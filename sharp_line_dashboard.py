@@ -7901,7 +7901,14 @@ def train_sharp_model_from_bq(
                 "📋 df_market columns BEFORE feature selection:",
                 sorted(df_market.columns.tolist())
             )
-            
+        if "st" in globals():
+            with st.expander("🔍 df_market sample values", expanded=False):
+                st.dataframe(
+                    df_market
+                    .head(50)          # or .sample(50, random_state=42)
+                    .reset_index(drop=True),
+                    use_container_width=True
+                )   
         # --- start with your manual core list ---
         features = [
             # 🔹 Core sharp signals
