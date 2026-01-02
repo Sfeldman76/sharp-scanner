@@ -1446,10 +1446,10 @@ def add_book_path_reliability_features(
     min_trials_for_stats: int = 5,
     early_tiers: set[str] | None = None,
 ) -> pd.DataFrame:
-    out = df.copy()
+    if df.empty:
+        return df.copy()
 
     if early_tiers is None:
-        # use your hybrid timing labels for “early”
         early_tiers = {
             "Overnight_VeryEarly",
             "Overnight_MidRange",
@@ -1458,148 +1458,133 @@ def add_book_path_reliability_features(
             "Midday_VeryEarly",
         }
 
-    # --- normalize + merge closers ---
-    out["Game_Key"] = out["Game_Key"].astype(str).str.lower().str.strip()
-    out["Bookmaker"] = out["Bookmaker"].astype(str).str.lower().str.strip()
-    out["Market"] = out["Market"].astype(str).str.lower().str.strip()
+    # Work on a thin slice for stats (keeps memory + time down)
+    cols_needed = [
+        "Sport", "Market", "Bookmaker", "Game_Key",
+        "Snapshot_Timestamp", "Value", "Odds_Price",
+    ]
+    tier_col = "SharpMove_Timing_Dominant" if "SharpMove_Timing_Dominant" in df.columns else None
+    if tier_col is not None:
+        cols_needed.append(tier_col)
+    if "Game_Start" in df.columns:
+        cols_needed.append("Game_Start")
 
-    clos = closers.copy()
+    out = df.loc[:, [c for c in cols_needed if c in df.columns]].copy()
+
+    # --- normalize keys (if you already normalized upstream, you can remove these 3 lines) ---
+    out["Game_Key"]  = out["Game_Key"].astype(str).str.lower().str.strip()
+    out["Bookmaker"] = out["Bookmaker"].astype(str).str.lower().str.strip()
+    out["Market"]    = out["Market"].astype(str).str.lower().str.strip()
+
+    clos = closers.loc[:, ["Game_Key", "close_spread", "close_total", "p_ml_fav"]].copy()
     clos["Game_Key"] = clos["Game_Key"].astype(str).str.lower().str.strip()
 
-    # expect: clos has close_spread / close_total / p_ml_fav
-    out = out.merge(clos[["Game_Key", "close_spread", "close_total", "p_ml_fav"]],
-                    on="Game_Key", how="left")
+    out = out.merge(clos, on="Game_Key", how="left")
 
-    # --- per-snapshot distance to closer ---
+    # --- per-row errors ---
     is_spread = out["Market"].eq("spreads")
     is_total  = out["Market"].eq("totals")
     is_ml     = out["Market"].eq("h2h")
 
     val = pd.to_numeric(out["Value"], errors="coerce")
 
-    out["close_line"] = np.where(
-        is_spread, out["close_spread"],
-        np.where(is_total, out["close_total"], np.nan)
-    )
-    out["Path_Line_Error"] = (val - out["close_line"]).abs()
+    close_line = np.where(is_spread, out["close_spread"],
+                 np.where(is_total,  out["close_total"], np.nan))
+    out["Path_Line_Error"] = np.abs(val - close_line)
 
-    def _amer_to_prob_vec(s):
-        x = pd.to_numeric(s, errors="coerce")
-        return np.where(
-            x >= 0,
-            100.0 / (x + 100.0),
-            (-x) / ((-x) + 100.0),
-        )
-
-    out["Imp_Prob"] = _amer_to_prob_vec(out["Odds_Price"])
-    out["Path_Prob_Error"] = np.where(
-        is_ml,
-        (out["Imp_Prob"] - out["p_ml_fav"]).abs(),
-        np.nan,
+    # american odds -> implied prob (vectorized)
+    x = pd.to_numeric(out["Odds_Price"], errors="coerce")
+    imp_prob = np.where(
+        x >= 0,
+        100.0 / (x + 100.0),
+        (-x) / ((-x) + 100.0),
     )
+    out["Imp_Prob"] = imp_prob
+    out["Path_Prob_Error"] = np.where(is_ml, np.abs(out["Imp_Prob"] - out["p_ml_fav"]), np.nan)
 
-    # --- collapse to 1 row per (Sport, Market, Bookmaker, Game_Key) for stats ---
-    out["Snapshot_Timestamp"] = pd.to_datetime(
-        out["Snapshot_Timestamp"], errors="coerce", utc=True
-    )
+    # --- timestamps ---
+    out["Snapshot_Timestamp"] = pd.to_datetime(out["Snapshot_Timestamp"], errors="coerce", utc=True)
     if "Game_Start" in out.columns:
         out["Game_Start"] = pd.to_datetime(out["Game_Start"], errors="coerce", utc=True)
     else:
         out["Game_Start"] = out["Snapshot_Timestamp"]
 
-    out = out.sort_values(
-        ["Sport", "Market", "Bookmaker", "Game_Key", "Snapshot_Timestamp"]
-    )
+    # Sort once so "first" means opener snapshot
+    keys = ["Sport", "Market", "Bookmaker", "Game_Key"]
+    out = out.sort_values(keys + ["Snapshot_Timestamp"], kind="mergesort")
 
-    tier_col = "SharpMove_Timing_Dominant" if "SharpMove_Timing_Dominant" in out.columns else None
+    # --- per-game stats without apply ---
+    # opener row per group
+    first_rows = out.groupby(keys, sort=False, observed=True).first()
 
-    def _per_game_stats(g: pd.DataFrame) -> pd.Series:
-        # first snapshot for this game/book
-        first = g.iloc[0]
-        open_err = first["Path_Line_Error"]
+    open_good = (
+        first_rows["Path_Line_Error"].notna()
+        & (first_rows["Path_Line_Error"].to_numpy() <= eps_open)
+    ).astype("int8")
 
-        # good open if within eps_open of closer (for spreads/totals only)
-        open_good = int(
-            pd.notna(open_err)
-            and (open_err <= eps_open)
+    if tier_col is not None:
+        band = out["Path_Line_Error"].to_numpy() <= eps_open
+        early = out[tier_col].isin(early_tiers).to_numpy()
+        out["_BandEarly"] = band & early
+        fast_good = (
+            out.groupby(keys, sort=False, observed=True)["_BandEarly"]
+               .any()
+               .astype("int8")
         )
+        out.drop(columns=["_BandEarly"], inplace=True)
+    else:
+        # no timing tiers -> define as 0 (keeps semantics close to your original)
+        fast_good = pd.Series(0, index=first_rows.index, dtype="int8")
 
-        # “fast” = ever get within eps_open while in an early tier
-        fast_good = 0
-        if tier_col is not None:
-            m_band = g["Path_Line_Error"] <= eps_open
-            m_early = g[tier_col].isin(early_tiers) if tier_col in g.columns else False
-            fast_good = int((m_band & m_early).any())
-
-        return pd.Series(
-            {
-                "Game_Start": first["Game_Start"],
-                "Open_Good_Game": open_good,
-                "Fast_Good_Game": fast_good,
-            }
-        )
-
-    game_stats = (
-        out.groupby(["Sport", "Market", "Bookmaker", "Game_Key"], sort=False)
-           .apply(_per_game_stats)
-           .reset_index()
-    )
+    game_stats = pd.DataFrame(
+        {
+            "Game_Start": first_rows["Game_Start"],
+            "Open_Good_Game": open_good,
+            "Fast_Good_Game": fast_good.reindex(first_rows.index).fillna(0).astype("int8"),
+        },
+        index=first_rows.index,
+    ).reset_index()
 
     # --- leak-safe cumulative Beta posteriors per (Sport, Market, Bookmaker) ---
-    game_stats = game_stats.sort_values(
-        ["Sport", "Market", "Bookmaker", "Game_Start"]
-    )
+    game_stats = game_stats.sort_values(["Sport", "Market", "Bookmaker", "Game_Start"], kind="mergesort")
+    g = game_stats.groupby(["Sport", "Market", "Bookmaker"], sort=False, observed=True)
 
-    g = game_stats.groupby(["Sport", "Market", "Bookmaker"], sort=False)
+    # number of prior games (exclude current)
+    prior_n = g.cumcount()
 
-    idx = g.cumcount()
+    # prior hits (exclude current)
+    cum_open = g["Open_Good_Game"].cumsum() - game_stats["Open_Good_Game"]
+    cum_fast = g["Fast_Good_Game"].cumsum() - game_stats["Fast_Good_Game"]
 
-    # exclude current game via shift
-    cum_games = idx
-    cum_open_hits = g["Open_Good_Game"].cumsum() - game_stats["Open_Good_Game"]
-    cum_fast_hits = g["Fast_Good_Game"].cumsum() - game_stats["Fast_Good_Game"]
-
-    # Open quality posterior
     alpha0_open = prior_strength_open * 0.5
     beta0_open  = prior_strength_open * 0.5
+    post_open = (cum_open + alpha0_open) / (prior_n + alpha0_open + beta0_open)
+    post_open = np.where(prior_n >= min_trials_for_stats, post_open, 0.5)
 
-    trials_open = cum_games
-    post_open = (cum_open_hits + alpha0_open) / (
-        trials_open + alpha0_open + beta0_open
-    )
-    post_open = np.where(trials_open >= min_trials_for_stats, post_open, 0.5)
-
-    # Speed posterior
     alpha0_speed = prior_strength_speed * 0.5
     beta0_speed  = prior_strength_speed * 0.5
+    post_speed = (cum_fast + alpha0_speed) / (prior_n + alpha0_speed + beta0_speed)
+    post_speed = np.where(prior_n >= min_trials_for_stats, post_speed, 0.5)
 
-    trials_speed = cum_games
-    post_speed = (cum_fast_hits + alpha0_speed) / (
-        trials_speed + alpha0_speed + beta0_speed
-    )
-    post_speed = np.where(trials_speed >= min_trials_for_stats, post_speed, 0.5)
-
-    game_stats["Book_Path_Open_Score"] = post_open
+    game_stats["Book_Path_Open_Score"]  = post_open
     game_stats["Book_Path_Speed_Score"] = post_speed
 
-    # convert to lifts if you want log-odds style
-    game_stats["Book_Path_Open_Lift"] = np.log(
-        np.clip(game_stats["Book_Path_Open_Score"], 0.01, 0.99)
-        / (1 - np.clip(game_stats["Book_Path_Open_Score"], 0.01, 0.99))
-    )
-    game_stats["Book_Path_Speed_Lift"] = np.log(
-        np.clip(game_stats["Book_Path_Speed_Score"], 0.01, 0.99)
-        / (1 - np.clip(game_stats["Book_Path_Speed_Score"], 0.01, 0.99))
-    )
+    p1 = np.clip(game_stats["Book_Path_Open_Score"].to_numpy(), 0.01, 0.99)
+    p2 = np.clip(game_stats["Book_Path_Speed_Score"].to_numpy(), 0.01, 0.99)
+    game_stats["Book_Path_Open_Lift"]  = np.log(p1 / (1.0 - p1))
+    game_stats["Book_Path_Speed_Lift"] = np.log(p2 / (1.0 - p2))
 
-    # --- merge back to every row of df by (Sport, Market, Bookmaker, Game_Key) ---
-    merged = df.merge(
+    # --- merge back ---
+    # (normalize df keys the same way if df wasn't already normalized upstream)
+    merged = df.copy()
+    merged["Game_Key"]  = merged["Game_Key"].astype(str).str.lower().str.strip()
+    merged["Bookmaker"] = merged["Bookmaker"].astype(str).str.lower().str.strip()
+    merged["Market"]    = merged["Market"].astype(str).str.lower().str.strip()
+
+    merged = merged.merge(
         game_stats[
             [
-                "Sport",
-                "Market",
-                "Bookmaker",
-                "Game_Key",
+                "Sport", "Market", "Bookmaker", "Game_Key",
                 "Book_Path_Open_Score",
                 "Book_Path_Speed_Score",
                 "Book_Path_Open_Lift",
@@ -1612,7 +1597,6 @@ def add_book_path_reliability_features(
     )
 
     return merged
-
 
 def add_book_reliability_features(
     df: pd.DataFrame,
