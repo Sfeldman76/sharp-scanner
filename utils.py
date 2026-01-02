@@ -5750,6 +5750,32 @@ def apply_blended_sharp_score(
     scored_all = []
     # ---------- models presence ----------
     # ---------- models presence ----------
+
+    # ---------- models presence (MUST be before any HAS_MODELS usage) ----------
+    trained_models = trained_models or {}
+    
+    # normalize keys but don’t filter out tuples/objects
+    trained_models_norm = {str(k).strip().lower(): v for k, v in trained_models.items()}
+    
+    # back-compat aliases for older code paths
+    trained_models_lc = trained_models_norm
+    trained_models_by_market = trained_models_norm
+    model_markets_lower = sorted(trained_models_norm.keys())
+    
+    def _has_any_model(bundle):
+        if isinstance(bundle, dict):
+            return any(k in bundle for k in (
+                "model", "calibrator",
+                "model_logloss", "model_auc",
+                "calibrator_logloss", "calibrator_auc"
+            ))
+        return bundle is not None  # accept tuples or single models too
+    
+    HAS_MODELS = any(_has_any_model(v) for v in trained_models_norm.values())
+    logger.info("📦 HAS_MODELS=%s; model markets: %s",
+                HAS_MODELS, sorted(trained_models_norm.keys()))
+    # ------------------------------------------------------------------------
+
     # ------------------ HARD BACKFILL: Market ------------------
     def _norm_market(m: str) -> str:
         m = ("" if m is None else str(m)).lower().strip()
@@ -6913,8 +6939,7 @@ def apply_blended_sharp_score(
     }
 
     # Normalize the incoming trained_models without discarding tuples/objects
-    trained_models = trained_models or {}
-    trained_models_norm = {str(k).strip().lower(): v for k, v in trained_models.items()}
+
     # Pull ~3.3 years of scores, or set days_back=None for all-time
     df_scores_hist = load_scores_history_cached_backend(
         
@@ -6936,18 +6961,7 @@ def apply_blended_sharp_score(
 
     df = wire_ats_features_inplace(df)      
 
-    def _has_any_model(bundle):
-        if isinstance(bundle, dict):
-            return any(k in bundle for k in (
-                "model","calibrator","model_logloss","model_auc",
-                "calibrator_logloss","calibrator_auc"
-            ))
-        return bundle is not None
-
-    HAS_MODELS = any(_has_any_model(v) for v in trained_models_norm.values())
-    logger.info("📦 HAS_MODELS=%s; model markets: %s",
-                HAS_MODELS, sorted(trained_models_norm.keys()))
-
+  
     # Normalize DF markets ONCE (before building markets_present)
     if 'Market' in df.columns and not df.empty:
         m_raw = df['Market'].astype('string').str.lower().str.strip()
