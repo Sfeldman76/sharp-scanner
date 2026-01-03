@@ -2563,113 +2563,74 @@ def shap_stability_select(
     summary.index.name = "feature"
     return selected, summary
 
-
 # ------- AUC helpers for auto-K selection -------
-def _cv_auc_for_feature_set(
-    model_proto,
-    X,
-    y,
-    folds,
-    feature_list,
-    *,
-    log_func=print,     # pass st.write
-    debug=False,
-    debug_max_folds=3,  # keep Streamlit output small
-):
+def _cv_auc_for_feature_set(model_proto, X, y, folds, feature_list, *, log_func=print, debug=False):
     """
-    Streamlit-friendly mean CV AUC for a fixed feature subset.
-
-    Fixes / detects:
-      - folds generator consumption (caller should pass list(folds))
-      - X/y misalignment (align y to X.index; slice by index)
-      - wrong proba column (use classes_ to pick class==1)
-      - flipped proba / inverted label (takes max of orientations in debug mode)
+    Compute mean CV AUC for a fixed feature subset.
+    - Uses correct proba column for class==1 (avoids accidental inversion).
+    - Optionally logs fold-level flip diagnostics to Streamlit via log_func.
     """
-    
-
-    # ---- align y to X.index to prevent silent mismatch ----
-    if isinstance(y, pd.Series):
-        y_s = y.reindex(X.index)
-    else:
-        y_arr = np.asarray(y)
-        if len(y_arr) != len(X):
-            raise ValueError(f"[AUTO-FEAT] len(y)={len(y_arr)} != len(X)={len(X)} -> X/y alignment bug")
-        y_s = pd.Series(y_arr, index=X.index)
-
     aucs = []
-    debug_rows = []
+    flips = 0
 
     for fold_i, (tr_idx, val_idx) in enumerate(folds, 1):
-        tr_i = X.index[tr_idx]
-        val_i = X.index[val_idx]
-
-        X_tr = X.loc[tr_i, feature_list]
-        X_val = X.loc[val_i, feature_list]
-        y_tr = y_s.loc[tr_i].astype(int).values
-        y_val = y_s.loc[val_i].astype(int).values
+        X_tr, X_val = X.iloc[tr_idx][feature_list], X.iloc[val_idx][feature_list]
+        y_tr, y_val = y[tr_idx], y[val_idx]
 
         mdl = clone(model_proto)
         mdl.fit(X_tr, y_tr)
 
-        # --- get probabilities robustly ---
-        proba_col = None
-        classes = getattr(mdl, "classes_", None)
+        # ---- IMPORTANT: pick P(class==1) robustly ----
+        try:
+            proba2 = mdl.predict_proba(X_val)
+            classes = getattr(mdl, "classes_", None)
 
-        if hasattr(mdl, "predict_proba"):
-            proba_all = mdl.predict_proba(X_val)
-
-            # pick the column corresponding to class==1 (don't assume [:,1])
-            if classes is not None and 1 in list(classes):
-                proba_col = int(np.where(classes == 1)[0][0])
-                proba = proba_all[:, proba_col]
+            if classes is None:
+                # fallback (shouldn't happen for classifiers)
+                proba = proba2[:, 1]
             else:
-                proba_col = -1
-                proba = proba_all[:, -1]
-        else:
+                classes = np.asarray(classes)
+                pos_idx = int(np.where(classes == 1)[0][0])  # raises if 1 not present
+                proba = proba2[:, pos_idx]
+        except Exception:
+            # fallback for models without predict_proba
             proba = mdl.predict(X_val)
 
-        # --- auc diagnostics ---
+        # sanitize
+        proba = np.asarray(proba, float).reshape(-1)
+        y_val = np.asarray(y_val, int).reshape(-1)
+
+        # AUC (raw vs flipped)
         auc = roc_auc_score(y_val, proba)
         auc_flip = roc_auc_score(y_val, 1.0 - proba)
-        auc_invlabel = roc_auc_score(1 - y_val, proba)
 
-        best = max(auc, auc_flip, auc_invlabel)
+        used = "normal"
+        best = auc
+        if auc_flip > auc:
+            best = auc_flip
+            flips += 1
+            used = "flip_proba"
+
         aucs.append(best)
 
-        if debug and fold_i <= debug_max_folds:
-            pos_tr = float(np.mean(y_tr)) if len(y_tr) else np.nan
-            pos_va = float(np.mean(y_val)) if len(y_val) else np.nan
-            orient = (
-                "normal" if best == auc else
-                "flip_proba" if best == auc_flip else
-                "invert_label"
+        if debug:
+            # Quick fold diagnostics
+            p_mean = float(np.mean(proba))
+            y_mean = float(np.mean(y_val))
+            log_func(
+                f"[AUC-DBG] fold={fold_i:02d} "
+                f"auc={auc:.4f} auc_flip={auc_flip:.4f} used={used} "
+                f"y_mean={y_mean:.4f} p_mean={p_mean:.4f} "
+                f"classes={getattr(mdl, 'classes_', None)}"
             )
-            debug_rows.append({
-                "fold": fold_i,
-                "n_tr": len(y_tr),
-                "n_val": len(y_val),
-                "pos_tr": round(pos_tr, 4),
-                "pos_val": round(pos_va, 4),
-                "classes_": str(classes),
-                "proba_col_for_1": proba_col,
-                "auc": round(float(auc), 6),
-                "auc_flip_proba": round(float(auc_flip), 6),
-                "auc_inv_label": round(float(auc_invlabel), 6),
-                "best_auc_used": round(float(best), 6),
-                "best_orientation": orient,
-            })
 
-    # Streamlit output: compact table for first few folds
-    if debug and debug_rows:
-        try:
-            import streamlit as st
-            st.caption(f"🔍 AUTO-FEAT debug (showing first {len(debug_rows)} folds)")
-            st.dataframe(pd.DataFrame(debug_rows), use_container_width=True)
-        except Exception:
-            # fallback if streamlit not available in this context
-            log_func(pd.DataFrame(debug_rows).to_string(index=False))
+    mean_auc = float(np.mean(aucs)) if aucs else float("nan")
+    flip_rate = (flips / len(aucs)) if aucs else 0.0
 
-    return float(np.mean(aucs)) if aucs else float("nan")
+    if debug:
+        log_func(f"[AUC-DBG] mean_auc={mean_auc:.6f} flip_rate={flip_rate:.2%} (n_folds={len(aucs)})")
+
+    return mean_auc, flip_rate
 
 
 def _auto_select_k_by_auc(
@@ -2684,23 +2645,17 @@ def _auto_select_k_by_auc(
     patience=5,
     min_improve=1e-4,
     verbose=True,
-    log_func=print,    # pass st.write
-    debug=False,       # ✅ turn on in Streamlit
-    debug_every=10,    # show debug table every N k's to avoid spam
+    log_func=print,   # 👈 can be st.write
+    debug=False,      # 👈 streamlit toggle
 ):
     """
-    Greedy prefix scan over `ordered_features`:
+    Greedy prefix scan over ordered_features:
       - evaluates AUC for top-k prefixes
       - picks k with best mean CV AUC
       - early-stops if no improvement for `patience` steps.
     Returns:
-      best_k, best_auc, history[(k, auc_k), ...]
+      best_k, best_auc, history[(k, auc_k, flip_rate_k), ...]
     """
-  
-
-    # ✅ CRITICAL: make folds reusable (generators get consumed otherwise)
-    folds = list(folds)
-
     if max_k is None:
         max_k = len(ordered_features)
 
@@ -2711,19 +2666,13 @@ def _auto_select_k_by_auc(
 
     for k in range(1, max_k + 1):
         feats_k = ordered_features[:k]
-
-        # only show the fold-debug table occasionally to avoid Streamlit overload
-        show_debug = bool(debug and (k == 1 or k % debug_every == 0 or k == min_k))
-
-        auc_k = _cv_auc_for_feature_set(
-            model_proto, X, y, folds, feats_k,
-            log_func=log_func,
-            debug=show_debug,
+        auc_k, flip_rate = _cv_auc_for_feature_set(
+            model_proto, X, y, folds, feats_k, log_func=log_func, debug=debug
         )
-        history.append((k, auc_k))
+        history.append((k, auc_k, flip_rate))
 
         if verbose:
-            log_func(f"[AUTO-FEAT] k={k:3d}, AUC={auc_k:.6f}")
+            log_func(f"[AUTO-FEAT] k={k:3d}, AUC={auc_k:.6f}, flip_rate={flip_rate:.1%}")
 
         if auc_k > best_auc + min_improve:
             best_auc = auc_k
@@ -2747,6 +2696,7 @@ def _auto_select_k_by_auc(
         )
 
     return best_k, best_auc, history
+
 
 
 # ------- One-call AUTO selector that does everything -------
