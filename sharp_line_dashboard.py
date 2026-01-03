@@ -2646,7 +2646,8 @@ def _auto_select_k_by_auc(
     min_improve=1e-4,
     verbose=True,
     log_func=print,   # 👈 can be st.write
-    debug=False,      # 👈 streamlit toggle
+    debug=False,
+    debug_every=10, # 👈 streamlit toggle
 ):
     """
     Greedy prefix scan over ordered_features:
