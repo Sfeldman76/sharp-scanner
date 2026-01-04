@@ -2864,30 +2864,67 @@ def select_features_auto(
     else:
         final_feats = keep_order
 
+  
+
     # 3c) extra logging: ΔAUC vs full set + top-10 features
     if auc_verbose and keep_order:
+        def _safe_float(x, name="value"):
+            """Coerce possible tuple/list/np array/scalar into a python float or raise."""
+            import numpy as np
+    
+            if x is None:
+                return None
+    
+            # If someone changed _cv_auc_for_feature_set to return (auc, flip_rate), etc.
+            if isinstance(x, (tuple, list)):
+                if len(x) == 0:
+                    return np.nan
+                x = x[0]
+    
+            # Numpy array -> must be scalar-ish
+            if isinstance(x, np.ndarray):
+                if x.size == 0:
+                    return np.nan
+                if x.size == 1:
+                    x = x.ravel()[0]
+                else:
+                    raise ValueError(f"{name} is non-scalar array with shape {x.shape}")
+    
+            # Numpy scalar / python scalar
+            try:
+                return float(x)
+            except Exception as e:
+                raise ValueError(f"Could not convert {name}={x!r} to float: {e}")
+    
         try:
             y_arr = np.asarray(y_train)
-            auc_full = _cv_auc_for_feature_set(
+            auc_full_raw = _cv_auc_for_feature_set(
                 model_proto, X_df_train, y_arr, folds, keep_order
             )
+            auc_full = _safe_float(auc_full_raw, "auc_full")
         except Exception as e:
             log_func(f"[AUTO-FEAT] Failed to compute AUC for full candidate set: {e}")
             auc_full = np.nan
-
-        if best_auc is not None and np.isfinite(auc_full):
-            delta_auc = best_auc - auc_full
+    
+        best_auc_f = None
+        try:
+            best_auc_f = _safe_float(best_auc, "best_auc") if best_auc is not None else None
+        except Exception as e:
+            log_func(f"[AUTO-FEAT] best_auc not scalar: {e}")
+            best_auc_f = None
+    
+        if best_auc_f is not None and np.isfinite(auc_full):
+            delta_auc = best_auc_f - float(auc_full)
             log_func(
-                f"[AUTO-FEAT] AUC(best_k={best_k}, n_feats={len(final_feats)}) = {best_auc:.6f} | "
-                f"AUC(full={len(keep_order)}) = {auc_full:.6f} | "
+                f"[AUTO-FEAT] AUC(best_k={best_k}, n_feats={len(final_feats)}) = {best_auc_f:.6f} | "
+                f"AUC(full={len(keep_order)}) = {float(auc_full):.6f} | "
                 f"ΔAUC = {delta_auc:+.6f}"
             )
-        elif best_auc is not None:
+        elif best_auc_f is not None:
             log_func(
-                f"[AUTO-FEAT] AUC(best_k={best_k}, n_feats={len(final_feats)}) = {best_auc:.6f} "
+                f"[AUTO-FEAT] AUC(best_k={best_k}, n_feats={len(final_feats)}) = {best_auc_f:.6f} "
                 f"(full-set AUC unavailable)"
             )
-
         log_func("[AUTO-FEAT] Top chosen features (up to 30):")
         for f in final_feats[:30]:
             if f in rank_df.index:
