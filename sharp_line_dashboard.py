@@ -7680,17 +7680,47 @@ def train_sharp_model_from_bq(
             status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
             pb.progress(min(100, max(0, pct)))
             continue
-        # === Directional agreement (for spreads/h2h invert line logic)
-        df_market['Line_Delta'] = pd.to_numeric(df_market['Line_Delta'], errors='coerce')
-       
+      
+        # -----------------------------
+        # Spread-safe direction features
+        # -----------------------------
+        df_market["Line_Delta"] = pd.to_numeric(df_market["Line_Delta"], errors="coerce")
+        df_market["Value"]      = pd.to_numeric(df_market["Value"], errors="coerce")
         
-        df_market['Direction_Aligned'] = np.where(
-            df_market['Line_Delta'] > 0, 1,
-            np.where(df_market['Line_Delta'] < 0, 0, -1)
+        # (A) RAW: which way did the number move?
+        # +1 = increased (e.g., -3 -> -2, or +3 -> +4), -1 = decreased (e.g., -3 -> -4)
+        df_market["Line_Move_Raw_Dir"] = np.where(
+            df_market["Line_Delta"] > 0, 1,
+            np.where(df_market["Line_Delta"] < 0, -1, 0)
         ).astype(int)
+        
+        # (B) TEAM-RELATIVE: did it move toward THIS team (spreads/h2h only)?
+        # Create a team-signed delta: normalizes favorite/dog so "toward team" is consistent.
+        sign_val = np.sign(df_market["Value"])
+        sign_val = np.where(sign_val == 0, np.nan, sign_val)   # avoid sign(0)
+        
+        df_market["Line_Delta_Team"] = df_market["Line_Delta"] * sign_val
+        
+        # Convention (choose ONE and keep it everywhere):
+        # Here: Line_Delta_Team < 0  ==> moved TOWARD the team
+        df_market["Line_Moved_Toward_Team"] = np.where(
+            df_market["Line_Delta_Team"] < 0, 1,
+            np.where(df_market["Line_Delta_Team"] > 0, 0, -1)
+        ).astype(int)
+        
+        # (C) This is what you should use for alignment in spreads/h2h
+        is_spread_like = df_market["Market"].isin(["spreads", "h2h"])
+        
+        base = np.where(is_spread_like, df_market["Line_Delta_Team"], df_market["Line_Delta"])
+        
+        df_market["Direction_Aligned"] = np.where(
+            base < 0, 1,               # toward team (per convention above)
+            np.where(base > 0, 0, -1)   # away / unknown
+        ).astype(int)
+        
+        
         df_market['Line_Value_Abs'] = df_market['Value'].abs()
-        val_num = pd.to_numeric(df_market['Value'], errors='coerce').fillna(0.0)
-        df_market['Line_Delta_Signed'] = df_market['Line_Delta'] * np.sign(val_num)
+        
         
         
         df_market['Book_Norm'] = df_market['Bookmaker'].str.lower().str.strip()
@@ -7718,9 +7748,8 @@ def train_sharp_model_from_bq(
         # df_market['Line_Move_Magnitude'] = df_market['Line_Delta'].abs()
         
         # === Contextual Flags
-        df_market['Is_Home_Team_Bet'] = (df_market['Outcome'] == df_market['Home_Team_Norm']).astype(int)
+        df_market["Is_Home_Team_Bet"] = (df_market["Outcome_Norm"] == df_market["Home_Team_Norm"]).astype(int)
         df_market['Is_Favorite_Bet'] = (df_market['Value'] < 0).astype(int)
-      
         
         # Ensure NA-safe boo logic and conversion
         df_market['SharpMove_Odds_Up'] = (
@@ -7844,6 +7873,8 @@ def train_sharp_model_from_bq(
             df_market['Abs_Line_Move_From_Opening'] / df_market['First_Line_Value'].abs(),
             np.nan
         )
+        if df_market["Market"].iloc[0] == "spreads":
+            st.write(df_market[["Outcome","Value","Line_Delta","Line_Move_Raw_Dir","Line_Delta_Team","Line_Moved_Toward_Team","Direction_Aligned"]].head(12))
         
         df_market['Pct_Line_Move_Bin'] = pd.cut(
             df_market['Pct_Line_Move_From_Opening'],
@@ -8039,6 +8070,7 @@ def train_sharp_model_from_bq(
             #'Book_lift_x_PROB_SHIFT',
             'Sharp_Limit_Total',
             'Is_Reinforced_MultiMarket','Market_Leader',#'LimitUp_NoMove_Flag',
+            'Line_Moved_Toward_Team_And_Missed',
         
             # 🔹 Market response
             'Sharp_Line_Magnitude',
@@ -8068,7 +8100,7 @@ def train_sharp_model_from_bq(
             
             'Pct_Line_Move_From_Opening',#'Pct_Line_Move_Bin',
             'Potential_Overmove_Flag',
-            'Potential_Overmove_Total_Pct_Flag',#'Mispricing_Flag',
+            #'Potential_Overmove_Total_Pct_Flag',#'Mispricing_Flag',
             'Was_Line_Resistance_Broken',
             'Line_Resistance_Crossed_Count','SharpMove_Resistance_Break',
         
