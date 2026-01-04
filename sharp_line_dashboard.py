@@ -2563,19 +2563,42 @@ def shap_stability_select(
     summary.index.name = "feature"
     return selected, summary
 
-# ------- AUC helpers for auto-K selection -------
-def _cv_auc_for_feature_set(model_proto, X, y, folds, feature_list, *, log_func=print, debug=False):
+
+
+# ------- AUC helpers for auto-K selection (with OOF preds) -------
+def _cv_auc_for_feature_set(
+    model_proto,
+    X,
+    y,
+    folds,
+    feature_list,
+    *,
+    log_func=print,
+    debug=False,
+    return_oof=True,
+):
     """
-    Compute mean CV AUC for a fixed feature subset.
-    - Uses correct proba column for class==1 (avoids accidental inversion).
-    - Optionally logs fold-level flip diagnostics to Streamlit via log_func.
+    Compute mean CV AUC for a fixed feature subset + build OOF preds.
+
+    - Robustly selects P(class==1) using mdl.classes_.
+    - Tracks fold-level "would flip" diagnostics (your existing behavior).
+    - ALSO builds OOF predictions and computes an overall OOF AUC vs flipped OOF AUC.
+      This lets you enforce a SINGLE global flip decision per feature set / market
+      instead of fold-by-fold flipping.
     """
     aucs = []
     flips = 0
 
+    y = np.asarray(y, int).reshape(-1)
+    n = len(y)
+
+    oof_proba = np.full(n, np.nan, dtype=float) if return_oof else None
+
     for fold_i, (tr_idx, val_idx) in enumerate(folds, 1):
-        X_tr, X_val = X.iloc[tr_idx][feature_list], X.iloc[val_idx][feature_list]
-        y_tr, y_val = y[tr_idx], y[val_idx]
+        X_tr = X.iloc[tr_idx][feature_list]
+        X_val = X.iloc[val_idx][feature_list]
+        y_tr = y[tr_idx]
+        y_val = y[val_idx]
 
         mdl = clone(model_proto)
         mdl.fit(X_tr, y_tr)
@@ -2586,11 +2609,14 @@ def _cv_auc_for_feature_set(model_proto, X, y, folds, feature_list, *, log_func=
             classes = getattr(mdl, "classes_", None)
 
             if classes is None:
-                # fallback (shouldn't happen for classifiers)
                 proba = proba2[:, 1]
             else:
                 classes = np.asarray(classes)
-                pos_idx = int(np.where(classes == 1)[0][0])  # raises if 1 not present
+                # if class "1" not present (rare edge case), fallback to last column
+                if np.any(classes == 1):
+                    pos_idx = int(np.where(classes == 1)[0][0])
+                else:
+                    pos_idx = int(len(classes) - 1)
                 proba = proba2[:, pos_idx]
         except Exception:
             # fallback for models without predict_proba
@@ -2600,7 +2626,11 @@ def _cv_auc_for_feature_set(model_proto, X, y, folds, feature_list, *, log_func=
         proba = np.asarray(proba, float).reshape(-1)
         y_val = np.asarray(y_val, int).reshape(-1)
 
-        # AUC (raw vs flipped)
+        # Save OOF preds
+        if return_oof:
+            oof_proba[val_idx] = proba
+
+        # Fold AUC (raw vs flipped)
         auc = roc_auc_score(y_val, proba)
         auc_flip = roc_auc_score(y_val, 1.0 - proba)
 
@@ -2614,7 +2644,6 @@ def _cv_auc_for_feature_set(model_proto, X, y, folds, feature_list, *, log_func=
         aucs.append(best)
 
         if debug:
-            # Quick fold diagnostics
             p_mean = float(np.mean(proba))
             y_mean = float(np.mean(y_val))
             log_func(
@@ -2627,10 +2656,40 @@ def _cv_auc_for_feature_set(model_proto, X, y, folds, feature_list, *, log_func=
     mean_auc = float(np.mean(aucs)) if aucs else float("nan")
     flip_rate = (flips / len(aucs)) if aucs else 0.0
 
+    # ---- OOF-level diagnostics (single global decision) ----
+    oof_auc = oof_auc_flip = float("nan")
+    global_flip = False
+    if return_oof:
+        valid = np.isfinite(oof_proba)
+        if not np.all(valid):
+            # This should not happen if folds cover all rows; but protect anyway
+            if debug:
+                log_func(f"[AUC-DBG] WARNING: oof_proba has {np.sum(~valid)} NaNs (folds may not cover all rows)")
+        if np.sum(valid) > 1 and len(np.unique(y[valid])) > 1:
+            oof_auc = roc_auc_score(y[valid], oof_proba[valid])
+            oof_auc_flip = roc_auc_score(y[valid], 1.0 - oof_proba[valid])
+            global_flip = bool(oof_auc_flip > oof_auc)
+
     if debug:
         log_func(f"[AUC-DBG] mean_auc={mean_auc:.6f} flip_rate={flip_rate:.2%} (n_folds={len(aucs)})")
+        if return_oof:
+            log_func(
+                f"[AUC-OOF] oof_auc={oof_auc:.6f} oof_auc_flip={oof_auc_flip:.6f} "
+                f"global_flip={'YES' if global_flip else 'NO'}"
+            )
 
-    return mean_auc, flip_rate
+    # Return rich info so caller can decide once (global) instead of fold-by-fold
+    return {
+        "mean_auc": mean_auc,
+        "flip_rate": flip_rate,
+        "oof_auc": oof_auc,
+        "oof_auc_flip": oof_auc_flip,
+        "global_flip": global_flip,
+        "oof_proba": oof_proba,   # length n, aligned to X/y
+        "feature_list": list(feature_list),
+    }
+
+
 
 
 def _auto_select_k_by_auc(
@@ -2647,35 +2706,67 @@ def _auto_select_k_by_auc(
     verbose=True,
     log_func=print,   # 👈 can be st.write
     debug=False,
-    debug_every=10, # 👈 streamlit toggle
+    debug_every=10,   # 👈 streamlit toggle
 ):
     """
     Greedy prefix scan over ordered_features:
       - evaluates AUC for top-k prefixes
-      - picks k with best mean CV AUC
+      - picks k with best (OOF) AUC
       - early-stops if no improvement for `patience` steps.
+
     Returns:
-      best_k, best_auc, history[(k, auc_k, flip_rate_k), ...]
+      best_k, best_auc, history
+    where history is a list of tuples:
+      (k, auc_k, flip_rate, oof_auc, oof_auc_flip, global_flip)
     """
     if max_k is None:
         max_k = len(ordered_features)
+    max_k = int(min(max_k, len(ordered_features)))
 
     best_auc = -np.inf
-    best_k = min_k
+    best_k = max(1, int(min_k))
     no_improve = 0
     history = []
 
+    # ensure y is array-like (your helper expects it)
+    # (doesn't copy if already ndarray)
+    y_arr = np.asarray(y)
+
     for k in range(1, max_k + 1):
         feats_k = ordered_features[:k]
-        auc_k, flip_rate = _cv_auc_for_feature_set(
-            model_proto, X, y, folds, feats_k, log_func=log_func, debug=debug
+
+        # throttle debug spam unless user asked for full debug
+        dbg = bool(debug and (k % int(debug_every) == 0 or k in (1, min_k, max_k)))
+
+        res = _cv_auc_for_feature_set(
+            model_proto,
+            X,
+            y_arr,
+            folds,
+            feats_k,
+            log_func=log_func,
+            debug=dbg,
+            return_oof=True,
         )
-        history.append((k, auc_k, flip_rate))
+
+        # prefer OOF AUC (more stable), fallback to mean_auc
+        oof_auc      = float(res.get("oof_auc", np.nan))
+        mean_auc     = float(res.get("mean_auc", np.nan))
+        auc_k        = oof_auc if np.isfinite(oof_auc) else mean_auc
+
+        flip_rate    = float(res.get("flip_rate", 0.0))
+        oof_auc_flip = float(res.get("oof_auc_flip", np.nan))
+        global_flip  = bool(res.get("global_flip", False))
+
+        history.append((k, auc_k, flip_rate, oof_auc, oof_auc_flip, global_flip))
 
         if verbose:
-            log_func(f"[AUTO-FEAT] k={k:3d}, AUC={auc_k:.6f}, flip_rate={flip_rate:.1%}")
+            log_func(
+                f"[AUTO-FEAT] k={k:3d}, AUC={auc_k:.6f}, "
+                f"flip_rate={flip_rate:.1%}, global_flip={'YES' if global_flip else 'NO'}"
+            )
 
-        if auc_k > best_auc + min_improve:
+        if auc_k > best_auc + float(min_improve):
             best_auc = auc_k
             best_k = k
             no_improve = 0
@@ -2697,8 +2788,6 @@ def _auto_select_k_by_auc(
         )
 
     return best_k, best_auc, history
-
-
 
 # ------- One-call AUTO selector that does everything -------
 def select_features_auto(
