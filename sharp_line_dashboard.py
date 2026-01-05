@@ -1089,10 +1089,6 @@ def compute_ev_features_sharp_vs_rec(
         how="left",
         keep_right=True,
     )
-        # Re‑assert output cols after merge (idsempotent)
-        for c in out_cols:
-            if c not in dm.columns:
-                dm[c] = np.nan
 
     # --- Price each row at its own line (always Series, aligned to dm.index) ---
     mu_series  = _ensure_series(_col_or_nan(dm, "Truth_Margin_Mu"), dm.index)
