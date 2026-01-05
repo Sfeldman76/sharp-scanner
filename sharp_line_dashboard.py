@@ -1859,31 +1859,55 @@ def attach_pairwise_correlation_features(
     TM_lookup: pd.DataFrame,
     sport_default: str="NFL",
 ) -> pd.DataFrame:
-    if df.empty: return df
+    if df.empty:
+        return df
+
     out = df.merge(cross_pivots, on=["Game_Key","Bookmaker"], how="left", validate="m:1")
 
-    # Core probs
+    # ---- GUARANTEE Spread_Value / Total_Value exist (avoid KeyError) ----
+    # If pivots didn't bring them, derive from per-row (Market, Value) and broadcast per (Game_Key, Bookmaker).
+    if "Spread_Value" not in out.columns:
+        out["Spread_Value"] = np.nan
+        if "Market" in out.columns and "Value" in out.columns:
+            m = out["Market"].astype(str).str.lower().str.strip()
+            v = pd.to_numeric(out["Value"], errors="coerce")
+            out.loc[m == "spreads", "Spread_Value"] = v
+            out["Spread_Value"] = out.groupby(["Game_Key","Bookmaker"])["Spread_Value"].transform(
+                lambda s: s.dropna().iloc[0] if s.notna().any() else np.nan
+            )
+
+    if "Total_Value" not in out.columns:
+        out["Total_Value"] = np.nan
+        if "Market" in out.columns and "Value" in out.columns:
+            m = out["Market"].astype(str).str.lower().str.strip()
+            v = pd.to_numeric(out["Value"], errors="coerce")
+            out.loc[m == "totals", "Total_Value"] = v
+            out["Total_Value"] = out.groupby(["Game_Key","Bookmaker"])["Total_Value"].transform(
+                lambda s: s.dropna().iloc[0] if s.notna().any() else np.nan
+            )
+
+    # ---- Core probs (now safe) ----
     sport = out.get("Sport", sport_default).astype(str).str.upper().to_numpy()
     spread_abs = pd.to_numeric(out["Spread_Value"], errors="coerce").to_numpy(dtype="float64")
     p_spread_fav = _spread_to_winprob(spread_abs, sport)
-    p_ml_fav     = pd.to_numeric(out["p_ml_fav"], errors="coerce").to_numpy(dtype="float64")
-    p_over       = pd.to_numeric(out["p_over"],    errors="coerce").to_numpy(dtype="float64")
 
-    # Side-awareness (if you train on canonical only you can skip the side flip)
+    p_ml_fav = pd.to_numeric(out.get("p_ml_fav"), errors="coerce").to_numpy(dtype="float64")
+    p_over   = pd.to_numeric(out.get("p_over"), errors="coerce").to_numpy(dtype="float64")
+
+    # Side-awareness ...
     if "Is_Favorite_Bet" in out.columns:
         is_fav = out["Is_Favorite_Bet"].astype("float32").to_numpy() == 1.0
     else:
         v = pd.to_numeric(out.get("Value"), errors="coerce").to_numpy(dtype="float64")
         is_fav = np.where(np.isnan(v), False, v < 0)
 
-    p_side = np.where(is_fav, p_spread_fav, 1.0 - p_spread_fav)  # for ST pair
+    p_side = np.where(is_fav, p_spread_fav, 1.0 - p_spread_fav)
 
     # Bins for lookups
     out["spread_bin"] = pd.Series(out.get("Spread_Value")).apply(_bin_spread)
     out["total_bin"]  = pd.Series(out.get("Total_Value")).apply(_bin_total)
     out["ml_bin"]     = pd.Series(out.get("p_ml_fav")).apply(_bin_ml)
 
-    # Join rhos
     out = out.merge(ST_lookup[["spread_bin","total_bin","rho_ST"]], on=["spread_bin","total_bin"], how="left")
     out = out.merge(SM_lookup[["spread_bin","ml_bin","rho_SM"]],     on=["spread_bin","ml_bin"],    how="left")
     out = out.merge(TM_lookup[["total_bin","ml_bin","rho_TM"]],     on=["total_bin","ml_bin"],     how="left")
