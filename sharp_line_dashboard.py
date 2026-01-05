@@ -1081,13 +1081,18 @@ def compute_ev_features_sharp_vs_rec(
 
     # Merge μ,σ back to every book row (merge can drop pre-created cols)
     keys = ["Game_Key","Market","Outcome_Norm"]
-    dm = dm.merge(truth[keys + ["Truth_Fair_Prob_at_SharpLine","Truth_Margin_Mu","Truth_Sigma"]],
-                  on=keys, how="left")
-
-    # Re‑assert output cols after merge (idsempotent)
-    for c in out_cols:
-        if c not in dm.columns:
-            dm[c] = np.nan
+    truth_cols = ["Truth_Fair_Prob_at_SharpLine", "Truth_Margin_Mu", "Truth_Sigma"]
+    dm = merge_drop_overlap(
+        dm,
+        truth[keys + truth_cols],
+        on=keys,
+        how="left",
+        keep_right=True,
+    )
+        # Re‑assert output cols after merge (idsempotent)
+        for c in out_cols:
+            if c not in dm.columns:
+                dm[c] = np.nan
 
     # --- Price each row at its own line (always Series, aligned to dm.index) ---
     mu_series  = _ensure_series(_col_or_nan(dm, "Truth_Margin_Mu"), dm.index)
@@ -6457,6 +6462,20 @@ def build_cover_streaks_game_level(df_bt_prepped: pd.DataFrame, *, sport: str, m
     out = g[["Sport", "Market", "Game_Key", "Team", time_col] + streak_cols].rename(columns={time_col: "Game_Start"})
     return out
 
+def merge_drop_overlap(left, right, on, how="left", *, keep_right=True, validate=None):
+    """
+    Merge while preventing pandas _x/_y duplicates by dropping overlapping
+    non-key columns from the side you DON'T want to keep.
+    """
+    on = [on] if isinstance(on, str) else list(on)
+    overlap = (set(left.columns) & set(right.columns)) - set(on)
+    if overlap:
+        if keep_right:
+            left = left.drop(columns=sorted(overlap), errors="ignore")
+        else:
+            right = right.drop(columns=sorted(overlap), errors="ignore")
+    return left.merge(right, on=on, how=how, validate=validate)
+
 
 def train_sharp_model_from_bq(
     *,
@@ -7163,16 +7182,29 @@ def train_sharp_model_from_bq(
             ).astype("float32")
 
         # === Merge game-level cross-market values (Spread_Value / Total_Value / H2H_Value) ===
-        df_market = df_market.merge(df_cross_market, on="Game_Key", how="left")
-
-        # === GAME-LEVEL value-aware features: compute once per Game_Key, then broadcast ===
-        # If there are no spread/total values, this may be empty, so guard downstream usage.
-        game_vals = (
-            df_market[["Game_Key", "Sport", "Spread_Value", "Total_Value"]]
-            .drop_duplicates("Game_Key")
-            .copy()
+     
+        df_market = merge_drop_overlap(
+            df_market,
+            df_cross_market,
+            on="Game_Key",
+            how="left",
+            keep_right=True,      # keep df_cross_market versions
         )
-
+        # === GAME-LEVEL value-aware features: compute once per Game_Key, then broadcast ===
+        cols = [
+            "Game_Key",
+            "Spread_Abs_Game","Spread_Abs_Game_Z","Spread_Size_Bucket",
+            "Total_Game","Total_Game_Z","Total_Size_Bucket",
+            "Spread_x_Total","Spread_over_Total","Total_over_Spread",
+            "Dist_to_3","Dist_to_7","Dist_to_10",
+        ]
+        df_market = merge_drop_overlap(
+            df_market,
+            game_vals[cols],
+            on="Game_Key",
+            how="left",
+            keep_right=True,
+        )
         if not game_vals.empty:
             # Make sure these are numeric
             game_vals["Spread_Value"] = pd.to_numeric(game_vals["Spread_Value"], errors="coerce")
