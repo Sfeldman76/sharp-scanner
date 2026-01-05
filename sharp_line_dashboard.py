@@ -2739,32 +2739,37 @@ def _auto_select_k_by_auc(
         dbg = bool(debug and (k % int(debug_every) == 0 or k in (1, min_k, max_k)))
 
         res = _cv_auc_for_feature_set(
-            model_proto,
-            X,
-            y_arr,
-            folds,
-            feats_k,
-            log_func=log_func,
-            debug=dbg,
-            return_oof=True,
+            model_proto, X, y_arr, folds, feats_k,
+            log_func=log_func, debug=dbg, return_oof=True
         )
-
-        # prefer OOF AUC (more stable), fallback to mean_auc
+        
         oof_auc      = float(res.get("oof_auc", np.nan))
-        mean_auc     = float(res.get("mean_auc", np.nan))
-        auc_k        = oof_auc if np.isfinite(oof_auc) else mean_auc
-
-        flip_rate    = float(res.get("flip_rate", 0.0))
         oof_auc_flip = float(res.get("oof_auc_flip", np.nan))
-        global_flip  = bool(res.get("global_flip", False))
-
+        mean_auc     = float(res.get("mean_auc", np.nan))
+        
+        # ✅ pick best OOF orientation (this is what you *actually* want to compare across k)
+        if np.isfinite(oof_auc) and np.isfinite(oof_auc_flip):
+            auc_k = max(oof_auc, oof_auc_flip)
+            global_flip = (oof_auc_flip > oof_auc)
+        elif np.isfinite(oof_auc):
+            auc_k = oof_auc
+            global_flip = bool(res.get("global_flip", False))
+        else:
+            # fallback
+            auc_k = mean_auc
+            global_flip = bool(res.get("global_flip", False))
+        
+        flip_rate = float(res.get("flip_rate", 0.0))
+        
         history.append((k, auc_k, flip_rate, oof_auc, oof_auc_flip, global_flip))
-
+        
         if verbose:
             log_func(
                 f"[AUTO-FEAT] k={k:3d}, AUC={auc_k:.6f}, "
-                f"flip_rate={flip_rate:.1%}, global_flip={'YES' if global_flip else 'NO'}"
+                f"flip_rate={flip_rate:.1%}, global_flip={'YES' if global_flip else 'NO'} "
+                f"(oof={oof_auc:.6f}, oof_flip={oof_auc_flip:.6f})"
             )
+
 
         if auc_k > best_auc + float(min_improve):
             best_auc = auc_k
