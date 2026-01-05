@@ -5389,8 +5389,15 @@ def add_internal_consistency_features(df: pd.DataFrame, df_cross_market: pd.Data
     out["Market_norm"] = out.get("Market", "").astype(str).str.lower().str.strip()
 
     # Bring in cross-market pivots if provided (as in your training build)
-    if df_cross_market is not None:
-        out = out.merge(df_cross_market, on="Game_Key", how="left")
+    if df_cross_market is not None and not df_cross_market.empty:
+        out = merge_drop_overlap(
+            out,
+            df_cross_market,
+            on="Game_Key",
+            how="left",
+            keep_right=True,   # cross-market pivots should win
+        )
+
 
     # Prefer spread/total from cross-market pivots if present
     spread_val = pd.to_numeric(out.get("Spread_Value", out.get("Value")), errors="coerce")
