@@ -2587,7 +2587,7 @@ def _safe_predict_proba_pos(mdl, X_val):
         if np.any(classes == 1):
             pos_idx = int(np.where(classes == 1)[0][0])
         else:
-            pos_idx = int(len(classes) - 1a
+            pos_idx = int(len(classes) - 1)
         return np.asarray(proba2[:, pos_idx], float)
     # fallback: treat predict as probability-like output
     return np.asarray(mdl.predict(X_val), float)
