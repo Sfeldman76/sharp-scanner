@@ -3077,15 +3077,41 @@ def select_features_auto(
             except Exception as e:
                 raise ValueError(f"Could not convert {name}={x!r} to float: {e}")
     
+      
         try:
             y_arr = np.asarray(y_train)
-            auc_full_raw = _cv_auc_for_feature_set(
-                model_proto, X_df_train, y_arr, folds, keep_order
+        
+            # NEW: _cv_auc_for_feature_set returns a dict
+            res_full = _cv_auc_for_feature_set(
+                model_proto,
+                X_df_train,
+                y_arr,
+                folds,
+                keep_order,
+                log_func=log_func,
+                debug=False,
+                return_oof=True,
             )
-            auc_full = _safe_float(auc_full_raw, "auc_full")
+        
+            # define "full-set AUC" consistently: best OOF orientation
+            oof_auc_full      = float(res_full.get("oof_auc", np.nan))
+            oof_auc_full_flip = float(res_full.get("oof_auc_flip", np.nan))
+            auc_full = max(oof_auc_full, oof_auc_full_flip)
+        
+            full_global_flip = bool(res_full.get("global_flip", False))
+            full_flip_rate   = float(res_full.get("flip_rate", 0.0))
+        
+            log_func(
+                f"[AUTO-FEAT] Full set OOF: auc={auc_full:.6f} "
+                f"(oof={oof_auc_full:.6f}, oof_flip={oof_auc_full_flip:.6f}) "
+                f"global_flip={'YES' if full_global_flip else 'NO'} "
+                f"flip_rate={full_flip_rate:.1%}"
+            )
+        
         except Exception as e:
             log_func(f"[AUTO-FEAT] Failed to compute AUC for full candidate set: {e}")
             auc_full = np.nan
+
     
         best_auc_f = None
         try:
