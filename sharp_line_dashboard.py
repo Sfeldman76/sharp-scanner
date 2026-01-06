@@ -3093,10 +3093,11 @@ def select_features_auto(
     
         best_auc_f = None
         try:
-            best_auc_f = _safe_float(best_auc, "best_auc") if best_auc is not None else None
+            best_auc_f = float(best_score) if best_score is not None else None
         except Exception as e:
-            log_func(f"[AUTO-FEAT] best_auc not scalar: {e}")
+            log_func(f"[AUTO-FEAT] best_score not scalar: {e}")
             best_auc_f = None
+
     
         if best_auc_f is not None and np.isfinite(auc_full):
             delta_auc = best_auc_f - float(auc_full)
