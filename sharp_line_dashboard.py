@@ -6698,7 +6698,16 @@ def train_sharp_model_from_bq(
         "ATS_Cover_Margin_Last5_Prior_Mean",
         "ATS_Cover_Margin_Last5_Prior_Std",
         "Market_Bucket",
-        "Market_OddsProb_Bucket"
+        "Market_OddsProb_Bucket",
+        "After_Win_Flag","Revenge_Flag",
+        "Current_Win_Streak_Prior", "Current_Loss_Streak_Prior",
+        "H2H_Win_Pct_Prior",  "Opp_WinPct_Prior",
+        "Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
+        "Wins_Last5_Prior",
+        "Margin_Last5_Prior",
+        "Days_Since_Last_Game",
+        "Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
+        "Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
     ]
     
     # (Opponent mirrors intentionally excluded per your note)
@@ -8295,7 +8304,7 @@ def train_sharp_model_from_bq(
             #'Book_lift_x_Magnitude',
             #'Book_lift_x_PROB_SHIFT',
             'Sharp_Limit_Total',
-            'Is_Reinforced_MultiMarket','Market_Leader',#'LimitUp_NoMove_Flag',
+            'Is_Reinforced_MultiMarket','Market_Leader','LimitUp_NoMove_Flag',
             
         
             # 🔹 Market response
@@ -8351,10 +8360,10 @@ def train_sharp_model_from_bq(
             'Outcome_Spread_Edge',
             'Outcome_Cover_Prob',
             'model_fav_vs_market_fav_agree',
-            #'TOT_Proj_Total_Baseline',
-            #'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
-            #'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
-            #'TOT_Mispricing', 
+            'TOT_Proj_Total_Baseline',
+            'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
+            'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
+            'TOT_Mispricing', 
             'ATS_EB_Rate',
             'ATS_EB_Margin',            # Optional: only if cover_margin_col was set
             'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
@@ -8423,7 +8432,7 @@ def train_sharp_model_from_bq(
         extend_unique(features, timing_cols)
 
         # add historical/streak features you computed earlier (schema-safe list)
-        extend_unique(features, [c for c in history_present if c not in features])
+        
         extend_unique(features, [
             'ResistBreak_x_Mag','LateSteam_x_KeyCount','Aligned_x_HighLimit',
             'Rev_x_BookLift','GapExists_x_RecSkew','Misalign_x_MoveAway'
