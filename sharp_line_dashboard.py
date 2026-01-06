@@ -6705,16 +6705,7 @@ def train_sharp_model_from_bq(
         "ATS_Cover_Margin_Last5_Prior_Std",
         "Market_Bucket",
         "Market_OddsProb_Bucket",
-        "After_Win_Flag","Revenge_Flag",
-        "Current_Win_Streak_Prior", "Current_Loss_Streak_Prior",
-        "H2H_Win_Pct_Prior",  "Opp_WinPct_Prior",
-        "Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
-        "Wins_Last5_Prior",
-        "Margin_Last5_Prior",
-        "Days_Since_Last_Game",
-        "Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
-        "Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
-    ]
+
     
     # (Opponent mirrors intentionally excluded per your note)
     
@@ -8403,6 +8394,15 @@ def train_sharp_model_from_bq(
            
             # flags
             "On_Cover_Streak","On_Cover_Streak_Home","On_Cover_Streak_Away",
+            "After_Win_Flag","Revenge_Flag",
+            "Current_Win_Streak_Prior", "Current_Loss_Streak_Prior",
+            "H2H_Win_Pct_Prior",  "Opp_WinPct_Prior",
+            "Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
+            "Wins_Last5_Prior",
+            "Margin_Last5_Prior",
+            "Days_Since_Last_Game",
+            "Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
+            "Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
        
             
         ]
