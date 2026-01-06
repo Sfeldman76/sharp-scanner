@@ -2995,10 +2995,14 @@ def select_features_auto(
         y_arr = np.asarray(y_train)
     
         # 🔑 NEW: dynamic bounds based on feature count
+        
         n_feats = len(keep_order)
-        min_k_dyn = max(40, int(0.25 * n_feats))
-        max_k_dyn = n_feats
-    
+
+        min_k_dyn = max(
+            60,                     # ← hard minimum
+            int(0.25 * n_feats),    # ← adaptive scaling
+        )
+        
         best_k, best_score, history = _auto_select_k_by_auc(
             model_proto,
             X_df_train,
@@ -3006,7 +3010,7 @@ def select_features_auto(
             folds,
             keep_order,
             min_k=min_k_dyn,
-            max_k=max_k_dyn,
+            max_k=n_feats,
             patience=auc_patience,
             min_improve=auc_min_improve,
             verbose=auc_verbose,
@@ -3014,6 +3018,7 @@ def select_features_auto(
             debug=True,
             debug_every=15,
         )
+
     
         final_feats = keep_order[:best_k]
     else:
