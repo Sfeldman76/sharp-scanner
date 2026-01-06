@@ -2617,37 +2617,18 @@ def _safe_predict_proba_pos(mdl, X_val):
     return np.asarray(mdl.predict(X_val), float)
 
 
-def _cv_auc_for_feature_set(
-    model_proto,
-    X,
-    y,
-    folds,
-    feature_list,
-    *,
-    log_func=print,
-    debug=False,
-    debug_every_fold=True,
-    return_oof=True,
-    eps=1e-6,
-):
-    """
-    Multi-metric CV evaluation for a fixed feature subset.
+from sklearn.metrics import roc_auc_score, log_loss
 
-    Produces:
-      - fold diagnostics (optional)
-      - OOF proba vector
-      - OOF metrics for normal vs flipped orientation:
-          * AUC
-          * LogLoss
-          * Brier
-      - chooses ONE global orientation using OOF LogLoss (tie-breakers AUC/Brier)
-    """
+def _cv_auc_for_feature_set(
+    model_proto, X, y, folds, feature_list, *,
+    log_func=print, debug=False, return_oof=True
+):
+    aucs_best = []
+    flips = 0
+
     y = np.asarray(y, int).reshape(-1)
     n = len(y)
     oof_proba = np.full(n, np.nan, dtype=float) if return_oof else None
-
-    fold_flip_votes = 0
-    fold_aucs = []
 
     for fold_i, (tr_idx, val_idx) in enumerate(folds, 1):
         X_tr = X.iloc[tr_idx][feature_list]
@@ -2658,146 +2639,123 @@ def _cv_auc_for_feature_set(
         mdl = clone(model_proto)
         mdl.fit(X_tr, y_tr)
 
-        proba = _safe_predict_proba_pos(mdl, X_val).reshape(-1)
-
-        # sanitize / clip for logloss stability
-        proba = np.clip(proba, eps, 1.0 - eps)
-        y_val = np.asarray(y_val, int).reshape(-1)
+        # proba for class==1
+        proba2 = mdl.predict_proba(X_val)
+        classes = np.asarray(getattr(mdl, "classes_", [0, 1]))
+        pos_idx = int(np.where(classes == 1)[0][0]) if np.any(classes == 1) else int(len(classes) - 1)
+        proba = np.asarray(proba2[:, pos_idx], float).reshape(-1)
 
         if return_oof:
             oof_proba[val_idx] = proba
 
-        # fold-only AUC (raw vs flipped) used only for flip-rate diagnostic
-        if len(np.unique(y_val)) > 1:
-            auc = roc_auc_score(y_val, proba)
-            auc_flip = roc_auc_score(y_val, 1.0 - proba)
-            if auc_flip > auc:
-                fold_flip_votes += 1
-            fold_aucs.append(max(auc, auc_flip))
+        auc = roc_auc_score(y_val, proba)
+        auc_flip = roc_auc_score(y_val, 1.0 - proba)
 
-            if debug and debug_every_fold:
-                log_func(
-                    f"[AUC-DBG] fold={fold_i:02d} "
-                    f"auc={auc:.4f} auc_flip={auc_flip:.4f} "
-                    f"y_mean={float(np.mean(y_val)):.4f} p_mean={float(np.mean(proba)):.4f}"
-                )
+        if auc_flip > auc:
+            flips += 1
+            aucs_best.append(auc_flip)
+            used = "flip"
+        else:
+            aucs_best.append(auc)
+            used = "normal"
 
-    flip_rate = (fold_flip_votes / max(1, len(folds))) if folds is not None else 0.0
-    mean_auc_fold = float(np.mean(fold_aucs)) if fold_aucs else float("nan")
+        if debug:
+            log_func(
+                f"[AUC-DBG] fold={fold_i:02d} auc={auc:.4f} auc_flip={auc_flip:.4f} "
+                f"y_mean={float(np.mean(y_val)):.4f} p_mean={float(np.mean(proba)):.4f} used={used}"
+            )
 
-    # ---- OOF metrics (global orientation) ----
-    oof = {}
-    global_flip = False
+    mean_fold_auc_best = float(np.mean(aucs_best)) if aucs_best else float("nan")
+    flip_rate = (flips / len(aucs_best)) if aucs_best else 0.0
+
+    # --- OOF metrics with SINGLE global orientation ---
+    out = {
+        "feature_list": list(feature_list),
+        "flip_rate": float(flip_rate),
+        "mean_fold_auc_best": float(mean_fold_auc_best),
+        "oof_proba": oof_proba,
+        "oof_auc": np.nan,
+        "oof_auc_flip": np.nan,
+        "oof_auc_best": np.nan,
+        "global_flip": False,
+        "oof_logloss": np.nan,
+        "oof_logloss_flip": np.nan,
+        "oof_logloss_best": np.nan,
+        "oof_brier": np.nan,
+        "oof_brier_flip": np.nan,
+        "oof_brier_best": np.nan,
+    }
 
     if return_oof:
         valid = np.isfinite(oof_proba)
-        if np.sum(valid) < 5 or len(np.unique(y[valid])) < 2:
-            # Not enough signal to score AUC; still return structure
-            oof.update({
-                "oof_auc": float("nan"),
-                "oof_auc_flip": float("nan"),
-                "oof_logloss": float("nan"),
-                "oof_logloss_flip": float("nan"),
-                "oof_brier": float("nan"),
-                "oof_brier_flip": float("nan"),
-            })
-        else:
-            p = np.clip(oof_proba[valid], eps, 1.0 - eps)
-            yy = y[valid]
+        yv = y[valid]
+        pv = oof_proba[valid]
 
-            # AUC (higher is better)
-            oof_auc = roc_auc_score(yy, p)
-            oof_auc_flip = roc_auc_score(yy, 1.0 - p)
+        if len(np.unique(yv)) > 1:
+            oof_auc = roc_auc_score(yv, pv)
+            oof_auc_flip = roc_auc_score(yv, 1.0 - pv)
+            global_flip = bool(oof_auc_flip > oof_auc)
 
-            # LogLoss (lower is better)
-            oof_ll = log_loss(yy, p, labels=[0, 1])
-            oof_ll_flip = log_loss(yy, 1.0 - p, labels=[0, 1])
+            pv_best = (1.0 - pv) if global_flip else pv
+            oof_auc_best = max(oof_auc, oof_auc_flip)
 
-            # Brier (lower is better)
-            oof_br = brier_score_loss(yy, p)
-            oof_br_flip = brier_score_loss(yy, 1.0 - p)
+            # logloss/brier on best-oriented probs
+            ll = log_loss(yv, pv, labels=[0, 1])
+            ll_flip = log_loss(yv, 1.0 - pv, labels=[0, 1])
+            ll_best = min(ll, ll_flip)
 
-            oof.update({
-                "oof_auc": float(oof_auc),
-                "oof_auc_flip": float(oof_auc_flip),
-                "oof_logloss": float(oof_ll),
-                "oof_logloss_flip": float(oof_ll_flip),
-                "oof_brier": float(oof_br),
-                "oof_brier_flip": float(oof_br_flip),
-            })
+            brier = float(np.mean((pv - yv) ** 2))
+            brier_flip = float(np.mean(((1.0 - pv) - yv) ** 2))
+            brier_best = min(brier, brier_flip)
 
-            # ✅ choose ONE orientation using LogLoss first (most stable),
-            # then Brier, then AUC as tie-breaker
-            if oof_ll_flip < oof_ll - 1e-9:
-                global_flip = True
-            elif abs(oof_ll_flip - oof_ll) <= 1e-9:
-                if oof_br_flip < oof_br - 1e-12:
-                    global_flip = True
-                elif abs(oof_br_flip - oof_br) <= 1e-12:
-                    if oof_auc_flip > oof_auc + 1e-12:
-                        global_flip = True
-
-    if debug:
-        log_func(f"[CV] mean_fold_auc(best-of-orient)={mean_auc_fold:.6f} flip_rate={flip_rate:.2%}")
-        if return_oof and "oof_auc" in oof:
-            log_func(
-                f"[OOF] auc={oof.get('oof_auc', np.nan):.6f} auc_flip={oof.get('oof_auc_flip', np.nan):.6f} | "
-                f"ll={oof.get('oof_logloss', np.nan):.6f} ll_flip={oof.get('oof_logloss_flip', np.nan):.6f} | "
-                f"brier={oof.get('oof_brier', np.nan):.6f} brier_flip={oof.get('oof_brier_flip', np.nan):.6f} | "
-                f"global_flip={'YES' if global_flip else 'NO'}"
+            out.update(
+                oof_auc=float(oof_auc),
+                oof_auc_flip=float(oof_auc_flip),
+                oof_auc_best=float(oof_auc_best),
+                global_flip=global_flip,
+                oof_logloss=float(ll),
+                oof_logloss_flip=float(ll_flip),
+                oof_logloss_best=float(ll_best),
+                oof_brier=float(brier),
+                oof_brier_flip=float(brier_flip),
+                oof_brier_best=float(brier_best),
             )
 
-    return {
-        "feature_list": list(feature_list),
-        "flip_rate": float(flip_rate),
-        "mean_fold_auc_best": float(mean_auc_fold),
-        "global_flip": bool(global_flip),
-        "oof_proba": oof_proba if return_oof else None,
-        **oof,
-    }
+            if debug:
+                log_func(
+                    f"[OOF] auc={oof_auc:.6f} auc_flip={oof_auc_flip:.6f} | "
+                    f"ll={ll:.6f} ll_flip={ll_flip:.6f} | "
+                    f"brier={brier:.6f} brier_flip={brier_flip:.6f} | "
+                    f"global_flip={'YES' if global_flip else 'NO'}"
+                )
+
+    if debug:
+        log_func(f"[CV] mean_fold_auc(best-of-orient)={mean_fold_auc_best:.6f} flip_rate={flip_rate:.2%}")
+
+    return out
+
 def _auto_select_k_by_auc(
-    model_proto,
-    X,
-    y,
-    folds,
-    ordered_features,
-    *,
-    min_k=30,
-    max_k=None,
-    patience=5,
-    min_improve=1e-4,
-    verbose=True,
-    log_func=print,
-    debug=False,
-    debug_every=10,
-    # ✅ weights for composite objective
-    w_auc=1.0,
-    w_logloss=1.0,
-    w_brier=0.25,
-    # optional: penalize unstable flip behavior
-    w_fliprate=0.0,   # try 0.05 if you want to prefer stability
+    model_proto, X, y, folds, ordered_features, *,
+    min_k=30, max_k=None, patience=5, min_improve=1e-4,
+    verbose=True, log_func=print, debug=False, debug_every=10,
+    # NEW: tie-break + guardrails
+    auc_tie_eps=0.002,          # if AUC within this, use logloss/brier to decide
+    max_ll_increase=0.20,       # reject if logloss worsens too much vs best-so-far
+    max_brier_increase=0.06,    # reject if brier worsens too much vs best-so-far
 ):
-    """
-    Greedy prefix scan over ordered_features (top-k prefixes).
-
-    Evaluates each k by OOF metrics and chooses best_k via a composite objective:
-      score = w_auc*AUC - w_logloss*LogLoss - w_brier*Brier - w_fliprate*flip_rate
-
-    Orientation (normal vs flipped) is chosen ONCE per k using OOF LogLoss
-    (then Brier/AUC tie-breakers) to avoid fold-by-fold flipping nonsense.
-
-    Returns:
-      best_k, best_score, history
-    where history entries are dicts with metrics + chosen orientation.
-    """
     if max_k is None:
         max_k = len(ordered_features)
     max_k = int(min(max_k, len(ordered_features)))
+    min_k = int(max(1, min(min_k, max_k)))
 
-    y_arr = np.asarray(y, int).reshape(-1)
+    y_arr = np.asarray(y)
 
-    best_score = -np.inf
-    best_k = max(1, int(min_k))
+    best_k = min_k
+    best_res = None
+    best_auc = -np.inf
+    best_ll = np.inf
+    best_brier = np.inf
+
     no_improve = 0
     history = []
 
@@ -2810,56 +2768,41 @@ def _auto_select_k_by_auc(
             log_func=log_func, debug=dbg, return_oof=True
         )
 
-        gf = bool(res.get("global_flip", False))
-
-        # pick oriented OOF metrics (based on global flip)
-        oof_auc = res.get("oof_auc_flip" if gf else "oof_auc", np.nan)
-        oof_ll  = res.get("oof_logloss_flip" if gf else "oof_logloss", np.nan)
-        oof_br  = res.get("oof_brier_flip" if gf else "oof_brier", np.nan)
+        auc_k = float(res.get("oof_auc_best", np.nan))
+        ll_k = float(res.get("oof_logloss_best", np.nan))
+        br_k = float(res.get("oof_brier_best", np.nan))
         flip_rate = float(res.get("flip_rate", 0.0))
+        global_flip = bool(res.get("global_flip", False))
 
-        # If AUC unavailable (rare), fall back to fold mean AUC-best
-        if not np.isfinite(oof_auc):
-            oof_auc = float(res.get("mean_fold_auc_best", np.nan))
-
-        # Composite score (higher better)
-        score = (
-            float(w_auc) * float(oof_auc)
-            - float(w_logloss) * float(oof_ll) if np.isfinite(oof_ll) else float(w_auc) * float(oof_auc)
-        )
-        if np.isfinite(oof_br):
-            score -= float(w_brier) * float(oof_br)
-        score -= float(w_fliprate) * float(flip_rate)
-
-        row = {
-            "k": int(k),
-            "score": float(score),
-            "global_flip": gf,
-            "flip_rate": float(flip_rate),
-            "oof_auc_oriented": float(oof_auc) if np.isfinite(oof_auc) else float("nan"),
-            "oof_logloss_oriented": float(oof_ll) if np.isfinite(oof_ll) else float("nan"),
-            "oof_brier_oriented": float(oof_br) if np.isfinite(oof_br) else float("nan"),
-            "oof_auc": float(res.get("oof_auc", np.nan)),
-            "oof_auc_flip": float(res.get("oof_auc_flip", np.nan)),
-            "oof_logloss": float(res.get("oof_logloss", np.nan)),
-            "oof_logloss_flip": float(res.get("oof_logloss_flip", np.nan)),
-            "oof_brier": float(res.get("oof_brier", np.nan)),
-            "oof_brier_flip": float(res.get("oof_brier_flip", np.nan)),
-            "features": list(feats_k),
-        }
-        history.append(row)
+        history.append((k, auc_k, ll_k, br_k, flip_rate, global_flip))
 
         if verbose:
             log_func(
-                f"[AUTO-FEAT] k={k:3d} score={row['score']:.6f} "
-                f"auc={row['oof_auc_oriented']:.6f} ll={row['oof_logloss_oriented']:.6f} "
-                f"brier={row['oof_brier_oriented']:.6f} "
-                f"flip_rate={flip_rate:.1%} global_flip={'YES' if gf else 'NO'}"
+                f"[AUTO-FEAT] k={k:3d} auc={auc_k:.6f} ll={ll_k:.6f} brier={br_k:.6f} "
+                f"flip_rate={flip_rate:.1%} global_flip={'YES' if global_flip else 'NO'}"
             )
 
-        if score > best_score + float(min_improve):
-            best_score = score
+        if not np.isfinite(auc_k):
+            continue
+
+        # --- GUARDRAILS: don't accept a set that blows up calibration massively ---
+        if best_res is not None:
+            if np.isfinite(ll_k) and ll_k > best_ll + float(max_ll_increase):
+                continue
+            if np.isfinite(br_k) and br_k > best_brier + float(max_brier_increase):
+                continue
+
+        improved = (auc_k > best_auc + float(min_improve))
+
+        # --- TIE-BREAK: if AUC is basically tied, prefer better LL/Brier ---
+        tied = (abs(auc_k - best_auc) <= float(auc_tie_eps))
+
+        if improved or (tied and (ll_k < best_ll or br_k < best_brier)):
+            best_auc = auc_k
+            best_ll = ll_k if np.isfinite(ll_k) else best_ll
+            best_brier = br_k if np.isfinite(br_k) else best_brier
             best_k = k
+            best_res = res
             no_improve = 0
         else:
             no_improve += 1
@@ -2868,17 +2811,15 @@ def _auto_select_k_by_auc(
             if verbose:
                 log_func(
                     f"[AUTO-FEAT] Early stop at k={k} "
-                    f"(best_k={best_k}, best_score={best_score:.6f})"
+                    f"(best_k={best_k}, best_auc={best_auc:.6f})"
                 )
             break
 
     if verbose and history:
-        log_func(
-            f"[AUTO-FEAT] Final best_k={best_k}, best_score={best_score:.6f}, "
-            f"tried up to k={history[-1]['k']}"
-        )
+        log_func(f"[AUTO-FEAT] Final best_k={best_k}, best_auc={best_auc:.6f}, tried up to k={history[-1][0]}")
 
-    return best_k, best_score, history
+    return best_k, best_auc, history
+
 
 
 # ------- One-call AUTO selector that does everything -------
