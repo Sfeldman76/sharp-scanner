@@ -2743,12 +2743,17 @@ def _cv_auc_for_feature_set(
 
 def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
-    min_k=30, max_k=None, patience=5, min_improve=1e-4,
-    verbose=True, log_func=print, debug=False, debug_every=10,
-    # NEW: tie-break + guardrails
-    auc_tie_eps=0.002,          # if AUC within this, use logloss/brier to decide
-    max_ll_increase=0.20,       # reject if logloss worsens too much vs best-so-far
-    max_brier_increase=0.06,    # reject if brier worsens too much vs best-so-far
+    min_k=40,
+    max_k=None,
+    patience=15,
+    min_improve=1e-4,
+    verbose=True,
+    log_func=print,
+    debug=False,
+    debug_every=10,
+    auc_tie_eps=0.002,
+    max_ll_increase=0.20,
+    max_brier_increase=0.06,
 ):
     if max_k is None:
         max_k = len(ordered_features)
@@ -2756,6 +2761,8 @@ def _auto_select_k_by_auc(
     min_k = int(max(1, min(min_k, max_k)))
 
     y_arr = np.asarray(y)
+    n_feats = len(keep_order)
+
 
     best_k = min_k
     best_res = None
@@ -2971,29 +2978,36 @@ def select_features_auto(
 
     # 3b) AUC-driven auto-selection of best prefix size
     best_k = None
-    best_auc = None
+    best_score = None
+    
     if use_auc_auto and keep_order:
         y_arr = np.asarray(y_train)
-        best_k, best_auc, history = _auto_select_k_by_auc(
+    
+        # 🔑 NEW: dynamic bounds based on feature count
+        n_feats = len(keep_order)
+        min_k_dyn = max(40, int(0.25 * n_feats))
+        max_k_dyn = n_feats
+    
+        best_k, best_score, history = _auto_select_k_by_auc(
             model_proto,
             X_df_train,
             y_arr,
             folds,
             keep_order,
-            min_k=min(auc_min_k, len(keep_order)),
-            max_k=len(keep_order),
+            min_k=min_k_dyn,
+            max_k=max_k_dyn,
             patience=auc_patience,
             min_improve=auc_min_improve,
             verbose=auc_verbose,
-            log_func=log_func, 
-            debug=True,        # ✅ shows fold debug tables
-            debug_every=15,# 👈 Streamlit logging
+            log_func=log_func,
+            debug=True,
+            debug_every=15,
         )
+    
         final_feats = keep_order[:best_k]
     else:
         final_feats = keep_order
 
-  
 
     # 3c) extra logging: ΔAUC vs full set + top-10 features
     if auc_verbose and keep_order:
