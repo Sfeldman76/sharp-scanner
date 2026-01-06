@@ -2852,7 +2852,7 @@ def _auto_select_k_by_auc(
     max_ll_increase=0.20,
     max_brier_increase=0.06,
     orient_features=True,
-    enable_feature_flips=False,
+    enable_feature_flips=True,
     max_feature_flips=20,
     orient_passes=1,
 ):
