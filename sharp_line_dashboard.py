@@ -2755,9 +2755,9 @@ def _cv_auc_for_feature_set(
 
 def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
-    min_k=50,
+    min_k=80,
     max_k=None,
-    patience=15,
+    patience=25,
     min_improve=1e-4,
     verbose=True,
     log_func=print,
