@@ -2600,6 +2600,11 @@ from sklearn.base import clone
 from sklearn.metrics import roc_auc_score
 import numpy as np
 
+# =========================
+# FAST, DIRECTED FEATURE ORIENTATION DROP-IN
+# (Adds quick screen + early-abort full-CV for flips)
+# =========================
+
 def _safe_predict_proba_pos(mdl, X_val):
     """
     Robustly return P(class==1) for classifiers.
@@ -2619,9 +2624,10 @@ def _safe_predict_proba_pos(mdl, X_val):
     return np.asarray(mdl.predict(X_val), float)
 
 
-import numpy as np
 from sklearn.base import clone
-from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
+from sklearn.metrics import roc_auc_score, log_loss
+import numpy as np
+
 
 def _cv_auc_for_feature_set(
     model_proto,
