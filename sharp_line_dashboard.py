@@ -2604,33 +2604,6 @@ import numpy as np
 from sklearn.base import clone
 from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
 
-def _safe_predict_proba_pos(mdl, X_val):
-    """
-    Robustly return P(class==1) for classifiers.
-    Falls back to predict() if predict_proba not available.
-    """
-    if hasattr(mdl, "predict_proba"):
-        proba2 = mdl.predict_proba(X_val)
-        classes = getattr(mdl, "classes_", None)
-        if classes is None:
-            return np.asarray(proba2[:, 1], float)
-        classes = np.asarray(classes)
-        if np.any(classes == 1):
-            pos_idx = int(np.where(classes == 1)[0][0])
-        else:
-            pos_idx = int(len(classes) - 1)
-        return np.asarray(proba2[:, pos_idx], float)
-    # fallback: treat predict as probability-like output
-    return np.asarray(mdl.predict(X_val), float)
-
-
-from sklearn.metrics import roc_auc_score, log_loss
-
-from sklearn.base import clone
-from sklearn.metrics import roc_auc_score, log_loss
-import numpy as np
-
-
 def _cv_auc_for_feature_set(
     model_proto,
     X,
@@ -2649,10 +2622,23 @@ def _cv_auc_for_feature_set(
     ll_weight=0.15,
     brier_weight=0.10,
     eps=1e-6,
+
+    # ---- NEW: speed knobs for feature orientation ----
+    orient_quick_folds=1,         # 1 fold is usually enough for screening
+    orient_quick_eps=2e-4,        # require small quick AUC improvement to proceed
+    orient_full_min_gain=1e-5,    # require tiny full score gain to accept
+    orient_full_abort_margin=2e-4,# early-abort if can't beat best by this
+    orient_max_candidates=None,   # cap how many features to even try (None = all numeric)
+    orient_use_corr_prefilter=False,
+    orient_corr_abs_min=0.01,
 ):
     """
     Evaluate a fixed feature set with OOF preds and optional INDIVIDUAL FEATURE flips.
     No global proba flipping. No fold-by-fold proba flipping.
+
+    NEW: Directed feature orientation:
+      - Quick-screen on 1 (or few) folds to decide whether to run full CV.
+      - Early-abort full CV for a candidate flip if it can't beat current best.
     """
 
     y = np.asarray(y, int).reshape(-1)
@@ -2687,29 +2673,64 @@ def _cv_auc_for_feature_set(
         except Exception:
             pass
 
-    def _oof_metrics_for_X(X_use, feats):
+    # optional corr prefilter (very cheap)
+    if orient_use_corr_prefilter and numeric_feats:
+        y_f = y.astype(float)
+        keep = []
+        for f in numeric_feats:
+            try:
+                x_f = np.asarray(X[f], float)
+                if np.all(~np.isfinite(x_f)):
+                    continue
+                # safe corr: center + dot
+                xf = x_f.copy()
+                m = np.nanmean(xf)
+                xf = np.where(np.isfinite(xf), xf - m, 0.0)
+                yf = y_f - np.mean(y_f)
+                denom = (np.sqrt(np.sum(xf * xf)) * np.sqrt(np.sum(yf * yf)) + 1e-12)
+                c = float(np.sum(xf * yf) / denom)
+                if abs(c) >= float(orient_corr_abs_min):
+                    keep.append(f)
+            except Exception:
+                continue
+        numeric_feats = keep
+
+    if orient_max_candidates is not None and numeric_feats:
+        numeric_feats = numeric_feats[: int(max(1, orient_max_candidates))]
+
+    def _oof_metrics_for_X(
+        X_use,
+        feats,
+        *,
+        abort_if_cannot_beat_score=None,
+        abort_margin=0.0,
+    ):
+        """
+        Full CV OOF metrics.
+        NEW: early abort if even perfect remaining folds can't beat current best score.
+        """
         oof = np.full(n, np.nan, dtype=float)
 
+        # If no abort target, just run normally
+        do_abort = abort_if_cannot_beat_score is not None and np.isfinite(abort_if_cannot_beat_score)
+        n_folds = len(folds)
+
+        # For abort heuristic, we'll track partial fold metrics and bound best possible score.
+        # AUC upper bound = 1.0; logloss/brier lower bound = 0.0 => score upper bound.
+        # score = auc_w*auc - ll_w*ll - brier_w*br
+        # best_possible_remaining score contribution <= auc_w*1.0 (and ll/br add 0 penalty)
+        auc_fold_vals = []
+
         for fold_i, (tr_idx, val_idx) in enumerate(folds, 1):
-            X_tr = X_use.iloc[tr_idx][feats]
+            X_tr  = X_use.iloc[tr_idx][feats]
             X_val = X_use.iloc[val_idx][feats]
-            y_tr = y[tr_idx]
+            y_tr  = y[tr_idx]
             y_val = y[val_idx]
 
             mdl = clone(model_proto)
             mdl.fit(X_tr, y_tr)
 
-            try:
-                proba2 = mdl.predict_proba(X_val)
-                classes = np.asarray(getattr(mdl, "classes_", [0, 1]))
-                if np.any(classes == 1):
-                    pos_idx = int(np.where(classes == 1)[0][0])
-                else:
-                    pos_idx = int(len(classes) - 1)
-                proba = proba2[:, pos_idx]
-            except Exception:
-                proba = mdl.predict(X_val)
-
+            proba = _safe_predict_proba_pos(mdl, X_val)
             proba = np.asarray(proba, float).reshape(-1)
 
             if debug:
@@ -2723,6 +2744,32 @@ def _cv_auc_for_feature_set(
                 )
 
             oof[val_idx] = proba
+
+            # ----- early abort check (cheap) -----
+            if do_abort:
+                # compute fold AUC quickly; if can't compute, treat as 0.5 (neutral)
+                try:
+                    auc_fold = roc_auc_score(np.asarray(y_val, int), np.clip(proba, eps, 1 - eps))
+                    if not np.isfinite(auc_fold):
+                        auc_fold = 0.5
+                except Exception:
+                    auc_fold = 0.5
+                auc_fold_vals.append(float(auc_fold))
+
+                done = len(auc_fold_vals)
+                left = n_folds - done
+                # optimistic bound on mean AUC if remaining folds were perfect
+                mean_auc_best_possible = (sum(auc_fold_vals) + left * 1.0) / float(n_folds)
+                best_possible_score = (auc_weight * mean_auc_best_possible)  # ll/br optimistic at 0
+                if best_possible_score < float(abort_if_cannot_beat_score) + float(abort_margin):
+                    return {
+                        "oof_proba": oof,
+                        "auc": float("nan"),
+                        "logloss": float("nan"),
+                        "brier": float("nan"),
+                        "score": float("-inf"),
+                        "aborted": True,
+                    }
 
         valid = np.isfinite(oof)
         y_v = y[valid]
@@ -2743,15 +2790,61 @@ def _cv_auc_for_feature_set(
             "logloss": float(ll),
             "brier": float(br),
             "score": float(score) if np.isfinite(score) else float("-inf"),
+            "aborted": False,
         }
 
     def _apply_flip_set(X_base, flip_set, feats):
-        # flip only on requested columns that exist + numeric
         X2 = X_base.copy()
         for c in flip_set:
             if c in feats:
                 X2[c] = -np.asarray(X2[c], float)
         return X2
+
+    def _quick_screen_auc_for_toggle(X_base, feats, f, flip_set):
+        """
+        Quick-screen a candidate toggle using 1 (or few) folds.
+        We compute mean AUC on the first `orient_quick_folds` folds for:
+          - current flip_set
+          - flip_set toggled on f
+        and decide whether toggling is promising.
+        """
+        q = int(max(1, orient_quick_folds))
+        q = min(q, len(folds))
+
+        def _mean_auc_for_set(trial_set):
+            aucs = []
+            X_try = _apply_flip_set(X_base, trial_set, feats)
+            for i in range(q):
+                tr_idx, val_idx = folds[i]
+                X_tr  = X_try.iloc[tr_idx][feats]
+                X_val = X_try.iloc[val_idx][feats]
+                y_tr  = y[tr_idx]
+                y_val = y[val_idx]
+
+                mdl = clone(model_proto)
+                mdl.fit(X_tr, y_tr)
+                p = _safe_predict_proba_pos(mdl, X_val)
+                p = np.clip(np.asarray(p, float).reshape(-1), eps, 1 - eps)
+
+                try:
+                    auc_i = roc_auc_score(np.asarray(y_val, int), p)
+                    if not np.isfinite(auc_i):
+                        auc_i = 0.5
+                except Exception:
+                    auc_i = 0.5
+                aucs.append(float(auc_i))
+            return float(np.mean(aucs)) if aucs else 0.5
+
+        cur_mean = _mean_auc_for_set(set(flip_set))
+
+        trial = set(flip_set)
+        if f in trial:
+            trial.remove(f)
+        else:
+            trial.add(f)
+        try_mean = _mean_auc_for_set(trial)
+
+        return cur_mean, try_mean, trial
 
     # --- baseline ---
     flip_set = set()
@@ -2765,7 +2858,7 @@ def _cv_auc_for_feature_set(
             f"brier={best['brier']:.6f} | score={best['score']:.6f} | n_feat_flips=0"
         )
 
-    # --- optional feature orientation ---
+    # --- optional feature orientation (FAST, DIRECTED) ---
     do_orient = bool(enable_feature_flips and orient_features and max_feature_flips and numeric_feats)
     max_feature_flips = int(max(0, max_feature_flips))
 
@@ -2773,25 +2866,37 @@ def _cv_auc_for_feature_set(
         for pass_i in range(int(max(1, orient_passes))):
             improved_any = False
 
-            # stop if we hit flip cap
             if len(flip_set) >= max_feature_flips:
                 break
 
             for f in numeric_feats:
-                # don’t exceed cap
                 if f not in flip_set and len(flip_set) >= max_feature_flips:
                     break
 
-                trial_set = set(flip_set)
-                if f in trial_set:
-                    trial_set.remove(f)   # allow un-flip if it helps (rare)
-                else:
-                    trial_set.add(f)
+                # 1) QUICK SCREEN
+                cur_q, try_q, trial_set = _quick_screen_auc_for_toggle(X_base, feature_list, f, flip_set)
 
+                if debug:
+                    log_func(
+                        f"[ORIENT-SCAN] pass={pass_i+1} feat={f} quick_auc: cur={cur_q:.6f} try={try_q:.6f}"
+                    )
+
+                if try_q <= cur_q + float(orient_quick_eps):
+                    continue  # skip expensive full CV
+
+                # 2) FULL CV (WITH EARLY ABORT VS CURRENT BEST)
                 X_try = _apply_flip_set(X_base, trial_set, feature_list)
-                cur = _oof_metrics_for_X(X_try, feature_list)
+                cur = _oof_metrics_for_X(
+                    X_try,
+                    feature_list,
+                    abort_if_cannot_beat_score=float(best["score"]),
+                    abort_margin=float(orient_full_abort_margin),
+                )
 
-                if np.isfinite(cur["score"]) and cur["score"] > best["score"] + 1e-6:
+                if cur.get("aborted", False):
+                    continue
+
+                if np.isfinite(cur["score"]) and cur["score"] > best["score"] + float(orient_full_min_gain):
                     flip_set = trial_set
                     best = dict(cur)
                     improved_any = True
