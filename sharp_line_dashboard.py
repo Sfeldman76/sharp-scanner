@@ -2600,6 +2600,25 @@ from sklearn.base import clone
 from sklearn.metrics import roc_auc_score
 import numpy as np
 
+def _safe_predict_proba_pos(mdl, X_val):
+    """
+    Robustly return P(class==1) for classifiers.
+    Falls back to predict() if predict_proba not available.
+    """
+    if hasattr(mdl, "predict_proba"):
+        proba2 = mdl.predict_proba(X_val)
+        classes = getattr(mdl, "classes_", None)
+        if classes is None:
+            return np.asarray(proba2[:, 1], float)
+        classes = np.asarray(classes)
+        if np.any(classes == 1):
+            pos_idx = int(np.where(classes == 1)[0][0])
+        else:
+            pos_idx = int(len(classes) - 1)
+        return np.asarray(proba2[:, pos_idx], float)
+    return np.asarray(mdl.predict(X_val), float)
+
+
 import numpy as np
 from sklearn.base import clone
 from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
