@@ -1862,7 +1862,14 @@ def attach_pairwise_correlation_features(
     if df.empty:
         return df
 
-    out = df.merge(cross_pivots, on=["Game_Key","Bookmaker"], how="left", validate="m:1")
+    out = merge_drop_overlap(
+        df,
+        cross_pivots,
+        on=["Game_Key", "Bookmaker"],
+        how="left",
+        keep_right=True,      # cross_pivots should win if it has the same fields
+        validate="m:1",
+    )
 
     # ---- GUARANTEE Spread_Value / Total_Value exist (avoid KeyError) ----
     # If pivots didn't bring them, derive from per-row (Market, Value) and broadcast per (Game_Key, Bookmaker).
