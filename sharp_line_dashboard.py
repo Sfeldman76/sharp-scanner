@@ -6705,7 +6705,7 @@ def train_sharp_model_from_bq(
         "ATS_Cover_Margin_Last5_Prior_Std",
         "Market_Bucket",
         "Market_OddsProb_Bucket",
-
+     ]
     
     # (Opponent mirrors intentionally excluded per your note)
     
