@@ -556,14 +556,35 @@ SPORT_CFG = {
     # --------------------------
     # 🏀 NCAAB Ridge-Massey
     # --------------------------
+   
     "NCAAB": dict(
         model="ridge_massey",
+    
+        # --- scoring geometry ---
         HFA_pts=3.0,
         mov_cap=25,
-        ridge_lambda=65.0,   # increased (≈65)
-        window_days=90,      # shortened midseason window
-        preseason_prior_games=12  # stronger preseason regression
+    
+        # --- regularization ---
+        ridge_lambda=65.0,          # stronger shrink for 360+ teams
+    
+        # --- time windowing ---
+        window_days=90,             # baseline midseason window
+        phase_aware_window=True,    # auto-adjust early/late season
+    
+        # --- recency weighting ---
+        rm_half_life_days=35.0,     # exponential decay inside window
+    
+        # --- early season stabilization ---
+        preseason_prior_games=18,  # stronger early shrink (12 was too weak)
+    
+        # --- design matrix ---
+        use_hfa_term=True,          # explicit home-court column
+    
+        # --- market calibration ---
+        spread_calib_clip_abs=15.0, # downweight extreme spreads
+        spread_calib_floor_abs=1.0, # avoid divide-by-zero / tiny spreads
     ),
+
 }
     BACKFILL_DAYS = 365
     PREFERRED_METHOD = {
@@ -1170,14 +1191,17 @@ SPORT_CFG = {
                     off_v[t] = (phi**2) * _ov(t) + sigma_eta**2
                     def_v[t] = (phi**2) * _dv(t) + sigma_eta**2
     
-                ts  = g.Snapshot_TS
+                ts  = g.Game_Start  # ✅ Option A: rating timestamp = game time (pregame)
+                if isinstance(ts, pd.Timestamp) and ts.tzinfo is None:
+                    ts = ts.tz_localize("UTC")
+                
                 tag = "backfill" if window_start is None else "incremental"
-    
-                # store NET as your single Rating (keeps downstream unchanged)
+                
                 history_batch.append({"Sport": sport, "Team": h, "Rating": 1500.0 + float(_net(h)),
                                       "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
                 history_batch.append({"Sport": sport, "Team": a, "Rating": 1500.0 + float(_net(a)),
                                       "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
+
     
                 if len(history_batch) >= BATCH_SZ:
                     bq.load_table_from_dataframe(pd.DataFrame(history_batch), table_history).result()
@@ -1213,20 +1237,48 @@ SPORT_CFG = {
 
     def run_ridge_massey(bq, sport: str, aliases: list[str], cfg: dict):
         """
-        Ridge-Massey fit for NCAAB:
-
-        • Fit ratings from MOV (score data)
-        • Pull sharp-book closing spreads from sharplogger.sharp_data.moves_with_features_merged
-          where Value is stored for each team (favorite negative, dog positive).
-        • Use only favorite-side rows (Value < 0) to define the market favorite & spread.
-        • Calibrate: spread_close (negative) ≈ -k * (rating_fav - rating_dog)
-          → ratings_pts *= k so rating diffs are in spread units.
+        Best-practice Ridge-Massey for NCAAB (scores + sharp spreads):
+    
+        Upgrades vs baseline:
+          ✅ Robust MOV (smooth tanh cap, not hard clip)
+          ✅ Recency weighting (half-life days) in the normal equations
+          ✅ Strong early-season shrink with schedule-strength adjustment
+          ✅ Phase-aware window_days (early season longer, late season shorter)
+          ✅ Spread calibration with magnitude-aware weights (downweight extreme spreads)
+          ✅ Guards for degenerate calibration + NaNs
+          ✅ Keeps output schema identical (one Rating per team)
+    
+        Assumes the following exist in module scope:
+          - SHARP_BOOKS_DEFAULT
+          - table_history (outer scope in update_power_ratings)
+          - bigquery imported, np/pd imported
         """
-
-        window_days  = int(cfg.get("window_days", 120))
-        mov_cap      = cfg.get("mov_cap", 25)
-        ridge_lambda = float(cfg.get("ridge_lambda", 50.0))
-
+    
+        # ---------------- knobs ----------------
+        window_days  = int(cfg.get("window_days", 90))
+        mov_cap      = float(cfg.get("mov_cap", 25))
+        ridge_lambda = float(cfg.get("ridge_lambda", 65.0))
+    
+        # NEW knobs (safe defaults)
+        rm_half_life_days      = float(cfg.get("rm_half_life_days", 35.0))     # recency weighting
+        preseason_prior_games  = float(cfg.get("preseason_prior_games", 18.0)) # stronger w/ all teams
+        phase_aware_window     = bool(cfg.get("phase_aware_window", True))
+        use_home_field_term    = bool(cfg.get("use_hfa_term", True))           # keep n+1 column
+        spread_calib_clip_abs  = float(cfg.get("spread_calib_clip_abs", 15.0)) # cap for weight calc
+        spread_calib_floor_abs = float(cfg.get("spread_calib_floor_abs", 1.0)) # avoid /0
+    
+        # Phase-aware window: stabilize early season, react late season
+        if phase_aware_window:
+            today = pd.Timestamp.utcnow()
+            m = int(today.month)
+            if m in (11, 12):          # early season
+                window_days = max(window_days, 120)
+            elif m in (1, 2):          # conference ramp
+                window_days = min(window_days, 100)
+            elif m in (3,):            # late season / tournament
+                window_days = min(window_days, 75)
+    
+        # ---------------- query ----------------
         sql = """
         WITH scores AS (
           SELECT
@@ -1242,18 +1294,18 @@ SPORT_CFG = {
             AND Score_Away_Score IS NOT NULL
             AND TIMESTAMP(Game_Start) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @win_days DAY)
         ),
-
+    
         latest_per_book AS (
           SELECT
             LOWER(TRIM(m.Home_Team_Norm)) AS home,
             LOWER(TRIM(m.Away_Team_Norm)) AS away,
             TIMESTAMP(m.Game_Start)       AS game_start_raw,
-
+    
             REGEXP_REPLACE(
               LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
               r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex'
             ) AS BookKey,
-
+    
             SAFE_CAST(m.Value AS FLOAT64) AS spread_value,      -- spread for this team
             m.Snapshot_Timestamp,
             LOWER(TRIM(m.Team_For_Join)) AS fav_team           -- team this row is for
@@ -1263,7 +1315,7 @@ SPORT_CFG = {
             AND m.Market IN ('spreads','spread','Spread','SPREADS')
             AND m.Value IS NOT NULL
             AND TIMESTAMP(m.Game_Start) IS NOT NULL
-            AND m.Value < 0    -- favorite side only (fav lines are negative)
+            AND m.Value < 0    -- favorite side only
           QUALIFY ROW_NUMBER() OVER (
             PARTITION BY
               LOWER(TRIM(m.Home_Team_Norm)),
@@ -1276,7 +1328,7 @@ SPORT_CFG = {
             ORDER BY m.Snapshot_Timestamp DESC
           ) = 1
         ),
-
+    
         market AS (
           SELECT
             home,
@@ -1291,7 +1343,7 @@ SPORT_CFG = {
           WHERE BookKey IN UNNEST(@sharp_books)
           GROUP BY home, away, game_start_raw
         )
-
+    
         SELECT
           s.home,
           s.away,
@@ -1307,95 +1359,164 @@ SPORT_CFG = {
          AND s.away = m.away
          AND s.game_start_raw = m.game_start_raw
         """
-
+    
         df = bq.query(
             sql,
             job_config=bigquery.QueryJobConfig(
                 query_parameters=[
                     bigquery.ArrayQueryParameter("aliases", "STRING", aliases),
-                    bigquery.ScalarQueryParameter("win_days", "INT64", window_days),
+                    bigquery.ScalarQueryParameter("win_days", "INT64", int(window_days)),
                     bigquery.ArrayQueryParameter("sharp_books", "STRING", SHARP_BOOKS_DEFAULT),
                 ]
             )
         ).to_dataframe()
-
+    
         if df.empty:
             return []
-
-        # Ridge-Massey system
-        df["mov"] = (df["hs"] - df["as_"]).astype(float).clip(lower=-mov_cap, upper=mov_cap)
-
+    
+        # ---------------- build MOV (robust) ----------------
+        # Smooth cap: cap * tanh(mov/cap) reduces blowout distortion vs hard clip
+        mov_raw = (df["hs"] - df["as_"]).astype(float)
+        cap = float(mov_cap) if np.isfinite(mov_cap) and mov_cap > 0 else 25.0
+        df["mov"] = cap * np.tanh(mov_raw / cap)
+    
+        # Ensure gs is tz-aware
+        df["gs"] = pd.to_datetime(df["gs"], utc=True, errors="coerce")
+        df = df[df["gs"].notna()].copy()
+        if df.empty:
+            return []
+    
+        # ---------------- team index ----------------
         teams = pd.Index(sorted(set(df.home) | set(df.away)))
         n = len(teams)
+        if n < 2:
+            return []
         idx = {t: i for i, t in enumerate(teams)}
-
+    
         m_rows = len(df)
-        X = np.zeros((m_rows, n + 1), dtype=float)  # +1 for HFA
+        X = np.zeros((m_rows, n + (1 if use_home_field_term else 0)), dtype=float)
         y = df["mov"].to_numpy(float)
-
-        for i, row in df.iterrows():
+    
+        # Fill X
+        # (home +1, away -1, optional HFA indicator +1)
+        if use_home_field_term:
+            hfa_col = n
+        for i, row in enumerate(df.itertuples(index=False)):
             hi, ai = idx[row.home], idx[row.away]
             X[i, hi] = 1.0
             X[i, ai] = -1.0
-            X[i, n]  = 1.0  # home indicator
-
-        XtX = X.T @ X
+            if use_home_field_term:
+                X[i, hfa_col] = 1.0
+    
+        # ---------------- recency weights ----------------
+        now_ts = df["gs"].max()
+        age_days = (now_ts - df["gs"]).dt.total_seconds().to_numpy(float) / 86400.0
+        w = np.exp(-age_days / max(rm_half_life_days, 1.0)).astype(float)
+    
+        # apply weights via sqrt(w)
+        sw = np.sqrt(np.clip(w, 1e-9, None))
+        Xw = X * sw[:, None]
+        yw = y * sw
+    
+        # ---------------- solve ridge system ----------------
+        XtX = Xw.T @ Xw
+        # ridge on team coeffs
         XtX[:n, :n] += np.eye(n) * ridge_lambda
-        XtX[n, n]   += ridge_lambda * 0.01
-
-        beta = np.linalg.solve(XtX, X.T @ y)
-        ratings_pts = beta[:n]
-
-        # center
-        ratings_pts = ratings_pts - ratings_pts.mean()
-        # ---- stronger preseason regression (shrink to 0 early season) ----
-        prior_games = float(cfg.get("preseason_prior_games", 12))
-        # crude game count proxy per team in window:
-        gcounts = (pd.concat([df["home"], df["away"]]).value_counts()).reindex(teams, fill_value=0).to_numpy(float)
-        # shrink factor: n / (n + prior_games)
-        shrink = gcounts / (gcounts + prior_games)
-        # apply teamwise shrink
+        # small ridge on HFA term (if present)
+        if use_home_field_term:
+            XtX[n, n] += ridge_lambda * 0.01
+    
+        beta = np.linalg.solve(XtX, Xw.T @ yw)
+        ratings_pts = beta[:n].astype(float)
+    
+        # center ratings around 0
+        ratings_pts = ratings_pts - float(np.mean(ratings_pts))
+    
+        # ---------------- early-season shrink (schedule-aware) ----------------
+        # games played in window
+        gcounts = (
+            pd.concat([df["home"], df["away"]])
+            .value_counts()
+            .reindex(teams, fill_value=0)
+            .to_numpy(float)
+        )
+    
+        # One-pass SoS proxy: avg opponent rating (using current ratings_pts)
+        rating_map0 = {t: float(r) for t, r in zip(teams, ratings_pts)}
+        opp_sum = pd.Series(0.0, index=teams)
+        opp_cnt = pd.Series(0.0, index=teams)
+    
+        # vectorized-ish loop over pairs (fast enough for NCAAB window sizes)
+        for h, a in zip(df["home"].to_numpy(), df["away"].to_numpy()):
+            opp_sum[h] += rating_map0.get(a, 0.0); opp_cnt[h] += 1.0
+            opp_sum[a] += rating_map0.get(h, 0.0); opp_cnt[a] += 1.0
+    
+        opp_avg = (opp_sum / opp_cnt.replace(0, np.nan)).fillna(0.0).reindex(teams).to_numpy(float)
+    
+        # weaker schedules => more shrink early
+        # (if opp_avg is very negative, schedule is weak)
+        sos_penalty = 1.0 / (1.0 + np.maximum(0.0, -opp_avg) / 6.0)
+    
+        shrink = (gcounts / (gcounts + preseason_prior_games)) * sos_penalty
         ratings_pts = ratings_pts * shrink
-
-        # Market calibration (favorite vs dog)
+    
+        # re-center
+        ratings_pts = ratings_pts - float(np.mean(ratings_pts))
+    
+        # ---------------- market calibration (weighted) ----------------
         df_cal = df[
             df["spread_close"].notna()
             & df["favorite_team"].notna()
             & df["dog_team"].notna()
         ].copy()
-
+    
         if not df_cal.empty:
-            rating_map = {t: r for t, r in zip(teams, ratings_pts)}
-            df_cal["rdiff"] = (
-                df_cal["favorite_team"].map(rating_map)
-                - df_cal["dog_team"].map(rating_map)
-            )
-
-            # spread_close (negative) ≈ -k * rdiff
-            num = float((df_cal["rdiff"] * df_cal["spread_close"]).sum())
-            den = float((df_cal["rdiff"] ** 2).sum())
-            if den > 0:
+            # map ratings
+            rating_map = {t: float(r) for t, r in zip(teams, ratings_pts)}
+            df_cal["rdiff"] = df_cal["favorite_team"].map(rating_map) - df_cal["dog_team"].map(rating_map)
+    
+            # weights: downweight huge spreads & tiny spreads
+            sabs = df_cal["spread_close"].abs().clip(lower=spread_calib_floor_abs, upper=spread_calib_clip_abs)
+            wcal = (1.0 / sabs).to_numpy(float)
+    
+            # Solve k in: spread_close ≈ -k * rdiff  => minimize weighted SSE
+            # k = - (Σ w rdiff spread) / (Σ w rdiff^2)
+            rdiff = df_cal["rdiff"].to_numpy(float)
+            spread = df_cal["spread_close"].to_numpy(float)
+    
+            num = float(np.sum(wcal * rdiff * spread))
+            den = float(np.sum(wcal * (rdiff ** 2)))
+    
+            if np.isfinite(num) and np.isfinite(den) and den > 1e-9:
                 k = - num / den
-                ratings_pts = ratings_pts * float(k)
-
+                # guard against absurd scaling
+                if np.isfinite(k) and 0.10 < abs(k) < 50.0:
+                    ratings_pts = ratings_pts * float(k)
+    
+        # final center (optional)
+        ratings_pts = ratings_pts - float(np.mean(ratings_pts))
+    
+        # ---------------- write history + current ----------------
         ts = df["gs"].max()
         if isinstance(ts, pd.Timestamp) and ts.tzinfo is None:
             ts = ts.tz_localize("UTC")
-
+    
         hist_rows = [
             {
                 "Sport": sport,
                 "Team": t,
                 "Rating": 1500.0 + float(r),
                 "Method": "ridge_massey",
-                "Updated_At": ts,
-                "Source": "window_fit",
+                "Updated_At": ts,           # snapshot timestamp for this window fit
+                "Source": "window_fit_best",
             }
             for t, r in zip(teams, ratings_pts)
         ]
         if hist_rows:
-            bq.load_table_from_dataframe(pd.DataFrame(hist_rows), table_history).result()
-
+            # batch load for safety
+            for i in range(0, len(hist_rows), 50_000):
+                bq.load_table_from_dataframe(pd.DataFrame(hist_rows[i:i+50_000]), table_history).result()
+    
         utc_now = pd.Timestamp.now(tz="UTC")
         current_rows = [
             {
@@ -1479,7 +1600,9 @@ SPORT_CFG = {
                     add_game(g.Home_Team, g.Away_Team, hs, as_)
                     Rh2 = team_rating(g.Home_Team)
                     Ra2 = team_rating(g.Away_Team)
-                    ts  = g.Snapshot_TS
+                    ts  = g.Game_Start  # ✅ Option A: timestamp = game time
+                    if isinstance(ts, pd.Timestamp) and ts.tzinfo is None:
+                        ts = ts.tz_localize("UTC")
                     tag = "backfill" if window_start is None else "incremental"
 
                     history_batch.append({"Sport": sport, "Team": g.Home_Team, "Rating": Rh2,
