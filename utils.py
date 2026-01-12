@@ -444,26 +444,127 @@ def update_power_ratings(
     """
 
     # ---------- config ----------
-    SPORT_CFG = {
-        "MLB":   dict(model="poisson",      HFA_pts=0.20, mov_cap=None),
-        "NFL":   dict(model="elo_kalman",   HFA_pts=2.1,  mov_cap=24, phi=0.96,
-                      sigma_eta=6.0,  sigma_y=13.0, sigma_spread=6.0,
-                      sos_half_life_days=90, sos_gamma=0.7),
-        "NCAAF": dict(model="elo_kalman",   HFA_pts=2.6,  mov_cap=28, phi=0.96,
-                      sigma_eta=7.0,  sigma_y=14.0, sigma_spread=7.0,
-                      sos_half_life_days=90, sos_gamma=0.7),
-        "NBA":   dict(model="elo_kalman",   HFA_pts=2.8,  mov_cap=28, phi=0.97,
-                      sigma_eta=7.5, sigma_y=12.0, sigma_spread=8.0,
-                      sos_half_life_days=60, sos_gamma=0.6),
-        "WNBA":  dict(model="elo_kalman",   HFA_pts=2.0,  mov_cap=26, phi=0.97,
-                      sigma_eta=7.0, sigma_y=11.5, sigma_spread=7.5,
-                      sos_half_life_days=60, sos_gamma=0.6),
-        "CFL":   dict(model="elo_kalman",   HFA_pts=1.6,  mov_cap=30, phi=0.96,
-                      sigma_eta=6.5, sigma_y=13.5, sigma_spread=7.5,
-                      sos_half_life_days=90, sos_gamma=0.7),
-        "NCAAB": dict(model="ridge_massey", HFA_pts=3.0,  mov_cap=25,
-                      ridge_lambda=50.0, window_days=120),
-    }
+SPORT_CFG = {
+    "MLB": dict(model="poisson", HFA_pts=0.20, mov_cap=None),
+
+    # --------------------------
+    # 🏈 NFL / NCAAF
+    # --------------------------
+    "NFL": dict(
+        model="elo_kalman_offdef",
+        HFA_pts=2.1,
+        mov_cap=24,
+        phi=0.96,
+        sigma_eta=6.0,        # state drift
+        sigma_pts=12.0,       # points sensor SD (for Off/Def updates)
+        sigma_spread=6.0,     # market spread SD
+        market_lambda=0.35,   # spread sensor strength (0.2–0.5)
+        favored_only_market=True,
+        sos_half_life_days=90,
+        sos_gamma=0.7,
+        season_gap_days=120,  # offseason reset trigger
+        season_rho=0.75,      # keep % of strength across offseason
+        # downweight late blowouts
+        blowout_mov=17,       # if abs(MOV) >= this, treat as blowout
+        late_month_start=11,  # Nov+
+        blowout_var_mult=2.25 # inflate obs var when late blowout
+    ),
+
+    "NCAAF": dict(
+        model="elo_kalman_offdef",
+        HFA_pts=2.6,
+        mov_cap=28,
+        phi=0.96,
+        sigma_eta=7.0,
+        sigma_pts=13.0,
+        sigma_spread=7.0,
+        market_lambda=0.30,
+        favored_only_market=True,
+        sos_half_life_days=90,
+        sos_gamma=0.7,
+        season_gap_days=150,
+        season_rho=0.62,
+        blowout_mov=21,
+        late_month_start=11,
+        blowout_var_mult=2.50
+    ),
+
+    # --------------------------
+    # 🏀 NBA / WNBA
+    # --------------------------
+    "NBA": dict(
+        model="elo_kalman_offdef",
+        HFA_pts=2.8,
+        mov_cap=24,            # reduced (28 -> 24)
+        phi=0.97,
+        sigma_eta=7.5,
+        sigma_pts=12.0,
+        sigma_spread=10.0,     # increased market σ (lines move more)
+        market_lambda=0.35,
+        favored_only_market=False,
+        sos_half_life_days=60,
+        sos_gamma=0.6,
+        season_gap_days=120,
+        season_rho=0.82,
+        # blowouts matter less late season, but NBA is noisier; keep mild
+        blowout_mov=22,
+        late_month_start=3,    # Mar+
+        blowout_var_mult=1.75,
+        # back-to-back penalty hook (no-op unless rest cols exist)
+        b2b_sigma_pts_mult=1.20
+    ),
+
+    "WNBA": dict(
+        model="elo_kalman_offdef",
+        HFA_pts=2.0,
+        mov_cap=24,            # reduced a touch
+        phi=0.97,
+        sigma_eta=7.0,
+        sigma_pts=11.5,
+        sigma_spread=9.0,      # increased market σ
+        market_lambda=0.35,
+        favored_only_market=False,
+        sos_half_life_days=60,
+        sos_gamma=0.6,
+        season_gap_days=200,
+        season_rho=0.70,
+        blowout_mov=18,
+        late_month_start=7,    # Jul+
+        blowout_var_mult=2.00,
+        b2b_sigma_pts_mult=1.20
+    ),
+
+    "CFL": dict(
+        model="elo_kalman_offdef",
+        HFA_pts=1.6,
+        mov_cap=30,
+        phi=0.96,
+        sigma_eta=6.5,
+        sigma_pts=13.5,
+        sigma_spread=7.5,
+        market_lambda=0.30,
+        favored_only_market=True,
+        sos_half_life_days=90,
+        sos_gamma=0.7,
+        season_gap_days=180,
+        season_rho=0.65,
+        blowout_mov=20,
+        late_month_start=9,    # Sep+
+        blowout_var_mult=2.10
+    ),
+
+    # --------------------------
+    # 🏀 NCAAB Ridge-Massey
+    # --------------------------
+    "NCAAB": dict(
+        model="ridge_massey",
+        HFA_pts=3.0,
+        mov_cap=25,
+        ridge_lambda=65.0,   # increased (≈65)
+        window_days=90,      # shortened midseason window
+        preseason_prior_games=12  # stronger preseason regression
+    ),
+}
     BACKFILL_DAYS = 365
     PREFERRED_METHOD = {
         "MLB":   "poisson",
@@ -817,43 +918,185 @@ def update_power_ratings(
             return float(mov)
         return float(min(max(mov, -cap), cap))
 
-    def run_kalman_elo(bq, sport: str, aliases: list[str], cfg: dict, window_start):
+ 
+    def run_kalman_offdef(bq, sport: str, aliases: list[str], cfg: dict, window_start):
+        """
+        Off/Def Kalman-Elo:
+          - Maintains Off and Def states per team
+          - Uses points sensors (home points, away points)
+          - Optional market spread sensor, optionally favored-side only
+          - Late-season blowout downweight
+          - Explicit season reset (gap-based shrink)
+          - SoS correction applied to NET (Off - Def)
+        Output stays a single Rating per team: 1500 + (Off - Def)
+        """
         phi         = float(cfg.get("phi", 0.96))
-        sigma_eta   = float(cfg.get("sigma_eta", 6.0))
-        sigma_y     = float(cfg.get("sigma_y", 13.0))      # score sensor SD
-        sigma_s     = float(cfg.get("sigma_spread", 7.0))  # market sensor SD
+        sigma_eta   = float(cfg.get("sigma_eta", 6.0))        # state drift (per component)
+        sigma_pts   = float(cfg.get("sigma_pts", 12.0))       # points observation SD
+        sigma_s     = float(cfg.get("sigma_spread", 7.0))     # spread sensor SD
         mov_cap     = cfg.get("mov_cap", None)
         HFA_pts     = float(cfg.get("HFA_pts", 2.0))
-
-        sos_hl      = float(cfg.get("sos_half_life_days", 60))
-        sos_gamma   = float(cfg.get("sos_gamma", 0.6))
-
-        r_mean: Dict[str, float] = {}
-        r_var: Dict[str, float] = {}
-
-        def _m(t): return r_mean.get(t, 0.0)
-        def _v(t): return r_var.get(t, 100.0)
-
-        # SoS accumulators
-        sos_num: Dict[str, float] = {}
-        sos_den: Dict[str, float] = {}
-
-        def _do_update(obs_value, obs_var, Rh, Ra, Vh, Va):
-            # obs_value is observed MOV from home POV
-            y_hat = (Rh - Ra + HFA_pts)
-            e     = obs_value - y_hat
-            S     = Vh + Va + obs_var
+    
+        market_lambda = float(cfg.get("market_lambda", 0.35))
+        favored_only  = bool(cfg.get("favored_only_market", False))
+    
+        sos_hl    = float(cfg.get("sos_half_life_days", 60))
+        sos_gamma = float(cfg.get("sos_gamma", 0.6))
+    
+        season_gap_days = int(cfg.get("season_gap_days", 120))
+        season_rho      = float(cfg.get("season_rho", 0.75))
+    
+        blowout_mov     = float(cfg.get("blowout_mov", 999))
+        late_month_start= int(cfg.get("late_month_start", 13))
+        blowout_var_mult= float(cfg.get("blowout_var_mult", 1.0))
+    
+        b2b_sigma_mult  = float(cfg.get("b2b_sigma_pts_mult", 1.0))
+    
+        # ---- states ----
+        off_m: dict[str, float] = {}
+        def_m: dict[str, float] = {}
+        off_v: dict[str, float] = {}
+        def_v: dict[str, float] = {}
+    
+        def _om(t): return off_m.get(t, 0.0)
+        def _dm(t): return def_m.get(t, 0.0)
+        def _ov(t): return off_v.get(t, 100.0)
+        def _dv(t): return def_v.get(t, 100.0)
+    
+        # Seed from existing single Rating (net) if present
+        seed = load_seed_ratings(sport, window_start)
+        for team, rating in seed.items():
+            try:
+                net = float(rating) - 1500.0
+                # split net into Off and Def symmetrically
+                off_m[str(team)] =  0.5 * net
+                def_m[str(team)] = -0.5 * net
+                off_v[str(team)] =  75.0
+                def_v[str(team)] =  75.0
+            except Exception:
+                pass
+    
+        # SoS accumulators computed on NET
+        sos_num: dict[str, float] = {}
+        sos_den: dict[str, float] = {}
+    
+        def _net(t: str) -> float:
+            return _om(t) - _dm(t)
+    
+        def _cap_margin(mov):
+            if mov_cap is None:
+                return float(mov)
+            return float(min(max(mov, -mov_cap), mov_cap))
+    
+        def _exp_decay_weight(gs_ts: pd.Timestamp, now_ts: pd.Timestamp, half_life_days: float) -> float:
+            age_days = max((now_ts - gs_ts).days, 0)
+            return float(np.exp(- age_days / max(half_life_days, 1.0)))
+    
+        def _safe_get(d: dict, k, default=0.0):
+            v = d.get(k, default)
+            return float(v if np.isfinite(v) else default)
+    
+        # ---- simple Kalman update for two variables: x1=Off(teamA) and x2=Def(teamB) given points ----
+        # obs: pts ≈ mu + Off_A - Def_B + hfa_pts_adj
+        def _update_off_def_for_points(team_off, team_def, pts_obs, mu, hfa_adj, obs_var):
+            # state means/vars
+            m1, v1 = _om(team_off), _ov(team_off)
+            m2, v2 = _dm(team_def), _dv(team_def)
+    
+            # prediction
+            y_hat = mu + m1 - m2 + hfa_adj
+            e     = float(pts_obs) - float(y_hat)
+    
+            # Since covariances are ignored (fast/streaming), gain is diagonal-ish:
+            S = v1 + v2 + obs_var
             if S <= 0:
                 S = 1e-6
-            Kh, Ka = Vh / S, Va / S
-            Rh_post, Ra_post = Rh + Kh * e, Ra - Ka * e
-            Vh_post, Va_post = Vh - Kh * Vh, Va - Ka * Va
-            return Rh_post, Ra_post, Vh_post, Va_post
-
+            k1 = v1 / S
+            k2 = v2 / S
+    
+            # update: Off increases with e; Def decreases with e (because y_hat uses -Def)
+            m1p = m1 + k1 * e
+            m2p = m2 - k2 * e
+            v1p = (1.0 - k1) * v1
+            v2p = (1.0 - k2) * v2
+    
+            off_m[team_off], off_v[team_off] = m1p, v1p
+            def_m[team_def], def_v[team_def] = m2p, v2p
+    
+        def _apply_net_shift(team: str, delta_net: float):
+            # shift net by pushing Off up and Def down equally
+            off_m[team] = _om(team) + 0.5 * delta_net
+            def_m[team] = _dm(team) - 0.5 * delta_net
+    
+        # ---- market sensor: apply ONLY to favored team if requested ----
+        def _market_anchor_favored_only(home: str, away: str, spread_close_home: float):
+            # Spread_Close is HOME spread (negative => home favored) :contentReference[oaicite:5]{index=5}
+            sc = float(spread_close_home)
+            if not np.isfinite(sc):
+                return
+    
+            # expected MOV from spread
+            obs_mov = _cap_margin(-sc)  # home -5.5 -> expected MOV +5.5
+    
+            # figure out favorite
+            home_fav = (sc < 0)
+            fav = home if home_fav else away
+    
+            # compare obs to current expectation
+            exp_mov = _cap_margin((_net(home) - _net(away)) + HFA_pts)
+            e = obs_mov - exp_mov
+    
+            lam = max(1e-3, min(1.0, float(market_lambda)))
+            # weaker market => bigger variance => smaller effective step
+            obs_var = (sigma_s / lam) ** 2
+    
+            # one-sided gain using fav net variance approx
+            v_fav = _ov(fav) + _dv(fav)
+            S = v_fav + obs_var
+            if S <= 0:
+                S = 1e-6
+            k = v_fav / S
+    
+            _apply_net_shift(fav, k * e)
+    
+            # inflate uncertainty a touch after market adjust (optional)
+            off_v[fav] = min(400.0, _ov(fav) + 0.10 * sigma_eta**2)
+            def_v[fav] = min(400.0, _dv(fav) + 0.10 * sigma_eta**2)
+    
+        def _market_anchor_two_sided(home: str, away: str, spread_close_home: float):
+            sc = float(spread_close_home)
+            if not np.isfinite(sc):
+                return
+    
+            obs_mov = _cap_margin(-sc)
+            exp_mov = _cap_margin((_net(home) - _net(away)) + HFA_pts)
+            e = obs_mov - exp_mov
+    
+            lam = max(1e-3, min(1.0, float(market_lambda)))
+            obs_var = (sigma_s / lam) ** 2
+    
+            # split update across both teams' net (fast, stable)
+            v_h = _ov(home) + _dv(home)
+            v_a = _ov(away) + _dv(away)
+            S = v_h + v_a + obs_var
+            if S <= 0:
+                S = 1e-6
+    
+            kh = v_h / S
+            ka = v_a / S
+    
+            _apply_net_shift(home,  kh * e)
+            _apply_net_shift(away, -ka * e)
+    
         history_batch: List[dict] = []
         BATCH_SZ = 50_000
         utc_now = pd.Timestamp.now(tz="UTC")
-
+        last_game_ts = None
+    
+        # league baseline points per team per game (EWMA)
+        mu = None
+        mu_alpha = 0.02
+    
         for chunk in load_games_stream(
             sport, aliases, cutoff=window_start, page_rows=200_000,
             project_table_market=project_table_market, sharp_books=SHARP_BOOKS_DEFAULT
@@ -862,80 +1105,111 @@ def update_power_ratings(
                 h, a = g.Home_Team, g.Away_Team
                 gs_ts = g.Game_Start if isinstance(g.Game_Start, pd.Timestamp) else pd.Timestamp(g.Game_Start, tz="UTC")
                 hs, as_ = float(g.Score_Home_Score), float(g.Score_Away_Score)
-                mov = _cap_margin(hs - as_, mov_cap)  # home MOV
-
-                Rh, Ra = _m(h), _m(a)
-                Vh, Va = _v(h), _v(a)
-
-                # 1) score sensor
-                Rh, Ra, Vh, Va = _do_update(mov, sigma_y**2, Rh, Ra, Vh, Va)
-
-                # 2) market spread sensor (Spread_Close is home spread)
+    
+                # ---- offseason / long-gap reset ----
+                if last_game_ts is not None:
+                    gap = (gs_ts - last_game_ts).days
+                    if gap >= season_gap_days:
+                        for t in set(list(off_m.keys()) + list(def_m.keys())):
+                            off_m[t] *= season_rho
+                            def_m[t] *= season_rho
+                            off_v[t]  = min(400.0, _ov(t) + 60.0)
+                            def_v[t]  = min(400.0, _dv(t) + 60.0)
+                last_game_ts = gs_ts
+    
+                # Update mu (points per team) from this game
+                pts_per_team = 0.5 * (hs + as_)
+                if mu is None:
+                    mu = pts_per_team
+                else:
+                    mu = (1.0 - mu_alpha) * mu + mu_alpha * pts_per_team
+    
+                # ---- downweight late-season blowouts (inflate obs variance) ----
+                mov = _cap_margin(hs - as_)
+                obs_var_pts = sigma_pts ** 2
+                if (abs(mov) >= blowout_mov) and (int(gs_ts.month) >= late_month_start):
+                    obs_var_pts *= blowout_var_mult
+    
+                # ---- optional back-to-back penalty via σ_y (only if rest cols exist later) ----
+                # No-op unless your stream includes these columns (currently it doesn’t).
+                if hasattr(g, "Home_Rest_Days") and hasattr(g, "Away_Rest_Days"):
+                    try:
+                        if float(getattr(g, "Home_Rest_Days")) <= 0 or float(getattr(g, "Away_Rest_Days")) <= 0:
+                            obs_var_pts *= (b2b_sigma_mult ** 2)
+                    except Exception:
+                        pass
+    
+                # HFA split across points sensors
+                hfa_adj_home = 0.5 * HFA_pts
+                hfa_adj_away = -0.5 * HFA_pts
+    
+                # ---- score sensors (points) ----
+                _update_off_def_for_points(h, a, hs, mu, hfa_adj_home, obs_var_pts)
+                _update_off_def_for_points(a, h, as_, mu, hfa_adj_away, obs_var_pts)
+    
+                # ---- market spread sensor ----
                 sc = g.Spread_Close
                 if pd.notna(sc):
-                    # spread is home spread (negative if home favored)
-                    obs_mov_market = -float(sc)  # home -5.5 → expected MOV +5.5
-                    Rh, Ra, Vh, Va = _do_update(obs_mov_market, sigma_s**2, Rh, Ra, Vh, Va)
-
-                # SoS accumulation using opponent rating *before* propagation
+                    if favored_only:
+                        _market_anchor_favored_only(h, a, float(sc))
+                    else:
+                        _market_anchor_two_sided(h, a, float(sc))
+    
+                # ---- SoS accumulation on NET ----
                 gs_ts_utc = gs_ts if gs_ts.tzinfo else gs_ts.tz_localize("UTC")
                 w = _exp_decay_weight(gs_ts_utc, utc_now, sos_hl)
-                sos_num[h] = _safe_get(sos_num, h) + w * _safe_get(r_mean, a, 0.0)
+                sos_num[h] = _safe_get(sos_num, h) + w * float(_net(a))
+                sos_num[a] = _safe_get(sos_num, a) + w * float(_net(h))
                 sos_den[h] = _safe_get(sos_den, h) + w
-                sos_num[a] = _safe_get(sos_num, a) + w * _safe_get(r_mean, h, 0.0)
                 sos_den[a] = _safe_get(sos_den, a) + w
-
-                # propagate
-                Rh_next, Ra_next = phi * Rh, phi * Ra
-                Vh_next, Va_next = (phi ** 2) * Vh + sigma_eta ** 2, (phi ** 2) * Va + sigma_eta ** 2
-
-                r_mean[h], r_var[h] = Rh_next, Vh_next
-                r_mean[a], r_var[a] = Ra_next, Va_next
-
+    
+                # ---- propagate (per component) ----
+                for t in (h, a):
+                    off_m[t] = phi * _om(t)
+                    def_m[t] = phi * _dm(t)
+                    off_v[t] = (phi**2) * _ov(t) + sigma_eta**2
+                    def_v[t] = (phi**2) * _dv(t) + sigma_eta**2
+    
                 ts  = g.Snapshot_TS
                 tag = "backfill" if window_start is None else "incremental"
-                history_batch.append({"Sport": sport, "Team": h, "Rating": 1500.0 + Rh_next,
+    
+                # store NET as your single Rating (keeps downstream unchanged)
+                history_batch.append({"Sport": sport, "Team": h, "Rating": 1500.0 + float(_net(h)),
                                       "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
-                history_batch.append({"Sport": sport, "Team": a, "Rating": 1500.0 + Ra_next,
+                history_batch.append({"Sport": sport, "Team": a, "Rating": 1500.0 + float(_net(a)),
                                       "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
-
+    
                 if len(history_batch) >= BATCH_SZ:
                     bq.load_table_from_dataframe(pd.DataFrame(history_batch), table_history).result()
                     history_batch.clear()
+    
             del chunk
             gc.collect()
-
+    
         if history_batch:
             bq.load_table_from_dataframe(pd.DataFrame(history_batch), table_history).result()
-
-        if not r_mean:
+    
+        teams = sorted(set(list(off_m.keys()) + list(def_m.keys())))
+        if not teams:
             return []
-
-        # ---- SoS correction ----
-        teams = list(r_mean.keys())
-        raw_R = np.array([r_mean[t] for t in teams], dtype=float)
-        sos   = np.array([(_safe_get(sos_num, t) / max(_safe_get(sos_den, t), 1e-9)) for t in teams], dtype=float)
-        sos   = np.where(np.isfinite(sos), sos, np.nan)
-
+    
+        raw_R = np.array([_net(t) for t in teams], dtype=float)
+    
+        # SoS correction on NET (same structure as your prior approach) :contentReference[oaicite:6]{index=6}
+        sos = np.array([(_safe_get(sos_num, t) / max(_safe_get(sos_den, t), 1e-9)) for t in teams], dtype=float)
+        sos = np.where(np.isfinite(sos), sos, np.nan)
+    
         league_mean_R = float(np.nanmean(raw_R)) if np.isfinite(np.nanmean(raw_R)) else 0.0
         sos = np.where(np.isnan(sos), league_mean_R, sos)
-
+    
         adj_R = raw_R + sos_gamma * (league_mean_R - sos)
-
-        USE_ADJUSTED_FOR_OUTPUT = True
-        final_R = adj_R if USE_ADJUSTED_FOR_OUTPUT else raw_R
-
+    
         utc_now = pd.Timestamp.now(tz="UTC")
         return [
-            {
-                "Sport": sport,
-                "Team": t,
-                "Rating": 1500.0 + float(r),
-                "Method": "elo_kalman",
-                "Updated_At": utc_now,
-            }
-            for t, r in zip(teams, final_R)
+            {"Sport": sport, "Team": t, "Rating": 1500.0 + float(r), "Method": "elo_kalman", "Updated_At": utc_now}
+            for t, r in zip(teams, adj_R)
         ]
+
 
     def run_ridge_massey(bq, sport: str, aliases: list[str], cfg: dict):
         """
@@ -1074,6 +1348,14 @@ def update_power_ratings(
 
         # center
         ratings_pts = ratings_pts - ratings_pts.mean()
+        # ---- stronger preseason regression (shrink to 0 early season) ----
+        prior_games = float(cfg.get("preseason_prior_games", 12))
+        # crude game count proxy per team in window:
+        gcounts = (pd.concat([df["home"], df["away"]]).value_counts()).reindex(teams, fill_value=0).to_numpy(float)
+        # shrink factor: n / (n + prior_games)
+        shrink = gcounts / (gcounts + prior_games)
+        # apply teamwise shrink
+        ratings_pts = ratings_pts * shrink
 
         # Market calibration (favorite vs dog)
         df_cal = df[
@@ -1227,8 +1509,9 @@ def update_power_ratings(
                 })
             updated_sports.append(sport)
 
-        elif cfg["model"] == "elo_kalman":
-            cur_rows = run_kalman_elo(bq=bq, sport=sport, aliases=aliases, cfg=cfg, window_start=window_start)
+        
+        elif cfg["model"] in ("elo_kalman", "elo_kalman_offdef"):
+            cur_rows = run_kalman_offdef(bq=bq, sport=sport, aliases=aliases, cfg=cfg, window_start=window_start)
             if cur_rows:
                 current_rows_all.extend(cur_rows)
                 updated_sports.append(sport)
