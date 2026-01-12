@@ -444,149 +444,132 @@ def update_power_ratings(
     """
 
     # ---------- config ----------
-SPORT_CFG = {
-    "MLB": dict(model="poisson", HFA_pts=0.20, mov_cap=None),
+    SPORT_CFG = {
+        "MLB": dict(model="poisson", HFA_pts=0.20, mov_cap=None),
 
-    # --------------------------
-    # 🏈 NFL / NCAAF
-    # --------------------------
-    "NFL": dict(
-        model="elo_kalman_offdef",
-        HFA_pts=2.1,
-        mov_cap=24,
-        phi=0.96,
-        sigma_eta=6.0,        # state drift
-        sigma_pts=12.0,       # points sensor SD (for Off/Def updates)
-        sigma_spread=6.0,     # market spread SD
-        market_lambda=0.35,   # spread sensor strength (0.2–0.5)
-        favored_only_market=True,
-        sos_half_life_days=90,
-        sos_gamma=0.7,
-        season_gap_days=120,  # offseason reset trigger
-        season_rho=0.75,      # keep % of strength across offseason
-        # downweight late blowouts
-        blowout_mov=17,       # if abs(MOV) >= this, treat as blowout
-        late_month_start=11,  # Nov+
-        blowout_var_mult=2.25 # inflate obs var when late blowout
-    ),
+        # --------------------------
+        # 🏈 NFL / NCAAF
+        # --------------------------
+        "NFL": dict(
+            model="elo_kalman_offdef",
+            HFA_pts=2.1,
+            mov_cap=24,
+            phi=0.96,
+            sigma_eta=6.0,
+            sigma_pts=12.0,
+            sigma_spread=6.0,
+            market_lambda=0.35,
+            favored_only_market=True,
+            sos_half_life_days=90,
+            sos_gamma=0.7,
+            season_gap_days=120,
+            season_rho=0.75,
+            blowout_mov=17,
+            late_month_start=11,
+            blowout_var_mult=2.25,
+        ),
 
-    "NCAAF": dict(
-        model="elo_kalman_offdef",
-        HFA_pts=2.6,
-        mov_cap=28,
-        phi=0.96,
-        sigma_eta=7.0,
-        sigma_pts=13.0,
-        sigma_spread=7.0,
-        market_lambda=0.30,
-        favored_only_market=True,
-        sos_half_life_days=90,
-        sos_gamma=0.7,
-        season_gap_days=150,
-        season_rho=0.62,
-        blowout_mov=21,
-        late_month_start=11,
-        blowout_var_mult=2.50
-    ),
+        "NCAAF": dict(
+            model="elo_kalman_offdef",
+            HFA_pts=2.6,
+            mov_cap=28,
+            phi=0.96,
+            sigma_eta=7.0,
+            sigma_pts=13.0,
+            sigma_spread=7.0,
+            market_lambda=0.30,
+            favored_only_market=True,
+            sos_half_life_days=90,
+            sos_gamma=0.7,
+            season_gap_days=150,
+            season_rho=0.62,
+            blowout_mov=21,
+            late_month_start=11,
+            blowout_var_mult=2.50,
+        ),
 
-    # --------------------------
-    # 🏀 NBA / WNBA
-    # --------------------------
-    "NBA": dict(
-        model="elo_kalman_offdef",
-        HFA_pts=2.8,
-        mov_cap=24,            # reduced (28 -> 24)
-        phi=0.97,
-        sigma_eta=7.5,
-        sigma_pts=12.0,
-        sigma_spread=10.0,     # increased market σ (lines move more)
-        market_lambda=0.35,
-        favored_only_market=False,
-        sos_half_life_days=60,
-        sos_gamma=0.6,
-        season_gap_days=120,
-        season_rho=0.82,
-        # blowouts matter less late season, but NBA is noisier; keep mild
-        blowout_mov=22,
-        late_month_start=3,    # Mar+
-        blowout_var_mult=1.75,
-        # back-to-back penalty hook (no-op unless rest cols exist)
-        b2b_sigma_pts_mult=1.20
-    ),
+        # --------------------------
+        # 🏀 NBA / WNBA
+        # --------------------------
+        "NBA": dict(
+            model="elo_kalman_offdef",
+            HFA_pts=2.8,
+            mov_cap=24,
+            phi=0.97,
+            sigma_eta=7.5,
+            sigma_pts=12.0,
+            sigma_spread=10.0,
+            market_lambda=0.35,
+            favored_only_market=False,
+            sos_half_life_days=60,
+            sos_gamma=0.6,
+            season_gap_days=120,
+            season_rho=0.82,
+            blowout_mov=22,
+            late_month_start=3,
+            blowout_var_mult=1.75,
+            b2b_sigma_pts_mult=1.20,
+        ),
 
-    "WNBA": dict(
-        model="elo_kalman_offdef",
-        HFA_pts=2.0,
-        mov_cap=24,            # reduced a touch
-        phi=0.97,
-        sigma_eta=7.0,
-        sigma_pts=11.5,
-        sigma_spread=9.0,      # increased market σ
-        market_lambda=0.35,
-        favored_only_market=False,
-        sos_half_life_days=60,
-        sos_gamma=0.6,
-        season_gap_days=200,
-        season_rho=0.70,
-        blowout_mov=18,
-        late_month_start=7,    # Jul+
-        blowout_var_mult=2.00,
-        b2b_sigma_pts_mult=1.20
-    ),
+        "WNBA": dict(
+            model="elo_kalman_offdef",
+            HFA_pts=2.0,
+            mov_cap=24,
+            phi=0.97,
+            sigma_eta=7.0,
+            sigma_pts=11.5,
+            sigma_spread=9.0,
+            market_lambda=0.35,
+            favored_only_market=False,
+            sos_half_life_days=60,
+            sos_gamma=0.6,
+            season_gap_days=200,
+            season_rho=0.70,
+            blowout_mov=18,
+            late_month_start=7,
+            blowout_var_mult=2.00,
+            b2b_sigma_pts_mult=1.20,
+        ),
 
-    "CFL": dict(
-        model="elo_kalman_offdef",
-        HFA_pts=1.6,
-        mov_cap=30,
-        phi=0.96,
-        sigma_eta=6.5,
-        sigma_pts=13.5,
-        sigma_spread=7.5,
-        market_lambda=0.30,
-        favored_only_market=True,
-        sos_half_life_days=90,
-        sos_gamma=0.7,
-        season_gap_days=180,
-        season_rho=0.65,
-        blowout_mov=20,
-        late_month_start=9,    # Sep+
-        blowout_var_mult=2.10
-    ),
+        "CFL": dict(
+            model="elo_kalman_offdef",
+            HFA_pts=1.6,
+            mov_cap=30,
+            phi=0.96,
+            sigma_eta=6.5,
+            sigma_pts=13.5,
+            sigma_spread=7.5,
+            market_lambda=0.30,
+            favored_only_market=True,
+            sos_half_life_days=90,
+            sos_gamma=0.7,
+            season_gap_days=180,
+            season_rho=0.65,
+            blowout_mov=20,
+            late_month_start=9,
+            blowout_var_mult=2.10,
+        ),
 
-    # --------------------------
-    # 🏀 NCAAB Ridge-Massey
-    # --------------------------
-   
-    "NCAAB": dict(
-        model="ridge_massey",
-    
-        # --- scoring geometry ---
-        HFA_pts=3.0,
-        mov_cap=25,
-    
-        # --- regularization ---
-        ridge_lambda=65.0,          # stronger shrink for 360+ teams
-    
-        # --- time windowing ---
-        window_days=90,             # baseline midseason window
-        phase_aware_window=True,    # auto-adjust early/late season
-    
-        # --- recency weighting ---
-        rm_half_life_days=35.0,     # exponential decay inside window
-    
-        # --- early season stabilization ---
-        preseason_prior_games=18,  # stronger early shrink (12 was too weak)
-    
-        # --- design matrix ---
-        use_hfa_term=True,          # explicit home-court column
-    
-        # --- market calibration ---
-        spread_calib_clip_abs=15.0, # downweight extreme spreads
-        spread_calib_floor_abs=1.0, # avoid divide-by-zero / tiny spreads
-    ),
+        # --------------------------
+        # 🏀 NCAAB Ridge-Massey
+        # --------------------------
+        "NCAAB": dict(
+            model="ridge_massey",
+            HFA_pts=3.0,
+            mov_cap=25,
+            ridge_lambda=65.0,
+            window_days=90,
+            phase_aware_window=True,
+            rm_half_life_days=35.0,
+            preseason_prior_games=18,
+            use_hfa_term=True,
+            spread_calib_clip_abs=15.0,
+            spread_calib_floor_abs=1.0,
+        ),
+    }
 
-}
     BACKFILL_DAYS = 365
+
     PREFERRED_METHOD = {
         "MLB":   "poisson",
         "NFL":   "elo_kalman",
