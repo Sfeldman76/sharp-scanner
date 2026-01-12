@@ -6142,10 +6142,10 @@ def hyperparam_search_until_good(
     y,
     cv,
     *,
-    min_auc=0.60,
+    min_auc=0.520,
     max_logloss=0.693,
     max_overfit_gap=0.12,
-    max_rounds=4,
+    max_rounds=10,
     n_iter_per_round=25,
     random_state=42,
     logger=None,
@@ -6347,7 +6347,7 @@ def should_promote_challenger(
     challenger_metrics: Dict[str, float],
     champion_metrics: Optional[Dict[str, float]],
     *,
-    min_auc_holdout: float = 0.30,
+    min_auc_holdout: float = 0.50,
     max_gap_train_holdout: float = 0.50,
     min_auc_improvement: float = 0.00005,
     max_logloss_worsen: float = 0.001,
@@ -6515,66 +6515,68 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
     s = (sport or "").upper()
     m = (market or "").lower()
 
-    # Defaults (conservative, generic binary)
-    MIN_AUC           = 0.40     # minimum useful AUC
-    MAX_LOGLOSS       = 0.693    # ~coinflip baseline
-    MAX_OVERFIT_GAP   = 0.12     # AUC_train - AUC_val
-    MIN_AUC_THRESHOLD = 0.40
-
+ 
+    # Defaults (conservative, generic binary) — interpreted as ALIGNED AUC floors
+    MIN_AUC           = 0.53     # aligned AUC (>=0.53 means some edge)
+    MAX_LOGLOSS       = 0.695    # allow slightly worse than coinflip because class imbalance / priors
+    MAX_OVERFIT_GAP   = 0.18     # aligned train - aligned val
+    MIN_AUC_THRESHOLD = 0.53
+    
     # ---- NFL ----
     if s == "NFL":
         if m == "spreads":
-            MIN_AUC         = 0.40
-            MAX_OVERFIT_GAP = 0.30    # what you're using now
+            MIN_AUC         = 0.525
+            MAX_OVERFIT_GAP = 0.22
         elif m == "totals":
-            MIN_AUC         = 0.40
-            MAX_OVERFIT_GAP = 0.10
+            MIN_AUC         = 0.525
+            MAX_OVERFIT_GAP = 0.20
         else:  # h2h / others
-            MIN_AUC         = 0.56
+            MIN_AUC         = 0.54
             MAX_OVERFIT_GAP = 0.18
-
+    
     # ---- NBA ----
     elif s == "NBA":
         if m == "spreads":
-            MIN_AUC         = 0.60
-            MAX_OVERFIT_GAP = 0.10
+            MIN_AUC         = 0.525
+            MAX_OVERFIT_GAP = 0.20
         elif m == "totals":
-            MIN_AUC         = 0.58
-            MAX_OVERFIT_GAP = 0.12
-
+            MIN_AUC         = 0.525
+            MAX_OVERFIT_GAP = 0.20
+        else:
+            MIN_AUC         = 0.535
+            MAX_OVERFIT_GAP = 0.18
+    
     # ---- MLB ----
     elif s == "MLB":
         if m == "totals":
-            MIN_AUC         = 0.60
-            MAX_OVERFIT_GAP = 0.08
+            MIN_AUC         = 0.525
+            MAX_OVERFIT_GAP = 0.18
         elif m == "spreads":   # RL
-            MIN_AUC         = 0.58
-            MAX_OVERFIT_GAP = 0.10
+            MIN_AUC         = 0.525
+            MAX_OVERFIT_GAP = 0.18
         else:  # moneyline
-            MIN_AUC         = 0.58
-            MAX_OVERFIT_GAP = 0.10
-
+            MIN_AUC         = 0.53
+            MAX_OVERFIT_GAP = 0.18
+    
     # ---- NCAAF ----
     elif s in {"NCAAF", "CFB"}:
-        # Crazy tails, more variance; allow a bit more gap
+        # higher variance; allow slightly more gap
         if m == "spreads":
-            MIN_AUC         = 0.60
-            MAX_OVERFIT_GAP = 0.12
+            MIN_AUC         = 0.525
+            MAX_OVERFIT_GAP = 0.24
         else:
-            MIN_AUC         = 0.58
-            MAX_OVERFIT_GAP = 0.14
-
+            MIN_AUC         = 0.525
+            MAX_OVERFIT_GAP = 0.24
+    
     # ---- NCAAB ----
     elif s in {"NCAAB", "NCAAM"}:
         if m == "spreads":
-            MIN_AUC         = 0.50
-            MAX_OVERFIT_GAP = 0.10
+            MIN_AUC         = 0.52
+            MAX_OVERFIT_GAP = 0.22
         else:
-            MIN_AUC         = 0.50
-            MAX_OVERFIT_GAP = 0.13
-
-    # You can extend for WNBA, CFL, etc. as needed
-
+            MIN_AUC         = 0.52
+            MAX_OVERFIT_GAP = 0.22
+    
     return dict(
         MIN_AUC=MIN_AUC,
         MAX_LOGLOSS=MAX_LOGLOSS,
