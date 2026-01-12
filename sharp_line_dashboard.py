@@ -11346,6 +11346,7 @@ def train_sharp_model_from_bq(
             return models["iso_blend"].predict(p_blend)
 
         # === Save ensemble (choose one or both) ===
+       
         trained_models[market] = {
             "model_logloss":        model_logloss,
             "model_auc":            model_auc,
@@ -11356,23 +11357,26 @@ def train_sharp_model_from_bq(
             "book_reliability_map": book_reliability_map,
             "feature_cols":         feature_cols,
         }
-
+        
         save_info = save_model_to_gcs(
-            model={
+            model={  # ✅ THIS IS THE IMPORTANT PART
                 "model_logloss": model_logloss,
                 "model_auc":     model_auc,
                 "best_w":        float(best_w),
                 "feature_cols":  feature_cols,
-                "flip_flag":     bool(flip_flag),
+                "flip_flag":     bool(flip_flag),   # ✅ persist polarity
+                # optional but useful:
+                # "trained_at": datetime.utcnow().isoformat() + "Z",
+                # "sport": sport,
+                # "market": market,
             },
-            calibrator=iso_blend,
+            calibrator=iso_blend,                 # saved as payload["iso_blend"] by your saver
             sport=sport,
             market=market,
             bucket_name=bucket_name,
             team_feature_map=team_feature_map,
             book_reliability_map=book_reliability_map,
         )
-
         if return_artifacts and isinstance(save_info, dict):
             artifact_model_path = f"gs://{save_info.get('bucket', bucket_name)}/{save_info.get('path')}"
 
@@ -12311,17 +12315,32 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     if not isinstance(data, dict):
         logging.error(f"Unexpected payload type in {fname}: {type(data)}")
         return None
-
+    
+    iso_blend = data.get("iso_blend") or (data.get("calibrator", {}) or {}).get("iso_blend")
+    
     bundle = {
         "model_logloss": data.get("model_logloss"),
         "model_auc":     data.get("model_auc"),
-        "iso_blend":     data.get("iso_blend"),
         "best_w":        float(data.get("best_w", 1.0)),
         "feature_cols":  data.get("feature_cols") or [],
+    
+        # ✅ Make it match predict_blended() “NEW path”
+        "calibrator": {"iso_blend": iso_blend},
+    
+        # ✅ Persist global polarity lock so P(win) is always correct
+        "flip_flag": bool(
+            data.get("flip_flag", False)
+            or data.get("global_flip", False)
+            or (data.get("polarity", +1) == -1)
+        ),
+    
+        # keep these (your dashboard uses them)
         "team_feature_map":     data.get("team_feature_map") if isinstance(data.get("team_feature_map"), pd.DataFrame) else pd.DataFrame(),
         "book_reliability_map": data.get("book_reliability_map") if isinstance(data.get("book_reliability_map"), pd.DataFrame) else pd.DataFrame(),
     }
+    
     return bundle
+   
 
 
 
@@ -12804,7 +12823,11 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             base_prob = _safe_series(df_summary_base, 'Model Prob', default=np.nan)
             
             # Prefer sharp_avg when available; otherwise keep existing/base
-            df_summary_base['Model Prob'] = sharp_avg.combine_first(base_prob)
+            # ✅ Keep per-row probability as the primary “Model Prob”
+            df_summary_base['Model Prob'] = base_prob
+            
+            # ✅ Keep sharp-average as its own column (use this for spark/trend if desired)
+            df_summary_base['Model Prob (Sharp Avg)'] = sharp_avg
             
             # Tiering stays the same
             df_summary_base['Confidence Tier'] = df_summary_base['Model Prob'].apply(tier_from_prob)
