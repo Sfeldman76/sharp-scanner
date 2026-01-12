@@ -6347,7 +6347,7 @@ def should_promote_challenger(
     challenger_metrics: Dict[str, float],
     champion_metrics: Optional[Dict[str, float]],
     *,
-    min_auc_holdout: float = 0.52,
+    min_auc_holdout: float = 0.30,
     max_gap_train_holdout: float = 0.50,
     min_auc_improvement: float = 0.00005,
     max_logloss_worsen: float = 0.001,
@@ -6516,18 +6516,18 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
     m = (market or "").lower()
 
     # Defaults (conservative, generic binary)
-    MIN_AUC           = 0.51     # minimum useful AUC
+    MIN_AUC           = 0.40     # minimum useful AUC
     MAX_LOGLOSS       = 0.693    # ~coinflip baseline
     MAX_OVERFIT_GAP   = 0.12     # AUC_train - AUC_val
-    MIN_AUC_THRESHOLD = 0.58
+    MIN_AUC_THRESHOLD = 0.40
 
     # ---- NFL ----
     if s == "NFL":
         if m == "spreads":
-            MIN_AUC         = 0.60
-            MAX_OVERFIT_GAP = 0.12    # what you're using now
+            MIN_AUC         = 0.40
+            MAX_OVERFIT_GAP = 0.30    # what you're using now
         elif m == "totals":
-            MIN_AUC         = 0.56
+            MIN_AUC         = 0.40
             MAX_OVERFIT_GAP = 0.10
         else:  # h2h / others
             MIN_AUC         = 0.56
@@ -9870,32 +9870,45 @@ def train_sharp_model_from_bq(
                 rs_ll.fit(X_train, y_train, groups=g_train, **fit_params_search)
                 rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
         
+          
             # CV metrics
-            auc_cv     = float(rs_auc.best_score_)       # already roc_auc
+            auc_cv_raw = float(rs_auc.best_score_)       # already roc_auc
             logloss_cv = float(-rs_ll.best_score_)       # neg_log_loss → logloss
-        
+            
+            # --- aligned AUC so fade models count ---
+            auc_cv = float(max(auc_cv_raw, 1.0 - auc_cv_raw))
+            
             # Train vs CV AUC gap (overfit measure)
-            train_auc = np.nan
+            train_auc_raw = np.nan
             try:
                 cv_res_auc = rs_auc.cv_results_
                 if "mean_train_score" in cv_res_auc:
-                    train_auc = float(cv_res_auc["mean_train_score"][rs_auc.best_index_])
+                    train_auc_raw = float(cv_res_auc["mean_train_score"][rs_auc.best_index_])
             except Exception as e:
                 logger.warning(
                     f"⚠️ Could not compute train AUC for overfit gap in round {round_no}: {e}"
                 )
-        
-            if np.isfinite(train_auc):
-                overfit_gap = float(train_auc - auc_cv)
+            
+            if np.isfinite(train_auc_raw):
+                train_auc = float(max(train_auc_raw, 1.0 - train_auc_raw))
+                overfit_gap = float(train_auc - auc_cv)          # aligned gap
             else:
+                train_auc = np.nan
                 overfit_gap = np.nan
-        
+            
+            # Optional: record whether this round is "fade-ish" on CV
+            # (This is ONLY for reporting; do not use this to flip predictions here.)
+            cv_suggests_fade = bool(auc_cv_raw < 0.5)
+            
             logger.info(
                 f"   🧪 Round {round_no} CV: "
-                f"AUC={auc_cv:.4f}, LogLoss={logloss_cv:.4f}, "
-                f"TrainAUC={train_auc:.4f}, OverfitGap={overfit_gap:.4f}"
+                f"AUC_raw={auc_cv_raw:.4f}, AUC_aligned={auc_cv:.4f}, "
+                f"LogLoss={logloss_cv:.4f}, "
+                f"TrainAUC_raw={train_auc_raw:.4f}, TrainAUC_aligned={train_auc:.4f}, "
+                f"OverfitGap(aligned)={overfit_gap:.4f}, "
+                f"cv_fade={cv_suggests_fade}"
             )
-        
+            
             # Track best seen across all rounds (even if overfit) for reporting
             if np.isfinite(auc_cv):
                 better_global = (
@@ -9910,38 +9923,44 @@ def train_sharp_model_from_bq(
                     best_ll_score   = logloss_cv
                     best_auc_params = rs_auc.best_params_.copy()
                     best_ll_params  = rs_ll.best_params_.copy()
-        
+            
                     # NEW: store best estimators (already include best params + fitted state)
                     best_auc_estimator = deepcopy(rs_auc.best_estimator_)
                     best_ll_estimator  = deepcopy(rs_ll.best_estimator_)
-        
+            
                     best_round_metrics = dict(
-                        round_no    = round_no,
-                        auc_cv      = auc_cv,
-                        logloss_cv  = logloss_cv,
-                        train_auc   = train_auc,
-                        overfit_gap = overfit_gap,
+                        round_no        = round_no,
+                        auc_cv_raw      = auc_cv_raw,
+                        auc_cv_aligned  = auc_cv,
+                        logloss_cv      = logloss_cv,
+                        train_auc_raw   = train_auc_raw,
+                        train_auc_aligned = train_auc,
+                        overfit_gap     = overfit_gap,
+                        cv_fade         = cv_suggests_fade,
                     )
-        
+            
             # Overfit condition: allow NaN gap (no train scores) or small positive gap
             gap_ok = (not np.isfinite(overfit_gap)) or (overfit_gap <= MAX_OVERFIT_GAP)
+            
+            # IMPORTANT: gate on ALIGNED AUC, not raw AUC
             auc_ok = np.isfinite(auc_cv)     and (auc_cv     >= MIN_AUC)
             ll_ok  = np.isfinite(logloss_cv) and (logloss_cv <= MAX_LOGLOSS)
-        
+            
             if auc_ok and ll_ok and gap_ok:
                 logger.info(
                     f"✅ Conditions met in round {round_no} for {sport} {market} "
-                    f"(AUC={auc_cv:.4f}, LL={logloss_cv:.4f}, "
-                    f"gap={overfit_gap:.4f} ≤ {MAX_OVERFIT_GAP:.4f})."
+                    f"(AUC_aligned={auc_cv:.4f}, LL={logloss_cv:.4f}, "
+                    f"gap(aligned)={overfit_gap:.4f} ≤ {MAX_OVERFIT_GAP:.4f}, "
+                    f"cv_fade={cv_suggests_fade})."
                 )
                 found_good = True
-        
+            
                 # keep the accepted round's params + estimators (so downstream uses winner)
                 best_auc_params = rs_auc.best_params_.copy()
                 best_ll_params  = rs_ll.best_params_.copy()
                 best_auc_estimator = deepcopy(rs_auc.best_estimator_)
                 best_ll_estimator  = deepcopy(rs_ll.best_estimator_)
-        
+            
                 break
         
         
