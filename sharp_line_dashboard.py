@@ -11363,6 +11363,7 @@ def train_sharp_model_from_bq(
                 "model_auc":     model_auc,
                 "best_w":        float(best_w),
                 "feature_cols":  feature_cols,
+                "flip_flag":     bool(flip_flag),
             },
             calibrator=iso_blend,
             sport=sport,
