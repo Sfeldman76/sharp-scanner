@@ -9662,6 +9662,7 @@ def train_sharp_model_from_bq(
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
             sport=sport, X_rows=X_train.shape[0], n_jobs=n_jobs, features=feature_cols
         )
+        base_kwargs.pop("predictor", None)
         base_kwargs["base_score"] = float(np.clip(pos_rate, 1e-4, 1 - 1e-4))
         
         # -------------------- FAST SEARCH → MODERATE/DEEP REFIT ---------------------
