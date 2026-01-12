@@ -3845,6 +3845,8 @@ def _suffix_snapshot(df, tag):
 def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
     """
     Return calibrated/blended probs in [eps, 1-eps] or None.
+    Applies bundle["flip_flag"] (global polarity lock) BEFORE calibration,
+    so the returned value is always "P(win)" for the positive class.
     """
 
     def _predict_one(m, cal, X_):
@@ -3889,6 +3891,24 @@ def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
 
         return None
 
+    def _apply_flip_if_needed(p_vec):
+        """Apply global flip_flag to a probability vector."""
+        if p_vec is None:
+            return None
+        p_vec = np.asarray(p_vec, dtype=float).ravel()
+        if bool(flip_flag):
+            p_vec = 1.0 - p_vec
+        return p_vec
+
+    # --- determine global flip flag (supports a couple legacy names) ---
+    flip_flag = False
+    if isinstance(bundle, dict):
+        flip_flag = bool(
+            bundle.get("flip_flag", False)
+            or bundle.get("global_flip", False)
+            or (bundle.get("polarity", +1) == -1)
+        )
+
     # Tuple/list bundle
     if isinstance(bundle, (tuple, list)) and len(bundle) >= 1 and model is None and iso is None:
         model = bundle[0]
@@ -3912,11 +3932,17 @@ def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
                     return None
                 p_raw = _predict_one(m_single, None, X)
             else:
-                p_raw = (w * pL + (1.0 - w) * pA) if (pL is not None and pA is not None and len(pL) == len(pA)) else (pL if pL is not None else pA)
+                if pL is not None and pA is not None and len(pL) == len(pA):
+                    p_raw = (w * pL + (1.0 - w) * pA)
+                else:
+                    p_raw = pL if pL is not None else pA
 
             if p_raw is None:
                 return None
+
+            # clip → flip (BEFORE iso) → iso
             p_raw = np.clip(np.asarray(p_raw, dtype=float).ravel(), eps, 1 - eps)
+            p_raw = _apply_flip_if_needed(p_raw)  # ✅ GLOBAL POLARITY LOCK (P(win))
 
             iso = calib_bundle["iso_blend"]
             if hasattr(iso, "predict"):
@@ -3924,8 +3950,8 @@ def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
             elif hasattr(iso, "transform"):
                 p_cal = iso.transform(p_raw)
             else:
-                # last-resort fallback
                 p_cal = p_raw
+
             p_cal = np.asarray(p_cal, dtype=float).ravel()
             p_cal = np.nan_to_num(p_cal, nan=0.5, posinf=1 - eps, neginf=eps)
             return np.clip(p_cal, eps, 1 - eps)
@@ -3940,20 +3966,34 @@ def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
             pA = _predict_one(mA, cA, X) if (mA is not None or cA is not None) else None
 
             if pL is not None and pA is not None and len(pL) == len(pA):
-                return np.clip((w * pL + (1.0 - w) * pA).ravel(), eps, 1 - eps)
+                p = (w * np.asarray(pL, float) + (1.0 - w) * np.asarray(pA, float)).ravel()
+                p = np.clip(p, eps, 1 - eps)
+                p = _apply_flip_if_needed(p)  # ✅ flip after blend (already calibrated heads)
+                return np.clip(p, eps, 1 - eps)
+
             if pL is not None:
-                return np.clip(np.asarray(pL, dtype=float).ravel(), eps, 1 - eps)
+                p = np.clip(np.asarray(pL, dtype=float).ravel(), eps, 1 - eps)
+                p = _apply_flip_if_needed(p)
+                return np.clip(p, eps, 1 - eps)
+
             if pA is not None:
-                return np.clip(np.asarray(pA, dtype=float).ravel(), eps, 1 - eps)
+                p = np.clip(np.asarray(pA, dtype=float).ravel(), eps, 1 - eps)
+                p = _apply_flip_if_needed(p)
+                return np.clip(p, eps, 1 - eps)
 
         # Single pair: {"model": est, "calibrator": cal or {"iso_blend": cal}}
         if ("model" in bundle) or ("calibrator" in bundle):
             m = bundle.get("model")
             c = bundle.get("calibrator")
+
+            # single model + iso_blend dict
             if isinstance(c, dict) and "iso_blend" in c:
                 p_raw = _predict_one(m, None, X)
-                if p_raw is None: return None
+                if p_raw is None:
+                    return None
                 p_raw = np.clip(np.asarray(p_raw, dtype=float).ravel(), eps, 1 - eps)
+                p_raw = _apply_flip_if_needed(p_raw)  # ✅ flip BEFORE iso
+
                 iso = c["iso_blend"]
                 if hasattr(iso, "predict"):
                     p_cal = iso.predict(p_raw)
@@ -3961,16 +4001,26 @@ def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
                     p_cal = iso.transform(p_raw)
                 else:
                     p_cal = p_raw
+
                 p_cal = np.asarray(p_cal, dtype=float).ravel()
                 p_cal = np.nan_to_num(p_cal, nan=0.5, posinf=1 - eps, neginf=eps)
                 return np.clip(p_cal, eps, 1 - eps)
-            else:
-                p = _predict_one(m, c, X)
-                return np.clip(np.asarray(p, dtype=float).ravel(), eps, 1 - eps) if p is not None else None
+
+            # generic calibrator
+            p = _predict_one(m, c, X)
+            if p is None:
+                return None
+            p = np.clip(np.asarray(p, dtype=float).ravel(), eps, 1 - eps)
+            p = _apply_flip_if_needed(p)  # ✅ flip after per-model calibration
+            return np.clip(p, eps, 1 - eps)
 
     # Legacy args path
     p = _predict_one(model, iso, X)
-    return np.clip(np.asarray(p, dtype=float).ravel(), eps, 1 - eps) if p is not None else None
+    if p is None:
+        return None
+    p = np.clip(np.asarray(p, dtype=float).ravel(), eps, 1 - eps)
+    # Legacy path has no bundle dict, so no flip applied here
+    return np.clip(p, eps, 1 - eps)
 
 
 def _unwrap_pipeline(est):
@@ -9078,35 +9128,49 @@ def load_model_from_gcs(
     # NEW: payload["calibrator"] = {"iso_blend": <IsotonicRegression>}
     # OLD: payload["calibrator_logloss"], payload["calibrator_auc"] (IsoWrapper, etc.)
     calibrator_bundle = payload.get("calibrator")
-    if isinstance(calibrator_bundle, dict) and ("iso_blend" in calibrator_bundle):
-        calibrator = {"iso_blend": calibrator_bundle["iso_blend"]}
-    else:
-        # fall back to old keys (may be None)
-        calibrator = {
-            "cal_logloss": payload.get("calibrator_logloss"),
-            "cal_auc":     payload.get("calibrator_auc"),
-        }
-        # if both None, keep empty dict
-        if calibrator["cal_logloss"] is None and calibrator["cal_auc"] is None:
-            calibrator = {}
-
-    # Misc
-    feature_cols = payload.get("feature_cols") or payload.get("features") or []
-    team_map = payload.get("team_feature_map")
-    book_map = payload.get("book_reliability_map")
-
+    # ---- inside utils.py: load_model_from_gcs(...) ----
+    # after:
+    #   model_logloss = payload.get("model_logloss") or payload.get("model")
+    #   model_auc     = payload.get("model_auc")
+    
+    iso_blend = (
+        payload.get("iso_blend")
+        or (payload.get("calibrator", {}) or {}).get("iso_blend")
+        or (payload.get("calibrator", {}) or {}).get("iso")  # optional legacy
+    )
+    
+    # flip flag: support a few legacy names
+    flip_flag = bool(
+        payload.get("flip_flag", False)
+        or payload.get("global_flip", False)
+        or (payload.get("polarity", +1) == -1)
+    )
+    
+    best_w = float(payload.get("best_w", 1.0))
+    feature_cols = payload.get("feature_cols") or []
+    team_feature_map = payload.get("team_feature_map")
+    book_reliability_map = payload.get("book_reliability_map")
+    
     bundle = {
-        "model_logloss":        model_logloss,
-        "model_auc":            model_auc,
-        "calibrator":           calibrator,                 # unified slot
-        "best_w":               float(payload.get("best_w", 0.5)),
-        "feature_cols":         list(feature_cols),
-        "team_feature_map":     team_map if isinstance(team_map, pd.DataFrame) else pd.DataFrame(),
-        "book_reliability_map": book_map if isinstance(book_map, pd.DataFrame) else pd.DataFrame(),
-        "meta":                 payload.get("meta") or {},
-        "_blob_name":           blob.name,
+        "model_logloss": model_logloss,
+        "model_auc": model_auc,
+        "best_w": best_w,
+        "feature_cols": feature_cols,
+    
+        # ✅ this is what predict_bundle_proba() expects
+        "calibrator": {"iso_blend": iso_blend},
+    
+        # ✅ carry flip through to inference
+        "flip_flag": flip_flag,
+    
+        # (optional) keep convenience copies too
+        "iso_blend": iso_blend,
+    
+        "team_feature_map": team_feature_map if isinstance(team_feature_map, pd.DataFrame) else pd.DataFrame(),
+        "book_reliability_map": book_reliability_map if isinstance(book_reliability_map, pd.DataFrame) else pd.DataFrame(),
     }
     return bundle
+
 
 
 
