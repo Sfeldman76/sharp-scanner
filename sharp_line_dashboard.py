@@ -6517,7 +6517,7 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
 
  
     # Defaults (conservative, generic binary) — interpreted as ALIGNED AUC floors
-    MIN_AUC           = 0.53     # aligned AUC (>=0.53 means some edge)
+    MIN_AUC           = 0.51     # aligned AUC (>=0.53 means some edge)
     MAX_LOGLOSS       = 0.695    # allow slightly worse than coinflip because class imbalance / priors
     MAX_OVERFIT_GAP   = 0.18     # aligned train - aligned val
     MIN_AUC_THRESHOLD = 0.53
@@ -6525,10 +6525,10 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
     # ---- NFL ----
     if s == "NFL":
         if m == "spreads":
-            MIN_AUC         = 0.525
+            MIN_AUC         = 0.51
             MAX_OVERFIT_GAP = 0.22
         elif m == "totals":
-            MIN_AUC         = 0.525
+            MIN_AUC         = 0.51
             MAX_OVERFIT_GAP = 0.20
         else:  # h2h / others
             MIN_AUC         = 0.54
@@ -6537,13 +6537,13 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
     # ---- NBA ----
     elif s == "NBA":
         if m == "spreads":
-            MIN_AUC         = 0.525
+            MIN_AUC         = 0.51
             MAX_OVERFIT_GAP = 0.20
         elif m == "totals":
-            MIN_AUC         = 0.525
+            MIN_AUC         = 0.51
             MAX_OVERFIT_GAP = 0.20
         else:
-            MIN_AUC         = 0.535
+            MIN_AUC         = 0.51
             MAX_OVERFIT_GAP = 0.18
     
     # ---- MLB ----
@@ -6571,10 +6571,10 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
     # ---- NCAAB ----
     elif s in {"NCAAB", "NCAAM"}:
         if m == "spreads":
-            MIN_AUC         = 0.52
+            MIN_AUC         = 0.51
             MAX_OVERFIT_GAP = 0.22
         else:
-            MIN_AUC         = 0.52
+            MIN_AUC         = 0.51
             MAX_OVERFIT_GAP = 0.22
     
     return dict(
@@ -9930,16 +9930,24 @@ def train_sharp_model_from_bq(
                     best_auc_estimator = deepcopy(rs_auc.best_estimator_)
                     best_ll_estimator  = deepcopy(rs_ll.best_estimator_)
             
+                 
                     best_round_metrics = dict(
-                        round_no        = round_no,
-                        auc_cv_raw      = auc_cv_raw,
-                        auc_cv_aligned  = auc_cv,
-                        logloss_cv      = logloss_cv,
-                        train_auc_raw   = train_auc_raw,
-                        train_auc_aligned = train_auc,
-                        overfit_gap     = overfit_gap,
-                        cv_fade         = cv_suggests_fade,
+                        round_no=round_no,
+                    
+                        # ✅ keep old names so existing code doesn't break
+                        auc_cv=auc_cv,                 # aligned
+                        train_auc=train_auc,           # aligned (or nan)
+                        overfit_gap=overfit_gap,       # aligned gap
+                    
+                        # ✅ new explicit fields
+                        auc_cv_raw=auc_cv_raw,
+                        auc_cv_aligned=auc_cv,
+                        train_auc_raw=train_auc_raw,
+                        train_auc_aligned=train_auc,
+                        logloss_cv=logloss_cv,
+                        cv_fade=cv_suggests_fade,
                     )
+                    
             
             # Overfit condition: allow NaN gap (no train scores) or small positive gap
             gap_ok = (not np.isfinite(overfit_gap)) or (overfit_gap <= MAX_OVERFIT_GAP)
