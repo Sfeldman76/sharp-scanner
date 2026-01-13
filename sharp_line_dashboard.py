@@ -7430,17 +7430,18 @@ def train_sharp_model_from_bq(
     
         # --- Canonical side filter ---
         # === Canonical side filtering ONLY (training subset) ===
-        if market == "totals":
-            df_market = df_market[df_market["Outcome_Norm"] == "over"]
+        if mkt == "totals":
+            # keep Over only (fine for totals modeling)
+            df_market = df_market[df_market["Outcome"].astype(str).str.lower().str.strip() == "over"]
         
-        elif market == "spreads":
-            # ✅ keep BOTH sides (no Value sign filter)
-            df_market = df_market[pd.to_numeric(df_market["Value"], errors="coerce").notna()]
+        elif mkt == "spreads":
+            # ✅ keep BOTH favorite & dog rows for training
+            df_market["Value"] = pd.to_numeric(df_market["Value"], errors="coerce")
+            df_market = df_market[df_market["Value"].notna()]
         
-        elif market == "h2h":
-            # ✅ no Value<0 filtering for h2h
+        elif mkt == "h2h":
+            # h2h usually doesn't have spread Value semantics; do not filter by Value<0
             df_market = df_market.copy()
-
     
         if df_market.empty:
             pb.progress(min(100, max(0, pct)))
@@ -7862,10 +7863,18 @@ def train_sharp_model_from_bq(
         df_market["Value"]  = pd.to_numeric(df_market.get("Value", np.nan), errors="coerce")
         
         # === Canonical side filtering ONLY (training subset) ===
+        # === Canonical side filtering ONLY (training subset) ===
         if market == "totals":
             df_market = df_market[df_market["Outcome_Norm"] == "over"]
-        elif market in ("spreads", "h2h"):
-            df_market = df_market[df_market["Value"] < 0]
+        
+        elif market == "spreads":
+            # ✅ keep BOTH sides (no Value sign filter)
+            df_market = df_market[pd.to_numeric(df_market["Value"], errors="coerce").notna()]
+        
+        elif market == "h2h":
+            # ✅ no Value<0 filtering for h2h
+            df_market = df_market.copy()
+
         
         # === Labels ===
         df_market = df_market[df_market["SHARP_HIT_BOOL"].isin([0, 1])]
