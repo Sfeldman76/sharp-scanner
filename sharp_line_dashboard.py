@@ -2985,6 +2985,7 @@ def _auto_select_k_by_auc(
     enable_feature_flips=True,
     max_feature_flips=20,
     orient_passes=1,
+    force_full_scan=True,   # ✅ NEW: always go to max_k
 ):
     if max_k is None:
         max_k = len(ordered_features)
@@ -3036,8 +3037,11 @@ def _auto_select_k_by_auc(
 
         if best_res is not None:
             if np.isfinite(ll_k) and ll_k > best_ll + float(max_ll_increase):
+                # don't update best, but still continue scanning
+                no_improve += 1
                 continue
             if np.isfinite(br_k) and br_k > best_brier + float(max_brier_increase):
+                no_improve += 1
                 continue
 
         improved = (auc_k > best_auc + float(min_improve))
@@ -3053,7 +3057,8 @@ def _auto_select_k_by_auc(
         else:
             no_improve += 1
 
-        if no_improve >= patience:
+        # ✅ only early stop if NOT forcing full scan
+        if (not force_full_scan) and (no_improve >= patience):
             if verbose:
                 log_func(
                     f"[AUTO-FEAT] Early stop at k={k} (best_k={best_k}, best_auc={best_auc:.6f})"
@@ -3065,7 +3070,8 @@ def _auto_select_k_by_auc(
             f"[AUTO-FEAT] Final best_k={best_k}, best_auc={best_auc:.6f}, tried up to k={history[-1][0]}"
         )
 
-    return best_k, best_auc, history
+    return best_k, best_res, history  # ✅ also fix your return
+
 
 
 
