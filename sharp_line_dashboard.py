@@ -7429,11 +7429,18 @@ def train_sharp_model_from_bq(
       
     
         # --- Canonical side filter ---
-        if mkt == "totals":
-            df_market = df_market[df_market["Outcome"].astype(str).str.lower().str.strip() == "over"]
-        else:
-            df_market["Value"] = pd.to_numeric(df_market["Value"], errors="coerce")
-            df_market = df_market[df_market["Value"] < 0]
+        # === Canonical side filtering ONLY (training subset) ===
+        if market == "totals":
+            df_market = df_market[df_market["Outcome_Norm"] == "over"]
+        
+        elif market == "spreads":
+            # ✅ keep BOTH sides (no Value sign filter)
+            df_market = df_market[pd.to_numeric(df_market["Value"], errors="coerce").notna()]
+        
+        elif market == "h2h":
+            # ✅ no Value<0 filtering for h2h
+            df_market = df_market.copy()
+
     
         if df_market.empty:
             pb.progress(min(100, max(0, pct)))
