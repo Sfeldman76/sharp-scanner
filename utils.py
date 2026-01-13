@@ -565,6 +565,10 @@ def update_power_ratings(
             use_hfa_term=True,
             spread_calib_clip_abs=15.0,
             spread_calib_floor_abs=1.0,
+            sos_gamma=0.25,         # small! prevents double-count
+            sos_use_recency=True,   # use same half-life weights
+            sos_early_only=False,   # set True if you want only Nov/Dec
+
         ),
     }
 
@@ -1483,6 +1487,53 @@ def update_power_ratings(
         ts = df["gs"].max()
         if isinstance(ts, pd.Timestamp) and ts.tzinfo is None:
             ts = ts.tz_localize("UTC")
+
+        # ---------------- SoS correction (light touch, avoid double-count) ----------------
+        sos_gamma = float(cfg.get("sos_gamma", 0.25))
+        sos_use_recency = bool(cfg.get("sos_use_recency", True))
+        sos_early_only = bool(cfg.get("sos_early_only", False))
+        
+        if sos_gamma != 0.0:
+            # Optional: apply only early season
+            if (not sos_early_only) or (pd.Timestamp.utcnow().month in (11, 12)):
+                # Map current ratings
+                rating_map = {t: float(r) for t, r in zip(teams, ratings_pts)}
+        
+                # opponent sums
+                sos_num = pd.Series(0.0, index=teams)
+                sos_den = pd.Series(0.0, index=teams)
+        
+                # weights per game (reuse your recency weights if desired)
+                if sos_use_recency and "gs" in df.columns:
+                    now_ts = df["gs"].max()
+                    age_days = (now_ts - df["gs"]).dt.total_seconds().to_numpy(float) / 86400.0
+                    w_sos = np.exp(-age_days / max(float(cfg.get("rm_half_life_days", 35.0)), 1.0)).astype(float)
+                else:
+                    w_sos = np.ones(len(df), dtype=float)
+        
+                homes = df["home"].to_numpy()
+                aways = df["away"].to_numpy()
+        
+                for h, a, w in zip(homes, aways, w_sos):
+                    ra = rating_map.get(a, 0.0)
+                    rh = rating_map.get(h, 0.0)
+        
+                    sos_num[h] += w * ra
+                    sos_den[h] += w
+        
+                    sos_num[a] += w * rh
+                    sos_den[a] += w
+        
+                sos = (sos_num / sos_den.replace(0.0, np.nan)).fillna(0.0).to_numpy(float)
+        
+                league_mean = float(np.mean(ratings_pts))
+                # If sos below mean => weak schedule => penalize
+                ratings_pts = ratings_pts + sos_gamma * (league_mean - sos)
+        
+                # re-center (keep mean 0)
+                ratings_pts = ratings_pts - float(np.mean(ratings_pts))
+
+        
     
         hist_rows = [
             {
