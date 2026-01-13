@@ -7459,6 +7459,7 @@ def train_sharp_model_from_bq(
         df_team_base["Game_Start"] = pd.to_datetime(df_team_base["Game_Start"], errors="coerce", utc=True)
         
         # attach per-game LOO + streaks (time-safe)
+        # attach per-game LOO + streaks (time-safe)
         df_team_base = df_team_base.merge(
             df_bt_loostats,
             on=["Sport","Market","Game_Key","Team"],
@@ -7466,12 +7467,14 @@ def train_sharp_model_from_bq(
             validate="1:1",
         )
         
+        # ✅ DO NOT join streaks on Game_Start (timestamp mismatches cause total NaNs)
         df_team_base = df_team_base.merge(
-            df_bt_streaks,  # includes Game_Start already
-            on=["Sport","Market","Game_Key","Team","Game_Start"],
+            df_bt_streaks.drop(columns=["Game_Start"], errors="ignore"),
+            on=["Sport","Market","Game_Key","Team"],
             how="left",
             validate="1:1",
         )
+
         
         # sort for "last"
         df_team_base = df_team_base.sort_values(["Sport","Market","Team","Game_Start"])
