@@ -9411,29 +9411,83 @@ def train_sharp_model_from_bq(
                      f"min: {float(np.min(w_train)):.3f}, max: {float(np.max(w_train)):.3f}")
         
         # Optional: quick book‑level diagnostic (only if you want to use the helper)
-        def _fallback_book_lift(df: pd.DataFrame, book_col: str, label_col: str, prior: float = 100.0):
+      
+        def _fallback_book_lift(
+            df: pd.DataFrame,
+            book_col: str,
+            label_col: str,
+            prior: float = 50.0,            # shrink less than 200
+            canon_mask: pd.Series | None = None,
+            min_n: int = 25,
+        ):
             if (book_col is None) or (book_col not in df.columns) or (label_col not in df.columns):
                 return pd.Series(dtype=float)
-            dfv = df[[book_col, label_col]].dropna()
+        
+            d = df
+            if canon_mask is not None:
+                d = d.loc[canon_mask]
+        
+            dfv = d[[book_col, label_col]].copy()
+            y = pd.to_numeric(dfv[label_col], errors="coerce")
+            dfv = dfv.loc[y.notna()]
+            dfv["y"] = y.loc[y.notna()].astype(float)
+        
             if dfv.empty:
                 return pd.Series(dtype=float)
-            y = pd.to_numeric(dfv[label_col], errors="coerce")
-            m = float(np.nanmean(y))
-            grp = dfv.groupby(book_col)[label_col].agg(["sum","count"]).rename(columns={"sum":"hits","count":"n"})
-            a = m * prior; b = (1.0 - m) * prior
-            post_mean = (grp["hits"] + a) / (grp["n"] + a + b)
-            lift = (post_mean / max(1e-9, m)) - 1.0
-            return lift
         
+            m = float(dfv["y"].mean())
+            m = min(max(m, 1e-9), 1 - 1e-9)
+        
+            grp = dfv.groupby(book_col)["y"].agg(hits="sum", n="count")
+            grp = grp.loc[grp["n"] >= min_n]  # optional: ignore tiny samples
+            if grp.empty:
+                return pd.Series(dtype=float)
+        
+            a = m * prior
+            b = (1.0 - m) * prior
+            post_mean = (grp["hits"] + a) / (grp["n"] + a + b)
+            lift = (post_mean / m) - 1.0
+            return lift.sort_values(ascending=False)
+                
         # Example usage (diagnostic only):
+        mkt = _norm_market(market)  # <- use your existing normalizer
+
+        # canonical mask for diagnostics only
+        if mkt == "totals":
+            canon_mask = (
+                train_df["Market"].astype(str).str.lower().map(_norm_market).eq(mkt)
+                & train_df["Outcome"].astype(str).str.lower().str.strip().eq("over")
+            )
+        else:
+            v = pd.to_numeric(train_df["Value"], errors="coerce")
+            canon_mask = (
+                train_df["Market"].astype(str).str.lower().map(_norm_market).eq(mkt)
+                & v.lt(0)
+            )
+        
+        bk_col = (
+            "Bookmaker" if "Bookmaker" in train_df.columns
+            else ("Bookmaker_Norm" if "Bookmaker_Norm" in train_df.columns else None)
+        )
+        
+        if bk_col:
+            lift = _fallback_book_lift(
+                train_df,
+                bk_col,
+                "SHARP_HIT_BOOL",
+                prior=50.0,
+                canon_mask=canon_mask,
+                min_n=25,
+            )
+            if not lift.empty:
+                st.write(f"🏷️ Book reliability (empirical, smoothed) — {mkt}:")
+                st.json(lift.head(20).round(3).to_dict())
         bk_col = "Bookmaker" if "Bookmaker" in train_df.columns else ("Bookmaker_Norm" if "Bookmaker_Norm" in train_df.columns else None)
         if bk_col:
-            lift = _fallback_book_lift(train_df, bk_col, "SHARP_HIT_BOOL", prior=200.0)
+            lift = _fallback_book_lift(train_df, bk_col, "SHARP_HIT_BOOL", prior=50.0, canon_mask=canon_mask, min_n=25)
             if not lift.empty:
-                top = lift.sort_values(ascending=False).head(20).round(3)
                 st.write("🏷️ Book reliability (empirical, smoothed):")
-                st.json(top.to_dict())
-
+                st.json(lift.head(20).round(3).to_dict())
   
        
                 
