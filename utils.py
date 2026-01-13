@@ -1087,20 +1087,38 @@ def update_power_ratings(
         return [{"Sport": sport, "Team": t, "Rating": 1500.0 + float(r),
                  "Method": "elo_kalman", "Updated_At": utc_now} for t, r in zip(teams, adj_R)]
 
-    def run_ridge_massey(*, sport: str, aliases: list[str], cfg: dict):
-        # knobs
-        window_days  = int(cfg.get("window_days", 90))
-        mov_cap      = float(cfg.get("mov_cap", 25))
+   
+   
+    def run_ridge_massey(*, sport: str, aliases: list[str], cfg: dict, window_start):
+        """
+        Online Ridge-Massey for NCAAB:
+          - Updates after every game
+          - Writes history ONLY for the two teams that played
+          - Writes PRE-GAME rating at Updated_At = Game_Start (leakage-safe)
+          - Maintains ridge state via Sherman–Morrison rank-1 updates
+    
+        Strength of Schedule (SoS):
+          - Tracked as weighted avg opponent rating (post-update)
+          - Applied as a SMALL external adjustment to *reported* ratings only
+          - Does not corrupt ridge solver state
+        """
+    
+        window_days  = int(cfg.get("window_days", 120))
+        mov_cap      = float(cfg.get("mov_cap", 25.0))
         ridge_lambda = float(cfg.get("ridge_lambda", 65.0))
-
-        rm_half_life_days      = float(cfg.get("rm_half_life_days", 35.0))
-        preseason_prior_games  = float(cfg.get("preseason_prior_games", 18.0))
-        phase_aware_window     = bool(cfg.get("phase_aware_window", True))
-        use_home_field_term    = bool(cfg.get("use_hfa_term", True))
-        spread_calib_clip_abs  = float(cfg.get("spread_calib_clip_abs", 15.0))
-        spread_calib_floor_abs = float(cfg.get("spread_calib_floor_abs", 1.0))
-
-        if phase_aware_window:
+        use_hfa_term = bool(cfg.get("use_hfa_term", True))
+    
+        # Optional time-decay (0 disables)
+        rm_half_life_days = float(cfg.get("rm_half_life_days", 0.0))
+    
+        # SoS knobs (keep small)
+        sos_gamma     = float(cfg.get("sos_gamma", 0.06))   # 0.04–0.08 typical
+        sos_min_games = int(cfg.get("sos_min_games", 5))
+    
+        HIST_BATCH = int(cfg.get("history_batch_rows", 50_000))
+    
+        # Phase-aware window
+        if bool(cfg.get("phase_aware_window", True)):
             today = pd.Timestamp.utcnow()
             m = int(today.month)
             if m in (11, 12):
@@ -1109,7 +1127,8 @@ def update_power_ratings(
                 window_days = min(window_days, 100)
             elif m in (3,):
                 window_days = min(window_days, 75)
-
+    
+        # --- pull games (scores only), dedup finals ---
         sql = """
         WITH scores AS (
           SELECT
@@ -1117,8 +1136,7 @@ def update_power_ratings(
             LOWER(TRIM(Away_Team)) AS away,
             SAFE_CAST(Score_Home_Score AS FLOAT64) AS hs,
             SAFE_CAST(Score_Away_Score AS FLOAT64) AS as_,
-            TIMESTAMP(Game_Start) AS gs,
-            TIMESTAMP(Game_Start) AS game_start_raw
+            TIMESTAMP(Game_Start) AS gs
           FROM `sharplogger.sharp_data.game_scores_final`
           WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@aliases)
             AND Score_Home_Score IS NOT NULL
@@ -1128,226 +1146,164 @@ def update_power_ratings(
             PARTITION BY LOWER(TRIM(Home_Team)), LOWER(TRIM(Away_Team)), TIMESTAMP(Game_Start)
             ORDER BY TIMESTAMP(Inserted_Timestamp) DESC
           ) = 1
-        ),
-
-        latest_per_book AS (
-          SELECT
-            LOWER(TRIM(m.Home_Team_Norm)) AS home,
-            LOWER(TRIM(m.Away_Team_Norm)) AS away,
-            TIMESTAMP(m.Game_Start)       AS game_start_raw,
-
-            REGEXP_REPLACE(
-              LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
-              r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex'
-            ) AS BookKey,
-
-            SAFE_CAST(m.Value AS FLOAT64) AS spread_value,
-            m.Snapshot_Timestamp,
-            LOWER(TRIM(m.Team_For_Join)) AS fav_team
-          FROM `sharplogger.sharp_data.moves_with_features_merged` m
-          WHERE
-            UPPER(CAST(m.Sport AS STRING)) IN UNNEST(@aliases)
-            AND m.Market IN ('spreads','spread','Spread','SPREADS')
-            AND m.Value IS NOT NULL
-            AND TIMESTAMP(m.Game_Start) IS NOT NULL
-            AND m.Value < 0
-          QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY
-              LOWER(TRIM(m.Home_Team_Norm)),
-              LOWER(TRIM(m.Away_Team_Norm)),
-              TIMESTAMP(m.Game_Start),
-              REGEXP_REPLACE(
-                LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
-                r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex'
-              )
-            ORDER BY m.Snapshot_Timestamp DESC
-          ) = 1
-        ),
-
-        market AS (
-          SELECT
-            home,
-            away,
-            game_start_raw,
-            ANY_VALUE(fav_team) AS favorite_team,
-            CASE WHEN ANY_VALUE(fav_team) = home THEN away ELSE home END AS dog_team,
-            APPROX_QUANTILES(spread_value, 2)[OFFSET(1)] AS spread_close
-          FROM latest_per_book
-          WHERE BookKey IN UNNEST(@sharp_books)
-          GROUP BY home, away, game_start_raw
         )
-
-        SELECT
-          s.home, s.away, s.hs, s.as_, s.gs,
-          m.spread_close, m.favorite_team, m.dog_team
-        FROM scores s
-        LEFT JOIN market m
-          ON s.home = m.home
-         AND s.away = m.away
-         AND s.game_start_raw = m.game_start_raw
+        SELECT home, away, hs, as_, gs
+        FROM scores
+        ORDER BY gs
         """
-
+    
         df = bq.query(
             sql,
             job_config=bigquery.QueryJobConfig(
                 query_parameters=[
                     bigquery.ArrayQueryParameter("aliases", "STRING", aliases),
                     bigquery.ScalarQueryParameter("win_days", "INT64", int(window_days)),
-                    bigquery.ArrayQueryParameter("sharp_books", "STRING", SHARP_BOOKS_DEFAULT),
                 ]
             )
         ).to_dataframe()
-
+    
         if df.empty:
             return []
-
-        mov_raw = (df["hs"] - df["as_"]).astype(float)
-        cap = float(mov_cap) if np.isfinite(mov_cap) and mov_cap > 0 else 25.0
-        df["mov"] = cap * np.tanh(mov_raw / cap)
-
+    
         df["gs"] = pd.to_datetime(df["gs"], utc=True, errors="coerce")
-        df = df[df["gs"].notna()].copy()
+        df = df.dropna(subset=["gs", "home", "away", "hs", "as_"]).copy()
+        df = df.sort_values("gs", kind="mergesort")
         if df.empty:
             return []
-
-        teams = pd.Index(sorted(set(df.home) | set(df.away)))
+    
+        teams = pd.Index(sorted(set(df["home"]) | set(df["away"])))
         n = len(teams)
         if n < 2:
             return []
         idx = {t: i for i, t in enumerate(teams)}
-
-        m_rows = len(df)
-        X = np.zeros((m_rows, n + (1 if use_home_field_term else 0)), dtype=float)
-        y = df["mov"].to_numpy(float)
-
-        if use_home_field_term:
-            hfa_col = n
-        for i, row in enumerate(df.itertuples(index=False)):
-            hi, ai = idx[row.home], idx[row.away]
-            X[i, hi] = 1.0
-            X[i, ai] = -1.0
-            if use_home_field_term:
-                X[i, hfa_col] = 1.0
-
-        now_ts = df["gs"].max()
-        age_days = (now_ts - df["gs"]).dt.total_seconds().to_numpy(float) / 86400.0
-        w = np.exp(-age_days / max(rm_half_life_days, 1.0)).astype(float)
-
-        sw = np.sqrt(np.clip(w, 1e-9, None))
-        Xw = X * sw[:, None]
-        yw = y * sw
-
-        XtX = Xw.T @ Xw
-        XtX[:n, :n] += np.eye(n) * ridge_lambda
-        if use_home_field_term:
-            XtX[n, n] += ridge_lambda * 0.01
-
-        beta = np.linalg.solve(XtX, Xw.T @ yw)
-        ratings_pts = beta[:n].astype(float)
-        ratings_pts = ratings_pts - float(np.mean(ratings_pts))
-
-        gcounts = (
-            pd.concat([df["home"], df["away"]])
-            .value_counts()
-            .reindex(teams, fill_value=0)
-            .to_numpy(float)
-        )
-
-        rating_map0 = {t: float(r) for t, r in zip(teams, ratings_pts)}
-        opp_sum = pd.Series(0.0, index=teams)
-        opp_cnt = pd.Series(0.0, index=teams)
-        for h, a in zip(df["home"].to_numpy(), df["away"].to_numpy()):
-            opp_sum[h] += rating_map0.get(a, 0.0); opp_cnt[h] += 1.0
-            opp_sum[a] += rating_map0.get(h, 0.0); opp_cnt[a] += 1.0
-        opp_avg = (opp_sum / opp_cnt.replace(0, np.nan)).fillna(0.0).reindex(teams).to_numpy(float)
-        sos_penalty = 1.0 / (1.0 + np.maximum(0.0, -opp_avg) / 6.0)
-
-        shrink = (gcounts / (gcounts + preseason_prior_games)) * sos_penalty
-        ratings_pts = ratings_pts * shrink
-        ratings_pts = ratings_pts - float(np.mean(ratings_pts))
-
-        df_cal = df[
-            df["spread_close"].notna()
-            & df["favorite_team"].notna()
-            & df["dog_team"].notna()
-        ].copy()
-
-        if not df_cal.empty:
-            rating_map = {t: float(r) for t, r in zip(teams, ratings_pts)}
-            df_cal["rdiff"] = df_cal["favorite_team"].map(rating_map) - df_cal["dog_team"].map(rating_map)
-            sabs = df_cal["spread_close"].abs().clip(lower=spread_calib_floor_abs, upper=spread_calib_clip_abs)
-            wcal = (1.0 / sabs).to_numpy(float)
-            rdiff = df_cal["rdiff"].to_numpy(float)
-            spread = df_cal["spread_close"].to_numpy(float)
-            num = float(np.sum(wcal * rdiff * spread))
-            den = float(np.sum(wcal * (rdiff ** 2)))
-            if np.isfinite(num) and np.isfinite(den) and den > 1e-9:
-                k = - num / den
-                if np.isfinite(k) and 0.10 < abs(k) < 50.0:
-                    ratings_pts = ratings_pts * float(k)
-
-        ratings_pts = ratings_pts - float(np.mean(ratings_pts))
-
-        # optional SoS correction (small)
-        sos_gamma = float(cfg.get("sos_gamma", 0.0))
-        sos_use_recency = bool(cfg.get("sos_use_recency", True))
-        sos_early_only = bool(cfg.get("sos_early_only", False))
-
-        if sos_gamma != 0.0:
-            if (not sos_early_only) or (pd.Timestamp.utcnow().month in (11, 12)):
-                rating_map = {t: float(r) for t, r in zip(teams, ratings_pts)}
-                sos_num = pd.Series(0.0, index=teams)
-                sos_den = pd.Series(0.0, index=teams)
-
-                if sos_use_recency:
-                    now_ts = df["gs"].max()
-                    age_days = (now_ts - df["gs"]).dt.total_seconds().to_numpy(float) / 86400.0
-                    w_sos = np.exp(-age_days / max(rm_half_life_days, 1.0)).astype(float)
-                else:
-                    w_sos = np.ones(len(df), dtype=float)
-
-                homes = df["home"].to_numpy()
-                aways = df["away"].to_numpy()
-                for h, a, ww in zip(homes, aways, w_sos):
-                    ra = rating_map.get(a, 0.0)
-                    rh = rating_map.get(h, 0.0)
-                    sos_num[h] += ww * ra; sos_den[h] += ww
-                    sos_num[a] += ww * rh; sos_den[a] += ww
-
-                sos = (sos_num / sos_den.replace(0.0, np.nan)).fillna(0.0).reindex(teams).to_numpy(float)
-                league_mean = float(np.mean(ratings_pts))
-                ratings_pts = ratings_pts + sos_gamma * (league_mean - sos)
-                ratings_pts = ratings_pts - float(np.mean(ratings_pts))
-
-        # DAILY history snapshots (for training "as-of")
-        days = pd.to_datetime(df["gs"], utc=True, errors="coerce").dt.floor("D").dropna().unique()
-        days = np.sort(days)
-        rating_map = {t: float(r) for t, r in zip(teams, ratings_pts)}
-
+        d = n + (1 if use_hfa_term else 0)
+    
+        # robust MOV
+        cap = mov_cap if np.isfinite(mov_cap) and mov_cap > 0 else 25.0
+        def _robust_mov(hs, as_):
+            mov = float(hs) - float(as_)
+            return float(cap * np.tanh(mov / cap))
+    
+        # initialize ridge inverse + b
+        lam = float(max(ridge_lambda, 1e-6))
+        P = (np.eye(d, dtype=np.float32) / np.float32(lam)).astype(np.float32)
+        bvec = np.zeros(d, dtype=np.float32)
+    
+        hl = float(rm_half_life_days)
+        last_ts = None
+    
+        def _apply_forgetting(Pm, bv, dt_days: float):
+            if hl <= 0:
+                return Pm, bv
+            f = float(np.exp(-dt_days / max(hl, 1e-6)))
+            f = max(f, 1e-6)
+            return (Pm / np.float32(f)), (bv * np.float32(f))
+    
+        # ---- SoS trackers (opponent rating averages) ----
+        sos_sum = np.zeros(n, dtype=np.float32)
+        sos_cnt = np.zeros(n, dtype=np.float32)
+    
+        def _sos_adj(i: int) -> float:
+            """Return small SoS adjustment for team i (penalize easy schedules)."""
+            if sos_gamma <= 0.0:
+                return 0.0
+            if sos_cnt[i] < sos_min_games:
+                return 0.0
+            sos_i = float(sos_sum[i] / max(sos_cnt[i], 1.0))
+            # league mean is ~0 in this gauge, so adjustment is -gamma*sos
+            return float(sos_gamma * (0.0 - sos_i))
+    
         hist_rows = []
-        for day in days:
-            ts = pd.Timestamp(day)
-            if ts.tzinfo is None:
-                ts = ts.tz_localize("UTC")
-            else:
-                ts = ts.tz_convert("UTC")
-
-            for t in teams:
-                hist_rows.append({
-                    "Sport": sport,
-                    "Team": t,
-                    "Rating": 1500.0 + rating_map[t],
-                    "Method": "ridge_massey",
-                    "Updated_At": ts,
-                    "Source": "daily_window_fit",
-                })
-
-        for i in range(0, len(hist_rows), 50_000):
-            upsert_history_rows(pd.DataFrame(hist_rows[i:i+50_000]))
-
+    
+        for row in df.itertuples(index=False):
+            h = str(row.home)
+            a = str(row.away)
+            ts = row.gs
+            hs = float(row.hs)
+            as_ = float(row.as_)
+    
+            # optional forgetting BEFORE pregame write
+            if last_ts is not None and hl > 0:
+                dt_days = max((ts - last_ts).total_seconds() / 86400.0, 0.0)
+                P, bvec = _apply_forgetting(P, bvec, dt_days)
+            last_ts = ts
+    
+            ih, ia = idx[h], idx[a]
+    
+            # ---- PRE-GAME ratings (ridge state) ----
+            beta_pre = (P @ bvec).astype(np.float32)
+            r_pre = beta_pre[:n].astype(np.float32)
+    
+            # apply SoS adjustment for reporting (does not change ridge state)
+            r_pre_h = float(r_pre[ih]) + _sos_adj(ih)
+            r_pre_a = float(r_pre[ia]) + _sos_adj(ia)
+    
+            hist_rows.append({
+                "Sport": sport,
+                "Team": h,
+                "Rating": float(1500.0 + r_pre_h),
+                "Method": "ridge_massey",
+                "Updated_At": ts,
+                "Source": "per_game_pregame",
+            })
+            hist_rows.append({
+                "Sport": sport,
+                "Team": a,
+                "Rating": float(1500.0 + r_pre_a),
+                "Method": "ridge_massey",
+                "Updated_At": ts,
+                "Source": "per_game_pregame",
+            })
+    
+            if len(hist_rows) >= HIST_BATCH:
+                upsert_history_rows(pd.DataFrame(hist_rows))
+                hist_rows.clear()
+    
+            # ---- APPLY ridge update for this game ----
+            x = np.zeros(d, dtype=np.float32)
+            x[ih] = 1.0
+            x[ia] = -1.0
+            if use_hfa_term:
+                x[n] = 1.0
+    
+            y = np.float32(_robust_mov(hs, as_))
+    
+            Px = P @ x
+            denom = 1.0 + float(x @ Px)
+            if denom <= 1e-9:
+                denom = 1e-9
+            P = P - (np.outer(Px, Px).astype(np.float32) / np.float32(denom))
+            bvec = bvec + x * y
+    
+            # ---- Update SoS using POST-UPDATE ratings (for next games) ----
+            beta_post = (P @ bvec).astype(np.float32)
+            r_post = beta_post[:n].astype(np.float32)
+    
+            sos_sum[ih] += float(r_post[ia]); sos_cnt[ih] += 1.0
+            sos_sum[ia] += float(r_post[ih]); sos_cnt[ia] += 1.0
+    
+        if hist_rows:
+            upsert_history_rows(pd.DataFrame(hist_rows))
+            hist_rows.clear()
+    
+        # ---- current rows for ALL teams (latest ridge + SoS for display) ----
         utc_now = pd.Timestamp.now(tz="UTC")
-        return [{"Sport": sport, "Team": t, "Rating": 1500.0 + float(r),
-                 "Method": "ridge_massey", "Updated_At": utc_now} for t, r in zip(teams, ratings_pts)]
+        beta = (P @ bvec).astype(np.float32)
+        r = beta[:n].astype(np.float32)
+    
+        current_rows = []
+        for t in teams:
+            i = idx[str(t)]
+            cur = float(r[i]) + _sos_adj(i)
+            current_rows.append({
+                "Sport": sport,
+                "Team": str(t),
+                "Rating": float(1500.0 + cur),
+                "Method": "ridge_massey",
+                "Updated_At": utc_now,
+            })
+        return current_rows
+
 
     # ---------------- MAIN ----------------
     sports_available = fetch_sports_present()
@@ -1452,7 +1408,8 @@ def update_power_ratings(
                 updated_sports.append(sport)
 
         elif cfg["model"] == "ridge_massey":
-            cur_rows = run_ridge_massey(sport=sport, aliases=aliases, cfg=cfg)
+            cur_rows = run_ridge_massey(sport=sport, aliases=aliases, cfg=cfg, window_start=window_start)
+
             if cur_rows:
                 current_rows_all.extend(cur_rows)
                 updated_sports.append(sport)
