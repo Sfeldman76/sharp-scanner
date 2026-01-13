@@ -1484,73 +1484,69 @@ def update_power_ratings(
         ratings_pts = ratings_pts - float(np.mean(ratings_pts))
     
         # ---------------- write history + current ----------------
-        ts = df["gs"].max()
-        if isinstance(ts, pd.Timestamp) and ts.tzinfo is None:
-            ts = ts.tz_localize("UTC")
-
-        # ---------------- SoS correction (light touch, avoid double-count) ----------------
-        sos_gamma = float(cfg.get("sos_gamma", 0.25))
+        # ---------------- optional SoS correction (light touch) ----------------
+        sos_gamma     = float(cfg.get("sos_gamma", 0.0))          # default 0 unless you enable
         sos_use_recency = bool(cfg.get("sos_use_recency", True))
-        sos_early_only = bool(cfg.get("sos_early_only", False))
-        
+        sos_early_only  = bool(cfg.get("sos_early_only", False))
+
         if sos_gamma != 0.0:
-            # Optional: apply only early season
             if (not sos_early_only) or (pd.Timestamp.utcnow().month in (11, 12)):
-                # Map current ratings
                 rating_map = {t: float(r) for t, r in zip(teams, ratings_pts)}
-        
-                # opponent sums
+
                 sos_num = pd.Series(0.0, index=teams)
                 sos_den = pd.Series(0.0, index=teams)
-        
-                # weights per game (reuse your recency weights if desired)
-                if sos_use_recency and "gs" in df.columns:
+
+                if sos_use_recency:
                     now_ts = df["gs"].max()
                     age_days = (now_ts - df["gs"]).dt.total_seconds().to_numpy(float) / 86400.0
-                    w_sos = np.exp(-age_days / max(float(cfg.get("rm_half_life_days", 35.0)), 1.0)).astype(float)
+                    w_sos = np.exp(-age_days / max(rm_half_life_days, 1.0)).astype(float)
                 else:
                     w_sos = np.ones(len(df), dtype=float)
-        
+
                 homes = df["home"].to_numpy()
                 aways = df["away"].to_numpy()
-        
+
                 for h, a, w in zip(homes, aways, w_sos):
                     ra = rating_map.get(a, 0.0)
                     rh = rating_map.get(h, 0.0)
-        
-                    sos_num[h] += w * ra
-                    sos_den[h] += w
-        
-                    sos_num[a] += w * rh
-                    sos_den[a] += w
-        
-                sos = (sos_num / sos_den.replace(0.0, np.nan)).fillna(0.0).to_numpy(float)
-        
-                league_mean = float(np.mean(ratings_pts))
-                # If sos below mean => weak schedule => penalize
-                ratings_pts = ratings_pts + sos_gamma * (league_mean - sos)
-        
-                # re-center (keep mean 0)
-                ratings_pts = ratings_pts - float(np.mean(ratings_pts))
+                    sos_num[h] += w * ra; sos_den[h] += w
+                    sos_num[a] += w * rh; sos_den[a] += w
 
-        
-    
-        hist_rows = [
-            {
-                "Sport": sport,
-                "Team": t,
-                "Rating": 1500.0 + float(r),
-                "Method": "ridge_massey",
-                "Updated_At": ts,           # snapshot timestamp for this window fit
-                "Source": "window_fit_best",
-            }
-            for t, r in zip(teams, ratings_pts)
-        ]
-        if hist_rows:
-            # batch load for safety
-            for i in range(0, len(hist_rows), 50_000):
-                bq.load_table_from_dataframe(pd.DataFrame(hist_rows[i:i+50_000]), table_history).result()
-    
+                sos = (sos_num / sos_den.replace(0.0, np.nan)).fillna(0.0).reindex(teams).to_numpy(float)
+                league_mean = float(np.mean(ratings_pts))
+
+                ratings_pts = ratings_pts + sos_gamma * (league_mean - sos)
+                ratings_pts = ratings_pts - float(np.mean(ratings_pts))  # re-center
+
+        # ---------------- write DAILY history (for leakage-safe "as-of" training) ----------------
+        days = pd.to_datetime(df["gs"], utc=True, errors="coerce").dt.floor("D").dropna().unique()
+        days = np.sort(days)
+
+        rating_map = {t: float(r) for t, r in zip(teams, ratings_pts)}
+
+        hist_rows = []
+        for day in days:
+            ts = pd.Timestamp(day)
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            else:
+                ts = ts.tz_convert("UTC")
+
+            for t in teams:
+                hist_rows.append({
+                    "Sport": sport,
+                    "Team": t,
+                    "Rating": 1500.0 + rating_map[t],
+                    "Method": "ridge_massey",
+                    "Updated_At": ts,
+                    "Source": "daily_window_fit",
+                })
+
+        # batch load
+        for i in range(0, len(hist_rows), 50_000):
+            bq.load_table_from_dataframe(pd.DataFrame(hist_rows[i:i+50_000]), table_history).result()
+
+        # ---------------- current rows ----------------
         utc_now = pd.Timestamp.now(tz="UTC")
         current_rows = [
             {
@@ -1563,6 +1559,7 @@ def update_power_ratings(
             for t, r in zip(teams, ratings_pts)
         ]
         return current_rows
+
 
     # ---------------- MAIN ----------------
 
