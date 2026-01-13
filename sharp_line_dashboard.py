@@ -3073,7 +3073,11 @@ def _auto_select_k_by_auc(
     return best_k, best_res, history  # ✅ also fix your return
 
 
-
+def anchor_to_implied(p_model, p_imp, k=0.5, eps=1e-6):
+    # logit(p_final) = logit(p_imp) + k*(logit(p_model)-logit(p_imp))
+    z_imp = _logit(p_imp, eps=eps)
+    z_mod = _logit(p_model, eps=eps)
+    return np.clip(_sigmoid(z_imp + float(k)*(z_mod - z_imp)), eps, 1-eps
 
 # ------- One-call AUTO selector that does everything -------
 def select_features_auto(
@@ -6800,6 +6804,30 @@ def merge_drop_overlap(left, right, on, how="left", *, keep_right=True, validate
             right = right.drop(columns=sorted(overlap), errors="ignore")
     return left.merge(right, on=on, how=how, validate=validate)
 
+def _logit(p, eps=1e-6):
+    p = np.clip(np.asarray(p, float), eps, 1-eps)
+    return np.log(p / (1-p))
+
+def _sigmoid(z):
+    return 1.0 / (1.0 + np.exp(-z))
+
+def apply_temperature(p, T, eps=1e-6):
+    z = _logit(p, eps=eps)
+    return np.clip(_sigmoid(z / float(T)), eps, 1-eps)
+
+def fit_temperature_on_oof(y, p, grid=None):
+    # T > 1 => soften probabilities (almost always good for spreads)
+    if grid is None:
+        grid = [1.0, 1.1, 1.2, 1.35, 1.5, 1.7, 2.0]
+    y = np.asarray(y, int)
+    p = np.clip(np.asarray(p, float), 1e-6, 1-1e-6)
+    bestT, bestLL = 1.0, 1e18
+    for T in grid:
+        pp = apply_temperature(p, T)
+        ll = log_loss(y, pp, labels=[0,1])
+        if ll < bestLL:
+            bestLL, bestT = ll, float(T)
+    return bestT, bestLL
 
 def train_sharp_model_from_bq(
     *,
@@ -8021,11 +8049,11 @@ def train_sharp_model_from_bq(
             ).astype("float32")
         
             # --- Per-outcome engineered features (requires: k, Sigma_Pts, fav/dog spreads) ---
+          
             df_market["Outcome_Spread_Edge"] = (
-                pd.to_numeric(df_market["Outcome_Model_Spread"],  errors="coerce") -
-                pd.to_numeric(df_market["Outcome_Market_Spread"], errors="coerce")
+                pd.to_numeric(df_market["Outcome_Market_Spread"], errors="coerce") -
+                pd.to_numeric(df_market["Outcome_Model_Spread"],  errors="coerce")
             ).astype("float32")
-        
             # z = edge / k  (guard against zero/NaN k)
             k = pd.to_numeric(df_market.get("k"), errors="coerce").astype("float32")
             k = k.where(k > 0, np.nan)
@@ -10068,7 +10096,7 @@ def train_sharp_model_from_bq(
             # Drop only wrapper/managed keys
             for k in ("monotone_constraints","interaction_constraints","predictor",
                       "eval_metric","_estimator_type","response_method","n_estimators",
-                      "n_jobs","scale_pos_weight","max_depth"):
+                      "n_jobs","scale_pos_weight"):
                 bp.pop(k, None)
             return bp
         
@@ -10811,7 +10839,8 @@ def train_sharp_model_from_bq(
                 p_oof_auc=p_oof_auc,
                 p_oof_log=p_oof_log if RUN_LOGLOSS else None,
                 eps=eps,
-                metric="logloss",
+                metric="hybrid",
+                hybrid_alpha=0.92,   # 0.90–0.95 sweet spot for spreads
             )
         
         p_oof_blend = np.asarray(p_oof_blend, dtype=np.float64)
@@ -10843,10 +10872,11 @@ def train_sharp_model_from_bq(
         
         # ---------------- Calibration ----------------
         # ---------------- Calibration ----------------
-
+        # ---------------- Calibration ----------------
         
         # 0) Safe defaults (prevents UnboundLocalError on any path)
-        CLIP = 0.02 if bool(locals().get("SMALL", False)) else 0.01
+        CLIP = 0.03 if str(market).lower().strip() == "spreads" else (0.02 if bool(locals().get("SMALL", False)) else 0.01)
+        
         cal_name = "iso"
         cal_obj  = _IdentityIsoCal(eps=1e-6)
         cal_blend = (cal_name, cal_obj)
@@ -10854,7 +10884,7 @@ def train_sharp_model_from_bq(
         # 1) Decide global flip on OOF
         flip_flag = _decide_flip_on_oof(y_oof, p_oof_blend)
         
-        # 2) OOF prior (train) and deployment prior (hold) — define BEFORE prior-correction
+        # 2) OOF prior (train) and deployment prior (hold)
         oof_pos    = float(np.mean(y_oof == 1))
         deploy_pos = float(np.mean(y_full[hold_idx] == 1))  # or your rolling/ES estimate
         
@@ -10874,12 +10904,41 @@ def train_sharp_model_from_bq(
         
         # 6) Evaluate candidates by ECE (lower is better) on prior-corrected OOF
         candidates = []
-        if cals.get("beta")  is not None:  candidates.append(("beta",  cals["beta"]))
-        if cals.get("platt") is not None:  candidates.append(("platt", cals["platt"]))
-        if cals.get("iso")   is not None:  candidates.append(("iso",   cals["iso"]))
+        if cals.get("beta")  is not None: candidates.append(("beta",  cals["beta"]))
+        if cals.get("platt") is not None: candidates.append(("platt", cals["platt"]))
+        if cals.get("iso")   is not None: candidates.append(("iso",   cals["iso"]))
         if not candidates:
-            candidates = [("iso", _IdentityIsoCal(eps=1e-6))]  # still safe
+            candidates = [("iso", _IdentityIsoCal(eps=1e-6))]
         
+        scores = []
+        for kind, cal in candidates:
+            try:
+                pp = _apply_cal(kind, cal, p_oof_prior)
+                pp = np.asarray(np.clip(pp, CLIP, 1 - CLIP), float)
+                ece = expected_calibration_error(y_oof, pp)
+                if np.isfinite(ece):
+                    scores.append((float(ece), kind, cal))
+            except Exception as e:
+                st.debug(f"Calibrator {kind} failed: {e}")
+        
+        # 7) Pick best calibrator (or fallback)
+        if scores:
+            scores.sort(key=lambda t: t[0])
+            ece_best, cal_name, cal_obj = scores[0]
+            cal_blend = (cal_name, cal_obj)
+            st.write({"calibrator_used": str(cal_name), "flip_on_oof": bool(flip_flag), "ece_best": float(ece_best)})
+        else:
+            st.warning("No valid calibrator produced finite ECE; using identity isotonic.")
+            cal_name, cal_obj = "iso", _IdentityIsoCal(eps=1e-6)
+            cal_blend = (cal_name, cal_obj)
+        
+        # 8) Temperature scaling ON TOP of chosen calibrator (fit on OOF)
+        p_cal_oof = _apply_cal(cal_name, cal_obj, p_oof_prior)
+        p_cal_oof = np.asarray(np.clip(p_cal_oof, CLIP, 1 - CLIP), float)
+        
+        T_best, T_ll = fit_temperature_on_oof(y_oof, p_cal_oof)
+        st.write({"temp_T": float(T_best), "temp_ll": float(T_ll)})
+
         scores = []
         for kind, cal in candidates:
             try:
@@ -10923,15 +10982,27 @@ def train_sharp_model_from_bq(
         p_train_prior = _prior_correct(p_train_blend_raw, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
         p_hold_prior  = _prior_correct(p_hold_blend_raw,  train_pos=train_pos_for_pc, hold_pos=deploy_pos)
         
+
         # Calibrate using the chosen calibrator
         p_cal_tr = _apply_cal(cal_name, cal_obj, p_train_prior)
         p_cal_ho = _apply_cal(cal_name, cal_obj, p_hold_prior)
         
-        # Clip + gentle shrink of extremes
+        # Clip (required before logit/temperature)
         p_cal_tr = np.asarray(np.clip(p_cal_tr, CLIP, 1 - CLIP), float)
         p_cal_ho = np.asarray(np.clip(p_cal_ho, CLIP, 1 - CLIP), float)
+        
+        # Temperature scaling (bet-friendly)
+        p_cal_tr = apply_temperature(p_cal_tr, T_best)
+        p_cal_ho = apply_temperature(p_cal_ho, T_best)
+        
+        # Safety clip (optional but fine)
+        p_cal_tr = np.asarray(np.clip(p_cal_tr, CLIP, 1 - CLIP), float)
+        p_cal_ho = np.asarray(np.clip(p_cal_ho, CLIP, 1 - CLIP), float)
+        
+        # Gentle shrink of extremes
         p_train_vec = 0.95 * p_cal_tr + 0.05 * 0.5
         p_hold_vec  = 0.95 * p_cal_ho + 0.05 * 0.5
+
 
         
         # Diagnostics
@@ -12803,11 +12874,31 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             # === Sharp-book average Model Prob & Tier (safe) ===
             
             # 0) Make sure a base prob exists (row-level)
-            if 'Model Prob' not in df_summary_base.columns:
-                if 'Model_Sharp_Win_Prob' in df_summary_base.columns:
-                    df_summary_base['Model Prob'] = pd.to_numeric(df_summary_base['Model_Sharp_Win_Prob'], errors='coerce')
+            if "Model Prob" not in df_summary_base.columns:
+                if "Model_Sharp_Win_Prob" in df_summary_base.columns:
+                    df_summary_base["Model Prob"] = pd.to_numeric(
+                        df_summary_base["Model_Sharp_Win_Prob"], errors="coerce"
+                    )
                 else:
-                    df_summary_base['Model Prob'] = np.nan
+                    df_summary_base["Model Prob"] = np.nan
+            
+            # --- Anchor model prob toward book implied prob (bet-friendly) ---
+            p_final = pd.to_numeric(df_summary_base["Model Prob"], errors="coerce")
+            
+            p_imp = pd.Series(
+                calc_implied_prob(df_summary_base.get("Odds_Price", np.nan)),
+                index=df_summary_base.index,
+            )
+            
+            mask = p_final.notna() & p_imp.notna()
+            
+            df_summary_base["Model Prob (Bet)"] = np.nan
+            df_summary_base.loc[mask, "Model Prob (Bet)"] = anchor_to_implied(
+                p_final.loc[mask],
+                p_imp.loc[mask],
+                k=0.45,
+            )
+
             
             # 1) Normalize keys
             for k in ['Bookmaker','Market','Outcome']:
