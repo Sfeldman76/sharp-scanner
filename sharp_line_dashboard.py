@@ -3073,11 +3073,27 @@ def _auto_select_k_by_auc(
     return best_k, best_res, history  # ✅ also fix your return
 
 
-def anchor_to_implied(p_model, p_imp, k=0.5, eps=1e-6):
-    # logit(p_final) = logit(p_imp) + k*(logit(p_model)-logit(p_imp))
-    z_imp = _logit(p_imp, eps=eps)
-    z_mod = _logit(p_model, eps=eps)
-    return np.clip(_sigmoid(z_imp + float(k)*(z_mod - z_imp)), eps, 1-eps
+def anchor_to_implied(p_model, p_imp, k=0.45, eps=1e-6):
+    p_model = np.asarray(p_model, float)
+    p_imp   = np.asarray(p_imp, float)
+
+    p_model = np.clip(p_model, eps, 1 - eps)
+    p_imp   = np.clip(p_imp,   eps, 1 - eps)
+
+    def _logit(x):
+        return np.log(x / (1.0 - x))
+
+    def _sigmoid(z):
+        return 1.0 / (1.0 + np.exp(-z))
+
+    z_mod = _logit(p_model)
+    z_imp = _logit(p_imp)
+
+    return np.clip(
+        _sigmoid(z_imp + float(k) * (z_mod - z_imp)),
+        eps,
+        1 - eps
+    )
 
 # ------- One-call AUTO selector that does everything -------
 def select_features_auto(
