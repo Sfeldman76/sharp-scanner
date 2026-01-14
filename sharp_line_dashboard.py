@@ -12163,25 +12163,36 @@ def compute_diagnostics_vectorized(
         df['Timing_Stage'] = '—'
 
     # --- Load timing models (with their feature lists) ---
+    # --- Load timing models (with their feature lists) ---
     timing_models = {}
     if sport and gcs_bucket and ('load_model_from_gcs' in globals()):
         for _m in MARKETS:
             try:
-                
-                pl = load_model_from_gcs(sport=sport, market=f"timing_{_m}", bucket_name=gcs_bucket) or {}
-                
-                # ✅ timing payloads should have a real estimator under "model"
+                pl = load_model_from_gcs(
+                    sport=sport,
+                    market=f"timing_{_m}",
+                    bucket_name=gcs_bucket
+                ) or {}
+    
+                # timing payloads should have estimator under "model"
                 mdl  = pl.get("model", None)
                 cols = pl.get("feature_list", None)
-                
-                # ✅ hard guard: NEVER treat calibrator dict as a model
-                if isinstance(mdl, dict) or (mdl is not None and not (hasattr(mdl, "predict_proba") or hasattr(mdl, "predict"))):
+    
+                # hard guard: NEVER treat dict as model
+                if isinstance(mdl, dict) or (
+                    mdl is not None and not (hasattr(mdl, "predict_proba") or hasattr(mdl, "predict"))
+                ):
                     mdl = None
-                
+    
                 timing_models[_m] = {"mdl": mdl, "cols": cols}
-
+    
+            except Exception as e:
+                # if load fails, just set None so inference falls back to heuristic
+                st.warning(f"Timing model load failed for '{_m}': {e}")
+                timing_models[_m] = {"mdl": None, "cols": None}
     else:
         timing_models = {m: {"mdl": None, "cols": None} for m in MARKETS}
+
 
     def _align_X_for_model(X, mdl, cols_from_payload):
         # Prefer the exact saved train columns
