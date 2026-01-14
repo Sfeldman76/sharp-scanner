@@ -6974,23 +6974,23 @@ def train_sharp_model_from_bq(
     # === New team ATS cover / margin stats (prior-only, last-5) ===
     team_cover_cols = [
         # overall cover signal (intentionally off for now)
-        "Cover_Rate_Last5",
-        "Cover_Rate_After_Win_Last5",
-        "Cover_Rate_After_Loss_Last5",
+        #"Cover_Rate_Last5",
+        #"Cover_Rate_After_Win_Last5",
+        #"Cover_Rate_After_Loss_Last5",
         # situational cover rates (intentionally off for now)
-        "Cover_Rate_Home_After_Home_Win_Last5",
-        "Cover_Rate_Home_After_Home_Loss_Last5",
-        "Cover_Rate_Home_After_Away_Win_Last5",
-        "Cover_Rate_Home_After_Away_Loss_Last5",
-        "Cover_Rate_Away_After_Home_Win_Last5",
-        "Cover_Rate_Away_After_Home_Loss_Last5",
-        "Cover_Rate_Away_After_Away_Win_Last5",
-        "Cover_Rate_Away_After_Away_Loss_Last5",
+        #"Cover_Rate_Home_After_Home_Win_Last5",
+        #"Cover_Rate_Home_After_Home_Loss_Last5",
+        #"Cover_Rate_Home_After_Away_Win_Last5",
+        #"Cover_Rate_Home_After_Away_Loss_Last5",
+        #"Cover_Rate_Away_After_Home_Win_Last5",
+        #"Cover_Rate_Away_After_Home_Loss_Last5",
+        #"Cover_Rate_Away_After_Away_Win_Last5",
+        #"Cover_Rate_Away_After_Away_Loss_Last5",
         # margin distribution
-        "ATS_Cover_Margin_Last5_Prior_Mean",
-        "ATS_Cover_Margin_Last5_Prior_Std",
-        "Market_Bucket",
-        "Market_OddsProb_Bucket",
+        #"ATS_Cover_Margin_Last5_Prior_Mean",
+        #"ATS_Cover_Margin_Last5_Prior_Std",
+        #"Market_Bucket",
+        #"Market_OddsProb_Bucket",
      ]
     
     # (Opponent mirrors intentionally excluded per your note)
