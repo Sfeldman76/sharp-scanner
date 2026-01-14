@@ -3831,7 +3831,11 @@ def enrich_power_for_training_lowmem(
         return df.copy()
     if bq is None:
         raise ValueError("BigQuery client `bq` is None — pass your bigquery.Client (e.g., bq=bq_client).")
-
+    if float(allow_forward_hours or 0.0) != 0.0:
+        raise ValueError(
+            "Leakage guard: allow_forward_hours must be 0.0 for training "
+            "(power ratings must be strictly prior to Game_Start)."
+        )
     out = df.copy()
 
     # --- normalize inputs (strings + time) ---
@@ -3996,8 +4000,12 @@ def enrich_power_for_training_lowmem(
     for team, (t_arr, r_arr) in team_series.items():
         mask = (out['Home_Team_Norm'].values == team)
         if mask.any():
-            ts = gs_ns[mask].astype('int64') + allow_ns
-            ts = ts.astype('datetime64[ns]')
+            # strict prior cutoff: never allow AsOfTS == Game_Start
+            ts_i64 = gs_ns[mask].astype('int64') + allow_ns
+            if allow_ns == 0:
+                ts_i64 = ts_i64 - 1  # <-- critical: enforce AsOfTS < Game_Start
+            ts = ts_i64.astype('datetime64[ns]')
+            
             idx = np.searchsorted(t_arr, ts, side='right') - 1
             valid = idx >= 0
             vals = np.full(idx.shape, base, dtype=np.float32)
@@ -4009,8 +4017,12 @@ def enrich_power_for_training_lowmem(
     for team, (t_arr, r_arr) in team_series.items():
         mask = (out['Away_Team_Norm'].values == team)
         if mask.any():
-            ts = gs_ns[mask].astype('int64') + allow_ns
-            ts = ts.astype('datetime64[ns]')
+            # strict prior cutoff: never allow AsOfTS == Game_Start
+            ts_i64 = gs_ns[mask].astype('int64') + allow_ns
+            if allow_ns == 0:
+                ts_i64 = ts_i64 - 1  # <-- critical: enforce AsOfTS < Game_Start
+            ts = ts_i64.astype('datetime64[ns]')
+            
             idx = np.searchsorted(t_arr, ts, side='right') - 1
             valid = idx >= 0
             vals = np.full(idx.shape, base, dtype=np.float32)
