@@ -12210,26 +12210,47 @@ def compute_diagnostics_vectorized(
         return p
 
     # Score per market
+
     for _m, pack in timing_models.items():
         mask = df['Market'].eq(_m)
         if not mask.any():
             continue
-
-        mdl, cols = pack["mdl"], pack["cols"]
-        X = df.loc[mask, timing_feature_superset].apply(pd.to_numeric, errors='coerce').fillna(0.0)
-
+    
+        mdl, cols = pack.get("mdl"), pack.get("cols")
+    
+        # ✅ absolute safety: dict is not a model
+        if isinstance(mdl, dict):
+            st.warning(
+                f"Timing model for '{_m}' is a dict (keys={list(mdl.keys())[:12]}). "
+                f"Falling back to heuristic."
+            )
+            df.loc[mask, 'Timing_Opportunity_Score'] = _heuristic_score(df.loc[mask])
+            continue
+    
         if mdl is None:
             df.loc[mask, 'Timing_Opportunity_Score'] = _heuristic_score(df.loc[mask])
             continue
-
+    
+        # Build X only once we know we have a real estimator
+        X = (
+            df.loc[mask, timing_feature_superset]
+              .apply(pd.to_numeric, errors='coerce')
+              .fillna(0.0)
+        )
+    
         X = _align_X_for_model(X, mdl, cols)
+    
         try:
-            p = (mdl.predict_proba(X)[:, 1] if hasattr(mdl, 'predict_proba')
-                 else np.clip(mdl.predict(X), 0, 1))
+            if hasattr(mdl, "predict_proba"):
+                p = mdl.predict_proba(X)[:, 1]
+            else:
+                p = np.clip(mdl.predict(X), 0, 1)
+    
             df.loc[mask, 'Timing_Opportunity_Score'] = pd.to_numeric(p, errors='coerce')
         except Exception as e:
             st.warning(f"Timing model inference failed for '{_m}': {e}")
             df.loc[mask, 'Timing_Opportunity_Score'] = _heuristic_score(df.loc[mask])
+
 
     df['Timing_Opportunity_Score'] = (
         pd.to_numeric(df['Timing_Opportunity_Score'], errors='coerce')
