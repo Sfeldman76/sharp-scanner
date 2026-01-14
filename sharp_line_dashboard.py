@@ -3831,11 +3831,11 @@ def enrich_power_for_training_lowmem(
         return df.copy()
     if bq is None:
         raise ValueError("BigQuery client `bq` is None — pass your bigquery.Client (e.g., bq=bq_client).")
-    if float(allow_forward_hours or 0.0) != 0.0:
-        raise ValueError(
-            "Leakage guard: allow_forward_hours must be 0.0 for training "
-            "(power ratings must be strictly prior to Game_Start)."
-        )
+
+    # --- leakage-safe: training must be strictly prior to Game_Start ---
+    allow_forward_hours = float(allow_forward_hours or 0.0)
+    if allow_forward_hours != 0.0:
+        allow_forward_hours = 0.
     out = df.copy()
 
     # --- normalize inputs (strings + time) ---
