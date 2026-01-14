@@ -928,20 +928,30 @@ def update_power_ratings(
             v = d.get(k, default)
             return float(v if np.isfinite(v) else default)
 
+       
         def _update_off_def_for_points(team_off, team_def, pts_obs, mu, hfa_adj, obs_var):
             m1, v1 = _om(team_off), _ov(team_off)
             m2, v2 = _dm(team_def), _dv(team_def)
-            y_hat = mu + m1 - m2 + hfa_adj
+        
+            # DEF IS ADDED (m2 negative => reduces expected points)
+            y_hat = float(mu) + float(m1) + float(m2) + float(hfa_adj)
+        
             e = float(pts_obs) - float(y_hat)
-            S = v1 + v2 + obs_var
+            S = float(v1) + float(v2) + float(obs_var)
             if S <= 0:
                 S = 1e-6
-            k1 = v1 / S
-            k2 = v2 / S
-            off_m[team_off] = m1 + k1 * e
-            def_m[team_def] = m2 - k2 * e
-            off_v[team_off] = (1.0 - k1) * v1
-            def_v[team_def] = (1.0 - k2) * v2
+        
+            k1 = float(v1) / S
+            k2 = float(v2) / S
+        
+            off_m[team_off] = float(m1) + k1 * e
+        
+            # DEF UPDATE IS + (if pts higher than expected => defense gets worse, i.e. less negative)
+            def_m[team_def] = float(m2) + k2 * e
+        
+            off_v[team_off] = (1.0 - k1) * float(v1)
+            def_v[team_def] = (1.0 - k2) * float(v2)
+
 
         def _apply_net_shift(team: str, delta_net: float):
             off_m[team] = _om(team) + 0.5 * delta_net
@@ -1081,7 +1091,9 @@ def update_power_ratings(
         sos = np.where(np.isfinite(sos), sos, np.nan)
         league_mean_R = float(np.nanmean(raw_R)) if np.isfinite(np.nanmean(raw_R)) else 0.0
         sos = np.where(np.isnan(sos), league_mean_R, sos)
-        adj_R = raw_R + sos_gamma * (league_mean_R - sos)
+        # reward harder schedules (sos > mean => boost), penalize easy schedules
+        adj_R = raw_R + sos_gamma * (sos - league_mean_R)
+
 
         utc_now = pd.Timestamp.now(tz="UTC")
         return [{"Sport": sport, "Team": t, "Rating": 1500.0 + float(r),
