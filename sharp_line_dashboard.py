@@ -12167,12 +12167,19 @@ def compute_diagnostics_vectorized(
     if sport and gcs_bucket and ('load_model_from_gcs' in globals()):
         for _m in MARKETS:
             try:
+                
                 pl = load_model_from_gcs(sport=sport, market=f"timing_{_m}", bucket_name=gcs_bucket) or {}
-                mdl = pl.get("model") or pl.get("calibrator") or None
-                cols = pl.get("feature_list")
+                
+                # ✅ timing payloads should have a real estimator under "model"
+                mdl  = pl.get("model", None)
+                cols = pl.get("feature_list", None)
+                
+                # ✅ hard guard: NEVER treat calibrator dict as a model
+                if isinstance(mdl, dict) or (mdl is not None and not (hasattr(mdl, "predict_proba") or hasattr(mdl, "predict"))):
+                    mdl = None
+                
                 timing_models[_m] = {"mdl": mdl, "cols": cols}
-            except Exception:
-                timing_models[_m] = {"mdl": None, "cols": None}
+
     else:
         timing_models = {m: {"mdl": None, "cols": None} for m in MARKETS}
 
@@ -12511,7 +12518,16 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     if not isinstance(data, dict):
         logging.error(f"Unexpected payload type in {fname}: {type(data)}")
         return None
-    
+    # ✅ TIMING MODELS: saved as {"model": estimator, "feature_list": [...]}
+    # Return them directly instead of trying to normalize into the ensemble bundle.
+    if ("model" in data) and ("feature_list" in data):
+        return {
+            "model": data.get("model"),
+            "feature_list": data.get("feature_list") or [],
+            "market": data.get("market"),
+            "sport": data.get("sport"),
+        }
+
     iso_blend = data.get("iso_blend") or (data.get("calibrator", {}) or {}).get("iso_blend")
     
     bundle = {
