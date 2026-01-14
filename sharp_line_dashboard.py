@@ -3816,6 +3816,7 @@ def enrich_power_for_training_lowmem(
     table_history: str = "sharplogger.sharp_data.ratings_history",
     pad_days: int = 10,
     allow_forward_hours: float = 0.0,            # 0 = strict backward-only
+    allow_equal_asof: bool = True,
     project: str | None = None,                  # kept for signature parity
 ) -> pd.DataFrame:
     """
@@ -3865,7 +3866,8 @@ def enrich_power_for_training_lowmem(
     gmin, gmax = out['Game_Start'].min(), out['Game_Start'].max()
     pad = pd.Timedelta(days=pad_days)
     start_iso = pd.to_datetime(gmin - pad, utc=True).isoformat()
-    end_iso   = pd.to_datetime(gmax + pad, utc=True).isoformat()
+    end_iso = pd.to_datetime(gmax + pd.Timedelta(hours=2), utc=True).isoformat()
+
 
     # ---------- tiny in-function cache ----------
     if not hasattr(enrich_power_for_training_lowmem, "_ratings_cache"):
@@ -4002,8 +4004,8 @@ def enrich_power_for_training_lowmem(
         if mask.any():
             # strict prior cutoff: never allow AsOfTS == Game_Start
             ts_i64 = gs_ns[mask].astype('int64') + allow_ns
-            if allow_ns == 0:
-                ts_i64 = ts_i64 - 1  # <-- critical: enforce AsOfTS < Game_Start
+            if allow_ns == 0 and (not allow_equal_asof):
+                ts_i64 = ts_i64 - 1  # strict <
             ts = ts_i64.astype('datetime64[ns]')
             
             idx = np.searchsorted(t_arr, ts, side='right') - 1
@@ -4232,7 +4234,8 @@ def enrich_and_grade_for_training(
         sport_aliases=sport_aliases,
         table_history=table_history,
         pad_days=pad_days,
-        allow_forward_hours=allow_forward_hours,
+        allow_forward_hours=0.0,
+        allow_equal_asof=True, 
         project=project,
     )
 
