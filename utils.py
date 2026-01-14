@@ -422,11 +422,13 @@ def update_power_ratings(
     """
     Streamed, low-memory update of team power ratings per sport.
 
-    IMPORTANT CHANGES vs older version:
-      - ratings_history writes are UPSERT (MERGE) on (Sport, Team, Method, Updated_At) => NO DUPLICATES
-      - game_scores_final inputs are deduped in SQL via QUALIFY rn=1
-      - Kalman + MLB history uses Updated_At = Game_Start (Option A, leakage-safe for training)
-      - NCAAB Ridge-Massey writes DAILY history snapshots so training can pull "as-of game" ratings
+    Key guarantees:
+      - ratings_history writes are UPSERT (MERGE) on (Sport, Team, Method, Updated_At) => no duplicates
+      - inputs are deduped in SQL via QUALIFY rn=1
+      - Kalman + MLB history uses Updated_At = Game_Start (leakage-safe for training)
+      - load stream is ORDERED BY Game_Start (then Snapshot_TS) so recursion is time-forward
+      - per-chunk sort + out-of-order guard prevents any residual ordering corruption
+      - ratings_current MERGE is on (Sport, Team, Method) so methods don't overwrite each other
     """
 
     # ---------- config ----------
@@ -570,30 +572,42 @@ def update_power_ratings(
         bq.query(f"DROP TABLE `{stage}`").result()
 
     # ------------------------------------------------------------------
-    # Current upsert (unchanged)
+    # ✅ CURRENT UPSERT (FIXED): MERGE ON (Sport, Team, Method)
     # ------------------------------------------------------------------
     def upsert_current(rows: list[dict]):
         if not rows:
             return
         df_cur = pd.DataFrame(rows)
+
+        # normalize just to keep keys consistent
+        if "Sport" in df_cur.columns:
+            df_cur["Sport"] = df_cur["Sport"].astype(str).str.upper()
+        if "Team" in df_cur.columns:
+            df_cur["Team"] = df_cur["Team"].astype(str).str.lower().str.strip()
+        if "Method" in df_cur.columns:
+            df_cur["Method"] = df_cur["Method"].astype(str).str.lower().str.strip()
+
         stage = table_current.rsplit(".", 1)[0] + "._ratings_current_stage"
         bq.load_table_from_dataframe(df_cur, stage).result()
+
         bq.query(f"""
         MERGE `{table_current}` T
         USING `{stage}` S
-        ON T.Sport = S.Sport AND T.Team = S.Team
+        ON T.Sport = S.Sport AND T.Team = S.Team AND T.Method = S.Method
         WHEN MATCHED THEN UPDATE SET
           T.Rating     = S.Rating,
-          T.Method     = S.Method,
           T.Updated_At = S.Updated_At
-        WHEN NOT MATCHED THEN INSERT (Sport, Team, Rating, Method, Updated_At)
+        WHEN NOT MATCHED THEN
+          INSERT (Sport, Team, Rating, Method, Updated_At)
           VALUES (S.Sport, S.Team, S.Rating, S.Method, S.Updated_At)
         """).result()
+
         bq.query(f"DROP TABLE `{stage}`").result()
 
     # ---------------- seed + state helpers ----------------
     def load_seed_ratings(sport: str, asof_ts: dt.datetime | pd.Timestamp | None) -> dict[str, float]:
         if asof_ts is None:
+            # prefer current rows for this sport (any method)
             cur = bq.query(
                 f"SELECT Team, Rating FROM `{table_current}` WHERE UPPER(Sport) = @sport",
                 job_config=bigquery.QueryJobConfig(
@@ -808,7 +822,7 @@ def update_power_ratings(
                       -m.Value
                   END AS FLOAT64
                 ) AS SpreadValue,
-                m.Snapshot_Timestamp
+                TIMESTAMP(m.Snapshot_Timestamp) AS Snapshot_TS
               FROM `{project_table_market}` m
               WHERE
                 UPPER(CAST(m.Sport AS STRING)) IN UNNEST(@sport_aliases)
@@ -824,7 +838,7 @@ def update_power_ratings(
                     LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
                     r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex'
                   )
-                ORDER BY m.Snapshot_Timestamp DESC
+                ORDER BY TIMESTAMP(m.Snapshot_Timestamp) DESC
               ) = 1
             ),
             market AS (
@@ -840,19 +854,27 @@ def update_power_ratings(
             SELECT s.*, m.Spread_Close
             FROM scores s
             LEFT JOIN market m USING (Home_Team, Away_Team, Game_Start)
-            ORDER BY s.Snapshot_TS, s.Game_Start
+            ORDER BY s.Game_Start, s.Snapshot_TS
             """
             params["sharp_books"] = [b.lower() for b in sharp_list]
         else:
-            sql_to_run = base_scores_sql + "\nORDER BY Snapshot_TS, Game_Start"
+            sql_to_run = base_scores_sql + "\nORDER BY Game_Start, Snapshot_TS"
 
         for df in stream_query_dfs(bq, sql_to_run, params=params, page_rows=page_rows, select_cols=None):
             if "Spread_Close" not in df.columns:
                 df["Spread_Close"] = np.nan
+
             df = df[[
                 "Sport","Home_Team","Away_Team","Game_Start","Snapshot_TS",
                 "Score_Home_Score","Score_Away_Score","Spread_Close",
             ]]
+
+            # ✅ extra safety: enforce ordering within each page
+            df["Game_Start"] = pd.to_datetime(df["Game_Start"], utc=True, errors="coerce")
+            df["Snapshot_TS"] = pd.to_datetime(df["Snapshot_TS"], utc=True, errors="coerce")
+            df = df.dropna(subset=["Game_Start"])
+            df = df.sort_values(["Game_Start", "Snapshot_TS"], kind="mergesort")
+
             df = downcast_numeric(df)
             df = to_cats(df, ["Sport", "Home_Team", "Away_Team"])
             yield df
@@ -928,30 +950,27 @@ def update_power_ratings(
             v = d.get(k, default)
             return float(v if np.isfinite(v) else default)
 
-       
         def _update_off_def_for_points(team_off, team_def, pts_obs, mu, hfa_adj, obs_var):
             m1, v1 = _om(team_off), _ov(team_off)
             m2, v2 = _dm(team_def), _dv(team_def)
-        
+
             # DEF IS ADDED (m2 negative => reduces expected points)
             y_hat = float(mu) + float(m1) + float(m2) + float(hfa_adj)
-        
+
             e = float(pts_obs) - float(y_hat)
             S = float(v1) + float(v2) + float(obs_var)
             if S <= 0:
                 S = 1e-6
-        
+
             k1 = float(v1) / S
             k2 = float(v2) / S
-        
+
             off_m[team_off] = float(m1) + k1 * e
-        
-            # DEF UPDATE IS + (if pts higher than expected => defense gets worse, i.e. less negative)
+            # if pts higher than expected => defense gets worse (less negative)
             def_m[team_def] = float(m2) + k2 * e
-        
+
             off_v[team_off] = (1.0 - k1) * float(v1)
             def_v[team_def] = (1.0 - k2) * float(v2)
-
 
         def _apply_net_shift(team: str, delta_net: float):
             off_m[team] = _om(team) + 0.5 * delta_net
@@ -1005,10 +1024,21 @@ def update_power_ratings(
             sport, aliases, cutoff=window_start, page_rows=200_000,
             project_table_market=project_table_market, sharp_books=SHARP_BOOKS_DEFAULT
         ):
+            # ✅ extra safety: enforce ordering within each chunk (already sorted in loader,
+            # but keep it harmless in case stream_query_dfs changes)
+            chunk["Game_Start"] = pd.to_datetime(chunk["Game_Start"], utc=True, errors="coerce")
+            chunk["Snapshot_TS"] = pd.to_datetime(chunk["Snapshot_TS"], utc=True, errors="coerce")
+            chunk = chunk.dropna(subset=["Game_Start"])
+            chunk = chunk.sort_values(["Game_Start", "Snapshot_TS"], kind="mergesort")
+
             for _, g in chunk.iterrows():
                 h, a = str(g.Home_Team), str(g.Away_Team)
                 gs_ts = pd.to_datetime(g.Game_Start, utc=True, errors="coerce")
                 if pd.isna(gs_ts):
+                    continue
+
+                # ✅ critical guard: never allow time to go backward
+                if last_game_ts is not None and gs_ts < last_game_ts:
                     continue
 
                 hs, as_ = float(g.Score_Home_Score), float(g.Score_Away_Score)
@@ -1063,7 +1093,7 @@ def update_power_ratings(
                     off_v[t] = (phi**2) * _ov(t) + sigma_eta**2
                     def_v[t] = (phi**2) * _dv(t) + sigma_eta**2
 
-                ts = gs_ts  # ✅ Option A
+                ts = gs_ts  # ✅ Option A (pregame timestamp for training pulls)
                 tag = "backfill" if window_start is None else "incremental"
 
                 history_batch.append({"Sport": sport, "Team": h, "Rating": 1500.0 + float(_net(h)),
@@ -1091,45 +1121,36 @@ def update_power_ratings(
         sos = np.where(np.isfinite(sos), sos, np.nan)
         league_mean_R = float(np.nanmean(raw_R)) if np.isfinite(np.nanmean(raw_R)) else 0.0
         sos = np.where(np.isnan(sos), league_mean_R, sos)
-        # reward harder schedules (sos > mean => boost), penalize easy schedules
         adj_R = raw_R + sos_gamma * (sos - league_mean_R)
-
 
         utc_now = pd.Timestamp.now(tz="UTC")
         return [{"Sport": sport, "Team": t, "Rating": 1500.0 + float(r),
                  "Method": "elo_kalman", "Updated_At": utc_now} for t, r in zip(teams, adj_R)]
 
-   
-   
+    # ---------------- engines ----------------
     def run_ridge_massey(*, sport: str, aliases: list[str], cfg: dict, window_start):
         """
         Online Ridge-Massey for NCAAB:
           - Updates after every game
-          - Writes history ONLY for the two teams that played
           - Writes PRE-GAME rating at Updated_At = Game_Start (leakage-safe)
           - Maintains ridge state via Sherman–Morrison rank-1 updates
-    
-        Strength of Schedule (SoS):
-          - Tracked as weighted avg opponent rating (post-update)
-          - Applied as a SMALL external adjustment to *reported* ratings only
-          - Does not corrupt ridge solver state
+
+        SoS:
+          - tracked as avg opponent rating (post-update)
+          - applied as small external adjustment to REPORTED ratings only
         """
-    
         window_days  = int(cfg.get("window_days", 120))
         mov_cap      = float(cfg.get("mov_cap", 25.0))
         ridge_lambda = float(cfg.get("ridge_lambda", 65.0))
         use_hfa_term = bool(cfg.get("use_hfa_term", True))
-    
-        # Optional time-decay (0 disables)
+
         rm_half_life_days = float(cfg.get("rm_half_life_days", 0.0))
-    
-        # SoS knobs (keep small)
-        sos_gamma     = float(cfg.get("sos_gamma", 0.06))   # 0.04–0.08 typical
+
+        sos_gamma     = float(cfg.get("sos_gamma", 0.06))
         sos_min_games = int(cfg.get("sos_min_games", 5))
-    
+
         HIST_BATCH = int(cfg.get("history_batch_rows", 50_000))
-    
-        # Phase-aware window
+
         if bool(cfg.get("phase_aware_window", True)):
             today = pd.Timestamp.utcnow()
             m = int(today.month)
@@ -1139,8 +1160,7 @@ def update_power_ratings(
                 window_days = min(window_days, 100)
             elif m in (3,):
                 window_days = min(window_days, 75)
-    
-        # --- pull games (scores only), dedup finals ---
+
         sql = """
         WITH scores AS (
           SELECT
@@ -1163,7 +1183,7 @@ def update_power_ratings(
         FROM scores
         ORDER BY gs
         """
-    
+
         df = bq.query(
             sql,
             job_config=bigquery.QueryJobConfig(
@@ -1173,83 +1193,75 @@ def update_power_ratings(
                 ]
             )
         ).to_dataframe()
-    
+
         if df.empty:
             return []
-    
+
         df["gs"] = pd.to_datetime(df["gs"], utc=True, errors="coerce")
         df = df.dropna(subset=["gs", "home", "away", "hs", "as_"]).copy()
         df = df.sort_values("gs", kind="mergesort")
         if df.empty:
             return []
-    
+
         teams = pd.Index(sorted(set(df["home"]) | set(df["away"])))
         n = len(teams)
         if n < 2:
             return []
         idx = {t: i for i, t in enumerate(teams)}
         d = n + (1 if use_hfa_term else 0)
-    
-        # robust MOV
+
         cap = mov_cap if np.isfinite(mov_cap) and mov_cap > 0 else 25.0
         def _robust_mov(hs, as_):
             mov = float(hs) - float(as_)
             return float(cap * np.tanh(mov / cap))
-    
-        # initialize ridge inverse + b
+
         lam = float(max(ridge_lambda, 1e-6))
         P = (np.eye(d, dtype=np.float32) / np.float32(lam)).astype(np.float32)
         bvec = np.zeros(d, dtype=np.float32)
-    
+
         hl = float(rm_half_life_days)
         last_ts = None
-    
+
         def _apply_forgetting(Pm, bv, dt_days: float):
             if hl <= 0:
                 return Pm, bv
             f = float(np.exp(-dt_days / max(hl, 1e-6)))
             f = max(f, 1e-6)
             return (Pm / np.float32(f)), (bv * np.float32(f))
-    
-        # ---- SoS trackers (opponent rating averages) ----
+
         sos_sum = np.zeros(n, dtype=np.float32)
         sos_cnt = np.zeros(n, dtype=np.float32)
-    
+
         def _sos_adj(i: int) -> float:
-            """Return small SoS adjustment for team i (penalize easy schedules)."""
             if sos_gamma <= 0.0:
                 return 0.0
             if sos_cnt[i] < sos_min_games:
                 return 0.0
             sos_i = float(sos_sum[i] / max(sos_cnt[i], 1.0))
-            # league mean is ~0 in this gauge, so adjustment is -gamma*sos
             return float(sos_gamma * (0.0 - sos_i))
-    
+
         hist_rows = []
-    
+
         for row in df.itertuples(index=False):
             h = str(row.home)
             a = str(row.away)
             ts = row.gs
             hs = float(row.hs)
             as_ = float(row.as_)
-    
-            # optional forgetting BEFORE pregame write
+
             if last_ts is not None and hl > 0:
                 dt_days = max((ts - last_ts).total_seconds() / 86400.0, 0.0)
                 P, bvec = _apply_forgetting(P, bvec, dt_days)
             last_ts = ts
-    
+
             ih, ia = idx[h], idx[a]
-    
-            # ---- PRE-GAME ratings (ridge state) ----
+
             beta_pre = (P @ bvec).astype(np.float32)
             r_pre = beta_pre[:n].astype(np.float32)
-    
-            # apply SoS adjustment for reporting (does not change ridge state)
+
             r_pre_h = float(r_pre[ih]) + _sos_adj(ih)
             r_pre_a = float(r_pre[ia]) + _sos_adj(ia)
-    
+
             hist_rows.append({
                 "Sport": sport,
                 "Team": h,
@@ -1266,43 +1278,40 @@ def update_power_ratings(
                 "Updated_At": ts,
                 "Source": "per_game_pregame",
             })
-    
+
             if len(hist_rows) >= HIST_BATCH:
                 upsert_history_rows(pd.DataFrame(hist_rows))
                 hist_rows.clear()
-    
-            # ---- APPLY ridge update for this game ----
+
             x = np.zeros(d, dtype=np.float32)
             x[ih] = 1.0
             x[ia] = -1.0
             if use_hfa_term:
                 x[n] = 1.0
-    
+
             y = np.float32(_robust_mov(hs, as_))
-    
+
             Px = P @ x
             denom = 1.0 + float(x @ Px)
             if denom <= 1e-9:
                 denom = 1e-9
             P = P - (np.outer(Px, Px).astype(np.float32) / np.float32(denom))
             bvec = bvec + x * y
-    
-            # ---- Update SoS using POST-UPDATE ratings (for next games) ----
+
             beta_post = (P @ bvec).astype(np.float32)
             r_post = beta_post[:n].astype(np.float32)
-    
+
             sos_sum[ih] += float(r_post[ia]); sos_cnt[ih] += 1.0
             sos_sum[ia] += float(r_post[ih]); sos_cnt[ia] += 1.0
-    
+
         if hist_rows:
             upsert_history_rows(pd.DataFrame(hist_rows))
             hist_rows.clear()
-    
-        # ---- current rows for ALL teams (latest ridge + SoS for display) ----
+
         utc_now = pd.Timestamp.now(tz="UTC")
         beta = (P @ bvec).astype(np.float32)
         r = beta[:n].astype(np.float32)
-    
+
         current_rows = []
         for t in teams:
             i = idx[str(t)]
@@ -1315,7 +1324,6 @@ def update_power_ratings(
                 "Updated_At": utc_now,
             })
         return current_rows
-
 
     # ---------------- MAIN ----------------
     sports_available = fetch_sports_present()
@@ -1375,13 +1383,19 @@ def update_power_ratings(
 
             for chunk in load_games_stream(sport, aliases, cutoff=window_start, page_rows=200_000,
                                            project_table_market=project_table_market):
+                # enforce ordering in chunk
+                chunk["Game_Start"] = pd.to_datetime(chunk["Game_Start"], utc=True, errors="coerce")
+                chunk["Snapshot_TS"] = pd.to_datetime(chunk["Snapshot_TS"], utc=True, errors="coerce")
+                chunk = chunk.dropna(subset=["Game_Start"])
+                chunk = chunk.sort_values(["Game_Start", "Snapshot_TS"], kind="mergesort")
+
                 for _, g in chunk.iterrows():
                     hs, as_ = float(g.Score_Home_Score), float(g.Score_Away_Score)
                     add_game(g.Home_Team, g.Away_Team, hs, as_)
                     Rh2 = team_rating(g.Home_Team)
                     Ra2 = team_rating(g.Away_Team)
 
-                    ts = pd.to_datetime(g.Game_Start, utc=True, errors="coerce")  # ✅ Option A
+                    ts = pd.to_datetime(g.Game_Start, utc=True, errors="coerce")  # Option A
                     if pd.isna(ts):
                         continue
                     tag = "backfill" if window_start is None else "incremental"
@@ -1421,12 +1435,14 @@ def update_power_ratings(
 
         elif cfg["model"] == "ridge_massey":
             cur_rows = run_ridge_massey(sport=sport, aliases=aliases, cfg=cfg, window_start=window_start)
-
             if cur_rows:
                 current_rows_all.extend(cur_rows)
                 updated_sports.append(sport)
 
+    # ✅ fixed merge keys (Sport, Team, Method)
     upsert_current(current_rows_all)
+
+    # ensure any missing rows from history appear in current
     fill_missing_current_from_history(None)
 
     if not updated_sports:
@@ -1436,11 +1452,10 @@ def update_power_ratings(
     SELECT Sport, Team, Method, Rating, Updated_At
     FROM `{table_current}`
     WHERE UPPER(Sport) IN UNNEST(@sports)
-    ORDER BY Sport, Team
+    ORDER BY Sport, Team, Method
     """
     params = [bigquery.ArrayQueryParameter("sports", "STRING", [s.upper() for s in updated_sports])]
     return bq.query(q, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
-
 
 
 def normalize_team(t):
