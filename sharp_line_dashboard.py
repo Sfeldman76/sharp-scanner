@@ -6913,10 +6913,16 @@ def fit_temperature_on_oof(y, p, grid=None):
 # ---------------------------
 # Leakage guard: snapshot must be <= game start
 # ---------------------------
-def _audit_and_filter_snapshot_timing(df: pd.DataFrame, *, log=print, grace_minutes: float = 0.0) -> pd.DataFrame:
+def _audit_and_filter_snapshot_timing(
+    df: pd.DataFrame,
+    *,
+    log=print,
+    grace_minutes: float = 30.0,
+    return_stats: bool = False,
+):
     if df.empty:
         log("[TIME-AUDIT] df is empty; skipping.")
-        return df
+        return (df, None) if return_stats else df
 
     snap_candidates = [
         "Snapshot_Timestamp", "snapshot_timestamp",
@@ -6928,36 +6934,37 @@ def _audit_and_filter_snapshot_timing(df: pd.DataFrame, *, log=print, grace_minu
     gs_candidates = ["feat_Game_Start", "Game_Start", "Commence_Hour", "Commence_Time"]
     gs_col = next((c for c in gs_candidates if c in df.columns), None)
 
-    if snap_col is None:
-        log("[TIME-AUDIT] No snapshot timestamp column found; cannot audit timing.")
-        return df
-    if gs_col is None:
-        log("[TIME-AUDIT] No game start column found; cannot audit timing.")
-        return df
+    if snap_col is None or gs_col is None:
+        log("[TIME-AUDIT] Missing snapshot or game-start column; skipping.")
+        return (df, None) if return_stats else df
 
     snap = pd.to_datetime(df[snap_col], utc=True, errors="coerce")
     gs   = pd.to_datetime(df[gs_col],   utc=True, errors="coerce")
 
-    if grace_minutes and float(grace_minutes) > 0:
-        gs = gs + pd.to_timedelta(float(grace_minutes), unit="m")
+    gs_grace = gs + pd.to_timedelta(float(grace_minutes), unit="m")
 
-    bad = snap.notna() & gs.notna() & (snap > gs)
+    delta = snap - gs
+    bad = snap.notna() & gs_grace.notna() & (snap > gs_grace)
+
     n_bad = int(bad.sum())
     n_all = int(len(df))
 
     if n_bad:
-        cols = [c for c in ["feat_Game_Key", "Game_Key", "Book", "Bookmaker", "Market", "market2", "Outcome", "outcome2"] if c in df.columns]
-        cols += [snap_col, gs_col]
-        ex = df.loc[bad, cols].head(25)
-        log(f"🚨 [LEAK] {n_bad}/{n_all} rows have {snap_col} AFTER {gs_col} (grace={grace_minutes}m). Showing up to 25:")
-        log(ex)
+        log(f"🚨 [LEAK] {n_bad}/{n_all} rows beyond {grace_minutes}m grace")
     else:
-        log(f"✅ [TIME-AUDIT] OK: 0/{n_all} rows where {snap_col} > {gs_col} (grace={grace_minutes}m).")
+        log(f"✅ [TIME-AUDIT] OK: 0/{n_all} rows beyond {grace_minutes}m grace")
 
     df2 = df.loc[~bad].copy()
-    if n_bad:
-        log(f"🧹 [TIME-AUDIT] Filtered out {n_bad} leaking rows; remaining={len(df2)}.")
-    return df2
+
+    stats = {
+        "snap_col": snap_col,
+        "gs_col": gs_col,
+        "min_delta": delta.min(),
+        "max_delta": delta.max(),
+    }
+
+    return (df2, stats) if return_stats else df2
+
 
 
 def train_sharp_model_from_bq(
@@ -7550,8 +7557,21 @@ def train_sharp_model_from_bq(
                 print(msg)
         
         # 0-minute grace by default. If your timestamps are known noisy, try grace_minutes=1.0
-        df_market = _audit_and_filter_snapshot_timing(df_market, log=_log, grace_minutes=0.0)
-        df_market = df_market.loc[~(snap.notna() & gs.notna() & (snap > gs))].copy()
+        df_market, timing_stats = _audit_and_filter_snapshot_timing(
+            df_market,
+            log=_log,
+            grace_minutes=2.0,
+            return_stats=True,
+        )
+        
+        if timing_stats is not None:
+            _log(
+                f"[SANITY] Δ(snapshot - start): "
+                f"min={timing_stats['min_delta']} | "
+                f"max={timing_stats['max_delta']}"
+            )
+
+       
         # --- Canonical side filter ---
         # === Canonical side filtering ONLY (training subset) ===
         if mkt == "totals":
