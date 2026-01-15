@@ -4293,8 +4293,8 @@ def enrich_and_grade_for_training(
     value_col: str = "Value",
     outcome_col: str = "Outcome_Norm",
     pad_days: int = 30,
-    allow_forward_hours: float = 0.0,
-    table_history: str = "sharplogger.sharp_data.ratings_history",  # override to ratings_current for live
+    rating_lag_hours: float = 12.0,       # ✅ NEW (replaces allow_forward_hours)
+    table_history: str = "sharplogger.sharp_data.ratings_history",
     project: str | None = None,
 ) -> pd.DataFrame:
     """
@@ -4312,7 +4312,7 @@ def enrich_and_grade_for_training(
         sport_aliases=sport_aliases,
         table_history=table_history,
         pad_days=pad_days,
-        allow_forward_hours=0.0,
+        rating_lag_hours=12.0,  
         allow_equal_asof=True, 
         project=project,
     )
@@ -7208,12 +7208,12 @@ def train_sharp_model_from_bq(
      
     with st.spinner("Training…"):
         try:
-            df_bt = enrich_power_for_training_lowmem(
+            df_bt = (
                 df=df_bt,
                 bq=bq_client,
                 sport_aliases=SPORT_ALIASES,
-                pad_days=10,
-                allow_forward_hours=0.0,
+                pad_days=30,
+                rating_lag_hours=12.0,  
             )
         except Exception as e:
             st.exception(e)
@@ -12063,15 +12063,17 @@ def attach_ratings_and_edges_for_diagnostics(
     is_current_table = 'ratings_current' in str(table_history).lower()
     pad_days_eff = (365 if is_current_table else pad_days)
 
+    
     base = enrich_power_for_training_lowmem(
         df=d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
         bq=bq,
         sport_aliases=sport_aliases,
         table_history=table_history,
         pad_days=pad_days_eff,
-        allow_forward_hours=allow_forward_hours,
-        project=project
+        rating_lag_hours=12.0,   # ✅ NEW: enforce AsOfTS <= Game_Start - 12h
+        project=project,
     )
+
 
     cons = prep_consensus_market_spread_lowmem(d_sp, value_col='Value', outcome_col='Outcome_Norm')
 
