@@ -889,6 +889,7 @@ def update_power_ratings(
             del df
             gc.collect()
 
+  
     # ---------------- engines ----------------
     def run_kalman_offdef(
         *,
@@ -903,34 +904,54 @@ def update_power_ratings(
         sigma_s     = float(cfg.get("sigma_spread", 7.0))
         mov_cap     = cfg.get("mov_cap", None)
         HFA_pts     = float(cfg.get("HFA_pts", 2.0))
-
+    
         market_lambda = float(cfg.get("market_lambda", 0.35))
         favored_only  = bool(cfg.get("favored_only_market", False))
-
+    
         sos_hl    = float(cfg.get("sos_half_life_days", 60))
         sos_gamma = float(cfg.get("sos_gamma", 0.0))
-        sos_min_games = int(cfg.get("sos_min_games", 999999))  # ✅ default "never"
-
+        sos_min_games = int(cfg.get("sos_min_games", 999999))  # default "never" unless set (college)
+    
         season_gap_days = int(cfg.get("season_gap_days", 120))
         season_rho      = float(cfg.get("season_rho", 0.75))
-
+    
+        # blowout knobs
         blowout_mov      = float(cfg.get("blowout_mov", 999))
-        late_month_start = int(cfg.get("late_month_start", 13))
         blowout_var_mult = float(cfg.get("blowout_var_mult", 1.0))
         b2b_sigma_mult   = float(cfg.get("b2b_sigma_pts_mult", 1.0))
-
+    
+        # NEW: point-outlier guard (prevents a single 150pt game whiplash)
+        pts_outlier_thresh = float(cfg.get("pts_outlier_thresh", 145.0))  # NBA: 145; NCAAB: 105-115; NFL: unused
+        pts_outlier_mult   = float(cfg.get("pts_outlier_mult", 2.0))
+    
+        # NEW: smooth downweight for big margins (in addition to blowout gate)
+        smooth_mov_start = float(cfg.get("smooth_mov_start", 10.0))
+        smooth_mov_slope = float(cfg.get("smooth_mov_slope", 0.03))  # ~1.6x at 30pt win if start=10
+    
+        # NEW: early-sample shrinkage to avoid bad teams spiking top off 1-2 crazy games
+        shrink_prior_games = float(cfg.get("shrink_prior_games", 0.0))
+        # sensible defaults if not set:
+        if shrink_prior_games <= 0:
+            if sport.upper() in ("NBA", "WNBA"):
+                shrink_prior_games = 12.0
+            elif sport.upper() in ("NFL", "NCAAF", "CFL"):
+                shrink_prior_games = 6.0
+            else:
+                shrink_prior_games = 10.0
+    
         off_m: dict[str, float] = {}
         def_m: dict[str, float] = {}
         off_v: dict[str, float] = {}
         def_v: dict[str, float] = {}
-
-        games_played: dict[str, int] = {}  # ✅ used to gate SoS/market and can be used for shrinkage if desired
-
+    
+        games_played: dict[str, int] = {}  # gating + shrinkage
+    
         def _om(t): return off_m.get(t, 0.0)
         def _dm(t): return def_m.get(t, 0.0)
         def _ov(t): return off_v.get(t, 100.0)
         def _dv(t): return def_v.get(t, 100.0)
-
+    
+        # seed state
         seed = load_seed_ratings(sport, window_start)
         for team, rating in seed.items():
             try:
@@ -941,50 +962,50 @@ def update_power_ratings(
                 def_v[str(team)] =  75.0
             except Exception:
                 pass
-
+    
         # SoS trackers (only used if sos_gamma>0)
         sos_num: dict[str, float] = {}
         sos_den: dict[str, float] = {}
-
+    
         def _net(t: str) -> float:
             return _om(t) - _dm(t)
-
+    
         def _cap(x):
             if mov_cap is None:
                 return float(x)
             return float(min(max(float(x), -float(mov_cap)), float(mov_cap)))
-
+    
         def _exp_decay_weight(gs_ts: pd.Timestamp, now_ts: pd.Timestamp, half_life_days: float) -> float:
             age_days = max((now_ts - gs_ts).days, 0)
-            return float(np.exp(- age_days / max(half_life_days, 1.0)))
-
+            return float(np.exp(-age_days / max(half_life_days, 1.0)))
+    
         def _safe_get(d: dict, k, default=0.0):
             v = d.get(k, default)
             return float(v if np.isfinite(v) else default)
-
+    
         def _update_off_def_for_points(team_off, team_def, pts_obs, mu, hfa_adj, obs_var):
             m1, v1 = _om(team_off), _ov(team_off)
             m2, v2 = _dm(team_def), _dv(team_def)
             y_hat = float(mu) + float(m1) + float(m2) + float(hfa_adj)
-
+    
             e = float(pts_obs) - float(y_hat)
             S = float(v1) + float(v2) + float(obs_var)
             if S <= 0:
                 S = 1e-6
-
+    
             k1 = float(v1) / S
             k2 = float(v2) / S
-
+    
             off_m[team_off] = float(m1) + k1 * e
             def_m[team_def] = float(m2) + k2 * e
-
+    
             off_v[team_off] = (1.0 - k1) * float(v1)
             def_v[team_def] = (1.0 - k2) * float(v2)
-
+    
         def _apply_net_shift(team: str, delta_net: float):
             off_m[team] = _om(team) + 0.5 * delta_net
             def_m[team] = _dm(team) - 0.5 * delta_net
-
+    
         def _market_anchor_favored_only(home: str, away: str, spread_close_home: float):
             sc = float(spread_close_home)
             if not np.isfinite(sc) or market_lambda <= 0:
@@ -1001,7 +1022,7 @@ def update_power_ratings(
                 S = 1e-6
             k = v_fav / S
             _apply_net_shift(fav, k * e)
-
+    
         def _market_anchor_two_sided(home: str, away: str, spread_close_home: float):
             sc = float(spread_close_home)
             if not np.isfinite(sc) or market_lambda <= 0:
@@ -1020,17 +1041,17 @@ def update_power_ratings(
             ka = v_a / S
             _apply_net_shift(home,  kh * e)
             _apply_net_shift(away, -ka * e)
-
+    
         history_batch: list[dict] = []
         BATCH_SZ = 50_000
-        utc_now_for_sos_decay = pd.Timestamp.now(tz="UTC")  # only used for decay weights
+        utc_now_for_sos_decay = pd.Timestamp.now(tz="UTC")  # only used for SoS decay weights
         last_game_ts = None
-
+    
         mu = None
         mu_alpha = 0.02
-
+    
         market_min_games = int(MARKET_MIN_GAMES_BY_SPORT.get(sport.upper(), 0))
-
+    
         for chunk in load_games_stream(
             sport, aliases, cutoff=window_start, page_rows=200_000,
             project_table_market=project_table_market, sharp_books=SHARP_BOOKS_DEFAULT
@@ -1039,18 +1060,20 @@ def update_power_ratings(
             chunk["Snapshot_TS"] = pd.to_datetime(chunk["Snapshot_TS"], utc=True, errors="coerce")
             chunk = chunk.dropna(subset=["Game_Start"])
             chunk = chunk.sort_values(["Game_Start", "Snapshot_TS"], kind="mergesort")
-
+    
             for _, g in chunk.iterrows():
                 h, a = str(g.Home_Team), str(g.Away_Team)
                 gs_ts = pd.to_datetime(g.Game_Start, utc=True, errors="coerce")
                 if pd.isna(gs_ts):
                     continue
-
+    
+                # never allow time to go backward
                 if last_game_ts is not None and gs_ts < last_game_ts:
                     continue
-
+    
                 hs, as_ = float(g.Score_Home_Score), float(g.Score_Away_Score)
-
+    
+                # season gap soft reset
                 if last_game_ts is not None:
                     gap = (gs_ts - last_game_ts).days
                     if gap >= season_gap_days:
@@ -1060,33 +1083,51 @@ def update_power_ratings(
                             off_v[t]  = min(400.0, _ov(t) + 60.0)
                             def_v[t]  = min(400.0, _dv(t) + 60.0)
                 last_game_ts = gs_ts
-
-                # count games (used for gating)
+    
+                # count games
                 games_played[h] = games_played.get(h, 0) + 1
                 games_played[a] = games_played.get(a, 0) + 1
-
+    
+                # update league average points
                 pts_per_team = 0.5 * (hs + as_)
                 mu = pts_per_team if mu is None else (1.0 - mu_alpha) * mu + mu_alpha * pts_per_team
-
+    
+                # MOV (used only for downweighting / market anchoring)
                 mov = _cap(hs - as_)
+                mov_abs = abs(mov)
+    
+                # --------------------------
+                # ✅ OBSERVATION VARIANCE FIXES
+                # --------------------------
                 obs_var_pts = sigma_pts ** 2
-                if (abs(mov) >= blowout_mov) and (int(gs_ts.month) >= late_month_start):
+    
+                # ✅ ALWAYS-ON blowout protection (remove month gate)
+                if mov_abs >= blowout_mov:
                     obs_var_pts *= blowout_var_mult
-
+    
+                # ✅ Smooth downweight for big margins (prevents single-game whiplash)
+                if mov_abs > smooth_mov_start:
+                    obs_var_pts *= (1.0 + smooth_mov_slope * (mov_abs - smooth_mov_start))
+    
+                # ✅ Points outlier guard (prevents 150-pt games dominating)
+                if max(hs, as_) >= pts_outlier_thresh:
+                    obs_var_pts *= pts_outlier_mult
+    
+                # back-to-back guard (if these cols exist on the row)
                 if hasattr(g, "Home_Rest_Days") and hasattr(g, "Away_Rest_Days"):
                     try:
                         if float(getattr(g, "Home_Rest_Days")) <= 0 or float(getattr(g, "Away_Rest_Days")) <= 0:
                             obs_var_pts *= (b2b_sigma_mult ** 2)
                     except Exception:
                         pass
-
+    
+                # points updates (home and away)
                 hfa_adj_home = 0.5 * HFA_pts
                 hfa_adj_away = -0.5 * HFA_pts
-
                 _update_off_def_for_points(h, a, hs, mu, hfa_adj_home, obs_var_pts)
                 _update_off_def_for_points(a, h, as_, mu, hfa_adj_away, obs_var_pts)
-
-                # ✅ market anchoring gated by games played (and lambda>0)
+    
+                # market anchoring gated by games played (and lambda>0)
                 sc = g.Spread_Close
                 if pd.notna(sc) and market_lambda > 0:
                     if (games_played.get(h, 0) >= market_min_games) and (games_played.get(a, 0) >= market_min_games):
@@ -1094,64 +1135,69 @@ def update_power_ratings(
                             _market_anchor_favored_only(h, a, float(sc))
                         else:
                             _market_anchor_two_sided(h, a, float(sc))
-
-                # ✅ only accumulate SoS if we intend to use it
+    
+                # SoS accumulation ONLY if we intend to use it
                 if sos_gamma > 0:
                     w = _exp_decay_weight(gs_ts, utc_now_for_sos_decay, sos_hl)
                     sos_num[h] = _safe_get(sos_num, h) + w * float(_net(a))
                     sos_num[a] = _safe_get(sos_num, a) + w * float(_net(h))
                     sos_den[h] = _safe_get(sos_den, h) + w
                     sos_den[a] = _safe_get(sos_den, a) + w
-
+    
+                # evolve state
                 for t in (h, a):
                     off_m[t] = phi * _om(t)
                     def_m[t] = phi * _dm(t)
                     off_v[t] = (phi**2) * _ov(t) + sigma_eta**2
                     def_v[t] = (phi**2) * _dv(t) + sigma_eta**2
-
-                # ✅ history timestamps always on Game_Start axis (leakage-safe)
+    
+                # history timestamps always on Game_Start axis (leakage-safe)
                 ts = gs_ts
                 tag = "backfill" if window_start is None else "incremental"
-
+    
                 history_batch.append({"Sport": sport, "Team": h, "Rating": 1500.0 + float(_net(h)),
                                       "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
                 history_batch.append({"Sport": sport, "Team": a, "Rating": 1500.0 + float(_net(a)),
                                       "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
-
+    
                 if len(history_batch) >= BATCH_SZ:
                     upsert_history_rows(pd.DataFrame(history_batch))
                     history_batch.clear()
-
+    
             del chunk
             gc.collect()
-
+    
         if history_batch:
             upsert_history_rows(pd.DataFrame(history_batch))
             history_batch.clear()
-
+    
         teams = sorted(set(list(off_m.keys()) + list(def_m.keys())))
         if not teams:
             return []
-
+    
         raw_R = np.array([_net(t) for t in teams], dtype=float)
-
-        # ✅ SoS only for college, and only after min games
+    
+        # ✅ early-sample shrinkage (prevents "one blowout makes them elite")
+        gp = np.array([games_played.get(t, 0) for t in teams], dtype=float)
+        shrink = gp / (gp + float(shrink_prior_games))
+        raw_R = raw_R * shrink
+    
+        # ✅ SoS only when enabled, and only after sos_min_games
         if sos_gamma > 0:
             sos = np.array([(_safe_get(sos_num, t) / max(_safe_get(sos_den, t), 1e-9)) for t in teams], dtype=float)
             sos = np.where(np.isfinite(sos), sos, np.nan)
             league_mean_R = float(np.nanmean(raw_R)) if np.isfinite(np.nanmean(raw_R)) else 0.0
             sos = np.where(np.isnan(sos), league_mean_R, sos)
-
-            gp = np.array([games_played.get(t, 0) for t in teams], dtype=float)
+    
             sos_adj = sos_gamma * (sos - league_mean_R)
-            sos_adj = np.where(gp >= float(sos_min_games), sos_adj, 0.0)  # gate early
+            sos_adj = np.where(gp >= float(sos_min_games), sos_adj, 0.0)
             adj_R = raw_R + sos_adj
         else:
             adj_R = raw_R
-
+    
         # ✅ current timestamp aligned to last processed game start (so deltas are meaningful)
         current_ts = last_game_ts if last_game_ts is not None else pd.Timestamp.now(tz="UTC")
-
+    
         return [{"Sport": sport, "Team": t, "Rating": 1500.0 + float(r),
                  "Method": "elo_kalman", "Updated_At": current_ts} for t, r in zip(teams, adj_R)]
 
