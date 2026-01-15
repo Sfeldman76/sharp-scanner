@@ -13434,7 +13434,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                     if diag_rows.empty:
                         continue
            
-                    ratings_df = enrich_power_for_training_lowmem(
+                    ratings_current_df = enrich_power_for_training_lowmem(
                         df=diag_rows[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
                         bq=bq_client,
                         sport_aliases=sport_aliases,
@@ -13443,7 +13443,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                         rating_lag_hours=10_000.0,  # forces always fallback to base (not useful)
                     )
                     diag_rows = diag_rows.merge(
-                        ratings_df[['Sport','Home_Team_Norm','Away_Team_Norm',
+                        ratings_current_df[['Sport','Home_Team_Norm','Away_Team_Norm',
                                     'Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff']],
                         on=['Sport','Home_Team_Norm','Away_Team_Norm'],
                         how='left'
