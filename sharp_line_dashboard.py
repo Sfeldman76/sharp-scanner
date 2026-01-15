@@ -3859,7 +3859,7 @@ def attach_why_all_features(df_in: pd.DataFrame, bundle, model, why_rules=WHY_RU
                                                 map(int, rule_hits)))
     return df
 
-def wmem(
+def enrich_power_for_training_lowmem(
     df: pd.DataFrame,
     sport_aliases: dict | None = None,           # optional
     bq=None,                                     # pass your bigquery.Client
