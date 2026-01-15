@@ -4314,7 +4314,6 @@ def enrich_and_grade_for_training(
         table_history=table_history,
         pad_days=pad_days,
         rating_lag_hours=12.0,  
-        allow_equal_asof=True, 
         project=project,
     )
 
