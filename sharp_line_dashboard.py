@@ -7202,37 +7202,35 @@ def train_sharp_model_from_bq(
 
     # Latest snapshot per market/game/outcome
     #-----do this once right before enrichment) ----
-    df_bt["Sport"] = df_bt["Sport"].astype(str).str.upper().str.strip()
-    df_bt["Home_Team_Norm"] = df_bt["Home_Team_Norm"].astype(str).str.lower().str.strip()
-    df_bt["Away_Team_Norm"] = df_bt["Away_Team_Norm"].astype(str).str.lower().str.strip()
-    df_bt["Game_Start"] = pd.to_datetime(df_bt["Game_Start"], utc=True, errors="coerce")
-    
+    df_latest = (
+        df_bt
+        .sort_values('Snapshot_Timestamp')
+        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
+    )
+     
     with st.spinner("Training…"):
         try:
-            # ✅ enrich at GAME grain (fast + avoids duplicates)
-            ratings_df = enrich_power_for_training_lowmem(
-                df=df_bt[["Sport", "Home_Team_Norm", "Away_Team_Norm", "Game_Start"]].drop_duplicates(),
+            df_bt = enrich_power_for_training_lowmem(
+                df=df_bt,
                 bq=bq_client,
                 sport_aliases=SPORT_ALIASES,
-                table_history="sharplogger.sharp_data.ratings_history",
-                pad_days=30,
+                pad_days=10,
                 rating_lag_hours=12.0,
-                debug_asof_cols=False,
             )
         except Exception as e:
             st.exception(e)
             st.stop()
+
+
+    # === Build hist_df (closers + finals) once, then ρ lookups once ===
+    sport_label = sport.upper()
     
-    # ✅ merge onto df_bt so all downstream df_market slices inherit ratings
-    df_bt = df_bt.merge(
-        ratings_df[[
-            "Sport", "Home_Team_Norm", "Away_Team_Norm", "Game_Start",
-            "Home_Power_Rating", "Away_Power_Rating", "Power_Rating_Diff"
-        ]].drop_duplicates(["Sport", "Home_Team_Norm", "Away_Team_Norm", "Game_Start"]),
-        on=["Sport", "Home_Team_Norm", "Away_Team_Norm", "Game_Start"],
-        how="left",
-        validate="many_to_one",
-    )
+    # Ensure df_latest has teams
+    if not {"Home_Team_Norm","Away_Team_Norm"}.issubset(df_latest.columns):
+        df_latest = df_latest.merge(
+            df_bt[["Game_Key","Home_Team_Norm","Away_Team_Norm"]].drop_duplicates("Game_Key"),
+            on="Game_Key", how="left"
+        )
 
     # === Build hist_df (closers + finals) once, then ρ lookups once ===
     sport_label = sport.upper()
