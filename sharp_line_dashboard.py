@@ -8792,7 +8792,7 @@ def train_sharp_model_from_bq(
             'PR_Team_Rating','PR_Opp_Rating',
             'PR_Rating_Diff',#'PR_Abs_Rating_Diff',
             #'Outcome_Model_Spread','Outcome_Market_Spread',
-            #'Outcome_Spread_Edge',
+            'Outcome_Spread_Edge',
             #'Outcome_Cover_Prob',
             'model_fav_vs_market_fav_agree',
             'TOT_Proj_Total_Baseline',
@@ -8831,16 +8831,16 @@ def train_sharp_model_from_bq(
             "Team_Recent_Cover_Rate","Team_Recent_Cover_Rate_Home","Team_Recent_Cover_Rate_Away",
            
             # flags
-            #"On_Cover_Streak","On_Cover_Streak_Home","On_Cover_Streak_Away",
-            #"After_Win_Flag","Revenge_Flag",
-            #"Current_Win_Streak_Prior", "Current_Loss_Streak_Prior",
-            #"H2H_Win_Pct_Prior",  "Opp_WinPct_Prior",
-            #"Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
-            #"Wins_Last5_Prior",
-            #"Margin_Last5_Prior",
-            #"Days_Since_Last_Game",
-            #"Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
-            #"Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
+            "On_Cover_Streak","On_Cover_Streak_Home","On_Cover_Streak_Away",
+            "After_Win_Flag","Revenge_Flag",
+            "Current_Win_Streak_Prior", "Current_Loss_Streak_Prior",
+            "H2H_Win_Pct_Prior",  "Opp_WinPct_Prior",
+            "Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
+            "Wins_Last5_Prior",
+            "Margin_Last5_Prior",
+            "Days_Since_Last_Game",
+            "Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
+            "Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
        
             
         ]
