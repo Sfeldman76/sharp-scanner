@@ -4359,6 +4359,8 @@ def enrich_and_grade_for_training(
     out['Outcome_Cover_Prob']    = np.where(is_fav, out['Fav_Cover_Prob'].values, out['Dog_Cover_Prob'].values).astype('float32')
 
     return out
+
+
 def favorite_centric_from_powerdiff_lowmem(df_games: pd.DataFrame) -> pd.DataFrame:
     g = df_games.copy()
     g['Sport'] = g['Sport'].astype(str).str.upper()
@@ -7199,26 +7201,38 @@ def train_sharp_model_from_bq(
            .reset_index(drop=True))
 
     # Latest snapshot per market/game/outcome
-    # === Get latest snapshot per Game_Key + Market + Outcome ===
-    df_latest = (
-        df_bt
-        .sort_values('Snapshot_Timestamp')
-        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
-    )
-     
-   
+    #-----do this once right before enrichment) ----
+    df_bt["Sport"] = df_bt["Sport"].astype(str).str.upper().str.strip()
+    df_bt["Home_Team_Norm"] = df_bt["Home_Team_Norm"].astype(str).str.lower().str.strip()
+    df_bt["Away_Team_Norm"] = df_bt["Away_Team_Norm"].astype(str).str.lower().str.strip()
+    df_bt["Game_Start"] = pd.to_datetime(df_bt["Game_Start"], utc=True, errors="coerce")
+    
     with st.spinner("Training…"):
         try:
+            # ✅ enrich at GAME grain (fast + avoids duplicates)
             ratings_df = enrich_power_for_training_lowmem(
-                df=df_bt,
+                df=df_bt[["Sport", "Home_Team_Norm", "Away_Team_Norm", "Game_Start"]].drop_duplicates(),
                 bq=bq_client,
                 sport_aliases=SPORT_ALIASES,
+                table_history="sharplogger.sharp_data.ratings_history",
                 pad_days=30,
                 rating_lag_hours=12.0,
+                debug_asof_cols=False,
             )
         except Exception as e:
             st.exception(e)
             st.stop()
+    
+    # ✅ merge onto df_bt so all downstream df_market slices inherit ratings
+    df_bt = df_bt.merge(
+        ratings_df[[
+            "Sport", "Home_Team_Norm", "Away_Team_Norm", "Game_Start",
+            "Home_Power_Rating", "Away_Power_Rating", "Power_Rating_Diff"
+        ]].drop_duplicates(["Sport", "Home_Team_Norm", "Away_Team_Norm", "Game_Start"]),
+        on=["Sport", "Home_Team_Norm", "Away_Team_Norm", "Game_Start"],
+        how="left",
+        validate="many_to_one",
+    )
 
     # === Build hist_df (closers + finals) once, then ρ lookups once ===
     sport_label = sport.upper()
