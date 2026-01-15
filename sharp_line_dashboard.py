@@ -3942,8 +3942,9 @@ def enrich_power_for_training_lowmem(
     end_iso = pd.to_datetime(gmax, utc=True).isoformat()
 
     # ---------- tiny in-function cache ----------
-    if not hasattr(wmem, "_ratings_cache"):
+    if not hasattr(enrich_power_for_training_lowmem, "_ratings_cache"):
         enrich_power_for_training_lowmem._ratings_cache = {}
+    
     _CACHE = enrich_power_for_training_lowmem._ratings_cache
 
     # Preferred method per sport (history only)
