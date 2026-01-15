@@ -7206,19 +7206,19 @@ def train_sharp_model_from_bq(
         .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
     )
      
+   
     with st.spinner("Training…"):
         try:
-            df_bt = (
+            ratings_df = enrich_power_for_training_lowmem(
                 df=df_bt,
                 bq=bq_client,
                 sport_aliases=SPORT_ALIASES,
                 pad_days=30,
-                rating_lag_hours=12.0,  
+                rating_lag_hours=12.0,
             )
         except Exception as e:
             st.exception(e)
             st.stop()
-
 
     # === Build hist_df (closers + finals) once, then ρ lookups once ===
     sport_label = sport.upper()
