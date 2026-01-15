@@ -2628,6 +2628,10 @@ from sklearn.base import clone
 from sklearn.metrics import roc_auc_score, log_loss
 import numpy as np
 
+from copy import deepcopy
+import numpy as np
+from sklearn.base import clone
+from sklearn.metrics import roc_auc_score, log_loss
 
 def _cv_auc_for_feature_set(
     model_proto,
@@ -2656,21 +2660,57 @@ def _cv_auc_for_feature_set(
     orient_max_candidates=None,   # cap how many features to even try (None = all numeric)
     orient_use_corr_prefilter=False,
     orient_corr_abs_min=0.01,
+
+    # ---- NEW: leakage guards ----
+    game_keys=None,               # pd.Series/np.array aligned to X rows (e.g., feat_Game_Key)
+    enforce_no_game_overlap=True, # raise if any game appears in both train & val in a fold
+    leak_col_patterns=None,       # list[str] substrings to forbid in feature_list
+    drop_forbidden_features=True, # drop forbidden features (else raise)
 ):
     """
     Evaluate a fixed feature set with OOF preds and optional INDIVIDUAL FEATURE flips.
     No global proba flipping. No fold-by-fold proba flipping.
+
+    Adds two critical safeguards:
+      1) Optional fold-level "no Game_Key overlap" leak check (huge source of fake AUC).
+      2) Optional feature blacklist (e.g., Spread_Cover_Flag, Closing_Spread_For_Team, scores).
 
     NEW: Directed feature orientation:
       - Quick-screen on 1 (or few) folds to decide whether to run full CV.
       - Early-abort full CV for a candidate flip if it can't beat current best.
     """
 
+    # ---- normalize folds to a concrete list (so quick-screen can index) ----
+    folds = list(folds)
+
     y = np.asarray(y, int).reshape(-1)
     n = len(y)
+    if len(y) != len(X):
+        raise ValueError(f"X and y length mismatch: len(X)={len(X)} len(y)={len(y)}")
+
+    # ---- leakage/feature blacklist ----
+    if leak_col_patterns is None:
+        leak_col_patterns = [
+            "SHARP_COVER_RESULT", "cover_flag", "Spread_Cover_Flag",
+            "Team_Score", "Opp_Score", "Point_Diff", "Win_Flag",
+            "Closing_Spread_For_Team",
+            "Score_", "POST_", "Actual_", "FINAL_",
+        ]
 
     # keep only cols present
     feature_list = [f for f in feature_list if f in X.columns]
+
+    # drop/raise on forbidden
+    forbidden = [f for f in feature_list if any(p in f for p in leak_col_patterns)]
+    if forbidden:
+        msg = f"[LEAK-GUARD] Forbidden feature(s) present: {forbidden[:50]}{'...' if len(forbidden)>50 else ''}"
+        if drop_forbidden_features:
+            if debug:
+                log_func(msg + " (dropping)")
+            feature_list = [f for f in feature_list if f not in forbidden]
+        else:
+            raise RuntimeError(msg)
+
     if len(feature_list) == 0:
         return {
             "feature_list": [],
@@ -2707,7 +2747,6 @@ def _cv_auc_for_feature_set(
                 x_f = np.asarray(X[f], float)
                 if np.all(~np.isfinite(x_f)):
                     continue
-                # safe corr: center + dot
                 xf = x_f.copy()
                 m = np.nanmean(xf)
                 xf = np.where(np.isfinite(xf), xf - m, 0.0)
@@ -2723,6 +2762,22 @@ def _cv_auc_for_feature_set(
     if orient_max_candidates is not None and numeric_feats:
         numeric_feats = numeric_feats[: int(max(1, orient_max_candidates))]
 
+    # ---- fold leakage guard: no game overlap ----
+    def _assert_no_game_overlap(tr_idx, val_idx):
+        if not enforce_no_game_overlap:
+            return
+        if game_keys is None:
+            return
+        g = np.asarray(game_keys)
+        tr = set(map(str, g[tr_idx]))
+        va = set(map(str, g[val_idx]))
+        inter = tr & va
+        if inter:
+            sample = list(inter)[:10]
+            raise RuntimeError(
+                f"[LEAK] Game overlap between train/val: {len(inter)} games. Sample={sample}"
+            )
+
     def _oof_metrics_for_X(
         X_use,
         feats,
@@ -2732,21 +2787,16 @@ def _cv_auc_for_feature_set(
     ):
         """
         Full CV OOF metrics.
-        NEW: early abort if even perfect remaining folds can't beat current best score.
+        Early abort if even perfect remaining folds can't beat current best score.
         """
         oof = np.full(n, np.nan, dtype=float)
-
-        # If no abort target, just run normally
         do_abort = abort_if_cannot_beat_score is not None and np.isfinite(abort_if_cannot_beat_score)
         n_folds = len(folds)
-
-        # For abort heuristic, we'll track partial fold metrics and bound best possible score.
-        # AUC upper bound = 1.0; logloss/brier lower bound = 0.0 => score upper bound.
-        # score = auc_w*auc - ll_w*ll - brier_w*br
-        # best_possible_remaining score contribution <= auc_w*1.0 (and ll/br add 0 penalty)
         auc_fold_vals = []
 
         for fold_i, (tr_idx, val_idx) in enumerate(folds, 1):
+            _assert_no_game_overlap(tr_idx, val_idx)
+
             X_tr  = X_use.iloc[tr_idx][feats]
             X_val = X_use.iloc[val_idx][feats]
             y_tr  = y[tr_idx]
@@ -2760,11 +2810,11 @@ def _cv_auc_for_feature_set(
 
             if debug:
                 try:
-                    auc_fold = roc_auc_score(np.asarray(y_val, int), proba)
+                    auc_fold_dbg = roc_auc_score(np.asarray(y_val, int), np.clip(proba, eps, 1 - eps))
                 except Exception:
-                    auc_fold = np.nan
+                    auc_fold_dbg = np.nan
                 log_func(
-                    f"[AUC-DBG] fold={fold_i:02d} auc={auc_fold:.4f} "
+                    f"[AUC-DBG] fold={fold_i:02d} auc={auc_fold_dbg:.4f} "
                     f"y_mean={float(np.mean(y_val)):.4f} p_mean={float(np.mean(proba)):.4f}"
                 )
 
@@ -2772,7 +2822,6 @@ def _cv_auc_for_feature_set(
 
             # ----- early abort check (cheap) -----
             if do_abort:
-                # compute fold AUC quickly; if can't compute, treat as 0.5 (neutral)
                 try:
                     auc_fold = roc_auc_score(np.asarray(y_val, int), np.clip(proba, eps, 1 - eps))
                     if not np.isfinite(auc_fold):
@@ -2783,9 +2832,8 @@ def _cv_auc_for_feature_set(
 
                 done = len(auc_fold_vals)
                 left = n_folds - done
-                # optimistic bound on mean AUC if remaining folds were perfect
                 mean_auc_best_possible = (sum(auc_fold_vals) + left * 1.0) / float(n_folds)
-                best_possible_score = (auc_weight * mean_auc_best_possible)  # ll/br optimistic at 0
+                best_possible_score = (auc_weight * mean_auc_best_possible)  # optimistic ll/br = 0
                 if best_possible_score < float(abort_if_cannot_beat_score) + float(abort_margin):
                     return {
                         "oof_proba": oof,
@@ -2819,6 +2867,8 @@ def _cv_auc_for_feature_set(
         }
 
     def _apply_flip_set(X_base, flip_set, feats):
+        if not flip_set:
+            return X_base
         X2 = X_base.copy()
         for c in flip_set:
             if c in feats:
@@ -2828,10 +2878,7 @@ def _cv_auc_for_feature_set(
     def _quick_screen_auc_for_toggle(X_base, feats, f, flip_set):
         """
         Quick-screen a candidate toggle using 1 (or few) folds.
-        We compute mean AUC on the first `orient_quick_folds` folds for:
-          - current flip_set
-          - flip_set toggled on f
-        and decide whether toggling is promising.
+        Computes mean AUC on the first `orient_quick_folds` folds.
         """
         q = int(max(1, orient_quick_folds))
         q = min(q, len(folds))
@@ -2841,6 +2888,8 @@ def _cv_auc_for_feature_set(
             X_try = _apply_flip_set(X_base, trial_set, feats)
             for i in range(q):
                 tr_idx, val_idx = folds[i]
+                _assert_no_game_overlap(tr_idx, val_idx)
+
                 X_tr  = X_try.iloc[tr_idx][feats]
                 X_val = X_try.iloc[val_idx][feats]
                 y_tr  = y[tr_idx]
@@ -2884,8 +2933,8 @@ def _cv_auc_for_feature_set(
         )
 
     # --- optional feature orientation (FAST, DIRECTED) ---
-    do_orient = bool(enable_feature_flips and orient_features and max_feature_flips and numeric_feats)
     max_feature_flips = int(max(0, max_feature_flips))
+    do_orient = bool(enable_feature_flips and orient_features and (max_feature_flips > 0) and numeric_feats)
 
     if do_orient:
         for pass_i in range(int(max(1, orient_passes))):
@@ -3016,6 +3065,7 @@ def _auto_select_k_by_auc(
             enable_feature_flips=enable_feature_flips,
             max_feature_flips=max_feature_flips,
             orient_passes=orient_passes,
+            enforce_no_game_overlap=True,
         )
 
         auc_k = float(res.get("oof_auc_best", np.nan))
@@ -6860,6 +6910,56 @@ def fit_temperature_on_oof(y, p, grid=None):
             bestLL, bestT = ll, float(T)
     return bestT, bestLL
 
+# ---------------------------
+# Leakage guard: snapshot must be <= game start
+# ---------------------------
+def _audit_and_filter_snapshot_timing(df: pd.DataFrame, *, log=print, grace_minutes: float = 0.0) -> pd.DataFrame:
+    if df.empty:
+        log("[TIME-AUDIT] df is empty; skipping.")
+        return df
+
+    snap_candidates = [
+        "Snapshot_Timestamp", "snapshot_timestamp",
+        "Inserted_Timestamp", "Inserted_At",
+        "SnapshotTS", "Created_At",
+    ]
+    snap_col = next((c for c in snap_candidates if c in df.columns), None)
+
+    gs_candidates = ["feat_Game_Start", "Game_Start", "Commence_Hour", "Commence_Time"]
+    gs_col = next((c for c in gs_candidates if c in df.columns), None)
+
+    if snap_col is None:
+        log("[TIME-AUDIT] No snapshot timestamp column found; cannot audit timing.")
+        return df
+    if gs_col is None:
+        log("[TIME-AUDIT] No game start column found; cannot audit timing.")
+        return df
+
+    snap = pd.to_datetime(df[snap_col], utc=True, errors="coerce")
+    gs   = pd.to_datetime(df[gs_col],   utc=True, errors="coerce")
+
+    if grace_minutes and float(grace_minutes) > 0:
+        gs = gs + pd.to_timedelta(float(grace_minutes), unit="m")
+
+    bad = snap.notna() & gs.notna() & (snap > gs)
+    n_bad = int(bad.sum())
+    n_all = int(len(df))
+
+    if n_bad:
+        cols = [c for c in ["feat_Game_Key", "Game_Key", "Book", "Bookmaker", "Market", "market2", "Outcome", "outcome2"] if c in df.columns]
+        cols += [snap_col, gs_col]
+        ex = df.loc[bad, cols].head(25)
+        log(f"🚨 [LEAK] {n_bad}/{n_all} rows have {snap_col} AFTER {gs_col} (grace={grace_minutes}m). Showing up to 25:")
+        log(ex)
+    else:
+        log(f"✅ [TIME-AUDIT] OK: 0/{n_all} rows where {snap_col} > {gs_col} (grace={grace_minutes}m).")
+
+    df2 = df.loc[~bad].copy()
+    if n_bad:
+        log(f"🧹 [TIME-AUDIT] Filtered out {n_bad} leaking rows; remaining={len(df2)}.")
+    return df2
+
+
 def train_sharp_model_from_bq(
     *,
     sport: str = "NBA",
@@ -7441,13 +7541,23 @@ def train_sharp_model_from_bq(
 
         df_market = df_bt[df_bt["Market"].astype(str).str.lower().str.strip() == mkt].copy()
     
-      
-    
+                # ---------------------------
+                # Streamlit-friendly logger
+        def _log(msg):
+            try:
+                status.write(msg)
+            except Exception:
+                print(msg)
+        
+        # 0-minute grace by default. If your timestamps are known noisy, try grace_minutes=1.0
+        df_market = _audit_and_filter_snapshot_timing(df_market, log=_log, grace_minutes=0.0)
+        df_market = df_market.loc[~(snap.notna() & gs.notna() & (snap > gs))].copy()
         # --- Canonical side filter ---
         # === Canonical side filtering ONLY (training subset) ===
         if mkt == "totals":
             # keep Over only (fine for totals modeling)
             df_market = df_market[df_market["Outcome"].astype(str).str.lower().str.strip() == "over"]
+            
         
         elif mkt == "spreads":
             # ✅ keep BOTH favorite & dog rows for training
@@ -8659,8 +8769,8 @@ def train_sharp_model_from_bq(
             "Book_Path_Speed_Lift",
 
             # Power ratings / edges
-            'PR_Team_Rating','PR_Opp_Rating',
-            'PR_Rating_Diff',#'PR_Abs_Rating_Diff',
+            #'PR_Team_Rating','PR_Opp_Rating',
+            #'PR_Rating_Diff',#'PR_Abs_Rating_Diff',
             #'Outcome_Model_Spread','Outcome_Market_Spread',
             #'Outcome_Spread_Edge',
             #'Outcome_Cover_Prob',
@@ -8674,7 +8784,7 @@ def train_sharp_model_from_bq(
             'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
             'ATS_EB_Rate_Home',
             'ATS_EB_Rate_Away',
-            'PR_Model_Agree_H2H_Flag',#'PR_Market_Agree_H2H_Flag',
+            #'PR_Model_Agree_H2H_Flag',#'PR_Market_Agree_H2H_Flag',
             "SpreadTotal_Rho","SpreadTotal_Synergy","SpreadTotal_Sign",
             "SpreadML_Rho","SpreadML_Synergy","SpreadML_Sign","Spread_ML_ProbGap",
             "TotalML_Rho","TotalML_Synergy","TotalML_Sign",
@@ -8701,16 +8811,16 @@ def train_sharp_model_from_bq(
             "Team_Recent_Cover_Rate","Team_Recent_Cover_Rate_Home","Team_Recent_Cover_Rate_Away",
            
             # flags
-            "On_Cover_Streak","On_Cover_Streak_Home","On_Cover_Streak_Away",
-            "After_Win_Flag","Revenge_Flag",
-            "Current_Win_Streak_Prior", "Current_Loss_Streak_Prior",
-            "H2H_Win_Pct_Prior",  "Opp_WinPct_Prior",
-            "Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
-            "Wins_Last5_Prior",
-            "Margin_Last5_Prior",
-            "Days_Since_Last_Game",
-            "Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
-            "Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
+            #"On_Cover_Streak","On_Cover_Streak_Home","On_Cover_Streak_Away",
+            #"After_Win_Flag","Revenge_Flag",
+            #"Current_Win_Streak_Prior", "Current_Loss_Streak_Prior",
+            #"H2H_Win_Pct_Prior",  "Opp_WinPct_Prior",
+            #"Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
+            #"Wins_Last5_Prior",
+            #"Margin_Last5_Prior",
+            #"Days_Since_Last_Game",
+            #"Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
+            #"Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
        
             
         ]
