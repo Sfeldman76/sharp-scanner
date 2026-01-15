@@ -7560,7 +7560,7 @@ def train_sharp_model_from_bq(
         df_market, timing_stats = _audit_and_filter_snapshot_timing(
             df_market,
             log=_log,
-            grace_minutes=2.0,
+            grace_minutes=30.0,
             return_stats=True,
         )
         
