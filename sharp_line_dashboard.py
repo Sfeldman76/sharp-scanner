@@ -8789,8 +8789,8 @@ def train_sharp_model_from_bq(
             "Book_Path_Speed_Lift",
 
             # Power ratings / edges
-            #'PR_Team_Rating','PR_Opp_Rating',
-            #'PR_Rating_Diff',#'PR_Abs_Rating_Diff',
+            'PR_Team_Rating','PR_Opp_Rating',
+            'PR_Rating_Diff',#'PR_Abs_Rating_Diff',
             #'Outcome_Model_Spread','Outcome_Market_Spread',
             #'Outcome_Spread_Edge',
             #'Outcome_Cover_Prob',
