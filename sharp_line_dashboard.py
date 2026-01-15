@@ -7377,7 +7377,7 @@ def train_sharp_model_from_bq(
         value_col="Value",
         outcome_col="Outcome_Norm",
         pad_days=30,
-        allow_forward_hours=0.0,  # strict backward-only
+        rating_lag_hours=12.0,   # strict backward-only
         table_history="sharplogger.sharp_data.ratings_history",
         project="sharplogger",
     )
