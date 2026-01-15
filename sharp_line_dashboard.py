@@ -6995,6 +6995,117 @@ def _audit_and_filter_snapshot_timing(
 
     return (df2, stats) if return_stats else df2
 
+# =========================================================
+# (A) ADD THIS FUNCTION near build_cover_streaks_game_level()
+# =========================================================
+def build_schedule_density_game_level(
+    df_bt_prepped: pd.DataFrame,
+    *,
+    sport: str,
+    market: str,
+    windows_days: tuple[int, ...] = (2, 4, 7),
+    b2b_threshold_days: float = 1.0,
+) -> pd.DataFrame:
+    """
+    Leakage-safe schedule density features at GAME grain (one row per team-game).
+
+    Outputs (per Sport/Market/Team/Game_Key):
+      - Days_Since_Last_Game
+      - Games_Last_{W}_Days for W in windows_days
+      - Is_B2B (Days_Since_Last_Game <= b2b_threshold_days)
+      - Is_3in4 (Games_Last_4_Days >= 3)  [only if 4 in windows]
+    """
+    if df_bt_prepped is None or df_bt_prepped.empty:
+        return pd.DataFrame(columns=["Sport", "Market", "Game_Key", "Team"])
+
+    sport_u  = str(sport).upper().strip()
+    market_l = _norm_market(market)
+
+    time_col = "feat_Game_Start" if "feat_Game_Start" in df_bt_prepped.columns else "Game_Start"
+    need = ["Sport", "Market", "Game_Key", "Team", time_col]
+    missing = [c for c in need if c not in df_bt_prepped.columns]
+    if missing:
+        raise ValueError(f"build_schedule_density_game_level missing cols: {missing}")
+
+    d = df_bt_prepped.loc[
+        (df_bt_prepped["Sport"].astype(str).str.upper().str.strip() == sport_u) &
+        (df_bt_prepped["Market"].astype(str).str.lower().str.strip().map(_norm_market) == market_l),
+        need
+    ].copy()
+
+    if d.empty:
+        return pd.DataFrame(columns=["Sport", "Market", "Game_Key", "Team"])
+
+    # normalize keys
+    d["Sport"]  = d["Sport"].astype(str).str.upper().str.strip()
+    d["Market"] = d["Market"].astype(str).str.lower().str.strip().map(_norm_market)
+    d["Team"]   = d["Team"].astype(str).str.lower().str.strip()
+
+    # parse time axis (UTC)
+    d[time_col] = pd.to_datetime(d[time_col], errors="coerce", utc=True)
+
+    # one row per team-game (drop book/snapshot noise)
+    g = (
+        d.dropna(subset=["Game_Key", "Team", time_col])
+         .sort_values(["Sport", "Market", "Team", time_col, "Game_Key"])
+         .drop_duplicates(["Sport", "Market", "Team", "Game_Key"], keep="last")
+         .copy()
+    )
+
+    if g.empty:
+        return pd.DataFrame(columns=["Sport", "Market", "Game_Key", "Team"])
+
+    # build per-team arrays for fast searchsorted window counts
+    g = g.sort_values(["Sport", "Market", "Team", time_col, "Game_Key"]).reset_index(drop=True)
+
+    # Days since last game (leakage-safe because it's based on prior game time)
+    g["Days_Since_Last_Game"] = (
+        g.groupby(["Sport", "Market", "Team"])[time_col]
+         .diff()
+         .dt.total_seconds()
+         .div(86400.0)
+         .astype("float32")
+    )
+
+    # schedule density counts: number of PRIOR games in the last W days
+    # For each row i at time t_i, count games with t_j >= t_i - W days AND j < i
+    for W in windows_days:
+        out_col = f"Games_Last_{int(W)}_Days"
+        counts = np.zeros(len(g), dtype=np.int16)
+
+        # group indices for stable vectorized per-team computation
+        for _, idx in g.groupby(["Sport", "Market", "Team"], sort=False).indices.items():
+            idx = np.asarray(idx, dtype=np.int64)
+            t = g.loc[idx, time_col].values.astype("datetime64[ns]")
+
+            # convert to int64 nanos for searchsorted
+            t_ns = t.astype("datetime64[ns]").astype("int64")
+            # left boundary for each i
+            cutoff_ns = t_ns - np.int64(W) * np.int64(86400 * 1_000_000_000)
+
+            # left = first index with time >= cutoff
+            left = np.searchsorted(t_ns, cutoff_ns, side="left")
+            # position within this group is 0..len-1
+            pos = np.arange(len(idx), dtype=np.int64)
+            # prior count in window excludes current: pos - left
+            c = (pos - left).astype(np.int16)
+            counts[idx] = c
+
+        g[out_col] = counts.astype("int16")
+
+    # derived flags
+    g["Is_B2B"] = (g["Days_Since_Last_Game"] <= float(b2b_threshold_days)).astype("int8")
+
+    if 4 in windows_days:
+        # 3 prior games in last 4 days means "3-in-4 including today" (i.e., current game is the 3rd/4th)
+        # If you prefer ">=2 prior games" adjust threshold. Most people use >=2 prior games -> total >=3 in 4 days.
+        g["Is_3in4"] = (g["Games_Last_4_Days"] >= 2).astype("int8")  # 2 prior + current = 3-in-4
+    else:
+        g["Is_3in4"] = 0
+
+    return g[["Sport", "Market", "Game_Key", "Team", "Days_Since_Last_Game", "Is_B2B", "Is_3in4"]
+             + [f"Games_Last_{int(W)}_Days" for W in windows_days]]
+
 
 
 def train_sharp_model_from_bq(
@@ -7654,6 +7765,16 @@ def train_sharp_model_from_bq(
         df_bt_streaks["Sport"]  = df_bt_streaks["Sport"].astype(str).str.upper().str.strip()
         df_bt_streaks["Market"] = df_bt_streaks["Market"].astype(str).str.lower().str.strip().map(_norm_market)
         df_bt_streaks["Team"]   = df_bt_streaks["Team"].astype(str).str.lower().str.strip()
+        df_bt_sched = build_schedule_density_game_level(
+            df_prepped_mkt,
+            sport=sport,
+            market=mkt,
+            windows_days=(2, 4, 7),
+            b2b_threshold_days=1.0,
+        )
+        df_bt_sched["Sport"]  = df_bt_sched["Sport"].astype(str).str.upper().str.strip()
+        df_bt_sched["Market"] = df_bt_sched["Market"].astype(str).str.lower().str.strip().map(_norm_market)
+        df_bt_sched["Team"]   = df_bt_sched["Team"].astype(str).str.lower().str.strip()
 
         # normalize df_market keys + team mapping
         df_market["Outcome_Norm"]   = df_market["Outcome"].astype(str).str.lower().str.strip()
@@ -7718,7 +7839,12 @@ def train_sharp_model_from_bq(
             validate="1:1",
         )
 
-        
+        df_team_base = df_team_base.merge(
+            df_bt_sched,
+            on=["Sport","Market","Game_Key","Team"],
+            how="left",
+            validate="1:1",
+        )
         # sort for "last"
         df_team_base = df_team_base.sort_values(["Sport","Market","Team","Game_Start"])
         
@@ -8881,6 +9007,12 @@ def train_sharp_model_from_bq(
             "Days_Since_Last_Game",
             "Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
             "Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
+            "Days_Since_Last_Game",
+            "Games_Last_2_Days",
+            "Games_Last_4_Days",
+            "Games_Last_7_Days",
+            "Is_B2B",
+            "Is_3in4",
        
             
         ]
