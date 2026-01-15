@@ -7114,9 +7114,9 @@ def train_sharp_model_from_bq(
     # === New team ATS cover / margin stats (prior-only, last-5) ===
     team_cover_cols = [
         # overall cover signal (intentionally off for now)
-        #"Cover_Rate_Last5",
-        #"Cover_Rate_After_Win_Last5",
-        #"Cover_Rate_After_Loss_Last5",
+        "Cover_Rate_Last5",
+        "Cover_Rate_After_Win_Last5",
+        "Cover_Rate_After_Loss_Last5",
         # situational cover rates (intentionally off for now)
         #"Cover_Rate_Home_After_Home_Win_Last5",
         #"Cover_Rate_Home_After_Home_Loss_Last5",
@@ -7127,10 +7127,10 @@ def train_sharp_model_from_bq(
         #"Cover_Rate_Away_After_Away_Win_Last5",
         #"Cover_Rate_Away_After_Away_Loss_Last5",
         # margin distribution
-        #"ATS_Cover_Margin_Last5_Prior_Mean",
-        #"ATS_Cover_Margin_Last5_Prior_Std",
-        #"Market_Bucket",
-        #"Market_OddsProb_Bucket",
+        "ATS_Cover_Margin_Last5_Prior_Mean",
+        "ATS_Cover_Margin_Last5_Prior_Std",
+        "Market_Bucket",
+        "Market_OddsProb_Bucket",
      ]
     
     # (Opponent mirrors intentionally excluded per your note)
@@ -8831,9 +8831,9 @@ def train_sharp_model_from_bq(
             # Power ratings / edges
             'PR_Team_Rating','PR_Opp_Rating',
             'PR_Rating_Diff',#'PR_Abs_Rating_Diff',
-            #'Outcome_Model_Spread','Outcome_Market_Spread',
-            #'Outcome_Spread_Edge',
-            #'Outcome_Cover_Prob',
+            'Outcome_Model_Spread','Outcome_Market_Spread',
+            'Outcome_Spread_Edge',
+            'Outcome_Cover_Prob',
             'model_fav_vs_market_fav_agree',
             'TOT_Proj_Total_Baseline',
             'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
@@ -8844,7 +8844,7 @@ def train_sharp_model_from_bq(
             'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
             'ATS_EB_Rate_Home',
             'ATS_EB_Rate_Away',
-            #'PR_Model_Agree_H2H_Flag',#'PR_Market_Agree_H2H_Flag',
+            'PR_Model_Agree_H2H_Flag',#'PR_Market_Agree_H2H_Flag',
             "SpreadTotal_Rho","SpreadTotal_Synergy","SpreadTotal_Sign",
             "SpreadML_Rho","SpreadML_Synergy","SpreadML_Sign","Spread_ML_ProbGap",
             "TotalML_Rho","TotalML_Synergy","TotalML_Sign",
