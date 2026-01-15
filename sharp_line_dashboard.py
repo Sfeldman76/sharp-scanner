@@ -3859,7 +3859,7 @@ def attach_why_all_features(df_in: pd.DataFrame, bundle, model, why_rules=WHY_RU
                                                 map(int, rule_hits)))
     return df
 
-def enrich_power_for_training_lowmem(
+def wmem(
     df: pd.DataFrame,
     sport_aliases: dict | None = None,           # optional
     bq=None,                                     # pass your bigquery.Client
@@ -3942,7 +3942,7 @@ def enrich_power_for_training_lowmem(
     end_iso = pd.to_datetime(gmax, utc=True).isoformat()
 
     # ---------- tiny in-function cache ----------
-    if not hasattr(enrich_power_for_training_lowmem, "_ratings_cache"):
+    if not hasattr(wmem, "_ratings_cache"):
         enrich_power_for_training_lowmem._ratings_cache = {}
     _CACHE = enrich_power_for_training_lowmem._ratings_cache
 
@@ -13433,13 +13433,14 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                     diag_rows = diag_source[diag_source['Market'].astype(str).str.lower().str.strip().map(_canonical_market) == market_norm]
                     if diag_rows.empty:
                         continue
+           
                     ratings_df = enrich_power_for_training_lowmem(
                         df=diag_rows[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
-                        bq=bq_client,                                  # your BigQuery client
-                        sport_aliases=sport_aliases,                   # pass if you have it
+                        bq=bq_client,
+                        sport_aliases=sport_aliases,
                         table_history="sharplogger.sharp_data.ratings_current",
                         pad_days=365,
-                        allow_forward_hours=24*365
+                        rating_lag_hours=10_000.0,  # forces always fallback to base (not useful)
                     )
                     diag_rows = diag_rows.merge(
                         ratings_df[['Sport','Home_Team_Norm','Away_Team_Norm',
