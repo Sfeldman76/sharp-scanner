@@ -2652,7 +2652,7 @@ def _cv_auc_for_feature_set(
     brier_weight=0.10,
     eps=1e-6,
 
-    # ---- NEW: speed knobs for feature orientation ----
+    # ---- speed knobs for feature orientation ----
     orient_quick_folds=1,         # 1 fold is usually enough for screening
     orient_quick_eps=2e-4,        # require small quick AUC improvement to proceed
     orient_full_min_gain=1e-5,    # require tiny full score gain to accept
@@ -2661,7 +2661,7 @@ def _cv_auc_for_feature_set(
     orient_use_corr_prefilter=False,
     orient_corr_abs_min=0.01,
 
-    # ---- NEW: leakage guards ----
+    # ---- leakage guards ----
     game_keys=None,               # pd.Series/np.array aligned to X rows (e.g., feat_Game_Key)
     enforce_no_game_overlap=True, # raise if any game appears in both train & val in a fold
     leak_col_patterns=None,       # list[str] substrings to forbid in feature_list
@@ -2671,15 +2671,14 @@ def _cv_auc_for_feature_set(
     Evaluate a fixed feature set with OOF preds and optional INDIVIDUAL FEATURE flips.
     No global proba flipping. No fold-by-fold proba flipping.
 
-    Adds two critical safeguards:
-      1) Optional fold-level "no Game_Key overlap" leak check (huge source of fake AUC).
-      2) Optional feature blacklist (e.g., Spread_Cover_Flag, Closing_Spread_For_Team, scores).
+    Adds safeguards:
+      1) Optional fold-level "no Game_Key overlap" leak check.
+      2) Optional feature blacklist.
 
-    NEW: Directed feature orientation:
+    Directed feature orientation:
       - Quick-screen on 1 (or few) folds to decide whether to run full CV.
       - Early-abort full CV for a candidate flip if it can't beat current best.
     """
-
     # ---- normalize folds to a concrete list (so quick-screen can index) ----
     folds = list(folds)
 
@@ -2690,9 +2689,7 @@ def _cv_auc_for_feature_set(
 
     # ---- leakage/feature blacklist ----
     if leak_col_patterns is None:
-        leak_col_patterns = [
-            "SHARP_COVER_RESULT"
-        ]
+        leak_col_patterns = ["SHARP_COVER_RESULT"]
 
     # keep only cols present
     feature_list = [f for f in feature_list if f in X.columns]
@@ -2709,21 +2706,31 @@ def _cv_auc_for_feature_set(
             raise RuntimeError(msg)
 
     if len(feature_list) == 0:
+        # keep legacy keys so callers don't explode
         return {
             "feature_list": [],
             "oof_proba": np.full(n, np.nan, dtype=float) if return_oof else None,
-            "oof_auc": np.nan,
-            "oof_logloss": np.nan,
-            "oof_brier": np.nan,
-            "oof_auc_best": np.nan,
-            "oof_logloss_best": np.nan,
-            "oof_brier_best": np.nan,
+            "auc": float("nan"),
+            "logloss": float("nan"),
+            "brier": float("nan"),
+            "score": float("-inf"),
+            "aborted": False,
+
+            # ✅ aliases expected by auto-select
+            "oof_auc_best": float("nan"),
+            "oof_logloss_best": float("nan"),
+            "oof_brier_best": float("nan"),
+            "oof_score_best": float("-inf"),
+            "oof_auc": float("nan"),
+            "oof_logloss": float("nan"),
+            "oof_brier": float("nan"),
+            "oof_score": float("-inf"),
+
+            # flipping metadata
             "n_feature_flips": 0,
             "flipped_features": [],
-            "oof_score": float("-inf"),
-            "flip_rate": float("nan"),
-            "mean_fold_auc_best": float("nan"),
             "global_flip": False,
+            "flip_rate": float("nan"),
         }
 
     # numeric candidates only (for flipping)
@@ -2863,152 +2870,123 @@ def _cv_auc_for_feature_set(
             "aborted": False,
         }
 
-    def _apply_flip_set(X_base, flip_set, feats):
-        if not flip_set:
-            return X_base
-        X2 = X_base.copy()
-        for c in flip_set:
-            if c in feats:
-                X2[c] = -np.asarray(X2[c], float)
-        return X2
+    # ============================================================
+    # BASELINE: compute full CV metrics for current feature set
+    # ============================================================
+    base = _oof_metrics_for_X(X, feature_list)
+    best_metrics = dict(base)
+    best_score = float(best_metrics.get("score", float("-inf")))
+    flipped_features = []
+    n_feature_flips = 0
 
-    def _quick_screen_auc_for_toggle(X_base, feats, f, flip_set):
-        """
-        Quick-screen a candidate toggle using 1 (or few) folds.
-        Computes mean AUC on the first `orient_quick_folds` folds.
-        """
-        q = int(max(1, orient_quick_folds))
-        q = min(q, len(folds))
+    # ============================================================
+    # OPTIONAL: directed feature orientation (flip features one by one)
+    # ============================================================
+    if orient_features and enable_feature_flips and max_feature_flips > 0 and numeric_feats:
+        # quick-screen uses first few folds
+        quick_folds = folds[: max(1, int(orient_quick_folds))]
 
-        def _mean_auc_for_set(trial_set):
-            aucs = []
-            X_try = _apply_flip_set(X_base, trial_set, feats)
-            for i in range(q):
-                tr_idx, val_idx = folds[i]
+        def _quick_auc(X_use, feats):
+            # evaluate only on quick_folds
+            oof_q = np.full(n, np.nan, dtype=float)
+            for (tr_idx, val_idx) in quick_folds:
                 _assert_no_game_overlap(tr_idx, val_idx)
-
-                X_tr  = X_try.iloc[tr_idx][feats]
-                X_val = X_try.iloc[val_idx][feats]
-                y_tr  = y[tr_idx]
-                y_val = y[val_idx]
-
                 mdl = clone(model_proto)
-                mdl.fit(X_tr, y_tr)
-                p = _safe_predict_proba_pos(mdl, X_val)
-                p = np.clip(np.asarray(p, float).reshape(-1), eps, 1 - eps)
+                mdl.fit(X_use.iloc[tr_idx][feats], y[tr_idx])
+                proba = _safe_predict_proba_pos(mdl, X_use.iloc[val_idx][feats])
+                oof_q[val_idx] = np.asarray(proba, float).reshape(-1)
+            valid_q = np.isfinite(oof_q)
+            if valid_q.sum() < 2 or len(np.unique(y[valid_q])) < 2:
+                return np.nan
+            return float(roc_auc_score(y[valid_q], np.clip(oof_q[valid_q], eps, 1 - eps)))
 
-                try:
-                    auc_i = roc_auc_score(np.asarray(y_val, int), p)
-                    if not np.isfinite(auc_i):
-                        auc_i = 0.5
-                except Exception:
-                    auc_i = 0.5
-                aucs.append(float(auc_i))
-            return float(np.mean(aucs)) if aucs else 0.5
+        cur_quick = _quick_auc(X, feature_list)
 
-        cur_mean = _mean_auc_for_set(set(flip_set))
-
-        trial = set(flip_set)
-        if f in trial:
-            trial.remove(f)
-        else:
-            trial.add(f)
-        try_mean = _mean_auc_for_set(trial)
-
-        return cur_mean, try_mean, trial
-
-    # --- baseline ---
-    flip_set = set()
-    X_base = X
-    base = _oof_metrics_for_X(X_base, feature_list)
-    best = dict(base)
-
-    if debug:
-        log_func(
-            f"[OOF] auc={best['auc']:.6f} | ll={best['logloss']:.6f} | "
-            f"brier={best['brier']:.6f} | score={best['score']:.6f} | n_feat_flips=0"
-        )
-
-    # --- optional feature orientation (FAST, DIRECTED) ---
-    max_feature_flips = int(max(0, max_feature_flips))
-    do_orient = bool(enable_feature_flips and orient_features and (max_feature_flips > 0) and numeric_feats)
-
-    if do_orient:
-        for pass_i in range(int(max(1, orient_passes))):
-            improved_any = False
-
-            if len(flip_set) >= max_feature_flips:
-                break
-
-            for f in numeric_feats:
-                if f not in flip_set and len(flip_set) >= max_feature_flips:
+        # greedy passes
+        for p in range(int(max(1, orient_passes))):
+            any_flip = False
+            for feat in list(numeric_feats):
+                if n_feature_flips >= int(max_feature_flips):
                     break
 
-                # 1) QUICK SCREEN
-                cur_q, try_q, trial_set = _quick_screen_auc_for_toggle(X_base, feature_list, f, flip_set)
-
-                if debug:
-                    log_func(
-                        f"[ORIENT-SCAN] pass={pass_i+1} feat={f} quick_auc: cur={cur_q:.6f} try={try_q:.6f}"
-                    )
-
-                if try_q <= cur_q + float(orient_quick_eps):
-                    continue  # skip expensive full CV
-
-                # 2) FULL CV (WITH EARLY ABORT VS CURRENT BEST)
-                X_try = _apply_flip_set(X_base, trial_set, feature_list)
-                cur = _oof_metrics_for_X(
-                    X_try,
-                    feature_list,
-                    abort_if_cannot_beat_score=float(best["score"]),
-                    abort_margin=float(orient_full_abort_margin),
-                )
-
-                if cur.get("aborted", False):
+                # quick screen
+                X_try = X.copy()
+                try:
+                    X_try[feat] = -pd.to_numeric(X_try[feat], errors="coerce")
+                except Exception:
                     continue
 
-                if np.isfinite(cur["score"]) and cur["score"] > best["score"] + float(orient_full_min_gain):
-                    flip_set = trial_set
-                    best = dict(cur)
-                    improved_any = True
+                try_quick = _quick_auc(X_try, feature_list)
+                if debug:
+                    log_func(f"[ORIENT-SCAN] pass={p+1} feat={feat} quick_auc: cur={cur_quick:.6f} try={try_quick:.6f}")
 
-                    if debug:
-                        log_func(
-                            f"[ORIENT] pass={pass_i+1} toggle={f} -> "
-                            f"auc={best['auc']:.6f} ll={best['logloss']:.6f} "
-                            f"brier={best['brier']:.6f} score={best['score']:.6f} "
-                            f"n_feat_flips={len(flip_set)}"
-                        )
+                if not np.isfinite(try_quick) or not np.isfinite(cur_quick):
+                    continue
+                if (try_quick - cur_quick) < float(orient_quick_eps):
+                    continue
 
-            if not improved_any:
+                # full CV with early-abort vs current best
+                cand = _oof_metrics_for_X(
+                    X_try,
+                    feature_list,
+                    abort_if_cannot_beat_score=best_score,
+                    abort_margin=float(orient_full_abort_margin),
+                )
+                if cand.get("aborted", False):
+                    continue
+
+                cand_score = float(cand.get("score", float("-inf")))
+                if (cand_score - best_score) >= float(orient_full_min_gain):
+                    # accept
+                    X = X_try
+                    best_metrics = dict(cand)
+                    best_score = cand_score
+                    flipped_features.append(feat)
+                    n_feature_flips += 1
+                    cur_quick = try_quick
+                    any_flip = True
+
+                    log_func(
+                        f"[ORIENT] pass={p+1} toggle={feat} -> "
+                        f"auc={best_metrics.get('auc', float('nan')):.6f} "
+                        f"ll={best_metrics.get('logloss', float('nan')):.6f} "
+                        f"brier={best_metrics.get('brier', float('nan')):.6f} "
+                        f"score={best_score:.6f} n_feat_flips={n_feature_flips}"
+                    )
+
+            if not any_flip:
                 break
 
-    out = {
-        "feature_list": list(feature_list),
-        "flip_rate": float("nan"),
-        "mean_fold_auc_best": float("nan"),
-        "global_flip": False,
+    # ============================================================
+    # FINAL RETURN: normalize keys so callers never guess
+    # ============================================================
+    out = dict(best_metrics)
 
-        "oof_proba": best["oof_proba"] if return_oof else None,
-        "oof_auc": float(best["auc"]),
-        "oof_logloss": float(best["logloss"]),
-        "oof_brier": float(best["brier"]),
+    # attach metadata
+    out["feature_list"] = list(feature_list)
+    out["n_feature_flips"] = int(n_feature_flips)
+    out["flipped_features"] = list(flipped_features)
+    out["global_flip"] = False
+    out["flip_rate"] = float("nan")
 
-        "oof_auc_best": float(best["auc"]),
-        "oof_logloss_best": float(best["logloss"]),
-        "oof_brier_best": float(best["brier"]),
+    # ✅ aliases expected by _auto_select_k_by_auc (and your log lines)
+    out["oof_auc_best"]      = float(out.get("auc", float("nan")))
+    out["oof_logloss_best"]  = float(out.get("logloss", float("nan")))
+    out["oof_brier_best"]    = float(out.get("brier", float("nan")))
+    out["oof_score_best"]    = float(out.get("score", float("-inf")))
 
-        "n_feature_flips": int(len(flip_set)),
-        "flipped_features": sorted(list(flip_set)),
-        "oof_score": float(best["score"]),
-    }
+    # keep legacy “oof_*” names too
+    out["oof_auc"]     = out["oof_auc_best"]
+    out["oof_logloss"] = out["oof_logloss_best"]
+    out["oof_brier"]   = out["oof_brier_best"]
+    out["oof_score"]   = out["oof_score_best"]
 
-    if debug:
-        log_func(
-            f"[OOF-FINAL] auc={out['oof_auc_best']:.6f} | ll={out['oof_logloss_best']:.6f} | "
-            f"brier={out['oof_brier_best']:.6f} | score={out['oof_score']:.6f} | "
-            f"n_feat_flips={out['n_feature_flips']}"
-        )
+    # oof proba only if requested
+    if not return_oof:
+        out["oof_proba"] = None
+    else:
+        # base function returns oof_proba already; just ensure present
+        out["oof_proba"] = out.get("oof_proba", None)
 
     return out
 
@@ -3031,7 +3009,7 @@ def _auto_select_k_by_auc(
     enable_feature_flips=True,
     max_feature_flips=20,
     orient_passes=1,
-    force_full_scan=True,   # ✅ NEW: always go to max_k
+    force_full_scan=True,   # ✅ always go to max_k
 ):
     if max_k is None:
         max_k = len(ordered_features)
@@ -3044,6 +3022,7 @@ def _auto_select_k_by_auc(
     best_auc = -np.inf
     best_ll = np.inf
     best_brier = np.inf
+    best_score = -np.inf   # ✅ keep scalar best_score for tie-break
     best_res = None
 
     no_improve = 0
@@ -3065,26 +3044,30 @@ def _auto_select_k_by_auc(
             enforce_no_game_overlap=True,
         )
 
+        # ✅ these keys now ALWAYS exist (because we added aliases in _cv_auc_for_feature_set)
         auc_k = float(res.get("oof_auc_best", np.nan))
         ll_k  = float(res.get("oof_logloss_best", np.nan))
         br_k  = float(res.get("oof_brier_best", np.nan))
+        sc_k  = float(res.get("oof_score_best", float("-inf")))
+
         n_feat_flips = int(res.get("n_feature_flips", 0))
         flipped = res.get("flipped_features", [])
 
-        history.append((k, auc_k, ll_k, br_k, n_feat_flips, flipped))
+        history.append((k, auc_k, ll_k, br_k, sc_k, n_feat_flips, flipped))
 
         if verbose:
             log_func(
                 f"[AUTO-FEAT] k={k:3d} auc={auc_k:.6f} ll={ll_k:.6f} brier={br_k:.6f} "
-                f"n_feat_flips={n_feat_flips}"
+                f"score={sc_k:.6f} n_feat_flips={n_feat_flips}"
             )
 
         if not np.isfinite(auc_k):
+            no_improve += 1
             continue
 
+        # guards on LL/Brier regressions (still scan, just don't update best)
         if best_res is not None:
             if np.isfinite(ll_k) and ll_k > best_ll + float(max_ll_increase):
-                # don't update best, but still continue scanning
                 no_improve += 1
                 continue
             if np.isfinite(br_k) and br_k > best_brier + float(max_brier_increase):
@@ -3094,8 +3077,12 @@ def _auto_select_k_by_auc(
         improved = (auc_k > best_auc + float(min_improve))
         tied = (abs(auc_k - best_auc) <= float(auc_tie_eps))
 
-        if improved or (tied and ((ll_k < best_ll) or (br_k < best_brier))):
+        # ✅ tie-break: prefer better score (which already blends auc/ll/brier)
+        better_on_tie = tied and (sc_k > best_score + 1e-12)
+
+        if improved or better_on_tie:
             best_auc = auc_k
+            best_score = sc_k
             if np.isfinite(ll_k): best_ll = ll_k
             if np.isfinite(br_k): best_brier = br_k
             best_k = k
@@ -3104,7 +3091,7 @@ def _auto_select_k_by_auc(
         else:
             no_improve += 1
 
-        # ✅ only early stop if NOT forcing full scan
+        # early stop only if not forcing full scan
         if (not force_full_scan) and (no_improve >= patience):
             if verbose:
                 log_func(
@@ -3117,7 +3104,7 @@ def _auto_select_k_by_auc(
             f"[AUTO-FEAT] Final best_k={best_k}, best_auc={best_auc:.6f}, tried up to k={history[-1][0]}"
         )
 
-    return best_k, best_res, history  # ✅ also fix your return
+    return best_k, best_res, history
 
 
 def anchor_to_implied(p_model, p_imp, k=0.45, eps=1e-6):
