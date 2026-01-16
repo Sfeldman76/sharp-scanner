@@ -7463,7 +7463,37 @@ def train_sharp_model_from_bq(
                                     np.where(hist_df["p_home_raw"] >= hist_df["p_away_raw"], margin > 0, margin < 0))
     hist_df["went_over"] = total_pts > pd.to_numeric(hist_df["close_total"], errors="coerce")
     hist_df["Sport"]     = hist_df["Sport"].astype(str).str.upper()
-    
+        # ============================
+    # FIX LABEL DIRECTION (SPREADS)
+    # ============================
+    # hist_df["fav_covered"] is a *favorite-side* label at the game level.
+    # Your training rows are team/outcome-level, so underdog rows must get (1 - fav_covered).
+
+    _fav_lbl = hist_df[["Merge_Key_Short", "fav_covered"]].copy()
+    _fav_lbl["Merge_Key_Short"] = _fav_lbl["Merge_Key_Short"].astype(str).str.strip().str.lower()
+
+    # df_bt already has Merge_Key_Short normalized earlier; ensure anyway
+    df_bt["Merge_Key_Short"] = df_bt["Merge_Key_Short"].astype(str).str.strip().str.lower()
+
+    df_bt = df_bt.merge(_fav_lbl, on="Merge_Key_Short", how="left", suffixes=("", "_favtmp"))
+
+    _m_sp = df_bt["Market"].astype(str).str.lower().str.strip().eq("spreads")
+    _y_fav = pd.to_numeric(df_bt["fav_covered"], errors="coerce")
+    _val   = pd.to_numeric(df_bt["Value"], errors="coerce")
+    _is_fav_row = (_val < 0)
+
+    _mask = _m_sp & _y_fav.notna() & _val.notna()
+
+    # Favorite row keeps fav_covered; underdog row gets 1 - fav_covered
+    df_bt.loc[_mask, "SHARP_HIT_BOOL"] = np.where(
+        _is_fav_row.loc[_mask],
+        _y_fav.loc[_mask].astype(float),
+        (1.0 - _y_fav.loc[_mask].astype(float))
+    ).astype("float32")
+
+    # cleanup helper column
+    df_bt.drop(columns=["fav_covered"], inplace=True, errors="ignore")
+
     # ρ lookups (Spread↔Total, Spread↔ML, Total↔ML) — do this ONCE
     
     ST_lookup, SM_lookup, TM_lookup = build_corr_lookup_ST_SM_TM(hist_df, sport=sport_label)
@@ -8417,48 +8447,61 @@ def train_sharp_model_from_bq(
                 g_fc["Model_Dog_Spread"] = ( ema).astype("float32")
         
             # Only the columns we need from g_fc
+           
             proj_cols = [
                 "Model_Fav_Spread","Model_Dog_Spread",
                 "Market_Favorite_Team","Market_Underdog_Team",
                 "Favorite_Market_Spread","Underdog_Market_Spread",
-                "Model_Expected_Margin_Abs","Sigma_Pts","k"
+                "Model_Expected_Margin",          # signed home-away expected margin
+                "Model_Expected_Margin_Abs",
+                "Sigma_Pts","k"
             ]
+            
             g_map = g_fc[game_keys + proj_cols].copy()
             g_map = (g_map.sort_values(game_keys)
                           .drop_duplicates(subset=game_keys, keep="last"))
-        
-            # Single merge (no duplicates)
+            
             before = len(df_market)
             df_market = df_market.merge(g_map, on=game_keys, how="left", validate="many_to_one")
             _assert_no_growth(before, df_market, "merge game-level projections")
-        
-            # Compute per-outcome spreads from model/market
+            
+            # Compute per-outcome spreads from model/market (fav vs dog)
             for c in ["Outcome_Norm","Market_Favorite_Team"]:
                 df_market[c] = df_market[c].astype(str).str.lower().str.strip()
-        
+            
             is_fav = (df_market["Outcome_Norm"].values == df_market["Market_Favorite_Team"].values)
-        
-            df_market["Outcome_Model_Spread"]  = np.where(
+            
+            df_market["Outcome_Model_Spread"] = np.where(
                 is_fav, df_market["Model_Fav_Spread"].values, df_market["Model_Dog_Spread"].values
             ).astype("float32")
-        
+            
             df_market["Outcome_Market_Spread"] = np.where(
                 is_fav, df_market["Favorite_Market_Spread"].values, df_market["Underdog_Market_Spread"].values
             ).astype("float32")
-        
-            # --- Per-outcome engineered features (requires: k, Sigma_Pts, fav/dog spreads) ---
-          
-            df_market["Outcome_Spread_Edge"] = (
-                pd.to_numeric(df_market["Outcome_Market_Spread"], errors="coerce") -
-                pd.to_numeric(df_market["Outcome_Model_Spread"],  errors="coerce")
-            ).astype("float32")
-            # z = edge / k  (guard against zero/NaN k)
-            k = pd.to_numeric(df_market.get("k"), errors="coerce").astype("float32")
-            k = k.where(k > 0, np.nan)
-            df_market["z"] = (df_market["Outcome_Spread_Edge"] / k).astype("float32")
-        
-            # cover prob: Φ(z)
-            df_market["Outcome_Cover_Prob"] = _phi(df_market["z"]).astype("float32")
+            
+            # TEAM-perspective edge / cover prob
+            mu_home = pd.to_numeric(df_market.get("Model_Expected_Margin"), errors="coerce").astype("float32")
+            
+            out_norm = df_market["Outcome_Norm"].astype(str).str.lower().str.strip().values
+            home_t   = df_market["Home_Team_Norm"].astype(str).str.lower().str.strip().values
+            away_t   = df_market["Away_Team_Norm"].astype(str).str.lower().str.strip().values
+            
+            is_home_row = (out_norm == "home") | (out_norm == home_t)
+            is_away_row = (out_norm == "away") | (out_norm == away_t)
+            
+            mu_team = np.where(is_home_row, mu_home, np.where(is_away_row, -mu_home, np.nan)).astype("float32")
+            
+            val_team = pd.to_numeric(df_market.get("Value"), errors="coerce").astype("float32")
+            sigma = pd.to_numeric(df_market.get("Sigma_Pts"), errors="coerce").astype("float32")
+            sigma = np.where(sigma > 0, sigma, np.nan).astype("float32")
+            
+            df_market["Outcome_Spread_Edge"] = (mu_team + val_team).astype("float32")
+            
+            z = (-val_team - mu_team) / sigma
+            df_market["Outcome_Cover_Prob"] = (1.0 - _phi(z)).astype("float32")
+            
+            df_market["z"] = (df_market["Outcome_Spread_Edge"] / sigma).astype("float32")
+
         
             # Streamlit KPIs (guarded)
             if "Model_Fav_Spread" in df_market.columns:
