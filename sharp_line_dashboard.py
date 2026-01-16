@@ -7722,6 +7722,9 @@ def train_sharp_model_from_bq(
 
         # --- Canonical side filter ---
         # === Canonical side filtering ONLY (training subset) ===
+       # ===========================
+        # Canonical side filtering ONLY (training subset)
+        # ===========================
         if mkt == "totals":
             # keep Over only (fine for totals modeling)
             df_market = df_market[df_market["Outcome"].astype(str).str.lower().str.strip() == "over"].copy()
@@ -7758,7 +7761,7 @@ def train_sharp_model_from_bq(
             _df["Team"]   = _df["Team"].astype(str).str.lower().str.strip()
         
         # ---------------------------------------------------------
-        # Build game-grain streaks
+        # Build game-grain streaks (Game_Key + Team)
         # ---------------------------------------------------------
         df_bt_streaks = build_cover_streaks_game_level(df_prepped_mkt, sport=sport, market=mkt)
         df_bt_streaks["Sport"]  = df_bt_streaks["Sport"].astype(str).str.upper().str.strip()
@@ -7766,7 +7769,7 @@ def train_sharp_model_from_bq(
         df_bt_streaks["Team"]   = df_bt_streaks["Team"].astype(str).str.lower().str.strip()
         
         # ---------------------------------------------------------
-        # Build schedule density features
+        # Build schedule density features (Game_Key + Team)
         # IMPORTANT: for totals, Team key must match df_market Team (Home_Team_Norm)
         # ---------------------------------------------------------
         df_sched_base = df_prepped_mkt.copy()
@@ -7835,16 +7838,33 @@ def train_sharp_model_from_bq(
             validate="many_to_one",
         )
         
-        # ✅ THIS WAS MISSING BEFORE: merge schedule density into df_market
+        # ✅ schedule density features we own at GAME level (avoid _x/_y collisions)
+
+        SCHED_COLS = [
+            "Days_Since_Last_Game",
+            "Games_Last_2_Days",
+            "Games_Last_4_Days",
+            "Games_Last_7_Days",
+            "Is_B2B",
+            "Is_3in4",
+        ]
+        
+        df_market = df_market.drop(
+            columns=[c for c in SCHED_COLS if c in df_market.columns],
+            errors="ignore",
+        )
+        
         df_market = df_market.merge(
             df_bt_sched,
             on=["Sport", "Market", "Game_Key", "Team"],
             how="left",
             validate="many_to_one",
         )
-        
+                
         # ---------------------------------------------------------
-        # Build team_feature_map (state) including schedule density
+        # Build team_feature_map (state) INCLUDING schedule density (for priors / UI),
+        # but NOTE: when merging team_feature_map back into df_market later,
+        # exclude SCHED_COLS to avoid x/y collisions.
         # ---------------------------------------------------------
         df_team_base = (
             df_sched_base[["Sport", "Market", "Game_Key", "Team", "Game_Start"]]
@@ -7854,13 +7874,11 @@ def train_sharp_model_from_bq(
               .copy()
         )
         
-        # normalize keys consistently
         df_team_base["Sport"]  = df_team_base["Sport"].astype(str).str.upper().str.strip()
         df_team_base["Market"] = df_team_base["Market"].astype(str).str.lower().str.strip().map(_norm_market)
         df_team_base["Team"]   = df_team_base["Team"].astype(str).str.lower().str.strip()
         df_team_base["Game_Start"] = pd.to_datetime(df_team_base["Game_Start"], errors="coerce", utc=True)
         
-        # attach per-game LOO + streaks (time-safe)
         df_team_base = df_team_base.merge(
             df_bt_loostats,
             on=["Sport", "Market", "Game_Key", "Team"],
@@ -7868,15 +7886,13 @@ def train_sharp_model_from_bq(
             validate="1:1",
         )
         
-        # ✅ DO NOT join streaks on Game_Start (timestamp mismatches cause total NaNs)
         df_team_base = df_team_base.merge(
             df_bt_streaks.drop(columns=["Game_Start"], errors="ignore"),
             on=["Sport", "Market", "Game_Key", "Team"],
             how="left",
             validate="1:1",
         )
-        
-        # ✅ schedule density into state map
+       "ignore")
         df_team_base = df_team_base.merge(
             df_bt_sched,
             on=["Sport", "Market", "Game_Key", "Team"],
@@ -7884,8 +7900,8 @@ def train_sharp_model_from_bq(
             validate="1:1",
         )
         
-        # sort for "last"
         df_team_base = df_team_base.sort_values(["Sport", "Market", "Team", "Game_Start"])
+
         
         STATE_COLS = [c for c in df_bt_streaks.columns if c not in ["Sport","Market","Game_Key","Team","Game_Start"]]
         LOO_PRIOR_COLS = [c for c in df_bt_loostats.columns if c not in ["Sport","Market","Game_Key","Team"]]
