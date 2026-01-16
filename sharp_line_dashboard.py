@@ -2691,10 +2691,7 @@ def _cv_auc_for_feature_set(
     # ---- leakage/feature blacklist ----
     if leak_col_patterns is None:
         leak_col_patterns = [
-            "SHARP_COVER_RESULT", "cover_flag", "Spread_Cover_Flag",
-            "Team_Score", "Opp_Score", "Point_Diff", "Win_Flag",
-            "Closing_Spread_For_Team",
-            "Score_", "POST_", "Actual_", "FINAL_",
+            "SHARP_COVER_RESULT"
         ]
 
     # keep only cols present
