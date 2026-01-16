@@ -7892,7 +7892,7 @@ def train_sharp_model_from_bq(
             how="left",
             validate="1:1",
         )
-       "ignore")
+       
         df_team_base = df_team_base.merge(
             df_bt_sched,
             on=["Sport", "Market", "Game_Key", "Team"],
