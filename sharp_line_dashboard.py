@@ -7090,6 +7090,221 @@ def build_schedule_density_game_level(
     return g[["Sport", "Market", "Game_Key", "Team", "Days_Since_Last_Game", "Is_B2B", "Is_3in4"]
              + [f"Games_Last_{int(W)}_Days" for W in windows_days]]
 
+def add_market_structure_features_training(
+    df: pd.DataFrame,
+    *,
+    sharp_books: list[str],
+    rec_books: list[str],
+    game_col: str = "Game_Key",
+    market_col: str = "Market",
+    outcome_col: str = "Outcome",
+    book_col: str = "Bookmaker",
+) -> pd.DataFrame:
+    """
+    Training-only, snapshot-safe market structure features.
+    Assumes one row per (Game_Key, Market, Outcome, Bookmaker) snapshot.
+
+    Adds:
+      - CLV_Prob_Delta, CLV_Line_Pts_Signed
+      - Crossed_Key_3/7, Dist_to_3/7 (if spreads)
+      - Sharp/Rec consensus mean/std and gaps (prob + line)
+      - Pct_Books_Aligned (agreement on direction of belief change)
+      - Resistance_Score (intensity, not just flags)
+      - Early_Sharp_Flag / Late_Sharp_Flag (regime bins)
+    """
+    out = df.copy()
+    if out.empty:
+        return out
+
+    # ---------- helpers ----------
+    def _col(*names):
+        for n in names:
+            if n in out.columns:
+                return n
+        return None
+
+    gcol = _col(game_col, "feat_Game_Key", "game_key_clean")
+    mcol = _col(market_col)
+    ocol = _col(outcome_col)
+    bcol = _col(book_col, "Book")
+
+    if gcol is None or mcol is None or ocol is None or bcol is None:
+        # can't compute group features safely
+        return out
+
+    # core numeric columns
+    prob_col = _col("Implied_Prob", "Market_Implied_Prob")
+    open_prob_col = _col("First_Imp_Prob", "Open_Imp_Prob")
+    val_col = _col("Value", "Line_Value", "Line")
+    open_val_col = _col("First_Line_Value", "Open_Value", "Opening_Line")
+    # fallbacks (keep behavior stable)
+    if prob_col is None:
+        out["CLV_Prob_Delta"] = 0.0
+    else:
+        p = pd.to_numeric(out[prob_col], errors="coerce")
+        p0 = pd.to_numeric(out[open_prob_col], errors="coerce") if open_prob_col in out.columns else np.nan
+        out["CLV_Prob_Delta"] = (p - p0).fillna(0.0).astype("float32")
+
+    # Signed line CLV proxy (best for spreads)
+    if (val_col is not None) and (open_val_col is not None) and (open_val_col in out.columns):
+        v = pd.to_numeric(out[val_col], errors="coerce")
+        v0 = pd.to_numeric(out[open_val_col], errors="coerce")
+        raw = (v - v0)
+
+        # If favorite bet: more negative spread = better for favorite; for dog: more positive = better.
+        fav_col = _col("Is_Favorite_Bet", "Is_Team_Favorite")
+        if fav_col is not None:
+            is_fav = pd.to_numeric(out[fav_col], errors="coerce").fillna(0).astype(int)
+            sign = np.where(is_fav.values == 1, -1.0, +1.0)
+            out["CLV_Line_Pts_Signed"] = (raw.values * sign).astype("float32")
+        else:
+            out["CLV_Line_Pts_Signed"] = raw.fillna(0.0).astype("float32")
+    else:
+        out["CLV_Line_Pts_Signed"] = 0.0
+
+    # ---------- key-number logic (spreads only) ----------
+    # Works even if you already have Dist_to_3/7; we won't overwrite if present.
+    market_lower = out[mcol].astype(str).str.lower()
+    is_spreads = market_lower.eq("spreads")
+
+    if "Crossed_Key_3" not in out.columns:
+        out["Crossed_Key_3"] = 0
+    if "Crossed_Key_7" not in out.columns:
+        out["Crossed_Key_7"] = 0
+
+    if (val_col is not None) and (open_val_col is not None) and (open_val_col in out.columns):
+        v = pd.to_numeric(out[val_col], errors="coerce")
+        v0 = pd.to_numeric(out[open_val_col], errors="coerce")
+
+        # crossing occurs if open and current are on opposite sides of the key OR one equals and the other differs
+        for key, name in [(3.0, "Crossed_Key_3"), (7.0, "Crossed_Key_7")]:
+            crossed = (
+                ((v0 - key) * (v - key) < 0) |
+                ((v0 - key) == 0) & ((v - key) != 0) |
+                ((v - key) == 0) & ((v0 - key) != 0)
+            )
+            out.loc[is_spreads, name] = crossed.loc[is_spreads].fillna(False).astype("int8").values
+
+        if "Dist_to_3" not in out.columns:
+            out["Dist_to_3"] = np.nan
+        if "Dist_to_7" not in out.columns:
+            out["Dist_to_7"] = np.nan
+        out.loc[is_spreads, "Dist_to_3"] = (v.loc[is_spreads].abs() - 3.0).abs().astype("float32").values
+        out.loc[is_spreads, "Dist_to_7"] = (v.loc[is_spreads].abs() - 7.0).abs().astype("float32").values
+
+    # ---------- resistance intensity ----------
+    # don't rely on a single flag; build an intensity score.
+    lim_up_no_move = pd.to_numeric(out.get("LimitUp_NoMove_Flag", 0), errors="coerce").fillna(0)
+    high_limit     = pd.to_numeric(out.get("High_Limit_Flag", 0), errors="coerce").fillna(0)
+    # absorption: very narrow traveled range in Value despite movement attempts
+    if ("Max_Value" in out.columns) and ("Min_Value" in out.columns):
+        vmax = pd.to_numeric(out["Max_Value"], errors="coerce")
+        vmin = pd.to_numeric(out["Min_Value"], errors="coerce")
+        narrow = ((vmax - vmin).abs() <= 0.25).fillna(False).astype("int8")
+    else:
+        narrow = 0
+
+    out["Resistance_Score"] = (lim_up_no_move + high_limit + narrow).astype("float32")
+
+    # ---------- timing regime bins ----------
+    # If Sharp_Time_Score exists: use it; else fall back to Minutes_To_Game / tier buckets if present.
+    if "Sharp_Time_Score" in out.columns:
+        s = pd.to_numeric(out["Sharp_Time_Score"], errors="coerce").fillna(0.0)
+        out["Early_Sharp_Flag"] = (s >= 0.70).astype("int8")
+        out["Late_Sharp_Flag"]  = (s <= 0.30).astype("int8")
+    else:
+        out["Early_Sharp_Flag"] = 0
+        out["Late_Sharp_Flag"] = 0
+
+    # ---------- consensus + dispersion across books ----------
+    # Normalize book names to lower for membership tests
+    bl = out[bcol].astype(str).str.lower()
+    sharp_set = set([str(x).lower() for x in (sharp_books or [])])
+    rec_set   = set([str(x).lower() for x in (rec_books or [])])
+
+    out["_is_sharp_book_tmp"] = bl.isin(sharp_set)
+    out["_is_rec_book_tmp"]   = bl.isin(rec_set)
+
+    grp_keys = [gcol, mcol, ocol]
+
+    if prob_col is not None and prob_col in out.columns:
+        p = pd.to_numeric(out[prob_col], errors="coerce")
+
+        # all books
+        g_all = out.groupby(grp_keys, dropna=False)
+        out["ImpProb_Mean_AllBooks"] = g_all[p.name].transform("mean").astype("float32")
+        out["ImpProb_Std_AllBooks"]  = g_all[p.name].transform("std").fillna(0.0).astype("float32")
+
+        # sharp
+        out["_p_tmp"] = p
+        sharp_mean = (
+            out.loc[out["_is_sharp_book_tmp"]]
+               .groupby(grp_keys, dropna=False)["_p_tmp"].mean()
+        )
+        rec_mean = (
+            out.loc[out["_is_rec_book_tmp"]]
+               .groupby(grp_keys, dropna=False)["_p_tmp"].mean()
+        )
+        out["ImpProb_Mean_SharpBooks"] = out.set_index(grp_keys).index.map(sharp_mean).astype("float32")
+        out["ImpProb_Mean_RecBooks"]   = out.set_index(grp_keys).index.map(rec_mean).astype("float32")
+
+        out["Sharp_Rec_Prob_Gap"] = (
+            (out["ImpProb_Mean_SharpBooks"] - out["ImpProb_Mean_RecBooks"])
+            .replace([np.inf, -np.inf], np.nan)
+            .fillna(0.0)
+            .astype("float32")
+        )
+
+        # agreement on direction of belief change (book-level) -> percent aligned vs the median direction
+        if "CLV_Prob_Delta" in out.columns:
+            d = pd.to_numeric(out["CLV_Prob_Delta"], errors="coerce").fillna(0.0)
+            dir_med = out.groupby(grp_keys, dropna=False)[d.name].transform("median")
+            aligned = (np.sign(d) == np.sign(dir_med)).astype("int8")
+            out["Pct_Books_Aligned"] = out.groupby(grp_keys, dropna=False)[aligned.name].transform("mean").fillna(0.0).astype("float32")
+        else:
+            out["Pct_Books_Aligned"] = 0.0
+
+    else:
+        out["ImpProb_Mean_AllBooks"] = 0.0
+        out["ImpProb_Std_AllBooks"] = 0.0
+        out["ImpProb_Mean_SharpBooks"] = 0.0
+        out["ImpProb_Mean_RecBooks"] = 0.0
+        out["Sharp_Rec_Prob_Gap"] = 0.0
+        out["Pct_Books_Aligned"] = 0.0
+
+    # line consensus gap (optional, but useful)
+    if val_col is not None and val_col in out.columns:
+        v = pd.to_numeric(out[val_col], errors="coerce")
+        out["_v_tmp"] = v
+        sharp_v = (
+            out.loc[out["_is_sharp_book_tmp"]]
+               .groupby(grp_keys, dropna=False)["_v_tmp"].mean()
+        )
+        rec_v = (
+            out.loc[out["_is_rec_book_tmp"]]
+               .groupby(grp_keys, dropna=False)["_v_tmp"].mean()
+        )
+        out["Line_Mean_SharpBooks"] = out.set_index(grp_keys).index.map(sharp_v).astype("float32")
+        out["Line_Mean_RecBooks"]   = out.set_index(grp_keys).index.map(rec_v).astype("float32")
+        out["Sharp_Rec_Line_Gap"]   = (
+            (out["Line_Mean_SharpBooks"] - out["Line_Mean_RecBooks"])
+            .replace([np.inf, -np.inf], np.nan)
+            .fillna(0.0)
+            .astype("float32")
+        )
+        out["Line_Std_AllBooks"] = out.groupby(grp_keys, dropna=False)[v.name].transform("std").fillna(0.0).astype("float32")
+    else:
+        out["Line_Mean_SharpBooks"] = 0.0
+        out["Line_Mean_RecBooks"] = 0.0
+        out["Sharp_Rec_Line_Gap"] = 0.0
+        out["Line_Std_AllBooks"] = 0.0
+
+    # cleanup temp cols
+    for c in ["_is_sharp_book_tmp", "_is_rec_book_tmp", "_p_tmp", "_v_tmp"]:
+        if c in out.columns:
+            out.drop(columns=[c], inplace=True, errors="ignore")
+
+    return out
 
 
 def train_sharp_model_from_bq(
@@ -8116,6 +8331,12 @@ def train_sharp_model_from_bq(
             prob_col="Implied_Prob" if "Implied_Prob" in df_market.columns else None,
             price_col="Odds_Price" if "Odds_Price" in df_market.columns else None,
         )
+
+        df_market = add_market_structure_features_training(
+            df_market,
+            sharp_books=SHARP_BOOKS,
+            rec_books=REC_BOOKS,
+        )
         # === Compact domain interactions ===
         df_market['ResistBreak_x_Mag']     = df_market.get('Was_Line_Resistance_Broken',0) * df_market.get('Abs_Line_Move_From_Opening',0).fillna(0)
         df_market['LateSteam_x_KeyCount']  = df_market.get('Potential_Overmove_Flag',0)   * df_market.get('Line_Resistance_Crossed_Count',0).fillna(0)
@@ -9069,8 +9290,6 @@ def train_sharp_model_from_bq(
             "Spread_x_Total",
             "Spread_over_Total",
             "Total_over_Spread",
-            "Dist_to_3",
-            "Dist_to_7",
             "Dist_to_10",
                     # sums
             "Team_Recent_Cover_Streak","Team_Recent_Cover_Streak_Home","Team_Recent_Cover_Streak_Away",
@@ -9098,8 +9317,31 @@ def train_sharp_model_from_bq(
             "Games_Last_7_Days",
             "Is_B2B",
             "Is_3in4",
-       
-            
+            "CLV_Prob_Delta",
+            "CLV_Line_Pts_Signed",
+            "Resistance_Score",
+            "Early_Sharp_Flag",
+            "Late_Sharp_Flag",
+        
+            # Consensus / dispersion
+            "ImpProb_Mean_AllBooks",
+            "ImpProb_Std_AllBooks",
+            "ImpProb_Mean_SharpBooks",
+            "ImpProb_Mean_RecBooks",
+            "Sharp_Rec_Prob_Gap",
+            "Pct_Books_Aligned",
+        
+            "Line_Mean_SharpBooks",
+            "Line_Mean_RecBooks",
+            "Sharp_Rec_Line_Gap",
+            "Line_Std_AllBooks",
+        
+            # Key numbers (spreads)
+            "Crossed_Key_3",
+            "Crossed_Key_7",
+            "Dist_to_3",
+            "Dist_to_7",
+                   
         ]
         
         # ensure uniqueness (order-preserving)
