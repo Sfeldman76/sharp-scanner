@@ -9795,6 +9795,7 @@ def train_sharp_model_from_bq(
         
         
          # ---- Cheap feature pruning (before any split/CV) --
+      
         check = [
             "Was_Line_Resistance_Broken",
             "Odds_Reversal_Flag",
@@ -9802,15 +9803,25 @@ def train_sharp_model_from_bq(
             "Sharp_Limit_Jump",
             "Pct_Line_Move_From_Opening",
         ]
+        
         for c in check:
             if c in feature_cols:
                 j = feature_cols.index(c)
-                col = pd.to_numeric((_get_col(X_full, j)), errors="coerce")
+        
+                if isinstance(X_full, pd.DataFrame):
+                    raw = X_full.iloc[:, j]
+                else:
+                    raw = X_full[:, j]
+        
+                col = pd.to_numeric(raw, errors="coerce").to_numpy() if hasattr(raw, "to_numpy") else pd.to_numeric(raw, errors="coerce")
+                finite = np.isfinite(col)
+        
                 st.write(c, {
-                    "n_finite": int(np.isfinite(col).sum()),
-                    "unique_finite": int(np.unique(col[np.isfinite(col)]).size) if np.isfinite(col).any() else 0,
-                    "mean_finite": float(np.nanmean(col)) if np.isfinite(col).any() else None,
-                })        
+                    "n_finite": int(finite.sum()),
+                    "unique_finite": int(np.unique(col[finite]).size) if finite.any() else 0,
+                    "mean_finite": float(np.nanmean(col)) if finite.any() else None,
+                })
+
 
         st.markdown("### 🧹 Feature Pruning (pre-split)")
         
