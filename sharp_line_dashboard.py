@@ -2861,7 +2861,9 @@ def _cv_auc_for_feature_set(
             for c in feats:
                 if c in X_use.columns:
                     X_use[c] = pd.to_numeric(X_use[c], errors="coerce")
-
+        if debug:
+            log_func(f"[FEATS-CV] n={len(feats)}")
+            log_func("[FEATS-CV] " + ", ".join(map(str, feats[:120])) + (" ..." if len(feats) > 120 else ""))
         for fold_i, (tr_idx, val_idx) in enumerate(folds, 1):
             _assert_no_game_overlap(tr_idx, val_idx)
 
@@ -3105,6 +3107,9 @@ def _auto_select_k_by_auc(
     for k in range(min_k, max_k + 1):
         feats_k = ordered[:k]
         dbg = bool(debug and (k % int(debug_every) == 0 or k in (min_k, max_k)))
+        if verbose:
+            log_func(f"[AUTO-FEAT-FEATS] k={k:3d} n={len(feats_k)}")
+            log_func("[AUTO-FEAT-FEATS] " + ", ".join(feats_k[:120]) + (" ..." if len(feats_k) > 120 else ""))
 
         res = _cv_auc_for_feature_set(
             model_proto, X, y_arr, folds, feats_k,
