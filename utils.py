@@ -5388,8 +5388,16 @@ def add_market_structure_features_training(
         out.loc[is_spreads, "Dist_to_7"] = (v.loc[is_spreads].abs() - 7.0).abs().fillna(0.0).astype("float32").values
 
     # ---------- resistance intensity ----------
-    lim_up_no_move = pd.to_numeric(out.get("LimitUp_NoMove_Flag", 0), errors="coerce").fillna(0)
-    high_limit     = pd.to_numeric(out.get("High_Limit_Flag", 0), errors="coerce").fillna(0)
+    def _series_or_zero(col: str) -> pd.Series:
+        if col in out.columns:
+            return pd.to_numeric(out[col], errors="coerce").fillna(0)
+        # missing column -> aligned zero Series
+        return pd.Series(0, index=out.index, dtype="float32")
+    
+    lim_up_no_move = _series_or_zero("LimitUp_NoMove_Flag")
+    high_limit     = _series_or_zero("High_Limit_Flag")
+
+
     if ("Max_Value" in out.columns) and ("Min_Value" in out.columns):
         vmax = pd.to_numeric(out["Max_Value"], errors="coerce")
         vmin = pd.to_numeric(out["Min_Value"], errors="coerce")
