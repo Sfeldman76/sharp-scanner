@@ -9795,46 +9795,81 @@ def train_sharp_model_from_bq(
         
         
          # ---- Cheap feature pruning (before any split/CV) --
-        
+        check = [
+            "Was_Line_Resistance_Broken",
+            "Odds_Reversal_Flag",
+            "CrossMarket_Prob_Gap_Exists",
+            "Sharp_Limit_Jump",
+            "Pct_Line_Move_From_Opening",
+        ]
+        for c in check:
+            if c in feature_cols:
+                j = feature_cols.index(c)
+                col = pd.to_numeric((_get_col(X_full, j)), errors="coerce")
+                st.write(c, {
+                    "n_finite": int(np.isfinite(col).sum()),
+                    "unique_finite": int(np.unique(col[np.isfinite(col)]).size) if np.isfinite(col).any() else 0,
+                    "mean_finite": float(np.nanmean(col)) if np.isfinite(col).any() else None,
+                })        
 
         st.markdown("### 🧹 Feature Pruning (pre-split)")
         
-        # X_full may be ndarray or DataFrame — normalize access
         Xtmp = X_full
         cols = list(feature_cols)
         
-        # helper to get column vector safely
-        def _get_col(X, j):
-            if isinstance(X, pd.DataFrame):
-                return X.iloc[:, j]
-            else:
-                return X[:, j]
+        # ✅ protect these (add more as needed)
+        MUST_KEEP = {
+            "Sharp_Limit_Jump",
+            "Sharp_Time_Score",
+            "Sharp_Limit_Total",
+            "MarketLeader_ImpProbShift",
+            "LimitProtect_SharpMag",
+            "Odds_Reversal_Flag",
+            "Spread_vs_H2H_ProbGap",
+            "Total_vs_H2H_ProbGap",
+            "Total_vs_Spread_ProbGap",
+            "CrossMarket_Prob_Gap_Exists",
+            "Pct_Line_Move_From_Opening",
+            "Potential_Overmove_Flag",
+            "Was_Line_Resistance_Broken",
+            "Line_Resistance_Crossed_Count",
+            "SharpMove_Resistance_Break",
+            "Pct_Line_Move_Z",
+            "Outcome_Model_Spread",
+            "Outcome_Market_Spread",
+            "Outcome_Spread_Edge",
+            "Outcome_Cover_Prob",
+        }
         
-        MIN_NON_NAN = max(50, int(0.005 * len(Xtmp)))   # 0.5% rows or 50
+        def _get_col(X, j):
+            return X.iloc[:, j] if isinstance(X, pd.DataFrame) else X[:, j]
+        
+        MIN_NON_NAN = max(25, int(0.002 * len(Xtmp)))  # looser: 0.2% rows or 25
         MIN_UNIQUE  = 2
         
         keep_idx = []
         removed = []
+        removed_stats = []
         
         for j, c in enumerate(cols):
+            if c in MUST_KEEP:
+                keep_idx.append(j)
+                continue
+        
             col = _get_col(Xtmp, j)
             col = pd.to_numeric(col, errors="coerce")
         
             finite = np.isfinite(col)
             n_ok = int(finite.sum())
+            uniq = int(np.unique(col[finite]).size) if n_ok else 0
         
-            if n_ok < MIN_NON_NAN:
+            # keep rule
+            if (n_ok < MIN_NON_NAN) or (uniq < MIN_UNIQUE):
                 removed.append(c)
-                continue
+                removed_stats.append((c, n_ok, uniq))
+            else:
+                keep_idx.append(j)
         
-            vals = col[finite]
-            if np.unique(vals).size < MIN_UNIQUE:
-                removed.append(c)
-                continue
-        
-            keep_idx.append(j)
-        
-        # apply pruning
         feature_cols = [cols[j] for j in keep_idx]
         
         if isinstance(X_full, pd.DataFrame):
@@ -9845,10 +9880,17 @@ def train_sharp_model_from_bq(
         st.write(f"• Removed low-information features: {len(removed)}")
         if removed:
             st.caption(", ".join(removed[:20]) + (" ..." if len(removed) > 20 else ""))
+        
+        # ✅ show WHY they were removed
+        if removed_stats:
+            df_removed = pd.DataFrame(removed_stats, columns=["feature", "n_finite", "n_unique"])
+            df_removed = df_removed.sort_values(["n_finite", "n_unique"], ascending=True)
+            st.dataframe(df_removed.head(80))
+
 
         
         # 2) Exact duplicate columns (optional but cheap)
-        df_tmp = pd.DataFrame(X_full_pruned, columns=feature_cols)
+        df_tmp = pd.DataFrame(X_full, columns=feature_cols)
         # Transpose, get unique rows (i.e., unique columns pre-transpose)
         _, uniq_idx = np.unique(df_tmp.T, axis=0, return_index=True)
         uniq_idx = np.sort(uniq_idx)
