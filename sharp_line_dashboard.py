@@ -9797,25 +9797,45 @@ def train_sharp_model_from_bq(
          # ---- Cheap feature pruning (before any split/CV) --
         
         
+             
         st.markdown("### 🧹 Feature Pruning (pre-split)")
         
-        # 1) Near-constant features
-        vt = VarianceThreshold(threshold=1e-8)
-        X_full_pruned = vt.fit_transform(X_full)
+        Xtmp = X_full.copy()
         
-        if hasattr(vt, "get_support"):
-            mask_keep = vt.get_support()
-            removed_const = [c for c, keep in zip(feature_cols, mask_keep) if not keep]
-            feature_cols  = [c for c, keep in zip(feature_cols, mask_keep) if keep]
-        else:
-            # Fallback (very rare)
-            mask_keep = np.ones(X_full.shape[1], dtype=bool)
-            removed_const = []
-            feature_cols  = feature_cols[:X_full_pruned.shape[1]]
+        # 1) Coerce numerics safely but keep NaNs (do NOT fillna(0) before this)
+        for c in Xtmp.columns:
+            if Xtmp[c].dtype == "object":
+                Xtmp[c] = pd.to_numeric(Xtmp[c], errors="coerce")
         
-        st.write(f"• Removed near-constant features: {len(removed_const)}")
-        if removed_const:
-            st.caption(", ".join(removed_const[:20]) + (" ..." if len(removed_const) > 20 else ""))
+        # 2) Define sparsity-aware keep rules
+        MIN_NON_NAN = max(50, int(0.005 * len(Xtmp)))   # 0.5% rows or 50, whichever larger
+        MIN_UNIQUE  = 2                                # must have at least 2 unique finite values
+        
+        keep = []
+        removed = []
+        
+        for c in feature_cols:
+            s = Xtmp[c]
+            finite = np.isfinite(np.asarray(s, float))
+            n_ok = int(finite.sum())
+        
+            if n_ok < MIN_NON_NAN:
+                removed.append(c)
+                continue
+        
+            vals = np.asarray(s[finite], float)
+            if np.unique(vals).size < MIN_UNIQUE:
+                removed.append(c)
+                continue
+        
+            keep.append(c)
+        
+        feature_cols = keep
+        X_full = X_full[feature_cols]
+        
+        st.write(f"• Removed low-information features: {len(removed)}")
+        if removed:
+            st.caption(", ".join(removed[:20]) + (" ..." if len(removed) > 20 else ""))
         
         # 2) Exact duplicate columns (optional but cheap)
         df_tmp = pd.DataFrame(X_full_pruned, columns=feature_cols)
