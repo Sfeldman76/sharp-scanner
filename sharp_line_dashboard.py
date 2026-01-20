@@ -2632,7 +2632,6 @@ from copy import deepcopy
 import numpy as np
 from sklearn.base import clone
 from sklearn.metrics import roc_auc_score, log_loss
-
 def _cv_auc_for_feature_set(
     model_proto,
     X,
@@ -2653,31 +2652,33 @@ def _cv_auc_for_feature_set(
     eps=1e-6,
 
     # ---- speed knobs for feature orientation ----
-    orient_quick_folds=1,         # 1 fold is usually enough for screening
-    orient_quick_eps=2e-4,        # require small quick AUC improvement to proceed
-    orient_full_min_gain=1e-5,    # require tiny full score gain to accept
-    orient_full_abort_margin=2e-4,# early-abort if can't beat best by this
-    orient_max_candidates=None,   # cap how many features to even try (None = all numeric)
+    orient_quick_folds=1,
+    orient_quick_eps=2e-4,
+    orient_full_min_gain=1e-5,
+    orient_full_abort_margin=2e-4,
+    orient_max_candidates=None,
     orient_use_corr_prefilter=False,
     orient_corr_abs_min=0.01,
 
     # ---- leakage guards ----
-    game_keys=None,               # pd.Series/np.array aligned to X rows (e.g., feat_Game_Key)
-    enforce_no_game_overlap=True, # raise if any game appears in both train & val in a fold
-    leak_col_patterns=None,       # list[str] substrings to forbid in feature_list
-    drop_forbidden_features=True, # drop forbidden features (else raise)
+    game_keys=None,
+    enforce_no_game_overlap=True,
+    leak_col_patterns=None,
+    drop_forbidden_features=True,
+
+    # ---- NEW: always-try knobs ----
+    fallback_to_all_available_features=True,   # ✅ if feature_list collapses, use all usable columns in X
+    require_numeric_features=True,             # ✅ drop non-numeric features defensively (avoids fit crashes)
+    min_non_nan_frac=0.01,                     # ✅ drop near-empty columns
 ):
     """
     Evaluate a fixed feature set with OOF preds and optional INDIVIDUAL FEATURE flips.
     No global proba flipping. No fold-by-fold proba flipping.
 
-    Adds safeguards:
-      1) Optional fold-level "no Game_Key overlap" leak check.
-      2) Optional feature blacklist.
-
-    Directed feature orientation:
-      - Quick-screen on 1 (or few) folds to decide whether to run full CV.
-      - Early-abort full CV for a candidate flip if it can't beat current best.
+    ALWAYS-TRY behavior:
+      - If requested features are missing and the list becomes empty, we fall back to all usable columns in X
+        (excluding forbidden/leaky patterns). This prevents "empty feature set" from stopping the scan.
+      - Optionally restrict to numeric-coercible columns (recommended for XGBoost/linear models).
     """
     # ---- normalize folds to a concrete list (so quick-screen can index) ----
     folds = list(folds)
@@ -2691,11 +2692,44 @@ def _cv_auc_for_feature_set(
     if leak_col_patterns is None:
         leak_col_patterns = ["SHARP_COVER_RESULT"]
 
-    # keep only cols present
+    # helper: forbidden pattern check
+    def _is_forbidden(col: str) -> bool:
+        return any(p in str(col) for p in leak_col_patterns)
+
+    # helper: build "usable" feature list from X
+    def _all_usable_features_from_X() -> list[str]:
+        cols = [c for c in list(X.columns) if not _is_forbidden(c)]
+        if not cols:
+            return []
+
+        if not require_numeric_features:
+            # still drop columns that are almost entirely NaN
+            keep = []
+            for c in cols:
+                s = pd.to_numeric(X[c], errors="coerce")
+                frac = float(np.isfinite(np.asarray(s, float)).mean()) if len(s) else 0.0
+                if frac >= float(min_non_nan_frac):
+                    keep.append(c)
+            return keep
+
+        # numeric-only: must be coercible with enough finite values
+        keep = []
+        for c in cols:
+            try:
+                s = pd.to_numeric(X[c], errors="coerce")
+                arr = np.asarray(s, float)
+                frac = float(np.isfinite(arr).mean()) if arr.size else 0.0
+                if frac >= float(min_non_nan_frac):
+                    keep.append(c)
+            except Exception:
+                continue
+        return keep
+
+    # keep only requested cols present
     feature_list = [f for f in feature_list if f in X.columns]
 
-    # drop/raise on forbidden
-    forbidden = [f for f in feature_list if any(p in f for p in leak_col_patterns)]
+    # drop/raise on forbidden in requested list
+    forbidden = [f for f in feature_list if _is_forbidden(f)]
     if forbidden:
         msg = f"[LEAK-GUARD] Forbidden feature(s) present: {forbidden[:50]}{'...' if len(forbidden)>50 else ''}"
         if drop_forbidden_features:
@@ -2705,8 +2739,14 @@ def _cv_auc_for_feature_set(
         else:
             raise RuntimeError(msg)
 
+    # ✅ ALWAYS-TRY: if nothing left, fall back to all usable features in X
+    if len(feature_list) == 0 and fallback_to_all_available_features:
+        feature_list = _all_usable_features_from_X()
+        if debug:
+            log_func(f"[FEATS] Requested list collapsed; fallback_to_all_available_features -> using {len(feature_list)} cols")
+
+    # if still empty, return legacy-safe payload
     if len(feature_list) == 0:
-        # keep legacy keys so callers don't explode
         return {
             "feature_list": [],
             "oof_proba": np.full(n, np.nan, dtype=float) if return_oof else None,
@@ -2716,7 +2756,6 @@ def _cv_auc_for_feature_set(
             "score": float("-inf"),
             "aborted": False,
 
-            # ✅ aliases expected by auto-select
             "oof_auc_best": float("nan"),
             "oof_logloss_best": float("nan"),
             "oof_brier_best": float("nan"),
@@ -2726,18 +2765,36 @@ def _cv_auc_for_feature_set(
             "oof_brier": float("nan"),
             "oof_score": float("-inf"),
 
-            # flipping metadata
             "n_feature_flips": 0,
             "flipped_features": [],
             "global_flip": False,
             "flip_rate": float("nan"),
         }
 
+    # ---- enforce numeric-only if requested (prevents downstream fit errors) ----
+    if require_numeric_features:
+        numeric_only = []
+        for f in feature_list:
+            try:
+                s = pd.to_numeric(X[f], errors="coerce")
+                arr = np.asarray(s, float)
+                frac = float(np.isfinite(arr).mean()) if arr.size else 0.0
+                if frac >= float(min_non_nan_frac):
+                    numeric_only.append(f)
+            except Exception:
+                continue
+        if numeric_only:
+            feature_list = numeric_only
+        else:
+            # last resort: try all usable numeric from X
+            if fallback_to_all_available_features:
+                feature_list = _all_usable_features_from_X()
+
     # numeric candidates only (for flipping)
     numeric_feats = []
     for f in feature_list:
         try:
-            _ = np.asarray(X[f], float)
+            _ = np.asarray(pd.to_numeric(X[f], errors="coerce"), float)
             numeric_feats.append(f)
         except Exception:
             pass
@@ -2748,7 +2805,7 @@ def _cv_auc_for_feature_set(
         keep = []
         for f in numeric_feats:
             try:
-                x_f = np.asarray(X[f], float)
+                x_f = np.asarray(pd.to_numeric(X[f], errors="coerce"), float)
                 if np.all(~np.isfinite(x_f)):
                     continue
                 xf = x_f.copy()
@@ -2797,6 +2854,13 @@ def _cv_auc_for_feature_set(
         do_abort = abort_if_cannot_beat_score is not None and np.isfinite(abort_if_cannot_beat_score)
         n_folds = len(folds)
         auc_fold_vals = []
+
+        # use numeric-coerced view if require_numeric_features
+        if require_numeric_features:
+            X_use = X_use.copy()
+            for c in feats:
+                if c in X_use.columns:
+                    X_use[c] = pd.to_numeric(X_use[c], errors="coerce")
 
         for fold_i, (tr_idx, val_idx) in enumerate(folds, 1):
             _assert_no_game_overlap(tr_idx, val_idx)
@@ -2883,18 +2947,24 @@ def _cv_auc_for_feature_set(
     # OPTIONAL: directed feature orientation (flip features one by one)
     # ============================================================
     if orient_features and enable_feature_flips and max_feature_flips > 0 and numeric_feats:
-        # quick-screen uses first few folds
         quick_folds = folds[: max(1, int(orient_quick_folds))]
 
         def _quick_auc(X_use, feats):
-            # evaluate only on quick_folds
             oof_q = np.full(n, np.nan, dtype=float)
+
+            if require_numeric_features:
+                X_use = X_use.copy()
+                for c in feats:
+                    if c in X_use.columns:
+                        X_use[c] = pd.to_numeric(X_use[c], errors="coerce")
+
             for (tr_idx, val_idx) in quick_folds:
                 _assert_no_game_overlap(tr_idx, val_idx)
                 mdl = clone(model_proto)
                 mdl.fit(X_use.iloc[tr_idx][feats], y[tr_idx])
                 proba = _safe_predict_proba_pos(mdl, X_use.iloc[val_idx][feats])
                 oof_q[val_idx] = np.asarray(proba, float).reshape(-1)
+
             valid_q = np.isfinite(oof_q)
             if valid_q.sum() < 2 or len(np.unique(y[valid_q])) < 2:
                 return np.nan
@@ -2902,14 +2972,12 @@ def _cv_auc_for_feature_set(
 
         cur_quick = _quick_auc(X, feature_list)
 
-        # greedy passes
         for p in range(int(max(1, orient_passes))):
             any_flip = False
             for feat in list(numeric_feats):
                 if n_feature_flips >= int(max_feature_flips):
                     break
 
-                # quick screen
                 X_try = X.copy()
                 try:
                     X_try[feat] = -pd.to_numeric(X_try[feat], errors="coerce")
@@ -2925,7 +2993,6 @@ def _cv_auc_for_feature_set(
                 if (try_quick - cur_quick) < float(orient_quick_eps):
                     continue
 
-                # full CV with early-abort vs current best
                 cand = _oof_metrics_for_X(
                     X_try,
                     feature_list,
@@ -2937,7 +3004,6 @@ def _cv_auc_for_feature_set(
 
                 cand_score = float(cand.get("score", float("-inf")))
                 if (cand_score - best_score) >= float(orient_full_min_gain):
-                    # accept
                     X = X_try
                     best_metrics = dict(cand)
                     best_score = cand_score
@@ -2962,41 +3028,33 @@ def _cv_auc_for_feature_set(
     # ============================================================
     out = dict(best_metrics)
 
-    # attach metadata
     out["feature_list"] = list(feature_list)
     out["n_feature_flips"] = int(n_feature_flips)
     out["flipped_features"] = list(flipped_features)
     out["global_flip"] = False
     out["flip_rate"] = float("nan")
 
-    # ✅ aliases expected by _auto_select_k_by_auc (and your log lines)
     out["oof_auc_best"]      = float(out.get("auc", float("nan")))
     out["oof_logloss_best"]  = float(out.get("logloss", float("nan")))
     out["oof_brier_best"]    = float(out.get("brier", float("nan")))
     out["oof_score_best"]    = float(out.get("score", float("-inf")))
 
-    # keep legacy “oof_*” names too
     out["oof_auc"]     = out["oof_auc_best"]
     out["oof_logloss"] = out["oof_logloss_best"]
     out["oof_brier"]   = out["oof_brier_best"]
     out["oof_score"]   = out["oof_score_best"]
 
-    # oof proba only if requested
     if not return_oof:
         out["oof_proba"] = None
     else:
-        # base function returns oof_proba already; just ensure present
         out["oof_proba"] = out.get("oof_proba", None)
 
     return out
-
-
-
 def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
     min_k=80,
     max_k=None,
-    patience=25,
+    patience=60,
     min_improve=1e-4,
     verbose=True,
     log_func=print,
@@ -3010,11 +3068,27 @@ def _auto_select_k_by_auc(
     max_feature_flips=20,
     orient_passes=1,
     force_full_scan=True,   # ✅ always go to max_k
+    # ✅ NEW
+    fallback_to_all_available_features=True,     # if ordered list collapses, scan all usable cols
+    require_present_in_X=True,                  # drop missing feature names
 ):
+    # ---- sanitize ordered_features so scan never "dies" due to missing cols ----
+    ordered = list(ordered_features) if ordered_features is not None else []
+    if require_present_in_X:
+        ordered = [f for f in ordered if f in X.columns]
+
+    # if nothing left, fall back to all columns
+    if (not ordered) and fallback_to_all_available_features:
+        ordered = list(X.columns)
+
+    if not ordered:
+        # nothing to scan
+        return 0, None, []
+
     if max_k is None:
-        max_k = len(ordered_features)
-    max_k = int(min(max_k, len(ordered_features)))
-    min_k = int(max(1, min(min_k, max_k)))
+        max_k = len(ordered)
+    max_k = int(min(max_k, len(ordered)))
+    min_k = int(max(1, min(min_k, max_k)))   # ✅ clamp to [1, max_k]
 
     y_arr = np.asarray(y, int).reshape(-1)
 
@@ -3022,14 +3096,14 @@ def _auto_select_k_by_auc(
     best_auc = -np.inf
     best_ll = np.inf
     best_brier = np.inf
-    best_score = -np.inf   # ✅ keep scalar best_score for tie-break
+    best_score = -np.inf
     best_res = None
 
     no_improve = 0
     history = []
 
     for k in range(min_k, max_k + 1):
-        feats_k = ordered_features[:k]
+        feats_k = ordered[:k]
         dbg = bool(debug and (k % int(debug_every) == 0 or k in (min_k, max_k)))
 
         res = _cv_auc_for_feature_set(
@@ -3042,9 +3116,10 @@ def _auto_select_k_by_auc(
             max_feature_flips=max_feature_flips,
             orient_passes=orient_passes,
             enforce_no_game_overlap=True,
+            # ✅ keep scan alive even if a prefix collapses
+            fallback_to_all_available_features=True,
         )
 
-        # ✅ these keys now ALWAYS exist (because we added aliases in _cv_auc_for_feature_set)
         auc_k = float(res.get("oof_auc_best", np.nan))
         ll_k  = float(res.get("oof_logloss_best", np.nan))
         br_k  = float(res.get("oof_brier_best", np.nan))
@@ -3076,8 +3151,6 @@ def _auto_select_k_by_auc(
 
         improved = (auc_k > best_auc + float(min_improve))
         tied = (abs(auc_k - best_auc) <= float(auc_tie_eps))
-
-        # ✅ tie-break: prefer better score (which already blends auc/ll/brier)
         better_on_tie = tied and (sc_k > best_score + 1e-12)
 
         if improved or better_on_tie:
@@ -3091,7 +3164,6 @@ def _auto_select_k_by_auc(
         else:
             no_improve += 1
 
-        # early stop only if not forcing full scan
         if (not force_full_scan) and (no_improve >= patience):
             if verbose:
                 log_func(
@@ -3105,31 +3177,6 @@ def _auto_select_k_by_auc(
         )
 
     return best_k, best_res, history
-
-
-def anchor_to_implied(p_model, p_imp, k=0.45, eps=1e-6):
-    p_model = np.asarray(p_model, float)
-    p_imp   = np.asarray(p_imp, float)
-
-    p_model = np.clip(p_model, eps, 1 - eps)
-    p_imp   = np.clip(p_imp,   eps, 1 - eps)
-
-    def _logit(x):
-        return np.log(x / (1.0 - x))
-
-    def _sigmoid(z):
-        return 1.0 / (1.0 + np.exp(-z))
-
-    z_mod = _logit(p_model)
-    z_imp = _logit(p_imp)
-
-    return np.clip(
-        _sigmoid(z_imp + float(k) * (z_mod - z_imp)),
-        eps,
-        1 - eps
-    )
-
-# ------- One-call AUTO selector that does everything -------
 def select_features_auto(
     model_proto,
     X_df_train: pd.DataFrame,
@@ -3140,20 +3187,19 @@ def select_features_auto(
     corr_within=0.90,
     corr_global=0.92,
     max_feats_major=100,
-    sign_flip_max=0.35,    # drop features that flip sign across folds too often
-    shap_cv_max=1.00,      # drop features with unstable magnitude (std/mean)
+    sign_flip_max=0.35,
+    shap_cv_max=1.00,
     max_feats_small=80,
     sport_key: str = "NFL",
     must_keep: list[str] = None,
-    topk_per_fold=60,
+    topk_per_fold=90,
     min_presence=0.6,
     # AUC-driven auto-K controls
     use_auc_auto: bool = True,
-    auc_min_k: int = 30,
-    auc_patience: int = 5,
+    auc_min_k: int = 50,
+    auc_patience: int = 30,
     auc_min_improve: float = 1e-4,
     auc_verbose: bool = True,
-    # NEW: logging hook for Streamlit or plain print
     log_func=print,
 ):
     must_keep = must_keep or ["Is_Home_Team_Bet", "Is_Favorite_Bet"]
@@ -3199,7 +3245,6 @@ def select_features_auto(
     if "shap_cv" in rank_df.columns:
         filt &= rank_df["shap_cv"].fillna(1.0) <= float(shap_cv_max)
 
-    # keep at least the top-K by |SHAP|
     top_by_abs = (
         rank_df.sort_values("avg_abs_shap", ascending=False)
         .head(25)
@@ -3249,10 +3294,7 @@ def select_features_auto(
         keep_order = (
             rank_df.loc[cols_in_summary]
             .assign(
-                _presence=rank_df.get(
-                    "presence",
-                    pd.Series(1.0, index=rank_df.index),
-                )
+                _presence=rank_df.get("presence", pd.Series(1.0, index=rank_df.index))
                 .reindex(cols_in_summary)
                 .fillna(0.0)
             )
@@ -3262,86 +3304,51 @@ def select_features_auto(
     else:
         keep_order = list(final)
 
-    # ensure must_keep are present and at the front
     mk_in = [m for m in must_keep if m in X_df_train.columns]
     keep_order = list(dict.fromkeys(mk_in + keep_order))
 
+    # ✅ IMPORTANT: keep cap, but never let it kill the scan if it's already smaller
     if len(keep_order) > cap:
         keep_order = keep_order[:cap]
 
     # 3b) AUC-driven auto-selection of best prefix size
     best_k = None
-    best_score = None
-    
+    best_res = None
+
     if use_auc_auto and keep_order:
         y_arr = np.asarray(y_train)
-    
-        # 🔑 NEW: dynamic bounds based on feature count
-        
+
         n_feats = len(keep_order)
 
-        min_k_dyn = max(
-            60,                     # ← hard minimum
-            int(0.25 * n_feats),    # ← adaptive scaling
-        )
-        
-        best_k, best_score, history = _auto_select_k_by_auc(
+        # ✅ FIX: dynamic min_k can NEVER exceed n_feats, and NEVER hard-floor at 60
+        min_k_dyn = int(max(1, min(int(auc_min_k), n_feats)))
+
+        best_k, best_res, history = _auto_select_k_by_auc(
             model_proto,
             X_df_train,
             y_arr,
             folds,
             keep_order,
             min_k=min_k_dyn,
-            max_k=n_feats,
+            max_k=n_feats,                 # ✅ always try all available in keep_order
             patience=auc_patience,
             min_improve=auc_min_improve,
             verbose=auc_verbose,
             log_func=log_func,
             debug=True,
             debug_every=15,
+            force_full_scan=True,          # ✅ always go to max_k
         )
 
-    
         final_feats = keep_order[:best_k]
     else:
         final_feats = keep_order
 
-
-    # 3c) extra logging: ΔAUC vs full set + top-10 features
+    # 3c) logging: compare best vs full-set (no dead keys like oof_auc_flip)
     if auc_verbose and keep_order:
-        def _safe_float(x, name="value"):
-            """Coerce possible tuple/list/np array/scalar into a python float or raise."""
-            import numpy as np
-    
-            if x is None:
-                return None
-    
-            # If someone changed _cv_auc_for_feature_set to return (auc, flip_rate), etc.
-            if isinstance(x, (tuple, list)):
-                if len(x) == 0:
-                    return np.nan
-                x = x[0]
-    
-            # Numpy array -> must be scalar-ish
-            if isinstance(x, np.ndarray):
-                if x.size == 0:
-                    return np.nan
-                if x.size == 1:
-                    x = x.ravel()[0]
-                else:
-                    raise ValueError(f"{name} is non-scalar array with shape {x.shape}")
-    
-            # Numpy scalar / python scalar
-            try:
-                return float(x)
-            except Exception as e:
-                raise ValueError(f"Could not convert {name}={x!r} to float: {e}")
-    
-      
         try:
             y_arr = np.asarray(y_train)
-        
-            # NEW: _cv_auc_for_feature_set returns a dict
+
             res_full = _cv_auc_for_feature_set(
                 model_proto,
                 X_df_train,
@@ -3351,48 +3358,37 @@ def select_features_auto(
                 log_func=log_func,
                 debug=False,
                 return_oof=True,
+                fallback_to_all_available_features=True,
             )
-        
-            # define "full-set AUC" consistently: best OOF orientation
-            oof_auc_full      = float(res_full.get("oof_auc", np.nan))
-            oof_auc_full_flip = float(res_full.get("oof_auc_flip", np.nan))
-            auc_full = max(oof_auc_full, oof_auc_full_flip)
-        
-            full_global_flip = bool(res_full.get("global_flip", False))
-            full_flip_rate   = float(res_full.get("flip_rate", 0.0))
-        
+
+            auc_full = float(res_full.get("oof_auc_best", np.nan))
+            ll_full  = float(res_full.get("oof_logloss_best", np.nan))
+            br_full  = float(res_full.get("oof_brier_best", np.nan))
+            sc_full  = float(res_full.get("oof_score_best", float("-inf")))
+
             log_func(
-                f"[AUTO-FEAT] Full set OOF: auc={auc_full:.6f} "
-                f"(oof={oof_auc_full:.6f}, oof_flip={oof_auc_full_flip:.6f}) "
-                f"global_flip={'YES' if full_global_flip else 'NO'} "
-                f"flip_rate={full_flip_rate:.1%}"
+                f"[AUTO-FEAT] Full candidate set OOF: auc={auc_full:.6f} ll={ll_full:.6f} "
+                f"brier={br_full:.6f} score={sc_full:.6f} n_feats={len(keep_order)}"
             )
-        
         except Exception as e:
-            log_func(f"[AUTO-FEAT] Failed to compute AUC for full candidate set: {e}")
+            log_func(f"[AUTO-FEAT] Failed to compute OOF for full candidate set: {e}")
             auc_full = np.nan
 
-    
-        best_auc_f = None
-        try:
-            best_auc_f = float(best_score) if best_score is not None else None
-        except Exception as e:
-            log_func(f"[AUTO-FEAT] best_score not scalar: {e}")
-            best_auc_f = None
+        best_auc = None
+        if best_res is not None:
+            best_auc = float(best_res.get("oof_auc_best", np.nan))
 
-    
-        if best_auc_f is not None and np.isfinite(auc_full):
-            delta_auc = best_auc_f - float(auc_full)
+        if best_auc is not None and np.isfinite(best_auc) and np.isfinite(auc_full):
             log_func(
-                f"[AUTO-FEAT] AUC(best_k={best_k}, n_feats={len(final_feats)}) = {best_auc_f:.6f} | "
-                f"AUC(full={len(keep_order)}) = {float(auc_full):.6f} | "
-                f"ΔAUC = {delta_auc:+.6f}"
+                f"[AUTO-FEAT] AUC(best_k={best_k}, n_feats={len(final_feats)})={best_auc:.6f} | "
+                f"AUC(full={len(keep_order)})={auc_full:.6f} | ΔAUC={best_auc-auc_full:+.6f}"
             )
-        elif best_auc_f is not None:
+        elif best_auc is not None and np.isfinite(best_auc):
             log_func(
-                f"[AUTO-FEAT] AUC(best_k={best_k}, n_feats={len(final_feats)}) = {best_auc_f:.6f} "
+                f"[AUTO-FEAT] AUC(best_k={best_k}, n_feats={len(final_feats)})={best_auc:.6f} "
                 f"(full-set AUC unavailable)"
             )
+
         log_func("[AUTO-FEAT] Top chosen features (up to 30):")
         for f in final_feats[:30]:
             if f in rank_df.index:
@@ -3410,11 +3406,9 @@ def select_features_auto(
 
     # 4) build final matrices
     feature_cols = list(final_feats)
-    summary = rank_df.loc[
-        [c for c in feature_cols if c in rank_df.index]
-    ].copy()
-
+    summary = rank_df.loc[[c for c in feature_cols if c in rank_df.index]].copy()
     return feature_cols, summary
+
 
 
 from sklearn.model_selection import StratifiedKFold
