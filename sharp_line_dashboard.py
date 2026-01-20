@@ -6922,6 +6922,25 @@ def fit_temperature_on_oof(y, p, grid=None):
         if ll < bestLL:
             bestLL, bestT = ll, float(T)
     return bestT, bestLL
+    
+def anchor_to_implied(p_model, p_implied, *, k: float = 0.45, eps: float = 1e-6):
+    """
+    Anchor model probability toward market-implied probability in logit space.
+
+    k controls how much of the model-vs-market logit gap you keep:
+      p_final = sigmoid( logit(p_imp) + k*(logit(p_model) - logit(p_imp)) )
+
+    k=0   -> pure market implied
+    k=1   -> pure model
+    """
+    pm = np.clip(np.asarray(p_model, dtype=float), eps, 1.0 - eps)
+    pi = np.clip(np.asarray(p_implied, dtype=float), eps, 1.0 - eps)
+
+    z_m = _logit(pm, eps=eps)
+    z_i = _logit(pi, eps=eps)
+
+    z = z_i + float(k) * (z_m - z_i)
+    return np.clip(_sigmoid(z), eps, 1.0 - eps)
 
 # ---------------------------
 # Leakage guard: snapshot must be <= game start
