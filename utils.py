@@ -5287,6 +5287,179 @@ MICRO_NUMERIC = [
     "Corridor_x_LateShare_Line","Dist_x_LateShare_Line","PctRank_x_LateShare_Line",
 ]
 RESIST_NUMERIC = ["Line_Resistance_Crossed_Count","Was_Line_Resistance_Broken","SharpMove_Resistance_Break"]
+MARKET_STRUCT_NUMERIC = [
+    # CLV / belief deltas
+    "CLV_Prob_Delta",
+    "CLV_Line_Pts_Signed",
+
+    # resistance intensity + timing regimes
+    "Resistance_Score",
+    "Early_Sharp_Flag",
+    "Late_Sharp_Flag",
+
+    # dispersion / consensus (prob + line)
+    "ImpProb_Mean_AllBooks",
+    "ImpProb_Std_AllBooks",
+    "ImpProb_Mean_SharpBooks",
+    "ImpProb_Mean_RecBooks",
+    "Sharp_Rec_Prob_Gap",
+    "Pct_Books_Aligned",
+
+    "Line_Mean_SharpBooks",
+    "Line_Mean_RecBooks",
+    "Sharp_Rec_Line_Gap",
+    "Line_Std_AllBooks",
+
+    # key-number structure (spreads only)
+    "Crossed_Key_3",
+    "Crossed_Key_7",
+    "Dist_to_3",
+    "Dist_to_7",
+]
+
+def add_market_structure_features_training(
+    df: pd.DataFrame,
+    *,
+    sharp_books: list[str],
+    rec_books: list[str],
+    game_col: str = "Game_Key",
+    market_col: str = "Market",
+    outcome_col: str = "Outcome",
+    book_col: str = "Bookmaker",
+) -> pd.DataFrame:
+    out = df.copy()
+    if out.empty:
+        return out
+
+    # required grouping cols
+    for c in (game_col, market_col, outcome_col, book_col):
+        if c not in out.columns:
+            return out
+
+    # numeric inputs (exist in your CSV; backend ensures some of these too)
+    prob_col      = "Implied_Prob" if "Implied_Prob" in out.columns else None
+    open_prob_col = "First_Imp_Prob" if "First_Imp_Prob" in out.columns else None
+    val_col       = "Value" if "Value" in out.columns else None
+    open_val_col  = "First_Line_Value" if "First_Line_Value" in out.columns else ("Open_Value" if "Open_Value" in out.columns else None)
+
+    # ---------- CLV deltas ----------
+    if prob_col and open_prob_col:
+        p  = pd.to_numeric(out[prob_col], errors="coerce")
+        p0 = pd.to_numeric(out[open_prob_col], errors="coerce")
+        out["CLV_Prob_Delta"] = (p - p0).fillna(0.0).astype("float32")
+    else:
+        out["CLV_Prob_Delta"] = 0.0
+
+    # signed line CLV proxy for spreads (uses Is_Favorite_Bet if present)
+    if val_col and open_val_col:
+        v  = pd.to_numeric(out[val_col], errors="coerce")
+        v0 = pd.to_numeric(out[open_val_col], errors="coerce")
+        raw = (v - v0).fillna(0.0)
+
+        if "Is_Favorite_Bet" in out.columns:
+            is_fav = pd.to_numeric(out["Is_Favorite_Bet"], errors="coerce").fillna(0).astype(int)
+            sign = np.where(is_fav.values == 1, -1.0, +1.0)
+            out["CLV_Line_Pts_Signed"] = (raw.values * sign).astype("float32")
+        else:
+            out["CLV_Line_Pts_Signed"] = raw.astype("float32")
+    else:
+        out["CLV_Line_Pts_Signed"] = 0.0
+
+    # ---------- key-number structure (spreads only) ----------
+    is_spreads = out[market_col].astype(str).str.lower().eq("spreads")
+    for name in ("Crossed_Key_3","Crossed_Key_7","Dist_to_3","Dist_to_7"):
+        if name not in out.columns:
+            out[name] = 0.0 if name.startswith("Dist_") else 0
+
+    if val_col and open_val_col:
+        v  = pd.to_numeric(out[val_col], errors="coerce")
+        v0 = pd.to_numeric(out[open_val_col], errors="coerce")
+
+        def _cross(key):
+            return (
+                ((v0 - key) * (v - key) < 0) |
+                (((v0 - key) == 0) & ((v - key) != 0)) |
+                (((v - key) == 0) & ((v0 - key) != 0))
+            )
+
+        out.loc[is_spreads, "Crossed_Key_3"] = _cross(3.0).loc[is_spreads].fillna(False).astype("int8").values
+        out.loc[is_spreads, "Crossed_Key_7"] = _cross(7.0).loc[is_spreads].fillna(False).astype("int8").values
+        out.loc[is_spreads, "Dist_to_3"] = (v.loc[is_spreads].abs() - 3.0).abs().fillna(0.0).astype("float32").values
+        out.loc[is_spreads, "Dist_to_7"] = (v.loc[is_spreads].abs() - 7.0).abs().fillna(0.0).astype("float32").values
+
+    # ---------- resistance intensity ----------
+    lim_up_no_move = pd.to_numeric(out.get("LimitUp_NoMove_Flag", 0), errors="coerce").fillna(0)
+    high_limit     = pd.to_numeric(out.get("High_Limit_Flag", 0), errors="coerce").fillna(0)
+    if ("Max_Value" in out.columns) and ("Min_Value" in out.columns):
+        vmax = pd.to_numeric(out["Max_Value"], errors="coerce")
+        vmin = pd.to_numeric(out["Min_Value"], errors="coerce")
+        narrow = ((vmax - vmin).abs() <= 0.25).fillna(False).astype("int8")
+    else:
+        narrow = 0
+    out["Resistance_Score"] = (lim_up_no_move + high_limit + narrow).astype("float32")
+
+    # ---------- timing regime bins ----------
+    if "Sharp_Time_Score" in out.columns:
+        s = pd.to_numeric(out["Sharp_Time_Score"], errors="coerce").fillna(0.0)
+        out["Early_Sharp_Flag"] = (s >= 0.70).astype("int8")
+        out["Late_Sharp_Flag"]  = (s <= 0.30).astype("int8")
+    else:
+        out["Early_Sharp_Flag"] = 0
+        out["Late_Sharp_Flag"]  = 0
+
+    # ---------- consensus / dispersion ----------
+    bl = out[book_col].astype(str).str.lower().str.strip()
+    sharp_set = set([str(x).lower() for x in (sharp_books or [])])
+    rec_set   = set([str(x).lower() for x in (rec_books or [])])
+    out["_is_sharp_tmp"] = bl.isin(sharp_set)
+    out["_is_rec_tmp"]   = bl.isin(rec_set)
+
+    grp_keys = [game_col, market_col, outcome_col]
+
+    # probability dispersion + gaps
+    if prob_col:
+        p = pd.to_numeric(out[prob_col], errors="coerce")
+        g = out.groupby(grp_keys, dropna=False)
+
+        out["ImpProb_Mean_AllBooks"] = g[prob_col].transform("mean").fillna(0.0).astype("float32")
+        out["ImpProb_Std_AllBooks"]  = g[prob_col].transform("std").fillna(0.0).astype("float32")
+
+        out["_p_tmp"] = p
+        sharp_mean = out.loc[out["_is_sharp_tmp"]].groupby(grp_keys, dropna=False)["_p_tmp"].mean()
+        rec_mean   = out.loc[out["_is_rec_tmp"]].groupby(grp_keys, dropna=False)["_p_tmp"].mean()
+
+        idx = out.set_index(grp_keys).index
+        out["ImpProb_Mean_SharpBooks"] = idx.map(sharp_mean).fillna(0.0).astype("float32")
+        out["ImpProb_Mean_RecBooks"]   = idx.map(rec_mean).fillna(0.0).astype("float32")
+        out["Sharp_Rec_Prob_Gap"]      = (out["ImpProb_Mean_SharpBooks"] - out["ImpProb_Mean_RecBooks"]).astype("float32")
+
+        # agreement on direction of CLV belief change
+        d = pd.to_numeric(out["CLV_Prob_Delta"], errors="coerce").fillna(0.0)
+        dir_med = out.groupby(grp_keys, dropna=False)["CLV_Prob_Delta"].transform("median")
+        aligned = (np.sign(d) == np.sign(dir_med)).astype("int8")
+        out["Pct_Books_Aligned"] = out.groupby(grp_keys, dropna=False)[aligned.name].transform("mean").fillna(0.0).astype("float32")
+    else:
+        for c in ["ImpProb_Mean_AllBooks","ImpProb_Std_AllBooks","ImpProb_Mean_SharpBooks","ImpProb_Mean_RecBooks","Sharp_Rec_Prob_Gap","Pct_Books_Aligned"]:
+            out[c] = 0.0
+
+    # line dispersion + gaps
+    if val_col:
+        v = pd.to_numeric(out[val_col], errors="coerce")
+        out["_v_tmp"] = v
+        sharp_v = out.loc[out["_is_sharp_tmp"]].groupby(grp_keys, dropna=False)["_v_tmp"].mean()
+        rec_v   = out.loc[out["_is_rec_tmp"]].groupby(grp_keys, dropna=False)["_v_tmp"].mean()
+
+        idx = out.set_index(grp_keys).index
+        out["Line_Mean_SharpBooks"] = idx.map(sharp_v).fillna(0.0).astype("float32")
+        out["Line_Mean_RecBooks"]   = idx.map(rec_v).fillna(0.0).astype("float32")
+        out["Sharp_Rec_Line_Gap"]   = (out["Line_Mean_SharpBooks"] - out["Line_Mean_RecBooks"]).astype("float32")
+        out["Line_Std_AllBooks"]    = out.groupby(grp_keys, dropna=False)[val_col].transform("std").fillna(0.0).astype("float32")
+    else:
+        for c in ["Line_Mean_SharpBooks","Line_Mean_RecBooks","Sharp_Rec_Line_Gap","Line_Std_AllBooks"]:
+            out[c] = 0.0
+
+    out.drop(columns=[c for c in ["_is_sharp_tmp","_is_rec_tmp","_p_tmp","_v_tmp"] if c in out.columns], inplace=True, errors="ignore")
+    return out
 
 def _enrich_snapshot_micro_and_resistance(df_in: pd.DataFrame) -> pd.DataFrame:
     if df_in.empty:
@@ -5338,12 +5511,19 @@ def _enrich_snapshot_micro_and_resistance(df_in: pd.DataFrame) -> pd.DataFrame:
 
     # Hybrid timing derivatives (built from your existing hybrid magnitude cols)
     df_tmp = compute_hybrid_timing_derivatives_training(df_tmp)
-
+    df_tmp = add_market_structure_features_training(
+        df_tmp,
+        sharp_books=SHARP_BOOKS,
+        rec_books=REC_BOOKS,
+    )
     # Type-safety & fill
     for c in MICRO_NUMERIC:
         df_tmp[c] = pd.to_numeric(df_tmp.get(c), errors="coerce").fillna(0).astype("float32")
     for c in RESIST_NUMERIC:
         df_tmp[c] = pd.to_numeric(df_tmp.get(c), errors="coerce").fillna(0).astype("uint8")
+    for c in MARKET_STRUCT_NUMERIC:
+        df_tmp[c] = pd.to_numeric(df_tmp.get(c), errors="coerce").fillna(0).astype("float32")
+
 
     return df_tmp
 
@@ -6541,7 +6721,8 @@ def apply_blended_sharp_score(
     
     # Merge enriched scalars back (many_to_one prevents accidental row multiplication)
     merge_keys = ['Game_Key','Market','Outcome','Bookmaker']
-    cols_to_bring = merge_keys + MICRO_NUMERIC + RESIST_NUMERIC
+    cols_to_bring = merge_keys + MICRO_NUMERIC + RESIST_NUMERIC + MARKET_STRUCT_NUMERIC
+
     df = df.merge(
         df_enrich[cols_to_bring],
         on=merge_keys,
@@ -6559,7 +6740,10 @@ def apply_blended_sharp_score(
         if c not in df.columns:
             df[c] = 0
         df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0).astype('uint8')
-    
+    for c in MARKET_STRUCT_NUMERIC:
+        if c not in df.columns:
+            df[c] = 0.0
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0).astype("float32")
          
     
     # === Cross-market support (optional)
