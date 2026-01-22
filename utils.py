@@ -3920,86 +3920,133 @@ SPORT_SPREAD_CFG = {
 
 def enrich_power_from_current_inplace(
     df: pd.DataFrame,
-    sport_aliases: dict,
+    *,
+    bq: bigquery.Client,
     table_current: str = "sharplogger.sharp_data.ratings_current",
-    project: str = "sharplogger",
-    baseline: float = 1500.0,
-) -> None:
+    preferred_method: dict | None = None,
+    sport_col: str = "Sport",
+    home_col: str = "Home_Team_Norm",
+    away_col: str = "Away_Team_Norm",
+    out_home_col: str = "Home_Power_Rating",
+    out_away_col: str = "Away_Power_Rating",
+    out_diff_col: str = "Power_Rating_Diff",
+    log_func=print,
+) -> pd.DataFrame:
     """
-    In-place version: adds/overwrites Home_Power_Rating, Away_Power_Rating, Power_Rating_Diff.
-    Requires ['Sport','Home_Team_Norm','Away_Team_Norm'] normalized enough for mapping.
+    Enrich df with Home_Power_Rating / Away_Power_Rating from ratings_current.
+
+    FIX: ratings_current may contain multiple rows per Team (multiple Method values, esp. NCAAB),
+         so we must filter to one method per sport and deduplicate Team before reindex.
     """
-   
+    if df is None or df.empty:
+        return df
 
-    if df.empty:
-        # still ensure columns exist
-        df["Home_Power_Rating"] = np.float32(baseline)
-        df["Away_Power_Rating"] = np.float32(baseline)
-        df["Power_Rating_Diff"] = np.float32(0.0)
-        return
+    preferred_method = preferred_method or PREFERRED_METHOD  # uses your dict
 
-    # Canon sport (assume single sport batch is typical)
-    sport_canon = str(df["Sport"].iloc[0]).upper()
+    # --- normalize team keys in df ---
+    for c in (sport_col, home_col, away_col):
+        if c not in df.columns:
+            raise ValueError(f"enrich_power_from_current_inplace missing column: {c}")
 
-    # Fetch minimal ratings (memoized)
-    ratings = fetch_latest_current_ratings_cached(
-        sport=sport_canon,
-        table_current=table_current,
-        project=project,
-    )
+    df[sport_col] = df[sport_col].astype(str).str.upper()
+    home_keys = df[home_col].astype(str).str.lower().str.strip()
+    away_keys = df[away_col].astype(str).str.lower().str.strip()
 
-    # Default fills
-    base32 = np.float32(baseline)
+    # Pre-create output cols (avoid KeyErrors downstream)
+    if out_home_col not in df.columns:
+        df[out_home_col] = np.nan
+    if out_away_col not in df.columns:
+        df[out_away_col] = np.nan
+    if out_diff_col not in df.columns:
+        df[out_diff_col] = np.nan
 
-    if ratings.empty:
-        df["Home_Power_Rating"] = base32
-        df["Away_Power_Rating"] = base32
-        df["Power_Rating_Diff"] = np.float32(0.0)
-        return
+    sports = sorted(set(df[sport_col].dropna().astype(str).str.upper().tolist()))
+    if not sports:
+        return df
 
-    # Build mapping Series (no dict, no copies)
-    s_map = pd.Series(
-        ratings["Power_Rating"].to_numpy(copy=False),
-        index=ratings["Team_Norm"],
-        dtype="float32",
-    )
+    # Query once for all sports in the batch
+    q = f"""
+    SELECT
+      UPPER(CAST(Sport AS STRING)) AS Sport,
+      LOWER(TRIM(Team))            AS Team,
+      LOWER(TRIM(Method))          AS Method,
+      SAFE_CAST(Rating AS FLOAT64) AS Rating,
+      TIMESTAMP(Updated_At)        AS Updated_At
+    FROM `{table_current}`
+    WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@sports)
+    """
+    df_cur = bq.query(
+        q,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ArrayQueryParameter("sports", "STRING", sports)]
+        ),
+    ).to_dataframe()
 
-    # Ensure team keys are normalized here (cheap and avoids another copy upstream)
-    def _norm(s: pd.Series) -> pd.Series:
-        s = s.astype(str).str.lower().str.strip()
-        s = s.str.replace(r"\s+", " ", regex=True)\
-             .str.replace(".", "", regex=False)\
-             .str.replace("&", "and", regex=False)\
-             .str.replace("-", " ", regex=False)
-        return s
+    if df_cur.empty:
+        log_func("⚠️ Power rating enrichment: ratings_current returned 0 rows.")
+        return df
 
-    if "Home_Team_Norm" in df.columns:
-        home_keys = _norm(df["Home_Team_Norm"])
-    else:
-        raise KeyError("Home_Team_Norm missing")
+    df_cur["Sport"] = df_cur["Sport"].astype(str).str.upper()
+    df_cur["Team"] = df_cur["Team"].astype(str).str.lower().str.strip()
+    df_cur["Method"] = df_cur["Method"].astype(str).str.lower().str.strip()
+    df_cur["Updated_At"] = pd.to_datetime(df_cur["Updated_At"], utc=True, errors="coerce")
+    df_cur["Rating"] = pd.to_numeric(df_cur["Rating"], errors="coerce")
 
-    if "Away_Team_Norm" in df.columns:
-        away_keys = _norm(df["Away_Team_Norm"])
-    else:
-        raise KeyError("Away_Team_Norm missing")
+    # Helper: build a unique Team->Rating Series for a given sport
+    def _build_map_for_sport(sport: str) -> pd.Series:
+        d = df_cur[df_cur["Sport"] == sport].copy()
+        if d.empty:
+            return pd.Series(dtype="float32")
 
-    # Vectorized lookups -> float32 arrays
-    home = s_map.reindex(home_keys).to_numpy(dtype="float32", copy=False)
-    away = s_map.reindex(away_keys).to_numpy(dtype="float32", copy=False)
+        m = preferred_method.get(sport, None)
+        if m is not None:
+            m = str(m).lower().strip()
+            if "Method" in d.columns:
+                d = d[d["Method"] == m]
 
-    # Single sport mean as fallback
-    sport_mean = np.float32(s_map.mean(skipna=True))
+        # If still multiple rows per team (or method missing), keep latest Updated_At then last row
+        d = d.dropna(subset=["Team", "Rating"])
+        if d.empty:
+            return pd.Series(dtype="float32")
 
-    # Fill NaNs in place
-    np.nan_to_num(home, copy=False, nan=sport_mean)
-    np.nan_to_num(away, copy=False, nan=sport_mean)
+        if "Updated_At" in d.columns:
+            d = d.sort_values(["Team", "Updated_At"], kind="mergesort")
+        else:
+            d = d.sort_values(["Team"], kind="mergesort")
 
-    # Attach columns without creating intermediates
-    df["Home_Power_Rating"] = home
-    df["Away_Power_Rating"] = away
-    df["Power_Rating_Diff"] = (home - away).astype("float32", copy=False)
+        # Deduplicate Team to guarantee a unique index for reindex()
+        d = d.drop_duplicates(subset=["Team"], keep="last")
+
+        s = d.set_index("Team")["Rating"]
+        # Absolute safety: remove any duplicate index labels
+        if s.index.has_duplicates:
+            s = s[~s.index.duplicated(keep="last")]
+
+        return s.astype("float32")
+
+    # Apply sport-by-sport (vectorized within each sport)
+    for sp in sports:
+        mask = (df[sport_col].astype(str).str.upper() == sp)
+        if not mask.any():
+            continue
+
+        s_map = _build_map_for_sport(sp)
+        if s_map.empty:
+            continue
+
+        hk = df.loc[mask, home_col].astype(str).str.lower().str.strip()
+        ak = df.loc[mask, away_col].astype(str).str.lower().str.strip()
+
+        # ✅ reindex now safe: s_map index is unique
+        h = s_map.reindex(hk).to_numpy(dtype="float32", copy=False)
+        a = s_map.reindex(ak).to_numpy(dtype="float32", copy=False)
+
+        df.loc[mask, out_home_col] = h
+        df.loc[mask, out_away_col] = a
+        df.loc[mask, out_diff_col] = (h - a).astype("float32")
 
     return df
+
 
 # ---- math utils (Normal CDF; no scipy) ----
 def _phi(z: np.ndarray) -> np.ndarray:
