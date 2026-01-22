@@ -489,25 +489,46 @@ def update_power_ratings(
 
         # ✅ NCAAB: KenPom-ish AdjEM (per 100 poss), stored as Rating directly (NOT 1500-scale)
         "NCAAB": dict(
-            model="ridge_massey",
-            ridge_lambda=65.0,
-            window_days=90,
-            phase_aware_window=True,
-            rm_half_life_days=35.0,
-
-            # AdjEM target + cap in EM_100 units
-            mov_cap_em100=35.0,          # 30–40 is typical
-            use_hfa_term=True,
-
-            # possessions proxy from totals
-            ncaab_league_ppp=1.03,
+            model="kp_kalman_ppp",
+        
+            # --- possessions estimation from market total ---
+            # Total_Close ≈ possessions * (ppp_home + ppp_away). If each ~1.03, total_ppp ~2.06
+            ncaab_total_ppp=2.06,
             poss_floor=55.0,
             poss_ceil=80.0,
-
-            # SoS
-            sos_gamma=0.25,
+        
+            # --- Kalman / update knobs (PPP space) ---
+            phi=0.985,                 # recency/forgetting (higher = slower drift)
+            sigma_eta=0.020,           # state drift noise (PPP)
+            sigma_ppp=0.090,           # observation noise (PPP)
+        
+            # Home-court advantage in KenPom-ish units (points per 100)
+            hfa_em100=3.5,             # ~3–4 is reasonable
+            # convert internally to PPP by /100
+        
+            # blowout / outlier downweight
+            em100_blowout=22.0,
+            blowout_var_mult=2.0,
+            smooth_em100_start=12.0,
+            smooth_em100_slope=0.04,
+            adj_em_cap=35.0,
+            adj_em_season_scale=True,
+            adj_o_cap=130.0,   # optional sanity caps
+            adj_d_cap=130.0,
+            # early shrink to avoid crazy early-season spikes
+            shrink_prior_games=12.0,
+        
+            # tempo tracking
+            tempo_alpha=0.06,          # EWMA for possessions/team
+        
+            # optional SoS (usually small if O/D model already “adjusts”)
+            sos_gamma=0.08,
             sos_min_games=10,
+        
+            # optional: only use totals from sharp books
+            sharp_books=["pinnacle", "betfair_ex"],
         ),
+
     }
 
     BACKFILL_DAYS = 365
@@ -1245,41 +1266,79 @@ def update_power_ratings(
                  "Method": "elo_kalman", "Updated_At": current_ts} for t, r in zip(teams, adj_R)]
 
     # ---------------- engines ----------------
-    def run_ridge_massey(*, sport: str, aliases: list[str], cfg: dict, window_start):
+    def run_kp_kalman_ppp(
+        *,
+        sport: str,
+        aliases: list[str],
+        cfg: dict,
+        window_start,
+    ):
         """
-        KenPom-ish AdjEM engine for NCAAB using Ridge-Massey on EM_100 (per 100 possessions).
-        Stores Rating = AdjEM directly (NOT 1500-scale), with Method='kp_adj_em'.
+        KenPom-like NCAAB engine:
+          - Estimate possessions from sharp-market Total_Close (median across sharp books)
+          - Observe PPP (points per possession) for each team
+          - Kalman-style updates on Offense and Defense states in PPP space
+          - Track tempo (AdjT) as EWMA possessions per game
+          - Output:
+              kp_adj_o  = 100*(mu_ppp + off[t])
+              kp_adj_d  = 100*(mu_ppp + def[t])
+              kp_adj_em = kp_adj_o - kp_adj_d
+              kp_adj_t  = tempo[t]
+        Stores NCAAB Rating as the metric itself (not 1500-scale).
         """
-        window_days  = int(cfg.get("window_days", 120))
-        ridge_lambda = float(cfg.get("ridge_lambda", 65.0))
-        use_hfa_term = bool(cfg.get("use_hfa_term", True))
-        rm_half_life_days = float(cfg.get("rm_half_life_days", 0.0))
-
-        em100_cap = float(cfg.get("mov_cap_em100", 35.0))
-        em100_cap = em100_cap if np.isfinite(em100_cap) and em100_cap > 0 else 35.0
-
-        league_ppp = float(cfg.get("ncaab_league_ppp", 1.03))
-        poss_floor = float(cfg.get("poss_floor", 55.0))
-        poss_ceil  = float(cfg.get("poss_ceil", 80.0))
-
+    
+        if project_table_market is None:
+            raise ValueError("kp_kalman_ppp requires project_table_market (totals) but project_table_market is None.")
+    
+        # ---- caps / scaling to mimic KenPom range ----
+        EM_CAP = float(cfg.get("adj_em_cap", 35.0))
+        O_CAP  = float(cfg.get("adj_o_cap", 130.0))
+        D_CAP  = float(cfg.get("adj_d_cap", 130.0))
+        USE_SEASON_SCALE = bool(cfg.get("adj_em_season_scale", True))  # ✅ recommended
+    
+        def _clip(x, lo, hi):
+            try:
+                x = float(x)
+                if not np.isfinite(x):
+                    return 0.0
+                return float(min(max(x, lo), hi))
+            except Exception:
+                return 0.0
+    
+        total_ppp   = float(cfg.get("ncaab_total_ppp", 2.06))
+        poss_floor  = float(cfg.get("poss_floor", 55.0))
+        poss_ceil   = float(cfg.get("poss_ceil", 80.0))
+    
+        phi       = float(cfg.get("phi", 0.985))
+        sigma_eta = float(cfg.get("sigma_eta", 0.020))
+        sigma_ppp = float(cfg.get("sigma_ppp", 0.090))
+    
+        hfa_em100 = float(cfg.get("hfa_em100", 3.5))
+        hfa_ppp   = hfa_em100 / 100.0
+    
+        em100_blowout    = float(cfg.get("em100_blowout", 22.0))
+        blowout_var_mult = float(cfg.get("blowout_var_mult", 2.0))
+        smooth_start     = float(cfg.get("smooth_em100_start", 12.0))
+        smooth_slope     = float(cfg.get("smooth_em100_slope", 0.04))
+    
+        shrink_prior_games = float(cfg.get("shrink_prior_games", 12.0))
+        tempo_alpha        = float(cfg.get("tempo_alpha", 0.06))
+    
         sos_gamma     = float(cfg.get("sos_gamma", 0.0))
         sos_min_games = int(cfg.get("sos_min_games", 10))
-        HIST_BATCH = int(cfg.get("history_batch_rows", 50_000))
-
-        if bool(cfg.get("phase_aware_window", True)):
-            today = pd.Timestamp.utcnow()
-            m = int(today.month)
-            if m in (11, 12):
-                window_days = max(window_days, 120)
-            elif m in (1, 2):
-                window_days = min(window_days, 100)
-            elif m in (3,):
-                window_days = min(window_days, 75)
-
-        # Pull scores + sharp consensus Total_Close (for possessions proxy)
-        if project_table_market is None:
-            raise ValueError("NCAAB kp_adj_em requires project_table_market (totals) but project_table_market is None.")
-
+    
+        sharp_books = [b.lower() for b in cfg.get("sharp_books", SHARP_BOOKS_DEFAULT)]
+    
+        BATCH_SZ = 50_000
+        history_batch: list[dict] = []
+    
+        # --- stream final scores + total_close ---
+        cutoff_param = None
+        if window_start is not None and not pd.isna(window_start):
+            w = to_utc_ts(window_start)
+            if not pd.isna(w):
+                cutoff_param = w.to_pydatetime()
+    
         sql = f"""
         WITH scores AS (
           SELECT
@@ -1292,7 +1351,7 @@ def update_power_ratings(
           WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@aliases)
             AND Score_Home_Score IS NOT NULL
             AND Score_Away_Score IS NOT NULL
-            AND TIMESTAMP(Game_Start) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @win_days DAY)
+            {"" if cutoff_param is None else "AND TIMESTAMP(Game_Start) >= @cutoff"}
           QUALIFY ROW_NUMBER() OVER (
             PARTITION BY LOWER(TRIM(Home_Team)), LOWER(TRIM(Away_Team)), TIMESTAMP(Game_Start)
             ORDER BY TIMESTAMP(Inserted_Timestamp) DESC
@@ -1339,172 +1398,234 @@ def update_power_ratings(
           ON tc.home = s.home AND tc.away = s.away AND tc.gs = s.gs
         ORDER BY s.gs
         """
-
-        df = bq.query(
-            sql,
-            job_config=bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ArrayQueryParameter("aliases", "STRING", aliases),
-                    bigquery.ScalarQueryParameter("win_days", "INT64", int(window_days)),
-                    bigquery.ArrayQueryParameter("sharp_books", "STRING", [b.lower() for b in SHARP_BOOKS_DEFAULT]),
-                ]
-            )
-        ).to_dataframe()
-
+    
+        params = [
+            bigquery.ArrayQueryParameter("aliases", "STRING", aliases),
+            bigquery.ArrayQueryParameter("sharp_books", "STRING", sharp_books),
+        ]
+        if cutoff_param is not None:
+            params.append(bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", cutoff_param))
+    
+        df = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
         if df.empty:
             return []
-
+    
         df["gs"] = pd.to_datetime(df["gs"], utc=True, errors="coerce")
-        df = df.dropna(subset=["gs", "home", "away", "hs", "as_"]).copy()
-        df = df.sort_values("gs", kind="mergesort")
+        df = df.dropna(subset=["gs", "home", "away", "hs", "as_"]).sort_values("gs", kind="mergesort")
         if df.empty:
             return []
-
-        teams = pd.Index(sorted(set(df["home"]) | set(df["away"])))
-        n = len(teams)
-        if n < 2:
-            return []
-        idx = {t: i for i, t in enumerate(teams)}
-        d = n + (1 if use_hfa_term else 0)
-
-        def _estimate_possessions(total_close: float | None, hs: float, as_: float) -> float:
-            # total_close is usually a good tempo proxy (market knows expected possessions & efficiency)
-            if total_close is not None and np.isfinite(total_close) and total_close > 80:
-                poss = float(total_close) / max(league_ppp, 0.5)
+    
+        # --- state ---
+        off_m: dict[str, float] = {}
+        def_m: dict[str, float] = {}
+        off_v: dict[str, float] = {}
+        def_v: dict[str, float] = {}
+    
+        tempo: dict[str, float] = {}
+        games_played: dict[str, int] = {}
+    
+        sos_num: dict[str, float] = {}
+        sos_den: dict[str, float] = {}
+    
+        def _om(t): return float(off_m.get(t, 0.0))
+        def _dm(t): return float(def_m.get(t, 0.0))
+        def _ov(t): return float(off_v.get(t, 0.15))
+        def _dv(t): return float(def_v.get(t, 0.15))
+        def _tempo(t): return float(tempo.get(t, 68.0))
+    
+        def _safe(x, default=0.0):
+            try:
+                x = float(x)
+                return x if np.isfinite(x) else float(default)
+            except Exception:
+                return float(default)
+    
+        def _estimate_possessions(total_close, hs, as_):
+            tc = _safe(total_close, default=np.nan)
+            if np.isfinite(tc) and tc > 80:
+                poss = tc / max(total_ppp, 1e-6)
             else:
-                poss = float(hs + as_) / max(league_ppp, 0.5)
+                poss = (hs + as_) / max(total_ppp, 1e-6)
             return float(min(max(poss, poss_floor), poss_ceil))
-
-        def _robust_em100(hs: float, as_: float, total_close: float | None) -> float:
-            poss = _estimate_possessions(total_close, hs, as_)
-            em100 = ((hs - as_) / max(poss, 1e-6)) * 100.0
-            return float(em100_cap * np.tanh(em100 / em100_cap))
-
-        lam = float(max(ridge_lambda, 1e-6))
-        P = (np.eye(d, dtype=np.float32) / np.float32(lam)).astype(np.float32)
-        bvec = np.zeros(d, dtype=np.float32)
-
-        hl = float(rm_half_life_days)
-        last_ts = None
-
-        def _apply_forgetting(Pm, bv, dt_days: float):
-            if hl <= 0:
-                return Pm, bv
-            f = float(np.exp(-dt_days / max(hl, 1e-6)))
-            f = max(f, 1e-6)
-            return (Pm / np.float32(f)), (bv * np.float32(f))
-
-        sos_sum = np.zeros(n, dtype=np.float32)
-        sos_cnt = np.zeros(n, dtype=np.float32)
-
-        def _sos_adj(i: int) -> float:
-            if sos_gamma <= 0.0:
+    
+        mu_ppp = None
+        mu_alpha = 0.02
+    
+        def _update_team_tempo(t: str, poss: float):
+            prev = _tempo(t)
+            tempo[t] = float((1.0 - tempo_alpha) * prev + tempo_alpha * poss)
+    
+        def _obs_var_from_em100(em100_abs: float) -> float:
+            var = sigma_ppp ** 2
+            if em100_abs >= em100_blowout:
+                var *= blowout_var_mult
+            if em100_abs > smooth_start:
+                var *= (1.0 + smooth_slope * (em100_abs - smooth_start))
+            return float(var)
+    
+        def _kalman_update_ppp(team_off: str, team_def: str, ppp_obs: float, hfa: float, obs_var: float):
+            m1, v1 = _om(team_off), _ov(team_off)
+            m2, v2 = _dm(team_def), _dv(team_def)
+    
+            y_hat = float(mu_ppp) + float(m1) + float(m2) + float(hfa)
+            e = float(ppp_obs) - float(y_hat)
+    
+            S = float(v1) + float(v2) + float(obs_var)
+            if S <= 1e-9:
+                S = 1e-9
+    
+            k1 = float(v1) / S
+            k2 = float(v2) / S
+    
+            off_m[team_off] = float(m1) + k1 * e
+            def_m[team_def] = float(m2) + k2 * e
+    
+            off_v[team_off] = max(1e-6, (1.0 - k1) * float(v1))
+            def_v[team_def] = max(1e-6, (1.0 - k2) * float(v2))
+    
+        def _adj_o(t): return 100.0 * (float(mu_ppp) + _om(t))
+        def _adj_d(t): return 100.0 * (float(mu_ppp) + _dm(t))
+        def _adj_em(t): return _adj_o(t) - _adj_d(t)
+        def _adj_t(t): return _tempo(t)
+    
+        def _sos_em_adj(t: str) -> float:
+            if sos_gamma <= 0:
                 return 0.0
-            if sos_cnt[i] < sos_min_games:
+            if games_played.get(t, 0) < sos_min_games:
                 return 0.0
-            sos_i = float(sos_sum[i] / max(sos_cnt[i], 1.0))
-            # small external adjustment (centered at 0)
-            return float(sos_gamma * (0.0 - sos_i))
-
-        hist_rows = []
-        METHOD = "kp_adj_em"
-
-        # Seed (same method), and center at 0 if absent
-        seed = load_seed_ratings(sport, window_start, method=METHOD)
-        if seed:
-            # Put seed into bvec approximately by initializing beta directly (cheap approximate):
-            # We'll just start bvec as zeros and rely on window; seed is optional.
-            pass
-
+            num = _safe(sos_num.get(t, 0.0), 0.0)
+            den = max(_safe(sos_den.get(t, 0.0), 0.0), 1e-9)
+            opp_em = num / den
+            return float(sos_gamma * (0.0 - opp_em))
+    
+        last_game_ts = None
+    
         for row in df.itertuples(index=False):
             h = str(row.home)
             a = str(row.away)
             ts = row.gs
             hs = float(row.hs)
             as_ = float(row.as_)
-            tc = None
-            try:
-                tc = float(row.total_close) if row.total_close is not None else None
-            except Exception:
-                tc = None
-
-            if last_ts is not None and hl > 0:
-                dt_days = max((ts - last_ts).total_seconds() / 86400.0, 0.0)
-                P, bvec = _apply_forgetting(P, bvec, dt_days)
-            last_ts = ts
-
-            ih, ia = idx[h], idx[a]
-
-            beta_pre = (P @ bvec).astype(np.float32)
-            r_pre = beta_pre[:n].astype(np.float32)
-
-            r_pre_h = float(r_pre[ih]) + _sos_adj(ih)
-            r_pre_a = float(r_pre[ia]) + _sos_adj(ia)
-
-            # leakage-safe: log PRE-GAME AdjEM at game start
-            hist_rows.append({
-                "Sport": sport,
-                "Team": h,
-                "Rating": float(r_pre_h),     # ✅ AdjEM
-                "Method": METHOD,
-                "Updated_At": ts,
-                "Source": "per_game_pregame",
-            })
-            hist_rows.append({
-                "Sport": sport,
-                "Team": a,
-                "Rating": float(r_pre_a),     # ✅ AdjEM
-                "Method": METHOD,
-                "Updated_At": ts,
-                "Source": "per_game_pregame",
-            })
-
-            if len(hist_rows) >= HIST_BATCH:
-                upsert_history_rows(pd.DataFrame(hist_rows))
-                hist_rows.clear()
-
-            x = np.zeros(d, dtype=np.float32)
-            x[ih] = 1.0
-            x[ia] = -1.0
-            if use_hfa_term:
-                x[n] = 1.0  # HFA is interpreted in EM_100 space
-
-            y = np.float32(_robust_em100(hs, as_, tc))
-
-            Px = P @ x
-            denom = 1.0 + float(x @ Px)
-            if denom <= 1e-9:
-                denom = 1e-9
-            P = P - (np.outer(Px, Px).astype(np.float32) / np.float32(denom))
-            bvec = bvec + x * y
-
-            beta_post = (P @ bvec).astype(np.float32)
-            r_post = beta_post[:n].astype(np.float32)
-
-            sos_sum[ih] += float(r_post[ia]); sos_cnt[ih] += 1.0
-            sos_sum[ia] += float(r_post[ih]); sos_cnt[ia] += 1.0
-
-        if hist_rows:
-            upsert_history_rows(pd.DataFrame(hist_rows))
-            hist_rows.clear()
-
-        current_ts = last_ts if last_ts is not None else pd.Timestamp.now(tz="UTC")
-
-        beta = (P @ bvec).astype(np.float32)
-        r = beta[:n].astype(np.float32)
-
+    
+            poss = _estimate_possessions(getattr(row, "total_close", None), hs, as_)
+            home_ppp = hs / max(poss, 1e-6)
+            away_ppp = as_ / max(poss, 1e-6)
+    
+            team_ppp = 0.5 * (home_ppp + away_ppp)
+            mu_ppp = team_ppp if mu_ppp is None else (1.0 - mu_alpha) * mu_ppp + mu_alpha * team_ppp
+    
+            _update_team_tempo(h, poss)
+            _update_team_tempo(a, poss)
+    
+            games_played[h] = games_played.get(h, 0) + 1
+            games_played[a] = games_played.get(a, 0) + 1
+    
+            em100 = ((hs - as_) / max(poss, 1e-6)) * 100.0
+            obs_var = _obs_var_from_em100(abs(em100))
+    
+            if last_game_ts is not None and ts < last_game_ts:
+                continue
+            last_game_ts = ts
+    
+            # --- pregame outputs (clipped to KenPom-ish ranges) ---
+            h_o  = _clip(_adj_o(h), -O_CAP, O_CAP)
+            h_d  = _clip(_adj_d(h), -D_CAP, D_CAP)
+            h_em = _clip((h_o - h_d) + _sos_em_adj(h), -EM_CAP, EM_CAP)
+    
+            a_o  = _clip(_adj_o(a), -O_CAP, O_CAP)
+            a_d  = _clip(_adj_d(a), -D_CAP, D_CAP)
+            a_em = _clip((a_o - a_d) + _sos_em_adj(a), -EM_CAP, EM_CAP)
+    
+            history_batch.extend([
+                {"Sport": sport, "Team": h, "Rating": float(h_o),          "Method": "kp_adj_o",  "Updated_At": ts, "Source": "per_game_pregame"},
+                {"Sport": sport, "Team": h, "Rating": float(h_d),          "Method": "kp_adj_d",  "Updated_At": ts, "Source": "per_game_pregame"},
+                {"Sport": sport, "Team": h, "Rating": float(h_em),         "Method": "kp_adj_em", "Updated_At": ts, "Source": "per_game_pregame"},
+                {"Sport": sport, "Team": h, "Rating": float(_adj_t(h)),    "Method": "kp_adj_t",  "Updated_At": ts, "Source": "per_game_pregame"},
+    
+                {"Sport": sport, "Team": a, "Rating": float(a_o),          "Method": "kp_adj_o",  "Updated_At": ts, "Source": "per_game_pregame"},
+                {"Sport": sport, "Team": a, "Rating": float(a_d),          "Method": "kp_adj_d",  "Updated_At": ts, "Source": "per_game_pregame"},
+                {"Sport": sport, "Team": a, "Rating": float(a_em),         "Method": "kp_adj_em", "Updated_At": ts, "Source": "per_game_pregame"},
+                {"Sport": sport, "Team": a, "Rating": float(_adj_t(a)),    "Method": "kp_adj_t",  "Updated_At": ts, "Source": "per_game_pregame"},
+            ])
+    
+            if len(history_batch) >= BATCH_SZ:
+                upsert_history_rows(pd.DataFrame(history_batch))
+                history_batch.clear()
+    
+            # --- kalman updates ---
+            _kalman_update_ppp(h, a, home_ppp, +hfa_ppp, obs_var)
+            _kalman_update_ppp(a, h, away_ppp, -hfa_ppp, obs_var)
+    
+            if sos_gamma > 0:
+                sos_num[h] = _safe(sos_num.get(h, 0.0), 0.0) + float(_adj_em(a))
+                sos_den[h] = _safe(sos_den.get(h, 0.0), 0.0) + 1.0
+                sos_num[a] = _safe(sos_num.get(a, 0.0), 0.0) + float(_adj_em(h))
+                sos_den[a] = _safe(sos_den.get(a, 0.0), 0.0) + 1.0
+    
+            for t in (h, a):
+                off_m[t] = phi * _om(t)
+                def_m[t] = phi * _dm(t)
+                off_v[t] = (phi**2) * _ov(t) + sigma_eta**2
+                def_v[t] = (phi**2) * _dv(t) + sigma_eta**2
+    
+        if history_batch:
+            upsert_history_rows(pd.DataFrame(history_batch))
+            history_batch.clear()
+    
+        current_ts = last_game_ts if last_game_ts is not None else pd.Timestamp.now(tz="UTC")
+    
+        teams = sorted(set(list(off_m.keys()) + list(def_m.keys()) + list(tempo.keys())))
+        if not teams or mu_ppp is None:
+            return []
+    
+        gp = np.array([games_played.get(t, 0) for t in teams], dtype=float)
+        shrink = gp / (gp + float(shrink_prior_games))
+    
+        def adj_o_raw(t): return 100.0 * (float(mu_ppp) + _om(t))
+        def adj_d_raw(t): return 100.0 * (float(mu_ppp) + _dm(t))
+        def adj_em_raw(t): return adj_o_raw(t) - adj_d_raw(t)
+        def adj_t_raw(t): return _tempo(t)
+    
+        # ✅ season scale: map 99th percentile |AdjEM| to EM_CAP (prevents constant clipping)
+        if USE_SEASON_SCALE:
+            raw_em = np.array([adj_em_raw(t) for t in teams], dtype=float)
+            raw_em = raw_em[np.isfinite(raw_em)]
+            if raw_em.size > 10:
+                q = float(np.quantile(np.abs(raw_em), 0.99))
+                season_scale = float(EM_CAP / max(q, 1e-6))
+                season_scale = float(min(max(season_scale, 0.5), 2.0))
+            else:
+                season_scale = 1.0
+        else:
+            season_scale = 1.0
+    
         current_rows = []
-        for t in teams:
-            i = idx[str(t)]
-            cur = float(r[i]) + _sos_adj(i)
-            current_rows.append({
-                "Sport": sport,
-                "Team": str(t),
-                "Rating": float(cur),     # ✅ AdjEM
-                "Method": METHOD,
-                "Updated_At": current_ts,
-            })
+        for i, t in enumerate(teams):
+            o = float(adj_o_raw(t))
+            d = float(adj_d_raw(t))
+            mid = 0.5 * (o + d)
+            em = (o - d)
+    
+            # shrink + season-scale in EM space
+            em2 = float(em) * float(shrink[i]) * float(season_scale)
+    
+            o2 = mid + 0.5 * em2
+            d2 = mid - 0.5 * em2
+    
+            # final caps
+            o2  = _clip(o2, -O_CAP, O_CAP)
+            d2  = _clip(d2, -D_CAP, D_CAP)
+            em2 = _clip(o2 - d2, -EM_CAP, EM_CAP)
+    
+            current_rows.extend([
+                {"Sport": sport, "Team": t, "Rating": float(o2),           "Method": "kp_adj_o",  "Updated_At": current_ts},
+                {"Sport": sport, "Team": t, "Rating": float(d2),           "Method": "kp_adj_d",  "Updated_At": current_ts},
+                {"Sport": sport, "Team": t, "Rating": float(em2),          "Method": "kp_adj_em", "Updated_At": current_ts},
+                {"Sport": sport, "Team": t, "Rating": float(adj_t_raw(t)), "Method": "kp_adj_t",  "Updated_At": current_ts},
+            ])
+    
         return current_rows
+
 
     # ---------------- MAIN ----------------
     sports_available = fetch_sports_present()
@@ -1622,11 +1743,12 @@ def update_power_ratings(
                 current_rows_all.extend(cur_rows)
                 updated_sports.append(sport)
 
-        elif cfg["model"] == "ridge_massey":
-            cur_rows = run_ridge_massey(sport=sport, aliases=aliases, cfg=cfg, window_start=window_start)
+        elif cfg["model"] == "kp_kalman_ppp":
+            cur_rows = run_kp_kalman_ppp(sport=sport, aliases=aliases, cfg=cfg, window_start=window_start)
             if cur_rows:
                 current_rows_all.extend(cur_rows)
                 updated_sports.append(sport)
+        
 
     upsert_current(current_rows_all)
     fill_missing_current_from_history(None)
