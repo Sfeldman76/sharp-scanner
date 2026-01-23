@@ -3938,7 +3938,7 @@ def enrich_power_for_training_lowmem(
         "NBA":   "elo_kalman",
         "WNBA":  "elo_kalman",
         "CFL":   "elo_kalman",
-        "NCAAB": "ridge_massey",
+        "NCAAB": "kp_adj_em",
     }
 
     def fetch_training_ratings_window_cached(
@@ -4002,7 +4002,9 @@ def enrich_power_for_training_lowmem(
         project=project,
     )
 
-    base = np.float32(1500.0)
+    method_used = PREFERRED_METHOD.get(sport_canon.upper())
+    base = np.float32(0.0) if method_used == "kp_adj_em" else np.float32(1500.0)
+
     out["Home_Power_Rating"] = base
     out["Away_Power_Rating"] = base
     if debug_asof_cols:
@@ -4345,74 +4347,150 @@ def enrich_and_grade_for_training(
 
 
 def favorite_centric_from_powerdiff_lowmem(df_games: pd.DataFrame) -> pd.DataFrame:
+    """
+    Takes one row per game (home/away) with:
+      - Sport, Home_Team_Norm, Away_Team_Norm
+      - Power_Rating_Diff (Home - Away)
+      - market consensus fields (k, Market_Favorite_Team, etc.)
+
+    FIXES:
+      ✅ Handles NCAAB KenPom-style AdjEM correctly:
+           Power_Rating_Diff is EM per 100 possessions (not 1500-scale points)
+           Convert to expected margin in points via possessions proxy.
+      ✅ Keeps existing behavior for Elo-ish sports (1500-scale) + MLB scale.
+      ✅ Robust to missing columns (k, totals, etc.) and bad dtypes.
+    """
+
     g = df_games.copy()
-    g['Sport'] = g['Sport'].astype(str).str.upper()
+    if g.empty:
+        return pd.DataFrame(columns=[
+            'Sport','Home_Team_Norm','Away_Team_Norm',
+            'Model_Expected_Margin','Model_Expected_Margin_Abs','Sigma_Pts',
+            'Model_Fav_Spread','Model_Dog_Spread','Model_Favorite_Team','Model_Underdog_Team',
+            'Market_Favorite_Team','Market_Underdog_Team','Favorite_Market_Spread','Underdog_Market_Spread',
+            'Fav_Edge_Pts','Dog_Edge_Pts','Fav_Cover_Prob','Dog_Cover_Prob'
+        ])
+
+    g['Sport'] = g['Sport'].astype(str).str.upper().str.strip()
 
     n = len(g)
-    scale = np.full(n, np.float32(1.0), dtype=np.float32)  # rating-units → points (or runs for MLB)
-    hfa   = np.zeros(n, dtype=np.float32)                  # home-field in points/runs
-    sigma = np.full(n, np.float32(12.0), dtype=np.float32) # margin SD
+
+    # rating-units → points (or runs for MLB), default 1.0
+    scale = np.full(n, np.float32(1.0), dtype=np.float32)
+    # home-field advantage in points/runs, default 0
+    hfa   = np.zeros(n, dtype=np.float32)
+    # margin SD
+    sigma = np.full(n, np.float32(12.0), dtype=np.float32)
 
     sp = g['Sport'].values
     for s, cfg in SPORT_SPREAD_CFG.items():
         mask = (sp == s)
         if mask.any():
             scale[mask] = np.float32(cfg.get('scale', 1.0))
-            hfa[mask]   = np.float32(cfg['HFA'])
-            sigma[mask] = np.float32(cfg['sigma_pts'])
+            hfa[mask]   = np.float32(cfg.get('HFA', 0.0))
+            sigma[mask] = np.float32(cfg.get('sigma_pts', 12.0))
 
-    # Power_Rating_Diff must be (Home_Rating - Away_Rating); ratings are stored as 1500 + *units*.
-    pr_diff = pd.to_numeric(g['Power_Rating_Diff'], errors='coerce').fillna(0).astype('float32').values
+    # Power_Rating_Diff must be (Home_Rating - Away_Rating)
+    pr_diff = pd.to_numeric(g.get('Power_Rating_Diff', 0.0), errors='coerce').fillna(0.0).astype('float32').to_numpy()
 
-    # Expected home-away margin in sport units:
-    #   • point-based sports: scale=1.0 → mu = pr_diff + HFA_pts
-    #   • MLB:               scale≈89   → mu = pr_diff/scale + HFA_runs
-    mu = (pr_diff / scale) + hfa
-    mu = mu.astype(np.float32)
-    mu_abs = np.abs(mu, dtype=np.float32)
+    # ---- NCAAB KenPom AdjEM conversion ----
+    # If NCAAB ratings are kp_adj_em: Power_Rating_Diff is "points per 100 possessions".
+    # Convert to expected margin in points using possessions proxy:
+    #   mu_pts ≈ (AdjEM_diff / 100) * poss
+    #
+    # Possessions proxy preference:
+    #   1) If you have Total_Close or Total (market total points), poss ≈ total / 2.06
+    #   2) Else fallback to 68
+    #
+    # You can feed Total_Close into this function via upstream merge if desired.
+    NCAAB_TOTAL_PPP = np.float32(2.06)
+    poss_default = np.float32(68.0)
 
-    # k = market absolute spread (median abs from consensus step)
-    k = pd.to_numeric(g.get('k', np.nan), errors='coerce').astype('float32').values
+    poss = np.full(n, poss_default, dtype=np.float32)
+    # Try to derive possessions from an available total column
+    for total_col in ("Total_Close", "Market_Total", "Total", "Closing_Total", "Total_Points"):
+        if total_col in g.columns:
+            tot = pd.to_numeric(g[total_col], errors='coerce').astype('float32').to_numpy()
+            poss_est = tot / NCAAB_TOTAL_PPP
+            # clamp to realistic range
+            poss_est = np.clip(poss_est, 55.0, 80.0).astype('float32')
+            # use where finite
+            poss = np.where(np.isfinite(poss_est), poss_est, poss).astype('float32')
+            break
 
-    # Edges at game level (favorite vs dog)
+    is_ncaab = (sp == "NCAAB")
+    # mu base in sport units
+    # - non-NCAAB: keep original behavior:
+    #     mu = pr_diff/scale + hfa
+    # - NCAAB: override with possessions-scaled AdjEM diff and add HFA in points
+    mu = (pr_diff / np.where(scale == 0, 1.0, scale)) + hfa
+    mu = mu.astype('float32')
+
+    if is_ncaab.any():
+        # pr_diff is AdjEM diff (per 100)
+        mu_ncaab = (pr_diff / 100.0) * poss + hfa
+        mu = np.where(is_ncaab, mu_ncaab.astype('float32'), mu)
+
+        # sigma for NCAAB is typically smaller than NFL; if your cfg isn't set, nudge default
+        # (optional; remove if SPORT_SPREAD_CFG already sets NCAAB)
+        # sigma = np.where(is_ncaab & (sigma == 12.0), np.float32(10.5), sigma).astype('float32')
+
+    mu_abs = np.abs(mu).astype('float32')
+
+    # market absolute spread (median abs from consensus step)
+    k = pd.to_numeric(g.get('k', np.nan), errors='coerce').astype('float32').to_numpy()
+
+    # If k missing, edges/probs should be nan-safe
     fav_edge = (mu_abs - k).astype('float32')
     dog_edge = (k - mu_abs).astype('float32')
 
-    # Cover probs for favorite side under Normal(margin; mu_abs, sigma):
+    # Cover probs for favorite side under Normal(margin_abs; mu_abs, sigma):
     # P(margin > k) = 1 - Φ((k - mu_abs)/σ)
     denom = sigma.copy()
     denom[denom == 0] = np.nan
     z_cov = (k - mu_abs) / denom
-  
+
+    # _phi should be standard normal CDF; if k is nan -> z_cov nan -> probs nan
     fav_cover = (1.0 - _phi(z_cov)).astype('float32')
     dog_cover = (1.0 - fav_cover).astype('float32')
 
+    # Robust market columns (may be missing)
+    def _col(name, default=np.nan):
+        if name in g.columns:
+            return g[name]
+        return pd.Series(default, index=g.index)
+
     g_out = pd.DataFrame({
-        'Sport': g['Sport'].astype(str).values,
-        'Home_Team_Norm': g['Home_Team_Norm'].astype(str).values,
-        'Away_Team_Norm': g['Away_Team_Norm'].astype(str).values,
-        'Model_Expected_Margin': mu,
-        'Model_Expected_Margin_Abs': mu_abs,
+        'Sport': g['Sport'].astype(str).to_numpy(),
+        'Home_Team_Norm': g['Home_Team_Norm'].astype(str).to_numpy(),
+        'Away_Team_Norm': g['Away_Team_Norm'].astype(str).to_numpy(),
+
+        'Model_Expected_Margin': mu.astype('float32'),
+        'Model_Expected_Margin_Abs': mu_abs.astype('float32'),
         'Sigma_Pts': sigma.astype('float32'),
+
+        # model spreads (favorite negative, dog positive)
         'Model_Fav_Spread': (-mu_abs).astype('float32'),
         'Model_Dog_Spread': ( mu_abs).astype('float32'),
-        'Model_Favorite_Team': np.where(mu >= 0, g['Home_Team_Norm'].values, g['Away_Team_Norm'].values),
-        'Model_Underdog_Team': np.where(mu >= 0, g['Away_Team_Norm'].values, g['Home_Team_Norm'].values),
+
+        # favorite is team with +expected margin (home favored if mu>=0)
+        'Model_Favorite_Team': np.where(mu >= 0, g['Home_Team_Norm'].to_numpy(), g['Away_Team_Norm'].to_numpy()),
+        'Model_Underdog_Team': np.where(mu >= 0, g['Away_Team_Norm'].to_numpy(), g['Home_Team_Norm'].to_numpy()),
 
         # market bits (merged upstream)
-        'Market_Favorite_Team': g['Market_Favorite_Team'].astype(str).values,
-        'Market_Underdog_Team': g['Market_Underdog_Team'].astype(str).values,
-        'Favorite_Market_Spread': g['Favorite_Market_Spread'].astype('float32').values,
-        'Underdog_Market_Spread': g['Underdog_Market_Spread'].astype('float32').values,
+        'Market_Favorite_Team': _col('Market_Favorite_Team', '').astype(str).to_numpy(),
+        'Market_Underdog_Team': _col('Market_Underdog_Team', '').astype(str).to_numpy(),
+        'Favorite_Market_Spread': pd.to_numeric(_col('Favorite_Market_Spread', np.nan), errors='coerce').astype('float32').to_numpy(),
+        'Underdog_Market_Spread': pd.to_numeric(_col('Underdog_Market_Spread', np.nan), errors='coerce').astype('float32').to_numpy(),
 
         # edges + cover probs at game level
-        'Fav_Edge_Pts': fav_edge,
-        'Dog_Edge_Pts': dog_edge,
-        'Fav_Cover_Prob': fav_cover,
-        'Dog_Cover_Prob': dog_cover,
+        'Fav_Edge_Pts': fav_edge.astype('float32'),
+        'Dog_Edge_Pts': dog_edge.astype('float32'),
+        'Fav_Cover_Prob': fav_cover.astype('float32'),
+        'Dog_Cover_Prob': dog_cover.astype('float32'),
     })
-    return g_out
 
+    return g_out
 
 # --- 0) Build a unified favorite flag where totals use OVER as "favorite"
 def add_favorite_context_flag(df: pd.DataFrame) -> pd.DataFrame:
@@ -12635,16 +12713,29 @@ def attach_ratings_and_edges_for_diagnostics(
     is_current_table = 'ratings_current' in str(table_history).lower()
     pad_days_eff = (365 if is_current_table else pad_days)
 
+    if 'ratings_current' in str(table_history).lower():
+        tmp = d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates().copy()
+        tmp = enrich_power_from_current_inplace(
+            tmp,
+            sport_aliases=sport_aliases,
+            table_current=table_history,   # pass current
+            project=project,
+            baseline=(0.0 if str(PREFERRED_METHOD.get(str(tmp['Sport'].iloc[0]).upper(),'')).lower()=='kp_adj_em' else 1500.0),
+        )
+        base = tmp
+    else:
+        base = enrich_power_for_training_lowmem(
+            df=d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
+            bq=bq,
+            sport_aliases=sport_aliases,
+            table_history=table_history,
+            pad_days=pad_days,
+            rating_lag_hours=12.0,
+            project=project,
+        )
+
+        
     
-    base = enrich_power_for_training_lowmem(
-        df=d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
-        bq=bq,
-        sport_aliases=sport_aliases,
-        table_history=table_history,
-        pad_days=pad_days_eff,
-        rating_lag_hours=12.0,   # ✅ NEW: enforce AsOfTS <= Game_Start - 12h
-        project=project,
-    )
 
 
     cons = prep_consensus_market_spread_lowmem(d_sp, value_col='Value', outcome_col='Outcome_Norm')
