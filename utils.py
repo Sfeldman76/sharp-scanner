@@ -4182,10 +4182,7 @@ def enrich_power_from_current_inplace(
     baseline: float = 1500.0,           # ✅ accept to match call-site (optional use)
     **_ignored_kwargs,                  # ✅ swallow any future extra knobs safely
 ) -> pd.DataFrame:
-    """
-    Enrich df (in-place) from ratings_current.
-    Adds: Home_Power_Rating, Away_Power_Rating, Power_Rating_Diff
-    """
+   
     sport_aliases = sport_aliases or {}
 
     if df is None or df.empty:
@@ -4196,7 +4193,7 @@ def enrich_power_from_current_inplace(
     # ✅ normalize sport names IN PLACE (don’t copy)
     if "Sport" in df.columns and sport_aliases:
         df["Sport"] = df["Sport"].map(lambda s: sport_aliases.get(s, s))
-    """
+    
     if df_spread_rows is None or df_spread_rows.empty:
         logging.info("[enrich_and_grade_for_training] empty input")
         return df_spread_rows
