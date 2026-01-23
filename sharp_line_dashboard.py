@@ -3862,10 +3862,10 @@ def enrich_power_for_training_lowmem(
     bq=None,                                     # pass your bigquery.Client
     table_history: str = "sharplogger.sharp_data.ratings_history",
     pad_days: int = 21,
-    rating_lag_hours: float = 9.0,              # ✅ NEW: must be at least 12h pregame
+    rating_lag_hours: float = 12.0,              # ✅ default to 12h for leakage-safe training
     project: str | None = None,                  # kept for signature parity
     *,
-    debug_asof_cols: bool = True,                # ✅ NEW: emit Home/Away_Rating_AsOfTS for audit
+    debug_asof_cols: bool = True,                # ✅ emit Home/Away_Rating_AsOfTS for audit
 ) -> pd.DataFrame:
     """
     Enrich df with Home_Power_Rating, Away_Power_Rating, Power_Rating_Diff
@@ -3874,20 +3874,22 @@ def enrich_power_for_training_lowmem(
     Leakage-safe rule (hard):
       AsOfTS <= Game_Start - rating_lag_hours
 
-    Notes:
-    - Works with BOTH ratings_history (filters by Method) and ratings_current (no Method column).
-    - Requires: pass a google.cloud.bigquery.Client as `bq`.
+    Key fix (your issue):
+      - Apply PREFERRED_METHOD filtering to BOTH ratings_history AND ratings_current
+        *when the table supports a Method column*.
+      - If Method doesn't exist, fall back automatically (no crash).
+      - Cache key includes method + lag + pad to avoid stale/wrong reuse.
     """
     sport_aliases = sport_aliases or {}
 
-    if df.empty:
+    if df is None or df.empty:
         return df.copy()
     if bq is None:
         raise ValueError("BigQuery client `bq` is None — pass your bigquery.Client (e.g., bq=bq_client).")
 
     out = df.copy()
 
-    # --- normalize inputs (strings + time) ---
+    # --- normalize inputs ---
     out["Sport"] = out["Sport"].astype(str).str.upper()
     out["Home_Team_Norm"] = out["Home_Team_Norm"].astype(str).str.lower().str.strip()
     out["Away_Team_Norm"] = out["Away_Team_Norm"].astype(str).str.lower().str.strip()
@@ -3924,7 +3926,7 @@ def enrich_power_for_training_lowmem(
             al = [al]
         return sorted({s, *[str(x).upper() for x in al]})
 
-    # ✅ normalize team keys once
+    # normalize team keys once
     out["Home_Team_Norm"] = _norm_team_series(out["Home_Team_Norm"])
     out["Away_Team_Norm"] = _norm_team_series(out["Away_Team_Norm"])
 
@@ -3933,18 +3935,15 @@ def enrich_power_for_training_lowmem(
     # window for fetch
     gmin, gmax = out["Game_Start"].min(), out["Game_Start"].max()
     pad = pd.Timedelta(days=int(pad_days))
-
     start_iso = pd.to_datetime(gmin - pad, utc=True).isoformat()
-    # ✅ IMPORTANT: do NOT fetch beyond max game start (no +2h)
-    end_iso = pd.to_datetime(gmax, utc=True).isoformat()
+    end_iso   = pd.to_datetime(gmax, utc=True).isoformat()   # do NOT fetch beyond max game start
 
     # ---------- tiny in-function cache ----------
     if not hasattr(enrich_power_for_training_lowmem, "_ratings_cache"):
         enrich_power_for_training_lowmem._ratings_cache = {}
-    
     _CACHE = enrich_power_for_training_lowmem._ratings_cache
 
-    # Preferred method per sport (history only)
+    # Preferred method per sport
     PREFERRED_METHOD = {
         "MLB":   "poisson",
         "NFL":   "elo_kalman",
@@ -3955,44 +3954,69 @@ def enrich_power_for_training_lowmem(
         "NCAAB": "kp_adj_em",
     }
 
-    def fetch_training_ratings_window_cached(
+    def fetch_ratings_window_cached(
         sport: str,
         start_iso: str,
         end_iso: str,
-        table_history: str,
-        project: str | None = None,
+        table_name: str,
     ) -> pd.DataFrame:
-        key = (sport.upper(), start_iso, end_iso, table_history, tuple(sorted(teams)))
+        method = PREFERRED_METHOD.get(sport.upper())  # ✅ apply to current too if Method exists
+
+        # ✅ cache key includes method + lag + pad so changes don’t reuse wrong results
+        key = (
+            sport.upper(),
+            start_iso, end_iso,
+            str(table_name),
+            tuple(sorted(teams)),
+            str(method or ""),
+            float(rating_lag_hours),
+            int(pad_days),
+        )
         if key in _CACHE:
             return _CACHE[key].copy()
 
-        is_current = "ratings_current" in str(table_history).lower()
-        method = None if is_current else PREFERRED_METHOD.get(sport.upper())
-
-        sql = f"""
+        base_sql = f"""
         SELECT
           UPPER(CAST(Sport AS STRING))        AS Sport,
           LOWER(TRIM(CAST(Team AS STRING)))   AS Team_Norm,
           CAST(Rating AS FLOAT64)             AS Power_Rating,
           TIMESTAMP(Updated_At)               AS AsOfTS
-        FROM `{table_history}`
+        FROM `{table_name}`
         WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@aliases)
           AND LOWER(TRIM(CAST(Team AS STRING))) IN UNNEST(@teams)
           AND TIMESTAMP(Updated_At) >= @start
           AND TIMESTAMP(Updated_At) <= @end
-          {"AND LOWER(CAST(Method AS STRING)) = @method" if method else ""}
         """
 
-        params = [
+        params_common = [
             bigquery.ArrayQueryParameter("aliases", "STRING", _aliases_for(sport)),
             bigquery.ArrayQueryParameter("teams", "STRING", teams),
             bigquery.ScalarQueryParameter("start", "TIMESTAMP", pd.Timestamp(start_iso).to_pydatetime()),
             bigquery.ScalarQueryParameter("end",   "TIMESTAMP", pd.Timestamp(end_iso).to_pydatetime()),
         ]
-        if method:
-            params.append(bigquery.ScalarQueryParameter("method", "STRING", method.lower()))
 
-        df_r = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
+        def _run(sql: str, params: list):
+            return bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
+
+        df_r = pd.DataFrame()
+
+        # 1) Try method-filtered query (best) if we have a preferred method
+        if method:
+            sql1 = base_sql + "\n  AND LOWER(CAST(Method AS STRING)) = @method\n"
+            params1 = params_common + [
+                bigquery.ScalarQueryParameter("method", "STRING", str(method).lower())
+            ]
+            try:
+                df_r = _run(sql1, params1)
+            except Exception as e:
+                # If Method column doesn't exist in the table, fall back without method
+                msg = str(e).lower()
+                if ("unrecognized name" in msg and "method" in msg) or ("name method" in msg and "not found" in msg):
+                    df_r = _run(base_sql, params_common)
+                else:
+                    raise
+        else:
+            df_r = _run(base_sql, params_common)
 
         if df_r.empty:
             _CACHE[key] = df_r
@@ -4008,15 +4032,15 @@ def enrich_power_for_training_lowmem(
         return df_r.copy()
 
     # === Pull ratings (cached) ===
-    ratings = fetch_training_ratings_window_cached(
+    ratings = fetch_ratings_window_cached(
         sport=sport_canon,
         start_iso=start_iso,
         end_iso=end_iso,
-        table_history=table_history,
-        project=project,
+        table_name=table_history,
     )
 
-    method_used = None if ("ratings_current" in str(table_history).lower()) else PREFERRED_METHOD.get(sport_canon.upper())
+    # Baseline depends on preferred method (NCAAB kp_adj_em centered near 0)
+    method_used = PREFERRED_METHOD.get(sport_canon.upper())
     base = np.float32(0.0) if (str(method_used).lower() == "kp_adj_em") else np.float32(1500.0)
 
     out["Home_Power_Rating"] = base
@@ -4046,15 +4070,12 @@ def enrich_power_for_training_lowmem(
         )
 
     # ============================
-    # ✅ 12-hour gate (hard)
+    # As-of gate (hard)
     # ============================
     gs_ns = out["Game_Start"].values.astype("datetime64[ns]").astype("int64")
     lag_ns = np.int64(round(float(rating_lag_hours) * 3600.0 * 1e9))
-
-    # cutoff is Game_Start - 12h (in ns)
     cutoff_ns = gs_ns - lag_ns
 
-    # start with defaults
     home_vals = np.full(len(out), base, dtype=np.float32)
     away_vals = np.full(len(out), base, dtype=np.float32)
 
@@ -4105,16 +4126,20 @@ def enrich_power_for_training_lowmem(
         out["Home_Rating_AsOfTS"] = pd.to_datetime(home_asof, utc=True, errors="coerce")
         out["Away_Rating_AsOfTS"] = pd.to_datetime(away_asof, utc=True, errors="coerce")
 
-        # ✅ hard assertion: no rating newer than Game_Start - 12h
+        # hard assertion: no rating newer than Game_Start - rating_lag_hours
         cutoff_dt = out["Game_Start"] - pd.Timedelta(hours=float(rating_lag_hours))
         bad_home = out["Home_Rating_AsOfTS"].notna() & (out["Home_Rating_AsOfTS"] > cutoff_dt)
         bad_away = out["Away_Rating_AsOfTS"].notna() & (out["Away_Rating_AsOfTS"] > cutoff_dt)
         n_bad = int(bad_home.sum() + bad_away.sum())
         if n_bad:
             ex_cols = [c for c in ["feat_Game_Key","Game_Key","Home_Team_Norm","Away_Team_Norm","Game_Start","Home_Rating_AsOfTS","Away_Rating_AsOfTS"] if c in out.columns]
-            raise RuntimeError(f"[LEAK] {n_bad} power-rating rows violate {rating_lag_hours}h gate. Examples:\n{out.loc[bad_home | bad_away, ex_cols].head(25)}")
+            raise RuntimeError(
+                f"[LEAK] {n_bad} power-rating rows violate {rating_lag_hours}h gate. Examples:\n"
+                f"{out.loc[bad_home | bad_away, ex_cols].head(25)}"
+            )
 
     return out
+
 
 def enrich_and_grade_for_training(
     df_spread_rows: pd.DataFrame,
@@ -12749,9 +12774,22 @@ def attach_ratings_and_edges_for_diagnostics(
     pad_days: int = 30,
     allow_forward_hours: float = 0.0,
     bq=None,                        # ✅ pass your BigQuery client in
-) -> pd.DataFrame:                  # << ✅ colon here
+) -> pd.DataFrame:
+    """
+    UI diagnostics helper (spreads only):
+      - Attaches power ratings (method-aware when using ratings_history)
+      - Computes model vs market spreads/edges + cover probs
+      - Maps game-level metrics to each outcome row
+
+    Key fix:
+      - If table_history is ratings_current (no Method column), we DO NOT attempt method selection there.
+      - If sport is NCAAB (or any sport where you want method-specific ratings), we FORCE ratings_history so
+        PREFERRED_METHOD + Method filter can be applied.
+    """
+
     UI_EDGE_COLS = [
-        'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff',
+        'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Abs_Rating_Diff',
+        'PR_Edge_Pts','PR_Abs_Edge_Pts',
         'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
         'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_x_k','mu_x_k'
     ]
@@ -12762,16 +12800,26 @@ def attach_ratings_and_edges_for_diagnostics(
             out[c] = np.nan
         return out
 
+    if bq is None:
+        # ratings attach needs BigQuery
+        out = df.copy()
+        for c in UI_EDGE_COLS:
+            out[c] = np.nan
+        out["Ratings_Attach_Error"] = "bq client is None"
+        return out
+
     out = df.copy()
 
     def _series(col, default=""):
         return out[col] if col in out.columns else pd.Series(default, index=out.index)
 
+    # normalize base fields
     out['Sport']          = _series('Sport').astype(str).str.upper().str.strip()
     out['Market']         = _series('Market').astype(str).str.lower().str.strip()
     out['Home_Team_Norm'] = _series('Home_Team_Norm').astype(str).str.lower().str.strip()
     out['Away_Team_Norm'] = _series('Away_Team_Norm').astype(str).str.lower().str.strip()
-    out['Outcome_Norm']   = (
+
+    out['Outcome_Norm'] = (
         _series('Outcome_Norm', None)
         .where((_series('Outcome_Norm', None).notna()) if 'Outcome_Norm' in out else False,
                _series('Outcome'))
@@ -12782,7 +12830,7 @@ def attach_ratings_and_edges_for_diagnostics(
         out['Game_Start'] = pd.to_datetime(_series('Snapshot_Timestamp', pd.NaT),
                                            utc=True, errors='coerce')
 
-    # Only compute edges for spreads; ratings/PRs are needed for spreads logic below
+    # spreads only
     mask = out['Market'].eq('spreads') & out['Home_Team_Norm'].ne('') & out['Away_Team_Norm'].ne('')
     if not mask.any():
         for c in UI_EDGE_COLS:
@@ -12796,41 +12844,66 @@ def attach_ratings_and_edges_for_diagnostics(
            .dropna(subset=['Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value'])
            .copy()
     )
+    if d_sp.empty:
+        for c in UI_EDGE_COLS:
+            out[c] = np.nan
+        return out
+
     d_sp['Value'] = pd.to_numeric(d_sp['Value'], errors='coerce').astype('float32')
+    sport0 = str(d_sp['Sport'].iloc[0]).upper()
 
+    # -------------------------
+    # ✅ Method-aware ratings selection for UI
+    # -------------------------
     is_current_table = 'ratings_current' in str(table_history).lower()
-    pad_days_eff = (365 if is_current_table else pad_days)
 
-    
+    # If the UI points to ratings_current but we need method-specific ratings (NCAAB kp_adj_em),
+    # force history where Method exists.
+    if is_current_table and sport0 == "NCAAB":
+        ratings_table_used = "sharplogger.sharp_data.ratings_history"
+        ui_lag_hours = 0.0   # UI: allow latest ratings; they’re derived from prior games
+        pad_days_used = max(int(pad_days), 60)
+    else:
+        ratings_table_used = table_history
+        # UI: avoid the 12h gate that can drop legit ratings_current updates
+        ui_lag_hours = 0.0 if is_current_table else 12.0
+        pad_days_used = (365 if is_current_table else int(pad_days))
+
     base = enrich_power_for_training_lowmem(
         df=d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
         bq=bq,
         sport_aliases=sport_aliases,
-        table_history=table_history,
-        pad_days=pad_days_eff,
-        rating_lag_hours=12.0,   # ✅ NEW: enforce AsOfTS <= Game_Start - 12h
+        table_history=ratings_table_used,
+        pad_days=pad_days_used,
+        rating_lag_hours=float(ui_lag_hours),
         project=project,
     )
 
-
+    # consensus market
     cons = prep_consensus_market_spread_lowmem(d_sp, value_col='Value', outcome_col='Outcome_Norm')
 
     game_keys = ['Sport','Home_Team_Norm','Away_Team_Norm']
     g_full = base.merge(cons, on=game_keys, how='left')
     g_fc   = favorite_centric_from_powerdiff_lowmem(g_full)
 
+    # ensure PR cols exist
     for c in ['Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff']:
         if c not in g_fc.columns:
             g_fc[c] = g_full[c] if c in g_full.columns else np.nan
 
     d_map = d_sp.merge(g_fc, on=game_keys, how='left')
 
-    is_fav_row = d_map['Outcome_Norm'].eq(d_map['Market_Favorite_Team'])
+    # map game-level to each row’s outcome
+    lhs = d_map['Outcome_Norm'].astype(str).str.lower().str.strip()
+    rhs = d_map['Market_Favorite_Team'].astype(str).str.lower().str.strip()
+    is_fav_row = lhs.eq(rhs)
+
     d_map['Outcome_Model_Spread']  = np.where(is_fav_row, d_map['Model_Fav_Spread'], d_map['Model_Dog_Spread']).astype('float32')
     d_map['Outcome_Market_Spread'] = np.where(is_fav_row, d_map['Favorite_Market_Spread'], d_map['Underdog_Market_Spread']).astype('float32')
     d_map['Outcome_Spread_Edge']   = np.where(is_fav_row, d_map['Fav_Edge_Pts'], d_map['Dog_Edge_Pts']).astype('float32')
     d_map['Outcome_Cover_Prob']    = np.where(is_fav_row, d_map['Fav_Cover_Prob'], d_map['Dog_Cover_Prob']).astype('float32')
 
+    # PR columns: team/opponent from bet side
     is_home_bet = d_map['Outcome_Norm'].eq(d_map['Home_Team_Norm'])
     d_map['PR_Team_Rating'] = np.where(is_home_bet, d_map['Home_Power_Rating'], d_map['Away_Power_Rating']).astype('float32')
     d_map['PR_Opp_Rating']  = np.where(is_home_bet, d_map['Away_Power_Rating'], d_map['Home_Power_Rating']).astype('float32')
@@ -12838,7 +12911,25 @@ def attach_ratings_and_edges_for_diagnostics(
         pd.to_numeric(d_map['PR_Team_Rating'], errors='coerce') -
         pd.to_numeric(d_map['PR_Opp_Rating'],  errors='coerce')
     ).astype('float32')
+    d_map['PR_Abs_Rating_Diff'] = np.abs(pd.to_numeric(d_map['PR_Rating_Diff'], errors='coerce')).astype('float32')
 
+    # Convert rating diff to an approximate points edge for WHY/UI consistency
+    # (tune these if you have better sport-specific mappings already)
+    SPORT_PR_SCALE_TO_PTS = {
+        "NFL":   1.0/25.0,
+        "NCAAF": 1.0/25.0,
+        "NBA":   1.0/35.0,
+        "WNBA":  1.0/35.0,
+        "CFL":   1.0/25.0,
+        "MLB":   1.0/50.0,
+        "NCAAB": 1.0,        # kp_adj_em already points-ish
+    }
+    sp = d_map['Sport'].astype(str).str.upper().values
+    scale = np.array([SPORT_PR_SCALE_TO_PTS.get(s, 1.0/30.0) for s in sp], dtype='float32')
+    d_map['PR_Edge_Pts'] = (pd.to_numeric(d_map['PR_Rating_Diff'], errors='coerce').astype('float32') * scale).astype('float32')
+    d_map['PR_Abs_Edge_Pts'] = np.abs(d_map['PR_Edge_Pts']).astype('float32')
+
+    # k_abs + agree flags
     k_abs = (
         pd.to_numeric(d_map.get('Favorite_Market_Spread'),  errors='coerce').abs()
           .combine_first(pd.to_numeric(d_map.get('Underdog_Market_Spread'), errors='coerce').abs())
@@ -12846,12 +12937,13 @@ def attach_ratings_and_edges_for_diagnostics(
 
     d_map['model_fav_vs_market_fav_agree'] = (
         (pd.to_numeric(d_map['Outcome_Model_Spread'], errors='coerce') < 0) ==
-        d_map['Outcome_Norm'].eq(d_map['Market_Favorite_Team'])
+        lhs.eq(rhs)
     ).astype('int8')
 
     d_map['edge_x_k'] = (pd.to_numeric(d_map['Outcome_Spread_Edge'], errors='coerce') * k_abs).astype('float32')
     d_map['mu_x_k']   = (pd.to_numeric(d_map['Outcome_Spread_Edge'], errors='coerce').abs() * k_abs).astype('float32')
 
+    # merge back
     out.drop(columns=UI_EDGE_COLS, inplace=True, errors='ignore')
     out = out.merge(d_map[need_cols + UI_EDGE_COLS], on=need_cols, how='left')
 
