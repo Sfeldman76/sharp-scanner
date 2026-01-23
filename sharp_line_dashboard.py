@@ -14594,6 +14594,10 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
             if c in colnames:
                 return c
         return None
+
+    def has_method(colnames: set[str]) -> bool:
+        return "Method" in colnames
+
     # -----------------------------
 
     with tab:
@@ -14603,12 +14607,11 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
         with col_left:
             days_back = st.slider("History Window (days)", min_value=14, max_value=365, value=90, step=7)
         with col_right:
-            _ = st.select_slider("Trend Window", options=[7, 14, 30], value=14)
+            trend_win = st.select_slider("Trend Window", options=[7, 14, 30], value=14)
 
         end_d = date.today()
         start_d = end_d - timedelta(days=days_back)
 
-        # ---- Inspect schemas & build safe SELECTs ----
         cur_fq = "sharplogger.sharp_data.ratings_current"
         his_fq = "sharplogger.sharp_data.ratings_history"
 
@@ -14633,41 +14636,113 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
             st.error(f"`{his_fq}` has no rating column (tried Rating/Power_Rating/Elo/PR/PowerIndex).")
             return
 
-        ts_cur = pick_ts(cur_cols)  # may be None
-        ts_his = pick_ts(his_cols)  # may be None
+        ts_cur = pick_ts(cur_cols)
+        ts_his = pick_ts(his_cols)
 
+        # ✅ Method support
+        cur_has_method = has_method(cur_cols)
+        his_has_method = has_method(his_cols)
+
+        # If either table has Method, treat Method as required for correctness.
+        use_method = cur_has_method or his_has_method
+
+        chosen_method = None
+        if use_method:
+            # Pull available methods for this sport from CURRENT (preferred)
+            sql_methods = f"""
+            SELECT DISTINCT Method
+            FROM `{cur_fq}`
+            WHERE UPPER(Sport) = @sport
+              AND Method IS NOT NULL
+            ORDER BY Method
+            """
+            methods = bq_client.query(
+                sql_methods,
+                job_config=bigquery.QueryJobConfig(query_parameters=[
+                    bigquery.ScalarQueryParameter("sport", "STRING", sport_label.upper())
+                ]),
+            ).to_dataframe()
+
+            method_list = methods["Method"].dropna().astype(str).tolist()
+
+            if len(method_list) == 0:
+                # fallback: try history
+                sql_methods_h = f"""
+                SELECT DISTINCT Method
+                FROM `{his_fq}`
+                WHERE UPPER(Sport) = @sport
+                  AND Method IS NOT NULL
+                ORDER BY Method
+                """
+                methods_h = bq_client.query(
+                    sql_methods_h,
+                    job_config=bigquery.QueryJobConfig(query_parameters=[
+                        bigquery.ScalarQueryParameter("sport", "STRING", sport_label.upper())
+                    ]),
+                ).to_dataframe()
+                method_list = methods_h["Method"].dropna().astype(str).tolist()
+
+            if len(method_list) == 0:
+                # No methods available even though schema has Method — continue without filter,
+                # but warn because it can mix.
+                st.warning("Ratings tables have `Method` column but no methods found for this sport — results may mix.")
+                chosen_method = None
+                use_method = False
+            elif len(method_list) == 1:
+                chosen_method = method_list[0]
+                st.caption(f"Method: `{chosen_method}`")
+            else:
+                # default: pick something stable (prefer elo_kalman if present, else first)
+                default = "elo_kalman" if "elo_kalman" in method_list else method_list[0]
+                chosen_method = st.selectbox("Rating Method", options=method_list, index=method_list.index(default))
+
+        # ---------- SQL expressions ----------
         team_cur_expr = f"LOWER({team_cur})"
         team_his_expr = f"LOWER({team_his})"
         rating_cur_expr = f"CAST({rating_cur} AS FLOAT64)"
         rating_his_expr = f"CAST({rating_his} AS FLOAT64)"
         ts_cur_expr = ts_cur if ts_cur else "CAST(NULL AS TIMESTAMP)"
         ts_his_expr = ts_his if ts_his else "CAST(NULL AS TIMESTAMP)"
+
         hist_date_clause = f"AND DATE({ts_his}) BETWEEN @start_d AND @end_d" if ts_his else ""
 
-        # --- Current snapshot (schema-safe) ---
+        method_clause_cur = "AND Method = @method" if (use_method and cur_has_method and chosen_method) else ""
+        method_clause_his = "AND Method = @method" if (use_method and his_has_method and chosen_method) else ""
+
+        # --- Current snapshot ---
         sql_current = f"""
         SELECT
           UPPER(Sport) AS Sport,
           {team_cur_expr} AS Team,
           {rating_cur_expr} AS Rating,
           {ts_cur_expr} AS Snapshot_Timestamp
+          {", Method" if cur_has_method else ""}
         FROM `{cur_fq}`
         WHERE UPPER(Sport) = @sport
           AND {team_cur} IS NOT NULL
+          {method_clause_cur}
         """
         cur_params = [bigquery.ScalarQueryParameter("sport", "STRING", sport_label.upper())]
-        cur_df = bq_client.query(sql_current, job_config=bigquery.QueryJobConfig(query_parameters=cur_params)).to_dataframe()
+        if use_method and chosen_method and cur_has_method:
+            cur_params.append(bigquery.ScalarQueryParameter("method", "STRING", chosen_method))
 
-        # --- History window (only filter by date if ts exists) ---
+        cur_df = bq_client.query(
+            sql_current,
+            job_config=bigquery.QueryJobConfig(query_parameters=cur_params),
+        ).to_dataframe()
+
+        # --- History window ---
         sql_hist = f"""
         SELECT
           UPPER(Sport) AS Sport,
           {team_his_expr} AS Team,
           {rating_his_expr} AS Rating,
           {ts_his_expr} AS Snapshot_Timestamp
+          {", Method" if his_has_method else ""}
         FROM `{his_fq}`
         WHERE UPPER(Sport) = @sport
           AND {team_his} IS NOT NULL
+          {method_clause_his}
           {(' ' + hist_date_clause) if hist_date_clause else ''}
         """
         hist_params = [bigquery.ScalarQueryParameter("sport", "STRING", sport_label.upper())]
@@ -14676,28 +14751,46 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
                 bigquery.ScalarQueryParameter("start_d", "DATE", start_d),
                 bigquery.ScalarQueryParameter("end_d", "DATE", end_d),
             ]
-        hist_df = bq_client.query(sql_hist, job_config=bigquery.QueryJobConfig(query_parameters=hist_params)).to_dataframe()
+        if use_method and chosen_method and his_has_method:
+            hist_params.append(bigquery.ScalarQueryParameter("method", "STRING", chosen_method))
+
+        hist_df = bq_client.query(
+            sql_hist,
+            job_config=bigquery.QueryJobConfig(query_parameters=hist_params),
+        ).to_dataframe()
 
         # ---------- types / early exit ----------
         for d in (cur_df, hist_df):
             if not d.empty:
                 d["Snapshot_Timestamp"] = pd.to_datetime(d["Snapshot_Timestamp"], utc=True, errors="coerce")
+                if "Method" in d.columns:
+                    d["Method"] = d["Method"].astype(str)
+
         if cur_df.empty and hist_df.empty:
             st.warning("No ratings found for this sport in the selected window.")
             return
 
-        # ---------- latest + deltas ----------
-        base_df = pd.concat([hist_df, cur_df], ignore_index=True)
-        base_df["Team"] = base_df["Team"].astype(str)
-        base_df = base_df[~base_df["Team"].str.contains(r"\bleague\b", case=False, na=False)]
-        base_df = base_df.dropna(subset=["Team", "Rating"]).copy()
-        if base_df.empty:
-            st.warning("No team-level ratings after filtering.")
+        # ✅ IMPORTANT: “today” should come from CURRENT table, not “latest of history+current”
+        # History is only for deltas.
+        cur_df = cur_df.dropna(subset=["Team", "Rating"]).copy()
+        cur_df["Team"] = cur_df["Team"].astype(str)
+        cur_df = cur_df[~cur_df["Team"].str.contains(r"\bleague\b", case=False, na=False)]
+        if cur_df.empty:
+            st.warning("No current team-level ratings after filtering.")
             return
-        base_df.sort_values(["Team", "Snapshot_Timestamp"], inplace=True)
+
+        # If multiple rows per team exist in current (possible), take latest timestamp
+        cur_df = cur_df.sort_values(["Team", "Snapshot_Timestamp"]).groupby("Team", as_index=False).tail(1)
+        cur_df.rename(columns={"Rating": "Rating_Today"}, inplace=True)
+
+        # ---------- deltas from history ----------
+        hist_df = hist_df.dropna(subset=["Team", "Rating", "Snapshot_Timestamp"]).copy()
+        hist_df["Team"] = hist_df["Team"].astype(str)
+        hist_df = hist_df[~hist_df["Team"].str.contains(r"\bleague\b", case=False, na=False)]
+        hist_df.sort_values(["Team", "Snapshot_Timestamp"], inplace=True)
 
         def _value_asof(group: pd.DataFrame, cutoff_days: int):
-            g = group.dropna(subset=["Snapshot_Timestamp"])
+            g = group.dropna(subset=["Snapshot_Timestamp"]).sort_values("Snapshot_Timestamp")
             if g.empty:
                 return np.nan
             ts = g["Snapshot_Timestamp"].values
@@ -14706,23 +14799,27 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
             idx = np.searchsorted(ts, cutoff.to_datetime64(), side="right") - 1
             return float(vals[idx]) if idx >= 0 else np.nan
 
-        last_by_team = base_df.groupby("Team", as_index=False).tail(1).copy()
-        last_by_team.rename(columns={"Rating": "Rating_Today"}, inplace=True)
-
         deltas = []
-        for team, g in base_df.groupby("Team"):
-            g = g.sort_values("Snapshot_Timestamp")
-            r_today = float(g["Rating"].iloc[-1])
-            deltas.append((
-                team,
-                r_today - _value_asof(g, 7),
-                r_today - _value_asof(g, 14),
-                r_today - _value_asof(g, 30),
-            ))
+        # compute deltas relative to current rating (from cur_df)
+        hist_groups = {t: g for t, g in hist_df.groupby("Team")} if not hist_df.empty else {}
+        for _, row in cur_df.iterrows():
+            team = row["Team"]
+            r_today = float(row["Rating_Today"])
+            g = hist_groups.get(team)
+            if g is None:
+                deltas.append((team, np.nan, np.nan, np.nan))
+            else:
+                deltas.append((
+                    team,
+                    r_today - _value_asof(g, 7),
+                    r_today - _value_asof(g, 14),
+                    r_today - _value_asof(g, 30),
+                ))
+
         deltas_df = pd.DataFrame(deltas, columns=["Team", "Delta_7d", "Delta_14d", "Delta_30d"])
 
         summary = (
-            last_by_team[["Team", "Rating_Today"]]
+            cur_df[["Team", "Rating_Today"]]
             .merge(deltas_df, on="Team", how="left")
             .sort_values("Rating_Today", ascending=False)
             .reset_index(drop=True)
@@ -14730,25 +14827,34 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
         summary["Rank"] = (np.arange(len(summary)) + 1).astype(int)
 
         pretty = summary[["Rank", "Team", "Rating_Today", "Delta_7d", "Delta_14d", "Delta_30d"]].copy()
-        pretty.rename(columns={"Rating_Today": "Rating",
-                               "Delta_7d": "Delta 7d", "Delta_14d": "Delta 14d", "Delta_30d": "Delta 30d"}, inplace=True)
+        pretty.rename(columns={
+            "Rating_Today": "Rating",
+            "Delta_7d": "Delta 7d",
+            "Delta_14d": "Delta 14d",
+            "Delta_30d": "Delta 30d",
+        }, inplace=True)
+
         for c in ["Rating", "Delta 7d", "Delta 14d", "Delta 30d"]:
-            if c in pretty.columns:
-                pretty[c] = pd.to_numeric(pretty[c], errors="coerce").round(2)
+            pretty[c] = pd.to_numeric(pretty[c], errors="coerce").round(2)
         pretty["Rating"] = pd.to_numeric(pretty["Rating"], errors="coerce").round(1)
 
         st.markdown("### Current Ratings & Trend")
+        if use_method and chosen_method:
+            st.caption(f"Filtered to Method: `{chosen_method}`")
         st.dataframe(pretty, use_container_width=True)
 
         # ---------- history chart ----------
         with st.expander("📈 Team Rating History"):
             team_sel = st.selectbox("Team", options=list(summary["Team"]), index=0)
-            g = base_df[base_df["Team"] == team_sel].sort_values("Snapshot_Timestamp").copy()
-            try:
-                g["Date"] = g["Snapshot_Timestamp"].dt.tz_convert("America/New_York").dt.date
-            except TypeError:
-                g["Date"] = g["Snapshot_Timestamp"].dt.tz_localize("UTC").dt.tz_convert("America/New_York").dt.date
-            st.line_chart(g.set_index("Date")["Rating"])
+            g = hist_df[hist_df["Team"] == team_sel].sort_values("Snapshot_Timestamp").copy()
+            if g.empty:
+                st.info("No history points in the selected window for this team.")
+            else:
+                try:
+                    g["Date"] = g["Snapshot_Timestamp"].dt.tz_convert("America/New_York").dt.date
+                except TypeError:
+                    g["Date"] = g["Snapshot_Timestamp"].dt.tz_localize("UTC").dt.tz_convert("America/New_York").dt.date
+                st.line_chart(g.set_index("Date")["Rating"])
 
         # ---------- optional edges (unchanged) ----------
         if show_edges:
