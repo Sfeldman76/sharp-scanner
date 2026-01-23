@@ -4170,17 +4170,32 @@ def prep_consensus_market_spread_lowmem(
     return out
 
 # ---- 3) The wrapper that ties it all together (minimal memory/BQ) ----
-def enrich_and_grade_for_training(
-    df_spread_rows: pd.DataFrame,
-    sport_aliases: dict,
-    value_col: str = "Value",
-    outcome_col: str = "Outcome_Norm",
+def enrich_power_from_current_inplace(
+    df: pd.DataFrame,
+    *,
+    bq=None,
     table_current: str = "sharplogger.sharp_data.ratings_current",
-    project: str = "sharplogger",
+    pad_days: int = 10,
+    allow_forward_hours: float = 0.0,
+    sport_aliases: dict | None = None,  # ✅ now supported
+    project: str | None = None,         # ✅ accept to match call-site (optional use)
+    baseline: float = 1500.0,           # ✅ accept to match call-site (optional use)
+    **_ignored_kwargs,                  # ✅ swallow any future extra knobs safely
 ) -> pd.DataFrame:
     """
-    No history pulls. Uses your `enrich_power_from_current_inplace` once on a
-    deduped game list, then builds consensus market spreads and grading.
+    Enrich df (in-place) from ratings_current.
+    Adds: Home_Power_Rating, Away_Power_Rating, Power_Rating_Diff
+    """
+    sport_aliases = sport_aliases or {}
+
+    if df is None or df.empty:
+        return df
+    if bq is None:
+        raise ValueError("BigQuery client `bq` is None — pass your bigquery.Client (e.g., bq=bq_client).")
+
+    # ✅ normalize sport names IN PLACE (don’t copy)
+    if "Sport" in df.columns and sport_aliases:
+        df["Sport"] = df["Sport"].map(lambda s: sport_aliases.get(s, s))
     """
     if df_spread_rows is None or df_spread_rows.empty:
         logging.info("[enrich_and_grade_for_training] empty input")
@@ -7044,6 +7059,7 @@ def apply_blended_sharp_score(
     try:
         enrich_power_from_current_inplace(
             df,
+            bq=bq_client,
             sport_aliases=SPORT_ALIASES,
             table_current="sharplogger.sharp_data.ratings_current",
             project="sharplogger",
