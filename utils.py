@@ -7589,13 +7589,13 @@ def apply_blended_sharp_score(
         # ⬇️ Enrich (produces all spread features)
         
         df_sp_enriched = enrich_and_grade_for_training(
-            df_spread_rows,
+            df_sp,
             bq=bq_client,
             table_current="sharplogger.sharp_data.ratings_current",
             sport_aliases=SPORT_ALIASES,
             preferred_method=PREFERRED_METHOD,
             value_col="Value",
-            outcome_col="Outcome",
+            outcome_col="Outcome_Norm",   # ✅ IMPORTANT (see note below)
             log_func=logger.info,
         )
         # Ensure original row id on enriched frame
