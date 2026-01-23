@@ -4171,10 +4171,11 @@ def enrich_power_from_current_inplace(
             raise ValueError(f"enrich_power_from_current_inplace missing column: {c}")
 
     # --- normalize Sport (forward aliases + UPPER) ---
-    s0 = df[sport_col].astype(str).str.strip()
-    if sport_aliases:
-        s0 = s0.map(lambda x: sport_aliases.get(x, x))
-    df[sport_col] = s0.astype(str).str.upper()
+  
+
+  
+    s0 = df[sport_col].astype(str).str.strip().str.upper()
+    df[sport_col] = s0
 
     # precreate outputs
     if out_home_col not in df.columns:
