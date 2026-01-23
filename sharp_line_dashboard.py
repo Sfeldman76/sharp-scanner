@@ -4016,7 +4016,9 @@ def enrich_power_for_training_lowmem(
         project=project,
     )
 
-    base = np.float32(1500.0)
+    method_used = None if ("ratings_current" in str(table_history).lower()) else PREFERRED_METHOD.get(sport_canon.upper())
+    base = np.float32(0.0) if (str(method_used).lower() == "kp_adj_em") else np.float32(1500.0)
+
     out["Home_Power_Rating"] = base
     out["Away_Power_Rating"] = base
     if debug_asof_cols:
