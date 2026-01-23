@@ -3709,23 +3709,33 @@ WHY_RULES_V3 = [
          check=lambda r: _rv(r,"Total_vs_Spread_Contradiction") > 0.0,
          msg="⚠️ Totals vs Spread Contradiction"),
 
+  
     # PR / model / market agreement
-    dict(requires_any=["model_fav_vs_market_fav_agree"],
-         check=lambda r: _rv(r,"model_fav_vs_market_fav_agree") > 0.0,
-         msg="🧭 Model & Market Agree"),
-    dict(requires_any=["Outcome_Cover_Prob"],
-         check=lambda r: _rv(r,"Outcome_Cover_Prob") >= THR["cover_prob_conf"],
-         msg="🔮 Strong Cover Probability"),
-    dict(requires_any=["PR_Abs_Edge_Pts","PR_Edge_Pts"],
-         check=lambda r: _rv(r,"PR_Abs_Edge_Pts") >= THR.get("pr_edge_pts_meaningful", 1.5),
-     msg="📈 Meaningful Power-Rating Edge"),
-         msg="📈 Meaningful Power‑Rating Edge"),
-    dict(requires_any=["PR_Model_Agree_H2H_Flag"],
-         check=lambda r: _rv(r,"PR_Model_Agree_H2H_Flag") > 0.0,
-         msg="🧠 Power Ratings Agree with Model"),
-    dict(requires_any=["PR_Market_Agree_H2H_Flag"],
-         check=lambda r: _rv(r,"PR_Market_Agree_H2H_Flag") > 0.0,
-         msg="📊 Power Ratings Agree with Market"),
+    dict(
+        requires_any=["model_fav_vs_market_fav_agree"],
+        check=lambda r: _rv(r, "model_fav_vs_market_fav_agree") > 0.0,
+        msg="🧭 Model & Market Agree",
+    ),
+    dict(
+        requires_any=["Outcome_Cover_Prob"],
+        check=lambda r: _rv(r, "Outcome_Cover_Prob") >= THR["cover_prob_conf"],
+        msg="🔮 Strong Cover Probability",
+    ),
+    dict(
+        requires_any=["PR_Abs_Edge_Pts", "PR_Edge_Pts"],
+        check=lambda r: _rv(r, "PR_Abs_Edge_Pts") >= THR.get("pr_edge_pts_meaningful", 1.5),
+        msg="📈 Meaningful Power-Rating Edge",
+    ),
+    dict(
+        requires_any=["PR_Model_Agree_H2H_Flag"],
+        check=lambda r: _rv(r, "PR_Model_Agree_H2H_Flag") > 0.0,
+        msg="🧠 Power Ratings Agree with Model",
+    ),
+    dict(
+        requires_any=["PR_Market_Agree_H2H_Flag"],
+        check=lambda r: _rv(r, "PR_Market_Agree_H2H_Flag") > 0.0,
+        msg="📊 Power Ratings Agree with Market",
+    ),
 
     # Totals context
     dict(requires_any=["TOT_Mispricing","TOT_Proj_Total_Baseline"],
