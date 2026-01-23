@@ -4138,6 +4138,8 @@ def enrich_and_grade_for_training(
     ).astype("float32")
 
     return out
+
+
 def enrich_power_from_current_inplace(
     df: pd.DataFrame,
     *,
@@ -4160,21 +4162,19 @@ def enrich_power_from_current_inplace(
     if bq is None:
         raise ValueError("BigQuery client `bq` is None — pass bq=bq_client.")
 
-    # preferred methods
     if preferred_method is None:
         preferred_method = globals().get("PREFERRED_METHOD", {}) or {}
     sport_aliases = sport_aliases or {}
 
-    # validate cols
     for c in (sport_col, home_col, away_col):
         if c not in df.columns:
             raise ValueError(f"enrich_power_from_current_inplace missing column: {c}")
 
-    # normalize Sport (optional via aliases)
-    s = df[sport_col].astype(str)
+    # --- normalize Sport (forward aliases + UPPER) ---
+    s0 = df[sport_col].astype(str).str.strip()
     if sport_aliases:
-        s = s.map(lambda x: sport_aliases.get(x, x))
-    df[sport_col] = s.astype(str).str.upper()
+        s0 = s0.map(lambda x: sport_aliases.get(x, x))
+    df[sport_col] = s0.astype(str).str.upper()
 
     # precreate outputs
     if out_home_col not in df.columns:
@@ -4184,12 +4184,29 @@ def enrich_power_from_current_inplace(
     if out_diff_col not in df.columns:
         df[out_diff_col] = np.nan
 
-    sports = sorted(set(df[sport_col].dropna().astype(str).str.upper().tolist()))
+    sports = sorted(set(df[sport_col].dropna().astype(str).str.upper().str.strip().tolist()))
     if not sports:
         df[out_home_col] = pd.to_numeric(df[out_home_col], errors="coerce").fillna(baseline).astype("float32")
         df[out_away_col] = pd.to_numeric(df[out_away_col], errors="coerce").fillna(baseline).astype("float32")
         df[out_diff_col] = (df[out_home_col] - df[out_away_col]).astype("float32")
         return df
+
+    # --- expand candidate sports with reverse aliasing too (common mismatch cause) ---
+    candidates = set(sports)
+    if sport_aliases:
+        # forward mapping (already applied) but keep anyway
+        for sp in sports:
+            candidates.add(str(sport_aliases.get(sp, sp)).upper().strip())
+        # reverse mapping (value -> key)
+        rev = {}
+        for k, v in sport_aliases.items():
+            rev[str(v).upper().strip()] = str(k).upper().strip()
+        for sp in sports:
+            if sp in rev:
+                candidates.add(rev[sp])
+
+    sports_param = sorted(candidates)
+    log_func(f"🔎 Power enrich: querying {table_current} for Sports={sports_param}")
 
     q = f"""
     SELECT
@@ -4205,18 +4222,33 @@ def enrich_power_from_current_inplace(
     df_cur = bq.query(
         q,
         job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ArrayQueryParameter("sports", "STRING", sports)]
+            query_parameters=[bigquery.ArrayQueryParameter("sports", "STRING", sports_param)]
         ),
     ).to_dataframe()
 
     if df_cur is None or df_cur.empty:
+        # tiny debug: what sports even exist in the table?
+        try:
+            q2 = f"""
+            SELECT UPPER(CAST(Sport AS STRING)) AS Sport, COUNT(*) AS n
+            FROM `{table_current}`
+            GROUP BY 1
+            ORDER BY n DESC
+            LIMIT 30
+            """
+            df_sports = bq.query(q2).to_dataframe()
+            log_func(f"⚠️ Power enrich: 0 rows for Sports={sports_param}. Table sports sample:\n{df_sports.to_string(index=False)}")
+        except Exception as e:
+            log_func(f"⚠️ Power enrich: 0 rows for Sports={sports_param}. (Also failed debug query: {e})")
+
         log_func("⚠️ Power rating enrichment: ratings_current returned 0 rows; using baseline.")
         df[out_home_col] = pd.to_numeric(df[out_home_col], errors="coerce").fillna(baseline).astype("float32")
         df[out_away_col] = pd.to_numeric(df[out_away_col], errors="coerce").fillna(baseline).astype("float32")
         df[out_diff_col] = (df[out_home_col] - df[out_away_col]).astype("float32")
         return df
 
-    df_cur["Sport"] = df_cur["Sport"].astype(str).str.upper()
+    # normalize fetched
+    df_cur["Sport"] = df_cur["Sport"].astype(str).str.upper().str.strip()
     df_cur["Team"] = df_cur["Team"].astype(str).str.lower().str.strip()
     df_cur["Method"] = df_cur["Method"].astype(str).str.lower().str.strip()
     df_cur["Updated_At"] = pd.to_datetime(df_cur["Updated_At"], utc=True, errors="coerce")
@@ -4243,10 +4275,10 @@ def enrich_power_from_current_inplace(
         s_map = d.set_index("Team")["Rating"]
         if s_map.index.has_duplicates:
             s_map = s_map[~s_map.index.duplicated(keep="last")]
-
         return s_map.astype("float32")
 
-    for sp in sports:
+    # apply per sport
+    for sp in sorted(set(df_cur["Sport"].dropna().astype(str).tolist())):
         mask = df[sport_col].astype(str).str.upper().eq(sp)
         if not mask.any():
             continue
@@ -4265,6 +4297,7 @@ def enrich_power_from_current_inplace(
         df.loc[mask, out_away_col] = a
         df.loc[mask, out_diff_col] = (h - a).astype("float32")
 
+    # finalize
     df[out_home_col] = pd.to_numeric(df[out_home_col], errors="coerce").fillna(baseline).astype("float32")
     df[out_away_col] = pd.to_numeric(df[out_away_col], errors="coerce").fillna(baseline).astype("float32")
     df[out_diff_col] = (df[out_home_col] - df[out_away_col]).astype("float32")
