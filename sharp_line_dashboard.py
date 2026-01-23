@@ -12773,7 +12773,7 @@ def attach_ratings_and_edges_for_diagnostics(
         pd.to_numeric(d_map['PR_Team_Rating'], errors='coerce') -
         pd.to_numeric(d_map['PR_Opp_Rating'],  errors='coerce')
     ).astype('float32')
-        d_map['PR_Abs_Rating_Diff'] = np.abs(pd.to_numeric(d_map['PR_Rating_Diff'], errors='coerce')).astype('float32')
+    d_map['PR_Abs_Rating_Diff'] = np.abs(pd.to_numeric(d_map['PR_Rating_Diff'], errors='coerce')).astype('float32')
 
     # --- Convert rating-diff to an approximate points edge for WHY/UI consistency ---
     # For Elo-ish sports your ratings are ~1500-scale; you already have SPORT_SPREAD_CFG scale factors elsewhere.
