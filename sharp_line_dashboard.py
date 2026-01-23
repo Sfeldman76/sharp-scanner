@@ -3853,265 +3853,79 @@ def attach_why_all_features(df_in: pd.DataFrame, bundle, model, why_rules=WHY_RU
                                                 map(int, rule_hits)))
     return df
 
-def enrich_power_for_training_lowmem(
-    df: pd.DataFrame,
-    sport_aliases: dict | None = None,           # optional
-    bq=None,                                     # pass your bigquery.Client
+def enrich_and_grade_for_training(
+    df_spread_rows: pd.DataFrame,
+    bq,                                   # required BigQuery client
+    sport_aliases: dict,
+    value_col: str = "Value",
+    outcome_col: str = "Outcome_Norm",
+    pad_days: int = 30,
+    rating_lag_hours: float = 12.0,       # ✅ NEW (replaces allow_forward_hours)
     table_history: str = "sharplogger.sharp_data.ratings_history",
-    pad_days: int = 21,
-    rating_lag_hours: float = 9.0,              # ✅ NEW: must be at least 12h pregame
-    project: str | None = None,                  # kept for signature parity
-    *,
-    debug_asof_cols: bool = True,                # ✅ NEW: emit Home/Away_Rating_AsOfTS for audit
+    project: str | None = None,
 ) -> pd.DataFrame:
     """
-    Enrich df with Home_Power_Rating, Away_Power_Rating, Power_Rating_Diff
-    by looking up team ratings within a small time window.
-
-    Leakage-safe rule (hard):
-      AsOfTS <= Game_Start - rating_lag_hours
-
-    Notes:
-    - Works with BOTH ratings_history (filters by Method) and ratings_current (no Method column).
-    - Requires: pass a google.cloud.bigquery.Client as `bq`.
+    Attach leakage-safe power ratings + consensus market k, then compute
+    model-vs-market spreads/edges and cover probs mapped to each outcome row.
+    Expects spreads only.
     """
-    sport_aliases = sport_aliases or {}
+    if df_spread_rows.empty:
+        return df_spread_rows.copy()
 
-    if df.empty:
-        return df.copy()
-    if bq is None:
-        raise ValueError("BigQuery client `bq` is None — pass your bigquery.Client (e.g., bq=bq_client).")
-
-    out = df.copy()
-
-    # --- normalize inputs (strings + time) ---
-    out["Sport"] = out["Sport"].astype(str).str.upper()
-    out["Home_Team_Norm"] = out["Home_Team_Norm"].astype(str).str.lower().str.strip()
-    out["Away_Team_Norm"] = out["Away_Team_Norm"].astype(str).str.lower().str.strip()
-    out["Game_Start"] = pd.to_datetime(out["Game_Start"], utc=True, errors="coerce")
-
-    # sport alias → canon
-    canon = {}
-    for k, v in (sport_aliases or {}).items():
-        if isinstance(v, list):
-            for a in v:
-                canon[str(a).upper()] = str(k).upper()
-        else:
-            canon[str(k).upper()] = str(v).upper()
-    out["Sport"] = out["Sport"].map(lambda s: canon.get(s, s))
-
-    # assume one sport per call
-    sport_canon = str(out["Sport"].iloc[0])
-    out = out[out["Sport"] == sport_canon].copy()
-    if out.empty:
-        return df.copy()
-
-    # --- helpers ---
-    def _norm_team_series(s: pd.Series) -> pd.Series:
-        return (s.astype(str).str.lower().str.strip()
-                .str.replace(r"\s+", " ", regex=True)
-                .str.replace(".", "", regex=False)
-                .str.replace("&", "and", regex=False)
-                .str.replace("-", " ", regex=False))
-
-    def _aliases_for(s: str) -> list[str]:
-        s = (s or "").upper()
-        al = sport_aliases.get(s, []) if sport_aliases else []
-        if not isinstance(al, list):
-            al = [al]
-        return sorted({s, *[str(x).upper() for x in al]})
-
-    # ✅ normalize team keys once
-    out["Home_Team_Norm"] = _norm_team_series(out["Home_Team_Norm"])
-    out["Away_Team_Norm"] = _norm_team_series(out["Away_Team_Norm"])
-
-    teams = pd.Index(out["Home_Team_Norm"]).union(out["Away_Team_Norm"]).unique().tolist()
-
-    # window for fetch
-    gmin, gmax = out["Game_Start"].min(), out["Game_Start"].max()
-    pad = pd.Timedelta(days=int(pad_days))
-
-    start_iso = pd.to_datetime(gmin - pad, utc=True).isoformat()
-    # ✅ IMPORTANT: do NOT fetch beyond max game start (no +2h)
-    end_iso = pd.to_datetime(gmax, utc=True).isoformat()
-
-    # ---------- tiny in-function cache ----------
-    if not hasattr(enrich_power_for_training_lowmem, "_ratings_cache"):
-        enrich_power_for_training_lowmem._ratings_cache = {}
-    
-    _CACHE = enrich_power_for_training_lowmem._ratings_cache
-
-    # Preferred method per sport (history only)
-    PREFERRED_METHOD = {
-        "MLB":   "poisson",
-        "NFL":   "elo_kalman",
-        "NCAAF": "elo_kalman",
-        "NBA":   "elo_kalman",
-        "WNBA":  "elo_kalman",
-        "CFL":   "elo_kalman",
-        "NCAAB": "kp_adj_em",
-    }
-
-    def fetch_training_ratings_window_cached(
-        sport: str,
-        start_iso: str,
-        end_iso: str,
-        table_history: str,
-        project: str | None = None,
-    ) -> pd.DataFrame:
-        key = (sport.upper(), start_iso, end_iso, table_history, tuple(sorted(teams)))
-        if key in _CACHE:
-            return _CACHE[key].copy()
-
-        is_current = "ratings_current" in str(table_history).lower()
-        method = None if is_current else PREFERRED_METHOD.get(sport.upper())
-
-        sql = f"""
-        SELECT
-          UPPER(CAST(Sport AS STRING))        AS Sport,
-          LOWER(TRIM(CAST(Team AS STRING)))   AS Team_Norm,
-          CAST(Rating AS FLOAT64)             AS Power_Rating,
-          TIMESTAMP(Updated_At)               AS AsOfTS
-        FROM `{table_history}`
-        WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@aliases)
-          AND LOWER(TRIM(CAST(Team AS STRING))) IN UNNEST(@teams)
-          AND TIMESTAMP(Updated_At) >= @start
-          AND TIMESTAMP(Updated_At) <= @end
-          {"AND LOWER(CAST(Method AS STRING)) = @method" if method else ""}
-        """
-
-        params = [
-            bigquery.ArrayQueryParameter("aliases", "STRING", _aliases_for(sport)),
-            bigquery.ArrayQueryParameter("teams", "STRING", teams),
-            bigquery.ScalarQueryParameter("start", "TIMESTAMP", pd.Timestamp(start_iso).to_pydatetime()),
-            bigquery.ScalarQueryParameter("end",   "TIMESTAMP", pd.Timestamp(end_iso).to_pydatetime()),
-        ]
-        if method:
-            params.append(bigquery.ScalarQueryParameter("method", "STRING", method.lower()))
-
-        df_r = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
-
-        if df_r.empty:
-            _CACHE[key] = df_r
-            return df_r
-
-        df_r["Team_Norm"] = _norm_team_series(df_r["Team_Norm"])
-        df_r["Power_Rating"] = pd.to_numeric(df_r["Power_Rating"], errors="coerce")
-        df_r["AsOfTS"] = pd.to_datetime(df_r["AsOfTS"], utc=True, errors="coerce")
-        df_r = df_r.dropna(subset=["Team_Norm", "Power_Rating", "AsOfTS"])
-        df_r = df_r[df_r["Sport"].str.upper() == sport.upper()]
-
-        _CACHE[key] = df_r
-        return df_r.copy()
-
-    # === Pull ratings (cached) ===
-    ratings = fetch_training_ratings_window_cached(
-        sport=sport_canon,
-        start_iso=start_iso,
-        end_iso=end_iso,
+    # 1) Ratings (as-of) for the unique games in this batch
+    base = enrich_power_for_training_lowmem(
+        df=df_spread_rows[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
+        bq=bq,
+        sport_aliases=sport_aliases,
         table_history=table_history,
+        pad_days=pad_days,
+        rating_lag_hours=12.0,  
         project=project,
     )
 
-    method_used = PREFERRED_METHOD.get(sport_canon.upper())
-    base = np.float32(0.0) if method_used == "kp_adj_em" else np.float32(1500.0)
+    # 2) Consensus market (favorite + absolute spread “k”)
+    g_cons = prep_consensus_market_spread_lowmem(
+        df_spread_rows, value_col=value_col, outcome_col=outcome_col
+    )
 
-    out["Home_Power_Rating"] = base
-    out["Away_Power_Rating"] = base
-    if debug_asof_cols:
-        out["Home_Rating_AsOfTS"] = pd.NaT
-        out["Away_Rating_AsOfTS"] = pd.NaT
+    # 3) Join → game-level, compute model favorite/dog edges + probs
+    game_key = ['Sport','Home_Team_Norm','Away_Team_Norm']
+    g_full = base.merge(g_cons, on=game_key, how='left')
+    g_fc   = favorite_centric_from_powerdiff_lowmem(g_full)
 
-    if ratings.empty:
-        out["Power_Rating_Diff"] = np.float32(0.0)
-        return out
+    # Ensure PR cols exist even if base missed
+    for c in ['Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff']:
+        if c not in g_fc.columns and c in g_full.columns:
+            g_fc[c] = g_full[c].values
+        elif c not in g_fc.columns:
+            g_fc[c] = np.nan
 
-    ratings = ratings.copy()
-    ratings["Team_Norm"] = _norm_team_series(ratings["Team_Norm"])
-    ratings = ratings[ratings["Team_Norm"].isin(teams)]
-    if ratings.empty:
-        out["Power_Rating_Diff"] = np.float32(0.0)
-        return out
+    keep_cols = game_key + [
+        'Market_Favorite_Team','Market_Underdog_Team',
+        'Favorite_Market_Spread','Underdog_Market_Spread',
+        'Model_Favorite_Team','Model_Underdog_Team',
+        'Model_Fav_Spread','Model_Dog_Spread',
+        'Fav_Edge_Pts','Dog_Edge_Pts',
+        'Fav_Cover_Prob','Dog_Cover_Prob',
+        'Model_Expected_Margin','Model_Expected_Margin_Abs','Sigma_Pts',
+        'Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff'
+    ]
+    for c in keep_cols:
+        if c not in g_fc.columns:
+            g_fc[c] = np.nan
+    g_fc = g_fc[keep_cols].copy()
 
-    # compact arrays per team: times + values (sorted)
-    team_series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-    for team, g in ratings.groupby("Team_Norm", sort=False):
-        g = g.sort_values("AsOfTS")
-        team_series[team] = (
-            g["AsOfTS"].to_numpy(dtype="datetime64[ns]"),
-            g["Power_Rating"].to_numpy(dtype=np.float32),
-        )
+    out = df_spread_rows.merge(g_fc, on=game_key, how='left')
 
-    # ============================
-    # ✅ 12-hour gate (hard)
-    # ============================
-    gs_ns = out["Game_Start"].values.astype("datetime64[ns]").astype("int64")
-    lag_ns = np.int64(round(float(rating_lag_hours) * 3600.0 * 1e9))
-
-    # cutoff is Game_Start - 12h (in ns)
-    cutoff_ns = gs_ns - lag_ns
-
-    # start with defaults
-    home_vals = np.full(len(out), base, dtype=np.float32)
-    away_vals = np.full(len(out), base, dtype=np.float32)
-
-    if debug_asof_cols:
-        home_asof = np.full(len(out), np.datetime64("NaT"), dtype="datetime64[ns]")
-        away_asof = np.full(len(out), np.datetime64("NaT"), dtype="datetime64[ns]")
-
-    home_team = out["Home_Team_Norm"].to_numpy()
-    away_team = out["Away_Team_Norm"].to_numpy()
-
-    # Home side: pick latest rating with AsOfTS <= cutoff
-    for team, (t_arr, r_arr) in team_series.items():
-        mask = (home_team == team)
-        if mask.any():
-            ts = cutoff_ns[mask].astype("datetime64[ns]")
-            idx = np.searchsorted(t_arr, ts, side="right") - 1
-            valid = idx >= 0
-
-            vals = np.full(idx.shape, base, dtype=np.float32)
-            if valid.any():
-                vals[valid] = r_arr[idx[valid]]
-                if debug_asof_cols:
-                    home_asof[mask] = np.where(valid, t_arr[idx], home_asof[mask])
-
-            home_vals[mask] = vals
-
-    # Away side: pick latest rating with AsOfTS <= cutoff
-    for team, (t_arr, r_arr) in team_series.items():
-        mask = (away_team == team)
-        if mask.any():
-            ts = cutoff_ns[mask].astype("datetime64[ns]")
-            idx = np.searchsorted(t_arr, ts, side="right") - 1
-            valid = idx >= 0
-
-            vals = np.full(idx.shape, base, dtype=np.float32)
-            if valid.any():
-                vals[valid] = r_arr[idx[valid]]
-                if debug_asof_cols:
-                    away_asof[mask] = np.where(valid, t_arr[idx], away_asof[mask])
-
-            away_vals[mask] = vals
-
-    out["Home_Power_Rating"] = home_vals
-    out["Away_Power_Rating"] = away_vals
-    out["Power_Rating_Diff"] = (home_vals - away_vals).astype("float32")
-
-    if debug_asof_cols:
-        out["Home_Rating_AsOfTS"] = pd.to_datetime(home_asof, utc=True, errors="coerce")
-        out["Away_Rating_AsOfTS"] = pd.to_datetime(away_asof, utc=True, errors="coerce")
-
-        # ✅ hard assertion: no rating newer than Game_Start - 12h
-        cutoff_dt = out["Game_Start"] - pd.Timedelta(hours=float(rating_lag_hours))
-        bad_home = out["Home_Rating_AsOfTS"].notna() & (out["Home_Rating_AsOfTS"] > cutoff_dt)
-        bad_away = out["Away_Rating_AsOfTS"].notna() & (out["Away_Rating_AsOfTS"] > cutoff_dt)
-        n_bad = int(bad_home.sum() + bad_away.sum())
-        if n_bad:
-            ex_cols = [c for c in ["feat_Game_Key","Game_Key","Home_Team_Norm","Away_Team_Norm","Game_Start","Home_Rating_AsOfTS","Away_Rating_AsOfTS"] if c in out.columns]
-            raise RuntimeError(f"[LEAK] {n_bad} power-rating rows violate {rating_lag_hours}h gate. Examples:\n{out.loc[bad_home | bad_away, ex_cols].head(25)}")
+    # Map game-level numbers to the row’s outcome side
+    is_fav = (out[outcome_col].astype(str).values == out['Market_Favorite_Team'].astype(str).values)
+    out['Outcome_Model_Spread']  = np.where(is_fav, out['Model_Fav_Spread'].values, out['Model_Dog_Spread'].values).astype('float32')
+    out['Outcome_Market_Spread'] = np.where(is_fav, out['Favorite_Market_Spread'].values, out['Underdog_Market_Spread'].values).astype('float32')
+    out['Outcome_Spread_Edge']   = np.where(is_fav, out['Fav_Edge_Pts'].values, out['Dog_Edge_Pts'].values).astype('float32')
+    out['Outcome_Cover_Prob']    = np.where(is_fav, out['Fav_Cover_Prob'].values, out['Dog_Cover_Prob'].values).astype('float32')
 
     return out
+
 
 
 from sklearn.isotonic import IsotonicRegression
