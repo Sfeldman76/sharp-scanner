@@ -4039,89 +4039,137 @@ def prep_consensus_market_spread_lowmem(
 
     return out
 
-# ---- 3) The wrapper that ties it all together (minimal memory/BQ) ----
 def enrich_power_from_current_inplace(
     df: pd.DataFrame,
     *,
     bq=None,
     table_current: str = "sharplogger.sharp_data.ratings_current",
-    pad_days: int = 10,
-    allow_forward_hours: float = 0.0,
-    sport_aliases: dict | None = None,  # ✅ now supported
-    project: str | None = None,         # ✅ accept to match call-site (optional use)
-    baseline: float = 1500.0,           # ✅ accept to match call-site (optional use)
-    **_ignored_kwargs,                  # ✅ swallow any future extra knobs safely
+    preferred_method: dict | None = None,
+    sport_col: str = "Sport",
+    home_col: str = "Home_Team_Norm",
+    away_col: str = "Away_Team_Norm",
+    out_home_col: str = "Home_Power_Rating",
+    out_away_col: str = "Away_Power_Rating",
+    out_diff_col: str = "Power_Rating_Diff",
+    sport_aliases: dict | None = None,
+    baseline: float = 1500.0,
+    log_func=print,
+    **_ignored_kwargs,
 ) -> pd.DataFrame:
-   
-    sport_aliases = sport_aliases or {}
-
     if df is None or df.empty:
         return df
     if bq is None:
-        raise ValueError("BigQuery client `bq` is None — pass your bigquery.Client (e.g., bq=bq_client).")
+        raise ValueError("BigQuery client `bq` is None — pass bq=bq_client.")
 
-    # ✅ normalize sport names IN PLACE (don’t copy)
-    if "Sport" in df.columns and sport_aliases:
-        df["Sport"] = df["Sport"].map(lambda s: sport_aliases.get(s, s))
-    
-    if df_spread_rows is None or df_spread_rows.empty:
-        logging.info("[enrich_and_grade_for_training] empty input")
-        return df_spread_rows
+    # preferred methods
+    if preferred_method is None:
+        preferred_method = globals().get("PREFERRED_METHOD", {}) or {}
+    sport_aliases = sport_aliases or {}
 
-    game_key = ["Sport","Home_Team_Norm","Away_Team_Norm"]
-    base_cols = game_key + ["Game_Start"]
-    df_games = (
-        df_spread_rows[base_cols]
-        .drop_duplicates()
-        .reset_index(drop=True)
-        .copy()
-    )
+    # validate cols
+    for c in (sport_col, home_col, away_col):
+        if c not in df.columns:
+            raise ValueError(f"enrich_power_from_current_inplace missing column: {c}")
 
-    # 3.1) Power enrich (IN-PLACE, single pass, minimal memory)
-    enrich_power_from_current_inplace(
-        df_games,
-        sport_aliases=sport_aliases,
-        table_current=table_current,
-        project=project,
-    )
+    # normalize Sport (optional via aliases)
+    s = df[sport_col].astype(str)
+    if sport_aliases:
+        s = s.map(lambda x: sport_aliases.get(x, x))
+    df[sport_col] = s.astype(str).str.upper()
 
-    # 3.2) Consensus market favorite & spreads (no queries)
-    g_cons = prep_consensus_market_spread_lowmem(
-        df_spread_rows, value_col=value_col, outcome_col=outcome_col
-    )
+    # precreate outputs
+    if out_home_col not in df.columns:
+        df[out_home_col] = np.nan
+    if out_away_col not in df.columns:
+        df[out_away_col] = np.nan
+    if out_diff_col not in df.columns:
+        df[out_diff_col] = np.nan
 
-    # 3.3) Join & compute model grading from power diff
-    g_full = df_games.merge(g_cons, on=game_key, how="left")
-    g_fc   = favorite_centric_from_powerdiff_lowmem(g_full)
+    sports = sorted(set(df[sport_col].dropna().astype(str).str.upper().tolist()))
+    if not sports:
+        df[out_home_col] = pd.to_numeric(df[out_home_col], errors="coerce").fillna(baseline).astype("float32")
+        df[out_away_col] = pd.to_numeric(df[out_away_col], errors="coerce").fillna(baseline).astype("float32")
+        df[out_diff_col] = (df[out_home_col] - df[out_away_col]).astype("float32")
+        return df
 
-    # ensure required columns exist (avoid KeyErrors downstream)
-    needed = game_key + [
-        'Market_Favorite_Team','Market_Underdog_Team',
-        'Favorite_Market_Spread','Underdog_Market_Spread',
-        'Model_Favorite_Team','Model_Underdog_Team',
-        'Model_Fav_Spread','Model_Dog_Spread',
-        'Fav_Edge_Pts','Dog_Edge_Pts',
-        'Fav_Cover_Prob','Dog_Cover_Prob',
-        'Model_Expected_Margin','Model_Expected_Margin_Abs','Sigma_Pts',
-        'Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff'
-    ]
-    for c in needed:
-        if c not in g_fc.columns:
-            g_fc[c] = np.nan
-    g_fc = g_fc[needed].copy()
+    q = f"""
+    SELECT
+      UPPER(CAST(Sport AS STRING))         AS Sport,
+      LOWER(TRIM(CAST(Team AS STRING)))    AS Team,
+      LOWER(TRIM(CAST(Method AS STRING)))  AS Method,
+      SAFE_CAST(Rating AS FLOAT64)         AS Rating,
+      TIMESTAMP(Updated_At)                AS Updated_At
+    FROM `{table_current}`
+    WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@sports)
+    """
 
-    out = df_spread_rows.merge(g_fc, on=game_key, how="left")
+    df_cur = bq.query(
+        q,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ArrayQueryParameter("sports", "STRING", sports)]
+        ),
+    ).to_dataframe()
 
-    # 3.4) Per-outcome vectorized mapping
-    is_fav = (out[outcome_col].astype(str).values ==
-              out['Market_Favorite_Team'].astype(str).values)
-    out['Outcome_Model_Spread']  = np.where(is_fav, out['Model_Fav_Spread'].values,      out['Model_Dog_Spread'].values).astype('float32')
-    out['Outcome_Market_Spread'] = np.where(is_fav, out['Favorite_Market_Spread'].values, out['Underdog_Market_Spread'].values).astype('float32')
-    out['Outcome_Spread_Edge']   = np.where(is_fav, out['Fav_Edge_Pts'].values,           out['Dog_Edge_Pts'].values).astype('float32')
-    out['Outcome_Cover_Prob']    = np.where(is_fav, out['Fav_Cover_Prob'].values,         out['Dog_Cover_Prob'].values).astype('float32')
+    if df_cur is None or df_cur.empty:
+        log_func("⚠️ Power rating enrichment: ratings_current returned 0 rows; using baseline.")
+        df[out_home_col] = pd.to_numeric(df[out_home_col], errors="coerce").fillna(baseline).astype("float32")
+        df[out_away_col] = pd.to_numeric(df[out_away_col], errors="coerce").fillna(baseline).astype("float32")
+        df[out_diff_col] = (df[out_home_col] - df[out_away_col]).astype("float32")
+        return df
 
-    return out
+    df_cur["Sport"] = df_cur["Sport"].astype(str).str.upper()
+    df_cur["Team"] = df_cur["Team"].astype(str).str.lower().str.strip()
+    df_cur["Method"] = df_cur["Method"].astype(str).str.lower().str.strip()
+    df_cur["Updated_At"] = pd.to_datetime(df_cur["Updated_At"], utc=True, errors="coerce")
+    df_cur["Rating"] = pd.to_numeric(df_cur["Rating"], errors="coerce")
 
+    def _build_map_for_sport(sp: str) -> pd.Series:
+        d = df_cur.loc[df_cur["Sport"] == sp].copy()
+        if d.empty:
+            return pd.Series(dtype="float32")
+
+        m = preferred_method.get(sp, None)
+        if m is not None:
+            m = str(m).lower().strip()
+            if d["Method"].notna().any():
+                d = d.loc[d["Method"] == m]
+
+        d = d.dropna(subset=["Team", "Rating"])
+        if d.empty:
+            return pd.Series(dtype="float32")
+
+        d = d.sort_values(["Team", "Updated_At"], kind="mergesort")
+        d = d.drop_duplicates(subset=["Team"], keep="last")
+
+        s_map = d.set_index("Team")["Rating"]
+        if s_map.index.has_duplicates:
+            s_map = s_map[~s_map.index.duplicated(keep="last")]
+
+        return s_map.astype("float32")
+
+    for sp in sports:
+        mask = df[sport_col].astype(str).str.upper().eq(sp)
+        if not mask.any():
+            continue
+
+        s_map = _build_map_for_sport(sp)
+        if s_map.empty:
+            continue
+
+        hk = df.loc[mask, home_col].astype(str).str.lower().str.strip()
+        ak = df.loc[mask, away_col].astype(str).str.lower().str.strip()
+
+        h = s_map.reindex(hk).to_numpy(dtype="float32", copy=False)
+        a = s_map.reindex(ak).to_numpy(dtype="float32", copy=False)
+
+        df.loc[mask, out_home_col] = h
+        df.loc[mask, out_away_col] = a
+        df.loc[mask, out_diff_col] = (h - a).astype("float32")
+
+    df[out_home_col] = pd.to_numeric(df[out_home_col], errors="coerce").fillna(baseline).astype("float32")
+    df[out_away_col] = pd.to_numeric(df[out_away_col], errors="coerce").fillna(baseline).astype("float32")
+    df[out_diff_col] = (df[out_home_col] - df[out_away_col]).astype("float32")
+    return df
 
 def implied_prob_vec(odds):
     # expects numpy/pandas array, returns float32 array
