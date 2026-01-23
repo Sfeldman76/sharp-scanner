@@ -3612,7 +3612,7 @@ def build_hybrid_bin_rules():
             rules.append(dict(requires_any=[col2], check=lambda r, c=col2: _rv(r, c) > 0.0,
                               msg=f"💥 Odds Timing Spike ({p}/{u})"))
     return rules
-
+THR["pr_edge_pts_meaningful"] = 1.5 
 WHY_RULES_V3 = [
     # Sharp / book pressure
     dict(requires_any=["Book_Reliability_Lift"],
@@ -3716,8 +3716,9 @@ WHY_RULES_V3 = [
     dict(requires_any=["Outcome_Cover_Prob"],
          check=lambda r: _rv(r,"Outcome_Cover_Prob") >= THR["cover_prob_conf"],
          msg="🔮 Strong Cover Probability"),
-    dict(requires_any=["PR_Rating_Diff","PR_Abs_Rating_Diff"],
-         check=lambda r: max(abs(_rv(r,"PR_Rating_Diff")), _rv(r,"PR_Abs_Rating_Diff")) >= THR["pr_diff_meaningful"],
+    dict(requires_any=["PR_Abs_Edge_Pts","PR_Edge_Pts"],
+         check=lambda r: _rv(r,"PR_Abs_Edge_Pts") >= THR.get("pr_edge_pts_meaningful", 1.5),
+     msg="📈 Meaningful Power-Rating Edge"),
          msg="📈 Meaningful Power‑Rating Edge"),
     dict(requires_any=["PR_Model_Agree_H2H_Flag"],
          check=lambda r: _rv(r,"PR_Model_Agree_H2H_Flag") > 0.0,
@@ -12663,7 +12664,8 @@ def attach_ratings_and_edges_for_diagnostics(
     bq=None,                        # ✅ pass your BigQuery client in
 ) -> pd.DataFrame:                  # << ✅ colon here
     UI_EDGE_COLS = [
-        'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff',
+        'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Abs_Rating_Diff',
+        'PR_Edge_Pts','PR_Abs_Edge_Pts',
         'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
         'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_x_k','mu_x_k'
     ]
@@ -12715,10 +12717,12 @@ def attach_ratings_and_edges_for_diagnostics(
 
     if 'ratings_current' in str(table_history).lower():
         tmp = d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates().copy()
+
         tmp = enrich_power_from_current_inplace(
             tmp,
+            bq=bq,                       # ✅ FIX: pass client
             sport_aliases=sport_aliases,
-            table_current=table_history,   # pass current
+            table_current=table_history, # ratings_current fully-qualified table
             project=project,
             baseline=(0.0 if str(PREFERRED_METHOD.get(str(tmp['Sport'].iloc[0]).upper(),'')).lower()=='kp_adj_em' else 1500.0),
         )
@@ -12733,10 +12737,6 @@ def attach_ratings_and_edges_for_diagnostics(
             rating_lag_hours=12.0,
             project=project,
         )
-
-        
-    
-
 
     cons = prep_consensus_market_spread_lowmem(d_sp, value_col='Value', outcome_col='Outcome_Norm')
 
@@ -12763,6 +12763,27 @@ def attach_ratings_and_edges_for_diagnostics(
         pd.to_numeric(d_map['PR_Team_Rating'], errors='coerce') -
         pd.to_numeric(d_map['PR_Opp_Rating'],  errors='coerce')
     ).astype('float32')
+        d_map['PR_Abs_Rating_Diff'] = np.abs(pd.to_numeric(d_map['PR_Rating_Diff'], errors='coerce')).astype('float32')
+
+    # --- Convert rating-diff to an approximate points edge for WHY/UI consistency ---
+    # For Elo-ish sports your ratings are ~1500-scale; you already have SPORT_SPREAD_CFG scale factors elsewhere.
+    # For NCAAB kp_adj_em, diff is already "points per 100 poss"; your favorite_centric function converts it,
+    # but for WHY we just need a stable points-like proxy.
+    SPORT_PR_SCALE_TO_PTS = {
+        # rating-units → points (tune these to match your SPORT_SPREAD_CFG or favorite_centric logic)
+        "NFL":   1.0/25.0,
+        "NCAAF": 1.0/25.0,
+        "NBA":   1.0/35.0,
+        "WNBA":  1.0/35.0,
+        "CFL":   1.0/25.0,
+        "MLB":   1.0/50.0,   # runs-ish
+        "NCAAB": 1.0,        # kp_adj_em handled as already “points-like” proxy here
+    }
+
+    sp = d_map['Sport'].astype(str).str.upper().values
+    scale = np.array([SPORT_PR_SCALE_TO_PTS.get(s, 1.0/30.0) for s in sp], dtype='float32')
+    d_map['PR_Edge_Pts'] = (pd.to_numeric(d_map['PR_Rating_Diff'], errors='coerce').astype('float32') * scale).astype('float32')
+    d_map['PR_Abs_Edge_Pts'] = np.abs(d_map['PR_Edge_Pts']).astype('float32')
 
     k_abs = (
         pd.to_numeric(d_map.get('Favorite_Market_Spread'),  errors='coerce').abs()
@@ -12916,10 +12937,10 @@ def compute_diagnostics_vectorized(
         seen=set(); active_feats = [x for x in (active_feats + seed + canon) if not (x in seen or seen.add(x))]
 
 
-   
+ 
+    ACTIVE_FEATS = set(active_feats or [])
     def _is_active(col: str) -> bool:
         return col in ACTIVE_FEATS
-    
     def _num(row, col):
         v = row.get(col)
         if isinstance(v, str):
