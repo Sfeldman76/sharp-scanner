@@ -406,6 +406,15 @@ SPORT_ALIASES = {
     "NCAAB": ["NCAAB", "BASKETBALL_NCAAB", "BASKETBALL_NCAAM", "NCAAM", "COLLEGE_BASKETBALL"],
 }
 
+PREFERRED_METHOD = {
+    "MLB":   "poisson",
+    "NFL":   "elo_kalman",
+    "NCAAF": "elo_kalman",
+    "NBA":   "elo_kalman",
+    "WNBA":  "elo_kalman",
+    "CFL":   "elo_kalman",
+    "NCAAB": "kp_adj_em",
+}
 
 # ---------------------------------------------------------------------
 # Main power-ratings updater
@@ -546,15 +555,6 @@ def update_power_ratings(
     }
 
     # Just informational; not used inside this function
-    PREFERRED_METHOD = {
-        "MLB":   "poisson",
-        "NFL":   "elo_kalman",
-        "NCAAF": "elo_kalman",
-        "NBA":   "elo_kalman",
-        "WNBA":  "elo_kalman",
-        "CFL":   "elo_kalman",
-        "NCAAB": "kp_adj_em",
-    }
 
     def get_aliases(canon: str) -> list[str]:
         return SPORT_ALIASES.get(canon.upper(), [canon.upper()])
