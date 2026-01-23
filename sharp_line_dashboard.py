@@ -12678,7 +12678,7 @@ def compute_diagnostics_vectorized(
         )
     except Exception as e:
         # don't swallow silently — at least surface it once while debugging
-        df["Why Model Likes It"] = f"⚠️ Ratings attach failed: {e}"
+        df["Ratings_Attach_Error"] = str(e)[:250]
 
     # --- 3) Tier Δ ---
     TIER_ORDER = {'🪙 Low Probability':1, '🤏 Lean':2, '🔥 Strong Indication':3, '🌋 Steam':4}
@@ -12735,30 +12735,25 @@ def compute_diagnostics_vectorized(
     has_prob_context = prob_col is not None and pd.to_numeric(df[prob_col], errors="coerce").notna().any()
     
     active_feats = []
+    active_feats = []
     try:
-        # Prefer the all-features explainer so attrs are populated even if bundle/model are thin
+        # build WHY + attrs
         df = attach_why_all_features(df, bundle=bundle, model=model, why_rules=WHY_RULES_V3)
-        active_feats = list(getattr(df, "attrs", {}).get("active_features_used", []))
+        active_feats = list(getattr(df, "attrs", {}).get("active_features_used", [])) or []
     except Exception as e:
-        # Only show "no context" if we truly have neither a model nor a prob column
         if not has_prob_context:
             df["Why Model Likes It"] = f"⚠️ Explainer failed: {e}"
             df["Why_Feature_Count"] = 0
         active_feats = []
     
-    # Robust fallback if the resolver returned nothing but we do have a prob
-    if not active_feats and has_prob_context:
-        # try exact training cols
-        try:
-            active_feats = _resolve_feature_cols_like_training(bundle, model, df) or []
-        except Exception:
-            active_feats = []
-        # seed at least the probability (and a few canonical context features) for the UI
-        seed = [prob_col] if prob_col else []
-        canon = [c for c in ("Outcome_Model_Spread","Outcome_Market_Spread","Outcome_Spread_Edge",
-                             "Outcome_Cover_Prob","PR_Rating_Diff") if c in df.columns]
-        # Make unique, preserve order
-        seen=set(); active_feats = [x for x in (active_feats + seed + canon) if not (x in seen or seen.add(x))]
+    # ✅ ALWAYS prefer the exact training columns when available (stable ~53)
+    try:
+        train_cols = _resolve_feature_cols_like_training(bundle, model, df) or []
+    except Exception:
+        train_cols = []
+    
+    if train_cols:
+        active_feats = train_cols
 
 
  
