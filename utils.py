@@ -4301,7 +4301,7 @@ class MemSampler:
         return (time.monotonic() - self.last_t) >= self.interval_s
 
     def maybe(self, tag: str, frame_locals: dict | None = None):
-        """Call at checkpoints; cheap if interval hasn’t elapsed."""
+       
         if not self._should_sample():
             return
         rss = _rss_bytes()
