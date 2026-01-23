@@ -4039,6 +4039,105 @@ def prep_consensus_market_spread_lowmem(
 
     return out
 
+
+def enrich_and_grade_for_training(
+    df_spread_rows: pd.DataFrame,
+    *,
+    bq=None,
+    table_current: str = "sharplogger.sharp_data.ratings_current",
+    sport_aliases: dict | None = None,
+    preferred_method: dict | None = None,
+    value_col: str = "Value",
+    outcome_col: str = "Outcome",
+    log_func=print,
+) -> pd.DataFrame:
+    """
+    Spread-only helper:
+      1) Builds game-level frame (Sport/Home/Away/Game_Start)
+      2) Enriches power ratings on that game frame
+      3) Computes consensus market favorite/spread
+      4) Derives model favorite/spread from power diff
+      5) Joins back and produces per-outcome fields:
+         Outcome_Model_Spread, Outcome_Market_Spread, Outcome_Spread_Edge, Outcome_Cover_Prob
+    """
+    if df_spread_rows is None or df_spread_rows.empty:
+        return df_spread_rows
+
+    sport_aliases = sport_aliases or {}
+    if preferred_method is None:
+        preferred_method = globals().get("PREFERRED_METHOD", {}) or {}
+
+    game_key = ["Sport", "Home_Team_Norm", "Away_Team_Norm"]
+    base_cols = game_key + ["Game_Start"]
+    for c in base_cols:
+        if c not in df_spread_rows.columns:
+            raise KeyError(f"enrich_and_grade_for_training missing column: {c}")
+
+    df_games = (
+        df_spread_rows[base_cols]
+        .drop_duplicates()
+        .reset_index(drop=True)
+        .copy()
+    )
+
+    # 1) Power enrich on games
+    enrich_power_from_current_inplace(
+        df_games,
+        bq=bq,
+        table_current=table_current,
+        preferred_method=preferred_method,
+        sport_aliases=sport_aliases,
+        log_func=log_func,
+    )
+
+    # 2) Consensus market favorite/spread
+    g_cons = prep_consensus_market_spread_lowmem(
+        df_spread_rows, value_col=value_col, outcome_col=outcome_col
+    )
+
+    # 3) Join & compute model grading from power diff
+    g_full = df_games.merge(g_cons, on=game_key, how="left")
+    g_fc = favorite_centric_from_powerdiff_lowmem(g_full)
+
+    # Ensure required columns exist (avoid KeyErrors downstream)
+    needed = game_key + [
+        "Market_Favorite_Team", "Market_Underdog_Team",
+        "Favorite_Market_Spread", "Underdog_Market_Spread",
+        "Model_Favorite_Team", "Model_Underdog_Team",
+        "Model_Fav_Spread", "Model_Dog_Spread",
+        "Fav_Edge_Pts", "Dog_Edge_Pts",
+        "Fav_Cover_Prob", "Dog_Cover_Prob",
+        "Model_Expected_Margin", "Model_Expected_Margin_Abs", "Sigma_Pts",
+        "Home_Power_Rating", "Away_Power_Rating", "Power_Rating_Diff",
+    ]
+    for c in needed:
+        if c not in g_fc.columns:
+            g_fc[c] = np.nan
+    g_fc = g_fc[needed].copy()
+
+    out = df_spread_rows.merge(g_fc, on=game_key, how="left")
+
+    # 4) Per-outcome mapping
+    is_fav = (out[outcome_col].astype(str).values ==
+              out["Market_Favorite_Team"].astype(str).values)
+
+    out["Outcome_Model_Spread"] = np.where(
+        is_fav, out["Model_Fav_Spread"].values, out["Model_Dog_Spread"].values
+    ).astype("float32")
+
+    out["Outcome_Market_Spread"] = np.where(
+        is_fav, out["Favorite_Market_Spread"].values, out["Underdog_Market_Spread"].values
+    ).astype("float32")
+
+    out["Outcome_Spread_Edge"] = np.where(
+        is_fav, out["Fav_Edge_Pts"].values, out["Dog_Edge_Pts"].values
+    ).astype("float32")
+
+    out["Outcome_Cover_Prob"] = np.where(
+        is_fav, out["Fav_Cover_Prob"].values, out["Dog_Cover_Prob"].values
+    ).astype("float32")
+
+    return out
 def enrich_power_from_current_inplace(
     df: pd.DataFrame,
     *,
@@ -7488,15 +7587,17 @@ def apply_blended_sharp_score(
         df_sp['Value']           = pd.to_numeric(df_sp['Value'], errors='coerce').astype('float32')
     
         # ⬇️ Enrich (produces all spread features)
+        
         df_sp_enriched = enrich_and_grade_for_training(
-            df_sp,
-            sport_aliases=SPORT_ALIASES,
-            value_col="Value",
-            outcome_col="Outcome_Norm",
+            df_spread_rows,
+            bq=bq_client,
             table_current="sharplogger.sharp_data.ratings_current",
-            project="sharplogger",
+            sport_aliases=SPORT_ALIASES,
+            preferred_method=PREFERRED_METHOD,
+            value_col="Value",
+            outcome_col="Outcome",
+            log_func=logger.info,
         )
-    
         # Ensure original row id on enriched frame
         if '__row__' not in df_sp_enriched.columns:
             df_sp_enriched = df_sp[['__row__','Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm']].merge(
