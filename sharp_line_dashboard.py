@@ -3612,7 +3612,22 @@ def build_hybrid_bin_rules():
             rules.append(dict(requires_any=[col2], check=lambda r, c=col2: _rv(r, c) > 0.0,
                               msg=f"💥 Odds Timing Spike ({p}/{u})"))
     return rules
-THR["pr_edge_pts_meaningful"] = 1.5 
+
+# ---------- WHY_RULES_V3 ----------
+def build_hybrid_bin_rules():
+    phases = ["Overnight", "Early", "Midday", "Late"]
+    urg = ["VeryEarly", "MidRange", "LateGame", "Urgent"]
+    rules = []
+    for p in phases:
+        for u in urg:
+            col1 = f"SharpMove_Magnitude_{p}_{u}"
+            col2 = f"OddsMove_Magnitude_{p}_{u}"
+            rules.append(dict(requires_any=[col1], check=lambda r, c=col1: _rv(r, c) > 0.0,
+                              msg=f"💥 Sharp Timing Spike ({p}/{u})"))
+            rules.append(dict(requires_any=[col2], check=lambda r, c=col2: _rv(r, c) > 0.0,
+                              msg=f"💥 Odds Timing Spike ({p}/{u})"))
+    return rules
+
 WHY_RULES_V3 = [
     # Sharp / book pressure
     dict(requires_any=["Book_Reliability_Lift"],
@@ -3709,33 +3724,22 @@ WHY_RULES_V3 = [
          check=lambda r: _rv(r,"Total_vs_Spread_Contradiction") > 0.0,
          msg="⚠️ Totals vs Spread Contradiction"),
 
-  
     # PR / model / market agreement
-    dict(
-        requires_any=["model_fav_vs_market_fav_agree"],
-        check=lambda r: _rv(r, "model_fav_vs_market_fav_agree") > 0.0,
-        msg="🧭 Model & Market Agree",
-    ),
-    dict(
-        requires_any=["Outcome_Cover_Prob"],
-        check=lambda r: _rv(r, "Outcome_Cover_Prob") >= THR["cover_prob_conf"],
-        msg="🔮 Strong Cover Probability",
-    ),
-    dict(
-        requires_any=["PR_Abs_Edge_Pts", "PR_Edge_Pts"],
-        check=lambda r: _rv(r, "PR_Abs_Edge_Pts") >= THR.get("pr_edge_pts_meaningful", 1.5),
-        msg="📈 Meaningful Power-Rating Edge",
-    ),
-    dict(
-        requires_any=["PR_Model_Agree_H2H_Flag"],
-        check=lambda r: _rv(r, "PR_Model_Agree_H2H_Flag") > 0.0,
-        msg="🧠 Power Ratings Agree with Model",
-    ),
-    dict(
-        requires_any=["PR_Market_Agree_H2H_Flag"],
-        check=lambda r: _rv(r, "PR_Market_Agree_H2H_Flag") > 0.0,
-        msg="📊 Power Ratings Agree with Market",
-    ),
+    dict(requires_any=["model_fav_vs_market_fav_agree"],
+         check=lambda r: _rv(r,"model_fav_vs_market_fav_agree") > 0.0,
+         msg="🧭 Model & Market Agree"),
+    dict(requires_any=["Outcome_Cover_Prob"],
+         check=lambda r: _rv(r,"Outcome_Cover_Prob") >= THR["cover_prob_conf"],
+         msg="🔮 Strong Cover Probability"),
+    dict(requires_any=["PR_Rating_Diff","PR_Abs_Rating_Diff"],
+         check=lambda r: max(abs(_rv(r,"PR_Rating_Diff")), _rv(r,"PR_Abs_Rating_Diff")) >= THR["pr_diff_meaningful"],
+         msg="📈 Meaningful Power‑Rating Edge"),
+    dict(requires_any=["PR_Model_Agree_H2H_Flag"],
+         check=lambda r: _rv(r,"PR_Model_Agree_H2H_Flag") > 0.0,
+         msg="🧠 Power Ratings Agree with Model"),
+    dict(requires_any=["PR_Market_Agree_H2H_Flag"],
+         check=lambda r: _rv(r,"PR_Market_Agree_H2H_Flag") > 0.0,
+         msg="📊 Power Ratings Agree with Market"),
 
     # Totals context
     dict(requires_any=["TOT_Mispricing","TOT_Proj_Total_Baseline"],
@@ -12488,8 +12492,7 @@ def attach_ratings_and_edges_for_diagnostics(
     bq=None,                        # ✅ pass your BigQuery client in
 ) -> pd.DataFrame:                  # << ✅ colon here
     UI_EDGE_COLS = [
-        'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Abs_Rating_Diff',
-        'PR_Edge_Pts','PR_Abs_Edge_Pts',
+        'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff',
         'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
         'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_x_k','mu_x_k'
     ]
@@ -12539,28 +12542,17 @@ def attach_ratings_and_edges_for_diagnostics(
     is_current_table = 'ratings_current' in str(table_history).lower()
     pad_days_eff = (365 if is_current_table else pad_days)
 
-    if 'ratings_current' in str(table_history).lower():
-        tmp = d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates().copy()
+    
+    base = enrich_power_for_training_lowmem(
+        df=d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
+        bq=bq,
+        sport_aliases=sport_aliases,
+        table_history=table_history,
+        pad_days=pad_days_eff,
+        rating_lag_hours=12.0,   # ✅ NEW: enforce AsOfTS <= Game_Start - 12h
+        project=project,
+    )
 
-        tmp = enrich_power_from_current_inplace(
-            tmp,
-            bq=bq,                       # ✅ FIX: pass client
-            sport_aliases=sport_aliases,
-            table_current=table_history, # ratings_current fully-qualified table
-            project=project,
-            baseline=(0.0 if str(PREFERRED_METHOD.get(str(tmp['Sport'].iloc[0]).upper(),'')).lower()=='kp_adj_em' else 1500.0),
-        )
-        base = tmp
-    else:
-        base = enrich_power_for_training_lowmem(
-            df=d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
-            bq=bq,
-            sport_aliases=sport_aliases,
-            table_history=table_history,
-            pad_days=pad_days,
-            rating_lag_hours=12.0,
-            project=project,
-        )
 
     cons = prep_consensus_market_spread_lowmem(d_sp, value_col='Value', outcome_col='Outcome_Norm')
 
@@ -12587,27 +12579,6 @@ def attach_ratings_and_edges_for_diagnostics(
         pd.to_numeric(d_map['PR_Team_Rating'], errors='coerce') -
         pd.to_numeric(d_map['PR_Opp_Rating'],  errors='coerce')
     ).astype('float32')
-    d_map['PR_Abs_Rating_Diff'] = np.abs(pd.to_numeric(d_map['PR_Rating_Diff'], errors='coerce')).astype('float32')
-
-    # --- Convert rating-diff to an approximate points edge for WHY/UI consistency ---
-    # For Elo-ish sports your ratings are ~1500-scale; you already have SPORT_SPREAD_CFG scale factors elsewhere.
-    # For NCAAB kp_adj_em, diff is already "points per 100 poss"; your favorite_centric function converts it,
-    # but for WHY we just need a stable points-like proxy.
-    SPORT_PR_SCALE_TO_PTS = {
-        # rating-units → points (tune these to match your SPORT_SPREAD_CFG or favorite_centric logic)
-        "NFL":   1.0/25.0,
-        "NCAAF": 1.0/25.0,
-        "NBA":   1.0/35.0,
-        "WNBA":  1.0/35.0,
-        "CFL":   1.0/25.0,
-        "MLB":   1.0/50.0,   # runs-ish
-        "NCAAB": 1.0,        # kp_adj_em handled as already “points-like” proxy here
-    }
-
-    sp = d_map['Sport'].astype(str).str.upper().values
-    scale = np.array([SPORT_PR_SCALE_TO_PTS.get(s, 1.0/30.0) for s in sp], dtype='float32')
-    d_map['PR_Edge_Pts'] = (pd.to_numeric(d_map['PR_Rating_Diff'], errors='coerce').astype('float32') * scale).astype('float32')
-    d_map['PR_Abs_Edge_Pts'] = np.abs(d_map['PR_Edge_Pts']).astype('float32')
 
     k_abs = (
         pd.to_numeric(d_map.get('Favorite_Market_Spread'),  errors='coerce').abs()
@@ -12678,7 +12649,7 @@ def compute_diagnostics_vectorized(
         )
     except Exception as e:
         # don't swallow silently — at least surface it once while debugging
-        df["Ratings_Attach_Error"] = str(e)[:250]
+        df["Why Model Likes It"] = f"⚠️ Ratings attach failed: {e}"
 
     # --- 3) Tier Δ ---
     TIER_ORDER = {'🪙 Low Probability':1, '🤏 Lean':2, '🔥 Strong Indication':3, '🌋 Steam':4}
@@ -12735,31 +12706,36 @@ def compute_diagnostics_vectorized(
     has_prob_context = prob_col is not None and pd.to_numeric(df[prob_col], errors="coerce").notna().any()
     
     active_feats = []
-    active_feats = []
     try:
-        # build WHY + attrs
+        # Prefer the all-features explainer so attrs are populated even if bundle/model are thin
         df = attach_why_all_features(df, bundle=bundle, model=model, why_rules=WHY_RULES_V3)
-        active_feats = list(getattr(df, "attrs", {}).get("active_features_used", [])) or []
+        active_feats = list(getattr(df, "attrs", {}).get("active_features_used", []))
     except Exception as e:
+        # Only show "no context" if we truly have neither a model nor a prob column
         if not has_prob_context:
             df["Why Model Likes It"] = f"⚠️ Explainer failed: {e}"
             df["Why_Feature_Count"] = 0
         active_feats = []
     
-    # ✅ ALWAYS prefer the exact training columns when available (stable ~53)
-    try:
-        train_cols = _resolve_feature_cols_like_training(bundle, model, df) or []
-    except Exception:
-        train_cols = []
-    
-    if train_cols:
-        active_feats = train_cols
+    # Robust fallback if the resolver returned nothing but we do have a prob
+    if not active_feats and has_prob_context:
+        # try exact training cols
+        try:
+            active_feats = _resolve_feature_cols_like_training(bundle, model, df) or []
+        except Exception:
+            active_feats = []
+        # seed at least the probability (and a few canonical context features) for the UI
+        seed = [prob_col] if prob_col else []
+        canon = [c for c in ("Outcome_Model_Spread","Outcome_Market_Spread","Outcome_Spread_Edge",
+                             "Outcome_Cover_Prob","PR_Rating_Diff") if c in df.columns]
+        # Make unique, preserve order
+        seen=set(); active_feats = [x for x in (active_feats + seed + canon) if not (x in seen or seen.add(x))]
 
 
- 
-    ACTIVE_FEATS = set(active_feats or [])
+   
     def _is_active(col: str) -> bool:
         return col in ACTIVE_FEATS
+    
     def _num(row, col):
         v = row.get(col)
         if isinstance(v, str):
@@ -13966,15 +13942,16 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                         diag_rows,
                         bundle=bundle,
                         model=model,
-                        sport=label,               # you used `label` earlier for loading
-                        gcs_bucket=GCS_BUCKET,
-                        bq=bq_client,              # ✅ critical
+                        sport=label,                # you used `label` earlier for loading
+                        gcs_bucket=GCS_BUCKET, 
+                        bq=bq_client,
                         ratings_table_fq="sharplogger.sharp_data.ratings_current",
                         sport_aliases=sport_aliases,
                         hybrid_timing_features=hybrid_timing_features if 'hybrid_timing_features' in globals() else None,
                         hybrid_odds_timing_features=hybrid_odds_timing_features if 'hybrid_odds_timing_features' in globals() else None,
                     )
                     diagnostics_chunks.append(chunk)
+                diagnostics_chunks = [c.loc[:, ~pd.Index(c.columns).duplicated()] for c in diagnostics_chunks]
             
                 diagnostics_chunks = [c.loc[:, ~pd.Index(c.columns).duplicated()] for c in diagnostics_chunks]
                 diagnostics_df = (
