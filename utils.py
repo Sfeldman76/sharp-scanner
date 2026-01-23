@@ -4193,20 +4193,8 @@ def enrich_power_from_current_inplace(
         return df
 
     # --- expand candidate sports with reverse aliasing too (common mismatch cause) ---
-    candidates = set(sports)
-    if sport_aliases:
-        # forward mapping (already applied) but keep anyway
-        for sp in sports:
-            candidates.add(str(sport_aliases.get(sp, sp)).upper().strip())
-        # reverse mapping (value -> key)
-        rev = {}
-        for k, v in sport_aliases.items():
-            rev[str(v).upper().strip()] = str(k).upper().strip()
-        for sp in sports:
-            if sp in rev:
-                candidates.add(rev[sp])
-
-    sports_param = sorted(candidates)
+    
+    sports_param = sports
     log_func(f"🔎 Power enrich: querying {table_current} for Sports={sports_param}")
 
     q = f"""
