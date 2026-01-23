@@ -6071,18 +6071,7 @@ def add_limit_dynamics_features(
     spike_rel: float = 0.25,        # or relative step >= 25% of previous
     epsilon_no_move: float = 1e-6,  # "no-line-move" tolerance in absolute line units
 ) -> pd.DataFrame:
-    """
-    Emits (adds columns if missing):
-      - Delta_Limit (current - prev/open)
-      - Limit_Spike_Flag (1/0)   — step-up detected
-      - LimitSpike_x_NoMove      — spike AND line didn't move
-    Prev limit is taken from:
-        1) df['Prev_Limit'] if present,
-        2) else df['Opening_Limit'],
-        3) else 0.
-    'NoMove' is |Value - Open_Value| <= epsilon OR |Line_Delta| <= epsilon.
-    Works with either ('Game_Key','Market') or ('Game','Market') if present.
-    """
+   
     if df.empty:
         for c in ("Delta_Limit","Limit_Spike_Flag","LimitSpike_x_NoMove"):
             df[c] = df.get(c, pd.Series([], dtype="float32" if c=="Delta_Limit" else "int8"))
