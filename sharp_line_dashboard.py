@@ -13630,7 +13630,6 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
            
     
             # === Preview & column check
-            #st.write("📋 Columns in df_pre:", df_pre.columns.tolist())
             
             # === Compute consensus lines
             sharp_consensus = (
@@ -13775,45 +13774,25 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             df_summary_base['Sharp Move'] = (df_summary_base['Sharp Line'] - df_summary_base['First_Line_Value']).round(2)
             df_summary_base['Rec Move']   = (df_summary_base['Rec Line']  - df_summary_base['First_Line_Value']).round(2)
             
-            # =========================================================
-            # 6) Aggregated sharp-only trend + spark (from df_all_snapshots)
-            # =========================================================
-            
-            # --- ensure a consistent prob column in snapshots ---
+            # === 6) Aggregated sharp-only trend + spark (from df_all_snapshots) ===
+            # === 6) Aggregated sharp-only trend + spark (from df_all_snapshots) ===
+            # Ensure we have a consistent prob column in snapshots
             if 'Model Prob' not in df_all_snapshots.columns and 'Model_Sharp_Win_Prob' in df_all_snapshots.columns:
                 df_all_snapshots['Model Prob'] = pd.to_numeric(df_all_snapshots['Model_Sharp_Win_Prob'], errors='coerce')
             else:
                 df_all_snapshots['Model Prob'] = pd.to_numeric(df_all_snapshots.get('Model Prob'), errors='coerce')
             
-            # --- sharp books only, safe ---
-            snap = df_all_snapshots.copy()
-            snap["Bookmaker"] = snap.get("Bookmaker", "").astype(str)
-            snap_sharp = snap[snap["Bookmaker"].str.lower().isin(SHARP_BOOKS)].copy()
-            snap_sharp['Snapshot_Timestamp'] = pd.to_datetime(snap_sharp.get('Snapshot_Timestamp'), errors='coerce', utc=True)
+            # Sharp books only
+            snap_sharp = df_all_snapshots[df_all_snapshots['Bookmaker'].str.lower().isin(SHARP_BOOKS)].copy()
+            snap_sharp['Snapshot_Timestamp'] = pd.to_datetime(snap_sharp['Snapshot_Timestamp'], errors='coerce', utc=True)
             
-            # Canonical market helper (use everywhere)
-            def _canonical_market(m: str) -> str:
-                m = str(m).lower().strip()
-                if m in ('spread','spreads','ats'): return 'spreads'
-                if m in ('total','totals','o/u','ou'): return 'totals'
-                if m in ('moneyline','ml','h2h','headtohead'): return 'h2h'
-                return m
-            
-            # Normalize keys used in this section (NO bookmaker in the merge grain)
-            for df_ in (df_summary_base, snap_sharp):
-                for k in ['Game_Key','Market','Outcome']:
-                    if k in df_.columns:
-                        df_[k] = df_[k].astype(str).str.strip().str.lower()
-                if 'Market' in df_.columns:
-                    df_['Market'] = df_['Market'].map(_canonical_market)
-            
-            # --- per-timestamp sharp-book AVERAGE ---
+            # --- Single source of truth: per-timestamp sharp-book AVERAGE ---
             sharp_ts_avg = (
                 snap_sharp
                   .dropna(subset=['Snapshot_Timestamp'])
                   .sort_values('Snapshot_Timestamp')
                   .groupby(['Game_Key','Market','Outcome','Snapshot_Timestamp'], as_index=False)['Model Prob']
-                  .mean()
+                  .mean()  # avg across sharp books at each timestamp
             )
             
             # First sharp prob (from the same averaged series)
@@ -13832,34 +13811,37 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                   .reset_index(name='Prob_Trend_List_Agg')
             )
             
-            # Merge onto summary (grain: Game/Market/Outcome)
+            # Merge onto summary
             df_summary_base = df_summary_base.merge(first_prob_map, on=['Game_Key','Market','Outcome'], how='left')
             df_summary_base = df_summary_base.merge(trend_history_sharp, on=['Game_Key','Market','Outcome'], how='left')
             
-            # --- trend helpers ---
+            # Confidence Trend from the SAME series as the sparkline (first→current)
+            # --- trend text helper (expects a list already)
             def _trend_text_from_list(lst, current):
-                if not isinstance(lst, list) or len(lst) == 0:
+                if not isinstance(lst, list) or len(lst) == 0 or pd.isna(current):
                     return "⚠️ Missing"
-                try:
-                    start = float(lst[0])
-                    cur = float(current) if current is not None and current == current else np.nan
-                except Exception:
+                start = lst[0]
+                if pd.isna(start):
                     return "⚠️ Missing"
-                if not np.isfinite(start) or not np.isfinite(cur):
-                    return "⚠️ Missing"
-                if abs(cur - start) < 1e-12:
-                    return f"↔ Stable: {start:.1%} → {cur:.1%}"
-                arrow = "📈 Trending Up" if cur > start else "📉 Trending Down"
-                return f"{arrow}: {start:.1%} → {cur:.1%}"
+                if current == start:
+                    return f"↔ Stable: {start:.1%} → {current:.1%}"
+                arrow = "📈 Trending Up" if current > start else "📉 Trending Down"
+                return f"{arrow}: {start:.1%} → {current:.1%}"
             
-            hist_col = "Prob_Trend_List_Agg"
-            df_summary_base[hist_col] = df_summary_base.get(hist_col).apply(_normalize_history)
+            # ===== Use ONE dataframe consistently (df_summary_base) =====
+            # Normalize the history column USED BELOW
+            hist_col = "Prob_Trend_List_Agg"   # <- this is the column you actually use for the spark and trend
+            df_summary_base[hist_col] = df_summary_base[hist_col].apply(_normalize_history)
             
-            _prob_now = pd.to_numeric(df_summary_base.get('Model Prob'), errors='coerce')
+            # Current prob (already set earlier)
+            _prob_now = pd.to_numeric(df_summary_base['Model Prob'], errors='coerce')
+            
+            # Confidence Trend (no len() on floats anywhere)
             df_summary_base['Confidence Trend'] = [
                 _trend_text_from_list(lst, cur) for lst, cur in zip(df_summary_base[hist_col], _prob_now)
             ]
             
+            # Confidence Spark using the SAME normalized history + safe sparkline
             MAX_SPARK_POINTS = 36
             df_summary_base['Confidence Spark'] = (
                 df_summary_base[hist_col]
@@ -13867,38 +13849,22 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                   .apply(create_sparkline_html_safe)
             )
             
-            # =========================================================
-            # 7) Select representative row (sharp-first, latest) at outcome-level
-            # =========================================================
-            df_summary_base['Bookmaker'] = df_summary_base.get('Bookmaker', '').astype(str)
-            df_summary_base['Snapshot_Timestamp'] = pd.to_datetime(df_summary_base.get('Snapshot_Timestamp'), errors='coerce', utc=True)
-            
+            # === 7) STEP 4: select representative book row (sharp-first, latest) ===
             df_summary_base['Book_Is_Sharp'] = df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS).astype(int)
             df_summary_base = (
                 df_summary_base
-                  .sort_values(['Book_Is_Sharp','Snapshot_Timestamp'], ascending=[False, False])
-                  .drop_duplicates(subset=['Game_Key','Market','Outcome'], keep='first')  # ✅ NOTE: no Bookmaker here
-                  .drop(columns=['Book_Is_Sharp'])
+                .sort_values(['Book_Is_Sharp','Snapshot_Timestamp'], ascending=[False, False])
+                .drop_duplicates(subset=['Game_Key','Market','Outcome'], keep='first')
+                .drop(columns=['Book_Is_Sharp'])
             )
             
-            # =========================================================
-            # 8) Diagnostics on sharp-book rows, then merge back on (Game,Market,Outcome)
-            # =========================================================
+            # === 8) STEP 5: per-book diagnostics built on latest-per-book sharp rows from df_pre, then attach ===
+            # === 8) STEP 5: per-book diagnostics built on latest-per-book sharp rows from df_pre, then attach ===
             diag_source = (
                 df_pre
                   .sort_values('Snapshot_Timestamp')
                   .drop_duplicates(subset=['Game_Key','Market','Outcome','Bookmaker'], keep='last')
             )
-            
-            diag_source['Bookmaker'] = diag_source.get('Bookmaker', '').astype(str)
-            diag_source['Snapshot_Timestamp'] = pd.to_datetime(diag_source.get('Snapshot_Timestamp'), errors='coerce', utc=True)
-            
-            # normalize keys
-            for k in ['Game_Key','Market','Outcome']:
-                diag_source[k] = diag_source.get(k, "").astype(str).str.strip().str.lower()
-            diag_source['Market'] = diag_source['Market'].map(_canonical_market)
-            
-            # sharp books only
             diag_source = diag_source[diag_source['Bookmaker'].str.lower().isin(SHARP_BOOKS)].copy()
             
             if diag_source.empty:
@@ -13906,38 +13872,62 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 for col in ['Tier Δ','Line/Model Direction','Why Model Likes It','Timing_Opportunity_Score','Timing_Stage']:
                     df_summary_base[col] = "⚠️ Missing"
             else:
-                # ✅ Collapse to ONE sharp representative per outcome (prevents Bookmaker join failure)
-                # prefer higher limits, then latest timestamp
-                diag_source["Limit_num"] = pd.to_numeric(diag_source.get("Limit"), errors="coerce").fillna(0)
-                diag_source_outcome = (
-                    diag_source
-                      .sort_values(["Game_Key","Market","Outcome","Limit_num","Snapshot_Timestamp"])
-                      .drop_duplicates(subset=["Game_Key","Market","Outcome"], keep="last")
-                      .drop(columns=["Limit_num"])
-                      .copy()
-                )
+                # normalize keys before merge
+                for df_ in (df_summary_base, diag_source):
+                    for k in ['Game_Key','Market','Outcome','Bookmaker']:
+                        df_[k] = df_[k].astype(str).str.strip().str.lower()
             
-                # Markets present: prefer trained_models keys else derived
+                # Helper: map Market labels to canonical keys used in trained_models
+                def _canonical_market(m: str) -> str:
+                    m = str(m).lower().strip()
+                    if m in ('spread','spreads','ats'): return 'spreads'
+                    if m in ('total','totals','o/u','ou'): return 'totals'
+                    if m in ('moneyline','ml','h2h','headtohead'): return 'h2h'
+                    return m
+            
+                # Helper: resolve bundle/model for a market key
+                def _resolve_bundle_model_for_market(trained_by_market: dict, mkt_norm: str):
+                    bundle = (trained_by_market or {}).get(mkt_norm)
+                    mdl = None
+                    if isinstance(bundle, dict):
+                        mdl = bundle.get("model_logloss") or bundle.get("model_auc") or bundle.get("model")
+                    return bundle, mdl
+            
+                # Figure out which markets to loop over:
+                # prefer explicit trained_models keys; otherwise derive from diag_source
                 if 'trained_models' in locals() and trained_models:
                     markets_present = list(trained_models.keys())
                 else:
-                    markets_present = diag_source_outcome['Market'].unique().tolist()
+                    markets_present = (
+                        diag_source['Market'].astype(str).str.lower().str.strip().map(_canonical_market).unique().tolist()
+                    )
             
                 diagnostics_chunks = []
                 for market in markets_present:
                     market_norm = _canonical_market(market)
-            
-                    # Resolve model/bundle for this market
-                    bundle = (trained_models or {}).get(market_norm) if ('trained_models' in locals()) else None
-                    model = None
-                    if isinstance(bundle, dict):
-                        model = bundle.get("model_logloss") or bundle.get("model_auc") or bundle.get("model")
-            
-                    diag_rows = diag_source_outcome[diag_source_outcome['Market'] == market_norm].copy()
+                    bundle, model = _resolve_bundle_model_for_market(trained_models if 'trained_models' in locals() else {}, market_norm)
+                    
+                    # rows for this market
+                    diag_rows = diag_source[diag_source['Market'].astype(str).str.lower().str.strip().map(_canonical_market) == market_norm]
                     if diag_rows.empty:
                         continue
-            
-                    # ✅ Compute diagnostics; this should attach PR/edges inside, as long as bq is passed
+           
+                    ratings_current_df = enrich_power_for_training_lowmem(
+                        df=diag_rows[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
+                        bq=bq_client,
+                        sport_aliases=sport_aliases,
+                        table_history="sharplogger.sharp_data.ratings_current",
+                        pad_days=365,
+                        rating_lag_hours=10_000.0,  # forces always fallback to base (not useful)
+                    )
+                    diag_rows = diag_rows.merge(
+                        ratings_current_df[['Sport','Home_Team_Norm','Away_Team_Norm',
+                                    'Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff']],
+                        on=['Sport','Home_Team_Norm','Away_Team_Norm'],
+                        how='left'
+                    )
+                    
+                    # compute diagnostics for this market with its matching model
                     chunk = compute_diagnostics_vectorized(
                         diag_rows,
                         bundle=bundle,
@@ -13952,42 +13942,38 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                     )
                     diagnostics_chunks.append(chunk)
                 diagnostics_chunks = [c.loc[:, ~pd.Index(c.columns).duplicated()] for c in diagnostics_chunks]
-            
-                diagnostics_chunks = [c.loc[:, ~pd.Index(c.columns).duplicated()] for c in diagnostics_chunks]
+    
                 diagnostics_df = (
                     pd.concat(diagnostics_chunks, ignore_index=True)
                     if diagnostics_chunks else pd.DataFrame(columns=[
-                        'Game_Key','Market','Outcome','Tier Δ',
+                        'Game_Key','Market','Outcome','Bookmaker','Tier Δ',
                         'Line/Model Direction','Why Model Likes It',
                         'Timing_Opportunity_Score','Timing_Stage'
                     ])
                 )
-            
-                # ✅ Keep only the columns we need; merge back on outcome grain
-                keep = [c for c in [
-                    'Game_Key','Market','Outcome',
+
+
+                rep = df_summary_base[['Game_Key','Market','Outcome','Bookmaker']].drop_duplicates()
+                diagnostics_pick = diagnostics_df.merge(
+                    rep, on=['Game_Key','Market','Outcome','Bookmaker'], how='inner'
+                )[[
+                    'Game_Key','Market','Outcome','Bookmaker',
                     'Tier Δ','Line/Model Direction','Why Model Likes It',
-                    'Timing_Opportunity_Score','Timing_Stage'
-                ] if c in diagnostics_df.columns]
-            
-                diagnostics_pick = diagnostics_df[keep].copy()
+                    'Timing_Opportunity_Score','Timing_Stage',  # <-- add these
+                ]]
             
                 df_summary_base = df_summary_base.merge(
                     diagnostics_pick,
-                    on=['Game_Key','Market','Outcome'],
-                    how='left',
-                    validate='m:1'
+                    on=['Game_Key','Market','Outcome','Bookmaker'],
+                    how='left'
                 )
-            
-                for col in ['Tier Δ','Line/Model Direction','Why Model Likes It','Timing_Opportunity_Score','Timing_Stage']:
-                    if col not in df_summary_base.columns:
-                        df_summary_base[col] = "⚠️ Missing"
+                for col in ['Tier Δ','Line/Model Direction','Why Model Likes It']:
                     df_summary_base[col] = df_summary_base[col].fillna("⚠️ Missing")
             
-            # =========================================================
-            # 9) (Optional) merge team features AFTER the dedupe (unchanged)
-            # =========================================================
+            # === 9) (Optional) merge team features and small-book liquidity AFTER the dedupe ===
+            # === 9) (Optional) merge team features AFTER the dedupe ===
             if team_feature_map is not None and not team_feature_map.empty:
+                # normalize keys
                 df_summary_base["Sport"]  = df_summary_base["Sport"].astype(str).str.upper().str.strip()
                 df_summary_base["Market"] = df_summary_base["Market"].astype(str).str.lower().str.strip()
                 df_summary_base["Team"]   = df_summary_base["Outcome"].astype(str).str.lower().str.strip()
@@ -13997,14 +13983,15 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 team_feature_map["Market"] = team_feature_map["Market"].astype(str).str.lower().str.strip()
                 team_feature_map["Team"]   = team_feature_map["Team"].astype(str).str.lower().str.strip()
             
+                # merge at the intended grain
                 df_summary_base = df_summary_base.merge(
                     team_feature_map,
                     on=["Sport", "Market", "Team"],
                     how="left",
                     validate="many_to_one",
                 )
+
             
-            # Small-book liquidity (unchanged)
             df_pre = compute_small_book_liquidity_features(df_pre)
             sb_cols = [
                 'Game_Key','Market','Outcome',
@@ -14013,13 +14000,13 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             ]
             sb_skinny = (
                 df_pre[sb_cols]
-                  .drop_duplicates(subset=['Game_Key','Market','Outcome'], keep='last')
+                .drop_duplicates(subset=['Game_Key','Market','Outcome'], keep='last')
             )
             df_summary_base = df_summary_base.merge(sb_skinny, on=['Game_Key','Market','Outcome'], how='left')
+            #st.write( df_summary_base.columns.tolist())
+            # ✅ Always guarantee timing columns exist on df_summary_base (UI-only)
             
-            # =========================================================
-            # 10) Build summary_df with selected columns (unchanged)
-            # =========================================================
+            # === 10) Build summary_df with selected columns ===
             summary_cols = [
                 'Matchup','Market','Game_Start','Outcome',
                 'Rec Line','Sharp Line','Rec Move','Sharp Move',
@@ -14029,14 +14016,21 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             ]
             summary_df = df_summary_base[[c for c in summary_cols if c in df_summary_base.columns]].copy()
             
+            # time/formatting
             summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
             summary_df = summary_df[summary_df['Game_Start'].notna()]
             summary_df['Date + Time (EST)'] = summary_df['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
             summary_df['Event_Date_Only'] = summary_df['Game_Start'].dt.date.astype(str)
             
+            # cleanup
             summary_df.columns = summary_df.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
             summary_df = summary_df.loc[:, ~summary_df.columns.duplicated()]
-
+    
+            
+            # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome
+            # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome
+            # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome
+            
             
             # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome
             # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome
