@@ -3240,12 +3240,12 @@ def select_features_auto(
     max_feats_small=80,
     sport_key: str = "NFL",
     must_keep: list[str] = None,
-    topk_per_fold=75,
+    topk_per_fold=40,
     min_presence=0.6,
 
     # AUC-driven controls (now used by greedy acceptance)
     use_auc_auto: bool = True,
-    auc_min_k: int = 40,          # seed size
+    auc_min_k: int = 80,          # seed size
     auc_patience: int = 40,       # stop after N rejects
     auc_min_improve: float = 1e-4,# required gain to accept
     auc_verbose: bool = True,
