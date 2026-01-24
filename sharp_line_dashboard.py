@@ -3056,7 +3056,7 @@ def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
     min_k=80,
     max_k=None,
-    patience=60,
+    patience=30,
     min_improve=1e-4,
     verbose=True,
     log_func=print,
@@ -3197,11 +3197,11 @@ def select_features_auto(
     max_feats_small=80,
     sport_key: str = "NFL",
     must_keep: list[str] = None,
-    topk_per_fold=90,
+    topk_per_fold=60,
     min_presence=0.6,
     # AUC-driven auto-K controls
     use_auc_auto: bool = True,
-    auc_min_k: int = 50,
+    auc_min_k: int = 30,
     auc_patience: int = 30,
     auc_min_improve: float = 1e-4,
     auc_verbose: bool = True,
@@ -3342,7 +3342,7 @@ def select_features_auto(
             log_func=log_func,
             debug=True,
             debug_every=15,
-            force_full_scan=True,          # ✅ always go to max_k
+            force_full_scan=False,          # ✅ always go to max_k
         )
 
         final_feats = keep_order[:best_k]
