@@ -3058,7 +3058,7 @@ def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
     min_k=1,                      # ✅ now means "seed size"
     max_k=None,                   # ✅ max accepted features
-    patience=20,                  # ✅ stop after N rejects in a row
+    patience=50,                  # ✅ stop after N rejects in a row
     min_improve=1e-4,             # ✅ required AUC gain to accept
     verbose=True,
     log_func=print,
@@ -3240,13 +3240,13 @@ def select_features_auto(
     max_feats_small=80,
     sport_key: str = "NFL",
     must_keep: list[str] = None,
-    topk_per_fold=60,
+    topk_per_fold=75,
     min_presence=0.6,
 
     # AUC-driven controls (now used by greedy acceptance)
     use_auc_auto: bool = True,
-    auc_min_k: int = 15,          # seed size
-    auc_patience: int = 15,       # stop after N rejects
+    auc_min_k: int = 40,          # seed size
+    auc_patience: int = 40,       # stop after N rejects
     auc_min_improve: float = 1e-4,# required gain to accept
     auc_verbose: bool = True,
 
