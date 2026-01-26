@@ -465,15 +465,43 @@ def update_power_ratings(
         ),
 
         "NBA": dict(
-            model="elo_kalman_offdef",
-            HFA_pts=2.8, mov_cap=24, phi=0.97,
-            sigma_eta=7.5, sigma_pts=12.0, sigma_spread=10.0,
-            market_lambda=0.35, favored_only_market=False,
-            sos_half_life_days=60, sos_gamma=0.0,
-            season_gap_days=120, season_rho=0.82,
-            blowout_mov=22, blowout_var_mult=1.75,
-            b2b_sigma_pts_mult=1.20,
+            model="nba_bpi_kalman_ppp",
+        
+            # --- possessions estimation ---
+            nba_total_ppp=2.26,          # NBA total points per possession (both teams combined)
+            poss_floor=90.0,
+            poss_ceil=108.0,
+        
+            # --- Kalman in PPP space ---
+            phi=0.990,                   # recency/forgetting
+            sigma_eta=0.012,             # state drift noise (PPP)
+            sigma_ppp=0.070,             # obs noise (PPP)
+        
+            # Home-court advantage as points per 100 possessions, convert internally to PPP
+            hfa_em100=2.6,               # ~2–3 pts/100
+        
+            # blowout downweight (in EM100 space)
+            em100_blowout=18.0,
+            blowout_var_mult=1.6,
+            smooth_em100_start=12.0,
+            smooth_em100_slope=0.03,
+        
+            # early shrink to avoid early-season craziness
+            shrink_prior_games=18.0,
+        
+            # tempo tracking
+            tempo_alpha=0.08,
+        
+            # --- BPI-ish predictive anchoring to sharp close spread ---
+            market_lambda=0.18,          # 0.12–0.22 is a good band
+            market_min_games=10,
+            sigma_spread=9.5,            # spread-close observation noise scale in points
+        
+            # optional small SoS (usually small for NBA)
+            sos_gamma=0.05,
+            sos_min_games=12,
         ),
+
 
         "WNBA": dict(
             model="elo_kalman_offdef",
@@ -1626,7 +1654,437 @@ def update_power_ratings(
     
         return current_rows
 
+    def run_nba_bpi_kalman_ppp(
+        *,
+        sport: str,
+        aliases: list[str],
+        cfg: dict,
+        window_start,
+    ):
+        """
+        NBA BPI-style engine:
+          - Off/Def Kalman in PPP space (tempo-free efficiency)
+          - Tempo (possessions) tracked as EWMA
+          - Anchors team strength to SHARP Spread_Close (predictive behavior)
+          - Uses Total_Close proxy (or score fallback) only to estimate possessions
+    
+        Outputs methods:
+          nba_bpi_adj_o   (pts/100 poss)
+          nba_bpi_adj_d   (pts allowed/100 poss)
+          nba_bpi_adj_em  (net pts/100 poss)
+          nba_bpi_adj_t   (possessions/game)
+        """
+        if project_table_market is None:
+            raise ValueError("nba_bpi_kalman_ppp requires project_table_market but project_table_market is None.")
+    
+        # --- knobs ---
+        total_ppp  = float(cfg.get("nba_total_ppp", 2.26))
+        poss_floor = float(cfg.get("poss_floor", 90.0))
+        poss_ceil  = float(cfg.get("poss_ceil", 108.0))
+    
+        phi       = float(cfg.get("phi", 0.990))
+        sigma_eta = float(cfg.get("sigma_eta", 0.012))
+        sigma_ppp = float(cfg.get("sigma_ppp", 0.070))
+    
+        hfa_em100 = float(cfg.get("hfa_em100", 2.6))
+        hfa_ppp   = hfa_em100 / 100.0
+    
+        em100_blowout    = float(cfg.get("em100_blowout", 18.0))
+        blowout_var_mult = float(cfg.get("blowout_var_mult", 1.6))
+        smooth_start     = float(cfg.get("smooth_em100_start", 12.0))
+        smooth_slope     = float(cfg.get("smooth_em100_slope", 0.03))
+    
+        shrink_prior_games = float(cfg.get("shrink_prior_games", 18.0))
+        tempo_alpha        = float(cfg.get("tempo_alpha", 0.08))
+    
+        market_lambda    = float(cfg.get("market_lambda", 0.18))
+        market_min_games = int(cfg.get("market_min_games", 10))
+        sigma_spread     = float(cfg.get("sigma_spread", 9.5))   # points
+    
+        sos_gamma     = float(cfg.get("sos_gamma", 0.0))
+        sos_min_games = int(cfg.get("sos_min_games", 12))
+    
+        sharp_books = [b.lower() for b in SHARP_BOOKS_DEFAULT]
+    
+        # --- cutoff ---
+        cutoff_param = None
+        if window_start is not None and not pd.isna(window_start):
+            w = to_utc_ts(window_start)
+            if not pd.isna(w):
+                cutoff_param = w.to_pydatetime()
+    
+        # --- query: scores + sharp spread close + sharp total close ---
+        sql = f"""
+        WITH scores AS (
+          SELECT
+            LOWER(TRIM(Home_Team)) AS home,
+            LOWER(TRIM(Away_Team)) AS away,
+            SAFE_CAST(Score_Home_Score AS FLOAT64) AS hs,
+            SAFE_CAST(Score_Away_Score AS FLOAT64) AS as_,
+            TIMESTAMP(Game_Start) AS gs
+          FROM `{project_table_scores}`
+          WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@aliases)
+            AND Score_Home_Score IS NOT NULL
+            AND Score_Away_Score IS NOT NULL
+            {"" if cutoff_param is None else "AND TIMESTAMP(Game_Start) >= @cutoff"}
+          QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY LOWER(TRIM(Home_Team)), LOWER(TRIM(Away_Team)), TIMESTAMP(Game_Start)
+            ORDER BY TIMESTAMP(Inserted_Timestamp) DESC
+          ) = 1
+        ),
+    
+        latest_spread_per_book AS (
+          SELECT
+            LOWER(TRIM(m.Home_Team_Norm)) AS home,
+            LOWER(TRIM(m.Away_Team_Norm)) AS away,
+            TIMESTAMP(m.Game_Start)       AS gs,
+            REGEXP_REPLACE(
+              LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
+              r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex'
+            ) AS bookkey,
+            SAFE_CAST(
+              CASE
+                WHEN LOWER(TRIM(m.Team_For_Join)) = LOWER(TRIM(m.Home_Team_Norm))
+                  THEN m.Value
+                ELSE
+                  -m.Value
+              END AS FLOAT64
+            ) AS spread_home
+          FROM `{project_table_market}` m
+          WHERE UPPER(CAST(m.Sport AS STRING)) IN UNNEST(@aliases)
+            AND LOWER(m.Market) IN ('spreads','spread')
+            AND m.Value IS NOT NULL
+            AND TIMESTAMP(m.Game_Start) IS NOT NULL
+          QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY
+              LOWER(TRIM(m.Home_Team_Norm)),
+              LOWER(TRIM(m.Away_Team_Norm)),
+              TIMESTAMP(m.Game_Start),
+              REGEXP_REPLACE(
+                LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
+                r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex'
+              )
+            ORDER BY TIMESTAMP(m.Snapshot_Timestamp) DESC
+          ) = 1
+        ),
+        spread_close AS (
+          SELECT home, away, gs,
+                 APPROX_QUANTILES(spread_home, 2)[OFFSET(1)] AS spread_close_home
+          FROM latest_spread_per_book
+          WHERE bookkey IN UNNEST(@sharp_books)
+          GROUP BY home, away, gs
+        ),
+    
+        latest_total_per_book AS (
+          SELECT
+            LOWER(TRIM(m.Home_Team_Norm)) AS home,
+            LOWER(TRIM(m.Away_Team_Norm)) AS away,
+            TIMESTAMP(m.Game_Start)       AS gs,
+            REGEXP_REPLACE(
+              LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
+              r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex'
+            ) AS bookkey,
+            SAFE_CAST(m.Value AS FLOAT64) AS total_val
+          FROM `{project_table_market}` m
+          WHERE UPPER(CAST(m.Sport AS STRING)) IN UNNEST(@aliases)
+            AND LOWER(m.Market) IN ('totals','total')
+            AND m.Value IS NOT NULL
+            AND TIMESTAMP(m.Game_Start) IS NOT NULL
+          QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY
+              LOWER(TRIM(m.Home_Team_Norm)),
+              LOWER(TRIM(m.Away_Team_Norm)),
+              TIMESTAMP(m.Game_Start),
+              REGEXP_REPLACE(
+                LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
+                r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex'
+              )
+            ORDER BY TIMESTAMP(m.Snapshot_Timestamp) DESC
+          ) = 1
+        ),
+        total_close AS (
+          SELECT home, away, gs,
+                 APPROX_QUANTILES(total_val, 2)[OFFSET(1)] AS total_close
+          FROM latest_total_per_book
+          WHERE bookkey IN UNNEST(@sharp_books)
+          GROUP BY home, away, gs
+        )
+    
+        SELECT s.home, s.away, s.hs, s.as_, s.gs,
+               sc.spread_close_home,
+               tc.total_close
+        FROM scores s
+        LEFT JOIN spread_close sc
+          ON sc.home = s.home AND sc.away = s.away AND sc.gs = s.gs
+        LEFT JOIN total_close tc
+          ON tc.home = s.home AND tc.away = s.away AND tc.gs = s.gs
+        ORDER BY s.gs
+        """
+    
+        params = [
+            bigquery.ArrayQueryParameter("aliases", "STRING", aliases),
+            bigquery.ArrayQueryParameter("sharp_books", "STRING", sharp_books),
+        ]
+        if cutoff_param is not None:
+            params.append(bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", cutoff_param))
+    
+        df = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
+        if df.empty:
+            return []
+    
+        df["gs"] = pd.to_datetime(df["gs"], utc=True, errors="coerce")
+        df = df.dropna(subset=["gs", "home", "away", "hs", "as_"]).sort_values("gs", kind="mergesort")
+        if df.empty:
+            return []
+    
+        # --- state in PPP ---
+        off_m: dict[str, float] = {}
+        def_m: dict[str, float] = {}
+        off_v: dict[str, float] = {}
+        def_v: dict[str, float] = {}
+        tempo: dict[str, float] = {}
+        games_played: dict[str, int] = {}
+    
+        sos_num: dict[str, float] = {}
+        sos_den: dict[str, float] = {}
+    
+        def _om(t): return float(off_m.get(t, 0.0))
+        def _dm(t): return float(def_m.get(t, 0.0))
+        def _ov(t): return float(off_v.get(t, 0.15))
+        def _dv(t): return float(def_v.get(t, 0.15))
+        def _tempo(t): return float(tempo.get(t, 100.0))
+    
+        def _safe(x, default=np.nan):
+            try:
+                x = float(x)
+                return x if np.isfinite(x) else float(default)
+            except Exception:
+                return float(default)
+    
+        def _estimate_possessions(total_close, hs, as_):
+            tc = _safe(total_close, default=np.nan)
+            if np.isfinite(tc) and tc > 150:
+                poss = tc / max(total_ppp, 1e-6)
+            else:
+                poss = (hs + as_) / max(total_ppp, 1e-6)
+            return float(min(max(poss, poss_floor), poss_ceil))
+    
+        # seed from prior nba_bpi_adj_em if available
+        seed_em = load_seed_ratings(sport, window_start, method="nba_bpi_adj_em")
+        for team, em100 in seed_em.items():
+            try:
+                em100 = float(em100)
+                net_ppp = em100 / 100.0
+                off_m[str(team)] = +0.5 * net_ppp
+                def_m[str(team)] = -0.5 * net_ppp
+                off_v[str(team)] = 0.12
+                def_v[str(team)] = 0.12
+                tempo[str(team)] = 100.0
+            except Exception:
+                pass
+    
+        mu_ppp = None
+        mu_alpha = 0.02
+    
+        def _update_team_tempo(t: str, poss: float):
+            prev = _tempo(t)
+            tempo[t] = float((1.0 - tempo_alpha) * prev + tempo_alpha * poss)
+    
+        def _obs_var_from_em100(em100_abs: float) -> float:
+            var = sigma_ppp ** 2
+            if em100_abs >= em100_blowout:
+                var *= blowout_var_mult
+            if em100_abs > smooth_start:
+                var *= (1.0 + smooth_slope * (em100_abs - smooth_start))
+            return float(var)
+    
+        def _kalman_update_ppp(team_off: str, team_def: str, ppp_obs: float, hfa: float, obs_var: float):
+            m1, v1 = _om(team_off), _ov(team_off)
+            m2, v2 = _dm(team_def), _dv(team_def)
+    
+            y_hat = float(mu_ppp) + float(m1) + float(m2) + float(hfa)
+            e = float(ppp_obs) - float(y_hat)
+    
+            S = float(v1) + float(v2) + float(obs_var)
+            if S <= 1e-9:
+                S = 1e-9
+    
+            k1 = float(v1) / S
+            k2 = float(v2) / S
+    
+            off_m[team_off] = float(m1) + k1 * e
+            def_m[team_def] = float(m2) + k2 * e
+    
+            off_v[team_off] = max(1e-6, (1.0 - k1) * float(v1))
+            def_v[team_def] = max(1e-6, (1.0 - k2) * float(v2))
+    
+        def _net_ppp(t):  # net in PPP units
+            return _om(t) - _dm(t)
+    
+        def _apply_net_ppp_shift(team: str, delta_net_ppp: float):
+            off_m[team] = _om(team) + 0.5 * delta_net_ppp
+            def_m[team] = _dm(team) - 0.5 * delta_net_ppp
+    
+        def _adj_o100(t): return 100.0 * (float(mu_ppp) + _om(t))
+        def _adj_d100(t): return 100.0 * (float(mu_ppp) + _dm(t))
+        def _adj_em100(t): return _adj_o100(t) - _adj_d100(t)
+    
+        def _sos_em_adj(t: str) -> float:
+            if sos_gamma <= 0 or games_played.get(t, 0) < sos_min_games:
+                return 0.0
+            num = float(sos_num.get(t, 0.0))
+            den = max(float(sos_den.get(t, 0.0)), 1e-9)
+            opp_em = num / den
+            return float(sos_gamma * (0.0 - opp_em))
+    
+        # history batching
+        BATCH_SZ = 50_000
+        history_batch: list[dict] = []
+        last_game_ts = None
+    
+        for row in df.itertuples(index=False):
+            h = str(row.home)
+            a = str(row.away)
+            ts = row.gs
+            hs = float(row.hs)
+            as_ = float(row.as_)
+    
+            poss = _estimate_possessions(getattr(row, "total_close", None), hs, as_)
+            home_ppp = hs / max(poss, 1e-6)
+            away_ppp = as_ / max(poss, 1e-6)
+    
+            team_ppp = 0.5 * (home_ppp + away_ppp)
+            mu_ppp = team_ppp if mu_ppp is None else (1.0 - mu_alpha) * mu_ppp + mu_alpha * team_ppp
+    
+            _update_team_tempo(h, poss)
+            _update_team_tempo(a, poss)
+    
+            games_played[h] = games_played.get(h, 0) + 1
+            games_played[a] = games_played.get(a, 0) + 1
+    
+            if last_game_ts is not None and ts < last_game_ts:
+                continue
+            last_game_ts = ts
+    
+            # --- pregame outputs saved to history (BPI-like reporting) ---
+            h_o  = float(_adj_o100(h))
+            h_d  = float(_adj_d100(h))
+            h_em = float(_adj_em100(h) + _sos_em_adj(h))
+    
+            a_o  = float(_adj_o100(a))
+            a_d  = float(_adj_d100(a))
+            a_em = float(_adj_em100(a) + _sos_em_adj(a))
+    
+            history_batch.extend([
+                {"Sport": sport, "Team": h, "Rating": h_o,  "Method": "nba_bpi_adj_o",  "Updated_At": ts, "Source": "per_game_pregame"},
+                {"Sport": sport, "Team": h, "Rating": h_d,  "Method": "nba_bpi_adj_d",  "Updated_At": ts, "Source": "per_game_pregame"},
+                {"Sport": sport, "Team": h, "Rating": h_em, "Method": "nba_bpi_adj_em", "Updated_At": ts, "Source": "per_game_pregame"},
+                {"Sport": sport, "Team": h, "Rating": float(_tempo(h)), "Method": "nba_bpi_adj_t", "Updated_At": ts, "Source": "per_game_pregame"},
+    
+                {"Sport": sport, "Team": a, "Rating": a_o,  "Method": "nba_bpi_adj_o",  "Updated_At": ts, "Source": "per_game_pregame"},
+                {"Sport": sport, "Team": a, "Rating": a_d,  "Method": "nba_bpi_adj_d",  "Updated_At": ts, "Source": "per_game_pregame"},
+                {"Sport": sport, "Team": a, "Rating": a_em, "Method": "nba_bpi_adj_em", "Updated_At": ts, "Source": "per_game_pregame"},
+                {"Sport": sport, "Team": a, "Rating": float(_tempo(a)), "Method": "nba_bpi_adj_t", "Updated_At": ts, "Source": "per_game_pregame"},
+            ])
+    
+            if len(history_batch) >= BATCH_SZ:
+                upsert_history_rows(pd.DataFrame(history_batch))
+                history_batch.clear()
+    
+            # --- postgame kalman updates in PPP ---
+            em100_obs = ((hs - as_) / max(poss, 1e-6)) * 100.0
+            obs_var = _obs_var_from_em100(abs(em100_obs))
+    
+            _kalman_update_ppp(h, a, home_ppp, +hfa_ppp, obs_var)
+            _kalman_update_ppp(a, h, away_ppp, -hfa_ppp, obs_var)
+    
+            # --- BPI-ish market anchor to sharp spread close (predictive) ---
+            sc = _safe(getattr(row, "spread_close_home", None), default=np.nan)
+            if np.isfinite(sc) and market_lambda > 0:
+                if (games_played.get(h, 0) >= market_min_games) and (games_played.get(a, 0) >= market_min_games):
+                    # market margin (home perspective)
+                    mkt_margin_pts = -float(sc)
+    
+                    # model margin from EM diff + HFA, at expected pace
+                    exp_poss = float(0.5 * (_tempo(h) + _tempo(a)))
+                    exp_poss = float(min(max(exp_poss, poss_floor), poss_ceil))
+    
+                    emdiff100 = float((_adj_em100(h) - _adj_em100(a)))  # net per 100
+                    model_margin_pts = (emdiff100 / 100.0) * exp_poss + (hfa_em100 / 100.0) * exp_poss
+    
+                    err_pts = mkt_margin_pts - model_margin_pts
+                    # convert points error back into EM100 units
+                    delta_em100 = (err_pts * 100.0) / max(exp_poss, 1e-6)
+                    delta_net_ppp = delta_em100 / 100.0
+    
+                    lam = max(1e-3, min(1.0, float(market_lambda)))
+                    # translate spread noise in points to EM100 noise, then to PPP noise
+                    obs_var_em100 = (sigma_spread / lam) ** 2 * (100.0 / max(exp_poss, 1e-6)) ** 2
+                    obs_var_ppp = max(1e-6, obs_var_em100 / (100.0**2))
+    
+                    v_h = _ov(h) + _dv(h)
+                    v_a = _ov(a) + _dv(a)
+                    S = v_h + v_a + obs_var_ppp
+                    if S <= 1e-9:
+                        S = 1e-9
+    
+                    kh = v_h / S
+                    ka = v_a / S
+    
+                    _apply_net_ppp_shift(h,  kh * delta_net_ppp)
+                    _apply_net_ppp_shift(a, -ka * delta_net_ppp)
+    
+            # SoS tracker (optional)
+            if sos_gamma > 0:
+                sos_num[h] = float(sos_num.get(h, 0.0)) + float(_adj_em100(a))
+                sos_den[h] = float(sos_den.get(h, 0.0)) + 1.0
+                sos_num[a] = float(sos_num.get(a, 0.0)) + float(_adj_em100(h))
+                sos_den[a] = float(sos_den.get(a, 0.0)) + 1.0
+    
+            # drift
+            for t in (h, a):
+                off_m[t] = phi * _om(t)
+                def_m[t] = phi * _dm(t)
+                off_v[t] = (phi**2) * _ov(t) + sigma_eta**2
+                def_v[t] = (phi**2) * _dv(t) + sigma_eta**2
+    
+        if history_batch:
+            upsert_history_rows(pd.DataFrame(history_batch))
+            history_batch.clear()
+    
+        # --- finalize current ---
+        current_ts = last_game_ts if last_game_ts is not None else pd.Timestamp.now(tz="UTC")
+        teams = sorted(set(list(off_m.keys()) + list(def_m.keys()) + list(tempo.keys())))
+        if not teams or mu_ppp is None:
+            return []
+    
+        gp = np.array([games_played.get(t, 0) for t in teams], dtype=float)
+        shrink = gp / (gp + float(shrink_prior_games))
+    
+        current_rows = []
+        for i, t in enumerate(teams):
+            o = float(_adj_o100(t))
+            d = float(_adj_d100(t))
+            em = float(o - d)
+    
+            # shrink in EM space, then reconstruct O/D around mid
+            mid = 0.5 * (o + d)
+            em2 = float(em) * float(shrink[i])
+    
+            o2 = mid + 0.5 * em2
+            d2 = mid - 0.5 * em2
+            em2 = o2 - d2
+    
+            current_rows.extend([
+                {"Sport": sport, "Team": t, "Rating": float(o2),  "Method": "nba_bpi_adj_o",  "Updated_At": current_ts},
+                {"Sport": sport, "Team": t, "Rating": float(d2),  "Method": "nba_bpi_adj_d",  "Updated_At": current_ts},
+                {"Sport": sport, "Team": t, "Rating": float(em2), "Method": "nba_bpi_adj_em", "Updated_At": current_ts},
+                {"Sport": sport, "Team": t, "Rating": float(_tempo(t)), "Method": "nba_bpi_adj_t", "Updated_At": current_ts},
+            ])
+    
+        return current_rows
 
+    
     # ---------------- MAIN ----------------
     sports_available = fetch_sports_present()
     sports = [s for s in sports_available if s.upper() in SPORT_CFG]
@@ -1748,7 +2206,12 @@ def update_power_ratings(
             if cur_rows:
                 current_rows_all.extend(cur_rows)
                 updated_sports.append(sport)
-        
+                
+        elif cfg["model"] == "nba_bpi_kalman_ppp":
+            cur_rows = run_nba_bpi_kalman_ppp(sport=sport, aliases=aliases, cfg=cfg, window_start=window_start)
+            if cur_rows:
+                current_rows_all.extend(cur_rows)
+                updated_sports.append(sport)  
 
     upsert_current(current_rows_all)
     fill_missing_current_from_history(None)
