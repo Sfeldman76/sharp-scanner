@@ -407,12 +407,12 @@ SPORT_ALIASES = {
 }
 
 PREFERRED_METHOD = {
-    "MLB":   "poisson",
-    "NFL":   "elo_kalman",
+    "MLB": "poisson",
+    "NFL": "elo_kalman",
     "NCAAF": "elo_kalman",
-    "NBA":   "elo_kalman",
-    "WNBA":  "elo_kalman",
-    "CFL":   "elo_kalman",
+    "NBA": "nba_bpi_adj_em",      # ✅
+    "WNBA": "elo_kalman",
+    "CFL": "elo_kalman",
     "NCAAB": "kp_adj_em",
 }
 
@@ -4369,16 +4369,15 @@ def fetch_latest_current_ratings_cached(
     return df[["Team_Norm", "Power_Rating"]]
 
 SPORT_SPREAD_CFG = {
-    "NFL":   dict(scale=np.float32(1.0),  HFA=np.float32(2.1),  sigma_pts=np.float32(13.0)),
-    "NCAAF": dict(scale=np.float32(1.0),  HFA=np.float32(2.6),  sigma_pts=np.float32(14.0)),
-    "NBA":   dict(scale=np.float32(1.0),  HFA=np.float32(2.8),  sigma_pts=np.float32(12.0)),
-    "WNBA":  dict(scale=np.float32(1.0),  HFA=np.float32(2.0),  sigma_pts=np.float32(11.5)),
+    "NFL":   dict(scale=np.float32(1.0),  HFA=np.float32(2.1),  sigma_pts=np.float32(13.2)),
+    "NCAAF": dict(scale=np.float32(1.0),  HFA=np.float32(2.6),  sigma_pts=np.float32(16.0)),
+    "NBA":   dict(scale=np.float32(1.0),  HFA=np.float32(2.8),  sigma_pts=np.float32(11.5)),
+    "WNBA":  dict(scale=np.float32(1.0),  HFA=np.float32(2.0),  sigma_pts=np.float32(10.5)),
     "CFL":   dict(scale=np.float32(1.0),  HFA=np.float32(1.6),  sigma_pts=np.float32(13.5)),
-    # MLB ratings are 1500 + 400*(atk+dfn) → not run units; scale≈89–90 maps diff → runs
+    # MLB ratings are not in run units (1500 + 400*(atk+dfn)), so scale ≈ 89–90.
     "MLB":   dict(scale=np.float32(89.0), HFA=np.float32(0.20), sigma_pts=np.float32(3.1)),
-    "NCAAB":   dict(scale=np.float32(1.0),  HFA=np.float32(2.8),  sigma_pts=np.float32(12.0)),
+    "NCAAB": dict(scale=np.float32(1.0),  HFA=np.float32(3.2),  sigma_pts=np.float32(11.0)),
 }
-
 
 
 # ---- math utils (Normal CDF; no scipy) ----
@@ -4410,26 +4409,84 @@ def _get_cfg_vec(sport_series: pd.Series):
 def favorite_centric_from_powerdiff_lowmem(g_full: pd.DataFrame) -> pd.DataFrame:
     out = g_full.copy()
     out["Sport"] = out["Sport"].astype(str).str.upper().str.strip()
-    for c in ["Home_Team_Norm","Away_Team_Norm"]:
+    for c in ["Home_Team_Norm", "Away_Team_Norm"]:
         out[c] = out[c].astype(str).str.lower().str.strip()
 
     pr_diff = pd.to_numeric(out.get("Power_Rating_Diff"), errors="coerce").fillna(0).astype("float32")
 
-    # ⬇⬇ changed: pull `scale` (not ppe), and compute mu = pr_diff/scale + HFA
     scale, hfa, sig = _get_cfg_vec(out["Sport"])
-    mu = (pr_diff / scale) + hfa
+
+    # Default behavior (Elo-ish): rating units -> points
+    mu = (pr_diff / np.where(scale == 0, 1.0, scale)) + hfa
     mu = mu.astype("float32")
 
-    out["Model_Expected_Margin"] = mu
-    out["Model_Expected_Margin_Abs"] = np.abs(mu, dtype=np.float32)
-    out["Sigma_Pts"] = sig
+    sp = out["Sport"].to_numpy(dtype=str)
+
+    # ----------------------------
+    # NCAAB: kp_adj_em is per 100 poss -> points using possessions proxy
+    # ----------------------------
+    is_ncaab = (sp == "NCAAB")
+    if is_ncaab.any():
+        NCAAB_TOTAL_PPP = np.float32(2.06)
+        poss_default = np.float32(68.0)
+
+        poss = np.full(len(out), poss_default, dtype=np.float32)
+
+        for total_col in ("Total_Close", "Market_Total", "Total", "Closing_Total", "Total_Points"):
+            if total_col in out.columns:
+                tot = pd.to_numeric(out[total_col], errors="coerce").astype("float32").to_numpy()
+                poss_est = tot / NCAAB_TOTAL_PPP
+                poss_est = np.clip(poss_est, 55.0, 80.0).astype("float32")
+                poss = np.where(np.isfinite(poss_est), poss_est, poss).astype("float32")
+                break
+
+        mu_ncaab = (pr_diff.to_numpy() / 100.0) * poss + hfa
+        mu = np.where(is_ncaab, mu_ncaab.astype("float32"), mu)
+
+    # ----------------------------
+    # NBA: nba_bpi_adj_em is per 100 poss -> points using BPI tempo if present
+    # ----------------------------
+    is_nba = (sp == "NBA")
+    if is_nba.any():
+        NBA_TOTAL_PPP = np.float32(2.26)
+        poss_default = np.float32(100.0)
+
+        poss = np.full(len(out), poss_default, dtype=np.float32)
+
+        # best: tempo columns produced by your enrichment (nba_bpi_adj_t)
+        if "Home_BPI_Tempo" in out.columns and "Away_BPI_Tempo" in out.columns:
+            ht = pd.to_numeric(out["Home_BPI_Tempo"], errors="coerce").astype("float32").to_numpy()
+            at = pd.to_numeric(out["Away_BPI_Tempo"], errors="coerce").astype("float32").to_numpy()
+            poss_est = 0.5 * (ht + at)
+            poss_est = np.clip(poss_est, 90.0, 108.0).astype("float32")
+            poss = np.where(np.isfinite(poss_est), poss_est, poss).astype("float32")
+        else:
+            # fallback: derive from total if present
+            for total_col in ("Total_Close", "Market_Total", "Total", "Closing_Total", "Total_Points"):
+                if total_col in out.columns:
+                    tot = pd.to_numeric(out[total_col], errors="coerce").astype("float32").to_numpy()
+                    poss_est = tot / NBA_TOTAL_PPP
+                    poss_est = np.clip(poss_est, 90.0, 108.0).astype("float32")
+                    poss = np.where(np.isfinite(poss_est), poss_est, poss).astype("float32")
+                    break
+
+        mu_nba = (pr_diff.to_numpy() / 100.0) * poss + hfa
+        mu = np.where(is_nba, mu_nba.astype("float32"), mu)
+
+    # ----------------------------
+    # Outputs
+    # ----------------------------
+    out["Model_Expected_Margin"] = mu.astype("float32")
+    out["Model_Expected_Margin_Abs"] = np.abs(mu).astype("float32")
+    out["Sigma_Pts"] = sig.astype("float32")
 
     fav_is_home = (mu >= 0)
     out["Model_Favorite_Team"] = np.where(fav_is_home, out["Home_Team_Norm"], out["Away_Team_Norm"])
     out["Model_Underdog_Team"] = np.where(fav_is_home, out["Away_Team_Norm"], out["Home_Team_Norm"])
 
-    out["Model_Fav_Spread"] = (-np.abs(mu)).astype("float32")
-    out["Model_Dog_Spread"] = (+np.abs(mu)).astype("float32")
+    mu_abs = np.abs(mu).astype("float32")
+    out["Model_Fav_Spread"] = (-mu_abs).astype("float32")
+    out["Model_Dog_Spread"] = (+mu_abs).astype("float32")
 
     fav_mkt = pd.to_numeric(out.get("Favorite_Market_Spread"), errors="coerce").astype("float32")
     dog_mkt = pd.to_numeric(out.get("Underdog_Market_Spread"), errors="coerce").astype("float32")
@@ -4439,9 +4496,10 @@ def favorite_centric_from_powerdiff_lowmem(g_full: pd.DataFrame) -> pd.DataFrame
     out["Dog_Edge_Pts"] = (dog_mkt - out["Model_Dog_Spread"]).astype("float32")
 
     eps = np.finfo("float32").eps
-    z_fav = (np.abs(mu) - k) / np.where(sig == 0, eps, sig)
-    out["Fav_Cover_Prob"] = (1.0 - _phi(-z_fav)).astype("float32")  # Φ(z_fav)
+    z_fav = (mu_abs - k) / np.where(sig == 0, eps, sig)
+    out["Fav_Cover_Prob"] = _phi(z_fav).astype("float32")
     out["Dog_Cover_Prob"] = (1.0 - out["Fav_Cover_Prob"]).astype("float32")
+
     return out
 
 def prep_consensus_market_spread_lowmem(
@@ -4633,20 +4691,20 @@ def enrich_power_from_current_inplace(
         if c not in df.columns:
             raise ValueError(f"enrich_power_from_current_inplace missing column: {c}")
 
-    # --- normalize Sport (forward aliases + UPPER) ---
-  
+    df[sport_col] = df[sport_col].astype(str).str.strip().str.upper()
+    df[home_col]  = df[home_col].astype(str).str.lower().str.strip()
+    df[away_col]  = df[away_col].astype(str).str.lower().str.strip()
 
-  
-    s0 = df[sport_col].astype(str).str.strip().str.upper()
-    df[sport_col] = s0
+    # outputs
+    for c in (out_home_col, out_away_col, out_diff_col):
+        if c not in df.columns:
+            df[c] = np.nan
 
-    # precreate outputs
-    if out_home_col not in df.columns:
-        df[out_home_col] = np.nan
-    if out_away_col not in df.columns:
-        df[out_away_col] = np.nan
-    if out_diff_col not in df.columns:
-        df[out_diff_col] = np.nan
+    # NBA pace outputs (optional columns)
+    if "Home_BPI_Tempo" not in df.columns:
+        df["Home_BPI_Tempo"] = np.nan
+    if "Away_BPI_Tempo" not in df.columns:
+        df["Away_BPI_Tempo"] = np.nan
 
     sports = sorted(set(df[sport_col].dropna().astype(str).str.upper().str.strip().tolist()))
     if not sports:
@@ -4655,10 +4713,7 @@ def enrich_power_from_current_inplace(
         df[out_diff_col] = (df[out_home_col] - df[out_away_col]).astype("float32")
         return df
 
-    # --- expand candidate sports with reverse aliasing too (common mismatch cause) ---
-    
-    sports_param = sports
-    log_func(f"🔎 Power enrich: querying {table_current} for Sports={sports_param}")
+    log_func(f"🔎 Power enrich: querying {table_current} for Sports={sports}")
 
     q = f"""
     SELECT
@@ -4674,70 +4729,60 @@ def enrich_power_from_current_inplace(
     df_cur = bq.query(
         q,
         job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ArrayQueryParameter("sports", "STRING", sports_param)]
+            query_parameters=[bigquery.ArrayQueryParameter("sports", "STRING", sports)]
         ),
     ).to_dataframe()
 
     if df_cur is None or df_cur.empty:
-        # tiny debug: what sports even exist in the table?
-        try:
-            q2 = f"""
-            SELECT UPPER(CAST(Sport AS STRING)) AS Sport, COUNT(*) AS n
-            FROM `{table_current}`
-            GROUP BY 1
-            ORDER BY n DESC
-            LIMIT 30
-            """
-            df_sports = bq.query(q2).to_dataframe()
-            log_func(f"⚠️ Power enrich: 0 rows for Sports={sports_param}. Table sports sample:\n{df_sports.to_string(index=False)}")
-        except Exception as e:
-            log_func(f"⚠️ Power enrich: 0 rows for Sports={sports_param}. (Also failed debug query: {e})")
-
         log_func("⚠️ Power rating enrichment: ratings_current returned 0 rows; using baseline.")
         df[out_home_col] = pd.to_numeric(df[out_home_col], errors="coerce").fillna(baseline).astype("float32")
         df[out_away_col] = pd.to_numeric(df[out_away_col], errors="coerce").fillna(baseline).astype("float32")
         df[out_diff_col] = (df[out_home_col] - df[out_away_col]).astype("float32")
         return df
 
-    # normalize fetched
     df_cur["Sport"] = df_cur["Sport"].astype(str).str.upper().str.strip()
     df_cur["Team"] = df_cur["Team"].astype(str).str.lower().str.strip()
     df_cur["Method"] = df_cur["Method"].astype(str).str.lower().str.strip()
     df_cur["Updated_At"] = pd.to_datetime(df_cur["Updated_At"], utc=True, errors="coerce")
     df_cur["Rating"] = pd.to_numeric(df_cur["Rating"], errors="coerce")
 
-    def _build_map_for_sport(sp: str) -> pd.Series:
-        d = df_cur.loc[df_cur["Sport"] == sp].copy()
+    ZERO_CENTERED = {"kp_adj_em", "nba_bpi_adj_em"}
+
+    def _build_map_for_sport(sp: str, method_name: str) -> pd.Series:
+        d = df_cur.loc[(df_cur["Sport"] == sp) & (df_cur["Method"] == method_name)].copy()
         if d.empty:
             return pd.Series(dtype="float32")
-
-        m = preferred_method.get(sp, None)
-        if m is not None:
-            m = str(m).lower().strip()
-            if d["Method"].notna().any():
-                d = d.loc[d["Method"] == m]
-
         d = d.dropna(subset=["Team", "Rating"])
         if d.empty:
             return pd.Series(dtype="float32")
-
         d = d.sort_values(["Team", "Updated_At"], kind="mergesort")
         d = d.drop_duplicates(subset=["Team"], keep="last")
-
         s_map = d.set_index("Team")["Rating"]
         if s_map.index.has_duplicates:
             s_map = s_map[~s_map.index.duplicated(keep="last")]
         return s_map.astype("float32")
 
-    # apply per sport
-    for sp in sorted(set(df_cur["Sport"].dropna().astype(str).tolist())):
-        mask = df[sport_col].astype(str).str.upper().eq(sp)
+    # apply per sport (and handle NBA tempo)
+    for sp in sports:
+        mask = df[sport_col].eq(sp)
         if not mask.any():
             continue
 
-        s_map = _build_map_for_sport(sp)
-        if s_map.empty:
-            continue
+        pref = preferred_method.get(sp, None)
+        pref = str(pref).lower().strip() if pref is not None else None
+
+        # ✅ sport-specific baseline
+        base_sp = np.float32(0.0) if (pref in ZERO_CENTERED) else np.float32(baseline)
+
+        # --- main rating map (preferred method) ---
+        if pref:
+            s_map = _build_map_for_sport(sp, pref)
+        else:
+            # fallback: just take latest per team regardless of method
+            d = df_cur.loc[df_cur["Sport"] == sp].copy()
+            d = d.dropna(subset=["Team", "Rating"])
+            d = d.sort_values(["Team", "Updated_At"], kind="mergesort").drop_duplicates(subset=["Team"], keep="last")
+            s_map = d.set_index("Team")["Rating"].astype("float32")
 
         hk = df.loc[mask, home_col].astype(str).str.lower().str.strip()
         ak = df.loc[mask, away_col].astype(str).str.lower().str.strip()
@@ -4745,14 +4790,32 @@ def enrich_power_from_current_inplace(
         h = s_map.reindex(hk).to_numpy(dtype="float32", copy=False)
         a = s_map.reindex(ak).to_numpy(dtype="float32", copy=False)
 
+        # fill missing with baseline for that sport
+        h = np.where(np.isfinite(h), h, base_sp).astype("float32")
+        a = np.where(np.isfinite(a), a, base_sp).astype("float32")
+
         df.loc[mask, out_home_col] = h
         df.loc[mask, out_away_col] = a
         df.loc[mask, out_diff_col] = (h - a).astype("float32")
 
-    # finalize
-    df[out_home_col] = pd.to_numeric(df[out_home_col], errors="coerce").fillna(baseline).astype("float32")
-    df[out_away_col] = pd.to_numeric(df[out_away_col], errors="coerce").fillna(baseline).astype("float32")
+        # --- NBA tempo maps (optional) ---
+        if sp == "NBA":
+            t_map = _build_map_for_sport("NBA", "nba_bpi_adj_t")
+            ht = t_map.reindex(hk).to_numpy(dtype="float32", copy=False)
+            at = t_map.reindex(ak).to_numpy(dtype="float32", copy=False)
+
+            # reasonable fallback tempo if missing
+            ht = np.where(np.isfinite(ht), ht, np.float32(100.0)).astype("float32")
+            at = np.where(np.isfinite(at), at, np.float32(100.0)).astype("float32")
+
+            df.loc[mask, "Home_BPI_Tempo"] = ht
+            df.loc[mask, "Away_BPI_Tempo"] = at
+
+    # finalize (do NOT force baseline=1500 for NBA/NCAAB after we computed base_sp above)
+    df[out_home_col] = pd.to_numeric(df[out_home_col], errors="coerce").astype("float32")
+    df[out_away_col] = pd.to_numeric(df[out_away_col], errors="coerce").astype("float32")
     df[out_diff_col] = (df[out_home_col] - df[out_away_col]).astype("float32")
+
     return df
 
 def implied_prob_vec(odds):
