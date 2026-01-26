@@ -3356,8 +3356,8 @@ def select_features_auto(
 
     # AUC-driven controls (now used by greedy acceptance)
     use_auc_auto: bool = True,
-    auc_min_k: int = 35,          # seed size
-    auc_patience: int = 40,       # stop after N rejects
+    auc_min_k: int = 40,          # seed size
+    auc_patience: int = 80,       # stop after N rejects
     auc_min_improve: float = 5e-5,# required gain to accept
     auc_verbose: bool = True,
 
