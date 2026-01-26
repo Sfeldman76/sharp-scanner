@@ -2483,7 +2483,7 @@ def shap_stability_select(
     X: pd.DataFrame,
     y: np.ndarray,
     folds, *,
-    topk_per_fold: int = 60,
+    topk_per_fold: int = 150,
     min_presence: float = 0.6,
     max_keep: int | None = None,
     sample_per_fold: int = 4000,
@@ -3056,10 +3056,10 @@ def _cv_auc_for_feature_set(
 
 def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
-    min_k=1,                      # ✅ target seed size (now "earn it")
+    min_k=10                      # ✅ target seed size (now "earn it")
     max_k=None,                   # ✅ max accepted features
-    patience=40,                  # ✅ stop after N rejects in a row (seed + main)
-    min_improve=1e-4,             # ✅ required improvement to accept
+    patience=160,                  # ✅ stop after N rejects in a row (seed + main)
+    min_improve=5e-5,             # ✅ required improvement to accept
     verbose=True,
     log_func=print,
     debug=False,
@@ -3358,7 +3358,7 @@ def select_features_auto(
     use_auc_auto: bool = True,
     auc_min_k: int = 35,          # seed size
     auc_patience: int = 40,       # stop after N rejects
-    auc_min_improve: float = 1e-4,# required gain to accept
+    auc_min_improve: float = 5e-5,# required gain to accept
     auc_verbose: bool = True,
 
     # ✅ NEW: choose what “improve” means
