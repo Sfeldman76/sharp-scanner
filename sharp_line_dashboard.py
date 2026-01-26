@@ -3057,7 +3057,7 @@ def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
     min_k=40,                      # target seed size (earned)
     max_k=None,                    # max accepted features
-    patience=160,                  # stop after N rejects in a row (seed + main)
+    patience=160,                  # stop after N rejects in a row (seed + main)  (ignored if force_full_scan=True)
     min_improve=5e-5,              # required improvement to accept (AUC or score)
     verbose=True,
     log_func=print,
@@ -3070,7 +3070,7 @@ def _auto_select_k_by_auc(
     enable_feature_flips=True,     # no flips during selection; optional final pass
     max_feature_flips=3,
     orient_passes=1,
-    force_full_scan=True,          # ignored (kept for signature parity)
+    force_full_scan=True,          # ✅ NOW IMPLEMENTED
     fallback_to_all_available_features=True,
     require_present_in_X=True,
 
@@ -3080,28 +3080,29 @@ def _auto_select_k_by_auc(
     must_keep: list[str] | None = None,
     seed_mode: str = "earned",     # "earned" or "firstk"
 
-    # ✅ NEW: near-miss pooling + bundle tries (helps when features only work in combos)
-    near_miss_margin: float = 2e-4,   # keep rejects within this margin of best (can be slightly worse)
-    near_miss_topk: int = 40,         # store at most this many near-miss features
-    bundle_try_k: int = 5,            # try adding up to this many near-miss feats at once
+    # near-miss pooling + bundle tries
+    near_miss_margin: float = 2e-4,
+    near_miss_topk: int = 40,
+    bundle_try_k: int = 5,
 
-    # ✅ NEW: optional PSI guard (reject unstable features)
-    # Provide a callable: psi_fn(feature_name)->float  OR psi_fn(list_of_features)->dict[name->psi]
+    # optional PSI guard (advisory unless you set psi_max)
     psi_fn=None,
-    psi_max: float | None = None,     # e.g., 0.5 or 0.8; if None, disabled
+    psi_max: float | None = None,
 
-    # ✅ NEW: extra scanning control
-    max_total_evals: int | None = None,  # hard cap total CV eval calls (None = unlimited)
+    # hard cap eval calls
+    max_total_evals: int | None = None,
 ):
     """
     Greedy forward selection with:
       - earned seed (accept-only-if-improves)
       - optional quick fade rescue (1-fold flip check)
-      - near-miss pooling + bundle acceptance (captures “only works in combo” features)
-      - optional PSI guard (reject unstable features)
-      - optional hard cap on total CV evaluations
-    Returns:
-      accepted_feats, best_res, history
+      - near-miss pooling + bundle acceptance
+      - optional PSI guard
+      - optional hard cap on total CV evals
+
+    Key behavior:
+      ✅ If force_full_scan=True, NEVER early-stop due to patience.
+         It will scan all features in `ordered` (subject to max_total_evals).
     """
     import numpy as np
     import pandas as pd
@@ -3125,7 +3126,6 @@ def _auto_select_k_by_auc(
     max_k = int(min(max_k, len(ordered)))
     min_k = int(max(1, min(int(min_k), max_k)))
 
-    # ---- must_keep always first (dedup) ----
     must_keep = must_keep or []
     mk = [m for m in must_keep if m in X.columns]
     ordered = list(dict.fromkeys(mk + ordered))
@@ -3151,7 +3151,6 @@ def _auto_select_k_by_auc(
             return _cv_cache[key]
 
         if max_total_evals is not None and eval_calls >= int(max_total_evals):
-            # return a "poison" result so caller stops accepting
             res = {
                 "oof_proba": None,
                 "auc": float("nan"),
@@ -3201,47 +3200,33 @@ def _auto_select_k_by_auc(
             return True
         try:
             out = psi_fn(feats)
-            # allow dict[name->psi] or float
             if isinstance(out, dict):
                 mx = max([float(v) for v in out.values() if v is not None] + [0.0])
             else:
                 mx = float(out)
             return bool(mx <= float(psi_max))
         except Exception:
-            # if PSI guard errors, do not block selection
-            return True
+            return True  # don't block on psi errors
 
     def _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br, *, rescue=None):
-        # LL/Brier guards first
         ll_ok = (not np.isfinite(ll_try)) or (not np.isfinite(best_ll)) or (ll_try <= float(best_ll) + float(max_ll_increase))
         br_ok = (not np.isfinite(br_try)) or (not np.isfinite(best_br)) or (br_try <= float(best_br) + float(max_brier_increase))
         if not (ll_ok and br_ok):
             return False
-
         if not np.isfinite(val_try):
             return False
-
-        # allow first finite trial if baseline metric is NaN (common AUC edge case)
         if not np.isfinite(best_val):
             return True
-
-        ok = bool(val_try >= float(best_val) + float(min_improve))
-        if ok:
+        if val_try >= float(best_val) + float(min_improve):
             return True
-
         if rescue is not None:
             try:
                 return bool(rescue())
             except Exception:
                 return False
-
         return False
 
     def _quick_flip_rescue(feat: str, feats_current: list[str]) -> bool:
-        """
-        Cheap 1-fold check: if flipping JUST this feature improves 1-fold AUC by >= min_improve,
-        allow it even if raw-direction trial was rejected.
-        """
         if not orient_features or not folds:
             return False
         try:
@@ -3252,7 +3237,6 @@ def _auto_select_k_by_auc(
         tr_idx, val_idx = folds[0]
         feats = list(feats_current)
 
-        # baseline quick AUC
         try:
             mdl0 = clone(model_proto)
             mdl0.fit(X.iloc[tr_idx][feats], y_arr[tr_idx])
@@ -3262,7 +3246,6 @@ def _auto_select_k_by_auc(
         except Exception:
             return False
 
-        # flipped quick AUC
         try:
             Xf = X.copy()
             Xf[feat] = -pd.to_numeric(Xf[feat], errors="coerce")
@@ -3277,24 +3260,20 @@ def _auto_select_k_by_auc(
         return bool(np.isfinite(auc1) and np.isfinite(auc0) and (auc1 - auc0) >= float(min_improve))
 
     # ============================================================
-    # BASELINE: start from must_keep (or empty)
+    # BASELINE
     # ============================================================
     accepted = list(mk)
     near_miss = []  # list of (gain, feat)
 
-    if accepted:
-        best_res = _cv_cached(accepted, dbg=bool(debug), allow_flips=False)
-    else:
-        best_res = None
-
+    best_res = _cv_cached(accepted, dbg=bool(debug), allow_flips=False) if accepted else None
     if best_res is not None:
         best_val = _metric(best_res)
         best_ll  = _ll(best_res)
         best_br  = _br(best_res)
     else:
         best_val = float("nan") if accept_metric != "score" else float("-inf")
-        best_ll  = float("nan")
-        best_br  = float("nan")
+        best_ll = float("nan")
+        best_br = float("nan")
 
     if verbose:
         log_func(f"[AUTO-FEAT] start: must_keep={len(mk)} seed_mode={seed_mode} target_seed={min_k} metric={accept_metric}")
@@ -3309,10 +3288,6 @@ def _auto_select_k_by_auc(
         if needed > 0:
             add = [f for f in ordered if f not in set(accepted)][:needed]
             accepted = accepted + add
-
-        if not _psi_ok(accepted):
-            if verbose:
-                log_func("[AUTO-FEAT] ⚠️ PSI guard failed on forced seed; continuing anyway (PSI guard is advisory).")
 
         best_res = _cv_cached(accepted, dbg=bool(debug), allow_flips=False)
         best_val = _metric(best_res)
@@ -3340,7 +3315,7 @@ def _auto_select_k_by_auc(
             ll_try  = _ll(res_try)
             br_try  = _br(res_try)
 
-            # no baseline yet (must_keep empty): accept first finite
+            # If baseline is None (no must_keep), accept first finite
             if best_res is None:
                 if np.isfinite(val_try) and _psi_ok(trial):
                     accepted = trial
@@ -3375,7 +3350,6 @@ def _auto_select_k_by_auc(
                     log_func(f"[AUTO-FEAT] 🌱 seed accept +{feat} -> {accept_metric}={best_val:.6f} k={len(accepted)}")
             else:
                 rejects_in_row += 1
-                # near-miss store (captures “works in combo”)
                 if np.isfinite(best_val) and np.isfinite(val_try):
                     gain = float(val_try - best_val)
                     if gain >= -float(near_miss_margin):
@@ -3389,7 +3363,8 @@ def _auto_select_k_by_auc(
             history.append(("SEED_EARN", len(trial), feat, accepted_flag, val_try, ll_try, br_try,
                             int(res_try.get("n_feature_flips", 0)), res_try.get("flipped_features", [])))
 
-            if rejects_in_row >= int(patience):
+            # ✅ ONLY stop early if force_full_scan is False
+            if (not force_full_scan) and (rejects_in_row >= int(patience)):
                 if verbose:
                     log_func(f"[AUTO-FEAT] Seed stop: {rejects_in_row} consecutive rejects (k={len(accepted)})")
                 break
@@ -3435,7 +3410,6 @@ def _auto_select_k_by_auc(
                 log_func(f"[AUTO-FEAT] ✅ accept +{feat} -> {accept_metric}={best_val:.6f} k={len(accepted)}")
         else:
             rejects_in_row += 1
-            # near-miss store
             if np.isfinite(best_val) and np.isfinite(val_try):
                 gain = float(val_try - best_val)
                 if gain >= -float(near_miss_margin):
@@ -3449,13 +3423,14 @@ def _auto_select_k_by_auc(
         history.append(("TRY", len(trial), feat, accepted_flag, val_try, ll_try, br_try,
                         int(res_try.get("n_feature_flips", 0)), res_try.get("flipped_features", [])))
 
-        if rejects_in_row >= int(patience):
+        # ✅ ONLY stop early if force_full_scan is False
+        if (not force_full_scan) and (rejects_in_row >= int(patience)):
             if verbose:
                 log_func(f"[AUTO-FEAT] Stop: {rejects_in_row} consecutive rejects (k={len(accepted)})")
             break
 
     # ============================================================
-    # NEAR-MISS BUNDLE TRY (captures combo-only features)
+    # NEAR-MISS BUNDLE TRY
     # ============================================================
     if near_miss and bundle_try_k and len(accepted) < max_k:
         bundle = [f for _, f in near_miss if f not in set(accepted)]
