@@ -3931,11 +3931,12 @@ def enrich_power_for_training_lowmem(
         "MLB":   "poisson",
         "NFL":   "elo_kalman",
         "NCAAF": "elo_kalman",
-        "NBA":   "elo_kalman",
+        "NBA":   "nba_bpi_adj_em", 
         "WNBA":  "elo_kalman",
         "CFL":   "elo_kalman",
         "NCAAB": "kp_adj_em",
     }
+
 
     def fetch_ratings_window_cached(
         sport: str,
@@ -3943,25 +3944,35 @@ def enrich_power_for_training_lowmem(
         end_iso: str,
         table_name: str,
     ) -> pd.DataFrame:
-        method = PREFERRED_METHOD.get(sport.upper())  # ✅ apply to current too if Method exists
-
-        # ✅ cache key includes method + lag + pad so changes don’t reuse wrong results
+        # Preferred method per sport (single) + optional multi-method override
+        method = PREFERRED_METHOD.get(sport.upper())
+    
+        # ✅ methods to fetch (lowercase)
+        if sport.upper() == "NBA":
+            methods = ["nba_bpi_adj_em", "nba_bpi_adj_t"]   # pull both
+        elif method:
+            methods = [str(method).lower()]
+        else:
+            methods = None
+    
+        # ✅ cache key includes *methods list* (not just method string)
         key = (
             sport.upper(),
             start_iso, end_iso,
             str(table_name),
             tuple(sorted(teams)),
-            str(method or ""),
+            tuple(methods) if methods else None,
             float(rating_lag_hours),
             int(pad_days),
         )
         if key in _CACHE:
             return _CACHE[key].copy()
-
+    
         base_sql = f"""
         SELECT
           UPPER(CAST(Sport AS STRING))        AS Sport,
           LOWER(TRIM(CAST(Team AS STRING)))   AS Team_Norm,
+          LOWER(CAST(Method AS STRING))       AS Method,
           CAST(Rating AS FLOAT64)             AS Power_Rating,
           TIMESTAMP(Updated_At)               AS AsOfTS
         FROM `{table_name}`
@@ -3970,40 +3981,89 @@ def enrich_power_for_training_lowmem(
           AND TIMESTAMP(Updated_At) >= @start
           AND TIMESTAMP(Updated_At) <= @end
         """
-
+    
         params_common = [
             bigquery.ArrayQueryParameter("aliases", "STRING", _aliases_for(sport)),
             bigquery.ArrayQueryParameter("teams", "STRING", teams),
             bigquery.ScalarQueryParameter("start", "TIMESTAMP", pd.Timestamp(start_iso).to_pydatetime()),
             bigquery.ScalarQueryParameter("end",   "TIMESTAMP", pd.Timestamp(end_iso).to_pydatetime()),
         ]
-
+    
         def _run(sql: str, params: list):
             return bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
-
-        df_r = pd.DataFrame()
-
-        # 1) Try method-filtered query (best) if we have a preferred method
-        if method:
-            sql1 = base_sql + "\n  AND LOWER(CAST(Method AS STRING)) = @method\n"
+    
+        # ------------------------
+        # Try method-filtered first
+        # ------------------------
+        if methods:
+            sql1 = base_sql + "\n  AND LOWER(CAST(Method AS STRING)) IN UNNEST(@methods)\n"
             params1 = params_common + [
-                bigquery.ScalarQueryParameter("method", "STRING", str(method).lower())
+                bigquery.ArrayQueryParameter("methods", "STRING", [m.lower() for m in methods])
             ]
             try:
                 df_r = _run(sql1, params1)
             except Exception as e:
-                # If Method column doesn't exist in the table, fall back without method
+                # If Method column doesn't exist in the table, fall back w/o method filter
                 msg = str(e).lower()
                 if ("unrecognized name" in msg and "method" in msg) or ("name method" in msg and "not found" in msg):
-                    df_r = _run(base_sql, params_common)
+                    # Fallback query without Method in SELECT/WHERE
+                    base_sql_nomethod = f"""
+                    SELECT
+                      UPPER(CAST(Sport AS STRING))        AS Sport,
+                      LOWER(TRIM(CAST(Team AS STRING)))   AS Team_Norm,
+                      CAST(Rating AS FLOAT64)             AS Power_Rating,
+                      TIMESTAMP(Updated_At)               AS AsOfTS
+                    FROM `{table_name}`
+                    WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@aliases)
+                      AND LOWER(TRIM(CAST(Team AS STRING))) IN UNNEST(@teams)
+                      AND TIMESTAMP(Updated_At) >= @start
+                      AND TIMESTAMP(Updated_At) <= @end
+                    """
+                    df_r = _run(base_sql_nomethod, params_common)
                 else:
                     raise
         else:
-            df_r = _run(base_sql, params_common)
-
+            # No preferred method → fetch all (if Method exists), else this will also work for tables with Method
+            try:
+                df_r = _run(base_sql, params_common)
+            except Exception as e:
+                msg = str(e).lower()
+                if ("unrecognized name" in msg and "method" in msg) or ("name method" in msg and "not found" in msg):
+                    base_sql_nomethod = f"""
+                    SELECT
+                      UPPER(CAST(Sport AS STRING))        AS Sport,
+                      LOWER(TRIM(CAST(Team AS STRING)))   AS Team_Norm,
+                      CAST(Rating AS FLOAT64)             AS Power_Rating,
+                      TIMESTAMP(Updated_At)               AS AsOfTS
+                    FROM `{table_name}`
+                    WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@aliases)
+                      AND LOWER(TRIM(CAST(Team AS STRING))) IN UNNEST(@teams)
+                      AND TIMESTAMP(Updated_At) >= @start
+                      AND TIMESTAMP(Updated_At) <= @end
+                    """
+                    df_r = _run(base_sql_nomethod, params_common)
+                else:
+                    raise
+    
         if df_r.empty:
             _CACHE[key] = df_r
             return df_r
+    
+        # normalize + clean
+        df_r["Team_Norm"] = _norm_team_series(df_r["Team_Norm"])
+        df_r["Power_Rating"] = pd.to_numeric(df_r["Power_Rating"], errors="coerce")
+        df_r["AsOfTS"] = pd.to_datetime(df_r["AsOfTS"], utc=True, errors="coerce")
+    
+        keep = ["Sport", "Team_Norm", "Power_Rating", "AsOfTS"]
+        if "Method" in df_r.columns:
+            df_r["Method"] = df_r["Method"].astype(str).str.lower().str.strip()
+            keep.insert(2, "Method")  # keep after Team_Norm
+    
+        df_r = df_r[keep].dropna(subset=["Team_Norm", "Power_Rating", "AsOfTS"])
+        df_r = df_r[df_r["Sport"].str.upper() == sport.upper()]
+    
+        _CACHE[key] = df_r
+        return df_r.copy()
 
         df_r["Team_Norm"] = _norm_team_series(df_r["Team_Norm"])
         df_r["Power_Rating"] = pd.to_numeric(df_r["Power_Rating"], errors="coerce")
@@ -4024,8 +4084,22 @@ def enrich_power_for_training_lowmem(
 
     # Baseline depends on preferred method (NCAAB kp_adj_em centered near 0)
     method_used = PREFERRED_METHOD.get(sport_canon.upper())
-    base = np.float32(0.0) if (str(method_used).lower() == "kp_adj_em") else np.float32(1500.0)
+    is_nba_bpi = (sport_canon.upper() == "NBA")
+    
+    if is_nba_bpi and "Method" in ratings.columns:
+        r_em = ratings[ratings["Method"] == "nba_bpi_adj_em"].copy()
+        r_t  = ratings[ratings["Method"] == "nba_bpi_adj_t"].copy()
+    else:
+        r_em = ratings.copy()
+        r_t  = pd.DataFrame(columns=ratings.columns)
 
+    # ✅ methods that are centered near 0 (not 1500-scale)
+    ZERO_CENTERED = {"kp_adj_em", "nba_bpi_adj_em"}
+    
+    base = np.float32(0.0) if (str(method_used).lower() in ZERO_CENTERED) else np.float32(1500.0)
+    tempo_base = np.float32(100.0)
+    out["Home_BPI_Tempo"] = tempo_base
+    out["Away_BPI_Tempo"] = tempo_base
     out["Home_Power_Rating"] = base
     out["Away_Power_Rating"] = base
     if debug_asof_cols:
@@ -4521,7 +4595,7 @@ def favorite_centric_from_powerdiff_lowmem(df_games: pd.DataFrame) -> pd.DataFra
     # - NCAAB: override with possessions-scaled AdjEM diff and add HFA in points
     mu = (pr_diff / np.where(scale == 0, 1.0, scale)) + hfa
     mu = mu.astype('float32')
-
+    
     if is_ncaab.any():
         # pr_diff is AdjEM diff (per 100)
         mu_ncaab = (pr_diff / 100.0) * poss + hfa
@@ -4530,7 +4604,34 @@ def favorite_centric_from_powerdiff_lowmem(df_games: pd.DataFrame) -> pd.DataFra
         # sigma for NCAAB is typically smaller than NFL; if your cfg isn't set, nudge default
         # (optional; remove if SPORT_SPREAD_CFG already sets NCAAB)
         # sigma = np.where(is_ncaab & (sigma == 12.0), np.float32(10.5), sigma).astype('float32')
+    NBA_TOTAL_PPP = np.float32(2.26)
+    nba_poss_default = np.float32(100.0)
 
+    is_nba = (sp == "NBA")
+    if is_nba.any():
+        nba_poss = np.full(n, nba_poss_default, dtype=np.float32)
+
+        # 1) tempo columns (best)
+        if "Home_BPI_Tempo" in g.columns and "Away_BPI_Tempo" in g.columns:
+            ht = pd.to_numeric(g["Home_BPI_Tempo"], errors="coerce").astype("float32").to_numpy()
+            at = pd.to_numeric(g["Away_BPI_Tempo"], errors="coerce").astype("float32").to_numpy()
+            poss_est = 0.5 * (ht + at)
+            poss_est = np.clip(poss_est, 90.0, 108.0).astype("float32")
+            nba_poss = np.where(np.isfinite(poss_est), poss_est, nba_poss).astype("float32")
+
+        # 2) derive possessions from total if tempo missing
+        elif any(c in g.columns for c in ("Total_Close", "Market_Total", "Total", "Closing_Total", "Total_Points")):
+            for total_col in ("Total_Close", "Market_Total", "Total", "Closing_Total", "Total_Points"):
+                if total_col in g.columns:
+                    tot = pd.to_numeric(g[total_col], errors="coerce").astype("float32").to_numpy()
+                    poss_est = tot / NBA_TOTAL_PPP
+                    poss_est = np.clip(poss_est, 90.0, 108.0).astype("float32")
+                    nba_poss = np.where(np.isfinite(poss_est), poss_est, nba_poss).astype("float32")
+                    break
+
+        # Convert AdjEM diff (per 100) -> points at expected possessions, then add HFA (already in points)
+        mu_nba = (pr_diff / 100.0) * nba_poss + hfa
+        mu = np.where(is_nba, mu_nba.astype("float32"), mu)
     mu_abs = np.abs(mu).astype('float32')
 
     # market absolute spread (median abs from consensus step)
