@@ -3053,45 +3053,43 @@ def _cv_auc_for_feature_set(
 
     return out
 
-
 def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
-    min_k=10,                      # ✅ target seed size (now "earn it")
-    max_k=None,                   # ✅ max accepted features
-    patience=160,                  # ✅ stop after N rejects in a row (seed + main)
-    min_improve=5e-5,             # ✅ required improvement to accept
+    min_k=25,                      # ✅ target seed size (earned)
+    max_k=None,                    # ✅ max accepted features
+    patience=100,                  # ✅ stop after N rejects in a row (seed + main)
+    min_improve=5e-8,              # ✅ required improvement to accept
     verbose=True,
     log_func=print,
     debug=False,
-    debug_every=10,
-    auc_tie_eps=0.002,            # unused (kept for signature parity)
+    debug_every=1,
+    auc_tie_eps=0.002,             # unused (kept for signature parity)
     max_ll_increase=0.20,
     max_brier_increase=0.06,
     orient_features=True,
-    enable_feature_flips=True,    # ✅ no flips during selection; optional final pass
+    enable_feature_flips=True,     # ✅ no flips during selection; optional final pass
     max_feature_flips=3,
     orient_passes=1,
-    force_full_scan=True,         # ignored (kept for signature parity)
+    force_full_scan=True,          # ignored (kept for signature parity)
     fallback_to_all_available_features=True,
     require_present_in_X=True,
 
-    accept_metric: str = "auc",   # "auc" or "score"
+    accept_metric: str = "auc",    # "auc" or "score"
     flips_after_selection: bool = True,  # one final orientation pass
 
-    # ✅ NEW: smarter seed build
-    must_keep: list[str] | None = None, # always include if present
-    seed_mode: str = "earned",          # "earned" or "firstk"
+    must_keep: list[str] | None = None,  # always include if present
+    seed_mode: str = "earned",           # "earned" or "firstk"
 ):
     """
     Greedy forward selection.
 
     Seed step:
-      - seed_mode="earned": build up to min_k by accepting only improvements.
+      - seed_mode="earned": build up to min_k by accepting only improvements (with optional quick fade rescue).
       - seed_mode="firstk" : legacy behavior, seed = first min_k.
 
     Returns:
       accepted_feats: list[str]
-      best_res: dict (CV result for accepted set, after optional orientation)
+      best_res: dict (CV result for accepted set, after optional final orientation)
       history: list of step logs
     """
     # ---- sanitize ordered_features ----
@@ -3108,18 +3106,19 @@ def _auto_select_k_by_auc(
     max_k = int(min(max_k, len(ordered)))
     min_k = int(max(1, min(int(min_k), max_k)))
 
+    folds = list(folds)
     y_arr = np.asarray(y, int).reshape(-1)
 
     # ---- must_keep always first (and de-duped) ----
     must_keep = must_keep or []
     mk = [m for m in must_keep if m in X.columns]
-    # ensure mk appear first but don't remove them from ordered if already present
     ordered = list(dict.fromkeys(mk + ordered))
 
     # ---- cache CV by feature tuple ----
     _cv_cache: dict[tuple, dict] = {}
 
     def _cv_cached(feats, *, dbg=False, allow_flips=False):
+        # ✅ NO flips during selection; only if allow_flips=True (final pass)
         ef = bool(enable_feature_flips and allow_flips)
         mff = int(max_feature_flips if ef else 0)
 
@@ -3157,16 +3156,97 @@ def _auto_select_k_by_auc(
     def _ll(res): return float(res.get("oof_logloss_best", np.nan))
     def _br(res): return float(res.get("oof_brier_best", np.nan))
 
-    def _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br):
-        if not (np.isfinite(val_try) and np.isfinite(best_val)):
-            return False
-        ll_ok = (not np.isfinite(ll_try)) or (not np.isfinite(best_ll)) or (ll_try <= best_ll + float(max_ll_increase))
-        br_ok = (not np.isfinite(br_try)) or (not np.isfinite(best_br)) or (br_try <= best_br + float(max_brier_increase))
+    # ✅ REQUIRED
+    history = []
+
+    def _accept_ok(
+        val_try, best_val,
+        ll_try, best_ll,
+        br_try, best_br,
+        *,
+        min_gain: float,
+        max_ll_increase: float,
+        max_brier_increase: float,
+        allow_if_baseline_nan: bool = True,
+        rescue=None,  # signature: rescue()->bool ; called only after normal rejection
+    ):
+        # ---- LL/Brier guards first ----
+        ll_ok = (not np.isfinite(ll_try)) or (not np.isfinite(best_ll)) or (ll_try <= float(best_ll) + float(max_ll_increase))
+        br_ok = (not np.isfinite(br_try)) or (not np.isfinite(best_br)) or (br_try <= float(best_br) + float(max_brier_increase))
         if not (ll_ok and br_ok):
             return False
-        return bool(val_try >= best_val + float(min_improve))
 
-    history = []
+        # ---- metric must be finite ----
+        if not np.isfinite(val_try):
+            return False
+
+        # ---- if baseline metric is NaN, accept first finite trial ----
+        if not np.isfinite(best_val):
+            return True if allow_if_baseline_nan else False
+
+        # ---- normal improvement rule ----
+        ok = bool(val_try >= float(best_val) + float(min_gain))
+        if ok:
+            return True
+
+        # ---- optional fade/orientation rescue ----
+        if rescue is not None:
+            try:
+                return bool(rescue())
+            except Exception:
+                return False
+
+        return False
+
+    def _quick_flip_rescue(feat: str, feats_current: list[str]) -> bool:
+        """
+        Cheap 1-fold fade check:
+          - fit on current accepted set (already includes feat in trial)
+          - flip JUST this feat and see if AUC improves by >= min_improve on 1 fold
+        Only used when a feature would otherwise be rejected.
+        """
+        if not orient_features:
+            return False
+
+        # numeric-ish only
+        try:
+            _ = pd.to_numeric(X[feat], errors="coerce")
+        except Exception:
+            return False
+
+        if not folds:
+            return False
+        tr_idx, val_idx = folds[0]
+
+        feats = list(feats_current)
+
+        # baseline quick AUC
+        try:
+            mdl0 = clone(model_proto)
+            Xtr0 = X.iloc[tr_idx][feats]
+            Xva0 = X.iloc[val_idx][feats]
+            mdl0.fit(Xtr0, y_arr[tr_idx])
+            p0 = np.asarray(_safe_predict_proba_pos(mdl0, Xva0), float).ravel()
+            p0 = np.clip(p0, 1e-6, 1 - 1e-6)
+            auc0 = roc_auc_score(y_arr[val_idx], p0)
+        except Exception:
+            return False
+
+        # flipped quick AUC
+        try:
+            Xf = X.copy()
+            Xf[feat] = -pd.to_numeric(Xf[feat], errors="coerce")
+            mdl1 = clone(model_proto)
+            Xtr1 = Xf.iloc[tr_idx][feats]
+            Xva1 = Xf.iloc[val_idx][feats]
+            mdl1.fit(Xtr1, y_arr[tr_idx])
+            p1 = np.asarray(_safe_predict_proba_pos(mdl1, Xva1), float).ravel()
+            p1 = np.clip(p1, 1e-6, 1 - 1e-6)
+            auc1 = roc_auc_score(y_arr[val_idx], p1)
+        except Exception:
+            return False
+
+        return bool(np.isfinite(auc1) and np.isfinite(auc0) and (auc1 - auc0) >= float(min_improve))
 
     # ============================================================
     # BASELINE: start from must_keep (or empty)
@@ -3175,11 +3255,8 @@ def _auto_select_k_by_auc(
     if accepted:
         best_res = _cv_cached(accepted, dbg=bool(debug), allow_flips=False)
     else:
-        # empty baseline: score it by trying the first feature as baseline
-        # (we’ll handle this cleanly in seed building)
         best_res = None
 
-    # Establish baseline metric
     if best_res is not None:
         best_val = _metric(best_res)
         best_ll  = _ll(best_res)
@@ -3198,7 +3275,6 @@ def _auto_select_k_by_auc(
     rejects_in_row = 0
 
     if seed_mode == "firstk":
-        # legacy: force first min_k (after must_keep)
         needed = max(0, min_k - len(accepted))
         if needed > 0:
             add = [f for f in ordered if f not in set(accepted)][:needed]
@@ -3210,8 +3286,6 @@ def _auto_select_k_by_auc(
         history.append(("SEED_FIRSTK", len(accepted), None, True, best_val, best_ll, best_br, 0, []))
 
     else:
-        # "earned": accept-only improvements until we reach min_k (or patience)
-        # Need a finite baseline; if we have none, we’ll set baseline from first accepted feature.
         if best_res is not None:
             history.append(("SEED_BASE", len(accepted), None, True, best_val, best_ll, best_br, 0, []))
 
@@ -3231,7 +3305,7 @@ def _auto_select_k_by_auc(
             ll_try  = _ll(res_try)
             br_try  = _br(res_try)
 
-            # If we don't have a baseline yet (must_keep empty), accept the first sane result
+            # If no baseline yet (must_keep empty), accept first sane result
             if best_res is None:
                 if np.isfinite(val_try) or (accept_metric == "score" and np.isfinite(val_try)):
                     accepted = trial
@@ -3250,7 +3324,15 @@ def _auto_select_k_by_auc(
                                     int(res_try.get("n_feature_flips", 0)), res_try.get("flipped_features", [])))
                 continue
 
-            accepted_flag = _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br)
+            accepted_flag = _accept_ok(
+                val_try, best_val,
+                ll_try, best_ll,
+                br_try, best_br,
+                min_gain=min_improve,
+                max_ll_increase=max_ll_increase,
+                max_brier_increase=max_brier_increase,
+                rescue=(lambda f=feat, cur=accepted: _quick_flip_rescue(f, cur)),
+            )
 
             if accepted_flag:
                 accepted = trial
@@ -3274,7 +3356,6 @@ def _auto_select_k_by_auc(
                     log_func(f"[AUTO-FEAT] Seed stop: {rejects_in_row} consecutive rejects (k={len(accepted)})")
                 break
 
-        # If we still didn't reach min_k, that's OK — we'll continue main greedy from current accepted set.
         history.append(("SEED_DONE", len(accepted), None, True, best_val, best_ll, best_br, 0, []))
 
     # ============================================================
@@ -3297,7 +3378,15 @@ def _auto_select_k_by_auc(
         ll_try  = _ll(res_try)
         br_try  = _br(res_try)
 
-        accepted_flag = _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br)
+        accepted_flag = _accept_ok(
+            val_try, best_val,
+            ll_try, best_ll,
+            br_try, best_br,
+            min_gain=min_improve,
+            max_ll_increase=max_ll_increase,
+            max_brier_increase=max_brier_increase,
+            rescue=(lambda f=feat, cur=accepted: _quick_flip_rescue(f, cur)),
+        )
 
         if accepted_flag:
             accepted = trial
