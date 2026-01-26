@@ -3056,7 +3056,7 @@ def _cv_auc_for_feature_set(
 
 def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
-    min_k=10                      # ✅ target seed size (now "earn it")
+    min_k=10,                      # ✅ target seed size (now "earn it")
     max_k=None,                   # ✅ max accepted features
     patience=160,                  # ✅ stop after N rejects in a row (seed + main)
     min_improve=5e-5,             # ✅ required improvement to accept
