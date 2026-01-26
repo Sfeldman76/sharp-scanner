@@ -3056,37 +3056,45 @@ def _cv_auc_for_feature_set(
 
 def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
-    min_k=1,
-    max_k=None,
-    patience=80,
-    min_improve=1e-4,
+    min_k=1,                      # ✅ target seed size (now "earn it")
+    max_k=None,                   # ✅ max accepted features
+    patience=80,                  # ✅ stop after N rejects in a row (seed + main)
+    min_improve=1e-4,             # ✅ required improvement to accept
     verbose=True,
     log_func=print,
     debug=False,
     debug_every=10,
-    auc_tie_eps=0.002,
+    auc_tie_eps=0.002,            # unused (kept for signature parity)
     max_ll_increase=0.20,
     max_brier_increase=0.06,
     orient_features=True,
-    enable_feature_flips=True,
+    enable_feature_flips=True,    # ✅ no flips during selection; optional final pass
     max_feature_flips=3,
     orient_passes=1,
-    force_full_scan=True,
+    force_full_scan=True,         # ignored (kept for signature parity)
     fallback_to_all_available_features=True,
     require_present_in_X=True,
-    accept_metric: str = "auc",
-    flips_after_selection: bool = True,
+
+    accept_metric: str = "auc",   # "auc" or "score"
+    flips_after_selection: bool = True,  # one final orientation pass
+
+    # ✅ NEW: smarter seed build
+    must_keep: list[str] | None = None, # always include if present
+    seed_mode: str = "earned",          # "earned" or "firstk"
 ):
     """
-    Greedy forward selection:
-      - Seed with first min_k.
-      - Try adding one-by-one; only ACCEPT if improves metric by >= min_improve.
-      - Stops after `patience` consecutive rejects.
+    Greedy forward selection.
+
+    Seed step:
+      - seed_mode="earned": build up to min_k by accepting only improvements.
+      - seed_mode="firstk" : legacy behavior, seed = first min_k.
+
     Returns:
       accepted_feats: list[str]
       best_res: dict (CV result for accepted set, after optional orientation)
-      history: list
+      history: list of step logs
     """
+    # ---- sanitize ordered_features ----
     ordered = list(ordered_features) if ordered_features is not None else []
     if require_present_in_X:
         ordered = [f for f in ordered if f in X.columns]
@@ -3102,6 +3110,13 @@ def _auto_select_k_by_auc(
 
     y_arr = np.asarray(y, int).reshape(-1)
 
+    # ---- must_keep always first (and de-duped) ----
+    must_keep = must_keep or []
+    mk = [m for m in must_keep if m in X.columns]
+    # ensure mk appear first but don't remove them from ordered if already present
+    ordered = list(dict.fromkeys(mk + ordered))
+
+    # ---- cache CV by feature tuple ----
     _cv_cache: dict[tuple, dict] = {}
 
     def _cv_cached(feats, *, dbg=False, allow_flips=False):
@@ -3142,24 +3157,135 @@ def _auto_select_k_by_auc(
     def _ll(res): return float(res.get("oof_logloss_best", np.nan))
     def _br(res): return float(res.get("oof_brier_best", np.nan))
 
+    def _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br):
+        if not (np.isfinite(val_try) and np.isfinite(best_val)):
+            return False
+        ll_ok = (not np.isfinite(ll_try)) or (not np.isfinite(best_ll)) or (ll_try <= best_ll + float(max_ll_increase))
+        br_ok = (not np.isfinite(br_try)) or (not np.isfinite(best_br)) or (br_try <= best_br + float(max_brier_increase))
+        if not (ll_ok and br_ok):
+            return False
+        return bool(val_try >= best_val + float(min_improve))
+
     history = []
 
-    # ---- seed ----
-    accepted = ordered[:min_k]
-    best_res = _cv_cached(accepted, dbg=bool(debug), allow_flips=False)
-    best_val = _metric(best_res)
-    best_ll = _ll(best_res)
-    best_br = _br(best_res)
+    # ============================================================
+    # BASELINE: start from must_keep (or empty)
+    # ============================================================
+    accepted = list(mk)
+    if accepted:
+        best_res = _cv_cached(accepted, dbg=bool(debug), allow_flips=False)
+    else:
+        # empty baseline: score it by trying the first feature as baseline
+        # (we’ll handle this cleanly in seed building)
+        best_res = None
+
+    # Establish baseline metric
+    if best_res is not None:
+        best_val = _metric(best_res)
+        best_ll  = _ll(best_res)
+        best_br  = _br(best_res)
+    else:
+        best_val = float("-inf") if accept_metric == "score" else float("nan")
+        best_ll  = float("nan")
+        best_br  = float("nan")
 
     if verbose:
-        log_func(f"[AUTO-FEAT] Greedy start: seed_k={min_k} metric={accept_metric} best={best_val:.6f}")
+        log_func(f"[AUTO-FEAT] start: must_keep={len(mk)} seed_mode={seed_mode} target_seed={min_k} metric={accept_metric}")
 
-    history.append(("SEED", len(accepted), None, True, best_val, best_ll, best_br, 0, []))
-
+    # ============================================================
+    # SEED BUILD
+    # ============================================================
     rejects_in_row = 0
 
-    # ---- greedy add ----
-    for i, feat in enumerate(ordered[min_k:], start=min_k + 1):
+    if seed_mode == "firstk":
+        # legacy: force first min_k (after must_keep)
+        needed = max(0, min_k - len(accepted))
+        if needed > 0:
+            add = [f for f in ordered if f not in set(accepted)][:needed]
+            accepted = accepted + add
+        best_res = _cv_cached(accepted, dbg=bool(debug), allow_flips=False)
+        best_val = _metric(best_res)
+        best_ll  = _ll(best_res)
+        best_br  = _br(best_res)
+        history.append(("SEED_FIRSTK", len(accepted), None, True, best_val, best_ll, best_br, 0, []))
+
+    else:
+        # "earned": accept-only improvements until we reach min_k (or patience)
+        # Need a finite baseline; if we have none, we’ll set baseline from first accepted feature.
+        if best_res is not None:
+            history.append(("SEED_BASE", len(accepted), None, True, best_val, best_ll, best_br, 0, []))
+
+        for i, feat in enumerate(ordered, start=1):
+            if feat in set(accepted):
+                continue
+            if len(accepted) >= min_k:
+                break
+            if len(accepted) >= max_k:
+                break
+
+            trial = accepted + [feat]
+            dbg = bool(debug and (i % int(debug_every) == 0))
+            res_try = _cv_cached(trial, dbg=dbg, allow_flips=False)
+
+            val_try = _metric(res_try)
+            ll_try  = _ll(res_try)
+            br_try  = _br(res_try)
+
+            # If we don't have a baseline yet (must_keep empty), accept the first sane result
+            if best_res is None:
+                if np.isfinite(val_try) or (accept_metric == "score" and np.isfinite(val_try)):
+                    accepted = trial
+                    best_res = res_try
+                    best_val = val_try
+                    best_ll  = ll_try
+                    best_br  = br_try
+                    rejects_in_row = 0
+                    history.append(("SEED_EARN", len(trial), feat, True, val_try, ll_try, br_try,
+                                    int(res_try.get("n_feature_flips", 0)), res_try.get("flipped_features", [])))
+                    if verbose:
+                        log_func(f"[AUTO-FEAT] 🌱 seed accept (baseline) +{feat} -> {accept_metric}={best_val:.6f} k={len(accepted)}")
+                else:
+                    rejects_in_row += 1
+                    history.append(("SEED_EARN", len(trial), feat, False, val_try, ll_try, br_try,
+                                    int(res_try.get("n_feature_flips", 0)), res_try.get("flipped_features", [])))
+                continue
+
+            accepted_flag = _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br)
+
+            if accepted_flag:
+                accepted = trial
+                best_res = res_try
+                best_val = val_try
+                if np.isfinite(ll_try): best_ll = ll_try
+                if np.isfinite(br_try): best_br = br_try
+                rejects_in_row = 0
+                if verbose:
+                    log_func(f"[AUTO-FEAT] 🌱 seed accept +{feat} -> {accept_metric}={best_val:.6f} k={len(accepted)}")
+            else:
+                rejects_in_row += 1
+                if verbose and dbg:
+                    log_func(f"[AUTO-FEAT] 🌱 seed reject +{feat} -> {accept_metric}={val_try:.6f} (best={best_val:.6f})")
+
+            history.append(("SEED_EARN", len(trial), feat, accepted_flag, val_try, ll_try, br_try,
+                            int(res_try.get("n_feature_flips", 0)), res_try.get("flipped_features", [])))
+
+            if rejects_in_row >= int(patience):
+                if verbose:
+                    log_func(f"[AUTO-FEAT] Seed stop: {rejects_in_row} consecutive rejects (k={len(accepted)})")
+                break
+
+        # If we still didn't reach min_k, that's OK — we'll continue main greedy from current accepted set.
+        history.append(("SEED_DONE", len(accepted), None, True, best_val, best_ll, best_br, 0, []))
+
+    # ============================================================
+    # MAIN GREEDY ADD (continue scanning from ordered list)
+    # ============================================================
+    rejects_in_row = 0
+    accepted_set = set(accepted)
+
+    for i, feat in enumerate(ordered, start=1):
+        if feat in accepted_set:
+            continue
         if len(accepted) >= max_k:
             break
 
@@ -3171,16 +3297,11 @@ def _auto_select_k_by_auc(
         ll_try  = _ll(res_try)
         br_try  = _br(res_try)
 
-        accepted_flag = False
-
-        if np.isfinite(val_try) and np.isfinite(best_val):
-            ll_ok = (not np.isfinite(ll_try)) or (not np.isfinite(best_ll)) or (ll_try <= best_ll + float(max_ll_increase))
-            br_ok = (not np.isfinite(br_try)) or (not np.isfinite(best_br)) or (br_try <= best_br + float(max_brier_increase))
-            if ll_ok and br_ok and (val_try >= best_val + float(min_improve)):
-                accepted_flag = True
+        accepted_flag = _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br)
 
         if accepted_flag:
             accepted = trial
+            accepted_set.add(feat)
             best_res = res_try
             best_val = val_try
             if np.isfinite(ll_try): best_ll = ll_try
@@ -3191,7 +3312,7 @@ def _auto_select_k_by_auc(
                 log_func(f"[AUTO-FEAT] ✅ accept +{feat} -> {accept_metric}={best_val:.6f} k={len(accepted)}")
         else:
             rejects_in_row += 1
-            if verbose:
+            if verbose and dbg:
                 log_func(f"[AUTO-FEAT] ✖ reject +{feat} -> {accept_metric}={val_try:.6f} (best={best_val:.6f})")
 
         history.append(("TRY", len(trial), feat, accepted_flag, val_try, ll_try, br_try,
@@ -3202,7 +3323,7 @@ def _auto_select_k_by_auc(
                 log_func(f"[AUTO-FEAT] Stop: {rejects_in_row} consecutive rejects (k={len(accepted)})")
             break
 
-    # ---- optional orientation pass on final accepted set ----
+    # ---- optional: one orientation pass on final accepted set ----
     if flips_after_selection and orient_features and accepted:
         best_res = _cv_cached(accepted, dbg=False, allow_flips=True)
         best_val = _metric(best_res)
@@ -3213,7 +3334,6 @@ def _auto_select_k_by_auc(
             )
 
     return list(accepted), best_res, history
-
 
 
 def select_features_auto(
@@ -3354,6 +3474,7 @@ def select_features_auto(
         n_feats = len(keep_order)
         seed_k = int(max(1, min(int(auc_min_k), n_feats)))
 
+      
         accepted_feats, best_res, history = _auto_select_k_by_auc(
             model_proto,
             X_df_train,
@@ -3374,12 +3495,12 @@ def select_features_auto(
             orient_passes=1,
             accept_metric=str(accept_metric),
             flips_after_selection=True,
-        )
 
-        # ✅ Use what greedy actually accepted (not keep_order[:k])
+            # ✅ NEW
+            must_keep=mk_in,
+            seed_mode="earned",   # or "firstk" to revert
+        )
         final_feats = accepted_feats if accepted_feats else mk_in
-    else:
-        final_feats = keep_order
     # 3c) logging
     if auc_verbose:
         log_func(f"[AUTO-FEAT] Final selected (improvement-only): n_feats={len(final_feats)} metric={accept_metric}")
