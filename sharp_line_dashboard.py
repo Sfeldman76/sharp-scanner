@@ -3258,7 +3258,8 @@ def _auto_select_k_by_auc(
     # ============================================================
     accepted = list(mk)
     near_miss = []  # (gain, feat)
-
+    top_quick = []          # list of (quick_gain, feat)
+    TOP_QUICK_K = 40        # tune: 20–40 is typical
     best_res = _cv_cached(accepted, dbg=bool(debug), allow_flips=False) if accepted else None
     if best_res is not None:
         best_val = _metric(best_res)
