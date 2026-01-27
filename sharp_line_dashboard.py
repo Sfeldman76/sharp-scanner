@@ -3586,7 +3586,7 @@ def select_features_auto(
     # Optional: make it obvious which ones were missing from rank_df
     summary["in_rank_df"] = summary.index.isin(rank_df.index)
 
-return feature_cols, summary
+
 
     return feature_cols, summary
 
