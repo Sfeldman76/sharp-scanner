@@ -3089,7 +3089,7 @@ def _auto_select_k_by_auc(
     # ✅ quick screen knobs (tuned to be LESS aggressive)
     quick_screen: bool = True,
     quick_folds: int = 1,
-    quick_drop: float = 2e-3,     # was 1e-3 (too aggressive)
+    quick_drop: float = 1e-5,     # was 1e-3 (too aggressive)
     quick_accept: float = 0.0,    # was 2e-4 (caused many “quick-skips”)
 
     must_keep: list[str] | None = None,
@@ -3113,10 +3113,7 @@ def _auto_select_k_by_auc(
       - full CV only for promising candidates
       - early-abort only when optimizing AUC (safe)
     """
-    import numpy as np
-    import pandas as pd
-    from sklearn.base import clone
-    from sklearn.metrics import roc_auc_score
+
 
     folds = list(folds)
 
@@ -3297,8 +3294,9 @@ def _auto_select_k_by_auc(
             if (not force_full_scan) and (len(accepted) >= min_k):
                 break
 
-            if verbose:
+            if verbose and (i % 25 == 0 or i <= 10):
                 log_func(f"[AUTO-FEAT] try {i}/{len(ordered)} +{feat} (k={len(accepted)})")
+           
 
             trial = accepted + [feat]
             if not _psi_ok(trial):
@@ -3416,7 +3414,7 @@ def select_features_auto(
     use_auc_auto: bool = True,
     auc_min_k: int = 40,          # seed size
     auc_patience: int = 80,       # stop after N rejects
-    auc_min_improve: float = 5e-5,# required gain to accept
+    auc_min_improve: float = 5e-6,# required gain to accept
     auc_verbose: bool = True,
 
     # ✅ NEW: choose what “improve” means
