@@ -2659,7 +2659,8 @@ def _cv_auc_for_feature_set(
     orient_max_candidates=None,
     orient_use_corr_prefilter=False,
     orient_corr_abs_min=0.01,
-
+    abort_if_cannot_beat_score=None,
+    abort_margin=0.0
     # ---- leakage guards ----
     game_keys=None,
     enforce_no_game_overlap=True,
@@ -2939,7 +2940,12 @@ def _cv_auc_for_feature_set(
     # ============================================================
     # BASELINE: compute full CV metrics for current feature set
     # ============================================================
-    base = _oof_metrics_for_X(X, feature_list)
+    base = _oof_metrics_for_X(
+        X, feature_list,
+        abort_if_cannot_beat_score=abort_if_cannot_beat_score,
+        abort_margin=float(abort_margin),
+    )
+
     best_metrics = dict(base)
     best_score = float(best_metrics.get("score", float("-inf")))
     flipped_features = []
@@ -2995,12 +3001,14 @@ def _cv_auc_for_feature_set(
                 if (try_quick - cur_quick) < float(orient_quick_eps):
                     continue
 
+                
                 cand = _oof_metrics_for_X(
                     X_try,
                     feature_list,
-                    abort_if_cannot_beat_score=best_score,
-                    abort_margin=float(orient_full_abort_margin),
+                    abort_if_cannot_beat_score=best_score if abort_if_cannot_beat_score is None else abort_if_cannot_beat_score,
+                    abort_margin=float(orient_full_abort_margin if abort_margin in (0.0, None) else abort_margin),
                 )
+
                 if cand.get("aborted", False):
                     continue
 
@@ -3063,7 +3071,7 @@ def _auto_select_k_by_auc(
     verbose=True,
     log_func=print,
     debug=False,
-    debug_every=40,
+    debug_every=60,
     auc_tie_eps=0.002,
     max_ll_increase=0.20,
     max_brier_increase=0.06,
@@ -3137,7 +3145,8 @@ def _auto_select_k_by_auc(
     _cv_cache: dict[tuple, dict] = {}
     eval_calls = 0
 
-    def _cv_cached(feats, *, dbg=False, allow_flips=False):
+  
+    def _cv_cached(feats, *, dbg=False, allow_flips=False, abort_score=None, abort_margin=0.0):
         nonlocal eval_calls
         ef = bool(enable_feature_flips and allow_flips)
         mff = int(max_feature_flips if ef else 0)
@@ -3173,6 +3182,7 @@ def _auto_select_k_by_auc(
 
         eval_calls += 1
 
+   
         res = _cv_auc_for_feature_set(
             model_proto, X, y_arr, folds, list(feats),
             log_func=log_func,
@@ -3184,7 +3194,12 @@ def _auto_select_k_by_auc(
             orient_passes=int(orient_passes),
             enforce_no_game_overlap=True,
             fallback_to_all_available_features=True,
+        
+            # ✅ NEW: abort CV early when it can't possibly beat current best
+            abort_if_cannot_beat_score=abort_score,
+            abort_margin=float(abort_margin),
         )
+
         _cv_cache[key] = res
         return res
 
@@ -3315,7 +3330,14 @@ def _auto_select_k_by_auc(
 
             trial = accepted + [feat]
             dbg = bool(debug and (i % int(debug_every) == 0))
-            res_try = _cv_cached(trial, dbg=dbg, allow_flips=False)
+           
+            res_try = _cv_cached(
+                trial,
+                dbg=dbg,
+                allow_flips=False,
+                abort_score=float(best_val) if np.isfinite(best_val) else None,
+                abort_margin=2e-4,  # tune
+            )
             if res_try.get("aborted", False):
                 break
 
@@ -3577,7 +3599,7 @@ def select_features_auto(
             verbose=bool(auc_verbose),
             log_func=log_func,
             debug=True,
-            debug_every=15,
+            debug_every=40,
             orient_features=True,
             enable_feature_flips=True,
             max_feature_flips=3,
