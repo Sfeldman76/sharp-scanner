@@ -3613,8 +3613,14 @@ def select_features_auto(
 
     mk_in = [m for m in must_keep if m in X_df_train.columns]
     keep_order = list(dict.fromkeys(mk_in + keep_order))
-    if len(keep_order) > cap:
-        keep_order = keep_order[:cap]
+   
+    # ✅ optional: if you want FULL scan, override cap
+    FULL_SCAN_ALL_X = True
+    if FULL_SCAN_ALL_X:
+        keep_order = list(dict.fromkeys(mk_in + list(X_df_train.columns)))
+    else:
+        if len(keep_order) > cap:
+            keep_order = keep_order[:cap]
 
     # ✅ 3b) Greedy accept-only-if-improves
   
@@ -3647,8 +3653,18 @@ def select_features_auto(
 
             # ✅ NEW
             must_keep=mk_in,
-            seed_mode="earned",   # or "firstk" to revert
+            seed_mode="earned",
+                must_keep=mk_in,
+            seed_mode="earned",
+        
+            # ✅ ADD THESE
+            force_full_scan=True,
+            near_miss_margin=2e-4,
+            near_miss_topk=40,
+            bundle_try_k=5,
+            max_total_evals=None,
         )
+        
         final_feats = accepted_feats if accepted_feats else mk_in
     # 3c) logging
     if auc_verbose:
