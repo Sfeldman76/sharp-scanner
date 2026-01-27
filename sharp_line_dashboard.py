@@ -3305,12 +3305,22 @@ def _auto_select_k_by_auc(
             if not _psi_ok(trial):
                 continue
 
-            # ✅ Quick screen: only drop obvious losers
+            # ✅ Quick screen: score cheaply, but DON’T permanently discard good-but-contextual features
+            q = None
             if quick_screen and np.isfinite(best_val):
                 q = _quick_auc_for_feats(trial)
-                if np.isfinite(q) and (q < float(best_val) - float(quick_drop)):
-                    continue
-
+                if np.isfinite(q):
+                    q_gain = float(q - best_val)
+            
+                    # Track top quick candidates for later "second-chance" pass
+                    top_quick.append((q_gain, feat))
+                    top_quick.sort(reverse=True, key=lambda t: t[0])
+                    if len(top_quick) > TOP_QUICK_K:
+                        top_quick = top_quick[:TOP_QUICK_K]
+            
+                    # Hard drop only truly awful quick results (keep this loose)
+                    if q_gain < -float(quick_drop):
+                        continue
             dbg = bool(debug and (i % int(debug_every) == 0))
 
             # ✅ Early-abort only makes sense when optimizing AUC
@@ -3355,7 +3365,51 @@ def _auto_select_k_by_auc(
                     break
 
         history.append(("SEED_DONE", len(accepted), None, True, best_val, best_ll, best_br, 0, []))
-
+    # ============================================================
+    # TOP-QUICK SECOND-CHANCE PASS
+    # (retest best quick candidates after context exists)
+    # ============================================================
+    if top_quick:
+        if verbose:
+            log_func(f"[AUTO-FEAT] 🔁 top-quick second chance: retrying {len(top_quick)} feats (k={len(accepted)})")
+    
+        # retry in descending quick_gain order
+        for q_gain, feat in top_quick:
+            if feat in set(accepted):
+                continue
+            if len(accepted) >= max_k:
+                break
+    
+            trial = accepted + [feat]
+            if not _psi_ok(trial):
+                continue
+    
+            # AUC-only abort is safe here because accept_metric is "auc" in your runs
+            use_abort = (accept_metric == "auc") and np.isfinite(best_val)
+    
+            res_try = _cv_cached(
+                trial,
+                dbg=False,
+                allow_flips=False,
+                abort_score=float(best_val) if use_abort else None,
+                abort_margin=float(abort_margin_cv) if use_abort else 0.0,
+            )
+            if res_try.get("aborted", False):
+                continue
+    
+            val_try = _metric(res_try)
+            ll_try  = _ll(res_try)
+            br_try  = _br(res_try)
+    
+            if _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br):
+                accepted = trial
+                best_res = res_try
+                best_val = val_try
+                if np.isfinite(ll_try): best_ll = ll_try
+                if np.isfinite(br_try): best_br = br_try
+    
+                if verbose:
+                    log_func(f"[AUTO-FEAT] 🔁 rescue accept +{feat} (q_gain={q_gain:+.5f}) -> auc={best_val:.6f} k={len(accepted)}")
     # ============================================================
     # NEAR-MISS BUNDLE TRY (optional)
     # ============================================================
