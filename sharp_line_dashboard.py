@@ -2652,7 +2652,8 @@ def _cv_auc_for_feature_set(
     eps=1e-6,
 
     # ---- speed knobs for feature orientation ----
-    orient_quick_folds=1,
+
+    orient_quick_folds=2,
     orient_quick_eps=2e-4,
     orient_full_min_gain=1e-5,
     orient_full_abort_margin=2e-4,
@@ -3088,10 +3089,12 @@ def _auto_select_k_by_auc(
 
     # ✅ quick screen knobs (tuned to be LESS aggressive)
     quick_screen: bool = True,
-    quick_folds: int = 1,
-    quick_drop: float = 1e-5,     # was 1e-3 (too aggressive)
-    quick_accept: float = 0.0,    # was 2e-4 (caused many “quick-skips”)
 
+  # was 2e-4 (caused many “quick-skips”)
+    quick_folds=2,
+    quick_accept=0.0,
+    quick_drop=0.01,
+    abort_margin_cv=0.005,
     must_keep: list[str] | None = None,
     seed_mode: str = "earned",
 
@@ -3105,7 +3108,7 @@ def _auto_select_k_by_auc(
     max_total_evals: int | None = None,
 
     # ✅ full-CV early abort margin (looser)
-    abort_margin_cv: float = 2e-3,   # was 2e-4 (too tight)
+   # was 2e-4 (too tight)
 ):
     """
     SINGLE-PASS feature selection with:
