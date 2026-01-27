@@ -3654,9 +3654,7 @@ def select_features_auto(
             # ✅ NEW
             must_keep=mk_in,
             seed_mode="earned",
-                must_keep=mk_in,
-            seed_mode="earned",
-        
+           
             # ✅ ADD THESE
             force_full_scan=True,
             near_miss_margin=2e-4,
