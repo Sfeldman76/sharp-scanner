@@ -3252,7 +3252,48 @@ def _auto_select_k_by_auc(
         if valid.sum() < 2 or len(np.unique(y_arr[valid])) < 2:
             return float("nan")
         return float(roc_auc_score(y_arr[valid], oof_q[valid]))
-
+    def _quick_flip_gain_one_fold(feat: str, feats_current: list[str]) -> float:
+        """
+        1-fold fade check:
+          returns (auc_flipped - auc_base) on fold 0 for the CURRENT feature set.
+        """
+        if not folds:
+            return 0.0
+        tr_idx, val_idx = folds[0]
+    
+        # must be numeric-ish
+        try:
+            _ = pd.to_numeric(X[feat], errors="coerce")
+        except Exception:
+            return 0.0
+    
+        feats = list(feats_current)
+    
+        # baseline
+        try:
+            mdl0 = clone(model_proto)
+            mdl0.fit(X.iloc[tr_idx][feats], y_arr[tr_idx])
+            p0 = np.asarray(_safe_predict_proba_pos(mdl0, X.iloc[val_idx][feats]), float).ravel()
+            p0 = np.clip(p0, 1e-6, 1 - 1e-6)
+            auc0 = roc_auc_score(y_arr[val_idx], p0)
+        except Exception:
+            return 0.0
+    
+        # flipped
+        try:
+            Xf = X.copy()
+            Xf[feat] = -pd.to_numeric(Xf[feat], errors="coerce")
+            mdl1 = clone(model_proto)
+            mdl1.fit(Xf.iloc[tr_idx][feats], y_arr[tr_idx])
+            p1 = np.asarray(_safe_predict_proba_pos(mdl1, Xf.iloc[val_idx][feats]), float).ravel()
+            p1 = np.clip(p1, 1e-6, 1 - 1e-6)
+            auc1 = roc_auc_score(y_arr[val_idx], p1)
+        except Exception:
+            return 0.0
+    
+        if not np.isfinite(auc0) or not np.isfinite(auc1):
+            return 0.0
+        return float(auc1 - auc0)
     # ============================================================
     # BASELINE
     # ============================================================
@@ -3327,14 +3368,26 @@ def _auto_select_k_by_auc(
             # ✅ Early-abort only makes sense when optimizing AUC
             use_abort = (accept_metric == "auc") and np.isfinite(best_val)
 
+            if do_flip:
+                X_orig = X
+                try:
+                    X = X.copy()
+                    X[feat] = -pd.to_numeric(X[feat], errors="coerce")
+                except Exception:
+                    X = X_orig
+                    do_flip = False
+            
             res_try = _cv_cached(
                 trial,
-                dbg=dbg,
+                dbg=False,
                 allow_flips=False,
                 abort_score=float(best_val) if use_abort else None,
                 abort_margin=float(abort_margin_cv) if use_abort else 0.0,
             )
-
+            
+            # restore X
+            if do_flip:
+                X = X_orig
             # If it aborted, that candidate can't beat best under the AUC bound; just skip it.
             if res_try.get("aborted", False):
                 continue
