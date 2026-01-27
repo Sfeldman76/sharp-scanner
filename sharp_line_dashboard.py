@@ -2660,7 +2660,7 @@ def _cv_auc_for_feature_set(
     orient_use_corr_prefilter=False,
     orient_corr_abs_min=0.01,
     abort_if_cannot_beat_score=None,
-    abort_margin=0.0
+    abort_margin=0.0,
     # ---- leakage guards ----
     game_keys=None,
     enforce_no_game_overlap=True,
