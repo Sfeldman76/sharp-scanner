@@ -3297,7 +3297,7 @@ def _auto_select_k_by_auc(
             if (not force_full_scan) and (len(accepted) >= min_k):
                 break
 
-            if verbose and (i % 10 == 0 or i <= 10):
+            if verbose:
                 log_func(f"[AUTO-FEAT] try {i}/{len(ordered)} +{feat} (k={len(accepted)})")
 
             trial = accepted + [feat]
