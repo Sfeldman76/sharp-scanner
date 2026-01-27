@@ -3058,25 +3058,25 @@ def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
     min_k=40,                      # target seed size (earned)
     max_k=None,                    # max accepted features
-    patience=160,                  # stop after N rejects in a row (seed + main)  (ignored if force_full_scan=True)
-    min_improve=5e-5,              # required improvement to accept (AUC or score)
+    patience=40,                  # ignored when force_full_scan=True
+    min_improve=5e-5,
     verbose=True,
     log_func=print,
     debug=False,
-    debug_every=10,
-    auc_tie_eps=0.002,             # unused (kept for signature parity)
+    debug_every=40,
+    auc_tie_eps=0.002,
     max_ll_increase=0.20,
     max_brier_increase=0.06,
     orient_features=True,
-    enable_feature_flips=True,     # no flips during selection; optional final pass
+    enable_feature_flips=True,     # used only by _cv_cached when allow_flips=True (final pass)
     max_feature_flips=3,
     orient_passes=1,
-    force_full_scan=True,          # ✅ NOW applied in BOTH seed + main
+    force_full_scan=True,
     fallback_to_all_available_features=True,
     require_present_in_X=True,
 
     accept_metric: str = "auc",    # "auc" or "score"
-    flips_after_selection: bool = True,  # one final orientation pass
+    flips_after_selection: bool = True,
 
     must_keep: list[str] | None = None,
     seed_mode: str = "earned",     # "earned" or "firstk"
@@ -3091,16 +3091,14 @@ def _auto_select_k_by_auc(
     max_total_evals: int | None = None,
 ):
     """
-    Greedy forward selection with:
-      - earned seed (accept-only-if-improves)
-      - optional quick fade rescue (1-fold flip check)
-      - near-miss pooling + bundle acceptance
-      - optional PSI guard
-      - optional hard cap on total CV evals
+    SINGLE-PASS feature selection:
+      - Runs ONE forward scan (seed pass).
+      - If force_full_scan=True, the seed pass scans ALL candidates (ordered_features).
+      - No second/main pass.
 
-    Logging upgrades:
-      ✅ prints header: len(ordered) vs X.shape[1]
-      ✅ prints every attempt: [AUTO-FEAT] try i/N +feat
+    Logging:
+      - prints header: len(ordered) vs X.shape[1]
+      - prints every attempt: [AUTO-FEAT] try i/N +feat (seed k=...)
     """
     import numpy as np
     import pandas as pd
@@ -3268,7 +3266,7 @@ def _auto_select_k_by_auc(
     # BASELINE
     # ============================================================
     accepted = list(mk)
-    near_miss = []  # list of (gain, feat)
+    near_miss = []  # (gain, feat)
 
     best_res = _cv_cached(accepted, dbg=bool(debug), allow_flips=False) if accepted else None
     if best_res is not None:
@@ -3284,7 +3282,7 @@ def _auto_select_k_by_auc(
         log_func(f"[AUTO-FEAT] start: must_keep={len(mk)} seed_mode={seed_mode} target_seed={min_k} metric={accept_metric}")
 
     # ============================================================
-    # SEED BUILD
+    # SINGLE PASS: SEED / FORWARD SCAN
     # ============================================================
     rejects_in_row = 0
 
@@ -3304,9 +3302,6 @@ def _auto_select_k_by_auc(
         if best_res is not None:
             history.append(("SEED_BASE", len(accepted), None, True, best_val, best_ll, best_br, 0, []))
 
-        # IMPORTANT:
-        # - If force_full_scan=True, we DO NOT stop scanning when we hit min_k.
-        # - We still won't accept beyond max_k (hard).
         for i, feat in enumerate(ordered, start=1):
             if feat in set(accepted):
                 continue
@@ -3328,7 +3323,7 @@ def _auto_select_k_by_auc(
             ll_try  = _ll(res_try)
             br_try  = _br(res_try)
 
-            # no baseline yet (must_keep empty): accept first finite
+            # baseline-less case (rare here because you usually have must_keep)
             if best_res is None:
                 if np.isfinite(val_try) and _psi_ok(trial):
                     accepted = trial
@@ -3384,67 +3379,7 @@ def _auto_select_k_by_auc(
         history.append(("SEED_DONE", len(accepted), None, True, best_val, best_ll, best_br, 0, []))
 
     # ============================================================
-    # MAIN GREEDY ADD
-    # ============================================================
-    rejects_in_row = 0
-    accepted_set = set(accepted)
-
-    for i, feat in enumerate(ordered, start=1):
-        if feat in accepted_set:
-            continue
-        if len(accepted) >= max_k:
-            break
-
-        if verbose:
-            log_func(f"[AUTO-FEAT] try {i}/{len(ordered)} +{feat} (main k={len(accepted)})")
-
-        trial = accepted + [feat]
-        dbg = bool(debug and (i % int(debug_every) == 0))
-        res_try = _cv_cached(trial, dbg=dbg, allow_flips=False)
-        if res_try.get("aborted", False):
-            break
-
-        val_try = _metric(res_try)
-        ll_try  = _ll(res_try)
-        br_try  = _br(res_try)
-
-        accepted_flag = _accept_ok(
-            val_try, best_val, ll_try, best_ll, br_try, best_br,
-            rescue=(lambda f=feat, cur=accepted: _quick_flip_rescue(f, cur)),
-        ) and _psi_ok(trial)
-
-        if accepted_flag:
-            accepted = trial
-            accepted_set.add(feat)
-            best_res = res_try
-            best_val = val_try
-            if np.isfinite(ll_try): best_ll = ll_try
-            if np.isfinite(br_try): best_br = br_try
-            rejects_in_row = 0
-            if verbose:
-                log_func(f"[AUTO-FEAT] ✅ accept +{feat} -> {accept_metric}={best_val:.6f} k={len(accepted)}")
-        else:
-            rejects_in_row += 1
-            if np.isfinite(best_val) and np.isfinite(val_try):
-                gain = float(val_try - best_val)
-                if gain >= -float(near_miss_margin):
-                    near_miss.append((gain, feat))
-                    near_miss.sort(reverse=True, key=lambda t: t[0])
-                    if len(near_miss) > int(near_miss_topk):
-                        near_miss = near_miss[: int(near_miss_topk)]
-            if verbose and dbg:
-                log_func(f"[AUTO-FEAT] ✖ reject +{feat} -> {accept_metric}={val_try:.6f} (best={best_val:.6f})")
-
-        history.append(("TRY", len(trial), feat, accepted_flag, val_try, ll_try, br_try,
-                        int(res_try.get("n_feature_flips", 0)), res_try.get("flipped_features", [])))
-
-        if (not force_full_scan) and (rejects_in_row >= int(patience)):
-            if verbose:
-                log_func(f"[AUTO-FEAT] Stop: {rejects_in_row} consecutive rejects (k={len(accepted)})")
-            break
-
-    # ============================================================
-    # NEAR-MISS BUNDLE TRY
+    # NEAR-MISS BUNDLE TRY (still allowed in single-pass mode)
     # ============================================================
     if near_miss and bundle_try_k and len(accepted) < max_k:
         bundle = [f for _, f in near_miss if f not in set(accepted)]
@@ -3483,7 +3418,6 @@ def _auto_select_k_by_auc(
             )
 
     return list(accepted), best_res, history
-
 
 def select_features_auto(
     model_proto,
