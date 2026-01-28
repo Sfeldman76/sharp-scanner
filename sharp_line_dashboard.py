@@ -9736,7 +9736,7 @@ def train_sharp_model_from_bq(
             #'Book_lift_x_Magnitude',
             #'Book_lift_x_PROB_SHIFT',
             'Sharp_Limit_Total',
-            'Is_Reinforced_MultiMarket','Market_Leader','LimitUp_NoMove_Flag','Value'
+            'Is_Reinforced_MultiMarket','Market_Leader','LimitUp_NoMove_Flag','Value',
             
         
             # 🔹 Market response
