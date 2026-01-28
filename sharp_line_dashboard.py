@@ -3062,7 +3062,6 @@ def _cv_auc_for_feature_set(
 
     return out
 
-
 def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
     min_k=40,
@@ -3087,14 +3086,13 @@ def _auto_select_k_by_auc(
     accept_metric: str = "auc",
     flips_after_selection: bool = True,
 
-    # ✅ quick screen knobs (tuned to be LESS aggressive)
+    # quick screen knobs
     quick_screen: bool = True,
+    quick_folds: int = 2,
+    quick_accept: float = 0.0,   # not used (kept for signature parity)
+    quick_drop: float = 0.01,    # hard-drop if quick is worse than best by > this
+    abort_margin_cv: float = 0.005,
 
-  # was 2e-4 (caused many “quick-skips”)
-    quick_folds=2,
-    quick_accept=0.0,
-    quick_drop=0.01,
-    abort_margin_cv=0.005,
     must_keep: list[str] | None = None,
     seed_mode: str = "earned",
 
@@ -3107,16 +3105,23 @@ def _auto_select_k_by_auc(
 
     max_total_evals: int | None = None,
 
-    # ✅ full-CV early abort margin (looser)
-   # was 2e-4 (too tight)
+    # top-quick rescue knobs
+    top_quick_k: int = 40,
+    fade_flip_eps: float = 2e-4,   # 1-fold flip gain threshold
 ):
     """
     SINGLE-PASS feature selection with:
-      - 1-fold quick screen (drops only obvious losers)
-      - full CV only for promising candidates
-      - early-abort only when optimizing AUC (safe)
-    """
+      - quick screen (2 folds)
+      - full CV only for non-awful candidates, with early-abort
+      - top-quick second-chance pass (full CV on best quick candidates)
+      - fade (sign) detection in second-chance pass only (cheap, safe)
 
+    Requires: _cv_auc_for_feature_set supports abort_if_cannot_beat_score / abort_margin kwargs.
+    """
+    import numpy as np
+    import pandas as pd
+    from sklearn.base import clone
+    from sklearn.metrics import roc_auc_score
 
     folds = list(folds)
 
@@ -3153,7 +3158,6 @@ def _auto_select_k_by_auc(
         ef = bool(enable_feature_flips and allow_flips)
         mff = int(max_feature_flips if ef else 0)
 
-        # NOTE: Do NOT include abort_score in the cache key; it doesn't change the final metrics, only speed.
         key = (
             tuple(feats),
             ef,
@@ -3196,8 +3200,6 @@ def _auto_select_k_by_auc(
             orient_passes=int(orient_passes),
             enforce_no_game_overlap=True,
             fallback_to_all_available_features=True,
-
-            # ✅ use early-abort only when caller provides it
             abort_if_cannot_beat_score=abort_score,
             abort_margin=float(abort_margin),
         )
@@ -3235,7 +3237,7 @@ def _auto_select_k_by_auc(
             return True
         return bool(val_try >= float(best_val) + float(min_improve))
 
-    # ✅ Quick screen AUC on 1 fold (or 2 folds)
+    # quick screen AUC on 1–2 folds
     def _quick_auc_for_feats(feats) -> float:
         if not folds:
             return float("nan")
@@ -3252,6 +3254,7 @@ def _auto_select_k_by_auc(
         if valid.sum() < 2 or len(np.unique(y_arr[valid])) < 2:
             return float("nan")
         return float(roc_auc_score(y_arr[valid], oof_q[valid]))
+
     def _quick_flip_gain_one_fold(feat: str, feats_current: list[str]) -> float:
         """
         1-fold fade check:
@@ -3260,15 +3263,14 @@ def _auto_select_k_by_auc(
         if not folds:
             return 0.0
         tr_idx, val_idx = folds[0]
-    
-        # must be numeric-ish
+
         try:
             _ = pd.to_numeric(X[feat], errors="coerce")
         except Exception:
             return 0.0
-    
+
         feats = list(feats_current)
-    
+
         # baseline
         try:
             mdl0 = clone(model_proto)
@@ -3278,7 +3280,7 @@ def _auto_select_k_by_auc(
             auc0 = roc_auc_score(y_arr[val_idx], p0)
         except Exception:
             return 0.0
-    
+
         # flipped
         try:
             Xf = X.copy()
@@ -3290,17 +3292,18 @@ def _auto_select_k_by_auc(
             auc1 = roc_auc_score(y_arr[val_idx], p1)
         except Exception:
             return 0.0
-    
+
         if not np.isfinite(auc0) or not np.isfinite(auc1):
             return 0.0
         return float(auc1 - auc0)
+
     # ============================================================
     # BASELINE
     # ============================================================
     accepted = list(mk)
-    near_miss = []  # (gain, feat)
-    top_quick = []          # list of (quick_gain, feat)
-    TOP_QUICK_K = 40        # tune: 20–40 is typical
+    near_miss = []
+    top_quick = []  # list of (quick_gain, feat)
+
     best_res = _cv_cached(accepted, dbg=bool(debug), allow_flips=False) if accepted else None
     if best_res is not None:
         best_val = _metric(best_res)
@@ -3324,6 +3327,7 @@ def _auto_select_k_by_auc(
         if needed > 0:
             add = [f for f in ordered if f not in set(accepted)][:needed]
             accepted = accepted + add
+
         best_res = _cv_cached(accepted, dbg=bool(debug), allow_flips=False)
         best_val = _metric(best_res)
         best_ll  = _ll(best_res)
@@ -3341,54 +3345,37 @@ def _auto_select_k_by_auc(
 
             if verbose and (i % 25 == 0 or i <= 10):
                 log_func(f"[AUTO-FEAT] try {i}/{len(ordered)} +{feat} (k={len(accepted)})")
-           
 
             trial = accepted + [feat]
             if not _psi_ok(trial):
                 continue
 
-            # ✅ Quick screen: score cheaply, but DON’T permanently discard good-but-contextual features
-            q = None
+            # quick screen + top_quick tracking
             if quick_screen and np.isfinite(best_val):
                 q = _quick_auc_for_feats(trial)
                 if np.isfinite(q):
                     q_gain = float(q - best_val)
-            
-                    # Track top quick candidates for later "second-chance" pass
+
+                    # track top quick candidates
                     top_quick.append((q_gain, feat))
                     top_quick.sort(reverse=True, key=lambda t: t[0])
-                    if len(top_quick) > TOP_QUICK_K:
-                        top_quick = top_quick[:TOP_QUICK_K]
-            
-                    # Hard drop only truly awful quick results (keep this loose)
+                    if len(top_quick) > int(max(1, top_quick_k)):
+                        top_quick = top_quick[: int(max(1, top_quick_k))]
+
+                    # hard drop only truly awful quick results
                     if q_gain < -float(quick_drop):
                         continue
-            dbg = bool(debug and (i % int(debug_every) == 0))
 
-            # ✅ Early-abort only makes sense when optimizing AUC
+            dbg = bool(debug and (i % int(debug_every) == 0))
             use_abort = (accept_metric == "auc") and np.isfinite(best_val)
 
-            if do_flip:
-                X_orig = X
-                try:
-                    X = X.copy()
-                    X[feat] = -pd.to_numeric(X[feat], errors="coerce")
-                except Exception:
-                    X = X_orig
-                    do_flip = False
-            
             res_try = _cv_cached(
                 trial,
-                dbg=False,
+                dbg=dbg,
                 allow_flips=False,
                 abort_score=float(best_val) if use_abort else None,
                 abort_margin=float(abort_margin_cv) if use_abort else 0.0,
             )
-            
-            # restore X
-            if do_flip:
-                X = X_orig
-            # If it aborted, that candidate can't beat best under the AUC bound; just skip it.
             if res_try.get("aborted", False):
                 continue
 
@@ -3419,51 +3406,77 @@ def _auto_select_k_by_auc(
                     break
 
         history.append(("SEED_DONE", len(accepted), None, True, best_val, best_ll, best_br, 0, []))
+
     # ============================================================
-    # TOP-QUICK SECOND-CHANCE PASS
-    # (retest best quick candidates after context exists)
+    # TOP-QUICK SECOND-CHANCE PASS (WITH FADE CHECK)
     # ============================================================
     if top_quick:
         if verbose:
             log_func(f"[AUTO-FEAT] 🔁 top-quick second chance: retrying {len(top_quick)} feats (k={len(accepted)})")
-    
-        # retry in descending quick_gain order
+
         for q_gain, feat in top_quick:
             if feat in set(accepted):
                 continue
             if len(accepted) >= max_k:
                 break
-    
+
             trial = accepted + [feat]
             if not _psi_ok(trial):
                 continue
-    
-            # AUC-only abort is safe here because accept_metric is "auc" in your runs
+
             use_abort = (accept_metric == "auc") and np.isfinite(best_val)
-    
-            res_try = _cv_cached(
-                trial,
-                dbg=False,
-                allow_flips=False,
-                abort_score=float(best_val) if use_abort else None,
-                abort_margin=float(abort_margin_cv) if use_abort else 0.0,
-            )
+
+            # ✅ ALWAYS define before use
+            do_flip = False
+            X_orig = None
+
+            # fade detection (cheap 1-fold)
+            if orient_features:
+                fg = _quick_flip_gain_one_fold(feat, trial)
+                if fg >= float(fade_flip_eps):
+                    do_flip = True
+                    if verbose:
+                        log_func(f"[AUTO-FEAT] 🌓 fade detected +{feat} (flip_gain={fg:+.6f}) -> testing flipped")
+
+            # temporarily flip X for evaluation (safe restore)
+            if do_flip:
+                X_orig = X
+                try:
+                    X = X.copy()
+                    X[feat] = -pd.to_numeric(X[feat], errors="coerce")
+                except Exception:
+                    X = X_orig
+                    X_orig = None
+                    do_flip = False
+
+            try:
+                res_try = _cv_cached(
+                    trial,
+                    dbg=False,
+                    allow_flips=False,
+                    abort_score=float(best_val) if use_abort else None,
+                    abort_margin=float(abort_margin_cv) if use_abort else 0.0,
+                )
+            finally:
+                if do_flip and (X_orig is not None):
+                    X = X_orig
+
             if res_try.get("aborted", False):
                 continue
-    
+
             val_try = _metric(res_try)
             ll_try  = _ll(res_try)
             br_try  = _br(res_try)
-    
+
             if _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br):
                 accepted = trial
                 best_res = res_try
                 best_val = val_try
                 if np.isfinite(ll_try): best_ll = ll_try
                 if np.isfinite(br_try): best_br = br_try
-    
                 if verbose:
                     log_func(f"[AUTO-FEAT] 🔁 rescue accept +{feat} (q_gain={q_gain:+.5f}) -> auc={best_val:.6f} k={len(accepted)}")
+
     # ============================================================
     # NEAR-MISS BUNDLE TRY (optional)
     # ============================================================
@@ -3500,7 +3513,6 @@ def _auto_select_k_by_auc(
             log_func(f"[AUTO-FEAT] Final accepted set (post-orient): k={len(accepted)} {accept_metric}={best_val:.6f}")
 
     return list(accepted), best_res, history
-
 
 
 def select_features_auto(
