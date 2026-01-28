@@ -335,6 +335,14 @@ def _alias_lookup(s: str) -> str:
 
 import os
 
+@st.cache_resource
+def get_clients():
+    from google.cloud import bigquery, storage
+    return bigquery.Client(), storage.Client()
+
+bq, gcs = get_clients()
+
+
 def get_vcpus(env_var: str = "XGB_SEARCH_NJOBS") -> int:
     """Prefer ENV override; else fall back to container vCPU count."""
     val = os.getenv(env_var, "")
@@ -15474,6 +15482,10 @@ st.sidebar.checkbox(
 )
 
 pause_refresh = bool(st.session_state["pause_refresh_user"] or st.session_state["pause_refresh_lock"])
+# ✅ Global auto-refresh gate (NEVER refresh while training)
+if (not pause_refresh) and (not st.session_state.get("is_training", False)):
+    # refresh the *page state* (keep interval not too small)
+    st_autorefresh(interval=180_000, key="global_refresh")  # 3 minutes
 
 force_reload = st.sidebar.button("🔁 Force Reload", key="force_reload_btn")
 
