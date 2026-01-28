@@ -3067,7 +3067,7 @@ def _auto_select_k_by_auc(
     min_k=40,
     max_k=None,
     patience=40,                 # ignored when force_full_scan=True
-    min_improve=5e-5,
+    min_improve=5e-8,
     verbose=True,
     log_func=print,
     debug=False,
@@ -3091,7 +3091,7 @@ def _auto_select_k_by_auc(
     quick_folds: int = 2,
     quick_accept: float = 0.0,   # not used (kept for signature parity)
     quick_drop: float = 0.01,    # hard-drop if quick is worse than best by > this
-    abort_margin_cv: float = 0.005,
+    abort_margin_cv: float = 0.0005,
 
     must_keep: list[str] | None = None,
     seed_mode: str = "earned",
@@ -9811,7 +9811,7 @@ def train_sharp_model_from_bq(
             #'Book_lift_x_Magnitude',
             #'Book_lift_x_PROB_SHIFT',
             'Sharp_Limit_Total',
-            'Is_Reinforced_MultiMarket','Market_Leader','LimitUp_NoMove_Flag',
+            'Is_Reinforced_MultiMarket','Market_Leader','LimitUp_NoMove_Flag','Value'
             
         
             # 🔹 Market response
@@ -9862,7 +9862,7 @@ def train_sharp_model_from_bq(
 
             # Power ratings / edges
             'PR_Team_Rating','PR_Opp_Rating',
-            'PR_Rating_Diff',#'PR_Abs_Rating_Diff',
+            'PR_Rating_Diff','PR_Abs_Rating_Diff',
             'Outcome_Model_Spread','Outcome_Market_Spread',
             'Outcome_Spread_Edge',
             'Outcome_Cover_Prob',
@@ -11075,8 +11075,8 @@ def train_sharp_model_from_bq(
             y_train=y_train,
             folds=folds,                         # iterable of (train_idx, val_idx)
             sport_key=sport_key,                 # used for max feature cap
-            must_keep=["Is_Home_Team_Bet", "Is_Favorite_Bet"],
-            topk_per_fold=60,
+            must_keep=["Is_Home_Team_Bet", 'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Abs_Rating_Diff','Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge','Outcome_Cover_Prob',],
+            topk_per_fold=80,
             min_presence=0.60,
             corr_within=0.90,
             corr_global=0.92,
