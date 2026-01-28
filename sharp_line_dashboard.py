@@ -15520,6 +15520,39 @@ else:
     label = sport  # e.g., "WNBA"
     sport_key = SPORTS[sport]  # e.g., "basketball_wnba"
 
+    # put this near where you render the Train button (same league page section)
+    market_choice = st.sidebar.selectbox(
+        "Train which market?",
+        ["All", "spreads", "h2h", "totals"],
+        key=f"train_market_choice_{sport}",
+    )
+    
+    if st.button(f"📈 Train {sport} Sharp Model", key=f"train_{sport}_btn"):
+        st.session_state["is_training"] = True
+        st.session_state["pause_refresh_lock"] = True  # ✅ safe: not a widget key
+    
+        try:
+            # (optional) if you only want timing model trained when training "All"
+            if market_choice == "All":
+                train_timing_opportunity_model(sport=label)
+    
+            # decide which markets to train
+            if market_choice == "All":
+                markets_to_train = ("h2h", "spreads", "totals")
+            else:
+                markets_to_train = (market_choice,)
+    
+            for mkt in markets_to_train:
+                train_with_champion_wrapper(
+                    sport=label,
+                    market=mkt,
+                    bucket_name=GCS_BUCKET,
+                    log_func=st.write,
+                )
+    
+        finally:
+            st.session_state["pause_refresh_lock"] = False
+            st.session_state["is_training"] = False
 
     
   
