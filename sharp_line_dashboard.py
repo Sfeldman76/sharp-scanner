@@ -11,9 +11,12 @@ st.set_page_config(layout="wide")
 if "is_training" not in st.session_state:
     st.session_state["is_training"] = False
 
-if "pause_refresh_prev" not in st.session_state:
-    st.session_state["pause_refresh_prev"] = False
-    
+if "pause_refresh_lock" not in st.session_state:
+    st.session_state["pause_refresh_lock"] = False
+
+if "pause_refresh_user" not in st.session_state:
+    st.session_state["pause_refresh_user"] = False
+
 st.title("Betting Line Scanner")
 
 # --- Custom CSS for scrollable DataFrames ---
@@ -14221,10 +14224,10 @@ def _looks_malformed(html_str: str) -> bool:
 
 
 def render_scanner_tab(label, sport_key, container, force_reload=False):
-    if st.session_state.get("pause_refresh", False):
+
+    if st.session_state.get("pause_refresh_user", False) or st.session_state.get("pause_refresh_lock", False):
         st.info("⏸️ Auto-refresh paused")
         return
-
     with container:
         st.subheader(f"📡 Scanning {label} Sharp Signals")
         # Inject JS patch to log InvalidCharacterError with class/id context (browser console)
@@ -15695,12 +15698,14 @@ sport = st.sidebar.radio(
 
 st.sidebar.markdown("### ⚙️ Controls")
 
-pause_refresh = st.sidebar.checkbox(
+
+st.sidebar.checkbox(
     "⏸️ Pause Auto Refresh",
-    key="pause_refresh",
-    value=st.session_state.get("pause_refresh", False),
+    key="pause_refresh_user",
     disabled=st.session_state.get("is_training", False),
 )
+
+pause_refresh = bool(st.session_state["pause_refresh_user"] or st.session_state["pause_refresh_lock"])
 
 force_reload = st.sidebar.button("🔁 Force Reload", key="force_reload_btn")
 
@@ -15737,14 +15742,10 @@ else:
 
 
     
+  
     if st.button(f"📈 Train {sport} Sharp Model", key=f"train_{sport}_btn"):
-    
-        # ---- LOCK refresh state for training ----
         st.session_state["is_training"] = True
-        st.session_state["pause_refresh_prev"] = bool(
-            st.session_state.get("pause_refresh", False)
-        )
-        st.session_state["pause_refresh"] = True  # force pause
+        st.session_state["pause_refresh_lock"] = True  # ✅ safe: not a widget key
     
         try:
             train_timing_opportunity_model(sport=label)
@@ -15756,12 +15757,8 @@ else:
                     bucket_name=GCS_BUCKET,
                     log_func=st.write,
                 )
-    
         finally:
-            # ---- RESTORE previous state ----
-            st.session_state["pause_refresh"] = st.session_state.get(
-                "pause_refresh_prev", False
-            )
+            st.session_state["pause_refresh_lock"] = False
             st.session_state["is_training"] = False
 
             
