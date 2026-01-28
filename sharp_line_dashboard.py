@@ -2628,10 +2628,6 @@ from sklearn.base import clone
 from sklearn.metrics import roc_auc_score, log_loss
 import numpy as np
 
-from copy import deepcopy
-import numpy as np
-from sklearn.base import clone
-from sklearn.metrics import roc_auc_score, log_loss
 def _cv_auc_for_feature_set(
     model_proto,
     X,
@@ -2652,7 +2648,6 @@ def _cv_auc_for_feature_set(
     eps=1e-6,
 
     # ---- speed knobs for feature orientation ----
-
     orient_quick_folds=2,
     orient_quick_eps=2e-4,
     orient_full_min_gain=1e-5,
@@ -2662,6 +2657,7 @@ def _cv_auc_for_feature_set(
     orient_corr_abs_min=0.01,
     abort_if_cannot_beat_score=None,
     abort_margin=0.0,
+
     # ---- leakage guards ----
     game_keys=None,
     enforce_no_game_overlap=True,
@@ -2669,22 +2665,23 @@ def _cv_auc_for_feature_set(
     drop_forbidden_features=True,
 
     # ---- NEW: always-try knobs ----
-    fallback_to_all_available_features=True,   # ✅ if feature_list collapses, use all usable columns in X
-    require_numeric_features=True,             # ✅ drop non-numeric features defensively (avoids fit crashes)
-    min_non_nan_frac=0.01,                     # ✅ drop near-empty columns
+    fallback_to_all_available_features=True,
+    require_numeric_features=True,
+    min_non_nan_frac=0.01,
 ):
     """
     Evaluate a fixed feature set with OOF preds and optional INDIVIDUAL FEATURE flips.
-    No global proba flipping. No fold-by-fold proba flipping.
-
-    ALWAYS-TRY behavior:
-      - If requested features are missing and the list becomes empty, we fall back to all usable columns in X
-        (excluding forbidden/leaky patterns). This prevents "empty feature set" from stopping the scan.
-      - Optionally restrict to numeric-coercible columns (recommended for XGBoost/linear models).
+    Same semantics as before, but faster by:
+      - building one numeric matrix once per feature set
+      - numpy slicing per fold
+      - avoiding X.copy()/pd.to_numeric in inner loops
     """
-    # ---- normalize folds to a concrete list (so quick-screen can index) ----
-    folds = list(folds)
+    import numpy as np
+    import pandas as pd
+    from sklearn.base import clone
+    from sklearn.metrics import roc_auc_score, log_loss
 
+    folds = list(folds)
     y = np.asarray(y, int).reshape(-1)
     n = len(y)
     if len(y) != len(X):
@@ -2694,9 +2691,9 @@ def _cv_auc_for_feature_set(
     if leak_col_patterns is None:
         leak_col_patterns = ["SHARP_COVER_RESULT"]
 
-    # helper: forbidden pattern check
     def _is_forbidden(col: str) -> bool:
-        return any(p in str(col) for p in leak_col_patterns)
+        s = str(col)
+        return any(p in s for p in leak_col_patterns)
 
     # helper: build "usable" feature list from X
     def _all_usable_features_from_X() -> list[str]:
@@ -2704,18 +2701,18 @@ def _cv_auc_for_feature_set(
         if not cols:
             return []
 
+        keep = []
         if not require_numeric_features:
             # still drop columns that are almost entirely NaN
-            keep = []
             for c in cols:
                 s = pd.to_numeric(X[c], errors="coerce")
-                frac = float(np.isfinite(np.asarray(s, float)).mean()) if len(s) else 0.0
+                arr = np.asarray(s, float)
+                frac = float(np.isfinite(arr).mean()) if arr.size else 0.0
                 if frac >= float(min_non_nan_frac):
                     keep.append(c)
             return keep
 
         # numeric-only: must be coercible with enough finite values
-        keep = []
         for c in cols:
             try:
                 s = pd.to_numeric(X[c], errors="coerce")
@@ -2741,13 +2738,12 @@ def _cv_auc_for_feature_set(
         else:
             raise RuntimeError(msg)
 
-    # ✅ ALWAYS-TRY: if nothing left, fall back to all usable features in X
+    # ✅ ALWAYS-TRY fallback
     if len(feature_list) == 0 and fallback_to_all_available_features:
         feature_list = _all_usable_features_from_X()
         if debug:
             log_func(f"[FEATS] Requested list collapsed; fallback_to_all_available_features -> using {len(feature_list)} cols")
 
-    # if still empty, return legacy-safe payload
     if len(feature_list) == 0:
         return {
             "feature_list": [],
@@ -2773,63 +2769,9 @@ def _cv_auc_for_feature_set(
             "flip_rate": float("nan"),
         }
 
-    # ---- enforce numeric-only if requested (prevents downstream fit errors) ----
-    if require_numeric_features:
-        numeric_only = []
-        for f in feature_list:
-            try:
-                s = pd.to_numeric(X[f], errors="coerce")
-                arr = np.asarray(s, float)
-                frac = float(np.isfinite(arr).mean()) if arr.size else 0.0
-                if frac >= float(min_non_nan_frac):
-                    numeric_only.append(f)
-            except Exception:
-                continue
-        if numeric_only:
-            feature_list = numeric_only
-        else:
-            # last resort: try all usable numeric from X
-            if fallback_to_all_available_features:
-                feature_list = _all_usable_features_from_X()
-
-    # numeric candidates only (for flipping)
-    numeric_feats = []
-    for f in feature_list:
-        try:
-            _ = np.asarray(pd.to_numeric(X[f], errors="coerce"), float)
-            numeric_feats.append(f)
-        except Exception:
-            pass
-
-    # optional corr prefilter (very cheap)
-    if orient_use_corr_prefilter and numeric_feats:
-        y_f = y.astype(float)
-        keep = []
-        for f in numeric_feats:
-            try:
-                x_f = np.asarray(pd.to_numeric(X[f], errors="coerce"), float)
-                if np.all(~np.isfinite(x_f)):
-                    continue
-                xf = x_f.copy()
-                m = np.nanmean(xf)
-                xf = np.where(np.isfinite(xf), xf - m, 0.0)
-                yf = y_f - np.mean(y_f)
-                denom = (np.sqrt(np.sum(xf * xf)) * np.sqrt(np.sum(yf * yf)) + 1e-12)
-                c = float(np.sum(xf * yf) / denom)
-                if abs(c) >= float(orient_corr_abs_min):
-                    keep.append(f)
-            except Exception:
-                continue
-        numeric_feats = keep
-
-    if orient_max_candidates is not None and numeric_feats:
-        numeric_feats = numeric_feats[: int(max(1, orient_max_candidates))]
-
-    # ---- fold leakage guard: no game overlap ----
+    # ---- leakage guard: no game overlap ----
     def _assert_no_game_overlap(tr_idx, val_idx):
-        if not enforce_no_game_overlap:
-            return
-        if game_keys is None:
+        if not enforce_no_game_overlap or game_keys is None:
             return
         g = np.asarray(game_keys)
         tr = set(map(str, g[tr_idx]))
@@ -2837,65 +2779,143 @@ def _cv_auc_for_feature_set(
         inter = tr & va
         if inter:
             sample = list(inter)[:10]
-            raise RuntimeError(
-                f"[LEAK] Game overlap between train/val: {len(inter)} games. Sample={sample}"
-            )
+            raise RuntimeError(f"[LEAK] Game overlap between train/val: {len(inter)} games. Sample={sample}")
 
-    def _oof_metrics_for_X(
-        X_use,
-        feats,
+    # ============================================================
+    # FAST PATH: prepare numeric matrix once
+    # ============================================================
+    feats = list(feature_list)
+
+    if require_numeric_features:
+        # one coercion pass, once
+        X_num = X[feats].apply(pd.to_numeric, errors="coerce")
+        # drop near-empty cols (same rule)
+        good = []
+        for j, c in enumerate(feats):
+            arr = X_num.iloc[:, j].to_numpy(dtype=float, copy=False)
+            frac = float(np.isfinite(arr).mean()) if arr.size else 0.0
+            if frac >= float(min_non_nan_frac):
+                good.append(c)
+        if good:
+            feats = good
+            X_num = X[feats].apply(pd.to_numeric, errors="coerce")
+        else:
+            if fallback_to_all_available_features:
+                feats = _all_usable_features_from_X()
+                if not feats:
+                    return {
+                        "feature_list": [],
+                        "oof_proba": np.full(n, np.nan, dtype=float) if return_oof else None,
+                        "auc": float("nan"),
+                        "logloss": float("nan"),
+                        "brier": float("nan"),
+                        "score": float("-inf"),
+                        "aborted": False,
+                        "oof_auc_best": float("nan"),
+                        "oof_logloss_best": float("nan"),
+                        "oof_brier_best": float("nan"),
+                        "oof_score_best": float("-inf"),
+                        "n_feature_flips": 0,
+                        "flipped_features": [],
+                        "global_flip": False,
+                        "flip_rate": float("nan"),
+                    }
+                X_num = X[feats].apply(pd.to_numeric, errors="coerce")
+            else:
+                feats = []
+
+    else:
+        # allow non-numeric, but still build matrix (will become object -> slow)
+        # in practice you want require_numeric_features=True for speed + stability.
+        X_num = X[feats]
+
+    # final matrix
+    # float32 helps memory + speed; NaNs are fine for xgb / many models
+    X_mat = X_num.to_numpy(dtype=np.float32, copy=False)
+
+    # numeric feats list (for flip candidates)
+    numeric_feats = []
+    feat_to_col = {f: i for i, f in enumerate(feats)}
+    for f in feats:
+        # if we got here with require_numeric_features=True, these are numeric
+        # still keep the try to be safe
+        try:
+            _ = feat_to_col[f]
+            numeric_feats.append(f)
+        except Exception:
+            pass
+
+    # optional corr prefilter (cheap) on raw column vectors
+    if orient_use_corr_prefilter and numeric_feats:
+        y_f = y.astype(np.float32)
+        yf = y_f - float(np.mean(y_f))
+        yden = float(np.sqrt(np.sum(yf * yf)) + 1e-12)
+
+        keep = []
+        for f in numeric_feats:
+            j = feat_to_col.get(f)
+            if j is None:
+                continue
+            x_f = X_mat[:, j].astype(np.float32, copy=False)
+            # treat NaNs as mean-centered zeros (same as prior logic)
+            m = float(np.nanmean(x_f)) if np.isfinite(x_f).any() else 0.0
+            xf = np.where(np.isfinite(x_f), x_f - m, 0.0).astype(np.float32, copy=False)
+            xden = float(np.sqrt(np.sum(xf * xf)) + 1e-12)
+            c = float(np.sum(xf * yf) / (xden * yden + 1e-12))
+            if abs(c) >= float(orient_corr_abs_min):
+                keep.append(f)
+        numeric_feats = keep
+
+    if orient_max_candidates is not None and numeric_feats:
+        numeric_feats = numeric_feats[: int(max(1, orient_max_candidates))]
+
+    if debug:
+        log_func(f"[FEATS-CV] n={len(feats)}")
+        log_func("[FEATS-CV] " + ", ".join(map(str, feats[:120])) + (" ..." if len(feats) > 120 else ""))
+
+    # ============================================================
+    # inner: full CV OOF metrics (numpy slicing)
+    # ============================================================
+    def _oof_metrics_for_mat(
+        X_local_mat,
         *,
         abort_if_cannot_beat_score=None,
         abort_margin=0.0,
     ):
-        """
-        Full CV OOF metrics.
-        Early abort if even perfect remaining folds can't beat current best score.
-        """
-        oof = np.full(n, np.nan, dtype=float)
+        oof = np.full(n, np.nan, dtype=np.float32)
         do_abort = abort_if_cannot_beat_score is not None and np.isfinite(abort_if_cannot_beat_score)
         n_folds = len(folds)
         auc_fold_vals = []
 
-        # use numeric-coerced view if require_numeric_features
-        if require_numeric_features:
-            X_use = X_use.copy()
-            for c in feats:
-                if c in X_use.columns:
-                    X_use[c] = pd.to_numeric(X_use[c], errors="coerce")
-        if debug:
-            log_func(f"[FEATS-CV] n={len(feats)}")
-            log_func("[FEATS-CV] " + ", ".join(map(str, feats[:120])) + (" ..." if len(feats) > 120 else ""))
         for fold_i, (tr_idx, val_idx) in enumerate(folds, 1):
             _assert_no_game_overlap(tr_idx, val_idx)
 
-            X_tr  = X_use.iloc[tr_idx][feats]
-            X_val = X_use.iloc[val_idx][feats]
-            y_tr  = y[tr_idx]
-            y_val = y[val_idx]
+            X_tr = X_local_mat[tr_idx, :]
+            X_va = X_local_mat[val_idx, :]
+            y_tr = y[tr_idx]
+            y_va = y[val_idx]
 
             mdl = clone(model_proto)
             mdl.fit(X_tr, y_tr)
 
-            proba = _safe_predict_proba_pos(mdl, X_val)
+            proba = _safe_predict_proba_pos(mdl, X_va)
             proba = np.asarray(proba, float).reshape(-1)
+            oof[val_idx] = proba.astype(np.float32, copy=False)
 
             if debug:
                 try:
-                    auc_fold_dbg = roc_auc_score(np.asarray(y_val, int), np.clip(proba, eps, 1 - eps))
+                    auc_fold_dbg = roc_auc_score(np.asarray(y_va, int), np.clip(proba, eps, 1 - eps))
                 except Exception:
                     auc_fold_dbg = np.nan
                 log_func(
                     f"[AUC-DBG] fold={fold_i:02d} auc={auc_fold_dbg:.4f} "
-                    f"y_mean={float(np.mean(y_val)):.4f} p_mean={float(np.mean(proba)):.4f}"
+                    f"y_mean={float(np.mean(y_va)):.4f} p_mean={float(np.mean(proba)):.4f}"
                 )
 
-            oof[val_idx] = proba
-
-            # ----- early abort check (cheap) -----
+            # early abort check (unchanged logic)
             if do_abort:
                 try:
-                    auc_fold = roc_auc_score(np.asarray(y_val, int), np.clip(proba, eps, 1 - eps))
+                    auc_fold = roc_auc_score(np.asarray(y_va, int), np.clip(proba, eps, 1 - eps))
                     if not np.isfinite(auc_fold):
                         auc_fold = 0.5
                 except Exception:
@@ -2905,10 +2925,10 @@ def _cv_auc_for_feature_set(
                 done = len(auc_fold_vals)
                 left = n_folds - done
                 mean_auc_best_possible = (sum(auc_fold_vals) + left * 1.0) / float(n_folds)
-                best_possible_score = (auc_weight * mean_auc_best_possible)  # optimistic ll/br = 0
+                best_possible_score = (auc_weight * mean_auc_best_possible)
                 if best_possible_score < float(abort_if_cannot_beat_score) + float(abort_margin):
                     return {
-                        "oof_proba": oof,
+                        "oof_proba": oof.astype(float, copy=False),
                         "auc": float("nan"),
                         "logloss": float("nan"),
                         "brier": float("nan"),
@@ -2918,7 +2938,7 @@ def _cv_auc_for_feature_set(
 
         valid = np.isfinite(oof)
         y_v = y[valid]
-        p_v = np.clip(oof[valid], eps, 1 - eps)
+        p_v = np.clip(oof[valid].astype(float, copy=False), eps, 1 - eps)
 
         if len(y_v) < 2 or len(np.unique(y_v)) < 2:
             auc = np.nan
@@ -2930,7 +2950,7 @@ def _cv_auc_for_feature_set(
         score = (auc_weight * auc) - (ll_weight * ll) - (brier_weight * br)
 
         return {
-            "oof_proba": oof,
+            "oof_proba": oof.astype(float, copy=False),
             "auc": float(auc) if np.isfinite(auc) else float("nan"),
             "logloss": float(ll),
             "brier": float(br),
@@ -2939,10 +2959,10 @@ def _cv_auc_for_feature_set(
         }
 
     # ============================================================
-    # BASELINE: compute full CV metrics for current feature set
+    # BASELINE
     # ============================================================
-    base = _oof_metrics_for_X(
-        X, feature_list,
+    base = _oof_metrics_for_mat(
+        X_mat,
         abort_if_cannot_beat_score=abort_if_cannot_beat_score,
         abort_margin=float(abort_margin),
     )
@@ -2953,47 +2973,42 @@ def _cv_auc_for_feature_set(
     n_feature_flips = 0
 
     # ============================================================
-    # OPTIONAL: directed feature orientation (flip features one by one)
+    # ORIENTATION (feature flips) — fast column flip on matrix
     # ============================================================
     if orient_features and enable_feature_flips and max_feature_flips > 0 and numeric_feats:
         quick_folds = folds[: max(1, int(orient_quick_folds))]
 
-        def _quick_auc(X_use, feats):
-            oof_q = np.full(n, np.nan, dtype=float)
-
-            if require_numeric_features:
-                X_use = X_use.copy()
-                for c in feats:
-                    if c in X_use.columns:
-                        X_use[c] = pd.to_numeric(X_use[c], errors="coerce")
+        def _quick_auc_for_mat(X_local_mat) -> float:
+            oof_q = np.full(n, np.nan, dtype=np.float32)
 
             for (tr_idx, val_idx) in quick_folds:
                 _assert_no_game_overlap(tr_idx, val_idx)
                 mdl = clone(model_proto)
-                mdl.fit(X_use.iloc[tr_idx][feats], y[tr_idx])
-                proba = _safe_predict_proba_pos(mdl, X_use.iloc[val_idx][feats])
-                oof_q[val_idx] = np.asarray(proba, float).reshape(-1)
+                mdl.fit(X_local_mat[tr_idx, :], y[tr_idx])
+                proba = _safe_predict_proba_pos(mdl, X_local_mat[val_idx, :])
+                oof_q[val_idx] = np.asarray(proba, float).reshape(-1).astype(np.float32, copy=False)
 
             valid_q = np.isfinite(oof_q)
             if valid_q.sum() < 2 or len(np.unique(y[valid_q])) < 2:
                 return np.nan
-            return float(roc_auc_score(y[valid_q], np.clip(oof_q[valid_q], eps, 1 - eps)))
+            return float(roc_auc_score(y[valid_q], np.clip(oof_q[valid_q].astype(float), eps, 1 - eps)))
 
-        cur_quick = _quick_auc(X, feature_list)
+        cur_quick = _quick_auc_for_mat(X_mat)
 
         for p in range(int(max(1, orient_passes))):
             any_flip = False
             for feat in list(numeric_feats):
                 if n_feature_flips >= int(max_feature_flips):
                     break
-
-                X_try = X.copy()
-                try:
-                    X_try[feat] = -pd.to_numeric(X_try[feat], errors="coerce")
-                except Exception:
+                j = feat_to_col.get(feat)
+                if j is None:
                     continue
 
-                try_quick = _quick_auc(X_try, feature_list)
+                # flip one column on a scratch copy (much cheaper than X.copy())
+                X_try = X_mat.copy()
+                X_try[:, j] = -X_try[:, j]
+
+                try_quick = _quick_auc_for_mat(X_try)
                 if debug:
                     log_func(f"[ORIENT-SCAN] pass={p+1} feat={feat} quick_auc: cur={cur_quick:.6f} try={try_quick:.6f}")
 
@@ -3002,20 +3017,18 @@ def _cv_auc_for_feature_set(
                 if (try_quick - cur_quick) < float(orient_quick_eps):
                     continue
 
-                
-                cand = _oof_metrics_for_X(
+                cand = _oof_metrics_for_mat(
                     X_try,
-                    feature_list,
                     abort_if_cannot_beat_score=best_score if abort_if_cannot_beat_score is None else abort_if_cannot_beat_score,
                     abort_margin=float(orient_full_abort_margin if abort_margin in (0.0, None) else abort_margin),
                 )
-
                 if cand.get("aborted", False):
                     continue
 
                 cand_score = float(cand.get("score", float("-inf")))
                 if (cand_score - best_score) >= float(orient_full_min_gain):
-                    X = X_try
+                    # accept flip: update baseline matrix
+                    X_mat = X_try
                     best_metrics = dict(cand)
                     best_score = cand_score
                     flipped_features.append(feat)
@@ -3035,25 +3048,24 @@ def _cv_auc_for_feature_set(
                 break
 
     # ============================================================
-    # FINAL RETURN: normalize keys so callers never guess
+    # FINAL RETURN
     # ============================================================
     out = dict(best_metrics)
-
-    out["feature_list"] = list(feature_list)
+    out["feature_list"] = list(feats)  # final filtered feature list
     out["n_feature_flips"] = int(n_feature_flips)
     out["flipped_features"] = list(flipped_features)
     out["global_flip"] = False
     out["flip_rate"] = float("nan")
 
-    out["oof_auc_best"]      = float(out.get("auc", float("nan")))
-    out["oof_logloss_best"]  = float(out.get("logloss", float("nan")))
-    out["oof_brier_best"]    = float(out.get("brier", float("nan")))
-    out["oof_score_best"]    = float(out.get("score", float("-inf")))
+    out["oof_auc_best"] = float(out.get("auc", float("nan")))
+    out["oof_logloss_best"] = float(out.get("logloss", float("nan")))
+    out["oof_brier_best"] = float(out.get("brier", float("nan")))
+    out["oof_score_best"] = float(out.get("score", float("-inf")))
 
-    out["oof_auc"]     = out["oof_auc_best"]
+    out["oof_auc"] = out["oof_auc_best"]
     out["oof_logloss"] = out["oof_logloss_best"]
-    out["oof_brier"]   = out["oof_brier_best"]
-    out["oof_score"]   = out["oof_score_best"]
+    out["oof_brier"] = out["oof_brier_best"]
+    out["oof_score"] = out["oof_score_best"]
 
     if not return_oof:
         out["oof_proba"] = None
@@ -3061,6 +3073,7 @@ def _cv_auc_for_feature_set(
         out["oof_proba"] = out.get("oof_proba", None)
 
     return out
+
 
 def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
