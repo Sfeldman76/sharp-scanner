@@ -15506,6 +15506,7 @@ if sport == "General":
     st.title("🎯 Sharp Scanner Dashboard")
     st.write("Use the sidebar to select a league and begin scanning or training models.")
 
+
 # === LEAGUE PAGES ===
 else:
     st.title(f"🏟️ {sport} Sharp Scanner")
@@ -15517,31 +15518,36 @@ else:
         value=True,
     )
 
-    label = sport  # e.g., "WNBA"
-    sport_key = SPORTS[sport]  # e.g., "basketball_wnba"
+    label = sport
+    sport_key = SPORTS[sport]
 
-    # put this near where you render the Train button (same league page section)
+    # Market picker
     market_choice = st.sidebar.selectbox(
         "Train which market?",
         ["All", "spreads", "h2h", "totals"],
         key=f"train_market_choice_{sport}",
     )
-    
-    if st.button(f"📈 Train {sport} Sharp Model", key=f"train_{sport}_btn"):
+
+    # ✅ Unique key per sport + choice
+    train_key = f"train::{sport}::{market_choice}"
+
+    # (Optional) disable train button while training
+    if st.session_state.get("is_training", False):
+        st.info("⏳ Training in progress…")
+        st.stop()
+
+    # ✅ SINGLE train button
+    if st.button(f"📈 Train {sport} Sharp Model", key=train_key):
         st.session_state["is_training"] = True
-        st.session_state["pause_refresh_lock"] = True  # ✅ safe: not a widget key
-    
+        st.session_state["pause_refresh_lock"] = True
+
         try:
-            # (optional) if you only want timing model trained when training "All"
             if market_choice == "All":
                 train_timing_opportunity_model(sport=label)
-    
-            # decide which markets to train
-            if market_choice == "All":
                 markets_to_train = ("h2h", "spreads", "totals")
             else:
                 markets_to_train = (market_choice,)
-    
+
             for mkt in markets_to_train:
                 train_with_champion_wrapper(
                     sport=label,
@@ -15549,43 +15555,36 @@ else:
                     bucket_name=GCS_BUCKET,
                     log_func=st.write,
                 )
-    
+
         finally:
             st.session_state["pause_refresh_lock"] = False
             st.session_state["is_training"] = False
 
-    
+    # -----------------------------
+    # Feature selection UI (separate, not nested under Train)
+    # -----------------------------
+    feat_key = f"run_feat_select::{sport}"
+    if st.button("Run feature selection", key=feat_key):
+        st.session_state["feat_resume"] = None
+        st.session_state["feat_done"] = False
+        # No need to st.experimental_rerun(); button click already reruns.
+
+    if st.session_state.get("feat_done", False) is False and st.session_state.get("feat_resume") is not None:
+        accepted, best_res, state = _auto_select_k_by_auc(
+            ...,
+            resume_state=st.session_state.get("feat_resume")
+        )
+        st.session_state["feat_resume"] = state
+
+        if state.get("done"):
+            st.session_state["feat_done"] = True
+            st.session_state["final_feats"] = accepted
+            st.session_state["final_best_res"] = best_res
+        else:
+            st.rerun()  # modern replacement for experimental_rerun
+
   
-    if st.button(f"📈 Train {sport} Sharp Model", key=f"train_{sport}_btn"):
-        st.session_state["is_training"] = True
-        st.session_state["pause_refresh_lock"] = True  # ✅ safe: not a widget key
-    
-        try:
-            train_timing_opportunity_model(sport=label)
-    
-            for mkt in ("h2h", "spreads", "totals"):
-                train_with_champion_wrapper(
-                    sport=label,
-                    market=mkt,
-                    bucket_name=GCS_BUCKET,
-                    log_func=st.write,
-                )
-        finally:
-            st.session_state["pause_refresh_lock"] = False
-            st.session_state["is_training"] = False
-        if st.button("Run feature selection"):
-            st.session_state["feat_resume"] = None
-            st.session_state["feat_done"] = False
-        
-        if not st.session_state.get("feat_done", False):
-            accepted, best_res, state = _auto_select_k_by_auc(..., resume_state=st.session_state.get("feat_resume"))
-            st.session_state["feat_resume"] = state
-            if state.get("done"):
-                st.session_state["feat_done"] = True
-                st.session_state["final_feats"] = accepted
-                st.session_state["final_best_res"] = best_res
-            else:
-                st.experimental_rerun()
+
             
     # Prevent multiple scanners from running
     conflicting = [
