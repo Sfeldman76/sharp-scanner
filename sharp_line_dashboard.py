@@ -3602,7 +3602,8 @@ def _auto_select_k_by_auc(
         if verbose:
             log_func(f"[AUTO-FEAT] Final accepted set (post-orient): k={len(accepted)} {accept_metric}={best_val:.6f}")
 
-    return list(accepted), best_res, history
+    return list(accepted), best_res, None
+
 
 
 def select_features_auto(
@@ -3774,8 +3775,9 @@ def select_features_auto(
         y_arr = np.asarray(y_train)
         n_feats = len(keep_order)
         seed_k = int(max(1, min(int(auc_min_k), n_feats)))
+     
 
-        accepted_feats, best_res, history = _auto_select_k_by_auc(
+        accepted_feats, best_res, _  = _auto_select_k_by_auc(
             model_proto, X_df_train, y_arr, folds, keep_order,
             min_k=seed_k, max_k=n_feats,
             patience=int(auc_patience),
