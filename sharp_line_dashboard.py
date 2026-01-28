@@ -5,7 +5,15 @@ from streamlit_autorefresh import st_autorefresh
 
 # === Page Config ===
 st.set_page_config(layout="wide")
+# =========================
+# Session-state initialization
+# =========================
+if "is_training" not in st.session_state:
+    st.session_state["is_training"] = False
 
+if "pause_refresh_prev" not in st.session_state:
+    st.session_state["pause_refresh_prev"] = False
+    
 st.title("Betting Line Scanner")
 
 # --- Custom CSS for scrollable DataFrames ---
@@ -15690,7 +15698,8 @@ st.sidebar.markdown("### ⚙️ Controls")
 pause_refresh = st.sidebar.checkbox(
     "⏸️ Pause Auto Refresh",
     key="pause_refresh",
-    value=False,
+    value=st.session_state.get("pause_refresh", False),
+    disabled=st.session_state.get("is_training", False),
 )
 
 force_reload = st.sidebar.button("🔁 Force Reload", key="force_reload_btn")
@@ -15729,17 +15738,32 @@ else:
 
     
     if st.button(f"📈 Train {sport} Sharp Model", key=f"train_{sport}_btn"):
-        # Still train the timing-opportunity model as before
-        train_timing_opportunity_model(sport=label)
-
-        # Champion/challenger flow: train per-market challengers and promote only if better
-        for mkt in ("h2h","spreads", "totals", ):
-            train_with_champion_wrapper(
-                sport=label,
-                market=mkt,
-                bucket_name=GCS_BUCKET,
-                log_func=st.write,  # passed through to train_sharp_model_from_bq
+    
+        # ---- LOCK refresh state for training ----
+        st.session_state["is_training"] = True
+        st.session_state["pause_refresh_prev"] = bool(
+            st.session_state.get("pause_refresh", False)
+        )
+        st.session_state["pause_refresh"] = True  # force pause
+    
+        try:
+            train_timing_opportunity_model(sport=label)
+    
+            for mkt in ("h2h", "spreads", "totals"):
+                train_with_champion_wrapper(
+                    sport=label,
+                    market=mkt,
+                    bucket_name=GCS_BUCKET,
+                    log_func=st.write,
+                )
+    
+        finally:
+            # ---- RESTORE previous state ----
+            st.session_state["pause_refresh"] = st.session_state.get(
+                "pause_refresh_prev", False
             )
+            st.session_state["is_training"] = False
+
             
     # Prevent multiple scanners from running
     conflicting = [
