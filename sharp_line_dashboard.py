@@ -10070,7 +10070,7 @@ def train_sharp_model_from_bq(
         cols = list(feature_cols)
         
         # ✅ protect these (add more as needed)
-         = {
+        PROTECT = {
             "Sharp_Limit_Jump",
             "Sharp_Time_Score",
             "Sharp_Limit_Total",
