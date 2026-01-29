@@ -3290,6 +3290,13 @@ def select_features_auto(
     # summary placeholder
     summary = pd.DataFrame(index=feature_cols)
     summary.index.name = "feature"
+    
+    if shap_summary is not None and not shap_summary.empty:
+        for col in ["avg_abs_shap", "presence", "sign_flip_rate", "shap_cv"]:
+            if col in shap_summary.columns:
+                summary[col] = shap_summary[col].reindex(feature_cols)
+    
+    summary["selected"] = True
     return feature_cols, summary
 
 
