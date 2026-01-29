@@ -1,10 +1,10 @@
 
 import streamlit as st
 import time
-from streamlit_autorefresh import st_autorefresh
 
 # === Page Config ===
 st.set_page_config(layout="wide")
+
 # =========================
 # Session-state initialization
 # =========================
@@ -13,8 +13,24 @@ if "is_training" not in st.session_state:
 if "pause_refresh_lock" not in st.session_state:
     st.session_state["pause_refresh_lock"] = False
 
-st.title("Betting Line Scanner")
+# =========================
+# Auto-refresh (SAFE) + Training lock
+# =========================
+AUTO_REFRESH_SECONDS = 3600
 
+# Only refresh when NOT training and NOT paused
+enable_refresh = (not st.session_state["is_training"]) and (not st.session_state["pause_refresh_lock"])
+
+if enable_refresh:
+    try:
+        from streamlit_autorefresh import st_autorefresh
+        st_autorefresh(interval=AUTO_REFRESH_SECONDS * 1000, key="autorefresh")
+    except Exception as e:
+        # Component failed in deployment — app still loads
+        st.warning("Auto-refresh disabled (component assets not loading in this deployment).")
+        st.caption(f"{type(e).__name__}: {e}")
+
+st.title("Betting Line Scanner")
 # --- Custom CSS for scrollable DataFrames ---
 st.markdown(
     """
