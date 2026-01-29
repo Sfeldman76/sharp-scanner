@@ -2931,7 +2931,7 @@ from sklearn.metrics import roc_auc_score
 # =========================
 def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
-    min_k=40,
+    min_k=None,
     max_k=None,
     patience=200,
     min_improve=1e-6,
@@ -2999,7 +2999,13 @@ def _auto_select_k_by_auc(
     if max_k is None:
         max_k = len(ordered)
     max_k = int(min(max_k, len(ordered)))
-    min_k = int(max(1, min(int(min_k), max_k)))
+    
+    # ✅ seed size = must_keep count (8) unless explicitly overridden
+    if min_k is None:
+        min_k = len(mk)
+    min_k = int(max(len(mk), min(int(min_k), max_k)))
+    if verbose:
+        log_func(f"[AUTO-FEAT] seed(min_k)={min_k} must_keep={len(mk)} max_k={max_k} candidates={len(ordered)}")
 
     # ---------- evaluate ALL first ----------
     all_feats = list(ordered)
