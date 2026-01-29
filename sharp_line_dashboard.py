@@ -10103,14 +10103,15 @@ def train_sharp_model_from_bq(
         removed = []
         removed_stats = []
         
+   
         for j, c in enumerate(cols):
-            if c in :
+            if c in PROTECT:
                 keep_idx.append(j)
                 continue
         
             col = _get_col(Xtmp, j)
             col = pd.to_numeric(col, errors="coerce")
-        
+
             finite = np.isfinite(col)
             n_ok = int(finite.sum())
             uniq = int(np.unique(col[finite]).size) if n_ok else 0
