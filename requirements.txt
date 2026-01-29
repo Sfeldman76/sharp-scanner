@@ -48,9 +48,10 @@ google-cloud-bigquery-storage==2.24.0
 google-cloud-storage==2.16.0
 google-cloud-tasks==2.16.2
 pandas-gbq==0.19.2
-
+requests
 # === Misc ===
 cloudpickle==3.0.0
+
 
 
 
