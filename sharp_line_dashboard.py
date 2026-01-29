@@ -1,6 +1,6 @@
 
 import streamlit as st
-import time
+import time  # keep only if you use it elsewhere
 
 # === Page Config ===
 st.set_page_config(layout="wide")
@@ -13,22 +13,8 @@ if "is_training" not in st.session_state:
 if "pause_refresh_lock" not in st.session_state:
     st.session_state["pause_refresh_lock"] = False
 
-# =========================
-# Auto-refresh (SAFE) + Training lock
-# =========================
-AUTO_REFRESH_SECONDS = 3600
+# ✅ No auto-refresh. No component import. No warnings.
 
-# Only refresh when NOT training and NOT paused
-enable_refresh = (not st.session_state["is_training"]) and (not st.session_state["pause_refresh_lock"])
-
-if enable_refresh:
-    try:
-        from streamlit_autorefresh import st_autorefresh
-        st_autorefresh(interval=AUTO_REFRESH_SECONDS * 1000, key="autorefresh")
-    except Exception as e:
-        # Component failed in deployment — app still loads
-        st.warning("Auto-refresh disabled (component assets not loading in this deployment).")
-        st.caption(f"{type(e).__name__}: {e}")
 
 st.title("Betting Line Scanner")
 # --- Custom CSS for scrollable DataFrames ---
@@ -14607,9 +14593,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
     with st.container():  # or a dedicated tab/expander if you want
         st.subheader(f"📊 Live Odds Snapshot – {label} (Value @ Odds + Limit)")
     
-        # ✅ Only this block will autorefresh
-        # st_autorefresh(interval=180 * 1000, key=f"{label}_odds_refresh")  # every 3 minutes
-    
+ 
         # === Live odds fetch + display logic
         live = fetch_live_odds(sport_key)
         odds_rows = []
@@ -15155,12 +15139,6 @@ st.sidebar.checkbox(
     key="pause_refresh_user",
     disabled=st.session_state.get("is_training", False),
 )
-
-pause_refresh = bool(st.session_state["pause_refresh_user"] or st.session_state["pause_refresh_lock"])
-# ✅ Global auto-refresh gate (NEVER refresh while training)
-if (not pause_refresh) and (not st.session_state.get("is_training", False)):
-    # refresh the *page state* (keep interval not too small)
-    st_autorefresh(interval=180_000, key="global_refresh")  # 3 minutes
 
 force_reload = st.sidebar.button("🔁 Force Reload", key="force_reload_btn")
 
