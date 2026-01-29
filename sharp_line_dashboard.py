@@ -3240,10 +3240,8 @@ def select_features_auto(
     import pandas as pd
 
     must_keep = must_keep or [
-        "PR_Team_Rating",
-        "PR_Opp_Rating",
+
         "PR_Rating_Diff",
-        "PR_Abs_Rating_Diff",
         "Outcome_Model_Spread",
         "Outcome_Market_Spread",
         "Outcome_Spread_Edge",
@@ -10711,7 +10709,7 @@ def train_sharp_model_from_bq(
             sport_key=sport_key,
             must_keep=[
                
-                "PR_Team_Rating","PR_Opp_Rating","PR_Rating_Diff","PR_Abs_Rating_Diff",
+                "PR_Rating_Diff",
                 "Outcome_Model_Spread","Outcome_Market_Spread","Outcome_Spread_Edge",
             ],
             auc_min_k=None,            # ✅ seed = len(must_keep) only
