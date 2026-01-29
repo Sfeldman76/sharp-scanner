@@ -1454,6 +1454,7 @@ def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "Americ
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype, is_datetime64tz_dtype
+from pandas.api.types import is_datetime64_any_dtype, is_datetime64tz_dtype
 
 def add_book_path_reliability_features(
     df: pd.DataFrame,
@@ -1464,8 +1465,8 @@ def add_book_path_reliability_features(
     prior_strength_speed: float = 200.0,
     min_trials_for_stats: int = 5,
     early_tiers: set[str] | None = None,
-    assume_normalized: bool = True,     # ✅ NEW: skip repeated string normalization
-    canon_mask=None,                    # ✅ NEW: compute stats on canonical rows only (huge win for spreads)
+    assume_normalized: bool = True,     # skip repeated string normalization
+    canon_mask=None,                    # compute stats only on canonical rows (big win for spreads)
 ) -> pd.DataFrame:
     if df is None or df.empty:
         return df.copy()
@@ -1479,7 +1480,7 @@ def add_book_path_reliability_features(
             "Midday_VeryEarly",
         }
 
-    # Optional: compute stats only on canonical rows (recommended for spreads)
+    # Optional: compute stats only on canonical rows
     base = df if canon_mask is None else df.loc[canon_mask]
 
     # ---- thin slice ----
@@ -1497,11 +1498,12 @@ def add_book_path_reliability_features(
 
     # ---- normalize keys (ONLY if not already normalized upstream) ----
     if not assume_normalized:
-        # do in-place on thin slice to avoid big copies
         out = out.copy()
         out["Game_Key"]  = out["Game_Key"].astype(str).str.lower().str.strip()
         out["Bookmaker"] = out["Bookmaker"].astype(str).str.lower().str.strip()
         out["Market"]    = out["Market"].astype(str).str.lower().str.strip()
+        if "Sport" in out.columns:
+            out["Sport"] = out["Sport"].astype(str).str.upper().str.strip()
 
     # ---- closers lookup: .map (avoid merge) ----
     clos = closers.loc[:, ["Game_Key", "close_spread", "close_total", "p_ml_fav"]]
@@ -1509,38 +1511,39 @@ def add_book_path_reliability_features(
         clos = clos.copy()
         clos["Game_Key"] = clos["Game_Key"].astype(str).str.lower().str.strip()
 
+    # Ensure unique Game_Key → faster + avoids weirdness
     clos_ix = clos.drop_duplicates("Game_Key").set_index("Game_Key")
+
     gk = out["Game_Key"]
     close_spread = gk.map(clos_ix["close_spread"]) if "close_spread" in clos_ix.columns else np.nan
     close_total  = gk.map(clos_ix["close_total"])  if "close_total"  in clos_ix.columns else np.nan
     p_ml_fav     = gk.map(clos_ix["p_ml_fav"])     if "p_ml_fav"     in clos_ix.columns else np.nan
 
     # ---- per-row errors (vectorized numpy) ----
-    mkt = out["Market"].astype(str) if out["Market"].dtype.name == "category" else out["Market"]
-    is_spread = (mkt == "spreads")
-    is_total  = (mkt == "totals")
-    is_ml     = (mkt == "h2h")
+    mkt = out["Market"].astype(str) if getattr(out["Market"].dtype, "name", "") == "category" else out["Market"]
+    is_spread = (mkt == "spreads").to_numpy()
+    is_total  = (mkt == "totals").to_numpy()
+    is_ml     = (mkt == "h2h").to_numpy()
 
     val = pd.to_numeric(out["Value"], errors="coerce").to_numpy()
 
-    close_line = np.where(is_spread.to_numpy(), close_spread.to_numpy(),
-                 np.where(is_total.to_numpy(),  close_total.to_numpy(), np.nan))
+    close_line = np.where(is_spread, close_spread.to_numpy(),
+                 np.where(is_total,  close_total.to_numpy(), np.nan))
     path_line_err = np.abs(val - close_line)
 
     x = pd.to_numeric(out["Odds_Price"], errors="coerce").to_numpy()
     imp_prob = np.where(x >= 0, 100.0 / (x + 100.0), (-x) / ((-x) + 100.0))
-    path_prob_err = np.where(is_ml.to_numpy(), np.abs(imp_prob - p_ml_fav.to_numpy()), np.nan)
+    # keep for completeness; not used in downstream here, but cheap
+    _ = np.where(is_ml, np.abs(imp_prob - p_ml_fav.to_numpy()), np.nan)
 
-    # ---- timestamps (skip conversion if already datetime64[ns, UTC]) ----
-    # ---- timestamps (tz-safe dtype checks; avoids numpy dtype crash) ----
+    # ---- timestamps (tz-safe; avoids numpy dtype crash) ----
     ts = out["Snapshot_Timestamp"]
     if not (is_datetime64_any_dtype(ts) or is_datetime64tz_dtype(ts)):
         ts = pd.to_datetime(ts, errors="coerce", utc=True)
     else:
-        # if datetime but tz-naive, localize to UTC
         if getattr(ts.dt, "tz", None) is None:
             ts = ts.dt.tz_localize("UTC", nonexistent="shift_forward", ambiguous="NaT")
-    
+
     if "Game_Start" in out.columns:
         gs = out["Game_Start"]
         if not (is_datetime64_any_dtype(gs) or is_datetime64tz_dtype(gs)):
@@ -1551,51 +1554,56 @@ def add_book_path_reliability_features(
     else:
         gs = ts
 
-
     # ---- opener rows WITHOUT sorting the full frame ----
     keys = ["Sport", "Market", "Bookmaker", "Game_Key"]
 
     # idx of earliest snapshot per (Sport,Market,Bookmaker,Game_Key)
+    grp = [out[k] for k in keys]
     idx_open = (
         pd.Series(ts.to_numpy(), index=out.index)
-          .groupby([out[k] for k in keys], sort=False, observed=True)
+          .groupby(grp, sort=False, observed=True)
           .idxmin()
     )
+    # drop groups with all-NaT timestamps (rare but possible)
+    idx_open = idx_open.dropna()
 
-    # opener “good”
-    open_err = pd.Series(path_line_err, index=out.index).reindex(idx_open)
+    # opener line error and open_good
+    open_err = pd.Series(path_line_err, index=out.index).reindex(idx_open.to_numpy())
     open_good = (open_err.notna() & (open_err.to_numpy() <= eps_open)).astype("int8")
 
     # fast “good” (any early-tier snapshot in band)
     if tier_col is not None:
         tier = out[tier_col]
-        band = (path_line_err <= eps_open)
-        early = tier.isin(early_tiers).to_numpy()
-        band_early = pd.Series((band & early), index=out.index)
+        band_early = pd.Series(
+            (path_line_err <= eps_open) & tier.isin(early_tiers).to_numpy(),
+            index=out.index,
+        )
 
-        # any(band_early) per game group
-        fast_good = (
-            band_early.groupby([out[k] for k in keys], sort=False, observed=True)
+        grouped_any = (
+            band_early.groupby(grp, sort=False, observed=True)
                       .any()
                       .astype("int8")
-                      .reindex(open_good.index)  # align to opener index
-                      .fillna(0)
-                      .astype("int8")
         )
+
+        # ✅ align WITHOUT MultiIndex reindex() issues:
+        # use the exact group index object from idx_open (same grouping)
+        fast_good = grouped_any.loc[idx_open.index].fillna(0).astype("int8")
+        fast_good_np = fast_good.to_numpy()
     else:
-        fast_good = pd.Series(0, index=open_good.index, dtype="int8")
+        fast_good_np = np.zeros(len(idx_open), dtype=np.int8)
 
     # game start at opener idx
-    game_start_open = pd.Series(gs.to_numpy(), index=out.index).reindex(idx_open)
+    game_start_open = pd.Series(gs.to_numpy(), index=out.index).reindex(idx_open.to_numpy())
 
+    # Build game_stats (one row per group)
     game_stats = pd.DataFrame({
-        "Sport": out.loc[idx_open, "Sport"].to_numpy(),
-        "Market": out.loc[idx_open, "Market"].to_numpy(),
-        "Bookmaker": out.loc[idx_open, "Bookmaker"].to_numpy(),
-        "Game_Key": out.loc[idx_open, "Game_Key"].to_numpy(),
+        "Sport": out.loc[idx_open.to_numpy(), "Sport"].to_numpy(),
+        "Market": out.loc[idx_open.to_numpy(), "Market"].to_numpy(),
+        "Bookmaker": out.loc[idx_open.to_numpy(), "Bookmaker"].to_numpy(),
+        "Game_Key": out.loc[idx_open.to_numpy(), "Game_Key"].to_numpy(),
         "Game_Start": game_start_open.to_numpy(),
         "Open_Good_Game": open_good.to_numpy(),
-        "Fast_Good_Game": fast_good.to_numpy(),
+        "Fast_Good_Game": fast_good_np,
     })
 
     # ---- cumulative, leak-safe per (Sport,Market,Bookmaker) ----
@@ -1624,28 +1632,9 @@ def add_book_path_reliability_features(
     game_stats["Book_Path_Open_Lift"]  = np.log(p1 / (1.0 - p1))
     game_stats["Book_Path_Speed_Lift"] = np.log(p2 / (1.0 - p2))
 
-    # ---- merge back WITHOUT copying whole df ----
-    # (If not normalized upstream, normalize only the join keys in a small temp frame)
-    if assume_normalized:
-        merged = df.merge(
-            game_stats[[
-                "Sport", "Market", "Bookmaker", "Game_Key",
-                "Book_Path_Open_Score", "Book_Path_Speed_Score",
-                "Book_Path_Open_Lift",  "Book_Path_Speed_Lift",
-            ]],
-            on=["Sport", "Market", "Bookmaker", "Game_Key"],
-            how="left",
-            validate="many_to_one",
-        )
-        return merged
-
-    # slow-path normalization only for join keys (avoid full df.copy())
-    tmp = df[["Sport", "Market", "Bookmaker", "Game_Key"]].copy()
-    tmp["Game_Key"]  = tmp["Game_Key"].astype(str).str.lower().str.strip()
-    tmp["Bookmaker"] = tmp["Bookmaker"].astype(str).str.lower().str.strip()
-    tmp["Market"]    = tmp["Market"].astype(str).str.lower().str.strip()
-
-    add = tmp.merge(
+    # ---- merge back ----
+    # Many rows per key → one row in game_stats (validate many_to_one)
+    merged = df.merge(
         game_stats[[
             "Sport", "Market", "Bookmaker", "Game_Key",
             "Book_Path_Open_Score", "Book_Path_Speed_Score",
@@ -1656,12 +1645,10 @@ def add_book_path_reliability_features(
         validate="many_to_one",
     )
 
-    # attach columns back by index
-    outdf = df.copy()
-    for c in ["Book_Path_Open_Score","Book_Path_Speed_Score","Book_Path_Open_Lift","Book_Path_Speed_Lift"]:
-        outdf[c] = add[c].to_numpy()
+    # If df wasn't normalized but assume_normalized=True was passed incorrectly,
+    # this will produce lots of NaNs. That's fine; you’ll notice quickly.
 
-    return outdf
+    return merged
 
 
 def add_book_reliability_features(
