@@ -3186,7 +3186,7 @@ def select_features_auto(
 
     # selection knobs
     use_auc_auto: bool = True,
-    auc_min_k: int = 40,
+    auc_min_k: int = None,
     auc_patience: int = 200,
     auc_min_improve: float = 1e-5,
     accept_metric: str = "auc",
@@ -3204,7 +3204,15 @@ def select_features_auto(
     import numpy as np
     import pandas as pd
 
-    must_keep = must_keep or ["Is_Home_Team_Bet", "Is_Favorite_Bet"]
+    must_keep = must_keep or [
+        "PR_Team_Rating",
+        "PR_Opp_Rating",
+        "PR_Rating_Diff",
+        "PR_Abs_Rating_Diff",
+        "Outcome_Model_Spread",
+        "Outcome_Market_Spread",
+        "Outcome_Spread_Edge",
+    ]
     mk_in = [m for m in must_keep if m in X_df_train.columns]
     y_arr = np.asarray(y_train, dtype=int).reshape(-1)
 
@@ -3214,7 +3222,8 @@ def select_features_auto(
     if use_auc_auto and keep_order:
         accepted_feats, best_res, _state = _auto_select_k_by_auc(
             model_proto, X_df_train, y_arr, folds, keep_order,
-            min_k=int(auc_min_k),
+            min_k=len(mk_in) if (auc_min_k is None) else int(max(len(mk_in), auc_min_k)),
+
             max_k=len(keep_order),
             patience=int(auc_patience),
             min_improve=float(auc_min_improve),
@@ -10008,7 +10017,7 @@ def train_sharp_model_from_bq(
         cols = list(feature_cols)
         
         # ✅ protect these (add more as needed)
-        MUST_KEEP = {
+         = {
             "Sharp_Limit_Jump",
             "Sharp_Time_Score",
             "Sharp_Limit_Total",
@@ -10042,7 +10051,7 @@ def train_sharp_model_from_bq(
         removed_stats = []
         
         for j, c in enumerate(cols):
-            if c in MUST_KEEP:
+            if c in :
                 keep_idx.append(j)
                 continue
         
@@ -10650,6 +10659,7 @@ def train_sharp_model_from_bq(
         
         # ======== AUTO FEATURE SELECTION (INLINE / ONE-SHOT) ========
         feature_cols, shap_summary = select_features_auto(
+        feature_cols, shap_summary = select_features_auto(
             model_proto=_model_proto,
             X_df_train=X_df_train,
             y_train=y_train,
@@ -10658,8 +10668,17 @@ def train_sharp_model_from_bq(
             must_keep=[
                 "Is_Home_Team_Bet",
                 "PR_Team_Rating","PR_Opp_Rating","PR_Rating_Diff","PR_Abs_Rating_Diff",
-                "Outcome_Model_Spread","Outcome_Market_Spread","Outcome_Spread_Edge","Outcome_Cover_Prob",
+                "Outcome_Model_Spread","Outcome_Market_Spread","Outcome_Spread_Edge",
             ],
+            auc_min_k=None,            # ✅ seed = len(must_keep) only
+            use_auc_auto=True,         # ✅ actually select (earned)
+            auc_patience=200,
+            auc_min_improve=1e-5,
+            accept_metric="auc",
+            auc_verbose=True,
+            log_func=log_func,
+        
+            # keep these for backward compat; can be ignored by your new selector
             topk_per_fold=80,
             min_presence=0.60,
             corr_within=0.90,
@@ -10668,13 +10687,7 @@ def train_sharp_model_from_bq(
             max_feats_small=80,
             sign_flip_max=0.35,
             shap_cv_max=1.00,
-            auc_verbose=True,
-            log_func=log_func,
         )
-
-
-        
-        
         # 4) Rebuild matrices in the final selected order
         X_train = X_df_train.loc[:, feature_cols].to_numpy(np.float32)
         X_full  = pd.DataFrame(X_full, columns=list(features_pruned)).loc[:, feature_cols].to_numpy(np.float32)
