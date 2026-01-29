@@ -10970,7 +10970,7 @@ def train_sharp_model_from_bq(
   
         
         # ======== AUTO FEATURE SELECTION (INLINE / ONE-SHOT) ========
-        feature_cols, shap_summary, _ = select_features_auto(
+        feature_cols, shap_summary = select_features_auto(
             model_proto=_model_proto,
             X_df_train=X_df_train,
             y_train=y_train,
@@ -10991,13 +10991,8 @@ def train_sharp_model_from_bq(
             shap_cv_max=1.00,
             auc_verbose=True,
             log_func=log_func,
-        
-            # ✅ force it to finish in one run
-            resume_state=None,
-            time_budget_s=1e9,        # effectively "no budget"
-            max_total_evals=10**9,    # effectively "no cap"
-            quick_folds=2,            # optional: a little safer than 1
         )
+
 
         
         
