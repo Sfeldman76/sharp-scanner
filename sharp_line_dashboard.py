@@ -10,12 +10,8 @@ st.set_page_config(layout="wide")
 # =========================
 if "is_training" not in st.session_state:
     st.session_state["is_training"] = False
-
 if "pause_refresh_lock" not in st.session_state:
     st.session_state["pause_refresh_lock"] = False
-
-if "pause_refresh_user" not in st.session_state:
-    st.session_state["pause_refresh_user"] = False
 
 st.title("Betting Line Scanner")
 
@@ -3309,24 +3305,23 @@ def _auto_select_k_by_auc(
     }
     return list(accepted), best_res, state
 
-
 def select_features_auto(
     model_proto,
-    X_df_train: pd.DataFrame,
-    y_train: np.ndarray,
+    X_df_train: "pd.DataFrame",
+    y_train: "np.ndarray",
     folds,
     *,
     families: dict[str, list[str]] | None = None,
-    corr_within=0.90,
-    corr_global=0.92,
-    max_feats_major=240,
-    sign_flip_max=0.35,
-    shap_cv_max=1.00,
-    max_feats_small=240,
+    corr_within: float = 0.90,
+    corr_global: float = 0.92,
+    max_feats_major: int = 240,
+    max_feats_small: int = 240,
     sport_key: str = "NFL",
-    must_keep: list[str] = None,
-    topk_per_fold=120,
-    min_presence=0.8,
+    must_keep: list[str] | None = None,
+    topk_per_fold: int = 120,
+    min_presence: float = 0.80,
+    sign_flip_max: float = 0.35,
+    shap_cv_max: float = 1.00,
     use_auc_auto: bool = True,
     auc_min_k: int = 40,
     auc_patience: int = 80,
@@ -3334,28 +3329,19 @@ def select_features_auto(
     auc_verbose: bool = True,
     accept_metric: str = "auc",
     log_func=print,
-
-    # ✅ NEW: Streamlit-safe + faster selection defaults
-    time_budget_s: float = 18.0,        # keep each call under ~20s
-    resume_state: dict | None = None,   # pass st.session_state.get("feat_resume")
-    max_total_evals: int = 120,         # cap full-CV evals
-    quick_folds: int = 1,               # 1-fold quick gate
-    quick_accept: float = 2e-4,         # must beat best by this to run full CV
-    quick_drop: float = 0.003,          # if worse by this, skip
-    abort_margin_cv: float = 0.001,     # more aggressive abort
-    final_orient: bool = True,          # do flips only once on final set
+    final_orient: bool = True,   # do flips only once at end
 ):
     """
-    FIXES:
-      ✅ Prevents Streamlit timeout by supporting budgeted/resumable forward scan.
-      ✅ Avoids slow behavior: no orientation/flips during scan; only once at the end.
-      ✅ Keeps your SHAP/permutation ranking + correlation pruning, but caps candidates.
-      ✅ Returns (feature_cols, summary, state) if you want resume; otherwise state is None.
+    One-shot automatic feature selection.
 
-    USAGE (Streamlit):
-      feats, summary, state = select_features_auto(..., resume_state=st.session_state.get("feat_resume"))
-      st.session_state["feat_resume"] = state
-      if state and not state.get("done"): st.experimental_rerun()
+    Returns:
+      feature_cols: list[str]
+      summary: pd.DataFrame (rank/importance info for selected features)
+
+    Notes:
+      - NO resume/state/time budgets.
+      - Runs SHAP-stability (fallback to permutation importance),
+        then correlation pruning, then AUC forward-scan, then one final orientation/flip pass.
     """
     import numpy as np
     import pandas as pd
@@ -3433,7 +3419,7 @@ def select_features_auto(
     sel = [c for c in dict.fromkeys(sel) if c in X_df_train.columns]
 
     # -------------------------
-    # 3) fast corr prune (small set uses corrcoef; large falls back)
+    # 3) fast corr prune
     # -------------------------
     def _fast_greedy_corr_prune(feats, corr_thresh, must_keep_local=None):
         feats = [f for f in feats if f in col_ix]
@@ -3491,7 +3477,7 @@ def select_features_auto(
     final = _fast_greedy_corr_prune(candidates, corr_thresh=corr_global, must_keep_local=must_keep)
 
     # -------------------------
-    # 4) cap ordered candidates (critical for runtime)
+    # 4) cap ordered candidates
     # -------------------------
     is_small = str(sport_key).upper() in {"NBA", "MLB"}
     cap = int(max_feats_small if is_small else max_feats_major)
@@ -3513,20 +3499,17 @@ def select_features_auto(
     if len(keep_order) > cap:
         keep_order = keep_order[:cap]
 
-    # default output if we skip auc auto
+    # -------------------------
+    # 5) AUC auto selection (NO resume, NO budgets)
+    # -------------------------
     final_feats = mk_in
-    best_res = None
-    state_out = {"done": True}
+    y_arr = np.asarray(y_train, dtype=int).reshape(-1)
 
-    # -------------------------
-    # 5) AUC auto selection (budgeted + no flips during scan)
-    # -------------------------
     if use_auc_auto and keep_order:
-        y_arr = np.asarray(y_train, dtype=int).reshape(-1)
         n_feats = len(keep_order)
         seed_k = int(max(1, min(int(auc_min_k), n_feats)))
 
-        accepted_feats, best_res, state_out = _auto_select_k_by_auc(
+        accepted_feats, best_res, _state_unused = _auto_select_k_by_auc(
             model_proto, X_df_train, y_arr, folds, keep_order,
             min_k=seed_k,
             max_k=n_feats,
@@ -3534,7 +3517,7 @@ def select_features_auto(
             min_improve=float(auc_min_improve),
             verbose=bool(auc_verbose),
             log_func=log_func,
-            debug=False,                 # ✅ debug off for speed
+            debug=False,
             debug_every=999999,
 
             # ✅ critical: do NOT orient/flip during scan
@@ -3542,39 +3525,30 @@ def select_features_auto(
             enable_feature_flips=False,
             max_feature_flips=0,
             orient_passes=0,
-            flips_after_selection=False,  # we do it manually once below
+            flips_after_selection=False,
 
             must_keep=mk_in,
             seed_mode="earned",
-            force_full_scan=False,        # ✅ don’t scan the universe
+            force_full_scan=False,
 
             # ✅ strict quick gate
             quick_screen=True,
-            quick_folds=int(max(1, quick_folds)),
-            quick_accept=float(quick_accept),
-            quick_drop=float(quick_drop),
-            abort_margin_cv=float(abort_margin_cv),
+            quick_folds=1,
+            quick_accept=2e-4,
+            quick_drop=0.003,
+            abort_margin_cv=0.001,
 
-            # ✅ Streamlit-safe chunking
-            time_budget_s=float(time_budget_s),
-            resume_state=resume_state,
-            max_total_evals=int(max_total_evals),
+            # ✅ disable chunking/resume by making them inert
+            time_budget_s=1e18,
+            resume_state=None,
+            max_total_evals=10**9,
         )
-
-        # if not finished (budget exhausted), return partial + state
-        if state_out and not bool(state_out.get("done", False)):
-            # return what we have so far so UI can display progress
-            final_feats = accepted_feats if accepted_feats else mk_in
-            feature_cols = list(final_feats)
-            summary = rank_df.reindex(feature_cols).copy()
-            summary["in_rank_df"] = summary.index.isin(rank_df.index)
-            return feature_cols, summary, state_out
 
         final_feats = accepted_feats if accepted_feats else mk_in
 
         # ✅ one final polish pass with flips/orientation ONCE
         if final_orient and final_feats:
-            best_res = _cv_auc_for_feature_set(
+            _ = _cv_auc_for_feature_set(
                 model_proto, X_df_train, y_arr, folds, list(final_feats),
                 log_func=log_func,
                 debug=False,
@@ -3593,10 +3567,8 @@ def select_features_auto(
     summary = rank_df.reindex(feature_cols).copy()
     summary["in_rank_df"] = summary.index.isin(rank_df.index)
 
-    # ✅ backward compatible: if caller expects only 2-tuple, they can ignore state
-    if resume_state is not None:
-        return feature_cols, summary, (state_out if use_auc_auto else None)
     return feature_cols, summary
+
 
 
 
@@ -10995,9 +10967,10 @@ def train_sharp_model_from_bq(
   
         # 3) Run automatic selection (SHAP-stability with safe fallback to perm AUC),
         #    then family-wise and global correlation pruning, then league-aware cap.
+  
         
-       
-        feature_cols, shap_summary, feat_state = select_features_auto(
+        # ======== AUTO FEATURE SELECTION (INLINE / ONE-SHOT) ========
+        feature_cols, shap_summary, _ = select_features_auto(
             model_proto=_model_proto,
             X_df_train=X_df_train,
             y_train=y_train,
@@ -11018,16 +10991,15 @@ def train_sharp_model_from_bq(
             shap_cv_max=1.00,
             auc_verbose=True,
             log_func=log_func,
-            resume_state=st.session_state.get("feat_resume"),
+        
+            # ✅ force it to finish in one run
+            resume_state=None,
+            time_budget_s=1e9,        # effectively "no budget"
+            max_total_evals=10**9,    # effectively "no cap"
+            quick_folds=2,            # optional: a little safer than 1
         )
-        
-        st.session_state["feat_resume"] = feat_state
-        
-        # ✅ if budgeted selection isn't done yet, stop cleanly
-        if feat_state and not feat_state.get("done", False):
-            st.info("⏳ Auto feature selection still running — rerun to continue.")
-            st.stop()
 
+        
         
         # 4) Rebuild matrices in the final selected order
         X_train = X_df_train.loc[:, feature_cols].to_numpy(np.float32)
@@ -15521,11 +15493,11 @@ if sport == "General":
     st.title("🎯 Sharp Scanner Dashboard")
     st.write("Use the sidebar to select a league and begin scanning or training models.")
 
-
 # === LEAGUE PAGES ===
 else:
     st.title(f"🏟️ {sport} Sharp Scanner")
 
+    # Scanner toggle (still visible)
     scanner_key = scanner_widget_keys[sport]
     run_scanner = st.checkbox(
         f"Run {sport} Scanner",
@@ -15543,62 +15515,57 @@ else:
         key=f"train_market_choice_{sport}",
     )
 
-    # ✅ Unique key per sport + choice
-    train_key = f"train::{sport}::{market_choice}"
-
-    # (Optional) disable train button while training
-    if st.session_state.get("is_training", False):
-        st.info("⏳ Training in progress…")
+    # --- If training, pause scanner + stop page from doing anything expensive ---
+    if st.session_state.get("is_training", False) or st.session_state.get("pause_refresh_lock", False):
+        st.info("⏳ Training in progress… scanner/refresh is paused.")
         st.stop()
 
-    # ✅ SINGLE train button
+    # ✅ Single train button (unique key per sport + choice)
+    train_key = f"train::{sport}::{market_choice}"
+
     if st.button(f"📈 Train {sport} Sharp Model", key=train_key):
         st.session_state["is_training"] = True
-        st.session_state["pause_refresh_lock"] = True
+        st.session_state["pause_refresh_lock"] = True  # ✅ pause scanner/refresh during training
 
-        try:
-            if market_choice == "All":
-                train_timing_opportunity_model(sport=label)
-                markets_to_train = ("h2h", "spreads", "totals")
-            else:
-                markets_to_train = (market_choice,)
+        with st.spinner(f"Training {sport} model(s)… this may take several minutes"):
+            try:
+                # If training "All", optionally train timing model once first
+                if market_choice == "All":
+                    train_timing_opportunity_model(sport=label)
+                    markets_to_train = ("h2h", "spreads", "totals")
+                else:
+                    markets_to_train = (market_choice,)
 
-            for mkt in markets_to_train:
-                train_with_champion_wrapper(
-                    sport=label,
-                    market=mkt,
-                    bucket_name=GCS_BUCKET,
-                    log_func=st.write,
-                )
+                for mkt in markets_to_train:
+                    st.write(f"— Training market: **{mkt}**")
+                    train_with_champion_wrapper(
+                        sport=label,
+                        market=mkt,
+                        bucket_name=GCS_BUCKET,
+                        log_func=st.write,
+                    )
 
-        finally:
-            st.session_state["pause_refresh_lock"] = False
-            st.session_state["is_training"] = False
+                st.success("✅ Training complete")
+
+            except Exception as e:
+                st.exception(e)
+
+            finally:
+                st.session_state["pause_refresh_lock"] = False
+                st.session_state["is_training"] = False
+
+        st.stop()  # don’t continue into scanner logic in this run
 
     # -----------------------------
-    # Feature selection UI (separate, not nested under Train)
+    # Scanner run (only if not paused)
     # -----------------------------
-    feat_key = f"run_feat_select::{sport}"
-    if st.button("Run feature selection", key=feat_key):
-        st.session_state["feat_resume"] = None
-        st.session_state["feat_done"] = False
-        # No need to st.experimental_rerun(); button click already reruns.
-
-    if st.session_state.get("feat_done", False) is False and st.session_state.get("feat_resume") is not None:
-        accepted, best_res, state = _auto_select_k_by_auc(
-            ...,
-            resume_state=st.session_state.get("feat_resume")
-        )
-        st.session_state["feat_resume"] = state
-
-        if state.get("done"):
-            st.session_state["feat_done"] = True
-            st.session_state["final_feats"] = accepted
-            st.session_state["final_best_res"] = best_res
-        else:
-            st.rerun()  # modern replacement for experimental_rerun
-
-  
+    if run_scanner and not st.session_state.get("pause_refresh_lock", False):
+        # call your scanner logic here
+        # e.g., render_scanner_tab(...) or detect_and_render(...)
+        pass
+    else:
+        if st.session_state.get("pause_refresh_lock", False):
+            st.info("⏸️ Scanner paused during training.")
 
             
     # Prevent multiple scanners from running
