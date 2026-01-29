@@ -3249,8 +3249,8 @@ def _auto_select_k_by_auc(
         res_try = _cv_full(
             trial,
             dbg=dbg,
-            abort_score=float(best_val) if use_abort else None,
-            abort_margin=float(abort_margin_cv) if use_abort else 0.0,
+            abort_score=None
+            abort_margin=0.0,
         )
         if res_try.get("aborted", False):
             rejects_in_row += 1
@@ -3324,8 +3324,8 @@ def select_features_auto(
     shap_cv_max: float = 1.00,
     use_auc_auto: bool = True,
     auc_min_k: int = 40,
-    auc_patience: int = 80,
-    auc_min_improve: float = 5e-6,
+    auc_patience: int = 200,
+    auc_min_improve: float = 1e-5,
     auc_verbose: bool = True,
     accept_metric: str = "auc",
     log_func=print,
@@ -3510,40 +3510,38 @@ def select_features_auto(
         seed_k = int(max(1, min(int(auc_min_k), n_feats)))
 
         accepted_feats, best_res, _state_unused = _auto_select_k_by_auc(
+        accepted_feats, best_res, _ = _auto_select_k_by_auc(
             model_proto, X_df_train, y_arr, folds, keep_order,
             min_k=seed_k,
             max_k=n_feats,
-            patience=int(auc_patience),
-            min_improve=float(auc_min_improve),
-            verbose=bool(auc_verbose),
+            patience=250,
+            min_improve=1e-5,
+            verbose=True,
             log_func=log_func,
-            debug=False,
-            debug_every=999999,
-
-            # ✅ critical: do NOT orient/flip during scan
+        
             orient_features=False,
             enable_feature_flips=False,
-            max_feature_flips=0,
-            orient_passes=0,
             flips_after_selection=False,
-
+        
             must_keep=mk_in,
             seed_mode="earned",
-            force_full_scan=False,
-
-            # ✅ strict quick gate
-            quick_screen=True,
-            quick_folds=1,
-            quick_accept=2e-4,
-            quick_drop=0.003,
-            abort_margin_cv=0.001,
-
-            # ✅ disable chunking/resume by making them inert
+        
+            # ✅ deep scan
+            force_full_scan=True,
+        
+            # ✅ disable speed hacks
+            quick_screen=False,
+            abort_margin_cv=0.0,
+        
+            # ✅ no job budget caps
             time_budget_s=1e18,
             resume_state=None,
-            max_total_evals=10**9,
+            max_total_evals=None,
         )
+ 
+      
 
+   
         final_feats = accepted_feats if accepted_feats else mk_in
 
         # ✅ one final polish pass with flips/orientation ONCE
