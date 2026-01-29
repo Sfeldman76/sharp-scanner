@@ -3594,7 +3594,9 @@ def select_features_auto(
     summary["in_rank_df"] = summary.index.isin(rank_df.index)
 
     # ✅ backward compatible: if caller expects only 2-tuple, they can ignore state
-    return feature_cols, summary, (state_out if use_auc_auto else None)
+    if resume_state is not None:
+        return feature_cols, summary, (state_out if use_auc_auto else None)
+    return feature_cols, summary
 
 
 
@@ -10994,25 +10996,38 @@ def train_sharp_model_from_bq(
         # 3) Run automatic selection (SHAP-stability with safe fallback to perm AUC),
         #    then family-wise and global correlation pruning, then league-aware cap.
         
-        feature_cols, shap_summary = select_features_auto(
+       
+        feature_cols, shap_summary, feat_state = select_features_auto(
             model_proto=_model_proto,
             X_df_train=X_df_train,
             y_train=y_train,
-            folds=folds,                         # iterable of (train_idx, val_idx)
-            sport_key=sport_key,                 # used for max feature cap
-            must_keep=["Is_Home_Team_Bet", 'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Abs_Rating_Diff','Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge','Outcome_Cover_Prob',],
+            folds=folds,
+            sport_key=sport_key,
+            must_keep=[
+                "Is_Home_Team_Bet",
+                "PR_Team_Rating","PR_Opp_Rating","PR_Rating_Diff","PR_Abs_Rating_Diff",
+                "Outcome_Model_Spread","Outcome_Market_Spread","Outcome_Spread_Edge","Outcome_Cover_Prob",
+            ],
             topk_per_fold=80,
             min_presence=0.60,
             corr_within=0.90,
             corr_global=0.92,
             max_feats_major=100,
             max_feats_small=80,
-            sign_flip_max=0.35,                  # tighter
-            shap_cv_max=1.00,                    # reasonable
-            # NEW: streamlit-aware logging + AUC trace
+            sign_flip_max=0.35,
+            shap_cv_max=1.00,
             auc_verbose=True,
-            log_func=log_func,                   # <- this is the key line
+            log_func=log_func,
+            resume_state=st.session_state.get("feat_resume"),
         )
+        
+        st.session_state["feat_resume"] = feat_state
+        
+        # ✅ if budgeted selection isn't done yet, stop cleanly
+        if feat_state and not feat_state.get("done", False):
+            st.info("⏳ Auto feature selection still running — rerun to continue.")
+            st.stop()
+
         
         # 4) Rebuild matrices in the final selected order
         X_train = X_df_train.loc[:, feature_cols].to_numpy(np.float32)
