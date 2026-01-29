@@ -3046,7 +3046,6 @@ def _auto_select_k_by_auc(
 
 # =========================
 # 3) SELECT FEATURES AUTO (NOW RETURNS ALL FEATURES + SUMMARY)
-# =========================
 def select_features_auto(
     model_proto,
     X_df_train: "pd.DataFrame",
@@ -3062,6 +3061,9 @@ def select_features_auto(
     # run orientation/flips once at end
     final_orient: bool = True,
     log_func=print,
+
+    # ✅ backward-compat: swallow old feature-selection knobs
+    **_ignored_kwargs,
 ):
     import numpy as np
     import pandas as pd
@@ -3071,17 +3073,17 @@ def select_features_auto(
 
     y_arr = np.asarray(y_train, dtype=int).reshape(-1)
 
-    # ✅ ALL FEATURES: do NOT prune by SHAP/corr/forward scan
+    # ✅ ALL FEATURES: no SHAP/corr/forward scan
     feature_cols = list(dict.fromkeys(mk_in + list(X_df_train.columns)))
 
-    # Evaluate + baseline signal check (uses the ALL-FEATS auto block above)
+    # Evaluate + baseline fade check (ALL features)
     _accepted, best_res, _state = _auto_select_k_by_auc(
         model_proto, X_df_train, y_arr, folds, feature_cols,
         verbose=True,
         log_func=log_func,
         must_keep=mk_in,
         baseline_feats=baseline_feats if baseline_feats is not None else mk_in,
-        orient_features=False,            # do not orient here (do it once below)
+        orient_features=False,
         enable_feature_flips=False,
         max_feature_flips=0,
         orient_passes=0,
@@ -3109,7 +3111,6 @@ def select_features_auto(
         summary.attrs["all_feats_cv"] = {k: best_res.get(k) for k in ("auc", "logloss", "brier", "score")}
 
     log_func(f"[AUTO-FEAT] ALL FEATURES returned: n_feats={len(feature_cols)}")
-
     return feature_cols, summary
 
 
