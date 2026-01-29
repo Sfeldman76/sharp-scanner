@@ -2699,6 +2699,10 @@ from sklearn.base import clone
 from sklearn.metrics import roc_auc_score, log_loss
 import numpy as np
 import xgboost as xgb
+import numpy as np
+import pandas as pd
+from sklearn.base import clone
+from sklearn.metrics import roc_auc_score, log_loss
 
 # 1) CV EVAL BLOCK (unchanged interface)
 # =========================
@@ -2734,10 +2738,7 @@ def _cv_auc_for_feature_set(
     require_numeric_features=True,
     min_non_nan_frac=0.01,
 ):
-    import numpy as np
-    import pandas as pd
-    from sklearn.base import clone
-    from sklearn.metrics import roc_auc_score, log_loss
+
 
     folds = list(folds) if folds is not None else []
     if max_folds is not None and folds:
@@ -2971,7 +2972,7 @@ def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
     min_k=None,
     max_k=None,
-    patience=200,
+    patience=50,
     min_improve=1e-6,
     verbose=True,
     log_func=print,
@@ -3254,9 +3255,9 @@ def select_features_auto(
     # keep old knobs but they won't break your call
     corr_within: float = 0.90,
     corr_global: float = 0.92,
-    max_feats_major: int = 240,
-    max_feats_small: int = 240,
-    topk_per_fold: int = 120,
+    max_feats_major: int = 160,
+    max_feats_small: int = 160,
+    topk_per_fold: int = 80,
     min_presence: float = 0.80,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
@@ -3264,7 +3265,7 @@ def select_features_auto(
     # selection knobs
     use_auc_auto: bool = True,
     auc_min_k: int | None = None,     # None => min_k == len(must_keep present)
-    auc_patience: int = 200,
+    auc_patience: int = 50,
     auc_min_improve: float = 1e-5,
     accept_metric: str = "auc",
     auc_verbose: bool = True,
@@ -3285,11 +3286,8 @@ def select_features_auto(
 
     # ✅ Default must_keep (edit to your preferred 7/8)
     must_keep = must_keep or [
-        "Is_Home_Team_Bet",
-        "PR_Team_Rating",
-        "PR_Opp_Rating",
+       
         "PR_Rating_Diff",
-        "PR_Abs_Rating_Diff",
         "Outcome_Model_Spread",
         "Outcome_Market_Spread",
         "Outcome_Spread_Edge",
