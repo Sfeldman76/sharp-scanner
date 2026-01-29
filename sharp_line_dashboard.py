@@ -2743,7 +2743,7 @@ def _cv_auc_for_feature_set(
     drop_forbidden_features=True,
     fallback_to_all_available_features=True,
     require_numeric_features=True,
-    min_non_nan_frac=0.01,
+    min_non_nan_frac = 0.001,
 ):
 
 
@@ -3527,7 +3527,7 @@ def select_features_auto(
         var = np.nanvar(X_mat, axis=0)
 
     # Tune these if you want; these are safe defaults
-    min_non_nan_frac = 0.01
+    min_non_nan_frac = 0.001
     usable = (nn_frac >= float(min_non_nan_frac)) & (var > 0.0)
 
     # Force must_keep to be usable if present (even if constant) so earned logic can decide later
