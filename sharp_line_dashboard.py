@@ -10712,7 +10712,7 @@ def train_sharp_model_from_bq(
   
         
         # ======== AUTO FEATURE SELECTION (INLINE / ONE-SHOT) ========
-        feature_cols, shap_summary = select_features_auto(
+ 
         feature_cols, shap_summary = select_features_auto(
             model_proto=_model_proto,
             X_df_train=X_df_train,
@@ -10720,7 +10720,7 @@ def train_sharp_model_from_bq(
             folds=folds,
             sport_key=sport_key,
             must_keep=[
-                "Is_Home_Team_Bet",
+               
                 "PR_Team_Rating","PR_Opp_Rating","PR_Rating_Diff","PR_Abs_Rating_Diff",
                 "Outcome_Model_Spread","Outcome_Market_Spread","Outcome_Spread_Edge",
             ],
