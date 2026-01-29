@@ -1,7 +1,13 @@
 # streamlit_train_controller.py
-import json, time, subprocess, uuid
+import json
+import time
+import uuid
+import shutil
+import subprocess
+
 import streamlit as st
 from google.cloud import storage
+
 
 def read_progress_lines(gcs_client, uri: str, max_lines: int = 200):
     assert uri.startswith("gs://")
@@ -14,18 +20,30 @@ def read_progress_lines(gcs_client, uri: str, max_lines: int = 200):
     lines = [ln for ln in data.splitlines() if ln.strip()]
     return lines[-max_lines:]
 
+
+def start_job_with_gcloud(job_name: str, region: str, sport: str, market: str, progress_uri: str):
+    # Hard fail early if gcloud isn't available (common on Cloud Run containers)
+    if shutil.which("gcloud") is None:
+        raise RuntimeError("gcloud not found in this environment. If Streamlit runs on Cloud Run, use REST trigger instead.")
+
+    subprocess.Popen([
+        "gcloud", "run", "jobs", "execute", job_name,
+        "--region", region,
+        "--update-env-vars", f"SPORT={sport},MARKET={market},PROGRESS_URI={progress_uri}",
+    ])
+
+
 st.title("📈 Training Controller (Cloud Run Job)")
 
-if "exec_id" not in st.session_state:
-    st.session_state.exec_id = None
-if "progress_uri" not in st.session_state:
-    st.session_state.progress_uri = None
+# session state
+st.session_state.setdefault("exec_id", None)
+st.session_state.setdefault("progress_uri", None)
 
-sport = st.selectbox("Sport", ["NBA","NFL","NCAAB","WNBA"], index=0)
-market = st.selectbox("Market", ["All","spreads","h2h","totals"], index=0)
+sport = st.selectbox("Sport", ["NBA", "NFL", "NCAAB", "WNBA"], index=0)
+market = st.selectbox("Market", ["All", "spreads", "h2h", "totals"], index=0)
+auto = st.checkbox("Auto-refresh", value=True)
 
-col1, col2 = st.columns(2)
-
+col1, col2 = st.columns([1, 1])
 with col1:
     if st.button("🚀 Start Training Job"):
         exec_id = str(uuid.uuid4())[:8]
@@ -34,49 +52,55 @@ with col1:
         st.session_state.exec_id = exec_id
         st.session_state.progress_uri = progress_uri
 
-        # Trigger job (simple CLI way). Better is REST, but this is fine to start.
-        cmd = [
-            "gcloud", "run", "jobs", "execute", "sharp-train-job",
-            "--region=us-central1",
-            "--update-env-vars", f"SPORT={sport},MARKET={market},PROGRESS_URI={progress_uri}",
-        ]
-        out = subprocess.run(cmd, capture_output=True, text=True)
-        st.code(out.stdout or out.stderr)
+        try:
+            start_job_with_gcloud(
+                job_name="sharp-train-job",
+                region="us-central1",
+                sport=sport,
+                market=market,
+                progress_uri=progress_uri,
+            )
+            st.success("Training job started 🚀")
+        except Exception as e:
+            st.error(f"Failed to start job: {e}")
 
 with col2:
-    auto = st.checkbox("Auto-refresh", value=True)
+    st.write("")
+    st.write("")
+    st.caption("Tip: If this is deployed on Cloud Run, gcloud won’t exist. Use REST trigger.")
 
 st.divider()
 
-if st.session_state.progress_uri:
-    st.caption(f"Progress file: {st.session_state.progress_uri}")
-
-    gcs = storage.Client()
-    box = st.empty()
-
-    # A “bounded” poll loop: keeps the page alive without running forever
-    # (Streamlit will rerun on interactions; this just helps show progress now.)
-    polls = 30 if auto else 1  # ~30*2s = 60s window per run
-    for _ in range(polls):
-        lines = read_progress_lines(gcs, st.session_state.progress_uri, max_lines=200)
-        if lines:
-            events = [json.loads(ln) for ln in lines]
-            last = events[-1]
-            pct = last.get("pct")
-            if pct is not None:
-                st.progress(float(pct))
-            box.code("\n".join(lines[-40:]), language="json")
-
-            if last.get("stage") == "done":
-                st.success("Job finished ✅")
-                break
-        else:
-            box.info("No progress events yet…")
-
-        if not auto:
-            break
-        time.sleep(2)
-
-    st.button("🔄 Refresh now")
-else:
+if not st.session_state.progress_uri:
     st.info("Start a job to see progress here.")
+    st.stop()
+
+st.caption(f"Progress file: {st.session_state.progress_uri}")
+
+gcs = storage.Client()
+lines = read_progress_lines(gcs, st.session_state.progress_uri, max_lines=200)
+
+if lines:
+    events = [json.loads(ln) for ln in lines]
+    last = events[-1]
+    pct = last.get("pct")
+
+    if pct is not None:
+        st.progress(float(pct))
+
+    st.code("\n".join(lines[-40:]), language="json")
+
+    if last.get("stage") == "done":
+        st.success("Job finished ✅")
+    elif last.get("stage") == "error":
+        st.error(f"Job error: {last.get('msg')}")
+else:
+    st.info("No progress events yet… (job may still be starting)")
+
+# Auto-refresh without blocking loops
+if auto:
+    time.sleep(2)
+    st.rerun()
+
+if st.button("🔄 Refresh now"):
+    st.rerun()
