@@ -2675,15 +2675,31 @@ def _safe_predict_proba_pos(mdl, X_val):
         return np.asarray(proba2[:, pos_idx], float)
     return np.asarray(mdl.predict(X_val), float)
 
+def _auto_flip_series(x):
+    """
+    Decide how to flip a feature:
+      - If it's mostly in [0,1], treat as probability-like -> flip via (1 - x)
+      - Otherwise -> flip via (-x)
+    Returns flipped array (float32) and a string tag describing flip mode.
+    """
+    import numpy as np
+    x = np.asarray(x, dtype=np.float32)
+
+    finite = np.isfinite(x)
+    if finite.sum() == 0:
+        return x, "none"
+
+    xf = x[finite]
+    # prob-like if within [0,1] with tiny tolerance
+    if (xf.min() >= -1e-3) and (xf.max() <= 1.0 + 1e-3):
+        return (1.0 - x), "one_minus"
+    return (-x), "negate"
 
 from sklearn.base import clone
 from sklearn.metrics import roc_auc_score, log_loss
 import numpy as np
 import xgboost as xgb
-# =========================
-# 1) CV EVAL BLOCK (drop-in)
-# =========================
-# =========================
+
 # 1) CV EVAL BLOCK (unchanged interface)
 # =========================
 def _cv_auc_for_feature_set(
@@ -2949,6 +2965,7 @@ from sklearn.metrics import roc_auc_score
 
 # =========================
 # 2) AUTO SELECT BLOCK (evaluate-all first, then forward-select, NO quick gate)
+#    + optional per-candidate flip test (reverse AUC) that can be accepted
 # =========================
 def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
@@ -2964,7 +2981,7 @@ def _auto_select_k_by_auc(
     max_ll_increase=0.20,
     max_brier_increase=0.06,
 
-    # flips should happen ONLY at end
+    # flips should happen ONLY at end (this is your existing final-orient pass)
     orient_features=False,
     enable_feature_flips=False,
     max_feature_flips=0,
@@ -2977,6 +2994,10 @@ def _auto_select_k_by_auc(
 
     accept_metric: str = "auc",
     flips_after_selection: bool = True,
+
+    # ✅ NEW: test candidate in normal vs flipped orientation
+    allow_candidate_flip: bool = True,
+    flip_gain_min: float = 0.0,
 
     must_keep: list[str] | None = None,
 
@@ -2997,14 +3018,13 @@ def _auto_select_k_by_auc(
     psi_fn=None,
     psi_max: float | None = None,
 ):
-    import time
-    import numpy as np
+
 
     t0 = time.time()
     folds = list(folds) if folds is not None else []
     y_arr = np.asarray(y, int).reshape(-1)
 
-    # sanitize ordered_features
+    # ---- sanitize ordered_features ----
     ordered = list(ordered_features) if ordered_features is not None else []
     if require_present_in_X:
         ordered = [f for f in ordered if f in X.columns]
@@ -3020,11 +3040,12 @@ def _auto_select_k_by_auc(
     if max_k is None:
         max_k = len(ordered)
     max_k = int(min(max_k, len(ordered)))
-    
-    # ✅ seed size = must_keep count (8) unless explicitly overridden
+
+    # ✅ seed size = must_keep count unless explicitly overridden
     if min_k is None:
         min_k = len(mk)
     min_k = int(max(len(mk), min(int(min_k), max_k)))
+
     if verbose:
         log_func(f"[AUTO-FEAT] seed(min_k)={min_k} must_keep={len(mk)} max_k={max_k} candidates={len(ordered)}")
 
@@ -3048,7 +3069,7 @@ def _auto_select_k_by_auc(
             f"n_feats={len(all_feats)}"
         )
 
-    # baseline check
+    # ---------- baseline check ----------
     if baseline_feats is None:
         baseline_feats = mk
     base_feats = [f for f in (baseline_feats or []) if f in X.columns]
@@ -3072,7 +3093,7 @@ def _auto_select_k_by_auc(
                 f"Δll={lift_ll:+.4f}"
             )
 
-    # ---------- forward selection (NO quick gate) ----------
+    # ---------- helpers ----------
     def _metric(res):
         if accept_metric == "score":
             return float(res.get("score", float("-inf")))
@@ -3089,9 +3110,10 @@ def _auto_select_k_by_auc(
             return True
         return bool(val_try >= float(best_val) + float(min_improve))
 
-    # start from must_keep
+    # ---------- start from must_keep only (earned selection) ----------
     accepted = list(mk)
     accepted_set = set(accepted)
+    flip_map = {}  # feature -> {"flipped": True, "mode": "negate"|"one_minus"}
 
     best_res = _cv_auc_for_feature_set(
         model_proto, X, y_arr, folds, accepted,
@@ -3111,26 +3133,8 @@ def _auto_select_k_by_auc(
     if verbose:
         log_func(f"[AUTO-FEAT] start scan: must_keep={len(mk)} target_seed={min_k} metric={accept_metric}")
 
-    # seed up to min_k using order (no evaluation)
-    needed = max(0, min_k - len(accepted))
-    if needed > 0:
-        add = [f for f in ordered if f not in accepted_set][:needed]
-        accepted.extend(add)
-        accepted_set.update(add)
-
-        # evaluate seeded set once
-        best_res = _cv_auc_for_feature_set(
-            model_proto, X, y_arr, folds, accepted,
-            log_func=log_func,
-            debug=False,
-            return_oof=False,
-            orient_features=False,
-            enable_feature_flips=False,
-            cv_mode="full",
-        )
-        best_val = _metric(best_res)
-        best_ll  = float(best_res.get("logloss", np.nan))
-        best_br  = float(best_res.get("brier", np.nan))
+    # ✅ IMPORTANT: no "seed up to min_k" auto-fill block here.
+    # Everything beyond must_keep must earn entry.
 
     for i, feat in enumerate(ordered):
         if (time.time() - t0) >= float(time_budget_s):
@@ -3144,8 +3148,8 @@ def _auto_select_k_by_auc(
 
         trial = accepted + [feat]
 
-        # full CV every time (optionally can early-abort on AUC upper bound)
-        res_try = _cv_auc_for_feature_set(
+        # --- evaluate normal ---
+        res_norm = _cv_auc_for_feature_set(
             model_proto, X, y_arr, folds, trial,
             log_func=log_func,
             debug=False,
@@ -3153,13 +3157,40 @@ def _auto_select_k_by_auc(
             orient_features=False,
             enable_feature_flips=False,
             cv_mode="full",
-            abort_if_cannot_beat_score=(best_val if (accept_metric == "auc" and np.isfinite(best_val)) else None),
-            abort_margin=0.0,
         )
-        if res_try.get("aborted", False):
-            rejects_in_row += 1
-            continue
 
+        best_trial_res = res_norm
+        best_trial_flip = False
+        best_trial_flip_mode = None
+
+        # --- evaluate flipped (optional) ---
+        if allow_candidate_flip:
+            import pandas as pd
+            X_flip = X.copy()
+            flipped_vals, flip_mode = _auto_flip_series(
+                pd.to_numeric(X_flip[feat], errors="coerce").to_numpy()
+            )
+            X_flip[feat] = flipped_vals
+
+            res_flip = _cv_auc_for_feature_set(
+                model_proto, X_flip, y_arr, folds, trial,
+                log_func=log_func,
+                debug=False,
+                return_oof=False,
+                orient_features=False,
+                enable_feature_flips=False,
+                cv_mode="full",
+            )
+
+            m_norm = _metric(res_norm)
+            m_flip = _metric(res_flip)
+
+            if np.isfinite(m_flip) and (not np.isfinite(m_norm) or (m_flip > m_norm + float(flip_gain_min))):
+                best_trial_res = res_flip
+                best_trial_flip = True
+                best_trial_flip_mode = flip_mode
+
+        res_try = best_trial_res
         val_try = _metric(res_try)
         ll_try  = float(res_try.get("logloss", np.nan))
         br_try  = float(res_try.get("brier", np.nan))
@@ -3172,8 +3203,16 @@ def _auto_select_k_by_auc(
             if np.isfinite(ll_try): best_ll = float(ll_try)
             if np.isfinite(br_try): best_br = float(br_try)
             rejects_in_row = 0
+
+            # ✅ record flip ONLY if this feature was accepted AND flipped won
+            if best_trial_flip:
+                flip_map[feat] = {"flipped": True, "mode": best_trial_flip_mode}
+                if verbose:
+                    log_func(f"[AUTO-FEAT] 🔁 flip accepted for {feat} mode={best_trial_flip_mode}")
+
             if verbose:
-                log_func(f"[AUTO-FEAT] ✅ accept +{feat} -> {accept_metric}={best_val:.6f} k={len(accepted)}")
+                tag = " (flipped)" if best_trial_flip else ""
+                log_func(f"[AUTO-FEAT] ✅ accept +{feat}{tag} -> {accept_metric}={best_val:.6f} k={len(accepted)}")
         else:
             rejects_in_row += 1
 
@@ -3193,12 +3232,15 @@ def _auto_select_k_by_auc(
         if verbose and isinstance(best_res, dict):
             log_func(f"[AUTO-FEAT] Final accepted set: k={len(accepted)} {accept_metric}={_metric(best_res):.6f}")
 
-    state = {"done": True, "i": len(ordered), "accepted": list(accepted), "best_res": best_res}
+    state = {"done": True, "accepted": list(accepted), "best_res": best_res, "flip_map": flip_map}
     return list(accepted), best_res, state
 
 
 # =========================
 # 3) SELECT FEATURES AUTO (backward compatible signature)
+#    - seeds with must_keep only (earned thereafter)
+#    - evaluates ALL features + baseline fade check (inside _auto_select_k_by_auc)
+#    - supports reverse-AUC candidate flips and returns flip_map in summary
 # =========================
 def select_features_auto(
     model_proto,
@@ -3221,7 +3263,7 @@ def select_features_auto(
 
     # selection knobs
     use_auc_auto: bool = True,
-    auc_min_k: int = None,
+    auc_min_k: int | None = None,     # None => min_k == len(must_keep present)
     auc_patience: int = 200,
     auc_min_improve: float = 1e-5,
     accept_metric: str = "auc",
@@ -3230,33 +3272,44 @@ def select_features_auto(
     # fade/baseline check features
     baseline_feats: list[str] | None = None,
 
+    # reverse-AUC / candidate flip knobs
+    allow_candidate_flip: bool = True,
+    flip_gain_min: float = 0.0,
+
     final_orient: bool = True,
     log_func=print,
 
     # ✅ backward compat: swallow extra kwargs safely
     **_ignored_kwargs,
 ):
-    import numpy as np
-    import pandas as pd
 
+    # ✅ Default must_keep (edit to your preferred 7/8)
     must_keep = must_keep or [
-
+        "Is_Home_Team_Bet",
+        "PR_Team_Rating",
+        "PR_Opp_Rating",
         "PR_Rating_Diff",
+        "PR_Abs_Rating_Diff",
         "Outcome_Model_Spread",
         "Outcome_Market_Spread",
         "Outcome_Spread_Edge",
     ]
+
     mk_in = [m for m in must_keep if m in X_df_train.columns]
     y_arr = np.asarray(y_train, dtype=int).reshape(-1)
 
-    # For now: candidates are ALL columns (you can still feed a ranked list if you want)
+    # Candidates: all columns, with must_keep first
     keep_order = list(dict.fromkeys(mk_in + list(X_df_train.columns)))
 
-    if use_auc_auto and keep_order:
-        accepted_feats, best_res, _state = _auto_select_k_by_auc(
-            model_proto, X_df_train, y_arr, folds, keep_order,
-            min_k=len(mk_in) if (auc_min_k is None) else int(max(len(mk_in), auc_min_k)),
+    # min_k should NEVER exceed earned logic; default is exactly must_keep length
+    min_k_eff = len(mk_in) if (auc_min_k is None) else int(max(len(mk_in), auc_min_k))
 
+    flip_map = {}
+
+    if use_auc_auto and keep_order:
+        accepted_feats, best_res, state = _auto_select_k_by_auc(
+            model_proto, X_df_train, y_arr, folds, keep_order,
+            min_k=min_k_eff,
             max_k=len(keep_order),
             patience=int(auc_patience),
             min_improve=float(auc_min_improve),
@@ -3266,37 +3319,41 @@ def select_features_auto(
             must_keep=mk_in,
             baseline_feats=baseline_feats if baseline_feats is not None else mk_in,
 
-            # do flips once at end
+            # candidate flip support (reverse-AUC)
+            allow_candidate_flip=bool(allow_candidate_flip),
+            flip_gain_min=float(flip_gain_min),
+
+            # final orient pass at end (optional)
             flips_after_selection=bool(final_orient),
             orient_features=True if final_orient else False,
             enable_feature_flips=True if final_orient else False,
             max_feature_flips=3,
             orient_passes=1,
 
-            # ✅ no quick gates
+            # no quick gates
             quick_screen=False,
             abort_margin_cv=0.0,
 
-            # ✅ deep scan
+            # deep scan
             force_full_scan=True,
             time_budget_s=1e18,
             resume_state=None,
             max_total_evals=None,
         )
         feature_cols = accepted_feats
+        flip_map = (state or {}).get("flip_map", {}) or {}
     else:
         feature_cols = keep_order
 
-    # summary placeholder
+    # ✅ Summary that will NOT be blank
     summary = pd.DataFrame(index=feature_cols)
     summary.index.name = "feature"
-    
-    if shap_summary is not None and not shap_summary.empty:
-        for col in ["avg_abs_shap", "presence", "sign_flip_rate", "shap_cv"]:
-            if col in shap_summary.columns:
-                summary[col] = shap_summary[col].reindex(feature_cols)
-    
     summary["selected"] = True
+
+    # show which accepted features were flipped (reverse-AUC winners)
+    summary["flipped"] = [bool(flip_map.get(f, {}).get("flipped", False)) for f in feature_cols]
+    summary["flip_mode"] = [flip_map.get(f, {}).get("mode", "") for f in feature_cols]
+
     return feature_cols, summary
 
 
