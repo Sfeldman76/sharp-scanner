@@ -1453,6 +1453,7 @@ def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "Americ
     return out
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_datetime64_any_dtype, is_datetime64tz_dtype
 
 def add_book_path_reliability_features(
     df: pd.DataFrame,
@@ -1531,23 +1532,25 @@ def add_book_path_reliability_features(
     path_prob_err = np.where(is_ml.to_numpy(), np.abs(imp_prob - p_ml_fav.to_numpy()), np.nan)
 
     # ---- timestamps (skip conversion if already datetime64[ns, UTC]) ----
+    # ---- timestamps (tz-safe dtype checks; avoids numpy dtype crash) ----
     ts = out["Snapshot_Timestamp"]
-    if not np.issubdtype(ts.dtype, np.datetime64):
+    if not (is_datetime64_any_dtype(ts) or is_datetime64tz_dtype(ts)):
         ts = pd.to_datetime(ts, errors="coerce", utc=True)
     else:
-        # ensure timezone-aware UTC if needed
+        # if datetime but tz-naive, localize to UTC
         if getattr(ts.dt, "tz", None) is None:
             ts = ts.dt.tz_localize("UTC", nonexistent="shift_forward", ambiguous="NaT")
-
+    
     if "Game_Start" in out.columns:
         gs = out["Game_Start"]
-        if not np.issubdtype(gs.dtype, np.datetime64):
+        if not (is_datetime64_any_dtype(gs) or is_datetime64tz_dtype(gs)):
             gs = pd.to_datetime(gs, errors="coerce", utc=True)
         else:
             if getattr(gs.dt, "tz", None) is None:
                 gs = gs.dt.tz_localize("UTC", nonexistent="shift_forward", ambiguous="NaT")
     else:
         gs = ts
+
 
     # ---- opener rows WITHOUT sorting the full frame ----
     keys = ["Sport", "Market", "Bookmaker", "Game_Key"]
