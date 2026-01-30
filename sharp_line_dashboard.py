@@ -3415,7 +3415,7 @@ def _auto_select_k_by_auc(
 
     # --- gating margins (tune if you want) ---
     quick_margin_auc = 0.003   # if quick AUC is worse than best-0.002, skip full CV
-    flip_close_margin = 0.002  # only try flip if normal is at least (best - 0.001) in quick/full
+    flip_close_margin = 0.001  # only try flip if normal is at least (best - 0.001) in quick/full
 
     for i, feat in enumerate(ordered):
         if (time.time() - t0) >= float(time_budget_s):
