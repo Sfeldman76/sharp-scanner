@@ -3414,7 +3414,7 @@ def _auto_select_k_by_auc(
         log_func(f"[AUTO-FEAT] start scan: must_keep={len(mk)} target_seed={min_k} metric={accept_metric} quick_folds={len(folds_quick)}")
 
     # --- gating margins (tune if you want) ---
-    quick_margin_auc = 0.004   # if quick AUC is worse than best-0.002, skip full CV
+    quick_margin_auc = 0.003   # if quick AUC is worse than best-0.002, skip full CV
     flip_close_margin = 0.002  # only try flip if normal is at least (best - 0.001) in quick/full
 
     for i, feat in enumerate(ordered):
