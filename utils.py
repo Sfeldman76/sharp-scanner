@@ -9411,7 +9411,13 @@ def apply_blended_sharp_score(
         logger.error("❌ Exception during final aggregation")
         logger.error(traceback.format_exc())
         return pd.DataFrame()
-    
+
+def _dbg_timing(msg, **kv):
+    try:
+        print("[timing]", msg, " | " + " ".join([f"{k}={v}" for k,v in kv.items()]))
+    except Exception:
+        pass  
+
 def detect_sharp_moves(
     current,
     previous=None,                    # optional/ignored
@@ -9667,11 +9673,56 @@ def detect_sharp_moves(
     
     _keys = df[merge_keys].drop_duplicates()
     snaps = df_all_snapshots.merge(_keys, on=merge_keys, how='inner')
+    # =======================
+    # PROBE A: key match rate
+    # =======================
+    k = ['Game_Key','Market','Outcome','Bookmaker']
     
+    # ensure required cols exist
+    for col in k:
+        if col not in df.columns or col not in df_all_snapshots.columns:
+            _dbg_timing("missing_key_col", col=col, in_df=(col in df.columns), in_hist=(col in df_all_snapshots.columns))
+    
+    cur_keys  = df[k].drop_duplicates()
+    hist_keys = df_all_snapshots[k].drop_duplicates()
+    
+    m = cur_keys.merge(hist_keys, on=k, how='left', indicator=True)
+    _dbg_timing(
+        "probeA_key_match",
+        cur_keys=len(cur_keys),
+        hist_keys=len(hist_keys),
+        matched=int((m["_merge"] == "both").sum()),
+        pct_matched=float((m["_merge"] == "both").mean()) if len(m) else None
+    )
+
     # ensure sorted once (stable, low mem)
     if not snaps.empty and 'Snapshot_Timestamp' in snaps.columns:
         snaps = snaps.sort_values('Snapshot_Timestamp', kind='mergesort')
+    # ===========================
+    # PROBE B: snapshot depth/key
+    # ===========================
+    k = ['Game_Key','Market','Outcome','Bookmaker']
     
+    if snaps.empty:
+        _dbg_timing("probeB_snaps_empty", snaps_rows=0)
+    else:
+        if 'Snapshot_Timestamp' not in snaps.columns:
+            _dbg_timing("probeB_missing_ts_col", snaps_rows=len(snaps))
+        else:
+            tmp = snaps.dropna(subset=['Snapshot_Timestamp']).copy()
+            tmp['Snapshot_Timestamp'] = pd.to_datetime(tmp['Snapshot_Timestamp'], utc=True, errors='coerce')
+            nun = tmp.groupby(k)['Snapshot_Timestamp'].nunique()
+    
+            _dbg_timing(
+                "probeB_ts_depth",
+                snaps_rows=len(snaps),
+                groups=len(nun),
+                pct_groups_ge2=float((nun >= 2).mean()) if len(nun) else None,
+                min_ts=int(nun.min()) if len(nun) else None,
+                med_ts=float(nun.median()) if len(nun) else None,
+                max_ts=int(nun.max()) if len(nun) else None,
+            )
+
     # ─────────────────────────────────────────────────────────
     # 4) Extremes (vectorized)
     # ─────────────────────────────────────────────────────────
@@ -9775,6 +9826,14 @@ def detect_sharp_moves(
             df_all_snapshots[c] = pd.Series(pd.NA, index=df_all_snapshots.index, dtype='string')
     
     df = apply_compute_sharp_metrics_rowwise(df, df_all_snapshots)
+    # ===========================
+    # PROBE C: did cols get added?
+    # ===========================
+    timing_cols = [c for c in df.columns if c.startswith("SharpMove_Magnitude_")]
+    _dbg_timing("probeC_cols_after_metrics", timing_cols=len(timing_cols))
+    if timing_cols:
+        s = df[timing_cols].fillna(0).sum(axis=1)
+        _dbg_timing("probeC_nonzero_rows", nonzero_rows=int((s != 0).sum()), total_rows=len(df))
 
     # ─────────────────────────────────────────────────────────
     # 8) Score (avoid extra copies) + housekeeping
@@ -9834,7 +9893,6 @@ def detect_sharp_moves(
     return df_scored, df_all_snapshots, summary_df
 
     
-  
 
 
 def compute_weighted_signal(row, market_weights):
