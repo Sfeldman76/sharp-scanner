@@ -6821,35 +6821,34 @@ def _is_xgb_classifier(m):
 
 
 def _xgb_params_from_proto(proto):
-    """
-    Convert an XGBClassifier proto into params for xgboost.train.
-    Keeps semantics as close as possible.
-    """
     p = proto.get_params(deep=False)
 
+    def _f(key, default):
+        v = p.get(key, default)
+        return default if v is None else v
+
     params = {
-        "objective": p.get("objective", "binary:logistic"),
-        "eval_metric": p.get("eval_metric", ["logloss", "auc"]),
-        "tree_method": p.get("tree_method", "hist"),
-        "grow_policy": p.get("grow_policy", "lossguide"),
-        "max_bin": p.get("max_bin", 256),
-        "learning_rate": p.get("learning_rate", 0.05),
-        "subsample": p.get("subsample", 0.7),
-        "colsample_bytree": p.get("colsample_bytree", 0.6),
-        "min_child_weight": p.get("min_child_weight", 1.0),
-        "reg_lambda": p.get("reg_lambda", 1.0),
-        "reg_alpha": p.get("reg_alpha", 0.0),
-        "gamma": p.get("gamma", 0.0),
-        "max_depth": p.get("max_depth", 0),  # lossguide ignores typical depth semantics
-        "nthread": int(p.get("n_jobs", 1) or 1),
+        "objective": _f("objective", "binary:logistic"),
+        "eval_metric": _f("eval_metric", ["logloss", "auc"]),
+        "tree_method": _f("tree_method", "hist"),
+        "grow_policy": _f("grow_policy", "lossguide"),
+        "max_bin": int(_f("max_bin", 256)),
+        "learning_rate": float(_f("learning_rate", 0.05)),
+        "subsample": float(_f("subsample", 0.7)),
+        "colsample_bytree": float(_f("colsample_bytree", 0.6)),
+        "min_child_weight": float(_f("min_child_weight", 1.0)),
+        "reg_lambda": float(_f("reg_lambda", 1.0)),
+        "reg_alpha": float(_f("reg_alpha", 0.0)),
+        "gamma": float(_f("gamma", 0.0)),
+        "max_depth": int(_f("max_depth", 0)),
+        "nthread": int(_f("n_jobs", 1) or 1),
         "verbosity": 0,
-        "predictor": p.get("predictor", "cpu_predictor"),
+        "predictor": _f("predictor", "cpu_predictor"),
     }
 
-    # some sklearn-only keys may exist; ignore safely
-    num_boost_round = int(p.get("n_estimators", 400) or 400)
-
+    num_boost_round = int(_f("n_estimators", 400) or 400)
     return params, num_boost_round
+
 
 
 
