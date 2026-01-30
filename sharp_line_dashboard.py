@@ -3606,12 +3606,7 @@ def select_features_auto(
         return [], pd.DataFrame(columns=["selected", "flipped", "flip_mode"])
 
     # ✅ Default must_keep
-    must_keep = must_keep or [
-        "PR_Rating_Diff",
-        "Outcome_Model_Spread",
-        "Outcome_Market_Spread",
-        "Outcome_Spread_Edge",
-    ]
+    must_keep = must_keep or ["Outcome_Market_Spread"]
 
     y_arr = np.asarray(y_train, dtype=int).reshape(-1)
 
@@ -11154,11 +11149,7 @@ def train_sharp_model_from_bq(
             y_train=y_train,
             folds=folds,
             sport_key=sport_key,
-            must_keep=[
-               
-                "PR_Rating_Diff",
-                "Outcome_Model_Spread","Outcome_Market_Spread","Outcome_Spread_Edge",
-            ],
+            must_keep=["Outcome_Market_Spread"],
             auc_min_k=None,            # ✅ seed = len(must_keep) only
             use_auc_auto=True,         # ✅ actually select (earned)
             auc_patience=200,
