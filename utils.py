@@ -3203,20 +3203,88 @@ def compute_sharp_metrics(
             out[f"OddsMove_Magnitude_{tod}_{mtg}"]  = round(odds_buckets[idx], 6)
 
     return out
+import time
+import pandas as pd
+import numpy as np
+import logging
+
+_TIMING_SNAP_CACHE = {"ts": 0.0, "df": None, "hours": None, "table": None}
+
+def get_timing_snapshots_cached(
+    *,
+    hours: int = 120,
+    table: str = "sharplogger.sharp_data.sharp_moves_master",
+    ttl_s: int = 120,
+) -> pd.DataFrame:
+    """
+    Cache a skinny snapshot history frame for timing features.
+
+    - Reads from RAW snapshot table (sharp_moves_master), NOT merged view.
+    - Keeps only columns needed by timing.
+    - Normalizes join keys + dtypes once per TTL.
+    """
+    now = time.time()
+    c = _TIMING_SNAP_CACHE
+
+    # TTL cache hit
+    if (
+        c.get("df") is not None
+        and (now - float(c.get("ts", 0.0))) < ttl_s
+        and c.get("hours") == hours
+        and c.get("table") == table
+    ):
+        return c["df"]
+
+    df = read_recent_sharp_moves(hours=hours, table=table)  # must be RAW table
+    if df is None or df.empty:
+        c.update({"ts": now, "df": pd.DataFrame(), "hours": hours, "table": table})
+        return c["df"]
+
+    keep = [x for x in (
+        "Game_Key","Market","Outcome","Bookmaker",
+        "Snapshot_Timestamp","Game_Start",
+        "Limit","Value","Odds_Price",
+    ) if x in df.columns]
+    df = df.loc[:, keep].copy()
+
+    # normalize join keys once
+    for k in ("Game_Key","Market","Outcome","Bookmaker"):
+        if k in df.columns:
+            df[k] = df[k].astype("string").str.strip().str.lower()
+
+    # timestamps once
+    if "Snapshot_Timestamp" in df.columns:
+        df["Snapshot_Timestamp"] = pd.to_datetime(df["Snapshot_Timestamp"], utc=True, errors="coerce")
+    if "Game_Start" in df.columns:
+        df["Game_Start"] = pd.to_datetime(df["Game_Start"], utc=True, errors="coerce")
+
+    # numerics once
+    for cnum in ("Limit","Value","Odds_Price"):
+        if cnum in df.columns:
+            df[cnum] = pd.to_numeric(df[cnum], errors="coerce").astype("float32", copy=False)
+
+    # optional: drop rows with null keys to reduce group noise
+    df = df.dropna(subset=[k for k in ("Game_Key","Market","Outcome","Bookmaker") if k in df.columns])
+
+    c.update({"ts": now, "df": df, "hours": hours, "table": table})
+    return df
+
+    
 def apply_compute_sharp_metrics_rowwise(
     df: pd.DataFrame,
     df_all_snapshots: pd.DataFrame,
 ) -> pd.DataFrame:
     """
     Compute sharp/odds timing metrics ONLY when valid snapshot data exists.
-    - Does NOT create default timing bucket columns.
-    - Does NOT fill with zeros/NaNs for missing groups.
-    - Rollups are computed only if their inputs exist on the merged frame.
+
+    Notes:
+    - Does NOT mutate input df in-place.
+    - Expects df_all_snapshots to be raw snapshot stream (multi Snapshot_Timestamp rows).
+    - Requires >=2 timestamps per (Game_Key,Market,Outcome,Bookmaker) to compute timing.
     """
     if df is None or df.empty or df_all_snapshots is None or df_all_snapshots.empty:
         return df
 
-    # ---- required join keys
     keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
     missing = [k for k in keys if k not in df.columns]
     if missing:
@@ -3225,15 +3293,7 @@ def apply_compute_sharp_metrics_rowwise(
     _tod = ['Overnight','Early','Midday','Late']
     _mtg = ['VeryEarly','MidRange','LateGame','Urgent']
 
-    # ── skinny snapshots ────────────────────────────────────────────────────────
-    snap_needed = list(dict.fromkeys(keys + [
-        'Limit', 'Value', 'Snapshot_Timestamp', 'Game_Start', 'Odds_Price'
-    ]))
-    snaps = df_all_snapshots.loc[:, [c for c in snap_needed if c in df_all_snapshots.columns]].copy()
-    if snaps.empty:
-        return df  # nothing to compute, do not add columns
-
-    # normalize key columns (lower/strip, keep string dtype)
+    # --- build a normalized key frame (do NOT mutate df) ---
     def _to_str_col(s: pd.Series) -> pd.Series:
         if str(s.dtype).startswith('string'):
             out = s
@@ -3241,25 +3301,34 @@ def apply_compute_sharp_metrics_rowwise(
             try:
                 out = s.astype('string[pyarrow]')
             except Exception:
-                out = s.astype(str)
+                out = s.astype('string')
         return out.str.strip().str.lower()
 
+    df_keys = df.loc[:, keys].copy()
+    for k in keys:
+        df_keys[k] = _to_str_col(df_keys[k])
+
+    # --- skinny snapshot view (no copy unless needed) ---
+    snap_needed = list(dict.fromkeys(keys + ['Limit','Value','Snapshot_Timestamp','Game_Start','Odds_Price']))
+    snaps = df_all_snapshots.loc[:, [c for c in snap_needed if c in df_all_snapshots.columns]]
+    if snaps.empty:
+        return df
+
+    # If snapshots already normalized by get_timing_snapshots_cached, this is cheap.
     for k in (set(keys) & set(snaps.columns)):
-        snaps[k] = _to_str_col(snaps[k])
-    for k in (set(keys) & set(df.columns)):
-        df[k] = _to_str_col(df[k])
+        snaps.loc[:, k] = _to_str_col(snaps[k])
 
-    if 'Snapshot_Timestamp' in snaps.columns:
-        snaps['Snapshot_Timestamp'] = pd.to_datetime(snaps['Snapshot_Timestamp'], errors='coerce', utc=True)
-    if 'Game_Start' in snaps.columns:
-        snaps['Game_Start'] = pd.to_datetime(snaps['Game_Start'], errors='coerce', utc=True)
+    if 'Snapshot_Timestamp' in snaps.columns and not pd.api.types.is_datetime64_any_dtype(snaps['Snapshot_Timestamp']):
+        snaps.loc[:, 'Snapshot_Timestamp'] = pd.to_datetime(snaps['Snapshot_Timestamp'], errors='coerce', utc=True)
+    if 'Game_Start' in snaps.columns and not pd.api.types.is_datetime64_any_dtype(snaps['Game_Start']):
+        snaps.loc[:, 'Game_Start'] = pd.to_datetime(snaps['Game_Start'], errors='coerce', utc=True)
 
-    for c in ('Limit', 'Value', 'Odds_Price'):
-        if c in snaps.columns:
-            snaps[c] = pd.to_numeric(snaps[c], errors='coerce').astype('float32', copy=False)
+    for cnum in ('Limit', 'Value', 'Odds_Price'):
+        if cnum in snaps.columns and not pd.api.types.is_float_dtype(snaps[cnum]):
+            snaps.loc[:, cnum] = pd.to_numeric(snaps[cnum], errors='coerce').astype('float32', copy=False)
 
-    # keep only snaps for keys present in df (saves work and avoids stray keys)
-    snaps = snaps.merge(df[keys].drop_duplicates(), on=keys, how='inner')
+    # --- filter snapshots to keys in current df ---
+    snaps = snaps.merge(df_keys.drop_duplicates(), on=keys, how='inner')
     if snaps.empty:
         return df
 
@@ -3267,40 +3336,36 @@ def apply_compute_sharp_metrics_rowwise(
     if 'Snapshot_Timestamp' in snaps.columns:
         sort_cols.append('Snapshot_Timestamp')
     if sort_cols:
-        snaps.sort_values(sort_cols, inplace=True, kind='mergesort')
+        snaps = snaps.sort_values(sort_cols, kind='mergesort')
 
-    # ── compute metrics per valid group (require >=2 timestamps and some data) ──
+    # --- compute metrics per group ---
     records = []
-    append = records.append
 
     gb = snaps.groupby(keys, sort=False, observed=True, dropna=False)
     for name, g in gb:
-        # validity: at least 2 snapshots and at least one signal dimension present
-        n_ts = int(g['Snapshot_Timestamp'].notna().sum()) if 'Snapshot_Timestamp' in g else 0
-        has_val  = 'Value' in g and g['Value'].notna().any()
-        has_odds = 'Odds_Price' in g and g['Odds_Price'].notna().any()
-        
-        if n_ts < 2 and not (has_val or has_odds):
-            # Emit a zeroed record so merge creates the columns
-            append({
-                keys[0]: name[0], keys[1]: name[1], keys[2]: name[2], keys[3]: name[3],
-                'Open_Value': None, 'Open_Odds': None, 'Opening_Limit': None, 'First_Imp_Prob': None,
-                'Sharp_Move_Signal': 0, 'Sharp_Line_Magnitude': 0.0, 'Odds_Move_Magnitude': 0.0,
-                'Sharp_Limit_Jump': 0, 'Sharp_Limit_Total': 0.0,
-                'SharpMove_Timing_Dominant': 'unknown'
-            })
+        # Must have >=2 timestamps to compute timing buckets
+        if 'Snapshot_Timestamp' not in g.columns:
+            continue
+        n_ts = int(g['Snapshot_Timestamp'].notna().sum())
+        if n_ts < 2:
             continue
 
-        game_start    = g['Game_Start'].dropna().iloc[0] if 'Game_Start' in g and g['Game_Start'].notna().any() else None
-        open_val      = g['Value'].dropna().iloc[0] if has_val else None
-        open_odds     = g['Odds_Price'].dropna().iloc[0] if has_odds else None
-        opening_limit = g['Limit'].dropna().iloc[0] if 'Limit' in g and g['Limit'].notna().any() else None
+        has_val  = ('Value' in g.columns) and g['Value'].notna().any()
+        has_odds = ('Odds_Price' in g.columns) and g['Odds_Price'].notna().any()
+        if not (has_val or has_odds):
+            continue
+
+        game_start = g['Game_Start'].dropna().iloc[0] if ('Game_Start' in g.columns and g['Game_Start'].notna().any()) else None
+        open_val   = g['Value'].dropna().iloc[0] if has_val else None
+        open_odds  = g['Odds_Price'].dropna().iloc[0] if has_odds else None
+        opening_limit = g['Limit'].dropna().iloc[0] if ('Limit' in g.columns and g['Limit'].notna().any()) else None
 
         n = len(g)
-        lim  = g['Limit'].to_numpy(dtype='float32', copy=False)      if 'Limit' in g else np.empty(n, dtype='float32')
-        val  = g['Value'].to_numpy(dtype='float32', copy=False)      if 'Value' in g else np.empty(n, dtype='float32')
-        ts   = g['Snapshot_Timestamp'].to_numpy(copy=False)          if 'Snapshot_Timestamp' in g else np.array([pd.NaT]*n, dtype='datetime64[ns]')
-        odds = g['Odds_Price'].to_numpy(dtype='float32', copy=False) if 'Odds_Price' in g else np.empty(n, dtype='float32')
+        lim  = g['Limit'].to_numpy(dtype='float32', copy=False)      if 'Limit' in g.columns else np.empty(n, dtype='float32')
+        val  = g['Value'].to_numpy(dtype='float32', copy=False)      if 'Value' in g.columns else np.empty(n, dtype='float32')
+        ts   = g['Snapshot_Timestamp'].to_numpy(copy=False)
+        odds = g['Odds_Price'].to_numpy(dtype='float32', copy=False) if 'Odds_Price' in g.columns else np.empty(n, dtype='float32')
+
         entries = list(zip(lim, val, ts, np.repeat(game_start, n), odds))
 
         m = compute_sharp_metrics(
@@ -3314,13 +3379,11 @@ def apply_compute_sharp_metrics_rowwise(
             opening_limit=opening_limit,
         ) or {}
 
-        # Only attach if compute_sharp_metrics produced anything useful.
         if m:
-            rec = {keys[0]: name[0], keys[1]: name[1], keys[2]: name[2], keys[3]: name[3], **m}
-            append(rec)
+            records.append({keys[0]: name[0], keys[1]: name[1], keys[2]: name[2], keys[3]: name[3], **m})
 
     if not records:
-        return df  # nothing valid to add
+        return df
 
     metrics_df = pd.DataFrame.from_records(records)
 
@@ -3328,31 +3391,34 @@ def apply_compute_sharp_metrics_rowwise(
     _opener_cols = ['Open_Value', 'Open_Odds', 'Opening_Limit', 'First_Imp_Prob']
     metrics_df = metrics_df.drop(columns=[c for c in _opener_cols if c in metrics_df.columns], errors='ignore')
 
-    # merge back (left join), only columns that exist in metrics_df are introduced
-    out = df.merge(metrics_df, on=keys, how='left', copy=False)
+    # merge back (left join) using normalized keys on the df side
+    df_out = df.copy()
+    # ensure df_out join keys normalized the same way as df_keys used for snaps
+    for k in keys:
+        df_out[k] = df_keys[k].values
 
-    # ---- optional: rollups ONLY if their inputs were produced
-    sharp_cols_present = [c for t in _tod for m in _mtg
-                          for c in [f'SharpMove_Magnitude_{t}_{m}']
-                          if c in out.columns]
-    odds_cols_present  = [c for t in _tod for m in _mtg
-                          for c in [f'OddsMove_Magnitude_{t}_{m}']
-                          if c in out.columns]
+    out = df_out.merge(metrics_df, on=keys, how='left', copy=False)
+
+    # rollups only if present
+    sharp_cols_present = [f'SharpMove_Magnitude_{t}_{m}' for t in _tod for m in _mtg if f'SharpMove_Magnitude_{t}_{m}' in out.columns]
+    odds_cols_present  = [f'OddsMove_Magnitude_{t}_{m}'  for t in _tod for m in _mtg if f'OddsMove_Magnitude_{t}_{m}'  in out.columns]
 
     if sharp_cols_present and 'SharpMove_Timing_Magnitude' not in out.columns:
         out['SharpMove_Timing_Magnitude'] = out[sharp_cols_present].sum(axis=1).astype('float32')
+
     if odds_cols_present and 'Odds_Move_Magnitude' not in out.columns:
         out['Odds_Move_Magnitude'] = out[odds_cols_present].sum(axis=1).astype('float32')
 
-    if sharp_cols_present and 'SharpMove_Timing_Dominant' not in out.columns:
+    if sharp_cols_present:
         max_col = out[sharp_cols_present].idxmax(axis=1)
         dom = (max_col.fillna('')
-                      .str.replace('SharpMove_Magnitude_', '', regex=False)
-                      .str.replace('_', '/', regex=False))
+                  .astype('string')
+                  .str.replace('SharpMove_Magnitude_', '', regex=False)
+                  .str.replace('_', '/', regex=False))
         has_mass = out[sharp_cols_present].sum(axis=1) > 0
-        out.loc[has_mass, 'SharpMove_Timing_Dominant'] = dom[has_mass].astype('string')
+        out.loc[has_mass, 'SharpMove_Timing_Dominant'] = dom[has_mass]
 
-    # numeric coercion only for columns that exist (no creation)
+    # numeric coercion only for existing cols
     for c in sharp_cols_present + odds_cols_present + [
         'SharpMove_Timing_Magnitude','Odds_Move_Magnitude',
         'Net_Line_Move_From_Opening','Abs_Line_Move_From_Opening',
@@ -3363,7 +3429,7 @@ def apply_compute_sharp_metrics_rowwise(
             out[c] = pd.to_numeric(out[c], errors='coerce').astype('float32', copy=False)
 
     return out
-    
+
 
     
     
@@ -9641,6 +9707,30 @@ def detect_sharp_moves(
     # 2) Read snapshots (KEEP ALL COLUMNS) + normalize hot fields
     # ─────────────────────────────────────────────────────────
     df_all_snapshots = read_recent_sharp_master_cached(hours=120)
+    # ─────────────────────────────────────────────────────────
+    # TIMING HISTORY (raw snapshot stream; do NOT reuse df_all_snapshots)
+    # ─────────────────────────────────────────────────────────
+    df_timing_snapshots = get_timing_snapshots_cached(
+        hours=120,
+        table="sharplogger.sharp_data.sharp_moves_master",
+        ttl_s=120,
+    )
+    
+    df = apply_compute_sharp_metrics_rowwise(df, df_timing_snapshots)
+    
+    for c in ('Game_Key','Market','Outcome','Bookmaker'):
+        if c in df_all_snapshots.columns:
+            df_all_snapshots[c] = df_all_snapshots[c].astype('string').str.strip().str.lower()
+
+
+    # normalize join keys for timing func (same normalization you already do)
+    for c in ('Game_Key','Market','Outcome','Bookmaker'):
+        if c in df_timing_snapshots.columns:
+            df_timing_snapshots[c] = df_timing_snapshots[c].astype('string').str.strip().str.lower()
+    
+    for c in ('Snapshot_Timestamp','Game_Start'):
+        if c in df_timing_snapshots.columns:
+            df_timing_snapshots[c] = pd.to_datetime(df_timing_snapshots[c], errors='coerce', utc=True)
     
     # Keep join keys as string for safe merges & concatenation later
     for c in ('Game_Key','Market','Outcome','Bookmaker'):
@@ -9826,7 +9916,8 @@ def detect_sharp_moves(
         if c not in df_all_snapshots.columns:
             df_all_snapshots[c] = pd.Series(pd.NA, index=df_all_snapshots.index, dtype='string')
     
-    df = apply_compute_sharp_metrics_rowwise(df, df_all_snapshots)
+   
+
     # ===========================
     # PROBE C: did cols get added?
     # ===========================
