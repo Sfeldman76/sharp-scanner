@@ -2864,14 +2864,7 @@ def _cv_auc_for_feature_set(
         xgb_params, xgb_num_round = _xgb_params_from_proto(model_proto)
         if isinstance(xgb_params, dict) and "nthread" not in xgb_params and "n_jobs" not in xgb_params:
             xgb_params["nthread"] = 0
-    # ✅ Slightly increase regularization (Option A)
-    # Prefer reg_lambda bump (safest)
-    lam = float(xgb_params.get("reg_lambda", 1.0))
-    xgb_params["reg_lambda"] = lam * 1.15  # +15%
-
-    # (Alternative: min_child_weight bump instead of reg_lambda)
-    mcw = float(xgb_params.get("min_child_weight", 1.0))
-    xgb_params["min_child_weight"] = mcw * 1.20  # +20%
+   
 
     def _fit_predict_proba(X_tr, y_tr, X_va):
         if use_xgb:
@@ -3246,12 +3239,7 @@ def _auto_select_k_by_auc(
         if isinstance(xgb_params, dict) and "nthread" not in xgb_params and "n_jobs" not in xgb_params:
             xgb_params["nthread"] = 0
     # ✅ Slightly increase regularization (Option A)
-    lam = float(xgb_params.get("reg_lambda", 1.0))
-    xgb_params["reg_lambda"] = lam * 1.15  # +15%
-
-    # (Alternative: min_child_weight bump instead of reg_lambda)
-    mcw = float(xgb_params.get("min_child_weight", 1.0))
-    xgb_params["min_child_weight"] = mcw * 1.20  # +20%
+  
 
     # ---- fast flip helpers (mode-only + inplace) ----
     def _auto_flip_mode(arr1d):
