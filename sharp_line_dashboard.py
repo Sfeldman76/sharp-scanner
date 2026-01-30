@@ -3399,8 +3399,8 @@ def _auto_select_k_by_auc(
         log_func(f"[AUTO-FEAT] start scan: must_keep={len(mk)} target_seed={min_k} metric={accept_metric} quick_folds={len(folds_quick)}")
 
     # --- gating margins (tune if you want) ---
-    quick_margin_auc = 0.002   # if quick AUC is worse than best-0.002, skip full CV
-    flip_close_margin = 0.001  # only try flip if normal is at least (best - 0.001) in quick/full
+    quick_margin_auc = 0.004   # if quick AUC is worse than best-0.002, skip full CV
+    flip_close_margin = 0.002  # only try flip if normal is at least (best - 0.001) in quick/full
 
     for i, feat in enumerate(ordered):
         if (time.time() - t0) >= float(time_budget_s):
@@ -3581,8 +3581,8 @@ def select_features_auto(
     # selection knobs
     use_auc_auto: bool = True,
     auc_min_k: int | None = None,
-    auc_patience: int = 50,
-    auc_min_improve: float = 1e-5,
+    auc_patience: int = 70,
+    auc_min_improve: float = 5e-6,
     accept_metric: str = "auc",
     auc_verbose: bool = True,
 
@@ -11153,7 +11153,7 @@ def train_sharp_model_from_bq(
             auc_min_k=None,            # ✅ seed = len(must_keep) only
             use_auc_auto=True,         # ✅ actually select (earned)
             auc_patience=200,
-            auc_min_improve=1e-5,
+            auc_min_improve=5e-6,
             accept_metric="auc",
             auc_verbose=True,
             log_func=log_func,
