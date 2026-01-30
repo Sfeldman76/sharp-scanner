@@ -3269,7 +3269,71 @@ def get_timing_snapshots_cached(
     c.update({"ts": now, "df": df, "hours": hours, "table": table})
     return df
 
-    
+
+def propagate_timing_to_other_side(df: pd.DataFrame) -> pd.DataFrame:
+    timing_cols = [c for c in df.columns if c.startswith("SharpMove_Magnitude_") or c.startswith("OddsMove_Magnitude_")]
+    if not timing_cols:
+        return df
+
+    # work on a copy
+    out = df.copy()
+
+    # define "has timing" as any nonzero mass across timing columns
+    timing_mass = out[timing_cols].fillna(0).sum(axis=1)
+    has_timing = timing_mass > 0
+
+    # build a pairing key that is stable across both sides
+    # prefer Merge_Key_Short if present, else Game_Key sans outcome isn't available, so fall back to Game_Key
+    base_key = 'Merge_Key_Short' if 'Merge_Key_Short' in out.columns else 'Game_Key'
+
+    mkt = out.get('Market', pd.Series("", index=out.index)).astype(str).str.lower().str.strip()
+
+    # value abs helps spreads; for h2h it's harmless; for totals it pairs over/under too
+    v = pd.to_numeric(out.get('Value', pd.Series(np.nan, index=out.index)), errors='coerce')
+    v_abs = v.abs()
+
+    out['_pair_key'] = (
+        out[base_key].astype('string').fillna("").str.lower().str.strip()
+        + "|" + mkt.astype('string')
+        + "|" + out.get('Bookmaker', pd.Series("", index=out.index)).astype('string').fillna("").str.lower().str.strip()
+        + "|" + v_abs.round(3).astype('string')   # round to avoid float noise
+    )
+
+    # For each pair_key, pick the "best" donor row (most timing mass)
+    donors = out.loc[has_timing, ['_pair_key'] + timing_cols].copy()
+    if donors.empty:
+        out.drop(columns=['_pair_key'], inplace=True, errors='ignore')
+        return out
+
+    donors['_mass'] = donors[timing_cols].fillna(0).sum(axis=1)
+    donors = donors.sort_values(['_pair_key','_mass'], ascending=[True, False]).drop_duplicates('_pair_key')
+    donors = donors.drop(columns=['_mass'])
+
+    # rows that need timing (no mass)
+    need = ~has_timing
+    out = out.merge(donors, on='_pair_key', how='left', suffixes=('', '__donor'))
+
+    # fill only timing columns that are missing/zero
+    for c in timing_cols:
+        dc = c + "__donor"
+        if dc in out.columns:
+            cur = pd.to_numeric(out[c], errors='coerce').fillna(0)
+            don = pd.to_numeric(out[dc], errors='coerce')
+            fill_mask = need & (cur == 0) & don.notna()
+            if fill_mask.any():
+                out.loc[fill_mask, c] = don.loc[fill_mask].astype('float32')
+            out.drop(columns=[dc], inplace=True)
+
+    # recompute rollups if you rely on them
+    if 'SharpMove_Timing_Magnitude' in out.columns:
+        out['SharpMove_Timing_Magnitude'] = out[[c for c in timing_cols if c.startswith("SharpMove_Magnitude_")]].fillna(0).sum(axis=1).astype('float32')
+    if 'Odds_Move_Magnitude' in out.columns:
+        out['Odds_Move_Magnitude'] = out[[c for c in timing_cols if c.startswith("OddsMove_Magnitude_")]].fillna(0).sum(axis=1).astype('float32')
+
+    out.drop(columns=['_pair_key'], inplace=True, errors='ignore')
+    return out
+
+
 def apply_compute_sharp_metrics_rowwise(
     df: pd.DataFrame,
     df_all_snapshots: pd.DataFrame,
@@ -3346,9 +3410,10 @@ def apply_compute_sharp_metrics_rowwise(
         # Must have >=2 timestamps to compute timing buckets
         if 'Snapshot_Timestamp' not in g.columns:
             continue
-        n_ts = int(g['Snapshot_Timestamp'].notna().sum())
+        n_ts = int(g['Snapshot_Timestamp'].dropna().nunique())
         if n_ts < 2:
             continue
+            
 
         has_val  = ('Value' in g.columns) and g['Value'].notna().any()
         has_odds = ('Odds_Price' in g.columns) and g['Odds_Price'].notna().any()
@@ -9717,7 +9782,7 @@ def detect_sharp_moves(
     )
     
     df = apply_compute_sharp_metrics_rowwise(df, df_timing_snapshots)
-    
+    df = propagate_timing_to_other_side(df)
     for c in ('Game_Key','Market','Outcome','Bookmaker'):
         if c in df_all_snapshots.columns:
             df_all_snapshots[c] = df_all_snapshots[c].astype('string').str.strip().str.lower()
