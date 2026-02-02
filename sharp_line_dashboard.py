@@ -3054,11 +3054,11 @@ def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
     min_k=None,
     max_k=None,
-    patience=50,
+    patience=100,
     min_improve=1e-6,
     verbose=True,
     log_func=print,
-    debug=False,
+    debug=True,
     debug_every=20,
 
     max_ll_increase=0.20,
@@ -3577,14 +3577,14 @@ def select_features_auto(
     max_feats_major: int = 160,
     max_feats_small: int = 160,
     topk_per_fold: int = 80,
-    min_presence: float = 0.80,
+    min_presence: float = 0.40,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
 
     # selection knobs
     use_auc_auto: bool = True,
     auc_min_k: int | None = None,
-    auc_patience: int = 70,
+    auc_patience: int = 100,
     auc_min_improve: float = 5e-6,
     accept_metric: str = "auc",
     auc_verbose: bool = True,
@@ -3602,8 +3602,7 @@ def select_features_auto(
     # ✅ backward compat: swallow extra kwargs safely
     **_ignored_kwargs,
 ):
-    import numpy as np
-    import pandas as pd
+ 
 
     if X_df_train is None or X_df_train.empty:
         return [], pd.DataFrame(columns=["selected", "flipped", "flip_mode"])
@@ -3689,7 +3688,7 @@ def select_features_auto(
             flips_after_selection=bool(final_orient),
             orient_features=True if final_orient else False,
             enable_feature_flips=True if final_orient else False,
-            max_feature_flips=3,
+            max_feature_flips=10,
             orient_passes=1,
 
             quick_screen=False,
