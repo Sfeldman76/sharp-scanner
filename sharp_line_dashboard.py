@@ -4179,7 +4179,7 @@ def attach_why_all_features(df_in: pd.DataFrame, bundle, model, why_rules=WHY_RU
     df.attrs["why_rule_hits_counts"] = dict(zip([r.get("msg","") for r in why_rules],
                                                 map(int, rule_hits)))
     return df
-from __future__ import annotations
+
 
 from typing import Dict, Optional, Tuple
 import numpy as np
