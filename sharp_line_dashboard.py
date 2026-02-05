@@ -13291,41 +13291,98 @@ except Exception:
     _HAS_ST = False
 
 # module cache works in training jobs and also reduces requery across reruns
-_PR_BETA_CACHE: dict[tuple[str, str, str, int], Dict[str, float]] = {}
+_PR_BETA_CACHE: dict[tuple[str, str, str, str, int, float], Dict[str, float]] = {}
+# key: (project, dataset, table, ratings_table, min_rows, lag_hours)
+
+from typing import Dict
 
 def compute_pr_points_slopes_from_scores(
     bq,
     project: str = "sharplogger",
     dataset: str = "sharp_data",
     table: str = "scores_with_features",
+    ratings_table: str = "sharplogger.sharp_data.ratings_history",
     min_rows_per_sport: int = 5000,
+    rating_lag_hours: float = 12.0,  # leakage-safe
 ) -> Dict[str, float]:
+    """
+    Learns beta per sport where:
+        margin ≈ beta * (Team_Rating - Opp_Rating)
+
+    beta is "POINTS per 1 rating point".
+    Uses scores_with_features columns:
+      Sport, Market, feat_Game_Start, feat_Team, feat_Opponent, Team_Score, Opp_Score
+    """
+
+    from google.cloud import bigquery
+
     sql = f"""
     WITH base AS (
       SELECT
-        UPPER(Sport) AS Sport,
-        SAFE_CAST(PR_Team_Rating AS FLOAT64) AS PR_Team_Rating,
-        SAFE_CAST(PR_Opp_Rating  AS FLOAT64) AS PR_Opp_Rating,
-        SAFE_CAST(Closing_Spread_For_Team AS FLOAT64) AS y
+        UPPER(CAST(Sport AS STRING)) AS Sport,
+        CAST(Market AS STRING) AS Market,
+        TIMESTAMP(feat_Game_Start) AS Game_Start,
+        LOWER(TRIM(CAST(feat_Team AS STRING))) AS Team_Norm,
+        LOWER(TRIM(CAST(feat_Opponent AS STRING))) AS Opp_Norm,
+        SAFE_CAST(Team_Score AS FLOAT64) AS Team_Score,
+        SAFE_CAST(Opp_Score  AS FLOAT64) AS Opp_Score,
+        (SAFE_CAST(Team_Score AS FLOAT64) - SAFE_CAST(Opp_Score AS FLOAT64)) AS margin
       FROM `{project}.{dataset}.{table}`
-      WHERE Market = 'spreads'
-        AND PR_Team_Rating IS NOT NULL
-        AND PR_Opp_Rating  IS NOT NULL
-        AND Closing_Spread_For_Team IS NOT NULL
+      WHERE feat_Game_Start IS NOT NULL
+        AND Team_Score IS NOT NULL
+        AND Opp_Score IS NOT NULL
+        AND feat_Team IS NOT NULL
+        AND feat_Opponent IS NOT NULL
+        AND Sport IS NOT NULL
+        AND Market = 'spreads'
     ),
+
+    team_r AS (
+      SELECT
+        b.*,
+        r.Rating AS Team_Rating
+      FROM base b
+      JOIN `{ratings_table}` r
+        ON UPPER(CAST(r.Sport AS STRING)) = b.Sport
+       AND LOWER(TRIM(CAST(r.Team  AS STRING))) = b.Team_Norm
+       AND TIMESTAMP(r.Updated_At) <= TIMESTAMP_SUB(b.Game_Start, INTERVAL CAST(@lag_hours AS INT64) HOUR)
+      QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY b.Sport, b.Game_Start, b.Team_Norm, b.Opp_Norm
+        ORDER BY TIMESTAMP(r.Updated_At) DESC
+      ) = 1
+    ),
+
+    both_r AS (
+      SELECT
+        t.*,
+        r.Rating AS Opp_Rating
+      FROM team_r t
+      JOIN `{ratings_table}` r
+        ON UPPER(CAST(r.Sport AS STRING)) = t.Sport
+       AND LOWER(TRIM(CAST(r.Team  AS STRING))) = t.Opp_Norm
+       AND TIMESTAMP(r.Updated_At) <= TIMESTAMP_SUB(t.Game_Start, INTERVAL CAST(@lag_hours AS INT64) HOUR)
+      QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY t.Sport, t.Game_Start, t.Team_Norm, t.Opp_Norm
+        ORDER BY TIMESTAMP(r.Updated_At) DESC
+      ) = 1
+    ),
+
     x AS (
       SELECT
         Sport,
-        (PR_Team_Rating - PR_Opp_Rating) AS pr_diff,
-        y
-      FROM base
-      WHERE ABS(PR_Team_Rating - PR_Opp_Rating) > 1e-9
+        (SAFE_CAST(Team_Rating AS FLOAT64) - SAFE_CAST(Opp_Rating AS FLOAT64)) AS pr_diff,
+        margin
+      FROM both_r
+      WHERE Team_Rating IS NOT NULL
+        AND Opp_Rating  IS NOT NULL
+        AND ABS(SAFE_CAST(Team_Rating AS FLOAT64) - SAFE_CAST(Opp_Rating AS FLOAT64)) > 1e-9
     ),
+
     agg AS (
       SELECT
         Sport,
         COUNT(*) AS n,
-        SAFE_DIVIDE(SUM(pr_diff * y), SUM(pr_diff * pr_diff)) AS beta
+        SAFE_DIVIDE(SUM(pr_diff * margin), SUM(pr_diff * pr_diff)) AS beta
       FROM x
       GROUP BY Sport
     )
@@ -13336,22 +13393,17 @@ def compute_pr_points_slopes_from_scores(
       AND ABS(beta) < 1000
     """
 
-    job_config = None
-    try:
-        from google.cloud import bigquery
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("min_rows", "INT64", int(min_rows_per_sport))]
-        )
-    except Exception:
-        job_config = None
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("min_rows", "INT64", int(min_rows_per_sport)),
+            bigquery.ScalarQueryParameter("lag_hours", "FLOAT64", float(rating_lag_hours)),
+        ]
+    )
 
     df = bq.query(sql, job_config=job_config).to_dataframe()
     out: Dict[str, float] = {}
     for _, r in df.iterrows():
-        try:
-            out[str(r["Sport"]).upper()] = float(r["beta"])
-        except Exception:
-            pass
+        out[str(r["Sport"]).upper()] = float(r["beta"])
     return out
 
 
@@ -13361,8 +13413,9 @@ def resolve_pr_beta_map(
     dataset: str = "sharp_data",
     table: str = "scores_with_features",
     min_rows_per_sport: int = 5000,
+    rating_lag_hours: float = 12.0
 ) -> Dict[str, float]:
-    key = (project, dataset, table, int(min_rows_per_sport))
+    key = (project, dataset, table, int(min_rows_per_sport), float(rating_lag_hours))
 
     # 1) module cache always works (training + UI)
     cached = _PR_BETA_CACHE.get(key)
@@ -13382,7 +13435,12 @@ def resolve_pr_beta_map(
 
     # 3) compute once
     beta_map = compute_pr_points_slopes_from_scores(
-        bq, project=project, dataset=dataset, table=table, min_rows_per_sport=int(min_rows_per_sport)
+        bq,
+        project=project,
+        dataset=dataset,
+        table=table,
+        min_rows_per_sport=int(min_rows_per_sport),
+        rating_lag_hours=float(rating_lag_hours),
     )
 
     # store in caches (best effort for streamlit)
