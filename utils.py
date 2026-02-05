@@ -4860,71 +4860,48 @@ def prep_consensus_market_spread_lowmem(
     return out
 
 
-def enrich_and_grade_for_training(
-    df_spread_rows: pd.DataFrame,
-    *,
-    bq,
-    table_current: str = "sharplogger.sharp_data.ratings_current",
-    sport_aliases: dict | None = None,
-    preferred_method: dict | None = None,
-    value_col: str = "Value",
-    outcome_col: str = "Outcome_Norm",  # ✅ use normalized outcome consistently
-    project: str = "sharplogger",
-    dataset: str = "sharp_data",
-    scores_table: str = "sharp_scores_with_features", 
-    min_rows_per_sport: int = 5000,
-    log_func=print,
-) -> pd.DataFrame:
-    if df_spread_rows is None or df_spread_rows.empty:
-        return df_spread_rows
 
-    sport_aliases = sport_aliases or {}
-    if preferred_method is None:
-        preferred_method = globals().get("PREFERRED_METHOD", {}) or {}
+from typing import Dict
+import numpy as np
+import pandas as pd
 
-    game_key = ["Sport", "Home_Team_Norm", "Away_Team_Norm"]
-    base_cols = game_key + ["Game_Start"]
-    for c in base_cols:
-        if c not in df_spread_rows.columns:
-            raise KeyError(f"enrich_and_grade_for_training missing column: {c}")
+# ============================================================
+# BACKEND FIXES (ratings_current path)
+#   Goals:
+#   1) Never silently mix methods/scales (fixes “100 vs 2” weirdness)
+#   2) Always import bigquery (your current code uses bigquery but doesn’t import it)
+#   3) Apply sport aliases to Sports AND teams
+#   4) Attach Home/Away_Rating_Method and PR_Pts_Beta_Used
+#   5) Convert ratings units -> points using learned betas ONLY when needed
+#      (skip conversion for zero-centered methods: kp_adj_em, nba_bpi_adj_em)
+# ============================================================
 
-    df_games = df_spread_rows[base_cols].drop_duplicates().reset_index(drop=True).copy()
+# methods that are already “points-ish” (or at least not Elo-ish 1500 scale)
+ZERO_CENTERED_METHODS = {"kp_adj_em", "nba_bpi_adj_em"}
 
-    enrich_power_from_current_inplace(
-        df_games,
-        bq=bq,
-        table_current=table_current,
-        preferred_method=preferred_method,
-        sport_aliases=sport_aliases,
-        log_func=log_func,
-    )
+def _norm_team_series(s: pd.Series) -> pd.Series:
+    return (s.astype(str).str.lower().str.strip()
+            .str.replace(r"\s+", " ", regex=True)
+            .str.replace(".", "", regex=False)
+            .str.replace("&", "and", regex=False)
+            .str.replace("-", " ", regex=False))
 
-    g_cons = prep_consensus_market_spread_lowmem(
-        df_spread_rows, value_col=value_col, outcome_col=outcome_col
-    )
+def _canonize_sport_series(s: pd.Series, sport_aliases: dict) -> pd.Series:
+    canon: dict[str, str] = {}
+    for k, v in (sport_aliases or {}).items():
+        if isinstance(v, list):
+            for a in v:
+                canon[str(a).upper()] = str(k).upper()
+        else:
+            canon[str(k).upper()] = str(v).upper()
+    return s.astype(str).str.upper().str.strip().map(lambda x: canon.get(x, x))
 
-    g_full = df_games.merge(g_cons, on=game_key, how="left")
-    g_fc = favorite_centric_from_powerdiff_lowmem(
-        g_full,
-        bq=bq,
-        project=project,
-        dataset=dataset,
-        scores_table=scores_table,
-        min_rows_per_sport=int(min_rows_per_sport),
-    )
-
-    out = df_spread_rows.merge(g_fc, on=game_key, how="left")
-
-    is_fav = (out[outcome_col].astype(str).values ==
-              out["Market_Favorite_Team"].astype(str).values)
-
-    out["Outcome_Model_Spread"]  = np.where(is_fav, out["Model_Fav_Spread"].values, out["Model_Dog_Spread"].values).astype("float32")
-    out["Outcome_Market_Spread"] = np.where(is_fav, out["Favorite_Market_Spread"].values, out["Underdog_Market_Spread"].values).astype("float32")
-    out["Outcome_Spread_Edge"]   = np.where(is_fav, out["Fav_Edge_Pts"].values, out["Dog_Edge_Pts"].values).astype("float32")
-    out["Outcome_Cover_Prob"]    = np.where(is_fav, out["Fav_Cover_Prob"].values, out["Dog_Cover_Prob"].values).astype("float32")
-
-    return out
-
+def _aliases_for_sport(sport: str, sport_aliases: dict) -> list[str]:
+    sport = (sport or "").upper().strip()
+    al = (sport_aliases or {}).get(sport, [])
+    if not isinstance(al, list):
+        al = [al]
+    return sorted({sport, *[str(x).upper() for x in al]})
 
 
 def enrich_power_from_current_inplace(
@@ -4941,13 +4918,27 @@ def enrich_power_from_current_inplace(
     out_diff_col: str = "Power_Rating_Diff",
     sport_aliases: dict | None = None,
     baseline: float = 1500.0,
+    strict_method: bool = True,         # ✅ NEW: don’t fall back to “any method” if preferred missing
     log_func=print,
     **_ignored_kwargs,
 ) -> pd.DataFrame:
+    """
+    Backend “ratings_current” enricher.
+
+    Key behavior changes:
+      - Always imports bigquery
+      - Sport aliases applied (so NBA/NCAAB etc don’t mismatch)
+      - Team normalization consistent
+      - If preferred method exists and returns 0 rows, we *raise* when strict_method=True
+        (prevents mixed-scale or wrong-method fallbacks)
+      - Emits Home_Rating_Method / Away_Rating_Method for auditing
+    """
     if df is None or df.empty:
         return df
     if bq is None:
         raise ValueError("BigQuery client `bq` is None — pass bq=bq_client.")
+
+    from google.cloud import bigquery  # ✅ FIX: your code referenced bigquery without importing
 
     if preferred_method is None:
         preferred_method = globals().get("PREFERRED_METHOD", {}) or {}
@@ -4957,16 +4948,23 @@ def enrich_power_from_current_inplace(
         if c not in df.columns:
             raise ValueError(f"enrich_power_from_current_inplace missing column: {c}")
 
-    df[sport_col] = df[sport_col].astype(str).str.strip().str.upper()
-    df[home_col]  = df[home_col].astype(str).str.lower().str.strip()
-    df[away_col]  = df[away_col].astype(str).str.lower().str.strip()
+    # normalize
+    df[sport_col] = _canonize_sport_series(df[sport_col], sport_aliases)
+    df[home_col]  = _norm_team_series(df[home_col])
+    df[away_col]  = _norm_team_series(df[away_col])
 
     # outputs
     for c in (out_home_col, out_away_col, out_diff_col):
         if c not in df.columns:
             df[c] = np.nan
 
-    # NBA pace outputs (optional columns)
+    # method audit outputs
+    if "Home_Rating_Method" not in df.columns:
+        df["Home_Rating_Method"] = ""
+    if "Away_Rating_Method" not in df.columns:
+        df["Away_Rating_Method"] = ""
+
+    # NBA tempo outputs (optional columns)
     if "Home_BPI_Tempo" not in df.columns:
         df["Home_BPI_Tempo"] = np.nan
     if "Away_BPI_Tempo" not in df.columns:
@@ -4974,6 +4972,7 @@ def enrich_power_from_current_inplace(
 
     sports = sorted(set(df[sport_col].dropna().astype(str).str.upper().str.strip().tolist()))
     if not sports:
+        # fall back safely
         df[out_home_col] = pd.to_numeric(df[out_home_col], errors="coerce").fillna(baseline).astype("float32")
         df[out_away_col] = pd.to_numeric(df[out_away_col], errors="coerce").fillna(baseline).astype("float32")
         df[out_diff_col] = (df[out_home_col] - df[out_away_col]).astype("float32")
@@ -5000,63 +4999,79 @@ def enrich_power_from_current_inplace(
     ).to_dataframe()
 
     if df_cur is None or df_cur.empty:
-        log_func("⚠️ Power rating enrichment: ratings_current returned 0 rows; using baseline.")
-        df[out_home_col] = pd.to_numeric(df[out_home_col], errors="coerce").fillna(baseline).astype("float32")
-        df[out_away_col] = pd.to_numeric(df[out_away_col], errors="coerce").fillna(baseline).astype("float32")
-        df[out_diff_col] = (df[out_home_col] - df[out_away_col]).astype("float32")
+        log_func("⚠️ ratings_current returned 0 rows; using baselines.")
+        # baseline per row depends on preferred method
+        for sp in sports:
+            mask = df[sport_col].eq(sp)
+            pref = str(preferred_method.get(sp, "")).lower().strip()
+            base_sp = np.float32(0.0) if (pref in ZERO_CENTERED_METHODS) else np.float32(baseline)
+            df.loc[mask, out_home_col] = base_sp
+            df.loc[mask, out_away_col] = base_sp
+            df.loc[mask, out_diff_col] = np.float32(0.0)
+            df.loc[mask, "Home_Rating_Method"] = pref
+            df.loc[mask, "Away_Rating_Method"] = pref
         return df
 
     df_cur["Sport"] = df_cur["Sport"].astype(str).str.upper().str.strip()
-    df_cur["Team"] = df_cur["Team"].astype(str).str.lower().str.strip()
+    df_cur["Team"] = _norm_team_series(df_cur["Team"])
     df_cur["Method"] = df_cur["Method"].astype(str).str.lower().str.strip()
     df_cur["Updated_At"] = pd.to_datetime(df_cur["Updated_At"], utc=True, errors="coerce")
     df_cur["Rating"] = pd.to_numeric(df_cur["Rating"], errors="coerce")
 
-    ZERO_CENTERED = {"kp_adj_em", "nba_bpi_adj_em"}
-
-    def _build_map_for_sport(sp: str, method_name: str) -> pd.Series:
-        d = df_cur.loc[(df_cur["Sport"] == sp) & (df_cur["Method"] == method_name)].copy()
+    def _latest_team_map(d: pd.DataFrame) -> pd.DataFrame:
+        # latest row per team (stable)
+        d = d.dropna(subset=["Team", "Rating"]).copy()
         if d.empty:
-            return pd.Series(dtype="float32")
-        d = d.dropna(subset=["Team", "Rating"])
-        if d.empty:
-            return pd.Series(dtype="float32")
+            return d
         d = d.sort_values(["Team", "Updated_At"], kind="mergesort")
         d = d.drop_duplicates(subset=["Team"], keep="last")
-        s_map = d.set_index("Team")["Rating"]
-        if s_map.index.has_duplicates:
-            s_map = s_map[~s_map.index.duplicated(keep="last")]
-        return s_map.astype("float32")
+        return d
 
-    # apply per sport (and handle NBA tempo)
+    def _build_map_for_sport_method(sp: str, method_name: str) -> pd.DataFrame:
+        d = df_cur.loc[(df_cur["Sport"] == sp) & (df_cur["Method"] == method_name)].copy()
+        return _latest_team_map(d)
+
+    def _build_latest_any_method(sp: str) -> pd.DataFrame:
+        d = df_cur.loc[df_cur["Sport"] == sp].copy()
+        return _latest_team_map(d)
+
+    # apply per sport
     for sp in sports:
         mask = df[sport_col].eq(sp)
         if not mask.any():
             continue
 
         pref = preferred_method.get(sp, None)
-        pref = str(pref).lower().strip() if pref is not None else None
+        pref = str(pref).lower().strip() if pref is not None else ""
 
-        # ✅ sport-specific baseline
-        base_sp = np.float32(0.0) if (pref in ZERO_CENTERED) else np.float32(baseline)
+        # sport-specific baseline
+        base_sp = np.float32(0.0) if (pref in ZERO_CENTERED_METHODS) else np.float32(baseline)
 
-        # --- main rating map (preferred method) ---
         if pref:
-            s_map = _build_map_for_sport(sp, pref)
+            d_map = _build_map_for_sport_method(sp, pref)
+            if d_map.empty:
+                msg = f"⚠️ ratings_current has 0 rows for sport={sp} method={pref}"
+                if strict_method:
+                    raise RuntimeError(msg + " (strict_method=True)")
+                log_func(msg + " → falling back to latest-any-method")
+                d_map = _build_latest_any_method(sp)
         else:
-            # fallback: just take latest per team regardless of method
-            d = df_cur.loc[df_cur["Sport"] == sp].copy()
-            d = d.dropna(subset=["Team", "Rating"])
-            d = d.sort_values(["Team", "Updated_At"], kind="mergesort").drop_duplicates(subset=["Team"], keep="last")
-            s_map = d.set_index("Team")["Rating"].astype("float32")
+            # no preferred method given
+            d_map = _build_latest_any_method(sp)
 
-        hk = df.loc[mask, home_col].astype(str).str.lower().str.strip()
-        ak = df.loc[mask, away_col].astype(str).str.lower().str.strip()
+        # build series
+        s_rating = d_map.set_index("Team")["Rating"].astype("float32") if not d_map.empty else pd.Series(dtype="float32")
+        s_method = d_map.set_index("Team")["Method"].astype(str) if ("Method" in d_map.columns and not d_map.empty) else pd.Series(dtype=str)
 
-        h = s_map.reindex(hk).to_numpy(dtype="float32", copy=False)
-        a = s_map.reindex(ak).to_numpy(dtype="float32", copy=False)
+        hk = df.loc[mask, home_col]
+        ak = df.loc[mask, away_col]
 
-        # fill missing with baseline for that sport
+        h = s_rating.reindex(hk).to_numpy(dtype="float32", copy=False)
+        a = s_rating.reindex(ak).to_numpy(dtype="float32", copy=False)
+
+        hm = s_method.reindex(hk).astype(str).to_numpy(copy=False) if not s_method.empty else np.array([pref]*len(hk), dtype=object)
+        am = s_method.reindex(ak).astype(str).to_numpy(copy=False) if not s_method.empty else np.array([pref]*len(ak), dtype=object)
+
         h = np.where(np.isfinite(h), h, base_sp).astype("float32")
         a = np.where(np.isfinite(a), a, base_sp).astype("float32")
 
@@ -5064,25 +5079,152 @@ def enrich_power_from_current_inplace(
         df.loc[mask, out_away_col] = a
         df.loc[mask, out_diff_col] = (h - a).astype("float32")
 
-        # --- NBA tempo maps (optional) ---
+        # audit methods
+        df.loc[mask, "Home_Rating_Method"] = pd.Series(hm, index=df.index[mask]).astype(str).str.lower().values
+        df.loc[mask, "Away_Rating_Method"] = pd.Series(am, index=df.index[mask]).astype(str).str.lower().values
+
+        # NBA tempo (optional) — keep separate from rating scale
         if sp == "NBA":
-            t_map = _build_map_for_sport("NBA", "nba_bpi_adj_t")
-            ht = t_map.reindex(hk).to_numpy(dtype="float32", copy=False)
-            at = t_map.reindex(ak).to_numpy(dtype="float32", copy=False)
+            d_t = _build_map_for_sport_method("NBA", "nba_bpi_adj_t")
+            if not d_t.empty:
+                t_map = d_t.set_index("Team")["Rating"].astype("float32")
+                ht = t_map.reindex(hk).to_numpy(dtype="float32", copy=False)
+                at = t_map.reindex(ak).to_numpy(dtype="float32", copy=False)
+                df.loc[mask, "Home_BPI_Tempo"] = np.where(np.isfinite(ht), ht, np.float32(100.0)).astype("float32")
+                df.loc[mask, "Away_BPI_Tempo"] = np.where(np.isfinite(at), at, np.float32(100.0)).astype("float32")
+            else:
+                df.loc[mask, "Home_BPI_Tempo"] = np.float32(100.0)
+                df.loc[mask, "Away_BPI_Tempo"] = np.float32(100.0)
 
-            # reasonable fallback tempo if missing
-            ht = np.where(np.isfinite(ht), ht, np.float32(100.0)).astype("float32")
-            at = np.where(np.isfinite(at), at, np.float32(100.0)).astype("float32")
-
-            df.loc[mask, "Home_BPI_Tempo"] = ht
-            df.loc[mask, "Away_BPI_Tempo"] = at
-
-    # finalize (do NOT force baseline=1500 for NBA/NCAAB after we computed base_sp above)
+    # finalize diffs
     df[out_home_col] = pd.to_numeric(df[out_home_col], errors="coerce").astype("float32")
     df[out_away_col] = pd.to_numeric(df[out_away_col], errors="coerce").astype("float32")
     df[out_diff_col] = (df[out_home_col] - df[out_away_col]).astype("float32")
-
     return df
+
+
+def enrich_and_grade_for_training(
+    df_spread_rows: pd.DataFrame,
+    *,
+    bq,
+    table_current: str = "sharplogger.sharp_data.ratings_current",
+    sport_aliases: dict | None = None,
+    preferred_method: dict | None = None,
+    value_col: str = "Value",
+    outcome_col: str = "Outcome_Norm",
+    project: str = "sharplogger",
+    dataset: str = "sharp_data",
+    scores_table: str = "sharp_scores_with_features",
+    min_rows_per_sport: int = 5000,
+    log_func=print,
+) -> pd.DataFrame:
+    """
+    Backend spread enrichment:
+      - pulls ratings_current (method-safe)
+      - (optional) rescales Elo-ish ratings to points using learned betas
+      - computes favorite-centric edges and maps to each outcome row
+    """
+    if df_spread_rows is None or df_spread_rows.empty:
+        return df_spread_rows
+
+    sport_aliases = sport_aliases or {}
+    if preferred_method is None:
+        preferred_method = globals().get("PREFERRED_METHOD", {}) or {}
+
+    game_key = ["Sport", "Home_Team_Norm", "Away_Team_Norm"]
+    base_cols = game_key + ["Game_Start"]
+    for c in base_cols:
+        if c not in df_spread_rows.columns:
+            raise KeyError(f"enrich_and_grade_for_training missing column: {c}")
+
+    # normalize sport + team keys for stability before joins
+    df0 = df_spread_rows.copy()
+    df0["Sport"] = _canonize_sport_series(df0["Sport"], sport_aliases)
+    df0["Home_Team_Norm"] = _norm_team_series(df0["Home_Team_Norm"])
+    df0["Away_Team_Norm"] = _norm_team_series(df0["Away_Team_Norm"])
+
+    df_games = df0[base_cols].drop_duplicates().reset_index(drop=True).copy()
+
+    # 1) attach current ratings (method-safe)
+    enrich_power_from_current_inplace(
+        df_games,
+        bq=bq,
+        table_current=table_current,
+        preferred_method=preferred_method,
+        sport_aliases=sport_aliases,
+        strict_method=True,      # ✅ prevents method mixing / scale weirdness
+        log_func=log_func,
+    )
+
+    # 2) Convert ratings units -> points using learned betas
+    #    Only for Elo-ish methods. For kp_adj_em / nba_bpi_adj_em we force beta=1.0
+    beta_map = resolve_pr_beta_map(
+        bq,
+        project=project,
+        dataset=dataset,
+        table=scores_table,
+        min_rows_per_sport=int(min_rows_per_sport),
+    )
+
+    # ✅ fallback betas are "points per 1 rating point"
+    beta_fallback_map = {
+        "NFL":   25.0,
+        "NCAAF": 25.0,
+        "NBA":   35.0,
+        "WNBA":  35.0,
+        "CFL":   25.0,
+        "MLB":   50.0,
+        "NCAAB": 1.0,
+    }
+
+    sp = df_games["Sport"].astype(str).str.upper().values
+    beta = np.array([beta_map.get(s, np.nan) for s in sp], dtype="float32")
+    beta_fb = np.array([beta_fallback_map.get(s, 30.0) for s in sp], dtype="float32")
+    beta = np.where(np.isfinite(beta), beta, beta_fb).astype("float32")
+
+    # method-aware gate: zero-centered methods => beta=1
+    m = df_games.get("Home_Rating_Method", "").astype(str).str.lower().values
+    beta = np.where(np.isin(m, list(ZERO_CENTERED_METHODS)), 1.0, beta).astype("float32")
+    df_games["PR_Pts_Beta_Used"] = beta
+
+    # keep unit versions for debugging/audit
+    for c in ["Home_Power_Rating", "Away_Power_Rating", "Power_Rating_Diff"]:
+        if c in df_games.columns and f"{c}_Units" not in df_games.columns:
+            df_games[f"{c}_Units"] = pd.to_numeric(df_games[c], errors="coerce").astype("float32")
+
+    # apply scaling
+    df_games["Home_Power_Rating"] = (pd.to_numeric(df_games["Home_Power_Rating"], errors="coerce").astype("float32") * beta).astype("float32")
+    df_games["Away_Power_Rating"] = (pd.to_numeric(df_games["Away_Power_Rating"], errors="coerce").astype("float32") * beta).astype("float32")
+    df_games["Power_Rating_Diff"] = (df_games["Home_Power_Rating"] - df_games["Away_Power_Rating"]).astype("float32")
+
+    # 3) Consensus market
+    g_cons = prep_consensus_market_spread_lowmem(
+        df0, value_col=value_col, outcome_col=outcome_col
+    )
+
+    # 4) Favorite-centric edges/probs (expects Power_Rating_Diff already in points if needed)
+    g_full = df_games.merge(g_cons, on=game_key, how="left")
+    g_fc = favorite_centric_from_powerdiff_lowmem(g_full)
+
+    # propagate useful audit cols
+    for c in ["PR_Pts_Beta_Used", "Home_Rating_Method", "Away_Rating_Method",
+              "Home_Power_Rating_Units", "Away_Power_Rating_Units", "Power_Rating_Diff_Units"]:
+        if c in g_full.columns and c not in g_fc.columns:
+            g_fc[c] = g_full[c]
+
+    out = df0.merge(g_fc, on=game_key, how="left")
+
+    # 5) Map game-level numbers to each outcome row
+    is_fav = (out[outcome_col].astype(str).values ==
+              out["Market_Favorite_Team"].astype(str).values)
+
+    out["Outcome_Model_Spread"]  = np.where(is_fav, out["Model_Fav_Spread"].values, out["Model_Dog_Spread"].values).astype("float32")
+    out["Outcome_Market_Spread"] = np.where(is_fav, out["Favorite_Market_Spread"].values, out["Underdog_Market_Spread"].values).astype("float32")
+    out["Outcome_Spread_Edge"]   = np.where(is_fav, out["Fav_Edge_Pts"].values, out["Dog_Edge_Pts"].values).astype("float32")
+    out["Outcome_Cover_Prob"]    = np.where(is_fav, out["Fav_Cover_Prob"].values, out["Dog_Cover_Prob"].values).astype("float32")
+
+    return out
+
 
 def implied_prob_vec(odds):
     # expects numpy/pandas array, returns float32 array
