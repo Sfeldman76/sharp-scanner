@@ -4179,30 +4179,32 @@ def attach_why_all_features(df_in: pd.DataFrame, bundle, model, why_rules=WHY_RU
     df.attrs["why_rule_hits_counts"] = dict(zip([r.get("msg","") for r in why_rules],
                                                 map(int, rule_hits)))
     return df
+from __future__ import annotations
+
+from typing import Dict, Optional, Tuple
+import numpy as np
+import pandas as pd
+
+# ============================================================
+# FIXED: enrich_power_for_training_lowmem
+#   - carries Home/Away_Rating_Method
+#   - strict method usage (no silent “all-methods” mixing) when available
+#   - removes dead/unreachable duplicated code
+#   - as-of gate preserved
+# ============================================================
+
 def enrich_power_for_training_lowmem(
     df: pd.DataFrame,
-    sport_aliases: dict | None = None,           # optional
-    bq=None,                                     # pass your bigquery.Client
+    sport_aliases: dict | None = None,
+    bq=None,
     table_history: str = "sharplogger.sharp_data.ratings_history",
     pad_days: int = 21,
-    rating_lag_hours: float = 12.0,              # ✅ default to 12h for leakage-safe training
-    project: str | None = None,                  # kept for signature parity
+    rating_lag_hours: float = 12.0,
+    project: str | None = None,
     *,
-    debug_asof_cols: bool = True,                # ✅ emit Home/Away_Rating_AsOfTS for audit
+    debug_asof_cols: bool = True,
+    strict_method: bool = True,   # ✅ NEW: prevents mixed-scale ratings in training
 ) -> pd.DataFrame:
-    """
-    Enrich df with Home_Power_Rating, Away_Power_Rating, Power_Rating_Diff
-    by looking up team ratings within a small time window.
-
-    Leakage-safe rule (hard):
-      AsOfTS <= Game_Start - rating_lag_hours
-
-    Key fix (your issue):
-      - Apply PREFERRED_METHOD filtering to BOTH ratings_history AND ratings_current
-        *when the table supports a Method column*.
-      - If Method doesn't exist, fall back automatically (no crash).
-      - Cache key includes method + lag + pad to avoid stale/wrong reuse.
-    """
     sport_aliases = sport_aliases or {}
 
     if df is None or df.empty:
@@ -4210,16 +4212,19 @@ def enrich_power_for_training_lowmem(
     if bq is None:
         raise ValueError("BigQuery client `bq` is None — pass your bigquery.Client (e.g., bq=bq_client).")
 
+    # local import (keeps module light)
+    from google.cloud import bigquery
+
     out = df.copy()
 
     # --- normalize inputs ---
-    out["Sport"] = out["Sport"].astype(str).str.upper()
+    out["Sport"] = out["Sport"].astype(str).str.upper().str.strip()
     out["Home_Team_Norm"] = out["Home_Team_Norm"].astype(str).str.lower().str.strip()
     out["Away_Team_Norm"] = out["Away_Team_Norm"].astype(str).str.lower().str.strip()
     out["Game_Start"] = pd.to_datetime(out["Game_Start"], utc=True, errors="coerce")
 
     # sport alias → canon
-    canon = {}
+    canon: dict[str, str] = {}
     for k, v in (sport_aliases or {}).items():
         if isinstance(v, list):
             for a in v:
@@ -4229,7 +4234,7 @@ def enrich_power_for_training_lowmem(
     out["Sport"] = out["Sport"].map(lambda s: canon.get(s, s))
 
     # assume one sport per call
-    sport_canon = str(out["Sport"].iloc[0])
+    sport_canon = str(out["Sport"].iloc[0]).upper()
     out = out[out["Sport"] == sport_canon].copy()
     if out.empty:
         return df.copy()
@@ -4259,7 +4264,7 @@ def enrich_power_for_training_lowmem(
     gmin, gmax = out["Game_Start"].min(), out["Game_Start"].max()
     pad = pd.Timedelta(days=int(pad_days))
     start_iso = pd.to_datetime(gmin - pad, utc=True).isoformat()
-    end_iso   = pd.to_datetime(gmax, utc=True).isoformat()   # do NOT fetch beyond max game start
+    end_iso   = pd.to_datetime(gmax, utc=True).isoformat()  # do NOT fetch beyond max game start
 
     # ---------- tiny in-function cache ----------
     if not hasattr(enrich_power_for_training_lowmem, "_ratings_cache"):
@@ -4271,12 +4276,13 @@ def enrich_power_for_training_lowmem(
         "MLB":   "poisson",
         "NFL":   "elo_kalman",
         "NCAAF": "elo_kalman",
-        "NBA":   "nba_bpi_adj_em", 
+        "NBA":   "nba_bpi_adj_em",   # ✅ keep this single scale for ratings
         "WNBA":  "elo_kalman",
         "CFL":   "elo_kalman",
         "NCAAB": "kp_adj_em",
     }
 
+    ZERO_CENTERED = {"kp_adj_em", "nba_bpi_adj_em"}  # points-ish / not Elo-ish 1500
 
     def fetch_ratings_window_cached(
         sport: str,
@@ -4284,18 +4290,11 @@ def enrich_power_for_training_lowmem(
         end_iso: str,
         table_name: str,
     ) -> pd.DataFrame:
-        # Preferred method per sport (single) + optional multi-method override
         method = PREFERRED_METHOD.get(sport.upper())
-    
-        # ✅ methods to fetch (lowercase)
-        if sport.upper() == "NBA":
-            methods = ["nba_bpi_adj_em", "nba_bpi_adj_t"]   # pull both
-        elif method:
-            methods = [str(method).lower()]
-        else:
-            methods = None
-    
-        # ✅ cache key includes *methods list* (not just method string)
+
+        # ✅ IMPORTANT: for training, do NOT pull multiple methods (avoids mixed scale)
+        methods = [str(method).lower()] if method else None
+
         key = (
             sport.upper(),
             start_iso, end_iso,
@@ -4304,10 +4303,12 @@ def enrich_power_for_training_lowmem(
             tuple(methods) if methods else None,
             float(rating_lag_hours),
             int(pad_days),
+            bool(strict_method),
         )
         if key in _CACHE:
             return _CACHE[key].copy()
-    
+
+        # method-aware query (attempt)
         base_sql = f"""
         SELECT
           UPPER(CAST(Sport AS STRING))        AS Sport,
@@ -4321,95 +4322,73 @@ def enrich_power_for_training_lowmem(
           AND TIMESTAMP(Updated_At) >= @start
           AND TIMESTAMP(Updated_At) <= @end
         """
-    
+
         params_common = [
             bigquery.ArrayQueryParameter("aliases", "STRING", _aliases_for(sport)),
             bigquery.ArrayQueryParameter("teams", "STRING", teams),
             bigquery.ScalarQueryParameter("start", "TIMESTAMP", pd.Timestamp(start_iso).to_pydatetime()),
             bigquery.ScalarQueryParameter("end",   "TIMESTAMP", pd.Timestamp(end_iso).to_pydatetime()),
         ]
-    
+
         def _run(sql: str, params: list):
             return bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
-    
-        # ------------------------
-        # Try method-filtered first
-        # ------------------------
+
+        df_r: pd.DataFrame
+
         if methods:
             sql1 = base_sql + "\n  AND LOWER(CAST(Method AS STRING)) IN UNNEST(@methods)\n"
-            params1 = params_common + [
-                bigquery.ArrayQueryParameter("methods", "STRING", [m.lower() for m in methods])
-            ]
+            params1 = params_common + [bigquery.ArrayQueryParameter("methods", "STRING", [m.lower() for m in methods])]
             try:
                 df_r = _run(sql1, params1)
             except Exception as e:
-                # If Method column doesn't exist in the table, fall back w/o method filter
                 msg = str(e).lower()
-                if ("unrecognized name" in msg and "method" in msg) or ("name method" in msg and "not found" in msg):
-                    # Fallback query without Method in SELECT/WHERE
-                    base_sql_nomethod = f"""
-                    SELECT
-                      UPPER(CAST(Sport AS STRING))        AS Sport,
-                      LOWER(TRIM(CAST(Team AS STRING)))   AS Team_Norm,
-                      CAST(Rating AS FLOAT64)             AS Power_Rating,
-                      TIMESTAMP(Updated_At)               AS AsOfTS
-                    FROM `{table_name}`
-                    WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@aliases)
-                      AND LOWER(TRIM(CAST(Team AS STRING))) IN UNNEST(@teams)
-                      AND TIMESTAMP(Updated_At) >= @start
-                      AND TIMESTAMP(Updated_At) <= @end
-                    """
-                    df_r = _run(base_sql_nomethod, params_common)
-                else:
+                method_missing = (("unrecognized name" in msg and "method" in msg) or
+                                  ("name method" in msg and "not found" in msg))
+                if not method_missing:
                     raise
+
+                # Table has no Method column → fallback query without Method
+                base_sql_nomethod = f"""
+                SELECT
+                  UPPER(CAST(Sport AS STRING))        AS Sport,
+                  LOWER(TRIM(CAST(Team AS STRING)))   AS Team_Norm,
+                  CAST(Rating AS FLOAT64)             AS Power_Rating,
+                  TIMESTAMP(Updated_At)               AS AsOfTS
+                FROM `{table_name}`
+                WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@aliases)
+                  AND LOWER(TRIM(CAST(Team AS STRING))) IN UNNEST(@teams)
+                  AND TIMESTAMP(Updated_At) >= @start
+                  AND TIMESTAMP(Updated_At) <= @end
+                """
+                df_r = _run(base_sql_nomethod, params_common)
         else:
-            # No preferred method → fetch all (if Method exists), else this will also work for tables with Method
-            try:
-                df_r = _run(base_sql, params_common)
-            except Exception as e:
-                msg = str(e).lower()
-                if ("unrecognized name" in msg and "method" in msg) or ("name method" in msg and "not found" in msg):
-                    base_sql_nomethod = f"""
-                    SELECT
-                      UPPER(CAST(Sport AS STRING))        AS Sport,
-                      LOWER(TRIM(CAST(Team AS STRING)))   AS Team_Norm,
-                      CAST(Rating AS FLOAT64)             AS Power_Rating,
-                      TIMESTAMP(Updated_At)               AS AsOfTS
-                    FROM `{table_name}`
-                    WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@aliases)
-                      AND LOWER(TRIM(CAST(Team AS STRING))) IN UNNEST(@teams)
-                      AND TIMESTAMP(Updated_At) >= @start
-                      AND TIMESTAMP(Updated_At) <= @end
-                    """
-                    df_r = _run(base_sql_nomethod, params_common)
-                else:
-                    raise
-    
+            # No preferred method defined
+            # If strict_method, we can still run and accept (method-less tables)
+            df_r = _run(base_sql, params_common)
+
+        # If strict_method and the table supports Method, empty means mismatch → hard error
         if df_r.empty:
             _CACHE[key] = df_r
+            if strict_method and methods:
+                raise RuntimeError(
+                    f"No ratings returned for sport={sport.upper()} methods={methods} "
+                    f"from {table_name} in window [{start_iso}, {end_iso}]."
+                )
             return df_r
-    
+
         # normalize + clean
+        df_r["Sport"] = df_r["Sport"].astype(str).str.upper()
         df_r["Team_Norm"] = _norm_team_series(df_r["Team_Norm"])
         df_r["Power_Rating"] = pd.to_numeric(df_r["Power_Rating"], errors="coerce")
         df_r["AsOfTS"] = pd.to_datetime(df_r["AsOfTS"], utc=True, errors="coerce")
-    
+
         keep = ["Sport", "Team_Norm", "Power_Rating", "AsOfTS"]
         if "Method" in df_r.columns:
             df_r["Method"] = df_r["Method"].astype(str).str.lower().str.strip()
-            keep.insert(2, "Method")  # keep after Team_Norm
-    
-        df_r = df_r[keep].dropna(subset=["Team_Norm", "Power_Rating", "AsOfTS"])
-        df_r = df_r[df_r["Sport"].str.upper() == sport.upper()]
-    
-        _CACHE[key] = df_r
-        return df_r.copy()
+            keep.insert(2, "Method")
 
-        df_r["Team_Norm"] = _norm_team_series(df_r["Team_Norm"])
-        df_r["Power_Rating"] = pd.to_numeric(df_r["Power_Rating"], errors="coerce")
-        df_r["AsOfTS"] = pd.to_datetime(df_r["AsOfTS"], utc=True, errors="coerce")
-        df_r = df_r.dropna(subset=["Team_Norm", "Power_Rating", "AsOfTS"])
-        df_r = df_r[df_r["Sport"].str.upper() == sport.upper()]
+        df_r = df_r[keep].dropna(subset=["Team_Norm", "Power_Rating", "AsOfTS"])
+        df_r = df_r[df_r["Sport"] == sport.upper()]
 
         _CACHE[key] = df_r
         return df_r.copy()
@@ -4422,49 +4401,42 @@ def enrich_power_for_training_lowmem(
         table_name=table_history,
     )
 
-    # Baseline depends on preferred method (NCAAB kp_adj_em centered near 0)
-    method_used = PREFERRED_METHOD.get(sport_canon.upper())
-    is_nba_bpi = (sport_canon.upper() == "NBA")
-    
-    if is_nba_bpi and "Method" in ratings.columns:
-        r_em = ratings[ratings["Method"] == "nba_bpi_adj_em"].copy()
-        r_t  = ratings[ratings["Method"] == "nba_bpi_adj_t"].copy()
-    else:
-        r_em = ratings.copy()
-        r_t  = pd.DataFrame(columns=ratings.columns)
+    method_used = str(PREFERRED_METHOD.get(sport_canon, "")).lower()
+    base_default = np.float32(0.0) if (method_used in ZERO_CENTERED) else np.float32(1500.0)
 
-    # ✅ methods that are centered near 0 (not 1500-scale)
-    ZERO_CENTERED = {"kp_adj_em", "nba_bpi_adj_em"}
-    
-    base = np.float32(0.0) if (str(method_used).lower() in ZERO_CENTERED) else np.float32(1500.0)
-    tempo_base = np.float32(100.0)
-    out["Home_BPI_Tempo"] = tempo_base
-    out["Away_BPI_Tempo"] = tempo_base
-    out["Home_Power_Rating"] = base
-    out["Away_Power_Rating"] = base
+    # init defaults
+    out["Home_Power_Rating"] = base_default
+    out["Away_Power_Rating"] = base_default
+    out["Power_Rating_Diff"] = np.float32(0.0)
+
+    # carry methods for gating (even if empty)
+    out["Home_Rating_Method"] = method_used
+    out["Away_Rating_Method"] = method_used
+
     if debug_asof_cols:
         out["Home_Rating_AsOfTS"] = pd.NaT
         out["Away_Rating_AsOfTS"] = pd.NaT
 
     if ratings.empty:
-        out["Power_Rating_Diff"] = np.float32(0.0)
         return out
 
     ratings = ratings.copy()
     ratings["Team_Norm"] = _norm_team_series(ratings["Team_Norm"])
     ratings = ratings[ratings["Team_Norm"].isin(teams)]
     if ratings.empty:
-        out["Power_Rating_Diff"] = np.float32(0.0)
         return out
 
-    # compact arrays per team: times + values (sorted)
-    team_series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    # compact arrays per team: times + values + method (sorted)
+    team_series: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
     for team, g in ratings.groupby("Team_Norm", sort=False):
         g = g.sort_values("AsOfTS")
-        team_series[team] = (
-            g["AsOfTS"].to_numpy(dtype="datetime64[ns]"),
-            g["Power_Rating"].to_numpy(dtype=np.float32),
-        )
+        t_arr = g["AsOfTS"].to_numpy(dtype="datetime64[ns]")
+        r_arr = g["Power_Rating"].to_numpy(dtype=np.float32)
+        if "Method" in g.columns:
+            m_arr = g["Method"].astype(str).str.lower().fillna("").to_numpy(dtype=object)
+        else:
+            m_arr = np.array([""] * len(g), dtype=object)
+        team_series[team] = (t_arr, r_arr, m_arr)
 
     # ============================
     # As-of gate (hard)
@@ -4473,8 +4445,10 @@ def enrich_power_for_training_lowmem(
     lag_ns = np.int64(round(float(rating_lag_hours) * 3600.0 * 1e9))
     cutoff_ns = gs_ns - lag_ns
 
-    home_vals = np.full(len(out), base, dtype=np.float32)
-    away_vals = np.full(len(out), base, dtype=np.float32)
+    home_vals = np.full(len(out), base_default, dtype=np.float32)
+    away_vals = np.full(len(out), base_default, dtype=np.float32)
+    home_methods = np.full(len(out), method_used, dtype=object)
+    away_methods = np.full(len(out), method_used, dtype=object)
 
     if debug_asof_cols:
         home_asof = np.full(len(out), np.datetime64("NaT"), dtype="datetime64[ns]")
@@ -4484,52 +4458,67 @@ def enrich_power_for_training_lowmem(
     away_team = out["Away_Team_Norm"].to_numpy()
 
     # Home side: pick latest rating with AsOfTS <= cutoff
-    for team, (t_arr, r_arr) in team_series.items():
+    for team, (t_arr, r_arr, m_arr) in team_series.items():
         mask = (home_team == team)
-        if mask.any():
-            ts = cutoff_ns[mask].astype("datetime64[ns]")
-            idx = np.searchsorted(t_arr, ts, side="right") - 1
-            valid = idx >= 0
+        if not mask.any():
+            continue
+        ts = cutoff_ns[mask].astype("datetime64[ns]")
+        idx = np.searchsorted(t_arr, ts, side="right") - 1
+        valid = idx >= 0
 
-            vals = np.full(idx.shape, base, dtype=np.float32)
-            if valid.any():
-                vals[valid] = r_arr[idx[valid]]
-                if debug_asof_cols:
-                    home_asof[mask] = np.where(valid, t_arr[idx], home_asof[mask])
+        vals = np.full(idx.shape, base_default, dtype=np.float32)
+        meth = np.full(idx.shape, method_used, dtype=object)
 
-            home_vals[mask] = vals
+        if valid.any():
+            vals[valid] = r_arr[idx[valid]]
+            if len(m_arr) == len(r_arr):
+                meth[valid] = m_arr[idx[valid]]
+            if debug_asof_cols:
+                home_asof[mask] = np.where(valid, t_arr[idx], home_asof[mask])
 
-    # Away side: pick latest rating with AsOfTS <= cutoff
-    for team, (t_arr, r_arr) in team_series.items():
+        home_vals[mask] = vals
+        home_methods[mask] = meth
+
+    # Away side
+    for team, (t_arr, r_arr, m_arr) in team_series.items():
         mask = (away_team == team)
-        if mask.any():
-            ts = cutoff_ns[mask].astype("datetime64[ns]")
-            idx = np.searchsorted(t_arr, ts, side="right") - 1
-            valid = idx >= 0
+        if not mask.any():
+            continue
+        ts = cutoff_ns[mask].astype("datetime64[ns]")
+        idx = np.searchsorted(t_arr, ts, side="right") - 1
+        valid = idx >= 0
 
-            vals = np.full(idx.shape, base, dtype=np.float32)
-            if valid.any():
-                vals[valid] = r_arr[idx[valid]]
-                if debug_asof_cols:
-                    away_asof[mask] = np.where(valid, t_arr[idx], away_asof[mask])
+        vals = np.full(idx.shape, base_default, dtype=np.float32)
+        meth = np.full(idx.shape, method_used, dtype=object)
 
-            away_vals[mask] = vals
+        if valid.any():
+            vals[valid] = r_arr[idx[valid]]
+            if len(m_arr) == len(r_arr):
+                meth[valid] = m_arr[idx[valid]]
+            if debug_asof_cols:
+                away_asof[mask] = np.where(valid, t_arr[idx], away_asof[mask])
+
+        away_vals[mask] = vals
+        away_methods[mask] = meth
 
     out["Home_Power_Rating"] = home_vals
     out["Away_Power_Rating"] = away_vals
     out["Power_Rating_Diff"] = (home_vals - away_vals).astype("float32")
+    out["Home_Rating_Method"] = pd.Series(home_methods, index=out.index).astype(str).str.lower()
+    out["Away_Rating_Method"] = pd.Series(away_methods, index=out.index).astype(str).str.lower()
 
     if debug_asof_cols:
         out["Home_Rating_AsOfTS"] = pd.to_datetime(home_asof, utc=True, errors="coerce")
         out["Away_Rating_AsOfTS"] = pd.to_datetime(away_asof, utc=True, errors="coerce")
 
-        # hard assertion: no rating newer than Game_Start - rating_lag_hours
         cutoff_dt = out["Game_Start"] - pd.Timedelta(hours=float(rating_lag_hours))
         bad_home = out["Home_Rating_AsOfTS"].notna() & (out["Home_Rating_AsOfTS"] > cutoff_dt)
         bad_away = out["Away_Rating_AsOfTS"].notna() & (out["Away_Rating_AsOfTS"] > cutoff_dt)
         n_bad = int(bad_home.sum() + bad_away.sum())
         if n_bad:
-            ex_cols = [c for c in ["feat_Game_Key","Game_Key","Home_Team_Norm","Away_Team_Norm","Game_Start","Home_Rating_AsOfTS","Away_Rating_AsOfTS"] if c in out.columns]
+            ex_cols = [c for c in ["feat_Game_Key","Game_Key","Home_Team_Norm","Away_Team_Norm","Game_Start",
+                                   "Home_Rating_AsOfTS","Away_Rating_AsOfTS","Home_Rating_Method","Away_Rating_Method"]
+                       if c in out.columns]
             raise RuntimeError(
                 f"[LEAK] {n_bad} power-rating rows violate {rating_lag_hours}h gate. Examples:\n"
                 f"{out.loc[bad_home | bad_away, ex_cols].head(25)}"
@@ -4538,23 +4527,30 @@ def enrich_power_for_training_lowmem(
     return out
 
 
+# ============================================================
+# FIXED: enrich_and_grade_for_training
+#   - converts ratings to points ONLY when method is Elo-ish
+#   - fixes fallback beta direction (25, 35... not 1/25)
+#   - preserves *_Units debug cols
+# ============================================================
+
 def enrich_and_grade_for_training(
     df_spread_rows: pd.DataFrame,
-    bq,                                   # required BigQuery client
+    bq,
     sport_aliases: dict,
     value_col: str = "Value",
     outcome_col: str = "Outcome_Norm",
     pad_days: int = 30,
-    rating_lag_hours: float = 12.0,       # ✅ NEW (replaces allow_forward_hours)
+    rating_lag_hours: float = 12.0,
     table_history: str = "sharplogger.sharp_data.ratings_history",
     project: str | None = None,
+    *,
+    beta_project: str = "sharplogger",
+    beta_dataset: str = "sharp_data",
+    beta_table: str = "sharp_scores_with_features",
+    beta_min_rows_per_sport: int = 5000,
 ) -> pd.DataFrame:
-    """
-    Attach leakage-safe power ratings + consensus market k, then compute
-    model-vs-market spreads/edges and cover probs mapped to each outcome row.
-    Expects spreads only.
-    """
-    if df_spread_rows.empty:
+    if df_spread_rows is None or df_spread_rows.empty:
         return df_spread_rows.copy()
 
     # 1) Ratings (as-of) for the unique games in this batch
@@ -4564,9 +4560,55 @@ def enrich_and_grade_for_training(
         sport_aliases=sport_aliases,
         table_history=table_history,
         pad_days=pad_days,
-        rating_lag_hours=12.0,  
+        rating_lag_hours=float(rating_lag_hours),
         project=project,
+        debug_asof_cols=True,
+        strict_method=True,   # ✅ stop mixed-scale
     )
+
+    # 1b) Convert rating units -> spread points (method-aware)
+    ZERO_CENTERED = {"kp_adj_em", "nba_bpi_adj_em"}  # points-ish scales: do NOT rescale
+
+    if base is not None and not base.empty:
+        beta_map = resolve_pr_beta_map(
+            bq,
+            project=beta_project,
+            dataset=beta_dataset,
+            table=beta_table,
+            min_rows_per_sport=int(beta_min_rows_per_sport),
+        )
+
+        # ✅ fallback betas MUST be "points per rating point"
+        beta_fallback_map = {
+            "NFL":   25.0,
+            "NCAAF": 25.0,
+            "NBA":   35.0,
+            "WNBA":  35.0,
+            "CFL":   25.0,
+            "MLB":   50.0,
+            "NCAAB": 1.0,   # kp_adj_em already points-ish; we also gate by method below
+        }
+
+        sp = base["Sport"].astype(str).str.upper().values
+        beta = np.array([beta_map.get(s, np.nan) for s in sp], dtype="float32")
+        beta_fb = np.array([beta_fallback_map.get(s, 30.0) for s in sp], dtype="float32")
+        beta = np.where(np.isfinite(beta), beta, beta_fb).astype("float32")
+
+        # ✅ method gate: if method is already points-ish, force beta=1.0
+        if "Home_Rating_Method" in base.columns:
+            m = base["Home_Rating_Method"].astype(str).str.lower().values
+            beta = np.where(np.isin(m, list(ZERO_CENTERED)), 1.0, beta).astype("float32")
+
+        # keep original (units) for debugging
+        for c in ["Home_Power_Rating", "Away_Power_Rating", "Power_Rating_Diff"]:
+            if c in base.columns and f"{c}_Units" not in base.columns:
+                base[f"{c}_Units"] = pd.to_numeric(base[c], errors="coerce").astype("float32")
+
+        base["PR_Pts_Beta_Used"] = beta.astype("float32")
+
+        for c in ["Home_Power_Rating", "Away_Power_Rating", "Power_Rating_Diff"]:
+            if c in base.columns:
+                base[c] = (pd.to_numeric(base[c], errors="coerce").astype("float32") * beta).astype("float32")
 
     # 2) Consensus market (favorite + absolute spread “k”)
     g_cons = prep_consensus_market_spread_lowmem(
@@ -4579,7 +4621,9 @@ def enrich_and_grade_for_training(
     g_fc   = favorite_centric_from_powerdiff_lowmem(g_full)
 
     # Ensure PR cols exist even if base missed
-    for c in ['Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff']:
+    for c in ['Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff', 'PR_Pts_Beta_Used',
+              'Home_Rating_Method','Away_Rating_Method',
+              'Home_Power_Rating_Units','Away_Power_Rating_Units','Power_Rating_Diff_Units']:
         if c not in g_fc.columns and c in g_full.columns:
             g_fc[c] = g_full[c].values
         elif c not in g_fc.columns:
@@ -4593,7 +4637,10 @@ def enrich_and_grade_for_training(
         'Fav_Edge_Pts','Dog_Edge_Pts',
         'Fav_Cover_Prob','Dog_Cover_Prob',
         'Model_Expected_Margin','Model_Expected_Margin_Abs','Sigma_Pts',
-        'Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff'
+        'Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff',
+        'PR_Pts_Beta_Used',
+        'Home_Rating_Method','Away_Rating_Method',
+        'Home_Power_Rating_Units','Away_Power_Rating_Units','Power_Rating_Diff_Units',
     ]
     for c in keep_cols:
         if c not in g_fc.columns:
@@ -4610,8 +4657,6 @@ def enrich_and_grade_for_training(
     out['Outcome_Cover_Prob']    = np.where(is_fav, out['Fav_Cover_Prob'].values, out['Dog_Cover_Prob'].values).astype('float32')
 
     return out
-
-
 
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
@@ -4823,13 +4868,13 @@ def enrich_and_grade_for_training(
 
         # fallback if sport missing / low sample
         beta_fallback_map = {
-            "NFL":   1.0/25.0,
-            "NCAAF": 1.0/25.0,
-            "NBA":   1.0/35.0,
-            "WNBA":  1.0/35.0,
-            "CFL":   1.0/25.0,
-            "MLB":   1.0/50.0,
-            "NCAAB": 1.0,        # only if your NCAAB ratings are already points
+            "NFL":   25.0,
+            "NCAAF": 25.0,
+            "NBA":   35.0,
+            "WNBA":  35.0,
+            "CFL":   25.0,
+            "MLB":   50.0,
+            "NCAAB": 1.0,   # only if kp_adj_em already in points-like units
         }
 
         sp = base["Sport"].astype(str).str.upper().values
