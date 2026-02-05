@@ -4129,7 +4129,7 @@ def build_feature_label_index(why_rules) -> dict[str, list[str]]:
 def attach_why_all_features(df_in: pd.DataFrame, bundle, model, why_rules=WHY_RULES_V3,
                             ui_numeric_cols=frozenset((
                                 'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
-                                'Outcome_Cover_Prob','PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff',
+                                'Outcome_Cover_Prob','PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Edge_Pts',
                                 'edge_x_k','mu_x_k'
                             ))):
     df = df_in.copy()
@@ -4782,20 +4782,20 @@ def prep_consensus_market_spread_lowmem(
 
 def enrich_and_grade_for_training(
     df_spread_rows: pd.DataFrame,
-    bq,                                   # required BigQuery client
+    bq,
     sport_aliases: dict,
     value_col: str = "Value",
     outcome_col: str = "Outcome_Norm",
     pad_days: int = 30,
-    rating_lag_hours: float = 12.0,       # ✅ NEW (replaces allow_forward_hours)
+    rating_lag_hours: float = 12.0,
     table_history: str = "sharplogger.sharp_data.ratings_history",
     project: str | None = None,
+    *,
+    beta_project: str = "sharplogger",
+    beta_dataset: str = "sharp_data",
+    beta_table: str = "scores_with_features",
+    beta_min_rows_per_sport: int = 5000,
 ) -> pd.DataFrame:
-    """
-    Attach leakage-safe power ratings + consensus market k, then compute
-    model-vs-market spreads/edges and cover probs mapped to each outcome row.
-    Expects spreads only.
-    """
     if df_spread_rows.empty:
         return df_spread_rows.copy()
 
@@ -4806,9 +4806,49 @@ def enrich_and_grade_for_training(
         sport_aliases=sport_aliases,
         table_history=table_history,
         pad_days=pad_days,
-        rating_lag_hours=12.0,  
+        rating_lag_hours=float(rating_lag_hours),  # ✅ use param
         project=project,
     )
+
+    # ✅ 1b) Convert ratings from "units" -> "spread points" using learned sport betas
+    # base must have Sport and rating cols
+    if base is not None and not base.empty:
+        beta_map = resolve_pr_beta_map(
+            bq,
+            project=beta_project,
+            dataset=beta_dataset,
+            table=beta_table,
+            min_rows_per_sport=int(beta_min_rows_per_sport),
+        )
+
+        # fallback if sport missing / low sample
+        beta_fallback_map = {
+            "NFL":   1.0/25.0,
+            "NCAAF": 1.0/25.0,
+            "NBA":   1.0/35.0,
+            "WNBA":  1.0/35.0,
+            "CFL":   1.0/25.0,
+            "MLB":   1.0/50.0,
+            "NCAAB": 1.0,        # only if your NCAAB ratings are already points
+        }
+
+        sp = base["Sport"].astype(str).str.upper().values
+        beta = np.array([beta_map.get(s, np.nan) for s in sp], dtype="float32")
+        beta_fb = np.array([beta_fallback_map.get(s, 1.0/30.0) for s in sp], dtype="float32")
+        beta = np.where(np.isfinite(beta), beta, beta_fb).astype("float32")
+
+        # keep original (units) for debugging / optional feature use
+        for c in ["Home_Power_Rating", "Away_Power_Rating", "Power_Rating_Diff"]:
+            if c in base.columns:
+                base[f"{c}_Units"] = pd.to_numeric(base[c], errors="coerce").astype("float32")
+
+        base["PR_Pts_Beta_Used"] = beta
+        if "Home_Power_Rating" in base.columns:
+            base["Home_Power_Rating"] = (pd.to_numeric(base["Home_Power_Rating"], errors="coerce").astype("float32") * beta).astype("float32")
+        if "Away_Power_Rating" in base.columns:
+            base["Away_Power_Rating"] = (pd.to_numeric(base["Away_Power_Rating"], errors="coerce").astype("float32") * beta).astype("float32")
+        if "Power_Rating_Diff" in base.columns:
+            base["Power_Rating_Diff"] = (pd.to_numeric(base["Power_Rating_Diff"], errors="coerce").astype("float32") * beta).astype("float32")
 
     # 2) Consensus market (favorite + absolute spread “k”)
     g_cons = prep_consensus_market_spread_lowmem(
@@ -4835,7 +4875,8 @@ def enrich_and_grade_for_training(
         'Fav_Edge_Pts','Dog_Edge_Pts',
         'Fav_Cover_Prob','Dog_Cover_Prob',
         'Model_Expected_Margin','Model_Expected_Margin_Abs','Sigma_Pts',
-        'Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff'
+        'Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff',
+        'PR_Pts_Beta_Used',  # ✅ helpful to propagate
     ]
     for c in keep_cols:
         if c not in g_fc.columns:
@@ -9785,7 +9826,7 @@ def train_sharp_model_from_bq(
         df_market['PR_Opp_Rating']  = np.where(is_home_bet, df_market['Away_Power_Rating'], df_market['Home_Power_Rating'])
         df_market['PR_Rating_Diff']     = df_market['PR_Team_Rating'] - df_market['PR_Opp_Rating']
         df_market['PR_Abs_Rating_Diff'] = df_market['PR_Rating_Diff'].abs()
-        
+       
         # ---- H2H-only power rating alignment flags ---------------------------------
         mkt = df_market['Market'].astype(str).str.strip().str.lower()
         is_h2h = mkt.isin(['h2h', 'moneyline', 'ml', 'headtohead'])
@@ -9934,6 +9975,7 @@ def train_sharp_model_from_bq(
             # Power ratings / edges
             'PR_Team_Rating','PR_Opp_Rating',
             'PR_Rating_Diff','PR_Abs_Rating_Diff',
+            
             'Outcome_Model_Spread','Outcome_Market_Spread',
             'Outcome_Spread_Edge',
             'Outcome_Cover_Prob',
@@ -13236,7 +13278,186 @@ def read_market_weights_from_bigquery():
     except Exception as e:
         print(f"❌ Failed to load market weights from BigQuery: {e}")
         return {}
-        
+
+
+
+from typing import Dict
+import numpy as np
+
+try:
+    import streamlit as st
+    _HAS_ST = True
+except Exception:
+    _HAS_ST = False
+
+# module cache works in training jobs and also reduces requery across reruns
+_PR_BETA_CACHE: dict[tuple[str, str, str, int], Dict[str, float]] = {}
+
+def compute_pr_points_slopes_from_scores(
+    bq,
+    project: str = "sharplogger",
+    dataset: str = "sharp_data",
+    table: str = "scores_with_features",
+    min_rows_per_sport: int = 5000,
+) -> Dict[str, float]:
+    sql = f"""
+    WITH base AS (
+      SELECT
+        UPPER(Sport) AS Sport,
+        SAFE_CAST(PR_Team_Rating AS FLOAT64) AS PR_Team_Rating,
+        SAFE_CAST(PR_Opp_Rating  AS FLOAT64) AS PR_Opp_Rating,
+        SAFE_CAST(Closing_Spread_For_Team AS FLOAT64) AS y
+      FROM `{project}.{dataset}.{table}`
+      WHERE Market = 'spreads'
+        AND PR_Team_Rating IS NOT NULL
+        AND PR_Opp_Rating  IS NOT NULL
+        AND Closing_Spread_For_Team IS NOT NULL
+    ),
+    x AS (
+      SELECT
+        Sport,
+        (PR_Team_Rating - PR_Opp_Rating) AS pr_diff,
+        y
+      FROM base
+      WHERE ABS(PR_Team_Rating - PR_Opp_Rating) > 1e-9
+    ),
+    agg AS (
+      SELECT
+        Sport,
+        COUNT(*) AS n,
+        SAFE_DIVIDE(SUM(pr_diff * y), SUM(pr_diff * pr_diff)) AS beta
+      FROM x
+      GROUP BY Sport
+    )
+    SELECT Sport, n, beta
+    FROM agg
+    WHERE n >= @min_rows
+      AND beta IS NOT NULL
+      AND ABS(beta) < 1000
+    """
+
+    job_config = None
+    try:
+        from google.cloud import bigquery
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("min_rows", "INT64", int(min_rows_per_sport))]
+        )
+    except Exception:
+        job_config = None
+
+    df = bq.query(sql, job_config=job_config).to_dataframe()
+    out: Dict[str, float] = {}
+    for _, r in df.iterrows():
+        try:
+            out[str(r["Sport"]).upper()] = float(r["beta"])
+        except Exception:
+            pass
+    return out
+
+
+def resolve_pr_beta_map(
+    bq,
+    project: str = "sharplogger",
+    dataset: str = "sharp_data",
+    table: str = "scores_with_features",
+    min_rows_per_sport: int = 5000,
+) -> Dict[str, float]:
+    """
+    One resolver for BOTH training + UI.
+    - Uses Streamlit cache if available
+    - Always has module fallback cache
+    """
+    key = (project, dataset, table, int(min_rows_per_sport))
+
+    # fast path: module cache (works everywhere)
+    if key in _PR_BETA_CACHE:
+        return _PR_BETA_CACHE[key]
+
+    # Streamlit: add a cache layer so rerenders don't recompute
+    if _HAS_ST:
+        cache_key = f"pr_beta::{project}.{dataset}.{table}::{int(min_rows_per_sport)}"
+        if cache_key in st.session_state:
+            _PR_BETA_CACHE[key] = st.session_state[cache_key]
+            return _PR_BETA_CACHE[key]
+
+        beta_map = compute_pr_points_slopes_from_scores(
+            bq, project=project, dataset=dataset, table=table, min_rows_per_sport=int(min_rows_per_sport)
+        )
+        st.session_state[cache_key] = beta_map
+        _PR_BETA_CACHE[key] = beta_map
+        return beta_map
+
+    # non-streamlit
+    beta_map = compute_pr_points_slopes_from_scores(
+        bq, project=project, dataset=dataset, table=table, min_rows_per_sport=int(min_rows_per_sport)
+    )
+    _PR_BETA_CACHE[key] = beta_map
+    return beta_map
+import pandas as pd
+
+def attach_pr_points_edge_cols(
+    df: pd.DataFrame,
+    *,
+    bq,
+    project: str = "sharplogger",
+    dataset: str = "sharp_data",
+    table: str = "scores_with_features",
+    min_rows_per_sport: int = 5000,
+    sport_col: str = "Sport",
+    pr_diff_col: str = "PR_Rating_Diff",
+) -> pd.DataFrame:
+    """
+    Adds:
+      - PR_Edge_Pts
+      - PR_Abs_Edge_Pts
+      - PR_Pts_Beta_Used (optional but useful for debugging)
+
+    Requires df[Sport] and df[PR_Rating_Diff].
+    """
+    out = df.copy()
+
+    # ensure sport strings
+    if sport_col not in out.columns or pr_diff_col not in out.columns:
+        out["PR_Edge_Pts"] = np.nan
+        out["PR_Abs_Edge_Pts"] = np.nan
+        out["PR_Pts_Beta_Used"] = np.nan
+        return out
+
+    beta_map = resolve_pr_beta_map(
+        bq,
+        project=project,
+        dataset=dataset,
+        table=table,
+        min_rows_per_sport=int(min_rows_per_sport),
+    )
+
+    # last-resort fallback mapping (only used if sport missing / low rows)
+    beta_fallback_map = {
+        "NFL":   1.0/25.0,
+        "NCAAF": 1.0/25.0,
+        "NBA":   1.0/35.0,
+        "WNBA":  1.0/35.0,
+        "CFL":   1.0/25.0,
+        "MLB":   1.0/50.0,
+        "NCAAB": 1.0,        # only if your NCAAB ratings are already in points
+    }
+
+    sp = out[sport_col].astype(str).str.upper().values
+    beta = np.array([beta_map.get(s, np.nan) for s in sp], dtype="float32")
+    beta_fb = np.array([beta_fallback_map.get(s, 1.0/30.0) for s in sp], dtype="float32")
+    beta = np.where(np.isfinite(beta), beta, beta_fb).astype("float32")
+
+    pr_diff = pd.to_numeric(out[pr_diff_col], errors="coerce").astype("float32")
+    out["PR_Pts_Beta_Used"] = beta
+    out["PR_Edge_Pts"] = (pr_diff * beta).astype("float32")
+    out["PR_Abs_Edge_Pts"] = np.abs(out["PR_Edge_Pts"]).astype("float32")
+    return out
+
+
+# =======================
+# Main function
+# =======================
+
 def attach_ratings_and_edges_for_diagnostics(
     df: pd.DataFrame,
     sport_aliases: dict,
@@ -13251,28 +13472,23 @@ def attach_ratings_and_edges_for_diagnostics(
       - Attaches power ratings (method-aware when using ratings_history)
       - Computes model vs market spreads/edges + cover probs
       - Maps game-level metrics to each outcome row
-
-    Key fix:
-      - If table_history is ratings_current (no Method column), we DO NOT attempt method selection there.
-      - If sport is NCAAB (or any sport where you want method-specific ratings), we FORCE ratings_history so
-        PREFERRED_METHOD + Method filter can be applied.
     """
 
-    UI_EDGE_COLS = [
-        'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Abs_Rating_Diff',
-        'PR_Edge_Pts','PR_Abs_Edge_Pts',
-        'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
-        'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_x_k','mu_x_k'
-    ]
 
-    if df.empty:
-        out = df.copy()
+    UI_EDGE_COLS = [
+      'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Abs_Rating_Diff',
+      'PR_Edge_Pts','PR_Abs_Edge_Pts',
+      'PR_Pts_Beta_Used',   # ✅ add this (optional)
+      'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
+      'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_x_k','mu_x_k'
+    ]
+    if df is None or df.empty:
+        out = (df.copy() if df is not None else pd.DataFrame())
         for c in UI_EDGE_COLS:
             out[c] = np.nan
         return out
 
     if bq is None:
-        # ratings attach needs BigQuery
         out = df.copy()
         for c in UI_EDGE_COLS:
             out[c] = np.nan
@@ -13324,19 +13540,16 @@ def attach_ratings_and_edges_for_diagnostics(
     sport0 = str(d_sp['Sport'].iloc[0]).upper()
 
     # -------------------------
-    # ✅ Method-aware ratings selection for UI
+    # Method-aware ratings selection for UI
     # -------------------------
     is_current_table = 'ratings_current' in str(table_history).lower()
 
-    # If the UI points to ratings_current but we need method-specific ratings (NCAAB kp_adj_em),
-    # force history where Method exists.
     if is_current_table and sport0 == "NCAAB":
         ratings_table_used = "sharplogger.sharp_data.ratings_history"
-        ui_lag_hours = 0.0   # UI: allow latest ratings; they’re derived from prior games
+        ui_lag_hours = 0.0
         pad_days_used = max(int(pad_days), 60)
     else:
         ratings_table_used = table_history
-        # UI: avoid the 12h gate that can drop legit ratings_current updates
         ui_lag_hours = 0.0 if is_current_table else 12.0
         pad_days_used = (365 if is_current_table else int(pad_days))
 
@@ -13384,22 +13597,20 @@ def attach_ratings_and_edges_for_diagnostics(
     ).astype('float32')
     d_map['PR_Abs_Rating_Diff'] = np.abs(pd.to_numeric(d_map['PR_Rating_Diff'], errors='coerce')).astype('float32')
 
-    # Convert rating diff to an approximate points edge for WHY/UI consistency
-    # (tune these if you have better sport-specific mappings already)
-    SPORT_PR_SCALE_TO_PTS = {
-        "NFL":   1.0/25.0,
-        "NCAAF": 1.0/25.0,
-        "NBA":   1.0/35.0,
-        "WNBA":  1.0/35.0,
-        "CFL":   1.0/25.0,
-        "MLB":   1.0/50.0,
-        "NCAAB": 1.0,        # kp_adj_em already points-ish
-    }
-    sp = d_map['Sport'].astype(str).str.upper().values
-    scale = np.array([SPORT_PR_SCALE_TO_PTS.get(s, 1.0/30.0) for s in sp], dtype='float32')
-    d_map['PR_Edge_Pts'] = (pd.to_numeric(d_map['PR_Rating_Diff'], errors='coerce').astype('float32') * scale).astype('float32')
-    d_map['PR_Abs_Edge_Pts'] = np.abs(d_map['PR_Edge_Pts']).astype('float32')
-
+    # -------------------------
+    # ✅ Convert PR diff -> points using learned sport betas (cached)
+    # -------------------------
+    d_map = attach_pr_points_edge_cols(
+        d_map,
+        bq=bq,
+        project=project,
+        dataset="sharp_data",
+        table="scores_with_features",
+        min_rows_per_sport=5000,
+        sport_col="Sport",
+        pr_diff_col="PR_Rating_Diff",
+    ) 
+   
     # k_abs + agree flags
     k_abs = (
         pd.to_numeric(d_map.get('Favorite_Market_Spread'),  errors='coerce').abs()
@@ -13423,6 +13634,7 @@ def attach_ratings_and_edges_for_diagnostics(
             out[c] = np.nan
 
     return out
+
 
 def compute_diagnostics_vectorized(
     df: pd.DataFrame,
@@ -13598,7 +13810,7 @@ def compute_diagnostics_vectorized(
             # always try to print PR numbers (if ratings merged)
             _pr_team = _num(row, 'PR_Team_Rating')
             _pr_opp  = _num(row, 'PR_Opp_Rating')
-            _pr_diff = _num(row, 'PR_Rating_Diff')
+            _pr_diff = _num(row, 'PR_Edge_Pts')
             if pd.notna(_pr_team) and pd.notna(_pr_opp):
                 if pd.notna(_pr_diff):
                     parts.append(f"📊 Power Ratings {int(round(_pr_team))} vs {int(round(_pr_opp))} (Δ {_pr_diff:+.0f})")
