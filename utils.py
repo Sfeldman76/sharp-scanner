@@ -5204,8 +5204,15 @@ def enrich_and_grade_for_training(
 
     # 4) Favorite-centric edges/probs (expects Power_Rating_Diff already in points if needed)
     g_full = df_games.merge(g_cons, on=game_key, how="left")
-    g_fc = favorite_centric_from_powerdiff_lowmem(g_full)
-
+    
+    g_fc = favorite_centric_from_powerdiff_lowmem(
+        g_full,
+        bq=bq,                       # ✅ required now
+        project=project,
+        dataset=dataset,
+        scores_table=scores_table,
+        min_rows_per_sport=int(min_rows_per_sport),
+    )
     # propagate useful audit cols
     for c in ["PR_Pts_Beta_Used", "Home_Rating_Method", "Away_Rating_Method",
               "Home_Power_Rating_Units", "Away_Power_Rating_Units", "Power_Rating_Diff_Units"]:
