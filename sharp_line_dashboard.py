@@ -6868,7 +6868,7 @@ def fetch_scores_with_features(sport: str, days_back: int):
     # === EXACT logic as your original f-string, but parameterized ===
     sql = """
     SELECT *
-    FROM `sharplogger.sharp_data.sharp_scores_with_features`
+    FROM `sharplogger.sharp_data.scores_with_features`
     WHERE Sport = @sport
       AND Scored = TRUE
       AND SHARP_HIT_BOOL IS NOT NULL
@@ -13155,7 +13155,7 @@ from sklearn.model_selection import StratifiedKFold
 def train_timing_opportunity_model(
     sport: str = "NBA",
     days_back: int = 35,
-    table_fq: str = "sharplogger.sharp_data.sharp_scores_full",
+    table_fq: str = "sharplogger.sharp_data.scores_with_features",
     gcs_bucket: str | None = None,
 ):
     """
@@ -14384,7 +14384,7 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
 def fetch_scored_picks_from_bigquery(limit=1000000):
     query = f"""
         SELECT *
-        FROM `sharplogger.sharp_data.sharp_scores_with_features`
+        FROM `sharplogger.sharp_data.scores_with_features`
         WHERE SHARP_HIT_BOOL IS NOT NULL
         ORDER BY Snapshot_Timestamp DESC
         LIMIT {limit}
@@ -15882,7 +15882,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
         try:
             df = client.query(f"""
                 SELECT *
-                FROM `sharplogger.sharp_data.sharp_scores_with_features`
+                FROM 'sharplogger.sharp_data.scores_with_features'
                 WHERE Sport = '{sport_label.upper()}' {date_filter}
             """).to_dataframe()
         except Exception as e:
