@@ -4500,14 +4500,13 @@ def fetch_latest_current_ratings_cached(
     return df[["Team_Norm", "Power_Rating"]]
 
 SPORT_SPREAD_CFG = {
-    "NFL":   dict(scale=np.float32(1.0),  HFA=np.float32(2.1),  sigma_pts=np.float32(13.2)),
-    "NCAAF": dict(scale=np.float32(1.0),  HFA=np.float32(2.6),  sigma_pts=np.float32(16.0)),
-    "NBA":   dict(scale=np.float32(1.0),  HFA=np.float32(2.8),  sigma_pts=np.float32(11.5)),
-    "WNBA":  dict(scale=np.float32(1.0),  HFA=np.float32(2.0),  sigma_pts=np.float32(10.5)),
-    "CFL":   dict(scale=np.float32(1.0),  HFA=np.float32(1.6),  sigma_pts=np.float32(13.5)),
-    # MLB ratings are not in run units (1500 + 400*(atk+dfn)), so scale ≈ 89–90.
-    "MLB":   dict(scale=np.float32(89.0), HFA=np.float32(0.20), sigma_pts=np.float32(3.1)),
-    "NCAAB": dict(scale=np.float32(1.0),  HFA=np.float32(3.2),  sigma_pts=np.float32(11.0)),
+    "NFL":   dict(HFA=np.float32(2.1),  sigma_pts=np.float32(13.2)),
+    "NCAAF": dict(HFA=np.float32(2.6),  sigma_pts=np.float32(16.0)),
+    "NBA":   dict(HFA=np.float32(2.8),  sigma_pts=np.float32(11.5)),
+    "WNBA":  dict(HFA=np.float32(2.0),  sigma_pts=np.float32(10.5)),
+    "CFL":   dict(HFA=np.float32(1.6),  sigma_pts=np.float32(13.5)),
+    "MLB":   dict(HFA=np.float32(0.20), sigma_pts=np.float32(3.1)),
+    "NCAAB": dict(HFA=np.float32(3.2),  sigma_pts=np.float32(11.0)),
 }
 
 
@@ -4534,80 +4533,191 @@ def _get_cfg_vec(sport_series: pd.Series):
         sig[m]   = np.float32(cfg["sigma_pts"])
 
     return scale.astype("float32"), hfa.astype("float32"), sig.astype("float32")
+from typing import Dict, Tuple
+import time
+import numpy as np
+
+# backend cache: key -> (ts, beta_map)
+_PR_BETA_CACHE: dict[Tuple[str, str, str, int], tuple[float, Dict[str, float]]] = {}
+_PR_BETA_TTL_S = 24 * 3600  # refresh once per day per Cloud Run instance
+
+
+def compute_pr_points_slopes_from_scores(
+    bq,
+    project: str = "sharplogger",
+    dataset: str = "sharp_data",
+    table: str = "scores_with_features",
+    min_rows_per_sport: int = 5000,
+) -> Dict[str, float]:
+    sql = f"""
+    WITH base AS (
+      SELECT
+        UPPER(Sport) AS Sport,
+        SAFE_CAST(PR_Team_Rating AS FLOAT64) AS PR_Team_Rating,
+        SAFE_CAST(PR_Opp_Rating  AS FLOAT64) AS PR_Opp_Rating,
+        SAFE_CAST(Closing_Spread_For_Team AS FLOAT64) AS y
+      FROM `{project}.{dataset}.{table}`
+      WHERE Market = 'spreads'
+        AND PR_Team_Rating IS NOT NULL
+        AND PR_Opp_Rating  IS NOT NULL
+        AND Closing_Spread_For_Team IS NOT NULL
+    ),
+    x AS (
+      SELECT
+        Sport,
+        (PR_Team_Rating - PR_Opp_Rating) AS pr_diff,
+        y
+      FROM base
+      WHERE ABS(PR_Team_Rating - PR_Opp_Rating) > 1e-9
+    ),
+    agg AS (
+      SELECT
+        Sport,
+        COUNT(*) AS n,
+        SAFE_DIVIDE(SUM(pr_diff * y), SUM(pr_diff * pr_diff)) AS beta
+      FROM x
+      GROUP BY Sport
+    )
+    SELECT Sport, n, beta
+    FROM agg
+    WHERE n >= @min_rows
+      AND beta IS NOT NULL
+      AND ABS(beta) < 1000
+    """
+
+    job_config = None
+    try:
+        from google.cloud import bigquery
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("min_rows", "INT64", int(min_rows_per_sport))]
+        )
+    except Exception:
+        job_config = None
+
+    df = bq.query(sql, job_config=job_config).to_dataframe()
+    out: Dict[str, float] = {}
+    for _, r in df.iterrows():
+        sp = str(r.get("Sport", "")).upper().strip()
+        b = r.get("beta")
+        if not sp:
+            continue
+        try:
+            out[sp] = float(b)
+        except Exception:
+            pass
+    return out
+
+
+def resolve_pr_beta_map(
+    bq,
+    project: str = "sharplogger",
+    dataset: str = "sharp_data",
+    table: str = "scores_with_features",
+    min_rows_per_sport: int = 5000,
+    ttl_s: int = _PR_BETA_TTL_S,
+) -> Dict[str, float]:
+    """
+    Backend resolver (Cloud Run):
+      - module cache + TTL
+      - requires caller to pass in bq client
+    """
+    key = (project, dataset, table, int(min_rows_per_sport))
+    now = time.time()
+
+    hit = _PR_BETA_CACHE.get(key)
+    if hit is not None:
+        ts, beta_map = hit
+        if (now - ts) < ttl_s and beta_map:
+            return beta_map
+
+    beta_map = compute_pr_points_slopes_from_scores(
+        bq,
+        project=project,
+        dataset=dataset,
+        table=table,
+        min_rows_per_sport=int(min_rows_per_sport),
+    )
+    _PR_BETA_CACHE[key] = (now, beta_map)
+    return beta_map
 
 # ---- 1) Build consensus market spread per game (no BQ) ----
+def _get_beta_hfa_sigma_vec(
+    sport_series: pd.Series,
+    *,
+    bq,
+    project: str = "sharplogger",
+    dataset: str = "sharp_data",
+    scores_table: str = "scores_with_features",
+    min_rows_per_sport: int = 5000,
+):
+    s = sport_series.astype(str).str.upper().values
+    n = len(s)
 
-def favorite_centric_from_powerdiff_lowmem(g_full: pd.DataFrame) -> pd.DataFrame:
+    beta_map = resolve_pr_beta_map(
+        bq,
+        project=project,
+        dataset=dataset,
+        table=scores_table,
+        min_rows_per_sport=int(min_rows_per_sport),
+    )
+    beta = np.array([beta_map.get(x, np.nan) for x in s], dtype=np.float32)
+
+    # fallback only if sport missing / low rows
+    beta_fallback_map = {
+        "NFL":   1.0/25.0,
+        "NCAAF": 1.0/25.0,
+        "WNBA":  1.0/35.0,
+        "CFL":   1.0/25.0,
+        "MLB":   1.0/50.0,
+        "NBA":   1.0,     # per-100 to points fallback (~100 poss)
+        "NCAAB": 0.68,    # per-100 to points fallback (~68 poss)
+    }
+    beta_fb = np.array([beta_fallback_map.get(x, 1.0/30.0) for x in s], dtype=np.float32)
+    beta = np.where(np.isfinite(beta), beta, beta_fb).astype(np.float32)
+
+    hfa = np.zeros(n, dtype=np.float32)
+    sig = np.full(n, np.float32(12.0), dtype=np.float32)
+
+    for sport, cfg in SPORT_SPREAD_CFG.items():
+        m = (s == sport)
+        if not m.any():
+            continue
+        hfa[m] = np.float32(cfg["HFA"])
+        sig[m] = np.float32(cfg["sigma_pts"])
+
+    return beta.astype("float32"), hfa.astype("float32"), sig.astype("float32")
+
+
+def favorite_centric_from_powerdiff_lowmem(
+    g_full: pd.DataFrame,
+    *,
+    bq,
+    project: str = "sharplogger",
+    dataset: str = "sharp_data",
+    scores_table: str = "scores_with_features",
+    min_rows_per_sport: int = 5000,
+) -> pd.DataFrame:
     out = g_full.copy()
     out["Sport"] = out["Sport"].astype(str).str.upper().str.strip()
     for c in ["Home_Team_Norm", "Away_Team_Norm"]:
         out[c] = out[c].astype(str).str.lower().str.strip()
 
-    pr_diff = pd.to_numeric(out.get("Power_Rating_Diff"), errors="coerce").fillna(0).astype("float32")
+    pr_diff = pd.to_numeric(out.get("Power_Rating_Diff"), errors="coerce").astype("float32").to_numpy()
 
-    scale, hfa, sig = _get_cfg_vec(out["Sport"])
+    beta, hfa, sig = _get_beta_hfa_sigma_vec(
+        out["Sport"],
+        bq=bq,
+        project=project,
+        dataset=dataset,
+        scores_table=scores_table,
+        min_rows_per_sport=int(min_rows_per_sport),
+    )
 
-    # Default behavior (Elo-ish): rating units -> points
-    mu = (pr_diff / np.where(scale == 0, 1.0, scale)) + hfa
-    mu = mu.astype("float32")
+    # ✅ convert rating units -> expected margin (points)
+    mu = (pr_diff * beta) + hfa
+    mu = np.where(np.isfinite(mu), mu, hfa).astype("float32")
 
-    sp = out["Sport"].to_numpy(dtype=str)
-
-    # ----------------------------
-    # NCAAB: kp_adj_em is per 100 poss -> points using possessions proxy
-    # ----------------------------
-    is_ncaab = (sp == "NCAAB")
-    if is_ncaab.any():
-        NCAAB_TOTAL_PPP = np.float32(2.06)
-        poss_default = np.float32(68.0)
-
-        poss = np.full(len(out), poss_default, dtype=np.float32)
-
-        for total_col in ("Total_Close", "Market_Total", "Total", "Closing_Total", "Total_Points"):
-            if total_col in out.columns:
-                tot = pd.to_numeric(out[total_col], errors="coerce").astype("float32").to_numpy()
-                poss_est = tot / NCAAB_TOTAL_PPP
-                poss_est = np.clip(poss_est, 55.0, 80.0).astype("float32")
-                poss = np.where(np.isfinite(poss_est), poss_est, poss).astype("float32")
-                break
-
-        mu_ncaab = (pr_diff.to_numpy() / 100.0) * poss + hfa
-        mu = np.where(is_ncaab, mu_ncaab.astype("float32"), mu)
-
-    # ----------------------------
-    # NBA: nba_bpi_adj_em is per 100 poss -> points using BPI tempo if present
-    # ----------------------------
-    is_nba = (sp == "NBA")
-    if is_nba.any():
-        NBA_TOTAL_PPP = np.float32(2.26)
-        poss_default = np.float32(100.0)
-
-        poss = np.full(len(out), poss_default, dtype=np.float32)
-
-        # best: tempo columns produced by your enrichment (nba_bpi_adj_t)
-        if "Home_BPI_Tempo" in out.columns and "Away_BPI_Tempo" in out.columns:
-            ht = pd.to_numeric(out["Home_BPI_Tempo"], errors="coerce").astype("float32").to_numpy()
-            at = pd.to_numeric(out["Away_BPI_Tempo"], errors="coerce").astype("float32").to_numpy()
-            poss_est = 0.5 * (ht + at)
-            poss_est = np.clip(poss_est, 90.0, 108.0).astype("float32")
-            poss = np.where(np.isfinite(poss_est), poss_est, poss).astype("float32")
-        else:
-            # fallback: derive from total if present
-            for total_col in ("Total_Close", "Market_Total", "Total", "Closing_Total", "Total_Points"):
-                if total_col in out.columns:
-                    tot = pd.to_numeric(out[total_col], errors="coerce").astype("float32").to_numpy()
-                    poss_est = tot / NBA_TOTAL_PPP
-                    poss_est = np.clip(poss_est, 90.0, 108.0).astype("float32")
-                    poss = np.where(np.isfinite(poss_est), poss_est, poss).astype("float32")
-                    break
-
-        mu_nba = (pr_diff.to_numpy() / 100.0) * poss + hfa
-        mu = np.where(is_nba, mu_nba.astype("float32"), mu)
-
-    # ----------------------------
-    # Outputs
-    # ----------------------------
-    out["Model_Expected_Margin"] = mu.astype("float32")
+    out["Model_Expected_Margin"] = mu
     out["Model_Expected_Margin_Abs"] = np.abs(mu).astype("float32")
     out["Sigma_Pts"] = sig.astype("float32")
 
@@ -4619,12 +4729,12 @@ def favorite_centric_from_powerdiff_lowmem(g_full: pd.DataFrame) -> pd.DataFrame
     out["Model_Fav_Spread"] = (-mu_abs).astype("float32")
     out["Model_Dog_Spread"] = (+mu_abs).astype("float32")
 
-    fav_mkt = pd.to_numeric(out.get("Favorite_Market_Spread"), errors="coerce").astype("float32")
-    dog_mkt = pd.to_numeric(out.get("Underdog_Market_Spread"), errors="coerce").astype("float32")
+    fav_mkt = pd.to_numeric(out.get("Favorite_Market_Spread"), errors="coerce").astype("float32").to_numpy()
+    dog_mkt = pd.to_numeric(out.get("Underdog_Market_Spread"), errors="coerce").astype("float32").to_numpy()
     k = np.where(np.isnan(fav_mkt), np.abs(dog_mkt), np.abs(fav_mkt)).astype("float32")
 
-    out["Fav_Edge_Pts"] = (fav_mkt - out["Model_Fav_Spread"]).astype("float32")
-    out["Dog_Edge_Pts"] = (dog_mkt - out["Model_Dog_Spread"]).astype("float32")
+    out["Fav_Edge_Pts"] = (fav_mkt - out["Model_Fav_Spread"].to_numpy(dtype="float32")).astype("float32")
+    out["Dog_Edge_Pts"] = (dog_mkt - out["Model_Dog_Spread"].to_numpy(dtype="float32")).astype("float32")
 
     eps = np.finfo("float32").eps
     z_fav = (mu_abs - k) / np.where(sig == 0, eps, sig)
@@ -4632,6 +4742,7 @@ def favorite_centric_from_powerdiff_lowmem(g_full: pd.DataFrame) -> pd.DataFrame
     out["Dog_Cover_Prob"] = (1.0 - out["Fav_Cover_Prob"]).astype("float32")
 
     return out
+
 
 def prep_consensus_market_spread_lowmem(
     df_spread_rows: pd.DataFrame,
@@ -4695,23 +4806,18 @@ def prep_consensus_market_spread_lowmem(
 def enrich_and_grade_for_training(
     df_spread_rows: pd.DataFrame,
     *,
-    bq=None,
+    bq,
     table_current: str = "sharplogger.sharp_data.ratings_current",
     sport_aliases: dict | None = None,
     preferred_method: dict | None = None,
     value_col: str = "Value",
-    outcome_col: str = "Outcome",
+    outcome_col: str = "Outcome_Norm",  # ✅ use normalized outcome consistently
+    project: str = "sharplogger",
+    dataset: str = "sharp_data",
+    scores_table: str = "scores_with_features",
+    min_rows_per_sport: int = 5000,
     log_func=print,
 ) -> pd.DataFrame:
-    """
-    Spread-only helper:
-      1) Builds game-level frame (Sport/Home/Away/Game_Start)
-      2) Enriches power ratings on that game frame
-      3) Computes consensus market favorite/spread
-      4) Derives model favorite/spread from power diff
-      5) Joins back and produces per-outcome fields:
-         Outcome_Model_Spread, Outcome_Market_Spread, Outcome_Spread_Edge, Outcome_Cover_Prob
-    """
     if df_spread_rows is None or df_spread_rows.empty:
         return df_spread_rows
 
@@ -4725,14 +4831,8 @@ def enrich_and_grade_for_training(
         if c not in df_spread_rows.columns:
             raise KeyError(f"enrich_and_grade_for_training missing column: {c}")
 
-    df_games = (
-        df_spread_rows[base_cols]
-        .drop_duplicates()
-        .reset_index(drop=True)
-        .copy()
-    )
+    df_games = df_spread_rows[base_cols].drop_duplicates().reset_index(drop=True).copy()
 
-    # 1) Power enrich on games
     enrich_power_from_current_inplace(
         df_games,
         bq=bq,
@@ -4742,54 +4842,32 @@ def enrich_and_grade_for_training(
         log_func=log_func,
     )
 
-    # 2) Consensus market favorite/spread
     g_cons = prep_consensus_market_spread_lowmem(
         df_spread_rows, value_col=value_col, outcome_col=outcome_col
     )
 
-    # 3) Join & compute model grading from power diff
     g_full = df_games.merge(g_cons, on=game_key, how="left")
-    g_fc = favorite_centric_from_powerdiff_lowmem(g_full)
-
-    # Ensure required columns exist (avoid KeyErrors downstream)
-    needed = game_key + [
-        "Market_Favorite_Team", "Market_Underdog_Team",
-        "Favorite_Market_Spread", "Underdog_Market_Spread",
-        "Model_Favorite_Team", "Model_Underdog_Team",
-        "Model_Fav_Spread", "Model_Dog_Spread",
-        "Fav_Edge_Pts", "Dog_Edge_Pts",
-        "Fav_Cover_Prob", "Dog_Cover_Prob",
-        "Model_Expected_Margin", "Model_Expected_Margin_Abs", "Sigma_Pts",
-        "Home_Power_Rating", "Away_Power_Rating", "Power_Rating_Diff",
-    ]
-    for c in needed:
-        if c not in g_fc.columns:
-            g_fc[c] = np.nan
-    g_fc = g_fc[needed].copy()
+    g_fc = favorite_centric_from_powerdiff_lowmem(
+        g_full,
+        bq=bq,
+        project=project,
+        dataset=dataset,
+        scores_table=scores_table,
+        min_rows_per_sport=int(min_rows_per_sport),
+    )
 
     out = df_spread_rows.merge(g_fc, on=game_key, how="left")
 
-    # 4) Per-outcome mapping
     is_fav = (out[outcome_col].astype(str).values ==
               out["Market_Favorite_Team"].astype(str).values)
 
-    out["Outcome_Model_Spread"] = np.where(
-        is_fav, out["Model_Fav_Spread"].values, out["Model_Dog_Spread"].values
-    ).astype("float32")
-
-    out["Outcome_Market_Spread"] = np.where(
-        is_fav, out["Favorite_Market_Spread"].values, out["Underdog_Market_Spread"].values
-    ).astype("float32")
-
-    out["Outcome_Spread_Edge"] = np.where(
-        is_fav, out["Fav_Edge_Pts"].values, out["Dog_Edge_Pts"].values
-    ).astype("float32")
-
-    out["Outcome_Cover_Prob"] = np.where(
-        is_fav, out["Fav_Cover_Prob"].values, out["Dog_Cover_Prob"].values
-    ).astype("float32")
+    out["Outcome_Model_Spread"]  = np.where(is_fav, out["Model_Fav_Spread"].values, out["Model_Dog_Spread"].values).astype("float32")
+    out["Outcome_Market_Spread"] = np.where(is_fav, out["Favorite_Market_Spread"].values, out["Underdog_Market_Spread"].values).astype("float32")
+    out["Outcome_Spread_Edge"]   = np.where(is_fav, out["Fav_Edge_Pts"].values, out["Dog_Edge_Pts"].values).astype("float32")
+    out["Outcome_Cover_Prob"]    = np.where(is_fav, out["Fav_Cover_Prob"].values, out["Dog_Cover_Prob"].values).astype("float32")
 
     return out
+
 
 
 def enrich_power_from_current_inplace(
