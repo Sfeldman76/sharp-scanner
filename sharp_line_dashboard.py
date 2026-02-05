@@ -4793,7 +4793,7 @@ def enrich_and_grade_for_training(
     *,
     beta_project: str = "sharplogger",
     beta_dataset: str = "sharp_data",
-    beta_table: str = "scores_with_features",
+    beta_table: str = "sharp_scores_with_features",
     beta_min_rows_per_sport: int = 5000,
 ) -> pd.DataFrame:
     if df_spread_rows.empty:
@@ -6823,7 +6823,7 @@ def fetch_scores_with_features(sport: str, days_back: int):
     # === EXACT logic as your original f-string, but parameterized ===
     sql = """
     SELECT *
-    FROM `sharplogger.sharp_data.scores_with_features`
+    FROM `sharplogger.sharp_data.sharp_scores_with_features`
     WHERE Sport = @sport
       AND Scored = TRUE
       AND SHARP_HIT_BOOL IS NOT NULL
@@ -13300,7 +13300,7 @@ def compute_pr_points_slopes_from_scores(
     bq,
     project: str = "sharplogger",
     dataset: str = "sharp_data",
-    table: str = "scores_with_features",
+    table: str = "sharp_scores_with_features",  
     ratings_table: str = "sharplogger.sharp_data.ratings_history",
     min_rows_per_sport: int = 5000,
     rating_lag_hours: float = 12.0,  # leakage-safe
@@ -13411,7 +13411,7 @@ def resolve_pr_beta_map(
     bq,
     project: str = "sharplogger",
     dataset: str = "sharp_data",
-    table: str = "scores_with_features",
+    table: str = "sharp_scores_with_features",  
     min_rows_per_sport: int = 5000,
     rating_lag_hours: float = 12.0
 ) -> Dict[str, float]:
@@ -13461,7 +13461,7 @@ def attach_pr_points_edge_cols(
     bq,
     project: str = "sharplogger",
     dataset: str = "sharp_data",
-    table: str = "scores_with_features",
+    table: str = "sharp_scores_with_features",  
     min_rows_per_sport: int = 5000,
     sport_col: str = "Sport",
     pr_diff_col: str = "PR_Rating_Diff",
@@ -13665,7 +13665,7 @@ def attach_ratings_and_edges_for_diagnostics(
         bq=bq,
         project=project,
         dataset="sharp_data",
-        table="scores_with_features",
+        table="sharp_scores_with_features",
         min_rows_per_sport=5000,
         sport_col="Sport",
         pr_diff_col="PR_Rating_Diff",
@@ -14339,7 +14339,7 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
 def fetch_scored_picks_from_bigquery(limit=1000000):
     query = f"""
         SELECT *
-        FROM `sharplogger.sharp_data.scores_with_features`
+        FROM `sharplogger.sharp_data.sharp_scores_with_features`
         WHERE SHARP_HIT_BOOL IS NOT NULL
         ORDER BY Snapshot_Timestamp DESC
         LIMIT {limit}
@@ -15778,7 +15778,7 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
                 SELECT
                   Sport, Market, Home_Team_Norm, Away_Team_Norm, Outcome, Outcome_Norm,
                   Value, Bookmaker, Snapshot_Timestamp, Game_Start
-                FROM `sharplogger.sharp_data.scores_with_features`
+                FROM `sharplogger.sharp_data.sharp_scores_with_features`
                 WHERE UPPER(Sport) = @sport
                   AND Market = 'spreads'
                   AND DATETIME(Game_Start) >= DATETIME(@now_utc)
@@ -15837,7 +15837,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
         try:
             df = client.query(f"""
                 SELECT *
-                FROM `sharplogger.sharp_data.scores_with_features`
+                FROM `sharplogger.sharp_data.sharp_scores_with_features`
                 WHERE Sport = '{sport_label.upper()}' {date_filter}
             """).to_dataframe()
         except Exception as e:
