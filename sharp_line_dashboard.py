@@ -13362,37 +13362,39 @@ def resolve_pr_beta_map(
     table: str = "scores_with_features",
     min_rows_per_sport: int = 5000,
 ) -> Dict[str, float]:
-    """
-    One resolver for BOTH training + UI.
-    - Uses Streamlit cache if available
-    - Always has module fallback cache
-    """
     key = (project, dataset, table, int(min_rows_per_sport))
 
-    # fast path: module cache (works everywhere)
-    if key in _PR_BETA_CACHE:
-        return _PR_BETA_CACHE[key]
+    # 1) module cache always works (training + UI)
+    cached = _PR_BETA_CACHE.get(key)
+    if cached is not None:
+        return cached
 
-    # Streamlit: add a cache layer so rerenders don't recompute
+    # 2) streamlit session cache only if actually available
     if _HAS_ST:
-        cache_key = f"pr_beta::{project}.{dataset}.{table}::{int(min_rows_per_sport)}"
-        if cache_key in st.session_state:
-            _PR_BETA_CACHE[key] = st.session_state[cache_key]
-            return _PR_BETA_CACHE[key]
+        try:
+            cache_key = f"pr_beta::{project}.{dataset}.{table}::{int(min_rows_per_sport)}"
+            if cache_key in st.session_state:
+                _PR_BETA_CACHE[key] = st.session_state[cache_key]
+                return _PR_BETA_CACHE[key]
+        except Exception:
+            # not running under `streamlit run`
+            pass
 
-        beta_map = compute_pr_points_slopes_from_scores(
-            bq, project=project, dataset=dataset, table=table, min_rows_per_sport=int(min_rows_per_sport)
-        )
-        st.session_state[cache_key] = beta_map
-        _PR_BETA_CACHE[key] = beta_map
-        return beta_map
-
-    # non-streamlit
+    # 3) compute once
     beta_map = compute_pr_points_slopes_from_scores(
         bq, project=project, dataset=dataset, table=table, min_rows_per_sport=int(min_rows_per_sport)
     )
+
+    # store in caches (best effort for streamlit)
     _PR_BETA_CACHE[key] = beta_map
+    if _HAS_ST:
+        try:
+            st.session_state[cache_key] = beta_map
+        except Exception:
+            pass
+
     return beta_map
+
 import pandas as pd
 
 def attach_pr_points_edge_cols(
