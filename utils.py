@@ -4548,7 +4548,7 @@ def compute_pr_points_slopes_from_scores(
     bq,
     project: str = "sharplogger",
     dataset: str = "sharp_data",
-    table: str = "scores_with_features",
+    table: str = "sharp_scores_with_features", 
     ratings_table: str = "sharplogger.sharp_data.ratings_history",
     min_rows_per_sport: int = 5000,
     rating_lag_hours: float = 12.0,  # ✅ leakage-safe
@@ -4669,7 +4669,7 @@ def resolve_pr_beta_map(
     bq,
     project: str = "sharplogger",
     dataset: str = "sharp_data",
-    table: str = "scores_with_features",
+    table: str = "sharp_scores_with_features", 
     min_rows_per_sport: int = 5000,
     ttl_s: int = _PR_BETA_TTL_S,
 ) -> Dict[str, float]:
@@ -4704,7 +4704,7 @@ def _get_beta_hfa_sigma_vec(
     bq,
     project: str = "sharplogger",
     dataset: str = "sharp_data",
-    scores_table: str = "scores_with_features",
+    table: str = "sharp_scores_with_features", 
     min_rows_per_sport: int = 5000,
 ):
     s = sport_series.astype(str).str.upper().values
@@ -4751,7 +4751,7 @@ def favorite_centric_from_powerdiff_lowmem(
     bq,
     project: str = "sharplogger",
     dataset: str = "sharp_data",
-    scores_table: str = "scores_with_features",
+    table: str = "sharp_scores_with_features", 
     min_rows_per_sport: int = 5000,
 ) -> pd.DataFrame:
     out = g_full.copy()
@@ -4871,7 +4871,7 @@ def enrich_and_grade_for_training(
     outcome_col: str = "Outcome_Norm",  # ✅ use normalized outcome consistently
     project: str = "sharplogger",
     dataset: str = "sharp_data",
-    scores_table: str = "scores_with_features",
+    scores_table: str = "sharp_scores_with_features", 
     min_rows_per_sport: int = 5000,
     log_func=print,
 ) -> pd.DataFrame:
