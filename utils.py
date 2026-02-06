@@ -4704,9 +4704,15 @@ def _get_beta_hfa_sigma_vec(
     bq,
     project: str = "sharplogger",
     dataset: str = "sharp_data",
-    table: str = "sharp_scores_with_features", 
+    table: str = "sharp_scores_with_features",
+    scores_table: str | None = None,   # ✅ alias
     min_rows_per_sport: int = 5000,
+    **_ignored_kwargs,                 # ✅ seatbelt
 ):
+    # allow caller to use scores_table=
+    if scores_table:
+        table = scores_table
+    
     s = sport_series.astype(str).str.upper().values
     n = len(s)
 
