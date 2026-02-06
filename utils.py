@@ -5204,12 +5204,15 @@ def enrich_and_grade_for_training(
 
     # 4) Favorite-centric edges/probs (expects Power_Rating_Diff already in points if needed)
     g_full = df_games.merge(g_cons, on=game_key, how="left")
-    
+    import inspect
+    log_func(f"[DBG] fc func = {favorite_centric_from_powerdiff_lowmem.__module__}.{favorite_centric_from_powerdiff_lowmem.__name__}")
+    log_func(f"[DBG] fc sig  = {inspect.signature(favorite_centric_from_powerdiff_lowmem)}")
     g_fc = favorite_centric_from_powerdiff_lowmem(
         g_full,
         bq=bq,                       # ✅ required now
         project=project,
         dataset=dataset,
+        scores_table=scores_table,
         min_rows_per_sport=int(min_rows_per_sport),
     )
     # propagate useful audit cols
