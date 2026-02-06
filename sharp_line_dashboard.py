@@ -11258,11 +11258,11 @@ def train_sharp_model_from_bq(
             log_func=log_func,
         
             # keep these for backward compat; can be ignored by your new selector
-            topk_per_fold=80,
-            min_presence=0.60,
+            topk_per_fold=100,
+            min_presence=0.40,
             corr_within=0.90,
             corr_global=0.92,
-            max_feats_major=100,
+            max_feats_major=130,
             max_feats_small=80,
             sign_flip_max=0.35,
             shap_cv_max=1.00,
