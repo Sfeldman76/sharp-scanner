@@ -8927,8 +8927,8 @@ def train_sharp_model_from_bq(
         # === GAME-LEVEL value-aware features: compute once per Game_Key, then broadcast ===
         value_cols = [
             "Game_Key",
-            "Spread_Abs_Game", "Spread_Abs_Game_Z", "Spread_Size_Bucket",
-            "Total_Game", "Total_Game_Z", "Total_Size_Bucket",
+            "Spread_Abs_Game", "Spread_Abs_Game_Z", 
+            "Total_Game", "Total_Game_Z", 
             "Spread_x_Total", "Spread_over_Total", "Total_over_Spread",
             "Dist_to_3", "Dist_to_7", "Dist_to_10",
         ]
@@ -9053,7 +9053,7 @@ def train_sharp_model_from_bq(
                 df_market[c] = np.nan
         
         # ensure buckets are plain strings (not Categorical / NaN)
-        for c in ["Spread_Size_Bucket", "Total_Size_Bucket"]:
+        for c in ["Model_Spread_Size_Bucket", "Model_Total_Size_Bucket"]:
             df_market[c] = df_market[c].astype(str).replace("nan", "").fillna("")
 
         # === Implied probabilities directly from Odds_Price by market (unchanged in spirit) ===
@@ -10049,10 +10049,10 @@ def train_sharp_model_from_bq(
             "EV_Sh_vs_Rec_Prob", "EV_Sh_vs_Rec_Dollar", "Kelly_Fraction",
             "Spread_Abs_Game",
             "Spread_Abs_Game_Z",
-            "Spread_Size_Bucket",
+            
             "Total_Game",
             "Total_Game_Z",
-            "Total_Size_Bucket",
+            
             "Spread_x_Total",
             "Spread_over_Total",
             "Total_over_Spread",
