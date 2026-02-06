@@ -8316,7 +8316,7 @@ def apply_blended_sharp_score(
         )
 
         # Spread size bucket (generic but meaningful)
-        game_vals["Spread_Size_Bucket"] = pd.cut(
+        game_vals["Model_Spread_Size_Bucket"] = pd.cut(
             game_vals["Spread_Abs_Game"],
             bins=[-0.01, 2.5, 6.5, 10.5, np.inf],
             labels=["Close", "Medium", "Large", "Huge"],
@@ -8324,7 +8324,7 @@ def apply_blended_sharp_score(
 
       
         # Total size bucket: per-sport quantiles (Low / Medium / High / Very High)
-        game_vals["Total_Size_Bucket"] = ""
+        game_vals["Model_Total_Size_Bucket"] = ""
         for sport_val, g in game_vals.groupby("Sport"):
             if g["Total_Game"].notna().sum() < 5:
                 continue
