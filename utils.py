@@ -5210,7 +5210,6 @@ def enrich_and_grade_for_training(
         bq=bq,                       # ✅ required now
         project=project,
         dataset=dataset,
-        scores_table=scores_table,
         min_rows_per_sport=int(min_rows_per_sport),
     )
     # propagate useful audit cols
