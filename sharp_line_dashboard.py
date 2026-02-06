@@ -8980,43 +8980,51 @@ def train_sharp_model_from_bq(
             game_vals["Spread_Abs_Game_Z"] = game_vals.groupby("Sport")["Spread_Abs_Game"].transform(_zsafe)
             game_vals["Total_Game_Z"]      = game_vals.groupby("Sport")["Total_Game"].transform(_zsafe)
         
-            # Spread size bucket (generic but meaningful)
-            game_vals["Spread_Size_Bucket"] = pd.cut(
+
+            # Spread size bucket (MODEL-ONLY; generic but meaningful)
+            game_vals["Model_Spread_Size_Bucket"] = pd.cut(
                 game_vals["Spread_Abs_Game"],
                 bins=[-0.01, 2.5, 6.5, 10.5, np.inf],
                 labels=["Close", "Medium", "Large", "Huge"],
                 include_lowest=True,
             ).astype(str)
-        
-            # Total size bucket: per-sport quantiles, robust to duplicate edges
-            game_vals["Total_Size_Bucket"] = "NA"
+            
+            
+            # Total size bucket (MODEL-ONLY): per-sport quantiles, robust to duplicate edges
+            game_vals["Model_Total_Size_Bucket"] = "NA"
+            
             for sport_val, g in game_vals.groupby("Sport"):
                 idx = g.index
-                tg  = g["Total_Game"].dropna()
+            
+                tg = g["Total_Game"].dropna()
                 if tg.shape[0] < 5:
                     continue
-        
+            
                 q1, q2, q3 = tg.quantile([0.25, 0.50, 0.75]).values.tolist()
                 bins = [-np.inf, q1, q2, q3, np.inf]
-        
+            
                 # de-dup consecutive equal edges (prevents "Bin edges must be unique")
                 dedup_bins = []
                 for b in bins:
                     if not dedup_bins or b != dedup_bins[-1]:
                         dedup_bins.append(b)
-        
+            
                 if len(dedup_bins) < 3:
-                    game_vals.loc[idx, "Total_Size_Bucket"] = "Flat"
+                    game_vals.loc[idx, "Model_Total_Size_Bucket"] = "Flat"
                 else:
                     default_labels = ["Low", "Medium", "High", "Very_High"]
                     labels = default_labels[: (len(dedup_bins) - 1)]
-                    game_vals.loc[idx, "Total_Size_Bucket"] = pd.cut(
-                        g["Total_Game"],
+            
+                    # ✅ assign only where Total_Game is present for this sport
+                    mask = idx.intersection(g["Total_Game"].dropna().index)
+            
+                    game_vals.loc[mask, "Model_Total_Size_Bucket"] = pd.cut(
+                        game_vals.loc[mask, "Total_Game"],
                         bins=dedup_bins,
                         labels=labels,
                         include_lowest=True,
                     ).astype(str)
-        
+
             # Interactions / volatility proxies
             game_vals["Spread_x_Total"]    = game_vals["Spread_Abs_Game"] * game_vals["Total_Game"]
             game_vals["Spread_over_Total"] = game_vals["Spread_Abs_Game"] / game_vals["Total_Game"].replace(0, np.nan)
