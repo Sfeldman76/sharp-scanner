@@ -9053,8 +9053,8 @@ def train_sharp_model_from_bq(
                 df_market[c] = np.nan
         
         # ensure buckets are plain strings (not Categorical / NaN)
-        for c in ["Model_Spread_Size_Bucket", "Model_Total_Size_Bucket"]:
-            df_market[c] = df_market[c].astype(str).replace("nan", "").fillna("")
+        #for c in ["Model_Spread_Size_Bucket", "Model_Total_Size_Bucket"]:
+            #df_market[c] = df_market[c].astype(str).replace("nan", "").fillna("")
 
         # === Implied probabilities directly from Odds_Price by market (unchanged in spirit) ===
         df_market["Market_Implied_Prob"] = _amer_to_prob_vec(df_market["Odds_Price"])
