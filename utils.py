@@ -8379,10 +8379,10 @@ def apply_blended_sharp_score(
                     "Game_Key",
                     "Spread_Abs_Game",
                     "Spread_Abs_Game_Z",
-                    "Spread_Size_Bucket",
+                    
                     "Total_Game",
                     "Total_Game_Z",
-                    "Total_Size_Bucket",
+                 
                     "Spread_x_Total",
                     "Spread_over_Total",
                     "Total_over_Spread",
@@ -8398,18 +8398,15 @@ def apply_blended_sharp_score(
     else:
         # Ensure columns exist even if we couldn't build game_vals
         for c in [
-            "Spread_Abs_Game","Spread_Abs_Game_Z","Spread_Size_Bucket",
-            "Total_Game","Total_Game_Z","Total_Size_Bucket",
+            "Spread_Abs_Game","Spread_Abs_Game_Z",
+            "Total_Game","Total_Game_Z",
             "Spread_x_Total","Spread_over_Total","Total_over_Spread",
             "Dist_to_3","Dist_to_7","Dist_to_10",
         ]:
             if c not in df.columns:
                 df[c] = np.nan
 
-    # Buckets as plain strings (avoid category setitem headaches)
-    for c in ["Spread_Size_Bucket", "Total_Size_Bucket"]:
-        if c in df.columns:
-            df[c] = df[c].astype("string").fillna("")
+
 
  
     # === Implied probabilities per market (vectorized, with row-level fallback) ===
