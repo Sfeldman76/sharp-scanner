@@ -4751,7 +4751,7 @@ def favorite_centric_from_powerdiff_lowmem(
     bq,
     project: str = "sharplogger",
     dataset: str = "sharp_data",
-    scores_tabl: str = "sharp_scores_with_features", 
+    scores_table: str = "sharp_scores_with_features", 
     min_rows_per_sport: int = 5000,
 ) -> pd.DataFrame:
     out = g_full.copy()
