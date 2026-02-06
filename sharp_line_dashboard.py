@@ -10080,6 +10080,9 @@ def train_sharp_model_from_bq(
             "Resistance_Score",
             "Early_Sharp_Flag",
             "Late_Sharp_Flag",
+            "Spread_Size_Bucket",
+            "Total_Size_Bucket",
+            'H2H_Prob_Bucket",
         
             # Consensus / dispersion
             "ImpProb_Mean_AllBooks",
