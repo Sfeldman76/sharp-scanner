@@ -2167,7 +2167,6 @@ def _resolve_feature_cols_like_training(bundle, model=None, df_like=None, market
     return final
 
 
-
 def holdout_by_percent_groups(
     *,
     sport: str | None = None,
@@ -2183,43 +2182,61 @@ def holdout_by_percent_groups(
     Time-forward holdout by last % of GROUPS (e.g., Game_Key).
     If pct_holdout is None, choose per sport via SPORT_HOLDOUT_PCT.
     Returns (train_idx, hold_idx) as **row indices** (int arrays), sorted ascending.
+
+    Improvements vs original:
+      - sport defaults tuned for "more training, better results" on larger datasets
+      - adaptive shrink of holdout % as #groups grows (mild, max ~3%)
+      - label diversity: shift window (same size) before expanding (last resort)
+      - fixes common sport key typo(s): NCCAB/NCCAM -> NCAAB
     """
     import numpy as np
     import pandas as pd
 
-    # ---- sport-defaults ----
+    # ---- sport-defaults (tuned) ----
     SPORT_HOLDOUT_PCT = {
-        "NFL": 0.12, "NCAAF": 0.12, "NBA": 0.18, "WNBA": 0.12,
-        "NHL": 0.18, "MLB": 0.20, "MLS": 0.18, "CFL": 0.12, "DEFAULT": 0.18,"NCCAM": 0.18,
+        "NFL": 0.10,
+        "NCAAF": 0.10,
+        "NBA": 0.15,
+        "WNBA": 0.10,
+        "NHL": 0.15,
+        "MLB": 0.12,
+        "MLS": 0.15,
+        "CFL": 0.10,
+        "NCAAB": 0.15,
+        "DEFAULT": 0.15,
     }
+
+    key = (sport or "DEFAULT").upper().strip()
+    if key in ("NCCAB", "NCCAM", "NCAAB ", "NCAA_BB"):
+        key = "NCAAB"
+
     if pct_holdout is None:
-        key = (sport or "DEFAULT").upper()
         pct_holdout = float(SPORT_HOLDOUT_PCT.get(key, SPORT_HOLDOUT_PCT["DEFAULT"]))
-    pct_holdout = float(np.clip(pct_holdout, 0.05, 0.50))  # keep reasonable bounds
+    pct_holdout = float(np.clip(pct_holdout, 0.05, 0.50))  # hard bounds
 
     # ---- align lengths safely (no crashes on mismatches) ----
     n = int(min(len(groups), len(y), len(times) if times is not None else len(groups)))
     groups = np.asarray(groups)[:n]
     y = np.asarray(y).astype(int)[:n]
+
     if times is None:
-        # Use an increasing counter as a last-resort "time"
         times = np.arange(n)
         times_is_datetime = False
     else:
         times = np.asarray(times)[:n]
         times_is_datetime = True
 
-    # ---- row-level frame (we keep all rows; do not drop NaT rows) ----
+    # ---- row-level frame (keep all rows; don't drop NaT rows) ----
     df_rows = pd.DataFrame({
         "row_idx": np.arange(n, dtype=int),
         "group":   pd.Series(groups).astype(str),
         "y":       y,
     })
-    # Parse times; may produce NaT
+
     if times_is_datetime:
         t_ser = pd.to_datetime(times, utc=True, errors="coerce")
     else:
-        # fallback: monotonic increasing pseudo-time
+        # monotonic pseudo-time
         t_ser = pd.to_datetime(pd.Series(times, dtype="int64"), unit="s", utc=True, errors="ignore")
     df_rows["time"] = t_ser
 
@@ -2230,73 +2247,83 @@ def holdout_by_percent_groups(
 
     gmeta = pd.DataFrame({
         "group": gfirst.index,
-        "first_row": gfirst.values,                  # fallback order
-        "start": gstart.reindex(gfirst.index),       # may be NaT
-        "end":   gend.reindex(gfirst.index),         # may be NaT
-    })
-    # Primary sort: by start time; Secondary: by first occurrence (stable for NaT)
-    gmeta = gmeta.sort_values(by=["start", "first_row"], na_position="last").reset_index(drop=True)
+        "first_row": gfirst.values,            # fallback order
+        "start": gstart.reindex(gfirst.index), # may be NaT
+        "end":   gend.reindex(gfirst.index),   # may be NaT
+    }).sort_values(by=["start", "first_row"], na_position="last").reset_index(drop=True)
 
-    n_groups = len(gmeta)
+    n_groups = int(len(gmeta))
     if n_groups == 0:
         return np.array([], dtype=int), np.array([], dtype=int)
 
+    # ---- adaptive shrink: as you have more groups, hold out slightly less ----
+    # max shrink ~= 3%, ramps in around ~250 groups
+    shrink = 0.03 * (1.0 - np.exp(-n_groups / 250.0))
+    pct_eff = float(np.clip(pct_holdout - shrink, 0.05, 0.35))
+
     # ---- choose #hold groups with bounds ----
-    # ensure at least 1 train group exists
     min_train_groups = max(1, int(min_train_games))
     min_hold_groups  = max(1, int(min_hold_games))
 
-    # requested hold groups by pct
-    wanted_hold = int(np.ceil(n_groups * pct_holdout))
-    # clamp to feasible window
+    wanted_hold = int(np.ceil(n_groups * pct_eff))
     max_hold_allowed = max(1, n_groups - min_train_groups)
     n_hold_groups = int(np.clip(wanted_hold, min_hold_groups, max_hold_allowed))
 
     # If dataset is too small, shrink gracefully
     if n_groups < (min_train_groups + min_hold_groups):
-        # leave at least 1 train group
         n_hold_groups = int(np.clip(n_groups - 1, 1, n_groups))
 
-    # ---- select train/hold groups (last % by time) ----
-    hold_groups = gmeta["group"].iloc[-n_hold_groups:].to_numpy()
-    train_groups = gmeta["group"].iloc[: n_groups - n_hold_groups].to_numpy()
-
-    # ---- map groups back to rows (non-overlapping; sorted) ----
     all_groups = df_rows["group"].to_numpy()
-    hold_mask = np.isin(all_groups, hold_groups)
-    train_mask = np.isin(all_groups, train_groups)
 
-    # enforce disjointness (just in case)
-    both = train_mask & hold_mask
-    if np.any(both):
-        hold_mask[both] = False  # keep in train if ever ambiguous
+    def _idx_from_hold_groups(hold_groups_arr: np.ndarray):
+        hold_mask_local = np.isin(all_groups, hold_groups_arr)
+        hold_idx_local = np.sort(np.flatnonzero(hold_mask_local).astype(int))
+        train_idx_local = np.sort(np.flatnonzero(~hold_mask_local).astype(int))
+        return train_idx_local, hold_idx_local, hold_mask_local
 
-    hold_idx = np.sort(np.flatnonzero(hold_mask).astype(int))
-    train_idx = np.sort(np.flatnonzero(train_mask).astype(int))
+    def _has_both(idx_rows: np.ndarray) -> bool:
+        if idx_rows.size == 0:
+            return False
+        return np.unique(df_rows.loc[idx_rows, "y"]).size >= 2
 
-    # ---- optional: ensure label diversity in holdout (expand boundary if needed) ----
-    if ensure_label_diversity and hold_idx.size > 0:
-        def _has_both(idx_rows: np.ndarray) -> bool:
-            if idx_rows.size == 0:
-                return False
-            return np.unique(df_rows.loc[idx_rows, "y"]).size >= 2
+    # ---- primary: last n_hold_groups groups ----
+    hold_groups = gmeta["group"].iloc[-n_hold_groups:].to_numpy()
+    train_idx, hold_idx, hold_mask = _idx_from_hold_groups(hold_groups)
 
-        if not _has_both(hold_idx):
-            k = n_hold_groups
-            # expand hold boundary forward as much as possible while leaving min_train_groups
-            while (not _has_both(hold_idx)) and ((n_groups - k) >= min_train_groups) and (k < n_groups):
-                k += 1
-                hold_groups = gmeta["group"].iloc[-k:].to_numpy()
-                train_groups = gmeta["group"].iloc[: n_groups - k].to_numpy()
-                hold_mask = np.isin(all_groups, hold_groups)
-                train_mask = np.isin(all_groups, train_groups)
-                both = train_mask & hold_mask
-                if np.any(both):
-                    hold_mask[both] = False
-                hold_idx = np.sort(np.flatnonzero(hold_mask).astype(int))
-                train_idx = np.sort(np.flatnonzero(train_mask).astype(int))
+    # ---- optional: ensure label diversity in holdout ----
+    if ensure_label_diversity and hold_idx.size > 0 and (not _has_both(hold_idx)):
 
-    return train_idx, hold_idx
+        # 1) Try shifting the holdout window earlier while keeping SAME size (preserves training size)
+        found = False
+        k = int(n_hold_groups)
+
+        # Don't shift too far; enough tries to escape end-of-season label skew
+        max_shift = int(min(max(10, k), max(0, n_groups - k)))
+
+        for s in range(1, max_shift + 1):
+            # window: groups[-(k+s) : -s]
+            start = -(k + s)
+            end = -s
+            if (k + s) > n_groups:
+                break
+            hg = gmeta["group"].iloc[start:end].to_numpy()
+            tr, ho, hm = _idx_from_hold_groups(hg)
+
+            # Ensure we still have enough training groups (same k means yes, but keep for safety)
+            if (n_groups - k) >= min_train_groups and _has_both(ho):
+                train_idx, hold_idx, hold_mask = tr, ho, hm
+                found = True
+                break
+
+        # 2) If shifting can't fix it, expand holdout boundary (last resort; costs training size)
+        if not found:
+            kk = k
+            while (not _has_both(hold_idx)) and ((n_groups - kk) >= min_train_groups) and (kk < n_groups):
+                kk += 1
+                hg = gmeta["group"].iloc[-kk:].to_numpy()
+                train_idx, hold_idx, hold_mask = _idx_from_hold_groups(hg)
+
+    return np.asarray(train_idx, dtype=int), np.asarray(hold_idx, dtype=int)
 
 
 
@@ -3054,8 +3081,8 @@ def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
     min_k=None,
     max_k=None,
-    patience=120,
-    min_improve=1e-6,
+    patience=160,
+    min_improve=1e-7,
     verbose=True,
     log_func=print,
     debug=True,
@@ -3090,7 +3117,7 @@ def _auto_select_k_by_auc(
     quick_drop: float = 0.0,       # (unused but kept)
     abort_margin_cv: float = 0.0,  # used in early abort upper-bound
 
-    time_budget_s: float = 1e18,
+    time_budget_s: float = 1e21,
     resume_state: dict | None = None,
     max_total_evals: int | None = None,
 
@@ -3112,11 +3139,7 @@ def _auto_select_k_by_auc(
       - baseline check print
       - final orient/feature flip pass via _cv_auc_for_feature_set
     """
-    import time
-    import numpy as np
-    import pandas as pd
-    from sklearn.base import clone
-    from sklearn.metrics import roc_auc_score, log_loss
+
 
     t0 = time.time()
     folds = list(folds) if folds is not None else []
@@ -3270,7 +3293,7 @@ def _auto_select_k_by_auc(
         Returns dict with auc (no ll/brier).
         Adds early stopping for XGB during selection.
         """
-        eps = 1e-6
+        eps = 1e-7
         oof = np.full(n, np.nan, dtype=np.float32)
 
         do_abort = (abort_best_auc is not None) and np.isfinite(abort_best_auc)
@@ -3278,7 +3301,7 @@ def _auto_select_k_by_auc(
         n_folds = len(folds_use)
 
         if use_xgb:
-            import xgboost as xgb
+   
             # build once per eval (still cheaper than pandas slicing; X_mat is contiguous slice)
             d_all = xgb.DMatrix(np.ascontiguousarray(X_mat, dtype=np.float32), label=y_arr)
 
@@ -3329,7 +3352,7 @@ def _auto_select_k_by_auc(
         """
         Full metrics (AUC + LL + Brier) — call only when a candidate is about to be accepted.
         """
-        eps = 1e-6
+        eps = 1e-7
         oof = np.full(n, np.nan, dtype=np.float32)
 
         if use_xgb:
@@ -3576,16 +3599,16 @@ def select_features_auto(
     corr_global: float = 0.92,
     max_feats_major: int = 160,
     max_feats_small: int = 160,
-    topk_per_fold: int = 100,
-    min_presence: float = 0.20,
+    topk_per_fold: int = 80,
+    min_presence: float = 0.40,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
 
     # selection knobs
     use_auc_auto: bool = True,
     auc_min_k: int | None = None,
-    auc_patience: int = 130,
-    auc_min_improve: float = 1e-6,
+    auc_patience: int = 160,
+    auc_min_improve: float = 1e-7,
     accept_metric: str = "auc",
     auc_verbose: bool = True,
 
@@ -10183,7 +10206,7 @@ def train_sharp_model_from_bq(
             # Book network
             "Sharp_Consensus_Weight","Sharp_vs_Rec_SpreadGap_Q90_Q10",#"Sharp_vs_Rec_SpreadGap_Q50",
             # Internal consistency
-            #"Spread_ML_ProbGap",
+            "Spread_ML_ProbGap",
             "Spread_ML_Inconsistency","Total_vs_Side_ImpliedDelta",
             # Alt lines (optional)
             #"AltLine_Slope",#"AltLine_Curv",
