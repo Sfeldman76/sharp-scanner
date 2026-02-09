@@ -2189,20 +2189,19 @@ def holdout_by_percent_groups(
       - label diversity: shift window (same size) before expanding (last resort)
       - fixes common sport key typo(s): NCCAB/NCCAM -> NCAAB
     """
-    import numpy as np
-    import pandas as pd
+
 
     # ---- sport-defaults (tuned) ----
     SPORT_HOLDOUT_PCT = {
         "NFL": 0.10,
         "NCAAF": 0.10,
-        "NBA": 0.15,
+        "NBA": 0.12,
         "WNBA": 0.10,
         "NHL": 0.15,
         "MLB": 0.12,
         "MLS": 0.15,
         "CFL": 0.10,
-        "NCAAB": 0.15,
+        "NCAAB": 0.12,
         "DEFAULT": 0.15,
     }
 
