@@ -2727,6 +2727,7 @@ def _apply_flip_inplace(col, mode: str):
     elif mode == "negate":
         np.negative(col, out=col)                    # col = -col
 
+import time
 
 from sklearn.base import clone
 from sklearn.metrics import roc_auc_score, log_loss
@@ -3307,6 +3308,7 @@ def _auto_select_k_by_auc(
             def _fit_predict(tr_idx, va_idx):
                 d_tr = d_all.slice(tr_idx)
                 d_va = d_all.slice(va_idx)
+            
                 booster = xgb.train(
                     xgb_params,
                     d_tr,
@@ -3315,7 +3317,16 @@ def _auto_select_k_by_auc(
                     early_stopping_rounds=int(early_stop_rounds),
                     verbose_eval=False,
                 )
-                return booster.predict(d_va)
+                
+                # ✅ use best_iteration for prediction (so early stopping actually matters)
+                if hasattr(booster, "best_iteration") and booster.best_iteration is not None:
+                    try:
+                        return booster.predict(d_va, iteration_range=(0, int(booster.best_iteration) + 1))
+                    except TypeError:
+                        # older xgboost fallback
+                        return booster.predict(d_va, ntree_limit=int(getattr(booster, "best_ntree_limit", 0)) or None)
+                else:
+                    return booster.predict(d_va)
         else:
             def _fit_predict(tr_idx, va_idx):
                 mdl = clone(model_proto)
@@ -3361,7 +3372,8 @@ def _auto_select_k_by_auc(
             def _fit_predict(tr_idx, va_idx):
                 d_tr = d_all.slice(tr_idx)
                 d_va = d_all.slice(va_idx)
-                booster = xgb.train(
+              
+                
                     xgb_params,
                     d_tr,
                     num_boost_round=int(xgb_num_round),
@@ -3369,7 +3381,16 @@ def _auto_select_k_by_auc(
                     early_stopping_rounds=int(early_stop_rounds),
                     verbose_eval=False,
                 )
-                return booster.predict(d_va)
+                
+                # ✅ use best_iteration for prediction (so early stopping actually matters)
+                if hasattr(booster, "best_iteration") and booster.best_iteration is not None:
+                    try:
+                        return booster.predict(d_va, iteration_range=(0, int(booster.best_iteration) + 1))
+                    except TypeError:
+                        # older xgboost fallback
+                        return booster.predict(d_va, ntree_limit=int(getattr(booster, "best_ntree_limit", 0)) or None)
+                else:
+                    return booster.predict(d_va)
         else:
             def _fit_predict(tr_idx, va_idx):
                 mdl = clone(model_proto)
@@ -6936,9 +6957,11 @@ def _xgb_params_from_proto(proto):
         "reg_alpha": float(_f("reg_alpha", 0.0)),
         "gamma": float(_f("gamma", 0.0)),
         "max_depth": int(_f("max_depth", 0)),
-        "nthread": int(_f("n_jobs", 1) or 1),
+        "max_leaves": int(_f("max_leaves", 64)),   # ✅ NEW
+        "nthread": int(_f("n_jobs", 0) or 0),       # ✅ FIXED
         "verbosity": 0,
         "predictor": _f("predictor", "cpu_predictor"),
+        "seed": int(_f("random_state", 1337)),     # ✅ nice-to-have stability
     }
 
     num_boost_round = int(_f("n_estimators", 400) or 400)
