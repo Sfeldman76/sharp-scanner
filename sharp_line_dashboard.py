@@ -15892,76 +15892,92 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
                 st.warning(f"Could not render edges: {e}")
 
 
+from google.cloud import bigquery
+import pandas as pd
+import streamlit as st
+from datetime import date, timedelta
+
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date=None, end_date=None):
 
     client = bigquery.Client(project="sharplogger", location="us")
 
     with tab:
         st.subheader(f"📈 Model Confidence Calibration – {sport_label}")
-    
-        # === Date Filters UI ===
+
         col1, col2 = st.columns(2)
         with col1:
             start_date = st.date_input("Start Date", value=date.today() - timedelta(days=14))
         with col2:
             end_date = st.date_input("End Date", value=date.today())
-    
-        # === Build WHERE clause
-        date_filter = ""
-        if start_date and end_date:
-            date_filter = f"AND DATE(Snapshot_Timestamp) BETWEEN '{start_date}' AND '{end_date}'"
 
+        query = """
+        SELECT
+          Sport,
+          Snapshot_Timestamp,
+          Market,
+          SHARP_HIT_BOOL,
+          Model_Sharp_Win_Prob
+        FROM `sharplogger.sharp_data.scores_with_features`
+        WHERE UPPER(TRIM(Sport)) = @sport
+          AND DATE(Snapshot_Timestamp) BETWEEN @start_date AND @end_date
+        """
+
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("sport", "STRING", sport_label.upper()),
+                bigquery.ScalarQueryParameter("start_date", "DATE", start_date),
+                bigquery.ScalarQueryParameter("end_date", "DATE", end_date),
+            ]
+        )
 
         try:
-            df = client.query(f"""
-                SELECT *
-                FROM 'sharplogger.sharp_data.scores_with_features'
-                WHERE Sport = '{sport_label.upper()}' {date_filter}
-            """).to_dataframe()
+            df = client.query(query, job_config=job_config).to_dataframe()
         except Exception as e:
             st.error(f"❌ Failed to load data: {e}")
             return
 
         st.info(f"✅ Loaded rows: {len(df)}")
 
-        # === Filter valid rows
-        df = df[df['SHARP_HIT_BOOL'].notna() & df['Model_Sharp_Win_Prob'].notna()].copy()
-        df['SHARP_HIT_BOOL'] = pd.to_numeric(df['SHARP_HIT_BOOL'], errors='coerce').astype('Int64')
-        df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
+        # Filter valid rows
+        df = df[df["SHARP_HIT_BOOL"].notna() & df["Model_Sharp_Win_Prob"].notna()].copy()
+        df["SHARP_HIT_BOOL"] = pd.to_numeric(df["SHARP_HIT_BOOL"], errors="coerce").astype("Int64")
+        df["Model_Sharp_Win_Prob"] = pd.to_numeric(df["Model_Sharp_Win_Prob"], errors="coerce")
 
-        # === Bin probabilities
-        prob_bins = [0, 0.50, 0.55, 0.70, 1.0]
+        # Bin probabilities (make bins inclusive and avoid NaN from exact 1.0)
+       
+        prob_bins = [0.0, 0.51, 0.55, 0.70, 1.0000001]
         bin_labels = ["✅ Low", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
-
         
-        df['Confidence_Bin'] = pd.cut(df['Model_Sharp_Win_Prob'], bins=prob_bins, labels=bin_labels)
-
-
-        # === Overall Summary
+        df["Confidence_Bin"] = pd.cut(
+            df["Model_Sharp_Win_Prob"],
+            bins=prob_bins,
+            labels=bin_labels,
+            include_lowest=True,
+            right=False,   # important so boundaries match tier_from_prob()
+        )
+        # Overall summary
         st.subheader("📊 Model Win Rate by Confidence Bin (Overall)")
         overall = (
-            df.groupby('Confidence_Bin')['SHARP_HIT_BOOL']
-            .agg(['count', 'mean'])
-            .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
+            df.groupby("Confidence_Bin")["SHARP_HIT_BOOL"]
+            .agg(Picks="count", Win_Rate="mean")
             .reset_index()
         )
-        st.dataframe(overall.style.format({'Win_Rate': '{:.1%}'}))
+        st.dataframe(overall.style.format({"Win_Rate": "{:.1%}"}))
 
-        # === By Market
+        # By market
         st.markdown("#### 📉 Confidence Calibration by Market")
         conf_summary = (
-            df.groupby(['Market', 'Confidence_Bin'])['SHARP_HIT_BOOL']
-            .agg(['count', 'mean'])
-            .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
+            df.groupby(["Market", "Confidence_Bin"])["SHARP_HIT_BOOL"]
+            .agg(Picks="count", Win_Rate="mean")
             .reset_index()
         )
 
-        for market in conf_summary['Market'].dropna().unique():
-            st.markdown(f"**📊 {market.upper()}**")
+        for market in conf_summary["Market"].dropna().unique():
+            st.markdown(f"**📊 {str(market).upper()}**")
             st.dataframe(
-                conf_summary[conf_summary['Market'] == market]
-                .drop(columns='Market')
-                .style.format({'Win_Rate': '{:.1%}'})
+                conf_summary[conf_summary["Market"] == market]
+                .drop(columns="Market")
+                .style.format({"Win_Rate": "{:.1%}"})
             )
 
 
