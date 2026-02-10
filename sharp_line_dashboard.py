@@ -3288,7 +3288,7 @@ def _auto_select_k_by_auc(
                 flip_mode_cache[f] = _auto_flip_mode(X_all_mat[:, col_ix[f]])
 
     # ---- matrix-backed CV evaluator ----
-    def _cv_eval_auc_only(X_mat, folds_use, *, abort_best_auc=None, early_stop_rounds=25):
+    def _cv_eval_auc_only(X_mat, folds_use, *, abort_best_auc=None, early_stop_rounds=50):
         """
         Returns dict with auc (no ll/brier).
         Adds early stopping for XGB during selection.
@@ -3358,7 +3358,7 @@ def _auto_select_k_by_auc(
         auc = roc_auc_score(y_v, p_v) if (len(y_v) >= 2 and len(np.unique(y_v)) >= 2) else np.nan
         return {"auc": float(auc) if np.isfinite(auc) else float("nan"), "aborted": False}
 
-    def _cv_eval_full_metrics(X_mat, folds_use, *, early_stop_rounds=25):
+    def _cv_eval_full_metrics(X_mat, folds_use, *, early_stop_rounds=50):
         """
         Full metrics (AUC + LL + Brier) — call only when a candidate is about to be accepted.
         """
@@ -3469,7 +3469,7 @@ def _auto_select_k_by_auc(
             res_q = _cv_eval_auc_only(
                 X_work[:, :k+1], folds_quick,
                 abort_best_auc=(best_val if np.isfinite(best_val) else None),
-                early_stop_rounds=15,
+                early_stop_rounds=50,
             )
             m_q = float(res_q.get("auc", np.nan))
             if np.isfinite(best_val) and (not np.isfinite(m_q) or (m_q < float(best_val) - float(quick_margin_auc))):
@@ -3483,7 +3483,7 @@ def _auto_select_k_by_auc(
             res_norm_auc = _cv_eval_auc_only(
                 X_work[:, :k+1], folds_full,
                 abort_best_auc=(best_val if np.isfinite(best_val) else None),
-                early_stop_rounds=25,
+                early_stop_rounds=50,
             )
             m_norm = float(res_norm_auc.get("auc", np.nan))
             if (not np.isfinite(m_norm)) or (np.isfinite(best_val) and (m_norm < float(best_val) - 0.0015)):
@@ -3491,7 +3491,7 @@ def _auto_select_k_by_auc(
                 continue
         else:
             # score-mode: must compute full metrics
-            res_norm_full = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=25)
+            res_norm_full = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=50)
             m_norm = _metric(res_norm_full)
 
         best_trial_flip = False
@@ -3512,12 +3512,12 @@ def _auto_select_k_by_auc(
                 # quick flip gate (optional)
                 ok_to_full_flip = True
                 if quick_screen and len(folds_quick) < len(folds_full):
-                    res_fq = _cv_eval_auc_only(X_work[:, :k+1], folds_quick, abort_best_auc=None, early_stop_rounds=15)
+                    res_fq = _cv_eval_auc_only(X_work[:, :k+1], folds_quick, abort_best_auc=None, early_stop_rounds=50)
                     mfq = float(res_fq.get("auc", np.nan))
                     ok_to_full_flip = np.isfinite(mfq) and (mfq >= m_norm + float(flip_gain_min))
 
                 if ok_to_full_flip:
-                    res_flip_auc = _cv_eval_auc_only(X_work[:, :k+1], folds_full, abort_best_auc=None, early_stop_rounds=25)
+                    res_flip_auc = _cv_eval_auc_only(X_work[:, :k+1], folds_full, abort_best_auc=None, early_stop_rounds=50)
                     m_flip = float(res_flip_auc.get("auc", np.nan))
                     if np.isfinite(m_flip) and (m_flip > m_norm + float(flip_gain_min)):
                         best_trial_flip = True
