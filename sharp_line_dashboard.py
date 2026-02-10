@@ -10386,7 +10386,24 @@ def train_sharp_model_from_bq(
             feature_cols = [c for c in feature_cols if not any(x in c for x in drop_like)]
 
         st.markdown(f"### 📈 Features Used: `{len(features)}`")
-           
+
+
+
+        # ============================================
+        # SPORT EMBARGO SETTINGS (global constant)
+        # ============================================
+        SPORT_EMBARGO = {
+            "MLB":   pd.Timedelta("2 hours"),
+            "NBA":   pd.Timedelta("12 hours"),
+            "NHL":   pd.Timedelta("2 hours"),
+            "NCAAB": pd.Timedelta("11 hours"),
+            "NFL":   pd.Timedelta("1 days"),
+            "NCAAF": pd.Timedelta("1 days"),
+            "WNBA":  pd.Timedelta("8 hours"),
+            "MLS":   pd.Timedelta("12 hours"),
+            "default": pd.Timedelta("12 hours"),
+        }
+
         # ─────────────────────────────────────────────────────────────────────────────
         # FEATURE PREP (before select_features_auto)
         # Produces:
