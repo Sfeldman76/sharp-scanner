@@ -3081,7 +3081,7 @@ def _auto_select_k_by_auc(
     min_k=None,
     max_k=None,
     patience=160,
-    min_improve=1e-7,
+    min_improve=1e-5,
     verbose=True,
     log_func=print,
     debug=True,
@@ -3174,7 +3174,7 @@ def _auto_select_k_by_auc(
     all_res = _cv_auc_for_feature_set(
         model_proto, X, y_arr, folds, all_feats,
         log_func=log_func,
-        debug=False,
+        debug=True,
         return_oof=False,
         orient_features=False,
         enable_feature_flips=False,
@@ -3197,7 +3197,7 @@ def _auto_select_k_by_auc(
         base_res = _cv_auc_for_feature_set(
             model_proto, X, y_arr, folds, base_feats,
             log_func=log_func,
-            debug=False,
+            debug=True,
             return_oof=False,
             cv_mode="full",
         )
@@ -3424,8 +3424,8 @@ def _auto_select_k_by_auc(
         log_func(f"[AUTO-FEAT] start scan: must_keep={len(mk)} target_seed={min_k} metric={accept_metric} quick_folds={len(folds_quick)}")
 
     # --- gating margins (tune if you want) ---
-    quick_margin_auc = 0.0005   # if quick AUC is worse than best-0.002, skip full CV
-    flip_close_margin = 0.0005  # only try flip if normal is at least (best - 0.001) in quick/full
+    quick_margin_auc = 0.0015   # if quick AUC is worse than best-0.002, skip full CV
+    flip_close_margin = 0.0015  # only try flip if normal is at least (best - 0.001) in quick/full
 
     for i, feat in enumerate(ordered):
         if (time.time() - t0) >= float(time_budget_s):
@@ -3598,7 +3598,7 @@ def select_features_auto(
     corr_global: float = 0.92,
     max_feats_major: int = 160,
     max_feats_small: int = 160,
-    topk_per_fold: int = 80,
+    topk_per_fold: int = 50,
     min_presence: float = 0.40,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
@@ -3607,7 +3607,7 @@ def select_features_auto(
     use_auc_auto: bool = True,
     auc_min_k: int | None = None,
     auc_patience: int = 160,
-    auc_min_improve: float = 1e-7,
+    auc_min_improve: float = 1e-5,
     accept_metric: str = "auc",
     auc_verbose: bool = True,
 
@@ -7428,8 +7428,8 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
     # ---- NCAAB ----
     elif s in {"NCAAB", "NCAAM"}:
         if m == "spreads":
-            MIN_AUC         = 0.51
-            MAX_OVERFIT_GAP = 0.22
+            MIN_AUC         = 0.53
+            MAX_OVERFIT_GAP = 0.15
         else:
             MIN_AUC         = 0.51
             MAX_OVERFIT_GAP = 0.22
