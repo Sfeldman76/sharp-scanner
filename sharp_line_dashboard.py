@@ -10509,6 +10509,8 @@ def train_sharp_model_from_bq(
         
                     yield train_idx, val_idx
 
+        eps = 1e-7
+
 
         # ============================================
         # SPORT EMBARGO SETTINGS (global constant)
