@@ -3295,7 +3295,7 @@ def _auto_select_k_by_auc(
         folds_use,
         *,
         abort_best_auc=None,
-        early_stop_rounds=200,
+        early_stop_rounds=None,
         return_fold_mean=True,
     ):
         """
@@ -3367,7 +3367,7 @@ def _auto_select_k_by_auc(
         auc = roc_auc_score(y_v, p_v) if (len(y_v) >= 2 and len(np.unique(y_v)) >= 2) else np.nan
         return {"auc": float(auc) if np.isfinite(auc) else float("nan"), "aborted": False, "auc_fold_mean": auc_fold_mean}
 
-    def _cv_eval_full_metrics(X_mat, folds_use, *, early_stop_rounds=25):
+    def _cv_eval_full_metrics(X_mat, folds_use, *, early_stop_rounds=None):
         """
         Full metrics (AUC + LL + Brier) — called only when candidate is about to be accepted.
         """
@@ -3445,7 +3445,7 @@ def _auto_select_k_by_auc(
         k += 1
 
     if k > 0:
-        best_res = _cv_eval_full_metrics(X_work[:, :k], folds_full, early_stop_rounds=25)
+        best_res = _cv_eval_full_metrics(X_work[:, :k], folds_full, early_stop_rounds=None)
     else:
         best_res = None
 
@@ -3481,7 +3481,7 @@ def _auto_select_k_by_auc(
             res_q = _cv_eval_auc_only(
                 X_work[:, :k+1], folds_quick,
                 abort_best_auc=(best_val if np.isfinite(best_val) else None),
-                early_stop_rounds=200,
+                early_stop_rounds=None,
                 return_fold_mean=True,
             )
             m_q = float(res_q.get("auc", np.nan))
@@ -3496,7 +3496,7 @@ def _auto_select_k_by_auc(
             res_norm_auc = _cv_eval_auc_only(
                 X_work[:, :k+1], folds_full,
                 abort_best_auc=(best_val if np.isfinite(best_val) else None),
-                early_stop_rounds=200,
+                early_stop_rounds=None,
                 return_fold_mean=True,
             )
             m_norm = float(res_norm_auc.get("auc", np.nan))
@@ -3517,7 +3517,7 @@ def _auto_select_k_by_auc(
                 rejects_in_row += 1
                 continue
         else:
-            res_norm_full = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=25)
+            res_norm_full = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=None)
             m_norm = _metric(res_norm_full)
 
         best_trial_flip = False
@@ -3540,7 +3540,7 @@ def _auto_select_k_by_auc(
                     res_fq = _cv_eval_auc_only(
                         X_work[:, :k+1], folds_quick,
                         abort_best_auc=None,
-                        early_stop_rounds=200,
+                        early_stop_rounds=None,
                         return_fold_mean=True,
                     )
                     mfq = float(res_fq.get("auc", np.nan))
@@ -3550,7 +3550,7 @@ def _auto_select_k_by_auc(
                     res_flip_auc = _cv_eval_auc_only(
                         X_work[:, :k+1], folds_full,
                         abort_best_auc=None,
-                        early_stop_rounds=200,
+                        early_stop_rounds=None,
                         return_fold_mean=True,
                     )
                     m_flip = float(res_flip_auc.get("auc", np.nan))
@@ -3571,7 +3571,7 @@ def _auto_select_k_by_auc(
                 if best_trial_flip:
                     _apply_flip_inplace(col, best_trial_flip_mode)
 
-                res_try = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=25)
+                res_try = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=None)
                 col[:] = orig
             else:
                 rejects_in_row += 1
@@ -3632,7 +3632,7 @@ def _auto_select_k_by_auc(
         )
 
         # ✅ selection-consistent final metrics (early stopping + fold-mean AUC)
-        best_res = _final_eval_consistent(X_work[:, :k], folds_full, early_stop_rounds=25)
+        best_res = _final_eval_consistent(X_work[:, :k], folds_full, early_stop_rounds=None)
 
         if verbose and isinstance(best_res, dict):
             auc_show = float(best_res.get("auc", np.nan))
