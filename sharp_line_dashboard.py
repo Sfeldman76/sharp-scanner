@@ -10508,8 +10508,7 @@ def train_sharp_model_from_bq(
                         continue
         
                     yield train_idx, val_idx
-
-        eps = 1e-7
+   
 
 
         # ============================================
@@ -12349,7 +12348,7 @@ def train_sharp_model_from_bq(
                  (len(y_train) < 500))
         MIN_OOF = 40 if SMALL else 120
         RUN_LOGLOSS = True  # keep on; you can tie to SMALL if desired
-        
+        eps = 1e-7
         oof_pred_auc = np.full(len(y_train), np.nan, dtype=np.float64)
         oof_pred_logloss = (np.full(len(y_train), np.nan, dtype=np.float64)
                             if RUN_LOGLOSS else None)
