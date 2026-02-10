@@ -10387,60 +10387,94 @@ def train_sharp_model_from_bq(
 
         st.markdown(f"### 📈 Features Used: `{len(features)}`")
            
+        # ─────────────────────────────────────────────────────────────────────────────
+        # FEATURE PREP (before select_features_auto)
+        # Produces:
+        #   - X_full: np.ndarray float32 (n_rows x n_feats)
+        #   - y_full: np.ndarray int8    (n_rows,)
+        #   - feature_cols: pruned list[str] aligned to X_full columns
+        # ─────────────────────────────────────────────────────────────────────────────
         
-        # ─────────────────────────────────────────────────────────────────────────────
-        # Safe feature matrix + high‑corr report (Arrow/Streamlit‑proof)
-        # ─────────────────────────────────────────────────────────────────────────────
-        # Expect: df_market, feature_cols (list-like), market, st, np, pd in scope
-        _fc = list(dict.fromkeys([str(c) for c in (feature_cols or [])]))
-        # 1) Build numeric X (all float32), no Inf/NaN, no exotic dtypes
-        if not _fc:
+        # 0) sanitize feature list
+        feature_cols = list(dict.fromkeys([str(c) for c in (feature_cols or [])]))
+        if not feature_cols:
             st.info("No features provided.")
             return
         
-        X_raw = df_market.reindex(columns=_fc, fill_value=np.nan)
+        # 1) build y + mask FIRST (so X and y always aligned)
+        if "SHARP_HIT_BOOL" not in df_market.columns:
+            st.warning("⚠️ Missing SHARP_HIT_BOOL in df_market — skipping.")
+            return
         
-        # Coerce everything → numeric
-        X = (
-            X_raw.apply(pd.to_numeric, errors='coerce')
-                 .replace([np.inf, -np.inf], np.nan)
-                 .fillna(0.0)
-                 .astype('float32', copy=False)
+        y_series = pd.to_numeric(df_market["SHARP_HIT_BOOL"], errors="coerce")
+        valid_mask = y_series.notna()
+        
+        df_valid = df_market.loc[valid_mask].reset_index(drop=True)
+        y_full = (
+            y_series.loc[valid_mask]
+            .where(y_series.loc[valid_mask].isin([0, 1]), 0)
+            .fillna(0)
+            .astype("int8")
+            .to_numpy()
         )
         
-        # 1a) Ensure DataFrame & Arrow‑friendly column names (strings, unique)
-        if not isinstance(X, pd.DataFrame):
-            X = pd.DataFrame(X, columns=_fc)
-        X.columns = [str(c) for c in X.columns]
+        if np.unique(y_full).size < 2:
+            title_market = str(market).upper() if "market" in locals() else "MARKET"
+            st.warning(f"⚠️ Skipping {title_market} — only one label class.")
+            return
         
-        # 2) Secondary c for correlation input
-        Xc = (
-            X.apply(pd.to_numeric, errors="coerce")
-             .replace([np.inf, -np.inf], np.nan)
-        )
+        # 2) build X_full ONCE from masked frame (training truth)
+        def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+            out = df.reindex(columns=cols, fill_value=np.nan).copy()
+            for c in cols:
+                col = out[c]
         
-        # 2a) Drop all‑NA and constant columns (corr degeneracy)
+                # bool -> float
+                if is_bool_dtype(col):
+                    out[c] = col.astype("float32")
+                    continue
+        
+                # objects/strings/categories -> numeric
+                if is_object_dtype(col) or is_string_dtype(col) or str(col.dtype).startswith("category"):
+                    out[c] = col.replace({
+                        "True": 1, "False": 0, "true": 1, "false": 0,
+                        True: 1, False: 0,
+                        "": np.nan, "none": np.nan, "None": np.nan,
+                        "NA": np.nan, "NaN": np.nan
+                    })
+                    out[c] = pd.to_numeric(out[c], errors="coerce")
+                    continue
+        
+                out[c] = pd.to_numeric(col, errors="coerce")
+        
+            return (
+                out.replace([np.inf, -np.inf], np.nan)
+                   .fillna(0.0)
+                   .astype("float32")
+            )
+        
+        X_df = _to_numeric_block(df_valid, feature_cols)  # DataFrame float32
+        # Arrow-safe colnames
+        X_df.columns = [str(c) for c in X_df.columns]
+        
+        # 3) (optional) corr report using SAME rows, SAME numeric block
+        #     NOTE: corr can be expensive; keep it capped.
+        Xc = X_df.replace([np.inf, -np.inf], np.nan)
+        
+        # drop all-NA / constant
         na_only_cols = [c for c in Xc.columns if Xc[c].isna().all()]
         const_cols   = [c for c in Xc.columns if Xc[c].nunique(dropna=True) <= 1]
-        drop_cols    = set(na_only_cols) | set(const_cols)
-        keep_cols    = [c for c in Xc.columns if c not in drop_cols]
-        Xc = Xc[keep_cols].copy()
+        drop_cols = set(na_only_cols) | set(const_cols)
+        keep_cols = [c for c in Xc.columns if c not in drop_cols]
+        Xc = Xc[keep_cols]
         
-        # 2b) Cap width for safety (very wide matrices can choke Arrow/corr)
-        MAX_CORR_COLS = 400  # tune if needed
+        MAX_CORR_COLS = 400
         if Xc.shape[1] > MAX_CORR_COLS:
-            st.warning(f"Feature count {Xc.shape[1]} too wide for corr; sampling {MAX_CORR_COLS}.")
-            # prefer most variable columns (more informative)
             variances = Xc.var(numeric_only=True).sort_values(ascending=False)
             sel = [c for c in variances.index.tolist() if c in Xc.columns][:MAX_CORR_COLS]
-            Xc = Xc[sel].copy()
+            Xc = Xc[sel]
         
-        # 2c) If nothing viable, bail gracefully
-        if Xc.shape[1] == 0:
-            st.info("No valid numeric, non‑constant features available for correlation.")
-        else:
-            # 3) Compute abs corr with fallback + size cap on rows to avoid memory spikes
-            # Downsample rows if extremely tall
+        if Xc.shape[1] > 0:
             MAX_CORR_ROWS = 20000
             if len(Xc) > MAX_CORR_ROWS:
                 Xc = Xc.sample(n=MAX_CORR_ROWS, random_state=13)
@@ -10448,325 +10482,37 @@ def train_sharp_model_from_bq(
             try:
                 corr_matrix = Xc.corr(method="pearson", min_periods=2).abs()
             except Exception as e:
-                st.warning(f"Primary (pearson) corr failed: {e}. Retrying with Spearman…")
+                st.warning(f"Pearson corr failed: {e}. Retrying with Spearman…")
                 try:
                     corr_matrix = Xc.corr(method="spearman", min_periods=2).abs()
                 except Exception as e2:
                     st.error(f"Spearman corr also failed: {e2}. Skipping corr view.")
                     corr_matrix = None
         
-            # 4) Extract high‑corr pairs safely
             if corr_matrix is not None and not corr_matrix.empty:
                 threshold = 0.85
-                cols = corr_matrix.columns.tolist()
+                cols_corr = corr_matrix.columns.tolist()
                 pairs = []
-                # Avoid self-pairs; iterate upper triangle only
-                for i, ci in enumerate(cols):
+                for i, ci in enumerate(cols_corr):
                     row = corr_matrix.iloc[i, i+1:]
-                    if row is not None and hasattr(row, "dropna"):
-                        hits = row.dropna()
-                        hits = hits[hits > threshold]
-                        if not hits.empty:
-                            for cj, val in hits.items():
-                                # enforce plain Python scalars (Arrow‑safe)
-                                pairs.append((str(ci), str(cj), float(val)))
+                    hits = row.dropna()
+                    hits = hits[hits > threshold]
+                    for cj, val in hits.items():
+                        pairs.append((str(ci), str(cj), float(val)))
         
                 if not pairs:
                     st.success("✅ No highly correlated feature pairs found")
                 else:
                     df_corr = pd.DataFrame(pairs, columns=["Feature_1", "Feature_2", "Correlation"])
-                    df_corr = df_corr.sort_values("Correlation", ascending=False)
-        
-                    # 5) UI safety: cap rows & round; enforce pure Python types
-                    MAX_ROWS_SHOW = 500
-                    show = df_corr.head(MAX_ROWS_SHOW).copy()
-                    show["Feature_1"] = show["Feature_1"].astype(str)
-                    show["Feature_2"] = show["Feature_2"].astype(str)
-                    show["Correlation"] = pd.to_numeric(show["Correlation"], errors="coerce").round(4)
-        
-                    # Final sanitization for Arrow / React (#185)
-                    # - Replace NaN in object columns with ""
-                    # - Ensure pure Python scalars
-                    show = show.replace([np.inf, -np.inf], np.nan).dropna(how="all").drop_duplicates().reset_index(drop=True)
-                    # Ensure no NaNs in string/object cols
-                    for c in ["Feature_1", "Feature_2"]:
-                        if c in show.columns:
-                            show[c] = show[c].astype(object).where(pd.notna(show[c]), "")
-                            # Force Python str
-                            show[c] = show[c].map(lambda v: str(v) if v is not None else "")
-                    # Force float64 for the numeric col
-                    if "Correlation" in show.columns:
-                        show["Correlation"] = show["Correlation"].astype("float64")
-                    # Arrow prefers no NaN in object cells; use None
-                    show = show.where(pd.notna(show), None)
-        
-                    # 6) Title + Render correlated feature pairs
+                    df_corr = df_corr.sort_values("Correlation", ascending=False).head(500).copy()
+                    df_corr["Correlation"] = df_corr["Correlation"].round(4).astype("float64")
+                    df_corr = df_corr.where(pd.notna(df_corr), None)
                     st.markdown("#### 🔗 Highly Correlated Feature Pairs (|r| > 0.85)")
-                    try:
-                        st.dataframe(show, hide_index=True, use_container_width=True)
-                    except Exception as e:
-                        st.warning(f"Dataframe render failed, using fallback table. ({e})")
-                        st.table(show)
-                        # Optional: CSV download fallback
-                        try:
-                            csv_bytes = show.to_csv(index=False).encode("utf-8")
-                            st.download_button("⬇️ Download correlated pairs (CSV)", data=csv_bytes, file_name="high_corr_pairs.csv", mime="text/csv")
-                        except Exception:
-                            pass
-            else:
-                st.info("Correlation matrix is empty or unavailable.")
+                    st.dataframe(df_corr, hide_index=True, use_container_width=True)
         
-        # ── Target checks (Arrow‑ and training‑safe) ──────────────────────────────────
-        if 'SHARP_HIT_BOOL' not in df_market.columns:
-            st.warning("⚠️ Missing SHARP_HIT_BOOL in df_market — skipping.")
-            return  # or `continue` if inside a loop
-        
-        y = pd.to_numeric(df_market['SHARP_HIT_BOOL'], errors='coerce')
-        # Treat any non‑{0,1} as 0; fill NaN to 0 explicitly
-        y = y.where(y.isin([0, 1]), 0).fillna(0).astype('int8')
-        
-        if y.nunique(dropna=True) < 2:
-            title_market = str(market).upper() if 'market' in locals() else 'MARKET'
-            st.warning(f"⚠️ Skipping {title_market} — only one label class.")
-            return  # or `continue`
-                
-  
-      
-        # ===============================
-        # Purged Group Time-Series CV (PGTSCV) + Embargo
-        # ===============================
-        # Normalize the sport string for lookup
-        # Use the passed-in `sport` exactly as-is (case-sensitive mapping + default)
-       
-       
-        
-        # --- sport → embargo (top of file, once) ---
-        SPORT_EMBARGO = {
-            "MLB":   pd.Timedelta("2 hours"),
-            "NBA":   pd.Timedelta("12 hours"),
-            "NHL":   pd.Timedelta("2 hours"),
-            "NCAAB": pd.Timedelta("11 hours"),
-            "NFL":   pd.Timedelta("1 days"),
-            "NCAAF": pd.Timedelta("1 days"),
-            "WNBA":  pd.Timedelta("8 hours"),
-            "MLS":   pd.Timedelta("12 hours"),
-            "default": pd.Timedelta("12 hours"),
-        }
-        def get_embargo_for_sport(sport: str) -> pd.Timedelta:
-            return SPORT_EMBARGO.get(str(sport).upper(), SPORT_EMBARGO["default"])
-        
-        
-        class PurgedGroupTimeSeriesSplit(BaseCrossValidator):
-            """
-            Time-ordered, group-based CV with purge + time embargo.
-        
-            - Groups (e.g., Game_Key) never straddle train/val.
-            - Any group overlapping the validation time window is *purged* from train.
-            - Any group overlapping the extended embargo window around validation is embargoed from train.
-            - Folds are contiguous in time at the group level.
-            """
-        
-            def __init__(self, n_splits=5, embargo=pd.Timedelta("0 hours"), time_values=None, min_val_size=20):
-                if n_splits < 2:
-                    raise ValueError("n_splits must be at least 2")
-                self.n_splits = int(n_splits)
-                self.embargo = pd.Timedelta(embargo)
-                self.time_values = time_values
-                self.min_val_size = int(min_val_size)
-        
-            def get_n_splits(self, X=None, y=None, groups=None):
-                return self.n_splits
-        
-            def split(self, X, y=None, groups=None):
-                if groups is None:
-                    raise ValueError("groups must be provided to split()")
-                if self.time_values is None:
-                    raise ValueError("time_values must be set on the splitter")
-                if len(groups) != len(self.time_values):
-                    raise ValueError("groups and time_values must be aligned to X rows")
-        
-                meta = pd.DataFrame({
-                    "group": np.asarray(groups),
-                    "time":  pd.to_datetime(self.time_values, errors="coerce", utc=True)
-                })
-                if meta["time"].isna().any():
-                    raise ValueError("time_values contain NaT after to_datetime; check your inputs")
-        
-                # one row per group, ordered by start time
-                gmeta = (meta.groupby("group", as_index=False)["time"]
-                            .agg(start="min", end="max")
-                            .sort_values("start")
-                            .reset_index(drop=True))
-        
-                n_groups = len(gmeta)
-                if n_groups < self.n_splits:
-                    self.n_splits = max(2, n_groups)
-        
-                # contiguous group folds
-                fold_sizes = np.full(self.n_splits, n_groups // self.n_splits, dtype=int)
-                fold_sizes[: n_groups % self.n_splits] += 1
-                edges = np.cumsum(fold_sizes)
-        
-                start = 0
-                for _k, stop in enumerate(edges):
-                    val_slice = gmeta.iloc[start:stop]
-                    start = stop
-                    if val_slice.empty:
-                        continue
-        
-                    val_groups = val_slice["group"].to_numpy()
-                    val_start  = val_slice["start"].iloc[0]
-                    val_end    = val_slice["end"].iloc[-1]
-        
-                    # 1) PURGE: overlap with [val_start, val_end]
-                    purge_mask = ~((gmeta["end"] < val_start) | (gmeta["start"] > val_end))
-                    purged_groups = set(gmeta.loc[purge_mask, "group"])
-        
-                    # 2) EMBARGO: overlap with [val_start - embargo, val_end + embargo]
-                    emb_lo = val_start - self.embargo
-                    emb_hi = val_end   + self.embargo
-                    embargo_mask = ~((gmeta["end"] < emb_lo) | (gmeta["start"] > emb_hi))
-                    embargo_groups = set(gmeta.loc[embargo_mask, "group"])
-        
-                    bad_groups   = set(val_groups) | purged_groups | embargo_groups
-                    train_groups = gmeta.loc[~gmeta["group"].isin(bad_groups), "group"].to_numpy()
-        
-                    # map back to row indices
-                    all_groups = meta["group"].to_numpy()
-                    val_idx    = np.flatnonzero(np.isin(all_groups, val_groups))
-                    train_idx  = np.flatnonzero(np.isin(all_groups, train_groups))
-        
-                    # hardening
-                    if len(val_idx) == 0 or len(train_idx) == 0:
-                        continue
-                    if len(val_idx) < self.min_val_size:
-                        continue
-                    if y is not None:
-                        y_arr = np.asarray(y)
-                        if np.unique(y_arr[val_idx]).size < 2:
-                            continue
-        
-                    yield train_idx, val_idx
-        
-        
-     
-        
-        eps = 1e-4  # default probability clip
-        
-        
-        def pos_col_index(est, positive=1):
-            cls = getattr(est, "classes_", None)
-            if cls is None:
-                raise RuntimeError("Estimator has no classes_. Was it fitted?")
-            hits = np.where(cls == positive)[0]
-            if len(hits) == 0:
-                raise RuntimeError(f"Positive class {positive!r} not found in classes_={cls}. Check label encoding.")
-            return int(hits[0])
-        
-        
-        def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-            out = df[cols].copy()
-            for c in cols:
-                col = out[c]
-        
-                # 1) Boo-like → float (True/False/NA → 1.0/0.0/NaN)
-                if is_bool_dtype(col):
-                    out[c] = col.astype("float32")
-                    continue
-        
-                # 2) Strings/objects/categories → c then to_numeric
-                if is_object_dtype(col) or is_string_dtype(col) or str(col.dtype).startswith("category"):
-                    out[c] = col.replace({
-                        'True': 1, 'False': 0, 'true': 1, 'false': 0,
-                        True: 1, False: 0,
-                        '': np.nan, 'none': np.nan, 'None': np.nan,
-                        'NA': np.nan, 'NaN': np.nan
-                    })
-                    out[c] = pd.to_numeric(out[c], errors="coerce")
-                    continue
-        
-                # 3) Everything else → to_numeric safely
-                out[c] = pd.to_numeric(col, errors="coerce")
-        
-            return (out.replace([np.inf, -np.inf], np.nan)
-                       .astype("float32")
-                       .fillna(0.0))
-      
-        # ==== Remove PR_* features for SPREADS only ==================================
-        # Determine market label (use your local variable if you already have one)
-        try:
-            market_label = str(market).lower()  # if you have `market` in scope
-        except NameError:
-            # Fallback: infer from df_market (safe if single market slice)
-            market_label = str(df_market["Market"].iloc[0]).lower() if "Market" in df_market.columns and len(df_market) else ""
-        
-        # Normalize your working feature list name
-        feature_cols = list(features) if "features" in locals() else list(feature_cols)
-        
-  
-        features = feature_cols
-
-        # ============================================================================
-        def auc_safe(y, p):
-            y = np.asarray(y, int)
-            if np.unique(y).size < 2:
-                return np.nan
-            return roc_auc_score(y, p)
-
-
-        # === Build y and mask FIRST ===
-        y_series   = pd.to_numeric(df_market["SHARP_HIT_BOOL"], errors="coerce")
-        valid_mask = y_series.notna()
-        
-        # Work from a masked, reindexed dataframe so .iloc matches X/y
-        df_valid = df_market.loc[valid_mask].reset_index(drop=True)
-        
-        # Final y
-        y_full = y_series.loc[valid_mask].astype(int).to_numpy()
-        
-        # Build X from the masked frame (no extra masking later)
-        X_full = _to_numeric_block(df_valid, feature_cols).to_numpy(np.float32)
-        # Always work off the masked frame with positional indexing
-   
-       
-        # === Build X / y ===
-        
-        
-         # ---- Cheap feature pruning (before any split/CV) --
-      
-        check = [
-            "Was_Line_Resistance_Broken",
-            "Odds_Reversal_Flag",
-            "CrossMarket_Prob_Gap_Exists",
-            "Sharp_Limit_Jump",
-            "Pct_Line_Move_From_Opening",
-        ]
-        
-        for c in check:
-            if c in feature_cols:
-                j = feature_cols.index(c)
-        
-                if isinstance(X_full, pd.DataFrame):
-                    raw = X_full.iloc[:, j]
-                else:
-                    raw = X_full[:, j]
-        
-                col = pd.to_numeric(raw, errors="coerce").to_numpy() if hasattr(raw, "to_numpy") else pd.to_numeric(raw, errors="coerce")
-                finite = np.isfinite(col)
-        
-                st.write(c, {
-                    "n_finite": int(finite.sum()),
-                    "unique_finite": int(np.unique(col[finite]).size) if finite.any() else 0,
-                    "mean_finite": float(np.nanmean(col)) if finite.any() else None,
-                })
-
-
+        # 4) Pre-split pruning (low-info + exact duplicates)
         st.markdown("### 🧹 Feature Pruning (pre-split)")
         
-        Xtmp = X_full
-        cols = list(feature_cols)
-        
-        # ✅ protect these (add more as needed)
         PROTECT = {
             "Sharp_Limit_Jump",
             "Sharp_Time_Score",
@@ -10790,74 +10536,57 @@ def train_sharp_model_from_bq(
             "Outcome_Cover_Prob",
         }
         
-        def _get_col(X, j):
-            return X.iloc[:, j] if isinstance(X, pd.DataFrame) else X[:, j]
-        
-        MIN_NON_NAN = max(25, int(0.002 * len(Xtmp)))  # looser: 0.2% rows or 25
+        MIN_NON_NAN = max(25, int(0.002 * len(X_df)))  # 0.2% or 25
         MIN_UNIQUE  = 2
         
-        keep_idx = []
-        removed = []
+        keep_cols = []
         removed_stats = []
         
-   
-        for j, c in enumerate(cols):
+        for c in list(X_df.columns):
             if c in PROTECT:
-                keep_idx.append(j)
+                keep_cols.append(c)
                 continue
         
-            col = _get_col(Xtmp, j)
-            col = pd.to_numeric(col, errors="coerce")
-
+            col = X_df[c].to_numpy(dtype=np.float32, copy=False)
             finite = np.isfinite(col)
             n_ok = int(finite.sum())
             uniq = int(np.unique(col[finite]).size) if n_ok else 0
         
-            # keep rule
             if (n_ok < MIN_NON_NAN) or (uniq < MIN_UNIQUE):
-                removed.append(c)
                 removed_stats.append((c, n_ok, uniq))
             else:
-                keep_idx.append(j)
+                keep_cols.append(c)
         
-        feature_cols = [cols[j] for j in keep_idx]
-        
-        if isinstance(X_full, pd.DataFrame):
-            X_full = X_full[feature_cols]
-        else:
-            X_full = X_full[:, keep_idx]
-        
-        st.write(f"• Removed low-information features: {len(removed)}")
-        if removed:
-            st.caption(", ".join(removed[:20]) + (" ..." if len(removed) > 20 else ""))
-        
-        # ✅ show WHY they were removed
         if removed_stats:
-            df_removed = pd.DataFrame(removed_stats, columns=["feature", "n_finite", "n_unique"])
-            df_removed = df_removed.sort_values(["n_finite", "n_unique"], ascending=True)
-            st.dataframe(df_removed.head(80))
-
-
+            st.write(f"• Removed low-information features: {len(removed_stats)}")
+            df_removed = pd.DataFrame(removed_stats, columns=["feature", "n_finite", "n_unique"]).sort_values(
+                ["n_finite", "n_unique"], ascending=True
+            )
+            st.dataframe(df_removed.head(80), use_container_width=True)
         
-        # 2) Exact duplicate columns (optional but cheap)
-        df_tmp = pd.DataFrame(X_full, columns=feature_cols)
-        # Transpose, get unique rows (i.e., unique columns pre-transpose)
-        _, uniq_idx = np.unique(df_tmp.T, axis=0, return_index=True)
+        # apply low-info keep
+        X_df = X_df[keep_cols]
+        feature_cols = list(X_df.columns)
+        
+        # exact duplicate columns (keeps ONE copy)
+        arr = X_df.to_numpy(dtype=np.float32, copy=False)
+        _, uniq_idx = np.unique(arr.T, axis=0, return_index=True)
         uniq_idx = np.sort(uniq_idx)
         
-        dup_count = df_tmp.shape[1] - len(uniq_idx)
+        dup_count = arr.shape[1] - len(uniq_idx)
         if dup_count > 0:
             removed_dups = [feature_cols[i] for i in range(len(feature_cols)) if i not in uniq_idx]
             st.write(f"• Removed duplicate features: {dup_count}")
-            if removed_dups:
-                st.caption(", ".join(removed_dups[:20]) + (" ..." if len(removed_dups) > 20 else ""))
-            df_tmp = df_tmp.iloc[:, uniq_idx]
-            feature_cols = list(df_tmp.columns)
+            st.caption(", ".join(removed_dups[:20]) + (" ..." if len(removed_dups) > 20 else ""))
         
-        # Finalize X_full after pruning
-        X_full = df_tmp.to_numpy(dtype=np.float32)
-        features_pruned = tuple(feature_cols)   # 🔒 freeze pruned column names
+        X_df = X_df.iloc[:, uniq_idx]
+        feature_cols = list(X_df.columns)
+        
+        # finalize numeric matrix for selection / training
+        X_full = X_df.to_numpy(dtype=np.float32, copy=False)
+        features_pruned = tuple(feature_cols)
         st.write(f"✅ Final feature count after pruning: {len(feature_cols)}")
+
         
         # Recompute these from df_valid so everything is aligned
         groups_all = df_valid["Game_Key"].astype(str).to_numpy()
