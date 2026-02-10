@@ -10387,6 +10387,77 @@ def train_sharp_model_from_bq(
 
         st.markdown(f"### 📈 Features Used: `{len(features)}`")
 
+        # ============================================
+        # Purged Group Time Series CV
+        # ============================================
+        class PurgedGroupTimeSeriesSplit(BaseCrossValidator):
+            """
+            Time-ordered, group-based CV with purge + embargo.
+            """
+        
+            def __init__(self, n_splits=5, embargo=pd.Timedelta("0 hours"),
+                         time_values=None, min_val_size=20):
+                self.n_splits = int(n_splits)
+                self.embargo = pd.Timedelta(embargo)
+                self.time_values = time_values
+                self.min_val_size = int(min_val_size)
+        
+            def get_n_splits(self, X=None, y=None, groups=None):
+                return self.n_splits
+        
+            def split(self, X, y=None, groups=None):
+                if groups is None:
+                    raise ValueError("groups required")
+                if self.time_values is None:
+                    raise ValueError("time_values required")
+        
+                meta = pd.DataFrame({
+                    "group": np.asarray(groups),
+                    "time": pd.to_datetime(self.time_values, utc=True),
+                })
+        
+                gmeta = (
+                    meta.groupby("group", as_index=False)["time"]
+                    .agg(start="min", end="max")
+                    .sort_values("start")
+                    .reset_index(drop=True)
+                )
+        
+                n_groups = len(gmeta)
+                fold_sizes = np.full(self.n_splits, n_groups // self.n_splits, dtype=int)
+                fold_sizes[: n_groups % self.n_splits] += 1
+                edges = np.cumsum(fold_sizes)
+        
+                start = 0
+                for stop in edges:
+                    val_slice = gmeta.iloc[start:stop]
+                    start = stop
+                    if val_slice.empty:
+                        continue
+        
+                    val_groups = val_slice["group"].to_numpy()
+                    val_start = val_slice["start"].iloc[0]
+                    val_end = val_slice["end"].iloc[-1]
+        
+                    purge_mask = ~((gmeta["end"] < val_start) | (gmeta["start"] > val_end))
+                    purged_groups = set(gmeta.loc[purge_mask, "group"])
+        
+                    emb_lo = val_start - self.embargo
+                    emb_hi = val_end + self.embargo
+                    embargo_mask = ~((gmeta["end"] < emb_lo) | (gmeta["start"] > emb_hi))
+                    embargo_groups = set(gmeta.loc[embargo_mask, "group"])
+        
+                    bad = set(val_groups) | purged_groups | embargo_groups
+                    train_groups = gmeta.loc[~gmeta["group"].isin(bad), "group"].to_numpy()
+        
+                    all_groups = meta["group"].to_numpy()
+                    val_idx = np.flatnonzero(np.isin(all_groups, val_groups))
+                    train_idx = np.flatnonzero(np.isin(all_groups, train_groups))
+        
+                    if len(val_idx) < self.min_val_size or len(train_idx) == 0:
+                        continue
+        
+                    yield train_idx, val_idx
 
 
         # ============================================
