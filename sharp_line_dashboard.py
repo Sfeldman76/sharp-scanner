@@ -2195,13 +2195,13 @@ def holdout_by_percent_groups(
     SPORT_HOLDOUT_PCT = {
         "NFL": 0.10,
         "NCAAF": 0.10,
-        "NBA": 0.12,
+        "NBA": 0.15,
         "WNBA": 0.10,
         "NHL": 0.15,
         "MLB": 0.12,
         "MLS": 0.15,
         "CFL": 0.10,
-        "NCAAB": 0.12,
+        "NCAAB": 0.15,
         "DEFAULT": 0.15,
     }
 
