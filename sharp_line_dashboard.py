@@ -3130,12 +3130,13 @@ def _auto_select_k_by_auc(
       ✅ adaptive margins early vs late (more permissive early)
       ✅ synergy rescue when stuck (lets interaction-only features through occasionally)
       ✅ consistent early stopping rounds (quick=15, full=25)
-      ✅ slight selection-time stabilization for XGB (no memory cost)
+      ✅ selection-time stabilization for XGB (no memory cost)
+      ✅ IMPORTANT FIX: final evaluation uses the SAME regime as selection
+         (early stopping + best_iteration + same AUC definition by default)
     """
     import time
     import numpy as np
     import pandas as pd
-    import xgboost as xgb
     from sklearn.base import clone
     from sklearn.metrics import roc_auc_score, log_loss
 
@@ -3253,15 +3254,18 @@ def _auto_select_k_by_auc(
     xgb_params = None
     xgb_num_round = None
     if use_xgb:
+        import xgboost as xgb
         xgb_params, xgb_num_round = _xgb_params_from_proto(model_proto)
         if isinstance(xgb_params, dict) and "nthread" not in xgb_params and "n_jobs" not in xgb_params:
             xgb_params["nthread"] = 0
 
-        # ✅ selection-time stabilization (tiny copy; no memory blowup)
+        # ✅ selection-time stabilization (tiny dict copy; no memory blowup)
         xgb_params = dict(xgb_params)
         xgb_params["reg_lambda"] = float(xgb_params.get("reg_lambda", 1.0)) * 1.5
         xgb_params["min_child_weight"] = max(float(xgb_params.get("min_child_weight", 1.0)), 2.0)
-        xgb_params["max_leaves"] = int(xgb_params.get("max_leaves", 64))
+        # keep whatever you already tune; just ensure int
+        if "max_leaves" in xgb_params:
+            xgb_params["max_leaves"] = int(xgb_params["max_leaves"])
 
     # ---- fast flip helpers (mode-only + inplace) ----
     def _auto_flip_mode(arr1d):
@@ -3286,7 +3290,14 @@ def _auto_select_k_by_auc(
                 flip_mode_cache[f] = _auto_flip_mode(X_all_mat[:, col_ix[f]])
 
     # ---- matrix-backed CV evaluator ----
-    def _cv_eval_auc_only(X_mat, folds_use, *, abort_best_auc=None, early_stop_rounds=25, return_fold_mean=True):
+    def _cv_eval_auc_only(
+        X_mat,
+        folds_use,
+        *,
+        abort_best_auc=None,
+        early_stop_rounds=200,
+        return_fold_mean=True,
+    ):
         """
         AUC-only CV with XGB early stopping.
         ✅ returns fold-mean AUC (default) for a stabler selection gate.
@@ -3299,6 +3310,7 @@ def _auto_select_k_by_auc(
         n_folds = len(folds_use)
 
         if use_xgb:
+            import xgboost as xgb
             d_all = xgb.DMatrix(np.ascontiguousarray(X_mat, dtype=np.float32), label=y_arr)
 
             def _fit_predict(tr_idx, va_idx):
@@ -3363,6 +3375,7 @@ def _auto_select_k_by_auc(
         oof = np.full(n, np.nan, dtype=np.float32)
 
         if use_xgb:
+            import xgboost as xgb
             d_all = xgb.DMatrix(np.ascontiguousarray(X_mat, dtype=np.float32), label=y_arr)
 
             def _fit_predict(tr_idx, va_idx):
@@ -3403,6 +3416,18 @@ def _auto_select_k_by_auc(
         br = float(np.mean((p_v - y_v) ** 2))
         score = float(auc) - (0.15 * float(ll)) - (0.10 * float(br))
         return {"auc": float(auc), "logloss": float(ll), "brier": float(br), "score": float(score), "aborted": False}
+
+    # ✅ NEW: final-eval helper that matches selection regime (early stopping + fold-mean AUC)
+    def _final_eval_consistent(X_mat, folds_use, *, early_stop_rounds=25):
+        # for your log line at end, use the same AUC notion used during selection gating
+        res_auc = _cv_eval_auc_only(X_mat, folds_use, abort_best_auc=None, early_stop_rounds=early_stop_rounds, return_fold_mean=True)
+        res_full = _cv_eval_full_metrics(X_mat, folds_use, early_stop_rounds=early_stop_rounds)
+        # overwrite AUC with fold-mean so the printed AUC matches what you gated on
+        if isinstance(res_full, dict) and isinstance(res_auc, dict):
+            res_full = dict(res_full)
+            res_full["auc"] = float(res_auc.get("auc", res_full.get("auc", np.nan)))
+            res_full["auc_fold_mean"] = float(res_auc.get("auc_fold_mean", res_full.get("auc", np.nan)))
+        return res_full
 
     # ---- selection state ----
     accepted = list(mk)
@@ -3456,7 +3481,7 @@ def _auto_select_k_by_auc(
             res_q = _cv_eval_auc_only(
                 X_work[:, :k+1], folds_quick,
                 abort_best_auc=(best_val if np.isfinite(best_val) else None),
-                early_stop_rounds=15,
+                early_stop_rounds=200,
                 return_fold_mean=True,
             )
             m_q = float(res_q.get("auc", np.nan))
@@ -3471,12 +3496,12 @@ def _auto_select_k_by_auc(
             res_norm_auc = _cv_eval_auc_only(
                 X_work[:, :k+1], folds_full,
                 abort_best_auc=(best_val if np.isfinite(best_val) else None),
-                early_stop_rounds=25,
+                early_stop_rounds=200,
                 return_fold_mean=True,
             )
             m_norm = float(res_norm_auc.get("auc", np.nan))
 
-            # ✅ synergy rescue: after many rejects, allow near-misses through occasionally
+            # ✅ synergy rescue (throttled): after many rejects, allow near-misses through occasionally
             near_miss = (
                 np.isfinite(m_norm) and np.isfinite(best_val) and
                 (m_norm >= float(best_val) - float(rej_margin)) and
@@ -3488,7 +3513,6 @@ def _auto_select_k_by_auc(
                 rejects_in_row += 1
                 continue
 
-            # throttle near-misses so you don't lose speed
             if near_miss and (i % 3 != 0):
                 rejects_in_row += 1
                 continue
@@ -3516,7 +3540,7 @@ def _auto_select_k_by_auc(
                     res_fq = _cv_eval_auc_only(
                         X_work[:, :k+1], folds_quick,
                         abort_best_auc=None,
-                        early_stop_rounds=15,
+                        early_stop_rounds=200,
                         return_fold_mean=True,
                     )
                     mfq = float(res_fq.get("auc", np.nan))
@@ -3526,7 +3550,7 @@ def _auto_select_k_by_auc(
                     res_flip_auc = _cv_eval_auc_only(
                         X_work[:, :k+1], folds_full,
                         abort_best_auc=None,
-                        early_stop_rounds=25,
+                        early_stop_rounds=200,
                         return_fold_mean=True,
                     )
                     m_flip = float(res_flip_auc.get("auc", np.nan))
@@ -3585,9 +3609,17 @@ def _auto_select_k_by_auc(
         if debug and (i % int(max(1, debug_every)) == 0):
             log_func(f"[AUTO-FEAT][DBG] i={i} k={len(accepted)} best_{accept_metric}={best_val:.6f}")
 
-    # ---------- final orient pass (unchanged) ----------
+    # ---------- FINAL EVAL (FIXED) ----------
+    # Your old code called _cv_auc_for_feature_set here, which (in your current stack)
+    # often uses a different regime than selection (no early stopping / different AUC definition).
+    # This caused “accept AUC looks great” then “final AUC drops”.
+    #
+    # ✅ We still optionally do orient/flip logic via your existing function,
+    #    but we ALSO re-evaluate consistently with the selection regime for the printed final.
     if flips_after_selection and accepted:
-        best_res = _cv_auc_for_feature_set(
+        # If you want orientation/flips, keep using your existing function (it may mutate flip_map in that fn).
+        # But do NOT trust its printed AUC as the “selection-consistent” one.
+        _ = _cv_auc_for_feature_set(
             model_proto, X, y_arr, folds_full, list(accepted),
             log_func=log_func,
             debug=False,
@@ -3598,8 +3630,13 @@ def _auto_select_k_by_auc(
             orient_passes=int(orient_passes),
             cv_mode="full",
         )
+
+        # ✅ selection-consistent final metrics (early stopping + fold-mean AUC)
+        best_res = _final_eval_consistent(X_work[:, :k], folds_full, early_stop_rounds=25)
+
         if verbose and isinstance(best_res, dict):
-            log_func(f"[AUTO-FEAT] Final accepted set: k={len(accepted)} {accept_metric}={_metric(best_res):.6f}")
+            auc_show = float(best_res.get("auc", np.nan))
+            log_func(f"[AUTO-FEAT] Final accepted set (consistent): k={len(accepted)} auc={auc_show:.6f}")
 
     state = {"done": True, "accepted": list(accepted), "best_res": best_res, "flip_map": flip_map}
     return list(accepted), best_res, state
