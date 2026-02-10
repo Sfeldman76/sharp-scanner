@@ -10386,6 +10386,19 @@ def train_sharp_model_from_bq(
             feature_cols = [c for c in feature_cols if not any(x in c for x in drop_like)]
 
         st.markdown(f"### 📈 Features Used: `{len(features)}`")
+        # ============================================
+        # Safe AUC helper
+        # ============================================
+        def auc_safe(y, p):
+            y = np.asarray(y, int)
+            if len(y) == 0:
+                return np.nan
+            if np.unique(y).size < 2:
+                return np.nan
+            try:
+                return roc_auc_score(y, p)
+            except Exception:
+                return np.nan
 
         # ============================================
         # Purged Group Time Series CV
