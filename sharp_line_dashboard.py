@@ -3373,7 +3373,7 @@ def _auto_select_k_by_auc(
                 d_tr = d_all.slice(tr_idx)
                 d_va = d_all.slice(va_idx)
               
-                
+                booster = xgb.train(
                     xgb_params,
                     d_tr,
                     num_boost_round=int(xgb_num_round),
