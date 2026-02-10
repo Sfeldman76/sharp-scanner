@@ -11270,7 +11270,7 @@ def train_sharp_model_from_bq(
             y_train=y_train,
             folds=folds,
             sport_key=sport_key,
-            must_keep=[],
+            must_keep=['PR_Rating_Diff'],
             auc_min_k=None,            # ✅ seed = len(must_keep) only
             use_auc_auto=True,         # ✅ actually select (earned)
             auc_patience=200,
