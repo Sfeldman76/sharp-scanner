@@ -3321,7 +3321,7 @@ def _auto_select_k_by_auc(
                     d_tr,
                     num_boost_round=int(xgb_num_round),
                     evals=[(d_va, "val")],
-                    early_stopping_rounds=int(early_stop_rounds),
+                    early_stopping_rounds=(int(early_stop_rounds) if early_stop_rounds is not None else None),
                     verbose_eval=False,
                 )
                 if hasattr(booster, "best_iteration") and booster.best_iteration is not None:
@@ -3386,7 +3386,7 @@ def _auto_select_k_by_auc(
                     d_tr,
                     num_boost_round=int(xgb_num_round),
                     evals=[(d_va, "val")],
-                    early_stopping_rounds=int(early_stop_rounds),
+                    early_stopping_rounds=(int(early_stop_rounds) if early_stop_rounds is not None else None),
                     verbose_eval=False,
                 )
                 if hasattr(booster, "best_iteration") and booster.best_iteration is not None:
