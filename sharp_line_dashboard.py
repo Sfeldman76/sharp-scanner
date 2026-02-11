@@ -3470,7 +3470,7 @@ def _auto_select_k_by_auc(
         _put_feat_into_col(feat, k)
 
         # ✅ adaptive margins: more permissive early, tighter later
-        rej_margin = 0.0030 if k < max(10, min_k) else 0.0015
+        rej_margin = 0.0020 if k < max(10, min_k) else 0.0015
         quick_margin_auc = rej_margin
         flip_close_margin = rej_margin
 
