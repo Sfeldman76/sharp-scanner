@@ -2466,7 +2466,7 @@ from sklearn.metrics import roc_auc_score
 
 # ------- lightweight corr-pruner (keeps highest-ranked, drops high-corr followers) -------
 def greedy_corr_prune(X: pd.DataFrame, candidates, rank_df: pd.DataFrame,
-                      corr_thresh=0.92, must_keep=None):
+                      corr_thresh=0.85, must_keep=None):
     must_keep = set(must_keep or [])
     C = X.loc[:, candidates].astype(float)
     # order by rank_df (avg_abs_shap desc, then presence desc, then avg_rank asc)
@@ -2562,7 +2562,7 @@ def shap_stability_select(
     y: np.ndarray,
     folds, *,
     topk_per_fold: int = 150,
-    min_presence: float = 0.8,
+    min_presence: float = 0.4,
     max_keep: int | None = None,
     sample_per_fold: int = 4000,
     random_state: int = 42,
@@ -3082,7 +3082,7 @@ def _auto_select_k_by_auc(
     min_k=None,
     max_k=None,
     patience=160,
-    min_improve=1e-5,
+    min_improve=1e-6,
     verbose=True,
     log_func=print,
     debug=True,
@@ -3470,7 +3470,7 @@ def _auto_select_k_by_auc(
         _put_feat_into_col(feat, k)
 
         # ✅ adaptive margins: more permissive early, tighter later
-        rej_margin = 0.0020 if k < max(10, min_k) else 0.0015
+        rej_margin = 0.0015 if k < max(10, min_k) else 0.0010
         quick_margin_auc = rej_margin
         flip_close_margin = rej_margin
 
@@ -3661,7 +3661,7 @@ def select_features_auto(
     corr_global: float = 0.92,
     max_feats_major: int = 160,
     max_feats_small: int = 160,
-    topk_per_fold: int = 50,
+    topk_per_fold: int = 80,
     min_presence: float = 0.40,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
@@ -3670,7 +3670,7 @@ def select_features_auto(
     use_auc_auto: bool = True,
     auc_min_k: int | None = None,
     auc_patience: int = 160,
-    auc_min_improve: float = 1e-5,
+    auc_min_improve: float = 1e-6,
     accept_metric: str = "auc",
     auc_verbose: bool = True,
 
