@@ -15998,6 +15998,35 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
 
 # --- SIMPLE RENDER FLOW (no UI sanitization/purge) ---
 from streamlit_situations_tab import render_current_situations_tab
+import json
+import uuid
+import time
+
+import google.auth
+from google.auth.transport.requests import AuthorizedSession
+from google.cloud import storage
+def read_progress_lines(gcs_client, uri: str, max_lines: int = 200):
+    assert uri.startswith("gs://")
+    rest = uri[5:]
+    bucket_name, path = rest.split("/", 1)
+    blob = gcs_client.bucket(bucket_name).blob(path)
+    if not blob.exists():
+        return []
+    data = blob.download_as_text()
+    lines = [ln for ln in data.splitlines() if ln.strip()]
+    return lines[-max_lines:]
+
+
+def start_job_with_rest(*, job_name: str, region: str, project_id: str, env: dict):
+    creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    session = AuthorizedSession(creds)
+    url = f"https://{region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/{project_id}/jobs/{job_name}:run"
+    env_list = [{"name": k, "value": str(v)} for k, v in env.items()]
+    body = {"overrides": {"containerOverrides": [{"env": env_list}]}}
+    resp = session.post(url, json=body, timeout=30)
+    if resp.status_code >= 300:
+        raise RuntimeError(f"Job run failed: {resp.status_code} {resp.text}")
+    return resp.json()
 # ============================ SIDEBAR + TABS UI ================================
 sport = st.sidebar.radio(
     "Select a League",
@@ -16056,45 +16085,86 @@ else:
     )
 
     # --- If training, pause scanner + stop page from doing anything expensive ---
+
     if st.session_state.get("is_training", False) or st.session_state.get("pause_refresh_lock", False):
         st.info("⏳ Training in progress… scanner/refresh is paused.")
+    
+        progress_uri = st.session_state.get("train_progress_uri")
+        if progress_uri:
+            st.caption(f"Progress: {progress_uri}")
+            gcs = storage.Client()
+            lines = read_progress_lines(gcs, progress_uri, max_lines=200)
+    
+            if lines:
+                # parse last event
+                try:
+                    events = [json.loads(ln) for ln in lines]
+                    last = events[-1]
+                except Exception:
+                    last = {"stage": "parse_error", "msg": lines[-1]}
+    
+                pct = last.get("pct")
+                if pct is not None:
+                    try:
+                        st.progress(max(0.0, min(1.0, float(pct))))
+                    except Exception:
+                        pass
+    
+                st.code("\n".join(lines[-40:]), language="json")
+    
+                stage = last.get("stage")
+                if stage == "done":
+                    st.success("✅ Training complete")
+                    st.session_state["pause_refresh_lock"] = False
+                    st.session_state["is_training"] = False
+                elif stage == "error":
+                    st.error(f"❌ Training error: {last.get('msg')}")
+                    st.session_state["pause_refresh_lock"] = False
+                    st.session_state["is_training"] = False
+            else:
+                st.info("No progress events yet… (job may still be starting)")
+    
+            # keep progress live without running scanner
+            time.sleep(2)
+            st.rerun()
+    
         st.stop()
 
     # ✅ Single train button (unique key per sport + choice)
     train_key = f"train::{sport}::{market_choice}"
 
+  
     if st.button(f"📈 Train {sport} Sharp Model", key=train_key):
         st.session_state["is_training"] = True
-        st.session_state["pause_refresh_lock"] = True  # ✅ pause scanner/refresh during training
-
-        with st.spinner(f"Training {sport} model(s)… this may take several minutes"):
-            try:
-                # If training "All", optionally train timing model once first
-                if market_choice == "All":
-                    train_timing_opportunity_model(sport=label)
-                    markets_to_train = ("h2h", "spreads", "totals")
-                else:
-                    markets_to_train = (market_choice,)
-
-                for mkt in markets_to_train:
-                    st.write(f"— Training market: **{mkt}**")
-                    train_with_champion_wrapper(
-                        sport=label,
-                        market=mkt,
-                        bucket_name=GCS_BUCKET,
-                        log_func=st.write,
-                    )
-
-                st.success("✅ Training complete")
-
-            except Exception as e:
-                st.exception(e)
-
-            finally:
-                st.session_state["pause_refresh_lock"] = False
-                st.session_state["is_training"] = False
-
-        st.stop()  # don’t continue into scanner logic in this run
+        st.session_state["pause_refresh_lock"] = True
+    
+        # --- job config ---
+        PROJECT_ID = "sharplogger"
+        REGION = "us-central1"
+        JOB_NAME = "sharp-train-job"
+        PROGRESS_BUCKET = "sharp-models"
+    
+        exec_id = str(uuid.uuid4())[:8]
+        progress_uri = f"gs://{PROGRESS_BUCKET}/progress/{sport}_{market_choice}_{exec_id}.jsonl"
+    
+        # Store so the page can keep showing progress on reruns
+        st.session_state["train_exec_id"] = exec_id
+        st.session_state["train_progress_uri"] = progress_uri
+        st.session_state["train_sport"] = sport
+        st.session_state["train_market"] = market_choice
+    
+        try:
+            # Trigger backend training (Cloud Run Job)
+            env = {"SPORT": sport, "MARKET": market_choice, "PROGRESS_URI": progress_uri}
+            start_job_with_rest(job_name=JOB_NAME, region=REGION, project_id=PROJECT_ID, env=env)
+            st.success("Training job started 🚀")
+        except Exception as e:
+            st.session_state["pause_refresh_lock"] = False
+            st.session_state["is_training"] = False
+            st.error(f"Failed to start job: {e}")
+            st.stop()
+    
+        st.stop()  # stop here so the rest of the page doesn't run this cycle
 
     # -----------------------------
     # Scanner run (only if not paused)
