@@ -7,11 +7,20 @@ import warnings
 import numpy as np
 
 # Silence noisy numpy warnings in training jobs
-warnings.filterwarnings("ignore", category=RuntimeWarning)
-np.seterr(all="ignore")
 
 # --- HEADLESS STREAMLIT SHIM (must be installed BEFORE importing sharp_line_dashboard) ---
-import os, sys
+import os
+import warnings
+import numpy as np
+import logging
+
+HEADLESS = os.getenv("HEADLESS", "0") == "1"
+
+if HEADLESS:
+    # Silence noisy numpy warnings in training jobs
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
+    np.seterr(all="ignore")
+    logging.getLogger("numpy").setLevel(logging.ERROR)
 from types import SimpleNamespace
 
 # --- HEADLESS STREAMLIT SHIM (install BEFORE importing sharp_line_dashboard) ---
