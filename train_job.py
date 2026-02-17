@@ -37,58 +37,64 @@ def _decorator(func=None, **kwargs):
 import os, sys
 from types import SimpleNamespace
 
+import os, sys
+from types import SimpleNamespace
+
 def install_streamlit_shim(log_func=print):
     class _Ctx:
-        def __init__(self, msg=None):
-            self.msg = msg
-        def __enter__(self):
+        def __init__(self, msg=None): self.msg = msg
+        def __enter__(self): 
             if self.msg:
                 try: log_func(str(self.msg))
                 except Exception: pass
             return self
-        def __exit__(self, exc_type, exc, tb):
-            return False  # don't swallow exceptions
+        def __exit__(self, exc_type, exc, tb): return False
 
     def _log(*args, **kwargs):
         msg = " ".join(str(a) for a in args)
-        try:
-            log_func(msg)
-        except Exception:
-            print(msg, flush=True)
+        try: log_func(msg)
+        except Exception: print(msg, flush=True)
 
     def _noop(*a, **k): return None
 
     def _decorator(func=None, **kwargs):
-        # supports @st.cache_data and @st.cache_data(...)
-        if callable(func):
-            return func
+        if callable(func): return func
         def wrap(fn): return fn
         return wrap
 
     st = SimpleNamespace()
 
+    # ✅ import-time safe calls
+    st.set_page_config = _noop
+
     # basic output
     for name in ("write","info","warning","error","success","markdown","text","caption","title","header","subheader"):
         setattr(st, name, _log)
 
-    # caching decorators used at import-time
+    # caching
     st.cache_data = _decorator
     st.cache_resource = _decorator
 
-    # sidebar + layout objects
+    # sidebar
     st.sidebar = SimpleNamespace(
         write=_log, info=_log, warning=_log, error=_log, success=_log,
         markdown=_log, text=_log, caption=_log,
-        radio=lambda *a, **k: (k.get("options") or [None])[0] if isinstance(k.get("options"), list) else None,
-        selectbox=lambda *a, **k: (k.get("options") or [None])[0] if isinstance(k.get("options"), list) else None,
+        radio=lambda *a, **k: (a[1][0] if len(a) > 1 and isinstance(a[1], list) and a[1] else (k.get("options") or [None])[0]),
+        selectbox=lambda *a, **k: (a[1][0] if len(a) > 1 and isinstance(a[1], list) and a[1] else (k.get("options") or [None])[0]),
         checkbox=lambda *a, **k: k.get("value", False),
         button=lambda *a, **k: False,
     )
 
-    st.columns = lambda n, **k: [SimpleNamespace(write=_log, info=_log, warning=_log, error=_log, success=_log) for _ in range(n)]
+    # layout
+    st.columns = lambda n, **k: [SimpleNamespace(write=_log, markdown=_log) for _ in range(n)]
     st.tabs = lambda labels, **k: [SimpleNamespace() for _ in range(len(labels or []))]
+    st.container = lambda *a, **k: _Ctx()
+    st.expander = lambda *a, **k: _Ctx(a[0] if a else None)
+    st.form = lambda *a, **k: _Ctx(a[0] if a else None)
+    st.spinner = lambda *a, **k: _Ctx(a[0] if a else None)
+    st.status  = lambda *a, **k: _Ctx(a[0] if a else None)
 
-    # widgets (return safe defaults)
+    # widgets
     st.button = lambda *a, **k: False
     st.checkbox = lambda *a, **k: k.get("value", False)
     st.selectbox = lambda *a, **k: (k.get("options") or [None])[0]
@@ -97,21 +103,16 @@ def install_streamlit_shim(log_func=print):
     st.text_input = lambda *a, **k: k.get("value", "")
     st.number_input = lambda *a, **k: k.get("value", 0)
 
-    # ✅ context managers used in your code
-    st.spinner = lambda *a, **k: _Ctx(a[0] if a else None)
-    st.status  = lambda *a, **k: _Ctx(a[0] if a else None)
-    st.expander = lambda *a, **k: _Ctx(a[0] if a else None)
-    st.form = lambda *a, **k: _Ctx(a[0] if a else None)
-
     # misc
     st.progress = _noop
-    st.stop = lambda: (_ for _ in ()).throw(SystemExit)  # raise SystemExit if called
-    st.rerun = lambda: None
+    st.metric = _noop
+    st.empty = lambda *a, **k: SimpleNamespace(write=_log, markdown=_log, text=_log)
+    st.stop = lambda: (_ for _ in ()).throw(SystemExit)
+    st.rerun = _noop
     st.session_state = {}
 
     sys.modules["streamlit"] = st
 
-# Install shim only when running headless training job
 if os.getenv("HEADLESS", "1") == "1":
     install_streamlit_shim(print)
 
