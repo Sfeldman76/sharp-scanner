@@ -16238,7 +16238,7 @@ if not HEADLESS:
             st.stop()
 
      
-       :
+       
         # ✅ Single train button (unique key per sport + choice)
         train_key = f"train::{sport}::{market_choice}"
         
