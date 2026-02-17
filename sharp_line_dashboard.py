@@ -16237,21 +16237,54 @@ if not HEADLESS:
 
             st.stop()
 
+     
+       :
         # ✅ Single train button (unique key per sport + choice)
         train_key = f"train::{sport}::{market_choice}"
-
+        
         if st.button(f"📈 Train {sport} Sharp Model", key=train_key):
+            # lock UI immediately
             st.session_state["is_training"] = True
             st.session_state["pause_refresh_lock"] = True
-
+        
+            PROJECT_ID = "sharplogger"
+            REGION = "us-east4"
+            JOB_NAME = "sharp-train-job"
+            PROGRESS_BUCKET = "sharp-models"
+            MODEL_BUCKET = "sharp-models"
+        
             exec_id = str(uuid.uuid4())[:8]
-            progress_uri = f"gs://{PROGRESS_BUCKET}/train-progress/{sport}/{market_choice}/{exec_id}.json"
-
+        
+            progress_uri = (
+                f"gs://{PROGRESS_BUCKET}/train-progress/"
+                f"{sport}/{market_choice}/{exec_id}.jsonl"
+            )
+        
             st.session_state["train_exec_id"] = exec_id
             st.session_state["train_progress_uri"] = progress_uri
             st.session_state["train_sport"] = sport
             st.session_state["train_market"] = market_choice
-
+            st.session_state["train_execution_name"] = None  # will be filled if returned
+        
+            # ✅ Optional but highly recommended: write an immediate "bootstrap" line
+            # so your progress panel has something to show on the very next rerun.
+            try:
+                gcs = storage.Client()
+                bucket_name = progress_uri[5:].split("/", 1)[0]
+                path = progress_uri[5:].split("/", 1)[1]
+                blob = gcs.bucket(bucket_name).blob(path)
+                blob.upload_from_string(
+                    json.dumps({
+                        "stage": "queued",
+                        "pct": 0.01,
+                        "msg": f"Queued job exec_id={exec_id} sport={sport} market={market_choice}",
+                        "ts": time.time()
+                    }) + "\n",
+                    content_type="application/json"
+                )
+            except Exception:
+                pass  # don't block job start if this fails
+        
             try:
                 env = {
                     "SPORT": sport,
@@ -16261,31 +16294,26 @@ if not HEADLESS:
                     "MODEL_BUCKET": MODEL_BUCKET,
                     "HEADLESS": "1",
                 }
-
+        
                 run_resp = start_job_with_rest(
                     job_name=JOB_NAME,
                     region=REGION,
                     project_id=PROJECT_ID,
                     env=env,
                 )
-
+        
                 exec_name = _extract_execution_name(run_resp)
-                st.session_state["train_execution_name"] = exec_name  # may be None
-
-                if exec_name:
-                    st.caption(f"Cloud Run execution: {exec_name.split('/')[-1]}")
-                else:
-                    st.caption("Cloud Run execution: (not returned yet)")
-
-                st.success("Training job started 🚀")
-
+                st.session_state["train_execution_name"] = exec_name
+        
+                # ✅ Immediately jump into the "training in progress" view
+                st.rerun()
+        
             except Exception as e:
                 st.session_state["pause_refresh_lock"] = False
                 st.session_state["is_training"] = False
                 st.error(f"Failed to start job: {e}")
                 st.stop()
-
-            st.stop()
+     
 
         # -----------------------------
         # Scanner run (only if not paused)
