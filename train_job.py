@@ -34,24 +34,61 @@ def _decorator(func=None, **kwargs):
         return fn
     return wrap
 
-def install_streamlit_shim(log_func=print):
-    st = _Null(log_func, "st")
+import os, sys
+from types import SimpleNamespace
 
-    # Real decorator attributes so @st.cache_* doesn't break
+def install_streamlit_shim(log_func=print):
+    class _Ctx:
+        def __init__(self, msg=None):
+            self.msg = msg
+        def __enter__(self):
+            if self.msg:
+                try: log_func(str(self.msg))
+                except Exception: pass
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False  # don't swallow exceptions
+
+    def _log(*args, **kwargs):
+        msg = " ".join(str(a) for a in args)
+        try:
+            log_func(msg)
+        except Exception:
+            print(msg, flush=True)
+
+    def _noop(*a, **k): return None
+
+    def _decorator(func=None, **kwargs):
+        # supports @st.cache_data and @st.cache_data(...)
+        if callable(func):
+            return func
+        def wrap(fn): return fn
+        return wrap
+
+    st = SimpleNamespace()
+
+    # basic output
+    for name in ("write","info","warning","error","success","markdown","text","caption","title","header","subheader"):
+        setattr(st, name, _log)
+
+    # caching decorators used at import-time
     st.cache_data = _decorator
     st.cache_resource = _decorator
 
-    # Sidebar object
-    st.sidebar = _Null(log_func, "st.sidebar")
+    # sidebar + layout objects
+    st.sidebar = SimpleNamespace(
+        write=_log, info=_log, warning=_log, error=_log, success=_log,
+        markdown=_log, text=_log, caption=_log,
+        radio=lambda *a, **k: (k.get("options") or [None])[0] if isinstance(k.get("options"), list) else None,
+        selectbox=lambda *a, **k: (k.get("options") or [None])[0] if isinstance(k.get("options"), list) else None,
+        checkbox=lambda *a, **k: k.get("value", False),
+        button=lambda *a, **k: False,
+    )
 
-    # Common structural helpers Streamlit returns
-    st.columns = lambda n, **k: [_Null(log_func, f"st.columns[{i}]") for i in range(n)]
-    st.tabs = lambda labels, **k: [_Null(log_func, f"st.tabs[{i}]") for i in range(len(labels or []))]
-    st.container = lambda **k: _Null(log_func, "st.container")
-    st.expander = lambda *a, **k: _Null(log_func, "st.expander")
-    st.form = lambda *a, **k: _Null(log_func, "st.form")
+    st.columns = lambda n, **k: [SimpleNamespace(write=_log, info=_log, warning=_log, error=_log, success=_log) for _ in range(n)]
+    st.tabs = lambda labels, **k: [SimpleNamespace() for _ in range(len(labels or []))]
 
-    # Widgets: return defaults so code paths don’t explode
+    # widgets (return safe defaults)
     st.button = lambda *a, **k: False
     st.checkbox = lambda *a, **k: k.get("value", False)
     st.selectbox = lambda *a, **k: (k.get("options") or [None])[0]
@@ -60,13 +97,21 @@ def install_streamlit_shim(log_func=print):
     st.text_input = lambda *a, **k: k.get("value", "")
     st.number_input = lambda *a, **k: k.get("value", 0)
 
-    # Session state
+    # ✅ context managers used in your code
+    st.spinner = lambda *a, **k: _Ctx(a[0] if a else None)
+    st.status  = lambda *a, **k: _Ctx(a[0] if a else None)
+    st.expander = lambda *a, **k: _Ctx(a[0] if a else None)
+    st.form = lambda *a, **k: _Ctx(a[0] if a else None)
+
+    # misc
+    st.progress = _noop
+    st.stop = lambda: (_ for _ in ()).throw(SystemExit)  # raise SystemExit if called
+    st.rerun = lambda: None
     st.session_state = {}
 
-    # Install into sys.modules so "import streamlit as st" gets this shim
     sys.modules["streamlit"] = st
 
-# Install shim BEFORE any other imports that might import streamlit
+# Install shim only when running headless training job
 if os.getenv("HEADLESS", "1") == "1":
     install_streamlit_shim(print)
 
