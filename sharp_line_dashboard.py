@@ -16313,7 +16313,7 @@ if not HEADLESS:
                 st.session_state["is_training"] = False
                 st.error(f"Failed to start job: {e}")
                 st.stop()
-     
+             st.stop()
 
         # -----------------------------
         # Scanner run (only if not paused)
