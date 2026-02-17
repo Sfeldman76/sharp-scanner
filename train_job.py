@@ -40,27 +40,26 @@ def _require_env(name: str) -> str:
 
 
 def main():
-    # Optional run id (never hard-fail)
     run_id = os.environ.get("TRAIN_RUN_ID") or str(uuid.uuid4())[:8]
-    
 
-    # Required for progress + UI
-    progress_uri = _require_env("PROGRESS_URI")
-
-    # Training selectors
+    # Training selectors (define these BEFORE progress_uri)
     sport = os.environ.get("SPORT", "NBA")
     market = os.environ.get("MARKET", "All")
 
-    # Where models get written (your training code should use this)
     bucket = os.environ.get("MODEL_BUCKET", "sharp-models")
+
+    progress_uri = os.environ.get("PROGRESS_URI")
+    if not progress_uri:
+        progress_uri = f"gs://{bucket}/train-progress/{sport}/{market}/{run_id}.json"
+        os.environ["PROGRESS_URI"] = progress_uri  # optional but handy for debugging
 
     gcs = storage.Client()
     pw = ProgressWriter(progress_uri, gcs)
 
-    # Make a log function compatible with training code that expects log_func(str)
     log_func = lambda msg: pw.emit("log", str(msg))
 
     pw.emit("start", f"Training start run_id={run_id} sport={sport} market={market}", pct=0.0)
+    
 
     try:
         if market == "All":
