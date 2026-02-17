@@ -3,3 +3,5 @@ steps:
   args: ['build', '-f', 'Dockerfile.job', '-t', 'gcr.io/sharplogger/sharp-train-job:latest', '.']
 images:
 - 'gcr.io/sharplogger/sharp-train-job:latest'
+options:
+  logging: CLOUD_LOGGING_ONLY
