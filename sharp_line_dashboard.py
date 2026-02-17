@@ -16134,29 +16134,44 @@ else:
     train_key = f"train::{sport}::{market_choice}"
 
   
+  
     if st.button(f"📈 Train {sport} Sharp Model", key=train_key):
         st.session_state["is_training"] = True
         st.session_state["pause_refresh_lock"] = True
     
-        # --- job config ---
         PROJECT_ID = "sharplogger"
-        REGION = "us-central1"
+        REGION = "us-east4"
         JOB_NAME = "sharp-train-job"
         PROGRESS_BUCKET = "sharp-models"
+        MODEL_BUCKET = "sharp-models"
     
         exec_id = str(uuid.uuid4())[:8]
-        progress_uri = f"gs://{PROGRESS_BUCKET}/progress/{sport}_{market_choice}_{exec_id}.jsonl"
     
-        # Store so the page can keep showing progress on reruns
+        progress_uri = (
+            f"gs://{PROGRESS_BUCKET}/train-progress/"
+            f"{sport}/{market_choice}/{exec_id}.json"
+        )
+    
         st.session_state["train_exec_id"] = exec_id
         st.session_state["train_progress_uri"] = progress_uri
         st.session_state["train_sport"] = sport
         st.session_state["train_market"] = market_choice
     
         try:
-            # Trigger backend training (Cloud Run Job)
-            env = {"SPORT": sport, "MARKET": market_choice, "PROGRESS_URI": progress_uri}
-            start_job_with_rest(job_name=JOB_NAME, region=REGION, project_id=PROJECT_ID, env=env)
+            env = {
+                "SPORT": sport,
+                "MARKET": market_choice,
+                "TRAIN_RUN_ID": exec_id,
+                "PROGRESS_URI": progress_uri,
+                "MODEL_BUCKET": MODEL_BUCKET,
+                "HEADLESS": "1",
+            }
+            start_job_with_rest(
+                job_name=JOB_NAME,
+                region=REGION,
+                project_id=PROJECT_ID,
+                env=env,
+            )
             st.success("Training job started 🚀")
         except Exception as e:
             st.session_state["pause_refresh_lock"] = False
@@ -16164,8 +16179,7 @@ else:
             st.error(f"Failed to start job: {e}")
             st.stop()
     
-        st.stop()  # stop here so the rest of the page doesn't run this cycle
-
+        st.stop()
     # -----------------------------
     # Scanner run (only if not paused)
     # -----------------------------
