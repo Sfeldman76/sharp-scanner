@@ -34,67 +34,103 @@ def _decorator(func=None, **kwargs):
         return fn
     return wrap
 
-import os, sys
-from types import SimpleNamespace
 
-import os, sys
+
+import sys
 from types import SimpleNamespace
 
 def install_streamlit_shim(log_func=print):
-    class _Ctx:
-        def __init__(self, msg=None): self.msg = msg
-        def __enter__(self): 
-            if self.msg:
-                try: log_func(str(self.msg))
-                except Exception: pass
-            return self
-        def __exit__(self, exc_type, exc, tb): return False
-
     def _log(*args, **kwargs):
         msg = " ".join(str(a) for a in args)
-        try: log_func(msg)
-        except Exception: print(msg, flush=True)
+        try:
+            log_func(msg)
+        except Exception:
+            print(msg, flush=True)
 
-    def _noop(*a, **k): return None
+    def _noop(*a, **k):
+        return None
 
-    def _decorator(func=None, **kwargs):
-        if callable(func): return func
-        def wrap(fn): return fn
+    # Supports both @st.cache_data and @st.cache_data(...)
+    def _decorator(fn=None, **kwargs):
+        if callable(fn):
+            return fn
+        def wrap(f):
+            return f
         return wrap
+
+    class _Ctx:
+        """Context manager returned by st.status / st.spinner in headless mode."""
+        def __init__(self, label=""):
+            self.label = label
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def write(self, *a, **k): _log(*a)
+        def markdown(self, *a, **k): _log(*a)
+        def update(self, *a, **k): return None
+        def success(self, *a, **k): _log(*a)
+        def warning(self, *a, **k): _log(*a)
+        def error(self, *a, **k): _log(*a)
+
+    class _Null:
+        """Null object to absorb arbitrary streamlit calls/chains."""
+        def __init__(self, prefix="st"):
+            self._prefix = prefix
+
+        def __call__(self, *args, **kwargs):
+            # swallow calls like st.markdown("x")
+            return None
+
+        def __getattr__(self, name):
+            # allow st.sidebar.markdown(...) chains
+            return _Null(prefix=f"{self._prefix}.{name}")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
 
     st = SimpleNamespace()
 
-    # ✅ import-time safe calls
+    # Page + common outputs
     st.set_page_config = _noop
+    st.title = _log
+    st.header = _log
+    st.subheader = _log
+    st.write = _log
+    st.info = _log
+    st.warning = _log
+    st.error = _log
+    st.success = _log
+    st.markdown = _log
+    st.text = _log
+    st.caption = _log
+    st.json = _log
+    st.code = _log
 
-    # basic output
-    for name in ("write","info","warning","error","success","markdown","text","caption","title","header","subheader"):
-        setattr(st, name, _log)
+    # Sidebar
+    st.sidebar = _Null(prefix="st.sidebar")
+    st.sidebar.markdown = _log
+    st.sidebar.write = _log
+    st.sidebar.info = _log
+    st.sidebar.warning = _log
+    st.sidebar.error = _log
+    st.sidebar.success = _log
 
-    # caching
-    st.cache_data = _decorator
-    st.cache_resource = _decorator
+    # Layout helpers
+    st.columns = lambda n, **k: [_Null(prefix=f"st.columns[{i}]") for i in range(n)]
+    st.tabs = lambda labels, **k: [_Null(prefix=f"st.tabs[{i}]") for i in range(len(labels or []))]
+    st.container = lambda **k: _Null(prefix="st.container")
+    st.expander = lambda *a, **k: _Null(prefix="st.expander")
+    st.form = lambda *a, **k: _Null(prefix="st.form")
+    st.empty = lambda: _Null(prefix="st.empty")
 
-    # sidebar
-    st.sidebar = SimpleNamespace(
-        write=_log, info=_log, warning=_log, error=_log, success=_log,
-        markdown=_log, text=_log, caption=_log,
-        radio=lambda *a, **k: (a[1][0] if len(a) > 1 and isinstance(a[1], list) and a[1] else (k.get("options") or [None])[0]),
-        selectbox=lambda *a, **k: (a[1][0] if len(a) > 1 and isinstance(a[1], list) and a[1] else (k.get("options") or [None])[0]),
-        checkbox=lambda *a, **k: k.get("value", False),
-        button=lambda *a, **k: False,
-    )
-
-    # layout
-    st.columns = lambda n, **k: [SimpleNamespace(write=_log, markdown=_log) for _ in range(n)]
-    st.tabs = lambda labels, **k: [SimpleNamespace() for _ in range(len(labels or []))]
-    st.container = lambda *a, **k: _Ctx()
-    st.expander = lambda *a, **k: _Ctx(a[0] if a else None)
-    st.form = lambda *a, **k: _Ctx(a[0] if a else None)
-    st.spinner = lambda *a, **k: _Ctx(a[0] if a else None)
-    st.status  = lambda *a, **k: _Ctx(a[0] if a else None)
-
-    # widgets
+    # Widgets (return defaults)
     st.button = lambda *a, **k: False
     st.checkbox = lambda *a, **k: k.get("value", False)
     st.selectbox = lambda *a, **k: (k.get("options") or [None])[0]
@@ -102,16 +138,22 @@ def install_streamlit_shim(log_func=print):
     st.slider = lambda *a, **k: k.get("value", 0)
     st.text_input = lambda *a, **k: k.get("value", "")
     st.number_input = lambda *a, **k: k.get("value", 0)
+    st.date_input = lambda *a, **k: k.get("value", None)
 
-    # misc
+    # Progress/status/spinner
     st.progress = _noop
-    st.metric = _noop
-    st.empty = lambda *a, **k: SimpleNamespace(write=_log, markdown=_log, text=_log)
-    st.stop = lambda: (_ for _ in ()).throw(SystemExit)
-    st.rerun = _noop
+    st.status = lambda *a, **k: _Ctx(label=str(a[0]) if a else "")
+    st.spinner = lambda *a, **k: _Ctx(label=str(a[0]) if a else "")
+
+    # Cache decorators
+    st.cache_data = _decorator
+    st.cache_resource = _decorator
+
+    # Session state
     st.session_state = {}
 
     sys.modules["streamlit"] = st
+    return st
 
 if os.getenv("HEADLESS", "1") == "1":
     install_streamlit_shim(print)
