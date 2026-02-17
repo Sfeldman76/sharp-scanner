@@ -4,38 +4,36 @@ import sys
 import uuid
 import traceback
 import warnings
-import numpy as np
-
-# Silence noisy numpy warnings in training jobs
-
-# --- HEADLESS STREAMLIT SHIM (must be installed BEFORE importing sharp_line_dashboard) ---
-import os
-import warnings
-import numpy as np
 import logging
 
 HEADLESS = os.getenv("HEADLESS", "0") == "1"
 
+# -----------------------------------------------------------------------------
+# Headless warning / numeric noise control (ONLY in Cloud Run Jobs / headless)
+# -----------------------------------------------------------------------------
 if HEADLESS:
-    # Silence noisy numpy warnings in training jobs
-    warnings.filterwarnings("ignore", category=RuntimeWarning)
-    np.seterr(all="ignore")
+    # Keep this narrow so we don't hide real numerical bugs
+    warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
+    warnings.filterwarnings("ignore", message="Degrees of freedom <= 0", category=RuntimeWarning)
+
+    # Optional: if you still get spam from other libs, you can broaden *slightly*:
+    # warnings.filterwarnings("ignore", category=RuntimeWarning, module=r"numpy\.lib\.nanfunctions")
+
+    # Numpy doesn't log via logging; this is mostly harmless, but doesn't hurt.
     logging.getLogger("numpy").setLevel(logging.ERROR)
-from types import SimpleNamespace
 
-# --- HEADLESS STREAMLIT SHIM (install BEFORE importing sharp_line_dashboard) ---
-import os, sys, types
-
-import os, sys, types
-
+# -----------------------------------------------------------------------------
+# HEADLESS STREAMLIT SHIM (MUST be installed BEFORE importing sharp_line_dashboard)
+# -----------------------------------------------------------------------------
 def install_streamlit_shim(log_func=print):
     import types
 
     class _Ctx:
+        """No-op context manager for st.status/st.spinner/st.expander/etc."""
         def __enter__(self): return self
         def __exit__(self, exc_type, exc, tb): return False
 
-        # common status/spinner methods
+        # Common "status" methods
         def write(self, *a, **k): return None
         def markdown(self, *a, **k): return None
         def code(self, *a, **k): return None
@@ -57,20 +55,23 @@ def install_streamlit_shim(log_func=print):
             return None
 
         def __getattr__(self, name):
-            # context manager style APIs
-            if name in ("spinner", "status", "expander", "container", "form"):
-                return lambda *a, **k: _Ctx()
-            if name == "empty":
-                return lambda *a, **k: _Null(prefix=f"{self._prefix}.empty")
-            if name == "tabs":
-                return lambda labels, **k: [_Null(prefix=f"{self._prefix}.tabs[{i}]") for i in range(len(labels or []))]
-            if name == "columns":
-                return lambda n, **k: [_Null(prefix=f"{self._prefix}.columns[{i}]") for i in range(int(n or 0))]
-
+            # Return another absorber for any attribute access
             return _Null(prefix=f"{self._prefix}.{name}")
 
         def __enter__(self): return self
         def __exit__(self, exc_type, exc, tb): return False
+
+    class _Progress:
+        """
+        Streamlit progress bar object.
+        Streamlit supports:
+          pb = st.progress(0)
+          pb.progress(50)
+          pb.empty()
+        """
+        def progress(self, *a, **k): return None
+        def update(self, *a, **k): return None
+        def empty(self): return None
 
     # decorator shim: supports @st.cache_data and @st.cache_data(...)
     def _decorator(fn=None, **kwargs):
@@ -80,10 +81,10 @@ def install_streamlit_shim(log_func=print):
             return f
         return wrap
 
-    # create a module-like object (important: some libs expect a module)
+    # Create a real module object (some libs check types.ModuleType)
     st = types.ModuleType("streamlit")
 
-    # common outputs
+    # Common outputs
     st.write = lambda *a, **k: None
     st.markdown = lambda *a, **k: None
     st.text = lambda *a, **k: None
@@ -101,7 +102,10 @@ def install_streamlit_shim(log_func=print):
     st.subheader = lambda *a, **k: None
     st.set_page_config = lambda *a, **k: None
 
-    # layout
+    # Progress (IMPORTANT: avoid crashes at st.progress(0))
+    st.progress = lambda *a, **k: _Progress()
+
+    # Layout
     st.tabs = lambda labels, **k: [_Null(prefix=f"st.tabs[{i}]") for i in range(len(labels or []))]
     st.columns = lambda n, **k: [_Null(prefix=f"st.columns[{i}]") for i in range(int(n or 0))]
     st.container = lambda **k: _Ctx()
@@ -109,11 +113,11 @@ def install_streamlit_shim(log_func=print):
     st.form = lambda *a, **k: _Ctx()
     st.empty = lambda: _Null(prefix="st.empty")
 
-    # status/spinner
+    # Status / spinner
     st.status = lambda *a, **k: _Ctx()
     st.spinner = lambda *a, **k: _Ctx()
 
-    # widgets (safe defaults)
+    # Widgets (safe defaults)
     st.button = lambda *a, **k: False
     st.checkbox = lambda *a, **k: k.get("value", False)
     st.selectbox = lambda *a, **k: (k.get("options") or [None])[0]
@@ -125,26 +129,33 @@ def install_streamlit_shim(log_func=print):
     st.metric = lambda *a, **k: None
     st.plotly_chart = lambda *a, **k: None
 
-    # caching
+    # Caching
     st.cache_data = _decorator
     st.cache_resource = _decorator
 
-    # session state + sidebar (IMPORTANT: sidebar must NOT call back into st init)
+    # Session state + sidebar
     st.session_state = {}
     st.sidebar = _Null(prefix="st.sidebar")
 
-    # catch-all: if code calls st.something_unexpected, return a _Null chain
-    def __getattr__(name):
-        return getattr(st, name, _Null(prefix=f"st.{name}"))
-    st.__getattr__ = __getattr__  # type: ignore[attr-defined]
+    # SAFE module-level __getattr__ fallback (DO NOT call getattr(st, ...) here -> recursion)
+    def _module_getattr(name):
+        d = st.__dict__
+        if name in d:
+            return d[name]
+        return _Null(prefix=f"st.{name}")
 
+    st.__getattr__ = _module_getattr  # type: ignore[attr-defined]
+
+    # Make `import streamlit as st` resolve to this shim
     sys.modules["streamlit"] = st
     return st
 
-HEADLESS = os.getenv("HEADLESS", "0") == "1"
 if HEADLESS:
     install_streamlit_shim()
 
+# -----------------------------------------------------------------------------
+# Normal imports (after shim)
+# -----------------------------------------------------------------------------
 from google.cloud import storage
 from progress import ProgressWriter
 
