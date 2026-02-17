@@ -11,7 +11,27 @@ from train_sharp_model_from_bq_extracted import (
     train_timing_model_for_market,
 )
 
+from types import SimpleNamespace
 
+def _headless_st(log_func):
+    def _log(*args, **kwargs):
+        msg = " ".join(str(a) for a in args)
+        log_func(msg)
+
+    # minimal subset you commonly use
+    return SimpleNamespace(
+        write=_log,
+        info=_log,
+        warning=_log,
+        error=_log,
+        success=_log,
+        markdown=_log,
+        text=_log,
+        caption=_log,
+        progress=lambda *a, **k: None,
+        status=lambda *a, **k: SimpleNamespace(__enter__=lambda s: s, __exit__=lambda *x: None, write=_log),
+        session_state={},  # prevent attribute errors if referenced
+    )
 def _require_env(name: str) -> str:
     v = os.environ.get(name)
     if not v:
