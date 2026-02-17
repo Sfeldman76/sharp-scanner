@@ -4,158 +4,94 @@ import sys
 import uuid
 import traceback
 
-class _Null:
-    def __init__(self, log_func=print, prefix=""):
-        self._log_func = log_func
-        self._prefix = prefix
 
-    def __call__(self, *args, **kwargs):
-        # Allows calls like st.markdown("x") without crashing
-        return None
+# --- HEADLESS STREAMLIT SHIM (must be installed BEFORE importing sharp_line_dashboard) ---
+import os, sys
+from types import SimpleNamespace
 
-    def __getattr__(self, name):
-        # Allows chained calls like st.sidebar.markdown(...)
-        return _Null(self._log_func, prefix=f"{self._prefix}.{name}" if self._prefix else name)
+class _Ctx:
+    """A no-op context manager that also swallows common Streamlit 'status' methods."""
+    def __init__(self, log_func=print):
+        self._log = log_func
 
     def __enter__(self):
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, exc_type, exc, tb):
         return False
 
-def _decorator(func=None, **kwargs):
-    # Supports both:
-    #   @st.cache_data
-    # and:
-    #   @st.cache_data(ttl=3600)
-    if callable(func):
-        return func
-    def wrap(fn):
-        return fn
-    return wrap
+    # Streamlit status-like API
+    def write(self, *a, **k): return None
+    def markdown(self, *a, **k): return None
+    def code(self, *a, **k): return None
+    def json(self, *a, **k): return None
+    def dataframe(self, *a, **k): return None
+    def table(self, *a, **k): return None
+    def success(self, *a, **k): return None
+    def info(self, *a, **k): return None
+    def warning(self, *a, **k): return None
+    def error(self, *a, **k): return None
+    def update(self, *a, **k): return None
 
+class _NullStreamlit:
+    """
+    Object that absorbs any Streamlit calls in headless mode.
+    - Any function call returns None (or a _Ctx for context manager functions).
+    - Any attribute access returns another callable absorber.
+    """
+    def __init__(self, log_func=print):
+        self._log = log_func
+        self.session_state = {}  # behave like Streamlit session_state
+        self.sidebar = self      # sidebar.* should also work
 
+        # decorator shims
+        self.cache_data = self._decorator
+        self.cache_resource = self._decorator
 
-import sys
-from types import SimpleNamespace
-
-def install_streamlit_shim(log_func=print):
-    def _log(*args, **kwargs):
-        msg = " ".join(str(a) for a in args)
-        try:
-            log_func(msg)
-        except Exception:
-            print(msg, flush=True)
-
-    def _noop(*a, **k):
-        return None
-
-    # Supports both @st.cache_data and @st.cache_data(...)
-    def _decorator(fn=None, **kwargs):
-        if callable(fn):
+    def _decorator(self, func=None, **kwargs):
+        # Supports both @st.cache_data and @st.cache_data(...)
+        if callable(func):
+            return func
+        def wrap(fn):
             return fn
-        def wrap(f):
-            return f
         return wrap
 
-    class _Ctx:
-        """Context manager returned by st.status / st.spinner in headless mode."""
-        def __init__(self, label=""):
-            self.label = label
+    def __getattr__(self, name):
+        # Context manager style APIs
+        if name in ("spinner", "expander", "container", "form"):
+            return lambda *a, **k: _Ctx(self._log)
 
-        def __enter__(self):
-            return self
+        # st.status() returns an object with .write/.update etc.
+        if name == "status":
+            return lambda *a, **k: _Ctx(self._log)
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
+        # Most layout builders return context-ish objects
+        if name == "tabs":
+            return lambda labels, **k: [_Ctx(self._log) for _ in range(len(labels or []))]
+        if name == "columns":
+            return lambda n, **k: [_Ctx(self._log) for _ in range(int(n or 0))]
 
-        def write(self, *a, **k): _log(*a)
-        def markdown(self, *a, **k): _log(*a)
-        def update(self, *a, **k): return None
-        def success(self, *a, **k): _log(*a)
-        def warning(self, *a, **k): _log(*a)
-        def error(self, *a, **k): _log(*a)
+        # Any other attribute becomes a callable no-op
+        return lambda *a, **k: None
 
-    class _Null:
-        """Null object to absorb arbitrary streamlit calls/chains."""
-        def __init__(self, prefix="st"):
-            self._prefix = prefix
+    # allow st(...) calls (rare)
+    def __call__(self, *a, **k):
+        return None
 
-        def __call__(self, *args, **kwargs):
-            # swallow calls like st.markdown("x")
-            return None
+def install_streamlit_shim(log_func=print):
+    st = _NullStreamlit(log_func=log_func)
 
-        def __getattr__(self, name):
-            # allow st.sidebar.markdown(...) chains
-            return _Null(prefix=f"{self._prefix}.{name}")
+    # Make "import streamlit as st" work
+    shim_module = SimpleNamespace(**{"__dict__": {}, **st.__dict__})
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    st = SimpleNamespace()
-
-    # Page + common outputs
-    st.set_page_config = _noop
-    st.title = _log
-    st.header = _log
-    st.subheader = _log
-    st.write = _log
-    st.info = _log
-    st.warning = _log
-    st.error = _log
-    st.success = _log
-    st.markdown = _log
-    st.text = _log
-    st.caption = _log
-    st.json = _log
-    st.code = _log
-
-    # Sidebar
-    st.sidebar = _Null(prefix="st.sidebar")
-    st.sidebar.markdown = _log
-    st.sidebar.write = _log
-    st.sidebar.info = _log
-    st.sidebar.warning = _log
-    st.sidebar.error = _log
-    st.sidebar.success = _log
-
-    # Layout helpers
-    st.columns = lambda n, **k: [_Null(prefix=f"st.columns[{i}]") for i in range(n)]
-    st.tabs = lambda labels, **k: [_Null(prefix=f"st.tabs[{i}]") for i in range(len(labels or []))]
-    st.container = lambda **k: _Null(prefix="st.container")
-    st.expander = lambda *a, **k: _Null(prefix="st.expander")
-    st.form = lambda *a, **k: _Null(prefix="st.form")
-    st.empty = lambda: _Null(prefix="st.empty")
-
-    # Widgets (return defaults)
-    st.button = lambda *a, **k: False
-    st.checkbox = lambda *a, **k: k.get("value", False)
-    st.selectbox = lambda *a, **k: (k.get("options") or [None])[0]
-    st.radio = lambda *a, **k: (k.get("options") or [None])[0]
-    st.slider = lambda *a, **k: k.get("value", 0)
-    st.text_input = lambda *a, **k: k.get("value", "")
-    st.number_input = lambda *a, **k: k.get("value", 0)
-    st.date_input = lambda *a, **k: k.get("value", None)
-
-    # Progress/status/spinner
-    st.progress = _noop
-    st.status = lambda *a, **k: _Ctx(label=str(a[0]) if a else "")
-    st.spinner = lambda *a, **k: _Ctx(label=str(a[0]) if a else "")
-
-    # Cache decorators
-    st.cache_data = _decorator
-    st.cache_resource = _decorator
-
-    # Session state
-    st.session_state = {}
-
+    # But easiest: set sys.modules["streamlit"] to an object with attributes
     sys.modules["streamlit"] = st
     return st
 
-if os.getenv("HEADLESS", "1") == "1":
+
+# Install shim BEFORE importing anything that imports streamlit (sharp_line_dashboard)
+HEADLESS = os.getenv("HEADLESS", "0") == "1"
+if HEADLESS:
     install_streamlit_shim(print)
 
 from google.cloud import storage
