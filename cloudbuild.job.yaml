@@ -1,6 +1,7 @@
 steps:
 - name: 'gcr.io/cloud-builders/docker'
   args: ['build', '-f', 'Dockerfile.job', '-t', 'gcr.io/sharplogger/sharp-train-job:latest', '.']
+  
 images:
 - 'gcr.io/sharplogger/sharp-train-job:latest'
 options:
