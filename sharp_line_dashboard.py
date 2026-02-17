@@ -16098,6 +16098,8 @@ def execution_state(exec_obj: dict) -> str:
 
 # ============================ SIDEBAR + TABS UI ================================
 # IMPORTANT: Do NOT execute Streamlit UI at import-time inside Cloud Run training jobs.
+# ============================ SIDEBAR + TABS UI ================================
+# IMPORTANT: Do NOT execute Streamlit UI at import-time inside Cloud Run training jobs.
 if not HEADLESS:
 
     # ---- constants used in BOTH start + polling paths ----
@@ -16141,227 +16143,215 @@ if not HEADLESS:
     if sport == "General":
         st.title("🎯 Sharp Scanner Dashboard")
         st.write("Use the sidebar to select a league and begin scanning or training models.")
+        st.stop()
 
-    else:
-        st.title(f"🏟️ {sport} Sharp Scanner")
+    # === LEAGUE PAGES ===
+    st.title(f"🏟️ {sport} Sharp Scanner")
 
-        # Always safe; never KeyError; also ensures key isn't None
-        scanner_key = scanner_widget_keys.get(sport, f"run_{str(sport).lower()}_scanner")
+    # Always safe; never KeyError; also ensures key isn't None
+    scanner_key = scanner_widget_keys.get(sport, f"run_{str(sport).lower()}_scanner")
 
-        run_scanner = st.checkbox(
-            f"Run {sport} Scanner",
-            key=scanner_key,
-            value=True,
-        )
+    run_scanner = st.checkbox(
+        f"Run {sport} Scanner",
+        key=scanner_key,
+        value=True,
+    )
 
-        label = sport
+    label = sport
 
-        sport_key = SPORTS.get(sport)
-        if not sport_key:
-            st.error(f"Unknown sport selection: {sport!r}")
-            st.stop()
+    sport_key = SPORTS.get(sport)
+    if not sport_key:
+        st.error(f"Unknown sport selection: {sport!r}")
+        st.stop()
 
-        market_choice = st.sidebar.selectbox(
-            "Train which market?",
-            ["All", "spreads", "h2h", "totals"],
-            key=f"train_market_choice_{sport}",
-        )
+    market_choice = st.sidebar.selectbox(
+        "Train which market?",
+        ["All", "spreads", "h2h", "totals"],
+        key=f"train_market_choice_{sport}",
+    )
 
-        # --- If training, pause scanner + stop page from doing anything expensive ---
-        if st.session_state.get("is_training", False) or st.session_state.get("pause_refresh_lock", False):
-            st.info("⏳ Training in progress… scanner/refresh is paused.")
+    # --- If training, pause scanner + stop page from doing anything expensive ---
+    if st.session_state.get("is_training", False) or st.session_state.get("pause_refresh_lock", False):
+        st.info("⏳ Training in progress… scanner/refresh is paused.")
 
-            exec_name = st.session_state.get("train_execution_name")
-            if exec_name:
-                try:
-                    exec_obj = get_execution_with_rest(execution_name=exec_name, region=REGION)
-                    state = execution_state(exec_obj)
-                    st.write(f"**Cloud Run status:** {state}")
-
-                    exec_id = exec_name.split("/")[-1]
-                    st.markdown(
-                        f"[Open execution in Cloud Console]"
-                        f"(https://console.cloud.google.com/run/jobs/executions/details/{REGION}/{exec_id}?project={PROJECT_ID})"
-                    )
-
-                    if state in ("SUCCEEDED", "FAILED"):
-                        if state == "SUCCEEDED":
-                            st.success("✅ Cloud Run execution succeeded")
-                        else:
-                            st.error("❌ Cloud Run execution failed (check logs)")
-                        # unlock UI even if progress file didn't finalize
-                        st.session_state["pause_refresh_lock"] = False
-                        st.session_state["is_training"] = False
-
-                except Exception as e:
-                    st.warning(f"Could not fetch Cloud Run status yet: {e}")
-            else:
-                st.info("Cloud Run execution id not available yet (job may still be starting).")
-
-            progress_uri = st.session_state.get("train_progress_uri")
-            if progress_uri:
-                st.caption(f"Progress: {progress_uri}")
-                gcs = storage.Client()
-                lines = read_progress_lines(gcs, progress_uri, max_lines=200)
-
-                if lines:
-                    try:
-                        events = [json.loads(ln) for ln in lines]
-                        last = events[-1]
-                    except Exception:
-                        last = {"stage": "parse_error", "msg": lines[-1]}
-
-                    pct = last.get("pct")
-                    if pct is not None:
-                        try:
-                            st.progress(max(0.0, min(1.0, float(pct))))
-                        except Exception:
-                            pass
-
-                    st.code("\n".join(lines[-40:]), language="json")
-
-                    stage = last.get("stage")
-                    if stage == "done":
-                        st.success("✅ Training complete")
-                        st.session_state["pause_refresh_lock"] = False
-                        st.session_state["is_training"] = False
-                    elif stage == "error":
-                        st.error(f"❌ Training error: {last.get('msg')}")
-                        st.session_state["pause_refresh_lock"] = False
-                        st.session_state["is_training"] = False
-                else:
-                    st.info("No progress events yet… (job may still be starting)")
-
-                time.sleep(2)
-                st.rerun()
-
-            st.stop()
-
-     
-       
-        # ✅ Single train button (unique key per sport + choice)
-        train_key = f"train::{sport}::{market_choice}"
-        
-        if st.button(f"📈 Train {sport} Sharp Model", key=train_key):
-            # lock UI immediately
-            st.session_state["is_training"] = True
-            st.session_state["pause_refresh_lock"] = True
-        
-            PROJECT_ID = "sharplogger"
-            REGION = "us-east4"
-            JOB_NAME = "sharp-train-job"
-            PROGRESS_BUCKET = "sharp-models"
-            MODEL_BUCKET = "sharp-models"
-        
-            exec_id = str(uuid.uuid4())[:8]
-        
-            progress_uri = (
-                f"gs://{PROGRESS_BUCKET}/train-progress/"
-                f"{sport}/{market_choice}/{exec_id}.jsonl"
-            )
-        
-            st.session_state["train_exec_id"] = exec_id
-            st.session_state["train_progress_uri"] = progress_uri
-            st.session_state["train_sport"] = sport
-            st.session_state["train_market"] = market_choice
-            st.session_state["train_execution_name"] = None  # will be filled if returned
-        
-            # ✅ Optional but highly recommended: write an immediate "bootstrap" line
-            # so your progress panel has something to show on the very next rerun.
+        exec_name = st.session_state.get("train_execution_name")
+        if exec_name:
             try:
-                gcs = storage.Client()
-                bucket_name = progress_uri[5:].split("/", 1)[0]
-                path = progress_uri[5:].split("/", 1)[1]
-                blob = gcs.bucket(bucket_name).blob(path)
-                blob.upload_from_string(
-                    json.dumps({
-                        "stage": "queued",
-                        "pct": 0.01,
-                        "msg": f"Queued job exec_id={exec_id} sport={sport} market={market_choice}",
-                        "ts": time.time()
-                    }) + "\n",
-                    content_type="application/json"
+                exec_obj = get_execution_with_rest(execution_name=exec_name, region=REGION)
+                state = execution_state(exec_obj)
+                st.write(f"**Cloud Run status:** {state}")
+
+                exec_id = exec_name.split("/")[-1]
+                # Console URL that reliably opens the execution list filtered by job.
+                st.markdown(
+                    f"[Open Cloud Run job executions]"
+                    f"(https://console.cloud.google.com/run/jobs/details/{REGION}/{JOB_NAME}/executions?project={PROJECT_ID})"
                 )
-            except Exception:
-                pass  # don't block job start if this fails
-        
-            try:
-                env = {
-                    "SPORT": sport,
-                    "MARKET": market_choice,
-                    "TRAIN_RUN_ID": exec_id,
-                    "PROGRESS_URI": progress_uri,
-                    "MODEL_BUCKET": MODEL_BUCKET,
-                    "HEADLESS": "1",
-                }
-        
-                run_resp = start_job_with_rest(
-                    job_name=JOB_NAME,
-                    region=REGION,
-                    project_id=PROJECT_ID,
-                    env=env,
-                )
-        
-                exec_name = _extract_execution_name(run_resp)
-                st.session_state["train_execution_name"] = exec_name
-        
-                # ✅ Immediately jump into the "training in progress" view
-                st.rerun()
-        
+                st.caption(f"Execution: {exec_id}")
+
+                if state in ("SUCCEEDED", "FAILED"):
+                    if state == "SUCCEEDED":
+                        st.success("✅ Cloud Run execution succeeded")
+                    else:
+                        st.error("❌ Cloud Run execution failed (check logs)")
+                    st.session_state["pause_refresh_lock"] = False
+                    st.session_state["is_training"] = False
+
             except Exception as e:
-                st.session_state["pause_refresh_lock"] = False
-                st.session_state["is_training"] = False
-                st.error(f"Failed to start job: {e}")
-                st.stop()
-             st.stop()
-
-        # -----------------------------
-        # Scanner run (only if not paused)
-        # -----------------------------
-        if run_scanner and not st.session_state.get("pause_refresh_lock", False):
-            # call your scanner logic here
-            pass
+                st.warning(f"Could not fetch Cloud Run status yet: {e}")
         else:
-            if st.session_state.get("pause_refresh_lock", False):
-                st.info("⏸️ Scanner paused during training.")
+            st.info("Cloud Run execution id not available yet (job may still be starting).")
 
-        conflicting = [
-            k for k, v in scanner_widget_keys.items()
-            if k != sport and bool(st.session_state.get(v, False)) is True
-        ]
+        progress_uri = st.session_state.get("train_progress_uri")
+        if progress_uri:
+            st.caption(f"Progress: {progress_uri}")
+            gcs = storage.Client()
+            lines = read_progress_lines(gcs, progress_uri, max_lines=200)
 
-        if conflicting:
-            st.warning(f"⚠️ Please disable other scanners before running {sport}: {conflicting}")
-        elif run_scanner:
-            scan_tab, analysis_tab, power_tab, situation_tab = st.tabs(
-                ["📡 Live Scanner", "📈 Backtest Analysis", "🏆 Power Ratings", "📚 Situation DB"]
+            if lines:
+                try:
+                    events = [json.loads(ln) for ln in lines]
+                    last = events[-1]
+                except Exception:
+                    last = {"stage": "parse_error", "msg": lines[-1]}
+
+                pct = last.get("pct")
+                if pct is not None:
+                    try:
+                        st.progress(max(0.0, min(1.0, float(pct))))
+                    except Exception:
+                        pass
+
+                st.code("\n".join(lines[-40:]), language="json")
+
+                stage = last.get("stage")
+                if stage == "done":
+                    st.success("✅ Training complete")
+                    st.session_state["pause_refresh_lock"] = False
+                    st.session_state["is_training"] = False
+                elif stage == "error":
+                    st.error(f"❌ Training error: {last.get('msg')}")
+                    st.session_state["pause_refresh_lock"] = False
+                    st.session_state["is_training"] = False
+            else:
+                st.info("No progress events yet… (job may still be starting)")
+
+            time.sleep(2)
+            st.rerun()
+
+        st.stop()
+
+    # ✅ Single train button (unique key per sport + choice)
+    train_key = f"train::{sport}::{market_choice}"
+
+    if st.button(f"📈 Train {sport} Sharp Model", key=train_key):
+        # lock UI immediately
+        st.session_state["is_training"] = True
+        st.session_state["pause_refresh_lock"] = True
+
+        exec_id = str(uuid.uuid4())[:8]
+
+        progress_uri = (
+            f"gs://{PROGRESS_BUCKET}/train-progress/"
+            f"{sport}/{market_choice}/{exec_id}.jsonl"
+        )
+
+        st.session_state["train_exec_id"] = exec_id
+        st.session_state["train_progress_uri"] = progress_uri
+        st.session_state["train_sport"] = sport
+        st.session_state["train_market"] = market_choice
+        st.session_state["train_execution_name"] = None
+
+        # Bootstrap progress line so the very next rerun shows something
+        try:
+            gcs = storage.Client()
+            bucket_name = progress_uri[5:].split("/", 1)[0]
+            path = progress_uri[5:].split("/", 1)[1]
+            blob = gcs.bucket(bucket_name).blob(path)
+            blob.upload_from_string(
+                json.dumps({
+                    "stage": "queued",
+                    "pct": 0.01,
+                    "msg": f"Queued job exec_id={exec_id} sport={sport} market={market_choice}",
+                    "ts": time.time()
+                }) + "\n",
+                content_type="application/json"
+            )
+        except Exception:
+            pass
+
+        try:
+            env = {
+                "SPORT": sport,
+                "MARKET": market_choice,
+                "TRAIN_RUN_ID": exec_id,
+                "PROGRESS_URI": progress_uri,
+                "MODEL_BUCKET": MODEL_BUCKET,
+                "HEADLESS": "1",
+            }
+
+            run_resp = start_job_with_rest(
+                job_name=JOB_NAME,
+                region=REGION,
+                project_id=PROJECT_ID,
+                env=env,
             )
 
-            with scan_tab:
-                render_scanner_tab(label=label, sport_key=sport_key, container=scan_tab)
+            exec_name = _extract_execution_name(run_resp)
+            st.session_state["train_execution_name"] = exec_name
 
-            with analysis_tab:
-                render_sharp_signal_analysis_tab(
-                    tab=analysis_tab, sport_label=label, sport_key_api=sport_key
-                )
+            st.rerun()
+            st.stop()
 
-            with power_tab:
-                client = bigquery.Client(project=PROJECT_ID, location="us")
-                render_power_ranking_tab(
-                    tab=power_tab,
-                    sport_label=label,
-                    sport_key_api=sport_key,
-                    bq_client=client,
-                    show_edges=False,
-                )
+        except Exception as e:
+            st.session_state["pause_refresh_lock"] = False
+            st.session_state["is_training"] = False
+            st.error(f"Failed to start job: {e}")
+            st.stop()
 
-            with situation_tab:
-                try:
-                    render_current_situations_tab(selected_sport=sport)
-                except Exception as e:
-                    st.error(f"Situations tab error: {e}")
+    # -----------------------------
+    # Scanner run (only if not paused)
+    # -----------------------------
+    if run_scanner and not st.session_state.get("pause_refresh_lock", False):
+        # call your scanner logic here
+        pass
+    else:
+        if st.session_state.get("pause_refresh_lock", False):
+            st.info("⏸️ Scanner paused during training.")
 
+    conflicting = [
+        k for k, v in scanner_widget_keys.items()
+        if k != sport and bool(st.session_state.get(v, False)) is True
+    ]
 
+    if conflicting:
+        st.warning(f"⚠️ Please disable other scanners before running {sport}: {conflicting}")
+    elif run_scanner:
+        scan_tab, analysis_tab, power_tab, situation_tab = st.tabs(
+            ["📡 Live Scanner", "📈 Backtest Analysis", "🏆 Power Ratings", "📚 Situation DB"]
+        )
 
+        with scan_tab:
+            render_scanner_tab(label=label, sport_key=sport_key, container=scan_tab)
 
+        with analysis_tab:
+            render_sharp_signal_analysis_tab(
+                tab=analysis_tab, sport_label=label, sport_key_api=sport_key
+            )
+
+        with power_tab:
+            client = bigquery.Client(project=PROJECT_ID, location="us")
+            render_power_ranking_tab(
+                tab=power_tab,
+                sport_label=label,
+                sport_key_api=sport_key,
+                bq_client=client,
+                show_edges=False,
+            )
+
+        with situation_tab:
+            try:
+                render_current_situations_tab(selected_sport=sport)
+            except Exception as e:
+                st.error(f"Situations tab error: {e}")
 
