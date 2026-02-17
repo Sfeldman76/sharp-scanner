@@ -26,137 +26,120 @@ from types import SimpleNamespace
 # --- HEADLESS STREAMLIT SHIM (install BEFORE importing sharp_line_dashboard) ---
 import os, sys, types
 
-class _Ctx:
-    """No-op context manager that swallows common Streamlit status/spinner APIs."""
-    def __enter__(self): return self
-    def __exit__(self, exc_type, exc, tb): return False
+import os, sys, types
 
-    # status-like API
-    def write(self, *a, **k): return None
-    def markdown(self, *a, **k): return None
-    def code(self, *a, **k): return None
-    def json(self, *a, **k): return None
-    def dataframe(self, *a, **k): return None
-    def table(self, *a, **k): return None
-    def success(self, *a, **k): return None
-    def info(self, *a, **k): return None
-    def warning(self, *a, **k): return None
-    def error(self, *a, **k): return None
-    def update(self, *a, **k): return None
+def install_streamlit_shim(log_func=print):
+    import types
 
-def _decorator(func=None, **kwargs):
-    # Supports @st.cache_data and @st.cache_data(...)
-    if callable(func):
-        return func
-    def wrap(fn):
-        return fn
-    return wrap
+    class _Ctx:
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
 
-class _NullStreamlit:
-    """
-    Absorbs any Streamlit calls in headless mode.
-    - Unknown attrs return callables that don't crash.
-    - Context-managers return _Ctx.
-    - Widgets return safe defaults.
-    """
-    def __init__(self):
-        self.session_state = {}
-        self.cache_data = _decorator
-        self.cache_resource = _decorator
+        # common status/spinner methods
+        def write(self, *a, **k): return None
+        def markdown(self, *a, **k): return None
+        def code(self, *a, **k): return None
+        def json(self, *a, **k): return None
+        def dataframe(self, *a, **k): return None
+        def table(self, *a, **k): return None
+        def success(self, *a, **k): return None
+        def info(self, *a, **k): return None
+        def warning(self, *a, **k): return None
+        def error(self, *a, **k): return None
+        def update(self, *a, **k): return None
 
-        # sidebar is its own proxy, but shares session_state
-        self.sidebar = _NullSidebar(self.session_state)
+    class _Null:
+        """Absorb any chained streamlit calls: st.x.y().z ..."""
+        def __init__(self, prefix="st"):
+            self._prefix = prefix
 
-    # --- Explicit common APIs (no-op) ---
-    def set_page_config(self, *a, **k): return None
-    def stop(self): return None
-    def rerun(self): return None
+        def __call__(self, *a, **k):
+            return None
 
-    def write(self, *a, **k): return None
-    def markdown(self, *a, **k): return None
-    def code(self, *a, **k): return None
-    def json(self, *a, **k): return None
-    def dataframe(self, *a, **k): return None
-    def table(self, *a, **k): return None
-    def metric(self, *a, **k): return None
-    def plotly_chart(self, *a, **k): return None
-    def pyplot(self, *a, **k): return None
-    def altair_chart(self, *a, **k): return None
-    def progress(self, *a, **k): return None
+        def __getattr__(self, name):
+            # context manager style APIs
+            if name in ("spinner", "status", "expander", "container", "form"):
+                return lambda *a, **k: _Ctx()
+            if name == "empty":
+                return lambda *a, **k: _Null(prefix=f"{self._prefix}.empty")
+            if name == "tabs":
+                return lambda labels, **k: [_Null(prefix=f"{self._prefix}.tabs[{i}]") for i in range(len(labels or []))]
+            if name == "columns":
+                return lambda n, **k: [_Null(prefix=f"{self._prefix}.columns[{i}]") for i in range(int(n or 0))]
 
-    def title(self, *a, **k): return None
-    def header(self, *a, **k): return None
-    def subheader(self, *a, **k): return None
-    def info(self, *a, **k): return None
-    def warning(self, *a, **k): return None
-    def error(self, *a, **k): return None
-    def success(self, *a, **k): return None
-    def caption(self, *a, **k): return None
-    def text(self, *a, **k): return None
+            return _Null(prefix=f"{self._prefix}.{name}")
 
-    # --- Context managers ---
-    def spinner(self, *a, **k): return _Ctx()
-    def status(self, *a, **k): return _Ctx()
-    def container(self, *a, **k): return _Ctx()
-    def expander(self, *a, **k): return _Ctx()
-    def form(self, *a, **k): return _Ctx()
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
 
-    # --- Layout builders ---
-    def columns(self, n, **k):
-        try:
-            n = int(n)
-        except Exception:
-            n = 0
-        return [_Ctx() for _ in range(n)]
+    # decorator shim: supports @st.cache_data and @st.cache_data(...)
+    def _decorator(fn=None, **kwargs):
+        if callable(fn):
+            return fn
+        def wrap(f):
+            return f
+        return wrap
 
-    def tabs(self, labels, **k):
-        labels = labels or []
-        return [_Ctx() for _ in range(len(labels))]
+    # create a module-like object (important: some libs expect a module)
+    st = types.ModuleType("streamlit")
 
-    def empty(self):
-        return _Ctx()
+    # common outputs
+    st.write = lambda *a, **k: None
+    st.markdown = lambda *a, **k: None
+    st.text = lambda *a, **k: None
+    st.caption = lambda *a, **k: None
+    st.code = lambda *a, **k: None
+    st.json = lambda *a, **k: None
+    st.dataframe = lambda *a, **k: None
+    st.table = lambda *a, **k: None
+    st.info = lambda *a, **k: None
+    st.warning = lambda *a, **k: None
+    st.error = lambda *a, **k: None
+    st.success = lambda *a, **k: None
+    st.title = lambda *a, **k: None
+    st.header = lambda *a, **k: None
+    st.subheader = lambda *a, **k: None
+    st.set_page_config = lambda *a, **k: None
 
-    # --- Widgets: safe defaults ---
-    def button(self, *a, **k): return False
-    def checkbox(self, *a, **k): return k.get("value", False)
+    # layout
+    st.tabs = lambda labels, **k: [_Null(prefix=f"st.tabs[{i}]") for i in range(len(labels or []))]
+    st.columns = lambda n, **k: [_Null(prefix=f"st.columns[{i}]") for i in range(int(n or 0))]
+    st.container = lambda **k: _Ctx()
+    st.expander = lambda *a, **k: _Ctx()
+    st.form = lambda *a, **k: _Ctx()
+    st.empty = lambda: _Null(prefix="st.empty")
 
-    def selectbox(self, *a, **k):
-        opts = k.get("options") or (a[1] if len(a) > 1 else None) or []
-        return opts[0] if opts else None
+    # status/spinner
+    st.status = lambda *a, **k: _Ctx()
+    st.spinner = lambda *a, **k: _Ctx()
 
-    def radio(self, *a, **k):
-        opts = k.get("options") or (a[1] if len(a) > 1 else None) or []
-        return opts[0] if opts else None
+    # widgets (safe defaults)
+    st.button = lambda *a, **k: False
+    st.checkbox = lambda *a, **k: k.get("value", False)
+    st.selectbox = lambda *a, **k: (k.get("options") or [None])[0]
+    st.radio = lambda *a, **k: (k.get("options") or [None])[0]
+    st.slider = lambda *a, **k: k.get("value", 0)
+    st.text_input = lambda *a, **k: k.get("value", "")
+    st.number_input = lambda *a, **k: k.get("value", 0)
+    st.date_input = lambda *a, **k: k.get("value", None)
+    st.metric = lambda *a, **k: None
+    st.plotly_chart = lambda *a, **k: None
 
-    def slider(self, *a, **k): return k.get("value", 0)
-    def text_input(self, *a, **k): return k.get("value", "")
-    def number_input(self, *a, **k): return k.get("value", 0)
-    def date_input(self, *a, **k): return k.get("value", None)
+    # caching
+    st.cache_data = _decorator
+    st.cache_resource = _decorator
 
-    def __getattr__(self, name):
-        # Anything else: return a callable no-op so st.<new_api>() never crashes
-        def _noop(*a, **k): return None
-        return _noop
+    # session state + sidebar (IMPORTANT: sidebar must NOT call back into st init)
+    st.session_state = {}
+    st.sidebar = _Null(prefix="st.sidebar")
 
-class _NullSidebar(_NullStreamlit):
-    def __init__(self, shared_session_state):
-        super().__init__()
-        self.session_state = shared_session_state  # share same dict
+    # catch-all: if code calls st.something_unexpected, return a _Null chain
+    def __getattr__(name):
+        return getattr(st, name, _Null(prefix=f"st.{name}"))
+    st.__getattr__ = __getattr__  # type: ignore[attr-defined]
 
-def install_streamlit_shim():
-    st_obj = _NullStreamlit()
-
-    # Install as a real module
-    mod = types.ModuleType("streamlit")
-    for attr in dir(st_obj):
-        if not attr.startswith("__"):
-            setattr(mod, attr, getattr(st_obj, attr))
-    # Also expose session_state + sidebar (important)
-    mod.session_state = st_obj.session_state
-    mod.sidebar = st_obj.sidebar
-
-    sys.modules["streamlit"] = mod
-    return mod
+    sys.modules["streamlit"] = st
+    return st
 
 HEADLESS = os.getenv("HEADLESS", "0") == "1"
 if HEADLESS:
