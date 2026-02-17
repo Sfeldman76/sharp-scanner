@@ -2,6 +2,8 @@
 import os, sys, uuid, traceback
 from types import SimpleNamespace
 
+
+
 def _install_streamlit_shim(log_func=print):
     def _log(*args, **kwargs):
         msg = " ".join(str(a) for a in args)
@@ -11,8 +13,12 @@ def _install_streamlit_shim(log_func=print):
             print(msg, flush=True)
 
     def _noop(*a, **k): return None
-    def _decorator(*a, **k):
-        def wrap(fn): return fn
+
+    def _decorator(func=None, **dkwargs):
+        if callable(func):
+            return func
+        def wrap(fn):
+            return fn
         return wrap
 
     st = SimpleNamespace(
@@ -29,23 +35,36 @@ def _install_streamlit_shim(log_func=print):
         json=_log,
         text=_log,
         caption=_log,
+
         cache_data=_decorator,
         cache_resource=_decorator,
+
         session_state={},
+
+        # common things dashboards reference at import-time
+        sidebar=SimpleNamespace(
+            write=_log, info=_log, warning=_log, error=_log,
+            selectbox=lambda *a, **k: k.get("index", 0),
+            radio=lambda *a, **k: k.get("index", 0),
+            checkbox=lambda *a, **k: k.get("value", False),
+        ),
+
         columns=lambda n, **k: [SimpleNamespace() for _ in range(n)],
         progress=_noop,
-        status=lambda *a, **k: SimpleNamespace(
-            __enter__=lambda s: s,
-            __exit__=lambda *x: None,
-            write=_log,
-        ),
+        status=lambda *a, **k: SimpleNamespace(__enter__=lambda s: s, __exit__=lambda *x: None, write=_log),
+
+        # prevent accidental hard-fails
+        button=lambda *a, **k: False,
+        selectbox=lambda *a, **k: (k.get("options") or [None])[0],
+        radio=lambda *a, **k: (k.get("options") or [None])[0],
+        checkbox=lambda *a, **k: k.get("value", False),
     )
 
     sys.modules["streamlit"] = st
 
-# Install shim BEFORE any other imports that might import streamlit
 if os.getenv("HEADLESS", "1") == "1":
     _install_streamlit_shim(print)
+# Install shim BEFORE any other imports that might import streamlit
 
 from google.cloud import storage
 from progress import ProgressWriter
