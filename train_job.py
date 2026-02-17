@@ -22,6 +22,7 @@ def _require_env(name: str) -> str:
 def main():
     # Optional run id (never hard-fail)
     run_id = os.environ.get("TRAIN_RUN_ID") or str(uuid.uuid4())[:8]
+    
 
     # Required for progress + UI
     progress_uri = _require_env("PROGRESS_URI")
