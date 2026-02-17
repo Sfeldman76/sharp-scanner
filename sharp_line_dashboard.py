@@ -16019,6 +16019,36 @@ def read_progress_lines(gcs_client, uri: str, max_lines: int = 200):
     lines = [ln for ln in data.splitlines() if ln.strip()]
     return lines[-max_lines:]
 
+import re
+import google.auth
+from google.auth.transport.requests import AuthorizedSession
+
+def _extract_execution_name(run_resp: dict) -> str | None:
+    """
+    Cloud Run Jobs :run returns an Execution object or a response containing its name.
+    Try a few known shapes safely.
+    """
+    if not isinstance(run_resp, dict):
+        return None
+
+    # common places
+    for key in ("name", "execution", "executionName"):
+        v = run_resp.get(key)
+        if isinstance(v, str) and "/executions/" in v:
+            return v
+
+    # sometimes nested
+    resp = run_resp.get("response")
+    if isinstance(resp, dict):
+        v = resp.get("name")
+        if isinstance(v, str) and "/executions/" in v:
+            return v
+
+    # fallback: regex scan all string values
+    blob = str(run_resp)
+    m = re.search(r"namespaces/[^\"']+/executions/[^\"']+", blob)
+    return m.group(0) if m else None
+
 
 def start_job_with_rest(*, job_name: str, region: str, project_id: str, env: dict):
     creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
@@ -16030,6 +16060,62 @@ def start_job_with_rest(*, job_name: str, region: str, project_id: str, env: dic
     if resp.status_code >= 300:
         raise RuntimeError(f"Job run failed: {resp.status_code} {resp.text}")
     return resp.json()
+
+
+def get_execution_with_rest(*, execution_name: str, region: str):
+    """
+    execution_name example: namespaces/sharplogger/executions/sharp-train-job-7shn8
+    """
+    creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    session = AuthorizedSession(creds)
+    url = f"https://{region}-run.googleapis.com/apis/run.googleapis.com/v1/{execution_name}"
+    resp = session.get(url, timeout=20)
+    if resp.status_code >= 300:
+        raise RuntimeError(f"Execution GET failed: {resp.status_code} {resp.text}")
+    return resp.json()
+
+
+def execution_state(exec_obj: dict) -> str:
+    """
+    Cloud Run Execution typically has status.conditions with types like 'Completed'
+    and a 'state' field in some versions. We normalize to RUNNING/SUCCEEDED/FAILED/UNKNOWN.
+    """
+    if not isinstance(exec_obj, dict):
+        return "UNKNOWN"
+
+    # direct state sometimes present
+    st = exec_obj.get("status", {}).get("state") or exec_obj.get("state")
+    if isinstance(st, str) and st:
+        s = st.upper()
+        if "SUCC" in s:
+            return "SUCCEEDED"
+        if "FAIL" in s:
+            return "FAILED"
+        if "RUN" in s or "EXEC" in s:
+            return "RUNNING"
+
+    # conditions are more consistent
+    conds = exec_obj.get("status", {}).get("conditions") or []
+    if isinstance(conds, list):
+        # look for Completed
+        for c in conds:
+            if c.get("type") == "Completed":
+                if c.get("status") == "True":
+                    return "SUCCEEDED"
+                if c.get("status") == "False":
+                    # if reason indicates failure
+                    reason = (c.get("reason") or "").lower()
+                    if "fail" in reason or "error" in reason:
+                        return "FAILED"
+                    # could still be running
+                    return "RUNNING"
+
+    # fallback: if it has completion time
+    done = exec_obj.get("status", {}).get("completionTime")
+    if done:
+        return "SUCCEEDED"
+
+    return "RUNNING"  # default optimistic
 
 
 # ============================ SIDEBAR + TABS UI ================================
@@ -16102,7 +16188,34 @@ if not HEADLESS:
         # --- If training, pause scanner + stop page from doing anything expensive ---
         if st.session_state.get("is_training", False) or st.session_state.get("pause_refresh_lock", False):
             st.info("⏳ Training in progress… scanner/refresh is paused.")
-
+            exec_name = st.session_state.get("train_execution_name")
+            if exec_name:
+                try:
+                    exec_obj = get_execution_with_rest(execution_name=exec_name, region=REGION)
+                    state = execution_state(exec_obj)
+                    st.write(f"**Cloud Run status:** {state}")
+            
+                    # Optional: show a Console link
+                    exec_id = exec_name.split("/")[-1]
+                    st.markdown(
+                        f"[Open execution in Cloud Console]"
+                        f"(https://console.cloud.google.com/run/jobs/executions/details/us-east4/{exec_id}?project=sharplogger)"
+                    )
+            
+                    if state in ("SUCCEEDED", "FAILED"):
+                        # If execution ended but progress file didn't yet flip, we still unlock UI
+                        if state == "SUCCEEDED":
+                            st.success("✅ Cloud Run execution succeeded")
+                        else:
+                            st.error("❌ Cloud Run execution failed (check logs)")
+            
+                        st.session_state["pause_refresh_lock"] = False
+                        st.session_state["is_training"] = False
+            
+                except Exception as e:
+                    st.warning(f"Could not fetch Cloud Run status yet: {e}")
+            else:
+                st.info("Cloud Run execution id not available yet (job may still be starting).")
             progress_uri = st.session_state.get("train_progress_uri")
             if progress_uri:
                 st.caption(f"Progress: {progress_uri}")
@@ -16169,6 +16282,7 @@ if not HEADLESS:
             st.session_state["train_sport"] = sport
             st.session_state["train_market"] = market_choice
 
+        
             try:
                 env = {
                     "SPORT": sport,
@@ -16178,19 +16292,29 @@ if not HEADLESS:
                     "MODEL_BUCKET": MODEL_BUCKET,
                     "HEADLESS": "1",
                 }
-                start_job_with_rest(
+            
+                run_resp = start_job_with_rest(
                     job_name=JOB_NAME,
                     region=REGION,
                     project_id=PROJECT_ID,
                     env=env,
                 )
+            
+                exec_name = _extract_execution_name(run_resp)
+                st.session_state["train_execution_name"] = exec_name  # may be None
+            
+                if exec_name:
+                    st.caption(f"Cloud Run execution: {exec_name.split('/')[-1]}")
+                else:
+                    st.caption("Cloud Run execution: (not returned yet)")
+            
                 st.success("Training job started 🚀")
+            
             except Exception as e:
                 st.session_state["pause_refresh_lock"] = False
                 st.session_state["is_training"] = False
                 st.error(f"Failed to start job: {e}")
                 st.stop()
-
             st.stop()
 
         # -----------------------------
