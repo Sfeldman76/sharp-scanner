@@ -15994,10 +15994,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
                 .style.format({"Win_Rate": "{:.1%}"})
             )
 
-
-
-# --- SIMPLE RENDER FLOW (no UI sanitization/purge) ---
-from streamlit_situations_tab import render_current_situations_tab
+import os
 import json
 import uuid
 import time
@@ -16005,6 +16002,12 @@ import time
 import google.auth
 from google.auth.transport.requests import AuthorizedSession
 from google.cloud import storage
+
+from streamlit_situations_tab import render_current_situations_tab
+
+HEADLESS = os.getenv("HEADLESS", "0") == "1"
+
+
 def read_progress_lines(gcs_client, uri: str, max_lines: int = 200):
     assert uri.startswith("gs://")
     rest = uri[5:]
@@ -16027,206 +16030,217 @@ def start_job_with_rest(*, job_name: str, region: str, project_id: str, env: dic
     if resp.status_code >= 300:
         raise RuntimeError(f"Job run failed: {resp.status_code} {resp.text}")
     return resp.json()
+
+
 # ============================ SIDEBAR + TABS UI ================================
-sport = st.sidebar.radio(
-    "Select a League",
-    ["General", "NFL", "NCAAF", "NBA", "MLB", "CFL", "WNBA","NCAAB"],
-    key="sport_radio",
-)
+# IMPORTANT: Do NOT execute Streamlit UI at import-time inside Cloud Run training jobs.
+if not HEADLESS:
 
-st.sidebar.markdown("### ⚙️ Controls")
-
-
-st.sidebar.checkbox(
-    "⏸️ Pause Auto Refresh",
-    key="pause_refresh_user",
-    disabled=st.session_state.get("is_training", False),
-)
-
-force_reload = st.sidebar.button("🔁 Force Reload", key="force_reload_btn")
-
-# --- Optional: Track scanner checkboxes by sport (logical names)
-scanner_flags = {
-    "NFL": "run_nfl_scanner",
-    "NCAAF": "run_ncaaf_scanner",
-    "NBA": "run_nba_scanner",
-    "MLB": "run_mlb_scanner",
-    "CFL": "run_cfl_scanner",
-    "WNBA": "run_wnba_scanner",
-    "NCAAB": "run_ncaab_scanner"
-}
-scanner_widget_keys = {k: f"{v}" for k, v in scanner_flags.items()}
-
-# === GENERAL PAGE ===
-if sport == "General":
-    st.title("🎯 Sharp Scanner Dashboard")
-    st.write("Use the sidebar to select a league and begin scanning or training models.")
-
-# === LEAGUE PAGES ===
-else:
-    st.title(f"🏟️ {sport} Sharp Scanner")
-
-    # Scanner toggle (still visible)
-    scanner_key = scanner_widget_keys[sport]
-    run_scanner = st.checkbox(
-        f"Run {sport} Scanner",
-        key=scanner_key,
-        value=True,
+    sport = st.sidebar.radio(
+        "Select a League",
+        ["General", "NFL", "NCAAF", "NBA", "MLB", "CFL", "WNBA", "NCAAB"],
+        key="sport_radio",
     )
 
-    label = sport
-    sport_key = SPORTS[sport]
+    # Safety fallback: if Streamlit ever returns None or unexpected value
+    if not sport:
+        sport = "General"
 
-    # Market picker
-    market_choice = st.sidebar.selectbox(
-        "Train which market?",
-        ["All", "spreads", "h2h", "totals"],
-        key=f"train_market_choice_{sport}",
+    st.sidebar.markdown("### ⚙️ Controls")
+
+    st.sidebar.checkbox(
+        "⏸️ Pause Auto Refresh",
+        key="pause_refresh_user",
+        disabled=st.session_state.get("is_training", False),
     )
 
-    # --- If training, pause scanner + stop page from doing anything expensive ---
+    force_reload = st.sidebar.button("🔁 Force Reload", key="force_reload_btn")
 
-    if st.session_state.get("is_training", False) or st.session_state.get("pause_refresh_lock", False):
-        st.info("⏳ Training in progress… scanner/refresh is paused.")
-    
-        progress_uri = st.session_state.get("train_progress_uri")
-        if progress_uri:
-            st.caption(f"Progress: {progress_uri}")
-            gcs = storage.Client()
-            lines = read_progress_lines(gcs, progress_uri, max_lines=200)
-    
-            if lines:
-                # parse last event
-                try:
-                    events = [json.loads(ln) for ln in lines]
-                    last = events[-1]
-                except Exception:
-                    last = {"stage": "parse_error", "msg": lines[-1]}
-    
-                pct = last.get("pct")
-                if pct is not None:
-                    try:
-                        st.progress(max(0.0, min(1.0, float(pct))))
-                    except Exception:
-                        pass
-    
-                st.code("\n".join(lines[-40:]), language="json")
-    
-                stage = last.get("stage")
-                if stage == "done":
-                    st.success("✅ Training complete")
-                    st.session_state["pause_refresh_lock"] = False
-                    st.session_state["is_training"] = False
-                elif stage == "error":
-                    st.error(f"❌ Training error: {last.get('msg')}")
-                    st.session_state["pause_refresh_lock"] = False
-                    st.session_state["is_training"] = False
-            else:
-                st.info("No progress events yet… (job may still be starting)")
-    
-            # keep progress live without running scanner
-            time.sleep(2)
-            st.rerun()
-    
-        st.stop()
+    # --- Optional: Track scanner checkboxes by sport (logical names)
+    scanner_flags = {
+        "NFL": "run_nfl_scanner",
+        "NCAAF": "run_ncaaf_scanner",
+        "NBA": "run_nba_scanner",
+        "MLB": "run_mlb_scanner",
+        "CFL": "run_cfl_scanner",
+        "WNBA": "run_wnba_scanner",
+        "NCAAB": "run_ncaab_scanner"
+    }
+    scanner_widget_keys = {k: f"{v}" for k, v in scanner_flags.items()}
 
-    # ✅ Single train button (unique key per sport + choice)
-    train_key = f"train::{sport}::{market_choice}"
+    # === GENERAL PAGE ===
+    if sport == "General":
+        st.title("🎯 Sharp Scanner Dashboard")
+        st.write("Use the sidebar to select a league and begin scanning or training models.")
 
-  
-  
-    if st.button(f"📈 Train {sport} Sharp Model", key=train_key):
-        st.session_state["is_training"] = True
-        st.session_state["pause_refresh_lock"] = True
-    
-        PROJECT_ID = "sharplogger"
-        REGION = "us-east4"
-        JOB_NAME = "sharp-train-job"
-        PROGRESS_BUCKET = "sharp-models"
-        MODEL_BUCKET = "sharp-models"
-    
-        exec_id = str(uuid.uuid4())[:8]
-    
-        progress_uri = (
-            f"gs://{PROGRESS_BUCKET}/train-progress/"
-            f"{sport}/{market_choice}/{exec_id}.json"
-        )
-    
-        st.session_state["train_exec_id"] = exec_id
-        st.session_state["train_progress_uri"] = progress_uri
-        st.session_state["train_sport"] = sport
-        st.session_state["train_market"] = market_choice
-    
-        try:
-            env = {
-                "SPORT": sport,
-                "MARKET": market_choice,
-                "TRAIN_RUN_ID": exec_id,
-                "PROGRESS_URI": progress_uri,
-                "MODEL_BUCKET": MODEL_BUCKET,
-                "HEADLESS": "1",
-            }
-            start_job_with_rest(
-                job_name=JOB_NAME,
-                region=REGION,
-                project_id=PROJECT_ID,
-                env=env,
-            )
-            st.success("Training job started 🚀")
-        except Exception as e:
-            st.session_state["pause_refresh_lock"] = False
-            st.session_state["is_training"] = False
-            st.error(f"Failed to start job: {e}")
-            st.stop()
-    
-        st.stop()
-    # -----------------------------
-    # Scanner run (only if not paused)
-    # -----------------------------
-    if run_scanner and not st.session_state.get("pause_refresh_lock", False):
-        # call your scanner logic here
-        # e.g., render_scanner_tab(...) or detect_and_render(...)
-        pass
+    # === LEAGUE PAGES ===
     else:
-        if st.session_state.get("pause_refresh_lock", False):
-            st.info("⏸️ Scanner paused during training.")
+        st.title(f"🏟️ {sport} Sharp Scanner")
 
-            
-    # Prevent multiple scanners from running
-    conflicting = [
-        k for k, v in scanner_widget_keys.items()
-        if k != sport and bool(st.session_state.get(v, False)) is True
-    ]
+        # Scanner toggle (still visible)
+        scanner_key = scanner_widget_keys.get(sport, f"run_{str(sport).lower()}_scanner")
+        run_scanner = st.checkbox(
+            f"Run {sport} Scanner",
+            key=scanner_key,
+            value=True,
+        )
 
-    if conflicting:
-        st.warning(f"⚠️ Please disable other scanners before running {sport}: {conflicting}")
-    elif run_scanner:
-        scan_tab, analysis_tab, power_tab, situation_tab = st.tabs(
-            ["📡 Live Scanner", "📈 Backtest Analysis", "🏆 Power Ratings", "📚 Situation DB"]
-        )       
+        label = sport
 
-        with scan_tab:
-            render_scanner_tab(label=label, sport_key=sport_key, container=scan_tab)
+        sport_key = SPORTS.get(sport)
+        if not sport_key:
+            st.error(f"Unknown sport selection: {sport!r}")
+            st.stop()
 
-        with analysis_tab:
-            render_sharp_signal_analysis_tab(
-                tab=analysis_tab, sport_label=label, sport_key_api=sport_key
+        # Market picker
+        market_choice = st.sidebar.selectbox(
+            "Train which market?",
+            ["All", "spreads", "h2h", "totals"],
+            key=f"train_market_choice_{sport}",
+        )
+
+        # --- If training, pause scanner + stop page from doing anything expensive ---
+        if st.session_state.get("is_training", False) or st.session_state.get("pause_refresh_lock", False):
+            st.info("⏳ Training in progress… scanner/refresh is paused.")
+
+            progress_uri = st.session_state.get("train_progress_uri")
+            if progress_uri:
+                st.caption(f"Progress: {progress_uri}")
+                gcs = storage.Client()
+                lines = read_progress_lines(gcs, progress_uri, max_lines=200)
+
+                if lines:
+                    # parse last event
+                    try:
+                        events = [json.loads(ln) for ln in lines]
+                        last = events[-1]
+                    except Exception:
+                        last = {"stage": "parse_error", "msg": lines[-1]}
+
+                    pct = last.get("pct")
+                    if pct is not None:
+                        try:
+                            st.progress(max(0.0, min(1.0, float(pct))))
+                        except Exception:
+                            pass
+
+                    st.code("\n".join(lines[-40:]), language="json")
+
+                    stage = last.get("stage")
+                    if stage == "done":
+                        st.success("✅ Training complete")
+                        st.session_state["pause_refresh_lock"] = False
+                        st.session_state["is_training"] = False
+                    elif stage == "error":
+                        st.error(f"❌ Training error: {last.get('msg')}")
+                        st.session_state["pause_refresh_lock"] = False
+                        st.session_state["is_training"] = False
+                else:
+                    st.info("No progress events yet… (job may still be starting)")
+
+                # keep progress live without running scanner
+                time.sleep(2)
+                st.rerun()
+
+            st.stop()
+
+        # ✅ Single train button (unique key per sport + choice)
+        train_key = f"train::{sport}::{market_choice}"
+
+        if st.button(f"📈 Train {sport} Sharp Model", key=train_key):
+            st.session_state["is_training"] = True
+            st.session_state["pause_refresh_lock"] = True
+
+            PROJECT_ID = "sharplogger"
+            REGION = "us-east4"
+            JOB_NAME = "sharp-train-job"
+            PROGRESS_BUCKET = "sharp-models"
+            MODEL_BUCKET = "sharp-models"
+
+            exec_id = str(uuid.uuid4())[:8]
+
+            progress_uri = (
+                f"gs://{PROGRESS_BUCKET}/train-progress/"
+                f"{sport}/{market_choice}/{exec_id}.json"
             )
 
-        with power_tab:
-            client = bigquery.Client(project="sharplogger", location="us")
-            render_power_ranking_tab(
-                tab=power_tab,
-                sport_label=label,
-                sport_key_api=sport_key,
-                bq_client=client,
-                show_edges=False,
-            )
-        with situation_tab:
+            st.session_state["train_exec_id"] = exec_id
+            st.session_state["train_progress_uri"] = progress_uri
+            st.session_state["train_sport"] = sport
+            st.session_state["train_market"] = market_choice
+
             try:
-                render_current_situations_tab(selected_sport=sport)
+                env = {
+                    "SPORT": sport,
+                    "MARKET": market_choice,
+                    "TRAIN_RUN_ID": exec_id,
+                    "PROGRESS_URI": progress_uri,
+                    "MODEL_BUCKET": MODEL_BUCKET,
+                    "HEADLESS": "1",
+                }
+                start_job_with_rest(
+                    job_name=JOB_NAME,
+                    region=REGION,
+                    project_id=PROJECT_ID,
+                    env=env,
+                )
+                st.success("Training job started 🚀")
             except Exception as e:
-                st.error(f"Situations tab error: {e}")
+                st.session_state["pause_refresh_lock"] = False
+                st.session_state["is_training"] = False
+                st.error(f"Failed to start job: {e}")
+                st.stop()
+
+            st.stop()
+
+        # -----------------------------
+        # Scanner run (only if not paused)
+        # -----------------------------
+        if run_scanner and not st.session_state.get("pause_refresh_lock", False):
+            # call your scanner logic here
+            # e.g., render_scanner_tab(...) or detect_and_render(...)
+            pass
+        else:
+            if st.session_state.get("pause_refresh_lock", False):
+                st.info("⏸️ Scanner paused during training.")
+
+        # Prevent multiple scanners from running
+        conflicting = [
+            k for k, v in scanner_widget_keys.items()
+            if k != sport and bool(st.session_state.get(v, False)) is True
+        ]
+
+        if conflicting:
+            st.warning(f"⚠️ Please disable other scanners before running {sport}: {conflicting}")
+        elif run_scanner:
+            scan_tab, analysis_tab, power_tab, situation_tab = st.tabs(
+                ["📡 Live Scanner", "📈 Backtest Analysis", "🏆 Power Ratings", "📚 Situation DB"]
+            )
+
+            with scan_tab:
+                render_scanner_tab(label=label, sport_key=sport_key, container=scan_tab)
+
+            with analysis_tab:
+                render_sharp_signal_analysis_tab(
+                    tab=analysis_tab, sport_label=label, sport_key_api=sport_key
+                )
+
+            with power_tab:
+                client = bigquery.Client(project="sharplogger", location="us")
+                render_power_ranking_tab(
+                    tab=power_tab,
+                    sport_label=label,
+                    sport_key_api=sport_key,
+                    bq_client=client,
+                    show_edges=False,
+                )
+
+            with situation_tab:
+                try:
+                    render_current_situations_tab(selected_sport=sport)
+                except Exception as e:
+                    st.error(f"Situations tab error: {e}")
+
 
 
 
