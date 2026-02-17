@@ -1,69 +1,72 @@
-# train_job.py
+import os, sys
+from types import SimpleNamespace
 import os, sys, uuid, traceback
 from types import SimpleNamespace
 
+class _Null:
+    def __init__(self, log_func=print, prefix=""):
+        self._log_func = log_func
+        self._prefix = prefix
 
+    def __call__(self, *args, **kwargs):
+        # For calls like st.markdown("x")
+        return None
 
-def _install_streamlit_shim(log_func=print):
-    def _log(*args, **kwargs):
-        msg = " ".join(str(a) for a in args)
-        try:
-            log_func(msg)
-        except Exception:
-            print(msg, flush=True)
+    def __getattr__(self, name):
+        # For chained things like st.sidebar.markdown(...)
+        if name in ("__enter__", "__exit__"):
+            return getattr(self, name)
+        # Return another _Null so chains keep working
+        return _Null(self._log_func, prefix=f"{self._prefix}.{name}" if self._prefix else name)
 
-    def _noop(*a, **k): return None
+    def __enter__(self):
+        return self
 
-    def _decorator(func=None, **dkwargs):
-        if callable(func):
-            return func
-        def wrap(fn):
-            return fn
-        return wrap
+    def __exit__(self, *exc):
+        return False
 
-    st = SimpleNamespace(
-        set_page_config=_noop,
-        title=_log,
-        subheader=_log,
-        header=_log,
-        write=_log,
-        info=_log,
-        warning=_log,
-        error=_log,
-        success=_log,
-        markdown=_log,
-        json=_log,
-        text=_log,
-        caption=_log,
+def _decorator(func=None, **kwargs):
+    # Supports @st.cache_data and @st.cache_data(...)
+    if callable(func):
+        return func
+    def wrap(fn):
+        return fn
+    return wrap
 
-        cache_data=_decorator,
-        cache_resource=_decorator,
+def install_streamlit_shim(log_func=print):
+    st = _Null(log_func, "st")
 
-        session_state={},
+    # Provide real decorator attributes (otherwise they become _Null and break decoration)
+    st.cache_data = _decorator
+    st.cache_resource = _decorator
 
-        # common things dashboards reference at import-time
-        sidebar=SimpleNamespace(
-            write=_log, info=_log, warning=_log, error=_log,
-            selectbox=lambda *a, **k: k.get("index", 0),
-            radio=lambda *a, **k: k.get("index", 0),
-            checkbox=lambda *a, **k: k.get("value", False),
-        ),
+    # Provide a sidebar object (also Null)
+    st.sidebar = _Null(log_func, "st.sidebar")
 
-        columns=lambda n, **k: [SimpleNamespace() for _ in range(n)],
-        progress=_noop,
-        status=lambda *a, **k: SimpleNamespace(__enter__=lambda s: s, __exit__=lambda *x: None, write=_log),
+    # Common structural helpers Streamlit returns lists for
+    st.columns = lambda n, **k: [_Null(log_func, f"st.columns[{i}]") for i in range(n)]
+    st.tabs = lambda labels, **k: [_Null(log_func, f"st.tabs[{i}]") for i in range(len(labels or []))]
+    st.container = lambda **k: _Null(log_func, "st.container")
+    st.expander = lambda *a, **k: _Null(log_func, "st.expander")
+    st.form = lambda *a, **k: _Null(log_func, "st.form")
 
-        # prevent accidental hard-fails
-        button=lambda *a, **k: False,
-        selectbox=lambda *a, **k: (k.get("options") or [None])[0],
-        radio=lambda *a, **k: (k.get("options") or [None])[0],
-        checkbox=lambda *a, **k: k.get("value", False),
-    )
+    # Widgets: return defaults so code paths don’t explode
+    st.button = lambda *a, **k: False
+    st.checkbox = lambda *a, **k: k.get("value", False)
+    st.selectbox = lambda *a, **k: (k.get("options") or [None])[0]
+    st.radio = lambda *a, **k: (k.get("options") or [None])[0]
+    st.slider = lambda *a, **k: k.get("value", 0)
+    st.text_input = lambda *a, **k: k.get("value", "")
+    st.number_input = lambda *a, **k: k.get("value", 0)
+
+    # Session state
+    st.session_state = {}
 
     sys.modules["streamlit"] = st
 
 if os.getenv("HEADLESS", "1") == "1":
-    _install_streamlit_shim(print)
+    install_streamlit_shim(print) = st
+
 # Install shim BEFORE any other imports that might import streamlit
 
 from google.cloud import storage
