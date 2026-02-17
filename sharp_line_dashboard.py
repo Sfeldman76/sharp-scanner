@@ -15994,10 +15994,12 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
                 .style.format({"Win_Rate": "{:.1%}"})
             )
 
+
 import os
 import json
 import uuid
 import time
+import re
 
 import google.auth
 from google.auth.transport.requests import AuthorizedSession
@@ -16019,32 +16021,22 @@ def read_progress_lines(gcs_client, uri: str, max_lines: int = 200):
     lines = [ln for ln in data.splitlines() if ln.strip()]
     return lines[-max_lines:]
 
-import re
-import google.auth
-from google.auth.transport.requests import AuthorizedSession
 
 def _extract_execution_name(run_resp: dict) -> str | None:
-    """
-    Cloud Run Jobs :run returns an Execution object or a response containing its name.
-    Try a few known shapes safely.
-    """
     if not isinstance(run_resp, dict):
         return None
 
-    # common places
     for key in ("name", "execution", "executionName"):
         v = run_resp.get(key)
         if isinstance(v, str) and "/executions/" in v:
             return v
 
-    # sometimes nested
     resp = run_resp.get("response")
     if isinstance(resp, dict):
         v = resp.get("name")
         if isinstance(v, str) and "/executions/" in v:
             return v
 
-    # fallback: regex scan all string values
     blob = str(run_resp)
     m = re.search(r"namespaces/[^\"']+/executions/[^\"']+", blob)
     return m.group(0) if m else None
@@ -16063,9 +16055,6 @@ def start_job_with_rest(*, job_name: str, region: str, project_id: str, env: dic
 
 
 def get_execution_with_rest(*, execution_name: str, region: str):
-    """
-    execution_name example: namespaces/sharplogger/executions/sharp-train-job-7shn8
-    """
     creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     session = AuthorizedSession(creds)
     url = f"https://{region}-run.googleapis.com/apis/run.googleapis.com/v1/{execution_name}"
@@ -16076,17 +16065,12 @@ def get_execution_with_rest(*, execution_name: str, region: str):
 
 
 def execution_state(exec_obj: dict) -> str:
-    """
-    Cloud Run Execution typically has status.conditions with types like 'Completed'
-    and a 'state' field in some versions. We normalize to RUNNING/SUCCEEDED/FAILED/UNKNOWN.
-    """
     if not isinstance(exec_obj, dict):
         return "UNKNOWN"
 
-    # direct state sometimes present
-    st = exec_obj.get("status", {}).get("state") or exec_obj.get("state")
-    if isinstance(st, str) and st:
-        s = st.upper()
+    st_ = exec_obj.get("status", {}).get("state") or exec_obj.get("state")
+    if isinstance(st_, str) and st_:
+        s = st_.upper()
         if "SUCC" in s:
             return "SUCCEEDED"
         if "FAIL" in s:
@@ -16094,33 +16078,34 @@ def execution_state(exec_obj: dict) -> str:
         if "RUN" in s or "EXEC" in s:
             return "RUNNING"
 
-    # conditions are more consistent
     conds = exec_obj.get("status", {}).get("conditions") or []
     if isinstance(conds, list):
-        # look for Completed
         for c in conds:
             if c.get("type") == "Completed":
                 if c.get("status") == "True":
                     return "SUCCEEDED"
                 if c.get("status") == "False":
-                    # if reason indicates failure
                     reason = (c.get("reason") or "").lower()
                     if "fail" in reason or "error" in reason:
                         return "FAILED"
-                    # could still be running
                     return "RUNNING"
 
-    # fallback: if it has completion time
-    done = exec_obj.get("status", {}).get("completionTime")
-    if done:
+    if exec_obj.get("status", {}).get("completionTime"):
         return "SUCCEEDED"
 
-    return "RUNNING"  # default optimistic
+    return "RUNNING"
 
 
 # ============================ SIDEBAR + TABS UI ================================
 # IMPORTANT: Do NOT execute Streamlit UI at import-time inside Cloud Run training jobs.
 if not HEADLESS:
+
+    # ---- constants used in BOTH start + polling paths ----
+    PROJECT_ID = "sharplogger"
+    REGION = "us-east4"
+    JOB_NAME = "sharp-train-job"
+    PROGRESS_BUCKET = "sharp-models"
+    MODEL_BUCKET = "sharp-models"
 
     sport = st.sidebar.radio(
         "Select a League",
@@ -16128,7 +16113,7 @@ if not HEADLESS:
         key="sport_radio",
     )
 
-    # Safety fallback: if Streamlit ever returns None or unexpected value
+    # Safety fallback
     if not sport:
         sport = "General"
 
@@ -16142,7 +16127,6 @@ if not HEADLESS:
 
     force_reload = st.sidebar.button("🔁 Force Reload", key="force_reload_btn")
 
-    # --- Optional: Track scanner checkboxes by sport (logical names)
     scanner_flags = {
         "NFL": "run_nfl_scanner",
         "NCAAF": "run_ncaaf_scanner",
@@ -16150,21 +16134,20 @@ if not HEADLESS:
         "MLB": "run_mlb_scanner",
         "CFL": "run_cfl_scanner",
         "WNBA": "run_wnba_scanner",
-        "NCAAB": "run_ncaab_scanner"
+        "NCAAB": "run_ncaab_scanner",
     }
     scanner_widget_keys = {k: f"{v}" for k, v in scanner_flags.items()}
 
-    # === GENERAL PAGE ===
     if sport == "General":
         st.title("🎯 Sharp Scanner Dashboard")
         st.write("Use the sidebar to select a league and begin scanning or training models.")
 
-    # === LEAGUE PAGES ===
     else:
         st.title(f"🏟️ {sport} Sharp Scanner")
 
-        # Scanner toggle (still visible)
+        # Always safe; never KeyError; also ensures key isn't None
         scanner_key = scanner_widget_keys.get(sport, f"run_{str(sport).lower()}_scanner")
+
         run_scanner = st.checkbox(
             f"Run {sport} Scanner",
             key=scanner_key,
@@ -16178,7 +16161,6 @@ if not HEADLESS:
             st.error(f"Unknown sport selection: {sport!r}")
             st.stop()
 
-        # Market picker
         market_choice = st.sidebar.selectbox(
             "Train which market?",
             ["All", "spreads", "h2h", "totals"],
@@ -16188,34 +16170,34 @@ if not HEADLESS:
         # --- If training, pause scanner + stop page from doing anything expensive ---
         if st.session_state.get("is_training", False) or st.session_state.get("pause_refresh_lock", False):
             st.info("⏳ Training in progress… scanner/refresh is paused.")
+
             exec_name = st.session_state.get("train_execution_name")
             if exec_name:
                 try:
                     exec_obj = get_execution_with_rest(execution_name=exec_name, region=REGION)
                     state = execution_state(exec_obj)
                     st.write(f"**Cloud Run status:** {state}")
-            
-                    # Optional: show a Console link
+
                     exec_id = exec_name.split("/")[-1]
                     st.markdown(
                         f"[Open execution in Cloud Console]"
-                        f"(https://console.cloud.google.com/run/jobs/executions/details/us-east4/{exec_id}?project=sharplogger)"
+                        f"(https://console.cloud.google.com/run/jobs/executions/details/{REGION}/{exec_id}?project={PROJECT_ID})"
                     )
-            
+
                     if state in ("SUCCEEDED", "FAILED"):
-                        # If execution ended but progress file didn't yet flip, we still unlock UI
                         if state == "SUCCEEDED":
                             st.success("✅ Cloud Run execution succeeded")
                         else:
                             st.error("❌ Cloud Run execution failed (check logs)")
-            
+                        # unlock UI even if progress file didn't finalize
                         st.session_state["pause_refresh_lock"] = False
                         st.session_state["is_training"] = False
-            
+
                 except Exception as e:
                     st.warning(f"Could not fetch Cloud Run status yet: {e}")
             else:
                 st.info("Cloud Run execution id not available yet (job may still be starting).")
+
             progress_uri = st.session_state.get("train_progress_uri")
             if progress_uri:
                 st.caption(f"Progress: {progress_uri}")
@@ -16223,7 +16205,6 @@ if not HEADLESS:
                 lines = read_progress_lines(gcs, progress_uri, max_lines=200)
 
                 if lines:
-                    # parse last event
                     try:
                         events = [json.loads(ln) for ln in lines]
                         last = events[-1]
@@ -16251,7 +16232,6 @@ if not HEADLESS:
                 else:
                     st.info("No progress events yet… (job may still be starting)")
 
-                # keep progress live without running scanner
                 time.sleep(2)
                 st.rerun()
 
@@ -16264,25 +16244,14 @@ if not HEADLESS:
             st.session_state["is_training"] = True
             st.session_state["pause_refresh_lock"] = True
 
-            PROJECT_ID = "sharplogger"
-            REGION = "us-east4"
-            JOB_NAME = "sharp-train-job"
-            PROGRESS_BUCKET = "sharp-models"
-            MODEL_BUCKET = "sharp-models"
-
             exec_id = str(uuid.uuid4())[:8]
-
-            progress_uri = (
-                f"gs://{PROGRESS_BUCKET}/train-progress/"
-                f"{sport}/{market_choice}/{exec_id}.json"
-            )
+            progress_uri = f"gs://{PROGRESS_BUCKET}/train-progress/{sport}/{market_choice}/{exec_id}.json"
 
             st.session_state["train_exec_id"] = exec_id
             st.session_state["train_progress_uri"] = progress_uri
             st.session_state["train_sport"] = sport
             st.session_state["train_market"] = market_choice
 
-        
             try:
                 env = {
                     "SPORT": sport,
@@ -16292,29 +16261,30 @@ if not HEADLESS:
                     "MODEL_BUCKET": MODEL_BUCKET,
                     "HEADLESS": "1",
                 }
-            
+
                 run_resp = start_job_with_rest(
                     job_name=JOB_NAME,
                     region=REGION,
                     project_id=PROJECT_ID,
                     env=env,
                 )
-            
+
                 exec_name = _extract_execution_name(run_resp)
                 st.session_state["train_execution_name"] = exec_name  # may be None
-            
+
                 if exec_name:
                     st.caption(f"Cloud Run execution: {exec_name.split('/')[-1]}")
                 else:
                     st.caption("Cloud Run execution: (not returned yet)")
-            
+
                 st.success("Training job started 🚀")
-            
+
             except Exception as e:
                 st.session_state["pause_refresh_lock"] = False
                 st.session_state["is_training"] = False
                 st.error(f"Failed to start job: {e}")
                 st.stop()
+
             st.stop()
 
         # -----------------------------
@@ -16322,13 +16292,11 @@ if not HEADLESS:
         # -----------------------------
         if run_scanner and not st.session_state.get("pause_refresh_lock", False):
             # call your scanner logic here
-            # e.g., render_scanner_tab(...) or detect_and_render(...)
             pass
         else:
             if st.session_state.get("pause_refresh_lock", False):
                 st.info("⏸️ Scanner paused during training.")
 
-        # Prevent multiple scanners from running
         conflicting = [
             k for k, v in scanner_widget_keys.items()
             if k != sport and bool(st.session_state.get(v, False)) is True
@@ -16350,7 +16318,7 @@ if not HEADLESS:
                 )
 
             with power_tab:
-                client = bigquery.Client(project="sharplogger", location="us")
+                client = bigquery.Client(project=PROJECT_ID, location="us")
                 render_power_ranking_tab(
                     tab=power_tab,
                     sport_label=label,
@@ -16364,8 +16332,6 @@ if not HEADLESS:
                     render_current_situations_tab(selected_sport=sport)
                 except Exception as e:
                     st.error(f"Situations tab error: {e}")
-
-
 
 
 
