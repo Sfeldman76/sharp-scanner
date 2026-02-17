@@ -1,7 +1,8 @@
-import os, sys
-from types import SimpleNamespace
-import os, sys, uuid, traceback
-from types import SimpleNamespace
+# train_job.py
+import os
+import sys
+import uuid
+import traceback
 
 class _Null:
     def __init__(self, log_func=print, prefix=""):
@@ -9,14 +10,11 @@ class _Null:
         self._prefix = prefix
 
     def __call__(self, *args, **kwargs):
-        # For calls like st.markdown("x")
+        # Allows calls like st.markdown("x") without crashing
         return None
 
     def __getattr__(self, name):
-        # For chained things like st.sidebar.markdown(...)
-        if name in ("__enter__", "__exit__"):
-            return getattr(self, name)
-        # Return another _Null so chains keep working
+        # Allows chained calls like st.sidebar.markdown(...)
         return _Null(self._log_func, prefix=f"{self._prefix}.{name}" if self._prefix else name)
 
     def __enter__(self):
@@ -26,7 +24,10 @@ class _Null:
         return False
 
 def _decorator(func=None, **kwargs):
-    # Supports @st.cache_data and @st.cache_data(...)
+    # Supports both:
+    #   @st.cache_data
+    # and:
+    #   @st.cache_data(ttl=3600)
     if callable(func):
         return func
     def wrap(fn):
@@ -36,14 +37,14 @@ def _decorator(func=None, **kwargs):
 def install_streamlit_shim(log_func=print):
     st = _Null(log_func, "st")
 
-    # Provide real decorator attributes (otherwise they become _Null and break decoration)
+    # Real decorator attributes so @st.cache_* doesn't break
     st.cache_data = _decorator
     st.cache_resource = _decorator
 
-    # Provide a sidebar object (also Null)
+    # Sidebar object
     st.sidebar = _Null(log_func, "st.sidebar")
 
-    # Common structural helpers Streamlit returns lists for
+    # Common structural helpers Streamlit returns
     st.columns = lambda n, **k: [_Null(log_func, f"st.columns[{i}]") for i in range(n)]
     st.tabs = lambda labels, **k: [_Null(log_func, f"st.tabs[{i}]") for i in range(len(labels or []))]
     st.container = lambda **k: _Null(log_func, "st.container")
@@ -62,12 +63,12 @@ def install_streamlit_shim(log_func=print):
     # Session state
     st.session_state = {}
 
+    # Install into sys.modules so "import streamlit as st" gets this shim
     sys.modules["streamlit"] = st
 
-if os.getenv("HEADLESS", "1") == "1":
-    install_streamlit_shim(print) = st
-
 # Install shim BEFORE any other imports that might import streamlit
+if os.getenv("HEADLESS", "1") == "1":
+    install_streamlit_shim(print)
 
 from google.cloud import storage
 from progress import ProgressWriter
@@ -101,6 +102,7 @@ def main():
                 train_timing_model_for_market(sport=sport, bucket_name=bucket, log_func=log_func)
             except TypeError:
                 train_timing_model_for_market(sport=sport)
+
             mkts = ("h2h", "spreads", "totals")
         else:
             mkts = (market,)
