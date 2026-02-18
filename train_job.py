@@ -5,6 +5,8 @@ import uuid
 import traceback
 import warnings
 import logging
+import threading
+import time
 
 HEADLESS = os.getenv("HEADLESS", "0") == "1"
 
@@ -12,42 +14,64 @@ HEADLESS = os.getenv("HEADLESS", "0") == "1"
 # Headless warning / numeric noise control (ONLY in Cloud Run Jobs / headless)
 # -----------------------------------------------------------------------------
 if HEADLESS:
-    # Keep this narrow so we don't hide real numerical bugs
+    # Keep narrow: only suppress the specific spam you showed
     warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
     warnings.filterwarnings("ignore", message="Degrees of freedom <= 0", category=RuntimeWarning)
 
-    # Optional: if you still get spam from other libs, you can broaden *slightly*:
-    # warnings.filterwarnings("ignore", category=RuntimeWarning, module=r"numpy\.lib\.nanfunctions")
-
-    # Numpy doesn't log via logging; this is mostly harmless, but doesn't hurt.
-    logging.getLogger("numpy").setLevel(logging.ERROR)
+    # Optional: reduce other noisy libs (doesn't affect numpy warnings)
+    logging.getLogger("google").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 # -----------------------------------------------------------------------------
 # HEADLESS STREAMLIT SHIM (MUST be installed BEFORE importing sharp_line_dashboard)
 # -----------------------------------------------------------------------------
 def install_streamlit_shim(log_func=print):
+    """
+    Install/replace a 'streamlit' module shim that:
+      - never recurses in __getattr__
+      - converts common st.* calls into log_func(...) so you see step-by-step logs
+      - supports st.status/st.spinner context patterns
+      - supports st.progress(0) returning an object with .progress()/.empty()
+    """
     import types
 
-    class _Ctx:
-        """No-op context manager for st.status/st.spinner/st.expander/etc."""
-        def __enter__(self): return self
-        def __exit__(self, exc_type, exc, tb): return False
+    def _log(*a, **k):
+        msg = " ".join(str(x) for x in a).strip()
+        if not msg:
+            return
+        try:
+            log_func(msg)
+        except Exception:
+            print(msg, flush=True)
 
-        # Common "status" methods
-        def write(self, *a, **k): return None
-        def markdown(self, *a, **k): return None
-        def code(self, *a, **k): return None
-        def json(self, *a, **k): return None
-        def dataframe(self, *a, **k): return None
-        def table(self, *a, **k): return None
-        def success(self, *a, **k): return None
-        def info(self, *a, **k): return None
-        def warning(self, *a, **k): return None
-        def error(self, *a, **k): return None
-        def update(self, *a, **k): return None
+    class _Ctx:
+        def __init__(self, label=""):
+            if label:
+                _log(label)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        # status-like methods
+        def write(self, *a, **k): _log(*a)
+        def markdown(self, *a, **k): _log(*a)
+        def info(self, *a, **k): _log(*a)
+        def warning(self, *a, **k): _log(*a)
+        def error(self, *a, **k): _log(*a)
+        def success(self, *a, **k): _log(*a)
+
+        def update(self, *a, **k):
+            # streamlit status.update(label="...")
+            label = k.get("label")
+            if label:
+                _log(label)
+            return None
 
     class _Null:
-        """Absorb any chained streamlit calls: st.x.y().z ..."""
+        """Absorb chained calls: st.x.y().z ..."""
         def __init__(self, prefix="st"):
             self._prefix = prefix
 
@@ -55,25 +79,34 @@ def install_streamlit_shim(log_func=print):
             return None
 
         def __getattr__(self, name):
-            # Return another absorber for any attribute access
             return _Null(prefix=f"{self._prefix}.{name}")
 
-        def __enter__(self): return self
-        def __exit__(self, exc_type, exc, tb): return False
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
 
     class _Progress:
-        """
-        Streamlit progress bar object.
-        Streamlit supports:
-          pb = st.progress(0)
-          pb.progress(50)
-          pb.empty()
-        """
-        def progress(self, *a, **k): return None
-        def update(self, *a, **k): return None
-        def empty(self): return None
+        def __init__(self):
+            self._last = None
 
-    # decorator shim: supports @st.cache_data and @st.cache_data(...)
+        def progress(self, value=None):
+            # value can be 0..100 or 0..1 depending on code; just log occasionally
+            try:
+                if value is not None and value != self._last:
+                    self._last = value
+                    _log(f"[progress] {value}")
+            except Exception:
+                pass
+            return None
+
+        def update(self, value=None):
+            return self.progress(value)
+
+        def empty(self):
+            return None
+
     def _decorator(fn=None, **kwargs):
         if callable(fn):
             return fn
@@ -81,28 +114,27 @@ def install_streamlit_shim(log_func=print):
             return f
         return wrap
 
-    # Create a real module object (some libs check types.ModuleType)
     st = types.ModuleType("streamlit")
 
-    # Common outputs
-    st.write = lambda *a, **k: None
-    st.markdown = lambda *a, **k: None
-    st.text = lambda *a, **k: None
-    st.caption = lambda *a, **k: None
-    st.code = lambda *a, **k: None
-    st.json = lambda *a, **k: None
+    # Common outputs -> log
+    st.write = _log
+    st.markdown = _log
+    st.text = _log
+    st.caption = _log
+    st.code = lambda *a, **k: _log(*a)
+    st.json = lambda *a, **k: _log(*a)
     st.dataframe = lambda *a, **k: None
     st.table = lambda *a, **k: None
-    st.info = lambda *a, **k: None
-    st.warning = lambda *a, **k: None
-    st.error = lambda *a, **k: None
-    st.success = lambda *a, **k: None
-    st.title = lambda *a, **k: None
-    st.header = lambda *a, **k: None
-    st.subheader = lambda *a, **k: None
+    st.info = _log
+    st.warning = _log
+    st.error = _log
+    st.success = _log
+    st.title = _log
+    st.header = _log
+    st.subheader = _log
     st.set_page_config = lambda *a, **k: None
 
-    # Progress (IMPORTANT: avoid crashes at st.progress(0))
+    # Progress
     st.progress = lambda *a, **k: _Progress()
 
     # Layout
@@ -113,9 +145,9 @@ def install_streamlit_shim(log_func=print):
     st.form = lambda *a, **k: _Ctx()
     st.empty = lambda: _Null(prefix="st.empty")
 
-    # Status / spinner
-    st.status = lambda *a, **k: _Ctx()
-    st.spinner = lambda *a, **k: _Ctx()
+    # Status/spinner return context managers that log their label (if any)
+    st.status = lambda label=None, **k: _Ctx(label=str(label) if label else "")
+    st.spinner = lambda text=None, **k: _Ctx(label=str(text) if text else "")
 
     # Widgets (safe defaults)
     st.button = lambda *a, **k: False
@@ -137,7 +169,7 @@ def install_streamlit_shim(log_func=print):
     st.session_state = {}
     st.sidebar = _Null(prefix="st.sidebar")
 
-    # SAFE module-level __getattr__ fallback (DO NOT call getattr(st, ...) here -> recursion)
+    # SAFE module-level __getattr__ fallback (no recursion)
     def _module_getattr(name):
         d = st.__dict__
         if name in d:
@@ -146,25 +178,52 @@ def install_streamlit_shim(log_func=print):
 
     st.__getattr__ = _module_getattr  # type: ignore[attr-defined]
 
-    # Make `import streamlit as st` resolve to this shim
     sys.modules["streamlit"] = st
     return st
 
+
+# Install an early shim (print-based) BEFORE importing modules that import streamlit
 if HEADLESS:
-    install_streamlit_shim()
+    install_streamlit_shim(print)
 
 # -----------------------------------------------------------------------------
 # Normal imports (after shim)
 # -----------------------------------------------------------------------------
 from google.cloud import storage
 from progress import ProgressWriter
-
 from train_sharp_model_from_bq_extracted import (
     train_sharp_model_for_market,
     train_timing_model_for_market,
 )
 
+def _force_unbuffered_streams():
+    # Helps Cloud Run stream logs continuously
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
+def _start_heartbeat(pw, label, every=45):
+    stop_evt = threading.Event()
+
+    def _hb():
+        mins = 0
+        while not stop_evt.wait(every):
+            mins += every / 60.0
+            # If your ProgressWriter requires pct, remove pct entirely or use a stable value
+            try:
+                pw.emit("hb", f"{label} ... still running ({mins:.1f}m)")
+            except TypeError:
+                pw.emit("hb", f"{label} ... still running ({mins:.1f}m)", pct=0.0)
+
+    t = threading.Thread(target=_hb, daemon=True)
+    t.start()
+    return stop_evt
+
 def main():
+    _force_unbuffered_streams()
+
     run_id = os.environ.get("TRAIN_RUN_ID") or str(uuid.uuid4())[:8]
     sport = os.environ.get("SPORT", "NBA")
     market = os.environ.get("MARKET", "All")
@@ -179,15 +238,24 @@ def main():
     pw = ProgressWriter(progress_uri, gcs)
 
     log_func = lambda msg: pw.emit("log", str(msg))
+
+    # Re-install shim so st.write/status/progress go into ProgressWriter logs
+    if HEADLESS:
+        install_streamlit_shim(log_func)
+
     pw.emit("start", f"Training start run_id={run_id} sport={sport} market={market}", pct=0.0)
 
     try:
         if market == "All":
             pw.emit("timing", f"[{sport}] Training timing model...", pct=0.05)
+            hb_stop = _start_heartbeat(pw, f"[{sport}] timing")
             try:
-                train_timing_model_for_market(sport=sport, bucket_name=bucket, log_func=log_func)
-            except TypeError:
-                train_timing_model_for_market(sport=sport)
+                try:
+                    train_timing_model_for_market(sport=sport, bucket_name=bucket, log_func=log_func)
+                except TypeError:
+                    train_timing_model_for_market(sport=sport)
+            finally:
+                hb_stop.set()
 
             mkts = ("h2h", "spreads", "totals")
         else:
@@ -197,11 +265,18 @@ def main():
         for i, mkt in enumerate(mkts, start=1):
             pct = 0.10 + 0.80 * (i - 1) / max(1, n)
             pw.emit("train", f"[{sport}] Training sharp model market={mkt}", pct=pct)
+            pw.emit("log", f"ENTER train_sharp_model_for_market sport={sport} mkt={mkt}", pct=pct)
 
+            hb_stop = _start_heartbeat(pw, f"[{sport}] market={mkt}")
             try:
-                train_sharp_model_for_market(sport=sport, market=mkt, bucket_name=bucket, log_func=log_func)
-            except TypeError:
-                train_sharp_model_for_market(sport=sport, market=mkt, bucket_name=bucket)
+                try:
+                    train_sharp_model_for_market(sport=sport, market=mkt, bucket_name=bucket, log_func=log_func)
+                except TypeError:
+                    train_sharp_model_for_market(sport=sport, market=mkt, bucket_name=bucket)
+            finally:
+                hb_stop.set()
+
+            pw.emit("log", f"EXIT train_sharp_model_for_market sport={sport} mkt={mkt}", pct=pct)
 
         pw.emit("done", "Training complete ✅", pct=1.0)
 
