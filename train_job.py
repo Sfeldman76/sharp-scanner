@@ -162,7 +162,7 @@ def main():
 
     progress_uri = os.environ.get("PROGRESS_URI")
     if not progress_uri:
-        progress_uri = f"gs://{bucket}/train-progress/{sport}/{market}/{run_id}.json"
+        progress_uri = f"gs://{bucket}/train-progress/{sport}/{market}/{run_id}.jsonl"
         os.environ["PROGRESS_URI"] = progress_uri
 
     gcs = storage.Client()
