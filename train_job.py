@@ -1,209 +1,121 @@
+
 # train_job.py
-"""
-Cloud Run Job / headless training entrypoint.
-
-Goals:
-- Run training in HEADLESS mode (no Streamlit UI) without crashing.
-- Emit rich progress + model "Streamlit style" logs to:
-  1) Google Cloud Logging (stdout/stderr), AND
-  2) your ProgressWriter JSON in GCS (pw.emit)
-- Avoid the recursion bug you hit (module __getattr__ calling getattr on itself).
-- Keep output unbuffered so logs appear live.
-
-Set env vars in Cloud Run Job:
-  HEADLESS=1
-  PYTHONUNBUFFERED=1
-Optionally:
-  SPORT=NBA
-  MARKET=All|spreads|totals|h2h
-  MODEL_BUCKET=sharp-models
-  PROGRESS_URI=gs://... (optional; auto-derived if missing)
-"""
-
 import os
 import sys
 import uuid
-import time
-import threading
 import traceback
 import warnings
 import logging
+import time
+import threading
 
+from google.cloud import storage
+from progress import ProgressWriter
 
-# -----------------------------------------------------------------------------
-# Environment + basic noise control
-# -----------------------------------------------------------------------------
 HEADLESS = os.getenv("HEADLESS", "0") == "1"
 
 
-def configure_cloud_logging():
+# -----------------------------
+# 1) Tee stdout/stderr -> pw.emit("log", ...)
+# -----------------------------
+class _StreamTee:
     """
-    Send python logging + warnings to stdout so Cloud Run captures them.
-    Make stdout line-buffered when possible.
+    Mirrors writes to the original stream AND forwards full lines to a callback.
     """
-    # stdout line buffering (Python 3.7+ may support reconfigure)
-    try:
-        sys.stdout.reconfigure(line_buffering=True)
-        sys.stderr.reconfigure(line_buffering=True)
-    except Exception:
-        pass
+    def __init__(self, stream, on_line):
+        self._stream = stream
+        self._on_line = on_line
+        self._buf = ""
 
-    # Root logger -> stdout
-    root = logging.getLogger()
-    root.handlers.clear()
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    root.addHandler(handler)
-    root.setLevel(logging.INFO)
+    def write(self, s):
+        self._stream.write(s)
+        self._stream.flush()
 
-    # Route warnings through logging
-    logging.captureWarnings(True)
-    warnings.simplefilter("default")  # "once" if too noisy
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            line = line.rstrip()
+            if line:
+                try:
+                    self._on_line(line)
+                except Exception:
+                    pass
 
-    # Narrow suppression for known numpy spam (optional)
-    if HEADLESS:
-        warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
-        warnings.filterwarnings("ignore", message="Degrees of freedom <= 0", category=RuntimeWarning)
+    def flush(self):
+        try:
+            self._stream.flush()
+        except Exception:
+            pass
 
 
-# -----------------------------------------------------------------------------
-# Headless Streamlit shim
-# MUST install BEFORE importing sharp_line_dashboard (or anything that imports streamlit)
-# -----------------------------------------------------------------------------
-def install_streamlit_shim(log_func=print):
+def install_streamlit_shim(log_func):
     """
-    Provides a minimal `streamlit` module replacement that:
-      - prevents crashes in headless execution
-      - emits "Streamlit style" messages (write/markdown/status/progress/etc) via log_func
-      - avoids recursion in __getattr__
+    Must be called BEFORE importing sharp_line_dashboard / training modules.
+    Wires st.write/st.info/etc to log_func.
     """
     import types
 
-    def _format_arg(x, max_len=1400):
-        try:
-            import pandas as pd  # optional
-            if isinstance(x, pd.DataFrame):
-                head = x.head(12)
-                return head.to_string() + f"\n[{x.shape[0]} rows x {x.shape[1]} columns]"
-            if isinstance(x, pd.Series):
-                return x.head(20).to_string()
-
-            s = str(x)
-            return s if len(s) <= max_len else (s[:max_len] + "…(truncated)")
-        except Exception:
-            s = str(x)
-            return s if len(s) <= max_len else (s[:max_len] + "…(truncated)")
-
     def _log(*a, **k):
-        msg = " ".join(_format_arg(v) for v in a).strip()
-        if not msg:
-            return None
-        try:
+        msg = " ".join(str(x) for x in a).strip()
+        if msg:
             log_func(msg)
-        except Exception:
-            print(msg, flush=True)
         return None
 
     class _Ctx:
-        """
-        Context manager used for st.status(), st.spinner(), st.container(), st.expander(), st.form()
-        Also supports .update(label="...") calls.
-        """
-        def __init__(self, label: str = ""):
+        def __init__(self, label=""):
             if label:
                 _log(label)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        # common UI-ish methods
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
         def write(self, *a, **k): return _log(*a)
         def markdown(self, *a, **k): return _log(*a)
-        def code(self, *a, **k): return _log(*a)
-        def json(self, *a, **k): return _log(*a)
-        def dataframe(self, *a, **k): return _log(*a)
-        def table(self, *a, **k): return _log(*a)
-        def info(self, *a, **k): return _log(*a)
+        def update(self, *a, **k):
+            lab = k.get("label") or (a[0] if a else "")
+            if lab:
+                _log(lab)
+            return None
+        def success(self, *a, **k): return _log(*a)
         def warning(self, *a, **k): return _log(*a)
         def error(self, *a, **k): return _log(*a)
-        def success(self, *a, **k): return _log(*a)
-
-        def update(self, *a, **k):
-            # Streamlit status.update(label="...") common pattern
-            label = k.get("label") or (a[0] if a else "")
-            if label:
-                _log(label)
-            return None
 
     class _Null:
-        """Absorb any chained streamlit calls: st.x.y().z ..."""
         def __init__(self, prefix="st"):
             self._prefix = prefix
-
         def __call__(self, *a, **k):
-            # Some code does st.sidebar.xxx(...) -> just log if it looks like a message
+            # if someone does st.something("text"), capture it
             if a:
-                try:
-                    _log(*a)
-                except Exception:
-                    pass
+                _log(*a)
             return None
-
         def __getattr__(self, name):
             return _Null(prefix=f"{self._prefix}.{name}")
-
         def __enter__(self): return self
         def __exit__(self, exc_type, exc, tb): return False
 
     class _Progress:
-        """
-        Streamlit progress bar object:
-          pb = st.progress(0)
-          pb.progress(50)
-          pb.empty()
-        """
-        def __init__(self):
-            self._last = None
-
-        def progress(self, value=None, *a, **k):
-            try:
-                v = float(value) if value is not None else None
-            except Exception:
-                v = None
-            if v is not None and v != self._last:
-                self._last = v
+        def progress(self, v=None, *a, **k):
+            if v is not None:
                 _log(f"[progress] {v}")
             return None
-
         def update(self, *a, **k):
-            # Sometimes called with value=... or label=...
             if "label" in k and k["label"]:
                 _log(k["label"])
             if "value" in k:
                 return self.progress(k["value"])
             return None
-
         def empty(self):
             _log("[progress] cleared")
             return None
 
     def _decorator(fn=None, **kwargs):
-        # supports @st.cache_data and @st.cache_data(...)
         if callable(fn):
             return fn
-
         def wrap(f):
             return f
-
         return wrap
 
-    # Create module
     st = types.ModuleType("streamlit")
 
-    # Common outputs -> log
+    # outputs -> log_func
     st.write = _log
     st.markdown = _log
     st.text = _log
@@ -221,22 +133,18 @@ def install_streamlit_shim(log_func=print):
     st.subheader = _log
     st.set_page_config = lambda *a, **k: None
 
-    # Progress (IMPORTANT: avoid crashes at st.progress(0))
+    # progress/layout/context
     st.progress = lambda *a, **k: _Progress()
-
-    # Layout
     st.tabs = lambda labels, **k: [_Null(prefix=f"st.tabs[{i}]") for i in range(len(labels or []))]
     st.columns = lambda n, **k: [_Null(prefix=f"st.columns[{i}]") for i in range(int(n or 0))]
     st.container = lambda **k: _Ctx()
     st.expander = lambda *a, **k: _Ctx(label=str(a[0]) if a else "")
     st.form = lambda *a, **k: _Ctx(label=str(a[0]) if a else "")
     st.empty = lambda: _Null(prefix="st.empty")
-
-    # Status / spinner
     st.status = lambda *a, **k: _Ctx(label=str(a[0]) if a else (k.get("label") or ""))
     st.spinner = lambda *a, **k: _Ctx(label=str(a[0]) if a else (k.get("text") or ""))
 
-    # Widgets (safe defaults)
+    # widgets
     st.button = lambda *a, **k: False
     st.checkbox = lambda *a, **k: k.get("value", False)
     st.selectbox = lambda *a, **k: (k.get("options") or [None])[0]
@@ -248,15 +156,15 @@ def install_streamlit_shim(log_func=print):
     st.metric = lambda *a, **k: None
     st.plotly_chart = lambda *a, **k: None
 
-    # Caching
+    # caching
     st.cache_data = _decorator
     st.cache_resource = _decorator
 
-    # Session state + sidebar
+    # state/sidebar
     st.session_state = {}
     st.sidebar = _Null(prefix="st.sidebar")
 
-    # SAFE module-level __getattr__ fallback (NO recursion!)
+    # IMPORTANT: no recursion
     def _module_getattr(name):
         d = st.__dict__
         if name in d:
@@ -265,46 +173,18 @@ def install_streamlit_shim(log_func=print):
 
     st.__getattr__ = _module_getattr  # type: ignore[attr-defined]
 
-    # Register shim
     sys.modules["streamlit"] = st
     return st
 
 
-# Install a minimal shim early so imports never crash in headless mode.
-# We'll reinstall inside main() with pw.emit logger after pw exists.
-if HEADLESS:
-    configure_cloud_logging()
-    install_streamlit_shim(print)
-
-
-# -----------------------------------------------------------------------------
-# Imports AFTER shim
-# -----------------------------------------------------------------------------
-from google.cloud import storage
-from progress import ProgressWriter
-
-from train_sharp_model_from_bq_extracted import (
-    train_sharp_model_for_market,
-    train_timing_model_for_market,
-)
-
-
-# -----------------------------------------------------------------------------
-# Heartbeat thread (keeps logs alive during long CPU work)
-# -----------------------------------------------------------------------------
-def start_heartbeat(pw: ProgressWriter, *, label: str, every_sec: int = 45):
+def start_heartbeat(pw, label, every_sec=45):
     stop_evt = threading.Event()
 
     def _hb():
-        tick = 0
+        i = 0
         while not stop_evt.is_set():
-            # pct=None means "do not overwrite pct" (assuming your ProgressWriter supports it)
-            try:
-                pw.emit("hb", f"{label} ... still running ({tick})", pct=None)
-            except TypeError:
-                # fallback if pct=None not supported
-                pw.emit("hb", f"{label} ... still running ({tick})")
-            tick += 1
+            pw.emit("hb", f"{label} ... still running ({i})", pct=None)
+            i += 1
             stop_evt.wait(every_sec)
 
     t = threading.Thread(target=_hb, daemon=True)
@@ -312,12 +192,7 @@ def start_heartbeat(pw: ProgressWriter, *, label: str, every_sec: int = 45):
     return stop_evt
 
 
-# -----------------------------------------------------------------------------
-# main
-# -----------------------------------------------------------------------------
 def main():
-    configure_cloud_logging()
-
     run_id = os.environ.get("TRAIN_RUN_ID") or str(uuid.uuid4())[:8]
     sport = os.environ.get("SPORT", "NBA")
     market = os.environ.get("MARKET", "All")
@@ -328,78 +203,81 @@ def main():
         progress_uri = f"gs://{bucket}/train-progress/{sport}/{market}/{run_id}.json"
         os.environ["PROGRESS_URI"] = progress_uri
 
-    # Create progress writer
     gcs = storage.Client()
     pw = ProgressWriter(progress_uri, gcs)
 
-    # All logs go both to pw + stdout (cloud logs)
-    def log_func(msg: str):
-        s = str(msg)
-        # Cloud logs
-        print(s, flush=True)
-        # GCS progress JSON
-        pw.emit("log", s)
+    # ONE unified logger for everything
+    def log_line(line: str):
+        line = str(line).rstrip()
+        if not line:
+            return
+        # Cloud Run logs
+        print(line, flush=True)
+        # Progress JSON feed
+        pw.emit("log", line)
 
-    # Reinstall streamlit shim with the real log_func,
-    # so st.write/st.markdown inside the model training land in cloud logs too.
+    # tee stdout/stderr so any print() inside model shows up in pw.emit("log", ...)
+    sys.stdout = _StreamTee(sys.__stdout__, log_line)
+    sys.stderr = _StreamTee(sys.__stderr__, log_line)
+
+    # install shim *after* we have log_line but *before* importing training modules
     if HEADLESS:
-        install_streamlit_shim(log_func)
+        install_streamlit_shim(log_line)
+
+    # NOW import anything that uses streamlit / prints
+    from train_sharp_model_from_bq_extracted import (
+        train_sharp_model_for_market,
+        train_timing_model_for_market,
+    )
 
     pw.emit("start", f"Training start run_id={run_id} sport={sport} market={market}", pct=0.0)
-    log_func(f"[boot] progress_uri={progress_uri}")
+    log_line(f"[boot] HEADLESS={HEADLESS} bucket={bucket} progress_uri={progress_uri}")
 
-    # Decide markets
-    if market == "All":
-        mkts = ("h2h", "spreads", "totals")
-    else:
-        mkts = (market,)
-
-    # Heartbeat for the overall job
-    hb_stop = start_heartbeat(pw, label=f"[{sport}] market={market}", every_sec=45)
+    hb_stop = start_heartbeat(pw, f"[{sport}] market={market}", 45)
 
     try:
-        # Optional timing model first
         if market == "All":
             pw.emit("timing", f"[{sport}] Training timing model...", pct=0.05)
-            log_func(f"[timing] ENTER sport={sport}")
+            log_line(f"[timing] ENTER sport={sport}")
             try:
-                train_timing_model_for_market(sport=sport, bucket_name=bucket, log_func=log_func)
+                train_timing_model_for_market(sport=sport, bucket_name=bucket, log_func=log_line)
             except TypeError:
                 train_timing_model_for_market(sport=sport)
-            log_func(f"[timing] EXIT sport={sport}")
+            log_line(f"[timing] EXIT sport={sport}")
 
-        # Train sharp models per market
+            mkts = ("h2h", "spreads", "totals")
+        else:
+            mkts = (market,)
+
         n = len(mkts)
         for i, mkt in enumerate(mkts, start=1):
             pct = 0.10 + 0.80 * (i - 1) / max(1, n)
             pw.emit("train", f"[{sport}] Training sharp model market={mkt}", pct=pct)
-            log_func(f"[sharp] ENTER sport={sport} market={mkt}")
+            log_line(f"[sharp] ENTER sport={sport} market={mkt}")
 
-            # Heartbeat per market (useful when a single market takes forever)
-            hb_mkt_stop = start_heartbeat(pw, label=f"[{sport}] market={mkt}", every_sec=45)
+            hb_mkt_stop = start_heartbeat(pw, f"[{sport}] market={mkt}", 45)
             try:
                 try:
                     train_sharp_model_for_market(
                         sport=sport,
                         market=mkt,
                         bucket_name=bucket,
-                        log_func=log_func,
+                        log_func=log_line,
                     )
                 except TypeError:
-                    # Backward-compatible signature
                     train_sharp_model_for_market(sport=sport, market=mkt, bucket_name=bucket)
             finally:
                 hb_mkt_stop.set()
 
-            log_func(f"[sharp] EXIT sport={sport} market={mkt}")
+            log_line(f"[sharp] EXIT sport={sport} market={mkt}")
 
         pw.emit("done", "Training complete ✅", pct=1.0)
-        log_func("[done] Training complete ✅")
+        log_line("[done] Training complete ✅")
 
     except Exception as e:
         err = f"{e}\n{traceback.format_exc()}"
         pw.emit("error", err, pct=1.0)
-        print(err, flush=True)
+        log_line(err)
         raise
 
     finally:
