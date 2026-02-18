@@ -14772,15 +14772,7 @@ def _normalize_history(x):
 
 from google.cloud import storage
 from io import BytesIO
-import pickle
 import logging
-def _debug_picklability(payload):
-    import pickle
-    for k, v in payload.items():
-        try:
-            pickle.dumps(v, protocol=pickle.HIGHEST_PROTOCOL)
-        except Exception as e:
-            print(f"❌ cannot pickle key={k!r} (type={type(v)}): {e}")
 
 def save_model_to_gcs(
     model,
@@ -14790,52 +14782,60 @@ def save_model_to_gcs(
     calibrator=None,
     team_feature_map=None,
     book_reliability_map=None,
-    **kwargs  # ignore any extras silently
+    feature_list=None,
+    **kwargs,
 ):
-    from io import BytesIO
-    import logging
+    """
+    Saves a *portable* dict bundle.
+    Never pickle custom wrapper objects as the top-level 'model' unless unavoidable.
+    """
     try:
-        import cloudpickle as pickler  # more robust than std pickle
+        import cloudpickle as pickler
     except ImportError:
         import pickle as pickler
-    import pickle as std_pickle  # for optional debug
-    from google.cloud import storage
 
-    sport_l  = str(sport).lower()
-    market_l = str(market).lower()
+    sport_l  = str(sport).lower().strip()
+    market_l = str(market).lower().strip()
     filename = f"sharp_win_model_{sport_l}_{market_l}.pkl"
 
-    # --- build payload exactly like before ---
+    # ---- normalize what we save ----
+    # If caller passed an already-built bundle, keep it.
     if isinstance(model, dict):
-        payload = dict(model)  # shallow copy
-        if calibrator is not None:
+        payload = dict(model)
+        payload.setdefault("schema_version", 2)
+        payload.setdefault("sport", sport_l)
+        payload.setdefault("market", market_l)
+        if calibrator is not None and "iso_blend" not in payload:
             payload["iso_blend"] = calibrator
         if team_feature_map is not None and "team_feature_map" not in payload:
             payload["team_feature_map"] = team_feature_map
         if book_reliability_map is not None and "book_reliability_map" not in payload:
             payload["book_reliability_map"] = book_reliability_map
+        if feature_list is not None and "feature_list" not in payload:
+            payload["feature_list"] = feature_list
     else:
+        # Prefer saving the estimator itself, not an adapter wrapper.
+        # If model has attributes like .model or .estimator, unwrap it.
+        base_model = getattr(model, "model", None) or getattr(model, "estimator", None) or model
+
         payload = {
-            "model": model,
-            "iso_blend": calibrator,
+            "schema_version": 2,
+            "sport": sport_l,
+            "market": market_l,
+            "model": base_model,              # single estimator OR timing model
+            "iso_blend": calibrator,          # calibrator object or dict
             "team_feature_map": team_feature_map,
             "book_reliability_map": book_reliability_map,
         }
+        if feature_list is not None:
+            payload["feature_list"] = feature_list
 
-    #--- OPTIONAL: quick picklability debug (uncomment if needed) ---
-    for k, v in payload.items():
-        try:
-            std_pickle.dumps(v)
-        except Exception as e:
-            print(f"❌ cannot pickle key={k!r} (type={type(v)}): {e}")
-
+    # ---- serialize & upload ----
     try:
-        # --- serialize (cloudpickle if available) ---
         buffer = BytesIO()
         pickler.dump(payload, buffer)
         buffer.seek(0)
 
-        # --- upload to GCS ---
         client = storage.Client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(filename)
@@ -14847,11 +14847,37 @@ def save_model_to_gcs(
         logging.error(f"❌ Failed to save model to GCS: {e}", exc_info=True)
         raise
 
+import io
+import pickle
+import logging
+import pandas as pd
+from google.cloud import storage
 
+class _PickleShim:
+    """Fallback for custom classes pickled from other modules."""
+    def __init__(self, *args, **kwargs):
+        pass
+    def __setstate__(self, state):
+        if isinstance(state, dict):
+            self.__dict__.update(state)
 
+class _RenamingUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        # Remap legacy / backend wrapper class names that may not exist in UI runtime
+        if (module, name) in {
+            ("sharp_line_dashboard", "_CalAdapter"),
+            ("utils", "_CalAdapter"),
+            ("sharp_line_dashboard", "IsoWrapper"),
+            ("utils", "IsoWrapper"),
+        }:
+            return _PickleShim
+        if name == "IsoWrapper":
+            return _PickleShim
+        return super().find_class(module, name)
 
-
-
+def _safe_loads(b: bytes):
+    # Always use the custom unpickler (no duplicate definitions)
+    return _RenamingUnpickler(io.BytesIO(b)).load()
 
 def _to_df(x):
     if isinstance(x, pd.DataFrame): return x
@@ -14859,60 +14885,13 @@ def _to_df(x):
     try: return pd.DataFrame(x)
     except Exception: return pd.DataFrame()
 
-import io, pickle
+def _normalize_bundle(data: dict):
+    """
+    Accepts old + new payloads and returns a standardized bundle
+    your dashboard can consume.
+    """
 
-class _IsoWrapperShim:
-    """Minimal shim so old pickles referencing IsoWrapper can load."""
-    def __init__(self, model=None, calibrator=None):
-        self.model = model
-        self.calibrator = calibrator
-    # pickle will restore attributes; no other methods required here
-
-class _RenamingUnpickler(pickle.Unpickler):
-    def find_class(self, module, name):
-        # be permissive: ANY module with class name 'IsoWrapper' -> shim
-        if name == "IsoWrapper":
-            return _IsoWrapperShim
-        return super().find_class(module, name)
-
-def _safe_loads(b: bytes):
-    bio = io.BytesIO(b)
-    try:
-        return _RenamingUnpickler(bio).load()
-    except Exception:
-        bio.seek(0)
-        return pickle.loads(bio.read())
-
-def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
-    import io, pickle, logging, pandas as pd
-    from google.cloud import storage
-    
-    sport_l  = str(sport).lower()
-    market_l = str(market).lower()
-    fname    = f"sharp_win_model_{sport_l}_{market_l}.pkl"
-
-    client = storage.Client()
-    blob   = client.bucket(bucket_name).blob(fname)
-
-    try:
-        content = blob.download_as_bytes()
-    except Exception as e:
-        logging.warning(f"⚠️ No artifact: gs://{bucket_name}/{fname} ({e})")
-        return None
-
-    try:
-        data = _safe_loads(content)  # your saves don’t need IsoWrapper anymore
-        logging.info(f"✅ Loaded artifact: gs://{bucket_name}/{fname}")
-    except Exception as e:
-        logging.warning(f"⚠️ Failed to unpickle {fname}: {e}")
-        return None
-
-    # --- Normalize the dict ---
-    if not isinstance(data, dict):
-        logging.error(f"Unexpected payload type in {fname}: {type(data)}")
-        return None
-    # ✅ TIMING MODELS: saved as {"model": estimator, "feature_list": [...]}
-    # Return them directly instead of trying to normalize into the ensemble bundle.
+    # ---- Timing model style ----
     if ("model" in data) and ("feature_list" in data):
         return {
             "model": data.get("model"),
@@ -14921,33 +14900,72 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
             "sport": data.get("sport"),
         }
 
+    # ---- New single-model style (schema_version 2) ----
+    if "model" in data and ("model_logloss" not in data and "model_auc" not in data):
+        iso_blend = data.get("iso_blend") or (data.get("calibrator", {}) or {}).get("iso_blend")
+        # return in the same structure your predict_blended path expects
+        return {
+            "model_logloss": None,
+            "model_auc": None,
+            "best_w": float(data.get("best_w", 1.0)),
+            "feature_cols": data.get("feature_cols") or data.get("feature_list") or [],
+            "calibrator": {"iso_blend": iso_blend},
+            "flip_flag": bool(data.get("flip_flag", False) or data.get("global_flip", False) or (data.get("polarity", +1) == -1)),
+            "single_model": data.get("model"),
+            "team_feature_map": _to_df(data.get("team_feature_map")),
+            "book_reliability_map": _to_df(data.get("book_reliability_map")),
+        }
+
+    # ---- Old ensemble style ----
     iso_blend = data.get("iso_blend") or (data.get("calibrator", {}) or {}).get("iso_blend")
-    
-    bundle = {
+
+    return {
         "model_logloss": data.get("model_logloss"),
         "model_auc":     data.get("model_auc"),
         "best_w":        float(data.get("best_w", 1.0)),
         "feature_cols":  data.get("feature_cols") or [],
-    
-        # ✅ Make it match predict_blended() “NEW path”
         "calibrator": {"iso_blend": iso_blend},
-    
-        # ✅ Persist global polarity lock so P(win) is always correct
         "flip_flag": bool(
             data.get("flip_flag", False)
             or data.get("global_flip", False)
             or (data.get("polarity", +1) == -1)
         ),
-    
-        # keep these (your dashboard uses them)
-        "team_feature_map":     data.get("team_feature_map") if isinstance(data.get("team_feature_map"), pd.DataFrame) else pd.DataFrame(),
-        "book_reliability_map": data.get("book_reliability_map") if isinstance(data.get("book_reliability_map"), pd.DataFrame) else pd.DataFrame(),
+        "team_feature_map": _to_df(data.get("team_feature_map")),
+        "book_reliability_map": _to_df(data.get("book_reliability_map")),
     }
-    
-    return bundle
-   
 
+def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
+    sport_l  = str(sport).lower().strip()
+    market_l = str(market).lower().strip()
+    fname    = f"sharp_win_model_{sport_l}_{market_l}.pkl"
 
+    client = storage.Client()
+    blob   = client.bucket(bucket_name).blob(fname)
+
+    try:
+        content = blob.download_as_bytes()
+    except Exception as e:
+        # show real reason in logs
+        logging.warning(f"⚠️ GCS download failed: gs://{bucket_name}/{fname} ({type(e).__name__}: {e})")
+        return None
+
+    try:
+        raw = _safe_loads(content)
+    except Exception as e:
+        logging.warning(f"⚠️ Unpickle failed: {fname} ({type(e).__name__}: {e})")
+        return None
+
+    if not isinstance(raw, dict):
+        logging.warning(f"⚠️ Unexpected payload type in {fname}: {type(raw)}")
+        return None
+
+    try:
+        bundle = _normalize_bundle(raw)
+        logging.info(f"✅ Loaded artifact: gs://{bucket_name}/{fname}")
+        return bundle
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to normalize payload {fname}: ({type(e).__name__}: {e})")
+        return None
 
 def fetch_scored_picks_from_bigquery(limit=1000000):
     query = f"""
