@@ -29,9 +29,9 @@ def _base_prefix_from_progress_uri(progress_uri: str) -> Tuple[str, str]:
       - base/events/<ts_ms>-<rand>.json
     """
     bucket, path = _parse_gcs_uri(progress_uri)
-    if path.endswith(".jsonl"):
-        path = path[:-5]
-    return bucket, path.rstrip("/")
+    if path.lower().endswith(".jsonl"):
+        path = path[: -len(".jsonl")]
+    return bucket, path.strip("/")
 
 
 # -----------------------------
@@ -52,15 +52,16 @@ def list_event_blob_names(
     gcs_client: storage.Client,
     progress_uri: str,
     *,
-    limit: int = 80,
+    limit: int = 120,
 ) -> List[str]:
     """
-    List event object names under .../events/. We only need names (fast),
-    then we can fetch a small tail for display.
+    List event object names under .../events/.
+    Names are .../events/<ts_ms>-<rand>.json so lexicographic sort is chronological.
     """
     bucket_name, base = _base_prefix_from_progress_uri(progress_uri)
     prefix = f"{base}/events/"
     bucket = gcs_client.bucket(bucket_name)
+
     try:
         blobs = list(bucket.list_blobs(prefix=prefix))
     except Exception:
@@ -69,7 +70,7 @@ def list_event_blob_names(
     if not blobs:
         return []
 
-    blobs.sort(key=lambda b: b.name)  # chronological due to ts_ms prefix
+    blobs.sort(key=lambda b: b.name)
     blobs = blobs[-limit:]
     return [b.name for b in blobs]
 
@@ -91,22 +92,6 @@ def read_events_by_names(
         except Exception:
             out.append({"stage": "parse_error", "msg": f"Could not parse {name}"})
     return out
-
-
-# -----------------------------
-# Legacy JSONL reader (fallback)
-# -----------------------------
-def read_progress_lines_legacy_jsonl(gcs_client: storage.Client, uri: str, max_lines: int = 200):
-    bucket_name, path = _parse_gcs_uri(uri)
-    blob = gcs_client.bucket(bucket_name).blob(path)
-    try:
-        if not blob.exists():
-            return []
-        data = blob.download_as_text()
-        lines = [ln for ln in data.splitlines() if ln.strip()]
-        return lines[-max_lines:]
-    except Exception:
-        return []
 
 
 # -----------------------------
@@ -157,10 +142,14 @@ with st.expander("⚙️ Display options", expanded=False):
     log_tail = st.slider("Log tail (events)", min_value=20, max_value=200, value=60, step=10)
 
 col1, col2 = st.columns([1, 1])
+
 with col1:
     if st.button("🚀 Start Training Job"):
         exec_id = str(uuid.uuid4())[:8]
-        progress_uri = f"gs://{PROGRESS_BUCKET}/progress/{sport}_{market}_{exec_id}.jsonl"
+
+        # ✅ IMPORTANT: match what your Cloud Run job/logs use
+        # gs://sharp-models/train-progress/NBA/spreads/<exec_id>.jsonl
+        progress_uri = f"gs://{PROGRESS_BUCKET}/train-progress/{sport}/{market}/{exec_id}.jsonl"
 
         st.session_state.exec_id = exec_id
         st.session_state.progress_uri = progress_uri
@@ -197,25 +186,16 @@ if not st.session_state.progress_uri:
     st.stop()
 
 progress_uri = st.session_state.progress_uri
+bucket_name, base = _base_prefix_from_progress_uri(progress_uri)
+
 st.caption(f"Progress target: {progress_uri}")
+st.caption(f"Polling latest: gs://{bucket_name}/{base}/latest.json")
+st.caption(f"Polling events: gs://{bucket_name}/{base}/events/")
 
 gcs = storage.Client()
 
+# Option A only (no legacy fallback — avoids getting stuck on stale queued JSONL)
 latest = read_latest_event(gcs, progress_uri)
-
-# If Option A has nothing yet, fall back to legacy JSONL (transition-safe)
-events: List[Dict] = []
-if latest is None:
-    lines = read_progress_lines_legacy_jsonl(gcs, progress_uri, max_lines=200)
-    if lines:
-        parsed = []
-        for ln in lines:
-            try:
-                parsed.append(json.loads(ln))
-            except Exception:
-                parsed.append({"stage": "parse_error", "msg": ln})
-        events = parsed
-        latest = parsed[-1] if parsed else None
 
 # ---- Render "latest" (fast path) ----
 if latest:
@@ -237,29 +217,16 @@ if latest:
     else:
         st.info(msg)
 else:
-    st.info("No progress yet… (job may still be starting)")
+    st.warning("No latest.json yet… (job may still be starting)")
 
-# ---- Render event tail (optional; avoids heavy work each refresh) ----
+# ---- Render event tail (optional) ----
 if show_log:
-    bucket_name, _ = _parse_gcs_uri(progress_uri)
-
-    # Cache the list of recent event blob names for 2 seconds to match your refresh cadence
-    @st.cache_data(ttl=2.0, show_spinner=False)
-    def _cached_event_names(uri: str, limit: int) -> List[str]:
-        return list_event_blob_names(gcs, uri, limit=limit)
-
-    names = _cached_event_names(progress_uri, log_tail)
-
+    names = list_event_blob_names(gcs, progress_uri, limit=log_tail)
     if names:
-        # Download only the tail we want
         tail_events = read_events_by_names(gcs, bucket_name, names[-log_tail:])
         st.code("\n".join(json.dumps(e, default=str) for e in tail_events[-40:]), language="json")
     else:
-        # If we’re in legacy mode, show the legacy parsed events (already loaded)
-        if events:
-            st.code("\n".join(json.dumps(e, default=str) for e in events[-40:]), language="json")
-        else:
-            st.caption("No event objects found yet.")
+        st.caption("No event objects found yet.")
 
 # -----------------------------
 # Refresh controls
