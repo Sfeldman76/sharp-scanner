@@ -16558,25 +16558,27 @@ if not HEADLESS:
         key=f"train_market_choice_{sport}",
     )
 
+    
+    # -----------------------------
     # --- If training, pause scanner + stop page from doing anything expensive ---
+    # -----------------------------
     if st.session_state.get("is_training", False) or st.session_state.get("pause_refresh_lock", False):
         st.info("⏳ Training in progress… scanner/refresh is paused.")
-
+    
         exec_name = st.session_state.get("train_execution_name")
         if exec_name:
             try:
                 exec_obj = get_execution_with_rest(execution_name=exec_name, region=REGION)
                 state = execution_state(exec_obj)
                 st.write(f"**Cloud Run status:** {state}")
-
+    
                 exec_id = exec_name.split("/")[-1]
-                # Console URL that reliably opens the execution list filtered by job.
                 st.markdown(
                     f"[Open Cloud Run job executions]"
                     f"(https://console.cloud.google.com/run/jobs/details/{REGION}/{JOB_NAME}/executions?project={PROJECT_ID})"
                 )
                 st.caption(f"Execution: {exec_id}")
-
+    
                 if state in ("SUCCEEDED", "FAILED"):
                     if state == "SUCCEEDED":
                         st.success("✅ Cloud Run execution succeeded")
@@ -16584,90 +16586,159 @@ if not HEADLESS:
                         st.error("❌ Cloud Run execution failed (check logs)")
                     st.session_state["pause_refresh_lock"] = False
                     st.session_state["is_training"] = False
-
+    
             except Exception as e:
                 st.warning(f"Could not fetch Cloud Run status yet: {e}")
         else:
             st.info("Cloud Run execution id not available yet (job may still be starting).")
-
+    
         progress_uri = st.session_state.get("train_progress_uri")
         if progress_uri:
             st.caption(f"Progress: {progress_uri}")
+    
             gcs = storage.Client()
-            lines = read_progress_lines(gcs, progress_uri, max_lines=200)
-
-            if lines:
+    
+            # -----------------------------
+            # Option A reader (latest.json + events/)
+            # -----------------------------
+            def _parse_gcs_uri(uri: str):
+                assert uri.startswith("gs://")
+                rest = uri[5:]
+                b, p = rest.split("/", 1)
+                return b, p
+    
+            def _base_prefix_from_progress_uri(uri: str):
+                b, p = _parse_gcs_uri(uri)
+                p = p.rstrip("/")
+                lp = p.lower()
+                if lp.endswith(".jsonl"):
+                    p = p[:-len(".jsonl")]
+                elif lp.endswith(".json"):
+                    p = p[:-len(".json")]
+                return b, p.rstrip("/")
+    
+            bucket_name, base = _base_prefix_from_progress_uri(progress_uri)
+            bucket = gcs.bucket(bucket_name)
+    
+            latest_blob = bucket.blob(f"{base}/latest.json")
+            latest = None
+            if latest_blob.exists():
                 try:
-                    events = [json.loads(ln) for ln in lines]
-                    last = events[-1]
+                    latest = json.loads(latest_blob.download_as_text())
                 except Exception:
-                    last = {"stage": "parse_error", "msg": lines[-1]}
-
-                pct = last.get("pct")
+                    latest = None
+    
+            # If latest.json doesn't exist yet, show a helpful message (don't fall back to JSONL,
+            # because JSONL is now only a bootstrap placeholder and will stay "queued" forever.)
+            if not latest:
+                st.info("No latest.json yet… (job may still be starting).")
+            else:
+                pct = latest.get("pct")
                 if pct is not None:
                     try:
                         st.progress(max(0.0, min(1.0, float(pct))))
                     except Exception:
                         pass
-
-                st.code("\n".join(lines[-40:]), language="json")
-
-                stage = last.get("stage")
+    
+                stage = latest.get("stage")
+                msg = latest.get("msg", "")
+    
                 if stage == "done":
                     st.success("✅ Training complete")
                     st.session_state["pause_refresh_lock"] = False
                     st.session_state["is_training"] = False
                 elif stage == "error":
-                    st.error(f"❌ Training error: {last.get('msg')}")
+                    st.error(f"❌ Training error: {msg}")
                     st.session_state["pause_refresh_lock"] = False
                     st.session_state["is_training"] = False
-            else:
-                st.info("No progress events yet… (job may still be starting)")
-
+                else:
+                    st.info(msg)
+    
+                # Optional: show recent event log tail from events/
+                try:
+                    show_tail = st.checkbox("Show progress log", value=True, key=f"show_progress_log_{base}")
+                    if show_tail:
+                        prefix = f"{base}/events/"
+                        blobs = list(bucket.list_blobs(prefix=prefix))
+                        blobs.sort(key=lambda b: b.name)
+                        blobs = blobs[-60:]  # limit downloads
+                        tail = []
+                        for b in blobs[-40:]:
+                            try:
+                                tail.append(json.loads(b.download_as_text()))
+                            except Exception:
+                                tail.append({"stage": "parse_error", "msg": f"Could not parse {b.name}"})
+                        st.code("\n".join(json.dumps(e, default=str) for e in tail), language="json")
+                except Exception as e:
+                    st.caption(f"(Could not load event log tail: {e})")
+    
+            # -----------------------------
+            # Refresh loop (kept as-is to match your existing dashboard behavior)
+            # -----------------------------
             time.sleep(2)
             st.rerun()
-
+    
         st.stop()
 
     # ✅ Single train button (unique key per sport + choice)
     train_key = f"train::{sport}::{market_choice}"
-
+    
     if st.button(f"📈 Train {sport} Sharp Model", key=train_key):
-        # lock UI immediately
+    
+        # Lock UI immediately
         st.session_state["is_training"] = True
         st.session_state["pause_refresh_lock"] = True
-
+    
         exec_id = str(uuid.uuid4())[:8]
-
+    
         progress_uri = (
             f"gs://{PROGRESS_BUCKET}/train-progress/"
             f"{sport}/{market_choice}/{exec_id}.jsonl"
         )
-
+    
         st.session_state["train_exec_id"] = exec_id
         st.session_state["train_progress_uri"] = progress_uri
         st.session_state["train_sport"] = sport
         st.session_state["train_market"] = market_choice
         st.session_state["train_execution_name"] = None
-
-        # Bootstrap progress line so the very next rerun shows something
+    
+        # -------------------------------------------------------
+        # ✅ Bootstrap progress using Option A (latest.json)
+        # -------------------------------------------------------
         try:
             gcs = storage.Client()
+    
+            # progress_uri = gs://bucket/train-progress/<sport>/<market>/<exec_id>.jsonl
             bucket_name = progress_uri[5:].split("/", 1)[0]
-            path = progress_uri[5:].split("/", 1)[1]
-            blob = gcs.bucket(bucket_name).blob(path)
-            blob.upload_from_string(
+            path = progress_uri[5:].split("/", 1)[1].rstrip("/")
+    
+            # Strip extension to get base prefix
+            lower = path.lower()
+            if lower.endswith(".jsonl"):
+                base = path[:-len(".jsonl")]
+            elif lower.endswith(".json"):
+                base = path[:-len(".json")]
+            else:
+                base = path
+    
+            latest_blob = gcs.bucket(bucket_name).blob(f"{base}/latest.json")
+    
+            latest_blob.upload_from_string(
                 json.dumps({
                     "stage": "queued",
                     "pct": 0.01,
                     "msg": f"Queued job exec_id={exec_id} sport={sport} market={market_choice}",
                     "ts": time.time()
-                }) + "\n",
+                }),
                 content_type="application/json"
             )
+    
         except Exception:
             pass
-
+    
+        # -------------------------------------------------------
+        # Start Cloud Run Job
+        # -------------------------------------------------------
         try:
             env = {
                 "SPORT": sport,
@@ -16677,25 +16748,27 @@ if not HEADLESS:
                 "MODEL_BUCKET": MODEL_BUCKET,
                 "HEADLESS": "1",
             }
-
+    
             run_resp = start_job_with_rest(
                 job_name=JOB_NAME,
                 region=REGION,
                 project_id=PROJECT_ID,
                 env=env,
             )
-
+    
             exec_name = _extract_execution_name(run_resp)
             st.session_state["train_execution_name"] = exec_name
-
+    
             st.rerun()
             st.stop()
-
+    
         except Exception as e:
             st.session_state["pause_refresh_lock"] = False
             st.session_state["is_training"] = False
             st.error(f"Failed to start job: {e}")
             st.stop()
+
+       
 
     # -----------------------------
     # Scanner run (only if not paused)
