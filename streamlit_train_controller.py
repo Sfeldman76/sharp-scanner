@@ -1,4 +1,5 @@
 # streamlit_train_controller.py
+# streamlit_train_controller.py
 import json
 import time
 import uuid
@@ -22,12 +23,6 @@ def _parse_gcs_uri(uri: str) -> Tuple[str, str]:
 
 
 def _base_prefix_from_progress_uri(progress_uri: str) -> Tuple[str, str]:
-    """
-    Option A writer treats gs://bucket/path/run.jsonl as base prefix gs://bucket/path/run
-    and stores:
-      - base/latest.json
-      - base/events/<ts_ms>-<rand>.json
-    """
     bucket, path = _parse_gcs_uri(progress_uri)
     if path.lower().endswith(".jsonl"):
         path = path[: -len(".jsonl")]
@@ -48,47 +43,26 @@ def read_latest_event(gcs_client: storage.Client, progress_uri: str) -> Optional
         return None
 
 
-def list_event_blob_names(
-    gcs_client: storage.Client,
-    progress_uri: str,
-    *,
-    limit: int = 120,
-) -> List[str]:
-    """
-    List event object names under .../events/.
-    Names are .../events/<ts_ms>-<rand>.json so lexicographic sort is chronological.
-    """
+def list_event_blob_names(gcs_client: storage.Client, progress_uri: str, *, limit: int = 120) -> List[str]:
     bucket_name, base = _base_prefix_from_progress_uri(progress_uri)
     prefix = f"{base}/events/"
     bucket = gcs_client.bucket(bucket_name)
-
     try:
         blobs = list(bucket.list_blobs(prefix=prefix))
     except Exception:
         return []
-
     if not blobs:
         return []
-
-    blobs.sort(key=lambda b: b.name)
-    blobs = blobs[-limit:]
-    return [b.name for b in blobs]
+    blobs.sort(key=lambda b: b.name)  # chronological
+    return [b.name for b in blobs[-limit:]]
 
 
-def read_events_by_names(
-    gcs_client: storage.Client,
-    bucket_name: str,
-    blob_names: List[str],
-) -> List[Dict]:
-    """
-    Download + parse a small set of event JSON blobs.
-    """
+def read_events_by_names(gcs_client: storage.Client, bucket_name: str, blob_names: List[str]) -> List[Dict]:
     bucket = gcs_client.bucket(bucket_name)
     out: List[Dict] = []
     for name in blob_names:
         try:
-            txt = bucket.blob(name).download_as_text()
-            out.append(json.loads(txt))
+            out.append(json.loads(bucket.blob(name).download_as_text()))
         except Exception:
             out.append({"stage": "parse_error", "msg": f"Could not parse {name}"})
     return out
@@ -98,10 +72,6 @@ def read_events_by_names(
 # Cloud Run Jobs REST trigger
 # -----------------------------
 def start_job_with_rest(*, job_name: str, region: str, project_id: str, env: dict):
-    """
-    Trigger Cloud Run Job execution via REST and override container env vars.
-    Works when Streamlit itself is running on Cloud Run (no gcloud needed).
-    """
     creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     session = AuthorizedSession(creds)
 
@@ -135,46 +105,37 @@ st.session_state.setdefault("progress_uri", None)
 
 sport = st.selectbox("Sport", ["NBA", "NFL", "NCAAB", "WNBA", "NCAAF", "MLB"], index=0)
 market = st.selectbox("Market", ["All", "spreads", "h2h", "totals"], index=0)
+
 auto = st.checkbox("Auto-refresh", value=True)
+refresh_s = st.slider("Refresh interval (seconds)", 1, 10, 2)
 
 with st.expander("⚙️ Display options", expanded=False):
-    show_log = st.checkbox("Show event log (downloads recent events)", value=True)
+    show_log = st.checkbox("Show event log", value=True)
     log_tail = st.slider("Log tail (events)", min_value=20, max_value=200, value=60, step=10)
 
-col1, col2 = st.columns([1, 1])
+# Show a tick so you can SEE reruns happening
+st.caption(f"UI tick: {time.strftime('%H:%M:%S')}")
 
+col1, col2 = st.columns([1, 1])
 with col1:
     if st.button("🚀 Start Training Job"):
         exec_id = str(uuid.uuid4())[:8]
 
-        # ✅ IMPORTANT: match what your Cloud Run job/logs use
-        # gs://sharp-models/train-progress/NBA/spreads/<exec_id>.jsonl
+        # ✅ Match your job/log convention
         progress_uri = f"gs://{PROGRESS_BUCKET}/train-progress/{sport}/{market}/{exec_id}.jsonl"
 
         st.session_state.exec_id = exec_id
         st.session_state.progress_uri = progress_uri
 
-        env = {
-            "SPORT": sport,
-            "MARKET": market,
-            "PROGRESS_URI": progress_uri,
-        }
-
+        env = {"SPORT": sport, "MARKET": market, "PROGRESS_URI": progress_uri}
         try:
-            start_job_with_rest(
-                job_name=JOB_NAME,
-                region=REGION,
-                project_id=PROJECT_ID,
-                env=env,
-            )
+            start_job_with_rest(job_name=JOB_NAME, region=REGION, project_id=PROJECT_ID, env=env)
             st.success("Training job started 🚀")
         except Exception as e:
             st.error(f"Failed to start job: {e}")
 
 with col2:
-    st.write("")
-    st.write("")
-    st.caption("This triggers the Cloud Run Job via REST (works on Cloud Run; no gcloud needed).")
+    st.caption("Triggers the Cloud Run Job via REST (works on Cloud Run; no gcloud needed).")
 
 st.divider()
 
@@ -183,50 +144,45 @@ st.divider()
 # -----------------------------
 if not st.session_state.progress_uri:
     st.info("Start a job to see progress here.")
-    st.stop()
-
-progress_uri = st.session_state.progress_uri
-bucket_name, base = _base_prefix_from_progress_uri(progress_uri)
-
-st.caption(f"Progress target: {progress_uri}")
-st.caption(f"Polling latest: gs://{bucket_name}/{base}/latest.json")
-st.caption(f"Polling events: gs://{bucket_name}/{base}/events/")
-
-gcs = storage.Client()
-
-# Option A only (no legacy fallback — avoids getting stuck on stale queued JSONL)
-latest = read_latest_event(gcs, progress_uri)
-
-# ---- Render "latest" (fast path) ----
-if latest:
-    pct = latest.get("pct")
-    if pct is not None:
-        try:
-            st.progress(max(0.0, min(1.0, float(pct))))
-        except Exception:
-            pass
-
-    stage = latest.get("stage")
-    msg = latest.get("msg", "")
-
-    if stage == "done":
-        st.success("Job finished ✅")
-        st.caption("Tip: start another job to retrain a different sport/market.")
-    elif stage == "error":
-        st.error(f"Job error: {msg}")
-    else:
-        st.info(msg)
 else:
-    st.warning("No latest.json yet… (job may still be starting)")
+    progress_uri = st.session_state.progress_uri
+    bucket_name, base = _base_prefix_from_progress_uri(progress_uri)
 
-# ---- Render event tail (optional) ----
-if show_log:
-    names = list_event_blob_names(gcs, progress_uri, limit=log_tail)
-    if names:
-        tail_events = read_events_by_names(gcs, bucket_name, names[-log_tail:])
-        st.code("\n".join(json.dumps(e, default=str) for e in tail_events[-40:]), language="json")
+    st.caption(f"Progress target: {progress_uri}")
+    st.caption(f"Polling latest: gs://{bucket_name}/{base}/latest.json")
+    st.caption(f"Polling events: gs://{bucket_name}/{base}/events/")
+
+    gcs = storage.Client()
+    latest = read_latest_event(gcs, progress_uri)
+
+    if latest:
+        pct = latest.get("pct")
+        if pct is not None:
+            try:
+                st.progress(max(0.0, min(1.0, float(pct))))
+            except Exception:
+                pass
+
+        stage = latest.get("stage")
+        msg = latest.get("msg", "")
+
+        if stage == "done":
+            st.success("Job finished ✅")
+        elif stage == "error":
+            st.error(f"Job error: {msg}")
+        else:
+            st.info(msg)
     else:
-        st.caption("No event objects found yet.")
+        st.warning("No latest.json yet… (job may still be starting)")
+
+    if show_log:
+        names = list_event_blob_names(gcs, progress_uri, limit=log_tail)
+        if names:
+            tail_events = read_events_by_names(gcs, bucket_name, names[-log_tail:])
+            st.code("\n".join(json.dumps(e, default=str) for e in tail_events[-40:]), language="json")
+        else:
+            st.caption("No event objects found yet.")
+
 
 # -----------------------------
 # Refresh controls
@@ -234,6 +190,17 @@ if show_log:
 if st.button("🔄 Refresh now"):
     st.rerun()
 
+# ✅ Safe-ish auto refresh without sleep-looping the app forever:
+# Use query params to trigger reruns (Streamlit supports this reliably).
 if auto:
-    time.sleep(2)
-    st.rerun()
+    # This causes the browser to request the page again after N seconds.
+    st.markdown(
+        f"""
+        <script>
+        setTimeout(function() {{
+            window.location.reload();
+        }}, {refresh_s * 1000});
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
