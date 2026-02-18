@@ -3119,20 +3119,20 @@ def _cv_auc_for_feature_set(
                             "auc_fold_mean": float("nan"),
                         }
 
+
         auc_fold_mean = float(np.mean(auc_fold_vals)) if auc_fold_vals else float("nan")
 
-        # AUC used in score
+        # choose which AUC to use
         if stable_auc == "fold_mean":
             auc_used = auc_fold_mean
         else:
             if oof is None:
-                # should not happen, but guard
                 auc_used = float("nan")
             else:
                 valid = np.isfinite(oof)
                 y_v = y[valid]
                 p_v = np.clip(oof[valid].astype(float), eps, 1 - eps)
-                auc_used = roc_auc_score(y_v, p_v) if (len(y_v) >= 2 and len(np.unique(y_v)) >= 2) else np.nan
+                auc_used = roc_auc_score(y_v, p_v) if (len(y_v) >= 2 and len(np.unique(y_v)) >= 2) else float("nan")
 
         # ll/brier from OOF if requested
         if compute_ll_brier:
@@ -3149,18 +3149,21 @@ def _cv_auc_for_feature_set(
             ll = float("nan")
             br = float("nan")
 
-        score = (auc_weight * float(auc_used))
-        if compute_ll_brier:
-            score = score - (ll_weight * float(ll)) - (brier_weight * float(br))
+        # ✅ robust score (never NaN -> -inf)
+        score = float("-inf")
+        if np.isfinite(auc_used):
+            score = (auc_weight * float(auc_used))
+            if compute_ll_brier and np.isfinite(ll) and np.isfinite(br):
+                score = score - (ll_weight * float(ll)) - (brier_weight * float(br))
 
         return {
             "oof_proba": (oof.astype(float) if (return_oof and oof is not None) else None),
-            "auc": float(auc_used) if np.isfinite(auc_used) else float("nan"),
-            "logloss": float(ll) if compute_ll_brier else float("nan"),
-            "brier": float(br) if compute_ll_brier else float("nan"),
-            "score": float(score) if np.isfinite(score) else float("-inf"),
-            "aborted": False,
+            "auc": float(auc_used),
             "auc_fold_mean": float(auc_fold_mean),
+            "logloss": float(ll),
+            "brier": float(br),
+            "score": float(score),
+            "aborted": False,
         }
 
     # -----------------------------
@@ -3329,17 +3332,34 @@ def _auto_select_k_by_auc(
     rescue_every: int = 20,
     rescue_pool: int = 60,
 
+    # ✅ NEW: interaction-friendly acceptance
+    interaction_admit: bool = True,
+    early_relax_k: int = 10,            # first N accepts are allowed to be near-ties
+    near_tie_auc: float = 2e-4,         # allow tiny AUC dip early to enable interactions
+    near_tie_score: float = 2e-4,       # same idea if accept_metric="score"
+    early_ll_cap: float = 0.40,         # looser early calibration caps
+    early_brier_cap: float = 0.12,
+    pair_rescue: bool = True,
+    pair_top: int = 6,                  # try pairs among top-N quick-ranked
+
     allow_backward: bool = True,
     backward_every: int = 5,
     backward_min_gain: float = 0.0,
     max_backward_steps: int = 2,
     accept_on_score: bool = False,
 ):
+    """
+    Forward-selection with:
+      - quick fold-mean ranking to pick candidates
+      - full CV only on top-N candidates
+      - interaction admit (near-ties early) + optional pair rescue
+      - optional periodic backward drops
+
+    NOTE: This block assumes _cv_auc_for_feature_set(...) exists and returns dict with keys:
+      auc, score, logloss, brier, auc_fold_mean, etc.
+    """
     import time
     import numpy as np
-    import pandas as pd
-    from sklearn.base import clone
-    from sklearn.metrics import roc_auc_score, log_loss
 
     t0 = time.time()
     y_arr = np.asarray(y, int).reshape(-1)
@@ -3373,9 +3393,12 @@ def _auto_select_k_by_auc(
     min_k = int(max(len(mk), min(int(min_k), max_k)))
 
     if verbose:
-        log_func(f"[AUTO-FEAT] seed(min_k)={min_k} must_keep={len(mk)} max_k={max_k} candidates={len(ordered)} backend_mode={backend_mode}")
+        log_func(
+            f"[AUTO-FEAT] seed(min_k)={min_k} must_keep={len(mk)} "
+            f"max_k={max_k} candidates={len(ordered)} backend_mode={backend_mode}"
+        )
 
-    # ---- evaluate ALL + baseline (OK but can be capped by caller; leaving as-is) ----
+    # ---- evaluate ALL + baseline (kept; caller can cap by max_total_evals/time_budget if needed) ----
     all_feats = list(ordered)
     all_res = _cv_auc_for_feature_set(
         model_proto, X, y_arr, folds, all_feats,
@@ -3418,6 +3441,9 @@ def _auto_select_k_by_auc(
                 f"Δll={lift_ll:+.4f}"
             )
 
+    # -----------------------------
+    # Metric + acceptance helpers
+    # -----------------------------
     def _metric(res):
         if res is None:
             return float("-inf") if accept_metric == "score" else float("nan")
@@ -3425,19 +3451,52 @@ def _auto_select_k_by_auc(
             return float(res.get("score", float("-inf")))
         return float(res.get("auc", float("nan")))
 
-    def _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br):
-        ll_ok = (not np.isfinite(ll_try)) or (not np.isfinite(best_ll)) or (ll_try <= float(best_ll) + float(max_ll_increase))
-        br_ok = (not np.isfinite(br_try)) or (not np.isfinite(best_br)) or (br_try <= float(best_br) + float(max_brier_increase))
+    def _accept_ok(res_try, best_res, *, phase_k: int) -> bool:
+        """
+        phase_k = number of already-accepted (non-must-keep) features.
+        """
+        if res_try is None:
+            return False
+
+        v_try = _metric(res_try)
+        ll_try = float(res_try.get("logloss", np.nan))
+        br_try = float(res_try.get("brier", np.nan))
+
+        v_best = _metric(best_res) if best_res is not None else float("nan")
+        ll_best = float(best_res.get("logloss", np.nan)) if best_res is not None else float("nan")
+        br_best = float(best_res.get("brier", np.nan)) if best_res is not None else float("nan")
+
+        if not np.isfinite(v_try):
+            return False
+
+        # ---- adaptive caps (looser early to allow interaction scaffolding) ----
+        ll_cap = float(early_ll_cap if (interaction_admit and phase_k < int(early_relax_k)) else max_ll_increase)
+        br_cap = float(early_brier_cap if (interaction_admit and phase_k < int(early_relax_k)) else max_brier_increase)
+
+        ll_ok = (not np.isfinite(ll_try)) or (not np.isfinite(ll_best)) or (ll_try <= ll_best + ll_cap)
+        br_ok = (not np.isfinite(br_try)) or (not np.isfinite(br_best)) or (br_try <= br_best + br_cap)
         if not (ll_ok and br_ok):
             return False
-        if not np.isfinite(val_try):
-            return False
-        if not np.isfinite(best_val):
-            return True
-        return bool(val_try >= float(best_val) + float(min_improve))
 
-    # ✅ QUICK evaluator: fold-mean AUC on a few folds (fast ranking; consistent with your CV helper)
-    def _cv_quick_auc(feature_list):
+        # ---- normal accept: must improve by min_improve ----
+        if not np.isfinite(v_best):
+            return True
+
+        if v_try >= v_best + float(min_improve):
+            return True
+
+        # ---- interaction admit: allow near-ties early ----
+        if interaction_admit and phase_k < int(early_relax_k):
+            if accept_metric == "score":
+                return bool(v_try >= v_best - float(near_tie_score))
+            return bool(v_try >= v_best - float(near_tie_auc))
+
+        return False
+
+    # -----------------------------
+    # Quick + Full evaluators
+    # -----------------------------
+    def _cv_quick_auc(feature_list) -> float:
         if not quick_screen:
             return float("nan")
         res = _cv_auc_for_feature_set(
@@ -3447,14 +3506,13 @@ def _auto_select_k_by_auc(
             return_oof=False,
             cv_mode="quick",
             quick_folds_n=int(max(1, quick_folds)),
-            compute_ll_brier=False,           # fast
-            stable_auc="fold_mean",          # stable ranking
+            compute_ll_brier=False,      # fast
+            stable_auc="fold_mean",      # stable ranking
             backend_mode=True,
             early_stop_rounds=early_stop_rounds,
         )
         return float(res.get("auc_fold_mean", np.nan))
 
-    # ✅ FULL evaluator: your existing thorough eval (still fold-based, ll/brier)
     def _cv_full(feature_list):
         return _cv_auc_for_feature_set(
             model_proto, X, y_arr, folds, list(feature_list),
@@ -3463,7 +3521,7 @@ def _auto_select_k_by_auc(
             return_oof=False,
             cv_mode="full",
             compute_ll_brier=True,
-            stable_auc="oof",                # report AUC like before
+            stable_auc="oof",
             backend_mode=True,
             early_stop_rounds=early_stop_rounds,
         )
@@ -3474,56 +3532,65 @@ def _auto_select_k_by_auc(
     accepted = list(mk)
     accepted_set = set(accepted)
     flip_map = {}
-    rejects_in_row = 0
 
-    # start score
+    rejects_in_row = 0
+    evals_done = 0
+    accept_count = 0
+
     best_res = _cv_full(accepted) if accepted else None
     best_val = _metric(best_res)
-    best_ll = float(best_res.get("logloss", np.nan)) if best_res is not None else float("nan")
-    best_br = float(best_res.get("brier", np.nan)) if best_res is not None else float("nan")
 
     if verbose:
-        log_func(f"[AUTO-FEAT] start: k={len(accepted)} best_{accept_metric}={best_val if np.isfinite(best_val) else float('nan'):.6f}")
+        log_func(
+            f"[AUTO-FEAT] start: k={len(accepted)} "
+            f"best_{accept_metric}={best_val if np.isfinite(best_val) else float('nan'):.6f}"
+        )
 
     remaining = [f for f in ordered if f not in accepted_set]
     if not remaining:
         return accepted, best_res, {"done": True, "accepted": accepted, "best_res": best_res, "flip_map": flip_map}
 
-    evals_done = 0
-    accept_count = 0
-
+    # -----------------------------
+    # Main loop
+    # -----------------------------
     while remaining and len(accepted) < max_k:
         if max_total_evals is not None and evals_done >= int(max_total_evals):
             break
         if (time.time() - t0) >= float(time_budget_s):
             break
-        if (not force_full_scan) and (len(accepted) >= min_k) and (rejects_in_row >= int(patience)):
+
+        # do not early-stop until we have at least min_accepts (or min_k) accepted
+        if (not force_full_scan) and (len(accepted) >= max(min_k, int(min_accepts))) and (rejects_in_row >= int(patience)):
             break
 
         batch_n = int(max(1, candidate_batch))
         pool = remaining[:batch_n]
 
+        # rescue: widen pool occasionally if stuck
         if rejects_in_row >= int(rescue_every) and len(remaining) > batch_n:
             rng = np.random.default_rng(42 + rejects_in_row)
             wider = remaining[: int(min(len(remaining), max(rescue_pool, batch_n * 3)))]
             head = remaining[: max(2, batch_n // 3)]
-            rand = list(rng.choice(wider, size=batch_n - len(head), replace=False))
+            need = max(0, batch_n - len(head))
+            rand = list(rng.choice(wider, size=need, replace=False)) if need > 0 and len(wider) >= need else []
             pool = list(dict.fromkeys(head + rand))
 
-        # ✅ QUICK-RANK the pool
+        # QUICK rank
         quick_scores = []
         for feat in pool:
             qs = _cv_quick_auc(accepted + [feat])
             quick_scores.append((feat, qs))
         quick_scores.sort(key=lambda t: (np.nan_to_num(t[1], nan=-1e9)), reverse=True)
 
-        # ✅ FULL-EVAL only top-N (plus 1 safety)
+        # FULL eval only top-N quick-ranked
         topN = int(max(1, full_eval_top))
         eval_list = [t[0] for t in quick_scores[:topN]]
 
         best_feat = None
         best_trial_res = None
         best_trial_val = best_val
+
+        phase_k = max(0, len([f for f in accepted if f not in mk]))
 
         for feat in eval_list:
             if max_total_evals is not None and evals_done >= int(max_total_evals):
@@ -3534,46 +3601,81 @@ def _auto_select_k_by_auc(
             res_try = _cv_full(accepted + [feat])
             evals_done += 1
 
-            val_try = _metric(res_try)
-            ll_try = float(res_try.get("logloss", np.nan))
-            br_try = float(res_try.get("brier", np.nan))
-
-            if _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br):
-                if (best_feat is None) or (np.isfinite(val_try) and (not np.isfinite(best_trial_val) or val_try > best_trial_val)):
+            if _accept_ok(res_try, best_res, phase_k=phase_k):
+                v_try = _metric(res_try)
+                if (best_feat is None) or (
+                    np.isfinite(v_try) and (not np.isfinite(best_trial_val) or v_try > best_trial_val)
+                ):
                     best_feat = feat
                     best_trial_res = res_try
-                    best_trial_val = float(val_try)
+                    best_trial_val = float(v_try)
 
+        # If nothing acceptable as a single feature, try pairs
+        if best_feat is None and pair_rescue and len(quick_scores) >= 2:
+            top_feats = [t[0] for t in quick_scores[: int(max(2, pair_top))]]
+
+            pair_best = None
+            pair_best_res = None
+            pair_best_val = best_val
+
+            for i in range(len(top_feats)):
+                for j in range(i + 1, len(top_feats)):
+                    f1, f2 = top_feats[i], top_feats[j]
+                    if f1 in accepted_set or f2 in accepted_set:
+                        continue
+
+                    if max_total_evals is not None and evals_done >= int(max_total_evals):
+                        break
+                    if (time.time() - t0) >= float(time_budget_s):
+                        break
+
+                    res_pair = _cv_full(accepted + [f1, f2])
+                    evals_done += 1
+
+                    if _accept_ok(res_pair, best_res, phase_k=phase_k):
+                        v_pair = _metric(res_pair)
+                        if (pair_best is None) or (
+                            np.isfinite(v_pair) and (not np.isfinite(pair_best_val) or v_pair > pair_best_val)
+                        ):
+                            pair_best = (f1, f2)
+                            pair_best_res = res_pair
+                            pair_best_val = float(v_pair)
+
+            if pair_best is not None:
+                f1, f2 = pair_best
+                for f in (f1, f2):
+                    accepted.append(f)
+                    accepted_set.add(f)
+                    try:
+                        remaining.remove(f)
+                    except ValueError:
+                        pass
+
+                best_res = pair_best_res
+                best_val = float(pair_best_val)
+                rejects_in_row = 0
+                accept_count += 2
+
+                if verbose:
+                    log_func(
+                        f"[AUTO-FEAT] 🤝 pair-accept +{f1} +{f2} -> {accept_metric}={best_val:.6f} "
+                        f"k={len(accepted)} evals={evals_done}"
+                    )
+                continue  # next while iteration
+
+        # If still nothing accepted, reject & advance
         if best_feat is None:
-            # reject the head (keep moving)
             remaining.pop(0)
             rejects_in_row += 1
 
-            # ✅ if we’re “stuck” but have accepted too few, loosen by accepting top quick-ranked
-            if (len(accepted) < int(max(min_k, min_accepts))) and quick_scores:
-                # take the best quick candidate and full-eval it (already did for topN),
-                # if none accepted, accept anyway if it doesn't catastrophically break ll/brier
-                fallback_feat = quick_scores[0][0]
-                if fallback_feat not in accepted_set:
-                    res_fb = _cv_full(accepted + [fallback_feat])
-                    evals_done += 1
-                    ll_fb = float(res_fb.get("logloss", np.nan))
-                    br_fb = float(res_fb.get("brier", np.nan))
-                    v_fb = _metric(res_fb)
-
-                    ll_ok = (not np.isfinite(ll_fb)) or (not np.isfinite(best_ll)) or (ll_fb <= float(best_ll) + float(max_ll_increase))
-                    br_ok = (not np.isfinite(br_fb)) or (not np.isfinite(best_br)) or (br_fb <= float(best_br) + float(max_brier_increase))
-                    if ll_ok and br_ok and np.isfinite(v_fb):
-                        best_feat = fallback_feat
-                        best_trial_res = res_fb
-                        best_trial_val = float(v_fb)
-
             if debug and (rejects_in_row % int(max(1, debug_every)) == 0):
-                log_func(f"[AUTO-FEAT][DBG] rejects_in_row={rejects_in_row} k={len(accepted)} best_{accept_metric}={best_val:.6f}")
-            if best_feat is None:
-                continue
+                log_func(
+                    f"[AUTO-FEAT][DBG] rejects_in_row={rejects_in_row} k={len(accepted)} "
+                    f"best_{accept_metric}={best_val if np.isfinite(best_val) else float('nan'):.6f}"
+                )
+            continue
 
-        # accept
+        # Accept best_feat
         accepted.append(best_feat)
         accepted_set.add(best_feat)
         try:
@@ -3583,38 +3685,44 @@ def _auto_select_k_by_auc(
 
         best_res = best_trial_res
         best_val = float(best_trial_val)
-        best_ll = float(best_res.get("logloss", np.nan))
-        best_br = float(best_res.get("brier", np.nan))
         rejects_in_row = 0
         accept_count += 1
 
         if verbose:
-            log_func(f"[AUTO-FEAT] ✅ accept +{best_feat} -> {accept_metric}={best_val:.6f} k={len(accepted)} evals={evals_done}")
+            log_func(
+                f"[AUTO-FEAT] ✅ accept +{best_feat} -> {accept_metric}={best_val:.6f} "
+                f"k={len(accepted)} evals={evals_done}"
+            )
 
-        # optional backward pruning (floating) using full eval
+        # optional backward pruning
         if allow_backward and (accept_count % int(max(1, backward_every)) == 0) and len(accepted) > len(mk) + 1:
             droppable = [f for f in accepted if f not in mk]
             probe = droppable[-min(len(droppable), 20):]
+
             for _ in range(int(max_backward_steps)):
                 best_drop = None
                 best_drop_res = None
                 best_drop_val = best_val
+
                 for fdrop in probe:
                     keep_feats = [f for f in accepted if f != fdrop]
                     res = _cv_full(keep_feats)
+                    evals_done += 1
+
                     v = _metric(res)
                     if np.isfinite(v) and v > best_drop_val + float(backward_min_gain):
                         best_drop_val = float(v)
                         best_drop = fdrop
                         best_drop_res = res
+
                 if best_drop is None:
                     break
+
                 accepted = [f for f in accepted if f != best_drop]
                 accepted_set = set(accepted)
                 best_res = best_drop_res
                 best_val = float(best_drop_val)
-                best_ll = float(best_res.get("logloss", np.nan))
-                best_br = float(best_res.get("brier", np.nan))
+
                 if verbose:
                     log_func(f"[AUTO-FEAT] 🧹 backward drop -{best_drop} -> {accept_metric}={best_val:.6f} k={len(accepted)}")
 
@@ -3640,13 +3748,13 @@ def _auto_select_k_by_auc(
         "early_stop_rounds": early_stop_rounds,
     }
     return list(accepted), final_res, state
-    
 # =========================
 # 3) SELECT FEATURES AUTO (backward compatible signature)
 #    - seeds with must_keep only (earned thereafter)
 #    - evaluates ALL features + baseline fade check (inside _auto_select_k_by_auc)
 #    - supports reverse-AUC candidate flips and returns flip_map in summary
 # =========================
+
 def select_features_auto(
     model_proto,
     X_df_train: "pd.DataFrame",
@@ -3657,14 +3765,14 @@ def select_features_auto(
     must_keep: list[str] | None = None,
 
     # keep old knobs (won't break your call)
-    corr_within: float = 0.90,
-    corr_global: float = 0.92,
+    corr_within: float = 0.90,     # kept for compat (not used in this block)
+    corr_global: float = 0.92,     # kept for compat (not used in this block)
     max_feats_major: int = 160,
     max_feats_small: int = 160,
-    topk_per_fold: int = 80,   # kept for compat; not required by new screen
-    min_presence: float = 0.40,
-    sign_flip_max: float = 0.35,
-    shap_cv_max: float = 1.00,
+    topk_per_fold: int = 80,       # kept for compat; not required by new screen
+    min_presence: float = 0.40,    # kept for compat (not used in this block)
+    sign_flip_max: float = 0.35,   # kept for compat (not used in this block)
+    shap_cv_max: float = 1.00,     # kept for compat (not used in this block)
 
     # selection knobs
     use_auc_auto: bool = True,
@@ -3686,7 +3794,7 @@ def select_features_auto(
     preselect_mult: int = 5,
     corr_preselect_thr: float = 0.95,
     corr_check_cap: int = 160,
-    zcache_cap: int = 256,
+    zcache_cap: int = 256,         # kept (not used here)
     min_finite_rows: int = 20,
     binary_min_on: int = 10,
     binary_min_off: int = 10,
@@ -3711,6 +3819,9 @@ def select_features_auto(
     import numpy as np
     import pandas as pd
 
+    # ----------------------------
+    # 0) Basic guards
+    # ----------------------------
     if X_df_train is None or X_df_train.empty:
         return [], pd.DataFrame(columns=["selected", "flipped", "flip_mode"])
 
@@ -3724,7 +3835,7 @@ def select_features_auto(
         return [], pd.DataFrame(columns=["selected", "flipped", "flip_mode"])
 
     # ----------------------------
-    # 0) leak guard + column list
+    # 1) Leak-guard + column list
     # ----------------------------
     leak_patterns = ("SHARP_COVER_RESULT",)
 
@@ -3736,10 +3847,10 @@ def select_features_auto(
     if not cols:
         return [], pd.DataFrame(columns=["selected", "flipped", "flip_mode"])
 
-    col_to_idx = {c: i for i, c in enumerate(cols)}  # ✅ avoid repeated cols.index O(p)
+    col_to_idx = {c: i for i, c in enumerate(cols)}
 
     # ----------------------------
-    # 1) numeric once (float32)
+    # 2) Numeric conversion once
     # ----------------------------
     X_num = X_df_train[cols].apply(pd.to_numeric, errors="coerce")
     X_mat = X_num.to_numpy(dtype=np.float32, copy=False)
@@ -3755,8 +3866,8 @@ def select_features_auto(
 
     with np.errstate(invalid="ignore"):
         var = np.nanvar(X_mat, axis=0)
-        mu_all = np.nanmean(X_mat, axis=0)          # ✅ precompute once (used in corr pruning)
-        sd_all = np.nanstd(X_mat, axis=0) + 1e-12   # ✅ precompute once
+        mu_all = np.nanmean(X_mat, axis=0)
+        sd_all = np.nanstd(X_mat, axis=0) + 1e-12
 
     # dynamic sparsity gate
     min_rows = int(max(min_finite_rows, max(5, int(0.002 * n))))
@@ -3788,11 +3899,6 @@ def select_features_auto(
 
     col_groups = np.array([_group_key(c) for c in cols], dtype=object)
 
-    y_f = y_arr.astype(np.float32)
-    y_mean = float(y_f.mean())
-    y_c = y_f - y_mean
-    y_sd = float(np.std(y_c) + 1e-12)
-
     def _zscore(a: np.ndarray) -> np.ndarray:
         a = a.astype(np.float32, copy=False)
         m = float(np.nanmean(a))
@@ -3821,6 +3927,7 @@ def select_features_auto(
         px = (c0 + c1) / n_
         py0 = float((y == 0).mean())
         py1 = float((y == 1).mean())
+
         mi_val = 0.0
         for i in range(bins):
             if px[i] <= 0:
@@ -3845,7 +3952,6 @@ def select_features_auto(
         c = float(np.mean(x_ * y_))
         return c if np.isfinite(c) else 0.0
 
-    # ---- binary lift on a provided vector + labels (avoids full-mask work) ----
     def _binary_lift_vec(x: np.ndarray, y: np.ndarray) -> float:
         m = np.isfinite(x)
         if int(m.sum()) < (binary_min_on + binary_min_off):
@@ -3863,21 +3969,42 @@ def select_features_auto(
         return float(abs(p_on - p_off))
 
     # ----------------------------
-    # 2) cheap screen (per-fold median)
+    # 3) Fold-based cheap screen
     # ----------------------------
     def _get_quick_splits():
-        try:
-            it = folds.split(np.zeros((n, 1), dtype=np.float32), y_arr)
-            splits = []
-            for i, (tr, te) in enumerate(it):
-                splits.append((np.asarray(tr, dtype=np.int32), np.asarray(te, dtype=np.int32)))
-                if len(splits) >= int(max(1, fold_screen_folds)):
-                    break
-            if splits:
-                return splits
-        except Exception:
-            pass
+        # If caller passed an iterable of (tr, va) pairs, use it.
+        # If caller passed a CV object with .split, use that.
+        if folds is None:
+            return None
 
+        # already a list/tuple of splits?
+        if isinstance(folds, (list, tuple)) and len(folds) > 0:
+            try:
+                tr0, va0 = folds[0]
+                return [(np.asarray(tr, np.int32), np.asarray(va, np.int32)) for (tr, va) in folds[: int(max(1, fold_screen_folds))]]
+            except Exception:
+                pass
+
+        # CV splitter?
+        if hasattr(folds, "split"):
+            try:
+                it = folds.split(np.zeros((n, 1), dtype=np.float32), y_arr)
+                splits = []
+                for i, (tr, te) in enumerate(it):
+                    splits.append((np.asarray(tr, dtype=np.int32), np.asarray(te, dtype=np.int32)))
+                    if len(splits) >= int(max(1, fold_screen_folds)):
+                        break
+                if splits:
+                    return splits
+            except Exception:
+                pass
+
+        return None
+
+    splits = _get_quick_splits()
+
+    # fallback split if nothing usable
+    if splits is None:
         idx = np.arange(n, dtype=np.int32)
         pos = idx[y_arr == 1]
         neg = idx[y_arr == 0]
@@ -3887,9 +4014,10 @@ def select_features_auto(
             mid = n // 2
             a = idx[:mid]
             b = idx[mid:]
-        return [(a, b)]
+        splits = [(a, b)]
 
-    splits = _get_quick_splits() if fold_screen else [(np.arange(n, dtype=np.int32), np.array([], dtype=np.int32))]
+    if not fold_screen:
+        splits = [(np.arange(n, dtype=np.int32), np.array([], dtype=np.int32))]
 
     is_small = str(sport_key).upper() in {"WNBA", "CFL", "MLS", "NHL"}
     max_final = int(max_feats_small if is_small else max_feats_major)
@@ -3898,7 +4026,6 @@ def select_features_auto(
     fold_scores = []
 
     for (tr_idx, _te_idx) in splits:
-        # ✅ avoid tr_mask bool allocation; slice by indices
         X_tr = X_mat[tr_idx, :]
         fin_tr = finite[tr_idx, :]
         y_tr = y_arr[tr_idx]
@@ -3929,7 +4056,7 @@ def select_features_auto(
         corrp = np.abs(cov / (cnt - 1.0 + 1e-12)) / (sd_u + 1e-12) / y_tr_sd
         corrp = corrp.astype(np.float32, copy=False)
 
-        # ✅ lift only for top-N by corrp (and compute directly on Xu[:, loc])
+        # lift only for top-N by corrp (cap hard)
         lift = np.zeros(len(idxs), dtype=np.float32)
         topN = int(min(pre_budget, len(corrp), int(fold_lift_cap)))
         if topN > 0:
@@ -3937,7 +4064,7 @@ def select_features_auto(
             for loc in top_local:
                 lift[loc] = float(_binary_lift_vec(Xu[:, loc], y_tr))
 
-        # ✅ MI-lite only for top-N by corrp (cap hard)
+        # MI-lite only for top-N by corrp (cap hard)
         mi = np.zeros(len(idxs), dtype=np.float32)
         miN = int(min(mi_top_k, corrp.size, int(fold_mi_cap)))
         if miN > 0:
@@ -3945,18 +4072,13 @@ def select_features_auto(
             for loc in mi_local:
                 mi[loc] = float(_mi_lite_1(Xu[:, loc].astype(np.float32, copy=False), y_tr, bins=int(mi_bins)))
 
-        score = np.maximum.reduce([
-            _zscore(corrp),
-            _zscore(lift),
-            _zscore(mi),
-        ]).astype(np.float32, copy=False)
-
+        score = np.maximum.reduce([_zscore(corrp), _zscore(lift), _zscore(mi)]).astype(np.float32, copy=False)
         fold_scores.append(score)
 
     score_uni = np.median(np.stack(fold_scores, axis=0), axis=0).astype(np.float32, copy=False)
 
     # ----------------------------
-    # 2b) group-aware candidate selection
+    # 4) Group-aware candidate selection
     # ----------------------------
     order_local = np.argsort(-score_uni)
     usable_ranked = usable_idx[order_local]
@@ -4000,30 +4122,26 @@ def select_features_auto(
         return keep_order, pd.DataFrame({"selected": True}, index=pd.Index(keep_order, name="feature"))
 
     # ----------------------------
-    # 3) overlap-aware correlation pruning
-    #    ✅ speedups:
-    #      - no per-feature nanmean/nanstd inside loop (use mu_all/sd_all)
-    #      - O(1) score lookups via pos_of_col
-    #      - lift/mi computed only for top-N candidates
-    #      - O(1) lift/mi lookup by global column index
+    # 5) Overlap-aware correlation pruning
     # ----------------------------
-    # fast map col->position in usable_idx for score_uni
     pos_of_col = np.full(p, -1, dtype=np.int32)
     pos_of_col[usable_idx] = np.arange(usable_idx.size, dtype=np.int32)
-    cand_score_uni = score_uni[pos_of_col[cand_idx]].astype(np.float32, copy=False)
 
-    # compute lift + MI only for top candidates by cand_score_uni
+    cand_pos = pos_of_col[cand_idx]
+    cand_pos = cand_pos[cand_pos >= 0]
+    cand_score_uni = score_uni[cand_pos].astype(np.float32, copy=False)
+
+    # compute lift + MI only for top candidates by score
     lift_by_col = np.zeros(p, dtype=np.float32)
     mi_by_col = np.zeros(p, dtype=np.float32)
 
     # LIFT
     liftN = int(min(int(lift_cap), cand_idx.size))
     if liftN > 0:
-        lift_pick = np.argpartition(-cand_score_uni, kth=liftN - 1)[:liftN]
-        for ii in lift_pick:
+        pick = np.argpartition(-cand_score_uni, kth=min(liftN - 1, cand_score_uni.size - 1))[:liftN]
+        for ii in pick:
             j = int(cand_idx[ii])
             x = X_mat[:, j]
-            # quick binary-ish gate
             m = np.isfinite(x)
             if int(m.sum()) < (binary_min_on + binary_min_off):
                 continue
@@ -4036,8 +4154,8 @@ def select_features_auto(
     # MI
     miN2 = int(min(int(mi_cap), cand_idx.size))
     if miN2 > 0:
-        mi_pick = np.argpartition(-cand_score_uni, kth=miN2 - 1)[:miN2]
-        for ii in mi_pick:
+        pick = np.argpartition(-cand_score_uni, kth=min(miN2 - 1, cand_score_uni.size - 1))[:miN2]
+        for ii in pick:
             j = int(cand_idx[ii])
             mi_by_col[j] = float(_mi_lite_1(X_mat[:, j].astype(np.float32, copy=False), y_arr, bins=int(mi_bins)))
 
@@ -4046,7 +4164,6 @@ def select_features_auto(
     prot_lift_idx = set(cand_idx[np.argsort(-lift_by_col[cand_idx])[: int(min(protect_top_lift, cand_idx.size))]].tolist())
     prot_all_idx = prot_mi_idx | prot_lift_idx | set(mk_idx.tolist())
 
-    # combined ranking for pruning order
     def _z(a):
         return _zscore(a)
 
@@ -4076,7 +4193,6 @@ def select_features_auto(
 
         sdj = float(sd_all[j])
         if not np.isfinite(sdj) or sdj < 1e-12:
-            # keep if must_keep
             if j in prot_all_idx:
                 keep.append(j)
                 kept_set.add(j)
@@ -4102,7 +4218,6 @@ def select_features_auto(
 
             if abs(c) >= thr:
                 if is_protected:
-                    # replace non-protected kept feature if possible
                     if k not in prot_all_idx:
                         try:
                             keep.remove(k)
@@ -4111,12 +4226,8 @@ def select_features_auto(
                             pass
                         keep.append(j)
                         kept_set.add(j)
-                        ok = False
-                    else:
-                        # both protected: allow both
-                        continue
-                else:
-                    ok = False
+                    # if both protected, allow both
+                ok = False
                 break
 
         if ok and j not in kept_set:
@@ -4140,7 +4251,7 @@ def select_features_auto(
     flip_map = {}
 
     # ----------------------------
-    # 4) Auto-select (heavy CV) on reduced set
+    # 6) Auto-select (heavy CV) on reduced set
     # ----------------------------
     if use_auc_auto and keep_order:
         accepted_feats, best_res, state = _auto_select_k_by_auc(
@@ -4178,10 +4289,8 @@ def select_features_auto(
         feature_cols = keep_order
 
     # ----------------------------
-    # 5) Summary
+    # 7) Summary
     # ----------------------------
-    f_arr = np.asarray(feature_cols, dtype=object)
-
     flipped = np.fromiter(
         (bool(flip_map.get(f, {}).get("flipped", False)) for f in feature_cols),
         dtype=bool,
@@ -4194,14 +4303,9 @@ def select_features_auto(
     )
 
     summary = pd.DataFrame(
-        {
-            "selected": np.ones(len(feature_cols), dtype=bool),
-            "flipped": flipped,
-            "flip_mode": flip_mode,
-        },
-        index=f_arr,
+        {"selected": np.ones(len(feature_cols), dtype=bool), "flipped": flipped, "flip_mode": flip_mode},
+        index=pd.Index(feature_cols, dtype=object, name="feature"),
     )
-    summary.index.name = "feature"
 
     if auc_verbose:
         log_func(f"[AUTO-FEAT] final selected: {len(feature_cols)} feats (from {X_df_train.shape[1]})")
