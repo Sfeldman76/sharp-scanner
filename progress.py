@@ -18,16 +18,26 @@ class ProgressWriter:
     """
     Writes progress events to GCS without mutating the same object repeatedly.
 
-    Given gs://bucket/path/run.jsonl, this writer stores:
-      - gs://bucket/path/run/events/<ts>-<rand>.json   (one event per object)
-      - gs://bucket/path/run/latest.json              (optional pointer)
+    Given gs://bucket/path/run.jsonl (or .json), this writer stores:
+      - gs://bucket/path/run/events/<ts>-<rand>.json
+      - gs://bucket/path/run/latest.json
     """
 
-    def __init__(self, gcs_uri: str, gcs_client, *, write_latest: bool = True, max_retries: int = 8):
+    def __init__(
+        self,
+        gcs_uri: str,
+        gcs_client,
+        *,
+        write_latest: bool = True,
+        max_retries: int = 8,
+        latest_min_interval_s: float = 1.0,  # throttle latest.json updates
+    ):
         self.gcs_uri = gcs_uri
         self.gcs = gcs_client
         self.write_latest = write_latest
         self.max_retries = max_retries
+        self.latest_min_interval_s = latest_min_interval_s
+        self._last_latest_ts = 0.0
 
         self._bucket, self._base_prefix = self._parse_base_prefix(gcs_uri)
 
@@ -39,22 +49,30 @@ class ProgressWriter:
 
     def _parse_base_prefix(self, uri: str):
         b, p = self._parse_gcs_uri(uri)
-        # If user passed .../something.jsonl, use prefix without suffix for folder-like layout
-        # e.g. train-progress/.../cbee9242.jsonl -> train-progress/.../cbee9242
-        if p.endswith(".jsonl"):
-            p = p[:-5]
+        p = p.rstrip("/")
+
+        # ✅ handle both .jsonl and .json safely
+        lower = p.lower()
+        if lower.endswith(".jsonl"):
+            p = p[:-len(".jsonl")]
+        elif lower.endswith(".json"):
+            p = p[:-len(".json")]
+
         return b, p.rstrip("/")
 
     def _upload_with_retry(self, blob, data: bytes, content_type: str):
-        # Exponential backoff + jitter for transient 429/503s
         for attempt in range(self.max_retries):
             try:
                 blob.upload_from_string(data, content_type=content_type)
                 return
             except Exception as e:
-                # Only retry common transient GCS failures
                 msg = str(e)
-                is_retryable = ("429" in msg) or ("TooManyRequests" in msg) or ("503" in msg) or ("ServiceUnavailable" in msg)
+                is_retryable = (
+                    ("429" in msg)
+                    or ("TooManyRequests" in msg)
+                    or ("503" in msg)
+                    or ("ServiceUnavailable" in msg)
+                )
                 if not is_retryable or attempt == self.max_retries - 1:
                     raise
                 backoff = (2 ** attempt) * 0.25
@@ -67,15 +85,16 @@ class ProgressWriter:
 
         bucket = self.gcs.bucket(self._bucket)
 
-        # Unique object per event (no per-object mutation rate limit issues)
+        # Unique object per event
         ts_ms = int(ev.ts * 1000)
         rand = random.randint(100000, 999999)
         event_path = f"{self._base_prefix}/events/{ts_ms}-{rand}.json"
-        event_blob = bucket.blob(event_path)
-        self._upload_with_retry(event_blob, payload, content_type="application/json")
+        self._upload_with_retry(bucket.blob(event_path), payload, content_type="application/json")
 
-        # Optional: update a small latest pointer (still a single object mutation, but low-frequency)
+        # Throttled latest pointer
         if self.write_latest:
-            latest_path = f"{self._base_prefix}/latest.json"
-            latest_blob = bucket.blob(latest_path)
-            self._upload_with_retry(latest_blob, payload, content_type="application/json")
+            now = ev.ts
+            if (now - self._last_latest_ts) >= self.latest_min_interval_s:
+                latest_path = f"{self._base_prefix}/latest.json"
+                self._upload_with_retry(bucket.blob(latest_path), payload, content_type="application/json")
+                self._last_latest_ts = now
