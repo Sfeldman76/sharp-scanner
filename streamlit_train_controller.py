@@ -2,7 +2,7 @@
 import json
 import time
 import uuid
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 import streamlit as st
 from google.cloud import storage
@@ -26,7 +26,7 @@ def _base_prefix_from_progress_uri(progress_uri: str) -> Tuple[str, str]:
     Option A writer treats gs://bucket/path/run.jsonl as base prefix gs://bucket/path/run
     and stores:
       - base/latest.json
-      - base/events/<ts>-<rand>.json
+      - base/events/<ts_ms>-<rand>.json
     """
     bucket, path = _parse_gcs_uri(progress_uri)
     if path.endswith(".jsonl"):
@@ -37,64 +37,76 @@ def _base_prefix_from_progress_uri(progress_uri: str) -> Tuple[str, str]:
 # -----------------------------
 # Option A progress readers
 # -----------------------------
-def read_latest_event(gcs_client: storage.Client, progress_uri: str) -> Dict | None:
+def read_latest_event(gcs_client: storage.Client, progress_uri: str) -> Optional[Dict]:
     bucket_name, base = _base_prefix_from_progress_uri(progress_uri)
     blob = gcs_client.bucket(bucket_name).blob(f"{base}/latest.json")
-    if not blob.exists():
-        return None
     try:
+        if not blob.exists():
+            return None
         return json.loads(blob.download_as_text())
     except Exception:
         return None
 
 
-def read_recent_events(
+def list_event_blob_names(
     gcs_client: storage.Client,
     progress_uri: str,
-    max_events: int = 200,
-) -> List[Dict]:
+    *,
+    limit: int = 80,
+) -> List[str]:
     """
-    Reads recent events from Option A event objects. Uses name sorting:
-      .../events/<ts_ms>-<rand>.json
-    so lexicographic order is chronological.
+    List event object names under .../events/. We only need names (fast),
+    then we can fetch a small tail for display.
     """
     bucket_name, base = _base_prefix_from_progress_uri(progress_uri)
     prefix = f"{base}/events/"
     bucket = gcs_client.bucket(bucket_name)
-
-    # List blobs under events/
-    blobs = list(bucket.list_blobs(prefix=prefix))
+    try:
+        blobs = list(bucket.list_blobs(prefix=prefix))
+    except Exception:
+        return []
 
     if not blobs:
         return []
 
-    # Sort by object name (chronological given our <ts_ms>-<rand>.json naming)
-    blobs.sort(key=lambda b: b.name)
+    blobs.sort(key=lambda b: b.name)  # chronological due to ts_ms prefix
+    blobs = blobs[-limit:]
+    return [b.name for b in blobs]
 
-    # Take last N blobs only
-    blobs = blobs[-max_events:]
 
-    events: List[Dict] = []
-    for b in blobs:
+def read_events_by_names(
+    gcs_client: storage.Client,
+    bucket_name: str,
+    blob_names: List[str],
+) -> List[Dict]:
+    """
+    Download + parse a small set of event JSON blobs.
+    """
+    bucket = gcs_client.bucket(bucket_name)
+    out: List[Dict] = []
+    for name in blob_names:
         try:
-            events.append(json.loads(b.download_as_text()))
+            txt = bucket.blob(name).download_as_text()
+            out.append(json.loads(txt))
         except Exception:
-            # Keep something visible in the log
-            events.append({"stage": "parse_error", "msg": f"Could not parse {b.name}"})
-    return events
+            out.append({"stage": "parse_error", "msg": f"Could not parse {name}"})
+    return out
 
 
 # -----------------------------
 # Legacy JSONL reader (fallback)
 # -----------------------------
-def read_progress_lines_legacy_jsonl(gcs_client, uri: str, max_lines: int = 200):
+def read_progress_lines_legacy_jsonl(gcs_client: storage.Client, uri: str, max_lines: int = 200):
     bucket_name, path = _parse_gcs_uri(uri)
     blob = gcs_client.bucket(bucket_name).blob(path)
-    if not blob.exists():
+    try:
+        if not blob.exists():
+            return []
+        data = blob.download_as_text()
+        lines = [ln for ln in data.splitlines() if ln.strip()]
+        return lines[-max_lines:]
+    except Exception:
         return []
-    data = blob.download_as_text()
-    lines = [ln for ln in data.splitlines() if ln.strip()]
-    return lines[-max_lines:]
 
 
 # -----------------------------
@@ -128,13 +140,11 @@ def start_job_with_rest(*, job_name: str, region: str, project_id: str, env: dic
 # -----------------------------
 st.title("📈 Training Controller (Cloud Run Job)")
 
-# Config (adjust if needed)
 PROJECT_ID = st.secrets.get("GCP_PROJECT_ID", "sharplogger")
 REGION = st.secrets.get("RUN_REGION", "us-central1")
 JOB_NAME = st.secrets.get("RUN_JOB_NAME", "sharp-train-job")
 PROGRESS_BUCKET = st.secrets.get("PROGRESS_BUCKET", "sharp-models")
 
-# Session state
 st.session_state.setdefault("exec_id", None)
 st.session_state.setdefault("progress_uri", None)
 
@@ -142,13 +152,14 @@ sport = st.selectbox("Sport", ["NBA", "NFL", "NCAAB", "WNBA", "NCAAF", "MLB"], i
 market = st.selectbox("Market", ["All", "spreads", "h2h", "totals"], index=0)
 auto = st.checkbox("Auto-refresh", value=True)
 
+with st.expander("⚙️ Display options", expanded=False):
+    show_log = st.checkbox("Show event log (downloads recent events)", value=True)
+    log_tail = st.slider("Log tail (events)", min_value=20, max_value=200, value=60, step=10)
+
 col1, col2 = st.columns([1, 1])
 with col1:
     if st.button("🚀 Start Training Job"):
         exec_id = str(uuid.uuid4())[:8]
-
-        # Keep the same env var shape you already use.
-        # Option A writer will treat this as base prefix without ".jsonl".
         progress_uri = f"gs://{PROGRESS_BUCKET}/progress/{sport}_{market}_{exec_id}.jsonl"
 
         st.session_state.exec_id = exec_id
@@ -190,12 +201,11 @@ st.caption(f"Progress target: {progress_uri}")
 
 gcs = storage.Client()
 
-# Prefer Option A (latest.json + events/)
 latest = read_latest_event(gcs, progress_uri)
-events = read_recent_events(gcs, progress_uri, max_events=200)
 
-# If Option A has nothing yet, fall back to legacy JSONL (helps during transition)
-if latest is None and not events:
+# If Option A has nothing yet, fall back to legacy JSONL (transition-safe)
+events: List[Dict] = []
+if latest is None:
     lines = read_progress_lines_legacy_jsonl(gcs, progress_uri, max_lines=200)
     if lines:
         parsed = []
@@ -207,6 +217,7 @@ if latest is None and not events:
         events = parsed
         latest = parsed[-1] if parsed else None
 
+# ---- Render "latest" (fast path) ----
 if latest:
     pct = latest.get("pct")
     if pct is not None:
@@ -220,17 +231,35 @@ if latest:
 
     if stage == "done":
         st.success("Job finished ✅")
+        st.caption("Tip: start another job to retrain a different sport/market.")
     elif stage == "error":
         st.error(f"Job error: {msg}")
     else:
         st.info(msg)
-
-if events:
-    # Show last ~40 events as a readable JSON log
-    tail = events[-40:]
-    st.code("\n".join(json.dumps(e, default=str) for e in tail), language="json")
 else:
-    st.info("No progress events yet… (job may still be starting)")
+    st.info("No progress yet… (job may still be starting)")
+
+# ---- Render event tail (optional; avoids heavy work each refresh) ----
+if show_log:
+    bucket_name, _ = _parse_gcs_uri(progress_uri)
+
+    # Cache the list of recent event blob names for 2 seconds to match your refresh cadence
+    @st.cache_data(ttl=2.0, show_spinner=False)
+    def _cached_event_names(uri: str, limit: int) -> List[str]:
+        return list_event_blob_names(gcs, uri, limit=limit)
+
+    names = _cached_event_names(progress_uri, log_tail)
+
+    if names:
+        # Download only the tail we want
+        tail_events = read_events_by_names(gcs, bucket_name, names[-log_tail:])
+        st.code("\n".join(json.dumps(e, default=str) for e in tail_events[-40:]), language="json")
+    else:
+        # If we’re in legacy mode, show the legacy parsed events (already loaded)
+        if events:
+            st.code("\n".join(json.dumps(e, default=str) for e in events[-40:]), language="json")
+        else:
+            st.caption("No event objects found yet.")
 
 # -----------------------------
 # Refresh controls
