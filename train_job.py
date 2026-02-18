@@ -1,4 +1,3 @@
-
 # train_job.py
 import os
 import sys
@@ -6,7 +5,6 @@ import uuid
 import traceback
 import warnings
 import logging
-import time
 import threading
 
 from google.cloud import storage
@@ -15,50 +13,29 @@ from progress import ProgressWriter
 HEADLESS = os.getenv("HEADLESS", "0") == "1"
 
 
-# -----------------------------
-# 1) Tee stdout/stderr -> pw.emit("log", ...)
-# -----------------------------
-class _StreamTee:
-    """
-    Mirrors writes to the original stream AND forwards full lines to a callback.
-    """
-    def __init__(self, stream, on_line):
-        self._stream = stream
-        self._on_line = on_line
-        self._buf = ""
-
-    def write(self, s):
-        self._stream.write(s)
-        self._stream.flush()
-
-        self._buf += s
-        while "\n" in self._buf:
-            line, self._buf = self._buf.split("\n", 1)
-            line = line.rstrip()
-            if line:
-                try:
-                    self._on_line(line)
-                except Exception:
-                    pass
-
-    def flush(self):
-        try:
-            self._stream.flush()
-        except Exception:
-            pass
+# -----------------------------------------------------------------------------
+# Headless warning / numeric noise control
+# -----------------------------------------------------------------------------
+if HEADLESS:
+    warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
+    warnings.filterwarnings("ignore", message="Degrees of freedom <= 0", category=RuntimeWarning)
+    logging.getLogger("numpy").setLevel(logging.ERROR)
 
 
 def install_streamlit_shim(log_func):
     """
-    Must be called BEFORE importing sharp_line_dashboard / training modules.
-    Wires st.write/st.info/etc to log_func.
+    Wire streamlit calls to log_func, but do NOT capture all stdout/stderr.
+    Must be installed BEFORE importing sharp_line_dashboard / training modules.
     """
     import types
 
     def _log(*a, **k):
         msg = " ".join(str(x) for x in a).strip()
         if msg:
-            log_func(msg)
+            try:
+                log_func(msg)
+            except Exception:
+                pass
         return None
 
     class _Ctx:
@@ -70,7 +47,7 @@ def install_streamlit_shim(log_func):
         def write(self, *a, **k): return _log(*a)
         def markdown(self, *a, **k): return _log(*a)
         def update(self, *a, **k):
-            lab = k.get("label") or (a[0] if a else "")
+            lab = k.get("label") or ""
             if lab:
                 _log(lab)
             return None
@@ -82,7 +59,7 @@ def install_streamlit_shim(log_func):
         def __init__(self, prefix="st"):
             self._prefix = prefix
         def __call__(self, *a, **k):
-            # if someone does st.something("text"), capture it
+            # capture if someone does st.something("text")
             if a:
                 _log(*a)
             return None
@@ -93,6 +70,7 @@ def install_streamlit_shim(log_func):
 
     class _Progress:
         def progress(self, v=None, *a, **k):
+            # optional: only log when value is meaningful
             if v is not None:
                 _log(f"[progress] {v}")
             return None
@@ -102,15 +80,12 @@ def install_streamlit_shim(log_func):
             if "value" in k:
                 return self.progress(k["value"])
             return None
-        def empty(self):
-            _log("[progress] cleared")
-            return None
+        def empty(self): return None
 
     def _decorator(fn=None, **kwargs):
         if callable(fn):
             return fn
-        def wrap(f):
-            return f
+        def wrap(f): return f
         return wrap
 
     st = types.ModuleType("streamlit")
@@ -144,18 +119,6 @@ def install_streamlit_shim(log_func):
     st.status = lambda *a, **k: _Ctx(label=str(a[0]) if a else (k.get("label") or ""))
     st.spinner = lambda *a, **k: _Ctx(label=str(a[0]) if a else (k.get("text") or ""))
 
-    # widgets
-    st.button = lambda *a, **k: False
-    st.checkbox = lambda *a, **k: k.get("value", False)
-    st.selectbox = lambda *a, **k: (k.get("options") or [None])[0]
-    st.radio = lambda *a, **k: (k.get("options") or [None])[0]
-    st.slider = lambda *a, **k: k.get("value", 0)
-    st.text_input = lambda *a, **k: k.get("value", "")
-    st.number_input = lambda *a, **k: k.get("value", 0)
-    st.date_input = lambda *a, **k: k.get("value", None)
-    st.metric = lambda *a, **k: None
-    st.plotly_chart = lambda *a, **k: None
-
     # caching
     st.cache_data = _decorator
     st.cache_resource = _decorator
@@ -164,13 +127,12 @@ def install_streamlit_shim(log_func):
     st.session_state = {}
     st.sidebar = _Null(prefix="st.sidebar")
 
-    # IMPORTANT: no recursion
+    # SAFE getattr
     def _module_getattr(name):
         d = st.__dict__
         if name in d:
             return d[name]
         return _Null(prefix=f"st.{name}")
-
     st.__getattr__ = _module_getattr  # type: ignore[attr-defined]
 
     sys.modules["streamlit"] = st
@@ -206,44 +168,32 @@ def main():
     gcs = storage.Client()
     pw = ProgressWriter(progress_uri, gcs)
 
-    # ONE unified logger for everything
-    def log_line(line: str):
-        line = str(line).rstrip()
-        if not line:
-            return
-        # Cloud Run logs
-        print(line, flush=True)
-        # Progress JSON feed
-        pw.emit("log", line)
+    # This is the ONLY log stream you want:
+    def log_func(msg: str):
+        pw.emit("log", str(msg))
+        # optional: also show in Cloud Run logs, but only for log_func messages
+        print(str(msg), flush=True)
 
-    # tee stdout/stderr so any print() inside model shows up in pw.emit("log", ...)
-    sys.stdout = _StreamTee(sys.__stdout__, log_line)
-    sys.stderr = _StreamTee(sys.__stderr__, log_line)
-
-    # install shim *after* we have log_line but *before* importing training modules
+    # Install shim before importing training modules
     if HEADLESS:
-        install_streamlit_shim(log_line)
+        install_streamlit_shim(log_func)
 
-    # NOW import anything that uses streamlit / prints
     from train_sharp_model_from_bq_extracted import (
         train_sharp_model_for_market,
         train_timing_model_for_market,
     )
 
     pw.emit("start", f"Training start run_id={run_id} sport={sport} market={market}", pct=0.0)
-    log_line(f"[boot] HEADLESS={HEADLESS} bucket={bucket} progress_uri={progress_uri}")
 
     hb_stop = start_heartbeat(pw, f"[{sport}] market={market}", 45)
 
     try:
         if market == "All":
             pw.emit("timing", f"[{sport}] Training timing model...", pct=0.05)
-            log_line(f"[timing] ENTER sport={sport}")
             try:
-                train_timing_model_for_market(sport=sport, bucket_name=bucket, log_func=log_line)
+                train_timing_model_for_market(sport=sport, bucket_name=bucket, log_func=log_func)
             except TypeError:
                 train_timing_model_for_market(sport=sport)
-            log_line(f"[timing] EXIT sport={sport}")
 
             mkts = ("h2h", "spreads", "totals")
         else:
@@ -253,31 +203,22 @@ def main():
         for i, mkt in enumerate(mkts, start=1):
             pct = 0.10 + 0.80 * (i - 1) / max(1, n)
             pw.emit("train", f"[{sport}] Training sharp model market={mkt}", pct=pct)
-            log_line(f"[sharp] ENTER sport={sport} market={mkt}")
 
             hb_mkt_stop = start_heartbeat(pw, f"[{sport}] market={mkt}", 45)
             try:
                 try:
                     train_sharp_model_for_market(
-                        sport=sport,
-                        market=mkt,
-                        bucket_name=bucket,
-                        log_func=log_line,
+                        sport=sport, market=mkt, bucket_name=bucket, log_func=log_func
                     )
                 except TypeError:
                     train_sharp_model_for_market(sport=sport, market=mkt, bucket_name=bucket)
             finally:
                 hb_mkt_stop.set()
 
-            log_line(f"[sharp] EXIT sport={sport} market={mkt}")
-
         pw.emit("done", "Training complete ✅", pct=1.0)
-        log_line("[done] Training complete ✅")
 
     except Exception as e:
-        err = f"{e}\n{traceback.format_exc()}"
-        pw.emit("error", err, pct=1.0)
-        log_line(err)
+        pw.emit("error", f"{e}\n{traceback.format_exc()}", pct=1.0)
         raise
 
     finally:
