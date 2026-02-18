@@ -3323,6 +3323,7 @@ def _auto_select_k_by_auc(
 ):
     import time
     import numpy as np
+    import inspect
 
     t0 = time.time()
     y_arr = np.asarray(y, int).reshape(-1)
@@ -3330,7 +3331,6 @@ def _auto_select_k_by_auc(
     if n == 0:
         return [], None, {"done": True, "reason": "empty_y"}
 
-    # folds can be list of (tr, va) OR CV splitter
     if folds is None:
         return [], None, {"done": True, "reason": "no_folds"}
 
@@ -3338,7 +3338,6 @@ def _auto_select_k_by_auc(
     if isinstance(folds, (list, tuple)) and len(folds) > 0:
         _folds = [(np.asarray(tr, np.int64), np.asarray(va, np.int64)) for (tr, va) in folds]
     elif hasattr(folds, "split"):
-        # build them once
         idx = np.zeros((n, 1), dtype=np.float32)
         _folds = []
         for tr, va in folds.split(idx, y_arr):
@@ -3351,13 +3350,11 @@ def _auto_select_k_by_auc(
     ordered = list(ordered_features) if ordered_features is not None else []
     if hasattr(X, "columns"):
         ordered = [f for f in ordered if f in X.columns]
-
     if not ordered:
         return [], None, {"done": True, "reason": "no_candidates"}
 
     must_keep = must_keep or []
     mk = [m for m in must_keep if (not hasattr(X, "columns")) or (m in X.columns)]
-    # ensure mk first, preserve order, de-dupe
     ordered = list(dict.fromkeys(mk + ordered))
 
     if max_k is None:
@@ -3369,8 +3366,19 @@ def _auto_select_k_by_auc(
     min_k = int(max(len(mk), min(int(min_k), max_k)))
 
     # -----------------------
-    # local helpers
+    # local helpers (CV compat)
     # -----------------------
+    try:
+        _cv_sig = inspect.signature(_cv_auc_for_feature_set)
+        _cv_supports_flip_map = ("flip_map" in _cv_sig.parameters)
+    except Exception:
+        _cv_supports_flip_map = False
+
+    # If helper doesn't support flip_map, disable flip logic cleanly
+    if not _cv_supports_flip_map:
+        allow_candidate_flip = False
+        flips_after_each_accept = False
+
     def _metric(res: dict | None) -> float:
         if res is None:
             return float("nan")
@@ -3379,9 +3387,7 @@ def _auto_select_k_by_auc(
         return float(res.get("auc", res.get("auc_fold_mean", np.nan)))
 
     def _cv_quick(feats, *, flip_map=None):
-        # quick fold-mean AUC, no ll/brier for speed
-        return _cv_auc_for_feature_set(
-            model_proto, X, y_arr, _folds, list(feats),
+        kwargs = dict(
             log_func=log_func,
             debug=False,
             return_oof=False,
@@ -3391,14 +3397,17 @@ def _auto_select_k_by_auc(
             stable_auc="fold_mean",
             backend_mode=backend_mode,
             early_stop_rounds=early_stop_rounds,
-            flip_map=flip_map,
+        )
+        if _cv_supports_flip_map:
+            kwargs["flip_map"] = flip_map
+        return _cv_auc_for_feature_set(
+            model_proto, X, y_arr, _folds, list(feats),
+            **kwargs,
         )
 
     def _cv_full(feats, *, flip_map=None):
-        # full OOF AUC (heavier)
         use_folds = _folds if (full_check_folds is None) else _folds[: int(max(1, full_check_folds))]
-        return _cv_auc_for_feature_set(
-            model_proto, X, y_arr, use_folds, list(feats),
+        kwargs = dict(
             log_func=log_func,
             debug=False,
             return_oof=False,
@@ -3407,7 +3416,12 @@ def _auto_select_k_by_auc(
             stable_auc="oof",
             backend_mode=backend_mode,
             early_stop_rounds=early_stop_rounds,
-            flip_map=flip_map,
+        )
+        if _cv_supports_flip_map:
+            kwargs["flip_map"] = flip_map
+        return _cv_auc_for_feature_set(
+            model_proto, X, y_arr, use_folds, list(feats),
+            **kwargs,
         )
 
     def _accept_ok(v_try: float, v_best: float, *, phase_k: int) -> bool:
@@ -3418,7 +3432,6 @@ def _auto_select_k_by_auc(
         if v_try >= v_best + float(min_improve):
             return True
         if interaction_admit and phase_k < int(early_relax_k):
-            # allow tiny dip early to build interactions
             return bool(v_try >= v_best - float(near_tie_auc))
         return False
 
@@ -3427,17 +3440,20 @@ def _auto_select_k_by_auc(
     # -----------------------
     accepted = list(mk)
     accepted_set = set(accepted)
-    flip_map = {}  # feature -> {"flipped": True, "mode":"sign"}
+    flip_state = {}  # feature -> {"flipped": True, "mode":"sign"}
 
-    base_q = _cv_quick(accepted, flip_map={f: -1 for f in flip_map.keys()}) if accepted else None
+    base_flip = ({f: -1 for f in flip_state.keys()} if (_cv_supports_flip_map and flip_state) else None)
+    base_q = _cv_quick(accepted, flip_map=base_flip) if accepted else None
     best_val = _metric(base_q)
+
     if verbose:
         log_func(f"[AUTO-FEAT] start k={len(accepted)} quick_{accept_metric}={best_val if np.isfinite(best_val) else float('nan'):.6f}")
 
     remaining = [f for f in ordered if f not in accepted_set]
     if not remaining:
-        final = _cv_full(accepted, flip_map={f: -1 for f in flip_map.keys()}) if accepted else None
-        return accepted, final, {"done": True, "accepted": accepted, "flip_map": flip_map}
+        final_flip = ({f: -1 for f in flip_state.keys()} if (_cv_supports_flip_map and flip_state) else None)
+        final = _cv_full(accepted, flip_map=final_flip) if accepted else None
+        return accepted, final, {"done": True, "accepted": accepted, "flip_map": flip_state}
 
     rejects_in_row = 0
     evals_done = 0
@@ -3457,7 +3473,8 @@ def _auto_select_k_by_auc(
         pool = remaining[: int(max(1, candidate_batch))]
 
         qs = []
-        cur_flip = {f: -1 for f in flip_map.keys()}
+        cur_flip = ({f: -1 for f in flip_state.keys()} if (_cv_supports_flip_map and flip_state) else None)
+
         for feat in pool:
             res = _cv_quick(accepted + [feat], flip_map=cur_flip)
             evals_done += 1
@@ -3465,8 +3482,8 @@ def _auto_select_k_by_auc(
             qs.append((feat, v))
             if max_total_evals is not None and evals_done >= int(max_total_evals):
                 break
-        qs.sort(key=lambda t: (np.nan_to_num(t[1], nan=-1e9)), reverse=True)
 
+        qs.sort(key=lambda t: (np.nan_to_num(t[1], nan=-1e9)), reverse=True)
         eval_list = [t[0] for t in qs[: int(max(1, full_eval_top))]]
 
         best_feat = None
@@ -3511,28 +3528,29 @@ def _auto_select_k_by_auc(
         if verbose:
             log_func(f"[AUTO-FEAT] ✅ accept +{best_feat} -> quick_auc={best_val:.6f} k={len(accepted)}")
 
-        # flip test: ONLY the new feature
-        if flips_after_each_accept and allow_candidate_flip:
-            base_flip = {f: -1 for f in flip_map.keys()}
+        # flip test: ONLY the new feature (only if supported)
+        if flips_after_each_accept and allow_candidate_flip and _cv_supports_flip_map:
+            base_flip = ({f: -1 for f in flip_state.keys()} if flip_state else None)
             res0 = _cv_quick(accepted, flip_map=base_flip)
             auc0 = float(res0.get("auc_fold_mean", np.nan))
 
-            trial = dict(base_flip)
+            trial = dict(base_flip or {})
             trial[best_feat] = -1
             res1 = _cv_quick(accepted, flip_map=trial)
             auc1 = float(res1.get("auc_fold_mean", np.nan))
 
             if np.isfinite(auc0) and np.isfinite(auc1) and (auc1 >= auc0 + float(flip_gain_min)):
-                flip_map[best_feat] = {"flipped": True, "mode": "sign"}
+                flip_state[best_feat] = {"flipped": True, "mode": "sign"}
                 best_val = max(best_val, auc1)
                 if verbose:
                     log_func(f"[AUTO-FEAT] 🔁 flip kept for {best_feat}: {auc0:.6f} → {auc1:.6f}")
 
         # occasional full checkpoint
         if full_check_every and full_check_every > 0 and (accept_count % int(full_check_every) == 0):
-            cur_flip = {f: -1 for f in flip_map.keys()}
+            cur_flip = ({f: -1 for f in flip_state.keys()} if (_cv_supports_flip_map and flip_state) else None)
             full_res = _cv_full(accepted, flip_map=cur_flip)
             full_auc = float(full_res.get("auc", np.nan))
+
             if verbose:
                 log_func(f"[AUTO-FEAT] 🧪 full-check: auc={full_auc:.6f} k={len(accepted)}")
 
@@ -3542,16 +3560,17 @@ def _auto_select_k_by_auc(
                         log_func(f"[AUTO-FEAT] ⛔ rollback -{last_accept_feat} (full drop {last_accept_prev_best:.6f}→{full_auc:.6f})")
                     accepted = [f for f in accepted if f != last_accept_feat]
                     accepted_set = set(accepted)
-                    flip_map.pop(last_accept_feat, None)
+                    flip_state.pop(last_accept_feat, None)
                     if last_accept_feat in ordered and last_accept_feat not in remaining:
                         remaining.append(last_accept_feat)
-                    cur_flip = {f: -1 for f in flip_map.keys()}
+
+                    cur_flip = ({f: -1 for f in flip_state.keys()} if (_cv_supports_flip_map and flip_state) else None)
                     q = _cv_quick(accepted, flip_map=cur_flip) if accepted else None
                     best_val = _metric(q)
                     rejects_in_row += 1
                     continue
 
-    cur_flip = {f: -1 for f in flip_map.keys()}
+    cur_flip = ({f: -1 for f in flip_state.keys()} if (_cv_supports_flip_map and flip_state) else None)
     final_res = _cv_full(accepted, flip_map=cur_flip) if accepted else None
 
     if verbose and isinstance(final_res, dict):
@@ -3566,18 +3585,14 @@ def _auto_select_k_by_auc(
     state = {
         "done": True,
         "accepted": list(accepted),
-        "flip_map": dict(flip_map),
+        "flip_map": dict(flip_state),
         "evals_done": int(evals_done),
         "backend_mode": bool(backend_mode),
         "early_stop_rounds": early_stop_rounds,
+        "supports_flip_map": bool(_cv_supports_flip_map),
     }
     return list(accepted), final_res, state
-# =========================
-# 3) SELECT FEATURES AUTO (backward compatible signature)
-#    - seeds with must_keep only (earned thereafter)
-#    - evaluates ALL features + baseline fade check (inside _auto_select_k_by_auc)
-#    - supports reverse-AUC candidate flips and returns flip_map in summary
-# =========================
+
 
 def select_features_auto(
     model_proto,
@@ -3643,9 +3658,6 @@ def select_features_auto(
     import numpy as np
     import pandas as pd
 
-    # ----------------------------
-    # 0) Basic guards
-    # ----------------------------
     if X_df_train is None or X_df_train.empty:
         return [], pd.DataFrame(columns=["selected", "flipped", "flip_mode"])
 
@@ -3693,13 +3705,11 @@ def select_features_auto(
         mu_all = np.nanmean(X_mat, axis=0)
         sd_all = np.nanstd(X_mat, axis=0) + 1e-12
 
-    # dynamic sparsity gate
     min_rows = int(max(min_finite_rows, max(5, int(0.002 * n))))
     min_non_nan_frac = float(min_rows / float(max(1, n)))
 
     usable = (nn_cnt >= min_rows) & (var > 0.0)
 
-    # always keep must_keep (even if constant/sparse)
     mk_idx = np.array([col_to_idx[m] for m in mk_in if m in col_to_idx], dtype=np.int32)
     if mk_idx.size:
         usable[mk_idx] = True
@@ -3796,25 +3806,22 @@ def select_features_auto(
     # 3) Fold-based cheap screen
     # ----------------------------
     def _get_quick_splits():
-        # If caller passed an iterable of (tr, va) pairs, use it.
-        # If caller passed a CV object with .split, use that.
         if folds is None:
             return None
 
-        # already a list/tuple of splits?
         if isinstance(folds, (list, tuple)) and len(folds) > 0:
             try:
                 tr0, va0 = folds[0]
-                return [(np.asarray(tr, np.int32), np.asarray(va, np.int32)) for (tr, va) in folds[: int(max(1, fold_screen_folds))]]
+                return [(np.asarray(tr, np.int32), np.asarray(va, np.int32))
+                        for (tr, va) in folds[: int(max(1, fold_screen_folds))]]
             except Exception:
                 pass
 
-        # CV splitter?
         if hasattr(folds, "split"):
             try:
                 it = folds.split(np.zeros((n, 1), dtype=np.float32), y_arr)
                 splits = []
-                for i, (tr, te) in enumerate(it):
+                for (tr, te) in it:
                     splits.append((np.asarray(tr, dtype=np.int32), np.asarray(te, dtype=np.int32)))
                     if len(splits) >= int(max(1, fold_screen_folds)):
                         break
@@ -3827,7 +3834,6 @@ def select_features_auto(
 
     splits = _get_quick_splits()
 
-    # fallback split if nothing usable
     if splits is None:
         idx = np.arange(n, dtype=np.int32)
         pos = idx[y_arr == 1]
@@ -3848,7 +3854,6 @@ def select_features_auto(
     pre_budget = int(min(usable_idx.size, max(max_final * int(preselect_mult), len(mk_in) + 80)))
 
     fold_scores = []
-
     for (tr_idx, _te_idx) in splits:
         X_tr = X_mat[tr_idx, :]
         fin_tr = finite[tr_idx, :]
@@ -3880,7 +3885,6 @@ def select_features_auto(
         corrp = np.abs(cov / (cnt - 1.0 + 1e-12)) / (sd_u + 1e-12) / y_tr_sd
         corrp = corrp.astype(np.float32, copy=False)
 
-        # lift only for top-N by corrp (cap hard)
         lift = np.zeros(len(idxs), dtype=np.float32)
         topN = int(min(pre_budget, len(corrp), int(fold_lift_cap)))
         if topN > 0:
@@ -3888,7 +3892,6 @@ def select_features_auto(
             for loc in top_local:
                 lift[loc] = float(_binary_lift_vec(Xu[:, loc], y_tr))
 
-        # MI-lite only for top-N by corrp (cap hard)
         mi = np.zeros(len(idxs), dtype=np.float32)
         miN = int(min(mi_top_k, corrp.size, int(fold_mi_cap)))
         if miN > 0:
@@ -3911,13 +3914,11 @@ def select_features_auto(
     per_group = {}
     quota = int(max(0, group_quota))
 
-    # seed must_keep
     for m in mk_in:
         j = col_to_idx.get(m)
         if j is not None:
             cand.append(int(j))
 
-    # group quota pass
     for j in usable_ranked:
         j = int(j)
         if j in cand:
@@ -3930,7 +3931,6 @@ def select_features_auto(
         if len(cand) >= pre_budget:
             break
 
-    # global fill
     if len(cand) < pre_budget:
         for j in usable_ranked:
             j = int(j)
@@ -3955,11 +3955,9 @@ def select_features_auto(
     cand_pos = cand_pos[cand_pos >= 0]
     cand_score_uni = score_uni[cand_pos].astype(np.float32, copy=False)
 
-    # compute lift + MI only for top candidates by score
     lift_by_col = np.zeros(p, dtype=np.float32)
     mi_by_col = np.zeros(p, dtype=np.float32)
 
-    # LIFT
     liftN = int(min(int(lift_cap), cand_idx.size))
     if liftN > 0:
         pick = np.argpartition(-cand_score_uni, kth=min(liftN - 1, cand_score_uni.size - 1))[:liftN]
@@ -3975,7 +3973,6 @@ def select_features_auto(
                 continue
             lift_by_col[j] = float(_binary_lift_vec(x, y_arr))
 
-    # MI
     miN2 = int(min(int(mi_cap), cand_idx.size))
     if miN2 > 0:
         pick = np.argpartition(-cand_score_uni, kth=min(miN2 - 1, cand_score_uni.size - 1))[:miN2]
@@ -3983,7 +3980,6 @@ def select_features_auto(
             j = int(cand_idx[ii])
             mi_by_col[j] = float(_mi_lite_1(X_mat[:, j].astype(np.float32, copy=False), y_arr, bins=int(mi_bins)))
 
-    # protect top MI + lift + must_keep
     prot_mi_idx = set(cand_idx[np.argsort(-mi_by_col[cand_idx])[: int(min(protect_top_mi, cand_idx.size))]].tolist())
     prot_lift_idx = set(cand_idx[np.argsort(-lift_by_col[cand_idx])[: int(min(protect_top_lift, cand_idx.size))]].tolist())
     prot_all_idx = prot_mi_idx | prot_lift_idx | set(mk_idx.tolist())
@@ -3997,7 +3993,6 @@ def select_features_auto(
     keep = []
     kept_set = set()
 
-    # seed must_keep first
     for m in mk_in:
         j = col_to_idx.get(m)
         if j is not None and j not in kept_set:
@@ -4041,16 +4036,14 @@ def select_features_auto(
             c = _corr_overlap(j, k, mu_j=mu_j, sd_j=sdj, mu_k=float(mu_all[k]), sd_k=sdk)
 
             if abs(c) >= thr:
-                if is_protected:
-                    if k not in prot_all_idx:
-                        try:
-                            keep.remove(k)
-                            kept_set.remove(k)
-                        except Exception:
-                            pass
-                        keep.append(j)
-                        kept_set.add(j)
-                    # if both protected, allow both
+                if is_protected and (k not in prot_all_idx):
+                    try:
+                        keep.remove(k)
+                        kept_set.remove(k)
+                    except Exception:
+                        pass
+                    keep.append(j)
+                    kept_set.add(j)
                 ok = False
                 break
 
@@ -4070,7 +4063,6 @@ def select_features_auto(
     if not keep_order:
         return [], pd.DataFrame(columns=["selected", "flipped", "flip_mode"])
 
-    # min_k should never be < must_keep size
     min_k_eff = len(mk_in) if (auc_min_k is None) else int(max(len(mk_in), auc_min_k))
     flip_map = {}
 
@@ -4089,24 +4081,20 @@ def select_features_auto(
             accept_metric=str(accept_metric),
             must_keep=mk_in,
             baseline_feats=baseline_feats if baseline_feats is not None else mk_in,
-    
-            # flips you actually support
+
             flips_after_each_accept=True,
             allow_candidate_flip=bool(allow_candidate_flip),
             flip_gain_min=float(flip_gain_min),
-    
-            # speed/quality knobs you actually support
+
             quick_folds=int(max(1, fold_screen_folds)) if fold_screen else 2,
             candidate_batch=24,
             full_eval_top=3,
-            force_full_scan=False,            # allow patience to stop; set True to scan all
-    
-            # checkpointing you actually support
+            force_full_scan=False,
+
             full_check_every=10,
             full_check_folds=None,
             abort_drop_full_auc=0.002,
-    
-            # runtime caps (you actually support)
+
             time_budget_s=1e18,
             max_total_evals=None,
         )
@@ -4115,6 +4103,7 @@ def select_features_auto(
     else:
         feature_cols = keep_order
         flip_map = {}
+
     # ----------------------------
     # 7) Summary
     # ----------------------------
