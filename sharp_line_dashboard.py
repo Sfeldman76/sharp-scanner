@@ -2738,7 +2738,8 @@ import pandas as pd
 from sklearn.base import clone
 from sklearn.metrics import roc_auc_score, log_loss
 
-# 1) CV EVAL BLOCK (unchanged interface)
+# =========================
+# 1) CV EVAL BLOCK (backend-optimized, same interface)
 # =========================
 def _cv_auc_for_feature_set(
     model_proto, X, y, folds, feature_list, *,
@@ -2770,17 +2771,38 @@ def _cv_auc_for_feature_set(
     drop_forbidden_features=True,
     fallback_to_all_available_features=True,
     require_numeric_features=True,
-    min_non_nan_frac = 0.001,
-):
+    min_non_nan_frac=0.001,
 
+    # ✅ backend knobs (optional, safe defaults)
+    backend_mode: bool = True,            # if True: prefer stable fold-mean metrics + early stopping
+    early_stop_rounds: int | None = 50,   # XGB early stopping (only for xgb native path)
+    stable_auc: str = "fold_mean",        # "fold_mean" (default) or "oof"
+    min_finite_rows: int = 20,            # dynamic sparsity gate (in addition to min_non_nan_frac)
+    use_dmatrix_cache: bool = True,       # cache DMatrix per (X,id cols) signature
+    dmatrix_cache_cap: int = 8,           # bounded cache size
+    verbose_eval_xgb: bool = False,
+):
+    """
+    Backend-optimized CV evaluator:
+      ✅ uses cached numeric matrix and (optionally) cached XGB DMatrix
+      ✅ supports XGB early stopping per fold (more realistic + less overfit)
+      ✅ stable AUC option: fold-mean AUC (less noisy than OOF AUC for selection)
+      ✅ dynamic sparsity gate: require >= min_finite_rows finite rows per feature
+      ✅ abort logic uses fold-mean best-possible bound when stable_auc="fold_mean"
+      ✅ interface compatible with your existing callers
+    """
+    import numpy as np
+    import pandas as pd
+    from sklearn.base import clone
+    from sklearn.metrics import roc_auc_score, log_loss
 
     folds = list(folds) if folds is not None else []
     if max_folds is not None and folds:
         folds = folds[: int(max_folds)]
 
     y = np.asarray(y, int).reshape(-1)
-    n = len(y)
-    if len(y) != len(X):
+    n = int(len(y))
+    if n != len(X):
         raise ValueError(f"X and y length mismatch: len(X)={len(X)} len(y)={len(y)}")
 
     if leak_col_patterns is None:
@@ -2790,6 +2812,11 @@ def _cv_auc_for_feature_set(
         s = str(col)
         return any(p in s for p in leak_col_patterns)
 
+    # ---- dynamic sparsity threshold ----
+    min_rows = int(max(min_finite_rows, max(5, int(0.002 * n))))
+    min_frac_dyn = float(min_rows / float(max(1, n)))
+    min_frac_eff = float(max(float(min_non_nan_frac), min_frac_dyn))
+
     def _all_usable_features_from_X() -> list[str]:
         cols = [c for c in list(X.columns) if not _is_forbidden(c)]
         if not cols:
@@ -2798,12 +2825,15 @@ def _cv_auc_for_feature_set(
         for c in cols:
             s = pd.to_numeric(X[c], errors="coerce")
             arr = np.asarray(s, float)
-            frac = float(np.isfinite(arr).mean()) if arr.size else 0.0
-            if frac >= float(min_non_nan_frac):
+            if arr.size == 0:
+                continue
+            frac = float(np.isfinite(arr).mean())
+            cnt = int(np.isfinite(arr).sum())
+            if (frac >= min_frac_eff) and (cnt >= min_rows):
                 keep.append(c)
         return keep
 
-    feature_list = [f for f in feature_list if f in X.columns]
+    feature_list = [f for f in (feature_list or []) if f in X.columns]
 
     forbidden = [f for f in feature_list if _is_forbidden(f)]
     if forbidden:
@@ -2818,7 +2848,7 @@ def _cv_auc_for_feature_set(
     if len(feature_list) == 0 and fallback_to_all_available_features:
         feature_list = _all_usable_features_from_X()
         if debug:
-            log_func(f"[FEATS] Requested list collapsed; fallback -> using {len(feature_list)} cols")
+            log_func(f"[FEATS] Requested list collapsed; fallback -> using {len(feature_list)} cols (min_frac_eff={min_frac_eff:.4f})")
 
     if len(feature_list) == 0:
         return {
@@ -2831,9 +2861,7 @@ def _cv_auc_for_feature_set(
             "aborted": False,
         }
 
-    folds_np = [(np.asarray(tr, np.int64), np.asarray(va, np.int64)) for tr, va in (folds or [])]
-    folds = folds_np
-
+    folds = [(np.asarray(tr, np.int64), np.asarray(va, np.int64)) for tr, va in (folds or [])]
     if cv_mode == "quick" and folds:
         folds = folds[: max(1, int(quick_folds_n))]
 
@@ -2845,7 +2873,9 @@ def _cv_auc_for_feature_set(
         if inter:
             raise RuntimeError(f"[LEAK] Game overlap between train/val: {len(inter)} games. Sample={list(inter)[:10]}")
 
-    # numeric cache
+    # -----------------------------
+    # Numeric matrix cache (float32)
+    # -----------------------------
     _MAT_CACHE = getattr(_cv_auc_for_feature_set, "_MAT_CACHE", {})
     sig = (id(X), tuple(X.columns), bool(require_numeric_features))
     if sig in _MAT_CACHE:
@@ -2877,7 +2907,9 @@ def _cv_auc_for_feature_set(
 
     X_mat = X_all_mat[:, cols_idx]
 
-    # xgb native fast path (helpers must exist)
+    # ---------------------------------
+    # XGB native path + early stopping
+    # ---------------------------------
     use_xgb = False
     try:
         use_xgb = bool(_is_xgb_classifier(model_proto))
@@ -2891,84 +2923,147 @@ def _cv_auc_for_feature_set(
         xgb_params, xgb_num_round = _xgb_params_from_proto(model_proto)
         if isinstance(xgb_params, dict) and "nthread" not in xgb_params and "n_jobs" not in xgb_params:
             xgb_params["nthread"] = 0
-   
 
-    def _fit_predict_proba(X_tr, y_tr, X_va):
-        if use_xgb:
+        # small stability nudge (safe)
+        xgb_params = dict(xgb_params)
+        xgb_params["reg_lambda"] = float(xgb_params.get("reg_lambda", 1.0)) * (1.10 if backend_mode else 1.0)
+        xgb_params["min_child_weight"] = max(float(xgb_params.get("min_child_weight", 1.0)), 2.0)
+
+    # -----------------------------
+    # DMatrix cache (bounded)
+    # -----------------------------
+    _DMAT_CACHE = getattr(_cv_auc_for_feature_set, "_DMAT_CACHE", {})
+    _DMAT_KEYS = getattr(_cv_auc_for_feature_set, "_DMAT_KEYS", [])
+    # signature includes column indices to avoid wrong reuse
+    d_sig = (id(X_all_mat), tuple(cols_idx), int(n))
+    d_all = None
+    if use_xgb and use_dmatrix_cache:
+        if d_sig in _DMAT_CACHE:
+            d_all = _DMAT_CACHE[d_sig]
+        else:
             import xgboost as xgb  # noqa
-            dtr = xgb.DMatrix(X_tr, label=y_tr)
-            dva = xgb.DMatrix(X_va)
-            booster = xgb.train(xgb_params, dtr, num_boost_round=int(xgb_num_round))
-            return booster.predict(dva)
-        mdl = clone(model_proto)
-        mdl.fit(X_tr, y_tr)
-        return _safe_predict_proba_pos(mdl, X_va)
+            d_all = xgb.DMatrix(np.ascontiguousarray(X_mat, dtype=np.float32), label=y)
+            _DMAT_CACHE[d_sig] = d_all
+            _DMAT_KEYS.append(d_sig)
+            # evict oldest if cap exceeded
+            if len(_DMAT_KEYS) > int(max(1, dmatrix_cache_cap)):
+                old = _DMAT_KEYS.pop(0)
+                _DMAT_CACHE.pop(old, None)
+            _cv_auc_for_feature_set._DMAT_CACHE = _DMAT_CACHE
+            _cv_auc_for_feature_set._DMAT_KEYS = _DMAT_KEYS
 
-   
-    def _oof_metrics_for_mat(X_local_mat):
+    # -----------------------------
+    # Flip/orient helpers (optional)
+    # -----------------------------
+    def _auto_flip_mode(arr1d):
+        arr1d = np.asarray(arr1d, dtype=np.float32)
+        if not np.isfinite(arr1d).any():
+            return "none"
+        x_nan = np.where(np.isfinite(arr1d), arr1d, np.nan)
+        mn = np.nanmin(x_nan)
+        mx = np.nanmax(x_nan)
+        return "one_minus" if (mn >= -1e-3 and mx <= 1.0 + 1e-3) else "negate"
+
+    def _apply_flip_inplace(col, mode: str):
+        if mode == "one_minus":
+            np.subtract(np.float32(1.0), col, out=col)
+        elif mode == "negate":
+            np.negative(col, out=col)
+
+    # -----------------------------
+    # Core CV evaluator
+    # -----------------------------
+    def _oof_metrics_for_mat(X_local_mat, *, try_flips: bool = False):
+        """
+        Returns metrics dict (and oof if return_oof).
+        If backend_mode & stable_auc == "fold_mean": AUC used in score is fold-mean AUC.
+        """
         oof = np.full(n, np.nan, dtype=np.float32) if return_oof else None
-    
+
         do_abort = abort_if_cannot_beat_score is not None and np.isfinite(abort_if_cannot_beat_score)
         auc_fold_vals = []
         n_folds = len(folds)
-    
+
         # ---------------------------
-        # ✅ XGB no-copy CV fast path
+        # XGB path
         # ---------------------------
         if use_xgb:
             import xgboost as xgb  # noqa
-    
-            # build once (float32 already)
-            d_all = xgb.DMatrix(X_local_mat, label=y)
-    
-            # small helper
+
+            # if cached d_all exists and matches X_local_mat, use it; else build per-call
+            # NOTE: we cache only for the exact feature-set X_mat; so if X_local_mat is different, rebuild.
+            local_is_base = (X_local_mat is X_mat) or (
+                X_local_mat.shape == X_mat.shape and np.may_share_memory(X_local_mat, X_mat)
+            )
+            dmat = d_all if (d_all is not None and local_is_base) else xgb.DMatrix(
+                np.ascontiguousarray(X_local_mat, dtype=np.float32), label=y
+            )
+
             def _fit_predict_xgb(tr_idx, val_idx):
-                d_tr = d_all.slice(tr_idx)
-                d_va = d_all.slice(val_idx)
-                booster = xgb.train(xgb_params, d_tr, num_boost_round=int(xgb_num_round))
+                d_tr = dmat.slice(tr_idx)
+                d_va = dmat.slice(val_idx)
+                booster = xgb.train(
+                    xgb_params,
+                    d_tr,
+                    num_boost_round=int(xgb_num_round),
+                    evals=[(d_va, "val")],
+                    early_stopping_rounds=(int(early_stop_rounds) if (backend_mode and early_stop_rounds) else None),
+                    verbose_eval=bool(verbose_eval_xgb) if debug else False,
+                )
+                if hasattr(booster, "best_iteration") and booster.best_iteration is not None:
+                    try:
+                        return booster.predict(d_va, iteration_range=(0, int(booster.best_iteration) + 1))
+                    except TypeError:
+                        ntl = int(getattr(booster, "best_ntree_limit", 0) or 0)
+                        return booster.predict(d_va, ntree_limit=ntl if ntl > 0 else None)
                 return booster.predict(d_va)
-    
+
             for (tr_idx, val_idx) in folds:
                 _assert_no_game_overlap(tr_idx, val_idx)
-    
+
                 proba = np.asarray(_fit_predict_xgb(tr_idx, val_idx), float).ravel()
                 if oof is not None:
                     oof[val_idx] = proba.astype(np.float32, copy=False)
-    
-                if do_abort:
-                    try:
-                        auc_fold = roc_auc_score(y[val_idx], np.clip(proba, eps, 1 - eps))
-                        if not np.isfinite(auc_fold):
-                            auc_fold = 0.5
-                    except Exception:
+
+                # fold AUC for stable gating + abort bound
+                try:
+                    auc_fold = roc_auc_score(y[val_idx], np.clip(proba, eps, 1 - eps))
+                    if not np.isfinite(auc_fold):
                         auc_fold = 0.5
-    
-                    auc_fold_vals.append(float(auc_fold))
+                except Exception:
+                    auc_fold = 0.5
+                auc_fold_vals.append(float(auc_fold))
+
+                if do_abort and (backend_mode and stable_auc == "fold_mean"):
                     left = n_folds - len(auc_fold_vals)
                     mean_auc_best_possible = (sum(auc_fold_vals) + left * 1.0) / float(n_folds)
                     best_possible_score = (auc_weight * mean_auc_best_possible)
+                    if compute_ll_brier:
+                        # optimistic bound ignores ll/brier penalties (still safe for pruning)
+                        pass
                     if best_possible_score < float(abort_if_cannot_beat_score) + float(abort_margin):
                         return {
-                            "oof_proba": oof.astype(float) if oof is not None else None,
+                            "oof_proba": oof.astype(float) if (oof is not None and return_oof) else None,
                             "auc": float("nan"),
                             "logloss": float("nan"),
                             "brier": float("nan"),
                             "score": float("-inf"),
                             "aborted": True,
+                            "auc_fold_mean": float("nan"),
                         }
-    
-            if oof is None:
-                # still need oof for final metrics
+
+            # if no oof requested, we still need oof for ll/brier if compute_ll_brier=True and stable_auc=="oof"
+            if oof is None and (compute_ll_brier or stable_auc == "oof"):
                 oof2 = np.full(n, np.nan, dtype=np.float32)
                 for (tr_idx, val_idx) in folds:
                     _assert_no_game_overlap(tr_idx, val_idx)
                     p = np.asarray(_fit_predict_xgb(tr_idx, val_idx), float).ravel()
                     oof2[val_idx] = p.astype(np.float32, copy=False)
                 oof = oof2
-    
-        # --------------------------------------
-        # sklearn / generic path (still copies)
-        # --------------------------------------
+
+        # ---------------------------
+        # sklearn / generic path
+        # ---------------------------
         else:
             def _fit_predict_proba_sklearn(tr_idx, val_idx):
                 X_tr = X_local_mat[tr_idx, :]
@@ -2977,77 +3072,158 @@ def _cv_auc_for_feature_set(
                 mdl = clone(model_proto)
                 mdl.fit(X_tr, y_tr)
                 return _safe_predict_proba_pos(mdl, X_va)
-    
+
             for (tr_idx, val_idx) in folds:
                 _assert_no_game_overlap(tr_idx, val_idx)
-    
+
                 proba = np.asarray(_fit_predict_proba_sklearn(tr_idx, val_idx), float).ravel()
                 if oof is not None:
                     oof[val_idx] = proba.astype(np.float32, copy=False)
-    
-                if do_abort:
-                    try:
-                        auc_fold = roc_auc_score(y[val_idx], np.clip(proba, eps, 1 - eps))
-                        if not np.isfinite(auc_fold):
-                            auc_fold = 0.5
-                    except Exception:
+
+                try:
+                    auc_fold = roc_auc_score(y[val_idx], np.clip(proba, eps, 1 - eps))
+                    if not np.isfinite(auc_fold):
                         auc_fold = 0.5
-                    auc_fold_vals.append(float(auc_fold))
-    
+                except Exception:
+                    auc_fold = 0.5
+                auc_fold_vals.append(float(auc_fold))
+
+                if do_abort and (backend_mode and stable_auc == "fold_mean"):
                     left = n_folds - len(auc_fold_vals)
                     mean_auc_best_possible = (sum(auc_fold_vals) + left * 1.0) / float(n_folds)
                     best_possible_score = (auc_weight * mean_auc_best_possible)
                     if best_possible_score < float(abort_if_cannot_beat_score) + float(abort_margin):
                         return {
-                            "oof_proba": oof.astype(float) if oof is not None else None,
+                            "oof_proba": oof.astype(float) if (oof is not None and return_oof) else None,
                             "auc": float("nan"),
                             "logloss": float("nan"),
                             "brier": float("nan"),
                             "score": float("-inf"),
                             "aborted": True,
+                            "auc_fold_mean": float("nan"),
                         }
-    
-            if oof is None:
+
+            if oof is None and (compute_ll_brier or stable_auc == "oof"):
                 oof2 = np.full(n, np.nan, dtype=np.float32)
                 for (tr_idx, val_idx) in folds:
                     _assert_no_game_overlap(tr_idx, val_idx)
                     p = np.asarray(_fit_predict_proba_sklearn(tr_idx, val_idx), float).ravel()
                     oof2[val_idx] = p.astype(np.float32, copy=False)
                 oof = oof2
-    
+
         # ---------------------------
-        # metrics (vectorized already)
+        # metrics
         # ---------------------------
-        valid = np.isfinite(oof)
-        y_v = y[valid]
-        p_v = np.clip(oof[valid].astype(float), eps, 1 - eps)
-    
-        auc = roc_auc_score(y_v, p_v) if (len(y_v) >= 2 and len(np.unique(y_v)) >= 2) else np.nan
-    
+        auc_fold_mean = float(np.mean(auc_fold_vals)) if auc_fold_vals else float("nan")
+
+        if stable_auc == "fold_mean":
+            auc_used = auc_fold_mean
+        else:
+            # OOF AUC (can be noisier but fine for reporting)
+            valid = np.isfinite(oof)
+            y_v = y[valid]
+            p_v = np.clip(oof[valid].astype(float), eps, 1 - eps)
+            auc_used = roc_auc_score(y_v, p_v) if (len(y_v) >= 2 and len(np.unique(y_v)) >= 2) else np.nan
+
+        # ll/brier always computed from OOF if requested
         if compute_ll_brier:
+            valid = np.isfinite(oof)
+            y_v = y[valid]
+            p_v = np.clip(oof[valid].astype(float), eps, 1 - eps)
             ll = log_loss(y_v, p_v, labels=[0, 1])
             br = float(np.mean((p_v - y_v) ** 2))
         else:
             ll = float("nan")
             br = float("nan")
-    
-        score = (auc_weight * auc)
+
+        score = (auc_weight * float(auc_used))
         if compute_ll_brier:
-            score = score - (ll_weight * ll) - (brier_weight * br)
-    
+            score = score - (ll_weight * float(ll)) - (brier_weight * float(br))
+
         return {
-            "oof_proba": oof.astype(float) if return_oof else None,
-            "auc": float(auc) if np.isfinite(auc) else float("nan"),
+            "oof_proba": oof.astype(float) if (return_oof and oof is not None) else None,
+            "auc": float(auc_used) if np.isfinite(auc_used) else float("nan"),
             "logloss": float(ll) if compute_ll_brier else float("nan"),
             "brier": float(br) if compute_ll_brier else float("nan"),
             "score": float(score) if np.isfinite(score) else float("-inf"),
             "aborted": False,
+            "auc_fold_mean": float(auc_fold_mean),
         }
 
+    # -----------------------------
+    # Optional orientation / flip search (backend safe)
+    # -----------------------------
+    # Default behavior: evaluate base once. If flips/orient enabled, do a cheap greedy flip pass.
     base = _oof_metrics_for_mat(X_mat)
 
-    out = dict(base)
-    out["feature_list"] = list(feats)
+    best = dict(base)
+    best_feats = list(feats)
+    best_flip_map = {}
+
+    if enable_feature_flips and max_feature_flips and X_mat.shape[1] > 0:
+        # greedy: try flipping single columns; accept if improves "score" (or AUC if compute_ll_brier False)
+        X_try = X_mat.copy()  # backend: allowed
+        chosen = 0
+
+        def _val_of(res):
+            return float(res["score"]) if (accept_metric := "score") else float(res["auc"])
+
+        # if you want to keep it purely score-based:
+        def _better(res_new, res_old):
+            return float(res_new.get("score", -1e18)) > float(res_old.get("score", -1e18)) + 1e-12
+
+        # evaluate each feature flip once, pick best, repeat up to max_feature_flips
+        for _pass in range(int(max(1, orient_passes))):
+            if chosen >= int(max_feature_flips):
+                break
+
+            best_gain = 0.0
+            best_j = None
+            best_mode = None
+            best_res = None
+
+            for j, f in enumerate(best_feats):
+                col = X_try[:, j]
+                orig = col.copy()
+
+                mode = _auto_flip_mode(orig)
+                if mode == "none":
+                    continue
+                _apply_flip_inplace(col, mode)
+
+                res = _oof_metrics_for_mat(X_try)
+                col[:] = orig
+
+                if res.get("aborted", False):
+                    continue
+
+                gain = float(res.get("score", -1e18)) - float(best.get("score", -1e18))
+                if gain > best_gain + 1e-12:
+                    best_gain = gain
+                    best_j = j
+                    best_mode = mode
+                    best_res = res
+
+            if best_j is None:
+                break
+
+            # apply best flip permanently
+            _apply_flip_inplace(X_try[:, best_j], best_mode)
+            best_flip_map[best_feats[best_j]] = {"flipped": True, "mode": best_mode}
+            best = dict(best_res)
+            chosen += 1
+
+            if debug:
+                log_func(f"[CV-FLIP] ✅ flip {best_feats[best_j]} mode={best_mode} Δscore={best_gain:+.6f}")
+
+            if chosen >= int(max_feature_flips):
+                break
+
+    out = dict(best)
+    out["feature_list"] = list(best_feats)
+    out["flip_map"] = dict(best_flip_map)
+
+    # keep your legacy fields
     out["oof_auc_best"] = float(out.get("auc", float("nan")))
     out["oof_logloss_best"] = float(out.get("logloss", float("nan")))
     out["oof_brier_best"] = float(out.get("brier", float("nan")))
@@ -3060,10 +3236,16 @@ def _cv_auc_for_feature_set(
 
     if not return_oof:
         out["oof_proba"] = None
+
+    if debug:
+        log_func(
+            f"[CV] k={len(out['feature_list'])} auc={out.get('auc', float('nan')):.6f} "
+            f"auc_fold_mean={out.get('auc_fold_mean', float('nan')):.6f} "
+            f"ll={out.get('logloss', float('nan')):.6f} brier={out.get('brier', float('nan')):.6f} "
+            f"score={out.get('score', float('nan')):.6f} stable_auc={stable_auc} min_frac_eff={min_frac_eff:.4f}"
+        )
+
     return out
-
-
-
 
 import numpy as np
 import pandas as pd
@@ -3110,7 +3292,7 @@ def _auto_select_k_by_auc(
     must_keep: list[str] | None = None,
     baseline_feats: list[str] | None = None,
 
-    # --- speed knobs ---
+    # --- speed knobs (kept for compat; backend mode ignores most) ---
     quick_screen: bool = True,
     quick_folds: int = 2,
     quick_accept: float = 0.0,      # unused kept for compat
@@ -3123,16 +3305,27 @@ def _auto_select_k_by_auc(
 
     psi_fn=None,
     psi_max: float | None = None,
+
+    # ✅ backend / quality knobs (new)
+    backend_mode: bool = True,              # if True: disable quick gates & do thorough selection
+    early_stop_rounds: int | None = 50,     # XGB early stopping during selection
+    full_eval_every: int = 1,               # evaluate full metrics on every accepted step (1 = always)
+    candidate_batch: int = 12,              # evaluate top-N remaining candidates per iteration (picks up interactions)
+    rescue_every: int = 20,                 # every N rejects, do a "synergy rescue" step
+    rescue_pool: int = 40,                  # pool size to sample from for rescue
+    allow_backward: bool = True,            # floating selection: occasionally drop a harmful feature
+    backward_every: int = 5,                # consider backward step every N accepts
+    backward_min_gain: float = 0.0,         # require >= this AUC gain to drop something (0.0 = allow if improves)
+    max_backward_steps: int = 2,            # per check
+    accept_on_score: bool = False,          # if accept_metric=="score", accept based on score; else AUC
 ):
     """
-    Fast + low-memory forward selection with improved signal pickup:
-      ✅ fold-mean AUC gating (less noisy than OOF AUC for screening)
-      ✅ adaptive margins early vs late (more permissive early)
-      ✅ synergy rescue when stuck (lets interaction-only features through occasionally)
-      ✅ consistent early stopping rounds (quick=15, full=25)
-      ✅ selection-time stabilization for XGB (no memory cost)
-      ✅ IMPORTANT FIX: final evaluation uses the SAME regime as selection
-         (early stopping + best_iteration + same AUC definition by default)
+    Backend-optimized forward selection (less about speed, more about signal pickup):
+      ✅ batch candidate evaluation (top-N per step) -> captures interaction-only features
+      ✅ overlap-free: uses full folds (no quick gates) in backend_mode
+      ✅ optional floating selection (forward + occasional backward prune)
+      ✅ consistent regime between selection and final eval (same CV + early stopping)
+      ✅ optional candidate flips (full-fold evaluation when close)
     """
     import time
     import numpy as np
@@ -3141,9 +3334,16 @@ def _auto_select_k_by_auc(
     from sklearn.metrics import roc_auc_score, log_loss
 
     t0 = time.time()
-    folds = list(folds) if folds is not None else []
     y_arr = np.asarray(y, int).reshape(-1)
-    n = len(y_arr)
+    n = int(len(y_arr))
+    if n == 0:
+        return [], None, {"done": True, "reason": "empty_y"}
+
+    # ---- folds sanitize ----
+    folds = list(folds) if folds is not None else []
+    folds = [(np.asarray(tr, np.int64), np.asarray(va, np.int64)) for (tr, va) in folds]
+    if not folds:
+        return [], None, {"done": True, "reason": "no_folds"}
 
     # ---- sanitize ordered_features ----
     ordered = list(ordered_features) if ordered_features is not None else []
@@ -3167,14 +3367,14 @@ def _auto_select_k_by_auc(
     min_k = int(max(len(mk), min(int(min_k), max_k)))
 
     if verbose:
-        log_func(f"[AUTO-FEAT] seed(min_k)={min_k} must_keep={len(mk)} max_k={max_k} candidates={len(ordered)}")
+        log_func(f"[AUTO-FEAT] seed(min_k)={min_k} must_keep={len(mk)} max_k={max_k} candidates={len(ordered)} backend_mode={backend_mode}")
 
-    # ---------- evaluate ALL first (unchanged) ----------
+    # ---- evaluate ALL + baseline (kept from your original; uses your helper) ----
     all_feats = list(ordered)
     all_res = _cv_auc_for_feature_set(
         model_proto, X, y_arr, folds, all_feats,
         log_func=log_func,
-        debug=True,
+        debug=False,
         return_oof=False,
         orient_features=False,
         enable_feature_flips=False,
@@ -3189,7 +3389,6 @@ def _auto_select_k_by_auc(
             f"n_feats={len(all_feats)}"
         )
 
-    # ---------- baseline check (unchanged) ----------
     if baseline_feats is None:
         baseline_feats = mk
     base_feats = [f for f in (baseline_feats or []) if f in X.columns]
@@ -3197,13 +3396,13 @@ def _auto_select_k_by_auc(
         base_res = _cv_auc_for_feature_set(
             model_proto, X, y_arr, folds, base_feats,
             log_func=log_func,
-            debug=True,
+            debug=False,
             return_oof=False,
             cv_mode="full",
         )
-        if verbose and isinstance(base_res, dict):
+        if verbose and isinstance(base_res, dict) and isinstance(all_res, dict):
             lift_auc = float(all_res.get("auc", 0.5)) - float(base_res.get("auc", 0.5))
-            lift_ll  = float(base_res.get("logloss", float("nan"))) - float(all_res.get("logloss", float("nan")))
+            lift_ll = float(base_res.get("logloss", float("nan"))) - float(all_res.get("logloss", float("nan")))
             log_func(
                 f"[SIGNAL CHECK] baseline_auc={base_res.get('auc', float('nan')):.4f} "
                 f"all_auc={all_res.get('auc', float('nan')):.4f} "
@@ -3232,14 +3431,6 @@ def _auto_select_k_by_auc(
             return True
         return bool(val_try >= float(best_val) + float(min_improve))
 
-    # ---- fold arrays once ----
-    folds = [(np.asarray(tr, np.int64), np.asarray(va, np.int64)) for (tr, va) in (folds or [])]
-
-    # quick folds subset
-    qn = int(max(1, quick_folds)) if (quick_screen and len(folds) > 1) else len(folds)
-    folds_quick = folds[:qn]
-    folds_full = folds
-
     # ---- numeric matrix once (float32) ----
     X_num_all = X.apply(pd.to_numeric, errors="coerce")
     X_all_mat = X_num_all.to_numpy(dtype=np.float32, copy=False)
@@ -3258,16 +3449,14 @@ def _auto_select_k_by_auc(
         xgb_params, xgb_num_round = _xgb_params_from_proto(model_proto)
         if isinstance(xgb_params, dict) and "nthread" not in xgb_params and "n_jobs" not in xgb_params:
             xgb_params["nthread"] = 0
-
-        # ✅ selection-time stabilization (tiny dict copy; no memory blowup)
+        # selection-time stabilization (OK in backend too)
         xgb_params = dict(xgb_params)
-        xgb_params["reg_lambda"] = float(xgb_params.get("reg_lambda", 1.0)) * 1.5
+        xgb_params["reg_lambda"] = float(xgb_params.get("reg_lambda", 1.0)) * 1.25
         xgb_params["min_child_weight"] = max(float(xgb_params.get("min_child_weight", 1.0)), 2.0)
-        # keep whatever you already tune; just ensure int
         if "max_leaves" in xgb_params:
             xgb_params["max_leaves"] = int(xgb_params["max_leaves"])
 
-    # ---- fast flip helpers (mode-only + inplace) ----
+    # ---- flip helpers ----
     def _auto_flip_mode(arr1d):
         arr1d = np.asarray(arr1d, dtype=np.float32)
         if not np.isfinite(arr1d).any():
@@ -3289,123 +3478,47 @@ def _auto_select_k_by_auc(
             if f in col_ix:
                 flip_mode_cache[f] = _auto_flip_mode(X_all_mat[:, col_ix[f]])
 
-    # ---- matrix-backed CV evaluator ----
-    def _cv_eval_auc_only(
-        X_mat,
-        folds_use,
-        *,
-        abort_best_auc=None,
-        early_stop_rounds=None,
-        return_fold_mean=True,
-    ):
-        """
-        AUC-only CV with XGB early stopping.
-        ✅ returns fold-mean AUC (default) for a stabler selection gate.
-        """
-        eps = 1e-7
-        oof = np.full(n, np.nan, dtype=np.float32)
-
-        do_abort = (abort_best_auc is not None) and np.isfinite(abort_best_auc)
-        auc_fold_vals = []
-        n_folds = len(folds_use)
-
-        if use_xgb:
-            import xgboost as xgb
-            d_all = xgb.DMatrix(np.ascontiguousarray(X_mat, dtype=np.float32), label=y_arr)
-
-            def _fit_predict(tr_idx, va_idx):
-                d_tr = d_all.slice(tr_idx)
-                d_va = d_all.slice(va_idx)
-                booster = xgb.train(
-                    xgb_params,
-                    d_tr,
-                    num_boost_round=int(xgb_num_round),
-                    evals=[(d_va, "val")],
-                    early_stopping_rounds=(int(early_stop_rounds) if early_stop_rounds is not None else None),
-                    verbose_eval=False,
-                )
-                if hasattr(booster, "best_iteration") and booster.best_iteration is not None:
-                    try:
-                        return booster.predict(d_va, iteration_range=(0, int(booster.best_iteration) + 1))
-                    except TypeError:
-                        ntl = int(getattr(booster, "best_ntree_limit", 0) or 0)
-                        return booster.predict(d_va, ntree_limit=ntl if ntl > 0 else None)
-                return booster.predict(d_va)
-        else:
-            def _fit_predict(tr_idx, va_idx):
-                mdl = clone(model_proto)
-                mdl.fit(X_mat[tr_idx, :], y_arr[tr_idx])
-                p = mdl.predict_proba(X_mat[va_idx, :])
-                return p[:, 1] if p.ndim == 2 else p
-
-        for tr_idx, va_idx in folds_use:
-            proba = np.asarray(_fit_predict(tr_idx, va_idx), float).ravel()
-            oof[va_idx] = proba.astype(np.float32, copy=False)
-
-            # ✅ always compute fold AUC (stable gate)
+    # ---- matrix-backed evaluators (consistent regime) ----
+    def _fit_predict_xgb(d_all, tr_idx, va_idx):
+        import xgboost as xgb
+        d_tr = d_all.slice(tr_idx)
+        d_va = d_all.slice(va_idx)
+        booster = xgb.train(
+            xgb_params,
+            d_tr,
+            num_boost_round=int(xgb_num_round),
+            evals=[(d_va, "val")],
+            early_stopping_rounds=(int(early_stop_rounds) if early_stop_rounds is not None else None),
+            verbose_eval=False,
+        )
+        if hasattr(booster, "best_iteration") and booster.best_iteration is not None:
             try:
-                auc_fold = roc_auc_score(y_arr[va_idx], np.clip(proba, eps, 1 - eps))
-                if not np.isfinite(auc_fold):
-                    auc_fold = 0.5
-            except Exception:
-                auc_fold = 0.5
-            auc_fold_vals.append(float(auc_fold))
+                return booster.predict(d_va, iteration_range=(0, int(booster.best_iteration) + 1))
+            except TypeError:
+                ntl = int(getattr(booster, "best_ntree_limit", 0) or 0)
+                return booster.predict(d_va, ntree_limit=ntl if ntl > 0 else None)
+        return booster.predict(d_va)
 
-            if do_abort:
-                left = n_folds - len(auc_fold_vals)
-                best_possible_auc = (sum(auc_fold_vals) + left * 1.0) / float(n_folds)
-                if best_possible_auc < float(abort_best_auc) + float(abort_margin_cv):
-                    return {"auc": float("nan"), "aborted": True, "auc_fold_mean": float("nan")}
+    def _fit_predict_sklearn(X_mat, tr_idx, va_idx):
+        mdl = clone(model_proto)
+        mdl.fit(X_mat[tr_idx, :], y_arr[tr_idx])
+        p = mdl.predict_proba(X_mat[va_idx, :])
+        return p[:, 1] if p.ndim == 2 else p
 
-        auc_fold_mean = float(np.mean(auc_fold_vals)) if auc_fold_vals else float("nan")
-        if return_fold_mean:
-            return {"auc": auc_fold_mean, "aborted": False, "auc_fold_mean": auc_fold_mean}
-
-        valid = np.isfinite(oof)
-        y_v = y_arr[valid]
-        p_v = np.clip(oof[valid].astype(float), eps, 1 - eps)
-        auc = roc_auc_score(y_v, p_v) if (len(y_v) >= 2 and len(np.unique(y_v)) >= 2) else np.nan
-        return {"auc": float(auc) if np.isfinite(auc) else float("nan"), "aborted": False, "auc_fold_mean": auc_fold_mean}
-
-    def _cv_eval_full_metrics(X_mat, folds_use, *, early_stop_rounds=None):
-        """
-        Full metrics (AUC + LL + Brier) — called only when candidate is about to be accepted.
-        """
+    def _cv_eval_full_metrics(X_mat):
         eps = 1e-7
         oof = np.full(n, np.nan, dtype=np.float32)
 
         if use_xgb:
             import xgboost as xgb
             d_all = xgb.DMatrix(np.ascontiguousarray(X_mat, dtype=np.float32), label=y_arr)
-
-            def _fit_predict(tr_idx, va_idx):
-                d_tr = d_all.slice(tr_idx)
-                d_va = d_all.slice(va_idx)
-                booster = xgb.train(
-                    xgb_params,
-                    d_tr,
-                    num_boost_round=int(xgb_num_round),
-                    evals=[(d_va, "val")],
-                    early_stopping_rounds=(int(early_stop_rounds) if early_stop_rounds is not None else None),
-                    verbose_eval=False,
-                )
-                if hasattr(booster, "best_iteration") and booster.best_iteration is not None:
-                    try:
-                        return booster.predict(d_va, iteration_range=(0, int(booster.best_iteration) + 1))
-                    except TypeError:
-                        ntl = int(getattr(booster, "best_ntree_limit", 0) or 0)
-                        return booster.predict(d_va, ntree_limit=ntl if ntl > 0 else None)
-                return booster.predict(d_va)
+            for tr_idx, va_idx in folds:
+                proba = np.asarray(_fit_predict_xgb(d_all, tr_idx, va_idx), float).ravel()
+                oof[va_idx] = proba.astype(np.float32, copy=False)
         else:
-            def _fit_predict(tr_idx, va_idx):
-                mdl = clone(model_proto)
-                mdl.fit(X_mat[tr_idx, :], y_arr[tr_idx])
-                p = mdl.predict_proba(X_mat[va_idx, :])
-                return p[:, 1] if p.ndim == 2 else p
-
-        for tr_idx, va_idx in folds_use:
-            proba = np.asarray(_fit_predict(tr_idx, va_idx), float).ravel()
-            oof[va_idx] = proba.astype(np.float32, copy=False)
+            for tr_idx, va_idx in folds:
+                proba = np.asarray(_fit_predict_sklearn(X_mat, tr_idx, va_idx), float).ravel()
+                oof[va_idx] = proba.astype(np.float32, copy=False)
 
         valid = np.isfinite(oof)
         y_v = y_arr[valid]
@@ -3417,210 +3530,249 @@ def _auto_select_k_by_auc(
         score = float(auc) - (0.15 * float(ll)) - (0.10 * float(br))
         return {"auc": float(auc), "logloss": float(ll), "brier": float(br), "score": float(score), "aborted": False}
 
-    # ✅ NEW: final-eval helper that matches selection regime (early stopping + fold-mean AUC)
-    def _final_eval_consistent(X_mat, folds_use, *, early_stop_rounds=25):
-        # for your log line at end, use the same AUC notion used during selection gating
-        res_auc = _cv_eval_auc_only(X_mat, folds_use, abort_best_auc=None, early_stop_rounds=early_stop_rounds, return_fold_mean=True)
-        res_full = _cv_eval_full_metrics(X_mat, folds_use, early_stop_rounds=early_stop_rounds)
-        # overwrite AUC with fold-mean so the printed AUC matches what you gated on
-        if isinstance(res_full, dict) and isinstance(res_auc, dict):
-            res_full = dict(res_full)
-            res_full["auc"] = float(res_auc.get("auc", res_full.get("auc", np.nan)))
-            res_full["auc_fold_mean"] = float(res_auc.get("auc_fold_mean", res_full.get("auc", np.nan)))
-        return res_full
-
-    # ---- selection state ----
+    # -----------------------------
+    # Selection state
+    # -----------------------------
     accepted = list(mk)
     accepted_set = set(accepted)
     flip_map = {}
+    rejected = []
+    rejects_in_row = 0
 
+    # working design matrix (incremental)
     X_work = np.empty((n, max_k), dtype=np.float32)
     k = 0
 
     def _put_feat_into_col(feat: str, j: int):
         X_work[:, j] = X_all_mat[:, col_ix[feat]]
 
+    # seed must_keep
     for f in accepted:
         _put_feat_into_col(f, k)
         k += 1
 
-    if k > 0:
-        best_res = _cv_eval_full_metrics(X_work[:, :k], folds_full, early_stop_rounds=None)
-    else:
-        best_res = None
-
+    best_res = _cv_eval_full_metrics(X_work[:, :k]) if k > 0 else None
     best_val = _metric(best_res)
-    best_ll  = float(best_res.get("logloss", np.nan)) if best_res is not None else float("nan")
-    best_br  = float(best_res.get("brier", np.nan)) if best_res is not None else float("nan")
+    best_ll = float(best_res.get("logloss", np.nan)) if best_res is not None else float("nan")
+    best_br = float(best_res.get("brier", np.nan)) if best_res is not None else float("nan")
 
-    rejects_in_row = 0
     if verbose:
-        log_func(f"[AUTO-FEAT] start scan: must_keep={len(mk)} target_seed={min_k} metric={accept_metric} quick_folds={len(folds_quick)}")
+        log_func(f"[AUTO-FEAT] start: k={len(accepted)} best_{accept_metric}={best_val if np.isfinite(best_val) else float('nan'):.6f}")
 
-    for i, feat in enumerate(ordered):
-        if (time.time() - t0) >= float(time_budget_s):
-            break
-        if feat in accepted_set:
-            continue
-        if max_k is not None and len(accepted) >= int(max_k):
-            break
-        if (not force_full_scan) and (len(accepted) >= min_k) and (rejects_in_row >= int(patience)):
-            break
+    # remaining candidates, in provided order
+    remaining = [f for f in ordered if f not in accepted_set and f in col_ix]
+    if not remaining:
+        return accepted, best_res, {"done": True, "accepted": accepted, "best_res": best_res, "flip_map": flip_map}
 
+    # helper: evaluate a trial feature (and optional flip) and return best trial result
+    def _trial_eval(feat: str):
+        nonlocal k
         _put_feat_into_col(feat, k)
 
-        # ✅ adaptive margins: more permissive early, tighter later
-        rej_margin = 0.0015 if k < max(10, min_k) else 0.0010
-        quick_margin_auc = rej_margin
-        flip_close_margin = rej_margin
+        # baseline eval
+        res0 = _cv_eval_full_metrics(X_work[:, :k+1])
+        best_trial = (False, None, res0)
 
-        # -----------------------------
-        # 1) QUICK gate (AUC-only, fold-mean)
-        # -----------------------------
-        if accept_metric == "auc" and quick_screen and len(folds_quick) < len(folds_full):
-            res_q = _cv_eval_auc_only(
-                X_work[:, :k+1], folds_quick,
-                abort_best_auc=(best_val if np.isfinite(best_val) else None),
-                early_stop_rounds=None,
-                return_fold_mean=True,
-            )
-            m_q = float(res_q.get("auc", np.nan))
-            if np.isfinite(best_val) and (not np.isfinite(m_q) or (m_q < float(best_val) - float(quick_margin_auc))):
-                rejects_in_row += 1
-                continue
-
-        # -----------------------------
-        # 2) FULL AUC-only (fold-mean)
-        # -----------------------------
-        if accept_metric == "auc":
-            res_norm_auc = _cv_eval_auc_only(
-                X_work[:, :k+1], folds_full,
-                abort_best_auc=(best_val if np.isfinite(best_val) else None),
-                early_stop_rounds=None,
-                return_fold_mean=True,
-            )
-            m_norm = float(res_norm_auc.get("auc", np.nan))
-
-            # ✅ synergy rescue (throttled): after many rejects, allow near-misses through occasionally
-            near_miss = (
-                np.isfinite(m_norm) and np.isfinite(best_val) and
-                (m_norm >= float(best_val) - float(rej_margin)) and
-                (m_norm <  float(best_val) + float(min_improve)) and
-                (rejects_in_row >= 25)
-            )
-
-            if (not np.isfinite(m_norm)) or (np.isfinite(best_val) and (m_norm < float(best_val) - float(rej_margin))):
-                rejects_in_row += 1
-                continue
-
-            if near_miss and (i % 3 != 0):
-                rejects_in_row += 1
-                continue
-        else:
-            res_norm_full = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=None)
-            m_norm = _metric(res_norm_full)
-
-        best_trial_flip = False
-        best_trial_flip_mode = None
-        best_trial_auc = float(m_norm)
-
-        # -----------------------------
-        # 3) Flip test only if close/promising
-        # -----------------------------
-        if allow_candidate_flip and accept_metric == "auc" and np.isfinite(m_norm):
-            if (not np.isfinite(best_val)) or (m_norm >= float(best_val) - float(flip_close_margin)):
+        if allow_candidate_flip:
+            # only bother if close-ish or if improves metrics
+            v0 = _metric(res0)
+            if (not np.isfinite(best_val)) or (np.isfinite(v0) and v0 >= float(best_val) - 5e-4):
                 col = X_work[:, k]
                 orig = col.copy()
 
                 fm = flip_mode_cache.get(feat) or _auto_flip_mode(orig)
                 _apply_flip_inplace(col, fm)
+                res1 = _cv_eval_full_metrics(X_work[:, :k+1])
 
-                ok_to_full_flip = True
-                if quick_screen and len(folds_quick) < len(folds_full):
-                    res_fq = _cv_eval_auc_only(
-                        X_work[:, :k+1], folds_quick,
-                        abort_best_auc=None,
-                        early_stop_rounds=None,
-                        return_fold_mean=True,
-                    )
-                    mfq = float(res_fq.get("auc", np.nan))
-                    ok_to_full_flip = np.isfinite(mfq) and (mfq >= m_norm + float(flip_gain_min))
-
-                if ok_to_full_flip:
-                    res_flip_auc = _cv_eval_auc_only(
-                        X_work[:, :k+1], folds_full,
-                        abort_best_auc=None,
-                        early_stop_rounds=None,
-                        return_fold_mean=True,
-                    )
-                    m_flip = float(res_flip_auc.get("auc", np.nan))
-                    if np.isfinite(m_flip) and (m_flip > m_norm + float(flip_gain_min)):
-                        best_trial_flip = True
-                        best_trial_flip_mode = fm
-                        best_trial_auc = float(m_flip)
-
+                # restore
                 col[:] = orig
 
-        # -----------------------------
-        # 4) If AUC suggests "maybe accept", compute full metrics ONCE
-        # -----------------------------
-        if accept_metric == "auc":
-            if np.isfinite(best_trial_auc) and (not np.isfinite(best_val) or (best_trial_auc >= float(best_val) + float(min_improve))):
-                col = X_work[:, k]
-                orig = col.copy()
-                if best_trial_flip:
-                    _apply_flip_inplace(col, best_trial_flip_mode)
+                v1 = _metric(res1)
+                if np.isfinite(v1) and np.isfinite(v0) and (v1 >= v0 + float(flip_gain_min)):
+                    best_trial = (True, fm, res1)
 
-                res_try = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=None)
-                col[:] = orig
-            else:
-                rejects_in_row += 1
-                continue
-        else:
-            res_try = res_norm_full
-            best_trial_auc = float(res_try.get("auc", np.nan))
+        return best_trial  # (flipped?, mode, res)
 
-        val_try = _metric(res_try)
-        ll_try  = float(res_try.get("logloss", np.nan))
-        br_try  = float(res_try.get("brier", np.nan))
+    # helper: optional backward floating step (drop worst feature if it improves)
+    def _maybe_backward():
+        nonlocal k, best_res, best_val, best_ll, best_br, accepted, accepted_set, flip_map
+        if not allow_backward or len(accepted) <= len(mk) + 1:
+            return
 
-        if _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br):
-            accepted.append(feat)
-            accepted_set.add(feat)
-            k += 1
+        # candidates to consider dropping (exclude must_keep)
+        droppable = [f for f in accepted if f not in mk]
+        if not droppable:
+            return
 
-            best_res = res_try
-            best_val = float(val_try)
-            if np.isfinite(ll_try): best_ll = float(ll_try)
-            if np.isfinite(br_try): best_br = float(br_try)
-            rejects_in_row = 0
+        # cheap heuristic: try dropping last few first (often redundancy)
+        probe = droppable[-min(len(droppable), 20):]
 
-            if best_trial_flip:
-                flip_map[feat] = {"flipped": True, "mode": best_trial_flip_mode}
-                if verbose:
-                    log_func(f"[AUTO-FEAT] 🔁 flip accepted for {feat} mode={best_trial_flip_mode}")
+        improved = 0
+        for _ in range(int(max_backward_steps)):
+            best_drop = None
+            best_drop_res = None
+            best_drop_val = best_val
 
+            for fdrop in probe:
+                # build X_tmp without fdrop (in-place rebuild is safest/cleanest here)
+                keep_feats = [f for f in accepted if f != fdrop]
+                Xt = np.empty((n, len(keep_feats)), dtype=np.float32)
+                for jj, ff in enumerate(keep_feats):
+                    Xt[:, jj] = X_all_mat[:, col_ix[ff]]
+                    # re-apply stored flip if needed
+                    if flip_map.get(ff, {}).get("flipped", False):
+                        _apply_flip_inplace(Xt[:, jj], flip_map[ff]["mode"])
+
+                res = _cv_eval_full_metrics(Xt)
+                v = _metric(res)
+
+                if np.isfinite(v) and (not np.isfinite(best_drop_val) or v > best_drop_val + float(backward_min_gain)):
+                    best_drop_val = float(v)
+                    best_drop = fdrop
+                    best_drop_res = res
+
+            if best_drop is None:
+                break
+
+            # apply best drop
+            accepted = [f for f in accepted if f != best_drop]
+            accepted_set = set(accepted)
+            flip_map.pop(best_drop, None)
+
+            # rebuild X_work compactly
+            k = 0
+            for f in accepted:
+                _put_feat_into_col(f, k)
+                if flip_map.get(f, {}).get("flipped", False):
+                    _apply_flip_inplace(X_work[:, k], flip_map[f]["mode"])
+                k += 1
+
+            best_res = best_drop_res
+            best_val = float(best_drop_val)
+            best_ll = float(best_res.get("logloss", np.nan))
+            best_br = float(best_res.get("brier", np.nan))
+
+            improved += 1
             if verbose:
-                tag = " (flipped)" if best_trial_flip else ""
-                log_func(f"[AUTO-FEAT] ✅ accept +{feat}{tag} -> {accept_metric}={best_val:.6f} k={len(accepted)}")
-        else:
+                log_func(f"[AUTO-FEAT] 🧹 backward drop -{best_drop} -> {accept_metric}={best_val:.6f} k={len(accepted)}")
+
+        return
+
+    # -----------------------------
+    # Main selection loop (backend-focused)
+    #   - each iteration: evaluate a batch, pick best improvement
+    # -----------------------------
+    evals_done = 0
+    accept_count = 0
+
+    while remaining and len(accepted) < max_k:
+        if max_total_evals is not None and evals_done >= int(max_total_evals):
+            break
+        if (time.time() - t0) >= float(time_budget_s):
+            break
+
+        # if we already satisfied min_k, allow early stop by patience unless force_full_scan
+        if (not force_full_scan) and (len(accepted) >= min_k) and (rejects_in_row >= int(patience)):
+            break
+
+        # choose candidate pool: take next chunk in order, but also allow rescue sampling when stuck
+        batch_n = int(max(1, candidate_batch))
+        pool = remaining[:batch_n]
+
+        # synergy rescue: when stuck, sample from a wider pool (lets interaction-only features through)
+        if rejects_in_row >= int(rescue_every) and len(remaining) > batch_n:
+            rng = np.random.default_rng(42 + rejects_in_row)
+            wider = remaining[: int(min(len(remaining), max(rescue_pool, batch_n * 3)))]
+            # mix: keep a few from head + a few random from wider
+            head = remaining[: max(2, batch_n // 3)]
+            rand = list(rng.choice(wider, size=batch_n - len(head), replace=False))
+            pool = list(dict.fromkeys(head + rand))
+
+        best_feat = None
+        best_trial_flip = False
+        best_trial_mode = None
+        best_trial_res = None
+        best_trial_val = best_val
+
+        # evaluate pool
+        for feat in pool:
+            if max_total_evals is not None and evals_done >= int(max_total_evals):
+                break
+            if (time.time() - t0) >= float(time_budget_s):
+                break
+
+            trial_flip, trial_mode, res_try = _trial_eval(feat)
+            evals_done += 1
+
+            val_try = _metric(res_try)
+            ll_try = float(res_try.get("logloss", np.nan))
+            br_try = float(res_try.get("brier", np.nan))
+
+            # acceptance check uses your guardrails (ll/brier)
+            if _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br):
+                # choose the best improvement within the pool
+                if (best_feat is None) or (np.isfinite(val_try) and (not np.isfinite(best_trial_val) or val_try > best_trial_val)):
+                    best_feat = feat
+                    best_trial_flip = bool(trial_flip)
+                    best_trial_mode = trial_mode
+                    best_trial_res = res_try
+                    best_trial_val = float(val_try)
+
+        # if no candidate improved, advance remaining pointer and count reject
+        if best_feat is None:
+            # move forward: drop the head element to keep exploring
+            rejected.append(remaining.pop(0))
             rejects_in_row += 1
 
-        if debug and (i % int(max(1, debug_every)) == 0):
-            log_func(f"[AUTO-FEAT][DBG] i={i} k={len(accepted)} best_{accept_metric}={best_val:.6f}")
+            if debug and (rejects_in_row % int(max(1, debug_every)) == 0):
+                log_func(f"[AUTO-FEAT][DBG] rejects_in_row={rejects_in_row} k={len(accepted)} best_{accept_metric}={best_val:.6f}")
 
-    # ---------- FINAL EVAL (FIXED) ----------
-    # Your old code called _cv_auc_for_feature_set here, which (in your current stack)
-    # often uses a different regime than selection (no early stopping / different AUC definition).
-    # This caused “accept AUC looks great” then “final AUC drops”.
-    #
-    # ✅ We still optionally do orient/flip logic via your existing function,
-    #    but we ALSO re-evaluate consistently with the selection regime for the printed final.
-    if flips_after_selection and accepted:
-        # If you want orientation/flips, keep using your existing function (it may mutate flip_map in that fn).
-        # But do NOT trust its printed AUC as the “selection-consistent” one.
+            continue
+
+        # accept best_feat
+        _put_feat_into_col(best_feat, k)
+        if best_trial_flip:
+            _apply_flip_inplace(X_work[:, k], best_trial_mode)
+            flip_map[best_feat] = {"flipped": True, "mode": best_trial_mode}
+
+        accepted.append(best_feat)
+        accepted_set.add(best_feat)
+        k += 1
+        accept_count += 1
+
+        # remove accepted from remaining
+        try:
+            remaining.remove(best_feat)
+        except ValueError:
+            pass
+
+        best_res = best_trial_res
+        best_val = float(best_trial_val)
+        best_ll = float(best_res.get("logloss", np.nan))
+        best_br = float(best_res.get("brier", np.nan))
+        rejects_in_row = 0
+
+        if verbose:
+            tag = f" (flipped:{best_trial_mode})" if best_trial_flip else ""
+            log_func(f"[AUTO-FEAT] ✅ accept +{best_feat}{tag} -> {accept_metric}={best_val:.6f} k={len(accepted)} evals={evals_done}")
+
+        # optional backward step (floating selection)
+        if allow_backward and (accept_count % int(max(1, backward_every)) == 0):
+            _maybe_backward()
+
+        # safety: if we reached min_k and have no meaningful gain for a long time, allow stop (unless force_full_scan)
+        # (handled by patience via rejects_in_row above)
+
+    # -----------------------------
+    # Final evaluation (consistent regime)
+    # -----------------------------
+    final_res = _cv_eval_full_metrics(X_work[:, :k]) if k > 0 else None
+
+    # optional orientation/flips pass using your existing machinery
+    # (keep it, but do NOT rely on it for "final metrics"; we recompute consistently after)
+    if flips_after_selection and accepted and (orient_features or enable_feature_flips):
         _ = _cv_auc_for_feature_set(
-            model_proto, X, y_arr, folds_full, list(accepted),
+            model_proto, X, y_arr, folds, list(accepted),
             log_func=log_func,
             debug=False,
             return_oof=True,
@@ -3630,17 +3782,29 @@ def _auto_select_k_by_auc(
             orient_passes=int(orient_passes),
             cv_mode="full",
         )
+        # re-evaluate consistently
+        final_res = _cv_eval_full_metrics(X_work[:, :k]) if k > 0 else None
 
-        # ✅ selection-consistent final metrics (early stopping + fold-mean AUC)
-        best_res = _final_eval_consistent(X_work[:, :k], folds_full, early_stop_rounds=None)
+    if verbose and isinstance(final_res, dict):
+        log_func(
+            f"[AUTO-FEAT] FINAL (consistent) k={len(accepted)} "
+            f"auc={final_res.get('auc', float('nan')):.6f} "
+            f"ll={final_res.get('logloss', float('nan')):.6f} "
+            f"brier={final_res.get('brier', float('nan')):.6f} "
+            f"score={final_res.get('score', float('nan')):.6f} "
+            f"evals={evals_done}"
+        )
 
-        if verbose and isinstance(best_res, dict):
-            auc_show = float(best_res.get("auc", np.nan))
-            log_func(f"[AUTO-FEAT] Final accepted set (consistent): k={len(accepted)} auc={auc_show:.6f}")
-
-    state = {"done": True, "accepted": list(accepted), "best_res": best_res, "flip_map": flip_map}
-    return list(accepted), best_res, state
-
+    state = {
+        "done": True,
+        "accepted": list(accepted),
+        "best_res": final_res,
+        "flip_map": flip_map,
+        "evals_done": int(evals_done),
+        "backend_mode": bool(backend_mode),
+        "early_stop_rounds": early_stop_rounds,
+    }
+    return list(accepted), final_res, state
 # =========================
 # 3) SELECT FEATURES AUTO (backward compatible signature)
 #    - seeds with must_keep only (earned thereafter)
@@ -3656,12 +3820,12 @@ def select_features_auto(
     sport_key: str = "NFL",
     must_keep: list[str] | None = None,
 
-    # keep old knobs but they won't break your call
+    # keep old knobs (won't break your call)
     corr_within: float = 0.90,
     corr_global: float = 0.92,
     max_feats_major: int = 160,
     max_feats_small: int = 160,
-    topk_per_fold: int = 80,
+    topk_per_fold: int = 80,   # kept for compat; not required by new screen
     min_presence: float = 0.40,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
@@ -3682,6 +3846,23 @@ def select_features_auto(
     final_orient: bool = True,
     log_func=print,
 
+    # ✅ new / improved knobs (safe defaults)
+    preselect_mult: int = 5,              # was effectively 3x; 5x keeps interactions alive longer
+    corr_preselect_thr: float = 0.95,     # looser pruning early; final CV decides
+    corr_check_cap: int = 160,            # compare against last N kept
+    zcache_cap: int = 256,
+    min_finite_rows: int = 20,            # dynamic sparsity gate uses this
+    binary_min_on: int = 10,
+    binary_min_off: int = 10,
+    mi_bins: int = 16,
+    mi_top_k: int = 2000,                 # compute MI-lite only for top-K by fast score per pass
+    fold_screen: bool = True,             # do screen per-fold and aggregate (median)
+    fold_screen_folds: int = 2,           # quick split count; 2 is usually enough
+    group_quota: int = 30,                # ensure some representation per group family
+    group_key_mode: str = "prefix",       # "prefix" uses token before first "_" / ":" / "."
+    protect_top_mi: int = 60,             # don't allow corr prune to drop these MI-strong cols
+    protect_top_lift: int = 60,           # don't allow corr prune to drop these lift-strong cols
+
     # ✅ backward compat
     **_ignored_kwargs,
 ):
@@ -3692,19 +3873,24 @@ def select_features_auto(
         return [], pd.DataFrame(columns=["selected", "flipped", "flip_mode"])
 
     must_keep = must_keep or []
-    y_arr = np.asarray(y_train, dtype=np.int8).reshape(-1)  # small
+    mk_in = [m for m in must_keep if m in X_df_train.columns]
+    mk_set = set(mk_in)
+
+    y_arr = np.asarray(y_train, dtype=np.int8).reshape(-1)
+    n = int(len(y_arr))
+    if n == 0:
+        return [], pd.DataFrame(columns=["selected", "flipped", "flip_mode"])
 
     # ----------------------------
     # 0) leak guard + column list
     # ----------------------------
-    mk_in = [m for m in must_keep if m in X_df_train.columns]
-
     leak_patterns = ("SHARP_COVER_RESULT",)
+
     def _is_forbidden(c: str) -> bool:
         s = str(c)
         return any(p in s for p in leak_patterns)
 
-    cols = [c for c in X_df_train.columns if (c in mk_in) or (not _is_forbidden(c))]
+    cols = [c for c in X_df_train.columns if (c in mk_set) or (not _is_forbidden(c))]
     if not cols:
         return [], pd.DataFrame(columns=["selected", "flipped", "flip_mode"])
 
@@ -3713,26 +3899,29 @@ def select_features_auto(
     # ----------------------------
     X_num = X_df_train[cols].apply(pd.to_numeric, errors="coerce")
     X_mat = X_num.to_numpy(dtype=np.float32, copy=False)
-    del X_num  # free pandas object memory early
+    del X_num
 
     n, p = X_mat.shape
     if p == 0:
         return [], pd.DataFrame(columns=["selected", "flipped", "flip_mode"])
 
     finite = np.isfinite(X_mat)
-    nn_frac = finite.mean(axis=0)
+    nn_cnt = finite.sum(axis=0).astype(np.int32, copy=False)
+    nn_frac = nn_cnt.astype(np.float32) / float(max(1, n))
 
     with np.errstate(invalid="ignore"):
         var = np.nanvar(X_mat, axis=0)
 
-    # ✅ slightly stricter default helps signal: drop ultra-sparse junk
-    min_non_nan_frac = 0.01  # was 0.001
-    usable = (nn_frac >= float(min_non_nan_frac)) & (var > 0.0)
+    # dynamic sparsity gate:
+    # - require at least `min_finite_rows` finite rows (or 0.2% of n, whichever larger)
+    min_rows = int(max(min_finite_rows, max(5, int(0.002 * n))))
+    min_non_nan_frac = float(min_rows / float(max(1, n)))
+
+    usable = (nn_cnt >= min_rows) & (var > 0.0)
 
     # always keep must_keep (even if constant/sparse)
     if mk_in:
-        mk_set = set(mk_in)
-        mk_idx = np.fromiter((i for i, c in enumerate(cols) if c in mk_set), dtype=int)
+        mk_idx = np.fromiter((i for i, c in enumerate(cols) if c in mk_set), dtype=np.int32)
         if mk_idx.size:
             usable[mk_idx] = True
 
@@ -3742,134 +3931,466 @@ def select_features_auto(
         return keep_order, pd.DataFrame({"selected": True}, index=pd.Index(keep_order, name="feature"))
 
     # ----------------------------
-    # 2) CHEAP univariate screen (signal pickup)
-    #    - point-biserial correlation proxy
-    #    - keeps "likely useful" columns without heavy CV
+    # helpers: grouping + lightweight metrics
     # ----------------------------
-    # y centered in float32
+    def _group_key(name: str) -> str:
+        s = str(name)
+        if group_key_mode == "prefix":
+            # take prefix token before common separators
+            for sep in ("__", ":", ".", "|", "_"):
+                if sep in s:
+                    return s.split(sep, 1)[0]
+            return s
+        return "ALL"
+
+    col_groups = np.array([_group_key(c) for c in cols], dtype=object)
+
     y_f = y_arr.astype(np.float32)
-    y_c = y_f - y_f.mean()
-
-    # compute per-column mean impute for corr calc (vectorized, no new big matrix)
-    # we'll use nanmean/nanstd; avoids creating filled copy
-    with np.errstate(invalid="ignore", divide="ignore"):
-        mu = np.nanmean(X_mat[:, usable_idx], axis=0)
-        sd = np.nanstd(X_mat[:, usable_idx], axis=0)
-
-    # compute cov(x,y)/sdx/sdy using nan-aware approach:
-    # replace NaNs on the fly in a temporary view would be heavy; instead:
-    # - compute (x - mu) only for finite entries via masked sum
-    X_u = X_mat[:, usable_idx]
-    fin_u = finite[:, usable_idx]
-
-    # centered sums: sum((x-mu)*y_c) over finite entries
-    # do in blocks to keep peak memory low
-    block = 256
-    cov = np.zeros(len(usable_idx), dtype=np.float32)
-
-    for j0 in range(0, X_u.shape[1], block):
-        j1 = min(X_u.shape[1], j0 + block)
-        Xu_b = X_u[:, j0:j1]
-        fin_b = fin_u[:, j0:j1]
-
-        # (Xu - mu) but only where finite; elsewhere 0
-        mu_b = mu[j0:j1]
-        xc = np.where(fin_b, Xu_b - mu_b, 0.0).astype(np.float32, copy=False)
-
-        # cov ~ mean(xc*y_c) over valid count
-        # use dot with y_c
-        cov[j0:j1] = (xc.T @ y_c).astype(np.float32, copy=False)
-
+    y_mean = float(y_f.mean())
+    y_c = y_f - y_mean
     y_sd = float(np.std(y_c) + 1e-12)
-    score_uni = np.abs(cov) / (sd + 1e-12) / y_sd  # |corr| proxy
 
-    # choose budget of candidates for CV (not memory heavy; speeds up and improves signal)
-    # keep more for major sports; fewer for small sports
-    is_small = str(sport_key).upper() in {"WNBA", "CFL", "MLS", "NHL"}  # tweak if you want
-    max_pre = int(max_feats_small if is_small else max_feats_major)
+    def _zscore(a: np.ndarray) -> np.ndarray:
+        a = a.astype(np.float32, copy=False)
+        m = float(np.nanmean(a))
+        s = float(np.nanstd(a) + 1e-12)
+        return (a - m) / s
 
-    # always preserve must_keep + top univariate
-    # keep 3x the final budget going into forward selection (helps interactions survive)
-    pre_budget = int(min(len(usable_idx), max(max_pre * 3, len(mk_in) + 50)))
+    # ---- MI-lite for 1 feature (quantile bins) ----
+    def _mi_lite_1(x: np.ndarray, y: np.ndarray, *, bins: int = 16) -> float:
+        m = np.isfinite(x)
+        x = x[m]
+        y = y[m]
+        if x.size < 50:
+            return 0.0
+        try:
+            qs = np.quantile(x, np.linspace(0.0, 1.0, bins + 1))
+        except Exception:
+            return 0.0
+        if not np.all(np.isfinite(qs)):
+            return 0.0
+        # widen edges slightly
+        qs[0] -= 1e-6
+        qs[-1] += 1e-6
+        b = np.clip(np.searchsorted(qs, x, side="right") - 1, 0, bins - 1)
 
-    top_idx_local = np.argpartition(-score_uni, kth=pre_budget - 1)[:pre_budget]
-    cand_idx = usable_idx[top_idx_local]
+        c0 = np.bincount(b[y == 0], minlength=bins).astype(np.float32)
+        c1 = np.bincount(b[y == 1], minlength=bins).astype(np.float32)
+        n_ = float(x.size)
+        px = (c0 + c1) / n_
+        py0 = float((y == 0).mean())
+        py1 = float((y == 1).mean())
+        mi_val = 0.0
+        for i in range(bins):
+            if px[i] <= 0:
+                continue
+            p0 = float(c0[i] / n_)
+            p1 = float(c1[i] / n_)
+            if p0 > 0:
+                mi_val += p0 * float(np.log((p0 / (px[i] * py0 + 1e-12)) + 1e-12))
+            if p1 > 0:
+                mi_val += p1 * float(np.log((p1 / (px[i] * py1 + 1e-12)) + 1e-12))
+        return float(mi_val)
 
-    # ----------------------------
-    # 3) CHEAP correlation pruning (reduces redundancy)
-    #    Greedy keep: drop cols highly correlated to already-kept.
-    #    Done in float32 blocks; no full corr matrix.
-    # ----------------------------
-    mk_set = set(mk_in)
-    # start with must_keep first
-    keep = [cols.index(m) for m in mk_in if m in cols]
-    kept_set = set(keep)
-
-    # order remaining candidates by univariate score (high->low)
-    order = cand_idx[np.argsort(-score_uni[top_idx_local])]
-
-    # helper: get standardized vector quickly (nanmean/nanstd)
-    def _std_col(j):
+    # ---- overlap-aware correlation for pruning ----
+    def _corr_overlap(j: int, k: int, *, mu: float, sd: float, muk: float, sdk: float) -> float:
         x = X_mat[:, j]
-        m = np.nanmean(x)
-        s = np.nanstd(x)
-        if not np.isfinite(s) or s < 1e-12:
-            return None
-        # return standardized with nan->0 (safe for dot corr approx)
-        z = (np.where(np.isfinite(x), x, m) - m) / s
-        return z.astype(np.float32, copy=False)
+        y = X_mat[:, k]
+        mx = np.isfinite(x)
+        my = np.isfinite(y)
+        m = mx & my
+        cnt = int(m.sum())
+        if cnt < 25:
+            return 0.0
+        # standardize on overlap only (using global mu/sd is ok-ish, but compute fast overlap z)
+        x_ = (x[m] - mu) / (sd + 1e-12)
+        y_ = (y[m] - muk) / (sdk + 1e-12)
+        c = float(np.mean(x_ * y_))
+        if not np.isfinite(c):
+            return 0.0
+        return c
 
-    # cache a few standardized vectors for kept set (bounded)
-    z_cache = {}
+    # ---- binary-ish detection + lift ----
+    def _binary_lift(j: int) -> float:
+        x = X_mat[:, j]
+        m = np.isfinite(x)
+        if int(m.sum()) < (binary_min_on + binary_min_off):
+            return 0.0
+        # tolerate float noise around 0/1
+        on = m & (np.abs(x - 1.0) < 1e-6)
+        off = m & (np.abs(x - 0.0) < 1e-6)
+        n_on = int(on.sum())
+        n_off = int(off.sum())
+        if n_on < binary_min_on or n_off < binary_min_off:
+            return 0.0
+        # Laplace smoothing
+        p_on = (float(y_f[on].sum()) + 1.0) / (float(n_on) + 2.0)
+        p_off = (float(y_f[off].sum()) + 1.0) / (float(n_off) + 2.0)
+        return float(abs(p_on - p_off))
 
-    corr_thr = float(corr_global if corr_global is not None else 0.92)
+    # ---- fast corr proxy screen (over finite entries) ----
+    def _corr_proxy_screen(idxs: np.ndarray) -> np.ndarray:
+        Xu = X_mat[:, idxs]
+        finu = finite[:, idxs]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mu_u = np.nanmean(Xu, axis=0)
+            sd_u = np.nanstd(Xu, axis=0)
 
-    for j in order:
+        cov = np.zeros(len(idxs), dtype=np.float32)
+        cnt = finu.sum(axis=0).astype(np.float32)
+
+        block = 256
+        for j0 in range(0, Xu.shape[1], block):
+            j1 = min(Xu.shape[1], j0 + block)
+            Xu_b = Xu[:, j0:j1]
+            fin_b = finu[:, j0:j1]
+            mu_b = mu_u[j0:j1]
+            xc = np.where(fin_b, Xu_b - mu_b, 0.0).astype(np.float32, copy=False)
+            cov[j0:j1] = (xc.T @ y_c).astype(np.float32, copy=False)
+
+        # normalize roughly -> |corr| proxy
+        corrp = np.abs(cov / (cnt - 1.0 + 1e-12)) / (sd_u + 1e-12) / y_sd
+        return corrp.astype(np.float32, copy=False)
+
+    # ----------------------------
+    # 2) improved cheap screen (per-fold median)
+    #    score = max(z(corr_proxy), z(MI-lite), z(binary_lift))
+    # ----------------------------
+    # quick fold splits from 'folds' if possible; otherwise do a deterministic 2-fold split
+    def _get_quick_splits():
+        # folds could be a splitter with .split(X,y), or list of (tr,te)
+        try:
+            it = folds.split(np.zeros((n, 1), dtype=np.float32), y_arr)
+            splits = []
+            for i, (tr, te) in enumerate(it):
+                splits.append((np.asarray(tr, dtype=np.int32), np.asarray(te, dtype=np.int32)))
+                if len(splits) >= int(max(1, fold_screen_folds)):
+                    break
+            if splits:
+                return splits
+        except Exception:
+            pass
+
+        # fallback: deterministic half split
+        idx = np.arange(n, dtype=np.int32)
+        # keep label mix: simple stratified-ish by interleaving
+        pos = idx[y_arr == 1]
+        neg = idx[y_arr == 0]
+        a = np.concatenate([pos[::2], neg[::2]])
+        b = np.concatenate([pos[1::2], neg[1::2]])
+        if a.size == 0 or b.size == 0:
+            mid = n // 2
+            a = idx[:mid]
+            b = idx[mid:]
+        return [(a, b)]
+
+    splits = _get_quick_splits() if fold_screen else [(np.arange(n, dtype=np.int32), np.array([], dtype=np.int32))]
+
+    # allocate fold score arrays and aggregate by median
+    fold_scores = []
+
+    # major vs small
+    is_small = str(sport_key).upper() in {"WNBA", "CFL", "MLS", "NHL"}
+    max_final = int(max_feats_small if is_small else max_feats_major)
+    pre_budget = int(min(usable_idx.size, max(max_final * int(preselect_mult), len(mk_in) + 80)))
+
+    for (tr_idx, _te_idx) in splits:
+        # screen only on "train" side to avoid optimistic selection
+        tr_mask = np.zeros(n, dtype=bool)
+        tr_mask[tr_idx] = True
+
+        # view into training rows
+        X_tr = X_mat[tr_mask, :]
+        fin_tr = finite[tr_mask, :]
+
+        idxs = usable_idx
+        # corr proxy on training rows
+        Xu = X_tr[:, idxs]
+        finu = fin_tr[:, idxs]
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mu_u = np.nanmean(Xu, axis=0)
+            sd_u = np.nanstd(Xu, axis=0)
+
+        y_tr = y_arr[tr_mask]
+        y_tr_f = y_tr.astype(np.float32)
+        y_tr_c = y_tr_f - float(y_tr_f.mean())
+        y_tr_sd = float(np.std(y_tr_c) + 1e-12)
+
+        cov = np.zeros(len(idxs), dtype=np.float32)
+        cnt = finu.sum(axis=0).astype(np.float32)
+
+        block = 256
+        for j0 in range(0, Xu.shape[1], block):
+            j1 = min(Xu.shape[1], j0 + block)
+            Xu_b = Xu[:, j0:j1]
+            fin_b = finu[:, j0:j1]
+            mu_b = mu_u[j0:j1]
+            xc = np.where(fin_b, Xu_b - mu_b, 0.0).astype(np.float32, copy=False)
+            cov[j0:j1] = (xc.T @ y_tr_c).astype(np.float32, copy=False)
+
+        corrp = np.abs(cov / (cnt - 1.0 + 1e-12)) / (sd_u + 1e-12) / y_tr_sd
+        corrp = corrp.astype(np.float32, copy=False)
+
+        # binary lift (only for a subset to keep it fast: top pre_budget by corrp)
+        top_local = np.argpartition(-corrp, kth=min(pre_budget, len(corrp)) - 1)[: min(pre_budget, len(corrp))]
+        lift = np.zeros(len(idxs), dtype=np.float32)
+        for loc in top_local[: min(4000, top_local.size)]:  # cap work
+            j = int(idxs[loc])
+            # compute on training rows only
+            x = X_tr[:, np.where(np.arange(p) == j)[0][0]]  # avoid copies
+            # but above is slow; just compute from full column with mask
+            # (cheap enough at this capped size)
+            x_full = X_mat[:, j]
+            m = tr_mask & np.isfinite(x_full)
+            if int(m.sum()) < (binary_min_on + binary_min_off):
+                continue
+            on = m & (np.abs(x_full - 1.0) < 1e-6)
+            off = m & (np.abs(x_full - 0.0) < 1e-6)
+            n_on = int(on.sum())
+            n_off = int(off.sum())
+            if n_on < binary_min_on or n_off < binary_min_off:
+                continue
+            p_on = (float(y_f[on].sum()) + 1.0) / (float(n_on) + 2.0)
+            p_off = (float(y_f[off].sum()) + 1.0) / (float(n_off) + 2.0)
+            lift[loc] = float(abs(p_on - p_off))
+
+        # MI-lite (only for top mi_top_k by corrp)
+        K_mi = int(min(mi_top_k, corrp.size))
+        mi_local = np.argpartition(-corrp, kth=K_mi - 1)[:K_mi] if K_mi > 0 else np.array([], dtype=np.int32)
+        mi = np.zeros(len(idxs), dtype=np.float32)
+        for loc in mi_local:
+            j = int(idxs[loc])
+            x_full = X_mat[:, j]
+            m = tr_mask & np.isfinite(x_full)
+            if int(m.sum()) < 50:
+                continue
+            mi[loc] = float(_mi_lite_1(x_full[m].astype(np.float32, copy=False), y_arr[m], bins=int(mi_bins)))
+
+        # combine screens
+        score = np.maximum.reduce([
+            _zscore(corrp),
+            _zscore(lift),
+            _zscore(mi),
+        ]).astype(np.float32, copy=False)
+
+        fold_scores.append(score)
+
+    # median across folds
+    score_uni = np.median(np.stack(fold_scores, axis=0), axis=0).astype(np.float32, copy=False)
+
+    # protect sets
+    top_mi_local = np.argpartition(-fold_scores[0], kth=min(protect_top_mi, usable_idx.size) - 1)[: min(protect_top_mi, usable_idx.size)] \
+        if usable_idx.size else np.array([], dtype=np.int32)
+    # NOTE: we’ll compute real MI protect below; this is just a fallback. We’ll re-derive from fold 0 mi if available.
+
+    # ----------------------------
+    # 2b) group-aware candidate selection (quota + top global)
+    # ----------------------------
+    # rank usable_idx by score_uni
+    order_local = np.argsort(-score_uni)
+    usable_ranked = usable_idx[order_local]
+
+    # allocate candidates using group quotas
+    cand = []
+    per_group = {}
+    quota = int(max(0, group_quota))
+
+    # always seed must_keep
+    for m in mk_in:
+        if m in cols:
+            cand.append(cols.index(m))
+
+    # first pass: satisfy group quotas
+    for j in usable_ranked:
+        if j in cand:
+            continue
+        g = col_groups[j]
+        c = per_group.get(g, 0)
+        if c < quota:
+            cand.append(int(j))
+            per_group[g] = c + 1
+        if len(cand) >= pre_budget:
+            break
+
+    # second pass: fill remaining by global rank
+    if len(cand) < pre_budget:
+        for j in usable_ranked:
+            if j in cand:
+                continue
+            cand.append(int(j))
+            if len(cand) >= pre_budget:
+                break
+
+    cand_idx = np.array(cand, dtype=np.int32)
+    if cand_idx.size == 0:
+        keep_order = list(dict.fromkeys(mk_in))
+        return keep_order, pd.DataFrame({"selected": True}, index=pd.Index(keep_order, name="feature"))
+
+    # ----------------------------
+    # 3) overlap-aware correlation pruning (protect niche signals)
+    #    - prune within the candidate list only
+    #    - do NOT let corr prune knock out top MI/lift columns
+    # ----------------------------
+    # compute global mu/sd for candidate columns (for pruning)
+    X_c = X_mat[:, cand_idx]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mu_c = np.nanmean(X_c, axis=0)
+        sd_c = np.nanstd(X_c, axis=0)
+
+    # determine binary-like and sparse flags (for protection / thresholding)
+    cand_nn_frac = nn_frac[cand_idx]
+    cand_sparse = cand_nn_frac < 0.15
+
+    # compute lift on candidates (full data, cheap enough at this reduced size)
+    lift_c = np.zeros(cand_idx.size, dtype=np.float32)
+    for i, j in enumerate(cand_idx):
+        # only attempt lift if it looks plausibly binary-ish
+        # heuristic: many zeros and few ones OR values near 0/1 among finite
+        x = X_mat[:, j]
+        m = np.isfinite(x)
+        if int(m.sum()) < (binary_min_on + binary_min_off):
+            continue
+        # check near-0/near-1
+        near0 = float(np.mean(m & (np.abs(x - 0.0) < 1e-6)))
+        near1 = float(np.mean(m & (np.abs(x - 1.0) < 1e-6)))
+        if (near0 + near1) < 0.90:
+            continue
+        lift_c[i] = float(_binary_lift(int(j)))
+
+    # compute MI-lite on candidates (cap)
+    mi_c = np.zeros(cand_idx.size, dtype=np.float32)
+    # choose top by score_uni among candidates for MI
+    cand_scores = score_uni[np.searchsorted(usable_ranked, cand_idx, side="left")] if False else None
+    # simpler: use score_uni at candidate positions
+    # map candidate j -> local index in usable_idx for score_uni
+    usable_pos = {int(j): i for i, j in enumerate(usable_idx)}
+    cand_score_uni = np.array([score_uni[usable_pos[int(j)]] for j in cand_idx], dtype=np.float32)
+    K_mi2 = int(min(mi_top_k, cand_idx.size))
+    mi_pick = np.argpartition(-cand_score_uni, kth=K_mi2 - 1)[:K_mi2] if K_mi2 > 0 else np.array([], dtype=np.int32)
+    for i in mi_pick:
+        j = int(cand_idx[i])
+        mi_c[i] = float(_mi_lite_1(X_mat[:, j].astype(np.float32, copy=False), y_arr, bins=int(mi_bins)))
+
+    # protect top MI and lift
+    prot_mi = set(cand_idx[np.argsort(-mi_c)[: int(min(protect_top_mi, cand_idx.size))]].tolist())
+    prot_lift = set(cand_idx[np.argsort(-lift_c)[: int(min(protect_top_lift, cand_idx.size))]].tolist())
+    prot_all = prot_mi | prot_lift | mk_set
+
+    # sort candidates by combined score (favor MI/lift too)
+    comb = np.maximum.reduce([_zscore(cand_score_uni), _zscore(mi_c), _zscore(lift_c)])
+    cand_order = cand_idx[np.argsort(-comb)]
+
+    # greedy prune
+    keep = []
+    kept_set = set()
+
+    # seed must_keep first
+    for m in mk_in:
+        j = cols.index(m)
+        keep.append(j)
+        kept_set.add(j)
+
+    corr_thr = float(corr_preselect_thr if corr_preselect_thr is not None else corr_global)
+    corr_thr_sparse = float(min(0.98, max(corr_thr, 0.96)))  # more forgiving for sparse
+    corr_thr_binary = float(min(0.99, max(corr_thr, 0.97)))  # even more forgiving for binary-like
+
+    # small cache of mu/sd for fast overlap-corr
+    ms_cache = {}
+    def _get_ms(j: int):
+        v = ms_cache.get(j)
+        if v is not None:
+            return v
+        m = float(np.nanmean(X_mat[:, j]))
+        s = float(np.nanstd(X_mat[:, j]))
+        ms_cache[j] = (m, s)
+        if len(ms_cache) > (zcache_cap * 2):
+            # cheap eviction: clear (fast + safe)
+            ms_cache.clear()
+        return ms_cache[j]
+
+    for j in cand_order:
+        j = int(j)
         if j in kept_set:
             continue
         if len(keep) >= pre_budget:
             break
 
-        zj = _std_col(j)
-        if zj is None:
+        # drop if cannot standardize at all
+        muj, sdj = _get_ms(j)
+        if not np.isfinite(sdj) or sdj < 1e-12:
+            # keep if protected (e.g., a constant flag in must_keep)
+            if cols[j] in mk_set:
+                keep.append(j)
+                kept_set.add(j)
             continue
 
+        # choose threshold based on type
+        # identify candidate's sparse / binary-ish
+        # (binary-ish inferred from protection set and/or lift)
+        is_protected = (cols[j] in prot_all) or (j in prot_all)
+        is_bin_like = (lift_c[np.where(cand_idx == j)[0][0]] > 0) if j in cand_idx else False
+        is_sparse = bool(nn_frac[j] < 0.15)
+
+        thr = corr_thr
+        if is_bin_like:
+            thr = corr_thr_binary
+        elif is_sparse:
+            thr = corr_thr_sparse
+
         ok = True
-        # compare against a limited number of top-kept to avoid heavy work
-        # (kept is already pruned, so this is usually fast)
-        to_check = keep[-min(len(keep), 100):]
-        for kidx in to_check:
-        
-            zk = z_cache.get(kidx)
-            if zk is None:
-                zk = _std_col(kidx)
-                if zk is None:
-                    # if the kept feature can't be standardized, it cannot "knock out" others
-                    continue
-                if len(z_cache) < 128:
-                    z_cache[kidx] = zk
-            
-            # corr approx = mean(zj*zk)
-            c = float(np.mean(zj * zk))
-            if np.isfinite(c) and abs(c) >= corr_thr:
-                ok = False
+        # compare against last N kept to keep it cheap
+        to_check = keep[-min(len(keep), int(corr_check_cap)):]
+        for k in to_check:
+            muk, sdk = _get_ms(int(k))
+            if not np.isfinite(sdk) or sdk < 1e-12:
+                continue
+            c = _corr_overlap(j, int(k), mu=muj, sd=sdj, muk=muk, sdk=sdk)
+
+            if abs(c) >= thr:
+                # if candidate is protected, do NOT allow it to be knocked out
+                # instead, consider knocking out the existing kept one only if kept isn't protected.
+                if is_protected:
+                    # try to replace a non-protected kept feature with this protected one
+                    k_name = cols[int(k)]
+                    if k_name not in prot_all and k_name not in mk_set:
+                        # replace: remove k, add j
+                        try:
+                            keep.remove(int(k))
+                            kept_set.remove(int(k))
+                        except Exception:
+                            pass
+                        keep.append(j)
+                        kept_set.add(j)
+                        ok = False
+                    else:
+                        # both protected -> allow both (do not prune)
+                        continue
+                else:
+                    ok = False
                 break
 
-        if ok:
-            keep.append(int(j))
-            kept_set.add(int(j))
+        if ok and j not in kept_set:
+            keep.append(j)
+            kept_set.add(j)
+
+        if len(keep) >= pre_budget:
+            break
 
     keep_order = list(dict.fromkeys([cols[i] for i in keep]))
 
     if auc_verbose:
-        log_func(f"[AUTO-FEAT] usable={int(usable.sum())}/{p} -> preselect={len(keep_order)} (budget={pre_budget})")
+        log_func(
+            f"[AUTO-FEAT] n={n} p={p} usable={int(usable.sum())} "
+            f"min_non_nan_frac~{min_non_nan_frac:.4f} -> preselect={len(keep_order)} "
+            f"(pre_budget={pre_budget}, groups={len(set(col_groups[cand_idx]))})"
+        )
 
     if not keep_order:
         return [], pd.DataFrame(columns=["selected", "flipped", "flip_mode"])
 
     # min_k should never be < must_keep size
     min_k_eff = len(mk_in) if (auc_min_k is None) else int(max(len(mk_in), auc_min_k))
-
     flip_map = {}
 
     # ----------------------------
