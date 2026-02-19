@@ -11,6 +11,7 @@ from google.cloud import storage
 from progress import ProgressWriter
 
 HEADLESS = os.getenv("HEADLESS", "0") == "1"
+import warnings
 
 
 # -----------------------------------------------------------------------------
@@ -20,7 +21,7 @@ if HEADLESS:
     warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
     warnings.filterwarnings("ignore", message="Degrees of freedom <= 0", category=RuntimeWarning)
     logging.getLogger("numpy").setLevel(logging.ERROR)
-
+    logging.getLogger("xgboost").setLevel(logging.ERROR)
 
 def install_streamlit_shim(log_func):
     """
