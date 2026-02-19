@@ -166,17 +166,6 @@ def install_streamlit_shim(log_func):
     return st
 
 
-def patch_xgboost_drop_predictor_set_params_only():
-    from xgboost.sklearn import XGBModel
-
-    _orig_set_params = XGBModel.set_params
-
-    def _set_params(self, **params):
-        params.pop("predictor", None)
-        params.setdefault("verbosity", 0)
-        return _orig_set_params(self, **params)
-
-    XGBModel.set_params = _set_params
 
 def start_heartbeat(pw, label, every_sec=45):
     stop_evt = threading.Event()
@@ -219,9 +208,6 @@ def main():
     def log_func(msg: str):
         pw.emit("log", str(msg))
         print(str(msg), flush=True)
-
-    # Patch XGBoost BEFORE importing training modules
-    patch_xgboost_drop_predictor_set_params_only()
 
     # Install shim BEFORE importing any Streamlit-heavy modules
     if HEADLESS:
