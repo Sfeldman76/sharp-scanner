@@ -3169,15 +3169,15 @@ def _auto_select_k_by_auc(
     debug=True,
     debug_every=20,
 
-    max_ll_increase=0.20,
-    max_brier_increase=0.06,
+    max_ll_increase=0.40,
+    max_brier_increase=0.10,
 
     orient_features=False,
     enable_feature_flips=False,
     max_feature_flips=0,
     orient_passes=1,
 
-    force_full_scan=True,
+    force_full_scan=False,
 
     fallback_to_all_available_features=True,
     require_present_in_X=True,
@@ -3707,8 +3707,8 @@ def select_features_auto(
 
     # keep old knobs (won't break your call)
     corr_within: float = 0.90,
-    corr_global: float = 0.92,
-    max_feats_major: int = 160,
+    corr_global: float = 0.97,
+    max_feats_major: int = 220,
     max_feats_small: int = 160,
     topk_per_fold: int = 120,
     min_presence: float = 0.80,
@@ -3718,9 +3718,9 @@ def select_features_auto(
     # selection knobs
     use_auc_auto: bool = True,
     auc_min_k: int | None = None,
-    auc_patience: int = 160,
-    auc_min_improve: float = 1e-6,
-    accept_metric: str = "auc",
+    auc_patience: int = 400,
+    auc_min_improve: float = 1e-8,
+    accept_metric: str = "score",
     auc_verbose: bool = True,
 
     baseline_feats: list[str] | None = None,
@@ -3800,7 +3800,7 @@ def select_features_auto(
     # 2) usable mask (two-tier presence floor)
     # -----------------------------
     min_non_nan_dense = 0.01
-    min_non_nan_sparse = 0.001
+    min_non_nan_sparse = 0.0003
 
     name_arr = np.asarray(cols, dtype=object)
     sparse_ok = np.fromiter((_is_sparse_ok_name(c) for c in name_arr), dtype=bool, count=len(cols))
@@ -3985,7 +3985,7 @@ def select_features_auto(
             quick_screen=True,
             quick_folds=2,
             abort_margin_cv=0.0,
-            force_full_scan=True,
+            force_full_scan=False,
             time_budget_s=1e18,
             resume_state=None,
             max_total_evals=None,
@@ -11365,7 +11365,7 @@ def train_sharp_model_from_bq(
             auc_min_k=None,            # ✅ seed = len(must_keep) only
             use_auc_auto=True,         # ✅ actually select (earned)
             auc_patience=200,
-            auc_min_improve=5e-6,
+            auc_min_improve=1e-8,
             accept_metric="auc",
             auc_verbose=True,
             log_func=log_func,
