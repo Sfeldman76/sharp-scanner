@@ -5538,6 +5538,7 @@ def get_xgb_search_space(
         objective="binary:logistic",
         tree_method="hist",
         grow_policy="lossguide",
+        predictor="cpu_predictor",
         sampling_method="uniform",
         max_bin=256,
         max_delta_step=0.5,        # small clamp helps stability
@@ -7197,10 +7198,10 @@ def _xgb_params_from_proto(proto):
         "max_leaves": int(_f("max_leaves", 64)),   # ✅ NEW
         "nthread": int(_f("n_jobs", 0) or 0),       # ✅ FIXED
         "verbosity": 0,
+        "predictor": _f("predictor", "cpu_predictor"),
         "seed": int(_f("random_state", 1337)),     # ✅ nice-to-have stability
     }
-    p.pop("predictor", None)
-    params.pop("predictor", None)
+    
     num_boost_round = int(_f("n_estimators", 400) or 400)
     return params, num_boost_round
 
