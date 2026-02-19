@@ -183,18 +183,17 @@ def start_heartbeat(pw, label, every_sec=45):
 
 
 def main():
-    run_id = os.environ.get("TRAIN_RUN_ID") or str(uuid.uuid4())[:8]
-    sport = os.environ.get("SPORT", "NBA")
-    market = os.environ.get("MARKET", "All")
-    bucket = os.environ.get("MODEL_BUCKET", "sharp-models")
-
-    # Optional: narrow warning filter (belt + suspenders). Keep it tight.
     warnings.filterwarnings(
         "ignore",
         message=r'.*Parameters:\s*\{\s*"predictor"\s*\}\s*are not used\..*',
         category=UserWarning,
         module=r"xgboost(\.|$)",
     )
+    run_id = os.environ.get("TRAIN_RUN_ID") or str(uuid.uuid4())[:8]
+    sport = os.environ.get("SPORT", "NBA")
+    market = os.environ.get("MARKET", "All")
+    bucket = os.environ.get("MODEL_BUCKET", "sharp-models")
+
 
     progress_uri = os.environ.get("PROGRESS_URI")
     if not progress_uri:
