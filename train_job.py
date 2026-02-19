@@ -166,25 +166,9 @@ def install_streamlit_shim(log_func):
     return st
 
 
-def patch_xgboost_drop_predictor():
-    """
-    Guarantees `predictor` never reaches XGBoost (constructor OR set_params),
-    and forces verbosity=0 by default to reduce native noise.
-    Call BEFORE importing modules that construct XGB models.
-    """
+def patch_xgboost_drop_predictor_set_params_only():
     from xgboost.sklearn import XGBModel
 
-    # ---- Patch constructor ----
-    _orig_init = XGBModel.__init__
-
-    def _init(self, *args, **kwargs):
-        kwargs.pop("predictor", None)
-        kwargs.setdefault("verbosity", 0)
-        return _orig_init(self, *args, **kwargs)
-
-    XGBModel.__init__ = _init
-
-    # ---- Patch set_params ----
     _orig_set_params = XGBModel.set_params
 
     def _set_params(self, **params):
@@ -193,7 +177,6 @@ def patch_xgboost_drop_predictor():
         return _orig_set_params(self, **params)
 
     XGBModel.set_params = _set_params
-
 
 def start_heartbeat(pw, label, every_sec=45):
     stop_evt = threading.Event()
@@ -238,7 +221,7 @@ def main():
         print(str(msg), flush=True)
 
     # Patch XGBoost BEFORE importing training modules
-    patch_xgboost_drop_predictor()
+    patch_xgboost_drop_predictor_set_params_only()
 
     # Install shim BEFORE importing any Streamlit-heavy modules
     if HEADLESS:
