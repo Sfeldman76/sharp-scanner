@@ -160,7 +160,13 @@ def main():
     sport = os.environ.get("SPORT", "NBA")
     market = os.environ.get("MARKET", "All")
     bucket = os.environ.get("MODEL_BUCKET", "sharp-models")
-
+    import warnings
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*Parameters:\s*\{\s*\"predictor\"\s*\}\s*are not used\..*",
+        category=UserWarning,
+        module=r"xgboost(\.|$)",
+    )
     progress_uri = os.environ.get("PROGRESS_URI")
     if not progress_uri:
         progress_uri = f"gs://{bucket}/train-progress/{sport}/{market}/{run_id}.jsonl"
