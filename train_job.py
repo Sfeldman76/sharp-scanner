@@ -11,7 +11,6 @@ from google.cloud import storage
 from progress import ProgressWriter
 
 HEADLESS = os.getenv("HEADLESS", "0") == "1"
-import warnings
 
 
 # -----------------------------------------------------------------------------
@@ -22,6 +21,7 @@ if HEADLESS:
     warnings.filterwarnings("ignore", message="Degrees of freedom <= 0", category=RuntimeWarning)
     logging.getLogger("numpy").setLevel(logging.ERROR)
     logging.getLogger("xgboost").setLevel(logging.ERROR)
+
 
 def install_streamlit_shim(log_func):
     """
@@ -43,50 +43,75 @@ def install_streamlit_shim(log_func):
         def __init__(self, label=""):
             if label:
                 _log(label)
-        def __enter__(self): return self
-        def __exit__(self, exc_type, exc, tb): return False
-        def write(self, *a, **k): return _log(*a)
-        def markdown(self, *a, **k): return _log(*a)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def write(self, *a, **k):
+            return _log(*a)
+
+        def markdown(self, *a, **k):
+            return _log(*a)
+
         def update(self, *a, **k):
             lab = k.get("label") or ""
             if lab:
                 _log(lab)
             return None
-        def success(self, *a, **k): return _log(*a)
-        def warning(self, *a, **k): return _log(*a)
-        def error(self, *a, **k): return _log(*a)
+
+        def success(self, *a, **k):
+            return _log(*a)
+
+        def warning(self, *a, **k):
+            return _log(*a)
+
+        def error(self, *a, **k):
+            return _log(*a)
 
     class _Null:
         def __init__(self, prefix="st"):
             self._prefix = prefix
+
         def __call__(self, *a, **k):
-            # capture if someone does st.something("text")
             if a:
                 _log(*a)
             return None
+
         def __getattr__(self, name):
             return _Null(prefix=f"{self._prefix}.{name}")
-        def __enter__(self): return self
-        def __exit__(self, exc_type, exc, tb): return False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
 
     class _Progress:
         def progress(self, v=None, *a, **k):
-            # optional: only log when value is meaningful
             if v is not None:
                 _log(f"[progress] {v}")
             return None
+
         def update(self, *a, **k):
             if "label" in k and k["label"]:
                 _log(k["label"])
             if "value" in k:
                 return self.progress(k["value"])
             return None
-        def empty(self): return None
+
+        def empty(self):
+            return None
 
     def _decorator(fn=None, **kwargs):
         if callable(fn):
             return fn
-        def wrap(f): return f
+
+        def wrap(f):
+            return f
+
         return wrap
 
     st = types.ModuleType("streamlit")
@@ -134,10 +159,40 @@ def install_streamlit_shim(log_func):
         if name in d:
             return d[name]
         return _Null(prefix=f"st.{name}")
+
     st.__getattr__ = _module_getattr  # type: ignore[attr-defined]
 
     sys.modules["streamlit"] = st
     return st
+
+
+def patch_xgboost_drop_predictor():
+    """
+    Guarantees `predictor` never reaches XGBoost (constructor OR set_params),
+    and forces verbosity=0 by default to reduce native noise.
+    Call BEFORE importing modules that construct XGB models.
+    """
+    from xgboost.sklearn import XGBModel
+
+    # ---- Patch constructor ----
+    _orig_init = XGBModel.__init__
+
+    def _init(self, *args, **kwargs):
+        kwargs.pop("predictor", None)
+        kwargs.setdefault("verbosity", 0)
+        return _orig_init(self, *args, **kwargs)
+
+    XGBModel.__init__ = _init
+
+    # ---- Patch set_params ----
+    _orig_set_params = XGBModel.set_params
+
+    def _set_params(self, **params):
+        params.pop("predictor", None)
+        params.setdefault("verbosity", 0)
+        return _orig_set_params(self, **params)
+
+    XGBModel.set_params = _set_params
 
 
 def start_heartbeat(pw, label, every_sec=45):
@@ -160,13 +215,15 @@ def main():
     sport = os.environ.get("SPORT", "NBA")
     market = os.environ.get("MARKET", "All")
     bucket = os.environ.get("MODEL_BUCKET", "sharp-models")
-    import warnings
+
+    # Optional: narrow warning filter (belt + suspenders). Keep it tight.
     warnings.filterwarnings(
         "ignore",
-        message=r".*Parameters:\s*\{\s*\"predictor\"\s*\}\s*are not used\..*",
+        message=r'.*Parameters:\s*\{\s*"predictor"\s*\}\s*are not used\..*',
         category=UserWarning,
         module=r"xgboost(\.|$)",
     )
+
     progress_uri = os.environ.get("PROGRESS_URI")
     if not progress_uri:
         progress_uri = f"gs://{bucket}/train-progress/{sport}/{market}/{run_id}.jsonl"
@@ -178,10 +235,12 @@ def main():
     # This is the ONLY log stream you want:
     def log_func(msg: str):
         pw.emit("log", str(msg))
-        # optional: also show in Cloud Run logs, but only for log_func messages
         print(str(msg), flush=True)
 
-    # Install shim before importing training modules
+    # Patch XGBoost BEFORE importing training modules
+    patch_xgboost_drop_predictor()
+
+    # Install shim BEFORE importing any Streamlit-heavy modules
     if HEADLESS:
         install_streamlit_shim(log_func)
 
@@ -215,7 +274,10 @@ def main():
             try:
                 try:
                     train_sharp_model_for_market(
-                        sport=sport, market=mkt, bucket_name=bucket, log_func=log_func
+                        sport=sport,
+                        market=mkt,
+                        bucket_name=bucket,
+                        log_func=log_func,
                     )
                 except TypeError:
                     train_sharp_model_for_market(sport=sport, market=mkt, bucket_name=bucket)
