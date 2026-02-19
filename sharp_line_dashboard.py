@@ -2758,7 +2758,7 @@ def _cv_auc_for_feature_set(
     eps=1e-6,
 
     cv_mode: str = "full",
-    quick_folds_n: int = 1,
+    quick_folds_n: int = 2,
     compute_ll_brier: bool = True,
     max_folds: int | None = None,
 
@@ -3517,7 +3517,7 @@ def _auto_select_k_by_auc(
         _put_feat_into_col(feat, k)
 
         # adaptive margins
-        rej_margin = 0.0015 if k < max(10, min_k) else 0.0010
+        rej_margin = 0.00015 if k < max(10, min_k) else 0.00010
         quick_margin_auc = rej_margin
         flip_close_margin = rej_margin
 
@@ -3691,8 +3691,8 @@ def select_features_auto(
     corr_global: float = 0.92,
     max_feats_major: int = 160,
     max_feats_small: int = 160,
-    topk_per_fold: int = 80,
-    min_presence: float = 0.40,
+    topk_per_fold: int = 120,
+    min_presence: float = 0.35,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
 
