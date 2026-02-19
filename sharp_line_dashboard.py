@@ -2741,6 +2741,10 @@ from sklearn.metrics import roc_auc_score, log_loss
 # =========================
 # 1) CV EVAL BLOCK (backend-optimized, same interface)
 # =========================
+# =========================
+# 1) CV EVAL BLOCK (backend-optimized, same interface)
+#    ✅ now supports flip_map={feature: -1} without pandas scans
+# =========================
 def _cv_auc_for_feature_set(
     model_proto, X, y, folds, feature_list, *,
     log_func=print,
@@ -2774,28 +2778,31 @@ def _cv_auc_for_feature_set(
     min_non_nan_frac=0.001,
 
     # ✅ backend knobs (optional, safe defaults)
-    backend_mode: bool = True,            # if True: prefer stable fold-mean metrics + early stopping
-    early_stop_rounds: int | None = 50,   # XGB early stopping (only for xgb native path)
-    stable_auc: str = "fold_mean",        # "fold_mean" (default) or "oof"
-    min_finite_rows: int = 20,            # dynamic sparsity gate (in addition to min_non_nan_frac)
+    backend_mode: bool = True,
+    early_stop_rounds: int | None = 50,
+    stable_auc: str = "fold_mean",        # "fold_mean" or "oof"
+    min_finite_rows: int = 20,
 
-    use_dmatrix_cache: bool = True,       # cache DMatrix per (X,id cols) signature
-    dmatrix_cache_cap: int = 8,           # bounded cache size
+    use_dmatrix_cache: bool = True,
+    dmatrix_cache_cap: int = 8,
     verbose_eval_xgb: bool = False,
 
-    # ✅ speed/throughput knobs (keep thoroughness, avoid worst-case)
-    allow_fallback_scan: bool = False,    # IMPORTANT: per-column pandas scan is extremely slow
-    fold_mean_abort: bool = True,         # abort bound uses fold-mean best-possible
-    xgb_build_dmatrix_each_fold: bool = False,  # if False: build once, slice (faster)
+    # ✅ speed/throughput knobs
+    allow_fallback_scan: bool = False,
+    fold_mean_abort: bool = True,
+    xgb_build_dmatrix_each_fold: bool = False,
+
+    # ✅ NEW: per-feature sign flips (fast)
+    flip_map: dict | None = None,         # e.g. {"FeatA": -1, "FeatB": -1}
 ):
     """
     Thorough but not overly slow:
       - Avoids per-column fallback scan by default (allow_fallback_scan=False)
-      - Uses cheap cache signature (no tuple(X.columns) hashing)
-      - Uses matrix-based fallback when needed (fast)
+      - Uses cached numeric matrix (float32)
+      - Supports flip_map sign flips without pandas (applied after column selection)
       - Uses XGB early stopping per fold
       - Uses fold-mean AUC for stable gating and abort bounds (optional)
-      - Keeps LL/Brier computation (still OOF-based), but no duplicate passes
+      - Keeps LL/Brier computation (OOF-based) when requested
       - Bounded DMatrix cache to speed repeated evaluations of same feature-set
     """
     import numpy as np
@@ -2842,7 +2849,7 @@ def _cv_auc_for_feature_set(
     # Numeric matrix cache (FAST signature)
     # -----------------------------
     _MAT_CACHE = getattr(_cv_auc_for_feature_set, "_MAT_CACHE", {})
-    mgr_id = id(getattr(X, "_mgr", X))  # changes if df data changes materially
+    mgr_id = id(getattr(X, "_mgr", X))
     sig = (id(X), mgr_id, X.shape, bool(require_numeric_features))
     if sig in _MAT_CACHE:
         X_all_mat, col_ix = _MAT_CACHE[sig]
@@ -2850,7 +2857,6 @@ def _cv_auc_for_feature_set(
         X_num_all = X.apply(pd.to_numeric, errors="coerce") if require_numeric_features else X
         X_all_mat = X_num_all.to_numpy(dtype=np.float32, copy=False)
         col_ix = {c: i for i, c in enumerate(X.columns)}
-        # keep cache bounded-ish (simple FIFO)
         if len(_MAT_CACHE) > 8:
             try:
                 _MAT_CACHE.pop(next(iter(_MAT_CACHE)))
@@ -2863,17 +2869,14 @@ def _cv_auc_for_feature_set(
     # Fast usable-feature fallback (MATRIX-BASED)
     # -----------------------------
     def _all_usable_features_from_mat() -> list[str]:
-        # Uses cached float32 matrix; NO per-column pandas conversion.
         finite = np.isfinite(X_all_mat)
         nn = finite.sum(axis=0)
         nn_frac = nn / float(max(1, n))
         with np.errstate(invalid="ignore"):
             var = np.nanvar(X_all_mat, axis=0)
-
         cols_ok = (nn_frac >= min_frac_eff) & (nn >= min_rows) & (var > 0.0)
 
         out_cols = []
-        # iterate columns once; cheap
         for c, j in col_ix.items():
             if _is_forbidden(c):
                 continue
@@ -2881,7 +2884,6 @@ def _cv_auc_for_feature_set(
                 out_cols.append(c)
         return out_cols
 
-    # slow pandas-per-column fallback (optional)
     def _all_usable_features_from_X_slow() -> list[str]:
         cols = [c for c in list(X.columns) if not _is_forbidden(c)]
         if not cols:
@@ -2914,9 +2916,7 @@ def _cv_auc_for_feature_set(
             raise RuntimeError(msg)
 
     if len(feature_list) == 0 and fallback_to_all_available_features:
-        # ✅ fast matrix fallback
         feature_list = _all_usable_features_from_mat()
-        # only if you explicitly allow it
         if (not feature_list) and allow_fallback_scan:
             feature_list = _all_usable_features_from_X_slow()
         if debug:
@@ -2946,8 +2946,22 @@ def _cv_auc_for_feature_set(
             "aborted": False,
         }
 
-    # ✅ np.take is usually faster than fancy slicing and more predictable
     X_mat = np.take(X_all_mat, cols_idx, axis=1).astype(np.float32, copy=False)
+
+    # -----------------------------
+    # ✅ apply flip_map efficiently (sign only)
+    # -----------------------------
+    if flip_map:
+        try:
+            flip_set = {k for k, v in flip_map.items() if v == -1}
+        except Exception:
+            flip_set = set()
+        if flip_set:
+            # copy once so we don't mutate cached X_all_mat columns indirectly
+            X_mat = X_mat.copy()
+            for j, f in enumerate(feats):
+                if f in flip_set:
+                    np.negative(X_mat[:, j], out=X_mat[:, j])
 
     # ---------------------------------
     # XGB native path + early stopping
@@ -2966,17 +2980,24 @@ def _cv_auc_for_feature_set(
         if isinstance(xgb_params, dict) and "nthread" not in xgb_params and "n_jobs" not in xgb_params:
             xgb_params["nthread"] = 0
 
-        # small stability nudge (safe)
         xgb_params = dict(xgb_params)
         xgb_params["reg_lambda"] = float(xgb_params.get("reg_lambda", 1.0)) * (1.10 if backend_mode else 1.0)
         xgb_params["min_child_weight"] = max(float(xgb_params.get("min_child_weight", 1.0)), 2.0)
 
     # -----------------------------
-    # DMatrix cache (bounded, only for exact X_mat)
+    # DMatrix cache (bounded)
+    # NOTE: flip_map changes X_mat content => include flip signature
     # -----------------------------
     _DMAT_CACHE = getattr(_cv_auc_for_feature_set, "_DMAT_CACHE", {})
     _DMAT_KEYS = getattr(_cv_auc_for_feature_set, "_DMAT_KEYS", [])
-    d_sig = (id(X_all_mat), tuple(cols_idx), n, bool(backend_mode), int(early_stop_rounds or 0))
+    flip_sig = None
+    if flip_map:
+        try:
+            flip_sig = tuple(sorted((k for k, v in flip_map.items() if v == -1)))
+        except Exception:
+            flip_sig = None
+
+    d_sig = (id(X_all_mat), tuple(cols_idx), n, bool(backend_mode), int(early_stop_rounds or 0), flip_sig)
     d_all = None
     if use_xgb and use_dmatrix_cache:
         if d_sig in _DMAT_CACHE:
@@ -2993,7 +3014,7 @@ def _cv_auc_for_feature_set(
             _cv_auc_for_feature_set._DMAT_KEYS = _DMAT_KEYS
 
     # -----------------------------
-    # Flip helpers (optional)
+    # Flip helpers (optional greedy flips inside CV block)
     # -----------------------------
     def _auto_flip_mode(arr1d):
         arr1d = np.asarray(arr1d, dtype=np.float32)
@@ -3023,11 +3044,9 @@ def _cv_auc_for_feature_set(
         if use_xgb:
             import xgboost as xgb  # noqa
 
-            # build once (preferred), slice per fold
             if (d_all is not None) and (X_local_mat is X_mat):
                 dmat = d_all
             else:
-                # only rebuild if caller passed different matrix
                 dmat = xgb.DMatrix(np.ascontiguousarray(X_local_mat, dtype=np.float32), label=y)
 
             def _fit_predict_xgb(tr_idx, val_idx):
@@ -3056,7 +3075,6 @@ def _cv_auc_for_feature_set(
                 if oof is not None:
                     oof[val_idx] = proba.astype(np.float32, copy=False)
 
-                # fold AUC
                 try:
                     auc_fold = roc_auc_score(y[val_idx], np.clip(proba, eps, 1 - eps))
                     if not np.isfinite(auc_fold):
@@ -3065,7 +3083,6 @@ def _cv_auc_for_feature_set(
                     auc_fold = 0.5
                 auc_fold_vals.append(float(auc_fold))
 
-                # abort bound (fast)
                 if do_abort and backend_mode and stable_auc == "fold_mean" and fold_mean_abort:
                     left = n_folds - len(auc_fold_vals)
                     mean_auc_best_possible = (sum(auc_fold_vals) + left * 1.0) / float(n_folds)
@@ -3119,10 +3136,8 @@ def _cv_auc_for_feature_set(
                             "auc_fold_mean": float("nan"),
                         }
 
-
         auc_fold_mean = float(np.mean(auc_fold_vals)) if auc_fold_vals else float("nan")
 
-        # choose which AUC to use
         if stable_auc == "fold_mean":
             auc_used = auc_fold_mean
         else:
@@ -3134,7 +3149,6 @@ def _cv_auc_for_feature_set(
                 p_v = np.clip(oof[valid].astype(float), eps, 1 - eps)
                 auc_used = roc_auc_score(y_v, p_v) if (len(y_v) >= 2 and len(np.unique(y_v)) >= 2) else float("nan")
 
-        # ll/brier from OOF if requested
         if compute_ll_brier:
             if oof is None:
                 ll = float("nan")
@@ -3149,7 +3163,6 @@ def _cv_auc_for_feature_set(
             ll = float("nan")
             br = float("nan")
 
-        # ✅ robust score (never NaN -> -inf)
         score = float("-inf")
         if np.isfinite(auc_used):
             score = (auc_weight * float(auc_used))
@@ -3174,18 +3187,11 @@ def _cv_auc_for_feature_set(
     best_flip_map = {}
 
     # -----------------------------
-    # OPTIONAL greedy flips (thorough but bounded)
+    # OPTIONAL greedy flips (bounded)
     # -----------------------------
-    # Make flip search cheaper:
-    #  - only attempt flips if base is finite
-    #  - cap attempts by max_feature_flips
-    #  - use fold-mean auc metric (already) so it’s stable
     if enable_feature_flips and max_feature_flips and X_mat.shape[1] > 0 and np.isfinite(best.get("score", np.nan)):
-        # copy once, mutate in place
         X_try = X_mat.copy()
         chosen = 0
-
-        # consider only columns that look flippable (0..1 or mixed sign)
         cand_js = list(range(X_try.shape[1]))
 
         for _pass in range(int(max(1, orient_passes))):
@@ -3197,7 +3203,6 @@ def _cv_auc_for_feature_set(
             best_mode = None
             best_res = None
 
-            # evaluate each candidate once; pick best gain
             for j in cand_js:
                 col = X_try[:, j]
                 orig = col.copy()
@@ -3223,7 +3228,6 @@ def _cv_auc_for_feature_set(
             if best_j is None:
                 break
 
-            # apply best flip permanently
             _apply_flip_inplace(X_try[:, best_j], best_mode)
             feat_name = feats[best_j]
             best_flip_map[feat_name] = {"flipped": True, "mode": best_mode}
@@ -3237,7 +3241,6 @@ def _cv_auc_for_feature_set(
     out["feature_list"] = list(feats)
     out["flip_map"] = dict(best_flip_map)
 
-    # legacy fields
     out["oof_auc_best"] = float(out.get("auc", float("nan")))
     out["oof_logloss_best"] = float(out.get("logloss", float("nan")))
     out["oof_brier_best"] = float(out.get("brier", float("nan")))
@@ -3260,17 +3263,10 @@ def _cv_auc_for_feature_set(
         )
 
     return out
-import numpy as np
-import pandas as pd
-import heapq
-from sklearn.base import clone
-from sklearn.metrics import roc_auc_score
-
-
 
 # =========================
-# 2) AUTO SELECT BLOCK (evaluate-all first, then forward-select, NO quick gate)
-#    + optional per-candidate flip test (reverse AUC) that can be accepted
+# 2) AUTO SELECT BLOCK (speed-first, greedy forward-select)
+#    ✅ uses flip_map now that CV supports it
 # =========================
 def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
@@ -3283,47 +3279,37 @@ def _auto_select_k_by_auc(
     debug=True,
     debug_every=10,
 
-    # selection speed/quality
     quick_folds: int = 2,
     candidate_batch: int = 24,
-    full_eval_top: int = 3,              # top-N in pool to consider (quick-eval)
-    force_full_scan: bool = False,       # if False, patience can stop
+    full_eval_top: int = 3,
+    force_full_scan: bool = False,
 
-    # periodic validation (optional, keep small)
-    full_check_every: int = 10,          # run full CV every N accepts (0 disables)
-    full_check_folds: int | None = None, # None => use all folds in full
-    abort_drop_full_auc: float = 0.002,  # if full AUC drops more than this, undo last accept
+    full_check_every: int = 0,           # keep 0 for speed; set >0 for depth checks
+    full_check_folds: int | None = None,
+    abort_drop_full_auc: float = 0.002,
 
-    # interaction admit (near-ties early)
     interaction_admit: bool = True,
     early_relax_k: int = 10,
     near_tie_auc: float = 2e-4,
 
-    # flips (brought back)
     flips_after_each_accept: bool = True,
     allow_candidate_flip: bool = True,
     flip_gain_min: float = 0.0,
 
-    # must keep / baseline
     must_keep: list[str] | None = None,
     baseline_feats: list[str] | None = None,
 
-    # passthrough to your CV helper
     backend_mode: bool = True,
     early_stop_rounds: int | None = 50,
 
-    # runtime caps
     time_budget_s: float = 1e21,
     max_total_evals: int | None = None,
 
     accept_metric: str = "auc",
-
-    # ✅ backward-compat: ignore extra knobs safely
     **_ignored_kwargs,
 ):
     import time
     import numpy as np
-    import inspect
 
     t0 = time.time()
     y_arr = np.asarray(y, int).reshape(-1)
@@ -3365,20 +3351,6 @@ def _auto_select_k_by_auc(
         min_k = len(mk)
     min_k = int(max(len(mk), min(int(min_k), max_k)))
 
-    # -----------------------
-    # local helpers (CV compat)
-    # -----------------------
-    try:
-        _cv_sig = inspect.signature(_cv_auc_for_feature_set)
-        _cv_supports_flip_map = ("flip_map" in _cv_sig.parameters)
-    except Exception:
-        _cv_supports_flip_map = False
-
-    # If helper doesn't support flip_map, disable flip logic cleanly
-    if not _cv_supports_flip_map:
-        allow_candidate_flip = False
-        flips_after_each_accept = False
-
     def _metric(res: dict | None) -> float:
         if res is None:
             return float("nan")
@@ -3387,7 +3359,8 @@ def _auto_select_k_by_auc(
         return float(res.get("auc", res.get("auc_fold_mean", np.nan)))
 
     def _cv_quick(feats, *, flip_map=None):
-        kwargs = dict(
+        return _cv_auc_for_feature_set(
+            model_proto, X, y_arr, _folds, list(feats),
             log_func=log_func,
             debug=False,
             return_oof=False,
@@ -3397,17 +3370,13 @@ def _auto_select_k_by_auc(
             stable_auc="fold_mean",
             backend_mode=backend_mode,
             early_stop_rounds=early_stop_rounds,
-        )
-        if _cv_supports_flip_map:
-            kwargs["flip_map"] = flip_map
-        return _cv_auc_for_feature_set(
-            model_proto, X, y_arr, _folds, list(feats),
-            **kwargs,
+            flip_map=flip_map,
         )
 
     def _cv_full(feats, *, flip_map=None):
         use_folds = _folds if (full_check_folds is None) else _folds[: int(max(1, full_check_folds))]
-        kwargs = dict(
+        return _cv_auc_for_feature_set(
+            model_proto, X, y_arr, use_folds, list(feats),
             log_func=log_func,
             debug=False,
             return_oof=False,
@@ -3416,12 +3385,7 @@ def _auto_select_k_by_auc(
             stable_auc="oof",
             backend_mode=backend_mode,
             early_stop_rounds=early_stop_rounds,
-        )
-        if _cv_supports_flip_map:
-            kwargs["flip_map"] = flip_map
-        return _cv_auc_for_feature_set(
-            model_proto, X, y_arr, use_folds, list(feats),
-            **kwargs,
+            flip_map=flip_map,
         )
 
     def _accept_ok(v_try: float, v_best: float, *, phase_k: int) -> bool:
@@ -3435,14 +3399,13 @@ def _auto_select_k_by_auc(
             return bool(v_try >= v_best - float(near_tie_auc))
         return False
 
-    # -----------------------
-    # initial state
-    # -----------------------
     accepted = list(mk)
     accepted_set = set(accepted)
-    flip_state = {}  # feature -> {"flipped": True, "mode":"sign"}
 
-    base_flip = ({f: -1 for f in flip_state.keys()} if (_cv_supports_flip_map and flip_state) else None)
+    # flip_state stores ONLY approved flips as "sign" mode
+    flip_state: dict[str, dict] = {}  # feat -> {"flipped": True, "mode":"sign"}
+
+    base_flip = {f: -1 for f in flip_state.keys()} if flip_state else None
     base_q = _cv_quick(accepted, flip_map=base_flip) if accepted else None
     best_val = _metric(base_q)
 
@@ -3451,8 +3414,7 @@ def _auto_select_k_by_auc(
 
     remaining = [f for f in ordered if f not in accepted_set]
     if not remaining:
-        final_flip = ({f: -1 for f in flip_state.keys()} if (_cv_supports_flip_map and flip_state) else None)
-        final = _cv_full(accepted, flip_map=final_flip) if accepted else None
+        final = _cv_full(accepted, flip_map={f: -1 for f in flip_state.keys()} if flip_state else None) if accepted else None
         return accepted, final, {"done": True, "accepted": accepted, "flip_map": flip_state}
 
     rejects_in_row = 0
@@ -3473,7 +3435,7 @@ def _auto_select_k_by_auc(
         pool = remaining[: int(max(1, candidate_batch))]
 
         qs = []
-        cur_flip = ({f: -1 for f in flip_state.keys()} if (_cv_supports_flip_map and flip_state) else None)
+        cur_flip = {f: -1 for f in flip_state.keys()} if flip_state else None
 
         for feat in pool:
             res = _cv_quick(accepted + [feat], flip_map=cur_flip)
@@ -3528,9 +3490,9 @@ def _auto_select_k_by_auc(
         if verbose:
             log_func(f"[AUTO-FEAT] ✅ accept +{best_feat} -> quick_auc={best_val:.6f} k={len(accepted)}")
 
-        # flip test: ONLY the new feature (only if supported)
-        if flips_after_each_accept and allow_candidate_flip and _cv_supports_flip_map:
-            base_flip = ({f: -1 for f in flip_state.keys()} if flip_state else None)
+        # flip test: ONLY the new feature
+        if flips_after_each_accept and allow_candidate_flip:
+            base_flip = {f: -1 for f in flip_state.keys()} if flip_state else None
             res0 = _cv_quick(accepted, flip_map=base_flip)
             auc0 = float(res0.get("auc_fold_mean", np.nan))
 
@@ -3545,12 +3507,11 @@ def _auto_select_k_by_auc(
                 if verbose:
                     log_func(f"[AUTO-FEAT] 🔁 flip kept for {best_feat}: {auc0:.6f} → {auc1:.6f}")
 
-        # occasional full checkpoint
+        # optional depth check
         if full_check_every and full_check_every > 0 and (accept_count % int(full_check_every) == 0):
-            cur_flip = ({f: -1 for f in flip_state.keys()} if (_cv_supports_flip_map and flip_state) else None)
+            cur_flip = {f: -1 for f in flip_state.keys()} if flip_state else None
             full_res = _cv_full(accepted, flip_map=cur_flip)
             full_auc = float(full_res.get("auc", np.nan))
-
             if verbose:
                 log_func(f"[AUTO-FEAT] 🧪 full-check: auc={full_auc:.6f} k={len(accepted)}")
 
@@ -3564,13 +3525,13 @@ def _auto_select_k_by_auc(
                     if last_accept_feat in ordered and last_accept_feat not in remaining:
                         remaining.append(last_accept_feat)
 
-                    cur_flip = ({f: -1 for f in flip_state.keys()} if (_cv_supports_flip_map and flip_state) else None)
+                    cur_flip = {f: -1 for f in flip_state.keys()} if flip_state else None
                     q = _cv_quick(accepted, flip_map=cur_flip) if accepted else None
                     best_val = _metric(q)
                     rejects_in_row += 1
                     continue
 
-    cur_flip = ({f: -1 for f in flip_state.keys()} if (_cv_supports_flip_map and flip_state) else None)
+    cur_flip = {f: -1 for f in flip_state.keys()} if flip_state else None
     final_res = _cv_full(accepted, flip_map=cur_flip) if accepted else None
 
     if verbose and isinstance(final_res, dict):
@@ -3589,7 +3550,7 @@ def _auto_select_k_by_auc(
         "evals_done": int(evals_done),
         "backend_mode": bool(backend_mode),
         "early_stop_rounds": early_stop_rounds,
-        "supports_flip_map": bool(_cv_supports_flip_map),
+        "supports_flip_map": True,
     }
     return list(accepted), final_res, state
 
