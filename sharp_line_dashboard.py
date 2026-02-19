@@ -11355,28 +11355,30 @@ def train_sharp_model_from_bq(
         
         # ======== AUTO FEATURE SELECTION (INLINE / ONE-SHOT) ========
  
+       
         feature_cols, shap_summary = select_features_auto(
             model_proto=_model_proto,
             X_df_train=X_df_train,
             y_train=y_train,
             folds=folds,
             sport_key=sport_key,
-            must_keep=['PR_Rating_Diff'],
-            auc_min_k=None,            # ✅ seed = len(must_keep) only
-            use_auc_auto=True,         # ✅ actually select (earned)
-            auc_patience=200,
-            auc_min_improve=1e-8,
-            accept_metric="auc",
+        
+            must_keep=["PR_Rating_Diff", "Spread_Size_Bucket", "Total_Size_Bucket", "H2H_Prob_Bucket"],
+        
+            auc_min_k=None,
+            use_auc_auto=True,
+            auc_patience=300,
+            auc_min_improve=5e-7,          # <- key change
+            accept_metric="score",
             auc_verbose=True,
             log_func=log_func,
         
-            # keep these for backward compat; can be ignored by your new selector
             topk_per_fold=100,
             min_presence=0.40,
             corr_within=0.90,
-            corr_global=0.92,
-            max_feats_major=130,
-            max_feats_small=80,
+            corr_global=0.95,              # <- key change
+            max_feats_major=200,           # <- key change
+            max_feats_small=140,           # <- key change
             sign_flip_max=0.35,
             shap_cv_max=1.00,
         )
