@@ -2195,13 +2195,13 @@ def holdout_by_percent_groups(
     SPORT_HOLDOUT_PCT = {
         "NFL": 0.10,
         "NCAAF": 0.10,
-        "NBA": 0.20,
+        "NBA": 0.10,
         "WNBA": 0.10,
         "NHL": 0.15,
         "MLB": 0.12,
         "MLS": 0.15,
         "CFL": 0.10,
-        "NCAAB": 0.20,
+        "NCAAB": 0.10,
         "DEFAULT": 0.15,
     }
 
@@ -2739,7 +2739,9 @@ from sklearn.base import clone
 from sklearn.metrics import roc_auc_score, log_loss
 
 # =========================
+# =========================
 # 1) CV EVAL BLOCK (OLD/FAST interface, backend-safe)
+#    ✅ patched fallback to not throw away sparse "signal #1" features
 # =========================
 def _cv_auc_for_feature_set(
     model_proto, X, y, folds, feature_list, *,
@@ -2788,6 +2790,19 @@ def _cv_auc_for_feature_set(
     import pandas as pd
     from sklearn.base import clone
     from sklearn.metrics import roc_auc_score, log_loss
+
+    # -----------------------------
+    # sparse whitelist (for fallback "all usable features")
+    # -----------------------------
+    def _is_sparse_ok_name(c: str) -> bool:
+        s = str(c)
+        return (
+            s.startswith("Steam_") or
+            s.startswith("SharpMove_") or
+            s.startswith("OddsMove_") or
+            ("Reversal" in s) or
+            ("Resistance" in s)
+        )
 
     # -----------------------------
     # normalize y + folds
@@ -2875,12 +2890,17 @@ def _cv_auc_for_feature_set(
             raise RuntimeError(msg)
 
     if (not feats) and fallback_to_all_available_features:
-        # fast fallback: all usable (non-sparse, non-const) columns
         finite = np.isfinite(X_all_mat)
         nn_frac = finite.mean(axis=0)
         with np.errstate(invalid="ignore"):
             var = np.nanvar(X_all_mat, axis=0)
-        usable = (nn_frac >= float(min_non_nan_frac)) & (var > 0.0)
+
+        cols_list = list(X.columns)
+        sparse_ok = np.fromiter((_is_sparse_ok_name(c) for c in cols_list), dtype=bool, count=len(cols_list))
+
+        # two-tier presence: keep dense cols normally; allow sparse signal cols at lower floor
+        usable = ((nn_frac >= float(min_non_nan_frac)) | (sparse_ok & (nn_frac >= 0.001))) & (var > 0.0)
+
         feats = [c for c, j in col_ix.items() if usable[j] and (not _is_forbidden(c))]
 
     if not feats:
@@ -2951,7 +2971,7 @@ def _cv_auc_for_feature_set(
                     d_tr,
                     num_boost_round=int(xgb_num_round),
                     evals=[(d_va, "val")],
-                    early_stopping_rounds=None,   # OLD behavior: selector controls early stopping elsewhere
+                    early_stopping_rounds=None,
                     verbose_eval=False,
                 )
                 if hasattr(booster, "best_iteration") and booster.best_iteration is not None:
@@ -3001,7 +3021,6 @@ def _cv_auc_for_feature_set(
 
         auc_fold_mean = float(np.mean(auc_fold_vals)) if auc_fold_vals else float("nan")
 
-        # AUC for reporting: fold-mean for quick; OOF for full if available
         if cv_mode == "quick":
             auc_used = auc_fold_mean
         else:
@@ -3044,7 +3063,7 @@ def _cv_auc_for_feature_set(
     flip_map = {}
 
     # -----------------------------
-    # OPTIONAL flips/orientation (old style; bounded)
+    # OPTIONAL flips/orientation (unchanged)
     # -----------------------------
     def _auto_flip_mode(arr1d):
         arr1d = np.asarray(arr1d, dtype=np.float32)
@@ -3114,7 +3133,7 @@ def _cv_auc_for_feature_set(
     out["flip_map"] = dict(flip_map)
     out["oof_proba"] = (best.get("oof").astype(float) if (return_oof and best.get("oof") is not None) else None)
 
-    # legacy aliases (your downstream expects these sometimes)
+    # legacy aliases
     out["oof_auc_best"] = float(out.get("auc", float("nan")))
     out["oof_logloss_best"] = float(out.get("logloss", float("nan")))
     out["oof_brier_best"] = float(out.get("brier", float("nan")))
@@ -3137,6 +3156,7 @@ def _cv_auc_for_feature_set(
 
 # =========================
 # 2) AUTO SELECT BLOCK (OLD/FAST matrix-backed forward selection)
+#    ✅ patched to accept more tiny-lift signal features early (still fast)
 # =========================
 def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
@@ -3174,8 +3194,8 @@ def _auto_select_k_by_auc(
     # --- speed knobs ---
     quick_screen: bool = True,
     quick_folds: int = 2,
-    quick_accept: float = 0.0,      # unused kept for compat
-    quick_drop: float = 0.0,        # unused kept for compat
+    quick_accept: float = 0.0,
+    quick_drop: float = 0.0,
     abort_margin_cv: float = 0.0,
 
     time_budget_s: float = 1e21,
@@ -3188,15 +3208,6 @@ def _auto_select_k_by_auc(
     # backward compat
     **_ignored_kwargs,
 ):
-    """
-    OLD/FAST forward selection:
-      - X_all_mat once
-      - X_work preallocated
-      - quick fold-mean AUC gate
-      - full fold-mean AUC gate
-      - full LL/Brier only on accept
-      - candidate flip only when close
-    """
     import time
     import numpy as np
     import pandas as pd
@@ -3301,7 +3312,7 @@ def _auto_select_k_by_auc(
             return float(res.get("score", float("-inf")))
         return float(res.get("auc", float("nan")))
 
-    def _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br):
+    def _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br, *, min_improve_eff: float):
         ll_ok = (not np.isfinite(ll_try)) or (not np.isfinite(best_ll)) or (ll_try <= float(best_ll) + float(max_ll_increase))
         br_ok = (not np.isfinite(br_try)) or (not np.isfinite(best_br)) or (br_try <= float(best_br) + float(max_brier_increase))
         if not (ll_ok and br_ok):
@@ -3310,7 +3321,7 @@ def _auto_select_k_by_auc(
             return False
         if not np.isfinite(best_val):
             return True
-        return bool(val_try >= float(best_val) + float(min_improve))
+        return bool(val_try >= float(best_val) + float(min_improve_eff))
 
     # quick folds subset
     qn = int(max(1, quick_folds)) if (quick_screen and len(folds_list) > 1) else len(folds_list)
@@ -3337,7 +3348,7 @@ def _auto_select_k_by_auc(
         if "nthread" not in xgb_params and "n_jobs" not in xgb_params:
             xgb_params["nthread"] = 0
 
-        # selection-time stabilization (as in your old version)
+        # selection-time stabilization
         xgb_params["reg_lambda"] = float(xgb_params.get("reg_lambda", 1.0)) * 1.5
         xgb_params["min_child_weight"] = max(float(xgb_params.get("min_child_weight", 1.0)), 2.0)
         if "max_leaves" in xgb_params:
@@ -3513,11 +3524,19 @@ def _auto_select_k_by_auc(
         if (not force_full_scan) and (len(accepted) >= min_k) and (rejects_in_row >= int(patience)):
             break
 
-        # add candidate into next column
         _put_feat_into_col(feat, k)
 
-        # adaptive margins
-        rej_margin = 0.00015 if k < max(10, min_k) else 0.00010
+        # ---- NEW: k-adaptive thresholds (more tiny-lift accepts early)
+        if k < max(12, min_k):
+            rej_margin = 0.00025
+            min_improve_eff = max(float(min_improve), 2.5e-6)
+        elif k < 40:
+            rej_margin = 0.00015
+            min_improve_eff = float(min_improve)
+        else:
+            rej_margin = 0.00010
+            min_improve_eff = max(float(min_improve), 1.0e-6)
+
         quick_margin_auc = rej_margin
         flip_close_margin = rej_margin
 
@@ -3547,7 +3566,7 @@ def _auto_select_k_by_auc(
             near_miss = (
                 np.isfinite(m_norm) and np.isfinite(best_val) and
                 (m_norm >= float(best_val) - float(rej_margin)) and
-                (m_norm <  float(best_val) + float(min_improve)) and
+                (m_norm <  float(best_val) + float(min_improve_eff)) and
                 (rejects_in_row >= 25)
             )
 
@@ -3559,7 +3578,6 @@ def _auto_select_k_by_auc(
                 rejects_in_row += 1
                 continue
         else:
-            # score-mode: go straight to full metrics
             res_norm_full = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=25)
             evals_done += 1
             m_norm = _metric(res_norm_full)
@@ -3605,7 +3623,7 @@ def _auto_select_k_by_auc(
 
         # 4) full metrics only if AUC says acceptable
         if accept_metric == "auc":
-            if np.isfinite(best_trial_auc) and (not np.isfinite(best_val) or (best_trial_auc >= float(best_val) + float(min_improve))):
+            if np.isfinite(best_trial_auc) and (not np.isfinite(best_val) or (best_trial_auc >= float(best_val) + float(min_improve_eff))):
                 col = X_work[:, k]
                 orig = col.copy()
                 if best_trial_flip:
@@ -3624,7 +3642,7 @@ def _auto_select_k_by_auc(
         ll_try  = float(res_try.get("logloss", np.nan))
         br_try  = float(res_try.get("brier", np.nan))
 
-        if _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br):
+        if _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br, min_improve_eff=min_improve_eff):
             accepted.append(feat)
             accepted_set.add(feat)
             k += 1
@@ -3676,6 +3694,7 @@ def _auto_select_k_by_auc(
 
 # =========================
 # 3) SELECT FEATURES AUTO (OLD/FAST preselect + prune + forward-select)
+#    ✅ patched to pick up more sparse "signal #1" features WITHOUT slowing down
 # =========================
 def select_features_auto(
     model_proto,
@@ -3692,7 +3711,7 @@ def select_features_auto(
     max_feats_major: int = 160,
     max_feats_small: int = 160,
     topk_per_fold: int = 120,
-    min_presence: float = 0.35,
+    min_presence: float = 0.80,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
 
@@ -3721,12 +3740,36 @@ def select_features_auto(
     if X_df_train is None or X_df_train.empty:
         return [], pd.DataFrame(columns=["selected", "flipped", "flip_mode"])
 
+    # -----------------------------
+    # helpers (family + sparse whitelist)
+    # -----------------------------
+    def _feat_family(name: str) -> str:
+        s = str(name)
+        for pref in (
+            "SharpMove_", "OddsMove_", "Hybrid_", "Steam_", "Resistance_",
+            "Market_Mispricing", "Book_", "CrossMarket_", "PR_", "ATS_", "Team_",
+        ):
+            if s.startswith(pref):
+                return pref
+        return s.split("_", 1)[0] if "_" in s else "misc"
+
+    def _is_sparse_ok_name(c: str) -> bool:
+        s = str(c)
+        return (
+            s.startswith("Steam_") or
+            s.startswith("SharpMove_") or
+            s.startswith("OddsMove_") or
+            ("Reversal" in s) or
+            ("Resistance" in s)
+        )
+
     must_keep = must_keep or []
     y_arr = np.asarray(y_train, dtype=np.int8).reshape(-1)
-
     mk_in = [m for m in must_keep if m in X_df_train.columns]
 
+    # -----------------------------
     # 0) leak guard + column list
+    # -----------------------------
     leak_patterns = ("SHARP_COVER_RESULT",)
 
     def _is_forbidden(c: str) -> bool:
@@ -3737,7 +3780,9 @@ def select_features_auto(
     if not cols:
         return [], pd.DataFrame(columns=["selected", "flipped", "flip_mode"])
 
+    # -----------------------------
     # 1) numeric once (float32)
+    # -----------------------------
     X_num = X_df_train[cols].apply(pd.to_numeric, errors="coerce")
     X_mat = X_num.to_numpy(dtype=np.float32, copy=False)
     del X_num
@@ -3748,13 +3793,18 @@ def select_features_auto(
 
     finite = np.isfinite(X_mat)
     nn_frac = finite.mean(axis=0)
-
     with np.errstate(invalid="ignore"):
         var = np.nanvar(X_mat, axis=0)
 
-    # old default tightened a bit for speed/signal
-    min_non_nan_frac = 0.01
-    usable = (nn_frac >= float(min_non_nan_frac)) & (var > 0.0)
+    # -----------------------------
+    # 2) usable mask (two-tier presence floor)
+    # -----------------------------
+    min_non_nan_dense = 0.01
+    min_non_nan_sparse = 0.001
+
+    name_arr = np.asarray(cols, dtype=object)
+    sparse_ok = np.fromiter((_is_sparse_ok_name(c) for c in name_arr), dtype=bool, count=len(cols))
+    usable = ((nn_frac >= float(min_non_nan_dense)) | (sparse_ok & (nn_frac >= float(min_non_nan_sparse)))) & (var > 0.0)
 
     # always keep must_keep
     if mk_in:
@@ -3768,7 +3818,9 @@ def select_features_auto(
         keep_order = list(dict.fromkeys(mk_in))
         return keep_order, pd.DataFrame({"selected": True}, index=pd.Index(keep_order, name="feature"))
 
-    # 2) cheap univariate screen (corr proxy)
+    # -----------------------------
+    # 3) cheap univariate screen (corr proxy)
+    # -----------------------------
     y_f = y_arr.astype(np.float32)
     y_c = y_f - y_f.mean()
 
@@ -3797,15 +3849,58 @@ def select_features_auto(
 
     # keep ~3x final budget for interactions
     pre_budget = int(min(len(usable_idx), max(max_pre * 3, len(mk_in) + 50)))
-    top_idx_local = np.argpartition(-score_uni, kth=pre_budget - 1)[:pre_budget]
-    cand_idx = usable_idx[top_idx_local]
 
-    # 3) cheap correlation pruning
+    # -----------------------------
+    # 3b) NEW: family-aware reserve so sparse "signal #1" families survive preselect
+    # -----------------------------
+    reserve_per_family = 12
+    max_families = 50
+
+    rank_local = np.argsort(-score_uni)  # indices into usable_idx (desc)
+    usable_ranked_cols = usable_idx[rank_local]                 # column indices in X_mat
+    usable_ranked_names = [cols[j] for j in usable_ranked_cols] # names
+
+    family_counts = {}
+    reserved = []
+    for j_idx, fname in zip(usable_ranked_cols, usable_ranked_names):
+        fam = _feat_family(fname)
+        if len(family_counts) >= max_families and fam not in family_counts:
+            continue
+        c = family_counts.get(fam, 0)
+        if c < reserve_per_family:
+            reserved.append(int(j_idx))
+            family_counts[fam] = c + 1
+
+    reserved = np.array(reserved, dtype=int)
+
+    need = max(0, pre_budget - reserved.size)
+    if need > 0:
+        top_global = usable_ranked_cols[:need]
+        cand_idx = np.unique(np.concatenate([reserved, top_global])).astype(int)
+    else:
+        cand_idx = np.unique(reserved).astype(int)
+
+    # order candidates by uni score
+    # (build local mapping from col->score_uni)
+    idx_to_local = {int(col_j): int(loc_j) for loc_j, col_j in enumerate(usable_idx)}
+    cand_scores = np.array([score_uni[idx_to_local[int(j)]] for j in cand_idx], dtype=np.float32)
+    order = cand_idx[np.argsort(-cand_scores)]
+
+    # -----------------------------
+    # 4) cheap correlation pruning (less destructive within signal families)
+    # -----------------------------
+    corr_thr_global = float(corr_global if corr_global is not None else 0.92)
+    corr_thr_signal = 0.975
+
+    def _corr_thr_for_pair(a: str, b: str) -> float:
+        fa = _feat_family(a)
+        fb = _feat_family(b)
+        if fa == fb and fa in {"SharpMove_", "OddsMove_", "Hybrid_", "Steam_", "Resistance_"}:
+            return corr_thr_signal
+        return corr_thr_global
+
     keep = [cols.index(m) for m in mk_in if m in cols]
     kept_set = set(keep)
-
-    order = cand_idx[np.argsort(-score_uni[top_idx_local])]
-    corr_thr = float(corr_global if corr_global is not None else 0.92)
 
     z_cache = {}
 
@@ -3819,12 +3914,13 @@ def select_features_auto(
         return z.astype(np.float32, copy=False)
 
     for j in order:
+        j = int(j)
         if j in kept_set:
             continue
         if len(keep) >= pre_budget:
             break
 
-        zj = _std_col(int(j))
+        zj = _std_col(j)
         if zj is None:
             continue
 
@@ -3839,13 +3935,14 @@ def select_features_auto(
                 if len(z_cache) < 128:
                     z_cache[kidx] = zk
             c = float(np.mean(zj * zk))
-            if np.isfinite(c) and abs(c) >= corr_thr:
+            thr = _corr_thr_for_pair(cols[j], cols[int(kidx)])
+            if np.isfinite(c) and abs(c) >= thr:
                 ok = False
                 break
 
         if ok:
-            keep.append(int(j))
-            kept_set.add(int(j))
+            keep.append(j)
+            kept_set.add(j)
 
     keep_order = list(dict.fromkeys([cols[i] for i in keep]))
 
@@ -3860,7 +3957,9 @@ def select_features_auto(
 
     flip_map = {}
 
-    # 4) forward-select on reduced set
+    # -----------------------------
+    # 5) forward-select on reduced set
+    # -----------------------------
     if use_auc_auto and keep_order:
         accepted_feats, best_res, state = _auto_select_k_by_auc(
             model_proto, X_df_train, y_arr, folds, keep_order,
@@ -3896,7 +3995,9 @@ def select_features_auto(
     else:
         feature_cols = keep_order
 
-    # 5) summary
+    # -----------------------------
+    # 6) summary
+    # -----------------------------
     flipped = np.fromiter(
         (bool(flip_map.get(f, {}).get("flipped", False)) for f in feature_cols),
         dtype=bool,
@@ -3917,6 +4018,7 @@ def select_features_auto(
         log_func(f"[AUTO-FEAT] final selected: {len(feature_cols)} feats (from {X_df_train.shape[1]})")
 
     return feature_cols, summary
+
 
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
