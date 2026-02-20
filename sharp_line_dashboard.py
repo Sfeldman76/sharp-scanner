@@ -3427,7 +3427,7 @@ def _auto_select_k_by_auc(
                     d_tr,
                     num_boost_round=int(xgb_num_round),
                     evals=[(d_va, "val")],
-                    early_stopping_rounds=(int(early_stop_rounds) if early_stop_rounds is not None else None),
+                    early_stopping_rounds=None,
                     verbose_eval=False,
                 )
                 if hasattr(booster, "best_iteration") and booster.best_iteration is not None:
@@ -3481,7 +3481,7 @@ def _auto_select_k_by_auc(
                     d_tr,
                     num_boost_round=int(xgb_num_round),
                     evals=[(d_va, "val")],
-                    early_stopping_rounds=(int(early_stop_rounds) if early_stop_rounds is not None else None),
+                    early_stopping_rounds=None,
                     verbose_eval=False,
                 )
                 if hasattr(booster, "best_iteration") and booster.best_iteration is not None:
@@ -3535,7 +3535,7 @@ def _auto_select_k_by_auc(
 
     # baseline on seed
     if k > 0:
-        best_res = _cv_eval_full_metrics(X_work[:, :k], folds_full, early_stop_rounds=25)
+        best_res = _cv_eval_full_metrics(X_work[:, :k], folds_full, early_stop_rounds=500)
     else:
         best_res = None
 
@@ -3601,7 +3601,7 @@ def _auto_select_k_by_auc(
                 res_q = _cv_eval_auc_only(
                     X_work[:, :k+1], folds_quick,
                     abort_best_auc=(best_val if np.isfinite(best_val) else None),
-                    early_stop_rounds=15,
+                    early_stop_rounds=500,
                 )
                 evals_done += 1
                 m_q = float(res_q.get("auc", np.nan))
@@ -3613,7 +3613,7 @@ def _auto_select_k_by_auc(
             res_norm_auc = _cv_eval_auc_only(
                 X_work[:, :k+1], folds_full,
                 abort_best_auc=(best_val if np.isfinite(best_val) else None),
-                early_stop_rounds=25,
+                early_stop_rounds=500,
             )
             evals_done += 1
             m_norm = float(res_norm_auc.get("auc", np.nan))
@@ -3649,7 +3649,7 @@ def _auto_select_k_by_auc(
                         res_fq = _cv_eval_auc_only(
                             X_work[:, :k+1], folds_quick,
                             abort_best_auc=None,
-                            early_stop_rounds=15,
+                            early_stop_rounds=500,
                         )
                         evals_done += 1
                         mfq = float(res_fq.get("auc", np.nan))
@@ -3659,7 +3659,7 @@ def _auto_select_k_by_auc(
                         res_flip_auc = _cv_eval_auc_only(
                             X_work[:, :k+1], folds_full,
                             abort_best_auc=None,
-                            early_stop_rounds=25,
+                            early_stop_rounds=500,
                         )
                         evals_done += 1
                         m_flip = float(res_flip_auc.get("auc", np.nan))
@@ -3677,7 +3677,7 @@ def _auto_select_k_by_auc(
                 if best_trial_flip:
                     _apply_flip_inplace(col, best_trial_flip_mode)
 
-                res_try = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=25)
+                res_try = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=500)
                 evals_done += 1
                 col[:] = orig
             else:
@@ -3688,7 +3688,7 @@ def _auto_select_k_by_auc(
     
         else:
             # ---- SCORE MODE: full metrics directly, BUT allow flip trial if close ----
-            res_try = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=25)
+            res_try = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=500)
             evals_done += 1
             m_norm = float(res_try.get("score", np.nan))
         
@@ -3710,13 +3710,13 @@ def _auto_select_k_by_auc(
                         # Optional quick pre-check on quick folds (keeps it fast)
                         ok_to_full_flip = True
                         if quick_screen and len(folds_quick) < len(folds_full):
-                            res_fq = _cv_eval_full_metrics(X_work[:, :k+1], folds_quick, early_stop_rounds=15)
+                            res_fq = _cv_eval_full_metrics(X_work[:, :k+1], folds_quick, early_stop_rounds=500)
                             evals_done += 1
                             m_fq = float(res_fq.get("score", np.nan))
                             ok_to_full_flip = np.isfinite(m_fq) and (m_fq >= m_norm + float(flip_gain_min))
         
                         if ok_to_full_flip:
-                            res_flip_full = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=25)
+                            res_flip_full = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=500)
                             evals_done += 1
                             m_flip = float(res_flip_full.get("score", np.nan))
         
