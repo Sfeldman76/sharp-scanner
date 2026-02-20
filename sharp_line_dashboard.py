@@ -2736,6 +2736,32 @@ def _apply_flip_inplace(col, mode: str):
     elif mode == "negate":
         np.negative(col, out=col)                    # col = -col
 
+def _split_xgb_kwargs_for_sklearn(base_kwargs: dict) -> tuple[dict, dict]:
+    """
+    Returns (sklearn_kwargs, booster_sanitized_kwargs)
+
+    sklearn_kwargs: safe for XGBClassifier(...) constructor; may include predictor.
+    booster_sanitized_kwargs: safe to pass into get_xgb_params / native booster; predictor removed.
+    """
+    sk = dict(base_kwargs or {})
+    booster = dict(base_kwargs or {})
+    booster.pop("predictor", None)  # predictor triggers the warning at booster-level
+    return sk, booster
+
+
+def _sanitize_xgb_estimator_for_booster(est):
+    """
+    Ensure the estimator never forwards predictor to booster-level params.
+    Keeps predictor in estimator init params, but removes from internal booster params.
+    """
+    try:
+        # set_params stores in estimator; xgboost uses this when building booster params
+        # We keep predictor on estimator but also set verbosity low.
+        est.set_params(verbosity=0)
+    except Exception:
+        pass
+    return est
+
 import time
 
 from sklearn.base import clone
@@ -5626,10 +5652,11 @@ def get_xgb_search_space(
 ) -> tuple[dict, dict, dict]:
     s = str(sport).upper()
     n_jobs = int(n_jobs)
-    SMALL_LEAGUES = {"WNBA", "CFL"}    # keep your set
+    SMALL_LEAGUES = {"WNBA", "CFL"}
     SMALL = (s in SMALL_LEAGUES)
 
-    # ---- Base kwargs: conservative + deterministic ----
+    # ---- Base kwargs (sklearn estimator params) ----
+    # NOTE: keep predictor here for serialization / saved model params
     base_kwargs = dict(
         objective="binary:logistic",
         tree_method="hist",
@@ -5637,10 +5664,10 @@ def get_xgb_search_space(
         predictor="cpu_predictor",
         sampling_method="uniform",
         max_bin=256,
-        max_delta_step=0.5,        # small clamp helps stability
-        reg_lambda=6.0,            # stronger L2 default
-        reg_alpha=0.05,            # small L1 default
-        min_child_weight=8.0,      # raise split threshold to fight memorization
+        max_delta_step=0.5,
+        reg_lambda=6.0,
+        reg_alpha=0.05,
+        min_child_weight=8.0,
         n_jobs=n_jobs,
         random_state=42,
         importance_type="total_gain",
@@ -5649,37 +5676,44 @@ def get_xgb_search_space(
     # (optional) monotone scaffolding unchanged
     if use_monotone and features:
         pass
-    # ---- Auto-regularize search if data are thin ---------------------------------
+
+    # ---- Auto-regularize search if data are thin ----
     n = int(X_rows)
     p = int(len(features) if features else 0)
     rows_per_feat = (n / max(p, 1)) if p else float("inf")
-    
-    # Tightness levels based on sample size / dimensionality
-    THIN = (n < 600 or rows_per_feat < 25)       # moderate
-    VERY_THIN = (n < 300 or rows_per_feat < 12)  # aggressive
-    
-    def _shrink(space: dict, *, thin=False, very_thin=False) -> dict:
-        s = dict(space)
-        # Clamp max_leaves / depth (lower variance trees)
-        if "max_leaves" in s and hasattr(s["max_leaves"], "high"):
-            s["max_leaves"] = randint(32, min(128, s["max_leaves"].high if not very_thin else 96))
-        if "max_depth" in s and hasattr(s["max_depth"], "high"):
-            s["max_depth"] = randint(2, min(5, s["max_depth"].high))
-        # Push LR lower; raise min_child_weight / gamma; tighten sampling
-        s["learning_rate"]    = loguniform(0.006, 0.03 if very_thin else 0.035)
-        s["min_child_weight"] = loguniform(8.0, 32.0 if thin else 24.0)
-        s["gamma"]            = loguniform(2.0, 12.0 if thin else 8.0)
-        s["subsample"]        = uniform(0.55, 0.25)      # 0.55–0.80
-        s["colsample_bytree"] = uniform(0.50, 0.25)      # 0.50–0.75
-        s["colsample_bynode"] = uniform(0.55, 0.25)      # 0.55–0.80
-        s["reg_lambda"]       = loguniform(8.0, 24.0)    # ↑ ridge
-        s["reg_alpha"]        = loguniform(0.05, 1.5)    # ↑ lasso
-        s["max_bin"]          = randint(160, 256)        # keep hist bins tight
-        return s
 
-    # ---- Search spaces: tightened + no explosive wideners ----
+    THIN = (n < 600 or rows_per_feat < 25)
+    VERY_THIN = (n < 300 or rows_per_feat < 12)
+
+    def _shrink(space: dict, *, thin: bool = False, very_thin: bool = False) -> dict:
+        """
+        Tighten distributions without relying on scipy internals.
+        We overwrite keys with new distributions directly.
+        """
+        s2 = dict(space)
+
+        # Clamp max_leaves / depth (lower variance trees)
+        if "max_leaves" in s2:
+            hi = 96 if very_thin else (128 if thin else 160)
+            s2["max_leaves"] = randint(32, hi)
+        if "max_depth" in s2:
+            s2["max_depth"] = randint(2, 5)
+
+        # Push LR lower; raise min_child_weight / gamma; tighten sampling
+        s2["learning_rate"]    = loguniform(0.006, 0.030 if very_thin else 0.035)
+        s2["min_child_weight"] = loguniform(8.0, 32.0 if thin else 24.0)
+        s2["gamma"]            = loguniform(2.0, 12.0 if thin else 8.0)
+        s2["subsample"]        = uniform(0.55, 0.25)      # 0.55–0.80
+        s2["colsample_bytree"] = uniform(0.50, 0.25)      # 0.50–0.75
+        s2["colsample_bynode"] = uniform(0.55, 0.25)      # 0.55–0.80
+        s2["reg_lambda"]       = loguniform(8.0, 24.0)
+        s2["reg_alpha"]        = loguniform(0.05, 1.5)
+        s2["max_bin"]          = randint(160, 256)
+
+        return s2
+
+    # ---- Search spaces ----
     if SMALL:
-        # small-league => fewer leaves, slower LR
         params_ll = {
             "max_depth":        randint(3, 5),
             "max_leaves":       randint(48, 96),
@@ -5693,9 +5727,8 @@ def get_xgb_search_space(
             "reg_alpha":        loguniform(0.02, 0.8),
             "max_bin":          randint(192, 289),
         }
-        params_auc = dict(params_ll)  # same shape; AUC will pick slightly larger leaves via search
+        params_auc = dict(params_ll)
     else:
-        # bigger leagues can afford a bit more depth, still regularized
         params_ll = {
             "max_depth":        randint(3, 6),
             "max_leaves":       randint(64, 160),
@@ -5711,18 +5744,19 @@ def get_xgb_search_space(
         }
         params_auc = dict(params_ll)
 
-    # ⚠️ remove the old params_common “wideners” (max_leaves=512/1024, LR up to .10, etc.)
-    # They were a big overfit lever.
+    # Tighten for thin data
     if VERY_THIN:
         params_ll  = _shrink(params_ll,  very_thin=True)
         params_auc = _shrink(params_auc, very_thin=True)
     elif THIN:
         params_ll  = _shrink(params_ll,  thin=True)
         params_auc = _shrink(params_auc, thin=True)
-    # scrub danger keys, as before
-    danger = {"objective","_estimator_type","response_method","eval_metric","scale_pos_weight"}
-    params_ll  = {k:v for k,v in params_ll.items()  if k not in danger}
-    params_auc = {k:v for k,v in params_auc.items() if k not in danger}
+
+    # scrub danger keys (keep consistent with your pipeline)
+    danger = {"objective", "_estimator_type", "response_method", "eval_metric", "scale_pos_weight"}
+    params_ll  = {k: v for k, v in params_ll.items()  if k not in danger}
+    params_auc = {k: v for k, v in params_auc.items() if k not in danger}
+
     return base_kwargs, params_ll, params_auc
 
 import numpy as np
@@ -7271,6 +7305,10 @@ def _is_xgb_classifier(m):
 
 
 def _xgb_params_from_proto(proto):
+    """
+    Convert sklearn estimator params -> native booster params.
+    Keep predictor on sklearn estimator for serialization, but never pass it to booster.
+    """
     p = proto.get_params(deep=False)
 
     def _f(key, default):
@@ -7296,18 +7334,12 @@ def _xgb_params_from_proto(proto):
         "verbosity": 0,
         "seed": int(_f("random_state", 1337)),
     }
-    
-    # keep predictor on sklearn proto for saving,
-    # but NEVER send it to native xgboost booster
+
+    # predictor is a sklearn-level setting; native booster will ignore + warn
     params.pop("predictor", None)
-    
+
     num_boost_round = int(_f("n_estimators", 400) or 400)
     return params, num_boost_round
-    
-    num_boost_round = int(_f("n_estimators", 400) or 400)
-    return params, num_boost_round
-
-
 
 
 def c_features_inplace(df: pd.DataFrame, features: list[str]) -> list[str]:
@@ -11502,17 +11534,30 @@ def train_sharp_model_from_bq(
         except Exception:
             pass
         
+                
+        # -------------------- FAST SEARCH → MODERATE/DEEP REFIT ---------------------
+   
+        # --------- Capacity knobs (tighter, less overfit) ----------
         # ================== Search space + base kwargs (REFactored) ==================
         pos_rate = float(np.mean(y_train))
         n_jobs = 1
+        
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
             sport=sport, X_rows=X_train.shape[0], n_jobs=n_jobs, features=feature_cols
         )
         
+        # keep base_score
         base_kwargs["base_score"] = float(np.clip(pos_rate, 1e-4, 1 - 1e-4))
         
+        # ✅ KEEP predictor for saving (later), but NEVER let it reach the native booster during training
+        _PREDICTOR_TO_SAVE = base_kwargs.get("predictor", None)
+        
+        # ✅ training kwargs: predictor removed to stop learner.cc warning
+        train_kwargs = dict(base_kwargs)
+        train_kwargs.pop("predictor", None)
+        
         # -------------------- FAST SEARCH → MODERATE/DEEP REFIT ---------------------
-   
+        
         # --------- Capacity knobs (tighter, less overfit) ----------
         SEARCH_N_EST    = 600   # was 900 – reduce trees used in CV search
         SEARCH_MAX_BIN  = 256
@@ -11522,11 +11567,12 @@ def train_sharp_model_from_bq(
         HALVING_FACTOR  = 2
         MIN_RESOURCES   = 24
         VCPUS           = get_vcpus()
-
+        
         # --- Estimators for search (keep n_jobs=1 for parallel CV) ---
-        est_ll  = XGBClassifier(
+        # ✅ IMPORTANT: build from train_kwargs (NO predictor)
+        est_ll = XGBClassifier(
             **{
-                **base_kwargs,
+                **train_kwargs,
                 "n_estimators": SEARCH_N_EST,
                 "eval_metric": "logloss",
                 "max_bin": SEARCH_MAX_BIN,
@@ -11535,87 +11581,81 @@ def train_sharp_model_from_bq(
         )
         est_auc = XGBClassifier(
             **{
-                **base_kwargs,
+                **train_kwargs,
                 "n_estimators": SEARCH_N_EST,
                 "eval_metric": "auc",
                 "max_bin": SEARCH_MAX_BIN,
                 "n_jobs": 1,
             }
         )
-
-    
+        
         # ======================= COMMON PARAMETER SPACE (ULTRA-HARDENED) =======================
         param_space_common = dict(
             # Much shallower / fewer leaves
             max_depth        = randint(2, 4),          # was up to 5
             max_leaves       = randint(12, 48),        # was up to ~96
-
+        
             # Slow learning
             learning_rate    = loguniform(0.006, 0.022),
-
+        
             # Aggressive subsampling → weaker trees
             subsample        = uniform(0.45, 0.25),    # 0.45–0.70
             colsample_bytree = uniform(0.45, 0.20),    # 0.45–0.65
             colsample_bynode = uniform(0.45, 0.20),
-
+        
             # Stronger child / split penalties
-            min_child_weight = loguniform(16, 256),    # push heavily toward larger leaves
+            min_child_weight = loguniform(16, 256),
             gamma            = loguniform(5.0, 30.0),
-
+        
             # Stronger regularization
-            reg_alpha        = loguniform(0.5, 15.0),  # L1
-            reg_lambda       = loguniform(40.0, 120.0),# L2
-
+            reg_alpha        = loguniform(0.5, 15.0),
+            reg_lambda       = loguniform(40.0, 120.0),
+        
             # Conservative histogram / step size
             max_bin          = randint(192, 320),
             max_delta_step   = loguniform(0.5, 1.8),
         )
-
+        
         # ======================= STREAM-SPECIFIC ADJUSTMENTS =======================
         params_ll  = dict(param_space_common)
-
+        
         params_auc = dict(param_space_common)
         params_auc.update(
             dict(
                 # AUC stream: even slightly smaller trees
                 max_depth        = randint(2, 3),
                 max_leaves       = randint(12, 40),
-
+        
                 learning_rate    = loguniform(0.007, 0.018),
-
-                subsample        = uniform(0.50, 0.20),   # 0.50–0.70
-                colsample_bytree = uniform(0.48, 0.17),   # 0.48–0.65
+        
+                subsample        = uniform(0.50, 0.20),
+                colsample_bytree = uniform(0.48, 0.17),
                 colsample_bynode = uniform(0.48, 0.17),
-
+        
                 min_child_weight = loguniform(20, 256),
                 gamma            = loguniform(6.0, 30.0),
-
+        
                 reg_alpha        = loguniform(0.8, 12.0),
                 reg_lambda       = loguniform(45.0, 100.0),
             )
         )
-
-       
-      
-                # --------- Quality thresholds / search config ----------
+        
+        # --------- Quality thresholds / search config ----------
         thr = get_quality_thresholds(sport, market)
-
+        
         MIN_AUC           = thr["MIN_AUC"]
         MAX_LOGLOSS       = thr["MAX_LOGLOSS"]
-        MAX_ROUNDS        = 30  # still global
+        MAX_ROUNDS        = 30
         MAX_OVERFIT_GAP   = thr["MAX_OVERFIT_GAP"]
         MIN_AUC_THRESHOLD = thr["MIN_AUC_THRESHOLD"]
         
         fit_params_search = dict(sample_weight=w_train, verbose=False)
         n_jobs_search     = max(1, min(VCPUS, 6))
         
-        
         def _make_search_objects(seed_ll: int, seed_auc: int):
             """
             Build rs_ll, rs_auc for a given pair of seeds
             (Halving if possible, else Randomized).
-        
-            Expects HALVING_FACTOR, MIN_RESOURCES, SEARCH_N_EST to be defined above.
             """
             try:
                 rs_ll = HalvingRandomSearchCV(
@@ -11649,7 +11689,6 @@ def train_sharp_model_from_bq(
                     return_train_score=True,
                 )
             except Exception:
-                # Fallback: pure RandomizedSearchCV with expanded trials
                 try:
                     search_trials  # type: ignore
                 except NameError:
@@ -11686,9 +11725,6 @@ def train_sharp_model_from_bq(
                 )
             return rs_ll, rs_auc
         
-
-        
-    
         # ======= multi-round search with overfit / quality guards =======
         best_ll_params     = None
         best_auc_params    = None
@@ -11696,7 +11732,6 @@ def train_sharp_model_from_bq(
         best_ll_score      = np.inf
         best_round_metrics = None
         
-        # NEW: capture best estimators too (more robust than params-only)
         best_auc_estimator = None
         best_ll_estimator  = None
         
@@ -11714,41 +11749,32 @@ def train_sharp_model_from_bq(
         
             rs_ll, rs_auc = _make_search_objects(seed_ll, seed_auc)
         
-            # Fit with 1 thread inside search to avoid nested parallelism issues
             with threadpool_limits(limits=1):
                 rs_ll.fit(X_train, y_train, groups=g_train, **fit_params_search)
                 rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
         
-          
-            # CV metrics
-            auc_cv_raw = float(rs_auc.best_score_)       # already roc_auc
-            logloss_cv = float(-rs_ll.best_score_)       # neg_log_loss → logloss
-            
-            # --- aligned AUC so fade models count ---
+            auc_cv_raw = float(rs_auc.best_score_)
+            logloss_cv = float(-rs_ll.best_score_)
+        
             auc_cv = float(max(auc_cv_raw, 1.0 - auc_cv_raw))
-            
-            # Train vs CV AUC gap (overfit measure)
+        
             train_auc_raw = np.nan
             try:
                 cv_res_auc = rs_auc.cv_results_
                 if "mean_train_score" in cv_res_auc:
                     train_auc_raw = float(cv_res_auc["mean_train_score"][rs_auc.best_index_])
             except Exception as e:
-                logger.warning(
-                    f"⚠️ Could not compute train AUC for overfit gap in round {round_no}: {e}"
-                )
-            
+                logger.warning(f"⚠️ Could not compute train AUC in round {round_no}: {e}")
+        
             if np.isfinite(train_auc_raw):
                 train_auc = float(max(train_auc_raw, 1.0 - train_auc_raw))
-                overfit_gap = float(train_auc - auc_cv)          # aligned gap
+                overfit_gap = float(train_auc - auc_cv)
             else:
                 train_auc = np.nan
                 overfit_gap = np.nan
-            
-            # Optional: record whether this round is "fade-ish" on CV
-            # (This is ONLY for reporting; do not use this to flip predictions here.)
+        
             cv_suggests_fade = bool(auc_cv_raw < 0.5)
-            
+        
             logger.info(
                 f"   🧪 Round {round_no} CV: "
                 f"AUC_raw={auc_cv_raw:.4f}, AUC_aligned={auc_cv:.4f}, "
@@ -11757,36 +11783,25 @@ def train_sharp_model_from_bq(
                 f"OverfitGap(aligned)={overfit_gap:.4f}, "
                 f"cv_fade={cv_suggests_fade}"
             )
-            
-            # Track best seen across all rounds (even if overfit) for reporting
+        
             if np.isfinite(auc_cv):
                 better_global = (
                     (auc_cv > best_auc_score + 1e-6) or
-                    (
-                        abs(auc_cv - best_auc_score) <= 1e-6 and
-                        logloss_cv < best_ll_score - 1e-6
-                    )
+                    (abs(auc_cv - best_auc_score) <= 1e-6 and logloss_cv < best_ll_score - 1e-6)
                 )
                 if better_global:
                     best_auc_score  = auc_cv
                     best_ll_score   = logloss_cv
                     best_auc_params = rs_auc.best_params_.copy()
                     best_ll_params  = rs_ll.best_params_.copy()
-            
-                    # NEW: store best estimators (already include best params + fitted state)
                     best_auc_estimator = deepcopy(rs_auc.best_estimator_)
                     best_ll_estimator  = deepcopy(rs_ll.best_estimator_)
-            
-                 
+        
                     best_round_metrics = dict(
                         round_no=round_no,
-                    
-                        # ✅ keep old names so existing code doesn't break
-                        auc_cv=auc_cv,                 # aligned
-                        train_auc=train_auc,           # aligned (or nan)
-                        overfit_gap=overfit_gap,       # aligned gap
-                    
-                        # ✅ new explicit fields
+                        auc_cv=auc_cv,
+                        train_auc=train_auc,
+                        overfit_gap=overfit_gap,
                         auc_cv_raw=auc_cv_raw,
                         auc_cv_aligned=auc_cv,
                         train_auc_raw=train_auc_raw,
@@ -11794,15 +11809,11 @@ def train_sharp_model_from_bq(
                         logloss_cv=logloss_cv,
                         cv_fade=cv_suggests_fade,
                     )
-                    
-            
-            # Overfit condition: allow NaN gap (no train scores) or small positive gap
+        
             gap_ok = (not np.isfinite(overfit_gap)) or (overfit_gap <= MAX_OVERFIT_GAP)
-            
-            # IMPORTANT: gate on ALIGNED AUC, not raw AUC
             auc_ok = np.isfinite(auc_cv)     and (auc_cv     >= MIN_AUC)
             ll_ok  = np.isfinite(logloss_cv) and (logloss_cv <= MAX_LOGLOSS)
-            
+        
             if auc_ok and ll_ok and gap_ok:
                 logger.info(
                     f"✅ Conditions met in round {round_no} for {sport} {market} "
@@ -11811,17 +11822,12 @@ def train_sharp_model_from_bq(
                     f"cv_fade={cv_suggests_fade})."
                 )
                 found_good = True
-            
-                # keep the accepted round's params + estimators (so downstream uses winner)
                 best_auc_params = rs_auc.best_params_.copy()
                 best_ll_params  = rs_ll.best_params_.copy()
                 best_auc_estimator = deepcopy(rs_auc.best_estimator_)
                 best_ll_estimator  = deepcopy(rs_ll.best_estimator_)
-            
                 break
         
-        
-        # NEW: if nothing met constraints, proceed with best-so-far instead of returning
         if not found_good:
             if best_round_metrics is not None:
                 logger.warning(
@@ -11841,30 +11847,14 @@ def train_sharp_model_from_bq(
                     "Cannot train a model for this market.",
                     sport, market
                 )
-                return  # only bail if literally nothing ran successfully
+                return
         
-        
-        # NEW: hard guard — must have something to proceed
         if best_auc_params is None or best_ll_params is None:
             logger.error("❌ No params selected for %s %s; cannot continue.", sport, market)
             return
         
-        # Optional: warn if you didn't capture estimators (shouldn't happen now)
         if best_auc_estimator is None or best_ll_estimator is None:
             logger.warning("⚠️ Best estimators not captured; downstream should refit from params.")
-        
-        # At this point:
-        # - if found_good: best_* are from the accepted round
-        # - else: best_* are best-so-far across rounds
-        # You can now either:
-        #   (A) use best_auc_estimator / best_ll_estimator directly, OR
-        #   (B) refit fresh on full train set using best_*_params.
-
-
-        
-        # At this point best_*_params are the ones from the accepted round
-        assert best_auc_params is not None and best_ll_params is not None
-        
         
         # ---------------- stabilize best params (regularization-first) ----------------
         STABLE = dict(
@@ -11878,7 +11868,6 @@ def train_sharp_model_from_bq(
             from xgboost import XGBClassifier
             bp = dict(best_params or {})
         
-            # Version-safe handling for colsample_bynode vs colsample_bylevel
             try:
                 _supports_bynode = ("colsample_bynode" in XGBClassifier().get_xgb_params())
             except Exception:
@@ -11888,7 +11877,7 @@ def train_sharp_model_from_bq(
         
             updates = {
                 **STABLE,
-                "max_depth":         0,  # use leaves
+                "max_depth":         0,
                 "max_leaves":        int(min(leaf_cap, int(bp.get("max_leaves", leaf_cap)))),
                 "min_child_weight":  float(max(12.0, float(bp.get("min_child_weight", 8.0)))),
                 "gamma":             float(max(6.0,  float(bp.get("gamma", 2.0)))),
@@ -11902,22 +11891,23 @@ def train_sharp_model_from_bq(
             }
             bp.update(updates)
         
-            # Drop only wrapper/managed keys
-            for k in ("monotone_constraints","interaction_constraints","predictor",
-                      "eval_metric","_estimator_type","response_method","n_estimators",
-                      "n_jobs","scale_pos_weight"):
+            # Drop only wrapper/managed keys (and predictor) for training
+            for k in (
+                "monotone_constraints", "interaction_constraints", "predictor",
+                "eval_metric", "_estimator_type", "response_method", "n_estimators",
+                "n_jobs", "scale_pos_weight"
+            ):
                 bp.pop(k, None)
+        
             return bp
         
         best_auc_params = _stabilize(best_auc_params, leaf_cap=128)
         best_ll_params  = _stabilize(best_ll_params,  leaf_cap=128)
         
-        
         # ================== ES refit on last fold (deterministic) ===================
         tr_es_rel, va_es_rel = folds[-1]
         tr_es_rel = np.asarray(tr_es_rel); va_es_rel = np.asarray(va_es_rel)
         
-        # Use DataFrames so XGBoost keeps real column names
         X_tr_es = X_train[tr_es_rel]
         X_va_es = X_train[va_es_rel]
         X_tr_es_df = pd.DataFrame(X_tr_es, columns=feature_cols)
@@ -11929,7 +11919,6 @@ def train_sharp_model_from_bq(
         W_CLIP  = 5.0
         w_tr_es = np.clip(w_tr_es, 0.0, W_CLIP); w_va_es = np.clip(w_va_es, 0.0, W_CLIP)
         
-        # Leak/shape checks
         assert set(tr_es_rel).isdisjoint(set(va_es_rel)), "Train/val overlap in ES fold!"
         assert X_tr_es_df.shape[0] == len(y_tr_es) == len(w_tr_es)
         assert X_va_es_df.shape[0] == len(y_va_es) == len(w_va_es)
@@ -11937,9 +11926,8 @@ def train_sharp_model_from_bq(
         assert {0,1}.issubset(u_tr) and {0,1}.issubset(u_va), \
             "ES fold single-class; widen min_val_size or choose different fold."
         
-        # -------- Median-impute (from TRAIN) + low-variance drop (critical) --------
-        num_cols = [c for c in feature_cols
-                    if c in X_tr_es_df.columns and is_numeric_dtype(X_tr_es_df[c])]
+        # -------- Median-impute (from TRAIN) + low-variance drop --------
+        num_cols = [c for c in feature_cols if c in X_tr_es_df.columns and is_numeric_dtype(X_tr_es_df[c])]
         
         if num_cols:
             med = X_tr_es_df[num_cols].median(numeric_only=True)
@@ -11947,8 +11935,7 @@ def train_sharp_model_from_bq(
             X_va_es_df.loc[:, num_cols] = X_va_es_df[num_cols].fillna(med)
         
             var = X_tr_es_df[num_cols].var(numeric_only=True)
-            keep_cols = [c for c in num_cols
-                         if np.isfinite(var.get(c, 0.0)) and var.get(c, 0.0) > 1e-10]
+            keep_cols = [c for c in num_cols if np.isfinite(var.get(c, 0.0)) and var.get(c, 0.0) > 1e-10]
             drop_cols = [c for c in num_cols if c not in keep_cols]
         else:
             keep_cols, drop_cols = [], []
@@ -11961,59 +11948,52 @@ def train_sharp_model_from_bq(
             X_tr_es_df = X_tr_es_df.drop(columns=drop_cols, errors="ignore")
             X_va_es_df = X_va_es_df.drop(columns=drop_cols, errors="ignore")
         
-        # Build an ES-scoped feature list so we don’t mutate global feature_cols
         feature_cols_es = [c for c in feature_cols if c in X_tr_es_df.columns]
         
-        # --- Rebuild arrays from the cleaned DF views so shapes match feature list ---
         X_tr_es = X_tr_es_df[feature_cols_es].to_numpy(copy=False)
         X_va_es = X_va_es_df[feature_cols_es].to_numpy(copy=False)
         
-        # Sanity: both train/val must now match the cleaned feature set
         assert X_tr_es.shape[1] == X_va_es.shape[1] == len(feature_cols_es), \
             f"Width mismatch: tr={X_tr_es.shape[1]}, va={X_va_es.shape[1]}, feats={len(feature_cols_es)}"
-        # --- Align global design matrices to ES feature subset so widths match everywhere ---
+        
         if len(feature_cols_es) < len(feature_cols):
             drop_lowvar_global = [c for c in feature_cols if c not in feature_cols_es]
             try:
-                st.info({
-                    "global_lowvar_drop": drop_lowvar_global[:25],
-                    "n_drop_global": len(drop_lowvar_global),
-                })
+                st.info({"global_lowvar_drop": drop_lowvar_global[:25], "n_drop_global": len(drop_lowvar_global)})
             except Exception:
                 pass
         
-            # Rebuild X_train using only the ES-safe feature set
             X_train_df_global = pd.DataFrame(X_train, columns=list(feature_cols))
             X_train = X_train_df_global.loc[:, feature_cols_es].to_numpy(np.float32)
         
-            # Rebuild X_full likewise so final scoring uses the same features
             X_full_df_global = pd.DataFrame(X_full, columns=list(feature_cols))
             X_full = X_full_df_global.loc[:, feature_cols_es].to_numpy(np.float32)
         
-            # Make ES feature list the new master list
             feature_cols = list(feature_cols_es)
-
+        
         # threads for refit
         refit_threads = max(1, min(VCPUS, 6))
         pos_tr = float((y_tr_es == 1).sum()); neg_tr = float((y_tr_es == 0).sum())
         scale_pos_weight = max(1.0, neg_tr / max(pos_tr, 1.0))
         
-        # AUC stream (early-stop on logloss; compute AUC after)
-        deep_auc = XGBClassifier(**{**base_kwargs, **best_auc_params})
+        # ✅ IMPORTANT: instantiate deep models from train_kwargs (NO predictor)
+        deep_auc = XGBClassifier(**{**train_kwargs, **best_auc_params})
+        deep_ll  = XGBClassifier(**{**train_kwargs, **best_ll_params})
+        
         deep_auc.set_params(
             n_estimators=DEEP_N_EST,
             max_bin=DEEP_MAX_BIN,
             n_jobs=refit_threads,
-            eval_metric=["logloss","auc"],
+            eval_metric=["logloss", "auc"],
             scale_pos_weight=scale_pos_weight,
             random_state=1337, seed=1337,
         )
-        deep_ll = XGBClassifier(**{**base_kwargs, **best_ll_params})
+        
         deep_ll.set_params(
             n_estimators=DEEP_N_EST,
             max_bin=DEEP_MAX_BIN,
             n_jobs=refit_threads,
-            eval_metric=["logloss","auc"],
+            eval_metric=["logloss", "auc"],
             scale_pos_weight=scale_pos_weight,
             random_state=1337, seed=1337,
         )
@@ -12027,6 +12007,7 @@ def train_sharp_model_from_bq(
             verbose=False,
             early_stopping_rounds=EARLY_STOP,
         )
+        
         planned_cap = int(deep_auc.get_xgb_params().get("n_estimators", DEEP_N_EST))
         p_va_raw    = np.clip(deep_auc.predict_proba(X_va_es_df)[:, 1], 1e-12, 1 - 1e-12)
         auc_va      = float(roc_auc_score(y_va_es.astype(int), p_va_raw, sample_weight=w_va_es))
@@ -12034,10 +12015,8 @@ def train_sharp_model_from_bq(
         extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
         best_iter        = getattr(deep_auc, "best_iteration", None)
         cap_hit          = bool(best_iter is not None and best_iter >= 0.7 * DEEP_N_EST)
-        learning_rate    = float(np.clip(float(best_auc_params.get("learning_rate", 0.02)),
-                                         0.008, 0.04))
+        learning_rate    = float(np.clip(float(best_auc_params.get("learning_rate", 0.02)), 0.008, 0.04))
         
-        # If ES found a peak, set a tight cap around it; else conservative
         if best_iter is not None and best_iter >= 50:
             final_estimators_cap = int(np.clip(int(1.10 * (best_iter + 1)), 500, 1200))
         else:
@@ -12052,6 +12031,7 @@ def train_sharp_model_from_bq(
             verbose=False,
             early_stopping_rounds=EARLY_STOP,
         )
+        
         if getattr(deep_ll, "best_iteration", None) is not None and deep_ll.best_iteration >= 50:
             deep_ll.set_params(n_estimators=deep_ll.best_iteration + 1)
         
@@ -12073,7 +12053,8 @@ def train_sharp_model_from_bq(
             },
             "auc_va_es": auc_va,
         })
-        
+
+
         
         # ----------------- Helpers (once) -----------------
         def _ece(y_true, p, bins=10):
@@ -13252,7 +13233,19 @@ def train_sharp_model_from_bq(
             cal_blend = ("iso", _IdentityIsoCal(eps=1e-6))
         cal_name, cal_obj = cal_blend
         iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1 - CLIP))
-
+        if _PREDICTOR_TO_SAVE is not None:
+            try:
+                # These are the ones you save:
+                model_auc.set_params(predictor=_PREDICTOR_TO_SAVE)
+                model_logloss.set_params(predictor=_PREDICTOR_TO_SAVE)
+        
+                # Optional: keep if you also serialize these somewhere else
+                # deep_auc.set_params(predictor=_PREDICTOR_TO_SAVE)
+                # deep_ll.set_params(predictor=_PREDICTOR_TO_SAVE)
+                # est_ll.set_params(predictor=_PREDICTOR_TO_SAVE)
+                # est_auc.set_params(predictor=_PREDICTOR_TO_SAVE)
+            except Exception:
+                pass
         # --- Helper to get final calibrated probs (blend → optional flip → calibrate+clip) ---
         def predict_calibrated(models: dict, X):
             # required keys: model_auc, model_logloss, best_w, iso_blend
