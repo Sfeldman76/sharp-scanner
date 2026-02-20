@@ -1,14 +1,25 @@
-# train_job.py
+
 
 # train_job.py
+
 import warnings
 
-warnings.filterwarnings(
-    "ignore",
-    category=UserWarning,
-    module=r"xgboost\.core",
-    message=r'(?s).*Parameters:\s*\{\s*"predictor"\s*\}\s*are not used\..*',
-)
+_orig_showwarning = warnings.showwarning
+
+def _showwarning(message, category, filename, lineno, file=None, line=None):
+    try:
+        msg = str(message)
+        if category is UserWarning and (
+            'Parameters: { "predictor" } are not used.' in msg
+            or "Parameters: { 'predictor' } are not used." in msg
+        ):
+            return  # swallow just this one
+    except Exception:
+        pass
+    return _orig_showwarning(message, category, filename, lineno, file=file, line=line)
+
+warnings.showwarning = _showwarning
+
 
 import os
 import sys
