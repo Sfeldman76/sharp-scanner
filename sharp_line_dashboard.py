@@ -75,6 +75,15 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
+
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module=r"xgboost\.core",
+    message=r'(?s).*Parameters:\s*\{\s*"predictor"\s*\}\s*are not used\..*',
+)
 # === Standard Imports ===
 import os
 import re
