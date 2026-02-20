@@ -1,9 +1,19 @@
 # train_job.py
+
+# train_job.py
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module=r"xgboost\.core",
+    message=r'(?s).*Parameters:\s*\{\s*"predictor"\s*\}\s*are not used\..*',
+)
+
 import os
 import sys
 import uuid
 import traceback
-import warnings
 import logging
 import threading
 
@@ -183,12 +193,7 @@ def start_heartbeat(pw, label, every_sec=45):
 
 
 def main():
-    warnings.filterwarnings(
-        "ignore",
-        message=r'.*Parameters:\s*\{\s*"predictor"\s*\}\s*are not used\..*',
-        category=UserWarning,
-        module=r"xgboost(\.|$)",
-    )
+
     run_id = os.environ.get("TRAIN_RUN_ID") or str(uuid.uuid4())[:8]
     sport = os.environ.get("SPORT", "NBA")
     market = os.environ.get("MARKET", "All")
