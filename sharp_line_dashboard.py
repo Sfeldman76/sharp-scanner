@@ -2204,13 +2204,13 @@ def holdout_by_percent_groups(
     SPORT_HOLDOUT_PCT = {
         "NFL": 0.10,
         "NCAAF": 0.10,
-        "NBA": 0.10,
+        "NBA": 0.15,
         "WNBA": 0.10,
         "NHL": 0.15,
         "MLB": 0.12,
         "MLS": 0.15,
         "CFL": 0.10,
-        "NCAAB": 0.10,
+        "NCAAB": 0.15,
         "DEFAULT": 0.15,
     }
 
@@ -3172,7 +3172,7 @@ def _auto_select_k_by_auc(
     min_k=None,
     max_k=None,
     patience=160,
-    min_improve=1e-6,
+    min_improve=1e-7,
     verbose=True,
     log_func=print,
     debug=True,
@@ -3816,7 +3816,7 @@ def select_features_auto(
     auc_min_k: int | None = None,
     auc_patience: int = 400,
     auc_min_improve: float = 1e-8,
-    accept_metric: str = "score",
+    accept_metric: str = "auc",
     auc_verbose: bool = True,
 
     baseline_feats: list[str] | None = None,
@@ -11472,7 +11472,7 @@ def train_sharp_model_from_bq(
             use_auc_auto=True,
             auc_patience=300,
             auc_min_improve=5e-7,          # <- key change
-            accept_metric="score",
+            accept_metric="auc",
             auc_verbose=True,
             log_func=log_func,
         
