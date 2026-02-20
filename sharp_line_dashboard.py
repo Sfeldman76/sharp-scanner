@@ -3481,35 +3481,46 @@ def _auto_select_k_by_auc(
         score = float(auc) - (0.15 * float(ll)) - (0.10 * float(br))
         return {"auc": float(auc), "logloss": float(ll), "brier": float(br), "score": float(score), "aborted": False}
 
+ 
     # selection state
     accepted = list(mk)
     accepted_set = set(accepted)
     flip_map = {}
-
+    
     # prealloc matrix
     X_work = np.empty((n, max_k), dtype=np.float32)
     k = 0
-
+    
     def _put_feat_into_col(feat: str, j: int):
         X_work[:, j] = X_all_mat[:, col_ix[feat]]
-
+    
     for f in accepted:
         _put_feat_into_col(f, k)
         k += 1
-
+    
+    # ---- NEW: log seeded set immediately ----
+    if verbose:
+        log_func(f"[AUTO-FEAT] seed accepted (k={k}): {accepted}")
+    
+    # compute baseline on seed
     if k > 0:
         best_res = _cv_eval_full_metrics(X_work[:, :k], folds_full, early_stop_rounds=25)
     else:
         best_res = None
-
+    
     best_val = _metric(best_res)
     best_ll  = float(best_res.get("logloss", np.nan)) if best_res is not None else float("nan")
     best_br  = float(best_res.get("brier", np.nan)) if best_res is not None else float("nan")
-
-    rejects_in_row = 0
-    if verbose:
-        log_func(f"[AUTO-FEAT] start scan: must_keep={len(mk)} target_seed={min_k} metric={accept_metric} quick_folds={len(folds_quick)}")
-
+    
+    if verbose and isinstance(best_res, dict):
+        # score-mode: show all metrics; auc-mode: still helpful
+        log_func(
+            f"[AUTO-FEAT] seed metrics: "
+            f"auc={best_res.get('auc', float('nan')):.6f} "
+            f"ll={best_res.get('logloss', float('nan')):.6f} "
+            f"brier={best_res.get('brier', float('nan')):.6f} "
+            f"score={best_res.get('score', float('nan')):.6f}"
+        )
     evals_done = 0
 
     for i, feat in enumerate(ordered):
@@ -3528,14 +3539,14 @@ def _auto_select_k_by_auc(
 
         # ---- NEW: k-adaptive thresholds (more tiny-lift accepts early)
         if k < max(12, min_k):
-            rej_margin = 0.00025
-            min_improve_eff = max(float(min_improve), 2.5e-6)
+            rej_margin = 0.000025
+            min_improve_eff = max(float(min_improve), 2.5e-7)
         elif k < 40:
-            rej_margin = 0.00015
+            rej_margin = 0.000015
             min_improve_eff = float(min_improve)
         else:
-            rej_margin = 0.00010
-            min_improve_eff = max(float(min_improve), 1.0e-6)
+            rej_margin = 0.000010
+            min_improve_eff = max(float(min_improve), 1.0e-7)
 
         quick_margin_auc = rej_margin
         flip_close_margin = rej_margin
@@ -3581,10 +3592,6 @@ def _auto_select_k_by_auc(
             res_norm_full = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=25)
             evals_done += 1
             m_norm = _metric(res_norm_full)
-
-        best_trial_flip = False
-        best_trial_flip_mode = None
-        best_trial_auc = float(m_norm) if np.isfinite(m_norm) else float("nan")
 
         # 3) flip test if close
         if allow_candidate_flip and accept_metric == "auc" and np.isfinite(m_norm):
@@ -3710,7 +3717,7 @@ def select_features_auto(
     corr_global: float = 0.97,
     max_feats_major: int = 220,
     max_feats_small: int = 160,
-    topk_per_fold: int = 120,
+    topk_per_fold: int = 100,
     min_presence: float = 0.80,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
@@ -3799,8 +3806,8 @@ def select_features_auto(
     # -----------------------------
     # 2) usable mask (two-tier presence floor)
     # -----------------------------
-    min_non_nan_dense = 0.01
-    min_non_nan_sparse = 0.0003
+    min_non_nan_dense = 0.001
+    min_non_nan_sparse = 0.00003
 
     name_arr = np.asarray(cols, dtype=object)
     sparse_ok = np.fromiter((_is_sparse_ok_name(c) for c in name_arr), dtype=bool, count=len(cols))
@@ -3853,8 +3860,8 @@ def select_features_auto(
     # -----------------------------
     # 3b) NEW: family-aware reserve so sparse "signal #1" families survive preselect
     # -----------------------------
-    reserve_per_family = 12
-    max_families = 50
+    reserve_per_family = 40
+    max_families = 100
 
     rank_local = np.argsort(-score_uni)  # indices into usable_idx (desc)
     usable_ranked_cols = usable_idx[rank_local]                 # column indices in X_mat
@@ -3979,13 +3986,13 @@ def select_features_auto(
             flips_after_selection=bool(final_orient),
             orient_features=True if final_orient else False,
             enable_feature_flips=True if final_orient else False,
-            max_feature_flips=10,
+            max_feature_flips=100,
             orient_passes=1,
 
             quick_screen=True,
             quick_folds=2,
             abort_margin_cv=0.0,
-            force_full_scan=False,
+            force_full_scan=True,
             time_budget_s=1e18,
             resume_state=None,
             max_total_evals=None,
