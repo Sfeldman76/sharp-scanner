@@ -14506,6 +14506,15 @@ import pickle
 import logging
 import pandas as pd
 from google.cloud import storage
+import numpy as np
+
+class _IdentityIsoCal:
+    """Identity calibrator used for portability when pickles reference model._IdentityIsoCal."""
+    def __init__(self, eps=1e-6):
+        self.eps = eps
+    def transform(self, p):
+        p = np.asarray(p, float).reshape(-1)
+        return np.clip(p, self.eps, 1.0 - self.eps)
 
 class _PickleShim:
     """Fallback for custom classes pickled from other modules."""
@@ -14514,6 +14523,9 @@ class _PickleShim:
     def __setstate__(self, state):
         if isinstance(state, dict):
             self.__dict__.update(state)
+    # ✅ critical: act like identity calibrator if used that way
+    def transform(self, p):
+        return p
 
 class _RenamingUnpickler(pickle.Unpickler):
     def find_class(self, module, name):
@@ -14601,6 +14613,16 @@ def _normalize_bundle(data: dict):
 from google.api_core.exceptions import NotFound, Forbidden, PermissionDenied
 import logging
 from google.cloud import storage
+import gzip, bz2
+
+def _maybe_decompress(name: str, b: bytes) -> bytes:
+    nl = (name or "").lower()
+    if nl.endswith(".gz"):
+        return gzip.decompress(b)
+    if nl.endswith(".bz2"):
+        return bz2.decompress(b)
+    return b
+
 
 def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     sport_l  = str(sport).lower().strip()
@@ -14655,14 +14677,15 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
 
             # 2) Unpickle
             try:
-                raw = _safe_loads(content)
+                raw = _safe_loads(_maybe_decompress(fname, content))
+            
             except Exception as e:
                 last_unpickle_err = e
-                logging.warning(
-                    f"⚠️ Unpickle failed: {fname} ({type(e).__name__}: {e})"
-                )
-                # Try next candidate (maybe different artifact version loads)
+                msg = f"⚠️ Unpickle failed: {fname} ({type(e).__name__}: {e})"
+                logging.warning(msg)
+                st.warning(msg)
                 continue
+                
 
             # 3) Validate payload shape
             if not isinstance(raw, dict):
