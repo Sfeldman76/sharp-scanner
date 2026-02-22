@@ -10788,6 +10788,8 @@ def detect_cross_market_sharp_support(
 import io, gzip, bz2, logging, pickle, re
 from google.cloud import storage
 
+from google.api_core.exceptions import NotFound, Forbidden, PermissionDenied
+
 import numpy as np
 import pandas as pd
 
@@ -10812,6 +10814,9 @@ class _IsoWrapperShim:
         self.calibrator = calibrator
 
     def predict_proba(self, X):
+        if self.model is None:
+            raise RuntimeError("IsoWrapperShim loaded but model is None")
+
         # base proba
         if hasattr(self.model, "predict_proba"):
             p = self.model.predict_proba(X)
@@ -10829,32 +10834,56 @@ class _IsoWrapperShim:
         return np.column_stack([1 - p1, p1])
 
 
+class _IdentityIsoCal:
+    """Identity calibrator used as a safe fallback."""
+    def __init__(self, eps=1e-6):
+        self.eps = eps
+
+    def transform(self, p):
+        return p
+
+
 class _PickleShim:
     """
-    Generic shim for custom classes (e.g. _CalAdapter) that may not exist
-    in the current runtime. We only need the restored attributes.
+    Safe placeholder for legacy wrapper classes.
+    Must NOT crash just by existing; should only error if used like a real model.
     """
     def __init__(self, *args, **kwargs):
         pass
 
-    def __setstate__(self, state):
-        if isinstance(state, dict):
-            self.__dict__.update(state)
+    def transform(self, p):
+        # behave like identity calibrator if used in that context
+        return p
+
+    def predict_proba(self, X):
+        raise RuntimeError(
+            "Loaded a shim class during unpickle; original wrapper class not available in this runtime."
+        )
 
 
 class _RenamingUnpickler(pickle.Unpickler):
+    """
+    Remaps module/class names embedded in old pickles to shims or stable local classes.
+    """
     def find_class(self, module, name):
-        # Old IsoWrapper -> shim
+        # 1) Any IsoWrapper name -> shim (some pickles store only name)
         if name == "IsoWrapper":
             return _IsoWrapperShim
 
-        # Backend/UI wrapper classes that break portability
+        # 2) Explicit remaps for known moved/non-portable classes
+        #    - _CalAdapter was defined in different modules across refactors
+        #    - _IdentityIsoCal sometimes got pickled from module "model"
         if (module, name) in {
             ("sharp_line_dashboard", "_CalAdapter"),
             ("utils", "_CalAdapter"),
             ("sharp_line_dashboard", "IsoWrapper"),
             ("utils", "IsoWrapper"),
+
+            # ✅ H2H portability fix:
+            ("model", "_IdentityIsoCal"),
         }:
+            if (module, name) == ("model", "_IdentityIsoCal"):
+                return _IdentityIsoCal
             return _PickleShim
 
         return super().find_class(module, name)
@@ -10916,95 +10945,182 @@ def load_model_from_gcs(
       - single-model bundles: model + iso_blend (+ optional feature_list)
       - timing bundles: model + feature_list
       - legacy IsoWrapper + legacy wrapper classes
+
+    Also supports H2H naming aliases and basic folder prefixes.
     """
     client = storage.Client(project=project) if project else storage.Client()
     bucket = client.bucket(bucket_name)
 
-    sport_l, market_l = _slug(sport), _slug(market)
-    base_prefix = f"sharp_win_model_{sport_l}_{market_l}"
+    sport_l = _slug(sport)
+    market_l = _slug(market)
 
-    if use_latest:
-        blobs = list(bucket.list_blobs(prefix=base_prefix))
-        if not blobs:
-            logging.warning(f"⚠️ No artifacts with prefix {base_prefix} in gs://{bucket_name}")
-            return None
-        blob = sorted(blobs, key=lambda b: b.updated or b.time_created)[-1]
+    # --- Market aliasing (fixes "h2h" vs "moneyline"/"ml") ---
+    if market_l in {"h2h", "moneyline", "ml", "headtohead"}:
+        market_candidates = ["h2h", "moneyline", "ml", "headtohead"]
     else:
-        blob = bucket.blob(f"{base_prefix}.pkl")
+        market_candidates = [market_l]
 
-    # ---- download ----
-    try:
-        content = blob.download_as_bytes()
-    except Exception as e:
-        logging.warning(f"⚠️ GCS download failed: gs://{bucket_name}/{blob.name} ({type(e).__name__}: {e})")
-        return None
+    # --- Folder prefixes (in case you saved under models/) ---
+    prefixes = ["", "models/"]
 
-    # ---- unpickle ----
-    try:
-        payload = _safe_loads(_maybe_decompress(blob.name, content))
-        logging.info(f"✅ Loaded artifact: gs://{bucket_name}/{blob.name}")
-    except Exception as e:
-        logging.warning(f"⚠️ Unpickle failed: {blob.name} ({type(e).__name__}: {e})")
-        return None
+    last_download_err = None
+    last_unpickle_err = None
 
-    if not isinstance(payload, dict):
-        logging.error(f"Unexpected payload type in {blob.name}: {type(payload)}")
-        return None
+    # Try candidates until one loads
+    for m in market_candidates:
+        base_name = f"sharp_win_model_{sport_l}_{m}"
 
-    # ---------------------------
-    # Normalize formats
-    # ---------------------------
+        # Optional "latest" behavior: find the newest blob that starts with base_name
+        if use_latest:
+            # we still try each prefix, and choose newest within that prefix+base
+            chosen_blob = None
+            for pref in prefixes:
+                pref_base = f"{pref}{base_name}"
+                blobs = list(bucket.list_blobs(prefix=pref_base))
+                if not blobs:
+                    continue
+                newest = sorted(blobs, key=lambda b: b.updated or b.time_created)[-1]
+                if (chosen_blob is None) or ((newest.updated or newest.time_created) > (chosen_blob.updated or chosen_blob.time_created)):
+                    chosen_blob = newest
 
-    # 1) Timing model bundle (explicit)
-    if ("model" in payload) and ("feature_list" in payload):
+            if chosen_blob is None:
+                continue
+
+            blob = chosen_blob
+
+        else:
+            # Default: exact name with prefixes
+            blob = None
+            for pref in prefixes:
+                candidate = bucket.blob(f"{pref}{base_name}.pkl")
+                # We can just attempt download; NotFound will tell us quickly.
+                blob = candidate
+                try:
+                    content = blob.download_as_bytes()
+                    break  # found one that downloads
+                except NotFound as e:
+                    last_download_err = e
+                    content = None
+                    blob = None
+                    continue
+                except (Forbidden, PermissionDenied) as e:
+                    logging.warning(
+                        f"⚠️ GCS permission error: gs://{bucket_name}/{candidate.name} "
+                        f"({type(e).__name__}: {e})"
+                    )
+                    return None
+                except Exception as e:
+                    last_download_err = e
+                    logging.warning(
+                        f"⚠️ GCS download failed: gs://{bucket_name}/{candidate.name} "
+                        f"({type(e).__name__}: {e})"
+                    )
+                    content = None
+                    blob = None
+                    continue
+
+            if blob is None or content is None:
+                continue  # try next market alias
+
+        # If use_latest=True, we haven't downloaded yet
+        if use_latest:
+            try:
+                content = blob.download_as_bytes()
+            except NotFound as e:
+                last_download_err = e
+                continue
+            except (Forbidden, PermissionDenied) as e:
+                logging.warning(
+                    f"⚠️ GCS permission error: gs://{bucket_name}/{blob.name} "
+                    f"({type(e).__name__}: {e})"
+                )
+                return None
+            except Exception as e:
+                last_download_err = e
+                logging.warning(
+                    f"⚠️ GCS download failed: gs://{bucket_name}/{blob.name} "
+                    f"({type(e).__name__}: {e})"
+                )
+                continue
+
+        # ---- unpickle ----
+        try:
+            payload = _safe_loads(_maybe_decompress(blob.name, content))
+            logging.info(f"✅ Loaded artifact: gs://{bucket_name}/{blob.name}")
+        except Exception as e:
+            last_unpickle_err = e
+            logging.warning(f"⚠️ Unpickle failed: {blob.name} ({type(e).__name__}: {e})")
+            continue
+
+        if not isinstance(payload, dict):
+            logging.error(f"Unexpected payload type in {blob.name}: {type(payload)}")
+            continue
+
+        # ---------------------------
+        # Normalize formats
+        # ---------------------------
+
+        # 1) Timing model bundle (explicit)
+        if ("model" in payload) and ("feature_list" in payload):
+            return {
+                "model": payload.get("model"),
+                "feature_list": payload.get("feature_list") or [],
+                "sport": payload.get("sport") or sport_l,
+                "market": payload.get("market") or m,
+            }
+
+        # 2) Ensemble bundle (your main path)
+        model_logloss = payload.get("model_logloss")
+        model_auc     = payload.get("model_auc")
+
+        # 3) Single-model bundle
+        single_model = payload.get("model") if (model_logloss is None and model_auc is None) else None
+
+        iso_blend = (
+            payload.get("iso_blend")
+            or (payload.get("calibrator", {}) or {}).get("iso_blend")
+            or (payload.get("calibrator", {}) or {}).get("iso")
+        )
+
+        flip_flag = bool(
+            payload.get("flip_flag", False)
+            or payload.get("global_flip", False)
+            or (payload.get("polarity", +1) == -1)
+        )
+
+        best_w = float(payload.get("best_w", 1.0))
+        feature_cols = payload.get("feature_cols") or payload.get("feature_list") or []
+
         return {
-            "model": payload.get("model"),
-            "feature_list": payload.get("feature_list") or [],
+            "model_logloss": model_logloss,
+            "model_auc": model_auc,
+            "single_model": single_model,
+            "best_w": best_w,
+            "feature_cols": feature_cols,
+            "calibrator": {"iso_blend": iso_blend},
+            "flip_flag": flip_flag,
+            "iso_blend": iso_blend,
+            "team_feature_map": _to_df(payload.get("team_feature_map")),
+            "book_reliability_map": _to_df(payload.get("book_reliability_map")),
             "sport": payload.get("sport") or sport_l,
-            "market": payload.get("market") or market_l,
+            "market": payload.get("market") or m,
         }
 
-    # 2) Ensemble bundle (your main path)
-    model_logloss = payload.get("model_logloss")
-    model_auc     = payload.get("model_auc")
+    # Nothing worked — give the best clue
+    if last_unpickle_err is not None:
+        logging.warning(
+            f"⚠️ No usable model found for sport={sport_l} market={market_l}. "
+            f"Last error UNPICKLE: {type(last_unpickle_err).__name__}: {last_unpickle_err}"
+        )
+    elif last_download_err is not None:
+        logging.warning(
+            f"⚠️ No model object found for sport={sport_l} market={market_l}. "
+            f"Tried market_candidates={market_candidates} prefixes={prefixes} in bucket={bucket_name}."
+        )
+    else:
+        logging.warning(f"⚠️ No model found for sport={sport_l} market={market_l}.")
 
-    # 3) Single-model bundle (backend sometimes saves {"model": estimator, ...})
-    single_model = payload.get("model") if (model_logloss is None and model_auc is None) else None
-
-    iso_blend = (
-        payload.get("iso_blend")
-        or (payload.get("calibrator", {}) or {}).get("iso_blend")
-        or (payload.get("calibrator", {}) or {}).get("iso")
-    )
-
-    flip_flag = bool(
-        payload.get("flip_flag", False)
-        or payload.get("global_flip", False)
-        or (payload.get("polarity", +1) == -1)
-    )
-
-    best_w = float(payload.get("best_w", 1.0))
-    feature_cols = payload.get("feature_cols") or payload.get("feature_list") or []
-
-    bundle = {
-        "model_logloss": model_logloss,
-        "model_auc": model_auc,
-        "single_model": single_model,            # ✅ present when it's a single-model artifact
-        "best_w": best_w,
-        "feature_cols": feature_cols,
-        "calibrator": {"iso_blend": iso_blend},
-        "flip_flag": flip_flag,
-        "iso_blend": iso_blend,
-        "team_feature_map": _to_df(payload.get("team_feature_map")),
-        "book_reliability_map": _to_df(payload.get("book_reliability_map")),
-        "sport": payload.get("sport") or sport_l,
-        "market": payload.get("market") or market_l,
-    }
-
-    return bundle
-
-
-
+    return None
 
 
 DEFAULT_MOVES_VIEW = "sharp_data.moves_with_features_merged"
