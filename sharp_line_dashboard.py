@@ -14523,8 +14523,18 @@ class _RenamingUnpickler(pickle.Unpickler):
             ("utils", "_CalAdapter"),
             ("sharp_line_dashboard", "IsoWrapper"),
             ("utils", "IsoWrapper"),
+
+            # ✅ ADD THIS:
+            ("model", "_IdentityIsoCal"),
         }:
+            # Prefer the real local class if defined; otherwise shim
+            if module == "model" and name == "_IdentityIsoCal":
+                try:
+                    return _IdentityIsoCal  # must exist in this module
+                except Exception:
+                    return _PickleShim
             return _PickleShim
+
         if name == "IsoWrapper":
             return _PickleShim
         return super().find_class(module, name)
@@ -14588,38 +14598,113 @@ def _normalize_bundle(data: dict):
         "book_reliability_map": _to_df(data.get("book_reliability_map")),
     }
 
+from google.api_core.exceptions import NotFound, Forbidden, PermissionDenied
+import logging
+from google.cloud import storage
+
 def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     sport_l  = str(sport).lower().strip()
     market_l = str(market).lower().strip()
-    fname    = f"sharp_win_model_{sport_l}_{market_l}.pkl"
+
+    # --- Market aliasing (most important for H2H) ---
+    if market_l in {"h2h", "moneyline", "ml", "headtohead"}:
+        market_candidates = ["h2h", "moneyline", "ml", "headtohead"]
+    else:
+        market_candidates = [market_l]
+
+    # --- Common object key patterns/prefixes ---
+    # Add more prefixes here if you store under folders like "artifacts/" etc.
+    prefixes = ["", "models/"]
 
     client = storage.Client()
-    blob   = client.bucket(bucket_name).blob(fname)
+    bucket = client.bucket(bucket_name)
 
-    try:
-        content = blob.download_as_bytes()
-    except Exception as e:
-        # show real reason in logs
-        logging.warning(f"⚠️ GCS download failed: gs://{bucket_name}/{fname} ({type(e).__name__}: {e})")
-        return None
+    last_download_err = None
+    last_unpickle_err = None
+    last_normalize_err = None
 
-    try:
-        raw = _safe_loads(content)
-    except Exception as e:
-        logging.warning(f"⚠️ Unpickle failed: {fname} ({type(e).__name__}: {e})")
-        return None
+    # Try all candidate filenames until one succeeds
+    for m in market_candidates:
+        for pref in prefixes:
+            fname = f"{pref}sharp_win_model_{sport_l}_{m}.pkl"
+            blob = bucket.blob(fname)
 
-    if not isinstance(raw, dict):
-        logging.warning(f"⚠️ Unexpected payload type in {fname}: {type(raw)}")
-        return None
+            # 1) Download
+            try:
+                content = blob.download_as_bytes()
+            except NotFound as e:
+                # This is common if the object name differs; keep trying others
+                last_download_err = e
+                logging.info(f"Model not found at gs://{bucket_name}/{fname} (NotFound)")
+                continue
+            except (Forbidden, PermissionDenied) as e:
+                # Permissions won't be fixed by trying other keys
+                logging.warning(
+                    f"⚠️ GCS permission error: gs://{bucket_name}/{fname} "
+                    f"({type(e).__name__}: {e})"
+                )
+                return None
+            except Exception as e:
+                last_download_err = e
+                logging.warning(
+                    f"⚠️ GCS download failed: gs://{bucket_name}/{fname} "
+                    f"({type(e).__name__}: {e})"
+                )
+                # Could be transient; try next candidate
+                continue
 
-    try:
-        bundle = _normalize_bundle(raw)
-        logging.info(f"✅ Loaded artifact: gs://{bucket_name}/{fname}")
-        return bundle
-    except Exception as e:
-        logging.warning(f"⚠️ Failed to normalize payload {fname}: ({type(e).__name__}: {e})")
-        return None
+            # 2) Unpickle
+            try:
+                raw = _safe_loads(content)
+            except Exception as e:
+                last_unpickle_err = e
+                logging.warning(
+                    f"⚠️ Unpickle failed: {fname} ({type(e).__name__}: {e})"
+                )
+                # Try next candidate (maybe different artifact version loads)
+                continue
+
+            # 3) Validate payload shape
+            if not isinstance(raw, dict):
+                logging.warning(f"⚠️ Unexpected payload type in {fname}: {type(raw)}")
+                # Try next candidate
+                continue
+
+            # 4) Normalize bundle
+            try:
+                bundle = _normalize_bundle(raw)
+                logging.info(f"✅ Loaded artifact: gs://{bucket_name}/{fname}")
+                return bundle
+            except Exception as e:
+                last_normalize_err = e
+                logging.warning(
+                    f"⚠️ Failed to normalize payload {fname}: ({type(e).__name__}: {e})"
+                )
+                continue
+
+    # If nothing worked, log the best clue we have
+    if last_unpickle_err is not None:
+        logging.warning(
+            f"⚠️ No usable model found for sport={sport_l} market={market_l}. "
+            f"Last error was UNPICKLE: {type(last_unpickle_err).__name__}: {last_unpickle_err}"
+        )
+    elif last_normalize_err is not None:
+        logging.warning(
+            f"⚠️ No usable model found for sport={sport_l} market={market_l}. "
+            f"Last error was NORMALIZE: {type(last_normalize_err).__name__}: {last_normalize_err}"
+        )
+    elif last_download_err is not None:
+        logging.warning(
+            f"⚠️ No model object found for sport={sport_l} market={market_l}. "
+            f"Tried keys for candidates={market_candidates} prefixes={prefixes} in bucket={bucket_name}."
+        )
+    else:
+        logging.warning(
+            f"⚠️ No model found for sport={sport_l} market={market_l} (no attempts succeeded)."
+        )
+
+    return None
+    
 
 def fetch_scored_picks_from_bigquery(limit=1000000):
     query = f"""
