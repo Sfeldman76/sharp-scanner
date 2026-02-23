@@ -3220,7 +3220,7 @@ def _auto_select_k_by_auc(
     max_k=None,
 
     # --- MORE SIGNAL defaults ---
-    patience=350,                 # was 160 (stops later → finds weaker features)
+    patience=400,                 # was 160 (stops later → finds weaker features)
     min_improve=0.0,              # was 1e-7 (allow tiny lifts; rely on LL/Brier + CV)
 
     verbose=True,
@@ -3237,7 +3237,7 @@ def _auto_select_k_by_auc(
     max_feature_flips=0,
     orient_passes=1,
 
-    force_full_scan=False,
+    force_full_scan=True, 
 
     fallback_to_all_available_features=True,
     require_present_in_X=True,
@@ -3257,7 +3257,7 @@ def _auto_select_k_by_auc(
     quick_accept: float = 0.0,    # kept for compat (unused)
     quick_drop: float = 0.0,      # kept for compat (unused)
 
-    abort_margin_cv: float = -1e-4,  # was 0.0 (more permissive; abort less)
+    abort_margin_cv: float = -1e-6,  # was 0.0 (more permissive; abort less)
 
     time_budget_s: float = 1e21,
     resume_state: dict | None = None,
@@ -3623,14 +3623,11 @@ def _auto_select_k_by_auc(
 
         # k-adaptive thresholds (MORE SIGNAL = more forgiving rej_margin)
         if k < max(12, min_k):
-            rej_margin = 0.000050   # was 0.000025
-            min_improve_eff = max(float(min_improve), 0.0)
+            rej_margin = 0.00010
         elif k < 40:
-            rej_margin = 0.000030   # was 0.000015
-            min_improve_eff = max(float(min_improve), 0.0)
+            rej_margin = 0.00006
         else:
-            rej_margin = 0.000020   # was 0.000010
-            min_improve_eff = max(float(min_improve), 0.0)
+            rej_margin = 0.00004
 
         quick_margin_auc = rej_margin
         flip_close_margin = rej_margin
