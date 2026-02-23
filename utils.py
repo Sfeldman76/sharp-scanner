@@ -2334,14 +2334,11 @@ model_cache = {}
 
 def get_trained_models(sport_key):
     sk = str(sport_key).strip()
-    sk_l = sk.lower()
+    if sk.lower() == "general":
+        model_cache[sport_key] = {}
+        return model_cache[sport_key]
 
     if sport_key not in model_cache:
-        # "General" has no trained models in GCS by design
-        if sk_l == "general":
-            model_cache[sport_key] = {}   # <-- important: empty dict, not {market: None}
-            return model_cache[sport_key]
-
         bundles = {}
         for market in ["spreads", "totals", "h2h"]:
             b = load_model_from_gcs(sk, market)
@@ -2350,7 +2347,8 @@ def get_trained_models(sport_key):
         model_cache[sport_key] = bundles
 
     return model_cache[sport_key]
-    
+
+
 sharp_moves_cache = {}
 
 
@@ -10956,12 +10954,19 @@ def load_model_from_gcs(
       - legacy IsoWrapper + legacy wrapper classes
 
     Also supports H2H naming aliases and basic folder prefixes.
+
+    NOTE: sport='General' is intentionally skipped (no trained artifacts).
     """
     client = storage.Client(project=project) if project else storage.Client()
     bucket = client.bucket(bucket_name)
 
     sport_l = _slug(sport)
     market_l = _slug(market)
+
+    # ✅ Skip General entirely (prevents GCS NotFound spam)
+    if sport_l == "general":
+        logging.info(f"Skipping model load for sport='General' (market={market_l}).")
+        return None
 
     # --- Market aliasing (fixes "h2h" vs "moneyline"/"ml") ---
     if market_l in {"h2h", "moneyline", "ml", "headtohead"}:
@@ -10981,7 +10986,6 @@ def load_model_from_gcs(
 
         # Optional "latest" behavior: find the newest blob that starts with base_name
         if use_latest:
-            # we still try each prefix, and choose newest within that prefix+base
             chosen_blob = None
             for pref in prefixes:
                 pref_base = f"{pref}{base_name}"
@@ -10989,7 +10993,10 @@ def load_model_from_gcs(
                 if not blobs:
                     continue
                 newest = sorted(blobs, key=lambda b: b.updated or b.time_created)[-1]
-                if (chosen_blob is None) or ((newest.updated or newest.time_created) > (chosen_blob.updated or chosen_blob.time_created)):
+                if (chosen_blob is None) or (
+                    (newest.updated or newest.time_created)
+                    > (chosen_blob.updated or chosen_blob.time_created)
+                ):
                     chosen_blob = newest
 
             if chosen_blob is None:
@@ -10997,42 +11004,7 @@ def load_model_from_gcs(
 
             blob = chosen_blob
 
-        else:
-            # Default: exact name with prefixes
-            blob = None
-            for pref in prefixes:
-                candidate = bucket.blob(f"{pref}{base_name}.pkl")
-                # We can just attempt download; NotFound will tell us quickly.
-                blob = candidate
-                try:
-                    content = blob.download_as_bytes()
-                    break  # found one that downloads
-                except NotFound as e:
-                    last_download_err = e
-                    content = None
-                    blob = None
-                    continue
-                except (Forbidden, PermissionDenied) as e:
-                    logging.warning(
-                        f"⚠️ GCS permission error: gs://{bucket_name}/{candidate.name} "
-                        f"({type(e).__name__}: {e})"
-                    )
-                    return None
-                except Exception as e:
-                    last_download_err = e
-                    logging.warning(
-                        f"⚠️ GCS download failed: gs://{bucket_name}/{candidate.name} "
-                        f"({type(e).__name__}: {e})"
-                    )
-                    content = None
-                    blob = None
-                    continue
-
-            if blob is None or content is None:
-                continue  # try next market alias
-
-        # If use_latest=True, we haven't downloaded yet
-        if use_latest:
+            # Download for latest
             try:
                 content = blob.download_as_bytes()
             except NotFound as e:
@@ -11051,6 +11023,36 @@ def load_model_from_gcs(
                     f"({type(e).__name__}: {e})"
                 )
                 continue
+
+        else:
+            # Default: exact name with prefixes
+            blob = None
+            content = None
+            for pref in prefixes:
+                candidate = bucket.blob(f"{pref}{base_name}.pkl")
+                try:
+                    content = candidate.download_as_bytes()
+                    blob = candidate
+                    break
+                except NotFound as e:
+                    last_download_err = e
+                    continue
+                except (Forbidden, PermissionDenied) as e:
+                    logging.warning(
+                        f"⚠️ GCS permission error: gs://{bucket_name}/{candidate.name} "
+                        f"({type(e).__name__}: {e})"
+                    )
+                    return None
+                except Exception as e:
+                    last_download_err = e
+                    logging.warning(
+                        f"⚠️ GCS download failed: gs://{bucket_name}/{candidate.name} "
+                        f"({type(e).__name__}: {e})"
+                    )
+                    continue
+
+            if blob is None or content is None:
+                continue  # try next market alias
 
         # ---- unpickle ----
         try:
@@ -11080,7 +11082,7 @@ def load_model_from_gcs(
 
         # 2) Ensemble bundle (your main path)
         model_logloss = payload.get("model_logloss")
-        model_auc     = payload.get("model_auc")
+        model_auc = payload.get("model_auc")
 
         # 3) Single-model bundle
         single_model = payload.get("model") if (model_logloss is None and model_auc is None) else None
