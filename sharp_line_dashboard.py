@@ -11419,20 +11419,26 @@ def train_sharp_model_from_bq(
             return int(getattr(clf, "n_estimators", 200))
         
         # --- Snapshot‑aware CV with purge + embargo -----------------------------------------
+        # Canonical sport key (define once)
+        sport_key = str(sport).upper().strip()
+        if sport_key in ("NCCAB", "NCCAM", "NCAAB ", "NCAA_BB"):
+            sport_key = "NCAAB"
+        
+        # --- Snapshot-aware CV with purge + embargo -----------------------------------------
         rows_per_game = int(np.ceil(len(X_train) / max(1, pd.unique(g_train).size)))
+        
         if sport_key in SMALL_LEAGUES:
-            target_games  = 10
-            min_val_size  = max(12, target_games * rows_per_game)
-            embargo_td    = pd.Timedelta(hours=24) if 'embargo_td' not in locals() else embargo_td
+            target_games = 10
+            min_val_size = max(12, target_games * rows_per_game)
+            embargo_td = pd.Timedelta(hours=24)
         else:
-            target_games  = 28
-            min_val_size  = max(28, target_games * rows_per_game)
-            # Slightly stronger embargo for dense-snapshot sports
-            _dense = str(sport_key).upper() in {"NBA", "MLB", "WNBA", "CFL"}
-            embargo_td    = pd.Timedelta(hours=18 if _dense else 36)
+            target_games = 28
+            min_val_size = max(28, target_games * rows_per_game)
+            _dense = sport_key in {"NBA", "MLB", "WNBA", "CFL"}
+            embargo_td = pd.Timedelta(hours=18 if _dense else 36)
         
         n_groups_train = pd.unique(g_train).size
-        target_folds   = 5 if n_groups_train >= 200 else (4 if n_groups_train >= 120 else 3)
+        target_folds = 5 if n_groups_train >= 200 else (4 if n_groups_train >= 120 else 3)
         
         cv = PurgedGroupTimeSeriesSplit(
             n_splits=target_folds,
@@ -11441,6 +11447,15 @@ def train_sharp_model_from_bq(
             min_val_size=min_val_size,
         )
         
+        y_train = pd.Series(y_train, copy=False).astype(int).clip(0, 1).to_numpy()
+        folds, tr_es_rel, va_es_rel = build_deterministic_folds(
+            X_train, y_train,
+            cv=cv,
+            groups=g_train,
+            times=None,  # not used by this CV; prevents the times kwarg attempt
+            n_splits=getattr(cv, "n_splits", 5),
+            min_pos=5, min_neg=5, seed=1337,
+        )
         # Enforce per-fold class presence; reuse your build_deterministic_folds
         y_train = pd.Series(y_train, copy=False).astype(int).clip(0, 1).to_numpy()
         folds, tr_es_rel, va_es_rel = build_deterministic_folds(
@@ -11452,7 +11467,7 @@ def train_sharp_model_from_bq(
             min_pos=5, min_neg=5, seed=1337,
         )
         
-        # ================== SHAP stability selection (on pruned set) ==================
+
         # ================== SHAP stability selection (on pruned set) ==================
         # 1) SHAP stability on a pruned base set (safe & fallback-friendly)
         
