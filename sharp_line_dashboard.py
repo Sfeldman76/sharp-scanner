@@ -14427,6 +14427,43 @@ def _normalize_history(x):
 from google.cloud import storage
 from io import BytesIO
 import logging
+from io import BytesIO
+import types
+
+def _portable_calibrator(cal):
+    """
+    Convert calibrator / adapter objects into a pickle-portable representation.
+    Goal: avoid pickling anything defined in Streamlit UI modules.
+    """
+    if cal is None:
+        return None
+
+    # If it's already a simple dict, keep it
+    if isinstance(cal, dict):
+        return cal
+
+    # If it's a tuple like ("iso", obj) or ("platt", obj) keep name + try to serialize obj safely
+    if isinstance(cal, (tuple, list)) and len(cal) == 2 and isinstance(cal[0], str):
+        name, obj = cal
+        return {"type": str(name), "obj": _portable_calibrator(obj)}
+
+    # If it's identity-ish (your H2H case), store a tag instead of the object
+    cls = cal.__class__
+    mod = getattr(cls, "__module__", "")
+    name = getattr(cls, "__name__", "")
+
+    # Anything coming from Streamlit UI module is NOT portable
+    if mod in {"sharp_line_dashboard", "__main__"}:
+        # preserve minimal behavior: identity transform
+        return {"type": "identity", "eps": float(getattr(cal, "eps", 1e-6))}
+
+    # If it looks like an identity calibrator regardless of module
+    if name.lower() in {"_identityisocal", "identityisocal", "identity"}:
+        return {"type": "identity", "eps": float(getattr(cal, "eps", 1e-6))}
+
+    # If it's a sklearn calibrator or something pickle-safe, allow it through
+    return cal
+
 
 def save_model_to_gcs(
     model,
@@ -14460,7 +14497,7 @@ def save_model_to_gcs(
         payload.setdefault("sport", sport_l)
         payload.setdefault("market", market_l)
         if calibrator is not None and "iso_blend" not in payload:
-            payload["iso_blend"] = calibrator
+            payload["iso_blend"] = _portable_calibrator(calibrator)
         if team_feature_map is not None and "team_feature_map" not in payload:
             payload["team_feature_map"] = team_feature_map
         if book_reliability_map is not None and "book_reliability_map" not in payload:
@@ -14508,13 +14545,27 @@ import pandas as pd
 from google.cloud import storage
 import numpy as np
 
+
+import numpy as np
+
 class _IdentityIsoCal:
-    """Identity calibrator used for portability when pickles reference model._IdentityIsoCal."""
     def __init__(self, eps=1e-6):
         self.eps = eps
     def transform(self, p):
         p = np.asarray(p, float).reshape(-1)
         return np.clip(p, self.eps, 1.0 - self.eps)
+
+def _hydrate_calibrator(x):
+    # x may be an object OR a dict tag produced by save_model_to_gcs
+    if isinstance(x, dict) and x.get("type") == "identity":
+        return _IdentityIsoCal(eps=float(x.get("eps", 1e-6)))
+    # handle {"type": "...", "obj": ...} nesting if you used that pattern
+    if isinstance(x, dict) and "obj" in x:
+        x = dict(x)
+        x["obj"] = _hydrate_calibrator(x["obj"])
+        return x
+    return x
+
 
 class _PickleShim:
     """Fallback for custom classes pickled from other modules."""
@@ -14529,26 +14580,29 @@ class _PickleShim:
 
 class _RenamingUnpickler(pickle.Unpickler):
     def find_class(self, module, name):
-        # Remap legacy / backend wrapper class names that may not exist in UI runtime
-        if (module, name) in {
-            ("sharp_line_dashboard", "_CalAdapter"),
-            ("utils", "_CalAdapter"),
-            ("sharp_line_dashboard", "IsoWrapper"),
-            ("utils", "IsoWrapper"),
+        # 🔥 Never import Streamlit UI module during unpickle
+        if module == "sharp_line_dashboard":
+            # Map known wrapper types to safe substitutes
+            if name in {"IsoWrapper"}:
+                return _PickleShim
+            if name in {"_CalAdapter"}:
+                return _PickleShim
+            # Anything else from this module: do not import it
+            return _PickleShim
 
-            # ✅ ADD THIS:
+        # Existing remaps
+        if (module, name) in {
+            ("utils", "_CalAdapter"),
+            ("utils", "IsoWrapper"),
             ("model", "_IdentityIsoCal"),
         }:
-            # Prefer the real local class if defined; otherwise shim
-            if module == "model" and name == "_IdentityIsoCal":
-                try:
-                    return _IdentityIsoCal  # must exist in this module
-                except Exception:
-                    return _PickleShim
+            if (module, name) == ("model", "_IdentityIsoCal"):
+                return _IdentityIsoCal
             return _PickleShim
 
         if name == "IsoWrapper":
             return _PickleShim
+
         return super().find_class(module, name)
 
 def _safe_loads(b: bytes):
@@ -14560,7 +14614,6 @@ def _to_df(x):
     if x is None: return pd.DataFrame()
     try: return pd.DataFrame(x)
     except Exception: return pd.DataFrame()
-
 def _normalize_bundle(data: dict):
     """
     Accepts old + new payloads and returns a standardized bundle
@@ -14579,14 +14632,19 @@ def _normalize_bundle(data: dict):
     # ---- New single-model style (schema_version 2) ----
     if "model" in data and ("model_logloss" not in data and "model_auc" not in data):
         iso_blend = data.get("iso_blend") or (data.get("calibrator", {}) or {}).get("iso_blend")
-        # return in the same structure your predict_blended path expects
+        iso_blend = _hydrate_calibrator(iso_blend)   # ✅ ADD HERE
+
         return {
             "model_logloss": None,
             "model_auc": None,
             "best_w": float(data.get("best_w", 1.0)),
             "feature_cols": data.get("feature_cols") or data.get("feature_list") or [],
             "calibrator": {"iso_blend": iso_blend},
-            "flip_flag": bool(data.get("flip_flag", False) or data.get("global_flip", False) or (data.get("polarity", +1) == -1)),
+            "flip_flag": bool(
+                data.get("flip_flag", False)
+                or data.get("global_flip", False)
+                or (data.get("polarity", +1) == -1)
+            ),
             "single_model": data.get("model"),
             "team_feature_map": _to_df(data.get("team_feature_map")),
             "book_reliability_map": _to_df(data.get("book_reliability_map")),
@@ -14594,6 +14652,7 @@ def _normalize_bundle(data: dict):
 
     # ---- Old ensemble style ----
     iso_blend = data.get("iso_blend") or (data.get("calibrator", {}) or {}).get("iso_blend")
+    iso_blend = _hydrate_calibrator(iso_blend)       # ✅ ADD HERE TOO
 
     return {
         "model_logloss": data.get("model_logloss"),
