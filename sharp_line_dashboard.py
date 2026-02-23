@@ -2189,18 +2189,19 @@ def holdout_by_percent_groups(
 ):
     """
     Time-forward holdout by last % of GROUPS (e.g., Game_Key).
-    If pct_holdout is None, choose per sport via SPORT_HOLDOUT_PCT.
     Returns (train_idx, hold_idx) as **row indices** (int arrays), sorted ascending.
 
-    Improvements vs original:
-      - sport defaults tuned for "more training, better results" on larger datasets
-      - adaptive shrink of holdout % as #groups grows (mild, max ~3%)
-      - label diversity: shift window (same size) before expanding (last resort)
-      - fixes common sport key typo(s): NCCAB/NCCAM -> NCAAB
+    Fixes vs your current version:
+      - FAIL FAST on length mismatches (no silent truncation)
+      - Robust datetime handling for `times` (supports datetime64, pandas timestamps, ints)
+      - Never uses global ffill/bfill (prevents cross-game time leakage)
+      - Clean, deterministic group ordering: by group start time, fallback to first_row
+      - Label-diversity shifting is optional and logged-friendly (doesn't silently change semantics)
     """
+    import numpy as np
+    import pandas as pd
 
-
-    # ---- sport-defaults (tuned) ----
+    # ---- sport-defaults ----
     SPORT_HOLDOUT_PCT = {
         "NFL": 0.10,
         "NCAAF": 0.10,
@@ -2220,58 +2221,84 @@ def holdout_by_percent_groups(
 
     if pct_holdout is None:
         pct_holdout = float(SPORT_HOLDOUT_PCT.get(key, SPORT_HOLDOUT_PCT["DEFAULT"]))
-    pct_holdout = float(np.clip(pct_holdout, 0.05, 0.50))  # hard bounds
+    pct_holdout = float(np.clip(pct_holdout, 0.05, 0.50))
 
-    # ---- align lengths safely (no crashes on mismatches) ----
-    n = int(min(len(groups), len(y), len(times) if times is not None else len(groups)))
-    groups = np.asarray(groups)[:n]
-    y = np.asarray(y).astype(int)[:n]
+    # ---- validate lengths (NO silent truncation) ----
+    groups = np.asarray(groups)
+    y = np.asarray(y).reshape(-1).astype(int)
 
     if times is None:
-        times = np.arange(n)
-        times_is_datetime = False
+        if len(groups) != len(y):
+            raise ValueError(f"length mismatch: groups={len(groups)} y={len(y)}")
+        times_arr = None
     else:
-        times = np.asarray(times)[:n]
-        times_is_datetime = True
+        times_arr = np.asarray(times)
+        if not (len(groups) == len(y) == len(times_arr)):
+            raise ValueError(f"length mismatch: groups={len(groups)} y={len(y)} times={len(times_arr)}")
 
-    # ---- row-level frame (keep all rows; don't drop NaT rows) ----
+    n = int(len(y))
+    if n == 0:
+        return np.array([], dtype=int), np.array([], dtype=int)
+
+    # ---- build row-level frame ----
     df_rows = pd.DataFrame({
         "row_idx": np.arange(n, dtype=int),
-        "group":   pd.Series(groups).astype(str),
-        "y":       y,
+        "group": pd.Series(groups, dtype="object").astype(str),
+        "y": y,
     })
 
-    if times_is_datetime:
-        t_ser = pd.to_datetime(times, utc=True, errors="coerce")
+    # ---- time parsing (robust) ----
+    if times_arr is None:
+        # monotonic pseudo-time (keeps stable ordering but not "real time")
+        df_rows["time"] = pd.to_datetime(df_rows["row_idx"], unit="s", utc=True)
     else:
-        # monotonic pseudo-time
-        t_ser = pd.to_datetime(pd.Series(times, dtype="int64"), unit="s", utc=True, errors="ignore")
-    df_rows["time"] = t_ser
+        # This will handle datetime64, pandas timestamps, strings; for ints it's ambiguous,
+        # but your pipeline passes real datetimes so this is correct.
+        t_ser = pd.to_datetime(times_arr, utc=True, errors="coerce")
 
-    # ---- group-level meta (order by real time; fallback to first row order) ----
+        # If many NaT, try interpreting numeric as seconds (only if it looks numeric)
+        if t_ser.isna().mean() > 0.50:
+            try:
+                t_num = pd.to_numeric(pd.Series(times_arr), errors="coerce")
+                # interpret as seconds if plausible
+                if np.isfinite(t_num).mean() > 0.80:
+                    t_ser2 = pd.to_datetime(t_num, unit="s", utc=True, errors="coerce")
+                    # keep whichever yields fewer NaT
+                    if t_ser2.isna().sum() < t_ser.isna().sum():
+                        t_ser = t_ser2
+            except Exception:
+                pass
+
+        df_rows["time"] = t_ser
+
+    # ---- group-level meta (order by real time; fallback to first row) ----
     gfirst = df_rows.groupby("group", sort=False)["row_idx"].min()
+
+    # IMPORTANT: do NOT global fill times; just compute group start/end from available times
     gstart = df_rows.dropna(subset=["time"]).groupby("group")["time"].min()
-    gend   = df_rows.dropna(subset=["time"]).groupby("group")["time"].max()
+    gend = df_rows.dropna(subset=["time"]).groupby("group")["time"].max()
 
     gmeta = pd.DataFrame({
         "group": gfirst.index,
-        "first_row": gfirst.values,            # fallback order
-        "start": gstart.reindex(gfirst.index), # may be NaT
-        "end":   gend.reindex(gfirst.index),   # may be NaT
-    }).sort_values(by=["start", "first_row"], na_position="last").reset_index(drop=True)
+        "first_row": gfirst.values,
+        "start": gstart.reindex(gfirst.index),  # may be NaT
+        "end": gend.reindex(gfirst.index),      # may be NaT
+    })
+
+    # Deterministic ordering: by start time (NaT last), then first_row
+    gmeta = gmeta.sort_values(by=["start", "first_row"], na_position="last").reset_index(drop=True)
 
     n_groups = int(len(gmeta))
     if n_groups == 0:
         return np.array([], dtype=int), np.array([], dtype=int)
 
     # ---- adaptive shrink: as you have more groups, hold out slightly less ----
-    # max shrink ~= 3%, ramps in around ~250 groups
     shrink = 0.03 * (1.0 - np.exp(-n_groups / 250.0))
     pct_eff = float(np.clip(pct_holdout - shrink, 0.05, 0.35))
 
     # ---- choose #hold groups with bounds ----
     min_train_groups = max(1, int(min_train_games))
-    min_hold_groups  = max(1, int(min_hold_games))
+    min_hold_groups = max(1, int(min_hold_games))
 
     wanted_hold = int(np.ceil(n_groups * pct_eff))
     max_hold_allowed = max(1, n_groups - min_train_groups)
@@ -2287,27 +2314,25 @@ def holdout_by_percent_groups(
         hold_mask_local = np.isin(all_groups, hold_groups_arr)
         hold_idx_local = np.sort(np.flatnonzero(hold_mask_local).astype(int))
         train_idx_local = np.sort(np.flatnonzero(~hold_mask_local).astype(int))
-        return train_idx_local, hold_idx_local, hold_mask_local
+        return train_idx_local, hold_idx_local
 
     def _has_both(idx_rows: np.ndarray) -> bool:
         if idx_rows.size == 0:
             return False
         return np.unique(df_rows.loc[idx_rows, "y"]).size >= 2
 
-    # ---- primary: last n_hold_groups groups ----
+    # ---- primary: last n_hold_groups groups (true time-forward) ----
     hold_groups = gmeta["group"].iloc[-n_hold_groups:].to_numpy()
-    train_idx, hold_idx, hold_mask = _idx_from_hold_groups(hold_groups)
+    train_idx, hold_idx = _idx_from_hold_groups(hold_groups)
 
     # ---- optional: ensure label diversity in holdout ----
+    # NOTE: this can change the semantics from "latest chunk" to "recent chunk" if the tail is imbalanced.
     if ensure_label_diversity and hold_idx.size > 0 and (not _has_both(hold_idx)):
-
-        # 1) Try shifting the holdout window earlier while keeping SAME size (preserves training size)
         found = False
         k = int(n_hold_groups)
 
-        # Don't shift too far; enough tries to escape end-of-season label skew
+        # Try shifting the window earlier while keeping SAME size
         max_shift = int(min(max(10, k), max(0, n_groups - k)))
-
         for s in range(1, max_shift + 1):
             # window: groups[-(k+s) : -s]
             start = -(k + s)
@@ -2315,25 +2340,21 @@ def holdout_by_percent_groups(
             if (k + s) > n_groups:
                 break
             hg = gmeta["group"].iloc[start:end].to_numpy()
-            tr, ho, hm = _idx_from_hold_groups(hg)
-
-            # Ensure we still have enough training groups (same k means yes, but keep for safety)
+            tr, ho = _idx_from_hold_groups(hg)
             if (n_groups - k) >= min_train_groups and _has_both(ho):
-                train_idx, hold_idx, hold_mask = tr, ho, hm
+                train_idx, hold_idx = tr, ho
                 found = True
                 break
 
-        # 2) If shifting can't fix it, expand holdout boundary (last resort; costs training size)
+        # If shifting can't fix it, expand holdout boundary (last resort)
         if not found:
             kk = k
             while (not _has_both(hold_idx)) and ((n_groups - kk) >= min_train_groups) and (kk < n_groups):
                 kk += 1
                 hg = gmeta["group"].iloc[-kk:].to_numpy()
-                train_idx, hold_idx, hold_mask = _idx_from_hold_groups(hg)
+                train_idx, hold_idx = _idx_from_hold_groups(hg)
 
     return np.asarray(train_idx, dtype=int), np.asarray(hold_idx, dtype=int)
-
-
 
 def sharp_row_weights(df, a_sharp=0.8, b_limit=0.15, c_liq=0.10, d_steam=0.10):
   
@@ -10649,17 +10670,30 @@ def train_sharp_model_from_bq(
         # ============================================
         # Purged Group Time Series CV
         # ============================================
+        import numpy as np
+        import pandas as pd
+        from sklearn.model_selection import BaseCrossValidator
+        
         class PurgedGroupTimeSeriesSplit(BaseCrossValidator):
             """
-            Time-ordered, group-based CV with purge + embargo.
+            Time-forward, group-based CV with embargo.
+            - Groups are ordered by their start time (min time within group).
+            - Fold i validates on the next contiguous block of groups.
+            - Training uses ONLY groups strictly before val_start - embargo.
+            This matches a real "future holdout" regime.
+        
+            Notes:
+            - If your labels depend on outcomes after Game_Start, you should ensure `time_values`
+              are snapshot timestamps (pre-game) and groups are Game_Key.
             """
         
             def __init__(self, n_splits=5, embargo=pd.Timedelta("0 hours"),
-                         time_values=None, min_val_size=20):
+                         time_values=None, min_val_size=20, min_train_size=50):
                 self.n_splits = int(n_splits)
                 self.embargo = pd.Timedelta(embargo)
                 self.time_values = time_values
                 self.min_val_size = int(min_val_size)
+                self.min_train_size = int(min_train_size)
         
             def get_n_splits(self, X=None, y=None, groups=None):
                 return self.n_splits
@@ -10670,11 +10704,20 @@ def train_sharp_model_from_bq(
                 if self.time_values is None:
                     raise ValueError("time_values required")
         
-                meta = pd.DataFrame({
-                    "group": np.asarray(groups),
-                    "time": pd.to_datetime(self.time_values, utc=True),
-                })
+                groups = np.asarray(groups)
+                t = pd.to_datetime(self.time_values, utc=True, errors="coerce")
         
+                # Fail fast on broken time vectors (prevents silent garbage splits)
+                if len(groups) != len(t):
+                    raise ValueError(f"length mismatch: groups={len(groups)} time_values={len(t)}")
+                if t.isna().any():
+                    # If you truly want to allow NaT, you must fix upstream; NaT breaks ordering.
+                    bad = int(t.isna().sum())
+                    raise ValueError(f"time_values contains {bad} NaT values; fix upstream (per-game fallback), don't CV on NaT.")
+        
+                meta = pd.DataFrame({"group": groups.astype(str), "time": t})
+        
+                # group time span
                 gmeta = (
                     meta.groupby("group", as_index=False)["time"]
                     .agg(start="min", end="max")
@@ -10683,41 +10726,42 @@ def train_sharp_model_from_bq(
                 )
         
                 n_groups = len(gmeta)
+                if n_groups <= 1:
+                    return
+        
+                # contiguous fold blocks over groups (like blocked time series CV)
                 fold_sizes = np.full(self.n_splits, n_groups // self.n_splits, dtype=int)
                 fold_sizes[: n_groups % self.n_splits] += 1
                 edges = np.cumsum(fold_sizes)
         
-                start = 0
-                for stop in edges:
-                    val_slice = gmeta.iloc[start:stop]
-                    start = stop
+                all_groups = meta["group"].to_numpy()
+        
+                start_idx = 0
+                for stop_idx in edges:
+                    val_slice = gmeta.iloc[start_idx:stop_idx]
+                    start_idx = stop_idx
                     if val_slice.empty:
                         continue
         
                     val_groups = val_slice["group"].to_numpy()
                     val_start = val_slice["start"].iloc[0]
-                    val_end = val_slice["end"].iloc[-1]
+                    # val_end = val_slice["end"].iloc[-1]  # not needed for time-forward train selection
         
-                    purge_mask = ~((gmeta["end"] < val_start) | (gmeta["start"] > val_end))
-                    purged_groups = set(gmeta.loc[purge_mask, "group"])
+                    # TIME-FORWARD TRAIN:
+                    # only groups whose END is strictly before (val_start - embargo)
+                    cutoff = val_start - self.embargo
+                    train_groups = gmeta.loc[gmeta["end"] < cutoff, "group"].to_numpy()
         
-                    emb_lo = val_start - self.embargo
-                    emb_hi = val_end + self.embargo
-                    embargo_mask = ~((gmeta["end"] < emb_lo) | (gmeta["start"] > emb_hi))
-                    embargo_groups = set(gmeta.loc[embargo_mask, "group"])
-        
-                    bad = set(val_groups) | purged_groups | embargo_groups
-                    train_groups = gmeta.loc[~gmeta["group"].isin(bad), "group"].to_numpy()
-        
-                    all_groups = meta["group"].to_numpy()
+                    # row indices
                     val_idx = np.flatnonzero(np.isin(all_groups, val_groups))
                     train_idx = np.flatnonzero(np.isin(all_groups, train_groups))
         
-                    if len(val_idx) < self.min_val_size or len(train_idx) == 0:
+                    if len(val_idx) < self.min_val_size:
+                        continue
+                    if len(train_idx) < self.min_train_size:
                         continue
         
                     yield train_idx, val_idx
-   
 
 
         # ============================================
@@ -10936,63 +10980,36 @@ def train_sharp_model_from_bq(
         st.write(f"✅ Final feature count after pruning: {len(feature_cols)}")
 
         
-        # Recompute these from df_valid so everything is aligned
-        groups_all = df_valid["Game_Key"].astype(str).to_numpy()
-        snap_ts    = pd.to_datetime(df_valid["Snapshot_Timestamp"], errors="coerce", utc=True)
-        game_ts    = pd.to_datetime(df_valid["Game_Start"],           errors="coerce", utc=True)
-        # ---- Groups & times (snapshot-aware) ----
+         # --- aligned arrays from df_valid ---
+        groups = df_valid["Game_Key"].astype(str).to_numpy()
         
-        # If any game has >1 snapshot we’re in snapshot regime (embargo matters)
-        by_game_snaps = (
-            df_market.loc[valid_mask]
-            .groupby("Game_Key")["Snapshot_Timestamp"]
-            .nunique(dropna=True)
+        t_snap = pd.to_datetime(df_valid["Snapshot_Timestamp"], utc=True, errors="coerce")
+        t_game = pd.to_datetime(df_valid["Game_Start"], utc=True, errors="coerce")
+        
+        # safest: snapshot time when present, else fallback to game start
+        t_full = t_snap.fillna(t_game)
+        
+        # if still NaT, fill within GAME only (never global)
+        t_full = (
+            t_full.groupby(groups)
+                  .apply(lambda s: s.ffill().bfill())
+                  .reset_index(level=0, drop=True)
         )
-        has_snapshots = (by_game_snaps.fillna(0).max() > 1)
         
-        groups_all = df_valid["Game_Key"].astype(str).to_numpy()
-        snap_ts    = pd.to_datetime(df_valid["Snapshot_Timestamp"], errors="coerce", utc=True)
-        game_ts    = pd.to_datetime(df_valid["Game_Start"],           errors="coerce", utc=True)
-        
-        # Use snapshot time if multiple snapshots exist, else game start time
-        time_values_all = snap_ts.to_numpy() if has_snapshots else game_ts.to_numpy()
-        sport_key  = str(sport).upper()
-        embargo_td = SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"]) if has_snapshots else pd.Timedelta(0)
-
-        # Final arrays used downstream
-        groups = groups_all
-        times  = time_values_all
-        
-        # ✅ Guard: drop NaT times (rare but fatal for CV) — PLACE THIS BLOCK RIGHT HERE
-        if pd.isna(times).any():
-            bad  = np.flatnonzero(pd.isna(times))
-            keep = np.setdiff1d(np.arange(len(times)), bad)
-            X_full  = X_full[keep]
-            y_full  = y_full[keep]
-            groups  = groups[keep]
-            times   = times[keep]
-            df_valid = df_valid.iloc[keep].reset_index(drop=True)
-            
-        # ---- Holdout = last ~N groups (time-forward, group-safe) ----
-        meta  = pd.DataFrame({"group": groups, "time": pd.to_datetime(times, utc=True)})
-        gmeta = (meta.groupby("group", as_index=False)["time"]
-                   .agg(start="min", end="max")
-                   .sort_values("start")
-                   .reset_index(drop=True))
-        # ---- Build time vector once (aligned to df_valid) ----
-        t_full = pd.to_datetime(df_valid["Snapshot_Timestamp"], utc=True, errors="coerce")
-        
-        # Fallback to Commence_Hour where Snapshot_Timestamp is NaT
-        if t_full.isna().any() and "Commence_Hour" in df_valid.columns:
-            t_full = t_full.fillna(pd.to_datetime(df_valid["Commence_Hour"], utc=True, errors="coerce"))
-        
-        # Fill any remaining gaps to keep ordering/stability
-        t_full = t_full.fillna(method="ffill").fillna(method="bfill")
-        
-        # Numpy array for downstream use
         times = t_full.to_numpy()
-
-        # --- (7) time‑forward, group‑safe holdout as before ---
+        
+        # --- guard: drop any remaining NaT rows (must slice EVERYTHING consistently) ---
+        if pd.isna(times).any():
+            bad = np.flatnonzero(pd.isna(times))
+            keep = np.setdiff1d(np.arange(len(times)), bad)
+        
+            X_full = X_full[keep]
+            y_full = y_full[keep]
+            groups = groups[keep]
+            times  = times[keep]
+            df_valid = df_valid.iloc[keep].reset_index(drop=True)
+        
+        # --- HOLDOUT (true time-forward, group-safe) ---
         train_all_idx, hold_idx = holdout_by_percent_groups(
             sport=sport,
             groups=groups,
@@ -11001,9 +11018,8 @@ def train_sharp_model_from_bq(
             pct_holdout=None,
             min_train_games=25,
             min_hold_games=8,
-            ensure_label_diversity=True
+            ensure_label_diversity=False,  # keeps it truly "latest chunk"
         )
-        
         # Make sure indices are positional (ints or boolean masks)
         # If your splitter returns numpy arrays of ints, you’re fine.
         # If it returns pandas Index, cast to numpy:
