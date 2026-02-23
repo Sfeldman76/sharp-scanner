@@ -2198,8 +2198,7 @@ def holdout_by_percent_groups(
       - Clean, deterministic group ordering: by group start time, fallback to first_row
       - Label-diversity shifting is optional and logged-friendly (doesn't silently change semantics)
     """
-    import numpy as np
-    import pandas as pd
+
 
     # ---- sport-defaults ----
     SPORT_HOLDOUT_PCT = {
@@ -2489,8 +2488,7 @@ def build_game_market_sharpaware_schema(
     return out.reset_index(drop=True)
 
 
-import numpy as np
-import pandas as pd
+
 from sklearn.base import clone
 from sklearn.metrics import roc_auc_score
 
