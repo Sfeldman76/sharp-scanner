@@ -2785,10 +2785,9 @@ import time
 
 from sklearn.base import clone
 from sklearn.metrics import roc_auc_score, log_loss
-import numpy as np
+
 import xgboost as xgb
-import numpy as np
-import pandas as pd
+
 from sklearn.base import clone
 from sklearn.metrics import roc_auc_score, log_loss
 
@@ -2840,8 +2839,7 @@ def _cv_auc_for_feature_set(
       - Full metrics only if compute_ll_brier=True and return_oof available
       - Optional greedy feature flips (bounded)
     """
-    import numpy as np
-    import pandas as pd
+
     from sklearn.base import clone
     from sklearn.metrics import roc_auc_score, log_loss
 
@@ -3275,8 +3273,7 @@ def _auto_select_k_by_auc(
       - selection-time XGB regularization no longer tightened (was suppressing weak signals)
     """
     import time
-    import numpy as np
-    import pandas as pd
+
     from sklearn.base import clone
     from sklearn.metrics import roc_auc_score, log_loss
 
@@ -3869,8 +3866,7 @@ def select_features_auto(
     # backward compat
     **_ignored_kwargs,
 ):
-    import numpy as np
-    import pandas as pd
+
 
     if X_df_train is None or X_df_train.empty:
         return [], pd.DataFrame(columns=["selected", "flipped", "flip_mode"])
@@ -4239,8 +4235,7 @@ def _clean_probs(y, *probs, eps=1e-6):
 # WHY: all-features + metadata (V3, corrected)
 # ---------------------------
 from collections import defaultdict
-import numpy as np
-import pandas as pd
+
 
 # --- robust value getter ---
 def _rv(row, *names, default=0.0):
@@ -4598,8 +4593,7 @@ def attach_why_all_features(df_in: pd.DataFrame, bundle, model, why_rules=WHY_RU
 
 
 from typing import Dict, Optional, Tuple
-import numpy as np
-import pandas as pd
+
 
 # ============================================================
 # FIXED: enrich_power_for_training_lowmem
@@ -10665,8 +10659,7 @@ def train_sharp_model_from_bq(
         # ============================================
         # Purged Group Time Series CV
         # ============================================
-        import numpy as np
-        import pandas as pd
+
         from sklearn.model_selection import BaseCrossValidator
         
         class PurgedGroupTimeSeriesSplit(BaseCrossValidator):
@@ -13728,7 +13721,6 @@ def resolve_pr_beta_map(
 
     return beta_map
 
-import pandas as pd
 
 def attach_pr_points_edge_cols(
     df: pd.DataFrame,
@@ -14549,7 +14541,7 @@ def save_model_to_gcs(
 import io
 import pickle
 import logging
-import pandas as pd
+
 from google.cloud import storage
 import numpy as np
 
@@ -15943,8 +15935,7 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
     Uses the Team column (falls back to Team_Norm ONLY if Team is absent in that table).
     """
     from google.cloud import bigquery
-    import pandas as pd
-    import numpy as np
+
     import streamlit as st
     from datetime import date, timedelta
 
@@ -16275,7 +16266,7 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
 
 
 from google.cloud import bigquery
-import pandas as pd
+
 import streamlit as st
 from datetime import date, timedelta
 
