@@ -2332,15 +2332,24 @@ def build_game_key(df):
 
 model_cache = {}
 
-
 def get_trained_models(sport_key):
+    sk = str(sport_key).strip()
+    sk_l = sk.lower()
+
     if sport_key not in model_cache:
-        model_cache[sport_key] = {
-            market: load_model_from_gcs(sport_key, market)
-            for market in ['spreads', 'totals', 'h2h']
-        }
+        # "General" has no trained models in GCS by design
+        if sk_l == "general":
+            model_cache[sport_key] = {}   # <-- important: empty dict, not {market: None}
+            return model_cache[sport_key]
+
+        bundles = {}
+        for market in ["spreads", "totals", "h2h"]:
+            b = load_model_from_gcs(sk, market)
+            if b is not None:
+                bundles[market] = b
+        model_cache[sport_key] = bundles
+
     return model_cache[sport_key]
-    
     
 sharp_moves_cache = {}
 
