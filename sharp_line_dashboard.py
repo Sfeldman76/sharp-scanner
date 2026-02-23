@@ -3197,15 +3197,19 @@ def _auto_select_k_by_auc(
     model_proto, X, y, folds, ordered_features, *,
     min_k=None,
     max_k=None,
-    patience=160,
-    min_improve=1e-7,
+
+    # --- MORE SIGNAL defaults ---
+    patience=350,                 # was 160 (stops later → finds weaker features)
+    min_improve=0.0,              # was 1e-7 (allow tiny lifts; rely on LL/Brier + CV)
+
     verbose=True,
     log_func=print,
     debug=True,
     debug_every=20,
 
-    max_ll_increase=0.40,
-    max_brier_increase=0.10,
+    # --- loosen calibration guards a bit (still protects you) ---
+    max_ll_increase=0.70,         # was 0.40
+    max_brier_increase=0.18,      # was 0.10
 
     orient_features=False,
     enable_feature_flips=False,
@@ -3228,10 +3232,11 @@ def _auto_select_k_by_auc(
 
     # --- speed knobs ---
     quick_screen: bool = True,
-    quick_folds: int = 2,
-    quick_accept: float = 0.0,   # kept for compat (unused)
-    quick_drop: float = 0.0,     # kept for compat (unused)
-    abort_margin_cv: float = 0.0,
+    quick_folds: int = 4,         # was 2 (reduces noisy quick-gate rejects)
+    quick_accept: float = 0.0,    # kept for compat (unused)
+    quick_drop: float = 0.0,      # kept for compat (unused)
+
+    abort_margin_cv: float = -1e-4,  # was 0.0 (more permissive; abort less)
 
     time_budget_s: float = 1e21,
     resume_state: dict | None = None,
@@ -3244,15 +3249,11 @@ def _auto_select_k_by_auc(
     **_ignored_kwargs,
 ):
     """
-    OLD/FAST forward selection:
-      - X_all_mat once
-      - X_work preallocated
-      - quick fold-mean AUC gate
-      - full fold-mean AUC gate
-      - full LL/Brier only on accept (AUC mode)
-      - score mode uses full metrics directly
-      - candidate flip only in AUC mode (bounded)
-      - logs seeded accepted list immediately
+    OLD/FAST forward selection (tuned for MORE SIGNAL):
+      - less aggressive quick gating (more quick folds, more permissive abort)
+      - less aggressive reject margins
+      - near-miss throttling disabled (was skipping 2/3 of near-misses)
+      - selection-time XGB regularization no longer tightened (was suppressing weak signals)
     """
     import time
     import numpy as np
@@ -3404,9 +3405,11 @@ def _auto_select_k_by_auc(
         if "nthread" not in xgb_params and "n_jobs" not in xgb_params:
             xgb_params["nthread"] = 0
 
-        # selection-time stabilization
-        xgb_params["reg_lambda"] = float(xgb_params.get("reg_lambda", 1.0)) * 1.5
-        xgb_params["min_child_weight"] = max(float(xgb_params.get("min_child_weight", 1.0)), 2.0)
+        # --- MORE SIGNAL: do NOT tighten regularization during selection ---
+        # (the old *1.5 lambda + min_child_weight>=2 suppresses weak/rare signal)
+        xgb_params["reg_lambda"] = float(xgb_params.get("reg_lambda", 1.0)) * 1.0
+        xgb_params["min_child_weight"] = max(float(xgb_params.get("min_child_weight", 1.0)), 1.0)
+
         if "max_leaves" in xgb_params:
             xgb_params["max_leaves"] = int(xgb_params["max_leaves"])
 
@@ -3426,12 +3429,12 @@ def _auto_select_k_by_auc(
         elif mode == "negate":
             np.negative(col, out=col)
 
-  
     flip_mode_cache = {}
     if allow_candidate_flip:
         for f in ordered:
             if f in col_ix:
                 flip_mode_cache[f] = _auto_flip_mode(X_all_mat[:, col_ix[f]])
+
     # -------------------------
     # evaluators
     # -------------------------
@@ -3555,11 +3558,9 @@ def _auto_select_k_by_auc(
         _put_feat_into_col(f, k)
         k += 1
 
-    # seeded log
     if verbose:
         log_func(f"[AUTO-FEAT] seed accepted (k={k}): {accepted}")
 
-    # baseline on seed
     if k > 0:
         best_res = _cv_eval_full_metrics(X_work[:, :k], folds_full, early_stop_rounds=500)
     else:
@@ -3599,27 +3600,26 @@ def _auto_select_k_by_auc(
         # put candidate
         _put_feat_into_col(feat, k)
 
-        # k-adaptive thresholds
+        # k-adaptive thresholds (MORE SIGNAL = more forgiving rej_margin)
         if k < max(12, min_k):
-            rej_margin = 0.000025
-            min_improve_eff = max(float(min_improve), 2.5e-7)
+            rej_margin = 0.000050   # was 0.000025
+            min_improve_eff = max(float(min_improve), 0.0)
         elif k < 40:
-            rej_margin = 0.000015
-            min_improve_eff = float(min_improve)
+            rej_margin = 0.000030   # was 0.000015
+            min_improve_eff = max(float(min_improve), 0.0)
         else:
-            rej_margin = 0.000010
-            min_improve_eff = max(float(min_improve), 1.0e-7)
+            rej_margin = 0.000020   # was 0.000010
+            min_improve_eff = max(float(min_improve), 0.0)
 
         quick_margin_auc = rej_margin
         flip_close_margin = rej_margin
 
-        # defaults for BOTH modes (prevents UnboundLocalError)
         best_trial_flip = False
         best_trial_flip_mode = None
         best_trial_auc = float("nan")
 
         # -------------------------
-        # AUC MODE: quick gate -> full AUC gate -> optional flip -> full metrics accept
+        # AUC MODE
         # -------------------------
         if accept_metric == "auc":
             # 1) quick gate
@@ -3644,18 +3644,18 @@ def _auto_select_k_by_auc(
             evals_done += 1
             m_norm = float(res_norm_auc.get("auc", np.nan))
 
-            near_miss = (
-                np.isfinite(m_norm) and np.isfinite(best_val) and
-                (m_norm >= float(best_val) - float(rej_margin)) and
-                (m_norm <  float(best_val) + float(min_improve_eff)) and
-                (rejects_in_row >= 25)
-            )
+            # --- MORE SIGNAL: disable near-miss throttling (was skipping 2/3) ---
+            # near_miss = (
+            #     np.isfinite(m_norm) and np.isfinite(best_val) and
+            #     (m_norm >= float(best_val) - float(rej_margin)) and
+            #     (m_norm <  float(best_val) + float(min_improve_eff)) and
+            #     (rejects_in_row >= 25)
+            # )
+            # if near_miss and (i % 3 != 0):
+            #     rejects_in_row += 1
+            #     continue
 
             if (not np.isfinite(m_norm)) or (np.isfinite(best_val) and (m_norm < float(best_val) - float(rej_margin))):
-                rejects_in_row += 1
-                continue
-
-            if near_miss and (i % 3 != 0):
                 rejects_in_row += 1
                 continue
 
@@ -3685,7 +3685,7 @@ def _auto_select_k_by_auc(
                         res_flip_auc = _cv_eval_auc_only(
                             X_work[:, :k+1], folds_full,
                             abort_best_auc=None,
-                            early_stop_rounds=500,
+                            early_stop_rounds=2000,
                         )
                         evals_done += 1
                         m_flip = float(res_flip_auc.get("auc", np.nan))
@@ -3710,48 +3710,45 @@ def _auto_select_k_by_auc(
                 rejects_in_row += 1
                 continue
 
-    
-    
         else:
-            # ---- SCORE MODE: full metrics directly, BUT allow flip trial if close ----
+            # -------------------------
+            # SCORE MODE
+            # -------------------------
             res_try = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=500)
             evals_done += 1
             m_norm = float(res_try.get("score", np.nan))
-        
-            # defaults (even in score mode)
+
             best_trial_flip = False
             best_trial_flip_mode = None
             best_trial_score = float(m_norm) if np.isfinite(m_norm) else float("nan")
-        
-            # Flip trial if candidate is close to best (or best is nan early)
+
             if allow_candidate_flip and np.isfinite(m_norm):
                 if (not np.isfinite(best_val)) or (m_norm >= float(best_val) - float(flip_close_margin)):
                     col = X_work[:, k]
                     orig = col.copy()
-        
+
                     fm = flip_mode_cache.get(feat) or _auto_flip_mode(orig)
                     if fm != "none":
                         _apply_flip_inplace(col, fm)
-        
-                        # Optional quick pre-check on quick folds (keeps it fast)
+
                         ok_to_full_flip = True
                         if quick_screen and len(folds_quick) < len(folds_full):
                             res_fq = _cv_eval_full_metrics(X_work[:, :k+1], folds_quick, early_stop_rounds=500)
                             evals_done += 1
                             m_fq = float(res_fq.get("score", np.nan))
                             ok_to_full_flip = np.isfinite(m_fq) and (m_fq >= m_norm + float(flip_gain_min))
-        
+
                         if ok_to_full_flip:
                             res_flip_full = _cv_eval_full_metrics(X_work[:, :k+1], folds_full, early_stop_rounds=500)
                             evals_done += 1
                             m_flip = float(res_flip_full.get("score", np.nan))
-        
+
                             if np.isfinite(m_flip) and (m_flip > m_norm + float(flip_gain_min)):
                                 best_trial_flip = True
                                 best_trial_flip_mode = fm
                                 best_trial_score = float(m_flip)
-                                res_try = res_flip_full  # take flipped result as trial result
-        
+                                res_try = res_flip_full
+
                     col[:] = orig
 
         # -------------------------
@@ -3832,7 +3829,7 @@ def select_features_auto(
     corr_global: float = 0.97,
     max_feats_major: int = 220,
     max_feats_small: int = 160,
-    topk_per_fold: int = 100,
+    topk_per_fold: int = 160,
     min_presence: float = 0.80,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
