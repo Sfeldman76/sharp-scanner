@@ -3601,6 +3601,7 @@ def _auto_select_k_by_auc(
     # -------------------------
     # main scan
     # -------------------------
+    min_improve_eff = float(min_improve)
     for i, feat in enumerate(ordered):
         if max_total_evals is not None and evals_done >= int(max_total_evals):
             break
