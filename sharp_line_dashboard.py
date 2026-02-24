@@ -2963,7 +2963,7 @@ def _cv_auc_for_feature_set(
 
     if (not feats) and fallback_to_all_available_features:
         nn_frac = nn_frac_raw
-        var = var_raw0)
+        var = var_raw
 
         cols_list = list(col_ix.keys())
         sparse_ok = np.fromiter((_is_sparse_ok_name(c) for c in cols_list), dtype=bool, count=len(cols_list))
