@@ -2904,26 +2904,46 @@ def _cv_auc_for_feature_set(
     # -----------------------------
     # matrix cache (keyed by df identity + manager identity)
     # -----------------------------
+    # -----------------------------
+    # matrix cache (keyed by df identity + manager identity)
+    # -----------------------------
     _MAT_CACHE = getattr(_cv_auc_for_feature_set, "_MAT_CACHE", {})
     mgr_id = id(getattr(X, "_mgr", X))
-    sig = (id(X), mgr_id, X.shape, bool(require_numeric_features))
-
+    cols_sig = (len(X.columns), hash(tuple(map(str, X.columns))))
+    sig = (id(X), mgr_id, X.shape, cols_sig, bool(require_numeric_features))
+    
     if sig in _MAT_CACHE:
-        X_all_mat, col_ix = _MAT_CACHE[sig]
+        X_all_mat, col_ix, nn_frac_raw, var_raw = _MAT_CACHE[sig]
     else:
         if require_numeric_features:
             X_num_all = X.apply(pd.to_numeric, errors="coerce")
         else:
-            X_num_all = X
+            X_num_all = X.copy()
+    
+        # Replace inf first
+        X_num_all = X_num_all.replace([np.inf, -np.inf], np.nan)
+    
+        # --- compute raw presence/variance BEFORE fill ---
+        X_raw_mat = X_num_all.to_numpy(dtype=np.float32, copy=False)
+        finite_raw = np.isfinite(X_raw_mat)
+        nn_frac_raw = finite_raw.mean(axis=0)
+    
+        with np.errstate(invalid="ignore"):
+            X_tmp = np.where(finite_raw, X_raw_mat, np.nan)
+            var_raw = np.nanvar(X_tmp, axis=0)
+    
+        # --- now fill for selection-time stability ---
+        X_num_all = X_num_all.fillna(0.0)
+    
+        # final cached matrix used for modeling
         X_all_mat = X_num_all.to_numpy(dtype=np.float32, copy=False)
-        col_ix = {c: i for i, c in enumerate(X.columns)}
+        col_ix = {c: i for i, c in enumerate(X_num_all.columns)}
+    
         # keep cache bounded
         if len(_MAT_CACHE) > 8:
-            try:
-                _MAT_CACHE.pop(next(iter(_MAT_CACHE)))
-            except Exception:
-                _MAT_CACHE = {}
-        _MAT_CACHE[sig] = (X_all_mat, col_ix)
+            _MAT_CACHE.clear()
+    
+        _MAT_CACHE[sig] = (X_all_mat, col_ix, nn_frac_raw, var_raw)
         _cv_auc_for_feature_set._MAT_CACHE = _MAT_CACHE
 
     # -----------------------------
@@ -2942,16 +2962,14 @@ def _cv_auc_for_feature_set(
             raise RuntimeError(msg)
 
     if (not feats) and fallback_to_all_available_features:
-        finite = np.isfinite(X_all_mat)
-        nn_frac = finite.mean(axis=0)
-        with np.errstate(invalid="ignore"):
-            var = np.nanvar(X_all_mat, axis=0)
+        nn_frac = nn_frac_raw
+        var = var_raw0)
 
-        cols_list = list(X.columns)
+        cols_list = list(col_ix.keys())
         sparse_ok = np.fromiter((_is_sparse_ok_name(c) for c in cols_list), dtype=bool, count=len(cols_list))
 
         # two-tier presence: keep dense cols normally; allow sparse signal cols at lower floor
-        usable = ((nn_frac >= float(min_non_nan_frac)) | (sparse_ok & (nn_frac >= 0.001))) & (var > 0.0)
+        usable = ((nn_frac >= float(min_non_nan_frac)) | (sparse_ok & (nn_frac >= 0.005))) & (var > 0.0)
 
         feats = [c for c, j in col_ix.items() if usable[j] and (not _is_forbidden(c))]
 
