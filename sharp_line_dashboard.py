@@ -3234,8 +3234,8 @@ def _auto_select_k_by_auc(
     max_k=None,
 
     # --- MORE SIGNAL defaults ---
-    patience=400,                 # was 160 (stops later → finds weaker features)
-    min_improve=0.0,              # was 1e-7 (allow tiny lifts; rely on LL/Brier + CV)
+    patience=200,                 # was 160 (stops later → finds weaker features)
+    min_improve=1e-7,              # was 1e-7 (allow tiny lifts; rely on LL/Brier + CV)
 
     verbose=True,
     log_func=print,
@@ -3248,7 +3248,7 @@ def _auto_select_k_by_auc(
 
     orient_features=False,
     enable_feature_flips=False,
-    max_feature_flips=0,
+    max_feature_flips=None,
     orient_passes=1,
 
     force_full_scan=True, 
@@ -3267,7 +3267,7 @@ def _auto_select_k_by_auc(
 
     # --- speed knobs ---
     quick_screen: bool = True,
-    quick_folds: int = 4,         # was 2 (reduces noisy quick-gate rejects)
+    quick_folds: int = 2,         # was 2 (reduces noisy quick-gate rejects)
     quick_accept: float = 0.0,    # kept for compat (unused)
     quick_drop: float = 0.0,      # kept for compat (unused)
 
@@ -3644,11 +3644,11 @@ def _auto_select_k_by_auc(
 
         # k-adaptive thresholds (MORE SIGNAL = more forgiving rej_margin)
         if k < max(12, min_k):
-            rej_margin = 0.00010
+            rej_margin = 0.0010
         elif k < 40:
-            rej_margin = 0.00006
+            rej_margin = 0.005
         else:
-            rej_margin = 0.00004
+            rej_margin = 0.004
 
         quick_margin_auc = rej_margin
         flip_close_margin = rej_margin
@@ -3666,7 +3666,7 @@ def _auto_select_k_by_auc(
                 res_q = _cv_eval_auc_only(
                     X_work[:, :k+1], folds_quick,
                     abort_best_auc=(best_val if np.isfinite(best_val) else None),
-                    early_stop_rounds=500,
+                    early_stop_rounds=100,
                 )
                 evals_done += 1
                 m_q = float(res_q.get("auc", np.nan))
@@ -3724,7 +3724,7 @@ def _auto_select_k_by_auc(
                         res_flip_auc = _cv_eval_auc_only(
                             X_work[:, :k+1], folds_full,
                             abort_best_auc=None,
-                            early_stop_rounds=2000,
+                            early_stop_rounds=150,
                         )
                         evals_done += 1
                         m_flip = float(res_flip_auc.get("auc", np.nan))
@@ -3868,8 +3868,8 @@ def select_features_auto(
     corr_global: float = 0.97,
     max_feats_major: int = 220,
     max_feats_small: int = 160,
-    topk_per_fold: int = 160,
-    min_presence: float = 0.80,
+    topk_per_fold: int = 80,
+    min_presence: float = 0.40,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
 
@@ -3952,12 +3952,13 @@ def select_features_auto(
     nn_frac = finite.mean(axis=0)
     with np.errstate(invalid="ignore"):
         var = np.nanvar(X_mat, axis=0)
+        var = np.where(np.isfinite(var), var, 0.0)
 
     # -----------------------------
     # 2) usable mask (two-tier presence floor)
     # -----------------------------
     min_non_nan_dense = 0.001
-    min_non_nan_sparse = 0.00003
+    min_non_nan_sparse = max(50 / n, 0.0002) 
 
     name_arr = np.asarray(cols, dtype=object)
     sparse_ok = np.fromiter((_is_sparse_ok_name(c) for c in name_arr), dtype=bool, count=len(cols))
@@ -3978,45 +3979,142 @@ def select_features_auto(
     # -----------------------------
     # 3) cheap univariate screen (corr proxy)
     # -----------------------------
+    # -----------------------------
+    # 3) cheap univariate screen (corr proxy)  ✅ FIXED
+    #   - normalize by effective count to avoid sparse inflation
+    #   - compute a true-ish correlation proxy using only finite entries
+    #   - add light shrinkage for very low-count features
+    # -----------------------------
     y_f = y_arr.astype(np.float32)
     y_c = y_f - y_f.mean()
-
-    with np.errstate(invalid="ignore", divide="ignore"):
-        mu = np.nanmean(X_mat[:, usable_idx], axis=0)
-        sd = np.nanstd(X_mat[:, usable_idx], axis=0)
-
-    X_u = X_mat[:, usable_idx]
+    y_sd = float(np.std(y_c) + 1e-12)
+    
+    X_u   = X_mat[:, usable_idx]
     fin_u = finite[:, usable_idx]
-
+    
+    # per-column stats on finite entries
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mu  = np.nanmean(X_u, axis=0).astype(np.float32, copy=False)
+        sd  = np.nanstd(X_u, axis=0).astype(np.float32, copy=False)
+    
+    # counts of finite values per column (critical for sparse control)
+    cnt = fin_u.sum(axis=0).astype(np.float32, copy=False)
+    cnt_safe = np.maximum(cnt, 1.0)
+    
+    # compute cov normalized by count (so 3-row features don't dominate)
     block = 256
-    cov = np.zeros(len(usable_idx), dtype=np.float32)
+    cov = np.zeros(X_u.shape[1], dtype=np.float32)
+    
     for j0 in range(0, X_u.shape[1], block):
         j1 = min(X_u.shape[1], j0 + block)
-        Xu_b = X_u[:, j0:j1]
+    
+        Xu_b  = X_u[:, j0:j1]
         fin_b = fin_u[:, j0:j1]
-        mu_b = mu[j0:j1]
+        mu_b  = mu[j0:j1]
+    
+        # center only where finite; elsewhere 0 so dot() ignores missing
         xc = np.where(fin_b, Xu_b - mu_b, 0.0).astype(np.float32, copy=False)
-        cov[j0:j1] = (xc.T @ y_c).astype(np.float32, copy=False)
-
-    y_sd = float(np.std(y_c) + 1e-12)
-    score_uni = np.abs(cov) / (sd + 1e-12) / y_sd
-
+    
+        # normalized covariance estimate
+        cov[j0:j1] = (xc.T @ y_c).astype(np.float32, copy=False) / np.maximum(cnt_safe[j0:j1], 1.0)
+    
+    # base score: |corr| proxy
+    sd_safe = np.maximum(sd, 1e-12)
+    score_uni = np.abs(cov) / sd_safe / y_sd  # ~ |corr|
+    
+    # light reliability shrinkage for small counts (keeps rare signals but stops lottery wins)
+    # ~ sqrt(cnt / (cnt + k)) : at cnt<<k shrinks strongly; at cnt>>k ~1
+    k_shrink = max(50.0, 0.0005 * float(n))   # adaptive: >=50 examples, or 0.05% of data
+    shrink = np.sqrt(cnt_safe / (cnt_safe + k_shrink)).astype(np.float32, copy=False)
+    score_uni *= shrink
+    
+    # hard-penalize columns with effectively no variance after nan-handling
+    score_uni = np.where(np.isfinite(score_uni), score_uni, 0.0).astype(np.float32, copy=False)
+    
     is_small = str(sport_key).upper() in {"WNBA", "CFL", "MLS", "NHL"}
     max_pre = int(max_feats_small if is_small else max_feats_major)
-
+    
     # keep ~3x final budget for interactions
     pre_budget = int(min(len(usable_idx), max(max_pre * 3, len(mk_in) + 50)))
-
     # -----------------------------
-    # 3b) NEW: family-aware reserve so sparse "signal #1" families survive preselect
+    # 3c) Fold voting filter ✅ uses topk_per_fold / min_presence / sign_flip_max
+    #   IMPORTANT: must run BEFORE building reserved/cand/order
+    # -----------------------------
+    folds_list = []
+    if hasattr(folds, "split"):
+        idx_dummy = np.zeros((len(y_arr), 1), dtype=np.float32)
+        for tr, va in folds.split(idx_dummy, y_arr):
+            folds_list.append((np.asarray(tr, np.int64), np.asarray(va, np.int64)))
+    else:
+        folds_list = [(np.asarray(tr, np.int64), np.asarray(va, np.int64)) for tr, va in (folds or [])]
+    
+    F = len(folds_list)
+    if F >= 2 and int(topk_per_fold) > 0:
+        K = int(max(10, topk_per_fold))
+        votes = np.zeros(len(usable_idx), dtype=np.int16)
+        pos   = np.zeros(len(usable_idx), dtype=np.int16)
+        neg   = np.zeros(len(usable_idx), dtype=np.int16)
+    
+        y_full = y_arr.astype(np.float32)
+    
+        for tr, _va in folds_list:
+            y_tr = y_full[tr]
+            y_tc = y_tr - y_tr.mean()
+            y_sd_tr = float(np.std(y_tc) + 1e-12)
+    
+            X_tr = X_mat[tr][:, usable_idx]
+            fin_tr = np.isfinite(X_tr)
+    
+            mu_tr = np.nanmean(X_tr, axis=0).astype(np.float32, copy=False)
+            sd_tr = np.nanstd(X_tr, axis=0).astype(np.float32, copy=False)
+            sd_tr = np.maximum(sd_tr, 1e-12)
+    
+            xc = np.where(fin_tr, X_tr - mu_tr, 0.0).astype(np.float32, copy=False)
+            cnt_tr = fin_tr.sum(axis=0).astype(np.float32, copy=False)
+            cnt_tr = np.maximum(cnt_tr, 1.0)
+    
+            cov_tr = (xc.T @ y_tc).astype(np.float32, copy=False) / cnt_tr
+            score_tr = np.abs(cov_tr) / sd_tr / y_sd_tr
+    
+            kk = min(K, score_tr.size)
+            if kk <= 0:
+                continue
+            topk_loc = np.argpartition(-score_tr, kk - 1)[:kk]
+    
+            votes[topk_loc] += 1
+            pos[topk_loc] += (cov_tr[topk_loc] > 0).astype(np.int16)
+            neg[topk_loc] += (cov_tr[topk_loc] < 0).astype(np.int16)
+    
+        presence = votes.astype(np.float32) / float(max(F, 1))
+        flip_rate = np.minimum(pos, neg).astype(np.float32) / np.maximum((pos + neg).astype(np.float32), 1.0)
+    
+        keep_mask = (presence >= float(min_presence)) & (flip_rate <= float(sign_flip_max))
+    
+        # always keep must_keep
+        if mk_in:
+            mk_set = set(mk_in)
+            for loc, col_j in enumerate(usable_idx):
+                if cols[int(col_j)] in mk_set:
+                    keep_mask[loc] = True
+    
+        usable_idx = usable_idx[keep_mask]
+        score_uni  = score_uni[keep_mask]
+    
+    # Recompute pre_budget AFTER fold voting (pool may shrink)
+    is_small = str(sport_key).upper() in {"WNBA", "CFL", "MLS", "NHL"}
+    max_pre = int(max_feats_small if is_small else max_feats_major)
+    pre_budget = int(min(len(usable_idx), max(max_pre * 3, len(mk_in) + 50)))
+    
+    # -----------------------------
+    # 3b) family-aware reserve ✅ now operates on fold-filtered usable_idx
     # -----------------------------
     reserve_per_family = 40
     max_families = 100
-
-    rank_local = np.argsort(-score_uni)  # indices into usable_idx (desc)
-    usable_ranked_cols = usable_idx[rank_local]                 # column indices in X_mat
-    usable_ranked_names = [cols[j] for j in usable_ranked_cols] # names
-
+    
+    rank_local = np.argsort(-score_uni)               # indices into usable_idx space
+    usable_ranked_cols = usable_idx[rank_local]       # column indices in X_mat
+    usable_ranked_names = [cols[j] for j in usable_ranked_cols]
+    
     family_counts = {}
     reserved = []
     for j_idx, fname in zip(usable_ranked_cols, usable_ranked_names):
@@ -4027,33 +4125,41 @@ def select_features_auto(
         if c < reserve_per_family:
             reserved.append(int(j_idx))
             family_counts[fam] = c + 1
-
+    
     reserved = np.array(reserved, dtype=int)
-
+    
     need = max(0, pre_budget - reserved.size)
     if need > 0:
         top_global = usable_ranked_cols[:need]
         cand_idx = np.unique(np.concatenate([reserved, top_global])).astype(int)
     else:
         cand_idx = np.unique(reserved).astype(int)
-
-    # order candidates by uni score
-    # (build local mapping from col->score_uni)
+    
+    # order candidates by score_uni (build fresh mapping after fold voting)
     idx_to_local = {int(col_j): int(loc_j) for loc_j, col_j in enumerate(usable_idx)}
     cand_scores = np.array([score_uni[idx_to_local[int(j)]] for j in cand_idx], dtype=np.float32)
-    order = cand_idx[np.argsort(-cand_scores)]
+    order = cand_idx[np.argsort(-cand_scores)]  
+       
 
+   
     # -----------------------------
     # 4) cheap correlation pruning (less destructive within signal families)
     # -----------------------------
     corr_thr_global = float(corr_global if corr_global is not None else 0.92)
-    corr_thr_signal = 0.975
-
+    corr_thr_within = float(corr_within if corr_within is not None else 0.90)
+    signal_fams = {"SharpMove_", "OddsMove_", "Hybrid_", "Steam_", "Resistance_"}
+    
     def _corr_thr_for_pair(a: str, b: str) -> float:
         fa = _feat_family(a)
         fb = _feat_family(b)
-        if fa == fb and fa in {"SharpMove_", "OddsMove_", "Hybrid_", "Steam_", "Resistance_"}:
-            return corr_thr_signal
+        if fa == fb:
+            # within-family pruning
+            thr = corr_thr_within
+            # for signal families, be less destructive (keep more variants)
+            if fa in signal_fams:
+                thr = max(thr, 0.975)
+            return thr
+        # across-family pruning
         return corr_thr_global
 
     keep = [cols.index(m) for m in mk_in if m in cols]
@@ -4140,8 +4246,8 @@ def select_features_auto(
             orient_passes=1,
 
             quick_screen=True,
-            quick_folds=2,
-            abort_margin_cv=0.0,
+            quick_folds=4,
+            abort_margin_cv=-1e-6,
             force_full_scan=True,
             time_budget_s=1e18,
             resume_state=None,
