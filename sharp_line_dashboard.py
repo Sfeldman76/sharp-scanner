@@ -3402,9 +3402,16 @@ def _auto_select_k_by_auc(
     folds_full = folds_list
 
     # numeric matrix once
+
     X_num_all = X.apply(pd.to_numeric, errors="coerce")
+    X_num_all = X_num_all.replace([np.inf, -np.inf], np.nan)
+    
+    med = X_num_all.median(numeric_only=True)
+    X_num_all = X_num_all.fillna(med).fillna(0.0)
+    
     X_all_mat = X_num_all.to_numpy(dtype=np.float32, copy=False)
-    col_ix = {c: i for i, c in enumerate(X.columns)}
+    col_ix = {c: i for i, c in enumerate(X_num_all.columns)}
+
 
     # xgb config
     try:
