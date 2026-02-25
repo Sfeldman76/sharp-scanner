@@ -3868,7 +3868,7 @@ def select_features_auto(
     corr_global: float = 0.97,
     max_feats_major: int = 220,
     max_feats_small: int = 160,
-    topk_per_fold: int = 80,
+    topk_per_fold: int = 120,
     min_presence: float = 0.40,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
@@ -3957,8 +3957,8 @@ def select_features_auto(
     # -----------------------------
     # 2) usable mask (two-tier presence floor)
     # -----------------------------
-    min_non_nan_dense = 0.001
-    min_non_nan_sparse = max(50 / n, 0.0002) 
+    min_non_nan_dense = 0.0001
+    min_non_nan_sparse = max(50 / n, 0.00002) 
 
     name_arr = np.asarray(cols, dtype=object)
     sparse_ok = np.fromiter((_is_sparse_ok_name(c) for c in name_arr), dtype=bool, count=len(cols))
@@ -11651,7 +11651,7 @@ def train_sharp_model_from_bq(
             accept_metric="score",
             auc_min_improve=0.0,
         
-            topk_per_fold=100,
+            topk_per_fold=120,
             min_presence=0.40,
             sign_flip_max=0.35,
         
