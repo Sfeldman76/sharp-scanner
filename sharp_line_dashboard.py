@@ -11644,7 +11644,7 @@ def train_sharp_model_from_bq(
             y_train=y_train,
             folds=folds,
             sport_key=sport_key,
-            must_keep=["PR_Rating_Diff"],
+            must_keep=[],
         
             use_auc_auto=True,
             auc_patience=300,
