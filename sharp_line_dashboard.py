@@ -11648,7 +11648,7 @@ def train_sharp_model_from_bq(
         
             use_auc_auto=True,
             auc_patience=300,
-            accept_metric="score",
+            accept_metric="auc",
             auc_min_improve=0.0,
         
             topk_per_fold=120,
