@@ -11602,72 +11602,86 @@ def train_sharp_model_from_bq(
 
         # ================== SHAP stability selection (on pruned set) ==================
         # 1) SHAP stability on a pruned base set (safe & fallback-friendly)
-        
-        # ======== AUTO FEATURE SELECTION (replaces manual SHAP/per-family/global pruning) ========
-
         # 1) Build a DataFrame view once
         X_df_train = pd.DataFrame(X_train, columns=list(features_pruned))
         
+        # Make X_full_df ONCE (before using it)
+        X_full_df = pd.DataFrame(X_full, columns=list(features_pruned))
+        
+      
         def _default_proto():
-            # Lightweight, single-threaded proto just for SHAP/perm importance
             return XGBClassifier(
                 objective="binary:logistic",
-                eval_metric=["logloss","auc"],
+                eval_metric=["logloss", "auc"],
                 tree_method="hist",
                 grow_policy="lossguide",
-                max_bin=256,
-                n_estimators=400,     # modest; SHAP uses this proto only
-                learning_rate=0.05,
-                subsample=0.7,
-                colsample_bytree=0.6,
-                n_jobs=1,            # avoid thread storms during CV/SHAP
-            )
         
+                # ---- stability knobs ----
+                n_estimators=250,        # ↓ fewer trees = less fold noise
+                learning_rate=0.07,      # slightly higher to compensate
+                subsample=0.90,          # ↑ less stochastic
+                colsample_bytree=0.85,   # ↑ more consistent feature exposure
+        
+                max_depth=6,             # optional but stabilizes splits
+                min_child_weight=2,      # avoids tiny-split noise
+        
+                max_bin=256,
+                n_jobs=1,
+                random_state=42,
+            )
         try:
-            _model_proto = est_auc     # if already defined earlier in your script
+            _model_proto = est_auc
         except NameError:
             try:
-                _model_proto = est_ll  # else try logloss stream if it exists
+                _model_proto = est_ll
             except NameError:
                 _model_proto = _default_proto()
-        # 2) Pick a model prototype for SHAP/perm importance
-  
-        # 3) Run automatic selection (SHAP-stability with safe fallback to perm AUC),
-        #    then family-wise and global correlation pruning, then league-aware cap.
-  
         
-        # ======== AUTO FEATURE SELECTION (INLINE / ONE-SHOT) ========
- 
-       
+        # 2) Auto selection
         feature_cols, shap_summary = select_features_auto(
             model_proto=_model_proto,
             X_df_train=X_df_train,
             y_train=y_train,
             folds=folds,
             sport_key=sport_key,
+            must_keep=["PR_Rating_Diff"],
         
-            must_keep=["PR_Rating_Diff", "Spread_Size_Bucket", "Total_Size_Bucket", "H2H_Prob_Bucket"],
-        
-            auc_min_k=None,
             use_auc_auto=True,
             auc_patience=300,
-            auc_min_improve=5e-7,          # <- key change
-            accept_metric="auc",
-            auc_verbose=True,
-            log_func=log_func,
+            accept_metric="score",
+            auc_min_improve=0.0,
         
             topk_per_fold=100,
             min_presence=0.40,
-            corr_within=0.90,
-            corr_global=0.95,              # <- key change
-            max_feats_major=200,           # <- key change
-            max_feats_small=140,           # <- key change
             sign_flip_max=0.35,
-            shap_cv_max=1.00,
+        
+            corr_within=0.90,
+            corr_global=0.97,
+        
+            max_feats_major=200,
+            max_feats_small=140,
+        
+            flip_gain_min=0.0,
+            auc_verbose=True,
+            log_func=log_func,
         )
-        # 4) Rebuild matrices in the final selected order
-        X_train = X_df_train.loc[:, feature_cols].to_numpy(np.float32)
-        X_full  = pd.DataFrame(X_full, columns=list(features_pruned)).loc[:, feature_cols].to_numpy(np.float32)
+        
+        # 3) Ensure both train and full share identical column order (and exist)
+        feature_cols = [c for c in feature_cols if c in X_df_train.columns]
+        # (optional safety) ensure same exists in full too:
+        feature_cols = [c for c in feature_cols if c in X_full_df.columns]
+        # 👇 PUT IT HERE
+        log_func(f"[AutoFS] selected={len(feature_cols)} (train_cols={X_df_train.shape[1]})")
+
+        def _final_clean(df: pd.DataFrame) -> pd.DataFrame:
+            df = df.apply(pd.to_numeric, errors="coerce")
+            df = df.replace([np.inf, -np.inf], np.nan)
+            med = df.median(numeric_only=True)
+            return df.fillna(med).fillna(0.0)
+        
+        # 4) Rebuild matrices ONCE, cleaned, aligned
+        X_train = _final_clean(X_df_train.reindex(columns=feature_cols)).to_numpy(np.float32, copy=False)
+        X_full  = _final_clean(X_full_df.reindex(columns=feature_cols)).to_numpy(np.float32, copy=False)
         
         # 5) Sanity checks / logs
         assert X_train.shape[1] == len(feature_cols), f"X_train={X_train.shape[1]} vs feature_cols={len(feature_cols)}"
