@@ -3235,7 +3235,7 @@ def _auto_select_k_by_auc(
 
     # --- MORE SIGNAL defaults ---
     patience=200,                 # was 160 (stops later → finds weaker features)
-    min_improve=1e-7,              # was 1e-7 (allow tiny lifts; rely on LL/Brier + CV)
+    min_improve=1e-5,              # was 1e-7 (allow tiny lifts; rely on LL/Brier + CV)
 
     verbose=True,
     log_func=print,
@@ -3267,7 +3267,7 @@ def _auto_select_k_by_auc(
 
     # --- speed knobs ---
     quick_screen: bool = True,
-    quick_folds: int = 2,         # was 2 (reduces noisy quick-gate rejects)
+    quick_folds: int = 5,         # was 2 (reduces noisy quick-gate rejects)
     quick_accept: float = 0.0,    # kept for compat (unused)
     quick_drop: float = 0.0,      # kept for compat (unused)
 
@@ -3644,7 +3644,7 @@ def _auto_select_k_by_auc(
 
         # k-adaptive thresholds (MORE SIGNAL = more forgiving rej_margin)
         if k < max(12, min_k):
-            rej_margin = 0.0010
+            rej_margin = 0.0015
         elif k < 40:
             rej_margin = 0.005
         else:
@@ -3868,8 +3868,8 @@ def select_features_auto(
     corr_global: float = 0.97,
     max_feats_major: int = 220,
     max_feats_small: int = 160,
-    topk_per_fold: int = 120,
-    min_presence: float = 0.40,
+    topk_per_fold: int = 100,
+    min_presence: float = 0.55,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
 
@@ -4246,7 +4246,7 @@ def select_features_auto(
             orient_passes=1,
 
             quick_screen=True,
-            quick_folds=4,
+            quick_folds=6,
             abort_margin_cv=-1e-6,
             force_full_scan=True,
             time_budget_s=1e18,
