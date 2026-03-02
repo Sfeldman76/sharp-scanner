@@ -12386,59 +12386,75 @@ def train_sharp_model_from_bq(
                 except Exception: pass
         except Exception:
             pass
-        
+
         # -----------------------------------------
         # OOF predictions (train-only) + blending
+        # + Calibration + Tables + Save + Artifacts (HARDENED)
         # -----------------------------------------
-        SMALL = ((sport_key in SMALL_LEAGUES) or (np.unique(g_train).size < 30) or (len(y_train) < 500))
-        MIN_OOF = 40 if SMALL else 120
+        SMALL = (
+            (sport_key in SMALL_LEAGUES)
+            or (np.unique(g_train).size < 30)
+            or (len(y_train) < 500)
+        )
+        MIN_OOF     = 40 if SMALL else 120
         RUN_LOGLOSS = True
-        eps = 1e-7
+        eps         = 1e-7
         
-        oof_pred_auc = np.full(len(y_train), np.nan, dtype=np.float64)
+        oof_pred_auc     = np.full(len(y_train), np.nan, dtype=np.float64)
         oof_pred_logloss = (np.full(len(y_train), np.nan, dtype=np.float64) if RUN_LOGLOSS else None)
         
         # IMPORTANT:
         # - You ALREADY per-fold "AUC-align" via auc_with_flip() below.
-        # - Therefore DO NOT do a second global flip later unless you explicitly want to allow polarity inversion.
+        # - Therefore DO NOT do a second global flip later unless you explicitly want polarity inversion.
         ALLOW_GLOBAL_FLIP = False
         
+        # --- Make OOFs (per-fold AUC-align) ---
         for tr_rel, va_rel in folds:
-            # Guard against 0/None ntrees
-            fold_ntrees_auc = int(max(200, n_trees_auc))
-            fold_ntrees_ll  = int(max(200, n_trees_ll))
+            fold_ntrees_auc = int(max(200, int(n_trees_auc) if n_trees_auc is not None else 0))
+            fold_ntrees_ll  = int(max(200, int(n_trees_ll)  if n_trees_ll  is not None else 0))
         
-            m_auc = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": fold_ntrees_auc, "n_jobs": 1})
+            m_auc = XGBClassifier(
+                **{**base_kwargs, **best_auc_params, "n_estimators": fold_ntrees_auc, "n_jobs": 1}
+            )
             m_auc.fit(
                 X_train[tr_rel], y_train[tr_rel],
                 sample_weight=w_train[tr_rel],
-                verbose=False
+                verbose=False,
             )
             pa, _ = pos_proba_safe(m_auc, X_train[va_rel], positive=1)
             _, pa_fixed, _ = auc_with_flip(y_train[va_rel].astype(int), pa, w_train[va_rel])
             oof_pred_auc[va_rel] = np.clip(pa_fixed.astype(np.float64), eps, 1 - eps)
         
             if RUN_LOGLOSS:
-                m_ll = XGBClassifier(**{**base_kwargs, **best_ll_params, "n_estimators": fold_ntrees_ll, "n_jobs": 1})
+                m_ll = XGBClassifier(
+                    **{**base_kwargs, **best_ll_params, "n_estimators": fold_ntrees_ll, "n_jobs": 1}
+                )
                 m_ll.fit(
                     X_train[tr_rel], y_train[tr_rel],
                     sample_weight=w_train[tr_rel],
-                    verbose=False
+                    verbose=False,
                 )
                 pl, _ = pos_proba_safe(m_ll, X_train[va_rel], positive=1)
                 oof_pred_logloss[va_rel] = np.clip(pl.astype(np.float64), eps, 1 - eps)
         
         mask_auc = np.isfinite(oof_pred_auc)
-        mask_log = np.isfinite(oof_pred_logloss) if RUN_LOGLOSS else mask_auc
+        mask_log = np.isfinite(oof_pred_logloss) if (RUN_LOGLOSS and oof_pred_logloss is not None) else mask_auc
         mask_oof = mask_auc & mask_log
-        n_oof = int(mask_oof.sum())
+        n_oof    = int(mask_oof.sum())
         
-        # pick OOF sources
-        y_oof = y_train[mask_oof].astype(int) if n_oof >= MIN_OOF else y_train[mask_auc].astype(int)
-        p_oof_auc = np.clip(oof_pred_auc[mask_oof if n_oof >= MIN_OOF else mask_auc], eps, 1 - eps).astype(np.float64)
-        p_oof_log = None
-        if RUN_LOGLOSS and (oof_pred_logloss is not None) and (n_oof >= MIN_OOF):
-            p_oof_log = np.clip(oof_pred_logloss[mask_oof], eps, 1 - eps).astype(np.float64)
+        # --- Pick OOF sources robustly ---
+        if n_oof >= MIN_OOF:
+            y_oof     = y_train[mask_oof].astype(int)
+            p_oof_auc = np.clip(oof_pred_auc[mask_oof], eps, 1 - eps).astype(np.float64)
+            p_oof_log = (
+                np.clip(oof_pred_logloss[mask_oof], eps, 1 - eps).astype(np.float64)
+                if (RUN_LOGLOSS and oof_pred_logloss is not None)
+                else None
+            )
+        else:
+            y_oof     = y_train[mask_auc].astype(int)
+            p_oof_auc = np.clip(oof_pred_auc[mask_auc], eps, 1 - eps).astype(np.float64)
+            p_oof_log = None
         
         best_w, p_oof_blend, _ = pick_blend_weight_on_oof(
             y_oof=y_oof,
@@ -12450,8 +12466,13 @@ def train_sharp_model_from_bq(
         )
         
         p_oof_blend = np.asarray(p_oof_blend, dtype=np.float64)
-        oof_std = float(np.std(p_oof_blend))
-        oof_rng = float(np.max(p_oof_blend) - np.min(p_oof_blend))
+        if not np.isfinite(p_oof_blend).all():
+            keep = np.isfinite(p_oof_blend)
+            y_oof = y_oof[keep]
+            p_oof_blend = p_oof_blend[keep]
+        
+        oof_std = float(np.std(p_oof_blend)) if p_oof_blend.size else float("nan")
+        oof_rng = float(np.max(p_oof_blend) - np.min(p_oof_blend)) if p_oof_blend.size else float("nan")
         
         st.write({
             "SMALL": bool(SMALL),
@@ -12459,45 +12480,43 @@ def train_sharp_model_from_bq(
             "n_oof": int(len(y_oof)),
             "blend_w": float(best_w),
             "oof_std": float(oof_std),
-            "oof_minmax": (float(p_oof_blend.min()), float(p_oof_blend.max())),
+            "oof_minmax": (
+                float(np.min(p_oof_blend)) if p_oof_blend.size else None,
+                float(np.max(p_oof_blend)) if p_oof_blend.size else None,
+            ),
         })
-        
         assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
         
-        # ---------------- Calibration (FIXED) ----------------
+        # ---------------- Calibration ----------------
         def _prior_correct(p, train_pos, hold_pos, clip=1e-6):
-            p = np.clip(p, clip, 1-clip)
-            def logit(x): return np.log(x/(1-x))
-            def sigmoid(z): return 1.0/(1.0+np.exp(-z))
-            shift = np.log((hold_pos/(1-hold_pos)) / (train_pos/(1-train_pos)))
+            p = np.clip(p, clip, 1 - clip)
+            def logit(x): return np.log(x / (1 - x))
+            def sigmoid(z): return 1.0 / (1.0 + np.exp(-z))
+            shift = np.log((hold_pos / (1 - hold_pos)) / (train_pos / (1 - train_pos)))
             return sigmoid(logit(p) + shift)
         
         CLIP = 0.03 if str(market).lower().strip() == "spreads" else (0.02 if SMALL else 0.01)
         
-        # deployment prior
-        deploy_pos = float(np.mean(y_full[hold_idx] == 1))
-        oof_pos    = float(np.mean(y_oof == 1))
+        deploy_pos = float(np.mean(y_full[hold_idx] == 1)) if len(hold_idx) else float(np.mean(y_oof == 1))
+        oof_pos    = float(np.mean(y_oof == 1)) if len(y_oof) else float(np.mean(y_full[train_all_idx] == 1))
         
-        # --- IMPORTANT: since OOF AUC stream already got per-fold AUC flip, do NOT global flip by default
         flip_flag = False
-        if ALLOW_GLOBAL_FLIP:
+        if ALLOW_GLOBAL_FLIP and (np.unique(y_oof).size == 2):
             flip_flag = _decide_flip_on_oof(y_oof, p_oof_blend, min_margin=0.01)
         
         p_oof_for_cal = (1.0 - p_oof_blend) if flip_flag else p_oof_blend
         p_oof_prior   = _prior_correct(p_oof_for_cal, train_pos=oof_pos, hold_pos=deploy_pos)
         
-        # Degeneracy guard: if OOF preds are collapsed, isotonic & temperature will wreck shape.
-        COLLAPSED = bool((oof_rng < 0.02) or (oof_std < 0.01))
+        COLLAPSED = bool((np.isfinite(oof_rng) and oof_rng < 0.02) or (np.isfinite(oof_std) and oof_std < 0.01))
         
         use_qiso = (len(np.unique(np.round(p_oof_prior, 4))) < 400)
         cals_raw = fit_iso_platt_beta(p_oof_prior, y_oof, eps=1e-6, use_quantile_iso=use_qiso)
-        cals = _normalize_cals(cals_raw)
+        cals     = _normalize_cals(cals_raw)
         
         cals["iso"]   = _ensure_transform_for_iso(cals.get("iso")) or _IdentityIsoCal(eps=1e-6)
         cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=1e-6)
         cals["beta"]  = _ensure_predict_proba_for_prob_cal(cals.get("beta"),  eps=1e-6)
         
-        # candidates (if collapsed, prioritize platt/beta; keep iso last)
         candidates = []
         if cals.get("beta")  is not None: candidates.append(("beta",  cals["beta"]))
         if cals.get("platt") is not None: candidates.append(("platt", cals["platt"]))
@@ -12517,23 +12536,30 @@ def train_sharp_model_from_bq(
                 if np.isfinite(ece):
                     scores.append((ece, kind, cal))
             except Exception as e:
-                st.debug(f"Calibrator {kind} failed: {e}")
+                try:
+                    st.debug(f"Calibrator {kind} failed: {e}")
+                except Exception:
+                    pass
         
-        # Selection rule:
-        # - if collapsed: force platt if available; otherwise best-ECE among non-iso; iso only as last resort
+        ece_best = float("nan")
         if COLLAPSED:
             forced = next(((k, c) for (k, c) in candidates if k == "platt"), None)
             if forced is None:
                 forced = next(((k, c) for (k, c) in candidates if k == "beta"), None)
             if forced is not None:
                 cal_name, cal_obj = forced
-                ece_best = float("nan")
             else:
                 scores.sort(key=lambda t: t[0])
-                ece_best, cal_name, cal_obj = scores[0] if scores else (float("nan"), "iso", _IdentityIsoCal(eps=1e-6))
+                if scores:
+                    ece_best, cal_name, cal_obj = scores[0]
+                else:
+                    cal_name, cal_obj = "iso", _IdentityIsoCal(eps=1e-6)
         else:
             scores.sort(key=lambda t: t[0])
-            ece_best, cal_name, cal_obj = scores[0] if scores else (float("nan"), "iso", _IdentityIsoCal(eps=1e-6))
+            if scores:
+                ece_best, cal_name, cal_obj = scores[0]
+            else:
+                cal_name, cal_obj = "iso", _IdentityIsoCal(eps=1e-6)
         
         st.write({
             "calibrator_used": str(cal_name),
@@ -12544,22 +12570,20 @@ def train_sharp_model_from_bq(
             "oof_range": float(oof_rng),
         })
         
-        # Fit temperature ONLY if not collapsed; otherwise keep T=1.0
         p_cal_oof = _apply_cal(cal_name, cal_obj, p_oof_prior)
         p_cal_oof = np.asarray(np.clip(p_cal_oof, CLIP, 1 - CLIP), float)
         
-        if COLLAPSED:
+        if COLLAPSED or (np.unique(y_oof).size < 2):
             T_best, T_ll = 1.0, float("nan")
         else:
             T_best, T_ll = fit_temperature_on_oof(y_oof, p_cal_oof)
-            # tiny sanity: don't let huge T flatten you to 0.5 land
             T_best = float(np.clip(T_best, 0.75, 1.25))
         
         st.write({"temp_T": float(T_best), "temp_ll": (None if not np.isfinite(T_ll) else float(T_ll))})
         
         # --- Raw model preds (AUC + optional LogLoss model) ---------------------------
-        p_tr_auc, _ = pos_proba_safe(model_auc,     X_full[train_all_idx], positive=1)
-        p_ho_auc, _ = pos_proba_safe(model_auc,     X_full[hold_idx],      positive=1)
+        p_tr_auc, _ = pos_proba_safe(model_auc, X_full[train_all_idx], positive=1)
+        p_ho_auc, _ = pos_proba_safe(model_auc, X_full[hold_idx],      positive=1)
         
         if RUN_LOGLOSS:
             p_tr_log, _ = pos_proba_safe(model_logloss, X_full[train_all_idx], positive=1)
@@ -12570,35 +12594,29 @@ def train_sharp_model_from_bq(
             p_train_blend_raw = np.clip(p_tr_auc, eps, 1 - eps)
             p_hold_blend_raw  = np.clip(p_ho_auc, eps, 1 - eps)
         
-        # Apply SAME flip before prior-correction & calibration
         if flip_flag:
             p_train_blend_raw = 1.0 - p_train_blend_raw
             p_hold_blend_raw  = 1.0 - p_hold_blend_raw
         
-        # PRIOR-CORRECT train/hold to deployment prior
-        train_pos_for_pc = float(np.mean(y_full[train_all_idx] == 1))
+        train_pos_for_pc = float(np.mean(y_full[train_all_idx] == 1)) if len(train_all_idx) else oof_pos
         p_train_prior = _prior_correct(p_train_blend_raw, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
         p_hold_prior  = _prior_correct(p_hold_blend_raw,  train_pos=train_pos_for_pc, hold_pos=deploy_pos)
         
-        # Calibrate using the chosen calibrator
         p_cal_tr = _apply_cal(cal_name, cal_obj, p_train_prior)
         p_cal_ho = _apply_cal(cal_name, cal_obj, p_hold_prior)
         
         p_cal_tr = np.asarray(np.clip(p_cal_tr, CLIP, 1 - CLIP), float)
         p_cal_ho = np.asarray(np.clip(p_cal_ho, CLIP, 1 - CLIP), float)
         
-        # Temperature scaling (only meaningful if not collapsed; T is clamped anyway)
         p_cal_tr = apply_temperature(p_cal_tr, T_best)
         p_cal_ho = apply_temperature(p_cal_ho, T_best)
         
         p_cal_tr = np.asarray(np.clip(p_cal_tr, CLIP, 1 - CLIP), float)
         p_cal_ho = np.asarray(np.clip(p_cal_ho, CLIP, 1 - CLIP), float)
         
-        # Gentle shrink of extremes
         p_train_vec = 0.95 * p_cal_tr + 0.05 * 0.5
         p_hold_vec  = 0.95 * p_cal_ho + 0.05 * 0.5
         
-        # Diagnostics
         ece_tr = expected_calibration_error(y_full[train_all_idx].astype(int), p_train_vec, n_bins=10)
         ece_ho = expected_calibration_error(y_full[hold_idx].astype(int),      p_hold_vec,  n_bins=10)
         psi    = population_stability_index(p_train_vec, p_hold_vec, bins=20)
@@ -12613,11 +12631,57 @@ def train_sharp_model_from_bq(
         assert p_train_vec.shape[0] == len(train_all_idx), "p_train_vec length mismatch"
         assert p_hold_vec.shape[0]  == len(hold_idx),      "p_hold_vec length mismatch"
         
-        # --- Save adapter (unchanged) ---
+        # -------------------------------------------------------------------
+        # CALIBRATION TABLES (Train + Holdout)  ✅ you asked to keep these
+        # -------------------------------------------------------------------
+        def _calibration_table(y_true, p_pred, q=10, eps=1e-7):
+            y_true = np.asarray(y_true, int)
+            p_pred = np.clip(np.asarray(p_pred, float), eps, 1 - eps)
+        
+            dfc = pd.DataFrame({"p": p_pred, "y": y_true}).dropna()
+            if dfc.empty:
+                return pd.DataFrame(columns=["Prob Bin", "N", "Hit Rate", "Avg Pred P"])
+        
+            uniq = np.unique(np.round(dfc["p"].to_numpy(), 6)).size
+            if uniq <= 1:
+                # constant predictions — return a single row
+                return pd.DataFrame([{
+                    "Prob Bin": "all",
+                    "N": int(len(dfc)),
+                    "Hit Rate": float(dfc["y"].mean()),
+                    "Avg Pred P": float(dfc["p"].mean()),
+                }])
+        
+            try:
+                cuts = pd.qcut(dfc["p"], q=q, duplicates="drop")
+            except Exception:
+                cuts = pd.cut(dfc["p"], bins=np.linspace(0.0, 1.0, q + 1), include_lowest=True)
+        
+            gb = dfc.groupby(cuts, observed=True, sort=False)
+        
+            rows = []
+            for k, sub in gb:
+                pmin = float(sub["p"].min()); pmax = float(sub["p"].max())
+                rows.append({
+                    "Prob Bin": f"{pmin:.2f}-{pmax:.2f}",
+                    "N": int(len(sub)),
+                    "Hit Rate": float(sub["y"].mean()),
+                    "Avg Pred P": float(sub["p"].mean()),
+                })
+            return pd.DataFrame(rows).sort_values("Avg Pred P").reset_index(drop=True)
+        
+        st.markdown("#### 🎯 Calibration Table — TRAIN (blended + calibrated)")
+        calib_train_df = _calibration_table(y_full[train_all_idx].astype(int), p_train_vec, q=10, eps=eps)
+        st.dataframe(calib_train_df, use_container_width=True)
+        
+        st.markdown("#### 🎯 Calibration Table — HOLDOUT (blended + calibrated)")
+        calib_hold_df = _calibration_table(y_full[hold_idx].astype(int), p_hold_vec, q=10, eps=eps)
+        st.dataframe(calib_hold_df, use_container_width=True)
+        
+        # --- Save adapter ---
         cal_blend = (cal_name, cal_obj)
         iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1 - CLIP))
         
-        # --- Helper to get final calibrated probs (blend → optional flip → calibrate+clip) ---
         def predict_calibrated(models: dict, X):
             pa = models["model_auc"].predict_proba(X)[:, 1]
             pl = models["model_logloss"].predict_proba(X)[:, 1]
@@ -12626,42 +12690,91 @@ def train_sharp_model_from_bq(
             if models.get("flip_flag", False):
                 p_blend = 1.0 - p_blend
             return models["iso_blend"].predict(p_blend)
-        # === Save ensemble (choose one or both) ===
         
-    # --- Book reliability (build DF exactly as apply expects) ---
+        # -------------------------------------------------------------------
+        # METRICS (always defined; prevents NameError later)
+        # -------------------------------------------------------------------
+        def _to_float(x, default=np.nan):
+            try:
+                v = float(x)
+                return v if np.isfinite(v) else float(default)
+            except Exception:
+                return float(default)
+        
+        y_train_vec = y_full[train_all_idx].astype(int)
+        y_hold_vec  = y_full[hold_idx].astype(int)
+        
+        auc_train  = auc_safe(y_train_vec, p_train_vec)
+        auc_hold   = auc_safe(y_hold_vec,  p_hold_vec)
+        
+        acc_train  = accuracy_score(y_train_vec, (p_train_vec >= 0.5).astype(int)) if np.unique(y_train_vec).size == 2 else np.nan
+        acc_hold   = accuracy_score(y_hold_vec,  (p_hold_vec  >= 0.5).astype(int)) if np.unique(y_hold_vec).size  == 2 else np.nan
+        
+        logloss_train = log_loss(y_train_vec, np.clip(p_train_vec, 1e-6, 1 - 1e-6), labels=[0, 1])
+        logloss_hold  = log_loss(y_hold_vec,  np.clip(p_hold_vec,  1e-6, 1 - 1e-6), labels=[0, 1])
+        
+        brier_train = brier_score_loss(y_train_vec, np.clip(p_train_vec, 1e-6, 1 - 1e-6))
+        brier_hold  = brier_score_loss(y_hold_vec,  np.clip(p_hold_vec,  1e-6, 1 - 1e-6))
+        
+        auc_train_f     = _to_float(auc_train)
+        auc_hold_f      = _to_float(auc_hold)
+        acc_train_f     = _to_float(acc_train)
+        acc_hold_f      = _to_float(acc_hold)
+        logloss_train_f = _to_float(logloss_train)
+        logloss_hold_f  = _to_float(logloss_hold)
+        brier_train_f   = _to_float(brier_train)
+        brier_hold_f    = _to_float(brier_hold)
+        auc_gap_f       = _to_float(auc_train_f - auc_hold_f)
+        
+        artifact_metrics = None
+        artifact_config  = None
+        if return_artifacts:
+            artifact_metrics = {
+                "auc_holdout": auc_hold_f,
+                "logloss_holdout": logloss_hold_f,
+                "brier_holdout": brier_hold_f,
+                "accuracy_holdout": acc_hold_f,
+                "auc_gap_train_holdout": auc_gap_f,
+            }
+            artifact_config = {
+                "sport": sport,
+                "market": market,
+                "feature_count": int(len(feature_cols)),
+                "calibrator": str(cal_name),
+                "flip_flag": bool(flip_flag),
+                "blend_w": float(best_w),
+            }
+        
+        # -------------------------------------------------------------------
+        # Book reliability — ALWAYS DEFINED
+        # -------------------------------------------------------------------
+        book_reliability_map = pd.DataFrame(columns=[
+            "Sport", "Market", "Bookmaker", "Book_Reliability_Score", "Book_Reliability_Lift"
+        ])
         try:
             if isinstance(df_market, pd.DataFrame) and len(df_market) > 0:
-        
-                # pick the bookmaker column we can actually use
                 bk_col = None
                 if "Bookmaker" in df_market.columns:
                     bk_col = "Bookmaker"
                 elif "Bookmaker_Norm" in df_market.columns:
                     bk_col = "Bookmaker_Norm"
         
-                # must have at least these
                 req_core = ["Sport", "Market", "SHARP_HIT_BOOL"]
                 if bk_col is None or any(c not in df_market.columns for c in req_core):
                     raise KeyError(f"Missing cols for reliability: bk_col={bk_col}, have={list(df_market.columns)[:20]}")
         
                 df_rel_in = df_market.loc[:, req_core + [bk_col]].copy()
-        
-                # builder expects 'Bookmaker'
                 if bk_col != "Bookmaker":
                     df_rel_in.rename(columns={bk_col: "Bookmaker"}, inplace=True)
         
-                # final safety (no weird null keys)
                 df_rel_in["Bookmaker"] = df_rel_in["Bookmaker"].astype(str).str.strip().str.lower()
-        
                 book_reliability_map = build_book_reliability_map(df_rel_in, prior_strength=200.0)
-        
-            # else: keep default empty DF
-        
         except Exception as e:
             logger.warning(f"book_reliability_map build failed; defaulting to empty. err={e}")
-            book_reliability_map = pd.DataFrame(columns=[
-                "Sport", "Market", "Bookmaker", "Book_Reliability_Score", "Book_Reliability_Lift"
-            ])    
+        
+        # -------------------------------------------------------------------
+        # Store trained models (per-market map)
+        # -------------------------------------------------------------------
         trained_models[market] = {
             "model_logloss":        model_logloss,
             "model_auc":            model_auc,
@@ -12673,65 +12786,58 @@ def train_sharp_model_from_bq(
             "feature_cols":         feature_cols,
         }
         
+        # -------------------------------------------------------------------
+        # Save model artifact to GCS
+        # -------------------------------------------------------------------
         save_info = save_model_to_gcs(
-            model={  # ✅ THIS IS THE IMPORTANT PART
+            model={
                 "model_logloss": model_logloss,
                 "model_auc":     model_auc,
                 "best_w":        float(best_w),
                 "feature_cols":  feature_cols,
-                "flip_flag":     bool(flip_flag),   # ✅ persist polarity
-                # optional but useful:
-                # "trained_at": datetime.utcnow().isoformat() + "Z",
-                # "sport": sport,
-                # "market": market,
+                "flip_flag":     bool(flip_flag),
             },
-            calibrator=iso_blend,                 # saved as payload["iso_blend"] by your saver
+            calibrator=iso_blend,
             sport=sport,
             market=market,
             bucket_name=bucket_name,
             team_feature_map=team_feature_map,
             book_reliability_map=book_reliability_map,
         )
+        
+        artifact_model_path = None
         if return_artifacts and isinstance(save_info, dict):
             artifact_model_path = f"gs://{save_info.get('bucket', bucket_name)}/{save_info.get('path')}"
-
-        # Use the holdout metrics you already computed
-        auc    = float(auc_hold)
-        acc    = float(acc_hold)
-        logloss = float(logloss_hold)
-        brier   = float(brier_hold)
-
-        # Keep this in the status box
+        
+        # -------------------------------------------------------------------
+        # Status box
+        # -------------------------------------------------------------------
         status.write(
-            f"""✅ Trained + saved ensemble model for {market.upper()}
-- AUC: {auc:.4f}
-- Accuracy: {acc:.4f}
-- Log Loss: {logloss:.4f}
-- Brier Score: {brier:.4f}
-"""
+            f"""✅ Trained + saved ensemble model for {str(market).upper()}
+        - AUC: {auc_hold_f:.4f}
+        - Accuracy: {acc_hold_f:.4f}
+        - Log Loss: {logloss_hold_f:.4f}
+        - Brier Score: {brier_hold_f:.4f}
+        """
         )
-
+        
         pb.progress(min(100, max(0, pct)))
-
-    # ← end of for i, market in enumerate(markets_present, 1)
-
-    status.update(label="✅ All models trained", state="complete", expanded=False)
-
-    if return_artifacts:
-        # Champion/challenger mode: return a single artifact dict instead of per-market map
-        if not artifact_model_path:
-            st.error("❌ Challenger training did not produce a model artifact.")
-            return None
-        return {
-            "model_path": artifact_model_path,
-            "metrics": artifact_metrics,
-            "config": artifact_config,
-        }
-
-    if not trained_models:
-        st.error("❌ No models were trained.")
-    return trained_models
-
+        
+        status.update(label="✅ All models trained", state="complete", expanded=False)
+        
+        if return_artifacts:
+            if not artifact_model_path:
+                st.error("❌ Challenger training did not produce a model artifact.")
+                return None
+            return {
+                "model_path": artifact_model_path,
+                "metrics": artifact_metrics,
+                "config": artifact_config,
+            }
+        
+        if not trained_models:
+            st.error("❌ No models were trained.")
+        return trained_models
 
 def evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, model_label="Base"):
     model = xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1)
