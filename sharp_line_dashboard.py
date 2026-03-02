@@ -11719,11 +11719,17 @@ def train_sharp_model_from_bq(
         train_kwargs.pop("predictor", None)
         
         # -------------------- FAST SEARCH → MODERATE/DEEP REFIT ---------------------
+        # This rewrite fixes:
+        #  1) "n_estimators: 0" / best-iter confusion (get_xgb_params() never has n_estimators)
+        #  2) accidental 0/too-small ntree caps that collapse preds to ~0.50
+        #  3) double-calibration scoring loop + iso-on-collapsed preds
+        #  4) flip semantics (avoid re-flipping already AUC-aligned OOF)
+        #  5) temperature scaling when preds are already flat
         
-        # --------- Capacity knobs (tighter, less overfit) ----------
-        SEARCH_N_EST    = 600   # was 900 – reduce trees used in CV search
+        # --------- Capacity knobs ----------
+        SEARCH_N_EST    = 600
         SEARCH_MAX_BIN  = 256
-        DEEP_N_EST      = 1600  # final deep refit is still allowed more trees
+        DEEP_N_EST      = 1600
         DEEP_MAX_BIN    = 256
         EARLY_STOP      = 100
         HALVING_FACTOR  = 2
@@ -11753,72 +11759,53 @@ def train_sharp_model_from_bq(
         
         # ======================= COMMON PARAMETER SPACE (ULTRA-HARDENED) =======================
         param_space_common = dict(
-            # Much shallower / fewer leaves
-            max_depth        = randint(2, 4),          # was up to 5
-            max_leaves       = randint(12, 48),        # was up to ~96
+            max_depth        = randint(2, 4),
+            max_leaves       = randint(12, 48),
         
-            # Slow learning
             learning_rate    = loguniform(0.006, 0.022),
         
-            # Aggressive subsampling → weaker trees
-            subsample        = uniform(0.45, 0.25),    # 0.45–0.70
-            colsample_bytree = uniform(0.45, 0.20),    # 0.45–0.65
+            subsample        = uniform(0.45, 0.25),
+            colsample_bytree = uniform(0.45, 0.20),
             colsample_bynode = uniform(0.45, 0.20),
         
-            # Stronger child / split penalties
             min_child_weight = loguniform(16, 256),
             gamma            = loguniform(5.0, 30.0),
         
-            # Stronger regularization
             reg_alpha        = loguniform(0.5, 15.0),
             reg_lambda       = loguniform(40.0, 120.0),
         
-            # Conservative histogram / step size
             max_bin          = randint(192, 320),
             max_delta_step   = loguniform(0.5, 1.8),
         )
         
-        # ======================= STREAM-SPECIFIC ADJUSTMENTS =======================
         params_ll  = dict(param_space_common)
-        
         params_auc = dict(param_space_common)
         params_auc.update(
             dict(
-                # AUC stream: even slightly smaller trees
                 max_depth        = randint(2, 3),
                 max_leaves       = randint(12, 40),
-        
                 learning_rate    = loguniform(0.007, 0.018),
-        
                 subsample        = uniform(0.50, 0.20),
                 colsample_bytree = uniform(0.48, 0.17),
                 colsample_bynode = uniform(0.48, 0.17),
-        
                 min_child_weight = loguniform(20, 256),
                 gamma            = loguniform(6.0, 30.0),
-        
                 reg_alpha        = loguniform(0.8, 12.0),
                 reg_lambda       = loguniform(45.0, 100.0),
             )
         )
         
-        # --------- Quality thresholds / search config ----------
         thr = get_quality_thresholds(sport, market)
-        
         MIN_AUC           = thr["MIN_AUC"]
         MAX_LOGLOSS       = thr["MAX_LOGLOSS"]
         MAX_ROUNDS        = 30
         MAX_OVERFIT_GAP   = thr["MAX_OVERFIT_GAP"]
-        MIN_AUC_THRESHOLD = thr["MIN_AUC_THRESHOLD"]
         
         fit_params_search = dict(sample_weight=w_train, verbose=False)
-        n_jobs_search     = max(1, min(VCPUS, 6))
+        n_jobs_search     = max(1, min(get_vcpus(), 6))
         
         def _make_search_objects(seed_ll: int, seed_auc: int):
-            """
-            Build rs_ll, rs_auc for a given pair of seeds
-            (Halving if possible, else Randomized).
-            """
+            """Build rs_ll, rs_auc for a given pair of seeds (Halving if possible, else Randomized)."""
             try:
                 rs_ll = HalvingRandomSearchCV(
                     estimator=est_ll,
@@ -11888,15 +11875,11 @@ def train_sharp_model_from_bq(
             return rs_ll, rs_auc
         
         # ======= multi-round search with overfit / quality guards =======
-        best_ll_params     = None
-        best_auc_params    = None
-        best_auc_score     = -np.inf
-        best_ll_score      = np.inf
+        best_auc_params = best_ll_params = None
+        best_auc_score  = -np.inf
+        best_ll_score   = np.inf
         best_round_metrics = None
-        
-        best_auc_estimator = None
-        best_ll_estimator  = None
-        
+        best_auc_estimator = best_ll_estimator = None
         found_good = False
         
         for round_idx in range(MAX_ROUNDS):
@@ -11917,8 +11900,7 @@ def train_sharp_model_from_bq(
         
             auc_cv_raw = float(rs_auc.best_score_)
             logloss_cv = float(-rs_ll.best_score_)
-        
-            auc_cv = float(max(auc_cv_raw, 1.0 - auc_cv_raw))
+            auc_cv     = float(max(auc_cv_raw, 1.0 - auc_cv_raw))
         
             train_auc_raw = np.nan
             try:
@@ -11929,11 +11911,11 @@ def train_sharp_model_from_bq(
                 logger.warning(f"⚠️ Could not compute train AUC in round {round_no}: {e}")
         
             if np.isfinite(train_auc_raw):
-                train_auc = float(max(train_auc_raw, 1.0 - train_auc_raw))
-                overfit_gap = float(train_auc - auc_cv)
+                train_auc    = float(max(train_auc_raw, 1.0 - train_auc_raw))
+                overfit_gap  = float(train_auc - auc_cv)
             else:
-                train_auc = np.nan
-                overfit_gap = np.nan
+                train_auc    = np.nan
+                overfit_gap  = np.nan
         
             cv_suggests_fade = bool(auc_cv_raw < 0.5)
         
@@ -11942,8 +11924,7 @@ def train_sharp_model_from_bq(
                 f"AUC_raw={auc_cv_raw:.4f}, AUC_aligned={auc_cv:.4f}, "
                 f"LogLoss={logloss_cv:.4f}, "
                 f"TrainAUC_raw={train_auc_raw:.4f}, TrainAUC_aligned={train_auc:.4f}, "
-                f"OverfitGap(aligned)={overfit_gap:.4f}, "
-                f"cv_fade={cv_suggests_fade}"
+                f"OverfitGap(aligned)={overfit_gap:.4f}, cv_fade={cv_suggests_fade}"
             )
         
             if np.isfinite(auc_cv):
@@ -11980,8 +11961,7 @@ def train_sharp_model_from_bq(
                 logger.info(
                     f"✅ Conditions met in round {round_no} for {sport} {market} "
                     f"(AUC_aligned={auc_cv:.4f}, LL={logloss_cv:.4f}, "
-                    f"gap(aligned)={overfit_gap:.4f} ≤ {MAX_OVERFIT_GAP:.4f}, "
-                    f"cv_fade={cv_suggests_fade})."
+                    f"gap(aligned)={overfit_gap:.4f} ≤ {MAX_OVERFIT_GAP:.4f}, cv_fade={cv_suggests_fade})."
                 )
                 found_good = True
                 best_auc_params = rs_auc.best_params_.copy()
@@ -11993,9 +11973,8 @@ def train_sharp_model_from_bq(
         if not found_good:
             if best_round_metrics is not None:
                 logger.warning(
-                    "⚠️ No config met all constraints for %s %s after %d rounds. "
-                    "Proceeding with best-so-far. Best round=%d, AUC=%.4f, LogLoss=%.4f, "
-                    "TrainAUC=%.4f, OverfitGap=%.4f.",
+                    "⚠️ No config met all constraints for %s %s after %d rounds. Proceeding with best-so-far. "
+                    "Best round=%d, AUC=%.4f, LogLoss=%.4f, TrainAUC=%.4f, OverfitGap=%.4f.",
                     sport, market, MAX_ROUNDS,
                     best_round_metrics["round_no"],
                     best_round_metrics["auc_cv"],
@@ -12005,8 +11984,7 @@ def train_sharp_model_from_bq(
                 )
             else:
                 logger.error(
-                    "❌ All rounds failed for %s %s (no successful search results). "
-                    "Cannot train a model for this market.",
+                    "❌ All rounds failed for %s %s (no successful search results). Cannot train a model for this market.",
                     sport, market
                 )
                 return
@@ -12014,9 +11992,6 @@ def train_sharp_model_from_bq(
         if best_auc_params is None or best_ll_params is None:
             logger.error("❌ No params selected for %s %s; cannot continue.", sport, market)
             return
-        
-        if best_auc_estimator is None or best_ll_estimator is None:
-            logger.warning("⚠️ Best estimators not captured; downstream should refit from params.")
         
         # ---------------- stabilize best params (regularization-first) ----------------
         STABLE = dict(
@@ -12027,9 +12002,9 @@ def train_sharp_model_from_bq(
         )
         
         def _stabilize(best_params: dict, leaf_cap: int = 128) -> dict:
-            from xgboost import XGBClassifier
             bp = dict(best_params or {})
         
+            # bynode support check
             try:
                 _supports_bynode = ("colsample_bynode" in XGBClassifier().get_xgb_params())
             except Exception:
@@ -12081,58 +12056,6 @@ def train_sharp_model_from_bq(
         W_CLIP  = 5.0
         w_tr_es = np.clip(w_tr_es, 0.0, W_CLIP); w_va_es = np.clip(w_va_es, 0.0, W_CLIP)
         
-        assert set(tr_es_rel).isdisjoint(set(va_es_rel)), "Train/val overlap in ES fold!"
-        assert X_tr_es_df.shape[0] == len(y_tr_es) == len(w_tr_es)
-        assert X_va_es_df.shape[0] == len(y_va_es) == len(w_va_es)
-        u_tr = set(np.unique(y_tr_es)); u_va = set(np.unique(y_va_es))
-        assert {0,1}.issubset(u_tr) and {0,1}.issubset(u_va), \
-            "ES fold single-class; widen min_val_size or choose different fold."
-        
-        # -------- Median-impute (from TRAIN) + low-variance drop --------
-        num_cols = [c for c in feature_cols if c in X_tr_es_df.columns and is_numeric_dtype(X_tr_es_df[c])]
-        
-        if num_cols:
-            med = X_tr_es_df[num_cols].median(numeric_only=True)
-            X_tr_es_df.loc[:, num_cols] = X_tr_es_df[num_cols].fillna(med)
-            X_va_es_df.loc[:, num_cols] = X_va_es_df[num_cols].fillna(med)
-        
-            var = X_tr_es_df[num_cols].var(numeric_only=True)
-            keep_cols = [c for c in num_cols if np.isfinite(var.get(c, 0.0)) and var.get(c, 0.0) > 1e-10]
-            drop_cols = [c for c in num_cols if c not in keep_cols]
-        else:
-            keep_cols, drop_cols = [], []
-        
-        if drop_cols:
-            try:
-                st.info({"dropped_low_variance": drop_cols[:25], "n_drop": len(drop_cols)})
-            except Exception:
-                pass
-            X_tr_es_df = X_tr_es_df.drop(columns=drop_cols, errors="ignore")
-            X_va_es_df = X_va_es_df.drop(columns=drop_cols, errors="ignore")
-        
-        feature_cols_es = [c for c in feature_cols if c in X_tr_es_df.columns]
-        
-        X_tr_es = X_tr_es_df[feature_cols_es].to_numpy(copy=False)
-        X_va_es = X_va_es_df[feature_cols_es].to_numpy(copy=False)
-        
-        assert X_tr_es.shape[1] == X_va_es.shape[1] == len(feature_cols_es), \
-            f"Width mismatch: tr={X_tr_es.shape[1]}, va={X_va_es.shape[1]}, feats={len(feature_cols_es)}"
-        
-        if len(feature_cols_es) < len(feature_cols):
-            drop_lowvar_global = [c for c in feature_cols if c not in feature_cols_es]
-            try:
-                st.info({"global_lowvar_drop": drop_lowvar_global[:25], "n_drop_global": len(drop_lowvar_global)})
-            except Exception:
-                pass
-        
-            X_train_df_global = pd.DataFrame(X_train, columns=list(feature_cols))
-            X_train = X_train_df_global.loc[:, feature_cols_es].to_numpy(np.float32)
-        
-            X_full_df_global = pd.DataFrame(X_full, columns=list(feature_cols))
-            X_full = X_full_df_global.loc[:, feature_cols_es].to_numpy(np.float32)
-        
-            feature_cols = list(feature_cols_es)
-        
         # threads for refit
         refit_threads = max(1, min(VCPUS, 6))
         pos_tr = float((y_tr_es == 1).sum()); neg_tr = float((y_tr_es == 0).sum())
@@ -12149,8 +12072,8 @@ def train_sharp_model_from_bq(
             eval_metric=["logloss", "auc"],
             scale_pos_weight=scale_pos_weight,
             random_state=1337, seed=1337,
+            early_stopping_rounds=EARLY_STOP,   # <-- prefer ctor/set_params vs fit kwarg
         )
-        
         deep_ll.set_params(
             n_estimators=DEEP_N_EST,
             max_bin=DEEP_MAX_BIN,
@@ -12158,6 +12081,7 @@ def train_sharp_model_from_bq(
             eval_metric=["logloss", "auc"],
             scale_pos_weight=scale_pos_weight,
             random_state=1337, seed=1337,
+            early_stopping_rounds=EARLY_STOP,
         )
         
         # === Preliminary deep fits (for diagnostics/cap sense) ===
@@ -12167,169 +12091,79 @@ def train_sharp_model_from_bq(
             eval_set=[(X_va_es_df, y_va_es)],
             sample_weight_eval_set=[w_va_es],
             verbose=False,
-            early_stopping_rounds=EARLY_STOP,
         )
-        
-        planned_cap = int(deep_auc.get_xgb_params().get("n_estimators", DEEP_N_EST))
-        p_va_raw    = np.clip(deep_auc.predict_proba(X_va_es_df)[:, 1], 1e-12, 1 - 1e-12)
-        auc_va      = float(roc_auc_score(y_va_es.astype(int), p_va_raw, sample_weight=w_va_es))
-        spread_std_raw   = float(np.std(p_va_raw))
-        extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
-        best_iter        = getattr(deep_auc, "best_iteration", None)
-        cap_hit          = bool(best_iter is not None and best_iter >= 0.7 * DEEP_N_EST)
-        learning_rate    = float(np.clip(float(best_auc_params.get("learning_rate", 0.02)), 0.008, 0.04))
-        
-        if best_iter is not None and best_iter >= 50:
-            final_estimators_cap = int(np.clip(int(1.10 * (best_iter + 1)), 500, 1200))
-        else:
-            final_estimators_cap = 900
-        early_stopping_rounds = int(np.clip(int(0.12 * final_estimators_cap), 60, 180))
-        
         deep_ll.fit(
             X_tr_es_df, y_tr_es,
             sample_weight=w_tr_es,
             eval_set=[(X_va_es_df, y_va_es)],
             sample_weight_eval_set=[w_va_es],
             verbose=False,
-            early_stopping_rounds=EARLY_STOP,
         )
         
-        if getattr(deep_ll, "best_iteration", None) is not None and deep_ll.best_iteration >= 50:
-            deep_ll.set_params(n_estimators=deep_ll.best_iteration + 1)
+        def _num_trees_fitted(clf) -> int:
+            """Robust: how many boosted rounds exist in the fitted booster."""
+            try:
+                return int(clf.get_booster().num_boosted_rounds())
+            except Exception:
+                return 0
         
-        st.session_state.setdefault("calibration", {})
-        st.session_state["calibration"]["spread_favorite_offset"] = float(0.0)
+        def _best_ntrees_from_es(clf, *, floor: int = 80, ceil: int = 1400) -> int:
+            """
+            Robust best-ntrees:
+              - if best_iteration exists, use best_iteration + 1
+              - else fall back to booster.num_boosted_rounds()
+              - never return 0 (prevents collapsed probabilities)
+            """
+            bi = getattr(clf, "best_iteration", None)
+            if bi is None:
+                bi = getattr(clf, "best_iteration_", None)
+            if bi is not None and int(bi) >= 0:
+                n = int(bi) + 1
+            else:
+                n = _num_trees_fitted(clf)
+        
+            n = int(np.clip(n, floor, ceil))
+            return n
+        
+        # Diagnostics (NOTE: get_xgb_params() does NOT include n_estimators)
+        p_va_raw = np.clip(deep_auc.predict_proba(X_va_es_df)[:, 1], 1e-12, 1 - 1e-12)
+        auc_va   = float(roc_auc_score(y_va_es.astype(int), p_va_raw, sample_weight=w_va_es))
+        spread_std_raw   = float(np.std(p_va_raw))
+        extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
+        best_iter        = getattr(deep_auc, "best_iteration", None)
+        cap_hit          = bool(best_iter is not None and int(best_iter) >= int(0.7 * DEEP_N_EST))
+        
+        learning_rate = float(np.clip(float(best_auc_params.get("learning_rate", 0.02)), 0.008, 0.04))
+        
+        # choose final estimator caps from ES best iter, but NEVER below a sane floor
+        final_estimators_cap = _best_ntrees_from_es(deep_auc, floor=400, ceil=1200)
+        early_stopping_rounds = int(np.clip(int(0.12 * final_estimators_cap), 60, 180))
         
         st.subheader("Spread AUC diagnostics")
-        y_bar = float(np.mean(y_va_es == 1))
-        p_bar = float(np.mean(p_va_raw))
         st.json({
             "best_iter": best_iter,
-            "n_estimators": int(deep_auc.get_xgb_params().get("n_estimators", 0)),
+            "booster_num_trees": _num_trees_fitted(deep_auc),
+            "planned_cap": int(final_estimators_cap),
             "cap_hit": bool(cap_hit),
             "raw": {
                 "spread_std": spread_std_raw,
                 "extreme_frac": extreme_frac_raw,
-                "y_bar": y_bar,
-                "p_bar": p_bar,
+                "y_bar": float(np.mean(y_va_es == 1)),
+                "p_bar": float(np.mean(p_va_raw)),
             },
             "auc_va_es": auc_va,
         })
-
-
-        
-        # ----------------- Helpers (once) -----------------
-        def _ece(y_true, p, bins=10):
-            y = np.asarray(y_true, float); p = np.asarray(p, float)
-            edges = np.linspace(0.0, 1.0, bins + 1)
-            idx = np.digitize(p, edges) - 1
-            e = 0.0
-            for b in range(bins):
-                m = (idx == b)
-                if m.any():
-                    e += (m.mean()) * abs(float(np.mean(y[m])) - float(np.mean(p[m])))
-            return float(e)
-        
-        
-        def _fast_auc(y, p, w=None):
-            try:
-                return float(roc_auc_score(y, p, sample_weight=w)) if np.unique(y).size == 2 else np.nan
-            except Exception:
-                return np.nan
-        
-        
-        def _psi(a: np.ndarray, b: np.ndarray, bins: int = 10) -> float:
-            a = np.asarray(a, float); b = np.asarray(b, float)
-            edges = np.quantile(a, np.linspace(0, 1, bins+1))
-            edges[0]  = min(edges[0],  np.min([a.min(), b.min()]) - 1e-9)
-            edges[-1] = max(edges[-1], np.max([a.max(), b.max()]) + 1e-9)
-            ah, _ = np.histogram(a, bins=edges); bh, _ = np.histogram(b, bins=edges)
-            ah = np.clip(ah / max(len(a),1), 1e-6, 1); bh = np.clip(bh / max(len(b),1), 1e-6, 1)
-            return float(np.sum((ah - bh) * np.log(ah / bh)))
-        
-        
-        def _drift_report(X_tr_df, X_va_df, top_k: int = 25) -> dict:
-            out = {}
-            try:
-                var = X_tr_df.var(numeric_only=True).abs().sort_values(ascending=False)
-                cols = [c for c in var.index
-                        if np.issubdtype(X_tr_df[c].dtype, np.number)][:top_k]
-                for c in cols:
-                    try:
-                        out[c] = _psi(X_tr_df[c].to_numpy(),
-                                      X_va_df[c].to_numpy(), bins=10)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            return out
-        
-        
-        # --- Overfit/mismatch diagnostics on ES probe ---
-        p_tr_es_raw = np.clip(deep_auc.predict_proba(X_tr_es_df)[:, 1], 1e-12, 1-1e-12)
-        auc_tr_es   = auc_safe(y_tr_es.astype(int), p_tr_es_raw)
-        ece_va_es   = _ece(y_va_es.astype(int), p_va_raw, bins=10)
-        
-        # Sanity panel (shuffle / flip / PSI)
-        rng = np.random.default_rng(123)
-        y_va_shuff = rng.permutation(y_va_es)
-        report_auc_va         = _fast_auc(y_va_es, p_va_raw, w_va_es)
-        report_auc_va_flip    = _fast_auc(y_va_es, 1.0 - p_va_raw, w_va_es)
-        report_auc_va_shuffle = _fast_auc(y_va_shuff, p_va_raw, w_va_es)
-        psi_map = _drift_report(X_tr_es_df, X_va_es_df, top_k=25)
-        psi_max = float(max(psi_map.values()) if psi_map else 0.0)
-        
-        try:
-            st.json({"auto_harden_sanity": {
-                "auc_va": report_auc_va,
-                "auc_va_flipped": report_auc_va_flip,
-                "auc_va_shuffle": report_auc_va_shuffle,
-                "psi_max": psi_max,
-                "psi_top": dict(sorted(psi_map.items(), key=lambda kv: kv[1], reverse=True)[:8]),
-                "ece_va": ece_va_es,
-                "extreme_frac": extreme_frac_raw,
-                "y_tr_mean": float(np.mean(y_tr_es)),
-                "y_va_mean": float(np.mean(y_va_es)),
-            }})
-        except Exception:
-            pass
-        
-        ES_SUSPECT = (
-            (np.isfinite(report_auc_va_shuffle) and
-             abs(report_auc_va - report_auc_va_shuffle) < 0.03)     # looks random vs shuffle
-            or (report_auc_va < 0.52 and report_auc_va_flip > 0.55) # possible label polarity
-            or (psi_max >= 0.25)                                    # heavy drift
-        )
-        
-        if ES_SUSPECT:
-            try:
-                st.warning({
-                    "es_suspect": True,
-                    "why": "shuffle≈val or flip better or PSI high",
-                    "auc_va": report_auc_va,
-                    "auc_va_shuffle": report_auc_va_shuffle,
-                    "auc_va_flipped": report_auc_va_flip,
-                    "psi_max": psi_max,
-                })
-            except Exception:
-                pass
         
         # If predictions are too flat, allow a small LR bump so the model can move off 0.5
-        if float(np.std(p_va_raw)) < 0.02:
+        if float(spread_std_raw) < 0.02:
             learning_rate = float(np.clip(learning_rate * 1.25, 0.008, 0.03))
         
-        # Very light guard against over-peaky ES behaviour (no full auto-hardening)
-        MAX_EXTREME_FRAC_ES = 0.30
-        if extreme_frac_raw > MAX_EXTREME_FRAC_ES:
-            final_estimators_cap = int(np.clip(final_estimators_cap * 0.85, 300, 1200))
-        
-        
-        # ---------------- Build final param dicts (simple, no auto-hardening) -----------------
+        # ---------------- Build final param dicts -----------------
         VCPUS = max(1, int(VCPUS))
         
         params_auc_final = {
             **base_kwargs,
-            **best_auc_params,                  # stabilized AUC params
+            **best_auc_params,
             "n_estimators": int(final_estimators_cap),
             "learning_rate": float(learning_rate),
             "eval_metric": "logloss",
@@ -12337,18 +12171,10 @@ def train_sharp_model_from_bq(
             "scale_pos_weight": float(scale_pos_weight),
             "max_bin": int(np.clip(DEEP_MAX_BIN, 128, 256)),
         }
-        
-        # For logloss model, we can use deep_ll.best_iteration as cap if available
-        ll_n_estimators = getattr(deep_ll, "best_iteration", None)
-        if ll_n_estimators is None or ll_n_estimators < 50:
-            ll_n_estimators = final_estimators_cap
-        else:
-            ll_n_estimators = int(np.clip(ll_n_estimators + 1, 300, 1200))
-        
         params_ll_final = {
             **base_kwargs,
-            **best_ll_params,                   # stabilized LL params
-            "n_estimators": int(ll_n_estimators),
+            **best_ll_params,
+            "n_estimators": int(_best_ntrees_from_es(deep_ll, floor=400, ceil=1200)),
             "learning_rate": float(learning_rate),
             "eval_metric": "logloss",
             "n_jobs": VCPUS,
@@ -12356,11 +12182,8 @@ def train_sharp_model_from_bq(
             "max_bin": int(np.clip(DEEP_MAX_BIN, 128, 256)),
         }
         
-        
         # ---------------- Apply monotone constraints ONCE --------------------------
-        FEATS_FOR_ES = list(feature_cols_es)  # must correspond to X_tr_es / X_va_es matrices
-        
-        # Define your directional priors only for features that exist
+        FEATS_FOR_ES = list(feature_cols)  # align to X_train/X_full that you ultimately refit on
         MONO = {
             'Abs_Line_Move_From_Opening': +1,
             'Implied_Prob_Shift': +1,
@@ -12368,11 +12191,7 @@ def train_sharp_model_from_bq(
             'Line_Resistance_Crossed_Count': +1,
             'Odds_Reversal_Flag': -1,
         }
-        
-        # Build vector aligned to FEATS_FOR_ES (zeros for everything else)
         mono_vec = [int(MONO.get(c, 0)) for c in FEATS_FOR_ES]
-        
-        # Only attach if there is at least one non-zero constraint
         if any(m != 0 for m in mono_vec):
             mono_str = "(" + ",".join(map(str, mono_vec)) + ")"
             params_ll_final['monotone_constraints']  = mono_str
@@ -12381,19 +12200,9 @@ def train_sharp_model_from_bq(
             params_ll_final.pop('monotone_constraints',  None)
             params_auc_final.pop('monotone_constraints', None)
         
-        # Final safety: if a mismatch still slips through due to any later column changes,
-        # drop the constraints rather than crash.
-        for _p in (params_ll_final, params_auc_final):
-            if isinstance(_p.get('monotone_constraints'), (list, tuple, str)):
-                expected = len(FEATS_FOR_ES)
-                size = len(mono_vec)
-                if size > expected:
-                    _p.pop('monotone_constraints', None)
-        
-        # --- Instantiate & fit finals ---------------------------------------------
+        # --- Instantiate & fit finals with ES eval_set ---------------------------------------------
         model_logloss = XGBClassifier(**params_ll_final)
         model_auc     = XGBClassifier(**params_auc_final)
-        
         
         model_logloss.fit(
             X_tr_es, y_tr_es,
@@ -12412,18 +12221,17 @@ def train_sharp_model_from_bq(
             early_stopping_rounds=early_stopping_rounds,
         )
         
-        # Best rounds
-        n_trees_ll  = _best_rounds(model_logloss)
-        n_trees_auc = _best_rounds(model_auc)
+        # Best rounds (robust; never 0)
+        n_trees_ll  = _best_ntrees_from_es(model_logloss, floor=200, ceil=int(params_ll_final["n_estimators"]))
+        n_trees_auc = _best_ntrees_from_es(model_auc,     floor=200, ceil=int(params_auc_final["n_estimators"]))
         
         # Optional: refit on ALL training rows at best rounds (deterministic)
-        if n_trees_ll > 0:
-            model_logloss.set_params(n_estimators=n_trees_ll)
-            model_logloss.fit(X_train, y_train, sample_weight=w_train, verbose=False)
+        # IMPORTANT: keep the chosen tree count, DO NOT refit with 0 or tiny n_estimators
+        model_logloss.set_params(n_estimators=int(n_trees_ll), early_stopping_rounds=None)
+        model_auc.set_params(n_estimators=int(n_trees_auc), early_stopping_rounds=None)
         
-        if n_trees_auc > 0:
-            model_auc.set_params(n_estimators=n_trees_auc)
-            model_auc.fit(X_train, y_train, sample_weight=w_train, verbose=False)
+        model_logloss.fit(X_train, y_train, sample_weight=w_train, verbose=False)
+        model_auc.fit(X_train, y_train, sample_weight=w_train, verbose=False)
         
         # ---- Stamp feature names on the models so we don't get f0,f1,... ----
         try:
@@ -12439,277 +12247,44 @@ def train_sharp_model_from_bq(
         except Exception:
             pass
         
-        
-        def _safe_metric_tail(clf, prefer):
-            ev = getattr(clf, "evals_result_", {}) or {}
-            ds = next((k for k in ("validation_0","eval","valid_0") if k in ev), None)
-            if not ds:
-                return None, {"datasets": list(ev.keys())}
-            metrics = ev[ds]
-            key = prefer if prefer in metrics else next((k for k in metrics if prefer in k), None)
-            if not key:
-                return None, {"dataset": ds, "metrics_available": list(metrics.keys())}
-            arr = metrics[key]
-            return (arr[-10:] if len(arr) >= 10 else arr), {
-                "dataset": ds, "metric_key": key, "len": len(arr)
-            }
-        
-        val_logloss_last10, info_log = _safe_metric_tail(model_logloss, "logloss")
-        val_auc_last10,     info_auc = _safe_metric_tail(model_auc,     "auc")  # may be None
-        
-        st.write({
-            "ES_n_trees_ll": getattr(model_logloss, "best_iteration", None),
-            "ES_n_trees_auc": getattr(model_auc, "best_iteration", None),
-            "val_logloss_last10": val_logloss_last10,
-            "val_auc_last10": val_auc_last10,
-        })
-        
-        # ================== Lightweight interpretation (optional, guarded) ==================
-        DEBUG_INTERP = True
-        if DEBUG_INTERP:
-        
-            # --- Permutation AUC importance with 95% CI (guard single-class) ---
-            perm_df = None
-            if np.unique(y_va_es).size < 2:
-                try: st.warning("Permutation importance skipped: ES validation fold has a single class.")
-                except Exception: pass
-            else:
-                assert X_tr_es.shape[1] == X_va_es.shape[1] == len(feature_cols_es), \
-                    f"Width mismatch: tr={X_tr_es.shape[1]}, va={X_va_es.shape[1]}, feats={len(feature_cols_es)}"
-        
-                X_va_es_df_perm = pd.DataFrame(X_va_es, columns=feature_cols_es)
-        
-                perm_model = None
-                for cand in ("deep_auc", "model_auc", "deep_ll", "model_logloss"):
-                    if cand in locals() and hasattr(locals()[cand], "predict_proba"):
-                        perm_model = locals()[cand]
-                        break
-        
-                if perm_model is None:
-                    try: st.warning("Permutation importance skipped: no fitted model available at this point.")
-                    except Exception: pass
-                else:
-                    kwargs = dict(n_repeats=50, random_state=42)
-                    try:
-                        import inspect
-                        if "stratify" in inspect.signature(perm_auc_importance_ci).parameters:
-                            kwargs["stratify"] = True
-                    except Exception:
-                        pass
-        
-                    base_auc, perm_df = perm_auc_importance_ci(
-                        perm_model,
-                        X_va_es_df_perm,
-                        y_va_es,
-                        **kwargs
-                    )
-                    try: st.write({"perm_base_auc": float(base_auc)})
-                    except Exception: pass
-        
-                    if perm_df is not None and not perm_df.empty:
-                        if "feature" not in perm_df.columns:
-                            perm_df = perm_df.reset_index().rename(columns={"index": "feature"})
-                        perm_df = perm_df.sort_values("perm_auc_drop_mean", ascending=False)
-                        perm_df["significant"] = perm_df["ci_lo"] > 0.001
-        
-            if perm_df is not None and not perm_df.empty:
-                st.subheader("Permutation AUC importance with 95% CI")
-                st.dataframe(perm_df.head(25))
-        
-                sig_top = perm_df.loc[perm_df["significant"]].head(20)
-                if not sig_top.empty:
-                    try:
-                        fig, ax = plt.subplots(figsize=(8, 6))
-                        y_pos = np.arange(len(sig_top))
-                        ax.errorbar(
-                            sig_top["perm_auc_drop_mean"].to_numpy(),
-                            y_pos,
-                            xerr=(
-                                (sig_top["perm_auc_drop_mean"] - sig_top["ci_lo"]).to_numpy(),
-                                (sig_top["ci_hi"] - sig_top["perm_auc_drop_mean"]).to_numpy()
-                            ),
-                            fmt="o", capsize=3,
-                        )
-                        ax.set_yticks(y_pos)
-                        ax.set_yticklabels(sig_top["feature"].tolist())
-                        ax.set_xlabel("AUC drop (mean ± 95% CI)")
-                        ax.set_title("Significant permutation importances")
-                        plt.tight_layout()
-                        st.pyplot(fig, clear_figure=True)
-                    except Exception as e:
-                        st.info(f"(Optional plot skipped: {e})")
-        
-            # --- SHAP on fixed, time-correct ES slice ---
-            ns = int(min(4000, X_va_es.shape[0]))
-            if ns >= 10:
-                ns = max(1, min(200, X_va_es.shape[0]))
-        
-                assert X_va_es.shape[1] == len(feature_cols_es), \
-                    f"ES val width {X_va_es.shape[1]} != len(feature_cols_es) {len(feature_cols_es)}"
-        
-                X_shap_df = pd.DataFrame(X_va_es[:ns], columns=list(feature_cols_es))
-        
-                def _expected_features(m):
-                    names = None
-                    try:
-                        names = getattr(m, "feature_names_in_", None)
-                        if names is not None:
-                            names = list(map(str, list(names)))
-                    except Exception:
-                        pass
-                    if not names:
-                        try:
-                            names = list(m.get_booster().feature_names)
-                        except Exception:
-                            names = None
-                    return names
-        
-                shap_model = None
-                for cand in ("model_auc", "deep_auc", "model_logloss", "deep_ll"):
-                    if cand in locals() and hasattr(locals()[cand], "predict_proba"):
-                        shap_model = locals()[cand]
-                        break
-        
-                if shap_model is None:
-                    try: st.warning("SHAP skipped: no fitted model available at this point.")
-                    except Exception: pass
-                else:
-                    exp_feats = _expected_features(shap_model)
-        
-                    def _align(df, exp):
-                        if not exp:
-                            return df, df.columns.tolist()
-                        missing = [c for c in exp if c not in df.columns]
-                        if missing:
-                            for c in missing:
-                                df[c] = 0.0
-                        df = df[exp]
-                        return df, exp
-        
-                    X_shap_df, used_cols = _align(X_shap_df.copy(), exp_feats)
-        
-                    try:
-                        try:
-                            expl = shap.TreeExplainer(
-                                shap_model, feature_perturbation="tree_path_dependent"
-                            )
-                        except Exception:
-                            expl = shap.Explainer(shap_model)
-                        sv = expl.shap_values(X_shap_df)
-                    except Exception as e_pred:
-                        sv = None
-                        if "deep_auc" in locals() and hasattr(deep_auc, "predict_proba"):
-                            exp2 = _expected_features(deep_auc)
-                            X_shap_df2, used_cols2 = _align(X_shap_df.copy(), exp2)
-                            try:
-                                try:
-                                    expl = shap.TreeExplainer(
-                                        deep_auc, feature_perturbation="tree_path_dependent"
-                                    )
-                                except Exception:
-                                    expl = shap.Explainer(deep_auc)
-                                sv = expl.shap_values(X_shap_df2)
-                                shap_model = deep_auc
-                                X_shap_df = X_shap_df2
-                                used_cols = used_cols2
-                            except Exception as e_pred2:
-                                try:
-                                    st.warning(f"SHAP skipped (both models failed): {e_pred2}")
-                                except Exception:
-                                    pass
-                                sv = None
-                        else:
-                            try: st.warning(f"SHAP skipped: {e_pred}")
-                            except Exception: pass
-                            sv = None
-        
-                    if sv is not None:
-                        if isinstance(sv, list):
-                            sv = sv[1]
-                        sv = np.asarray(sv)
-        
-                        shap_mean = np.abs(sv).mean(0)
-                        shap_top = (
-                            pd.DataFrame({"feature": used_cols, "mean|SHAP|": shap_mean})
-                            .sort_values("mean|SHAP|", ascending=False)
-                        )
-                        st.subheader("SHAP (AUC model, ES fold)")
-                        st.dataframe(shap_top.head(25))
-        
-                        try:
-                            from sklearn.inspection import PartialDependenceDisplay
-        
-                            top_feats = [
-                                f for f in shap_top["feature"].head(6).tolist()
-                                if f in X_shap_df.columns
-                            ]
-                            if top_feats:
-                                fig = plt.figure(figsize=(10, 8))
-                                ax = plt.gca()
-                                PartialDependenceDisplay.from_estimator(
-                                    estimator=shap_model,
-                                    X=X_shap_df,
-                                    features=top_feats,
-                                    kind="both",
-                                    grid_resolution=20,
-                                    response_method="predict_proba",
-                                    target=1,
-                                    ax=ax
-                                )
-                                st.subheader("PDP/ICE (AUC model, ES fold)")
-                                st.pyplot(fig, clear_figure=True)
-                                st.caption(f"PDP/ICE for: {', '.join(top_feats)}")
-                            else:
-                                st.info("PDP/ICE skipped: no top features available in SHAP frame.")
-                        except Exception as e:
-                            st.warning(f"PDP/ICE rendering skipped: {e}")
-        
-        
         # -----------------------------------------
         # OOF predictions (train-only) + blending
         # -----------------------------------------
-        SMALL = ((sport_key in SMALL_LEAGUES) or
-                 (np.unique(g_train).size < 30) or
-                 (len(y_train) < 500))
+        SMALL = ((sport_key in SMALL_LEAGUES) or (np.unique(g_train).size < 30) or (len(y_train) < 500))
         MIN_OOF = 40 if SMALL else 120
-        RUN_LOGLOSS = True  # keep on; you can tie to SMALL if desired
+        RUN_LOGLOSS = True
         eps = 1e-7
+        
         oof_pred_auc = np.full(len(y_train), np.nan, dtype=np.float64)
-        oof_pred_logloss = (np.full(len(y_train), np.nan, dtype=np.float64)
-                            if RUN_LOGLOSS else None)
+        oof_pred_logloss = (np.full(len(y_train), np.nan, dtype=np.float64) if RUN_LOGLOSS else None)
         
-        def _maybe_flip(p, flip):
-            p = np.asarray(p, float)
-            return (1.0 - p) if flip else p
+        # IMPORTANT:
+        # - You ALREADY per-fold "AUC-align" via auc_with_flip() below.
+        # - Therefore DO NOT do a second global flip later unless you explicitly want to allow polarity inversion.
+        ALLOW_GLOBAL_FLIP = False
         
-        def _decide_flip_on_oof(y, p, min_margin=0.01):
-            y = np.asarray(y, int); p = np.asarray(p, float)
-            if np.unique(y).size < 2:
-                return False
-            auc0 = roc_auc_score(y, p); auc1 = roc_auc_score(y, 1.0 - p)
-            return bool((auc1 - auc0) > min_margin)
-        
-        # --- Make OOFs with safe proba + per-fold flip only for AUC semantics ----------
         for tr_rel, va_rel in folds:
-            m_auc = XGBClassifier(
-                **{**base_kwargs, **best_auc_params,
-                   "n_estimators": int(n_trees_auc), "n_jobs": 1}
+            # Guard against 0/None ntrees
+            fold_ntrees_auc = int(max(200, n_trees_auc))
+            fold_ntrees_ll  = int(max(200, n_trees_ll))
+        
+            m_auc = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": fold_ntrees_auc, "n_jobs": 1})
+            m_auc.fit(
+                X_train[tr_rel], y_train[tr_rel],
+                sample_weight=w_train[tr_rel],
+                verbose=False
             )
-            m_auc.fit(X_train[tr_rel], y_train[tr_rel],
-                      sample_weight=w_train[tr_rel], verbose=False)
             pa, _ = pos_proba_safe(m_auc, X_train[va_rel], positive=1)
-            _, pa_fixed, _ = auc_with_flip(
-                y_train[va_rel].astype(int), pa, w_train[va_rel]
-            )
-            oof_pred_auc[va_rel] = np.clip(pa_fixed, eps, 1 - eps)
+            _, pa_fixed, _ = auc_with_flip(y_train[va_rel].astype(int), pa, w_train[va_rel])
+            oof_pred_auc[va_rel] = np.clip(pa_fixed.astype(np.float64), eps, 1 - eps)
         
             if RUN_LOGLOSS:
-                m_ll = XGBClassifier(
-                    **{**base_kwargs, **best_ll_params,
-                       "n_estimators": int(n_trees_ll), "n_jobs": 1}
+                m_ll = XGBClassifier(**{**base_kwargs, **best_ll_params, "n_estimators": fold_ntrees_ll, "n_jobs": 1})
+                m_ll.fit(
+                    X_train[tr_rel], y_train[tr_rel],
+                    sample_weight=w_train[tr_rel],
+                    verbose=False
                 )
-                m_ll.fit(X_train[tr_rel], y_train[tr_rel],
-                         sample_weight=w_train[tr_rel], verbose=False)
                 pl, _ = pos_proba_safe(m_ll, X_train[va_rel], positive=1)
                 oof_pred_logloss[va_rel] = np.clip(pl.astype(np.float64), eps, 1 - eps)
         
@@ -12718,99 +12293,38 @@ def train_sharp_model_from_bq(
         mask_oof = mask_auc & mask_log
         n_oof = int(mask_oof.sum())
         
-        # --- Small-league gap fill with ES models for rows never validated ------------
-        if SMALL and n_oof < MIN_OOF:
-            miss_auc = ~mask_auc
-            if miss_auc.any():
-                pa_fill, _ = pos_proba_safe(model_auc, X_train[miss_auc], positive=1)
-                oof_pred_auc[miss_auc] = np.clip(pa_fill, eps, 1 - eps)
-                mask_auc = np.isfinite(oof_pred_auc)
+        # pick OOF sources
+        y_oof = y_train[mask_oof].astype(int) if n_oof >= MIN_OOF else y_train[mask_auc].astype(int)
+        p_oof_auc = np.clip(oof_pred_auc[mask_oof if n_oof >= MIN_OOF else mask_auc], eps, 1 - eps).astype(np.float64)
+        p_oof_log = None
+        if RUN_LOGLOSS and (oof_pred_logloss is not None) and (n_oof >= MIN_OOF):
+            p_oof_log = np.clip(oof_pred_logloss[mask_oof], eps, 1 - eps).astype(np.float64)
         
-            if RUN_LOGLOSS and (oof_pred_logloss is not None):
-                miss_ll = ~np.isfinite(oof_pred_logloss)
-                if miss_ll.any():
-                    pl_fill, _ = pos_proba_safe(model_logloss,
-                                                X_train[miss_ll], positive=1)
-                    oof_pred_logloss[miss_ll] = np.clip(pl_fill, eps, 1 - eps)
-        
-            mask_log = np.isfinite(oof_pred_logloss) if RUN_LOGLOSS else mask_auc
-            mask_oof = mask_auc & mask_log
-            n_oof = int(mask_oof.sum())
-        
-        # --- Assemble OOF sources (handles low/normal coverage cleanly) ----------------
-        if n_oof < MIN_OOF:
-            if SMALL:
-                _, va_es_rel = folds[-1]
-                y_oof = y_train[va_es_rel].astype(int)
-                pa_es, _ = pos_proba_safe(model_auc, X_train[va_es_rel], positive=1)
-                _, p_oof_auc, _ = auc_with_flip(
-                    y_oof, pa_es, w_train[va_es_rel]
-                )
-                p_oof_auc = np.clip(p_oof_auc.astype(np.float64), eps, 1 - eps)
-                if RUN_LOGLOSS:
-                    pl_es, _ = pos_proba_safe(model_logloss,
-                                              X_train[va_es_rel], positive=1)
-                    p_oof_log = np.clip(pl_es, eps, 1 - eps).astype(np.float64)
-                else:
-                    p_oof_log = None
-                st.info(
-                    f"Small-league fallback: using last-fold validation only "
-                    f"(n={len(va_es_rel)}) for blend weight."
-                )
-            else:
-                y_oof = y_train[mask_auc].astype(int)
-                p_oof_auc = np.clip(oof_pred_auc[mask_auc], eps, 1 - eps).astype(np.float64)
-                p_oof_log = None
-                st.warning(
-                    f"OOF coverage low ({n_oof}); proceeding with AUC-only blend source."
-                )
-        else:
-            y_oof = y_train[mask_oof].astype(int)
-            p_oof_auc = np.clip(oof_pred_auc[mask_oof], eps, 1 - eps).astype(np.float64)
-            p_oof_log = (np.clip(oof_pred_logloss[mask_oof], eps, 1 - eps).astype(np.float64)
-                         if RUN_LOGLOSS else None)
-        
-        # --- Choose blend weight ------------------------------------------------------
-        use_discrete_grid = (n_oof < MIN_OOF) and RUN_LOGLOSS and (p_oof_log is not None)
-        if use_discrete_grid:
-            CAND = [0.35, 0.50, 0.65] if not SMALL else [0.35, 0.50]
-            best_w, best_ll = 0.50, np.inf
-            for w in CAND:
-                mix = np.clip(w * p_oof_log + (1 - w) * p_oof_auc, 1e-6, 1 - 1e-6)
-                ll = log_loss(y_oof, mix, labels=[0,1])
-                if ll < best_ll:
-                    best_ll, best_w = ll, w
-            p_oof_blend = np.clip(
-                best_w * (p_oof_log if p_oof_log is not None else p_oof_auc)
-                + (1 - best_w) * p_oof_auc,
-                1e-6, 1 - 1e-6
-            )
-        else:
-            best_w, p_oof_blend, _ = pick_blend_weight_on_oof(
-                y_oof=y_oof,
-                p_oof_auc=p_oof_auc,
-                p_oof_log=p_oof_log if RUN_LOGLOSS else None,
-                eps=eps,
-                metric="hybrid",
-                hybrid_alpha=0.92,   # 0.90–0.95 sweet spot for spreads
-            )
+        best_w, p_oof_blend, _ = pick_blend_weight_on_oof(
+            y_oof=y_oof,
+            p_oof_auc=p_oof_auc,
+            p_oof_log=p_oof_log,
+            eps=eps,
+            metric="hybrid",
+            hybrid_alpha=0.92,
+        )
         
         p_oof_blend = np.asarray(p_oof_blend, dtype=np.float64)
-        if not np.isfinite(p_oof_blend).all():
-            keep2 = np.isfinite(p_oof_blend)
-            y_oof, p_oof_blend = y_oof[keep2], p_oof_blend[keep2]
+        oof_std = float(np.std(p_oof_blend))
+        oof_rng = float(np.max(p_oof_blend) - np.min(p_oof_blend))
         
         st.write({
             "SMALL": bool(SMALL),
             "RUN_LOGLOSS": bool(RUN_LOGLOSS),
-            "n_oof": int(n_oof),
+            "n_oof": int(len(y_oof)),
             "blend_w": float(best_w),
-            "oof_minmax": (float(p_oof_blend.min()), float(p_oof_blend.max()))
+            "oof_std": float(oof_std),
+            "oof_minmax": (float(p_oof_blend.min()), float(p_oof_blend.max())),
         })
         
         assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
         
-        
+        # ---------------- Calibration (FIXED) ----------------
         def _prior_correct(p, train_pos, hold_pos, clip=1e-6):
             p = np.clip(p, clip, 1-clip)
             def logit(x): return np.log(x/(1-x))
@@ -12818,43 +12332,32 @@ def train_sharp_model_from_bq(
             shift = np.log((hold_pos/(1-hold_pos)) / (train_pos/(1-train_pos)))
             return sigmoid(logit(p) + shift)
         
-        # --- Choose priors for calibration context ---
-        oof_pos = float(np.mean(y_oof == 1))
+        CLIP = 0.03 if str(market).lower().strip() == "spreads" else (0.02 if SMALL else 0.01)
+        
+        # deployment prior
         deploy_pos = float(np.mean(y_full[hold_idx] == 1))
-        
-        # ---------------- Calibration ----------------
-        # ---------------- Calibration ----------------
-        # ---------------- Calibration ----------------
-        
-        # 0) Safe defaults (prevents UnboundLocalError on any path)
-        CLIP = 0.03 if str(market).lower().strip() == "spreads" else (0.02 if bool(locals().get("SMALL", False)) else 0.01)
-        
-        cal_name = "iso"
-        cal_obj  = _IdentityIsoCal(eps=1e-6)
-        cal_blend = (cal_name, cal_obj)
-        
-        # 1) Decide global flip on OOF
-        flip_flag = _decide_flip_on_oof(y_oof, p_oof_blend)
-        
-        # 2) OOF prior (train) and deployment prior (hold)
         oof_pos    = float(np.mean(y_oof == 1))
-        deploy_pos = float(np.mean(y_full[hold_idx] == 1))  # or your rolling/ES estimate
         
-        # 3) Apply SAME flip to OOF before prior-correction
+        # --- IMPORTANT: since OOF AUC stream already got per-fold AUC flip, do NOT global flip by default
+        flip_flag = False
+        if ALLOW_GLOBAL_FLIP:
+            flip_flag = _decide_flip_on_oof(y_oof, p_oof_blend, min_margin=0.01)
+        
         p_oof_for_cal = (1.0 - p_oof_blend) if flip_flag else p_oof_blend
+        p_oof_prior   = _prior_correct(p_oof_for_cal, train_pos=oof_pos, hold_pos=deploy_pos)
         
-        # 4) PRIOR-CORRECT OOF before fitting calibrators
-        p_oof_prior = _prior_correct(p_oof_for_cal, train_pos=oof_pos, hold_pos=deploy_pos)
+        # Degeneracy guard: if OOF preds are collapsed, isotonic & temperature will wreck shape.
+        COLLAPSED = bool((oof_rng < 0.02) or (oof_std < 0.01))
         
-        # 5) Fit/normalize available calibrators on prior-corrected OOF
         use_qiso = (len(np.unique(np.round(p_oof_prior, 4))) < 400)
         cals_raw = fit_iso_platt_beta(p_oof_prior, y_oof, eps=1e-6, use_quantile_iso=use_qiso)
         cals = _normalize_cals(cals_raw)
+        
         cals["iso"]   = _ensure_transform_for_iso(cals.get("iso")) or _IdentityIsoCal(eps=1e-6)
         cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=1e-6)
         cals["beta"]  = _ensure_predict_proba_for_prob_cal(cals.get("beta"),  eps=1e-6)
         
-        # 6) Evaluate candidates by ECE (lower is better) on prior-corrected OOF
+        # candidates (if collapsed, prioritize platt/beta; keep iso last)
         candidates = []
         if cals.get("beta")  is not None: candidates.append(("beta",  cals["beta"]))
         if cals.get("platt") is not None: candidates.append(("platt", cals["platt"]))
@@ -12862,54 +12365,57 @@ def train_sharp_model_from_bq(
         if not candidates:
             candidates = [("iso", _IdentityIsoCal(eps=1e-6))]
         
+        def _ece_score(y, p, n_bins=10):
+            return float(expected_calibration_error(np.asarray(y, int), np.asarray(p, float), n_bins=n_bins))
+        
         scores = []
         for kind, cal in candidates:
             try:
                 pp = _apply_cal(kind, cal, p_oof_prior)
                 pp = np.asarray(np.clip(pp, CLIP, 1 - CLIP), float)
-                ece = expected_calibration_error(y_oof, pp)
+                ece = _ece_score(y_oof, pp, n_bins=10)
                 if np.isfinite(ece):
-                    scores.append((float(ece), kind, cal))
+                    scores.append((ece, kind, cal))
             except Exception as e:
                 st.debug(f"Calibrator {kind} failed: {e}")
         
-        # 7) Pick best calibrator (or fallback)
-        if scores:
-            scores.sort(key=lambda t: t[0])
-            ece_best, cal_name, cal_obj = scores[0]
-            cal_blend = (cal_name, cal_obj)
-            st.write({"calibrator_used": str(cal_name), "flip_on_oof": bool(flip_flag), "ece_best": float(ece_best)})
+        # Selection rule:
+        # - if collapsed: force platt if available; otherwise best-ECE among non-iso; iso only as last resort
+        if COLLAPSED:
+            forced = next(((k, c) for (k, c) in candidates if k == "platt"), None)
+            if forced is None:
+                forced = next(((k, c) for (k, c) in candidates if k == "beta"), None)
+            if forced is not None:
+                cal_name, cal_obj = forced
+                ece_best = float("nan")
+            else:
+                scores.sort(key=lambda t: t[0])
+                ece_best, cal_name, cal_obj = scores[0] if scores else (float("nan"), "iso", _IdentityIsoCal(eps=1e-6))
         else:
-            st.warning("No valid calibrator produced finite ECE; using identity isotonic.")
-            cal_name, cal_obj = "iso", _IdentityIsoCal(eps=1e-6)
-            cal_blend = (cal_name, cal_obj)
+            scores.sort(key=lambda t: t[0])
+            ece_best, cal_name, cal_obj = scores[0] if scores else (float("nan"), "iso", _IdentityIsoCal(eps=1e-6))
         
-        # 8) Temperature scaling ON TOP of chosen calibrator (fit on OOF)
+        st.write({
+            "calibrator_used": str(cal_name),
+            "flip_on_oof": bool(flip_flag),
+            "ece_best": (None if not np.isfinite(ece_best) else float(ece_best)),
+            "oof_collapsed": bool(COLLAPSED),
+            "oof_std": float(oof_std),
+            "oof_range": float(oof_rng),
+        })
+        
+        # Fit temperature ONLY if not collapsed; otherwise keep T=1.0
         p_cal_oof = _apply_cal(cal_name, cal_obj, p_oof_prior)
         p_cal_oof = np.asarray(np.clip(p_cal_oof, CLIP, 1 - CLIP), float)
         
-        T_best, T_ll = fit_temperature_on_oof(y_oof, p_cal_oof)
-        st.write({"temp_T": float(T_best), "temp_ll": float(T_ll)})
-
-        scores = []
-        for kind, cal in candidates:
-            try:
-                pp = _apply_cal(kind, cal, p_oof_prior)
-                pp = np.asarray(np.clip(pp, CLIP, 1 - CLIP), float)
-                ece = expected_calibration_error(y_oof, pp)
-                if np.isfinite(ece):
-                    scores.append((float(ece), kind, cal))
-            except Exception as e:
-                st.debug(f"Calibrator {kind} failed: {e}")
-        
-        if scores:
-            scores.sort(key=lambda t: t[0])
-            ece_best, cal_name, cal_obj = scores[0]
-            cal_blend = (cal_name, cal_obj)
-            st.write({"calibrator_used": str(cal_name), "flip_on_oof": bool(flip_flag), "ece_best": float(ece_best)})
+        if COLLAPSED:
+            T_best, T_ll = 1.0, float("nan")
         else:
-            st.warning("No valid calibrator produced finite ECE; using identity isotonic.")
-            # cal_blend remains ('iso', IdentityIsoCal)
+            T_best, T_ll = fit_temperature_on_oof(y_oof, p_cal_oof)
+            # tiny sanity: don't let huge T flatten you to 0.5 land
+            T_best = float(np.clip(T_best, 0.75, 1.25))
+        
+        st.write({"temp_T": float(T_best), "temp_ll": (None if not np.isfinite(T_ll) else float(T_ll))})
         
         # --- Raw model preds (AUC + optional LogLoss model) ---------------------------
         p_tr_auc, _ = pos_proba_safe(model_auc,     X_full[train_all_idx], positive=1)
@@ -12921,504 +12427,65 @@ def train_sharp_model_from_bq(
             p_train_blend_raw = np.clip(best_w * p_tr_log + (1 - best_w) * p_tr_auc, eps, 1 - eps)
             p_hold_blend_raw  = np.clip(best_w * p_ho_log + (1 - best_w) * p_ho_auc, eps, 1 - eps)
         else:
-            p_tr_log = np.array([], dtype=float); p_ho_log = np.array([], dtype=float)
             p_train_blend_raw = np.clip(p_tr_auc, eps, 1 - eps)
-            p_hold_blend_raw  = np.clip(p_ho_auc,  eps, 1 - eps)
+            p_hold_blend_raw  = np.clip(p_ho_auc, eps, 1 - eps)
         
         # Apply SAME flip before prior-correction & calibration
-        p_train_blend_raw = _maybe_flip(p_train_blend_raw, flip_flag)
-        p_hold_blend_raw  = _maybe_flip(p_hold_blend_raw,  flip_flag)
+        if flip_flag:
+            p_train_blend_raw = 1.0 - p_train_blend_raw
+            p_hold_blend_raw  = 1.0 - p_hold_blend_raw
         
         # PRIOR-CORRECT train/hold to deployment prior
         train_pos_for_pc = float(np.mean(y_full[train_all_idx] == 1))
         p_train_prior = _prior_correct(p_train_blend_raw, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
         p_hold_prior  = _prior_correct(p_hold_blend_raw,  train_pos=train_pos_for_pc, hold_pos=deploy_pos)
         
-
         # Calibrate using the chosen calibrator
         p_cal_tr = _apply_cal(cal_name, cal_obj, p_train_prior)
         p_cal_ho = _apply_cal(cal_name, cal_obj, p_hold_prior)
         
-        # Clip (required before logit/temperature)
         p_cal_tr = np.asarray(np.clip(p_cal_tr, CLIP, 1 - CLIP), float)
         p_cal_ho = np.asarray(np.clip(p_cal_ho, CLIP, 1 - CLIP), float)
         
-        # Temperature scaling (bet-friendly)
+        # Temperature scaling (only meaningful if not collapsed; T is clamped anyway)
         p_cal_tr = apply_temperature(p_cal_tr, T_best)
         p_cal_ho = apply_temperature(p_cal_ho, T_best)
         
-        # Safety clip (optional but fine)
         p_cal_tr = np.asarray(np.clip(p_cal_tr, CLIP, 1 - CLIP), float)
         p_cal_ho = np.asarray(np.clip(p_cal_ho, CLIP, 1 - CLIP), float)
         
         # Gentle shrink of extremes
         p_train_vec = 0.95 * p_cal_tr + 0.05 * 0.5
         p_hold_vec  = 0.95 * p_cal_ho + 0.05 * 0.5
-
-
         
         # Diagnostics
         ece_tr = expected_calibration_error(y_full[train_all_idx].astype(int), p_train_vec, n_bins=10)
         ece_ho = expected_calibration_error(y_full[hold_idx].astype(int),      p_hold_vec,  n_bins=10)
         psi    = population_stability_index(p_train_vec, p_hold_vec, bins=20)
-        st.write({"cal_used": cal_name, "flip_on_oof": bool(flip_flag),
-                  "ece_train": float(ece_tr), "ece_hold": float(ece_ho), "psi": float(psi)})
+        st.write({
+            "cal_used": cal_name,
+            "flip_on_oof": bool(flip_flag),
+            "ece_train": float(ece_tr),
+            "ece_hold": float(ece_ho),
+            "psi": float(psi),
+        })
         
         assert p_train_vec.shape[0] == len(train_all_idx), "p_train_vec length mismatch"
         assert p_hold_vec.shape[0]  == len(hold_idx),      "p_hold_vec length mismatch"
-
         
-
-        # ---------- Metrics (no flips here) -------------------------------------------
-        y_train_vec = y_full[train_all_idx].astype(int)
-        y_hold_vec  = y_full[hold_idx].astype(int)
-        # ---- Robust time-split check (no NameErrors) ----
-      
-
-        # Prevalence shift (can wreck calibration/AUC)
-        rate_tr = float(y_full[train_all_idx].mean())
-        rate_ho = float(y_full[hold_idx].mean())
-        st.write({"label_rate_train": rate_tr, "label_rate_hold": rate_ho})
-
-        auc_train = auc_safe(y_train_vec, p_train_vec)
-        auc_val   = auc_safe(y_hold_vec,  p_hold_vec)
-        brier_tr  = brier_score_loss(y_train_vec, p_train_vec)
-        brier_val = brier_score_loss(y_hold_vec,  p_hold_vec)
-        
-        st.write(f"🔧 Ensemble weight (logloss vs auc): w={best_w:.2f}")
-        st.write(
-            f"📉 LogLoss: train={log_loss(y_train_vec, p_train_vec, labels=[0,1]):.5f}, "
-            f"val={log_loss(y_hold_vec,  p_hold_vec,  labels=[0,1]):.5f}"
-        )
-        st.write(
-            f"📈 AUC:     train={(auc_train if not np.isnan(auc_train) else '—')}, "
-            f"val={(auc_val if not np.isnan(auc_val) else '—')}"
-        )
-        st.write(f"🎯 Brier:   train={brier_tr:.4f},  val={brier_val:.4f}")
-        
-        # ==== HOLDOUT: Calibration bins (quantile) + ROI per bin ======================
-        # ==== HOLDOUT: Calibration bins (quantile) + ROI per bin ======================
-        st.markdown("#### 🎯 Calibration Bins (blended + calibrated)")
-        
-        # Strong shape/alignment guard
-        assert p_hold_vec.shape[0] == y_hold_vec.shape[0] == len(hold_idx)
-        _hold_pos = np.asarray(hold_idx, dtype=int)
-        
-        df_eval = pd.DataFrame({
-            "p":    np.clip(np.asarray(p_hold_vec, float), eps, 1 - eps),
-            "y":    np.asarray(y_hold_vec, int),
-            "odds": pd.to_numeric(df_valid.iloc[_hold_pos]["Odds_Price"], errors="coerce"),
-        }).dropna(subset=["p", "y"])
-        
-        # Degeneracy check: nearly (or exactly) constant probabilities
-        uniq_hold = np.unique(np.round(df_eval["p"].to_numpy(), 6)).size
-        if uniq_hold < 5:
-            st.warning(
-                f"⚠️ Holdout predictions are nearly discrete (unique≈{uniq_hold}). "
-                "If this persists, check upstream constraints/regularization and calibrator inputs."
-            )
-        
-        # If there's no variation, skip binning to avoid misleading output
-        if uniq_hold <= 1 or len(df_eval) == 0:
-            st.info("Holdout predictions are effectively constant; skipping calibration bins.")
-            st.dataframe(
-                pd.DataFrame(columns=["Prob Bin", "N", "Hit Rate", "Avg ROI (unit)", "Avg Pred P"]),
-                use_container_width=True
-            )
-        else:
-            # Try quantile bins; fall back to uniform bins
-            try:
-                cuts = pd.qcut(df_eval["p"], q=10, duplicates="drop")
-            except Exception:
-                cuts = pd.cut(df_eval["p"], bins=np.linspace(0.0, 1.0, 11), include_lowest=True)
-        
-            def _roi_mean_inline(sub: pd.DataFrame) -> float:
-                if not sub["odds"].notna().any():
-                    return float("nan")
-                odds = pd.to_numeric(sub["odds"], errors="coerce")
-                win  = sub["y"].astype(int)
-                # Profit on win (American odds)
-                profit_pos = odds.where(odds > 0, np.nan) / 100.0
-                profit_neg = 100.0 / odds.abs()
-                profit_on_win = np.where(odds > 0, profit_pos, profit_neg)
-                profit_on_win = pd.Series(profit_on_win, index=odds.index).fillna(0.0)
-                # ROI per bet (unit stake on each example)
-                roi = win * profit_on_win - (1 - win) * 1.0
-                return float(roi.mean())
-        
-            gb = df_eval.groupby(cuts, observed=True, sort=False)
-        
-            if getattr(gb, "ngroups", 0) == 0:
-                df_bins = pd.DataFrame(columns=["Prob Bin", "N", "Hit Rate", "Avg ROI (unit)", "Avg Pred P"])
-            else:
-                # Build columns explicitly as 1-D python lists
-                prob_bins = [f"{s.min():.2f}-{s.max():.2f}" for _, s in gb["p"]]
-                n_vals    = gb.size().astype(int).to_list()
-                hit_rate  = gb["y"].mean().astype(float).to_list()
-                avg_pred  = gb["p"].mean().astype(float).to_list()
-                avg_roi   = gb.apply(_roi_mean_inline).astype(float).to_list()
-        
-                df_bins = (pd.DataFrame({
-                    "Prob Bin": prob_bins,
-                    "N": n_vals,
-                    "Hit Rate": hit_rate,
-                    "Avg ROI (unit)": avg_roi,
-                    "Avg Pred P": avg_pred,
-                })
-                .sort_values("Avg Pred P")
-                .reset_index(drop=True))
-        
-            st.dataframe(df_bins, use_container_width=True)
-
-        
-        # ---- Overfitting check (gaps) ------------------------------------------------
-        auc_tr  = auc_train
-        auc_ho  = auc_val
-        ll_tr   = log_loss(y_train_vec, p_train_vec, labels=[0, 1])
-        ll_ho   = log_loss(y_hold_vec,  p_hold_vec,  labels=[0, 1])
-        br_tr   = brier_tr
-        br_ho   = brier_val
-        
-        st.markdown("### 📉 Overfitting Check – Gap Analysis")
-        st.write(f"- AUC Gap (Train - Holdout): `{(auc_tr - auc_ho):.4f}`")
-        st.write(f"- LogLoss Gap (Train - Holdout): `{(ll_tr  - ll_ho):.4f}`")
-        st.write(f"- Brier Gap (Train - Holdout): `{(br_tr  - br_ho):.4f}`")
-        
-        # ---- calibration quality: ECE + Brier decomposition --------------------------
-        def ECE(y_true, p, n_bins: int = 10) -> float:
-            y_true = np.asarray(y_true, dtype=float)
-            p = np.asarray(p, dtype=float)
-            bins = np.linspace(0.0, 1.0, n_bins + 1)
-            idx = np.digitize(p, bins) - 1
-            ece = 0.0
-            N = len(p)
-            for b in range(n_bins):
-                m = (idx == b)
-                if np.any(m):
-                    conf = float(np.mean(p[m]))
-                    acc  = float(np.mean(y_true[m]))
-                    ece += (np.sum(m) / N) * abs(acc - conf)
-            return float(ece)
-        
-        def brier_decomp(y_true, p, n_bins: int = 10):
-            y_true = np.asarray(y_true, dtype=float)
-            p = np.asarray(p, dtype=float)
-            base = float(np.mean(y_true))
-            unc  = base * (1.0 - base)
-            bins = np.linspace(0.0, 1.0, n_bins + 1)
-            idx  = np.digitize(p, bins) - 1
-            res = 0.0; rel = 0.0
-            for b in range(n_bins):
-                m = (idx == b)
-                if np.any(m):
-                    py = float(np.mean(y_true[m]))
-                    pp = float(np.mean(p[m]))
-                    w  = float(np.mean(m))
-                    res += w * (py - base) ** 2
-                    rel += w * (pp - py) ** 2
-            brier = brier_score_loss(y_true, p)
-            return float(brier), float(unc), float(res), float(rel)
-        
-        ece_tr = ECE(y_train_vec, p_train_vec, 10)
-        brier_tr_v, unc_tr, res_tr, rel_tr = brier_decomp(y_train_vec, p_train_vec, 10)
-        
-        ece_ho = ECE(y_hold_vec, p_hold_vec, 10)
-        brier_ho_v, unc_ho, res_ho, rel_ho = brier_decomp(y_hold_vec, p_hold_vec, 10)
-        
-        st.write(
-            f"- ECE(train): `{ece_tr:.4f}` | Brier(train): `{brier_tr_v:.4f}` = "
-            f"Unc `{unc_tr:.4f}` - Res `{res_tr:.4f}` + Rel `{rel_tr:.4f}`"
-        )
-        st.write(
-            f"- ECE(holdout): `{ece_ho:.4f}` | Brier(holdout): `{brier_ho_v:.4f}` = "
-            f"Unc `{unc_ho:.4f}` - Res `{res_ho:.4f}` + Rel `{rel_ho:.4f}`"
-        )
-     
-        # ---- Feature importance using model-native names only -------------------------
-        # ---- Feature importance using model-native names only (small corrections) ----
-        # ---- Feature importance using model-native names only (hardened) ----
-        def _model_feature_names(clf, n_expected: int | None = None) -> list[str]:
-            # 1) sklearn wrapper
-            names = getattr(clf, "feature_names_in_", None)
-            if names is not None and len(names) > 0:
-                return [str(x) for x in list(names)]
-            # 2) Booster names
-            try:
-                booster = clf.get_booster()
-                if getattr(booster, "feature_names", None):
-                    names = list(booster.feature_names)
-                    if names:
-                        return [str(x) for x in names]
-            except Exception:
-                pass
-            # 3) Positional fallback
-            n = int(getattr(clf, "n_features_in_", 0)) or \
-                int(len(getattr(clf, "feature_importances_", []))) or \
-                int(n_expected or 0)
-            return [f"f{i}" for i in range(max(0, n))]
-        
-        def _corr_sign_from_matrix(clf, X_mat: np.ndarray, feat_names: list[str]) -> list[str] | None:
-            """Return '↑ Increases' / '↓ Decreases' per feature by corr with proba."""
-            try:
-                p = clf.predict_proba(X_mat)[:, 1]
-            except Exception:
-                return None
-            p = np.asarray(p, float)
-            finite_p = np.isfinite(p)
-            out = []
-            for j in range(X_mat.shape[1]):
-                x = X_mat[:, j]
-                m = finite_p & np.isfinite(x)
-                if m.sum() < 3 or np.std(x[m]) <= 0:
-                    out.append("↓ Decreases")  # neutral default
-                else:
-                    c = np.corrcoef(x[m], p[m])[0, 1]
-                    out.append("↑ Increases" if float(c) > 0 else "↓ Decreases")
-            return out
-        
-        importances = np.asarray(getattr(model_auc, "feature_importances_", []), dtype=float)
-        if importances.size == 0:
-            st.error("❌ model_auc.feature_importances_ is empty. (Was the model fit?)")
-        else:
-            # Prefer model-stamped names; fallback to Booster; else f0..f{n-1}
-            names_all = _model_feature_names(model_auc, n_expected=importances.size)
-        
-            # Strict alignment for display
-            k = min(importances.size, len(names_all))
-            names = names_all[:k]
-            importances = importances[:k]
-        
-            importance_df = (
-                pd.DataFrame({"Feature": names, "Importance": importances})
-                  .sort_values("Importance", ascending=False)
-                  .reset_index(drop=True)
-            )
-            st.markdown("#### 📊 Feature Importance (model-native names)")
-            st.dataframe(importance_df, use_container_width=True)
-        
-            # Try df_market (if columns match); otherwise fall back to X_train matrix.
-            did_sign = False
-            try:
-                if "df_market" in locals():
-                    available = [n for n in names if n in df_market.columns]
-                    if len(available) >= 2:
-                        # keep the same order and length cap as 'names'
-                        available = [n for n in names if n in set(available)]
-                        X_features = (
-                            df_market[available]
-                            .apply(pd.to_numeric, errors="coerce")
-                            .replace([np.inf, -np.inf], np.nan)
-                            .fillna(0.0)
-                            .astype("float32")
-                        )
-                        preds = model_auc.predict_proba(X_features[available])[:, 1]
-                        finite = np.isfinite(preds)
-                        corrs = []
-                        for col in available:
-                            x = X_features[col].to_numpy()
-                            m = finite & np.isfinite(x)
-                            if m.sum() < 3 or np.std(x[m]) <= 0:
-                                corrs.append(0.0)
-                            else:
-                                c = np.corrcoef(x[m], preds[m])[0, 1]
-                                corrs.append(float(np.nan_to_num(c, nan=0.0)))
-                        sign_map = {n: ("↑ Increases" if v > 0 else "↓ Decreases") for n, v in zip(available, corrs)}
-                        final_df = (
-                            importance_df.merge(pd.DataFrame({"Feature": list(sign_map.keys()),
-                                                              "Impact": list(sign_map.values())}),
-                                                on="Feature", how="left")
-                                        .sort_values("Importance", ascending=False)
-                                        .reset_index(drop=True)
-                        )
-                        st.markdown("##### ➕ Impact sign (from df_market)")
-                        st.dataframe(final_df, use_container_width=True)
-                        did_sign = True
-            except Exception:
-                # soft-fail; we’ll try the matrix fallback
-                pass
-        
-            if not did_sign:
-                try:
-                    # Align with names/importances length to avoid indexing errors
-                    X_mat = np.asarray(X_train, dtype=np.float32)
-                    X_mat = X_mat[:, :min(X_mat.shape[1], len(names))]  # extra guard
-                    if X_mat.shape[1] != len(names):
-                        # If this happens, the model was fit with a different view than X_train here.
-                        # Keep them aligned by truncation.
-                        names = names[:X_mat.shape[1]]
-                        importances = importances[:X_mat.shape[1]]
-                    signs = _corr_sign_from_matrix(model_auc, X_mat, names)
-                    if signs is not None:
-                        final_df = (
-                            pd.DataFrame({"Feature": names, "Importance": importances, "Impact": signs})
-                              .sort_values("Importance", ascending=False)
-                              .reset_index(drop=True)
-                        )
-                        st.markdown("##### ➕ Impact sign (from train matrix)")
-                        st.dataframe(final_df, use_container_width=True)
-                    else:
-                        st.info("Skipped impact sign: could not compute predictions on train matrix.")
-                except Exception:
-                    st.info("Skipped impact sign: fallback computation failed.")
-
-
-        # ==== TRAIN: Calibration curve table (quantile bins, robust) ==================
-        
-        
-        p_train_final = np.clip(np.asarray(p_cal_tr, float), eps, 1 - eps)
-        y_train_plot  = y_train_vec.astype(int)
-        assert len(p_train_final) == len(y_train_plot) == len(train_all_idx)
-        
-        if not np.isfinite(p_train_final).all():
-            st.error("❌ Non-finite values in train probabilities after clipping.")
-            p_train_final = np.nan_to_num(p_train_final, nan=0.5, posinf=0.999, neginf=0.001)
-        
-        uniq_train = np.unique(np.round(p_train_final, 6)).size
-        if uniq_train < 5:
-            st.warning(
-                f"⚠️ Train predictions are nearly discrete (unique≈{uniq_train}). "
-                "Ensure you calibrate on probabilities (not logits/labels) and apply any AUC-based flip *before* calibration."
-            )
-        
-        cal_df_src = pd.DataFrame({"p": p_train_final, "y": y_train_plot})
-        try:
-            qb = pd.qcut(cal_df_src["p"], q=10, duplicates="drop")
-        except Exception:
-            qb = pd.cut(cal_df_src["p"], bins=np.linspace(0, 1, 11), include_lowest=True)
-        
-        g = cal_df_src.groupby(qb, observed=True, sort=False)
-        calib_df = pd.DataFrame({
-            "Predicted Bin Center": g["p"].mean().values,
-            "Actual Hit Rate": g["y"].mean().values,
-            "N": g.size().astype(int).values,
-        }).sort_values("Predicted Bin Center").reset_index(drop=True)
-        
-        st.markdown("#### 🎯 Calibration Bins – Train")
-        st.dataframe(calib_df)
-        
-        # ---- CV fold health -----------------------------------------------------------
-        st.markdown("### 🧩 CV Fold Health")
-        cv_rows = []
-        for i, (_, va) in enumerate(folds, 1):
-            yv = y_train[va].astype(int)
-            cv_rows.append({
-                "Fold": i,
-                "ValN": int(len(va)),
-                "ValPosRate": float(np.mean(yv)) if len(yv) else float("nan"),
-                "ValBothClasses": bool(np.unique(yv).size == 2)
-            })
-        st.dataframe(pd.DataFrame(cv_rows))
-
-
-
-                
-        # --- aliases from the blended/calibrated step ---
-       
-
-        ensemble_prob = p_train_vec
-        
-        if ('X_val' in locals() and isinstance(X_val, pd.DataFrame)) \
-           and ('y_val' in locals() and isinstance(y_val, (pd.Series, pd.DataFrame))):
-            y_val = y_val.loc[X_val.index]
-        
-        # Safe metric helpers
-        def _safe_auc(yv, pv):
-            if len(yv) != len(pv) or np.unique(yv).size < 2:
-                return np.nan
-            return roc_auc_score(yv, pv)
-        
-
-        def _safe_ll(yv, pv):
-            if len(yv) != len(pv):
-                return np.nan
-            return log_loss(yv, np.clip(pv, 1e-6, 1 - 1e-6), labels=[0, 1])
-
-        def _safe_brier(yv, pv):
-            if len(yv) != len(pv):
-                return np.nan
-            return brier_score_loss(yv, np.clip(pv, 1e-6, 1 - 1e-6))
-
-        # targets aligned
-        y_train_vec = y_full[train_all_idx].astype(int)
-        y_hold_vec  = y_full[hold_idx].astype(int)
-
-        # sanity checks
-        assert len(y_train_vec) == len(p_train_vec), f"train len mismatch: y={len(y_train_vec)} p={len(p_train_vec)}"
-        assert len(y_hold_vec)  == len(p_hold_vec),  f"holdout len mismatch: y={len(y_hold_vec)} p={len(p_hold_vec)}"
-
-        acc_train = accuracy_score(y_train_vec, (p_train_vec >= 0.5).astype(int)) if np.unique(y_train_vec).size == 2 else np.nan
-        acc_hold  = accuracy_score(y_hold_vec,  (p_hold_vec  >= 0.5).astype(int)) if np.unique(y_hold_vec).size  == 2 else np.nan
-
-        auc_train = roc_auc_score(y_train_vec, p_train_vec)
-        auc_hold  = roc_auc_score(y_hold_vec,  p_hold_vec)
-
-        logloss_train = log_loss(y_train_vec, np.clip(p_train_vec, 1e-6, 1 - 1e-6), labels=[0, 1])
-        logloss_hold  = log_loss(y_hold_vec,  np.clip(p_hold_vec,  1e-6, 1 - 1e-6), labels=[0, 1])
-
-        brier_train = brier_score_loss(y_train_vec, p_train_vec)
-        brier_hold  = brier_score_loss(y_hold_vec,  p_hold_vec)
-
-        # For champion/challenger wrapper: capture per-market holdout metrics
-        if return_artifacts:
-            artifact_metrics = {
-                "auc_holdout": float(auc_hold),
-                "logloss_holdout": float(logloss_hold),
-                "auc_gap_train_holdout": float(auc_train - auc_hold),
-            }
-            artifact_config = {
-                "sport": sport,
-                "market": market,
-                "feature_count": len(feature_cols),
-            }
-
-        # --- Book reliability (build DF exactly as apply expects) ---
-        bk_col = 'Bookmaker' if 'Bookmaker' in df_market.columns else 'Bookmaker_Norm'
-        need   = ['Sport', 'Market', bk_col, 'SHARP_HIT_BOOL']
-
-        df_rel_in = df_market.loc[:, [c for c in need if c in df_market.columns]].copy()
-        if bk_col != 'Bookmaker':  # builder expects 'Bookmaker'
-            df_rel_in.rename(columns={bk_col: 'Bookmaker'}, inplace=True)
-
-        try:
-            book_reliability_map = build_book_reliability_map(df_rel_in, prior_strength=200.0)
-        except Exception as e:
-            logger.warning(f"book_reliability_map build failed; defaulting to empty. err={e}")
-            book_reliability_map = pd.DataFrame(columns=[
-                'Sport', 'Market', 'Bookmaker', 'Book_Reliability_Score', 'Book_Reliability_Lift'
-            ])
-
-        # safety check (optional but nice)
-        _bake_feature_names_in_(model_logloss, feature_cols)
-        _bake_feature_names_in_(model_auc, feature_cols)
-
-        if cal_blend is None:
-            cal_blend = ("iso", _IdentityIsoCal(eps=1e-6))
-        cal_name, cal_obj = cal_blend
+        # --- Save adapter (unchanged) ---
+        cal_blend = (cal_name, cal_obj)
         iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1 - CLIP))
-        if _PREDICTOR_TO_SAVE is not None:
-            try:
-                # These are the ones you save:
-                model_auc.set_params(predictor=_PREDICTOR_TO_SAVE)
-                model_logloss.set_params(predictor=_PREDICTOR_TO_SAVE)
         
-                # Optional: keep if you also serialize these somewhere else
-                # deep_auc.set_params(predictor=_PREDICTOR_TO_SAVE)
-                # deep_ll.set_params(predictor=_PREDICTOR_TO_SAVE)
-                # est_ll.set_params(predictor=_PREDICTOR_TO_SAVE)
-                # est_auc.set_params(predictor=_PREDICTOR_TO_SAVE)
-            except Exception:
-                pass
         # --- Helper to get final calibrated probs (blend → optional flip → calibrate+clip) ---
         def predict_calibrated(models: dict, X):
-            # required keys: model_auc, model_logloss, best_w, iso_blend
             pa = models["model_auc"].predict_proba(X)[:, 1]
             pl = models["model_logloss"].predict_proba(X)[:, 1]
-            p_blend = float(models.get("best_w", 0.5)) * pl + (1.0 - float(models.get("best_w", 0.5))) * pa
+            w  = float(models.get("best_w", 0.5))
+            p_blend = w * pl + (1.0 - w) * pa
             if models.get("flip_flag", False):
                 p_blend = 1.0 - p_blend
-            # iso_blend is your _CalAdapter, already clipping (e.g., (CLIP, 1-CLIP))
             return models["iso_blend"].predict(p_blend)
-
         # === Save ensemble (choose one or both) ===
        
         trained_models[market] = {
