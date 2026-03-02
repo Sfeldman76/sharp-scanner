@@ -12487,27 +12487,49 @@ def train_sharp_model_from_bq(
         })
         assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
         
-        # ---------------- Calibration ----------------
-        def _prior_correct(p, train_pos, hold_pos, clip=1e-6):
-            p = np.clip(p, clip, 1 - clip)
-            def logit(x): return np.log(x / (1 - x))
+        # -----------------------------
+        # Calibration (NO-LEAK prior + comparable tables)
+        # -----------------------------
+        def _prior_correct(p, train_pos, deploy_pos, clip=1e-6):
+            p = np.clip(np.asarray(p, float), clip, 1 - clip)
+        
+            # if deploy_pos is missing/invalid, do nothing
+            if not np.isfinite(deploy_pos) or deploy_pos <= 0.0 or deploy_pos >= 1.0:
+                return p
+        
+            train_pos = float(np.clip(train_pos, clip, 1 - clip))
+            deploy_pos = float(np.clip(deploy_pos, clip, 1 - clip))
+        
+            def logit(x): return np.log(x / (1.0 - x))
             def sigmoid(z): return 1.0 / (1.0 + np.exp(-z))
-            shift = np.log((hold_pos / (1 - hold_pos)) / (train_pos / (1 - train_pos)))
+        
+            shift = np.log((deploy_pos / (1.0 - deploy_pos)) / (train_pos / (1.0 - train_pos)))
             return sigmoid(logit(p) + shift)
         
         CLIP = 0.03 if str(market).lower().strip() == "spreads" else (0.02 if SMALL else 0.01)
         
-        deploy_pos = float(np.mean(y_full[hold_idx] == 1)) if len(hold_idx) else float(np.mean(y_oof == 1))
-        oof_pos    = float(np.mean(y_oof == 1)) if len(y_oof) else float(np.mean(y_full[train_all_idx] == 1))
+        # --- IMPORTANT: DO NOT use holdout labels to define deploy prior ---
+        # If you have a real deployment prior estimate (e.g., rolling last 30d from TRAIN ONLY),
+        # set it here. Otherwise default to OOF prior (no shift).
+        oof_pos = float(np.mean(y_oof == 1)) if len(y_oof) else float(np.mean(y_full[train_all_idx] == 1))
         
+        deploy_pos_est = float(oof_pos)  # ✅ no-leak default
+        # If you *do* have a train-only rolling estimate, use it instead:
+        # deploy_pos_est = float(train_only_recent_posrate_est)
+        
+        # global flip is OFF by default (you already did per-fold AUC alignment)
         flip_flag = False
         if ALLOW_GLOBAL_FLIP and (np.unique(y_oof).size == 2):
             flip_flag = _decide_flip_on_oof(y_oof, p_oof_blend, min_margin=0.01)
         
+        # OOF prior-correct (usually no-op unless deploy_pos_est differs)
         p_oof_for_cal = (1.0 - p_oof_blend) if flip_flag else p_oof_blend
-        p_oof_prior   = _prior_correct(p_oof_for_cal, train_pos=oof_pos, hold_pos=deploy_pos)
+        p_oof_prior   = _prior_correct(p_oof_for_cal, train_pos=oof_pos, deploy_pos=deploy_pos_est)
         
-        COLLAPSED = bool((np.isfinite(oof_rng) and oof_rng < 0.02) or (np.isfinite(oof_std) and oof_std < 0.01))
+        # Degeneracy guard
+        oof_std = float(np.std(p_oof_prior))
+        oof_rng = float(np.max(p_oof_prior) - np.min(p_oof_prior))
+        COLLAPSED = bool((oof_rng < 0.02) or (oof_std < 0.01))
         
         use_qiso = (len(np.unique(np.round(p_oof_prior, 4))) < 400)
         cals_raw = fit_iso_platt_beta(p_oof_prior, y_oof, eps=1e-6, use_quantile_iso=use_qiso)
@@ -12543,6 +12565,7 @@ def train_sharp_model_from_bq(
         
         ece_best = float("nan")
         if COLLAPSED:
+            # if collapsed, prefer platt/beta over iso (iso can overfit steps)
             forced = next(((k, c) for (k, c) in candidates if k == "platt"), None)
             if forced is None:
                 forced = next(((k, c) for (k, c) in candidates if k == "beta"), None)
@@ -12550,16 +12573,12 @@ def train_sharp_model_from_bq(
                 cal_name, cal_obj = forced
             else:
                 scores.sort(key=lambda t: t[0])
-                if scores:
-                    ece_best, cal_name, cal_obj = scores[0]
-                else:
-                    cal_name, cal_obj = "iso", _IdentityIsoCal(eps=1e-6)
+                cal_name, cal_obj = ("iso", _IdentityIsoCal(eps=1e-6)) if not scores else (scores[0][1], scores[0][2])
         else:
             scores.sort(key=lambda t: t[0])
+            cal_name, cal_obj = ("iso", _IdentityIsoCal(eps=1e-6)) if not scores else (scores[0][1], scores[0][2])
             if scores:
-                ece_best, cal_name, cal_obj = scores[0]
-            else:
-                cal_name, cal_obj = "iso", _IdentityIsoCal(eps=1e-6)
+                ece_best = float(scores[0][0])
         
         st.write({
             "calibrator_used": str(cal_name),
@@ -12568,8 +12587,11 @@ def train_sharp_model_from_bq(
             "oof_collapsed": bool(COLLAPSED),
             "oof_std": float(oof_std),
             "oof_range": float(oof_rng),
+            "deploy_pos_est": float(deploy_pos_est),
+            "oof_pos": float(oof_pos),
         })
         
+        # Temperature scaling (skip if collapsed)
         p_cal_oof = _apply_cal(cal_name, cal_obj, p_oof_prior)
         p_cal_oof = np.asarray(np.clip(p_cal_oof, CLIP, 1 - CLIP), float)
         
@@ -12581,7 +12603,9 @@ def train_sharp_model_from_bq(
         
         st.write({"temp_T": float(T_best), "temp_ll": (None if not np.isfinite(T_ll) else float(T_ll))})
         
-        # --- Raw model preds (AUC + optional LogLoss model) ---------------------------
+        # -----------------------------
+        # Apply to TRAIN / HOLDOUT
+        # -----------------------------
         p_tr_auc, _ = pos_proba_safe(model_auc, X_full[train_all_idx], positive=1)
         p_ho_auc, _ = pos_proba_safe(model_auc, X_full[hold_idx],      positive=1)
         
@@ -12598,9 +12622,9 @@ def train_sharp_model_from_bq(
             p_train_blend_raw = 1.0 - p_train_blend_raw
             p_hold_blend_raw  = 1.0 - p_hold_blend_raw
         
-        train_pos_for_pc = float(np.mean(y_full[train_all_idx] == 1)) if len(train_all_idx) else oof_pos
-        p_train_prior = _prior_correct(p_train_blend_raw, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
-        p_hold_prior  = _prior_correct(p_hold_blend_raw,  train_pos=train_pos_for_pc, hold_pos=deploy_pos)
+        train_pos_for_pc = float(np.mean(y_full[train_all_idx] == 1))
+        p_train_prior = _prior_correct(p_train_blend_raw, train_pos=train_pos_for_pc, deploy_pos=deploy_pos_est)
+        p_hold_prior  = _prior_correct(p_hold_blend_raw,  train_pos=train_pos_for_pc, deploy_pos=deploy_pos_est)
         
         p_cal_tr = _apply_cal(cal_name, cal_obj, p_train_prior)
         p_cal_ho = _apply_cal(cal_name, cal_obj, p_hold_prior)
@@ -12617,68 +12641,53 @@ def train_sharp_model_from_bq(
         p_train_vec = 0.95 * p_cal_tr + 0.05 * 0.5
         p_hold_vec  = 0.95 * p_cal_ho + 0.05 * 0.5
         
-        ece_tr = expected_calibration_error(y_full[train_all_idx].astype(int), p_train_vec, n_bins=10)
-        ece_ho = expected_calibration_error(y_full[hold_idx].astype(int),      p_hold_vec,  n_bins=10)
-        psi    = population_stability_index(p_train_vec, p_hold_vec, bins=20)
-        st.write({
-            "cal_used": cal_name,
-            "flip_on_oof": bool(flip_flag),
-            "ece_train": float(ece_tr),
-            "ece_hold": float(ece_ho),
-            "psi": float(psi),
-        })
+        # -----------------------------
+        # Comparable calibration tables (ONE set of edges)
+        # -----------------------------
+        def _make_edges(p, q=10):
+            p = np.asarray(p, float)
+            qs = np.linspace(0.0, 1.0, q + 1)
+            edges = np.quantile(p, qs)
+            edges[0]  = min(edges[0],  0.0)
+            edges[-1] = max(edges[-1], 1.0)
+            # ensure strictly increasing
+            edges = np.unique(np.round(edges, 10))
+            if edges.size < 3:
+                edges = np.array([0.0, 0.5, 1.0], float)
+            return edges
         
-        assert p_train_vec.shape[0] == len(train_all_idx), "p_train_vec length mismatch"
-        assert p_hold_vec.shape[0]  == len(hold_idx),      "p_hold_vec length mismatch"
-        
-        # -------------------------------------------------------------------
-        # CALIBRATION TABLES (Train + Holdout)  ✅ you asked to keep these
-        # -------------------------------------------------------------------
-        def _calibration_table(y_true, p_pred, q=10, eps=1e-7):
-            y_true = np.asarray(y_true, int)
-            p_pred = np.clip(np.asarray(p_pred, float), eps, 1 - eps)
-        
-            dfc = pd.DataFrame({"p": p_pred, "y": y_true}).dropna()
-            if dfc.empty:
-                return pd.DataFrame(columns=["Prob Bin", "N", "Hit Rate", "Avg Pred P"])
-        
-            uniq = np.unique(np.round(dfc["p"].to_numpy(), 6)).size
-            if uniq <= 1:
-                # constant predictions — return a single row
-                return pd.DataFrame([{
-                    "Prob Bin": "all",
-                    "N": int(len(dfc)),
-                    "Hit Rate": float(dfc["y"].mean()),
-                    "Avg Pred P": float(dfc["p"].mean()),
-                }])
-        
-            try:
-                cuts = pd.qcut(dfc["p"], q=q, duplicates="drop")
-            except Exception:
-                cuts = pd.cut(dfc["p"], bins=np.linspace(0.0, 1.0, q + 1), include_lowest=True)
-        
-            gb = dfc.groupby(cuts, observed=True, sort=False)
-        
+        def _cal_table_fixed_edges(y, p, edges, eps=1e-7):
+            y = np.asarray(y, int)
+            p = np.clip(np.asarray(p, float), eps, 1 - eps)
+            cuts = pd.cut(p, bins=edges, include_lowest=True, right=True)
+            dfc = pd.DataFrame({"p": p, "y": y, "bin": cuts})
+            g = dfc.groupby("bin", observed=True, sort=False)
             rows = []
-            for k, sub in gb:
-                pmin = float(sub["p"].min()); pmax = float(sub["p"].max())
+            for b, sub in g:
+                if sub.empty: 
+                    continue
                 rows.append({
-                    "Prob Bin": f"{pmin:.2f}-{pmax:.2f}",
+                    "Prob Bin": f"{float(sub['p'].min()):.2f}-{float(sub['p'].max()):.2f}",
                     "N": int(len(sub)),
                     "Hit Rate": float(sub["y"].mean()),
                     "Avg Pred P": float(sub["p"].mean()),
                 })
-            return pd.DataFrame(rows).sort_values("Avg Pred P").reset_index(drop=True)
+            out = pd.DataFrame(rows)
+            if not out.empty:
+                out = out.sort_values("Avg Pred P").reset_index(drop=True)
+            return out
         
-        st.markdown("#### 🎯 Calibration Table — TRAIN (blended + calibrated)")
-        calib_train_df = _calibration_table(y_full[train_all_idx].astype(int), p_train_vec, q=10, eps=eps)
-        st.dataframe(calib_train_df, use_container_width=True)
+        edges = _make_edges(p_train_vec, q=10)
         
-        st.markdown("#### 🎯 Calibration Table — HOLDOUT (blended + calibrated)")
-        calib_hold_df = _calibration_table(y_full[hold_idx].astype(int), p_hold_vec, q=10, eps=eps)
-        st.dataframe(calib_hold_df, use_container_width=True)
+        st.markdown("#### 🎯 Calibration Table — TRAIN (fixed edges)")
+        st.dataframe(_cal_table_fixed_edges(y_full[train_all_idx].astype(int), p_train_vec, edges, eps=eps),
+                     use_container_width=True)
         
-        # --- Save adapter ---
+        st.markdown("#### 🎯 Calibration Table — HOLDOUT (fixed edges)")
+        st.dataframe(_cal_table_fixed_edges(y_full[hold_idx].astype(int), p_hold_vec, edges, eps=eps),
+                     use_container_width=True)
+        
+        # adapter for saving
         cal_blend = (cal_name, cal_obj)
         iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1 - CLIP))
         
