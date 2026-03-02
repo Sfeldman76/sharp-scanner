@@ -8237,32 +8237,91 @@ def build_cover_streaks_game_level(df_bt_prepped: pd.DataFrame, *, sport: str, m
     out = g[["Sport", "Market", "Game_Key", "Team", time_col] + streak_cols].rename(columns={time_col: "Game_Start"})
     return out
 
-def merge_drop_overlap(left: pd.DataFrame,
-                       right: pd.DataFrame,
-                       on: list[str],
-                       how: str = "left",
-                       keep_right: bool = True) -> pd.DataFrame:
+import pandas as pd
+import numpy as np
+
+def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
+    # defensive: strip column names (BQ sometimes brings weird whitespace)
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+def _ensure_merge_key(df: pd.DataFrame, key: str) -> pd.DataFrame:
     """
-    Merge right into left, avoiding duplicate-column suffix hell.
-    If keep_right=True, right-side overlapping columns replace left-side ones.
+    Ensure df has `key` as a column. If missing, try common aliases.
     """
-    if left is None or left.empty:
+    df = _normalize_cols(df)
+
+    if key in df.columns:
+        return df
+
+    # If key is an index name / index level
+    if getattr(df.index, "name", None) == key:
+        df = df.reset_index()
+        return df
+
+    # Common aliases by key
+    alias_map = {
+        "Game_Key": [
+            "game_key", "game_key_clean", "feat_Game_Key", "GameKey", "GAME_KEY",
+            "Event_Key", "event_key", "Match_Key", "match_key",
+            "Id_Game", "game_id", "Game_ID"
+        ],
+        "Bookmaker": ["Book", "book", "Sportsbook", "sportsbook"],
+        "Outcome_Norm": ["Outcome", "Team", "Selection", "Side"],
+    }
+
+    for cand in alias_map.get(key, []):
+        if cand in df.columns:
+            df[key] = df[cand]
+            return df
+        # also check stripped/lower versions
+        for c in df.columns:
+            if str(c).strip().lower() == str(cand).strip().lower():
+                df[key] = df[c]
+                return df
+
+    # Not found
+    return df
+
+def merge_drop_overlap(left, right, on, how="left", *, keep_right=True, validate=None):
+    """
+    Merge while preventing pandas _x/_y duplicates by dropping overlapping
+    non-key columns from the side you DON'T want to keep.
+    Also auto-repairs missing merge keys (esp. Game_Key) from common aliases.
+    """
+    if left is None or right is None or len(getattr(left, "index", [])) == 0:
         return left
-    if right is None or right.empty:
-        return left
 
-    left = left.copy()
-    right = right.copy()
+    on = [on] if isinstance(on, str) else list(on)
 
-    # Identify overlapping non-key columns
-    keyset = set(on)
-    overlap = [c for c in right.columns if (c in left.columns and c not in keyset)]
+    left = _normalize_cols(left)
+    right = _normalize_cols(right)
 
-    if overlap and keep_right:
-        left = left.drop(columns=overlap, errors="ignore")
+    # Ensure keys exist on both frames
+    for k in on:
+        left = _ensure_merge_key(left, k)
+        right = _ensure_merge_key(right, k)
 
-    return left.merge(right, on=on, how=how)
+    # If still missing, fail with a useful error message
+    missing_left = [k for k in on if k not in left.columns and getattr(left.index, "name", None) != k]
+    missing_right = [k for k in on if k not in right.columns and getattr(right.index, "name", None) != k]
+    if missing_left or missing_right:
+        raise KeyError(
+            f"merge_drop_overlap: missing merge keys. "
+            f"left_missing={missing_left} right_missing={missing_right} "
+            f"left_cols_sample={list(left.columns)[:30]} right_cols_sample={list(right.columns)[:30]}"
+        )
 
+    overlap = (set(left.columns) & set(right.columns)) - set(on)
+    if overlap:
+        if keep_right:
+            left = left.drop(columns=sorted(overlap), errors="ignore")
+        else:
+            right = right.drop(columns=sorted(overlap), errors="ignore")
+
+    return left.merge(right, on=on, how=how, validate=validate)
+    
 
 def _logit(p, eps=1e-6):
     p = np.clip(np.asarray(p, float), eps, 1-eps)
