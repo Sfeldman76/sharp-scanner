@@ -16600,6 +16600,10 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
 
         st.dataframe(overall)
 
+        # Optional chart: Wins by bin
+        if len(overall) > 0:
+            st.bar_chart(overall.set_index("Prob_Bin")["Wins"])
+
         # =========================
         # BY MARKET: show WINS (counts) by probability bin (NO win %)
         # =========================
@@ -16619,8 +16623,6 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
 
             if len(mdf) > 0:
                 st.bar_chart(mdf.set_index("Prob_Bin")["Wins"])
-
-
 import os
 import json
 import uuid
