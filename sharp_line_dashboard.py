@@ -1050,24 +1050,25 @@ def compute_ev_features_sharp_vs_rec(
         .rename(columns={"Value":"Sharp_Line","Odds_Price":"Sharp_Odds"})
     )
 
-    # Take top-2 sharp outcomes per (Game_Key, Market) → de‑vig pair
+  
+    # Take top-2 sharp outcomes per (Game_Key, Market) → de-vig pair (no groupby.apply)
     pairs_base = (sharp_rows
         .sort_values(["Game_Key","Market", reliability_col], ascending=[True,True,False])
-        .drop_duplicates(subset=["Game_Key","Market","Outcome_Norm"], keep="first"))
-
-    top2 = (pairs_base.groupby(["Game_Key","Market"], as_index=False)
-        .apply(lambda g: g.head(2))
-        .reset_index(drop=True))
-
-    def _to_pair(df):
-        if len(df) < 2:
-            return pd.Series({"Outcome_A":np.nan,"Line_A":np.nan,"Odds_A":np.nan,
-                              "Outcome_B":np.nan,"Line_B":np.nan,"Odds_B":np.nan})
-        a, b = df.iloc[0], df.iloc[1]
-        return pd.Series({"Outcome_A":a["Outcome_Norm"], "Line_A":a["Value"], "Odds_A":a["Odds_Price"],
-                          "Outcome_B":b["Outcome_Norm"], "Line_B":b["Value"], "Odds_B":b["Odds_Price"]})
-    sharp_pairs = top2.groupby(["Game_Key","Market"]).apply(_to_pair).reset_index()
-
+        .drop_duplicates(subset=["Game_Key","Market","Outcome_Norm"], keep="first")
+    )
+    
+    pairs_base["_rank2"] = pairs_base.groupby(["Game_Key","Market"], sort=False).cumcount()
+    
+    top2 = pairs_base[pairs_base["_rank2"] < 2].copy()
+    
+    # Pivot to two outcomes
+    A = top2[top2["_rank2"] == 0].rename(columns={"Outcome_Norm":"Outcome_A","Value":"Line_A","Odds_Price":"Odds_A"})
+    B = top2[top2["_rank2"] == 1].rename(columns={"Outcome_Norm":"Outcome_B","Value":"Line_B","Odds_Price":"Odds_B"})
+    
+    sharp_pairs = (A[["Game_Key","Market","Outcome_A","Line_A","Odds_A"]]
+        .merge(B[["Game_Key","Market","Outcome_B","Line_B","Odds_B"]], on=["Game_Key","Market"], how="left")
+    )
+    
     truth = sharp_ref.merge(sharp_pairs, on=["Game_Key","Market"], how="left")
 
     # De‑vig at the sharp line (if pair available)
@@ -1355,111 +1356,136 @@ from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score
 def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     UI-only: Adds small-book liquidity features.
-    Market-aware and safe if no small-limit books or missing Limit values.
+    Safe if no small-limit books or missing Limit values.
     Run on df_pre (latest snapshot per book/outcome) BEFORE building df_summary_base.
     """
-    SMALL_LIMIT_BOOKS = ['betfair_ex_uk','betfair_ex_eu','betfair_ex_au','matchbook','smarkets']
+    SMALL_LIMIT_BOOKS = {'betfair_ex_uk','betfair_ex_eu','betfair_ex_au','matchbook','smarkets'}
+
+    if df is None or df.empty:
+        return df
 
     out = df.copy()
 
-    # Normalize
-    out['Bookmaker_Norm'] = out.get('Bookmaker_Norm', out.get('Bookmaker', '')).astype(str).str.lower().str.strip()
-    out['Market'] = out['Market'].astype(str).str.lower().str.strip()
-    out['Outcome'] = out['Outcome'].astype(str).str.lower().str.strip()
+    # --- normalize book + market + outcome keys robustly ---
+    # Bookmaker key
+    if "Bookmaker_Norm" in out.columns:
+        bk = out["Bookmaker_Norm"]
+    elif "Bookmaker" in out.columns:
+        bk = out["Bookmaker"]
+    elif "Book" in out.columns:
+        bk = out["Book"]
+    else:
+        bk = ""
+
+    out["Bookmaker_Norm"] = pd.Series(bk, index=out.index).astype(str).str.lower().str.strip()
+    out["Market"] = out.get("Market", "").astype(str).str.lower().str.strip()
+
+    # Outcome key (prefer Outcome_Norm, else Outcome)
+    if "Outcome_Norm" in out.columns:
+        out["Outcome_Key"] = out["Outcome_Norm"].astype(str).str.lower().str.strip()
+    else:
+        out["Outcome_Key"] = out.get("Outcome", "").astype(str).str.lower().str.strip()
 
     # Numeric limit
-    out['Limit'] = pd.to_numeric(out.get('Limit', 0), errors='coerce').fillna(0)
+    out["Limit"] = pd.to_numeric(out.get("Limit", np.nan), errors="coerce").fillna(0.0)
 
     # Filter small-limit books
-    sb = out[out['Bookmaker_Norm'].isin(SMALL_LIMIT_BOOKS)].copy()
+    sb = out[out["Bookmaker_Norm"].isin(SMALL_LIMIT_BOOKS)].copy()
+    base_cols = [
+        "SmallBook_Total_Limit","SmallBook_Max_Limit","SmallBook_Min_Limit",
+        "SmallBook_Limit_Skew","SmallBook_Heavy_Liquidity_Flag","SmallBook_Limit_Skew_Flag"
+    ]
     if sb.empty:
-        # Create empty columns and return (UI-safe)
-        for c in [
-            'SmallBook_Total_Limit','SmallBook_Max_Limit','SmallBook_Min_Limit',
-            'SmallBook_Limit_Skew','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag'
-        ]:
-            out[c] = np.nan if c == 'SmallBook_Limit_Skew' else 0
+        for c in base_cols:
+            out[c] = 0.0 if c != "SmallBook_Limit_Skew" else np.nan
         return out
 
-    # Aggregate per Game_Key × Market × Outcome
+    # Aggregate per Game_Key × Market × Outcome_Key
     agg = (
-        sb.groupby(['Game_Key','Market','Outcome'])
+        sb.groupby(["Game_Key","Market","Outcome_Key"], dropna=False)
           .agg(
-              SmallBook_Total_Limit=('Limit','sum'),
-              SmallBook_Max_Limit=('Limit','max'),
-              SmallBook_Min_Limit=('Limit','min'),
-              SmallBook_Count=('Limit','size')
+              SmallBook_Total_Limit=("Limit","sum"),
+              SmallBook_Max_Limit=("Limit","max"),
+              SmallBook_Min_Limit=("Limit","min"),
           )
           .reset_index()
     )
 
-    # Compute skew (avoid /0)
-    agg['SmallBook_Limit_Skew'] = np.where(
-        agg['SmallBook_Min_Limit'] > 0,
-        agg['SmallBook_Max_Limit'] / agg['SmallBook_Min_Limit'],
+    agg["SmallBook_Limit_Skew"] = np.where(
+        agg["SmallBook_Min_Limit"] > 0,
+        agg["SmallBook_Max_Limit"] / agg["SmallBook_Min_Limit"],
         np.nan
     )
 
-    # Flags (tune thresholds as you wish)
-    HEAVY_TOTAL = 700    # you used 700 in your current skew/heavy logic
+    HEAVY_TOTAL = 700.0
     SKEW_RATIO  = 1.5
+    agg["SmallBook_Heavy_Liquidity_Flag"] = (agg["SmallBook_Total_Limit"] >= HEAVY_TOTAL).astype("int8")
+    agg["SmallBook_Limit_Skew_Flag"]      = (agg["SmallBook_Limit_Skew"] >= SKEW_RATIO).astype("int8")
 
-    agg['SmallBook_Heavy_Liquidity_Flag'] = (agg['SmallBook_Total_Limit'] >= HEAVY_TOTAL).astype(int)
-    agg['SmallBook_Limit_Skew_Flag']      = (agg['SmallBook_Limit_Skew'] >= SKEW_RATIO).astype(int)
-
-    # Merge skinny back (left)
     out = out.merge(
-        agg[['Game_Key','Market','Outcome',
-             'SmallBook_Total_Limit','SmallBook_Max_Limit','SmallBook_Min_Limit',
-             'SmallBook_Limit_Skew','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag']],
-        on=['Game_Key','Market','Outcome'],
-        how='left'
+        agg[["Game_Key","Market","Outcome_Key"] + base_cols],
+        on=["Game_Key","Market","Outcome_Key"],
+        how="left",
+        validate="many_to_one"
     )
+
+    # Fill safe defaults
+    out["SmallBook_Total_Limit"] = out["SmallBook_Total_Limit"].fillna(0.0)
+    out["SmallBook_Max_Limit"]   = out["SmallBook_Max_Limit"].fillna(0.0)
+    out["SmallBook_Min_Limit"]   = out["SmallBook_Min_Limit"].fillna(0.0)
+    out["SmallBook_Heavy_Liquidity_Flag"] = out["SmallBook_Heavy_Liquidity_Flag"].fillna(0).astype("int8")
+    out["SmallBook_Limit_Skew_Flag"]      = out["SmallBook_Limit_Skew_Flag"].fillna(0).astype("int8")
 
     return out
 
 def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "America/New_York") -> pd.DataFrame:
     out = df.copy()
-
-    # 1) Pick a timestamp source (prefer Commence_Hour, else Game_Start)
-    if 'Commence_Hour' in out.columns:
-        ts = pd.to_datetime(out['Commence_Hour'], errors='coerce', utc=True)
-    elif 'Game_Start' in out.columns:
-        ts = pd.to_datetime(out['Game_Start'], errors='coerce', utc=True)
-    else:
-        # if neither exist, create dummies and return
-        out['Is_Weekend'] = 0
-        out['Is_Night_Game'] = 0
-        out['Game_Local_Hour'] = np.nan
-        out['Game_DOW'] = np.nan
+    if out is None or out.empty:
         return out
 
-    # 2) Convert to local for day/night & weekend logic
-    ts_local = ts.dt.tz_convert(local_tz)
-    out['Game_Local_Hour'] = ts_local.dt.hour
-    out['Game_DOW'] = ts_local.dt.dayofweek  # Mon=0 ... Sun=6
-    out['Is_Weekend'] = out['Game_DOW'].isin([5, 6]).astype(int)
-
-    # 3) Night cutoffs by sport (tweak to taste)
-    SPORT_NIGHT_CUTOFF = {
-        'MLB': 18, 'NFL': 18, 'CFL': 18, 'NBA': 18, 'WNBA': 18, 'NCAAF': 18, 'NCAAB': 18
-    }
-    night_cutoff = SPORT_NIGHT_CUTOFF.get(str(sport).upper(), 18)
-    out['Is_Night_Game'] = (out['Game_Local_Hour'] >= night_cutoff).astype(int)
-
-    # (Optional) primetime flag (example tuned for NFL)
-    if str(sport).upper() in {'NFL', 'CFL'}:
-        # Thu(3), Sun(6), Mon(0) and 7–11pm local
-        out['Is_PrimeTime'] = ((out['Game_DOW'].isin([3, 6, 0])) &
-                               (out['Game_Local_Hour'].between(19, 23))).astype(int)
+    # Pick a timestamp source
+    if "Commence_Hour" in out.columns:
+        ts = pd.to_datetime(out["Commence_Hour"], errors="coerce", utc=True)
+    elif "Game_Start" in out.columns:
+        ts = pd.to_datetime(out["Game_Start"], errors="coerce", utc=True)
     else:
-        out['Is_PrimeTime'] = 0
+        out["Is_Weekend"] = 0
+        out["Is_Night_Game"] = 0
+        out["Is_PrimeTime"] = 0
+        out["Game_Local_Hour"] = np.nan
+        out["Game_DOW"] = np.nan
+        out["DOW_Sin"] = 0.0
+        out["DOW_Cos"] = 0.0
+        return out
 
-    #(Optional) cyclical DOW encodings
-    out['DOW_Sin'] = np.sin(2*np.pi*(out['Game_DOW'] / 7.0))
-    out['DOW_Cos'] = np.cos(2*np.pi*(out['Game_DOW'] / 7.0))
+    # Convert to local safely
+    try:
+        ts_local = ts.dt.tz_convert(local_tz)
+    except Exception:
+        # if something somehow became tz-naive, re-localize to UTC first
+        ts = pd.to_datetime(ts, errors="coerce", utc=True)
+        ts_local = ts.dt.tz_convert(local_tz)
 
+    out["Game_Local_Hour"] = ts_local.dt.hour
+    out["Game_DOW"] = ts_local.dt.dayofweek
+    out["Is_Weekend"] = out["Game_DOW"].isin([5, 6]).astype("int8")
+
+    SPORT_NIGHT_CUTOFF = {'MLB':18,'NFL':18,'CFL':18,'NBA':18,'WNBA':18,'NCAAF':18,'NCAAB':18}
+    night_cutoff = SPORT_NIGHT_CUTOFF.get(str(sport).upper(), 18)
+    out["Is_Night_Game"] = (out["Game_Local_Hour"] >= night_cutoff).astype("int8")
+
+    if str(sport).upper() in {"NFL", "CFL"}:
+        out["Is_PrimeTime"] = (
+            out["Game_DOW"].isin([3, 6, 0]) & out["Game_Local_Hour"].between(19, 23)
+        ).astype("int8")
+    else:
+        out["Is_PrimeTime"] = 0
+
+    out["DOW_Sin"] = np.sin(2*np.pi*(out["Game_DOW"] / 7.0))
+    out["DOW_Cos"] = np.cos(2*np.pi*(out["Game_DOW"] / 7.0))
     return out
+
+
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype, is_datetime64tz_dtype
@@ -1659,68 +1685,108 @@ def add_book_path_reliability_features(
 
     return merged
 
+import numpy as np
+import pandas as pd
 
 def add_book_reliability_features(
     df: pd.DataFrame,
     label_col: str = "SHARP_HIT_BOOL",
-    prior_strength: float = 200.0
+    prior_strength: float = 200.0,
+    time_cols: tuple[str, ...] = ("Game_Start", "Snapshot_Timestamp"),
 ) -> pd.DataFrame:
     """
-    Leak-safe per-row features:
-      Book_Reliability_Score: Beta-Binomial posterior mean for this (Sport, Market, Bookmaker)
-      Book_Reliability_Lift : log-odds of that mean vs 50/50
+    Leak-safe per-row features (as-of, no leakage):
+      - Book_Reliability_Score: Beta-Binomial posterior mean for (Sport, Market, Bookmaker)
+      - Book_Reliability_Lift : log-odds of that mean
 
-    Uses ONLY prior rows ("as of" via cumulative counts shifted by 1).
-    Requires: Sport (UPPER), Market (lower), Bookmaker (lower), time col (Game_Start or Snapshot_Timestamp), label_col.
+    Prior is sport/market as-of mean (also leak-safe), scaled by prior_strength.
     """
+
+    if df is None or df.empty:
+        return df
+
     out = df.copy()
 
-    # --- Normalize keys & types
-    out['Sport'] = out['Sport'].astype(str).str.upper()
-    out['Market'] = out['Market'].astype(str).str.lower().str.strip()
-    if 'Bookmaker' not in out.columns and 'Book' in out.columns:
-        out['Bookmaker'] = out['Book']
-    out['Bookmaker'] = out['Bookmaker'].astype(str).str.lower().str.strip()
+    # ---- Normalize keys ----
+    if "Sport" not in out.columns:
+        out["Sport"] = ""
+    out["Sport"] = out["Sport"].astype(str).str.upper().str.strip()
 
-    # Time column with safe fallback
-    if 'Game_Start' in out.columns and pd.api.types.is_datetime64_any_dtype(out['Game_Start']):
-        out['Game_Start'] = pd.to_datetime(out['Game_Start'], errors='coerce', utc=True)
-    else:
-        # Fallback to snapshot if Game_Start missing
-        out['Game_Start'] = pd.to_datetime(out.get('Snapshot_Timestamp'), errors='coerce', utc=True)
+    if "Market" not in out.columns:
+        out["Market"] = ""
+    out["Market"] = out["Market"].astype(str).str.lower().str.strip()
 
-    # Label
-    out[label_col] = pd.to_numeric(out[label_col], errors='coerce').fillna(0).astype(int)
+    if "Bookmaker" not in out.columns:
+        if "Book" in out.columns:
+            out["Bookmaker"] = out["Book"]
+        else:
+            out["Bookmaker"] = ""
+    out["Bookmaker"] = out["Bookmaker"].astype(str).str.lower().str.strip()
 
-    # --- Sort for "as-of" math
-    out = out.sort_values(['Sport', 'Market', 'Bookmaker', 'Game_Start'], kind='mergesort')
+    # ---- Choose robust time key ----
+    # Parse candidate time columns; prefer the first that yields non-null values.
+    t_series = None
+    for c in time_cols:
+        if c in out.columns:
+            parsed = pd.to_datetime(out[c], errors="coerce", utc=True)
+            if parsed.notna().any():
+                t_series = parsed
+                break
 
-    # Book-level cumulative (exclude current row)
-    g_smb = out.groupby(['Sport', 'Market', 'Bookmaker'], sort=False)
-    cum_trials = g_smb.cumcount()
-    cum_hits   = g_smb[label_col].cumsum() - out[label_col]
+    if t_series is None:
+        # No usable time column => cannot do leak-safe "as-of"
+        out["Book_Reliability_Score"] = np.float32(0.5)
+        out["Book_Reliability_Lift"]  = np.float32(0.0)
+        return out
 
-    # Sport/market global prior (exclude current row)
-    g_sm = out.groupby(['Sport', 'Market'], sort=False)
-    cum_trials_sm = g_sm.cumcount()
-    cum_hits_sm   = g_sm[label_col].cumsum() - out[label_col]
+    out["_Rel_Time"] = t_series
+
+    # ---- Label ----
+    if label_col not in out.columns:
+        out[label_col] = 0
+    y = pd.to_numeric(out[label_col], errors="coerce").fillna(0).astype(int)
+    y = y.clip(0, 1)
+    out[label_col] = y
+
+    # ---- Sort for as-of math (stable) ----
+    # Use mergesort so cum* order is stable; push NaT to end deterministically
+    out["_Rel_Time_isna"] = out["_Rel_Time"].isna().astype(int)
+    out = out.sort_values(
+        ["Sport", "Market", "Bookmaker", "_Rel_Time_isna", "_Rel_Time"],
+        kind="mergesort"
+    )
+
+    # ---- Book-level cumulative counts (exclude current row) ----
+    g_b = out.groupby(["Sport", "Market", "Bookmaker"], sort=False)
+    prior_n_b    = g_b.cumcount()  # 0,1,2,...  (already excludes current)
+    prior_hits_b = g_b[label_col].cumsum() - out[label_col]
+
+    # ---- Sport/Market global as-of prior (exclude current row) ----
+    g_sm = out.groupby(["Sport", "Market"], sort=False)
+    prior_n_sm    = g_sm.cumcount()
+    prior_hits_sm = g_sm[label_col].cumsum() - out[label_col]
 
     p_global_asof = np.where(
-        cum_trials_sm > 0,
-        (cum_hits_sm / np.maximum(cum_trials_sm, 1)).astype(float),
+        prior_n_sm.to_numpy() > 0,
+        (prior_hits_sm / np.maximum(prior_n_sm, 1)).to_numpy(dtype=float),
         0.5
     )
 
     alpha0 = prior_strength * p_global_asof
     beta0  = prior_strength * (1.0 - p_global_asof)
 
-    post_mean = (cum_hits + alpha0) / (np.maximum(cum_trials, 0) + alpha0 + beta0)
-    post_mean = np.clip(post_mean, 0.01, 0.99)
-    post_lift = np.log(post_mean / (1 - post_mean))
+    # Posterior mean
+    n_b = prior_n_b.to_numpy(dtype=float)
+    h_b = prior_hits_b.to_numpy(dtype=float)
 
-    out['Book_Reliability_Score'] = post_mean
-    out['Book_Reliability_Lift']  = post_lift
+    post_mean = (h_b + alpha0) / (n_b + alpha0 + beta0)
+    post_mean = np.clip(post_mean, 1e-3, 1.0 - 1e-3)
+    post_lift = np.log(post_mean / (1.0 - post_mean))
 
+    out["Book_Reliability_Score"] = post_mean.astype("float32")
+    out["Book_Reliability_Lift"]  = post_lift.astype("float32")
+
+    out = out.drop(columns=["_Rel_Time", "_Rel_Time_isna"], errors="ignore")
     return out
 
 def sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
@@ -8171,19 +8237,32 @@ def build_cover_streaks_game_level(df_bt_prepped: pd.DataFrame, *, sport: str, m
     out = g[["Sport", "Market", "Game_Key", "Team", time_col] + streak_cols].rename(columns={time_col: "Game_Start"})
     return out
 
-def merge_drop_overlap(left, right, on, how="left", *, keep_right=True, validate=None):
+def merge_drop_overlap(left: pd.DataFrame,
+                       right: pd.DataFrame,
+                       on: list[str],
+                       how: str = "left",
+                       keep_right: bool = True) -> pd.DataFrame:
     """
-    Merge while preventing pandas _x/_y duplicates by dropping overlapping
-    non-key columns from the side you DON'T want to keep.
+    Merge right into left, avoiding duplicate-column suffix hell.
+    If keep_right=True, right-side overlapping columns replace left-side ones.
     """
-    on = [on] if isinstance(on, str) else list(on)
-    overlap = (set(left.columns) & set(right.columns)) - set(on)
-    if overlap:
-        if keep_right:
-            left = left.drop(columns=sorted(overlap), errors="ignore")
-        else:
-            right = right.drop(columns=sorted(overlap), errors="ignore")
-    return left.merge(right, on=on, how=how, validate=validate)
+    if left is None or left.empty:
+        return left
+    if right is None or right.empty:
+        return left
+
+    left = left.copy()
+    right = right.copy()
+
+    # Identify overlapping non-key columns
+    keyset = set(on)
+    overlap = [c for c in right.columns if (c in left.columns and c not in keyset)]
+
+    if overlap and keep_right:
+        left = left.drop(columns=overlap, errors="ignore")
+
+    return left.merge(right, on=on, how=how)
+
 
 def _logit(p, eps=1e-6):
     p = np.clip(np.asarray(p, float), eps, 1-eps)
@@ -10509,7 +10588,9 @@ def train_sharp_model_from_bq(
             sport_default=sport_label,   # not 'label'
         )
 
-     
+        book_reliability_map = pd.DataFrame(columns=[
+            "Sport", "Market", "Bookmaker", "Book_Reliability_Score", "Book_Reliability_Lift"
+        ])
         
         if "st" in globals():
             st.write(
@@ -12487,7 +12568,41 @@ def train_sharp_model_from_bq(
                 p_blend = 1.0 - p_blend
             return models["iso_blend"].predict(p_blend)
         # === Save ensemble (choose one or both) ===
-       
+        
+    # --- Book reliability (build DF exactly as apply expects) ---
+        try:
+            if isinstance(df_market, pd.DataFrame) and len(df_market) > 0:
+        
+                # pick the bookmaker column we can actually use
+                bk_col = None
+                if "Bookmaker" in df_market.columns:
+                    bk_col = "Bookmaker"
+                elif "Bookmaker_Norm" in df_market.columns:
+                    bk_col = "Bookmaker_Norm"
+        
+                # must have at least these
+                req_core = ["Sport", "Market", "SHARP_HIT_BOOL"]
+                if bk_col is None or any(c not in df_market.columns for c in req_core):
+                    raise KeyError(f"Missing cols for reliability: bk_col={bk_col}, have={list(df_market.columns)[:20]}")
+        
+                df_rel_in = df_market.loc[:, req_core + [bk_col]].copy()
+        
+                # builder expects 'Bookmaker'
+                if bk_col != "Bookmaker":
+                    df_rel_in.rename(columns={bk_col: "Bookmaker"}, inplace=True)
+        
+                # final safety (no weird null keys)
+                df_rel_in["Bookmaker"] = df_rel_in["Bookmaker"].astype(str).str.strip().str.lower()
+        
+                book_reliability_map = build_book_reliability_map(df_rel_in, prior_strength=200.0)
+        
+            # else: keep default empty DF
+        
+        except Exception as e:
+            logger.warning(f"book_reliability_map build failed; defaulting to empty. err={e}")
+            book_reliability_map = pd.DataFrame(columns=[
+                "Sport", "Market", "Bookmaker", "Book_Reliability_Score", "Book_Reliability_Lift"
+            ])    
         trained_models[market] = {
             "model_logloss":        model_logloss,
             "model_auc":            model_auc,
