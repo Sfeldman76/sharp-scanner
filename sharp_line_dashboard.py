@@ -16509,15 +16509,15 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
 
 
 from google.cloud import bigquery
-
+import streamlit as st
+import pandas as pd
+import numpy as np
+from datetime import date, timedelta
+from google.cloud import
 import streamlit as st
 from datetime import date, timedelta
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date=None, end_date=None):
-    import streamlit as st
-    import pandas as pd
-    import numpy as np
-    from datetime import date, timedelta
-    from google.cloud import bigquery
+
 
     client = bigquery.Client(project="sharplogger", location="us")
 
@@ -16526,9 +16526,15 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
 
         col1, col2 = st.columns(2)
         with col1:
-            start_date = st.date_input("Start Date", value=(date.today() - timedelta(days=14)) if start_date is None else start_date)
+            start_date = st.date_input(
+                "Start Date",
+                value=(date.today() - timedelta(days=14)) if start_date is None else start_date
+            )
         with col2:
-            end_date = st.date_input("End Date", value=date.today() if end_date is None else end_date)
+            end_date = st.date_input(
+                "End Date",
+                value=date.today() if end_date is None else end_date
+            )
 
         query = """
         SELECT
@@ -16558,25 +16564,40 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
 
         st.info(f"✅ Loaded rows: {len(df)}")
 
-        # ---- Clean + filter ----
+        # =====================================
+        # CLEAN + VALIDATE
+        # =====================================
         df = df[df["SHARP_HIT_BOOL"].notna() & df["Model_Sharp_Win_Prob"].notna()].copy()
 
         df["SHARP_HIT_BOOL"] = pd.to_numeric(df["SHARP_HIT_BOOL"], errors="coerce")
         df["Model_Sharp_Win_Prob"] = pd.to_numeric(df["Model_Sharp_Win_Prob"], errors="coerce")
-        df = df[df["SHARP_HIT_BOOL"].isin([0, 1]) & df["Model_Sharp_Win_Prob"].between(0, 1)].copy()
+
+        df = df[
+            df["SHARP_HIT_BOOL"].isin([0, 1]) &
+            df["Model_Sharp_Win_Prob"].between(0, 1)
+        ].copy()
 
         df["SHARP_HIT_BOOL"] = df["SHARP_HIT_BOOL"].astype(int)
 
-        # ---- OPTIONAL: only include "playable" probabilities (uncomment if desired) ----
+        # OPTIONAL FILTER (playable edges only)
         # df = df[df["Model_Sharp_Win_Prob"] >= 0.51].copy()
 
-        # ---- Bin by predicted probability (you can change bin_width to 0.05, 0.10, etc.) ----
-        bin_width = 0.02  # 2% bins
-        lo = 0.50  # start bins at 50%
+        # =====================================
+        # PROBABILITY BINNING
+        # =====================================
+        bin_width = 0.02   # 2% bins
+        lo = 0.30
         hi = 1.00
 
-        prob_bins = np.round(np.arange(lo, hi + bin_width + 1e-9, bin_width), 6)
-        bin_labels = [f"{int(a*100)}–{int(b*100)}%" for a, b in zip(prob_bins[:-1], prob_bins[1:])]
+        prob_bins = np.round(
+            np.arange(lo, hi + bin_width + 1e-9, bin_width),
+            6
+        )
+
+        bin_labels = [
+            f"{int(a*100)}–{int(b*100)}%"
+            for a, b in zip(prob_bins[:-1], prob_bins[1:])
+        ]
 
         df["Prob_Bin"] = pd.cut(
             df["Model_Sharp_Win_Prob"],
@@ -16586,9 +16607,9 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
             right=False
         )
 
-        # =========================
-        # OVERALL: show WINS (counts) by probability bin (NO win %)
-        # =========================
+        # =====================================
+        # OVERALL SUMMARY
+        # =====================================
         st.subheader("🏆 Wins by Model Probability (Overall)")
 
         overall = (
@@ -16596,17 +16617,22 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
               .agg(Picks="count", Wins="sum")
               .reset_index()
         )
+
         overall["Losses"] = overall["Picks"] - overall["Wins"]
+        overall["Win_%"] = overall["Wins"] / overall["Picks"]
 
-        st.dataframe(overall)
+        st.dataframe(
+            overall.style.format({
+                "Win_%": "{:.1%}"
+            })
+        )
 
-        # Optional chart: Wins by bin
         if len(overall) > 0:
             st.bar_chart(overall.set_index("Prob_Bin")["Wins"])
 
-        # =========================
-        # BY MARKET: show WINS (counts) by probability bin (NO win %)
-        # =========================
+        # =====================================
+        # BY MARKET
+        # =====================================
         st.markdown("#### 🧩 Wins by Model Probability (by Market)")
 
         by_market = (
@@ -16614,12 +16640,24 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
               .agg(Picks="count", Wins="sum")
               .reset_index()
         )
+
         by_market["Losses"] = by_market["Picks"] - by_market["Wins"]
+        by_market["Win_%"] = by_market["Wins"] / by_market["Picks"]
 
         for market in sorted(by_market["Market"].dropna().unique()):
             st.markdown(f"**📊 {str(market).upper()}**")
-            mdf = by_market[by_market["Market"] == market].drop(columns="Market")
-            st.dataframe(mdf)
+
+            mdf = (
+                by_market[by_market["Market"] == market]
+                .drop(columns="Market")
+                .copy()
+            )
+
+            st.dataframe(
+                mdf.style.format({
+                    "Win_%": "{:.1%}"
+                })
+            )
 
             if len(mdf) > 0:
                 st.bar_chart(mdf.set_index("Prob_Bin")["Wins"])
