@@ -16507,15 +16507,14 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
             except Exception as e:
                 st.warning(f"Could not render edges: {e}")
 
-
-from google.cloud import bigquery
 import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import date, timedelta
-from google.cloud import
-import streamlit as st
-from datetime import date, timedelta
+from google.cloud import bigquery
+
+
+
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date=None, end_date=None):
 
 
