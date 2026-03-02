@@ -12391,149 +12391,120 @@ def train_sharp_model_from_bq(
         # OOF predictions (train-only) + blending
         # + Calibration + Tables + Save + Artifacts (HARDENED)
         # -----------------------------------------
-        SMALL = (
-            (sport_key in SMALL_LEAGUES)
-            or (np.unique(g_train).size < 30)
-            or (len(y_train) < 500)
-        )
-        MIN_OOF     = 40 if SMALL else 120
+        # -----------------------------------------
+        # OOF predictions (train-only) + LOGIT blending + calibration
+        # -----------------------------------------
+        SMALL = ((sport_key in SMALL_LEAGUES) or (np.unique(g_train).size < 30) or (len(y_train) < 500))
+        MIN_OOF = 40 if SMALL else 120
         RUN_LOGLOSS = True
-        eps         = 1e-7
+        eps = 1e-7
         
-        oof_pred_auc     = np.full(len(y_train), np.nan, dtype=np.float64)
-        oof_pred_logloss = (np.full(len(y_train), np.nan, dtype=np.float64) if RUN_LOGLOSS else None)
+        def _clip01(p, lo=1e-7):
+            return np.clip(np.asarray(p, float), lo, 1.0 - lo)
         
-        # IMPORTANT:
-        # - You ALREADY per-fold "AUC-align" via auc_with_flip() below.
-        # - Therefore DO NOT do a second global flip later unless you explicitly want polarity inversion.
-        ALLOW_GLOBAL_FLIP = False
+        def _logit(p):
+            p = _clip01(p, eps)
+            return np.log(p / (1.0 - p))
         
-        # --- Make OOFs (per-fold AUC-align) ---
+        def _sigmoid(z):
+            return 1.0 / (1.0 + np.exp(-z))
+        
+        oof_pred_auc = np.full(len(y_train), np.nan, dtype=np.float64)
+        oof_pred_ll  = np.full(len(y_train), np.nan, dtype=np.float64) if RUN_LOGLOSS else None
+        
+        # Per-fold fit → predict → AUC-align ONLY for AUC stream (as you already do)
         for tr_rel, va_rel in folds:
-            fold_ntrees_auc = int(max(200, int(n_trees_auc) if n_trees_auc is not None else 0))
-            fold_ntrees_ll  = int(max(200, int(n_trees_ll)  if n_trees_ll  is not None else 0))
+            fold_ntrees_auc = int(max(200, n_trees_auc))
+            fold_ntrees_ll  = int(max(200, n_trees_ll))
         
-            m_auc = XGBClassifier(
-                **{**base_kwargs, **best_auc_params, "n_estimators": fold_ntrees_auc, "n_jobs": 1}
-            )
-            m_auc.fit(
-                X_train[tr_rel], y_train[tr_rel],
-                sample_weight=w_train[tr_rel],
-                verbose=False,
-            )
+            m_auc = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": fold_ntrees_auc, "n_jobs": 1})
+            m_auc.fit(X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
+        
             pa, _ = pos_proba_safe(m_auc, X_train[va_rel], positive=1)
             _, pa_fixed, _ = auc_with_flip(y_train[va_rel].astype(int), pa, w_train[va_rel])
-            oof_pred_auc[va_rel] = np.clip(pa_fixed.astype(np.float64), eps, 1 - eps)
+            oof_pred_auc[va_rel] = _clip01(pa_fixed, eps)
         
             if RUN_LOGLOSS:
-                m_ll = XGBClassifier(
-                    **{**base_kwargs, **best_ll_params, "n_estimators": fold_ntrees_ll, "n_jobs": 1}
-                )
-                m_ll.fit(
-                    X_train[tr_rel], y_train[tr_rel],
-                    sample_weight=w_train[tr_rel],
-                    verbose=False,
-                )
+                m_ll = XGBClassifier(**{**base_kwargs, **best_ll_params, "n_estimators": fold_ntrees_ll, "n_jobs": 1})
+                m_ll.fit(X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
+        
                 pl, _ = pos_proba_safe(m_ll, X_train[va_rel], positive=1)
-                oof_pred_logloss[va_rel] = np.clip(pl.astype(np.float64), eps, 1 - eps)
+                oof_pred_ll[va_rel] = _clip01(pl, eps)
         
         mask_auc = np.isfinite(oof_pred_auc)
-        mask_log = np.isfinite(oof_pred_logloss) if (RUN_LOGLOSS and oof_pred_logloss is not None) else mask_auc
-        mask_oof = mask_auc & mask_log
-        n_oof    = int(mask_oof.sum())
+        mask_ll  = np.isfinite(oof_pred_ll) if RUN_LOGLOSS else mask_auc
+        mask_oof = mask_auc & mask_ll
+        n_oof = int(mask_oof.sum())
         
-        # --- Pick OOF sources robustly ---
-        if n_oof >= MIN_OOF:
+        # Choose OOF sources
+        if n_oof >= MIN_OOF and RUN_LOGLOSS:
             y_oof     = y_train[mask_oof].astype(int)
-            p_oof_auc = np.clip(oof_pred_auc[mask_oof], eps, 1 - eps).astype(np.float64)
-            p_oof_log = (
-                np.clip(oof_pred_logloss[mask_oof], eps, 1 - eps).astype(np.float64)
-                if (RUN_LOGLOSS and oof_pred_logloss is not None)
-                else None
-            )
+            p_oof_auc = _clip01(oof_pred_auc[mask_oof], eps)
+            p_oof_ll  = _clip01(oof_pred_ll[mask_oof],  eps)
         else:
             y_oof     = y_train[mask_auc].astype(int)
-            p_oof_auc = np.clip(oof_pred_auc[mask_auc], eps, 1 - eps).astype(np.float64)
-            p_oof_log = None
+            p_oof_auc = _clip01(oof_pred_auc[mask_auc], eps)
+            p_oof_ll  = None
         
-        best_w, p_oof_blend, _ = pick_blend_weight_on_oof(
-            y_oof=y_oof,
-            p_oof_auc=p_oof_auc,
-            p_oof_log=p_oof_log,
-            eps=eps,
-            metric="hybrid",
-            hybrid_alpha=0.92,
-        )
+        # ---- Choose blend weight on OOF (LOGIT SPACE) ----
+        # We pick w by minimizing logloss of sigmoid(w*z_ll + (1-w)*z_auc)
+        z_auc = _logit(p_oof_auc)
+        if p_oof_ll is not None:
+            z_ll  = _logit(p_oof_ll)
+            CAND = [0.25, 0.35, 0.45, 0.55, 0.65, 0.75] if not SMALL else [0.35, 0.50, 0.65]
+            best_w, best_lloss = 0.50, np.inf
+            for w in CAND:
+                z_mix = w * z_ll + (1.0 - w) * z_auc
+                p_mix = _clip01(_sigmoid(z_mix), eps)
+                ll = log_loss(y_oof, p_mix, labels=[0, 1])
+                if ll < best_lloss:
+                    best_lloss, best_w = float(ll), float(w)
+        else:
+            best_w = 0.0  # only AUC stream
         
-        p_oof_blend = np.asarray(p_oof_blend, dtype=np.float64)
-        if not np.isfinite(p_oof_blend).all():
-            keep = np.isfinite(p_oof_blend)
-            y_oof = y_oof[keep]
-            p_oof_blend = p_oof_blend[keep]
+        # Final OOF blended probabilities (still PRE-calibration)
+        if p_oof_ll is not None:
+            z_oof_blend = best_w * _logit(p_oof_ll) + (1.0 - best_w) * _logit(p_oof_auc)
+        else:
+            z_oof_blend = _logit(p_oof_auc)
         
-        oof_std = float(np.std(p_oof_blend)) if p_oof_blend.size else float("nan")
-        oof_rng = float(np.max(p_oof_blend) - np.min(p_oof_blend)) if p_oof_blend.size else float("nan")
+        p_oof_blend = _clip01(_sigmoid(z_oof_blend), eps)
+        oof_std = float(np.std(p_oof_blend))
+        oof_rng = float(p_oof_blend.max() - p_oof_blend.min())
         
         st.write({
             "SMALL": bool(SMALL),
             "RUN_LOGLOSS": bool(RUN_LOGLOSS),
             "n_oof": int(len(y_oof)),
-            "blend_w": float(best_w),
+            "blend_w_logit": float(best_w),
             "oof_std": float(oof_std),
-            "oof_minmax": (
-                float(np.min(p_oof_blend)) if p_oof_blend.size else None,
-                float(np.max(p_oof_blend)) if p_oof_blend.size else None,
-            ),
+            "oof_minmax": (float(p_oof_blend.min()), float(p_oof_blend.max())),
         })
-        assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
         
-        # -----------------------------
-        # Calibration (NO-LEAK prior + comparable tables)
-        # -----------------------------
-        def _prior_correct(p, train_pos, deploy_pos, clip=1e-6):
-            p = np.clip(np.asarray(p, float), clip, 1 - clip)
-        
-            # if deploy_pos is missing/invalid, do nothing
-            if not np.isfinite(deploy_pos) or deploy_pos <= 0.0 or deploy_pos >= 1.0:
-                return p
-        
-            train_pos = float(np.clip(train_pos, clip, 1 - clip))
-            deploy_pos = float(np.clip(deploy_pos, clip, 1 - clip))
-        
-            def logit(x): return np.log(x / (1.0 - x))
-            def sigmoid(z): return 1.0 / (1.0 + np.exp(-z))
-        
-            shift = np.log((deploy_pos / (1.0 - deploy_pos)) / (train_pos / (1.0 - train_pos)))
+        # ---------------- Calibration (simplified, avoids extra compression) ----------------
+        def _prior_correct(p, train_pos, hold_pos, clip=1e-6):
+            p = np.clip(p, clip, 1-clip)
+            def logit(x): return np.log(x/(1-x))
+            def sigmoid(z): return 1.0/(1.0+np.exp(-z))
+            shift = np.log((hold_pos/(1-hold_pos)) / (train_pos/(1-train_pos)))
             return sigmoid(logit(p) + shift)
         
         CLIP = 0.03 if str(market).lower().strip() == "spreads" else (0.02 if SMALL else 0.01)
         
-        # --- IMPORTANT: DO NOT use holdout labels to define deploy prior ---
-        # If you have a real deployment prior estimate (e.g., rolling last 30d from TRAIN ONLY),
-        # set it here. Otherwise default to OOF prior (no shift).
-        oof_pos = float(np.mean(y_oof == 1)) if len(y_oof) else float(np.mean(y_full[train_all_idx] == 1))
+        deploy_pos = float(np.mean(y_full[hold_idx] == 1))
+        oof_pos    = float(np.mean(y_oof == 1))
         
-        deploy_pos_est = float(oof_pos)  # ✅ no-leak default
-        # If you *do* have a train-only rolling estimate, use it instead:
-        # deploy_pos_est = float(train_only_recent_posrate_est)
-        
-        # global flip is OFF by default (you already did per-fold AUC alignment)
+        # NOTE: keep flip OFF by default since you already AUC-aligned per fold
         flip_flag = False
-        if ALLOW_GLOBAL_FLIP and (np.unique(y_oof).size == 2):
-            flip_flag = _decide_flip_on_oof(y_oof, p_oof_blend, min_margin=0.01)
         
-        # OOF prior-correct (usually no-op unless deploy_pos_est differs)
+        # IMPORTANT CHANGE:
+        # Fit calibrator on the *blended* OOF directly (NOT prior-corrected first),
+        # then apply prior-correction at inference time only (deployment adjustment).
         p_oof_for_cal = (1.0 - p_oof_blend) if flip_flag else p_oof_blend
-        p_oof_prior   = _prior_correct(p_oof_for_cal, train_pos=oof_pos, deploy_pos=deploy_pos_est)
         
-        # Degeneracy guard
-        oof_std = float(np.std(p_oof_prior))
-        oof_rng = float(np.max(p_oof_prior) - np.min(p_oof_prior))
-        COLLAPSED = bool((oof_rng < 0.02) or (oof_std < 0.01))
-        
-        use_qiso = (len(np.unique(np.round(p_oof_prior, 4))) < 400)
-        cals_raw = fit_iso_platt_beta(p_oof_prior, y_oof, eps=1e-6, use_quantile_iso=use_qiso)
-        cals     = _normalize_cals(cals_raw)
+        use_qiso = (len(np.unique(np.round(p_oof_for_cal, 4))) < 400)
+        cals_raw = fit_iso_platt_beta(p_oof_for_cal, y_oof, eps=1e-6, use_quantile_iso=use_qiso)
+        cals = _normalize_cals(cals_raw)
         
         cals["iso"]   = _ensure_transform_for_iso(cals.get("iso")) or _IdentityIsoCal(eps=1e-6)
         cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=1e-6)
@@ -12549,97 +12520,102 @@ def train_sharp_model_from_bq(
         def _ece_score(y, p, n_bins=10):
             return float(expected_calibration_error(np.asarray(y, int), np.asarray(p, float), n_bins=n_bins))
         
+        # Selection with an anti-compression guard:
+        # choose best ECE among those that don't shrink std too much vs raw
+        raw_std = float(np.std(p_oof_for_cal))
         scores = []
         for kind, cal in candidates:
             try:
-                pp = _apply_cal(kind, cal, p_oof_prior)
+                pp = _apply_cal(kind, cal, p_oof_for_cal)
                 pp = np.asarray(np.clip(pp, CLIP, 1 - CLIP), float)
                 ece = _ece_score(y_oof, pp, n_bins=10)
+                std_ratio = float(np.std(pp) / max(raw_std, 1e-9))
+                # guard: don't accept calibrators that crush variance
                 if np.isfinite(ece):
-                    scores.append((ece, kind, cal))
-            except Exception as e:
-                try:
-                    st.debug(f"Calibrator {kind} failed: {e}")
-                except Exception:
-                    pass
+                    scores.append((ece, -std_ratio, kind, cal, std_ratio))
+            except Exception:
+                pass
         
-        ece_best = float("nan")
-        if COLLAPSED:
-            # if collapsed, prefer platt/beta over iso (iso can overfit steps)
-            forced = next(((k, c) for (k, c) in candidates if k == "platt"), None)
-            if forced is None:
-                forced = next(((k, c) for (k, c) in candidates if k == "beta"), None)
-            if forced is not None:
-                cal_name, cal_obj = forced
-            else:
-                scores.sort(key=lambda t: t[0])
-                cal_name, cal_obj = ("iso", _IdentityIsoCal(eps=1e-6)) if not scores else (scores[0][1], scores[0][2])
+        if scores:
+            scores.sort(key=lambda t: (t[0], t[1]))  # low ECE, high std_ratio
+            ece_best, _, cal_name, cal_obj, std_ratio = scores[0]
         else:
-            scores.sort(key=lambda t: t[0])
-            cal_name, cal_obj = ("iso", _IdentityIsoCal(eps=1e-6)) if not scores else (scores[0][1], scores[0][2])
-            if scores:
-                ece_best = float(scores[0][0])
+            cal_name, cal_obj, ece_best, std_ratio = "iso", _IdentityIsoCal(eps=1e-6), float("nan"), float("nan")
         
         st.write({
             "calibrator_used": str(cal_name),
             "flip_on_oof": bool(flip_flag),
             "ece_best": (None if not np.isfinite(ece_best) else float(ece_best)),
-            "oof_collapsed": bool(COLLAPSED),
-            "oof_std": float(oof_std),
-            "oof_range": float(oof_rng),
-            "deploy_pos_est": float(deploy_pos_est),
-            "oof_pos": float(oof_pos),
+            "std_ratio_after_cal": (None if not np.isfinite(std_ratio) else float(std_ratio)),
         })
         
-        # Temperature scaling (skip if collapsed)
-        p_cal_oof = _apply_cal(cal_name, cal_obj, p_oof_prior)
-        p_cal_oof = np.asarray(np.clip(p_cal_oof, CLIP, 1 - CLIP), float)
+        # Temperature scaling: OFF by default for spreads (usually compresses). Keep T=1.0.
+        T_best = 1.0
         
-        if COLLAPSED or (np.unique(y_oof).size < 2):
-            T_best, T_ll = 1.0, float("nan")
-        else:
-            T_best, T_ll = fit_temperature_on_oof(y_oof, p_cal_oof)
-            T_best = float(np.clip(T_best, 0.75, 1.25))
-        
-        st.write({"temp_T": float(T_best), "temp_ll": (None if not np.isfinite(T_ll) else float(T_ll))})
-        
-        # -----------------------------
-        # Apply to TRAIN / HOLDOUT
-        # -----------------------------
-        p_tr_auc, _ = pos_proba_safe(model_auc, X_full[train_all_idx], positive=1)
-        p_ho_auc, _ = pos_proba_safe(model_auc, X_full[hold_idx],      positive=1)
+        # --- Inference probs (blend → flip → calibrate → PRIOR-CORRECT to deploy prior) ---
+        p_tr_auc, _ = pos_proba_safe(model_auc,     X_full[train_all_idx], positive=1)
+        p_ho_auc, _ = pos_proba_safe(model_auc,     X_full[hold_idx],      positive=1)
         
         if RUN_LOGLOSS:
-            p_tr_log, _ = pos_proba_safe(model_logloss, X_full[train_all_idx], positive=1)
-            p_ho_log, _ = pos_proba_safe(model_logloss, X_full[hold_idx],      positive=1)
-            p_train_blend_raw = np.clip(best_w * p_tr_log + (1 - best_w) * p_tr_auc, eps, 1 - eps)
-            p_hold_blend_raw  = np.clip(best_w * p_ho_log + (1 - best_w) * p_ho_auc, eps, 1 - eps)
+            p_tr_ll, _ = pos_proba_safe(model_logloss, X_full[train_all_idx], positive=1)
+            p_ho_ll, _ = pos_proba_safe(model_logloss, X_full[hold_idx],      positive=1)
+            z_tr = best_w * _logit(_clip01(p_tr_ll, eps)) + (1.0 - best_w) * _logit(_clip01(p_tr_auc, eps))
+            z_ho = best_w * _logit(_clip01(p_ho_ll, eps)) + (1.0 - best_w) * _logit(_clip01(p_ho_auc, eps))
         else:
-            p_train_blend_raw = np.clip(p_tr_auc, eps, 1 - eps)
-            p_hold_blend_raw  = np.clip(p_ho_auc, eps, 1 - eps)
+            z_tr = _logit(_clip01(p_tr_auc, eps))
+            z_ho = _logit(_clip01(p_ho_auc, eps))
+        
+        p_train_blend_raw = _clip01(_sigmoid(z_tr), eps)
+        p_hold_blend_raw  = _clip01(_sigmoid(z_ho), eps)
         
         if flip_flag:
             p_train_blend_raw = 1.0 - p_train_blend_raw
             p_hold_blend_raw  = 1.0 - p_hold_blend_raw
         
+        # Calibrate (no prior correction yet)
+        p_cal_tr = np.asarray(np.clip(_apply_cal(cal_name, cal_obj, p_train_blend_raw), CLIP, 1 - CLIP), float)
+        p_cal_ho = np.asarray(np.clip(_apply_cal(cal_name, cal_obj, p_hold_blend_raw),  CLIP, 1 - CLIP), float)
+        
+        # Apply deployment prior correction LAST (adjust for prevalence shift)
         train_pos_for_pc = float(np.mean(y_full[train_all_idx] == 1))
-        p_train_prior = _prior_correct(p_train_blend_raw, train_pos=train_pos_for_pc, deploy_pos=deploy_pos_est)
-        p_hold_prior  = _prior_correct(p_hold_blend_raw,  train_pos=train_pos_for_pc, deploy_pos=deploy_pos_est)
+        p_train_vec = _prior_correct(p_cal_tr, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
+        p_hold_vec  = _prior_correct(p_cal_ho, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
         
-        p_cal_tr = _apply_cal(cal_name, cal_obj, p_train_prior)
-        p_cal_ho = _apply_cal(cal_name, cal_obj, p_hold_prior)
+        p_train_vec = np.asarray(np.clip(p_train_vec, CLIP, 1 - CLIP), float)
+        p_hold_vec  = np.asarray(np.clip(p_hold_vec,  CLIP, 1 - CLIP), float)
         
-        p_cal_tr = np.asarray(np.clip(p_cal_tr, CLIP, 1 - CLIP), float)
-        p_cal_ho = np.asarray(np.clip(p_cal_ho, CLIP, 1 - CLIP), float)
+        # NOTE: remove explicit shrink-to-0.5; it’s a big compressor
+        # If you REALLY want it, do it only when std is huge (not the case for spreads).
         
-        p_cal_tr = apply_temperature(p_cal_tr, T_best)
-        p_cal_ho = apply_temperature(p_cal_ho, T_best)
+        # Diagnostics
+        ece_tr = expected_calibration_error(y_full[train_all_idx].astype(int), p_train_vec, n_bins=10)
+        ece_ho = expected_calibration_error(y_full[hold_idx].astype(int),      p_hold_vec,  n_bins=10)
+        psi    = population_stability_index(p_train_vec, p_hold_vec, bins=20)
+        st.write({"cal_used": cal_name, "ece_train": float(ece_tr), "ece_hold": float(ece_ho), "psi": float(psi)})
         
-        p_cal_tr = np.asarray(np.clip(p_cal_tr, CLIP, 1 - CLIP), float)
-        p_cal_ho = np.asarray(np.clip(p_cal_ho, CLIP, 1 - CLIP), float)
+        assert p_train_vec.shape[0] == len(train_all_idx)
+        assert p_hold_vec.shape[0]  == len(hold_idx)
         
-        p_train_vec = 0.95 * p_cal_tr + 0.05 * 0.5
-        p_hold_vec  = 0.95 * p_cal_ho + 0.05 * 0.5
+        # --- Save adapter ---
+        cal_blend = (cal_name, cal_obj)
+        iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1 - CLIP))
+        
+        def predict_calibrated(models: dict, X):
+            eps = 1e-7
+            def _clip01(p): return np.clip(np.asarray(p, float), eps, 1-eps)
+            def _logit(p): p=_clip01(p); return np.log(p/(1-p))
+            def _sigmoid(z): return 1/(1+np.exp(-z))
+        
+            pa = models["model_auc"].predict_proba(X)[:, 1]
+            pl = models["model_logloss"].predict_proba(X)[:, 1]
+            w  = float(models.get("best_w", 0.5))
+        
+            z = w * _logit(pl) + (1.0 - w) * _logit(pa)
+            p = _sigmoid(z)
+            if models.get("flip_flag", False):
+                p = 1.0 - p
+            p = models["iso_blend"].predict(p)  # calibrated + clipped
+            return p
         
         # -----------------------------
         # Comparable calibration tables (ONE set of edges)
@@ -12686,19 +12662,7 @@ def train_sharp_model_from_bq(
         st.markdown("#### 🎯 Calibration Table — HOLDOUT (fixed edges)")
         st.dataframe(_cal_table_fixed_edges(y_full[hold_idx].astype(int), p_hold_vec, edges, eps=eps),
                      use_container_width=True)
-        
-        # adapter for saving
-        cal_blend = (cal_name, cal_obj)
-        iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1 - CLIP))
-        
-        def predict_calibrated(models: dict, X):
-            pa = models["model_auc"].predict_proba(X)[:, 1]
-            pl = models["model_logloss"].predict_proba(X)[:, 1]
-            w  = float(models.get("best_w", 0.5))
-            p_blend = w * pl + (1.0 - w) * pa
-            if models.get("flip_flag", False):
-                p_blend = 1.0 - p_blend
-            return models["iso_blend"].predict(p_blend)
+
         
         # -------------------------------------------------------------------
         # METRICS (always defined; prevents NameError later)
