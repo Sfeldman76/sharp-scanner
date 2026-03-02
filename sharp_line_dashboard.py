@@ -16512,8 +16512,12 @@ from google.cloud import bigquery
 
 import streamlit as st
 from datetime import date, timedelta
-
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date=None, end_date=None):
+    import streamlit as st
+    import pandas as pd
+    import numpy as np
+    from datetime import date, timedelta
+    from google.cloud import bigquery
 
     client = bigquery.Client(project="sharplogger", location="us")
 
@@ -16522,9 +16526,9 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
 
         col1, col2 = st.columns(2)
         with col1:
-            start_date = st.date_input("Start Date", value=date.today() - timedelta(days=14))
+            start_date = st.date_input("Start Date", value=(date.today() - timedelta(days=14)) if start_date is None else start_date)
         with col2:
-            end_date = st.date_input("End Date", value=date.today())
+            end_date = st.date_input("End Date", value=date.today() if end_date is None else end_date)
 
         query = """
         SELECT
@@ -16554,47 +16558,67 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
 
         st.info(f"✅ Loaded rows: {len(df)}")
 
-        # Filter valid rows
+        # ---- Clean + filter ----
         df = df[df["SHARP_HIT_BOOL"].notna() & df["Model_Sharp_Win_Prob"].notna()].copy()
-        df["SHARP_HIT_BOOL"] = pd.to_numeric(df["SHARP_HIT_BOOL"], errors="coerce").astype("Int64")
-        df["Model_Sharp_Win_Prob"] = pd.to_numeric(df["Model_Sharp_Win_Prob"], errors="coerce")
 
-        # Bin probabilities (make bins inclusive and avoid NaN from exact 1.0)
-       
-        prob_bins = [0.0, 0.51, 0.55, 0.70, 1.0000001]
-        bin_labels = ["✅ Low", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
-        
-        df["Confidence_Bin"] = pd.cut(
+        df["SHARP_HIT_BOOL"] = pd.to_numeric(df["SHARP_HIT_BOOL"], errors="coerce")
+        df["Model_Sharp_Win_Prob"] = pd.to_numeric(df["Model_Sharp_Win_Prob"], errors="coerce")
+        df = df[df["SHARP_HIT_BOOL"].isin([0, 1]) & df["Model_Sharp_Win_Prob"].between(0, 1)].copy()
+
+        df["SHARP_HIT_BOOL"] = df["SHARP_HIT_BOOL"].astype(int)
+
+        # ---- OPTIONAL: only include "playable" probabilities (uncomment if desired) ----
+        # df = df[df["Model_Sharp_Win_Prob"] >= 0.51].copy()
+
+        # ---- Bin by predicted probability (you can change bin_width to 0.05, 0.10, etc.) ----
+        bin_width = 0.02  # 2% bins
+        lo = 0.50  # start bins at 50%
+        hi = 1.00
+
+        prob_bins = np.round(np.arange(lo, hi + bin_width + 1e-9, bin_width), 6)
+        bin_labels = [f"{int(a*100)}–{int(b*100)}%" for a, b in zip(prob_bins[:-1], prob_bins[1:])]
+
+        df["Prob_Bin"] = pd.cut(
             df["Model_Sharp_Win_Prob"],
             bins=prob_bins,
             labels=bin_labels,
             include_lowest=True,
-            right=False,   # important so boundaries match tier_from_prob()
+            right=False
         )
-        # Overall summary
-        st.subheader("📊 Model Win Rate by Confidence Bin (Overall)")
+
+        # =========================
+        # OVERALL: show WINS (counts) by probability bin (NO win %)
+        # =========================
+        st.subheader("🏆 Wins by Model Probability (Overall)")
+
         overall = (
-            df.groupby("Confidence_Bin")["SHARP_HIT_BOOL"]
-            .agg(Picks="count", Win_Rate="mean")
-            .reset_index()
+            df.groupby("Prob_Bin", dropna=True)["SHARP_HIT_BOOL"]
+              .agg(Picks="count", Wins="sum")
+              .reset_index()
         )
-        st.dataframe(overall.style.format({"Win_Rate": "{:.1%}"}))
+        overall["Losses"] = overall["Picks"] - overall["Wins"]
 
-        # By market
-        st.markdown("#### 📉 Confidence Calibration by Market")
-        conf_summary = (
-            df.groupby(["Market", "Confidence_Bin"])["SHARP_HIT_BOOL"]
-            .agg(Picks="count", Win_Rate="mean")
-            .reset_index()
+        st.dataframe(overall)
+
+        # =========================
+        # BY MARKET: show WINS (counts) by probability bin (NO win %)
+        # =========================
+        st.markdown("#### 🧩 Wins by Model Probability (by Market)")
+
+        by_market = (
+            df.groupby(["Market", "Prob_Bin"], dropna=True)["SHARP_HIT_BOOL"]
+              .agg(Picks="count", Wins="sum")
+              .reset_index()
         )
+        by_market["Losses"] = by_market["Picks"] - by_market["Wins"]
 
-        for market in conf_summary["Market"].dropna().unique():
+        for market in sorted(by_market["Market"].dropna().unique()):
             st.markdown(f"**📊 {str(market).upper()}**")
-            st.dataframe(
-                conf_summary[conf_summary["Market"] == market]
-                .drop(columns="Market")
-                .style.format({"Win_Rate": "{:.1%}"})
-            )
+            mdf = by_market[by_market["Market"] == market].drop(columns="Market")
+            st.dataframe(mdf)
+
+            if len(mdf) > 0:
+                st.bar_chart(mdf.set_index("Prob_Bin")["Wins"])
 
 
 import os
