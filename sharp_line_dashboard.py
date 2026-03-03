@@ -11710,7 +11710,7 @@ def train_sharp_model_from_bq(
             embargo_td = pd.Timedelta(hours=18 if _dense else 36)
         
         n_groups_train = pd.unique(g_train).size
-        target_folds = 5 if n_groups_train >= 200 else (4 if n_groups_train >= 120 else 3)
+        target_folds = 6 if n_groups_train >= 200 else (4 if n_groups_train >= 120 else 3)
         
         cv = PurgedGroupTimeSeriesSplit(
             n_splits=target_folds,
