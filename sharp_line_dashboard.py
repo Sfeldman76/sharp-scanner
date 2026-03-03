@@ -11517,9 +11517,10 @@ def train_sharp_model_from_bq(
         
         # ----------------------------
         # 4) AutoFS on train slice (pre-AutoFS matrices)
-        # ----------------------------
+        # ===================== AutoFS on ALL features (train slice) =====================
+        # These are "all-features" DataFrames aligned to your split indices
         X_df_train_full = pd.DataFrame(X_full[train_all_idx], columns=list(features_pruned))
-        X_df_hold_full  = pd.DataFrame(X_full[hold_idx],      columns=list(features_pruned))
+        X_df_hold_full  = pd.DataFrame(X_full[hold_idx],      columns=list(features_pruned))  # optional, for intersection checks
         
         # Model proto for AutoFS
         def _default_proto():
@@ -11540,7 +11541,7 @@ def train_sharp_model_from_bq(
             )
         
         try:
-            _model_proto = est_auc  # if defined upstream
+            _model_proto = est_auc
         except Exception:
             try:
                 _model_proto = est_ll
@@ -11575,32 +11576,41 @@ def train_sharp_model_from_bq(
             log_func=log_func,
         )
         
-        feature_cols = [c for c in feature_cols if c in X_df_train_full.columns and c in X_df_hold_full.columns]
-        log_func(f"[AutoFS] selected={len(feature_cols)} (train_cols={X_df_train_full.shape[1]})")
+        # Keep only features present in BOTH train and hold (defensive)
+        feature_cols_sel = [c for c in feature_cols if c in X_df_train_full.columns and c in X_df_hold_full.columns]
+        log_func(f"[AutoFS] selected={len(feature_cols_sel)} (train_cols={X_df_train_full.shape[1]})")
         
         try:
-            st.write(f"🔎 AutoFS kept {len(feature_cols)} features")
+            st.write(f"🔎 AutoFS kept {len(feature_cols_sel)} features")
             st.dataframe(shap_summary.head(25))
         except Exception:
             pass
         
-        # ----------------------------
-        # 5) Final clean + rebuild matrices from train/hold dfs (NO stale X_hold)
-        # ----------------------------
-        def _final_clean(df_: pd.DataFrame) -> pd.DataFrame:
-            df_ = df_.apply(pd.to_numeric, errors="coerce")
-            df_ = df_.replace([np.inf, -np.inf], np.nan)
-            med = df_.median(numeric_only=True)
-            return df_.fillna(med).fillna(0.0)
+        # ===================== Rebuild SELECTED matrices ONLY from the full split-safe DFs =====================
+        def _final_clean(df: pd.DataFrame) -> pd.DataFrame:
+            df = df.apply(pd.to_numeric, errors="coerce")
+            df = df.replace([np.inf, -np.inf], np.nan)
+            med = df.median(numeric_only=True)
+            return df.fillna(med).fillna(0.0)
         
-        X_train = _final_clean(X_df_train_full.reindex(columns=feature_cols)).to_numpy(np.float32, copy=False)
-        X_hold  = _final_clean(X_df_hold_full.reindex(columns=feature_cols)).to_numpy(np.float32, copy=False)
+        # Selected, cleaned train/hold/full matrices
+        X_train_df_sel = _final_clean(X_df_train_full.reindex(columns=feature_cols_sel))
+        X_hold_df_sel  = _final_clean(X_df_hold_full.reindex(columns=feature_cols_sel))
         
-        assert X_train.shape[0] == len(train_df) == len(y_train) == len(w_train)
-        assert X_hold.shape[0]  == len(hold_df)  == len(y_hold)
-        assert np.isfinite(X_train).all(), "X_train contains NaN/Inf after cleaning"
-        assert set(np.unique(y_train)) <= {0, 1}
+        X_train_sel = X_train_df_sel.to_numpy(np.float32, copy=False)
+        X_hold_sel  = X_hold_df_sel.to_numpy(np.float32, copy=False)
         
+        # If you need "full" for later inference by indices, build it once from the full all-features DF:
+        X_df_full_all = pd.DataFrame(X_full, columns=list(features_pruned))
+        X_full_sel    = _final_clean(X_df_full_all.reindex(columns=feature_cols_sel)).to_numpy(np.float32, copy=False)
+        
+        # Hard checks
+        assert X_train_sel.shape[1] == len(feature_cols_sel)
+        assert X_hold_sel.shape[1]  == len(feature_cols_sel)
+        assert X_full_sel.shape[1]  == len(feature_cols_sel)
+        
+        assert X_train_sel.shape[0] == len(train_all_idx) == y_train.shape[0]
+        assert X_hold_sel.shape[0]  == len(hold_idx)      == y_hold.shape[0]
         # ----------------------------
         # 6) FAST SEARCH → MODERATE/DEEP REFIT (SMOOTHER)
         # ----------------------------
@@ -11756,8 +11766,8 @@ def train_sharp_model_from_bq(
             rs_ll, rs_auc = _make_search_objects(seed_ll, seed_auc)
         
             with threadpool_limits(limits=1):
-                rs_ll.fit(X_train, y_train, groups=g_train, **fit_params_search)
-                rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
+                rs_ll.fit(X_train_sel, y_train, groups=g_train, **fit_params_search)
+                rs_auc.fit(X_train_sel, y_train, groups=g_train, **fit_params_search)
         
             auc_cv_raw = float(rs_auc.best_score_)
             logloss_cv = float(-rs_ll.best_score_)
@@ -11880,8 +11890,8 @@ def train_sharp_model_from_bq(
         # ================== ES probe on chosen ES fold (deterministic) ===================
         tr_es_rel, va_es_rel = np.asarray(tr_es_rel), np.asarray(va_es_rel)
         
-        X_tr_es = X_train[tr_es_rel]
-        X_va_es = X_train[va_es_rel]
+        X_tr_es = X_train_sel[tr_es_rel]
+        X_va_es = X_train_sel[va_es_rel]
         y_tr_es = y_train[tr_es_rel]
         y_va_es = y_train[va_es_rel]
         
@@ -12006,8 +12016,8 @@ def train_sharp_model_from_bq(
             final_ll.set_params(monotone_constraints=mono_str)
         
         # Fit on aligned X_train/y_train/w_train
-        final_auc.fit(X_train, y_train, sample_weight=w_train, verbose=False)
-        final_ll.fit( X_train, y_train, sample_weight=w_train, verbose=False)
+        final_auc.fit(X_train_sel, y_train, sample_weight=w_train, verbose=False)
+        final_ll.fit( X_train_sel, y_train, sample_weight=w_train, verbose=False)
         
         model_auc     = final_auc
         model_logloss = final_ll
@@ -12226,15 +12236,15 @@ def train_sharp_model_from_bq(
         # ------------------
         # 2) Inference: Blend in logit space -> (optional flip) -> calibrate -> prior shift LAST
         # ------------------
-        p_tr_auc, _ = pos_proba_safe(model_auc,     X_full[train_all_idx], positive=1)
-        p_ho_auc, _ = pos_proba_safe(model_auc,     X_full[hold_idx],      positive=1)
+        p_tr_auc, _ = pos_proba_safe(model_auc, X_full_sel[train_all_idx], positive=1)
+        p_ho_auc, _ = pos_proba_safe(model_auc, X_full_sel[hold_idx], positive=1)
         
         p_tr_auc = _clip01(p_tr_auc, eps)
         p_ho_auc = _clip01(p_ho_auc, eps)
         
         if RUN_LOGLOSS:
-            p_tr_ll, _ = pos_proba_safe(model_logloss, X_full[train_all_idx], positive=1)
-            p_ho_ll, _ = pos_proba_safe(model_logloss, X_full[hold_idx],      positive=1)
+            p_tr_ll, _ = pos_proba_safe(model_logloss, X_full_sel[train_all_idx], positive=1)
+            p_ho_ll, _ = pos_proba_safe(model_logloss, X_full_sel[hold_idx], positive=1)
             p_tr_ll = _clip01(p_tr_ll, eps)
             p_ho_ll = _clip01(p_ho_ll, eps)
         
