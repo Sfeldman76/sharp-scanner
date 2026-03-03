@@ -11426,7 +11426,82 @@ def train_sharp_model_from_bq(
         )
         
         y_train = pd.Series(y_train, copy=False).astype(int).clip(0, 1).to_numpy()
+        # ----------------------------
+        # Helper: deterministic folds w/ safety + ES fold selection
+        # ----------------------------
+        GLOBAL_SEED = 1337
         
+        def build_deterministic_folds(
+            X, y, *,
+            cv=None,
+            groups=None,
+            times=None,
+            n_splits=5,
+            min_pos=5,
+            min_neg=5,
+            seed=GLOBAL_SEED,
+        ):
+            """
+            Returns:
+              folds: list[(tr_idx, va_idx)]
+              tr_es_rel, va_es_rel: indices for ES probe fold (picked as most balanced val split)
+            Works with:
+              - PurgedGroupTimeSeriesSplit (group/time-aware) via cv.split(X, y, groups)
+              - Any sklearn splitter
+              - Fallback to StratifiedShuffleSplit if needed
+            """
+            yb = pd.Series(y, copy=False).astype(int).clip(0, 1).to_numpy()
+        
+            def _has_min_counts(idx) -> bool:
+                yy = yb[idx]
+                pos = int((yy == 1).sum())
+                neg = int((yy == 0).sum())
+                return (pos >= min_pos) and (neg >= min_neg)
+        
+            def _balance_score(idx) -> float:
+                # closer to 50/50 is better -> higher score
+                p = float((yb[idx] == 1).mean()) if len(idx) else 0.0
+                return -abs(p - 0.5)
+        
+            # (1) candidate splits
+            if cv is not None:
+                raw = None
+                # Some splitters accept times= kwarg, most don't. Try once.
+                if times is not None:
+                    try:
+                        raw = [(tr, va) for tr, va in cv.split(X, yb, groups=groups, times=times)]
+                    except TypeError:
+                        raw = None
+                if raw is None:
+                    raw = [(tr, va) for tr, va in cv.split(X, yb, groups=groups)]
+                if not raw and hasattr(cv, "n_splits"):
+                    n_splits = int(getattr(cv, "n_splits", n_splits))
+            else:
+                skf = StratifiedKFold(n_splits=int(n_splits), shuffle=True, random_state=int(seed))
+                raw = [(tr, va) for tr, va in skf.split(np.zeros_like(yb), yb)]
+        
+            # (2) keep only splits with both classes in train & val
+            folds = [(tr, va) for tr, va in raw if _has_min_counts(tr) and _has_min_counts(va)]
+        
+            # (3) fallback if nothing usable
+            if not folds:
+                for ts in (0.20, 0.30, 0.40):
+                    sss = StratifiedShuffleSplit(n_splits=1, test_size=float(ts), random_state=int(seed))
+                    for tr, va in sss.split(np.zeros_like(yb), yb):
+                        if _has_min_counts(tr) and _has_min_counts(va):
+                            folds = [(tr, va)]
+                            break
+                    if folds:
+                        break
+        
+            if not folds:
+                raise RuntimeError("No class-balanced CV split available (min_pos/min_neg too strict or labels too sparse).")
+        
+            # (4) pick ES fold: most balanced validation
+            folds = [(np.asarray(tr, dtype=int), np.asarray(va, dtype=int)) for tr, va in folds]
+            folds.sort(key=lambda tv: _balance_score(tv[1]), reverse=True)
+            tr_es_rel, va_es_rel = folds[0]
+            return folds, tr_es_rel, va_es_rel
         # IMPORTANT: call ONCE; PurgedGroupTimeSeriesSplit already has time_values
         folds, tr_es_rel, va_es_rel = build_deterministic_folds(
             X=np.zeros((len(y_train), 1), dtype=np.float32),  # not used by this splitter; placeholder
