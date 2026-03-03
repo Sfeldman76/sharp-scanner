@@ -12216,23 +12216,25 @@ def train_sharp_model_from_bq(
         pos_tr = float((y_tr_es == 1).sum()); neg_tr = float((y_tr_es == 0).sum())
         scale_pos_weight = max(1.0, neg_tr / max(pos_tr, 1.0))
         
+               
         # ✅ IMPORTANT: instantiate deep models from train_kwargs (NO predictor)
         deep_auc = XGBClassifier(**{**train_kwargs, **best_auc_params})
         deep_ll  = XGBClassifier(**{**train_kwargs, **best_ll_params})
-        # --- Capacity knobs (use your existing DEEP_N_EST_CAP) ---
-        # If your codebase only has DEEP_N_EST_CAP, define the probe cap from it
-        DEEP_N_EST = int(DEEP_N_EST_CAP)
-        PROBE_N_EST = int(DEEP_N_EST_CAP)                 # ES probe cap
-        FINAL_N_EST_CAP = int(DEEP_N_EST_CAP)             # clamp for final no-ES refit (can be same)
         
-        # if you want probe higher than final, do:
-        # PROBE_N_EST = int(DEEP_N_EST_CAP)
-        # FINAL_N_EST_CAP = int(0.85 * DEEP_N_EST_CAP)
+        # Ensure weights are aligned to X_train/y_train
+        w_train = np.asarray(w_train, dtype=np.float64)
+        assert X_train.shape[0] == y_train.shape[0] == w_train.shape[0]
+        
+        # --- Capacity knobs ---
+        PROBE_N_EST      = int(DEEP_N_EST_CAP)   # ES probe cap
+        DEEP_MAX_BIN     = int(DEEP_MAX_BIN)
+        refit_threads    = max(1, min(int(get_vcpus()), 6))
+        
         # -------------------------
-        # Phase A: ES probe (size trees)  ✅ ES ON only for probing
+        # Phase A: ES probe (size trees) ✅ ES ON only for probing
         # -------------------------
         deep_auc.set_params(
-            n_estimators=DEEP_N_EST,
+            n_estimators=PROBE_N_EST,
             max_bin=DEEP_MAX_BIN,
             n_jobs=refit_threads,
             eval_metric=["logloss", "auc"],
@@ -12241,7 +12243,7 @@ def train_sharp_model_from_bq(
             early_stopping_rounds=EARLY_STOP,
         )
         deep_ll.set_params(
-            n_estimators=DEEP_N_EST,
+            n_estimators=PROBE_N_EST,
             max_bin=DEEP_MAX_BIN,
             n_jobs=refit_threads,
             eval_metric=["logloss", "auc"],
@@ -12284,20 +12286,19 @@ def train_sharp_model_from_bq(
         def _smooth_final_ntrees(n: int, *, mult: float = 1.6, floor: int = 240, ceil: int = 2000) -> int:
             return int(np.clip(int(round(n * mult)), floor, ceil))
         
-        # --- stable tree targets from probe ---
         nt_auc = _best_ntrees_from_es(deep_auc, floor=120, ceil=int(DEEP_N_EST_CAP))
         nt_ll  = _best_ntrees_from_es(deep_ll,  floor=120, ceil=int(DEEP_N_EST_CAP))
         
         FINAL_NTREES_AUC = _smooth_final_ntrees(nt_auc, mult=1.6, floor=240, ceil=int(DEEP_N_EST_CAP))
         FINAL_NTREES_LL  = _smooth_final_ntrees(nt_ll,  mult=1.6, floor=240, ceil=int(DEEP_N_EST_CAP))
         
-        # --- diagnostics on probe (for your log lines) ---
+        # diagnostics on probe
         p_va_raw = np.clip(deep_auc.predict_proba(X_va_es_df)[:, 1], 1e-12, 1 - 1e-12)
         auc_va   = float(roc_auc_score(y_va_es.astype(int), p_va_raw, sample_weight=w_va_es))
         spread_std_raw   = float(np.std(p_va_raw))
         extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
         best_iter        = getattr(deep_auc, "best_iteration", None)
-        cap_hit          = bool(best_iter is not None and int(best_iter) >= int(0.7 * DEEP_N_EST))
+        cap_hit          = bool(best_iter is not None and int(best_iter) >= int(0.7 * PROBE_N_EST))
         
         st.write({
             "best_iter_probe_auc": (None if best_iter is None else int(best_iter)),
@@ -12305,7 +12306,7 @@ def train_sharp_model_from_bq(
             "probe_ntrees_ll": int(nt_ll),
             "final_ntrees_auc": int(FINAL_NTREES_AUC),
             "final_ntrees_ll": int(FINAL_NTREES_LL),
-            "planned_cap": int(DEEP_N_EST),
+            "planned_cap": int(PROBE_N_EST),
             "cap_hit": bool(cap_hit),
             "raw": {
                 "spread_std": float(spread_std_raw),
@@ -12340,7 +12341,6 @@ def train_sharp_model_from_bq(
             eval_metric=["logloss", "auc"],
             scale_pos_weight=scale_pos_weight,
             random_state=1337, seed=1337,
-            early_stopping_rounds=None,
         )
         final_ll.set_params(
             n_estimators=int(FINAL_NTREES_LL),
@@ -12349,31 +12349,19 @@ def train_sharp_model_from_bq(
             eval_metric=["logloss", "auc"],
             scale_pos_weight=scale_pos_weight,
             random_state=1337, seed=1337,
-            early_stopping_rounds=None,
         )
         
         if mono_str is not None:
             final_auc.set_params(monotone_constraints=mono_str)
             final_ll.set_params(monotone_constraints=mono_str)
         
-        # ✅ Fit on the final training slice you want to deploy (train_all_idx)
-        final_auc.fit(
-            X_full[train_all_idx],
-            y_full[train_all_idx],
-            sample_weight=w_train[train_all_idx],
-            verbose=False,
-        )
-        final_ll.fit(
-            X_full[train_all_idx],
-            y_full[train_all_idx],
-            sample_weight=w_train[train_all_idx],
-            verbose=False,
-        )
+        # ✅ Fit on X_train space (aligned with w_train)
+        final_auc.fit(X_train, y_train, sample_weight=w_train, verbose=False)
+        final_ll.fit( X_train, y_train, sample_weight=w_train, verbose=False)
         
-        # ✅ Downstream uses THESE
         model_auc = final_auc
         model_logloss = final_ll
-        
+                
         # ---- Stamp feature names on boosters so we don't get f0,f1,... ----
         try:
             n_model = int(getattr(model_auc, "n_features_in_", X_full[train_all_idx].shape[1]))
