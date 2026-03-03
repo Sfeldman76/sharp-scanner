@@ -11626,7 +11626,7 @@ def train_sharp_model_from_bq(
         n_jobs = 1
         
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
-            sport=sport, X_rows=X_train.shape[0], n_jobs=n_jobs, features=feature_cols
+            sport=sport, X_rows=X_train_sel.shape[0], n_jobs=n_jobs, features=feature_cols_sel
         )
         
         base_kwargs["base_score"] = float(np.clip(pos_rate, 1e-4, 1 - 1e-4))
