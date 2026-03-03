@@ -12219,7 +12219,15 @@ def train_sharp_model_from_bq(
         # ✅ IMPORTANT: instantiate deep models from train_kwargs (NO predictor)
         deep_auc = XGBClassifier(**{**train_kwargs, **best_auc_params})
         deep_ll  = XGBClassifier(**{**train_kwargs, **best_ll_params})
+        # --- Capacity knobs (use your existing DEEP_N_EST_CAP) ---
+        # If your codebase only has DEEP_N_EST_CAP, define the probe cap from it
+        DEEP_N_EST = int(DEEP_N_EST_CAP)
+        PROBE_N_EST = int(DEEP_N_EST_CAP)                 # ES probe cap
+        FINAL_N_EST_CAP = int(DEEP_N_EST_CAP)             # clamp for final no-ES refit (can be same)
         
+        # if you want probe higher than final, do:
+        # PROBE_N_EST = int(DEEP_N_EST_CAP)
+        # FINAL_N_EST_CAP = int(0.85 * DEEP_N_EST_CAP)
         # -------------------------
         # Phase A: ES probe (size trees)  ✅ ES ON only for probing
         # -------------------------
