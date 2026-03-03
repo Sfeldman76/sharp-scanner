@@ -2656,7 +2656,7 @@ def shap_stability_select(
     y: np.ndarray,
     folds, *,
     topk_per_fold: int = 200,
-    min_presence: float = 0.65,
+    min_presence: float = 0.40,
     max_keep: int | None = None,
     sample_per_fold: int = None,
     random_state: int = 42,
@@ -2879,7 +2879,7 @@ def _cv_auc_for_feature_set(
     eps=1e-6,
 
     cv_mode: str = "full",
-    quick_folds_n: int = 7,
+    quick_folds_n: int = 8,
     compute_ll_brier: bool = True,
     max_folds: int | None = None,
 
@@ -3333,7 +3333,7 @@ def _auto_select_k_by_auc(
 
     # --- speed knobs ---
     quick_screen: bool = True,
-    quick_folds: int = 7,         # was 2 (reduces noisy quick-gate rejects)
+    quick_folds: int = 8,         # was 2 (reduces noisy quick-gate rejects)
     quick_accept: float = 0.0,    # kept for compat (unused)
     quick_drop: float = 0.0,      # kept for compat (unused)
 
@@ -3935,7 +3935,7 @@ def select_features_auto(
     max_feats_major: int = 220,
     max_feats_small: int = 160,
     topk_per_fold: int = 200,
-    min_presence: float = 0.65,
+    min_presence: float = 0.40,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
 
@@ -4312,7 +4312,7 @@ def select_features_auto(
             orient_passes=1,
 
             quick_screen=True,
-            quick_folds=7,
+            quick_folds=8,
             abort_margin_cv=-1e-6,
             force_full_scan=True,
             time_budget_s=1e18,
@@ -11792,7 +11792,7 @@ def train_sharp_model_from_bq(
             auc_min_improve=0.0,
         
             topk_per_fold=200,
-            min_presence=0.65,
+            min_presence=0.40,
             sign_flip_max=0.35,
         
             corr_within=0.90,
@@ -11859,21 +11859,21 @@ def train_sharp_model_from_bq(
         train_kwargs.pop("predictor", None)
         
         # -------------------- FAST SEARCH → MODERATE/DEEP REFIT ---------------------
-        # This rewrite fixes:
-        #  1) "n_estimators: 0" / best-iter confusion (get_xgb_params() never has n_estimators)
-        #  2) accidental 0/too-small ntree caps that collapse preds to ~0.50
-        #  3) double-calibration scoring loop + iso-on-collapsed preds
-        #  4) flip semantics (avoid re-flipping already AUC-aligned OOF)
-        #  5) temperature scaling when preds are already flat
+        # -------------------- FAST SEARCH → MODERATE/DEEP REFIT (SMOOTHER) ---------------------
+        # Goals:
+        #  - prevent chronic underfit from overly harsh regularization ranges
+        #  - stabilize early stopping in search
+        #  - make deep refit consistently "stronger" than search without going crazy
         
         # --------- Capacity knobs ----------
-        SEARCH_N_EST    = 600
+        SEARCH_N_EST    = 1000          # slightly higher so weak-signal models can find structure
         SEARCH_MAX_BIN  = 256
-        DEEP_N_EST      = 1600
-        DEEP_MAX_BIN    = 256
-        EARLY_STOP      = 100
+        DEEP_N_EST_CAP  = 1800         # cap; actual DEEP_N_EST chosen from CV best_iters
+        DEEP_MAX_BIN    = 320          # modest bump; helps a bit on dense numeric features
+        
+        EARLY_STOP      = 60           # tighter patience in search (less time chasing noise)
         HALVING_FACTOR  = 2
-        MIN_RESOURCES   = 24
+        MIN_RESOURCES   = 32           # a bit more stable than 24 when signal is weak
         VCPUS           = get_vcpus()
         
         # --- Estimators for search (keep n_jobs=1 for parallel CV) ---
@@ -11897,44 +11897,59 @@ def train_sharp_model_from_bq(
             }
         )
         
-        # ======================= COMMON PARAMETER SPACE (ULTRA-HARDENED) =======================
+        # ======================= COMMON PARAMETER SPACE (SMOOTHER) =======================
+        # Key smoothing moves:
+        #  - gamma range lowered a lot (5–30 is *very* punitive and causes early stop)
+        #  - min_child_weight lowered (16–256 is also punitive)
+        #  - reg_lambda lowered (40–120 is huge; it will shrink everything to mush)
+        #  - allow a bit more learning_rate so we don't need 5,000 trees to move
         param_space_common = dict(
-            max_depth        = randint(2, 4),
-            max_leaves       = randint(12, 48),
+            # Keep trees shallow for stability, but allow a touch more capacity than before
+            max_depth        = randint(2, 5),
+            max_leaves       = randint(16, 96),
         
-            learning_rate    = loguniform(0.006, 0.022),
+            # Slightly wider but still conservative LR
+            learning_rate    = loguniform(0.008, 0.05),
         
-            subsample        = uniform(0.45, 0.25),
-            colsample_bytree = uniform(0.45, 0.20),
-            colsample_bynode = uniform(0.45, 0.20),
+            # Keep sampling moderate; your prior ranges were OK but a bit narrow on the high end
+            subsample        = uniform(0.55, 0.35),   # 0.55–0.90
+            colsample_bytree = uniform(0.55, 0.35),   # 0.55–0.90
+            colsample_bynode = uniform(0.55, 0.35),   # 0.55–0.90
         
-            min_child_weight = loguniform(16, 256),
-            gamma            = loguniform(5.0, 30.0),
+            # Much less punitive
+            min_child_weight = loguniform(1.0, 32.0),
+            gamma            = loguniform(0.0 + 1e-6, 5.0),
         
-            reg_alpha        = loguniform(0.5, 15.0),
-            reg_lambda       = loguniform(40.0, 120.0),
+            # Regularization: allow mild→moderate, not "shut it down"
+            reg_alpha        = loguniform(1e-6, 2.0),
+            reg_lambda       = loguniform(1.0, 25.0),
         
-            max_bin          = randint(192, 320),
-            max_delta_step   = loguniform(0.5, 1.8),
+            # If you want to tune max_bin, keep it in a tighter band; otherwise fix per stage
+            max_bin          = randint(224, 384),
+            max_delta_step   = loguniform(1e-6, 2.0),
         )
         
         params_ll  = dict(param_space_common)
         params_auc = dict(param_space_common)
+        
+        # AUC-optimized model: slightly more conservative (less overfit), but not strangled
         params_auc.update(
             dict(
-                max_depth        = randint(2, 3),
-                max_leaves       = randint(12, 40),
-                learning_rate    = loguniform(0.007, 0.018),
-                subsample        = uniform(0.50, 0.20),
-                colsample_bytree = uniform(0.48, 0.17),
-                colsample_bynode = uniform(0.48, 0.17),
-                min_child_weight = loguniform(20, 256),
-                gamma            = loguniform(6.0, 30.0),
-                reg_alpha        = loguniform(0.8, 12.0),
-                reg_lambda       = loguniform(45.0, 100.0),
+                max_depth        = randint(2, 4),
+                max_leaves       = randint(16, 80),
+                learning_rate    = loguniform(0.008, 0.035),
+        
+                subsample        = uniform(0.60, 0.30),   # 0.60–0.90
+                colsample_bytree = uniform(0.60, 0.30),
+                colsample_bynode = uniform(0.60, 0.30),
+        
+                min_child_weight = loguniform(1.0, 40.0),
+                gamma            = loguniform(1e-6, 4.0),
+        
+                reg_alpha        = loguniform(1e-6, 1.5),
+                reg_lambda       = loguniform(1.0, 20.0),
             )
         )
-        
         thr = get_quality_thresholds(sport, market)
         MIN_AUC           = thr["MIN_AUC"]
         MAX_LOGLOSS       = thr["MAX_LOGLOSS"]
@@ -12205,6 +12220,9 @@ def train_sharp_model_from_bq(
         deep_auc = XGBClassifier(**{**train_kwargs, **best_auc_params})
         deep_ll  = XGBClassifier(**{**train_kwargs, **best_ll_params})
         
+        # -------------------------
+        # Phase A: ES probe (size trees)  ✅ ES ON only for probing
+        # -------------------------
         deep_auc.set_params(
             n_estimators=DEEP_N_EST,
             max_bin=DEEP_MAX_BIN,
@@ -12212,7 +12230,7 @@ def train_sharp_model_from_bq(
             eval_metric=["logloss", "auc"],
             scale_pos_weight=scale_pos_weight,
             random_state=1337, seed=1337,
-            early_stopping_rounds=EARLY_STOP,   # <-- prefer ctor/set_params vs fit kwarg
+            early_stopping_rounds=EARLY_STOP,
         )
         deep_ll.set_params(
             n_estimators=DEEP_N_EST,
@@ -12224,7 +12242,6 @@ def train_sharp_model_from_bq(
             early_stopping_rounds=EARLY_STOP,
         )
         
-        # === Preliminary deep fits (for diagnostics/cap sense) ===
         deep_auc.fit(
             X_tr_es_df, y_tr_es,
             sample_weight=w_tr_es,
@@ -12241,19 +12258,12 @@ def train_sharp_model_from_bq(
         )
         
         def _num_trees_fitted(clf) -> int:
-            """Robust: how many boosted rounds exist in the fitted booster."""
             try:
                 return int(clf.get_booster().num_boosted_rounds())
             except Exception:
                 return 0
         
-        def _best_ntrees_from_es(clf, *, floor: int = 80, ceil: int = 1400) -> int:
-            """
-            Robust best-ntrees:
-              - if best_iteration exists, use best_iteration + 1
-              - else fall back to booster.num_boosted_rounds()
-              - never return 0 (prevents collapsed probabilities)
-            """
+        def _best_ntrees_from_es(clf, *, floor: int = 120, ceil: int = 2200) -> int:
             bi = getattr(clf, "best_iteration", None)
             if bi is None:
                 bi = getattr(clf, "best_iteration_", None)
@@ -12261,11 +12271,19 @@ def train_sharp_model_from_bq(
                 n = int(bi) + 1
             else:
                 n = _num_trees_fitted(clf)
+            return int(np.clip(n, floor, ceil))
         
-            n = int(np.clip(n, floor, ceil))
-            return n
+        def _smooth_final_ntrees(n: int, *, mult: float = 1.6, floor: int = 240, ceil: int = 2000) -> int:
+            return int(np.clip(int(round(n * mult)), floor, ceil))
         
-        # Diagnostics (NOTE: get_xgb_params() does NOT include n_estimators)
+        # --- stable tree targets from probe ---
+        nt_auc = _best_ntrees_from_es(deep_auc, floor=120, ceil=int(DEEP_N_EST_CAP))
+        nt_ll  = _best_ntrees_from_es(deep_ll,  floor=120, ceil=int(DEEP_N_EST_CAP))
+        
+        FINAL_NTREES_AUC = _smooth_final_ntrees(nt_auc, mult=1.6, floor=240, ceil=int(DEEP_N_EST_CAP))
+        FINAL_NTREES_LL  = _smooth_final_ntrees(nt_ll,  mult=1.6, floor=240, ceil=int(DEEP_N_EST_CAP))
+        
+        # --- diagnostics on probe (for your log lines) ---
         p_va_raw = np.clip(deep_auc.predict_proba(X_va_es_df)[:, 1], 1e-12, 1 - 1e-12)
         auc_va   = float(roc_auc_score(y_va_es.astype(int), p_va_raw, sample_weight=w_va_es))
         spread_std_raw   = float(np.std(p_va_raw))
@@ -12273,109 +12291,84 @@ def train_sharp_model_from_bq(
         best_iter        = getattr(deep_auc, "best_iteration", None)
         cap_hit          = bool(best_iter is not None and int(best_iter) >= int(0.7 * DEEP_N_EST))
         
-        learning_rate = float(np.clip(float(best_auc_params.get("learning_rate", 0.02)), 0.008, 0.04))
-        
-        # choose final estimator caps from ES best iter, but NEVER below a sane floor
-        final_estimators_cap = _best_ntrees_from_es(deep_auc, floor=400, ceil=1200)
-        early_stopping_rounds = int(np.clip(int(0.12 * final_estimators_cap), 60, 180))
-        
-        st.subheader("Spread AUC diagnostics")
-        st.json({
-            "best_iter": best_iter,
-            "booster_num_trees": _num_trees_fitted(deep_auc),
-            "planned_cap": int(final_estimators_cap),
+        st.write({
+            "best_iter_probe_auc": (None if best_iter is None else int(best_iter)),
+            "probe_ntrees_auc": int(nt_auc),
+            "probe_ntrees_ll": int(nt_ll),
+            "final_ntrees_auc": int(FINAL_NTREES_AUC),
+            "final_ntrees_ll": int(FINAL_NTREES_LL),
+            "planned_cap": int(DEEP_N_EST),
             "cap_hit": bool(cap_hit),
             "raw": {
-                "spread_std": spread_std_raw,
-                "extreme_frac": extreme_frac_raw,
-                "y_bar": float(np.mean(y_va_es == 1)),
+                "spread_std": float(spread_std_raw),
+                "extreme_frac": float(extreme_frac_raw),
+                "y_bar": float(np.mean(y_va_es)),
                 "p_bar": float(np.mean(p_va_raw)),
             },
-            "auc_va_es": auc_va,
+            "auc_va_es": float(auc_va),
         })
         
-        # If predictions are too flat, allow a small LR bump so the model can move off 0.5
-        if float(spread_std_raw) < 0.02:
-            learning_rate = float(np.clip(learning_rate * 1.25, 0.008, 0.03))
-        
-        # ---------------- Build final param dicts -----------------
-        VCPUS = max(1, int(VCPUS))
-        
-        params_auc_final = {
-            **base_kwargs,
-            **best_auc_params,
-            "n_estimators": int(final_estimators_cap),
-            "learning_rate": float(learning_rate),
-            "eval_metric": "logloss",
-            "n_jobs": VCPUS,
-            "scale_pos_weight": float(scale_pos_weight),
-            "max_bin": int(np.clip(DEEP_MAX_BIN, 128, 256)),
-        }
-        params_ll_final = {
-            **base_kwargs,
-            **best_ll_params,
-            "n_estimators": int(_best_ntrees_from_es(deep_ll, floor=400, ceil=1200)),
-            "learning_rate": float(learning_rate),
-            "eval_metric": "logloss",
-            "n_jobs": VCPUS,
-            "scale_pos_weight": float(scale_pos_weight),
-            "max_bin": int(np.clip(DEEP_MAX_BIN, 128, 256)),
-        }
-        
-        # ---------------- Apply monotone constraints ONCE --------------------------
-        FEATS_FOR_ES = list(feature_cols)  # align to X_train/X_full that you ultimately refit on
+        # -------------------------
+        # Phase B: Final deep refit (NO early stopping) ✅ this is the model you keep
+        # -------------------------
+        FEATS_FOR_MONO = list(feature_cols)
         MONO = {
-            'Abs_Line_Move_From_Opening': +1,
-            'Implied_Prob_Shift': +1,
-            'Was_Line_Resistance_Broken': +1,
-            'Line_Resistance_Crossed_Count': +1,
-            'Odds_Reversal_Flag': -1,
+            "Abs_Line_Move_From_Opening": +1,
+            "Implied_Prob_Shift": +1,
+            "Was_Line_Resistance_Broken": +1,
+            "Line_Resistance_Crossed_Count": +1,
+            "Odds_Reversal_Flag": -1,
         }
-        mono_vec = [int(MONO.get(c, 0)) for c in FEATS_FOR_ES]
-        if any(m != 0 for m in mono_vec):
-            mono_str = "(" + ",".join(map(str, mono_vec)) + ")"
-            params_ll_final['monotone_constraints']  = mono_str
-            params_auc_final['monotone_constraints'] = mono_str
-        else:
-            params_ll_final.pop('monotone_constraints',  None)
-            params_auc_final.pop('monotone_constraints', None)
+        mono_vec = [int(MONO.get(c, 0)) for c in FEATS_FOR_MONO]
+        mono_str = "(" + ",".join(map(str, mono_vec)) + ")" if any(m != 0 for m in mono_vec) else None
         
-        # --- Instantiate & fit finals with ES eval_set ---------------------------------------------
-        model_logloss = XGBClassifier(**params_ll_final)
-        model_auc     = XGBClassifier(**params_auc_final)
+        final_auc = XGBClassifier(**{**train_kwargs, **best_auc_params})
+        final_ll  = XGBClassifier(**{**train_kwargs, **best_ll_params})
         
-        model_logloss.fit(
-            X_tr_es, y_tr_es,
-            sample_weight=w_tr_es,
-            eval_set=[(X_va_es, y_va_es)],
-            sample_weight_eval_set=[w_va_es],
-            verbose=False,
-            early_stopping_rounds=early_stopping_rounds,
+        final_auc.set_params(
+            n_estimators=int(FINAL_NTREES_AUC),
+            max_bin=DEEP_MAX_BIN,
+            n_jobs=refit_threads,
+            eval_metric=["logloss", "auc"],
+            scale_pos_weight=scale_pos_weight,
+            random_state=1337, seed=1337,
+            early_stopping_rounds=None,
         )
-        model_auc.fit(
-            X_tr_es, y_tr_es,
-            sample_weight=w_tr_es,
-            eval_set=[(X_va_es, y_va_es)],
-            sample_weight_eval_set=[w_va_es],
-            verbose=False,
-            early_stopping_rounds=early_stopping_rounds,
+        final_ll.set_params(
+            n_estimators=int(FINAL_NTREES_LL),
+            max_bin=DEEP_MAX_BIN,
+            n_jobs=refit_threads,
+            eval_metric=["logloss", "auc"],
+            scale_pos_weight=scale_pos_weight,
+            random_state=1337, seed=1337,
+            early_stopping_rounds=None,
         )
         
-        # Best rounds (robust; never 0)
-        n_trees_ll  = _best_ntrees_from_es(model_logloss, floor=200, ceil=int(params_ll_final["n_estimators"]))
-        n_trees_auc = _best_ntrees_from_es(model_auc,     floor=200, ceil=int(params_auc_final["n_estimators"]))
+        if mono_str is not None:
+            final_auc.set_params(monotone_constraints=mono_str)
+            final_ll.set_params(monotone_constraints=mono_str)
         
-        # Optional: refit on ALL training rows at best rounds (deterministic)
-        # IMPORTANT: keep the chosen tree count, DO NOT refit with 0 or tiny n_estimators
-        model_logloss.set_params(n_estimators=int(n_trees_ll), early_stopping_rounds=None)
-        model_auc.set_params(n_estimators=int(n_trees_auc), early_stopping_rounds=None)
+        # ✅ Fit on the final training slice you want to deploy (train_all_idx)
+        final_auc.fit(
+            X_full[train_all_idx],
+            y_full[train_all_idx],
+            sample_weight=w_full[train_all_idx],
+            verbose=False,
+        )
+        final_ll.fit(
+            X_full[train_all_idx],
+            y_full[train_all_idx],
+            sample_weight=w_full[train_all_idx],
+            verbose=False,
+        )
         
-        model_logloss.fit(X_train, y_train, sample_weight=w_train, verbose=False)
-        model_auc.fit(X_train, y_train, sample_weight=w_train, verbose=False)
+        # ✅ Downstream uses THESE
+        model_auc = final_auc
+        model_logloss = final_ll
         
-        # ---- Stamp feature names on the models so we don't get f0,f1,... ----
+        # ---- Stamp feature names on boosters so we don't get f0,f1,... ----
         try:
-            n_model = int(getattr(model_auc, "n_features_in_", X_train.shape[1]))
+            n_model = int(getattr(model_auc, "n_features_in_", X_full[train_all_idx].shape[1]))
             if len(feature_cols) == n_model:
                 real_names = list(map(str, feature_cols))
                 model_auc.feature_names_in_ = np.asarray(real_names, dtype=object)
@@ -12386,7 +12379,6 @@ def train_sharp_model_from_bq(
                 except Exception: pass
         except Exception:
             pass
-
         # -----------------------------------------
         # OOF predictions (train-only) + blending
         # + Calibration + Tables + Save + Artifacts (HARDENED)
