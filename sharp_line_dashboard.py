@@ -12493,7 +12493,17 @@ def train_sharp_model_from_bq(
             def sigmoid(z): return 1.0/(1.0+np.exp(-z))
             shift = np.log((hold_pos/(1-hold_pos)) / (train_pos/(1-train_pos)))
             return sigmoid(logit(p) + shift)
+        def _clip01(p, eps=1e-7):
+            p = np.asarray(p, dtype=np.float64)
+            return np.clip(p, eps, 1.0 - eps)
         
+        def _logit(p):
+            p = np.asarray(p, dtype=np.float64)
+            return np.log(p / (1.0 - p))
+        
+        def _sigmoid(z):
+            z = np.asarray(z, dtype=np.float64)
+            return 1.0 / (1.0 + np.exp(-z))
         CLIP = 0.03 if str(market).lower().strip() == "spreads" else (0.02 if SMALL else 0.01)
         
         deploy_pos = float(np.mean(y_full[hold_idx] == 1))
