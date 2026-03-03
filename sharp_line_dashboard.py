@@ -2270,13 +2270,13 @@ def holdout_by_percent_groups(
     SPORT_HOLDOUT_PCT = {
         "NFL": 0.10,
         "NCAAF": 0.10,
-        "NBA": 0.15,
+        "NBA": 0.18,
         "WNBA": 0.10,
         "NHL": 0.15,
         "MLB": 0.12,
         "MLS": 0.15,
         "CFL": 0.10,
-        "NCAAB": 0.15,
+        "NCAAB": 0.18,
         "DEFAULT": 0.15,
     }
 
@@ -2655,10 +2655,10 @@ def shap_stability_select(
     X: pd.DataFrame,
     y: np.ndarray,
     folds, *,
-    topk_per_fold: int = 150,
-    min_presence: float = 0.4,
+    topk_per_fold: int = 200,
+    min_presence: float = 0.65,
     max_keep: int | None = None,
-    sample_per_fold: int = 4000,
+    sample_per_fold: int = None,
     random_state: int = 42,
     must_keep: list[str] = None
 ):
@@ -3934,7 +3934,7 @@ def select_features_auto(
     corr_global: float = 0.97,
     max_feats_major: int = 220,
     max_feats_small: int = 160,
-    topk_per_fold: int = 140,
+    topk_per_fold: int = 200,
     min_presence: float = 0.65,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
@@ -11791,8 +11791,8 @@ def train_sharp_model_from_bq(
             accept_metric="auc",
             auc_min_improve=0.0,
         
-            topk_per_fold=120,
-            min_presence=0.40,
+            topk_per_fold=200,
+            min_presence=0.65,
             sign_flip_max=0.35,
         
             corr_within=0.90,
