@@ -12487,24 +12487,38 @@ def train_sharp_model_from_bq(
 
 
         # ---------------- Calibration (simplified, avoids extra compression) ----------------
-        def _prior_correct(p, train_pos, hold_pos, clip=1e-6):
-            p = np.clip(p, clip, 1-clip)
-            def logit(x): return np.log(x/(1-x))
-            def sigmoid(z): return 1.0/(1.0+np.exp(-z))
-            shift = np.log((hold_pos/(1-hold_pos)) / (train_pos/(1-train_pos)))
-            return sigmoid(logit(p) + shift)
+        # ---------------- Calibration (simplified, avoids extra compression) ----------------
+        # Goals:
+        #  1) Blend AUC + LogLoss in LOGIT space (keeps edges / avoids mean-pull)
+        #  2) Fit calibrator on OOF BLEND (no prior shift during fitting)
+        #  3) Apply prior shift LAST (deployment adjustment), separately from "calibration quality"
+        #  4) Keep temperature OFF by default for spreads (often compresses)
+        #  5) Show calibration tables for BOTH:
+        #       - calibrated (no prior shift)  ✅ true calibration check
+        #       - deploy-adjusted (after prior shift) ✅ what you'd actually serve
+        
         def _clip01(p, eps=1e-7):
             p = np.asarray(p, dtype=np.float64)
             return np.clip(p, eps, 1.0 - eps)
         
-        def _logit(p):
-            p = np.asarray(p, dtype=np.float64)
+        def _logit(p, eps=1e-7):
+            p = _clip01(p, eps)
             return np.log(p / (1.0 - p))
         
         def _sigmoid(z):
             z = np.asarray(z, dtype=np.float64)
             return 1.0 / (1.0 + np.exp(-z))
+        
+        def _prior_correct(p, train_pos, hold_pos, clip=1e-6):
+            # base-rate / prevalence shift correction (logit add)
+            p = np.clip(np.asarray(p, float), clip, 1.0 - clip)
+            train_pos = float(np.clip(train_pos, clip, 1.0 - clip))
+            hold_pos  = float(np.clip(hold_pos,  clip, 1.0 - clip))
+            shift = np.log((hold_pos / (1.0 - hold_pos)) / (train_pos / (1.0 - train_pos)))
+            return _sigmoid(_logit(p, eps=clip) + shift)
+        
         CLIP = 0.03 if str(market).lower().strip() == "spreads" else (0.02 if SMALL else 0.01)
+        eps = 1e-7
         
         deploy_pos = float(np.mean(y_full[hold_idx] == 1))
         oof_pos    = float(np.mean(y_oof == 1))
@@ -12512,15 +12526,17 @@ def train_sharp_model_from_bq(
         # NOTE: keep flip OFF by default since you already AUC-aligned per fold
         flip_flag = False
         
-        # IMPORTANT CHANGE:
-        # Fit calibrator on the *blended* OOF directly (NOT prior-corrected first),
-        # then apply prior-correction at inference time only (deployment adjustment).
-        p_oof_for_cal = (1.0 - p_oof_blend) if flip_flag else p_oof_blend
+        # ------------------
+        # 1) Fit calibrator on blended OOF directly (NO prior shift here)
+        # ------------------
+        p_oof_for_cal = (1.0 - p_oof_blend) if flip_flag else np.asarray(p_oof_blend, dtype=np.float64)
+        p_oof_for_cal = _clip01(p_oof_for_cal, eps)
         
         use_qiso = (len(np.unique(np.round(p_oof_for_cal, 4))) < 400)
         cals_raw = fit_iso_platt_beta(p_oof_for_cal, y_oof, eps=1e-6, use_quantile_iso=use_qiso)
         cals = _normalize_cals(cals_raw)
         
+        # normalize calibrators to uniform apply interface
         cals["iso"]   = _ensure_transform_for_iso(cals.get("iso")) or _IdentityIsoCal(eps=1e-6)
         cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=1e-6)
         cals["beta"]  = _ensure_predict_proba_for_prob_cal(cals.get("beta"),  eps=1e-6)
@@ -12535,21 +12551,24 @@ def train_sharp_model_from_bq(
         def _ece_score(y, p, n_bins=10):
             return float(expected_calibration_error(np.asarray(y, int), np.asarray(p, float), n_bins=n_bins))
         
-        # Selection with an anti-compression guard:
-        # choose best ECE among those that don't shrink std too much vs raw
+        # Selection with anti-compression guard:
+        # prefer low ECE, but penalize calibrators that crush variance
         raw_std = float(np.std(p_oof_for_cal))
         scores = []
         for kind, cal in candidates:
             try:
                 pp = _apply_cal(kind, cal, p_oof_for_cal)
-                pp = np.asarray(np.clip(pp, CLIP, 1 - CLIP), float)
+                pp = np.asarray(np.clip(pp, CLIP, 1.0 - CLIP), float)
                 ece = _ece_score(y_oof, pp, n_bins=10)
                 std_ratio = float(np.std(pp) / max(raw_std, 1e-9))
-                # guard: don't accept calibrators that crush variance
+                # keep: lower ECE is good; higher std_ratio is good (less compression)
                 if np.isfinite(ece):
                     scores.append((ece, -std_ratio, kind, cal, std_ratio))
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    st.debug(f"Calibrator {kind} failed: {e}")
+                except Exception:
+                    pass
         
         if scores:
             scores.sort(key=lambda t: (t[0], t[1]))  # low ECE, high std_ratio
@@ -12564,21 +12583,30 @@ def train_sharp_model_from_bq(
             "std_ratio_after_cal": (None if not np.isfinite(std_ratio) else float(std_ratio)),
         })
         
-        # Temperature scaling: OFF by default for spreads (usually compresses). Keep T=1.0.
+        # Temperature scaling: OFF by default (especially spreads); keep as constant
         T_best = 1.0
         
-        # --- Inference probs (blend → flip → calibrate → PRIOR-CORRECT to deploy prior) ---
+        # ------------------
+        # 2) Inference: Blend in logit space -> (optional flip) -> calibrate -> prior shift LAST
+        # ------------------
         p_tr_auc, _ = pos_proba_safe(model_auc,     X_full[train_all_idx], positive=1)
         p_ho_auc, _ = pos_proba_safe(model_auc,     X_full[hold_idx],      positive=1)
+        
+        p_tr_auc = _clip01(p_tr_auc, eps)
+        p_ho_auc = _clip01(p_ho_auc, eps)
         
         if RUN_LOGLOSS:
             p_tr_ll, _ = pos_proba_safe(model_logloss, X_full[train_all_idx], positive=1)
             p_ho_ll, _ = pos_proba_safe(model_logloss, X_full[hold_idx],      positive=1)
-            z_tr = best_w * _logit(_clip01(p_tr_ll, eps)) + (1.0 - best_w) * _logit(_clip01(p_tr_auc, eps))
-            z_ho = best_w * _logit(_clip01(p_ho_ll, eps)) + (1.0 - best_w) * _logit(_clip01(p_ho_auc, eps))
+            p_tr_ll = _clip01(p_tr_ll, eps)
+            p_ho_ll = _clip01(p_ho_ll, eps)
+        
+            # ✅ LOGIT-SPACE BLEND (structural change that preserves spread)
+            z_tr = float(best_w) * _logit(p_tr_ll, eps) + (1.0 - float(best_w)) * _logit(p_tr_auc, eps)
+            z_ho = float(best_w) * _logit(p_ho_ll, eps) + (1.0 - float(best_w)) * _logit(p_ho_auc, eps)
         else:
-            z_tr = _logit(_clip01(p_tr_auc, eps))
-            z_ho = _logit(_clip01(p_ho_auc, eps))
+            z_tr = _logit(p_tr_auc, eps)
+            z_ho = _logit(p_ho_auc, eps)
         
         p_train_blend_raw = _clip01(_sigmoid(z_tr), eps)
         p_hold_blend_raw  = _clip01(_sigmoid(z_ho), eps)
@@ -12587,97 +12615,139 @@ def train_sharp_model_from_bq(
             p_train_blend_raw = 1.0 - p_train_blend_raw
             p_hold_blend_raw  = 1.0 - p_hold_blend_raw
         
-        # Calibrate (no prior correction yet)
-        p_cal_tr = np.asarray(np.clip(_apply_cal(cal_name, cal_obj, p_train_blend_raw), CLIP, 1 - CLIP), float)
-        p_cal_ho = np.asarray(np.clip(_apply_cal(cal_name, cal_obj, p_hold_blend_raw),  CLIP, 1 - CLIP), float)
+        # Calibrate (NO prior shift here)
+        p_cal_tr = np.asarray(_apply_cal(cal_name, cal_obj, p_train_blend_raw), float)
+        p_cal_ho = np.asarray(_apply_cal(cal_name, cal_obj, p_hold_blend_raw),  float)
         
-        # Apply deployment prior correction LAST (adjust for prevalence shift)
+        p_cal_tr = np.asarray(np.clip(p_cal_tr, CLIP, 1.0 - CLIP), float)
+        p_cal_ho = np.asarray(np.clip(p_cal_ho, CLIP, 1.0 - CLIP), float)
+        
+        # Prior-correct LAST (deployment adjustment)
         train_pos_for_pc = float(np.mean(y_full[train_all_idx] == 1))
         p_train_vec = _prior_correct(p_cal_tr, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
         p_hold_vec  = _prior_correct(p_cal_ho, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
         
-        p_train_vec = np.asarray(np.clip(p_train_vec, CLIP, 1 - CLIP), float)
-        p_hold_vec  = np.asarray(np.clip(p_hold_vec,  CLIP, 1 - CLIP), float)
+        p_train_vec = np.asarray(np.clip(p_train_vec, CLIP, 1.0 - CLIP), float)
+        p_hold_vec  = np.asarray(np.clip(p_hold_vec,  CLIP, 1.0 - CLIP), float)
         
-        # NOTE: remove explicit shrink-to-0.5; it’s a big compressor
-        # If you REALLY want it, do it only when std is huge (not the case for spreads).
-        
-        # Diagnostics
+        # Diagnostics (report BOTH calibration quality + stability)
         ece_tr = expected_calibration_error(y_full[train_all_idx].astype(int), p_train_vec, n_bins=10)
         ece_ho = expected_calibration_error(y_full[hold_idx].astype(int),      p_hold_vec,  n_bins=10)
         psi    = population_stability_index(p_train_vec, p_hold_vec, bins=20)
         st.write({"cal_used": cal_name, "ece_train": float(ece_tr), "ece_hold": float(ece_ho), "psi": float(psi)})
         
-        assert p_train_vec.shape[0] == len(train_all_idx)
-        assert p_hold_vec.shape[0]  == len(hold_idx)
+        assert p_train_vec.shape[0] == len(train_all_idx), "p_train_vec length mismatch"
+        assert p_hold_vec.shape[0]  == len(hold_idx),      "p_hold_vec length mismatch"
         
         # --- Save adapter ---
         cal_blend = (cal_name, cal_obj)
-        iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1 - CLIP))
+        iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1.0 - CLIP))
         
+        # --- Helper to get final calibrated probs (blend->flip->calibrate->clip) ---
+        # NOTE: this returns CALIBRATED (no prior shift). If you want deploy prior shift in prod,
+        # do it at the call site with _prior_correct() using your runtime base rate estimate.
         def predict_calibrated(models: dict, X):
             eps = 1e-7
-            def _clip01(p): return np.clip(np.asarray(p, float), eps, 1-eps)
-            def _logit(p): p=_clip01(p); return np.log(p/(1-p))
-            def _sigmoid(z): return 1/(1+np.exp(-z))
+            def _clip01_local(p): return np.clip(np.asarray(p, float), eps, 1.0 - eps)
+            def _logit_local(p):
+                p = _clip01_local(p)
+                return np.log(p / (1.0 - p))
+            def _sigmoid_local(z): return 1.0 / (1.0 + np.exp(-z))
         
             pa = models["model_auc"].predict_proba(X)[:, 1]
-            pl = models["model_logloss"].predict_proba(X)[:, 1]
-            w  = float(models.get("best_w", 0.5))
+            pa = _clip01_local(pa)
         
-            z = w * _logit(pl) + (1.0 - w) * _logit(pa)
-            p = _sigmoid(z)
+            if "model_logloss" in models and models["model_logloss"] is not None:
+                pl = models["model_logloss"].predict_proba(X)[:, 1]
+                pl = _clip01_local(pl)
+                w  = float(models.get("best_w", 0.5))
+                z = w * _logit_local(pl) + (1.0 - w) * _logit_local(pa)
+                p = _sigmoid_local(z)
+            else:
+                p = pa
+        
             if models.get("flip_flag", False):
                 p = 1.0 - p
-            p = models["iso_blend"].predict(p)  # calibrated + clipped
-            return p
         
-        # -----------------------------
-        # Comparable calibration tables (ONE set of edges)
-        # -----------------------------
-        def _make_edges(p, q=10):
+            # calibrated + clipped
+            return models["iso_blend"].predict(p)
+        
+        # ------------------
+        # 3) Calibration tables (RECOMMENDATION: show both "calibration quality" and "deploy-adjusted")
+        # ------------------
+        def _make_edges(p, q=10, eps=1e-7):
             p = np.asarray(p, float)
-            qs = np.linspace(0.0, 1.0, q + 1)
+            p = p[np.isfinite(p)]
+            if p.size == 0:
+                return np.linspace(eps, 1.0 - eps, q + 1)
+            qs = np.linspace(0, 1, q + 1)
             edges = np.quantile(p, qs)
-            edges[0]  = min(edges[0],  0.0)
-            edges[-1] = max(edges[-1], 1.0)
-            # ensure strictly increasing
-            edges = np.unique(np.round(edges, 10))
-            if edges.size < 3:
-                edges = np.array([0.0, 0.5, 1.0], float)
+            # enforce strictly increasing edges
+            edges = np.maximum.accumulate(edges)
+            edges[0] = min(edges[0], 1.0 - eps)
+            edges[-1] = max(edges[-1], eps)
+            # de-dupe tiny bins
+            for i in range(1, len(edges)):
+                if edges[i] <= edges[i-1]:
+                    edges[i] = min(1.0 - eps, edges[i-1] + 1e-6)
             return edges
         
         def _cal_table_fixed_edges(y, p, edges, eps=1e-7):
             y = np.asarray(y, int)
-            p = np.clip(np.asarray(p, float), eps, 1 - eps)
-            cuts = pd.cut(p, bins=edges, include_lowest=True, right=True)
-            dfc = pd.DataFrame({"p": p, "y": y, "bin": cuts})
-            g = dfc.groupby("bin", observed=True, sort=False)
+            p = _clip01(np.asarray(p, float), eps)
+            edges = np.asarray(edges, float)
+        
+            # bin index
+            b = np.digitize(p, edges, right=True) - 1
+            b = np.clip(b, 0, len(edges) - 2)
+        
             rows = []
-            for b, sub in g:
-                if sub.empty: 
+            for i in range(len(edges) - 1):
+                mask = (b == i)
+                sub_y = y[mask]
+                sub_p = p[mask]
+                if sub_p.size == 0:
                     continue
                 rows.append({
-                    "Prob Bin": f"{float(sub['p'].min()):.2f}-{float(sub['p'].max()):.2f}",
-                    "N": int(len(sub)),
-                    "Hit Rate": float(sub["y"].mean()),
-                    "Avg Pred P": float(sub["p"].mean()),
+                    "Prob Bin": f"{float(sub_p.min()):.2f}-{float(sub_p.max()):.2f}",
+                    "N": int(sub_p.size),
+                    "Hit Rate": float(np.mean(sub_y)),
+                    "Avg Pred P": float(np.mean(sub_p)),
                 })
             out = pd.DataFrame(rows)
             if not out.empty:
                 out = out.sort_values("Avg Pred P").reset_index(drop=True)
             return out
         
-        edges = _make_edges(p_train_vec, q=10)
+        # ✅ "Calibration quality" tables should use calibrated probs WITHOUT prior shift
+        edges_cal = _make_edges(p_cal_ho, q=10, eps=eps)
         
-        st.markdown("#### 🎯 Calibration Table — TRAIN (fixed edges)")
-        st.dataframe(_cal_table_fixed_edges(y_full[train_all_idx].astype(int), p_train_vec, edges, eps=eps),
-                     use_container_width=True)
+        st.markdown("#### 🎯 Calibration Table — TRAIN (calibrated, no prior shift)")
+        st.dataframe(
+            _cal_table_fixed_edges(y_full[train_all_idx].astype(int), p_cal_tr, edges_cal, eps=eps),
+            use_container_width=True
+        )
         
-        st.markdown("#### 🎯 Calibration Table — HOLDOUT (fixed edges)")
-        st.dataframe(_cal_table_fixed_edges(y_full[hold_idx].astype(int), p_hold_vec, edges, eps=eps),
-                     use_container_width=True)
-
+        st.markdown("#### 🎯 Calibration Table — HOLDOUT (calibrated, no prior shift)")
+        st.dataframe(
+            _cal_table_fixed_edges(y_full[hold_idx].astype(int), p_cal_ho, edges_cal, eps=eps),
+            use_container_width=True
+        )
+        
+        # Optional: "what you'd serve" tables AFTER prior shift
+        edges_deploy = _make_edges(p_hold_vec, q=10, eps=eps)
+        
+        st.markdown("#### 🧭 Calibration Table — TRAIN (deploy-adjusted prior shift)")
+        st.dataframe(
+            _cal_table_fixed_edges(y_full[train_all_idx].astype(int), p_train_vec, edges_deploy, eps=eps),
+            use_container_width=True
+        )
+        
+        st.markdown("#### 🧭 Calibration Table — HOLDOUT (deploy-adjusted prior shift)")
+        st.dataframe(
+            _cal_table_fixed_edges(y_full[hold_idx].astype(int), p_hold_vec, edges_deploy, eps=eps),
+            use_container_width=True
+        )
         
         # -------------------------------------------------------------------
         # METRICS (always defined; prevents NameError later)
