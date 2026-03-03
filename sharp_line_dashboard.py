@@ -12052,8 +12052,8 @@ def train_sharp_model_from_bq(
         
         # --- OOF loop: NO per-fold flip. Keep raw orientation consistent. ---
         for tr_rel, va_rel in folds:
-            fold_ntrees_auc = int(max(200, int(n_trees_auc or 0)))
-            fold_ntrees_ll  = int(max(200, int(n_trees_ll  or 0)))
+            fold_ntrees_auc = int(FINAL_NTREES_AUC)
+            fold_ntrees_ll  = int(FINAL_NTREES_LL)
         
             m_auc = XGBClassifier(
                 **{**base_kwargs, **best_auc_params, "n_estimators": fold_ntrees_auc, "n_jobs": 1}
