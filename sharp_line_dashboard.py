@@ -2879,7 +2879,7 @@ def _cv_auc_for_feature_set(
     eps=1e-6,
 
     cv_mode: str = "full",
-    quick_folds_n: int = 2,
+    quick_folds_n: int = 7,
     compute_ll_brier: bool = True,
     max_folds: int | None = None,
 
@@ -3333,7 +3333,7 @@ def _auto_select_k_by_auc(
 
     # --- speed knobs ---
     quick_screen: bool = True,
-    quick_folds: int = 5,         # was 2 (reduces noisy quick-gate rejects)
+    quick_folds: int = 7,         # was 2 (reduces noisy quick-gate rejects)
     quick_accept: float = 0.0,    # kept for compat (unused)
     quick_drop: float = 0.0,      # kept for compat (unused)
 
@@ -3712,9 +3712,9 @@ def _auto_select_k_by_auc(
         if k < max(12, min_k):
             rej_margin = 0.0015
         elif k < 40:
-            rej_margin = 0.005
+            rej_margin = 0.002
         else:
-            rej_margin = 0.004
+            rej_margin = 0.003
 
         quick_margin_auc = rej_margin
         flip_close_margin = rej_margin
@@ -3934,8 +3934,8 @@ def select_features_auto(
     corr_global: float = 0.97,
     max_feats_major: int = 220,
     max_feats_small: int = 160,
-    topk_per_fold: int = 100,
-    min_presence: float = 0.55,
+    topk_per_fold: int = 140,
+    min_presence: float = 0.65,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
 
@@ -3943,7 +3943,7 @@ def select_features_auto(
     use_auc_auto: bool = True,
     auc_min_k: int | None = None,
     auc_patience: int = 400,
-    auc_min_improve: float = 1e-8,
+    auc_min_improve: float = 1e-7,
     accept_metric: str = "auc",
     auc_verbose: bool = True,
 
@@ -4312,7 +4312,7 @@ def select_features_auto(
             orient_passes=1,
 
             quick_screen=True,
-            quick_folds=6,
+            quick_folds=7,
             abort_margin_cv=-1e-6,
             force_full_scan=True,
             time_budget_s=1e18,
