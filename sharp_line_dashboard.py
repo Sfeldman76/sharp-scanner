@@ -11311,6 +11311,7 @@ def train_sharp_model_from_bq(
         y_hold  = y_full[hold_idx].astype(int)
         g_hold  = groups[hold_idx]
         t_hold  = times[hold_idx]
+       
         
         # ----------------------------
         # 2) Sample weights (BUILD ONCE from train_df) — no drops
@@ -11611,6 +11612,13 @@ def train_sharp_model_from_bq(
         
         assert X_train_sel.shape[0] == len(train_all_idx) == y_train.shape[0]
         assert X_hold_sel.shape[0]  == len(hold_idx)      == y_hold.shape[0]
+        # ---- Canonicalize names AFTER AutoFS so the rest of the pipeline keeps working ----
+        X_train = X_train_sel
+        X_hold  = X_hold_sel
+        X_full  = X_full_sel
+        
+        feature_cols = list(feature_cols_sel)   # make sure everyone uses the selected list
+        features_pruned = tuple(feature_cols)   # optional: if later code expects this name
         # ----------------------------
         # 6) FAST SEARCH → MODERATE/DEEP REFIT (SMOOTHER)
         # ----------------------------
