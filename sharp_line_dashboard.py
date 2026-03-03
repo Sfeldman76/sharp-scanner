@@ -12394,93 +12394,98 @@ def train_sharp_model_from_bq(
         # -----------------------------------------
         # OOF predictions (train-only) + LOGIT blending + calibration
         # -----------------------------------------
+        # -----------------------------------------
+        # OOF predictions (train-only) + blending
+        # -----------------------------------------
         SMALL = ((sport_key in SMALL_LEAGUES) or (np.unique(g_train).size < 30) or (len(y_train) < 500))
         MIN_OOF = 40 if SMALL else 120
         RUN_LOGLOSS = True
         eps = 1e-7
         
-        def _clip01(p, lo=1e-7):
-            return np.clip(np.asarray(p, float), lo, 1.0 - lo)
-        
-        def _logit(p):
-            p = _clip01(p, eps)
-            return np.log(p / (1.0 - p))
-        
-        def _sigmoid(z):
-            return 1.0 / (1.0 + np.exp(-z))
-        
         oof_pred_auc = np.full(len(y_train), np.nan, dtype=np.float64)
-        oof_pred_ll  = np.full(len(y_train), np.nan, dtype=np.float64) if RUN_LOGLOSS else None
+        oof_pred_logloss = (np.full(len(y_train), np.nan, dtype=np.float64) if RUN_LOGLOSS else None)
         
-        # Per-fold fit → predict → AUC-align ONLY for AUC stream (as you already do)
+        def _decide_global_flip(y, p, min_margin=0.01):
+            y = np.asarray(y, int); p = np.asarray(p, float)
+            if np.unique(y).size < 2:
+                return False
+            auc0 = roc_auc_score(y, p)
+            auc1 = roc_auc_score(y, 1.0 - p)
+            return bool((auc1 - auc0) > float(min_margin))
+        
+        # --- OOF loop: NO per-fold flip. Keep raw orientation consistent. ---
         for tr_rel, va_rel in folds:
-            fold_ntrees_auc = int(max(200, n_trees_auc))
-            fold_ntrees_ll  = int(max(200, n_trees_ll))
+            fold_ntrees_auc = int(max(200, int(n_trees_auc or 0)))
+            fold_ntrees_ll  = int(max(200, int(n_trees_ll  or 0)))
         
-            m_auc = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": fold_ntrees_auc, "n_jobs": 1})
-            m_auc.fit(X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
-        
+            m_auc = XGBClassifier(
+                **{**base_kwargs, **best_auc_params, "n_estimators": fold_ntrees_auc, "n_jobs": 1}
+            )
+            m_auc.fit(
+                X_train[tr_rel], y_train[tr_rel],
+                sample_weight=w_train[tr_rel],
+                verbose=False
+            )
             pa, _ = pos_proba_safe(m_auc, X_train[va_rel], positive=1)
-            _, pa_fixed, _ = auc_with_flip(y_train[va_rel].astype(int), pa, w_train[va_rel])
-            oof_pred_auc[va_rel] = _clip01(pa_fixed, eps)
+            oof_pred_auc[va_rel] = np.clip(pa.astype(np.float64), eps, 1 - eps)
         
             if RUN_LOGLOSS:
-                m_ll = XGBClassifier(**{**base_kwargs, **best_ll_params, "n_estimators": fold_ntrees_ll, "n_jobs": 1})
-                m_ll.fit(X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
-        
+                m_ll = XGBClassifier(
+                    **{**base_kwargs, **best_ll_params, "n_estimators": fold_ntrees_ll, "n_jobs": 1}
+                )
+                m_ll.fit(
+                    X_train[tr_rel], y_train[tr_rel],
+                    sample_weight=w_train[tr_rel],
+                    verbose=False
+                )
                 pl, _ = pos_proba_safe(m_ll, X_train[va_rel], positive=1)
-                oof_pred_ll[va_rel] = _clip01(pl, eps)
+                oof_pred_logloss[va_rel] = np.clip(pl.astype(np.float64), eps, 1 - eps)
         
         mask_auc = np.isfinite(oof_pred_auc)
-        mask_ll  = np.isfinite(oof_pred_ll) if RUN_LOGLOSS else mask_auc
-        mask_oof = mask_auc & mask_ll
+        mask_log = np.isfinite(oof_pred_logloss) if RUN_LOGLOSS else mask_auc
+        mask_oof = mask_auc & mask_log
         n_oof = int(mask_oof.sum())
         
-        # Choose OOF sources
-        if n_oof >= MIN_OOF and RUN_LOGLOSS:
-            y_oof     = y_train[mask_oof].astype(int)
-            p_oof_auc = _clip01(oof_pred_auc[mask_oof], eps)
-            p_oof_ll  = _clip01(oof_pred_ll[mask_oof],  eps)
-        else:
-            y_oof     = y_train[mask_auc].astype(int)
-            p_oof_auc = _clip01(oof_pred_auc[mask_auc], eps)
-            p_oof_ll  = None
+        # pick OOF sources
+        use_full = (n_oof >= MIN_OOF) and (RUN_LOGLOSS and (oof_pred_logloss is not None))
+        y_oof = y_train[mask_oof].astype(int) if use_full else y_train[mask_auc].astype(int)
         
-        # ---- Choose blend weight on OOF (LOGIT SPACE) ----
-        # We pick w by minimizing logloss of sigmoid(w*z_ll + (1-w)*z_auc)
-        z_auc = _logit(p_oof_auc)
-        if p_oof_ll is not None:
-            z_ll  = _logit(p_oof_ll)
-            CAND = [0.25, 0.35, 0.45, 0.55, 0.65, 0.75] if not SMALL else [0.35, 0.50, 0.65]
-            best_w, best_lloss = 0.50, np.inf
-            for w in CAND:
-                z_mix = w * z_ll + (1.0 - w) * z_auc
-                p_mix = _clip01(_sigmoid(z_mix), eps)
-                ll = log_loss(y_oof, p_mix, labels=[0, 1])
-                if ll < best_lloss:
-                    best_lloss, best_w = float(ll), float(w)
-        else:
-            best_w = 0.0  # only AUC stream
+        p_oof_auc = np.clip(oof_pred_auc[mask_oof if use_full else mask_auc], eps, 1 - eps).astype(np.float64)
+        p_oof_log = None
+        if use_full:
+            p_oof_log = np.clip(oof_pred_logloss[mask_oof], eps, 1 - eps).astype(np.float64)
         
-        # Final OOF blended probabilities (still PRE-calibration)
-        if p_oof_ll is not None:
-            z_oof_blend = best_w * _logit(p_oof_ll) + (1.0 - best_w) * _logit(p_oof_auc)
-        else:
-            z_oof_blend = _logit(p_oof_auc)
+        # --- Blend weight selection (your existing chooser) ---
+        best_w, p_oof_blend, _ = pick_blend_weight_on_oof(
+            y_oof=y_oof,
+            p_oof_auc=p_oof_auc,
+            p_oof_log=p_oof_log,
+            eps=eps,
+            metric="hybrid",
+            hybrid_alpha=0.92,
+        )
+        p_oof_blend = np.asarray(p_oof_blend, dtype=np.float64)
+        assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
         
-        p_oof_blend = _clip01(_sigmoid(z_oof_blend), eps)
+        # ✅ THE STRUCTURAL CHANGE: decide ONE global flip from the final blended OOF
+        flip_flag = _decide_global_flip(y_oof, p_oof_blend, min_margin=0.01)
+        if flip_flag:
+            p_oof_blend = 1.0 - p_oof_blend
+        
         oof_std = float(np.std(p_oof_blend))
-        oof_rng = float(p_oof_blend.max() - p_oof_blend.min())
+        oof_rng = float(np.max(p_oof_blend) - np.min(p_oof_blend))
         
         st.write({
             "SMALL": bool(SMALL),
             "RUN_LOGLOSS": bool(RUN_LOGLOSS),
             "n_oof": int(len(y_oof)),
             "blend_w_logit": float(best_w),
+            "flip_on_oof_global": bool(flip_flag),
             "oof_std": float(oof_std),
             "oof_minmax": (float(p_oof_blend.min()), float(p_oof_blend.max())),
         })
-        
+
+
         # ---------------- Calibration (simplified, avoids extra compression) ----------------
         def _prior_correct(p, train_pos, hold_pos, clip=1e-6):
             p = np.clip(p, clip, 1-clip)
