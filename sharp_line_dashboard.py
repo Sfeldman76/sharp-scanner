@@ -12360,13 +12360,13 @@ def train_sharp_model_from_bq(
         final_auc.fit(
             X_full[train_all_idx],
             y_full[train_all_idx],
-            sample_weight=w_full[train_all_idx],
+            sample_weight=w_train[train_all_idx],
             verbose=False,
         )
         final_ll.fit(
             X_full[train_all_idx],
             y_full[train_all_idx],
-            sample_weight=w_full[train_all_idx],
+            sample_weight=w_train[train_all_idx],
             verbose=False,
         )
         
