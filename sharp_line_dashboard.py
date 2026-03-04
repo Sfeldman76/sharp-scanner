@@ -2656,7 +2656,7 @@ def shap_stability_select(
     y: np.ndarray,
     folds, *,
     topk_per_fold: int = 200,
-    min_presence: float = 0.40,
+    min_presence: float = 0.50,
     max_keep: int | None = None,
     sample_per_fold: int = None,
     random_state: int = 42,
@@ -2879,7 +2879,7 @@ def _cv_auc_for_feature_set(
     eps=1e-6,
 
     cv_mode: str = "full",
-    quick_folds_n: int = 8,
+    quick_folds_n: int = 10,
     compute_ll_brier: bool = True,
     max_folds: int | None = None,
 
@@ -3333,7 +3333,7 @@ def _auto_select_k_by_auc(
 
     # --- speed knobs ---
     quick_screen: bool = True,
-    quick_folds: int = 8,         # was 2 (reduces noisy quick-gate rejects)
+    quick_folds: int = 10,         # was 2 (reduces noisy quick-gate rejects)
     quick_accept: float = 0.0,    # kept for compat (unused)
     quick_drop: float = 0.0,      # kept for compat (unused)
 
@@ -3710,11 +3710,11 @@ def _auto_select_k_by_auc(
 
         # k-adaptive thresholds (MORE SIGNAL = more forgiving rej_margin)
         if k < max(12, min_k):
-            rej_margin = 0.0015
+            rej_margin = 0.0001
         elif k < 40:
-            rej_margin = 0.002
+            rej_margin = 0.00015
         else:
-            rej_margin = 0.003
+            rej_margin = 0.0002
 
         quick_margin_auc = rej_margin
         flip_close_margin = rej_margin
@@ -3935,7 +3935,7 @@ def select_features_auto(
     max_feats_major: int = 220,
     max_feats_small: int = 160,
     topk_per_fold: int = 200,
-    min_presence: float = 0.40,
+    min_presence: float = 0.50,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
 
@@ -4312,7 +4312,7 @@ def select_features_auto(
             orient_passes=1,
 
             quick_screen=True,
-            quick_folds=8,
+            quick_folds=10,
             abort_margin_cv=-1e-6,
             force_full_scan=True,
             time_budget_s=1e18,
@@ -11563,7 +11563,7 @@ def train_sharp_model_from_bq(
             auc_min_improve=0.0,
         
             topk_per_fold=200,
-            min_presence=0.40,
+            min_presence=0.50,
             sign_flip_max=0.35,
         
             corr_within=0.90,
@@ -11878,56 +11878,77 @@ def train_sharp_model_from_bq(
         def _stabilize(best_params: dict, *, mode: str = "normal", leaf_cap: int = 128) -> dict:
             bp = dict(best_params or {})
         
-            # defaults
+            # ---- base defaults (fallbacks if search didn't set them) ----
             min_child  = float(bp.get("min_child_weight", 2.0))
             gamma      = float(bp.get("gamma", 0.0))
             reg_lambda = float(bp.get("reg_lambda", 1.0))
+            reg_alpha  = float(bp.get("reg_alpha", 0.0))
             lr         = float(bp.get("learning_rate", 0.03))
         
-            if mode == "loosen":
+            # ---- mode adjustments (soft + hard) ----
+            if mode == "loosen_soft":
+                # small nudge: allow splits + a bit more movement
+                min_child  = max(1.0,  min_child * 0.60)
+                gamma      = max(0.0,  gamma * 0.60)
+                reg_lambda = max(0.25, reg_lambda * 0.70)
+                lr         = min(0.06, lr * 1.25)
+        
+            elif mode == "loosen":
+                # strong nudge: break out of collapse
                 min_child  = max(1.0,  min_child * 0.25)
                 gamma      = max(0.0,  gamma * 0.25)
-                reg_lambda = max(1.0,  reg_lambda * 0.25)
-                lr         = min(0.07, lr * 1.5)
+                reg_lambda = max(0.10, reg_lambda * 0.25)
+                lr         = min(0.07, lr * 1.50)
         
             elif mode == "tighten":
-                min_child  = max(10.0, min_child * 2.0)
-                gamma      = max(5.0,  gamma * 2.0)
-                reg_lambda = max(20.0, reg_lambda * 2.0)
-                lr         = min(0.02, lr)
+                # dampen extremes / volatility
+                min_child  = max(8.0,  min_child * 2.0)
+                gamma      = max(2.0,  gamma * 2.0)
+                reg_lambda = max(5.0,  reg_lambda * 2.0)
+                lr         = min(0.03, lr)  # never increase when tightening
         
-            # bynode support check (defensive across xgb versions)
+            # ---- clamp / sanity ranges (prevents crazy params from search) ----
+            min_child  = float(np.clip(min_child, 1.0,  50.0))
+            gamma      = float(np.clip(gamma,     0.0,  50.0))
+            reg_alpha  = float(np.clip(reg_alpha, 0.0,  50.0))
+            reg_lambda = float(np.clip(reg_lambda, 0.05, 200.0))
+            lr         = float(np.clip(lr,        0.005, 0.10))
+        
+            # ---- bynode support check (defensive across xgb versions) ----
             try:
                 _supports_bynode = ("colsample_bynode" in XGBClassifier().get_xgb_params())
             except Exception:
                 _supports_bynode = False
+        
             node_key = "colsample_bynode" if _supports_bynode else "colsample_bylevel"
             node_val = float(bp.get("colsample_bynode", bp.get("colsample_bylevel", 0.85)))
+            node_val = float(np.clip(node_val, 0.40, 0.90))
         
+            # ---- final stabilized updates ----
             updates = {
                 **STABLE,
         
                 # force lossguide leaf growth
                 "max_depth": 0,
-                "max_leaves": int(min(leaf_cap, int(bp.get("max_leaves", leaf_cap)))),
+                "max_leaves": int(np.clip(int(bp.get("max_leaves", leaf_cap)), 16, leaf_cap)),
         
-                "min_child_weight": float(min_child),
-                "gamma": float(gamma),
-                "reg_alpha": float(max(0.0, float(bp.get("reg_alpha", 0.0)))),
-                "reg_lambda": float(reg_lambda),
+                "min_child_weight": min_child,
+                "gamma": gamma,
+                "reg_alpha": reg_alpha,
+                "reg_lambda": reg_lambda,
         
-                "learning_rate": float(lr),
+                "learning_rate": lr,
         
-                "subsample": float(min(0.90, float(bp.get("subsample", 0.85)))),
-                "colsample_bytree": float(min(0.90, float(bp.get("colsample_bytree", 0.85)))),
-                node_key: float(min(0.90, node_val)),
+                "subsample": float(np.clip(float(bp.get("subsample", 0.85)), 0.55, 0.90)),
+                "colsample_bytree": float(np.clip(float(bp.get("colsample_bytree", 0.85)), 0.55, 0.90)),
+                node_key: node_val,
         
-                "max_bin": int(min(384, int(bp.get("max_bin", 256)))),
+                "max_bin": int(np.clip(int(bp.get("max_bin", 256)), 128, 384)),
             }
         
             bp.update(updates)
         
-            # remove unsafe/managed params (and predictor) for training
+            # ---- remove unsafe/managed params (and predictor) for training ----
             for k in (
                 "predictor", "eval_metric", "_estimator_type", "response_method",
                 "n_estimators", "n_jobs", "scale_pos_weight",
@@ -12048,12 +12069,49 @@ def train_sharp_model_from_bq(
         
         # ================= Adaptive stabilize (NOW that probe stats exist) =================
         mode = "normal"
-        if (best_iter is not None and int(best_iter) <= 1) or (spread_std_raw < 0.01):
+        
+        # --- thresholds you can tune per sport/market ---
+        COLLAPSE_STD_HARD   = 0.010  # truly flat ~ all 0.50
+        COLLAPSE_STD_SOFT   = 0.040  # too compressed to rank well
+        SPREAD_STD_TIGHT    = 0.200
+        EXTREME_FRAC_TIGHT  = 0.250
+        
+        # ES-fold AUC on X_va_es (already computed above)
+        auc_es = float(auc_va_es) if np.isfinite(auc_va_es) else np.nan
+        
+        best_iter_i = None
+        try:
+            best_iter_i = int(best_iter) if best_iter is not None else None
+        except Exception:
+            best_iter_i = None
+        
+        # -------------------------
+        # 1) Hard collapse / under-capacity => LOOSEN (strong)
+        #    Trigger if predictions are basically flat OR ES immediately stops at 0/1 trees.
+        # -------------------------
+        if (spread_std_raw < COLLAPSE_STD_HARD) or (best_iter_i is not None and best_iter_i <= 1 and spread_std_raw < COLLAPSE_STD_SOFT):
             mode = "loosen"
-        elif (spread_std_raw > 0.20) or (extreme_frac_raw > 0.25):
+        
+        # -------------------------
+        # 2) Soft collapse => LOOSEN_SOFT
+        #    Predictions too tight AND ES AUC isn't decent (or missing).
+        # -------------------------
+        elif (spread_std_raw < COLLAPSE_STD_SOFT) and (not np.isfinite(auc_es) or auc_es < 0.53):
+            mode = "loosen_soft"
+        
+        # -------------------------
+        # 3) Over-confident / too many extremes => TIGHTEN
+        # -------------------------
+        elif (spread_std_raw > SPREAD_STD_TIGHT) or (extreme_frac_raw > EXTREME_FRAC_TIGHT):
             mode = "tighten"
         
-        st.write({"regularization_mode": mode})
+        st.write({
+            "regularization_mode": mode,
+            "spread_std_raw": float(spread_std_raw),
+            "extreme_frac_raw": float(extreme_frac_raw),
+            "auc_va_es": (None if not np.isfinite(auc_es) else float(auc_es)),
+            "best_iter": (None if best_iter_i is None else int(best_iter_i)),
+        })
         
         best_auc_params = _stabilize(best_auc_params, mode=mode, leaf_cap=128)
         best_ll_params  = _stabilize(best_ll_params,  mode=mode, leaf_cap=128)
