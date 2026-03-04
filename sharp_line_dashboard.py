@@ -12067,43 +12067,36 @@ def train_sharp_model_from_bq(
             "auc_va_es": float(auc_va),
         })
         
+      
+
         # ================= Adaptive stabilize (NOW that probe stats exist) =================
         mode = "normal"
         
-        # --- thresholds you can tune per sport/market ---
-        COLLAPSE_STD_HARD   = 0.010  # truly flat ~ all 0.50
-        COLLAPSE_STD_SOFT   = 0.040  # too compressed to rank well
-        SPREAD_STD_TIGHT    = 0.200
-        EXTREME_FRAC_TIGHT  = 0.250
+        COLLAPSE_STD_HARD   = 0.01
+        COLLAPSE_STD_SOFT   = 0.04
+        AUC_ES_GOOD         = 0.56   # tune per sport/market
+        SPREAD_STD_TIGHT    = 0.20
+        EXTREME_FRAC_TIGHT  = 0.25
         
-        # ES-fold AUC on X_va_es (already computed above)
-        
+        best_iter_i = (int(best_iter) if best_iter is not None else None)
         auc_es = float(auc_va) if ("auc_va" in locals() and np.isfinite(auc_va)) else np.nan
-  
         
-        best_iter_i = None
-        try:
-            best_iter_i = int(best_iter) if best_iter is not None else None
-        except Exception:
-            best_iter_i = None
+        collapsed_hard = (spread_std_raw < COLLAPSE_STD_HARD)
+        collapsed_soft = (spread_std_raw < COLLAPSE_STD_SOFT)
         
-        # -------------------------
-        # 1) Hard collapse / under-capacity => LOOSEN (strong)
-        #    Trigger if predictions are basically flat OR ES immediately stops at 0/1 trees.
-        # -------------------------
-        if (spread_std_raw < COLLAPSE_STD_HARD) or (best_iter_i is not None and best_iter_i <= 1 and spread_std_raw < COLLAPSE_STD_SOFT):
+        # 1) Hard collapse => loosen no matter what
+        if collapsed_hard:
             mode = "loosen"
         
-        # -------------------------
-        # 2) Soft collapse => LOOSEN_SOFT
-        #    Predictions too tight AND ES AUC isn't decent (or missing).
-        # -------------------------
-        elif (spread_std_raw < COLLAPSE_STD_SOFT) and (not np.isfinite(auc_es) or auc_es < 0.53):
-            mode = "loosen_soft"
+        # 2) Soft collapse => loosen only if ES AUC isn't already good
+        elif collapsed_soft and (not np.isfinite(auc_es) or auc_es < AUC_ES_GOOD):
+            mode = "loosen"
         
-        # -------------------------
-        # 3) Over-confident / too many extremes => TIGHTEN
-        # -------------------------
+        # 3) Early-stop at iter<=1 is only a supporting signal (don’t loosen on it alone)
+        elif (best_iter_i is not None and best_iter_i <= 1) and (not np.isfinite(auc_es) or auc_es < AUC_ES_GOOD):
+            mode = "loosen"
+        
+        # 4) Over-confident/extremes => tighten
         elif (spread_std_raw > SPREAD_STD_TIGHT) or (extreme_frac_raw > EXTREME_FRAC_TIGHT):
             mode = "tighten"
         
@@ -12111,12 +12104,14 @@ def train_sharp_model_from_bq(
             "regularization_mode": mode,
             "spread_std_raw": float(spread_std_raw),
             "extreme_frac_raw": float(extreme_frac_raw),
-            "auc_va_es": (None if not np.isfinite(auc_es) else float(auc_es)),
-            "best_iter": (None if best_iter_i is None else int(best_iter_i)),
+            "auc_es": (None if not np.isfinite(auc_es) else float(auc_es)),
+            "best_iter": best_iter_i,
         })
         
         best_auc_params = _stabilize(best_auc_params, mode=mode, leaf_cap=128)
         best_ll_params  = _stabilize(best_ll_params,  mode=mode, leaf_cap=128)
+                
+
         
         # -------------------------
         # Phase B: Final deep refit (NO early stopping) ✅ keep these models
