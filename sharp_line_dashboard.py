@@ -12077,7 +12077,9 @@ def train_sharp_model_from_bq(
         EXTREME_FRAC_TIGHT  = 0.250
         
         # ES-fold AUC on X_va_es (already computed above)
-        auc_es = float(auc_va_es) if np.isfinite(auc_va_es) else np.nan
+        
+        auc_es = float(auc_va) if ("auc_va" in locals() and np.isfinite(auc_va)) else np.nan
+  
         
         best_iter_i = None
         try:
