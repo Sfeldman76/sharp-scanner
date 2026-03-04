@@ -12051,22 +12051,29 @@ def train_sharp_model_from_bq(
         auc_va_auc = float(roc_auc_score(y_va_es.astype(int), p_va_auc, sample_weight=w_va_es))
         auc_va_ll  = float(roc_auc_score(y_va_es.astype(int), p_va_ll,  sample_weight=w_va_es))
         
-        # Use best ES AUC for gating decisions
-        auc_va_es = max(auc_va_auc, auc_va_ll)
+        # --- Choose ONE "gate probe" and use it consistently everywhere ---
+        # tie-breaker: prefer ll if essentially equal (often more stable)
+        EPS = 1e-6
+        use_ll = (auc_va_ll > auc_va_auc + EPS) or (abs(auc_va_ll - auc_va_auc) <= EPS)
         
-        # Use the SAME probs for spread/extremes diagnostics (pick the probe you gated with)
-        p_va_diag = p_va_auc if (auc_va_auc >= auc_va_ll) else p_va_ll
+        probe_used   = "ll" if use_ll else "auc"
+        p_va_diag    = p_va_ll if use_ll else p_va_auc
+        auc_va_es    = auc_va_ll if use_ll else auc_va_auc
+        probe_for_it = deep_ll if use_ll else deep_auc
+        
+        # Diagnostics from the same probe
         spread_std_raw   = float(np.std(p_va_diag))
         extreme_frac_raw = float(((p_va_diag < 0.35) | (p_va_diag > 0.65)).mean())
         
-        # Best iteration should also come from the same probe you gated with
-        probe_for_iter = deep_auc if (auc_va_auc >= auc_va_ll) else deep_ll
-        best_iter = getattr(probe_for_iter, "best_iteration", None)
-        cap_hit   = bool(best_iter is not None and int(best_iter) >= int(0.7 * PROBE_N_EST))
+        best_iter = getattr(probe_for_it, "best_iteration", None)
+        if best_iter is None:
+            best_iter = getattr(probe_for_it, "best_iteration_", None)
+        
+        cap_hit = bool(best_iter is not None and int(best_iter) >= int(0.7 * PROBE_N_EST))
         
         st.write({
             "best_iter_probe": (None if best_iter is None else int(best_iter)),
-            "probe_used": ("auc" if (auc_va_auc >= auc_va_ll) else "ll"),
+            "probe_used": probe_used,
             "probe_ntrees_auc": int(nt_auc),
             "probe_ntrees_ll": int(nt_ll),
             "final_ntrees_auc": int(FINAL_NTREES_AUC),
@@ -12089,31 +12096,28 @@ def train_sharp_model_from_bq(
         
         COLLAPSE_STD_HARD   = 0.01
         COLLAPSE_STD_SOFT   = 0.04
-        AUC_ES_GOOD         = 0.56   # tune per sport/market
+        AUC_ES_GOOD         = 0.56
         SPREAD_STD_TIGHT    = 0.20
         EXTREME_FRAC_TIGHT  = 0.25
         
         best_iter_i = (int(best_iter) if best_iter is not None else None)
-        auc_es = float(auc_va_es) if np.isfinite(auc_va_es) else np.nan
+        auc_es      = float(auc_va_es) if np.isfinite(auc_va_es) else np.nan
+        auc_good    = (np.isfinite(auc_es) and auc_es >= AUC_ES_GOOD)
         
-        collapsed_hard = (spread_std_raw < COLLAPSE_STD_HARD)
-        collapsed_soft = (spread_std_raw < COLLAPSE_STD_SOFT)
+        collapse_hard = (spread_std_raw < COLLAPSE_STD_HARD)
+        collapse_soft = (spread_std_raw < COLLAPSE_STD_SOFT)
         
-        # 1) Hard collapse => loosen no matter what
-        if collapsed_hard:
+        # Only loosen if collapse AND ES AUC is NOT good
+        if (collapse_hard or collapse_soft) and (not auc_good):
             mode = "loosen"
         
-        # 2) Soft collapse => loosen only if ES AUC isn't already good
-        elif collapsed_soft and (not np.isfinite(auc_es) or auc_es < AUC_ES_GOOD):
-            mode = "loosen"
-        
-        # 3) Early-stop at iter<=1 is only a supporting signal (don’t loosen on it alone)
-        elif (best_iter_i is not None and best_iter_i <= 1) and (not np.isfinite(auc_es) or auc_es < AUC_ES_GOOD):
-            mode = "loosen"
-        
-        # 4) Over-confident/extremes => tighten
+        # Tighten if too extreme / too spread
         elif (spread_std_raw > SPREAD_STD_TIGHT) or (extreme_frac_raw > EXTREME_FRAC_TIGHT):
             mode = "tighten"
+        
+        # best_iter tiny is only a loosen trigger if ES AUC is bad
+        elif (best_iter_i is not None and best_iter_i <= 2) and (not auc_good):
+            mode = "loosen"
         
         st.write({
             "regularization_mode": mode,
