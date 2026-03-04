@@ -11860,40 +11860,87 @@ def train_sharp_model_from_bq(
             return
         
         # ---------------- stabilize best params (regularization-first) ----------------
-        STABLE = dict(objective="binary:logistic", tree_method="hist", grow_policy="lossguide", max_delta_step=0.5)
+        # Key fixes vs your block:
+        #  1) Base-stabilize ONCE ("normal") BEFORE probe
+        #  2) Run ES probe to get spread_std/extreme_frac/best_iter
+        #  3) Choose mode ("loosen"/"tighten"/"normal")
+        #  4) Re-stabilize ONCE with mode (no duplicate stabilize calls)
+        #  5) Use feature_cols_sel (selected) everywhere; never touch X_full[...] here
+        #  6) Stamp feature names using feature_cols_sel (not feature_cols, not X_full[train_all_idx])
         
-        def _stabilize(best_params: dict, leaf_cap: int = 128) -> dict:
+        STABLE = dict(
+            objective="binary:logistic",
+            tree_method="hist",
+            grow_policy="lossguide",
+            max_delta_step=0.5,
+        )
+        
+        def _stabilize(best_params: dict, *, mode: str = "normal", leaf_cap: int = 128) -> dict:
             bp = dict(best_params or {})
         
+            # defaults
+            min_child  = float(bp.get("min_child_weight", 2.0))
+            gamma      = float(bp.get("gamma", 0.0))
+            reg_lambda = float(bp.get("reg_lambda", 1.0))
+            lr         = float(bp.get("learning_rate", 0.03))
+        
+            if mode == "loosen":
+                min_child  = max(1.0,  min_child * 0.25)
+                gamma      = max(0.0,  gamma * 0.25)
+                reg_lambda = max(1.0,  reg_lambda * 0.25)
+                lr         = min(0.07, lr * 1.5)
+        
+            elif mode == "tighten":
+                min_child  = max(10.0, min_child * 2.0)
+                gamma      = max(5.0,  gamma * 2.0)
+                reg_lambda = max(20.0, reg_lambda * 2.0)
+                lr         = min(0.02, lr)
+        
+            # bynode support check (defensive across xgb versions)
             try:
                 _supports_bynode = ("colsample_bynode" in XGBClassifier().get_xgb_params())
             except Exception:
                 _supports_bynode = False
             node_key = "colsample_bynode" if _supports_bynode else "colsample_bylevel"
-            node_val = float(bp.get("colsample_bynode", bp.get("colsample_bylevel", 0.80)))
+            node_val = float(bp.get("colsample_bynode", bp.get("colsample_bylevel", 0.85)))
         
-            bp.update({
+            updates = {
                 **STABLE,
-                "max_depth":         0,
-                "max_leaves":        int(min(leaf_cap, int(bp.get("max_leaves", leaf_cap)))),
-                "min_child_weight":  float(max(12.0, float(bp.get("min_child_weight", 8.0)))),
-                "gamma":             float(max(6.0,  float(bp.get("gamma", 2.0)))),
-                "reg_alpha":         float(max(0.10, float(bp.get("reg_alpha", 0.05)))),
-                "reg_lambda":        float(max(15.0, float(bp.get("reg_lambda", 6.0)))),
-                "subsample":         float(min(0.80, float(bp.get("subsample", 0.85)))),
-                "colsample_bytree":  float(min(0.70, float(bp.get("colsample_bytree", 0.80)))),
-                node_key:            float(min(0.75, node_val)),
-                "max_bin":           int(min(256, int(bp.get("max_bin", 256)))),
-                "learning_rate":     float(min(0.02, float(bp.get("learning_rate", 0.025)))),
-            })
         
-            for k in ("monotone_constraints","interaction_constraints","predictor","eval_metric",
-                      "_estimator_type","response_method","n_estimators","n_jobs","scale_pos_weight"):
+                # force lossguide leaf growth
+                "max_depth": 0,
+                "max_leaves": int(min(leaf_cap, int(bp.get("max_leaves", leaf_cap)))),
+        
+                "min_child_weight": float(min_child),
+                "gamma": float(gamma),
+                "reg_alpha": float(max(0.0, float(bp.get("reg_alpha", 0.0)))),
+                "reg_lambda": float(reg_lambda),
+        
+                "learning_rate": float(lr),
+        
+                "subsample": float(min(0.90, float(bp.get("subsample", 0.85)))),
+                "colsample_bytree": float(min(0.90, float(bp.get("colsample_bytree", 0.85)))),
+                node_key: float(min(0.90, node_val)),
+        
+                "max_bin": int(min(384, int(bp.get("max_bin", 256)))),
+            }
+        
+            bp.update(updates)
+        
+            # remove unsafe/managed params (and predictor) for training
+            for k in (
+                "predictor", "eval_metric", "_estimator_type", "response_method",
+                "n_estimators", "n_jobs", "scale_pos_weight",
+                "monotone_constraints", "interaction_constraints",
+            ):
                 bp.pop(k, None)
+        
             return bp
         
-        best_auc_params = _stabilize(best_auc_params, leaf_cap=128)
-        best_ll_params  = _stabilize(best_ll_params,  leaf_cap=128)
+        
+        # ===== Base stabilize first (normal) =====
+        best_auc_params = _stabilize(best_auc_params, mode="normal", leaf_cap=128)
+        best_ll_params  = _stabilize(best_ll_params,  mode="normal", leaf_cap=128)
         
         # ================== ES probe on chosen ES fold (deterministic) ===================
         tr_es_rel, va_es_rel = np.asarray(tr_es_rel), np.asarray(va_es_rel)
@@ -11913,32 +11960,42 @@ def train_sharp_model_from_bq(
         deep_auc = XGBClassifier(**{**train_kwargs, **best_auc_params})
         deep_ll  = XGBClassifier(**{**train_kwargs, **best_ll_params})
         
-        PROBE_N_EST = int(DEEP_N_EST_CAP)
-        DEEP_MAX_BIN_I = int(DEEP_MAX_BIN)
+        PROBE_N_EST     = int(DEEP_N_EST_CAP)
+        DEEP_MAX_BIN_I  = int(DEEP_MAX_BIN)
         
         deep_auc.set_params(
             n_estimators=PROBE_N_EST,
             max_bin=DEEP_MAX_BIN_I,
             n_jobs=refit_threads,
-            eval_metric=["logloss","auc"],
+            eval_metric=["logloss", "auc"],
             scale_pos_weight=scale_pos_weight,
             random_state=1337, seed=1337,
-            early_stopping_rounds=EARLY_STOP,
+            early_stopping_rounds=int(EARLY_STOP),
         )
         deep_ll.set_params(
             n_estimators=PROBE_N_EST,
             max_bin=DEEP_MAX_BIN_I,
             n_jobs=refit_threads,
-            eval_metric=["logloss","auc"],
+            eval_metric=["logloss", "auc"],
             scale_pos_weight=scale_pos_weight,
             random_state=1337, seed=1337,
-            early_stopping_rounds=EARLY_STOP,
+            early_stopping_rounds=int(EARLY_STOP),
         )
         
-        deep_auc.fit(X_tr_es, y_tr_es, sample_weight=w_tr_es,
-                     eval_set=[(X_va_es, y_va_es)], sample_weight_eval_set=[w_va_es], verbose=False)
-        deep_ll.fit(X_tr_es, y_tr_es, sample_weight=w_tr_es,
-                    eval_set=[(X_va_es, y_va_es)], sample_weight_eval_set=[w_va_es], verbose=False)
+        deep_auc.fit(
+            X_tr_es, y_tr_es,
+            sample_weight=w_tr_es,
+            eval_set=[(X_va_es, y_va_es)],
+            sample_weight_eval_set=[w_va_es],
+            verbose=False,
+        )
+        deep_ll.fit(
+            X_tr_es, y_tr_es,
+            sample_weight=w_tr_es,
+            eval_set=[(X_va_es, y_va_es)],
+            sample_weight_eval_set=[w_va_es],
+            verbose=False,
+        )
         
         def _num_trees_fitted(clf) -> int:
             try:
@@ -11980,15 +12037,33 @@ def train_sharp_model_from_bq(
             "final_ntrees_ll": int(FINAL_NTREES_LL),
             "planned_cap": int(PROBE_N_EST),
             "cap_hit": bool(cap_hit),
-            "raw": {"spread_std": spread_std_raw, "extreme_frac": extreme_frac_raw,
-                    "y_bar": float(np.mean(y_va_es)), "p_bar": float(np.mean(p_va_raw))},
+            "raw": {
+                "spread_std": float(spread_std_raw),
+                "extreme_frac": float(extreme_frac_raw),
+                "y_bar": float(np.mean(y_va_es)),
+                "p_bar": float(np.mean(p_va_raw)),
+            },
             "auc_va_es": float(auc_va),
         })
+        
+        # ================= Adaptive stabilize (NOW that probe stats exist) =================
+        mode = "normal"
+        if (best_iter is not None and int(best_iter) <= 1) or (spread_std_raw < 0.01):
+            mode = "loosen"
+        elif (spread_std_raw > 0.20) or (extreme_frac_raw > 0.25):
+            mode = "tighten"
+        
+        st.write({"regularization_mode": mode})
+        
+        best_auc_params = _stabilize(best_auc_params, mode=mode, leaf_cap=128)
+        best_ll_params  = _stabilize(best_ll_params,  mode=mode, leaf_cap=128)
         
         # -------------------------
         # Phase B: Final deep refit (NO early stopping) ✅ keep these models
         # -------------------------
-        FEATS_FOR_MONO = list(feature_cols)
+        # IMPORTANT: use SELECTED feature list for monotones and stamping
+        FEATS_FOR_MONO = list(feature_cols_sel)
+        
         MONO = {
             "Abs_Line_Move_From_Opening": +1,
             "Implied_Prob_Shift": +1,
@@ -12006,7 +12081,7 @@ def train_sharp_model_from_bq(
             n_estimators=int(FINAL_NTREES_AUC),
             max_bin=DEEP_MAX_BIN_I,
             n_jobs=refit_threads,
-            eval_metric=["logloss","auc"],
+            eval_metric=["logloss", "auc"],
             scale_pos_weight=scale_pos_weight,
             random_state=1337, seed=1337,
         )
@@ -12014,7 +12089,7 @@ def train_sharp_model_from_bq(
             n_estimators=int(FINAL_NTREES_LL),
             max_bin=DEEP_MAX_BIN_I,
             n_jobs=refit_threads,
-            eval_metric=["logloss","auc"],
+            eval_metric=["logloss", "auc"],
             scale_pos_weight=scale_pos_weight,
             random_state=1337, seed=1337,
         )
@@ -12023,23 +12098,28 @@ def train_sharp_model_from_bq(
             final_auc.set_params(monotone_constraints=mono_str)
             final_ll.set_params(monotone_constraints=mono_str)
         
-        # Fit on aligned X_train/y_train/w_train
+        # Fit on aligned X_train_sel/y_train/w_train
         final_auc.fit(X_train_sel, y_train, sample_weight=w_train, verbose=False)
         final_ll.fit( X_train_sel, y_train, sample_weight=w_train, verbose=False)
         
         model_auc     = final_auc
         model_logloss = final_ll
+        
         # ---- Stamp feature names on boosters so we don't get f0,f1,... ----
         try:
-            n_model = int(getattr(model_auc, "n_features_in_", X_full[train_all_idx].shape[1]))
-            if len(feature_cols) == n_model:
-                real_names = list(map(str, feature_cols))
+            real_names = list(map(str, feature_cols_sel))
+            n_model = int(getattr(model_auc, "n_features_in_", len(real_names)))
+            if len(real_names) == n_model:
                 model_auc.feature_names_in_ = np.asarray(real_names, dtype=object)
                 model_logloss.feature_names_in_ = np.asarray(real_names, dtype=object)
-                try: model_auc.get_booster().feature_names = real_names
-                except Exception: pass
-                try: model_logloss.get_booster().feature_names = real_names
-                except Exception: pass
+                try:
+                    model_auc.get_booster().feature_names = real_names
+                except Exception:
+                    pass
+                try:
+                    model_logloss.get_booster().feature_names = real_names
+                except Exception:
+                    pass
         except Exception:
             pass
         # -----------------------------------------
