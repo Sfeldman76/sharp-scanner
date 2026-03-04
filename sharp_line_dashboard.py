@@ -12037,21 +12037,36 @@ def train_sharp_model_from_bq(
         def _smooth_final_ntrees(n: int, *, mult: float = 1.6, floor: int = 240, ceil: int = 2000) -> int:
             return int(np.clip(int(round(n * mult)), floor, ceil))
         
+        # --- Probe-derived tree counts ---
         nt_auc = _best_ntrees_from_es(deep_auc, floor=120, ceil=int(DEEP_N_EST_CAP))
         nt_ll  = _best_ntrees_from_es(deep_ll,  floor=120, ceil=int(DEEP_N_EST_CAP))
         
         FINAL_NTREES_AUC = _smooth_final_ntrees(nt_auc, mult=1.6, floor=240, ceil=int(DEEP_N_EST_CAP))
         FINAL_NTREES_LL  = _smooth_final_ntrees(nt_ll,  mult=1.6, floor=240, ceil=int(DEEP_N_EST_CAP))
         
-        p_va_raw = np.clip(deep_auc.predict_proba(X_va_es)[:, 1], 1e-12, 1 - 1e-12)
-        auc_va   = float(roc_auc_score(y_va_es.astype(int), p_va_raw, sample_weight=w_va_es))
-        spread_std_raw   = float(np.std(p_va_raw))
-        extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
-        best_iter        = getattr(deep_auc, "best_iteration", None)
-        cap_hit          = bool(best_iter is not None and int(best_iter) >= int(0.7 * PROBE_N_EST))
+        # --- ES fold preds from BOTH probes ---
+        p_va_auc = np.clip(deep_auc.predict_proba(X_va_es)[:, 1], 1e-12, 1 - 1e-12)
+        p_va_ll  = np.clip(deep_ll.predict_proba(X_va_es)[:, 1], 1e-12, 1 - 1e-12)
+        
+        auc_va_auc = float(roc_auc_score(y_va_es.astype(int), p_va_auc, sample_weight=w_va_es))
+        auc_va_ll  = float(roc_auc_score(y_va_es.astype(int), p_va_ll,  sample_weight=w_va_es))
+        
+        # Use best ES AUC for gating decisions
+        auc_va_es = max(auc_va_auc, auc_va_ll)
+        
+        # Use the SAME probs for spread/extremes diagnostics (pick the probe you gated with)
+        p_va_diag = p_va_auc if (auc_va_auc >= auc_va_ll) else p_va_ll
+        spread_std_raw   = float(np.std(p_va_diag))
+        extreme_frac_raw = float(((p_va_diag < 0.35) | (p_va_diag > 0.65)).mean())
+        
+        # Best iteration should also come from the same probe you gated with
+        probe_for_iter = deep_auc if (auc_va_auc >= auc_va_ll) else deep_ll
+        best_iter = getattr(probe_for_iter, "best_iteration", None)
+        cap_hit   = bool(best_iter is not None and int(best_iter) >= int(0.7 * PROBE_N_EST))
         
         st.write({
-            "best_iter_probe_auc": (None if best_iter is None else int(best_iter)),
+            "best_iter_probe": (None if best_iter is None else int(best_iter)),
+            "probe_used": ("auc" if (auc_va_auc >= auc_va_ll) else "ll"),
             "probe_ntrees_auc": int(nt_auc),
             "probe_ntrees_ll": int(nt_ll),
             "final_ntrees_auc": int(FINAL_NTREES_AUC),
@@ -12062,13 +12077,13 @@ def train_sharp_model_from_bq(
                 "spread_std": float(spread_std_raw),
                 "extreme_frac": float(extreme_frac_raw),
                 "y_bar": float(np.mean(y_va_es)),
-                "p_bar": float(np.mean(p_va_raw)),
+                "p_bar": float(np.mean(p_va_diag)),
             },
-            "auc_va_es": float(auc_va),
+            "auc_va_auc": float(auc_va_auc),
+            "auc_va_ll": float(auc_va_ll),
+            "auc_va_es": float(auc_va_es),
         })
         
-      
-
         # ================= Adaptive stabilize (NOW that probe stats exist) =================
         mode = "normal"
         
@@ -12079,7 +12094,7 @@ def train_sharp_model_from_bq(
         EXTREME_FRAC_TIGHT  = 0.25
         
         best_iter_i = (int(best_iter) if best_iter is not None else None)
-        auc_es = float(auc_va) if ("auc_va" in locals() and np.isfinite(auc_va)) else np.nan
+        auc_es = float(auc_va_es) if np.isfinite(auc_va_es) else np.nan
         
         collapsed_hard = (spread_std_raw < COLLAPSE_STD_HARD)
         collapsed_soft = (spread_std_raw < COLLAPSE_STD_SOFT)
