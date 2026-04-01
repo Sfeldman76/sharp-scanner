@@ -10081,7 +10081,7 @@ def train_sharp_model_from_bq(
         # === Labels ===
         df_market = df_market[df_market["SHARP_HIT_BOOL"].isin([0, 1])]
         if df_market.empty or df_market["SHARP_HIT_BOOL"].nunique() < 2:
-            status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
+            status.warning(f"⚠️ Not enough edge-label variety for {str(market).upper()} — skipping.")
             pb.progress(min(100, max(0, pct)))
             continue
         
