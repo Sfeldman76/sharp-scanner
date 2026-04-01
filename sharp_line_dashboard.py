@@ -10789,7 +10789,7 @@ def train_sharp_model_from_bq(
         df_market = _build_edge_target(df_market, edge_threshold=float(kwargs.get("edge_threshold", 0.01)))
         df_market = df_market[df_market["TARGET_EDGE_BOOL"].isin([0, 1])].copy()
         if df_market.empty or df_market["TARGET_EDGE_BOOL"].nunique() < 2:
-            status.warning(f"⚠️ Not enough edge-label variety for {mkt.upper()} — skipping.")
+            status.warning(f"⚠️ Not enough edge-label variety for {str(market).upper()} — skipping.")
             pb.progress(min(100, max(0, pct)))
             continue
 
