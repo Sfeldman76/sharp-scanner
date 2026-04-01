@@ -11296,7 +11296,7 @@ def train_sharp_model_from_bq(
         fair_prob_anchor, edge_anchor_name = _choose_edge_anchor(df_market)
         df_market["Fair_Prob_Anchor"] = fair_prob_anchor
         df_market["Prob_Edge_Anchor"] = df_market["Fair_Prob_Anchor"] - df_market["Market_Implied_Prob"]
-        
+        df_market["EDGE_TARGET_KIND"] = edge_anchor_name
         # tunable threshold; small positive edge to avoid pure noise labels
         EDGE_THRESHOLD = 0.01
         
@@ -11324,35 +11324,35 @@ def train_sharp_model_from_bq(
             f"threshold={EDGE_THRESHOLD:.3f}, rows={len(df_valid)}"
         )
                 
-            # 2) build X_full ONCE from masked frame (training truth)
-            def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-                out = df.reindex(columns=cols, fill_value=np.nan).copy()
-                for c in cols:
-                    col = out[c]
-            
-                    # bool -> float
-                    if is_bool_dtype(col):
-                        out[c] = col.astype("float32")
-                        continue
-            
-                    # objects/strings/categories -> numeric
-                    if is_object_dtype(col) or is_string_dtype(col) or str(col.dtype).startswith("category"):
-                        out[c] = col.replace({
-                            "True": 1, "False": 0, "true": 1, "false": 0,
-                            True: 1, False: 0,
-                            "": np.nan, "none": np.nan, "None": np.nan,
-                            "NA": np.nan, "NaN": np.nan
-                        })
-                        out[c] = pd.to_numeric(out[c], errors="coerce")
-                        continue
-            
-                    out[c] = pd.to_numeric(col, errors="coerce")
-            
-                return (
-                    out.replace([np.inf, -np.inf], np.nan)
-                       .fillna(0.0)
-                       .astype("float32")
-                )
+        # 2) build X_full ONCE from masked frame (training truth)
+        def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+            out = df.reindex(columns=cols, fill_value=np.nan).copy()
+            for c in cols:
+                col = out[c]
+        
+                # bool -> float
+                if is_bool_dtype(col):
+                    out[c] = col.astype("float32")
+                    continue
+        
+                # objects/strings/categories -> numeric
+                if is_object_dtype(col) or is_string_dtype(col) or str(col.dtype).startswith("category"):
+                    out[c] = col.replace({
+                        "True": 1, "False": 0, "true": 1, "false": 0,
+                        True: 1, False: 0,
+                        "": np.nan, "none": np.nan, "None": np.nan,
+                        "NA": np.nan, "NaN": np.nan
+                    })
+                    out[c] = pd.to_numeric(out[c], errors="coerce")
+                    continue
+        
+                out[c] = pd.to_numeric(col, errors="coerce")
+        
+            return (
+                out.replace([np.inf, -np.inf], np.nan)
+                   .fillna(0.0)
+                   .astype("float32")
+            )
             
         X_df = _to_numeric_block(df_valid, feature_cols)  # DataFrame float32
         # Arrow-safe colnames
