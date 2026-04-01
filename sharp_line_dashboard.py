@@ -9212,10 +9212,10 @@ def train_sharp_model_from_bq(
                .merge(finals_slim, on="Merge_Key_Short", how="left"))
 
     with tmr("book path reliability"):
-        mkt = df_bt["Market"]  # already normalized
-        v   = pd.to_numeric(df_bt["Value"], errors="coerce")
-    
-        canon_mask = (mkt != "spreads") | (v < 0)   # spreads: fav side only
+        mkt_series = df_bt["Market"]  # already normalized
+        v = pd.to_numeric(df_bt["Value"], errors="coerce")
+        
+        canon_mask = (mkt_series != "spreads") | (v < 0)
     
         df_bt = add_book_path_reliability_features(
             df=df_bt,
