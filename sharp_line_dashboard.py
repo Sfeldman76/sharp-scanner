@@ -8760,145 +8760,6 @@ def train_sharp_model_from_bq(
     return_artifacts: bool = False,
     **kwargs: Any,
 ) -> Optional[Dict[str, Any]]:
-   
-   
-    def _info(msg: str) -> None:
-        try:
-            st.info(msg)
-        except Exception:
-            log_func(msg)
-
-    def _warn(msg: str) -> None:
-        try:
-            st.warning(msg)
-        except Exception:
-            log_func(msg)
-
-    def _error(msg: str) -> None:
-        try:
-            st.error(msg)
-        except Exception:
-            log_func(msg)
-
-    def _norm_lower(s: pd.Series) -> pd.Series:
-        return s.astype(str).str.lower().str.strip()
-
-    def _norm_upper(s: pd.Series) -> pd.Series:
-        return s.astype(str).str.upper().str.strip()
-
-    def _auc_safe(y_true: np.ndarray, p: np.ndarray) -> float:
-        try:
-            y_true = np.asarray(y_true, int)
-            p = np.asarray(p, float)
-            if np.unique(y_true).size < 2:
-                return float("nan")
-            return float(roc_auc_score(y_true, np.clip(p, 1e-6, 1 - 1e-6)))
-        except Exception:
-            return float("nan")
-
-    def _american_to_implied_prob(odds: pd.Series) -> pd.Series:
-        o = pd.to_numeric(odds, errors="coerce")
-        return pd.Series(
-            np.where(o < 0, (-o) / ((-o) + 100.0), 100.0 / (o + 100.0)),
-            index=odds.index,
-            dtype="float64",
-        )
-
-    def _pick_latest_by_game_side(df_in: pd.DataFrame) -> pd.DataFrame:
-        cols = [c for c in ["Game_Key", "Outcome_Norm", "Snapshot_Timestamp"] if c in df_in.columns]
-        if len(cols) < 3:
-            return df_in.copy()
-        tmp = df_in.copy()
-        tmp["Snapshot_Timestamp"] = pd.to_datetime(tmp["Snapshot_Timestamp"], errors="coerce", utc=True)
-        return (
-            tmp.sort_values(["Game_Key", "Outcome_Norm", "Snapshot_Timestamp"]) 
-               .groupby(["Game_Key", "Outcome_Norm"], as_index=False)
-               .tail(1)
-               .copy()
-        )
-
-    def _build_edge_target(df_in: pd.DataFrame, *, edge_threshold: float = 0.01) -> pd.DataFrame:
-        df = df_in.copy()
-        df["Odds_Price"] = pd.to_numeric(df.get("Odds_Price", np.nan), errors="coerce")
-        df["Market_Implied_Prob"] = _american_to_implied_prob(df["Odds_Price"])
-
-        # preferred anchors, in order of trust
-        if "Closing_Implied_Prob" in df.columns:
-            fair_anchor = pd.to_numeric(df["Closing_Implied_Prob"], errors="coerce")
-        elif "Truth_Fair_Prob_at_RecLine" in df.columns:
-            fair_anchor = pd.to_numeric(df["Truth_Fair_Prob_at_RecLine"], errors="coerce")
-        else:
-            fair_anchor = pd.Series(np.nan, index=df.index, dtype="float64")
-
-        # fallback for spreads/totals when cover-prob style anchor exists
-        if "Outcome_Cover_Prob" in df.columns:
-            fair_anchor = fair_anchor.fillna(pd.to_numeric(df["Outcome_Cover_Prob"], errors="coerce"))
-
-        # fallback for h2h when sharp fair prob exists
-        if "Truth_Fair_Prob_at_SharpLine" in df.columns:
-            fair_anchor = fair_anchor.fillna(pd.to_numeric(df["Truth_Fair_Prob_at_SharpLine"], errors="coerce"))
-
-        df["Fair_Prob_Anchor"] = fair_anchor.clip(1e-6, 1 - 1e-6)
-        df["Prob_Edge_Anchor"] = df["Fair_Prob_Anchor"] - df["Market_Implied_Prob"]
-
-        # CLV proxy if closing implied exists
-        if "Closing_Implied_Prob" in df.columns:
-            close_p = pd.to_numeric(df["Closing_Implied_Prob"], errors="coerce")
-            df["CLV_Prob_Delta"] = close_p - df["Market_Implied_Prob"]
-            df["CLV_Positive_Flag"] = (df["CLV_Prob_Delta"] > 0).astype("Int64")
-        else:
-            df["CLV_Prob_Delta"] = np.nan
-            df["CLV_Positive_Flag"] = pd.Series(pd.NA, index=df.index, dtype="Int64")
-
-        # target: prefer close-based pricing target when possible, else fair-anchor edge
-        if df["CLV_Positive_Flag"].notna().sum() > max(200, int(0.1 * len(df))):
-            df["TARGET_EDGE_BOOL"] = df["CLV_Positive_Flag"].astype("Int64")
-            df["EDGE_TARGET_KIND"] = "clv_positive_flag"
-        else:
-            df["TARGET_EDGE_BOOL"] = (df["Prob_Edge_Anchor"] >= edge_threshold).astype("Int64")
-            df["EDGE_TARGET_KIND"] = "fair_prob_anchor"
-
-        return df
-
-    def _simulate_holdout_bets(df_eval: pd.DataFrame, min_edge: float = 0.01) -> Dict[str, float]:
-        out = df_eval.copy()
-        out["Odds_Price"] = pd.to_numeric(out.get("Odds_Price", np.nan), errors="coerce")
-        out["Pred_Prob"] = pd.to_numeric(out.get("Pred_Prob", np.nan), errors="coerce")
-        out["Market_Implied_Prob"] = pd.to_numeric(out.get("Market_Implied_Prob", np.nan), errors="coerce")
-        out["Pred_Edge"] = out["Pred_Prob"] - out["Market_Implied_Prob"]
-        out["bet_flag"] = (out["Pred_Edge"] >= min_edge).astype(int)
-
-        odds = out["Odds_Price"].to_numpy(dtype=float)
-        payout = np.where(odds >= 0, odds / 100.0, 100.0 / np.maximum(-odds, 1e-9))
-
-        y_outcome = pd.to_numeric(out.get("SHARP_HIT_BOOL", np.nan), errors="coerce").fillna(0).astype(int).to_numpy()
-        out["unit_profit"] = np.where(
-            out["bet_flag"].to_numpy() == 1,
-            np.where(y_outcome == 1, payout, -1.0),
-            0.0,
-        )
-
-        bets = out[out["bet_flag"] == 1].copy()
-        if bets.empty:
-            return {
-                "bets_n": 0.0,
-                "roi_flat_1u": float("nan"),
-                "profit_units": 0.0,
-                "bet_hit_rate": float("nan"),
-                "avg_pred_edge": float("nan"),
-                "avg_clv_prob": float("nan"),
-            }
-
-        return {
-            "bets_n": float(len(bets)),
-            "roi_flat_1u": float(pd.to_numeric(bets["unit_profit"], errors="coerce").mean()),
-            "profit_units": float(pd.to_numeric(bets["unit_profit"], errors="coerce").sum()),
-            "bet_hit_rate": float(pd.to_numeric(bets.get("SHARP_HIT_BOOL", np.nan), errors="coerce").mean()),
-            "avg_pred_edge": float(pd.to_numeric(bets["Pred_Edge"], errors="coerce").mean()),
-            "avg_clv_prob": float(pd.to_numeric(bets.get("CLV_Prob_Delta", np.nan), errors="coerce").mean()),
-        }
-    
-    # Work with a single frame going forward
     SPORT_DAYS_BACK = {"NBA": 365, "NFL": 365, "CFL": 45, "WNBA": 45, "MLB": 700, "NCAAF": 365, "NCAAB": 365}
     days_back = SPORT_DAYS_BACK.get(sport.upper(), days_back)
 
@@ -8908,6 +8769,10 @@ def train_sharp_model_from_bq(
     if df.empty:
         st.warning("No rows returned for training after filters.")
         return
+   
+    
+    # Work with a single frame going forward
+    
 
     df_bt = df.copy()
     df_bt['SHARP_HIT_BOOL'] = pd.to_numeric(df_bt['SHARP_HIT_BOOL'], errors='coerce')
@@ -9212,10 +9077,10 @@ def train_sharp_model_from_bq(
                .merge(finals_slim, on="Merge_Key_Short", how="left"))
 
     with tmr("book path reliability"):
-        mkt_series = df_bt["Market"]  # already normalized
-        v = pd.to_numeric(df_bt["Value"], errors="coerce")
-        
-        canon_mask = (mkt_series != "spreads") | (v < 0)
+        mkt = df_bt["Market"]  # already normalized
+        v   = pd.to_numeric(df_bt["Value"], errors="coerce")
+    
+        canon_mask = (mkt != "spreads") | (v < 0)   # spreads: fav side only
     
         df_bt = add_book_path_reliability_features(
             df=df_bt,
@@ -9545,8 +9410,7 @@ def train_sharp_model_from_bq(
         # ===========================
         if mkt == "totals":
             # keep Over only (fine for totals modeling)
-            df_market = df_market[df_market["Outcome"].isin(["over", "under"])].copy()
-
+            df_market = df_market[df_market["Outcome"].astype(str).str.lower().str.strip() == "over"].copy()
         
         elif mkt == "spreads":
             # ✅ keep BOTH favorite & dog rows for training
@@ -9631,18 +9495,15 @@ def train_sharp_model_from_bq(
         
         is_totals = df_market["Market"].eq("totals")
         
-        df_market["Team"] = df_market["Outcome_Norm"].where(~is_totals, "__totals__")
+        df_market["Team"] = (
+            df_market["Outcome_Norm"].where(~is_totals, df_market["Home_Team_Norm"])
+        ).astype(str).str.lower().str.strip()
+        
         df_market["Is_Home"] = np.where(
-            is_totals,
-            0,
-            (df_market["Team"] == df_market["Home_Team_Norm"]).astype(int),
+            is_totals, 1,
+            (df_market["Team"] == df_market["Home_Team_Norm"]).astype(int)
         ).astype(int)
-
-        # Build / refresh EV anchor features if helper exists
-        try:
-            df_market = compute_ev_features_sharp_vs_rec(df_market)
-        except Exception:
-            pass
+        
         # ---------------------------------------------------------
         # Time-safe per-game merges into df_market  (NOTE validate)
         # ---------------------------------------------------------
@@ -10081,7 +9942,7 @@ def train_sharp_model_from_bq(
         # === Labels ===
         df_market = df_market[df_market["SHARP_HIT_BOOL"].isin([0, 1])]
         if df_market.empty or df_market["SHARP_HIT_BOOL"].nunique() < 2:
-            status.warning(f"⚠️ Not enough edge-label variety for {str(market).upper()} — skipping.")
+            status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
             pb.progress(min(100, max(0, pct)))
             continue
         
@@ -10785,64 +10646,11 @@ def train_sharp_model_from_bq(
             ST_lookup, SM_lookup, TM_lookup,
             sport_default=sport_label,   # not 'label'
         )
-        # Edge anchor target
-        df_market = _build_edge_target(df_market, edge_threshold=float(kwargs.get("edge_threshold", 0.01)))
-        df_market = df_market[df_market["TARGET_EDGE_BOOL"].isin([0, 1])].copy()
-        if df_market.empty or df_market["TARGET_EDGE_BOOL"].nunique() < 2:
-            status.warning(f"⚠️ Not enough edge-label variety for {str(market).upper()} — skipping.")
-            pb.progress(min(100, max(0, pct)))
-            continue
-
-        # Build leakage-safe priors off the edge label
-        priors_df = pd.DataFrame()
-        try:
-            df_prior_input = _pick_latest_by_game_side(
-                df_market[[c for c in [
-                    "Game_Key", "Team", "Is_Home", "Snapshot_Timestamp", "Sport", "Game_Start", "TARGET_EDGE_BOOL"
-                ] if c in df_market.columns]].copy()
-            )
-            df_prior_input["Market"] = mkt
-            priors_df = build_team_ats_priors_market_sport(
-                df_prior_input.rename(columns={"TARGET_EDGE_BOOL": "EDGE_BOOL"}),
-                sport=str(df_prior_input["Sport"].iloc[0]) if not df_prior_input.empty else sport,
-                market=mkt,
-                period="reg",
-                team_col="Team",
-                game_col="Game_Key",
-                ts_col="Snapshot_Timestamp",
-                is_home_col="Is_Home",
-                cover_bool_col="EDGE_BOOL",
-                cover_margin_col=None,
-                add_home_away_splits=True,
-                suffix="",
-            )
-            if isinstance(priors_df, pd.DataFrame) and not priors_df.empty:
-                join_cols = [c for c in ["Sport", "Market", "Game_Key", "Team"] if c in priors_df.columns and c in df_market.columns]
-                feat_cols = [c for c in priors_df.columns if c not in join_cols]
-                df_market = df_market.merge(priors_df[join_cols + feat_cols], on=join_cols, how="left", validate="many_to_one")
-        except Exception:
-            priors_df = pd.DataFrame()
 
         book_reliability_map = pd.DataFrame(columns=[
             "Sport", "Market", "Bookmaker", "Book_Reliability_Score", "Book_Reliability_Lift"
         ])
-        try:
-            rel_label_col = "CLV_Positive_Flag" if df_market["CLV_Positive_Flag"].notna().sum() > 50 else "TARGET_EDGE_BOOL"
-            df_rel_in = df_market[["Sport", "Market", "Bookmaker", rel_label_col]].copy()
-            df_rel_in = df_rel_in.rename(columns={rel_label_col: "REL_LABEL"})
-            book_reliability_map = build_book_reliability_map(
-                df_rel_in.rename(columns={"REL_LABEL": "SHARP_HIT_BOOL"}),
-                prior_strength=200.0,
-            )
-            if isinstance(book_reliability_map, pd.DataFrame) and not book_reliability_map.empty:
-                df_market = df_market.merge(
-                    book_reliability_map,
-                    on=["Sport", "Market", "Bookmaker"],
-                    how="left",
-                    validate="many_to_one",
-                )
-        except Exception:
-            pass
+        
         if "st" in globals():
             st.write(
                 "📋 df_market columns BEFORE feature selection:",
@@ -11246,84 +11054,27 @@ def train_sharp_model_from_bq(
             return
         
         # 1) build y + mask FIRST (so X and y always aligned)
-        # 1) build EDGE target + mask FIRST (so X and y always aligned)
-        def _american_to_implied_prob(s: pd.Series) -> pd.Series:
-            x = pd.to_numeric(s, errors="coerce")
-            return pd.Series(
-                np.where(
-                    x < 0,
-                    (-x) / ((-x) + 100.0),
-                    100.0 / (x + 100.0)
-                ),
-                index=s.index,
-                dtype="float64",
-            )
-    
-        def _choose_edge_anchor(df: pd.DataFrame) -> tuple[pd.Series, str]:
-            # 1) preferred: fair prob at current offered line from your existing EV helper
-            if "Truth_Fair_Prob_at_RecLine" in df.columns:
-                s = pd.to_numeric(df["Truth_Fair_Prob_at_RecLine"], errors="coerce")
-                if s.notna().sum() > 25:
-                    return s.clip(0.001, 0.999), "Truth_Fair_Prob_at_RecLine"
-        
-            # 2) spread/total fallback already present in your feature universe
-            if "Outcome_Cover_Prob" in df.columns:
-                s = pd.to_numeric(df["Outcome_Cover_Prob"], errors="coerce")
-                if s.notna().sum() > 25:
-                    return s.clip(0.001, 0.999), "Outcome_Cover_Prob"
-        
-            # 3) h2h fallback: fair prob at sharp line
-            if "Truth_Fair_Prob_at_SharpLine" in df.columns:
-                s = pd.to_numeric(df["Truth_Fair_Prob_at_SharpLine"], errors="coerce")
-                if s.notna().sum() > 25:
-                    return s.clip(0.001, 0.999), "Truth_Fair_Prob_at_SharpLine"
-        
-            # 4) last resort: opening implied prob anchor already in your upstream data
-            if "First_Imp_Prob" in df.columns:
-                s = pd.to_numeric(df["First_Imp_Prob"], errors="coerce")
-                if s.notna().sum() > 25:
-                    return s.clip(0.001, 0.999), "First_Imp_Prob"
-        
-            return pd.Series(np.nan, index=df.index, dtype="float64"), "none"
-    
-        # market implied prob from current price
-        if "Odds_Price" not in df_market.columns:
-            st.warning("⚠️ Missing Odds_Price in df_market — cannot build edge target.")
+        if "SHARP_HIT_BOOL" not in df_market.columns:
+            st.warning("⚠️ Missing SHARP_HIT_BOOL in df_market — skipping.")
             return
         
-        df_market["Market_Implied_Prob"] = _american_to_implied_prob(df_market["Odds_Price"]).clip(0.001, 0.999)
-        
-        fair_prob_anchor, edge_anchor_name = _choose_edge_anchor(df_market)
-        df_market["Fair_Prob_Anchor"] = fair_prob_anchor
-        df_market["Prob_Edge_Anchor"] = df_market["Fair_Prob_Anchor"] - df_market["Market_Implied_Prob"]
-        df_market["EDGE_TARGET_KIND"] = edge_anchor_name
-        # tunable threshold; small positive edge to avoid pure noise labels
-        EDGE_THRESHOLD = 0.01
-        
-        target_series = pd.Series(np.nan, index=df_market.index, dtype="float64")
-        target_series.loc[df_market["Prob_Edge_Anchor"].notna()] = (
-            df_market.loc[df_market["Prob_Edge_Anchor"].notna(), "Prob_Edge_Anchor"] >= EDGE_THRESHOLD
-        ).astype(int)
-        
-        valid_mask = target_series.notna()
+        y_series = pd.to_numeric(df_market["SHARP_HIT_BOOL"], errors="coerce")
+        valid_mask = y_series.notna()
         
         df_valid = df_market.loc[valid_mask].reset_index(drop=True)
         y_full = (
-            target_series.loc[valid_mask]
+            y_series.loc[valid_mask]
+            .where(y_series.loc[valid_mask].isin([0, 1]), 0)
+            .fillna(0)
             .astype("int8")
             .to_numpy()
         )
         
         if np.unique(y_full).size < 2:
             title_market = str(market).upper() if "market" in locals() else "MARKET"
-            st.warning(f"⚠️ Skipping {title_market} — only one edge-label class. anchor={edge_anchor_name}")
+            st.warning(f"⚠️ Skipping {title_market} — only one label class.")
             return
         
-        st.caption(
-            f"Edge target active: anchor={edge_anchor_name}, "
-            f"threshold={EDGE_THRESHOLD:.3f}, rows={len(df_valid)}"
-        )
-                
         # 2) build X_full ONCE from masked frame (training truth)
         def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
             out = df.reindex(columns=cols, fill_value=np.nan).copy()
@@ -11353,7 +11104,7 @@ def train_sharp_model_from_bq(
                    .fillna(0.0)
                    .astype("float32")
             )
-            
+        
         X_df = _to_numeric_block(df_valid, feature_cols)  # DataFrame float32
         # Arrow-safe colnames
         X_df.columns = [str(c) for c in X_df.columns]
@@ -12445,7 +12196,12 @@ def train_sharp_model_from_bq(
                     pass
         except Exception:
             pass
-
+        # -----------------------------------------
+        # OOF predictions (train-only) + blending
+        # + Calibration + Tables + Save + Artifacts (HARDENED)
+        # -----------------------------------------
+        # -----------------------------------------
+        # OOF predictions (train-only) + LOGIT blending + calibration
         # -----------------------------------------
         # -----------------------------------------
         # OOF predictions (train-only) + blending
@@ -12836,12 +12592,7 @@ def train_sharp_model_from_bq(
         brier_train_f   = _to_float(brier_train)
         brier_hold_f    = _to_float(brier_hold)
         auc_gap_f       = _to_float(auc_train_f - auc_hold_f)
-        df_hold_eval = df_market.loc[hold_mask, [c for c in [
-            "Odds_Price", "SHARP_HIT_BOOL", "Market_Implied_Prob", "CLV_Prob_Delta"
-        ] if c in df_market.columns]].copy()
-        df_hold_eval["Pred_Prob"] = p_hold_vec
-        bet_metrics = _simulate_holdout_bets(df_hold_eval, min_edge=float(kwargs.get("deploy_edge_threshold", 0.01)))
-
+        
         artifact_metrics = None
         artifact_config  = None
         if return_artifacts:
@@ -12851,7 +12602,6 @@ def train_sharp_model_from_bq(
                 "brier_holdout": brier_hold_f,
                 "accuracy_holdout": acc_hold_f,
                 "auc_gap_train_holdout": auc_gap_f,
-                **bet_metrics,
             }
             artifact_config = {
                 "sport": sport,
@@ -12860,9 +12610,6 @@ def train_sharp_model_from_bq(
                 "calibrator": str(cal_name),
                 "flip_flag": bool(flip_flag),
                 "blend_w": float(best_w),
-                "edge_target_kind": str(df_market["EDGE_TARGET_KIND"].iloc[0]),
-                "edge_threshold": float(kwargs.get("edge_threshold", 0.01)),
-                "deploy_edge_threshold": float(kwargs.get("deploy_edge_threshold", 0.01)),
             }
         
         # -------------------------------------------------------------------
@@ -12904,8 +12651,6 @@ def train_sharp_model_from_bq(
             "team_feature_map":     team_feature_map,
             "book_reliability_map": book_reliability_map,
             "feature_cols":         feature_cols,
-            "artifact_metrics": artifact_metrics,
-            "artifact_config": artifact_config,
         }
         
         # -------------------------------------------------------------------
@@ -12918,9 +12663,6 @@ def train_sharp_model_from_bq(
                 "best_w":        float(best_w),
                 "feature_cols":  feature_cols,
                 "flip_flag":     bool(flip_flag),
-                "edge_target_kind": artifact_config["edge_target_kind"],
-                "edge_threshold": artifact_config["edge_threshold"],
-                "deploy_edge_threshold": artifact_config["deploy_edge_threshold"],
             },
             calibrator=iso_blend,
             sport=sport,
@@ -12930,42 +12672,41 @@ def train_sharp_model_from_bq(
             book_reliability_map=book_reliability_map,
         )
         
+        artifact_model_path = None
+        if return_artifacts and isinstance(save_info, dict):
+            artifact_model_path = f"gs://{save_info.get('bucket', bucket_name)}/{save_info.get('path')}"
+        
+        # -------------------------------------------------------------------
+        # Status box
+        # -------------------------------------------------------------------
+        status.write(
+            f"""✅ Trained + saved ensemble model for {str(market).upper()}
+        - AUC: {auc_hold_f:.4f}
+        - Accuracy: {acc_hold_f:.4f}
+        - Log Loss: {logloss_hold_f:.4f}
+        - Brier Score: {brier_hold_f:.4f}
+        """
+        )
+        
+        pb.progress(min(100, max(0, pct)))
+        
+        status.update(label="✅ All models trained", state="complete", expanded=False)
+        
         if return_artifacts:
-            artifact_model_path = None
-            if isinstance(save_info, dict):
-                artifact_model_path = f"gs://{save_info.get('bucket', bucket_name)}/{save_info.get('path')}"
-            status.update(label="✅ All models trained", state="complete", expanded=False)
             if not artifact_model_path:
-                _error("❌ Challenger training did not produce a model artifact.")
+                st.error("❌ Challenger training did not produce a model artifact.")
                 return None
             return {
                 "model_path": artifact_model_path,
                 "metrics": artifact_metrics,
                 "config": artifact_config,
             }
-
-        status.write(
-            f"""✅ Trained + saved edge-anchored ensemble model for {mkt.upper()}
-            - Edge target: {artifact_config['edge_target_kind']}
-            - Holdout AUC: {auc_hold_f:.4f}
-            - Holdout Accuracy: {acc_hold_f:.4f}
-            - Holdout Log Loss: {logloss_hold_f:.4f}
-            - Holdout Brier: {brier_hold_f:.4f}
-            - Holdout ROI (flat 1u): {bet_metrics['roi_flat_1u']:.4f}
-            - Holdout Bets: {int(bet_metrics['bets_n'])}
-            """
-                    )
-
-        
-        pb.progress(min(100, max(0, pct)))
-        
-        status.update(label="✅ All models trained", state="complete", expanded=False)
-        
-  
         
         if not trained_models:
             st.error("❌ No models were trained.")
         return trained_models
+
+
 
 def evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, model_label="Base"):
     model = xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1)
