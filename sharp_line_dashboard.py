@@ -1126,7 +1126,7 @@ def compute_ev_features_sharp_vs_rec(
     # exactly one row per outcome in selected sharp book
     sharp_sel = (
         sharp_sel.sort_values([pair_key, "Market", "Outcome_Norm"])
-                 .drop_duplicates(subset=[pair_key,, "Market", "Outcome_Norm"], keep="first")
+                 .drop_duplicates(subset=[pair_key, "Market", "Outcome_Norm"], keep="first")
                  .copy()
     )
 
