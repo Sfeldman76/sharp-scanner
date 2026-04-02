@@ -10922,7 +10922,7 @@ def train_sharp_model_from_bq(
             "SpreadTotal_Rho","SpreadTotal_Synergy","SpreadTotal_Sign",
             "SpreadML_Rho","SpreadML_Synergy","SpreadML_Sign","Spread_ML_ProbGap",
             "TotalML_Rho","TotalML_Synergy","TotalML_Sign",
-            "EV_Sh_vs_Rec_Prob", "EV_Sh_vs_Rec_Dollar", "Kelly_Fraction",
+           
             "Spread_Abs_Game",
             "Spread_Abs_Game_Z",
             
