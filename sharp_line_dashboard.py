@@ -1041,7 +1041,8 @@ def compute_ev_features_sharp_vs_rec(
         dm["Rec_Implied_Prob"] = _amer_to_prob(_col_or_nan(dm, "Odds_Price")).astype("float32")
         return dm
 
-    keep = ["Game_Key", "Market", "Outcome_Norm", "Bookmaker", "Value", "Odds_Price"]
+    pair_key = "Merge_Key_Short" if "Merge_Key_Short" in dm.columns else "Game_Key"
+    keep = [pair_key, "Market", "Outcome_Norm", "Bookmaker", "Value", "Odds_Price"]
     if reliability_col in dm.columns:
         keep.append(reliability_col)
     if limit_col in dm.columns:
@@ -1055,7 +1056,7 @@ def compute_ev_features_sharp_vs_rec(
     print("sharp_rows:", len(sharp_rows))
     
     pair_diag = (
-        sharp_rows.groupby(["Game_Key", "Market"], as_index=False)["Outcome_Norm"]
+        sharp_rows.groupby([pair_key, "Market"], as_index=False)["Outcome_Norm"]
         .nunique()
         .rename(columns={"Outcome_Norm": "n_outcomes"})
     )
@@ -1067,12 +1068,12 @@ def compute_ev_features_sharp_vs_rec(
     bad_games = pair_diag[pair_diag["n_outcomes"] < 2]["Game_Key"].head(10).tolist()
     print("sample bad games:", bad_games)
     print(
-        sharp_rows.groupby(["Game_Key", "Market"])["Bookmaker"]
+        sharp_rows.groupby([pair_key, "Market"])["Bookmaker"]
         .nunique()
         .describe()
     )
     print(
-        sharp_rows.groupby(["Game_Key", "Market", "Bookmaker"])["Outcome_Norm"]
+        sharp_rows.groupby([pair_key,, "Market", "Bookmaker"])["Outcome_Norm"]
         .nunique()
         .describe()
     )
@@ -1090,13 +1091,13 @@ def compute_ev_features_sharp_vs_rec(
 
     # ensure one row per side per book for pair-building
     sharp_rows = (
-        sharp_rows.sort_values(["Game_Key", "Market", "Bookmaker", "_rel", "_lim"], ascending=[True, True, True, False, False])
-                  .drop_duplicates(subset=["Game_Key", "Market", "Bookmaker", "Outcome_Norm"], keep="first")
+        sharp_rows.sort_values([pair_key,", "Market", "Bookmaker", "_rel", "_lim"], ascending=[True, True, True, False, False])
+                  .drop_duplicates(subset=[pair_key,, "Market", "Bookmaker", "Outcome_Norm"], keep="first")
                   .copy()
     )
 
     book_pairs = (
-        sharp_rows.groupby(["Game_Key", "Market", "Bookmaker"], as_index=False)
+        sharp_rows.groupby([pair_key, "Market", "Bookmaker"], as_index=False)
                   .agg(
                       n_outcomes=("Outcome_Norm", "nunique"),
                       book_rel=("_rel", "max"),
@@ -1111,26 +1112,26 @@ def compute_ev_features_sharp_vs_rec(
 
     best_books = (
         book_pairs.sort_values(
-            ["Game_Key", "Market", "book_rel", "book_lim", "Bookmaker"],
+            [pair_key,, "Market", "book_rel", "book_lim", "Bookmaker"],
             ascending=[True, True, False, False, True],
         )
-        .drop_duplicates(subset=["Game_Key", "Market"], keep="first")
-        [["Game_Key", "Market", "Bookmaker"]]
+        .drop_duplicates(subset=[pair_key, "Market"], keep="first")
+        [[pair_key,, "Market", "Bookmaker"]]
         .rename(columns={"Bookmaker": "Sharp_Book_Selected"})
     )
 
-    sharp_sel = sharp_rows.merge(best_books, on=["Game_Key", "Market"], how="inner")
+    sharp_sel = sharp_rows.merge(best_books, on=[pair_key, "Market"], how="inner")
     sharp_sel = sharp_sel[sharp_sel["Bookmaker"] == sharp_sel["Sharp_Book_Selected"]].copy()
 
     # exactly one row per outcome in selected sharp book
     sharp_sel = (
-        sharp_sel.sort_values(["Game_Key", "Market", "Outcome_Norm"])
-                 .drop_duplicates(subset=["Game_Key", "Market", "Outcome_Norm"], keep="first")
+        sharp_sel.sort_values([pair_key,, "Market", "Outcome_Norm"])
+                 .drop_duplicates(subset=[pair_key,, "Market", "Outcome_Norm"], keep="first")
                  .copy()
     )
 
     # rank the two selected outcomes to make a pair
-    sharp_sel["_rank2"] = sharp_sel.groupby(["Game_Key", "Market"], sort=False).cumcount()
+    sharp_sel["_rank2"] = sharp_sel.groupby([pair_key, "Market"], sort=False).cumcount()
     top2 = sharp_sel[sharp_sel["_rank2"] < 2].copy()
 
     A = top2[top2["_rank2"] == 0].rename(
@@ -1141,18 +1142,18 @@ def compute_ev_features_sharp_vs_rec(
     )
 
     sharp_pairs = (
-        A[["Game_Key", "Market", "Sharp_Book_Selected", "Outcome_A", "Line_A", "Odds_A"]]
+        A[[pair_key, "Market", "Sharp_Book_Selected", "Outcome_A", "Line_A", "Odds_A"]]
         .merge(
-            B[["Game_Key", "Market", "Sharp_Book_Selected", "Outcome_B", "Line_B", "Odds_B"]],
-            on=["Game_Key", "Market", "Sharp_Book_Selected"],
+            B[[pair_key, "Market", "Sharp_Book_Selected", "Outcome_B", "Line_B", "Odds_B"]],
+            on=[pair_key, "Market", "Sharp_Book_Selected"],
             how="left",
         )
     )
 
     # anchor each row to the selected sharp book pair
     truth = (
-        dm[["Game_Key", "Market", "Outcome_Norm"]].drop_duplicates()
-        .merge(sharp_pairs, on=["Game_Key", "Market"], how="left")
+        dm[[pair_key, "Market", "Outcome_Norm"]].drop_duplicates()
+        .merge(sharp_pairs, on=[pair_key, "Market"], how="left")
     )
 
     # ------------------------------------------------------------------
@@ -1178,10 +1179,10 @@ def compute_ev_features_sharp_vs_rec(
     if sigma_col not in dm.columns:
         dm[sigma_col] = np.nan
 
-    sig_map = dm[["Game_Key", "Market", "Outcome_Norm", sigma_col, "Sport"]].drop_duplicates(
-        ["Game_Key", "Market", "Outcome_Norm"]
+    sig_map = dm[[pair_key, "Market", "Outcome_Norm", sigma_col, "Sport"]].drop_duplicates(
+        [pair_key, "Market", "Outcome_Norm"]
     )
-    truth = truth.merge(sig_map, on=["Game_Key", "Market", "Outcome_Norm"], how="left")
+    truth = truth.merge(sig_map, on=[pair_key, "Market", "Outcome_Norm"], how="left")
 
     SPORT_SIGMA_DEFAULT = {
         "NFL": 13.0, "NCAAF": 14.0, "NBA": 12.0, "WNBA": 11.0,
@@ -1236,7 +1237,7 @@ def compute_ev_features_sharp_vs_rec(
     # ------------------------------------------------------------------
     # 4) Merge truth back to every book row
     # ------------------------------------------------------------------
-    keys = ["Game_Key", "Market", "Outcome_Norm"]
+    keys = [pair_key, "Market", "Outcome_Norm"]
     truth_cols = ["Truth_Fair_Prob_at_SharpLine", "Truth_Margin_Mu", "Truth_Sigma"]
     dm = merge_drop_overlap(
         dm,
