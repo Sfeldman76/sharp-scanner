@@ -1279,7 +1279,7 @@ def compute_ev_features_sharp_vs_rec(
             dm[c] = np.nan
         dm[c] = pd.to_numeric(dm[c], errors="coerce").astype("float32")
 
-    return dm dm
+    return dm
 
 
 def normalize_team(t):
