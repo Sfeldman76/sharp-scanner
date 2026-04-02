@@ -9909,7 +9909,13 @@ def train_sharp_model_from_bq(
             limit_col="Sharp_Limit_Total",
             sigma_col="Sigma_Pts",  # your spreads block already tries to create Sigma_Pts
         )
-       # === NEW: final-snapshot microstructure + hybrid timing (before normalization/canonical filter) ===
+        df_market["EDGE_TARGET"] = pd.to_numeric(
+            df_market["EV_Sh_vs_Rec_Dollar"], errors="coerce"
+        ).clip(-0.25, 0.25)
+        thr = df_market["EDGE_TARGET"].quantile(0.7)
+        df_market["EDGE_CLASS"] = (df_market["EDGE_TARGET"] > thr).astype("int8")
+                
+        # === NEW: final-snapshot microstructure + hybrid timing (before normalization/canonical filter) ===
         df_market = compute_snapshot_micro_features_training(
             df_market,
             sport_col="Sport",
