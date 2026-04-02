@@ -1091,7 +1091,7 @@ def compute_ev_features_sharp_vs_rec(
 
     # ensure one row per side per book for pair-building
     sharp_rows = (
-        sharp_rows.sort_values([pair_key,", "Market", "Bookmaker", "_rel", "_lim"], ascending=[True, True, True, False, False])
+        sharp_rows.sort_values([pair_key, "Market", "Bookmaker", "_rel", "_lim"], ascending=[True, True, True, False, False])
                   .drop_duplicates(subset=[pair_key,, "Market", "Bookmaker", "Outcome_Norm"], keep="first")
                   .copy()
     )
