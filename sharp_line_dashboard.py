@@ -1073,7 +1073,7 @@ def compute_ev_features_sharp_vs_rec(
         .describe()
     )
     print(
-        sharp_rows.groupby([pair_key,, "Market", "Bookmaker"])["Outcome_Norm"]
+        sharp_rows.groupby([pair_key, "Market", "Bookmaker"])["Outcome_Norm"]
         .nunique()
         .describe()
     )
@@ -1092,7 +1092,7 @@ def compute_ev_features_sharp_vs_rec(
     # ensure one row per side per book for pair-building
     sharp_rows = (
         sharp_rows.sort_values([pair_key, "Market", "Bookmaker", "_rel", "_lim"], ascending=[True, True, True, False, False])
-                  .drop_duplicates(subset=[pair_key,, "Market", "Bookmaker", "Outcome_Norm"], keep="first")
+                  .drop_duplicates(subset=[pair_key, "Market", "Bookmaker", "Outcome_Norm"], keep="first")
                   .copy()
     )
 
@@ -1112,11 +1112,11 @@ def compute_ev_features_sharp_vs_rec(
 
     best_books = (
         book_pairs.sort_values(
-            [pair_key,, "Market", "book_rel", "book_lim", "Bookmaker"],
+            [pair_key, "Market", "book_rel", "book_lim", "Bookmaker"],
             ascending=[True, True, False, False, True],
         )
         .drop_duplicates(subset=[pair_key, "Market"], keep="first")
-        [[pair_key,, "Market", "Bookmaker"]]
+        [[pair_key, "Market", "Bookmaker"]]
         .rename(columns={"Bookmaker": "Sharp_Book_Selected"})
     )
 
@@ -1125,7 +1125,7 @@ def compute_ev_features_sharp_vs_rec(
 
     # exactly one row per outcome in selected sharp book
     sharp_sel = (
-        sharp_sel.sort_values([pair_key,, "Market", "Outcome_Norm"])
+        sharp_sel.sort_values([pair_key, "Market", "Outcome_Norm"])
                  .drop_duplicates(subset=[pair_key,, "Market", "Outcome_Norm"], keep="first")
                  .copy()
     )
