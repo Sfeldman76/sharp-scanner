@@ -10902,20 +10902,21 @@ def train_sharp_model_from_bq(
             "Book_Path_Speed_Lift",
 
             # Power ratings / edges
-            'PR_Team_Rating','PR_Opp_Rating',
-            'PR_Rating_Diff','PR_Abs_Rating_Diff',
+            #'PR_Team_Rating','PR_Opp_Rating',
+            #'PR_Rating_Diff','PR_Abs_Rating_Diff',
             
-            'Outcome_Model_Spread','Outcome_Market_Spread',
-            'Outcome_Spread_Edge',
-            'Outcome_Cover_Prob',
+            #'Outcome_Model_Spread',
+            'Outcome_Market_Spread',
+            #'Outcome_Spread_Edge',
+            #'Outcome_Cover_Prob',
             'model_fav_vs_market_fav_agree',
             'TOT_Proj_Total_Baseline',
             'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
             'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
             'TOT_Mispricing', 
             'ATS_EB_Rate',
-            'ATS_EB_Margin',            # Optional: only if cover_margin_col was set
-            'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
+            #'ATS_EB_Margin',            # Optional: only if cover_margin_col was set
+            #'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
             'ATS_EB_Rate_Home',
             'ATS_EB_Rate_Away',
             'PR_Model_Agree_H2H_Flag',#'PR_Market_Agree_H2H_Flag',
