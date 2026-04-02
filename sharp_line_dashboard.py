@@ -1051,7 +1051,31 @@ def compute_ev_features_sharp_vs_rec(
     if sharp_rows.empty:
         dm["Rec_Implied_Prob"] = _amer_to_prob(_col_or_nan(dm, "Odds_Price")).astype("float32")
         return dm
-
+    print("EV PAIR DEBUG")
+    print("sharp_rows:", len(sharp_rows))
+    
+    pair_diag = (
+        sharp_rows.groupby(["Game_Key", "Market"], as_index=False)["Outcome_Norm"]
+        .nunique()
+        .rename(columns={"Outcome_Norm": "n_outcomes"})
+    )
+    
+    print("games with >=2 sharp outcomes:", int((pair_diag["n_outcomes"] >= 2).sum()))
+    print("games with 1 sharp outcome:", int((pair_diag["n_outcomes"] == 1).sum()))
+    print(pair_diag["n_outcomes"].describe())
+    
+    bad_games = pair_diag[pair_diag["n_outcomes"] < 2]["Game_Key"].head(10).tolist()
+    print("sample bad games:", bad_games)
+    print(
+        sharp_rows.groupby(["Game_Key", "Market"])["Bookmaker"]
+        .nunique()
+        .describe()
+    )
+    print(
+        sharp_rows.groupby(["Game_Key", "Market", "Bookmaker"])["Outcome_Norm"]
+        .nunique()
+        .describe()
+    )
     # ------------------------------------------------------------------
     # 1) Pick ONE best sharp bookmaker with a COMPLETE 2-sided pair
     #    for each (Game_Key, Market)
