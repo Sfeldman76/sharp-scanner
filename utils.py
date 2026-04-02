@@ -4091,15 +4091,12 @@ def compute_ev_features_sharp_vs_rec(
     sigma_col: str = "Sigma_Pts",
 ) -> pd.DataFrame:
     """
-    Compare a sharp 'truth' vs each book's offer (line + odds) and add EV features.
-    Safe to run even if sharp data/sigma is missing; returns same number of rows.
-
-    Writes/ensures:
-      - Truth_Fair_Prob_at_SharpLine, Truth_Margin_Mu, Truth_Sigma
-      - Truth_Fair_Prob_at_RecLine, Rec_Implied_Prob
-      - EV_Sh_vs_Rec_Prob, EV_Sh_vs_Rec_Dollar, Kelly_Fraction
+    Backend-aligned EV calculation:
+    - pairs sharp sides at GAME grain (Merge_Key_Short when available)
+    - de-vigs same market pair
+    - prices spreads/totals side-aware
+    - returns same row count
     """
-    # --- local, empty-safe Φ so we don't depend on a global vectorize() variant ---
     def _phi_local(z):
         z = np.asarray(z, dtype=float)
         if z.size == 0:
@@ -4118,163 +4115,238 @@ def compute_ev_features_sharp_vs_rec(
         "EV_Sh_vs_Rec_Prob","EV_Sh_vs_Rec_Dollar","Kelly_Fraction"
     ]
 
-    # empty guard
     if df_market is None or df_market.empty:
         dm = (df_market.copy() if df_market is not None else pd.DataFrame())
-        for c in out_cols: dm[c] = np.nan
+        for c in out_cols:
+            dm[c] = np.nan
         return dm
 
     dm = df_market.copy()
-
-    # normalize minimal keys used here
     dm["Market"] = dm.get("Market", "").astype(str).str.lower().str.strip()
     dm["Outcome_Norm"] = dm.get("Outcome_Norm", dm.get("Outcome", "")).astype(str).str.lower().str.strip()
     dm["Bookmaker"] = dm.get("Bookmaker", dm.get("Book", "")).astype(str).str.lower().str.strip()
+    dm["Value"] = pd.to_numeric(dm.get("Value", np.nan), errors="coerce")
+    dm["Odds_Price"] = pd.to_numeric(dm.get("Odds_Price", np.nan), errors="coerce")
 
-    # pre-create outputs (avoids KeyError later)
+    pair_key = "Merge_Key_Short" if "Merge_Key_Short" in dm.columns else "Game_Key"
+
     for c in out_cols:
         if c not in dm.columns:
             dm[c] = np.nan
 
-    # identify sharp rows
     SHARP_SET = set(sharp_books or SHARP_BOOKS)
     sharp_mask = dm["Bookmaker"].isin(SHARP_SET)
 
-    # if no sharp rows, still compute Rec_Implied_Prob and return
     if not sharp_mask.any():
         dm["Rec_Implied_Prob"] = np.asarray(_amer_to_prob(dm.get("Odds_Price", np.nan)), dtype="float64")
         return dm
 
-    # collect sharp candidates
-    keep = ["Game_Key","Market","Outcome_Norm","Bookmaker","Value","Odds_Price"]
-    if reliability_col in dm.columns: keep.append(reliability_col)
-    if limit_col in dm.columns:       keep.append(limit_col)
-    sharp_rows = dm.loc[sharp_mask, keep].copy()
+    keep = [pair_key, "Market", "Outcome_Norm", "Bookmaker", "Value", "Odds_Price"]
+    if reliability_col in dm.columns:
+        keep.append(reliability_col)
+    if limit_col in dm.columns:
+        keep.append(limit_col)
 
+    sharp_rows = dm.loc[sharp_mask, keep].copy()
     if sharp_rows.empty:
         dm["Rec_Implied_Prob"] = np.asarray(_amer_to_prob(dm.get("Odds_Price", np.nan)), dtype="float64")
         return dm
 
-    # rank sharp by reliability then limit (both optional)
     if reliability_col not in sharp_rows.columns:
         sharp_rows[reliability_col] = 0.0
-    sharp_rows["_rel_rank"] = sharp_rows.groupby(["Game_Key","Market","Outcome_Norm"])[reliability_col] \
-        .rank(ascending=False, method="first")
-    if limit_col in sharp_rows.columns:
-        sharp_rows["_lim_rank"] = sharp_rows.groupby(["Game_Key","Market","Outcome_Norm"])[limit_col] \
-            .rank(ascending=False, method="first")
-    else:
-        sharp_rows["_lim_rank"] = 1.0
+    if limit_col not in sharp_rows.columns:
+        sharp_rows[limit_col] = 0.0
 
-    sharp_ref = (sharp_rows
-        .sort_values(["Game_Key","Market","Outcome_Norm","_rel_rank","_lim_rank"])
-        .groupby(["Game_Key","Market","Outcome_Norm"], as_index=False)
-        .head(1)
-        .drop(columns=["_rel_rank","_lim_rank"])
-        .rename(columns={"Value":"Sharp_Line","Odds_Price":"Sharp_Odds"})
+    sharp_rows["_rel"] = pd.to_numeric(sharp_rows[reliability_col], errors="coerce").fillna(0.0)
+    sharp_rows["_lim"] = pd.to_numeric(sharp_rows[limit_col], errors="coerce").fillna(0.0)
+
+    # one best row per side per book
+    sharp_rows = (
+        sharp_rows.sort_values([pair_key, "Market", "Bookmaker", "_rel", "_lim"], ascending=[True, True, True, False, False])
+                  .drop_duplicates(subset=[pair_key, "Market", "Bookmaker", "Outcome_Norm"], keep="first")
+                  .copy()
     )
 
-    # build top-2 sharp pair per (Game_Key, Market) for de‑vig
-    pairs_base = (sharp_rows
-        .sort_values(["Game_Key","Market", reliability_col], ascending=[True,True,False])
-        .drop_duplicates(subset=["Game_Key","Market","Outcome_Norm"], keep="first"))
-    def _to_pair(df_):
-        if len(df_) < 2:
-            return pd.Series({"Outcome_A":np.nan,"Line_A":np.nan,"Odds_A":np.nan,
-                              "Outcome_B":np.nan,"Line_B":np.nan,"Odds_B":np.nan})
-        a, b = df_.iloc[0], df_.iloc[1]
-        return pd.Series({"Outcome_A":a["Outcome_Norm"], "Line_A":a["Value"], "Odds_A":a["Odds_Price"],
-                          "Outcome_B":b["Outcome_Norm"], "Line_B":b["Value"], "Odds_B":b["Odds_Price"]})
-    top2 = (pairs_base.groupby(["Game_Key","Market"], as_index=False)
-        .apply(lambda g: g.head(2)).reset_index(drop=True))
-    sharp_pairs = top2.groupby(["Game_Key","Market"]).apply(_to_pair).reset_index()
+    # choose best same-book pair
+    book_pairs = (
+        sharp_rows.groupby([pair_key, "Market", "Bookmaker"], as_index=False)
+                  .agg(
+                      n_outcomes=("Outcome_Norm", "nunique"),
+                      book_rel=("_rel", "max"),
+                      book_lim=("_lim", "max"),
+                  )
+    )
+    book_pairs = book_pairs[book_pairs["n_outcomes"] >= 2].copy()
 
-    truth = sharp_ref.merge(sharp_pairs, on=["Game_Key","Market"], how="left")
+    if book_pairs.empty:
+        dm["Rec_Implied_Prob"] = np.asarray(_amer_to_prob(dm.get("Odds_Price", np.nan)), dtype="float64")
+        return dm
 
-    # de‑vig fair prob at the sharp line (if pair available)
+    best_books = (
+        book_pairs.sort_values(
+            [pair_key, "Market", "book_rel", "book_lim", "Bookmaker"],
+            ascending=[True, True, False, False, True],
+        )
+        .drop_duplicates(subset=[pair_key, "Market"], keep="first")
+        [[pair_key, "Market", "Bookmaker"]]
+        .rename(columns={"Bookmaker": "Sharp_Book_Selected"})
+    )
+
+    sharp_sel = sharp_rows.merge(best_books, on=[pair_key, "Market"], how="inner")
+    sharp_sel = sharp_sel[sharp_sel["Bookmaker"] == sharp_sel["Sharp_Book_Selected"]].copy()
+    sharp_sel = (
+        sharp_sel.sort_values([pair_key, "Market", "Outcome_Norm"])
+                 .drop_duplicates(subset=[pair_key, "Market", "Outcome_Norm"], keep="first")
+                 .copy()
+    )
+
+    sharp_sel["_rank2"] = sharp_sel.groupby([pair_key, "Market"], sort=False).cumcount()
+    top2 = sharp_sel[sharp_sel["_rank2"] < 2].copy()
+
+    A = top2[top2["_rank2"] == 0].rename(
+        columns={"Outcome_Norm": "Outcome_A", "Value": "Line_A", "Odds_Price": "Odds_A"}
+    )
+    B = top2[top2["_rank2"] == 1].rename(
+        columns={"Outcome_Norm": "Outcome_B", "Value": "Line_B", "Odds_Price": "Odds_B"}
+    )
+
+    sharp_pairs = (
+        A[[pair_key, "Market", "Sharp_Book_Selected", "Outcome_A", "Line_A", "Odds_A"]]
+        .merge(
+            B[[pair_key, "Market", "Sharp_Book_Selected", "Outcome_B", "Line_B", "Odds_B"]],
+            on=[pair_key, "Market", "Sharp_Book_Selected"],
+            how="left",
+        )
+    )
+
+    truth = (
+        dm[[pair_key, "Market", "Outcome_Norm"]].drop_duplicates()
+        .merge(sharp_pairs, on=[pair_key, "Market"], how="left")
+    )
+
     same_as_A = truth["Outcome_Norm"].astype(str).eq(truth["Outcome_A"].astype(str))
     odds_this = np.where(same_as_A, truth["Odds_A"], truth["Odds_B"])
-    odds_opp  = np.where(same_as_A, truth["Odds_B"], truth["Odds_A"])
-    p_this_raw = np.asarray(_amer_to_prob(odds_this), dtype="float64")
-    p_opp_raw  = np.asarray(_amer_to_prob(odds_opp),  dtype="float64")
-    s = p_this_raw + p_opp_raw
-    good = s > 0
-    p_fair_this = np.where(good, p_this_raw / s, np.nan)
-    truth["Truth_Fair_Prob_at_SharpLine"] = p_fair_this
+    odds_opp = np.where(same_as_A, truth["Odds_B"], truth["Odds_A"])
+    sharp_line_this = np.where(same_as_A, truth["Line_A"], truth["Line_B"])
 
-    # sigma: prefer row sigma; else sport defaults
+    p_this_raw = np.asarray(_amer_to_prob(odds_this), dtype="float64")
+    p_opp_raw = np.asarray(_amer_to_prob(odds_opp), dtype="float64")
+    s = p_this_raw + p_opp_raw
+    good = np.isfinite(s) & (s > 0)
+    truth["Truth_Fair_Prob_at_SharpLine"] = np.where(good, p_this_raw / s, np.nan)
+    truth["Sharp_Line"] = pd.to_numeric(sharp_line_this, errors="coerce")
+
     if sigma_col not in dm.columns:
         dm[sigma_col] = np.nan
-    sig_map = dm[["Game_Key","Market","Outcome_Norm",sigma_col,"Sport"]] \
-                .drop_duplicates(["Game_Key","Market","Outcome_Norm"])
-    truth = truth.merge(sig_map, on=["Game_Key","Market","Outcome_Norm"], how="left")
+
+    sig_keep = [pair_key, "Market", "Outcome_Norm", sigma_col]
+    if "Sport" in dm.columns:
+        sig_keep.append("Sport")
+
+    sig_map = dm[sig_keep].drop_duplicates([pair_key, "Market", "Outcome_Norm"])
+    truth = truth.merge(sig_map, on=[pair_key, "Market", "Outcome_Norm"], how="left")
 
     SPORT_SIGMA_DEFAULT = {'NFL':13.0,'NCAAF':14.0,'NBA':12.0,'WNBA':11.0,'MLB':5.5,'CFL':13.5,'NCAAB':11.5}
     def _pick_sigma(row):
-        s = pd.to_numeric(row.get(sigma_col), errors="coerce")
-        if pd.notna(s) and s > 0: return float(s)
+        s0 = pd.to_numeric(row.get(sigma_col), errors="coerce")
+        if pd.notna(s0) and s0 > 0:
+            return float(s0)
         return float(SPORT_SIGMA_DEFAULT.get(str(row.get("Sport","NFL")).upper(), 12.0))
 
     s_sharp = pd.to_numeric(truth["Sharp_Line"], errors="coerce")
-    p_sharp = pd.to_numeric(truth["Truth_Fair_Prob_at_SharpLine"], errors="coerce")
-    sigma   = truth.apply(_pick_sigma, axis=1).astype(float)
+    p_sharp = pd.to_numeric(truth["Truth_Fair_Prob_at_SharpLine"], errors="coerce").clip(1e-6, 1 - 1e-6)
+    sigma = truth.apply(_pick_sigma, axis=1).astype(float)
 
-    # solve μ where both pieces exist
+    market_vec = truth["Market"].astype(str).str.lower().str.strip()
+    out_vec = truth["Outcome_Norm"].astype(str).str.lower().str.strip()
+
+    is_spread = market_vec.eq("spreads")
+    is_total = market_vec.eq("totals")
+    is_h2h = market_vec.isin(["h2h","ml","moneyline","headtohead"])
+    is_over = out_vec.eq("over")
+    is_under = out_vec.eq("under")
+
     mu = np.full(len(truth), np.nan, dtype=float)
-    mask_mu = p_sharp.notna() & s_sharp.notna()
-    if mask_mu.any():
-        mu[mask_mu.values] = (s_sharp[mask_mu] + sigma[mask_mu] * _ppf(p_sharp[mask_mu])).astype(float)
+    mask_base = p_sharp.notna() & s_sharp.notna() & np.isfinite(sigma) & (sigma > 0)
+    z = np.full(len(truth), np.nan, dtype=float)
+    z[mask_base.values] = _ppf(p_sharp[mask_base])
+
+    mask_sp = mask_base & is_spread
+    mu[mask_sp.values] = (-s_sharp[mask_sp] + sigma[mask_sp] * z[mask_sp]).astype(float)
+
+    mask_over = mask_base & is_total & is_over
+    mu[mask_over.values] = (s_sharp[mask_over] + sigma[mask_over] * z[mask_over]).astype(float)
+
+    mask_under = mask_base & is_total & is_under
+    mu[mask_under.values] = (s_sharp[mask_under] - sigma[mask_under] * z[mask_under]).astype(float)
 
     truth["Truth_Margin_Mu"] = mu
-    truth["Truth_Sigma"]     = sigma
+    truth["Truth_Sigma"] = sigma
 
-    # merge μ,σ back to every book row
-    keys = ["Game_Key","Market","Outcome_Norm"]
-    dm = dm.merge(truth[keys + ["Truth_Fair_Prob_at_SharpLine","Truth_Margin_Mu","Truth_Sigma"]],
-                  on=keys, how="left")
+    keys = [pair_key, "Market", "Outcome_Norm"]
+    dm = dm.merge(
+        truth[keys + ["Truth_Fair_Prob_at_SharpLine", "Truth_Margin_Mu", "Truth_Sigma"]],
+        on=keys,
+        how="left",
+    )
 
-    # price each row at its own line (vectorized, aligned)
-    mu_series  = _ensure_series(_col_or_nan(dm, "Truth_Margin_Mu"), dm.index)
+    mu_series = _ensure_series(_col_or_nan(dm, "Truth_Margin_Mu"), dm.index)
     sig_series = _ensure_series(_col_or_nan(dm, "Truth_Sigma"), dm.index)
-    line_rec   = _ensure_series(_col_or_nan(dm, "Value"), dm.index)
+    line_rec = _ensure_series(_col_or_nan(dm, "Value"), dm.index)
+
+    dm_market = dm["Market"].astype(str).str.lower().str.strip()
+    dm_out = dm["Outcome_Norm"].astype(str).str.lower().str.strip()
+
+    is_spread_dm = dm_market.eq("spreads")
+    is_total_dm = dm_market.eq("totals")
+    is_h2h_dm = dm_market.isin(["h2h","ml","moneyline","headtohead"])
+    is_over_dm = dm_out.eq("over")
+    is_under_dm = dm_out.eq("under")
 
     ok = mu_series.notna() & sig_series.notna() & (sig_series > 0) & line_rec.notna()
-    if ok.any():  # avoid calling any vectorized CDF on size-0 inputs
-        z = (mu_series[ok].to_numpy(dtype=float, copy=False)
-             - line_rec[ok].to_numpy(dtype=float, copy=False)) \
-            / sig_series[ok].to_numpy(dtype=float, copy=False)
-        dm.loc[ok, "Truth_Fair_Prob_at_RecLine"] = _phi_local(z)
 
-    # moneyline fallback (no line shift)
-    is_ml   = dm["Market"].isin(["h2h","ml","moneyline","headtohead"])
-    need_ml = is_ml & dm["Truth_Fair_Prob_at_RecLine"].isna()
+    mask = ok & is_spread_dm
+    if mask.any():
+        z = (mu_series[mask].to_numpy(dtype=float, copy=False) +
+             line_rec[mask].to_numpy(dtype=float, copy=False)) / sig_series[mask].to_numpy(dtype=float, copy=False)
+        dm.loc[mask, "Truth_Fair_Prob_at_RecLine"] = _phi_local(z)
+
+    mask = ok & is_total_dm & is_over_dm
+    if mask.any():
+        z = (mu_series[mask].to_numpy(dtype=float, copy=False) -
+             line_rec[mask].to_numpy(dtype=float, copy=False)) / sig_series[mask].to_numpy(dtype=float, copy=False)
+        dm.loc[mask, "Truth_Fair_Prob_at_RecLine"] = _phi_local(z)
+
+    mask = ok & is_total_dm & is_under_dm
+    if mask.any():
+        z = (line_rec[mask].to_numpy(dtype=float, copy=False) -
+             mu_series[mask].to_numpy(dtype=float, copy=False)) / sig_series[mask].to_numpy(dtype=float, copy=False)
+        dm.loc[mask, "Truth_Fair_Prob_at_RecLine"] = _phi_local(z)
+
+    mask = is_h2h_dm & dm["Truth_Fair_Prob_at_RecLine"].isna()
     base_sharp = _ensure_series(_col_or_nan(dm, "Truth_Fair_Prob_at_SharpLine"), dm.index)
-    dm.loc[need_ml, "Truth_Fair_Prob_at_RecLine"] = base_sharp[need_ml].values
+    dm.loc[mask, "Truth_Fair_Prob_at_RecLine"] = base_sharp[mask].values
 
-    # implied prob of offered odds (always)
     dm["Rec_Implied_Prob"] = np.asarray(_amer_to_prob(dm.get("Odds_Price", np.nan)), dtype="float64")
 
-    # EV per $1 stake & prob edge
-    p_truth = pd.to_numeric(dm["Truth_Fair_Prob_at_RecLine"], errors="coerce")
-    odds    = pd.to_numeric(dm.get("Odds_Price", np.nan), errors="coerce")
-    payout  = np.where(odds >= 0, odds/100.0, 100.0/(-odds))
-    ok_ev   = p_truth.notna() & np.isfinite(payout)
+    p_truth = pd.to_numeric(dm["Truth_Fair_Prob_at_RecLine"], errors="coerce").clip(1e-6, 1 - 1e-6)
+    odds = pd.to_numeric(dm.get("Odds_Price", np.nan), errors="coerce")
+    payout = np.where(odds >= 0, odds / 100.0, 100.0 / np.maximum(-odds, 1e-9))
+    ok_ev = p_truth.notna() & np.isfinite(payout)
+
     dm.loc[ok_ev, "EV_Sh_vs_Rec_Dollar"] = (p_truth[ok_ev] * payout[ok_ev]) - (1.0 - p_truth[ok_ev])
-    dm.loc[ok_ev, "EV_Sh_vs_Rec_Prob"]   = p_truth[ok_ev] - dm.loc[ok_ev, "Rec_Implied_Prob"]
-    dm.loc[ok_ev, "Kelly_Fraction"]      = np.maximum(
+    dm.loc[ok_ev, "EV_Sh_vs_Rec_Prob"] = p_truth[ok_ev] - dm.loc[ok_ev, "Rec_Implied_Prob"]
+    dm.loc[ok_ev, "Kelly_Fraction"] = np.maximum(
         0.0,
         ((p_truth[ok_ev] * payout[ok_ev]) - (1.0 - p_truth[ok_ev])) / payout[ok_ev]
     )
 
-   
-        # --- compact dtypes (re‑ensure columns exist first to avoid KeyError) ---
     for c in out_cols:
         if c not in dm.columns:
             dm[c] = np.nan
         dm[c] = pd.to_numeric(dm[c], errors="coerce").astype("float32")
 
     return dm
-
 
 def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame,
                                        df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
