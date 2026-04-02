@@ -9909,6 +9909,26 @@ def train_sharp_model_from_bq(
             limit_col="Sharp_Limit_Total",
             sigma_col="Sigma_Pts",  # your spreads block already tries to create Sigma_Pts
         )
+        print("EV DEBUG")
+        for c in [
+            "Bookmaker",
+            "Value",
+            "Odds_Price",
+            "Sigma_Pts",
+            "Truth_Fair_Prob_at_SharpLine",
+            "Truth_Margin_Mu",
+            "Truth_Sigma",
+            "Truth_Fair_Prob_at_RecLine",
+            "Rec_Implied_Prob",
+            "EV_Sh_vs_Rec_Dollar",
+        ]:
+            if c in df_market.columns:
+                s = pd.to_numeric(df_market[c], errors="coerce") if c not in ["Bookmaker"] else df_market[c]
+                if c == "Bookmaker":
+                    print(c, "nonnull:", s.notna().sum(), "unique:", s.astype(str).nunique())
+                    print("sharp matches:", df_market["Bookmaker"].astype(str).str.lower().isin(SHARP_BOOKS).sum())
+                else:
+                    print(c, "nonnull:", pd.Series(s).notna().sum())
         df_market["EDGE_TARGET"] = pd.to_numeric(
             df_market["EV_Sh_vs_Rec_Dollar"], errors="coerce"
         ).clip(-0.25, 0.25)
