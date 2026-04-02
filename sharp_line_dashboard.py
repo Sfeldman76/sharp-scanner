@@ -10998,6 +10998,9 @@ def train_sharp_model_from_bq(
             df_market["Edge_Proxy_Total"] *
             (1.0 + 0.25 * df_market["Value_Odds_Edge_Aligned"])
         )
+        print("EDGE_TARGET stats:")
+        print(df_market["EDGE_TARGET"].describe())
+        print("NaNs:", df_market["EDGE_TARGET"].isna().sum())
         extend_unique(features, hybrid_timing_features)
         extend_unique(features, hybrid_odds_timing_features)
         timing_cols = build_timing_aggregates_inplace(df_bt)
@@ -11220,26 +11223,26 @@ def train_sharp_model_from_bq(
             return
         
         # 1) build y + mask FIRST (so X and y always aligned)
-        if "SHARP_HIT_BOOL" not in df_market.columns:
-            st.warning("⚠️ Missing SHARP_HIT_BOOL in df_market — skipping.")
+        # 1) build EDGE CLASS y + mask FIRST
+        if "EV_Sh_vs_Rec_Dollar" not in df_market.columns:
+            st.warning("⚠️ Missing EV_Sh_vs_Rec_Dollar in df_market — skipping.")
             return
         
-        y_series = pd.to_numeric(df_market["SHARP_HIT_BOOL"], errors="coerce")
-        valid_mask = y_series.notna()
+        edge_series = pd.to_numeric(df_market["EV_Sh_vs_Rec_Dollar"], errors="coerce").clip(-0.25, 0.25)
+        valid_mask = edge_series.notna() & np.isfinite(edge_series)
         
         df_valid = df_market.loc[valid_mask].reset_index(drop=True)
-        y_full = (
-            y_series.loc[valid_mask]
-            .where(y_series.loc[valid_mask].isin([0, 1]), 0)
-            .fillna(0)
-            .astype("int8")
-            .to_numpy()
-        )
+        edge_valid = edge_series.loc[valid_mask]
+        
+        # quantile threshold avoids "no diversity"
+        thr = edge_valid.quantile(0.70)
+        
+        y_full = (edge_valid > thr).astype("int8").to_numpy()
         
         if np.unique(y_full).size < 2:
-            title_market = str(market).upper() if "market" in locals() else "MARKET"
-            st.warning(f"⚠️ Skipping {title_market} — only one label class.")
+            st.warning(f"⚠️ Skipping {str(market).upper()} — only one edge-label class.")
             return
+        
         
         # 2) build X_full ONCE from masked frame (training truth)
         def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
