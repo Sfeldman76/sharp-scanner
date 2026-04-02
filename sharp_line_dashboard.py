@@ -1065,7 +1065,7 @@ def compute_ev_features_sharp_vs_rec(
     print("games with 1 sharp outcome:", int((pair_diag["n_outcomes"] == 1).sum()))
     print(pair_diag["n_outcomes"].describe())
     
-    bad_games = pair_diag[pair_diag["n_outcomes"] < 2]["Game_Key"].head(10).tolist()
+    bad_games = pair_diag[pair_diag["n_outcomes"] < 2][pair_ke].head(10).tolist()
     print("sample bad games:", bad_games)
     print(
         sharp_rows.groupby([pair_key, "Market"])["Bookmaker"]
