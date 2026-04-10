@@ -11864,12 +11864,26 @@ def train_sharp_model_from_bq(
         
         # ----------------------------
         # 4) AutoFS on train slice (pre-AutoFS matrices)
-        # ===================== AutoFS on ALL features (train slice) =====================
-        # These are "all-features" DataFrames aligned to your split indices
-        X_df_train_full = pd.DataFrame(X_full[train_all_idx], columns=list(features_pruned))
-        X_df_hold_full  = pd.DataFrame(X_full[hold_idx],      columns=list(features_pruned))  # optional, for intersection checks
-        
-        # Model proto for AutoFS
+        # ----------------------------
+        # 4) AutoFS on train slice (HEAD-SPECIFIC)
+        # Outcome / Situation / Value each get their own AutoFS
+        # NOTE:
+        #   - feature_cols remains the OUTCOME head selected list for backward compatibility
+        #   - X_train / X_hold / X_full remain the OUTCOME matrices for backward compatibility
+        #   - additive names are created for situation/value heads
+        # ----------------------------
+
+        # Full pruned matrices (same rows, same split-safe base) for per-head AutoFS
+        X_df_train_full_all = pd.DataFrame(X_full[train_all_idx], columns=list(features_pruned))
+        X_df_hold_full_all  = pd.DataFrame(X_full[hold_idx],      columns=list(features_pruned))
+        X_df_full_all       = pd.DataFrame(X_full,                columns=list(features_pruned))
+
+        def _final_clean(df: pd.DataFrame) -> pd.DataFrame:
+            df = df.apply(pd.to_numeric, errors="coerce")
+            df = df.replace([np.inf, -np.inf], np.nan)
+            med = df.median(numeric_only=True)
+            return df.fillna(med).fillna(0.0)
+
         def _default_proto():
             return XGBClassifier(
                 objective="binary:logistic",
@@ -11886,84 +11900,147 @@ def train_sharp_model_from_bq(
                 n_jobs=1,
                 random_state=42,
             )
-        
-        try:
-            _model_proto = est_auc
-        except Exception:
+
+        def _run_head_autofs(head_name: str, y_head_train: np.ndarray):
             try:
-                _model_proto = est_ll
+                _model_proto = est_auc
             except Exception:
-                _model_proto = _default_proto()
-        
-        feature_cols, shap_summary = select_features_auto(
-            model_proto=_model_proto,
-            X_df_train=X_df_train_full,
-            y_train=y_train,
-            folds=folds,
-            sport_key=sport_key,
-            must_keep=[],
-        
-            use_auc_auto=True,
-            auc_patience=300,
-            accept_metric="auc",
-            auc_min_improve=0.0,
-        
-            topk_per_fold=200,
-            min_presence=0.50,
-            sign_flip_max=0.35,
-        
-            corr_within=0.90,
-            corr_global=0.97,
-        
-            max_feats_major=200,
-            max_feats_small=140,
-        
-            flip_gain_min=0.0,
-            auc_verbose=True,
-            log_func=log_func,
-        )
-        
-        # Keep only features present in BOTH train and hold (defensive)
-        feature_cols_sel = [c for c in feature_cols if c in X_df_train_full.columns and c in X_df_hold_full.columns]
-        log_func(f"[AutoFS] selected={len(feature_cols_sel)} (train_cols={X_df_train_full.shape[1]})")
-        
+                try:
+                    _model_proto = est_ll
+                except Exception:
+                    _model_proto = _default_proto()
+
+            feat_cols_head, shap_summary_head = select_features_auto(
+                model_proto=_model_proto,
+                X_df_train=X_df_train_full_all,
+                y_train=y_head_train,
+                folds=folds,
+                sport_key=sport_key,
+                must_keep=[],
+
+                use_auc_auto=True,
+                auc_patience=300,
+                accept_metric="auc",
+                auc_min_improve=0.0,
+
+                topk_per_fold=200,
+                min_presence=0.50,
+                sign_flip_max=0.35,
+
+                corr_within=0.90,
+                corr_global=0.97,
+
+                max_feats_major=200,
+                max_feats_small=140,
+
+                flip_gain_min=0.0,
+                auc_verbose=True,
+                log_func=log_func,
+            )
+
+            # keep only columns present in BOTH split-safe matrices
+            feat_cols_head = [
+                c for c in feat_cols_head
+                if c in X_df_train_full_all.columns and c in X_df_hold_full_all.columns
+            ]
+
+            log_func(f"[AutoFS:{head_name}] selected={len(feat_cols_head)}")
+
+            X_train_head_df = _final_clean(X_df_train_full_all.reindex(columns=feat_cols_head))
+            X_hold_head_df  = _final_clean(X_df_hold_full_all.reindex(columns=feat_cols_head))
+            X_full_head_df  = _final_clean(X_df_full_all.reindex(columns=feat_cols_head))
+
+            return {
+                "feature_cols": list(feat_cols_head),
+                "shap_summary": shap_summary_head,
+                "X_train": X_train_head_df.to_numpy(np.float32, copy=False),
+                "X_hold":  X_hold_head_df.to_numpy(np.float32, copy=False),
+                "X_full":  X_full_head_df.to_numpy(np.float32, copy=False),
+            }
+
+        # ----------------------------
+        # Outcome head AutoFS
+        # canonical / backward-compatible head
+        # ----------------------------
+        autofs_outcome = _run_head_autofs("outcome", y_train)
+
+        # ----------------------------
+        # Situation head AutoFS
+        # phase 1 target = y_train_situation (same label, different head)
+        # ----------------------------
+        autofs_situation = _run_head_autofs("situation", y_train_situation)
+
+        # ----------------------------
+        # Value head AutoFS
+        # IMPORTANT: use classification target for AutoFS because select_features_auto
+        # is classifier/AUC oriented in the current pipeline
+        # ----------------------------
+        autofs_value = _run_head_autofs("value", y_train_value_cls)
+
+        # ----------------------------
+        # Optional displays
+        # ----------------------------
         try:
-            st.write(f"🔎 AutoFS kept {len(feature_cols_sel)} features")
-            st.dataframe(shap_summary.head(25))
+            st.write(f"🔎 Outcome AutoFS kept {len(autofs_outcome['feature_cols'])} features")
+            st.dataframe(autofs_outcome["shap_summary"].head(25))
+            st.write(f"🔎 Situation AutoFS kept {len(autofs_situation['feature_cols'])} features")
+            st.dataframe(autofs_situation["shap_summary"].head(25))
+            st.write(f"🔎 Value AutoFS kept {len(autofs_value['feature_cols'])} features")
+            st.dataframe(autofs_value["shap_summary"].head(25))
         except Exception:
             pass
-        
-        # ===================== Rebuild SELECTED matrices ONLY from the full split-safe DFs =====================
-        def _final_clean(df: pd.DataFrame) -> pd.DataFrame:
-            df = df.apply(pd.to_numeric, errors="coerce")
-            df = df.replace([np.inf, -np.inf], np.nan)
-            med = df.median(numeric_only=True)
-            return df.fillna(med).fillna(0.0)
-        
-        # Selected, cleaned train/hold/full matrices
-        X_train_df_sel = _final_clean(X_df_train_full.reindex(columns=feature_cols_sel))
-        X_hold_df_sel  = _final_clean(X_df_hold_full.reindex(columns=feature_cols_sel))
-        
-        X_train_sel = X_train_df_sel.to_numpy(np.float32, copy=False)
-        X_hold_sel  = X_hold_df_sel.to_numpy(np.float32, copy=False)
-        
-        # If you need "full" for later inference by indices, build it once from the full all-features DF:
-        X_df_full_all = pd.DataFrame(X_full, columns=list(features_pruned))
-        X_full_sel    = _final_clean(X_df_full_all.reindex(columns=feature_cols_sel)).to_numpy(np.float32, copy=False)
-        
-        # Hard checks
-        assert X_train_sel.shape[1] == len(feature_cols_sel)
-        assert X_hold_sel.shape[1]  == len(feature_cols_sel)
-        assert X_full_sel.shape[1]  == len(feature_cols_sel)
-        
-        assert X_train_sel.shape[0] == len(train_all_idx) == y_train.shape[0]
-        assert X_hold_sel.shape[0]  == len(hold_idx)      == y_hold.shape[0]
 
-                # ---- Canonicalize names AFTER AutoFS so the rest of the pipeline keeps working ----
-        X_train = X_train_sel
-        X_hold  = X_hold_sel
-        X_full  = X_full_sel
-        
+        # ----------------------------
+        # Canonicalize names AFTER head-specific AutoFS
+        # Outcome head keeps legacy names for downstream compatibility
+        # ----------------------------
+        feature_cols = list(autofs_outcome["feature_cols"])     # legacy / downstream-safe
+        features_pruned = tuple(feature_cols)                   # legacy alias if later code expects it
+
+        X_train = autofs_outcome["X_train"]                     # legacy / downstream-safe
+        X_hold  = autofs_outcome["X_hold"]                      # legacy / downstream-safe
+        X_full  = autofs_outcome["X_full"]                      # legacy / downstream-safe
+
+        # ----------------------------
+        # Additive per-head feature lists
+        # ----------------------------
+        feature_cols_outcome   = list(autofs_outcome["feature_cols"])
+        feature_cols_situation = list(autofs_situation["feature_cols"])
+        feature_cols_value     = list(autofs_value["feature_cols"])
+
+        # ----------------------------
+        # Additive per-head matrices
+        # ----------------------------
+        X_train_outcome = autofs_outcome["X_train"]
+        X_hold_outcome  = autofs_outcome["X_hold"]
+        X_full_outcome  = autofs_outcome["X_full"]
+
+        X_train_situation = autofs_situation["X_train"]
+        X_hold_situation  = autofs_situation["X_hold"]
+        X_full_situation  = autofs_situation["X_full"]
+
+        X_train_value = autofs_value["X_train"]
+        X_hold_value  = autofs_value["X_hold"]
+        X_full_value  = autofs_value["X_full"]
+
+        # ----------------------------
+        # Hard checks
+        # ----------------------------
+        assert X_train_outcome.shape[0]   == len(y_train),           "X_train_outcome row mismatch"
+        assert X_hold_outcome.shape[0]    == len(y_hold),            "X_hold_outcome row mismatch"
+
+        assert X_train_situation.shape[0] == len(y_train_situation), "X_train_situation row mismatch"
+        assert X_hold_situation.shape[0]  == len(y_hold_situation),  "X_hold_situation row mismatch"
+
+        assert X_train_value.shape[0]     == len(y_train_value_cls), "X_train_value row mismatch"
+        assert X_hold_value.shape[0]      == len(y_hold_value_cls),  "X_hold_value row mismatch"
+
+        log_func(
+            f"[AutoFS] outcome={len(feature_cols_outcome)} | "
+            f"situation={len(feature_cols_situation)} | "
+            f"value={len(feature_cols_value)}"
+        )
+             
         # Shared selected features for ALL heads
         feature_cols = list(feature_cols_sel)
         
@@ -12545,7 +12622,7 @@ def train_sharp_model_from_bq(
         )
         
         model_situation_cls.fit(
-            X_train,
+            X_train_situation,
             y_train_situation,
             sample_weight=w_train,
             verbose=False,
@@ -12576,7 +12653,7 @@ def train_sharp_model_from_bq(
         )
         
         model_value_cls.fit(
-            X_train,
+            X_train_value,
             y_train_value_cls,
             sample_weight=w_train,
             verbose=False,
@@ -12606,7 +12683,7 @@ def train_sharp_model_from_bq(
         )
         
         model_value_reg.fit(
-            X_train,
+            X_train_value,
             y_train_value_reg,
             sample_weight=w_train,
             verbose=False,
@@ -12615,65 +12692,7 @@ def train_sharp_model_from_bq(
         pred_value_reg_train = np.asarray(model_value_reg.predict(X_train), dtype=np.float64)
         pred_value_reg_hold  = np.asarray(model_value_reg.predict(X_hold),  dtype=np.float64)
         
-        # ----------------------------
-        # 6D) META-COMBINER
-        # ----------------------------
-        meta_train_df = pd.DataFrame({
-            "Meta_P_Outcome":   np.asarray(p_train_vec, dtype=np.float64),          # calibrated outcome head
-            "Meta_P_Situation": np.asarray(p_situation_train_vec, dtype=np.float64),
-            "Meta_P_Value":     np.asarray(p_value_train_vec, dtype=np.float64),
-            "Meta_Value_Reg":   np.asarray(pred_value_reg_train, dtype=np.float64),
-        }, index=train_df.index)
         
-        meta_hold_df = pd.DataFrame({
-            "Meta_P_Outcome":   np.asarray(p_hold_vec, dtype=np.float64),           # calibrated outcome head
-            "Meta_P_Situation": np.asarray(p_situation_hold_vec, dtype=np.float64),
-            "Meta_P_Value":     np.asarray(p_value_hold_vec, dtype=np.float64),
-            "Meta_Value_Reg":   np.asarray(pred_value_reg_hold, dtype=np.float64),
-        }, index=hold_df.index)
-        
-        # Optional safe context
-        if "Odds_Price" in train_df.columns:
-            meta_train_df["Meta_Odds_Price"] = pd.to_numeric(train_df["Odds_Price"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-            meta_hold_df["Meta_Odds_Price"]  = pd.to_numeric(hold_df["Odds_Price"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-        
-        if "Value" in train_df.columns:
-            meta_train_df["Meta_Line_Value"] = pd.to_numeric(train_df["Value"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-            meta_hold_df["Meta_Line_Value"]  = pd.to_numeric(hold_df["Value"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-        
-        meta_train_df = meta_train_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        meta_hold_df  = meta_hold_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        
-        meta_model = XGBRegressor(
-            objective="reg:squarederror",
-            eval_metric="rmse",
-            tree_method="hist",
-            grow_policy="lossguide",
-            max_depth=3,
-            max_leaves=32,
-            learning_rate=0.03,
-            subsample=0.90,
-            colsample_bytree=0.90,
-            min_child_weight=2.0,
-            gamma=0.25,
-            reg_alpha=0.05,
-            reg_lambda=3.0,
-            max_bin=256,
-            n_estimators=300,
-            n_jobs=1,
-            random_state=2029,
-        )
-        
-        meta_model.fit(
-            meta_train_df.to_numpy(dtype=np.float32),
-            y_train_value_reg.astype(np.float32),
-            sample_weight=w_train,
-            verbose=False,
-        )
-        
-        final_bet_score_train = np.asarray(meta_model.predict(meta_train_df.to_numpy(dtype=np.float32)), dtype=np.float64)
-        final_bet_score_hold  = np.asarray(meta_model.predict(meta_hold_df.to_numpy(dtype=np.float32)),  dtype=np.float64)
-
         # -----------------------------------------
         # OOF predictions (train-only) + blending
         # -----------------------------------------
@@ -12909,7 +12928,65 @@ def train_sharp_model_from_bq(
         
         p_train_vec = np.asarray(np.clip(p_train_vec, CLIP, 1.0 - CLIP), float)
         p_hold_vec  = np.asarray(np.clip(p_hold_vec,  CLIP, 1.0 - CLIP), float)
+        # ----------------------------
+        # 6D) META-COMBINER
+        # ----------------------------
+        meta_train_df = pd.DataFrame({
+            "Meta_P_Outcome":   np.asarray(p_train_vec, dtype=np.float64),          # calibrated outcome head
+            "Meta_P_Situation": np.asarray(p_situation_train_vec, dtype=np.float64),
+            "Meta_P_Value":     np.asarray(p_value_train_vec, dtype=np.float64),
+            "Meta_Value_Reg":   np.asarray(pred_value_reg_train, dtype=np.float64),
+        }, index=train_df.index)
         
+        meta_hold_df = pd.DataFrame({
+            "Meta_P_Outcome":   np.asarray(p_hold_vec, dtype=np.float64),           # calibrated outcome head
+            "Meta_P_Situation": np.asarray(p_situation_hold_vec, dtype=np.float64),
+            "Meta_P_Value":     np.asarray(p_value_hold_vec, dtype=np.float64),
+            "Meta_Value_Reg":   np.asarray(pred_value_reg_hold, dtype=np.float64),
+        }, index=hold_df.index)
+        
+        # Optional safe context
+        if "Odds_Price" in train_df.columns:
+            meta_train_df["Meta_Odds_Price"] = pd.to_numeric(train_df["Odds_Price"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+            meta_hold_df["Meta_Odds_Price"]  = pd.to_numeric(hold_df["Odds_Price"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        
+        if "Value" in train_df.columns:
+            meta_train_df["Meta_Line_Value"] = pd.to_numeric(train_df["Value"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+            meta_hold_df["Meta_Line_Value"]  = pd.to_numeric(hold_df["Value"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        
+        meta_train_df = meta_train_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        meta_hold_df  = meta_hold_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        
+        meta_model = XGBRegressor(
+            objective="reg:squarederror",
+            eval_metric="rmse",
+            tree_method="hist",
+            grow_policy="lossguide",
+            max_depth=3,
+            max_leaves=32,
+            learning_rate=0.03,
+            subsample=0.90,
+            colsample_bytree=0.90,
+            min_child_weight=2.0,
+            gamma=0.25,
+            reg_alpha=0.05,
+            reg_lambda=3.0,
+            max_bin=256,
+            n_estimators=300,
+            n_jobs=1,
+            random_state=2029,
+        )
+        
+        meta_model.fit(
+            meta_train_df.to_numpy(dtype=np.float32),
+            y_train_value_reg.astype(np.float32),
+            sample_weight=w_train,
+            verbose=False,
+        )
+        
+        final_bet_score_train = np.asarray(meta_model.predict(meta_train_df.to_numpy(dtype=np.float32)), dtype=np.float64)
+        final_bet_score_hold  = np.asarray(meta_model.predict(meta_hold_df.to_numpy(dtype=np.float32)),  dtype=np.float64)
+
         # Diagnostics (report BOTH calibration quality + stability)
         ece_tr = expected_calibration_error(y_full[train_all_idx].astype(int), p_train_vec, n_bins=10)
         ece_ho = expected_calibration_error(y_full[hold_idx].astype(int),      p_hold_vec,  n_bins=10)
