@@ -157,7 +157,7 @@ from pandas.api.types import (
 from copy import deepcopy
 
 from sklearn.model_selection import RandomizedSearchCV
-
+from xgboost import XGBClassifier, XGBRegressor
 from sklearn.base import clone
              
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
