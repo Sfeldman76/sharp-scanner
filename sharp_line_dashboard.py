@@ -155,9 +155,11 @@ from pandas.api.types import (
     is_period_dtype, is_interval_dtype, is_object_dtype
 )
 from copy import deepcopy
-
-from sklearn.model_selection import RandomizedSearchCV
 from xgboost import XGBClassifier, XGBRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from scipy.stats import spearmanr
+from sklearn.model_selection import RandomizedSearchCV
+
 from sklearn.base import clone
              
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
