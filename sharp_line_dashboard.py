@@ -11112,7 +11112,71 @@ def train_sharp_model_from_bq(
         # merge view-driven features (all_present) without losing order
         if 'all_present' in locals():
             extend_unique(features, all_present)
+        # ============================================
+        # MULTI-HEAD TARGET HELPERS
+        # ============================================
         
+        def _american_to_payout_multiple(odds_series: pd.Series) -> np.ndarray:
+            o = pd.to_numeric(odds_series, errors="coerce").to_numpy(dtype=float)
+            return np.where(
+                o >= 0,
+                o / 100.0,
+                100.0 / np.maximum(np.abs(o), 1e-9)
+            )
+        
+        def _build_three_targets(df_in: pd.DataFrame) -> pd.DataFrame:
+            """
+            Additive / backward-safe target construction.
+        
+            Adds:
+              TARGET_OUTCOME_BOOL   -> core outcome target (same semantics as SHARP_HIT_BOOL)
+              TARGET_SITUATION_BOOL -> situation-only proxy target (same label, different head later)
+              TARGET_VALUE_REG      -> realized profit per 1u
+              TARGET_VALUE_BOOL     -> positive realized profit per 1u
+        
+            Notes:
+            - We keep SHARP_HIT_BOOL untouched.
+            - Situation target is intentionally same label for phase 1; the situation head will differ by feature view,
+              not by label. This avoids inventing a noisy pseudo-label.
+            """
+            df = df_in.copy()
+        
+            # Core outcome target
+            df["TARGET_OUTCOME_BOOL"] = pd.to_numeric(df.get("SHARP_HIT_BOOL", np.nan), errors="coerce")
+        
+            # Phase-1 situation target: same label, separate head later
+            df["TARGET_SITUATION_BOOL"] = df["TARGET_OUTCOME_BOOL"]
+        
+            # Value targets from realized profit per 1u
+            if "Odds_Price" not in df.columns:
+                df["TARGET_VALUE_REG"] = np.nan
+                df["TARGET_VALUE_BOOL"] = np.nan
+                return df
+        
+            payout_mult = _american_to_payout_multiple(df["Odds_Price"])
+        
+            push = np.zeros(len(df), dtype=int)
+            for c in ["Push_Flag", "PUSH_FLAG", "Was_Push", "is_push"]:
+                if c in df.columns:
+                    push = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int).to_numpy()
+                    break
+        
+            y_hit = pd.to_numeric(df["TARGET_OUTCOME_BOOL"], errors="coerce").to_numpy(dtype=float)
+        
+            realized_profit = np.full(len(df), np.nan, dtype=float)
+        
+            win_mask  = (y_hit == 1) & (push == 0)
+            lose_mask = (y_hit == 0) & (push == 0)
+            push_mask = (push == 1)
+        
+            realized_profit[win_mask]  = payout_mult[win_mask]
+            realized_profit[lose_mask] = -1.0
+            realized_profit[push_mask] = 0.0
+        
+            df["TARGET_VALUE_REG"]  = realized_profit.astype("float32")
+            df["TARGET_VALUE_BOOL"] = (df["TARGET_VALUE_REG"] > 0).astype("Int64")
+        
+            return df
         # ======= IMPORTANT: work with df_market from here on =======
         
         # Make sure df_market has placeholders for requested feature columns (0 default)
@@ -11274,28 +11338,69 @@ def train_sharp_model_from_bq(
             st.info("No features provided.")
             return
         
-        # 1) build y + mask FIRST (so X and y always aligned)
-        # 1) build EDGE CLASS y + mask FIRST
-        if "EV_Sh_vs_Rec_Dollar" not in df_market.columns:
-            st.warning("⚠️ Missing EV_Sh_vs_Rec_Dollar in df_market — skipping.")
+        # 1) build multi-head targets + canonical valid mask FIRST
+        df_market = _build_three_targets(df_market)
+        
+        required_target_cols = [
+            "TARGET_OUTCOME_BOOL",
+            "TARGET_SITUATION_BOOL",
+            "TARGET_VALUE_REG",
+            "TARGET_VALUE_BOOL",
+        ]
+        
+        missing_tgts = [c for c in required_target_cols if c not in df_market.columns]
+        if missing_tgts:
+            st.warning(f"⚠️ Missing required target columns: {missing_tgts} — skipping.")
             return
         
-        edge_series = pd.to_numeric(df_market["EV_Sh_vs_Rec_Dollar"], errors="coerce").clip(-0.25, 0.25)
-        valid_mask = edge_series.notna() & np.isfinite(edge_series)
+        # Canonical validity mask:
+        # outcome target must be present because it anchors split/CV/AutoFS
+        # value targets must also be present for the later heads
+        valid_mask = (
+            pd.to_numeric(df_market["TARGET_OUTCOME_BOOL"], errors="coerce").notna()
+            & pd.to_numeric(df_market["TARGET_SITUATION_BOOL"], errors="coerce").notna()
+            & pd.to_numeric(df_market["TARGET_VALUE_REG"], errors="coerce").notna()
+            & pd.to_numeric(df_market["TARGET_VALUE_BOOL"], errors="coerce").notna()
+        )
         
         df_valid = df_market.loc[valid_mask].reset_index(drop=True)
-        edge_valid = edge_series.loc[valid_mask]
         
-        # quantile threshold avoids "no diversity"
-        thr = edge_valid.quantile(0.70)
+        # Canonical split / AutoFS target = OUTCOME
+        y_full_outcome = (
+            pd.to_numeric(df_valid["TARGET_OUTCOME_BOOL"], errors="coerce")
+            .astype("int8")
+            .to_numpy()
+        )
         
-        y_full = (edge_valid > thr).astype("int8").to_numpy()
+        # Additional targets for later specialist heads
+        y_full_situation = (
+            pd.to_numeric(df_valid["TARGET_SITUATION_BOOL"], errors="coerce")
+            .astype("int8")
+            .to_numpy()
+        )
         
-        if np.unique(y_full).size < 2:
-            st.warning(f"⚠️ Skipping {str(market).upper()} — only one edge-label class.")
+        y_full_value_reg = (
+            pd.to_numeric(df_valid["TARGET_VALUE_REG"], errors="coerce")
+            .astype("float32")
+            .to_numpy()
+        )
+        
+        y_full_value_cls = (
+            pd.to_numeric(df_valid["TARGET_VALUE_BOOL"], errors="coerce")
+            .astype("int8")
+            .to_numpy()
+        )
+        
+        # Safety: outcome target must still be binary for the canonical split/AutoFS path
+        if np.unique(y_full_outcome).size < 2:
+            st.warning(f"⚠️ Skipping {str(market).upper()} — only one outcome-label class.")
             return
         
+        # Canonical y_full remains the outcome label to minimize downstream surgery
+        y_full = y_full_outcome
         
+        
+   
         # 2) build X_full ONCE from masked frame (training truth)
         def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
             out = df.reindex(columns=cols, fill_value=np.nan).copy()
@@ -11327,7 +11432,6 @@ def train_sharp_model_from_bq(
             )
         
         X_df = _to_numeric_block(df_valid, feature_cols)  # DataFrame float32
-        # Arrow-safe colnames
         X_df.columns = [str(c) for c in X_df.columns]
         
         # 3) (optional) corr report using SAME rows, SAME numeric block
@@ -11471,10 +11575,15 @@ def train_sharp_model_from_bq(
         #   - _norm_market, SHARP_BOOKS, etc.
         # =============================================================================
         
+
+        # =============================================================================
+        # ✅ SPLIT → WEIGHTS (ONCE) → CV FOLDS → AutoFS → REBUILD MATRICES → SEARCH/REFIT
+        # =============================================================================
+        
         # ----------------------------
         # 0) Finalize base matrices
         # ----------------------------
-        X_full = X_df.to_numpy(dtype=np.float32, copy=False)  # X_df must already match df_valid row-for-row
+        X_full = X_df.to_numpy(dtype=np.float32, copy=False)
         features_pruned = tuple(feature_cols)
         
         st.write(f"✅ Final feature count after pruning: {len(features_pruned)}")
@@ -11497,42 +11606,56 @@ def train_sharp_model_from_bq(
             bad = np.flatnonzero(pd.isna(times))
             keep = np.setdiff1d(np.arange(len(times)), bad)
         
-            X_full   = X_full[keep]
-            y_full   = y_full[keep]
-            groups   = groups[keep]
-            times    = times[keep]
-            df_valid = df_valid.iloc[keep].reset_index(drop=True)
+            X_full           = X_full[keep]
+            y_full           = y_full[keep]
+            y_full_outcome   = y_full_outcome[keep]
+            y_full_situation = y_full_situation[keep]
+            y_full_value_reg = y_full_value_reg[keep]
+            y_full_value_cls = y_full_value_cls[keep]
+            groups           = groups[keep]
+            times            = times[keep]
+            df_valid         = df_valid.iloc[keep].reset_index(drop=True)
         
         # ----------------------------
         # 1) HOLDOUT (true time-forward, group-safe)
+        # Canonical split anchor = OUTCOME label
         # ----------------------------
         train_all_idx, hold_idx = holdout_by_percent_groups(
             sport=sport,
             groups=groups,
             times=times,
-            y=y_full,
+            y=y_full_outcome,
             pct_holdout=None,
             min_train_games=25,
             min_hold_games=8,
-            ensure_label_diversity=False,  # keep it truly "latest chunk"
+            ensure_label_diversity=False,
         )
         
         train_all_idx = np.asarray(train_all_idx, dtype=int)
         hold_idx      = np.asarray(hold_idx, dtype=int)
         
-        # Anchor dfs (THIS is the anchor for everything else)
+        # Anchor dfs
         train_df = df_valid.iloc[train_all_idx].copy().reset_index(drop=True)
         hold_df  = df_valid.iloc[hold_idx].copy().reset_index(drop=True)
         
         # Anchor labels / groups / times
-        y_train = y_full[train_all_idx].astype(int)
+        y_train = y_full_outcome[train_all_idx].astype(int)
         g_train = groups[train_all_idx]
         t_train = times[train_all_idx]
         
-        y_hold  = y_full[hold_idx].astype(int)
+        y_hold  = y_full_outcome[hold_idx].astype(int)
         g_hold  = groups[hold_idx]
         t_hold  = times[hold_idx]
-       
+        
+        # Specialist targets aligned to same split
+        y_train_situation = y_full_situation[train_all_idx].astype(int)
+        y_hold_situation  = y_full_situation[hold_idx].astype(int)
+        
+        y_train_value_reg = y_full_value_reg[train_all_idx].astype(np.float32)
+        y_hold_value_reg  = y_full_value_reg[hold_idx].astype(np.float32)
+        
+        y_train_value_cls = y_full_value_cls[train_all_idx].astype(int)
+        y_hold_value_cls  = y_full_value_cls[hold_idx].astype(int)
         
         # ----------------------------
         # 2) Sample weights (BUILD ONCE from train_df) — no drops
@@ -11833,21 +11956,32 @@ def train_sharp_model_from_bq(
         
         assert X_train_sel.shape[0] == len(train_all_idx) == y_train.shape[0]
         assert X_hold_sel.shape[0]  == len(hold_idx)      == y_hold.shape[0]
-        # ---- Canonicalize names AFTER AutoFS so the rest of the pipeline keeps working ----
+
+                # ---- Canonicalize names AFTER AutoFS so the rest of the pipeline keeps working ----
         X_train = X_train_sel
         X_hold  = X_hold_sel
         X_full  = X_full_sel
         
+        # Shared selected features for ALL heads
+        feature_cols = list(feature_cols_sel)
+        
+        # Keep specialist targets aligned and ready for the next training section
+        # (Outcome head uses existing downstream names y_train / y_hold)
+        # New heads will use these additive names later:
+        #   y_train_situation, y_hold_situation
+        #   y_train_value_reg, y_hold_value_reg
+        #   y_train_value_cls, y_hold_value_cls
         feature_cols = list(feature_cols_sel)   # make sure everyone uses the selected list
         features_pruned = tuple(feature_cols)   # optional: if later code expects this name
+ 
         # ----------------------------
-        # 6) FAST SEARCH → MODERATE/DEEP REFIT (SMOOTHER)
+        # 6A) OUTCOME HEAD — FAST SEARCH → MODERATE/DEEP REFIT
         # ----------------------------
         pos_rate = float(np.mean(y_train))
         n_jobs = 1
         
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
-            sport=sport, X_rows=X_train_sel.shape[0], n_jobs=n_jobs, features=feature_cols_sel
+            sport=sport, X_rows=X_train.shape[0], n_jobs=n_jobs, features=feature_cols
         )
         
         base_kwargs["base_score"] = float(np.clip(pos_rate, 1e-4, 1 - 1e-4))
@@ -11870,7 +12004,6 @@ def train_sharp_model_from_bq(
         est_ll = XGBClassifier(**{**train_kwargs, "n_estimators": SEARCH_N_EST, "eval_metric": "logloss", "max_bin": SEARCH_MAX_BIN, "n_jobs": 1})
         est_auc = XGBClassifier(**{**train_kwargs, "n_estimators": SEARCH_N_EST, "eval_metric": "auc",     "max_bin": SEARCH_MAX_BIN, "n_jobs": 1})
         
-        # Smoother (less punitive) search ranges
         param_space_common = dict(
             max_depth        = randint(2, 5),
             max_leaves       = randint(16, 96),
@@ -11995,8 +12128,8 @@ def train_sharp_model_from_bq(
             rs_ll, rs_auc = _make_search_objects(seed_ll, seed_auc)
         
             with threadpool_limits(limits=1):
-                rs_ll.fit(X_train_sel, y_train, groups=g_train, **fit_params_search)
-                rs_auc.fit(X_train_sel, y_train, groups=g_train, **fit_params_search)
+                rs_ll.fit(X_train, y_train, groups=g_train, **fit_params_search)
+                rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
         
             auc_cv_raw = float(rs_auc.best_score_)
             logloss_cv = float(-rs_ll.best_score_)
@@ -12079,7 +12212,6 @@ def train_sharp_model_from_bq(
         if best_auc_params is None or best_ll_params is None:
             logger.error("❌ No params selected for %s %s; cannot continue.", sport, market)
             return
-        
         # ---------------- stabilize best params (regularization-first) ----------------
         # Key fixes vs your block:
         #  1) Base-stabilize ONCE ("normal") BEFORE probe
@@ -12089,6 +12221,8 @@ def train_sharp_model_from_bq(
         #  5) Use feature_cols_sel (selected) everywhere; never touch X_full[...] here
         #  6) Stamp feature names using feature_cols_sel (not feature_cols, not X_full[train_all_idx])
         
+
+        # ---------------- stabilize best params (regularization-first) ----------------
         STABLE = dict(
             objective="binary:logistic",
             tree_method="hist",
@@ -12099,43 +12233,36 @@ def train_sharp_model_from_bq(
         def _stabilize(best_params: dict, *, mode: str = "normal", leaf_cap: int = 128) -> dict:
             bp = dict(best_params or {})
         
-            # ---- base defaults (fallbacks if search didn't set them) ----
             min_child  = float(bp.get("min_child_weight", 2.0))
             gamma      = float(bp.get("gamma", 0.0))
             reg_lambda = float(bp.get("reg_lambda", 1.0))
             reg_alpha  = float(bp.get("reg_alpha", 0.0))
             lr         = float(bp.get("learning_rate", 0.03))
         
-            # ---- mode adjustments (soft + hard) ----
             if mode == "loosen_soft":
-                # small nudge: allow splits + a bit more movement
                 min_child  = max(1.0,  min_child * 0.60)
                 gamma      = max(0.0,  gamma * 0.60)
                 reg_lambda = max(0.25, reg_lambda * 0.70)
                 lr         = min(0.06, lr * 1.25)
         
             elif mode == "loosen":
-                # strong nudge: break out of collapse
                 min_child  = max(1.0,  min_child * 0.25)
                 gamma      = max(0.0,  gamma * 0.25)
                 reg_lambda = max(0.10, reg_lambda * 0.25)
                 lr         = min(0.07, lr * 1.50)
         
             elif mode == "tighten":
-                # dampen extremes / volatility
                 min_child  = max(8.0,  min_child * 2.0)
                 gamma      = max(2.0,  gamma * 2.0)
                 reg_lambda = max(5.0,  reg_lambda * 2.0)
-                lr         = min(0.03, lr)  # never increase when tightening
+                lr         = min(0.03, lr)
         
-            # ---- clamp / sanity ranges (prevents crazy params from search) ----
             min_child  = float(np.clip(min_child, 1.0,  50.0))
             gamma      = float(np.clip(gamma,     0.0,  50.0))
             reg_alpha  = float(np.clip(reg_alpha, 0.0,  50.0))
             reg_lambda = float(np.clip(reg_lambda, 0.05, 200.0))
             lr         = float(np.clip(lr,        0.005, 0.10))
         
-            # ---- bynode support check (defensive across xgb versions) ----
             try:
                 _supports_bynode = ("colsample_bynode" in XGBClassifier().get_xgb_params())
             except Exception:
@@ -12145,31 +12272,23 @@ def train_sharp_model_from_bq(
             node_val = float(bp.get("colsample_bynode", bp.get("colsample_bylevel", 0.85)))
             node_val = float(np.clip(node_val, 0.40, 0.90))
         
-            # ---- final stabilized updates ----
             updates = {
                 **STABLE,
-        
-                # force lossguide leaf growth
                 "max_depth": 0,
                 "max_leaves": int(np.clip(int(bp.get("max_leaves", leaf_cap)), 16, leaf_cap)),
-        
                 "min_child_weight": min_child,
                 "gamma": gamma,
                 "reg_alpha": reg_alpha,
                 "reg_lambda": reg_lambda,
-        
                 "learning_rate": lr,
-        
                 "subsample": float(np.clip(float(bp.get("subsample", 0.85)), 0.55, 0.90)),
                 "colsample_bytree": float(np.clip(float(bp.get("colsample_bytree", 0.85)), 0.55, 0.90)),
                 node_key: node_val,
-        
                 "max_bin": int(np.clip(int(bp.get("max_bin", 256)), 128, 384)),
             }
         
             bp.update(updates)
         
-            # ---- remove unsafe/managed params (and predictor) for training ----
             for k in (
                 "predictor", "eval_metric", "_estimator_type", "response_method",
                 "n_estimators", "n_jobs", "scale_pos_weight",
@@ -12180,15 +12299,14 @@ def train_sharp_model_from_bq(
             return bp
         
         
-        # ===== Base stabilize first (normal) =====
         best_auc_params = _stabilize(best_auc_params, mode="normal", leaf_cap=128)
         best_ll_params  = _stabilize(best_ll_params,  mode="normal", leaf_cap=128)
         
         # ================== ES probe on chosen ES fold (deterministic) ===================
         tr_es_rel, va_es_rel = np.asarray(tr_es_rel), np.asarray(va_es_rel)
         
-        X_tr_es = X_train_sel[tr_es_rel]
-        X_va_es = X_train_sel[va_es_rel]
+        X_tr_es = X_train[tr_es_rel]
+        X_va_es = X_train[va_es_rel]
         y_tr_es = y_train[tr_es_rel]
         y_va_es = y_train[va_es_rel]
         
@@ -12258,22 +12376,18 @@ def train_sharp_model_from_bq(
         def _smooth_final_ntrees(n: int, *, mult: float = 1.6, floor: int = 240, ceil: int = 2000) -> int:
             return int(np.clip(int(round(n * mult)), floor, ceil))
         
-        # --- Probe-derived tree counts ---
         nt_auc = _best_ntrees_from_es(deep_auc, floor=120, ceil=int(DEEP_N_EST_CAP))
         nt_ll  = _best_ntrees_from_es(deep_ll,  floor=120, ceil=int(DEEP_N_EST_CAP))
         
         FINAL_NTREES_AUC = _smooth_final_ntrees(nt_auc, mult=1.6, floor=240, ceil=int(DEEP_N_EST_CAP))
         FINAL_NTREES_LL  = _smooth_final_ntrees(nt_ll,  mult=1.6, floor=240, ceil=int(DEEP_N_EST_CAP))
         
-        # --- ES fold preds from BOTH probes ---
         p_va_auc = np.clip(deep_auc.predict_proba(X_va_es)[:, 1], 1e-12, 1 - 1e-12)
         p_va_ll  = np.clip(deep_ll.predict_proba(X_va_es)[:, 1], 1e-12, 1 - 1e-12)
         
         auc_va_auc = float(roc_auc_score(y_va_es.astype(int), p_va_auc, sample_weight=w_va_es))
         auc_va_ll  = float(roc_auc_score(y_va_es.astype(int), p_va_ll,  sample_weight=w_va_es))
         
-        # --- Choose ONE "gate probe" and use it consistently everywhere ---
-        # tie-breaker: prefer ll if essentially equal (often more stable)
         EPS = 1e-6
         use_ll = (auc_va_ll > auc_va_auc + EPS) or (abs(auc_va_ll - auc_va_auc) <= EPS)
         
@@ -12282,7 +12396,6 @@ def train_sharp_model_from_bq(
         auc_va_es    = auc_va_ll if use_ll else auc_va_auc
         probe_for_it = deep_ll if use_ll else deep_auc
         
-        # Diagnostics from the same probe
         spread_std_raw   = float(np.std(p_va_diag))
         extreme_frac_raw = float(((p_va_diag < 0.35) | (p_va_diag > 0.65)).mean())
         
@@ -12312,7 +12425,6 @@ def train_sharp_model_from_bq(
             "auc_va_es": float(auc_va_es),
         })
         
-        # ================= Adaptive stabilize (NOW that probe stats exist) =================
         mode = "normal"
         
         COLLAPSE_STD_HARD   = 0.01
@@ -12328,15 +12440,10 @@ def train_sharp_model_from_bq(
         collapse_hard = (spread_std_raw < COLLAPSE_STD_HARD)
         collapse_soft = (spread_std_raw < COLLAPSE_STD_SOFT)
         
-        # Only loosen if collapse AND ES AUC is NOT good
         if (collapse_hard or collapse_soft) and (not auc_good):
             mode = "loosen"
-        
-        # Tighten if too extreme / too spread
         elif (spread_std_raw > SPREAD_STD_TIGHT) or (extreme_frac_raw > EXTREME_FRAC_TIGHT):
             mode = "tighten"
-        
-        # best_iter tiny is only a loosen trigger if ES AUC is bad
         elif (best_iter_i is not None and best_iter_i <= 2) and (not auc_good):
             mode = "loosen"
         
@@ -12350,14 +12457,11 @@ def train_sharp_model_from_bq(
         
         best_auc_params = _stabilize(best_auc_params, mode=mode, leaf_cap=128)
         best_ll_params  = _stabilize(best_ll_params,  mode=mode, leaf_cap=128)
-                
-
         
         # -------------------------
-        # Phase B: Final deep refit (NO early stopping) ✅ keep these models
+        # Final outcome refit
         # -------------------------
-        # IMPORTANT: use SELECTED feature list for monotones and stamping
-        FEATS_FOR_MONO = list(feature_cols_sel)
+        FEATS_FOR_MONO = list(feature_cols)
         
         MONO = {
             "Abs_Line_Move_From_Opening": +1,
@@ -12393,16 +12497,14 @@ def train_sharp_model_from_bq(
             final_auc.set_params(monotone_constraints=mono_str)
             final_ll.set_params(monotone_constraints=mono_str)
         
-        # Fit on aligned X_train_sel/y_train/w_train
-        final_auc.fit(X_train_sel, y_train, sample_weight=w_train, verbose=False)
-        final_ll.fit( X_train_sel, y_train, sample_weight=w_train, verbose=False)
+        final_auc.fit(X_train, y_train, sample_weight=w_train, verbose=False)
+        final_ll.fit( X_train, y_train, sample_weight=w_train, verbose=False)
         
         model_auc     = final_auc
         model_logloss = final_ll
         
-        # ---- Stamp feature names on boosters so we don't get f0,f1,... ----
         try:
-            real_names = list(map(str, feature_cols_sel))
+            real_names = list(map(str, feature_cols))
             n_model = int(getattr(model_auc, "n_features_in_", len(real_names)))
             if len(real_names) == n_model:
                 model_auc.feature_names_in_ = np.asarray(real_names, dtype=object)
@@ -12417,13 +12519,159 @@ def train_sharp_model_from_bq(
                     pass
         except Exception:
             pass
-        # -----------------------------------------
-        # OOF predictions (train-only) + blending
-        # + Calibration + Tables + Save + Artifacts (HARDENED)
-        # -----------------------------------------
-        # -----------------------------------------
-        # OOF predictions (train-only) + LOGIT blending + calibration
-        # -----------------------------------------
+        
+        # ----------------------------
+        # 6B) SITUATION HEAD
+        # ----------------------------
+        # Phase 1: same binary target, separate model/head
+        # This lets you later specialize feature view or target construction without breaking downstream.
+        
+        situation_train_kwargs = dict(train_kwargs)
+        situation_train_kwargs["base_score"] = float(np.clip(np.mean(y_train_situation), 1e-4, 1 - 1e-4))
+        
+        model_situation_cls = XGBClassifier(
+            **{
+                **situation_train_kwargs,
+                **best_auc_params,
+                "objective": "binary:logistic",
+                "eval_metric": ["logloss", "auc"],
+                "n_estimators": int(max(300, min(FINAL_NTREES_AUC, 900))),
+                "n_jobs": 1,
+                "random_state": 2026,
+                "seed": 2026,
+            }
+        )
+        
+        model_situation_cls.fit(
+            X_train,
+            y_train_situation,
+            sample_weight=w_train,
+            verbose=False,
+        )
+        
+        p_situation_train_vec = np.clip(model_situation_cls.predict_proba(X_train)[:, 1], 1e-6, 1 - 1e-6)
+        p_situation_hold_vec  = np.clip(model_situation_cls.predict_proba(X_hold)[:, 1],  1e-6, 1 - 1e-6)
+
+        # ----------------------------
+        # 6C) VALUE / EV HEADS
+        # ----------------------------
+        value_base_score = float(np.clip(np.mean(y_train_value_cls), 1e-4, 1 - 1e-4))
+        
+        value_cls_kwargs = dict(train_kwargs)
+        value_cls_kwargs["base_score"] = value_base_score
+        
+        model_value_cls = XGBClassifier(
+            **{
+                **value_cls_kwargs,
+                **best_auc_params,
+                "objective": "binary:logistic",
+                "eval_metric": ["logloss", "auc"],
+                "n_estimators": int(max(300, min(FINAL_NTREES_AUC, 900))),
+                "n_jobs": 1,
+                "random_state": 2027,
+                "seed": 2027,
+            }
+        )
+        
+        model_value_cls.fit(
+            X_train,
+            y_train_value_cls,
+            sample_weight=w_train,
+            verbose=False,
+        )
+        
+        p_value_train_vec = np.clip(model_value_cls.predict_proba(X_train)[:, 1], 1e-6, 1 - 1e-6)
+        p_value_hold_vec  = np.clip(model_value_cls.predict_proba(X_hold)[:, 1],  1e-6, 1 - 1e-6)
+        
+        model_value_reg = XGBRegressor(
+            objective="reg:squarederror",
+            eval_metric="rmse",
+            tree_method="hist",
+            grow_policy="lossguide",
+            max_depth=4,
+            max_leaves=64,
+            learning_rate=0.03,
+            subsample=0.85,
+            colsample_bytree=0.80,
+            min_child_weight=3.0,
+            gamma=0.5,
+            reg_alpha=0.1,
+            reg_lambda=5.0,
+            max_bin=256,
+            n_estimators=500,
+            n_jobs=1,
+            random_state=2028,
+        )
+        
+        model_value_reg.fit(
+            X_train,
+            y_train_value_reg,
+            sample_weight=w_train,
+            verbose=False,
+        )
+        
+        pred_value_reg_train = np.asarray(model_value_reg.predict(X_train), dtype=np.float64)
+        pred_value_reg_hold  = np.asarray(model_value_reg.predict(X_hold),  dtype=np.float64)
+        
+        # ----------------------------
+        # 6D) META-COMBINER
+        # ----------------------------
+        meta_train_df = pd.DataFrame({
+            "Meta_P_Outcome":   np.asarray(p_train_vec, dtype=np.float64),          # calibrated outcome head
+            "Meta_P_Situation": np.asarray(p_situation_train_vec, dtype=np.float64),
+            "Meta_P_Value":     np.asarray(p_value_train_vec, dtype=np.float64),
+            "Meta_Value_Reg":   np.asarray(pred_value_reg_train, dtype=np.float64),
+        }, index=train_df.index)
+        
+        meta_hold_df = pd.DataFrame({
+            "Meta_P_Outcome":   np.asarray(p_hold_vec, dtype=np.float64),           # calibrated outcome head
+            "Meta_P_Situation": np.asarray(p_situation_hold_vec, dtype=np.float64),
+            "Meta_P_Value":     np.asarray(p_value_hold_vec, dtype=np.float64),
+            "Meta_Value_Reg":   np.asarray(pred_value_reg_hold, dtype=np.float64),
+        }, index=hold_df.index)
+        
+        # Optional safe context
+        if "Odds_Price" in train_df.columns:
+            meta_train_df["Meta_Odds_Price"] = pd.to_numeric(train_df["Odds_Price"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+            meta_hold_df["Meta_Odds_Price"]  = pd.to_numeric(hold_df["Odds_Price"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        
+        if "Value" in train_df.columns:
+            meta_train_df["Meta_Line_Value"] = pd.to_numeric(train_df["Value"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+            meta_hold_df["Meta_Line_Value"]  = pd.to_numeric(hold_df["Value"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        
+        meta_train_df = meta_train_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        meta_hold_df  = meta_hold_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        
+        meta_model = XGBRegressor(
+            objective="reg:squarederror",
+            eval_metric="rmse",
+            tree_method="hist",
+            grow_policy="lossguide",
+            max_depth=3,
+            max_leaves=32,
+            learning_rate=0.03,
+            subsample=0.90,
+            colsample_bytree=0.90,
+            min_child_weight=2.0,
+            gamma=0.25,
+            reg_alpha=0.05,
+            reg_lambda=3.0,
+            max_bin=256,
+            n_estimators=300,
+            n_jobs=1,
+            random_state=2029,
+        )
+        
+        meta_model.fit(
+            meta_train_df.to_numpy(dtype=np.float32),
+            y_train_value_reg.astype(np.float32),
+            sample_weight=w_train,
+            verbose=False,
+        )
+        
+        final_bet_score_train = np.asarray(meta_model.predict(meta_train_df.to_numpy(dtype=np.float32)), dtype=np.float64)
+        final_bet_score_hold  = np.asarray(meta_model.predict(meta_hold_df.to_numpy(dtype=np.float32)),  dtype=np.float64)
+
         # -----------------------------------------
         # OOF predictions (train-only) + blending
         # -----------------------------------------
@@ -12782,6 +13030,9 @@ def train_sharp_model_from_bq(
         # -------------------------------------------------------------------
         # METRICS (always defined; prevents NameError later)
         # -------------------------------------------------------------------
+        # -------------------------------------------------------------------
+        # METRICS (always defined; prevents NameError later)
+        # -------------------------------------------------------------------
         def _to_float(x, default=np.nan):
             try:
                 v = float(x)
@@ -12789,8 +13040,8 @@ def train_sharp_model_from_bq(
             except Exception:
                 return float(default)
         
-        y_train_vec = y_full[train_all_idx].astype(int)
-        y_hold_vec  = y_full[hold_idx].astype(int)
+        y_train_vec = y_train.astype(int)
+        y_hold_vec  = y_hold.astype(int)
         
         auc_train  = auc_safe(y_train_vec, p_train_vec)
         auc_hold   = auc_safe(y_hold_vec,  p_hold_vec)
@@ -12814,15 +13065,50 @@ def train_sharp_model_from_bq(
         brier_hold_f    = _to_float(brier_hold)
         auc_gap_f       = _to_float(auc_train_f - auc_hold_f)
         
+        # Situation head metrics
+        auc_situation_hold = auc_safe(y_hold_situation.astype(int), p_situation_hold_vec)
+        auc_situation_hold_f = _to_float(auc_situation_hold)
+        
+        # Value head metrics
+        auc_value_hold = auc_safe(y_hold_value_cls.astype(int), p_value_hold_vec)
+        auc_value_hold_f = _to_float(auc_value_hold)
+        
+        rmse_value_hold = _to_float(np.sqrt(mean_squared_error(y_hold_value_reg.astype(float), pred_value_reg_hold.astype(float))))
+        mae_value_hold  = _to_float(mean_absolute_error(y_hold_value_reg.astype(float), pred_value_reg_hold.astype(float)))
+        
+        # Meta metrics
+        meta_rmse_hold = _to_float(np.sqrt(mean_squared_error(y_hold_value_reg.astype(float), final_bet_score_hold.astype(float))))
+        meta_mae_hold  = _to_float(mean_absolute_error(y_hold_value_reg.astype(float), final_bet_score_hold.astype(float)))
+        try:
+            meta_spearman_hold = _to_float(spearmanr(y_hold_value_reg.astype(float), final_bet_score_hold.astype(float), nan_policy="omit").correlation)
+        except Exception:
+            meta_spearman_hold = np.nan
+        
+        # Top-decile util
+        q90 = np.nanquantile(final_bet_score_hold, 0.90)
+        mask_top = np.asarray(final_bet_score_hold >= q90)
+        meta_top_decile_mean_util = _to_float(np.mean(y_hold_value_reg[mask_top])) if mask_top.any() else np.nan
+
         artifact_metrics = None
         artifact_config  = None
         if return_artifacts:
             artifact_metrics = {
+                # old / outcome keys preserved
                 "auc_holdout": auc_hold_f,
                 "logloss_holdout": logloss_hold_f,
                 "brier_holdout": brier_hold_f,
                 "accuracy_holdout": acc_hold_f,
                 "auc_gap_train_holdout": auc_gap_f,
+        
+                # new additive keys
+                "auc_situation_holdout": auc_situation_hold_f,
+                "auc_value_holdout": auc_value_hold_f,
+                "rmse_value_holdout": rmse_value_hold,
+                "mae_value_holdout": mae_value_hold,
+                "meta_rmse_holdout": meta_rmse_hold,
+                "meta_mae_holdout": meta_mae_hold,
+                "meta_spearman_holdout": meta_spearman_hold,
+                "meta_top_decile_mean_util": meta_top_decile_mean_util,
             }
             artifact_config = {
                 "sport": sport,
@@ -12831,8 +13117,12 @@ def train_sharp_model_from_bq(
                 "calibrator": str(cal_name),
                 "flip_flag": bool(flip_flag),
                 "blend_w": float(best_w),
-            }
         
+                # new additive config
+                "model_family": "three_head_plus_meta_v1",
+                "meta_features": list(meta_train_df.columns),
+            }
+                
         # -------------------------------------------------------------------
         # Book reliability — ALWAYS DEFINED
         # -------------------------------------------------------------------
@@ -12864,14 +13154,32 @@ def train_sharp_model_from_bq(
         # Store trained models (per-market map)
         # -------------------------------------------------------------------
         trained_models[market] = {
-            "model_logloss":        model_logloss,
-            "model_auc":            model_auc,
+            # ---- existing / backward-compatible keys ----
+            "model_logloss":        model_logloss,      # outcome head
+            "model_auc":            model_auc,          # outcome head
             "flip_flag":            bool(flip_flag),
-            "iso_blend":            iso_blend,
-            "best_w":               float(best_w),
+            "iso_blend":            iso_blend,          # outcome calibrator
+            "best_w":               float(best_w),      # outcome blend weight
             "team_feature_map":     team_feature_map,
             "book_reliability_map": book_reliability_map,
             "feature_cols":         feature_cols,
+        
+            # ---- new additive keys ----
+            "model_situation_cls":  model_situation_cls,
+            "model_value_cls":      model_value_cls,
+            "model_value_reg":      model_value_reg,
+            "meta_model":           meta_model,
+        
+            # optional stored prediction metadata
+            "multihead_config": {
+                "model_family": "three_head_plus_meta_v1",
+                "outcome_head": "model_logloss/model_auc + iso_blend",
+                "situation_head": "model_situation_cls",
+                "value_cls_head": "model_value_cls",
+                "value_reg_head": "model_value_reg",
+                "meta_head": "meta_model",
+                "meta_features": list(meta_train_df.columns) if 'meta_train_df' in locals() else [],
+            },
         }
         
         # -------------------------------------------------------------------
@@ -12879,13 +13187,26 @@ def train_sharp_model_from_bq(
         # -------------------------------------------------------------------
         save_info = save_model_to_gcs(
             model={
+                # ---- existing / backward-compatible keys ----
                 "model_logloss": model_logloss,
                 "model_auc":     model_auc,
                 "best_w":        float(best_w),
                 "feature_cols":  feature_cols,
                 "flip_flag":     bool(flip_flag),
+        
+                # ---- new additive keys ----
+                "model_situation_cls": model_situation_cls,
+                "model_value_cls":     model_value_cls,
+                "model_value_reg":     model_value_reg,
+                "meta_model":          meta_model,
+        
+                "multihead_config": {
+                    "schema_version": 1,
+                    "model_family": "three_head_plus_meta_v1",
+                    "meta_features": list(meta_train_df.columns) if 'meta_train_df' in locals() else [],
+                },
             },
-            calibrator=iso_blend,
+            calibrator=iso_blend,  # keep old arg name for backward compatibility
             sport=sport,
             market=market,
             bucket_name=bucket_name,
@@ -12902,13 +13223,21 @@ def train_sharp_model_from_bq(
         # -------------------------------------------------------------------
         status.write(
             f"""✅ Trained + saved ensemble model for {str(market).upper()}
-        - AUC: {auc_hold_f:.4f}
-        - Accuracy: {acc_hold_f:.4f}
-        - Log Loss: {logloss_hold_f:.4f}
-        - Brier Score: {brier_hold_f:.4f}
+        - Outcome AUC: {auc_hold_f:.4f}
+        - Outcome Accuracy: {acc_hold_f:.4f}
+        - Outcome Log Loss: {logloss_hold_f:.4f}
+        - Outcome Brier Score: {brier_hold_f:.4f}
+        - Situation AUC: {auc_situation_hold_f:.4f}
+        - Value AUC: {auc_value_hold_f:.4f}
+        - Value RMSE: {rmse_value_hold:.4f}
+        - Value MAE: {mae_value_hold:.4f}
+        - Meta RMSE: {meta_rmse_hold:.4f}
+        - Meta MAE: {meta_mae_hold:.4f}
+        - Meta Spearman: {meta_spearman_hold:.4f}
+        - Meta Top Decile Mean Util: {meta_top_decile_mean_util:.4f}
         """
         )
-        
+                
         pb.progress(min(100, max(0, pct)))
         
         status.update(label="✅ All models trained", state="complete", expanded=False)
