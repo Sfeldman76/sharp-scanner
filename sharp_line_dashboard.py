@@ -12928,24 +12928,26 @@ def train_sharp_model_from_bq(
         
         p_train_vec = np.asarray(np.clip(p_train_vec, CLIP, 1.0 - CLIP), float)
         p_hold_vec  = np.asarray(np.clip(p_hold_vec,  CLIP, 1.0 - CLIP), float)
+
+        
         # ----------------------------
         # 6D) META-COMBINER
+        # FINAL OUTPUT = probability this line wins
         # ----------------------------
         meta_train_df = pd.DataFrame({
-            "Meta_P_Outcome":   np.asarray(p_train_vec, dtype=np.float64),          # calibrated outcome head
+            "Meta_P_Outcome":   np.asarray(p_train_vec, dtype=np.float64),
             "Meta_P_Situation": np.asarray(p_situation_train_vec, dtype=np.float64),
             "Meta_P_Value":     np.asarray(p_value_train_vec, dtype=np.float64),
             "Meta_Value_Reg":   np.asarray(pred_value_reg_train, dtype=np.float64),
         }, index=train_df.index)
         
         meta_hold_df = pd.DataFrame({
-            "Meta_P_Outcome":   np.asarray(p_hold_vec, dtype=np.float64),           # calibrated outcome head
+            "Meta_P_Outcome":   np.asarray(p_hold_vec, dtype=np.float64),
             "Meta_P_Situation": np.asarray(p_situation_hold_vec, dtype=np.float64),
             "Meta_P_Value":     np.asarray(p_value_hold_vec, dtype=np.float64),
             "Meta_Value_Reg":   np.asarray(pred_value_reg_hold, dtype=np.float64),
         }, index=hold_df.index)
         
-        # Optional safe context
         if "Odds_Price" in train_df.columns:
             meta_train_df["Meta_Odds_Price"] = pd.to_numeric(train_df["Odds_Price"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
             meta_hold_df["Meta_Odds_Price"]  = pd.to_numeric(hold_df["Odds_Price"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
@@ -12957,9 +12959,9 @@ def train_sharp_model_from_bq(
         meta_train_df = meta_train_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         meta_hold_df  = meta_hold_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         
-        meta_model = XGBRegressor(
-            objective="reg:squarederror",
-            eval_metric="rmse",
+        meta_model = XGBClassifier(
+            objective="binary:logistic",
+            eval_metric=["logloss", "auc"],
             tree_method="hist",
             grow_policy="lossguide",
             max_depth=3,
@@ -12979,13 +12981,19 @@ def train_sharp_model_from_bq(
         
         meta_model.fit(
             meta_train_df.to_numpy(dtype=np.float32),
-            y_train_value_reg.astype(np.float32),
+            y_train.astype(int),
             sample_weight=w_train,
             verbose=False,
         )
         
-        final_bet_score_train = np.asarray(meta_model.predict(meta_train_df.to_numpy(dtype=np.float32)), dtype=np.float64)
-        final_bet_score_hold  = np.asarray(meta_model.predict(meta_hold_df.to_numpy(dtype=np.float32)),  dtype=np.float64)
+        final_bet_score_train = np.asarray(
+            meta_model.predict_proba(meta_train_df.to_numpy(dtype=np.float32))[:, 1],
+            dtype=np.float64
+        )
+        final_bet_score_hold = np.asarray(
+            meta_model.predict_proba(meta_hold_df.to_numpy(dtype=np.float32))[:, 1],
+            dtype=np.float64
+        )
 
         # Diagnostics (report BOTH calibration quality + stability)
         ece_tr = expected_calibration_error(y_full[train_all_idx].astype(int), p_train_vec, n_bins=10)
