@@ -12042,7 +12042,7 @@ def train_sharp_model_from_bq(
         )
              
         # Shared selected features for ALL heads
-        feature_cols = list(feature_cols_sel)
+
         
         # Keep specialist targets aligned and ready for the next training section
         # (Outcome head uses existing downstream names y_train / y_hold)
@@ -12050,7 +12050,7 @@ def train_sharp_model_from_bq(
         #   y_train_situation, y_hold_situation
         #   y_train_value_reg, y_hold_value_reg
         #   y_train_value_cls, y_hold_value_cls
-        feature_cols = list(feature_cols_sel)   # make sure everyone uses the selected list
+        feature_cols = list(feature_cols_outcome)
         features_pruned = tuple(feature_cols)   # optional: if later code expects this name
  
         # ----------------------------
@@ -12540,7 +12540,7 @@ def train_sharp_model_from_bq(
         # -------------------------
         # Final outcome refit
         # -------------------------
-        FEATS_FOR_MONO = list(feature_cols)
+        FEATS_FOR_MONO = list(feature_cols_outcome)
         
         MONO = {
             "Abs_Line_Move_From_Opening": +1,
