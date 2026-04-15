@@ -11181,7 +11181,18 @@ def train_sharp_model_from_bq(
                 (pd.to_numeric(df["TARGET_VALUE_REG"], errors="coerce") > 0.0).astype("int8"),
                 np.nan,
             )
-        
+            print("VALUE INPUT DEBUG")
+            for c in [
+                "EV_Sh_vs_Rec_Dollar",
+                "Truth_Fair_Prob_at_RecLine",
+                "Truth_Fair_Prob_at_SharpLine",
+                "Rec_Implied_Prob",
+            ]:
+                if c in df.columns:
+                    s = pd.to_numeric(df[c], errors="coerce")
+                    print(f"{c}: nonnull={int(s.notna().sum())}")
+                else:
+                    print(f"{c}: MISSING")
             # valid flags
             df["TARGET_OUTCOME_VALID"] = pd.to_numeric(df["TARGET_OUTCOME_BOOL"], errors="coerce").notna()
             df["TARGET_SITUATION_VALID"] = pd.to_numeric(df["TARGET_SITUATION_BOOL"], errors="coerce").notna()
@@ -11432,23 +11443,22 @@ def train_sharp_model_from_bq(
             st.warning(f"⚠️ Skipping {market.upper()} — no valid rows after outcome-target filtering.")
             return None
         
-        # 5) canonical target = OUTCOME
+     
+        
+                
+        # canonical base frame
+        df_valid = df_outcome.reset_index(drop=True)
+        
+        if df_valid.empty:
+            st.warning(f"⚠️ Skipping {market.upper()} — no valid rows after outcome-target filtering.")
+            return None
+        
         y_full_outcome = (
             pd.to_numeric(df_valid["TARGET_OUTCOME_BOOL"], errors="coerce")
             .astype("int8")
             .to_numpy()
         )
         
-        if y_full_situation is not None and np.unique(y_full_situation).size < 2:
-            print(f"⚠️ Situation head has only one class for {market.upper()}")
-        
-        if y_full_value_cls is not None and np.unique(y_full_value_cls).size < 2:
-            print(f"⚠️ Value-cls head has only one class for {market.upper()}")
-                
-        # Keep downstream behavior unchanged
-        y_full = y_full_outcome
-        
-        # Optional aligned targets on the SAME canonical rows
         y_full_situation = None
         if "TARGET_SITUATION_BOOL" in df_valid.columns:
             s = pd.to_numeric(df_valid["TARGET_SITUATION_BOOL"], errors="coerce")
@@ -11466,8 +11476,18 @@ def train_sharp_model_from_bq(
             vc = pd.to_numeric(df_valid["TARGET_VALUE_BOOL"], errors="coerce")
             if vc.notna().all():
                 y_full_value_cls = vc.astype("int8").to_numpy()
-
-            
+        
+        if np.unique(y_full_outcome).size < 2:
+            st.warning(f"⚠️ Skipping {market.upper()} — only one outcome-label class.")
+            return None
+        
+        if y_full_situation is not None and np.unique(y_full_situation).size < 2:
+            print(f"⚠️ Situation head has only one class for {market.upper()}")
+        
+        if y_full_value_cls is not None and np.unique(y_full_value_cls).size < 2:
+            print(f"⚠️ Value head has only one class for {market.upper()}")
+        
+        y_full = y_full_outcome
    
         # 2) build X_full ONCE from masked frame (training truth)
         def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
