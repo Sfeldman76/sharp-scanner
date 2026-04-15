@@ -11183,7 +11183,28 @@ def train_sharp_model_from_bq(
                 (sit_score >= sit_thr).astype("int8"),
                 np.nan,
             )
+        def _filter_for_training_head(df_market: pd.DataFrame, head: str) -> pd.DataFrame:
+            df_market = df_market.copy()
         
+            if head == "outcome":
+                target_col = "TARGET_OUTCOME_BOOL"
+                valid_col = "TARGET_OUTCOME_VALID"
+            elif head == "situation":
+                target_col = "TARGET_SITUATION_BOOL"
+                valid_col = "TARGET_SITUATION_VALID"
+            elif head == "value":
+                target_col = "TARGET_VALUE_REG"
+                valid_col = "TARGET_VALUE_VALID"
+            else:
+                raise ValueError(f"Unknown head: {head}")
+        
+            if valid_col in df_market.columns:
+                df_market = df_market[df_market[valid_col].fillna(False)]
+            else:
+                df_market = df_market[df_market[target_col].notna()]
+        
+            return df_market[df_market[target_col].notna()].copy()  
+            
             # ------------------------------------------------------------------
             # 3) Value / EV target
             # Goal: market inefficiency, NOT realized outcome
@@ -11392,85 +11413,77 @@ def train_sharp_model_from_bq(
         #   - y_full: np.ndarray int8    (n_rows,)
         #   - feature_cols: pruned list[str] aligned to X_full columns
         # ─────────────────────────────────────────────────────────────────────────────
-        
         # 0) sanitize feature list
         feature_cols = list(dict.fromkeys([str(c) for c in (feature_cols or [])]))
         if not feature_cols:
             st.info("No features provided.")
             return
         
-        # 1) build multi-head targets + canonical valid mask FIRST
+        # 1) normalize market and subset
+        df["Market"] = df["Market"].astype(str).str.strip().str.lower()
+        market = str(market).strip().lower()
+        
+        df_market = df[df["Market"] == market].copy()
+        if df_market.empty:
+            print(f"No rows found for market={market}")
+            return None
+        
+        # 2) build targets
         df_market = _build_three_targets(df_market)
+        _debug_target_counts(df_market, market)
         
-        required_target_cols = [
-            "TARGET_OUTCOME_BOOL",
-            "TARGET_SITUATION_BOOL",
-            "TARGET_VALUE_REG",
-            "TARGET_VALUE_BOOL",
-        ]
+        # 3) head-specific valid frames
+        df_outcome = _filter_for_training_head(df_market, "outcome")
+        df_situation = _filter_for_training_head(df_market, "situation")
+        df_value = _filter_for_training_head(df_market, "value")
         
-        missing_tgts = [c for c in required_target_cols if c not in df_market.columns]
-        if missing_tgts:
-            st.warning(f"⚠️ Missing required target columns: {missing_tgts} — skipping.")
-            return
+        print(f"{market} outcome rows:   {len(df_outcome)}")
+        print(f"{market} situation rows: {len(df_situation)}")
+        print(f"{market} value rows:     {len(df_value)}")
         
-        # Canonical validity mask:
-        # outcome target must be present because it anchors split/CV/AutoFS
-        # situation/value targets must also be present for the other heads
-        valid_mask = (
-            pd.to_numeric(df_market["TARGET_OUTCOME_BOOL"], errors="coerce").notna()
-            & pd.to_numeric(df_market["TARGET_SITUATION_BOOL"], errors="coerce").notna()
-            & pd.to_numeric(df_market["TARGET_VALUE_REG"], errors="coerce").notna()
-            & pd.to_numeric(df_market["TARGET_VALUE_BOOL"], errors="coerce").notna()
-        )
-        
-        df_valid = df_market.loc[valid_mask].reset_index(drop=True)
+        # 4) use OUTCOME as the canonical base frame for split / AutoFS / main pipeline
+        df_valid = df_outcome.reset_index(drop=True)
         
         if df_valid.empty:
-            st.warning(f"⚠️ Skipping {str(market).upper()} — no valid rows after target filtering.")
-            return
+            st.warning(f"⚠️ Skipping {market.upper()} — no valid rows after outcome-target filtering.")
+            return None
         
-        # Canonical split / AutoFS target = OUTCOME
+        # 5) canonical target = OUTCOME
         y_full_outcome = (
             pd.to_numeric(df_valid["TARGET_OUTCOME_BOOL"], errors="coerce")
             .astype("int8")
             .to_numpy()
         )
         
-        # Additional targets for later specialist heads
-        y_full_situation = (
-            pd.to_numeric(df_valid["TARGET_SITUATION_BOOL"], errors="coerce")
-            .astype("int8")
-            .to_numpy()
-        )
+        if y_full_situation is not None and np.unique(y_full_situation).size < 2:
+            print(f"⚠️ Situation head has only one class for {market.upper()}")
         
-        y_full_value_reg = (
-            pd.to_numeric(df_valid["TARGET_VALUE_REG"], errors="coerce")
-            .astype("float32")
-            .to_numpy()
-        )
-        
-        y_full_value_cls = (
-            pd.to_numeric(df_valid["TARGET_VALUE_BOOL"], errors="coerce")
-            .astype("int8")
-            .to_numpy()
-        )
-        
-        # Safety checks: all classification targets must have 2 classes
-        if np.unique(y_full_outcome).size < 2:
-            st.warning(f"⚠️ Skipping {str(market).upper()} — only one outcome-label class.")
-            return
-        
-        if np.unique(y_full_situation).size < 2:
-            st.warning(f"⚠️ Skipping {str(market).upper()} — only one situation-label class.")
-            return
-        
-        if np.unique(y_full_value_cls).size < 2:
-            st.warning(f"⚠️ Skipping {str(market).upper()} — only one value-label class.")
-            return
-        
-        # Canonical y_full remains the outcome label to minimize downstream surgery
+        if y_full_value_cls is not None and np.unique(y_full_value_cls).size < 2:
+            print(f"⚠️ Value-cls head has only one class for {market.upper()}")
+                
+        # Keep downstream behavior unchanged
         y_full = y_full_outcome
+        
+        # Optional aligned targets on the SAME canonical rows
+        y_full_situation = None
+        if "TARGET_SITUATION_BOOL" in df_valid.columns:
+            s = pd.to_numeric(df_valid["TARGET_SITUATION_BOOL"], errors="coerce")
+            if s.notna().all():
+                y_full_situation = s.astype("int8").to_numpy()
+        
+        y_full_value_reg = None
+        if "TARGET_VALUE_REG" in df_valid.columns:
+            v = pd.to_numeric(df_valid["TARGET_VALUE_REG"], errors="coerce")
+            if v.notna().all():
+                y_full_value_reg = v.astype("float32").to_numpy()
+        
+        y_full_value_cls = None
+        if "TARGET_VALUE_BOOL" in df_valid.columns:
+            vc = pd.to_numeric(df_valid["TARGET_VALUE_BOOL"], errors="coerce")
+            if vc.notna().all():
+                y_full_value_cls = vc.astype("int8").to_numpy()
+
+            
    
         # 2) build X_full ONCE from masked frame (training truth)
         def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
