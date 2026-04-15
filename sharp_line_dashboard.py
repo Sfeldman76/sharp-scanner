@@ -11128,55 +11128,114 @@ def train_sharp_model_from_bq(
         
         def _build_three_targets(df_in: pd.DataFrame) -> pd.DataFrame:
             """
-            Additive / backward-safe target construction.
+            Three differentiated targets:
         
-            Adds:
-              TARGET_OUTCOME_BOOL   -> core outcome target (same semantics as SHARP_HIT_BOOL)
-              TARGET_SITUATION_BOOL -> situation-only proxy target (same label, different head later)
-              TARGET_VALUE_REG      -> realized profit per 1u
-              TARGET_VALUE_BOOL     -> positive realized profit per 1u
+            1) TARGET_OUTCOME_BOOL
+               Actual game/bet outcome.
         
-            Notes:
-            - We keep SHARP_HIT_BOOL untouched.
-            - Situation target is intentionally same label for phase 1; the situation head will differ by feature view,
-              not by label. This avoids inventing a noisy pseudo-label.
+            2) TARGET_SITUATION_BOOL
+               Context / situational strength target, built from prior-only team/context features.
+               This is NOT the same as raw outcome.
+        
+            3) TARGET_VALUE_REG / TARGET_VALUE_BOOL
+               Market/value target based on pregame mispricing proxy, NOT realized win/loss.
             """
             df = df_in.copy()
         
-            # Core outcome target
-            df["TARGET_OUTCOME_BOOL"] = pd.to_numeric(df.get("SHARP_HIT_BOOL", np.nan), errors="coerce")
+            # ------------------------------------------------------------------
+            # 1) Outcome target (unchanged)
+            # ------------------------------------------------------------------
+            df["TARGET_OUTCOME_BOOL"] = pd.to_numeric(
+                df.get("SHARP_HIT_BOOL", np.nan), errors="coerce"
+            )
         
-            # Phase-1 situation target: same label, separate head later
-            df["TARGET_SITUATION_BOOL"] = df["TARGET_OUTCOME_BOOL"]
+            # ------------------------------------------------------------------
+            # 2) Situation target
+            # Goal: capture "spot quality" from context the main model may smooth over
+            #
+            # We use a PRIOR-ONLY contextual score from historical/situational fields already
+            # present in your table. This is still a binary target for AutoFS/classification.
+            # ------------------------------------------------------------------
+            sit_parts = []
         
-            # Value targets from realized profit per 1u
-            if "Odds_Price" not in df.columns:
-                df["TARGET_VALUE_REG"] = np.nan
-                df["TARGET_VALUE_BOOL"] = np.nan
-                return df
+            def _safe_num(col, default=np.nan):
+                return pd.to_numeric(df.get(col, default), errors="coerce")
         
-            payout_mult = _american_to_payout_multiple(df["Odds_Price"])
+            # core prior-only context pieces
+            sit_parts.append(_safe_num("Team_Recent_Cover_Rate"))
+            sit_parts.append(_safe_num("H2H_Win_Pct_Prior"))
+            sit_parts.append(1.0 - _safe_num("Opp_WinPct_Prior"))
+            sit_parts.append((_safe_num("After_Win_Flag").fillna(0) * 0.15))
+            sit_parts.append((_safe_num("Revenge_Flag").fillna(0) * 0.15))
+            sit_parts.append((_safe_num("Current_Loss_Streak_Prior").fillna(0) * 0.03))
+            sit_parts.append((-_safe_num("Games_Last_7_Days").fillna(0) * 0.03))
+            sit_parts.append((-_safe_num("Is_B2B").fillna(0) * 0.10))
+            sit_parts.append((-_safe_num("Is_3in4").fillna(0) * 0.10))
         
-            push = np.zeros(len(df), dtype=int)
-            for c in ["Push_Flag", "PUSH_FLAG", "Was_Push", "is_push"]:
+            sit_df = pd.concat(sit_parts, axis=1)
+            sit_score = sit_df.mean(axis=1, skipna=True)
+        
+            # binary contextual regime label:
+            # top 35% of situational context = 1
+            sit_thr = sit_score.quantile(0.65)
+            df["TARGET_SITUATION_BOOL"] = np.where(
+                np.isfinite(sit_score),
+                (sit_score >= sit_thr).astype("int8"),
+                np.nan,
+            )
+        
+            # ------------------------------------------------------------------
+            # 3) Value / EV target
+            # Goal: market inefficiency, NOT realized outcome
+            #
+            # Use pregame market mispricing proxy. This avoids collapsing back to
+            # outcome/profit labels.
+            # ------------------------------------------------------------------
+            implied_prob = pd.Series(
+                np.where(
+                    pd.to_numeric(df.get("Odds_Price", np.nan), errors="coerce") < 0,
+                    (-pd.to_numeric(df.get("Odds_Price", np.nan), errors="coerce"))
+                    / ((-pd.to_numeric(df.get("Odds_Price", np.nan), errors="coerce")) + 100.0),
+                    100.0 / (pd.to_numeric(df.get("Odds_Price", np.nan), errors="coerce") + 100.0),
+                ),
+                index=df.index,
+                dtype="float64",
+            )
+        
+            # choose best pregame probability proxy available
+            prob_proxy = None
+            for c in [
+                "Outcome_Cover_Prob",
+                "Model_Sharp_Win_Prob",
+                "Outcome_Model_Prob",
+                "Spread_Implied_Prob",
+                "H2H_Implied_Prob",
+            ]:
                 if c in df.columns:
-                    push = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int).to_numpy()
+                    prob_proxy = pd.to_numeric(df[c], errors="coerce")
                     break
         
-            y_hit = pd.to_numeric(df["TARGET_OUTCOME_BOOL"], errors="coerce").to_numpy(dtype=float)
+            if prob_proxy is None:
+                prob_proxy = pd.Series(np.nan, index=df.index, dtype="float64")
         
-            realized_profit = np.full(len(df), np.nan, dtype=float)
+            # pregame value gap
+            value_gap = prob_proxy - implied_prob
         
-            win_mask  = (y_hit == 1) & (push == 0)
-            lose_mask = (y_hit == 0) & (push == 0)
-            push_mask = (push == 1)
+            # regression target = value gap
+            df["TARGET_VALUE_REG"] = value_gap.astype("float32")
         
-            realized_profit[win_mask]  = payout_mult[win_mask]
-            realized_profit[lose_mask] = -1.0
-            realized_profit[push_mask] = 0.0
-        
-            df["TARGET_VALUE_REG"]  = realized_profit.astype("float32")
-            df["TARGET_VALUE_BOOL"] = (df["TARGET_VALUE_REG"] > 0).astype("Int64")
+            # classification target = strong positive value only
+            # use upper quantile to create separation from plain outcome
+            valid_gap = value_gap[np.isfinite(value_gap)]
+            if len(valid_gap) > 0:
+                gap_thr = valid_gap.quantile(0.70)
+                df["TARGET_VALUE_BOOL"] = np.where(
+                    np.isfinite(value_gap),
+                    (value_gap >= gap_thr).astype("int8"),
+                    np.nan,
+                )
+            else:
+                df["TARGET_VALUE_BOOL"] = np.nan
         
             return df
         # ======= IMPORTANT: work with df_market from here on =======
@@ -11357,7 +11416,7 @@ def train_sharp_model_from_bq(
         
         # Canonical validity mask:
         # outcome target must be present because it anchors split/CV/AutoFS
-        # value targets must also be present for the later heads
+        # situation/value targets must also be present for the other heads
         valid_mask = (
             pd.to_numeric(df_market["TARGET_OUTCOME_BOOL"], errors="coerce").notna()
             & pd.to_numeric(df_market["TARGET_SITUATION_BOOL"], errors="coerce").notna()
@@ -11366,6 +11425,10 @@ def train_sharp_model_from_bq(
         )
         
         df_valid = df_market.loc[valid_mask].reset_index(drop=True)
+        
+        if df_valid.empty:
+            st.warning(f"⚠️ Skipping {str(market).upper()} — no valid rows after target filtering.")
+            return
         
         # Canonical split / AutoFS target = OUTCOME
         y_full_outcome = (
@@ -11393,15 +11456,21 @@ def train_sharp_model_from_bq(
             .to_numpy()
         )
         
-        # Safety: outcome target must still be binary for the canonical split/AutoFS path
+        # Safety checks: all classification targets must have 2 classes
         if np.unique(y_full_outcome).size < 2:
             st.warning(f"⚠️ Skipping {str(market).upper()} — only one outcome-label class.")
             return
         
+        if np.unique(y_full_situation).size < 2:
+            st.warning(f"⚠️ Skipping {str(market).upper()} — only one situation-label class.")
+            return
+        
+        if np.unique(y_full_value_cls).size < 2:
+            st.warning(f"⚠️ Skipping {str(market).upper()} — only one value-label class.")
+            return
+        
         # Canonical y_full remains the outcome label to minimize downstream surgery
         y_full = y_full_outcome
-        
-        
    
         # 2) build X_full ONCE from masked frame (training truth)
         def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
@@ -11865,6 +11934,7 @@ def train_sharp_model_from_bq(
         # ----------------------------
         # 4) AutoFS on train slice (pre-AutoFS matrices)
         # ----------------------------
+        # ----------------------------
         # 4) AutoFS on train slice (HEAD-SPECIFIC)
         # Outcome / Situation / Value each get their own AutoFS
         # NOTE:
@@ -11884,7 +11954,14 @@ def train_sharp_model_from_bq(
             med = df.median(numeric_only=True)
             return df.fillna(med).fillna(0.0)
 
-        def _default_proto():
+        def _default_proto(head_name: str):
+            seed_map = {
+                "outcome": 42,
+                "situation": 43,
+                "value": 44,
+            }
+            rs = seed_map.get(head_name, 42)
+
             return XGBClassifier(
                 objective="binary:logistic",
                 eval_metric=["logloss", "auc"],
@@ -11898,7 +11975,7 @@ def train_sharp_model_from_bq(
                 min_child_weight=2,
                 max_bin=256,
                 n_jobs=1,
-                random_state=42,
+                random_state=rs,
             )
 
         def _run_head_autofs(head_name: str, y_head_train: np.ndarray):
@@ -11908,7 +11985,7 @@ def train_sharp_model_from_bq(
                 try:
                     _model_proto = est_ll
                 except Exception:
-                    _model_proto = _default_proto()
+                    _model_proto = _default_proto(head_name)
 
             feat_cols_head, shap_summary_head = select_features_auto(
                 model_proto=_model_proto,
@@ -11917,22 +11994,17 @@ def train_sharp_model_from_bq(
                 folds=folds,
                 sport_key=sport_key,
                 must_keep=[],
-
                 use_auc_auto=True,
                 auc_patience=300,
                 accept_metric="auc",
                 auc_min_improve=0.0,
-
                 topk_per_fold=200,
                 min_presence=0.50,
                 sign_flip_max=0.35,
-
                 corr_within=0.90,
                 corr_global=0.97,
-
                 max_feats_major=200,
                 max_feats_small=140,
-
                 flip_gain_min=0.0,
                 auc_verbose=True,
                 log_func=log_func,
@@ -11966,7 +12038,6 @@ def train_sharp_model_from_bq(
 
         # ----------------------------
         # Situation head AutoFS
-        # phase 1 target = y_train_situation (same label, different head)
         # ----------------------------
         autofs_situation = _run_head_autofs("situation", y_train_situation)
 
@@ -11983,8 +12054,10 @@ def train_sharp_model_from_bq(
         try:
             st.write(f"🔎 Outcome AutoFS kept {len(autofs_outcome['feature_cols'])} features")
             st.dataframe(autofs_outcome["shap_summary"].head(25))
+
             st.write(f"🔎 Situation AutoFS kept {len(autofs_situation['feature_cols'])} features")
             st.dataframe(autofs_situation["shap_summary"].head(25))
+
             st.write(f"🔎 Value AutoFS kept {len(autofs_value['feature_cols'])} features")
             st.dataframe(autofs_value["shap_summary"].head(25))
         except Exception:
@@ -11994,12 +12067,12 @@ def train_sharp_model_from_bq(
         # Canonicalize names AFTER head-specific AutoFS
         # Outcome head keeps legacy names for downstream compatibility
         # ----------------------------
-        feature_cols = list(autofs_outcome["feature_cols"])     # legacy / downstream-safe
-        features_pruned = tuple(feature_cols)                   # legacy alias if later code expects it
+        feature_cols = list(autofs_outcome["feature_cols"])   # legacy / downstream-safe
+        features_pruned = tuple(feature_cols)                 # legacy alias if later code expects it
 
-        X_train = autofs_outcome["X_train"]                     # legacy / downstream-safe
-        X_hold  = autofs_outcome["X_hold"]                      # legacy / downstream-safe
-        X_full  = autofs_outcome["X_full"]                      # legacy / downstream-safe
+        X_train = autofs_outcome["X_train"]                   # legacy / downstream-safe
+        X_hold  = autofs_outcome["X_hold"]                    # legacy / downstream-safe
+        X_full  = autofs_outcome["X_full"]                    # legacy / downstream-safe
 
         # ----------------------------
         # Additive per-head feature lists
@@ -12040,7 +12113,6 @@ def train_sharp_model_from_bq(
             f"situation={len(feature_cols_situation)} | "
             f"value={len(feature_cols_value)}"
         )
-             
         # Shared selected features for ALL heads
 
         
@@ -12888,15 +12960,15 @@ def train_sharp_model_from_bq(
         # ------------------
         # 2) Inference: Blend in logit space -> (optional flip) -> calibrate -> prior shift LAST
         # ------------------
-        p_tr_auc, _ = pos_proba_safe(model_auc, X_full_sel[train_all_idx], positive=1)
-        p_ho_auc, _ = pos_proba_safe(model_auc, X_full_sel[hold_idx], positive=1)
+        p_tr_auc, _ = pos_proba_safe(model_auc, X_full[train_all_idx], positive=1)
+        p_ho_auc, _ = pos_proba_safe(model_auc, X_full[hold_idx], positive=1)
         
         p_tr_auc = _clip01(p_tr_auc, eps)
         p_ho_auc = _clip01(p_ho_auc, eps)
         
         if RUN_LOGLOSS:
-            p_tr_ll, _ = pos_proba_safe(model_logloss, X_full_sel[train_all_idx], positive=1)
-            p_ho_ll, _ = pos_proba_safe(model_logloss, X_full_sel[hold_idx], positive=1)
+            p_tr_ll, _ = pos_proba_safe(model_logloss, X_full[train_all_idx], positive=1)
+            p_ho_ll, _ = pos_proba_safe(model_logloss, X_full[hold_idx], positive=1)
             p_tr_ll = _clip01(p_tr_ll, eps)
             p_ho_ll = _clip01(p_ho_ll, eps)
         
