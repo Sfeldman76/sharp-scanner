@@ -11127,39 +11127,22 @@ def train_sharp_model_from_bq(
             )
         
        
+      
         def _build_three_targets(df_in: pd.DataFrame) -> pd.DataFrame:
-            """
-            Three differentiated targets:
-        
-            1) TARGET_OUTCOME_BOOL
-               Actual game/bet outcome.
-        
-            2) TARGET_SITUATION_BOOL
-               Context / situational strength target, built from prior-only team/context features.
-               This is NOT the same as raw outcome.
-        
-            3) TARGET_VALUE_REG / TARGET_VALUE_BOOL
-               Market/value target based on pregame mispricing proxy, NOT realized win/loss.
-            """
             df = df_in.copy()
-        
-            # ------------------------------------------------------------------
-            # 1) Outcome target (unchanged)
-            # ------------------------------------------------------------------
-            df["TARGET_OUTCOME_BOOL"] = pd.to_numeric(
-                df.get("SHARP_HIT_BOOL", np.nan), errors="coerce"
-            )
-        
-            # ------------------------------------------------------------------
-            # 2) Situation target
-            # ------------------------------------------------------------------
-            sit_parts = []
         
             def _safe_num(col: str) -> pd.Series:
                 if col in df.columns:
                     return pd.to_numeric(df[col], errors="coerce")
                 return pd.Series(np.nan, index=df.index, dtype="float64")
         
+            # 1) outcome
+            df["TARGET_OUTCOME_BOOL"] = pd.to_numeric(
+                df.get("SHARP_HIT_BOOL", np.nan), errors="coerce"
+            )
+        
+            # 2) situation
+            sit_parts = []
             sit_parts.append(_safe_num("Team_Recent_Cover_Rate"))
             sit_parts.append(_safe_num("H2H_Win_Pct_Prior"))
             sit_parts.append(1.0 - _safe_num("Opp_WinPct_Prior"))
@@ -11172,17 +11155,42 @@ def train_sharp_model_from_bq(
         
             sit_df = pd.concat(sit_parts, axis=1)
             sit_score = sit_df.mean(axis=1, skipna=True)
-        
             sit_thr = sit_score.quantile(0.65)
+        
             df["TARGET_SITUATION_BOOL"] = np.where(
                 np.isfinite(sit_score),
                 (sit_score >= sit_thr).astype("int8"),
                 np.nan,
             )
         
-            return df
-
+            # 3) value
+            fair_prob = _safe_num("Truth_Fair_Prob_at_RecLine")
+            if fair_prob.isna().all():
+                fair_prob = _safe_num("Truth_Fair_Prob_at_SharpLine")
         
+            rec_prob = _safe_num("Rec_Implied_Prob")
+            ev_dollar = _safe_num("EV_Sh_vs_Rec_Dollar")
+        
+            if ev_dollar.notna().sum() > 0:
+                df["TARGET_VALUE_REG"] = ev_dollar.astype("float32")
+            else:
+                df["TARGET_VALUE_REG"] = (fair_prob - rec_prob).astype("float32")
+        
+            df["TARGET_VALUE_BOOL"] = np.where(
+                pd.to_numeric(df["TARGET_VALUE_REG"], errors="coerce").notna(),
+                (pd.to_numeric(df["TARGET_VALUE_REG"], errors="coerce") > 0.0).astype("int8"),
+                np.nan,
+            )
+        
+            # valid flags
+            df["TARGET_OUTCOME_VALID"] = pd.to_numeric(df["TARGET_OUTCOME_BOOL"], errors="coerce").notna()
+            df["TARGET_SITUATION_VALID"] = pd.to_numeric(df["TARGET_SITUATION_BOOL"], errors="coerce").notna()
+            df["TARGET_VALUE_VALID"] = pd.to_numeric(df["TARGET_VALUE_REG"], errors="coerce").notna()
+        
+            return df
+        
+        
+       
         def _filter_for_training_head(df_market: pd.DataFrame, head: str) -> pd.DataFrame:
             df_market = df_market.copy()
         
@@ -11198,67 +11206,16 @@ def train_sharp_model_from_bq(
             else:
                 raise ValueError(f"Unknown head: {head}")
         
+            if target_col not in df_market.columns:
+                raise KeyError(f"Missing target column for head={head}: {target_col}")
+        
             if valid_col in df_market.columns:
                 df_market = df_market[df_market[valid_col].fillna(False)]
-            else:
-                df_market = df_market[df_market[target_col].notna()]
         
-            return df_market[df_market[target_col].notna()].copy()  
-            
-            # ------------------------------------------------------------------
-            # 3) Value / EV target
-            # Goal: market inefficiency, NOT realized outcome
-            #
-            # Use pregame market mispricing proxy. This avoids collapsing back to
-            # outcome/profit labels.
-            # ------------------------------------------------------------------
-            implied_prob = pd.Series(
-                np.where(
-                    pd.to_numeric(df.get("Odds_Price", np.nan), errors="coerce") < 0,
-                    (-pd.to_numeric(df.get("Odds_Price", np.nan), errors="coerce"))
-                    / ((-pd.to_numeric(df.get("Odds_Price", np.nan), errors="coerce")) + 100.0),
-                    100.0 / (pd.to_numeric(df.get("Odds_Price", np.nan), errors="coerce") + 100.0),
-                ),
-                index=df.index,
-                dtype="float64",
-            )
-        
-            # choose best pregame probability proxy available
-            prob_proxy = None
-            for c in [
-                "Outcome_Cover_Prob",
-                "Model_Sharp_Win_Prob",
-                "Outcome_Model_Prob",
-                "Spread_Implied_Prob",
-                "H2H_Implied_Prob",
-            ]:
-                if c in df.columns:
-                    prob_proxy = pd.to_numeric(df[c], errors="coerce")
-                    break
-        
-            if prob_proxy is None:
-                prob_proxy = pd.Series(np.nan, index=df.index, dtype="float64")
-        
-            # pregame value gap
-            value_gap = prob_proxy - implied_prob
-        
-            # regression target = value gap
-            df["TARGET_VALUE_REG"] = value_gap.astype("float32")
-        
-            # classification target = strong positive value only
-            # use upper quantile to create separation from plain outcome
-            valid_gap = value_gap[np.isfinite(value_gap)]
-            if len(valid_gap) > 0:
-                gap_thr = valid_gap.quantile(0.70)
-                df["TARGET_VALUE_BOOL"] = np.where(
-                    np.isfinite(value_gap),
-                    (value_gap >= gap_thr).astype("int8"),
-                    np.nan,
-                )
-            else:
-                df["TARGET_VALUE_BOOL"] = np.nan
-        
-            return df
+            df_market = df_market[df_market[target_col].notna()]
+            return df_market.copy()
+                    
+         
         # ======= IMPORTANT: work with df_market from here on =======
         
         # Make sure df_market has placeholders for requested feature columns (0 default)
