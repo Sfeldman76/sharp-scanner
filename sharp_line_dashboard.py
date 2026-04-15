@@ -11429,7 +11429,34 @@ def train_sharp_model_from_bq(
         if df_market.empty:
             print(f"No rows found for market={market}")
             return None
+        def _debug_target_counts(df_market: pd.DataFrame, market_name: str):
+            print(f"\n=== TARGET DEBUG: {market_name.upper()} ===")
+            print("Rows:", len(df_market))
         
+            for c in [
+                "Market",
+                "TARGET_OUTCOME_BOOL",
+                "TARGET_SITUATION_BOOL",
+                "TARGET_VALUE_REG",
+                "TARGET_VALUE_BOOL",
+                "TARGET_OUTCOME_VALID",
+                "TARGET_SITUATION_VALID",
+                "TARGET_VALUE_VALID",
+                "EDGE_TARGET",
+            ]:
+                if c in df_market.columns:
+                    try:
+                        if df_market[c].dtype == bool:
+                            val = int(df_market[c].sum())
+                        else:
+                            val = int(pd.to_numeric(df_market[c], errors="coerce").notna().sum())
+                    except Exception:
+                        val = "err"
+                    print(f"{c}: {val}")
+        
+            if "Market" in df_market.columns:
+                print("Market counts:")
+                print(df_market["Market"].value_counts(dropna=False).head(10))
         # 2) build targets
         df_market = _build_three_targets(df_market)
         _debug_target_counts(df_market, market)
