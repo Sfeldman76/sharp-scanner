@@ -10312,6 +10312,22 @@ def train_sharp_model_from_bq(
             
             before = len(df_market)
             df_market = df_market.merge(g_map, on=game_keys, how="left", validate="many_to_one")
+       
+            
+            for c in ["Sigma_Pts", "Sigma_Pts_x", "Sigma_Pts_y"]:
+                if c in df_market.columns:
+                    df_market[c] = pd.to_numeric(df_market[c], errors="coerce")
+            
+            if "Sigma_Pts_x" in df_market.columns or "Sigma_Pts_y" in df_market.columns:
+                sigma_base = df_market["Sigma_Pts"] if "Sigma_Pts" in df_market.columns else pd.Series(np.nan, index=df_market.index)
+                sigma_x = df_market["Sigma_Pts_x"] if "Sigma_Pts_x" in df_market.columns else pd.Series(np.nan, index=df_market.index)
+                sigma_y = df_market["Sigma_Pts_y"] if "Sigma_Pts_y" in df_market.columns else pd.Series(np.nan, index=df_market.index)
+            
+                df_market["Sigma_Pts"] = sigma_base.combine_first(sigma_x).combine_first(sigma_y)
+            
+                df_market = df_market.drop(
+                    columns=[c for c in ["Sigma_Pts_x", "Sigma_Pts_y"] if c in df_market.columns]
+                )
             _assert_no_growth(before, df_market, "merge game-level projections")
             
             # Compute per-outcome spreads from model/market (fav vs dog)
