@@ -11126,8 +11126,8 @@ def train_sharp_model_from_bq(
                 100.0 / np.maximum(np.abs(o), 1e-9)
             )
         
-       
-      
+               
+              
         def _build_three_targets(df_in: pd.DataFrame) -> pd.DataFrame:
             df = df_in.copy()
         
@@ -11171,16 +11171,6 @@ def train_sharp_model_from_bq(
             rec_prob = _safe_num("Rec_Implied_Prob")
             ev_dollar = _safe_num("EV_Sh_vs_Rec_Dollar")
         
-            if ev_dollar.notna().sum() > 0:
-                df["TARGET_VALUE_REG"] = ev_dollar.astype("float32")
-            else:
-                df["TARGET_VALUE_REG"] = (fair_prob - rec_prob).astype("float32")
-        
-            df["TARGET_VALUE_BOOL"] = np.where(
-                pd.to_numeric(df["TARGET_VALUE_REG"], errors="coerce").notna(),
-                (pd.to_numeric(df["TARGET_VALUE_REG"], errors="coerce") > 0.0).astype("int8"),
-                np.nan,
-            )
             print("VALUE INPUT DEBUG")
             for c in [
                 "EV_Sh_vs_Rec_Dollar",
@@ -11193,14 +11183,29 @@ def train_sharp_model_from_bq(
                     print(f"{c}: nonnull={int(s.notna().sum())}")
                 else:
                     print(f"{c}: MISSING")
+        
+            if ev_dollar.notna().sum() > 0:
+                df["TARGET_VALUE_REG"] = ev_dollar.astype("float32")
+            elif fair_prob.notna().sum() > 0 and rec_prob.notna().sum() > 0:
+                df["TARGET_VALUE_REG"] = (fair_prob - rec_prob).astype("float32")
+            else:
+                df["TARGET_VALUE_REG"] = np.nan
+                print("⚠️ TARGET_VALUE_REG could not be built: EV and fair-prob fallback unavailable")
+        
+            val_reg_num = pd.to_numeric(df["TARGET_VALUE_REG"], errors="coerce")
+            df["TARGET_VALUE_BOOL"] = np.where(
+                val_reg_num.notna(),
+                (val_reg_num > 0.0).astype("int8"),
+                np.nan,
+            )
+        
             # valid flags
             df["TARGET_OUTCOME_VALID"] = pd.to_numeric(df["TARGET_OUTCOME_BOOL"], errors="coerce").notna()
             df["TARGET_SITUATION_VALID"] = pd.to_numeric(df["TARGET_SITUATION_BOOL"], errors="coerce").notna()
-            df["TARGET_VALUE_VALID"] = pd.to_numeric(df["TARGET_VALUE_REG"], errors="coerce").notna()
+            df["TARGET_VALUE_VALID"] = val_reg_num.notna()
         
             return df
-        
-        
+                
        
         def _filter_for_training_head(df_market: pd.DataFrame, head: str) -> pd.DataFrame:
             df_market = df_market.copy()
