@@ -11158,8 +11158,10 @@ def train_sharp_model_from_bq(
             # ------------------------------------------------------------------
             sit_parts = []
         
-            def _safe_num(col, default=np.nan):
-                return pd.to_numeric(df.get(col, default), errors="coerce")
+            def _safe_num(col: str) -> pd.Series:
+                if col in df_market.columns:
+                    return pd.to_numeric(df_market[col], errors="coerce")
+                return pd.Series(np.nan, index=df_market.index, dtype="float64")
         
             # core prior-only context pieces
             sit_parts.append(_safe_num("Team_Recent_Cover_Rate"))
