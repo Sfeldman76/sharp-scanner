@@ -11126,6 +11126,7 @@ def train_sharp_model_from_bq(
                 100.0 / np.maximum(np.abs(o), 1e-9)
             )
         
+       
         def _build_three_targets(df_in: pd.DataFrame) -> pd.DataFrame:
             """
             Three differentiated targets:
@@ -11151,19 +11152,14 @@ def train_sharp_model_from_bq(
         
             # ------------------------------------------------------------------
             # 2) Situation target
-            # Goal: capture "spot quality" from context the main model may smooth over
-            #
-            # We use a PRIOR-ONLY contextual score from historical/situational fields already
-            # present in your table. This is still a binary target for AutoFS/classification.
             # ------------------------------------------------------------------
             sit_parts = []
         
             def _safe_num(col: str) -> pd.Series:
-                if col in df_market.columns:
-                    return pd.to_numeric(df_market[col], errors="coerce")
-                return pd.Series(np.nan, index=df_market.index, dtype="float64")
+                if col in df.columns:
+                    return pd.to_numeric(df[col], errors="coerce")
+                return pd.Series(np.nan, index=df.index, dtype="float64")
         
-            # core prior-only context pieces
             sit_parts.append(_safe_num("Team_Recent_Cover_Rate"))
             sit_parts.append(_safe_num("H2H_Win_Pct_Prior"))
             sit_parts.append(1.0 - _safe_num("Opp_WinPct_Prior"))
@@ -11177,14 +11173,16 @@ def train_sharp_model_from_bq(
             sit_df = pd.concat(sit_parts, axis=1)
             sit_score = sit_df.mean(axis=1, skipna=True)
         
-            # binary contextual regime label:
-            # top 35% of situational context = 1
             sit_thr = sit_score.quantile(0.65)
             df["TARGET_SITUATION_BOOL"] = np.where(
                 np.isfinite(sit_score),
                 (sit_score >= sit_thr).astype("int8"),
                 np.nan,
             )
+        
+            return df
+
+        
         def _filter_for_training_head(df_market: pd.DataFrame, head: str) -> pd.DataFrame:
             df_market = df_market.copy()
         
