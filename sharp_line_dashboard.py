@@ -11392,14 +11392,7 @@ def train_sharp_model_from_bq(
             st.info("No features provided.")
             return
         
-        # 1) normalize market and subset
-        df["Market"] = df["Market"].astype(str).str.strip().str.lower()
-        market = str(market).strip().lower()
-        
-        df_market = df[df["Market"] == market].copy()
-        if df_market.empty:
-            print(f"No rows found for market={market}")
-            return None
+      
         def _debug_target_counts(df_market: pd.DataFrame, market_name: str):
             print(f"\n=== TARGET DEBUG: {market_name.upper()} ===")
             print("Rows:", len(df_market))
