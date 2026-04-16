@@ -12703,98 +12703,176 @@ def train_sharp_model_from_bq(
             pass
         
         # ----------------------------
-        # 6B) SITUATION HEAD
+        # 6B) SITUATION HEAD — LIGHTWEIGHT
         # ----------------------------
-        # Phase 1: same binary target, separate model/head
-        # This lets you later specialize feature view or target construction without breaking downstream.
+        X_train_situation = autofs_situation["X_train"]
+        X_hold_situation  = autofs_situation["X_hold"]
+        X_full_situation  = autofs_situation["X_full"]
+        feature_cols_situation = list(autofs_situation["feature_cols"])
         
-        situation_train_kwargs = dict(train_kwargs)
-        situation_train_kwargs["base_score"] = float(np.clip(np.mean(y_train_situation), 1e-4, 1 - 1e-4))
+        model_situation_cls = None
+        p_situation_train_vec = None
+        p_situation_hold_vec = None
+        p_situation_full_vec = None
         
-        model_situation_cls = XGBClassifier(
-            **{
-                **situation_train_kwargs,
-                **best_auc_params,
-                "objective": "binary:logistic",
-                "eval_metric": ["logloss", "auc"],
-                "n_estimators": int(max(300, min(FINAL_NTREES_AUC, 900))),
-                "n_jobs": 1,
-                "random_state": 2026,
-                "seed": 2026,
-            }
-        )
+        if y_train_situation is not None and X_train_situation.shape[1] > 0:
+            situation_base_score = float(np.clip(np.mean(y_train_situation), 1e-4, 1 - 1e-4))
         
-        model_situation_cls.fit(
-            X_train_situation,
-            y_train_situation,
-            sample_weight=w_train,
-            verbose=False,
-        )
+            model_situation_cls = XGBClassifier(
+                objective="binary:logistic",
+                eval_metric=["logloss", "auc"],
+                tree_method="hist",
+                grow_policy="lossguide",
+                n_estimators=400,
+                learning_rate=0.03,
+                max_depth=0,
+                max_leaves=48,
+                min_child_weight=4.0,
+                gamma=1.0,
+                reg_alpha=0.1,
+                reg_lambda=8.0,
+                subsample=0.80,
+                colsample_bytree=0.80,
+                colsample_bynode=0.80,
+                max_bin=256,
+                base_score=situation_base_score,
+                n_jobs=1,
+                random_state=2026,
+                seed=2026,
+            )
         
-        p_situation_train_vec = np.clip(model_situation_cls.predict_proba(X_train)[:, 1], 1e-6, 1 - 1e-6)
-        p_situation_hold_vec  = np.clip(model_situation_cls.predict_proba(X_hold)[:, 1],  1e-6, 1 - 1e-6)
-
+            model_situation_cls.fit(
+                X_train_situation,
+                y_train_situation,
+                sample_weight=w_train,
+                verbose=False,
+            )
+        
+            p_situation_train_vec = np.clip(
+                model_situation_cls.predict_proba(X_train_situation)[:, 1],
+                1e-6, 1 - 1e-6
+            )
+            p_situation_hold_vec = np.clip(
+                model_situation_cls.predict_proba(X_hold_situation)[:, 1],
+                1e-6, 1 - 1e-6
+            )
+            p_situation_full_vec = np.clip(
+                model_situation_cls.predict_proba(X_full_situation)[:, 1],
+                1e-6, 1 - 1e-6
+            )
+        
+            try:
+                model_situation_cls.feature_names_in_ = np.asarray(feature_cols_situation, dtype=object)
+                model_situation_cls.get_booster().feature_names = feature_cols_situation
+            except Exception:
+                pass
+        
+        
         # ----------------------------
-        # 6C) VALUE / EV HEADS
+        # 6C) VALUE HEADS — LIGHTWEIGHT
         # ----------------------------
-        value_base_score = float(np.clip(np.mean(y_train_value_cls), 1e-4, 1 - 1e-4))
+        X_train_value = autofs_value["X_train"]
+        X_hold_value  = autofs_value["X_hold"]
+        X_full_value  = autofs_value["X_full"]
+        feature_cols_value = list(autofs_value["feature_cols"])
         
-        value_cls_kwargs = dict(train_kwargs)
-        value_cls_kwargs["base_score"] = value_base_score
+        model_value_cls = None
+        model_value_reg = None
         
-        model_value_cls = XGBClassifier(
-            **{
-                **value_cls_kwargs,
-                **best_auc_params,
-                "objective": "binary:logistic",
-                "eval_metric": ["logloss", "auc"],
-                "n_estimators": int(max(300, min(FINAL_NTREES_AUC, 900))),
-                "n_jobs": 1,
-                "random_state": 2027,
-                "seed": 2027,
-            }
-        )
+        p_value_train_vec = None
+        p_value_hold_vec = None
+        p_value_full_vec = None
         
-        model_value_cls.fit(
-            X_train_value,
-            y_train_value_cls,
-            sample_weight=w_train,
-            verbose=False,
-        )
+        pred_value_reg_train = None
+        pred_value_reg_hold = None
+        pred_value_reg_full = None
         
-        p_value_train_vec = np.clip(model_value_cls.predict_proba(X_train)[:, 1], 1e-6, 1 - 1e-6)
-        p_value_hold_vec  = np.clip(model_value_cls.predict_proba(X_hold)[:, 1],  1e-6, 1 - 1e-6)
+        # value classification head
+        if y_train_value_cls is not None and X_train_value.shape[1] > 0:
+            value_base_score = float(np.clip(np.mean(y_train_value_cls), 1e-4, 1 - 1e-4))
         
-        model_value_reg = XGBRegressor(
-            objective="reg:squarederror",
-            eval_metric="rmse",
-            tree_method="hist",
-            grow_policy="lossguide",
-            max_depth=4,
-            max_leaves=64,
-            learning_rate=0.03,
-            subsample=0.85,
-            colsample_bytree=0.80,
-            min_child_weight=3.0,
-            gamma=0.5,
-            reg_alpha=0.1,
-            reg_lambda=5.0,
-            max_bin=256,
-            n_estimators=500,
-            n_jobs=1,
-            random_state=2028,
-        )
+            model_value_cls = XGBClassifier(
+                objective="binary:logistic",
+                eval_metric=["logloss", "auc"],
+                tree_method="hist",
+                grow_policy="lossguide",
+                n_estimators=400,
+                learning_rate=0.03,
+                max_depth=0,
+                max_leaves=48,
+                min_child_weight=4.0,
+                gamma=1.0,
+                reg_alpha=0.1,
+                reg_lambda=8.0,
+                subsample=0.80,
+                colsample_bytree=0.80,
+                colsample_bynode=0.80,
+                max_bin=256,
+                base_score=value_base_score,
+                n_jobs=1,
+                random_state=2027,
+                seed=2027,
+            )
         
-        model_value_reg.fit(
-            X_train_value,
-            y_train_value_reg,
-            sample_weight=w_train,
-            verbose=False,
-        )
+            model_value_cls.fit(
+                X_train_value,
+                y_train_value_cls,
+                sample_weight=w_train,
+                verbose=False,
+            )
         
-        pred_value_reg_train = np.asarray(model_value_reg.predict(X_train), dtype=np.float64)
-        pred_value_reg_hold  = np.asarray(model_value_reg.predict(X_hold),  dtype=np.float64)
+            p_value_train_vec = np.clip(
+                model_value_cls.predict_proba(X_train_value)[:, 1],
+                1e-6, 1 - 1e-6
+            )
+            p_value_hold_vec = np.clip(
+                model_value_cls.predict_proba(X_hold_value)[:, 1],
+                1e-6, 1 - 1e-6
+            )
+            p_value_full_vec = np.clip(
+                model_value_cls.predict_proba(X_full_value)[:, 1],
+                1e-6, 1 - 1e-6
+            )
         
+            try:
+                model_value_cls.feature_names_in_ = np.asarray(feature_cols_value, dtype=object)
+                model_value_cls.get_booster().feature_names = feature_cols_value
+            except Exception:
+                pass
+        
+        # value regression head
+        if y_train_value_reg is not None and X_train_value.shape[1] > 0:
+            model_value_reg = XGBRegressor(
+                objective="reg:squarederror",
+                eval_metric="rmse",
+                tree_method="hist",
+                grow_policy="lossguide",
+                n_estimators=500,
+                learning_rate=0.03,
+                max_depth=0,
+                max_leaves=64,
+                min_child_weight=4.0,
+                gamma=0.5,
+                reg_alpha=0.1,
+                reg_lambda=8.0,
+                subsample=0.85,
+                colsample_bytree=0.80,
+                colsample_bynode=0.80,
+                max_bin=256,
+                n_jobs=1,
+                random_state=2028,
+            )
+        
+            model_value_reg.fit(
+                X_train_value,
+                y_train_value_reg,
+                sample_weight=w_train,
+                verbose=False,
+            )
+        
+            pred_value_reg_train = np.asarray(model_value_reg.predict(X_train_value), dtype=np.float64)
+            pred_value_reg_hold  = np.asarray(model_value_reg.predict(X_hold_value),  dtype=np.float64)
+            pred_value_reg_full  = np.asarray(model_value_reg.predict(X_full_value),  dtype=np.float64)
         
         # -----------------------------------------
         # OOF predictions (train-only) + blending
@@ -12808,7 +12886,8 @@ def train_sharp_model_from_bq(
         oof_pred_logloss = (np.full(len(y_train), np.nan, dtype=np.float64) if RUN_LOGLOSS else None)
         
         def _decide_global_flip(y, p, min_margin=0.01):
-            y = np.asarray(y, int); p = np.asarray(p, float)
+            y = np.asarray(y, int)
+            p = np.asarray(p, float)
             if np.unique(y).size < 2:
                 return False
             auc0 = roc_auc_score(y, p)
@@ -12857,7 +12936,7 @@ def train_sharp_model_from_bq(
         if use_full:
             p_oof_log = np.clip(oof_pred_logloss[mask_oof], eps, 1 - eps).astype(np.float64)
         
-        # --- Blend weight selection (your existing chooser) ---
+        # --- Blend weight selection ---
         best_w, p_oof_blend, _ = pick_blend_weight_on_oof(
             y_oof=y_oof,
             p_oof_auc=p_oof_auc,
@@ -12869,7 +12948,7 @@ def train_sharp_model_from_bq(
         p_oof_blend = np.asarray(p_oof_blend, dtype=np.float64)
         assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
         
-        # ✅ THE STRUCTURAL CHANGE: decide ONE global flip from the final blended OOF
+        # decide ONE global flip from the final blended OOF
         flip_flag = _decide_global_flip(y_oof, p_oof_blend, min_margin=0.01)
         if flip_flag:
             p_oof_blend = 1.0 - p_oof_blend
@@ -12886,19 +12965,9 @@ def train_sharp_model_from_bq(
             "oof_std": float(oof_std),
             "oof_minmax": (float(p_oof_blend.min()), float(p_oof_blend.max())),
         })
-
-
-        # ---------------- Calibration (simplified, avoids extra compression) ----------------
-        # ---------------- Calibration (simplified, avoids extra compression) ----------------
-        # Goals:
-        #  1) Blend AUC + LogLoss in LOGIT space (keeps edges / avoids mean-pull)
-        #  2) Fit calibrator on OOF BLEND (no prior shift during fitting)
-        #  3) Apply prior shift LAST (deployment adjustment), separately from "calibration quality"
-        #  4) Keep temperature OFF by default for spreads (often compresses)
-        #  5) Show calibration tables for BOTH:
-        #       - calibrated (no prior shift)  ✅ true calibration check
-        #       - deploy-adjusted (after prior shift) ✅ what you'd actually serve
         
+        
+        # ---------------- Calibration helpers ----------------
         def _clip01(p, eps=1e-7):
             p = np.asarray(p, dtype=np.float64)
             return np.clip(p, eps, 1.0 - eps)
@@ -12912,7 +12981,6 @@ def train_sharp_model_from_bq(
             return 1.0 / (1.0 + np.exp(-z))
         
         def _prior_correct(p, train_pos, hold_pos, clip=1e-6):
-            # base-rate / prevalence shift correction (logit add)
             p = np.clip(np.asarray(p, float), clip, 1.0 - clip)
             train_pos = float(np.clip(train_pos, clip, 1.0 - clip))
             hold_pos  = float(np.clip(hold_pos,  clip, 1.0 - clip))
@@ -12920,19 +12988,11 @@ def train_sharp_model_from_bq(
             return _sigmoid(_logit(p, eps=clip) + shift)
         
         CLIP = 0.03 if str(market).lower().strip() == "spreads" else (0.02 if SMALL else 0.01)
-        eps = 1e-7
-        
-        deploy_pos = float(np.mean(y_full[hold_idx] == 1))
-        oof_pos    = float(np.mean(y_oof == 1))
-        
-        # NOTE: keep flip OFF by default since you already AUC-aligned per fold
-        flip_flag = False
         
         # ------------------
         # 1) Fit calibrator on blended OOF directly (NO prior shift here)
         # ------------------
-        p_oof_for_cal = (1.0 - p_oof_blend) if flip_flag else np.asarray(p_oof_blend, dtype=np.float64)
-        p_oof_for_cal = _clip01(p_oof_for_cal, eps)
+        p_oof_for_cal = _clip01(p_oof_blend, eps)
         
         use_qiso = (len(np.unique(np.round(p_oof_for_cal, 4))) < 400)
         cals_raw = fit_iso_platt_beta(p_oof_for_cal, y_oof, eps=1e-6, use_quantile_iso=use_qiso)
@@ -12944,17 +13004,19 @@ def train_sharp_model_from_bq(
         cals["beta"]  = _ensure_predict_proba_for_prob_cal(cals.get("beta"),  eps=1e-6)
         
         candidates = []
-        if cals.get("beta")  is not None: candidates.append(("beta",  cals["beta"]))
-        if cals.get("platt") is not None: candidates.append(("platt", cals["platt"]))
-        if cals.get("iso")   is not None: candidates.append(("iso",   cals["iso"]))
+        if cals.get("beta")  is not None:
+            candidates.append(("beta",  cals["beta"]))
+        if cals.get("platt") is not None:
+            candidates.append(("platt", cals["platt"]))
+        if cals.get("iso")   is not None:
+            candidates.append(("iso",   cals["iso"]))
         if not candidates:
             candidates = [("iso", _IdentityIsoCal(eps=1e-6))]
         
         def _ece_score(y, p, n_bins=10):
             return float(expected_calibration_error(np.asarray(y, int), np.asarray(p, float), n_bins=n_bins))
         
-        # Selection with anti-compression guard:
-        # prefer low ECE, but penalize calibrators that crush variance
+        # Selection with anti-compression guard
         raw_std = float(np.std(p_oof_for_cal))
         scores = []
         for kind, cal in candidates:
@@ -12963,7 +13025,6 @@ def train_sharp_model_from_bq(
                 pp = np.asarray(np.clip(pp, CLIP, 1.0 - CLIP), float)
                 ece = _ece_score(y_oof, pp, n_bins=10)
                 std_ratio = float(np.std(pp) / max(raw_std, 1e-9))
-                # keep: lower ECE is good; higher std_ratio is good (less compression)
                 if np.isfinite(ece):
                     scores.append((ece, -std_ratio, kind, cal, std_ratio))
             except Exception as e:
@@ -12973,7 +13034,7 @@ def train_sharp_model_from_bq(
                     pass
         
         if scores:
-            scores.sort(key=lambda t: (t[0], t[1]))  # low ECE, high std_ratio
+            scores.sort(key=lambda t: (t[0], t[1]))
             ece_best, _, cal_name, cal_obj, std_ratio = scores[0]
         else:
             cal_name, cal_obj, ece_best, std_ratio = "iso", _IdentityIsoCal(eps=1e-6), float("nan"), float("nan")
@@ -12985,58 +13046,85 @@ def train_sharp_model_from_bq(
             "std_ratio_after_cal": (None if not np.isfinite(std_ratio) else float(std_ratio)),
         })
         
-        # Temperature scaling: OFF by default (especially spreads); keep as constant
-        T_best = 1.0
-        
         # ------------------
-        # 2) Inference: Blend in logit space -> (optional flip) -> calibrate -> prior shift LAST
+        # 2) Outcome inference: Blend in logit space -> optional flip -> calibrate -> prior shift LAST
         # ------------------
         p_tr_auc, _ = pos_proba_safe(model_auc, X_full[train_all_idx], positive=1)
         p_ho_auc, _ = pos_proba_safe(model_auc, X_full[hold_idx], positive=1)
+        p_fu_auc, _ = pos_proba_safe(model_auc, X_full, positive=1)
         
         p_tr_auc = _clip01(p_tr_auc, eps)
         p_ho_auc = _clip01(p_ho_auc, eps)
+        p_fu_auc = _clip01(p_fu_auc, eps)
         
         if RUN_LOGLOSS:
             p_tr_ll, _ = pos_proba_safe(model_logloss, X_full[train_all_idx], positive=1)
             p_ho_ll, _ = pos_proba_safe(model_logloss, X_full[hold_idx], positive=1)
+            p_fu_ll, _ = pos_proba_safe(model_logloss, X_full, positive=1)
+        
             p_tr_ll = _clip01(p_tr_ll, eps)
             p_ho_ll = _clip01(p_ho_ll, eps)
+            p_fu_ll = _clip01(p_fu_ll, eps)
         
-            # ✅ LOGIT-SPACE BLEND (structural change that preserves spread)
             z_tr = float(best_w) * _logit(p_tr_ll, eps) + (1.0 - float(best_w)) * _logit(p_tr_auc, eps)
             z_ho = float(best_w) * _logit(p_ho_ll, eps) + (1.0 - float(best_w)) * _logit(p_ho_auc, eps)
+            z_fu = float(best_w) * _logit(p_fu_ll, eps) + (1.0 - float(best_w)) * _logit(p_fu_auc, eps)
         else:
             z_tr = _logit(p_tr_auc, eps)
             z_ho = _logit(p_ho_auc, eps)
+            z_fu = _logit(p_fu_auc, eps)
         
         p_train_blend_raw = _clip01(_sigmoid(z_tr), eps)
         p_hold_blend_raw  = _clip01(_sigmoid(z_ho), eps)
+        p_full_blend_raw  = _clip01(_sigmoid(z_fu), eps)
         
         if flip_flag:
             p_train_blend_raw = 1.0 - p_train_blend_raw
             p_hold_blend_raw  = 1.0 - p_hold_blend_raw
+            p_full_blend_raw  = 1.0 - p_full_blend_raw
         
-        # Calibrate (NO prior shift here)
+        # Calibrate outcome (NO prior shift here)
         p_cal_tr = np.asarray(_apply_cal(cal_name, cal_obj, p_train_blend_raw), float)
         p_cal_ho = np.asarray(_apply_cal(cal_name, cal_obj, p_hold_blend_raw),  float)
+        p_cal_fu = np.asarray(_apply_cal(cal_name, cal_obj, p_full_blend_raw),  float)
         
         p_cal_tr = np.asarray(np.clip(p_cal_tr, CLIP, 1.0 - CLIP), float)
         p_cal_ho = np.asarray(np.clip(p_cal_ho, CLIP, 1.0 - CLIP), float)
+        p_cal_fu = np.asarray(np.clip(p_cal_fu, CLIP, 1.0 - CLIP), float)
         
-        # Prior-correct LAST (deployment adjustment)
+        # Prior-correct outcome LAST
+        deploy_pos = float(np.mean(y_full[hold_idx] == 1))
         train_pos_for_pc = float(np.mean(y_full[train_all_idx] == 1))
+        
         p_train_vec = _prior_correct(p_cal_tr, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
         p_hold_vec  = _prior_correct(p_cal_ho, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
+        p_full_vec  = _prior_correct(p_cal_fu, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
         
         p_train_vec = np.asarray(np.clip(p_train_vec, CLIP, 1.0 - CLIP), float)
         p_hold_vec  = np.asarray(np.clip(p_hold_vec,  CLIP, 1.0 - CLIP), float)
-
+        p_full_vec  = np.asarray(np.clip(p_full_vec,  CLIP, 1.0 - CLIP), float)
+        
         
         # ----------------------------
         # 6D) META-COMBINER
         # FINAL OUTPUT = probability this line wins
         # ----------------------------
+        # guards: if any support head is missing, substitute neutral defaults
+        if p_situation_train_vec is None:
+            p_situation_train_vec = np.full(len(train_df), 0.5, dtype=np.float64)
+            p_situation_hold_vec  = np.full(len(hold_df),  0.5, dtype=np.float64)
+            p_situation_full_vec  = np.full(len(df_valid), 0.5, dtype=np.float64)
+        
+        if p_value_train_vec is None:
+            p_value_train_vec = np.full(len(train_df), 0.5, dtype=np.float64)
+            p_value_hold_vec  = np.full(len(hold_df),  0.5, dtype=np.float64)
+            p_value_full_vec  = np.full(len(df_valid), 0.5, dtype=np.float64)
+        
+        if pred_value_reg_train is None:
+            pred_value_reg_train = np.zeros(len(train_df), dtype=np.float64)
+            pred_value_reg_hold  = np.zeros(len(hold_df),  dtype=np.float64)
+            pred_value_reg_full  = np.zeros(len(df_valid), dtype=np.float64)
+        
         meta_train_df = pd.DataFrame({
             "Meta_P_Outcome":   np.asarray(p_train_vec, dtype=np.float64),
             "Meta_P_Situation": np.asarray(p_situation_train_vec, dtype=np.float64),
@@ -13051,16 +13139,28 @@ def train_sharp_model_from_bq(
             "Meta_Value_Reg":   np.asarray(pred_value_reg_hold, dtype=np.float64),
         }, index=hold_df.index)
         
+        meta_full_df = pd.DataFrame({
+            "Meta_P_Outcome":   np.asarray(p_full_vec, dtype=np.float64),
+            "Meta_P_Situation": np.asarray(p_situation_full_vec, dtype=np.float64),
+            "Meta_P_Value":     np.asarray(p_value_full_vec, dtype=np.float64),
+            "Meta_Value_Reg":   np.asarray(pred_value_reg_full, dtype=np.float64),
+        }, index=df_valid.index)
+        
         if "Odds_Price" in train_df.columns:
             meta_train_df["Meta_Odds_Price"] = pd.to_numeric(train_df["Odds_Price"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
             meta_hold_df["Meta_Odds_Price"]  = pd.to_numeric(hold_df["Odds_Price"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        if "Odds_Price" in df_valid.columns:
+            meta_full_df["Meta_Odds_Price"]  = pd.to_numeric(df_valid["Odds_Price"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
         
         if "Value" in train_df.columns:
             meta_train_df["Meta_Line_Value"] = pd.to_numeric(train_df["Value"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
             meta_hold_df["Meta_Line_Value"]  = pd.to_numeric(hold_df["Value"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        if "Value" in df_valid.columns:
+            meta_full_df["Meta_Line_Value"]  = pd.to_numeric(df_valid["Value"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
         
         meta_train_df = meta_train_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         meta_hold_df  = meta_hold_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        meta_full_df  = meta_full_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         
         meta_model = XGBClassifier(
             objective="binary:logistic",
@@ -13089,38 +13189,115 @@ def train_sharp_model_from_bq(
             verbose=False,
         )
         
-        final_bet_score_train = np.asarray(
+        final_bet_score_train_raw = np.asarray(
             meta_model.predict_proba(meta_train_df.to_numpy(dtype=np.float32))[:, 1],
             dtype=np.float64
         )
-        final_bet_score_hold = np.asarray(
+        final_bet_score_hold_raw = np.asarray(
             meta_model.predict_proba(meta_hold_df.to_numpy(dtype=np.float32))[:, 1],
             dtype=np.float64
         )
-
-        # Diagnostics (report BOTH calibration quality + stability)
+        final_bet_score_full_raw = np.asarray(
+            meta_model.predict_proba(meta_full_df.to_numpy(dtype=np.float32))[:, 1],
+            dtype=np.float64
+        )
+        
+        # ----------------------------
+        # 6E) META CALIBRATION
+        # ----------------------------
+        meta_cals_raw = fit_iso_platt_beta(
+            _clip01(final_bet_score_train_raw, eps),
+            y_train.astype(int),
+            eps=1e-6,
+            use_quantile_iso=(len(np.unique(np.round(final_bet_score_train_raw, 4))) < 400),
+        )
+        meta_cals = _normalize_cals(meta_cals_raw)
+        meta_cals["iso"]   = _ensure_transform_for_iso(meta_cals.get("iso")) or _IdentityIsoCal(eps=1e-6)
+        meta_cals["platt"] = _ensure_predict_proba_for_prob_cal(meta_cals.get("platt"), eps=1e-6)
+        meta_cals["beta"]  = _ensure_predict_proba_for_prob_cal(meta_cals.get("beta"),  eps=1e-6)
+        
+        meta_candidates = []
+        if meta_cals.get("beta") is not None:
+            meta_candidates.append(("beta", meta_cals["beta"]))
+        if meta_cals.get("platt") is not None:
+            meta_candidates.append(("platt", meta_cals["platt"]))
+        if meta_cals.get("iso") is not None:
+            meta_candidates.append(("iso", meta_cals["iso"]))
+        if not meta_candidates:
+            meta_candidates = [("iso", _IdentityIsoCal(eps=1e-6))]
+        
+        meta_scores = []
+        meta_raw_std = float(np.std(final_bet_score_train_raw))
+        for kind, cal in meta_candidates:
+            try:
+                pp = _apply_cal(kind, cal, _clip01(final_bet_score_train_raw, eps))
+                pp = np.asarray(np.clip(pp, CLIP, 1.0 - CLIP), float)
+                ece = _ece_score(y_train.astype(int), pp, n_bins=10)
+                std_ratio = float(np.std(pp) / max(meta_raw_std, 1e-9))
+                if np.isfinite(ece):
+                    meta_scores.append((ece, -std_ratio, kind, cal, std_ratio))
+            except Exception:
+                pass
+        
+        if meta_scores:
+            meta_scores.sort(key=lambda t: (t[0], t[1]))
+            meta_ece_best, _, meta_cal_name, meta_cal_obj, meta_std_ratio = meta_scores[0]
+        else:
+            meta_cal_name, meta_cal_obj, meta_ece_best, meta_std_ratio = "iso", _IdentityIsoCal(eps=1e-6), float("nan"), float("nan")
+        
+        final_bet_score_train = np.asarray(
+            np.clip(_apply_cal(meta_cal_name, meta_cal_obj, _clip01(final_bet_score_train_raw, eps)), CLIP, 1.0 - CLIP),
+            dtype=np.float64
+        )
+        final_bet_score_hold = np.asarray(
+            np.clip(_apply_cal(meta_cal_name, meta_cal_obj, _clip01(final_bet_score_hold_raw, eps)), CLIP, 1.0 - CLIP),
+            dtype=np.float64
+        )
+        final_bet_score_full = np.asarray(
+            np.clip(_apply_cal(meta_cal_name, meta_cal_obj, _clip01(final_bet_score_full_raw, eps)), CLIP, 1.0 - CLIP),
+            dtype=np.float64
+        )
+        
+        st.write({
+            "meta_calibrator_used": str(meta_cal_name),
+            "meta_ece_best": (None if not np.isfinite(meta_ece_best) else float(meta_ece_best)),
+            "meta_std_ratio_after_cal": (None if not np.isfinite(meta_std_ratio) else float(meta_std_ratio)),
+        })
+        
+        # Diagnostics for outcome-calibrated probabilities
         ece_tr = expected_calibration_error(y_full[train_all_idx].astype(int), p_train_vec, n_bins=10)
         ece_ho = expected_calibration_error(y_full[hold_idx].astype(int),      p_hold_vec,  n_bins=10)
         psi    = population_stability_index(p_train_vec, p_hold_vec, bins=20)
         st.write({"cal_used": cal_name, "ece_train": float(ece_tr), "ece_hold": float(ece_ho), "psi": float(psi)})
         
+        # Diagnostics for final combined output
+        meta_ece_tr = expected_calibration_error(y_train.astype(int), final_bet_score_train, n_bins=10)
+        meta_ece_ho = expected_calibration_error(y_hold.astype(int),  final_bet_score_hold,  n_bins=10)
+        meta_psi    = population_stability_index(final_bet_score_train, final_bet_score_hold, bins=20)
+        st.write({"meta_ece_train": float(meta_ece_tr), "meta_ece_hold": float(meta_ece_ho), "meta_psi": float(meta_psi)})
+        
         assert p_train_vec.shape[0] == len(train_all_idx), "p_train_vec length mismatch"
         assert p_hold_vec.shape[0]  == len(hold_idx),      "p_hold_vec length mismatch"
+        assert final_bet_score_train.shape[0] == len(train_all_idx), "final_bet_score_train length mismatch"
+        assert final_bet_score_hold.shape[0]  == len(hold_idx),      "final_bet_score_hold length mismatch"
         
-        # --- Save adapter ---
+        # --- Save adapter for OUTCOME-only calibrated probabilities ---
         cal_blend = (cal_name, cal_obj)
         iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1.0 - CLIP))
         
-        # --- Helper to get final calibrated probs (blend->flip->calibrate->clip) ---
-        # NOTE: this returns CALIBRATED (no prior shift). If you want deploy prior shift in prod,
-        # do it at the call site with _prior_correct() using your runtime base rate estimate.
+        # --- Outcome-only helper (not meta-system) ---
         def predict_calibrated(models: dict, X):
-            eps = 1e-7
-            def _clip01_local(p): return np.clip(np.asarray(p, float), eps, 1.0 - eps)
+            eps_local = 1e-7
+        
+            def _clip01_local(p):
+                return np.clip(np.asarray(p, float), eps_local, 1.0 - eps_local)
+        
             def _logit_local(p):
                 p = _clip01_local(p)
                 return np.log(p / (1.0 - p))
-            def _sigmoid_local(z): return 1.0 / (1.0 + np.exp(-z))
+        
+            def _sigmoid_local(z):
+                return 1.0 / (1.0 + np.exp(-z))
         
             pa = models["model_auc"].predict_proba(X)[:, 1]
             pa = _clip01_local(pa)
@@ -13137,11 +13314,44 @@ def train_sharp_model_from_bq(
             if models.get("flip_flag", False):
                 p = 1.0 - p
         
-            # calibrated + clipped
             return models["iso_blend"].predict(p)
         
+        # --- Final three-head system helper ---
+        def predict_final_bet_score(
+            meta_model,
+            meta_cal_name,
+            meta_cal_obj,
+            p_outcome,
+            p_situation,
+            p_value_cls,
+            pred_value_reg,
+            odds_price=None,
+            line_value=None,
+            clip=(CLIP, 1.0 - CLIP),
+        ):
+            meta_df = pd.DataFrame({
+                "Meta_P_Outcome":   np.asarray(p_outcome, dtype=np.float64),
+                "Meta_P_Situation": np.asarray(p_situation, dtype=np.float64),
+                "Meta_P_Value":     np.asarray(p_value_cls, dtype=np.float64),
+                "Meta_Value_Reg":   np.asarray(pred_value_reg, dtype=np.float64),
+            })
+        
+            if odds_price is not None:
+                meta_df["Meta_Odds_Price"] = pd.to_numeric(pd.Series(odds_price), errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+            if line_value is not None:
+                meta_df["Meta_Line_Value"] = pd.to_numeric(pd.Series(line_value), errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        
+            meta_df = meta_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            raw = np.asarray(
+                meta_model.predict_proba(meta_df.to_numpy(dtype=np.float32))[:, 1],
+                dtype=np.float64
+            )
+            cal = np.asarray(_apply_cal(meta_cal_name, meta_cal_obj, _clip01(raw, eps)), dtype=np.float64)
+            lo, hi = clip
+            return np.clip(cal, lo, hi)
+        
         # ------------------
-        # 3) Calibration tables (RECOMMENDATION: show both "calibration quality" and "deploy-adjusted")
+        # Calibration tables
         # ------------------
         def _make_edges(p, q=10, eps=1e-7):
             p = np.asarray(p, float)
@@ -13150,14 +13360,12 @@ def train_sharp_model_from_bq(
                 return np.linspace(eps, 1.0 - eps, q + 1)
             qs = np.linspace(0, 1, q + 1)
             edges = np.quantile(p, qs)
-            # enforce strictly increasing edges
             edges = np.maximum.accumulate(edges)
             edges[0] = min(edges[0], 1.0 - eps)
             edges[-1] = max(edges[-1], eps)
-            # de-dupe tiny bins
             for i in range(1, len(edges)):
-                if edges[i] <= edges[i-1]:
-                    edges[i] = min(1.0 - eps, edges[i-1] + 1e-6)
+                if edges[i] <= edges[i - 1]:
+                    edges[i] = min(1.0 - eps, edges[i - 1] + 1e-6)
             return edges
         
         def _cal_table_fixed_edges(y, p, edges, eps=1e-7):
@@ -13165,7 +13373,6 @@ def train_sharp_model_from_bq(
             p = _clip01(np.asarray(p, float), eps)
             edges = np.asarray(edges, float)
         
-            # bin index
             b = np.digitize(p, edges, right=True) - 1
             b = np.clip(b, 0, len(edges) - 2)
         
@@ -13187,36 +13394,49 @@ def train_sharp_model_from_bq(
                 out = out.sort_values("Avg Pred P").reset_index(drop=True)
             return out
         
-        # ✅ "Calibration quality" tables should use calibrated probs WITHOUT prior shift
+        # Outcome calibration tables
         edges_cal = _make_edges(p_cal_ho, q=10, eps=eps)
         
-        st.markdown("#### 🎯 Calibration Table — TRAIN (calibrated, no prior shift)")
+        st.markdown("#### 🎯 Outcome Calibration Table — TRAIN (calibrated, no prior shift)")
         st.dataframe(
             _cal_table_fixed_edges(y_full[train_all_idx].astype(int), p_cal_tr, edges_cal, eps=eps),
             use_container_width=True
         )
         
-        st.markdown("#### 🎯 Calibration Table — HOLDOUT (calibrated, no prior shift)")
+        st.markdown("#### 🎯 Outcome Calibration Table — HOLDOUT (calibrated, no prior shift)")
         st.dataframe(
             _cal_table_fixed_edges(y_full[hold_idx].astype(int), p_cal_ho, edges_cal, eps=eps),
             use_container_width=True
         )
         
-        # Optional: "what you'd serve" tables AFTER prior shift
         edges_deploy = _make_edges(p_hold_vec, q=10, eps=eps)
         
-        st.markdown("#### 🧭 Calibration Table — TRAIN (deploy-adjusted prior shift)")
+        st.markdown("#### 🧭 Outcome Calibration Table — TRAIN (deploy-adjusted prior shift)")
         st.dataframe(
             _cal_table_fixed_edges(y_full[train_all_idx].astype(int), p_train_vec, edges_deploy, eps=eps),
             use_container_width=True
         )
         
-        st.markdown("#### 🧭 Calibration Table — HOLDOUT (deploy-adjusted prior shift)")
+        st.markdown("#### 🧭 Outcome Calibration Table — HOLDOUT (deploy-adjusted prior shift)")
         st.dataframe(
             _cal_table_fixed_edges(y_full[hold_idx].astype(int), p_hold_vec, edges_deploy, eps=eps),
             use_container_width=True
         )
         
+        # Final meta-system calibration tables
+        edges_meta = _make_edges(final_bet_score_hold, q=10, eps=eps)
+        
+        st.markdown("#### 🚀 Final Bet Score Calibration Table — TRAIN")
+        st.dataframe(
+            _cal_table_fixed_edges(y_train.astype(int), final_bet_score_train, edges_meta, eps=eps),
+            use_container_width=True
+        )
+        
+        st.markdown("#### 🚀 Final Bet Score Calibration Table — HOLDOUT")
+        st.dataframe(
+            _cal_table_fixed_edges(y_hold.astype(int), final_bet_score_hold, edges_meta, eps=eps),
+            use_container_width=True
+        )
         # -------------------------------------------------------------------
         # METRICS (always defined; prevents NameError later)
         # -------------------------------------------------------------------
@@ -13233,6 +13453,7 @@ def train_sharp_model_from_bq(
         y_train_vec = y_train.astype(int)
         y_hold_vec  = y_hold.astype(int)
         
+        # Outcome metrics
         auc_train  = auc_safe(y_train_vec, p_train_vec)
         auc_hold   = auc_safe(y_hold_vec,  p_hold_vec)
         
@@ -13256,63 +13477,82 @@ def train_sharp_model_from_bq(
         auc_gap_f       = _to_float(auc_train_f - auc_hold_f)
         
         # Situation head metrics
-        auc_situation_hold = auc_safe(y_hold_situation.astype(int), p_situation_hold_vec)
-        auc_situation_hold_f = _to_float(auc_situation_hold)
+        auc_situation_hold_f = np.nan
+        if y_hold_situation is not None and p_situation_hold_vec is not None:
+            auc_situation_hold = auc_safe(np.asarray(y_hold_situation).astype(int), np.asarray(p_situation_hold_vec))
+            auc_situation_hold_f = _to_float(auc_situation_hold)
         
         # Value head metrics
-        auc_value_hold = auc_safe(y_hold_value_cls.astype(int), p_value_hold_vec)
-        auc_value_hold_f = _to_float(auc_value_hold)
+        auc_value_hold_f = np.nan
+        if y_hold_value_cls is not None and p_value_hold_vec is not None:
+            auc_value_hold = auc_safe(np.asarray(y_hold_value_cls).astype(int), np.asarray(p_value_hold_vec))
+            auc_value_hold_f = _to_float(auc_value_hold)
         
-        rmse_value_hold = _to_float(np.sqrt(mean_squared_error(y_hold_value_reg.astype(float), pred_value_reg_hold.astype(float))))
-        mae_value_hold  = _to_float(mean_absolute_error(y_hold_value_reg.astype(float), pred_value_reg_hold.astype(float)))
+        rmse_value_hold = np.nan
+        mae_value_hold  = np.nan
+        if y_hold_value_reg is not None and pred_value_reg_hold is not None:
+            rmse_value_hold = _to_float(
+                np.sqrt(mean_squared_error(np.asarray(y_hold_value_reg).astype(float), np.asarray(pred_value_reg_hold).astype(float)))
+            )
+            mae_value_hold = _to_float(
+                mean_absolute_error(np.asarray(y_hold_value_reg).astype(float), np.asarray(pred_value_reg_hold).astype(float))
+            )
         
-        # Meta metrics
-        meta_rmse_hold = _to_float(np.sqrt(mean_squared_error(y_hold_value_reg.astype(float), final_bet_score_hold.astype(float))))
-        meta_mae_hold  = _to_float(mean_absolute_error(y_hold_value_reg.astype(float), final_bet_score_hold.astype(float)))
-        try:
-            meta_spearman_hold = _to_float(spearmanr(y_hold_value_reg.astype(float), final_bet_score_hold.astype(float), nan_policy="omit").correlation)
-        except Exception:
-            meta_spearman_hold = np.nan
+        # Meta metrics (meta predicts OUTCOME probability)
+        auc_meta_hold_f = _to_float(auc_safe(y_hold_vec, final_bet_score_hold))
+        acc_meta_hold_f = _to_float(
+            accuracy_score(y_hold_vec, (np.asarray(final_bet_score_hold) >= 0.5).astype(int))
+            if np.unique(y_hold_vec).size == 2 else np.nan
+        )
+        logloss_meta_hold_f = _to_float(
+            log_loss(y_hold_vec, np.clip(final_bet_score_hold, 1e-6, 1 - 1e-6), labels=[0, 1])
+        )
+        brier_meta_hold_f = _to_float(
+            brier_score_loss(y_hold_vec, np.clip(final_bet_score_hold, 1e-6, 1 - 1e-6))
+        )
         
-        # Top-decile util
+        # Utility diagnostic
         q90 = np.nanquantile(final_bet_score_hold, 0.90)
         mask_top = np.asarray(final_bet_score_hold >= q90)
-        meta_top_decile_mean_util = _to_float(np.mean(y_hold_value_reg[mask_top])) if mask_top.any() else np.nan
-
+        meta_top_decile_mean_util = _to_float(np.mean(y_hold_value_reg[mask_top])) if (mask_top.any() and y_hold_value_reg is not None) else np.nan
+        
         artifact_metrics = None
         artifact_config  = None
         if return_artifacts:
             artifact_metrics = {
-                # old / outcome keys preserved
                 "auc_holdout": auc_hold_f,
                 "logloss_holdout": logloss_hold_f,
                 "brier_holdout": brier_hold_f,
                 "accuracy_holdout": acc_hold_f,
                 "auc_gap_train_holdout": auc_gap_f,
         
-                # new additive keys
                 "auc_situation_holdout": auc_situation_hold_f,
                 "auc_value_holdout": auc_value_hold_f,
                 "rmse_value_holdout": rmse_value_hold,
                 "mae_value_holdout": mae_value_hold,
-                "meta_rmse_holdout": meta_rmse_hold,
-                "meta_mae_holdout": meta_mae_hold,
-                "meta_spearman_holdout": meta_spearman_hold,
+        
+                "auc_meta_holdout": auc_meta_hold_f,
+                "accuracy_meta_holdout": acc_meta_hold_f,
+                "logloss_meta_holdout": logloss_meta_hold_f,
+                "brier_meta_holdout": brier_meta_hold_f,
                 "meta_top_decile_mean_util": meta_top_decile_mean_util,
             }
             artifact_config = {
                 "sport": sport,
                 "market": market,
-                "feature_count": int(len(feature_cols)),
+                "feature_count": int(len(feature_cols_outcome)),
                 "calibrator": str(cal_name),
                 "flip_flag": bool(flip_flag),
                 "blend_w": float(best_w),
         
-                # new additive config
                 "model_family": "three_head_plus_meta_v1",
+                "feature_cols_outcome": list(feature_cols_outcome),
+                "feature_cols_situation": list(feature_cols_situation),
+                "feature_cols_value": list(feature_cols_value),
                 "meta_features": list(meta_train_df.columns),
+                "meta_calibrator": str(meta_cal_name),
             }
-                
+
         # -------------------------------------------------------------------
         # Book reliability — ALWAYS DEFINED
         # -------------------------------------------------------------------
@@ -13341,62 +13581,68 @@ def train_sharp_model_from_bq(
             logger.warning(f"book_reliability_map build failed; defaulting to empty. err={e}")
         
         # -------------------------------------------------------------------
+        # -------------------------------------------------------------------
         # Store trained models (per-market map)
         # -------------------------------------------------------------------
         trained_models[market] = {
-            # ---- existing / backward-compatible keys ----
-            "model_logloss":        model_logloss,      # outcome head
-            "model_auc":            model_auc,          # outcome head
+            "model_logloss":        model_logloss,
+            "model_auc":            model_auc,
             "flip_flag":            bool(flip_flag),
-            "iso_blend":            iso_blend,          # outcome calibrator
-            "best_w":               float(best_w),      # outcome blend weight
+            "iso_blend":            iso_blend,
+            "best_w":               float(best_w),
             "team_feature_map":     team_feature_map,
             "book_reliability_map": book_reliability_map,
-            "feature_cols":         feature_cols,
         
-            # ---- new additive keys ----
+            "feature_cols":         list(feature_cols_outcome),
+            "feature_cols_outcome": list(feature_cols_outcome),
+            "feature_cols_situation": list(feature_cols_situation),
+            "feature_cols_value":   list(feature_cols_value),
+        
             "model_situation_cls":  model_situation_cls,
             "model_value_cls":      model_value_cls,
             "model_value_reg":      model_value_reg,
             "meta_model":           meta_model,
+            "meta_calibrator":      (meta_cal_name, meta_cal_obj),
         
-            # optional stored prediction metadata
             "multihead_config": {
                 "model_family": "three_head_plus_meta_v1",
                 "outcome_head": "model_logloss/model_auc + iso_blend",
                 "situation_head": "model_situation_cls",
                 "value_cls_head": "model_value_cls",
                 "value_reg_head": "model_value_reg",
-                "meta_head": "meta_model",
-                "meta_features": list(meta_train_df.columns) if 'meta_train_df' in locals() else [],
+                "meta_head": "meta_model + meta_calibrator",
+                "meta_features": list(meta_train_df.columns),
             },
         }
-        
+        # -------------------------------------------------------------------
         # -------------------------------------------------------------------
         # Save model artifact to GCS
         # -------------------------------------------------------------------
         save_info = save_model_to_gcs(
             model={
-                # ---- existing / backward-compatible keys ----
                 "model_logloss": model_logloss,
                 "model_auc":     model_auc,
                 "best_w":        float(best_w),
-                "feature_cols":  feature_cols,
+                "feature_cols":  list(feature_cols_outcome),
+                "feature_cols_outcome": list(feature_cols_outcome),
+                "feature_cols_situation": list(feature_cols_situation),
+                "feature_cols_value": list(feature_cols_value),
                 "flip_flag":     bool(flip_flag),
         
-                # ---- new additive keys ----
                 "model_situation_cls": model_situation_cls,
                 "model_value_cls":     model_value_cls,
                 "model_value_reg":     model_value_reg,
                 "meta_model":          meta_model,
+                "meta_calibrator":     (meta_cal_name, meta_cal_obj),
         
                 "multihead_config": {
                     "schema_version": 1,
                     "model_family": "three_head_plus_meta_v1",
-                    "meta_features": list(meta_train_df.columns) if 'meta_train_df' in locals() else [],
+                    "meta_features": list(meta_train_df.columns),
+                    "meta_calibrator": str(meta_cal_name),
                 },
             },
-            calibrator=iso_blend,  # keep old arg name for backward compatibility
+            calibrator=iso_blend,
             sport=sport,
             market=market,
             bucket_name=bucket_name,
@@ -13408,6 +13654,7 @@ def train_sharp_model_from_bq(
         if return_artifacts and isinstance(save_info, dict):
             artifact_model_path = f"gs://{save_info.get('bucket', bucket_name)}/{save_info.get('path')}"
         
+        # -------------------------------------------------------------------
         # -------------------------------------------------------------------
         # Status box
         # -------------------------------------------------------------------
@@ -13421,13 +13668,13 @@ def train_sharp_model_from_bq(
         - Value AUC: {auc_value_hold_f:.4f}
         - Value RMSE: {rmse_value_hold:.4f}
         - Value MAE: {mae_value_hold:.4f}
-        - Meta RMSE: {meta_rmse_hold:.4f}
-        - Meta MAE: {meta_mae_hold:.4f}
-        - Meta Spearman: {meta_spearman_hold:.4f}
+        - Meta Outcome AUC: {auc_meta_hold_f:.4f}
+        - Meta Outcome Accuracy: {acc_meta_hold_f:.4f}
+        - Meta Outcome Log Loss: {logloss_meta_hold_f:.4f}
+        - Meta Outcome Brier Score: {brier_meta_hold_f:.4f}
         - Meta Top Decile Mean Util: {meta_top_decile_mean_util:.4f}
         """
         )
-                
         pb.progress(min(100, max(0, pct)))
         
         status.update(label="✅ All models trained", state="complete", expanded=False)
