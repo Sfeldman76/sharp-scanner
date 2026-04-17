@@ -11750,15 +11750,30 @@ def train_sharp_model_from_bq(
         t_hold  = times[hold_idx]
         
         # Specialist targets aligned to same split
-        y_train_situation = y_full_situation[train_all_idx].astype(int)
-        y_hold_situation  = y_full_situation[hold_idx].astype(int)
+        # Specialist targets aligned to same split
+        y_train_situation = None
+        y_hold_situation = None
+        if y_full_situation is not None:
+            y_train_situation = y_full_situation[train_all_idx].astype(int)
+            y_hold_situation  = y_full_situation[hold_idx].astype(int)
         
-        y_train_value_reg = y_full_value_reg[train_all_idx].astype(np.float32)
-        y_hold_value_reg  = y_full_value_reg[hold_idx].astype(np.float32)
+        y_train_value_reg = None
+        y_hold_value_reg = None
+        if y_full_value_reg is not None:
+            y_train_value_reg = y_full_value_reg[train_all_idx].astype(np.float32)
+            y_hold_value_reg  = y_full_value_reg[hold_idx].astype(np.float32)
         
-        y_train_value_cls = y_full_value_cls[train_all_idx].astype(int)
-        y_hold_value_cls  = y_full_value_cls[hold_idx].astype(int)
+        y_train_value_cls = None
+        y_hold_value_cls = None
+        if y_full_value_cls is not None:
+            y_train_value_cls = y_full_value_cls[train_all_idx].astype(int)
+            y_hold_value_cls  = y_full_value_cls[hold_idx].astype(int)
         
+        print({
+            "has_y_full_situation": y_full_situation is not None,
+            "has_y_full_value_reg": y_full_value_reg is not None,
+            "has_y_full_value_cls": y_full_value_cls is not None,
+        })
         # ----------------------------
         # 2) Sample weights (BUILD ONCE from train_df) — no drops
         # ----------------------------
