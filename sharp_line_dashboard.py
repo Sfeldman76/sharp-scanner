@@ -12024,7 +12024,26 @@ def train_sharp_model_from_bq(
                 random_state=rs,
             )
 
-        def _run_head_autofs(head_name: str, y_head_train: np.ndarray):
+       
+        def _run_head_autofs(head_name, y_train):
+            if y_train is None:
+                st.warning(f"[AutoFS:{head_name}] skipped: y_train is None")
+                return None
+        
+            ys = pd.Series(y_train)
+        
+            if len(ys) == 0:
+                st.warning(f"[AutoFS:{head_name}] skipped: empty target")
+                return None
+        
+            if not ys.notna().any():
+                st.warning(f"[AutoFS:{head_name}] skipped: all target values are NaN")
+                return None
+        
+            if ys.nunique(dropna=True) < 2:
+                st.warning(f"[AutoFS:{head_name}] skipped: target has <2 classes")
+                return None
+    
             try:
                 _model_proto = est_auc
             except Exception:
@@ -12077,23 +12096,53 @@ def train_sharp_model_from_bq(
             }
 
         # ----------------------------
+        # Head AutoFS guards
+        # ----------------------------
+        autofs_outcome = None
+        autofs_situation = None
+        autofs_value = None
+        
+        def _autofs_target_ok(y, head_name):
+            if y is None:
+                st.warning(f"[AutoFS:{head_name}] skipped: target is None")
+                return False
+        
+            ys = pd.Series(y)
+        
+            if len(ys) == 0:
+                st.warning(f"[AutoFS:{head_name}] skipped: target is empty")
+                return False
+        
+            if not ys.notna().any():
+                st.warning(f"[AutoFS:{head_name}] skipped: target is all NaN")
+                return False
+        
+            if ys.nunique(dropna=True) < 2:
+                st.warning(f"[AutoFS:{head_name}] skipped: target has <2 classes")
+                return False
+        
+            return True
+        
+        # ----------------------------
         # Outcome head AutoFS
         # canonical / backward-compatible head
         # ----------------------------
-        autofs_outcome = _run_head_autofs("outcome", y_train)
-
+        if _autofs_target_ok(y_train, "outcome"):
+            autofs_outcome = _run_head_autofs("outcome", y_train)
+        
         # ----------------------------
         # Situation head AutoFS
         # ----------------------------
-        autofs_situation = _run_head_autofs("situation", y_train_situation)
-
+        if _autofs_target_ok(y_train_situation, "situation"):
+            autofs_situation = _run_head_autofs("situation", y_train_situation)
+        
         # ----------------------------
         # Value head AutoFS
         # IMPORTANT: use classification target for AutoFS because select_features_auto
         # is classifier/AUC oriented in the current pipeline
         # ----------------------------
-        autofs_value = _run_head_autofs("value", y_train_value_cls)
-
+        if _autofs_target_ok(y_train_value_cls, "value"):
+            autofs_value = _run_head_autofs("value", y_train_value_cls)
         # ----------------------------
         # Optional displays
         # ----------------------------
