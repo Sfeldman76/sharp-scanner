@@ -12025,6 +12025,7 @@ def train_sharp_model_from_bq(
             )
 
        
+       
         def _run_head_autofs(head_name, y_train):
             if y_train is None:
                 st.warning(f"[AutoFS:{head_name}] skipped: y_train is None")
@@ -12043,7 +12044,7 @@ def train_sharp_model_from_bq(
             if ys.nunique(dropna=True) < 2:
                 st.warning(f"[AutoFS:{head_name}] skipped: target has <2 classes")
                 return None
-    
+        
             try:
                 _model_proto = est_auc
             except Exception:
@@ -12051,11 +12052,11 @@ def train_sharp_model_from_bq(
                     _model_proto = est_ll
                 except Exception:
                     _model_proto = _default_proto(head_name)
-
+        
             feat_cols_head, shap_summary_head = select_features_auto(
                 model_proto=_model_proto,
                 X_df_train=X_df_train_full_all,
-                y_train=y_head_train,
+                y_train=y_train,
                 folds=folds,
                 sport_key=sport_key,
                 must_keep=[],
@@ -12074,19 +12075,19 @@ def train_sharp_model_from_bq(
                 auc_verbose=True,
                 log_func=log_func,
             )
-
+        
             # keep only columns present in BOTH split-safe matrices
             feat_cols_head = [
                 c for c in feat_cols_head
                 if c in X_df_train_full_all.columns and c in X_df_hold_full_all.columns
             ]
-
+        
             log_func(f"[AutoFS:{head_name}] selected={len(feat_cols_head)}")
-
+        
             X_train_head_df = _final_clean(X_df_train_full_all.reindex(columns=feat_cols_head))
             X_hold_head_df  = _final_clean(X_df_hold_full_all.reindex(columns=feat_cols_head))
             X_full_head_df  = _final_clean(X_df_full_all.reindex(columns=feat_cols_head))
-
+        
             return {
                 "feature_cols": list(feat_cols_head),
                 "shap_summary": shap_summary_head,
@@ -12094,7 +12095,6 @@ def train_sharp_model_from_bq(
                 "X_hold":  X_hold_head_df.to_numpy(np.float32, copy=False),
                 "X_full":  X_full_head_df.to_numpy(np.float32, copy=False),
             }
-
         # ----------------------------
         # Head AutoFS guards
         # ----------------------------
@@ -12146,15 +12146,19 @@ def train_sharp_model_from_bq(
         # ----------------------------
         # Optional displays
         # ----------------------------
+      
         try:
-            st.write(f"🔎 Outcome AutoFS kept {len(autofs_outcome['feature_cols'])} features")
-            st.dataframe(autofs_outcome["shap_summary"].head(25))
-
-            st.write(f"🔎 Situation AutoFS kept {len(autofs_situation['feature_cols'])} features")
-            st.dataframe(autofs_situation["shap_summary"].head(25))
-
-            st.write(f"🔎 Value AutoFS kept {len(autofs_value['feature_cols'])} features")
-            st.dataframe(autofs_value["shap_summary"].head(25))
+            if autofs_outcome is not None:
+                st.write(f"🔎 Outcome AutoFS kept {len(autofs_outcome['feature_cols'])} features")
+                st.dataframe(autofs_outcome["shap_summary"].head(25))
+        
+            if autofs_situation is not None:
+                st.write(f"🔎 Situation AutoFS kept {len(autofs_situation['feature_cols'])} features")
+                st.dataframe(autofs_situation["shap_summary"].head(25))
+        
+            if autofs_value is not None:
+                st.write(f"🔎 Value AutoFS kept {len(autofs_value['feature_cols'])} features")
+                st.dataframe(autofs_value["shap_summary"].head(25))
         except Exception:
             pass
 
