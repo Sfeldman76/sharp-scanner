@@ -594,46 +594,70 @@ def update_power_ratings(
         if df_hist is None or df_hist.empty:
             return
 
-        need = {"Sport", "Team", "Rating", "Method", "Updated_At"}
+   
+        need = {"Sport", "Team", "Rating", "Method", "Updated_At", "Game_Key"}
         missing = [c for c in need if c not in df_hist.columns]
         if missing:
             raise ValueError(f"upsert_history_rows missing cols: {missing}")
-
+        
         dfh = df_hist.copy()
         dfh["Sport"] = dfh["Sport"].astype(str).str.upper()
         dfh["Team"] = dfh["Team"].astype(str).str.lower().str.strip()
         dfh["Method"] = dfh["Method"].astype(str).str.lower().str.strip()
+        dfh["Game_Key"] = dfh["Game_Key"].astype(str).str.lower().str.strip()
         dfh["Updated_At"] = pd.to_datetime(dfh["Updated_At"], utc=True, errors="coerce")
         dfh["Rating"] = pd.to_numeric(dfh["Rating"], errors="coerce")
-
+        
         if "Source" not in dfh.columns:
             dfh["Source"] = None
-
-        dfh = dfh.dropna(subset=["Sport", "Team", "Method", "Updated_At", "Rating"])
-        dfh = dfh.drop_duplicates(subset=["Sport", "Team", "Method", "Updated_At"], keep="last")
+        
+        dfh = dfh.dropna(subset=["Sport", "Team", "Method", "Game_Key", "Updated_At", "Rating"])
+        
+        dfh = (
+            dfh.sort_values("Updated_At")
+               .groupby(["Sport", "Team", "Method", "Game_Key", "Updated_At"], as_index=False)
+               .last()
+        )
+        
         if dfh.empty:
             return
-
+        
         stage = table_history.rsplit(".", 1)[0] + "._ratings_history_stage"
         bq.load_table_from_dataframe(dfh, stage).result()
-
+        
         bq.query(f"""
         MERGE `{table_history}` T
-        USING `{stage}` S
+        USING (
+          SELECT Sport, Team, Rating, Method, Game_Key, Updated_At, Source
+          FROM (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                     PARTITION BY
+                       UPPER(Sport),
+                       LOWER(Team),
+                       LOWER(Method),
+                       LOWER(Game_Key),
+                       TIMESTAMP(Updated_At)
+                     ORDER BY Updated_At DESC
+                   ) AS rn
+            FROM `{stage}`
+          )
+          WHERE rn = 1
+        ) S
         ON  UPPER(T.Sport) = UPPER(S.Sport)
-        AND LOWER(T.Team)  = LOWER(S.Team)
-        AND LOWER(T.Method)= LOWER(S.Method)
+        AND LOWER(T.Team) = LOWER(S.Team)
+        AND LOWER(T.Method) = LOWER(S.Method)
+        AND LOWER(T.Game_Key) = LOWER(S.Game_Key)
         AND TIMESTAMP(T.Updated_At) = TIMESTAMP(S.Updated_At)
         WHEN MATCHED THEN UPDATE SET
           T.Rating = S.Rating,
           T.Source = S.Source
         WHEN NOT MATCHED THEN
-          INSERT (Sport, Team, Rating, Method, Updated_At, Source)
-          VALUES (S.Sport, S.Team, S.Rating, S.Method, S.Updated_At, S.Source)
+          INSERT (Sport, Team, Rating, Method, Game_Key, Updated_At, Source)
+          VALUES (S.Sport, S.Team, S.Rating, S.Method, S.Game_Key, S.Updated_At, S.Source)
         """).result()
-
+        
         bq.query(f"DROP TABLE `{stage}`").result()
-
     # ------------------------------------------------------------------
     # ✅ CURRENT UPSERT: MERGE ON (Sport, Team, Method)
     # ------------------------------------------------------------------
@@ -2167,11 +2191,33 @@ def update_power_ratings(
                     Rh2 = team_rating(g.Home_Team)
                     Ra2 = team_rating(g.Away_Team)
 
+                   
                     tag = "backfill" if window_start is None else "incremental"
-                    history_batch.append({"Sport": sport, "Team": g.Home_Team, "Rating": Rh2,
-                                          "Method": "poisson", "Updated_At": ts, "Source": tag})
-                    history_batch.append({"Sport": sport, "Team": g.Away_Team, "Rating": Ra2,
-                                          "Method": "poisson", "Updated_At": ts, "Source": tag})
+                    
+                    game_key = (
+                        f"{str(g.Home_Team).strip().lower()}__"
+                        f"{str(g.Away_Team).strip().lower()}__"
+                        f"{pd.Timestamp(ts).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                    )
+                    
+                    history_batch.append({
+                        "Sport": sport,
+                        "Team": str(g.Home_Team).strip().lower(),
+                        "Rating": float(Rh2),
+                        "Method": "poisson",
+                        "Game_Key": game_key,
+                        "Updated_At": ts,
+                        "Source": tag
+                    })
+                    history_batch.append({
+                        "Sport": sport,
+                        "Team": str(g.Away_Team).strip().lower(),
+                        "Rating": float(Ra2),
+                        "Method": "poisson",
+                        "Game_Key": game_key,
+                        "Updated_At": ts,
+                        "Source": tag
+                    })
 
                     if len(history_batch) >= BATCH_SZ:
                         upsert_history_rows(pd.DataFrame(history_batch))
