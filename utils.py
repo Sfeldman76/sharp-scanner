@@ -1271,13 +1271,29 @@ def update_power_ratings(
                     off_v[t] = (phi**2) * _ov(t) + sigma_eta**2
                     def_v[t] = (phi**2) * _dv(t) + sigma_eta**2
 
+            
                 ts = gs_ts
                 tag = "backfill" if window_start is None else "incremental"
-
-                history_batch.append({"Sport": sport, "Team": h, "Rating": 1500.0 + float(_net(h)),
-                                      "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
-                history_batch.append({"Sport": sport, "Team": a, "Rating": 1500.0 + float(_net(a)),
-                                      "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
+                game_key = _mk_game_key(h, a, ts)
+                
+                history_batch.append({
+                    "Sport": sport,
+                    "Team": str(h).strip().lower(),
+                    "Rating": 1500.0 + float(_net(h)),
+                    "Method": "elo_kalman",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": tag,
+                })
+                history_batch.append({
+                    "Sport": sport,
+                    "Team": str(a).strip().lower(),
+                    "Rating": 1500.0 + float(_net(a)),
+                    "Method": "elo_kalman",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": tag,
+                })
 
                 if len(history_batch) >= BATCH_SZ:
                     upsert_history_rows(pd.DataFrame(history_batch))
@@ -1588,16 +1604,83 @@ def update_power_ratings(
             a_d  = _clip(_adj_d(a), -D_CAP, D_CAP)
             a_em = _clip((a_o - a_d) + _sos_em_adj(a), -EM_CAP, EM_CAP)
     
+           
+            game_key = _mk_game_key(h, a, ts)
+            
             history_batch.extend([
-                {"Sport": sport, "Team": h, "Rating": float(h_o),          "Method": "kp_adj_o",  "Updated_At": ts, "Source": "per_game_pregame"},
-                {"Sport": sport, "Team": h, "Rating": float(h_d),          "Method": "kp_adj_d",  "Updated_At": ts, "Source": "per_game_pregame"},
-                {"Sport": sport, "Team": h, "Rating": float(h_em),         "Method": "kp_adj_em", "Updated_At": ts, "Source": "per_game_pregame"},
-                {"Sport": sport, "Team": h, "Rating": float(_adj_t(h)),    "Method": "kp_adj_t",  "Updated_At": ts, "Source": "per_game_pregame"},
-    
-                {"Sport": sport, "Team": a, "Rating": float(a_o),          "Method": "kp_adj_o",  "Updated_At": ts, "Source": "per_game_pregame"},
-                {"Sport": sport, "Team": a, "Rating": float(a_d),          "Method": "kp_adj_d",  "Updated_At": ts, "Source": "per_game_pregame"},
-                {"Sport": sport, "Team": a, "Rating": float(a_em),         "Method": "kp_adj_em", "Updated_At": ts, "Source": "per_game_pregame"},
-                {"Sport": sport, "Team": a, "Rating": float(_adj_t(a)),    "Method": "kp_adj_t",  "Updated_At": ts, "Source": "per_game_pregame"},
+                {
+                    "Sport": sport,
+                    "Team": str(h).strip().lower(),
+                    "Rating": float(h_o),
+                    "Method": "kp_adj_o",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
+                {
+                    "Sport": sport,
+                    "Team": str(h).strip().lower(),
+                    "Rating": float(h_d),
+                    "Method": "kp_adj_d",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
+                {
+                    "Sport": sport,
+                    "Team": str(h).strip().lower(),
+                    "Rating": float(h_em),
+                    "Method": "kp_adj_em",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
+                {
+                    "Sport": sport,
+                    "Team": str(h).strip().lower(),
+                    "Rating": float(_adj_t(h)),
+                    "Method": "kp_adj_t",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
+            
+                {
+                    "Sport": sport,
+                    "Team": str(a).strip().lower(),
+                    "Rating": float(a_o),
+                    "Method": "kp_adj_o",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
+                {
+                    "Sport": sport,
+                    "Team": str(a).strip().lower(),
+                    "Rating": float(a_d),
+                    "Method": "kp_adj_d",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
+                {
+                    "Sport": sport,
+                    "Team": str(a).strip().lower(),
+                    "Rating": float(a_em),
+                    "Method": "kp_adj_em",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
+                {
+                    "Sport": sport,
+                    "Team": str(a).strip().lower(),
+                    "Rating": float(_adj_t(a)),
+                    "Method": "kp_adj_t",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
             ])
     
             if len(history_batch) >= BATCH_SZ:
@@ -1999,18 +2082,83 @@ def update_power_ratings(
             a_d  = float(_adj_d100(a))
             a_em = float(_adj_em100(a) + _sos_em_adj(a))
     
+            game_key = _mk_game_key(h, a, ts)
+            
             history_batch.extend([
-                {"Sport": sport, "Team": h, "Rating": h_o,  "Method": "nba_bpi_adj_o",  "Updated_At": ts, "Source": "per_game_pregame"},
-                {"Sport": sport, "Team": h, "Rating": h_d,  "Method": "nba_bpi_adj_d",  "Updated_At": ts, "Source": "per_game_pregame"},
-                {"Sport": sport, "Team": h, "Rating": h_em, "Method": "nba_bpi_adj_em", "Updated_At": ts, "Source": "per_game_pregame"},
-                {"Sport": sport, "Team": h, "Rating": float(_tempo(h)), "Method": "nba_bpi_adj_t", "Updated_At": ts, "Source": "per_game_pregame"},
-    
-                {"Sport": sport, "Team": a, "Rating": a_o,  "Method": "nba_bpi_adj_o",  "Updated_At": ts, "Source": "per_game_pregame"},
-                {"Sport": sport, "Team": a, "Rating": a_d,  "Method": "nba_bpi_adj_d",  "Updated_At": ts, "Source": "per_game_pregame"},
-                {"Sport": sport, "Team": a, "Rating": a_em, "Method": "nba_bpi_adj_em", "Updated_At": ts, "Source": "per_game_pregame"},
-                {"Sport": sport, "Team": a, "Rating": float(_tempo(a)), "Method": "nba_bpi_adj_t", "Updated_At": ts, "Source": "per_game_pregame"},
+                {
+                    "Sport": sport,
+                    "Team": str(h).strip().lower(),
+                    "Rating": h_o,
+                    "Method": "nba_bpi_adj_o",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
+                {
+                    "Sport": sport,
+                    "Team": str(h).strip().lower(),
+                    "Rating": h_d,
+                    "Method": "nba_bpi_adj_d",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
+                {
+                    "Sport": sport,
+                    "Team": str(h).strip().lower(),
+                    "Rating": h_em,
+                    "Method": "nba_bpi_adj_em",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
+                {
+                    "Sport": sport,
+                    "Team": str(h).strip().lower(),
+                    "Rating": float(_tempo(h)),
+                    "Method": "nba_bpi_adj_t",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
+            
+                {
+                    "Sport": sport,
+                    "Team": str(a).strip().lower(),
+                    "Rating": a_o,
+                    "Method": "nba_bpi_adj_o",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
+                {
+                    "Sport": sport,
+                    "Team": str(a).strip().lower(),
+                    "Rating": a_d,
+                    "Method": "nba_bpi_adj_d",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
+                {
+                    "Sport": sport,
+                    "Team": str(a).strip().lower(),
+                    "Rating": a_em,
+                    "Method": "nba_bpi_adj_em",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
+                {
+                    "Sport": sport,
+                    "Team": str(a).strip().lower(),
+                    "Rating": float(_tempo(a)),
+                    "Method": "nba_bpi_adj_t",
+                    "Game_Key": game_key,
+                    "Updated_At": ts,
+                    "Source": "per_game_pregame",
+                },
             ])
-    
             if len(history_batch) >= BATCH_SZ:
                 upsert_history_rows(pd.DataFrame(history_batch))
                 history_batch.clear()
