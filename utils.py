@@ -586,6 +586,14 @@ def update_power_ratings(
 
     def get_aliases(canon: str) -> list[str]:
         return SPORT_ALIASES.get(canon.upper(), [canon.upper()])
+    def _mk_game_key(home_team, away_team, ts) -> str:
+        ts = pd.to_datetime(ts, utc=True, errors="coerce")
+        ts_str = "" if pd.isna(ts) else pd.Timestamp(ts).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return (
+            f"{str(home_team).strip().lower()}__"
+            f"{str(away_team).strip().lower()}__"
+            f"{ts_str}"
+        )
 
     # ------------------------------------------------------------------
     # ✅ HISTORY UPSERT (MERGE) — prevents duplicates forever
