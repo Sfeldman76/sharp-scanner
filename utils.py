@@ -630,8 +630,17 @@ def update_power_ratings(
         if dfh.empty:
             return
         
+      
         stage = table_history.rsplit(".", 1)[0] + "._ratings_history_stage"
-        bq.load_table_from_dataframe(dfh, stage).result()
+        
+        # drop stale stage so schema changes like Game_Key do not fail
+        bq.query(f"DROP TABLE IF EXISTS `{stage}`").result()
+        
+        job_config = bigquery.LoadJobConfig(
+            write_disposition="WRITE_TRUNCATE",
+        )
+        
+        bq.load_table_from_dataframe(dfh, stage, job_config=job_config).result()
         
         bq.query(f"""
         MERGE `{table_history}` T
