@@ -11450,47 +11450,59 @@ def train_sharp_model_from_bq(
         print(f"{market} situation rows: {len(df_situation)}")
         print(f"{market} value rows:     {len(df_value)}")
         
-        # 4) use OUTCOME as the canonical base frame for split / AutoFS / main pipeline
-        df_valid = df_outcome.reset_index(drop=True)
+        # ----------------------------
+        # Canonical head-specific base frames
+        # ----------------------------
+        df_outcome_valid = df_outcome.reset_index(drop=True)
+        df_situation_valid = df_situation.reset_index(drop=True)
+        df_value_valid = df_value.reset_index(drop=True)
         
-        if df_valid.empty:
+        if df_outcome_valid.empty:
             st.warning(f"⚠️ Skipping {market.upper()} — no valid rows after outcome-target filtering.")
             return None
         
-     
+        # Keep outcome frame as the main canonical frame for outcome pipeline
+        df_valid = df_outcome_valid
         
-                
-        # canonical base frame
-        df_valid = df_outcome.reset_index(drop=True)
-        
-        if df_valid.empty:
-            st.warning(f"⚠️ Skipping {market.upper()} — no valid rows after outcome-target filtering.")
-            return None
-        
+        # ----------------------------
+        # Outcome target
+        # ----------------------------
         y_full_outcome = (
-            pd.to_numeric(df_valid["TARGET_OUTCOME_BOOL"], errors="coerce")
+            pd.to_numeric(df_outcome_valid["TARGET_OUTCOME_BOOL"], errors="coerce")
             .astype("int8")
             .to_numpy()
         )
         
+        # ----------------------------
+        # Situation target
+        # ----------------------------
         y_full_situation = None
-        if "TARGET_SITUATION_BOOL" in df_valid.columns:
-            s = pd.to_numeric(df_valid["TARGET_SITUATION_BOOL"], errors="coerce")
-            if s.notna().all():
+        if "TARGET_SITUATION_BOOL" in df_situation_valid.columns and not df_situation_valid.empty:
+            s = pd.to_numeric(df_situation_valid["TARGET_SITUATION_BOOL"], errors="coerce")
+            s = s[s.notna()]
+            if len(s) > 0 and s.nunique() >= 2:
                 y_full_situation = s.astype("int8").to_numpy()
         
-        y_full_value_reg = None
-        if "TARGET_VALUE_REG" in df_valid.columns:
-            v = pd.to_numeric(df_valid["TARGET_VALUE_REG"], errors="coerce")
-            if v.notna().all():
-                y_full_value_reg = v.astype("float32").to_numpy()
-        
+        # ----------------------------
+        # Value targets
+        # ----------------------------
         y_full_value_cls = None
-        if "TARGET_VALUE_BOOL" in df_valid.columns:
-            vc = pd.to_numeric(df_valid["TARGET_VALUE_BOOL"], errors="coerce")
-            if vc.notna().all():
+        if "TARGET_VALUE_BOOL" in df_value_valid.columns and not df_value_valid.empty:
+            vc = pd.to_numeric(df_value_valid["TARGET_VALUE_BOOL"], errors="coerce")
+            vc = vc[vc.notna()]
+            if len(vc) > 0 and vc.nunique() >= 2:
                 y_full_value_cls = vc.astype("int8").to_numpy()
         
+        y_full_value_reg = None
+        if "TARGET_VALUE_REG" in df_value_valid.columns and not df_value_valid.empty:
+            vr = pd.to_numeric(df_value_valid["TARGET_VALUE_REG"], errors="coerce")
+            vr = vr[vr.notna()]
+            if len(vr) > 0:
+                y_full_value_reg = vr.astype("float32").to_numpy()
+        
+        # ----------------------------
+        # Head viability checks
+        # ----------------------------
         if np.unique(y_full_outcome).size < 2:
             st.warning(f"⚠️ Skipping {market.upper()} — only one outcome-label class.")
             return None
@@ -11500,9 +11512,13 @@ def train_sharp_model_from_bq(
         
         if y_full_value_cls is not None and np.unique(y_full_value_cls).size < 2:
             print(f"⚠️ Value head has only one class for {market.upper()}")
-        
+                
         y_full = y_full_outcome
-   
+        df_full_outcome = df_outcome_valid
+        df_full_situation = df_situation_valid
+        df_full_value = df_value_valid
+
+        
         # 2) build X_full ONCE from masked frame (training truth)
         def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
             out = df.reindex(columns=cols, fill_value=np.nan).copy()
@@ -11721,11 +11737,17 @@ def train_sharp_model_from_bq(
         # ----------------------------
         # 1) HOLDOUT (true time-forward, group-safe)
         # Canonical split anchor = OUTCOME label
-        # ----------------------------
-        train_all_idx, hold_idx = holdout_by_percent_groups(
+        X_df_outcome = _to_numeric_block(df_full_outcome, feature_cols)
+        X_full_outcome_base = X_df_outcome.to_numpy(dtype=np.float32, copy=False)
+        groups_outcome = df_full_outcome["Game_Key"].astype(str).to_numpy()
+        times_outcome = pd.to_datetime(df_full_outcome["Snapshot_Timestamp"], utc=True, errors="coerce").fillna(
+            pd.to_datetime(df_full_outcome["Game_Start"], utc=True, errors="coerce")
+        ).to_numpy()
+        
+        train_idx_outcome, hold_idx_outcome = holdout_by_percent_groups(
             sport=sport,
-            groups=groups,
-            times=times,
+            groups=groups_outcome,
+            times=times_outcome,
             y=y_full_outcome,
             pct_holdout=None,
             min_train_games=25,
@@ -11733,41 +11755,96 @@ def train_sharp_model_from_bq(
             ensure_label_diversity=False,
         )
         
-        train_all_idx = np.asarray(train_all_idx, dtype=int)
-        hold_idx      = np.asarray(hold_idx, dtype=int)
+        # situation
+        X_df_situation = _to_numeric_block(df_full_situation, feature_cols)
+        X_full_situation_base = X_df_situation.to_numpy(dtype=np.float32, copy=False)
         
-        # Anchor dfs
-        train_df = df_valid.iloc[train_all_idx].copy().reset_index(drop=True)
-        hold_df  = df_valid.iloc[hold_idx].copy().reset_index(drop=True)
+        groups_situation = df_full_situation["Game_Key"].astype(str).to_numpy()
+        times_situation = pd.to_datetime(df_full_situation["Snapshot_Timestamp"], utc=True, errors="coerce").fillna(
+            pd.to_datetime(df_full_situation["Game_Start"], utc=True, errors="coerce")
+        ).to_numpy()
         
-        # Anchor labels / groups / times
-        y_train = y_full_outcome[train_all_idx].astype(int)
-        g_train = groups[train_all_idx]
-        t_train = times[train_all_idx]
+        train_idx_situation = hold_idx_situation = None
+        if y_full_situation is not None:
+            train_idx_situation, hold_idx_situation = holdout_by_percent_groups(
+                sport=sport,
+                groups=groups_situation,
+                times=times_situation,
+                y=y_full_situation,
+                pct_holdout=None,
+                min_train_games=25,
+                min_hold_games=8,
+                ensure_label_diversity=False,
+            )
         
-        y_hold  = y_full_outcome[hold_idx].astype(int)
-        g_hold  = groups[hold_idx]
-        t_hold  = times[hold_idx]
+        # value
+        X_df_value = _to_numeric_block(df_full_value, feature_cols)
+        X_full_value_base = X_df_value.to_numpy(dtype=np.float32, copy=False)
         
-        # Specialist targets aligned to same split
-        # Specialist targets aligned to same split
+        groups_value = df_full_value["Game_Key"].astype(str).to_numpy()
+        times_value = pd.to_datetime(df_full_value["Snapshot_Timestamp"], utc=True, errors="coerce").fillna(
+            pd.to_datetime(df_full_value["Game_Start"], utc=True, errors="coerce")
+        ).to_numpy()
+        
+        train_idx_value = hold_idx_value = None
+        if y_full_value_cls is not None:
+            train_idx_value, hold_idx_value = holdout_by_percent_groups(
+                sport=sport,
+                groups=groups_value,
+                times=times_value,
+                y=y_full_value_cls,
+                pct_holdout=None,
+                min_train_games=25,
+                min_hold_games=8,
+                ensure_label_diversity=False,
+            )
+        # ----------------------------
+        # Outcome anchor split objects
+        # ----------------------------
+        train_idx_outcome = np.asarray(train_idx_outcome, dtype=int)
+        hold_idx_outcome  = np.asarray(hold_idx_outcome, dtype=int)
+        
+        train_df = df_full_outcome.iloc[train_idx_outcome].copy().reset_index(drop=True)
+        hold_df  = df_full_outcome.iloc[hold_idx_outcome].copy().reset_index(drop=True)
+        
+        y_train = y_full_outcome[train_idx_outcome].astype(int)
+        y_hold  = y_full_outcome[hold_idx_outcome].astype(int)
+        
+        g_train = groups_outcome[train_idx_outcome]
+        g_hold  = groups_outcome[hold_idx_outcome]
+        
+        t_train = times_outcome[train_idx_outcome]
+        t_hold  = times_outcome[hold_idx_outcome]
+        
+        # ----------------------------
+        # Situation head split objects
+        # ----------------------------
         y_train_situation = None
         y_hold_situation = None
-        if y_full_situation is not None:
-            y_train_situation = y_full_situation[train_all_idx].astype(int)
-            y_hold_situation  = y_full_situation[hold_idx].astype(int)
+        if y_full_situation is not None and train_idx_situation is not None:
+            train_idx_situation = np.asarray(train_idx_situation, dtype=int)
+            hold_idx_situation  = np.asarray(hold_idx_situation, dtype=int)
         
+            y_train_situation = y_full_situation[train_idx_situation].astype(int)
+            y_hold_situation  = y_full_situation[hold_idx_situation].astype(int)
+        
+        # ----------------------------
+        # Value head split objects
+        # ----------------------------
         y_train_value_reg = None
         y_hold_value_reg = None
-        if y_full_value_reg is not None:
-            y_train_value_reg = y_full_value_reg[train_all_idx].astype(np.float32)
-            y_hold_value_reg  = y_full_value_reg[hold_idx].astype(np.float32)
+        if y_full_value_reg is not None and train_idx_value is not None:
+            train_idx_value = np.asarray(train_idx_value, dtype=int)
+            hold_idx_value  = np.asarray(hold_idx_value, dtype=int)
+        
+            y_train_value_reg = y_full_value_reg[train_idx_value].astype(np.float32)
+            y_hold_value_reg  = y_full_value_reg[hold_idx_value].astype(np.float32)
         
         y_train_value_cls = None
         y_hold_value_cls = None
-        if y_full_value_cls is not None:
-            y_train_value_cls = y_full_value_cls[train_all_idx].astype(int)
-            y_hold_value_cls  = y_full_value_cls[hold_idx].astype(int)
+        if y_full_value_cls is not None and train_idx_value is not None:
+            y_train_value_cls = y_full_value_cls[train_idx_value].astype(int)
+            y_hold_value_cls  = y_full_value_cls[hold_idx_value].astype(int)
         
         print({
             "has_y_full_situation": y_full_situation is not None,
@@ -11990,9 +12067,28 @@ def train_sharp_model_from_bq(
         # ----------------------------
 
         # Full pruned matrices (same rows, same split-safe base) for per-head AutoFS
-        X_df_train_full_all = pd.DataFrame(X_full[train_all_idx], columns=list(features_pruned))
-        X_df_hold_full_all  = pd.DataFrame(X_full[hold_idx],      columns=list(features_pruned))
-        X_df_full_all       = pd.DataFrame(X_full,                columns=list(features_pruned))
+        # Outcome head matrices
+        X_df_train_outcome = X_df_outcome.iloc[train_idx_outcome].reset_index(drop=True)
+        X_df_hold_outcome  = X_df_outcome.iloc[hold_idx_outcome].reset_index(drop=True)
+        X_df_full_outcome_autofs = X_df_outcome.reset_index(drop=True)
+        
+        # Situation head matrices
+        X_df_train_situation = None
+        X_df_hold_situation = None
+        X_df_full_situation_autofs = X_df_situation.reset_index(drop=True)
+        
+        if train_idx_situation is not None:
+            X_df_train_situation = X_df_situation.iloc[train_idx_situation].reset_index(drop=True)
+            X_df_hold_situation  = X_df_situation.iloc[hold_idx_situation].reset_index(drop=True)
+        
+        # Value head matrices
+        X_df_train_value = None
+        X_df_hold_value = None
+        X_df_full_value_autofs = X_df_value.reset_index(drop=True)
+        
+        if train_idx_value is not None:
+            X_df_train_value = X_df_value.iloc[train_idx_value].reset_index(drop=True)
+            X_df_hold_value  = X_df_value.iloc[hold_idx_value].reset_index(drop=True)
 
         def _final_clean(df: pd.DataFrame) -> pd.DataFrame:
             df = df.apply(pd.to_numeric, errors="coerce")
@@ -12026,23 +12122,15 @@ def train_sharp_model_from_bq(
 
        
        
-        def _run_head_autofs(head_name, y_train):
-            if y_train is None:
+      
+        def _run_head_autofs(head_name, X_df_train_head, X_df_hold_head, X_df_full_head, y_head_train, folds_head):
+            if y_head_train is None:
                 st.warning(f"[AutoFS:{head_name}] skipped: y_train is None")
                 return None
         
-            ys = pd.Series(y_train)
-        
-            if len(ys) == 0:
-                st.warning(f"[AutoFS:{head_name}] skipped: empty target")
-                return None
-        
-            if not ys.notna().any():
-                st.warning(f"[AutoFS:{head_name}] skipped: all target values are NaN")
-                return None
-        
-            if ys.nunique(dropna=True) < 2:
-                st.warning(f"[AutoFS:{head_name}] skipped: target has <2 classes")
+            ys = pd.Series(y_head_train)
+            if len(ys) == 0 or (not ys.notna().any()) or ys.nunique(dropna=True) < 2:
+                st.warning(f"[AutoFS:{head_name}] skipped: invalid target")
                 return None
         
             try:
@@ -12055,9 +12143,9 @@ def train_sharp_model_from_bq(
         
             feat_cols_head, shap_summary_head = select_features_auto(
                 model_proto=_model_proto,
-                X_df_train=X_df_train_full_all,
-                y_train=y_train,
-                folds=folds,
+                X_df_train=X_df_train_head,
+                y_train=y_head_train,
+                folds=folds_head,
                 sport_key=sport_key,
                 must_keep=[],
                 use_auc_auto=True,
@@ -12076,17 +12164,14 @@ def train_sharp_model_from_bq(
                 log_func=log_func,
             )
         
-            # keep only columns present in BOTH split-safe matrices
             feat_cols_head = [
                 c for c in feat_cols_head
-                if c in X_df_train_full_all.columns and c in X_df_hold_full_all.columns
+                if c in X_df_train_head.columns and c in X_df_hold_head.columns
             ]
         
-            log_func(f"[AutoFS:{head_name}] selected={len(feat_cols_head)}")
-        
-            X_train_head_df = _final_clean(X_df_train_full_all.reindex(columns=feat_cols_head))
-            X_hold_head_df  = _final_clean(X_df_hold_full_all.reindex(columns=feat_cols_head))
-            X_full_head_df  = _final_clean(X_df_full_all.reindex(columns=feat_cols_head))
+            X_train_head_df = _final_clean(X_df_train_head.reindex(columns=feat_cols_head))
+            X_hold_head_df  = _final_clean(X_df_hold_head.reindex(columns=feat_cols_head))
+            X_full_head_df  = _final_clean(X_df_full_head.reindex(columns=feat_cols_head))
         
             return {
                 "feature_cols": list(feat_cols_head),
@@ -12126,24 +12211,68 @@ def train_sharp_model_from_bq(
         # ----------------------------
         # Outcome head AutoFS
         # canonical / backward-compatible head
-        # ----------------------------
         if _autofs_target_ok(y_train, "outcome"):
-            autofs_outcome = _run_head_autofs("outcome", y_train)
+            folds_outcome, _, _ = build_deterministic_folds(
+                X=np.zeros((len(y_train), 1), dtype=np.float32),
+                y=y_train,
+                cv=cv,
+                groups=g_train,
+                times=None,
+                n_splits=getattr(cv, "n_splits", 5),
+                min_pos=5,
+                min_neg=5,
+                seed=1337,
+            )
+            autofs_outcome = _run_head_autofs(
+                "outcome",
+                X_df_train_outcome,
+                X_df_hold_outcome,
+                X_df_full_outcome_autofs,
+                y_train,
+                folds_outcome,
+            )
         
-        # ----------------------------
-        # Situation head AutoFS
-        # ----------------------------
         if _autofs_target_ok(y_train_situation, "situation"):
-            autofs_situation = _run_head_autofs("situation", y_train_situation)
+            folds_situation, _, _ = build_deterministic_folds(
+                X=np.zeros((len(y_train_situation), 1), dtype=np.float32),
+                y=y_train_situation,
+                cv=cv,
+                groups=groups_situation[train_idx_situation],
+                times=None,
+                n_splits=getattr(cv, "n_splits", 5),
+                min_pos=5,
+                min_neg=5,
+                seed=1338,
+            )
+            autofs_situation = _run_head_autofs(
+                "situation",
+                X_df_train_situation,
+                X_df_hold_situation,
+                X_df_full_situation_autofs,
+                y_train_situation,
+                folds_situation,
+            )
         
-        # ----------------------------
-        # Value head AutoFS
-        # IMPORTANT: use classification target for AutoFS because select_features_auto
-        # is classifier/AUC oriented in the current pipeline
-        # ----------------------------
         if _autofs_target_ok(y_train_value_cls, "value"):
-            autofs_value = _run_head_autofs("value", y_train_value_cls)
-        # ----------------------------
+            folds_value, _, _ = build_deterministic_folds(
+                X=np.zeros((len(y_train_value_cls), 1), dtype=np.float32),
+                y=y_train_value_cls,
+                cv=cv,
+                groups=groups_value[train_idx_value],
+                times=None,
+                n_splits=getattr(cv, "n_splits", 5),
+                min_pos=5,
+                min_neg=5,
+                seed=1339,
+            )
+            autofs_value = _run_head_autofs(
+                "value",
+                X_df_train_value,
+                X_df_hold_value,
+                X_df_full_value_autofs,
+                y_train_value_cls,
+                folds_value,
+            )
         # Optional displays
         # ----------------------------
       
