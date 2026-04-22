@@ -13098,7 +13098,7 @@ def train_sharp_model_from_bq(
             model_value_reg.fit(
                 X_train_value,
                 y_train_value_reg,
-                sample_weight=w_train,
+                sample_weight=w_train_value,
                 verbose=False,
             )
         
@@ -13127,7 +13127,7 @@ def train_sharp_model_from_bq(
             return bool((auc1 - auc0) > float(min_margin))
         
         # --- OOF loop: NO per-fold flip. Keep raw orientation consistent. ---
-        for tr_rel, va_rel in folds:
+        for tr_rel, va_rel in folds_outcome:
             fold_ntrees_auc = int(FINAL_NTREES_AUC)
             fold_ntrees_ll  = int(FINAL_NTREES_LL)
         
@@ -13136,7 +13136,7 @@ def train_sharp_model_from_bq(
             )
             m_auc.fit(
                 X_train[tr_rel], y_train[tr_rel],
-                sample_weight=w_train[tr_rel],
+                sample_weight=w_train_outcome[tr_rel],
                 verbose=False
             )
             pa, _ = pos_proba_safe(m_auc, X_train[va_rel], positive=1)
@@ -13148,7 +13148,7 @@ def train_sharp_model_from_bq(
                 )
                 m_ll.fit(
                     X_train[tr_rel], y_train[tr_rel],
-                    sample_weight=w_train[tr_rel],
+                    sample_weight=w_train_outcome[tr_rel],
                     verbose=False
                 )
                 pl, _ = pos_proba_safe(m_ll, X_train[va_rel], positive=1)
@@ -13197,8 +13197,6 @@ def train_sharp_model_from_bq(
             "oof_std": float(oof_std),
             "oof_minmax": (float(p_oof_blend.min()), float(p_oof_blend.max())),
         })
-        
-        
         # ---------------- Calibration helpers ----------------
         def _clip01(p, eps=1e-7):
             p = np.asarray(p, dtype=np.float64)
