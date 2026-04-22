@@ -12472,7 +12472,7 @@ def train_sharp_model_from_bq(
                     max_resources=SEARCH_N_EST,
                     aggressive_elimination=True,
                     scoring="neg_log_loss",
-                    cv=folds,
+                    cv=folds_outcome,
                     n_jobs=n_jobs_search,
                     random_state=seed_ll,
                     verbose=1 if st.session_state.get("debug", False) else 0,
@@ -12487,26 +12487,21 @@ def train_sharp_model_from_bq(
                     max_resources=SEARCH_N_EST,
                     aggressive_elimination=True,
                     scoring="roc_auc",
-                    cv=folds,
+                    cv=folds_outcome,
                     n_jobs=n_jobs_search,
                     random_state=seed_auc,
                     verbose=1 if st.session_state.get("debug", False) else 0,
                     return_train_score=True,
                 )
             except Exception:
-                try:
-                    search_trials  # type: ignore
-                except NameError:
-                    search_trials = _resolve_search_trials(sport, X_train.shape[0])
-                search_trials = int(search_trials) if str(search_trials).isdigit() else _resolve_search_trials(sport, X_train.shape[0])
-                search_trials = max(50, int(search_trials * 1.2))
+                search_trials = max(50, int(_resolve_search_trials(sport, X_train.shape[0]) * 1.2))
         
                 rs_ll = RandomizedSearchCV(
                     estimator=est_ll,
                     param_distributions=params_ll,
                     n_iter=search_trials,
                     scoring="neg_log_loss",
-                    cv=folds,
+                    cv=folds_outcome,
                     n_jobs=n_jobs_search,
                     random_state=seed_ll,
                     verbose=1 if st.session_state.get("debug", False) else 0,
@@ -12517,7 +12512,7 @@ def train_sharp_model_from_bq(
                     param_distributions=params_auc,
                     n_iter=search_trials,
                     scoring="roc_auc",
-                    cv=folds,
+                    cv=folds_outcome,
                     n_jobs=n_jobs_search,
                     random_state=seed_auc,
                     verbose=1 if st.session_state.get("debug", False) else 0,
