@@ -11705,44 +11705,35 @@ def train_sharp_model_from_bq(
         features_pruned = tuple(feature_cols)
         
         st.write(f"✅ Final feature count after pruning: {len(features_pruned)}")
-        
-        # --- aligned arrays from df_valid ---
-        groups = df_valid["Game_Key"].astype(str).to_numpy()
-        
-        t_snap = pd.to_datetime(df_valid["Snapshot_Timestamp"], utc=True, errors="coerce")
-        t_game = pd.to_datetime(df_valid["Game_Start"], utc=True, errors="coerce")
-        
-        # safest: snapshot time when present, else fallback to game start
-        t_full = t_snap.fillna(t_game)
-        
-        # fill within GAME only (safe, aligned, no apply-reorder)
-        t_full = pd.Series(t_full).groupby(groups, sort=False).transform(lambda s: s.ffill().bfill())
-        times = t_full.to_numpy()
-        
-        # --- guard: drop any remaining NaT rows (slice EVERYTHING consistently) ---
-        if pd.isna(times).any():
-            bad = np.flatnonzero(pd.isna(times))
-            keep = np.setdiff1d(np.arange(len(times)), bad)
-        
-            X_full           = X_full[keep]
-            y_full           = y_full[keep]
-            y_full_outcome   = y_full_outcome[keep]
-            y_full_situation = y_full_situation[keep]
-            y_full_value_reg = y_full_value_reg[keep]
-            y_full_value_cls = y_full_value_cls[keep]
-            groups           = groups[keep]
-            times            = times[keep]
-            df_valid         = df_valid.iloc[keep].reset_index(drop=True)
+
         
         # ----------------------------
         # 1) HOLDOUT (true time-forward, group-safe)
-        # Canonical split anchor = OUTCOME label
-        X_df_outcome = _to_numeric_block(df_full_outcome, feature_cols)
-        X_full_outcome_base = X_df_outcome.to_numpy(dtype=np.float32, copy=False)
-        groups_outcome = df_full_outcome["Game_Key"].astype(str).to_numpy()
-        times_outcome = pd.to_datetime(df_full_outcome["Snapshot_Timestamp"], utc=True, errors="coerce").fillna(
-            pd.to_datetime(df_full_outcome["Game_Start"], utc=True, errors="coerce")
-        ).to_numpy()
+        # ----------------------------
+        # 1) HOLDOUT (true time-forward, group-safe) — HEAD SPECIFIC
+        # ----------------------------
+        def _prep_head_frame(df_head: pd.DataFrame, feature_cols: list[str]):
+            X_df_head = _to_numeric_block(df_head, feature_cols)
+        
+            groups_head = df_head["Game_Key"].astype(str).to_numpy()
+        
+            t_snap_head = pd.to_datetime(df_head["Snapshot_Timestamp"], utc=True, errors="coerce")
+            t_game_head = pd.to_datetime(df_head["Game_Start"], utc=True, errors="coerce")
+            times_head = t_snap_head.fillna(t_game_head)
+            times_head = pd.Series(times_head).groupby(groups_head, sort=False).transform(lambda s: s.ffill().bfill())
+        
+            keep_head = ~pd.isna(times_head).to_numpy()
+        
+            X_df_head = X_df_head.iloc[keep_head].reset_index(drop=True)
+            df_head = df_head.iloc[keep_head].reset_index(drop=True)
+            groups_head = groups_head[keep_head]
+            times_head = times_head.to_numpy()[keep_head]
+        
+            return df_head, X_df_head, groups_head, times_head
+        
+        # outcome
+        df_full_outcome, X_df_outcome, groups_outcome, times_outcome = _prep_head_frame(df_full_outcome, feature_cols)
+        y_full_outcome = y_full_outcome[~pd.isna(pd.Series(times_outcome, copy=False)).to_numpy()] if False else y_full_outcome[:len(df_full_outcome)]
         
         train_idx_outcome, hold_idx_outcome = holdout_by_percent_groups(
             sport=sport,
@@ -11756,16 +11747,15 @@ def train_sharp_model_from_bq(
         )
         
         # situation
-        X_df_situation = _to_numeric_block(df_full_situation, feature_cols)
-        X_full_situation_base = X_df_situation.to_numpy(dtype=np.float32, copy=False)
-        
-        groups_situation = df_full_situation["Game_Key"].astype(str).to_numpy()
-        times_situation = pd.to_datetime(df_full_situation["Snapshot_Timestamp"], utc=True, errors="coerce").fillna(
-            pd.to_datetime(df_full_situation["Game_Start"], utc=True, errors="coerce")
-        ).to_numpy()
-        
         train_idx_situation = hold_idx_situation = None
+        X_df_situation = None
+        groups_situation = None
+        times_situation = None
+        
         if y_full_situation is not None:
+            df_full_situation, X_df_situation, groups_situation, times_situation = _prep_head_frame(df_full_situation, feature_cols)
+            y_full_situation = y_full_situation[:len(df_full_situation)]
+        
             train_idx_situation, hold_idx_situation = holdout_by_percent_groups(
                 sport=sport,
                 groups=groups_situation,
@@ -11778,16 +11768,18 @@ def train_sharp_model_from_bq(
             )
         
         # value
-        X_df_value = _to_numeric_block(df_full_value, feature_cols)
-        X_full_value_base = X_df_value.to_numpy(dtype=np.float32, copy=False)
-        
-        groups_value = df_full_value["Game_Key"].astype(str).to_numpy()
-        times_value = pd.to_datetime(df_full_value["Snapshot_Timestamp"], utc=True, errors="coerce").fillna(
-            pd.to_datetime(df_full_value["Game_Start"], utc=True, errors="coerce")
-        ).to_numpy()
-        
         train_idx_value = hold_idx_value = None
+        X_df_value = None
+        groups_value = None
+        times_value = None
+        
         if y_full_value_cls is not None:
+            df_full_value, X_df_value, groups_value, times_value = _prep_head_frame(df_full_value, feature_cols)
+            y_full_value_cls = y_full_value_cls[:len(df_full_value)]
+        
+            if y_full_value_reg is not None:
+                y_full_value_reg = y_full_value_reg[:len(df_full_value)]
+        
             train_idx_value, hold_idx_value = holdout_by_percent_groups(
                 sport=sport,
                 groups=groups_value,
@@ -11932,9 +11924,27 @@ def train_sharp_model_from_bq(
                 w[:] = 1.0
             return w
         
-        w_train = _build_sample_weights(train_df)
-        assert len(w_train) == len(train_df) == len(y_train), ("w_train misaligned", len(w_train), len(train_df), len(y_train))
+       
+        w_train_outcome = _build_sample_weights(train_df)
+        assert len(w_train_outcome) == len(train_df) == len(y_train), (
+            "w_train_outcome misaligned", len(w_train_outcome), len(train_df), len(y_train)
+        )
         
+        w_train_situation = None
+        if train_idx_situation is not None:
+            train_df_situation = df_full_situation.iloc[train_idx_situation].copy().reset_index(drop=True)
+            w_train_situation = _build_sample_weights(train_df_situation)
+            assert len(w_train_situation) == len(train_df_situation) == len(y_train_situation), (
+                "w_train_situation misaligned", len(w_train_situation), len(train_df_situation), len(y_train_situation)
+            )
+        
+        w_train_value = None
+        if train_idx_value is not None:
+            train_df_value = df_full_value.iloc[train_idx_value].copy().reset_index(drop=True)
+            w_train_value = _build_sample_weights(train_df_value)
+            assert len(w_train_value) == len(train_df_value) == len(y_train_value_cls), (
+                "w_train_value misaligned", len(w_train_value), len(train_df_value), len(y_train_value_cls)
+            )
         # ----------------------------
         # 3) Build deterministic CV folds (Purged group time split)
         # ----------------------------
@@ -11956,14 +11966,37 @@ def train_sharp_model_from_bq(
         
         n_groups_train = pd.unique(g_train).size
         target_folds = 6 if n_groups_train >= 200 else (4 if n_groups_train >= 120 else 3)
-        
-        cv = PurgedGroupTimeSeriesSplit(
+
+        cv_outcome = PurgedGroupTimeSeriesSplit(
             n_splits=target_folds,
             embargo=embargo_td,
             time_values=t_train,
             min_val_size=min_val_size,
         )
+
+        cv_situation = None
+        if y_train_situation is not None:
+            g_train_situation = groups_situation[train_idx_situation]
+            t_train_situation = times_situation[train_idx_situation]
         
+            cv_situation = PurgedGroupTimeSeriesSplit(
+                n_splits=target_folds,
+                embargo=embargo_td,
+                time_values=t_train_situation,
+                min_val_size=min_val_size,
+            )
+
+        cv_value = None
+        if y_train_value_cls is not None:
+            g_train_value = groups_value[train_idx_value]
+            t_train_value = times_value[train_idx_value]
+        
+            cv_value = PurgedGroupTimeSeriesSplit(
+                n_splits=target_folds,
+                embargo=embargo_td,
+                time_values=t_train_value,
+                min_val_size=min_val_size,
+            )
         y_train = pd.Series(y_train, copy=False).astype(int).clip(0, 1).to_numpy()
         # ----------------------------
         # Helper: deterministic folds w/ safety + ES fold selection
@@ -12042,18 +12075,18 @@ def train_sharp_model_from_bq(
             tr_es_rel, va_es_rel = folds[0]
             return folds, tr_es_rel, va_es_rel
         # IMPORTANT: call ONCE; PurgedGroupTimeSeriesSplit already has time_values
-        folds, tr_es_rel, va_es_rel = build_deterministic_folds(
-            X=np.zeros((len(y_train), 1), dtype=np.float32),  # not used by this splitter; placeholder
+
+        folds_outcome, tr_es_rel, va_es_rel = build_deterministic_folds(
+            X=np.zeros((len(y_train), 1), dtype=np.float32),
             y=y_train,
-            cv=cv,
+            cv=cv_outcome,
             groups=g_train,
             times=None,
-            n_splits=getattr(cv, "n_splits", 5),
+            n_splits=getattr(cv_outcome, "n_splits", 5),
             min_pos=5,
             min_neg=5,
             seed=1337,
         )
-        
         # ----------------------------
         # 4) AutoFS on train slice (pre-AutoFS matrices)
         # ----------------------------
@@ -12212,13 +12245,13 @@ def train_sharp_model_from_bq(
         # Outcome head AutoFS
         # canonical / backward-compatible head
         if _autofs_target_ok(y_train, "outcome"):
-            folds_outcome, _, _ = build_deterministic_folds(
+            folds_outcome, tr_es_rel, va_es_rel = build_deterministic_folds(
                 X=np.zeros((len(y_train), 1), dtype=np.float32),
                 y=y_train,
-                cv=cv,
+                cv=cv_outcome,
                 groups=g_train,
                 times=None,
-                n_splits=getattr(cv, "n_splits", 5),
+                n_splits=getattr(cv_outcome, "n_splits", 5),
                 min_pos=5,
                 min_neg=5,
                 seed=1337,
@@ -12233,13 +12266,14 @@ def train_sharp_model_from_bq(
             )
         
         if _autofs_target_ok(y_train_situation, "situation"):
+
             folds_situation, _, _ = build_deterministic_folds(
                 X=np.zeros((len(y_train_situation), 1), dtype=np.float32),
                 y=y_train_situation,
-                cv=cv,
-                groups=groups_situation[train_idx_situation],
+                cv=cv_situation,
+                groups=g_train_situation,
                 times=None,
-                n_splits=getattr(cv, "n_splits", 5),
+                n_splits=getattr(cv_situation, "n_splits", 5),
                 min_pos=5,
                 min_neg=5,
                 seed=1338,
@@ -12257,10 +12291,10 @@ def train_sharp_model_from_bq(
             folds_value, _, _ = build_deterministic_folds(
                 X=np.zeros((len(y_train_value_cls), 1), dtype=np.float32),
                 y=y_train_value_cls,
-                cv=cv,
-                groups=groups_value[train_idx_value],
+                cv=cv_value,
+                groups=g_train_value,
                 times=None,
-                n_splits=getattr(cv, "n_splits", 5),
+                n_splits=getattr(cv_value, "n_splits", 5),
                 min_pos=5,
                 min_neg=5,
                 seed=1339,
@@ -12423,7 +12457,8 @@ def train_sharp_model_from_bq(
         MAX_ROUNDS      = 30
         MAX_OVERFIT_GAP = thr["MAX_OVERFIT_GAP"]
         
-        fit_params_search = dict(sample_weight=w_train, verbose=False)
+       
+        fit_params_search = dict(sample_weight=w_train_outcome, verbose=False)
         n_jobs_search     = max(1, min(get_vcpus(), 6))
         
         def _make_search_objects(seed_ll: int, seed_auc: int):
@@ -12689,8 +12724,9 @@ def train_sharp_model_from_bq(
         y_tr_es = y_train[tr_es_rel]
         y_va_es = y_train[va_es_rel]
         
-        w_tr_es = np.clip(np.maximum(np.nan_to_num(w_train[tr_es_rel], 0.0), 1e-6), 0.0, 5.0).astype(np.float64)
-        w_va_es = np.clip(np.maximum(np.nan_to_num(w_train[va_es_rel], 0.0), 1e-6), 0.0, 5.0).astype(np.float64)
+       
+        w_tr_es = np.clip(np.maximum(np.nan_to_num(w_train_outcome[tr_es_rel], 0.0), 1e-6), 0.0, 5.0).astype(np.float64)
+        w_va_es = np.clip(np.maximum(np.nan_to_num(w_train_outcome[va_es_rel], 0.0), 1e-6), 0.0, 5.0).astype(np.float64)
         
         refit_threads = max(1, min(int(get_vcpus()), 6))
         pos_tr = float((y_tr_es == 1).sum()); neg_tr = float((y_tr_es == 0).sum())
@@ -12876,8 +12912,8 @@ def train_sharp_model_from_bq(
             final_auc.set_params(monotone_constraints=mono_str)
             final_ll.set_params(monotone_constraints=mono_str)
         
-        final_auc.fit(X_train, y_train, sample_weight=w_train, verbose=False)
-        final_ll.fit( X_train, y_train, sample_weight=w_train, verbose=False)
+        final_auc.fit(X_train, y_train, sample_weight=w_train_outcome, verbose=False)
+        final_ll.fit( X_train, y_train, sample_weight=w_train_outcome, verbose=False)
         
         model_auc     = final_auc
         model_logloss = final_ll
@@ -12902,10 +12938,12 @@ def train_sharp_model_from_bq(
         # ----------------------------
         # 6B) SITUATION HEAD — LIGHTWEIGHT
         # ----------------------------
-        X_train_situation = autofs_situation["X_train"]
-        X_hold_situation  = autofs_situation["X_hold"]
-        X_full_situation  = autofs_situation["X_full"]
-        feature_cols_situation = list(autofs_situation["feature_cols"])
+
+        X_train_situation = autofs_situation["X_train"] if autofs_situation else None
+        X_hold_situation  = autofs_situation["X_hold"]  if autofs_situation else None
+        X_full_situation  = autofs_situation["X_full"]  if autofs_situation else None
+        
+        feature_cols_situation = list(autofs_situation["feature_cols"]) if autofs_situation else []
         
         model_situation_cls = None
         p_situation_train_vec = None
@@ -12941,7 +12979,7 @@ def train_sharp_model_from_bq(
             model_situation_cls.fit(
                 X_train_situation,
                 y_train_situation,
-                sample_weight=w_train,
+                sample_weight=w_train_situation,
                 verbose=False,
             )
         
@@ -12968,10 +13006,12 @@ def train_sharp_model_from_bq(
         # ----------------------------
         # 6C) VALUE HEADS — LIGHTWEIGHT
         # ----------------------------
-        X_train_value = autofs_value["X_train"]
-        X_hold_value  = autofs_value["X_hold"]
-        X_full_value  = autofs_value["X_full"]
-        feature_cols_value = list(autofs_value["feature_cols"])
+
+        X_train_value = autofs_value["X_train"] if autofs_value else None
+        X_hold_value  = autofs_value["X_hold"]  if autofs_value else None
+        X_full_value  = autofs_value["X_full"]  if autofs_value else None
+    
+        feature_cols_value     = list(autofs_value["feature_cols"]) if autofs_value else []
         
         model_value_cls = None
         model_value_reg = None
@@ -13014,7 +13054,7 @@ def train_sharp_model_from_bq(
             model_value_cls.fit(
                 X_train_value,
                 y_train_value_cls,
-                sample_weight=w_train,
+                sample_weight=w_train_value,
                 verbose=False,
             )
         
@@ -13382,7 +13422,7 @@ def train_sharp_model_from_bq(
         meta_model.fit(
             meta_train_df.to_numpy(dtype=np.float32),
             y_train.astype(int),
-            sample_weight=w_train,
+            sample_weight=w_train_outcome,
             verbose=False,
         )
         
