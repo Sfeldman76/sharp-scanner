@@ -13288,8 +13288,8 @@ def train_sharp_model_from_bq(
         p_fu_auc = _clip01(p_fu_auc, eps)
         
         if RUN_LOGLOSS:
-            p_tr_ll, _ = pos_proba_safe(model_ll, X_train, positive=1)
-            p_ho_ll, _ = pos_proba_safe(model_ll, X_hold, positive=1)
+            p_tr_ll, _ = pos_proba_safe(model_logloss, X_train, positive=1)
+            p_ho_ll, _ = pos_proba_safe(model_logloss, X_hold, positive=1)
             p_fu_ll, _ = pos_proba_safe(model_logloss, X_full, positive=1)
         
             p_tr_ll = _clip01(p_tr_ll, eps)
