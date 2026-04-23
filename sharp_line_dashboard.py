@@ -13280,7 +13280,7 @@ def train_sharp_model_from_bq(
         # 2) Outcome inference: Blend in logit space -> optional flip -> calibrate -> prior shift LAST
         # ------------------
         p_tr_auc, _ = pos_proba_safe(model_auc, X_train, positive=1)
-        p_va_auc, _ = pos_proba_safe(model_auc, X_hold, positive=1)
+        p_ho_auc, _ = pos_proba_safe(model_auc, X_hold, positive=1)
         p_fu_auc, _ = pos_proba_safe(model_auc, X_full, positive=1)
         
         p_tr_auc = _clip01(p_tr_auc, eps)
@@ -13289,7 +13289,7 @@ def train_sharp_model_from_bq(
         
         if RUN_LOGLOSS:
             p_tr_ll, _ = pos_proba_safe(model_ll, X_train, positive=1)
-            p_va_ll, _ = pos_proba_safe(model_ll, X_hold, positive=1)
+            p_ho_ll, _ = pos_proba_safe(model_ll, X_hold, positive=1)
             p_fu_ll, _ = pos_proba_safe(model_logloss, X_full, positive=1)
         
             p_tr_ll = _clip01(p_tr_ll, eps)
