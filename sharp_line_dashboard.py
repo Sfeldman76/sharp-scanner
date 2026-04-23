@@ -13323,8 +13323,8 @@ def train_sharp_model_from_bq(
         p_cal_fu = np.asarray(np.clip(p_cal_fu, CLIP, 1.0 - CLIP), float)
         
         # Prior-correct outcome LAST
-        deploy_pos = float(np.mean(y_full[hold_idx] == 1))
-        train_pos_for_pc = float(np.mean(y_full[train_all_idx] == 1))
+        deploy_pos = float(np.mean(y_hold == 1))
+        train_pos_for_pc = float(np.mean(y_train == 1))
         
         p_train_vec = _prior_correct(p_cal_tr, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
         p_hold_vec  = _prior_correct(p_cal_ho, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
