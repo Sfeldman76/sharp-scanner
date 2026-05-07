@@ -13339,99 +13339,111 @@ def train_sharp_model_from_bq(
         # 6D) META-COMBINER
         # FINAL OUTPUT = probability this line wins
         # ----------------------------
-        # guards: if any support head is missing, substitute neutral defaults
-        if p_situation_train_vec is None:
-            p_situation_train_vec = np.full(len(train_df), 0.5, dtype=np.float64)
-            p_situation_hold_vec  = np.full(len(hold_df),  0.5, dtype=np.float64)
-            p_situation_full_vec  = np.full(len(df_valid), 0.5, dtype=np.float64)
+        # ----------------------------
+        # 6D) META-COMBINER
+        # FINAL OUTPUT = probability this line wins
+        # ----------------------------
         
-        if p_value_train_vec is None:
-            p_value_train_vec = np.full(len(train_df), 0.5, dtype=np.float64)
-            p_value_hold_vec  = np.full(len(hold_df),  0.5, dtype=np.float64)
-            p_value_full_vec  = np.full(len(df_valid), 0.5, dtype=np.float64)
+        # IMPORTANT:
+        # Meta training rows must align to the same rows used to create p_train_vec / p_hold_vec.
+        # Do NOT use stale train_df / hold_df indexes if predictions were made from train_all_idx / hold_idx.
+        train_meta_df = df_valid.iloc[np.asarray(train_all_idx)].copy()
+        hold_meta_df  = df_valid.iloc[np.asarray(hold_idx)].copy()
+        full_meta_df  = df_valid.copy()
         
-        if pred_value_reg_train is None:
-            pred_value_reg_train = np.zeros(len(train_df), dtype=np.float64)
-            pred_value_reg_hold  = np.zeros(len(hold_df),  dtype=np.float64)
-            pred_value_reg_full  = np.zeros(len(df_valid), dtype=np.float64)
+        n_train = len(train_meta_df)
+        n_hold  = len(hold_meta_df)
+        n_full  = len(full_meta_df)
+        
+        def _ensure_vec(name, x, n, default=0.5):
+            if x is None:
+                return np.full(n, default, dtype=np.float64)
+        
+            arr = np.asarray(x, dtype=np.float64).reshape(-1)
+        
+            if arr.shape[0] != n:
+                raise ValueError(
+                    f"{name} length mismatch: got {arr.shape[0]}, expected {n}. "
+                    f"This means the head prediction vector is not aligned to the meta frame."
+                )
+        
+            return arr
+        
+        # Outcome head
+        p_train_vec = _ensure_vec("p_train_vec", p_train_vec, n_train, default=0.5)
+        p_hold_vec  = _ensure_vec("p_hold_vec",  p_hold_vec,  n_hold,  default=0.5)
+        p_full_vec  = _ensure_vec("p_full_vec",  p_full_vec,  n_full,  default=0.5)
+        
+        # Situation head
+        p_situation_train_vec = _ensure_vec("p_situation_train_vec", p_situation_train_vec, n_train, default=0.5)
+        p_situation_hold_vec  = _ensure_vec("p_situation_hold_vec",  p_situation_hold_vec,  n_hold,  default=0.5)
+        p_situation_full_vec  = _ensure_vec("p_situation_full_vec",  p_situation_full_vec,  n_full,  default=0.5)
+        
+        # Value classification head
+        p_value_train_vec = _ensure_vec("p_value_train_vec", p_value_train_vec, n_train, default=0.5)
+        p_value_hold_vec  = _ensure_vec("p_value_hold_vec",  p_value_hold_vec,  n_hold,  default=0.5)
+        p_value_full_vec  = _ensure_vec("p_value_full_vec",  p_value_full_vec,  n_full,  default=0.5)
+        
+        # Value regression head
+        pred_value_reg_train = _ensure_vec("pred_value_reg_train", pred_value_reg_train, n_train, default=0.0)
+        pred_value_reg_hold  = _ensure_vec("pred_value_reg_hold",  pred_value_reg_hold,  n_hold,  default=0.0)
+        pred_value_reg_full  = _ensure_vec("pred_value_reg_full",  pred_value_reg_full,  n_full,  default=0.0)
+        
+        # Re-align targets to the same meta rows
+        y_train = np.asarray(y_full[np.asarray(train_all_idx)]).astype(int)
+        y_hold  = np.asarray(y_full[np.asarray(hold_idx)]).astype(int)
+        
+        if "w_train_outcome" not in locals() or len(np.asarray(w_train_outcome).reshape(-1)) != n_train:
+            w_train_outcome = np.ones(n_train, dtype=np.float64)
+        else:
+            w_train_outcome = np.asarray(w_train_outcome, dtype=np.float64).reshape(-1)
         
         meta_train_df = pd.DataFrame({
-            "Meta_P_Outcome":   np.asarray(p_train_vec, dtype=np.float64),
-            "Meta_P_Situation": np.asarray(p_situation_train_vec, dtype=np.float64),
-            "Meta_P_Value":     np.asarray(p_value_train_vec, dtype=np.float64),
-            "Meta_Value_Reg":   np.asarray(pred_value_reg_train, dtype=np.float64),
-        }, index=train_df.index)
+            "Meta_P_Outcome":   p_train_vec,
+            "Meta_P_Situation": p_situation_train_vec,
+            "Meta_P_Value":     p_value_train_vec,
+            "Meta_Value_Reg":   pred_value_reg_train,
+        }, index=train_meta_df.index)
         
         meta_hold_df = pd.DataFrame({
-            "Meta_P_Outcome":   np.asarray(p_hold_vec, dtype=np.float64),
-            "Meta_P_Situation": np.asarray(p_situation_hold_vec, dtype=np.float64),
-            "Meta_P_Value":     np.asarray(p_value_hold_vec, dtype=np.float64),
-            "Meta_Value_Reg":   np.asarray(pred_value_reg_hold, dtype=np.float64),
-        }, index=hold_df.index)
+            "Meta_P_Outcome":   p_hold_vec,
+            "Meta_P_Situation": p_situation_hold_vec,
+            "Meta_P_Value":     p_value_hold_vec,
+            "Meta_Value_Reg":   pred_value_reg_hold,
+        }, index=hold_meta_df.index)
         
         meta_full_df = pd.DataFrame({
-            "Meta_P_Outcome":   np.asarray(p_full_vec, dtype=np.float64),
-            "Meta_P_Situation": np.asarray(p_situation_full_vec, dtype=np.float64),
-            "Meta_P_Value":     np.asarray(p_value_full_vec, dtype=np.float64),
-            "Meta_Value_Reg":   np.asarray(pred_value_reg_full, dtype=np.float64),
-        }, index=df_valid.index)
+            "Meta_P_Outcome":   p_full_vec,
+            "Meta_P_Situation": p_situation_full_vec,
+            "Meta_P_Value":     p_value_full_vec,
+            "Meta_Value_Reg":   pred_value_reg_full,
+        }, index=full_meta_df.index)
         
-        if "Odds_Price" in train_df.columns:
-            meta_train_df["Meta_Odds_Price"] = pd.to_numeric(train_df["Odds_Price"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-            meta_hold_df["Meta_Odds_Price"]  = pd.to_numeric(hold_df["Odds_Price"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-        if "Odds_Price" in df_valid.columns:
-            meta_full_df["Meta_Odds_Price"]  = pd.to_numeric(df_valid["Odds_Price"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        if "Odds_Price" in train_meta_df.columns:
+            meta_train_df["Meta_Odds_Price"] = pd.to_numeric(train_meta_df["Odds_Price"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+            meta_hold_df["Meta_Odds_Price"]  = pd.to_numeric(hold_meta_df["Odds_Price"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+            meta_full_df["Meta_Odds_Price"]  = pd.to_numeric(full_meta_df["Odds_Price"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
         
-        if "Value" in train_df.columns:
-            meta_train_df["Meta_Line_Value"] = pd.to_numeric(train_df["Value"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-            meta_hold_df["Meta_Line_Value"]  = pd.to_numeric(hold_df["Value"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-        if "Value" in df_valid.columns:
-            meta_full_df["Meta_Line_Value"]  = pd.to_numeric(df_valid["Value"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        if "Value" in train_meta_df.columns:
+            meta_train_df["Meta_Line_Value"] = pd.to_numeric(train_meta_df["Value"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+            meta_hold_df["Meta_Line_Value"]  = pd.to_numeric(hold_meta_df["Value"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+            meta_full_df["Meta_Line_Value"]  = pd.to_numeric(full_meta_df["Value"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
         
         meta_train_df = meta_train_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         meta_hold_df  = meta_hold_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         meta_full_df  = meta_full_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         
-        meta_model = XGBClassifier(
-            objective="binary:logistic",
-            eval_metric=["logloss", "auc"],
-            tree_method="hist",
-            grow_policy="lossguide",
-            max_depth=3,
-            max_leaves=32,
-            learning_rate=0.03,
-            subsample=0.90,
-            colsample_bytree=0.90,
-            min_child_weight=2.0,
-            gamma=0.25,
-            reg_alpha=0.05,
-            reg_lambda=3.0,
-            max_bin=256,
-            n_estimators=300,
-            n_jobs=1,
-            random_state=2029,
-        )
-        
-        meta_model.fit(
-            meta_train_df.to_numpy(dtype=np.float32),
-            y_train.astype(int),
-            sample_weight=w_train_outcome,
-            verbose=False,
-        )
-        
-        final_bet_score_train_raw = np.asarray(
-            meta_model.predict_proba(meta_train_df.to_numpy(dtype=np.float32))[:, 1],
-            dtype=np.float64
-        )
-        final_bet_score_hold_raw = np.asarray(
-            meta_model.predict_proba(meta_hold_df.to_numpy(dtype=np.float32))[:, 1],
-            dtype=np.float64
-        )
-        final_bet_score_full_raw = np.asarray(
-            meta_model.predict_proba(meta_full_df.to_numpy(dtype=np.float32))[:, 1],
-            dtype=np.float64
-        )
-        
+        st.write({
+            "meta_alignment": {
+                "n_train_meta": int(len(meta_train_df)),
+                "n_hold_meta": int(len(meta_hold_df)),
+                "n_full_meta": int(len(meta_full_df)),
+                "y_train": int(len(y_train)),
+                "y_hold": int(len(y_hold)),
+                "w_train_outcome": int(len(w_train_outcome)),
+            }
+        })
+                
         # ----------------------------
         # 6E) META CALIBRATION
         # ----------------------------
