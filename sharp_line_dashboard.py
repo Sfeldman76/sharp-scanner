@@ -13347,14 +13347,14 @@ def train_sharp_model_from_bq(
         # IMPORTANT:
         # Meta training rows must align to the same rows used to create p_train_vec / p_hold_vec.
         # Do NOT use stale train_df / hold_df indexes if predictions were made from train_all_idx / hold_idx.
-        train_meta_df = df_valid.iloc[np.asarray(train_all_idx)].copy()
-        hold_meta_df  = df_valid.iloc[np.asarray(hold_idx)].copy()
+       
+        train_meta_df = train_df.copy()
+        hold_meta_df  = hold_df.copy()
         full_meta_df  = df_valid.copy()
-        
         n_train = len(train_meta_df)
         n_hold  = len(hold_meta_df)
         n_full  = len(full_meta_df)
-        
+
         def _ensure_vec(name, x, n, default=0.5):
             if x is None:
                 return np.full(n, default, dtype=np.float64)
@@ -13364,11 +13364,10 @@ def train_sharp_model_from_bq(
             if arr.shape[0] != n:
                 raise ValueError(
                     f"{name} length mismatch: got {arr.shape[0]}, expected {n}. "
-                    f"This means the head prediction vector is not aligned to the meta frame."
+                    f"Fix the upstream prediction source for this head."
                 )
         
             return arr
-        
         # Outcome head
         p_train_vec = _ensure_vec("p_train_vec", p_train_vec, n_train, default=0.5)
         p_hold_vec  = _ensure_vec("p_hold_vec",  p_hold_vec,  n_hold,  default=0.5)
@@ -13390,8 +13389,8 @@ def train_sharp_model_from_bq(
         pred_value_reg_full  = _ensure_vec("pred_value_reg_full",  pred_value_reg_full,  n_full,  default=0.0)
         
         # Re-align targets to the same meta rows
-        y_train = np.asarray(y_full[np.asarray(train_all_idx)]).astype(int)
-        y_hold  = np.asarray(y_full[np.asarray(hold_idx)]).astype(int)
+        y_train = np.asarray(y_train).astype(int)
+        y_hold  = np.asarray(y_hold).astype(int)
         
         if "w_train_outcome" not in locals() or len(np.asarray(w_train_outcome).reshape(-1)) != n_train:
             w_train_outcome = np.ones(n_train, dtype=np.float64)
