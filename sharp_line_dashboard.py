@@ -13364,29 +13364,59 @@ def train_sharp_model_from_bq(
             if arr.shape[0] != n:
                 raise ValueError(
                     f"{name} length mismatch: got {arr.shape[0]}, expected {n}. "
-                    f"Fix the upstream prediction source for this head."
+                    f"Outcome/full vectors must align exactly."
                 )
         
             return arr
+        
+        
+        def _align_optional_vec(name, x, n, default=0.5):
+            """
+            For support heads only: situation/value heads may be trained on valid-label subsets.
+            If shorter, fill missing rows with neutral default.
+            """
+            if x is None:
+                return np.full(n, default, dtype=np.float64)
+        
+            arr = np.asarray(x, dtype=np.float64).reshape(-1)
+        
+            if arr.shape[0] == n:
+                return arr
+        
+            if arr.shape[0] < n:
+                out = np.full(n, default, dtype=np.float64)
+                out[:arr.shape[0]] = arr
+        
+                st.warning(
+                    f"{name} shorter than meta frame: got {arr.shape[0]}, expected {n}. "
+                    f"Filled {n - arr.shape[0]} rows with {default}."
+                )
+                return out
+        
+            raise ValueError(
+                f"{name} longer than meta frame: got {arr.shape[0]}, expected {n}. "
+                f"Cannot safely align."
+            )
         # Outcome head
         p_train_vec = _ensure_vec("p_train_vec", p_train_vec, n_train, default=0.5)
         p_hold_vec  = _ensure_vec("p_hold_vec",  p_hold_vec,  n_hold,  default=0.5)
         p_full_vec  = _ensure_vec("p_full_vec",  p_full_vec,  n_full,  default=0.5)
         
         # Situation head
-        p_situation_train_vec = _ensure_vec("p_situation_train_vec", p_situation_train_vec, n_train, default=0.5)
-        p_situation_hold_vec  = _ensure_vec("p_situation_hold_vec",  p_situation_hold_vec,  n_hold,  default=0.5)
-        p_situation_full_vec  = _ensure_vec("p_situation_full_vec",  p_situation_full_vec,  n_full,  default=0.5)
+        # Situation head — optional support head
+        p_situation_train_vec = _align_optional_vec("p_situation_train_vec", p_situation_train_vec, n_train, default=0.5)
+        p_situation_hold_vec  = _align_optional_vec("p_situation_hold_vec",  p_situation_hold_vec,  n_hold,  default=0.5)
+        p_situation_full_vec  = _align_optional_vec("p_situation_full_vec",  p_situation_full_vec,  n_full,  default=0.5)
         
-        # Value classification head
-        p_value_train_vec = _ensure_vec("p_value_train_vec", p_value_train_vec, n_train, default=0.5)
-        p_value_hold_vec  = _ensure_vec("p_value_hold_vec",  p_value_hold_vec,  n_hold,  default=0.5)
-        p_value_full_vec  = _ensure_vec("p_value_full_vec",  p_value_full_vec,  n_full,  default=0.5)
+        # Value classification head — optional support head
+        p_value_train_vec = _align_optional_vec("p_value_train_vec", p_value_train_vec, n_train, default=0.5)
+        p_value_hold_vec  = _align_optional_vec("p_value_hold_vec",  p_value_hold_vec,  n_hold,  default=0.5)
+        p_value_full_vec  = _align_optional_vec("p_value_full_vec",  p_value_full_vec,  n_full,  default=0.5)
         
-        # Value regression head
-        pred_value_reg_train = _ensure_vec("pred_value_reg_train", pred_value_reg_train, n_train, default=0.0)
-        pred_value_reg_hold  = _ensure_vec("pred_value_reg_hold",  pred_value_reg_hold,  n_hold,  default=0.0)
-        pred_value_reg_full  = _ensure_vec("pred_value_reg_full",  pred_value_reg_full,  n_full,  default=0.0)
+        # Value regression head — optional support head
+        pred_value_reg_train = _align_optional_vec("pred_value_reg_train", pred_value_reg_train, n_train, default=0.0)
+        pred_value_reg_hold  = _align_optional_vec("pred_value_reg_hold",  pred_value_reg_hold,  n_hold,  default=0.0)
+        pred_value_reg_full  = _align_optional_vec("pred_value_reg_full",  pred_value_reg_full,  n_full,  default=0.0)
         
         # Re-align targets to the same meta rows
         y_train = np.asarray(y_train).astype(int)
