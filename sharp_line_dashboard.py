@@ -13472,7 +13472,61 @@ def train_sharp_model_from_bq(
                 "w_train_outcome": int(len(w_train_outcome)),
             }
         })
-                
+        # ----------------------------
+        # Train meta-combiner model
+        # ----------------------------
+        meta_model = XGBClassifier(
+            objective="binary:logistic",
+            eval_metric=["logloss", "auc"],
+            tree_method="hist",
+            grow_policy="lossguide",
+            max_depth=3,
+            max_leaves=32,
+            learning_rate=0.03,
+            subsample=0.90,
+            colsample_bytree=0.90,
+            min_child_weight=2.0,
+            gamma=0.25,
+            reg_alpha=0.05,
+            reg_lambda=3.0,
+            max_bin=256,
+            n_estimators=300,
+            n_jobs=1,
+            random_state=2029,
+        )
+        
+        meta_model.fit(
+            meta_train_df.to_numpy(dtype=np.float32),
+            y_train.astype(int),
+            sample_weight=w_train_outcome,
+            verbose=False,
+        )
+        
+        # ----------------------------
+        # Raw meta predictions
+        # ----------------------------
+        final_bet_score_train_raw = np.asarray(
+            meta_model.predict_proba(meta_train_df.to_numpy(dtype=np.float32))[:, 1],
+            dtype=np.float64,
+        )
+        
+        final_bet_score_hold_raw = np.asarray(
+            meta_model.predict_proba(meta_hold_df.to_numpy(dtype=np.float32))[:, 1],
+            dtype=np.float64,
+        )
+        
+        final_bet_score_full_raw = np.asarray(
+            meta_model.predict_proba(meta_full_df.to_numpy(dtype=np.float32))[:, 1],
+            dtype=np.float64,
+        )
+        
+        st.write({
+            "meta_raw_lengths": {
+                "train_raw": int(len(final_bet_score_train_raw)),
+                "hold_raw": int(len(final_bet_score_hold_raw)),
+                "full_raw": int(len(final_bet_score_full_raw)),
+            }
+        })        
         # ----------------------------
         # 6E) META CALIBRATION
         # ----------------------------
