@@ -13590,8 +13590,8 @@ def train_sharp_model_from_bq(
         })
         
         # Diagnostics for outcome-calibrated probabilities
-        ece_tr = expected_calibration_error(y_full[train_all_idx].astype(int), p_train_vec, n_bins=10)
-        ece_ho = expected_calibration_error(y_full[hold_idx].astype(int),      p_hold_vec,  n_bins=10)
+        ece_tr = expected_calibration_error(y_train.astype(int), p_train_vec, n_bins=10)
+        ece_ho = expected_calibration_error(y_hold.astype(int),  p_hold_vec,  n_bins=10)
         psi    = population_stability_index(p_train_vec, p_hold_vec, bins=20)
         st.write({"cal_used": cal_name, "ece_train": float(ece_tr), "ece_hold": float(ece_ho), "psi": float(psi)})
         
@@ -13601,10 +13601,10 @@ def train_sharp_model_from_bq(
         meta_psi    = population_stability_index(final_bet_score_train, final_bet_score_hold, bins=20)
         st.write({"meta_ece_train": float(meta_ece_tr), "meta_ece_hold": float(meta_ece_ho), "meta_psi": float(meta_psi)})
         
-        assert p_train_vec.shape[0] == len(train_all_idx), "p_train_vec length mismatch"
-        assert p_hold_vec.shape[0]  == len(hold_idx),      "p_hold_vec length mismatch"
-        assert final_bet_score_train.shape[0] == len(train_all_idx), "final_bet_score_train length mismatch"
-        assert final_bet_score_hold.shape[0]  == len(hold_idx),      "final_bet_score_hold length mismatch"
+        assert p_train_vec.shape[0] == len((y_train), "p_train_vec length mismatch"
+        assert p_hold_vec.shape[0]  == len(y_hold),      "p_hold_vec length mismatch"
+        assert final_bet_score_train.shape[0] == len(y_train), "final_bet_score_train length mismatch"
+        assert final_bet_score_hold.shape[0]  == len(y_hold),      "final_bet_score_hold length mismatch"
         
         # --- Save adapter for OUTCOME-only calibrated probabilities ---
         cal_blend = (cal_name, cal_obj)
@@ -13724,13 +13724,13 @@ def train_sharp_model_from_bq(
         
         st.markdown("#### 🎯 Outcome Calibration Table — TRAIN (calibrated, no prior shift)")
         st.dataframe(
-            _cal_table_fixed_edges(y_full[train_all_idx].astype(int), p_cal_tr, edges_cal, eps=eps),
+            _cal_table_fixed_edges(y_train.astype(int), p_cal_tr, edges_cal, eps=eps),
             use_container_width=True
         )
         
         st.markdown("#### 🎯 Outcome Calibration Table — HOLDOUT (calibrated, no prior shift)")
         st.dataframe(
-            _cal_table_fixed_edges(y_full[hold_idx].astype(int), p_cal_ho, edges_cal, eps=eps),
+            _cal_table_fixed_edges(y_hold.astype(int), p_cal_ho, edges_cal, eps=eps),
             use_container_width=True
         )
         
@@ -13738,13 +13738,13 @@ def train_sharp_model_from_bq(
         
         st.markdown("#### 🧭 Outcome Calibration Table — TRAIN (deploy-adjusted prior shift)")
         st.dataframe(
-            _cal_table_fixed_edges(y_full[train_all_idx].astype(int), p_train_vec, edges_deploy, eps=eps),
+            _cal_table_fixed_edges(y_train.astype(int), p_train_vec, edges_deploy, eps=eps),
             use_container_width=True
         )
         
         st.markdown("#### 🧭 Outcome Calibration Table — HOLDOUT (deploy-adjusted prior shift)")
         st.dataframe(
-            _cal_table_fixed_edges(y_full[hold_idx].astype(int), p_hold_vec, edges_deploy, eps=eps),
+            _cal_table_fixed_edges(y_hold.astype(int),  p_hold_vec,  edges_deploy, eps=eps),
             use_container_width=True
         )
         
