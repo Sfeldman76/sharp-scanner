@@ -13601,7 +13601,7 @@ def train_sharp_model_from_bq(
         meta_psi    = population_stability_index(final_bet_score_train, final_bet_score_hold, bins=20)
         st.write({"meta_ece_train": float(meta_ece_tr), "meta_ece_hold": float(meta_ece_ho), "meta_psi": float(meta_psi)})
         
-        assert p_train_vec.shape[0] == len((y_train), "p_train_vec length mismatch"
+        assert p_train_vec.shape[0] == len(y_train), "p_train_vec length mismatch"
         assert p_hold_vec.shape[0]  == len(y_hold),      "p_hold_vec length mismatch"
         assert final_bet_score_train.shape[0] == len(y_train), "final_bet_score_train length mismatch"
         assert final_bet_score_hold.shape[0]  == len(y_hold),      "final_bet_score_hold length mismatch"
