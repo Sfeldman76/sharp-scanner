@@ -13815,14 +13815,34 @@ def train_sharp_model_from_bq(
         
         rmse_value_hold = np.nan
         mae_value_hold  = np.nan
-        if y_hold_value_reg is not None and pred_value_reg_hold is not None:
-            rmse_value_hold = _to_float(
-                np.sqrt(mean_squared_error(np.asarray(y_hold_value_reg).astype(float), np.asarray(pred_value_reg_hold).astype(float)))
-            )
-            mae_value_hold = _to_float(
-                mean_absolute_error(np.asarray(y_hold_value_reg).astype(float), np.asarray(pred_value_reg_hold).astype(float))
-            )
         
+        if y_hold_value_reg is not None and pred_value_reg_hold is not None:
+            yv = np.asarray(y_hold_value_reg, dtype=float).reshape(-1)
+            pv = np.asarray(pred_value_reg_hold, dtype=float).reshape(-1)
+        
+            n_val = min(len(yv), len(pv))
+        
+            if n_val > 0:
+                if len(yv) != len(pv):
+                    st.warning({
+                        "value_reg_hold_metric_alignment": {
+                            "y_hold_value_reg": int(len(yv)),
+                            "pred_value_reg_hold": int(len(pv)),
+                            "using_first_n": int(n_val),
+                        }
+                    })
+        
+                yv = yv[:n_val]
+                pv = pv[:n_val]
+        
+                mask = np.isfinite(yv) & np.isfinite(pv)
+                if mask.sum() >= 2:
+                    rmse_value_hold = _to_float(
+                        np.sqrt(mean_squared_error(yv[mask], pv[mask]))
+                    )
+                    mae_value_hold = _to_float(
+                        mean_absolute_error(yv[mask], pv[mask])
+                    )
         # Meta metrics (meta predicts OUTCOME probability)
         auc_meta_hold_f = _to_float(auc_safe(y_hold_vec, final_bet_score_hold))
         acc_meta_hold_f = _to_float(
