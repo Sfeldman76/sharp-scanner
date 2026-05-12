@@ -13857,9 +13857,38 @@ def train_sharp_model_from_bq(
         )
         
         # Utility diagnostic
-        q90 = np.nanquantile(final_bet_score_hold, 0.90)
-        mask_top = np.asarray(final_bet_score_hold >= q90)
-        meta_top_decile_mean_util = _to_float(np.mean(y_hold_value_reg[mask_top])) if (mask_top.any() and y_hold_value_reg is not None) else np.nan
+        meta_top_decile_mean_util = np.nan
+        
+        if y_hold_value_reg is not None and final_bet_score_hold is not None:
+            yhvr = np.asarray(y_hold_value_reg, dtype=float).reshape(-1)
+            fbs  = np.asarray(final_bet_score_hold, dtype=float).reshape(-1)
+        
+            n_util = min(len(yhvr), len(fbs))
+        
+            if n_util > 0:
+                if len(yhvr) != len(fbs):
+                    st.warning({
+                        "meta_top_decile_util_alignment": {
+                            "y_hold_value_reg": int(len(yhvr)),
+                            "final_bet_score_hold": int(len(fbs)),
+                            "using_first_n": int(n_util),
+                        }
+                    })
+        
+                yhvr = yhvr[:n_util]
+                fbs  = fbs[:n_util]
+        
+                valid = np.isfinite(yhvr) & np.isfinite(fbs)
+        
+                if valid.sum() >= 10:
+                    yhvr_valid = yhvr[valid]
+                    fbs_valid  = fbs[valid]
+        
+                    q90 = np.nanquantile(fbs_valid, 0.90)
+                    mask_top = fbs_valid >= q90
+        
+                    if mask_top.any():
+                        meta_top_decile_mean_util = _to_float(np.mean(yhvr_valid[mask_top]))
         
         artifact_metrics = None
         artifact_config  = None
