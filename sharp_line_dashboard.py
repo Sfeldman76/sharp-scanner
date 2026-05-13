@@ -7931,27 +7931,28 @@ from typing import Tuple
 
 def _score_model_for_promotion(metrics: Dict[str, float]) -> float:
     """
-    Build a scalar score that prefers:
+    Promotion score prefers:
       - higher holdout AUC
+      - higher holdout accuracy
       - lower holdout LogLoss
-      - smaller train–holdout AUC gap (less overfit)
-
-    You can tweak weights per sport/market if needed.
+      - smaller train/holdout AUC gap
     """
-    auc_h  = float(metrics.get("auc_holdout", float("nan")))
-    ll_h   = float(metrics.get("logloss_holdout", float("nan")))
+    auc_h  = float(metrics.get("auc_meta_holdout", metrics.get("auc_holdout", float("nan"))))
+    acc_h  = float(metrics.get("accuracy_meta_holdout", metrics.get("accuracy_holdout", float("nan"))))
+    ll_h   = float(metrics.get("logloss_meta_holdout", metrics.get("logloss_holdout", float("nan"))))
     gap_th = float(metrics.get("auc_gap_train_holdout", float("nan")))
 
-    # Soft penalties
     if not np.isfinite(auc_h) or not np.isfinite(ll_h):
         return float("-inf")
 
-    # Normalize logloss to roughly similar scale as AUC (not perfect, but ok)
-    # Higher is better for this score.
+    if not np.isfinite(acc_h):
+        acc_h = 0.50
+
     score = (
-        1.0 * auc_h            # main driver
-        - 0.5 * ll_h           # want lower logloss
-        - 0.10 * max(gap_th, 0.0)  # penalize big overfit gaps
+        0.70 * auc_h
+        + 0.30 * acc_h
+        - 0.50 * ll_h
+        - 0.10 * max(gap_th, 0.0)
     )
     return float(score)
 
@@ -7960,78 +7961,88 @@ def should_promote_challenger(
     challenger_metrics: Dict[str, float],
     champion_metrics: Optional[Dict[str, float]],
     *,
-    min_auc_holdout: float = 0.50,
-    max_gap_train_holdout: float = 0.50,
-    min_auc_improvement: float = 0.00005,
-    max_logloss_worsen: float = 0.001,
+    min_accuracy_holdout: float = 0.50,
+    min_accuracy_improvement: float = 0.00005,
+    max_logloss_worsen: float = 0.0025,
+    max_brier_worsen: float = 0.0025,
+    min_holdout_n: int = 500,
+    min_positive_rate: float = 0.05,
+    max_positive_rate: float = 0.95,
 ) -> Tuple[bool, Dict[str, float]]:
-    """
-    Decide whether to promote challenger vs champion.
 
-    Returns:
-      (promote_flag, debug_dict)
-    """
     dbg: Dict[str, float] = {}
 
-    auc_h_c = float(challenger_metrics.get("auc_holdout", float("nan")))
-    ll_h_c  = float(challenger_metrics.get("logloss_holdout", float("nan")))
-    gap_c   = float(challenger_metrics.get("auc_gap_train_holdout", float("nan")))
+    acc_c = float(challenger_metrics.get("accuracy_meta_holdout", challenger_metrics.get("accuracy_holdout", float("nan"))))
+    auc_c = float(challenger_metrics.get("auc_meta_holdout", challenger_metrics.get("auc_holdout", float("nan"))))
+    ll_c  = float(challenger_metrics.get("logloss_meta_holdout", challenger_metrics.get("logloss_holdout", float("nan"))))
+    br_c  = float(challenger_metrics.get("brier_meta_holdout", challenger_metrics.get("brier_holdout", float("nan"))))
+    n_c   = int(challenger_metrics.get("holdout_n", challenger_metrics.get("n_holdout", 0)) or 0)
+    pr_c  = float(challenger_metrics.get("positive_rate_meta_holdout", challenger_metrics.get("positive_rate_holdout", float("nan"))))
 
-    dbg["challenger_auc_holdout"] = auc_h_c
-    dbg["challenger_logloss_holdout"] = ll_h_c
-    dbg["challenger_gap_train_holdout"] = gap_c
+    dbg.update({
+        "challenger_accuracy_holdout": acc_c,
+        "challenger_auc_holdout_tracked_only": auc_c,
+        "challenger_logloss_holdout": ll_c,
+        "challenger_brier_holdout": br_c,
+        "challenger_holdout_n": n_c,
+        "challenger_positive_rate": pr_c,
+    })
 
-    # 1) Basic sanity: challenger must meet absolute thresholds
-    if (not np.isfinite(auc_h_c)) or (auc_h_c < min_auc_holdout):
-        dbg["reason"] = "challenger_auc_below_min"
+    if n_c and n_c < min_holdout_n:
+        dbg["reason"] = "challenger_holdout_too_small"
         return False, dbg
 
-    if np.isfinite(gap_c) and (gap_c > max_gap_train_holdout):
-        dbg["reason"] = "challenger_gap_too_large"
+    if not np.isfinite(acc_c) or acc_c < min_accuracy_holdout:
+        dbg["reason"] = "challenger_accuracy_below_min"
         return False, dbg
 
-    # 2) No existing champion → auto-promote if challenger passes thresholds
+    if np.isfinite(pr_c) and not (min_positive_rate <= pr_c <= max_positive_rate):
+        dbg["reason"] = "challenger_prediction_class_collapse"
+        return False, dbg
+
     if not champion_metrics:
         dbg["reason"] = "no_champion_auto_promote"
         return True, dbg
 
-    auc_h_champ = float(champion_metrics.get("auc_holdout", float("nan")))
-    ll_h_champ  = float(champion_metrics.get("logloss_holdout", float("nan")))
-    gap_champ   = float(champion_metrics.get("auc_gap_train_holdout", float("nan")))
+    acc_ch = float(champion_metrics.get("accuracy_meta_holdout", champion_metrics.get("accuracy_holdout", float("nan"))))
+    auc_ch = float(champion_metrics.get("auc_meta_holdout", champion_metrics.get("auc_holdout", float("nan"))))
+    ll_ch  = float(champion_metrics.get("logloss_meta_holdout", champion_metrics.get("logloss_holdout", float("nan"))))
+    br_ch  = float(champion_metrics.get("brier_meta_holdout", champion_metrics.get("brier_holdout", float("nan"))))
 
-    dbg["champ_auc_holdout"] = auc_h_champ
-    dbg["champ_logloss_holdout"] = ll_h_champ
-    dbg["champ_gap_train_holdout"] = gap_champ
+    dbg.update({
+        "champ_accuracy_holdout": acc_ch,
+        "champ_auc_holdout_tracked_only": auc_ch,
+        "champ_logloss_holdout": ll_ch,
+        "champ_brier_holdout": br_ch,
+    })
 
-    # 3) Require challenger holdout AUC to beat champion by some epsilon
-    if np.isfinite(auc_h_champ):
-        auc_improve = auc_h_c - auc_h_champ
-        dbg["auc_improvement"] = auc_improve
-        if auc_improve < min_auc_improvement:
-            dbg["reason"] = "auc_improvement_too_small"
+    if np.isfinite(acc_ch):
+        acc_improve = acc_c - acc_ch
+        dbg["accuracy_improvement"] = acc_improve
+        if acc_improve < min_accuracy_improvement:
+            dbg["reason"] = "accuracy_improvement_too_small"
             return False, dbg
 
-    # 4) Ensure logloss is not meaningfully worse
-    if np.isfinite(ll_h_champ):
-        ll_delta = ll_h_c - ll_h_champ  # challenger - champ (we want <= small)
+    if np.isfinite(auc_ch) and np.isfinite(auc_c):
+        dbg["auc_improvement_tracked_only"] = auc_c - auc_ch
+
+    if np.isfinite(ll_ch) and np.isfinite(ll_c):
+        ll_delta = ll_c - ll_ch
         dbg["logloss_delta"] = ll_delta
         if ll_delta > max_logloss_worsen:
             dbg["reason"] = "logloss_worse_too_much"
             return False, dbg
 
-    # 5) Optionally, compare scalar scores as a final check
-    score_challenger = _score_model_for_promotion(challenger_metrics)
-    score_champion   = _score_model_for_promotion(champion_metrics)
-    dbg["score_challenger"] = score_challenger
-    dbg["score_champion"] = score_champion
+    if np.isfinite(br_ch) and np.isfinite(br_c):
+        br_delta = br_c - br_ch
+        dbg["brier_delta"] = br_delta
+        if br_delta > max_brier_worsen:
+            dbg["reason"] = "brier_worse_too_much"
+            return False, dbg
 
-    if score_challenger <= score_champion:
-        dbg["reason"] = "scalar_score_not_better"
-        return False, dbg
-
-    dbg["reason"] = "challenger_better"
+    dbg["reason"] = "challenger_accuracy_better_with_guardrails"
     return True, dbg
-from datetime import datetime, timezone
+    
 
 
 def train_with_champion_wrapper(
@@ -13904,7 +13915,13 @@ def train_sharp_model_from_bq(
                 "auc_value_holdout": auc_value_hold_f,
                 "rmse_value_holdout": rmse_value_hold,
                 "mae_value_holdout": mae_value_hold,
-        
+                "holdout_n": int(len(y_hold_vec)),
+                "positive_rate_meta_holdout": (
+                    float(np.mean(np.asarray(final_bet_score_hold, dtype=float) >= 0.5))
+                    if final_bet_score_hold is not None and len(final_bet_score_hold) > 0
+                    else float("nan")
+                ),
+
                 "auc_meta_holdout": auc_meta_hold_f,
                 "accuracy_meta_holdout": acc_meta_hold_f,
                 "logloss_meta_holdout": logloss_meta_hold_f,
