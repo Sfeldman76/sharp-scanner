@@ -12242,22 +12242,45 @@ def train_sharp_model_from_bq(
         X_df_full_outcome_autofs = X_df_outcome.reset_index(drop=True)
         
         # Situation head matrices
+        # Situation head matrices
         X_df_train_situation = None
         X_df_hold_situation = None
-        X_df_full_situation_autofs = X_df_situation.reset_index(drop=True)
+        X_df_full_situation_autofs = None
         
-        if train_idx_situation is not None:
-            X_df_train_situation = X_df_situation.iloc[train_idx_situation].reset_index(drop=True)
-            X_df_hold_situation  = X_df_situation.iloc[hold_idx_situation].reset_index(drop=True)
+        if X_df_situation is not None and train_idx_situation is not None:
+            X_df_train_situation = (
+                X_df_situation.iloc[train_idx_situation]
+                .reset_index(drop=True)
+            )
+        
+            X_df_hold_situation = (
+                X_df_situation.iloc[hold_idx_situation]
+                .reset_index(drop=True)
+            )
+        
+            X_df_full_situation_autofs = (
+                X_df_situation.reset_index(drop=True)
+            )
         
         # Value head matrices
         X_df_train_value = None
         X_df_hold_value = None
-        X_df_full_value_autofs = X_df_value.reset_index(drop=True)
+        X_df_full_value_autofs = None
         
-        if train_idx_value is not None:
-            X_df_train_value = X_df_value.iloc[train_idx_value].reset_index(drop=True)
-            X_df_hold_value  = X_df_value.iloc[hold_idx_value].reset_index(drop=True)
+        if X_df_value is not None and train_idx_value is not None:
+            X_df_train_value = (
+                X_df_value.iloc[train_idx_value]
+                .reset_index(drop=True)
+            )
+        
+            X_df_hold_value = (
+                X_df_value.iloc[hold_idx_value]
+                .reset_index(drop=True)
+            )
+        
+            X_df_full_value_autofs = (
+                X_df_value.reset_index(drop=True)
+            )
 
         def _final_clean(df: pd.DataFrame) -> pd.DataFrame:
             df = df.apply(pd.to_numeric, errors="coerce")
@@ -12401,8 +12424,13 @@ def train_sharp_model_from_bq(
                 folds_outcome,
             )
         
-        if _autofs_target_ok(y_train_situation, "situation"):
-
+  
+        if (
+            _autofs_target_ok(y_train_situation, "situation")
+            and X_df_train_situation is not None
+            and X_df_hold_situation is not None
+            and X_df_full_situation_autofs is not None
+        ):
             folds_situation, _, _ = build_deterministic_folds(
                 X=np.zeros((len(y_train_situation), 1), dtype=np.float32),
                 y=y_train_situation,
@@ -12423,7 +12451,12 @@ def train_sharp_model_from_bq(
                 folds_situation,
             )
         
-        if _autofs_target_ok(y_train_value_cls, "value"):
+        if (
+            _autofs_target_ok(y_train_value_cls, "value")
+            and X_df_train_value is not None
+            and X_df_hold_value is not None
+            and X_df_full_value_autofs is not None
+        ):
             folds_value, _, _ = build_deterministic_folds(
                 X=np.zeros((len(y_train_value_cls), 1), dtype=np.float32),
                 y=y_train_value_cls,
@@ -12475,9 +12508,21 @@ def train_sharp_model_from_bq(
         # ----------------------------
         # Additive per-head feature lists
         # ----------------------------
-        feature_cols_outcome   = list(autofs_outcome["feature_cols"])
-        feature_cols_situation = list(autofs_situation["feature_cols"])
-        feature_cols_value     = list(autofs_value["feature_cols"])
+        feature_cols_outcome = list(
+            autofs_outcome["feature_cols"]
+        )
+        
+        feature_cols_situation = (
+            list(autofs_situation["feature_cols"])
+            if autofs_situation is not None
+            else []
+        )
+        
+        feature_cols_value = (
+            list(autofs_value["feature_cols"])
+            if autofs_value is not None
+            else []
+        )
 
         # ----------------------------
         # Additive per-head matrices
@@ -12486,25 +12531,70 @@ def train_sharp_model_from_bq(
         X_hold_outcome  = autofs_outcome["X_hold"]
         X_full_outcome  = autofs_outcome["X_full"]
 
-        X_train_situation = autofs_situation["X_train"]
-        X_hold_situation  = autofs_situation["X_hold"]
-        X_full_situation  = autofs_situation["X_full"]
-
-        X_train_value = autofs_value["X_train"]
-        X_hold_value  = autofs_value["X_hold"]
-        X_full_value  = autofs_value["X_full"]
+        X_train_situation = (
+            autofs_situation["X_train"]
+            if autofs_situation is not None
+            else None
+        )
+        
+        X_hold_situation = (
+            autofs_situation["X_hold"]
+            if autofs_situation is not None
+            else None
+        )
+        
+        X_full_situation = (
+            autofs_situation["X_full"]
+            if autofs_situation is not None
+            else None
+        )
+        
+        X_train_value = (
+            autofs_value["X_train"]
+            if autofs_value is not None
+            else None
+        )
+        
+        X_hold_value = (
+            autofs_value["X_hold"]
+            if autofs_value is not None
+            else None
+        )
+        
+        X_full_value = (
+            autofs_value["X_full"]
+            if autofs_value is not None
+            else None
+        )
 
         # ----------------------------
         # Hard checks
         # ----------------------------
         assert X_train_outcome.shape[0]   == len(y_train),           "X_train_outcome row mismatch"
         assert X_hold_outcome.shape[0]    == len(y_hold),            "X_hold_outcome row mismatch"
-
-        assert X_train_situation.shape[0] == len(y_train_situation), "X_train_situation row mismatch"
-        assert X_hold_situation.shape[0]  == len(y_hold_situation),  "X_hold_situation row mismatch"
-
-        assert X_train_value.shape[0]     == len(y_train_value_cls), "X_train_value row mismatch"
-        assert X_hold_value.shape[0]      == len(y_hold_value_cls),  "X_hold_value row mismatch"
+        if y_train_situation is not None:
+            assert X_train_situation is not None
+            assert X_hold_situation is not None
+        
+            assert X_train_situation.shape[0] == len(y_train_situation), (
+                "X_train_situation row mismatch"
+            )
+        
+            assert X_hold_situation.shape[0] == len(y_hold_situation), (
+                "X_hold_situation row mismatch"
+            )
+        
+        if y_train_value_cls is not None:
+            assert X_train_value is not None
+            assert X_hold_value is not None
+        
+            assert X_train_value.shape[0] == len(y_train_value_cls), (
+                "X_train_value row mismatch"
+            )
+        
+            assert X_hold_value.shape[0] == len(y_hold_value_cls), (
+                "X_hold_value row mismatch"
+            )
 
         log_func(
             f"[AutoFS] outcome={len(feature_cols_outcome)} | "
@@ -13081,7 +13171,11 @@ def train_sharp_model_from_bq(
         p_situation_hold_vec = None
         p_situation_full_vec = None
         
-        if y_train_situation is not None and X_train_situation.shape[1] > 0:
+        if (
+            y_train_situation is not None
+            and X_train_situation is not None
+            and X_train_situation.shape[1] > 0
+        ):
             situation_base_score = float(np.clip(np.mean(y_train_situation), 1e-4, 1 - 1e-4))
         
             model_situation_cls = XGBClassifier(
@@ -13156,7 +13250,11 @@ def train_sharp_model_from_bq(
         pred_value_reg_full = None
         
         # value classification head
-        if y_train_value_cls is not None and X_train_value.shape[1] > 0:
+        if (
+            y_train_value_cls is not None
+            and X_train_value is not None
+            and X_train_value.shape[1] > 0
+        ):
             value_base_score = float(np.clip(np.mean(y_train_value_cls), 1e-4, 1 - 1e-4))
         
             model_value_cls = XGBClassifier(
@@ -13209,7 +13307,11 @@ def train_sharp_model_from_bq(
                 pass
         
         # value regression head
-        if y_train_value_reg is not None and X_train_value.shape[1] > 0:
+        if (
+            y_train_value_reg is not None
+            and X_train_value is not None
+            and X_train_value.shape[1] > 0
+        ):
             model_value_reg = XGBRegressor(
                 objective="reg:squarederror",
                 eval_metric="rmse",
