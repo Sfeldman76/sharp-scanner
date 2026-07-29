@@ -11448,10 +11448,22 @@ def train_sharp_model_from_bq(
             if "Market" in df_market.columns:
                 print("Market counts:")
                 print(df_market["Market"].value_counts(dropna=False).head(10))
+        
         # 2) build targets
         df_market = _build_three_targets(df_market)
         _debug_target_counts(df_market, market)
         
+        # Stable identity shared by all head-specific frames
+        df_market = df_market.copy()
+        df_market["_SOURCE_ROW_ID"] = np.arange(
+            len(df_market),
+            dtype=np.int64,
+        )
+        
+        # 3) head-specific valid frames
+        df_outcome = _filter_for_training_head(df_market, "outcome")
+        df_situation = _filter_for_training_head(df_market, "situation")
+        df_value = _filter_for_training_head(df_market, "value")        
         # 3) head-specific valid frames
         df_outcome = _filter_for_training_head(df_market, "outcome")
         df_situation = _filter_for_training_head(df_market, "situation")
@@ -11709,6 +11721,27 @@ def train_sharp_model_from_bq(
         # ✅ SPLIT → WEIGHTS (ONCE) → CV FOLDS → AutoFS → REBUILD MATRICES → SEARCH/REFIT
         # =============================================================================
         
+        # finalize numeric matrix for selection / training
+       
+        # =============================================================================
+        # ✅ SPLIT → WEIGHTS (ONCE) → CV FOLDS → AutoFS → REBUILD MATRICES → SEARCH/REFIT
+        # Paste-in safe: fixes stale X_hold, duplicate folds, duplicate weights, and
+        # index/weight misalignment. Keeps your existing helper functions:
+        #   - holdout_by_percent_groups
+        #   - PurgedGroupTimeSeriesSplit
+        #   - build_deterministic_folds
+        #   - select_features_auto
+        #   - get_xgb_search_space
+        #   - get_quality_thresholds
+        #   - _resolve_search_trials
+        #   - _norm_market, SHARP_BOOKS, etc.
+        # =============================================================================
+        
+
+        # =============================================================================
+        # ✅ SPLIT → WEIGHTS (ONCE) → CV FOLDS → AutoFS → REBUILD MATRICES → SEARCH/REFIT
+        # =============================================================================
+        
         # ----------------------------
         # 0) Finalize base matrices
         # ----------------------------
@@ -11724,28 +11757,53 @@ def train_sharp_model_from_bq(
         # 1) HOLDOUT (true time-forward, group-safe) — HEAD SPECIFIC
         # ----------------------------
         def _prep_head_frame(df_head: pd.DataFrame, feature_cols: list[str]):
+            """
+            Build a numeric feature frame and remove rows whose timestamps
+            cannot be recovered. Return the exact positional mask so each
+            target vector is filtered using the same rows.
+            """
             X_df_head = _to_numeric_block(df_head, feature_cols)
-        
+
             groups_head = df_head["Game_Key"].astype(str).to_numpy()
-        
-            t_snap_head = pd.to_datetime(df_head["Snapshot_Timestamp"], utc=True, errors="coerce")
-            t_game_head = pd.to_datetime(df_head["Game_Start"], utc=True, errors="coerce")
+
+            t_snap_head = pd.to_datetime(
+                df_head["Snapshot_Timestamp"],
+                utc=True,
+                errors="coerce",
+            )
+            t_game_head = pd.to_datetime(
+                df_head["Game_Start"],
+                utc=True,
+                errors="coerce",
+            )
+
             times_head = t_snap_head.fillna(t_game_head)
-            times_head = pd.Series(times_head).groupby(groups_head, sort=False).transform(lambda s: s.ffill().bfill())
-        
+            times_head = (
+                pd.Series(times_head)
+                .groupby(groups_head, sort=False)
+                .transform(lambda s: s.ffill().bfill())
+            )
+
             keep_head = ~pd.isna(times_head).to_numpy()
-        
+
             X_df_head = X_df_head.iloc[keep_head].reset_index(drop=True)
             df_head = df_head.iloc[keep_head].reset_index(drop=True)
             groups_head = groups_head[keep_head]
             times_head = times_head.to_numpy()[keep_head]
-        
-            return df_head, X_df_head, groups_head, times_head
-        
+
+            return df_head, X_df_head, groups_head, times_head, keep_head
+
         # outcome
-        df_full_outcome, X_df_outcome, groups_outcome, times_outcome = _prep_head_frame(df_full_outcome, feature_cols)
-        y_full_outcome = y_full_outcome[~pd.isna(pd.Series(times_outcome, copy=False)).to_numpy()] if False else y_full_outcome[:len(df_full_outcome)]
-        
+        (
+            df_full_outcome,
+            X_df_outcome,
+            groups_outcome,
+            times_outcome,
+            keep_outcome,
+        ) = _prep_head_frame(df_full_outcome, feature_cols)
+
+        y_full_outcome = y_full_outcome[keep_outcome]
+
         train_idx_outcome, hold_idx_outcome = holdout_by_percent_groups(
             sport=sport,
             groups=groups_outcome,
@@ -11756,17 +11814,24 @@ def train_sharp_model_from_bq(
             min_hold_games=8,
             ensure_label_diversity=False,
         )
-        
+
         # situation
         train_idx_situation = hold_idx_situation = None
         X_df_situation = None
         groups_situation = None
         times_situation = None
-        
+
         if y_full_situation is not None:
-            df_full_situation, X_df_situation, groups_situation, times_situation = _prep_head_frame(df_full_situation, feature_cols)
-            y_full_situation = y_full_situation[:len(df_full_situation)]
-        
+            (
+                df_full_situation,
+                X_df_situation,
+                groups_situation,
+                times_situation,
+                keep_situation,
+            ) = _prep_head_frame(df_full_situation, feature_cols)
+
+            y_full_situation = y_full_situation[keep_situation]
+
             train_idx_situation, hold_idx_situation = holdout_by_percent_groups(
                 sport=sport,
                 groups=groups_situation,
@@ -11777,20 +11842,27 @@ def train_sharp_model_from_bq(
                 min_hold_games=8,
                 ensure_label_diversity=False,
             )
-        
+
         # value
         train_idx_value = hold_idx_value = None
         X_df_value = None
         groups_value = None
         times_value = None
-        
+
         if y_full_value_cls is not None:
-            df_full_value, X_df_value, groups_value, times_value = _prep_head_frame(df_full_value, feature_cols)
-            y_full_value_cls = y_full_value_cls[:len(df_full_value)]
-        
+            (
+                df_full_value,
+                X_df_value,
+                groups_value,
+                times_value,
+                keep_value,
+            ) = _prep_head_frame(df_full_value, feature_cols)
+
+            y_full_value_cls = y_full_value_cls[keep_value]
+
             if y_full_value_reg is not None:
-                y_full_value_reg = y_full_value_reg[:len(df_full_value)]
-        
+                y_full_value_reg = y_full_value_reg[keep_value]
+
             train_idx_value, hold_idx_value = holdout_by_percent_groups(
                 sport=sport,
                 groups=groups_value,
@@ -11801,6 +11873,7 @@ def train_sharp_model_from_bq(
                 min_hold_games=8,
                 ensure_label_diversity=False,
             )
+
         # ----------------------------
         # Outcome anchor split objects
         # ----------------------------
@@ -11842,7 +11915,59 @@ def train_sharp_model_from_bq(
         
             y_train_value_reg = y_full_value_reg[train_idx_value].astype(np.float32)
             y_hold_value_reg  = y_full_value_reg[hold_idx_value].astype(np.float32)
+        # Outcome/meta row IDs
+        source_ids_train_outcome = (
+            df_full_outcome.iloc[train_idx_outcome]["_SOURCE_ROW_ID"]
+            .to_numpy(dtype=np.int64)
+        )
         
+        source_ids_hold_outcome = (
+            df_full_outcome.iloc[hold_idx_outcome]["_SOURCE_ROW_ID"]
+            .to_numpy(dtype=np.int64)
+        )
+        
+        source_ids_full_outcome = (
+            df_full_outcome["_SOURCE_ROW_ID"]
+            .to_numpy(dtype=np.int64)
+        )
+        
+        # Situation-head row IDs
+        source_ids_train_situation = None
+        source_ids_hold_situation = None
+        source_ids_full_situation = None
+        
+        if train_idx_situation is not None:
+            source_ids_train_situation = (
+                df_full_situation.iloc[train_idx_situation]["_SOURCE_ROW_ID"]
+                .to_numpy(dtype=np.int64)
+            )
+            source_ids_hold_situation = (
+                df_full_situation.iloc[hold_idx_situation]["_SOURCE_ROW_ID"]
+                .to_numpy(dtype=np.int64)
+            )
+            source_ids_full_situation = (
+                df_full_situation["_SOURCE_ROW_ID"]
+                .to_numpy(dtype=np.int64)
+            )
+        
+        # Value-head row IDs
+        source_ids_train_value = None
+        source_ids_hold_value = None
+        source_ids_full_value = None
+        
+        if train_idx_value is not None:
+            source_ids_train_value = (
+                df_full_value.iloc[train_idx_value]["_SOURCE_ROW_ID"]
+                .to_numpy(dtype=np.int64)
+            )
+            source_ids_hold_value = (
+                df_full_value.iloc[hold_idx_value]["_SOURCE_ROW_ID"]
+                .to_numpy(dtype=np.int64)
+            )
+            source_ids_full_value = (
+                df_full_value["_SOURCE_ROW_ID"]
+                .to_numpy(dtype=np.int64)
+            )
         y_train_value_cls = None
         y_hold_value_cls = None
         if y_full_value_cls is not None and train_idx_value is not None:
@@ -13344,7 +13469,51 @@ def train_sharp_model_from_bq(
         p_train_vec = np.asarray(np.clip(p_train_vec, CLIP, 1.0 - CLIP), float)
         p_hold_vec  = np.asarray(np.clip(p_hold_vec,  CLIP, 1.0 - CLIP), float)
         p_full_vec  = np.asarray(np.clip(p_full_vec,  CLIP, 1.0 - CLIP), float)
+        # Preserve specialist-native predictions for specialist metrics.
+        p_situation_train_native = (
+            None if p_situation_train_vec is None
+            else np.asarray(p_situation_train_vec, dtype=np.float64).copy()
+        )
         
+        p_situation_hold_native = (
+            None if p_situation_hold_vec is None
+            else np.asarray(p_situation_hold_vec, dtype=np.float64).copy()
+        )
+        
+        p_situation_full_native = (
+            None if p_situation_full_vec is None
+            else np.asarray(p_situation_full_vec, dtype=np.float64).copy()
+        )
+        
+        p_value_train_native = (
+            None if p_value_train_vec is None
+            else np.asarray(p_value_train_vec, dtype=np.float64).copy()
+        )
+        
+        p_value_hold_native = (
+            None if p_value_hold_vec is None
+            else np.asarray(p_value_hold_vec, dtype=np.float64).copy()
+        )
+        
+        p_value_full_native = (
+            None if p_value_full_vec is None
+            else np.asarray(p_value_full_vec, dtype=np.float64).copy()
+        )
+        
+        pred_value_reg_train_native = (
+            None if pred_value_reg_train is None
+            else np.asarray(pred_value_reg_train, dtype=np.float64).copy()
+        )
+        
+        pred_value_reg_hold_native = (
+            None if pred_value_reg_hold is None
+            else np.asarray(pred_value_reg_hold, dtype=np.float64).copy()
+        )
+        
+        pred_value_reg_full_native = (
+            None if pred_value_reg_full is None
+            else np.asarray(pred_value_reg_full, dtype=np.float64).copy()
+        )
         
         # ----------------------------
         # 6D) META-COMBINER
@@ -13381,53 +13550,150 @@ def train_sharp_model_from_bq(
             return arr
         
         
-        def _align_optional_vec(name, x, n, default=0.5):
+        def _map_specialist_vec_to_meta(
+            *,
+            name: str,
+            values,
+            value_source_ids,
+            meta_source_ids,
+            default: float,
+        ) -> np.ndarray:
             """
-            For support heads only: situation/value heads may be trained on valid-label subsets.
-            If shorter, fill missing rows with neutral default.
+            Map specialist-head predictions onto the outcome/meta row universe
+            using the permanent _SOURCE_ROW_ID.
+        
+            Rows that do not have a valid specialist label receive the neutral default.
             """
-            if x is None:
-                return np.full(n, default, dtype=np.float64)
+            meta_ids = np.asarray(meta_source_ids, dtype=np.int64).reshape(-1)
         
-            arr = np.asarray(x, dtype=np.float64).reshape(-1)
+            if values is None or value_source_ids is None:
+                return np.full(len(meta_ids), default, dtype=np.float64)
         
-            if arr.shape[0] == n:
-                return arr
+            arr = np.asarray(values, dtype=np.float64).reshape(-1)
+            src_ids = np.asarray(value_source_ids, dtype=np.int64).reshape(-1)
         
-            if arr.shape[0] < n:
-                out = np.full(n, default, dtype=np.float64)
-                out[:arr.shape[0]] = arr
-        
-                st.warning(
-                    f"{name} shorter than meta frame: got {arr.shape[0]}, expected {n}. "
-                    f"Filled {n - arr.shape[0]} rows with {default}."
+            if len(arr) != len(src_ids):
+                raise ValueError(
+                    f"{name}: prediction/source-ID mismatch: "
+                    f"predictions={len(arr)}, source_ids={len(src_ids)}"
                 )
-                return out
         
-            raise ValueError(
-                f"{name} longer than meta frame: got {arr.shape[0]}, expected {n}. "
-                f"Cannot safely align."
+            if pd.Index(src_ids).duplicated().any():
+                duplicate_count = int(pd.Index(src_ids).duplicated().sum())
+                raise ValueError(
+                    f"{name}: specialist source IDs contain "
+                    f"{duplicate_count} duplicate rows."
+                )
+        
+            prediction_map = pd.Series(arr, index=src_ids)
+        
+            mapped = pd.Series(meta_ids).map(prediction_map)
+        
+            missing = int(mapped.isna().sum())
+            if missing:
+                st.info(
+                    f"{name}: {missing}/{len(meta_ids)} meta rows did not have a "
+                    f"valid specialist target; filled with neutral default {default}."
+                )
+        
+            return (
+                mapped.fillna(default)
+                .to_numpy(dtype=np.float64)
             )
         # Outcome head
         p_train_vec = _ensure_vec("p_train_vec", p_train_vec, n_train, default=0.5)
         p_hold_vec  = _ensure_vec("p_hold_vec",  p_hold_vec,  n_hold,  default=0.5)
         p_full_vec  = _ensure_vec("p_full_vec",  p_full_vec,  n_full,  default=0.5)
         
-        # Situation head
-        # Situation head — optional support head
-        p_situation_train_vec = _align_optional_vec("p_situation_train_vec", p_situation_train_vec, n_train, default=0.5)
-        p_situation_hold_vec  = _align_optional_vec("p_situation_hold_vec",  p_situation_hold_vec,  n_hold,  default=0.5)
-        p_situation_full_vec  = _align_optional_vec("p_situation_full_vec",  p_situation_full_vec,  n_full,  default=0.5)
+        # Meta/outcome IDs
+        meta_train_ids = train_meta_df["_SOURCE_ROW_ID"].to_numpy(dtype=np.int64)
+        meta_hold_ids  = hold_meta_df["_SOURCE_ROW_ID"].to_numpy(dtype=np.int64)
+        meta_full_ids  = full_meta_df["_SOURCE_ROW_ID"].to_numpy(dtype=np.int64)
+
+        # Map the actual value-regression hold target onto the meta hold rows.
+        # Missing value labels remain NaN and are excluded from utility metrics.
+        value_reg_hold_for_meta = _map_specialist_vec_to_meta(
+            name="y_hold_value_reg_for_meta",
+            values=y_hold_value_reg,
+            value_source_ids=source_ids_hold_value,
+            meta_source_ids=meta_hold_ids,
+            default=np.nan,
+        )
         
-        # Value classification head — optional support head
-        p_value_train_vec = _align_optional_vec("p_value_train_vec", p_value_train_vec, n_train, default=0.5)
-        p_value_hold_vec  = _align_optional_vec("p_value_hold_vec",  p_value_hold_vec,  n_hold,  default=0.5)
-        p_value_full_vec  = _align_optional_vec("p_value_full_vec",  p_value_full_vec,  n_full,  default=0.5)
+        # Situation classification head
+        p_situation_train_vec = _map_specialist_vec_to_meta(
+            name="p_situation_train_vec",
+            values=p_situation_train_vec,
+            value_source_ids=source_ids_train_situation,
+            meta_source_ids=meta_train_ids,
+            default=0.5,
+        )
         
-        # Value regression head — optional support head
-        pred_value_reg_train = _align_optional_vec("pred_value_reg_train", pred_value_reg_train, n_train, default=0.0)
-        pred_value_reg_hold  = _align_optional_vec("pred_value_reg_hold",  pred_value_reg_hold,  n_hold,  default=0.0)
-        pred_value_reg_full  = _align_optional_vec("pred_value_reg_full",  pred_value_reg_full,  n_full,  default=0.0)
+        p_situation_hold_vec = _map_specialist_vec_to_meta(
+            name="p_situation_hold_vec",
+            values=p_situation_hold_vec,
+            value_source_ids=source_ids_hold_situation,
+            meta_source_ids=meta_hold_ids,
+            default=0.5,
+        )
+        
+        p_situation_full_vec = _map_specialist_vec_to_meta(
+            name="p_situation_full_vec",
+            values=p_situation_full_vec,
+            value_source_ids=source_ids_full_situation,
+            meta_source_ids=meta_full_ids,
+            default=0.5,
+        )
+        
+        # Value classification head
+        p_value_train_vec = _map_specialist_vec_to_meta(
+            name="p_value_train_vec",
+            values=p_value_train_vec,
+            value_source_ids=source_ids_train_value,
+            meta_source_ids=meta_train_ids,
+            default=0.5,
+        )
+        
+        p_value_hold_vec = _map_specialist_vec_to_meta(
+            name="p_value_hold_vec",
+            values=p_value_hold_vec,
+            value_source_ids=source_ids_hold_value,
+            meta_source_ids=meta_hold_ids,
+            default=0.5,
+        )
+        
+        p_value_full_vec = _map_specialist_vec_to_meta(
+            name="p_value_full_vec",
+            values=p_value_full_vec,
+            value_source_ids=source_ids_full_value,
+            meta_source_ids=meta_full_ids,
+            default=0.5,
+        )
+        
+        # Value regression head
+        pred_value_reg_train = _map_specialist_vec_to_meta(
+            name="pred_value_reg_train",
+            values=pred_value_reg_train,
+            value_source_ids=source_ids_train_value,
+            meta_source_ids=meta_train_ids,
+            default=0.0,
+        )
+        
+        pred_value_reg_hold = _map_specialist_vec_to_meta(
+            name="pred_value_reg_hold",
+            values=pred_value_reg_hold,
+            value_source_ids=source_ids_hold_value,
+            meta_source_ids=meta_hold_ids,
+            default=0.0,
+        )
+        
+        pred_value_reg_full = _map_specialist_vec_to_meta(
+            name="pred_value_reg_full",
+            values=pred_value_reg_full,
+            value_source_ids=source_ids_full_value,
+            meta_source_ids=meta_full_ids,
+            default=0.0,
+        )
         
         # Re-align targets to the same meta rows
         y_train = np.asarray(y_train).astype(int)
@@ -13812,48 +14078,95 @@ def train_sharp_model_from_bq(
         brier_hold_f    = _to_float(brier_hold)
         auc_gap_f       = _to_float(auc_train_f - auc_hold_f)
         
-        # Situation head metrics
+        # Situation-head metric: use native situation predictions,
+        # not the version remapped to the outcome/meta rows.
         auc_situation_hold_f = np.nan
-        if y_hold_situation is not None and p_situation_hold_vec is not None:
-            auc_situation_hold = auc_safe(np.asarray(y_hold_situation).astype(int), np.asarray(p_situation_hold_vec))
-            auc_situation_hold_f = _to_float(auc_situation_hold)
-        
-        # Value head metrics
+        if (
+            y_hold_situation is not None
+            and p_situation_hold_native is not None
+        ):
+            ys = np.asarray(y_hold_situation, dtype=int).reshape(-1)
+            ps = np.asarray(
+                p_situation_hold_native,
+                dtype=np.float64,
+            ).reshape(-1)
+
+            if len(ys) != len(ps):
+                raise ValueError(
+                    "Situation-head hold metric mismatch: "
+                    f"target={len(ys)}, prediction={len(ps)}"
+                )
+
+            auc_situation_hold_f = _to_float(
+                auc_safe(ys, ps)
+            )
+
+        # Value-classification metric: use native value predictions.
         auc_value_hold_f = np.nan
-        if y_hold_value_cls is not None and p_value_hold_vec is not None:
-            auc_value_hold = auc_safe(np.asarray(y_hold_value_cls).astype(int), np.asarray(p_value_hold_vec))
-            auc_value_hold_f = _to_float(auc_value_hold)
-        
+        if (
+            y_hold_value_cls is not None
+            and p_value_hold_native is not None
+        ):
+            yv_cls = np.asarray(
+                y_hold_value_cls,
+                dtype=int,
+            ).reshape(-1)
+            pv_cls = np.asarray(
+                p_value_hold_native,
+                dtype=np.float64,
+            ).reshape(-1)
+
+            if len(yv_cls) != len(pv_cls):
+                raise ValueError(
+                    "Value-head hold metric mismatch: "
+                    f"target={len(yv_cls)}, prediction={len(pv_cls)}"
+                )
+
+            auc_value_hold_f = _to_float(
+                auc_safe(yv_cls, pv_cls)
+            )
+
+        # Value-regression metrics: use native value predictions.
         rmse_value_hold = np.nan
-        mae_value_hold  = np.nan
-        
-        if y_hold_value_reg is not None and pred_value_reg_hold is not None:
-            yv = np.asarray(y_hold_value_reg, dtype=float).reshape(-1)
-            pv = np.asarray(pred_value_reg_hold, dtype=float).reshape(-1)
-        
-            n_val = min(len(yv), len(pv))
-        
-            if n_val > 0:
-                if len(yv) != len(pv):
-                    st.warning({
-                        "value_reg_hold_metric_alignment": {
-                            "y_hold_value_reg": int(len(yv)),
-                            "pred_value_reg_hold": int(len(pv)),
-                            "using_first_n": int(n_val),
-                        }
-                    })
-        
-                yv = yv[:n_val]
-                pv = pv[:n_val]
-        
-                mask = np.isfinite(yv) & np.isfinite(pv)
-                if mask.sum() >= 2:
-                    rmse_value_hold = _to_float(
-                        np.sqrt(mean_squared_error(yv[mask], pv[mask]))
+        mae_value_hold = np.nan
+
+        if (
+            y_hold_value_reg is not None
+            and pred_value_reg_hold_native is not None
+        ):
+            yv = np.asarray(
+                y_hold_value_reg,
+                dtype=np.float64,
+            ).reshape(-1)
+            pv = np.asarray(
+                pred_value_reg_hold_native,
+                dtype=np.float64,
+            ).reshape(-1)
+
+            if len(yv) != len(pv):
+                raise ValueError(
+                    "Value regression hold metric mismatch: "
+                    f"target={len(yv)}, prediction={len(pv)}"
+                )
+
+            valid_metric = np.isfinite(yv) & np.isfinite(pv)
+
+            if valid_metric.sum() >= 2:
+                rmse_value_hold = _to_float(
+                    np.sqrt(
+                        mean_squared_error(
+                            yv[valid_metric],
+                            pv[valid_metric],
+                        )
                     )
-                    mae_value_hold = _to_float(
-                        mean_absolute_error(yv[mask], pv[mask])
+                )
+                mae_value_hold = _to_float(
+                    mean_absolute_error(
+                        yv[valid_metric],
+                        pv[valid_metric],
                     )
+                )
+
         # Meta metrics (meta predicts OUTCOME probability)
         auc_meta_hold_f = _to_float(auc_safe(y_hold_vec, final_bet_score_hold))
         acc_meta_hold_f = _to_float(
@@ -13867,40 +14180,44 @@ def train_sharp_model_from_bq(
             brier_score_loss(y_hold_vec, np.clip(final_bet_score_hold, 1e-6, 1 - 1e-6))
         )
         
-        # Utility diagnostic
+        # Utility diagnostic: compare values and meta scores only after
+        # the value target has been mapped onto the meta hold rows.
         meta_top_decile_mean_util = np.nan
-        
-        if y_hold_value_reg is not None and final_bet_score_hold is not None:
-            yhvr = np.asarray(y_hold_value_reg, dtype=float).reshape(-1)
-            fbs  = np.asarray(final_bet_score_hold, dtype=float).reshape(-1)
-        
-            n_util = min(len(yhvr), len(fbs))
-        
-            if n_util > 0:
-                if len(yhvr) != len(fbs):
-                    st.warning({
-                        "meta_top_decile_util_alignment": {
-                            "y_hold_value_reg": int(len(yhvr)),
-                            "final_bet_score_hold": int(len(fbs)),
-                            "using_first_n": int(n_util),
-                        }
-                    })
-        
-                yhvr = yhvr[:n_util]
-                fbs  = fbs[:n_util]
-        
-                valid = np.isfinite(yhvr) & np.isfinite(fbs)
-        
-                if valid.sum() >= 10:
-                    yhvr_valid = yhvr[valid]
-                    fbs_valid  = fbs[valid]
-        
-                    q90 = np.nanquantile(fbs_valid, 0.90)
-                    mask_top = fbs_valid >= q90
-        
-                    if mask_top.any():
-                        meta_top_decile_mean_util = _to_float(np.mean(yhvr_valid[mask_top]))
-        
+
+        if (
+            value_reg_hold_for_meta is not None
+            and final_bet_score_hold is not None
+        ):
+            yhvr = np.asarray(
+                value_reg_hold_for_meta,
+                dtype=np.float64,
+            ).reshape(-1)
+            fbs = np.asarray(
+                final_bet_score_hold,
+                dtype=np.float64,
+            ).reshape(-1)
+
+            if len(yhvr) != len(fbs):
+                raise ValueError(
+                    "Meta utility alignment mismatch: "
+                    f"value_target={len(yhvr)}, "
+                    f"meta_score={len(fbs)}"
+                )
+
+            valid = np.isfinite(yhvr) & np.isfinite(fbs)
+
+            if valid.sum() >= 10:
+                yhvr_valid = yhvr[valid]
+                fbs_valid = fbs[valid]
+
+                q90 = np.nanquantile(fbs_valid, 0.90)
+                mask_top = fbs_valid >= q90
+
+                if mask_top.any():
+                    meta_top_decile_mean_util = _to_float(
+                        np.mean(yhvr_valid[mask_top])
+                    )
+
         artifact_metrics = None
         artifact_config  = None
         if return_artifacts:
@@ -14083,8 +14400,6 @@ def train_sharp_model_from_bq(
         if not trained_models:
             st.error("❌ No models were trained.")
         return trained_models
-
-
 
 def evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, model_label="Base"):
     model = xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1)
