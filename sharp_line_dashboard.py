@@ -8921,13 +8921,13 @@ def train_sharp_model_from_bq(
     *,
     sport: str = "NBA",
     market: str,
-    days_back: int = 35,
+    days_back: int = 900,
     log_func=print,
     bucket_name: str,
     return_artifacts: bool = False,
     **kwargs: Any,
 ) -> Optional[Dict[str, Any]]:
-    SPORT_DAYS_BACK = {"NBA": 365, "NFL": 365, "CFL": 45, "WNBA": 45, "MLB": 700, "NCAAF": 365, "NCAAB": 365}
+    SPORT_DAYS_BACK = {"NBA": 900, "NFL": 900, "CFL": 900, "WNBA": 900, "MLB": 700, "NCAAF": 900, "NCAAB": 900}
     days_back = SPORT_DAYS_BACK.get(sport.upper(), days_back)
 
     st.info(f"🎯 Training sharp model for {sport.upper()} with {days_back} days of historical data...")
