@@ -403,7 +403,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-01-v3"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-01-v4-football-keys"
 
 # Operational screens used only where the published Pathi wording is qualitative
 # rather than an exact numerical threshold. The corresponding feature names end
@@ -498,6 +498,175 @@ def _sys_pick_market_rows(df: pd.DataFrame, market: str) -> pd.DataFrame:
     d = d.drop_duplicates(["Game_Key", "Outcome_Norm"], keep="first")
     return d.drop(columns=["__sharp"], errors="ignore")
 
+
+
+# Narrow source contract for the Pathi/Big Al state engine.  The training view is
+# snapshot/book grained and can be very wide; carrying the whole frame into the
+# state builder can add many GiB.  Keep only fields the deterministic rules use.
+_PATHI_BIGAL_SYSTEM_SOURCE_COLS = [
+    "Sport", "Market", "Outcome", "Outcome_Norm", "Bookmaker", "Book",
+    "Value", "Odds_Price", "First_Odds", "First_Odds_Price", "Open_Odds", "Old_Odds",
+    "First_Line_Value", "Opening_Line", "Open_Value",
+    "Snapshot_Timestamp", "Game_Start", "feat_Game_Start", "Commence_Hour",
+    "Merge_Key_Short", "Game_Key", "Home_Team_Norm", "Away_Team_Norm", "Home_Team", "Away_Team",
+    "SHARP_HIT_BOOL", "ATS_Cover_Margin",
+    "Season", "Week", "Week_Number", "Game_Week", "Season_Type", "Game_Type",
+    "Is_Preseason", "Is_Postseason", "Is_Playoffs", "Is_Regular_Season", "Is_Finals",
+    "Is_Conference_Game", "Home_Conference", "Away_Conference",
+    "Home_Is_Defending_Champion", "Away_Is_Defending_Champion",
+    "Home_Prior_Season_Playoff", "Away_Prior_Season_Playoff",
+    "Home_Is_Final_Home_Game", "Away_Is_Final_Home_Game", "Is_Final_Home_Game",
+    "Home_Eliminated_With_Loss", "Away_Eliminated_With_Loss",
+    "Home_Would_Be_Eliminated_With_Loss", "Away_Would_Be_Eliminated_With_Loss",
+    "Series_Game_Number", "Home_Series_Wins", "Away_Series_Wins", "Revenge_Flag",
+]
+
+
+def prepare_pathi_bigal_training_source_lowmem(
+    df_rows: pd.DataFrame,
+    df_results: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Build a narrow one-row-per-game/market/outcome state source for training.
+
+    Important:
+      * Uses Merge_Key_Short as the physical Game_Key for system history.
+      * Prefers feat_Game_Start on view-backed training data.
+      * Reduces snapshot/book history BEFORE the expensive team-state expansion.
+      * Adds final scores by indexed maps rather than merging wide frames.
+    """
+    if df_rows is None or df_rows.empty:
+        return pd.DataFrame()
+
+    keep = [c for c in _PATHI_BIGAL_SYSTEM_SOURCE_COLS if c in df_rows.columns]
+    src = df_rows.loc[:, keep].copy()
+
+    # View tables use feat_Game_Start as the canonical event timestamp.
+    if "feat_Game_Start" in src.columns:
+        src["Game_Start"] = pd.to_datetime(src["feat_Game_Start"], errors="coerce", utc=True)
+    elif "Game_Start" in src.columns:
+        src["Game_Start"] = pd.to_datetime(src["Game_Start"], errors="coerce", utc=True)
+    elif "Commence_Hour" in src.columns:
+        src["Game_Start"] = pd.to_datetime(src["Commence_Hour"], errors="coerce", utc=True)
+    else:
+        src["Game_Start"] = pd.NaT
+
+    if "Snapshot_Timestamp" in src.columns:
+        src["Snapshot_Timestamp"] = pd.to_datetime(src["Snapshot_Timestamp"], errors="coerce", utc=True)
+
+    # Normalize the physical-game key.  Never use the market/outcome Game_Key for
+    # historical streaks/rematches because it fragments one game into many rows.
+    if "Merge_Key_Short" in src.columns:
+        src["Merge_Key_Short"] = src["Merge_Key_Short"].astype("string").str.lower().str.strip()
+    else:
+        src["Merge_Key_Short"] = pd.Series(pd.NA, index=src.index, dtype="string")
+
+    if {"Home_Team_Norm", "Away_Team_Norm"}.issubset(src.columns):
+        h = src["Home_Team_Norm"].astype("string").str.lower().str.strip()
+        a = src["Away_Team_Norm"].astype("string").str.lower().str.strip()
+        hour = src["Game_Start"].dt.floor("h").dt.strftime("%Y-%m-%dT%H:00Z")
+        fallback = h.where(h <= a, a).fillna("") + "_" + a.where(h <= a, h).fillna("") + "_" + hour.fillna("")
+        bad = src["Merge_Key_Short"].isna() | src["Merge_Key_Short"].isin(["", "nan", "none", "<na>"])
+        src.loc[bad, "Merge_Key_Short"] = fallback.loc[bad]
+
+    src = src[src["Merge_Key_Short"].notna()].copy()
+    src["Game_Key"] = src["Merge_Key_Short"].astype("string").str.lower().str.strip()
+    src["Sport"] = src.get("Sport", "").astype("string").str.upper().str.strip()
+    src["Market"] = src.get("Market", "").astype("string").map(_sys_norm_market)
+    src["Outcome"] = src.get("Outcome", "").astype("string").str.lower().str.strip()
+    src["Bookmaker"] = src.get("Bookmaker", src.get("Book", "")).astype("string").str.lower().str.strip()
+
+    # Pick one representative market row before the state builder.  This converts
+    # potentially millions of snapshot/book rows into roughly 6 rows per game.
+    src["__sharp"] = src["Bookmaker"].isin(set(SHARP_BOOKS)).astype("int8")
+    sort_cols = ["Game_Key", "Market", "Outcome", "__sharp"]
+    ascending = [True, True, True, False]
+    if "Snapshot_Timestamp" in src.columns:
+        sort_cols.append("Snapshot_Timestamp")
+        ascending.append(False)
+    src.sort_values(sort_cols, ascending=ascending, inplace=True, kind="mergesort")
+    src.drop_duplicates(["Game_Key", "Market", "Outcome"], keep="first", inplace=True)
+    src.drop(columns=["__sharp"], inplace=True, errors="ignore")
+
+    # Score enrichment by maps avoids a wide DataFrame merge and another large
+    # temporary allocation. game_scores_final legitimately uses Game_Start.
+    if df_results is not None and not df_results.empty and "Merge_Key_Short" in df_results.columns:
+        rcols = [c for c in ["Merge_Key_Short", "Score_Home_Score", "Score_Away_Score"] if c in df_results.columns]
+        if len(rcols) >= 2:
+            rs = df_results.loc[:, rcols].copy()
+            rs["Merge_Key_Short"] = rs["Merge_Key_Short"].astype("string").str.lower().str.strip()
+            rs.drop_duplicates("Merge_Key_Short", keep="last", inplace=True)
+            rs.set_index("Merge_Key_Short", inplace=True)
+            keys = src["Merge_Key_Short"]
+            for c in ("Score_Home_Score", "Score_Away_Score"):
+                if c in rs.columns:
+                    mapped = pd.to_numeric(keys.map(rs[c]), errors="coerce")
+                    if c in src.columns:
+                        src[c] = pd.to_numeric(src[c], errors="coerce").combine_first(mapped)
+                    else:
+                        src[c] = mapped
+            del rs
+
+    # Downcast state-source numerics immediately.  Team-state calculations can
+    # upcast locally where necessary, but the retained source stays compact.
+    for c in src.select_dtypes(include=["float64"]).columns:
+        src[c] = pd.to_numeric(src[c], errors="coerce", downcast="float")
+    for c in src.select_dtypes(include=["int64"]).columns:
+        src[c] = pd.to_numeric(src[c], errors="coerce", downcast="integer")
+
+    return src.reset_index(drop=True)
+
+
+def attach_pathi_bigal_training_features_lowmem(
+    df_rows: pd.DataFrame,
+    state: pd.DataFrame,
+) -> pd.DataFrame:
+    """Attach only model-eligible system columns using the physical-game key.
+
+    The training view's Game_Key is market/outcome-specific, while the state engine
+    is intentionally keyed by Merge_Key_Short.  Temporarily physicalize Game_Key,
+    attach, restore the original line key, and discard non-model state payload.
+    """
+    if df_rows is None or df_rows.empty:
+        return df_rows
+    if state is None or state.empty:
+        return add_pathi_football_key_features(df_rows)
+    if "Merge_Key_Short" not in df_rows.columns:
+        return attach_pathi_bigal_features_to_market_rows(df_rows, state)
+
+    original_cols = set(df_rows.columns)
+    df_rows["__Training_Line_Game_Key"] = df_rows["Game_Key"].astype("string")
+    df_rows["Game_Key"] = df_rows["Merge_Key_Short"].astype("string").str.lower().str.strip()
+
+    enriched = attach_pathi_bigal_features_to_market_rows(df_rows, state)
+    if "__Training_Line_Game_Key" in enriched.columns:
+        enriched["Game_Key"] = enriched["__Training_Line_Game_Key"].astype("string")
+        enriched.drop(columns=["__Training_Line_Game_Key"], inplace=True, errors="ignore")
+
+    # Training only needs auditable numeric system features.  Discard human text
+    # and state-helper payload that would otherwise be repeated on every book row.
+    added = [c for c in enriched.columns if c not in original_cols]
+    keep_added = {
+        c for c in added
+        if (str(c).startswith(("Pathi_", "BigAl_", "System_")) and c != "System_Signals_Text")
+    }
+    drop_added = [c for c in added if c not in keep_added and c not in {"Game_Key"}]
+    if drop_added:
+        enriched.drop(columns=drop_added, inplace=True, errors="ignore")
+    enriched.drop(columns=["System_Signals_Text", "Team"], inplace=True, errors="ignore")
+
+    # Compact deterministic features immediately.
+    for c in keep_added:
+        if c not in enriched.columns:
+            continue
+        if pd.api.types.is_float_dtype(enriched[c]):
+            enriched[c] = pd.to_numeric(enriched[c], errors="coerce").astype("float32")
+        elif pd.api.types.is_integer_dtype(enriched[c]) or pd.api.types.is_bool_dtype(enriched[c]):
+            vals = pd.to_numeric(enriched[c], errors="coerce")
+            if vals.dropna().isin([0, 1]).all():
+                enriched[c] = vals.fillna(0).astype("int8")
+            else:
+                enriched[c] = vals.fillna(0).astype("int16")
+    return enriched
 
 def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     """
@@ -784,6 +953,46 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     tg["ATS_Win_Streak_Prior"] = _sys_consecutive_prior(tg, "ATS_Win", grp)
     tg["ATS_Loss_Streak_Prior"] = _sys_consecutive_prior(tg, "ATS_Loss", grp)
 
+    # Pathi football role/trend state. These are prior-only and leakage-safe.
+    _sv = pd.to_numeric(tg.get("Spread_Value"), errors="coerce")
+    tg["__fb_spread_dog"] = np.where(_sv.notna(), (_sv > 0).astype(float), np.nan)
+    tg["__fb_spread_fav"] = np.where(_sv.notna(), (_sv < 0).astype(float), np.nan)
+
+    def _prior_cond_rate(mask: pd.Series, window: int | None = None) -> pd.Series:
+        tmp = pd.to_numeric(tg["ATS_Win"], errors="coerce").where(mask)
+        if window is None:
+            return tmp.groupby([tg[c] for c in grp], sort=False).transform(
+                lambda s: s.shift(1).expanding(min_periods=1).mean()
+            )
+        return tmp.groupby([tg[c] for c in grp], sort=False).transform(
+            lambda s: s.shift(1).rolling(window, min_periods=1).mean()
+        )
+
+    _dog = pd.Series(tg["__fb_spread_dog"], index=tg.index).eq(1)
+    _fav = pd.Series(tg["__fb_spread_fav"], index=tg.index).eq(1)
+    _home = pd.to_numeric(tg["Is_Home"], errors="coerce").eq(1)
+    _road = pd.to_numeric(tg["Is_Home"], errors="coerce").eq(0)
+
+    tg["Pathi_FB_Team_ATS_As_Dog"] = _prior_cond_rate(_dog)
+    tg["Pathi_FB_Team_ATS_As_Favorite"] = _prior_cond_rate(_fav)
+    tg["Pathi_FB_Team_ATS_Home_Dog"] = _prior_cond_rate(_dog & _home)
+    tg["Pathi_FB_Team_ATS_Road_Dog"] = _prior_cond_rate(_dog & _road)
+    tg["Pathi_FB_Team_ATS_Home_Favorite"] = _prior_cond_rate(_fav & _home)
+    tg["Pathi_FB_Team_ATS_Road_Favorite"] = _prior_cond_rate(_fav & _road)
+
+    _dog5, _fav5 = _prior_cond_rate(_dog, 5), _prior_cond_rate(_fav, 5)
+    _dog10, _fav10 = _prior_cond_rate(_dog, 10), _prior_cond_rate(_fav, 10)
+    tg["Pathi_FB_Team_Role_ATS_Last5"] = np.where(_dog, _dog5, np.where(_fav, _fav5, np.nan))
+    tg["Pathi_FB_Team_Role_ATS_Last10"] = np.where(_dog, _dog10, np.where(_fav, _fav10, np.nan))
+    tg["Pathi_FB_Team_Role_ATS_Season"] = np.where(
+        _dog, tg["Pathi_FB_Team_ATS_As_Dog"],
+        np.where(_fav, tg["Pathi_FB_Team_ATS_As_Favorite"], np.nan)
+    )
+    tg["Pathi_FB_RoleTrend_DataReady"] = (
+        tg["Sport"].astype(str).str.upper().isin(["NFL", "NCAAF"]) &
+        _sv.notna() & pd.to_numeric(tg["Pathi_FB_Team_Role_ATS_Season"], errors="coerce").notna()
+    ).astype("int8")
+
     # Previous-game fields.
     prev_base = [
         "Opponent", "SU_Win", "SU_Loss", "SU_Margin", "Points_For", "Points_Against",
@@ -812,6 +1021,12 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         )
 
     tg["Dog_Rate_Last10_Prior"] = _prior_roll_mean("Is_ML_Dog", 10)
+    _dog_rate = pd.to_numeric(tg["Dog_Rate_Last10_Prior"], errors="coerce")
+    _cur_spread = pd.to_numeric(tg.get("Spread_Value"), errors="coerce")
+    # "Usually" threshold is our engineering definition (70% of last 10 roles), not a Pathi quote.
+    tg["Pathi_FB_Usually_Dog_Now_Favorite"] = ((_dog_rate >= 0.70) & (_cur_spread < 0)).astype("int8")
+    tg["Pathi_FB_Usually_Favorite_Now_Dog"] = ((_dog_rate <= 0.30) & (_cur_spread > 0)).astype("int8")
+    tg["Pathi_FB_Dog_Rate_Last10_Prior"] = _dog_rate.astype("float32")
     tg["Avg_Points_For_Prior"] = tg.groupby(grp, sort=False)["Points_For"].transform(
         lambda s: pd.to_numeric(s, errors="coerce").shift(1).expanding(min_periods=1).mean()
     )
@@ -869,6 +1084,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         "Prev_Is_ML_Dog", "Prev_Is_ML_Favorite", "Prev_Is_Road_Favorite", "Prev_Is_Road_Dog_9Plus",
         "Prev_Opponent_Is_Defending_Champion", "Dog_Rate_Last10_Prior", "Avg_Points_For_Prior",
         "Road_Favorite_ROI_Prior", "Team_Game_Number", "Revenge_Flag_Current",
+        "Pathi_FB_Team_Role_ATS_Last5", "Pathi_FB_Team_Role_ATS_Last10", "Pathi_FB_Team_Role_ATS_Season",
         "Team_Is_Defending_Champion", "Team_Prior_Season_Playoff", "Is_Final_Home_Game",
         "Team_Eliminated_With_Loss", "Team_Series_Wins", "Opp_Series_Wins",
     ]
@@ -876,6 +1092,13 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     opp = tg[["Sport", "Game_Key", "Team"] + mirror_cols].copy()
     opp = opp.rename(columns={"Team": "Opponent", **{c: f"Opp_{c}" for c in mirror_cols}})
     tg = tg.merge(opp, on=["Sport", "Game_Key", "Opponent"], how="left", validate="1:1")
+
+    # Pathi football opponent role trends + regime aliases.
+    for _n in ("Last5", "Last10", "Season"):
+        _src = f"Opp_Pathi_FB_Team_Role_ATS_{_n}"
+        tg[f"Pathi_FB_Opp_Role_ATS_{_n}"] = pd.to_numeric(tg.get(_src), errors="coerce")
+    tg["Pathi_FB_Is_Postseason"] = pd.to_numeric(tg.get("Is_Postseason"), errors="coerce").fillna(0).astype("int8")
+    tg["Pathi_FB_Is_Regular_Season"] = pd.to_numeric(tg.get("Is_Regular_Season"), errors="coerce").fillna(0).astype("int8")
 
     # Standard current aliases used by the rule engine.
     tg["Is_Road"] = (tg["Is_Home"] == 0).astype("int8")
@@ -885,6 +1108,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         pd.to_numeric(tg["Is_ML_Favorite"], errors="coerce").eq(1)
     ).astype("int8")
 
+    tg.drop(columns=["__fb_spread_dog", "__fb_spread_fav"], inplace=True, errors="ignore")
     tg = add_pathi_bigal_rule_flags(tg)
     return tg
 
@@ -1222,8 +1446,10 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
 
 def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.DataFrame) -> pd.DataFrame:
     """Broadcast team/game Pathi-BigAl state to book/outcome rows without row growth."""
-    if df_rows is None or df_rows.empty or state is None or state.empty:
+    if df_rows is None or df_rows.empty:
         return df_rows.copy()
+    if state is None or state.empty:
+        return add_pathi_football_key_features(df_rows.copy())
     out = df_rows.copy()
     out["Sport"] = out.get("Sport", "").astype(str).str.upper().str.strip()
     out["Game_Key"] = out["Game_Key"].astype(str).str.lower().str.strip()
@@ -1351,6 +1577,7 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
                 vals.append(label)
         return " | ".join(vals) if vals else "—"
     out["System_Signals_Text"] = out.apply(_row_labels, axis=1)
+    out = add_pathi_football_key_features(out)
     return out
 
 
@@ -1368,33 +1595,222 @@ def pathi_bigal_numeric_feature_cols(df: pd.DataFrame) -> list[str]:
     return out
 
 
+def add_pathi_football_key_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Eric Pathi-style NFL/NCAAF football market-structure features.
+
+    These are deterministic engineering features based on Pathi's public emphasis
+    on line making, key numbers, price/value and football underdog roles. They do
+    not claim that Pathi published these exact formulas/weights.
+
+    Existing Crossed_Key_3/7 and Dist_to_3/7 names are intentionally overridden
+    for NFL/NCAAF spreads with sign-aware logic so favorite moves through -3/-7
+    are treated the same way as dog moves through +3/+7.
+    """
+    if df is None or df.empty:
+        return df.copy() if df is not None else df
+
+    out = df.copy()
+    idx = out.index
+
+    def _num_candidates(*names):
+        s = pd.Series(np.nan, index=idx, dtype="float64")
+        for name in names:
+            if name in out.columns:
+                s = s.combine_first(pd.to_numeric(out[name], errors="coerce"))
+        return s
+
+    sport = out.get("Sport", out.get("Sport_Norm", pd.Series("", index=idx))).astype(str).str.upper().str.strip()
+    market_raw = out.get("Market", out.get("Market_Norm", pd.Series("", index=idx))).astype(str).str.lower().str.strip()
+    market = market_raw.map(lambda x: _sys_norm_market(x) if '_sys_norm_market' in globals() else ({'spread':'spreads','total':'totals','ml':'h2h','moneyline':'h2h'}.get(x,x)))
+    cur = _num_candidates("Value", "Spread_Value")
+    opn = _num_candidates("Opening_Spread", "First_Line_Value", "Open_Value", "Opening_Line")
+
+    fb_spread = sport.isin(["NFL", "NCAAF"]) & market.eq("spreads") & cur.notna()
+    has_open = fb_spread & opn.notna()
+    abs_cur = cur.abs()
+    abs_opn = opn.abs()
+    is_dog = fb_spread & cur.gt(0)
+    is_fav = fb_spread & cur.lt(0)
+
+    # Existing + extended generic key columns.
+    for key in (3, 7, 10, 14):
+        cross_col = f"Crossed_Key_{key}"
+        dist_col = f"Dist_to_{key}"
+        if cross_col not in out.columns:
+            out[cross_col] = np.int8(0)
+        if dist_col not in out.columns:
+            out[dist_col] = np.nan
+
+        strict_cross = has_open & ((abs_opn - float(key)) * (abs_cur - float(key)) < 0)
+        touch_cross = has_open & (
+            (np.isclose(abs_opn, float(key), atol=1e-9) & ~np.isclose(abs_cur, float(key), atol=1e-9)) |
+            (np.isclose(abs_cur, float(key), atol=1e-9) & ~np.isclose(abs_opn, float(key), atol=1e-9))
+        )
+        out.loc[fb_spread, cross_col] = (strict_cross | touch_cross).loc[fb_spread].astype("int8")
+        out.loc[fb_spread, dist_col] = (abs_cur.loc[fb_spread] - float(key)).abs().astype("float32")
+
+        out[f"Pathi_FB_On_Key_{key}"] = (fb_spread & np.isclose(abs_cur, float(key), atol=1e-9)).astype("int8")
+
+    crossed_any = pd.Series(False, index=idx)
+    strict_any = pd.Series(False, index=idx)
+    onto_any = pd.Series(False, index=idx)
+    off_any = pd.Series(False, index=idx)
+    for key in (3.0, 7.0, 10.0, 14.0):
+        crossed_any |= has_open & (
+            ((abs_opn-key)*(abs_cur-key) < 0) |
+            (np.isclose(abs_opn,key,atol=1e-9) & ~np.isclose(abs_cur,key,atol=1e-9)) |
+            (np.isclose(abs_cur,key,atol=1e-9) & ~np.isclose(abs_opn,key,atol=1e-9))
+        )
+        strict_any |= has_open & ((abs_opn-key)*(abs_cur-key) < 0)
+        onto_any |= has_open & np.isclose(abs_cur,key,atol=1e-9) & ~np.isclose(abs_opn,key,atol=1e-9)
+        off_any |= has_open & np.isclose(abs_opn,key,atol=1e-9) & ~np.isclose(abs_cur,key,atol=1e-9)
+
+    # With the selected team's spread, lower number = market movement toward that team:
+    # favorite -3 -> -4 and dog +4 -> +3.
+    toward = has_open & cur.lt(opn)
+    away = has_open & cur.gt(opn)
+    out["Pathi_FB_Crossed_Key_Toward_Team"] = (crossed_any & toward).astype("int8")
+    out["Pathi_FB_Crossed_Key_Away_From_Team"] = (crossed_any & away).astype("int8")
+    out["Pathi_FB_Moved_Onto_Key"] = onto_any.astype("int8")
+    out["Pathi_FB_Moved_Off_Key"] = off_any.astype("int8")
+    out["Pathi_FB_Moved_Through_Key"] = strict_any.astype("int8")
+
+    # Hook / protected-number flags. Ranges intentionally allow quarter-point feeds.
+    for key in (3.0, 7.0, 10.0):
+        k = str(int(key))
+        out[f"Pathi_FB_Dog_Hook_Above_{k}"] = (is_dog & cur.gt(key) & cur.lt(key + 1.0)).astype("int8")
+        out[f"Pathi_FB_Favorite_Below_Key_{k}"] = (is_fav & abs_cur.lt(key) & abs_cur.gt(key - 1.0)).astype("int8")
+    for key in (3.0, 7.0):
+        k = str(int(key))
+        out[f"Pathi_FB_Dog_Below_Key_{k}"] = (is_dog & cur.lt(key) & cur.gt(key - 1.0)).astype("int8")
+        out[f"Pathi_FB_Favorite_Laying_Hook_{k}"] = (is_fav & abs_cur.gt(key) & abs_cur.lt(key + 1.0)).astype("int8")
+
+    # Dog bands: explicit rather than assuming one unpublished Pathi cutoff.
+    out["Pathi_FB_Dog_0_to_3"] = (is_dog & cur.gt(0) & cur.lt(3.0)).astype("int8")
+    out["Pathi_FB_Dog_3_to_3_5"] = (is_dog & cur.ge(3.0) & cur.le(3.5)).astype("int8")
+    out["Pathi_FB_Dog_3_5_to_6_5"] = (is_dog & cur.gt(3.5) & cur.le(6.5)).astype("int8")
+    out["Pathi_FB_Dog_On_7"] = (is_dog & np.isclose(cur, 7.0, atol=1e-9)).astype("int8")
+    out["Pathi_FB_Dog_Above_7"] = (is_dog & cur.gt(7.0) & cur.lt(10.0)).astype("int8")
+    out["Pathi_FB_Dog_10_Plus"] = (is_dog & cur.ge(10.0)).astype("int8")
+
+    # Engineering score for the value of the CURRENT number around 3/7/10/14.
+    # Positive = favorable side of nearest key; negative = unfavorable side.
+    # 3 and 7 receive larger weights because they are materially more important in NFL pricing.
+    key_weights = np.asarray([4.0, 3.0, 1.5, 1.0], dtype=np.float32)
+    key_nums = np.asarray([3.0, 7.0, 10.0, 14.0], dtype=np.float32)
+    def _key_value(series):
+        vals = pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float32, copy=False)
+        ans = np.full(vals.shape, np.nan, dtype=np.float32)
+        finite = np.isfinite(vals)
+        if not finite.any():
+            return pd.Series(ans, index=idx, dtype="float32")
+        ax = np.abs(vals[finite])
+        dist = np.abs(ax[:, None] - key_nums[None, :])
+        nearest_i = np.argmin(dist, axis=1)
+        nearest = key_nums[nearest_i]
+        delta = ax - nearest
+        w = key_weights[nearest_i]
+        xv = vals[finite]
+        res = np.zeros_like(xv, dtype=np.float32)
+        near = np.abs(delta) <= 1.0
+        on = near & (np.abs(delta) < 1e-6)
+        dog = near & ~on & (xv > 0)
+        fav = near & ~on & (xv < 0)
+        res[on] = 0.25 * w[on]
+        res[dog] = np.where(delta[dog] > 0, w[dog], -w[dog])
+        res[fav] = np.where(delta[fav] < 0, w[fav], -w[fav])
+        ans[finite] = res
+        return pd.Series(ans, index=idx, dtype="float32")
+
+    cur_val = _key_value(cur).where(fb_spread)
+    open_val = _key_value(opn).where(has_open)
+    out["Pathi_FB_Current_Key_Value"] = cur_val.astype("float32")
+    out["Pathi_FB_Opening_Key_Value"] = open_val.astype("float32")
+    out["Pathi_FB_Key_Value_Score"] = out["Pathi_FB_Current_Key_Value"]
+    out["Pathi_FB_Key_Value_Change"] = (cur_val - open_val).astype("float32")
+    out["Pathi_FB_Key_Value_Lost_From_Open"] = (open_val - cur_val).clip(lower=0).astype("float32")
+    out["Pathi_FB_Key_DataReady"] = has_open.astype("int8")
+
+    # Regime interactions become available after team/game state is attached.
+    post = _num_candidates("Pathi_FB_Is_Postseason", "Is_Postseason", "Is_Playoffs").fillna(0).gt(0.5)
+    reg = _num_candidates("Pathi_FB_Is_Regular_Season", "Is_Regular_Season").fillna(0).gt(0.5)
+    out["Pathi_FB_Is_Postseason"] = (fb_spread & post).astype("int8")
+    out["Pathi_FB_Is_Regular_Season"] = (fb_spread & reg).astype("int8")
+    out["Pathi_FB_Key3_x_Postseason"] = (out["Pathi_FB_On_Key_3"].eq(1) & post & fb_spread).astype("int8")
+    out["Pathi_FB_Key7_x_Postseason"] = (out["Pathi_FB_On_Key_7"].eq(1) & post & fb_spread).astype("int8")
+    out["Pathi_FB_Dog_x_Postseason"] = (is_dog & post).astype("int8")
+    out["Pathi_FB_Favorite_x_Postseason"] = (is_fav & post).astype("int8")
+    out["Pathi_FB_LineMoveToward_x_Postseason"] = (toward & post).astype("int8")
+
+    # For non-football / non-spread rows these are structural non-signals, not missing calculations.
+    return out
+
+
+
 @st.cache_data(ttl=15 * 60, show_spinner=False)
 def fetch_pathi_bigal_history_for_live(sport: str, days_back: int = 1200) -> pd.DataFrame:
-    """Load completed market rows + final scores used to create current system state."""
+    """Load completed system history without assuming one timestamp column name."""
     sport_u = str(sport).upper().strip()
-    q = """
-        SELECT *
-        FROM `sharplogger.sharp_data.scores_with_features`
-        WHERE UPPER(Sport) = @sport
-          AND SHARP_HIT_BOOL IS NOT NULL
-          AND DATE(Game_Start) >= DATE_SUB(CURRENT_DATE(), INTERVAL @days_back DAY)
-    """
-    cfg = bigquery.QueryJobConfig(query_parameters=[
-        bigquery.ScalarQueryParameter("sport", "STRING", sport_u),
-        bigquery.ScalarQueryParameter("days_back", "INT64", int(days_back)),
-    ])
-    hist = bq_client.query(q, job_config=cfg).to_dataframe()
+
+    def _cols(table_fq: str) -> set[str]:
+        try:
+            return {f.name for f in bq_client.get_table(table_fq).schema}
+        except Exception:
+            return set()
+
+    hist = pd.DataFrame()
+    for table_fq in (
+        "sharplogger.sharp_data.scores_with_features",
+        "sharplogger.sharp_data.sharp_scores_full",
+    ):
+        cols = _cols(table_fq)
+        if not {"Sport", "Market", "Outcome"}.issubset(cols):
+            continue
+        # Both *scores_with_features objects are view-style sources in this project;
+        # feat_Game_Start is the canonical event time when present.
+        is_feature_view = "scores_with_features" in table_fq
+        time_candidates = ("feat_Game_Start", "Game_Start", "Commence_Hour", "Snapshot_Timestamp") if is_feature_view \
+            else ("Game_Start", "feat_Game_Start", "Commence_Hour", "Snapshot_Timestamp")
+        time_col = next((c for c in time_candidates if c in cols), None)
+        where = ["UPPER(CAST(Sport AS STRING)) = @sport"]
+        params = [bigquery.ScalarQueryParameter("sport", "STRING", sport_u)]
+        if time_col:
+            where.append(f"TIMESTAMP(`{time_col}`) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days_back DAY)")
+            params.append(bigquery.ScalarQueryParameter("days_back", "INT64", int(days_back)))
+        if "SHARP_HIT_BOOL" in cols:
+            where.append("SHARP_HIT_BOOL IS NOT NULL")
+        desired = [c for c in _PATHI_BIGAL_SYSTEM_SOURCE_COLS if c in cols]
+        # Ensure the selected timestamp survives normalization even if it is not in
+        # the generic desired list for a future view schema.
+        if time_col and time_col not in desired:
+            desired.append(time_col)
+        if not desired:
+            continue
+        q = f"SELECT {', '.join('`'+c+'`' for c in desired)} FROM `{table_fq}` WHERE " + " AND ".join(where)
+        try:
+            candidate = bq_client.query(q, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
+        except Exception:
+            continue
+        if candidate is None or candidate.empty:
+            continue
+        if time_col and time_col in candidate.columns:
+            candidate["Game_Start"] = candidate[time_col]
+        hist = candidate
+        break
+
     if hist.empty:
         return hist
 
-    # Merge final scores only if the history view does not already provide them.
+    # Merge final scores only if the history source does not already provide them.
     if not {"Score_Home_Score", "Score_Away_Score"}.issubset(hist.columns) and "Merge_Key_Short" in hist.columns:
         q2 = """
             SELECT Merge_Key_Short,
                    SAFE_CAST(Score_Home_Score AS FLOAT64) AS Score_Home_Score,
-                   SAFE_CAST(Score_Away_Score AS FLOAT64) AS Score_Away_Score
+                   SAFE_CAST(Score_Away_Score AS FLOAT64) AS Score_Away_Score,
+                   TIMESTAMP(Game_Start) AS Game_Start
             FROM `sharplogger.sharp_data.game_scores_final`
-            WHERE UPPER(Sport) = @sport
+            WHERE UPPER(CAST(Sport AS STRING)) = @sport
               AND Score_Home_Score IS NOT NULL
               AND Score_Away_Score IS NOT NULL
         """
@@ -1404,7 +1820,10 @@ def fetch_pathi_bigal_history_for_live(sport: str, days_back: int = 1200) -> pd.
             hist["Merge_Key_Short"] = hist["Merge_Key_Short"].astype(str).str.lower().str.strip()
             sc["Merge_Key_Short"] = sc["Merge_Key_Short"].astype(str).str.lower().str.strip()
             sc = sc.drop_duplicates("Merge_Key_Short", keep="last")
-            hist = hist.merge(sc, on="Merge_Key_Short", how="left", validate="many_to_one")
+            # avoid Game_Start_x/y; only use score timestamp when history lacks it
+            score_cols = ["Merge_Key_Short", "Score_Home_Score", "Score_Away_Score"]
+            hist = hist.merge(sc[score_cols], on="Merge_Key_Short", how="left", validate="many_to_one")
+    hist["Game_Start"] = pd.to_datetime(hist.get("Game_Start"), errors="coerce", utc=True)
     return hist
 
 
@@ -1412,7 +1831,7 @@ def attach_pathi_bigal_live_features(current_rows: pd.DataFrame, sport: str) -> 
     """Create up-to-date Pathi/BigAl flags for upcoming dashboard rows."""
     if current_rows is None or current_rows.empty:
         return current_rows.copy()
-    cur = current_rows.copy()
+    cur = add_pathi_football_key_features(current_rows.copy())
     try:
         hist = fetch_pathi_bigal_history_for_live(sport)
         combo = pd.concat([hist, cur], ignore_index=True, sort=False) if hist is not None and not hist.empty else cur.copy()
@@ -2759,8 +3178,13 @@ def add_book_path_reliability_features(
                  np.where(is_total,  close_total.to_numpy(), np.nan))
     path_line_err = np.abs(val - close_line)
 
-    x = pd.to_numeric(out["Odds_Price"], errors="coerce").to_numpy()
-    imp_prob = np.where(x >= 0, 100.0 / (x + 100.0), (-x) / ((-x) + 100.0))
+    x = pd.to_numeric(out["Odds_Price"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+    imp_prob = np.full(x.shape, np.nan, dtype=np.float64)
+    pos = np.isfinite(x) & (x >= 0)
+    neg = np.isfinite(x) & (x < 0)
+    np.divide(100.0, x + 100.0, out=imp_prob, where=pos & ((x + 100.0) != 0))
+    neg_num = -x
+    np.divide(neg_num, neg_num + 100.0, out=imp_prob, where=neg & ((neg_num + 100.0) != 0))
     # keep for completeness; not used in downstream here, but cheap
     _ = np.where(is_ml, np.abs(imp_prob - p_ml_fav.to_numpy()), np.nan)
 
@@ -8674,14 +9098,21 @@ def get_bq_clients():
 def fetch_scores_with_features(sport: str, days_back: int):
     bq, bqs = get_bq_clients()
 
-    # === EXACT logic as your original f-string, but parameterized ===
-    sql = """
+    # The training source is a view.  In this project feat_Game_Start is the
+    # canonical event timestamp; discover once so the query remains schema-safe.
+    _table_fq = "sharplogger.sharp_data.scores_with_features"
+    try:
+        _cols = {f.name for f in bq.get_table(_table_fq).schema}
+    except Exception:
+        _cols = set()
+    _time_col = next((c for c in ("feat_Game_Start", "Game_Start", "Commence_Hour", "Snapshot_Timestamp") if c in _cols), "Snapshot_Timestamp")
+    sql = f"""
     SELECT *
-    FROM `sharplogger.sharp_data.scores_with_features`
+    FROM `{_table_fq}`
     WHERE Sport = @sport
       AND Scored = TRUE
       AND SHARP_HIT_BOOL IS NOT NULL
-      AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL @days_back DAY)
+      AND DATE(`{_time_col}`) >= DATE_SUB(CURRENT_DATE(), INTERVAL @days_back DAY)
     """
 
     job_cfg = bigquery.QueryJobConfig(
@@ -8692,8 +9123,16 @@ def fetch_scores_with_features(sport: str, days_back: int):
         use_query_cache=True,
     )
 
-    # Fast path, but stable because we reuse a cached BigQueryReadClient
-    return bq.query(sql, job_config=job_cfg).to_dataframe(bqstorage_client=bqs)
+    # Fast path, but stable because we reuse a cached BigQueryReadClient.
+    # scores_with_features is a VIEW-style training source: feat_Game_Start is the
+    # canonical event timestamp when present. Normalize it once here so all legacy
+    # downstream code can continue to use Game_Start safely.
+    out = bq.query(sql, job_config=job_cfg).to_dataframe(bqstorage_client=bqs)
+    if "feat_Game_Start" in out.columns:
+        out["Game_Start"] = pd.to_datetime(out["feat_Game_Start"], errors="coerce", utc=True)
+    elif "Game_Start" in out.columns:
+        out["Game_Start"] = pd.to_datetime(out["Game_Start"], errors="coerce", utc=True)
+    return out
 def _is_xgb_classifier(m):
     try:
         from xgboost import XGBClassifier
@@ -9985,10 +10424,11 @@ def train_sharp_model_from_bq(
         return
    
     
-    # Work with a single frame going forward
-    
-
-    df_bt = df.copy()
+    # Work with a single frame going forward.  Do NOT duplicate the full 700/900-day
+    # training view: on Cloud Run this can consume many GiB before feature engineering.
+    df_bt = df
+    del df
+    gc.collect()
     df_bt['SHARP_HIT_BOOL'] = pd.to_numeric(df_bt['SHARP_HIT_BOOL'], errors='coerce')
     # Normalize keys
     df_bt['Game_Key'] = df_bt['Game_Key'].astype(str).str.strip().str.lower()
@@ -9999,11 +10439,14 @@ def train_sharp_model_from_bq(
     
     # ✅ Timestamps (UTC)
     df_bt['Snapshot_Timestamp'] = pd.to_datetime(df_bt['Snapshot_Timestamp'], errors='coerce', utc=True)
-    # Use true Game_Start if present; else fall back to Snapshot_Timestamp for ordering
-    if 'Game_Start' in df_bt.columns:
+    # View-backed training data uses feat_Game_Start as the canonical event time.
+    # Keep Game_Start as the downstream compatibility name.
+    if 'feat_Game_Start' in df_bt.columns:
+        df_bt['Game_Start'] = pd.to_datetime(df_bt['feat_Game_Start'], errors='coerce', utc=True)
+    elif 'Game_Start' in df_bt.columns:
         df_bt['Game_Start'] = pd.to_datetime(df_bt['Game_Start'], errors='coerce', utc=True)
     else:
-        df_bt['Game_Start'] = df_bt['Snapshot_Timestamp']
+        df_bt['Game_Start'] = pd.to_datetime(df_bt['Snapshot_Timestamp'], errors='coerce', utc=True)
     for c in ['Outcome']:
         if c in df_bt.columns:
             df_bt[c] = df_bt[c].astype(str).str.lower().str.strip()
@@ -10362,40 +10805,28 @@ def train_sharp_model_from_bq(
     df_bt.drop(columns=["fav_covered"], inplace=True, errors="ignore")
 
     # ================================================================
-    # Pathi + Big Al deterministic state, built BEFORE market filtering
-    # so MLB moneyline roles, ATS history, totals and opponent context
-    # are all available to every market head without leakage.
+    # Pathi + Big Al deterministic state (LOW-MEMORY)
     # ================================================================
+    # Build the state once from a narrow physical-game source, but DO NOT attach
+    # dozens of system columns to the full multi-market snapshot frame.  They are
+    # attached only after the requested market has been reduced/deduplicated.
+    system_state_train = pd.DataFrame()
     try:
-        df_system_source = df_bt.copy()
-        if "Merge_Key_Short" in df_system_source.columns and df_results is not None and not df_results.empty:
-            _sc = df_results[[
-                c for c in ["Merge_Key_Short", "Score_Home_Score", "Score_Away_Score"]
-                if c in df_results.columns
-            ]].copy()
-            if "Merge_Key_Short" in _sc.columns:
-                _sc["Merge_Key_Short"] = _sc["Merge_Key_Short"].astype(str).str.lower().str.strip()
-                _sc = _sc.drop_duplicates("Merge_Key_Short", keep="last")
-                for _c in ["Score_Home_Score", "Score_Away_Score"]:
-                    if _c in _sc.columns:
-                        _map = _sc.set_index("Merge_Key_Short")[_c]
-                        _src = df_system_source["Merge_Key_Short"].astype(str).str.lower().str.strip()
-                        if _c not in df_system_source.columns:
-                            df_system_source[_c] = _src.map(_map)
-                        else:
-                            df_system_source[_c] = pd.to_numeric(df_system_source[_c], errors="coerce").combine_first(_src.map(_map))
-
+        df_system_source = prepare_pathi_bigal_training_source_lowmem(df_bt, df_results)
         system_state_train = build_pathi_bigal_team_game_state(df_system_source)
-        df_bt = attach_pathi_bigal_features_to_market_rows(df_bt, system_state_train)
-        status_msg = None
+        del df_system_source
+        gc.collect()
         try:
-            _n_sys = len(pathi_bigal_numeric_feature_cols(df_bt))
-            st.info(f"Pathi/Big Al layer attached: {_n_sys} numeric system features ({PATHI_BIGAL_FEATURE_VERSION}).")
+            _n_sys = len(pathi_bigal_numeric_feature_cols(system_state_train))
+            st.info(
+                f"Pathi/Big Al state prepared: {_n_sys} numeric features "
+                f"({PATHI_BIGAL_FEATURE_VERSION}); low-memory attach deferred to market slice."
+            )
         except Exception:
             pass
     except Exception as _sys_exc:
         system_state_train = pd.DataFrame()
-        st.warning(f"Pathi/Big Al training feature layer skipped: {_sys_exc}")
+        st.warning(f"Pathi/Big Al training state skipped: {_sys_exc}")
 
     # ρ lookups (Spread↔Total, Spread↔ML, Total↔ML) — do this ONCE
     
@@ -10474,7 +10905,24 @@ def train_sharp_model_from_bq(
     ]
     
     def _prep_team_context(df):
-        out = df.copy()
+        # LOO/streak/schedule context does not need the hundreds of columns in the
+        # full training view.  For one-market Cloud Run jobs, slice the market
+        # BEFORE copying and retain only the columns these calculations consume.
+        base = df
+        if return_artifacts:
+            _requested_ctx = _norm_market(str(market).lower())
+            base = base.loc[base['Market'].astype(str).str.lower().str.strip().map(_norm_market).eq(_requested_ctx)]
+
+        _prob_candidates_local = [
+            'Model_Sharp_Win_Prob', 'Model_Outcome_Prob', 'Model_Prob', 'Pred_Prob'
+        ]
+        _need = [
+            'Sport','Market','Game_Key','Outcome','Home_Team_Norm','Away_Team_Norm',
+            'Value','Odds_Price','Game_Start','feat_Game_Start','Snapshot_Timestamp',
+            'SHARP_HIT_BOOL','Is_ML_Favorite'
+        ] + _prob_candidates_local
+        _keep = [c for c in dict.fromkeys(_need) if c in base.columns]
+        out = base.loc[:, _keep].copy()
         out['Market']         = out['Market'].astype(str).str.lower().str.strip()
         out['Outcome_Norm']   = out['Outcome'].astype(str).str.lower().str.strip()
         out['Home_Team_Norm'] = out['Home_Team_Norm'].astype(str).str.lower().str.strip()
@@ -10594,6 +11042,8 @@ def train_sharp_model_from_bq(
           .merge(fav_home,      on=["Sport","Market","Game_Key","Team"], how="left", validate="1:1")
           .merge(fav_away,      on=["Sport","Market","Game_Key","Team"], how="left", validate="1:1")
     )
+    del overall_stats, home_stats, away_stats, fav_overall, fav_home, fav_away
+    gc.collect()
     
     
    
@@ -10619,7 +11069,10 @@ def train_sharp_model_from_bq(
             st.error(f"Unsupported market '{market}'. Must be one of {sorted(allowed)}.")
             return None
 
-        df_bt = df_bt[df_bt['Market'].astype(str).str.lower() == requested].copy()
+        _req_mask = df_bt['Market'].astype(str).str.lower().eq(requested)
+        df_bt = df_bt.loc[_req_mask]
+        del _req_mask
+        gc.collect()
         if df_bt.empty:
             st.error(f"No training rows found for {sport} {requested}.")
             return None
@@ -10642,7 +11095,10 @@ def train_sharp_model_from_bq(
     
         mkt = _norm_market(market)
 
-        df_market = df_bt[df_bt["Market"].astype(str).str.lower().str.strip() == mkt].copy()
+        if return_artifacts and len(markets_present) == 1:
+            df_market = df_bt
+        else:
+            df_market = df_bt[df_bt["Market"].astype(str).str.lower().str.strip() == mkt].copy()
     
                 # ---------------------------
                 # Streamlit-friendly logger
@@ -10679,12 +11135,11 @@ def train_sharp_model_from_bq(
         
         elif mkt == "spreads":
             # ✅ keep BOTH favorite & dog rows for training
-            df_market = df_market.copy()
             df_market["Value"] = pd.to_numeric(df_market["Value"], errors="coerce")
-            df_market = df_market[df_market["Value"].notna()].copy()
+            df_market = df_market.loc[df_market["Value"].notna()]
         
         elif mkt == "h2h":
-            df_market = df_market.copy()
+            pass
         
         if df_market.empty:
             pb.progress(min(100, max(0, pct)))
@@ -10696,6 +11151,11 @@ def train_sharp_model_from_bq(
                      .drop_duplicates(subset=["Game_Key", "Market", "Outcome", "Bookmaker"], keep="last")
                      .copy()
         )
+        if return_artifacts and len(markets_present) == 1:
+            # df_market is now the compact final-snapshot slice; release the much
+            # larger source view before subsequent feature engineering/XGBoost.
+            df_bt = pd.DataFrame()
+            gc.collect()
         
         # ---- PREPPED slice (this market only) ----
         df_prepped_mkt = df_bt_prepped[
@@ -11088,6 +11548,14 @@ def train_sharp_model_from_bq(
             sharp_books=SHARP_BOOKS,
             rec_books=REC_BOOKS,
         )
+        # Attach deterministic systems only to this already-reduced market slice.
+        # This is the key 32-GiB safeguard: never broadcast 70+ system columns to
+        # the full multi-market/snapshot training frame.
+        if system_state_train is not None and not system_state_train.empty:
+            df_market = attach_pathi_bigal_training_features_lowmem(df_market, system_state_train)
+        else:
+            df_market = add_pathi_football_key_features(df_market)
+        gc.collect()
         # === Compact domain interactions ===
         df_market['ResistBreak_x_Mag']     = df_market.get('Was_Line_Resistance_Broken',0) * df_market.get('Abs_Line_Move_From_Opening',0).fillna(0)
         df_market['LateSteam_x_KeyCount']  = df_market.get('Potential_Overmove_Flag',0)   * df_market.get('Line_Resistance_Crossed_Count',0).fillna(0)
@@ -12159,8 +12627,12 @@ def train_sharp_model_from_bq(
             # Key numbers (spreads)
             "Crossed_Key_3",
             "Crossed_Key_7",
+            "Crossed_Key_10",
+            "Crossed_Key_14",
             "Dist_to_3",
             "Dist_to_7",
+            "Dist_to_10",
+            "Dist_to_14",
                    
         ]
         
@@ -12232,7 +12704,7 @@ def train_sharp_model_from_bq(
         print("NaNs:", df_market["EDGE_TARGET"].isna().sum())
         extend_unique(features, hybrid_timing_features)
         extend_unique(features, hybrid_odds_timing_features)
-        timing_cols = build_timing_aggregates_inplace(df_bt)
+        timing_cols = build_timing_aggregates_inplace(df_market)
 
         # extend your feature list with timing_cols (and remove the 32 originals)
         extend_unique(features, timing_cols)
