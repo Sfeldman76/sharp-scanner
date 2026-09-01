@@ -271,7 +271,8 @@ SPORTS = {
     "CFL": "americanfootball_cfl",
     "NFL": "americanfootball_nfl",
     "NCAAF": "americanfootball_ncaaf",
-    "NCAAB": "basketball_ncaab"
+    "NCAAB": "basketball_ncaab",
+    "NHL": "icehockey_nhl"
 }
 SPORT_ALIAS_MAP = {
     "NBA": "basketball_nba",
@@ -281,6 +282,7 @@ SPORT_ALIAS_MAP = {
     "NFL": "americanfootball_nfl",
     "NCAAF": "americanfootball_ncaaf",
     "NCAAB": "basketball_ncaab",
+    "NHL": "icehockey_nhl",
 }
 # Sharp limit anchor(s)
 SHARP_BOOKS_FOR_LIMITS = ['pinnacle']
@@ -396,6 +398,1012 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
     return _alias_lookup(book_raw), _alias_lookup(bm_raw)
 
 
+# ============================================================================
+# Pathi + Big Al deterministic situational system layer
+# Added 2026-09-01. These flags are kept separate from the learned model so
+# the named systems remain auditable and can also be offered to AutoFS.
+# ============================================================================
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-01-v2"
+
+# Operational screens used only where the published Pathi wording is qualitative
+# rather than an exact numerical threshold. The corresponding feature names end
+# in _Screen so they are not confused with exact historical systems.
+PATHI_WEAK_TEAM_MAX_WIN_PCT = 0.55
+PATHI_PRIOR_DOG_RATE_MIN = 0.60
+
+
+def _sys_norm_market(v):
+    s = str(v or "").lower().strip()
+    if s in {"spread", "spreads", "ats"}:
+        return "spreads"
+    if s in {"total", "totals", "ou", "o/u", "overunder"}:
+        return "totals"
+    if s in {"h2h", "ml", "moneyline", "money_line", "headtohead"}:
+        return "h2h"
+    return s
+
+
+def _sys_num_series(df: pd.DataFrame, *names, default=np.nan) -> pd.Series:
+    for name in names:
+        if name in df.columns:
+            return pd.to_numeric(df[name], errors="coerce")
+    return pd.Series(default, index=df.index, dtype="float64")
+
+
+def _sys_bool_series(df: pd.DataFrame, *names, default=np.nan) -> pd.Series:
+    for name in names:
+        if name in df.columns:
+            s = df[name]
+            if pd.api.types.is_bool_dtype(s):
+                return s.astype("float64")
+            if pd.api.types.is_numeric_dtype(s):
+                return pd.to_numeric(s, errors="coerce")
+            t = s.astype(str).str.lower().str.strip()
+            out = pd.Series(np.nan, index=df.index, dtype="float64")
+            out[t.isin(["1", "true", "yes", "y", "t"])] = 1.0
+            out[t.isin(["0", "false", "no", "n", "f"])] = 0.0
+            return out
+    return pd.Series(default, index=df.index, dtype="float64")
+
+
+def _sys_text_series(df: pd.DataFrame, *names, default="") -> pd.Series:
+    for name in names:
+        if name in df.columns:
+            return df[name].astype(str).replace({"nan": "", "None": ""})
+    return pd.Series(default, index=df.index, dtype="object")
+
+
+def _sys_amer_prob(s: pd.Series) -> pd.Series:
+    x = pd.to_numeric(s, errors="coerce")
+    p = np.where(
+        x > 0,
+        100.0 / (x + 100.0),
+        np.where(x < 0, (-x) / ((-x) + 100.0), np.nan),
+    )
+    return pd.Series(p, index=s.index, dtype="float64")
+
+
+def _sys_consecutive_prior(g: pd.DataFrame, col: str, grp_cols: list[str]) -> pd.Series:
+    """Count consecutive TRUE results immediately before each row, leakage-safe."""
+    prev = g.groupby(grp_cols, sort=False)[col].shift(1)
+    out = pd.Series(0, index=g.index, dtype="int16")
+    for _, idx in g.groupby(grp_cols, sort=False).indices.items():
+        idx = np.asarray(idx, dtype=np.int64)
+        vals = prev.loc[idx].fillna(False).astype(bool).to_numpy()
+        cnt = np.zeros(len(idx), dtype=np.int16)
+        run = 0
+        for j, v in enumerate(vals):
+            if v:
+                run += 1
+            else:
+                run = 0
+            cnt[j] = run
+        out.loc[idx] = cnt
+    return out
+
+
+def _sys_pick_market_rows(df: pd.DataFrame, market: str) -> pd.DataFrame:
+    """One representative row per game/outcome, sharp-book-first and latest."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    d = df[df["Market"].eq(market)].copy()
+    if d.empty:
+        return d
+    d["__sharp"] = d.get("Bookmaker", "").astype(str).str.lower().isin(set(SHARP_BOOKS)).astype(int)
+    if "Snapshot_Timestamp" in d.columns:
+        d["Snapshot_Timestamp"] = pd.to_datetime(d["Snapshot_Timestamp"], errors="coerce", utc=True)
+        d = d.sort_values(["__sharp", "Snapshot_Timestamp"], ascending=[False, False])
+    else:
+        d = d.sort_values(["__sharp"], ascending=[False])
+    d = d.drop_duplicates(["Game_Key", "Outcome_Norm"], keep="first")
+    return d.drop(columns=["__sharp"], errors="ignore")
+
+
+def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build leakage-safe team/game state from historical or historical+upcoming rows.
+
+    The output is one row per (Sport, Game_Key, Team) and contains:
+      * exact consecutive SU/ATS streaks BEFORE the game
+      * previous 1/2/3 game results, scores, ATS margins, roles and prices
+      * current ML/spread/total roles and opening/current prices
+      * opponent mirrors of the prior-state fields
+      * H2H meeting state and schedule-density fields
+      * deterministic Pathi and Big Al rule flags
+
+    Rows without a completed score can be appended for upcoming games. Their prior
+    state remains leakage-safe because all historical calculations use shift(1).
+    """
+    if df_in is None or df_in.empty:
+        return pd.DataFrame(columns=["Sport", "Game_Key", "Team"])
+
+    d = df_in.copy()
+    d.columns = [str(c).strip() for c in d.columns]
+
+    required = ["Game_Key", "Market", "Outcome"]
+    if any(c not in d.columns for c in required):
+        return pd.DataFrame(columns=["Sport", "Game_Key", "Team"])
+
+    d["Sport"] = d.get("Sport", "").astype(str).str.upper().str.strip()
+    d["Game_Key"] = d["Game_Key"].astype(str).str.lower().str.strip()
+    d["Market"] = d["Market"].astype(str).map(_sys_norm_market)
+    d["Outcome_Norm"] = d["Outcome"].astype(str).str.lower().str.strip()
+    d["Home_Team_Norm"] = d.get("Home_Team_Norm", d.get("Home_Team", "")).astype(str).str.lower().str.strip()
+    d["Away_Team_Norm"] = d.get("Away_Team_Norm", d.get("Away_Team", "")).astype(str).str.lower().str.strip()
+    d["Game_Start"] = pd.to_datetime(d.get("Game_Start"), errors="coerce", utc=True)
+    if "Snapshot_Timestamp" in d.columns:
+        d["Snapshot_Timestamp"] = pd.to_datetime(d["Snapshot_Timestamp"], errors="coerce", utc=True)
+
+    # Normalize outcome aliases to actual team names when the source uses home/away.
+    d["Outcome_Team"] = np.where(
+        d["Outcome_Norm"].eq("home"), d["Home_Team_Norm"],
+        np.where(d["Outcome_Norm"].eq("away"), d["Away_Team_Norm"], d["Outcome_Norm"])
+    )
+
+    # ------------------------------------------------------------------
+    # Game-level scaffold + optional metadata.
+    # ------------------------------------------------------------------
+    score_home = _sys_num_series(d, "Score_Home_Score", "Home_Score", "Score_Home")
+    score_away = _sys_num_series(d, "Score_Away_Score", "Away_Score", "Score_Away")
+    d["__Score_Home"] = score_home
+    d["__Score_Away"] = score_away
+
+    meta_candidates = [
+        "Week", "Week_Number", "Game_Week", "Season", "Season_Type", "Game_Type",
+        "Is_Preseason", "Is_Postseason", "Is_Playoffs", "Is_Regular_Season", "Is_Finals",
+        "Is_Conference_Game", "Home_Conference", "Away_Conference",
+        "Home_Is_Defending_Champion", "Away_Is_Defending_Champion",
+        "Home_Prior_Season_Playoff", "Away_Prior_Season_Playoff",
+        "Home_Is_Final_Home_Game", "Away_Is_Final_Home_Game", "Is_Final_Home_Game",
+        "Home_Eliminated_With_Loss", "Away_Eliminated_With_Loss",
+        "Home_Would_Be_Eliminated_With_Loss", "Away_Would_Be_Eliminated_With_Loss",
+        "Series_Game_Number", "Home_Series_Wins", "Away_Series_Wins",
+        "Revenge_Flag",
+    ]
+    game_cols = ["Sport", "Game_Key", "Game_Start", "Home_Team_Norm", "Away_Team_Norm", "__Score_Home", "__Score_Away"]
+    game_cols += [c for c in meta_candidates if c in d.columns and c not in game_cols]
+    games = (
+        d[game_cols]
+        .sort_values("Game_Start")
+        .drop_duplicates("Game_Key", keep="last")
+        .copy()
+    )
+    games["Season"] = _sys_num_series(games, "Season", default=np.nan)
+    games["Season"] = games["Season"].fillna(games["Game_Start"].dt.year).astype("Int64")
+    games["Week_Number"] = _sys_num_series(games, "Week_Number", "Week", "Game_Week")
+
+    season_type = _sys_text_series(games, "Season_Type", "Game_Type").str.lower()
+    games["Is_Preseason"] = _sys_bool_series(games, "Is_Preseason")
+    games["Is_Postseason"] = _sys_bool_series(games, "Is_Postseason", "Is_Playoffs")
+    games.loc[games["Is_Preseason"].isna(), "Is_Preseason"] = season_type.str.contains("preseason", na=False).astype(float)
+    games.loc[games["Is_Postseason"].isna(), "Is_Postseason"] = season_type.str.contains("playoff|postseason|final", regex=True, na=False).astype(float)
+    games["Is_Regular_Season"] = _sys_bool_series(games, "Is_Regular_Season")
+    games.loc[games["Is_Regular_Season"].isna(), "Is_Regular_Season"] = (
+        (games["Is_Preseason"].fillna(0) == 0) & (games["Is_Postseason"].fillna(0) == 0)
+    ).astype(float)
+    games["Is_Finals"] = _sys_bool_series(games, "Is_Finals")
+
+    # Conference game can be supplied explicitly or inferred when both conference fields exist.
+    games["Is_Conference_Game"] = _sys_bool_series(games, "Is_Conference_Game")
+    if "Home_Conference" in games.columns and "Away_Conference" in games.columns:
+        hc = games["Home_Conference"].astype(str).str.lower().str.strip()
+        ac = games["Away_Conference"].astype(str).str.lower().str.strip()
+        inf = (hc.ne("") & ac.ne("") & hc.ne("nan") & ac.ne("nan"))
+        games.loc[games["Is_Conference_Game"].isna() & inf, "Is_Conference_Game"] = hc.eq(ac).astype(float)
+
+    games["Actual_Game_Total"] = games["__Score_Home"] + games["__Score_Away"]
+    games["Pair_Key"] = games.apply(
+        lambda r: "|".join(sorted([str(r.get("Home_Team_Norm", "")), str(r.get("Away_Team_Norm", ""))])), axis=1
+    )
+    games = games.sort_values(["Sport", "Season", "Pair_Key", "Game_Start", "Game_Key"])
+    games["Season_H2H_Meeting_Number"] = (
+        games.groupby(["Sport", "Season", "Pair_Key"], sort=False).cumcount() + 1
+    ).astype("int16")
+    first_total = games.groupby(["Sport", "Season", "Pair_Key"], sort=False)["Actual_Game_Total"].transform("first")
+    games["First_Meeting_Actual_Total_Prior"] = np.where(
+        games["Season_H2H_Meeting_Number"] >= 2, first_total, np.nan
+    )
+
+    # ------------------------------------------------------------------
+    # Long team/game scaffold.
+    # ------------------------------------------------------------------
+    common_cols = [c for c in games.columns if c not in ["Home_Team_Norm", "Away_Team_Norm"]]
+    home = games[common_cols + ["Home_Team_Norm", "Away_Team_Norm"]].copy()
+    home["Team"] = home["Home_Team_Norm"]
+    home["Opponent"] = home["Away_Team_Norm"]
+    home["Is_Home"] = 1
+    home["Points_For"] = home["__Score_Home"]
+    home["Points_Against"] = home["__Score_Away"]
+
+    away = games[common_cols + ["Home_Team_Norm", "Away_Team_Norm"]].copy()
+    away["Team"] = away["Away_Team_Norm"]
+    away["Opponent"] = away["Home_Team_Norm"]
+    away["Is_Home"] = 0
+    away["Points_For"] = away["__Score_Away"]
+    away["Points_Against"] = away["__Score_Home"]
+
+    tg = pd.concat([home, away], ignore_index=True)
+    tg["SU_Margin"] = tg["Points_For"] - tg["Points_Against"]
+    tg["SU_Win"] = np.where(tg["SU_Margin"].notna(), (tg["SU_Margin"] > 0).astype(float), np.nan)
+    tg["SU_Loss"] = np.where(tg["SU_Margin"].notna(), (tg["SU_Margin"] < 0).astype(float), np.nan)
+
+    # Team-specific optional metadata from home/away fields.
+    tg["Team_Is_Defending_Champion"] = np.where(
+        tg["Is_Home"].eq(1),
+        _sys_bool_series(tg, "Home_Is_Defending_Champion"),
+        _sys_bool_series(tg, "Away_Is_Defending_Champion"),
+    )
+    tg["Opponent_Is_Defending_Champion"] = np.where(
+        tg["Is_Home"].eq(1),
+        _sys_bool_series(tg, "Away_Is_Defending_Champion"),
+        _sys_bool_series(tg, "Home_Is_Defending_Champion"),
+    )
+    tg["Team_Prior_Season_Playoff"] = np.where(
+        tg["Is_Home"].eq(1),
+        _sys_bool_series(tg, "Home_Prior_Season_Playoff"),
+        _sys_bool_series(tg, "Away_Prior_Season_Playoff"),
+    )
+    tg["Opponent_Prior_Season_Playoff"] = np.where(
+        tg["Is_Home"].eq(1),
+        _sys_bool_series(tg, "Away_Prior_Season_Playoff"),
+        _sys_bool_series(tg, "Home_Prior_Season_Playoff"),
+    )
+    tg["Is_Final_Home_Game"] = _sys_bool_series(tg, "Is_Final_Home_Game")
+    if "Home_Is_Final_Home_Game" in tg.columns:
+        tg.loc[tg["Is_Home"].eq(1), "Is_Final_Home_Game"] = _sys_bool_series(tg, "Home_Is_Final_Home_Game")
+    tg["Team_Eliminated_With_Loss"] = np.where(
+        tg["Is_Home"].eq(1),
+        _sys_bool_series(tg, "Home_Eliminated_With_Loss", "Home_Would_Be_Eliminated_With_Loss"),
+        _sys_bool_series(tg, "Away_Eliminated_With_Loss", "Away_Would_Be_Eliminated_With_Loss"),
+    )
+    tg["Opponent_Eliminated_With_Loss"] = np.where(
+        tg["Is_Home"].eq(1),
+        _sys_bool_series(tg, "Away_Eliminated_With_Loss", "Away_Would_Be_Eliminated_With_Loss"),
+        _sys_bool_series(tg, "Home_Eliminated_With_Loss", "Home_Would_Be_Eliminated_With_Loss"),
+    )
+    tg["Team_Series_Wins"] = np.where(
+        tg["Is_Home"].eq(1), _sys_num_series(tg, "Home_Series_Wins"), _sys_num_series(tg, "Away_Series_Wins")
+    )
+    tg["Opp_Series_Wins"] = np.where(
+        tg["Is_Home"].eq(1), _sys_num_series(tg, "Away_Series_Wins"), _sys_num_series(tg, "Home_Series_Wins")
+    )
+
+    # ------------------------------------------------------------------
+    # Attach current/opening market roles.
+    # ------------------------------------------------------------------
+    h2h = _sys_pick_market_rows(d, "h2h")
+    if not h2h.empty:
+        h2h["Team"] = h2h["Outcome_Team"]
+        h2h["ML_Odds"] = _sys_num_series(h2h, "Odds_Price")
+        h2h["Opening_ML_Odds"] = _sys_num_series(h2h, "First_Odds", "First_Odds_Price")
+        h2h["ML_Imp_Prob"] = _sys_amer_prob(h2h["ML_Odds"])
+        h2h["Opening_ML_Imp_Prob"] = _sys_amer_prob(h2h["Opening_ML_Odds"])
+        denom = h2h.groupby("Game_Key")["ML_Imp_Prob"].transform("sum")
+        denom0 = h2h.groupby("Game_Key")["Opening_ML_Imp_Prob"].transform("sum")
+        h2h["ML_Fair_Prob"] = h2h["ML_Imp_Prob"] / denom.replace(0, np.nan)
+        h2h["Opening_ML_Fair_Prob"] = h2h["Opening_ML_Imp_Prob"] / denom0.replace(0, np.nan)
+        h2h["Is_ML_Dog"] = np.where(
+            h2h["ML_Fair_Prob"].notna(),
+            (h2h["ML_Fair_Prob"] < 0.5).astype(float),
+            np.where(h2h["ML_Odds"].notna(), (h2h["ML_Odds"] > 0).astype(float), np.nan),
+        )
+        h2h["Is_ML_Favorite"] = np.where(
+            h2h["ML_Fair_Prob"].notna(),
+            (h2h["ML_Fair_Prob"] > 0.5).astype(float),
+            np.where(h2h["ML_Odds"].notna(), (h2h["ML_Odds"] < 0).astype(float), np.nan),
+        )
+        h2h["Opening_Is_ML_Dog"] = np.where(
+            h2h["Opening_ML_Fair_Prob"].notna(),
+            (h2h["Opening_ML_Fair_Prob"] < 0.5).astype(float),
+            np.where(h2h["Opening_ML_Odds"].notna(), (h2h["Opening_ML_Odds"] > 0).astype(float), np.nan),
+        )
+        h2h_cols = [
+            "Game_Key", "Team", "ML_Odds", "Opening_ML_Odds", "ML_Fair_Prob",
+            "Opening_ML_Fair_Prob", "Is_ML_Dog", "Is_ML_Favorite", "Opening_Is_ML_Dog"
+        ]
+        tg = tg.merge(h2h[h2h_cols], on=["Game_Key", "Team"], how="left", validate="1:1")
+    else:
+        for c in ["ML_Odds", "Opening_ML_Odds", "ML_Fair_Prob", "Opening_ML_Fair_Prob", "Is_ML_Dog", "Is_ML_Favorite", "Opening_Is_ML_Dog"]:
+            tg[c] = np.nan
+
+    spr = _sys_pick_market_rows(d, "spreads")
+    if not spr.empty:
+        spr["Team"] = spr["Outcome_Team"]
+        spr["Spread_Value"] = _sys_num_series(spr, "Value")
+        spr["Opening_Spread"] = _sys_num_series(spr, "First_Line_Value", "Opening_Line", "Open_Value")
+        spr["Spread_Odds"] = _sys_num_series(spr, "Odds_Price")
+        spr["ATS_Hit_Raw"] = _sys_num_series(spr, "SHARP_HIT_BOOL")
+        spr["ATS_Cover_Margin"] = _sys_num_series(spr, "ATS_Cover_Margin")
+        spr_cols = ["Game_Key", "Team", "Spread_Value", "Opening_Spread", "Spread_Odds", "ATS_Hit_Raw", "ATS_Cover_Margin"]
+        tg = tg.merge(spr[spr_cols], on=["Game_Key", "Team"], how="left", validate="1:1")
+    else:
+        for c in ["Spread_Value", "Opening_Spread", "Spread_Odds", "ATS_Hit_Raw", "ATS_Cover_Margin"]:
+            tg[c] = np.nan
+
+    # If ATS cover margin was not stored, calculate team score margin + spread.
+    calc_ats_margin = tg["SU_Margin"] + tg["Spread_Value"]
+    tg["ATS_Cover_Margin"] = pd.to_numeric(tg["ATS_Cover_Margin"], errors="coerce").combine_first(calc_ats_margin)
+    tg["ATS_Win"] = np.where(
+        tg["ATS_Hit_Raw"].notna(),
+        (tg["ATS_Hit_Raw"] > 0.5).astype(float),
+        np.where(tg["ATS_Cover_Margin"].notna(), (tg["ATS_Cover_Margin"] > 0).astype(float), np.nan),
+    )
+    tg["ATS_Loss"] = np.where(
+        tg["ATS_Cover_Margin"].notna(), (tg["ATS_Cover_Margin"] < 0).astype(float),
+        np.where(tg["ATS_Win"].notna(), (tg["ATS_Win"] < 0.5).astype(float), np.nan),
+    )
+
+    tot = _sys_pick_market_rows(d, "totals")
+    if not tot.empty:
+        over = tot[tot["Outcome_Norm"].eq("over")].copy()
+        if over.empty:
+            over = tot.sort_values("Game_Key").drop_duplicates("Game_Key", keep="first")
+        over["Current_Total"] = _sys_num_series(over, "Value")
+        over["Opening_Total"] = _sys_num_series(over, "First_Line_Value", "Opening_Line", "Open_Value")
+        tot_map = over[["Game_Key", "Current_Total", "Opening_Total"]].drop_duplicates("Game_Key")
+        tg = tg.merge(tot_map, on="Game_Key", how="left", validate="many_to_one")
+    else:
+        tg["Current_Total"] = np.nan
+        tg["Opening_Total"] = np.nan
+
+    # Carry current revenge flag if it exists at team/outcome grain.
+    if "Revenge_Flag" in d.columns:
+        side = d[d["Market"].isin(["h2h", "spreads"])].copy()
+        side["Team"] = side["Outcome_Team"]
+        side["Revenge_Flag_Current"] = _sys_num_series(side, "Revenge_Flag")
+        side = side.sort_values("Snapshot_Timestamp" if "Snapshot_Timestamp" in side.columns else "Game_Start").drop_duplicates(["Game_Key", "Team"], keep="last")
+        tg = tg.merge(side[["Game_Key", "Team", "Revenge_Flag_Current"]], on=["Game_Key", "Team"], how="left", validate="1:1")
+    else:
+        tg["Revenge_Flag_Current"] = np.nan
+
+    # ------------------------------------------------------------------
+    # Prior-only chronological state.
+    # ------------------------------------------------------------------
+    tg = tg.sort_values(["Sport", "Season", "Team", "Game_Start", "Game_Key"]).reset_index(drop=True)
+    grp = ["Sport", "Season", "Team"]
+    tg["Team_Game_Number"] = (tg.groupby(grp, sort=False).cumcount() + 1).astype("int16")
+    prior_n = tg.groupby(grp, sort=False).cumcount().astype(float)
+    prior_wins = tg["SU_Win"].fillna(0).groupby([tg[c] for c in grp], sort=False).cumsum() - tg["SU_Win"].fillna(0)
+    tg["WinPct_Prior_System"] = prior_wins / prior_n.replace(0, np.nan)
+
+    tg["Days_Since_Last_Game_System"] = (
+        tg.groupby(grp, sort=False)["Game_Start"].diff().dt.total_seconds().div(86400.0)
+    )
+
+    # Exact consecutive streaks, not rolling counts.
+    tg["SU_Win_Streak_Prior"] = _sys_consecutive_prior(tg, "SU_Win", grp)
+    tg["SU_Loss_Streak_Prior"] = _sys_consecutive_prior(tg, "SU_Loss", grp)
+    tg["ATS_Win_Streak_Prior"] = _sys_consecutive_prior(tg, "ATS_Win", grp)
+    tg["ATS_Loss_Streak_Prior"] = _sys_consecutive_prior(tg, "ATS_Loss", grp)
+
+    # Previous-game fields.
+    prev_base = [
+        "Opponent", "SU_Win", "SU_Loss", "SU_Margin", "Points_For", "Points_Against",
+        "ATS_Win", "ATS_Loss", "ATS_Cover_Margin", "ML_Odds", "Is_ML_Dog", "Is_ML_Favorite",
+        "Spread_Value", "Is_Home", "Opponent_Is_Defending_Champion",
+    ]
+    for lag in (1, 2, 3):
+        for col in prev_base:
+            if col in tg.columns:
+                name = f"Prev{'' if lag == 1 else lag}_{col}"
+                tg[name] = tg.groupby(grp, sort=False)[col].shift(lag)
+
+    tg["Prev_Is_Road_Favorite"] = (
+        (pd.to_numeric(tg.get("Prev_Is_Home"), errors="coerce") == 0) &
+        (pd.to_numeric(tg.get("Prev_Is_ML_Favorite"), errors="coerce") == 1)
+    ).astype("int8")
+    tg["Prev_Is_Road_Dog_9Plus"] = (
+        (pd.to_numeric(tg.get("Prev_Is_Home"), errors="coerce") == 0) &
+        (pd.to_numeric(tg.get("Prev_Spread_Value"), errors="coerce") >= 9.0)
+    ).astype("int8")
+
+    # Rolling / expanding profile statistics prior to current game.
+    def _prior_roll_mean(col, window):
+        return tg.groupby(grp, sort=False)[col].transform(
+            lambda s: pd.to_numeric(s, errors="coerce").shift(1).rolling(window, min_periods=1).mean()
+        )
+
+    tg["Dog_Rate_Last10_Prior"] = _prior_roll_mean("Is_ML_Dog", 10)
+    tg["Avg_Points_For_Prior"] = tg.groupby(grp, sort=False)["Points_For"].transform(
+        lambda s: pd.to_numeric(s, errors="coerce").shift(1).expanding(min_periods=1).mean()
+    )
+
+    # Road-favorite unit ROI prior (one unit risked per qualifying game).
+    odds = pd.to_numeric(tg["ML_Odds"], errors="coerce")
+    payout = np.where(odds > 0, odds / 100.0, np.where(odds < 0, 100.0 / np.abs(odds), np.nan))
+    rf = (tg["Is_Home"].eq(0) & pd.to_numeric(tg["Is_ML_Favorite"], errors="coerce").eq(1))
+    unit_profit = np.where(tg["SU_Win"].eq(1), payout, np.where(tg["SU_Loss"].eq(1), -1.0, np.nan))
+    tg["__rf_game"] = rf.astype(float)
+    tg["__rf_profit"] = np.where(rf, unit_profit, 0.0)
+    rf_games_cum = tg["__rf_game"].groupby([tg[c] for c in grp], sort=False).cumsum() - tg["__rf_game"]
+    rf_profit_cum = tg["__rf_profit"].groupby([tg[c] for c in grp], sort=False).cumsum() - tg["__rf_profit"]
+    tg["Road_Favorite_ROI_Prior"] = rf_profit_cum / rf_games_cum.replace(0, np.nan)
+    tg.drop(columns=["__rf_game", "__rf_profit"], inplace=True, errors="ignore")
+
+    # Immediate rematch and pair-level prior state.
+    tg["Immediate_Rematch_Flag"] = (tg["Prev_Opponent"].astype(str) == tg["Opponent"].astype(str)).astype("int8")
+    pair_grp = ["Sport", "Season", "Team", "Opponent"]
+    tg["Days_Since_Last_Matchup_System"] = (
+        tg.groupby(pair_grp, sort=False)["Game_Start"].diff().dt.total_seconds().div(86400.0)
+    )
+    tg["Last_Matchup_SU_Win_System"] = tg.groupby(pair_grp, sort=False)["SU_Win"].shift(1)
+    tg["Last_Matchup_SU_Margin_System"] = tg.groupby(pair_grp, sort=False)["SU_Margin"].shift(1)
+
+    # Final-two regular-season window. Exact Week data wins; team-game proxy is explicit.
+    tg["Final_Two_Regular_Season_Proxy"] = (
+        tg["Sport"].eq("NFL") & tg["Is_Regular_Season"].fillna(1).eq(1) & (tg["Team_Game_Number"] >= 16)
+    ).astype("int8")
+    tg["Final_Two_Regular_Season"] = np.where(
+        tg["Week_Number"].notna(),
+        (tg["Week_Number"] >= 17).astype(int),
+        tg["Final_Two_Regular_Season_Proxy"],
+    ).astype("int8")
+
+    # Opponent mirrors of current roles + prior state.
+    mirror_cols = [
+        "Is_Home", "ML_Odds", "Is_ML_Dog", "Is_ML_Favorite", "Spread_Value", "Opening_Spread",
+        "WinPct_Prior_System", "SU_Win_Streak_Prior", "SU_Loss_Streak_Prior",
+        "ATS_Win_Streak_Prior", "ATS_Loss_Streak_Prior", "Days_Since_Last_Game_System",
+        "Prev_SU_Win", "Prev_SU_Loss", "Prev_SU_Margin", "Prev_Points_For", "Prev_Points_Against",
+        "Prev_ATS_Win", "Prev_ATS_Loss", "Prev_ATS_Cover_Margin", "Prev2_SU_Win", "Prev2_SU_Loss",
+        "Prev2_ATS_Win", "Prev2_ATS_Loss", "Prev2_ATS_Cover_Margin",
+        "Prev3_SU_Win", "Prev3_SU_Loss", "Prev3_ATS_Win", "Prev3_ATS_Loss", "Prev3_ATS_Cover_Margin",
+        "Prev_Is_ML_Dog", "Prev_Is_ML_Favorite", "Prev_Is_Road_Favorite", "Prev_Is_Road_Dog_9Plus",
+        "Prev_Opponent_Is_Defending_Champion", "Dog_Rate_Last10_Prior", "Avg_Points_For_Prior",
+        "Road_Favorite_ROI_Prior", "Team_Game_Number", "Revenge_Flag_Current",
+        "Team_Is_Defending_Champion", "Team_Prior_Season_Playoff", "Is_Final_Home_Game",
+        "Team_Eliminated_With_Loss", "Team_Series_Wins", "Opp_Series_Wins",
+    ]
+    mirror_cols = [c for c in mirror_cols if c in tg.columns]
+    opp = tg[["Sport", "Game_Key", "Team"] + mirror_cols].copy()
+    opp = opp.rename(columns={"Team": "Opponent", **{c: f"Opp_{c}" for c in mirror_cols}})
+    tg = tg.merge(opp, on=["Sport", "Game_Key", "Opponent"], how="left", validate="1:1")
+
+    # Standard current aliases used by the rule engine.
+    tg["Is_Road"] = (tg["Is_Home"] == 0).astype("int8")
+    tg["Is_Plus_Money"] = (pd.to_numeric(tg["ML_Odds"], errors="coerce") > 0).astype("int8")
+    tg["Role_Flip_Dog_To_Favorite"] = (
+        pd.to_numeric(tg["Opening_Is_ML_Dog"], errors="coerce").eq(1) &
+        pd.to_numeric(tg["Is_ML_Favorite"], errors="coerce").eq(1)
+    ).astype("int8")
+
+    tg = add_pathi_bigal_rule_flags(tg)
+    return tg
+
+
+def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
+    """Apply named Pathi / Big Al systems to one-row-per-team-game state."""
+    if state is None or state.empty:
+        return state.copy()
+    s = state.copy()
+    sport = s["Sport"].astype(str).str.upper()
+
+    def n(name, default=np.nan):
+        return pd.to_numeric(s[name], errors="coerce") if name in s.columns else pd.Series(default, index=s.index, dtype="float64")
+
+    def ready(*names):
+        if not names:
+            return pd.Series(True, index=s.index)
+        out = pd.Series(True, index=s.index)
+        for name in names:
+            out &= n(name).notna()
+        return out
+
+    is_mlb = sport.eq("MLB")
+    is_nfl = sport.eq("NFL")
+    is_ncaaf = sport.eq("NCAAF")
+    is_nba = sport.eq("NBA")
+    is_ncaab = sport.isin(["NCAAB", "NCAAM"])
+    is_cfl = sport.eq("CFL")
+
+    # ------------------------------------------------------------------
+    # Eric Pathi - MLB mechanical systems / screens.
+    # ------------------------------------------------------------------
+    s["Pathi_M1_DogThatWon_DataReady"] = ready("Is_ML_Dog", "Prev_Is_ML_Dog", "Prev_SU_Win").astype("int8")
+    s["Pathi_M1_DogThatWon"] = (
+        is_mlb & n("Is_ML_Dog").eq(1) & n("Prev_Is_ML_Dog").eq(1) & n("Prev_SU_Win").eq(1)
+    ).astype("int8")
+
+    s["Pathi_M8_DogWon_BetterPrice_DataReady"] = ready("ML_Odds", "Prev_ML_Odds").astype("int8")
+    s["Pathi_M8_DogWon_BetterPrice"] = (
+        s["Pathi_M1_DogThatWon"].eq(1) & n("ML_Odds").gt(n("Prev_ML_Odds")) & n("ML_Odds").gt(0)
+    ).astype("int8")
+
+    s["Pathi_M2_HomeDog_DataReady"] = ready("ML_Odds", "Is_Home").astype("int8")
+    s["Pathi_M2_HomeDog"] = (
+        is_mlb & n("Is_Home").eq(1) & n("ML_Odds").gt(0)
+    ).astype("int8")
+
+    s["Pathi_M3_Rule10_LosingStreak_DataReady"] = ready("SU_Loss_Streak_Prior").astype("int8")
+    s["Pathi_M3_Rule10_LosingStreak"] = (
+        is_mlb & n("SU_Loss_Streak_Prior").between(7, 10, inclusive="both")
+    ).astype("int8")
+    s["Pathi_M3_Rule10_PlusMoney"] = (
+        s["Pathi_M3_Rule10_LosingStreak"].eq(1) & n("ML_Odds").gt(0)
+    ).astype("int8")
+
+    # Flag is on the recommended opponent side, not on the hot favorite being faded.
+    s["Pathi_M4_ExtendedWinStreakFade_DataReady"] = ready("Opp_SU_Win_Streak_Prior", "Opp_Is_ML_Favorite", "Is_ML_Dog").astype("int8")
+    s["Pathi_M4_ExtendedWinStreakFade"] = (
+        is_mlb & n("Opp_SU_Win_Streak_Prior").ge(6) & n("Opp_Is_ML_Favorite").eq(1) & n("Is_ML_Dog").eq(1)
+    ).astype("int8")
+
+    s["Pathi_M5_TravelOffDayFreeze_DataReady"] = ready("Opp_SU_Win_Streak_Prior", "Opp_Days_Since_Last_Game_System", "Opp_Is_ML_Favorite").astype("int8")
+    s["Pathi_M5_TravelOffDayFreeze"] = (
+        is_mlb & n("Opp_SU_Win_Streak_Prior").ge(5) & n("Opp_Days_Since_Last_Game_System").ge(2.0) &
+        n("Opp_Is_ML_Favorite").eq(1) & n("Is_ML_Dog").eq(1)
+    ).astype("int8")
+
+    # M6 wording is qualitative, so this is deliberately labeled a Screen.
+    s["Pathi_M6_WeakTeamNewChalk_Screen_DataReady"] = ready("Opp_Is_ML_Favorite", "Opp_Prev_Is_ML_Dog", "Opp_Dog_Rate_Last10_Prior", "Opp_WinPct_Prior_System").astype("int8")
+    s["Pathi_M6_WeakTeamNewChalk_Screen"] = (
+        is_mlb & n("Opp_Is_ML_Favorite").eq(1) & n("Opp_Prev_Is_ML_Dog").eq(1) &
+        n("Opp_Dog_Rate_Last10_Prior").ge(PATHI_PRIOR_DOG_RATE_MIN) &
+        n("Opp_WinPct_Prior_System").le(PATHI_WEAK_TEAM_MAX_WIN_PCT) & n("Is_ML_Dog").eq(1)
+    ).astype("int8")
+
+    s["Pathi_M7_BadRoadFavoriteProfile_DataReady"] = ready("Opp_Is_Home", "Opp_Is_ML_Favorite", "Opp_Road_Favorite_ROI_Prior").astype("int8")
+    s["Pathi_M7_BadRoadFavoriteProfile"] = (
+        is_mlb & n("Opp_Is_Home").eq(0) & n("Opp_Is_ML_Favorite").eq(1) &
+        n("Opp_Road_Favorite_ROI_Prior").lt(0) & n("Is_ML_Dog").eq(1)
+    ).astype("int8")
+
+    s["Pathi_M9_Plus15_PlusMoney_DataReady"] = ready("Spread_Value", "Spread_Odds").astype("int8")
+    s["Pathi_M9_Plus15_PlusMoney"] = (
+        is_mlb & np.isclose(n("Spread_Value"), 1.5, atol=0.01) & n("Spread_Odds").gt(0)
+    ).astype("int8")
+
+    s["Pathi_RoleFlip_DogToFavorite_Cancel_DataReady"] = ready("Opening_Is_ML_Dog", "Is_ML_Favorite").astype("int8")
+    s["Pathi_RoleFlip_DogToFavorite_Cancel"] = (
+        is_mlb & n("Opening_Is_ML_Dog").eq(1) & n("Is_ML_Favorite").eq(1)
+    ).astype("int8")
+
+    # Additional diagnostic requested in the review: prior road favorite lost and is chalk again.
+    # This is a screen, not a sourced Pathi mechanical threshold.
+    s["Pathi_RoadFavLost_StillFavorite_Screen"] = (
+        is_mlb & n("Opp_Prev_Is_Road_Favorite").eq(1) & n("Opp_Prev_SU_Loss").eq(1) &
+        n("Opp_Is_ML_Favorite").eq(1) & n("Is_ML_Dog").eq(1)
+    ).astype("int8")
+
+    # ------------------------------------------------------------------
+    # Big Al - exact systems where inputs exist; metadata-heavy systems
+    # expose DataReady flags instead of manufacturing missing context.
+    # ------------------------------------------------------------------
+    # NFL 1 - Week 1: fade prior-year playoff team; flag play-on side.
+    s["BigAl_NFL1_Week1FadePlayoffTeam_DataReady"] = ready("Week_Number", "Team_Prior_Season_Playoff", "Opponent_Prior_Season_Playoff").astype("int8")
+    s["BigAl_NFL1_Week1FadePlayoffTeam"] = (
+        is_nfl & n("Week_Number").eq(1) & n("Team_Prior_Season_Playoff").eq(0) & n("Opponent_Prior_Season_Playoff").eq(1)
+    ).astype("int8")
+    s["BigAl_NFL1_HomeTightener"] = (s["BigAl_NFL1_Week1FadePlayoffTeam"].eq(1) & n("Is_Home").eq(1)).astype("int8")
+
+    # NFL 2 - final two regular-season weeks home dog off two losses vs <=.500 opponent.
+    s["BigAl_NFL2_LateSeasonHomeDog_DataReady"] = ready("Final_Two_Regular_Season", "SU_Loss_Streak_Prior", "Opp_WinPct_Prior_System", "Spread_Value").astype("int8")
+    s["BigAl_NFL2_LateSeasonHomeDog"] = (
+        is_nfl & n("Final_Two_Regular_Season").eq(1) & n("Is_Home").eq(1) & n("Spread_Value").gt(0) &
+        n("SU_Loss_Streak_Prior").ge(2) & n("Opp_WinPct_Prior_System").le(0.500)
+    ).astype("int8")
+    s["BigAl_NFL2_OppOffATSLoss_Tightener"] = (
+        s["BigAl_NFL2_LateSeasonHomeDog"].eq(1) & n("Opp_Prev_ATS_Loss").eq(1)
+    ).astype("int8")
+
+    # NFL 3 - flag is on opponent of high-scoring prior winner.
+    s["BigAl_NFL3_PlayoffHighScoreFade_DataReady"] = ready("Is_Postseason", "Opp_Is_Home", "Opp_Prev_SU_Win", "Opp_Prev_Points_For", "Prev_Points_For").astype("int8")
+    s["BigAl_NFL3_PlayoffHighScoreFade"] = (
+        is_nfl & n("Is_Postseason").eq(1) & n("Opp_Is_Home").eq(0) & n("Opp_Prev_SU_Win").eq(1) &
+        n("Opp_Prev_Points_For").ge(35) & n("Prev_Points_For").lt(35)
+    ).astype("int8")
+
+    # NFL 4 - contrarian side against a team that gained >=1.5 points from open to close.
+    # For the play-on row this is equivalent to its own spread becoming >=1.5 points less favorable.
+    s["BigAl_NFL4_PreseasonContrarianMove_DataReady"] = ready("Is_Preseason", "Spread_Value", "Opening_Spread").astype("int8")
+    s["BigAl_NFL4_PreseasonContrarianMove"] = (
+        is_nfl & n("Is_Preseason").eq(1) & ((n("Opening_Spread") - n("Spread_Value")) >= 1.5)
+    ).astype("int8")
+
+    # NFL 5 - game-level OVER condition; same flag on both team-state rows.
+    s["BigAl_NFL5_PreseasonLowOffenseOver_DataReady"] = ready("Is_Preseason", "Avg_Points_For_Prior", "Opp_Avg_Points_For_Prior").astype("int8")
+    low_pair = (
+        (n("Avg_Points_For_Prior").lt(10) & n("Opp_Avg_Points_For_Prior").lt(19)) |
+        (n("Opp_Avg_Points_For_Prior").lt(10) & n("Avg_Points_For_Prior").lt(19))
+    )
+    s["BigAl_NFL5_PreseasonLowOffenseOver"] = (is_nfl & n("Is_Preseason").eq(1) & low_pair).astype("int8")
+    s["BigAl_NFL5_TotalUnder40_Tightener"] = (
+        s["BigAl_NFL5_PreseasonLowOffenseOver"].eq(1) & n("Current_Total").lt(40)
+    ).astype("int8")
+
+    # College football 1 - Week 2 home off 42+ win, nonconference, opponent no revenge.
+    s["BigAl_CF1_Week2Home42Win_DataReady"] = ready("Week_Number", "Prev_SU_Win", "Prev_Points_For", "Is_Conference_Game", "Opp_Revenge_Flag_Current").astype("int8")
+    s["BigAl_CF1_Week2Home42Win"] = (
+        is_ncaaf & n("Week_Number").eq(2) & n("Is_Home").eq(1) & n("Prev_SU_Win").eq(1) &
+        n("Prev_Points_For").gt(42) & n("Is_Conference_Game").eq(0) & n("Opp_Revenge_Flag_Current").eq(0)
+    ).astype("int8")
+
+    # College football 2 - regular season game 9+, revenge dog, prior 50+ points.
+    s["BigAl_CF2_LateSeasonRevengeDog_DataReady"] = ready("Team_Game_Number", "Revenge_Flag_Current", "Prev_Points_For", "Spread_Value").astype("int8")
+    s["BigAl_CF2_LateSeasonRevengeDog"] = (
+        is_ncaaf & n("Is_Regular_Season").fillna(1).eq(1) & n("Team_Game_Number").ge(9) &
+        n("Revenge_Flag_Current").eq(1) & n("Spread_Value").gt(0) & n("Prev_Points_For").gt(50)
+    ).astype("int8")
+    s["BigAl_CF2_Away_Tightener"] = (s["BigAl_CF2_LateSeasonRevengeDog"].eq(1) & n("Is_Home").eq(0)).astype("int8")
+
+    # NBA 1 - consecutive-game rematch, double-digit road dog lost SU and ATS prior meeting.
+    s["BigAl_NBA1_B2BRematchRoadDog_DataReady"] = ready("Immediate_Rematch_Flag", "Spread_Value", "Prev_SU_Loss", "Prev_ATS_Loss").astype("int8")
+    s["BigAl_NBA1_B2BRematchRoadDog"] = (
+        is_nba & n("Is_Regular_Season").fillna(1).eq(1) & n("Immediate_Rematch_Flag").eq(1) &
+        n("Is_Home").eq(0) & n("Spread_Value").ge(10) & n("Prev_SU_Loss").eq(1) & n("Prev_ATS_Loss").eq(1)
+    ).astype("int8")
+    s["BigAl_NBA1_PriorLoss25_Tightener"] = (
+        s["BigAl_NBA1_B2BRematchRoadDog"].eq(1) & n("Prev_SU_Margin").le(-25)
+    ).astype("int8")
+
+    # NBA 2 - previous three covers by >=16 points each; current not road.
+    s["BigAl_NBA2_ThreeMassiveCovers_DataReady"] = ready("Prev_ATS_Cover_Margin", "Prev2_ATS_Cover_Margin", "Prev3_ATS_Cover_Margin").astype("int8")
+    s["BigAl_NBA2_ThreeMassiveCovers"] = (
+        is_nba & n("Is_Home").eq(1) & n("Prev_ATS_Cover_Margin").ge(16) &
+        n("Prev2_ATS_Cover_Margin").ge(16) & n("Prev3_ATS_Cover_Margin").ge(16)
+    ).astype("int8")
+
+    # NBA 3 - flag play-on opponent of home team returning from 9+ road-dog upset over defending champ.
+    s["BigAl_NBA3_FadeHomeAfterChampUpset_DataReady"] = ready("Opp_Is_Home", "Opp_Prev_SU_Win", "Opp_Prev_Is_Road_Dog_9Plus", "Opp_Prev_Opponent_Is_Defending_Champion").astype("int8")
+    s["BigAl_NBA3_FadeHomeAfterChampUpset"] = (
+        is_nba & n("Opp_Is_Home").eq(1) & n("Opp_Prev_SU_Win").eq(1) &
+        n("Opp_Prev_Is_Road_Dog_9Plus").eq(1) & n("Opp_Prev_Opponent_Is_Defending_Champion").eq(1)
+    ).astype("int8")
+    s["BigAl_NBA3_WinPct572_Tightener"] = (
+        s["BigAl_NBA3_FadeHomeAfterChampUpset"].eq(1) & n("Opp_WinPct_Prior_System").gt(0.572)
+    ).astype("int8")
+
+    # NBA 4 - final home game, favorite >5, revenge.
+    s["BigAl_NBA4_FinalHomeFavRevenge_DataReady"] = ready("Is_Final_Home_Game", "Spread_Value", "Revenge_Flag_Current").astype("int8")
+    s["BigAl_NBA4_FinalHomeFavRevenge"] = (
+        is_nba & n("Is_Final_Home_Game").eq(1) & n("Is_Home").eq(1) & n("Spread_Value").lt(-5) & n("Revenge_Flag_Current").eq(1)
+    ).astype("int8")
+    s["BigAl_NBA4_NotOffSUATSLoss_Tightener"] = (
+        s["BigAl_NBA4_FinalHomeFavRevenge"].eq(1) & ~(n("Prev_SU_Loss").eq(1) & n("Prev_ATS_Loss").eq(1))
+    ).astype("int8")
+
+    # NBA 5 - winning road team +10 vs defending champion in playoffs.
+    s["BigAl_NBA5_PlayoffBigDogVsChamp_DataReady"] = ready("Is_Postseason", "WinPct_Prior_System", "Spread_Value", "Opponent_Is_Defending_Champion").astype("int8")
+    s["BigAl_NBA5_PlayoffBigDogVsChamp"] = (
+        is_nba & n("Is_Postseason").eq(1) & n("WinPct_Prior_System").gt(0.5) & n("Is_Home").eq(0) &
+        n("Spread_Value").gt(10) & n("Opponent_Is_Defending_Champion").eq(1)
+    ).astype("int8")
+    s["BigAl_NBA5_ChampOffSUWin_Tightener"] = (
+        s["BigAl_NBA5_PlayoffBigDogVsChamp"].eq(1) & n("Opp_Prev_SU_Win").eq(1)
+    ).astype("int8")
+
+    # NBA 6 - Finals Game 4 road team down 2-1, off road win, .625+, <=4-point favorite.
+    s["BigAl_NBA6_FinalsGame4_DataReady"] = ready("Is_Finals", "Series_Game_Number", "Team_Series_Wins", "Opp_Series_Wins", "Prev_SU_Win", "Prev_Is_Home", "WinPct_Prior_System", "Spread_Value").astype("int8")
+    s["BigAl_NBA6_FinalsGame4"] = (
+        is_nba & n("Is_Finals").eq(1) & n("Series_Game_Number").eq(4) & n("Is_Home").eq(0) &
+        n("Team_Series_Wins").eq(1) & n("Opp_Series_Wins").eq(2) & n("Prev_SU_Win").eq(1) &
+        n("Prev_Is_Home").eq(0) & n("WinPct_Prior_System").ge(0.625) & n("Spread_Value").ge(-4)
+    ).astype("int8")
+
+    # NBA 7 - both teams would be eliminated with a loss => UNDER.
+    s["BigAl_NBA7_TwoTeamEliminationUnder_DataReady"] = ready("Team_Eliminated_With_Loss", "Opponent_Eliminated_With_Loss").astype("int8")
+    s["BigAl_NBA7_TwoTeamEliminationUnder"] = (
+        is_nba & n("Team_Eliminated_With_Loss").eq(1) & n("Opponent_Eliminated_With_Loss").eq(1)
+    ).astype("int8")
+
+    # NCAAB - dog/PK off two SU+ATS losses by >20; opponent not off two losses.
+    s["BigAl_CBB1_UglyDog20Losses_DataReady"] = ready(
+        "Spread_Value", "Prev_SU_Margin", "Prev_ATS_Cover_Margin", "Prev2_SU_Margin", "Prev2_ATS_Cover_Margin",
+        "Opp_Prev_SU_Loss", "Opp_Prev2_SU_Loss"
+    ).astype("int8")
+    s["BigAl_CBB1_UglyDog20Losses"] = (
+        is_ncaab & n("Spread_Value").ge(0) &
+        n("Prev_SU_Margin").lt(-20) & n("Prev_ATS_Cover_Margin").lt(-20) &
+        n("Prev2_SU_Margin").lt(-20) & n("Prev2_ATS_Cover_Margin").lt(-20) &
+        ~(n("Opp_Prev_SU_Loss").eq(1) & n("Opp_Prev2_SU_Loss").eq(1))
+    ).astype("int8")
+    s["BigAl_CBB1_ThreeLoss_Tightener"] = (
+        s["BigAl_CBB1_UglyDog20Losses"].eq(1) & n("Prev3_SU_Margin").lt(-20) & n("Prev3_ATS_Cover_Margin").lt(-20)
+    ).astype("int8")
+
+    # CFL 1 - second meeting after 63+ first meeting => UNDER; total >51 tightener.
+    s["BigAl_CFL1_SecondMeetingUnder_DataReady"] = ready("Season_H2H_Meeting_Number", "First_Meeting_Actual_Total_Prior").astype("int8")
+    s["BigAl_CFL1_SecondMeetingUnder"] = (
+        is_cfl & n("Season_H2H_Meeting_Number").eq(2) & n("First_Meeting_Actual_Total_Prior").ge(63)
+    ).astype("int8")
+    s["BigAl_CFL1_TotalAbove51_Tightener"] = (
+        s["BigAl_CFL1_SecondMeetingUnder"].eq(1) & n("Current_Total").gt(51)
+    ).astype("int8")
+
+    # CFL 2 - fade elite dog >3 after Game 7; flag play-on opponent.
+    s["BigAl_CFL2_EliteDogFade_DataReady"] = ready("Opp_Team_Game_Number", "Opp_WinPct_Prior_System", "Opp_Spread_Value").astype("int8")
+    s["BigAl_CFL2_EliteDogFade"] = (
+        is_cfl & n("Opp_Team_Game_Number").ge(7) & n("Opp_WinPct_Prior_System").ge(0.820) & n("Opp_Spread_Value").gt(3)
+    ).astype("int8")
+
+    # Signed total-system direction for the canonical Over training row:
+    # +1 = Big Al says OVER; -1 = Big Al says UNDER.
+    s["BigAl_Total_System_Signed"] = (
+        s["BigAl_NFL5_PreseasonLowOffenseOver"].astype(float)
+        - s["BigAl_NBA7_TwoTeamEliminationUnder"].astype(float)
+        - s["BigAl_CFL1_SecondMeetingUnder"].astype(float)
+    ).astype("float32")
+
+    # ------------------------------------------------------------------
+    # Aggregate counts + human-readable audit string.
+    # ------------------------------------------------------------------
+    pathi_signal_cols = [
+        "Pathi_M1_DogThatWon", "Pathi_M8_DogWon_BetterPrice", "Pathi_M2_HomeDog",
+        "Pathi_M3_Rule10_LosingStreak", "Pathi_M3_Rule10_PlusMoney", "Pathi_M4_ExtendedWinStreakFade",
+        "Pathi_M5_TravelOffDayFreeze", "Pathi_M6_WeakTeamNewChalk_Screen", "Pathi_M7_BadRoadFavoriteProfile",
+        "Pathi_M9_Plus15_PlusMoney", "Pathi_RoadFavLost_StillFavorite_Screen",
+    ]
+    bigal_base_cols = [
+        "BigAl_NFL1_Week1FadePlayoffTeam", "BigAl_NFL2_LateSeasonHomeDog", "BigAl_NFL3_PlayoffHighScoreFade",
+        "BigAl_NFL4_PreseasonContrarianMove", "BigAl_NFL5_PreseasonLowOffenseOver",
+        "BigAl_CF1_Week2Home42Win", "BigAl_CF2_LateSeasonRevengeDog",
+        "BigAl_NBA1_B2BRematchRoadDog", "BigAl_NBA2_ThreeMassiveCovers", "BigAl_NBA3_FadeHomeAfterChampUpset",
+        "BigAl_NBA4_FinalHomeFavRevenge", "BigAl_NBA5_PlayoffBigDogVsChamp", "BigAl_NBA6_FinalsGame4",
+        "BigAl_NBA7_TwoTeamEliminationUnder", "BigAl_CBB1_UglyDog20Losses",
+        "BigAl_CFL1_SecondMeetingUnder", "BigAl_CFL2_EliteDogFade",
+    ]
+    tight_cols = [c for c in s.columns if c.startswith("BigAl_") and c.endswith("_Tightener")]
+    s["Pathi_System_Count"] = s[pathi_signal_cols].sum(axis=1).astype("int16")
+    s["BigAl_System_Count"] = s[bigal_base_cols].sum(axis=1).astype("int16")
+    s["BigAl_Tightener_Count"] = s[tight_cols].sum(axis=1).astype("int16") if tight_cols else 0
+    s["System_Signal_Count"] = (s["Pathi_System_Count"] + s["BigAl_System_Count"] + s["BigAl_Tightener_Count"]).astype("int16")
+
+    label_map = {
+        "Pathi_M1_DogThatWon": "PATHI M1 Dog That Won",
+        "Pathi_M8_DogWon_BetterPrice": "PATHI M8 Better Price",
+        "Pathi_M2_HomeDog": "PATHI M2 Home Dog",
+        "Pathi_M3_Rule10_LosingStreak": "PATHI M3 Rule of 10",
+        "Pathi_M3_Rule10_PlusMoney": "PATHI M3 +Money",
+        "Pathi_M4_ExtendedWinStreakFade": "PATHI M4 Fade Hot Favorite",
+        "Pathi_M5_TravelOffDayFreeze": "PATHI M5 Off-Day Freeze",
+        "Pathi_M6_WeakTeamNewChalk_Screen": "PATHI M6 New Chalk Screen",
+        "Pathi_M7_BadRoadFavoriteProfile": "PATHI M7 Bad Road Favorite",
+        "Pathi_M9_Plus15_PlusMoney": "PATHI M9 +1.5 Plus Money",
+        "Pathi_RoleFlip_DogToFavorite_Cancel": "PATHI CANCEL: Dog->Favorite",
+        "BigAl_NFL1_Week1FadePlayoffTeam": "BIG AL NFL1 Week 1 Fade",
+        "BigAl_NFL1_HomeTightener": "BIG AL NFL1 Home Tightener",
+        "BigAl_NFL2_LateSeasonHomeDog": "BIG AL NFL2 Late Home Dog",
+        "BigAl_NFL2_OppOffATSLoss_Tightener": "BIG AL NFL2 Tightener",
+        "BigAl_NFL3_PlayoffHighScoreFade": "BIG AL NFL3 Playoff Fade",
+        "BigAl_NFL4_PreseasonContrarianMove": "BIG AL NFL4 Preseason RLM",
+        "BigAl_NFL5_PreseasonLowOffenseOver": "BIG AL NFL5 OVER",
+        "BigAl_CF1_Week2Home42Win": "BIG AL CF1 Week 2",
+        "BigAl_CF2_LateSeasonRevengeDog": "BIG AL CF2 Revenge Dog",
+        "BigAl_NBA1_B2BRematchRoadDog": "BIG AL NBA1 Rematch Dog",
+        "BigAl_NBA1_PriorLoss25_Tightener": "BIG AL NBA1 25+ Tightener",
+        "BigAl_NBA2_ThreeMassiveCovers": "BIG AL NBA2 3 Massive Covers",
+        "BigAl_NBA3_FadeHomeAfterChampUpset": "BIG AL NBA3 Champ-Upset Fade",
+        "BigAl_NBA4_FinalHomeFavRevenge": "BIG AL NBA4 Final Home Revenge",
+        "BigAl_NBA5_PlayoffBigDogVsChamp": "BIG AL NBA5 Playoff Big Dog",
+        "BigAl_NBA6_FinalsGame4": "BIG AL NBA6 Finals G4",
+        "BigAl_NBA7_TwoTeamEliminationUnder": "BIG AL NBA7 UNDER",
+        "BigAl_CBB1_UglyDog20Losses": "BIG AL CBB1 Ugly Dog",
+        "BigAl_CBB1_ThreeLoss_Tightener": "BIG AL CBB1 3-Loss Tightener",
+        "BigAl_CFL1_SecondMeetingUnder": "BIG AL CFL1 UNDER",
+        "BigAl_CFL1_TotalAbove51_Tightener": "BIG AL CFL1 >51 Tightener",
+        "BigAl_CFL2_EliteDogFade": "BIG AL CFL2 Fade Elite Dog",
+    }
+
+    def _labels(row):
+        parts = [label for col, label in label_map.items() if col in row.index and pd.to_numeric(row[col], errors="coerce") == 1]
+        return " | ".join(parts) if parts else "—"
+
+    s["System_Signals_Text"] = s.apply(_labels, axis=1)
+    return s
+
+
+def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.DataFrame) -> pd.DataFrame:
+    """Broadcast team/game Pathi-BigAl state to book/outcome rows without row growth."""
+    if df_rows is None or df_rows.empty or state is None or state.empty:
+        return df_rows.copy()
+    out = df_rows.copy()
+    out["Sport"] = out.get("Sport", "").astype(str).str.upper().str.strip()
+    out["Game_Key"] = out["Game_Key"].astype(str).str.lower().str.strip()
+    out["Market"] = out["Market"].astype(str).map(_sys_norm_market)
+    out["Outcome_Norm"] = out.get("Outcome", "").astype(str).str.lower().str.strip()
+    out["Home_Team_Norm"] = out.get("Home_Team_Norm", out.get("Home_Team", "")).astype(str).str.lower().str.strip()
+    out["Away_Team_Norm"] = out.get("Away_Team_Norm", out.get("Away_Team", "")).astype(str).str.lower().str.strip()
+    is_tot = out["Market"].eq("totals")
+    out["Team"] = np.where(
+        is_tot,
+        out["Home_Team_Norm"],
+        np.where(out["Outcome_Norm"].eq("home"), out["Home_Team_Norm"],
+                 np.where(out["Outcome_Norm"].eq("away"), out["Away_Team_Norm"], out["Outcome_Norm"]))
+    )
+    out["Team"] = pd.Series(out["Team"], index=out.index).astype(str).str.lower().str.strip()
+
+    keep = ["Sport", "Game_Key", "Team"] + [
+        c for c in state.columns
+        if c not in {"Sport", "Game_Key", "Team", "Opponent", "Game_Start", "Home_Team_Norm", "Away_Team_Norm"}
+        and (c.startswith("Pathi_") or c.startswith("BigAl_") or c.startswith("System_") or c in {
+            "ML_Odds", "Opening_ML_Odds", "ML_Fair_Prob", "Opening_ML_Fair_Prob",
+            "Is_ML_Dog", "Is_ML_Favorite", "Opening_Is_ML_Dog",
+            "Spread_Value", "Opening_Spread", "Spread_Odds", "Current_Total", "Opening_Total",
+            "SU_Win_Streak_Prior", "SU_Loss_Streak_Prior", "ATS_Win_Streak_Prior", "ATS_Loss_Streak_Prior",
+            "WinPct_Prior_System", "Team_Game_Number", "Immediate_Rematch_Flag", "Season_H2H_Meeting_Number",
+            "First_Meeting_Actual_Total_Prior", "Dog_Rate_Last10_Prior", "Road_Favorite_ROI_Prior",
+            "Revenge_Flag_Current", "Days_Since_Last_Game_System",
+        })
+    ]
+    stmap = state[keep].drop_duplicates(["Sport", "Game_Key", "Team"], keep="last")
+    before = len(out)
+    out = out.merge(stmap, on=["Sport", "Game_Key", "Team"], how="left", validate="many_to_one")
+    if len(out) != before:
+        raise RuntimeError(f"Pathi/BigAl merge changed row count {before} -> {len(out)}")
+
+    # Keep each named system on the market it actually recommends. This avoids,
+    # for example, feeding an MLB moneyline system into the run-line model or
+    # displaying an UNDER system on a side row.
+    _m = out["Market"].astype(str).map(_sys_norm_market)
+    _pathi_ml = [
+        "Pathi_M1_DogThatWon", "Pathi_M8_DogWon_BetterPrice", "Pathi_M2_HomeDog",
+        "Pathi_M3_Rule10_LosingStreak", "Pathi_M3_Rule10_PlusMoney",
+        "Pathi_M4_ExtendedWinStreakFade", "Pathi_M5_TravelOffDayFreeze",
+        "Pathi_M6_WeakTeamNewChalk_Screen", "Pathi_M7_BadRoadFavoriteProfile",
+        "Pathi_RoadFavLost_StillFavorite_Screen", "Pathi_RoleFlip_DogToFavorite_Cancel",
+    ]
+    _pathi_spread = ["Pathi_M9_Plus15_PlusMoney"]
+    _bigal_side = [
+        "BigAl_NFL1_Week1FadePlayoffTeam", "BigAl_NFL1_HomeTightener",
+        "BigAl_NFL2_LateSeasonHomeDog", "BigAl_NFL2_OppOffATSLoss_Tightener",
+        "BigAl_NFL3_PlayoffHighScoreFade", "BigAl_NFL4_PreseasonContrarianMove",
+        "BigAl_CF1_Week2Home42Win", "BigAl_CF2_LateSeasonRevengeDog", "BigAl_CF2_Away_Tightener",
+        "BigAl_NBA1_B2BRematchRoadDog", "BigAl_NBA1_PriorLoss25_Tightener",
+        "BigAl_NBA2_ThreeMassiveCovers", "BigAl_NBA3_FadeHomeAfterChampUpset",
+        "BigAl_NBA3_WinPct572_Tightener", "BigAl_NBA4_FinalHomeFavRevenge",
+        "BigAl_NBA4_NotOffSUATSLoss_Tightener", "BigAl_NBA5_PlayoffBigDogVsChamp",
+        "BigAl_NBA5_ChampOffSUWin_Tightener", "BigAl_NBA6_FinalsGame4",
+        "BigAl_CBB1_UglyDog20Losses", "BigAl_CBB1_ThreeLoss_Tightener",
+        "BigAl_CFL2_EliteDogFade",
+    ]
+    _bigal_total = [
+        "BigAl_NFL5_PreseasonLowOffenseOver", "BigAl_NFL5_TotalUnder40_Tightener",
+        "BigAl_NBA7_TwoTeamEliminationUnder",
+        "BigAl_CFL1_SecondMeetingUnder", "BigAl_CFL1_TotalAbove51_Tightener",
+        "BigAl_Total_System_Signed",
+    ]
+
+    for _c in _pathi_ml:
+        if _c in out.columns:
+            out.loc[~_m.eq("h2h"), _c] = 0
+    for _c in _pathi_spread + _bigal_side:
+        if _c in out.columns:
+            out.loc[~_m.eq("spreads"), _c] = 0
+    for _c in _bigal_total:
+        if _c in out.columns:
+            out.loc[~_m.eq("totals"), _c] = 0
+
+    _pathi_count = [c for c in (_pathi_ml + _pathi_spread) if c in out.columns and not c.endswith("Cancel")]
+    _bigal_bases = [
+        c for c in (_bigal_side + _bigal_total)
+        if c in out.columns and not c.endswith("_Tightener") and c != "BigAl_Total_System_Signed"
+    ]
+    _tight = [c for c in out.columns if c.startswith("BigAl_") and c.endswith("_Tightener")]
+    out["Pathi_System_Count"] = out[_pathi_count].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16") if _pathi_count else 0
+    out["BigAl_System_Count"] = out[_bigal_bases].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16") if _bigal_bases else 0
+    out["BigAl_Tightener_Count"] = out[_tight].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16") if _tight else 0
+    out["System_Signal_Count"] = (out["Pathi_System_Count"] + out["BigAl_System_Count"] + out["BigAl_Tightener_Count"]).astype("int16")
+
+    _labels = {
+        "Pathi_M1_DogThatWon": "PATHI M1 Dog That Won",
+        "Pathi_M8_DogWon_BetterPrice": "PATHI M8 Better Price",
+        "Pathi_M2_HomeDog": "PATHI M2 Home Dog",
+        "Pathi_M3_Rule10_LosingStreak": "PATHI M3 Rule of 10",
+        "Pathi_M3_Rule10_PlusMoney": "PATHI M3 +Money",
+        "Pathi_M4_ExtendedWinStreakFade": "PATHI M4 Fade Hot Favorite",
+        "Pathi_M5_TravelOffDayFreeze": "PATHI M5 Off-Day Freeze",
+        "Pathi_M6_WeakTeamNewChalk_Screen": "PATHI M6 New Chalk Screen",
+        "Pathi_M7_BadRoadFavoriteProfile": "PATHI M7 Bad Road Favorite",
+        "Pathi_M9_Plus15_PlusMoney": "PATHI M9 +1.5 Plus Money",
+        "Pathi_RoleFlip_DogToFavorite_Cancel": "PATHI CANCEL Dog->Favorite",
+        "BigAl_NFL1_Week1FadePlayoffTeam": "BIG AL NFL1 Week 1 Fade",
+        "BigAl_NFL2_LateSeasonHomeDog": "BIG AL NFL2 Late Home Dog",
+        "BigAl_NFL3_PlayoffHighScoreFade": "BIG AL NFL3 Playoff Fade",
+        "BigAl_NFL4_PreseasonContrarianMove": "BIG AL NFL4 Preseason RLM",
+        "BigAl_NFL5_PreseasonLowOffenseOver": "BIG AL NFL5 OVER",
+        "BigAl_CF1_Week2Home42Win": "BIG AL CF1 Week 2",
+        "BigAl_CF2_LateSeasonRevengeDog": "BIG AL CF2 Revenge Dog",
+        "BigAl_NBA1_B2BRematchRoadDog": "BIG AL NBA1 Rematch Dog",
+        "BigAl_NBA2_ThreeMassiveCovers": "BIG AL NBA2 3 Massive Covers",
+        "BigAl_NBA3_FadeHomeAfterChampUpset": "BIG AL NBA3 Champ-Upset Fade",
+        "BigAl_NBA4_FinalHomeFavRevenge": "BIG AL NBA4 Final Home Revenge",
+        "BigAl_NBA5_PlayoffBigDogVsChamp": "BIG AL NBA5 Playoff Big Dog",
+        "BigAl_NBA6_FinalsGame4": "BIG AL NBA6 Finals G4",
+        "BigAl_NBA7_TwoTeamEliminationUnder": "BIG AL NBA7 UNDER",
+        "BigAl_CBB1_UglyDog20Losses": "BIG AL CBB1 Ugly Dog",
+        "BigAl_CFL1_SecondMeetingUnder": "BIG AL CFL1 UNDER",
+        "BigAl_CFL2_EliteDogFade": "BIG AL CFL2 Fade Elite Dog",
+    }
+    _tight_labels = {c: c.replace("BigAl_", "BIG AL ").replace("_", " ") for c in _tight}
+    _labels.update(_tight_labels)
+    def _row_labels(r):
+        vals=[]
+        for c,label in _labels.items():
+            if c in r.index and pd.to_numeric(r[c], errors="coerce") == 1:
+                vals.append(label)
+        return " | ".join(vals) if vals else "—"
+    out["System_Signals_Text"] = out.apply(_row_labels, axis=1)
+    return out
+
+
+def pathi_bigal_numeric_feature_cols(df: pd.DataFrame) -> list[str]:
+    """Numeric Pathi/BigAl features safe to offer to AutoFS/model training."""
+    if df is None or df.empty:
+        return []
+    prefixes = ("Pathi_", "BigAl_", "System_")
+    out = []
+    for c in df.columns:
+        if not str(c).startswith(prefixes) or c == "System_Signals_Text":
+            continue
+        if pd.api.types.is_numeric_dtype(df[c]) or pd.api.types.is_bool_dtype(df[c]):
+            out.append(c)
+    return out
+
+
+@st.cache_data(ttl=15 * 60, show_spinner=False)
+def fetch_pathi_bigal_history_for_live(sport: str, days_back: int = 1200) -> pd.DataFrame:
+    """Load completed market rows + final scores used to create current system state."""
+    sport_u = str(sport).upper().strip()
+    q = """
+        SELECT *
+        FROM `sharplogger.sharp_data.scores_with_features`
+        WHERE UPPER(Sport) = @sport
+          AND SHARP_HIT_BOOL IS NOT NULL
+          AND DATE(Game_Start) >= DATE_SUB(CURRENT_DATE(), INTERVAL @days_back DAY)
+    """
+    cfg = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("sport", "STRING", sport_u),
+        bigquery.ScalarQueryParameter("days_back", "INT64", int(days_back)),
+    ])
+    hist = bq_client.query(q, job_config=cfg).to_dataframe()
+    if hist.empty:
+        return hist
+
+    # Merge final scores only if the history view does not already provide them.
+    if not {"Score_Home_Score", "Score_Away_Score"}.issubset(hist.columns) and "Merge_Key_Short" in hist.columns:
+        q2 = """
+            SELECT Merge_Key_Short,
+                   SAFE_CAST(Score_Home_Score AS FLOAT64) AS Score_Home_Score,
+                   SAFE_CAST(Score_Away_Score AS FLOAT64) AS Score_Away_Score
+            FROM `sharplogger.sharp_data.game_scores_final`
+            WHERE UPPER(Sport) = @sport
+              AND Score_Home_Score IS NOT NULL
+              AND Score_Away_Score IS NOT NULL
+        """
+        cfg2 = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport_u)])
+        sc = bq_client.query(q2, job_config=cfg2).to_dataframe()
+        if not sc.empty:
+            hist["Merge_Key_Short"] = hist["Merge_Key_Short"].astype(str).str.lower().str.strip()
+            sc["Merge_Key_Short"] = sc["Merge_Key_Short"].astype(str).str.lower().str.strip()
+            sc = sc.drop_duplicates("Merge_Key_Short", keep="last")
+            hist = hist.merge(sc, on="Merge_Key_Short", how="left", validate="many_to_one")
+    return hist
+
+
+def attach_pathi_bigal_live_features(current_rows: pd.DataFrame, sport: str) -> pd.DataFrame:
+    """Create up-to-date Pathi/BigAl flags for upcoming dashboard rows."""
+    if current_rows is None or current_rows.empty:
+        return current_rows.copy()
+    cur = current_rows.copy()
+    try:
+        hist = fetch_pathi_bigal_history_for_live(sport)
+        combo = pd.concat([hist, cur], ignore_index=True, sort=False) if hist is not None and not hist.empty else cur.copy()
+        state = build_pathi_bigal_team_game_state(combo)
+        current_keys = set(cur["Game_Key"].astype(str).str.lower().str.strip())
+        state_now = state[state["Game_Key"].astype(str).str.lower().str.strip().isin(current_keys)].copy()
+        return attach_pathi_bigal_features_to_market_rows(cur, state_now)
+    except Exception as e:
+        try:
+            st.warning(f"Pathi/Big Al feature layer unavailable: {e}")
+        except Exception:
+            pass
+        return cur
+
+# ============================================================================
+# End Pathi + Big Al deterministic situational system layer
+# ============================================================================
+
+
 
 def safe_row_entropy(W: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     """
@@ -478,6 +1486,7 @@ SPORT_ALIASES = {
     "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
     "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIANFOOTBALL_CFL"],
     "NCAAB":   ["NCAAB", "BASKETBALL_NCAAB", "BASKETBALL-NCAAB"],
+    "NHL":     ["NHL", "ICEHOCKEY_NHL", "HOCKEY_NHL"],
     # extend as needed
 }
 
@@ -8377,13 +9386,21 @@ def build_cover_streaks_game_level(df_bt_prepped: pd.DataFrame, *, sport: str, m
     g["Team_Recent_Cover_Rate_Home_Fav"]   = _rate(g["Team_Recent_Cover_Streak_Home_Fav"], g["Team_Recent_Cover_Games_Home_Fav"])
     g["Team_Recent_Cover_Rate_Away_Fav"]   = _rate(g["Team_Recent_Cover_Streak_Away_Fav"], g["Team_Recent_Cover_Games_Away_Fav"])
 
-    # ---- "on streak" flags (count-based) ----
+    # ---- Legacy "on streak" flags (count-based rolling-window counts) ----
     g["On_Cover_Streak"]          = (g["Team_Recent_Cover_Streak"]          >= on_thresh).astype(int)
     g["On_Cover_Streak_Home"]     = (g["Team_Recent_Cover_Streak_Home"]     >= on_thresh).astype(int)
     g["On_Cover_Streak_Away"]     = (g["Team_Recent_Cover_Streak_Away"]     >= on_thresh).astype(int)
     g["On_Cover_Streak_Fav"]      = (g["Team_Recent_Cover_Streak_Fav"]      >= on_thresh).astype(int)
     g["On_Cover_Streak_Home_Fav"] = (g["Team_Recent_Cover_Streak_Home_Fav"] >= on_thresh).astype(int)
     g["On_Cover_Streak_Away_Fav"] = (g["Team_Recent_Cover_Streak_Away_Fav"] >= on_thresh).astype(int)
+
+    # True consecutive hit/miss streaks before the game. These are separate from
+    # the legacy rolling-window counts above and are the appropriate inputs for
+    # Pathi/Big Al rules that say consecutive wins/losses/covers.
+    g["Team_Consecutive_Hit_Streak_Prior"] = _sys_consecutive_prior(g, "SHARP_HIT_BOOL", grp)
+    g["__MISS_BOOL"] = np.where(g["SHARP_HIT_BOOL"].notna(), (g["SHARP_HIT_BOOL"] < 0.5).astype(float), np.nan)
+    g["Team_Consecutive_Miss_Streak_Prior"] = _sys_consecutive_prior(g, "__MISS_BOOL", grp)
+    g.drop(columns=["__MISS_BOOL"], inplace=True, errors="ignore")
 
     streak_cols = [
         # sums
@@ -8397,7 +9414,9 @@ def build_cover_streaks_game_level(df_bt_prepped: pd.DataFrame, *, sport: str, m
         "Team_Recent_Cover_Rate_Fav","Team_Recent_Cover_Rate_Home_Fav","Team_Recent_Cover_Rate_Away_Fav",
         # flags
         "On_Cover_Streak","On_Cover_Streak_Home","On_Cover_Streak_Away",
-        "On_Cover_Streak_Fav","On_Cover_Streak_Home_Fav","On_Cover_Streak_Away_Fav"
+        "On_Cover_Streak_Fav","On_Cover_Streak_Home_Fav","On_Cover_Streak_Away_Fav",
+        # actual consecutive streaks
+        "Team_Consecutive_Hit_Streak_Prior","Team_Consecutive_Miss_Streak_Prior"
     ]
 
     # Always return the canonical "Game_Start" column name, even if we used feat_Game_Start internally
@@ -9314,6 +10333,42 @@ def train_sharp_model_from_bq(
     # cleanup helper column
     df_bt.drop(columns=["fav_covered"], inplace=True, errors="ignore")
 
+    # ================================================================
+    # Pathi + Big Al deterministic state, built BEFORE market filtering
+    # so MLB moneyline roles, ATS history, totals and opponent context
+    # are all available to every market head without leakage.
+    # ================================================================
+    try:
+        df_system_source = df_bt.copy()
+        if "Merge_Key_Short" in df_system_source.columns and df_results is not None and not df_results.empty:
+            _sc = df_results[[
+                c for c in ["Merge_Key_Short", "Score_Home_Score", "Score_Away_Score"]
+                if c in df_results.columns
+            ]].copy()
+            if "Merge_Key_Short" in _sc.columns:
+                _sc["Merge_Key_Short"] = _sc["Merge_Key_Short"].astype(str).str.lower().str.strip()
+                _sc = _sc.drop_duplicates("Merge_Key_Short", keep="last")
+                for _c in ["Score_Home_Score", "Score_Away_Score"]:
+                    if _c in _sc.columns:
+                        _map = _sc.set_index("Merge_Key_Short")[_c]
+                        _src = df_system_source["Merge_Key_Short"].astype(str).str.lower().str.strip()
+                        if _c not in df_system_source.columns:
+                            df_system_source[_c] = _src.map(_map)
+                        else:
+                            df_system_source[_c] = pd.to_numeric(df_system_source[_c], errors="coerce").combine_first(_src.map(_map))
+
+        system_state_train = build_pathi_bigal_team_game_state(df_system_source)
+        df_bt = attach_pathi_bigal_features_to_market_rows(df_bt, system_state_train)
+        status_msg = None
+        try:
+            _n_sys = len(pathi_bigal_numeric_feature_cols(df_bt))
+            st.info(f"Pathi/Big Al layer attached: {_n_sys} numeric system features ({PATHI_BIGAL_FEATURE_VERSION}).")
+        except Exception:
+            pass
+    except Exception as _sys_exc:
+        system_state_train = pd.DataFrame()
+        st.warning(f"Pathi/Big Al training feature layer skipped: {_sys_exc}")
+
     # ρ lookups (Spread↔Total, Spread↔ML, Total↔ML) — do this ONCE
     
     ST_lookup, SM_lookup, TM_lookup = build_corr_lookup_ST_SM_TM(hist_df, sport=sport_label)
@@ -9402,10 +10457,25 @@ def train_sharp_model_from_bq(
         out['Team'] = out['Outcome_Norm'].where(~is_totals, out['Home_Team_Norm']).astype(str).str.strip()
         out['Is_Home'] = np.where(is_totals, 1, (out['Team'] == out['Home_Team_Norm']).astype(int)).astype(int)
     
-        # Favorite context: spreads/h2h -> Value<0 ; totals -> OVER
-        out['Is_Favorite_Context'] = np.where(
-            is_totals, (out['Outcome_Norm'] == 'over').astype(int),
-            (pd.to_numeric(out['Value'], errors='coerce') < 0).astype(int)
+        # Favorite context:
+        #   spreads -> signed spread value
+        #   h2h     -> paired/de-vig role from Pathi/BigAl state when available,
+        #              otherwise American-price sign as a fallback
+        #   totals  -> OVER as the canonical side
+        is_h2h = out['Market'].eq('h2h')
+        spread_fav = (pd.to_numeric(out['Value'], errors='coerce') < 0).astype(int)
+        if 'Is_ML_Favorite' in out.columns:
+            h2h_fav = pd.to_numeric(out['Is_ML_Favorite'], errors='coerce')
+        else:
+            h2h_fav = pd.Series(np.nan, index=out.index)
+        h2h_fav = h2h_fav.where(
+            h2h_fav.notna(),
+            (pd.to_numeric(out.get('Odds_Price'), errors='coerce') < 0).astype(float)
+        ).fillna(0).astype(int)
+        out['Is_Favorite_Context'] = np.select(
+            [is_totals, is_h2h],
+            [(out['Outcome_Norm'] == 'over').astype(int), h2h_fav],
+            default=spread_fav
         ).astype(int)
         return out
     
@@ -9756,15 +10826,16 @@ def train_sharp_model_from_bq(
         STATE_COLS = [c for c in df_bt_streaks.columns if c not in ["Sport","Market","Game_Key","Team","Game_Start"]]
         LOO_PRIOR_COLS = [c for c in df_bt_loostats.columns if c not in ["Sport","Market","Game_Key","Team"]]
         
-        # aggregation: use LAST for both state + priors (recommended)
-        agg_spec = {c: "last" for c in (STATE_COLS + LOO_PRIOR_COLS) if c in df_team_base.columns}
+        # aggregation: use LAST for state + priors + schedule density
+        _team_map_cols = list(dict.fromkeys(STATE_COLS + LOO_PRIOR_COLS + SCHED_COLS))
+        agg_spec = {c: "last" for c in _team_map_cols if c in df_team_base.columns}
         
         team_feature_map = (
             df_team_base.groupby(["Sport","Market","Team"], as_index=False).agg(agg_spec)
         )
         
         # numeric coercion for the state cols (optional)
-        for c in STATE_COLS + LOO_PRIOR_COLS:
+        for c in list(dict.fromkeys(STATE_COLS + LOO_PRIOR_COLS + SCHED_COLS)):
             if c in team_feature_map.columns:
                 team_feature_map[c] = pd.to_numeric(team_feature_map[c], errors="coerce")
 
@@ -10433,13 +11504,27 @@ def train_sharp_model_from_bq(
             outcome = row['Outcome_Norm']
             home_team = row['Home_Team_Norm']
             
-            if market in ['spreads', 'h2h']:
-                if value < 0:
+            if market == 'spreads':
+                if pd.notna(value) and value < 0:
                     return 'favorite'
-                elif value > 0:
+                elif pd.notna(value) and value > 0:
                     return 'underdog'
                 else:
-                    return 'even'  # fallback (rare)
+                    return 'even'
+            elif market == 'h2h':
+                # Prefer paired/de-vig role from the deterministic state layer.
+                is_fav = pd.to_numeric(row.get('Is_ML_Favorite', np.nan), errors='coerce')
+                is_dog = pd.to_numeric(row.get('Is_ML_Dog', np.nan), errors='coerce')
+                if pd.notna(is_fav) and is_fav == 1:
+                    return 'favorite'
+                if pd.notna(is_dog) and is_dog == 1:
+                    return 'underdog'
+                odds = pd.to_numeric(row.get('Odds_Price', np.nan), errors='coerce')
+                if pd.notna(odds) and odds < 0:
+                    return 'favorite'
+                elif pd.notna(odds) and odds > 0:
+                    return 'underdog'
+                return 'even'
             elif market == 'totals':
                 if outcome == 'over':
                     return 'over'
@@ -10559,7 +11644,22 @@ def train_sharp_model_from_bq(
         
         # === Contextual Flags
         df_market["Is_Home_Team_Bet"] = (df_market["Outcome_Norm"] == df_market["Home_Team_Norm"]).astype(int)
-        df_market['Is_Favorite_Bet'] = (df_market['Value'] < 0).astype(int)
+        _is_h2h_role = df_market['Market'].eq('h2h')
+        _is_total_role = df_market['Market'].eq('totals')
+        _h2h_fav = (
+            pd.to_numeric(df_market['Is_ML_Favorite'], errors='coerce')
+            if 'Is_ML_Favorite' in df_market.columns
+            else pd.Series(np.nan, index=df_market.index, dtype='float64')
+        )
+        _h2h_fav = _h2h_fav.where(
+            _h2h_fav.notna(),
+            (pd.to_numeric(df_market.get('Odds_Price'), errors='coerce') < 0).astype(float)
+        ).fillna(0).astype(int)
+        df_market['Is_Favorite_Bet'] = np.select(
+            [_is_total_role, _is_h2h_role],
+            [(df_market['Outcome_Norm'] == 'over').astype(int), _h2h_fav],
+            default=(pd.to_numeric(df_market['Value'], errors='coerce') < 0).astype(int)
+        ).astype(int)
         
         # Ensure NA-safe boo logic and conversion
         df_market['SharpMove_Odds_Up'] = (
@@ -10650,6 +11750,7 @@ def train_sharp_model_from_bq(
             'NBA': 'NBA',
             'NCAAF': 'NCAAF',
             'NCAAB': 'NCAAB',
+            'NHL': 'NHL',
         }
                 # === Sport and Market Normalization (if not already present)
         df_market['Sport_Norm'] = df_market['Sport'].map(SPORT_ALIAS).fillna(df_market['Sport'])
@@ -10664,18 +11765,30 @@ def train_sharp_model_from_bq(
             _amer_to_prob_vec(df_market['Odds_Price']) - _amer_to_prob_vec(df_market['First_Odds'])
         )
         
-        # === Directional Movement Flags
-        df_market['Line_Moved_Toward_Team'] = np.where(
-            ((df_market['Value'] > df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 1)) |
-            ((df_market['Value'] < df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 0)),
-            1, 0
+        # === Directional Movement Flags (team-perspective, market-safe)
+        # Spreads: for a team-specific row, a numerically LOWER spread is support
+        # for that team (-3 -> -4 favorite; +4 -> +3 dog).
+        # H2H: support means implied probability increased.
+        # Totals: OVER support means total moved up; UNDER support means total moved down.
+        _mkt = df_market['Market_Norm']
+        _val_now = pd.to_numeric(df_market['Value'], errors='coerce')
+        _val_open = pd.to_numeric(df_market['First_Line_Value'], errors='coerce')
+        _prob_shift = pd.to_numeric(df_market['Implied_Prob_Shift'], errors='coerce')
+        _is_over = df_market['Outcome_Norm'].eq('over')
+        _is_under = df_market['Outcome_Norm'].eq('under')
+
+        _toward = np.select(
+            [_mkt.eq('spreads'), _mkt.eq('h2h'), _mkt.eq('totals') & _is_over, _mkt.eq('totals') & _is_under],
+            [_val_now < _val_open, _prob_shift > 0, _val_now > _val_open, _val_now < _val_open],
+            default=False
         )
-        
-        df_market['Line_Moved_Away_From_Team'] = np.where(
-            ((df_market['Value'] < df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 1)) |
-            ((df_market['Value'] > df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 0)),
-            1, 0
+        _away = np.select(
+            [_mkt.eq('spreads'), _mkt.eq('h2h'), _mkt.eq('totals') & _is_over, _mkt.eq('totals') & _is_under],
+            [_val_now > _val_open, _prob_shift < 0, _val_now < _val_open, _val_now > _val_open],
+            default=False
         )
+        df_market['Line_Moved_Toward_Team'] = pd.Series(_toward, index=df_market.index).fillna(False).astype('int8')
+        df_market['Line_Moved_Away_From_Team'] = pd.Series(_away, index=df_market.index).fillna(False).astype('int8')
         
         # === Percent Move (Totals only)
         df_market['Pct_Line_Move_From_Opening'] = np.where(
@@ -10700,7 +11813,7 @@ def train_sharp_model_from_bq(
         
         # === Disable line-move-based features in moneyline and MLB spread
         df_market['Disable_Line_Move_Features'] = np.where(
-            ((df_market['Sport_Norm'] == 'MLB') & (df_market['Market_Norm'] == 'spread')) |
+            ((df_market['Sport_Norm'] == 'MLB') & (df_market['Market_Norm'] == 'spreads')) |
             (df_market['Market_Norm'].isin(['h2h'])),
             1, 0
         )
@@ -10723,7 +11836,7 @@ def train_sharp_model_from_bq(
         df_market['Pct_Line_Move_Z'] = df_market['Pct_Line_Move_Z'].clip(-5, 5)
         # Spread: Z ≥ 2 (extreme)
         df_market['Potential_Overmove_Flag'] = np.where(
-            (df_market['Market_Norm'] == 'spread') &
+            (df_market['Market_Norm'] == 'spreads') &
             (df_market['Line_Moved_Toward_Team'] == 1) &
             (df_market['Abs_Line_Move_Z'] >= 2) &
             (df_market['Disable_Line_Move_Features'] == 0),
@@ -11019,6 +12132,9 @@ def train_sharp_model_from_bq(
                    
         ]
         
+        # Add deterministic Pathi / Big Al rule features before AutoFS.
+        extend_unique(features, pathi_bigal_numeric_feature_cols(df_market))
+
         # ensure uniqueness (order-preserving)
         _seen = set()
         features = [f for f in features if not (f in _seen or _seen.add(f))]
@@ -15818,6 +16934,15 @@ def _normalize_bundle(data: dict):
                 or (data.get("polarity", +1) == -1)
             ),
             "single_model": data.get("model"),
+            "feature_cols_outcome": data.get("feature_cols_outcome") or data.get("feature_cols") or data.get("feature_list") or [],
+            "feature_cols_situation": data.get("feature_cols_situation") or [],
+            "feature_cols_value": data.get("feature_cols_value") or [],
+            "model_situation_cls": data.get("model_situation_cls"),
+            "model_value_cls": data.get("model_value_cls"),
+            "model_value_reg": data.get("model_value_reg"),
+            "meta_model": data.get("meta_model"),
+            "meta_calibrator": data.get("meta_calibrator"),
+            "multihead_config": data.get("multihead_config") or {},
             "team_feature_map": _to_df(data.get("team_feature_map")),
             "book_reliability_map": _to_df(data.get("book_reliability_map")),
         }
@@ -15837,6 +16962,15 @@ def _normalize_bundle(data: dict):
             or data.get("global_flip", False)
             or (data.get("polarity", +1) == -1)
         ),
+        "feature_cols_outcome": data.get("feature_cols_outcome") or data.get("feature_cols") or [],
+        "feature_cols_situation": data.get("feature_cols_situation") or [],
+        "feature_cols_value": data.get("feature_cols_value") or [],
+        "model_situation_cls": data.get("model_situation_cls"),
+        "model_value_cls": data.get("model_value_cls"),
+        "model_value_reg": data.get("model_value_reg"),
+        "meta_model": data.get("meta_model"),
+        "meta_calibrator": data.get("meta_calibrator"),
+        "multihead_config": data.get("multihead_config") or {},
         "team_feature_map": _to_df(data.get("team_feature_map")),
         "book_reliability_map": _to_df(data.get("book_reliability_map")),
     }
@@ -16046,7 +17180,7 @@ def _looks_malformed(html_str: str) -> bool:
     """Heuristics to detect broken tags before injecting."""
     return any(
         bad in html_str
-        for bad in ("<td�", "\uFFFD", "<td\uFFFD", "<th\uFFFD", "<tr\uFFFD")
+        for bad in ("<td ", "\uFFFD", "<td\uFFFD", "<th\uFFFD", "<tr\uFFFD")
     )
 
 
@@ -16170,6 +17304,10 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 if df_moves_raw.empty:
                     st.warning("⚠️ No graded picks available yet. I’ll still show live odds below.")
                     skip_grading = True
+
+        # Attach current deterministic Pathi / Big Al systems before downstream summaries.
+        if not skip_grading and df_moves_raw is not None and not df_moves_raw.empty:
+            df_moves_raw = attach_pathi_bigal_live_features(df_moves_raw, label)
 
         # Keep a pristine copy for "first snapshot" work later (or empty if skipping)
         df_raw_for_history = df_moves_raw.copy() if not skip_grading else pd.DataFrame()
@@ -16730,7 +17868,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 'Rec Line','Sharp Line','Rec Move','Sharp Move',
                 'Model Prob','Confidence Tier',
                 'Confidence Trend','Confidence Spark','Line/Model Direction','Tier Δ','Why Model Likes It',
-                'Game_Key','Snapshot_Timestamp','Timing_Stage','Timing_Opportunity_Score'
+                'System_Signals_Text','Game_Key','Snapshot_Timestamp','Timing_Stage','Timing_Opportunity_Score'
             ]
             summary_df = df_summary_base[[c for c in summary_cols if c in df_summary_base.columns]].copy()
             
@@ -16789,6 +17927,8 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 
             
             # Step 5: Group from merged filtered_df to produce summary
+            if 'System_Signals_Text' not in filtered_df.columns:
+                filtered_df['System_Signals_Text'] = '—'
             summary_grouped = (
                 filtered_df
                 .groupby(['Game_Key', 'Matchup', 'Market', 'Outcome'], as_index=False)
@@ -16805,6 +17945,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                     'Tier Δ': 'first',
                     'Line/Model Direction': 'first',
                     'Why Model Likes It': 'first',
+                    'System_Signals_Text': 'first',
                     'Confidence Spark':'first'
                 })
             )
@@ -16847,7 +17988,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 'Date + Time (EST)', 'Matchup', 'Market', 'Outcome',
                 'Rec Line', 'Sharp Line', 'Rec Move', 'Sharp Move',
                 'Model Prob', 'Confidence Tier', 'Timing_Stage',
-                'Why Model Likes It', 'Confidence Trend','Confidence Spark', 'Tier Δ', 
+                'System_Signals_Text', 'Why Model Likes It', 'Confidence Trend','Confidence Spark', 'Tier Δ', 
             ]
             summary_grouped = summary_grouped.sort_values(
                 by=['Date + Time (EST)', 'Matchup', 'Market'],
