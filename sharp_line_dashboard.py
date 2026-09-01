@@ -403,7 +403,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-01-v2"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-01-v3"
 
 # Operational screens used only where the published Pathi wording is qualitative
 # rather than an exact numerical threshold. The corresponding feature names end
@@ -569,7 +569,15 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         .copy()
     )
     games["Season"] = _sys_num_series(games, "Season", default=np.nan)
-    games["Season"] = games["Season"].fillna(games["Game_Start"].dt.year).astype("Int64")
+    # Sport-aware season fallback. Calendar-year grouping breaks NBA/NCAAB and
+    # January NFL/NCAAF games when an explicit Season field is unavailable.
+    _yr = games["Game_Start"].dt.year.astype("float64")
+    _mo = games["Game_Start"].dt.month.astype("float64")
+    _sp = games["Sport"].astype(str).str.upper()
+    _season_fallback = _yr.copy()
+    _season_fallback = np.where(_sp.isin(["NBA", "NCAAB", "NHL"]) & _mo.le(6), _yr - 1, _season_fallback)
+    _season_fallback = np.where(_sp.isin(["NFL", "NCAAF"]) & _mo.le(3), _yr - 1, _season_fallback)
+    games["Season"] = games["Season"].fillna(pd.Series(_season_fallback, index=games.index)).astype("Int64")
     games["Week_Number"] = _sys_num_series(games, "Week_Number", "Week", "Game_Week")
 
     season_type = _sys_text_series(games, "Season_Type", "Game_Type").str.lower()
@@ -675,7 +683,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     if not h2h.empty:
         h2h["Team"] = h2h["Outcome_Team"]
         h2h["ML_Odds"] = _sys_num_series(h2h, "Odds_Price")
-        h2h["Opening_ML_Odds"] = _sys_num_series(h2h, "First_Odds", "First_Odds_Price")
+        h2h["Opening_ML_Odds"] = _sys_num_series(h2h, "First_Odds", "First_Odds_Price", "Open_Odds", "Old_Odds")
         h2h["ML_Imp_Prob"] = _sys_amer_prob(h2h["ML_Odds"])
         h2h["Opening_ML_Imp_Prob"] = _sys_amer_prob(h2h["Opening_ML_Odds"])
         denom = h2h.groupby("Game_Key")["ML_Imp_Prob"].transform("sum")
@@ -829,6 +837,16 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     tg["Last_Matchup_SU_Win_System"] = tg.groupby(pair_grp, sort=False)["SU_Win"].shift(1)
     tg["Last_Matchup_SU_Margin_System"] = tg.groupby(pair_grp, sort=False)["SU_Margin"].shift(1)
 
+    # If the source does not explicitly provide a revenge flag, infer the common
+    # historical meaning: the team lost its previous meeting with this opponent.
+    _rev = pd.to_numeric(tg.get("Revenge_Flag_Current"), errors="coerce")
+    _rev_infer = np.where(
+        pd.to_numeric(tg.get("Last_Matchup_SU_Win_System"), errors="coerce").notna(),
+        (pd.to_numeric(tg.get("Last_Matchup_SU_Win_System"), errors="coerce") < 0.5).astype(float),
+        np.nan,
+    )
+    tg["Revenge_Flag_Current"] = _rev.combine_first(pd.Series(_rev_infer, index=tg.index, dtype="float64"))
+
     # Final-two regular-season window. Exact Week data wins; team-game proxy is explicit.
     tg["Final_Two_Regular_Season_Proxy"] = (
         tg["Sport"].eq("NFL") & tg["Is_Regular_Season"].fillna(1).eq(1) & (tg["Team_Game_Number"] >= 16)
@@ -869,6 +887,8 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
 
     tg = add_pathi_bigal_rule_flags(tg)
     return tg
+
+
 
 
 def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
@@ -970,9 +990,13 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     # expose DataReady flags instead of manufacturing missing context.
     # ------------------------------------------------------------------
     # NFL 1 - Week 1: fade prior-year playoff team; flag play-on side.
-    s["BigAl_NFL1_Week1FadePlayoffTeam_DataReady"] = ready("Week_Number", "Team_Prior_Season_Playoff", "Opponent_Prior_Season_Playoff").astype("int8")
+    _nfl_week1 = n("Week_Number").eq(1) | (n("Week_Number").isna() & n("Team_Game_Number").eq(1))
+    s["BigAl_NFL1_Week1FadePlayoffTeam_DataReady"] = (
+        ready("Team_Prior_Season_Playoff", "Opponent_Prior_Season_Playoff") &
+        (n("Week_Number").notna() | n("Team_Game_Number").notna())
+    ).astype("int8")
     s["BigAl_NFL1_Week1FadePlayoffTeam"] = (
-        is_nfl & n("Week_Number").eq(1) & n("Team_Prior_Season_Playoff").eq(0) & n("Opponent_Prior_Season_Playoff").eq(1)
+        is_nfl & _nfl_week1 & n("Team_Prior_Season_Playoff").eq(0) & n("Opponent_Prior_Season_Playoff").eq(1)
     ).astype("int8")
     s["BigAl_NFL1_HomeTightener"] = (s["BigAl_NFL1_Week1FadePlayoffTeam"].eq(1) & n("Is_Home").eq(1)).astype("int8")
 
@@ -1012,9 +1036,11 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     ).astype("int8")
 
     # College football 1 - Week 2 home off 42+ win, nonconference, opponent no revenge.
-    s["BigAl_CF1_Week2Home42Win_DataReady"] = ready("Week_Number", "Prev_SU_Win", "Prev_Points_For", "Is_Conference_Game", "Opp_Revenge_Flag_Current").astype("int8")
+    # Published condition is the team's second game; use Team_Game_Number rather than
+    # calendar Week_Number so a bye does not misclassify the system.
+    s["BigAl_CF1_Week2Home42Win_DataReady"] = ready("Team_Game_Number", "Prev_SU_Win", "Prev_Points_For", "Is_Conference_Game", "Opp_Revenge_Flag_Current").astype("int8")
     s["BigAl_CF1_Week2Home42Win"] = (
-        is_ncaaf & n("Week_Number").eq(2) & n("Is_Home").eq(1) & n("Prev_SU_Win").eq(1) &
+        is_ncaaf & n("Team_Game_Number").eq(2) & n("Is_Home").eq(1) & n("Prev_SU_Win").eq(1) &
         n("Prev_Points_For").gt(42) & n("Is_Conference_Game").eq(0) & n("Opp_Revenge_Flag_Current").eq(0)
     ).astype("int8")
 
@@ -1190,6 +1216,8 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
 
     s["System_Signals_Text"] = s.apply(_labels, axis=1)
     return s
+
+
 
 
 def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.DataFrame) -> pd.DataFrame:
@@ -11789,6 +11817,10 @@ def train_sharp_model_from_bq(
         )
         df_market['Line_Moved_Toward_Team'] = pd.Series(_toward, index=df_market.index).fillna(False).astype('int8')
         df_market['Line_Moved_Away_From_Team'] = pd.Series(_away, index=df_market.index).fillna(False).astype('int8')
+        df_market['Direction_Aligned'] = np.where(
+            df_market['Line_Moved_Toward_Team'].eq(1), 1,
+            np.where(df_market['Line_Moved_Away_From_Team'].eq(1), 0, -1)
+        ).astype('int8')
         
         # === Percent Move (Totals only)
         df_market['Pct_Line_Move_From_Opening'] = np.where(
