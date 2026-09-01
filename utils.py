@@ -7033,8 +7033,12 @@ MARKET_STRUCT_NUMERIC = [
     # key-number structure (spreads only)
     "Crossed_Key_3",
     "Crossed_Key_7",
+    "Crossed_Key_10",
+    "Crossed_Key_14",
     "Dist_to_3",
     "Dist_to_7",
+    "Dist_to_10",
+    "Dist_to_14",
 ]
 
 def add_market_structure_features_training(
@@ -7244,6 +7248,7 @@ def _enrich_snapshot_micro_and_resistance(df_in: pd.DataFrame) -> pd.DataFrame:
         sharp_books=SHARP_BOOKS,
         rec_books=REC_BOOKS,
     )
+    df_tmp = add_pathi_football_key_features(df_tmp)
     # Type-safety & fill
     for c in MICRO_NUMERIC:
         df_tmp[c] = pd.to_numeric(df_tmp.get(c), errors="coerce").fillna(0).astype("float32")
@@ -10290,7 +10295,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-01-v3"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-01-v4-football-keys"
 
 # Operational screens used only where the published Pathi wording is qualitative
 # rather than an exact numerical threshold. The corresponding feature names end
@@ -10671,6 +10676,46 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     tg["ATS_Win_Streak_Prior"] = _sys_consecutive_prior(tg, "ATS_Win", grp)
     tg["ATS_Loss_Streak_Prior"] = _sys_consecutive_prior(tg, "ATS_Loss", grp)
 
+    # Pathi football role/trend state. These are prior-only and leakage-safe.
+    _sv = pd.to_numeric(tg.get("Spread_Value"), errors="coerce")
+    tg["__fb_spread_dog"] = np.where(_sv.notna(), (_sv > 0).astype(float), np.nan)
+    tg["__fb_spread_fav"] = np.where(_sv.notna(), (_sv < 0).astype(float), np.nan)
+
+    def _prior_cond_rate(mask: pd.Series, window: int | None = None) -> pd.Series:
+        tmp = pd.to_numeric(tg["ATS_Win"], errors="coerce").where(mask)
+        if window is None:
+            return tmp.groupby([tg[c] for c in grp], sort=False).transform(
+                lambda s: s.shift(1).expanding(min_periods=1).mean()
+            )
+        return tmp.groupby([tg[c] for c in grp], sort=False).transform(
+            lambda s: s.shift(1).rolling(window, min_periods=1).mean()
+        )
+
+    _dog = pd.Series(tg["__fb_spread_dog"], index=tg.index).eq(1)
+    _fav = pd.Series(tg["__fb_spread_fav"], index=tg.index).eq(1)
+    _home = pd.to_numeric(tg["Is_Home"], errors="coerce").eq(1)
+    _road = pd.to_numeric(tg["Is_Home"], errors="coerce").eq(0)
+
+    tg["Pathi_FB_Team_ATS_As_Dog"] = _prior_cond_rate(_dog)
+    tg["Pathi_FB_Team_ATS_As_Favorite"] = _prior_cond_rate(_fav)
+    tg["Pathi_FB_Team_ATS_Home_Dog"] = _prior_cond_rate(_dog & _home)
+    tg["Pathi_FB_Team_ATS_Road_Dog"] = _prior_cond_rate(_dog & _road)
+    tg["Pathi_FB_Team_ATS_Home_Favorite"] = _prior_cond_rate(_fav & _home)
+    tg["Pathi_FB_Team_ATS_Road_Favorite"] = _prior_cond_rate(_fav & _road)
+
+    _dog5, _fav5 = _prior_cond_rate(_dog, 5), _prior_cond_rate(_fav, 5)
+    _dog10, _fav10 = _prior_cond_rate(_dog, 10), _prior_cond_rate(_fav, 10)
+    tg["Pathi_FB_Team_Role_ATS_Last5"] = np.where(_dog, _dog5, np.where(_fav, _fav5, np.nan))
+    tg["Pathi_FB_Team_Role_ATS_Last10"] = np.where(_dog, _dog10, np.where(_fav, _fav10, np.nan))
+    tg["Pathi_FB_Team_Role_ATS_Season"] = np.where(
+        _dog, tg["Pathi_FB_Team_ATS_As_Dog"],
+        np.where(_fav, tg["Pathi_FB_Team_ATS_As_Favorite"], np.nan)
+    )
+    tg["Pathi_FB_RoleTrend_DataReady"] = (
+        tg["Sport"].astype(str).str.upper().isin(["NFL", "NCAAF"]) &
+        _sv.notna() & pd.to_numeric(tg["Pathi_FB_Team_Role_ATS_Season"], errors="coerce").notna()
+    ).astype("int8")
+
     # Previous-game fields.
     prev_base = [
         "Opponent", "SU_Win", "SU_Loss", "SU_Margin", "Points_For", "Points_Against",
@@ -10699,6 +10744,12 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         )
 
     tg["Dog_Rate_Last10_Prior"] = _prior_roll_mean("Is_ML_Dog", 10)
+    _dog_rate = pd.to_numeric(tg["Dog_Rate_Last10_Prior"], errors="coerce")
+    _cur_spread = pd.to_numeric(tg.get("Spread_Value"), errors="coerce")
+    # "Usually" threshold is our engineering definition (70% of last 10 roles), not a Pathi quote.
+    tg["Pathi_FB_Usually_Dog_Now_Favorite"] = ((_dog_rate >= 0.70) & (_cur_spread < 0)).astype("int8")
+    tg["Pathi_FB_Usually_Favorite_Now_Dog"] = ((_dog_rate <= 0.30) & (_cur_spread > 0)).astype("int8")
+    tg["Pathi_FB_Dog_Rate_Last10_Prior"] = _dog_rate.astype("float32")
     tg["Avg_Points_For_Prior"] = tg.groupby(grp, sort=False)["Points_For"].transform(
         lambda s: pd.to_numeric(s, errors="coerce").shift(1).expanding(min_periods=1).mean()
     )
@@ -10756,6 +10807,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         "Prev_Is_ML_Dog", "Prev_Is_ML_Favorite", "Prev_Is_Road_Favorite", "Prev_Is_Road_Dog_9Plus",
         "Prev_Opponent_Is_Defending_Champion", "Dog_Rate_Last10_Prior", "Avg_Points_For_Prior",
         "Road_Favorite_ROI_Prior", "Team_Game_Number", "Revenge_Flag_Current",
+        "Pathi_FB_Team_Role_ATS_Last5", "Pathi_FB_Team_Role_ATS_Last10", "Pathi_FB_Team_Role_ATS_Season",
         "Team_Is_Defending_Champion", "Team_Prior_Season_Playoff", "Is_Final_Home_Game",
         "Team_Eliminated_With_Loss", "Team_Series_Wins", "Opp_Series_Wins",
     ]
@@ -10763,6 +10815,13 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     opp = tg[["Sport", "Game_Key", "Team"] + mirror_cols].copy()
     opp = opp.rename(columns={"Team": "Opponent", **{c: f"Opp_{c}" for c in mirror_cols}})
     tg = tg.merge(opp, on=["Sport", "Game_Key", "Opponent"], how="left", validate="1:1")
+
+    # Pathi football opponent role trends + regime aliases.
+    for _n in ("Last5", "Last10", "Season"):
+        _src = f"Opp_Pathi_FB_Team_Role_ATS_{_n}"
+        tg[f"Pathi_FB_Opp_Role_ATS_{_n}"] = pd.to_numeric(tg.get(_src), errors="coerce")
+    tg["Pathi_FB_Is_Postseason"] = pd.to_numeric(tg.get("Is_Postseason"), errors="coerce").fillna(0).astype("int8")
+    tg["Pathi_FB_Is_Regular_Season"] = pd.to_numeric(tg.get("Is_Regular_Season"), errors="coerce").fillna(0).astype("int8")
 
     # Standard current aliases used by the rule engine.
     tg["Is_Road"] = (tg["Is_Home"] == 0).astype("int8")
@@ -10772,6 +10831,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         pd.to_numeric(tg["Is_ML_Favorite"], errors="coerce").eq(1)
     ).astype("int8")
 
+    tg.drop(columns=["__fb_spread_dog", "__fb_spread_fav"], inplace=True, errors="ignore")
     tg = add_pathi_bigal_rule_flags(tg)
     return tg
 
@@ -11105,8 +11165,10 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
 
 def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.DataFrame) -> pd.DataFrame:
     """Broadcast team/game Pathi-BigAl state to book/outcome rows without row growth."""
-    if df_rows is None or df_rows.empty or state is None or state.empty:
+    if df_rows is None or df_rows.empty:
         return df_rows.copy()
+    if state is None or state.empty:
+        return add_pathi_football_key_features(df_rows.copy())
     out = df_rows.copy()
     out["Sport"] = out.get("Sport", "").astype(str).str.upper().str.strip()
     out["Game_Key"] = out["Game_Key"].astype(str).str.lower().str.strip()
@@ -11234,6 +11296,7 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
                 vals.append(label)
         return " | ".join(vals) if vals else "—"
     out["System_Signals_Text"] = out.apply(_row_labels, axis=1)
+    out = add_pathi_football_key_features(out)
     return out
 
 
@@ -11248,6 +11311,158 @@ def pathi_bigal_numeric_feature_cols(df: pd.DataFrame) -> list[str]:
             continue
         if pd.api.types.is_numeric_dtype(df[c]) or pd.api.types.is_bool_dtype(df[c]):
             out.append(c)
+    return out
+
+
+def add_pathi_football_key_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Eric Pathi-style NFL/NCAAF football market-structure features.
+
+    These are deterministic engineering features based on Pathi's public emphasis
+    on line making, key numbers, price/value and football underdog roles. They do
+    not claim that Pathi published these exact formulas/weights.
+
+    Existing Crossed_Key_3/7 and Dist_to_3/7 names are intentionally overridden
+    for NFL/NCAAF spreads with sign-aware logic so favorite moves through -3/-7
+    are treated the same way as dog moves through +3/+7.
+    """
+    if df is None or df.empty:
+        return df.copy() if df is not None else df
+
+    out = df.copy()
+    idx = out.index
+
+    def _num_candidates(*names):
+        s = pd.Series(np.nan, index=idx, dtype="float64")
+        for name in names:
+            if name in out.columns:
+                s = s.combine_first(pd.to_numeric(out[name], errors="coerce"))
+        return s
+
+    sport = out.get("Sport", out.get("Sport_Norm", pd.Series("", index=idx))).astype(str).str.upper().str.strip()
+    market_raw = out.get("Market", out.get("Market_Norm", pd.Series("", index=idx))).astype(str).str.lower().str.strip()
+    market = market_raw.map(lambda x: _sys_norm_market(x) if '_sys_norm_market' in globals() else ({'spread':'spreads','total':'totals','ml':'h2h','moneyline':'h2h'}.get(x,x)))
+    cur = _num_candidates("Value", "Spread_Value")
+    opn = _num_candidates("Opening_Spread", "First_Line_Value", "Open_Value", "Opening_Line")
+
+    fb_spread = sport.isin(["NFL", "NCAAF"]) & market.eq("spreads") & cur.notna()
+    has_open = fb_spread & opn.notna()
+    abs_cur = cur.abs()
+    abs_opn = opn.abs()
+    is_dog = fb_spread & cur.gt(0)
+    is_fav = fb_spread & cur.lt(0)
+
+    # Existing + extended generic key columns.
+    for key in (3, 7, 10, 14):
+        cross_col = f"Crossed_Key_{key}"
+        dist_col = f"Dist_to_{key}"
+        if cross_col not in out.columns:
+            out[cross_col] = np.int8(0)
+        if dist_col not in out.columns:
+            out[dist_col] = np.nan
+
+        strict_cross = has_open & ((abs_opn - float(key)) * (abs_cur - float(key)) < 0)
+        touch_cross = has_open & (
+            (np.isclose(abs_opn, float(key), atol=1e-9) & ~np.isclose(abs_cur, float(key), atol=1e-9)) |
+            (np.isclose(abs_cur, float(key), atol=1e-9) & ~np.isclose(abs_opn, float(key), atol=1e-9))
+        )
+        out.loc[fb_spread, cross_col] = (strict_cross | touch_cross).loc[fb_spread].astype("int8")
+        out.loc[fb_spread, dist_col] = (abs_cur.loc[fb_spread] - float(key)).abs().astype("float32")
+
+        out[f"Pathi_FB_On_Key_{key}"] = (fb_spread & np.isclose(abs_cur, float(key), atol=1e-9)).astype("int8")
+
+    crossed_any = pd.Series(False, index=idx)
+    strict_any = pd.Series(False, index=idx)
+    onto_any = pd.Series(False, index=idx)
+    off_any = pd.Series(False, index=idx)
+    for key in (3.0, 7.0, 10.0, 14.0):
+        crossed_any |= has_open & (
+            ((abs_opn-key)*(abs_cur-key) < 0) |
+            (np.isclose(abs_opn,key,atol=1e-9) & ~np.isclose(abs_cur,key,atol=1e-9)) |
+            (np.isclose(abs_cur,key,atol=1e-9) & ~np.isclose(abs_opn,key,atol=1e-9))
+        )
+        strict_any |= has_open & ((abs_opn-key)*(abs_cur-key) < 0)
+        onto_any |= has_open & np.isclose(abs_cur,key,atol=1e-9) & ~np.isclose(abs_opn,key,atol=1e-9)
+        off_any |= has_open & np.isclose(abs_opn,key,atol=1e-9) & ~np.isclose(abs_cur,key,atol=1e-9)
+
+    # With the selected team's spread, lower number = market movement toward that team:
+    # favorite -3 -> -4 and dog +4 -> +3.
+    toward = has_open & cur.lt(opn)
+    away = has_open & cur.gt(opn)
+    out["Pathi_FB_Crossed_Key_Toward_Team"] = (crossed_any & toward).astype("int8")
+    out["Pathi_FB_Crossed_Key_Away_From_Team"] = (crossed_any & away).astype("int8")
+    out["Pathi_FB_Moved_Onto_Key"] = onto_any.astype("int8")
+    out["Pathi_FB_Moved_Off_Key"] = off_any.astype("int8")
+    out["Pathi_FB_Moved_Through_Key"] = strict_any.astype("int8")
+
+    # Hook / protected-number flags. Ranges intentionally allow quarter-point feeds.
+    for key in (3.0, 7.0, 10.0):
+        k = str(int(key))
+        out[f"Pathi_FB_Dog_Hook_Above_{k}"] = (is_dog & cur.gt(key) & cur.lt(key + 1.0)).astype("int8")
+        out[f"Pathi_FB_Favorite_Below_Key_{k}"] = (is_fav & abs_cur.lt(key) & abs_cur.gt(key - 1.0)).astype("int8")
+    for key in (3.0, 7.0):
+        k = str(int(key))
+        out[f"Pathi_FB_Dog_Below_Key_{k}"] = (is_dog & cur.lt(key) & cur.gt(key - 1.0)).astype("int8")
+        out[f"Pathi_FB_Favorite_Laying_Hook_{k}"] = (is_fav & abs_cur.gt(key) & abs_cur.lt(key + 1.0)).astype("int8")
+
+    # Dog bands: explicit rather than assuming one unpublished Pathi cutoff.
+    out["Pathi_FB_Dog_0_to_3"] = (is_dog & cur.gt(0) & cur.lt(3.0)).astype("int8")
+    out["Pathi_FB_Dog_3_to_3_5"] = (is_dog & cur.ge(3.0) & cur.le(3.5)).astype("int8")
+    out["Pathi_FB_Dog_3_5_to_6_5"] = (is_dog & cur.gt(3.5) & cur.le(6.5)).astype("int8")
+    out["Pathi_FB_Dog_On_7"] = (is_dog & np.isclose(cur, 7.0, atol=1e-9)).astype("int8")
+    out["Pathi_FB_Dog_Above_7"] = (is_dog & cur.gt(7.0) & cur.lt(10.0)).astype("int8")
+    out["Pathi_FB_Dog_10_Plus"] = (is_dog & cur.ge(10.0)).astype("int8")
+
+    # Engineering score for the value of the CURRENT number around 3/7/10/14.
+    # Positive = favorable side of nearest key; negative = unfavorable side.
+    # 3 and 7 receive larger weights because they are materially more important in NFL pricing.
+    key_weights = np.asarray([4.0, 3.0, 1.5, 1.0], dtype=np.float32)
+    key_nums = np.asarray([3.0, 7.0, 10.0, 14.0], dtype=np.float32)
+    def _key_value(series):
+        vals = pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float32, copy=False)
+        ans = np.full(vals.shape, np.nan, dtype=np.float32)
+        finite = np.isfinite(vals)
+        if not finite.any():
+            return pd.Series(ans, index=idx, dtype="float32")
+        ax = np.abs(vals[finite])
+        dist = np.abs(ax[:, None] - key_nums[None, :])
+        nearest_i = np.argmin(dist, axis=1)
+        nearest = key_nums[nearest_i]
+        delta = ax - nearest
+        w = key_weights[nearest_i]
+        xv = vals[finite]
+        res = np.zeros_like(xv, dtype=np.float32)
+        near = np.abs(delta) <= 1.0
+        on = near & (np.abs(delta) < 1e-6)
+        dog = near & ~on & (xv > 0)
+        fav = near & ~on & (xv < 0)
+        res[on] = 0.25 * w[on]
+        res[dog] = np.where(delta[dog] > 0, w[dog], -w[dog])
+        res[fav] = np.where(delta[fav] < 0, w[fav], -w[fav])
+        ans[finite] = res
+        return pd.Series(ans, index=idx, dtype="float32")
+
+    cur_val = _key_value(cur).where(fb_spread)
+    open_val = _key_value(opn).where(has_open)
+    out["Pathi_FB_Current_Key_Value"] = cur_val.astype("float32")
+    out["Pathi_FB_Opening_Key_Value"] = open_val.astype("float32")
+    out["Pathi_FB_Key_Value_Score"] = out["Pathi_FB_Current_Key_Value"]
+    out["Pathi_FB_Key_Value_Change"] = (cur_val - open_val).astype("float32")
+    out["Pathi_FB_Key_Value_Lost_From_Open"] = (open_val - cur_val).clip(lower=0).astype("float32")
+    out["Pathi_FB_Key_DataReady"] = has_open.astype("int8")
+
+    # Regime interactions become available after team/game state is attached.
+    post = _num_candidates("Pathi_FB_Is_Postseason", "Is_Postseason", "Is_Playoffs").fillna(0).gt(0.5)
+    reg = _num_candidates("Pathi_FB_Is_Regular_Season", "Is_Regular_Season").fillna(0).gt(0.5)
+    out["Pathi_FB_Is_Postseason"] = (fb_spread & post).astype("int8")
+    out["Pathi_FB_Is_Regular_Season"] = (fb_spread & reg).astype("int8")
+    out["Pathi_FB_Key3_x_Postseason"] = (out["Pathi_FB_On_Key_3"].eq(1) & post & fb_spread).astype("int8")
+    out["Pathi_FB_Key7_x_Postseason"] = (out["Pathi_FB_On_Key_7"].eq(1) & post & fb_spread).astype("int8")
+    out["Pathi_FB_Dog_x_Postseason"] = (is_dog & post).astype("int8")
+    out["Pathi_FB_Favorite_x_Postseason"] = (is_fav & post).astype("int8")
+    out["Pathi_FB_LineMoveToward_x_Postseason"] = (toward & post).astype("int8")
+
+    # For non-football / non-spread rows these are structural non-signals, not missing calculations.
     return out
 
 
@@ -11332,11 +11547,12 @@ def _ensure_merge_key_short_for_systems(df: pd.DataFrame) -> pd.DataFrame:
         out["Home_Team_Norm"] = out["Home_Team"].astype(str).str.lower().str.strip()
     if "Away_Team_Norm" not in out.columns and "Away_Team" in out.columns:
         out["Away_Team_Norm"] = out["Away_Team"].astype(str).str.lower().str.strip()
-    if "Game_Start" not in out.columns:
-        if "feat_Game_Start" in out.columns:
-            out["Game_Start"] = out["feat_Game_Start"]
-        elif "Commence_Hour" in out.columns:
-            out["Game_Start"] = out["Commence_Hour"]
+    # View-backed feature sources use feat_Game_Start as the canonical event time.
+    # Prefer it whenever present; current live rows normally do not carry it.
+    if "feat_Game_Start" in out.columns:
+        out["Game_Start"] = out["feat_Game_Start"]
+    elif "Game_Start" not in out.columns and "Commence_Hour" in out.columns:
+        out["Game_Start"] = out["Commence_Hour"]
     out["Game_Start"] = pd.to_datetime(out.get("Game_Start"), errors="coerce", utc=True)
     if "Commence_Hour" not in out.columns:
         out["Commence_Hour"] = out["Game_Start"].dt.floor("h")
@@ -11388,7 +11604,12 @@ def _query_pathi_bigal_history_table(table_fq: str, sport: str, days_back: int) 
     if not required.issubset(cols_present):
         return pd.DataFrame()
 
-    time_col = next((c for c in ("Game_Start", "feat_Game_Start", "Commence_Hour", "Snapshot_Timestamp") if c in cols_present), None)
+    # Both *scores_with_features objects are view-style in this project and use
+    # feat_Game_Start as their canonical event timestamp.
+    _is_feature_view = "scores_with_features" in table_fq
+    _time_candidates = ("feat_Game_Start", "Game_Start", "Commence_Hour", "Snapshot_Timestamp") if _is_feature_view \
+        else ("Game_Start", "feat_Game_Start", "Commence_Hour", "Snapshot_Timestamp")
+    time_col = next((c for c in _time_candidates if c in cols_present), None)
     aliases = _system_sport_aliases(sport)
     where = ["UPPER(CAST(Sport AS STRING)) IN UNNEST(@sport_aliases)"]
     params = [bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases)]
@@ -11488,7 +11709,7 @@ def attach_pathi_bigal_backend_features(current_rows: pd.DataFrame, sport: str |
     """
     if current_rows is None or current_rows.empty:
         return current_rows.copy()
-    original = _ensure_merge_key_short_for_systems(current_rows)
+    original = add_pathi_football_key_features(_ensure_merge_key_short_for_systems(current_rows))
     canon = _canon_system_sport(sport or (original["Sport"].iloc[0] if "Sport" in original.columns and len(original) else ""))
     if not canon:
         return original
@@ -11668,6 +11889,7 @@ def override_corrected_line_move_features(df: pd.DataFrame) -> pd.DataFrame:
     if len(out) != original_len:
         raise RuntimeError(f"corrected movement enrichment changed row count {original_len} -> {len(out)}")
     out.index = original_index
+    out = add_pathi_football_key_features(out)
     return out
 
 def _ensure_optional_bq_columns(df: pd.DataFrame, table: str, optional_cols: list[str]) -> list[str]:
