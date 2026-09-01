@@ -10297,6 +10297,52 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 PATHI_BIGAL_FEATURE_VERSION = "2026-09-01-v4-football-keys"
 
+PATHI_FOOTBALL_MODEL_FEATURES = [
+    # Exact current spread position / key structure
+    "Football_Key_Position_Bucket",
+    "Crossed_Key_3", "Crossed_Key_7", "Crossed_Key_10", "Crossed_Key_14",
+    "Dist_to_3", "Dist_to_7", "Dist_to_10", "Dist_to_14",
+    "Pathi_FB_On_Key_3", "Pathi_FB_On_Key_7", "Pathi_FB_On_Key_10", "Pathi_FB_On_Key_14",
+    "Pathi_FB_Crossed_Key_Toward_Team", "Pathi_FB_Crossed_Key_Away_From_Team",
+    "Pathi_FB_Moved_Onto_Key", "Pathi_FB_Moved_Off_Key", "Pathi_FB_Moved_Through_Key",
+
+    # Hook / protected-number position
+    "Pathi_FB_Dog_Hook_Above_3", "Pathi_FB_Dog_Hook_Above_7", "Pathi_FB_Dog_Hook_Above_10",
+    "Pathi_FB_Favorite_Below_Key_3", "Pathi_FB_Favorite_Below_Key_7", "Pathi_FB_Favorite_Below_Key_10",
+    "Pathi_FB_Dog_Below_Key_3", "Pathi_FB_Dog_Below_Key_7",
+    "Pathi_FB_Favorite_Laying_Hook_3", "Pathi_FB_Favorite_Laying_Hook_7",
+
+    # Dog price bands
+    "Pathi_FB_Dog_0_to_3", "Pathi_FB_Dog_3_to_3_5", "Pathi_FB_Dog_3_5_to_6_5",
+    "Pathi_FB_Dog_On_7", "Pathi_FB_Dog_Above_7", "Pathi_FB_Dog_10_Plus",
+
+    # Opening/current key value
+    "Pathi_FB_Current_Key_Value", "Pathi_FB_Opening_Key_Value",
+    "Pathi_FB_Key_Value_Score", "Pathi_FB_Key_Value_Change",
+    "Pathi_FB_Key_Value_Lost_From_Open", "Pathi_FB_Key_DataReady",
+
+    # Historical betting-role performance
+    "Pathi_FB_Team_ATS_As_Dog", "Pathi_FB_Team_ATS_As_Favorite",
+    "Pathi_FB_Team_ATS_Home_Dog", "Pathi_FB_Team_ATS_Road_Dog",
+    "Pathi_FB_Team_ATS_Home_Favorite", "Pathi_FB_Team_ATS_Road_Favorite",
+    "Pathi_FB_Team_Role_ATS_Last5", "Pathi_FB_Team_Role_ATS_Last10",
+    "Pathi_FB_Team_Role_ATS_Season",
+    "Pathi_FB_Opp_Role_ATS_Last5", "Pathi_FB_Opp_Role_ATS_Last10",
+    "Pathi_FB_Opp_Role_ATS_Season",
+    "Pathi_FB_RoleTrend_DataReady",
+    "Pathi_FB_Dog_Rate_Last10_Prior",
+    "Pathi_FB_Usually_Dog_Now_Favorite", "Pathi_FB_Usually_Favorite_Now_Dog",
+
+    # Regime interactions
+    "Pathi_FB_Is_Postseason", "Pathi_FB_Is_Regular_Season",
+    "Pathi_FB_Key3_x_Postseason", "Pathi_FB_Key7_x_Postseason",
+    "Pathi_FB_Dog_x_Postseason", "Pathi_FB_Favorite_x_Postseason",
+    "Pathi_FB_LineMoveToward_x_Postseason",
+]
+
+PATHI_BIGAL_ADDITIONAL_MODEL_FEATURES = ['Role_Price_Shift', 'Current_ImpliedProb_vs_Last10_Avg', 'Current_ImpliedProb_vs_Last10_Median', 'ML_Price_ZScore_vs_TeamHistory', 'Team_ML_ROI_Season', 'Team_Fav_ROI_Season', 'Team_Dog_ROI_Season', 'Team_Fav_ROI_Last10', 'Team_Dog_ROI_Last10', 'H2H_Consecutive_Losses_Prior', 'H2H_Consecutive_Wins_Prior', 'Revenge_Depth', 'H2H_Last_Loss_Margin', 'H2H_Meetings_Since_Last_Win', 'Prev_ATS_Margin', 'Prev2_ATS_Margin', 'Prev3_ATS_Margin', 'ATS_Margin_Max_Last3', 'ATS_Margin_Min_Last3', 'ATS_Margin_Mean_Last3', 'System_Side_Consensus_Count', 'System_Side_Conflict_Count', 'System_Net_Signal', 'System_Consensus_Ratio', 'Line_Move_30m', 'Line_Move_60m', 'Line_Move_120m', 'Line_Move_Last30m', 'Line_Move_Last60m', 'Line_Move_From_Open', 'Line_Move_Velocity_60m', 'Line_Move_Velocity_120m', 'Direction_Changes_Count', 'Max_Line_Seen', 'Min_Line_Seen', 'Current_vs_Best_Line', 'Current_vs_Worst_Line', 'Sharp_Book_Move_30m', 'Sharp_Book_Move_60m', 'Sharp_Move_Before_Market', 'Sharp_Lead_Time_Minutes', 'Sharp_Soft_Divergence', 'Sharp_Consensus_Direction', 'Crossed_Key_3_Last60m', 'Crossed_Key_7_Last60m', 'Crossed_Key_10_Last60m', 'Crossed_Key_14_Last60m', 'Minutes_Since_Key_Cross', 'Key_Cross_Confirmed_By_Sharp_Books', 'Key_Cross_Reversed', 'Key_Cross_Persistence']
+
+
 # Operational screens used only where the published Pathi wording is qualitative
 # rather than an exact numerical threshold. The corresponding feature names end
 # in _Screen so they are not confused with exact historical systems.
@@ -10397,6 +10443,119 @@ def _sys_pick_market_rows(df: pd.DataFrame, market: str) -> pd.DataFrame:
     d = d.drop_duplicates(["Game_Key", "Outcome_Norm"], keep="first")
     return d.drop(columns=["__sharp"], errors="ignore")
 
+
+
+
+def build_30min_line_timing_features(snapshot_rows: pd.DataFrame, sharp_books=None) -> pd.DataFrame:
+    """Leakage-safe 30/60/120-minute market-path features at book/outcome grain."""
+    keys = ["Game_Key", "Market", "Outcome", "Bookmaker"]
+    out_cols = keys + [
+        "Line_Move_30m","Line_Move_60m","Line_Move_120m","Line_Move_Last30m","Line_Move_Last60m",
+        "Line_Move_From_Open","Line_Move_Velocity_60m","Line_Move_Velocity_120m","Direction_Changes_Count",
+        "Max_Line_Seen","Min_Line_Seen","Current_vs_Best_Line","Current_vs_Worst_Line",
+        "Sharp_Book_Move_30m","Sharp_Book_Move_60m","Sharp_Move_Before_Market","Sharp_Lead_Time_Minutes",
+        "Sharp_Soft_Divergence","Sharp_Consensus_Direction","Crossed_Key_3_Last60m","Crossed_Key_7_Last60m",
+        "Crossed_Key_10_Last60m","Crossed_Key_14_Last60m","Minutes_Since_Key_Cross",
+        "Key_Cross_Confirmed_By_Sharp_Books","Key_Cross_Reversed","Key_Cross_Persistence",
+    ]
+    if snapshot_rows is None or snapshot_rows.empty or not all(k in snapshot_rows.columns for k in keys):
+        return pd.DataFrame(columns=out_cols)
+    if "Snapshot_Timestamp" not in snapshot_rows.columns:
+        return pd.DataFrame(columns=out_cols)
+    s = snapshot_rows[[c for c in keys + ["Snapshot_Timestamp","Value","Odds_Price"] if c in snapshot_rows.columns]].copy()
+    for k in keys:
+        s[k] = s[k].astype(str).str.lower().str.strip()
+    s["Snapshot_Timestamp"] = pd.to_datetime(s["Snapshot_Timestamp"], utc=True, errors="coerce")
+    s["Value"] = pd.to_numeric(s.get("Value"), errors="coerce")
+    s["Odds_Price"] = pd.to_numeric(s.get("Odds_Price"), errors="coerce")
+    s = s.dropna(subset=["Snapshot_Timestamp"])
+    if s.empty:
+        return pd.DataFrame(columns=out_cols)
+    sharp = {str(x).lower().strip() for x in (sharp_books or globals().get("SHARP_BOOKS", []))}
+
+    def amer_prob(x):
+        x = float(x)
+        if not np.isfinite(x) or x == 0: return np.nan
+        return 100.0/(x+100.0) if x > 0 else (-x)/((-x)+100.0)
+
+    records=[]
+    # market-wide reference is computed from book-level normalized paths below.
+    book_paths={}
+    for name,g in s.groupby(keys, sort=False, observed=True):
+        g=g.sort_values("Snapshot_Timestamp").drop_duplicates("Snapshot_Timestamp", keep="last")
+        market=str(name[1])
+        raw = g["Odds_Price"].map(amer_prob) if market == "h2h" else g["Value"]
+        arr=pd.to_numeric(raw, errors="coerce")
+        valid=arr.notna()
+        if valid.sum()<1: continue
+        gg=g.loc[valid].copy(); vals=arr.loc[valid].to_numpy(float); times=gg["Snapshot_Timestamp"].to_list()
+        current=float(vals[-1]); openv=float(vals[0]); tcur=times[-1]
+        def at_before(mins):
+            target=tcur-pd.Timedelta(minutes=mins)
+            ix=np.where(np.array([pd.Timestamp(x).value for x in times], dtype=np.int64) <= target.value)[0]
+            return float(vals[ix[-1]]) if len(ix) else float(vals[0])
+        v30,v60,v120=at_before(30),at_before(60),at_before(120)
+        dif=np.diff(vals)
+        signs=np.sign(dif[np.abs(dif)>1e-12])
+        changes=int(np.sum(signs[1:] != signs[:-1])) if len(signs)>1 else 0
+        best=float(np.nanmax(vals)); worst=float(np.nanmin(vals))
+        # Team-specific spread: numerically lower is a better/stronger line signal; h2h uses probability.
+        rec=dict(zip(keys,name))
+        rec.update({
+            "Line_Move_30m":current-v30,"Line_Move_60m":current-v60,"Line_Move_120m":current-v120,
+            "Line_Move_Last30m":current-v30,"Line_Move_Last60m":current-v60,"Line_Move_From_Open":current-openv,
+            "Line_Move_Velocity_60m":current-v60,"Line_Move_Velocity_120m":(current-v120)/2.0,
+            "Direction_Changes_Count":changes,"Max_Line_Seen":best,"Min_Line_Seen":worst,
+            "Current_vs_Best_Line":current-best,"Current_vs_Worst_Line":current-worst,
+        })
+        # Football key crossing is spread-only, sign-aware around ±3/7/10/14.
+        for key in (3,7,10,14):
+            crossed=0
+            if market in ("spread","spreads"):
+                for kv in (-float(key), float(key)):
+                    if (v60-kv)*(current-kv) <= 0 and abs(current-v60)>1e-12 and not (v60==current==kv): crossed=1
+            rec[f"Crossed_Key_{key}_Last60m"]=crossed
+        last_cross=np.nan; reversed_flag=0; persistence=0.0
+        if market in ("spread","spreads") and len(vals)>=2:
+            cross_events=[]
+            for j in range(1,len(vals)):
+                for key in (3,7,10,14):
+                    for kv in (-float(key),float(key)):
+                        if (vals[j-1]-kv)*(vals[j]-kv)<=0 and vals[j-1]!=vals[j]: cross_events.append(j)
+            if cross_events:
+                j=cross_events[-1]; last_cross=(tcur-times[j]).total_seconds()/60.0
+                post=vals[j:]
+                persistence=float(np.mean(np.sign(post-vals[j-1]) == np.sign(vals[j]-vals[j-1]))) if len(post) else 0.0
+                reversed_flag=int(np.sign(current-vals[j-1]) != np.sign(vals[j]-vals[j-1]))
+        rec["Minutes_Since_Key_Cross"]=last_cross
+        rec["Key_Cross_Reversed"]=reversed_flag
+        rec["Key_Cross_Persistence"]=persistence
+        records.append(rec)
+        book_paths[name]=(tcur,current,v30,v60,openv)
+    if not records: return pd.DataFrame(columns=out_cols)
+    r=pd.DataFrame(records)
+    # Cross-book sharp vs soft context at game/market/outcome grain.
+    base=["Game_Key","Market","Outcome"]
+    r["__sharp"] = r["Bookmaker"].isin(sharp).astype(int)
+    r["__m30"] = r["Line_Move_30m"]
+    r["__m60"] = r["Line_Move_60m"]
+    for _,idx in r.groupby(base, sort=False, observed=True).groups.items():
+        ix=list(idx); z=r.loc[ix]; sh=z[z["__sharp"].eq(1)]; sf=z[z["__sharp"].eq(0)]
+        sh30=float(sh["__m30"].mean()) if not sh.empty else np.nan; sh60=float(sh["__m60"].mean()) if not sh.empty else np.nan
+        soft60=float(sf["__m60"].mean()) if not sf.empty else np.nan
+        cons=float(np.sign(sh["__m60"]).replace(0,np.nan).mean()) if not sh.empty else np.nan
+        divergence=sh60-soft60 if np.isfinite(sh60) and np.isfinite(soft60) else np.nan
+        lead=int(np.isfinite(sh60) and abs(sh60)>1e-12 and (not np.isfinite(soft60) or abs(soft60)<abs(sh60)*0.5))
+        leadmins=30.0 if lead else 0.0
+        confirm=int((z[[f"Crossed_Key_{k}_Last60m" for k in (3,7,10,14)]].max(axis=1)>0).loc[sh.index].sum() >= 2) if len(sh)>=2 else 0
+        r.loc[ix,"Sharp_Book_Move_30m"]=sh30; r.loc[ix,"Sharp_Book_Move_60m"]=sh60
+        r.loc[ix,"Sharp_Move_Before_Market"]=lead; r.loc[ix,"Sharp_Lead_Time_Minutes"]=leadmins
+        r.loc[ix,"Sharp_Soft_Divergence"]=divergence; r.loc[ix,"Sharp_Consensus_Direction"]=cons
+        r.loc[ix,"Key_Cross_Confirmed_By_Sharp_Books"]=confirm
+    r.drop(columns=["__sharp","__m30","__m60"], inplace=True, errors="ignore")
+    for c in r.columns:
+        if c not in keys: r[c]=pd.to_numeric(r[c],errors="coerce").astype("float32")
+    return r
 
 def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     """
@@ -10772,6 +10931,74 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     rf_profit_cum = tg["__rf_profit"].groupby([tg[c] for c in grp], sort=False).cumsum() - tg["__rf_profit"]
     tg["Road_Favorite_ROI_Prior"] = rf_profit_cum / rf_games_cum.replace(0, np.nan)
     tg.drop(columns=["__rf_game", "__rf_profit"], inplace=True, errors="ignore")
+
+
+    # Additional Pathi/Big Al model state: price normalization, role ROI, revenge depth, ATS extremes.
+    mlp = _sys_amer_prob(pd.to_numeric(tg.get("ML_Odds"), errors="coerce"))
+    tg["__ml_imp_prob_hist"] = mlp
+    def _prior_roll(col, window, stat="mean"):
+        def fn(s):
+            x=pd.to_numeric(s, errors="coerce").shift(1).rolling(window, min_periods=1)
+            return getattr(x, stat)()
+        return tg.groupby(grp, sort=False)[col].transform(fn)
+    tg["Current_ImpliedProb_vs_Last10_Avg"] = mlp - _prior_roll("__ml_imp_prob_hist",10,"mean")
+    tg["Current_ImpliedProb_vs_Last10_Median"] = mlp - _prior_roll("__ml_imp_prob_hist",10,"median")
+    tg["Role_Price_Shift"] = tg["Current_ImpliedProb_vs_Last10_Avg"]
+    _mu = _prior_roll("__ml_imp_prob_hist",10,"mean"); _sd = _prior_roll("__ml_imp_prob_hist",10,"std")
+    tg["ML_Price_ZScore_vs_TeamHistory"] = (mlp-_mu)/_sd.replace(0,np.nan)
+
+    # One-unit moneyline ROI, always prior-only.
+    _od = pd.to_numeric(tg.get("ML_Odds"), errors="coerce")
+    _pay = np.where(_od>0,_od/100.0,np.where(_od<0,100.0/np.abs(_od),np.nan))
+    _profit = pd.Series(np.where(tg["SU_Win"].eq(1),_pay,np.where(tg["SU_Loss"].eq(1),-1.0,np.nan)), index=tg.index)
+    tg["__ml_profit"]=_profit
+    def _prior_roi(mask, window=None):
+        p=tg["__ml_profit"].where(mask); played=p.notna().astype(float)
+        if window is None:
+            ps=p.fillna(0).groupby([tg[c] for c in grp],sort=False).cumsum()-p.fillna(0)
+            ns=played.groupby([tg[c] for c in grp],sort=False).cumsum()-played
+        else:
+            ps=p.fillna(0).groupby([tg[c] for c in grp],sort=False).transform(lambda s:s.shift(1).rolling(window,min_periods=1).sum())
+            ns=played.groupby([tg[c] for c in grp],sort=False).transform(lambda s:s.shift(1).rolling(window,min_periods=1).sum())
+        return ps/ns.replace(0,np.nan)
+    _all=pd.Series(True,index=tg.index); _favml=pd.to_numeric(tg.get("Is_ML_Favorite"),errors="coerce").eq(1); _dogml=pd.to_numeric(tg.get("Is_ML_Dog"),errors="coerce").eq(1)
+    tg["Team_ML_ROI_Season"]=_prior_roi(_all)
+    tg["Team_Fav_ROI_Season"]=_prior_roi(_favml)
+    tg["Team_Dog_ROI_Season"]=_prior_roi(_dogml)
+    tg["Team_Fav_ROI_Last10"]=_prior_roi(_favml,10)
+    tg["Team_Dog_ROI_Last10"]=_prior_roi(_dogml,10)
+    tg.drop(columns=["__ml_profit","__ml_imp_prob_hist"],inplace=True,errors="ignore")
+
+    # H2H streak/depth state before current meeting.
+    pair_grp=["Sport","Season","Team","Opponent"]
+    tg["H2H_Consecutive_Wins_Prior"]=_sys_consecutive_prior(tg,"SU_Win",pair_grp)
+    tg["H2H_Consecutive_Losses_Prior"]=_sys_consecutive_prior(tg,"SU_Loss",pair_grp)
+    tg["Revenge_Depth"]=tg["H2H_Consecutive_Losses_Prior"]
+    def _prior_last_loss_margin(s):
+        vals=[]; last=np.nan
+        for x in pd.to_numeric(s,errors="coerce"):
+            vals.append(last)
+            if pd.notna(x) and x<0: last=float(x)
+        return pd.Series(vals,index=s.index)
+    tg["H2H_Last_Loss_Margin"] = tg.groupby(pair_grp,sort=False,group_keys=False)["SU_Margin"].apply(_prior_last_loss_margin).reindex(tg.index)
+    def _meetings_since_win(s):
+        out=[]; n=np.nan
+        for x in pd.to_numeric(s,errors="coerce"):
+            out.append(n)
+            if pd.isna(x): continue
+            if x>=0.5: n=0.0
+            elif pd.notna(n): n+=1.0
+        return pd.Series(out,index=s.index)
+    tg["H2H_Meetings_Since_Last_Win"] = tg.groupby(pair_grp,sort=False,group_keys=False)["SU_Win"].apply(_meetings_since_win).reindex(tg.index)
+
+    # Explicit ATS aliases + compact last-three summary.
+    tg["Prev_ATS_Margin"] = pd.to_numeric(tg.get("Prev_ATS_Cover_Margin"),errors="coerce")
+    tg["Prev2_ATS_Margin"] = pd.to_numeric(tg.get("Prev2_ATS_Cover_Margin"),errors="coerce")
+    tg["Prev3_ATS_Margin"] = pd.to_numeric(tg.get("Prev3_ATS_Cover_Margin"),errors="coerce")
+    _ats3=pd.concat([tg["Prev_ATS_Margin"],tg["Prev2_ATS_Margin"],tg["Prev3_ATS_Margin"]],axis=1)
+    tg["ATS_Margin_Max_Last3"]=_ats3.max(axis=1,skipna=True)
+    tg["ATS_Margin_Min_Last3"]=_ats3.min(axis=1,skipna=True)
+    tg["ATS_Margin_Mean_Last3"]=_ats3.mean(axis=1,skipna=True)
 
     # Immediate rematch and pair-level prior state.
     tg["Immediate_Rematch_Flag"] = (tg["Prev_Opponent"].astype(str) == tg["Opponent"].astype(str)).astype("int8")
@@ -11167,6 +11394,27 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         return " | ".join(parts) if parts else "—"
 
     s["System_Signals_Text"] = s.apply(_labels, axis=1)
+    # Per-game side-system convergence. A flag on this team is support; a flag on
+    # the opponent is conflict. Tighteners/DataReady/total-only rules are excluded.
+    side_flags = [c for c in (
+        [x for x in pathi_signal_cols if x != "Pathi_RoadFavLost_StillFavorite_Screen"] +
+        [x for x in bigal_base_cols if x not in {"BigAl_NFL5_PreseasonLowOffenseOver", "BigAl_NBA7_TwoTeamEliminationUnder", "BigAl_CFL1_SecondMeetingUnder"}]
+    ) if c in s.columns]
+    if side_flags:
+        own=(s[side_flags].fillna(0)>0).sum(axis=1).astype(float)
+        s["System_Side_Consensus_Count"]=own
+        oppmap=s[["Sport","Game_Key","Team"]].copy(); oppmap["__opp_support"]=own.to_numpy()
+        oppmap=oppmap.rename(columns={"Team":"Opponent"})
+        tmp=s[["Sport","Game_Key","Opponent"]].merge(oppmap,on=["Sport","Game_Key","Opponent"],how="left")
+        conflict=pd.to_numeric(tmp["__opp_support"],errors="coerce").fillna(0).to_numpy()
+        s["System_Side_Conflict_Count"]=conflict
+        s["System_Net_Signal"]=own.to_numpy()-conflict
+        denom=own.to_numpy()+conflict
+        s["System_Consensus_Ratio"]=np.where(denom>0,own.to_numpy()/denom,np.nan)
+    else:
+        for c in ("System_Side_Consensus_Count","System_Side_Conflict_Count","System_Net_Signal","System_Consensus_Ratio"):
+            s[c]=0.0
+
     return s
 
 
@@ -11203,6 +11451,7 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
             "WinPct_Prior_System", "Team_Game_Number", "Immediate_Rematch_Flag", "Season_H2H_Meeting_Number",
             "First_Meeting_Actual_Total_Prior", "Dog_Rate_Last10_Prior", "Road_Favorite_ROI_Prior",
             "Revenge_Flag_Current", "Days_Since_Last_Game_System",
+            *PATHI_BIGAL_ADDITIONAL_MODEL_FEATURES,
         })
     ]
     stmap = state[keep].drop_duplicates(["Sport", "Game_Key", "Team"], keep="last")
@@ -11358,6 +11607,18 @@ def add_pathi_football_key_features(df: pd.DataFrame) -> pd.DataFrame:
     abs_opn = opn.abs()
     is_dog = fb_spread & cur.gt(0)
     is_fav = fb_spread & cur.lt(0)
+
+    # Exact half-point spread position for NFL/NCAAF.  This mirrors the
+    # BigQuery feature view but is generated here too so training/serving do
+    # not depend on the view being the only source.  Examples:
+    # -3.5 -> -7, -3 -> -6, -2.5 -> -5, +2.5 -> 5, +3 -> 6, +3.5 -> 7.
+    _fb_key_pos = np.full(len(out), -999, dtype=np.int16)
+    _fb_mask_arr = fb_spread.to_numpy(dtype=bool, copy=False) & np.isfinite(cur.to_numpy(dtype=float, copy=False))
+    if _fb_mask_arr.any():
+        _fb_key_pos[_fb_mask_arr] = np.rint(
+            cur.to_numpy(dtype=float, copy=False)[_fb_mask_arr] * 2.0
+        ).astype(np.int16)
+    out["Football_Key_Position_Bucket"] = pd.Series(_fb_key_pos, index=idx, dtype="int16")
 
     # Existing + extended generic key columns.
     for key in (3, 7, 10, 14):
@@ -12173,6 +12434,13 @@ def detect_sharp_moves(
     
     df = apply_compute_sharp_metrics_rowwise(df, df_timing_snapshots)
     df = propagate_timing_to_other_side(df)
+    _timing30_map = build_30min_line_timing_features(df_timing_snapshots, sharp_books=SHARP_BOOKS)
+    if _timing30_map is not None and not _timing30_map.empty:
+        _tk=["Game_Key","Market","Outcome","Bookmaker"]
+        for _k in _tk:
+            if _k in df.columns: df[_k]=df[_k].astype(str).str.lower().str.strip()
+        df=df.merge(_timing30_map,on=_tk,how="left",validate="many_to_one")
+    del _timing30_map
     for c in ('Game_Key','Market','Outcome','Bookmaker'):
         if c in df_all_snapshots.columns:
             df_all_snapshots[c] = df_all_snapshots[c].astype('string').str.strip().str.lower()
