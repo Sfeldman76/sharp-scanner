@@ -464,22 +464,29 @@ def _sys_amer_prob(s: pd.Series) -> pd.Series:
 
 
 def _sys_consecutive_prior(g: pd.DataFrame, col: str, grp_cols: list[str]) -> pd.Series:
-    """Count consecutive TRUE results immediately before each row, leakage-safe."""
-    prev = g.groupby(grp_cols, sort=False)[col].shift(1)
-    out = pd.Series(0, index=g.index, dtype="int16")
-    for _, idx in g.groupby(grp_cols, sort=False).indices.items():
-        idx = np.asarray(idx, dtype=np.int64)
-        vals = prev.loc[idx].fillna(False).astype(bool).to_numpy()
-        cnt = np.zeros(len(idx), dtype=np.int16)
+    """Count consecutive TRUE results immediately before each row, leakage-safe.
+
+    pandas ``GroupBy.indices`` returns *positional* row locations, not index
+    labels.  Training slices can retain a sparse/non-RangeIndex, so using
+    ``.loc`` with those positions can raise KeyError.  Work positionally in
+    NumPy and restore the original index only on the returned Series.
+    """
+    if g is None or g.empty:
+        return pd.Series(index=getattr(g, "index", None), dtype="int16")
+
+    prev = g.groupby(grp_cols, sort=False, dropna=False)[col].shift(1)
+    prev_vals = prev.fillna(False).astype(bool).to_numpy(copy=False)
+    out_vals = np.zeros(len(g), dtype=np.int16)
+
+    for positions in g.groupby(grp_cols, sort=False, dropna=False).indices.values():
+        pos = np.asarray(positions, dtype=np.intp)
+        vals = prev_vals[pos]
         run = 0
         for j, v in enumerate(vals):
-            if v:
-                run += 1
-            else:
-                run = 0
-            cnt[j] = run
-        out.loc[idx] = cnt
-    return out
+            run = (run + 1) if bool(v) else 0
+            out_vals[pos[j]] = run
+
+    return pd.Series(out_vals, index=g.index, dtype="int16")
 
 
 def _sys_pick_market_rows(df: pd.DataFrame, market: str) -> pd.DataFrame:
@@ -899,7 +906,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
 
     # If ATS cover margin was not stored, calculate team score margin + spread.
     calc_ats_margin = tg["SU_Margin"] + tg["Spread_Value"]
-    tg["ATS_Cover_Margin"] = pd.to_numeric(tg["ATS_Cover_Margin"], errors="coerce").combine_first(calc_ats_margin)
+    tg["ATS_Cover_Margin"] = pd.to_numeric(tg["ATS_Cover_Margin"], errors="coerce").where(lambda s: s.notna(), calc_ats_margin)
     tg["ATS_Win"] = np.where(
         tg["ATS_Hit_Raw"].notna(),
         (tg["ATS_Hit_Raw"] > 0.5).astype(float),
