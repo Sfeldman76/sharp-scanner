@@ -10553,42 +10553,43 @@ def _sys_text_series(df: pd.DataFrame, *names, default="") -> pd.Series:
 
 
 def _sys_amer_prob(s):
-    """Convert American odds to implied probability for Series or scalar input."""
+    """Convert American odds to implied probability for Series or scalar input.
 
+    Several live paths use ``DataFrame.get`` for optional opening-odds columns.
+    When neither opening column exists, pandas returns a scalar/None rather than
+    a Series.  Preserve Series indexes when present, but safely return a scalar
+    float/NaN for scalar inputs so callers can broadcast it to their row index.
+    """
     if isinstance(s, pd.Series):
         x = pd.to_numeric(s, errors="coerce")
         xv = x.to_numpy(dtype="float64", na_value=np.nan)
-
         p = np.full(len(xv), np.nan, dtype="float64")
-
         pos = xv > 0
         neg = xv < 0
-
         p[pos] = 100.0 / (xv[pos] + 100.0)
         p[neg] = (-xv[neg]) / ((-xv[neg]) + 100.0)
-
         return pd.Series(p, index=s.index, dtype="float64")
 
+    # Optional columns can be absent entirely, producing None / np.nan scalars.
     try:
         x = pd.to_numeric(s, errors="coerce")
     except Exception:
         return np.nan
-
     try:
         if pd.isna(x):
             return np.nan
     except (TypeError, ValueError):
-        return _sys_amer_prob(pd.Series(s))
+        # Array-like non-Series input: normalize through a temporary Series.
+        tmp = pd.Series(s)
+        return _sys_amer_prob(tmp)
 
     x = float(x)
-
     if x > 0:
         return float(100.0 / (x + 100.0))
-
     if x < 0:
         return float((-x) / ((-x) + 100.0))
-
     return np.nan
+
 
 def _sys_consecutive_prior(g: pd.DataFrame, col: str, grp_cols: list[str]) -> pd.Series:
     """Count consecutive TRUE results immediately before each row, leakage-safe.
@@ -12289,15 +12290,18 @@ def override_corrected_line_move_features(df: pd.DataFrame) -> pd.DataFrame:
     original_index = out.index.copy()
     original_len = len(out)
 
-    m = out.get("Market", pd.Series("", index=out.index)).astype(str).map(_sys_norm_market)
-    val = pd.to_numeric(out.get("Value"), errors="coerce")
-    open_val = pd.to_numeric(out.get("Open_Value", out.get("First_Line_Value")), errors="coerce")
-    odds = pd.to_numeric(out.get("Odds_Price"), errors="coerce")
-    open_odds = pd.to_numeric(out.get("Open_Odds", out.get("First_Odds")), errors="coerce")
-    outn = out.get("Outcome_Norm", out.get("Outcome", pd.Series("", index=out.index))).astype(str).str.lower().str.strip()
+    # Normalize every optional source to an index-aligned Series. DataFrame.get(...,
+    # np.nan) returns a scalar when a column is absent; downstream vector operations
+    # such as .notna(), .loc and groupby require a Series.
+    m = _sys_text_series(out, "Market", default="").map(_sys_norm_market)
+    val = _sys_num_series(out, "Value")
+    open_val = _sys_num_series(out, "Open_Value", "First_Line_Value")
+    odds = _sys_num_series(out, "Odds_Price")
+    open_odds = _sys_num_series(out, "Open_Odds", "First_Odds")
+    outn = _sys_text_series(out, "Outcome_Norm", "Outcome", default="").str.lower().str.strip()
 
-    p_now = pd.Series(_sys_amer_prob(odds), index=out.index, dtype="float64")
-    p_open = pd.Series(_sys_amer_prob(open_odds), index=out.index, dtype="float64")
+    p_now = _sys_amer_prob(odds)
+    p_open = _sys_amer_prob(open_odds)
 
     toward = pd.Series(False, index=out.index, dtype="bool")
     away = pd.Series(False, index=out.index, dtype="bool")
@@ -12336,7 +12340,7 @@ def override_corrected_line_move_features(df: pd.DataFrame) -> pd.DataFrame:
         labels=['<0.25%', '0.5%', '1%', '2%', '2%+'],
     )
 
-    sport_norm = out.get("Sport", pd.Series("", index=out.index)).astype(str).str.upper().str.strip()
+    sport_norm = _sys_text_series(out, "Sport", default="").str.upper().str.strip()
     out["Disable_Line_Move_Features"] = (
         ((sport_norm == "MLB") & m.eq("spreads")) | m.eq("h2h")
     ).astype("int8")
