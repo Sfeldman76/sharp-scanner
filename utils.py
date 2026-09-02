@@ -2624,7 +2624,100 @@ def read_recent_sharp_master_cached(hours=120):
     sharp_moves_cache[cache_key] = df
     return df
         
-# Dedicated detection snapshot cache.  The old path used SELECT * from the\n# very wide merged feature view AND a second SELECT * from sharp_moves_master.\n# Detection only needs raw market-path columns, so fetch them once, keep the\n# frame narrow, and incrementally refresh it between scheduled runs.\n_DETECT_SNAPSHOT_CACHE = {"df": None, "hours": None, "last_check": 0.0, "max_ts": None}\n_DETECT_SNAPSHOT_REFRESH_SECONDS = 15 * 60\n_DETECT_SNAPSHOT_TABLE = "sharplogger.sharp_data.sharp_moves_master"\n_DETECT_SNAPSHOT_COLS = (\n    "Game_Key", "Game", "Sport", "Market", "Outcome", "Bookmaker", "Book",\n    "Snapshot_Timestamp", "Time", "Game_Start", "Commence_Hour",\n    "Value", "Odds_Price", "Limit", "Open_Value", "Open_Odds", "Opening_Limit",\n    "Home_Team_Norm", "Away_Team_Norm", "Team_Key", "Was_Canonical", "Pre_Game",\n)\n\ndef _normalize_detect_snapshot_frame(df: pd.DataFrame) -> pd.DataFrame:\n    if df is None or df.empty:\n        return pd.DataFrame()\n    out = df\n    for c in ("Game_Key", "Game", "Market", "Outcome", "Bookmaker", "Book",\n              "Home_Team_Norm", "Away_Team_Norm", "Team_Key", "Sport"):\n        if c in out.columns:\n            out[c] = out[c].astype("string").str.strip().str.lower()\n    for c in ("Snapshot_Timestamp", "Time", "Game_Start", "Commence_Hour"):\n        if c in out.columns:\n            out[c] = pd.to_datetime(out[c], errors="coerce", utc=True)\n    for c in ("Value", "Odds_Price", "Limit", "Open_Value", "Open_Odds", "Opening_Limit"):\n        if c in out.columns:\n            out[c] = pd.to_numeric(out[c], errors="coerce", downcast="float")\n    return out\n\ndef _query_detect_snapshot_rows(hours: int, since_ts=None) -> pd.DataFrame:\n    cols_present = _fetch_bq_table_columns(_DETECT_SNAPSHOT_TABLE)\n    cols = [c for c in _DETECT_SNAPSHOT_COLS if c in cols_present]\n    required = {"Game_Key", "Market", "Outcome", "Bookmaker", "Snapshot_Timestamp"}\n    if not required.issubset(cols_present):\n        # Fail open to the legacy reader if schema is unexpectedly different.\n        return pd.DataFrame()\n    where = ["Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)"]\n    params = [bigquery.ScalarQueryParameter("hours", "INT64", int(hours))]\n    if since_ts is not None and pd.notna(since_ts):\n        # one-minute overlap makes equal/late-arriving timestamps harmless; dedup below\n        where.append("Snapshot_Timestamp >= @since_ts")\n        params.append(bigquery.ScalarQueryParameter("since_ts", "TIMESTAMP", pd.Timestamp(since_ts).to_pydatetime()))\n    q = f"SELECT {', '.join('`'+c+'`' for c in cols)} FROM `{_DETECT_SNAPSHOT_TABLE}` WHERE " + " AND ".join(where)\n    df = bq_client.query(q, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe(create_bqstorage_client=True)\n    return _normalize_detect_snapshot_frame(df)\n\ndef get_detect_snapshots_cached(hours: int = 120) -> pd.DataFrame:\n    """Narrow raw snapshot history with incremental refresh, shared by all sports."""\n    now = time.time()\n    c = _DETECT_SNAPSHOT_CACHE\n    full_reload = c.get("df") is None or c.get("hours") != int(hours)\n    if full_reload:\n        df = _query_detect_snapshot_rows(int(hours))\n        if df is None or df.empty:\n            # Legacy fallback preserves availability if the raw query/schema changes.\n            df = read_recent_sharp_moves(hours=hours, table=_DETECT_SNAPSHOT_TABLE)\n            keep = [x for x in _DETECT_SNAPSHOT_COLS if x in df.columns]\n            df = _normalize_detect_snapshot_frame(df.loc[:, keep].copy()) if not df.empty else pd.DataFrame()\n        max_ts = df["Snapshot_Timestamp"].max() if "Snapshot_Timestamp" in df.columns and not df.empty else None\n        c.update({"df": df, "hours": int(hours), "last_check": now, "max_ts": max_ts})\n        return df\n\n    if (now - float(c.get("last_check", 0.0))) < _DETECT_SNAPSHOT_REFRESH_SECONDS:\n        return c["df"]\n\n    base = c["df"]\n    max_ts = c.get("max_ts")\n    since = (pd.Timestamp(max_ts) - pd.Timedelta(minutes=1)) if max_ts is not None and pd.notna(max_ts) else None\n    delta = _query_detect_snapshot_rows(int(hours), since_ts=since)\n    if delta is not None and not delta.empty:\n        base = pd.concat([base, delta], ignore_index=True, sort=False, copy=False)\n        dedup = [x for x in ("Game_Key", "Market", "Outcome", "Bookmaker", "Snapshot_Timestamp") if x in base.columns]\n        if dedup:\n            base = base.drop_duplicates(dedup, keep="last")\n        if "Snapshot_Timestamp" in base.columns:\n            cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=int(hours))\n            base = base[base["Snapshot_Timestamp"].ge(cutoff)].reset_index(drop=True)\n            max_ts = base["Snapshot_Timestamp"].max() if not base.empty else max_ts\n    c.update({"df": base, "hours": int(hours), "last_check": now, "max_ts": max_ts})\n    return base\n\ndef _filter_snapshots_to_current_keys(snapshot_rows: pd.DataFrame, current_rows: pd.DataFrame) -> pd.DataFrame:\n    keys = ["Game_Key", "Market", "Outcome", "Bookmaker"]\n    if snapshot_rows is None or snapshot_rows.empty or current_rows is None or current_rows.empty:\n        return pd.DataFrame(columns=getattr(snapshot_rows, "columns", []))\n    if not all(k in snapshot_rows.columns and k in current_rows.columns for k in keys):\n        return snapshot_rows\n    ck = current_rows[keys].dropna().drop_duplicates()\n    if ck.empty:\n        return snapshot_rows.iloc[0:0]\n    return snapshot_rows.merge(ck, on=keys, how="inner", validate="many_to_one")\n\ndef fetch_live_odds(sport_key, api_key):
+# Dedicated detection snapshot cache.  The old path used SELECT * from the
+# very wide merged feature view AND a second SELECT * from sharp_moves_master.
+# Detection only needs raw market-path columns, so fetch them once, keep the
+# frame narrow, and incrementally refresh it between scheduled runs.
+_DETECT_SNAPSHOT_CACHE = {"df": None, "hours": None, "last_check": 0.0, "max_ts": None}
+_DETECT_SNAPSHOT_REFRESH_SECONDS = 15 * 60
+_DETECT_SNAPSHOT_TABLE = "sharplogger.sharp_data.sharp_moves_master"
+_DETECT_SNAPSHOT_COLS = (
+    "Game_Key", "Game", "Sport", "Market", "Outcome", "Bookmaker", "Book",
+    "Snapshot_Timestamp", "Time", "Game_Start", "Commence_Hour",
+    "Value", "Odds_Price", "Limit", "Open_Value", "Open_Odds", "Opening_Limit",
+    "Home_Team_Norm", "Away_Team_Norm", "Team_Key", "Was_Canonical", "Pre_Game",
+)
+
+def _normalize_detect_snapshot_frame(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df
+    for c in ("Game_Key", "Game", "Market", "Outcome", "Bookmaker", "Book",
+              "Home_Team_Norm", "Away_Team_Norm", "Team_Key", "Sport"):
+        if c in out.columns:
+            out[c] = out[c].astype("string").str.strip().str.lower()
+    for c in ("Snapshot_Timestamp", "Time", "Game_Start", "Commence_Hour"):
+        if c in out.columns:
+            out[c] = pd.to_datetime(out[c], errors="coerce", utc=True)
+    for c in ("Value", "Odds_Price", "Limit", "Open_Value", "Open_Odds", "Opening_Limit"):
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce", downcast="float")
+    return out
+
+def _query_detect_snapshot_rows(hours: int, since_ts=None) -> pd.DataFrame:
+    cols_present = _fetch_bq_table_columns(_DETECT_SNAPSHOT_TABLE)
+    cols = [c for c in _DETECT_SNAPSHOT_COLS if c in cols_present]
+    required = {"Game_Key", "Market", "Outcome", "Bookmaker", "Snapshot_Timestamp"}
+    if not required.issubset(cols_present):
+        # Fail open to the legacy reader if schema is unexpectedly different.
+        return pd.DataFrame()
+    where = ["Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)"]
+    params = [bigquery.ScalarQueryParameter("hours", "INT64", int(hours))]
+    if since_ts is not None and pd.notna(since_ts):
+        # one-minute overlap makes equal/late-arriving timestamps harmless; dedup below
+        where.append("Snapshot_Timestamp >= @since_ts")
+        params.append(bigquery.ScalarQueryParameter("since_ts", "TIMESTAMP", pd.Timestamp(since_ts).to_pydatetime()))
+    q = f"SELECT {', '.join('`'+c+'`' for c in cols)} FROM `{_DETECT_SNAPSHOT_TABLE}` WHERE " + " AND ".join(where)
+    df = bq_client.query(q, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe(create_bqstorage_client=True)
+    return _normalize_detect_snapshot_frame(df)
+
+def get_detect_snapshots_cached(hours: int = 120) -> pd.DataFrame:
+    """Narrow raw snapshot history with incremental refresh, shared by all sports."""
+    now = time.time()
+    c = _DETECT_SNAPSHOT_CACHE
+    full_reload = c.get("df") is None or c.get("hours") != int(hours)
+    if full_reload:
+        df = _query_detect_snapshot_rows(int(hours))
+        if df is None or df.empty:
+            # Legacy fallback preserves availability if the raw query/schema changes.
+            df = read_recent_sharp_moves(hours=hours, table=_DETECT_SNAPSHOT_TABLE)
+            keep = [x for x in _DETECT_SNAPSHOT_COLS if x in df.columns]
+            df = _normalize_detect_snapshot_frame(df.loc[:, keep].copy()) if not df.empty else pd.DataFrame()
+        max_ts = df["Snapshot_Timestamp"].max() if "Snapshot_Timestamp" in df.columns and not df.empty else None
+        c.update({"df": df, "hours": int(hours), "last_check": now, "max_ts": max_ts})
+        return df
+
+    if (now - float(c.get("last_check", 0.0))) < _DETECT_SNAPSHOT_REFRESH_SECONDS:
+        return c["df"]
+
+    base = c["df"]
+    max_ts = c.get("max_ts")
+    since = (pd.Timestamp(max_ts) - pd.Timedelta(minutes=1)) if max_ts is not None and pd.notna(max_ts) else None
+    delta = _query_detect_snapshot_rows(int(hours), since_ts=since)
+    if delta is not None and not delta.empty:
+        base = pd.concat([base, delta], ignore_index=True, sort=False, copy=False)
+        dedup = [x for x in ("Game_Key", "Market", "Outcome", "Bookmaker", "Snapshot_Timestamp") if x in base.columns]
+        if dedup:
+            base = base.drop_duplicates(dedup, keep="last")
+        if "Snapshot_Timestamp" in base.columns:
+            cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=int(hours))
+            base = base[base["Snapshot_Timestamp"].ge(cutoff)].reset_index(drop=True)
+            max_ts = base["Snapshot_Timestamp"].max() if not base.empty else max_ts
+    c.update({"df": base, "hours": int(hours), "last_check": now, "max_ts": max_ts})
+    return base
+
+def _filter_snapshots_to_current_keys(snapshot_rows: pd.DataFrame, current_rows: pd.DataFrame) -> pd.DataFrame:
+    keys = ["Game_Key", "Market", "Outcome", "Bookmaker"]
+    if snapshot_rows is None or snapshot_rows.empty or current_rows is None or current_rows.empty:
+        return pd.DataFrame(columns=getattr(snapshot_rows, "columns", []))
+    if not all(k in snapshot_rows.columns and k in current_rows.columns for k in keys):
+        return snapshot_rows
+    ck = current_rows[keys].dropna().drop_duplicates()
+    if ck.empty:
+        return snapshot_rows.iloc[0:0]
+    return snapshot_rows.merge(ck, on=keys, how="inner", validate="many_to_one")
+
+def fetch_live_odds(sport_key, api_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
         'apiKey': api_key,
