@@ -1,5 +1,12 @@
 # --- Core Python ---
 import os, sys, gc, time, json, math, hashlib, logging, pickle, warnings, traceback, re
+
+# Suppress UI-only chatter before Streamlit/matplotlib can initialize.
+logging.getLogger("streamlit").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.caching").setLevel(logging.ERROR)
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
+logging.getLogger("matplotlib.font_manager").setLevel(logging.WARNING)
 from io import BytesIO
 from collections import defaultdict, Counter
 from functools import lru_cache
@@ -61,9 +68,6 @@ from google.cloud import storage
 import xgboost as xgb
 from xgboost import XGBClassifier
 
-# --- Streamlit (dashboard) ---
-import streamlit as st
-# reuse the same helpers you used in training:
 
 # --- Pandas dtype helpers ---
 from pandas.api.types import is_categorical_dtype, is_string_dtype
