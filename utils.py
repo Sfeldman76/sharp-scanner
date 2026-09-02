@@ -164,9 +164,16 @@ def implied_prob_vec_raw(arr: np.ndarray) -> np.ndarray:
 
 
 def ensure_columns(df, required_cols, fill_value=None):
-    for col in required_cols:
-        if col not in df.columns:
-            df[col] = fill_value
+    missing_cols = [col for col in required_cols if col not in df.columns]
+
+    if missing_cols:
+        filler = pd.DataFrame(
+            fill_value,
+            index=df.index,
+            columns=missing_cols,
+        )
+        df = pd.concat([df, filler], axis=1, copy=False)
+
     return df
 
 def normalize_book_name(bookmaker: str, book: str) -> str:
