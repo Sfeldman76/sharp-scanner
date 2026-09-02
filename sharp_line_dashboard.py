@@ -18196,7 +18196,10 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 if tfm is not None and not tfm.empty:
                     team_feature_map = tfm
                     break
+        
+        df_raw_for_history = df_moves_raw.copy()
 
+        
         # === 4) One gate you can use below to run the sharp section
         can_render_sharp = bool(trained_models) and not skip_grading
 
