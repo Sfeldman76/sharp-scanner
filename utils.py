@@ -7922,6 +7922,90 @@ def _merge_feature_overwrite(left: pd.DataFrame, right: pd.DataFrame, on, how="l
     return left.merge(right, on=keys, how=how, validate=validate)
 
 
+
+
+def attach_fair_value_bet_pass_fields(df: pd.DataFrame) -> pd.DataFrame:
+    """Post-model value layer: fair price/line, EV, and transparent BET/PASS policy.
+
+    This does not leak into training targets.  It consumes the calibrated model
+    probability produced by the saved artifact and the current offered odds.
+    """
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    idx = out.index
+    p = pd.to_numeric(out.get("Model_Sharp_Win_Prob", np.nan), errors="coerce").clip(1e-6, 1-1e-6)
+    odds = pd.to_numeric(out.get("Odds_Price", np.nan), errors="coerce")
+
+    # American market odds -> break-even probability and $1-profit payout.
+    imp = pd.Series(np.nan, index=idx, dtype="float64")
+    pos = odds.gt(0) & odds.notna()
+    neg = odds.lt(0) & odds.notna()
+    imp.loc[pos] = 100.0 / (odds.loc[pos] + 100.0)
+    imp.loc[neg] = (-odds.loc[neg]) / ((-odds.loc[neg]) + 100.0)
+    payout = pd.Series(np.nan, index=idx, dtype="float64")
+    payout.loc[pos] = odds.loc[pos] / 100.0
+    payout.loc[neg] = 100.0 / (-odds.loc[neg])
+
+    out["Market_Breakeven_Prob"] = imp.astype("float32")
+    out["Model_Edge_Prob"] = (p - imp).astype("float32")
+    out["Model_EV_Per_Unit"] = (p * payout - (1.0 - p)).astype("float32")
+
+    # Fair American odds implied by model probability.
+    fair_odds = pd.Series(np.nan, index=idx, dtype="float64")
+    fav = p.ge(0.5) & p.notna()
+    dog = p.lt(0.5) & p.notna()
+    fair_odds.loc[fav] = -100.0 * p.loc[fav] / (1.0 - p.loc[fav])
+    fair_odds.loc[dog] = 100.0 * (1.0 - p.loc[dog]) / p.loc[dog]
+    out["Fair_Odds_American"] = fair_odds.astype("float32")
+
+    m = out.get("Market", pd.Series("", index=idx)).astype(str).str.lower().str.strip()
+    fair_line = pd.Series(np.nan, index=idx, dtype="float64")
+    source = pd.Series("model fair odds", index=idx, dtype="object")
+    # Existing ratings/total components are genuine model estimates; do not invent
+    # a point-spread transform when one is unavailable.
+    spread_est = pd.to_numeric(out.get("Outcome_Model_Spread", np.nan), errors="coerce")
+    total_est = pd.to_numeric(out.get("TOT_Proj_Total_Baseline", np.nan), errors="coerce")
+    sm = m.isin(["spread", "spreads"]) & spread_est.notna()
+    tm = m.isin(["total", "totals"]) & total_est.notna()
+    hm = m.isin(["h2h", "moneyline", "ml", "headtohead"])
+    fair_line.loc[sm] = spread_est.loc[sm]
+    source.loc[sm] = "ratings/model spread"
+    fair_line.loc[tm] = total_est.loc[tm]
+    source.loc[tm] = "model total baseline"
+    fair_line.loc[hm] = fair_odds.loc[hm]
+    source.loc[hm] = "model fair odds"
+    out["Fair_Line"] = fair_line.astype("float32")
+    out["Fair_Line_Source"] = source
+
+    # Transparent first-generation decision policy.  Base requirement is at least
+    # +2 percentage points of probability edge and +2 cents EV per $1 risked.
+    # Mature, stable system history can reduce the edge hurdle slightly; weak
+    # decaying system history raises it.  Non-system bets retain the base hurdle.
+    threshold = pd.Series(0.020, index=idx, dtype="float64")
+    sample = pd.to_numeric(out.get("System_Reliability_Sample_Prior", np.nan), errors="coerce")
+    shr = pd.to_numeric(out.get("System_Reliability_Shrunk_HitRate_Prior", np.nan), errors="coerce")
+    stab = pd.to_numeric(out.get("System_Reliability_Stability_Score", np.nan), errors="coerce")
+    active = pd.to_numeric(out.get("System_Side_Consensus_Count", 0), errors="coerce").fillna(0).gt(0)
+    strong = active & sample.ge(25) & shr.ge(0.55) & stab.ge(0.60)
+    weak = active & sample.ge(25) & shr.lt(0.49)
+    threshold.loc[strong] = 0.015
+    threshold.loc[weak] = 0.030
+    out["Bet_Edge_Threshold"] = threshold.astype("float32")
+
+    edge = pd.to_numeric(out["Model_Edge_Prob"], errors="coerce")
+    ev = pd.to_numeric(out["Model_EV_Per_Unit"], errors="coerce")
+    valid = p.notna() & imp.notna() & ev.notna()
+    bet = valid & edge.ge(threshold) & ev.ge(0.020)
+    rec = pd.Series("PASS", index=idx, dtype="object")
+    rec.loc[~valid] = "NO MODEL"
+    rec.loc[bet] = "BET"
+    out["Bet_Recommendation"] = rec
+    # 1.0 means exactly at edge hurdle; >1 means greater margin over hurdle.
+    out["Bet_Value_Score"] = np.where(valid, edge / threshold.replace(0, np.nan), np.nan).astype("float32")
+    return out
+
+
 def apply_blended_sharp_score(
     df,
     trained_models,
@@ -10245,6 +10329,8 @@ def apply_blended_sharp_score(
                     logger.info("🧹 Removed %d unscored UNDER rows (no OVER available)", pre - len(df_final))
             
          
+            # Post-model fair-value + BET/PASS layer.
+            df_final = attach_fair_value_bet_pass_fields(df_final)
             logger.info("✅ Scoring completed in %.2f seconds", time.time() - total_start)
             return df_final
                            
@@ -11447,6 +11533,77 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         for c in ("System_Side_Consensus_Count","System_Side_Conflict_Count","System_Net_Signal","System_Consensus_Ratio"):
             s[c]=0.0
 
+
+    # ------------------------------------------------------------------
+    # Living system reliability / decay (prior-only).
+    # This evaluates the historical performance of rows where at least one
+    # named Pathi/Big Al SIDE system supported the selected team.  H2H uses
+    # SU outcome; spreads use ATS outcome.  Current/upcoming rows have no
+    # result, so they inherit the state accumulated strictly before them.
+    # ------------------------------------------------------------------
+    _rel_cols = [
+        "System_Reliability_Sample_Prior",
+        "System_Reliability_LongTerm_HitRate_Prior",
+        "System_Reliability_Recent50_HitRate_Prior",
+        "System_Reliability_RecentVsLongTerm_Delta",
+        "System_Reliability_Shrunk_HitRate_Prior",
+        "System_Reliability_Stability_Score",
+        "System_Reliability_GE25",
+        "System_Reliability_GE50",
+        "System_Reliability_GE100",
+    ]
+    for _c in _rel_cols:
+        s[_c] = np.nan
+    try:
+        _mrel = s.get("Market", pd.Series("", index=s.index)).astype(str).map(_sys_norm_market)
+        _su = pd.to_numeric(s.get("SU_Win", np.nan), errors="coerce")
+        _ats = pd.to_numeric(s.get("ATS_Win", np.nan), errors="coerce")
+        _target = pd.Series(np.nan, index=s.index, dtype="float64")
+        _target.loc[_mrel.eq("h2h")] = _su.loc[_mrel.eq("h2h")]
+        _target.loc[_mrel.eq("spreads")] = _ats.loc[_mrel.eq("spreads")]
+        _active = pd.to_numeric(s.get("System_Side_Consensus_Count", 0), errors="coerce").fillna(0).gt(0)
+        _tsrel = pd.to_datetime(s.get("Game_Start"), errors="coerce", utc=True)
+        _rel = pd.DataFrame({
+            "__idx": np.arange(len(s), dtype=np.int64),
+            "Sport": s.get("Sport", "").astype(str).str.upper().str.strip(),
+            "Market": _mrel,
+            "Game_Start": _tsrel,
+            "Target": _target,
+            "Active": _active,
+        }).sort_values(["Sport", "Market", "Game_Start", "__idx"], kind="mergesort")
+        _out = {c: np.full(len(s), np.nan, dtype=np.float64) for c in _rel_cols}
+        for (_sp, _mk), _g in _rel.groupby(["Sport", "Market"], sort=False, observed=True):
+            _hist = []
+            for _i, _tgt, _act in _g[["__idx", "Target", "Active"]].itertuples(index=False, name=None):
+                _i = int(_i)
+                _n = len(_hist)
+                _long = float(np.mean(_hist)) if _n else np.nan
+                _recent = float(np.mean(_hist[-50:])) if _n else np.nan
+                # Beta(25,25) shrinkage toward 50%; small samples cannot look extreme.
+                _wins = float(np.sum(_hist)) if _n else 0.0
+                _shr = (_wins + 25.0) / (_n + 50.0)
+                _stab = (1.0 - min(1.0, abs(_recent - _long) / 0.20)) if (_n and np.isfinite(_recent) and np.isfinite(_long)) else np.nan
+                _out["System_Reliability_Sample_Prior"][_i] = float(_n)
+                _out["System_Reliability_LongTerm_HitRate_Prior"][_i] = _long
+                _out["System_Reliability_Recent50_HitRate_Prior"][_i] = _recent
+                _out["System_Reliability_RecentVsLongTerm_Delta"][_i] = (_recent - _long) if (_n and np.isfinite(_recent) and np.isfinite(_long)) else np.nan
+                _out["System_Reliability_Shrunk_HitRate_Prior"][_i] = _shr
+                _out["System_Reliability_Stability_Score"][_i] = _stab
+                _out["System_Reliability_GE25"][_i] = float(_n >= 25)
+                _out["System_Reliability_GE50"][_i] = float(_n >= 50)
+                _out["System_Reliability_GE100"][_i] = float(_n >= 100)
+                if bool(_act) and np.isfinite(_tgt):
+                    _hist.append(float(_tgt))
+        for _c, _arr in _out.items():
+            s[_c] = pd.Series(_arr, index=s.index, dtype="float32")
+        for _c in ("System_Reliability_GE25", "System_Reliability_GE50", "System_Reliability_GE100"):
+            s[_c] = pd.to_numeric(s[_c], errors="coerce").fillna(0).astype("int8")
+    except Exception:
+        # Feature engineering is fail-open; legacy system features remain usable.
+        for _c in _rel_cols:
+            if _c not in s.columns:
+                s[_c] = np.nan
+
     return s
 
 
@@ -11792,6 +11949,9 @@ _PATHI_BIGAL_HISTORY_DESIRED_COLS = [
 
 _PATHI_BIGAL_STATE_PERSIST_COLS = [
     "System_Feature_Version", "System_Signals_Text",
+    "Market_Breakeven_Prob", "Model_Edge_Prob", "Model_EV_Per_Unit",
+    "Fair_Odds_American", "Fair_Line", "Fair_Line_Source",
+    "Bet_Edge_Threshold", "Bet_Recommendation", "Bet_Value_Score",
     "ML_Odds", "Opening_ML_Odds", "ML_Fair_Prob", "Opening_ML_Fair_Prob",
     "Is_ML_Dog", "Is_ML_Favorite", "Opening_Is_ML_Dog",
     "Spread_Value", "Opening_Spread", "Spread_Odds", "Current_Total", "Opening_Total",
