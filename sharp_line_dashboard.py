@@ -1695,6 +1695,77 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         for c in ("System_Side_Consensus_Count","System_Side_Conflict_Count","System_Net_Signal","System_Consensus_Ratio"):
             s[c]=0.0
 
+
+    # ------------------------------------------------------------------
+    # Living system reliability / decay (prior-only).
+    # This evaluates the historical performance of rows where at least one
+    # named Pathi/Big Al SIDE system supported the selected team.  H2H uses
+    # SU outcome; spreads use ATS outcome.  Current/upcoming rows have no
+    # result, so they inherit the state accumulated strictly before them.
+    # ------------------------------------------------------------------
+    _rel_cols = [
+        "System_Reliability_Sample_Prior",
+        "System_Reliability_LongTerm_HitRate_Prior",
+        "System_Reliability_Recent50_HitRate_Prior",
+        "System_Reliability_RecentVsLongTerm_Delta",
+        "System_Reliability_Shrunk_HitRate_Prior",
+        "System_Reliability_Stability_Score",
+        "System_Reliability_GE25",
+        "System_Reliability_GE50",
+        "System_Reliability_GE100",
+    ]
+    for _c in _rel_cols:
+        s[_c] = np.nan
+    try:
+        _mrel = s.get("Market", pd.Series("", index=s.index)).astype(str).map(_sys_norm_market)
+        _su = pd.to_numeric(s.get("SU_Win", np.nan), errors="coerce")
+        _ats = pd.to_numeric(s.get("ATS_Win", np.nan), errors="coerce")
+        _target = pd.Series(np.nan, index=s.index, dtype="float64")
+        _target.loc[_mrel.eq("h2h")] = _su.loc[_mrel.eq("h2h")]
+        _target.loc[_mrel.eq("spreads")] = _ats.loc[_mrel.eq("spreads")]
+        _active = pd.to_numeric(s.get("System_Side_Consensus_Count", 0), errors="coerce").fillna(0).gt(0)
+        _tsrel = pd.to_datetime(s.get("Game_Start"), errors="coerce", utc=True)
+        _rel = pd.DataFrame({
+            "__idx": np.arange(len(s), dtype=np.int64),
+            "Sport": s.get("Sport", "").astype(str).str.upper().str.strip(),
+            "Market": _mrel,
+            "Game_Start": _tsrel,
+            "Target": _target,
+            "Active": _active,
+        }).sort_values(["Sport", "Market", "Game_Start", "__idx"], kind="mergesort")
+        _out = {c: np.full(len(s), np.nan, dtype=np.float64) for c in _rel_cols}
+        for (_sp, _mk), _g in _rel.groupby(["Sport", "Market"], sort=False, observed=True):
+            _hist = []
+            for _i, _tgt, _act in _g[["__idx", "Target", "Active"]].itertuples(index=False, name=None):
+                _i = int(_i)
+                _n = len(_hist)
+                _long = float(np.mean(_hist)) if _n else np.nan
+                _recent = float(np.mean(_hist[-50:])) if _n else np.nan
+                # Beta(25,25) shrinkage toward 50%; small samples cannot look extreme.
+                _wins = float(np.sum(_hist)) if _n else 0.0
+                _shr = (_wins + 25.0) / (_n + 50.0)
+                _stab = (1.0 - min(1.0, abs(_recent - _long) / 0.20)) if (_n and np.isfinite(_recent) and np.isfinite(_long)) else np.nan
+                _out["System_Reliability_Sample_Prior"][_i] = float(_n)
+                _out["System_Reliability_LongTerm_HitRate_Prior"][_i] = _long
+                _out["System_Reliability_Recent50_HitRate_Prior"][_i] = _recent
+                _out["System_Reliability_RecentVsLongTerm_Delta"][_i] = (_recent - _long) if (_n and np.isfinite(_recent) and np.isfinite(_long)) else np.nan
+                _out["System_Reliability_Shrunk_HitRate_Prior"][_i] = _shr
+                _out["System_Reliability_Stability_Score"][_i] = _stab
+                _out["System_Reliability_GE25"][_i] = float(_n >= 25)
+                _out["System_Reliability_GE50"][_i] = float(_n >= 50)
+                _out["System_Reliability_GE100"][_i] = float(_n >= 100)
+                if bool(_act) and np.isfinite(_tgt):
+                    _hist.append(float(_tgt))
+        for _c, _arr in _out.items():
+            s[_c] = pd.Series(_arr, index=s.index, dtype="float32")
+        for _c in ("System_Reliability_GE25", "System_Reliability_GE50", "System_Reliability_GE100"):
+            s[_c] = pd.to_numeric(s[_c], errors="coerce").fillna(0).astype("int8")
+    except Exception:
+        # Feature engineering is fail-open; legacy system features remain usable.
+        for _c in _rel_cols:
+            if _c not in s.columns:
+                s[_c] = np.nan
+
     return s
 
 
@@ -18725,26 +18796,53 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             # Step 5: Group from merged filtered_df to produce summary
             if 'System_Signals_Text' not in filtered_df.columns:
                 filtered_df['System_Signals_Text'] = '—'
+            _summary_agg = {
+                'Rec Line': 'mean',
+                'Sharp Line': 'mean',
+                'Rec Move': 'mean',
+                'Sharp Move': 'mean',
+                'Model Prob': 'mean',
+                'Timing_Opportunity_Score': 'first',
+                'Timing_Stage': 'first',
+                'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else (x.iloc[0] if not x.empty else "⚠️ Missing"),
+                'Confidence Trend': 'first',
+                'Tier Δ': 'first',
+                'Line/Model Direction': 'first',
+                'Why Model Likes It': 'first',
+                'System_Signals_Text': 'first',
+                'Confidence Spark':'first',
+            }
+            # New post-model value fields are optional so the UI remains compatible
+            # while BigQuery schema/backfill catches up.
+            for _c, _fn in {
+                'Bet_Recommendation':'first', 'Model_Edge_Prob':'mean',
+                'Model_EV_Per_Unit':'mean', 'Fair_Line':'mean',
+                'Fair_Odds_American':'mean', 'Bet_Value_Score':'mean'
+            }.items():
+                if _c in filtered_df.columns:
+                    _summary_agg[_c] = _fn
             summary_grouped = (
                 filtered_df
                 .groupby(['Game_Key', 'Matchup', 'Market', 'Outcome'], as_index=False)
-                .agg({
-                    'Rec Line': 'mean',
-                    'Sharp Line': 'mean',
-                    'Rec Move': 'mean',
-                    'Sharp Move': 'mean',
-                    'Model Prob': 'mean',
-                    'Timing_Opportunity_Score': 'first',
-                    'Timing_Stage': 'first', 
-                    'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else (x.iloc[0] if not x.empty else "⚠️ Missing"),
-                    'Confidence Trend': 'first',
-                    'Tier Δ': 'first',
-                    'Line/Model Direction': 'first',
-                    'Why Model Likes It': 'first',
-                    'System_Signals_Text': 'first',
-                    'Confidence Spark':'first'
-                })
+                .agg(_summary_agg)
             )
+            if 'Bet_Recommendation' in summary_grouped.columns:
+                summary_grouped.rename(columns={'Bet_Recommendation':'Bet/Pass'}, inplace=True)
+            if 'Model_Edge_Prob' in summary_grouped.columns:
+                summary_grouped['Edge'] = summary_grouped['Model_Edge_Prob'].apply(
+                    lambda x: f"{x*100:+.1f}%" if pd.notna(x) else "—")
+            if 'Model_EV_Per_Unit' in summary_grouped.columns:
+                summary_grouped['EV / $1'] = summary_grouped['Model_EV_Per_Unit'].apply(
+                    lambda x: f"{x:+.3f}" if pd.notna(x) else "—")
+            if 'Fair_Line' in summary_grouped.columns:
+                def _fmt_fair_row(r):
+                    v = pd.to_numeric(pd.Series([r.get('Fair_Line')]), errors='coerce').iloc[0]
+                    if pd.isna(v): return "—"
+                    mk = str(r.get('Market','')).lower()
+                    if mk in ('h2h','moneyline','ml','headtohead'):
+                        return f"{v:+.0f}"
+                    return f"{v:+.1f}" if mk in ('spread','spreads') else f"{v:.1f}"
+                summary_grouped['Fair Line'] = summary_grouped.apply(_fmt_fair_row, axis=1)
             
             #st.markdown("### 🧪 Summary Grouped Debug View")
             # Round Rec Line and Sharp Line to 1 decimal
@@ -18782,6 +18880,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             # === Final Column Order for Display
             view_cols = [
                 'Date + Time (EST)', 'Matchup', 'Market', 'Outcome',
+                'Bet/Pass', 'Edge', 'EV / $1', 'Fair Line',
                 'Rec Line', 'Sharp Line', 'Rec Move', 'Sharp Move',
                 'Model Prob', 'Confidence Tier', 'Timing_Stage',
                 'System_Signals_Text', 'Why Model Likes It', 'Confidence Trend','Confidence Spark', 'Tier Δ', 
