@@ -68,6 +68,8 @@ from google.cloud import storage
 import xgboost as xgb
 from xgboost import XGBClassifier
 
+# --- Streamlit (dashboard) ---
+# reuse the same helpers you used in training:
 
 # --- Pandas dtype helpers ---
 from pandas.api.types import is_categorical_dtype, is_string_dtype
@@ -164,17 +166,12 @@ def implied_prob_vec_raw(arr: np.ndarray) -> np.ndarray:
 
 
 def ensure_columns(df, required_cols, fill_value=None):
-    missing_cols = [col for col in required_cols if col not in df.columns]
-
-    if missing_cols:
-        filler = pd.DataFrame(
-            fill_value,
-            index=df.index,
-            columns=missing_cols,
-        )
-        df = pd.concat([df, filler], axis=1, copy=False)
-
-    return df
+    """Add missing columns in one block to avoid pandas frame fragmentation."""
+    missing = [col for col in required_cols if col not in df.columns]
+    if not missing:
+        return df
+    filler = pd.DataFrame(fill_value, index=df.index, columns=missing)
+    return pd.concat([df, filler], axis=1, copy=False)
 
 def normalize_book_name(bookmaker: str, book: str) -> str:
     book = book.lower().strip() if isinstance(book, str) else ""
@@ -2627,7 +2624,7 @@ def read_recent_sharp_master_cached(hours=120):
     sharp_moves_cache[cache_key] = df
     return df
         
-def fetch_live_odds(sport_key, api_key):
+# Dedicated detection snapshot cache.  The old path used SELECT * from the\n# very wide merged feature view AND a second SELECT * from sharp_moves_master.\n# Detection only needs raw market-path columns, so fetch them once, keep the\n# frame narrow, and incrementally refresh it between scheduled runs.\n_DETECT_SNAPSHOT_CACHE = {"df": None, "hours": None, "last_check": 0.0, "max_ts": None}\n_DETECT_SNAPSHOT_REFRESH_SECONDS = 15 * 60\n_DETECT_SNAPSHOT_TABLE = "sharplogger.sharp_data.sharp_moves_master"\n_DETECT_SNAPSHOT_COLS = (\n    "Game_Key", "Game", "Sport", "Market", "Outcome", "Bookmaker", "Book",\n    "Snapshot_Timestamp", "Time", "Game_Start", "Commence_Hour",\n    "Value", "Odds_Price", "Limit", "Open_Value", "Open_Odds", "Opening_Limit",\n    "Home_Team_Norm", "Away_Team_Norm", "Team_Key", "Was_Canonical", "Pre_Game",\n)\n\ndef _normalize_detect_snapshot_frame(df: pd.DataFrame) -> pd.DataFrame:\n    if df is None or df.empty:\n        return pd.DataFrame()\n    out = df\n    for c in ("Game_Key", "Game", "Market", "Outcome", "Bookmaker", "Book",\n              "Home_Team_Norm", "Away_Team_Norm", "Team_Key", "Sport"):\n        if c in out.columns:\n            out[c] = out[c].astype("string").str.strip().str.lower()\n    for c in ("Snapshot_Timestamp", "Time", "Game_Start", "Commence_Hour"):\n        if c in out.columns:\n            out[c] = pd.to_datetime(out[c], errors="coerce", utc=True)\n    for c in ("Value", "Odds_Price", "Limit", "Open_Value", "Open_Odds", "Opening_Limit"):\n        if c in out.columns:\n            out[c] = pd.to_numeric(out[c], errors="coerce", downcast="float")\n    return out\n\ndef _query_detect_snapshot_rows(hours: int, since_ts=None) -> pd.DataFrame:\n    cols_present = _fetch_bq_table_columns(_DETECT_SNAPSHOT_TABLE)\n    cols = [c for c in _DETECT_SNAPSHOT_COLS if c in cols_present]\n    required = {"Game_Key", "Market", "Outcome", "Bookmaker", "Snapshot_Timestamp"}\n    if not required.issubset(cols_present):\n        # Fail open to the legacy reader if schema is unexpectedly different.\n        return pd.DataFrame()\n    where = ["Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)"]\n    params = [bigquery.ScalarQueryParameter("hours", "INT64", int(hours))]\n    if since_ts is not None and pd.notna(since_ts):\n        # one-minute overlap makes equal/late-arriving timestamps harmless; dedup below\n        where.append("Snapshot_Timestamp >= @since_ts")\n        params.append(bigquery.ScalarQueryParameter("since_ts", "TIMESTAMP", pd.Timestamp(since_ts).to_pydatetime()))\n    q = f"SELECT {', '.join('`'+c+'`' for c in cols)} FROM `{_DETECT_SNAPSHOT_TABLE}` WHERE " + " AND ".join(where)\n    df = bq_client.query(q, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe(create_bqstorage_client=True)\n    return _normalize_detect_snapshot_frame(df)\n\ndef get_detect_snapshots_cached(hours: int = 120) -> pd.DataFrame:\n    """Narrow raw snapshot history with incremental refresh, shared by all sports."""\n    now = time.time()\n    c = _DETECT_SNAPSHOT_CACHE\n    full_reload = c.get("df") is None or c.get("hours") != int(hours)\n    if full_reload:\n        df = _query_detect_snapshot_rows(int(hours))\n        if df is None or df.empty:\n            # Legacy fallback preserves availability if the raw query/schema changes.\n            df = read_recent_sharp_moves(hours=hours, table=_DETECT_SNAPSHOT_TABLE)\n            keep = [x for x in _DETECT_SNAPSHOT_COLS if x in df.columns]\n            df = _normalize_detect_snapshot_frame(df.loc[:, keep].copy()) if not df.empty else pd.DataFrame()\n        max_ts = df["Snapshot_Timestamp"].max() if "Snapshot_Timestamp" in df.columns and not df.empty else None\n        c.update({"df": df, "hours": int(hours), "last_check": now, "max_ts": max_ts})\n        return df\n\n    if (now - float(c.get("last_check", 0.0))) < _DETECT_SNAPSHOT_REFRESH_SECONDS:\n        return c["df"]\n\n    base = c["df"]\n    max_ts = c.get("max_ts")\n    since = (pd.Timestamp(max_ts) - pd.Timedelta(minutes=1)) if max_ts is not None and pd.notna(max_ts) else None\n    delta = _query_detect_snapshot_rows(int(hours), since_ts=since)\n    if delta is not None and not delta.empty:\n        base = pd.concat([base, delta], ignore_index=True, sort=False, copy=False)\n        dedup = [x for x in ("Game_Key", "Market", "Outcome", "Bookmaker", "Snapshot_Timestamp") if x in base.columns]\n        if dedup:\n            base = base.drop_duplicates(dedup, keep="last")\n        if "Snapshot_Timestamp" in base.columns:\n            cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=int(hours))\n            base = base[base["Snapshot_Timestamp"].ge(cutoff)].reset_index(drop=True)\n            max_ts = base["Snapshot_Timestamp"].max() if not base.empty else max_ts\n    c.update({"df": base, "hours": int(hours), "last_check": now, "max_ts": max_ts})\n    return base\n\ndef _filter_snapshots_to_current_keys(snapshot_rows: pd.DataFrame, current_rows: pd.DataFrame) -> pd.DataFrame:\n    keys = ["Game_Key", "Market", "Outcome", "Bookmaker"]\n    if snapshot_rows is None or snapshot_rows.empty or current_rows is None or current_rows.empty:\n        return pd.DataFrame(columns=getattr(snapshot_rows, "columns", []))\n    if not all(k in snapshot_rows.columns and k in current_rows.columns for k in keys):\n        return snapshot_rows\n    ck = current_rows[keys].dropna().drop_duplicates()\n    if ck.empty:\n        return snapshot_rows.iloc[0:0]\n    return snapshot_rows.merge(ck, on=keys, how="inner", validate="many_to_one")\n\ndef fetch_live_odds(sport_key, api_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
         'apiKey': api_key,
@@ -7443,6 +7440,29 @@ def build_corr_lookup_ST_SM_TM(hist, sport: str = "NFL"):
     TM_lookup = pd.DataFrame(TM_rows, columns=["total_bin","ml_bin","rho_TM","n"])
     return ST_lookup, SM_lookup, TM_lookup
 
+_CROSS_MARKET_CORR_CACHE: dict[tuple[str, str], tuple[float, tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]] = {}
+_CROSS_MARKET_CORR_TTL_SECONDS = 6 * 60 * 60
+
+def _get_cross_market_corr_cached(bq, hist_table_fq: str, sport: str):
+    key = (str(hist_table_fq), str(sport).upper())
+    now = time.time()
+    hit = _CROSS_MARKET_CORR_CACHE.get(key)
+    if hit is not None and (now - hit[0]) < _CROSS_MARKET_CORR_TTL_SECONDS:
+        return hit[1]
+    sql = f"""
+        SELECT Sport, close_spread, close_total, p_ml_fav,
+               fav_covered, went_over, fav_won
+        FROM `{hist_table_fq}`
+        WHERE UPPER(CAST(Sport AS STRING)) = @sport
+    """
+    cfg = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("sport", "STRING", str(sport).upper())
+    ])
+    hist = bq.query(sql, job_config=cfg).to_dataframe(create_bqstorage_client=True)
+    lookups = build_corr_lookup_ST_SM_TM(hist, sport=sport)
+    _CROSS_MARKET_CORR_CACHE[key] = (now, lookups)
+    return lookups
+
 def attach_cross_market_bins_and_corr(
     df: "pd.DataFrame",
     df_all_snapshots: "pd.DataFrame",
@@ -7479,14 +7499,7 @@ def attach_cross_market_bins_and_corr(
     ST_lookup = SM_lookup = TM_lookup = None
     if bq is not None and hist_table_fq:
         try:
-            sql = f"""
-            SELECT Sport, close_spread, close_total, p_ml_fav,
-                   fav_covered, went_over, fav_won
-            FROM `{hist_table_fq}`
-            WHERE Sport = '{sport}'
-            """
-            hist = bq.query(sql).to_dataframe(create_bqstorage_client=False)
-            ST_lookup, SM_lookup, TM_lookup = build_corr_lookup_ST_SM_TM(hist, sport=sport)
+            ST_lookup, SM_lookup, TM_lookup = _get_cross_market_corr_cached(bq, hist_table_fq, sport)
         except Exception:
             # Silent skip if table/cols unavailable
             ST_lookup = SM_lookup = TM_lookup = None
@@ -10453,8 +10466,12 @@ def apply_blended_sharp_score(
         return pd.DataFrame()
 import sys, json, logging
 
+_TIMING_DEBUG_ENABLED = str(os.getenv("SHARP_TIMING_DEBUG", "0")).strip().lower() in {"1", "true", "yes"}
+
 def _dbg_timing(event: str, **kv):
-    # Cloud Logging friendly: one JSON line
+    # These probes perform real groupby/copy work, so keep them disabled in production.
+    if not _TIMING_DEBUG_ENABLED:
+        return
     payload = {"tag": "timing_dbg", "event": event, **kv}
     logging.warning(json.dumps(payload, default=str))
     try:
@@ -12129,10 +12146,19 @@ def _physicalize_system_game_key(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+_BQ_SCHEMA_COL_CACHE: dict[str, tuple[float, set[str]]] = {}
+_BQ_SCHEMA_COL_TTL_SECONDS = 6 * 60 * 60
+
 def _fetch_bq_table_columns(table_fq: str) -> set[str]:
+    now = time.time()
+    hit = _BQ_SCHEMA_COL_CACHE.get(table_fq)
+    if hit is not None and (now - hit[0]) < _BQ_SCHEMA_COL_TTL_SECONDS:
+        return set(hit[1])
     try:
         tbl = bq_client.get_table(table_fq)
-        return {f.name for f in tbl.schema}
+        cols = {f.name for f in tbl.schema}
+        _BQ_SCHEMA_COL_CACHE[table_fq] = (now, cols)
+        return set(cols)
     except Exception as e:
         logging.warning("⚠️ Pathi/BigAl schema lookup failed for %s: %s", table_fq, e)
         return set()
@@ -12163,13 +12189,26 @@ def _query_pathi_bigal_history_table(table_fq: str, sport: str, days_back: int) 
         where.append("SHARP_HIT_BOOL IS NOT NULL")
 
     q = f"SELECT {', '.join('`'+c+'`' for c in cols)} FROM `{table_fq}` WHERE " + " AND ".join(where)
-    # Keep one latest scored row per game/market/outcome/book where the source is snapshot-grained.
+    # The state builder ultimately keeps ONE representative row per physical
+    # game/market/outcome, preferring a sharp book and then the latest snapshot.
+    # Do that collapse in BigQuery so we do not download 5-15 duplicate book
+    # rows for every historical outcome across 1,200 days.
     if "Merge_Key_Short" in cols_present and "Snapshot_Timestamp" in cols_present:
         _book_col = "Bookmaker" if "Bookmaker" in cols_present else ("Book" if "Book" in cols_present else None)
-        _parts = ["LOWER(TRIM(CAST(Merge_Key_Short AS STRING)))", "LOWER(TRIM(CAST(Market AS STRING)))", "LOWER(TRIM(CAST(Outcome AS STRING)))"]
+        _parts = [
+            "LOWER(TRIM(CAST(Merge_Key_Short AS STRING)))",
+            "LOWER(TRIM(CAST(Market AS STRING)))",
+            "LOWER(TRIM(CAST(Outcome AS STRING)))",
+        ]
+        _order = "TIMESTAMP(Snapshot_Timestamp) DESC"
         if _book_col:
-            _parts.append(f"LOWER(TRIM(CAST({_book_col} AS STRING)))")
-        q += " QUALIFY ROW_NUMBER() OVER (PARTITION BY " + ", ".join(_parts) + " ORDER BY TIMESTAMP(Snapshot_Timestamp) DESC) = 1"
+            sharp_vals = sorted({str(x).lower().strip() for x in (SHARP_BOOKS or []) if str(x).strip()})
+            params.append(bigquery.ArrayQueryParameter("system_sharp_books", "STRING", sharp_vals))
+            _order = (
+                f"CASE WHEN LOWER(TRIM(CAST({_book_col} AS STRING))) IN UNNEST(@system_sharp_books) "
+                f"THEN 1 ELSE 0 END DESC, TIMESTAMP(Snapshot_Timestamp) DESC"
+            )
+        q += " QUALIFY ROW_NUMBER() OVER (PARTITION BY " + ", ".join(_parts) + " ORDER BY " + _order + ") = 1"
     return bq_client.query(q, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe(create_bqstorage_client=True)
 
 
@@ -12551,6 +12590,8 @@ def detect_sharp_moves(
         logging.warning("⚠️ No current odds data provided.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
+    _detect_started = time.perf_counter()
+
     # ---------- 0) Basics ----------
     df_scored     = pd.DataFrame()
     summary_df    = pd.DataFrame()
@@ -12607,7 +12648,7 @@ def detect_sharp_moves(
     old_val_map, old_odds_map = {}, {}
     if history_hours and history_hours > 0:
         try:
-            df_history = read_recent_sharp_master_cached(hours=history_hours)
+            df_history = get_detect_snapshots_cached(hours=history_hours)
             if not df_history.empty:
                 # Keep only rows we can key on
                 df_history = df_history.dropna(subset=['Game', 'Market', 'Outcome', 'Book', 'Value'])
@@ -12753,19 +12794,20 @@ def detect_sharp_moves(
     # ─────────────────────────────────────────────────────────
     # 2) Read snapshots (KEEP ALL COLUMNS) + normalize hot fields
     # ─────────────────────────────────────────────────────────
-    df_all_snapshots = read_recent_sharp_master_cached(hours=120)
-    # ─────────────────────────────────────────────────────────
-    # TIMING HISTORY (raw snapshot stream; do NOT reuse df_all_snapshots)
-    # ─────────────────────────────────────────────────────────
-    df_timing_snapshots = get_timing_snapshots_cached(
-        hours=120,
-        table="sharplogger.sharp_data.sharp_moves_master",
-        ttl_s=120,
-    )
-    
+    # One narrow RAW snapshot fetch now serves opens/extremes, timing, hydration,
+    # market-leader and cross-market features.  The old code downloaded the wide
+    # merged view plus a second raw snapshot table on every detection cycle.
+    _phase_t0 = time.perf_counter()
+    df_all_snapshots = get_detect_snapshots_cached(hours=120)
+    df_timing_snapshots = _filter_snapshots_to_current_keys(df_all_snapshots, df)
+    logging.info("⏱ detect snapshot load/filter %s: %.2fs (%d current-history rows)",
+                 _sport_label or _sport_key, time.perf_counter() - _phase_t0, len(df_timing_snapshots))
+
+    _phase_t0 = time.perf_counter()
     df = apply_compute_sharp_metrics_rowwise(df, df_timing_snapshots)
     df = propagate_timing_to_other_side(df)
     _timing30_map = build_30min_line_timing_features(df_timing_snapshots, sharp_books=SHARP_BOOKS)
+    logging.info("⏱ detect timing features %s: %.2fs", _sport_label or _sport_key, time.perf_counter() - _phase_t0)
     if _timing30_map is not None and not _timing30_map.empty:
         _tk=["Game_Key","Market","Outcome","Bookmaker"]
         for _k in _tk:
@@ -12778,16 +12820,6 @@ def detect_sharp_moves(
         if c in df_all_snapshots.columns:
             df_all_snapshots[c] = df_all_snapshots[c].astype('string').str.strip().str.lower()
 
-
-    # normalize join keys for timing func (same normalization you already do)
-    for c in ('Game_Key','Market','Outcome','Bookmaker'):
-        if c in df_timing_snapshots.columns:
-            df_timing_snapshots[c] = df_timing_snapshots[c].astype('string').str.strip().str.lower()
-    
-    for c in ('Snapshot_Timestamp','Game_Start'):
-        if c in df_timing_snapshots.columns:
-            df_timing_snapshots[c] = pd.to_datetime(df_timing_snapshots[c], errors='coerce', utc=True)
-    
     # Keep join keys as string for safe merges & concatenation later
     for c in ('Game_Key','Market','Outcome','Bookmaker'):
         if c in df_all_snapshots.columns:
@@ -12825,22 +12857,24 @@ def detect_sharp_moves(
     
     _keys = df[merge_keys].drop_duplicates()
     snaps = df_all_snapshots.merge(_keys, on=merge_keys, how='inner')
+    # From here on, scoring only needs snapshot paths for the current games.
+    # Drop the all-sports 120h frame reference before the expensive scoring stage.
+    df_all_snapshots = snaps
     # =======================
-    # PROBE A: key match rate
+    # PROBE A: key match rate (debug only)
     # =======================
     k = ['Game_Key','Market','Outcome','Bookmaker']
-
-    cur_keys  = df[k].drop_duplicates()
-    hist_keys = df_all_snapshots[k].drop_duplicates()
-    
-    m = cur_keys.merge(hist_keys, on=k, how='left', indicator=True)
-    _dbg_timing(
-        "probeA_key_match",
-        cur_keys=len(cur_keys),
-        hist_keys=len(hist_keys),
-        matched=int((m["_merge"] == "both").sum()),
-        pct_matched=float((m["_merge"] == "both").mean()) if len(m) else None,
-    )
+    if _TIMING_DEBUG_ENABLED:
+        cur_keys  = df[k].drop_duplicates()
+        hist_keys = df_all_snapshots[k].drop_duplicates()
+        m = cur_keys.merge(hist_keys, on=k, how='left', indicator=True)
+        _dbg_timing(
+            "probeA_key_match",
+            cur_keys=len(cur_keys),
+            hist_keys=len(hist_keys),
+            matched=int((m["_merge"] == "both").sum()),
+            pct_matched=float((m["_merge"] == "both").mean()) if len(m) else None,
+        )
     # ensure sorted once (stable, low mem)
     if not snaps.empty and 'Snapshot_Timestamp' in snaps.columns:
         snaps = snaps.sort_values('Snapshot_Timestamp', kind='mergesort')
@@ -12849,16 +12883,14 @@ def detect_sharp_moves(
     # ===========================
     k = ['Game_Key','Market','Outcome','Bookmaker']
 
-    if snaps.empty:
-        _dbg_timing("probeB_snaps_empty", snaps_rows=0)
-    else:
-        if 'Snapshot_Timestamp' not in snaps.columns:
+    if _TIMING_DEBUG_ENABLED:
+        if snaps.empty:
+            _dbg_timing("probeB_snaps_empty", snaps_rows=0)
+        elif 'Snapshot_Timestamp' not in snaps.columns:
             _dbg_timing("probeB_missing_ts_col", snaps_rows=len(snaps), cols=list(snaps.columns)[:25])
         else:
             tmp = snaps.dropna(subset=['Snapshot_Timestamp']).copy()
-            tmp['Snapshot_Timestamp'] = pd.to_datetime(tmp['Snapshot_Timestamp'], utc=True, errors='coerce')
-            nun = tmp.groupby(k)['Snapshot_Timestamp'].nunique()
-    
+            nun = tmp.groupby(k, observed=True)['Snapshot_Timestamp'].nunique()
             _dbg_timing(
                 "probeB_ts_depth",
                 snaps_rows=len(snaps),
@@ -12947,7 +12979,7 @@ def detect_sharp_moves(
         )
         if need_hydrate_mask.any():
             needs_hydration = df_inverse.loc[need_hydrate_mask].copy()
-            needs_hydration = hydrate_inverse_rows_from_snapshot(needs_hydration, df_all_snapshots)
+            needs_hydration = hydrate_inverse_rows_from_snapshot(needs_hydration, snaps)
             needs_hydration = fallback_flip_inverse_rows(needs_hydration)
             if 'Team_Key' in needs_hydration.columns and 'Team_Key' in df.columns:
                 tmp = needs_hydration[['Team_Key','Value','Odds_Price','Limit']].drop_duplicates('Team_Key')
@@ -13020,18 +13052,24 @@ def detect_sharp_moves(
     
     # Add deterministic Pathi/Big Al state after opens/current lines are hydrated.
     # New model artifacts can request these columns; legacy artifacts simply ignore them.
+    _phase_t0 = time.perf_counter()
     df = attach_pathi_bigal_backend_features(df, canon_sport or _sport_label or _sport_key)
+    logging.info("⏱ detect Pathi/BigAl state %s: %.2fs", _sport_label or _sport_key, time.perf_counter() - _phase_t0)
+    _phase_t0 = time.perf_counter()
     df = override_corrected_line_move_features(df)
+    logging.info("⏱ detect corrected movement %s: %.2fs", _sport_label or _sport_key, time.perf_counter() - _phase_t0)
 
     # Compute hash before scoring
     df['Line_Hash'] = df.apply(compute_line_hash, axis=1)
     
     # If apply_blended_sharp_score mutates, let it copy internally; otherwise pass df directly.
     
+    _phase_t0 = time.perf_counter()
     df_scored = apply_blended_sharp_score(
-        df, trained_models, df_all_snapshots, weights,  # ← positional
+        df, trained_models, snaps, weights,  # current-game snapshot paths only
         sport=canon_sport                               # ← keyword-only (after the *)
     )
+    logging.info("⏱ detect model scoring %s: %.2fs", _sport_label or _sport_key, time.perf_counter() - _phase_t0)
 
 
     
@@ -13045,7 +13083,8 @@ def detect_sharp_moves(
         df_scored = pd.DataFrame()
         summary_df = pd.DataFrame()
     
-    return df_scored, df_all_snapshots, summary_df
+    logging.info("⏱ detect TOTAL %s: %.2fs", _sport_label or _sport_key, time.perf_counter() - _detect_started)
+    return df_scored, snaps, summary_df
 
     
 
