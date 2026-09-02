@@ -10552,15 +10552,43 @@ def _sys_text_series(df: pd.DataFrame, *names, default="") -> pd.Series:
     return pd.Series(default, index=df.index, dtype="object")
 
 
-def _sys_amer_prob(s: pd.Series) -> pd.Series:
-    x = pd.to_numeric(s, errors="coerce")
-    p = np.where(
-        x > 0,
-        100.0 / (x + 100.0),
-        np.where(x < 0, (-x) / ((-x) + 100.0), np.nan),
-    )
-    return pd.Series(p, index=s.index, dtype="float64")
+def _sys_amer_prob(s):
+    """Convert American odds to implied probability for Series or scalar input."""
 
+    if isinstance(s, pd.Series):
+        x = pd.to_numeric(s, errors="coerce")
+        xv = x.to_numpy(dtype="float64", na_value=np.nan)
+
+        p = np.full(len(xv), np.nan, dtype="float64")
+
+        pos = xv > 0
+        neg = xv < 0
+
+        p[pos] = 100.0 / (xv[pos] + 100.0)
+        p[neg] = (-xv[neg]) / ((-xv[neg]) + 100.0)
+
+        return pd.Series(p, index=s.index, dtype="float64")
+
+    try:
+        x = pd.to_numeric(s, errors="coerce")
+    except Exception:
+        return np.nan
+
+    try:
+        if pd.isna(x):
+            return np.nan
+    except (TypeError, ValueError):
+        return _sys_amer_prob(pd.Series(s))
+
+    x = float(x)
+
+    if x > 0:
+        return float(100.0 / (x + 100.0))
+
+    if x < 0:
+        return float((-x) / ((-x) + 100.0))
+
+    return np.nan
 
 def _sys_consecutive_prior(g: pd.DataFrame, col: str, grp_cols: list[str]) -> pd.Series:
     """Count consecutive TRUE results immediately before each row, leakage-safe.
