@@ -7891,6 +7891,37 @@ def wire_ats_features_inplace(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def _merge_feature_overwrite(left: pd.DataFrame, right: pd.DataFrame, on, how="left", validate=None) -> pd.DataFrame:
+    """Merge calculated feature columns without creating pandas _x/_y duplicates.
+
+    Non-key columns supplied by ``right`` intentionally replace same-named columns
+    already present on ``left``.  This is useful when a BigQuery feature view and
+    the live Python enrichment layer expose the same canonical feature names.
+    """
+    if left is None or right is None or getattr(right, "empty", True):
+        return left
+    keys = [on] if isinstance(on, str) else list(on)
+    missing_l = [k for k in keys if k not in left.columns]
+    missing_r = [k for k in keys if k not in right.columns]
+    if missing_l or missing_r:
+        raise KeyError(f"_merge_feature_overwrite missing keys: left={missing_l} right={missing_r}")
+    incoming = [c for c in right.columns if c not in keys]
+    overlap = [c for c in incoming if c in left.columns]
+    # Also remove stale pandas suffix artifacts from an earlier enrichment pass.
+    # Example: if Dist_to_3 and Dist_to_3_x both exist, a normal merge of another
+    # Dist_to_3 can fail before pandas has a chance to create suffixes.
+    stale_suffixes = []
+    for c in incoming:
+        for suff in ("_x", "_y"):
+            cc = f"{c}{suff}"
+            if cc in left.columns:
+                stale_suffixes.append(cc)
+    drop_cols = sorted(set(overlap + stale_suffixes))
+    if drop_cols:
+        left = left.drop(columns=drop_cols, errors="ignore")
+    return left.merge(right, on=keys, how=how, validate=validate)
+
+
 def apply_blended_sharp_score(
     df,
     trained_models,
@@ -8816,24 +8847,25 @@ def apply_blended_sharp_score(
                 game_vals[k] = np.nan
 
         # Merge these back to every scoring row for the game
-        df = df.merge(
-            game_vals[
-                [
-                    "Game_Key",
-                    "Spread_Abs_Game",
-                    "Spread_Abs_Game_Z",
-                    
-                    "Total_Game",
-                    "Total_Game_Z",
-                 
-                    "Spread_x_Total",
-                    "Spread_over_Total",
-                    "Total_over_Spread",
-                    "Dist_to_3",
-                    "Dist_to_7",
-                    "Dist_to_10",
-                ]
-            ],
+        _game_feature_cols = [
+            "Game_Key",
+            "Spread_Abs_Game",
+            "Spread_Abs_Game_Z",
+            "Total_Game",
+            "Total_Game_Z",
+            "Spread_x_Total",
+            "Spread_over_Total",
+            "Total_over_Spread",
+            "Dist_to_3",
+            "Dist_to_7",
+            "Dist_to_10",
+        ]
+        # These are canonical features and may already be present from the
+        # Pathi football layer / BigQuery feature views.  Recompute-and-replace
+        # rather than suffix-merging duplicates.
+        df = _merge_feature_overwrite(
+            df,
+            game_vals[_game_feature_cols],
             on="Game_Key",
             how="left",
             validate="many_to_one",
@@ -12439,7 +12471,9 @@ def detect_sharp_moves(
         _tk=["Game_Key","Market","Outcome","Bookmaker"]
         for _k in _tk:
             if _k in df.columns: df[_k]=df[_k].astype(str).str.lower().str.strip()
-        df=df.merge(_timing30_map,on=_tk,how="left",validate="many_to_one")
+        df = _merge_feature_overwrite(
+            df, _timing30_map, on=_tk, how="left", validate="many_to_one"
+        )
     del _timing30_map
     for c in ('Game_Key','Market','Outcome','Bookmaker'):
         if c in df_all_snapshots.columns:
