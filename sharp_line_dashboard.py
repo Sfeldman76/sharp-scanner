@@ -18172,12 +18172,8 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                     st.warning("⚠️ No graded picks available yet. I’ll still show live odds below.")
                     skip_grading = True
 
-        # Attach current deterministic Pathi / Big Al systems before downstream summaries.
-        if not skip_grading and df_moves_raw is not None and not df_moves_raw.empty:
-            df_moves_raw = attach_pathi_bigal_live_features(df_moves_raw, label)
-
-        # Keep a pristine copy for "first snapshot" work later (or empty if skipping)
-        df_raw_for_history = df_moves_raw.copy() if not skip_grading else pd.DataFrame()
+       
+   
 
         # === 3) Load per-market models (BEFORE any sharp-scoring)
         market_list = ['spreads', 'totals', 'h2h']
