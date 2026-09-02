@@ -14613,12 +14613,12 @@ def train_sharp_model_from_bq(
         train_kwargs = dict(base_kwargs)
         train_kwargs.pop("predictor", None)
         
-        SEARCH_N_EST    = 1000
-        SEARCH_MAX_BIN  = 256
-        DEEP_N_EST_CAP  = 1800
-        DEEP_MAX_BIN    = 320
+        SEARCH_N_EST    = 400
+        SEARCH_MAX_BIN  = 192
+        DEEP_N_EST_CAP  = 1200
+        DEEP_MAX_BIN    = 256
         
-        EARLY_STOP      = 60
+        EARLY_STOP      = 50
         HALVING_FACTOR  = 2
         MIN_RESOURCES   = 32
         VCPUS           = get_vcpus()
@@ -14663,7 +14663,7 @@ def train_sharp_model_from_bq(
         thr = get_quality_thresholds(sport, market)
         MIN_AUC         = thr["MIN_AUC"]
         MAX_LOGLOSS     = thr["MAX_LOGLOSS"]
-        MAX_ROUNDS      = 30
+        MAX_ROUNDS      = 5
         MAX_OVERFIT_GAP = thr["MAX_OVERFIT_GAP"]
         
        
