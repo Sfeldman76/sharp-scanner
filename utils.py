@@ -2724,6 +2724,44 @@ def compute_market_weights(df):
     # Temporary shim to keep new loader working
     return compute_and_write_market_weights(df)
 
+def _coerce_dataframe_to_existing_bq_schema(df: pd.DataFrame, table: str) -> pd.DataFrame:
+    """Best-effort pandas coercion to the destination BigQuery schema.
+
+    Prevents all-null STRING columns from being left as float64 and catches
+    INTEGER columns with fractional values before PyArrow sees them.
+    """
+    out = df.copy()
+    table_fq = table if table.count(".") == 2 else f"{GCP_PROJECT_ID}.{table}"
+    try:
+        client = bigquery.Client(project=GCP_PROJECT_ID, location="us")
+        tbl = client.get_table(table_fq)
+        bq_types = {f.name: f.field_type.upper() for f in tbl.schema}
+    except Exception as e:
+        logging.warning("⚠️ Could not load BQ schema for final dtype coercion: %s", e)
+        return out
+
+    for c in out.columns:
+        typ = bq_types.get(c)
+        if not typ:
+            continue
+        if typ in {"STRING"}:
+            out[c] = out[c].astype("string")
+        elif typ in {"FLOAT", "FLOAT64", "NUMERIC", "BIGNUMERIC"}:
+            out[c] = pd.to_numeric(out[c], errors="coerce").astype("float64")
+        elif typ in {"INTEGER", "INT64"}:
+            x = pd.to_numeric(out[c], errors="coerce")
+            frac = x.notna() & ((x - np.round(x)).abs() > 1e-9)
+            if frac.any():
+                examples = x[frac].head(5).tolist()
+                raise ValueError(f"BQ INTEGER column {c} contains fractional values {examples}")
+            out[c] = x.round().astype("Int64")
+        elif typ in {"BOOL", "BOOLEAN"}:
+            out[c] = out[c].astype("boolean")
+        elif typ in {"TIMESTAMP", "DATETIME"}:
+            out[c] = pd.to_datetime(out[c], errors="coerce", utc=(typ == "TIMESTAMP"))
+    return out
+
+
 def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     if df is None or df.empty:
         logging.warning("⚠️ No sharp moves to write.")
@@ -2989,10 +3027,15 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     logging.info(f"📦 Final row count to upload after filtering and dedup: {len(df)}")
     df = coerce_for_bq(df)
     for _c in [c for c in _pathi_bigal_optional_cols(df) if c in df.columns]:
-        if _c in {"System_Signals_Text", "System_Feature_Version"}:
+        if _c in {"System_Signals_Text", "System_Feature_Version", "Fair_Line_Source", "Bet_Recommendation"}:
             df[_c] = df[_c].astype("string")
         else:
             df[_c] = pd.to_numeric(df[_c], errors="coerce")
+
+    # Final authoritative coercion uses the destination schema itself.
+    # This prevents all-null STRING outputs from becoming float64 and prevents
+    # PyArrow from silently/truncating fractional values into INT64.
+    df = _coerce_dataframe_to_existing_bq_schema(df, table)
     # ======= 🚀 Write to BigQuery (with rich error diagnostics) =======
     try:
         logging.info(f"📤 Uploading to `{table}`...")
@@ -12352,34 +12395,87 @@ def override_corrected_line_move_features(df: pd.DataFrame) -> pd.DataFrame:
     out = add_pathi_football_key_features(out)
     return out
 
+def _optional_bq_expected_type(name: str, s: pd.Series | None) -> str:
+    """Infer the storage type for optional model/system fields.
+
+    Important: Pathi_/BigAl_ is NOT synonymous with integer.  Many of those
+    features are rates, ROI values, z-scores, and weighted key-value scores.
+    Prefer the actual pandas dtype; suffix/name hints are only fallbacks for
+    all-null or object-typed columns.
+    """
+    name = str(name)
+    if name in {"System_Signals_Text", "System_Feature_Version", "Fair_Line_Source", "Bet_Recommendation"}:
+        return "STRING"
+    if s is not None:
+        if pd.api.types.is_bool_dtype(s):
+            return "INT64"
+        if pd.api.types.is_integer_dtype(s):
+            return "INT64"
+        if pd.api.types.is_float_dtype(s):
+            return "FLOAT64"
+        if pd.api.types.is_numeric_dtype(s):
+            return "FLOAT64"
+    # Name-based fallback only when dtype cannot tell us.
+    if name.endswith(("_DataReady", "_Tightener", "_Flag")):
+        return "INT64"
+    if name.endswith("_Count"):
+        return "INT64"
+    return "STRING"
+
+
 def _ensure_optional_bq_columns(df: pd.DataFrame, table: str, optional_cols: list[str]) -> list[str]:
-    """Add nullable optional system columns when permitted; otherwise return only existing ones."""
+    """Add nullable optional fields and repair old INT64->FLOAT64 mistakes.
+
+    Earlier versions classified every Pathi_/BigAl_ field as INT64.  That is
+    invalid for rates/scores (e.g. 0.75). BigQuery permits widening INT64 to
+    FLOAT64, so repair those fields before append. If a repair is blocked by
+    permissions/table state, the incompatible optional field is skipped for
+    this upload rather than taking down the whole backend write.
+    """
     if not optional_cols:
         return []
     table_fq = table if table.count(".") == 2 else f"{GCP_PROJECT_ID}.{table}"
     try:
         client = bigquery.Client(project=GCP_PROJECT_ID)
         tbl = client.get_table(table_fq)
-        existing = {f.name for f in tbl.schema}
+        schema_map = {f.name: f.field_type.upper() for f in tbl.schema}
+        existing = set(schema_map)
         missing = [c for c in optional_cols if c not in existing]
         if missing:
             new_fields = []
             for c in missing:
-                s = df[c] if c in df.columns else pd.Series(dtype="float64")
-                if c in {"System_Signals_Text", "System_Feature_Version"}:
-                    typ = "STRING"
-                elif pd.api.types.is_bool_dtype(s) or pd.api.types.is_integer_dtype(s) or c.endswith("_DataReady") or c.endswith("_Tightener") or c.endswith("_Count") or c.startswith(("Pathi_", "BigAl_")):
-                    typ = "INT64"
-                elif pd.api.types.is_numeric_dtype(s):
-                    typ = "FLOAT64"
-                else:
-                    typ = "STRING"
+                ser = df[c] if c in df.columns else pd.Series(dtype="float64")
+                typ = _optional_bq_expected_type(c, ser)
                 new_fields.append(bigquery.SchemaField(c, typ, mode="NULLABLE"))
             tbl.schema = list(tbl.schema) + new_fields
             client.update_table(tbl, ["schema"])
-            existing.update(missing)
             logging.info("✅ Added %d optional Pathi/BigAl columns to %s", len(missing), table_fq)
-        return [c for c in optional_cols if c in existing]
+            tbl = client.get_table(table_fq)
+            schema_map = {f.name: f.field_type.upper() for f in tbl.schema}
+            existing = set(schema_map)
+
+        # Repair columns created by the old prefix=>INT64 rule.
+        widen = []
+        for c in optional_cols:
+            if c not in existing or c not in df.columns:
+                continue
+            expected = _optional_bq_expected_type(c, df[c])
+            actual = schema_map.get(c)
+            if actual in {"INTEGER", "INT64"} and expected == "FLOAT64":
+                widen.append(c)
+
+        skipped = set()
+        for c in widen:
+            try:
+                q = f"ALTER TABLE `{table_fq}` ALTER COLUMN `{c}` SET DATA TYPE FLOAT64"
+                client.query(q).result()
+                schema_map[c] = "FLOAT64"
+                logging.info("✅ Widened optional BQ column %s.%s INT64 → FLOAT64", table_fq, c)
+            except Exception as e:
+                skipped.add(c)
+                logging.error("⚠️ Could not widen %s.%s to FLOAT64; skipping this optional field for this write: %s", table_fq, c, e)
+
+        return [c for c in optional_cols if c in existing and c not in skipped]
     except Exception as e:
         logging.warning("⚠️ Could not evolve optional Pathi/BigAl schema for %s: %s", table_fq, e)
         try:
