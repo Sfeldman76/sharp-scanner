@@ -18414,6 +18414,43 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             for k in ['Bookmaker','Market','Outcome']:
                 df_summary_base[k] = df_summary_base[k].astype(str).str.strip().str.lower()
             
+            # === UI-local actionable price consensus from latest-per-book rows ===
+            # Keep the actual wager price in the scanner pipeline.  These are computed
+            # from the same latest-per-book rows as the table, so Edge / EV / BET-PASS
+            # do not depend on backend-provided decision columns.
+            _odds_num = pd.to_numeric(df_summary_base.get('Odds_Price', np.nan), errors='coerce')
+            df_summary_base['__Odds_Price_Num'] = _odds_num
+            _odds_keys = ['Game_Key','Market','Outcome']
+
+            _rec_odds_map = (
+                df_summary_base[df_summary_base['Bookmaker'].isin(REC_BOOKS)]
+                .dropna(subset=['__Odds_Price_Num'])
+                .groupby(_odds_keys, as_index=False)['__Odds_Price_Num']
+                .median()
+                .rename(columns={'__Odds_Price_Num':'Rec Odds'})
+            )
+            _sharp_odds_map = (
+                df_summary_base[df_summary_base['Bookmaker'].isin(SHARP_BOOKS)]
+                .dropna(subset=['__Odds_Price_Num'])
+                .groupby(_odds_keys, as_index=False)['__Odds_Price_Num']
+                .median()
+                .rename(columns={'__Odds_Price_Num':'Sharp Odds'})
+            )
+            df_summary_base.drop(columns=['Rec Odds','Sharp Odds'], errors='ignore', inplace=True)
+            if not _rec_odds_map.empty:
+                df_summary_base = df_summary_base.merge(
+                    _rec_odds_map, on=_odds_keys, how='left', validate='many_to_one'
+                )
+            else:
+                df_summary_base['Rec Odds'] = np.nan
+            if not _sharp_odds_map.empty:
+                df_summary_base = df_summary_base.merge(
+                    _sharp_odds_map, on=_odds_keys, how='left', validate='many_to_one'
+                )
+            else:
+                df_summary_base['Sharp Odds'] = np.nan
+            df_summary_base.drop(columns=['__Odds_Price_Num'], errors='ignore', inplace=True)
+
             # 2) Build sharp-only average map
             df_sharp = df_summary_base[df_summary_base['Bookmaker'].isin(SHARP_BOOKS)].copy()
             if not df_sharp.empty:
@@ -18732,10 +18769,13 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             # === 10) Build summary_df with selected columns ===
             summary_cols = [
                 'Matchup','Market','Game_Start','Outcome',
-                'Rec Line','Sharp Line','Rec Move','Sharp Move',
+                'Rec Line','Sharp Line','Rec Odds','Sharp Odds','Rec Move','Sharp Move',
                 'Model Prob','Confidence Tier',
                 'Confidence Trend','Confidence Spark','Line/Model Direction','Tier Δ','Why Model Likes It',
-                'System_Signals_Text','Game_Key','Snapshot_Timestamp','Timing_Stage','Timing_Opportunity_Score'
+                'System_Signals_Text','Game_Key','Snapshot_Timestamp','Timing_Stage','Timing_Opportunity_Score',
+                # Optional backend estimates are carried when available, but are not
+                # required for Edge / EV / BET-PASS.
+                'Fair_Line','Bet_Edge_Threshold'
             ]
             summary_df = df_summary_base[[c for c in summary_cols if c in df_summary_base.columns]].copy()
             
@@ -18799,6 +18839,8 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             _summary_agg = {
                 'Rec Line': 'mean',
                 'Sharp Line': 'mean',
+                'Rec Odds': 'first',
+                'Sharp Odds': 'first',
                 'Rec Move': 'mean',
                 'Sharp Move': 'mean',
                 'Model Prob': 'mean',
@@ -18812,38 +18854,93 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 'System_Signals_Text': 'first',
                 'Confidence Spark':'first',
             }
-            # New post-model value fields are optional so the UI remains compatible
-            # while BigQuery schema/backfill catches up.
-            for _c, _fn in {
-                'Bet_Recommendation':'first', 'Model_Edge_Prob':'mean',
-                'Model_EV_Per_Unit':'mean', 'Fair_Line':'mean',
-                'Fair_Odds_American':'mean', 'Bet_Value_Score':'mean'
-            }.items():
+            # Fair_Line / reliability-adjusted threshold remain optional.  Edge, EV and
+            # BET/PASS below are always derived locally from Model Prob + Rec Odds.
+            for _c, _fn in {'Fair_Line':'mean', 'Bet_Edge_Threshold':'mean'}.items():
                 if _c in filtered_df.columns:
                     _summary_agg[_c] = _fn
+
             summary_grouped = (
                 filtered_df
                 .groupby(['Game_Key', 'Matchup', 'Market', 'Outcome'], as_index=False)
                 .agg(_summary_agg)
             )
-            if 'Bet_Recommendation' in summary_grouped.columns:
-                summary_grouped.rename(columns={'Bet_Recommendation':'Bet/Pass'}, inplace=True)
-            if 'Model_Edge_Prob' in summary_grouped.columns:
-                summary_grouped['Edge'] = summary_grouped['Model_Edge_Prob'].apply(
-                    lambda x: f"{x*100:+.1f}%" if pd.notna(x) else "—")
-            if 'Model_EV_Per_Unit' in summary_grouped.columns:
-                summary_grouped['EV / $1'] = summary_grouped['Model_EV_Per_Unit'].apply(
-                    lambda x: f"{x:+.3f}" if pd.notna(x) else "—")
-            if 'Fair_Line' in summary_grouped.columns:
-                def _fmt_fair_row(r):
-                    v = pd.to_numeric(pd.Series([r.get('Fair_Line')]), errors='coerce').iloc[0]
-                    if pd.isna(v): return "—"
-                    mk = str(r.get('Market','')).lower()
-                    if mk in ('h2h','moneyline','ml','headtohead'):
-                        return f"{v:+.0f}"
-                    return f"{v:+.1f}" if mk in ('spread','spreads') else f"{v:.1f}"
-                summary_grouped['Fair Line'] = summary_grouped.apply(_fmt_fair_row, axis=1)
-            
+
+            # === UI-local fair value calculations ===
+            # Actionable price = recreational consensus.  If it is unavailable, fall
+            # back to sharp consensus so the row remains informative rather than blank.
+            _p_model = pd.to_numeric(summary_grouped['Model Prob'], errors='coerce')
+            _rec_odds = pd.to_numeric(summary_grouped.get('Rec Odds'), errors='coerce')
+            _sharp_odds = pd.to_numeric(summary_grouped.get('Sharp Odds'), errors='coerce')
+            _price = _rec_odds.where(_rec_odds.notna(), _sharp_odds)
+
+            def _ui_implied_prob_from_american(odds):
+                o = pd.to_numeric(odds, errors='coerce')
+                out = pd.Series(np.nan, index=o.index, dtype='float64')
+                neg = o < 0
+                pos = o > 0
+                out.loc[neg] = (-o.loc[neg]) / ((-o.loc[neg]) + 100.0)
+                out.loc[pos] = 100.0 / (o.loc[pos] + 100.0)
+                return out
+
+            def _ui_profit_per_dollar(odds):
+                o = pd.to_numeric(odds, errors='coerce')
+                out = pd.Series(np.nan, index=o.index, dtype='float64')
+                neg = o < 0
+                pos = o > 0
+                out.loc[neg] = 100.0 / (-o.loc[neg])
+                out.loc[pos] = o.loc[pos] / 100.0
+                return out
+
+            def _ui_prob_to_american(p):
+                p = pd.to_numeric(p, errors='coerce')
+                out = pd.Series(np.nan, index=p.index, dtype='float64')
+                good = p.gt(0) & p.lt(1)
+                fav = good & p.ge(0.5)
+                dog = good & p.lt(0.5)
+                out.loc[fav] = -100.0 * p.loc[fav] / (1.0 - p.loc[fav])
+                out.loc[dog] = 100.0 * (1.0 - p.loc[dog]) / p.loc[dog]
+                return out
+
+            _p_break = _ui_implied_prob_from_american(_price)
+            _edge = _p_model - _p_break
+            _win_profit = _ui_profit_per_dollar(_price)
+            _ev = (_p_model * _win_profit) - ((1.0 - _p_model) * 1.0)
+            _fair_odds = _ui_prob_to_american(_p_model)
+
+            # If the new backend supplies its reliability-adjusted hurdle, honor it;
+            # otherwise use the transparent baseline of +2 percentage points.
+            if 'Bet_Edge_Threshold' in summary_grouped.columns:
+                _threshold = pd.to_numeric(summary_grouped['Bet_Edge_Threshold'], errors='coerce').fillna(0.02)
+            else:
+                _threshold = pd.Series(0.02, index=summary_grouped.index, dtype='float64')
+
+            _valid_value = _p_model.notna() & _price.notna() & _p_break.notna() & _ev.notna()
+            _is_bet = _valid_value & _edge.ge(_threshold) & _ev.ge(0.02)
+            summary_grouped['Bet/Pass'] = np.where(_valid_value, np.where(_is_bet, 'BET', 'PASS'), '—')
+            summary_grouped['Edge'] = _edge.apply(lambda x: f"{x*100:+.1f}%" if pd.notna(x) else "—")
+            summary_grouped['EV / $1'] = _ev.apply(lambda x: f"{x:+.3f}" if pd.notna(x) else "—")
+            summary_grouped['Fair Odds'] = _fair_odds.apply(lambda x: f"{x:+.0f}" if pd.notna(x) else "—")
+
+            # Preserve the existing Fair Line display when the backend supplies a true
+            # fair spread/total.  For H2H the model probability itself implies fair ML
+            # odds, so use Fair Odds even with an older backend.
+            def _fmt_fair_row(r):
+                mk = str(r.get('Market','')).lower()
+                if mk in ('h2h','moneyline','ml','headtohead'):
+                    return r.get('Fair Odds', '—')
+                v = pd.to_numeric(pd.Series([r.get('Fair_Line', np.nan)]), errors='coerce').iloc[0]
+                if pd.isna(v):
+                    return '—'
+                return f"{v:+.1f}" if mk in ('spread','spreads') else f"{v:.1f}"
+            summary_grouped['Fair Line'] = summary_grouped.apply(_fmt_fair_row, axis=1)
+
+            # Format consensus American prices only after all arithmetic is complete.
+            for _odds_col in ('Rec Odds','Sharp Odds'):
+                summary_grouped[_odds_col] = pd.to_numeric(summary_grouped[_odds_col], errors='coerce').apply(
+                    lambda x: f"{x:+.0f}" if pd.notna(x) else '—'
+                )
+
             #st.markdown("### 🧪 Summary Grouped Debug View")
             # Round Rec Line and Sharp Line to 1 decimal
             summary_grouped['Rec Line'] = summary_grouped['Rec Line'].round(1)
@@ -18880,8 +18977,8 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             # === Final Column Order for Display
             view_cols = [
                 'Date + Time (EST)', 'Matchup', 'Market', 'Outcome',
-                'Bet/Pass', 'Edge', 'EV / $1', 'Fair Line',
-                'Rec Line', 'Sharp Line', 'Rec Move', 'Sharp Move',
+                'Bet/Pass', 'Edge', 'EV / $1', 'Fair Odds', 'Fair Line',
+                'Rec Line', 'Rec Odds', 'Sharp Line', 'Sharp Odds', 'Rec Move', 'Sharp Move',
                 'Model Prob', 'Confidence Tier', 'Timing_Stage',
                 'System_Signals_Text', 'Why Model Likes It', 'Confidence Trend','Confidence Spark', 'Tier Δ', 
             ]
