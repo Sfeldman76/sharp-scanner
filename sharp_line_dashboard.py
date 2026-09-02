@@ -2190,7 +2190,43 @@ def attach_pathi_bigal_live_features(current_rows: pd.DataFrame, sport: str) -> 
 # End Pathi + Big Al deterministic situational system layer
 # ============================================================================
 
+def _system_feature_valid_for_sport(col: str, sport: str) -> bool:
 
+    s = str(sport).upper().strip()
+
+    c = str(col)
+
+    # Pathi football-only features
+
+    if c.startswith("Pathi_FB_") or c == "Football_Key_Position_Bucket":
+
+        return s in ("NFL", "NCAAF")
+
+    # Big Al sport-specific systems
+
+    if c.startswith("BigAl_NFL"):
+
+        return s == "NFL"
+
+    if c.startswith("BigAl_CF"):
+
+        return s == "NCAAF"
+
+    if c.startswith("BigAl_CBB"):
+
+        return s == "NCAAB"
+
+    if c.startswith("BigAl_NBA"):
+
+        return s == "NBA"
+
+    if c.startswith("BigAl_CFL"):
+
+        return s == "CFL"
+
+    # Everything else stays eligible
+
+    return True
 
 def safe_row_entropy(W: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     """
@@ -2800,8 +2836,19 @@ def compute_ev_features_sharp_vs_rec(
     """
 
     def _amer_to_prob(odds):
-        o = pd.to_numeric(odds, errors="coerce")
-        return np.where(o >= 0, 100.0 / (o + 100.0), (-o) / ((-o) + 100.0))
+        o = np.asarray(o, dtype=float)
+
+        out = np.full(o.shape, np.nan, dtype=float)
+        
+        pos = o > 0
+        
+        neg = o < 0
+        
+        out[pos] = 100.0 / (o[pos] + 100.0)
+        
+        out[neg] = (-o[neg]) / ((-o[neg]) + 100.0)
+        
+        return out.item() if out.ndim == 0 else out
 
     out_cols = [
         "Truth_Fair_Prob_at_SharpLine",
@@ -12989,18 +13036,68 @@ def train_sharp_model_from_bq(
         # Add the Pathi football market-structure/role features explicitly so
         # they are visible in the training contract, then add all other numeric
         # Pathi / Big Al system fields dynamically as a forward-compatible safety net.
-        extend_unique(features, [c for c in PATHI_FOOTBALL_MODEL_FEATURES if c in df_market.columns])
-        extend_unique(features, [c for c in PATHI_BIGAL_ADDITIONAL_MODEL_FEATURES if c in df_market.columns])
-        extend_unique(features, pathi_bigal_numeric_feature_cols(df_market))
+        sport_u = str(sport).upper().strip()
 
-        try:
-            _pfb_candidates = [c for c in PATHI_FOOTBALL_MODEL_FEATURES if c in features and c in df_market.columns]
-            st.info(
-                f"Pathi football candidates offered to AutoFS: {len(_pfb_candidates)}/"
-                f"{len(PATHI_FOOTBALL_MODEL_FEATURES)}"
+        # ---------------------------------------------------------
+        # Pathi football features — NFL / NCAAF only
+        # ---------------------------------------------------------
+        if sport_u in ("NFL", "NCAAF"):
+            extend_unique(
+                features,
+                [
+                    c for c in PATHI_FOOTBALL_MODEL_FEATURES
+                    if c in df_market.columns
+                ]
             )
-        except Exception:
-            pass
+        
+        # ---------------------------------------------------------
+        # General Pathi / Big Al engineered features
+        # ---------------------------------------------------------
+        extend_unique(
+            features,
+            [
+                c for c in PATHI_BIGAL_ADDITIONAL_MODEL_FEATURES
+                if c in df_market.columns
+                and _system_feature_valid_for_sport(c, sport_u)
+            ]
+        )
+        
+        # ---------------------------------------------------------
+        # Dynamic Pathi / Big Al / System features
+        # ---------------------------------------------------------
+        _dynamic_system_features = pathi_bigal_numeric_feature_cols(df_market)
+        
+        _dynamic_system_features = [
+            c for c in _dynamic_system_features
+            if _system_feature_valid_for_sport(c, sport_u)
+        ]
+        
+        extend_unique(features, _dynamic_system_features)
+        
+        # ---------------------------------------------------------
+        # Final defensive sport filter
+        # ---------------------------------------------------------
+        features = [
+            c for c in features
+            if _system_feature_valid_for_sport(c, sport_u)
+        ]
+        
+        # ---------------------------------------------------------
+        # Diagnostic
+        # ---------------------------------------------------------
+        if sport_u in ("NFL", "NCAAF"):
+            try:
+                _pfb_candidates = [
+                    c for c in PATHI_FOOTBALL_MODEL_FEATURES
+                    if c in features and c in df_market.columns
+                ]
+        
+                st.info(
+                    f"Pathi football candidates offered to AutoFS: "
+                    f"{len(_pfb_candidates)}/{len(PATHI_FOOTBALL_MODEL_FEATURES)}"
+                )
+            except Exception:
+                pass
 
         # ensure uniqueness (order-preserving)
         _seen = set()
