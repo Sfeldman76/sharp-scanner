@@ -9852,6 +9852,14 @@ def should_promote_challenger(
         "challenger_positive_rate": pr_c,
     })
 
+    # If no champion exists, establish the newly trained challenger as the
+    # baseline champion even when it misses the normal minimum gates.  The
+    # thresholds below are comparison guardrails, not a reason to leave a
+    # sport/market with no published champion at all.
+    if not champion_metrics:
+        dbg["reason"] = "no_champion_auto_promote_regardless_of_minimums"
+        return True, dbg
+
     if n_c and n_c < min_holdout_n:
         dbg["reason"] = "challenger_holdout_too_small"
         return False, dbg
@@ -9863,10 +9871,6 @@ def should_promote_challenger(
     if np.isfinite(pr_c) and not (min_positive_rate <= pr_c <= max_positive_rate):
         dbg["reason"] = "challenger_prediction_class_collapse"
         return False, dbg
-
-    if not champion_metrics:
-        dbg["reason"] = "no_champion_auto_promote"
-        return True, dbg
 
     acc_ch = float(champion_metrics.get("accuracy_meta_holdout", champion_metrics.get("accuracy_holdout", float("nan"))))
     auc_ch = float(champion_metrics.get("auc_meta_holdout", champion_metrics.get("auc_holdout", float("nan"))))
@@ -9909,6 +9913,46 @@ def should_promote_challenger(
     
 
 
+def _publish_challenger_to_canonical(
+    bucket_name: str,
+    challenger_model_path: str,
+    sport: str,
+    market: str,
+    client: Optional[storage.Client] = None,
+) -> str:
+    """Copy a staged challenger artifact to the canonical live model object."""
+    if client is None:
+        client = storage.Client()
+
+    prefix = "gs://"
+    path = str(challenger_model_path or "").strip()
+    if not path.startswith(prefix):
+        raise ValueError(f"Expected GCS challenger path, got: {path!r}")
+
+    remainder = path[len(prefix):]
+    if "/" not in remainder:
+        raise ValueError(f"Invalid GCS challenger path: {path!r}")
+
+    source_bucket_name, source_blob_name = remainder.split("/", 1)
+    source_bucket = client.bucket(source_bucket_name)
+    source_blob = source_bucket.blob(source_blob_name)
+    if not source_blob.exists():
+        raise FileNotFoundError(f"Staged challenger artifact does not exist: {path}")
+
+    sport_l = str(sport).lower().strip()
+    market_l = str(market).lower().strip()
+    canonical_blob_name = f"sharp_win_model_{sport_l}_{market_l}.pkl"
+    dest_bucket = client.bucket(bucket_name)
+
+    # copy_blob supports same- or cross-bucket copy and replaces the live object.
+    source_bucket.copy_blob(source_blob, dest_bucket, canonical_blob_name)
+    canonical_path = f"gs://{bucket_name}/{canonical_blob_name}"
+    logging.getLogger(__name__).info(
+        "📤 Published promoted challenger to %s", canonical_path
+    )
+    return canonical_path
+
+
 def train_with_champion_wrapper(
     sport: str,
     market: str,
@@ -9918,8 +9962,10 @@ def train_with_champion_wrapper(
     **train_kwargs,
 ) -> None:
     """
-    High-level entrypoint: trains a challenger model, compares it to
-    the existing champion (if any), and promotes only if better.
+    High-level entrypoint: trains a staged challenger model, compares it to
+    the existing champion (if any), and publishes it to the live canonical
+    model path only when promoted. If no champion exists, the challenger is
+    automatically established as the baseline champion.
     """
 
     logger = logging.getLogger(__name__)
@@ -9973,12 +10019,20 @@ def train_with_champion_wrapper(
         )
         return
 
-    # 4) Promote challenger: mark as champion in metadata
+    # 4) Promote challenger: publish the staged artifact to the canonical live
+    # model path, then mark that canonical object as champion in metadata.
+    canonical_model_path = _publish_challenger_to_canonical(
+        bucket_name=bucket_name,
+        challenger_model_path=challenger_model_path,
+        sport=sport,
+        market=market,
+    )
+
     now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
     new_meta = ChampionMeta(
         sport=sport,
         market=market,
-        model_path=challenger_model_path,
+        model_path=canonical_model_path,
         created_at=now_iso,
         metrics={k: float(v) for k, v in challenger_metrics.items()
                  if np.isfinite(v) or isinstance(v, (int, float))},
@@ -16249,11 +16303,40 @@ def train_sharp_model_from_bq(
             dtype=np.float64,
         )
 
-        # Anchor the final probability to the stronger core outcome probability.
-        # Pathi/Big-Al/situation/value information can move confidence, but cannot
-        # freely turn a ~58% outcome estimate into an unsupported 90%+ probability.
-        META_WEIGHT = 0.40
+        # ---------------------------------------------------------------
+        # Adaptive deployment weight for the meta layer.
+        # ---------------------------------------------------------------
+        # Let second-level OOF performance earn influence.  This prevents a
+        # negatively ranked or barely useful meta stack from diluting a better
+        # core outcome model while still allowing strong Pathi/Big-Al/situation/
+        # value agreement to contribute up to 40% of the final probability.
+        try:
+            _meta_oof_prob_for_weight = np.asarray(
+                np.clip(
+                    _apply_cal(meta_cal_name, meta_cal_obj, _meta_oof_x),
+                    CLIP, 1.0 - CLIP,
+                ),
+                dtype=np.float64,
+            )
+            META_OOF_AUC = float(
+                roc_auc_score(_meta_oof_y, _meta_oof_prob_for_weight)
+            ) if np.unique(_meta_oof_y).size == 2 else float("nan")
+        except Exception:
+            META_OOF_AUC = float("nan")
+
+        if not np.isfinite(META_OOF_AUC) or META_OOF_AUC <= 0.500:
+            META_WEIGHT = 0.00
+        elif META_OOF_AUC < 0.525:
+            META_WEIGHT = 0.10
+        elif META_OOF_AUC < 0.550:
+            META_WEIGHT = 0.20
+        elif META_OOF_AUC < 0.575:
+            META_WEIGHT = 0.30
+        else:
+            META_WEIGHT = 0.40
+
         OUTCOME_WEIGHT = 1.0 - META_WEIGHT
+        META_WEIGHT_POLICY = "oof_auc_step_v1"
 
         p_outcome_train_for_meta = np.where(
             np.isfinite(p_outcome_oof_train), p_outcome_oof_train, p_train_vec
@@ -16277,6 +16360,8 @@ def train_sharp_model_from_bq(
             "meta_calibration_source": "second_level_oof",
             "meta_ece_best": (None if not np.isfinite(meta_ece_best) else float(meta_ece_best)),
             "meta_std_ratio_after_cal": (None if not np.isfinite(meta_std_ratio) else float(meta_std_ratio)),
+            "meta_oof_auc_for_weight": (None if not np.isfinite(META_OOF_AUC) else float(META_OOF_AUC)),
+            "meta_weight_policy": META_WEIGHT_POLICY,
             "meta_weight": float(META_WEIGHT),
             "outcome_weight": float(OUTCOME_WEIGHT),
         })
@@ -16674,6 +16759,8 @@ def train_sharp_model_from_bq(
                 "feature_cols_value": list(feature_cols_value),
                 "meta_features": list(meta_train_df.columns),
                 "meta_calibrator": str(meta_cal_name),
+                "meta_oof_auc_for_weight": (None if not np.isfinite(META_OOF_AUC) else float(META_OOF_AUC)),
+                "meta_weight_policy": META_WEIGHT_POLICY,
                 "meta_weight": float(META_WEIGHT),
                 "outcome_weight": float(OUTCOME_WEIGHT),
                 "stacking_train_mode": "oof_post_autofs",
@@ -16738,6 +16825,8 @@ def train_sharp_model_from_bq(
                 "value_reg_head": "model_value_reg",
                 "meta_head": "meta_model + meta_calibrator",
                 "meta_features": list(meta_train_df.columns),
+                "meta_oof_auc_for_weight": (None if not np.isfinite(META_OOF_AUC) else float(META_OOF_AUC)),
+                "meta_weight_policy": META_WEIGHT_POLICY,
                 "meta_weight": float(META_WEIGHT),
                 "outcome_weight": float(OUTCOME_WEIGHT),
                 "stacking_train_mode": "oof_post_autofs",
@@ -16747,6 +16836,14 @@ def train_sharp_model_from_bq(
         # -------------------------------------------------------------------
         # Save model artifact to GCS
         # -------------------------------------------------------------------
+        _challenger_object_name = None
+        if return_artifacts:
+            _stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            _challenger_object_name = (
+                f"challengers/{str(sport).lower().strip()}/{str(market).lower().strip()}/"
+                f"sharp_win_model_{str(sport).lower().strip()}_{str(market).lower().strip()}_{_stamp}.pkl"
+            )
+
         save_info = save_model_to_gcs(
             model={
                 "model_logloss": model_logloss,
@@ -16769,6 +16866,8 @@ def train_sharp_model_from_bq(
                     "model_family": "three_head_plus_meta_v1",
                     "meta_features": list(meta_train_df.columns),
                     "meta_calibrator": str(meta_cal_name),
+                    "meta_oof_auc_for_weight": (None if not np.isfinite(META_OOF_AUC) else float(META_OOF_AUC)),
+                    "meta_weight_policy": META_WEIGHT_POLICY,
                     "meta_weight": float(META_WEIGHT),
                     "outcome_weight": float(OUTCOME_WEIGHT),
                     "stacking_train_mode": "oof_post_autofs",
@@ -16780,6 +16879,7 @@ def train_sharp_model_from_bq(
             bucket_name=bucket_name,
             team_feature_map=team_feature_map,
             book_reliability_map=book_reliability_map,
+            object_name=_challenger_object_name,
         )
         
         artifact_model_path = None
@@ -17981,7 +18081,8 @@ def save_model_to_gcs(
 
     sport_l  = str(sport).lower().strip()
     market_l = str(market).lower().strip()
-    filename = f"sharp_win_model_{sport_l}_{market_l}.pkl"
+    canonical_filename = f"sharp_win_model_{sport_l}_{market_l}.pkl"
+    filename = str(kwargs.pop("object_name", "") or canonical_filename).strip()
 
     # ---- normalize what we save ----
     # If caller passed an already-built bundle, keep it.
