@@ -1808,6 +1808,16 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
         })
     ]
     stmap = state[keep].drop_duplicates(["Sport", "Game_Key", "Team"], keep="last")
+
+    # The training view can already contain older Pathi/BigAl/System columns.
+    # Never let pandas create stale *_x/*_y copies: the freshly rebuilt state above
+    # is the canonical leakage-safe version (all historical result state is shifted/prior-only).
+    _join_keys = {"Sport", "Game_Key", "Team"}
+    _state_payload = [c for c in stmap.columns if c not in _join_keys]
+    _overlap_payload = [c for c in _state_payload if c in out.columns]
+    if _overlap_payload:
+        out.drop(columns=_overlap_payload, inplace=True, errors="ignore")
+
     before = len(out)
     out = out.merge(stmap, on=["Sport", "Game_Key", "Team"], how="left", validate="many_to_one")
     if len(out) != before:
@@ -4863,6 +4873,46 @@ from sklearn.base import clone
 from sklearn.metrics import roc_auc_score, log_loss
 
 # =========================
+# Hard leakage contract for learned heads.
+# These fields contain the current game's realized result, score, or a target built
+# from it.  Prior/lagged variants (e.g. Prev_ATS_Margin, Last_Matchup_Result) are NOT
+# blocked here because they are known before the current game.
+# =========================
+_HARD_LEAK_EXACT = {
+    "SHARP_HIT_BOOL", "SHARP_COVER_RESULT",
+    "TARGET_OUTCOME_BOOL", "TARGET_SITUATION_BOOL",
+    "TARGET_VALUE_BOOL", "TARGET_VALUE_REG",
+    "EDGE_TARGET", "EDGE_CLASS",
+    "Score_Home_Score", "Score_Away_Score", "Home_Score", "Away_Score",
+    "Actual_Game_Total", "TOT_Actual_Total",
+    "SU_Win", "SU_Loss", "SU_Margin",
+    "ATS_Win", "ATS_Loss", "ATS_Cover_Margin",
+    "Points_For", "Points_Against",
+}
+
+_VALUE_TARGET_DERIVED_EXACT = {
+    # Direct outputs/ingredients of compute_ev_features_sharp_vs_rec.  They are
+    # available pregame, but feeding them to the value regressor/classifier would
+    # let the model reconstruct its own synthetic EV target rather than learn a
+    # generalizable market-value relationship.
+    "Truth_Fair_Prob_at_SharpLine", "Truth_Margin_Mu", "Truth_Sigma",
+    "Truth_Fair_Prob_at_RecLine", "Rec_Implied_Prob",
+    "EV_Sh_vs_Rec_Prob", "EV_Sh_vs_Rec_Dollar", "Kelly_Fraction",
+}
+
+def _is_hard_leak_feature(col: str) -> bool:
+    s = str(col)
+    return s in _HARD_LEAK_EXACT or s.startswith("TARGET_")
+
+def _head_forbidden_feature(col: str, head_name: str | None = None) -> bool:
+    s = str(col)
+    if _is_hard_leak_feature(s):
+        return True
+    if str(head_name or "").lower() == "value" and s in _VALUE_TARGET_DERIVED_EXACT:
+        return True
+    return False
+
+# =========================
 # =========================
 # 1) CV EVAL BLOCK (OLD/FAST interface, backend-safe)
 #    ✅ patched fallback to not throw away sparse "signal #1" features
@@ -4970,7 +5020,7 @@ def _cv_auc_for_feature_set(
 
     def _is_forbidden(col: str) -> bool:
         s = str(col)
-        return any(p in s for p in leak_col_patterns)
+        return _is_hard_leak_feature(s) or any(p in s for p in leak_col_patterns)
 
     # -----------------------------
     # matrix cache (keyed by df identity + manager identity)
@@ -6002,7 +6052,7 @@ def select_features_auto(
 
     def _is_forbidden(c: str) -> bool:
         s = str(c)
-        return any(p in s for p in leak_patterns)
+        return _is_hard_leak_feature(s) or any(p in s for p in leak_patterns)
 
     cols = [c for c in X_df_train.columns if (c in mk_in) or (not _is_forbidden(c))]
     if not cols:
@@ -6034,6 +6084,35 @@ def select_features_auto(
     name_arr = np.asarray(cols, dtype=object)
     sparse_ok = np.fromiter((_is_sparse_ok_name(c) for c in name_arr), dtype=bool, count=len(cols))
     usable = ((nn_frac >= float(min_non_nan_dense)) | (sparse_ok & (nn_frac >= float(min_non_nan_sparse)))) & (var > 0.0)
+
+    # Detect accidental target copies / near-copies before AutoFS.  In a sports
+    # outcome model, a single feature with oriented AUC ~1.0 is overwhelmingly more
+    # likely to be a leaked current-result field than a real pregame edge.  We only
+    # auto-drop at an intentionally extreme threshold so legitimate strong signals
+    # are retained and merely show up in normal diagnostics.
+    _target_copy_drop = []
+    if np.unique(y_arr).size >= 2:
+        for _j, _c in enumerate(cols):
+            if not usable[_j] or _c in mk_in:
+                continue
+            _x = X_mat[:, _j]
+            _m = np.isfinite(_x) & np.isfinite(y_arr)
+            if int(_m.sum()) < 100 or np.unique(_x[_m]).size < 2:
+                continue
+            try:
+                _auc = float(roc_auc_score(y_arr[_m], _x[_m]))
+                _auc_oriented = max(_auc, 1.0 - _auc)
+            except Exception:
+                continue
+            if np.isfinite(_auc_oriented) and _auc_oriented >= 0.995:
+                usable[_j] = False
+                _target_copy_drop.append((_c, _auc_oriented))
+
+    if _target_copy_drop:
+        log_func(
+            "[LEAK-GUARD] dropped near-target-copy features: " +
+            ", ".join(f"{c} (oriented_auc={a:.4f})" for c, a in _target_copy_drop[:20])
+        )
 
     # always keep must_keep
     if mk_in:
@@ -13303,28 +13382,17 @@ def train_sharp_model_from_bq(
                 df.get("SHARP_HIT_BOOL", np.nan), errors="coerce"
             )
         
-            # 2) situation
-            sit_parts = []
-            sit_parts.append(_safe_num("Team_Recent_Cover_Rate"))
-            sit_parts.append(_safe_num("H2H_Win_Pct_Prior"))
-            sit_parts.append(1.0 - _safe_num("Opp_WinPct_Prior"))
-            sit_parts.append((_safe_num("After_Win_Flag").fillna(0) * 0.15))
-            sit_parts.append((_safe_num("Revenge_Flag").fillna(0) * 0.15))
-            sit_parts.append((_safe_num("Current_Loss_Streak_Prior").fillna(0) * 0.03))
-            sit_parts.append((-_safe_num("Games_Last_7_Days").fillna(0) * 0.03))
-            sit_parts.append((-_safe_num("Is_B2B").fillna(0) * 0.10))
-            sit_parts.append((-_safe_num("Is_3in4").fillna(0) * 0.10))
-        
-            sit_df = pd.concat(sit_parts, axis=1)
-            sit_score = sit_df.mean(axis=1, skipna=True)
-            sit_thr = sit_score.quantile(0.65)
-        
-            df["TARGET_SITUATION_BOOL"] = np.where(
-                np.isfinite(sit_score),
-                (sit_score >= sit_thr).astype("int8"),
-                np.nan,
+            # 2) situation classification target
+            # IMPORTANT: do NOT manufacture this label from the same situational
+            # features that AutoFS is allowed to see.  The old synthetic target used
+            # Team_Recent_Cover_Rate / H2H_Win_Pct_Prior / Opp_WinPct_Prior / etc.,
+            # which made 0.90+ CV AUC largely circular.  The situation specialist now
+            # answers the useful question: can situational/history features predict
+            # the actual wager outcome?
+            df["TARGET_SITUATION_BOOL"] = pd.to_numeric(
+                df["TARGET_OUTCOME_BOOL"], errors="coerce"
             )
-        
+
             # 3) value
             fair_prob = _safe_num("Truth_Fair_Prob_at_RecLine")
             if fair_prob.isna().all():
@@ -13355,9 +13423,16 @@ def train_sharp_model_from_bq(
                 print("⚠️ TARGET_VALUE_REG could not be built: EV and fair-prob fallback unavailable")
         
             val_reg_num = pd.to_numeric(df["TARGET_VALUE_REG"], errors="coerce")
+
+            # Value CLASSIFICATION must not simply learn the sign of the synthetic
+            # EV formula that its market inputs can reconstruct.  Classify the actual
+            # realized wager outcome instead, restricted to rows where the value
+            # regression target is available.  TARGET_VALUE_REG remains the ex-ante
+            # value/EV specialist target.
+            _outcome_for_value = pd.to_numeric(df["TARGET_OUTCOME_BOOL"], errors="coerce")
             df["TARGET_VALUE_BOOL"] = np.where(
-                val_reg_num.notna(),
-                (val_reg_num > 0.0).astype("int8"),
+                val_reg_num.notna() & _outcome_for_value.notna(),
+                _outcome_for_value.astype("float64"),
                 np.nan,
             )
         
@@ -14467,6 +14542,24 @@ def train_sharp_model_from_bq(
                     _model_proto = est_ll
                 except Exception:
                     _model_proto = _default_proto(head_name)
+
+            # Head-specific leakage contract.  This is applied before AutoFS so
+            # forbidden columns cannot influence preselection, correlations, flips,
+            # or incremental AUC.
+            _candidate_cols = [
+                c for c in X_df_train_head.columns
+                if not _head_forbidden_feature(c, head_name)
+            ]
+            _blocked_cols = [c for c in X_df_train_head.columns if c not in _candidate_cols]
+            if _blocked_cols:
+                log_func(
+                    f"[LEAK-GUARD:{head_name}] blocked {len(_blocked_cols)} candidates: "
+                    + ", ".join(map(str, _blocked_cols[:20]))
+                )
+
+            X_df_train_head = X_df_train_head.reindex(columns=_candidate_cols)
+            X_df_hold_head = X_df_hold_head.reindex(columns=_candidate_cols)
+            X_df_full_head = X_df_full_head.reindex(columns=_candidate_cols)
         
             feat_cols_head, shap_summary_head = select_features_auto(
                 model_proto=_model_proto,
@@ -14495,6 +14588,39 @@ def train_sharp_model_from_bq(
                 c for c in feat_cols_head
                 if c in X_df_train_head.columns and c in X_df_hold_head.columns
             ]
+
+            # Selected-feature leakage audit.  Report unusually strong single-feature
+            # discrimination; do not auto-drop unless the near-copy guard above hit
+            # >=0.995.  After the target fixes, these AUCs are against realized outcome
+            # for outcome/situation/value classification heads and are therefore
+            # directly interpretable.
+            _audit_rows = []
+            _ya = np.asarray(y_head_train, dtype=int).reshape(-1)
+            if np.unique(_ya).size >= 2:
+                for _c in feat_cols_head:
+                    _xs = pd.to_numeric(X_df_train_head[_c], errors="coerce").to_numpy(dtype=float)
+                    _m = np.isfinite(_xs) & np.isfinite(_ya)
+                    if int(_m.sum()) < 100 or np.unique(_xs[_m]).size < 2:
+                        continue
+                    try:
+                        _a = float(roc_auc_score(_ya[_m], _xs[_m]))
+                        _ao = max(_a, 1.0 - _a)
+                    except Exception:
+                        continue
+                    if np.isfinite(_ao):
+                        _audit_rows.append((_c, _ao))
+            _audit_rows.sort(key=lambda t: t[1], reverse=True)
+            if _audit_rows:
+                log_func(
+                    f"[LEAK-AUDIT:{head_name}] strongest selected univariate oriented AUCs: "
+                    + ", ".join(f"{c}={a:.4f}" for c, a in _audit_rows[:10])
+                )
+                _sus = [(c, a) for c, a in _audit_rows if a >= 0.80]
+                if _sus:
+                    log_func(
+                        f"[LEAK-AUDIT:{head_name}] WARNING >=0.80 single-feature AUC; review provenance: "
+                        + ", ".join(f"{c}={a:.4f}" for c, a in _sus[:10])
+                    )
         
             X_train_head_df = _final_clean(X_df_train_head.reindex(columns=feat_cols_head))
             X_hold_head_df  = _final_clean(X_df_hold_head.reindex(columns=feat_cols_head))
@@ -16753,7 +16879,7 @@ def train_sharp_model_from_bq(
                 "flip_flag": bool(flip_flag),
                 "blend_w": float(best_w),
         
-                "model_family": "three_head_plus_meta_v1",
+                "model_family": "three_head_plus_meta_v2_leakguard",
                 "feature_cols_outcome": list(feature_cols_outcome),
                 "feature_cols_situation": list(feature_cols_situation),
                 "feature_cols_value": list(feature_cols_value),
@@ -16764,6 +16890,10 @@ def train_sharp_model_from_bq(
                 "meta_weight": float(META_WEIGHT),
                 "outcome_weight": float(OUTCOME_WEIGHT),
                 "stacking_train_mode": "oof_post_autofs",
+                "situation_target": "realized_outcome",
+                "value_cls_target": "realized_outcome_on_value_rows",
+                "value_reg_target": "synthetic_ex_ante_ev",
+                "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
             }
 
         # -------------------------------------------------------------------
@@ -16818,7 +16948,7 @@ def train_sharp_model_from_bq(
             "meta_calibrator":      (meta_cal_name, meta_cal_obj),
         
             "multihead_config": {
-                "model_family": "three_head_plus_meta_v1",
+                "model_family": "three_head_plus_meta_v2_leakguard",
                 "outcome_head": "model_logloss/model_auc + iso_blend",
                 "situation_head": "model_situation_cls",
                 "value_cls_head": "model_value_cls",
@@ -16830,6 +16960,10 @@ def train_sharp_model_from_bq(
                 "meta_weight": float(META_WEIGHT),
                 "outcome_weight": float(OUTCOME_WEIGHT),
                 "stacking_train_mode": "oof_post_autofs",
+                "situation_target": "realized_outcome",
+                "value_cls_target": "realized_outcome_on_value_rows",
+                "value_reg_target": "synthetic_ex_ante_ev",
+                "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
             },
         }
         # -------------------------------------------------------------------
@@ -16862,8 +16996,8 @@ def train_sharp_model_from_bq(
                 "meta_calibrator":     (meta_cal_name, meta_cal_obj),
         
                 "multihead_config": {
-                    "schema_version": 1,
-                    "model_family": "three_head_plus_meta_v1",
+                    "schema_version": 2,
+                    "model_family": "three_head_plus_meta_v2_leakguard",
                     "meta_features": list(meta_train_df.columns),
                     "meta_calibrator": str(meta_cal_name),
                     "meta_oof_auc_for_weight": (None if not np.isfinite(META_OOF_AUC) else float(META_OOF_AUC)),
@@ -16871,6 +17005,10 @@ def train_sharp_model_from_bq(
                     "meta_weight": float(META_WEIGHT),
                     "outcome_weight": float(OUTCOME_WEIGHT),
                     "stacking_train_mode": "oof_post_autofs",
+                "situation_target": "realized_outcome",
+                "value_cls_target": "realized_outcome_on_value_rows",
+                "value_reg_target": "synthetic_ex_ante_ev",
+                "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
                 },
             },
             calibrator=iso_blend,
@@ -16896,8 +17034,8 @@ def train_sharp_model_from_bq(
         - Outcome Accuracy: {acc_hold_f:.4f}
         - Outcome Log Loss: {logloss_hold_f:.4f}
         - Outcome Brier Score: {brier_hold_f:.4f}
-        - Situation AUC: {auc_situation_hold_f:.4f}
-        - Value AUC: {auc_value_hold_f:.4f}
+        - Situation-head Outcome AUC: {auc_situation_hold_f:.4f}
+        - Value-head Outcome AUC: {auc_value_hold_f:.4f}
         - Value RMSE: {rmse_value_hold:.4f}
         - Value MAE: {mae_value_hold:.4f}
         - Meta Outcome AUC: {auc_meta_hold_f:.4f}
