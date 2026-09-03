@@ -15432,6 +15432,117 @@ def train_sharp_model_from_bq(
         MIN_OOF = 40 if SMALL else 120
         RUN_LOGLOSS = True
         eps = 1e-7
+
+        # ------------------------------------------------------------------
+        # Leakage-safe first-level OOF predictions for the meta stack.
+        # The deploy specialist models are still fit on all training rows below/above;
+        # these OOF vectors are used ONLY as meta-training inputs.
+        # ------------------------------------------------------------------
+        p_situation_oof_train = (
+            np.full(len(y_train_situation), np.nan, dtype=np.float64)
+            if y_train_situation is not None else None
+        )
+        p_value_oof_train = (
+            np.full(len(y_train_value_cls), np.nan, dtype=np.float64)
+            if y_train_value_cls is not None else None
+        )
+        pred_value_reg_oof_train = (
+            np.full(len(y_train_value_reg), np.nan, dtype=np.float64)
+            if y_train_value_reg is not None else None
+        )
+
+        def _fresh_xgb_like(fitted_model, *, seed):
+            if fitted_model is None:
+                return None
+            params = dict(fitted_model.get_params(deep=False))
+            params["n_jobs"] = 1
+            params["random_state"] = int(seed)
+            if "seed" in params:
+                params["seed"] = int(seed)
+            return fitted_model.__class__(**params)
+
+        # Situation OOF
+        if (
+            p_situation_oof_train is not None
+            and model_situation_cls is not None
+            and X_train_situation is not None
+            and "folds_situation" in locals()
+        ):
+            for fold_no, (tr_rel, va_rel) in enumerate(folds_situation):
+                tr_rel = np.asarray(tr_rel, dtype=np.int64)
+                va_rel = np.asarray(va_rel, dtype=np.int64)
+                if len(tr_rel) < 2 or len(va_rel) < 1 or np.unique(y_train_situation[tr_rel]).size < 2:
+                    continue
+                try:
+                    m = _fresh_xgb_like(model_situation_cls, seed=3026 + fold_no)
+                    m.fit(
+                        X_train_situation[tr_rel],
+                        y_train_situation[tr_rel],
+                        sample_weight=np.asarray(w_train_situation)[tr_rel],
+                        verbose=False,
+                    )
+                    p_situation_oof_train[va_rel] = np.clip(
+                        m.predict_proba(X_train_situation[va_rel])[:, 1],
+                        eps, 1.0 - eps,
+                    )
+                except Exception as e:
+                    logger.warning(f"Situation OOF fold {fold_no} failed: {e}")
+
+        # Value classification + regression OOF.  Both heads share the same
+        # value-row universe/folds, but remain separate models.
+        if (
+            X_train_value is not None
+            and "folds_value" in locals()
+            and (p_value_oof_train is not None or pred_value_reg_oof_train is not None)
+        ):
+            for fold_no, (tr_rel, va_rel) in enumerate(folds_value):
+                tr_rel = np.asarray(tr_rel, dtype=np.int64)
+                va_rel = np.asarray(va_rel, dtype=np.int64)
+                if len(tr_rel) < 2 or len(va_rel) < 1:
+                    continue
+
+                if (
+                    p_value_oof_train is not None
+                    and model_value_cls is not None
+                    and np.unique(y_train_value_cls[tr_rel]).size >= 2
+                ):
+                    try:
+                        m = _fresh_xgb_like(model_value_cls, seed=4027 + fold_no)
+                        m.fit(
+                            X_train_value[tr_rel],
+                            y_train_value_cls[tr_rel],
+                            sample_weight=np.asarray(w_train_value)[tr_rel],
+                            verbose=False,
+                        )
+                        p_value_oof_train[va_rel] = np.clip(
+                            m.predict_proba(X_train_value[va_rel])[:, 1],
+                            eps, 1.0 - eps,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Value-class OOF fold {fold_no} failed: {e}")
+
+                if pred_value_reg_oof_train is not None and model_value_reg is not None:
+                    try:
+                        m = _fresh_xgb_like(model_value_reg, seed=4028 + fold_no)
+                        m.fit(
+                            X_train_value[tr_rel],
+                            y_train_value_reg[tr_rel],
+                            sample_weight=np.asarray(w_train_value)[tr_rel],
+                            verbose=False,
+                        )
+                        pred_value_reg_oof_train[va_rel] = np.asarray(
+                            m.predict(X_train_value[va_rel]), dtype=np.float64
+                        )
+                    except Exception as e:
+                        logger.warning(f"Value-reg OOF fold {fold_no} failed: {e}")
+
+        st.write({
+            "specialist_oof_coverage": {
+                "situation": (None if p_situation_oof_train is None else int(np.isfinite(p_situation_oof_train).sum())),
+                "value_cls": (None if p_value_oof_train is None else int(np.isfinite(p_value_oof_train).sum())),
+                "value_reg": (None if pred_value_reg_oof_train is None else int(np.isfinite(pred_value_reg_oof_train).sum())),
+            }
+        })
         
         oof_pred_auc = np.full(len(y_train), np.nan, dtype=np.float64)
         oof_pred_logloss = (np.full(len(y_train), np.nan, dtype=np.float64) if RUN_LOGLOSS else None)
@@ -15652,6 +15763,29 @@ def train_sharp_model_from_bq(
         p_train_vec = np.asarray(np.clip(p_train_vec, CLIP, 1.0 - CLIP), float)
         p_hold_vec  = np.asarray(np.clip(p_hold_vec,  CLIP, 1.0 - CLIP), float)
         p_full_vec  = np.asarray(np.clip(p_full_vec,  CLIP, 1.0 - CLIP), float)
+
+        # Strict OOF outcome probability for meta training.  This uses the same
+        # outcome calibrator/prior correction as deployment, but only on rows
+        # predicted by models that did not train on those rows.
+        _outcome_oof_mask = (mask_oof if use_full else mask_auc)
+        p_outcome_oof_train = np.full(len(y_train), np.nan, dtype=np.float64)
+        try:
+            _p_oof_cal = np.asarray(
+                _apply_cal(cal_name, cal_obj, _clip01(p_oof_blend, eps)),
+                dtype=np.float64,
+            )
+            _p_oof_cal = np.clip(_p_oof_cal, CLIP, 1.0 - CLIP)
+            _p_oof_deploy = _prior_correct(
+                _p_oof_cal,
+                train_pos=train_pos_for_pc,
+                hold_pos=deploy_pos,
+            )
+            p_outcome_oof_train[_outcome_oof_mask] = np.clip(
+                _p_oof_deploy, CLIP, 1.0 - CLIP
+            )
+        except Exception as e:
+            logger.warning(f"Outcome OOF meta-vector build failed: {e}")
+
         # Preserve specialist-native predictions for specialist metrics.
         p_situation_train_native = (
             None if p_situation_train_vec is None
@@ -15803,10 +15937,11 @@ def train_sharp_model_from_bq(
             default=np.nan,
         )
         
-        # Situation classification head
-        p_situation_train_vec = _map_specialist_vec_to_meta(
-            name="p_situation_train_vec",
-            values=p_situation_train_vec,
+        # Situation classification head. Meta TRAIN receives OOF predictions;
+        # hold/full receive deploy-model predictions.
+        p_situation_meta_train = _map_specialist_vec_to_meta(
+            name="p_situation_oof_train",
+            values=p_situation_oof_train,
             value_source_ids=source_ids_train_situation,
             meta_source_ids=meta_train_ids,
             default=0.5,
@@ -15828,10 +15963,10 @@ def train_sharp_model_from_bq(
             default=0.5,
         )
         
-        # Value classification head
-        p_value_train_vec = _map_specialist_vec_to_meta(
-            name="p_value_train_vec",
-            values=p_value_train_vec,
+        # Value classification head — OOF for meta training.
+        p_value_meta_train = _map_specialist_vec_to_meta(
+            name="p_value_oof_train",
+            values=p_value_oof_train,
             value_source_ids=source_ids_train_value,
             meta_source_ids=meta_train_ids,
             default=0.5,
@@ -15853,10 +15988,10 @@ def train_sharp_model_from_bq(
             default=0.5,
         )
         
-        # Value regression head
-        pred_value_reg_train = _map_specialist_vec_to_meta(
-            name="pred_value_reg_train",
-            values=pred_value_reg_train,
+        # Value regression head — OOF for meta training.
+        value_reg_meta_train = _map_specialist_vec_to_meta(
+            name="pred_value_reg_oof_train",
+            values=pred_value_reg_oof_train,
             value_source_ids=source_ids_train_value,
             meta_source_ids=meta_train_ids,
             default=0.0,
@@ -15888,10 +16023,10 @@ def train_sharp_model_from_bq(
             w_train_outcome = np.asarray(w_train_outcome, dtype=np.float64).reshape(-1)
         
         meta_train_df = pd.DataFrame({
-            "Meta_P_Outcome":   p_train_vec,
-            "Meta_P_Situation": p_situation_train_vec,
-            "Meta_P_Value":     p_value_train_vec,
-            "Meta_Value_Reg":   pred_value_reg_train,
+            "Meta_P_Outcome":   p_outcome_oof_train,
+            "Meta_P_Situation": p_situation_meta_train,
+            "Meta_P_Value":     p_value_meta_train,
+            "Meta_Value_Reg":   value_reg_meta_train,
         }, index=train_meta_df.index)
         
         meta_hold_df = pd.DataFrame({
@@ -15918,13 +16053,30 @@ def train_sharp_model_from_bq(
             meta_hold_df["Meta_Line_Value"]  = pd.to_numeric(hold_meta_df["Value"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
             meta_full_df["Meta_Line_Value"]  = pd.to_numeric(full_meta_df["Value"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
         
-        meta_train_df = meta_train_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        # Keep missing outcome OOF as NaN until the strict meta-fit mask is built.
+        meta_train_df = meta_train_df.replace([np.inf, -np.inf], np.nan)
         meta_hold_df  = meta_hold_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         meta_full_df  = meta_full_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        
+
+        meta_fit_mask = np.isfinite(
+            pd.to_numeric(meta_train_df["Meta_P_Outcome"], errors="coerce").to_numpy(dtype=np.float64)
+        )
+        if int(meta_fit_mask.sum()) < max(120, int(0.20 * len(meta_fit_mask))):
+            raise ValueError(
+                f"Insufficient OOF rows for meta training: "
+                f"{int(meta_fit_mask.sum())}/{len(meta_fit_mask)}"
+            )
+
+        # Specialist OOF gaps (for rows without a valid specialist target or the
+        # initial time-CV region) are intentionally neutral, never in-sample.
+        for c, neutral in (("Meta_P_Situation", 0.5), ("Meta_P_Value", 0.5), ("Meta_Value_Reg", 0.0)):
+            meta_train_df[c] = pd.to_numeric(meta_train_df[c], errors="coerce").fillna(neutral)
+        meta_train_df["Meta_P_Outcome"] = pd.to_numeric(meta_train_df["Meta_P_Outcome"], errors="coerce")
+
         st.write({
             "meta_alignment": {
                 "n_train_meta": int(len(meta_train_df)),
+                "n_train_meta_oof": int(meta_fit_mask.sum()),
                 "n_hold_meta": int(len(meta_hold_df)),
                 "n_full_meta": int(len(meta_full_df)),
                 "y_train": int(len(y_train)),
@@ -15932,75 +16084,115 @@ def train_sharp_model_from_bq(
                 "w_train_outcome": int(len(w_train_outcome)),
             }
         })
+
         # ----------------------------
-        # Train meta-combiner model
+        # Conservative meta-combiner. The specialist heads already do the
+        # nonlinear feature learning; this layer should combine, not relearn.
         # ----------------------------
-        meta_model = XGBClassifier(
-            objective="binary:logistic",
-            eval_metric=["logloss", "auc"],
-            tree_method="hist",
-            grow_policy="lossguide",
-            max_depth=3,
-            max_leaves=32,
-            learning_rate=0.03,
-            subsample=0.90,
-            colsample_bytree=0.90,
-            min_child_weight=2.0,
-            gamma=0.25,
-            reg_alpha=0.05,
-            reg_lambda=3.0,
-            max_bin=256,
-            n_estimators=300,
-            n_jobs=1,
-            random_state=2029,
-        )
-        
+        def _new_meta_model(seed=2029):
+            return XGBClassifier(
+                objective="binary:logistic",
+                eval_metric=["logloss", "auc"],
+                tree_method="hist",
+                grow_policy="lossguide",
+                max_depth=2,
+                max_leaves=8,
+                learning_rate=0.025,
+                n_estimators=150,
+                subsample=0.80,
+                colsample_bytree=0.85,
+                min_child_weight=10.0,
+                gamma=0.75,
+                reg_alpha=0.25,
+                reg_lambda=8.0,
+                max_bin=128,
+                n_jobs=1,
+                random_state=int(seed),
+                seed=int(seed),
+            )
+
+        meta_train_np = meta_train_df.fillna(0.0).to_numpy(dtype=np.float32)
+        meta_hold_np  = meta_hold_df.to_numpy(dtype=np.float32)
+        meta_full_np  = meta_full_df.to_numpy(dtype=np.float32)
+
+        # Second-level OOF: calibrate the meta layer only on predictions from a
+        # meta model that did not train on the validation row.
+        meta_oof_raw = np.full(len(y_train), np.nan, dtype=np.float64)
+        for fold_no, (tr_rel, va_rel) in enumerate(folds_outcome):
+            tr_rel = np.asarray(tr_rel, dtype=np.int64)
+            va_rel = np.asarray(va_rel, dtype=np.int64)
+            tr_meta = tr_rel[meta_fit_mask[tr_rel]]
+            va_meta = va_rel[meta_fit_mask[va_rel]]
+            if len(tr_meta) < 20 or len(va_meta) < 1 or np.unique(y_train[tr_meta]).size < 2:
+                continue
+            try:
+                m_meta = _new_meta_model(seed=5029 + fold_no)
+                m_meta.fit(
+                    meta_train_np[tr_meta],
+                    y_train[tr_meta].astype(int),
+                    sample_weight=w_train_outcome[tr_meta],
+                    verbose=False,
+                )
+                meta_oof_raw[va_meta] = np.asarray(
+                    m_meta.predict_proba(meta_train_np[va_meta])[:, 1],
+                    dtype=np.float64,
+                )
+            except Exception as e:
+                logger.warning(f"Meta OOF fold {fold_no} failed: {e}")
+
+        meta_oof_mask = meta_fit_mask & np.isfinite(meta_oof_raw)
+        if int(meta_oof_mask.sum()) < max(80, int(0.10 * len(meta_oof_mask))):
+            raise ValueError(
+                f"Insufficient second-level meta OOF rows: "
+                f"{int(meta_oof_mask.sum())}/{len(meta_oof_mask)}"
+            )
+
+        # Final deploy meta model: train on all first-level OOF rows.
+        meta_model = _new_meta_model(seed=2029)
         meta_model.fit(
-            meta_train_df.to_numpy(dtype=np.float32),
-            y_train.astype(int),
-            sample_weight=w_train_outcome,
+            meta_train_np[meta_fit_mask],
+            y_train[meta_fit_mask].astype(int),
+            sample_weight=w_train_outcome[meta_fit_mask],
             verbose=False,
         )
-        
-        # ----------------------------
-        # Raw meta predictions
-        # ----------------------------
-        final_bet_score_train_raw = np.asarray(
-            meta_model.predict_proba(meta_train_df.to_numpy(dtype=np.float32))[:, 1],
-            dtype=np.float64,
-        )
-        
+
+        # Deploy-style raw predictions for hold/full.  Train diagnostics use the
+        # second-level OOF predictions instead of in-sample meta predictions.
+        final_bet_score_train_raw = np.full(len(y_train), 0.5, dtype=np.float64)
+        final_bet_score_train_raw[meta_oof_mask] = meta_oof_raw[meta_oof_mask]
         final_bet_score_hold_raw = np.asarray(
-            meta_model.predict_proba(meta_hold_df.to_numpy(dtype=np.float32))[:, 1],
-            dtype=np.float64,
+            meta_model.predict_proba(meta_hold_np)[:, 1], dtype=np.float64
         )
-        
         final_bet_score_full_raw = np.asarray(
-            meta_model.predict_proba(meta_full_df.to_numpy(dtype=np.float32))[:, 1],
-            dtype=np.float64,
+            meta_model.predict_proba(meta_full_np)[:, 1], dtype=np.float64
         )
-        
+
         st.write({
             "meta_raw_lengths": {
                 "train_raw": int(len(final_bet_score_train_raw)),
+                "train_oof": int(meta_oof_mask.sum()),
                 "hold_raw": int(len(final_bet_score_hold_raw)),
                 "full_raw": int(len(final_bet_score_full_raw)),
             }
-        })        
+        })
+
         # ----------------------------
-        # 6E) META CALIBRATION
+        # OOF-only meta calibration
         # ----------------------------
+        _meta_oof_x = _clip01(meta_oof_raw[meta_oof_mask], eps)
+        _meta_oof_y = y_train[meta_oof_mask].astype(int)
+
         meta_cals_raw = fit_iso_platt_beta(
-            _clip01(final_bet_score_train_raw, eps),
-            y_train.astype(int),
+            _meta_oof_x,
+            _meta_oof_y,
             eps=1e-6,
-            use_quantile_iso=(len(np.unique(np.round(final_bet_score_train_raw, 4))) < 400),
+            use_quantile_iso=(len(np.unique(np.round(_meta_oof_x, 4))) < 400),
         )
         meta_cals = _normalize_cals(meta_cals_raw)
         meta_cals["iso"]   = _ensure_transform_for_iso(meta_cals.get("iso")) or _IdentityIsoCal(eps=1e-6)
         meta_cals["platt"] = _ensure_predict_proba_for_prob_cal(meta_cals.get("platt"), eps=1e-6)
         meta_cals["beta"]  = _ensure_predict_proba_for_prob_cal(meta_cals.get("beta"),  eps=1e-6)
-        
+
         meta_candidates = []
         if meta_cals.get("beta") is not None:
             meta_candidates.append(("beta", meta_cals["beta"]))
@@ -16010,45 +16202,85 @@ def train_sharp_model_from_bq(
             meta_candidates.append(("iso", meta_cals["iso"]))
         if not meta_candidates:
             meta_candidates = [("iso", _IdentityIsoCal(eps=1e-6))]
-        
+
         meta_scores = []
-        meta_raw_std = float(np.std(final_bet_score_train_raw))
+        meta_raw_std = float(np.std(_meta_oof_x))
         for kind, cal in meta_candidates:
             try:
-                pp = _apply_cal(kind, cal, _clip01(final_bet_score_train_raw, eps))
+                pp = _apply_cal(kind, cal, _meta_oof_x)
                 pp = np.asarray(np.clip(pp, CLIP, 1.0 - CLIP), float)
-                ece = _ece_score(y_train.astype(int), pp, n_bins=10)
+                ece = _ece_score(_meta_oof_y, pp, n_bins=10)
                 std_ratio = float(np.std(pp) / max(meta_raw_std, 1e-9))
                 if np.isfinite(ece):
                     meta_scores.append((ece, -std_ratio, kind, cal, std_ratio))
             except Exception:
                 pass
-        
+
         if meta_scores:
             meta_scores.sort(key=lambda t: (t[0], t[1]))
             meta_ece_best, _, meta_cal_name, meta_cal_obj, meta_std_ratio = meta_scores[0]
         else:
-            meta_cal_name, meta_cal_obj, meta_ece_best, meta_std_ratio = "iso", _IdentityIsoCal(eps=1e-6), float("nan"), float("nan")
-        
-        final_bet_score_train = np.asarray(
-            np.clip(_apply_cal(meta_cal_name, meta_cal_obj, _clip01(final_bet_score_train_raw, eps)), CLIP, 1.0 - CLIP),
-            dtype=np.float64
+            meta_cal_name, meta_cal_obj, meta_ece_best, meta_std_ratio = (
+                "iso", _IdentityIsoCal(eps=1e-6), float("nan"), float("nan")
+            )
+
+        # Calibrated meta component. Train uses OOF raw predictions; hold/full use
+        # the deploy model. Rows without second-level OOF get neutral meta weight.
+        meta_prob_train = np.full(len(y_train), 0.5, dtype=np.float64)
+        meta_prob_train[meta_oof_mask] = np.asarray(
+            np.clip(
+                _apply_cal(meta_cal_name, meta_cal_obj, _clip01(meta_oof_raw[meta_oof_mask], eps)),
+                CLIP, 1.0 - CLIP,
+            ),
+            dtype=np.float64,
         )
-        final_bet_score_hold = np.asarray(
-            np.clip(_apply_cal(meta_cal_name, meta_cal_obj, _clip01(final_bet_score_hold_raw, eps)), CLIP, 1.0 - CLIP),
-            dtype=np.float64
+        meta_prob_hold = np.asarray(
+            np.clip(
+                _apply_cal(meta_cal_name, meta_cal_obj, _clip01(final_bet_score_hold_raw, eps)),
+                CLIP, 1.0 - CLIP,
+            ),
+            dtype=np.float64,
         )
-        final_bet_score_full = np.asarray(
-            np.clip(_apply_cal(meta_cal_name, meta_cal_obj, _clip01(final_bet_score_full_raw, eps)), CLIP, 1.0 - CLIP),
-            dtype=np.float64
+        meta_prob_full = np.asarray(
+            np.clip(
+                _apply_cal(meta_cal_name, meta_cal_obj, _clip01(final_bet_score_full_raw, eps)),
+                CLIP, 1.0 - CLIP,
+            ),
+            dtype=np.float64,
         )
-        
+
+        # Anchor the final probability to the stronger core outcome probability.
+        # Pathi/Big-Al/situation/value information can move confidence, but cannot
+        # freely turn a ~58% outcome estimate into an unsupported 90%+ probability.
+        META_WEIGHT = 0.40
+        OUTCOME_WEIGHT = 1.0 - META_WEIGHT
+
+        p_outcome_train_for_meta = np.where(
+            np.isfinite(p_outcome_oof_train), p_outcome_oof_train, p_train_vec
+        ).astype(np.float64)
+
+        final_bet_score_train = np.clip(
+            OUTCOME_WEIGHT * p_outcome_train_for_meta + META_WEIGHT * meta_prob_train,
+            CLIP, 1.0 - CLIP,
+        ).astype(np.float64)
+        final_bet_score_hold = np.clip(
+            OUTCOME_WEIGHT * p_hold_vec + META_WEIGHT * meta_prob_hold,
+            CLIP, 1.0 - CLIP,
+        ).astype(np.float64)
+        final_bet_score_full = np.clip(
+            OUTCOME_WEIGHT * p_full_vec + META_WEIGHT * meta_prob_full,
+            CLIP, 1.0 - CLIP,
+        ).astype(np.float64)
+
         st.write({
             "meta_calibrator_used": str(meta_cal_name),
+            "meta_calibration_source": "second_level_oof",
             "meta_ece_best": (None if not np.isfinite(meta_ece_best) else float(meta_ece_best)),
             "meta_std_ratio_after_cal": (None if not np.isfinite(meta_std_ratio) else float(meta_std_ratio)),
+            "meta_weight": float(META_WEIGHT),
+            "outcome_weight": float(OUTCOME_WEIGHT),
         })
-        
+
         # Diagnostics for outcome-calibrated probabilities
         ece_tr = expected_calibration_error(y_train.astype(int), p_train_vec, n_bins=10)
         ece_ho = expected_calibration_error(y_hold.astype(int),  p_hold_vec,  n_bins=10)
@@ -16442,6 +16674,9 @@ def train_sharp_model_from_bq(
                 "feature_cols_value": list(feature_cols_value),
                 "meta_features": list(meta_train_df.columns),
                 "meta_calibrator": str(meta_cal_name),
+                "meta_weight": float(META_WEIGHT),
+                "outcome_weight": float(OUTCOME_WEIGHT),
+                "stacking_train_mode": "oof_post_autofs",
             }
 
         # -------------------------------------------------------------------
@@ -16503,6 +16738,9 @@ def train_sharp_model_from_bq(
                 "value_reg_head": "model_value_reg",
                 "meta_head": "meta_model + meta_calibrator",
                 "meta_features": list(meta_train_df.columns),
+                "meta_weight": float(META_WEIGHT),
+                "outcome_weight": float(OUTCOME_WEIGHT),
+                "stacking_train_mode": "oof_post_autofs",
             },
         }
         # -------------------------------------------------------------------
@@ -16531,6 +16769,9 @@ def train_sharp_model_from_bq(
                     "model_family": "three_head_plus_meta_v1",
                     "meta_features": list(meta_train_df.columns),
                     "meta_calibrator": str(meta_cal_name),
+                    "meta_weight": float(META_WEIGHT),
+                    "outcome_weight": float(OUTCOME_WEIGHT),
+                    "stacking_train_mode": "oof_post_autofs",
                 },
             },
             calibrator=iso_blend,
