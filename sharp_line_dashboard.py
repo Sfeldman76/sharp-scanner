@@ -4912,6 +4912,108 @@ def _head_forbidden_feature(col: str, head_name: str | None = None) -> bool:
         return True
     return False
 
+
+# =========================
+# Head-specific feature-family contract.
+# Outcome remains broad. Situation is intentionally restricted to prior/history/
+# role/system context. Value is intentionally restricted to market price, line,
+# movement, timing, liquidity, and book-consensus context.
+#
+# These are permissive family rules rather than a fixed list so newly-added
+# Pathi/BigAl/history or market-microstructure features automatically route to the
+# appropriate specialist without making all heads copies of the outcome model.
+# =========================
+def _head_feature_family_allowed(col: str, head_name: str | None = None) -> bool:
+    s = str(col)
+    sl = s.lower()
+    head = str(head_name or "outcome").lower().strip()
+
+    if head == "outcome":
+        return True
+
+    if head == "situation":
+        # Deterministic situational systems are always situation-eligible.
+        if sl.startswith(("pathi_", "bigal_", "system_")):
+            return True
+
+        # Keep generic market-microstructure variables out of the situation head,
+        # even when their names contain words such as H2H or role.
+        situation_market_exclusions = (
+            "prob_gap", "probgap", "sharp_", "rec_", "book_",
+            "odds", "price_shift", "implied", "line_move", "line_std",
+            "line_diff", "limit", "juice", "hold", "outlier",
+            "marketleader", "crossmarket", "hybrid_", "clv",
+            "liquidity", "booklift", "pctrank", "max_line", "min_line",
+            "current_vs_",
+        )
+        if any(tok in sl for tok in situation_market_exclusions):
+            return False
+
+        # Prior/history/team-role/schedule families.  These tokens intentionally
+        # favor information known before the current game and exclude generic
+        # live market microstructure such as Sharp_Rec_Prob_Gap.
+        situation_tokens = (
+            "streak", "cover_rate", "cover_games", "cover_margin",
+            "ats_", "_ats", "h2h_", "revenge", "last_matchup",
+            "winpct", "loss_pct", "lossrate", "win_rate",
+            "role_", "_role", "as_dog", "as_favorite",
+            "home_dog", "road_dog", "home_favorite", "road_favorite",
+            "usually_dog", "usually_favorite",
+            "prev_", "prior", "last5", "last10", "season_rate",
+            "days_since", "rest_", "is_b2b", "is_3in4", "games_last_",
+            "schedule", "travel", "off_day",
+            "postseason", "regular_season", "playoff", "preseason",
+            "week_number", "game_week", "game_number", "final_two_",
+            "conference", "series_", "defending_champion",
+            "eliminated", "final_home_game",
+            "after_win", "after_loss", "off_win", "off_loss",
+            "on_cover_streak", "team_recent_", "opp_recent_",
+            "team_fav_roi", "team_dog_roi", "road_favorite_roi",
+            "dog_rate_", "favorite_rate_", "su_win", "su_loss",
+        )
+        return any(tok in sl for tok in situation_tokens)
+
+    if head == "value":
+        # Named deterministic systems belong to the Situation specialist.  The
+        # broad Outcome head can still use them, but Value should remain an
+        # independent market/microstructure specialist.
+        if sl.startswith(("pathi_", "bigal_", "system_")):
+            return False
+
+        # Market/value/microstructure feature families.  The direct synthetic EV
+        # target ingredients remain blocked separately by _head_forbidden_feature.
+        value_prefixes = (
+            "sharp_", "rec_", "book_", "marketleader_", "crossmarket_",
+            "hybrid_", "line_", "odds_", "implied_", "impprob_",
+            "spread_", "total_", "limit_", "clv_", "edge_", "value_",
+            "steam_", "key_cross_", "crossed_key_", "current_vs_",
+        )
+        if sl.startswith(value_prefixes):
+            return True
+
+        value_tokens = (
+            "sharp", "book", "odds", "price", "implied",
+            "recskew", "_rec_", "vs_rec", "rec_line", "rec_odds",
+            "prob_gap", "probgap", "hold", "juice", "vig",
+            "line_move", "line_diff", "line_std", "line_totalmag",
+            "line_phasemag", "opening_line", "open_line",
+            "spread_gap", "total_gap", "market_gap", "crossmarket",
+            "consensus", "outlier", "pctrank", "liquidity", "limit",
+            "clv", "fair_line", "fair_odds", "edge_proxy",
+            "timing", "late_share", "early_share", "midmag",
+            "earlymag", "latemag", "velocity", "direction_changes",
+            "max_line", "min_line", "best_line", "worst_line",
+            "key_cross", "crossed_key", "dist_to_", "corridor",
+            "resist", "reversal", "booklift", "rev_x_booklift",
+            "role_price_shift", "ml_price_zscore",
+            "current_impliedprob", "first_odds", "open_odds",
+            "delta_limit", "delta_vs_sharp",
+        )
+        return any(tok in sl for tok in value_tokens)
+
+    # Unknown specialist heads default to broad rather than silently deleting data.
+    return True
+
 # =========================
 # =========================
 # 1) CV EVAL BLOCK (OLD/FAST interface, backend-safe)
@@ -14546,16 +14648,46 @@ def train_sharp_model_from_bq(
             # Head-specific leakage contract.  This is applied before AutoFS so
             # forbidden columns cannot influence preselection, correlations, flips,
             # or incremental AUC.
-            _candidate_cols = [
+            _leak_safe_cols = [
                 c for c in X_df_train_head.columns
                 if not _head_forbidden_feature(c, head_name)
             ]
-            _blocked_cols = [c for c in X_df_train_head.columns if c not in _candidate_cols]
+            _blocked_cols = [c for c in X_df_train_head.columns if c not in _leak_safe_cols]
             if _blocked_cols:
                 log_func(
                     f"[LEAK-GUARD:{head_name}] blocked {len(_blocked_cols)} candidates: "
                     + ", ".join(map(str, _blocked_cols[:20]))
                 )
+
+            # Give each specialist a distinct information domain. Outcome remains
+            # broad; Situation sees prior/history/Pathi/BigAl context; Value sees
+            # market/price/movement/liquidity context.
+            _candidate_cols = [
+                c for c in _leak_safe_cols
+                if _head_feature_family_allowed(c, head_name)
+            ]
+            _family_excluded = [c for c in _leak_safe_cols if c not in _candidate_cols]
+
+            log_func(
+                f"[HEAD-FAMILY:{head_name}] eligible={len(_candidate_cols)}/"
+                f"{len(_leak_safe_cols)} leak-safe candidates"
+            )
+            if _candidate_cols:
+                log_func(
+                    f"[HEAD-FAMILY:{head_name}] sample eligible: "
+                    + ", ".join(map(str, _candidate_cols[:20]))
+                )
+            if _family_excluded and str(head_name).lower() != "outcome":
+                log_func(
+                    f"[HEAD-FAMILY:{head_name}] excluded other-family sample: "
+                    + ", ".join(map(str, _family_excluded[:15]))
+                )
+
+            if not _candidate_cols:
+                st.warning(
+                    f"[AutoFS:{head_name}] skipped: no features matched the head-specific family contract"
+                )
+                return None
 
             X_df_train_head = X_df_train_head.reindex(columns=_candidate_cols)
             X_df_hold_head = X_df_hold_head.reindex(columns=_candidate_cols)
@@ -16890,6 +17022,7 @@ def train_sharp_model_from_bq(
                 "meta_weight": float(META_WEIGHT),
                 "outcome_weight": float(OUTCOME_WEIGHT),
                 "stacking_train_mode": "oof_post_autofs",
+                    "head_feature_family_policy": "specialist_domains_v1",
                 "situation_target": "realized_outcome",
                 "value_cls_target": "realized_outcome_on_value_rows",
                 "value_reg_target": "synthetic_ex_ante_ev",
@@ -16960,6 +17093,7 @@ def train_sharp_model_from_bq(
                 "meta_weight": float(META_WEIGHT),
                 "outcome_weight": float(OUTCOME_WEIGHT),
                 "stacking_train_mode": "oof_post_autofs",
+                    "head_feature_family_policy": "specialist_domains_v1",
                 "situation_target": "realized_outcome",
                 "value_cls_target": "realized_outcome_on_value_rows",
                 "value_reg_target": "synthetic_ex_ante_ev",
@@ -17005,6 +17139,7 @@ def train_sharp_model_from_bq(
                     "meta_weight": float(META_WEIGHT),
                     "outcome_weight": float(OUTCOME_WEIGHT),
                     "stacking_train_mode": "oof_post_autofs",
+                    "head_feature_family_policy": "specialist_domains_v1",
                 "situation_target": "realized_outcome",
                 "value_cls_target": "realized_outcome_on_value_rows",
                 "value_reg_target": "synthetic_ex_ante_ev",
