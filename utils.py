@@ -6108,9 +6108,73 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         except Exception as e:
             logger.warning("⚠️ Meta calibrator failed; using raw meta probability: %s", e)
 
-    raw = np.asarray(raw, dtype=np.float64).reshape(-1)
-    raw = np.nan_to_num(raw, nan=0.5, posinf=1.0-eps, neginf=eps)
-    return np.clip(raw, eps, 1.0 - eps)
+    # Calibrated meta probability.
+    meta_prob = np.asarray(raw, dtype=np.float64).reshape(-1)
+    meta_prob = np.nan_to_num(meta_prob, nan=0.5, posinf=1.0-eps, neginf=eps)
+    meta_prob = np.clip(meta_prob, eps, 1.0 - eps)
+
+    # New OOF-stacked artifacts persist the final deployment blend in
+    # multihead_config. Preserve legacy behavior for older artifacts that
+    # do not contain weight fields: those artifacts returned 100% meta.
+    has_saved_blend = ("meta_weight" in cfg) or ("outcome_weight" in cfg)
+    if not has_saved_blend:
+        return meta_prob
+
+    try:
+        meta_weight = float(cfg.get("meta_weight", 0.40))
+    except Exception:
+        meta_weight = 0.40
+
+    try:
+        outcome_weight = float(cfg.get("outcome_weight", 1.0 - meta_weight))
+    except Exception:
+        outcome_weight = 1.0 - meta_weight
+
+    # Defensive validation/normalization. If saved weights are invalid,
+    # fall back to the intended 60% outcome / 40% meta deployment mix.
+    if (
+        not np.isfinite(meta_weight)
+        or not np.isfinite(outcome_weight)
+        or meta_weight < 0.0
+        or outcome_weight < 0.0
+        or (meta_weight + outcome_weight) <= 0.0
+    ):
+        meta_weight = 0.40
+        outcome_weight = 0.60
+
+    weight_sum = meta_weight + outcome_weight
+    meta_weight /= weight_sum
+    outcome_weight /= weight_sum
+
+    outcome_prob = np.asarray(p_outcome, dtype=np.float64).reshape(-1)
+    outcome_prob = np.nan_to_num(
+        outcome_prob,
+        nan=0.5,
+        posinf=1.0-eps,
+        neginf=eps,
+    )
+    outcome_prob = np.clip(outcome_prob, eps, 1.0 - eps)
+
+    if len(outcome_prob) != len(meta_prob):
+        logger.warning(
+            "⚠️ Meta blend length mismatch (outcome=%d, meta=%d); using outcome head.",
+            len(outcome_prob),
+            len(meta_prob),
+        )
+        return outcome_prob
+
+    combined = (
+        outcome_weight * outcome_prob
+        + meta_weight * meta_prob
+    )
+
+    logger.info(
+        "🧠 Applying saved final probability blend: outcome=%.0f%% meta=%.0f%%",
+        100.0 * outcome_weight,
+        100.0 * meta_weight,
+    )
+
+    return np.clip(combined, eps, 1.0 - eps)
 
 def _unwrap_pipeline(est):
     pipe = est if hasattr(est, "named_steps") else None
