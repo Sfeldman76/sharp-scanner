@@ -2834,21 +2834,22 @@ def compute_ev_features_sharp_vs_rec(
        - totals under: P(Total < line)
        - h2h: direct fair probability from same-book de-vigged odds
     """
-
     def _amer_to_prob(odds):
-        o = np.asarray(o, dtype=float)
-
+    
+        o = np.asarray(pd.to_numeric(odds, errors="coerce"), dtype=float)
+    
         out = np.full(o.shape, np.nan, dtype=float)
-        
+    
         pos = o > 0
-        
+    
         neg = o < 0
-        
+    
         out[pos] = 100.0 / (o[pos] + 100.0)
-        
+    
         out[neg] = (-o[neg]) / ((-o[neg]) + 100.0)
-        
+    
         return out.item() if out.ndim == 0 else out
+   
 
     out_cols = [
         "Truth_Fair_Prob_at_SharpLine",
