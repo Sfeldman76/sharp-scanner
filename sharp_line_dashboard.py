@@ -403,7 +403,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-01-v4-football-keys"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-04-v5-conference-week"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -441,14 +441,29 @@ PATHI_FOOTBALL_MODEL_FEATURES = [
     "Pathi_FB_Dog_Rate_Last10_Prior",
     "Pathi_FB_Usually_Dog_Now_Favorite", "Pathi_FB_Usually_Favorite_Now_Dog",
 
-    # Regime interactions
-    "Pathi_FB_Is_Postseason", "Pathi_FB_Is_Regular_Season",
-    "Pathi_FB_Key3_x_Postseason", "Pathi_FB_Key7_x_Postseason",
-    "Pathi_FB_Dog_x_Postseason", "Pathi_FB_Favorite_x_Postseason",
-    "Pathi_FB_LineMoveToward_x_Postseason",
+    # Postseason regime features intentionally retired from the learned model.
 ]
 
 PATHI_BIGAL_ADDITIONAL_MODEL_FEATURES = ['Role_Price_Shift', 'Current_ImpliedProb_vs_Last10_Avg', 'Current_ImpliedProb_vs_Last10_Median', 'ML_Price_ZScore_vs_TeamHistory', 'Team_ML_ROI_Season', 'Team_Fav_ROI_Season', 'Team_Dog_ROI_Season', 'Team_Fav_ROI_Last10', 'Team_Dog_ROI_Last10', 'H2H_Consecutive_Losses_Prior', 'H2H_Consecutive_Wins_Prior', 'Revenge_Depth', 'H2H_Last_Loss_Margin', 'H2H_Meetings_Since_Last_Win', 'Prev_ATS_Margin', 'Prev2_ATS_Margin', 'Prev3_ATS_Margin', 'ATS_Margin_Max_Last3', 'ATS_Margin_Min_Last3', 'ATS_Margin_Mean_Last3', 'System_Side_Consensus_Count', 'System_Side_Conflict_Count', 'System_Net_Signal', 'System_Consensus_Ratio', 'Line_Move_30m', 'Line_Move_60m', 'Line_Move_120m', 'Line_Move_Last30m', 'Line_Move_Last60m', 'Line_Move_From_Open', 'Line_Move_Velocity_60m', 'Line_Move_Velocity_120m', 'Direction_Changes_Count', 'Max_Line_Seen', 'Min_Line_Seen', 'Current_vs_Best_Line', 'Current_vs_Worst_Line', 'Sharp_Book_Move_30m', 'Sharp_Book_Move_60m', 'Sharp_Move_Before_Market', 'Sharp_Lead_Time_Minutes', 'Sharp_Soft_Divergence', 'Sharp_Consensus_Direction', 'Crossed_Key_3_Last60m', 'Crossed_Key_7_Last60m', 'Crossed_Key_10_Last60m', 'Crossed_Key_14_Last60m', 'Minutes_Since_Key_Cross', 'Key_Cross_Confirmed_By_Sharp_Books', 'Key_Cross_Reversed', 'Key_Cross_Persistence']
+
+# Big Al model context was intentionally simplified on 2026-09-04.
+# Keep legacy system columns calculable for backward-compatible artifacts/UI, but
+# do not offer postseason/championship/finals/elimination/final-home features to
+# new training or to dynamic feature selection.  The current learned context is
+# conference/division/subdivision/league relationship + week/game-number context.
+BIGAL_RETIRED_FEATURE_TOKENS = (
+    "postseason", "playoff", "finals", "champ", "elimination",
+    "eliminated", "series", "finalhome", "final_home",
+)
+BIGAL_RETIRED_FEATURE_EXACT = {
+    "bigal_nfl1_hometightener",
+    "bigal_nba3_winpct572_tightener",
+    "bigal_nba4_notoffsuatsloss_tightener",
+}
+
+def _is_retired_bigal_feature_name(name: str) -> bool:
+    c = str(name or "").lower().replace("-", "_")
+    return c in BIGAL_RETIRED_FEATURE_EXACT or any(tok in c for tok in BIGAL_RETIRED_FEATURE_TOKENS)
 
 
 # Operational screens used only where the published Pathi wording is qualitative
@@ -566,6 +581,11 @@ _PATHI_BIGAL_SYSTEM_SOURCE_COLS = [
     "Season", "Week", "Week_Number", "Game_Week", "Season_Type", "Game_Type",
     "Is_Preseason", "Is_Postseason", "Is_Playoffs", "Is_Regular_Season", "Is_Finals",
     "Is_Conference_Game", "Home_Conference", "Away_Conference",
+    "Season_Stage", "Tournament_Type", "Round_Name",
+    "Is_Cup", "Is_PlayIn", "Is_Bowl", "Is_Conference_Tournament", "Is_Neutral_Site",
+    "Is_Division_Game", "Home_Division", "Away_Division",
+    "Home_Subdivision", "Away_Subdivision", "Home_League_Group", "Away_League_Group",
+    "Regular_Season_Final_Week",
     "Home_Is_Defending_Champion", "Away_Is_Defending_Champion",
     "Home_Prior_Season_Playoff", "Away_Prior_Season_Playoff",
     "Home_Is_Final_Home_Game", "Away_Is_Final_Home_Game", "Is_Final_Home_Game",
@@ -573,6 +593,108 @@ _PATHI_BIGAL_SYSTEM_SOURCE_COLS = [
     "Home_Would_Be_Eliminated_With_Loss", "Away_Would_Be_Eliminated_With_Loss",
     "Series_Game_Number", "Home_Series_Wins", "Away_Series_Wins", "Revenge_Flag",
 ]
+
+
+
+BIGAL_CONTEXT_VIEW = "sharplogger.sharp_data.bigal_game_context_enriched"
+
+_BIGAL_CONTEXT_COLUMNS = [
+    "Merge_Key_Short", "Sport", "Season", "Game_Start",
+    "Home_Team_Norm", "Away_Team_Norm",
+    "Home_Context_Team_Norm", "Away_Context_Team_Norm",
+    "Is_Neutral_Site",
+    "Home_Use_For_Context", "Away_Use_For_Context",
+    "Home_Conference", "Home_Division", "Home_Subdivision", "Home_League_Group",
+    "Away_Conference", "Away_Division", "Away_Subdivision", "Away_League_Group",
+    "Is_Conference_Game", "Is_Division_Game",
+    "Week_Number",
+]
+
+_BIGAL_CONTEXT_SCHEMA_CACHE = None
+
+def enrich_bigal_context_from_bq(df_rows: pd.DataFrame) -> pd.DataFrame:
+    """Fill Big Al schedule/team context from the optional BigQuery context view.
+
+    Existing non-null row values always win.  The helper is fail-open so the
+    model still trains/scores before the reference tables are populated.
+    """
+    global _BIGAL_CONTEXT_SCHEMA_CACHE
+    if df_rows is None or df_rows.empty:
+        return df_rows.copy()
+    out = df_rows.copy()
+    if "Merge_Key_Short" not in out.columns:
+        return out
+
+    keys = (
+        out["Merge_Key_Short"].astype("string").str.lower().str.strip()
+    )
+    valid_keys = sorted({
+        str(x) for x in keys.dropna().tolist()
+        if str(x).strip() and str(x).lower() not in {"nan", "none", "<na>"}
+    })
+    if not valid_keys:
+        return out
+
+    try:
+        if _BIGAL_CONTEXT_SCHEMA_CACHE is None:
+            _BIGAL_CONTEXT_SCHEMA_CACHE = {f.name for f in bq_client.get_table(BIGAL_CONTEXT_VIEW).schema}
+        present = set(_BIGAL_CONTEXT_SCHEMA_CACHE)
+        wanted = [c for c in _BIGAL_CONTEXT_COLUMNS if c in present]
+        if "Merge_Key_Short" not in wanted:
+            return out
+
+        # Key-based lookup is exact and cheap for live batches.  Chunk large
+        # training sets to stay comfortably below query-parameter limits.
+        parts = []
+        chunk_size = 5000
+        for start in range(0, len(valid_keys), chunk_size):
+            chunk = valid_keys[start:start + chunk_size]
+            sql = (
+                "SELECT " + ", ".join(f"`{c}`" for c in wanted) +
+                f" FROM `{BIGAL_CONTEXT_VIEW}` "
+                "WHERE LOWER(TRIM(CAST(Merge_Key_Short AS STRING))) IN UNNEST(@keys)"
+            )
+            cfg = bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ArrayQueryParameter("keys", "STRING", chunk)
+            ])
+            part = bq_client.query(sql, job_config=cfg).to_dataframe(create_bqstorage_client=True)
+            if part is not None and not part.empty:
+                parts.append(part)
+        if not parts:
+            return out
+
+        ctx = pd.concat(parts, ignore_index=True, sort=False)
+        ctx["Merge_Key_Short"] = ctx["Merge_Key_Short"].astype("string").str.lower().str.strip()
+        ctx = ctx.sort_values("Game_Start" if "Game_Start" in ctx.columns else "Merge_Key_Short")
+        ctx = ctx.drop_duplicates("Merge_Key_Short", keep="last")
+
+        # Merge with suffix and use BQ context only to fill missing values.
+        before = len(out)
+        out["Merge_Key_Short"] = keys
+        payload = [c for c in wanted if c not in {"Merge_Key_Short", "Sport", "Game_Start"}]
+        merge_cols = ["Merge_Key_Short"] + payload
+        out = out.merge(ctx[merge_cols], on="Merge_Key_Short", how="left", suffixes=("", "__bigalctx"), validate="many_to_one")
+        if len(out) != before:
+            raise RuntimeError(f"BigAl context merge changed row count {before}->{len(out)}")
+        for c in payload:
+            alt = c + "__bigalctx"
+            if alt not in out.columns:
+                continue
+            if c in out.columns:
+                base = out[c]
+                # blank strings are missing context too.
+                if pd.api.types.is_object_dtype(base) or pd.api.types.is_string_dtype(base):
+                    missing = base.isna() | base.astype("string").str.strip().isin(["", "nan", "None", "<NA>"])
+                    out.loc[missing, c] = out.loc[missing, alt]
+                else:
+                    out[c] = base.combine_first(out[alt])
+            else:
+                out[c] = out[alt]
+            out.drop(columns=[alt], inplace=True, errors="ignore")
+        return out
+    except Exception as e:
+        logging.info("BigAl context view unavailable/incomplete; using row-local context: %s", e)
+        return out
 
 
 def prepare_pathi_bigal_training_source_lowmem(
@@ -627,6 +749,9 @@ def prepare_pathi_bigal_training_source_lowmem(
     src["Market"] = src.get("Market", "").astype("string").map(_sys_norm_market)
     src["Outcome"] = src.get("Outcome", "").astype("string").str.lower().str.strip()
     src["Bookmaker"] = src.get("Bookmaker", src.get("Book", "")).astype("string").str.lower().str.strip()
+
+    # Optional metadata-heavy Big Al context from BigQuery reference tables.
+    src = enrich_bigal_context_from_bq(src)
 
     # Pick one representative market row before the state builder.  This converts
     # potentially millions of snapshot/book rows into roughly 6 rows per game.
@@ -888,6 +1013,11 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         "Week", "Week_Number", "Game_Week", "Season", "Season_Type", "Game_Type",
         "Is_Preseason", "Is_Postseason", "Is_Playoffs", "Is_Regular_Season", "Is_Finals",
         "Is_Conference_Game", "Home_Conference", "Away_Conference",
+    "Season_Stage", "Tournament_Type", "Round_Name",
+    "Is_Cup", "Is_PlayIn", "Is_Bowl", "Is_Conference_Tournament", "Is_Neutral_Site",
+    "Is_Division_Game", "Home_Division", "Away_Division",
+    "Home_Subdivision", "Away_Subdivision", "Home_League_Group", "Away_League_Group",
+    "Regular_Season_Final_Week",
         "Home_Is_Defending_Champion", "Away_Is_Defending_Champion",
         "Home_Prior_Season_Playoff", "Away_Prior_Season_Playoff",
         "Home_Is_Final_Home_Game", "Away_Is_Final_Home_Game", "Is_Final_Home_Game",
@@ -916,24 +1046,97 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     games["Season"] = games["Season"].fillna(pd.Series(_season_fallback, index=games.index)).astype("Int64")
     games["Week_Number"] = _sys_num_series(games, "Week_Number", "Week", "Game_Week")
 
-    season_type = _sys_text_series(games, "Season_Type", "Game_Type").str.lower()
+    # Combine all stage descriptors.  Explicit Boolean fields always win; text is
+    # only a fallback.  The BigQuery season calendar should populate the exact
+    # flags because boundary months (NBA/NCAAB April, WNBA September, etc.) overlap.
+    _stage_parts = []
+    for _c in ("Season_Type", "Game_Type", "Season_Stage", "Tournament_Type", "Round_Name"):
+        if _c in games.columns:
+            _stage_parts.append(games[_c].astype("string").fillna(""))
+    if _stage_parts:
+        stage_text = pd.concat(_stage_parts, axis=1).agg(" ".join, axis=1).str.lower()
+    else:
+        stage_text = pd.Series("", index=games.index, dtype="string")
+
     games["Is_Preseason"] = _sys_bool_series(games, "Is_Preseason")
     games["Is_Postseason"] = _sys_bool_series(games, "Is_Postseason", "Is_Playoffs")
-    games.loc[games["Is_Preseason"].isna(), "Is_Preseason"] = season_type.str.contains("preseason", na=False).astype(float)
-    games.loc[games["Is_Postseason"].isna(), "Is_Postseason"] = season_type.str.contains("playoff|postseason|final", regex=True, na=False).astype(float)
     games["Is_Regular_Season"] = _sys_bool_series(games, "Is_Regular_Season")
-    games.loc[games["Is_Regular_Season"].isna(), "Is_Regular_Season"] = (
-        (games["Is_Preseason"].fillna(0) == 0) & (games["Is_Postseason"].fillna(0) == 0)
-    ).astype(float)
     games["Is_Finals"] = _sys_bool_series(games, "Is_Finals")
+    games["Is_Cup"] = _sys_bool_series(games, "Is_Cup")
+    games["Is_PlayIn"] = _sys_bool_series(games, "Is_PlayIn")
+    games["Is_Bowl"] = _sys_bool_series(games, "Is_Bowl")
+    games["Is_Conference_Tournament"] = _sys_bool_series(games, "Is_Conference_Tournament")
+    games["Is_Neutral_Site"] = _sys_bool_series(games, "Is_Neutral_Site")
 
-    # Conference game can be supplied explicitly or inferred when both conference fields exist.
+    games.loc[games["Is_Preseason"].isna(), "Is_Preseason"] = stage_text.str.contains("preseason|exhibition", regex=True, na=False).astype(float)
+    games.loc[games["Is_Cup"].isna(), "Is_Cup"] = stage_text.str.contains(r"\bcup\b", regex=True, na=False).astype(float)
+    games.loc[games["Is_PlayIn"].isna(), "Is_PlayIn"] = stage_text.str.contains("play[- ]?in", regex=True, na=False).astype(float)
+    games.loc[games["Is_Bowl"].isna(), "Is_Bowl"] = stage_text.str.contains(r"\bbowl\b|\bcfp\b", regex=True, na=False).astype(float)
+    games.loc[games["Is_Conference_Tournament"].isna(), "Is_Conference_Tournament"] = stage_text.str.contains("conference tournament", regex=False, na=False).astype(float)
+    games.loc[games["Is_Finals"].isna(), "Is_Finals"] = stage_text.str.contains(r"\bfinals\b|championship series", regex=True, na=False).astype(float)
+
+    _post_from_text = (
+        stage_text.str.contains("playoff|postseason|play[- ]?in|conference tournament", regex=True, na=False)
+        | games["Is_Bowl"].fillna(0).eq(1)
+    )
+    games.loc[games["Is_Postseason"].isna(), "Is_Postseason"] = _post_from_text.astype(float)
+    games.loc[games["Is_Regular_Season"].isna(), "Is_Regular_Season"] = (
+        (games["Is_Preseason"].fillna(0) == 0) &
+        (games["Is_Postseason"].fillna(0) == 0)
+    ).astype(float)
+
+    # Conference/division/subdivision can be supplied explicitly or inferred from
+    # the team-season reference table exposed through the Big Al context view.
     games["Is_Conference_Game"] = _sys_bool_series(games, "Is_Conference_Game")
     if "Home_Conference" in games.columns and "Away_Conference" in games.columns:
-        hc = games["Home_Conference"].astype(str).str.lower().str.strip()
-        ac = games["Away_Conference"].astype(str).str.lower().str.strip()
-        inf = (hc.ne("") & ac.ne("") & hc.ne("nan") & ac.ne("nan"))
+        hc = games["Home_Conference"].astype("string").fillna("").str.lower().str.strip()
+        ac = games["Away_Conference"].astype("string").fillna("").str.lower().str.strip()
+        inf = hc.ne("") & ac.ne("") & hc.ne("nan") & ac.ne("nan")
         games.loc[games["Is_Conference_Game"].isna() & inf, "Is_Conference_Game"] = hc.eq(ac).astype(float)
+
+    games["Is_Division_Game"] = _sys_bool_series(games, "Is_Division_Game")
+    if "Home_Division" in games.columns and "Away_Division" in games.columns:
+        hd = games["Home_Division"].astype("string").fillna("").str.lower().str.strip()
+        ad = games["Away_Division"].astype("string").fillna("").str.lower().str.strip()
+        infd = hd.ne("") & ad.ne("") & hd.ne("nan") & ad.ne("nan")
+        games.loc[games["Is_Division_Game"].isna() & infd, "Is_Division_Game"] = hd.eq(ad).astype(float)
+
+    if "Home_Subdivision" in games.columns and "Away_Subdivision" in games.columns:
+        hs = games["Home_Subdivision"].astype("string").fillna("").str.lower().str.strip()
+        ass = games["Away_Subdivision"].astype("string").fillna("").str.lower().str.strip()
+        _sub_known = hs.ne("") & ass.ne("") & hs.ne("nan") & ass.ne("nan") & hs.ne("<na>") & ass.ne("<na>")
+        games["Same_Subdivision"] = np.where(
+            _sub_known,
+            hs.eq(ass).astype(float),
+            np.nan,
+        )
+    else:
+        games["Same_Subdivision"] = np.nan
+        _sub_known = pd.Series(False, index=games.index)
+
+    if "Home_League_Group" in games.columns and "Away_League_Group" in games.columns:
+        hlg = games["Home_League_Group"].astype("string").fillna("").str.lower().str.strip()
+        alg = games["Away_League_Group"].astype("string").fillna("").str.lower().str.strip()
+        _lg_known = hlg.ne("") & alg.ne("") & hlg.ne("nan") & alg.ne("nan") & hlg.ne("<na>") & alg.ne("<na>")
+        games["Same_League_Group"] = np.where(
+            _lg_known,
+            hlg.eq(alg).astype(float),
+            np.nan,
+        )
+    else:
+        games["Same_League_Group"] = np.nan
+        _lg_known = pd.Series(False, index=games.index)
+
+    # Explicit readiness lets the learned model distinguish "different" from
+    # "alignment unavailable" without treating missing metadata as a negative.
+    games["Conference_Context_Known"] = pd.to_numeric(
+        games.get("Is_Conference_Game"), errors="coerce"
+    ).notna().astype("int8")
+    games["Division_Context_Known"] = pd.to_numeric(
+        games.get("Is_Division_Game"), errors="coerce"
+    ).notna().astype("int8")
+    games["Subdivision_Context_Known"] = pd.Series(_sub_known, index=games.index).astype("int8")
+    games["League_Group_Context_Known"] = pd.Series(_lg_known, index=games.index).astype("int8")
 
     games["Actual_Game_Total"] = games["__Score_Home"] + games["__Score_Away"]
     games["Pair_Key"] = games.apply(
@@ -1013,6 +1216,99 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     )
 
     # ------------------------------------------------------------------
+    # Big Al conference/week context.
+    #
+    # Public Big Al material repeatedly treats week/game number, home/road,
+    # conference/non-conference and division relationships as meaningful
+    # situational dimensions.  These are generic, leakage-safe model features;
+    # they do NOT claim to reproduce proprietary Big Al formulas.
+    # ------------------------------------------------------------------
+    _wk = pd.to_numeric(tg.get("Week_Number"), errors="coerce")
+    _conf = pd.to_numeric(tg.get("Is_Conference_Game"), errors="coerce")
+    _div = pd.to_numeric(tg.get("Is_Division_Game"), errors="coerce")
+    _same_sub = pd.to_numeric(tg.get("Same_Subdivision"), errors="coerce")
+    _same_lg = pd.to_numeric(tg.get("Same_League_Group"), errors="coerce")
+    _home_ctx = pd.to_numeric(tg.get("Is_Home"), errors="coerce")
+    _neutral_ctx = pd.to_numeric(tg.get("Is_Neutral_Site"), errors="coerce")
+
+    _week_known = _wk.notna()
+    _conf_known = _conf.notna()
+    _div_known = _div.notna()
+    _sub_known_tg = _same_sub.notna()
+    _lg_known_tg = _same_lg.notna()
+
+    tg["BigAl_Context_Week_Number"] = _wk.astype("float32")
+    tg["BigAl_Context_Week_Known"] = _week_known.astype("int8")
+    tg["BigAl_Context_Week_1"] = (_week_known & _wk.eq(1)).astype("int8")
+    tg["BigAl_Context_Week_2"] = (_week_known & _wk.eq(2)).astype("int8")
+    tg["BigAl_Context_Week_3_4"] = (_week_known & _wk.between(3, 4)).astype("int8")
+    tg["BigAl_Context_Week_5_8"] = (_week_known & _wk.between(5, 8)).astype("int8")
+    tg["BigAl_Context_Week_9_Plus"] = (_week_known & _wk.ge(9)).astype("int8")
+
+    tg["BigAl_Context_Conference_Known"] = _conf_known.astype("int8")
+    tg["BigAl_Context_Is_Conference_Game"] = (_conf_known & _conf.eq(1)).astype("int8")
+    tg["BigAl_Context_Is_NonConference_Game"] = (_conf_known & _conf.eq(0)).astype("int8")
+    tg["BigAl_Context_Cross_Conference"] = (_conf_known & _conf.eq(0)).astype("int8")
+
+    tg["BigAl_Context_Division_Known"] = _div_known.astype("int8")
+    tg["BigAl_Context_Is_Division_Game"] = (_div_known & _div.eq(1)).astype("int8")
+    tg["BigAl_Context_Same_Conference_Different_Division"] = (
+        _conf_known & _conf.eq(1) & _div_known & _div.eq(0)
+    ).astype("int8")
+
+    tg["BigAl_Context_Subdivision_Known"] = _sub_known_tg.astype("int8")
+    tg["BigAl_Context_Same_Subdivision"] = (_sub_known_tg & _same_sub.eq(1)).astype("int8")
+    tg["BigAl_Context_Cross_Subdivision"] = (_sub_known_tg & _same_sub.eq(0)).astype("int8")
+
+    tg["BigAl_Context_League_Group_Known"] = _lg_known_tg.astype("int8")
+    tg["BigAl_Context_Same_League_Group"] = (_lg_known_tg & _same_lg.eq(1)).astype("int8")
+    tg["BigAl_Context_Cross_League_Group"] = (_lg_known_tg & _same_lg.eq(0)).astype("int8")
+
+    tg["BigAl_Context_Is_Neutral_Site"] = (
+        _neutral_ctx.notna() & _neutral_ctx.eq(1)
+    ).astype("int8")
+    tg["BigAl_Context_Is_Home"] = (_home_ctx.eq(1)).astype("int8")
+    tg["BigAl_Context_Is_Away"] = (_home_ctx.eq(0)).astype("int8")
+
+    # Relationship x location interactions.
+    tg["BigAl_Context_Conference_Home"] = (
+        _conf_known & _conf.eq(1) & _home_ctx.eq(1)
+    ).astype("int8")
+    tg["BigAl_Context_Conference_Away"] = (
+        _conf_known & _conf.eq(1) & _home_ctx.eq(0)
+    ).astype("int8")
+    tg["BigAl_Context_NonConference_Home"] = (
+        _conf_known & _conf.eq(0) & _home_ctx.eq(1)
+    ).astype("int8")
+    tg["BigAl_Context_NonConference_Away"] = (
+        _conf_known & _conf.eq(0) & _home_ctx.eq(0)
+    ).astype("int8")
+    tg["BigAl_Context_Division_Home"] = (
+        _div_known & _div.eq(1) & _home_ctx.eq(1)
+    ).astype("int8")
+    tg["BigAl_Context_Division_Away"] = (
+        _div_known & _div.eq(1) & _home_ctx.eq(0)
+    ).astype("int8")
+
+    # Week x relationship/location interactions.  Week 1/2 are explicit because
+    # Big Al's public football systems frequently isolate those schedule spots.
+    _w1 = _week_known & _wk.eq(1)
+    _w2 = _week_known & _wk.eq(2)
+    _early = _week_known & _wk.between(1, 4)
+
+    tg["BigAl_Context_Week1_Home"] = (_w1 & _home_ctx.eq(1)).astype("int8")
+    tg["BigAl_Context_Week2_Home"] = (_w2 & _home_ctx.eq(1)).astype("int8")
+    tg["BigAl_Context_Week1_Conference"] = (_w1 & _conf_known & _conf.eq(1)).astype("int8")
+    tg["BigAl_Context_Week2_Conference"] = (_w2 & _conf_known & _conf.eq(1)).astype("int8")
+    tg["BigAl_Context_Week1_NonConference"] = (_w1 & _conf_known & _conf.eq(0)).astype("int8")
+    tg["BigAl_Context_Week2_NonConference"] = (_w2 & _conf_known & _conf.eq(0)).astype("int8")
+    tg["BigAl_Context_Week2_NonConference_Home"] = (
+        _w2 & _conf_known & _conf.eq(0) & _home_ctx.eq(1)
+    ).astype("int8")
+    tg["BigAl_Context_Early_Conference"] = (_early & _conf_known & _conf.eq(1)).astype("int8")
+    tg["BigAl_Context_Early_NonConference"] = (_early & _conf_known & _conf.eq(0)).astype("int8")
+
+    # ------------------------------------------------------------------
     # Attach current/opening market roles.
     # ------------------------------------------------------------------
     h2h = _sys_pick_market_rows(d, "h2h")
@@ -1064,6 +1360,54 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         for c in ["Spread_Value", "Opening_Spread", "Spread_Odds", "ATS_Hit_Raw", "ATS_Cover_Margin"]:
             tg[c] = np.nan
 
+
+    # Big Al relationship x current spread role.  PickDawgz/BigAl public titles
+    # repeatedly segment plays by conference/division and favorite/underdog role.
+    # Keep the ingredients explicit and let the model learn weights.
+    _ctx_spread = pd.to_numeric(tg.get("Spread_Value"), errors="coerce")
+    _ctx_dog = _ctx_spread.gt(0)
+    _ctx_fav = _ctx_spread.lt(0)
+    _ctx_pick = _ctx_spread.eq(0)
+    _ctx_conf = pd.to_numeric(tg.get("Is_Conference_Game"), errors="coerce")
+    _ctx_div = pd.to_numeric(tg.get("Is_Division_Game"), errors="coerce")
+    _ctx_home = pd.to_numeric(tg.get("Is_Home"), errors="coerce")
+
+    tg["BigAl_Context_Conference_Dog"] = (
+        _ctx_conf.eq(1) & _ctx_dog
+    ).astype("int8")
+    tg["BigAl_Context_Conference_Favorite"] = (
+        _ctx_conf.eq(1) & _ctx_fav
+    ).astype("int8")
+    tg["BigAl_Context_Conference_Pickem"] = (
+        _ctx_conf.eq(1) & _ctx_pick
+    ).astype("int8")
+    tg["BigAl_Context_Conference_Home_Dog"] = (
+        _ctx_conf.eq(1) & _ctx_home.eq(1) & _ctx_dog
+    ).astype("int8")
+    tg["BigAl_Context_Conference_Home_Favorite"] = (
+        _ctx_conf.eq(1) & _ctx_home.eq(1) & _ctx_fav
+    ).astype("int8")
+
+    tg["BigAl_Context_Division_Dog"] = (
+        _ctx_div.eq(1) & _ctx_dog
+    ).astype("int8")
+    tg["BigAl_Context_Division_Favorite"] = (
+        _ctx_div.eq(1) & _ctx_fav
+    ).astype("int8")
+    tg["BigAl_Context_Division_Home_Dog"] = (
+        _ctx_div.eq(1) & _ctx_home.eq(1) & _ctx_dog
+    ).astype("int8")
+    tg["BigAl_Context_Division_Home_Favorite"] = (
+        _ctx_div.eq(1) & _ctx_home.eq(1) & _ctx_fav
+    ).astype("int8")
+
+    tg["BigAl_Context_NonConference_Dog"] = (
+        _ctx_conf.eq(0) & _ctx_dog
+    ).astype("int8")
+    tg["BigAl_Context_NonConference_Favorite"] = (
+        _ctx_conf.eq(0) & _ctx_fav
+    ).astype("int8")
+
     # If ATS cover margin was not stored, calculate team score margin + spread.
     calc_ats_margin = tg["SU_Margin"] + tg["Spread_Value"]
     tg["ATS_Cover_Margin"] = pd.to_numeric(tg["ATS_Cover_Margin"], errors="coerce").where(lambda s: s.notna(), calc_ats_margin)
@@ -1106,6 +1450,33 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     tg = tg.sort_values(["Sport", "Season", "Team", "Game_Start", "Game_Key"]).reset_index(drop=True)
     grp = ["Sport", "Season", "Team"]
     tg["Team_Game_Number"] = (tg.groupby(grp, sort=False).cumcount() + 1).astype("int16")
+
+    # Team game number is more robust than calendar week when byes exist.  The
+    # public Big Al NCAA Week-2 example is explicitly a team's second game.
+    _tgn = pd.to_numeric(tg.get("Team_Game_Number"), errors="coerce")
+    _wk_ctx = pd.to_numeric(tg.get("Week_Number"), errors="coerce")
+    _conf_ctx = pd.to_numeric(tg.get("Is_Conference_Game"), errors="coerce")
+    _home_ctx2 = pd.to_numeric(tg.get("Is_Home"), errors="coerce")
+
+    tg["BigAl_Context_Team_Game_Number"] = _tgn.astype("float32")
+    tg["BigAl_Context_Team_Game_1"] = _tgn.eq(1).astype("int8")
+    tg["BigAl_Context_Team_Game_2"] = _tgn.eq(2).astype("int8")
+    tg["BigAl_Context_Team_Game_3_4"] = _tgn.between(3, 4).astype("int8")
+    tg["BigAl_Context_Team_Game_5_Plus"] = _tgn.ge(5).astype("int8")
+
+    _week_game_gap = _wk_ctx - _tgn
+    tg["BigAl_Context_Week_Game_Gap"] = _week_game_gap.astype("float32")
+    tg["BigAl_Context_Had_Bye_Proxy"] = (
+        _week_game_gap.notna() & _week_game_gap.ge(1)
+    ).astype("int8")
+
+    tg["BigAl_Context_Game2_NonConference_Home"] = (
+        _tgn.eq(2) & _conf_ctx.eq(0) & _home_ctx2.eq(1)
+    ).astype("int8")
+    tg["BigAl_Context_Game2_Conference_Home"] = (
+        _tgn.eq(2) & _conf_ctx.eq(1) & _home_ctx2.eq(1)
+    ).astype("int8")
+
     prior_n = tg.groupby(grp, sort=False).cumcount().astype(float)
     prior_wins = tg["SU_Win"].fillna(0).groupby([tg[c] for c in grp], sort=False).cumsum() - tg["SU_Win"].fillna(0)
     tg["WinPct_Prior_System"] = prior_wins / prior_n.replace(0, np.nan)
@@ -1248,7 +1619,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     tg.drop(columns=["__ml_profit","__ml_imp_prob_hist"],inplace=True,errors="ignore")
 
     # H2H streak/depth state before current meeting.
-    pair_grp=["Sport","Season","Team","Opponent"]
+    pair_grp=["Sport","Team","Opponent"]
     tg["H2H_Consecutive_Wins_Prior"]=_sys_consecutive_prior(tg,"SU_Win",pair_grp)
     tg["H2H_Consecutive_Losses_Prior"]=_sys_consecutive_prior(tg,"SU_Loss",pair_grp)
     tg["Revenge_Depth"]=tg["H2H_Consecutive_Losses_Prior"]
@@ -1280,7 +1651,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
 
     # Immediate rematch and pair-level prior state.
     tg["Immediate_Rematch_Flag"] = (tg["Prev_Opponent"].astype(str) == tg["Opponent"].astype(str)).astype("int8")
-    pair_grp = ["Sport", "Season", "Team", "Opponent"]
+    pair_grp = ["Sport", "Team", "Opponent"]
     tg["Days_Since_Last_Matchup_System"] = (
         tg.groupby(pair_grp, sort=False)["Game_Start"].diff().dt.total_seconds().div(86400.0)
     )
@@ -1301,10 +1672,16 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     tg["Final_Two_Regular_Season_Proxy"] = (
         tg["Sport"].eq("NFL") & tg["Is_Regular_Season"].fillna(1).eq(1) & (tg["Team_Game_Number"] >= 16)
     ).astype("int8")
+    _final_week = pd.to_numeric(tg.get("Regular_Season_Final_Week"), errors="coerce")
+    _exact_final_two = (
+        tg["Week_Number"].notna() & _final_week.notna() &
+        (tg["Week_Number"] >= (_final_week - 1))
+    )
+    _legacy_week_final_two = tg["Week_Number"].notna() & _final_week.isna() & (tg["Week_Number"] >= 17)
     tg["Final_Two_Regular_Season"] = np.where(
-        tg["Week_Number"].notna(),
-        (tg["Week_Number"] >= 17).astype(int),
-        tg["Final_Two_Regular_Season_Proxy"],
+        _exact_final_two | _legacy_week_final_two,
+        1,
+        np.where(tg["Week_Number"].notna() & _final_week.notna(), 0, tg["Final_Two_Regular_Season_Proxy"]),
     ).astype("int8")
 
     # Opponent mirrors of current roles + prior state.
@@ -1455,7 +1832,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         (n("Week_Number").notna() | n("Team_Game_Number").notna())
     ).astype("int8")
     s["BigAl_NFL1_Week1FadePlayoffTeam"] = (
-        is_nfl & _nfl_week1 & n("Team_Prior_Season_Playoff").eq(0) & n("Opponent_Prior_Season_Playoff").eq(1)
+        is_nfl & n("Is_Regular_Season").eq(1) & _nfl_week1 & n("Team_Prior_Season_Playoff").eq(0) & n("Opponent_Prior_Season_Playoff").eq(1)
     ).astype("int8")
     s["BigAl_NFL1_HomeTightener"] = (s["BigAl_NFL1_Week1FadePlayoffTeam"].eq(1) & n("Is_Home").eq(1)).astype("int8")
 
@@ -1476,11 +1853,11 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         n("Opp_Prev_Points_For").ge(35) & n("Prev_Points_For").lt(35)
     ).astype("int8")
 
-    # NFL 4 - contrarian side against a team that gained >=1.5 points from open to close.
-    # For the play-on row this is equivalent to its own spread becoming >=1.5 points less favorable.
+    # NFL 4 - preseason play-on team getting >=1.5 more spread points at close than at open.
+    # Example: -2.5 -> +1.5 qualifies because current - opening = +4.0.
     s["BigAl_NFL4_PreseasonContrarianMove_DataReady"] = ready("Is_Preseason", "Spread_Value", "Opening_Spread").astype("int8")
     s["BigAl_NFL4_PreseasonContrarianMove"] = (
-        is_nfl & n("Is_Preseason").eq(1) & ((n("Opening_Spread") - n("Spread_Value")) >= 1.5)
+        is_nfl & n("Is_Preseason").eq(1) & ((n("Spread_Value") - n("Opening_Spread")) >= 1.5)
     ).astype("int8")
 
     # NFL 5 - game-level OVER condition; same flag on both team-state rows.
@@ -1541,7 +1918,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     # NBA 4 - final home game, favorite >5, revenge.
     s["BigAl_NBA4_FinalHomeFavRevenge_DataReady"] = ready("Is_Final_Home_Game", "Spread_Value", "Revenge_Flag_Current").astype("int8")
     s["BigAl_NBA4_FinalHomeFavRevenge"] = (
-        is_nba & n("Is_Final_Home_Game").eq(1) & n("Is_Home").eq(1) & n("Spread_Value").lt(-5) & n("Revenge_Flag_Current").eq(1)
+        is_nba & n("Is_Regular_Season").eq(1) & n("Is_Final_Home_Game").eq(1) & n("Is_Home").eq(1) & n("Spread_Value").lt(-5) & n("Revenge_Flag_Current").eq(1)
     ).astype("int8")
     s["BigAl_NBA4_NotOffSUATSLoss_Tightener"] = (
         s["BigAl_NBA4_FinalHomeFavRevenge"].eq(1) & ~(n("Prev_SU_Loss").eq(1) & n("Prev_ATS_Loss").eq(1))
@@ -1601,11 +1978,116 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         is_cfl & n("Opp_Team_Game_Number").ge(7) & n("Opp_WinPct_Prior_System").ge(0.820) & n("Opp_Spread_Value").gt(3)
     ).astype("int8")
 
+    # ------------------------------------------------------------------
+    # Big Al readiness + partial-match layer.
+    # DataReady is explicitly sport-gated and requires every input used by the
+    # exact rule. Match_Ratio is leakage-safe: it measures how much of the
+    # published setup is present BEFORE the game, without using the result.
+    # ------------------------------------------------------------------
+    _bigal_specs = {
+        "BigAl_NFL1_Week1FadePlayoffTeam": (is_nfl, ["Is_Regular_Season", "Team_Prior_Season_Playoff", "Opponent_Prior_Season_Playoff"]),
+        "BigAl_NFL2_LateSeasonHomeDog": (is_nfl, ["Final_Two_Regular_Season", "Is_Home", "Spread_Value", "SU_Loss_Streak_Prior", "Opp_WinPct_Prior_System"]),
+        "BigAl_NFL3_PlayoffHighScoreFade": (is_nfl, ["Is_Postseason", "Opp_Is_Home", "Opp_Prev_SU_Win", "Opp_Prev_Points_For", "Prev_Points_For"]),
+        "BigAl_NFL4_PreseasonContrarianMove": (is_nfl, ["Is_Preseason", "Spread_Value", "Opening_Spread"]),
+        "BigAl_NFL5_PreseasonLowOffenseOver": (is_nfl, ["Is_Preseason", "Avg_Points_For_Prior", "Opp_Avg_Points_For_Prior"]),
+        "BigAl_CF1_Week2Home42Win": (is_ncaaf, ["Team_Game_Number", "Is_Home", "Prev_SU_Win", "Prev_Points_For", "Is_Conference_Game", "Opp_Revenge_Flag_Current"]),
+        "BigAl_CF2_LateSeasonRevengeDog": (is_ncaaf, ["Is_Regular_Season", "Team_Game_Number", "Revenge_Flag_Current", "Spread_Value", "Prev_Points_For"]),
+        "BigAl_NBA1_B2BRematchRoadDog": (is_nba, ["Is_Regular_Season", "Immediate_Rematch_Flag", "Is_Home", "Spread_Value", "Prev_SU_Loss", "Prev_ATS_Loss"]),
+        "BigAl_NBA2_ThreeMassiveCovers": (is_nba, ["Is_Home", "Prev_ATS_Cover_Margin", "Prev2_ATS_Cover_Margin", "Prev3_ATS_Cover_Margin"]),
+        "BigAl_NBA3_FadeHomeAfterChampUpset": (is_nba, ["Opp_Is_Home", "Opp_Prev_SU_Win", "Opp_Prev_Is_Road_Dog_9Plus", "Opp_Prev_Opponent_Is_Defending_Champion"]),
+        "BigAl_NBA4_FinalHomeFavRevenge": (is_nba, ["Is_Regular_Season", "Is_Final_Home_Game", "Is_Home", "Spread_Value", "Revenge_Flag_Current"]),
+        "BigAl_NBA5_PlayoffBigDogVsChamp": (is_nba, ["Is_Postseason", "WinPct_Prior_System", "Is_Home", "Spread_Value", "Opponent_Is_Defending_Champion"]),
+        "BigAl_NBA6_FinalsGame4": (is_nba, ["Is_Finals", "Series_Game_Number", "Team_Series_Wins", "Opp_Series_Wins", "Is_Home", "Prev_SU_Win", "Prev_Is_Home", "WinPct_Prior_System", "Spread_Value"]),
+        "BigAl_NBA7_TwoTeamEliminationUnder": (is_nba, ["Team_Eliminated_With_Loss", "Opponent_Eliminated_With_Loss"]),
+        "BigAl_CBB1_UglyDog20Losses": (is_ncaab, ["Spread_Value", "Prev_SU_Margin", "Prev_ATS_Cover_Margin", "Prev2_SU_Margin", "Prev2_ATS_Cover_Margin", "Opp_Prev_SU_Loss", "Opp_Prev2_SU_Loss"]),
+        "BigAl_CFL1_SecondMeetingUnder": (is_cfl, ["Season_H2H_Meeting_Number", "First_Meeting_Actual_Total_Prior"]),
+        "BigAl_CFL2_EliteDogFade": (is_cfl, ["Opp_Team_Game_Number", "Opp_WinPct_Prior_System", "Opp_Spread_Value"]),
+    }
+    for _name, (_sport_mask, _reqs) in _bigal_specs.items():
+        s[_name + "_DataReady"] = (_sport_mask & ready(*_reqs)).astype("int8")
+    s["BigAl_NFL1_Week1FadePlayoffTeam_DataReady"] = (
+        is_nfl & ready("Is_Regular_Season", "Team_Prior_Season_Playoff", "Opponent_Prior_Season_Playoff") &
+        (n("Week_Number").notna() | n("Team_Game_Number").notna())
+    ).astype("int8")
+
+    def _set_bigal_match(name, sport_mask, conditions):
+        dr = pd.to_numeric(s.get(name + "_DataReady"), errors="coerce").fillna(0).eq(1)
+        vals = []
+        for cond in conditions:
+            vals.append(pd.Series(cond, index=s.index).astype(float))
+        ratio = pd.concat(vals, axis=1).mean(axis=1) if vals else pd.Series(np.nan, index=s.index)
+        s[name + "_Match_Ratio"] = ratio.where(sport_mask & dr, np.nan).astype("float32")
+
+    _set_bigal_match("BigAl_NFL1_Week1FadePlayoffTeam", is_nfl, [
+        n("Is_Regular_Season").eq(1), _nfl_week1,
+        n("Team_Prior_Season_Playoff").eq(0), n("Opponent_Prior_Season_Playoff").eq(1),
+    ])
+    _set_bigal_match("BigAl_NFL2_LateSeasonHomeDog", is_nfl, [
+        n("Final_Two_Regular_Season").eq(1), n("Is_Home").eq(1), n("Spread_Value").gt(0),
+        n("SU_Loss_Streak_Prior").ge(2), n("Opp_WinPct_Prior_System").le(0.500),
+    ])
+    _set_bigal_match("BigAl_NFL3_PlayoffHighScoreFade", is_nfl, [
+        n("Is_Postseason").eq(1), n("Opp_Is_Home").eq(0), n("Opp_Prev_SU_Win").eq(1),
+        n("Opp_Prev_Points_For").ge(35), n("Prev_Points_For").lt(35),
+    ])
+    _set_bigal_match("BigAl_NFL4_PreseasonContrarianMove", is_nfl, [
+        n("Is_Preseason").eq(1), (n("Spread_Value") - n("Opening_Spread")).ge(1.5),
+    ])
+    _set_bigal_match("BigAl_NFL5_PreseasonLowOffenseOver", is_nfl, [
+        n("Is_Preseason").eq(1), low_pair,
+    ])
+    _set_bigal_match("BigAl_CF1_Week2Home42Win", is_ncaaf, [
+        n("Team_Game_Number").eq(2), n("Is_Home").eq(1), n("Prev_SU_Win").eq(1),
+        n("Prev_Points_For").gt(42), n("Is_Conference_Game").eq(0), n("Opp_Revenge_Flag_Current").eq(0),
+    ])
+    _set_bigal_match("BigAl_CF2_LateSeasonRevengeDog", is_ncaaf, [
+        n("Is_Regular_Season").eq(1), n("Team_Game_Number").ge(9), n("Revenge_Flag_Current").eq(1),
+        n("Spread_Value").gt(0), n("Prev_Points_For").gt(50),
+    ])
+    _set_bigal_match("BigAl_NBA1_B2BRematchRoadDog", is_nba, [
+        n("Is_Regular_Season").eq(1), n("Immediate_Rematch_Flag").eq(1), n("Is_Home").eq(0),
+        n("Spread_Value").ge(10), n("Prev_SU_Loss").eq(1), n("Prev_ATS_Loss").eq(1),
+    ])
+    _set_bigal_match("BigAl_NBA2_ThreeMassiveCovers", is_nba, [
+        n("Is_Home").eq(1), n("Prev_ATS_Cover_Margin").ge(16),
+        n("Prev2_ATS_Cover_Margin").ge(16), n("Prev3_ATS_Cover_Margin").ge(16),
+    ])
+    _set_bigal_match("BigAl_NBA3_FadeHomeAfterChampUpset", is_nba, [
+        n("Opp_Is_Home").eq(1), n("Opp_Prev_SU_Win").eq(1),
+        n("Opp_Prev_Is_Road_Dog_9Plus").eq(1), n("Opp_Prev_Opponent_Is_Defending_Champion").eq(1),
+    ])
+    _set_bigal_match("BigAl_NBA4_FinalHomeFavRevenge", is_nba, [
+        n("Is_Regular_Season").eq(1), n("Is_Final_Home_Game").eq(1), n("Is_Home").eq(1),
+        n("Spread_Value").lt(-5), n("Revenge_Flag_Current").eq(1),
+    ])
+    _set_bigal_match("BigAl_NBA5_PlayoffBigDogVsChamp", is_nba, [
+        n("Is_Postseason").eq(1), n("WinPct_Prior_System").gt(0.5), n("Is_Home").eq(0),
+        n("Spread_Value").gt(10), n("Opponent_Is_Defending_Champion").eq(1),
+    ])
+    _set_bigal_match("BigAl_NBA6_FinalsGame4", is_nba, [
+        n("Is_Finals").eq(1), n("Series_Game_Number").eq(4), n("Is_Home").eq(0),
+        n("Team_Series_Wins").eq(1), n("Opp_Series_Wins").eq(2), n("Prev_SU_Win").eq(1),
+        n("Prev_Is_Home").eq(0), n("WinPct_Prior_System").ge(0.625), n("Spread_Value").ge(-4),
+    ])
+    _set_bigal_match("BigAl_NBA7_TwoTeamEliminationUnder", is_nba, [
+        n("Team_Eliminated_With_Loss").eq(1), n("Opponent_Eliminated_With_Loss").eq(1),
+    ])
+    _set_bigal_match("BigAl_CBB1_UglyDog20Losses", is_ncaab, [
+        n("Spread_Value").ge(0), n("Prev_SU_Margin").lt(-20), n("Prev_ATS_Cover_Margin").lt(-20),
+        n("Prev2_SU_Margin").lt(-20), n("Prev2_ATS_Cover_Margin").lt(-20),
+        ~(n("Opp_Prev_SU_Loss").eq(1) & n("Opp_Prev2_SU_Loss").eq(1)),
+    ])
+    _set_bigal_match("BigAl_CFL1_SecondMeetingUnder", is_cfl, [
+        n("Season_H2H_Meeting_Number").eq(2), n("First_Meeting_Actual_Total_Prior").ge(63),
+    ])
+    _set_bigal_match("BigAl_CFL2_EliteDogFade", is_cfl, [
+        n("Opp_Team_Game_Number").ge(7), n("Opp_WinPct_Prior_System").ge(0.820), n("Opp_Spread_Value").gt(3),
+    ])
+
     # Signed total-system direction for the canonical Over training row:
     # +1 = Big Al says OVER; -1 = Big Al says UNDER.
     s["BigAl_Total_System_Signed"] = (
         s["BigAl_NFL5_PreseasonLowOffenseOver"].astype(float)
-        - s["BigAl_NBA7_TwoTeamEliminationUnder"].astype(float)
         - s["BigAl_CFL1_SecondMeetingUnder"].astype(float)
     ).astype("float32")
 
@@ -1627,7 +2109,13 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         "BigAl_NBA7_TwoTeamEliminationUnder", "BigAl_CBB1_UglyDog20Losses",
         "BigAl_CFL1_SecondMeetingUnder", "BigAl_CFL2_EliteDogFade",
     ]
-    tight_cols = [c for c in s.columns if c.startswith("BigAl_") and c.endswith("_Tightener")]
+    bigal_base_cols = [c for c in bigal_base_cols if not _is_retired_bigal_feature_name(c)]
+    tight_cols = [
+        c for c in s.columns
+        if c.startswith("BigAl_")
+        and c.endswith("_Tightener")
+        and not _is_retired_bigal_feature_name(c)
+    ]
     s["Pathi_System_Count"] = s[pathi_signal_cols].sum(axis=1).astype("int16")
     s["BigAl_System_Count"] = s[bigal_base_cols].sum(axis=1).astype("int16")
     s["BigAl_Tightener_Count"] = s[tight_cols].sum(axis=1).astype("int16") if tight_cols else 0
@@ -1669,6 +2157,8 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         "BigAl_CFL2_EliteDogFade": "BIG AL CFL2 Fade Elite Dog",
     }
 
+    label_map = {k: v for k, v in label_map.items() if not _is_retired_bigal_feature_name(k)}
+
     def _labels(row):
         parts = [label for col, label in label_map.items() if col in row.index and pd.to_numeric(row[col], errors="coerce") == 1]
         return " | ".join(parts) if parts else "—"
@@ -1694,6 +2184,31 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     else:
         for c in ("System_Side_Consensus_Count","System_Side_Conflict_Count","System_Net_Signal","System_Consensus_Ratio"):
             s[c]=0.0
+
+    # Big-Al-only convergence, kept separate from Pathi so the meta/situation head
+    # can learn whether Big Al is agreeing with or opposing the selected side.
+    _bigal_side_bases = [
+        c for c in bigal_base_cols
+        if c not in {"BigAl_NFL5_PreseasonLowOffenseOver", "BigAl_NBA7_TwoTeamEliminationUnder", "BigAl_CFL1_SecondMeetingUnder"}
+        and c in s.columns
+    ]
+    if _bigal_side_bases:
+        _ba_own = (s[_bigal_side_bases].fillna(0) > 0).sum(axis=1).astype(float)
+        _ba_map = s[["Sport", "Game_Key", "Team"]].copy()
+        _ba_map["__bigal_opp_support"] = _ba_own.to_numpy()
+        _ba_map = _ba_map.rename(columns={"Team": "Opponent"})
+        _ba_tmp = s[["Sport", "Game_Key", "Opponent"]].merge(
+            _ba_map, on=["Sport", "Game_Key", "Opponent"], how="left"
+        )
+        _ba_conflict = pd.to_numeric(_ba_tmp["__bigal_opp_support"], errors="coerce").fillna(0).to_numpy()
+        s["BigAl_Side_Support_Count"] = _ba_own
+        s["BigAl_Side_Conflict_Count"] = _ba_conflict
+        s["BigAl_Side_Net_Signal"] = _ba_own.to_numpy() - _ba_conflict
+        _ba_den = _ba_own.to_numpy() + _ba_conflict
+        s["BigAl_Side_Consensus_Ratio"] = np.where(_ba_den > 0, _ba_own.to_numpy() / _ba_den, np.nan)
+    else:
+        for _c in ("BigAl_Side_Support_Count", "BigAl_Side_Conflict_Count", "BigAl_Side_Net_Signal", "BigAl_Side_Consensus_Ratio"):
+            s[_c] = 0.0
 
 
     # ------------------------------------------------------------------
@@ -1827,6 +2342,26 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
     # for example, feeding an MLB moneyline system into the run-line model or
     # displaying an UNDER system on a side row.
     _m = out["Market"].astype(str).map(_sys_norm_market)
+
+    # Spread-role context is meaningful only for spread rows.  Generic
+    # conference/division/week fields remain available to every market.
+    _bigal_spread_context = [
+        "BigAl_Context_Conference_Dog",
+        "BigAl_Context_Conference_Favorite",
+        "BigAl_Context_Conference_Pickem",
+        "BigAl_Context_Conference_Home_Dog",
+        "BigAl_Context_Conference_Home_Favorite",
+        "BigAl_Context_Division_Dog",
+        "BigAl_Context_Division_Favorite",
+        "BigAl_Context_Division_Home_Dog",
+        "BigAl_Context_Division_Home_Favorite",
+        "BigAl_Context_NonConference_Dog",
+        "BigAl_Context_NonConference_Favorite",
+    ]
+    for _c in _bigal_spread_context:
+        if _c in out.columns:
+            out.loc[~_m.eq("spreads"), _c] = 0
+
     _pathi_ml = [
         "Pathi_M1_DogThatWon", "Pathi_M8_DogWon_BetterPrice", "Pathi_M2_HomeDog",
         "Pathi_M3_Rule10_LosingStreak", "Pathi_M3_Rule10_PlusMoney",
@@ -1865,6 +2400,23 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
         if _c in out.columns:
             out.loc[~_m.eq("totals"), _c] = 0
 
+    # Market-mask the ENTIRE named Big Al family, including DataReady and
+    # Match_Ratio fields.  Previously those suffix features could cross from a
+    # totals system into a spreads model (or vice versa).
+    _bigal_side_prefixes = (
+        "BigAl_NFL1_", "BigAl_NFL2_", "BigAl_NFL3_", "BigAl_NFL4_",
+        "BigAl_CF1_", "BigAl_CF2_",
+        "BigAl_NBA1_", "BigAl_NBA2_", "BigAl_NBA3_", "BigAl_NBA4_", "BigAl_NBA5_", "BigAl_NBA6_",
+        "BigAl_CBB1_", "BigAl_CFL2_",
+    )
+    _bigal_total_prefixes = ("BigAl_NFL5_", "BigAl_NBA7_", "BigAl_CFL1_")
+    for _c in [c for c in out.columns if str(c).startswith(_bigal_side_prefixes)]:
+        out.loc[~_m.eq("spreads"), _c] = 0
+    for _c in [c for c in out.columns if str(c).startswith(_bigal_total_prefixes)]:
+        out.loc[~_m.eq("totals"), _c] = 0
+    if "BigAl_Total_System_Signed" in out.columns:
+        out.loc[~_m.eq("totals"), "BigAl_Total_System_Signed"] = 0
+
     _pathi_count = [c for c in (_pathi_ml + _pathi_spread) if c in out.columns and not c.endswith("Cancel")]
     _bigal_bases = [
         c for c in (_bigal_side + _bigal_total)
@@ -1875,6 +2427,22 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
     out["BigAl_System_Count"] = out[_bigal_bases].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16") if _bigal_bases else 0
     out["BigAl_Tightener_Count"] = out[_tight].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16") if _tight else 0
     out["System_Signal_Count"] = (out["Pathi_System_Count"] + out["BigAl_System_Count"] + out["BigAl_Tightener_Count"]).astype("int16")
+
+    _ba_ready_cols = [c for c in out.columns if c.startswith("BigAl_") and c.endswith("_DataReady")]
+    _ba_ratio_cols = [c for c in out.columns if c.startswith("BigAl_") and c.endswith("_Match_Ratio")]
+    out["BigAl_DataReady_Count"] = (
+        out[_ba_ready_cols].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16")
+        if _ba_ready_cols else 0
+    )
+    if _ba_ratio_cols:
+        _ba_rat = out[_ba_ratio_cols].apply(pd.to_numeric, errors="coerce").replace(0.0, np.nan)
+        out["BigAl_Max_Match_Ratio"] = _ba_rat.max(axis=1, skipna=True).astype("float32")
+        out["BigAl_Mean_Match_Ratio"] = _ba_rat.mean(axis=1, skipna=True).astype("float32")
+    else:
+        out["BigAl_Max_Match_Ratio"] = np.nan
+        out["BigAl_Mean_Match_Ratio"] = np.nan
+    out["BigAl_Active_System_Count"] = out["BigAl_System_Count"].astype("int16")
+    out["BigAl_Active_Tightener_Count"] = out["BigAl_Tightener_Count"].astype("int16")
 
     _labels = {
         "Pathi_M1_DogThatWon": "PATHI M1 Dog That Won",
@@ -1919,6 +2487,66 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
     return out
 
 
+
+def log_bigal_training_coverage(df_market: pd.DataFrame, sport: str, market: str) -> None:
+    """Compact audit of Big Al readiness, fires and realized historical hit rate."""
+    if df_market is None or df_market.empty:
+        return
+    m = _sys_norm_market(market)
+    base_map = {
+        "BigAl_NFL1_Week1FadePlayoffTeam": "spreads",
+        "BigAl_NFL2_LateSeasonHomeDog": "spreads",
+        "BigAl_NFL3_PlayoffHighScoreFade": "spreads",
+        "BigAl_NFL4_PreseasonContrarianMove": "spreads",
+        "BigAl_NFL5_PreseasonLowOffenseOver": "totals",
+        "BigAl_CF1_Week2Home42Win": "spreads",
+        "BigAl_CF2_LateSeasonRevengeDog": "spreads",
+        "BigAl_NBA1_B2BRematchRoadDog": "spreads",
+        "BigAl_NBA2_ThreeMassiveCovers": "spreads",
+        "BigAl_NBA3_FadeHomeAfterChampUpset": "spreads",
+        "BigAl_NBA4_FinalHomeFavRevenge": "spreads",
+        "BigAl_NBA5_PlayoffBigDogVsChamp": "spreads",
+        "BigAl_NBA6_FinalsGame4": "spreads",
+        "BigAl_NBA7_TwoTeamEliminationUnder": "totals",
+        "BigAl_CBB1_UglyDog20Losses": "spreads",
+        "BigAl_CFL1_SecondMeetingUnder": "totals",
+        "BigAl_CFL2_EliteDogFade": "spreads",
+    }
+    sport_prefix = {
+        "NFL": "BigAl_NFL", "NCAAF": "BigAl_CF", "NBA": "BigAl_NBA",
+        "NCAAB": "BigAl_CBB", "NCAAM": "BigAl_CBB", "CFL": "BigAl_CFL",
+    }.get(str(sport).upper().strip())
+    if not sport_prefix:
+        return
+    grain = [c for c in ("Merge_Key_Short", "Outcome") if c in df_market.columns]
+    d = df_market.copy()
+    if grain:
+        sortc = "Snapshot_Timestamp" if "Snapshot_Timestamp" in d.columns else None
+        if sortc:
+            d = d.sort_values(sortc)
+        d = d.drop_duplicates(grain, keep="last")
+    target = pd.to_numeric(d.get("SHARP_HIT_BOOL"), errors="coerce")
+    outn = d.get("Outcome", pd.Series("", index=d.index)).astype(str).str.lower().str.strip()
+    rows = []
+    for base, bmkt in base_map.items():
+        if bmkt != m or not base.startswith(sport_prefix) or base not in d.columns:
+            continue
+        drc = base + "_DataReady"
+        ready_n = int(pd.to_numeric(d.get(drc, 0), errors="coerce").fillna(0).eq(1).sum()) if drc in d.columns else 0
+        fire = pd.to_numeric(d[base], errors="coerce").fillna(0).eq(1)
+        if m == "totals":
+            desired = "over" if base == "BigAl_NFL5_PreseasonLowOffenseOver" else "under"
+            fire &= outn.eq(desired)
+        fire_n = int(fire.sum())
+        valid = fire & target.notna()
+        hit = float(target.loc[valid].mean()) if valid.any() else np.nan
+        rows.append(f"{base}: ready={ready_n} fires={fire_n} hit={hit:.3f}" if np.isfinite(hit)
+                    else f"{base}: ready={ready_n} fires={fire_n} hit=NA")
+    if rows:
+        print(f"[BIGAL-COVERAGE:{str(sport).upper()}:{m}] " + " | ".join(rows))
+
+
+
 def pathi_bigal_numeric_feature_cols(df: pd.DataFrame) -> list[str]:
     """Numeric Pathi/BigAl features safe to offer to AutoFS/model training."""
     if df is None or df.empty:
@@ -1927,6 +2555,8 @@ def pathi_bigal_numeric_feature_cols(df: pd.DataFrame) -> list[str]:
     out = []
     for c in df.columns:
         if not str(c).startswith(prefixes) or c == "System_Signals_Text":
+            continue
+        if _is_retired_bigal_feature_name(c):
             continue
         if pd.api.types.is_numeric_dtype(df[c]) or pd.api.types.is_bool_dtype(df[c]):
             out.append(c)
@@ -2205,6 +2835,12 @@ def _system_feature_valid_for_sport(col: str, sport: str) -> bool:
     s = str(sport).upper().strip()
 
     c = str(col)
+
+    # Postseason/championship/finals/elimination/final-home features are retired
+    # from the learned Big Al contract. Legacy model bundles remain scoreable
+    # because the prediction matrix already fills missing requested columns with 0.
+    if _is_retired_bigal_feature_name(c):
+        return False
 
     # Pathi football-only features
 
@@ -12188,6 +12824,10 @@ def train_sharp_model_from_bq(
             df_market = attach_pathi_bigal_training_features_lowmem(df_market, system_state_train)
         else:
             df_market = add_pathi_football_key_features(df_market)
+        try:
+            log_bigal_training_coverage(df_market, sport, market)
+        except Exception as _ba_cov_err:
+            print(f"[BIGAL-COVERAGE] skipped: {_ba_cov_err}")
         gc.collect()
         # === Compact domain interactions ===
         df_market['ResistBreak_x_Mag']     = df_market.get('Was_Line_Resistance_Broken',0) * df_market.get('Abs_Line_Move_From_Opening',0).fillna(0)
