@@ -10641,7 +10641,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-04-v5-conference-week"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-04-v7-bigal-regular-season-deepdive"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -11478,6 +11478,12 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     tg["ATS_Win_Streak_Prior"] = _sys_consecutive_prior(tg, "ATS_Win", grp)
     tg["ATS_Loss_Streak_Prior"] = _sys_consecutive_prior(tg, "ATS_Loss", grp)
 
+    # Big Al CBB streak-fade needs the winning streak that existed ENTERING
+    # the team's previous game.  This remains strictly prior-only.
+    tg["SU_Win_Streak_Entering_Previous_Game"] = (
+        tg.groupby(grp, sort=False)["SU_Win_Streak_Prior"].shift(1)
+    )
+
     # Pathi football role/trend state. These are prior-only and leakage-safe.
     _sv = pd.to_numeric(tg.get("Spread_Value"), errors="coerce")
     tg["__fb_spread_dog"] = np.where(_sv.notna(), (_sv > 0).astype(float), np.nan)
@@ -11675,6 +11681,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     mirror_cols = [
         "Is_Home", "ML_Odds", "Is_ML_Dog", "Is_ML_Favorite", "Spread_Value", "Opening_Spread",
         "WinPct_Prior_System", "SU_Win_Streak_Prior", "SU_Loss_Streak_Prior",
+        "SU_Win_Streak_Entering_Previous_Game",
         "ATS_Win_Streak_Prior", "ATS_Loss_Streak_Prior", "Days_Since_Last_Game_System",
         "Prev_SU_Win", "Prev_SU_Loss", "Prev_SU_Margin", "Prev_Points_For", "Prev_Points_Against",
         "Prev_ATS_Win", "Prev_ATS_Loss", "Prev_ATS_Cover_Margin", "Prev2_SU_Win", "Prev2_SU_Loss",
@@ -11948,6 +11955,32 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         s["BigAl_CBB1_UglyDog20Losses"].eq(1) & n("Prev3_SU_Margin").lt(-20) & n("Prev3_ATS_Cover_Margin").lt(-20)
     ).astype("int8")
 
+    # NCAAB 2 - fade a favorite laying 6+ immediately after a SU loss when it
+    # entered that loss on a 10+ game winning streak; play-on opponent must NOT
+    # be off a combined SU + ATS win.  Public Big Al system, regular season only.
+    s["BigAl_CBB2_Fade10WinStreakFavorite_DataReady"] = ready(
+        "Is_Regular_Season", "Spread_Value", "Opp_Prev_SU_Loss",
+        "Opp_SU_Win_Streak_Entering_Previous_Game", "Prev_SU_Win", "Prev_ATS_Win"
+    ).astype("int8")
+    s["BigAl_CBB2_Fade10WinStreakFavorite"] = (
+        is_ncaab & n("Is_Regular_Season").eq(1) & n("Spread_Value").ge(6) &
+        n("Opp_Prev_SU_Loss").eq(1) & n("Opp_SU_Win_Streak_Entering_Previous_Game").ge(10) &
+        ~(n("Prev_SU_Win").eq(1) & n("Prev_ATS_Win").eq(1))
+    ).astype("int8")
+
+    # NCAAB 3 - winning home team in regular season seeking revenge for a 27+
+    # point loss in an earlier meeting. Tightener: dog >2 and off a SU loss.
+    s["BigAl_CBB3_HomeRevenge27_DataReady"] = ready(
+        "Is_Regular_Season", "Is_Home", "WinPct_Prior_System", "H2H_Last_Loss_Margin"
+    ).astype("int8")
+    s["BigAl_CBB3_HomeRevenge27"] = (
+        is_ncaab & n("Is_Regular_Season").eq(1) & n("Is_Home").eq(1) &
+        n("WinPct_Prior_System").gt(0.500) & n("H2H_Last_Loss_Margin").le(-27)
+    ).astype("int8")
+    s["BigAl_CBB3_DogOffLoss_Tightener"] = (
+        s["BigAl_CBB3_HomeRevenge27"].eq(1) & n("Spread_Value").gt(2) & n("Prev_SU_Loss").eq(1)
+    ).astype("int8")
+
     # CFL 1 - second meeting after 63+ first meeting => UNDER; total >51 tightener.
     s["BigAl_CFL1_SecondMeetingUnder_DataReady"] = ready("Season_H2H_Meeting_Number", "First_Meeting_Actual_Total_Prior").astype("int8")
     s["BigAl_CFL1_SecondMeetingUnder"] = (
@@ -11985,6 +12018,8 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         "BigAl_NBA6_FinalsGame4": (is_nba, ["Is_Finals", "Series_Game_Number", "Team_Series_Wins", "Opp_Series_Wins", "Is_Home", "Prev_SU_Win", "Prev_Is_Home", "WinPct_Prior_System", "Spread_Value"]),
         "BigAl_NBA7_TwoTeamEliminationUnder": (is_nba, ["Team_Eliminated_With_Loss", "Opponent_Eliminated_With_Loss"]),
         "BigAl_CBB1_UglyDog20Losses": (is_ncaab, ["Spread_Value", "Prev_SU_Margin", "Prev_ATS_Cover_Margin", "Prev2_SU_Margin", "Prev2_ATS_Cover_Margin", "Opp_Prev_SU_Loss", "Opp_Prev2_SU_Loss"]),
+        "BigAl_CBB2_Fade10WinStreakFavorite": (is_ncaab, ["Is_Regular_Season", "Spread_Value", "Opp_Prev_SU_Loss", "Opp_SU_Win_Streak_Entering_Previous_Game", "Prev_SU_Win", "Prev_ATS_Win"]),
+        "BigAl_CBB3_HomeRevenge27": (is_ncaab, ["Is_Regular_Season", "Is_Home", "WinPct_Prior_System", "H2H_Last_Loss_Margin"]),
         "BigAl_CFL1_SecondMeetingUnder": (is_cfl, ["Season_H2H_Meeting_Number", "First_Meeting_Actual_Total_Prior"]),
         "BigAl_CFL2_EliteDogFade": (is_cfl, ["Opp_Team_Game_Number", "Opp_WinPct_Prior_System", "Opp_Spread_Value"]),
     }
@@ -12062,6 +12097,15 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         n("Prev2_SU_Margin").lt(-20), n("Prev2_ATS_Cover_Margin").lt(-20),
         ~(n("Opp_Prev_SU_Loss").eq(1) & n("Opp_Prev2_SU_Loss").eq(1)),
     ])
+    _set_bigal_match("BigAl_CBB2_Fade10WinStreakFavorite", is_ncaab, [
+        n("Is_Regular_Season").eq(1), n("Spread_Value").ge(6), n("Opp_Prev_SU_Loss").eq(1),
+        n("Opp_SU_Win_Streak_Entering_Previous_Game").ge(10),
+        ~(n("Prev_SU_Win").eq(1) & n("Prev_ATS_Win").eq(1)),
+    ])
+    _set_bigal_match("BigAl_CBB3_HomeRevenge27", is_ncaab, [
+        n("Is_Regular_Season").eq(1), n("Is_Home").eq(1), n("WinPct_Prior_System").gt(0.500),
+        n("H2H_Last_Loss_Margin").le(-27),
+    ])
     _set_bigal_match("BigAl_CFL1_SecondMeetingUnder", is_cfl, [
         n("Season_H2H_Meeting_Number").eq(2), n("First_Meeting_Actual_Total_Prior").ge(63),
     ])
@@ -12071,9 +12115,10 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
 
     # Signed total-system direction for the canonical Over training row:
     # +1 = Big Al says OVER; -1 = Big Al says UNDER.
+    # Regular-season-only total direction. Preseason/postseason systems are
+    # deliberately excluded so retired context cannot leak into new artifacts.
     s["BigAl_Total_System_Signed"] = (
-        s["BigAl_NFL5_PreseasonLowOffenseOver"].astype(float)
-        - s["BigAl_CFL1_SecondMeetingUnder"].astype(float)
+        -s["BigAl_CFL1_SecondMeetingUnder"].astype(float)
     ).astype("float32")
 
     # ------------------------------------------------------------------
@@ -12092,6 +12137,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         "BigAl_NBA1_B2BRematchRoadDog", "BigAl_NBA2_ThreeMassiveCovers", "BigAl_NBA3_FadeHomeAfterChampUpset",
         "BigAl_NBA4_FinalHomeFavRevenge", "BigAl_NBA5_PlayoffBigDogVsChamp", "BigAl_NBA6_FinalsGame4",
         "BigAl_NBA7_TwoTeamEliminationUnder", "BigAl_CBB1_UglyDog20Losses",
+        "BigAl_CBB2_Fade10WinStreakFavorite", "BigAl_CBB3_HomeRevenge27",
         "BigAl_CFL1_SecondMeetingUnder", "BigAl_CFL2_EliteDogFade",
     ]
     bigal_base_cols = [c for c in bigal_base_cols if not _is_retired_bigal_feature_name(c)]
@@ -12105,6 +12151,23 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     s["BigAl_System_Count"] = s[bigal_base_cols].sum(axis=1).astype("int16")
     s["BigAl_Tightener_Count"] = s[tight_cols].sum(axis=1).astype("int16") if tight_cols else 0
     s["System_Signal_Count"] = (s["Pathi_System_Count"] + s["BigAl_System_Count"] + s["BigAl_Tightener_Count"]).astype("int16")
+
+    # Regular-season Big Al market family indicators.  Aggregate features are
+    # intentionally not duplicates of the component systems; they identify the
+    # active recommendation family for the learned/meta layers.
+    _ba_total_base_names = [c for c in ["BigAl_CFL1_SecondMeetingUnder"] if c in s.columns]
+    _ba_spread_base_names = [c for c in bigal_base_cols if c not in _ba_total_base_names and c in s.columns]
+    _ba_total_tight_names = [c for c in tight_cols if c.startswith("BigAl_CFL1_")]
+    _ba_spread_tight_names = [c for c in tight_cols if c not in _ba_total_tight_names]
+    s["BigAl_Spread_System_Count"] = s[_ba_spread_base_names].sum(axis=1).astype("int16") if _ba_spread_base_names else 0
+    s["BigAl_Total_System_Count"] = s[_ba_total_base_names].sum(axis=1).astype("int16") if _ba_total_base_names else 0
+    s["BigAl_Spread_Tightener_Count"] = s[_ba_spread_tight_names].sum(axis=1).astype("int16") if _ba_spread_tight_names else 0
+    s["BigAl_Total_Tightener_Count"] = s[_ba_total_tight_names].sum(axis=1).astype("int16") if _ba_total_tight_names else 0
+    s["BigAl_Spread_Active"] = (s["BigAl_Spread_System_Count"] > 0).astype("int8")
+    s["BigAl_Total_Active"] = (s["BigAl_Total_System_Count"] > 0).astype("int8")
+    _ba_signed_state = pd.to_numeric(s.get("BigAl_Total_System_Signed"), errors="coerce").fillna(0)
+    s["BigAl_Total_Over_Active"] = (_ba_signed_state > 0).astype("int8")
+    s["BigAl_Total_Under_Active"] = (_ba_signed_state < 0).astype("int8")
 
     label_map = {
         "Pathi_M1_DogThatWon": "PATHI M1 Dog That Won",
@@ -12137,6 +12200,9 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         "BigAl_NBA7_TwoTeamEliminationUnder": "BIG AL NBA7 UNDER",
         "BigAl_CBB1_UglyDog20Losses": "BIG AL CBB1 Ugly Dog",
         "BigAl_CBB1_ThreeLoss_Tightener": "BIG AL CBB1 3-Loss Tightener",
+        "BigAl_CBB2_Fade10WinStreakFavorite": "BIG AL CBB2 Fade 10-Win-Streak Favorite",
+        "BigAl_CBB3_HomeRevenge27": "BIG AL CBB3 Home Revenge 27+",
+        "BigAl_CBB3_DogOffLoss_Tightener": "BIG AL CBB3 Dog + Off Loss Tightener",
         "BigAl_CFL1_SecondMeetingUnder": "BIG AL CFL1 UNDER",
         "BigAl_CFL1_TotalAbove51_Tightener": "BIG AL CFL1 >51 Tightener",
         "BigAl_CFL2_EliteDogFade": "BIG AL CFL2 Fade Elite Dog",
@@ -12354,6 +12420,8 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
         "BigAl_NBA4_NotOffSUATSLoss_Tightener", "BigAl_NBA5_PlayoffBigDogVsChamp",
         "BigAl_NBA5_ChampOffSUWin_Tightener", "BigAl_NBA6_FinalsGame4",
         "BigAl_CBB1_UglyDog20Losses", "BigAl_CBB1_ThreeLoss_Tightener",
+        "BigAl_CBB2_Fade10WinStreakFavorite",
+        "BigAl_CBB3_HomeRevenge27", "BigAl_CBB3_DogOffLoss_Tightener",
         "BigAl_CFL2_EliteDogFade",
     ]
     _bigal_total = [
@@ -12380,7 +12448,7 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
         "BigAl_NFL1_", "BigAl_NFL2_", "BigAl_NFL3_", "BigAl_NFL4_",
         "BigAl_CF1_", "BigAl_CF2_",
         "BigAl_NBA1_", "BigAl_NBA2_", "BigAl_NBA3_", "BigAl_NBA4_", "BigAl_NBA5_", "BigAl_NBA6_",
-        "BigAl_CBB1_", "BigAl_CFL2_",
+        "BigAl_CBB1_", "BigAl_CBB2_", "BigAl_CBB3_", "BigAl_CFL2_",
     )
     _bigal_total_prefixes = ("BigAl_NFL5_", "BigAl_NBA7_", "BigAl_CFL1_")
     for _c in [c for c in out.columns if str(c).startswith(_bigal_side_prefixes)]:
@@ -12394,15 +12462,41 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
     _bigal_bases = [
         c for c in (_bigal_side + _bigal_total)
         if c in out.columns and not c.endswith("_Tightener") and c != "BigAl_Total_System_Signed"
+        and not _is_retired_bigal_feature_name(c)
     ]
-    _tight = [c for c in out.columns if c.startswith("BigAl_") and c.endswith("_Tightener")]
+    _tight = [
+        c for c in out.columns
+        if c.startswith("BigAl_") and c.endswith("_Tightener")
+        and not _is_retired_bigal_feature_name(c)
+    ]
     out["Pathi_System_Count"] = out[_pathi_count].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16") if _pathi_count else 0
     out["BigAl_System_Count"] = out[_bigal_bases].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16") if _bigal_bases else 0
     out["BigAl_Tightener_Count"] = out[_tight].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16") if _tight else 0
     out["System_Signal_Count"] = (out["Pathi_System_Count"] + out["BigAl_System_Count"] + out["BigAl_Tightener_Count"]).astype("int16")
 
-    _ba_ready_cols = [c for c in out.columns if c.startswith("BigAl_") and c.endswith("_DataReady")]
-    _ba_ratio_cols = [c for c in out.columns if c.startswith("BigAl_") and c.endswith("_Match_Ratio")]
+    # Explicit Big Al market-family indicators for model/UI auditability.
+    _ba_spread_bases = [c for c in _bigal_side if c in out.columns and not c.endswith("_Tightener") and not _is_retired_bigal_feature_name(c)]
+    _ba_total_bases = [c for c in _bigal_total if c in out.columns and not c.endswith("_Tightener") and c != "BigAl_Total_System_Signed" and not _is_retired_bigal_feature_name(c)]
+    _ba_spread_tight = [c for c in _bigal_side if c in out.columns and c.endswith("_Tightener") and not _is_retired_bigal_feature_name(c)]
+    _ba_total_tight = [c for c in _bigal_total if c in out.columns and c.endswith("_Tightener") and not _is_retired_bigal_feature_name(c)]
+    out["BigAl_Spread_System_Count"] = out[_ba_spread_bases].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16") if _ba_spread_bases else 0
+    out["BigAl_Total_System_Count"] = out[_ba_total_bases].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16") if _ba_total_bases else 0
+    out["BigAl_Spread_Tightener_Count"] = out[_ba_spread_tight].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16") if _ba_spread_tight else 0
+    out["BigAl_Total_Tightener_Count"] = out[_ba_total_tight].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16") if _ba_total_tight else 0
+    out["BigAl_Spread_Active"] = (out["BigAl_Spread_System_Count"] > 0).astype("int8")
+    out["BigAl_Total_Active"] = (out["BigAl_Total_System_Count"] > 0).astype("int8")
+    _ba_signed = pd.to_numeric(out.get("BigAl_Total_System_Signed"), errors="coerce").fillna(0)
+    out["BigAl_Total_Over_Active"] = (_ba_signed > 0).astype("int8")
+    out["BigAl_Total_Under_Active"] = (_ba_signed < 0).astype("int8")
+
+    _ba_ready_cols = [
+        c for c in out.columns if c.startswith("BigAl_") and c.endswith("_DataReady")
+        and not _is_retired_bigal_feature_name(c)
+    ]
+    _ba_ratio_cols = [
+        c for c in out.columns if c.startswith("BigAl_") and c.endswith("_Match_Ratio")
+        and not _is_retired_bigal_feature_name(c)
+    ]
     out["BigAl_DataReady_Count"] = (
         out[_ba_ready_cols].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16")
         if _ba_ready_cols else 0
@@ -12444,6 +12538,8 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
         "BigAl_NBA6_FinalsGame4": "BIG AL NBA6 Finals G4",
         "BigAl_NBA7_TwoTeamEliminationUnder": "BIG AL NBA7 UNDER",
         "BigAl_CBB1_UglyDog20Losses": "BIG AL CBB1 Ugly Dog",
+        "BigAl_CBB2_Fade10WinStreakFavorite": "BIG AL CBB2 Fade 10-Win-Streak Favorite",
+        "BigAl_CBB3_HomeRevenge27": "BIG AL CBB3 Home Revenge 27+",
         "BigAl_CFL1_SecondMeetingUnder": "BIG AL CFL1 UNDER",
         "BigAl_CFL2_EliteDogFade": "BIG AL CFL2 Fade Elite Dog",
     }
@@ -12456,6 +12552,55 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
                 vals.append(label)
         return " | ".join(vals) if vals else "—"
     out["System_Signals_Text"] = out.apply(_row_labels, axis=1)
+
+    # Separate UI audit strings: Pathi and Big Al are never merged/double-counted.
+    _pathi_ui_labels = {c: label.replace("PATHI ", "") for c, label in _labels.items() if c.startswith("Pathi_")}
+    _bigal_ui_labels = {c: label.replace("BIG AL ", "") for c, label in _labels.items() if c.startswith("BigAl_") and not _is_retired_bigal_feature_name(c)}
+
+    def _ui_active_text(r, family):
+        if family == "pathi":
+            vals = [lab for c, lab in _pathi_ui_labels.items() if c in r.index and pd.to_numeric(r[c], errors="coerce") == 1]
+            return " | ".join(vals) if vals else "—"
+
+        vals = [lab for c, lab in _bigal_ui_labels.items() if c in r.index and pd.to_numeric(r[c], errors="coerce") == 1]
+        mk = _sys_norm_market(r.get("Market", ""))
+        if vals:
+            if mk == "totals":
+                signed = pd.to_numeric(pd.Series([r.get("BigAl_Total_System_Signed", 0)]), errors="coerce").fillna(0).iloc[0]
+                direction = "OVER" if signed > 0 else ("UNDER" if signed < 0 else "TOTAL")
+                return f"TOTAL · {direction} · " + " | ".join(vals)
+            if mk == "spreads":
+                return "SPREAD SIGNAL · " + " | ".join(vals)
+            return "BIG AL SIGNAL · " + " | ".join(vals)
+
+        # No exact system: show a concise, non-duplicative context summary.
+        context_priority = [
+            ("BigAl_Context_Game2_NonConference_Home", "Game 2 Non-Conf Home"),
+            ("BigAl_Context_Conference_Home_Dog", "Conference Home Dog"),
+            ("BigAl_Context_Division_Home_Dog", "Division Home Dog"),
+            ("BigAl_Context_Conference_Home_Favorite", "Conference Home Favorite"),
+            ("BigAl_Context_Division_Home_Favorite", "Division Home Favorite"),
+            ("BigAl_Context_Is_Division_Game", "Division Game"),
+            ("BigAl_Context_Is_Conference_Game", "Conference Game"),
+            ("BigAl_Context_Is_NonConference_Game", "Non-Conference"),
+            ("BigAl_Context_Week_1", "Week 1"),
+            ("BigAl_Context_Week_2", "Week 2"),
+            ("BigAl_Context_Week_9_Plus", "Week 9+"),
+            ("BigAl_Context_Had_Bye_Proxy", "Post-Bye"),
+        ]
+        ctx=[]
+        for c, lab in context_priority:
+            if c in r.index and pd.to_numeric(r[c], errors="coerce") == 1 and lab not in ctx:
+                ctx.append(lab)
+            if len(ctx) >= 3:
+                break
+        if not ctx:
+            return "—"
+        prefix = "TOTAL CONTEXT" if mk == "totals" else ("SPREAD CONTEXT" if mk == "spreads" else "CONTEXT")
+        return prefix + " · " + " | ".join(ctx)
+
+    out["Pathi_Active_Text"] = out.apply(lambda r: _ui_active_text(r, "pathi"), axis=1)
+    out["BigAl_Active_Text"] = out.apply(lambda r: _ui_active_text(r, "bigal"), axis=1)
     out = add_pathi_football_key_features(out)
     return out
 
