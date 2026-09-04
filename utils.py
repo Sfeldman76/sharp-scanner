@@ -10641,7 +10641,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-04-v10-bigal-merged-db-only"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-04-v11-ai-betting-brain"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -12921,11 +12921,183 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
     return out
 
 
+
+def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Leakage-safe meta-brain features built only from information available now.
+
+    This is a mixture-of-experts / regime layer. It does not assume any family is
+    correct; AutoFS/meta models learn which families deserve weight by sport/regime.
+    """
+    if df is None or df.empty:
+        return df.copy() if df is not None else df
+    out = df.copy()
+    idx = out.index
+
+    def num(*names, default=np.nan):
+        s = pd.Series(np.nan, index=idx, dtype='float64')
+        for name in names:
+            if name in out.columns:
+                s = s.combine_first(pd.to_numeric(out[name], errors='coerce'))
+        if default is not np.nan:
+            s = s.fillna(default)
+        return s
+
+    def flag(name):
+        return num(name, default=0).fillna(0).gt(0).astype('int8')
+
+    sport = out.get('Sport', pd.Series('', index=idx)).astype(str).str.upper().str.strip()
+    market = out.get('Market', pd.Series('', index=idx)).astype(str).str.lower().str.strip()
+
+    # -------------------------
+    # Regime detection
+    # -------------------------
+    game_no = num('BigAl_Context_Team_Game_Number', 'Team_Game_Number')
+    week = num('Week_Number', 'BigAl_Context_Week_Number')
+    is_early = (game_no.le(4) | week.le(4)).fillna(False)
+    is_late = (
+        flag('Final_Two_Regular_Season').eq(1)
+        | num('BigAl_Context_Week_9_Plus', default=0).eq(1)
+        | game_no.ge(12)
+    )
+    out['Brain_Regime_EarlySeason'] = is_early.astype('int8')
+    out['Brain_Regime_LateSeason'] = is_late.astype('int8')
+    out['Brain_Regime_MatureSeason'] = (~is_early & ~is_late & (game_no.notna() | week.notna())).astype('int8')
+
+    line_move = num('Line_Move_From_Open', 'Abs_Line_Move_From_Opening', 'Sharp_Line_Magnitude', default=0).abs()
+    velocity = num('Line_Move_Velocity_60m', 'Line_Move_Velocity_120m', default=0).abs()
+    dir_changes = num('Direction_Changes_Count', default=0)
+    sharp_cons = num('Sharp_Consensus_Direction', 'Pct_Books_Aligned', default=0).abs()
+    out['Brain_Regime_QuietMarket'] = ((line_move < 0.5) & (velocity < 0.25) & (dir_changes <= 1)).astype('int8')
+    out['Brain_Regime_ActiveMarket'] = ((line_move >= 0.5) | (velocity >= 0.25)).astype('int8')
+    out['Brain_Regime_SteamMarket'] = ((line_move >= 1.0) & (sharp_cons >= 0.5)).astype('int8')
+
+    key_market = (
+        flag('Pathi_FB_On_Key_3').eq(1) | flag('Pathi_FB_On_Key_7').eq(1)
+        | flag('Pathi_FB_Moved_Through_Key').eq(1) | flag('Crossed_Key_3').eq(1)
+        | flag('Crossed_Key_7').eq(1)
+    ) & sport.isin(['NFL','NCAAF']) & market.eq('spreads')
+    out['Brain_Regime_KeyNumberMarket'] = key_market.astype('int8')
+
+    # -------------------------
+    # Synthetic expert/family strengths (0..1-ish)
+    # -------------------------
+    bigal_exact = num('BigAl_System_Count', 'BigAl_Active_System_Count', default=0)
+    bigal_tight = num('BigAl_Tightener_Count', 'BigAl_Active_Tightener_Count', default=0)
+    bigal_enh = num('BigAl_Enhancer_Count', default=0)
+    bigal_ready = num('BigAl_DataReady_Count', default=0)
+    out['Brain_Expert_BigAl_Strength'] = np.tanh((1.00*bigal_exact + 0.55*bigal_tight + 0.25*bigal_enh) / 2.0).astype('float32')
+    out['Brain_Expert_BigAl_Readiness'] = (bigal_ready / (bigal_ready + 5.0)).fillna(0).astype('float32')
+
+    pathi_count = num('Pathi_System_Count', default=0)
+    pathi_key = (
+        flag('Pathi_FB_Moved_Through_Key') + flag('Pathi_FB_Crossed_Key_Toward_Team')
+        + flag('Pathi_FB_Key_DataReady')
+    ).astype(float)
+    out['Brain_Expert_Pathi_Strength'] = np.tanh((pathi_count + 0.35*pathi_key) / 2.0).astype('float32')
+
+    market_strength = (
+        0.35*np.tanh(line_move/1.5)
+        + 0.25*np.tanh(velocity/0.75)
+        + 0.25*np.clip(sharp_cons, 0, 1)
+        + 0.15*np.clip(num('Pct_Books_Aligned', default=0), 0, 1)
+    )
+    out['Brain_Expert_Market_Strength'] = np.clip(market_strength, 0, 1).astype('float32')
+
+    power_gap = num('PR_Rating_Diff', 'Power_Rating_Diff', default=0).abs()
+    out['Brain_Expert_Power_Strength'] = np.tanh(power_gap / 7.0).astype('float32')
+
+    form = pd.concat([
+        num('Team_Recent_Cover_Rate'), num('WinPct_Prior_System'),
+        num('BigAl_MLB_Recent_vs_Season_WinPct_Delta')
+    ], axis=1).abs().mean(axis=1, skipna=True).fillna(0)
+    out['Brain_Expert_Form_Strength'] = np.clip(form, 0, 1).astype('float32')
+
+    sched = pd.concat([
+        flag('Is_B2B').astype(float), flag('Is_3in4').astype(float),
+        flag('BigAl_Context_Had_Bye_Proxy').astype(float),
+        num('Days_Since_Last_Game_System').fillna(0).clip(0, 14)/14.0,
+    ], axis=1).mean(axis=1, skipna=True).fillna(0)
+    out['Brain_Expert_Schedule_Strength'] = np.clip(sched, 0, 1).astype('float32')
+
+    price = pd.concat([
+        num('Current_vs_Best_Line').abs(), num('Current_vs_Worst_Line').abs(),
+        num('ML_Price_ZScore_vs_TeamHistory').abs(), num('Role_Price_Shift').abs(),
+        num('Implied_Prob_Shift').abs()*10.0,
+    ], axis=1).mean(axis=1, skipna=True).fillna(0)
+    out['Brain_Expert_Price_Strength'] = np.tanh(price).astype('float32')
+
+    expert_cols = [
+        'Brain_Expert_BigAl_Strength','Brain_Expert_Pathi_Strength','Brain_Expert_Market_Strength',
+        'Brain_Expert_Power_Strength','Brain_Expert_Form_Strength','Brain_Expert_Schedule_Strength',
+        'Brain_Expert_Price_Strength'
+    ]
+    ex = out[expert_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
+    out['Brain_Expert_Mean_Strength'] = ex.mean(axis=1).astype('float32')
+    out['Brain_Expert_Max_Strength'] = ex.max(axis=1).astype('float32')
+    out['Brain_Expert_Dispersion'] = ex.std(axis=1, ddof=0).astype('float32')
+    out['Brain_Expert_Active_Count'] = (ex > 0.20).sum(axis=1).astype('int8')
+
+    # -------------------------
+    # Agreement / disagreement
+    # -------------------------
+    bigal_net = num('BigAl_Side_Net_Signal', default=0)
+    system_net = num('System_Net_Signal', default=0)
+    market_dir = num('Sharp_Consensus_Direction', default=0)
+    pathi_proxy = system_net - bigal_net
+    out['Brain_BigAl_Pathi_Agreement'] = ((bigal_net*pathi_proxy) > 0).astype('int8')
+    out['Brain_BigAl_Pathi_Conflict'] = ((bigal_net*pathi_proxy) < 0).astype('int8')
+    out['Brain_BigAl_Market_Agreement'] = ((bigal_net*market_dir) > 0).astype('int8')
+    out['Brain_BigAl_Market_Conflict'] = ((bigal_net*market_dir) < 0).astype('int8')
+    out['Brain_Pathi_Market_Agreement'] = ((pathi_proxy*market_dir) > 0).astype('int8')
+    out['Brain_Pathi_Market_Conflict'] = ((pathi_proxy*market_dir) < 0).astype('int8')
+    out['Brain_AllIndependent_Agree'] = (
+        out['Brain_BigAl_Pathi_Agreement'].eq(1)
+        & out['Brain_BigAl_Market_Agreement'].eq(1)
+        & out['Brain_Pathi_Market_Agreement'].eq(1)
+    ).astype('int8')
+    out['Brain_Conflict_Count'] = (
+        out[['Brain_BigAl_Pathi_Conflict','Brain_BigAl_Market_Conflict','Brain_Pathi_Market_Conflict']]
+        .sum(axis=1).astype('int8')
+    )
+
+    # -------------------------
+    # Uncertainty, durability, readiness
+    # -------------------------
+    data_ready = np.clip(out['Brain_Expert_Active_Count'].astype(float) / 5.0, 0, 1)
+    agreement = np.clip(
+        (out['Brain_AllIndependent_Agree'].astype(float)*0.55)
+        + (1.0 - np.clip(out['Brain_Conflict_Count'].astype(float)/3.0, 0, 1))*0.45,
+        0, 1,
+    )
+    uncertainty = np.clip(
+        0.55*out['Brain_Expert_Dispersion'].astype(float)
+        + 0.45*(1.0-data_ready), 0, 1
+    )
+    durability = 100.0*np.clip(
+        0.35*agreement + 0.25*data_ready + 0.20*out['Brain_Expert_Market_Strength'].astype(float)
+        + 0.20*out['Brain_Expert_Max_Strength'].astype(float) - 0.30*uncertainty,
+        0, 1,
+    )
+    out['Brain_Uncertainty_Proxy'] = uncertainty.astype('float32')
+    out['Brain_Edge_Durability'] = durability.astype('float32')
+    out['Brain_Decision_Readiness'] = np.clip((durability/100.0)*(1.0-0.5*uncertainty), 0, 1).astype('float32')
+
+    # Current implied probability, useful for close/value meta heads.
+    odds = num('Odds_Price')
+    cur_ip = pd.Series(np.nan, index=idx, dtype='float64')
+    pos = odds >= 0
+    cur_ip.loc[pos & odds.notna()] = 100.0/(odds.loc[pos & odds.notna()] + 100.0)
+    neg = odds < 0
+    cur_ip.loc[neg & odds.notna()] = (-odds.loc[neg & odds.notna()])/((-odds.loc[neg & odds.notna()]) + 100.0)
+    out['Brain_Current_Implied_Prob'] = cur_ip.astype('float32')
+
+    return out
+
 def pathi_bigal_numeric_feature_cols(df: pd.DataFrame) -> list[str]:
     """Numeric Pathi/BigAl features safe to offer to AutoFS/model training."""
     if df is None or df.empty:
         return []
-    prefixes = ("Pathi_", "BigAl_", "System_")
+    prefixes = ("Pathi_", "BigAl_", "System_", "Brain_")
     out = []
     for c in df.columns:
         if not str(c).startswith(prefixes) or c == "System_Signals_Text":
