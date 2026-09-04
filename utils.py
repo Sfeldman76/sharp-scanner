@@ -10641,7 +10641,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-04-v7-bigal-regular-season-deepdive"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-04-v10-bigal-merged-db-only"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -11235,8 +11235,6 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     tg["BigAl_Context_Conference_Known"] = _conf_known.astype("int8")
     tg["BigAl_Context_Is_Conference_Game"] = (_conf_known & _conf.eq(1)).astype("int8")
     tg["BigAl_Context_Is_NonConference_Game"] = (_conf_known & _conf.eq(0)).astype("int8")
-    tg["BigAl_Context_Cross_Conference"] = (_conf_known & _conf.eq(0)).astype("int8")
-
     tg["BigAl_Context_Division_Known"] = _div_known.astype("int8")
     tg["BigAl_Context_Is_Division_Game"] = (_div_known & _div.eq(1)).astype("int8")
     tg["BigAl_Context_Same_Conference_Different_Division"] = (
@@ -11468,6 +11466,25 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     prior_wins = tg["SU_Win"].fillna(0).groupby([tg[c] for c in grp], sort=False).cumsum() - tg["SU_Win"].fillna(0)
     tg["WinPct_Prior_System"] = prior_wins / prior_n.replace(0, np.nan)
 
+    # Big Al ALL Access research (DB-only proxy):
+    # In the 6/23/25 Arizona/Chicago ALL Access discussion, Big Al emphasized
+    # recent form improving materially versus full-season form.  The public
+    # discussion used pitcher metrics that are not in this database, so we do
+    # NOT recreate those metrics.  Instead, expose the same *concept* at the
+    # team level using strictly prior SU results already stored in our scores.
+    # This is an ENHANCER/proxy, never labeled as an exact Big Al system.
+    _su_numeric = pd.to_numeric(tg["SU_Win"], errors="coerce")
+    _recent5_su = (
+        _su_numeric.groupby([tg[c] for c in grp], sort=False)
+        .transform(lambda x: x.shift(1).rolling(5, min_periods=3).mean())
+    )
+    _is_mlb_state = tg["Sport"].astype(str).str.upper().eq("MLB")
+    _season_prior = pd.to_numeric(tg["WinPct_Prior_System"], errors="coerce")
+    _recent_delta = _recent5_su - _season_prior
+
+    tg["BigAl_MLB_Recent5_SU_WinPct_Prior"] = _recent5_su.where(_is_mlb_state).astype("float32")
+    tg["BigAl_MLB_Recent_vs_Season_WinPct_Delta"] = _recent_delta.where(_is_mlb_state).astype("float32")
+
     tg["Days_Since_Last_Game_System"] = (
         tg.groupby(grp, sort=False)["Game_Start"].diff().dt.total_seconds().div(86400.0)
     )
@@ -11616,6 +11633,19 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     tg["H2H_Consecutive_Wins_Prior"]=_sys_consecutive_prior(tg,"SU_Win",pair_grp)
     tg["H2H_Consecutive_Losses_Prior"]=_sys_consecutive_prior(tg,"SU_Loss",pair_grp)
     tg["Revenge_Depth"]=tg["H2H_Consecutive_Losses_Prior"]
+
+    # Same-season H2H state for published Big Al rematch/revenge systems.
+    # Every field is shifted/prior-only, so no current-game result can leak.
+    season_pair_grp=["Sport","Season","Team","Opponent"]
+    tg["Season_H2H_Consecutive_Losses_Prior"]=_sys_consecutive_prior(tg,"SU_Loss",season_pair_grp)
+    tg["Season_H2H_Last_SU_Win_Prior"] = tg.groupby(season_pair_grp, sort=False)["SU_Win"].shift(1)
+    tg["Season_H2H_Last_SU_Margin_Prior"] = tg.groupby(season_pair_grp, sort=False)["SU_Margin"].shift(1)
+    tg["Season_H2H_Last_Points_Against_Prior"] = tg.groupby(season_pair_grp, sort=False)["Points_Against"].shift(1)
+    tg["Season_H2H_Last_Spread_Prior"] = tg.groupby(season_pair_grp, sort=False)["Spread_Value"].shift(1)
+    tg["Season_H2H_Last_Is_Home_Prior"] = tg.groupby(season_pair_grp, sort=False)["Is_Home"].shift(1)
+    tg["Season_H2H_Days_Since_Last_Matchup_Prior"] = (
+        tg.groupby(season_pair_grp, sort=False)["Game_Start"].diff().dt.total_seconds().div(86400.0)
+    )
     def _prior_last_loss_margin(s):
         vals=[]; last=np.nan
         for x in pd.to_numeric(s,errors="coerce"):
@@ -11665,7 +11695,11 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     tg["Final_Two_Regular_Season_Proxy"] = (
         tg["Sport"].eq("NFL") & tg["Is_Regular_Season"].fillna(1).eq(1) & (tg["Team_Game_Number"] >= 16)
     ).astype("int8")
-    _final_week = pd.to_numeric(tg.get("Regular_Season_Final_Week"), errors="coerce")
+    _final_week = (
+        pd.to_numeric(tg["Regular_Season_Final_Week"], errors="coerce")
+        if "Regular_Season_Final_Week" in tg.columns
+        else pd.Series(np.nan, index=tg.index, dtype="float64")
+    )
     _exact_final_two = (
         tg["Week_Number"].notna() & _final_week.notna() &
         (tg["Week_Number"] >= (_final_week - 1))
@@ -11698,6 +11732,39 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     opp = tg[["Sport", "Game_Key", "Team"] + mirror_cols].copy()
     opp = opp.rename(columns={"Team": "Opponent", **{c: f"Opp_{c}" for c in mirror_cols}})
     tg = tg.merge(opp, on=["Sport", "Game_Key", "Opponent"], how="left", validate="1:1")
+
+    # Big Al hoops revenge-context family (DB-only, regular-season, prior-only).
+    # Big Al's public revenge methodology evaluates more than a one-bit revenge
+    # flag: prior site, spread, team-strength differential, loss magnitude and
+    # points allowed.  These are raw context features, not named systems and do
+    # not increment BigAl_System_Count or BigAl_Enhancer_Count.
+    _hoops_revenge_sport = tg["Sport"].astype(str).str.upper().isin(["NBA", "NCAAB"])
+    _hoops_regular = pd.to_numeric(tg.get("Is_Regular_Season"), errors="coerce").fillna(1).eq(1)
+    _season_last_win = pd.to_numeric(tg.get("Season_H2H_Last_SU_Win_Prior"), errors="coerce")
+    _hoops_revenge_active = _hoops_revenge_sport & _hoops_regular & _season_last_win.eq(0)
+    tg["BigAl_Hoops_Revenge_Context_Active"] = _hoops_revenge_active.astype("int8")
+
+    _season_last_margin = pd.to_numeric(tg.get("Season_H2H_Last_SU_Margin_Prior"), errors="coerce")
+    _season_last_spread = pd.to_numeric(tg.get("Season_H2H_Last_Spread_Prior"), errors="coerce")
+    _season_last_pa = pd.to_numeric(tg.get("Season_H2H_Last_Points_Against_Prior"), errors="coerce")
+    _season_last_home = pd.to_numeric(tg.get("Season_H2H_Last_Is_Home_Prior"), errors="coerce")
+    _season_days = pd.to_numeric(tg.get("Season_H2H_Days_Since_Last_Matchup_Prior"), errors="coerce")
+    _cur_home = pd.to_numeric(tg.get("Is_Home"), errors="coerce")
+    _team_wp = pd.to_numeric(tg.get("WinPct_Prior_System"), errors="coerce")
+    _opp_wp = pd.to_numeric(tg.get("Opp_WinPct_Prior_System"), errors="coerce")
+
+    tg["BigAl_Hoops_Revenge_LastMeeting_LossMargin"] = (-_season_last_margin).where(_hoops_revenge_active).astype("float32")
+    tg["BigAl_Hoops_Revenge_LastMeeting_Spread"] = _season_last_spread.where(_hoops_revenge_active).astype("float32")
+    tg["BigAl_Hoops_Revenge_LastMeeting_PointsAllowed"] = _season_last_pa.where(_hoops_revenge_active).astype("float32")
+    tg["BigAl_Hoops_Revenge_DaysSinceLastMeeting"] = _season_days.where(_hoops_revenge_active).astype("float32")
+    tg["BigAl_Hoops_Revenge_WinPctGap_Prior"] = (_team_wp - _opp_wp).where(_hoops_revenge_active).astype("float32")
+    tg["BigAl_Hoops_Revenge_LastMeeting_SiteFlip"] = (
+        _hoops_revenge_active & _season_last_home.notna() & _cur_home.notna() & _season_last_home.ne(_cur_home)
+    ).astype("int8")
+    tg["BigAl_Hoops_Revenge_Context_DataReady"] = (
+        _hoops_revenge_sport & _hoops_regular & _season_last_win.notna() &
+        _season_last_margin.notna() & _season_last_spread.notna() & _season_last_pa.notna()
+    ).astype("int8")
 
     # Pathi football opponent role trends + regime aliases.
     for _n in ("Last5", "Last10", "Season"):
@@ -11741,8 +11808,19 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     is_nfl = sport.eq("NFL")
     is_ncaaf = sport.eq("NCAAF")
     is_nba = sport.eq("NBA")
+    is_wnba = sport.eq("WNBA")
     is_ncaab = sport.isin(["NCAAB", "NCAAM"])
     is_cfl = sport.eq("CFL")
+
+    # Regular-season-only guard for all new ALL Access / ingredient enhancers.
+    # Missing explicit regular-season flags are allowed only when neither
+    # preseason nor postseason is identified by the state builder.
+    _regular_only = (
+        n("Is_Preseason").fillna(0).ne(1)
+        & n("Is_Postseason").fillna(0).ne(1)
+        & n("Is_Playoffs").fillna(0).ne(1)
+        & n("Is_Regular_Season").fillna(1).eq(1)
+    )
 
     # ------------------------------------------------------------------
     # Eric Pathi - MLB mechanical systems / screens.
@@ -11940,6 +12018,22 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         is_nba & n("Team_Eliminated_With_Loss").eq(1) & n("Opponent_Eliminated_With_Loss").eq(1)
     ).astype("int8")
 
+    # NBA 8 - published 3/17/24 regular-season revenge system.  Go against
+    # the current favorite/PK that scored 145+ in winning the season's prior
+    # meeting; this row is the revenge/play-on side.  Winning record is the
+    # explicitly published tightener.
+    s["BigAl_NBA8_Revenge145FadeFavorite_DataReady"] = ready(
+        "Spread_Value", "Season_H2H_Last_SU_Win_Prior", "Season_H2H_Last_Points_Against_Prior"
+    ).astype("int8")
+    s["BigAl_NBA8_Revenge145FadeFavorite"] = (
+        is_nba & _regular_only & n("Spread_Value").ge(0) &
+        n("Season_H2H_Last_SU_Win_Prior").lt(0.5) &
+        n("Season_H2H_Last_Points_Against_Prior").ge(145)
+    ).astype("int8")
+    s["BigAl_NBA8_WinningRecord_Tightener"] = (
+        s["BigAl_NBA8_Revenge145FadeFavorite"].eq(1) & n("WinPct_Prior_System").gt(0.500)
+    ).astype("int8")
+
     # NCAAB - dog/PK off two SU+ATS losses by >20; opponent not off two losses.
     s["BigAl_CBB1_UglyDog20Losses_DataReady"] = ready(
         "Spread_Value", "Prev_SU_Margin", "Prev_ATS_Cover_Margin", "Prev2_SU_Margin", "Prev2_ATS_Cover_Margin",
@@ -11996,6 +12090,17 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         is_cfl & n("Opp_Team_Game_Number").ge(7) & n("Opp_WinPct_Prior_System").ge(0.820) & n("Opp_Spread_Value").gt(3)
     ).astype("int8")
 
+    # CFL 3 - disclosed 8/20/26 situational system: in the season's third
+    # meeting, play the away underdog after it lost the first two meetings.
+    s["BigAl_CFL3_ThirdMeetingAwayDogLostFirstTwo_DataReady"] = ready(
+        "Season_H2H_Meeting_Number", "Is_Home", "Spread_Value", "Season_H2H_Consecutive_Losses_Prior"
+    ).astype("int8")
+    s["BigAl_CFL3_ThirdMeetingAwayDogLostFirstTwo"] = (
+        is_cfl & _regular_only & n("Season_H2H_Meeting_Number").eq(3) &
+        n("Is_Home").eq(0) & n("Spread_Value").gt(0) &
+        n("Season_H2H_Consecutive_Losses_Prior").ge(2)
+    ).astype("int8")
+
     # ------------------------------------------------------------------
     # Big Al readiness + partial-match layer.
     # DataReady is explicitly sport-gated and requires every input used by the
@@ -12017,11 +12122,13 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         "BigAl_NBA5_PlayoffBigDogVsChamp": (is_nba, ["Is_Postseason", "WinPct_Prior_System", "Is_Home", "Spread_Value", "Opponent_Is_Defending_Champion"]),
         "BigAl_NBA6_FinalsGame4": (is_nba, ["Is_Finals", "Series_Game_Number", "Team_Series_Wins", "Opp_Series_Wins", "Is_Home", "Prev_SU_Win", "Prev_Is_Home", "WinPct_Prior_System", "Spread_Value"]),
         "BigAl_NBA7_TwoTeamEliminationUnder": (is_nba, ["Team_Eliminated_With_Loss", "Opponent_Eliminated_With_Loss"]),
+        "BigAl_NBA8_Revenge145FadeFavorite": (is_nba, ["Spread_Value", "Season_H2H_Last_SU_Win_Prior", "Season_H2H_Last_Points_Against_Prior"]),
         "BigAl_CBB1_UglyDog20Losses": (is_ncaab, ["Spread_Value", "Prev_SU_Margin", "Prev_ATS_Cover_Margin", "Prev2_SU_Margin", "Prev2_ATS_Cover_Margin", "Opp_Prev_SU_Loss", "Opp_Prev2_SU_Loss"]),
         "BigAl_CBB2_Fade10WinStreakFavorite": (is_ncaab, ["Is_Regular_Season", "Spread_Value", "Opp_Prev_SU_Loss", "Opp_SU_Win_Streak_Entering_Previous_Game", "Prev_SU_Win", "Prev_ATS_Win"]),
         "BigAl_CBB3_HomeRevenge27": (is_ncaab, ["Is_Regular_Season", "Is_Home", "WinPct_Prior_System", "H2H_Last_Loss_Margin"]),
         "BigAl_CFL1_SecondMeetingUnder": (is_cfl, ["Season_H2H_Meeting_Number", "First_Meeting_Actual_Total_Prior"]),
         "BigAl_CFL2_EliteDogFade": (is_cfl, ["Opp_Team_Game_Number", "Opp_WinPct_Prior_System", "Opp_Spread_Value"]),
+        "BigAl_CFL3_ThirdMeetingAwayDogLostFirstTwo": (is_cfl, ["Season_H2H_Meeting_Number", "Is_Home", "Spread_Value", "Season_H2H_Consecutive_Losses_Prior"]),
     }
     for _name, (_sport_mask, _reqs) in _bigal_specs.items():
         s[_name + "_DataReady"] = (_sport_mask & ready(*_reqs)).astype("int8")
@@ -12092,6 +12199,11 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     _set_bigal_match("BigAl_NBA7_TwoTeamEliminationUnder", is_nba, [
         n("Team_Eliminated_With_Loss").eq(1), n("Opponent_Eliminated_With_Loss").eq(1),
     ])
+    _set_bigal_match("BigAl_NBA8_Revenge145FadeFavorite", is_nba, [
+        _regular_only, n("Spread_Value").ge(0),
+        n("Season_H2H_Last_SU_Win_Prior").lt(0.5),
+        n("Season_H2H_Last_Points_Against_Prior").ge(145),
+    ])
     _set_bigal_match("BigAl_CBB1_UglyDog20Losses", is_ncaab, [
         n("Spread_Value").ge(0), n("Prev_SU_Margin").lt(-20), n("Prev_ATS_Cover_Margin").lt(-20),
         n("Prev2_SU_Margin").lt(-20), n("Prev2_ATS_Cover_Margin").lt(-20),
@@ -12112,6 +12224,10 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     _set_bigal_match("BigAl_CFL2_EliteDogFade", is_cfl, [
         n("Opp_Team_Game_Number").ge(7), n("Opp_WinPct_Prior_System").ge(0.820), n("Opp_Spread_Value").gt(3),
     ])
+    _set_bigal_match("BigAl_CFL3_ThirdMeetingAwayDogLostFirstTwo", is_cfl, [
+        _regular_only, n("Season_H2H_Meeting_Number").eq(3), n("Is_Home").eq(0),
+        n("Spread_Value").gt(0), n("Season_H2H_Consecutive_Losses_Prior").ge(2),
+    ])
 
     # Signed total-system direction for the canonical Over training row:
     # +1 = Big Al says OVER; -1 = Big Al says UNDER.
@@ -12120,6 +12236,112 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     s["BigAl_Total_System_Signed"] = (
         -s["BigAl_CFL1_SecondMeetingUnder"].astype(float)
     ).astype("float32")
+
+    # ------------------------------------------------------------------
+    # Big Al DB-supported ENHANCERS.
+    #
+    # SYSTEM     = exact published/recoverable mechanical formula.
+    # TIGHTENER  = explicit published additional condition.
+    # ENHANCER   = a broader, DB-computable ingredient/proxy supported by
+    #              Big Al's disclosed handicapping logic.  Enhancers NEVER
+    #              increment BigAl_System_Count/System_Signal_Count.
+    #
+    # No preseason/postseason enhancer is permitted here.
+    # ------------------------------------------------------------------
+
+    # MLB ALL Access proxy: recent team form materially better than season form.
+    # The source discussion used pitcher ERA/venue history, which we do not have.
+    # This therefore captures only the database-supported recent-vs-season idea.
+    _mlb_recent_delta = n("BigAl_MLB_Recent_vs_Season_WinPct_Delta")
+    s["BigAl_MLB_Enhancer_RecentFormAboveSeason"] = (
+        is_mlb & _regular_only
+        & _mlb_recent_delta.notna()
+        & _mlb_recent_delta.gt(0)
+    ).astype("int8")
+    s["BigAl_MLB_Enhancer_RecentFormFavorite"] = (
+        s["BigAl_MLB_Enhancer_RecentFormAboveSeason"].eq(1)
+        & n("Is_ML_Favorite").eq(1)
+    ).astype("int8")
+
+    # Ingredient-level enhancers behind existing exact Big Al systems.
+    # They let AutoFS learn whether the broader situation has value even when
+    # every exact system condition is not present.
+    s["BigAl_NFL_Enhancer_LateHomeDog"] = (
+        is_nfl & _regular_only
+        & n("Final_Two_Regular_Season").eq(1)
+        & n("Is_Home").eq(1)
+        & n("Spread_Value").gt(0)
+    ).astype("int8")
+
+    # Published 12/26/2022 database ingredient: next-to-last regular-season week,
+    # very poor team (<= .250 prior SU win pct) off a SU win.  Exact week metadata
+    # is required; do not approximate this with team-game number.
+    _nfl_penultimate_exact = (
+        n("Week_Number").notna()
+        & n("Regular_Season_Final_Week").notna()
+        & n("Week_Number").eq(n("Regular_Season_Final_Week") - 1)
+    )
+    s["BigAl_NFL_Enhancer_PenultimateBadTeamOffWin"] = (
+        is_nfl & _regular_only & _nfl_penultimate_exact
+        & n("WinPct_Prior_System").le(0.250)
+        & n("Prev_SU_Win").eq(1)
+    ).astype("int8")
+
+    s["BigAl_CF_Enhancer_RevengeDog"] = (
+        is_ncaaf & _regular_only
+        & n("Revenge_Flag_Current").eq(1)
+        & n("Spread_Value").gt(0)
+    ).astype("int8")
+
+    s["BigAl_NBA_Enhancer_ImmediateRematchDog"] = (
+        is_nba & _regular_only
+        & n("Immediate_Rematch_Flag").eq(1)
+        & n("Spread_Value").gt(0)
+    ).astype("int8")
+
+    s["BigAl_CBB_Enhancer_HomeRevengeWinning"] = (
+        is_ncaab & _regular_only
+        & n("Is_Home").eq(1)
+        & n("Revenge_Flag_Current").eq(1)
+        & n("WinPct_Prior_System").gt(0.500)
+    ).astype("int8")
+
+    # WNBA public-selection disclosure (8/19/26): winning home teams in
+    # double-revenge; the home-underdog form was the stronger subset.
+    s["BigAl_WNBA_Enhancer_WinningHomeDoubleRevenge"] = (
+        is_wnba & _regular_only & n("Is_Home").eq(1) &
+        n("WinPct_Prior_System").gt(0.500) &
+        n("Season_H2H_Consecutive_Losses_Prior").ge(2)
+    ).astype("int8")
+    s["BigAl_WNBA_Enhancer_WinningHomeDoubleRevengeDog"] = (
+        s["BigAl_WNBA_Enhancer_WinningHomeDoubleRevenge"].eq(1) & n("Spread_Value").gt(0)
+    ).astype("int8")
+
+    # CFL public-selection disclosure (8/20/26): winless revenge-minded
+    # teams were strongest as underdogs of +9 or more.
+    s["BigAl_CFL_Enhancer_WinlessRevengeBigDog"] = (
+        is_cfl & _regular_only & n("WinPct_Prior_System").eq(0) &
+        n("Revenge_Flag_Current").eq(1) & n("Spread_Value").ge(9)
+    ).astype("int8")
+
+    _bigal_enhancer_flags = [
+        "BigAl_MLB_Enhancer_RecentFormAboveSeason",
+        "BigAl_MLB_Enhancer_RecentFormFavorite",
+        "BigAl_NFL_Enhancer_LateHomeDog",
+        "BigAl_NFL_Enhancer_PenultimateBadTeamOffWin",
+        "BigAl_CF_Enhancer_RevengeDog",
+        "BigAl_NBA_Enhancer_ImmediateRematchDog",
+        "BigAl_CBB_Enhancer_HomeRevengeWinning",
+        "BigAl_WNBA_Enhancer_WinningHomeDoubleRevenge",
+        "BigAl_WNBA_Enhancer_WinningHomeDoubleRevengeDog",
+        "BigAl_CFL_Enhancer_WinlessRevengeBigDog",
+    ]
+    _bigal_enhancer_flags = [c for c in _bigal_enhancer_flags if c in s.columns]
+    s["BigAl_Enhancer_Count"] = (
+        s[_bigal_enhancer_flags].sum(axis=1).astype("int16")
+        if _bigal_enhancer_flags else 0
+    )
+    s["BigAl_Enhancer_Active"] = (pd.to_numeric(s["BigAl_Enhancer_Count"], errors="coerce").fillna(0) > 0).astype("int8")
 
     # ------------------------------------------------------------------
     # Aggregate counts + human-readable audit string.
@@ -12136,9 +12358,10 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         "BigAl_CF1_Week2Home42Win", "BigAl_CF2_LateSeasonRevengeDog",
         "BigAl_NBA1_B2BRematchRoadDog", "BigAl_NBA2_ThreeMassiveCovers", "BigAl_NBA3_FadeHomeAfterChampUpset",
         "BigAl_NBA4_FinalHomeFavRevenge", "BigAl_NBA5_PlayoffBigDogVsChamp", "BigAl_NBA6_FinalsGame4",
-        "BigAl_NBA7_TwoTeamEliminationUnder", "BigAl_CBB1_UglyDog20Losses",
+        "BigAl_NBA7_TwoTeamEliminationUnder", "BigAl_NBA8_Revenge145FadeFavorite", "BigAl_CBB1_UglyDog20Losses",
         "BigAl_CBB2_Fade10WinStreakFavorite", "BigAl_CBB3_HomeRevenge27",
         "BigAl_CFL1_SecondMeetingUnder", "BigAl_CFL2_EliteDogFade",
+        "BigAl_CFL3_ThirdMeetingAwayDogLostFirstTwo",
     ]
     bigal_base_cols = [c for c in bigal_base_cols if not _is_retired_bigal_feature_name(c)]
     tight_cols = [
@@ -12151,6 +12374,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     s["BigAl_System_Count"] = s[bigal_base_cols].sum(axis=1).astype("int16")
     s["BigAl_Tightener_Count"] = s[tight_cols].sum(axis=1).astype("int16") if tight_cols else 0
     s["System_Signal_Count"] = (s["Pathi_System_Count"] + s["BigAl_System_Count"] + s["BigAl_Tightener_Count"]).astype("int16")
+    # BigAl_Enhancer_Count is intentionally excluded: enhancer != exact system signal.
 
     # Regular-season Big Al market family indicators.  Aggregate features are
     # intentionally not duplicates of the component systems; they identify the
@@ -12198,6 +12422,8 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         "BigAl_NBA5_PlayoffBigDogVsChamp": "BIG AL NBA5 Playoff Big Dog",
         "BigAl_NBA6_FinalsGame4": "BIG AL NBA6 Finals G4",
         "BigAl_NBA7_TwoTeamEliminationUnder": "BIG AL NBA7 UNDER",
+        "BigAl_NBA8_Revenge145FadeFavorite": "BIG AL NBA8 Revenge 145+ Fade",
+        "BigAl_NBA8_WinningRecord_Tightener": "BIG AL NBA8 Winning Record Tightener",
         "BigAl_CBB1_UglyDog20Losses": "BIG AL CBB1 Ugly Dog",
         "BigAl_CBB1_ThreeLoss_Tightener": "BIG AL CBB1 3-Loss Tightener",
         "BigAl_CBB2_Fade10WinStreakFavorite": "BIG AL CBB2 Fade 10-Win-Streak Favorite",
@@ -12206,6 +12432,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         "BigAl_CFL1_SecondMeetingUnder": "BIG AL CFL1 UNDER",
         "BigAl_CFL1_TotalAbove51_Tightener": "BIG AL CFL1 >51 Tightener",
         "BigAl_CFL2_EliteDogFade": "BIG AL CFL2 Fade Elite Dog",
+        "BigAl_CFL3_ThirdMeetingAwayDogLostFirstTwo": "BIG AL CFL3 3rd Meeting Road Dog",
     }
 
     label_map = {k: v for k, v in label_map.items() if not _is_retired_bigal_feature_name(k)}
@@ -12396,10 +12623,42 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
         "BigAl_Context_Division_Home_Favorite",
         "BigAl_Context_NonConference_Dog",
         "BigAl_Context_NonConference_Favorite",
+        "BigAl_Hoops_Revenge_Context_Active",
+        "BigAl_Hoops_Revenge_LastMeeting_LossMargin",
+        "BigAl_Hoops_Revenge_LastMeeting_Spread",
+        "BigAl_Hoops_Revenge_LastMeeting_PointsAllowed",
+        "BigAl_Hoops_Revenge_DaysSinceLastMeeting",
+        "BigAl_Hoops_Revenge_WinPctGap_Prior",
+        "BigAl_Hoops_Revenge_LastMeeting_SiteFlip",
+        "BigAl_Hoops_Revenge_Context_DataReady",
     ]
     for _c in _bigal_spread_context:
         if _c in out.columns:
             out.loc[~_m.eq("spreads"), _c] = 0
+
+    # DB-only Big Al enhancers are market-specific just like exact systems.
+    _bigal_spread_enhancers = [
+        "BigAl_NFL_Enhancer_LateHomeDog",
+        "BigAl_NFL_Enhancer_PenultimateBadTeamOffWin",
+        "BigAl_CF_Enhancer_RevengeDog",
+        "BigAl_NBA_Enhancer_ImmediateRematchDog",
+        "BigAl_CBB_Enhancer_HomeRevengeWinning",
+        "BigAl_WNBA_Enhancer_WinningHomeDoubleRevenge",
+        "BigAl_WNBA_Enhancer_WinningHomeDoubleRevengeDog",
+        "BigAl_CFL_Enhancer_WinlessRevengeBigDog",
+    ]
+    _bigal_h2h_enhancers = [
+        "BigAl_MLB_Recent5_SU_WinPct_Prior",
+        "BigAl_MLB_Recent_vs_Season_WinPct_Delta",
+        "BigAl_MLB_Enhancer_RecentFormAboveSeason",
+        "BigAl_MLB_Enhancer_RecentFormFavorite",
+    ]
+    for _c in _bigal_spread_enhancers:
+        if _c in out.columns:
+            out.loc[~_m.eq("spreads"), _c] = 0
+    for _c in _bigal_h2h_enhancers:
+        if _c in out.columns:
+            out.loc[~_m.eq("h2h"), _c] = 0
 
     _pathi_ml = [
         "Pathi_M1_DogThatWon", "Pathi_M8_DogWon_BetterPrice", "Pathi_M2_HomeDog",
@@ -12419,10 +12678,11 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
         "BigAl_NBA3_WinPct572_Tightener", "BigAl_NBA4_FinalHomeFavRevenge",
         "BigAl_NBA4_NotOffSUATSLoss_Tightener", "BigAl_NBA5_PlayoffBigDogVsChamp",
         "BigAl_NBA5_ChampOffSUWin_Tightener", "BigAl_NBA6_FinalsGame4",
+        "BigAl_NBA8_Revenge145FadeFavorite", "BigAl_NBA8_WinningRecord_Tightener",
         "BigAl_CBB1_UglyDog20Losses", "BigAl_CBB1_ThreeLoss_Tightener",
         "BigAl_CBB2_Fade10WinStreakFavorite",
         "BigAl_CBB3_HomeRevenge27", "BigAl_CBB3_DogOffLoss_Tightener",
-        "BigAl_CFL2_EliteDogFade",
+        "BigAl_CFL2_EliteDogFade", "BigAl_CFL3_ThirdMeetingAwayDogLostFirstTwo",
     ]
     _bigal_total = [
         "BigAl_NFL5_PreseasonLowOffenseOver", "BigAl_NFL5_TotalUnder40_Tightener",
@@ -12447,8 +12707,8 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
     _bigal_side_prefixes = (
         "BigAl_NFL1_", "BigAl_NFL2_", "BigAl_NFL3_", "BigAl_NFL4_",
         "BigAl_CF1_", "BigAl_CF2_",
-        "BigAl_NBA1_", "BigAl_NBA2_", "BigAl_NBA3_", "BigAl_NBA4_", "BigAl_NBA5_", "BigAl_NBA6_",
-        "BigAl_CBB1_", "BigAl_CBB2_", "BigAl_CBB3_", "BigAl_CFL2_",
+        "BigAl_NBA1_", "BigAl_NBA2_", "BigAl_NBA3_", "BigAl_NBA4_", "BigAl_NBA5_", "BigAl_NBA6_", "BigAl_NBA8_",
+        "BigAl_CBB1_", "BigAl_CBB2_", "BigAl_CBB3_", "BigAl_CFL2_", "BigAl_CFL3_",
     )
     _bigal_total_prefixes = ("BigAl_NFL5_", "BigAl_NBA7_", "BigAl_CFL1_")
     for _c in [c for c in out.columns if str(c).startswith(_bigal_side_prefixes)]:
@@ -12473,6 +12733,28 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
     out["BigAl_System_Count"] = out[_bigal_bases].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16") if _bigal_bases else 0
     out["BigAl_Tightener_Count"] = out[_tight].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16") if _tight else 0
     out["System_Signal_Count"] = (out["Pathi_System_Count"] + out["BigAl_System_Count"] + out["BigAl_Tightener_Count"]).astype("int16")
+
+    # Enhancers are intentionally tracked separately and never promoted to an
+    # exact System_Signal_Count.
+    _ba_enhancer_flags = [
+        c for c in (
+            "BigAl_MLB_Enhancer_RecentFormAboveSeason",
+            "BigAl_MLB_Enhancer_RecentFormFavorite",
+            "BigAl_NFL_Enhancer_LateHomeDog",
+            "BigAl_CF_Enhancer_RevengeDog",
+            "BigAl_NBA_Enhancer_ImmediateRematchDog",
+            "BigAl_CBB_Enhancer_HomeRevengeWinning",
+            "BigAl_WNBA_Enhancer_WinningHomeDoubleRevenge",
+            "BigAl_WNBA_Enhancer_WinningHomeDoubleRevengeDog",
+            "BigAl_CFL_Enhancer_WinlessRevengeBigDog",
+        )
+        if c in out.columns
+    ]
+    out["BigAl_Enhancer_Count"] = (
+        out[_ba_enhancer_flags].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16")
+        if _ba_enhancer_flags else 0
+    )
+    out["BigAl_Enhancer_Active"] = (out["BigAl_Enhancer_Count"] > 0).astype("int8")
 
     # Explicit Big Al market-family indicators for model/UI auditability.
     _ba_spread_bases = [c for c in _bigal_side if c in out.columns and not c.endswith("_Tightener") and not _is_retired_bigal_feature_name(c)]
@@ -12537,11 +12819,13 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
         "BigAl_NBA5_PlayoffBigDogVsChamp": "BIG AL NBA5 Playoff Big Dog",
         "BigAl_NBA6_FinalsGame4": "BIG AL NBA6 Finals G4",
         "BigAl_NBA7_TwoTeamEliminationUnder": "BIG AL NBA7 UNDER",
+        "BigAl_NBA8_Revenge145FadeFavorite": "BIG AL NBA8 Revenge 145+ Fade",
         "BigAl_CBB1_UglyDog20Losses": "BIG AL CBB1 Ugly Dog",
         "BigAl_CBB2_Fade10WinStreakFavorite": "BIG AL CBB2 Fade 10-Win-Streak Favorite",
         "BigAl_CBB3_HomeRevenge27": "BIG AL CBB3 Home Revenge 27+",
         "BigAl_CFL1_SecondMeetingUnder": "BIG AL CFL1 UNDER",
         "BigAl_CFL2_EliteDogFade": "BIG AL CFL2 Fade Elite Dog",
+        "BigAl_CFL3_ThirdMeetingAwayDogLostFirstTwo": "BIG AL CFL3 3rd Meeting Road Dog",
     }
     _tight_labels = {c: c.replace("BigAl_", "BIG AL ").replace("_", " ") for c in _tight}
     _labels.update(_tight_labels)
@@ -12573,8 +12857,40 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
                 return "SPREAD SIGNAL · " + " | ".join(vals)
             return "BIG AL SIGNAL · " + " | ".join(vals)
 
-        # No exact system: show a concise, non-duplicative context summary.
+        # No exact system/tightener: show DB-supported enhancer(s) next.
+        # Enhancers are deliberately suppressed when an exact system fires so
+        # a parent system and its broader ingredient are not visually doubled.
+        _enhancer_ui_labels = {
+            "BigAl_MLB_Enhancer_RecentFormFavorite": "Improving Form Favorite",
+            "BigAl_MLB_Enhancer_RecentFormAboveSeason": "Recent Form > Season",
+            "BigAl_NFL_Enhancer_LateHomeDog": "Late-Season Home Dog",
+            "BigAl_NFL_Enhancer_PenultimateBadTeamOffWin": "Penultimate Bad Team off Win",
+            "BigAl_CF_Enhancer_RevengeDog": "NCAAF Revenge Dog",
+            "BigAl_NBA_Enhancer_ImmediateRematchDog": "Immediate-Rematch Dog",
+            "BigAl_CBB_Enhancer_HomeRevengeWinning": "Winning Home Revenge",
+            "BigAl_WNBA_Enhancer_WinningHomeDoubleRevengeDog": "WNBA Winning Home Double-Revenge Dog",
+            "BigAl_WNBA_Enhancer_WinningHomeDoubleRevenge": "WNBA Winning Home Double-Revenge",
+            "BigAl_CFL_Enhancer_WinlessRevengeBigDog": "CFL Winless Revenge +9 Dog",
+        }
+        enh = []
+        for c, lab in _enhancer_ui_labels.items():
+            if c in r.index and pd.to_numeric(r[c], errors="coerce") == 1 and lab not in enh:
+                enh.append(lab)
+            if len(enh) >= 2:
+                break
+        if enh:
+            if mk == "h2h":
+                return "ML ENHANCER · " + " | ".join(enh)
+            if mk == "spreads":
+                return "SPREAD ENHANCER · " + " | ".join(enh)
+            if mk == "totals":
+                return "TOTAL ENHANCER · " + " | ".join(enh)
+            return "BIG AL ENHANCER · " + " | ".join(enh)
+
+        # No exact system or enhancer: show a concise, non-duplicative context summary.
         context_priority = [
+            ("BigAl_Hoops_Revenge_Context_Active", "Same-Season Revenge"),
+            ("BigAl_Hoops_Revenge_LastMeeting_SiteFlip", "Revenge Site Flip"),
             ("BigAl_Context_Game2_NonConference_Home", "Game 2 Non-Conf Home"),
             ("BigAl_Context_Conference_Home_Dog", "Conference Home Dog"),
             ("BigAl_Context_Division_Home_Dog", "Division Home Dog"),
