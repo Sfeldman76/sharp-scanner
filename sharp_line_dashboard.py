@@ -15124,6 +15124,191 @@ def train_sharp_model_from_bq(
         df_market = add_ai_betting_brain_training_targets(df_market)
         df_market = _build_three_targets(df_market)
         _debug_target_counts(df_market, market)
+
+        # ================================================================
+        # V11 AI BRAIN AUDIT — feature population, logic, targets, examples
+        # ================================================================
+        def _audit_ai_brain_frame(df_audit: pd.DataFrame, market_name: str, max_review_rows: int = 30):
+            """Diagnostic-only audit for V11 Brain_* features and training targets.
+
+            This function NEVER mutates training data and its outputs are not offered
+            to AutoFS.  It is intentionally verbose so Cloud Run logs can verify that
+            the AI-brain layer attached and populated correctly before model fitting.
+            """
+            try:
+                if df_audit is None:
+                    print("[BRAIN-AUDIT] SKIP - dataframe is None")
+                    return
+
+                brain_cols_all = [c for c in df_audit.columns if str(c).startswith("Brain_")]
+                target_cols = [c for c in brain_cols_all if str(c).startswith("Brain_Target_")]
+                predictor_brain_cols = [c for c in brain_cols_all if c not in target_cols]
+
+                print("\n" + "=" * 100)
+                print(f"AI BRAIN AUDIT | market={str(market_name).upper()} | rows={len(df_audit):,}")
+                print("=" * 100)
+                print(f"[BRAIN-QUICK] Brain columns found={len(brain_cols_all)} predictors={len(predictor_brain_cols)} targets={len(target_cols)}")
+
+                # 1) Duplicate / merge-corruption check.
+                dup_named = [c for c in df_audit.columns if str(c).endswith("_x") or str(c).endswith("_y")]
+                duplicate_labels = df_audit.columns[df_audit.columns.duplicated()].tolist()
+                print("\n[BRAIN-AUDIT:DUPLICATES]")
+                print(f"_x/_y columns={len(dup_named)}" + (f" sample={dup_named[:20]}" if dup_named else " PASS"))
+                print(f"duplicate column labels={len(duplicate_labels)}" + (f" sample={duplicate_labels[:20]}" if duplicate_labels else " PASS"))
+
+                # 2) Population / distribution check for every Brain predictor.
+                print("\n[BRAIN-AUDIT:POPULATION]")
+                pop_rows = []
+                for c in predictor_brain_cols:
+                    s = pd.to_numeric(df_audit[c], errors="coerce")
+                    pop_rows.append({
+                        "Feature": c,
+                        "NonNullPct": round(float(s.notna().mean() * 100.0), 2),
+                        "NonZeroPct": round(float((s.fillna(0) != 0).mean() * 100.0), 2),
+                        "Min": float(s.min()) if s.notna().any() else np.nan,
+                        "Mean": float(s.mean()) if s.notna().any() else np.nan,
+                        "Max": float(s.max()) if s.notna().any() else np.nan,
+                        "Unique": int(s.nunique(dropna=True)),
+                    })
+                if pop_rows:
+                    pop_df = pd.DataFrame(pop_rows).sort_values("Feature")
+                    print(pop_df.to_string(index=False))
+                    dead = pop_df[(pop_df["NonNullPct"] == 0) | (pop_df["NonZeroPct"] == 0)]
+                    if len(dead):
+                        print("[BRAIN-AUDIT:POPULATION-WARN] zero/unpopulated features:")
+                        print(dead[["Feature","NonNullPct","NonZeroPct"]].to_string(index=False))
+                else:
+                    print("FAIL - no non-target Brain_* predictor columns found")
+
+                # 3) Mechanical range checks. Current V11 strength measures are unsigned 0..1.
+                binary_cols = [
+                    "Brain_Regime_EarlySeason", "Brain_Regime_MatureSeason", "Brain_Regime_LateSeason",
+                    "Brain_Regime_QuietMarket", "Brain_Regime_ActiveMarket", "Brain_Regime_SteamMarket",
+                    "Brain_Regime_KeyNumberMarket", "Brain_BigAl_Pathi_Agreement", "Brain_BigAl_Pathi_Conflict",
+                    "Brain_BigAl_Market_Agreement", "Brain_BigAl_Market_Conflict",
+                    "Brain_Pathi_Market_Agreement", "Brain_Pathi_Market_Conflict",
+                    "Brain_AllIndependent_Agree",
+                ]
+                unit_cols = [
+                    "Brain_Expert_BigAl_Strength", "Brain_Expert_BigAl_Readiness",
+                    "Brain_Expert_Pathi_Strength", "Brain_Expert_Market_Strength",
+                    "Brain_Expert_Power_Strength", "Brain_Expert_Form_Strength",
+                    "Brain_Expert_Schedule_Strength", "Brain_Expert_Price_Strength",
+                    "Brain_Expert_Mean_Strength", "Brain_Expert_Max_Strength",
+                    "Brain_Expert_Dispersion", "Brain_Uncertainty_Proxy",
+                    "Brain_Decision_Readiness", "Brain_Current_Implied_Prob",
+                ]
+
+                def _range_check(col, lo, hi):
+                    if col not in df_audit.columns:
+                        print(f"MISSING - {col}")
+                        return
+                    s = pd.to_numeric(df_audit[col], errors="coerce")
+                    bad = s.notna() & ((s < lo) | (s > hi))
+                    if bad.any():
+                        print(f"FAIL - {col}: bad={int(bad.sum())} expected=[{lo},{hi}] min={s.min()} max={s.max()}")
+                    else:
+                        print(f"PASS - {col} range=[{lo},{hi}] observed_min={s.min()} observed_max={s.max()}")
+
+                print("\n[BRAIN-AUDIT:RANGES]")
+                for c in binary_cols:
+                    _range_check(c, 0, 1)
+                for c in unit_cols:
+                    _range_check(c, 0, 1)
+                _range_check("Brain_Conflict_Count", 0, 3)
+                _range_check("Brain_Expert_Active_Count", 0, 7)
+                _range_check("Brain_Edge_Durability", 0, 100)
+
+                # 4) Internal logic contradictions.
+                print("\n[BRAIN-AUDIT:LOGIC]")
+                season_cols = ["Brain_Regime_EarlySeason", "Brain_Regime_MatureSeason", "Brain_Regime_LateSeason"]
+                if all(c in df_audit.columns for c in season_cols):
+                    season_sum = df_audit[season_cols].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)
+                    print(f"season-stage rows with >1 active regime={int((season_sum > 1).sum())}")
+                if {"Brain_Regime_QuietMarket", "Brain_Regime_ActiveMarket"}.issubset(df_audit.columns):
+                    q = pd.to_numeric(df_audit["Brain_Regime_QuietMarket"], errors="coerce").fillna(0).eq(1)
+                    a = pd.to_numeric(df_audit["Brain_Regime_ActiveMarket"], errors="coerce").fillna(0).eq(1)
+                    print(f"rows both Quiet AND Active={int((q & a).sum())}")
+                for agree, conflict in [
+                    ("Brain_BigAl_Pathi_Agreement", "Brain_BigAl_Pathi_Conflict"),
+                    ("Brain_BigAl_Market_Agreement", "Brain_BigAl_Market_Conflict"),
+                    ("Brain_Pathi_Market_Agreement", "Brain_Pathi_Market_Conflict"),
+                ]:
+                    if agree in df_audit.columns and conflict in df_audit.columns:
+                        aa = pd.to_numeric(df_audit[agree], errors="coerce").fillna(0).eq(1)
+                        cc = pd.to_numeric(df_audit[conflict], errors="coerce").fillna(0).eq(1)
+                        print(f"{agree} AND {conflict} simultaneously={int((aa & cc).sum())}")
+
+                # 5) Historical target availability and oracle distribution.
+                print("\n[BRAIN-AUDIT:TARGETS]")
+                if target_cols:
+                    for c in sorted(target_cols):
+                        s = pd.to_numeric(df_audit[c], errors="coerce")
+                        print(
+                            f"{c}: nonnull={int(s.notna().sum()):,}/{len(s):,} ({s.notna().mean()*100:.2f}%) "
+                            f"min={s.min()} mean={s.mean()} max={s.max()}"
+                        )
+                else:
+                    print("No Brain_Target_* columns found")
+                if "Brain_Target_Action_Oracle" in df_audit.columns:
+                    print("Oracle action distribution (0=PASS, 1=WAIT, 2=BET_NOW):")
+                    print(df_audit["Brain_Target_Action_Oracle"].value_counts(dropna=False).sort_index().to_string())
+                    if "Sport" in df_audit.columns:
+                        print("Oracle action distribution by sport:")
+                        print(pd.crosstab(df_audit["Sport"], df_audit["Brain_Target_Action_Oracle"], dropna=False).to_string())
+
+                # 6) By-sport expert summary catches routing/population failures.
+                expert_summary_cols = [c for c in [
+                    "Brain_Expert_BigAl_Strength", "Brain_Expert_BigAl_Readiness",
+                    "Brain_Expert_Pathi_Strength", "Brain_Expert_Market_Strength",
+                    "Brain_Expert_Power_Strength", "Brain_Expert_Form_Strength",
+                    "Brain_Expert_Schedule_Strength", "Brain_Expert_Price_Strength",
+                    "Brain_Expert_Active_Count", "Brain_Conflict_Count",
+                    "Brain_Uncertainty_Proxy", "Brain_Edge_Durability", "Brain_Decision_Readiness",
+                ] if c in df_audit.columns]
+                if "Sport" in df_audit.columns and expert_summary_cols:
+                    print("\n[BRAIN-AUDIT:BY-SPORT]")
+                    tmp = df_audit[["Sport"] + expert_summary_cols].copy()
+                    for c in expert_summary_cols:
+                        tmp[c] = pd.to_numeric(tmp[c], errors="coerce")
+                    print(tmp.groupby("Sport", dropna=False)[expert_summary_cols].agg(["mean", "median", "max"]).round(4).to_string())
+
+                # 7) Representative rows for visual sanity-checking.
+                review_cols = [c for c in [
+                    "Sport", "Game_Key", "Team", "Opponent", "Market", "Outcome", "Value", "Odds_Price",
+                    "BigAl_System_Count", "BigAl_Tightener_Count", "BigAl_Enhancer_Count", "BigAl_DataReady_Count",
+                    "System_Net_Signal", "System_Consensus_Ratio",
+                    "Brain_Regime_EarlySeason", "Brain_Regime_MatureSeason", "Brain_Regime_LateSeason",
+                    "Brain_Regime_QuietMarket", "Brain_Regime_ActiveMarket", "Brain_Regime_SteamMarket",
+                    "Brain_Regime_KeyNumberMarket", "Brain_Expert_BigAl_Strength", "Brain_Expert_BigAl_Readiness",
+                    "Brain_Expert_Pathi_Strength", "Brain_Expert_Market_Strength", "Brain_Expert_Power_Strength",
+                    "Brain_Expert_Form_Strength", "Brain_Expert_Schedule_Strength", "Brain_Expert_Price_Strength",
+                    "Brain_BigAl_Pathi_Agreement", "Brain_BigAl_Pathi_Conflict",
+                    "Brain_BigAl_Market_Agreement", "Brain_BigAl_Market_Conflict",
+                    "Brain_Pathi_Market_Agreement", "Brain_Pathi_Market_Conflict",
+                    "Brain_Expert_Active_Count", "Brain_Conflict_Count", "Brain_Uncertainty_Proxy",
+                    "Brain_Edge_Durability", "Brain_Decision_Readiness",
+                    "Brain_Target_Close_Value_Delta", "Brain_Target_Close_ImpliedProb_Delta",
+                    "Brain_Target_Positive_CLV", "Brain_Target_Future_Best_Value", "Brain_Target_Action_Oracle",
+                ] if c in df_audit.columns]
+                if review_cols and len(df_audit):
+                    n = min(int(max_review_rows), len(df_audit))
+                    # Use latest rows when timestamps exist; otherwise tail preserves current ordering.
+                    if "Snapshot_Timestamp" in df_audit.columns:
+                        order = pd.to_datetime(df_audit["Snapshot_Timestamp"], errors="coerce", utc=True).sort_values().index
+                        review = df_audit.loc[order, review_cols].tail(n)
+                    else:
+                        review = df_audit[review_cols].tail(n)
+                    print(f"\n[BRAIN-AUDIT:REPRESENTATIVE-ROWS] last {n} rows")
+                    print(review.to_string(index=False))
+
+                print("=" * 100 + "\n")
+            except Exception as e:
+                # Diagnostics must never abort production training.
+                print(f"[BRAIN-AUDIT] WARNING - audit failed but training will continue: {type(e).__name__}: {e}")
+
+
+        _audit_ai_brain_frame(df_market, market)
         
         # Stable identity shared by all head-specific frames
         df_market = df_market.copy()
@@ -15421,6 +15606,25 @@ def train_sharp_model_from_bq(
         features_pruned = tuple(feature_cols)
         
         st.write(f"✅ Final feature count after pruning: {len(features_pruned)}")
+
+        # Final post-pruning Brain visibility + leakage audit.
+        # Brain_Target_* columns intentionally use future information and MUST NEVER
+        # be part of predictor feature_cols/features_pruned.
+        _brain_final = [c for c in features_pruned if str(c).startswith("Brain_")]
+        _brain_targets_in_model = [c for c in features_pruned if str(c).startswith("Brain_Target_")]
+        print("\n[BRAIN-AUDIT:FINAL-MODEL-FEATURES]")
+        print(f"Final features={len(features_pruned)} | Brain predictors reaching model matrix={len(_brain_final)}")
+        print("Brain predictors in final matrix:")
+        print(_brain_final if _brain_final else "NONE")
+        print("TARGET LEAKAGE INTO MODEL FEATURES:")
+        print(_brain_targets_in_model)
+        if _brain_targets_in_model:
+            raise RuntimeError(
+                "LEAKAGE BLOCK: Brain_Target_* future-label columns entered the model feature matrix: "
+                + ", ".join(_brain_targets_in_model)
+            )
+        else:
+            print("PASS - no Brain_Target_* columns in model features")
 
         
         # ----------------------------
