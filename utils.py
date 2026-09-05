@@ -8191,6 +8191,7 @@ def _merge_feature_overwrite(left: pd.DataFrame, right: pd.DataFrame, on, how="l
 
 
 
+# V11.5.5.4: missing-column-safe fair-value/post-model layer
 def attach_fair_value_bet_pass_fields(df: pd.DataFrame) -> pd.DataFrame:
     """Post-model value layer: fair price/line, EV, and transparent BET/PASS policy.
 
@@ -8201,8 +8202,19 @@ def attach_fair_value_bet_pass_fields(df: pd.DataFrame) -> pd.DataFrame:
         return df
     out = df.copy()
     idx = out.index
-    p = pd.to_numeric(out.get("Model_Sharp_Win_Prob", np.nan), errors="coerce").clip(1e-6, 1-1e-6)
-    odds = pd.to_numeric(out.get("Odds_Price", np.nan), errors="coerce")
+
+    # Always return an index-aligned Series, even when an optional column is absent.
+    # DataFrame.get(..., scalar_default) returns a scalar; downstream .fillna/.gt/.loc
+    # calls then fail (e.g. System_Side_Consensus_Count missing on some scored frames).
+    def _num_series(name: str, default=np.nan) -> pd.Series:
+        if name in out.columns:
+            v = pd.to_numeric(out[name], errors="coerce")
+            if isinstance(v, pd.Series):
+                return v.reindex(idx)
+        return pd.Series(default, index=idx, dtype="float64")
+
+    p = _num_series("Model_Sharp_Win_Prob").clip(1e-6, 1-1e-6)
+    odds = _num_series("Odds_Price")
 
     # American market odds -> break-even probability and $1-profit payout.
     imp = pd.Series(np.nan, index=idx, dtype="float64")
@@ -8231,8 +8243,8 @@ def attach_fair_value_bet_pass_fields(df: pd.DataFrame) -> pd.DataFrame:
     source = pd.Series("model fair odds", index=idx, dtype="object")
     # Existing ratings/total components are genuine model estimates; do not invent
     # a point-spread transform when one is unavailable.
-    spread_est = pd.to_numeric(out.get("Outcome_Model_Spread", np.nan), errors="coerce")
-    total_est = pd.to_numeric(out.get("TOT_Proj_Total_Baseline", np.nan), errors="coerce")
+    spread_est = _num_series("Outcome_Model_Spread")
+    total_est = _num_series("TOT_Proj_Total_Baseline")
     sm = m.isin(["spread", "spreads"]) & spread_est.notna()
     tm = m.isin(["total", "totals"]) & total_est.notna()
     hm = m.isin(["h2h", "moneyline", "ml", "headtohead"])
@@ -8250,10 +8262,10 @@ def attach_fair_value_bet_pass_fields(df: pd.DataFrame) -> pd.DataFrame:
     # Mature, stable system history can reduce the edge hurdle slightly; weak
     # decaying system history raises it.  Non-system bets retain the base hurdle.
     threshold = pd.Series(0.020, index=idx, dtype="float64")
-    sample = pd.to_numeric(out.get("System_Reliability_Sample_Prior", np.nan), errors="coerce")
-    shr = pd.to_numeric(out.get("System_Reliability_Shrunk_HitRate_Prior", np.nan), errors="coerce")
-    stab = pd.to_numeric(out.get("System_Reliability_Stability_Score", np.nan), errors="coerce")
-    active = pd.to_numeric(out.get("System_Side_Consensus_Count", 0), errors="coerce").fillna(0).gt(0)
+    sample = _num_series("System_Reliability_Sample_Prior")
+    shr = _num_series("System_Reliability_Shrunk_HitRate_Prior")
+    stab = _num_series("System_Reliability_Stability_Score")
+    active = _num_series("System_Side_Consensus_Count", 0.0).fillna(0.0).gt(0.0)
     strong = active & sample.ge(25) & shr.ge(0.55) & stab.ge(0.60)
     weak = active & sample.ge(25) & shr.lt(0.49)
     threshold.loc[strong] = 0.015
