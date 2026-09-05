@@ -1,4 +1,4 @@
-# V11.4: Expert Active/Direction/Intensity layer + Pathi/BigAl/Brain integrity audit
+# V11.2: Expert Active/Direction/Intensity layer + Pathi/BigAl/Brain integrity audit
 
 import streamlit as st
 import time  # keep only if you use it elsewhere
