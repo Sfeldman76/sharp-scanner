@@ -1,3 +1,4 @@
+# V11.2: Expert Active/Direction/Intensity layer + Pathi/BigAl/Brain integrity audit
 
 import streamlit as st
 import time  # keep only if you use it elsewhere
@@ -3007,10 +3008,15 @@ def log_bigal_training_coverage(df_market: pd.DataFrame, sport: str, market: str
 
 
 def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Leakage-safe meta-brain features built only from information available now.
+    """Leakage-safe expert-state / meta-brain features.
 
-    This is a mixture-of-experts / regime layer. It does not assume any family is
-    correct; AutoFS/meta models learn which families deserve weight by sport/regime.
+    V11.2 separates each expert family into:
+      * Active    -- does this family have a real opinion/evidence now?
+      * Direction -- +1 supports this row/outcome, -1 opposes it, 0 neutral/unknown
+      * Intensity -- unsigned strength of the currently active evidence (0..1)
+
+    Credibility/trust is intentionally NOT hard-coded here.  That later layer must
+    be learned from historical out-of-sample outcome/CLV performance by regime.
     """
     if df is None or df.empty:
         return df.copy() if df is not None else df
@@ -3022,38 +3028,109 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
         for name in names:
             if name in out.columns:
                 s = s.combine_first(pd.to_numeric(out[name], errors='coerce'))
-        if default is not np.nan:
+        if not (isinstance(default, float) and np.isnan(default)):
             s = s.fillna(default)
         return s
 
     def flag(name):
         return num(name, default=0).fillna(0).gt(0).astype('int8')
 
+    def sgn(s, eps=1e-12):
+        z = pd.to_numeric(s, errors='coerce').fillna(0.0)
+        return pd.Series(np.where(z > eps, 1, np.where(z < -eps, -1, 0)), index=idx, dtype='int8')
+
+    def install_expert(name, active, direction, intensity):
+        a = pd.Series(active, index=idx).fillna(False).astype(bool)
+        d = pd.Series(direction, index=idx).fillna(0).astype('int8')
+        inten = pd.to_numeric(pd.Series(intensity, index=idx), errors='coerce').fillna(0.0).clip(0, 1)
+        # No phantom expert: inactive means neutral and zero intensity.
+        d = d.where(a, 0).astype('int8')
+        inten = inten.where(a, 0.0).astype('float32')
+        out[f'Brain_Expert_{name}_Active'] = a.astype('int8')
+        out[f'Brain_Expert_{name}_Direction'] = d
+        out[f'Brain_Expert_{name}_Intensity'] = inten
+        # Preserve V11 names so existing model contracts do not break.
+        out[f'Brain_Expert_{name}_Strength'] = inten
+
     sport = out.get('Sport', pd.Series('', index=idx)).astype(str).str.upper().str.strip()
     market = out.get('Market', pd.Series('', index=idx)).astype(str).str.lower().str.strip()
 
-    # -------------------------
-    # Regime detection
-    # -------------------------
+    # ------------------------------------------------------------------
+    # 1) Mutually-exclusive season regime detection.
+    # ------------------------------------------------------------------
     game_no = num('BigAl_Context_Team_Game_Number', 'Team_Game_Number')
     week = num('Week_Number', 'BigAl_Context_Week_Number')
-    is_early = (game_no.le(4) | week.le(4)).fillna(False)
-    is_late = (
+    known_stage = game_no.notna() | week.notna()
+    early_raw = ((game_no.notna() & game_no.le(4)) | (week.notna() & week.le(4)))
+    late_raw = (
         flag('Final_Two_Regular_Season').eq(1)
         | num('BigAl_Context_Week_9_Plus', default=0).eq(1)
-        | game_no.ge(12)
+        | (game_no.notna() & game_no.ge(12))
     )
+    is_early = known_stage & early_raw
+    is_late = known_stage & late_raw & ~is_early
+    is_mature = known_stage & ~is_early & ~is_late
     out['Brain_Regime_EarlySeason'] = is_early.astype('int8')
+    out['Brain_Regime_MatureSeason'] = is_mature.astype('int8')
     out['Brain_Regime_LateSeason'] = is_late.astype('int8')
-    out['Brain_Regime_MatureSeason'] = (~is_early & ~is_late & (game_no.notna() | week.notna())).astype('int8')
 
-    line_move = num('Line_Move_From_Open', 'Abs_Line_Move_From_Opening', 'Sharp_Line_Magnitude', default=0).abs()
-    velocity = num('Line_Move_Velocity_60m', 'Line_Move_Velocity_120m', default=0).abs()
-    dir_changes = num('Direction_Changes_Count', default=0)
-    sharp_cons = num('Sharp_Consensus_Direction', 'Pct_Books_Aligned', default=0).abs()
-    out['Brain_Regime_QuietMarket'] = ((line_move < 0.5) & (velocity < 0.25) & (dir_changes <= 1)).astype('int8')
-    out['Brain_Regime_ActiveMarket'] = ((line_move >= 0.5) | (velocity >= 0.25)).astype('int8')
-    out['Brain_Regime_SteamMarket'] = ((line_move >= 1.0) & (sharp_cons >= 0.5)).astype('int8')
+    # ------------------------------------------------------------------
+    # 2) Market state built from fields that are already populated in this model.
+    # ------------------------------------------------------------------
+    line_move = num('Abs_Line_Move_From_Opening', 'Line_Move_From_Open', 'Sharp_Line_Magnitude', default=0).abs()
+    sharp_line_mag = num('Sharp_Line_Magnitude', default=0).abs()
+    velocity = pd.concat([
+        num('Line_Move_Velocity_60m', default=0).abs(),
+        num('Line_Move_Velocity_120m', default=0).abs(),
+    ], axis=1).max(axis=1)
+    books_align = num('Pct_Books_Aligned', default=0).clip(0, 1)
+    sharp_gap = num('Sharp_Rec_Prob_Gap', default=0).abs()
+    sharp_odds_mag = num('SharpMove_Odds_Mag', default=0).abs()
+    limit_mag = num('LimitProtect_SharpMag', default=0).abs()
+    sharp_signal = flag('Sharp_Move_Signal')
+    leader = flag('Market_Leader')
+    reversal = (flag('Value_Reversal_Flag').eq(1) | flag('Odds_Reversal_Flag').eq(1)).astype('int8')
+    toward = flag('Line_Moved_Toward_Team')
+    away = flag('Line_Moved_Away_From_Team')
+
+    market_intensity_raw = (
+        0.24*np.tanh(line_move/1.25)
+        + 0.16*np.tanh(sharp_line_mag/0.75)
+        + 0.12*np.tanh(velocity/0.50)
+        + 0.16*books_align
+        + 0.10*np.tanh(sharp_gap/0.025)
+        + 0.08*np.tanh(sharp_odds_mag/12.0)
+        + 0.05*np.tanh(limit_mag/0.75)
+        + 0.05*sharp_signal.astype(float)
+        + 0.02*leader.astype(float)
+        + 0.02*reversal.astype(float)
+    ).clip(0, 1)
+
+    market_dir_primary = toward.astype(int) - away.astype(int)
+    market_dir_gap = sgn(num('Sharp_Rec_Prob_Gap', default=0), eps=0.0025)
+    market_direction = pd.Series(
+        np.where(market_dir_primary != 0, np.sign(market_dir_primary), market_dir_gap),
+        index=idx, dtype='int8'
+    )
+    market_active = (
+        market_dir_primary.ne(0)
+        | sharp_signal.eq(1)
+        | reversal.eq(1)
+        | line_move.ge(0.25)
+        | sharp_line_mag.ge(0.15)
+        | sharp_gap.ge(0.0025)
+        | sharp_odds_mag.gt(0)
+    )
+    market_intensity = market_intensity_raw.where(market_active, 0.0)
+
+    out['Brain_Regime_ActiveMarket'] = market_active.astype('int8')
+    out['Brain_Regime_QuietMarket'] = (~market_active).astype('int8')
+    steam = (
+        market_active
+        & (sharp_signal.eq(1) | sharp_line_mag.ge(0.5) | line_move.ge(1.0))
+        & (books_align.ge(0.60) | sharp_gap.ge(0.01) | leader.eq(1))
+    )
+    out['Brain_Regime_SteamMarket'] = steam.astype('int8')
 
     key_market = (
         flag('Pathi_FB_On_Key_3').eq(1) | flag('Pathi_FB_On_Key_7').eq(1)
@@ -3062,111 +3139,186 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
     ) & sport.isin(['NFL','NCAAF']) & market.eq('spreads')
     out['Brain_Regime_KeyNumberMarket'] = key_market.astype('int8')
 
-    # -------------------------
-    # Synthetic expert/family strengths (0..1-ish)
-    # -------------------------
+    # ------------------------------------------------------------------
+    # 3) BIG AL expert state.
+    # ------------------------------------------------------------------
     bigal_exact = num('BigAl_System_Count', 'BigAl_Active_System_Count', default=0)
     bigal_tight = num('BigAl_Tightener_Count', 'BigAl_Active_Tightener_Count', default=0)
     bigal_enh = num('BigAl_Enhancer_Count', default=0)
     bigal_ready = num('BigAl_DataReady_Count', default=0)
-    out['Brain_Expert_BigAl_Strength'] = np.tanh((1.00*bigal_exact + 0.55*bigal_tight + 0.25*bigal_enh) / 2.0).astype('float32')
+    bigal_active = (bigal_exact + bigal_tight + bigal_enh).gt(0)
+    bigal_intensity = np.tanh((1.00*bigal_exact + 0.55*bigal_tight + 0.25*bigal_enh) / 2.0)
+    bigal_side_net = num('BigAl_Side_Net_Signal', default=0)
+    bigal_total_signed = num('BigAl_Total_System_Signed', default=0)
+    bigal_dir = pd.Series(0, index=idx, dtype='int8')
+    is_total = market.eq('totals')
+    bigal_dir.loc[is_total] = sgn(bigal_total_signed).loc[is_total]
+    bigal_dir.loc[~is_total] = sgn(bigal_side_net).loc[~is_total]
+    # Big Al enhancers in this build are play-on-current-row ingredients. If no
+    # exact directional system is active, let a live enhancer express +1.
+    bigal_dir = bigal_dir.where(~(bigal_dir.eq(0) & bigal_enh.gt(0)), 1).astype('int8')
+    install_expert('BigAl', bigal_active, bigal_dir, bigal_intensity)
     out['Brain_Expert_BigAl_Readiness'] = (bigal_ready / (bigal_ready + 5.0)).fillna(0).astype('float32')
 
+    # ------------------------------------------------------------------
+    # 4) PATHI expert state. DataReady alone no longer creates phantom strength.
+    # ------------------------------------------------------------------
     pathi_count = num('Pathi_System_Count', default=0)
-    pathi_key = (
-        flag('Pathi_FB_Moved_Through_Key') + flag('Pathi_FB_Crossed_Key_Toward_Team')
-        + flag('Pathi_FB_Key_DataReady')
-    ).astype(float)
-    out['Brain_Expert_Pathi_Strength'] = np.tanh((pathi_count + 0.35*pathi_key) / 2.0).astype('float32')
-
-    market_strength = (
-        0.35*np.tanh(line_move/1.5)
-        + 0.25*np.tanh(velocity/0.75)
-        + 0.25*np.clip(sharp_cons, 0, 1)
-        + 0.15*np.clip(num('Pct_Books_Aligned', default=0), 0, 1)
+    system_net = num('System_Net_Signal', default=0)
+    pathi_net = system_net - bigal_side_net
+    key_toward = flag('Pathi_FB_Crossed_Key_Toward_Team')
+    key_away = flag('Pathi_FB_Crossed_Key_Away_From_Team')
+    key_dir = key_toward.astype(int) - key_away.astype(int)
+    pathi_dir = sgn(pathi_net)
+    pathi_dir = pathi_dir.where(~pathi_dir.eq(0), sgn(key_dir)).astype('int8')
+    key_evidence = (
+        flag('Pathi_FB_Moved_Through_Key').astype(float)
+        + key_toward.astype(float) + key_away.astype(float)
+        + flag('Pathi_FB_Moved_Onto_Key').astype(float)
+        + flag('Pathi_FB_Moved_Off_Key').astype(float)
     )
-    out['Brain_Expert_Market_Strength'] = np.clip(market_strength, 0, 1).astype('float32')
+    pathi_active = pathi_count.gt(0) | key_dir.ne(0) | key_evidence.gt(0)
+    pathi_intensity = np.tanh((pathi_count + 0.50*key_evidence) / 2.0)
+    install_expert('Pathi', pathi_active, pathi_dir, pathi_intensity)
 
-    power_gap = num('PR_Rating_Diff', 'Power_Rating_Diff', default=0).abs()
-    out['Brain_Expert_Power_Strength'] = np.tanh(power_gap / 7.0).astype('float32')
+    # ------------------------------------------------------------------
+    # 5) MARKET expert state.
+    # ------------------------------------------------------------------
+    install_expert('Market', market_active, market_direction, market_intensity)
 
-    form = pd.concat([
-        num('Team_Recent_Cover_Rate'), num('WinPct_Prior_System'),
-        num('BigAl_MLB_Recent_vs_Season_WinPct_Delta')
-    ], axis=1).abs().mean(axis=1, skipna=True).fillna(0)
-    out['Brain_Expert_Form_Strength'] = np.clip(form, 0, 1).astype('float32')
+    # ------------------------------------------------------------------
+    # 6) POWER expert state.
+    # ------------------------------------------------------------------
+    power_gap = num('PR_Rating_Diff', 'Power_Rating_Diff')
+    power_active = power_gap.notna() & power_gap.abs().ge(0.50)
+    power_direction = sgn(power_gap, eps=0.50)
+    power_intensity = np.tanh(power_gap.abs().fillna(0)/7.0)
+    install_expert('Power', power_active, power_direction, power_intensity)
 
-    sched = pd.concat([
-        flag('Is_B2B').astype(float), flag('Is_3in4').astype(float),
-        flag('BigAl_Context_Had_Bye_Proxy').astype(float),
-        num('Days_Since_Last_Game_System').fillna(0).clip(0, 14)/14.0,
-    ], axis=1).mean(axis=1, skipna=True).fillna(0)
-    out['Brain_Expert_Schedule_Strength'] = np.clip(sched, 0, 1).astype('float32')
+    # ------------------------------------------------------------------
+    # 7) FORM expert state: deviation from neutral, not raw win pct magnitude.
+    # ------------------------------------------------------------------
+    form_components = pd.concat([
+        (num('Team_Recent_Cover_Rate') - 0.50),
+        (num('WinPct_Prior_System') - 0.50),
+        num('BigAl_MLB_Recent_vs_Season_WinPct_Delta'),
+    ], axis=1)
+    form_signed = form_components.mean(axis=1, skipna=True)
+    form_obs = form_components.notna().sum(axis=1)
+    form_active = form_obs.gt(0) & form_signed.abs().ge(0.025)
+    form_direction = sgn(form_signed, eps=0.025)
+    form_intensity = np.tanh(form_signed.abs().fillna(0)*4.0)
+    install_expert('Form', form_active, form_direction, form_intensity)
 
-    price = pd.concat([
+    # ------------------------------------------------------------------
+    # 8) SCHEDULE expert state: explicit stress/rest flags only.
+    # ------------------------------------------------------------------
+    b2b = flag('Is_B2B')
+    three4 = flag('Is_3in4')
+    bye = flag('BigAl_Context_Had_Bye_Proxy')
+    sched_signed = bye.astype(float) - b2b.astype(float) - 0.75*three4.astype(float)
+    sched_active = b2b.eq(1) | three4.eq(1) | bye.eq(1)
+    sched_direction = sgn(sched_signed)
+    sched_intensity = np.tanh(sched_signed.abs())
+    install_expert('Schedule', sched_active, sched_direction, sched_intensity)
+
+    # ------------------------------------------------------------------
+    # 9) PRICE/VALUE expert state. Direction comes from explicit mispricing.
+    # ------------------------------------------------------------------
+    mispricing = num('Market_Mispricing')
+    if mispricing.isna().all():
+        # Secondary leak-safe fallback: sharp-vs-rec probability gap is relative to
+        # the current outcome and therefore has a clear sign.
+        mispricing = num('Sharp_Rec_Prob_Gap')
+    price_mag = pd.concat([
         num('Current_vs_Best_Line').abs(), num('Current_vs_Worst_Line').abs(),
         num('ML_Price_ZScore_vs_TeamHistory').abs(), num('Role_Price_Shift').abs(),
         num('Implied_Prob_Shift').abs()*10.0,
     ], axis=1).mean(axis=1, skipna=True).fillna(0)
-    out['Brain_Expert_Price_Strength'] = np.tanh(price).astype('float32')
+    price_active = mispricing.notna() & mispricing.abs().ge(0.01)
+    price_direction = sgn(mispricing, eps=0.01)
+    price_intensity = np.maximum(np.tanh(price_mag), np.tanh(mispricing.abs().fillna(0)*8.0))
+    install_expert('Price', price_active, price_direction, price_intensity)
 
-    expert_cols = [
-        'Brain_Expert_BigAl_Strength','Brain_Expert_Pathi_Strength','Brain_Expert_Market_Strength',
-        'Brain_Expert_Power_Strength','Brain_Expert_Form_Strength','Brain_Expert_Schedule_Strength',
-        'Brain_Expert_Price_Strength'
-    ]
-    ex = out[expert_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
-    out['Brain_Expert_Mean_Strength'] = ex.mean(axis=1).astype('float32')
+    # ------------------------------------------------------------------
+    # 10) Expert ensemble summaries from real active states only.
+    # ------------------------------------------------------------------
+    expert_names = ['BigAl','Pathi','Market','Power','Form','Schedule','Price']
+    intensity_cols = [f'Brain_Expert_{n}_Intensity' for n in expert_names]
+    active_cols = [f'Brain_Expert_{n}_Active' for n in expert_names]
+    ex = out[intensity_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
+    ac = out[active_cols].apply(pd.to_numeric, errors='coerce').fillna(0).gt(0)
+    ex_active = ex.where(ac)
+    out['Brain_Expert_Mean_Strength'] = ex_active.mean(axis=1, skipna=True).fillna(0).astype('float32')
     out['Brain_Expert_Max_Strength'] = ex.max(axis=1).astype('float32')
-    out['Brain_Expert_Dispersion'] = ex.std(axis=1, ddof=0).astype('float32')
-    out['Brain_Expert_Active_Count'] = (ex > 0.20).sum(axis=1).astype('int8')
+    out['Brain_Expert_Dispersion'] = ex_active.std(axis=1, ddof=0, skipna=True).fillna(0).astype('float32')
+    out['Brain_Expert_Active_Count'] = ac.sum(axis=1).astype('int8')
 
-    # -------------------------
-    # Agreement / disagreement
-    # -------------------------
-    bigal_net = num('BigAl_Side_Net_Signal', default=0)
-    system_net = num('System_Net_Signal', default=0)
-    market_dir = num('Sharp_Consensus_Direction', default=0)
-    pathi_proxy = system_net - bigal_net
-    out['Brain_BigAl_Pathi_Agreement'] = ((bigal_net*pathi_proxy) > 0).astype('int8')
-    out['Brain_BigAl_Pathi_Conflict'] = ((bigal_net*pathi_proxy) < 0).astype('int8')
-    out['Brain_BigAl_Market_Agreement'] = ((bigal_net*market_dir) > 0).astype('int8')
-    out['Brain_BigAl_Market_Conflict'] = ((bigal_net*market_dir) < 0).astype('int8')
-    out['Brain_Pathi_Market_Agreement'] = ((pathi_proxy*market_dir) > 0).astype('int8')
-    out['Brain_Pathi_Market_Conflict'] = ((pathi_proxy*market_dir) < 0).astype('int8')
+    # ------------------------------------------------------------------
+    # 11) Directional agreement / disagreement (requires BOTH experts active).
+    # ------------------------------------------------------------------
+    def pair_state(a, b):
+        aa = out[f'Brain_Expert_{a}_Active'].eq(1)
+        bb = out[f'Brain_Expert_{b}_Active'].eq(1)
+        da = pd.to_numeric(out[f'Brain_Expert_{a}_Direction'], errors='coerce').fillna(0)
+        db = pd.to_numeric(out[f'Brain_Expert_{b}_Direction'], errors='coerce').fillna(0)
+        eligible = aa & bb & da.ne(0) & db.ne(0)
+        agree = (eligible & da.eq(db)).astype('int8')
+        conflict = (eligible & da.eq(-db)).astype('int8')
+        return eligible.astype('int8'), agree, conflict
+
+    bp_elig, bp_agree, bp_conf = pair_state('BigAl','Pathi')
+    bm_elig, bm_agree, bm_conf = pair_state('BigAl','Market')
+    pm_elig, pm_agree, pm_conf = pair_state('Pathi','Market')
+    out['Brain_BigAl_Pathi_Agreement'] = bp_agree
+    out['Brain_BigAl_Pathi_Conflict'] = bp_conf
+    out['Brain_BigAl_Market_Agreement'] = bm_agree
+    out['Brain_BigAl_Market_Conflict'] = bm_conf
+    out['Brain_Pathi_Market_Agreement'] = pm_agree
+    out['Brain_Pathi_Market_Conflict'] = pm_conf
     out['Brain_AllIndependent_Agree'] = (
-        out['Brain_BigAl_Pathi_Agreement'].eq(1)
-        & out['Brain_BigAl_Market_Agreement'].eq(1)
-        & out['Brain_Pathi_Market_Agreement'].eq(1)
+        bp_elig.eq(1) & bm_elig.eq(1) & pm_elig.eq(1)
+        & bp_agree.eq(1) & bm_agree.eq(1) & pm_agree.eq(1)
     ).astype('int8')
-    out['Brain_Conflict_Count'] = (
-        out[['Brain_BigAl_Pathi_Conflict','Brain_BigAl_Market_Conflict','Brain_Pathi_Market_Conflict']]
-        .sum(axis=1).astype('int8')
-    )
+    out['Brain_Conflict_Count'] = pd.concat([bp_conf,bm_conf,pm_conf], axis=1).sum(axis=1).astype('int8')
+    pair_eligible_count = pd.concat([bp_elig,bm_elig,pm_elig], axis=1).sum(axis=1).astype(float)
+    pair_agree_count = pd.concat([bp_agree,bm_agree,pm_agree], axis=1).sum(axis=1).astype(float)
+    out['Brain_Directional_Pair_Count'] = pair_eligible_count.astype('int8')
+    out['Brain_Directional_Agreement_Rate'] = np.where(
+        pair_eligible_count > 0, pair_agree_count/pair_eligible_count, np.nan
+    ).astype('float32')
 
-    # -------------------------
-    # Uncertainty, durability, readiness
-    # -------------------------
-    data_ready = np.clip(out['Brain_Expert_Active_Count'].astype(float) / 5.0, 0, 1)
-    agreement = np.clip(
-        (out['Brain_AllIndependent_Agree'].astype(float)*0.55)
-        + (1.0 - np.clip(out['Brain_Conflict_Count'].astype(float)/3.0, 0, 1))*0.45,
-        0, 1,
-    )
+    # ------------------------------------------------------------------
+    # 12) Uncertainty, durability, readiness. No inactive-family free credit.
+    # ------------------------------------------------------------------
+    active_count = out['Brain_Expert_Active_Count'].astype(float)
+    data_ready = np.clip(active_count / 5.0, 0, 1)
+    agree_rate = pd.to_numeric(out['Brain_Directional_Agreement_Rate'], errors='coerce')
+    agreement = agree_rate.fillna(0.0).clip(0,1)
+    conflict_rate = np.where(pair_eligible_count > 0,
+                             out['Brain_Conflict_Count'].astype(float)/pair_eligible_count,
+                             0.0)
     uncertainty = np.clip(
-        0.55*out['Brain_Expert_Dispersion'].astype(float)
-        + 0.45*(1.0-data_ready), 0, 1
+        0.45*out['Brain_Expert_Dispersion'].astype(float)
+        + 0.35*(1.0-data_ready)
+        + 0.20*np.asarray(conflict_rate, dtype=float), 0, 1
     )
     durability = 100.0*np.clip(
-        0.35*agreement + 0.25*data_ready + 0.20*out['Brain_Expert_Market_Strength'].astype(float)
-        + 0.20*out['Brain_Expert_Max_Strength'].astype(float) - 0.30*uncertainty,
+        0.25*agreement
+        + 0.25*data_ready
+        + 0.20*out['Brain_Expert_Market_Intensity'].astype(float)
+        + 0.20*out['Brain_Expert_Max_Strength'].astype(float)
+        + 0.10*np.clip(1.0-np.asarray(conflict_rate, dtype=float),0,1)
+        - 0.30*uncertainty,
         0, 1,
     )
-    out['Brain_Uncertainty_Proxy'] = uncertainty.astype('float32')
-    out['Brain_Edge_Durability'] = durability.astype('float32')
-    out['Brain_Decision_Readiness'] = np.clip((durability/100.0)*(1.0-0.5*uncertainty), 0, 1).astype('float32')
+    out['Brain_Uncertainty_Proxy'] = pd.Series(uncertainty, index=idx).astype('float32')
+    out['Brain_Edge_Durability'] = pd.Series(durability, index=idx).astype('float32')
+    out['Brain_Decision_Readiness'] = np.clip(
+        (durability/100.0) * data_ready * (1.0-0.5*uncertainty), 0, 1
+    ).astype('float32')
 
-    # Current implied probability, useful for close/value meta heads.
+    # Current implied probability, useful for future close/value meta heads.
     odds = num('Odds_Price')
     cur_ip = pd.Series(np.nan, index=idx, dtype='float64')
     pos = odds >= 0
@@ -15349,6 +15501,9 @@ def train_sharp_model_from_bq(
                     "Brain_BigAl_Market_Agreement", "Brain_BigAl_Market_Conflict",
                     "Brain_Pathi_Market_Agreement", "Brain_Pathi_Market_Conflict",
                     "Brain_AllIndependent_Agree",
+                    "Brain_Expert_BigAl_Active", "Brain_Expert_Pathi_Active", "Brain_Expert_Market_Active",
+                    "Brain_Expert_Power_Active", "Brain_Expert_Form_Active", "Brain_Expert_Schedule_Active",
+                    "Brain_Expert_Price_Active",
                 ]
                 unit_cols = [
                     "Brain_Expert_BigAl_Strength", "Brain_Expert_BigAl_Readiness",
@@ -15358,6 +15513,9 @@ def train_sharp_model_from_bq(
                     "Brain_Expert_Mean_Strength", "Brain_Expert_Max_Strength",
                     "Brain_Expert_Dispersion", "Brain_Uncertainty_Proxy",
                     "Brain_Decision_Readiness", "Brain_Current_Implied_Prob",
+                    "Brain_Expert_BigAl_Intensity", "Brain_Expert_Pathi_Intensity", "Brain_Expert_Market_Intensity",
+                    "Brain_Expert_Power_Intensity", "Brain_Expert_Form_Intensity", "Brain_Expert_Schedule_Intensity",
+                    "Brain_Expert_Price_Intensity", "Brain_Directional_Agreement_Rate",
                 ]
 
                 def _range_check(col, lo, hi):
@@ -15376,7 +15534,14 @@ def train_sharp_model_from_bq(
                     _range_check(c, 0, 1)
                 for c in unit_cols:
                     _range_check(c, 0, 1)
+                for c in [
+                    "Brain_Expert_BigAl_Direction", "Brain_Expert_Pathi_Direction", "Brain_Expert_Market_Direction",
+                    "Brain_Expert_Power_Direction", "Brain_Expert_Form_Direction", "Brain_Expert_Schedule_Direction",
+                    "Brain_Expert_Price_Direction",
+                ]:
+                    _range_check(c, -1, 1)
                 _range_check("Brain_Conflict_Count", 0, 3)
+                _range_check("Brain_Directional_Pair_Count", 0, 3)
                 _range_check("Brain_Expert_Active_Count", 0, 7)
                 _range_check("Brain_Edge_Durability", 0, 100)
 
@@ -15448,6 +15613,9 @@ def train_sharp_model_from_bq(
                     "Brain_Regime_EarlySeason", "Brain_Regime_MatureSeason", "Brain_Regime_LateSeason",
                     "Brain_Regime_QuietMarket", "Brain_Regime_ActiveMarket", "Brain_Regime_SteamMarket",
                     "Brain_Regime_KeyNumberMarket", "Brain_Expert_BigAl_Strength", "Brain_Expert_BigAl_Readiness",
+                    "Brain_Expert_BigAl_Active", "Brain_Expert_BigAl_Direction", "Brain_Expert_BigAl_Intensity",
+                    "Brain_Expert_Pathi_Active", "Brain_Expert_Pathi_Direction", "Brain_Expert_Pathi_Intensity",
+                    "Brain_Expert_Market_Active", "Brain_Expert_Market_Direction", "Brain_Expert_Market_Intensity",
                     "Brain_Expert_Pathi_Strength", "Brain_Expert_Market_Strength", "Brain_Expert_Power_Strength",
                     "Brain_Expert_Form_Strength", "Brain_Expert_Schedule_Strength", "Brain_Expert_Price_Strength",
                     "Brain_BigAl_Pathi_Agreement", "Brain_BigAl_Pathi_Conflict",
@@ -15475,7 +15643,187 @@ def train_sharp_model_from_bq(
                 print(f"[BRAIN-AUDIT] WARNING - audit failed but training will continue: {type(e).__name__}: {e}")
 
 
+
+        def _audit_pathi_bigal_brain_integrity(df_audit: pd.DataFrame, market_name: str, max_rows: int = 12):
+            """Cross-check raw Pathi + Big Al system layers against the V11.2 Brain state.
+
+            Diagnostic only.  It does not mutate the frame and never becomes a model feature.
+            """
+            try:
+                print("\n" + "="*100)
+                print(f"PATHI + BIG AL + BRAIN INTEGRITY AUDIT | market={str(market_name).upper()} | rows={len(df_audit):,}")
+                print("="*100)
+
+                def nser(c, default=0.0):
+                    if c in df_audit.columns:
+                        return pd.to_numeric(df_audit[c], errors='coerce').fillna(default)
+                    return pd.Series(default, index=df_audit.index, dtype='float64')
+
+                def nonzero(c):
+                    s=nser(c)
+                    return int(s.ne(0).sum())
+
+                # ---------- inventory ----------
+                pathi_cols=[c for c in df_audit.columns if str(c).startswith('Pathi_')]
+                bigal_cols=[c for c in df_audit.columns if str(c).startswith('BigAl_') and not _is_retired_bigal_feature_name(c)]
+                brain_cols=[c for c in df_audit.columns if str(c).startswith('Brain_') and not str(c).startswith('Brain_Target_')]
+                print("[PBB-AUDIT:INVENTORY]")
+                print(f"Pathi columns={len(pathi_cols)} | BigAl active-contract columns={len(bigal_cols)} | Brain predictors={len(brain_cols)}")
+
+                # ---------- exact aggregate-count reconstruction ----------
+                pathi_signals=[c for c in [
+                    'Pathi_M1_DogThatWon','Pathi_M8_DogWon_BetterPrice','Pathi_M2_HomeDog',
+                    'Pathi_M3_Rule10_LosingStreak','Pathi_M3_Rule10_PlusMoney','Pathi_M4_ExtendedWinStreakFade',
+                    'Pathi_M5_TravelOffDayFreeze','Pathi_M6_WeakTeamNewChalk_Screen','Pathi_M7_BadRoadFavoriteProfile',
+                    'Pathi_M9_Plus15_PlusMoney','Pathi_RoadFavLost_StillFavorite_Screen'
+                ] if c in df_audit.columns]
+                bigal_exact=[c for c in [
+                    'BigAl_NFL1_Week1FadePlayoffTeam','BigAl_NFL2_LateSeasonHomeDog','BigAl_NFL3_PlayoffHighScoreFade',
+                    'BigAl_NFL4_PreseasonContrarianMove','BigAl_NFL5_PreseasonLowOffenseOver',
+                    'BigAl_CF1_Week2Home42Win','BigAl_CF2_LateSeasonRevengeDog',
+                    'BigAl_NBA1_B2BRematchRoadDog','BigAl_NBA2_ThreeMassiveCovers','BigAl_NBA3_FadeHomeAfterChampUpset',
+                    'BigAl_NBA4_FinalHomeFavRevenge','BigAl_NBA5_PlayoffBigDogVsChamp','BigAl_NBA6_FinalsGame4',
+                    'BigAl_NBA7_TwoTeamEliminationUnder','BigAl_NBA8_Revenge145FadeFavorite',
+                    'BigAl_CBB1_UglyDog20Losses','BigAl_CBB2_Fade10WinStreakFavorite','BigAl_CBB3_HomeRevenge27',
+                    'BigAl_CFL1_SecondMeetingUnder','BigAl_CFL2_EliteDogFade','BigAl_CFL3_ThirdMeetingAwayDogLostFirstTwo'
+                ] if c in df_audit.columns and not _is_retired_bigal_feature_name(c)]
+                bigal_tight=[c for c in df_audit.columns if str(c).startswith('BigAl_') and str(c).endswith('_Tightener') and not _is_retired_bigal_feature_name(c)]
+                bigal_enh=[c for c in df_audit.columns if str(c).startswith('BigAl_') and '_Enhancer_' in str(c) and str(c) != 'BigAl_Enhancer_Active' and not _is_retired_bigal_feature_name(c)]
+
+                print("[PBB-AUDIT:AGGREGATE-COUNTS]")
+                if pathi_signals and 'Pathi_System_Count' in df_audit.columns:
+                    calc=df_audit[pathi_signals].apply(pd.to_numeric,errors='coerce').fillna(0).sum(axis=1)
+                    stored=nser('Pathi_System_Count')
+                    bad=~np.isclose(calc.to_numpy(float),stored.to_numpy(float))
+                    print(f"Pathi_System_Count mismatch rows={int(bad.sum())} {'PASS' if not bad.any() else 'FAIL'} | fires={int((stored>0).sum()):,}")
+                else:
+                    print("Pathi_System_Count reconstruction unavailable")
+                if bigal_exact and 'BigAl_System_Count' in df_audit.columns:
+                    calc=df_audit[bigal_exact].apply(pd.to_numeric,errors='coerce').fillna(0).sum(axis=1)
+                    stored=nser('BigAl_System_Count')
+                    bad=~np.isclose(calc.to_numpy(float),stored.to_numpy(float))
+                    print(f"BigAl_System_Count mismatch rows={int(bad.sum())} {'PASS' if not bad.any() else 'FAIL'} | exact fires={int((stored>0).sum()):,}")
+                else:
+                    print("BigAl_System_Count reconstruction unavailable")
+                if 'BigAl_Tightener_Count' in df_audit.columns:
+                    calc=df_audit[bigal_tight].apply(pd.to_numeric,errors='coerce').fillna(0).sum(axis=1) if bigal_tight else pd.Series(0,index=df_audit.index)
+                    stored=nser('BigAl_Tightener_Count'); bad=~np.isclose(calc.to_numpy(float),stored.to_numpy(float))
+                    print(f"BigAl_Tightener_Count mismatch rows={int(bad.sum())} {'PASS' if not bad.any() else 'FAIL'} | tightener rows={int((stored>0).sum()):,}")
+                if 'BigAl_Enhancer_Count' in df_audit.columns:
+                    calc=df_audit[bigal_enh].apply(pd.to_numeric,errors='coerce').fillna(0).sum(axis=1) if bigal_enh else pd.Series(0,index=df_audit.index)
+                    stored=nser('BigAl_Enhancer_Count'); bad=~np.isclose(calc.to_numpy(float),stored.to_numpy(float))
+                    print(f"BigAl_Enhancer_Count mismatch rows={int(bad.sum())} {'PASS' if not bad.any() else 'FAIL'} | enhancer rows={int((stored>0).sum()):,}")
+
+                # ---------- population and routing ----------
+                print("[PBB-AUDIT:PATHI-POPULATION]")
+                if pathi_signals:
+                    pstats=[]
+                    for c in pathi_signals:
+                        s=nser(c); pstats.append((c,int(s.eq(1).sum())))
+                    print(" | ".join(f"{c}={v}" for c,v in pstats))
+                print(f"Pathi_System_Count active rows={int(nser('Pathi_System_Count').gt(0).sum()):,}")
+
+                print("[PBB-AUDIT:BIGAL-POPULATION]")
+                if bigal_exact:
+                    bstats=[(c,int(nser(c).eq(1).sum())) for c in bigal_exact]
+                    print(" | ".join(f"{c}={v}" for c,v in bstats))
+                print(f"BigAl exact active rows={int(nser('BigAl_System_Count').gt(0).sum()):,} | tightener rows={int(nser('BigAl_Tightener_Count').gt(0).sum()):,} | enhancer rows={int(nser('BigAl_Enhancer_Count').gt(0).sum()):,} | data-ready rows={int(nser('BigAl_DataReady_Count').gt(0).sum()):,}")
+
+                # Sport routing checks for the families most vulnerable to prefix collisions.
+                if 'Sport' in df_audit.columns:
+                    sp=df_audit['Sport'].astype(str).str.upper().str.strip()
+                    cfl=[c for c in bigal_cols if str(c).startswith('BigAl_CFL') and pd.api.types.is_numeric_dtype(df_audit[c])]
+                    cf=[c for c in bigal_cols if str(c).startswith('BigAl_CF') and not str(c).startswith('BigAl_CFL') and pd.api.types.is_numeric_dtype(df_audit[c])]
+                    wnba=[c for c in bigal_cols if str(c).startswith('BigAl_WNBA') and pd.api.types.is_numeric_dtype(df_audit[c])]
+                    def routed_bad(cols, allowed):
+                        if not cols: return 0
+                        anyon=df_audit[cols].apply(pd.to_numeric,errors='coerce').fillna(0).ne(0).any(axis=1)
+                        return int((anyon & ~sp.isin(allowed)).sum())
+                    print("[PBB-AUDIT:SPORT-ROUTING]")
+                    print(f"CFL-on-nonCFL rows={routed_bad(cfl,['CFL'])} | CF-on-nonNCAAF rows={routed_bad(cf,['NCAAF'])} | WNBA-on-nonWNBA rows={routed_bad(wnba,['WNBA'])}")
+
+                # ---------- Brain expert-state consistency ----------
+                print("[PBB-AUDIT:BRAIN-EXPERT-STATE]")
+                experts=['BigAl','Pathi','Market','Power','Form','Schedule','Price']
+                for name in experts:
+                    ac=f'Brain_Expert_{name}_Active'; dc=f'Brain_Expert_{name}_Direction'; ic=f'Brain_Expert_{name}_Intensity'
+                    if all(c in df_audit.columns for c in [ac,dc,ic]):
+                        a=nser(ac); d=nser(dc); inten=nser(ic)
+                        bad_inactive_dir=int(((a==0)&(d!=0)).sum())
+                        bad_inactive_int=int(((a==0)&(inten!=0)).sum())
+                        bad_dir=int((~d.isin([-1,0,1])).sum())
+                        print(f"{name}: active={int((a==1).sum()):,} dir(+/-/0)={int((d>0).sum()):,}/{int((d<0).sum()):,}/{int((d==0).sum()):,} intensity_mean={inten.mean():.4f} inactive_dir_bad={bad_inactive_dir} inactive_intensity_bad={bad_inactive_int} dir_domain_bad={bad_dir}")
+                    else:
+                        print(f"{name}: MISSING expert-state columns")
+
+                # Direct raw->Brain activation reconciliation.
+                print("[PBB-AUDIT:CROSS-LAYER]")
+                if 'Brain_Expert_BigAl_Active' in df_audit.columns:
+                    expected=(nser('BigAl_System_Count')+nser('BigAl_Tightener_Count')+nser('BigAl_Enhancer_Count')).gt(0)
+                    actual=nser('Brain_Expert_BigAl_Active').eq(1)
+                    print(f"BigAl raw-active vs Brain-active mismatch={int((expected!=actual).sum())} {'PASS' if (expected==actual).all() else 'FAIL'}")
+                if 'Brain_Expert_Pathi_Active' in df_audit.columns:
+                    keyev=(nser('Pathi_FB_Moved_Through_Key').gt(0)|nser('Pathi_FB_Crossed_Key_Toward_Team').gt(0)|nser('Pathi_FB_Crossed_Key_Away_From_Team').gt(0)|nser('Pathi_FB_Moved_Onto_Key').gt(0)|nser('Pathi_FB_Moved_Off_Key').gt(0))
+                    expected=nser('Pathi_System_Count').gt(0)|keyev
+                    actual=nser('Brain_Expert_Pathi_Active').eq(1)
+                    print(f"Pathi raw-active vs Brain-active mismatch={int((expected!=actual).sum())} {'PASS' if (expected==actual).all() else 'FAIL'}")
+
+                # Agreement flags must correspond to active directional experts.
+                print("[PBB-AUDIT:AGREEMENT-INTEGRITY]")
+                pair_defs=[
+                    ('BigAl','Pathi','Brain_BigAl_Pathi_Agreement','Brain_BigAl_Pathi_Conflict'),
+                    ('BigAl','Market','Brain_BigAl_Market_Agreement','Brain_BigAl_Market_Conflict'),
+                    ('Pathi','Market','Brain_Pathi_Market_Agreement','Brain_Pathi_Market_Conflict'),
+                ]
+                for a,b,agree,conf in pair_defs:
+                    req=[f'Brain_Expert_{a}_Active',f'Brain_Expert_{a}_Direction',f'Brain_Expert_{b}_Active',f'Brain_Expert_{b}_Direction',agree,conf]
+                    if all(c in df_audit.columns for c in req):
+                        aa=nser(req[0]).eq(1); ab=nser(req[2]).eq(1); da=nser(req[1]); db=nser(req[3]); eligible=aa&ab&da.ne(0)&db.ne(0)
+                        exp_ag=eligible&da.eq(db); exp_cf=eligible&da.eq(-db)
+                        bad_ag=int((nser(agree).eq(1)!=exp_ag).sum()); bad_cf=int((nser(conf).eq(1)!=exp_cf).sum())
+                        print(f"{a}-{b}: eligible={int(eligible.sum()):,} agree={int(exp_ag.sum()):,} conflict={int(exp_cf.sum()):,} agree_mismatch={bad_ag} conflict_mismatch={bad_cf}")
+
+                # Regime sanity.
+                print("[PBB-AUDIT:REGIMES]")
+                if all(c in df_audit.columns for c in ['Brain_Regime_EarlySeason','Brain_Regime_MatureSeason','Brain_Regime_LateSeason']):
+                    ss=df_audit[['Brain_Regime_EarlySeason','Brain_Regime_MatureSeason','Brain_Regime_LateSeason']].apply(pd.to_numeric,errors='coerce').fillna(0).sum(axis=1)
+                    print(f"season overlap rows={int((ss>1).sum())} {'PASS' if not (ss>1).any() else 'FAIL'}")
+                if all(c in df_audit.columns for c in ['Brain_Regime_QuietMarket','Brain_Regime_ActiveMarket','Brain_Regime_SteamMarket']):
+                    q=nser('Brain_Regime_QuietMarket').eq(1); a=nser('Brain_Regime_ActiveMarket').eq(1); st=nser('Brain_Regime_SteamMarket').eq(1)
+                    print(f"quiet&active={int((q&a).sum())} | steam_without_active={int((st&~a).sum())} | quiet={int(q.sum()):,} active={int(a.sum()):,} steam={int(st.sum()):,}")
+
+                # Candidate availability confirms all three layers actually reach AutoFS inventory.
+                modelish=pathi_bigal_numeric_feature_cols(df_audit)
+                print("[PBB-AUDIT:MODEL-CANDIDATES]")
+                print(f"Pathi candidates={sum(str(c).startswith('Pathi_') for c in modelish)} | BigAl candidates={sum(str(c).startswith('BigAl_') for c in modelish)} | Brain candidates={sum(str(c).startswith('Brain_') and not str(c).startswith('Brain_Target_') for c in modelish)}")
+                leaked=[c for c in modelish if str(c).startswith('Brain_Target_')]
+                print(f"Brain target leakage candidates={len(leaked)} {'PASS' if not leaked else 'FAIL '+str(leaked[:10])}")
+
+                # Representative ACTIVE rows only, much more useful than a tail full of zeros.
+                base_cols=[c for c in ['Sport','Game_Key','Team','Opponent','Market','Outcome','Value','Odds_Price'] if c in df_audit.columns]
+                for fam,rawc,actc in [
+                    ('BIGAL','BigAl_System_Count','Brain_Expert_BigAl_Active'),
+                    ('PATHI','Pathi_System_Count','Brain_Expert_Pathi_Active'),
+                    ('BRAIN',None,'Brain_Expert_Active_Count')
+                ]:
+                    if actc not in df_audit.columns: continue
+                    mask=nser(actc).gt(0)
+                    if not mask.any():
+                        print(f"[PBB-AUDIT:{fam}-EXAMPLES] none active in this slice")
+                        continue
+                    extra=[c for c in [rawc,'BigAl_Tightener_Count','BigAl_Enhancer_Count','Brain_Expert_BigAl_Active','Brain_Expert_BigAl_Direction','Brain_Expert_BigAl_Intensity','Brain_Expert_Pathi_Active','Brain_Expert_Pathi_Direction','Brain_Expert_Pathi_Intensity','Brain_Expert_Market_Active','Brain_Expert_Market_Direction','Brain_Expert_Market_Intensity','Brain_Conflict_Count','Brain_Edge_Durability','Brain_Decision_Readiness'] if c and c in df_audit.columns]
+                    cols=[]
+                    for c in base_cols+extra:
+                        if c not in cols: cols.append(c)
+                    print(f"[PBB-AUDIT:{fam}-EXAMPLES] showing {min(max_rows,int(mask.sum()))} active rows")
+                    print(df_audit.loc[mask,cols].tail(max_rows).to_string(index=False))
+
+                print("="*100+"\n")
+            except Exception as e:
+                print(f"[PBB-AUDIT] WARNING - integrity audit failed but training will continue: {type(e).__name__}: {e}")
+
         _audit_ai_brain_frame(df_market, market)
+        _audit_pathi_bigal_brain_integrity(df_market, market)
         
         # Stable identity shared by all head-specific frames
         df_market = df_market.copy()
