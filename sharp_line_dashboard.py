@@ -404,7 +404,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.4-structure-stability"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.4.1-structure-stability-temporal-deoverlap"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -16023,7 +16023,7 @@ def train_sharp_model_from_bq(
             """
             try:
                 print("\n" + "="*100)
-                print(f"PATHI + BIG AL + BRAIN INTEGRITY AUDIT | V11.5.4 STRUCTURE STABILITY + TEMPORAL SHADOW + OVERLAY TRUST + SCHEDULE | market={str(market_name).upper()} | rows={len(df_audit):,}")
+                print(f"PATHI + BIG AL + BRAIN INTEGRITY AUDIT | V11.5.4.1 STRUCTURE STABILITY + TEMPORAL DEOVERLAP + TEMPORAL SHADOW + OVERLAY TRUST + SCHEDULE | market={str(market_name).upper()} | rows={len(df_audit):,}")
                 print("="*100)
 
                 def nser(c, default=0.0):
@@ -17113,25 +17113,65 @@ def train_sharp_model_from_bq(
                 raise RuntimeError(f"Only {len(plans)} valid rolling origins; need >=3")
             plans = sorted(plans, key=lambda z: z[2])
             n_shadow_eff = min(int(n_shadow), max(1, len(plans) - 2))
-            selection = [(x[0], x[1]) for x in plans[:-n_shadow_eff]]
-            shadow = [(x[0], x[1]) for x in plans[-n_shadow_eff:]]
-            if len(selection) < 2:
-                selection = [(x[0], x[1]) for x in plans[:-1]]
-                shadow = [(plans[-1][0], plans[-1][1])]
+            selection_plans = list(plans[:-n_shadow_eff])
+            shadow_plans = list(plans[-n_shadow_eff:])
+            if len(selection_plans) < 2:
+                selection_plans = list(plans[:-1])
+                shadow_plans = [plans[-1]]
 
-            # V11.5.4 fail-fast validation contract: never silently fall back to legacy CV.
+            # V11.5.4.1: validation windows are time-based, so different head/group
+            # populations can place adjacent origins close enough that their validation
+            # groups overlap. Shadow periods are the more recent, higher-priority
+            # structural tests, so preserve them and remove any cross-lane duplicates
+            # from SELECT folds. Never leak a SHADOW validation group into SELECT.
+            shadow_val_groups = set()
+            for x in shadow_plans:
+                shadow_val_groups.update(groups_arr[np.asarray(x[1], int)].tolist())
+
+            removed_cross_lane = 0
+            selection = []
+            selection_plans_kept = []
+            min_keep_groups = max(8, min_val_groups // 2)
+            for x in selection_plans:
+                va_idx0 = np.asarray(x[1], int)
+                va_groups0 = groups_arr[va_idx0]
+                keep_mask = np.asarray([g not in shadow_val_groups for g in va_groups0], dtype=bool)
+                va_idx = va_idx0[keep_mask]
+                removed_cross_lane += int(va_idx0.size - va_idx.size)
+                if va_idx.size == 0:
+                    continue
+                kept_groups = set(groups_arr[va_idx].tolist())
+                if len(kept_groups) < min_keep_groups:
+                    continue
+                if np.unique(y_arr[va_idx]).size < 2:
+                    continue
+                selection.append((np.asarray(x[0], int), va_idx.astype(int)))
+                selection_plans_kept.append(x)
+
+            shadow = [(np.asarray(x[0], int), np.asarray(x[1], int)) for x in shadow_plans]
+
+            # Fail-fast validation contract: never silently fall back to legacy CV.
             if len(selection) < 2 or len(shadow) < 1:
-                raise RuntimeError(f"V11.5.4 temporal contract failed: selection={len(selection)} shadow={len(shadow)}")
-            select_val_groups=set()
-            shadow_val_groups=set()
-            for a,b in selection:
-                select_val_groups.update(groups_arr[np.asarray(b,int)].tolist())
-            for a,b in shadow:
-                shadow_val_groups.update(groups_arr[np.asarray(b,int)].tolist())
-            overlap=select_val_groups & shadow_val_groups
+                raise RuntimeError(
+                    f"V11.5.4.1 temporal contract failed after de-overlap: "
+                    f"selection={len(selection)} shadow={len(shadow)} removed_cross_lane={removed_cross_lane}"
+                )
+
+            select_val_groups = set()
+            for _, b in selection:
+                select_val_groups.update(groups_arr[np.asarray(b, int)].tolist())
+            overlap = select_val_groups & shadow_val_groups
             if overlap:
-                raise RuntimeError(f"V11.5.4 SELECT/SHADOW overlap: {len(overlap)} groups")
-            print(f"[TEMPORAL-CONTRACT] selection>=2=PASS shadow>=1=PASS disjoint=PASS select_val_groups={len(select_val_groups)} shadow_val_groups={len(shadow_val_groups)}")
+                raise RuntimeError(f"V11.5.4.1 SELECT/SHADOW overlap after de-overlap: {len(overlap)} groups")
+
+            print(
+                f"[TEMPORAL-DEOVERLAP] removed_from_select_rows={removed_cross_lane} "
+                f"selection_folds_kept={len(selection)}/{len(selection_plans)} shadow_folds={len(shadow)}"
+            )
+            print(
+                f"[TEMPORAL-CONTRACT] selection>=2=PASS shadow>=1=PASS disjoint=PASS "
+                f"select_val_groups={len(select_val_groups)} shadow_val_groups={len(shadow_val_groups)}"
+            )
 
             print(
                 f"[TEMPORAL-CV] sport={key} groups={ng:,} horizon={horizon} embargo={embargo} "
