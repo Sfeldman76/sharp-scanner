@@ -10680,7 +10680,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.4-structure-stability"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.4.1-structure-stability-temporal-deoverlap"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
