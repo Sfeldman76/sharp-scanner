@@ -12325,19 +12325,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         n("Revenge_Flag_Current").eq(1) & n("Spread_Value").ge(9)
     ).astype("int8")
 
-    _bigal_enhancer_flags = [
-        "BigAl_MLB_Enhancer_RecentFormAboveSeason",
-        "BigAl_MLB_Enhancer_RecentFormFavorite",
-        "BigAl_NFL_Enhancer_LateHomeDog",
-        "BigAl_NFL_Enhancer_PenultimateBadTeamOffWin",
-        "BigAl_CF_Enhancer_RevengeDog",
-        "BigAl_NBA_Enhancer_ImmediateRematchDog",
-        "BigAl_CBB_Enhancer_HomeRevengeWinning",
-        "BigAl_WNBA_Enhancer_WinningHomeDoubleRevenge",
-        "BigAl_WNBA_Enhancer_WinningHomeDoubleRevengeDog",
-        "BigAl_CFL_Enhancer_WinlessRevengeBigDog",
-    ]
-    _bigal_enhancer_flags = [c for c in _bigal_enhancer_flags if c in s.columns]
+    _bigal_enhancer_flags = [c for c in BIGAL_ENHANCER_COLS if c in s.columns]
     s["BigAl_Enhancer_Count"] = (
         s[_bigal_enhancer_flags].sum(axis=1).astype("int16")
         if _bigal_enhancer_flags else 0
@@ -12347,12 +12335,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     # ------------------------------------------------------------------
     # Aggregate counts + human-readable audit string.
     # ------------------------------------------------------------------
-    pathi_signal_cols = [
-        "Pathi_M1_DogThatWon", "Pathi_M8_DogWon_BetterPrice", "Pathi_M2_HomeDog",
-        "Pathi_M3_Rule10_LosingStreak", "Pathi_M3_Rule10_PlusMoney", "Pathi_M4_ExtendedWinStreakFade",
-        "Pathi_M5_TravelOffDayFreeze", "Pathi_M6_WeakTeamNewChalk_Screen", "Pathi_M7_BadRoadFavoriteProfile",
-        "Pathi_M9_Plus15_PlusMoney", "Pathi_RoadFavLost_StillFavorite_Screen",
-    ]
+    pathi_signal_cols = [c for c in PATHI_EXACT_SIGNAL_COLS if c in s.columns]
     bigal_base_cols = [
         "BigAl_NFL1_Week1FadePlayoffTeam", "BigAl_NFL2_LateSeasonHomeDog", "BigAl_NFL3_PlayoffHighScoreFade",
         "BigAl_NFL4_PreseasonContrarianMove", "BigAl_NFL5_PreseasonLowOffenseOver",
@@ -12737,20 +12720,7 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
 
     # Enhancers are intentionally tracked separately and never promoted to an
     # exact System_Signal_Count.
-    _ba_enhancer_flags = [
-        c for c in (
-            "BigAl_MLB_Enhancer_RecentFormAboveSeason",
-            "BigAl_MLB_Enhancer_RecentFormFavorite",
-            "BigAl_NFL_Enhancer_LateHomeDog",
-            "BigAl_CF_Enhancer_RevengeDog",
-            "BigAl_NBA_Enhancer_ImmediateRematchDog",
-            "BigAl_CBB_Enhancer_HomeRevengeWinning",
-            "BigAl_WNBA_Enhancer_WinningHomeDoubleRevenge",
-            "BigAl_WNBA_Enhancer_WinningHomeDoubleRevengeDog",
-            "BigAl_CFL_Enhancer_WinlessRevengeBigDog",
-        )
-        if c in out.columns
-    ]
+    _ba_enhancer_flags = [c for c in BIGAL_ENHANCER_COLS if c in out.columns]
     out["BigAl_Enhancer_Count"] = (
         out[_ba_enhancer_flags].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16")
         if _ba_enhancer_flags else 0
@@ -13246,6 +13216,59 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# ============================================================================
+# V11.3 canonical Pathi / Big Al inventories. Keep backend and training aligned.
+# ============================================================================
+PATHI_EXACT_SIGNAL_COLS = (
+    "Pathi_M1_DogThatWon", "Pathi_M8_DogWon_BetterPrice", "Pathi_M2_HomeDog",
+    "Pathi_M3_Rule10_LosingStreak", "Pathi_M3_Rule10_PlusMoney",
+    "Pathi_M4_ExtendedWinStreakFade", "Pathi_M5_TravelOffDayFreeze",
+    "Pathi_M6_WeakTeamNewChalk_Screen", "Pathi_M7_BadRoadFavoriteProfile",
+    "Pathi_M9_Plus15_PlusMoney", "Pathi_RoadFavLost_StillFavorite_Screen",
+)
+
+BIGAL_ENHANCER_COLS = (
+    "BigAl_MLB_Enhancer_RecentFormAboveSeason",
+    "BigAl_MLB_Enhancer_RecentFormFavorite",
+    "BigAl_NFL_Enhancer_LateHomeDog",
+    "BigAl_NFL_Enhancer_PenultimateBadTeamOffWin",
+    "BigAl_CF_Enhancer_RevengeDog",
+    "BigAl_NBA_Enhancer_ImmediateRematchDog",
+    "BigAl_CBB_Enhancer_HomeRevengeWinning",
+    "BigAl_WNBA_Enhancer_WinningHomeDoubleRevenge",
+    "BigAl_WNBA_Enhancer_WinningHomeDoubleRevengeDog",
+    "BigAl_CFL_Enhancer_WinlessRevengeBigDog",
+)
+
+BIGAL_TIGHTENER_PARENT = {
+    "BigAl_NFL2_OppOffATSLoss_Tightener": "BigAl_NFL2_LateSeasonHomeDog",
+    "BigAl_NFL5_TotalUnder40_Tightener": "BigAl_NFL5_PreseasonLowOffenseOver",
+    "BigAl_CF2_Away_Tightener": "BigAl_CF2_LateSeasonRevengeDog",
+    "BigAl_NBA1_PriorLoss25_Tightener": "BigAl_NBA1_B2BRematchRoadDog",
+    "BigAl_NBA3_WinPct572_Tightener": "BigAl_NBA3_FadeHomeAfterChampUpset",
+    "BigAl_NBA4_NotOffSUATSLoss_Tightener": "BigAl_NBA4_FinalHomeFavRevenge",
+    "BigAl_NBA5_ChampOffSUWin_Tightener": "BigAl_NBA5_PlayoffBigDogVsChamp",
+    "BigAl_NBA8_WinningRecord_Tightener": "BigAl_NBA8_Revenge145FadeFavorite",
+    "BigAl_CBB1_ThreeLoss_Tightener": "BigAl_CBB1_UglyDog20Losses",
+    "BigAl_CBB3_DogOffLoss_Tightener": "BigAl_CBB3_HomeRevenge27",
+    "BigAl_CFL1_TotalAbove51_Tightener": "BigAl_CFL1_SecondMeetingUnder",
+}
+
+PATHI_KEY_EVENT_COLS = (
+    "Pathi_FB_Moved_Through_Key", "Pathi_FB_Crossed_Key_Toward_Team",
+    "Pathi_FB_Crossed_Key_Away_From_Team", "Pathi_FB_Moved_Onto_Key",
+    "Pathi_FB_Moved_Off_Key",
+)
+
+PATHI_ROLE_CONTEXT_COLS = (
+    "Pathi_FB_On_Key_3", "Pathi_FB_On_Key_7", "Pathi_FB_On_Key_10", "Pathi_FB_On_Key_14",
+    "Pathi_FB_Dog_Hook_Above_3", "Pathi_FB_Dog_Hook_Above_7", "Pathi_FB_Dog_Hook_Above_10",
+    "Pathi_FB_Favorite_Below_Key_3", "Pathi_FB_Favorite_Below_Key_7", "Pathi_FB_Favorite_Below_Key_10",
+    "Pathi_FB_Dog_Below_Key_3", "Pathi_FB_Dog_Below_Key_7",
+    "Pathi_FB_Favorite_Laying_Hook_3", "Pathi_FB_Favorite_Laying_Hook_7",
+    "Pathi_FB_Usually_Dog_Now_Favorite", "Pathi_FB_Usually_Favorite_Now_Dog",
+)
+
 def pathi_bigal_numeric_feature_cols(df: pd.DataFrame) -> list[str]:
     """Numeric Pathi/BigAl features safe to offer to AutoFS/model training."""
     if df is None or df.empty:
@@ -13254,6 +13277,8 @@ def pathi_bigal_numeric_feature_cols(df: pd.DataFrame) -> list[str]:
     out = []
     for c in df.columns:
         if not str(c).startswith(prefixes) or c == "System_Signals_Text":
+            continue
+        if str(c).startswith("Brain_Target_"):
             continue
         if _is_retired_bigal_feature_name(c):
             continue
