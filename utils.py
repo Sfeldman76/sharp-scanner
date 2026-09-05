@@ -13106,9 +13106,13 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
     # Opponent state is recovered from the paired team rows for the same game.
     # This keeps the expert two-sided without inventing unavailable travel data.
     # ------------------------------------------------------------------
-    b2b = flag('Is_B2B')
-    three4 = flag('Is_3in4')
-    bye = flag('BigAl_Context_Had_Bye_Proxy')
+    # FINAL/FROZEN CONTRACT: Schedule may vote only from genuinely paired,
+    # two-sided current-vs-opponent evidence.  One-sided proxies (notably the
+    # BigAl bye proxy) remain available as raw context but cannot manufacture a
+    # directional expert vote.
+    b2b_raw = num('Is_B2B')
+    three4_raw = num('Is_3in4')
+    bye_raw = num('BigAl_Context_Had_Bye_Proxy')
     days_rest = num('Days_Since_Last_Game')
 
     def _opp_metric_from_team_rows(col, agg='median'):
@@ -13128,42 +13132,44 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
         merged = merged.sort_values('__row_order', kind='stable')
         return pd.Series(pd.to_numeric(merged['__opp_metric'], errors='coerce').to_numpy(), index=idx, dtype='float64')
 
-    opp_b2b = _opp_metric_from_team_rows('Is_B2B', agg='max').fillna(0).eq(1)
-    opp_three4 = _opp_metric_from_team_rows('Is_3in4', agg='max').fillna(0).eq(1)
-    opp_bye = _opp_metric_from_team_rows('BigAl_Context_Had_Bye_Proxy', agg='max').fillna(0).eq(1)
+    opp_b2b_raw = _opp_metric_from_team_rows('Is_B2B', agg='max')
+    opp_three4_raw = _opp_metric_from_team_rows('Is_3in4', agg='max')
+    opp_bye_raw = _opp_metric_from_team_rows('BigAl_Context_Had_Bye_Proxy', agg='max')
     opp_days_rest = _opp_metric_from_team_rows('Days_Since_Last_Game', agg='median')
-    rest_diff = days_rest - opp_days_rest
 
-    # One extra rest day is meaningful; cap large gaps so bye-like gaps do not
-    # overwhelm the explicit bye/stress indicators.
-    rest_component = rest_diff.clip(-4, 4).fillna(0) * 0.25
-    stress_component = (
-        opp_b2b.astype(float) - b2b.astype(float)
-        + 0.75*(opp_three4.astype(float) - three4.astype(float))
-        + 0.75*(bye.astype(float) - opp_bye.astype(float))
-    )
+    rest_pair_ready = days_rest.notna() & opp_days_rest.notna()
+    b2b_pair_ready = b2b_raw.notna() & opp_b2b_raw.notna()
+    three4_pair_ready = three4_raw.notna() & opp_three4_raw.notna()
+
+    rest_diff = (days_rest - opp_days_rest).where(rest_pair_ready)
+    b2b_diff = (opp_b2b_raw - b2b_raw).where(b2b_pair_ready)
+    three4_diff = (opp_three4_raw - three4_raw).where(three4_pair_ready)
+
+    # Positive signed value favors the current row/team.  Missing opponent
+    # evidence contributes nothing and cannot activate the expert.
+    rest_component = rest_diff.clip(-4, 4).fillna(0.0) * 0.25
+    stress_component = b2b_diff.fillna(0.0) + 0.75*three4_diff.fillna(0.0)
     sched_signed = rest_component + stress_component
-    sched_active = (
-        rest_diff.abs().ge(1).fillna(False)
-        | b2b.eq(1) | three4.eq(1) | bye.eq(1)
-        | opp_b2b | opp_three4 | opp_bye
+
+    paired_directional_evidence = (
+        (rest_pair_ready & rest_diff.abs().ge(1))
+        | (b2b_pair_ready & b2b_diff.abs().ge(1))
+        | (three4_pair_ready & three4_diff.abs().ge(1))
     )
     sched_direction = sgn(sched_signed, eps=0.10)
-    # Do not call an expert active if opposing schedule effects cancel to neutral.
-    sched_active = sched_active & sched_direction.ne(0)
+    sched_active = paired_directional_evidence & sched_direction.ne(0)
     sched_intensity = np.tanh(sched_signed.abs())
     install_expert('Schedule', sched_active, sched_direction, sched_intensity)
 
-    # Audit-only source fields. They are intentionally Brain-prefixed so they
-    # remain visible to diagnostics, but excluded from learned trust until data
-    # supports their value independently.
+    # Audit/context fields. ByeProxy remains visible, but is deliberately NOT
+    # part of the frozen Schedule expert vote until it is symmetric/reliable.
     out['Brain_Schedule_Rest_Diff_Days'] = rest_diff.astype('float32')
-    out['Brain_Schedule_Current_B2B'] = b2b.astype('int8')
-    out['Brain_Schedule_Opp_B2B'] = opp_b2b.astype('int8')
-    out['Brain_Schedule_Current_3in4'] = three4.astype('int8')
-    out['Brain_Schedule_Opp_3in4'] = opp_three4.astype('int8')
-    out['Brain_Schedule_Current_ByeProxy'] = bye.astype('int8')
-    out['Brain_Schedule_Opp_ByeProxy'] = opp_bye.astype('int8')
+    out['Brain_Schedule_Current_B2B'] = b2b_raw.fillna(0).gt(0).astype('int8')
+    out['Brain_Schedule_Opp_B2B'] = opp_b2b_raw.fillna(0).gt(0).astype('int8')
+    out['Brain_Schedule_Current_3in4'] = three4_raw.fillna(0).gt(0).astype('int8')
+    out['Brain_Schedule_Opp_3in4'] = opp_three4_raw.fillna(0).gt(0).astype('int8')
+    out['Brain_Schedule_Current_ByeProxy'] = bye_raw.fillna(0).gt(0).astype('int8')
+    out['Brain_Schedule_Opp_ByeProxy'] = opp_bye_raw.fillna(0).gt(0).astype('int8')
 
     # ------------------------------------------------------------------
     # 9) PRICE/VALUE expert state. Direction comes from explicit mispricing.
