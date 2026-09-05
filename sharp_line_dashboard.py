@@ -404,7 +404,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.5.1-meta-oof-coverage"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.6-always-on-handicapper-overlays"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -17830,31 +17830,61 @@ def train_sharp_model_from_bq(
                 robust_core, overlay_candidates, sample_weight=sample_weight_head, head_name=head_name
             )
 
-            # V11.5.4 overlay trust is not metadata-only. Build a shrunk aggregate
-            # trust feature from only temporally admitted overlays. Raw admitted
-            # overlay flags remain available so a strong individual system can shine,
-            # while the aggregate gives the head a stable low-variance summary.
-            overlay_trust_map={}
-            if isinstance(overlay_trust,pd.DataFrame) and not overlay_trust.empty:
+            # V11.5.6 HANDICAPPER OVERLAY CONTRACT
+            # Exact Big Al / Pathi systems, Big Al tighteners, and configured
+            # enhancers are always carried into the fitted model matrix. AutoFS
+            # decides the general/core structure only. The model may learn zero,
+            # small, or large impact from these deterministic flags; separate
+            # time-forward trust remains a shrunk reliability input.
+            overlay_always_present = list(dict.fromkeys(overlay_candidates))
+            overlay_trust_map = {}
+            if isinstance(overlay_trust, pd.DataFrame) and not overlay_trust.empty:
                 for _c in overlay_selected:
                     if _c in overlay_trust.index:
-                        _tv=float(pd.to_numeric(pd.Series([overlay_trust.loc[_c,"overlay_trust"]]),errors="coerce").iloc[0])
-                        if np.isfinite(_tv) and _tv>0:
-                            overlay_trust_map[_c]=_tv
-            if overlay_trust_map:
-                for _df in (X_df_train_head, X_df_hold_head, X_df_full_head):
-                    _score=np.zeros(len(_df),dtype=np.float64)
-                    _active=np.zeros(len(_df),dtype=np.float64)
-                    for _c,_tv in overlay_trust_map.items():
-                        _x=pd.to_numeric(_df.get(_c,0.0),errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-                        _on=(np.abs(_x)>0.5).astype(np.float64)
-                        _score += _on*_tv
-                        _active += _on
-                    _df["Brain_Overlay_Trust_Score"]=_score.astype(np.float32)
-                    _df["Brain_Overlay_Trust_Active_Count"]=_active.astype(np.float32)
-                robust_core.extend(["Brain_Overlay_Trust_Score","Brain_Overlay_Trust_Active_Count"])
-                print(f"[OVERLAY-TRUST-FEATURE:{head_name}] admitted={len(overlay_trust_map)} score_max={float(X_df_train_head['Brain_Overlay_Trust_Score'].max()):.5f}")
-            feat_cols_head=list(dict.fromkeys(robust_core + overlay_selected))
+                        _tv = float(pd.to_numeric(pd.Series([overlay_trust.loc[_c, "overlay_trust"]]), errors="coerce").iloc[0])
+                        if np.isfinite(_tv) and _tv > 0:
+                            overlay_trust_map[_c] = _tv
+
+            for _df in (X_df_train_head, X_df_hold_head, X_df_full_head):
+                _score = np.zeros(len(_df), dtype=np.float64)
+                _trusted_active = np.zeros(len(_df), dtype=np.float64)
+                _raw_active = np.zeros(len(_df), dtype=np.float64)
+                _exact_active = np.zeros(len(_df), dtype=np.float64)
+                _tight_active = np.zeros(len(_df), dtype=np.float64)
+                _enh_active = np.zeros(len(_df), dtype=np.float64)
+                for _c in overlay_always_present:
+                    _src = _df[_c] if _c in _df.columns else pd.Series(0.0, index=_df.index)
+                    _x = pd.to_numeric(_src, errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+                    _on = (np.abs(_x) > 0.5).astype(np.float64)
+                    _raw_active += _on
+                    if _c in set(PATHI_EXACT_SIGNAL_COLS) or _c in _BIGAL_EXACT_OVERLAY:
+                        _exact_active += _on
+                    elif _c in set(BIGAL_ENHANCER_COLS):
+                        _enh_active += _on
+                    elif _c.startswith("BigAl_") and _c.endswith("_Tightener"):
+                        _tight_active += _on
+                    _tv = float(overlay_trust_map.get(_c, 0.0) or 0.0)
+                    if np.isfinite(_tv) and _tv > 0:
+                        _score += _on * _tv
+                        _trusted_active += _on
+                _df["Brain_Overlay_Trust_Score"] = _score.astype(np.float32)
+                _df["Brain_Overlay_Trust_Active_Count"] = _trusted_active.astype(np.float32)
+                _df["Brain_Overlay_Raw_Active_Count"] = _raw_active.astype(np.float32)
+                _df["Brain_Overlay_Exact_Active_Count"] = _exact_active.astype(np.float32)
+                _df["Brain_Overlay_Tightener_Active_Count"] = _tight_active.astype(np.float32)
+                _df["Brain_Overlay_Enhancer_Active_Count"] = _enh_active.astype(np.float32)
+
+            robust_core.extend([
+                "Brain_Overlay_Trust_Score", "Brain_Overlay_Trust_Active_Count",
+                "Brain_Overlay_Raw_Active_Count", "Brain_Overlay_Exact_Active_Count",
+                "Brain_Overlay_Tightener_Active_Count", "Brain_Overlay_Enhancer_Active_Count",
+            ])
+            feat_cols_head = list(dict.fromkeys(robust_core + overlay_always_present))
+            print(
+                f"[HANDICAPPER-OVERLAY:{head_name}] always_present={len(overlay_always_present)} "
+                f"trusted={len(overlay_trust_map)} raw_active_rows="
+                f"{int((X_df_train_head['Brain_Overlay_Raw_Active_Count'] > 0).sum())}"
+            )
 
             # Leakage audit on the final robust set.
             _audit_rows=[]; _ya=np.asarray(y_head_train,dtype=int).reshape(-1)
@@ -17888,7 +17918,7 @@ def train_sharp_model_from_bq(
 
             kept_set=set(feat_cols_head)
             removed=[c for c in core_candidates if c in set(dict(classifications)) and c not in kept_set]
-            print(f"[ROBUST-PRUNE:{head_name}] kept={len(feat_cols_head)} removed={len(removed)} overlays_selected={len(overlay_selected)}")
+            print(f"[ROBUST-PRUNE:{head_name}] kept={len(feat_cols_head)} removed={len(removed)} overlays_always_present={len(overlay_always_present)} overlays_trusted={len(overlay_selected)}")
             if removed:
                 print(f"[ROBUST-PRUNE:{head_name}] removed_structurally_unstable={removed[:30]}")
 
@@ -17900,6 +17930,7 @@ def train_sharp_model_from_bq(
                 "family_stability":family_stability,
                 "overlay_trust":overlay_trust,
                 "overlay_selected":overlay_selected,
+                "overlay_always_present":overlay_always_present,
                 "overlay_trust_map":overlay_trust_map,
                 "temporal_classification":dict(classifications),
                 "X_train":_tr_num.to_numpy(np.float32,copy=False),
@@ -20555,7 +20586,7 @@ def train_sharp_model_from_bq(
                 "flip_flag": bool(flip_flag),
                 "blend_w": float(best_w),
         
-                "model_family": "three_head_plus_meta_v5_3_specialist_calibration_wired",
+                "model_family": "three_head_plus_meta_v5_6_always_on_handicapper_overlays",
                 "feature_cols_outcome": list(feature_cols_outcome),
                 "feature_cols_situation": list(feature_cols_situation),
                 "feature_cols_value": list(feature_cols_value),
@@ -20624,6 +20655,8 @@ def train_sharp_model_from_bq(
                 ),
                 "overlay_trust_map_outcome": (autofs_outcome.get("overlay_trust_map", {}) if autofs_outcome is not None else {}),
                 "overlay_trust_map_situation": (autofs_situation.get("overlay_trust_map", {}) if autofs_situation is not None else {}),
+                "overlay_always_present_outcome": (autofs_outcome.get("overlay_always_present", []) if autofs_outcome is not None else []),
+                "overlay_always_present_situation": (autofs_situation.get("overlay_always_present", []) if autofs_situation is not None else []),
                 "temporal_classification_outcome": (autofs_outcome.get("temporal_classification", {}) if autofs_outcome is not None else {}),
                 "temporal_classification_situation": (autofs_situation.get("temporal_classification", {}) if autofs_situation is not None else {}),
                 "temporal_classification_value": (autofs_value.get("temporal_classification", {}) if autofs_value is not None else {}),
@@ -20689,7 +20722,7 @@ def train_sharp_model_from_bq(
             "meta_calibrator":      (meta_cal_name, meta_cal_obj),
         
             "multihead_config": {
-                "model_family": "three_head_plus_meta_v5_3_specialist_calibration_wired",
+                "model_family": "three_head_plus_meta_v5_6_always_on_handicapper_overlays",
                 "outcome_head": "model_logloss/model_auc + iso_blend",
                 "situation_head": "model_situation_cls",
                 "value_cls_head": "model_value_cls",
@@ -20720,6 +20753,8 @@ def train_sharp_model_from_bq(
                 "overlay_lane": "conditional_active_row_residual_uplift_with_sample_shrinkage",
                 "overlay_trust_map_outcome": (autofs_outcome.get("overlay_trust_map", {}) if autofs_outcome is not None else {}),
                 "overlay_trust_map_situation": (autofs_situation.get("overlay_trust_map", {}) if autofs_situation is not None else {}),
+                "overlay_always_present_outcome": (autofs_outcome.get("overlay_always_present", []) if autofs_outcome is not None else []),
+                "overlay_always_present_situation": (autofs_situation.get("overlay_always_present", []) if autofs_situation is not None else []),
             },
         }
         # -------------------------------------------------------------------
@@ -20753,7 +20788,7 @@ def train_sharp_model_from_bq(
         
                 "multihead_config": {
                     "schema_version": 3,
-                    "model_family": "three_head_plus_meta_v5_3_specialist_calibration_wired",
+                    "model_family": "three_head_plus_meta_v5_6_always_on_handicapper_overlays",
                     "meta_features": list(meta_train_df.columns),
                     "meta_calibrator": str(meta_cal_name),
                     "meta_oof_auc_for_weight": (None if not np.isfinite(META_OOF_AUC) else float(META_OOF_AUC)),
@@ -20780,6 +20815,8 @@ def train_sharp_model_from_bq(
                 "overlay_lane": "conditional_active_row_residual_uplift_with_sample_shrinkage",
                 "overlay_trust_map_outcome": (autofs_outcome.get("overlay_trust_map", {}) if autofs_outcome is not None else {}),
                 "overlay_trust_map_situation": (autofs_situation.get("overlay_trust_map", {}) if autofs_situation is not None else {}),
+                "overlay_always_present_outcome": (autofs_outcome.get("overlay_always_present", []) if autofs_outcome is not None else []),
+                "overlay_always_present_situation": (autofs_situation.get("overlay_always_present", []) if autofs_situation is not None else []),
                 },
             },
             calibrator=iso_blend,
