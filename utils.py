@@ -2603,7 +2603,9 @@ class _CalAdapter:
     def predict(self, p):
         import numpy as np
         p = np.asarray(p, float)
-        if self.kind == "iso":
+        if self.kind == "identity":
+            out = p
+        elif self.kind == "iso":
             out = self.model.transform(p)
         elif self.kind == "beta":
             out = self.model.predict(p.reshape(-1, 1))
@@ -5997,6 +5999,7 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         "three_head_plus_meta_v3_temporal_robust_overlay",
         "three_head_plus_meta_v4_structure_stable_overlay",
         "three_head_plus_meta_v5_specialist_gated",
+        "three_head_plus_meta_v5_3_specialist_calibration_wired",
     }
     if family and family not in _supported_multihead_families:
         logger.warning("⚠️ Unsupported multihead model family %s; using outcome-only fallback", family)
@@ -6131,7 +6134,9 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         kind, cal = str(cal_bundle[0]), cal_bundle[1]
         try:
             x = np.clip(raw, eps, 1.0 - eps)
-            if kind == "iso":
+            if kind == "identity":
+                raw = x
+            elif kind == "iso":
                 if hasattr(cal, "transform"):
                     raw = cal.transform(x)
                 elif hasattr(cal, "predict"):
