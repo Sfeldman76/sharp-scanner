@@ -4379,7 +4379,9 @@ class _CalAdapter:
     def predict(self, p):
         
         p = np.asarray(p, float)
-        if self.kind == "iso":
+        if self.kind == "identity":
+            out = p
+        elif self.kind == "iso":
             # your helpers already normalize iso to have .transform if needed
             out = self.model.transform(p) if hasattr(self.model, "transform") else self.model.predict(p)
         elif self.kind == "beta":
@@ -10828,12 +10830,15 @@ def fit_iso_platt_beta(p, y, eps=1e-6, use_quantile_iso=True):
         return ("iso", _IdentityCal())
 
 def _apply_cal(kind, cal, x):
+    kind = str(kind).lower().strip()
+    if kind == "identity":
+        return np.asarray(x, dtype=np.float64)
     if kind == "iso":
         return cal.transform(x)
     if kind == "platt":
-        return cal.predict_proba(x.reshape(-1,1))[:,1]
+        return cal.predict_proba(np.asarray(x).reshape(-1,1))[:,1]
     if kind == "beta":
-        return cal.predict(x.reshape(-1,1))
+        return cal.predict(np.asarray(x).reshape(-1,1))
     raise ValueError(kind)
 
 def select_blend(cals, p_oof, y_oof, eps=1e-4):
@@ -18970,6 +18975,19 @@ def train_sharp_model_from_bq(
             pred_value_reg_full  = np.asarray(model_value_reg.predict(X_full_value),  dtype=np.float64)
         
         # -----------------------------------------
+        # V11.5.5.3 fresh-model factory (must be bound BEFORE shadow audits)
+        # -----------------------------------------
+        def _fresh_xgb_like(fitted_model, *, seed):
+            if fitted_model is None:
+                return None
+            params = dict(fitted_model.get_params(deep=False))
+            params["n_jobs"] = 1
+            params["random_state"] = int(seed)
+            if "seed" in params:
+                params["seed"] = int(seed)
+            return fitted_model.__class__(**params)
+
+        # -----------------------------------------
         # V11.5.5 WHOLE-HEAD SHADOW TRUST
         # -----------------------------------------
         # Feature-level stability is necessary but not sufficient.  A specialist
@@ -19085,16 +19103,6 @@ def train_sharp_model_from_bq(
             np.full(len(y_train_value_reg), np.nan, dtype=np.float64)
             if y_train_value_reg is not None else None
         )
-
-        def _fresh_xgb_like(fitted_model, *, seed):
-            if fitted_model is None:
-                return None
-            params = dict(fitted_model.get_params(deep=False))
-            params["n_jobs"] = 1
-            params["random_state"] = int(seed)
-            if "seed" in params:
-                params["seed"] = int(seed)
-            return fitted_model.__class__(**params)
 
         # Situation OOF
         if (
@@ -19372,10 +19380,10 @@ def train_sharp_model_from_bq(
             except Exception:
                 return None
             chosen_display=chosen
-            # The global apply interface has iso/platt/beta.  Represent identity as
-            # an identity isotonic adapter while preserving the audit label.
+            # V11.5.5.3: identity remains an explicit deployable calibrator kind.
+            # Do not relabel identity as isotonic; that made audit selection and
+            # saved/runtime metadata disagree even when numerically identity-like.
             if chosen=="identity":
-                chosen="iso"
                 final=_IdentityIsoCal(eps=1e-6)
             print(f"[CAL-ROLLING:{label}] scores={means} chosen={chosen_display} origins={max(len(v) for v in method_scores.values()) if method_scores else 0}")
             return chosen,final,means
@@ -19413,6 +19421,12 @@ def train_sharp_model_from_bq(
                 std_ratio=float(np.std(_pp_roll)/max(np.std(p_oof_for_cal),1e-9))
             except Exception:
                 pass
+        _cal_selected_kind = str(cal_name)
+        if _roll_cal is not None:
+            _expected_kind = str(_roll_cal[0])
+            if _cal_selected_kind != _expected_kind:
+                raise RuntimeError(f"Outcome calibration propagation mismatch: selected={_expected_kind} active={_cal_selected_kind}")
+        print(f"[CAL-PROPAGATION:outcome] selected={_cal_selected_kind} active={_cal_selected_kind} PASS")
         
         st.write({
             "calibrator_used": str(cal_name),
@@ -20012,6 +20026,12 @@ def train_sharp_model_from_bq(
                 meta_std_ratio=float(np.std(_mpp)/max(np.std(_meta_oof_x),1e-9))
             except Exception:
                 pass
+        _meta_cal_selected_kind = str(meta_cal_name)
+        if _roll_meta_cal is not None:
+            _meta_expected_kind = str(_roll_meta_cal[0])
+            if _meta_cal_selected_kind != _meta_expected_kind:
+                raise RuntimeError(f"Meta calibration propagation mismatch: selected={_meta_expected_kind} active={_meta_cal_selected_kind}")
+        print(f"[CAL-PROPAGATION:meta] selected={_meta_cal_selected_kind} active={_meta_cal_selected_kind} PASS")
 
         # Calibrated meta component. Train uses OOF raw predictions; hold/full use
         # the deploy model. Rows without second-level OOF get neutral meta weight.
@@ -20490,7 +20510,11 @@ def train_sharp_model_from_bq(
         try:
             _hold_odds = pd.to_numeric(hold_meta_df.get("Odds_Price"), errors="coerce").to_numpy(dtype=float) if "Odds_Price" in hold_meta_df.columns else None
             if _hold_odds is not None:
-                _imp = np.where(_hold_odds < 0, (-_hold_odds)/((-_hold_odds)+100.0), 100.0/(_hold_odds+100.0))
+                _imp = np.full(_hold_odds.shape, np.nan, dtype=np.float64)
+                _neg = np.isfinite(_hold_odds) & (_hold_odds < 0)
+                _pos = np.isfinite(_hold_odds) & (_hold_odds > 0)
+                np.divide(-_hold_odds, (-_hold_odds) + 100.0, out=_imp, where=_neg)
+                np.divide(100.0, _hold_odds + 100.0, out=_imp, where=_pos)
                 _edge = np.asarray(final_bet_score_hold,dtype=float)-_imp
                 print(f"[BET-DECISION-DIAGNOSTIC] edge_positive={float(np.mean(_edge>0)):.2%} edge_ge_2pct={float(np.mean(_edge>=0.02)):.2%} p50_positive={float(np.mean(np.asarray(final_bet_score_hold)>=0.5)):.2%}")
         except Exception:
@@ -20531,7 +20555,7 @@ def train_sharp_model_from_bq(
                 "flip_flag": bool(flip_flag),
                 "blend_w": float(best_w),
         
-                "model_family": "three_head_plus_meta_v5_specialist_gated",
+                "model_family": "three_head_plus_meta_v5_3_specialist_calibration_wired",
                 "feature_cols_outcome": list(feature_cols_outcome),
                 "feature_cols_situation": list(feature_cols_situation),
                 "feature_cols_value": list(feature_cols_value),
@@ -20545,14 +20569,14 @@ def train_sharp_model_from_bq(
                 "specialist_trust_value": float(SPECIALIST_TRUST_VALUE),
                 "specialist_shadow_situation": dict(SPECIALIST_SHADOW_SITUATION),
                 "specialist_shadow_value": dict(SPECIALIST_SHADOW_VALUE),
-                "stacking_train_mode": "strict_rolling_oof_group_supported_v11_5_5_1",
+                "stacking_train_mode": "strict_rolling_oof_group_supported_v11_5_5_3",
                 "meta_oof_coverage_contract": "absolute_rows_plus_independent_groups__not_fraction_of_all_book_rows",
                     "head_feature_family_policy": "specialist_domains_plus_conditional_overlay_v2",
                 "situation_target": "realized_outcome",
                 "value_cls_target": "realized_outcome_on_value_rows",
                 "value_reg_target": "synthetic_ex_ante_ev",
                 "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
-                "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_late_shadow_specialist_gate_meta_oof_coverage_v11_5_5_1",
+                "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_late_shadow_specialist_gate_meta_oof_coverage_calibration_wired_v11_5_5_3",
                 "feature_stability_method": "weighted_rolling_origin_plus_late_shadow_permutation_v4",
                 "feature_stability_outcome": (
                     autofs_outcome.get("feature_stability", pd.DataFrame()).reset_index().to_dict("records")
@@ -20610,6 +20634,7 @@ def train_sharp_model_from_bq(
                 },
                 "weighting_contract": "outcome_situation_equal_game_side_total__value_quote_level",
                 "decision_policy": "rank_and_edge_vs_implied_probability__p50_accuracy_diagnostic_only",
+                "calibration_contract": "rolling_selector_identity_platt_iso__selected_kind_must_equal_saved_runtime_kind_v11_5_5_3",
             }
 
         # -------------------------------------------------------------------
@@ -20664,7 +20689,7 @@ def train_sharp_model_from_bq(
             "meta_calibrator":      (meta_cal_name, meta_cal_obj),
         
             "multihead_config": {
-                "model_family": "three_head_plus_meta_v5_specialist_gated",
+                "model_family": "three_head_plus_meta_v5_3_specialist_calibration_wired",
                 "outcome_head": "model_logloss/model_auc + iso_blend",
                 "situation_head": "model_situation_cls",
                 "value_cls_head": "model_value_cls",
@@ -20679,17 +20704,18 @@ def train_sharp_model_from_bq(
                 "specialist_trust_value": float(SPECIALIST_TRUST_VALUE),
                 "specialist_shadow_situation": dict(SPECIALIST_SHADOW_SITUATION),
                 "specialist_shadow_value": dict(SPECIALIST_SHADOW_VALUE),
-                "stacking_train_mode": "strict_rolling_oof_group_supported_v11_5_5_1",
+                "stacking_train_mode": "strict_rolling_oof_group_supported_v11_5_5_3",
                 "meta_oof_coverage_contract": "absolute_rows_plus_independent_groups__not_fraction_of_all_book_rows",
                     "head_feature_family_policy": "specialist_domains_plus_conditional_overlay_v2",
                 "situation_target": "realized_outcome",
                 "value_cls_target": "realized_outcome_on_value_rows",
                 "value_reg_target": "synthetic_ex_ante_ev",
                 "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
-                "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_late_shadow_specialist_gate_meta_oof_coverage_v11_5_5_1",
+                "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_late_shadow_specialist_gate_meta_oof_coverage_calibration_wired_v11_5_5_3",
                 "feature_stability_method": "weighted_rolling_origin_plus_late_shadow_permutation_v4",
                 "weighting_contract": "outcome_situation_equal_game_side_total__value_quote_level",
                 "decision_policy": "rank_and_edge_vs_implied_probability__p50_accuracy_diagnostic_only",
+                "calibration_contract": "rolling_selector_identity_platt_iso__selected_kind_must_equal_saved_runtime_kind_v11_5_5_3",
                 "recency_halflife_days": {"outcome": recency_outcome_halflife, "situation": recency_situation_halflife, "value": recency_value_halflife},
                 "overlay_lane": "conditional_active_row_residual_uplift_with_sample_shrinkage",
                 "overlay_trust_map_outcome": (autofs_outcome.get("overlay_trust_map", {}) if autofs_outcome is not None else {}),
@@ -20727,7 +20753,7 @@ def train_sharp_model_from_bq(
         
                 "multihead_config": {
                     "schema_version": 3,
-                    "model_family": "three_head_plus_meta_v5_specialist_gated",
+                    "model_family": "three_head_plus_meta_v5_3_specialist_calibration_wired",
                     "meta_features": list(meta_train_df.columns),
                     "meta_calibrator": str(meta_cal_name),
                     "meta_oof_auc_for_weight": (None if not np.isfinite(META_OOF_AUC) else float(META_OOF_AUC)),
@@ -20738,17 +20764,18 @@ def train_sharp_model_from_bq(
                     "specialist_trust_value": float(SPECIALIST_TRUST_VALUE),
                     "specialist_shadow_situation": dict(SPECIALIST_SHADOW_SITUATION),
                     "specialist_shadow_value": dict(SPECIALIST_SHADOW_VALUE),
-                    "stacking_train_mode": "strict_rolling_oof_group_supported_v11_5_5_1",
+                    "stacking_train_mode": "strict_rolling_oof_group_supported_v11_5_5_3",
                 "meta_oof_coverage_contract": "absolute_rows_plus_independent_groups__not_fraction_of_all_book_rows",
                     "head_feature_family_policy": "specialist_domains_plus_conditional_overlay_v2",
                 "situation_target": "realized_outcome",
                 "value_cls_target": "realized_outcome_on_value_rows",
                 "value_reg_target": "synthetic_ex_ante_ev",
                 "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
-                "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_late_shadow_specialist_gate_meta_oof_coverage_v11_5_5_1",
+                "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_late_shadow_specialist_gate_meta_oof_coverage_calibration_wired_v11_5_5_3",
                 "feature_stability_method": "weighted_rolling_origin_plus_late_shadow_permutation_v4",
                 "weighting_contract": "outcome_situation_equal_game_side_total__value_quote_level",
                 "decision_policy": "rank_and_edge_vs_implied_probability__p50_accuracy_diagnostic_only",
+                "calibration_contract": "rolling_selector_identity_platt_iso__selected_kind_must_equal_saved_runtime_kind_v11_5_5_3",
                 "recency_halflife_days": {"outcome": recency_outcome_halflife, "situation": recency_situation_halflife, "value": recency_value_halflife},
                 "overlay_lane": "conditional_active_row_residual_uplift_with_sample_shrinkage",
                 "overlay_trust_map_outcome": (autofs_outcome.get("overlay_trust_map", {}) if autofs_outcome is not None else {}),
