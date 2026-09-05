@@ -404,8 +404,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.6-temporal-robustness-overlay"
-# V11.6: grouped game-side weighting + recency decay + deployment-horizon CV + family-aware stability pruning.
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.4-structure-stability"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -1534,6 +1533,25 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         pd.to_numeric(tg["Games_Last_4_Days_System"], errors="coerce").ge(2)
     ).astype("int8")
 
+    # Canonical RECENT bye/extra-rest state.  The older BigAl_Context_Had_Bye_Proxy
+    # is cumulative after a missed scheduled week (Week_Number - Team_Game_Number)
+    # and therefore is useful as broad historical context but is not a valid
+    # "coming off a bye" vote.  This field is one-game-local and prior-only.
+    _week_gap_now = (
+        pd.to_numeric(tg.get("Week_Number"), errors="coerce")
+        - pd.to_numeric(tg.get("Team_Game_Number"), errors="coerce")
+    )
+    _week_gap_prev = _week_gap_now.groupby([tg[c] for c in grp], sort=False).shift(1)
+    _days_rest_sched = pd.to_numeric(tg["Days_Since_Last_Game_System"], errors="coerce")
+    _football_sched = tg["Sport"].astype(str).str.upper().isin(["NFL", "NCAAF", "CFL"])
+    tg["Had_Bye_Last_Game_System"] = (
+        _football_sched
+        & (
+            (_week_gap_now.notna() & _week_gap_prev.notna() & _week_gap_now.gt(_week_gap_prev))
+            | _days_rest_sched.ge(10.0)
+        )
+    ).astype("int8")
+
     # Exact consecutive streaks, not rolling counts.
     tg["SU_Win_Streak_Prior"] = _sys_consecutive_prior(tg, "SU_Win", grp)
     tg["SU_Loss_Streak_Prior"] = _sys_consecutive_prior(tg, "SU_Loss", grp)
@@ -1763,7 +1781,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         "SU_Win_Streak_Entering_Previous_Game",
         "ATS_Win_Streak_Prior", "ATS_Loss_Streak_Prior", "Days_Since_Last_Game_System",
         "Games_Last_2_Days_System", "Games_Last_4_Days_System", "Games_Last_7_Days_System",
-        "Is_B2B_System", "Is_3in4_System", "BigAl_Context_Had_Bye_Proxy",
+        "Is_B2B_System", "Is_3in4_System", "Had_Bye_Last_Game_System", "BigAl_Context_Had_Bye_Proxy",
         "Prev_SU_Win", "Prev_SU_Loss", "Prev_SU_Margin", "Prev_Points_For", "Prev_Points_Against",
         "Prev_ATS_Win", "Prev_ATS_Loss", "Prev_ATS_Cover_Margin", "Prev2_SU_Win", "Prev2_SU_Loss",
         "Prev2_ATS_Win", "Prev2_ATS_Loss", "Prev2_ATS_Cover_Margin",
@@ -2635,6 +2653,7 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
             "Games_Last_7_Days_System", "Opp_Games_Last_7_Days_System",
             "Is_B2B_System", "Opp_Is_B2B_System",
             "Is_3in4_System", "Opp_Is_3in4_System",
+            "Had_Bye_Last_Game_System", "Opp_Had_Bye_Last_Game_System",
             "Opp_BigAl_Context_Had_Bye_Proxy",
             *PATHI_BIGAL_ADDITIONAL_MODEL_FEATURES,
         })
@@ -2654,6 +2673,55 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
     out = out.merge(stmap, on=["Sport", "Game_Key", "Team"], how="left", validate="many_to_one")
     if len(out) != before:
         raise RuntimeError(f"Pathi/BigAl merge changed row count {before} -> {len(out)}")
+
+    # V11.5.4 schedule robustness: remap the opponent's canonical physical
+    # team-game schedule state directly from STATE rather than relying only on
+    # pre-mirrored Opp_* payloads.  This survives one-sided market slices and
+    # prevents missing opponent state from being silently interpreted as zero.
+    _sched_src_cols = [
+        "Days_Since_Last_Game_System",
+        "Games_Last_2_Days_System", "Games_Last_4_Days_System", "Games_Last_7_Days_System",
+        "Is_B2B_System", "Is_3in4_System", "Had_Bye_Last_Game_System",
+    ]
+    _sched_src_cols = [c for c in _sched_src_cols if c in state.columns]
+    if _sched_src_cols:
+        _opp_sched = (
+            state[["Sport", "Game_Key", "Team"] + _sched_src_cols]
+            .drop_duplicates(["Sport", "Game_Key", "Team"], keep="last")
+            .rename(columns={
+                "Team": "__Schedule_Opponent",
+                **{c: f"__opp_sched__{c}" for c in _sched_src_cols},
+            })
+        )
+        _team_now = out["Team"].astype(str).str.lower().str.strip()
+        _home_now = out["Home_Team_Norm"].astype(str).str.lower().str.strip()
+        _away_now = out["Away_Team_Norm"].astype(str).str.lower().str.strip()
+        out["__Schedule_Opponent"] = np.where(_team_now.eq(_home_now), _away_now, _home_now)
+        _before_sched = len(out)
+        out = out.merge(
+            _opp_sched,
+            on=["Sport", "Game_Key", "__Schedule_Opponent"],
+            how="left",
+            validate="many_to_one",
+        )
+        if len(out) != _before_sched:
+            raise RuntimeError(
+                f"Opponent schedule merge changed row count {_before_sched} -> {len(out)}"
+            )
+        for _c in _sched_src_cols:
+            _dst = f"Opp_{_c}"
+            _tmp = f"__opp_sched__{_c}"
+            _newv = pd.to_numeric(out.get(_tmp), errors="coerce")
+            if _dst in out.columns:
+                _oldv = pd.to_numeric(out[_dst], errors="coerce")
+                out[_dst] = _oldv.combine_first(_newv)
+            else:
+                out[_dst] = _newv
+        out.drop(
+            columns=["__Schedule_Opponent"] + [f"__opp_sched__{c}" for c in _sched_src_cols],
+            inplace=True,
+            errors="ignore",
+        )
 
     # Keep each named system on the market it actually recommends. This avoids,
     # for example, feeding an MLB moneyline system into the run-line model or
@@ -3247,7 +3315,11 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
     three4_raw = num('Is_3in4_System')
     if three4_raw.isna().all():
         three4_raw = num('Is_3in4')
-    bye_raw = num('BigAl_Context_Had_Bye_Proxy')
+    bye_raw = num('Had_Bye_Last_Game_System')
+    if bye_raw.isna().all():
+        # Legacy context fallback is deliberately non-directional unless
+        # an opponent value is also genuinely present.
+        bye_raw = num('BigAl_Context_Had_Bye_Proxy')
 
     def _opp_metric_from_team_rows(col, agg='median'):
         """Return opponent's same-game team metric while preserving row count/index."""
@@ -3287,9 +3359,13 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
         if opp_three4_raw.isna().all():
             opp_three4_raw = _opp_metric_from_team_rows('Is_3in4', agg='max')
 
-    opp_bye_raw = num('Opp_BigAl_Context_Had_Bye_Proxy')
+    opp_bye_raw = num('Opp_Had_Bye_Last_Game_System')
     if opp_bye_raw.isna().all():
-        opp_bye_raw = _opp_metric_from_team_rows('BigAl_Context_Had_Bye_Proxy', agg='max')
+        opp_bye_raw = _opp_metric_from_team_rows('Had_Bye_Last_Game_System', agg='max')
+    if opp_bye_raw.isna().all():
+        opp_bye_raw = num('Opp_BigAl_Context_Had_Bye_Proxy')
+        if opp_bye_raw.isna().all():
+            opp_bye_raw = _opp_metric_from_team_rows('BigAl_Context_Had_Bye_Proxy', agg='max')
 
     rest_pair_ready = days_rest.notna() & opp_days_rest.notna()
     b2b_pair_ready = b2b_raw.notna() & opp_b2b_raw.notna()
@@ -6705,6 +6781,7 @@ def _cv_auc_for_feature_set(
     fallback_to_all_available_features=True,
     require_numeric_features=True,
     min_non_nan_frac=0.001,
+    sample_weight=None,
 
     # backward compat
     **_ignored_kwargs,
@@ -6739,6 +6816,12 @@ def _cv_auc_for_feature_set(
     # -----------------------------
     y = np.asarray(y, int).reshape(-1)
     n = int(len(y))
+    sw = np.ones(n, dtype=np.float64) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64).reshape(-1)
+    if len(sw) != n:
+        raise ValueError(f"sample_weight length mismatch: {len(sw)} != {n}")
+    sw[~np.isfinite(sw)] = 0.0
+    if float(sw.sum()) <= 0:
+        sw[:] = 1.0
 
     if folds is None:
         folds_list = []
@@ -6909,7 +6992,7 @@ def _cv_auc_for_feature_set(
 
         if use_xgb:
             import xgboost as xgb  # noqa
-            d_all = xgb.DMatrix(np.ascontiguousarray(X_local, dtype=np.float32), label=y)
+            d_all = xgb.DMatrix(np.ascontiguousarray(X_local, dtype=np.float32), label=y, weight=sw)
 
             def _fit_predict(tr_idx, va_idx):
                 d_tr = d_all.slice(tr_idx)
@@ -6933,7 +7016,10 @@ def _cv_auc_for_feature_set(
         else:
             def _fit_predict(tr_idx, va_idx):
                 mdl = clone(model_proto)
-                mdl.fit(X_local[tr_idx, :], y[tr_idx])
+                try:
+                    mdl.fit(X_local[tr_idx, :], y[tr_idx], sample_weight=sw[tr_idx])
+                except TypeError:
+                    mdl.fit(X_local[tr_idx, :], y[tr_idx])
                 return _safe_predict_proba_pos(mdl, X_local[va_idx, :])
 
         for tr_idx, va_idx in folds_list:
@@ -6945,7 +7031,7 @@ def _cv_auc_for_feature_set(
                 oof[va_idx] = proba.astype(np.float32, copy=False)
 
             try:
-                auc_fold = roc_auc_score(y[va_idx], proba)
+                auc_fold = roc_auc_score(y[va_idx], proba, sample_weight=sw[va_idx])
                 if not np.isfinite(auc_fold):
                     auc_fold = 0.5
             except Exception:
@@ -6978,14 +7064,16 @@ def _cv_auc_for_feature_set(
                 valid = np.isfinite(oof)
                 y_v = y[valid]
                 p_v = np.clip(oof[valid].astype(float), eps, 1.0 - eps)
-                auc_used = roc_auc_score(y_v, p_v) if (len(y_v) >= 2 and len(np.unique(y_v)) >= 2) else float("nan")
+                w_v = sw[valid]
+                auc_used = roc_auc_score(y_v, p_v, sample_weight=w_v) if (len(y_v) >= 2 and len(np.unique(y_v)) >= 2) else float("nan")
 
         if compute_ll_brier and (oof is not None):
             valid = np.isfinite(oof)
             y_v = y[valid]
             p_v = np.clip(oof[valid].astype(float), eps, 1.0 - eps)
-            ll = log_loss(y_v, p_v, labels=[0, 1])
-            br = float(np.mean((p_v - y_v) ** 2))
+            w_v = sw[valid]
+            ll = log_loss(y_v, p_v, labels=[0, 1], sample_weight=w_v)
+            br = float(np.average((p_v - y_v) ** 2, weights=w_v))
         else:
             ll = float("nan")
             br = float("nan")
@@ -7157,6 +7245,7 @@ def _auto_select_k_by_auc(
 
     psi_fn=None,
     psi_max: float | None = None,
+    sample_weight=None,
 
     # backward compat
     **_ignored_kwargs,
@@ -7176,6 +7265,12 @@ def _auto_select_k_by_auc(
     t0 = time.time()
     y_arr = np.asarray(y, int).reshape(-1)
     n = int(len(y_arr))
+    sw = np.ones(n, dtype=np.float64) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64).reshape(-1)
+    if len(sw) != n:
+        raise ValueError(f"sample_weight length mismatch: {len(sw)} != {n}")
+    sw[~np.isfinite(sw)] = 0.0
+    if float(sw.sum()) <= 0:
+        sw[:] = 1.0
     if n == 0:
         return [], None, {"done": True, "reason": "empty_y"}
 
@@ -7236,6 +7331,7 @@ def _auto_select_k_by_auc(
         orient_features=False,
         enable_feature_flips=False,
         cv_mode="full",
+        sample_weight=sw,
     )
     if verbose and isinstance(all_res, dict):
         log_func(
@@ -7256,6 +7352,7 @@ def _auto_select_k_by_auc(
             debug=True,
             return_oof=False,
             cv_mode="full",
+            sample_weight=sw,
         )
         if verbose and isinstance(base_res, dict):
             lift_auc = float(all_res.get("auc", 0.5)) - float(base_res.get("auc", 0.5))
@@ -7364,7 +7461,7 @@ def _auto_select_k_by_auc(
 
         if use_xgb:
             import xgboost as xgb  # noqa
-            d_all = xgb.DMatrix(np.ascontiguousarray(X_mat, dtype=np.float32), label=y_arr)
+            d_all = xgb.DMatrix(np.ascontiguousarray(X_mat, dtype=np.float32), label=y_arr, weight=sw)
 
             def _fit_predict(tr_idx, va_idx):
                 d_tr = d_all.slice(tr_idx)
@@ -7387,7 +7484,10 @@ def _auto_select_k_by_auc(
         else:
             def _fit_predict(tr_idx, va_idx):
                 mdl = clone(model_proto)
-                mdl.fit(X_mat[tr_idx, :], y_arr[tr_idx])
+                try:
+                    mdl.fit(X_mat[tr_idx, :], y_arr[tr_idx], sample_weight=sw[tr_idx])
+                except TypeError:
+                    mdl.fit(X_mat[tr_idx, :], y_arr[tr_idx])
                 p = mdl.predict_proba(X_mat[va_idx, :])
                 return p[:, 1] if getattr(p, "ndim", 1) == 2 else np.asarray(p).ravel()
 
@@ -7396,7 +7496,7 @@ def _auto_select_k_by_auc(
             proba = np.clip(proba, eps2, 1 - eps2)
 
             try:
-                auc_fold = roc_auc_score(y_arr[va_idx], proba)
+                auc_fold = roc_auc_score(y_arr[va_idx], proba, sample_weight=sw[va_idx])
                 if not np.isfinite(auc_fold):
                     auc_fold = 0.5
             except Exception:
@@ -7419,7 +7519,7 @@ def _auto_select_k_by_auc(
 
         if use_xgb:
             import xgboost as xgb  # noqa
-            d_all = xgb.DMatrix(np.ascontiguousarray(X_mat, dtype=np.float32), label=y_arr)
+            d_all = xgb.DMatrix(np.ascontiguousarray(X_mat, dtype=np.float32), label=y_arr, weight=sw)
 
             def _fit_predict(tr_idx, va_idx):
                 d_tr = d_all.slice(tr_idx)
@@ -7442,7 +7542,10 @@ def _auto_select_k_by_auc(
         else:
             def _fit_predict(tr_idx, va_idx):
                 mdl = clone(model_proto)
-                mdl.fit(X_mat[tr_idx, :], y_arr[tr_idx])
+                try:
+                    mdl.fit(X_mat[tr_idx, :], y_arr[tr_idx], sample_weight=sw[tr_idx])
+                except TypeError:
+                    mdl.fit(X_mat[tr_idx, :], y_arr[tr_idx])
                 p = mdl.predict_proba(X_mat[va_idx, :])
                 return p[:, 1] if getattr(p, "ndim", 1) == 2 else np.asarray(p).ravel()
 
@@ -7452,9 +7555,10 @@ def _auto_select_k_by_auc(
             oof[va_idx] = proba.astype(np.float32, copy=False)
             yy = y_arr[va_idx]
             if len(yy) >= 2 and np.unique(yy).size >= 2:
-                fa = float(roc_auc_score(yy, proba))
-                fl = float(log_loss(yy, proba, labels=[0, 1]))
-                fb = float(np.mean((proba - yy) ** 2))
+                _wv = sw[va_idx]
+                fa = float(roc_auc_score(yy, proba, sample_weight=_wv))
+                fl = float(log_loss(yy, proba, labels=[0, 1], sample_weight=_wv))
+                fb = float(np.average((proba - yy) ** 2, weights=_wv))
                 fs = fa - (0.15 * fl) - (0.10 * fb)
                 fold_aucs.append(fa); fold_lls.append(fl); fold_briers.append(fb); fold_scores.append(fs)
 
@@ -7500,14 +7604,15 @@ def _auto_select_k_by_auc(
         _oof0 = np.full(n, np.nan, dtype=np.float64)
         _fa0, _fl0, _fb0, _fs0 = [], [], [], []
         for _tr0, _va0 in folds_full:
-            _base_rate = float(np.mean(y_arr[_tr0])) if len(_tr0) else float(np.mean(y_arr))
+            _base_rate = float(np.average(y_arr[_tr0], weights=sw[_tr0])) if len(_tr0) else float(np.average(y_arr, weights=sw))
             _pred0 = np.full(len(_va0), np.clip(_base_rate, 1e-6, 1.0 - 1e-6), dtype=float)
             _oof0[_va0] = _pred0
             _yy0 = y_arr[_va0]
             if len(_yy0) >= 2 and np.unique(_yy0).size >= 2:
-                _a0 = float(roc_auc_score(_yy0, _pred0))
-                _l0 = float(log_loss(_yy0, _pred0, labels=[0, 1]))
-                _b0 = float(np.mean((_pred0 - _yy0) ** 2))
+                _wv0 = sw[_va0]
+                _a0 = float(roc_auc_score(_yy0, _pred0, sample_weight=_wv0))
+                _l0 = float(log_loss(_yy0, _pred0, labels=[0, 1], sample_weight=_wv0))
+                _b0 = float(np.average((_pred0 - _yy0) ** 2, weights=_wv0))
                 _s0 = _a0 - (0.15 * _l0) - (0.10 * _b0)
                 _fa0.append(_a0); _fl0.append(_l0); _fb0.append(_b0); _fs0.append(_s0)
         _auc0 = float(np.mean(_fa0)) if _fa0 else 0.5
@@ -7820,6 +7925,7 @@ def select_features_auto(
     flip_gain_min: float = 5e-5,
 
     final_orient: bool = True,
+    sample_weight=None,
     log_func=print,
 
     # backward compat
@@ -7948,51 +8054,37 @@ def select_features_auto(
     #   - add light shrinkage for very low-count features
     # -----------------------------
     y_f = y_arr.astype(np.float32)
-    y_c = y_f - y_f.mean()
-    y_sd = float(np.std(y_c) + 1e-12)
-    
+    sw_all = np.ones(n, dtype=np.float32) if sample_weight is None else np.asarray(sample_weight, dtype=np.float32).reshape(-1)
+    if len(sw_all) != n:
+        raise ValueError(f"select_features_auto sample_weight mismatch {len(sw_all)} != {n}")
+    sw_all[~np.isfinite(sw_all)] = 0.0
+    if float(sw_all.sum()) <= 0:
+        sw_all[:] = 1.0
+    y_mu_w = float(np.average(y_f, weights=sw_all))
+    y_c = y_f - y_mu_w
+    y_sd = float(np.sqrt(np.average(y_c**2, weights=sw_all)) + 1e-12)
+
     X_u   = X_mat[:, usable_idx]
     fin_u = finite[:, usable_idx]
-    
-    # per-column stats on finite entries
-    with np.errstate(invalid="ignore", divide="ignore"):
-        mu  = np.nanmean(X_u, axis=0).astype(np.float32, copy=False)
-        sd  = np.nanstd(X_u, axis=0).astype(np.float32, copy=False)
-    
-    # counts of finite values per column (critical for sparse control)
+    w2 = sw_all[:, None]
+    wfin = np.where(fin_u, w2, 0.0).astype(np.float32, copy=False)
+    cntw = np.maximum(wfin.sum(axis=0), 1e-8)
+    x0 = np.where(fin_u, X_u, 0.0).astype(np.float32, copy=False)
+    mu = (x0 * w2).sum(axis=0) / cntw
+    xc = np.where(fin_u, X_u - mu, 0.0).astype(np.float32, copy=False)
+    varw = (w2 * (xc**2)).sum(axis=0) / cntw
+    sd = np.sqrt(np.maximum(varw, 1e-12)).astype(np.float32, copy=False)
+    cov = (w2 * xc * y_c[:,None]).sum(axis=0) / cntw
+    score_uni = np.abs(cov) / np.maximum(sd,1e-12) / y_sd
+
+    # Reliability shrinkage uses effective weighted support.
     cnt = fin_u.sum(axis=0).astype(np.float32, copy=False)
     cnt_safe = np.maximum(cnt, 1.0)
-    
-    # compute cov normalized by count (so 3-row features don't dominate)
-    block = 256
-    cov = np.zeros(X_u.shape[1], dtype=np.float32)
-    
-    for j0 in range(0, X_u.shape[1], block):
-        j1 = min(X_u.shape[1], j0 + block)
-    
-        Xu_b  = X_u[:, j0:j1]
-        fin_b = fin_u[:, j0:j1]
-        mu_b  = mu[j0:j1]
-    
-        # center only where finite; elsewhere 0 so dot() ignores missing
-        xc = np.where(fin_b, Xu_b - mu_b, 0.0).astype(np.float32, copy=False)
-    
-        # normalized covariance estimate
-        cov[j0:j1] = (xc.T @ y_c).astype(np.float32, copy=False) / np.maximum(cnt_safe[j0:j1], 1.0)
-    
-    # base score: |corr| proxy
-    sd_safe = np.maximum(sd, 1e-12)
-    score_uni = np.abs(cov) / sd_safe / y_sd  # ~ |corr|
-    
-    # light reliability shrinkage for small counts (keeps rare signals but stops lottery wins)
-    # ~ sqrt(cnt / (cnt + k)) : at cnt<<k shrinks strongly; at cnt>>k ~1
-    k_shrink = max(50.0, 0.0005 * float(n))   # adaptive: >=50 examples, or 0.05% of data
+    k_shrink = max(50.0, 0.0005 * float(n))
     shrink = np.sqrt(cnt_safe / (cnt_safe + k_shrink)).astype(np.float32, copy=False)
     score_uni *= shrink
-    
-    # hard-penalize columns with effectively no variance after nan-handling
     score_uni = np.where(np.isfinite(score_uni), score_uni, 0.0).astype(np.float32, copy=False)
-    
+
     is_small = str(sport_key).upper() in {"WNBA", "CFL", "MLS", "NHL"}
     max_pre = int(max_feats_small if is_small else max_feats_major)
     
@@ -8021,22 +8113,23 @@ def select_features_auto(
     
         for tr, _va in folds_list:
             y_tr = y_full[tr]
-            y_tc = y_tr - y_tr.mean()
-            y_sd_tr = float(np.std(y_tc) + 1e-12)
-    
+            w_tr = sw_all[tr].astype(np.float32, copy=False)
+            y_mu_tr = float(np.average(y_tr, weights=w_tr)) if float(w_tr.sum()) > 0 else float(np.mean(y_tr))
+            y_tc = y_tr - y_mu_tr
+            y_sd_tr = float(np.sqrt(np.average(y_tc**2, weights=np.maximum(w_tr,1e-12))) + 1e-12)
+
             X_tr = X_mat[tr][:, usable_idx]
             fin_tr = np.isfinite(X_tr)
-    
-            mu_tr = np.nanmean(X_tr, axis=0).astype(np.float32, copy=False)
-            sd_tr = np.nanstd(X_tr, axis=0).astype(np.float32, copy=False)
-            sd_tr = np.maximum(sd_tr, 1e-12)
-    
-            xc = np.where(fin_tr, X_tr - mu_tr, 0.0).astype(np.float32, copy=False)
-            cnt_tr = fin_tr.sum(axis=0).astype(np.float32, copy=False)
-            cnt_tr = np.maximum(cnt_tr, 1.0)
-    
-            cov_tr = (xc.T @ y_tc).astype(np.float32, copy=False) / cnt_tr
-            score_tr = np.abs(cov_tr) / sd_tr / y_sd_tr
+            wtr2 = w_tr[:,None]
+            wf = np.where(fin_tr, wtr2, 0.0).astype(np.float32, copy=False)
+            swf = np.maximum(wf.sum(axis=0), 1e-8)
+            x0tr = np.where(fin_tr, X_tr, 0.0).astype(np.float32, copy=False)
+            mu_tr = (x0tr*wtr2).sum(axis=0)/swf
+            xc = np.where(fin_tr, X_tr-mu_tr, 0.0).astype(np.float32, copy=False)
+            var_tr=(wtr2*(xc**2)).sum(axis=0)/swf
+            sd_tr=np.sqrt(np.maximum(var_tr,1e-12))
+            cov_tr=(wtr2*xc*y_tc[:,None]).sum(axis=0)/swf
+            score_tr=np.abs(cov_tr)/np.maximum(sd_tr,1e-12)/y_sd_tr
     
             kk = min(K, score_tr.size)
             if kk <= 0:
@@ -8214,6 +8307,7 @@ def select_features_auto(
             time_budget_s=1e18,
             resume_state=None,
             max_total_evals=None,
+            sample_weight=sample_weight,
         )
         feature_cols = list(accepted_feats or [])
         flip_map = (state or {}).get("flip_map", {}) or {}
@@ -15929,7 +16023,7 @@ def train_sharp_model_from_bq(
             """
             try:
                 print("\n" + "="*100)
-                print(f"PATHI + BIG AL + BRAIN INTEGRITY AUDIT | V11.5.2 HOLDOUT + STABILITY + SCHEDULE | market={str(market_name).upper()} | rows={len(df_audit):,}")
+                print(f"PATHI + BIG AL + BRAIN INTEGRITY AUDIT | V11.5.4 STRUCTURE STABILITY + TEMPORAL SHADOW + OVERLAY TRUST + SCHEDULE | market={str(market_name).upper()} | rows={len(df_audit):,}")
                 print("="*100)
 
                 def nser(c, default=0.0):
@@ -16118,12 +16212,23 @@ def train_sharp_model_from_bq(
                     print(f"Schedule active={int(_sa.sum()):,} | positive={int((_sa&_sd.gt(0)).sum()):,} | negative={int((_sa&_sd.lt(0)).sum()):,} | active-neutral={int((_sa&_sd.eq(0)).sum()):,}")
                     if 'Brain_Schedule_Rest_Diff_Days' in df_audit.columns:
                         _rd=pd.to_numeric(df_audit['Brain_Schedule_Rest_Diff_Days'],errors='coerce')
-                        print(f"rest-diff available={int(_rd.notna().sum()):,} positive(>=1d)={int(_rd.ge(1).sum()):,} negative(<=-1d)={int(_rd.le(-1).sum()):,} median={_rd.median()}")
+                        print(f"Brain rest-diff nonzero={int(_rd.ne(0).sum()):,} positive(>=1d)={int(_rd.ge(1).sum()):,} negative(<=-1d)={int(_rd.le(-1).sum()):,} median={_rd.median()}")
+                    if all(c in df_audit.columns for c in ['Days_Since_Last_Game_System','Opp_Days_Since_Last_Game_System']):
+                        _cur_rest=pd.to_numeric(df_audit['Days_Since_Last_Game_System'],errors='coerce')
+                        _opp_rest=pd.to_numeric(df_audit['Opp_Days_Since_Last_Game_System'],errors='coerce')
+                        _pair=_cur_rest.notna()&_opp_rest.notna()
+                        _raw_diff=(_cur_rest-_opp_rest).where(_pair)
+                        print(f"raw paired rest ready={int(_pair.sum()):,} diff_pos={int(_raw_diff.ge(1).sum()):,} diff_neg={int(_raw_diff.le(-1).sum()):,}")
                     for _c in ['Brain_Schedule_Current_B2B','Brain_Schedule_Opp_B2B','Brain_Schedule_Current_3in4','Brain_Schedule_Opp_3in4','Brain_Schedule_Current_ByeProxy','Brain_Schedule_Opp_ByeProxy']:
                         if _c in df_audit.columns:
                             print(f"{_c}={int(nser(_c).eq(1).sum()):,}")
-                    _sym_ok = int((_sa&_sd.lt(0)).sum()) > 0 or int((_sa&_sd.gt(0)).sum()) == 0
-                    print(f"schedule two-sided evidence={'PASS' if _sym_ok else 'WARN'}")
+                    if all(c in df_audit.columns for c in ['Had_Bye_Last_Game_System','Opp_Had_Bye_Last_Game_System']):
+                        _cb=pd.to_numeric(df_audit['Had_Bye_Last_Game_System'],errors='coerce')
+                        _ob=pd.to_numeric(df_audit['Opp_Had_Bye_Last_Game_System'],errors='coerce')
+                        _br=_cb.notna()&_ob.notna()
+                        print(f"raw recent-bye paired ready={int(_br.sum()):,} current_only={int((_br&_cb.eq(1)&_ob.eq(0)).sum()):,} opp_only={int((_br&_cb.eq(0)&_ob.eq(1)).sum()):,}")
+                    _sym_ok = bool(((_sa&_sd.gt(0)).any() and (_sa&_sd.lt(0)).any()) or (not _sa.any()))
+                    print(f"schedule two-sided directional evidence={'PASS' if _sym_ok else 'WARN'}")
                 else:
                     print("Schedule-source audit unavailable: expert state columns missing")
 
@@ -16785,123 +16890,124 @@ def train_sharp_model_from_bq(
         # ----------------------------
         # 2) Sample weights (BUILD ONCE from train_df) — no drops
         # ----------------------------
-        def _build_sample_weights(train_df: pd.DataFrame, head_name: str = "outcome") -> np.ndarray:
-            bk_col = "Bookmaker" if "Bookmaker" in train_df.columns else (
-                "Bookmaker_Norm" if "Bookmaker_Norm" in train_df.columns else None
+        def _build_sample_weights(
+            train_df: pd.DataFrame, *,
+            mode: str = "quote",
+            times=None,
+            recency_halflife_days: float | None = None,
+        ) -> np.ndarray:
+            """
+            V11.5.4 weighting contract.
+
+            outcome/situation -> mode="game_side": every physical game-side has
+            approximately equal TOTAL outcome influence even when many books quote it.
+            Book/market context only redistributes weight WITHIN that game-side.
+
+            value -> mode="quote": quote-level differences remain legitimate targets.
+
+            Optional exponential recency decay is applied at the GAME level after
+            group normalization and is chosen only from inner temporal CV.
+            """
+            if train_df is None or len(train_df) == 0:
+                return np.zeros(0, dtype=np.float32)
+
+            d = train_df.reset_index(drop=True).copy()
+            n_rows = len(d)
+            bk_col = "Bookmaker" if "Bookmaker" in d.columns else (
+                "Bookmaker_Norm" if "Bookmaker_Norm" in d.columns else None
             )
-        
+
+            # --- within-row/book reliability component ---
             if bk_col is None:
-                w_base = np.ones(len(train_df), dtype=np.float32)
+                w_book_base = np.ones(n_rows, dtype=np.float64)
             else:
-                B_g  = train_df.groupby("Game_Key")[bk_col].nunique()
-                n_gb = train_df.groupby(["Game_Key", bk_col]).size()
-        
+                B_g  = d.groupby("Game_Key", dropna=False)[bk_col].nunique()
+                n_gb = d.groupby(["Game_Key", bk_col], dropna=False).size()
                 TAU = 0.7
-                def _w_gb(g, b, tau=1.0):
-                    Bg  = max(1, int(B_g.get(g, 1)))
-                    ngb = max(1, int(n_gb.get((g, b), 1)))
-                    return 1.0 / (Bg * (ngb ** tau))
-        
-                w_base = np.array(
-                    [_w_gb(g, b, TAU) for g, b in zip(train_df["Game_Key"], train_df[bk_col])],
-                    dtype=np.float32
-                )
-        
-                # Sharp-book tilt
-                if "Is_Sharp_Book" in train_df.columns:
-                    is_sharp = train_df["Is_Sharp_Book"].fillna(False).astype(bool).to_numpy(dtype=np.float32)
+                w_book_base = np.array([
+                    1.0 / (
+                        max(1, int(B_g.get(g, 1)))
+                        * (max(1, int(n_gb.get((g, b), 1))) ** TAU)
+                    )
+                    for g, b in zip(d["Game_Key"], d[bk_col])
+                ], dtype=np.float64)
+                if "Is_Sharp_Book" in d.columns:
+                    is_sharp = d["Is_Sharp_Book"].fillna(False).astype(bool).to_numpy(dtype=np.float64)
                 else:
-                    is_sharp = train_df[bk_col].isin(SHARP_BOOKS).to_numpy(dtype=np.float32)
-        
-                w_base *= (1.0 + 0.20 * is_sharp)
-        
-            # Context multipliers (no row drops)
-            def _ctx(m: pd.DataFrame) -> np.ndarray:
-                w_book = m.get("Book_Reliability_Score", pd.Series(1.0, index=m.index)).clip(0.6, 1.4)
-        
-                w_mag = (
-                    pd.to_numeric(m.get("Abs_Line_Move_From_Opening", 0), errors="coerce")
-                    .fillna(0).clip(0, 2.0) ** 0.7
-                )
-        
-                tier = m.get("Minutes_To_Game_Tier", pd.Series("", index=m.index)).astype(str)
-                is_overnight = (tier == "Overnight_VeryEarly").astype(int)
-        
-                is_too_late = pd.to_numeric(m.get("Potential_Overmove_Flag", 0), errors="coerce").fillna(0).astype(int)
-                w_time = (1.0 - 0.15 * is_too_late) * (1.0 - 0.15 * is_overnight)
-        
-                p0 = (
-                    pd.to_numeric(m.get("Spread_Implied_Prob", np.nan), errors="coerce")
-                    .fillna(pd.to_numeric(m.get("H2H_Implied_Prob", np.nan), errors="coerce"))
-                    .fillna(0.5).clip(0.01, 0.99)
-                )
-                w_mid = np.where((p0 > 0.45) & (p0 < 0.55), 1.4, 1.0)
-        
-                rev = (
-                    (pd.to_numeric(m.get("Value_Reversal_Flag", 0), errors="coerce").fillna(0) == 1) |
-                    (pd.to_numeric(m.get("Odds_Reversal_Flag", 0),  errors="coerce").fillna(0) == 1)
-                ).astype(int)
-                w_rev = 1.0 - 0.15 * rev
-        
-                out = (
-                    w_book.to_numpy("float32")
-                    * w_mag.to_numpy("float32")
-                    * w_time.astype("float32")
-                    * w_mid.astype("float32")
-                    * w_rev.astype("float32")
-                )
-                return np.asarray(out, dtype=np.float32)
-        
-            w = (w_base * _ctx(train_df)).astype(np.float32)
+                    is_sharp = d[bk_col].isin(SHARP_BOOKS).to_numpy(dtype=np.float64)
+                w_book_base *= (1.0 + 0.20 * is_sharp)
+
+            # --- context component; preserve legacy ideas but never zero an entire game-side ---
+            w_reliability = pd.to_numeric(
+                d.get("Book_Reliability_Score", pd.Series(1.0, index=d.index)), errors="coerce"
+            ).fillna(1.0).clip(0.6, 1.4).to_numpy(dtype=np.float64)
+
+            mag = pd.to_numeric(d.get("Abs_Line_Move_From_Opening", 0.0), errors="coerce").fillna(0.0).clip(0, 2.0)
+            w_mag = (0.35 + np.power(mag.to_numpy(dtype=np.float64), 0.7))
+
+            tier = d.get("Minutes_To_Game_Tier", pd.Series("", index=d.index)).astype(str)
+            is_overnight = tier.eq("Overnight_VeryEarly").to_numpy(dtype=np.float64)
+            is_too_late = pd.to_numeric(d.get("Potential_Overmove_Flag", 0), errors="coerce").fillna(0).to_numpy(dtype=np.float64)
+            w_time = (1.0 - 0.15 * is_too_late) * (1.0 - 0.15 * is_overnight)
+
+            p0 = pd.to_numeric(d.get("Spread_Implied_Prob", np.nan), errors="coerce")
+            p0 = p0.fillna(pd.to_numeric(d.get("H2H_Implied_Prob", np.nan), errors="coerce")).fillna(0.5).clip(0.01, 0.99)
+            w_mid = np.where((p0.to_numpy() > 0.45) & (p0.to_numpy() < 0.55), 1.4, 1.0)
+
+            rev = (
+                pd.to_numeric(d.get("Value_Reversal_Flag", 0), errors="coerce").fillna(0).eq(1)
+                | pd.to_numeric(d.get("Odds_Reversal_Flag", 0), errors="coerce").fillna(0).eq(1)
+            ).to_numpy(dtype=np.float64)
+            w_rev = 1.0 - 0.15 * rev
+
+            raw = w_book_base * w_reliability * w_mag * w_time * w_mid * w_rev
+            raw[~np.isfinite(raw)] = 0.0
+            raw = np.maximum(raw, 1e-8)
+
+            mode_l = str(mode).lower().strip()
+            if mode_l == "game_side":
+                # Game_Key in this training view is side/outcome-specific, but Team/Market
+                # are included when available to make the unit explicit and future-proof.
+                gcols = [c for c in ["Sport", "Game_Key", "Team", "Market"] if c in d.columns]
+                if not gcols:
+                    gcols = ["Game_Key"]
+                key_frame = d[gcols].astype(str)
+                keys = pd.util.hash_pandas_object(key_frame, index=False).to_numpy(dtype=np.uint64)
+                tmp = pd.DataFrame({"k": keys, "raw": raw})
+                sums = tmp.groupby("k", sort=False)["raw"].transform("sum").to_numpy(dtype=np.float64)
+                counts = tmp.groupby("k", sort=False)["raw"].transform("size").to_numpy(dtype=np.float64)
+                w = np.empty_like(raw, dtype=np.float64)
+                good = sums > 0
+                np.divide(raw, sums, out=w, where=good)
+                w[~good] = 1.0 / np.maximum(counts[~good], 1.0)
+            else:
+                w = raw.copy()
+
+            # Optional recency weighting.  Apply one common factor to every quote
+            # from the same game-side so quote multiplicity remains normalized.
+            if recency_halflife_days is not None and float(recency_halflife_days) > 0:
+                if times is None:
+                    t = pd.to_datetime(d.get("Game_Start"), utc=True, errors="coerce")
+                else:
+                    t = pd.to_datetime(np.asarray(times), utc=True, errors="coerce")
+                if len(t) == n_rows and pd.Series(t).notna().any():
+                    tser = pd.Series(t)
+                    tmax = tser.max()
+                    age_days = (tmax - tser).dt.total_seconds().div(86400.0).clip(lower=0).fillna(0.0)
+                    rec = np.power(0.5, age_days.to_numpy(dtype=np.float64) / float(recency_halflife_days))
+                    w *= rec
+
+            w = np.asarray(w, dtype=np.float64)
             w[~np.isfinite(w)] = 0.0
-
-            # V11.6: Outcome/Situation labels are game-side outcomes.  Multiple
-            # sportsbook quotes must not multiply the statistical weight of the
-            # same realized result.  Preserve relative quote quality *within* a
-            # game-side, but force every game-side to carry the same total mass.
-            # Value remains quote-level because price/value genuinely differs by book.
-            if str(head_name).lower() in {"outcome", "situation"}:
-                side_cols = [c for c in ("Game_Key", "Team", "Market") if c in train_df.columns]
-                if "Game_Key" not in side_cols:
-                    side_cols = ["Game_Key"]
-                if "Team" not in side_cols and "Outcome" in train_df.columns:
-                    side_cols.append("Outcome")
-                tmp = pd.DataFrame({"_w": w}, index=train_df.index)
-                for c in side_cols:
-                    tmp[c] = train_df[c].astype(str).to_numpy()
-                denom = tmp.groupby(side_cols, dropna=False)["_w"].transform("sum").to_numpy(float)
-                counts = tmp.groupby(side_cols, dropna=False)["_w"].transform("size").to_numpy(float)
-                w = np.where(denom > 0, w / denom, 1.0 / np.maximum(counts, 1.0)).astype(np.float32)
-                print(f"[GAME-SIDE-WEIGHT:{head_name}] groups={tmp.groupby(side_cols, dropna=False).ngroups:,} "
-                      f"rows={len(tmp):,} total_mass={float(w.sum()):.1f}")
-
-            # V11.6 recency decay.  Rare systems retain the full history, but old
-            # market regimes do not receive identical influence to recent seasons.
-            # The half-life is deliberately long and sport-aware; this is a mild
-            # robustness prior, not a short-window replacement for history.
-            tcol = next((c for c in ("Game_Start", "Snapshot_Timestamp", "Time") if c in train_df.columns), None)
-            if tcol is not None:
-                tt = pd.to_datetime(train_df[tcol], utc=True, errors="coerce")
-                if tt.notna().any():
-                    newest = tt.max()
-                    age_days = (newest - tt).dt.total_seconds().div(86400.0).fillna(0.0).clip(lower=0.0)
-                    sport_guess = str(sport_key if "sport_key" in locals() else sport).upper()
-                    half_life = {"NFL": 730.0, "NCAAF": 730.0, "CFL": 730.0,
-                                 "NBA": 548.0, "NCAAB": 548.0, "WNBA": 548.0, "MLB": 548.0}.get(sport_guess, 730.0)
-                    decay = np.exp(-np.log(2.0) * age_days.to_numpy(float) / half_life)
-                    # Floor prevents older rare overlays from being erased.
-                    w *= np.clip(decay, 0.35, 1.0).astype(np.float32)
-
-            # Renormalize to mean 1.0 after all weighting.
-            s = float(w.sum())
-            if s > 0:
-                w *= (len(w) / s)
+            ssum = float(w.sum())
+            if ssum > 0:
+                w *= (n_rows / ssum)
             else:
                 w[:] = 1.0
-            return w
-        
+            return w.astype(np.float32)
+
        
-        w_train_outcome = _build_sample_weights(train_df, "outcome")
+        w_train_outcome = _build_sample_weights(train_df, mode="game_side", times=t_train)
         assert len(w_train_outcome) == len(train_df) == len(y_train), (
             "w_train_outcome misaligned", len(w_train_outcome), len(train_df), len(y_train)
         )
@@ -16909,7 +17015,7 @@ def train_sharp_model_from_bq(
         w_train_situation = None
         if train_idx_situation is not None:
             train_df_situation = df_full_situation.iloc[train_idx_situation].copy().reset_index(drop=True)
-            w_train_situation = _build_sample_weights(train_df_situation, "situation")
+            w_train_situation = _build_sample_weights(train_df_situation, mode="game_side", times=times_situation[train_idx_situation])
             assert len(w_train_situation) == len(train_df_situation) == len(y_train_situation), (
                 "w_train_situation misaligned", len(w_train_situation), len(train_df_situation), len(y_train_situation)
             )
@@ -16917,7 +17023,7 @@ def train_sharp_model_from_bq(
         w_train_value = None
         if train_idx_value is not None:
             train_df_value = df_full_value.iloc[train_idx_value].copy().reset_index(drop=True)
-            w_train_value = _build_sample_weights(train_df_value, "value")
+            w_train_value = _build_sample_weights(train_df_value, mode="quote", times=times_value[train_idx_value])
             assert len(w_train_value) == len(train_df_value) == len(y_train_value_cls), (
                 "w_train_value misaligned", len(w_train_value), len(train_df_value), len(y_train_value_cls)
             )
@@ -16929,67 +17035,155 @@ def train_sharp_model_from_bq(
             sport_key = "NCAAB"
         
         rows_per_game = int(np.ceil(len(y_train) / max(1, pd.unique(g_train).size)))
-        
-        if sport_key in SMALL_LEAGUES:
-            target_games = 12
-            min_val_size = max(18, target_games * rows_per_game)
-            embargo_td = pd.Timedelta(hours=24)
-        else:
-            # Larger contiguous validation blocks reduce fold-to-fold noise and
-            # make forward feature selection less able to chase tiny local lifts.
-            # V11.6 deployment-horizon validation: football is evaluated over
-            # approximately a full weekly slate; dense sports use a broader
-            # calendar-like block.  The splitter remains strictly time-forward.
-            if sport_key in {"NFL", "NCAAF"}:
-                target_games = 80
-            elif sport_key in {"NBA", "NCAAB", "MLB"}:
-                target_games = 100
-            else:
-                target_games = 60
-            min_val_size = max(60, target_games * rows_per_game)
-            _dense = sport_key in {"NBA", "MLB", "WNBA", "CFL"}
-            if sport_key in {"NFL", "NCAAF"}:
-                embargo_td = pd.Timedelta(hours=48)
-            else:
-                embargo_td = pd.Timedelta(hours=24 if _dense else 36)
-        
-        n_groups_train = pd.unique(g_train).size
-        target_folds = 5 if n_groups_train >= 200 else (4 if n_groups_train >= 120 else 3)
-        print(
-            f"[CV-STRENGTH] sport={sport_key} train_groups={n_groups_train:,} folds={target_folds} "
-            f"target_val_games={target_games} min_val_rows={min_val_size} embargo={embargo_td}"
-        )
 
-        cv_outcome = PurgedGroupTimeSeriesSplit(
-            n_splits=target_folds,
-            embargo=embargo_td,
-            time_values=t_train,
-            min_val_size=min_val_size,
+        # V11.5.4: deployment-horizon rolling origins.  AutoFS no longer judges
+        # stability only on arbitrary N-game blocks.  Validation windows reflect
+        # the cadence at which the sport is actually deployed, and the newest
+        # rolling origins inside TRAIN are held back as SHADOW tests that AutoFS
+        # never sees.
+        _HORIZON_DAYS = {
+            "NFL": 7, "NCAAF": 7, "CFL": 7,
+            "NBA": 10, "WNBA": 10, "NCAAB": 10, "NHL": 10,
+            "MLB": 7, "MLS": 14, "DEFAULT": 10,
+        }
+        _EMBARGO_HOURS = {
+            "NFL": 48, "NCAAF": 48, "CFL": 36,
+            "NBA": 18, "WNBA": 18, "NCAAB": 18, "NHL": 12,
+            "MLB": 8, "MLS": 24, "DEFAULT": 24,
+        }
+
+        def _rolling_origin_plan(groups_arr, times_arr, y_arr, *, sport_name, n_select=4, n_shadow=2):
+            groups_arr = np.asarray(groups_arr).astype(str)
+            y_arr = np.asarray(y_arr, dtype=int).reshape(-1)
+            tt = pd.to_datetime(np.asarray(times_arr), utc=True, errors="coerce")
+            if len(groups_arr) != len(y_arr) or len(tt) != len(y_arr):
+                raise ValueError("rolling-origin length mismatch")
+
+            gd = pd.DataFrame({"g": groups_arr, "t": tt, "row": np.arange(len(y_arr), dtype=int)})
+            gd = gd.dropna(subset=["t"])
+            gt = gd.groupby("g", sort=False)["t"].min().sort_values()
+            ordered_groups = gt.index.to_numpy(dtype=object)
+            ordered_times = gt.to_numpy()
+            ng = len(ordered_groups)
+            if ng < 80:
+                raise RuntimeError(f"Too few chronological groups for robust rolling CV: {ng}")
+
+            key = str(sport_name).upper().strip()
+            horizon = pd.Timedelta(days=float(_HORIZON_DAYS.get(key, _HORIZON_DAYS["DEFAULT"])))
+            embargo = pd.Timedelta(hours=float(_EMBARGO_HOURS.get(key, _EMBARGO_HOURS["DEFAULT"])))
+            dense = key in {"NBA", "WNBA", "NCAAB", "NHL", "MLB"}
+            min_val_groups = 50 if dense else (30 if key in {"NFL", "NCAAF", "CFL"} else 25)
+            min_train_groups = max(60, int(round(0.25 * ng)))
+            n_total = int(n_select + n_shadow)
+
+            # Spread origins over history; newest origins become shadow tests.
+            max_start = max(min_train_groups + 1, ng - min_val_groups - 1)
+            raw_pos = np.linspace(min_train_groups, max_start, n_total + 3, dtype=int)[1:-2]
+            raw_pos = np.unique(np.clip(raw_pos, min_train_groups, ng - min_val_groups - 1))
+            plans = []
+            seen_starts = set()
+            for pos in raw_pos:
+                val_start = pd.Timestamp(ordered_times[int(pos)])
+                if val_start in seen_starts:
+                    continue
+                seen_starts.add(val_start)
+                val_end = val_start + horizon
+                val_groups = gt.index[(gt >= val_start) & (gt < val_end)].astype(str).tolist()
+                if len(val_groups) < min_val_groups:
+                    val_groups = [str(x) for x in ordered_groups[int(pos): min(ng, int(pos) + min_val_groups)]]
+                    if val_groups:
+                        val_end = pd.Timestamp(gt.loc[val_groups[-1]]) + pd.Timedelta(seconds=1)
+                train_cut = val_start - embargo
+                tr_groups = gt.index[gt < train_cut].astype(str).tolist()
+                if len(tr_groups) < min_train_groups or len(val_groups) < max(8, min_val_groups // 2):
+                    continue
+                tr_mask = np.isin(groups_arr, np.asarray(tr_groups, dtype=object))
+                va_mask = np.isin(groups_arr, np.asarray(val_groups, dtype=object))
+                tr_idx = np.flatnonzero(tr_mask)
+                va_idx = np.flatnonzero(va_mask)
+                if tr_idx.size == 0 or va_idx.size == 0:
+                    continue
+                if np.unique(y_arr[tr_idx]).size < 2 or np.unique(y_arr[va_idx]).size < 2:
+                    continue
+                if set(groups_arr[tr_idx]) & set(groups_arr[va_idx]):
+                    raise RuntimeError("rolling-origin group overlap")
+                plans.append((tr_idx.astype(int), va_idx.astype(int), val_start, val_end, len(tr_groups), len(val_groups)))
+
+            if len(plans) < 3:
+                raise RuntimeError(f"Only {len(plans)} valid rolling origins; need >=3")
+            plans = sorted(plans, key=lambda z: z[2])
+            n_shadow_eff = min(int(n_shadow), max(1, len(plans) - 2))
+            selection = [(x[0], x[1]) for x in plans[:-n_shadow_eff]]
+            shadow = [(x[0], x[1]) for x in plans[-n_shadow_eff:]]
+            if len(selection) < 2:
+                selection = [(x[0], x[1]) for x in plans[:-1]]
+                shadow = [(plans[-1][0], plans[-1][1])]
+
+            # V11.5.4 fail-fast validation contract: never silently fall back to legacy CV.
+            if len(selection) < 2 or len(shadow) < 1:
+                raise RuntimeError(f"V11.5.4 temporal contract failed: selection={len(selection)} shadow={len(shadow)}")
+            select_val_groups=set()
+            shadow_val_groups=set()
+            for a,b in selection:
+                select_val_groups.update(groups_arr[np.asarray(b,int)].tolist())
+            for a,b in shadow:
+                shadow_val_groups.update(groups_arr[np.asarray(b,int)].tolist())
+            overlap=select_val_groups & shadow_val_groups
+            if overlap:
+                raise RuntimeError(f"V11.5.4 SELECT/SHADOW overlap: {len(overlap)} groups")
+            print(f"[TEMPORAL-CONTRACT] selection>=2=PASS shadow>=1=PASS disjoint=PASS select_val_groups={len(select_val_groups)} shadow_val_groups={len(shadow_val_groups)}")
+
+            print(
+                f"[TEMPORAL-CV] sport={key} groups={ng:,} horizon={horizon} embargo={embargo} "
+                f"selection_origins={len(selection)} shadow_origins={len(shadow)}"
+            )
+            for j, x in enumerate(plans):
+                lane = "SHADOW" if j >= len(plans) - len(shadow) else "SELECT"
+                print(
+                    f"[TEMPORAL-ORIGIN:{lane}] #{j+1} val_start={x[2]} val_end={x[3]} "
+                    f"train_groups={x[4]:,} val_groups={x[5]:,}"
+                )
+            return selection, shadow, embargo, horizon
+
+        class _PrecomputedTemporalSplit:
+            def __init__(self, folds):
+                self.folds = [(np.asarray(a, int), np.asarray(b, int)) for a, b in folds]
+                self.n_splits = len(self.folds)
+            def split(self, X, y=None, groups=None, times=None):
+                for a, b in self.folds:
+                    yield a, b
+
+        folds_plan_outcome, shadow_folds_outcome, embargo_td, horizon_td = _rolling_origin_plan(
+            g_train, t_train, y_train, sport_name=sport_key, n_select=4, n_shadow=2
         )
+        cv_outcome = _PrecomputedTemporalSplit(folds_plan_outcome)
 
         cv_situation = None
+        shadow_folds_situation = []
         if y_train_situation is not None:
             g_train_situation = groups_situation[train_idx_situation]
             t_train_situation = times_situation[train_idx_situation]
-        
-            cv_situation = PurgedGroupTimeSeriesSplit(
-                n_splits=target_folds,
-                embargo=embargo_td,
-                time_values=t_train_situation,
-                min_val_size=min_val_size,
+            _fs, shadow_folds_situation, _, _ = _rolling_origin_plan(
+                g_train_situation, t_train_situation, y_train_situation,
+                sport_name=sport_key, n_select=4, n_shadow=2
             )
+            cv_situation = _PrecomputedTemporalSplit(_fs)
 
         cv_value = None
+        shadow_folds_value = []
         if y_train_value_cls is not None:
             g_train_value = groups_value[train_idx_value]
             t_train_value = times_value[train_idx_value]
-        
-            cv_value = PurgedGroupTimeSeriesSplit(
-                n_splits=target_folds,
-                embargo=embargo_td,
-                time_values=t_train_value,
-                min_val_size=min_val_size,
+            _fv, shadow_folds_value, _, _ = _rolling_origin_plan(
+                g_train_value, t_train_value, y_train_value_cls,
+                sport_name=sport_key, n_select=4, n_shadow=2
             )
+            cv_value = _PrecomputedTemporalSplit(_fv)
+
+        print(
+            f"[CV-STRENGTH] sport={sport_key} selection_folds={cv_outcome.n_splits} "
+            f"shadow_folds={len(shadow_folds_outcome)} horizon={horizon_td} embargo={embargo_td}"
+        )
         y_train = pd.Series(y_train, copy=False).astype(int).clip(0, 1).to_numpy()
         # ----------------------------
         # Helper: deterministic folds w/ safety + ES fold selection
@@ -17178,39 +17372,93 @@ def train_sharp_model_from_bq(
        
        
       
-        def _robust_feature_family(col: str) -> str:
-            c = str(col)
-            if c.startswith("BigAl_"): return "BigAl"
-            if c.startswith("Pathi_"): return "Pathi"
-            if c.startswith("Brain_Expert_Market") or c.startswith("Brain_Regime_"): return "Market"
-            if c.startswith("Brain_Expert_Power") or "Power" in c: return "Power"
-            if c.startswith("Brain_Expert_Form") or "Form" in c: return "Form"
-            if c.startswith("Brain_Expert_Schedule") or c.startswith("Brain_Schedule_"): return "Schedule"
-            if c.startswith("Brain_Expert_Price") or "Price" in c or "Implied" in c: return "Price"
-            if c.startswith("Brain_"): return "Brain"
-            if any(x in c for x in ("Line_Move", "Sharp", "Steam", "Books_Aligned", "Market_", "Reversal")): return "RawMarket"
-            return "Core"
+        def _feature_family_v1154(name: str) -> str:
+            s0 = str(name)
+            sl = s0.lower()
+            # Structural/context flags are their own family even when names begin BigAl_.
+            # This prevents a strong Big Al system from rescuing an unrelated structural proxy.
+            if s0.startswith("BigAl_Context_") or any(tok in sl for tok in (
+                "conference", "nonconference", "is_home", "is_away", "week", "game2", "game_"
+            )):
+                return "STRUCTURAL_CONTEXT"
+            if s0 in set(PATHI_EXACT_SIGNAL_COLS):
+                return "PATHI_OVERLAY"
+            if s0 in set(BIGAL_ENHANCER_COLS):
+                return "BIGAL_OVERLAY"
+            if s0.startswith("BigAl_") and (s0.endswith("_Tightener") or s0 in _BIGAL_EXACT_OVERLAY):
+                return "BIGAL_OVERLAY"
+            if s0.startswith("BigAl_"):
+                return "BIGAL_CONTEXT"
+            if s0.startswith("Pathi_"):
+                return "PATHI"
+            if s0.startswith("Brain_Expert_Market") or s0.startswith("Brain_Regime_"):
+                return "BRAIN_MARKET"
+            if s0.startswith("Brain_Expert_Pathi") or s0.startswith("Brain_Pathi_"):
+                return "BRAIN_PATHI"
+            if s0.startswith("Brain_Expert_BigAl") or s0.startswith("Brain_BigAl_"):
+                return "BRAIN_BIGAL"
+            if s0.startswith("Brain_Expert_Power"):
+                return "POWER"
+            if s0.startswith("Brain_Expert_Form"):
+                return "FORM"
+            if s0.startswith("Brain_Expert_Schedule") or s0.startswith("Brain_Schedule_"):
+                return "SCHEDULE"
+            if s0.startswith("Brain_Expert_Price") or "price" in sl or "implied" in sl:
+                return "PRICE"
+            if any(tok in sl for tok in ("sharp", "line_move", "odds_move", "books_aligned", "reversal", "steam", "booklift")):
+                return "MARKET"
+            if any(tok in sl for tok in ("ats_", "cover_", "streak", "margin_prior", "winpct", "revenge")):
+                return "SITUATION"
+            return "OTHER"
 
-        def _is_sparse_overlay(col: str) -> bool:
-            c = str(col)
-            return c.startswith("BigAl_") or c.startswith("Pathi_") or c.startswith("Brain_Expert_") or c.startswith("Brain_Regime_")
+        # Backward alias only for internal compatibility; all V11.5.4 logic calls the new classifier.
+        _feature_family_v1153 = _feature_family_v1154
 
-        def _cv_feature_stability_audit(model_proto, X_df, y, folds, feature_cols, *, head_name, repeats=3, seed=20260905):
-            """
-            Conditional feature-stability audit using only INNER-CV validation rows.
+        _BIGAL_EXACT_OVERLAY = {
+            "BigAl_NFL1_Week1FadePlayoffTeam", "BigAl_NFL2_LateSeasonHomeDog", "BigAl_NFL3_PlayoffHighScoreFade",
+            "BigAl_NFL4_PreseasonContrarianMove", "BigAl_NFL5_PreseasonLowOffenseOver",
+            "BigAl_CF1_Week2Home42Win", "BigAl_CF2_LateSeasonRevengeDog",
+            "BigAl_NBA1_B2BRematchRoadDog", "BigAl_NBA2_ThreeMassiveCovers", "BigAl_NBA3_FadeHomeAfterChampUpset",
+            "BigAl_NBA4_FinalHomeFavRevenge", "BigAl_NBA5_PlayoffBigDogVsChamp", "BigAl_NBA6_FinalsGame4",
+            "BigAl_NBA7_TwoTeamEliminationUnder", "BigAl_NBA8_Revenge145FadeFavorite",
+            "BigAl_CBB1_UglyDog20Losses", "BigAl_CBB2_Fade10WinStreakFavorite", "BigAl_CBB3_HomeRevenge27",
+            "BigAl_CFL1_SecondMeetingUnder", "BigAl_CFL2_EliteDogFade", "BigAl_CFL3_ThirdMeetingAwayDogLostFirstTwo",
+        }
 
-            For each time-forward fold we fit the selected feature set once, then
-            permute each feature inside that fold's validation block.  The reported
-            stability is the fraction of folds where breaking that feature reduces
-            AUC.  The untouched outer holdout is never consulted.
-            """
+        def _is_sparse_overlay_feature(name: str) -> bool:
+            s0 = str(name)
+            if s0 in set(PATHI_EXACT_SIGNAL_COLS):
+                return True
+            if s0 in set(BIGAL_ENHANCER_COLS):
+                return True
+            if s0 in _BIGAL_EXACT_OVERLAY:
+                return True
+            if s0.startswith("BigAl_") and s0.endswith("_Tightener"):
+                return True
+            return False
+
+        def _fit_model_weighted(model_proto, Xtr, ytr, wtr):
             from sklearn.base import clone
+            mdl = clone(model_proto)
+            try:
+                mdl.fit(Xtr, ytr, sample_weight=wtr)
+            except TypeError:
+                mdl.fit(Xtr, ytr)
+            return mdl
+
+        def _cv_feature_stability_audit(
+            model_proto, X_df, y, folds, feature_cols, *, head_name,
+            sample_weight=None, repeats=3, seed=20260905, lane="selection"
+        ):
+            """Weighted conditional permutation stability on time-forward validation rows."""
             if not feature_cols:
                 return pd.DataFrame(columns=[
                     "cv_valid_folds", "cv_positive_folds", "cv_positive_frac",
                     "cv_auc_drop_mean", "cv_auc_drop_median", "cv_auc_drop_std", "cv_stable"
                 ])
             yy = np.asarray(y, dtype=int).reshape(-1)
+            ww = np.ones(len(yy), dtype=float) if sample_weight is None else np.asarray(sample_weight, dtype=float).reshape(-1)
+            ww[~np.isfinite(ww)] = 0.0
             Xn = X_df.reindex(columns=feature_cols).apply(pd.to_numeric, errors="coerce")
             drops = {c: [] for c in feature_cols}
             valid_fold_count = 0
@@ -17220,10 +17468,9 @@ def train_sharp_model_from_bq(
                     continue
                 Xtr = Xn.iloc[tr].fillna(0.0).to_numpy(np.float32, copy=False)
                 Xva_df = Xn.iloc[va].fillna(0.0).reset_index(drop=True)
-                mdl = clone(model_proto)
-                mdl.fit(Xtr, yy[tr])
+                mdl = _fit_model_weighted(model_proto, Xtr, yy[tr], ww[tr])
                 base_p = np.asarray(mdl.predict_proba(Xva_df.to_numpy(np.float32, copy=False)))[:, 1]
-                base_auc = roc_auc_score(yy[va], base_p)
+                base_auc = roc_auc_score(yy[va], base_p, sample_weight=ww[va])
                 if not np.isfinite(base_auc):
                     continue
                 valid_fold_count += 1
@@ -17236,7 +17483,7 @@ def train_sharp_model_from_bq(
                         Xp[:, j] = base_col[rng.permutation(len(base_col))]
                         pp = np.asarray(mdl.predict_proba(Xp))[:, 1]
                         try:
-                            vals.append(float(base_auc - roc_auc_score(yy[va], pp)))
+                            vals.append(float(base_auc - roc_auc_score(yy[va], pp, sample_weight=ww[va])))
                         except Exception:
                             pass
                     if vals:
@@ -17251,39 +17498,175 @@ def train_sharp_model_from_bq(
                 mu = float(np.mean(arr)) if nvalid else float("nan")
                 medv = float(np.median(arr)) if nvalid else float("nan")
                 sd = float(np.std(arr, ddof=1)) if nvalid > 1 else 0.0 if nvalid == 1 else float("nan")
-                stable = bool(nvalid >= 2 and frac >= 0.60 and mu > 0.0)
+                min_valid = 2 if str(lane).lower() == "selection" else 1
+                stable = bool(nvalid >= min_valid and frac >= 0.60 and mu > 0.0)
                 rows.append({
                     "feature": c, "cv_valid_folds": nvalid, "cv_positive_folds": npos,
                     "cv_positive_frac": frac, "cv_auc_drop_mean": mu,
                     "cv_auc_drop_median": medv, "cv_auc_drop_std": sd, "cv_stable": stable,
+                    "family": _feature_family_v1153(c),
                 })
             sdf = pd.DataFrame(rows).set_index("feature") if rows else pd.DataFrame()
             if not sdf.empty:
                 stable_n = int(sdf["cv_stable"].sum())
-                print(f"[FEATURE-STABILITY:{head_name}] selected={len(sdf)} stable={stable_n} valid_cv_folds={valid_fold_count}")
+                print(f"[FEATURE-STABILITY:{head_name}:{lane}] selected={len(sdf)} stable={stable_n} valid_folds={valid_fold_count}")
                 show = sdf.sort_values(["cv_stable","cv_positive_frac","cv_auc_drop_mean"], ascending=[False,False,False])
                 for c, row in show.head(25).iterrows():
                     print(
-                        f"[FEATURE-STABILITY:{head_name}] {c}: "
+                        f"[FEATURE-STABILITY:{head_name}:{lane}] {c}: "
                         f"positive={int(row['cv_positive_folds'])}/{int(row['cv_valid_folds'])} "
                         f"({float(row['cv_positive_frac']):.0%}) mean_auc_drop={float(row['cv_auc_drop_mean']):+.5f} "
-                        f"median={float(row['cv_auc_drop_median']):+.5f} stable={'YES' if bool(row['cv_stable']) else 'NO'}"
+                        f"stable={'YES' if bool(row['cv_stable']) else 'NO'} family={row['family']}"
                     )
-                unstable = show.index[~show["cv_stable"]].tolist()
-                if unstable:
-                    print(f"[FEATURE-STABILITY:{head_name}] review_unstable={unstable[:30]}")
             return sdf
 
-        def _run_head_autofs(head_name, X_df_train_head, X_df_hold_head, X_df_full_head, y_head_train, folds_head):
+        def _family_stability_table(selection_df, shadow_df, *, head_name):
+            rows = []
+            features = sorted(set(selection_df.index if isinstance(selection_df, pd.DataFrame) else []) |
+                              set(shadow_df.index if isinstance(shadow_df, pd.DataFrame) else []))
+            fams = sorted({_feature_family_v1153(c) for c in features})
+            for fam in fams:
+                fs = [c for c in features if _feature_family_v1153(c) == fam]
+                sel = selection_df.reindex(fs) if isinstance(selection_df, pd.DataFrame) and not selection_df.empty else pd.DataFrame()
+                sha = shadow_df.reindex(fs) if isinstance(shadow_df, pd.DataFrame) and not shadow_df.empty else pd.DataFrame()
+                sel_mu = float(pd.to_numeric(sel.get("cv_auc_drop_mean"), errors="coerce").mean()) if not sel.empty else np.nan
+                sha_mu = float(pd.to_numeric(sha.get("cv_auc_drop_mean"), errors="coerce").mean()) if not sha.empty else np.nan
+                sel_frac = float(pd.to_numeric(sel.get("cv_positive_frac"), errors="coerce").mean()) if not sel.empty else np.nan
+                sha_frac = float(pd.to_numeric(sha.get("cv_positive_frac"), errors="coerce").mean()) if not sha.empty else np.nan
+                stable = bool(np.isfinite(sel_mu) and sel_mu > 0 and sel_frac >= 0.60 and
+                              ((not np.isfinite(sha_mu)) or (sha_mu > 0 and sha_frac >= 0.50)))
+                rows.append({"family": fam, "features": len(fs), "selection_drop": sel_mu,
+                             "selection_positive_frac": sel_frac, "shadow_drop": sha_mu,
+                             "shadow_positive_frac": sha_frac, "family_stable": stable})
+                print(f"[FAMILY-STABILITY:{head_name}] {fam}: n={len(fs)} sel_drop={sel_mu:+.5f} "
+                      f"sel_pos={sel_frac:.0%} shadow_drop={sha_mu:+.5f} shadow_pos={sha_frac:.0%} "
+                      f"stable={'YES' if stable else 'NO'}")
+            return pd.DataFrame(rows).set_index("family") if rows else pd.DataFrame()
+
+        def _proxy_rescue_allowed(feature, robust_features, X_df, family_stability, *, corr_min=0.80):
+            """
+            Family rescue is allowed only for a genuinely interchangeable proxy:
+            same non-structural/non-overlay family AND high absolute correlation with
+            an already GLOBAL_STABLE feature.  Broad family labels alone never rescue.
+            """
+            fam = _feature_family_v1154(feature)
+            if fam in {"STRUCTURAL_CONTEXT", "BIGAL_OVERLAY", "PATHI_OVERLAY", "OTHER"}:
+                return False, None, float("nan")
+            if family_stability is None or family_stability.empty or fam not in family_stability.index:
+                return False, None, float("nan")
+            if not bool(family_stability.loc[fam, "family_stable"]):
+                return False, None, float("nan")
+            x = pd.to_numeric(X_df.get(feature), errors="coerce")
+            if x is None or x.notna().sum() < 50 or x.nunique(dropna=True) < 2:
+                return False, None, float("nan")
+            best_peer, best_corr = None, 0.0
+            for peer in robust_features:
+                if _feature_family_v1154(peer) != fam or peer not in X_df.columns:
+                    continue
+                y = pd.to_numeric(X_df[peer], errors="coerce")
+                m = x.notna() & y.notna()
+                if int(m.sum()) < 50 or x[m].nunique() < 2 or y[m].nunique() < 2:
+                    continue
+                try:
+                    cc = abs(float(np.corrcoef(x[m].to_numpy(float), y[m].to_numpy(float))[0,1]))
+                except Exception:
+                    continue
+                if np.isfinite(cc) and cc > best_corr:
+                    best_corr, best_peer = cc, peer
+            return bool(best_peer is not None and best_corr >= float(corr_min)), best_peer, float(best_corr)
+
+        def _conditional_overlay_trust_audit(
+            model_proto, X_df, y, folds, shadow_folds, core_features, overlay_candidates, *,
+            sample_weight=None, head_name="outcome"
+        ):
+            """
+            Sparse overlays are judged only when ACTIVE.  Trust is a shrunk,
+            time-forward residual uplift relative to the core model; they do not
+            need to move whole-dataset AUC to earn admission.
+            """
+            if not overlay_candidates or not core_features:
+                return [], pd.DataFrame()
+            yy = np.asarray(y, dtype=int).reshape(-1)
+            ww = np.ones(len(yy), dtype=float) if sample_weight is None else np.asarray(sample_weight, dtype=float).reshape(-1)
+            Xcore = X_df.reindex(columns=core_features).apply(pd.to_numeric, errors="coerce").fillna(0.0)
+            Xov = X_df.reindex(columns=overlay_candidates).apply(pd.to_numeric, errors="coerce").fillna(0.0)
+
+            def _lane_stats(folds_use, lane):
+                rec = {c: [] for c in overlay_candidates}
+                for fold_no, (tr, va) in enumerate(folds_use, start=1):
+                    tr=np.asarray(tr,int); va=np.asarray(va,int)
+                    if tr.size == 0 or va.size == 0 or np.unique(yy[va]).size < 2:
+                        continue
+                    mdl = _fit_model_weighted(
+                        model_proto,
+                        Xcore.iloc[tr].to_numpy(np.float32, copy=False), yy[tr], ww[tr]
+                    )
+                    p0 = np.asarray(mdl.predict_proba(Xcore.iloc[va].to_numpy(np.float32, copy=False)))[:,1]
+                    for c in overlay_candidates:
+                        xv = Xov.iloc[va][c].to_numpy(dtype=float)
+                        active = np.isfinite(xv) & (np.abs(xv) > 0.5)
+                        if int(active.sum()) < 3:
+                            continue
+                        vv = va[active]
+                        wa = ww[vv]
+                        if float(wa.sum()) <= 0:
+                            wa = np.ones(len(vv), dtype=float)
+                        resid = float(np.average(yy[vv] - p0[active], weights=wa))
+                        rec[c].append((resid, int(active.sum())))
+                return rec
+
+            sel_rec = _lane_stats(folds, "selection")
+            sha_rec = _lane_stats(shadow_folds or [], "shadow")
+            rows=[]
+            dense = sport_key in {"NBA","WNBA","NCAAB","NHL","MLB"}
+            shrink_k = 30.0 if not dense else 60.0
+            for c in overlay_candidates:
+                xs = sel_rec.get(c, [])
+                xh = sha_rec.get(c, [])
+                sel_vals=np.array([z[0] for z in xs], float) if xs else np.array([],float)
+                sha_vals=np.array([z[0] for z in xh], float) if xh else np.array([],float)
+                active_groups = int(pd.Series(X_df.loc[np.abs(pd.to_numeric(X_df[c], errors="coerce").fillna(0.0)) > 0.5, "Game_Key"].astype(str)).nunique()) if "Game_Key" in X_df.columns else int(sum(z[1] for z in xs))
+                # X_df passed here is numeric-only in most calls; recover a conservative active-row proxy if Game_Key absent.
+                if active_groups == 0:
+                    active_groups = int((np.abs(pd.to_numeric(X_df[c], errors="coerce").fillna(0.0)) > 0.5).sum())
+                sel_mu=float(sel_vals.mean()) if sel_vals.size else np.nan
+                sel_frac=float((sel_vals>0).mean()) if sel_vals.size else np.nan
+                sha_mu=float(sha_vals.mean()) if sha_vals.size else np.nan
+                sha_frac=float((sha_vals>0).mean()) if sha_vals.size else np.nan
+                shrink=float(active_groups/(active_groups+shrink_k))
+                temporal=float(max(0.0, ((sel_frac if np.isfinite(sel_frac) else 0.0)-0.50)*2.0))
+                if np.isfinite(sha_frac):
+                    temporal *= max(0.0, min(1.0, sha_frac/0.50))
+                trust=float(max(0.0, sel_mu if np.isfinite(sel_mu) else 0.0)*shrink*temporal)
+                selected=bool(active_groups>=8 and np.isfinite(sel_frac) and sel_frac>=0.60 and sel_mu>0 and
+                              ((not np.isfinite(sha_frac)) or (sha_frac>=0.50 and sha_mu>=0.0)) and trust>=0.001)
+                rows.append({"feature":c,"active_groups_proxy":active_groups,"selection_resid":sel_mu,
+                             "selection_positive_frac":sel_frac,"shadow_resid":sha_mu,
+                             "shadow_positive_frac":sha_frac,"shrink":shrink,"overlay_trust":trust,
+                             "overlay_selected":selected})
+            odf=pd.DataFrame(rows).set_index("feature") if rows else pd.DataFrame()
+            if not odf.empty:
+                odf=odf.sort_values(["overlay_selected","overlay_trust"], ascending=[False,False])
+                for c,row in odf.head(30).iterrows():
+                    print(f"[OVERLAY-TRUST:{head_name}] {c}: groups={int(row['active_groups_proxy'])} "
+                          f"sel_resid={row['selection_resid']:+.4f} sel_pos={row['selection_positive_frac']:.0%} "
+                          f"shadow_resid={row['shadow_resid']:+.4f} shadow_pos={row['shadow_positive_frac']:.0%} "
+                          f"shrink={row['shrink']:.3f} trust={row['overlay_trust']:.5f} "
+                          f"selected={'YES' if bool(row['overlay_selected']) else 'NO'}")
+            selected=list(odf.index[odf["overlay_selected"]])[:12] if not odf.empty else []
+            return selected, odf
+
+        def _run_head_autofs(
+            head_name, X_df_train_head, X_df_hold_head, X_df_full_head, y_head_train, folds_head, *,
+            shadow_folds_head=None, sample_weight_head=None
+        ):
             if y_head_train is None:
                 st.warning(f"[AutoFS:{head_name}] skipped: y_train is None")
                 return None
-        
             ys = pd.Series(y_head_train)
             if len(ys) == 0 or (not ys.notna().any()) or ys.nunique(dropna=True) < 2:
                 st.warning(f"[AutoFS:{head_name}] skipped: invalid target")
                 return None
-        
             try:
                 _model_proto = est_auc
             except Exception:
@@ -17292,65 +17675,37 @@ def train_sharp_model_from_bq(
                 except Exception:
                     _model_proto = _default_proto(head_name)
 
-            # Head-specific leakage contract.  This is applied before AutoFS so
-            # forbidden columns cannot influence preselection, correlations, flips,
-            # or incremental AUC.
-            _leak_safe_cols = [
-                c for c in X_df_train_head.columns
-                if not _head_forbidden_feature(c, head_name)
-            ]
+            _leak_safe_cols = [c for c in X_df_train_head.columns if not _head_forbidden_feature(c, head_name)]
             _blocked_cols = [c for c in X_df_train_head.columns if c not in _leak_safe_cols]
             if _blocked_cols:
-                log_func(
-                    f"[LEAK-GUARD:{head_name}] blocked {len(_blocked_cols)} candidates: "
-                    + ", ".join(map(str, _blocked_cols[:20]))
-                )
+                log_func(f"[LEAK-GUARD:{head_name}] blocked {len(_blocked_cols)} candidates: " + ", ".join(map(str,_blocked_cols[:20])))
 
-            # Give each specialist a distinct information domain. Outcome remains
-            # broad; Situation sees prior/history/Pathi/BigAl context; Value sees
-            # market/price/movement/liquidity context.
-            _candidate_cols = [
-                c for c in _leak_safe_cols
-                if _head_feature_family_allowed(c, head_name)
-            ]
+            _candidate_cols = [c for c in _leak_safe_cols if _head_feature_family_allowed(c, head_name)]
             _family_excluded = [c for c in _leak_safe_cols if c not in _candidate_cols]
-
-            log_func(
-                f"[HEAD-FAMILY:{head_name}] eligible={len(_candidate_cols)}/"
-                f"{len(_leak_safe_cols)} leak-safe candidates"
-            )
+            log_func(f"[HEAD-FAMILY:{head_name}] eligible={len(_candidate_cols)}/{len(_leak_safe_cols)} leak-safe candidates")
             if _candidate_cols:
-                log_func(
-                    f"[HEAD-FAMILY:{head_name}] sample eligible: "
-                    + ", ".join(map(str, _candidate_cols[:20]))
-                )
+                log_func(f"[HEAD-FAMILY:{head_name}] sample eligible: " + ", ".join(map(str,_candidate_cols[:20])))
             if _family_excluded and str(head_name).lower() != "outcome":
-                log_func(
-                    f"[HEAD-FAMILY:{head_name}] excluded other-family sample: "
-                    + ", ".join(map(str, _family_excluded[:15]))
-                )
-
+                log_func(f"[HEAD-FAMILY:{head_name}] excluded other-family sample: " + ", ".join(map(str,_family_excluded[:15])))
             if not _candidate_cols:
-                st.warning(
-                    f"[AutoFS:{head_name}] skipped: no features matched the head-specific family contract"
-                )
                 return None
 
-            X_df_train_head = X_df_train_head.reindex(columns=_candidate_cols)
-            X_df_hold_head = X_df_hold_head.reindex(columns=_candidate_cols)
-            X_df_full_head = X_df_full_head.reindex(columns=_candidate_cols)
-        
+            # Sparse deterministic systems use a conditional overlay lane for outcome/situation.
+            overlay_candidates = []
+            if str(head_name).lower() in {"outcome","situation"}:
+                overlay_candidates = [c for c in _candidate_cols if _is_sparse_overlay_feature(c)]
+            core_candidates = [c for c in _candidate_cols if c not in set(overlay_candidates)]
+            log_func(f"[OVERLAY-LANE:{head_name}] core={len(core_candidates)} sparse_overlays={len(overlay_candidates)}")
+
+            Xcore_train = X_df_train_head.reindex(columns=core_candidates)
             feat_cols_head, shap_summary_head = select_features_auto(
                 model_proto=_model_proto,
-                X_df_train=X_df_train_head,
+                X_df_train=Xcore_train,
                 y_train=y_head_train,
                 folds=folds_head,
                 sport_key=sport_key,
                 must_keep=[],
                 use_auc_auto=True,
-                # Inner-CV selection is intentionally conservative.  Tiny AUC-only
-                # lifts and free orientation flips were a major multiple-testing
-                # path to overfit in the prior build.
                 auc_patience=120,
                 accept_metric="score",
                 auc_min_improve=0.0005,
@@ -17363,116 +17718,158 @@ def train_sharp_model_from_bq(
                 max_feats_small=120,
                 flip_gain_min=0.00075,
                 auc_verbose=True,
+                sample_weight=sample_weight_head,
                 log_func=log_func,
             )
-        
-            feat_cols_head = [
-                c for c in feat_cols_head
-                if c in X_df_train_head.columns and c in X_df_hold_head.columns
-            ]
+            feat_cols_head=[c for c in feat_cols_head if c in X_df_train_head.columns and c in X_df_hold_head.columns]
 
-            # Selected-feature leakage audit.  Report unusually strong single-feature
-            # discrimination; do not auto-drop unless the near-copy guard above hit
-            # >=0.995.  After the target fixes, these AUCs are against realized outcome
-            # for outcome/situation/value classification heads and are therefore
-            # directly interpretable.
-            _audit_rows = []
-            _ya = np.asarray(y_head_train, dtype=int).reshape(-1)
-            if np.unique(_ya).size >= 2:
-                for _c in feat_cols_head:
-                    _xs = pd.to_numeric(X_df_train_head[_c], errors="coerce").to_numpy(dtype=float)
-                    _m = np.isfinite(_xs) & np.isfinite(_ya)
-                    if int(_m.sum()) < 100 or np.unique(_xs[_m]).size < 2:
-                        continue
-                    try:
-                        _a = float(roc_auc_score(_ya[_m], _xs[_m]))
-                        _ao = max(_a, 1.0 - _a)
-                    except Exception:
-                        continue
-                    if np.isfinite(_ao):
-                        _audit_rows.append((_c, _ao))
-            _audit_rows.sort(key=lambda t: t[1], reverse=True)
-            if _audit_rows:
-                log_func(
-                    f"[LEAK-AUDIT:{head_name}] strongest selected univariate oriented AUCs: "
-                    + ", ".join(f"{c}={a:.4f}" for c, a in _audit_rows[:10])
-                )
-                _sus = [(c, a) for c, a in _audit_rows if a >= 0.80]
-                if _sus:
-                    log_func(
-                        f"[LEAK-AUDIT:{head_name}] WARNING >=0.80 single-feature AUC; review provenance: "
-                        + ", ".join(f"{c}={a:.4f}" for c, a in _sus[:10])
-                    )
-        
-            # Strict preprocessing matches production scoring exactly: non-finite
-            # values become neutral zero on train, inner CV, outer holdout, and live
-            # inference.  No holdout-wide medians or future covariate distribution
-            # are used.
-            _tr_num = X_df_train_head.reindex(columns=feat_cols_head).apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan)
-            _ho_num = X_df_hold_head.reindex(columns=feat_cols_head).apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan)
-            _fu_num = X_df_full_head.reindex(columns=feat_cols_head).apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan)
-            X_train_head_df = _tr_num.fillna(0.0)
-            X_hold_head_df  = _ho_num.fillna(0.0)
-            X_full_head_df  = _fu_num.fillna(0.0)
-
-            stability_head = _cv_feature_stability_audit(
+            selection_stability = _cv_feature_stability_audit(
                 _model_proto, X_df_train_head, y_head_train, folds_head, feat_cols_head,
-                head_name=head_name, repeats=3, seed=20260905,
+                head_name=head_name, sample_weight=sample_weight_head, repeats=3, seed=20260905, lane="selection"
             )
-            if not stability_head.empty:
-                stability_head["family"] = [_robust_feature_family(c) for c in stability_head.index]
-                fam = stability_head.groupby("family").agg(
-                    family_features=("cv_stable", "size"),
-                    family_stable_features=("cv_stable", "sum"),
-                    family_mean_auc_drop=("cv_auc_drop_mean", "mean"),
-                    family_mean_positive_frac=("cv_positive_frac", "mean"),
-                )
-                fam["family_stable"] = (fam["family_mean_auc_drop"] > 0) & (fam["family_mean_positive_frac"] >= 0.55)
-                print(f"[FAMILY-STABILITY:{head_name}]\n{fam.sort_values('family_mean_auc_drop', ascending=False).to_string()}")
+            shadow_stability = _cv_feature_stability_audit(
+                _model_proto, X_df_train_head, y_head_train, shadow_folds_head or [], feat_cols_head,
+                head_name=head_name, sample_weight=sample_weight_head, repeats=3, seed=20260906, lane="shadow"
+            ) if shadow_folds_head else pd.DataFrame()
+            family_stability = _family_stability_table(selection_stability, shadow_stability, head_name=head_name)
 
-                # Core lane: unstable broad predictors are removed automatically.
-                # Overlay lane: sparse BigAl/Pathi/Brain signals are not discarded
-                # merely for low global AUC contribution.  They survive when their
-                # family is temporally useful, allowing later trust/shrinkage to
-                # determine magnitude rather than AutoFS erasing rare situations.
-                fam_ok = fam["family_stable"].to_dict()
-                kept = []
-                removed = []
-                for c in feat_cols_head:
-                    row = stability_head.loc[c] if c in stability_head.index else None
-                    individual_ok = bool(row["cv_stable"]) if row is not None else False
-                    overlay_ok = _is_sparse_overlay(c) and bool(fam_ok.get(_robust_feature_family(c), False))
-                    if individual_ok or overlay_ok:
-                        kept.append(c)
-                    else:
-                        removed.append(c)
-                # Never allow robustness filtering to collapse a head completely.
-                if kept:
-                    feat_cols_head = kept
-                    print(f"[ROBUST-PRUNE:{head_name}] kept={len(kept)} removed={len(removed)} "
-                          f"overlay_family_rescue={sum(_is_sparse_overlay(c) and not bool(stability_head.loc[c,'cv_stable']) for c in kept if c in stability_head.index)}")
-                    if removed:
-                        print(f"[ROBUST-PRUNE:{head_name}] removed_unstable={removed[:40]}")
+            # Classify global features.  Shadow evidence is REQUIRED for an unconditional
+            # main effect.  A broad family label can never rescue an unrelated variable.
+            robust_core=[]
+            pending_proxy=[]
+            classifications=[]
+            for c in feat_cols_head:
+                sr=selection_stability.loc[c] if c in selection_stability.index else None
+                hr=shadow_stability.loc[c] if (isinstance(shadow_stability,pd.DataFrame) and c in shadow_stability.index) else None
+                sel_ok=bool(sr is not None and bool(sr.get("cv_stable",False)))
+                sh_mu=float(hr.get("cv_auc_drop_mean",np.nan)) if hr is not None else np.nan
+                sh_frac=float(hr.get("cv_positive_frac",np.nan)) if hr is not None else np.nan
+                # No shadow record = no global approval on normal histories.
+                sha_ok=bool(hr is not None and np.isfinite(sh_mu) and sh_mu>0 and np.isfinite(sh_frac) and sh_frac>=0.50)
+                if sel_ok and sha_ok:
+                    cls="GLOBAL_STABLE"; robust_core.append(c)
+                elif sel_ok and not sha_ok:
+                    cls="REGIME_DEPENDENT"
+                else:
+                    cls="UNSTABLE"; pending_proxy.append(c)
+                classifications.append((c,cls))
+                print(f"[TEMPORAL-CLASS:{head_name}] {c}: {cls} sel_ok={sel_ok} shadow_ok={sha_ok} shadow_drop={sh_mu:+.5f} shadow_pos={sh_frac:.0%}")
 
-            if isinstance(shap_summary_head, pd.DataFrame) and not stability_head.empty:
-                shap_summary_head = shap_summary_head.join(stability_head, how="left")
+            # Second pass: only high-correlation interchangeable proxies may be rescued.
+            cls_map=dict(classifications)
+            for c in pending_proxy:
+                ok, peer, cc = _proxy_rescue_allowed(c, robust_core, X_df_train_head, family_stability, corr_min=0.80)
+                if ok:
+                    robust_core.append(c)
+                    cls_map[c]="FAMILY_STABLE_PROXY"
+                    print(f"[TEMPORAL-PROXY-RESCUE:{head_name}] {c} <- {peer} abs_corr={cc:.3f}")
+            classifications=[(c,cls_map.get(c,cls)) for c,cls in classifications]
 
-            # Rebuild matrices after robustness pruning.
-            _tr_num = X_df_train_head.reindex(columns=feat_cols_head).apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan)
-            _ho_num = X_df_hold_head.reindex(columns=feat_cols_head).apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan)
-            _fu_num = X_df_full_head.reindex(columns=feat_cols_head).apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan)
-            X_train_head_df = _tr_num.fillna(0.0)
-            X_hold_head_df = _ho_num.fillna(0.0)
-            X_full_head_df = _fu_num.fillna(0.0)
+            if not robust_core:
+                # Do not force a structurally unstable feature merely to keep a head alive.
+                # A constant column produces a neutral/intercept-only head and is synthesized
+                # automatically by backend reindexing when absent.
+                neutral_col="Model_Safe_Constant"
+                for _df in (X_df_train_head, X_df_hold_head, X_df_full_head):
+                    _df[neutral_col]=0.0
+                robust_core=[neutral_col]
+                classifications.append((neutral_col,"NEUTRAL_FALLBACK"))
+                print(f"[TEMPORAL-CLASS:{head_name}] no shadow-stable core -> {neutral_col}")
+
+            overlay_selected, overlay_trust = _conditional_overlay_trust_audit(
+                _model_proto, X_df_train_head, y_head_train, folds_head, shadow_folds_head or [],
+                robust_core, overlay_candidates, sample_weight=sample_weight_head, head_name=head_name
+            )
+
+            # V11.5.4 overlay trust is not metadata-only. Build a shrunk aggregate
+            # trust feature from only temporally admitted overlays. Raw admitted
+            # overlay flags remain available so a strong individual system can shine,
+            # while the aggregate gives the head a stable low-variance summary.
+            overlay_trust_map={}
+            if isinstance(overlay_trust,pd.DataFrame) and not overlay_trust.empty:
+                for _c in overlay_selected:
+                    if _c in overlay_trust.index:
+                        _tv=float(pd.to_numeric(pd.Series([overlay_trust.loc[_c,"overlay_trust"]]),errors="coerce").iloc[0])
+                        if np.isfinite(_tv) and _tv>0:
+                            overlay_trust_map[_c]=_tv
+            if overlay_trust_map:
+                for _df in (X_df_train_head, X_df_hold_head, X_df_full_head):
+                    _score=np.zeros(len(_df),dtype=np.float64)
+                    _active=np.zeros(len(_df),dtype=np.float64)
+                    for _c,_tv in overlay_trust_map.items():
+                        _x=pd.to_numeric(_df.get(_c,0.0),errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+                        _on=(np.abs(_x)>0.5).astype(np.float64)
+                        _score += _on*_tv
+                        _active += _on
+                    _df["Brain_Overlay_Trust_Score"]=_score.astype(np.float32)
+                    _df["Brain_Overlay_Trust_Active_Count"]=_active.astype(np.float32)
+                robust_core.extend(["Brain_Overlay_Trust_Score","Brain_Overlay_Trust_Active_Count"])
+                print(f"[OVERLAY-TRUST-FEATURE:{head_name}] admitted={len(overlay_trust_map)} score_max={float(X_df_train_head['Brain_Overlay_Trust_Score'].max()):.5f}")
+            feat_cols_head=list(dict.fromkeys(robust_core + overlay_selected))
+
+            # Leakage audit on the final robust set.
+            _audit_rows=[]; _ya=np.asarray(y_head_train,dtype=int).reshape(-1)
+            if np.unique(_ya).size>=2:
+                for _c in feat_cols_head:
+                    _xs=pd.to_numeric(X_df_train_head[_c],errors="coerce").to_numpy(dtype=float)
+                    _m=np.isfinite(_xs)
+                    if int(_m.sum())<100 or np.unique(_xs[_m]).size<2: continue
+                    try:
+                        _a=float(roc_auc_score(_ya[_m],_xs[_m], sample_weight=(np.asarray(sample_weight_head)[_m] if sample_weight_head is not None else None)))
+                        _audit_rows.append((_c,max(_a,1-_a)))
+                    except Exception: pass
+            _audit_rows.sort(key=lambda t:t[1],reverse=True)
+            if _audit_rows:
+                log_func(f"[LEAK-AUDIT:{head_name}] strongest final univariate oriented AUCs: "+", ".join(f"{c}={a:.4f}" for c,a in _audit_rows[:10]))
+
+            _tr_num=X_df_train_head.reindex(columns=feat_cols_head).apply(pd.to_numeric,errors="coerce").replace([np.inf,-np.inf],np.nan).fillna(0.0)
+            _ho_num=X_df_hold_head.reindex(columns=feat_cols_head).apply(pd.to_numeric,errors="coerce").replace([np.inf,-np.inf],np.nan).fillna(0.0)
+            _fu_num=X_df_full_head.reindex(columns=feat_cols_head).apply(pd.to_numeric,errors="coerce").replace([np.inf,-np.inf],np.nan).fillna(0.0)
+
+            # Reindex summary to the final production feature set and attach stability metadata.
+            if not isinstance(shap_summary_head,pd.DataFrame):
+                shap_summary_head=pd.DataFrame(index=pd.Index(feat_cols_head,name="feature"))
+            shap_summary_head=shap_summary_head.reindex(feat_cols_head)
+            if not selection_stability.empty:
+                shap_summary_head=shap_summary_head.join(selection_stability.add_prefix("select_"),how="left")
+            if isinstance(shadow_stability,pd.DataFrame) and not shadow_stability.empty:
+                shap_summary_head=shap_summary_head.join(shadow_stability.add_prefix("shadow_"),how="left")
+            if not overlay_trust.empty:
+                shap_summary_head=shap_summary_head.join(overlay_trust.add_prefix("overlay_"),how="left")
+
+            kept_set=set(feat_cols_head)
+            removed=[c for c in core_candidates if c in set(dict(classifications)) and c not in kept_set]
+            print(f"[ROBUST-PRUNE:{head_name}] kept={len(feat_cols_head)} removed={len(removed)} overlays_selected={len(overlay_selected)}")
+            if removed:
+                print(f"[ROBUST-PRUNE:{head_name}] removed_structurally_unstable={removed[:30]}")
 
             return {
-                "feature_cols": list(feat_cols_head),
-                "shap_summary": shap_summary_head,
-                "feature_stability": stability_head,
-                "X_train": X_train_head_df.to_numpy(np.float32, copy=False),
-                "X_hold":  X_hold_head_df.to_numpy(np.float32, copy=False),
-                "X_full":  X_full_head_df.to_numpy(np.float32, copy=False),
+                "feature_cols":list(feat_cols_head),
+                "shap_summary":shap_summary_head,
+                "feature_stability":selection_stability,
+                "shadow_stability":shadow_stability,
+                "family_stability":family_stability,
+                "overlay_trust":overlay_trust,
+                "overlay_selected":overlay_selected,
+                "overlay_trust_map":overlay_trust_map,
+                "temporal_classification":dict(classifications),
+                "X_train":_tr_num.to_numpy(np.float32,copy=False),
+                "X_hold":_ho_num.to_numpy(np.float32,copy=False),
+                "X_full":_fu_num.to_numpy(np.float32,copy=False),
             }
+
+        def _assert_autofs_propagation(result, head_name):
+            if result is None:
+                return
+            fc=list(result.get("feature_cols") or [])
+            xtr=result.get("X_train")
+            if xtr is None or int(getattr(xtr,"shape",(0,0))[1]) != len(fc):
+                raise RuntimeError(f"V11.5.4 {head_name} feature propagation mismatch: cols={len(fc)} X={getattr(xtr,'shape',None)}")
+            cls=result.get("temporal_classification") or {}
+            bad=[c for c in fc if cls.get(c) in {"UNSTABLE","REGIME_DEPENDENT"}]
+            if bad:
+                raise RuntimeError(f"V11.5.4 {head_name} unstable features leaked into production list: {bad}")
+            print(f"[FEATURE-PROPAGATION:{head_name}] PASS final_cols={len(fc)}")
         # ----------------------------
         # Head AutoFS guards
         # ----------------------------
@@ -17524,6 +17921,8 @@ def train_sharp_model_from_bq(
                 X_df_full_outcome_autofs,
                 y_train,
                 folds_outcome,
+                shadow_folds_head=shadow_folds_outcome,
+                sample_weight_head=w_train_outcome,
             )
         
   
@@ -17552,6 +17951,8 @@ def train_sharp_model_from_bq(
                 X_df_full_situation_autofs,
                 y_train_situation,
                 folds_situation,
+                shadow_folds_head=shadow_folds_situation,
+                sample_weight_head=w_train_situation,
             )
         
         if (
@@ -17579,7 +17980,13 @@ def train_sharp_model_from_bq(
                 X_df_full_value_autofs,
                 y_train_value_cls,
                 folds_value,
+                shadow_folds_head=shadow_folds_value,
+                sample_weight_head=w_train_value,
             )
+        _assert_autofs_propagation(autofs_outcome, "outcome")
+        _assert_autofs_propagation(autofs_situation, "situation")
+        _assert_autofs_propagation(autofs_value, "value")
+
         # Optional displays
         # ----------------------------
       
@@ -17717,6 +18124,76 @@ def train_sharp_model_from_bq(
         feature_cols = list(feature_cols_outcome)
         features_pruned = tuple(feature_cols)   # optional: if later code expects this name
  
+        # ----------------------------
+        # 5B) Recency-memory policy — chosen on rolling selection origins and
+        # confirmed on later shadow origins.  Rare overlays keep full history in
+        # their conditional trust audit; this decay affects broad model fitting.
+        # ----------------------------
+        def _choose_recency_halflife(
+            head_name, train_df_head, X_df_head, y_head, folds_sel, folds_shadow,
+            feature_cols_head, *, mode, times_head
+        ):
+            if not feature_cols_head or y_head is None:
+                return None, _build_sample_weights(train_df_head, mode=mode, times=times_head)
+            key=str(sport_key).upper()
+            candidates = [None, 730.0, 365.0] if key in {"NFL","NCAAF","CFL"} else [None, 365.0, 180.0]
+            proto=_default_proto(head_name)
+            rows=[]
+            for hl in candidates:
+                w=_build_sample_weights(train_df_head, mode=mode, times=times_head, recency_halflife_days=hl)
+                try:
+                    rs=_cv_auc_for_feature_set(
+                        proto, X_df_head, y_head, folds_sel, feature_cols_head,
+                        return_oof=False, debug=False, cv_mode="full", sample_weight=w,
+                    )
+                    sel_score=float(rs.get("score",-1e9)); sel_auc=float(rs.get("auc",np.nan))
+                except Exception:
+                    sel_score=-1e9; sel_auc=np.nan
+                sha_score=np.nan; sha_auc=np.nan
+                if folds_shadow:
+                    try:
+                        rh=_cv_auc_for_feature_set(
+                            proto, X_df_head, y_head, folds_shadow, feature_cols_head,
+                            return_oof=False, debug=False, cv_mode="full", sample_weight=w,
+                        )
+                        sha_score=float(rh.get("score",np.nan)); sha_auc=float(rh.get("auc",np.nan))
+                    except Exception:
+                        pass
+                rows.append((hl,sel_score,sel_auc,sha_score,sha_auc,w))
+                print(f"[RECENCY-POLICY:{head_name}] half_life_days={hl} sel_score={sel_score:.5f} sel_auc={sel_auc:.4f} shadow_score={sha_score:.5f} shadow_auc={sha_auc:.4f}")
+            # Select on inner score, but only allow a decayed policy if it does not
+            # deteriorate against no-decay on the later shadow origins.
+            base=rows[0]
+            best=max(rows,key=lambda z:z[1])
+            if best[0] is not None:
+                improve=best[1]-base[1]
+                shadow_ok=(not np.isfinite(base[3])) or (np.isfinite(best[3]) and best[3]>=base[3]-0.0005)
+                if improve < 0.001 or not shadow_ok:
+                    best=base
+            print(f"[RECENCY-POLICY:{head_name}] CHOSEN half_life_days={best[0]}")
+            return best[0], best[5]
+
+        recency_outcome_halflife, w_train_outcome = _choose_recency_halflife(
+            "outcome", train_df, X_df_train_outcome, y_train, folds_outcome, shadow_folds_outcome,
+            feature_cols_outcome, mode="game_side", times_head=t_train,
+        )
+        if autofs_situation is not None:
+            recency_situation_halflife, w_train_situation = _choose_recency_halflife(
+                "situation", train_df_situation, X_df_train_situation, y_train_situation,
+                folds_situation, shadow_folds_situation, feature_cols_situation,
+                mode="game_side", times_head=t_train_situation,
+            )
+        else:
+            recency_situation_halflife=None
+        if autofs_value is not None:
+            recency_value_halflife, w_train_value = _choose_recency_halflife(
+                "value", train_df_value, X_df_train_value, y_train_value_cls,
+                folds_value, shadow_folds_value, feature_cols_value,
+                mode="quote", times_head=t_train_value,
+            )
+        else:
+            recency_value_halflife=None
+
         # ----------------------------
         # 6A) OUTCOME HEAD — FAST SEARCH → MODERATE/DEEP REFIT
         # ----------------------------
@@ -18698,6 +19175,66 @@ def train_sharp_model_from_bq(
         
         def _ece_score(y, p, n_bins=10):
             return float(expected_calibration_error(np.asarray(y, int), np.asarray(p, float), n_bins=n_bins))
+
+        def _rolling_calibrator_select(p_raw, y_raw, time_raw, *, label):
+            """Choose calibration method on later OOF periods, then refit on all OOF."""
+            pp=np.asarray(p_raw,float).reshape(-1); yy=np.asarray(y_raw,int).reshape(-1)
+            tt=pd.to_datetime(np.asarray(time_raw),utc=True,errors="coerce")
+            valid=np.isfinite(pp) & pd.notna(tt)
+            pp=pp[valid]; yy=yy[valid]; tt=np.asarray(tt)[valid]
+            if len(pp)<300 or np.unique(yy).size<2:
+                return None
+            order=np.argsort(tt); pp=pp[order]; yy=yy[order]; tt=tt[order]
+            n=len(pp)
+            cuts=[(0.50,0.67),(0.67,0.83),(0.83,1.00)]
+            methods=["platt","iso"]
+            method_scores={m:[] for m in methods}
+            method_details={m:[] for m in methods}
+
+            def _fit_kind(kind, pfit, yfit):
+                if kind=="platt":
+                    m=LogisticRegression(solver="lbfgs",max_iter=2000)
+                    m.fit(np.asarray(pfit).reshape(-1,1),yfit)
+                    return m
+                iso=IsotonicRegression(y_min=1e-5,y_max=1-1e-5,out_of_bounds="clip")
+                iso.fit(pfit,yfit)
+                return iso
+            def _apply_kind(kind,m,x):
+                if kind=="platt": return m.predict_proba(np.asarray(x).reshape(-1,1))[:,1]
+                return m.predict(x)
+
+            for end_train_frac,end_val_frac in cuts:
+                it=max(100,int(round(n*end_train_frac)))
+                iv=min(n,int(round(n*end_val_frac)))
+                if iv-it<80: continue
+                pfit=pp[:it]; yfit=yy[:it]; pval=pp[it:iv]; yval=yy[it:iv]
+                if np.unique(yfit).size<2 or np.unique(yval).size<2: continue
+                for kind in methods:
+                    try:
+                        m=_fit_kind(kind,pfit,yfit)
+                        pv=np.clip(_apply_kind(kind,m,pval),CLIP,1-CLIP)
+                        ll=float(log_loss(yval,pv,labels=[0,1]))
+                        br=float(np.mean((pv-yval)**2))
+                        ece=float(_ece_score(yval,pv,n_bins=8))
+                        std_ratio=float(np.std(pv)/max(np.std(pval),1e-9))
+                        # Lower is better; heavy compression is penalized.
+                        compression=max(0.0,0.25-std_ratio)
+                        sc=ll + 0.50*br + 0.50*ece + 0.20*compression
+                        method_scores[kind].append(sc)
+                        method_details[kind].append((ll,br,ece,std_ratio))
+                    except Exception:
+                        pass
+            means={k:(float(np.mean(v)) if v else np.inf) for k,v in method_scores.items()}
+            chosen=min(means,key=means.get)
+            # Isotonic must materially beat the smoother monotone Platt option.
+            if chosen=="iso" and np.isfinite(means.get("platt",np.inf)) and means["iso"] > means["platt"]-0.002:
+                chosen="platt"
+            try:
+                final=_fit_kind(chosen,pp,yy)
+            except Exception:
+                return None
+            print(f"[CAL-ROLLING:{label}] scores={means} chosen={chosen} origins={max(len(v) for v in method_scores.values()) if method_scores else 0}")
+            return chosen,final,means
         
         # Selection with anti-compression guard
         raw_std = float(np.std(p_oof_for_cal))
@@ -18721,6 +19258,17 @@ def train_sharp_model_from_bq(
             ece_best, _, cal_name, cal_obj, std_ratio = scores[0]
         else:
             cal_name, cal_obj, ece_best, std_ratio = "iso", _IdentityIsoCal(eps=1e-6), float("nan"), float("nan")
+
+        _cal_time = np.asarray(t_train)[_outcome_oof_mask] if "_outcome_oof_mask" in locals() else np.asarray(t_train)[mask_oof if use_full else mask_auc]
+        _roll_cal = _rolling_calibrator_select(p_oof_for_cal, y_oof, _cal_time, label="outcome")
+        if _roll_cal is not None:
+            cal_name, cal_obj, _roll_scores = _roll_cal
+            try:
+                _pp_roll=np.asarray(_apply_cal(cal_name,cal_obj,p_oof_for_cal),float)
+                ece_best=_ece_score(y_oof,np.clip(_pp_roll,CLIP,1-CLIP),n_bins=10)
+                std_ratio=float(np.std(_pp_roll)/max(np.std(p_oof_for_cal),1e-9))
+            except Exception:
+                pass
         
         st.write({
             "calibrator_used": str(cal_name),
@@ -19247,6 +19795,17 @@ def train_sharp_model_from_bq(
                 "iso", _IdentityIsoCal(eps=1e-6), float("nan"), float("nan")
             )
 
+        _meta_time=np.asarray(t_train)[meta_oof_mask]
+        _roll_meta_cal=_rolling_calibrator_select(_meta_oof_x,_meta_oof_y,_meta_time,label="meta")
+        if _roll_meta_cal is not None:
+            meta_cal_name,meta_cal_obj,_meta_roll_scores=_roll_meta_cal
+            try:
+                _mpp=np.asarray(_apply_cal(meta_cal_name,meta_cal_obj,_meta_oof_x),float)
+                meta_ece_best=_ece_score(_meta_oof_y,np.clip(_mpp,CLIP,1-CLIP),n_bins=10)
+                meta_std_ratio=float(np.std(_mpp)/max(np.std(_meta_oof_x),1e-9))
+            except Exception:
+                pass
+
         # Calibrated meta component. Train uses OOF raw predictions; hold/full use
         # the deploy model. Rows without second-level OOF get neutral meta weight.
         meta_prob_train = np.full(len(y_train), 0.5, dtype=np.float64)
@@ -19293,7 +19852,7 @@ def train_sharp_model_from_bq(
         except Exception:
             META_OOF_AUC = float("nan")
 
-        if not np.isfinite(META_OOF_AUC) or META_OOF_AUC <= 0.500:
+        if not np.isfinite(META_OOF_AUC) or META_OOF_AUC <= 0.505:
             META_WEIGHT = 0.00
         elif META_OOF_AUC < 0.525:
             META_WEIGHT = 0.10
@@ -19305,7 +19864,7 @@ def train_sharp_model_from_bq(
             META_WEIGHT = 0.40
 
         OUTCOME_WEIGHT = 1.0 - META_WEIGHT
-        META_WEIGHT_POLICY = "oof_auc_step_v1"
+        META_WEIGHT_POLICY = "oof_auc_step_v2_deadzone_0505"
 
         p_outcome_train_for_meta = np.where(
             np.isfinite(p_outcome_oof_train), p_outcome_oof_train, p_train_vec
@@ -19743,7 +20302,7 @@ def train_sharp_model_from_bq(
                 "flip_flag": bool(flip_flag),
                 "blend_w": float(best_w),
         
-                "model_family": "three_head_plus_meta_v2_leakguard",
+                "model_family": "three_head_plus_meta_v4_structure_stable_overlay",
                 "feature_cols_outcome": list(feature_cols_outcome),
                 "feature_cols_situation": list(feature_cols_situation),
                 "feature_cols_value": list(feature_cols_value),
@@ -19754,13 +20313,13 @@ def train_sharp_model_from_bq(
                 "meta_weight": float(META_WEIGHT),
                 "outcome_weight": float(OUTCOME_WEIGHT),
                 "stacking_train_mode": "oof_post_autofs",
-                    "head_feature_family_policy": "specialist_domains_v1",
+                    "head_feature_family_policy": "specialist_domains_plus_conditional_overlay_v2",
                 "situation_target": "realized_outcome",
                 "value_cls_target": "realized_outcome_on_value_rows",
                 "value_reg_target": "synthetic_ex_ante_ev",
                 "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
-                "validation_contract": "outer_latest_group_holdout_15pct_plus_embargo__inner_purged_time_cv_v11_5_2",
-                "feature_stability_method": "inner_cv_validation_permutation_auc_drop_v1",
+                "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_shadow_structure_gate_v11_5_4",
+                "feature_stability_method": "weighted_rolling_origin_plus_shadow_permutation_v3",
                 "feature_stability_outcome": (
                     autofs_outcome.get("feature_stability", pd.DataFrame()).reset_index().to_dict("records")
                     if autofs_outcome is not None else []
@@ -19773,6 +20332,49 @@ def train_sharp_model_from_bq(
                     autofs_value.get("feature_stability", pd.DataFrame()).reset_index().to_dict("records")
                     if autofs_value is not None else []
                 ),
+                "shadow_stability_outcome": (
+                    autofs_outcome.get("shadow_stability", pd.DataFrame()).reset_index().to_dict("records")
+                    if autofs_outcome is not None else []
+                ),
+                "shadow_stability_situation": (
+                    autofs_situation.get("shadow_stability", pd.DataFrame()).reset_index().to_dict("records")
+                    if autofs_situation is not None else []
+                ),
+                "shadow_stability_value": (
+                    autofs_value.get("shadow_stability", pd.DataFrame()).reset_index().to_dict("records")
+                    if autofs_value is not None else []
+                ),
+                "family_stability_outcome": (
+                    autofs_outcome.get("family_stability", pd.DataFrame()).reset_index().to_dict("records")
+                    if autofs_outcome is not None else []
+                ),
+                "family_stability_situation": (
+                    autofs_situation.get("family_stability", pd.DataFrame()).reset_index().to_dict("records")
+                    if autofs_situation is not None else []
+                ),
+                "family_stability_value": (
+                    autofs_value.get("family_stability", pd.DataFrame()).reset_index().to_dict("records")
+                    if autofs_value is not None else []
+                ),
+                "overlay_trust_outcome": (
+                    autofs_outcome.get("overlay_trust", pd.DataFrame()).reset_index().to_dict("records")
+                    if autofs_outcome is not None else []
+                ),
+                "overlay_trust_situation": (
+                    autofs_situation.get("overlay_trust", pd.DataFrame()).reset_index().to_dict("records")
+                    if autofs_situation is not None else []
+                ),
+                "overlay_trust_map_outcome": (autofs_outcome.get("overlay_trust_map", {}) if autofs_outcome is not None else {}),
+                "overlay_trust_map_situation": (autofs_situation.get("overlay_trust_map", {}) if autofs_situation is not None else {}),
+                "temporal_classification_outcome": (autofs_outcome.get("temporal_classification", {}) if autofs_outcome is not None else {}),
+                "temporal_classification_situation": (autofs_situation.get("temporal_classification", {}) if autofs_situation is not None else {}),
+                "temporal_classification_value": (autofs_value.get("temporal_classification", {}) if autofs_value is not None else {}),
+                "recency_halflife_days": {
+                    "outcome": recency_outcome_halflife,
+                    "situation": recency_situation_halflife,
+                    "value": recency_value_halflife,
+                },
+                "weighting_contract": "outcome_situation_equal_game_side_total__value_quote_level",
             }
 
         # -------------------------------------------------------------------
@@ -19827,7 +20429,7 @@ def train_sharp_model_from_bq(
             "meta_calibrator":      (meta_cal_name, meta_cal_obj),
         
             "multihead_config": {
-                "model_family": "three_head_plus_meta_v2_leakguard",
+                "model_family": "three_head_plus_meta_v4_structure_stable_overlay",
                 "outcome_head": "model_logloss/model_auc + iso_blend",
                 "situation_head": "model_situation_cls",
                 "value_cls_head": "model_value_cls",
@@ -19839,13 +20441,18 @@ def train_sharp_model_from_bq(
                 "meta_weight": float(META_WEIGHT),
                 "outcome_weight": float(OUTCOME_WEIGHT),
                 "stacking_train_mode": "oof_post_autofs",
-                    "head_feature_family_policy": "specialist_domains_v1",
+                    "head_feature_family_policy": "specialist_domains_plus_conditional_overlay_v2",
                 "situation_target": "realized_outcome",
                 "value_cls_target": "realized_outcome_on_value_rows",
                 "value_reg_target": "synthetic_ex_ante_ev",
                 "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
-                "validation_contract": "outer_latest_group_holdout_plus_embargo__inner_purged_time_cv_v11_5_2",
-                "feature_stability_method": "inner_cv_validation_permutation_auc_drop_v1",
+                "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_shadow_structure_gate_v11_5_4",
+                "feature_stability_method": "weighted_rolling_origin_plus_shadow_permutation_v3",
+                "weighting_contract": "outcome_situation_equal_game_side_total__value_quote_level",
+                "recency_halflife_days": {"outcome": recency_outcome_halflife, "situation": recency_situation_halflife, "value": recency_value_halflife},
+                "overlay_lane": "conditional_active_row_residual_uplift_with_sample_shrinkage",
+                "overlay_trust_map_outcome": (autofs_outcome.get("overlay_trust_map", {}) if autofs_outcome is not None else {}),
+                "overlay_trust_map_situation": (autofs_situation.get("overlay_trust_map", {}) if autofs_situation is not None else {}),
             },
         }
         # -------------------------------------------------------------------
@@ -19879,7 +20486,7 @@ def train_sharp_model_from_bq(
         
                 "multihead_config": {
                     "schema_version": 2,
-                    "model_family": "three_head_plus_meta_v2_leakguard",
+                    "model_family": "three_head_plus_meta_v4_structure_stable_overlay",
                     "meta_features": list(meta_train_df.columns),
                     "meta_calibrator": str(meta_cal_name),
                     "meta_oof_auc_for_weight": (None if not np.isfinite(META_OOF_AUC) else float(META_OOF_AUC)),
@@ -19887,13 +20494,18 @@ def train_sharp_model_from_bq(
                     "meta_weight": float(META_WEIGHT),
                     "outcome_weight": float(OUTCOME_WEIGHT),
                     "stacking_train_mode": "oof_post_autofs",
-                    "head_feature_family_policy": "specialist_domains_v1",
+                    "head_feature_family_policy": "specialist_domains_plus_conditional_overlay_v2",
                 "situation_target": "realized_outcome",
                 "value_cls_target": "realized_outcome_on_value_rows",
                 "value_reg_target": "synthetic_ex_ante_ev",
                 "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
-                "validation_contract": "outer_latest_group_holdout_plus_embargo__inner_purged_time_cv_v11_5_2",
-                "feature_stability_method": "inner_cv_validation_permutation_auc_drop_v1",
+                "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_shadow_structure_gate_v11_5_4",
+                "feature_stability_method": "weighted_rolling_origin_plus_shadow_permutation_v3",
+                "weighting_contract": "outcome_situation_equal_game_side_total__value_quote_level",
+                "recency_halflife_days": {"outcome": recency_outcome_halflife, "situation": recency_situation_halflife, "value": recency_value_halflife},
+                "overlay_lane": "conditional_active_row_residual_uplift_with_sample_shrinkage",
+                "overlay_trust_map_outcome": (autofs_outcome.get("overlay_trust_map", {}) if autofs_outcome is not None else {}),
+                "overlay_trust_map_situation": (autofs_situation.get("overlay_trust_map", {}) if autofs_situation is not None else {}),
                 },
             },
             calibrator=iso_blend,
