@@ -404,7 +404,8 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.2-schedule-holdout-stability"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.6-temporal-robustness-overlay"
+# V11.6: grouped game-side weighting + recency decay + deployment-horizon CV + family-aware stability pruning.
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -16784,7 +16785,7 @@ def train_sharp_model_from_bq(
         # ----------------------------
         # 2) Sample weights (BUILD ONCE from train_df) — no drops
         # ----------------------------
-        def _build_sample_weights(train_df: pd.DataFrame) -> np.ndarray:
+        def _build_sample_weights(train_df: pd.DataFrame, head_name: str = "outcome") -> np.ndarray:
             bk_col = "Bookmaker" if "Bookmaker" in train_df.columns else (
                 "Bookmaker_Norm" if "Bookmaker_Norm" in train_df.columns else None
             )
@@ -16853,8 +16854,45 @@ def train_sharp_model_from_bq(
         
             w = (w_base * _ctx(train_df)).astype(np.float32)
             w[~np.isfinite(w)] = 0.0
-        
-            # Renormalize to mean 1.0
+
+            # V11.6: Outcome/Situation labels are game-side outcomes.  Multiple
+            # sportsbook quotes must not multiply the statistical weight of the
+            # same realized result.  Preserve relative quote quality *within* a
+            # game-side, but force every game-side to carry the same total mass.
+            # Value remains quote-level because price/value genuinely differs by book.
+            if str(head_name).lower() in {"outcome", "situation"}:
+                side_cols = [c for c in ("Game_Key", "Team", "Market") if c in train_df.columns]
+                if "Game_Key" not in side_cols:
+                    side_cols = ["Game_Key"]
+                if "Team" not in side_cols and "Outcome" in train_df.columns:
+                    side_cols.append("Outcome")
+                tmp = pd.DataFrame({"_w": w}, index=train_df.index)
+                for c in side_cols:
+                    tmp[c] = train_df[c].astype(str).to_numpy()
+                denom = tmp.groupby(side_cols, dropna=False)["_w"].transform("sum").to_numpy(float)
+                counts = tmp.groupby(side_cols, dropna=False)["_w"].transform("size").to_numpy(float)
+                w = np.where(denom > 0, w / denom, 1.0 / np.maximum(counts, 1.0)).astype(np.float32)
+                print(f"[GAME-SIDE-WEIGHT:{head_name}] groups={tmp.groupby(side_cols, dropna=False).ngroups:,} "
+                      f"rows={len(tmp):,} total_mass={float(w.sum()):.1f}")
+
+            # V11.6 recency decay.  Rare systems retain the full history, but old
+            # market regimes do not receive identical influence to recent seasons.
+            # The half-life is deliberately long and sport-aware; this is a mild
+            # robustness prior, not a short-window replacement for history.
+            tcol = next((c for c in ("Game_Start", "Snapshot_Timestamp", "Time") if c in train_df.columns), None)
+            if tcol is not None:
+                tt = pd.to_datetime(train_df[tcol], utc=True, errors="coerce")
+                if tt.notna().any():
+                    newest = tt.max()
+                    age_days = (newest - tt).dt.total_seconds().div(86400.0).fillna(0.0).clip(lower=0.0)
+                    sport_guess = str(sport_key if "sport_key" in locals() else sport).upper()
+                    half_life = {"NFL": 730.0, "NCAAF": 730.0, "CFL": 730.0,
+                                 "NBA": 548.0, "NCAAB": 548.0, "WNBA": 548.0, "MLB": 548.0}.get(sport_guess, 730.0)
+                    decay = np.exp(-np.log(2.0) * age_days.to_numpy(float) / half_life)
+                    # Floor prevents older rare overlays from being erased.
+                    w *= np.clip(decay, 0.35, 1.0).astype(np.float32)
+
+            # Renormalize to mean 1.0 after all weighting.
             s = float(w.sum())
             if s > 0:
                 w *= (len(w) / s)
@@ -16863,7 +16901,7 @@ def train_sharp_model_from_bq(
             return w
         
        
-        w_train_outcome = _build_sample_weights(train_df)
+        w_train_outcome = _build_sample_weights(train_df, "outcome")
         assert len(w_train_outcome) == len(train_df) == len(y_train), (
             "w_train_outcome misaligned", len(w_train_outcome), len(train_df), len(y_train)
         )
@@ -16871,7 +16909,7 @@ def train_sharp_model_from_bq(
         w_train_situation = None
         if train_idx_situation is not None:
             train_df_situation = df_full_situation.iloc[train_idx_situation].copy().reset_index(drop=True)
-            w_train_situation = _build_sample_weights(train_df_situation)
+            w_train_situation = _build_sample_weights(train_df_situation, "situation")
             assert len(w_train_situation) == len(train_df_situation) == len(y_train_situation), (
                 "w_train_situation misaligned", len(w_train_situation), len(train_df_situation), len(y_train_situation)
             )
@@ -16879,7 +16917,7 @@ def train_sharp_model_from_bq(
         w_train_value = None
         if train_idx_value is not None:
             train_df_value = df_full_value.iloc[train_idx_value].copy().reset_index(drop=True)
-            w_train_value = _build_sample_weights(train_df_value)
+            w_train_value = _build_sample_weights(train_df_value, "value")
             assert len(w_train_value) == len(train_df_value) == len(y_train_value_cls), (
                 "w_train_value misaligned", len(w_train_value), len(train_df_value), len(y_train_value_cls)
             )
@@ -16899,8 +16937,16 @@ def train_sharp_model_from_bq(
         else:
             # Larger contiguous validation blocks reduce fold-to-fold noise and
             # make forward feature selection less able to chase tiny local lifts.
-            target_games = 40
-            min_val_size = max(40, target_games * rows_per_game)
+            # V11.6 deployment-horizon validation: football is evaluated over
+            # approximately a full weekly slate; dense sports use a broader
+            # calendar-like block.  The splitter remains strictly time-forward.
+            if sport_key in {"NFL", "NCAAF"}:
+                target_games = 80
+            elif sport_key in {"NBA", "NCAAB", "MLB"}:
+                target_games = 100
+            else:
+                target_games = 60
+            min_val_size = max(60, target_games * rows_per_game)
             _dense = sport_key in {"NBA", "MLB", "WNBA", "CFL"}
             if sport_key in {"NFL", "NCAAF"}:
                 embargo_td = pd.Timedelta(hours=48)
@@ -17132,6 +17178,23 @@ def train_sharp_model_from_bq(
        
        
       
+        def _robust_feature_family(col: str) -> str:
+            c = str(col)
+            if c.startswith("BigAl_"): return "BigAl"
+            if c.startswith("Pathi_"): return "Pathi"
+            if c.startswith("Brain_Expert_Market") or c.startswith("Brain_Regime_"): return "Market"
+            if c.startswith("Brain_Expert_Power") or "Power" in c: return "Power"
+            if c.startswith("Brain_Expert_Form") or "Form" in c: return "Form"
+            if c.startswith("Brain_Expert_Schedule") or c.startswith("Brain_Schedule_"): return "Schedule"
+            if c.startswith("Brain_Expert_Price") or "Price" in c or "Implied" in c: return "Price"
+            if c.startswith("Brain_"): return "Brain"
+            if any(x in c for x in ("Line_Move", "Sharp", "Steam", "Books_Aligned", "Market_", "Reversal")): return "RawMarket"
+            return "Core"
+
+        def _is_sparse_overlay(col: str) -> bool:
+            c = str(col)
+            return c.startswith("BigAl_") or c.startswith("Pathi_") or c.startswith("Brain_Expert_") or c.startswith("Brain_Regime_")
+
         def _cv_feature_stability_audit(model_proto, X_df, y, folds, feature_cols, *, head_name, repeats=3, seed=20260905):
             """
             Conditional feature-stability audit using only INNER-CV validation rows.
@@ -17356,9 +17419,52 @@ def train_sharp_model_from_bq(
                 _model_proto, X_df_train_head, y_head_train, folds_head, feat_cols_head,
                 head_name=head_name, repeats=3, seed=20260905,
             )
+            if not stability_head.empty:
+                stability_head["family"] = [_robust_feature_family(c) for c in stability_head.index]
+                fam = stability_head.groupby("family").agg(
+                    family_features=("cv_stable", "size"),
+                    family_stable_features=("cv_stable", "sum"),
+                    family_mean_auc_drop=("cv_auc_drop_mean", "mean"),
+                    family_mean_positive_frac=("cv_positive_frac", "mean"),
+                )
+                fam["family_stable"] = (fam["family_mean_auc_drop"] > 0) & (fam["family_mean_positive_frac"] >= 0.55)
+                print(f"[FAMILY-STABILITY:{head_name}]\n{fam.sort_values('family_mean_auc_drop', ascending=False).to_string()}")
+
+                # Core lane: unstable broad predictors are removed automatically.
+                # Overlay lane: sparse BigAl/Pathi/Brain signals are not discarded
+                # merely for low global AUC contribution.  They survive when their
+                # family is temporally useful, allowing later trust/shrinkage to
+                # determine magnitude rather than AutoFS erasing rare situations.
+                fam_ok = fam["family_stable"].to_dict()
+                kept = []
+                removed = []
+                for c in feat_cols_head:
+                    row = stability_head.loc[c] if c in stability_head.index else None
+                    individual_ok = bool(row["cv_stable"]) if row is not None else False
+                    overlay_ok = _is_sparse_overlay(c) and bool(fam_ok.get(_robust_feature_family(c), False))
+                    if individual_ok or overlay_ok:
+                        kept.append(c)
+                    else:
+                        removed.append(c)
+                # Never allow robustness filtering to collapse a head completely.
+                if kept:
+                    feat_cols_head = kept
+                    print(f"[ROBUST-PRUNE:{head_name}] kept={len(kept)} removed={len(removed)} "
+                          f"overlay_family_rescue={sum(_is_sparse_overlay(c) and not bool(stability_head.loc[c,'cv_stable']) for c in kept if c in stability_head.index)}")
+                    if removed:
+                        print(f"[ROBUST-PRUNE:{head_name}] removed_unstable={removed[:40]}")
+
             if isinstance(shap_summary_head, pd.DataFrame) and not stability_head.empty:
                 shap_summary_head = shap_summary_head.join(stability_head, how="left")
-        
+
+            # Rebuild matrices after robustness pruning.
+            _tr_num = X_df_train_head.reindex(columns=feat_cols_head).apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan)
+            _ho_num = X_df_hold_head.reindex(columns=feat_cols_head).apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan)
+            _fu_num = X_df_full_head.reindex(columns=feat_cols_head).apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan)
+            X_train_head_df = _tr_num.fillna(0.0)
+            X_hold_head_df = _ho_num.fillna(0.0)
+            X_full_head_df = _fu_num.fillna(0.0)
+
             return {
                 "feature_cols": list(feat_cols_head),
                 "shap_summary": shap_summary_head,
