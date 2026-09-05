@@ -2340,19 +2340,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         n("Revenge_Flag_Current").eq(1) & n("Spread_Value").ge(9)
     ).astype("int8")
 
-    _bigal_enhancer_flags = [
-        "BigAl_MLB_Enhancer_RecentFormAboveSeason",
-        "BigAl_MLB_Enhancer_RecentFormFavorite",
-        "BigAl_NFL_Enhancer_LateHomeDog",
-        "BigAl_NFL_Enhancer_PenultimateBadTeamOffWin",
-        "BigAl_CF_Enhancer_RevengeDog",
-        "BigAl_NBA_Enhancer_ImmediateRematchDog",
-        "BigAl_CBB_Enhancer_HomeRevengeWinning",
-        "BigAl_WNBA_Enhancer_WinningHomeDoubleRevenge",
-        "BigAl_WNBA_Enhancer_WinningHomeDoubleRevengeDog",
-        "BigAl_CFL_Enhancer_WinlessRevengeBigDog",
-    ]
-    _bigal_enhancer_flags = [c for c in _bigal_enhancer_flags if c in s.columns]
+    _bigal_enhancer_flags = [c for c in BIGAL_ENHANCER_COLS if c in s.columns]
     s["BigAl_Enhancer_Count"] = (
         s[_bigal_enhancer_flags].sum(axis=1).astype("int16")
         if _bigal_enhancer_flags else 0
@@ -2362,12 +2350,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     # ------------------------------------------------------------------
     # Aggregate counts + human-readable audit string.
     # ------------------------------------------------------------------
-    pathi_signal_cols = [
-        "Pathi_M1_DogThatWon", "Pathi_M8_DogWon_BetterPrice", "Pathi_M2_HomeDog",
-        "Pathi_M3_Rule10_LosingStreak", "Pathi_M3_Rule10_PlusMoney", "Pathi_M4_ExtendedWinStreakFade",
-        "Pathi_M5_TravelOffDayFreeze", "Pathi_M6_WeakTeamNewChalk_Screen", "Pathi_M7_BadRoadFavoriteProfile",
-        "Pathi_M9_Plus15_PlusMoney", "Pathi_RoadFavLost_StillFavorite_Screen",
-    ]
+    pathi_signal_cols = [c for c in PATHI_EXACT_SIGNAL_COLS if c in s.columns]
     bigal_base_cols = [
         "BigAl_NFL1_Week1FadePlayoffTeam", "BigAl_NFL2_LateSeasonHomeDog", "BigAl_NFL3_PlayoffHighScoreFade",
         "BigAl_NFL4_PreseasonContrarianMove", "BigAl_NFL5_PreseasonLowOffenseOver",
@@ -2764,20 +2747,7 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
 
     # Enhancers are intentionally tracked separately and never promoted to an
     # exact System_Signal_Count.
-    _ba_enhancer_flags = [
-        c for c in (
-            "BigAl_MLB_Enhancer_RecentFormAboveSeason",
-            "BigAl_MLB_Enhancer_RecentFormFavorite",
-            "BigAl_NFL_Enhancer_LateHomeDog",
-            "BigAl_CF_Enhancer_RevengeDog",
-            "BigAl_NBA_Enhancer_ImmediateRematchDog",
-            "BigAl_CBB_Enhancer_HomeRevengeWinning",
-            "BigAl_WNBA_Enhancer_WinningHomeDoubleRevenge",
-            "BigAl_WNBA_Enhancer_WinningHomeDoubleRevengeDog",
-            "BigAl_CFL_Enhancer_WinlessRevengeBigDog",
-        )
-        if c in out.columns
-    ]
+    _ba_enhancer_flags = [c for c in BIGAL_ENHANCER_COLS if c in out.columns]
     out["BigAl_Enhancer_Count"] = (
         out[_ba_enhancer_flags].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).astype("int16")
         if _ba_enhancer_flags else 0
@@ -3329,6 +3299,66 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return out
 
+# ============================================================================
+# V11.3 canonical Pathi / Big Al inventories.
+# One source of truth is reused by production counts and integrity audits so
+# enhancer/tightener/system inventories cannot silently drift apart.
+# ============================================================================
+PATHI_EXACT_SIGNAL_COLS = (
+    "Pathi_M1_DogThatWon", "Pathi_M8_DogWon_BetterPrice", "Pathi_M2_HomeDog",
+    "Pathi_M3_Rule10_LosingStreak", "Pathi_M3_Rule10_PlusMoney",
+    "Pathi_M4_ExtendedWinStreakFade", "Pathi_M5_TravelOffDayFreeze",
+    "Pathi_M6_WeakTeamNewChalk_Screen", "Pathi_M7_BadRoadFavoriteProfile",
+    "Pathi_M9_Plus15_PlusMoney", "Pathi_RoadFavLost_StillFavorite_Screen",
+)
+
+BIGAL_ENHANCER_COLS = (
+    "BigAl_MLB_Enhancer_RecentFormAboveSeason",
+    "BigAl_MLB_Enhancer_RecentFormFavorite",
+    "BigAl_NFL_Enhancer_LateHomeDog",
+    "BigAl_NFL_Enhancer_PenultimateBadTeamOffWin",
+    "BigAl_CF_Enhancer_RevengeDog",
+    "BigAl_NBA_Enhancer_ImmediateRematchDog",
+    "BigAl_CBB_Enhancer_HomeRevengeWinning",
+    "BigAl_WNBA_Enhancer_WinningHomeDoubleRevenge",
+    "BigAl_WNBA_Enhancer_WinningHomeDoubleRevengeDog",
+    "BigAl_CFL_Enhancer_WinlessRevengeBigDog",
+)
+
+# Tightener -> exact parent. Retired parent/tightener pairs remain in code for
+# compatibility but are removed from the active learned contract by the same
+# retirement filter used everywhere else.
+BIGAL_TIGHTENER_PARENT = {
+    "BigAl_NFL2_OppOffATSLoss_Tightener": "BigAl_NFL2_LateSeasonHomeDog",
+    "BigAl_NFL5_TotalUnder40_Tightener": "BigAl_NFL5_PreseasonLowOffenseOver",
+    "BigAl_CF2_Away_Tightener": "BigAl_CF2_LateSeasonRevengeDog",
+    "BigAl_NBA1_PriorLoss25_Tightener": "BigAl_NBA1_B2BRematchRoadDog",
+    "BigAl_NBA3_WinPct572_Tightener": "BigAl_NBA3_FadeHomeAfterChampUpset",
+    "BigAl_NBA4_NotOffSUATSLoss_Tightener": "BigAl_NBA4_FinalHomeFavRevenge",
+    "BigAl_NBA5_ChampOffSUWin_Tightener": "BigAl_NBA5_PlayoffBigDogVsChamp",
+    "BigAl_NBA8_WinningRecord_Tightener": "BigAl_NBA8_Revenge145FadeFavorite",
+    "BigAl_CBB1_ThreeLoss_Tightener": "BigAl_CBB1_UglyDog20Losses",
+    "BigAl_CBB3_DogOffLoss_Tightener": "BigAl_CBB3_HomeRevenge27",
+    "BigAl_CFL1_TotalAbove51_Tightener": "BigAl_CFL1_SecondMeetingUnder",
+}
+
+PATHI_KEY_EVENT_COLS = (
+    "Pathi_FB_Moved_Through_Key",
+    "Pathi_FB_Crossed_Key_Toward_Team",
+    "Pathi_FB_Crossed_Key_Away_From_Team",
+    "Pathi_FB_Moved_Onto_Key",
+    "Pathi_FB_Moved_Off_Key",
+)
+
+PATHI_ROLE_CONTEXT_COLS = (
+    "Pathi_FB_On_Key_3", "Pathi_FB_On_Key_7", "Pathi_FB_On_Key_10", "Pathi_FB_On_Key_14",
+    "Pathi_FB_Dog_Hook_Above_3", "Pathi_FB_Dog_Hook_Above_7", "Pathi_FB_Dog_Hook_Above_10",
+    "Pathi_FB_Favorite_Below_Key_3", "Pathi_FB_Favorite_Below_Key_7", "Pathi_FB_Favorite_Below_Key_10",
+    "Pathi_FB_Dog_Below_Key_3", "Pathi_FB_Dog_Below_Key_7",
+    "Pathi_FB_Favorite_Laying_Hook_3", "Pathi_FB_Favorite_Laying_Hook_7",
+    "Pathi_FB_Usually_Dog_Now_Favorite", "Pathi_FB_Usually_Favorite_Now_Dog",
+)
+
 def pathi_bigal_numeric_feature_cols(df: pd.DataFrame) -> list[str]:
     """Numeric Pathi/BigAl features safe to offer to AutoFS/model training."""
     if df is None or df.empty:
@@ -3337,6 +3367,11 @@ def pathi_bigal_numeric_feature_cols(df: pd.DataFrame) -> list[str]:
     out = []
     for c in df.columns:
         if not str(c).startswith(prefixes) or c == "System_Signals_Text":
+            continue
+        # Future-label / oracle columns are targets only. Exclude at the earliest
+        # shared predictor inventory so no downstream selector can accidentally
+        # see them, even when all values are NaN.
+        if str(c).startswith("Brain_Target_"):
             continue
         if _is_retired_bigal_feature_name(c):
             continue
@@ -15651,7 +15686,7 @@ def train_sharp_model_from_bq(
             """
             try:
                 print("\n" + "="*100)
-                print(f"PATHI + BIG AL + BRAIN INTEGRITY AUDIT | market={str(market_name).upper()} | rows={len(df_audit):,}")
+                print(f"PATHI + BIG AL + BRAIN INTEGRITY AUDIT | V11.3 VALIDATION CLEAN | market={str(market_name).upper()} | rows={len(df_audit):,}")
                 print("="*100)
 
                 def nser(c, default=0.0):
@@ -15671,12 +15706,7 @@ def train_sharp_model_from_bq(
                 print(f"Pathi columns={len(pathi_cols)} | BigAl active-contract columns={len(bigal_cols)} | Brain predictors={len(brain_cols)}")
 
                 # ---------- exact aggregate-count reconstruction ----------
-                pathi_signals=[c for c in [
-                    'Pathi_M1_DogThatWon','Pathi_M8_DogWon_BetterPrice','Pathi_M2_HomeDog',
-                    'Pathi_M3_Rule10_LosingStreak','Pathi_M3_Rule10_PlusMoney','Pathi_M4_ExtendedWinStreakFade',
-                    'Pathi_M5_TravelOffDayFreeze','Pathi_M6_WeakTeamNewChalk_Screen','Pathi_M7_BadRoadFavoriteProfile',
-                    'Pathi_M9_Plus15_PlusMoney','Pathi_RoadFavLost_StillFavorite_Screen'
-                ] if c in df_audit.columns]
+                pathi_signals=[c for c in PATHI_EXACT_SIGNAL_COLS if c in df_audit.columns]
                 bigal_exact=[c for c in [
                     'BigAl_NFL1_Week1FadePlayoffTeam','BigAl_NFL2_LateSeasonHomeDog','BigAl_NFL3_PlayoffHighScoreFade',
                     'BigAl_NFL4_PreseasonContrarianMove','BigAl_NFL5_PreseasonLowOffenseOver',
@@ -15688,7 +15718,7 @@ def train_sharp_model_from_bq(
                     'BigAl_CFL1_SecondMeetingUnder','BigAl_CFL2_EliteDogFade','BigAl_CFL3_ThirdMeetingAwayDogLostFirstTwo'
                 ] if c in df_audit.columns and not _is_retired_bigal_feature_name(c)]
                 bigal_tight=[c for c in df_audit.columns if str(c).startswith('BigAl_') and str(c).endswith('_Tightener') and not _is_retired_bigal_feature_name(c)]
-                bigal_enh=[c for c in df_audit.columns if str(c).startswith('BigAl_') and '_Enhancer_' in str(c) and str(c) != 'BigAl_Enhancer_Active' and not _is_retired_bigal_feature_name(c)]
+                bigal_enh=[c for c in BIGAL_ENHANCER_COLS if c in df_audit.columns]
 
                 print("[PBB-AUDIT:AGGREGATE-COUNTS]")
                 if pathi_signals and 'Pathi_System_Count' in df_audit.columns:
@@ -15741,6 +15771,65 @@ def train_sharp_model_from_bq(
                         return int((anyon & ~sp.isin(allowed)).sum())
                     print("[PBB-AUDIT:SPORT-ROUTING]")
                     print(f"CFL-on-nonCFL rows={routed_bad(cfl,['CFL'])} | CF-on-nonNCAAF rows={routed_bad(cf,['NCAAF'])} | WNBA-on-nonWNBA rows={routed_bad(wnba,['WNBA'])}")
+
+                # ---------- Big Al tightener + enhancer integrity ----------
+                print("[PBB-AUDIT:BIGAL-TIGHTENERS]")
+                active_tighteners=[]
+                parent_violations=0
+                tightener_population=[]
+                for tc,parent in BIGAL_TIGHTENER_PARENT.items():
+                    if tc not in df_audit.columns or _is_retired_bigal_feature_name(tc) or _is_retired_bigal_feature_name(parent):
+                        continue
+                    fires=int(nser(tc).gt(0).sum())
+                    tightener_population.append((tc,fires))
+                    if fires:
+                        active_tighteners.append(tc)
+                    if parent in df_audit.columns:
+                        bad=int((nser(tc).gt(0) & ~nser(parent).gt(0)).sum())
+                        parent_violations += bad
+                        print(f"{tc}: fires={fires:,} parent={parent} parent_violation_rows={bad} {'PASS' if bad==0 else 'FAIL'}")
+                    else:
+                        print(f"{tc}: fires={fires:,} parent={parent} parent=MISSING")
+                calc_tight=sum((nser(c) for c,_ in tightener_population), start=pd.Series(0.0,index=df_audit.index)) if tightener_population else pd.Series(0.0,index=df_audit.index)
+                if 'BigAl_Tightener_Count' in df_audit.columns:
+                    bad=~np.isclose(calc_tight.to_numpy(float),nser('BigAl_Tightener_Count').to_numpy(float))
+                    print(f"canonical tightener-count mismatch rows={int(bad.sum())} {'PASS' if not bad.any() else 'FAIL'} | parent violations={parent_violations}")
+
+                print("[PBB-AUDIT:BIGAL-ENHANCERS]")
+                enh_present=[c for c in BIGAL_ENHANCER_COLS if c in df_audit.columns]
+                for c in enh_present:
+                    print(f"{c}={int(nser(c).gt(0).sum()):,}")
+                calc_enh=sum((nser(c) for c in enh_present), start=pd.Series(0.0,index=df_audit.index)) if enh_present else pd.Series(0.0,index=df_audit.index)
+                if 'BigAl_Enhancer_Count' in df_audit.columns:
+                    bad=~np.isclose(calc_enh.to_numpy(float),nser('BigAl_Enhancer_Count').to_numpy(float))
+                    print(f"canonical enhancer-count mismatch rows={int(bad.sum())} {'PASS' if not bad.any() else 'FAIL'} | canonical flags present={len(enh_present)}/{len(BIGAL_ENHANCER_COLS)}")
+                    # Enhancers must remain separate from exact counts. A row may have both,
+                    # but enhancer-only rows may not inflate BigAl_System_Count.
+                    enh_only=calc_enh.gt(0) & nser('BigAl_System_Count').eq(0)
+                    print(f"enhancer-only rows={int(enh_only.sum()):,} | enhancer flags never directly included in exact reconstruction=PASS")
+
+                # ---------- Pathi expert-family decomposition ----------
+                print("[PBB-AUDIT:PATHI-EXPERT-DECOMPOSITION]")
+                exact_active=(df_audit[pathi_signals].apply(pd.to_numeric,errors='coerce').fillna(0).ne(0).any(axis=1) if pathi_signals else pd.Series(False,index=df_audit.index))
+                key_cols=[c for c in PATHI_KEY_EVENT_COLS if c in df_audit.columns]
+                role_cols=[c for c in PATHI_ROLE_CONTEXT_COLS if c in df_audit.columns]
+                key_active=(df_audit[key_cols].apply(pd.to_numeric,errors='coerce').fillna(0).ne(0).any(axis=1) if key_cols else pd.Series(False,index=df_audit.index))
+                role_active=(df_audit[role_cols].apply(pd.to_numeric,errors='coerce').fillna(0).ne(0).any(axis=1) if role_cols else pd.Series(False,index=df_audit.index))
+                expert_active=nser('Brain_Expert_Pathi_Active').eq(1) if 'Brain_Expert_Pathi_Active' in df_audit.columns else pd.Series(False,index=df_audit.index)
+                print(f"exact-system active={int(exact_active.sum()):,} | key-event active={int(key_active.sum()):,} | role-context active={int(role_active.sum()):,} | Brain Pathi active={int(expert_active.sum()):,}")
+                print(f"Pathi active explained by exact-or-key={int((expert_active & (exact_active|key_active)).sum()):,}/{int(expert_active.sum()):,} | role-context overlap={int((expert_active&role_active).sum()):,}")
+                unexplained=expert_active & ~(exact_active|key_active)
+                print(f"Pathi expert active unexplained by configured activation contract={int(unexplained.sum())} {'PASS' if not unexplained.any() else 'FAIL'}")
+
+                # ---------- Expert independence diagnostic (diagnostic only) ----------
+                print("[PBB-AUDIT:EXPERT-INDEPENDENCE]")
+                if all(c in df_audit.columns for c in ['Brain_Expert_Pathi_Active','Brain_Expert_Market_Active','Brain_Expert_Pathi_Direction','Brain_Expert_Market_Direction']):
+                    pa=nser('Brain_Expert_Pathi_Active').eq(1); ma=nser('Brain_Expert_Market_Active').eq(1)
+                    pdire=nser('Brain_Expert_Pathi_Direction'); mdire=nser('Brain_Expert_Market_Direction')
+                    joint=pa&ma&pdire.ne(0)&mdire.ne(0)
+                    agree=joint&pdire.eq(mdire)
+                    print(f"Pathi+Market directional overlap={int(joint.sum()):,} | same-direction={int(agree.sum()):,} ({(100*agree.sum()/joint.sum() if joint.sum() else 0):.2f}%)")
+                    print("NOTE: overlap is diagnostic, not counted as independent credibility yet")
 
                 # ---------- Brain expert-state consistency ----------
                 print("[PBB-AUDIT:BRAIN-EXPERT-STATE]")
@@ -16125,7 +16214,7 @@ def train_sharp_model_from_bq(
         # Final post-pruning Brain visibility + leakage audit.
         # Brain_Target_* columns intentionally use future information and MUST NEVER
         # be part of predictor feature_cols/features_pruned.
-        _brain_final = [c for c in features_pruned if str(c).startswith("Brain_")]
+        _brain_final = [c for c in features_pruned if str(c).startswith("Brain_") and not str(c).startswith("Brain_Target_")]
         _brain_targets_in_model = [c for c in features_pruned if str(c).startswith("Brain_Target_")]
         print("\n[BRAIN-AUDIT:FINAL-MODEL-FEATURES]")
         print(f"Final features={len(features_pruned)} | Brain predictors reaching model matrix={len(_brain_final)}")
