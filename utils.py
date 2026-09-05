@@ -5995,6 +5995,7 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         "three_head_plus_meta_v1",
         "three_head_plus_meta_v3_temporal_robust_overlay",
         "three_head_plus_meta_v4_structure_stable_overlay",
+        "three_head_plus_meta_v5_specialist_gated",
     }
     if family and family not in _supported_multihead_families:
         logger.warning("⚠️ Unsupported multihead model family %s; using outcome-only fallback", family)
@@ -6065,6 +6066,22 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
             value_reg = np.asarray(model_value_reg.predict(X_value), dtype=np.float64).reshape(-1)
         except Exception as e:
             logger.warning("⚠️ Value-regression live prediction failed; using neutral 0.0: %s", e)
+
+    # V11.5.5: apply the same whole-head shadow trust used during training.
+    # A specialist that failed later shadow origins is neutralized before meta.
+    try:
+        specialist_trust_situation = float(cfg.get("specialist_trust_situation", 1.0))
+    except Exception:
+        specialist_trust_situation = 1.0
+    try:
+        specialist_trust_value = float(cfg.get("specialist_trust_value", 1.0))
+    except Exception:
+        specialist_trust_value = 1.0
+    specialist_trust_situation = float(np.clip(specialist_trust_situation, 0.0, 1.0))
+    specialist_trust_value = float(np.clip(specialist_trust_value, 0.0, 1.0))
+    p_situation = 0.5 + specialist_trust_situation * (np.asarray(p_situation, dtype=np.float64) - 0.5)
+    p_value = 0.5 + specialist_trust_value * (np.asarray(p_value, dtype=np.float64) - 0.5)
+    value_reg = specialist_trust_value * np.asarray(value_reg, dtype=np.float64)
 
     meta_df = pd.DataFrame({
         "Meta_P_Outcome": np.clip(p_outcome, eps, 1.0 - eps),
@@ -10680,7 +10697,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.4.1-structure-stability-temporal-deoverlap"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.5.1-meta-oof-coverage"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
