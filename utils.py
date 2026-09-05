@@ -13097,16 +13097,73 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
     install_expert('Form', form_active, form_direction, form_intensity)
 
     # ------------------------------------------------------------------
-    # 8) SCHEDULE expert state: explicit stress/rest flags only.
+    # 8) SCHEDULE expert state: symmetric current-vs-opponent rest/stress.
+    #
+    # +1 = schedule/rest edge supports the current row/team
+    # -1 = schedule/rest edge hurts the current row/team
+    #  0 = no meaningful schedule opinion
+    #
+    # Opponent state is recovered from the paired team rows for the same game.
+    # This keeps the expert two-sided without inventing unavailable travel data.
     # ------------------------------------------------------------------
     b2b = flag('Is_B2B')
     three4 = flag('Is_3in4')
     bye = flag('BigAl_Context_Had_Bye_Proxy')
-    sched_signed = bye.astype(float) - b2b.astype(float) - 0.75*three4.astype(float)
-    sched_active = b2b.eq(1) | three4.eq(1) | bye.eq(1)
-    sched_direction = sgn(sched_signed)
+    days_rest = num('Days_Since_Last_Game')
+
+    def _opp_metric_from_team_rows(col, agg='median'):
+        """Return opponent's same-game team metric while preserving row count/index."""
+        if col not in out.columns or not {'Sport','Game_Key','Team','Opponent'}.issubset(out.columns):
+            return pd.Series(np.nan, index=idx, dtype='float64')
+        base = out[['Sport','Game_Key','Team',col]].copy()
+        base[col] = pd.to_numeric(base[col], errors='coerce')
+        if agg == 'max':
+            base = base.groupby(['Sport','Game_Key','Team'], dropna=False, as_index=False)[col].max()
+        else:
+            base = base.groupby(['Sport','Game_Key','Team'], dropna=False, as_index=False)[col].median()
+        base = base.rename(columns={'Team':'Opponent', col:'__opp_metric'})
+        left = out[['Sport','Game_Key','Opponent']].copy()
+        left['__row_order'] = np.arange(len(left))
+        merged = left.merge(base, on=['Sport','Game_Key','Opponent'], how='left', sort=False)
+        merged = merged.sort_values('__row_order', kind='stable')
+        return pd.Series(pd.to_numeric(merged['__opp_metric'], errors='coerce').to_numpy(), index=idx, dtype='float64')
+
+    opp_b2b = _opp_metric_from_team_rows('Is_B2B', agg='max').fillna(0).eq(1)
+    opp_three4 = _opp_metric_from_team_rows('Is_3in4', agg='max').fillna(0).eq(1)
+    opp_bye = _opp_metric_from_team_rows('BigAl_Context_Had_Bye_Proxy', agg='max').fillna(0).eq(1)
+    opp_days_rest = _opp_metric_from_team_rows('Days_Since_Last_Game', agg='median')
+    rest_diff = days_rest - opp_days_rest
+
+    # One extra rest day is meaningful; cap large gaps so bye-like gaps do not
+    # overwhelm the explicit bye/stress indicators.
+    rest_component = rest_diff.clip(-4, 4).fillna(0) * 0.25
+    stress_component = (
+        opp_b2b.astype(float) - b2b.astype(float)
+        + 0.75*(opp_three4.astype(float) - three4.astype(float))
+        + 0.75*(bye.astype(float) - opp_bye.astype(float))
+    )
+    sched_signed = rest_component + stress_component
+    sched_active = (
+        rest_diff.abs().ge(1).fillna(False)
+        | b2b.eq(1) | three4.eq(1) | bye.eq(1)
+        | opp_b2b | opp_three4 | opp_bye
+    )
+    sched_direction = sgn(sched_signed, eps=0.10)
+    # Do not call an expert active if opposing schedule effects cancel to neutral.
+    sched_active = sched_active & sched_direction.ne(0)
     sched_intensity = np.tanh(sched_signed.abs())
     install_expert('Schedule', sched_active, sched_direction, sched_intensity)
+
+    # Audit-only source fields. They are intentionally Brain-prefixed so they
+    # remain visible to diagnostics, but excluded from learned trust until data
+    # supports their value independently.
+    out['Brain_Schedule_Rest_Diff_Days'] = rest_diff.astype('float32')
+    out['Brain_Schedule_Current_B2B'] = b2b.astype('int8')
+    out['Brain_Schedule_Opp_B2B'] = opp_b2b.astype('int8')
+    out['Brain_Schedule_Current_3in4'] = three4.astype('int8')
+    out['Brain_Schedule_Opp_3in4'] = opp_three4.astype('int8')
+    out['Brain_Schedule_Current_ByeProxy'] = bye.astype('int8')
+    out['Brain_Schedule_Opp_ByeProxy'] = opp_bye.astype('int8')
 
     # ------------------------------------------------------------------
     # 9) PRICE/VALUE expert state. Direction comes from explicit mispricing.
@@ -13134,9 +13191,12 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
     active_cols = [f'Brain_Expert_{n}_Active' for n in expert_names]
     ex = out[intensity_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
     ac = out[active_cols].apply(pd.to_numeric, errors='coerce').fillna(0).gt(0)
-    ex_active = ex.where(ac)
+    # IMPORTANT: active and intensity frames have different column names.
+    # Mask positionally, not by label, otherwise pandas aligns mismatched labels
+    # and turns the entire active-intensity matrix into NaN.
+    ex_active = ex.where(ac.to_numpy())
     out['Brain_Expert_Mean_Strength'] = ex_active.mean(axis=1, skipna=True).fillna(0).astype('float32')
-    out['Brain_Expert_Max_Strength'] = ex.max(axis=1).astype('float32')
+    out['Brain_Expert_Max_Strength'] = ex.where(ac.to_numpy(), 0.0).max(axis=1).astype('float32')
     out['Brain_Expert_Dispersion'] = ex_active.std(axis=1, ddof=0, skipna=True).fillna(0).astype('float32')
     out['Brain_Expert_Active_Count'] = ac.sum(axis=1).astype('int8')
 
