@@ -6001,6 +6001,7 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         "three_head_plus_meta_v5_specialist_gated",
         "three_head_plus_meta_v5_3_specialist_calibration_wired",
         "three_head_plus_meta_v5_6_always_on_handicapper_overlays",
+        "three_head_plus_meta_v5_6_1_hard_handicapper_overlay_contract",
     }
     if family and family not in _supported_multihead_families:
         logger.warning("⚠️ Unsupported multihead model family %s; using outcome-only fallback", family)
@@ -9983,13 +9984,11 @@ def apply_blended_sharp_score(
                 "Brain_Overlay_Tightener_Active_Count","Brain_Overlay_Enhancer_Active_Count",
             ))
             if _need_overlay:
-                _exact_pathi=set(PATHI_EXACT_SIGNAL_COLS); _enhancers=set(BIGAL_ENHANCER_COLS)
+                _exact_pathi=set(PATHI_EXACT_SIGNAL_COLS); _exact_bigal=set(BIGAL_EXACT_SIGNAL_COLS); _enhancers=set(BIGAL_ENHANCER_COLS)
                 _aggregate_names={"Brain_Overlay_Trust_Score","Brain_Overlay_Trust_Active_Count","Brain_Overlay_Raw_Active_Count","Brain_Overlay_Exact_Active_Count","Brain_Overlay_Tightener_Active_Count","Brain_Overlay_Enhancer_Active_Count","BigAl_System_Count","BigAl_Tightener_Count","BigAl_Enhancer_Count","BigAl_DataReady_Count"}
                 _overlay_cols=[]
                 for _c in feature_cols:
-                    if _c in _exact_pathi or _c in _enhancers or (_c.startswith("BigAl_") and _c.endswith("_Tightener")):
-                        _overlay_cols.append(_c)
-                    elif (_c.startswith("BigAl_") and _c not in _aggregate_names and not _c.startswith("BigAl_Context_") and not _c.endswith("_DataReady") and not _c.endswith("_Match_Ratio") and not _c.startswith("BigAl_MLB_Recent")):
+                    if _c in _exact_pathi or _c in _exact_bigal or _c in _enhancers or (_c.startswith("BigAl_") and _c.endswith("_Tightener")):
                         _overlay_cols.append(_c)
                 _score=np.zeros(len(df_canon),dtype=np.float64); _trusted=np.zeros(len(df_canon),dtype=np.float64)
                 _raw=np.zeros(len(df_canon),dtype=np.float64); _exact=np.zeros(len(df_canon),dtype=np.float64)
@@ -9997,7 +9996,7 @@ def apply_blended_sharp_score(
                 for _c in dict.fromkeys(_overlay_cols):
                     _x=pd.to_numeric(df_canon[_c],errors="coerce").fillna(0.0).to_numpy(dtype=np.float64) if _c in df_canon.columns else np.zeros(len(df_canon),dtype=np.float64)
                     _on=(np.abs(_x)>0.5).astype(np.float64); _raw += _on
-                    if _c in _exact_pathi or (_c.startswith("BigAl_") and _c not in _enhancers and not _c.endswith("_Tightener")): _exact += _on
+                    if _c in _exact_pathi or _c in _exact_bigal: _exact += _on
                     elif _c in _enhancers: _enh += _on
                     elif _c.startswith("BigAl_") and _c.endswith("_Tightener"): _tight += _on
                     _tv=float((_otm or {}).get(_c,0.0) or 0.0)
@@ -10772,7 +10771,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.6-always-on-handicapper-overlays"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.6.1-hard-handicapper-overlay-contract"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -13582,6 +13581,28 @@ PATHI_EXACT_SIGNAL_COLS = (
     "Pathi_M4_ExtendedWinStreakFade", "Pathi_M5_TravelOffDayFreeze",
     "Pathi_M6_WeakTeamNewChalk_Screen", "Pathi_M7_BadRoadFavoriteProfile",
     "Pathi_M9_Plus15_PlusMoney", "Pathi_RoadFavLost_StillFavorite_Screen",
+)
+
+# V11.5.6.1 canonical learned-safe Big Al exact-system inventory.
+# These are deterministic published-system flags that may be sparse, but when
+# generated for the current sport they must survive all generic low-information,
+# duplicate-column, and AutoFS pruning. Retired postseason/championship/finals/
+# elimination/final-home systems are intentionally absent from this learned list.
+BIGAL_EXACT_SIGNAL_COLS = (
+    "BigAl_NFL2_LateSeasonHomeDog",
+    "BigAl_NFL4_PreseasonContrarianMove",
+    "BigAl_NFL5_PreseasonLowOffenseOver",
+    "BigAl_CF1_Week2Home42Win",
+    "BigAl_CF2_LateSeasonRevengeDog",
+    "BigAl_NBA1_B2BRematchRoadDog",
+    "BigAl_NBA2_ThreeMassiveCovers",
+    "BigAl_NBA8_Revenge145FadeFavorite",
+    "BigAl_CBB1_UglyDog20Losses",
+    "BigAl_CBB2_Fade10WinStreakFavorite",
+    "BigAl_CBB3_HomeRevenge27",
+    "BigAl_CFL1_SecondMeetingUnder",
+    "BigAl_CFL2_EliteDogFade",
+    "BigAl_CFL3_ThirdMeetingAwayDogLostFirstTwo",
 )
 
 BIGAL_ENHANCER_COLS = (
