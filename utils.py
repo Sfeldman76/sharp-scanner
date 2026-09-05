@@ -10642,7 +10642,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-04-v11-ai-betting-brain"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.2-schedule-holdout-stability"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -11490,6 +11490,36 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         tg.groupby(grp, sort=False)["Game_Start"].diff().dt.total_seconds().div(86400.0)
     )
 
+    # Canonical leakage-safe schedule-density state at physical team-game grain.
+    # This belongs here (rather than market/book grain) so every team row has a
+    # true opponent-comparable schedule state. Counts include PRIOR games only.
+    for _sched_days in (2, 4, 7):
+        _sched_col = f"Games_Last_{_sched_days}_Days_System"
+        _sched_counts = np.zeros(len(tg), dtype=np.int16)
+        for _, _idx_arr in tg.groupby(grp, sort=False).indices.items():
+            _idx_arr = np.asarray(_idx_arr, dtype=np.int64)
+            _times = pd.to_datetime(tg.loc[_idx_arr, "Game_Start"], errors="coerce", utc=True)
+            _t_ns = _times.astype("int64").to_numpy()
+            _valid = _times.notna().to_numpy()
+            if not _valid.any():
+                continue
+            # Group is already chronological. Invalid timestamps remain zero.
+            _cut = _t_ns - np.int64(_sched_days) * np.int64(86400 * 1_000_000_000)
+            _left = np.searchsorted(_t_ns, _cut, side="left")
+            _pos = np.arange(len(_idx_arr), dtype=np.int64)
+            _cnt = (_pos - _left).astype(np.int16)
+            _cnt[~_valid] = 0
+            _sched_counts[_idx_arr] = _cnt
+        tg[_sched_col] = _sched_counts.astype("int16")
+
+    tg["Is_B2B_System"] = (
+        pd.to_numeric(tg["Days_Since_Last_Game_System"], errors="coerce").le(1.0)
+        & pd.to_numeric(tg["Days_Since_Last_Game_System"], errors="coerce").notna()
+    ).astype("int8")
+    tg["Is_3in4_System"] = (
+        pd.to_numeric(tg["Games_Last_4_Days_System"], errors="coerce").ge(2)
+    ).astype("int8")
+
     # Exact consecutive streaks, not rolling counts.
     tg["SU_Win_Streak_Prior"] = _sys_consecutive_prior(tg, "SU_Win", grp)
     tg["SU_Loss_Streak_Prior"] = _sys_consecutive_prior(tg, "SU_Loss", grp)
@@ -11718,6 +11748,8 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         "WinPct_Prior_System", "SU_Win_Streak_Prior", "SU_Loss_Streak_Prior",
         "SU_Win_Streak_Entering_Previous_Game",
         "ATS_Win_Streak_Prior", "ATS_Loss_Streak_Prior", "Days_Since_Last_Game_System",
+        "Games_Last_2_Days_System", "Games_Last_4_Days_System", "Games_Last_7_Days_System",
+        "Is_B2B_System", "Is_3in4_System", "BigAl_Context_Had_Bye_Proxy",
         "Prev_SU_Win", "Prev_SU_Loss", "Prev_SU_Margin", "Prev_Points_For", "Prev_Points_Against",
         "Prev_ATS_Win", "Prev_ATS_Loss", "Prev_ATS_Cover_Margin", "Prev2_SU_Win", "Prev2_SU_Loss",
         "Prev2_ATS_Win", "Prev2_ATS_Loss", "Prev2_ATS_Cover_Margin",
@@ -12578,11 +12610,28 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
             "SU_Win_Streak_Prior", "SU_Loss_Streak_Prior", "ATS_Win_Streak_Prior", "ATS_Loss_Streak_Prior",
             "WinPct_Prior_System", "Team_Game_Number", "Immediate_Rematch_Flag", "Season_H2H_Meeting_Number",
             "First_Meeting_Actual_Total_Prior", "Dog_Rate_Last10_Prior", "Road_Favorite_ROI_Prior",
-            "Revenge_Flag_Current", "Days_Since_Last_Game_System",
+            "Revenge_Flag_Current",
+            "Days_Since_Last_Game_System", "Opp_Days_Since_Last_Game_System",
+            "Games_Last_2_Days_System", "Opp_Games_Last_2_Days_System",
+            "Games_Last_4_Days_System", "Opp_Games_Last_4_Days_System",
+            "Games_Last_7_Days_System", "Opp_Games_Last_7_Days_System",
+            "Is_B2B_System", "Opp_Is_B2B_System",
+            "Is_3in4_System", "Opp_Is_3in4_System",
+            "Opp_BigAl_Context_Had_Bye_Proxy",
             *PATHI_BIGAL_ADDITIONAL_MODEL_FEATURES,
         })
     ]
     stmap = state[keep].drop_duplicates(["Sport", "Game_Key", "Team"], keep="last")
+
+    # The scoring/live view can already contain older Pathi/BigAl/System/Brain-adjacent
+    # state columns. Never create stale *_x/*_y copies; the freshly rebuilt team-game
+    # state is canonical and leakage-safe.
+    _join_keys = {"Sport", "Game_Key", "Team"}
+    _state_payload = [c for c in stmap.columns if c not in _join_keys]
+    _overlap_payload = [c for c in _state_payload if c in out.columns]
+    if _overlap_payload:
+        out.drop(columns=_overlap_payload, inplace=True, errors="ignore")
+
     before = len(out)
     out = out.merge(stmap, on=["Sport", "Game_Key", "Team"], how="left", validate="many_to_one")
     if len(out) != before:
@@ -13110,10 +13159,20 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
     # two-sided current-vs-opponent evidence.  One-sided proxies (notably the
     # BigAl bye proxy) remain available as raw context but cannot manufacture a
     # directional expert vote.
-    b2b_raw = num('Is_B2B')
-    three4_raw = num('Is_3in4')
+    # Prefer canonical physical team-game schedule state built by
+    # build_pathi_bigal_team_game_state(). Fall back to legacy market-grain
+    # schedule fields only when the canonical fields are unavailable.
+    days_rest = num('Days_Since_Last_Game_System')
+    if days_rest.isna().all():
+        days_rest = num('Days_Since_Last_Game')
+
+    b2b_raw = num('Is_B2B_System')
+    if b2b_raw.isna().all():
+        b2b_raw = num('Is_B2B')
+    three4_raw = num('Is_3in4_System')
+    if three4_raw.isna().all():
+        three4_raw = num('Is_3in4')
     bye_raw = num('BigAl_Context_Had_Bye_Proxy')
-    days_rest = num('Days_Since_Last_Game')
 
     def _opp_metric_from_team_rows(col, agg='median'):
         """Return opponent's same-game team metric while preserving row count/index."""
@@ -13132,37 +13191,62 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
         merged = merged.sort_values('__row_order', kind='stable')
         return pd.Series(pd.to_numeric(merged['__opp_metric'], errors='coerce').to_numpy(), index=idx, dtype='float64')
 
-    opp_b2b_raw = _opp_metric_from_team_rows('Is_B2B', agg='max')
-    opp_three4_raw = _opp_metric_from_team_rows('Is_3in4', agg='max')
-    opp_bye_raw = _opp_metric_from_team_rows('BigAl_Context_Had_Bye_Proxy', agg='max')
-    opp_days_rest = _opp_metric_from_team_rows('Days_Since_Last_Game', agg='median')
+    # Canonical opponent mirrors are attached directly by the team-game state
+    # builder. Use those first; self-join fallback is retained for backward
+    # compatibility with older saved feature frames.
+    opp_days_rest = num('Opp_Days_Since_Last_Game_System')
+    if opp_days_rest.isna().all():
+        opp_days_rest = _opp_metric_from_team_rows('Days_Since_Last_Game_System', agg='median')
+        if opp_days_rest.isna().all():
+            opp_days_rest = _opp_metric_from_team_rows('Days_Since_Last_Game', agg='median')
+
+    opp_b2b_raw = num('Opp_Is_B2B_System')
+    if opp_b2b_raw.isna().all():
+        opp_b2b_raw = _opp_metric_from_team_rows('Is_B2B_System', agg='max')
+        if opp_b2b_raw.isna().all():
+            opp_b2b_raw = _opp_metric_from_team_rows('Is_B2B', agg='max')
+
+    opp_three4_raw = num('Opp_Is_3in4_System')
+    if opp_three4_raw.isna().all():
+        opp_three4_raw = _opp_metric_from_team_rows('Is_3in4_System', agg='max')
+        if opp_three4_raw.isna().all():
+            opp_three4_raw = _opp_metric_from_team_rows('Is_3in4', agg='max')
+
+    opp_bye_raw = num('Opp_BigAl_Context_Had_Bye_Proxy')
+    if opp_bye_raw.isna().all():
+        opp_bye_raw = _opp_metric_from_team_rows('BigAl_Context_Had_Bye_Proxy', agg='max')
 
     rest_pair_ready = days_rest.notna() & opp_days_rest.notna()
     b2b_pair_ready = b2b_raw.notna() & opp_b2b_raw.notna()
     three4_pair_ready = three4_raw.notna() & opp_three4_raw.notna()
+    bye_pair_ready = bye_raw.notna() & opp_bye_raw.notna()
 
     rest_diff = (days_rest - opp_days_rest).where(rest_pair_ready)
     b2b_diff = (opp_b2b_raw - b2b_raw).where(b2b_pair_ready)
     three4_diff = (opp_three4_raw - three4_raw).where(three4_pair_ready)
+    bye_diff = (bye_raw - opp_bye_raw).where(bye_pair_ready)
 
-    # Positive signed value favors the current row/team.  Missing opponent
-    # evidence contributes nothing and cannot activate the expert.
+    # Positive signed value favors the current row/team. Football is driven
+    # primarily by rest/bye differential; high-frequency sports also use B2B
+    # and 3-in-4 stress. Missing opponent evidence contributes nothing.
     rest_component = rest_diff.clip(-4, 4).fillna(0.0) * 0.25
-    stress_component = b2b_diff.fillna(0.0) + 0.75*three4_diff.fillna(0.0)
-    sched_signed = rest_component + stress_component
+    stress_component = b2b_diff.fillna(0.0) + 0.75 * three4_diff.fillna(0.0)
+    bye_component = bye_diff.fillna(0.0) * 1.00
+    sched_signed = rest_component + stress_component + bye_component
 
     paired_directional_evidence = (
         (rest_pair_ready & rest_diff.abs().ge(1))
         | (b2b_pair_ready & b2b_diff.abs().ge(1))
         | (three4_pair_ready & three4_diff.abs().ge(1))
+        | (bye_pair_ready & bye_diff.abs().ge(1))
     )
     sched_direction = sgn(sched_signed, eps=0.10)
     sched_active = paired_directional_evidence & sched_direction.ne(0)
     sched_intensity = np.tanh(sched_signed.abs())
     install_expert('Schedule', sched_active, sched_direction, sched_intensity)
 
-    # Audit/context fields. ByeProxy remains visible, but is deliberately NOT
-    # part of the frozen Schedule expert vote until it is symmetric/reliable.
+    # Audit/context fields. ByeProxy is now symmetric because the canonical
+    # team-game state carries the opponent mirror directly.
     out['Brain_Schedule_Rest_Diff_Days'] = rest_diff.astype('float32')
     out['Brain_Schedule_Current_B2B'] = b2b_raw.fillna(0).gt(0).astype('int8')
     out['Brain_Schedule_Opp_B2B'] = opp_b2b_raw.fillna(0).gt(0).astype('int8')
