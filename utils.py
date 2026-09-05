@@ -6000,10 +6000,59 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         "three_head_plus_meta_v4_structure_stable_overlay",
         "three_head_plus_meta_v5_specialist_gated",
         "three_head_plus_meta_v5_3_specialist_calibration_wired",
+        "three_head_plus_meta_v5_6_always_on_handicapper_overlays",
     }
     if family and family not in _supported_multihead_families:
         logger.warning("⚠️ Unsupported multihead model family %s; using outcome-only fallback", family)
         return None
+
+    def _rebuild_handicapper_overlay_aggregates(src, cols, overlay_trust_map=None):
+        cols = [str(c) for c in (cols or [])]
+        needed = {
+            "Brain_Overlay_Trust_Score", "Brain_Overlay_Trust_Active_Count",
+            "Brain_Overlay_Raw_Active_Count", "Brain_Overlay_Exact_Active_Count",
+            "Brain_Overlay_Tightener_Active_Count", "Brain_Overlay_Enhancer_Active_Count",
+        }
+        if not (set(cols) & needed):
+            return src
+        exact_pathi = set(PATHI_EXACT_SIGNAL_COLS)
+        enhancers = set(BIGAL_ENHANCER_COLS)
+        aggregate_names = needed | {"BigAl_System_Count","BigAl_Tightener_Count","BigAl_Enhancer_Count","BigAl_DataReady_Count"}
+        overlay_cols=[]
+        for _c in cols:
+            if _c in exact_pathi or _c in enhancers or (_c.startswith("BigAl_") and _c.endswith("_Tightener")):
+                overlay_cols.append(_c)
+            elif (_c.startswith("BigAl_") and _c not in aggregate_names and not _c.startswith("BigAl_Context_")
+                  and not _c.endswith("_DataReady") and not _c.endswith("_Match_Ratio")
+                  and not _c.startswith("BigAl_MLB_Recent")):
+                overlay_cols.append(_c)
+        _score=np.zeros(len(src),dtype=np.float64)
+        _trusted=np.zeros(len(src),dtype=np.float64)
+        _raw=np.zeros(len(src),dtype=np.float64)
+        _exact=np.zeros(len(src),dtype=np.float64)
+        _tight=np.zeros(len(src),dtype=np.float64)
+        _enh=np.zeros(len(src),dtype=np.float64)
+        for _c in dict.fromkeys(overlay_cols):
+            _x=pd.to_numeric(src[_c],errors="coerce").fillna(0.0).to_numpy(dtype=np.float64) if _c in src.columns else np.zeros(len(src),dtype=np.float64)
+            _on=(np.abs(_x)>0.5).astype(np.float64)
+            _raw += _on
+            if _c in exact_pathi or (_c.startswith("BigAl_") and _c not in enhancers and not _c.endswith("_Tightener")):
+                _exact += _on
+            elif _c in enhancers:
+                _enh += _on
+            elif _c.startswith("BigAl_") and _c.endswith("_Tightener"):
+                _tight += _on
+            _tv=float((overlay_trust_map or {}).get(_c,0.0) or 0.0)
+            if np.isfinite(_tv) and _tv>0:
+                _score += _on*_tv
+                _trusted += _on
+        src["Brain_Overlay_Trust_Score"]=_score.astype("float32")
+        src["Brain_Overlay_Trust_Active_Count"]=_trusted.astype("float32")
+        src["Brain_Overlay_Raw_Active_Count"]=_raw.astype("float32")
+        src["Brain_Overlay_Exact_Active_Count"]=_exact.astype("float32")
+        src["Brain_Overlay_Tightener_Active_Count"]=_tight.astype("float32")
+        src["Brain_Overlay_Enhancer_Active_Count"]=_enh.astype("float32")
+        return src
 
     n = len(df_rows)
     p_outcome = np.asarray(p_outcome, dtype=np.float64).reshape(-1)
@@ -6015,18 +6064,7 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         if not cols:
             return None
         src = df_rows.copy()
-        if overlay_trust_map and any(c in cols for c in ("Brain_Overlay_Trust_Score","Brain_Overlay_Trust_Active_Count")):
-            _score=np.zeros(len(src),dtype=np.float64)
-            _active=np.zeros(len(src),dtype=np.float64)
-            for _c,_tv in (overlay_trust_map or {}).items():
-                if _c not in src.columns:
-                    continue
-                _x=pd.to_numeric(src[_c],errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-                _on=(np.abs(_x)>0.5).astype(np.float64)
-                _score += _on*float(_tv)
-                _active += _on
-            src["Brain_Overlay_Trust_Score"]=_score.astype("float32")
-            src["Brain_Overlay_Trust_Active_Count"]=_active.astype("float32")
+        src = _rebuild_handicapper_overlay_aggregates(src, cols, overlay_trust_map)
         x = src.reindex(columns=cols).copy()
         missing = [c for c in cols if c not in df_rows.columns]
         if missing:
@@ -9936,21 +9974,40 @@ def apply_blended_sharp_score(
             feature_cols = [str(c) for c in dict.fromkeys(feature_cols) if c is not None]
             logger.info("🔧 %s: using %d feature cols", mkt.upper(), len(feature_cols))
         
-            # V11.5.4: reconstruct shrunk overlay-trust aggregate exactly as training.
+            # V11.5.6: reconstruct always-on handicapper overlay aggregates exactly as training.
             _cfg = bundle.get("multihead_config") or {} if isinstance(bundle, dict) else {}
             _otm = _cfg.get("overlay_trust_map_outcome") or {}
-            if _otm and any(c in feature_cols for c in ("Brain_Overlay_Trust_Score","Brain_Overlay_Trust_Active_Count")):
-                _score=np.zeros(len(df_canon),dtype=np.float64)
-                _active=np.zeros(len(df_canon),dtype=np.float64)
-                for _c,_tv in _otm.items():
-                    if _c not in df_canon.columns:
-                        continue
-                    _x=pd.to_numeric(df_canon[_c],errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-                    _on=(np.abs(_x)>0.5).astype(np.float64)
-                    _score += _on*float(_tv)
-                    _active += _on
+            _need_overlay = any(c in feature_cols for c in (
+                "Brain_Overlay_Trust_Score","Brain_Overlay_Trust_Active_Count",
+                "Brain_Overlay_Raw_Active_Count","Brain_Overlay_Exact_Active_Count",
+                "Brain_Overlay_Tightener_Active_Count","Brain_Overlay_Enhancer_Active_Count",
+            ))
+            if _need_overlay:
+                _exact_pathi=set(PATHI_EXACT_SIGNAL_COLS); _enhancers=set(BIGAL_ENHANCER_COLS)
+                _aggregate_names={"Brain_Overlay_Trust_Score","Brain_Overlay_Trust_Active_Count","Brain_Overlay_Raw_Active_Count","Brain_Overlay_Exact_Active_Count","Brain_Overlay_Tightener_Active_Count","Brain_Overlay_Enhancer_Active_Count","BigAl_System_Count","BigAl_Tightener_Count","BigAl_Enhancer_Count","BigAl_DataReady_Count"}
+                _overlay_cols=[]
+                for _c in feature_cols:
+                    if _c in _exact_pathi or _c in _enhancers or (_c.startswith("BigAl_") and _c.endswith("_Tightener")):
+                        _overlay_cols.append(_c)
+                    elif (_c.startswith("BigAl_") and _c not in _aggregate_names and not _c.startswith("BigAl_Context_") and not _c.endswith("_DataReady") and not _c.endswith("_Match_Ratio") and not _c.startswith("BigAl_MLB_Recent")):
+                        _overlay_cols.append(_c)
+                _score=np.zeros(len(df_canon),dtype=np.float64); _trusted=np.zeros(len(df_canon),dtype=np.float64)
+                _raw=np.zeros(len(df_canon),dtype=np.float64); _exact=np.zeros(len(df_canon),dtype=np.float64)
+                _tight=np.zeros(len(df_canon),dtype=np.float64); _enh=np.zeros(len(df_canon),dtype=np.float64)
+                for _c in dict.fromkeys(_overlay_cols):
+                    _x=pd.to_numeric(df_canon[_c],errors="coerce").fillna(0.0).to_numpy(dtype=np.float64) if _c in df_canon.columns else np.zeros(len(df_canon),dtype=np.float64)
+                    _on=(np.abs(_x)>0.5).astype(np.float64); _raw += _on
+                    if _c in _exact_pathi or (_c.startswith("BigAl_") and _c not in _enhancers and not _c.endswith("_Tightener")): _exact += _on
+                    elif _c in _enhancers: _enh += _on
+                    elif _c.startswith("BigAl_") and _c.endswith("_Tightener"): _tight += _on
+                    _tv=float((_otm or {}).get(_c,0.0) or 0.0)
+                    if np.isfinite(_tv) and _tv>0: _score += _on*_tv; _trusted += _on
                 df_canon["Brain_Overlay_Trust_Score"]=_score.astype("float32")
-                df_canon["Brain_Overlay_Trust_Active_Count"]=_active.astype("float32")
+                df_canon["Brain_Overlay_Trust_Active_Count"]=_trusted.astype("float32")
+                df_canon["Brain_Overlay_Raw_Active_Count"]=_raw.astype("float32")
+                df_canon["Brain_Overlay_Exact_Active_Count"]=_exact.astype("float32")
+                df_canon["Brain_Overlay_Tightener_Active_Count"]=_tight.astype("float32")
+                df_canon["Brain_Overlay_Enhancer_Active_Count"]=_enh.astype("float32")
 
             # ---- ensure every feature exists & is numeric
             # ---- ensure every feature exists & is numeric (handles category dtypes)
@@ -10715,7 +10772,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.5.1-meta-oof-coverage"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.6-always-on-handicapper-overlays"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
