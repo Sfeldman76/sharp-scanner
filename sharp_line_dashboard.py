@@ -1,4 +1,4 @@
-# V11.2: Expert Active/Direction/Intensity layer + Pathi/BigAl/Brain integrity audit
+# V11.4: Expert Active/Direction/Intensity layer + Pathi/BigAl/Brain integrity audit
 
 import streamlit as st
 import time  # keep only if you use it elsewhere
@@ -404,7 +404,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-04-v11.1-ai-brain-wired-targetsafe"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-04-v11.4-brain-summary-schedule-audit"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -3181,16 +3181,73 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
     install_expert('Form', form_active, form_direction, form_intensity)
 
     # ------------------------------------------------------------------
-    # 8) SCHEDULE expert state: explicit stress/rest flags only.
+    # 8) SCHEDULE expert state: symmetric current-vs-opponent rest/stress.
+    #
+    # +1 = schedule/rest edge supports the current row/team
+    # -1 = schedule/rest edge hurts the current row/team
+    #  0 = no meaningful schedule opinion
+    #
+    # Opponent state is recovered from the paired team rows for the same game.
+    # This keeps the expert two-sided without inventing unavailable travel data.
     # ------------------------------------------------------------------
     b2b = flag('Is_B2B')
     three4 = flag('Is_3in4')
     bye = flag('BigAl_Context_Had_Bye_Proxy')
-    sched_signed = bye.astype(float) - b2b.astype(float) - 0.75*three4.astype(float)
-    sched_active = b2b.eq(1) | three4.eq(1) | bye.eq(1)
-    sched_direction = sgn(sched_signed)
+    days_rest = num('Days_Since_Last_Game')
+
+    def _opp_metric_from_team_rows(col, agg='median'):
+        """Return opponent's same-game team metric while preserving row count/index."""
+        if col not in out.columns or not {'Sport','Game_Key','Team','Opponent'}.issubset(out.columns):
+            return pd.Series(np.nan, index=idx, dtype='float64')
+        base = out[['Sport','Game_Key','Team',col]].copy()
+        base[col] = pd.to_numeric(base[col], errors='coerce')
+        if agg == 'max':
+            base = base.groupby(['Sport','Game_Key','Team'], dropna=False, as_index=False)[col].max()
+        else:
+            base = base.groupby(['Sport','Game_Key','Team'], dropna=False, as_index=False)[col].median()
+        base = base.rename(columns={'Team':'Opponent', col:'__opp_metric'})
+        left = out[['Sport','Game_Key','Opponent']].copy()
+        left['__row_order'] = np.arange(len(left))
+        merged = left.merge(base, on=['Sport','Game_Key','Opponent'], how='left', sort=False)
+        merged = merged.sort_values('__row_order', kind='stable')
+        return pd.Series(pd.to_numeric(merged['__opp_metric'], errors='coerce').to_numpy(), index=idx, dtype='float64')
+
+    opp_b2b = _opp_metric_from_team_rows('Is_B2B', agg='max').fillna(0).eq(1)
+    opp_three4 = _opp_metric_from_team_rows('Is_3in4', agg='max').fillna(0).eq(1)
+    opp_bye = _opp_metric_from_team_rows('BigAl_Context_Had_Bye_Proxy', agg='max').fillna(0).eq(1)
+    opp_days_rest = _opp_metric_from_team_rows('Days_Since_Last_Game', agg='median')
+    rest_diff = days_rest - opp_days_rest
+
+    # One extra rest day is meaningful; cap large gaps so bye-like gaps do not
+    # overwhelm the explicit bye/stress indicators.
+    rest_component = rest_diff.clip(-4, 4).fillna(0) * 0.25
+    stress_component = (
+        opp_b2b.astype(float) - b2b.astype(float)
+        + 0.75*(opp_three4.astype(float) - three4.astype(float))
+        + 0.75*(bye.astype(float) - opp_bye.astype(float))
+    )
+    sched_signed = rest_component + stress_component
+    sched_active = (
+        rest_diff.abs().ge(1).fillna(False)
+        | b2b.eq(1) | three4.eq(1) | bye.eq(1)
+        | opp_b2b | opp_three4 | opp_bye
+    )
+    sched_direction = sgn(sched_signed, eps=0.10)
+    # Do not call an expert active if opposing schedule effects cancel to neutral.
+    sched_active = sched_active & sched_direction.ne(0)
     sched_intensity = np.tanh(sched_signed.abs())
     install_expert('Schedule', sched_active, sched_direction, sched_intensity)
+
+    # Audit-only source fields. They are intentionally Brain-prefixed so they
+    # remain visible to diagnostics, but excluded from learned trust until data
+    # supports their value independently.
+    out['Brain_Schedule_Rest_Diff_Days'] = rest_diff.astype('float32')
+    out['Brain_Schedule_Current_B2B'] = b2b.astype('int8')
+    out['Brain_Schedule_Opp_B2B'] = opp_b2b.astype('int8')
+    out['Brain_Schedule_Current_3in4'] = three4.astype('int8')
+    out['Brain_Schedule_Opp_3in4'] = opp_three4.astype('int8')
+    out['Brain_Schedule_Current_ByeProxy'] = bye.astype('int8')
+    out['Brain_Schedule_Opp_ByeProxy'] = opp_bye.astype('int8')
 
     # ------------------------------------------------------------------
     # 9) PRICE/VALUE expert state. Direction comes from explicit mispricing.
@@ -3218,9 +3275,12 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
     active_cols = [f'Brain_Expert_{n}_Active' for n in expert_names]
     ex = out[intensity_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
     ac = out[active_cols].apply(pd.to_numeric, errors='coerce').fillna(0).gt(0)
-    ex_active = ex.where(ac)
+    # IMPORTANT: active and intensity frames have different column names.
+    # Mask positionally, not by label, otherwise pandas aligns mismatched labels
+    # and turns the entire active-intensity matrix into NaN.
+    ex_active = ex.where(ac.to_numpy())
     out['Brain_Expert_Mean_Strength'] = ex_active.mean(axis=1, skipna=True).fillna(0).astype('float32')
-    out['Brain_Expert_Max_Strength'] = ex.max(axis=1).astype('float32')
+    out['Brain_Expert_Max_Strength'] = ex.where(ac.to_numpy(), 0.0).max(axis=1).astype('float32')
     out['Brain_Expert_Dispersion'] = ex_active.std(axis=1, ddof=0, skipna=True).fillna(0).astype('float32')
     out['Brain_Expert_Active_Count'] = ac.sum(axis=1).astype('int8')
 
@@ -15686,7 +15746,7 @@ def train_sharp_model_from_bq(
             """
             try:
                 print("\n" + "="*100)
-                print(f"PATHI + BIG AL + BRAIN INTEGRITY AUDIT | V11.3 VALIDATION CLEAN | market={str(market_name).upper()} | rows={len(df_audit):,}")
+                print(f"PATHI + BIG AL + BRAIN INTEGRITY AUDIT | V11.4 SUMMARY + SCHEDULE CLEAN | market={str(market_name).upper()} | rows={len(df_audit):,}")
                 print("="*100)
 
                 def nser(c, default=0.0):
@@ -15844,6 +15904,45 @@ def train_sharp_model_from_bq(
                         print(f"{name}: active={int((a==1).sum()):,} dir(+/-/0)={int((d>0).sum()):,}/{int((d<0).sum()):,}/{int((d==0).sum()):,} intensity_mean={inten.mean():.4f} inactive_dir_bad={bad_inactive_dir} inactive_intensity_bad={bad_inactive_int} dir_domain_bad={bad_dir}")
                     else:
                         print(f"{name}: MISSING expert-state columns")
+
+                # ---------- V11.4 ensemble-summary reconstruction ----------
+                print("[PBB-AUDIT:ENSEMBLE-SUMMARY]")
+                _enames=['BigAl','Pathi','Market','Power','Form','Schedule','Price']
+                _icols=[f'Brain_Expert_{x}_Intensity' for x in _enames]
+                _acols=[f'Brain_Expert_{x}_Active' for x in _enames]
+                if all(c in df_audit.columns for c in _icols+_acols):
+                    _ex=df_audit[_icols].apply(pd.to_numeric,errors='coerce').fillna(0.0)
+                    _ac=df_audit[_acols].apply(pd.to_numeric,errors='coerce').fillna(0).gt(0)
+                    _exa=_ex.where(_ac.to_numpy())
+                    _mean=_exa.mean(axis=1,skipna=True).fillna(0)
+                    _disp=_exa.std(axis=1,ddof=0,skipna=True).fillna(0)
+                    _max=_ex.where(_ac.to_numpy(),0.0).max(axis=1)
+                    _bad_mean=int((~np.isclose(_mean.to_numpy(float),nser('Brain_Expert_Mean_Strength').to_numpy(float),atol=1e-6,equal_nan=True)).sum())
+                    _bad_disp=int((~np.isclose(_disp.to_numpy(float),nser('Brain_Expert_Dispersion').to_numpy(float),atol=1e-6,equal_nan=True)).sum())
+                    _bad_max=int((~np.isclose(_max.to_numpy(float),nser('Brain_Expert_Max_Strength').to_numpy(float),atol=1e-6,equal_nan=True)).sum())
+                    print(f"Mean Strength reconstruction mismatch={_bad_mean} {'PASS' if _bad_mean==0 else 'FAIL'} | mean={_mean.mean():.4f}")
+                    print(f"Dispersion reconstruction mismatch={_bad_disp} {'PASS' if _bad_disp==0 else 'FAIL'} | mean={_disp.mean():.4f} max={_disp.max():.4f}")
+                    print(f"Max Strength reconstruction mismatch={_bad_max} {'PASS' if _bad_max==0 else 'FAIL'} | mean={_max.mean():.4f}")
+                else:
+                    print("Ensemble-summary reconstruction unavailable: expert state columns missing")
+
+                # ---------- V11.4 schedule-source symmetry ----------
+                print("[PBB-AUDIT:SCHEDULE-SOURCES]")
+                _sched_req=['Brain_Expert_Schedule_Active','Brain_Expert_Schedule_Direction','Brain_Expert_Schedule_Intensity']
+                if all(c in df_audit.columns for c in _sched_req):
+                    _sa=nser('Brain_Expert_Schedule_Active').eq(1)
+                    _sd=nser('Brain_Expert_Schedule_Direction')
+                    print(f"Schedule active={int(_sa.sum()):,} | positive={int((_sa&_sd.gt(0)).sum()):,} | negative={int((_sa&_sd.lt(0)).sum()):,} | active-neutral={int((_sa&_sd.eq(0)).sum()):,}")
+                    if 'Brain_Schedule_Rest_Diff_Days' in df_audit.columns:
+                        _rd=pd.to_numeric(df_audit['Brain_Schedule_Rest_Diff_Days'],errors='coerce')
+                        print(f"rest-diff available={int(_rd.notna().sum()):,} positive(>=1d)={int(_rd.ge(1).sum()):,} negative(<=-1d)={int(_rd.le(-1).sum()):,} median={_rd.median()}")
+                    for _c in ['Brain_Schedule_Current_B2B','Brain_Schedule_Opp_B2B','Brain_Schedule_Current_3in4','Brain_Schedule_Opp_3in4','Brain_Schedule_Current_ByeProxy','Brain_Schedule_Opp_ByeProxy']:
+                        if _c in df_audit.columns:
+                            print(f"{_c}={int(nser(_c).eq(1).sum()):,}")
+                    _sym_ok = int((_sa&_sd.lt(0)).sum()) > 0 or int((_sa&_sd.gt(0)).sum()) == 0
+                    print(f"schedule two-sided evidence={'PASS' if _sym_ok else 'WARN'}")
+                else:
+                    print("Schedule-source audit unavailable: expert state columns missing")
 
                 # Direct raw->Brain activation reconciliation.
                 print("[PBB-AUDIT:CROSS-LAYER]")
