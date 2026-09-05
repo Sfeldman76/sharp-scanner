@@ -404,7 +404,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-04-v11.5-brain-frozen"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.2-schedule-holdout-stability"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -1503,6 +1503,36 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         tg.groupby(grp, sort=False)["Game_Start"].diff().dt.total_seconds().div(86400.0)
     )
 
+    # Canonical leakage-safe schedule-density state at physical team-game grain.
+    # This belongs here (rather than market/book grain) so every team row has a
+    # true opponent-comparable schedule state. Counts include PRIOR games only.
+    for _sched_days in (2, 4, 7):
+        _sched_col = f"Games_Last_{_sched_days}_Days_System"
+        _sched_counts = np.zeros(len(tg), dtype=np.int16)
+        for _, _idx_arr in tg.groupby(grp, sort=False).indices.items():
+            _idx_arr = np.asarray(_idx_arr, dtype=np.int64)
+            _times = pd.to_datetime(tg.loc[_idx_arr, "Game_Start"], errors="coerce", utc=True)
+            _t_ns = _times.astype("int64").to_numpy()
+            _valid = _times.notna().to_numpy()
+            if not _valid.any():
+                continue
+            # Group is already chronological. Invalid timestamps remain zero.
+            _cut = _t_ns - np.int64(_sched_days) * np.int64(86400 * 1_000_000_000)
+            _left = np.searchsorted(_t_ns, _cut, side="left")
+            _pos = np.arange(len(_idx_arr), dtype=np.int64)
+            _cnt = (_pos - _left).astype(np.int16)
+            _cnt[~_valid] = 0
+            _sched_counts[_idx_arr] = _cnt
+        tg[_sched_col] = _sched_counts.astype("int16")
+
+    tg["Is_B2B_System"] = (
+        pd.to_numeric(tg["Days_Since_Last_Game_System"], errors="coerce").le(1.0)
+        & pd.to_numeric(tg["Days_Since_Last_Game_System"], errors="coerce").notna()
+    ).astype("int8")
+    tg["Is_3in4_System"] = (
+        pd.to_numeric(tg["Games_Last_4_Days_System"], errors="coerce").ge(2)
+    ).astype("int8")
+
     # Exact consecutive streaks, not rolling counts.
     tg["SU_Win_Streak_Prior"] = _sys_consecutive_prior(tg, "SU_Win", grp)
     tg["SU_Loss_Streak_Prior"] = _sys_consecutive_prior(tg, "SU_Loss", grp)
@@ -1731,6 +1761,8 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         "WinPct_Prior_System", "SU_Win_Streak_Prior", "SU_Loss_Streak_Prior",
         "SU_Win_Streak_Entering_Previous_Game",
         "ATS_Win_Streak_Prior", "ATS_Loss_Streak_Prior", "Days_Since_Last_Game_System",
+        "Games_Last_2_Days_System", "Games_Last_4_Days_System", "Games_Last_7_Days_System",
+        "Is_B2B_System", "Is_3in4_System", "BigAl_Context_Had_Bye_Proxy",
         "Prev_SU_Win", "Prev_SU_Loss", "Prev_SU_Margin", "Prev_Points_For", "Prev_Points_Against",
         "Prev_ATS_Win", "Prev_ATS_Loss", "Prev_ATS_Cover_Margin", "Prev2_SU_Win", "Prev2_SU_Loss",
         "Prev2_ATS_Win", "Prev2_ATS_Loss", "Prev2_ATS_Cover_Margin",
@@ -2595,7 +2627,14 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
             "SU_Win_Streak_Prior", "SU_Loss_Streak_Prior", "ATS_Win_Streak_Prior", "ATS_Loss_Streak_Prior",
             "WinPct_Prior_System", "Team_Game_Number", "Immediate_Rematch_Flag", "Season_H2H_Meeting_Number",
             "First_Meeting_Actual_Total_Prior", "Dog_Rate_Last10_Prior", "Road_Favorite_ROI_Prior",
-            "Revenge_Flag_Current", "Days_Since_Last_Game_System",
+            "Revenge_Flag_Current",
+            "Days_Since_Last_Game_System", "Opp_Days_Since_Last_Game_System",
+            "Games_Last_2_Days_System", "Opp_Games_Last_2_Days_System",
+            "Games_Last_4_Days_System", "Opp_Games_Last_4_Days_System",
+            "Games_Last_7_Days_System", "Opp_Games_Last_7_Days_System",
+            "Is_B2B_System", "Opp_Is_B2B_System",
+            "Is_3in4_System", "Opp_Is_3in4_System",
+            "Opp_BigAl_Context_Had_Bye_Proxy",
             *PATHI_BIGAL_ADDITIONAL_MODEL_FEATURES,
         })
     ]
@@ -3194,10 +3233,20 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
     # two-sided current-vs-opponent evidence.  One-sided proxies (notably the
     # BigAl bye proxy) remain available as raw context but cannot manufacture a
     # directional expert vote.
-    b2b_raw = num('Is_B2B')
-    three4_raw = num('Is_3in4')
+    # Prefer canonical physical team-game schedule state built by
+    # build_pathi_bigal_team_game_state(). Fall back to legacy market-grain
+    # schedule fields only when the canonical fields are unavailable.
+    days_rest = num('Days_Since_Last_Game_System')
+    if days_rest.isna().all():
+        days_rest = num('Days_Since_Last_Game')
+
+    b2b_raw = num('Is_B2B_System')
+    if b2b_raw.isna().all():
+        b2b_raw = num('Is_B2B')
+    three4_raw = num('Is_3in4_System')
+    if three4_raw.isna().all():
+        three4_raw = num('Is_3in4')
     bye_raw = num('BigAl_Context_Had_Bye_Proxy')
-    days_rest = num('Days_Since_Last_Game')
 
     def _opp_metric_from_team_rows(col, agg='median'):
         """Return opponent's same-game team metric while preserving row count/index."""
@@ -3216,37 +3265,62 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
         merged = merged.sort_values('__row_order', kind='stable')
         return pd.Series(pd.to_numeric(merged['__opp_metric'], errors='coerce').to_numpy(), index=idx, dtype='float64')
 
-    opp_b2b_raw = _opp_metric_from_team_rows('Is_B2B', agg='max')
-    opp_three4_raw = _opp_metric_from_team_rows('Is_3in4', agg='max')
-    opp_bye_raw = _opp_metric_from_team_rows('BigAl_Context_Had_Bye_Proxy', agg='max')
-    opp_days_rest = _opp_metric_from_team_rows('Days_Since_Last_Game', agg='median')
+    # Canonical opponent mirrors are attached directly by the team-game state
+    # builder. Use those first; self-join fallback is retained for backward
+    # compatibility with older saved feature frames.
+    opp_days_rest = num('Opp_Days_Since_Last_Game_System')
+    if opp_days_rest.isna().all():
+        opp_days_rest = _opp_metric_from_team_rows('Days_Since_Last_Game_System', agg='median')
+        if opp_days_rest.isna().all():
+            opp_days_rest = _opp_metric_from_team_rows('Days_Since_Last_Game', agg='median')
+
+    opp_b2b_raw = num('Opp_Is_B2B_System')
+    if opp_b2b_raw.isna().all():
+        opp_b2b_raw = _opp_metric_from_team_rows('Is_B2B_System', agg='max')
+        if opp_b2b_raw.isna().all():
+            opp_b2b_raw = _opp_metric_from_team_rows('Is_B2B', agg='max')
+
+    opp_three4_raw = num('Opp_Is_3in4_System')
+    if opp_three4_raw.isna().all():
+        opp_three4_raw = _opp_metric_from_team_rows('Is_3in4_System', agg='max')
+        if opp_three4_raw.isna().all():
+            opp_three4_raw = _opp_metric_from_team_rows('Is_3in4', agg='max')
+
+    opp_bye_raw = num('Opp_BigAl_Context_Had_Bye_Proxy')
+    if opp_bye_raw.isna().all():
+        opp_bye_raw = _opp_metric_from_team_rows('BigAl_Context_Had_Bye_Proxy', agg='max')
 
     rest_pair_ready = days_rest.notna() & opp_days_rest.notna()
     b2b_pair_ready = b2b_raw.notna() & opp_b2b_raw.notna()
     three4_pair_ready = three4_raw.notna() & opp_three4_raw.notna()
+    bye_pair_ready = bye_raw.notna() & opp_bye_raw.notna()
 
     rest_diff = (days_rest - opp_days_rest).where(rest_pair_ready)
     b2b_diff = (opp_b2b_raw - b2b_raw).where(b2b_pair_ready)
     three4_diff = (opp_three4_raw - three4_raw).where(three4_pair_ready)
+    bye_diff = (bye_raw - opp_bye_raw).where(bye_pair_ready)
 
-    # Positive signed value favors the current row/team.  Missing opponent
-    # evidence contributes nothing and cannot activate the expert.
+    # Positive signed value favors the current row/team. Football is driven
+    # primarily by rest/bye differential; high-frequency sports also use B2B
+    # and 3-in-4 stress. Missing opponent evidence contributes nothing.
     rest_component = rest_diff.clip(-4, 4).fillna(0.0) * 0.25
-    stress_component = b2b_diff.fillna(0.0) + 0.75*three4_diff.fillna(0.0)
-    sched_signed = rest_component + stress_component
+    stress_component = b2b_diff.fillna(0.0) + 0.75 * three4_diff.fillna(0.0)
+    bye_component = bye_diff.fillna(0.0) * 1.00
+    sched_signed = rest_component + stress_component + bye_component
 
     paired_directional_evidence = (
         (rest_pair_ready & rest_diff.abs().ge(1))
         | (b2b_pair_ready & b2b_diff.abs().ge(1))
         | (three4_pair_ready & three4_diff.abs().ge(1))
+        | (bye_pair_ready & bye_diff.abs().ge(1))
     )
     sched_direction = sgn(sched_signed, eps=0.10)
     sched_active = paired_directional_evidence & sched_direction.ne(0)
     sched_intensity = np.tanh(sched_signed.abs())
     install_expert('Schedule', sched_active, sched_direction, sched_intensity)
 
-    # Audit/context fields. ByeProxy remains visible, but is deliberately NOT
-    # part of the frozen Schedule expert vote until it is symmetric/reliable.
+    # Audit/context fields. ByeProxy is now symmetric because the canonical
+    # team-game state carries the opponent mirror directly.
     out['Brain_Schedule_Rest_Diff_Days'] = rest_diff.astype('float32')
     out['Brain_Schedule_Current_B2B'] = b2b_raw.fillna(0).gt(0).astype('int8')
     out['Brain_Schedule_Opp_B2B'] = opp_b2b_raw.fillna(0).gt(0).astype('int8')
@@ -5800,6 +5874,8 @@ def holdout_by_percent_groups(
     min_train_games: int = 25,
     min_hold_games: int = 8,
     ensure_label_diversity: bool = True,
+    adaptive_shrink: bool = False,
+    embargo: pd.Timedelta | str | None = None,
 ):
     """
     Time-forward holdout by last % of GROUPS (e.g., Game_Key).
@@ -5815,17 +5891,32 @@ def holdout_by_percent_groups(
 
 
     # ---- sport-defaults ----
+    # Outer holdout is intentionally larger than the legacy slice.  It is the
+    # completely untouched, latest-in-time evaluation window; AutoFS, flips,
+    # calibration choice, and meta weighting never see these labels.
     SPORT_HOLDOUT_PCT = {
-        "NFL": 0.10,
-        "NCAAF": 0.10,
-        "NBA": 0.18,
-        "WNBA": 0.10,
-        "NHL": 0.15,
-        "MLB": 0.12,
-        "MLS": 0.15,
-        "CFL": 0.10,
-        "NCAAB": 0.18,
-        "DEFAULT": 0.15,
+        "NFL": 0.15,
+        "NCAAF": 0.15,
+        "NBA": 0.20,
+        "WNBA": 0.15,
+        "NHL": 0.18,
+        "MLB": 0.15,
+        "MLS": 0.18,
+        "CFL": 0.15,
+        "NCAAB": 0.20,
+        "DEFAULT": 0.18,
+    }
+    SPORT_HOLDOUT_EMBARGO = {
+        "NFL": pd.Timedelta("48 hours"),
+        "NCAAF": pd.Timedelta("48 hours"),
+        "NBA": pd.Timedelta("18 hours"),
+        "WNBA": pd.Timedelta("18 hours"),
+        "NHL": pd.Timedelta("12 hours"),
+        "MLB": pd.Timedelta("8 hours"),
+        "MLS": pd.Timedelta("24 hours"),
+        "CFL": pd.Timedelta("36 hours"),
+        "NCAAB": pd.Timedelta("18 hours"),
+        "DEFAULT": pd.Timedelta("24 hours"),
     }
 
     key = (sport or "DEFAULT").upper().strip()
@@ -5835,6 +5926,10 @@ def holdout_by_percent_groups(
     if pct_holdout is None:
         pct_holdout = float(SPORT_HOLDOUT_PCT.get(key, SPORT_HOLDOUT_PCT["DEFAULT"]))
     pct_holdout = float(np.clip(pct_holdout, 0.05, 0.50))
+    embargo_td = (
+        SPORT_HOLDOUT_EMBARGO.get(key, SPORT_HOLDOUT_EMBARGO["DEFAULT"])
+        if embargo is None else pd.Timedelta(embargo)
+    )
 
     # ---- validate lengths (NO silent truncation) ----
     groups = np.asarray(groups)
@@ -5905,9 +6000,14 @@ def holdout_by_percent_groups(
     if n_groups == 0:
         return np.array([], dtype=int), np.array([], dtype=int)
 
-    # ---- adaptive shrink: as you have more groups, hold out slightly less ----
-    shrink = 0.03 * (1.0 - np.exp(-n_groups / 250.0))
-    pct_eff = float(np.clip(pct_holdout - shrink, 0.05, 0.35))
+    # Keep the outer test size fixed by default.  The old adaptive shrink made
+    # large datasets use a surprisingly small test set (e.g. ~5-7%), which made
+    # decile hit-rate/calibration tables unnecessarily noisy.
+    if adaptive_shrink:
+        shrink = 0.03 * (1.0 - np.exp(-n_groups / 250.0))
+        pct_eff = float(np.clip(pct_holdout - shrink, 0.05, 0.35))
+    else:
+        pct_eff = float(np.clip(pct_holdout, 0.05, 0.50))
 
     # ---- choose #hold groups with bounds ----
     min_train_groups = max(1, int(min_train_games))
@@ -5966,6 +6066,27 @@ def holdout_by_percent_groups(
                 kk += 1
                 hg = gmeta["group"].iloc[-kk:].to_numpy()
                 train_idx, hold_idx = _idx_from_hold_groups(hg)
+
+    # ---- strict outer embargo ----
+    # Remove training games too close to the first holdout game.  This makes the
+    # outer test mimic a real future deployment boundary and prevents adjacent
+    # games/snapshots from straddling the selection/evaluation boundary.
+    if hold_idx.size > 0 and embargo_td > pd.Timedelta(0):
+        hold_group_names = pd.unique(df_rows.loc[hold_idx, "group"]).astype(str)
+        hold_meta = gmeta[gmeta["group"].isin(hold_group_names)]
+        hold_start = hold_meta["start"].min()
+        if pd.notna(hold_start):
+            cutoff = hold_start - embargo_td
+            safe_train_groups = gmeta.loc[
+                (~gmeta["group"].isin(hold_group_names)) & (gmeta["end"] < cutoff),
+                "group",
+            ].astype(str).to_numpy()
+            train_mask = np.isin(all_groups, safe_train_groups)
+            train_idx = np.sort(np.flatnonzero(train_mask).astype(int))
+            if train_idx.size == 0:
+                raise RuntimeError(
+                    f"Outer holdout embargo removed all training rows: sport={key} embargo={embargo_td}"
+                )
 
     return np.asarray(train_idx, dtype=int), np.asarray(hold_idx, dtype=int)
 
@@ -6999,8 +7120,8 @@ def _auto_select_k_by_auc(
     debug_every=20,
 
     # --- loosen calibration guards a bit (still protects you) ---
-    max_ll_increase=0.70,         # was 0.40
-    max_brier_increase=0.18,      # was 0.10
+    max_ll_increase=0.05,         # stability guard: reject large calibration degradation
+    max_brier_increase=0.02,      # stability guard: reject large probability-error degradation
 
     orient_features=False,
     enable_feature_flips=False,
@@ -7178,11 +7299,10 @@ def _auto_select_k_by_auc(
     # numeric matrix once
 
     X_num_all = X.apply(pd.to_numeric, errors="coerce")
-    X_num_all = X_num_all.replace([np.inf, -np.inf], np.nan)
-    
-    med = X_num_all.median(numeric_only=True)
-    X_num_all = X_num_all.fillna(med).fillna(0.0)
-    
+    X_num_all = X_num_all.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    # Match production scoring exactly: missing features are neutral zero.
+    # This avoids train/deploy preprocessing drift and uses no future covariate
+    # distribution information.
     X_all_mat = X_num_all.to_numpy(dtype=np.float32, copy=False)
     col_ix = {c: i for i, c in enumerate(X_num_all.columns)}
 
@@ -7294,6 +7414,7 @@ def _auto_select_k_by_auc(
     def _cv_eval_full_metrics(X_mat, folds_use, *, early_stop_rounds=None):
         eps2 = 1e-7
         oof = np.full(n, np.nan, dtype=np.float32)
+        fold_aucs, fold_lls, fold_briers, fold_scores = [], [], [], []
 
         if use_xgb:
             import xgboost as xgb  # noqa
@@ -7326,17 +7447,28 @@ def _auto_select_k_by_auc(
 
         for tr_idx, va_idx in folds_use:
             proba = np.asarray(_fit_predict(tr_idx, va_idx), float).ravel()
-            oof[va_idx] = np.clip(proba, eps2, 1 - eps2).astype(np.float32, copy=False)
+            proba = np.clip(proba, eps2, 1 - eps2)
+            oof[va_idx] = proba.astype(np.float32, copy=False)
+            yy = y_arr[va_idx]
+            if len(yy) >= 2 and np.unique(yy).size >= 2:
+                fa = float(roc_auc_score(yy, proba))
+                fl = float(log_loss(yy, proba, labels=[0, 1]))
+                fb = float(np.mean((proba - yy) ** 2))
+                fs = fa - (0.15 * fl) - (0.10 * fb)
+                fold_aucs.append(fa); fold_lls.append(fl); fold_briers.append(fb); fold_scores.append(fs)
 
-        valid = np.isfinite(oof)
-        y_v = y_arr[valid]
-        p_v = np.clip(oof[valid].astype(float), eps2, 1 - eps2)
-
-        auc = roc_auc_score(y_v, p_v) if (len(y_v) >= 2 and len(np.unique(y_v)) >= 2) else np.nan
-        ll = log_loss(y_v, p_v, labels=[0, 1])
-        br = float(np.mean((p_v - y_v) ** 2))
-        score = float(auc) - (0.15 * float(ll)) - (0.10 * float(br))
-        return {"auc": float(auc), "logloss": float(ll), "brier": float(br), "score": float(score), "aborted": False}
+        # Selection is based on the MEAN OF TIME-FOLD METRICS, not pooled OOF AUC.
+        # Pooling different future blocks can create artificial ranking from regime
+        # base-rate shifts even when a feature is not consistently useful within folds.
+        auc = float(np.mean(fold_aucs)) if fold_aucs else np.nan
+        ll = float(np.mean(fold_lls)) if fold_lls else np.nan
+        br = float(np.mean(fold_briers)) if fold_briers else np.nan
+        score = float(np.mean(fold_scores)) if fold_scores else float("-inf")
+        return {
+            "auc": auc, "logloss": ll, "brier": br, "score": score,
+            "fold_aucs": list(fold_aucs), "fold_scores": list(fold_scores),
+            "aborted": False,
+        }
 
     # -------------------------
     # selection state
@@ -7361,7 +7493,35 @@ def _auto_select_k_by_auc(
     if k > 0:
         best_res = _cv_eval_full_metrics(X_work[:, :k], folds_full, early_stop_rounds=500)
     else:
-        best_res = None
+        # Neutral inner-CV baseline.  The legacy selector treated best=None as
+        # "accept the first finite feature", so one candidate was forced into
+        # every model even if it did not beat a no-feature forecast.
+        _oof0 = np.full(n, np.nan, dtype=np.float64)
+        _fa0, _fl0, _fb0, _fs0 = [], [], [], []
+        for _tr0, _va0 in folds_full:
+            _base_rate = float(np.mean(y_arr[_tr0])) if len(_tr0) else float(np.mean(y_arr))
+            _pred0 = np.full(len(_va0), np.clip(_base_rate, 1e-6, 1.0 - 1e-6), dtype=float)
+            _oof0[_va0] = _pred0
+            _yy0 = y_arr[_va0]
+            if len(_yy0) >= 2 and np.unique(_yy0).size >= 2:
+                _a0 = float(roc_auc_score(_yy0, _pred0))
+                _l0 = float(log_loss(_yy0, _pred0, labels=[0, 1]))
+                _b0 = float(np.mean((_pred0 - _yy0) ** 2))
+                _s0 = _a0 - (0.15 * _l0) - (0.10 * _b0)
+                _fa0.append(_a0); _fl0.append(_l0); _fb0.append(_b0); _fs0.append(_s0)
+        _auc0 = float(np.mean(_fa0)) if _fa0 else 0.5
+        _ll0 = float(np.mean(_fl0)) if _fl0 else float("nan")
+        _br0 = float(np.mean(_fb0)) if _fb0 else float("nan")
+        _score0 = float(np.mean(_fs0)) if _fs0 else float("-inf")
+        best_res = {
+            "auc": _auc0, "logloss": _ll0, "brier": _br0, "score": _score0,
+            "fold_aucs": list(_fa0), "fold_scores": list(_fs0), "aborted": False,
+        }
+        if verbose:
+            log_func(
+                f"[AUTO-FEAT] neutral baseline: auc={_auc0:.6f} ll={_ll0:.6f} "
+                f"brier={_br0:.6f} score={_score0:.6f}"
+            )
 
     best_val = _metric(best_res)
     best_ll  = float(best_res.get("logloss", np.nan)) if isinstance(best_res, dict) else float("nan")
@@ -7553,7 +7713,19 @@ def _auto_select_k_by_auc(
         ll_try  = float(res_try.get("logloss", np.nan))
         br_try  = float(res_try.get("brier", np.nan))
 
-        if _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br, min_improve_eff=min_improve_eff):
+        _fold_consistency_ok = True
+        _fold_positive_frac = float("nan")
+        try:
+            _try_fs = np.asarray(res_try.get("fold_scores", []), dtype=float)
+            _best_fs = np.asarray(best_res.get("fold_scores", []), dtype=float) if isinstance(best_res, dict) else np.asarray([], dtype=float)
+            if len(_try_fs) >= 3 and len(_try_fs) == len(_best_fs):
+                _fd = _try_fs - _best_fs
+                _fold_positive_frac = float(np.mean(_fd > 0.0))
+                _fold_consistency_ok = bool(_fold_positive_frac >= 0.60)
+        except Exception:
+            _fold_consistency_ok = True
+
+        if _accept_ok(val_try, best_val, ll_try, best_ll, br_try, best_br, min_improve_eff=min_improve_eff) and _fold_consistency_ok:
             accepted.append(feat)
             accepted_set.add(feat)
             k += 1
@@ -7574,6 +7746,10 @@ def _auto_select_k_by_auc(
                 log_func(f"[AUTO-FEAT] ✅ accept +{feat}{tag} -> {accept_metric}={best_val:.6f} k={len(accepted)}")
         else:
             rejects_in_row += 1
+            if verbose and np.isfinite(_fold_positive_frac) and not _fold_consistency_ok:
+                log_func(
+                    f"[AUTO-FEAT] reject +{feat}: fold-consistency={_fold_positive_frac:.0%} < 60%"
+                )
 
         if debug and (i % int(max(1, debug_every)) == 0):
             log_func(f"[AUTO-FEAT][DBG] i={i} k={len(accepted)} best_{accept_metric}={best_val:.6f}")
@@ -8033,7 +8209,7 @@ def select_features_auto(
             quick_screen=True,
             quick_folds=10,
             abort_margin_cv=-1e-6,
-            force_full_scan=True,
+            force_full_scan=False,
             time_budget_s=1e18,
             resume_state=None,
             max_total_evals=None,
@@ -15752,7 +15928,7 @@ def train_sharp_model_from_bq(
             """
             try:
                 print("\n" + "="*100)
-                print(f"PATHI + BIG AL + BRAIN INTEGRITY AUDIT | V11.5 FROZEN BRAIN | market={str(market_name).upper()} | rows={len(df_audit):,}")
+                print(f"PATHI + BIG AL + BRAIN INTEGRITY AUDIT | V11.5.2 HOLDOUT + STABILITY + SCHEDULE | market={str(market_name).upper()} | rows={len(df_audit):,}")
                 print("="*100)
 
                 def nser(c, default=0.0):
@@ -16362,7 +16538,9 @@ def train_sharp_model_from_bq(
                 errors="coerce",
             )
 
-            times_head = t_snap_head.fillna(t_game_head)
+            # Validation is about future GAMES.  Order group splits by Game_Start
+            # first; Snapshot_Timestamp is only a fallback for malformed historical rows.
+            times_head = t_game_head.fillna(t_snap_head)
             times_head = (
                 pd.Series(times_head)
                 .groupby(groups_head, sort=False)
@@ -16396,8 +16574,10 @@ def train_sharp_model_from_bq(
             y=y_full_outcome,
             pct_holdout=None,
             min_train_games=25,
-            min_hold_games=8,
+            min_hold_games=30,
             ensure_label_diversity=False,
+            adaptive_shrink=False,
+            embargo=None,
         )
 
         # situation
@@ -16424,8 +16604,10 @@ def train_sharp_model_from_bq(
                 y=y_full_situation,
                 pct_holdout=None,
                 min_train_games=25,
-                min_hold_games=8,
+                min_hold_games=30,
                 ensure_label_diversity=False,
+                adaptive_shrink=False,
+                embargo=None,
             )
 
         # value
@@ -16455,9 +16637,44 @@ def train_sharp_model_from_bq(
                 y=y_full_value_cls,
                 pct_holdout=None,
                 min_train_games=25,
-                min_hold_games=8,
+                min_hold_games=30,
                 ensure_label_diversity=False,
+                adaptive_shrink=False,
+                embargo=None,
             )
+
+        # ----------------------------
+        # OUTER HOLDOUT AUDIT — this is the untouched final test window.
+        # ----------------------------
+        def _log_outer_holdout(head_name, df_head, groups_head, times_head, y_all, tr_idx, ho_idx):
+            tr_idx = np.asarray(tr_idx, dtype=int)
+            ho_idx = np.asarray(ho_idx, dtype=int)
+            t_all = pd.to_datetime(times_head, utc=True, errors="coerce")
+            tr_t = t_all[tr_idx] if tr_idx.size else pd.DatetimeIndex([])
+            ho_t = t_all[ho_idx] if ho_idx.size else pd.DatetimeIndex([])
+            train_end = tr_t.max() if len(tr_t) else pd.NaT
+            hold_start = ho_t.min() if len(ho_t) else pd.NaT
+            strict = bool(pd.notna(train_end) and pd.notna(hold_start) and train_end < hold_start)
+            gap_h = ((hold_start - train_end).total_seconds() / 3600.0) if strict else float("nan")
+            yv = np.asarray(y_all)
+            train_rate = float(np.mean(yv[tr_idx])) if tr_idx.size else float("nan")
+            hold_rate = float(np.mean(yv[ho_idx])) if ho_idx.size else float("nan")
+            print(
+                f"[OUTER-HOLDOUT:{head_name}] train_rows={tr_idx.size:,} hold_rows={ho_idx.size:,} "
+                f"hold_pct={100.0*ho_idx.size/max(1,len(yv)):.2f}% "
+                f"train_groups={pd.unique(np.asarray(groups_head)[tr_idx]).size:,} "
+                f"hold_groups={pd.unique(np.asarray(groups_head)[ho_idx]).size:,} "
+                f"train_end={train_end} hold_start={hold_start} gap_hours={gap_h:.1f} "
+                f"train_pos={train_rate:.4f} hold_pos={hold_rate:.4f} strict_future={'PASS' if strict else 'FAIL'}"
+            )
+            if not strict:
+                raise RuntimeError(f"Outer holdout is not strictly future for head={head_name}")
+
+        _log_outer_holdout("outcome", df_full_outcome, groups_outcome, times_outcome, y_full_outcome, train_idx_outcome, hold_idx_outcome)
+        if y_full_situation is not None and train_idx_situation is not None:
+            _log_outer_holdout("situation", df_full_situation, groups_situation, times_situation, y_full_situation, train_idx_situation, hold_idx_situation)
+        if y_full_value_cls is not None and train_idx_value is not None:
+            _log_outer_holdout("value", df_full_value, groups_value, times_value, y_full_value_cls, train_idx_value, hold_idx_value)
 
         # ----------------------------
         # Outcome anchor split objects
@@ -16676,17 +16893,26 @@ def train_sharp_model_from_bq(
         rows_per_game = int(np.ceil(len(y_train) / max(1, pd.unique(g_train).size)))
         
         if sport_key in SMALL_LEAGUES:
-            target_games = 10
-            min_val_size = max(12, target_games * rows_per_game)
+            target_games = 12
+            min_val_size = max(18, target_games * rows_per_game)
             embargo_td = pd.Timedelta(hours=24)
         else:
-            target_games = 28
-            min_val_size = max(28, target_games * rows_per_game)
+            # Larger contiguous validation blocks reduce fold-to-fold noise and
+            # make forward feature selection less able to chase tiny local lifts.
+            target_games = 40
+            min_val_size = max(40, target_games * rows_per_game)
             _dense = sport_key in {"NBA", "MLB", "WNBA", "CFL"}
-            embargo_td = pd.Timedelta(hours=18 if _dense else 36)
+            if sport_key in {"NFL", "NCAAF"}:
+                embargo_td = pd.Timedelta(hours=48)
+            else:
+                embargo_td = pd.Timedelta(hours=24 if _dense else 36)
         
         n_groups_train = pd.unique(g_train).size
-        target_folds = 6 if n_groups_train >= 200 else (4 if n_groups_train >= 120 else 3)
+        target_folds = 5 if n_groups_train >= 200 else (4 if n_groups_train >= 120 else 3)
+        print(
+            f"[CV-STRENGTH] sport={sport_key} train_groups={n_groups_train:,} folds={target_folds} "
+            f"target_val_games={target_games} min_val_rows={min_val_size} embargo={embargo_td}"
+        )
 
         cv_outcome = PurgedGroupTimeSeriesSplit(
             n_splits=target_folds,
@@ -16733,6 +16959,7 @@ def train_sharp_model_from_bq(
             min_pos=5,
             min_neg=5,
             seed=GLOBAL_SEED,
+            allow_random_fallback=False,
         ):
             """
             Returns:
@@ -16776,8 +17003,12 @@ def train_sharp_model_from_bq(
             # (2) keep only splits with both classes in train & val
             folds = [(tr, va) for tr, va in raw if _has_min_counts(tr) and _has_min_counts(va)]
         
-            # (3) fallback if nothing usable
-            if not folds:
+            # (3) Random fallback is prohibited on normal-sized histories because it
+            # destroys the time-forward validation contract. Tiny leagues may opt in
+            # explicitly, and the log makes that downgrade visible.
+            if not folds and allow_random_fallback:
+                log_func = print
+                log_func("[CV-STRENGTH] WARNING: using random stratified fallback; history too small for purged time CV")
                 for ts in (0.20, 0.30, 0.40):
                     sss = StratifiedShuffleSplit(n_splits=1, test_size=float(ts), random_state=int(seed))
                     for tr, va in sss.split(np.zeros_like(yb), yb):
@@ -16788,7 +17019,7 @@ def train_sharp_model_from_bq(
                         break
         
             if not folds:
-                raise RuntimeError("No class-balanced CV split available (min_pos/min_neg too strict or labels too sparse).")
+                raise RuntimeError("No class-balanced PURGED TIME CV split available; refusing random fallback on this history.")
         
             # (4) pick ES fold: most balanced validation
             folds = [(np.asarray(tr, dtype=int), np.asarray(va, dtype=int)) for tr, va in folds]
@@ -16807,6 +17038,7 @@ def train_sharp_model_from_bq(
             min_pos=5,
             min_neg=5,
             seed=1337,
+            allow_random_fallback=(pd.unique(g_train).size < 80),
         )
         # ----------------------------
         # 4) AutoFS on train slice (pre-AutoFS matrices)
@@ -16900,6 +17132,85 @@ def train_sharp_model_from_bq(
        
        
       
+        def _cv_feature_stability_audit(model_proto, X_df, y, folds, feature_cols, *, head_name, repeats=3, seed=20260905):
+            """
+            Conditional feature-stability audit using only INNER-CV validation rows.
+
+            For each time-forward fold we fit the selected feature set once, then
+            permute each feature inside that fold's validation block.  The reported
+            stability is the fraction of folds where breaking that feature reduces
+            AUC.  The untouched outer holdout is never consulted.
+            """
+            from sklearn.base import clone
+            if not feature_cols:
+                return pd.DataFrame(columns=[
+                    "cv_valid_folds", "cv_positive_folds", "cv_positive_frac",
+                    "cv_auc_drop_mean", "cv_auc_drop_median", "cv_auc_drop_std", "cv_stable"
+                ])
+            yy = np.asarray(y, dtype=int).reshape(-1)
+            Xn = X_df.reindex(columns=feature_cols).apply(pd.to_numeric, errors="coerce")
+            drops = {c: [] for c in feature_cols}
+            valid_fold_count = 0
+            for fold_no, (tr, va) in enumerate(folds, start=1):
+                tr = np.asarray(tr, dtype=int); va = np.asarray(va, dtype=int)
+                if tr.size == 0 or va.size == 0 or np.unique(yy[va]).size < 2:
+                    continue
+                Xtr = Xn.iloc[tr].fillna(0.0).to_numpy(np.float32, copy=False)
+                Xva_df = Xn.iloc[va].fillna(0.0).reset_index(drop=True)
+                mdl = clone(model_proto)
+                mdl.fit(Xtr, yy[tr])
+                base_p = np.asarray(mdl.predict_proba(Xva_df.to_numpy(np.float32, copy=False)))[:, 1]
+                base_auc = roc_auc_score(yy[va], base_p)
+                if not np.isfinite(base_auc):
+                    continue
+                valid_fold_count += 1
+                for j, c in enumerate(feature_cols):
+                    vals = []
+                    base_col = Xva_df.iloc[:, j].to_numpy(copy=True)
+                    for r in range(int(max(1, repeats))):
+                        rng = np.random.RandomState(int(seed + 1009*fold_no + 97*j + r))
+                        Xp = Xva_df.to_numpy(np.float32, copy=True)
+                        Xp[:, j] = base_col[rng.permutation(len(base_col))]
+                        pp = np.asarray(mdl.predict_proba(Xp))[:, 1]
+                        try:
+                            vals.append(float(base_auc - roc_auc_score(yy[va], pp)))
+                        except Exception:
+                            pass
+                    if vals:
+                        drops[c].append(float(np.mean(vals)))
+            rows = []
+            for c in feature_cols:
+                arr = np.asarray(drops.get(c, []), dtype=float)
+                arr = arr[np.isfinite(arr)]
+                nvalid = int(arr.size)
+                npos = int((arr > 0).sum()) if nvalid else 0
+                frac = float(npos / nvalid) if nvalid else float("nan")
+                mu = float(np.mean(arr)) if nvalid else float("nan")
+                medv = float(np.median(arr)) if nvalid else float("nan")
+                sd = float(np.std(arr, ddof=1)) if nvalid > 1 else 0.0 if nvalid == 1 else float("nan")
+                stable = bool(nvalid >= 2 and frac >= 0.60 and mu > 0.0)
+                rows.append({
+                    "feature": c, "cv_valid_folds": nvalid, "cv_positive_folds": npos,
+                    "cv_positive_frac": frac, "cv_auc_drop_mean": mu,
+                    "cv_auc_drop_median": medv, "cv_auc_drop_std": sd, "cv_stable": stable,
+                })
+            sdf = pd.DataFrame(rows).set_index("feature") if rows else pd.DataFrame()
+            if not sdf.empty:
+                stable_n = int(sdf["cv_stable"].sum())
+                print(f"[FEATURE-STABILITY:{head_name}] selected={len(sdf)} stable={stable_n} valid_cv_folds={valid_fold_count}")
+                show = sdf.sort_values(["cv_stable","cv_positive_frac","cv_auc_drop_mean"], ascending=[False,False,False])
+                for c, row in show.head(25).iterrows():
+                    print(
+                        f"[FEATURE-STABILITY:{head_name}] {c}: "
+                        f"positive={int(row['cv_positive_folds'])}/{int(row['cv_valid_folds'])} "
+                        f"({float(row['cv_positive_frac']):.0%}) mean_auc_drop={float(row['cv_auc_drop_mean']):+.5f} "
+                        f"median={float(row['cv_auc_drop_median']):+.5f} stable={'YES' if bool(row['cv_stable']) else 'NO'}"
+                    )
+                unstable = show.index[~show["cv_stable"]].tolist()
+                if unstable:
+                    print(f"[FEATURE-STABILITY:{head_name}] review_unstable={unstable[:30]}")
+            return sdf
+
         def _run_head_autofs(head_name, X_df_train_head, X_df_hold_head, X_df_full_head, y_head_train, folds_head):
             if y_head_train is None:
                 st.warning(f"[AutoFS:{head_name}] skipped: y_train is None")
@@ -16974,17 +17285,20 @@ def train_sharp_model_from_bq(
                 sport_key=sport_key,
                 must_keep=[],
                 use_auc_auto=True,
-                auc_patience=300,
-                accept_metric="auc",
-                auc_min_improve=0.0,
-                topk_per_fold=200,
-                min_presence=0.50,
-                sign_flip_max=0.35,
-                corr_within=0.90,
-                corr_global=0.97,
-                max_feats_major=200,
-                max_feats_small=140,
-                flip_gain_min=0.0,
+                # Inner-CV selection is intentionally conservative.  Tiny AUC-only
+                # lifts and free orientation flips were a major multiple-testing
+                # path to overfit in the prior build.
+                auc_patience=120,
+                accept_metric="score",
+                auc_min_improve=0.0005,
+                topk_per_fold=150,
+                min_presence=0.60,
+                sign_flip_max=0.25,
+                corr_within=0.88,
+                corr_global=0.95,
+                max_feats_major=160,
+                max_feats_small=120,
+                flip_gain_min=0.00075,
                 auc_verbose=True,
                 log_func=log_func,
             )
@@ -17027,13 +17341,28 @@ def train_sharp_model_from_bq(
                         + ", ".join(f"{c}={a:.4f}" for c, a in _sus[:10])
                     )
         
-            X_train_head_df = _final_clean(X_df_train_head.reindex(columns=feat_cols_head))
-            X_hold_head_df  = _final_clean(X_df_hold_head.reindex(columns=feat_cols_head))
-            X_full_head_df  = _final_clean(X_df_full_head.reindex(columns=feat_cols_head))
+            # Strict preprocessing matches production scoring exactly: non-finite
+            # values become neutral zero on train, inner CV, outer holdout, and live
+            # inference.  No holdout-wide medians or future covariate distribution
+            # are used.
+            _tr_num = X_df_train_head.reindex(columns=feat_cols_head).apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan)
+            _ho_num = X_df_hold_head.reindex(columns=feat_cols_head).apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan)
+            _fu_num = X_df_full_head.reindex(columns=feat_cols_head).apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan)
+            X_train_head_df = _tr_num.fillna(0.0)
+            X_hold_head_df  = _ho_num.fillna(0.0)
+            X_full_head_df  = _fu_num.fillna(0.0)
+
+            stability_head = _cv_feature_stability_audit(
+                _model_proto, X_df_train_head, y_head_train, folds_head, feat_cols_head,
+                head_name=head_name, repeats=3, seed=20260905,
+            )
+            if isinstance(shap_summary_head, pd.DataFrame) and not stability_head.empty:
+                shap_summary_head = shap_summary_head.join(stability_head, how="left")
         
             return {
                 "feature_cols": list(feat_cols_head),
                 "shap_summary": shap_summary_head,
+                "feature_stability": stability_head,
                 "X_train": X_train_head_df.to_numpy(np.float32, copy=False),
                 "X_hold":  X_hold_head_df.to_numpy(np.float32, copy=False),
                 "X_full":  X_full_head_df.to_numpy(np.float32, copy=False),
@@ -17080,6 +17409,7 @@ def train_sharp_model_from_bq(
                 min_pos=5,
                 min_neg=5,
                 seed=1337,
+                allow_random_fallback=(pd.unique(g_train).size < 80),
             )
             autofs_outcome = _run_head_autofs(
                 "outcome",
@@ -17107,6 +17437,7 @@ def train_sharp_model_from_bq(
                 min_pos=5,
                 min_neg=5,
                 seed=1338,
+                allow_random_fallback=(pd.unique(g_train_situation).size < 80),
             )
             autofs_situation = _run_head_autofs(
                 "situation",
@@ -17133,6 +17464,7 @@ def train_sharp_model_from_bq(
                 min_pos=5,
                 min_neg=5,
                 seed=1339,
+                allow_random_fallback=(pd.unique(g_train_value).size < 80),
             )
             autofs_value = _run_head_autofs(
                 "value",
@@ -19037,10 +19369,8 @@ def train_sharp_model_from_bq(
         )
         
         st.markdown("#### 🎯 Outcome Calibration Table — HOLDOUT (calibrated, no prior shift)")
-        st.dataframe(
-            _cal_table_fixed_edges(y_hold.astype(int), p_cal_ho, edges_cal, eps=eps),
-            use_container_width=True
-        )
+        _tbl_outcome_hold = _cal_table_fixed_edges(y_hold.astype(int), p_cal_ho, edges_cal, eps=eps)
+        st.dataframe(_tbl_outcome_hold, use_container_width=True)
         
         edges_deploy = _make_edges(p_hold_vec, q=10, eps=eps)
         
@@ -19066,10 +19396,33 @@ def train_sharp_model_from_bq(
         )
         
         st.markdown("#### 🚀 Final Bet Score Calibration Table — HOLDOUT")
-        st.dataframe(
-            _cal_table_fixed_edges(y_hold.astype(int), final_bet_score_hold, edges_meta, eps=eps),
-            use_container_width=True
-        )
+        _tbl_meta_hold = _cal_table_fixed_edges(y_hold.astype(int), final_bet_score_hold, edges_meta, eps=eps)
+        st.dataframe(_tbl_meta_hold, use_container_width=True)
+
+        def _calibration_stability_diag(name, tbl):
+            if tbl is None or len(tbl) < 3:
+                print(f"[CAL-STABILITY:{name}] insufficient bins")
+                return
+            x = pd.to_numeric(tbl["Avg Pred P"], errors="coerce")
+            h = pd.to_numeric(tbl["Hit Rate"], errors="coerce")
+            n = pd.to_numeric(tbl["N"], errors="coerce").fillna(0)
+            ok = x.notna() & h.notna() & n.gt(0)
+            if int(ok.sum()) < 3:
+                print(f"[CAL-STABILITY:{name}] insufficient valid bins")
+                return
+            spearman = float(x[ok].corr(h[ok], method="spearman"))
+            w = n[ok].to_numpy(float); w = w / max(w.sum(), 1.0)
+            gap = np.abs(h[ok].to_numpy(float) - x[ok].to_numpy(float))
+            wmae = float(np.sum(w * gap))
+            max_gap = float(np.max(gap))
+            inversions = int(np.sum(np.diff(h[ok].to_numpy(float)) < 0))
+            print(
+                f"[CAL-STABILITY:{name}] bins={int(ok.sum())} spearman={spearman:.4f} "
+                f"weighted_bin_MAE={wmae:.4f} max_bin_gap={max_gap:.4f} inversions={inversions}"
+            )
+
+        _calibration_stability_diag("outcome_holdout", _tbl_outcome_hold)
+        _calibration_stability_diag("meta_holdout", _tbl_meta_hold)
         # -------------------------------------------------------------------
         # METRICS (always defined; prevents NameError later)
         # -------------------------------------------------------------------
@@ -19300,6 +19653,20 @@ def train_sharp_model_from_bq(
                 "value_cls_target": "realized_outcome_on_value_rows",
                 "value_reg_target": "synthetic_ex_ante_ev",
                 "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
+                "validation_contract": "outer_latest_group_holdout_15pct_plus_embargo__inner_purged_time_cv_v11_5_2",
+                "feature_stability_method": "inner_cv_validation_permutation_auc_drop_v1",
+                "feature_stability_outcome": (
+                    autofs_outcome.get("feature_stability", pd.DataFrame()).reset_index().to_dict("records")
+                    if autofs_outcome is not None else []
+                ),
+                "feature_stability_situation": (
+                    autofs_situation.get("feature_stability", pd.DataFrame()).reset_index().to_dict("records")
+                    if autofs_situation is not None else []
+                ),
+                "feature_stability_value": (
+                    autofs_value.get("feature_stability", pd.DataFrame()).reset_index().to_dict("records")
+                    if autofs_value is not None else []
+                ),
             }
 
         # -------------------------------------------------------------------
@@ -19371,6 +19738,8 @@ def train_sharp_model_from_bq(
                 "value_cls_target": "realized_outcome_on_value_rows",
                 "value_reg_target": "synthetic_ex_ante_ev",
                 "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
+                "validation_contract": "outer_latest_group_holdout_plus_embargo__inner_purged_time_cv_v11_5_2",
+                "feature_stability_method": "inner_cv_validation_permutation_auc_drop_v1",
             },
         }
         # -------------------------------------------------------------------
@@ -19417,6 +19786,8 @@ def train_sharp_model_from_bq(
                 "value_cls_target": "realized_outcome_on_value_rows",
                 "value_reg_target": "synthetic_ex_ante_ev",
                 "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
+                "validation_contract": "outer_latest_group_holdout_plus_embargo__inner_purged_time_cv_v11_5_2",
+                "feature_stability_method": "inner_cv_validation_permutation_auc_drop_v1",
                 },
             },
             calibrator=iso_blend,
