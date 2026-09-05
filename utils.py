@@ -5991,7 +5991,13 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
 
     cfg = bundle.get("multihead_config") or {}
     family = str(cfg.get("model_family", ""))
-    if family and family != "three_head_plus_meta_v1":
+    _supported_multihead_families = {
+        "three_head_plus_meta_v1",
+        "three_head_plus_meta_v3_temporal_robust_overlay",
+        "three_head_plus_meta_v4_structure_stable_overlay",
+    }
+    if family and family not in _supported_multihead_families:
+        logger.warning("⚠️ Unsupported multihead model family %s; using outcome-only fallback", family)
         return None
 
     n = len(df_rows)
@@ -5999,11 +6005,24 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
     if len(p_outcome) != n:
         return None
 
-    def _matrix(cols):
+    def _matrix(cols, overlay_trust_map=None):
         cols = [str(c) for c in (cols or [])]
         if not cols:
             return None
-        x = df_rows.reindex(columns=cols).copy()
+        src = df_rows.copy()
+        if overlay_trust_map and any(c in cols for c in ("Brain_Overlay_Trust_Score","Brain_Overlay_Trust_Active_Count")):
+            _score=np.zeros(len(src),dtype=np.float64)
+            _active=np.zeros(len(src),dtype=np.float64)
+            for _c,_tv in (overlay_trust_map or {}).items():
+                if _c not in src.columns:
+                    continue
+                _x=pd.to_numeric(src[_c],errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+                _on=(np.abs(_x)>0.5).astype(np.float64)
+                _score += _on*float(_tv)
+                _active += _on
+            src["Brain_Overlay_Trust_Score"]=_score.astype("float32")
+            src["Brain_Overlay_Trust_Active_Count"]=_active.astype("float32")
+        x = src.reindex(columns=cols).copy()
         missing = [c for c in cols if c not in df_rows.columns]
         if missing:
             sys_missing = [c for c in missing if c.startswith(("Pathi_", "BigAl_", "System_"))]
@@ -6026,7 +6045,7 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
     value_reg = np.zeros(n, dtype=np.float64)
 
     model_situation = bundle.get("model_situation_cls")
-    X_situation = _matrix(bundle.get("feature_cols_situation"))
+    X_situation = _matrix(bundle.get("feature_cols_situation"), cfg.get("overlay_trust_map_situation") or {})
     if model_situation is not None and X_situation is not None and X_situation.shape[1] > 0:
         try:
             p_situation = np.asarray(model_situation.predict_proba(X_situation)[:, 1], dtype=np.float64)
@@ -6035,7 +6054,7 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
 
     model_value_cls = bundle.get("model_value_cls")
     model_value_reg = bundle.get("model_value_reg")
-    X_value = _matrix(bundle.get("feature_cols_value"))
+    X_value = _matrix(bundle.get("feature_cols_value"), {})
     if model_value_cls is not None and X_value is not None and X_value.shape[1] > 0:
         try:
             p_value = np.asarray(model_value_cls.predict_proba(X_value)[:, 1], dtype=np.float64)
@@ -9882,10 +9901,29 @@ def apply_blended_sharp_score(
             feature_cols = [str(c) for c in dict.fromkeys(feature_cols) if c is not None]
             logger.info("🔧 %s: using %d feature cols", mkt.upper(), len(feature_cols))
         
+            # V11.5.4: reconstruct shrunk overlay-trust aggregate exactly as training.
+            _cfg = bundle.get("multihead_config") or {} if isinstance(bundle, dict) else {}
+            _otm = _cfg.get("overlay_trust_map_outcome") or {}
+            if _otm and any(c in feature_cols for c in ("Brain_Overlay_Trust_Score","Brain_Overlay_Trust_Active_Count")):
+                _score=np.zeros(len(df_canon),dtype=np.float64)
+                _active=np.zeros(len(df_canon),dtype=np.float64)
+                for _c,_tv in _otm.items():
+                    if _c not in df_canon.columns:
+                        continue
+                    _x=pd.to_numeric(df_canon[_c],errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+                    _on=(np.abs(_x)>0.5).astype(np.float64)
+                    _score += _on*float(_tv)
+                    _active += _on
+                df_canon["Brain_Overlay_Trust_Score"]=_score.astype("float32")
+                df_canon["Brain_Overlay_Trust_Active_Count"]=_active.astype("float32")
+
             # ---- ensure every feature exists & is numeric
             # ---- ensure every feature exists & is numeric (handles category dtypes)
             for c in feature_cols:
                 if c not in df_canon.columns:
+                    # V11.5.4 may intentionally persist Model_Safe_Constant when no
+                    # temporally stable global structure survives. Missing saved
+                    # features are already neutralized to zero by contract.
                     df_canon[c] = 0.0
                     continue
             
@@ -10642,7 +10680,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.6-temporal-robustness-overlay"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.4-structure-stability"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -11520,6 +11558,25 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         pd.to_numeric(tg["Games_Last_4_Days_System"], errors="coerce").ge(2)
     ).astype("int8")
 
+    # Canonical RECENT bye/extra-rest state.  The older BigAl_Context_Had_Bye_Proxy
+    # is cumulative after a missed scheduled week (Week_Number - Team_Game_Number)
+    # and therefore is useful as broad historical context but is not a valid
+    # "coming off a bye" vote.  This field is one-game-local and prior-only.
+    _week_gap_now = (
+        pd.to_numeric(tg.get("Week_Number"), errors="coerce")
+        - pd.to_numeric(tg.get("Team_Game_Number"), errors="coerce")
+    )
+    _week_gap_prev = _week_gap_now.groupby([tg[c] for c in grp], sort=False).shift(1)
+    _days_rest_sched = pd.to_numeric(tg["Days_Since_Last_Game_System"], errors="coerce")
+    _football_sched = tg["Sport"].astype(str).str.upper().isin(["NFL", "NCAAF", "CFL"])
+    tg["Had_Bye_Last_Game_System"] = (
+        _football_sched
+        & (
+            (_week_gap_now.notna() & _week_gap_prev.notna() & _week_gap_now.gt(_week_gap_prev))
+            | _days_rest_sched.ge(10.0)
+        )
+    ).astype("int8")
+
     # Exact consecutive streaks, not rolling counts.
     tg["SU_Win_Streak_Prior"] = _sys_consecutive_prior(tg, "SU_Win", grp)
     tg["SU_Loss_Streak_Prior"] = _sys_consecutive_prior(tg, "SU_Loss", grp)
@@ -11749,7 +11806,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         "SU_Win_Streak_Entering_Previous_Game",
         "ATS_Win_Streak_Prior", "ATS_Loss_Streak_Prior", "Days_Since_Last_Game_System",
         "Games_Last_2_Days_System", "Games_Last_4_Days_System", "Games_Last_7_Days_System",
-        "Is_B2B_System", "Is_3in4_System", "BigAl_Context_Had_Bye_Proxy",
+        "Is_B2B_System", "Is_3in4_System", "Had_Bye_Last_Game_System", "BigAl_Context_Had_Bye_Proxy",
         "Prev_SU_Win", "Prev_SU_Loss", "Prev_SU_Margin", "Prev_Points_For", "Prev_Points_Against",
         "Prev_ATS_Win", "Prev_ATS_Loss", "Prev_ATS_Cover_Margin", "Prev2_SU_Win", "Prev2_SU_Loss",
         "Prev2_ATS_Win", "Prev2_ATS_Loss", "Prev2_ATS_Cover_Margin",
@@ -12617,6 +12674,7 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
             "Games_Last_7_Days_System", "Opp_Games_Last_7_Days_System",
             "Is_B2B_System", "Opp_Is_B2B_System",
             "Is_3in4_System", "Opp_Is_3in4_System",
+            "Had_Bye_Last_Game_System", "Opp_Had_Bye_Last_Game_System",
             "Opp_BigAl_Context_Had_Bye_Proxy",
             *PATHI_BIGAL_ADDITIONAL_MODEL_FEATURES,
         })
@@ -12636,6 +12694,55 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
     out = out.merge(stmap, on=["Sport", "Game_Key", "Team"], how="left", validate="many_to_one")
     if len(out) != before:
         raise RuntimeError(f"Pathi/BigAl merge changed row count {before} -> {len(out)}")
+
+    # V11.5.4 schedule robustness: remap the opponent's canonical physical
+    # team-game schedule state directly from STATE rather than relying only on
+    # pre-mirrored Opp_* payloads.  This survives one-sided market slices and
+    # prevents missing opponent state from being silently interpreted as zero.
+    _sched_src_cols = [
+        "Days_Since_Last_Game_System",
+        "Games_Last_2_Days_System", "Games_Last_4_Days_System", "Games_Last_7_Days_System",
+        "Is_B2B_System", "Is_3in4_System", "Had_Bye_Last_Game_System",
+    ]
+    _sched_src_cols = [c for c in _sched_src_cols if c in state.columns]
+    if _sched_src_cols:
+        _opp_sched = (
+            state[["Sport", "Game_Key", "Team"] + _sched_src_cols]
+            .drop_duplicates(["Sport", "Game_Key", "Team"], keep="last")
+            .rename(columns={
+                "Team": "__Schedule_Opponent",
+                **{c: f"__opp_sched__{c}" for c in _sched_src_cols},
+            })
+        )
+        _team_now = out["Team"].astype(str).str.lower().str.strip()
+        _home_now = out["Home_Team_Norm"].astype(str).str.lower().str.strip()
+        _away_now = out["Away_Team_Norm"].astype(str).str.lower().str.strip()
+        out["__Schedule_Opponent"] = np.where(_team_now.eq(_home_now), _away_now, _home_now)
+        _before_sched = len(out)
+        out = out.merge(
+            _opp_sched,
+            on=["Sport", "Game_Key", "__Schedule_Opponent"],
+            how="left",
+            validate="many_to_one",
+        )
+        if len(out) != _before_sched:
+            raise RuntimeError(
+                f"Opponent schedule merge changed row count {_before_sched} -> {len(out)}"
+            )
+        for _c in _sched_src_cols:
+            _dst = f"Opp_{_c}"
+            _tmp = f"__opp_sched__{_c}"
+            _newv = pd.to_numeric(out.get(_tmp), errors="coerce")
+            if _dst in out.columns:
+                _oldv = pd.to_numeric(out[_dst], errors="coerce")
+                out[_dst] = _oldv.combine_first(_newv)
+            else:
+                out[_dst] = _newv
+        out.drop(
+            columns=["__Schedule_Opponent"] + [f"__opp_sched__{c}" for c in _sched_src_cols],
+            inplace=True,
+            errors="ignore",
+        )
 
     # Keep each named system on the market it actually recommends. This avoids,
     # for example, feeding an MLB moneyline system into the run-line model or
@@ -13172,7 +13279,11 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
     three4_raw = num('Is_3in4_System')
     if three4_raw.isna().all():
         three4_raw = num('Is_3in4')
-    bye_raw = num('BigAl_Context_Had_Bye_Proxy')
+    bye_raw = num('Had_Bye_Last_Game_System')
+    if bye_raw.isna().all():
+        # Legacy context fallback is deliberately non-directional unless
+        # an opponent value is also genuinely present.
+        bye_raw = num('BigAl_Context_Had_Bye_Proxy')
 
     def _opp_metric_from_team_rows(col, agg='median'):
         """Return opponent's same-game team metric while preserving row count/index."""
@@ -13212,9 +13323,13 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
         if opp_three4_raw.isna().all():
             opp_three4_raw = _opp_metric_from_team_rows('Is_3in4', agg='max')
 
-    opp_bye_raw = num('Opp_BigAl_Context_Had_Bye_Proxy')
+    opp_bye_raw = num('Opp_Had_Bye_Last_Game_System')
     if opp_bye_raw.isna().all():
-        opp_bye_raw = _opp_metric_from_team_rows('BigAl_Context_Had_Bye_Proxy', agg='max')
+        opp_bye_raw = _opp_metric_from_team_rows('Had_Bye_Last_Game_System', agg='max')
+    if opp_bye_raw.isna().all():
+        opp_bye_raw = num('Opp_BigAl_Context_Had_Bye_Proxy')
+        if opp_bye_raw.isna().all():
+            opp_bye_raw = _opp_metric_from_team_rows('BigAl_Context_Had_Bye_Proxy', agg='max')
 
     rest_pair_ready = days_rest.notna() & opp_days_rest.notna()
     b2b_pair_ready = b2b_raw.notna() & opp_b2b_raw.notna()
