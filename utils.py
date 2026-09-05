@@ -5993,6 +5993,7 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
     family = str(cfg.get("model_family", ""))
     _supported_multihead_families = {
         "three_head_plus_meta_v1",
+        "three_head_plus_meta_v2_leakguard",  # backward compatibility with V10/V11.x champion artifacts
         "three_head_plus_meta_v3_temporal_robust_overlay",
         "three_head_plus_meta_v4_structure_stable_overlay",
         "three_head_plus_meta_v5_specialist_gated",
