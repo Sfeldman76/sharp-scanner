@@ -403,7 +403,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-04-v11-ai-betting-brain"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-04-v11.1-ai-brain-wired-targetsafe"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -14553,6 +14553,30 @@ def train_sharp_model_from_bq(
                    
         ]
         
+        # -----------------------------------------------------------------
+        # V11.1 AI BRAIN PREDICTOR ATTACH
+        # -----------------------------------------------------------------
+        # Attach leakage-safe Brain_* predictors BEFORE the dynamic model-feature
+        # inventory is built.  The prior V11 build defined this function but called
+        # only the future-label target builder later, so Brain predictors never
+        # reached AutoFS.
+        _rows_before_brain = len(df_market)
+        df_market = add_ai_betting_brain_features(df_market)
+        if len(df_market) != _rows_before_brain:
+            raise RuntimeError(
+                f"AI Brain attach changed row count: before={_rows_before_brain:,} after={len(df_market):,}"
+            )
+        _brain_predictors_attached = [
+            c for c in df_market.columns
+            if str(c).startswith("Brain_") and not str(c).startswith("Brain_Target_")
+        ]
+        print(
+            f"[BRAIN-ATTACH] predictors={len(_brain_predictors_attached)} "
+            f"rows={len(df_market):,} rowcount=PASS"
+        )
+        if not _brain_predictors_attached:
+            raise RuntimeError("AI Brain predictor attach produced zero Brain_* predictor columns")
+
         # Add the Pathi football market-structure/role features explicitly so
         # they are visible in the training contract, then add all other numeric
         # Pathi / Big Al system fields dynamically as a forward-compatible safety net.
@@ -14756,78 +14780,205 @@ def train_sharp_model_from_bq(
                
               
         def add_ai_betting_brain_training_targets(df: pd.DataFrame) -> pd.DataFrame:
-            """Create historical close/CLV/action oracle labels from the snapshot stream.
+            """Create future-market labels only when a genuine timestamp sequence exists.
 
-            No historical model BET/PASS decision is required. Labels are reconstructed
-            from the market path that actually occurred after each snapshot.
+            Safety rules:
+              * requires a valid Snapshot_Timestamp;
+              * requires >=2 DISTINCT timestamps inside the same market/outcome/book path;
+              * every label uses strictly LATER timestamps (never the row itself or same-time rows);
+              * rows at the last timestamp receive NaN targets;
+              * if the current training slice is final-snapshot-only, targets are left NaN
+                and training continues normally without manufacturing all-PASS labels.
+
+            These are FUTURE labels and are never eligible predictor features.
             """
-            if df is None or df.empty or 'Snapshot_Timestamp' not in df.columns:
-                return df.copy() if df is not None else df
+            target_names = [
+                'Brain_Target_Close_Value',
+                'Brain_Target_Close_Odds',
+                'Brain_Target_Close_Value_Delta',
+                'Brain_Target_Close_ImpliedProb_Delta',
+                'Brain_Target_Positive_CLV',
+                'Brain_Target_Future_Best_Value',
+                'Brain_Target_Action_Oracle',
+            ]
+
+            if df is None:
+                return df
             out = df.copy()
-            if not {'Game_Key','Market','Outcome'}.issubset(out.columns):
+
+            def _blank_targets(reason: str) -> pd.DataFrame:
+                for c in target_names:
+                    out[c] = np.nan
+                print(f"[BRAIN-TARGET] SKIPPED - {reason}")
                 return out
-            out['Snapshot_Timestamp'] = pd.to_datetime(out['Snapshot_Timestamp'], errors='coerce', utc=True)
-            keys = ['Game_Key','Market','Outcome'] + (['Bookmaker'] if 'Bookmaker' in out.columns else [])
+
+            required = {'Game_Key', 'Market', 'Outcome', 'Snapshot_Timestamp'}
+            missing = sorted(required.difference(out.columns))
+            if out.empty:
+                return _blank_targets('empty dataframe')
+            if missing:
+                return _blank_targets('missing required columns: ' + ', '.join(missing))
+
+            out['Snapshot_Timestamp'] = pd.to_datetime(
+                out['Snapshot_Timestamp'], errors='coerce', utc=True
+            )
+            valid_ts = out['Snapshot_Timestamp'].notna()
+            if not valid_ts.any():
+                return _blank_targets('Snapshot_Timestamp has no valid values')
+
+            keys = ['Game_Key', 'Market', 'Outcome']
+            if 'Bookmaker' in out.columns:
+                keys.append('Bookmaker')
+
+            # A valid path must contain at least two distinct observation times.
+            ts_counts = (
+                out.loc[valid_ts]
+                .groupby(keys, dropna=False, sort=False)['Snapshot_Timestamp']
+                .nunique(dropna=True)
+            )
+            sequential_keys = ts_counts[ts_counts >= 2]
+            if sequential_keys.empty:
+                return _blank_targets(
+                    'no group has >=2 DISTINCT Snapshot_Timestamp values; '
+                    'this appears to be a final-snapshot slice rather than a historical market stream'
+                )
+
             sort_cols = keys + ['Snapshot_Timestamp']
-            work = out.sort_values(sort_cols).copy()
+            work = out.sort_values(sort_cols, kind='mergesort').copy()
+            for c in target_names:
+                work[c] = np.nan
 
-            def amer_ip(s):
+            def amer_ip(s: pd.Series) -> pd.Series:
                 x = pd.to_numeric(s, errors='coerce')
-                return pd.Series(np.where(x>=0, 100.0/(x+100.0), (-x)/((-x)+100.0)), index=s.index, dtype='float64')
+                arr = np.where(
+                    x >= 0,
+                    100.0 / (x + 100.0),
+                    (-x) / ((-x) + 100.0),
+                )
+                return pd.Series(arr, index=s.index, dtype='float64').where(x.notna())
 
-            grp = work.groupby(keys, sort=False, dropna=False)
-            work['Brain_Target_Close_Value'] = grp['Value'].transform('last') if 'Value' in work.columns else np.nan
-            work['Brain_Target_Close_Odds'] = grp['Odds_Price'].transform('last') if 'Odds_Price' in work.columns else np.nan
-            if 'Value' in work.columns:
-                work['Brain_Target_Close_Value_Delta'] = (
-                    pd.to_numeric(work['Brain_Target_Close_Value'], errors='coerce') - pd.to_numeric(work['Value'], errors='coerce')
-                ).astype('float32')
-            if 'Odds_Price' in work.columns:
-                cur_ip = amer_ip(work['Odds_Price'])
-                close_ip = amer_ip(work['Brain_Target_Close_Odds'])
-                work['Brain_Target_Close_ImpliedProb_Delta'] = (close_ip-cur_ip).astype('float32')
-                work['Brain_Target_Positive_CLV'] = np.where((close_ip-cur_ip).notna(), ((close_ip-cur_ip) > 0.005).astype(float), np.nan)
+            valid_labeled_rows = 0
+            valid_sequence_groups = 0
 
-            # Best future line/price available after each timestamp, outcome-aware.
-            m = work['Market'].astype(str).str.lower().str.strip()
-            o = work['Outcome'].astype(str).str.lower().str.strip()
-            v = pd.to_numeric(work.get('Value'), errors='coerce')
-            best_future = pd.Series(np.nan, index=work.index, dtype='float64')
-            for _, ix in grp.indices.items():
-                ix = list(ix)
-                vals = v.loc[ix]
-                mm = m.loc[ix].iloc[0] if len(ix) else ''
-                oo = o.loc[ix].iloc[0] if len(ix) else ''
-                rev = vals.iloc[::-1]
-                if mm == 'totals' and oo == 'over':
-                    bf = rev.cummin().iloc[::-1]
-                else:
-                    # team spreads: larger value is better; under totals: larger is better.
-                    bf = rev.cummax().iloc[::-1]
-                best_future.loc[ix] = bf.to_numpy()
-            work['Brain_Target_Future_Best_Value'] = best_future.astype('float32')
+            # Work group-by-group so same-timestamp observations are never treated
+            # as "future" observations.  This is slower than transform(), but much
+            # safer and the target path is diagnostic/future-head preparation only.
+            for _, g in work.groupby(keys, sort=False, dropna=False):
+                g = g.loc[g['Snapshot_Timestamp'].notna()].sort_values(
+                    'Snapshot_Timestamp', kind='mergesort'
+                )
+                if g.empty or g['Snapshot_Timestamp'].nunique() < 2:
+                    continue
 
-            # Oracle action labels: 2=BET_NOW, 1=WAIT, 0=PASS.
-            # This is a process label from future market behavior, not an archived old-model decision.
-            action = pd.Series(0, index=work.index, dtype='int8')
-            if 'Brain_Target_Close_ImpliedProb_Delta' in work.columns:
-                pos_clv = pd.to_numeric(work['Brain_Target_Close_ImpliedProb_Delta'], errors='coerce') > 0.005
-            else:
-                pos_clv = pd.Series(False, index=work.index)
-            improve = pd.Series(False, index=work.index)
-            if 'Value' in work.columns:
-                curv = pd.to_numeric(work['Value'], errors='coerce')
-                fut = pd.to_numeric(work['Brain_Target_Future_Best_Value'], errors='coerce')
-                improve = ((m.eq('totals') & o.eq('over') & (fut < curv-0.25)) | (~(m.eq('totals') & o.eq('over')) & (fut > curv+0.25)))
-            action.loc[improve] = 1
-            action.loc[pos_clv & ~improve] = 2
-            work['Brain_Target_Action_Oracle'] = action
+                valid_sequence_groups += 1
+                times = list(g['Snapshot_Timestamp'].drop_duplicates().sort_values())
+                final_t = times[-1]
+                final_rows = g.loc[g['Snapshot_Timestamp'].eq(final_t)]
+                if final_rows.empty:
+                    continue
 
-            # Map back exactly to original rows.
-            cols = [c for c in work.columns if c.startswith('Brain_Target_')]
-            mapped = work[cols].reindex(out.index)
-            for c in cols:
-                out[c] = mapped[c]
+                # If duplicate rows exist at the closing timestamp, use the last
+                # deterministic row at that timestamp as the closing observation.
+                close_row = final_rows.iloc[-1]
+                close_value = pd.to_numeric(pd.Series([close_row.get('Value', np.nan)]), errors='coerce').iloc[0]
+                close_odds = pd.to_numeric(pd.Series([close_row.get('Odds_Price', np.nan)]), errors='coerce').iloc[0]
+
+                market_name = str(g['Market'].iloc[0]).lower().strip()
+                outcome_name = str(g['Outcome'].iloc[0]).lower().strip()
+
+                for t in times[:-1]:
+                    current_rows = g.loc[g['Snapshot_Timestamp'].eq(t)]
+                    future_rows = g.loc[g['Snapshot_Timestamp'].gt(t)]
+                    if current_rows.empty or future_rows.empty:
+                        continue
+
+                    future_values = pd.to_numeric(future_rows.get('Value'), errors='coerce')
+                    if future_values.notna().any():
+                        if market_name == 'totals' and outcome_name == 'over':
+                            best_future_value = float(future_values.min())
+                        else:
+                            # Spreads/team sides, h2h numeric values, and UNDER totals:
+                            # numerically larger is the better available number.
+                            best_future_value = float(future_values.max())
+                    else:
+                        best_future_value = np.nan
+
+                    for ridx in current_rows.index:
+                        cur_value = pd.to_numeric(
+                            pd.Series([work.at[ridx, 'Value'] if 'Value' in work.columns else np.nan]),
+                            errors='coerce'
+                        ).iloc[0]
+                        cur_odds = pd.to_numeric(
+                            pd.Series([work.at[ridx, 'Odds_Price'] if 'Odds_Price' in work.columns else np.nan]),
+                            errors='coerce'
+                        ).iloc[0]
+
+                        work.at[ridx, 'Brain_Target_Close_Value'] = close_value
+                        work.at[ridx, 'Brain_Target_Close_Odds'] = close_odds
+                        work.at[ridx, 'Brain_Target_Future_Best_Value'] = best_future_value
+
+                        if pd.notna(cur_value) and pd.notna(close_value):
+                            raw_delta = float(close_value - cur_value)
+                            work.at[ridx, 'Brain_Target_Close_Value_Delta'] = raw_delta
+                        else:
+                            raw_delta = np.nan
+
+                        cur_ip = amer_ip(pd.Series([cur_odds])).iloc[0] if pd.notna(cur_odds) else np.nan
+                        close_ip = amer_ip(pd.Series([close_odds])).iloc[0] if pd.notna(close_odds) else np.nan
+                        ip_delta = (
+                            float(close_ip - cur_ip)
+                            if pd.notna(cur_ip) and pd.notna(close_ip)
+                            else np.nan
+                        )
+                        work.at[ridx, 'Brain_Target_Close_ImpliedProb_Delta'] = ip_delta
+
+                        # Positive CLV for the CURRENT candidate side/total:
+                        # - OVER: a lower current total than close is favorable.
+                        # - spreads / UNDER: a higher current number than close is favorable.
+                        # - h2h / price: shorter closing price (higher implied probability)
+                        #   than current price indicates the bettor beat the price.
+                        line_clv = False
+                        if pd.notna(cur_value) and pd.notna(close_value):
+                            if market_name == 'totals' and outcome_name == 'over':
+                                line_clv = cur_value <= close_value - 0.25
+                            elif market_name in ('spreads', 'totals'):
+                                line_clv = cur_value >= close_value + 0.25
+                        price_clv = bool(pd.notna(ip_delta) and ip_delta > 0.005)
+                        positive_clv = bool(line_clv or price_clv)
+                        work.at[ridx, 'Brain_Target_Positive_CLV'] = float(positive_clv)
+
+                        # WAIT only when a strictly better later line was actually
+                        # available.  Because best_future excludes this row and all
+                        # rows at the same timestamp, this cannot self-label WAIT.
+                        improve = False
+                        if pd.notna(cur_value) and pd.notna(best_future_value):
+                            if market_name == 'totals' and outcome_name == 'over':
+                                improve = best_future_value < cur_value - 0.25
+                            else:
+                                improve = best_future_value > cur_value + 0.25
+
+                        # 2=BET_NOW, 1=WAIT, 0=PASS/NO EXECUTION EDGE.
+                        # This is an execution oracle for the candidate side, not an
+                        # assertion that the underlying side itself had positive EV.
+                        action = 1 if improve else (2 if positive_clv else 0)
+                        work.at[ridx, 'Brain_Target_Action_Oracle'] = float(action)
+                        valid_labeled_rows += 1
+
+            if valid_labeled_rows == 0:
+                return _blank_targets(
+                    'timestamp groups existed but no row had a strictly later observation'
+                )
+
+            # Map target columns back exactly to original row order/index.
+            mapped = work[target_names].reindex(out.index)
+            for c in target_names:
+                out[c] = pd.to_numeric(mapped[c], errors='coerce')
+
+            print(
+                f"[BRAIN-TARGET] BUILT - sequential_groups={valid_sequence_groups:,} "
+                f"labeled_rows={valid_labeled_rows:,}/{len(out):,} "
+                f"({valid_labeled_rows/max(len(out),1):.2%}); final-timestamp rows remain NaN"
+            )
             return out
 
         def _build_three_targets(df_in: pd.DataFrame) -> pd.DataFrame:
@@ -15121,6 +15272,16 @@ def train_sharp_model_from_bq(
                 print(df_market["Market"].value_counts(dropna=False).head(10))
         
         # 2) build targets
+        # Defensive guard: Brain predictors should already have been attached before
+        # feature inventory construction. If a future refactor bypasses that block,
+        # attach them here as well so the audit fails loudly rather than silently.
+        if not any(
+            str(c).startswith("Brain_") and not str(c).startswith("Brain_Target_")
+            for c in df_market.columns
+        ):
+            print("[BRAIN-ATTACH] defensive late attach triggered")
+            df_market = add_ai_betting_brain_features(df_market)
+
         df_market = add_ai_betting_brain_training_targets(df_market)
         df_market = _build_three_targets(df_market)
         _debug_target_counts(df_market, market)
@@ -15251,11 +15412,17 @@ def train_sharp_model_from_bq(
                 else:
                     print("No Brain_Target_* columns found")
                 if "Brain_Target_Action_Oracle" in df_audit.columns:
-                    print("Oracle action distribution (0=PASS, 1=WAIT, 2=BET_NOW):")
-                    print(df_audit["Brain_Target_Action_Oracle"].value_counts(dropna=False).sort_index().to_string())
-                    if "Sport" in df_audit.columns:
-                        print("Oracle action distribution by sport:")
-                        print(pd.crosstab(df_audit["Sport"], df_audit["Brain_Target_Action_Oracle"], dropna=False).to_string())
+                    _oracle_num = pd.to_numeric(df_audit["Brain_Target_Action_Oracle"], errors="coerce")
+                    if _oracle_num.notna().any():
+                        print("Oracle action distribution (0=PASS, 1=WAIT, 2=BET_NOW):")
+                        print(_oracle_num.value_counts(dropna=False).sort_index().to_string())
+                        if "Sport" in df_audit.columns:
+                            _oracle_view = df_audit[["Sport"]].copy()
+                            _oracle_view["Brain_Target_Action_Oracle"] = _oracle_num
+                            print("Oracle action distribution by sport:")
+                            print(pd.crosstab(_oracle_view["Sport"], _oracle_view["Brain_Target_Action_Oracle"], dropna=False).to_string())
+                    else:
+                        print("Oracle action targets: SKIPPED/UNAVAILABLE (all NaN; no valid future timestamp path in this slice)")
 
                 # 6) By-sport expert summary catches routing/population failures.
                 expert_summary_cols = [c for c in [
