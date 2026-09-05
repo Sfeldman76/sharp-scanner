@@ -404,7 +404,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.6-always-on-handicapper-overlays"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.6.1-hard-handicapper-overlay-contract"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -3527,6 +3527,28 @@ PATHI_EXACT_SIGNAL_COLS = (
     "Pathi_M4_ExtendedWinStreakFade", "Pathi_M5_TravelOffDayFreeze",
     "Pathi_M6_WeakTeamNewChalk_Screen", "Pathi_M7_BadRoadFavoriteProfile",
     "Pathi_M9_Plus15_PlusMoney", "Pathi_RoadFavLost_StillFavorite_Screen",
+)
+
+# V11.5.6.1 canonical learned-safe Big Al exact-system inventory.
+# These are deterministic published-system flags that may be sparse, but when
+# generated for the current sport they must survive all generic low-information,
+# duplicate-column, and AutoFS pruning. Retired postseason/championship/finals/
+# elimination/final-home systems are intentionally absent from this learned list.
+BIGAL_EXACT_SIGNAL_COLS = (
+    "BigAl_NFL2_LateSeasonHomeDog",
+    "BigAl_NFL4_PreseasonContrarianMove",
+    "BigAl_NFL5_PreseasonLowOffenseOver",
+    "BigAl_CF1_Week2Home42Win",
+    "BigAl_CF2_LateSeasonRevengeDog",
+    "BigAl_NBA1_B2BRematchRoadDog",
+    "BigAl_NBA2_ThreeMassiveCovers",
+    "BigAl_NBA8_Revenge145FadeFavorite",
+    "BigAl_CBB1_UglyDog20Losses",
+    "BigAl_CBB2_Fade10WinStreakFavorite",
+    "BigAl_CBB3_HomeRevenge27",
+    "BigAl_CFL1_SecondMeetingUnder",
+    "BigAl_CFL2_EliteDogFade",
+    "BigAl_CFL3_ThirdMeetingAwayDogLostFirstTwo",
 )
 
 BIGAL_ENHANCER_COLS = (
@@ -15146,6 +15168,33 @@ def train_sharp_model_from_bq(
         ]
         
         extend_unique(features, _dynamic_system_features)
+
+        # ---------------------------------------------------------
+        # V11.5.6.1 HARD HANDICAPPER PRESENCE CONTRACT
+        # ---------------------------------------------------------
+        # Deterministic exact systems/tighteners/enhancers must be offered to the
+        # model whenever the upstream rule engine generated the column for this
+        # sport.  This is intentionally independent of dynamic dtype discovery so
+        # a sparse/all-zero exact flag cannot disappear before the overlay lane.
+        _handicapper_source_contract = list(dict.fromkeys(
+            list(PATHI_EXACT_SIGNAL_COLS)
+            + list(BIGAL_EXACT_SIGNAL_COLS)
+            + [c for c in BIGAL_TIGHTENER_PARENT.keys() if not _is_retired_bigal_feature_name(c)]
+            + list(BIGAL_ENHANCER_COLS)
+        ))
+        _handicapper_source_present = [
+            c for c in _handicapper_source_contract
+            if c in df_market.columns
+            and _system_feature_valid_for_sport(c, sport_u)
+            and not _is_retired_bigal_feature_name(c)
+        ]
+        extend_unique(features, _handicapper_source_present)
+        print(
+            f"[HANDICAPPER-SOURCE-CONTRACT] sport={sport_u} "
+            f"present={len(_handicapper_source_present)} "
+            f"exact={sum(c in set(PATHI_EXACT_SIGNAL_COLS) or c in set(BIGAL_EXACT_SIGNAL_COLS) for c in _handicapper_source_present)} "
+            f"cols={_handicapper_source_present}"
+        )
         
         # ---------------------------------------------------------
         # Final defensive sport filter
@@ -16484,6 +16533,21 @@ def train_sharp_model_from_bq(
         # 4) Pre-split pruning (low-info + exact duplicates)
         st.markdown("### 🧹 Feature Pruning (pre-split)")
         
+        # Exact handicapper systems are structural inputs, not ordinary candidate
+        # features.  Protect every upstream-generated applicable system from generic
+        # low-information pruning, including all-zero/sparse columns.
+        _handicapper_prune_protect = {
+            c for c in (
+                list(PATHI_EXACT_SIGNAL_COLS)
+                + list(BIGAL_EXACT_SIGNAL_COLS)
+                + [x for x in BIGAL_TIGHTENER_PARENT.keys() if not _is_retired_bigal_feature_name(x)]
+                + list(BIGAL_ENHANCER_COLS)
+            )
+            if c in X_df.columns
+            and _system_feature_valid_for_sport(c, sport_u)
+            and not _is_retired_bigal_feature_name(c)
+        }
+
         PROTECT = {
             "Sharp_Limit_Jump",
             "Sharp_Time_Score",
@@ -16506,6 +16570,11 @@ def train_sharp_model_from_bq(
             "Outcome_Spread_Edge",
             "Outcome_Cover_Prob",
         }
+        PROTECT.update(_handicapper_prune_protect)
+        print(
+            f"[HANDICAPPER-PRUNE-PROTECT] protected={len(_handicapper_prune_protect)} "
+            f"cols={sorted(_handicapper_prune_protect)}"
+        )
         
         MIN_NON_NAN = max(25, int(0.002 * len(X_df)))  # 0.2% or 25
         MIN_UNIQUE  = 2
@@ -16539,19 +16608,44 @@ def train_sharp_model_from_bq(
         X_df = X_df[keep_cols]
         feature_cols = list(X_df.columns)
         
-        # exact duplicate columns (keeps ONE copy)
-        arr = X_df.to_numpy(dtype=np.float32, copy=False)
-        _, uniq_idx = np.unique(arr.T, axis=0, return_index=True)
-        uniq_idx = np.sort(uniq_idx)
-        
-        dup_count = arr.shape[1] - len(uniq_idx)
-        if dup_count > 0:
-            removed_dups = [feature_cols[i] for i in range(len(feature_cols)) if i not in uniq_idx]
-            st.write(f"• Removed duplicate features: {dup_count}")
-            st.caption(", ".join(removed_dups[:20]) + (" ..." if len(removed_dups) > 20 else ""))
-        
-        X_df = X_df.iloc[:, uniq_idx]
+        # exact duplicate columns. Generic duplicates keep ONE copy, but exact
+        # handicapper flags/tighteners/enhancers are NEVER sacrificed as duplicates.
+        # This was the V11.5.6 gap: BigAl_CF1 could be byte-identical to a derived
+        # context/data-ready column and vanish before the overlay lane.
         feature_cols = list(X_df.columns)
+        _protected_now = [c for c in feature_cols if c in _handicapper_prune_protect]
+        _generic_now = [c for c in feature_cols if c not in _handicapper_prune_protect]
+        _seen_vectors = set()
+        for _c in _protected_now:
+            _seen_vectors.add(X_df[_c].to_numpy(dtype=np.float32, copy=False).tobytes())
+        _generic_keep = []
+        _removed_dups = []
+        for _c in _generic_now:
+            _sig = X_df[_c].to_numpy(dtype=np.float32, copy=False).tobytes()
+            if _sig in _seen_vectors:
+                _removed_dups.append(_c)
+                continue
+            _seen_vectors.add(_sig)
+            _generic_keep.append(_c)
+        _keep_set = set(_protected_now) | set(_generic_keep)
+        _keep_order = [c for c in feature_cols if c in _keep_set]
+        if _removed_dups:
+            st.write(f"• Removed duplicate features: {len(_removed_dups)}")
+            st.caption(", ".join(_removed_dups[:20]) + (" ..." if len(_removed_dups) > 20 else ""))
+        X_df = X_df.reindex(columns=_keep_order)
+        feature_cols = list(X_df.columns)
+        _missing_after_prune = sorted(_handicapper_prune_protect - set(feature_cols))
+        print(
+            f"[HANDICAPPER-PRUNE-CONTRACT] expected={len(_handicapper_prune_protect)} "
+            f"survived={len(_handicapper_prune_protect)-len(_missing_after_prune)} "
+            f"missing={_missing_after_prune} "
+            f"{'PASS' if not _missing_after_prune else 'FAIL'}"
+        )
+        if _missing_after_prune:
+            raise RuntimeError(
+                "HANDICAPPER OVERLAY CONTRACT: deterministic systems disappeared during pre-split pruning: "
+                + ", ".join(_missing_after_prune)
+            )
         
         # finalize numeric matrix for selection / training
        
@@ -17463,16 +17557,7 @@ def train_sharp_model_from_bq(
         # Backward alias only for internal compatibility; all V11.5.4 logic calls the new classifier.
         _feature_family_v1153 = _feature_family_v1154
 
-        _BIGAL_EXACT_OVERLAY = {
-            "BigAl_NFL1_Week1FadePlayoffTeam", "BigAl_NFL2_LateSeasonHomeDog", "BigAl_NFL3_PlayoffHighScoreFade",
-            "BigAl_NFL4_PreseasonContrarianMove", "BigAl_NFL5_PreseasonLowOffenseOver",
-            "BigAl_CF1_Week2Home42Win", "BigAl_CF2_LateSeasonRevengeDog",
-            "BigAl_NBA1_B2BRematchRoadDog", "BigAl_NBA2_ThreeMassiveCovers", "BigAl_NBA3_FadeHomeAfterChampUpset",
-            "BigAl_NBA4_FinalHomeFavRevenge", "BigAl_NBA5_PlayoffBigDogVsChamp", "BigAl_NBA6_FinalsGame4",
-            "BigAl_NBA7_TwoTeamEliminationUnder", "BigAl_NBA8_Revenge145FadeFavorite",
-            "BigAl_CBB1_UglyDog20Losses", "BigAl_CBB2_Fade10WinStreakFavorite", "BigAl_CBB3_HomeRevenge27",
-            "BigAl_CFL1_SecondMeetingUnder", "BigAl_CFL2_EliteDogFade", "BigAl_CFL3_ThirdMeetingAwayDogLostFirstTwo",
-        }
+        _BIGAL_EXACT_OVERLAY = set(BIGAL_EXACT_SIGNAL_COLS)
 
         def _is_sparse_overlay_feature(name: str) -> bool:
             s0 = str(name)
@@ -17742,9 +17827,29 @@ def train_sharp_model_from_bq(
             # Sparse deterministic systems use a conditional overlay lane for outcome/situation.
             overlay_candidates = []
             if str(head_name).lower() in {"outcome","situation"}:
-                overlay_candidates = [c for c in _candidate_cols if _is_sparse_overlay_feature(c)]
+                # Build the overlay lane explicitly from the final head matrix, not
+                # indirectly from AutoFS candidate discovery.  This guarantees every
+                # applicable upstream-generated exact system survives even when sparse,
+                # constant, or duplicate of a context column.
+                _overlay_contract_cols = list(dict.fromkeys(
+                    list(PATHI_EXACT_SIGNAL_COLS)
+                    + list(BIGAL_EXACT_SIGNAL_COLS)
+                    + [c for c in BIGAL_TIGHTENER_PARENT.keys() if not _is_retired_bigal_feature_name(c)]
+                    + list(BIGAL_ENHANCER_COLS)
+                ))
+                overlay_candidates = [
+                    c for c in _overlay_contract_cols
+                    if c in X_df_train_head.columns
+                    and c in X_df_hold_head.columns
+                    and c in X_df_full_head.columns
+                    and _system_feature_valid_for_sport(c, sport_u)
+                    and not _is_retired_bigal_feature_name(c)
+                ]
             core_candidates = [c for c in _candidate_cols if c not in set(overlay_candidates)]
-            log_func(f"[OVERLAY-LANE:{head_name}] core={len(core_candidates)} sparse_overlays={len(overlay_candidates)}")
+            log_func(
+                f"[OVERLAY-LANE:{head_name}] core={len(core_candidates)} "
+                f"sparse_overlays={len(overlay_candidates)} overlays={overlay_candidates}"
+            )
 
             Xcore_train = X_df_train_head.reindex(columns=core_candidates)
             feat_cols_head, shap_summary_head = select_features_auto(
@@ -17830,7 +17935,7 @@ def train_sharp_model_from_bq(
                 robust_core, overlay_candidates, sample_weight=sample_weight_head, head_name=head_name
             )
 
-            # V11.5.6 HANDICAPPER OVERLAY CONTRACT
+            # V11.5.6.1 HANDICAPPER OVERLAY CONTRACT
             # Exact Big Al / Pathi systems, Big Al tighteners, and configured
             # enhancers are always carried into the fitted model matrix. AutoFS
             # decides the general/core structure only. The model may learn zero,
@@ -17885,6 +17990,34 @@ def train_sharp_model_from_bq(
                 f"trusted={len(overlay_trust_map)} raw_active_rows="
                 f"{int((X_df_train_head['Brain_Overlay_Raw_Active_Count'] > 0).sum())}"
             )
+
+            # Hard final exact-system contract. "Available" means the deterministic
+            # flag survived the upstream source/sport contract into this head matrix.
+            # Every available exact Pathi/Big Al system MUST be in the fitted feature
+            # list; trust may still be zero and XGBoost may learn zero effect.
+            _expected_exact = [
+                c for c in list(PATHI_EXACT_SIGNAL_COLS) + list(BIGAL_EXACT_SIGNAL_COLS)
+                if c in X_df_train_head.columns
+                and _system_feature_valid_for_sport(c, sport_u)
+                and not _is_retired_bigal_feature_name(c)
+            ] if str(head_name).lower() in {"outcome","situation"} else []
+            _final_exact = [c for c in _expected_exact if c in feat_cols_head]
+            _missing_exact = [c for c in _expected_exact if c not in feat_cols_head]
+            _active_exact = {
+                c: int((pd.to_numeric(X_df_train_head[c], errors="coerce").fillna(0.0).abs() > 0.5).sum())
+                for c in _expected_exact
+            }
+            print(
+                f"[HANDICAPPER-OVERLAY-CONTRACT:{head_name}] "
+                f"expected_exact={len(_expected_exact)} final_exact={len(_final_exact)} "
+                f"missing_exact={_missing_exact} active_rows={_active_exact} "
+                f"{'PASS' if not _missing_exact else 'FAIL'}"
+            )
+            if _missing_exact:
+                raise RuntimeError(
+                    f"HANDICAPPER OVERLAY CONTRACT FAILED head={head_name}: missing exact systems: "
+                    + ", ".join(_missing_exact)
+                )
 
             # Leakage audit on the final robust set.
             _audit_rows=[]; _ya=np.asarray(y_head_train,dtype=int).reshape(-1)
@@ -20586,7 +20719,7 @@ def train_sharp_model_from_bq(
                 "flip_flag": bool(flip_flag),
                 "blend_w": float(best_w),
         
-                "model_family": "three_head_plus_meta_v5_6_always_on_handicapper_overlays",
+                "model_family": "three_head_plus_meta_v5_6_1_hard_handicapper_overlay_contract",
                 "feature_cols_outcome": list(feature_cols_outcome),
                 "feature_cols_situation": list(feature_cols_situation),
                 "feature_cols_value": list(feature_cols_value),
@@ -20722,7 +20855,7 @@ def train_sharp_model_from_bq(
             "meta_calibrator":      (meta_cal_name, meta_cal_obj),
         
             "multihead_config": {
-                "model_family": "three_head_plus_meta_v5_6_always_on_handicapper_overlays",
+                "model_family": "three_head_plus_meta_v5_6_1_hard_handicapper_overlay_contract",
                 "outcome_head": "model_logloss/model_auc + iso_blend",
                 "situation_head": "model_situation_cls",
                 "value_cls_head": "model_value_cls",
@@ -20788,7 +20921,7 @@ def train_sharp_model_from_bq(
         
                 "multihead_config": {
                     "schema_version": 3,
-                    "model_family": "three_head_plus_meta_v5_6_always_on_handicapper_overlays",
+                    "model_family": "three_head_plus_meta_v5_6_1_hard_handicapper_overlay_contract",
                     "meta_features": list(meta_train_df.columns),
                     "meta_calibrator": str(meta_cal_name),
                     "meta_oof_auc_for_weight": (None if not np.isfinite(META_OOF_AUC) else float(META_OOF_AUC)),
