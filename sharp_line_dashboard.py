@@ -404,7 +404,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.4.1-structure-stability-temporal-deoverlap"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.5.1-meta-oof-coverage"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -16023,7 +16023,7 @@ def train_sharp_model_from_bq(
             """
             try:
                 print("\n" + "="*100)
-                print(f"PATHI + BIG AL + BRAIN INTEGRITY AUDIT | V11.5.4.1 STRUCTURE STABILITY + TEMPORAL DEOVERLAP + TEMPORAL SHADOW + OVERLAY TRUST + SCHEDULE | market={str(market_name).upper()} | rows={len(df_audit):,}")
+                print(f"PATHI + BIG AL + BRAIN INTEGRITY AUDIT | V11.5.5.1 STRUCTURE STABILITY + META OOF COVERAGE + LATE SHADOW + SPECIALIST GATING + PURE META + OVERLAY TRUST + SCHEDULE | market={str(market_name).upper()} | rows={len(df_audit):,}")
                 print("="*100)
 
                 def nser(c, default=0.0):
@@ -17193,8 +17193,12 @@ def train_sharp_model_from_bq(
                 for a, b in self.folds:
                     yield a, b
 
+        # V11.5.5: football needs a later internal regime test because the prior
+        # two-shadow plan ended too early in November.  Keep three shadow origins
+        # for football while preserving two for denser leagues.
+        _shadow_count = 3 if sport_key in {"NFL", "NCAAF", "CFL"} else 2
         folds_plan_outcome, shadow_folds_outcome, embargo_td, horizon_td = _rolling_origin_plan(
-            g_train, t_train, y_train, sport_name=sport_key, n_select=4, n_shadow=2
+            g_train, t_train, y_train, sport_name=sport_key, n_select=4, n_shadow=_shadow_count
         )
         cv_outcome = _PrecomputedTemporalSplit(folds_plan_outcome)
 
@@ -17205,7 +17209,7 @@ def train_sharp_model_from_bq(
             t_train_situation = times_situation[train_idx_situation]
             _fs, shadow_folds_situation, _, _ = _rolling_origin_plan(
                 g_train_situation, t_train_situation, y_train_situation,
-                sport_name=sport_key, n_select=4, n_shadow=2
+                sport_name=sport_key, n_select=4, n_shadow=_shadow_count
             )
             cv_situation = _PrecomputedTemporalSplit(_fs)
 
@@ -17216,7 +17220,7 @@ def train_sharp_model_from_bq(
             t_train_value = times_value[train_idx_value]
             _fv, shadow_folds_value, _, _ = _rolling_origin_plan(
                 g_train_value, t_train_value, y_train_value_cls,
-                sport_name=sport_key, n_select=4, n_shadow=2
+                sport_name=sport_key, n_select=4, n_shadow=_shadow_count
             )
             cv_value = _PrecomputedTemporalSplit(_fv)
 
@@ -18966,6 +18970,97 @@ def train_sharp_model_from_bq(
             pred_value_reg_full  = np.asarray(model_value_reg.predict(X_full_value),  dtype=np.float64)
         
         # -----------------------------------------
+        # V11.5.5 WHOLE-HEAD SHADOW TRUST
+        # -----------------------------------------
+        # Feature-level stability is necessary but not sufficient.  A specialist
+        # head must also prove that the complete fitted head ranks its own target in
+        # later, unseen SHADOW origins.  Weak/inverted heads are neutralized before
+        # they reach the meta learner.  This protects a healthy Outcome head from a
+        # temporally unstable Situation or Value specialist.
+        def _specialist_shadow_trust(
+            fitted_model, X_head, y_head, w_head, shadow_folds, *, label
+        ):
+            result = {
+                "label": str(label), "valid_folds": 0, "positive_folds": 0,
+                "positive_frac": 0.0, "pooled_auc": float("nan"),
+                "mean_fold_auc": float("nan"), "trust": 0.0,
+            }
+            if fitted_model is None or X_head is None or y_head is None or not shadow_folds:
+                print(f"[SPECIALIST-SHADOW:{label}] unavailable -> trust=0")
+                return result
+            yy = np.asarray(y_head, dtype=int).reshape(-1)
+            ww = np.ones(len(yy), dtype=float) if w_head is None else np.asarray(w_head, dtype=float).reshape(-1)
+            pooled_y, pooled_p, pooled_w = [], [], []
+            fold_aucs = []
+            for fold_no, (tr_rel, va_rel) in enumerate(shadow_folds, start=1):
+                tr_rel = np.asarray(tr_rel, dtype=np.int64)
+                va_rel = np.asarray(va_rel, dtype=np.int64)
+                if tr_rel.size < 20 or va_rel.size < 8:
+                    continue
+                if np.unique(yy[tr_rel]).size < 2 or np.unique(yy[va_rel]).size < 2:
+                    continue
+                try:
+                    m = _fresh_xgb_like(fitted_model, seed=7300 + 101*fold_no + (1 if label == "situation" else 2))
+                    m.fit(X_head[tr_rel], yy[tr_rel], sample_weight=ww[tr_rel], verbose=False)
+                    pp = np.asarray(m.predict_proba(X_head[va_rel])[:, 1], dtype=np.float64)
+                    auc = float(roc_auc_score(yy[va_rel], pp, sample_weight=ww[va_rel]))
+                    if not np.isfinite(auc):
+                        continue
+                    fold_aucs.append(auc)
+                    pooled_y.append(yy[va_rel]); pooled_p.append(pp); pooled_w.append(ww[va_rel])
+                    print(f"[SPECIALIST-SHADOW:{label}] fold={fold_no} auc={auc:.4f} rows={len(va_rel)}")
+                except Exception as e:
+                    logger.warning(f"Specialist shadow audit failed label={label} fold={fold_no}: {e}")
+            if not fold_aucs:
+                print(f"[SPECIALIST-SHADOW:{label}] no valid folds -> trust=0")
+                return result
+            fy = np.concatenate(pooled_y); fp = np.concatenate(pooled_p); fw = np.concatenate(pooled_w)
+            try:
+                pooled_auc = float(roc_auc_score(fy, fp, sample_weight=fw)) if np.unique(fy).size == 2 else float("nan")
+            except Exception:
+                pooled_auc = float("nan")
+            mean_auc = float(np.mean(fold_aucs))
+            pos_frac = float(np.mean(np.asarray(fold_aucs) > 0.5))
+            # Fail closed unless the WHOLE head is positive in a majority of later
+            # origins and positive in pooled ranking.  Above that, shrink influence
+            # continuously: +5 AUC points earns full specialist trust.
+            min_positive_frac = (2.0/3.0) if len(fold_aucs) >= 3 else 0.50
+            if (not np.isfinite(pooled_auc)) or pooled_auc <= 0.50 or pos_frac < min_positive_frac:
+                trust = 0.0
+            else:
+                trust = float(np.clip((pooled_auc - 0.50) / 0.05, 0.0, 1.0))
+                if pooled_auc < 0.51:
+                    trust = min(trust, 0.20)
+            result.update({
+                "valid_folds": int(len(fold_aucs)),
+                "positive_folds": int(sum(a > 0.5 for a in fold_aucs)),
+                "positive_frac": float(pos_frac),
+                "pooled_auc": float(pooled_auc),
+                "mean_fold_auc": float(mean_auc),
+                "trust": float(trust),
+            })
+            print(
+                f"[SPECIALIST-SHADOW:{label}] pooled_auc={pooled_auc:.4f} mean_auc={mean_auc:.4f} "
+                f"positive={sum(a>0.5 for a in fold_aucs)}/{len(fold_aucs)} ({pos_frac:.0%}) trust={trust:.3f}"
+            )
+            return result
+
+        SPECIALIST_SHADOW_SITUATION = _specialist_shadow_trust(
+            model_situation_cls, X_train_situation, y_train_situation, w_train_situation,
+            shadow_folds_situation, label="situation"
+        ) if y_train_situation is not None else {"trust": 0.0}
+        SPECIALIST_SHADOW_VALUE = _specialist_shadow_trust(
+            model_value_cls, X_train_value, y_train_value_cls, w_train_value,
+            shadow_folds_value, label="value"
+        ) if y_train_value_cls is not None else {"trust": 0.0}
+        SPECIALIST_TRUST_SITUATION = float(SPECIALIST_SHADOW_SITUATION.get("trust", 0.0) or 0.0)
+        SPECIALIST_TRUST_VALUE = float(SPECIALIST_SHADOW_VALUE.get("trust", 0.0) or 0.0)
+        print(
+            f"[SPECIALIST-GATE] situation_trust={SPECIALIST_TRUST_SITUATION:.3f} "
+            f"value_trust={SPECIALIST_TRUST_VALUE:.3f}"
+        )
+
+        # -----------------------------------------
         # OOF predictions (train-only) + blending
         # -----------------------------------------
         SMALL = ((sport_key in SMALL_LEAGUES) or (np.unique(g_train).size < 30) or (len(y_train) < 500))
@@ -19227,11 +19322,13 @@ def train_sharp_model_from_bq(
             order=np.argsort(tt); pp=pp[order]; yy=yy[order]; tt=tt[order]
             n=len(pp)
             cuts=[(0.50,0.67),(0.67,0.83),(0.83,1.00)]
-            methods=["platt","iso"]
+            methods=["identity","platt","iso"]
             method_scores={m:[] for m in methods}
             method_details={m:[] for m in methods}
 
             def _fit_kind(kind, pfit, yfit):
+                if kind=="identity":
+                    return None
                 if kind=="platt":
                     m=LogisticRegression(solver="lbfgs",max_iter=2000)
                     m.fit(np.asarray(pfit).reshape(-1,1),yfit)
@@ -19240,6 +19337,7 @@ def train_sharp_model_from_bq(
                 iso.fit(pfit,yfit)
                 return iso
             def _apply_kind(kind,m,x):
+                if kind=="identity": return np.asarray(x, dtype=float)
                 if kind=="platt": return m.predict_proba(np.asarray(x).reshape(-1,1))[:,1]
                 return m.predict(x)
 
@@ -19258,8 +19356,8 @@ def train_sharp_model_from_bq(
                         ece=float(_ece_score(yval,pv,n_bins=8))
                         std_ratio=float(np.std(pv)/max(np.std(pval),1e-9))
                         # Lower is better; heavy compression is penalized.
-                        compression=max(0.0,0.25-std_ratio)
-                        sc=ll + 0.50*br + 0.50*ece + 0.20*compression
+                        compression=max(0.0,0.40-std_ratio)
+                        sc=ll + 0.50*br + 0.50*ece + 0.35*compression
                         method_scores[kind].append(sc)
                         method_details[kind].append((ll,br,ece,std_ratio))
                     except Exception:
@@ -19273,7 +19371,13 @@ def train_sharp_model_from_bq(
                 final=_fit_kind(chosen,pp,yy)
             except Exception:
                 return None
-            print(f"[CAL-ROLLING:{label}] scores={means} chosen={chosen} origins={max(len(v) for v in method_scores.values()) if method_scores else 0}")
+            chosen_display=chosen
+            # The global apply interface has iso/platt/beta.  Represent identity as
+            # an identity isotonic adapter while preserving the audit label.
+            if chosen=="identity":
+                chosen="iso"
+                final=_IdentityIsoCal(eps=1e-6)
+            print(f"[CAL-ROLLING:{label}] scores={means} chosen={chosen_display} origins={max(len(v) for v in method_scores.values()) if method_scores else 0}")
             return chosen,final,means
         
         # Selection with anti-compression guard
@@ -19443,6 +19547,28 @@ def train_sharp_model_from_bq(
             else np.asarray(pred_value_reg_full, dtype=np.float64).copy()
         )
         
+        # V11.5.5: specialist-native predictions stay untouched for diagnostics,
+        # but only shadow-trusted signal is allowed into the outcome meta stack.
+        def _gate_prob_for_meta(arr, trust):
+            if arr is None:
+                return None
+            a = np.asarray(arr, dtype=np.float64)
+            return 0.5 + float(np.clip(trust, 0.0, 1.0)) * (a - 0.5)
+        def _gate_reg_for_meta(arr, trust):
+            if arr is None:
+                return None
+            return float(np.clip(trust, 0.0, 1.0)) * np.asarray(arr, dtype=np.float64)
+
+        p_situation_oof_for_meta = _gate_prob_for_meta(p_situation_oof_train, SPECIALIST_TRUST_SITUATION)
+        p_situation_hold_for_meta = _gate_prob_for_meta(p_situation_hold_vec, SPECIALIST_TRUST_SITUATION)
+        p_situation_full_for_meta = _gate_prob_for_meta(p_situation_full_vec, SPECIALIST_TRUST_SITUATION)
+        p_value_oof_for_meta = _gate_prob_for_meta(p_value_oof_train, SPECIALIST_TRUST_VALUE)
+        p_value_hold_for_meta = _gate_prob_for_meta(p_value_hold_vec, SPECIALIST_TRUST_VALUE)
+        p_value_full_for_meta = _gate_prob_for_meta(p_value_full_vec, SPECIALIST_TRUST_VALUE)
+        pred_value_reg_oof_for_meta = _gate_reg_for_meta(pred_value_reg_oof_train, SPECIALIST_TRUST_VALUE)
+        pred_value_reg_hold_for_meta = _gate_reg_for_meta(pred_value_reg_hold, SPECIALIST_TRUST_VALUE)
+        pred_value_reg_full_for_meta = _gate_reg_for_meta(pred_value_reg_full, SPECIALIST_TRUST_VALUE)
+
         # ----------------------------
         # 6D) META-COMBINER
         # FINAL OUTPUT = probability this line wins
@@ -19552,7 +19678,7 @@ def train_sharp_model_from_bq(
         # hold/full receive deploy-model predictions.
         p_situation_meta_train = _map_specialist_vec_to_meta(
             name="p_situation_oof_train",
-            values=p_situation_oof_train,
+            values=p_situation_oof_for_meta,
             value_source_ids=source_ids_train_situation,
             meta_source_ids=meta_train_ids,
             default=0.5,
@@ -19560,7 +19686,7 @@ def train_sharp_model_from_bq(
         
         p_situation_hold_vec = _map_specialist_vec_to_meta(
             name="p_situation_hold_vec",
-            values=p_situation_hold_vec,
+            values=p_situation_hold_for_meta,
             value_source_ids=source_ids_hold_situation,
             meta_source_ids=meta_hold_ids,
             default=0.5,
@@ -19568,7 +19694,7 @@ def train_sharp_model_from_bq(
         
         p_situation_full_vec = _map_specialist_vec_to_meta(
             name="p_situation_full_vec",
-            values=p_situation_full_vec,
+            values=p_situation_full_for_meta,
             value_source_ids=source_ids_full_situation,
             meta_source_ids=meta_full_ids,
             default=0.5,
@@ -19577,7 +19703,7 @@ def train_sharp_model_from_bq(
         # Value classification head — OOF for meta training.
         p_value_meta_train = _map_specialist_vec_to_meta(
             name="p_value_oof_train",
-            values=p_value_oof_train,
+            values=p_value_oof_for_meta,
             value_source_ids=source_ids_train_value,
             meta_source_ids=meta_train_ids,
             default=0.5,
@@ -19585,7 +19711,7 @@ def train_sharp_model_from_bq(
         
         p_value_hold_vec = _map_specialist_vec_to_meta(
             name="p_value_hold_vec",
-            values=p_value_hold_vec,
+            values=p_value_hold_for_meta,
             value_source_ids=source_ids_hold_value,
             meta_source_ids=meta_hold_ids,
             default=0.5,
@@ -19593,7 +19719,7 @@ def train_sharp_model_from_bq(
         
         p_value_full_vec = _map_specialist_vec_to_meta(
             name="p_value_full_vec",
-            values=p_value_full_vec,
+            values=p_value_full_for_meta,
             value_source_ids=source_ids_full_value,
             meta_source_ids=meta_full_ids,
             default=0.5,
@@ -19602,7 +19728,7 @@ def train_sharp_model_from_bq(
         # Value regression head — OOF for meta training.
         value_reg_meta_train = _map_specialist_vec_to_meta(
             name="pred_value_reg_oof_train",
-            values=pred_value_reg_oof_train,
+            values=pred_value_reg_oof_for_meta,
             value_source_ids=source_ids_train_value,
             meta_source_ids=meta_train_ids,
             default=0.0,
@@ -19610,7 +19736,7 @@ def train_sharp_model_from_bq(
         
         pred_value_reg_hold = _map_specialist_vec_to_meta(
             name="pred_value_reg_hold",
-            values=pred_value_reg_hold,
+            values=pred_value_reg_hold_for_meta,
             value_source_ids=source_ids_hold_value,
             meta_source_ids=meta_hold_ids,
             default=0.0,
@@ -19618,7 +19744,7 @@ def train_sharp_model_from_bq(
         
         pred_value_reg_full = _map_specialist_vec_to_meta(
             name="pred_value_reg_full",
-            values=pred_value_reg_full,
+            values=pred_value_reg_full_for_meta,
             value_source_ids=source_ids_full_value,
             meta_source_ids=meta_full_ids,
             default=0.0,
@@ -19633,36 +19759,27 @@ def train_sharp_model_from_bq(
         else:
             w_train_outcome = np.asarray(w_train_outcome, dtype=np.float64).reshape(-1)
         
-        meta_train_df = pd.DataFrame({
-            "Meta_P_Outcome":   p_outcome_oof_train,
-            "Meta_P_Situation": p_situation_meta_train,
-            "Meta_P_Value":     p_value_meta_train,
-            "Meta_Value_Reg":   value_reg_meta_train,
-        }, index=train_meta_df.index)
-        
-        meta_hold_df = pd.DataFrame({
-            "Meta_P_Outcome":   p_hold_vec,
-            "Meta_P_Situation": p_situation_hold_vec,
-            "Meta_P_Value":     p_value_hold_vec,
-            "Meta_Value_Reg":   pred_value_reg_hold,
-        }, index=hold_meta_df.index)
-        
-        meta_full_df = pd.DataFrame({
-            "Meta_P_Outcome":   p_full_vec,
-            "Meta_P_Situation": p_situation_full_vec,
-            "Meta_P_Value":     p_value_full_vec,
-            "Meta_Value_Reg":   pred_value_reg_full,
-        }, index=full_meta_df.index)
-        
-        if "Odds_Price" in train_meta_df.columns:
-            meta_train_df["Meta_Odds_Price"] = pd.to_numeric(train_meta_df["Odds_Price"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-            meta_hold_df["Meta_Odds_Price"]  = pd.to_numeric(hold_meta_df["Odds_Price"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-            meta_full_df["Meta_Odds_Price"]  = pd.to_numeric(full_meta_df["Odds_Price"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-        
-        if "Value" in train_meta_df.columns:
-            meta_train_df["Meta_Line_Value"] = pd.to_numeric(train_meta_df["Value"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-            meta_hold_df["Meta_Line_Value"]  = pd.to_numeric(hold_meta_df["Value"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-            meta_full_df["Meta_Line_Value"]  = pd.to_numeric(full_meta_df["Value"],  errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        # Pure mixture-of-experts meta lane.  V11.5.5 deliberately removes raw
+        # Odds/Line auxiliary columns from the meta head so the stack cannot relearn
+        # an unvalidated market model behind the specialist gates.
+        _meta_train_dict = {"Meta_P_Outcome": p_outcome_oof_train}
+        _meta_hold_dict  = {"Meta_P_Outcome": p_hold_vec}
+        _meta_full_dict  = {"Meta_P_Outcome": p_full_vec}
+        if SPECIALIST_TRUST_SITUATION > 0.0:
+            _meta_train_dict["Meta_P_Situation"] = p_situation_meta_train
+            _meta_hold_dict["Meta_P_Situation"] = p_situation_hold_vec
+            _meta_full_dict["Meta_P_Situation"] = p_situation_full_vec
+        if SPECIALIST_TRUST_VALUE > 0.0:
+            _meta_train_dict["Meta_P_Value"] = p_value_meta_train
+            _meta_hold_dict["Meta_P_Value"] = p_value_hold_vec
+            _meta_full_dict["Meta_P_Value"] = p_value_full_vec
+            _meta_train_dict["Meta_Value_Reg"] = value_reg_meta_train
+            _meta_hold_dict["Meta_Value_Reg"] = pred_value_reg_hold
+            _meta_full_dict["Meta_Value_Reg"] = pred_value_reg_full
+        meta_train_df = pd.DataFrame(_meta_train_dict, index=train_meta_df.index)
+        meta_hold_df = pd.DataFrame(_meta_hold_dict, index=hold_meta_df.index)
+        meta_full_df = pd.DataFrame(_meta_full_dict, index=full_meta_df.index)
+        print(f"[META-EXPERTS] features={list(meta_train_df.columns)}")
         
         # Keep missing outcome OOF as NaN until the strict meta-fit mask is built.
         meta_train_df = meta_train_df.replace([np.inf, -np.inf], np.nan)
@@ -19672,16 +19789,48 @@ def train_sharp_model_from_bq(
         meta_fit_mask = np.isfinite(
             pd.to_numeric(meta_train_df["Meta_P_Outcome"], errors="coerce").to_numpy(dtype=np.float64)
         )
-        if int(meta_fit_mask.sum()) < max(120, int(0.20 * len(meta_fit_mask))):
+
+        # V11.5.5.1: first-level OOF coverage is intentionally sparse under rolling-origin
+        # validation.  The correct denominator is the OOF validation universe, not every
+        # historical training row.  A large book-level dataset can therefore have <20%
+        # row coverage while still containing hundreds of independent future game groups.
+        _meta_fit_n = int(meta_fit_mask.sum())
+        _meta_fit_frac = float(_meta_fit_n / max(len(meta_fit_mask), 1))
+        try:
+            _meta_group_arr = np.asarray(g_train, dtype=object).reshape(-1)
+            _meta_fit_groups = int(pd.unique(_meta_group_arr[meta_fit_mask]).size)
+        except Exception:
+            _meta_fit_groups = 0
+        _meta_fit_pos = int(np.sum(y_train[meta_fit_mask] == 1)) if _meta_fit_n else 0
+        _meta_fit_neg = int(np.sum(y_train[meta_fit_mask] == 0)) if _meta_fit_n else 0
+        print(
+            f"[META-OOF-COVERAGE] rows={_meta_fit_n:,}/{len(meta_fit_mask):,} "
+            f"({100.0*_meta_fit_frac:.2f}%) groups={_meta_fit_groups:,} "
+            f"pos={_meta_fit_pos:,} neg={_meta_fit_neg:,}"
+        )
+
+        # Fail on genuinely inadequate independent support, not on an arbitrary fraction
+        # of book rows.  The meta learner is trained only on strict first-level OOF rows.
+        _meta_min_rows = 500 if not SMALL else 120
+        _meta_min_groups = 30 if not SMALL else 12
+        if (
+            _meta_fit_n < _meta_min_rows
+            or _meta_fit_groups < _meta_min_groups
+            or _meta_fit_pos < 40
+            or _meta_fit_neg < 40
+        ):
             raise ValueError(
-                f"Insufficient OOF rows for meta training: "
-                f"{int(meta_fit_mask.sum())}/{len(meta_fit_mask)}"
+                "Insufficient independent OOF support for meta training: "
+                f"rows={_meta_fit_n} (min={_meta_min_rows}), "
+                f"groups={_meta_fit_groups} (min={_meta_min_groups}), "
+                f"pos={_meta_fit_pos}, neg={_meta_fit_neg}"
             )
 
         # Specialist OOF gaps (for rows without a valid specialist target or the
         # initial time-CV region) are intentionally neutral, never in-sample.
         for c, neutral in (("Meta_P_Situation", 0.5), ("Meta_P_Value", 0.5), ("Meta_Value_Reg", 0.0)):
-            meta_train_df[c] = pd.to_numeric(meta_train_df[c], errors="coerce").fillna(neutral)
+            if c in meta_train_df.columns:
+                meta_train_df[c] = pd.to_numeric(meta_train_df[c], errors="coerce").fillna(neutral)
         meta_train_df["Meta_P_Outcome"] = pd.to_numeric(meta_train_df["Meta_P_Outcome"], errors="coerce")
 
         st.write({
@@ -19752,10 +19901,28 @@ def train_sharp_model_from_bq(
                 logger.warning(f"Meta OOF fold {fold_no} failed: {e}")
 
         meta_oof_mask = meta_fit_mask & np.isfinite(meta_oof_raw)
-        if int(meta_oof_mask.sum()) < max(80, int(0.10 * len(meta_oof_mask))):
+        _meta_oof_n = int(meta_oof_mask.sum())
+        _meta_oof_frac_of_first = float(_meta_oof_n / max(_meta_fit_n, 1))
+        try:
+            _meta_oof_groups = int(pd.unique(_meta_group_arr[meta_oof_mask]).size)
+        except Exception:
+            _meta_oof_groups = 0
+        print(
+            f"[META-SECOND-LEVEL-OOF] rows={_meta_oof_n:,}/{_meta_fit_n:,} "
+            f"({100.0*_meta_oof_frac_of_first:.2f}% of first-level OOF) "
+            f"groups={_meta_oof_groups:,}"
+        )
+
+        # Second-level OOF is judged against the first-level OOF universe.  Requiring a
+        # percentage of every historical/book row incorrectly rejects valid rolling-origin
+        # stacks (the failure seen with 13,006 strict OOF rows out of 88,409 total rows).
+        _meta_second_min_rows = max(250 if not SMALL else 80, int(0.25 * _meta_fit_n))
+        _meta_second_min_groups = 20 if not SMALL else 8
+        if _meta_oof_n < _meta_second_min_rows or _meta_oof_groups < _meta_second_min_groups:
             raise ValueError(
-                f"Insufficient second-level meta OOF rows: "
-                f"{int(meta_oof_mask.sum())}/{len(meta_oof_mask)}"
+                "Insufficient second-level meta OOF support: "
+                f"rows={_meta_oof_n} (min={_meta_second_min_rows}; first_level={_meta_fit_n}), "
+                f"groups={_meta_oof_groups} (min={_meta_second_min_groups})"
             )
 
         # Final deploy meta model: train on all first-level OOF rows.
@@ -19892,19 +20059,26 @@ def train_sharp_model_from_bq(
         except Exception:
             META_OOF_AUC = float("nan")
 
-        if not np.isfinite(META_OOF_AUC) or META_OOF_AUC <= 0.505:
-            META_WEIGHT = 0.00
+        _specialist_trust_max = float(max(SPECIALIST_TRUST_SITUATION, SPECIALIST_TRUST_VALUE))
+        _trusted_specialist_count = int(SPECIALIST_TRUST_SITUATION > 0.0) + int(SPECIALIST_TRUST_VALUE > 0.0)
+        if _trusted_specialist_count == 0 or not np.isfinite(META_OOF_AUC) or META_OOF_AUC <= 0.505:
+            _meta_weight_base = 0.00
         elif META_OOF_AUC < 0.525:
-            META_WEIGHT = 0.10
+            _meta_weight_base = 0.10
         elif META_OOF_AUC < 0.550:
-            META_WEIGHT = 0.20
+            _meta_weight_base = 0.20
         elif META_OOF_AUC < 0.575:
-            META_WEIGHT = 0.30
+            _meta_weight_base = 0.30
         else:
-            META_WEIGHT = 0.40
+            _meta_weight_base = 0.40
+        # A weak specialist can never earn more deployment influence than its own
+        # later-shadow trust supports.
+        META_WEIGHT = float(_meta_weight_base * _specialist_trust_max)
+        if META_WEIGHT < 0.025:
+            META_WEIGHT = 0.0
 
         OUTCOME_WEIGHT = 1.0 - META_WEIGHT
-        META_WEIGHT_POLICY = "oof_auc_step_v2_deadzone_0505"
+        META_WEIGHT_POLICY = "oof_auc_x_specialist_shadow_trust_v3"
 
         p_outcome_train_for_meta = np.where(
             np.isfinite(p_outcome_oof_train), p_outcome_oof_train, p_train_vec
@@ -19932,6 +20106,9 @@ def train_sharp_model_from_bq(
             "meta_weight_policy": META_WEIGHT_POLICY,
             "meta_weight": float(META_WEIGHT),
             "outcome_weight": float(OUTCOME_WEIGHT),
+            "specialist_trust_situation": float(SPECIALIST_TRUST_SITUATION),
+            "specialist_trust_value": float(SPECIALIST_TRUST_VALUE),
+            "trusted_specialist_count": int(_trusted_specialist_count),
         })
 
         # Diagnostics for outcome-calibrated probabilities
@@ -20307,6 +20484,18 @@ def train_sharp_model_from_bq(
                         np.mean(yhvr_valid[mask_top])
                     )
 
+        # V11.5.5 betting decisions are rank/edge based.  Keep p>=0.50 accuracy
+        # only as a legacy diagnostic/promotion input; do not interpret it as the
+        # operational betting threshold.
+        try:
+            _hold_odds = pd.to_numeric(hold_meta_df.get("Odds_Price"), errors="coerce").to_numpy(dtype=float) if "Odds_Price" in hold_meta_df.columns else None
+            if _hold_odds is not None:
+                _imp = np.where(_hold_odds < 0, (-_hold_odds)/((-_hold_odds)+100.0), 100.0/(_hold_odds+100.0))
+                _edge = np.asarray(final_bet_score_hold,dtype=float)-_imp
+                print(f"[BET-DECISION-DIAGNOSTIC] edge_positive={float(np.mean(_edge>0)):.2%} edge_ge_2pct={float(np.mean(_edge>=0.02)):.2%} p50_positive={float(np.mean(np.asarray(final_bet_score_hold)>=0.5)):.2%}")
+        except Exception:
+            pass
+
         artifact_metrics = None
         artifact_config  = None
         if return_artifacts:
@@ -20342,7 +20531,7 @@ def train_sharp_model_from_bq(
                 "flip_flag": bool(flip_flag),
                 "blend_w": float(best_w),
         
-                "model_family": "three_head_plus_meta_v4_structure_stable_overlay",
+                "model_family": "three_head_plus_meta_v5_specialist_gated",
                 "feature_cols_outcome": list(feature_cols_outcome),
                 "feature_cols_situation": list(feature_cols_situation),
                 "feature_cols_value": list(feature_cols_value),
@@ -20352,14 +20541,19 @@ def train_sharp_model_from_bq(
                 "meta_weight_policy": META_WEIGHT_POLICY,
                 "meta_weight": float(META_WEIGHT),
                 "outcome_weight": float(OUTCOME_WEIGHT),
-                "stacking_train_mode": "oof_post_autofs",
+                "specialist_trust_situation": float(SPECIALIST_TRUST_SITUATION),
+                "specialist_trust_value": float(SPECIALIST_TRUST_VALUE),
+                "specialist_shadow_situation": dict(SPECIALIST_SHADOW_SITUATION),
+                "specialist_shadow_value": dict(SPECIALIST_SHADOW_VALUE),
+                "stacking_train_mode": "strict_rolling_oof_group_supported_v11_5_5_1",
+                "meta_oof_coverage_contract": "absolute_rows_plus_independent_groups__not_fraction_of_all_book_rows",
                     "head_feature_family_policy": "specialist_domains_plus_conditional_overlay_v2",
                 "situation_target": "realized_outcome",
                 "value_cls_target": "realized_outcome_on_value_rows",
                 "value_reg_target": "synthetic_ex_ante_ev",
                 "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
-                "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_shadow_structure_gate_v11_5_4",
-                "feature_stability_method": "weighted_rolling_origin_plus_shadow_permutation_v3",
+                "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_late_shadow_specialist_gate_meta_oof_coverage_v11_5_5_1",
+                "feature_stability_method": "weighted_rolling_origin_plus_late_shadow_permutation_v4",
                 "feature_stability_outcome": (
                     autofs_outcome.get("feature_stability", pd.DataFrame()).reset_index().to_dict("records")
                     if autofs_outcome is not None else []
@@ -20415,6 +20609,7 @@ def train_sharp_model_from_bq(
                     "value": recency_value_halflife,
                 },
                 "weighting_contract": "outcome_situation_equal_game_side_total__value_quote_level",
+                "decision_policy": "rank_and_edge_vs_implied_probability__p50_accuracy_diagnostic_only",
             }
 
         # -------------------------------------------------------------------
@@ -20469,7 +20664,7 @@ def train_sharp_model_from_bq(
             "meta_calibrator":      (meta_cal_name, meta_cal_obj),
         
             "multihead_config": {
-                "model_family": "three_head_plus_meta_v4_structure_stable_overlay",
+                "model_family": "three_head_plus_meta_v5_specialist_gated",
                 "outcome_head": "model_logloss/model_auc + iso_blend",
                 "situation_head": "model_situation_cls",
                 "value_cls_head": "model_value_cls",
@@ -20480,15 +20675,21 @@ def train_sharp_model_from_bq(
                 "meta_weight_policy": META_WEIGHT_POLICY,
                 "meta_weight": float(META_WEIGHT),
                 "outcome_weight": float(OUTCOME_WEIGHT),
-                "stacking_train_mode": "oof_post_autofs",
+                "specialist_trust_situation": float(SPECIALIST_TRUST_SITUATION),
+                "specialist_trust_value": float(SPECIALIST_TRUST_VALUE),
+                "specialist_shadow_situation": dict(SPECIALIST_SHADOW_SITUATION),
+                "specialist_shadow_value": dict(SPECIALIST_SHADOW_VALUE),
+                "stacking_train_mode": "strict_rolling_oof_group_supported_v11_5_5_1",
+                "meta_oof_coverage_contract": "absolute_rows_plus_independent_groups__not_fraction_of_all_book_rows",
                     "head_feature_family_policy": "specialist_domains_plus_conditional_overlay_v2",
                 "situation_target": "realized_outcome",
                 "value_cls_target": "realized_outcome_on_value_rows",
                 "value_reg_target": "synthetic_ex_ante_ev",
                 "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
-                "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_shadow_structure_gate_v11_5_4",
-                "feature_stability_method": "weighted_rolling_origin_plus_shadow_permutation_v3",
+                "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_late_shadow_specialist_gate_meta_oof_coverage_v11_5_5_1",
+                "feature_stability_method": "weighted_rolling_origin_plus_late_shadow_permutation_v4",
                 "weighting_contract": "outcome_situation_equal_game_side_total__value_quote_level",
+                "decision_policy": "rank_and_edge_vs_implied_probability__p50_accuracy_diagnostic_only",
                 "recency_halflife_days": {"outcome": recency_outcome_halflife, "situation": recency_situation_halflife, "value": recency_value_halflife},
                 "overlay_lane": "conditional_active_row_residual_uplift_with_sample_shrinkage",
                 "overlay_trust_map_outcome": (autofs_outcome.get("overlay_trust_map", {}) if autofs_outcome is not None else {}),
@@ -20525,23 +20726,29 @@ def train_sharp_model_from_bq(
                 "meta_calibrator":     (meta_cal_name, meta_cal_obj),
         
                 "multihead_config": {
-                    "schema_version": 2,
-                    "model_family": "three_head_plus_meta_v4_structure_stable_overlay",
+                    "schema_version": 3,
+                    "model_family": "three_head_plus_meta_v5_specialist_gated",
                     "meta_features": list(meta_train_df.columns),
                     "meta_calibrator": str(meta_cal_name),
                     "meta_oof_auc_for_weight": (None if not np.isfinite(META_OOF_AUC) else float(META_OOF_AUC)),
                     "meta_weight_policy": META_WEIGHT_POLICY,
                     "meta_weight": float(META_WEIGHT),
                     "outcome_weight": float(OUTCOME_WEIGHT),
-                    "stacking_train_mode": "oof_post_autofs",
+                    "specialist_trust_situation": float(SPECIALIST_TRUST_SITUATION),
+                    "specialist_trust_value": float(SPECIALIST_TRUST_VALUE),
+                    "specialist_shadow_situation": dict(SPECIALIST_SHADOW_SITUATION),
+                    "specialist_shadow_value": dict(SPECIALIST_SHADOW_VALUE),
+                    "stacking_train_mode": "strict_rolling_oof_group_supported_v11_5_5_1",
+                "meta_oof_coverage_contract": "absolute_rows_plus_independent_groups__not_fraction_of_all_book_rows",
                     "head_feature_family_policy": "specialist_domains_plus_conditional_overlay_v2",
                 "situation_target": "realized_outcome",
                 "value_cls_target": "realized_outcome_on_value_rows",
                 "value_reg_target": "synthetic_ex_ante_ev",
                 "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
-                "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_shadow_structure_gate_v11_5_4",
-                "feature_stability_method": "weighted_rolling_origin_plus_shadow_permutation_v3",
+                "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_late_shadow_specialist_gate_meta_oof_coverage_v11_5_5_1",
+                "feature_stability_method": "weighted_rolling_origin_plus_late_shadow_permutation_v4",
                 "weighting_contract": "outcome_situation_equal_game_side_total__value_quote_level",
+                "decision_policy": "rank_and_edge_vs_implied_probability__p50_accuracy_diagnostic_only",
                 "recency_halflife_days": {"outcome": recency_outcome_halflife, "situation": recency_situation_halflife, "value": recency_value_halflife},
                 "overlay_lane": "conditional_active_row_residual_uplift_with_sample_shrinkage",
                 "overlay_trust_map_outcome": (autofs_outcome.get("overlay_trust_map", {}) if autofs_outcome is not None else {}),
