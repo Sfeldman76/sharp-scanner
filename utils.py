@@ -6002,6 +6002,7 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         "three_head_plus_meta_v5_3_specialist_calibration_wired",
         "three_head_plus_meta_v5_6_always_on_handicapper_overlays",
         "three_head_plus_meta_v5_6_1_hard_handicapper_overlay_contract",
+        "three_head_plus_meta_v5_7_conservative_meta_earlystop",
     }
     if family and family not in _supported_multihead_families:
         logger.warning("⚠️ Unsupported multihead model family %s; using outcome-only fallback", family)
@@ -10771,7 +10772,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.6.1-hard-handicapper-overlay-contract"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.7-conservative-meta-earlystop"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
