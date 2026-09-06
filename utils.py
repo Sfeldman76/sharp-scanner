@@ -6003,6 +6003,7 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         "three_head_plus_meta_v5_6_always_on_handicapper_overlays",
         "three_head_plus_meta_v5_6_1_hard_handicapper_overlay_contract",
         "three_head_plus_meta_v5_7_conservative_meta_earlystop",
+        "three_head_plus_meta_v5_8_residual_meta_49pct_stability",
     }
     if family and family not in _supported_multihead_families:
         logger.warning("⚠️ Unsupported multihead model family %s; using outcome-only fallback", family)
@@ -6246,10 +6247,9 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         )
         return outcome_prob
 
-    combined = (
-        outcome_weight * outcome_prob
-        + meta_weight * meta_prob
-    )
+    # V11.5.8 residual-meta deployment contract: specialists may only
+    # correct the Outcome probability by the saved deployment weight.
+    combined = outcome_prob + meta_weight * (meta_prob - outcome_prob)
 
     logger.info(
         "🧠 Applying saved final probability blend: outcome=%.0f%% meta=%.0f%%",
@@ -10772,7 +10772,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.7-conservative-meta-earlystop"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.8-residual-meta-49pct-stability"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
