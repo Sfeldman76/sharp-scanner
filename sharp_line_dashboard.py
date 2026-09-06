@@ -7851,7 +7851,7 @@ def _auto_select_k_by_auc(
             if len(_try_fs) >= 3 and len(_try_fs) == len(_best_fs):
                 _fd = _try_fs - _best_fs
                 _fold_positive_frac = float(np.mean(_fd > 0.0))
-                _fold_consistency_ok = bool(_fold_positive_frac >= 0.60)
+                _fold_consistency_ok = bool(_fold_positive_frac >= 0.49)
         except Exception:
             _fold_consistency_ok = True
 
@@ -7878,7 +7878,7 @@ def _auto_select_k_by_auc(
             rejects_in_row += 1
             if verbose and np.isfinite(_fold_positive_frac) and not _fold_consistency_ok:
                 log_func(
-                    f"[AUTO-FEAT] reject +{feat}: fold-consistency={_fold_positive_frac:.0%} < 60%"
+                    f"[AUTO-FEAT] reject +{feat}: fold-consistency={_fold_positive_frac:.0%} < 49%"
                 )
 
         if debug and (i % int(max(1, debug_every)) == 0):
@@ -19256,7 +19256,7 @@ def train_sharp_model_from_bq(
             # V11.5.7: trust the weakest future transition, not just the pooled
             # average.  A specialist that is excellent in two windows and nearly
             # coin-flip/inverted in another should not earn near-1.0 trust.
-            # V11.5.8: a specialist must survive every future transition.
+            # V11.5.8.1: a specialist must survive every future transition.
             # Any inverted fold fails closed.  A merely positive but weak worst
             # fold (0.500-0.515) may contribute only a token residual correction.
             min_positive_frac = 1.0 if len(fold_aucs) >= 3 else 0.50
@@ -20265,7 +20265,7 @@ def train_sharp_model_from_bq(
             if _meta_cal_selected_kind != _meta_expected_kind:
                 raise RuntimeError(f"Meta calibration propagation mismatch: selected={_meta_expected_kind} active={_meta_cal_selected_kind}")
 
-        # V11.5.8 calibration fail-closed: a flexible calibrator must improve
+        # V11.5.8.1 calibration fail-closed: a flexible calibrator must improve
         # BOTH proper scoring rules on the same strict OOF rows and must not
         # materially worsen calibration monotonicity. Otherwise use identity.
         def _meta_cal_mono(yv, pv, bins=8):
@@ -20353,7 +20353,7 @@ def train_sharp_model_from_bq(
         _specialist_support = float(np.mean(_trusted_trust_values)) if _trusted_trust_values else 0.0
 
         # ---------------------------------------------------------------
-        # V11.5.8 LEAKAGE-SAFE RESIDUAL META GATE
+        # V11.5.8.1 LEAKAGE-SAFE RESIDUAL META GATE
         # ---------------------------------------------------------------
         # Meta is allowed to make only a small correction to Outcome, and only
         # when it improves the SAME strict second-level OOF rows on ranking and
