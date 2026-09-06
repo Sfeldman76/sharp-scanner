@@ -404,7 +404,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.7-conservative-meta-earlystop"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.8-residual-meta-49pct-stability"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -6426,7 +6426,7 @@ def shap_stability_select(
     y: np.ndarray,
     folds, *,
     topk_per_fold: int = 200,
-    min_presence: float = 0.50,
+    min_presence: float = 0.49,
     max_keep: int | None = None,
     sample_per_fold: int = None,
     random_state: int = 42,
@@ -7931,7 +7931,7 @@ def select_features_auto(
     max_feats_major: int = 220,
     max_feats_small: int = 160,
     topk_per_fold: int = 200,
-    min_presence: float = 0.50,
+    min_presence: float = 0.49,
     sign_flip_max: float = 0.35,
     shap_cv_max: float = 1.00,
 
@@ -8128,6 +8128,8 @@ def select_features_auto(
     
     F = len(folds_list)
     if F >= 2 and int(topk_per_fold) > 0:
+        if verbose:
+            print(f"[FOLD-PRESENCE-CONTRACT] folds={F} min_presence={float(min_presence):.2f} (features at 50% presence remain eligible)")
         K = int(max(10, topk_per_fold))
         votes = np.zeros(len(usable_idx), dtype=np.int16)
         pos   = np.zeros(len(usable_idx), dtype=np.int16)
@@ -19254,27 +19256,28 @@ def train_sharp_model_from_bq(
             # V11.5.7: trust the weakest future transition, not just the pooled
             # average.  A specialist that is excellent in two windows and nearly
             # coin-flip/inverted in another should not earn near-1.0 trust.
-            min_positive_frac = (2.0/3.0) if len(fold_aucs) >= 3 else 0.50
+            # V11.5.8: a specialist must survive every future transition.
+            # Any inverted fold fails closed.  A merely positive but weak worst
+            # fold (0.500-0.515) may contribute only a token residual correction.
+            min_positive_frac = 1.0 if len(fold_aucs) >= 3 else 0.50
             if (
                 (not np.isfinite(pooled_auc)) or pooled_auc <= 0.505
                 or mean_auc <= 0.505
                 or pos_frac < min_positive_frac
-                or min_auc < 0.490
+                or min_auc < 0.500
             ):
                 trust = 0.0
             else:
                 pooled_factor = float(np.clip((pooled_auc - 0.505) / 0.055, 0.0, 1.0))
                 mean_factor = float(np.clip((mean_auc - 0.505) / 0.045, 0.0, 1.0))
-                worst_factor = float(np.clip((min_auc - 0.490) / 0.035, 0.0, 1.0))
+                worst_margin = float(min_auc - 0.500)
+                worst_factor = float(np.clip(worst_margin / 0.035, 0.0, 1.0))
                 consistency_factor = float(np.clip(pos_frac, 0.0, 1.0))
                 trust = min(pooled_factor, mean_factor, worst_factor, consistency_factor)
-                # Sparse evidence should accumulate before a specialist can receive
-                # full portfolio-level authority.  Three shadow windows can earn at
-                # most 50%; four at most 75%; five or more may earn full trust.
                 evidence_ceiling = 0.50 if len(fold_aucs) <= 3 else (0.75 if len(fold_aucs) == 4 else 1.00)
                 trust = float(min(trust, evidence_ceiling))
-                if min_auc < 0.505:
-                    trust = min(trust, 0.20)
+                if min_auc < 0.515:
+                    trust = min(trust, 0.10)
             result.update({
                 "valid_folds": int(len(fold_aucs)),
                 "positive_folds": int(sum(a > 0.5 for a in fold_aucs)),
@@ -19283,11 +19286,12 @@ def train_sharp_model_from_bq(
                 "mean_fold_auc": float(mean_auc),
                 "median_fold_auc": float(median_auc),
                 "min_fold_auc": float(min_auc),
+                "min_fold_margin": float(min_auc - 0.500),
                 "trust": float(trust),
             })
             print(
                 f"[SPECIALIST-SHADOW:{label}] pooled_auc={pooled_auc:.4f} mean_auc={mean_auc:.4f} "
-                f"median_auc={median_auc:.4f} min_auc={min_auc:.4f} "
+                f"median_auc={median_auc:.4f} min_auc={min_auc:.4f} min_margin={min_auc-0.500:+.4f} "
                 f"positive={sum(a>0.5 for a in fold_aucs)}/{len(fold_aucs)} ({pos_frac:.0%}) trust={trust:.3f}"
             )
             return result
@@ -20260,7 +20264,41 @@ def train_sharp_model_from_bq(
             _meta_expected_kind = str(_roll_meta_cal[0])
             if _meta_cal_selected_kind != _meta_expected_kind:
                 raise RuntimeError(f"Meta calibration propagation mismatch: selected={_meta_expected_kind} active={_meta_cal_selected_kind}")
-        print(f"[CAL-PROPAGATION:meta] selected={_meta_cal_selected_kind} active={_meta_cal_selected_kind} PASS")
+
+        # V11.5.8 calibration fail-closed: a flexible calibrator must improve
+        # BOTH proper scoring rules on the same strict OOF rows and must not
+        # materially worsen calibration monotonicity. Otherwise use identity.
+        def _meta_cal_mono(yv, pv, bins=8):
+            try:
+                q = pd.qcut(pd.Series(pv), q=min(int(bins), max(2, len(np.unique(pv)))), duplicates="drop")
+                d = pd.DataFrame({"y": yv, "p": pv, "q": q}).groupby("q", observed=True).agg(p=("p","mean"), y=("y","mean"))
+                return float(d["p"].corr(d["y"], method="spearman")) if len(d) >= 3 else float("nan")
+            except Exception:
+                return float("nan")
+
+        _id_meta = np.asarray(np.clip(_meta_oof_x, CLIP, 1.0-CLIP), dtype=np.float64)
+        try:
+            _sel_meta = np.asarray(np.clip(_apply_cal(meta_cal_name, meta_cal_obj, _meta_oof_x), CLIP, 1.0-CLIP), dtype=np.float64)
+            _id_ll = float(log_loss(_meta_oof_y, _id_meta, labels=[0,1]))
+            _sel_ll = float(log_loss(_meta_oof_y, _sel_meta, labels=[0,1]))
+            _id_br = float(brier_score_loss(_meta_oof_y, _id_meta))
+            _sel_br = float(brier_score_loss(_meta_oof_y, _sel_meta))
+            _id_mono = _meta_cal_mono(_meta_oof_y, _id_meta)
+            _sel_mono = _meta_cal_mono(_meta_oof_y, _sel_meta)
+            _mono_ok = (not np.isfinite(_id_mono)) or (not np.isfinite(_sel_mono)) or (_sel_mono >= _id_mono - 0.02)
+            _cal_improves = bool((_sel_ll < _id_ll - 1e-5) and (_sel_br < _id_br - 1e-6) and _mono_ok)
+            if str(meta_cal_name).lower() != "identity" and not _cal_improves:
+                print(f"[META-CAL-FAILCLOSED] selected={meta_cal_name} -> identity | ll { _sel_ll:.6f} vs {_id_ll:.6f} | brier {_sel_br:.6f} vs {_id_br:.6f} | mono {_sel_mono:.3f} vs {_id_mono:.3f}")
+                meta_cal_name, meta_cal_obj = "identity", _IdentityIsoCal(eps=1e-6)
+                _meta_cal_selected_kind = "identity"
+            else:
+                print(f"[META-CAL-FAILCLOSED] selected={meta_cal_name} retained | ll {_sel_ll:.6f} vs {_id_ll:.6f} | brier {_sel_br:.6f} vs {_id_br:.6f} | mono {_sel_mono:.3f} vs {_id_mono:.3f}")
+        except Exception as _cal_gate_err:
+            print(f"[META-CAL-FAILCLOSED] audit failed ({_cal_gate_err}); forcing identity")
+            meta_cal_name, meta_cal_obj = "identity", _IdentityIsoCal(eps=1e-6)
+            _meta_cal_selected_kind = "identity"
+
+        print(f"[CAL-PROPAGATION:meta] selected={_meta_cal_selected_kind} active={str(meta_cal_name)} PASS")
 
         # Calibrated meta component. Train uses OOF raw predictions; hold/full use
         # the deploy model. Rows without second-level OOF get neutral meta weight.
@@ -20314,37 +20352,126 @@ def train_sharp_model_from_bq(
         _trusted_specialist_count = len(_trusted_trust_values)
         _specialist_support = float(np.mean(_trusted_trust_values)) if _trusted_trust_values else 0.0
 
-        # V11.5.7 conservative mixture-of-experts policy.  Meta must earn its
-        # influence from strict second-level OOF, then be shrunk again by the
-        # weakest-window specialist evidence.  No internal diagnostic can grant
-        # more than 10% deployment authority on its own.
-        if _trusted_specialist_count == 0 or not np.isfinite(META_OOF_AUC) or META_OOF_AUC <= 0.515:
-            _meta_weight_base = 0.00
-        elif META_OOF_AUC < 0.535:
-            _meta_weight_base = 0.025
-        elif META_OOF_AUC < 0.555:
-            _meta_weight_base = 0.050
-        elif META_OOF_AUC < 0.575:
-            _meta_weight_base = 0.075
-        else:
-            _meta_weight_base = 0.100
+        # ---------------------------------------------------------------
+        # V11.5.8 LEAKAGE-SAFE RESIDUAL META GATE
+        # ---------------------------------------------------------------
+        # Meta is allowed to make only a small correction to Outcome, and only
+        # when it improves the SAME strict second-level OOF rows on ranking and
+        # probability error.  The untouched outer holdout remains diagnostic only.
+        _out_oof_gate = np.asarray(p_outcome_oof_train[meta_oof_mask], dtype=np.float64)
+        _meta_oof_gate = np.asarray(_meta_oof_prob_for_weight, dtype=np.float64)
+        _gate_y = np.asarray(_meta_oof_y, dtype=int)
 
-        # When the core head has ranking signal but almost no probability
-        # separation, do not allow a larger-amplitude specialist stack to swamp
-        # that ordering.
+        def _safe_auc(yv, pv):
+            try:
+                return float(roc_auc_score(yv, pv)) if np.unique(yv).size == 2 else float("nan")
+            except Exception:
+                return float("nan")
+
+        def _safe_ll(yv, pv):
+            try:
+                return float(log_loss(yv, np.clip(pv, CLIP, 1.0-CLIP), labels=[0,1]))
+            except Exception:
+                return float("nan")
+
+        def _safe_brier(yv, pv):
+            try:
+                return float(brier_score_loss(yv, np.clip(pv, CLIP, 1.0-CLIP)))
+            except Exception:
+                return float("nan")
+
+        def _cal_monotonicity(yv, pv, bins=8):
+            try:
+                q = pd.qcut(pd.Series(pv), q=min(int(bins), max(2, len(np.unique(pv)))), duplicates="drop")
+                d = pd.DataFrame({"y": yv, "p": pv, "q": q}).groupby("q", observed=True).agg(p=("p","mean"), y=("y","mean"))
+                if len(d) < 3:
+                    return float("nan")
+                return float(d["p"].corr(d["y"], method="spearman"))
+            except Exception:
+                return float("nan")
+
+        OUTCOME_OOF_AUC = _safe_auc(_gate_y, _out_oof_gate)
+        OUTCOME_OOF_LL = _safe_ll(_gate_y, _out_oof_gate)
+        OUTCOME_OOF_BRIER = _safe_brier(_gate_y, _out_oof_gate)
+        META_OOF_LL = _safe_ll(_gate_y, _meta_oof_gate)
+        META_OOF_BRIER = _safe_brier(_gate_y, _meta_oof_gate)
+        OUTCOME_OOF_MONO = _cal_monotonicity(_gate_y, _out_oof_gate)
+        META_OOF_MONO = _cal_monotonicity(_gate_y, _meta_oof_gate)
+        META_INCREMENTAL_AUC = float(META_OOF_AUC - OUTCOME_OOF_AUC) if np.isfinite(META_OOF_AUC) and np.isfinite(OUTCOME_OOF_AUC) else float("nan")
+
+        # Residual correction audit: when Meta disagrees with Outcome, does the
+        # correction more often move probability toward the realized target?
+        _corr = _meta_oof_gate - _out_oof_gate
+        _corr_mask = np.isfinite(_corr) & (np.abs(_corr) >= 0.002)
+        if np.any(_corr_mask):
+            _err_out = np.abs(_gate_y[_corr_mask] - _out_oof_gate[_corr_mask])
+            _err_meta = np.abs(_gate_y[_corr_mask] - _meta_oof_gate[_corr_mask])
+            META_CORRECTION_WIN_RATE = float(np.mean(_err_meta < _err_out))
+        else:
+            META_CORRECTION_WIN_RATE = float("nan")
+
+        # Temporal distribution stability uses only OOF rows, split in time.
+        # This avoids peeking at the untouched outer holdout to decide deployment.
+        try:
+            _meta_times = pd.to_datetime(np.asarray(t_train)[meta_oof_mask], utc=True, errors="coerce")
+            _ord = np.argsort(np.asarray(_meta_times.view("int64")))
+            _mid = max(1, len(_ord)//2)
+            _early = _meta_oof_gate[_ord[:_mid]]
+            _late = _meta_oof_gate[_ord[_mid:]]
+            META_OOF_TEMPORAL_PSI = float(population_stability_index(_early, _late, bins=20)) if len(_late) else float("nan")
+        except Exception:
+            META_OOF_TEMPORAL_PSI = float("nan")
+
+        _incremental_pass = bool(
+            _trusted_specialist_count > 0
+            and np.isfinite(META_INCREMENTAL_AUC) and META_INCREMENTAL_AUC >= 0.005
+            and np.isfinite(META_OOF_LL) and np.isfinite(OUTCOME_OOF_LL) and META_OOF_LL <= OUTCOME_OOF_LL - 0.0005
+            and np.isfinite(META_OOF_BRIER) and np.isfinite(OUTCOME_OOF_BRIER) and META_OOF_BRIER <= OUTCOME_OOF_BRIER - 0.0002
+            and (not np.isfinite(META_OOF_MONO) or not np.isfinite(OUTCOME_OOF_MONO) or META_OOF_MONO >= OUTCOME_OOF_MONO - 0.05)
+            and (not np.isfinite(META_CORRECTION_WIN_RATE) or META_CORRECTION_WIN_RATE >= 0.52)
+        )
+
+        if not _incremental_pass:
+            _meta_weight_base = 0.0
+        elif META_INCREMENTAL_AUC < 0.010:
+            _meta_weight_base = 0.025
+        else:
+            _meta_weight_base = 0.050
+
+        # Maximum specialist authority is now 5%, and compressed Outcome heads
+        # receive an even smaller correction budget.
         _sep_class = str(locals().get("OUTCOME_SEPARATION_CLASS", "normal"))
-        _meta_weight_cap = 0.050 if _sep_class == "ranking_only" else (0.075 if _sep_class in {"very_weak", "weak"} else 0.100)
+        _meta_weight_cap = 0.025 if _sep_class == "ranking_only" else 0.050
         _meta_weight_base = min(float(_meta_weight_base), float(_meta_weight_cap))
 
-        META_WEIGHT = float(_meta_weight_base * _specialist_support)
-        if META_WEIGHT < 0.015:
+        # Leakage-safe PSI fail-closed policy.
+        if np.isfinite(META_OOF_TEMPORAL_PSI):
+            if META_OOF_TEMPORAL_PSI > 1.0:
+                _psi_factor = 0.0
+            elif META_OOF_TEMPORAL_PSI > 0.50:
+                _psi_factor = 0.10
+            elif META_OOF_TEMPORAL_PSI > 0.25:
+                _psi_factor = 0.50
+            else:
+                _psi_factor = 1.0
+        else:
+            _psi_factor = 0.50
+
+        META_WEIGHT = float(_meta_weight_base * _specialist_support * _psi_factor)
+        if META_WEIGHT < 0.010:
             META_WEIGHT = 0.0
 
         OUTCOME_WEIGHT = 1.0 - META_WEIGHT
-        META_WEIGHT_POLICY = "conservative_oof_x_worst_shadow_support_v4"
+        META_WEIGHT_POLICY = "residual_incremental_oof_psi_failclosed_v5"
         print(
-            f"[META-ROBUST] oof_auc={META_OOF_AUC:.4f} specialist_support={_specialist_support:.3f} "
-            f"separation={_sep_class} base={_meta_weight_base:.3f} "
+            f"[META-INCREMENTAL] outcome_auc={OUTCOME_OOF_AUC:.4f} meta_auc={META_OOF_AUC:.4f} "
+            f"delta_auc={META_INCREMENTAL_AUC:+.4f} outcome_ll={OUTCOME_OOF_LL:.5f} meta_ll={META_OOF_LL:.5f} "
+            f"outcome_brier={OUTCOME_OOF_BRIER:.5f} meta_brier={META_OOF_BRIER:.5f} "
+            f"outcome_mono={OUTCOME_OOF_MONO:.3f} meta_mono={META_OOF_MONO:.3f} correction_win={META_CORRECTION_WIN_RATE:.3f} pass={_incremental_pass}"
+        )
+        print(
+            f"[META-ROBUST] specialist_support={_specialist_support:.3f} temporal_psi={META_OOF_TEMPORAL_PSI:.3f} "
+            f"psi_factor={_psi_factor:.2f} separation={_sep_class} base={_meta_weight_base:.3f} "
             f"meta_weight={META_WEIGHT:.3f} outcome_weight={OUTCOME_WEIGHT:.3f}"
         )
 
@@ -20353,15 +20480,15 @@ def train_sharp_model_from_bq(
         ).astype(np.float64)
 
         final_bet_score_train = np.clip(
-            OUTCOME_WEIGHT * p_outcome_train_for_meta + META_WEIGHT * meta_prob_train,
+            p_outcome_train_for_meta + META_WEIGHT * (meta_prob_train - p_outcome_train_for_meta),
             CLIP, 1.0 - CLIP,
         ).astype(np.float64)
         final_bet_score_hold = np.clip(
-            OUTCOME_WEIGHT * p_hold_vec + META_WEIGHT * meta_prob_hold,
+            p_hold_vec + META_WEIGHT * (meta_prob_hold - p_hold_vec),
             CLIP, 1.0 - CLIP,
         ).astype(np.float64)
         final_bet_score_full = np.clip(
-            OUTCOME_WEIGHT * p_full_vec + META_WEIGHT * meta_prob_full,
+            p_full_vec + META_WEIGHT * (meta_prob_full - p_full_vec),
             CLIP, 1.0 - CLIP,
         ).astype(np.float64)
 
@@ -20372,6 +20499,11 @@ def train_sharp_model_from_bq(
             "meta_std_ratio_after_cal": (None if not np.isfinite(meta_std_ratio) else float(meta_std_ratio)),
             "meta_oof_auc_for_weight": (None if not np.isfinite(META_OOF_AUC) else float(META_OOF_AUC)),
             "meta_weight_policy": META_WEIGHT_POLICY,
+            "meta_residual_mode": True,
+            "meta_incremental_auc": (None if not np.isfinite(META_INCREMENTAL_AUC) else float(META_INCREMENTAL_AUC)),
+            "meta_incremental_pass": bool(_incremental_pass),
+            "meta_oof_temporal_psi": (None if not np.isfinite(META_OOF_TEMPORAL_PSI) else float(META_OOF_TEMPORAL_PSI)),
+            "meta_correction_win_rate": (None if not np.isfinite(META_CORRECTION_WIN_RATE) else float(META_CORRECTION_WIN_RATE)),
             "meta_weight": float(META_WEIGHT),
             "outcome_weight": float(OUTCOME_WEIGHT),
             "specialist_trust_situation": float(SPECIALIST_TRUST_SITUATION),
@@ -20806,7 +20938,7 @@ def train_sharp_model_from_bq(
                 "flip_flag": bool(flip_flag),
                 "blend_w": float(best_w),
         
-                "model_family": "three_head_plus_meta_v5_7_conservative_meta_earlystop",
+                "model_family": "three_head_plus_meta_v5_8_residual_meta_49pct_stability",
                 "feature_cols_outcome": list(feature_cols_outcome),
                 "feature_cols_situation": list(feature_cols_situation),
                 "feature_cols_value": list(feature_cols_value),
@@ -20828,7 +20960,7 @@ def train_sharp_model_from_bq(
                 "value_reg_target": "synthetic_ex_ante_ev",
                 "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
                 "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_late_shadow_specialist_gate_meta_oof_coverage_calibration_wired_v11_5_5_3",
-                "feature_stability_method": "weighted_rolling_origin_plus_late_shadow_permutation_v4",
+                "feature_stability_method": "weighted_rolling_origin_plus_late_shadow_permutation_v5_min_presence_49pct",
                 "feature_stability_outcome": (
                     autofs_outcome.get("feature_stability", pd.DataFrame()).reset_index().to_dict("records")
                     if autofs_outcome is not None else []
@@ -20942,7 +21074,7 @@ def train_sharp_model_from_bq(
             "meta_calibrator":      (meta_cal_name, meta_cal_obj),
         
             "multihead_config": {
-                "model_family": "three_head_plus_meta_v5_7_conservative_meta_earlystop",
+                "model_family": "three_head_plus_meta_v5_8_residual_meta_49pct_stability",
                 "outcome_head": "model_logloss/model_auc + iso_blend",
                 "situation_head": "model_situation_cls",
                 "value_cls_head": "model_value_cls",
@@ -20965,7 +21097,7 @@ def train_sharp_model_from_bq(
                 "value_reg_target": "synthetic_ex_ante_ev",
                 "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
                 "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_late_shadow_specialist_gate_meta_oof_coverage_calibration_wired_v11_5_5_3",
-                "feature_stability_method": "weighted_rolling_origin_plus_late_shadow_permutation_v4",
+                "feature_stability_method": "weighted_rolling_origin_plus_late_shadow_permutation_v5_min_presence_49pct",
                 "weighting_contract": "outcome_situation_equal_game_side_total__value_quote_level",
                 "decision_policy": "rank_and_edge_vs_implied_probability__p50_accuracy_diagnostic_only",
                 "calibration_contract": "rolling_selector_identity_platt_iso__selected_kind_must_equal_saved_runtime_kind_v11_5_5_3",
@@ -21008,7 +21140,7 @@ def train_sharp_model_from_bq(
         
                 "multihead_config": {
                     "schema_version": 3,
-                    "model_family": "three_head_plus_meta_v5_7_conservative_meta_earlystop",
+                    "model_family": "three_head_plus_meta_v5_8_residual_meta_49pct_stability",
                     "meta_features": list(meta_train_df.columns),
                     "meta_calibrator": str(meta_cal_name),
                     "meta_oof_auc_for_weight": (None if not np.isfinite(META_OOF_AUC) else float(META_OOF_AUC)),
@@ -21027,7 +21159,7 @@ def train_sharp_model_from_bq(
                 "value_reg_target": "synthetic_ex_ante_ev",
                 "leakage_guard": "hard_result_block_plus_near_copy_auc_0.995",
                 "validation_contract": "outer_latest_group_holdout_plus_embargo__rolling_origin_selection_plus_late_shadow_specialist_gate_meta_oof_coverage_calibration_wired_v11_5_5_3",
-                "feature_stability_method": "weighted_rolling_origin_plus_late_shadow_permutation_v4",
+                "feature_stability_method": "weighted_rolling_origin_plus_late_shadow_permutation_v5_min_presence_49pct",
                 "weighting_contract": "outcome_situation_equal_game_side_total__value_quote_level",
                 "decision_policy": "rank_and_edge_vs_implied_probability__p50_accuracy_diagnostic_only",
                 "calibration_contract": "rolling_selector_identity_platt_iso__selected_kind_must_equal_saved_runtime_kind_v11_5_5_3",
