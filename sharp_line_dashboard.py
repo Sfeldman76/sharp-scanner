@@ -11575,44 +11575,83 @@ def get_bq_clients():
     return bigquery.Client(), bigquery_storage.BigQueryReadClient()
 
 @st.cache_data(ttl=15 * 60, show_spinner=False)
-def fetch_scores_with_features(sport: str, days_back: int):
+def fetch_scores_with_features(sport: str, days_back: int | None = None):
+    """
+    Load scored training rows.
+
+    Default behavior is ALL available history for the requested sport.
+    A positive days_back remains supported only as an explicit diagnostic override.
+    """
     bq, bqs = get_bq_clients()
 
-    # The training source is a view.  In this project feat_Game_Start is the
+    # The training source is a view. In this project feat_Game_Start is the
     # canonical event timestamp; discover once so the query remains schema-safe.
     _table_fq = "sharplogger.sharp_data.scores_with_features"
     try:
         _cols = {f.name for f in bq.get_table(_table_fq).schema}
     except Exception:
         _cols = set()
-    _time_col = next((c for c in ("feat_Game_Start", "Game_Start", "Commence_Hour", "Snapshot_Timestamp") if c in _cols), "Snapshot_Timestamp")
+
+    _time_col = next(
+        (
+            c for c in (
+                "feat_Game_Start",
+                "Game_Start",
+                "Commence_Hour",
+                "Snapshot_Timestamp",
+            )
+            if c in _cols
+        ),
+        "Snapshot_Timestamp",
+    )
+
+    where = [
+        "UPPER(Sport) = @sport",
+        "Scored = TRUE",
+        "SHARP_HIT_BOOL IS NOT NULL",
+    ]
+    params = [
+        bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
+    ]
+
+    # ALL history is the production default. Keep an explicit positive override
+    # for one-off diagnostics without silently truncating normal training.
+    if days_back is not None and int(days_back) > 0:
+        where.append(
+            f"DATE(`{_time_col}`) >= "
+            "DATE_SUB(CURRENT_DATE(), INTERVAL @days_back DAY)"
+        )
+        params.append(
+            bigquery.ScalarQueryParameter("days_back", "INT64", int(days_back))
+        )
+
     sql = f"""
     SELECT *
     FROM `{_table_fq}`
-    WHERE Sport = @sport
-      AND Scored = TRUE
-      AND SHARP_HIT_BOOL IS NOT NULL
-      AND DATE(`{_time_col}`) >= DATE_SUB(CURRENT_DATE(), INTERVAL @days_back DAY)
+    WHERE {' AND '.join(where)}
     """
 
     job_cfg = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
-            bigquery.ScalarQueryParameter("days_back", "INT64", int(days_back)),
-        ],
+        query_parameters=params,
         use_query_cache=True,
     )
 
     # Fast path, but stable because we reuse a cached BigQueryReadClient.
-    # scores_with_features is a VIEW-style training source: feat_Game_Start is the
-    # canonical event timestamp when present. Normalize it once here so all legacy
-    # downstream code can continue to use Game_Start safely.
-    out = bq.query(sql, job_config=job_cfg).to_dataframe(bqstorage_client=bqs)
+    out = bq.query(sql, job_config=job_cfg).to_dataframe(
+        bqstorage_client=bqs
+    )
+
     if "feat_Game_Start" in out.columns:
-        out["Game_Start"] = pd.to_datetime(out["feat_Game_Start"], errors="coerce", utc=True)
+        out["Game_Start"] = pd.to_datetime(
+            out["feat_Game_Start"], errors="coerce", utc=True
+        )
     elif "Game_Start" in out.columns:
-        out["Game_Start"] = pd.to_datetime(out["Game_Start"], errors="coerce", utc=True)
+        out["Game_Start"] = pd.to_datetime(
+            out["Game_Start"], errors="coerce", utc=True
+        )
+
     return out
+
 def _is_xgb_classifier(m):
     try:
         from xgboost import XGBClassifier
@@ -13100,33 +13139,64 @@ def _hc_target_frame(h: pd.DataFrame, market: str):
     """Use OPENING-line outcomes for the historical pregame expert; close is audit only."""
     m = _sys_norm_market(market)
     hh = h.copy()
+
     if m == "spreads":
-        score = pd.to_numeric(hh.get("Team_Score"), errors="coerce")
-        opp = pd.to_numeric(hh.get("Opponent_Score"), errors="coerce")
-        op = pd.to_numeric(hh.get("Opening_Spread"), errors="coerce")
-        margin = score - opp + op
-        valid = margin.notna() & ~np.isclose(margin, 0.0, atol=1e-9)
+        score = pd.to_numeric(hh.get("Team_Score"), errors="coerce").astype("float64")
+        opp = pd.to_numeric(hh.get("Opponent_Score"), errors="coerce").astype("float64")
+        op = pd.to_numeric(hh.get("Opening_Spread"), errors="coerce").astype("float64")
+
+        margin = (score - opp + op).astype("float64")
+        margin_np = margin.to_numpy(dtype="float64", na_value=np.nan)
+
+        valid = margin.notna() & ~np.isclose(
+            margin_np,
+            0.0,
+            atol=1e-9,
+            equal_nan=False,
+        )
+
         hh = hh.loc[valid].copy()
-        y = (margin.loc[valid] > 0).astype(int).to_numpy()
+        y = (margin.loc[valid] > 0).astype(int).to_numpy(dtype=int)
+
     elif m == "h2h":
-        su = hh.get("SU_Result", pd.Series(index=hh.index, dtype=object)).astype(str).str.upper()
+        su = hh.get(
+            "SU_Result",
+            pd.Series(index=hh.index, dtype=object),
+        ).astype(str).str.upper()
+
         valid = su.isin(["WIN", "LOSS"])
         hh = hh.loc[valid].copy()
-        y = (su.loc[valid] == "WIN").astype(int).to_numpy()
+        y = (su.loc[valid] == "WIN").astype(int).to_numpy(dtype=int)
+
     elif m == "totals":
         # One row per physical game to avoid duplicating the same OVER/UNDER label.
-        home = pd.to_numeric(hh.get("Is_Home"), errors="coerce").fillna(0).eq(1)
-        score = pd.to_numeric(hh.get("Team_Score"), errors="coerce")
-        opp = pd.to_numeric(hh.get("Opponent_Score"), errors="coerce")
-        op = pd.to_numeric(hh.get("Opening_Total"), errors="coerce")
-        diff = score + opp - op
-        valid = home & diff.notna() & ~np.isclose(diff, 0.0, atol=1e-9)
+        home = (
+            pd.to_numeric(hh.get("Is_Home"), errors="coerce")
+            .fillna(0)
+            .eq(1)
+        )
+
+        score = pd.to_numeric(hh.get("Team_Score"), errors="coerce").astype("float64")
+        opp = pd.to_numeric(hh.get("Opponent_Score"), errors="coerce").astype("float64")
+        op = pd.to_numeric(hh.get("Opening_Total"), errors="coerce").astype("float64")
+
+        diff = (score + opp - op).astype("float64")
+        diff_np = diff.to_numpy(dtype="float64", na_value=np.nan)
+
+        valid = home & diff.notna() & ~np.isclose(
+            diff_np,
+            0.0,
+            atol=1e-9,
+            equal_nan=False,
+        )
+
         hh = hh.loc[valid].copy()
-        y = (diff.loc[valid] > 0).astype(int).to_numpy()
+        y = (diff.loc[valid] > 0).astype(int).to_numpy(dtype=int)
+
     else:
         return pd.DataFrame(), np.zeros(0, dtype=int)
-    return hh.reset_index(drop=True), np.asarray(y, dtype=int)
 
+    return hh.reset_index(drop=True), np.asarray(y, dtype=int)
 
 def _hc_expanding_date_folds(dates: pd.Series, n_folds: int = 5, min_train_frac: float = 0.35):
     d = pd.to_datetime(dates, errors="coerce", utc=True)
@@ -13647,18 +13717,27 @@ def train_sharp_model_from_bq(
     *,
     sport: str = "NBA",
     market: str,
-    days_back: int = 900,
+    days_back: int | None = None,
     log_func=print,
     bucket_name: str,
     return_artifacts: bool = False,
     **kwargs: Any,
 ) -> Optional[Dict[str, Any]]:
-    SPORT_DAYS_BACK = {"NBA": 900, "NFL": 900, "CFL": 900, "WNBA": 900, "MLB": 700, "NCAAF": 900, "NCAAB": 900}
-    days_back = SPORT_DAYS_BACK.get(sport.upper(), days_back)
+    # Production training uses ALL available scored history for every sport.
+    # days_back is retained only as an optional explicit diagnostic override.
+    if days_back is None or int(days_back) <= 0:
+        training_window_label = "ALL available"
+        effective_days_back = None
+    else:
+        training_window_label = f"{int(days_back)} days (explicit override)"
+        effective_days_back = int(days_back)
 
-    st.info(f"🎯 Training sharp model for {sport.upper()} with {days_back} days of historical data...")
+    st.info(
+        f"🎯 Training sharp model for {sport.upper()} with "
+        f"{training_window_label} historical data..."
+    )
     with st.spinner("Pulling training data (cached)…"):
-        df = fetch_scores_with_features(sport, days_back)
+        df = fetch_scores_with_features(sport, effective_days_back)
     if df.empty:
         st.warning("No rows returned for training after filters.")
         return
@@ -22100,7 +22179,7 @@ from sklearn.model_selection import StratifiedKFold
 
 def train_timing_opportunity_model(
     sport: str = "NBA",
-    days_back: int = 35,
+    days_back: int | None = None,
     table_fq: str = "sharplogger.sharp_data.scores_with_features",
     gcs_bucket: str | None = None,
 ):
@@ -22119,14 +22198,23 @@ def train_timing_opportunity_model(
         st.error("No GCS bucket configured. Pass gcs_bucket=... or set GCS_BUCKET env/global.")
         return
 
-    # === Load historical scored data (robust to Scored being missing) ===
+    # === Load historical scored data ===
+    # Production timing training also uses ALL available history.
+    where = [
+        f"UPPER(Sport) = '{sport.upper()}'",
+        "(Scored IS NULL OR Scored = TRUE)",
+        "SHARP_HIT_BOOL IS NOT NULL",
+    ]
+    if days_back is not None and int(days_back) > 0:
+        where.append(
+            "DATE(Snapshot_Timestamp) >= "
+            f"DATE_SUB(CURRENT_DATE(), INTERVAL {int(days_back)} DAY)"
+        )
+
     query = f"""
         SELECT *
         FROM `{table_fq}`
-        WHERE UPPER(Sport) = '{sport.upper()}'
-          AND (Scored IS NULL OR Scored = TRUE)
-          AND SHARP_HIT_BOOL IS NOT NULL
-          AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days_back} DAY)
+        WHERE {' AND '.join(where)}
     """
     df = bq_client.query(query).to_dataframe()
     if df.empty:
