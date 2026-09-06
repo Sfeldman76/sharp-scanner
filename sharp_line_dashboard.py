@@ -8128,8 +8128,11 @@ def select_features_auto(
     
     F = len(folds_list)
     if F >= 2 and int(topk_per_fold) > 0:
-        if verbose:
-            print(f"[FOLD-PRESENCE-CONTRACT] folds={F} min_presence={float(min_presence):.2f} (features at 50% presence remain eligible)")
+        if auc_verbose:
+            log_func(
+                f"[FOLD-PRESENCE-CONTRACT] folds={F} min_presence={float(min_presence):.2f} "
+                "(features at 50% presence remain eligible)"
+            )
         K = int(max(10, topk_per_fold))
         votes = np.zeros(len(usable_idx), dtype=np.int16)
         pos   = np.zeros(len(usable_idx), dtype=np.int16)
@@ -19256,7 +19259,7 @@ def train_sharp_model_from_bq(
             # V11.5.7: trust the weakest future transition, not just the pooled
             # average.  A specialist that is excellent in two windows and nearly
             # coin-flip/inverted in another should not earn near-1.0 trust.
-            # V11.5.8.1: a specialist must survive every future transition.
+            # V11.5.8.2: a specialist must survive every future transition.
             # Any inverted fold fails closed.  A merely positive but weak worst
             # fold (0.500-0.515) may contribute only a token residual correction.
             min_positive_frac = 1.0 if len(fold_aucs) >= 3 else 0.50
