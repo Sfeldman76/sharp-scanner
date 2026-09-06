@@ -11925,123 +11925,139 @@ from typing import Tuple
 
 
 def _score_model_for_promotion(metrics: Dict[str, float]) -> float:
-    """
-    Promotion score prefers:
-      - higher holdout AUC
-      - higher holdout accuracy
-      - lower holdout LogLoss
-      - smaller train/holdout AUC gap
-    """
-    auc_h  = float(metrics.get("auc_meta_holdout", metrics.get("auc_holdout", float("nan"))))
-    acc_h  = float(metrics.get("accuracy_meta_holdout", metrics.get("accuracy_holdout", float("nan"))))
-    ll_h   = float(metrics.get("logloss_meta_holdout", metrics.get("logloss_holdout", float("nan"))))
+    """Composite probability-forecast score for champion promotion."""
+    auc_h = float(metrics.get("auc_meta_holdout", metrics.get("auc_holdout", float("nan"))))
+    ll_h = float(metrics.get("logloss_meta_holdout", metrics.get("logloss_holdout", float("nan"))))
+    br_h = float(metrics.get("brier_meta_holdout", metrics.get("brier_holdout", float("nan"))))
+    ece_h = float(metrics.get("ece_meta_holdout", metrics.get("ece_holdout", float("nan"))))
     gap_th = float(metrics.get("auc_gap_train_holdout", float("nan")))
 
-    if not np.isfinite(auc_h) or not np.isfinite(ll_h):
+    if not np.isfinite(ll_h) or not np.isfinite(br_h):
         return float("-inf")
+    if not np.isfinite(auc_h):
+        auc_h = 0.50
+    if not np.isfinite(ece_h):
+        ece_h = 0.10
+    if not np.isfinite(gap_th):
+        gap_th = 0.0
 
-    if not np.isfinite(acc_h):
-        acc_h = 0.50
-
-    score = (
-        0.70 * auc_h
-        + 0.30 * acc_h
-        - 0.50 * ll_h
-        - 0.10 * max(gap_th, 0.0)
+    # Proper scoring dominates. AUC is a ranking guardrail; 0.50-threshold
+    # accuracy is intentionally absent because bets are edge/probability decisions.
+    return float(
+        -1.00 * ll_h
+        -0.75 * br_h
+        -0.35 * ece_h
+        +0.20 * auc_h
+        -0.05 * max(gap_th, 0.0)
     )
-    return float(score)
 
 
 def should_promote_challenger(
     challenger_metrics: Dict[str, float],
     champion_metrics: Optional[Dict[str, float]],
     *,
-    min_accuracy_holdout: float = 0.50,
-    min_accuracy_improvement: float = 0.00005,
-    max_logloss_worsen: float = 0.0025,
-    max_brier_worsen: float = 0.0025,
+    max_logloss_worsen: float = 0.0010,
+    max_brier_worsen: float = 0.00075,
+    max_ece_worsen: float = 0.010,
+    max_auc_worsen: float = 0.010,
     min_holdout_n: int = 500,
-    min_positive_rate: float = 0.05,
-    max_positive_rate: float = 0.95,
 ) -> Tuple[bool, Dict[str, float]]:
-
+    """Promote on probability quality, not arbitrary 0.50 classification accuracy."""
     dbg: Dict[str, float] = {}
 
-    acc_c = float(challenger_metrics.get("accuracy_meta_holdout", challenger_metrics.get("accuracy_holdout", float("nan"))))
-    auc_c = float(challenger_metrics.get("auc_meta_holdout", challenger_metrics.get("auc_holdout", float("nan"))))
-    ll_c  = float(challenger_metrics.get("logloss_meta_holdout", challenger_metrics.get("logloss_holdout", float("nan"))))
-    br_c  = float(challenger_metrics.get("brier_meta_holdout", challenger_metrics.get("brier_holdout", float("nan"))))
-    n_c   = int(challenger_metrics.get("holdout_n", challenger_metrics.get("n_holdout", 0)) or 0)
-    pr_c  = float(challenger_metrics.get("positive_rate_meta_holdout", challenger_metrics.get("positive_rate_holdout", float("nan"))))
+    def _get(m, key, fallback, default=float("nan")):
+        return float(m.get(key, m.get(fallback, default)))
+
+    acc_c = _get(challenger_metrics, "accuracy_meta_holdout", "accuracy_holdout")
+    auc_c = _get(challenger_metrics, "auc_meta_holdout", "auc_holdout")
+    ll_c = _get(challenger_metrics, "logloss_meta_holdout", "logloss_holdout")
+    br_c = _get(challenger_metrics, "brier_meta_holdout", "brier_holdout")
+    ece_c = _get(challenger_metrics, "ece_meta_holdout", "ece_holdout")
+    n_c = int(challenger_metrics.get("holdout_n", challenger_metrics.get("n_holdout", 0)) or 0)
 
     dbg.update({
-        "challenger_accuracy_holdout": acc_c,
-        "challenger_auc_holdout_tracked_only": auc_c,
+        "challenger_accuracy_holdout_diagnostic": acc_c,
+        "challenger_auc_holdout": auc_c,
         "challenger_logloss_holdout": ll_c,
         "challenger_brier_holdout": br_c,
+        "challenger_ece_holdout": ece_c,
         "challenger_holdout_n": n_c,
-        "challenger_positive_rate": pr_c,
     })
 
-    # If no champion exists, establish the newly trained challenger as the
-    # baseline champion even when it misses the normal minimum gates.  The
-    # thresholds below are comparison guardrails, not a reason to leave a
-    # sport/market with no published champion at all.
     if not champion_metrics:
-        dbg["reason"] = "no_champion_auto_promote_regardless_of_minimums"
+        dbg["reason"] = "no_champion_auto_promote"
         return True, dbg
-
     if n_c and n_c < min_holdout_n:
         dbg["reason"] = "challenger_holdout_too_small"
         return False, dbg
-
-    if not np.isfinite(acc_c) or acc_c < min_accuracy_holdout:
-        dbg["reason"] = "challenger_accuracy_below_min"
+    if not np.isfinite(ll_c) or not np.isfinite(br_c):
+        dbg["reason"] = "challenger_missing_proper_scores"
         return False, dbg
 
-    if np.isfinite(pr_c) and not (min_positive_rate <= pr_c <= max_positive_rate):
-        dbg["reason"] = "challenger_prediction_class_collapse"
-        return False, dbg
-
-    acc_ch = float(champion_metrics.get("accuracy_meta_holdout", champion_metrics.get("accuracy_holdout", float("nan"))))
-    auc_ch = float(champion_metrics.get("auc_meta_holdout", champion_metrics.get("auc_holdout", float("nan"))))
-    ll_ch  = float(champion_metrics.get("logloss_meta_holdout", champion_metrics.get("logloss_holdout", float("nan"))))
-    br_ch  = float(champion_metrics.get("brier_meta_holdout", champion_metrics.get("brier_holdout", float("nan"))))
-
+    acc_ch = _get(champion_metrics, "accuracy_meta_holdout", "accuracy_holdout")
+    auc_ch = _get(champion_metrics, "auc_meta_holdout", "auc_holdout")
+    ll_ch = _get(champion_metrics, "logloss_meta_holdout", "logloss_holdout")
+    br_ch = _get(champion_metrics, "brier_meta_holdout", "brier_holdout")
+    ece_ch = _get(champion_metrics, "ece_meta_holdout", "ece_holdout")
     dbg.update({
-        "champ_accuracy_holdout": acc_ch,
-        "champ_auc_holdout_tracked_only": auc_ch,
+        "champ_accuracy_holdout_diagnostic": acc_ch,
+        "champ_auc_holdout": auc_ch,
         "champ_logloss_holdout": ll_ch,
         "champ_brier_holdout": br_ch,
+        "champ_ece_holdout": ece_ch,
     })
 
-    if np.isfinite(acc_ch):
-        acc_improve = acc_c - acc_ch
-        dbg["accuracy_improvement"] = acc_improve
-        if acc_improve < min_accuracy_improvement:
-            dbg["reason"] = "accuracy_improvement_too_small"
-            return False, dbg
+    ll_imp = (ll_ch - ll_c) if np.isfinite(ll_ch) else float("nan")
+    br_imp = (br_ch - br_c) if np.isfinite(br_ch) else float("nan")
+    ece_imp = (ece_ch - ece_c) if np.isfinite(ece_ch) and np.isfinite(ece_c) else float("nan")
+    auc_imp = (auc_c - auc_ch) if np.isfinite(auc_ch) and np.isfinite(auc_c) else float("nan")
+    dbg.update({
+        "logloss_improvement": ll_imp,
+        "brier_improvement": br_imp,
+        "ece_improvement": ece_imp,
+        "auc_improvement": auc_imp,
+    })
 
-    if np.isfinite(auc_ch) and np.isfinite(auc_c):
-        dbg["auc_improvement_tracked_only"] = auc_c - auc_ch
+    # Guard against materially worse probabilities/ranking.
+    if np.isfinite(ll_ch) and ll_c - ll_ch > max_logloss_worsen:
+        dbg["reason"] = "logloss_worse"
+        return False, dbg
+    if np.isfinite(br_ch) and br_c - br_ch > max_brier_worsen:
+        dbg["reason"] = "brier_worse"
+        return False, dbg
+    if np.isfinite(ece_ch) and np.isfinite(ece_c) and ece_c - ece_ch > max_ece_worsen:
+        dbg["reason"] = "calibration_worse"
+        return False, dbg
+    if np.isfinite(auc_ch) and np.isfinite(auc_c) and auc_ch - auc_c > max_auc_worsen:
+        dbg["reason"] = "auc_worse"
+        return False, dbg
 
-    if np.isfinite(ll_ch) and np.isfinite(ll_c):
-        ll_delta = ll_c - ll_ch
-        dbg["logloss_delta"] = ll_delta
-        if ll_delta > max_logloss_worsen:
-            dbg["reason"] = "logloss_worse_too_much"
-            return False, dbg
+    proper_improve = (
+        (np.isfinite(ll_imp) and ll_imp >= 0.0005)
+        or (np.isfinite(br_imp) and br_imp >= 0.00025)
+    )
+    calibration_improve = np.isfinite(ece_imp) and ece_imp >= 0.005
+    ranking_improve_with_probability_parity = (
+        np.isfinite(auc_imp) and auc_imp >= 0.010
+        and (not np.isfinite(ll_imp) or ll_imp >= -0.0005)
+        and (not np.isfinite(br_imp) or br_imp >= -0.00025)
+    )
 
-    if np.isfinite(br_ch) and np.isfinite(br_c):
-        br_delta = br_c - br_ch
-        dbg["brier_delta"] = br_delta
-        if br_delta > max_brier_worsen:
-            dbg["reason"] = "brier_worse_too_much"
-            return False, dbg
+    score_c = _score_model_for_promotion(challenger_metrics)
+    score_ch = _score_model_for_promotion(champion_metrics)
+    dbg["probability_score_challenger"] = score_c
+    dbg["probability_score_champion"] = score_ch
 
-    dbg["reason"] = "challenger_accuracy_better_with_guardrails"
+    if not (proper_improve or calibration_improve or ranking_improve_with_probability_parity):
+        dbg["reason"] = "no_material_probability_improvement"
+        return False, dbg
+    if np.isfinite(score_ch) and score_c <= score_ch:
+        dbg["reason"] = "composite_probability_score_not_better"
+        return False, dbg
+
+    dbg["reason"] = "proper_scoring_calibration_promotion"
     return True, dbg
-    
+
 
 
 def _publish_challenger_to_canonical(
@@ -13039,6 +13055,25 @@ def _hist_num_first(df: pd.DataFrame, *names, default=np.nan) -> pd.Series:
     return pd.Series(default, index=df.index, dtype="float64")
 
 
+def _hc_float_array(obj) -> np.ndarray:
+    """Nullable-pandas-safe conversion to a real float64 NumPy array."""
+    if isinstance(obj, pd.DataFrame):
+        return obj.apply(pd.to_numeric, errors="coerce").to_numpy(
+            dtype=np.float64, na_value=np.nan
+        )
+    if isinstance(obj, (pd.Series, pd.Index)):
+        return pd.to_numeric(pd.Series(obj), errors="coerce").to_numpy(
+            dtype=np.float64, na_value=np.nan
+        )
+    arr = np.asarray(obj)
+    if arr.dtype == object:
+        flat = pd.to_numeric(pd.Series(arr.reshape(-1)), errors="coerce").to_numpy(
+            dtype=np.float64, na_value=np.nan
+        )
+        return flat.reshape(arr.shape)
+    return np.asarray(arr, dtype=np.float64)
+
+
 def _hc_amer_prob(odds: pd.Series) -> pd.Series:
     o = pd.to_numeric(odds, errors="coerce")
     p = pd.Series(np.nan, index=o.index, dtype="float64")
@@ -13223,7 +13258,7 @@ def _hc_recency_weights(dates: pd.Series, half_life_days: float | None, ref_date
     if not half_life_days or not np.isfinite(float(half_life_days)) or float(half_life_days) <= 0:
         return np.ones(len(d), dtype=np.float64)
     ref = pd.Timestamp(ref_date) if ref_date is not None else pd.Timestamp(d.max())
-    age = (ref - d).dt.total_seconds().to_numpy(dtype=float) / 86400.0
+    age = _hc_float_array((ref - d).dt.total_seconds()) / 86400.0
     age = np.where(np.isfinite(age), np.maximum(age, 0.0), 0.0)
     w = np.exp(-np.log(2.0) * age / float(half_life_days))
     return np.clip(w, 0.10, 1.0)
@@ -13305,7 +13340,7 @@ def _hc_profile_similarity(X: pd.DataFrame, expert: dict) -> np.ndarray:
     prof = expert.get("profile") or {}
     med = np.asarray(prof.get("median", []), dtype=float)
     scale = np.asarray(prof.get("scale", []), dtype=float)
-    a = X.to_numpy(dtype=float, copy=False)
+    a = _hc_float_array(X)
     if med.size != a.shape[1] or scale.size != a.shape[1] or a.shape[1] == 0:
         return np.ones(len(X), dtype=np.float64)
     scale = np.where(np.isfinite(scale) & (scale > 1e-6), scale, 1.0)
@@ -13327,7 +13362,7 @@ def _hc_fit_one_horizon(hh: pd.DataFrame, y: np.ndarray, market: str, label: str
         return None
     X = _historical_core_feature_frame(hh, market)
     dates = pd.to_datetime(hh["Game_Date"], errors="coerce", utc=True).reset_index(drop=True)
-    baseline = _hc_market_baseline_prob(hh, market).to_numpy(dtype=float)
+    baseline = _hc_float_array(_hc_market_baseline_prob(hh, market))
     folds = _hc_expanding_date_folds(dates, n_folds=5, min_train_frac=0.35)
     if len(folds) < 3:
         log_func(f"[HISTORICAL-CORE:{label}] insufficient expanding folds={len(folds)}")
@@ -13616,7 +13651,7 @@ def fit_historical_ncaaf_core_expert(market: str, log_func=print):
 
 def _hc_score_bundle(out: pd.DataFrame, hb: dict, market: str):
     m = _sys_norm_market(market)
-    baseline = _hc_market_baseline_prob(out, m).to_numpy(dtype=float)
+    baseline = _hc_float_array(_hc_market_baseline_prob(out, m))
     experts = hb.get("experts") or []
     # Backward compatibility with V11.5.9 single classification expert.
     if not experts and hb.get("model") is not None:
@@ -13634,7 +13669,7 @@ def _hc_score_bundle(out: pd.DataFrame, hb: dict, market: str):
         p = _hc_apply_calibrator(ex.get("calibrator"), raw)
         sim = _hc_profile_similarity(X, ex)
         max_date = pd.to_datetime(ex.get("max_date") or hb.get("historical_max_date"), errors="coerce", utc=True)
-        age = (game_t - max_date).dt.total_seconds().to_numpy(dtype=float) / 86400.0
+        age = _hc_float_array((game_t - max_date).dt.total_seconds()) / 86400.0
         age = np.where(np.isfinite(age), np.maximum(age, 0.0), np.inf)
         decay = float(ex.get("runtime_decay_days", 1095.0) or 1095.0)
         rec = np.exp(-np.log(2.0) * age / max(decay, 1.0))
@@ -13743,7 +13778,7 @@ def train_sharp_model_from_bq(
         return
    
     
-    # Work with a single frame going forward.  Do NOT duplicate the full 700/900-day
+    # Work with a single frame going forward. Do NOT duplicate the full-history
     # training view: on Cloud Run this can consume many GiB before feature engineering.
     df_bt = df
     del df
@@ -20450,73 +20485,156 @@ def train_sharp_model_from_bq(
             return float(expected_calibration_error(np.asarray(y, int), np.asarray(p, float), n_bins=n_bins))
 
         def _rolling_calibrator_select(p_raw, y_raw, time_raw, *, label):
-            """Choose calibration method on later OOF periods, then refit on all OOF."""
-            pp=np.asarray(p_raw,float).reshape(-1); yy=np.asarray(y_raw,int).reshape(-1)
-            tt=pd.to_datetime(np.asarray(time_raw),utc=True,errors="coerce")
-            valid=np.isfinite(pp) & pd.notna(tt)
-            pp=pp[valid]; yy=yy[valid]; tt=np.asarray(tt)[valid]
-            if len(pp)<300 or np.unique(yy).size<2:
+            """
+            Time-forward calibration selection with recent-regime refit.
+
+            The base learner can use all available history. Calibration is a
+            separate probability-mapping problem: choose it only on later OOF
+            origins and, when sample size permits, refit on recent OOF evidence.
+            Flexible mappings fail closed to identity if their apparent benefit
+            is small, overly compressive, or temporally non-monotone.
+            """
+            pp = np.asarray(p_raw, float).reshape(-1)
+            yy = np.asarray(y_raw, int).reshape(-1)
+            tt = pd.to_datetime(np.asarray(time_raw), utc=True, errors="coerce")
+            valid = np.isfinite(pp) & pd.notna(tt)
+            pp = pp[valid]; yy = yy[valid]; tt = np.asarray(tt)[valid]
+            if len(pp) < 300 or np.unique(yy).size < 2:
                 return None
-            order=np.argsort(tt); pp=pp[order]; yy=yy[order]; tt=tt[order]
-            n=len(pp)
-            cuts=[(0.50,0.67),(0.67,0.83),(0.83,1.00)]
-            methods=["identity","platt","iso"]
-            method_scores={m:[] for m in methods}
-            method_details={m:[] for m in methods}
+
+            order = np.argsort(tt)
+            pp = pp[order]; yy = yy[order]; tt = tt[order]
+            n = len(pp)
+            cuts = [(0.50, 0.67), (0.67, 0.83), (0.83, 1.00)]
+            methods = ["identity", "platt", "iso"]
+            method_scores = {m: [] for m in methods}
+            method_details = {m: [] for m in methods}
 
             def _fit_kind(kind, pfit, yfit):
-                if kind=="identity":
+                if kind == "identity":
                     return None
-                if kind=="platt":
-                    m=LogisticRegression(solver="lbfgs",max_iter=2000)
-                    m.fit(np.asarray(pfit).reshape(-1,1),yfit)
-                    return m
-                iso=IsotonicRegression(y_min=1e-5,y_max=1-1e-5,out_of_bounds="clip")
-                iso.fit(pfit,yfit)
-                return iso
-            def _apply_kind(kind,m,x):
-                if kind=="identity": return np.asarray(x, dtype=float)
-                if kind=="platt": return m.predict_proba(np.asarray(x).reshape(-1,1))[:,1]
-                return m.predict(x)
+                if kind == "platt":
+                    mdl = LogisticRegression(solver="lbfgs", max_iter=2000)
+                    mdl.fit(np.asarray(pfit).reshape(-1, 1), yfit)
+                    return mdl
+                # Isotonic is flexible/data-hungry; avoid thin temporal fits.
+                if len(pfit) < 1000:
+                    raise ValueError("isotonic requires >=1000 calibration-fit rows")
+                mdl = IsotonicRegression(
+                    y_min=1e-5, y_max=1-1e-5, increasing=True,
+                    out_of_bounds="clip"
+                )
+                mdl.fit(pfit, yfit)
+                return mdl
 
-            for end_train_frac,end_val_frac in cuts:
-                it=max(100,int(round(n*end_train_frac)))
-                iv=min(n,int(round(n*end_val_frac)))
-                if iv-it<80: continue
-                pfit=pp[:it]; yfit=yy[:it]; pval=pp[it:iv]; yval=yy[it:iv]
-                if np.unique(yfit).size<2 or np.unique(yval).size<2: continue
+            def _apply_kind(kind, mdl, x):
+                if kind == "identity":
+                    return np.asarray(x, dtype=float)
+                if kind == "platt":
+                    return mdl.predict_proba(np.asarray(x).reshape(-1, 1))[:, 1]
+                return mdl.predict(x)
+
+            def _mono_score(yv, pv, bins=8):
+                try:
+                    qn = min(int(bins), max(2, len(np.unique(np.round(pv, 8)))))
+                    q = pd.qcut(pd.Series(pv), q=qn, duplicates="drop")
+                    d = (
+                        pd.DataFrame({"y": yv, "p": pv, "q": q})
+                        .groupby("q", observed=True)
+                        .agg(p=("p", "mean"), y=("y", "mean"))
+                    )
+                    return float(d["p"].corr(d["y"], method="spearman")) if len(d) >= 3 else float("nan")
+                except Exception:
+                    return float("nan")
+
+            for end_train_frac, end_val_frac in cuts:
+                it = max(100, int(round(n * end_train_frac)))
+                iv = min(n, int(round(n * end_val_frac)))
+                if iv - it < 80:
+                    continue
+                pfit = pp[:it]; yfit = yy[:it]
+                pval = pp[it:iv]; yval = yy[it:iv]
+                if np.unique(yfit).size < 2 or np.unique(yval).size < 2:
+                    continue
                 for kind in methods:
                     try:
-                        m=_fit_kind(kind,pfit,yfit)
-                        pv=np.clip(_apply_kind(kind,m,pval),CLIP,1-CLIP)
-                        ll=float(log_loss(yval,pv,labels=[0,1]))
-                        br=float(np.mean((pv-yval)**2))
-                        ece=float(_ece_score(yval,pv,n_bins=8))
-                        std_ratio=float(np.std(pv)/max(np.std(pval),1e-9))
-                        # Lower is better; heavy compression is penalized.
-                        compression=max(0.0,0.40-std_ratio)
-                        sc=ll + 0.50*br + 0.50*ece + 0.35*compression
-                        method_scores[kind].append(sc)
-                        method_details[kind].append((ll,br,ece,std_ratio))
+                        mdl = _fit_kind(kind, pfit, yfit)
+                        pv = np.clip(_apply_kind(kind, mdl, pval), CLIP, 1-CLIP)
+                        ll = float(log_loss(yval, pv, labels=[0, 1]))
+                        br = float(np.mean((pv - yval) ** 2))
+                        ece = float(_ece_score(yval, pv, n_bins=8))
+                        std_ratio = float(np.std(pv) / max(np.std(pval), 1e-9))
+                        mono = _mono_score(yval, pv)
+                        compression = max(0.0, 0.60 - std_ratio)
+                        mono_penalty = 0.0 if not np.isfinite(mono) else max(0.0, -mono)
+                        score = (
+                            ll + 0.50 * br + 0.35 * ece
+                            + 0.50 * compression + 0.25 * mono_penalty
+                        )
+                        method_scores[kind].append(score)
+                        method_details[kind].append((ll, br, ece, std_ratio, mono))
                     except Exception:
                         pass
-            means={k:(float(np.mean(v)) if v else np.inf) for k,v in method_scores.items()}
-            chosen=min(means,key=means.get)
-            # Isotonic must materially beat the smoother monotone Platt option.
-            if chosen=="iso" and np.isfinite(means.get("platt",np.inf)) and means["iso"] > means["platt"]-0.002:
-                chosen="platt"
-            try:
-                final=_fit_kind(chosen,pp,yy)
-            except Exception:
+
+            means = {
+                k: (float(np.mean(v)) if v else np.inf)
+                for k, v in method_scores.items()
+            }
+            if not any(np.isfinite(v) for v in means.values()):
                 return None
-            chosen_display=chosen
-            # V11.5.5.3: identity remains an explicit deployable calibrator kind.
-            # Do not relabel identity as isotonic; that made audit selection and
-            # saved/runtime metadata disagree even when numerically identity-like.
-            if chosen=="identity":
-                final=_IdentityIsoCal(eps=1e-6)
-            print(f"[CAL-ROLLING:{label}] scores={means} chosen={chosen_display} origins={max(len(v) for v in method_scores.values()) if method_scores else 0}")
-            return chosen,final,means
+
+            identity_score = means.get("identity", np.inf)
+            chosen = min(means, key=means.get)
+            min_score_gain = 0.0010
+
+            if chosen != "identity":
+                gain = identity_score - means.get(chosen, np.inf)
+                details = method_details.get(chosen, [])
+                avg_std = float(np.mean([d[3] for d in details])) if details else float("nan")
+                monos = np.asarray([d[4] for d in details], dtype=float) if details else np.asarray([])
+                avg_mono = float(np.nanmean(monos)) if monos.size and np.isfinite(monos).any() else float("nan")
+                if gain < min_score_gain:
+                    chosen = "identity"
+                elif np.isfinite(avg_std) and avg_std < 0.55:
+                    chosen = "identity"
+                elif np.isfinite(avg_mono) and avg_mono < -0.05:
+                    chosen = "identity"
+
+            # Isotonic needs both data and a clear edge over the smoother Platt map.
+            if chosen == "iso":
+                platt_score = means.get("platt", np.inf)
+                if n < 1500 or (np.isfinite(platt_score) and means["iso"] > platt_score - 0.002):
+                    if np.isfinite(platt_score) and platt_score < identity_score - min_score_gain:
+                        chosen = "platt"
+                    else:
+                        chosen = "identity"
+
+            # Recent OOF refit keeps the probability map current while the base
+            # model still benefits from all historical signal.
+            recent_start = 0
+            if n >= 1500:
+                recent_start = int(round(n * 0.50))
+                if n - recent_start < 750:
+                    recent_start = max(0, n - 750)
+            p_final = pp[recent_start:] if recent_start > 0 else pp
+            y_final = yy[recent_start:] if recent_start > 0 else yy
+
+            try:
+                final = _fit_kind(chosen, p_final, y_final)
+            except Exception:
+                chosen = "identity"
+                final = None
+            if chosen == "identity":
+                final = _IdentityIsoCal(eps=1e-6)
+
+            chosen_details = method_details.get(chosen, [])
+            avg_std = float(np.mean([d[3] for d in chosen_details])) if chosen_details else 1.0
+            print(
+                f"[CAL-ROLLING:{label}] scores={means} chosen={chosen} "
+                f"origins={max((len(v) for v in method_scores.values()), default=0)} "
+                f"recent_refit_rows={len(p_final)} avg_std_ratio={avg_std:.3f}"
+            )
+            return chosen, final, means
         
         # Selection with anti-compression guard
         raw_std = float(np.std(p_oof_for_cal))
@@ -20611,21 +20729,24 @@ def train_sharp_model_from_bq(
         p_cal_ho = np.asarray(np.clip(p_cal_ho, CLIP, 1.0 - CLIP), float)
         p_cal_fu = np.asarray(np.clip(p_cal_fu, CLIP, 1.0 - CLIP), float)
         
-        # Prior-correct outcome LAST
-        deploy_pos = float(np.mean(y_hold == 1))
+        # V11.6 LEAKAGE GUARD: the outer holdout is evaluation-only.
+        # Never estimate a target-prevalence correction from y_hold and then use
+        # that information in train/holdout/full deployment probabilities.
+        # Current-regime adaptation must come from pregame features and market data.
         train_pos_for_pc = float(np.mean(y_train == 1))
-        
-        p_train_vec = _prior_correct(p_cal_tr, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
-        p_hold_vec  = _prior_correct(p_cal_ho, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
-        p_full_vec  = _prior_correct(p_cal_fu, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
-        
-        p_train_vec = np.asarray(np.clip(p_train_vec, CLIP, 1.0 - CLIP), float)
-        p_hold_vec  = np.asarray(np.clip(p_hold_vec,  CLIP, 1.0 - CLIP), float)
-        p_full_vec  = np.asarray(np.clip(p_full_vec,  CLIP, 1.0 - CLIP), float)
+        deploy_pos = train_pos_for_pc  # metadata compatibility; no target shift applied
 
-        # Strict OOF outcome probability for meta training.  This uses the same
-        # outcome calibrator/prior correction as deployment, but only on rows
-        # predicted by models that did not train on those rows.
+        p_train_vec = np.asarray(np.clip(p_cal_tr, CLIP, 1.0 - CLIP), float)
+        p_hold_vec  = np.asarray(np.clip(p_cal_ho, CLIP, 1.0 - CLIP), float)
+        p_full_vec  = np.asarray(np.clip(p_cal_fu, CLIP, 1.0 - CLIP), float)
+        print(
+            f"[LEAKAGE-GUARD] outer holdout prevalence excluded from calibration/inference | "
+            f"train_pos={train_pos_for_pc:.4f}"
+        )
+
+        # Strict OOF outcome probability for meta training. This uses the same
+        # OOF-selected calibrator as deployment, only on rows predicted by models
+        # that did not train on those rows.
         _outcome_oof_mask = (mask_oof if use_full else mask_auc)
         p_outcome_oof_train = np.full(len(y_train), np.nan, dtype=np.float64)
         try:
@@ -20634,13 +20755,8 @@ def train_sharp_model_from_bq(
                 dtype=np.float64,
             )
             _p_oof_cal = np.clip(_p_oof_cal, CLIP, 1.0 - CLIP)
-            _p_oof_deploy = _prior_correct(
-                _p_oof_cal,
-                train_pos=train_pos_for_pc,
-                hold_pos=deploy_pos,
-            )
             p_outcome_oof_train[_outcome_oof_mask] = np.clip(
-                _p_oof_deploy, CLIP, 1.0 - CLIP
+                _p_oof_cal, CLIP, 1.0 - CLIP
             )
         except Exception as e:
             logger.warning(f"Outcome OOF meta-vector build failed: {e}")
@@ -21183,13 +21299,20 @@ def train_sharp_model_from_bq(
             _id_mono = _meta_cal_mono(_meta_oof_y, _id_meta)
             _sel_mono = _meta_cal_mono(_meta_oof_y, _sel_meta)
             _mono_ok = (not np.isfinite(_id_mono)) or (not np.isfinite(_sel_mono)) or (_sel_mono >= _id_mono - 0.02)
-            _cal_improves = bool((_sel_ll < _id_ll - 1e-5) and (_sel_br < _id_br - 1e-6) and _mono_ok)
+            _sel_std_ratio = float(np.std(_sel_meta) / max(np.std(_id_meta), 1e-9))
+            _spread_ok = bool((not np.isfinite(_sel_std_ratio)) or (_sel_std_ratio >= 0.55))
+            _cal_improves = bool(
+                (_sel_ll < _id_ll - 1e-5)
+                and (_sel_br < _id_br - 1e-6)
+                and _mono_ok
+                and _spread_ok
+            )
             if str(meta_cal_name).lower() != "identity" and not _cal_improves:
-                print(f"[META-CAL-FAILCLOSED] selected={meta_cal_name} -> identity | ll { _sel_ll:.6f} vs {_id_ll:.6f} | brier {_sel_br:.6f} vs {_id_br:.6f} | mono {_sel_mono:.3f} vs {_id_mono:.3f}")
+                print(f"[META-CAL-FAILCLOSED] selected={meta_cal_name} -> identity | ll {_sel_ll:.6f} vs {_id_ll:.6f} | brier {_sel_br:.6f} vs {_id_br:.6f} | mono {_sel_mono:.3f} vs {_id_mono:.3f} | std_ratio={_sel_std_ratio:.3f}")
                 meta_cal_name, meta_cal_obj = "identity", _IdentityIsoCal(eps=1e-6)
                 _meta_cal_selected_kind = "identity"
             else:
-                print(f"[META-CAL-FAILCLOSED] selected={meta_cal_name} retained | ll {_sel_ll:.6f} vs {_id_ll:.6f} | brier {_sel_br:.6f} vs {_id_br:.6f} | mono {_sel_mono:.3f} vs {_id_mono:.3f}")
+                print(f"[META-CAL-FAILCLOSED] selected={meta_cal_name} retained | ll {_sel_ll:.6f} vs {_id_ll:.6f} | brier {_sel_br:.6f} vs {_id_br:.6f} | mono {_sel_mono:.3f} vs {_id_mono:.3f} | std_ratio={_sel_std_ratio:.3f}")
         except Exception as _cal_gate_err:
             print(f"[META-CAL-FAILCLOSED] audit failed ({_cal_gate_err}); forcing identity")
             meta_cal_name, meta_cal_obj = "identity", _IdentityIsoCal(eps=1e-6)
@@ -21515,14 +21638,14 @@ def train_sharp_model_from_bq(
                     edges[i] = min(1.0 - eps, edges[i - 1] + 1e-6)
             return edges
         
-        def _cal_table_fixed_edges(y, p, edges, eps=1e-7):
+        def _cal_table_fixed_edges(y, p, edges, eps=1e-7, min_bin_n=None):
             y = np.asarray(y, int)
             p = _clip01(np.asarray(p, float), eps)
             edges = np.asarray(edges, float)
-        
+
             b = np.digitize(p, edges, right=True) - 1
             b = np.clip(b, 0, len(edges) - 2)
-        
+
             rows = []
             for i in range(len(edges) - 1):
                 mask = (b == i)
@@ -21531,14 +21654,69 @@ def train_sharp_model_from_bq(
                 if sub_p.size == 0:
                     continue
                 rows.append({
-                    "Prob Bin": f"{float(sub_p.min()):.2f}-{float(sub_p.max()):.2f}",
+                    "P_Min": float(sub_p.min()),
+                    "P_Max": float(sub_p.max()),
                     "N": int(sub_p.size),
+                    "Hits": int(np.sum(sub_y)),
                     "Hit Rate": float(np.mean(sub_y)),
                     "Avg Pred P": float(np.mean(sub_p)),
                 })
-            out = pd.DataFrame(rows)
+
+            # Equal-frequency edges can still leave tiny bins when calibrated
+            # probabilities are tied. Merge small adjacent bins for diagnostics.
+            if min_bin_n is None:
+                min_bin_n = int(np.clip(round(0.04 * max(len(y), 1)), 50, 150))
+            rows = sorted(rows, key=lambda r: r["Avg Pred P"])
+            merged = []
+            for r in rows:
+                if merged and r["N"] < min_bin_n:
+                    prev = merged.pop()
+                    n = prev["N"] + r["N"]
+                    hits = prev["Hits"] + r["Hits"]
+                    avgp = (
+                        prev["Avg Pred P"] * prev["N"]
+                        + r["Avg Pred P"] * r["N"]
+                    ) / max(n, 1)
+                    merged.append({
+                        "P_Min": min(prev["P_Min"], r["P_Min"]),
+                        "P_Max": max(prev["P_Max"], r["P_Max"]),
+                        "N": n, "Hits": hits,
+                        "Hit Rate": hits / max(n, 1),
+                        "Avg Pred P": avgp,
+                    })
+                else:
+                    merged.append(r)
+            if len(merged) >= 2 and merged[0]["N"] < min_bin_n:
+                first, nxt = merged[0], merged[1]
+                n = first["N"] + nxt["N"]
+                hits = first["Hits"] + nxt["Hits"]
+                avgp = (
+                    first["Avg Pred P"] * first["N"]
+                    + nxt["Avg Pred P"] * nxt["N"]
+                ) / max(n, 1)
+                merged[:2] = [{
+                    "P_Min": min(first["P_Min"], nxt["P_Min"]),
+                    "P_Max": max(first["P_Max"], nxt["P_Max"]),
+                    "N": n, "Hits": hits,
+                    "Hit Rate": hits / max(n, 1),
+                    "Avg Pred P": avgp,
+                }]
+
+            out = pd.DataFrame(merged)
             if not out.empty:
                 out = out.sort_values("Avg Pred P").reset_index(drop=True)
+                rate = pd.to_numeric(out["Hit Rate"], errors="coerce").to_numpy(float)
+                nn = pd.to_numeric(out["N"], errors="coerce").clip(lower=1).to_numpy(float)
+                se = np.sqrt(np.clip(rate * (1.0 - rate) / nn, 0.0, None))
+                out["Hit 95% Low"] = np.clip(rate - 1.96 * se, 0.0, 1.0)
+                out["Hit 95% High"] = np.clip(rate + 1.96 * se, 0.0, 1.0)
+                out["Prob Bin"] = out.apply(
+                    lambda r: f"{r['P_Min']:.2f}-{r['P_Max']:.2f}", axis=1
+                )
+                out = out[[
+                    "Prob Bin", "N", "Hit Rate", "Avg Pred P",
+                    "Hit 95% Low", "Hit 95% High"
+                ]]
             return out
         
         # Outcome calibration tables
@@ -21556,13 +21734,13 @@ def train_sharp_model_from_bq(
         
         edges_deploy = _make_edges(p_hold_vec, q=10, eps=eps)
         
-        st.markdown("#### 🧭 Outcome Calibration Table — TRAIN (deploy-adjusted prior shift)")
+        st.markdown("#### 🧭 Outcome Calibration Table — TRAIN (deployment probability)")
         st.dataframe(
             _cal_table_fixed_edges(y_train.astype(int), p_train_vec, edges_deploy, eps=eps),
             use_container_width=True
         )
         
-        st.markdown("#### 🧭 Outcome Calibration Table — HOLDOUT (deploy-adjusted prior shift)")
+        st.markdown("#### 🧭 Outcome Calibration Table — HOLDOUT (deployment probability)")
         st.dataframe(
             _cal_table_fixed_edges(y_hold.astype(int),  p_hold_vec,  edges_deploy, eps=eps),
             use_container_width=True
@@ -21800,6 +21978,45 @@ def train_sharp_model_from_bq(
         except Exception:
             pass
 
+        # V11.6 MARKET BENCHMARK: compare probability quality with the available
+        # pregame price. When both sides from the same game/book/market are present,
+        # normalize out the overround; otherwise fall back to the raw implied p.
+        market_auc_hold = market_ll_hold = market_br_hold = float("nan")
+        try:
+            _bench_frame = hold_meta_df.copy()
+            if "Odds_Price" in _bench_frame.columns and len(_bench_frame) == len(y_hold_vec):
+                _odds = pd.to_numeric(_bench_frame["Odds_Price"], errors="coerce")
+                _raw_market = pd.Series(_amer_to_prob_vec(_odds), index=_bench_frame.index, dtype="float64")
+                _group_cols = [c for c in ("Game_Key", "Bookmaker", "Market") if c in _bench_frame.columns]
+                _fair_market = _raw_market.copy()
+                if len(_group_cols) >= 2:
+                    _tmp = _bench_frame[_group_cols].copy()
+                    _tmp["__raw_p"] = _raw_market.to_numpy(dtype=np.float64, na_value=np.nan)
+                    _den = _tmp.groupby(_group_cols, dropna=False)["__raw_p"].transform("sum")
+                    _cnt = _tmp.groupby(_group_cols, dropna=False)["__raw_p"].transform("count")
+                    _devig = _tmp["__raw_p"] / _den.where(_den.gt(0))
+                    _fair_market = pd.Series(
+                        np.where(_cnt.ge(2), _devig, _tmp["__raw_p"]),
+                        index=_bench_frame.index,
+                        dtype="float64",
+                    )
+                _market_p_hold = _fair_market.clip(1e-6, 1-1e-6).to_numpy(
+                    dtype=np.float64, na_value=np.nan
+                )
+                _mk_ok = np.isfinite(_market_p_hold)
+                if int(_mk_ok.sum()) >= 100 and np.unique(y_hold_vec[_mk_ok]).size == 2:
+                    market_auc_hold = float(roc_auc_score(y_hold_vec[_mk_ok], _market_p_hold[_mk_ok]))
+                    market_ll_hold = float(log_loss(y_hold_vec[_mk_ok], _market_p_hold[_mk_ok], labels=[0,1]))
+                    market_br_hold = float(brier_score_loss(y_hold_vec[_mk_ok], _market_p_hold[_mk_ok]))
+                    print(
+                        f"[MARKET-BENCHMARK] rows={int(_mk_ok.sum())} auc={market_auc_hold:.4f} "
+                        f"logloss={market_ll_hold:.6f} brier={market_br_hold:.6f} | "
+                        f"outcome_ll_skill={market_ll_hold-logloss_hold_f:+.6f} "
+                        f"outcome_br_skill={market_br_hold-brier_hold_f:+.6f}"
+                    )
+        except Exception as _market_bench_err:
+            print(f"[MARKET-BENCHMARK] unavailable: {_market_bench_err}")
+
         artifact_metrics = None
         artifact_config  = None
         if return_artifacts:
@@ -21809,6 +22026,17 @@ def train_sharp_model_from_bq(
                 "brier_holdout": brier_hold_f,
                 "accuracy_holdout": acc_hold_f,
                 "auc_gap_train_holdout": auc_gap_f,
+                "ece_holdout": float(ece_ho),
+                "ece_meta_holdout": float(meta_ece_ho),
+                "market_auc_holdout": market_auc_hold,
+                "market_logloss_holdout": market_ll_hold,
+                "market_brier_holdout": market_br_hold,
+                "model_logloss_skill_vs_market": (
+                    market_ll_hold - logloss_hold_f if np.isfinite(market_ll_hold) else float("nan")
+                ),
+                "model_brier_skill_vs_market": (
+                    market_br_hold - brier_hold_f if np.isfinite(market_br_hold) else float("nan")
+                ),
         
                 "auc_situation_holdout": auc_situation_hold_f,
                 "auc_value_holdout": auc_value_hold_f,
@@ -21835,7 +22063,7 @@ def train_sharp_model_from_bq(
                 "flip_flag": bool(flip_flag),
                 "blend_w": float(best_w),
         
-                "model_family": "three_head_plus_meta_v5_10_historical_brain_walkforward_calibrated_49pct_stability",
+                "model_family": "three_head_plus_meta_v11_6_market_benchmarked_leakage_guarded_historical_brain",
                 "historical_core_expert": ({
                     "enabled": bool(historical_core_expert),
                     "market": (historical_core_expert or {}).get("market") if isinstance(historical_core_expert, dict) else None,
@@ -21926,7 +22154,7 @@ def train_sharp_model_from_bq(
                 },
                 "weighting_contract": "outcome_situation_equal_game_side_total__value_quote_level",
                 "decision_policy": "rank_and_edge_vs_implied_probability__p50_accuracy_diagnostic_only",
-                "calibration_contract": "rolling_selector_identity_platt_iso__selected_kind_must_equal_saved_runtime_kind_v11_5_5_3",
+                "calibration_contract": "rolling_future_origin_selector__recent_refit__anti_compression__identity_failclosed_v11_6",
             }
 
         # -------------------------------------------------------------------
@@ -22010,7 +22238,7 @@ def train_sharp_model_from_bq(
                 "feature_stability_method": "weighted_rolling_origin_plus_late_shadow_permutation_v5_min_presence_49pct",
                 "weighting_contract": "outcome_situation_equal_game_side_total__value_quote_level",
                 "decision_policy": "rank_and_edge_vs_implied_probability__p50_accuracy_diagnostic_only",
-                "calibration_contract": "rolling_selector_identity_platt_iso__selected_kind_must_equal_saved_runtime_kind_v11_5_5_3",
+                "calibration_contract": "rolling_future_origin_selector__recent_refit__anti_compression__identity_failclosed_v11_6",
                 "recency_halflife_days": {"outcome": recency_outcome_halflife, "situation": recency_situation_halflife, "value": recency_value_halflife},
                 "overlay_lane": "conditional_active_row_residual_uplift_with_sample_shrinkage",
                 "overlay_trust_map_outcome": (autofs_outcome.get("overlay_trust_map", {}) if autofs_outcome is not None else {}),
@@ -22072,7 +22300,7 @@ def train_sharp_model_from_bq(
                 "feature_stability_method": "weighted_rolling_origin_plus_late_shadow_permutation_v5_min_presence_49pct",
                 "weighting_contract": "outcome_situation_equal_game_side_total__value_quote_level",
                 "decision_policy": "rank_and_edge_vs_implied_probability__p50_accuracy_diagnostic_only",
-                "calibration_contract": "rolling_selector_identity_platt_iso__selected_kind_must_equal_saved_runtime_kind_v11_5_5_3",
+                "calibration_contract": "rolling_future_origin_selector__recent_refit__anti_compression__identity_failclosed_v11_6",
                 "recency_halflife_days": {"outcome": recency_outcome_halflife, "situation": recency_situation_halflife, "value": recency_value_halflife},
                 "overlay_lane": "conditional_active_row_residual_uplift_with_sample_shrinkage",
                 "overlay_trust_map_outcome": (autofs_outcome.get("overlay_trust_map", {}) if autofs_outcome is not None else {}),
