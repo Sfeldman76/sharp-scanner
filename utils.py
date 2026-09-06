@@ -9971,6 +9971,17 @@ def apply_blended_sharp_score(
    
         try:
             # ===== MODEL SCORING =====
+            # V11.5.9: reconstruct the historical/core prior from the fitted artifact
+            # before resolving the saved Outcome feature matrix. Legacy bundles simply
+            # receive neutral inactive columns.
+            df_canon = apply_historical_core_runtime_feature(df_canon, bundle, mkt)
+            # V11.5.10: rebuild the exact Brain expert-state contract at runtime AFTER
+            # historical residual/trust features exist. This also fixes prior bundles
+            # where Brain_* columns could be trained but silently neutralized at apply.
+            _brain_rows_before = len(df_canon)
+            df_canon = add_ai_betting_brain_features(df_canon)
+            if len(df_canon) != _brain_rows_before:
+                raise RuntimeError(f"runtime Brain attach changed row count {_brain_rows_before}->{len(df_canon)}")
             feature_cols = _resolve_feature_cols_like_training(bundle, model, df_canon)
             # stable de-dup, keep order, drop Nones
             feature_cols = [str(c) for c in dict.fromkeys(feature_cols) if c is not None]
@@ -10772,7 +10783,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.8-residual-meta-49pct-stability"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-06-v11.5.10-historical-brain-walkforward-calibrated"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -13480,10 +13491,40 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
     price_intensity = np.maximum(np.tanh(price_mag), np.tanh(mispricing.abs().fillna(0)*8.0))
     install_expert('Price', price_active, price_direction, price_intensity)
 
+
     # ------------------------------------------------------------------
-    # 10) Expert ensemble summaries from real active states only.
+    # 10) HISTORICAL expert state.
+    # Historical credibility is learned upstream from protected temporal OOF/shadow
+    # performance. This layer only exposes state; it never changes deterministic
+    # Pathi/Big Al rule definitions.
     # ------------------------------------------------------------------
-    expert_names = ['BigAl','Pathi','Market','Power','Form','Schedule','Price']
+    hist_prob = num('Historical_Core_Prob')
+    hist_base = num('Historical_Core_Market_Baseline_Prob', default=0.5).fillna(0.5)
+    hist_edge = num('Historical_Core_Edge')
+    hist_edge = hist_edge.where(hist_edge.notna(), hist_prob - hist_base)
+    hist_trust = num('Historical_Core_Trust', default=0).fillna(0).clip(0, 1)
+    hist_active = num('Historical_Core_Active', default=0).fillna(0).eq(1) & hist_edge.notna() & hist_edge.abs().ge(0.0025) & hist_trust.gt(0)
+    hist_direction = sgn(hist_edge, eps=0.0025)
+    hist_intensity = (np.tanh(hist_edge.abs().fillna(0) * 8.0) * hist_trust).clip(0, 1)
+    install_expert('Historical', hist_active, hist_direction, hist_intensity)
+    out['Brain_Expert_Historical_Prob'] = hist_prob.astype('float32')
+    out['Brain_Expert_Historical_Trust'] = hist_trust.astype('float32')
+    out['Brain_Expert_Historical_Edge'] = hist_edge.astype('float32')
+    out['Brain_Historical_Drift_Similarity'] = num('Historical_Core_Drift_Similarity', default=1).fillna(1).clip(0,1).astype('float32')
+    out['Brain_Historical_Recency_Factor'] = num('Historical_Core_Recency_Factor', default=1).fillna(1).clip(0,1).astype('float32')
+    out['Brain_Historical_Horizon_Agreement'] = num('Historical_Core_Horizon_Agreement', default=1).fillna(1).clip(0,1).astype('float32')
+    out['Brain_Historical_Uncertainty'] = num('Historical_Core_Uncertainty', default=1).fillna(1).clip(0,1).astype('float32')
+    # Named-system historical memory is exposed separately and may be learned by
+    # Outcome AutoFS. It does not turn a system on/off and does not flip direction.
+    for _fam in ('BigAl', 'Pathi'):
+        out[f'Brain_{_fam}_Historical_Posterior_Prob'] = num(f'{_fam}_Historical_Posterior_Prob', default=0.5).fillna(0.5).astype('float32')
+        out[f'Brain_{_fam}_Historical_Trust'] = num(f'{_fam}_Historical_Trust', default=0).fillna(0).clip(0,1).astype('float32')
+        out[f'Brain_{_fam}_Historical_Sample'] = num(f'{_fam}_Historical_Sample', default=0).fillna(0).astype('float32')
+
+    # ------------------------------------------------------------------
+    # 11) Expert ensemble summaries from real active states only.
+    # ------------------------------------------------------------------
+    expert_names = ['BigAl','Pathi','Market','Power','Form','Schedule','Price','Historical']
     intensity_cols = [f'Brain_Expert_{n}_Intensity' for n in expert_names]
     active_cols = [f'Brain_Expert_{n}_Active' for n in expert_names]
     ex = out[intensity_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
@@ -13513,29 +13554,47 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
     bp_elig, bp_agree, bp_conf = pair_state('BigAl','Pathi')
     bm_elig, bm_agree, bm_conf = pair_state('BigAl','Market')
     pm_elig, pm_agree, pm_conf = pair_state('Pathi','Market')
+    bh_elig, bh_agree, bh_conf = pair_state('BigAl','Historical')
+    ph_elig, ph_agree, ph_conf = pair_state('Pathi','Historical')
+    mh_elig, mh_agree, mh_conf = pair_state('Market','Historical')
     out['Brain_BigAl_Pathi_Agreement'] = bp_agree
     out['Brain_BigAl_Pathi_Conflict'] = bp_conf
     out['Brain_BigAl_Market_Agreement'] = bm_agree
     out['Brain_BigAl_Market_Conflict'] = bm_conf
     out['Brain_Pathi_Market_Agreement'] = pm_agree
     out['Brain_Pathi_Market_Conflict'] = pm_conf
+    out['Brain_BigAl_Historical_Agreement'] = bh_agree
+    out['Brain_BigAl_Historical_Conflict'] = bh_conf
+    out['Brain_Pathi_Historical_Agreement'] = ph_agree
+    out['Brain_Pathi_Historical_Conflict'] = ph_conf
+    out['Brain_Market_Historical_Agreement'] = mh_agree
+    out['Brain_Market_Historical_Conflict'] = mh_conf
+    # Backward-compatible 3-expert agreement remains unchanged.
     out['Brain_AllIndependent_Agree'] = (
         bp_elig.eq(1) & bm_elig.eq(1) & pm_elig.eq(1)
         & bp_agree.eq(1) & bm_agree.eq(1) & pm_agree.eq(1)
     ).astype('int8')
-    out['Brain_Conflict_Count'] = pd.concat([bp_conf,bm_conf,pm_conf], axis=1).sum(axis=1).astype('int8')
-    pair_eligible_count = pd.concat([bp_elig,bm_elig,pm_elig], axis=1).sum(axis=1).astype(float)
-    pair_agree_count = pd.concat([bp_agree,bm_agree,pm_agree], axis=1).sum(axis=1).astype(float)
+    out['Brain_AllCoreExperts_Agree'] = (
+        out['Brain_AllIndependent_Agree'].eq(1)
+        & bh_elig.eq(1) & ph_elig.eq(1) & mh_elig.eq(1)
+        & bh_agree.eq(1) & ph_agree.eq(1) & mh_agree.eq(1)
+    ).astype('int8')
+    _pair_conf = [bp_conf,bm_conf,pm_conf,bh_conf,ph_conf,mh_conf]
+    _pair_elig = [bp_elig,bm_elig,pm_elig,bh_elig,ph_elig,mh_elig]
+    _pair_ag = [bp_agree,bm_agree,pm_agree,bh_agree,ph_agree,mh_agree]
+    out['Brain_Conflict_Count'] = pd.concat(_pair_conf, axis=1).sum(axis=1).astype('int8')
+    pair_eligible_count = pd.concat(_pair_elig, axis=1).sum(axis=1).astype(float)
+    pair_agree_count = pd.concat(_pair_ag, axis=1).sum(axis=1).astype(float)
     out['Brain_Directional_Pair_Count'] = pair_eligible_count.astype('int8')
     out['Brain_Directional_Agreement_Rate'] = np.where(
         pair_eligible_count > 0, pair_agree_count/pair_eligible_count, np.nan
     ).astype('float32')
 
     # ------------------------------------------------------------------
-    # 12) Uncertainty, durability, readiness. No inactive-family free credit.
+    # 13) Uncertainty, durability, readiness. No inactive-family free credit.
     # ------------------------------------------------------------------
     active_count = out['Brain_Expert_Active_Count'].astype(float)
-    data_ready = np.clip(active_count / 5.0, 0, 1)
+    data_ready = np.clip(active_count / 6.0, 0, 1)
     agree_rate = pd.to_numeric(out['Brain_Directional_Agreement_Rate'], errors='coerce')
     agreement = agree_rate.fillna(0.0).clip(0,1)
     conflict_rate = np.where(pair_eligible_count > 0,
@@ -14238,6 +14297,239 @@ def attach_pathi_bigal_backend_features(current_rows: pd.DataFrame, sport: str |
     except Exception as e:
         logging.warning("⚠️ Pathi/BigAl backend enrichment unavailable; legacy scoring preserved: %s", e, exc_info=True)
         return original
+
+
+
+
+# ============================================================================
+# V11.5.10 HISTORICAL BRAIN RUNTIME CONTRACT
+# Mirrors the trained residual/multi-horizon historical expert exactly.
+# ============================================================================
+HISTORICAL_CORE_FEATURE_NAME = "Historical_Core_Prob"
+HISTORICAL_CORE_RAW_NAME = "Historical_Core_Raw_Prob"
+HISTORICAL_CORE_EDGE_NAME = "Historical_Core_Edge"
+HISTORICAL_CORE_BASELINE_NAME = "Historical_Core_Market_Baseline_Prob"
+HISTORICAL_CORE_ACTIVE_NAME = "Historical_Core_Active"
+HISTORICAL_CORE_TRUST_NAME = "Historical_Core_Trust"
+HISTORICAL_CORE_BASE_TRUST_NAME = "Historical_Core_Base_Trust"
+HISTORICAL_CORE_DRIFT_NAME = "Historical_Core_Drift_Similarity"
+HISTORICAL_CORE_RECENCY_NAME = "Historical_Core_Recency_Factor"
+HISTORICAL_CORE_AGREEMENT_NAME = "Historical_Core_Horizon_Agreement"
+HISTORICAL_CORE_HORIZON_COUNT_NAME = "Historical_Core_Horizon_Count"
+HISTORICAL_CORE_UNCERTAINTY_NAME = "Historical_Core_Uncertainty"
+
+
+def _hist_core_num_first(df: pd.DataFrame, *names, default=np.nan) -> pd.Series:
+    for name in names:
+        if name in df.columns:
+            return pd.to_numeric(df[name], errors="coerce")
+    return pd.Series(default, index=df.index, dtype="float64")
+
+
+def _hist_core_amer_prob(odds: pd.Series) -> pd.Series:
+    o = pd.to_numeric(odds, errors="coerce")
+    p = pd.Series(np.nan, index=o.index, dtype="float64")
+    neg = o < 0
+    pos = o > 0
+    p.loc[neg] = (-o.loc[neg]) / ((-o.loc[neg]) + 100.0)
+    p.loc[pos] = 100.0 / (o.loc[pos] + 100.0)
+    return p
+
+
+def _historical_core_runtime_baseline(df: pd.DataFrame, market: str) -> pd.Series:
+    m = _sys_norm_market(market)
+    if m in ("spreads", "totals"):
+        return pd.Series(0.5, index=df.index, dtype="float64")
+    fair = _hist_core_num_first(df, "Opening_ML_Fair_Prob")
+    if fair.notna().any():
+        return fair.clip(0.01, 0.99)
+    odds = _hist_core_num_first(
+        df, "Opening_ML_Odds", "First_Odds", "First_Odds_Price", "Open_Odds", "Open_Odds_Price", "Old_Odds"
+    )
+    raw = _hist_core_amer_prob(odds)
+    group_cols = []
+    if "Merge_Key_Short" in df.columns:
+        group_cols.append("Merge_Key_Short")
+    elif "Game_Key" in df.columns:
+        group_cols.append("Game_Key")
+    if "Bookmaker" in df.columns:
+        group_cols.append("Bookmaker")
+    elif "Bookmaker_Norm" in df.columns:
+        group_cols.append("Bookmaker_Norm")
+    if group_cols and raw.notna().any():
+        keys = [df[c].astype(str) for c in group_cols]
+        den = raw.groupby(keys, dropna=False).transform("sum")
+        cnt = raw.notna().groupby(keys, dropna=False).transform("sum")
+        devig = raw / den.where(den.gt(0))
+        raw = raw.where(cnt.lt(2), devig)
+    return raw.clip(0.01, 0.99).fillna(0.5)
+
+
+def _historical_core_runtime_frame(df: pd.DataFrame, market: str) -> pd.DataFrame:
+    m = _sys_norm_market(market)
+    x = pd.DataFrame(index=df.index)
+    week = _hist_core_num_first(df, "BigAl_Context_Week_Number", "Week_Number", "Week")
+    is_conf = _hist_core_num_first(df, "BigAl_Context_Is_Conference_Game", "Is_Conference_Game")
+    is_home = _hist_core_num_first(df, "BigAl_Context_Is_Home", "Is_Home")
+    team_game = _hist_core_num_first(df, "BigAl_Context_Team_Game_Number", "Team_Game_Number")
+    revenge = _hist_core_num_first(df, "Revenge_Flag_Current")
+    x["HC_Week_Number"] = week
+    x["HC_Is_Conference_Game"] = is_conf
+    x["HC_Is_NonConference_Game"] = np.where(is_conf.notna(), 1.0 - is_conf, np.nan)
+    x["HC_Is_Home"] = is_home
+    x["HC_Team_Game_Number"] = team_game
+    x["HC_WinPct_Prior"] = _hist_core_num_first(df, "WinPct_Prior_System")
+    x["HC_ATS_WinPct_Prior"] = _hist_core_num_first(df, "ATS_WinPct_Prior_System")
+    x["HC_Opp_WinPct_Prior"] = _hist_core_num_first(df, "Opp_WinPct_Prior_System")
+    x["HC_Prev_Points_For"] = _hist_core_num_first(df, "Prev_Points_For")
+    x["HC_Prev_Points_Against"] = _hist_core_num_first(df, "Prev_Points_Against")
+    x["HC_Avg_Points_For_Prior"] = _hist_core_num_first(df, "Avg_Points_For_Prior")
+    x["HC_Avg_Points_Against_Prior"] = _hist_core_num_first(df, "Avg_Points_Against_Prior")
+    x["HC_Revenge"] = revenge
+    x["HC_Revenge_Known"] = revenge.notna().astype("float64")
+    x["HC_Days_Since_Last_Game"] = _hist_core_num_first(df, "Days_Since_Last_Game_System")
+    x["HC_Opp_Days_Since_Last_Game"] = _hist_core_num_first(df, "Opp_Days_Since_Last_Game_System")
+    x["HC_Market_Baseline_Prob"] = _historical_core_runtime_baseline(df, m)
+    if m == "spreads":
+        op = _hist_core_num_first(df, "Opening_Spread", "First_Line_Value", "Open_Value", "Opening_Line")
+        x["HC_Open_Line"] = op
+        x["HC_Open_Is_Favorite"] = np.where(op.notna(), (op < 0).astype(float), np.nan)
+        x["HC_Open_Is_Dog"] = np.where(op.notna(), (op > 0).astype(float), np.nan)
+        x["HC_Open_Abs_Line"] = op.abs()
+        for k in (3.0, 7.0, 10.0, 14.0):
+            x[f"HC_Open_Dist_{int(k)}"] = (op.abs() - k).abs()
+    elif m == "totals":
+        x["HC_Open_Line"] = _hist_core_num_first(df, "Opening_Total", "First_Line_Value", "Open_Value", "Opening_Line")
+    else:
+        odds = _hist_core_num_first(
+            df, "Opening_ML_Odds", "First_Odds", "First_Odds_Price", "Open_Odds", "Open_Odds_Price", "Old_Odds"
+        )
+        x["HC_Open_Line"] = odds
+        x["HC_Open_Implied_Prob"] = _hist_core_amer_prob(odds)
+    return x.replace([np.inf, -np.inf], np.nan)
+
+
+def _hist_core_logit(p):
+    p = np.clip(np.asarray(p, dtype=float), 1e-5, 1 - 1e-5)
+    return np.log(p / (1.0 - p))
+
+
+def _hist_core_apply_calibrator(cal, raw_p):
+    p = np.clip(np.asarray(raw_p, dtype=float), 0.01, 0.99)
+    if cal is None:
+        return p
+    return np.asarray(cal.predict_proba(_hist_core_logit(p).reshape(-1, 1))[:, 1], dtype=float)
+
+
+def _hist_core_raw_from_model(model, X, baseline):
+    delta = np.asarray(model.predict(X), dtype=float)
+    delta = np.clip(delta, -0.25, 0.25)
+    return np.clip(np.asarray(baseline, dtype=float) + delta, 0.01, 0.99)
+
+
+def _hist_core_profile_similarity(X: pd.DataFrame, expert: dict):
+    prof = expert.get("profile") or {}
+    med = np.asarray(prof.get("median", []), dtype=float)
+    scale = np.asarray(prof.get("scale", []), dtype=float)
+    a = X.to_numpy(dtype=float, copy=False)
+    if med.size != a.shape[1] or scale.size != a.shape[1] or a.shape[1] == 0:
+        return np.ones(len(X), dtype=float)
+    scale = np.where(np.isfinite(scale) & (scale > 1e-6), scale, 1.0)
+    valid = np.isfinite(a) & np.isfinite(med)[None, :]
+    z = np.abs((a - med[None, :]) / scale[None, :])
+    z = np.where(valid, np.minimum(z, 8.0), np.nan)
+    with np.errstate(all="ignore"):
+        mean_z = np.nanmean(z, axis=1)
+    coverage = valid.mean(axis=1)
+    mean_z = np.where(np.isfinite(mean_z), mean_z, 4.0)
+    return np.clip(np.exp(-0.22 * mean_z) * (0.65 + 0.35 * coverage), 0.10, 1.0)
+
+
+def _hist_core_apply_system_memory(out: pd.DataFrame, hb: dict) -> pd.DataFrame:
+    for fam in ("BigAl", "Pathi"):
+        out[f"{fam}_Historical_Posterior_Prob"] = np.float32(0.5)
+        out[f"{fam}_Historical_Trust"] = np.float32(0.0)
+        out[f"{fam}_Historical_Sample"] = np.float32(0.0)
+    stats = hb.get("system_history") or {} if isinstance(hb, dict) else {}
+    for fam in ("BigAl", "Pathi"):
+        nume = np.zeros(len(out), dtype=float); den = np.zeros(len(out), dtype=float); sample = np.zeros(len(out), dtype=float)
+        for name, stt in stats.items():
+            if stt.get("family") != fam or name not in out.columns:
+                continue
+            on = pd.to_numeric(out[name], errors="coerce").fillna(0).eq(1).to_numpy(dtype=float)
+            t = float(np.clip(stt.get("trust", 0.0), 0.0, 1.0)); p = float(np.clip(stt.get("posterior_prob", 0.5), 0.01, 0.99)); n = float(max(0, stt.get("sample", 0)))
+            nume += on*t*p; den += on*t; sample += on*n
+        active = den > 0; post = np.full(len(out), 0.5, dtype=float); post[active] = nume[active] / den[active]
+        out[f"{fam}_Historical_Posterior_Prob"] = post.astype("float32")
+        out[f"{fam}_Historical_Trust"] = np.clip(den, 0.0, 1.0).astype("float32")
+        out[f"{fam}_Historical_Sample"] = sample.astype("float32")
+    return out
+
+
+def apply_historical_core_runtime_feature(df: pd.DataFrame, bundle, market: str) -> pd.DataFrame:
+    out = df.copy()
+    defaults = {
+        HISTORICAL_CORE_FEATURE_NAME: 0.5, HISTORICAL_CORE_RAW_NAME: 0.5, HISTORICAL_CORE_EDGE_NAME: 0.0,
+        HISTORICAL_CORE_BASELINE_NAME: 0.5, HISTORICAL_CORE_ACTIVE_NAME: 0, HISTORICAL_CORE_TRUST_NAME: 0.0,
+        HISTORICAL_CORE_BASE_TRUST_NAME: 0.0, HISTORICAL_CORE_DRIFT_NAME: 1.0, HISTORICAL_CORE_RECENCY_NAME: 1.0,
+        HISTORICAL_CORE_AGREEMENT_NAME: 1.0, HISTORICAL_CORE_HORIZON_COUNT_NAME: 0, HISTORICAL_CORE_UNCERTAINTY_NAME: 1.0,
+    }
+    for c, v in defaults.items(): out[c] = v
+    hb = bundle.get("historical_core_expert") if isinstance(bundle, dict) else None
+    if not isinstance(hb, dict) or out.empty:
+        return out
+    try:
+        m = _sys_norm_market(market)
+        if m != _sys_norm_market(hb.get("market")):
+            return out
+        baseline = _historical_core_runtime_baseline(out, m).to_numpy(dtype=float)
+        experts = hb.get("experts") or []
+        if not experts and hb.get("model") is not None:
+            # V11.5.9 backward compatibility.
+            X = _historical_core_runtime_frame(out, m).reindex(columns=hb.get("feature_cols") or [])
+            raw = np.asarray(hb["model"].predict_proba(X))[:, 1]
+            eff = np.full(len(out), float(np.clip(hb.get("trust", 0.0), 0.0, 1.0)))
+            sim = np.ones(len(out)); rec = np.ones(len(out)); agree = np.ones(len(out))
+        else:
+            probs=[]; weights=[]; sims=[]; recs=[]
+            game_t = pd.to_datetime(out.get("Game_Start"), errors="coerce", utc=True)
+            for ex in experts:
+                X = _historical_core_runtime_frame(out, m).reindex(columns=ex.get("feature_cols") or [])
+                rp = _hist_core_raw_from_model(ex["model"], X, baseline)
+                p = _hist_core_apply_calibrator(ex.get("calibrator"), rp)
+                s = _hist_core_profile_similarity(X, ex)
+                md = pd.to_datetime(ex.get("max_date") or hb.get("historical_max_date"), errors="coerce", utc=True)
+                age = (game_t-md).dt.total_seconds().to_numpy(dtype=float)/86400.0
+                age = np.where(np.isfinite(age), np.maximum(age,0.0), np.inf)
+                decay=float(ex.get("runtime_decay_days",1095.0) or 1095.0)
+                r=np.clip(np.exp(-np.log(2.0)*age/max(decay,1.0)),0.10,1.0)
+                t=float(np.clip(ex.get("trust",0.0),0.0,1.0)); w=t*s*r
+                probs.append(p); weights.append(w); sims.append(s); recs.append(r)
+            if not probs:
+                raw=baseline.copy(); eff=np.zeros(len(out)); sim=np.ones(len(out)); rec=np.ones(len(out)); agree=np.zeros(len(out))
+            else:
+                P=np.vstack(probs); W=np.vstack(weights); S=np.vstack(sims); R=np.vstack(recs); den=W.sum(axis=0)
+                raw=np.where(den>0,(P*W).sum(axis=0)/np.maximum(den,1e-12),baseline)
+                eff=np.where(den>0,(W*W).sum(axis=0)/np.maximum(den,1e-12),0.0)
+                agree=np.clip(1.0-np.nanstd(P,axis=0)/0.10,0.0,1.0) if P.shape[0]>=2 else np.ones(P.shape[1])
+                eff=np.clip(eff*agree,0.0,1.0)
+                sim=np.where(den>0,(S*W).sum(axis=0)/np.maximum(den,1e-12),1.0)
+                rec=np.where(den>0,(R*W).sum(axis=0)/np.maximum(den,1e-12),1.0)
+        cutoff=pd.to_datetime(hb.get("historical_max_date"),errors="coerce",utc=True); game_t=pd.to_datetime(out.get("Game_Start"),errors="coerce",utc=True)
+        eligible=game_t.gt(cutoff).to_numpy() & np.isfinite(raw) & np.isfinite(eff) & (eff>=0.03)
+        final_p=np.clip(baseline+eff*(raw-baseline),0.01,0.99); edge=final_p-baseline
+        out[HISTORICAL_CORE_BASELINE_NAME]=baseline.astype("float32"); out[HISTORICAL_CORE_RAW_NAME]=np.asarray(raw,dtype="float32")
+        out[HISTORICAL_CORE_DRIFT_NAME]=np.asarray(sim,dtype="float32"); out[HISTORICAL_CORE_RECENCY_NAME]=np.asarray(rec,dtype="float32"); out[HISTORICAL_CORE_AGREEMENT_NAME]=np.asarray(agree,dtype="float32")
+        out[HISTORICAL_CORE_BASE_TRUST_NAME]=np.float32(float(np.clip(hb.get("trust",0.0),0.0,1.0)))
+        out[HISTORICAL_CORE_HORIZON_COUNT_NAME]=np.int8(len(experts) if experts else (1 if hb.get("model") is not None else 0))
+        out.loc[eligible,HISTORICAL_CORE_FEATURE_NAME]=final_p[eligible].astype("float32"); out.loc[eligible,HISTORICAL_CORE_EDGE_NAME]=edge[eligible].astype("float32")
+        out.loc[eligible,HISTORICAL_CORE_ACTIVE_NAME]=np.int8(1); out.loc[eligible,HISTORICAL_CORE_TRUST_NAME]=eff[eligible].astype("float32")
+        out[HISTORICAL_CORE_UNCERTAINTY_NAME]=(1.0-np.clip(np.asarray(eff)*np.asarray(agree),0.0,1.0)).astype("float32")
+        out=_hist_core_apply_system_memory(out,hb)
+        logging.info("[HISTORICAL-BRAIN-RUNTIME] market=%s active=%d/%d horizons=%d mean_trust=%.3f",m,int(eligible.sum()),len(out),int(out[HISTORICAL_CORE_HORIZON_COUNT_NAME].iloc[0]) if len(out) else 0,float(np.mean(eff)) if len(eff) else 0.0)
+    except Exception as e:
+        logging.warning("[HISTORICAL-BRAIN-RUNTIME] disabled: %s",e,exc_info=True)
+    return out
 
 
 def override_corrected_line_move_features(df: pd.DataFrame) -> pd.DataFrame:
