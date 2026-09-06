@@ -6,20 +6,18 @@ from sharp_line_dashboard import (
 
 def train_sharp_model_for_market(
     *,
-    sport: str,
-    market: str,
-    bucket_name: str,
+    sport,
+    market,
+    bucket_name,
     log_func=print,
     **kwargs,
 ):
     """
-    Train the sharp model using ALL available scored history.
+    Production sharp-model entrypoint.
+
+    ALL available scored history is used by default for every sport.
     """
-
-    # Do not allow an old caller to accidentally reintroduce
-    # a 700/900-day training restriction.
     kwargs.pop("days_back", None)
-
     return train_with_champion_wrapper(
         sport=sport,
         market=market,
@@ -32,19 +30,20 @@ def train_sharp_model_for_market(
 
 def train_timing_model_for_market(
     *,
-    sport: str,
-    bucket_name: str = None,
+    sport,
+    bucket_name=None,
     log_func=print,
     **kwargs,
 ):
     """
-    Train the timing model using ALL available scored history.
+    Production timing-model entrypoint.
+
+    ALL available scored history is used by default for every sport.
     """
-
     kwargs.pop("days_back", None)
-
     return train_timing_opportunity_model(
         sport=sport,
         days_back=None,
         gcs_bucket=bucket_name,
+        **kwargs,
     )
