@@ -404,7 +404,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.6.1-hard-handicapper-overlay-contract"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-05-v11.5.7-conservative-meta-earlystop"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -18793,24 +18793,43 @@ def train_sharp_model_from_bq(
             except Exception:
                 return 0
         
-        def _best_ntrees_from_es(clf, *, floor: int = 120, ceil: int = 2200) -> int:
+        # V11.5.7: respect what early stopping is telling us.  The old path
+        # floored a best_iteration of 0 at 120 probe trees and then refit 240
+        # trees, which could re-introduce structure that validation had already
+        # rejected.  Preserve a modest refit buffer, but never manufacture a
+        # deep model from a one-tree optimum.
+        def _best_ntrees_from_es(clf, *, floor: int = 1, ceil: int = 2200) -> int:
             bi = getattr(clf, "best_iteration", None)
             if bi is None:
                 bi = getattr(clf, "best_iteration_", None)
             if bi is not None and int(bi) >= 0:
                 n = int(bi) + 1
             else:
-                n = _num_trees_fitted(clf)
+                n = max(1, _num_trees_fitted(clf))
             return int(np.clip(n, floor, ceil))
-        
-        def _smooth_final_ntrees(n: int, *, mult: float = 1.6, floor: int = 240, ceil: int = 2000) -> int:
-            return int(np.clip(int(round(n * mult)), floor, ceil))
-        
-        nt_auc = _best_ntrees_from_es(deep_auc, floor=120, ceil=int(DEEP_N_EST_CAP))
-        nt_ll  = _best_ntrees_from_es(deep_ll,  floor=120, ceil=int(DEEP_N_EST_CAP))
-        
-        FINAL_NTREES_AUC = _smooth_final_ntrees(nt_auc, mult=1.6, floor=240, ceil=int(DEEP_N_EST_CAP))
-        FINAL_NTREES_LL  = _smooth_final_ntrees(nt_ll,  mult=1.6, floor=240, ceil=int(DEEP_N_EST_CAP))
+
+        def _stable_final_ntrees(n: int, *, best_iter=None, ceil: int = 2000) -> int:
+            n = max(1, int(n))
+            bi = None if best_iter is None else int(best_iter)
+            if bi is not None and bi <= 2:
+                # Validation says almost no boosting is needed.
+                return int(np.clip(max(12, 4 * n), 12, min(32, ceil)))
+            if n <= 10:
+                return int(np.clip(max(24, 2 * n), 24, min(64, ceil)))
+            return int(np.clip(int(round(n * 1.35)), 32, ceil))
+
+        _bi_auc_probe = getattr(deep_auc, "best_iteration", None)
+        if _bi_auc_probe is None:
+            _bi_auc_probe = getattr(deep_auc, "best_iteration_", None)
+        _bi_ll_probe = getattr(deep_ll, "best_iteration", None)
+        if _bi_ll_probe is None:
+            _bi_ll_probe = getattr(deep_ll, "best_iteration_", None)
+
+        nt_auc = _best_ntrees_from_es(deep_auc, floor=1, ceil=int(DEEP_N_EST_CAP))
+        nt_ll  = _best_ntrees_from_es(deep_ll,  floor=1, ceil=int(DEEP_N_EST_CAP))
+
+        FINAL_NTREES_AUC = _stable_final_ntrees(nt_auc, best_iter=_bi_auc_probe, ceil=int(DEEP_N_EST_CAP))
+        FINAL_NTREES_LL  = _stable_final_ntrees(nt_ll,  best_iter=_bi_ll_probe, ceil=int(DEEP_N_EST_CAP))
         
         p_va_auc = np.clip(deep_auc.predict_proba(X_va_es)[:, 1], 1e-12, 1 - 1e-12)
         p_va_ll  = np.clip(deep_ll.predict_proba(X_va_es)[:, 1], 1e-12, 1 - 1e-12)
@@ -18877,13 +18896,39 @@ def train_sharp_model_from_bq(
         elif (best_iter_i is not None and best_iter_i <= 2) and (not auc_good):
             mode = "loosen"
         
+        # Ranking strength and probability separation are different properties.
+        # A head can rank well with microscopic probability differences.  Record
+        # that state explicitly so downstream meta blending cannot mistake a
+        # ranking-only signal for strong probability amplitude.
+        if spread_std_raw < 0.002:
+            OUTCOME_SEPARATION_CLASS = "ranking_only"
+            OUTCOME_SEPARATION_TRUST = 0.25
+        elif spread_std_raw < 0.005:
+            OUTCOME_SEPARATION_CLASS = "very_weak"
+            OUTCOME_SEPARATION_TRUST = 0.50
+        elif spread_std_raw < 0.010:
+            OUTCOME_SEPARATION_CLASS = "weak"
+            OUTCOME_SEPARATION_TRUST = 0.75
+        else:
+            OUTCOME_SEPARATION_CLASS = "normal"
+            OUTCOME_SEPARATION_TRUST = 1.00
+
         st.write({
             "regularization_mode": mode,
             "spread_std_raw": float(spread_std_raw),
             "extreme_frac_raw": float(extreme_frac_raw),
             "auc_es": (None if not np.isfinite(auc_es) else float(auc_es)),
             "best_iter": best_iter_i,
+            "outcome_probability_separation": OUTCOME_SEPARATION_CLASS,
+            "outcome_separation_trust": float(OUTCOME_SEPARATION_TRUST),
+            "final_ntrees_auc": int(FINAL_NTREES_AUC),
+            "final_ntrees_ll": int(FINAL_NTREES_LL),
         })
+        print(
+            f"[OUTCOME-COMPLEXITY] best_iter={best_iter_i} spread_std={spread_std_raw:.6f} "
+            f"separation={OUTCOME_SEPARATION_CLASS} trust={OUTCOME_SEPARATION_TRUST:.2f} "
+            f"final_trees_auc={FINAL_NTREES_AUC} final_trees_ll={FINAL_NTREES_LL}"
+        )
         
         best_auc_params = _stabilize(best_auc_params, mode=mode, leaf_cap=128)
         best_ll_params  = _stabilize(best_ll_params,  mode=mode, leaf_cap=128)
@@ -19202,16 +19247,33 @@ def train_sharp_model_from_bq(
             except Exception:
                 pooled_auc = float("nan")
             mean_auc = float(np.mean(fold_aucs))
+            median_auc = float(np.median(fold_aucs))
+            min_auc = float(np.min(fold_aucs))
             pos_frac = float(np.mean(np.asarray(fold_aucs) > 0.5))
-            # Fail closed unless the WHOLE head is positive in a majority of later
-            # origins and positive in pooled ranking.  Above that, shrink influence
-            # continuously: +5 AUC points earns full specialist trust.
+
+            # V11.5.7: trust the weakest future transition, not just the pooled
+            # average.  A specialist that is excellent in two windows and nearly
+            # coin-flip/inverted in another should not earn near-1.0 trust.
             min_positive_frac = (2.0/3.0) if len(fold_aucs) >= 3 else 0.50
-            if (not np.isfinite(pooled_auc)) or pooled_auc <= 0.50 or pos_frac < min_positive_frac:
+            if (
+                (not np.isfinite(pooled_auc)) or pooled_auc <= 0.505
+                or mean_auc <= 0.505
+                or pos_frac < min_positive_frac
+                or min_auc < 0.490
+            ):
                 trust = 0.0
             else:
-                trust = float(np.clip((pooled_auc - 0.50) / 0.05, 0.0, 1.0))
-                if pooled_auc < 0.51:
+                pooled_factor = float(np.clip((pooled_auc - 0.505) / 0.055, 0.0, 1.0))
+                mean_factor = float(np.clip((mean_auc - 0.505) / 0.045, 0.0, 1.0))
+                worst_factor = float(np.clip((min_auc - 0.490) / 0.035, 0.0, 1.0))
+                consistency_factor = float(np.clip(pos_frac, 0.0, 1.0))
+                trust = min(pooled_factor, mean_factor, worst_factor, consistency_factor)
+                # Sparse evidence should accumulate before a specialist can receive
+                # full portfolio-level authority.  Three shadow windows can earn at
+                # most 50%; four at most 75%; five or more may earn full trust.
+                evidence_ceiling = 0.50 if len(fold_aucs) <= 3 else (0.75 if len(fold_aucs) == 4 else 1.00)
+                trust = float(min(trust, evidence_ceiling))
+                if min_auc < 0.505:
                     trust = min(trust, 0.20)
             result.update({
                 "valid_folds": int(len(fold_aucs)),
@@ -19219,10 +19281,13 @@ def train_sharp_model_from_bq(
                 "positive_frac": float(pos_frac),
                 "pooled_auc": float(pooled_auc),
                 "mean_fold_auc": float(mean_auc),
+                "median_fold_auc": float(median_auc),
+                "min_fold_auc": float(min_auc),
                 "trust": float(trust),
             })
             print(
                 f"[SPECIALIST-SHADOW:{label}] pooled_auc={pooled_auc:.4f} mean_auc={mean_auc:.4f} "
+                f"median_auc={median_auc:.4f} min_auc={min_auc:.4f} "
                 f"positive={sum(a>0.5 for a in fold_aucs)}/{len(fold_aucs)} ({pos_frac:.0%}) trust={trust:.3f}"
             )
             return result
@@ -20243,26 +20308,45 @@ def train_sharp_model_from_bq(
         except Exception:
             META_OOF_AUC = float("nan")
 
-        _specialist_trust_max = float(max(SPECIALIST_TRUST_SITUATION, SPECIALIST_TRUST_VALUE))
-        _trusted_specialist_count = int(SPECIALIST_TRUST_SITUATION > 0.0) + int(SPECIALIST_TRUST_VALUE > 0.0)
-        if _trusted_specialist_count == 0 or not np.isfinite(META_OOF_AUC) or META_OOF_AUC <= 0.505:
+        _trusted_trust_values = [
+            float(t) for t in (SPECIALIST_TRUST_SITUATION, SPECIALIST_TRUST_VALUE) if float(t) > 0.0
+        ]
+        _trusted_specialist_count = len(_trusted_trust_values)
+        _specialist_support = float(np.mean(_trusted_trust_values)) if _trusted_trust_values else 0.0
+
+        # V11.5.7 conservative mixture-of-experts policy.  Meta must earn its
+        # influence from strict second-level OOF, then be shrunk again by the
+        # weakest-window specialist evidence.  No internal diagnostic can grant
+        # more than 10% deployment authority on its own.
+        if _trusted_specialist_count == 0 or not np.isfinite(META_OOF_AUC) or META_OOF_AUC <= 0.515:
             _meta_weight_base = 0.00
-        elif META_OOF_AUC < 0.525:
-            _meta_weight_base = 0.10
-        elif META_OOF_AUC < 0.550:
-            _meta_weight_base = 0.20
+        elif META_OOF_AUC < 0.535:
+            _meta_weight_base = 0.025
+        elif META_OOF_AUC < 0.555:
+            _meta_weight_base = 0.050
         elif META_OOF_AUC < 0.575:
-            _meta_weight_base = 0.30
+            _meta_weight_base = 0.075
         else:
-            _meta_weight_base = 0.40
-        # A weak specialist can never earn more deployment influence than its own
-        # later-shadow trust supports.
-        META_WEIGHT = float(_meta_weight_base * _specialist_trust_max)
-        if META_WEIGHT < 0.025:
+            _meta_weight_base = 0.100
+
+        # When the core head has ranking signal but almost no probability
+        # separation, do not allow a larger-amplitude specialist stack to swamp
+        # that ordering.
+        _sep_class = str(locals().get("OUTCOME_SEPARATION_CLASS", "normal"))
+        _meta_weight_cap = 0.050 if _sep_class == "ranking_only" else (0.075 if _sep_class in {"very_weak", "weak"} else 0.100)
+        _meta_weight_base = min(float(_meta_weight_base), float(_meta_weight_cap))
+
+        META_WEIGHT = float(_meta_weight_base * _specialist_support)
+        if META_WEIGHT < 0.015:
             META_WEIGHT = 0.0
 
         OUTCOME_WEIGHT = 1.0 - META_WEIGHT
-        META_WEIGHT_POLICY = "oof_auc_x_specialist_shadow_trust_v3"
+        META_WEIGHT_POLICY = "conservative_oof_x_worst_shadow_support_v4"
+        print(
+            f"[META-ROBUST] oof_auc={META_OOF_AUC:.4f} specialist_support={_specialist_support:.3f} "
+            f"separation={_sep_class} base={_meta_weight_base:.3f} "
+            f"meta_weight={META_WEIGHT:.3f} outcome_weight={OUTCOME_WEIGHT:.3f}"
+        )
 
         p_outcome_train_for_meta = np.where(
             np.isfinite(p_outcome_oof_train), p_outcome_oof_train, p_train_vec
@@ -20293,6 +20377,9 @@ def train_sharp_model_from_bq(
             "specialist_trust_situation": float(SPECIALIST_TRUST_SITUATION),
             "specialist_trust_value": float(SPECIALIST_TRUST_VALUE),
             "trusted_specialist_count": int(_trusted_specialist_count),
+            "specialist_support_mean": float(_specialist_support),
+            "outcome_probability_separation": str(locals().get("OUTCOME_SEPARATION_CLASS", "normal")),
+            "meta_weight_cap": float(_meta_weight_cap),
         })
 
         # Diagnostics for outcome-calibrated probabilities
@@ -20719,7 +20806,7 @@ def train_sharp_model_from_bq(
                 "flip_flag": bool(flip_flag),
                 "blend_w": float(best_w),
         
-                "model_family": "three_head_plus_meta_v5_6_1_hard_handicapper_overlay_contract",
+                "model_family": "three_head_plus_meta_v5_7_conservative_meta_earlystop",
                 "feature_cols_outcome": list(feature_cols_outcome),
                 "feature_cols_situation": list(feature_cols_situation),
                 "feature_cols_value": list(feature_cols_value),
@@ -20855,7 +20942,7 @@ def train_sharp_model_from_bq(
             "meta_calibrator":      (meta_cal_name, meta_cal_obj),
         
             "multihead_config": {
-                "model_family": "three_head_plus_meta_v5_6_1_hard_handicapper_overlay_contract",
+                "model_family": "three_head_plus_meta_v5_7_conservative_meta_earlystop",
                 "outcome_head": "model_logloss/model_auc + iso_blend",
                 "situation_head": "model_situation_cls",
                 "value_cls_head": "model_value_cls",
@@ -20921,7 +21008,7 @@ def train_sharp_model_from_bq(
         
                 "multihead_config": {
                     "schema_version": 3,
-                    "model_family": "three_head_plus_meta_v5_6_1_hard_handicapper_overlay_contract",
+                    "model_family": "three_head_plus_meta_v5_7_conservative_meta_earlystop",
                     "meta_features": list(meta_train_df.columns),
                     "meta_calibrator": str(meta_cal_name),
                     "meta_oof_auc_for_weight": (None if not np.isfinite(META_OOF_AUC) else float(META_OOF_AUC)),
