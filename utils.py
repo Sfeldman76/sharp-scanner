@@ -14427,11 +14427,24 @@ def _hist_core_raw_from_model(model, X, baseline):
     return np.clip(np.asarray(baseline, dtype=float) + delta, 0.01, 0.99)
 
 
+def _hist_core_float_array(obj):
+    """Nullable-pandas-safe float64 conversion for historical Brain runtime."""
+    if isinstance(obj, pd.DataFrame):
+        return obj.apply(pd.to_numeric, errors="coerce").to_numpy(
+            dtype=np.float64, na_value=np.nan
+        )
+    if isinstance(obj, (pd.Series, pd.Index)):
+        return pd.to_numeric(pd.Series(obj), errors="coerce").to_numpy(
+            dtype=np.float64, na_value=np.nan
+        )
+    return np.asarray(obj, dtype=np.float64)
+
+
 def _hist_core_profile_similarity(X: pd.DataFrame, expert: dict):
     prof = expert.get("profile") or {}
     med = np.asarray(prof.get("median", []), dtype=float)
     scale = np.asarray(prof.get("scale", []), dtype=float)
-    a = X.to_numpy(dtype=float, copy=False)
+    a = _hist_core_float_array(X)
     if med.size != a.shape[1] or scale.size != a.shape[1] or a.shape[1] == 0:
         return np.ones(len(X), dtype=float)
     scale = np.where(np.isfinite(scale) & (scale > 1e-6), scale, 1.0)
@@ -14482,7 +14495,7 @@ def apply_historical_core_runtime_feature(df: pd.DataFrame, bundle, market: str)
         m = _sys_norm_market(market)
         if m != _sys_norm_market(hb.get("market")):
             return out
-        baseline = _historical_core_runtime_baseline(out, m).to_numpy(dtype=float)
+        baseline = _hist_core_float_array(_historical_core_runtime_baseline(out, m))
         experts = hb.get("experts") or []
         if not experts and hb.get("model") is not None:
             # V11.5.9 backward compatibility.
@@ -14499,7 +14512,7 @@ def apply_historical_core_runtime_feature(df: pd.DataFrame, bundle, market: str)
                 p = _hist_core_apply_calibrator(ex.get("calibrator"), rp)
                 s = _hist_core_profile_similarity(X, ex)
                 md = pd.to_datetime(ex.get("max_date") or hb.get("historical_max_date"), errors="coerce", utc=True)
-                age = (game_t-md).dt.total_seconds().to_numpy(dtype=float)/86400.0
+                age = _hist_core_float_array((game_t-md).dt.total_seconds())/86400.0
                 age = np.where(np.isfinite(age), np.maximum(age,0.0), np.inf)
                 decay=float(ex.get("runtime_decay_days",1095.0) or 1095.0)
                 r=np.clip(np.exp(-np.log(2.0)*age/max(decay,1.0)),0.10,1.0)
