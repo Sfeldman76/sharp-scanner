@@ -6247,7 +6247,7 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         )
         return outcome_prob
 
-    # V11.5.8.1 residual-meta deployment contract: specialists may only
+    # V11.5.8.2 residual-meta deployment contract: specialists may only
     # correct the Outcome probability by the saved deployment weight.
     combined = outcome_prob + meta_weight * (meta_prob - outcome_prob)
 
