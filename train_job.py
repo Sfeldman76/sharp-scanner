@@ -1,37 +1,9 @@
 # train_job.py
-
-
-# train_job.py
-
-import warnings
-
-warnings.filterwarnings(
-    "ignore",
-    category=UserWarning,
-    module=r"xgboost\.core",
-    message=r'(?s).*Parameters:\s*\{\s*"predictor"\s*\}\s*are not used\..*',
-)
-_orig_showwarning = warnings.showwarning
-
-def _showwarning(message, category, filename, lineno, file=None, line=None):
-    try:
-        msg = str(message)
-        if category is UserWarning and (
-            'Parameters: { "predictor" } are not used.' in msg
-            or "Parameters: { 'predictor' } are not used." in msg
-        ):
-            return  # swallow just this one
-    except Exception:
-        pass
-    return _orig_showwarning(message, category, filename, lineno, file=file, line=line)
-
-warnings.showwarning = _showwarning
-
-
 import os
 import sys
 import uuid
 import traceback
+import warnings
 import logging
 import threading
 
@@ -48,7 +20,6 @@ if HEADLESS:
     warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
     warnings.filterwarnings("ignore", message="Degrees of freedom <= 0", category=RuntimeWarning)
     logging.getLogger("numpy").setLevel(logging.ERROR)
-    logging.getLogger("xgboost").setLevel(logging.ERROR)
 
 
 def install_streamlit_shim(log_func):
@@ -71,75 +42,50 @@ def install_streamlit_shim(log_func):
         def __init__(self, label=""):
             if label:
                 _log(label)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def write(self, *a, **k):
-            return _log(*a)
-
-        def markdown(self, *a, **k):
-            return _log(*a)
-
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
+        def write(self, *a, **k): return _log(*a)
+        def markdown(self, *a, **k): return _log(*a)
         def update(self, *a, **k):
             lab = k.get("label") or ""
             if lab:
                 _log(lab)
             return None
-
-        def success(self, *a, **k):
-            return _log(*a)
-
-        def warning(self, *a, **k):
-            return _log(*a)
-
-        def error(self, *a, **k):
-            return _log(*a)
+        def success(self, *a, **k): return _log(*a)
+        def warning(self, *a, **k): return _log(*a)
+        def error(self, *a, **k): return _log(*a)
 
     class _Null:
         def __init__(self, prefix="st"):
             self._prefix = prefix
-
         def __call__(self, *a, **k):
+            # capture if someone does st.something("text")
             if a:
                 _log(*a)
             return None
-
         def __getattr__(self, name):
             return _Null(prefix=f"{self._prefix}.{name}")
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
 
     class _Progress:
         def progress(self, v=None, *a, **k):
+            # optional: only log when value is meaningful
             if v is not None:
                 _log(f"[progress] {v}")
             return None
-
         def update(self, *a, **k):
             if "label" in k and k["label"]:
                 _log(k["label"])
             if "value" in k:
                 return self.progress(k["value"])
             return None
-
-        def empty(self):
-            return None
+        def empty(self): return None
 
     def _decorator(fn=None, **kwargs):
         if callable(fn):
             return fn
-
-        def wrap(f):
-            return f
-
+        def wrap(f): return f
         return wrap
 
     st = types.ModuleType("streamlit")
@@ -187,12 +133,10 @@ def install_streamlit_shim(log_func):
         if name in d:
             return d[name]
         return _Null(prefix=f"st.{name}")
-
     st.__getattr__ = _module_getattr  # type: ignore[attr-defined]
 
     sys.modules["streamlit"] = st
     return st
-
 
 
 def start_heartbeat(pw, label, every_sec=45):
@@ -211,12 +155,10 @@ def start_heartbeat(pw, label, every_sec=45):
 
 
 def main():
-
     run_id = os.environ.get("TRAIN_RUN_ID") or str(uuid.uuid4())[:8]
     sport = os.environ.get("SPORT", "NBA")
     market = os.environ.get("MARKET", "All")
     bucket = os.environ.get("MODEL_BUCKET", "sharp-models")
-
 
     progress_uri = os.environ.get("PROGRESS_URI")
     if not progress_uri:
@@ -229,9 +171,10 @@ def main():
     # This is the ONLY log stream you want:
     def log_func(msg: str):
         pw.emit("log", str(msg))
+        # optional: also show in Cloud Run logs, but only for log_func messages
         print(str(msg), flush=True)
 
-    # Install shim BEFORE importing any Streamlit-heavy modules
+    # Install shim before importing training modules
     if HEADLESS:
         install_streamlit_shim(log_func)
 
@@ -265,10 +208,7 @@ def main():
             try:
                 try:
                     train_sharp_model_for_market(
-                        sport=sport,
-                        market=mkt,
-                        bucket_name=bucket,
-                        log_func=log_func,
+                        sport=sport, market=mkt, bucket_name=bucket, log_func=log_func
                     )
                 except TypeError:
                     train_sharp_model_for_market(sport=sport, market=mkt, bucket_name=bucket)
