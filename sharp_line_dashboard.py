@@ -404,7 +404,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-07-v12.0.5-specialist-isolation-exact-history-ablation"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-07-v12.0.6-sport-specific-system-memory"
 HISTORY_DIAGNOSTIC_VERSION = "2026-09-07-v12.0.5-exact-history-ablation"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
@@ -4083,10 +4083,13 @@ def _system_feature_valid_for_sport(col: str, sport: str) -> bool:
     if _is_retired_bigal_feature_name(c):
         return False
 
+    # Pathi legacy M1-M9 / road-favorite named systems are MLB-only.
+    # They must never appear as zero-sample NCAAF/NFL historical systems.
+    if c.startswith("Pathi_M") or c == "Pathi_RoadFavLost_StillFavorite_Screen":
+        return s == "MLB"
+
     # Pathi football-only features
-
     if c.startswith("Pathi_FB_") or c == "Football_Key_Position_Bucket":
-
         return s in ("NFL", "NCAAF")
 
     # Big Al sport-specific systems
@@ -13890,43 +13893,76 @@ def _hc_fit_one_horizon(hh: pd.DataFrame, y: np.ndarray, market: str, label: str
 
 
 def _hc_build_system_history_stats(h: pd.DataFrame, log_func=print) -> dict:
-    """Historical exact-system reliability. Past outcomes inform trust, never the rule definition."""
+    """Sport-specific historical system reliability for NCAAF.
+
+    V12.0.6 fixes the old cross-sport inventory bug: MLB Pathi M1-M9 rules are
+    excluded from NCAAF. Football Pathi key/role signals plus NCAAF Big Al exact,
+    enhancer and tightener signals are audited with READY/FIRED/GRADED counts.
+    Past outcomes inform trust only; they never redefine a rule.
+    """
     stats = {}
     try:
         s = h.copy()
         s["Sport"] = "NCAAF"
-        # Exact production rules that depend on current spread are reconstructed at historical CLOSE
-        # only for retrospective system-performance auditing. These fields never enter HC predictors.
         if "Consensus_Close_Spread_Audit" in s.columns:
             s["Spread_Value"] = pd.to_numeric(s["Consensus_Close_Spread_Audit"], errors="coerce")
+
+        # Reconstruct both the named rule engine and the football-specific Pathi
+        # market/key-number layer from the historical rows.
         s = add_pathi_bigal_rule_flags(s)
+        s = add_pathi_football_key_features(s)
         target = pd.to_numeric(s.get("ATS_Win"), errors="coerce")
-        for name in list(PATHI_EXACT_SIGNAL_COLS) + list(BIGAL_EXACT_SIGNAL_COLS):
+
+        # NCAAF inventory only.  Do not mix MLB Pathi systems into football memory.
+        pathi_inventory = list(dict.fromkeys(list(PATHI_KEY_EVENT_COLS) + list(PATHI_ROLE_CONTEXT_COLS)))
+        bigal_inventory = [c for c in BIGAL_EXACT_SIGNAL_COLS if _system_feature_valid_for_sport(c, "NCAAF")]
+        bigal_inventory += [c for c in BIGAL_ENHANCER_COLS if _system_feature_valid_for_sport(c, "NCAAF")]
+        bigal_inventory += [c for c in BIGAL_TIGHTENER_PARENT if _system_feature_valid_for_sport(c, "NCAAF")]
+        inventory = list(dict.fromkeys(pathi_inventory + bigal_inventory))
+
+        report_parts = []
+        for name in inventory:
             if name not in s.columns or not _system_feature_valid_for_sport(name, "NCAAF"):
                 continue
+            sig = pd.to_numeric(s[name], errors="coerce")
             ready_name = name + "_DataReady"
-            fire = pd.to_numeric(s[name], errors="coerce").fillna(0).eq(1)
             if ready_name in s.columns:
-                fire &= pd.to_numeric(s[ready_name], errors="coerce").fillna(0).eq(1)
-            good = fire & target.notna()
-            n = int(good.sum())
-            wins = float(target.loc[good].sum()) if n else 0.0
-            # Beta(15,15): strong shrinkage toward 50% for sparse named-system samples.
+                ready_mask = pd.to_numeric(s[ready_name], errors="coerce").fillna(0).eq(1)
+            else:
+                # Football key/role flags are deterministic when their engineered
+                # value is non-null; no separate DataReady flag is required.
+                ready_mask = sig.notna()
+            fire = ready_mask & sig.fillna(0).eq(1)
+            graded = fire & target.notna()
+            ready_n = int(ready_mask.sum())
+            fired_n = int(fire.sum())
+            n = int(graded.sum())
+            wins = float(target.loc[graded].sum()) if n else 0.0
+            raw_ats = float(wins / n) if n else float("nan")
+            # Beta(15,15): strong shrinkage toward 50% for sparse samples.
             posterior = float((wins + 15.0) / (n + 30.0))
             trust = float((n / (n + 50.0)) * np.clip(abs(posterior - 0.5) / 0.08, 0.0, 1.0)) if n else 0.0
+            family = "Pathi" if name.startswith("Pathi_") else "BigAl"
             stats[name] = {
-                "family": "Pathi" if name.startswith("Pathi_") else "BigAl",
+                "family": family,
+                "ready": ready_n,
+                "fired": fired_n,
                 "sample": n,
+                "graded": n,
                 "wins": wins,
+                "raw_ats": raw_ats,
                 "posterior_prob": posterior,
                 "trust": trust,
             }
-        if stats:
-            log_func("[HISTORICAL-SYSTEM-MEMORY] " + " | ".join(
-                f"{k}:n={v['sample']} post={v['posterior_prob']:.3f} trust={v['trust']:.3f}" for k, v in stats.items()
-            ))
+            ats_txt = f"{raw_ats:.3f}" if np.isfinite(raw_ats) else "NA"
+            report_parts.append(
+                f"{name}:ready={ready_n} fired={fired_n} graded={n} ats={ats_txt} "
+                f"post={posterior:.3f} trust={trust:.3f}"
+            )
+        if report_parts:
+            log_func("[HISTORICAL-SYSTEM-MEMORY:NCAAF] " + " | ".join(report_parts))
     except Exception as e:
-        log_func(f"[HISTORICAL-SYSTEM-MEMORY] unavailable: {e}")
+        log_func(f"[HISTORICAL-SYSTEM-MEMORY:NCAAF] unavailable: {e}")
     return stats
 
 
