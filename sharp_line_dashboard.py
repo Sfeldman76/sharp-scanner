@@ -404,7 +404,8 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-07-v12.0.1-nullable-mask-hotfix"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-07-v12.0.2-nullable-state-paired-promotion-audit"
+HISTORY_DIAGNOSTIC_VERSION = "2026-09-07-v12.0.3-paired-history-ablation"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -508,6 +509,40 @@ def _sys_float64_series(values, index) -> pd.Series:
     except TypeError:
         arr = np.asarray(numeric.astype("float64"), dtype=np.float64)
     return pd.Series(arr, index=index, dtype="float64")
+
+
+def _sys_normalize_nullable_numeric_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with nullable numeric/boolean extension dtypes flattened.
+
+    BigQuery commonly yields pandas Int64/Float64/boolean extension columns.
+    Those columns propagate pd.NA through comparisons, which can later make a
+    deterministic ``.astype("int8")`` fail.  The Pathi/Big Al state builder
+    is numeric/boolean by contract, so extension numerics are normalized to
+    plain float64 + np.nan before any rule expressions are evaluated.
+    Text/datetime/category columns are left untouched.
+    """
+    if df is None or df.empty:
+        return df.copy() if isinstance(df, pd.DataFrame) else df
+    out = df.copy()
+    for c in out.columns:
+        s = out[c]
+        try:
+            is_ext = pd.api.types.is_extension_array_dtype(s.dtype)
+            is_num = pd.api.types.is_numeric_dtype(s.dtype) or pd.api.types.is_bool_dtype(s.dtype)
+        except Exception:
+            is_ext = False
+            is_num = False
+        if is_ext and is_num:
+            out[c] = _sys_float64_series(s, out.index)
+    return out
+
+
+def _sys_int_flag(values, index, dtype="int8") -> pd.Series:
+    """NA/inf-safe deterministic integer flag/count conversion."""
+    x = _sys_float64_series(values, index).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    arr = np.rint(x.to_numpy(dtype=np.float64, na_value=np.nan))
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    return pd.Series(arr, index=index).astype(dtype)
 
 
 def _sys_num_series(df: pd.DataFrame, *names, default=np.nan) -> pd.Series:
@@ -1004,6 +1039,8 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
 
     d = df_in.copy()
     d.columns = [str(c).strip() for c in d.columns]
+    # V12.0.2: flatten nullable BigQuery numerics before any rule/state math.
+    d = _sys_normalize_nullable_numeric_frame(d)
 
     required = ["Game_Key", "Market", "Outcome"]
     if any(c not in d.columns for c in required):
@@ -1068,7 +1105,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     _season_fallback = np.where(_sp.isin(["NBA", "NCAAB", "NHL"]) & _mo.le(6), _yr - 1, _season_fallback)
     _season_fallback = np.where(_sp.isin(["NFL", "NCAAF"]) & _mo.le(3), _yr - 1, _season_fallback)
     _season_safe = games["Season"].fillna(pd.Series(_season_fallback, index=games.index)).replace([np.inf, -np.inf], np.nan)
-    games["Season"] = _season_safe.round().astype("Int64")
+    games["Season"] = _sys_float64_series(_season_safe.round(), games.index)
     games["Week_Number"] = _sys_num_series(games, "Week_Number", "Week", "Game_Week")
 
     # Combine all stage descriptors.  Explicit Boolean fields always win; text is
@@ -1195,6 +1232,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     away["Points_Against"] = away["__Score_Home"]
 
     tg = pd.concat([home, away], ignore_index=True)
+    tg = _sys_normalize_nullable_numeric_frame(tg)
     tg["SU_Margin"] = tg["Points_For"] - tg["Points_Against"]
     tg["SU_Win"] = np.where(tg["SU_Margin"].notna(), (tg["SU_Margin"] > 0).astype(float), np.nan)
     tg["SU_Loss"] = np.where(tg["SU_Margin"].notna(), (tg["SU_Margin"] < 0).astype(float), np.nan)
@@ -1873,6 +1911,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     ).fillna(False).astype("int8")
 
     tg.drop(columns=["__fb_spread_dog", "__fb_spread_fav"], inplace=True, errors="ignore")
+    tg = _sys_normalize_nullable_numeric_frame(tg)
     tg = add_pathi_bigal_rule_flags(tg)
     return tg
 
@@ -1883,7 +1922,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     """Apply named Pathi / Big Al systems to one-row-per-team-game state."""
     if state is None or state.empty:
         return state.copy()
-    s = state.copy()
+    s = _sys_normalize_nullable_numeric_frame(state)
     sport = s["Sport"].astype(str).str.upper()
 
     def n(name, default=np.nan):
@@ -1913,7 +1952,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         a = np.column_stack(arrays)
         a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
         vals = np.rint(a.sum(axis=1))
-        return pd.Series(vals, index=s.index).astype(dtype)
+        return _sys_int_flag(pd.Series(vals, index=s.index), s.index, dtype=dtype)
 
     is_mlb = sport.eq("MLB")
     is_nfl = sport.eq("NFL")
@@ -11932,7 +11971,152 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, Optional
 from google.cloud import storage
 
-CHAMPION_META_VERSION = 1
+CHAMPION_META_VERSION = 2
+PROMOTION_ROW_KEY_VERSION = "v1_game_market_outcome_book_snapshot_value_odds"
+
+
+def _promotion_row_keys(df: pd.DataFrame) -> np.ndarray:
+    """Build stable row identities for exact champion/challenger pairing.
+
+    _SOURCE_ROW_ID is process-local and can shift when filtering/schema changes.
+    Promotion therefore uses a stable digest of the quote identity.  The key is
+    intentionally based only on ex-ante row identity fields, never on targets.
+    """
+    if df is None or df.empty:
+        return np.asarray([], dtype=object)
+    import hashlib
+
+    parts = []
+    for c in ("Game_Key", "Market", "Outcome", "Bookmaker"):
+        if c in df.columns:
+            s = df[c].astype("string").fillna("").str.lower().str.strip()
+        else:
+            s = pd.Series("", index=df.index, dtype="string")
+        parts.append(s.astype(str))
+
+    if "Snapshot_Timestamp" in df.columns:
+        ts = pd.to_datetime(df["Snapshot_Timestamp"], errors="coerce", utc=True)
+        ts_s = ts.dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ").fillna("")
+    else:
+        ts_s = pd.Series("", index=df.index, dtype="object")
+    parts.append(ts_s.astype(str))
+
+    for c in ("Value", "Odds_Price"):
+        if c in df.columns:
+            x = _sys_float64_series(df[c], df.index)
+            s = x.map(lambda v: "" if not np.isfinite(v) else f"{float(v):.10g}")
+        else:
+            s = pd.Series("", index=df.index, dtype="object")
+        parts.append(s.astype(str))
+
+    raw = parts[0]
+    for s in parts[1:]:
+        raw = raw.str.cat(s, sep="\x1f")
+
+    # Add deterministic duplicate ordinal only if the source contains exact
+    # duplicate quote identities. This avoids silently collapsing two rows.
+    dup_ord = raw.groupby(raw, sort=False).cumcount().astype(str)
+    raw = raw.str.cat(dup_ord, sep="\x1e")
+    return np.asarray([hashlib.sha256(v.encode("utf-8")).hexdigest()[:24] for v in raw], dtype=object)
+
+
+def _promotion_eval_payload(row_keys, y, p) -> Dict[str, Any]:
+    row_keys = np.asarray(row_keys, dtype=object).reshape(-1)
+    y = np.asarray(y, dtype=float).reshape(-1)
+    p = np.asarray(p, dtype=float).reshape(-1)
+    if not (len(row_keys) == len(y) == len(p)):
+        raise ValueError("promotion holdout payload length mismatch")
+    ok = np.asarray([bool(str(k)) for k in row_keys]) & np.isfinite(y) & np.isfinite(p)
+    return {
+        "key_version": PROMOTION_ROW_KEY_VERSION,
+        "row_keys": row_keys[ok].astype(str).tolist(),
+        "y": y[ok].astype(int).tolist(),
+        "p": np.clip(p[ok], 1e-6, 1 - 1e-6).astype(float).tolist(),
+    }
+
+
+def _paired_promotion_metrics(
+    challenger_eval: Optional[Dict[str, Any]],
+    champion_eval: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Re-score both candidates on the exact intersection of holdout rows."""
+    if not challenger_eval or not champion_eval:
+        return None
+    if challenger_eval.get("key_version") != champion_eval.get("key_version"):
+        return None
+
+    def _as_map(ev):
+        ks = list(ev.get("row_keys", []))
+        ys = list(ev.get("y", []))
+        ps = list(ev.get("p", []))
+        if not (len(ks) == len(ys) == len(ps)):
+            return {}
+        out = {}
+        for k, yv, pv in zip(ks, ys, ps):
+            try:
+                yv = int(yv); pv = float(pv)
+            except Exception:
+                continue
+            if yv not in (0, 1) or not np.isfinite(pv):
+                continue
+            out[str(k)] = (yv, float(np.clip(pv, 1e-6, 1 - 1e-6)))
+        return out
+
+    cm = _as_map(challenger_eval)
+    hm = _as_map(champion_eval)
+    common = sorted(set(cm).intersection(hm))
+    if not common:
+        return {"paired_n": 0, "label_mismatch_n": 0}
+
+    yc=[]; pc=[]; ph=[]; mism=0
+    for k in common:
+        y1, p1 = cm[k]; y2, p2 = hm[k]
+        if y1 != y2:
+            mism += 1
+            continue
+        yc.append(y1); pc.append(p1); ph.append(p2)
+    y = np.asarray(yc, dtype=int)
+    p_c = np.asarray(pc, dtype=float)
+    p_h = np.asarray(ph, dtype=float)
+
+    def _ece(yv, pv, bins=10):
+        if len(yv) == 0:
+            return float("nan")
+        edges=np.linspace(0.0,1.0,bins+1)
+        b=np.clip(np.digitize(pv, edges[1:-1], right=False),0,bins-1)
+        out=0.0
+        for i in range(bins):
+            m=b==i
+            if m.any():
+                out += float(m.mean()) * abs(float(yv[m].mean()) - float(pv[m].mean()))
+        return float(out)
+
+    def _metrics(pv):
+        if len(y) == 0:
+            return {"holdout_n": 0}
+        auc = float(roc_auc_score(y, pv)) if np.unique(y).size == 2 else float("nan")
+        return {
+            "auc_holdout": auc,
+            "auc_meta_holdout": auc,
+            "logloss_holdout": float(log_loss(y, pv, labels=[0,1])),
+            "logloss_meta_holdout": float(log_loss(y, pv, labels=[0,1])),
+            "brier_holdout": float(brier_score_loss(y, pv)),
+            "brier_meta_holdout": float(brier_score_loss(y, pv)),
+            "accuracy_holdout": float(accuracy_score(y, (pv >= 0.5).astype(int))),
+            "accuracy_meta_holdout": float(accuracy_score(y, (pv >= 0.5).astype(int))),
+            "ece_holdout": _ece(y, pv),
+            "ece_meta_holdout": _ece(y, pv),
+            "holdout_n": int(len(y)),
+            # A paired comparison has no comparable train-vs-holdout gap metric.
+            "auc_gap_train_holdout": 0.0,
+        }
+
+    return {
+        "paired_n": int(len(y)),
+        "label_mismatch_n": int(mism),
+        "challenger_metrics": _metrics(p_c),
+        "champion_metrics": _metrics(p_h),
+    }
 
 
 @dataclass
@@ -11943,6 +12127,7 @@ class ChampionMeta:
     created_at: str              # ISO8601 timestamp
     metrics: Dict[str, float]    # holdout + CV metrics
     config: Dict[str, Any]       # any training config you want (search space, seeds, etc.)
+    holdout_eval: Optional[Dict[str, Any]] = None
     version: int = CHAMPION_META_VERSION
 
 
@@ -11965,6 +12150,11 @@ def load_champion_meta(
     if not blob.exists():
         return None
     data = json.loads(blob.download_as_text())
+    # Metadata created before V12.0.2 may not contain the new paired-holdout
+    # fields. Treat missing version explicitly as legacy rather than inheriting
+    # the current dataclass default.
+    data.setdefault("version", 1)
+    data.setdefault("holdout_eval", None)
     return ChampionMeta(**data)
 
 
@@ -12192,16 +12382,119 @@ def train_with_champion_wrapper(
 
     challenger_metrics = challenger.get("metrics", {}) or {}
     challenger_model_path = challenger.get("model_path", "")
+    challenger_holdout_eval = challenger.get("holdout_eval")
 
     # 2) Load current champion metadata (if exists)
     champion_meta = load_champion_meta(bucket_name, sport, market)
     champion_metrics = champion_meta.metrics if champion_meta else None
+    champion_holdout_eval = champion_meta.holdout_eval if champion_meta else None
 
-    # 3) Decide promotion
-    promote, dbg = should_promote_challenger(
-        challenger_metrics=challenger_metrics,
-        champion_metrics=champion_metrics,
-    )
+    # 3) Decide promotion. V12.0.2 compares both models on the exact same quote
+    # rows whenever both artifacts were produced by the paired-holdout contract.
+    paired = _paired_promotion_metrics(challenger_holdout_eval, champion_holdout_eval)
+    comparison_mode = "no_champion" if champion_meta is None else "legacy_unpaired_migration"
+    paired_metrics_challenger = None
+    paired_metrics_champion = None
+
+    if champion_meta is None:
+        promote, dbg = should_promote_challenger(
+            challenger_metrics=challenger_metrics,
+            champion_metrics=None,
+        )
+        dbg["comparison_mode"] = "no_champion"
+        dbg["paired_holdout_n"] = 0
+    elif paired is not None:
+        _paired_n = int(paired.get("paired_n", 0) or 0)
+        _label_mismatch_n = int(paired.get("label_mismatch_n", 0) or 0)
+        _raw_c = int(challenger_metrics.get("holdout_n", 0) or 0)
+        _raw_h = int((champion_metrics or {}).get("holdout_n", 0) or 0)
+        _smaller_raw = min(x for x in (_raw_c, _raw_h) if x > 0) if (_raw_c > 0 or _raw_h > 0) else 0
+        _min_paired = max(500, int(np.ceil(0.60 * _smaller_raw))) if _smaller_raw else 500
+
+        if _label_mismatch_n > 0:
+            promote = False
+            dbg = {
+                "reason": "paired_holdout_label_mismatch",
+                "comparison_mode": "paired_exact_failclosed",
+                "paired_holdout_n": _paired_n,
+                "paired_required_n": _min_paired,
+                "paired_label_mismatch_n": _label_mismatch_n,
+                "challenger_raw_holdout_n": _raw_c,
+                "champion_raw_holdout_n": _raw_h,
+            }
+            comparison_mode = "paired_exact_failclosed"
+            logger.error(
+                "[PROMOTION-PAIRED] FAIL-CLOSED label mismatch rows=%d paired_rows=%d",
+                _label_mismatch_n, _paired_n,
+            )
+        elif _paired_n < _min_paired:
+            promote = False
+            dbg = {
+                "reason": "paired_holdout_too_small",
+                "comparison_mode": "paired_exact_failclosed",
+                "paired_holdout_n": _paired_n,
+                "paired_required_n": _min_paired,
+                "paired_label_mismatch_n": _label_mismatch_n,
+                "challenger_raw_holdout_n": _raw_c,
+                "champion_raw_holdout_n": _raw_h,
+            }
+            comparison_mode = "paired_exact_failclosed"
+            logger.warning(
+                "[PROMOTION-PAIRED] FAIL-CLOSED overlap too small rows=%d required=%d raw_n=%d/%d",
+                _paired_n, _min_paired, _raw_c, _raw_h,
+            )
+        else:
+            paired_metrics_challenger = paired.get("challenger_metrics") or {}
+            paired_metrics_champion = paired.get("champion_metrics") or {}
+            promote, dbg = should_promote_challenger(
+                challenger_metrics=paired_metrics_challenger,
+                champion_metrics=paired_metrics_champion,
+            )
+            comparison_mode = "paired_exact_intersection"
+            dbg.update({
+                "comparison_mode": comparison_mode,
+                "paired_holdout_n": _paired_n,
+                "paired_required_n": _min_paired,
+                "paired_label_mismatch_n": _label_mismatch_n,
+                "challenger_raw_holdout_n": _raw_c,
+                "champion_raw_holdout_n": _raw_h,
+            })
+            logger.info(
+                "[PROMOTION-PAIRED] mode=exact_intersection rows=%d required=%d label_mismatch=%d raw_n=%d/%d",
+                _paired_n, _min_paired, _label_mismatch_n, _raw_c, _raw_h,
+            )
+    elif int(getattr(champion_meta, "version", 1) or 1) < CHAMPION_META_VERSION:
+        # Migration compatibility for a pre-V12.0.2 champion. Old metadata did
+        # not save row identities/predictions, so exact pairing is impossible.
+        # The first promoted V12.0.2 champion stores the paired contract; after
+        # that, missing/incompatible paired data fails closed below.
+        promote, dbg = should_promote_challenger(
+            challenger_metrics=challenger_metrics,
+            champion_metrics=champion_metrics,
+        )
+        dbg["comparison_mode"] = "legacy_unpaired_migration"
+        dbg["paired_holdout_n"] = 0
+        dbg["legacy_migration_warning"] = "champion_has_no_paired_holdout_payload"
+        logger.warning(
+            "[PROMOTION-PAIRED] legacy champion has no paired holdout payload; "
+            "using migration comparison until the first V12.0.2 champion is established."
+        )
+    else:
+        # A V12.0.2+ champion must never silently fall back to unpaired metrics.
+        promote = False
+        comparison_mode = "paired_contract_failclosed"
+        dbg = {
+            "reason": "paired_holdout_contract_unavailable",
+            "comparison_mode": comparison_mode,
+            "paired_holdout_n": 0,
+            "challenger_raw_holdout_n": int(challenger_metrics.get("holdout_n", 0) or 0),
+            "champion_raw_holdout_n": int((champion_metrics or {}).get("holdout_n", 0) or 0),
+            "challenger_key_version": (challenger_holdout_eval or {}).get("key_version"),
+            "champion_key_version": (champion_holdout_eval or {}).get("key_version"),
+        }
+        logger.error(
+            "[PROMOTION-PAIRED] FAIL-CLOSED paired contract unavailable/incompatible for V12.0.2+ champion."
+        )
 
     # Streamlit-friendly logging
     try:
@@ -12212,6 +12505,8 @@ def train_with_champion_wrapper(
                 "decision_debug": dbg,
                 "challenger_metrics": challenger_metrics,
                 "champion_metrics": champion_metrics,
+                "paired_challenger_metrics": paired_metrics_challenger,
+                "paired_champion_metrics": paired_metrics_champion,
             }
         )
     except Exception:
@@ -12244,6 +12539,7 @@ def train_with_champion_wrapper(
         metrics={k: float(v) for k, v in challenger_metrics.items()
                  if np.isfinite(v) or isinstance(v, (int, float))},
         config=challenger.get("config", {}),
+        holdout_eval=challenger_holdout_eval,
     )
     save_champion_meta(bucket_name, new_meta)
     logger.info(
@@ -13654,7 +13950,7 @@ def _hc_apply_system_memory(out: pd.DataFrame, hb: dict) -> pd.DataFrame:
 #     plus information available before kickoff.
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
-NCAAF_STAT_FEATURE_VERSION = "2026-09-07-v12.0.1-nullable-mask-hotfix"
+NCAAF_STAT_FEATURE_VERSION = "2026-09-07-v12.0.2-nullable-state-paired-promotion-audit"
 NCAAF_STAT_PREFIX = "NCAAF_Stat_"
 _NCAAF_STAT_TRAIN_CACHE = {}
 try:
@@ -14882,6 +15178,14 @@ def train_sharp_model_from_bq(
             pass
     except Exception as _sys_exc:
         system_state_train = pd.DataFrame()
+        # V12.0.2: preserve a real traceback in Cloud Run logs if this fail-closed
+        # path ever fires again; the UI warning alone hid the remaining cast site.
+        try:
+            import traceback as _traceback
+            print("[PATHI-BIGAL-STATE-ERROR] full traceback follows")
+            _traceback.print_exc()
+        except Exception:
+            pass
         st.warning(f"Pathi/Big Al training state skipped: {_sys_exc}")
 
     # ρ lookups (Spread↔Total, Spread↔ML, Total↔ML) — do this ONCE
@@ -17701,7 +18005,7 @@ def train_sharp_model_from_bq(
             """
             try:
                 print("\n" + "="*100)
-                print(f"PATHI + BIG AL + BRAIN INTEGRITY AUDIT | V11.5.5.1 STRUCTURE STABILITY + META OOF COVERAGE + LATE SHADOW + SPECIALIST GATING + PURE META + OVERLAY TRUST + SCHEDULE | market={str(market_name).upper()} | rows={len(df_audit):,}")
+                print(f"PATHI + BIG AL + BRAIN INTEGRITY AUDIT | V12.0.2 NCAAF STAT + NULLABLE STATE + PAIRED PROMOTION + AUDIT | market={str(market_name).upper()} | rows={len(df_audit):,}")
                 print("="*100)
 
                 def nser(c, default=0.0):
@@ -17849,6 +18153,10 @@ def train_sharp_model_from_bq(
                 # ---------- Brain expert-state consistency ----------
                 print("[PBB-AUDIT:BRAIN-EXPERT-STATE]")
                 experts=['BigAl','Pathi','Market','Power','Form','Schedule','Price','Historical']
+                if all(c in df_audit.columns for c in [
+                    'Brain_Expert_NCAAFStat_Active','Brain_Expert_NCAAFStat_Direction','Brain_Expert_NCAAFStat_Intensity'
+                ]):
+                    experts.append('NCAAFStat')
                 for name in experts:
                     ac=f'Brain_Expert_{name}_Active'; dc=f'Brain_Expert_{name}_Direction'; ic=f'Brain_Expert_{name}_Intensity'
                     if all(c in df_audit.columns for c in [ac,dc,ic]):
@@ -17863,6 +18171,10 @@ def train_sharp_model_from_bq(
                 # ---------- V11.4 ensemble-summary reconstruction ----------
                 print("[PBB-AUDIT:ENSEMBLE-SUMMARY]")
                 _enames=['BigAl','Pathi','Market','Power','Form','Schedule','Price','Historical']
+                if all(c in df_audit.columns for c in [
+                    'Brain_Expert_NCAAFStat_Active','Brain_Expert_NCAAFStat_Intensity'
+                ]):
+                    _enames.append('NCAAFStat')
                 _icols=[f'Brain_Expert_{x}_Intensity' for x in _enames]
                 _acols=[f'Brain_Expert_{x}_Active' for x in _enames]
                 if all(c in df_audit.columns for c in _icols+_acols):
@@ -22718,9 +23030,287 @@ def train_sharp_model_from_bq(
         except Exception as _market_bench_err:
             print(f"[MARKET-BENCHMARK] unavailable: {_market_bench_err}")
 
+        # -------------------------------------------------------------------
+        # V12.0.3 PAIRED HISTORICAL VALUE DIAGNOSTICS
+        # -------------------------------------------------------------------
+        # Purpose: make the contribution of historical information explicit on the
+        # untouched outer holdout. This is a counterfactual feature ablation of the
+        # ACTUAL fitted outcome models (no retraining and no holdout fitting): each
+        # historical lane is neutralized, Brain aggregates are rebuilt, and the same
+        # model/calibrator is scored on the same y_hold rows. This isolates how much
+        # the deployed model is using each historical lane without contaminating the
+        # holdout or adding a second optimization loop.
+        _history_ablation_diag = []
+        _history_system_diag = []
+        try:
+            _is_ncaaf_spread = (
+                str(sport).upper().strip() == "NCAAF"
+                and str(market).lower().strip() == "spreads"
+                and len(y_hold_vec) >= 100
+            )
+            if _is_ncaaf_spread:
+                def _hist_neutralize_lane(frame, lane):
+                    f = frame.copy()
+
+                    def _set_existing(name, value):
+                        if name in f.columns:
+                            f[name] = value
+
+                    if lane == "stat":
+                        defaults = {
+                            "NCAAF_Stat_Prob": 0.5,
+                            "NCAAF_Stat_Raw_Prob": 0.5,
+                            "NCAAF_Stat_Edge": 0.0,
+                            "NCAAF_Stat_Market_Baseline_Prob": 0.5,
+                            "NCAAF_Stat_Active": 0,
+                            "NCAAF_Stat_Trust": 0.0,
+                            "NCAAF_Stat_Base_Trust": 0.0,
+                            "NCAAF_Stat_Profile_Similarity": 1.0,
+                            "NCAAF_Stat_Recency_Factor": 1.0,
+                            "NCAAF_Stat_Expected_Margin": np.nan,
+                            "NCAAF_Stat_Expected_Total": np.nan,
+                            "NCAAF_Stat_Expected_Team_Points": np.nan,
+                            "NCAAF_Stat_Expected_Opp_Points": np.nan,
+                            "NCAAF_Stat_Uncertainty": 1.0,
+                        }
+                        for c, v in defaults.items():
+                            _set_existing(c, v)
+
+                    elif lane == "historical_core":
+                        defaults = {
+                            HISTORICAL_CORE_FEATURE_NAME: 0.5,
+                            HISTORICAL_CORE_RAW_NAME: 0.5,
+                            HISTORICAL_CORE_EDGE_NAME: 0.0,
+                            HISTORICAL_CORE_BASELINE_NAME: 0.5,
+                            HISTORICAL_CORE_ACTIVE_NAME: 0,
+                            HISTORICAL_CORE_TRUST_NAME: 0.0,
+                            HISTORICAL_CORE_BASE_TRUST_NAME: 0.0,
+                            HISTORICAL_CORE_DRIFT_NAME: 1.0,
+                            HISTORICAL_CORE_RECENCY_NAME: 1.0,
+                            HISTORICAL_CORE_AGREEMENT_NAME: 1.0,
+                            HISTORICAL_CORE_HORIZON_COUNT_NAME: 0,
+                            HISTORICAL_CORE_UNCERTAINTY_NAME: 1.0,
+                        }
+                        for c, v in defaults.items():
+                            _set_existing(c, v)
+
+                    elif lane in ("pathi_memory", "bigal_memory"):
+                        fam = "Pathi" if lane == "pathi_memory" else "BigAl"
+                        _set_existing(f"{fam}_Historical_Posterior_Prob", 0.5)
+                        _set_existing(f"{fam}_Historical_Trust", 0.0)
+                        _set_existing(f"{fam}_Historical_Sample", 0.0)
+                    return f
+
+                def _hist_rebuild_brain(frame):
+                    # Rebuild every Brain aggregate/agreement field after source-lane
+                    # neutralization so ablated information cannot leak through cached
+                    # Brain_Mean_Strength / agreement / conflict columns.
+                    z = frame.copy()
+                    z = add_ai_betting_brain_features(z)
+                    return z
+
+                def _hist_predict_outcome(frame):
+                    xf = _to_numeric_block(frame, feature_cols_outcome)
+                    xf = xf.reindex(columns=feature_cols_outcome, fill_value=0.0)
+                    xa = xf.to_numpy(dtype=np.float32, copy=False)
+                    pa, _ = pos_proba_safe(model_auc, xa, positive=1)
+                    pa = _clip01(pa, eps)
+                    if RUN_LOGLOSS and model_logloss is not None:
+                        pl, _ = pos_proba_safe(model_logloss, xa, positive=1)
+                        pl = _clip01(pl, eps)
+                        zz = (
+                            float(best_w) * _logit(pl, eps)
+                            + (1.0 - float(best_w)) * _logit(pa, eps)
+                        )
+                        pp = _clip01(_sigmoid(zz), eps)
+                    else:
+                        pp = pa
+                    if flip_flag:
+                        pp = 1.0 - pp
+                    pp = np.asarray(_apply_cal(cal_name, cal_obj, pp), dtype=float)
+                    return np.clip(pp, CLIP, 1.0 - CLIP)
+
+                def _hist_metric_row(label, p, base_metrics=None):
+                    pp = np.asarray(p, dtype=float).reshape(-1)
+                    yy = np.asarray(y_hold_vec, dtype=int).reshape(-1)
+                    ok = np.isfinite(pp)
+                    if int(ok.sum()) < 50 or np.unique(yy[ok]).size < 2:
+                        return None
+                    auc = float(roc_auc_score(yy[ok], pp[ok]))
+                    ll = float(log_loss(yy[ok], np.clip(pp[ok], 1e-6, 1-1e-6), labels=[0, 1]))
+                    br = float(brier_score_loss(yy[ok], np.clip(pp[ok], 1e-6, 1-1e-6)))
+                    row = {
+                        "Configuration": str(label),
+                        "N": int(ok.sum()),
+                        "AUC": auc,
+                        "LogLoss": ll,
+                        "Brier": br,
+                    }
+                    if base_metrics is not None:
+                        row["AUC_Lift_vs_Base"] = auc - float(base_metrics["AUC"])
+                        row["LogLoss_Improvement_vs_Base"] = float(base_metrics["LogLoss"]) - ll
+                        row["Brier_Improvement_vs_Base"] = float(base_metrics["Brier"]) - br
+                    return row
+
+                # Contract check: a no-op Brain rebuild must reconstruct the actual
+                # outcome probability. If it does not, fail closed instead of showing
+                # a misleading ablation table.
+                _hist_full_rebuilt_frame = _hist_rebuild_brain(hold_df.copy())
+                _hist_full_rebuilt_p = _hist_predict_outcome(_hist_full_rebuilt_frame)
+                _hist_rebuild_diff = float(np.nanmax(np.abs(_hist_full_rebuilt_p - np.asarray(p_hold_vec, dtype=float))))
+                print(
+                    f"[HISTORY-ABLATION-CONTRACT] version={HISTORY_DIAGNOSTIC_VERSION} "
+                    f"rows={len(y_hold_vec)} rebuild_max_abs_diff={_hist_rebuild_diff:.8f}"
+                )
+                if not np.isfinite(_hist_rebuild_diff) or _hist_rebuild_diff > 1e-5:
+                    raise RuntimeError(
+                        f"historical ablation rebuild mismatch={_hist_rebuild_diff:.8f}; refusing diagnostic"
+                    )
+
+                # Sequential restoration. Every row uses the exact same holdout rows,
+                # fitted models and calibrator. Only historical information changes.
+                _hist_configs = [
+                    ("Base — historical lanes neutral", {"stat", "historical_core", "pathi_memory", "bigal_memory"}),
+                    ("+ NCAAF Statistical Brain", {"historical_core", "pathi_memory", "bigal_memory"}),
+                    ("+ Historical Core", {"pathi_memory", "bigal_memory"}),
+                    ("+ Pathi historical memory", {"bigal_memory"}),
+                    ("+ Big Al historical memory", set()),
+                ]
+                _hist_pred_by_label = {}
+                _hist_base_metrics = None
+                for _label, _disabled in _hist_configs:
+                    _f = hold_df.copy()
+                    for _lane in _disabled:
+                        _f = _hist_neutralize_lane(_f, _lane)
+                    _f = _hist_rebuild_brain(_f)
+                    _p = _hist_predict_outcome(_f)
+                    _hist_pred_by_label[_label] = _p
+                    _row = _hist_metric_row(_label, _p, _hist_base_metrics)
+                    if _row is not None:
+                        if _hist_base_metrics is None:
+                            _hist_base_metrics = dict(_row)
+                            _row["AUC_Lift_vs_Base"] = 0.0
+                            _row["LogLoss_Improvement_vs_Base"] = 0.0
+                            _row["Brier_Improvement_vs_Base"] = 0.0
+                        _history_ablation_diag.append(_row)
+
+                # Full deployed probability can differ from the outcome head when the
+                # meta layer earns nonzero trust. Keep it as the final table row.
+                _deploy_row = _hist_metric_row(
+                    "Full deployed model",
+                    final_bet_score_hold,
+                    _hist_base_metrics,
+                )
+                if _deploy_row is not None:
+                    _history_ablation_diag.append(_deploy_row)
+
+                print("[HISTORY-ABLATION-TABLE] paired outer-holdout counterfactual; positive LL/Brier improvement is better")
+                for _r in _history_ablation_diag:
+                    print(
+                        "[HISTORY-ABLATION] "
+                        f"config={_r['Configuration']} n={_r['N']} "
+                        f"auc={_r['AUC']:.6f} ll={_r['LogLoss']:.6f} brier={_r['Brier']:.6f} "
+                        f"auc_lift={_r.get('AUC_Lift_vs_Base', np.nan):+.6f} "
+                        f"ll_improve={_r.get('LogLoss_Improvement_vs_Base', np.nan):+.6f} "
+                        f"brier_improve={_r.get('Brier_Improvement_vs_Base', np.nan):+.6f}"
+                    )
+
+                # Exact-system history table: historical reliability plus current
+                # outer-holdout activity and the probability lift attributable to
+                # that family's historical-memory lane.
+                _system_history = (
+                    (historical_core_expert or {}).get("system_history", {})
+                    if isinstance(historical_core_expert, dict) else {}
+                )
+                _p_before_pathi = _hist_pred_by_label.get("+ Historical Core")
+                _p_with_pathi = _hist_pred_by_label.get("+ Pathi historical memory")
+                _p_before_bigal = _p_with_pathi
+                _p_with_bigal = _hist_pred_by_label.get("+ Big Al historical memory")
+
+                for _name, _stt in sorted(
+                    _system_history.items(),
+                    key=lambda kv: (str(kv[1].get("family", "")), -int(kv[1].get("sample", 0)), str(kv[0]))
+                ):
+                    if _name not in hold_df.columns:
+                        _active = np.zeros(len(hold_df), dtype=bool)
+                    else:
+                        _active = pd.to_numeric(hold_df[_name], errors="coerce").fillna(0).eq(1).to_numpy(dtype=bool)
+                        _ready_name = _name + "_DataReady"
+                        if _ready_name in hold_df.columns:
+                            _active &= pd.to_numeric(hold_df[_ready_name], errors="coerce").fillna(0).eq(1).to_numpy(dtype=bool)
+                    _n_active = int(_active.sum())
+                    _fam = str(_stt.get("family", ""))
+                    _hist_n = int(_stt.get("sample", 0) or 0)
+                    _wins = float(_stt.get("wins", 0.0) or 0.0)
+                    _raw_ats = (_wins / _hist_n) if _hist_n > 0 else np.nan
+                    _hold_hit = float(np.mean(y_hold_vec[_active])) if _n_active > 0 else np.nan
+                    if _fam == "Pathi" and _p_before_pathi is not None and _p_with_pathi is not None and _n_active > 0:
+                        _model_lift = float(np.mean(np.asarray(_p_with_pathi)[_active] - np.asarray(_p_before_pathi)[_active]))
+                    elif _fam == "BigAl" and _p_before_bigal is not None and _p_with_bigal is not None and _n_active > 0:
+                        _model_lift = float(np.mean(np.asarray(_p_with_bigal)[_active] - np.asarray(_p_before_bigal)[_active]))
+                    else:
+                        _model_lift = np.nan
+                    _sr = {
+                        "System": str(_name),
+                        "Family": _fam,
+                        "Historical_N": _hist_n,
+                        "Historical_Wins": _wins,
+                        "Raw_ATS": _raw_ats,
+                        "Shrunk_Prob": float(_stt.get("posterior_prob", 0.5)),
+                        "Trust": float(_stt.get("trust", 0.0)),
+                        "Holdout_Active_N": _n_active,
+                        "Holdout_Hit_Rate": _hold_hit,
+                        "Historical_Memory_Model_Lift": _model_lift,
+                    }
+                    _history_system_diag.append(_sr)
+                    print(
+                        "[HISTORY-SYSTEM-LIFT] "
+                        f"system={_name} family={_fam} hist_n={_hist_n} "
+                        f"raw_ats={_raw_ats if np.isfinite(_raw_ats) else np.nan:.4f} "
+                        f"shrunk={_sr['Shrunk_Prob']:.4f} trust={_sr['Trust']:.4f} "
+                        f"hold_active={_n_active} hold_hit={_hold_hit if np.isfinite(_hold_hit) else np.nan:.4f} "
+                        f"memory_prob_lift={_model_lift if np.isfinite(_model_lift) else np.nan:+.6f}"
+                    )
+
+                # Streamlit presentation. Training remains headless-safe if UI output
+                # is unavailable; the same diagnostics are always printed to logs.
+                try:
+                    if _history_ablation_diag:
+                        _ab_df = pd.DataFrame(_history_ablation_diag)
+                        _show = _ab_df.copy()
+                        for _c in ["AUC", "LogLoss", "Brier", "AUC_Lift_vs_Base", "LogLoss_Improvement_vs_Base", "Brier_Improvement_vs_Base"]:
+                            if _c in _show.columns:
+                                _show[_c] = pd.to_numeric(_show[_c], errors="coerce").round(6)
+                        st.markdown("#### Historical Value Ablation — Paired Outer Holdout")
+                        st.caption("Same holdout rows and fitted models. Historical lanes are neutralized/restored without retraining. Positive LogLoss/Brier improvement vs Base is better.")
+                        st.dataframe(_show, hide_index=True, use_container_width=True)
+                    if _history_system_diag:
+                        _sys_df = pd.DataFrame(_history_system_diag)
+                        _sys_show = _sys_df.copy()
+                        for _c in ["Raw_ATS", "Shrunk_Prob", "Trust", "Holdout_Hit_Rate", "Historical_Memory_Model_Lift"]:
+                            if _c in _sys_show.columns:
+                                _sys_show[_c] = pd.to_numeric(_sys_show[_c], errors="coerce").round(4 if _c != "Historical_Memory_Model_Lift" else 6)
+                        st.markdown("#### Pathi / Big Al Historical Memory")
+                        st.caption("Historical ATS is descriptive; Shrunk Prob and Trust are the values actually allowed to influence the model.")
+                        st.dataframe(_sys_show, hide_index=True, use_container_width=True)
+                except Exception as _hist_ui_err:
+                    print(f"[HISTORY-DIAGNOSTIC-UI] skipped: {_hist_ui_err}")
+        except Exception as _hist_diag_err:
+            print(f"[HISTORY-ABLATION] unavailable: {type(_hist_diag_err).__name__}: {_hist_diag_err}")
+
         artifact_metrics = None
         artifact_config  = None
+        artifact_holdout_eval = None
         if return_artifacts:
+            _promotion_keys = _promotion_row_keys(hold_df)
+            artifact_holdout_eval = _promotion_eval_payload(
+                _promotion_keys, y_hold_vec, final_bet_score_hold
+            )
+            print(
+                f"[PROMOTION-HOLDOUT-CONTRACT] key_version={PROMOTION_ROW_KEY_VERSION} "
+                f"rows={len(artifact_holdout_eval.get('row_keys', []))} "
+                f"raw_holdout={len(y_hold_vec)}"
+            )
             artifact_metrics = {
                 "auc_holdout": auc_hold_f,
                 "logloss_holdout": logloss_hold_f,
@@ -22765,6 +23355,12 @@ def train_sharp_model_from_bq(
                 "blend_w": float(best_w),
         
                 "model_family": "three_head_plus_meta_v12_ncaaf_statistical_brain_market_benchmarked",
+                "history_diagnostics": {
+                    "version": HISTORY_DIAGNOSTIC_VERSION,
+                    "method": "paired_outer_holdout_counterfactual_neutralization_no_retraining",
+                    "ablation": list(_history_ablation_diag),
+                    "system_lift": list(_history_system_diag),
+                },
                 "ncaaf_statistical_brain": ({
                     "enabled": bool(ncaaf_statistical_brain),
                     "version": (ncaaf_statistical_brain or {}).get("version") if isinstance(ncaaf_statistical_brain, dict) else None,
@@ -23070,6 +23666,7 @@ def train_sharp_model_from_bq(
                 "model_path": artifact_model_path,
                 "metrics": artifact_metrics,
                 "config": artifact_config,
+                "holdout_eval": artifact_holdout_eval,
             }
         
         if not trained_models:
