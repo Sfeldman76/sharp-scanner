@@ -404,7 +404,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-07-v12.0.2-nullable-state-paired-promotion-audit"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-07-v12.0.4-missing-season-groupby-na-safe"
 HISTORY_DIAGNOSTIC_VERSION = "2026-09-07-v12.0.3-paired-history-ablation"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
@@ -1205,10 +1205,19 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         lambda r: "|".join(sorted([str(r.get("Home_Team_Norm", "")), str(r.get("Away_Team_Norm", ""))])), axis=1
     )
     games = games.sort_values(["Sport", "Season", "Pair_Key", "Game_Start", "Game_Key"])
-    games["Season_H2H_Meeting_Number"] = (
-        games.groupby(["Sport", "Season", "Pair_Key"], sort=False).cumcount() + 1
-    ).astype("int16")
-    first_total = games.groupby(["Sport", "Season", "Pair_Key"], sort=False)["Actual_Game_Total"].transform("first")
+    # V12.0.4: pandas GroupBy drops NA keys by default.  Rows whose Season
+    # cannot be inferred (for example a malformed/upcoming row with no usable
+    # Game_Start) therefore receive NaN from cumcount(), and a direct int16
+    # cast raises IntCastingNaNError.  Keep the unknown-season group in the
+    # operation and still pass the count through the shared NA/inf-safe caster.
+    games["Season_H2H_Meeting_Number"] = _sys_int_flag(
+        games.groupby(["Sport", "Season", "Pair_Key"], sort=False, dropna=False).cumcount() + 1,
+        games.index,
+        "int16",
+    )
+    first_total = games.groupby(
+        ["Sport", "Season", "Pair_Key"], sort=False, dropna=False
+    )["Actual_Game_Total"].transform("first")
     games["First_Meeting_Actual_Total_Prior"] = np.where(
         games["Season_H2H_Meeting_Number"] >= 2, first_total, np.nan
     )
@@ -1510,7 +1519,9 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     # ------------------------------------------------------------------
     tg = tg.sort_values(["Sport", "Season", "Team", "Game_Start", "Game_Key"]).reset_index(drop=True)
     grp = ["Sport", "Season", "Team"]
-    tg["Team_Game_Number"] = (tg.groupby(grp, sort=False).cumcount() + 1).astype("int16")
+    tg["Team_Game_Number"] = _sys_int_flag(
+        tg.groupby(grp, sort=False, dropna=False).cumcount() + 1, tg.index, "int16"
+    )
 
     # Team game number is more robust than calendar week when byes exist.  The
     # public Big Al NCAA Week-2 example is explicitly a team's second game.
@@ -1538,8 +1549,8 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         _tgn.eq(2) & _conf_ctx.eq(1) & _home_ctx2.eq(1)
     ).astype("int8")
 
-    prior_n = tg.groupby(grp, sort=False).cumcount().astype(float)
-    prior_wins = tg["SU_Win"].fillna(0).groupby([tg[c] for c in grp], sort=False).cumsum() - tg["SU_Win"].fillna(0)
+    prior_n = tg.groupby(grp, sort=False, dropna=False).cumcount().astype(float)
+    prior_wins = tg["SU_Win"].fillna(0).groupby([tg[c] for c in grp], sort=False, dropna=False).cumsum() - tg["SU_Win"].fillna(0)
     tg["WinPct_Prior_System"] = prior_wins / prior_n.replace(0, np.nan)
 
     # Big Al ALL Access research (DB-only proxy):
@@ -1551,7 +1562,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     # This is an ENHANCER/proxy, never labeled as an exact Big Al system.
     _su_numeric = pd.to_numeric(tg["SU_Win"], errors="coerce")
     _recent5_su = (
-        _su_numeric.groupby([tg[c] for c in grp], sort=False)
+        _su_numeric.groupby([tg[c] for c in grp], sort=False, dropna=False)
         .transform(lambda x: x.shift(1).rolling(5, min_periods=3).mean())
     )
     _is_mlb_state = tg["Sport"].astype(str).str.upper().eq("MLB")
@@ -1562,7 +1573,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     tg["BigAl_MLB_Recent_vs_Season_WinPct_Delta"] = _recent_delta.where(_is_mlb_state).astype("float32")
 
     tg["Days_Since_Last_Game_System"] = (
-        tg.groupby(grp, sort=False)["Game_Start"].diff().dt.total_seconds().div(86400.0)
+        tg.groupby(grp, sort=False, dropna=False)["Game_Start"].diff().dt.total_seconds().div(86400.0)
     )
 
     # Canonical leakage-safe schedule-density state at physical team-game grain.
@@ -1571,7 +1582,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     for _sched_days in (2, 4, 7):
         _sched_col = f"Games_Last_{_sched_days}_Days_System"
         _sched_counts = np.zeros(len(tg), dtype=np.int16)
-        for _, _idx_arr in tg.groupby(grp, sort=False).indices.items():
+        for _, _idx_arr in tg.groupby(grp, sort=False, dropna=False).indices.items():
             _idx_arr = np.asarray(_idx_arr, dtype=np.int64)
             _times = pd.to_datetime(tg.loc[_idx_arr, "Game_Start"], errors="coerce", utc=True)
             _t_ns = _times.astype("int64").to_numpy()
@@ -1603,7 +1614,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         pd.to_numeric(tg.get("Week_Number"), errors="coerce")
         - pd.to_numeric(tg.get("Team_Game_Number"), errors="coerce")
     )
-    _week_gap_prev = _week_gap_now.groupby([tg[c] for c in grp], sort=False).shift(1)
+    _week_gap_prev = _week_gap_now.groupby([tg[c] for c in grp], sort=False, dropna=False).shift(1)
     _days_rest_sched = pd.to_numeric(tg["Days_Since_Last_Game_System"], errors="coerce")
     _football_sched = tg["Sport"].astype(str).str.upper().isin(["NFL", "NCAAF", "CFL"])
     tg["Had_Bye_Last_Game_System"] = (
@@ -1623,7 +1634,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     # Big Al CBB streak-fade needs the winning streak that existed ENTERING
     # the team's previous game.  This remains strictly prior-only.
     tg["SU_Win_Streak_Entering_Previous_Game"] = (
-        tg.groupby(grp, sort=False)["SU_Win_Streak_Prior"].shift(1)
+        tg.groupby(grp, sort=False, dropna=False)["SU_Win_Streak_Prior"].shift(1)
     )
 
     # Pathi football role/trend state. These are prior-only and leakage-safe.
@@ -1634,10 +1645,10 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     def _prior_cond_rate(mask: pd.Series, window: int | None = None) -> pd.Series:
         tmp = pd.to_numeric(tg["ATS_Win"], errors="coerce").where(mask)
         if window is None:
-            return tmp.groupby([tg[c] for c in grp], sort=False).transform(
+            return tmp.groupby([tg[c] for c in grp], sort=False, dropna=False).transform(
                 lambda s: s.shift(1).expanding(min_periods=1).mean()
             )
-        return tmp.groupby([tg[c] for c in grp], sort=False).transform(
+        return tmp.groupby([tg[c] for c in grp], sort=False, dropna=False).transform(
             lambda s: s.shift(1).rolling(window, min_periods=1).mean()
         )
 
@@ -1676,7 +1687,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         for col in prev_base:
             if col in tg.columns:
                 name = f"Prev{'' if lag == 1 else lag}_{col}"
-                tg[name] = tg.groupby(grp, sort=False)[col].shift(lag)
+                tg[name] = tg.groupby(grp, sort=False, dropna=False)[col].shift(lag)
 
     tg["Prev_Is_Road_Favorite"] = (
         (pd.to_numeric(tg.get("Prev_Is_Home"), errors="coerce") == 0) &
@@ -1689,7 +1700,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
 
     # Rolling / expanding profile statistics prior to current game.
     def _prior_roll_mean(col, window):
-        return tg.groupby(grp, sort=False)[col].transform(
+        return tg.groupby(grp, sort=False, dropna=False)[col].transform(
             lambda s: pd.to_numeric(s, errors="coerce").shift(1).rolling(window, min_periods=1).mean()
         )
 
@@ -1700,7 +1711,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     tg["Pathi_FB_Usually_Dog_Now_Favorite"] = ((_dog_rate >= 0.70) & (_cur_spread < 0)).astype("int8")
     tg["Pathi_FB_Usually_Favorite_Now_Dog"] = ((_dog_rate <= 0.30) & (_cur_spread > 0)).astype("int8")
     tg["Pathi_FB_Dog_Rate_Last10_Prior"] = _dog_rate.astype("float32")
-    tg["Avg_Points_For_Prior"] = tg.groupby(grp, sort=False)["Points_For"].transform(
+    tg["Avg_Points_For_Prior"] = tg.groupby(grp, sort=False, dropna=False)["Points_For"].transform(
         lambda s: pd.to_numeric(s, errors="coerce").shift(1).expanding(min_periods=1).mean()
     )
 
@@ -1711,8 +1722,8 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     unit_profit = np.where(tg["SU_Win"].eq(1), payout, np.where(tg["SU_Loss"].eq(1), -1.0, np.nan))
     tg["__rf_game"] = rf.astype(float)
     tg["__rf_profit"] = np.where(rf, unit_profit, 0.0)
-    rf_games_cum = tg["__rf_game"].groupby([tg[c] for c in grp], sort=False).cumsum() - tg["__rf_game"]
-    rf_profit_cum = tg["__rf_profit"].groupby([tg[c] for c in grp], sort=False).cumsum() - tg["__rf_profit"]
+    rf_games_cum = tg["__rf_game"].groupby([tg[c] for c in grp], sort=False, dropna=False).cumsum() - tg["__rf_game"]
+    rf_profit_cum = tg["__rf_profit"].groupby([tg[c] for c in grp], sort=False, dropna=False).cumsum() - tg["__rf_profit"]
     tg["Road_Favorite_ROI_Prior"] = rf_profit_cum / rf_games_cum.replace(0, np.nan)
     tg.drop(columns=["__rf_game", "__rf_profit"], inplace=True, errors="ignore")
 
@@ -1724,7 +1735,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         def fn(s):
             x=pd.to_numeric(s, errors="coerce").shift(1).rolling(window, min_periods=1)
             return getattr(x, stat)()
-        return tg.groupby(grp, sort=False)[col].transform(fn)
+        return tg.groupby(grp, sort=False, dropna=False)[col].transform(fn)
     tg["Current_ImpliedProb_vs_Last10_Avg"] = mlp - _prior_roll("__ml_imp_prob_hist",10,"mean")
     tg["Current_ImpliedProb_vs_Last10_Median"] = mlp - _prior_roll("__ml_imp_prob_hist",10,"median")
     tg["Role_Price_Shift"] = tg["Current_ImpliedProb_vs_Last10_Avg"]
@@ -1739,11 +1750,11 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     def _prior_roi(mask, window=None):
         p=tg["__ml_profit"].where(mask); played=p.notna().astype(float)
         if window is None:
-            ps=p.fillna(0).groupby([tg[c] for c in grp],sort=False).cumsum()-p.fillna(0)
-            ns=played.groupby([tg[c] for c in grp],sort=False).cumsum()-played
+            ps=p.fillna(0).groupby([tg[c] for c in grp],sort=False,dropna=False).cumsum()-p.fillna(0)
+            ns=played.groupby([tg[c] for c in grp],sort=False,dropna=False).cumsum()-played
         else:
-            ps=p.fillna(0).groupby([tg[c] for c in grp],sort=False).transform(lambda s:s.shift(1).rolling(window,min_periods=1).sum())
-            ns=played.groupby([tg[c] for c in grp],sort=False).transform(lambda s:s.shift(1).rolling(window,min_periods=1).sum())
+            ps=p.fillna(0).groupby([tg[c] for c in grp],sort=False,dropna=False).transform(lambda s:s.shift(1).rolling(window,min_periods=1).sum())
+            ns=played.groupby([tg[c] for c in grp],sort=False,dropna=False).transform(lambda s:s.shift(1).rolling(window,min_periods=1).sum())
         return ps/ns.replace(0,np.nan)
     _all=pd.Series(True,index=tg.index); _favml=pd.to_numeric(tg.get("Is_ML_Favorite"),errors="coerce").eq(1); _dogml=pd.to_numeric(tg.get("Is_ML_Dog"),errors="coerce").eq(1)
     tg["Team_ML_ROI_Season"]=_prior_roi(_all)
@@ -1763,13 +1774,13 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     # Every field is shifted/prior-only, so no current-game result can leak.
     season_pair_grp=["Sport","Season","Team","Opponent"]
     tg["Season_H2H_Consecutive_Losses_Prior"]=_sys_consecutive_prior(tg,"SU_Loss",season_pair_grp)
-    tg["Season_H2H_Last_SU_Win_Prior"] = tg.groupby(season_pair_grp, sort=False)["SU_Win"].shift(1)
-    tg["Season_H2H_Last_SU_Margin_Prior"] = tg.groupby(season_pair_grp, sort=False)["SU_Margin"].shift(1)
-    tg["Season_H2H_Last_Points_Against_Prior"] = tg.groupby(season_pair_grp, sort=False)["Points_Against"].shift(1)
-    tg["Season_H2H_Last_Spread_Prior"] = tg.groupby(season_pair_grp, sort=False)["Spread_Value"].shift(1)
-    tg["Season_H2H_Last_Is_Home_Prior"] = tg.groupby(season_pair_grp, sort=False)["Is_Home"].shift(1)
+    tg["Season_H2H_Last_SU_Win_Prior"] = tg.groupby(season_pair_grp, sort=False, dropna=False)["SU_Win"].shift(1)
+    tg["Season_H2H_Last_SU_Margin_Prior"] = tg.groupby(season_pair_grp, sort=False, dropna=False)["SU_Margin"].shift(1)
+    tg["Season_H2H_Last_Points_Against_Prior"] = tg.groupby(season_pair_grp, sort=False, dropna=False)["Points_Against"].shift(1)
+    tg["Season_H2H_Last_Spread_Prior"] = tg.groupby(season_pair_grp, sort=False, dropna=False)["Spread_Value"].shift(1)
+    tg["Season_H2H_Last_Is_Home_Prior"] = tg.groupby(season_pair_grp, sort=False, dropna=False)["Is_Home"].shift(1)
     tg["Season_H2H_Days_Since_Last_Matchup_Prior"] = (
-        tg.groupby(season_pair_grp, sort=False)["Game_Start"].diff().dt.total_seconds().div(86400.0)
+        tg.groupby(season_pair_grp, sort=False, dropna=False)["Game_Start"].diff().dt.total_seconds().div(86400.0)
     )
     def _prior_last_loss_margin(s):
         vals=[]; last=np.nan
