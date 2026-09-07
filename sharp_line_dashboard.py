@@ -404,7 +404,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-06-v12.0-statistical-brain-na-safe"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-07-v12.0.1-nullable-mask-hotfix"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -1901,6 +1901,20 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
             out &= n(name).notna()
         return out
 
+    def flag_sum(cols, dtype="int16"):
+        """NA/inf-safe sum of deterministic 0/1 system flags."""
+        cols = [c for c in cols if c in s.columns]
+        if not cols:
+            return pd.Series(0, index=s.index, dtype=dtype)
+        arrays = [
+            _sys_float64_series(s[c], s.index).to_numpy(dtype=np.float64, na_value=np.nan)
+            for c in cols
+        ]
+        a = np.column_stack(arrays)
+        a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+        vals = np.rint(a.sum(axis=1))
+        return pd.Series(vals, index=s.index).astype(dtype)
+
     is_mlb = sport.eq("MLB")
     is_nfl = sport.eq("NFL")
     is_ncaaf = sport.eq("NCAAF")
@@ -2422,10 +2436,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     ).astype("int8")
 
     _bigal_enhancer_flags = [c for c in BIGAL_ENHANCER_COLS if c in s.columns]
-    s["BigAl_Enhancer_Count"] = (
-        s[_bigal_enhancer_flags].sum(axis=1).astype("int16")
-        if _bigal_enhancer_flags else 0
-    )
+    s["BigAl_Enhancer_Count"] = flag_sum(_bigal_enhancer_flags, "int16")
     s["BigAl_Enhancer_Active"] = (pd.to_numeric(s["BigAl_Enhancer_Count"], errors="coerce").fillna(0) > 0).astype("int8")
 
     # ------------------------------------------------------------------
@@ -2450,10 +2461,12 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         and c.endswith("_Tightener")
         and not _is_retired_bigal_feature_name(c)
     ]
-    s["Pathi_System_Count"] = s[pathi_signal_cols].sum(axis=1).astype("int16")
-    s["BigAl_System_Count"] = s[bigal_base_cols].sum(axis=1).astype("int16")
-    s["BigAl_Tightener_Count"] = s[tight_cols].sum(axis=1).astype("int16") if tight_cols else 0
-    s["System_Signal_Count"] = (s["Pathi_System_Count"] + s["BigAl_System_Count"] + s["BigAl_Tightener_Count"]).astype("int16")
+    s["Pathi_System_Count"] = flag_sum(pathi_signal_cols, "int16")
+    s["BigAl_System_Count"] = flag_sum(bigal_base_cols, "int16")
+    s["BigAl_Tightener_Count"] = flag_sum(tight_cols, "int16")
+    s["System_Signal_Count"] = flag_sum(
+        ["Pathi_System_Count", "BigAl_System_Count", "BigAl_Tightener_Count"], "int16"
+    )
     # BigAl_Enhancer_Count is intentionally excluded: enhancer != exact system signal.
 
     # Regular-season Big Al market family indicators.  Aggregate features are
@@ -2463,10 +2476,10 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     _ba_spread_base_names = [c for c in bigal_base_cols if c not in _ba_total_base_names and c in s.columns]
     _ba_total_tight_names = [c for c in tight_cols if c.startswith("BigAl_CFL1_")]
     _ba_spread_tight_names = [c for c in tight_cols if c not in _ba_total_tight_names]
-    s["BigAl_Spread_System_Count"] = s[_ba_spread_base_names].sum(axis=1).astype("int16") if _ba_spread_base_names else 0
-    s["BigAl_Total_System_Count"] = s[_ba_total_base_names].sum(axis=1).astype("int16") if _ba_total_base_names else 0
-    s["BigAl_Spread_Tightener_Count"] = s[_ba_spread_tight_names].sum(axis=1).astype("int16") if _ba_spread_tight_names else 0
-    s["BigAl_Total_Tightener_Count"] = s[_ba_total_tight_names].sum(axis=1).astype("int16") if _ba_total_tight_names else 0
+    s["BigAl_Spread_System_Count"] = flag_sum(_ba_spread_base_names, "int16")
+    s["BigAl_Total_System_Count"] = flag_sum(_ba_total_base_names, "int16")
+    s["BigAl_Spread_Tightener_Count"] = flag_sum(_ba_spread_tight_names, "int16")
+    s["BigAl_Total_Tightener_Count"] = flag_sum(_ba_total_tight_names, "int16")
     s["BigAl_Spread_Active"] = (s["BigAl_Spread_System_Count"] > 0).astype("int8")
     s["BigAl_Total_Active"] = (s["BigAl_Total_System_Count"] > 0).astype("int8")
     _ba_signed_state = pd.to_numeric(s.get("BigAl_Total_System_Signed"), errors="coerce").fillna(0)
@@ -13641,7 +13654,7 @@ def _hc_apply_system_memory(out: pd.DataFrame, hb: dict) -> pd.DataFrame:
 #     plus information available before kickoff.
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
-NCAAF_STAT_FEATURE_VERSION = "2026-09-06-v12.0-structural-opponent-aware-market-shrunk"
+NCAAF_STAT_FEATURE_VERSION = "2026-09-07-v12.0.1-nullable-mask-hotfix"
 NCAAF_STAT_PREFIX = "NCAAF_Stat_"
 _NCAAF_STAT_TRAIN_CACHE = {}
 try:
@@ -13986,11 +13999,18 @@ def fit_ncaaf_statistical_brain(log_func=print):
     latest=seasons[-1]
     linear_weight=0.75; market_weight=0.15
 
+    # BigQuery/pandas may return nullable Int64/Float64 season columns. Convert
+    # once to a plain NumPy float array so every mask below is guaranteed bool,
+    # never object/pd.NA (which NumPy cannot use as an index).
+    season_arr = _sys_float64_series(games["Season"], games.index).to_numpy(
+        dtype=np.float64, na_value=np.nan
+    )
+
     # Season-forward OOF residuals; each validation season is unseen by its model.
     oof_margin=np.full(len(games),np.nan); oof_total=np.full(len(games),np.nan)
     for val_season in seasons[1:]:
-        tr=pd.to_numeric(games["Season"],errors="coerce").lt(val_season)
-        va=pd.to_numeric(games["Season"],errors="coerce").eq(val_season)
+        tr=np.isfinite(season_arr) & (season_arr < float(val_season))
+        va=np.isfinite(season_arr) & (season_arr == float(val_season))
         if tr.sum()<500 or va.sum()<100: continue
         mm,tm=_ncaaf_stat_fit_models_for_rows(games,feature_cols,tr)
         sm=_ncaaf_stat_blend_predict(mm,games.loc[va,feature_cols],linear_weight)
@@ -14003,13 +14023,13 @@ def fit_ncaaf_statistical_brain(log_func=print):
 
     actual_m=pd.to_numeric(games["Actual_Margin"],errors="coerce").to_numpy(dtype=float)
     actual_t=pd.to_numeric(games["Actual_Total"],errors="coerce").to_numpy(dtype=float)
-    shadow=pd.to_numeric(games["Season"],errors="coerce").eq(latest).to_numpy()
-    pre_shadow=np.isfinite(oof_margin) & (pd.to_numeric(games["Season"],errors="coerce").to_numpy(dtype=float)<latest)
+    shadow=np.isfinite(season_arr) & (season_arr == float(latest))
+    pre_shadow=np.isfinite(oof_margin) & np.isfinite(season_arr) & (season_arr < float(latest))
     resid_m=(actual_m-oof_margin)[pre_shadow & np.isfinite(actual_m)]
     resid_t=(actual_t-oof_total)[pre_shadow & np.isfinite(actual_t)]
 
-    shadow_open_sp=pd.to_numeric(games.loc[shadow,"Consensus_Open_Spread"],errors="coerce").to_numpy(dtype=float)
-    shadow_open_tot=pd.to_numeric(games.loc[shadow,"Consensus_Open_Total"],errors="coerce").to_numpy(dtype=float)
+    shadow_open_sp=pd.to_numeric(games.loc[shadow,"Consensus_Open_Spread"],errors="coerce").to_numpy(dtype=float, na_value=np.nan)
+    shadow_open_tot=pd.to_numeric(games.loc[shadow,"Consensus_Open_Total"],errors="coerce").to_numpy(dtype=float, na_value=np.nan)
     smarg=oof_margin[shadow]; stotl=oof_total[shadow]; am=actual_m[shadow]; at=actual_t[shadow]
     spread_margin=am+shadow_open_sp
     valid_sp=np.isfinite(spread_margin)&~np.isclose(spread_margin,0,atol=1e-9)&np.isfinite(smarg)&np.isfinite(shadow_open_sp)
@@ -14023,7 +14043,7 @@ def fit_ncaaf_statistical_brain(log_func=print):
     ptot=_ncaaf_stat_empirical_prob_gt(shadow_open_tot[valid_tot]-stotl[valid_tot],resid_t)
     ll_tot=_ncaaf_stat_logloss(ytot,ptot); auc_tot=_ncaaf_stat_auc(ytot,ptot); br_tot=_ncaaf_stat_brier(ytot,ptot)
 
-    h2h_market=pd.to_numeric(games.loc[shadow,"Market_Open_H2H_Fair"],errors="coerce").to_numpy(dtype=float)
+    h2h_market=pd.to_numeric(games.loc[shadow,"Market_Open_H2H_Fair"],errors="coerce").to_numpy(dtype=float, na_value=np.nan)
     yh=(am>0).astype(int)
     ph=_ncaaf_stat_empirical_prob_gt(-smarg,resid_m)
     okh=np.isfinite(ph)&np.isfinite(h2h_market)
@@ -14217,7 +14237,7 @@ def apply_ncaaf_statistical_brain_feature(df: pd.DataFrame, sb, market: str):
         rec=np.clip(np.exp(-np.log(2)*age/730.),.20,1.0)
         eff=np.clip(base_trust*sim*rec,0,1)
         final=np.clip(baseline+eff*(np.asarray(rawp,dtype=float)-baseline),.01,.99); edge=final-baseline
-        eligible=(gt>cutoff).to_numpy()&np.isfinite(rawp)&np.isfinite(eff)&(eff>=.03)
+        eligible=(gt>cutoff).fillna(False).to_numpy(dtype=bool)&np.isfinite(rawp)&np.isfinite(eff)&(eff>=.03)
         # V12 leakage contract: the final structural estimators were refit on the
         # complete historical source AFTER protected shadow evaluation.  Therefore
         # their row-level predictions may only be exposed for games strictly after
