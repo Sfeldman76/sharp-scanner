@@ -10788,7 +10788,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-07-v12.0.1-nullable-mask-hotfix"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-07-v12.0.2-nullable-state-paired-promotion-audit"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -10892,6 +10892,40 @@ def _sys_float64_series(values, index) -> pd.Series:
     except TypeError:
         arr = np.asarray(numeric.astype("float64"), dtype=np.float64)
     return pd.Series(arr, index=index, dtype="float64")
+
+
+def _sys_normalize_nullable_numeric_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with nullable numeric/boolean extension dtypes flattened.
+
+    BigQuery commonly yields pandas Int64/Float64/boolean extension columns.
+    Those columns propagate pd.NA through comparisons, which can later make a
+    deterministic ``.astype("int8")`` fail.  The Pathi/Big Al state builder
+    is numeric/boolean by contract, so extension numerics are normalized to
+    plain float64 + np.nan before any rule expressions are evaluated.
+    Text/datetime/category columns are left untouched.
+    """
+    if df is None or df.empty:
+        return df.copy() if isinstance(df, pd.DataFrame) else df
+    out = df.copy()
+    for c in out.columns:
+        s = out[c]
+        try:
+            is_ext = pd.api.types.is_extension_array_dtype(s.dtype)
+            is_num = pd.api.types.is_numeric_dtype(s.dtype) or pd.api.types.is_bool_dtype(s.dtype)
+        except Exception:
+            is_ext = False
+            is_num = False
+        if is_ext and is_num:
+            out[c] = _sys_float64_series(s, out.index)
+    return out
+
+
+def _sys_int_flag(values, index, dtype="int8") -> pd.Series:
+    """NA/inf-safe deterministic integer flag/count conversion."""
+    x = _sys_float64_series(values, index).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    arr = np.rint(x.to_numpy(dtype=np.float64, na_value=np.nan))
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    return pd.Series(arr, index=index).astype(dtype)
 
 
 def _sys_num_series(df: pd.DataFrame, *names, default=np.nan) -> pd.Series:
@@ -11137,6 +11171,8 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
 
     d = df_in.copy()
     d.columns = [str(c).strip() for c in d.columns]
+    # V12.0.2: flatten nullable BigQuery numerics before any rule/state math.
+    d = _sys_normalize_nullable_numeric_frame(d)
 
     required = ["Game_Key", "Market", "Outcome"]
     if any(c not in d.columns for c in required):
@@ -11201,7 +11237,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     _season_fallback = np.where(_sp.isin(["NBA", "NCAAB", "NHL"]) & _mo.le(6), _yr - 1, _season_fallback)
     _season_fallback = np.where(_sp.isin(["NFL", "NCAAF"]) & _mo.le(3), _yr - 1, _season_fallback)
     _season_safe = games["Season"].fillna(pd.Series(_season_fallback, index=games.index)).replace([np.inf, -np.inf], np.nan)
-    games["Season"] = _season_safe.round().astype("Int64")
+    games["Season"] = _sys_float64_series(_season_safe.round(), games.index)
     games["Week_Number"] = _sys_num_series(games, "Week_Number", "Week", "Game_Week")
 
     # Combine all stage descriptors.  Explicit Boolean fields always win; text is
@@ -11328,6 +11364,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     away["Points_Against"] = away["__Score_Home"]
 
     tg = pd.concat([home, away], ignore_index=True)
+    tg = _sys_normalize_nullable_numeric_frame(tg)
     tg["SU_Margin"] = tg["Points_For"] - tg["Points_Against"]
     tg["SU_Win"] = np.where(tg["SU_Margin"].notna(), (tg["SU_Margin"] > 0).astype(float), np.nan)
     tg["SU_Loss"] = np.where(tg["SU_Margin"].notna(), (tg["SU_Margin"] < 0).astype(float), np.nan)
@@ -12006,6 +12043,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     ).fillna(False).astype("int8")
 
     tg.drop(columns=["__fb_spread_dog", "__fb_spread_fav"], inplace=True, errors="ignore")
+    tg = _sys_normalize_nullable_numeric_frame(tg)
     tg = add_pathi_bigal_rule_flags(tg)
     return tg
 
@@ -12014,7 +12052,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     """Apply named Pathi / Big Al systems to one-row-per-team-game state."""
     if state is None or state.empty:
         return state.copy()
-    s = state.copy()
+    s = _sys_normalize_nullable_numeric_frame(state)
     sport = s["Sport"].astype(str).str.upper()
 
     def n(name, default=np.nan):
@@ -12044,7 +12082,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         a = np.column_stack(arrays)
         a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
         vals = np.rint(a.sum(axis=1))
-        return pd.Series(vals, index=s.index).astype(dtype)
+        return _sys_int_flag(pd.Series(vals, index=s.index), s.index, dtype=dtype)
 
     is_mlb = sport.eq("MLB")
     is_nfl = sport.eq("NFL")
@@ -14387,7 +14425,7 @@ def attach_pathi_bigal_backend_features(current_rows: pd.DataFrame, sport: str |
 #     plus information available before kickoff.
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
-NCAAF_STAT_FEATURE_VERSION = "2026-09-07-v12.0.1-nullable-mask-hotfix"
+NCAAF_STAT_FEATURE_VERSION = "2026-09-07-v12.0.2-nullable-state-paired-promotion-audit"
 NCAAF_STAT_PREFIX = "NCAAF_Stat_"
 _NCAAF_STAT_TRAIN_CACHE = {}
 try:
