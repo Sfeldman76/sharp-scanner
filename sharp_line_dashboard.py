@@ -404,7 +404,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-06-v11.5.10-historical-brain-walkforward-calibrated"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-06-v11.6.1-na-safe-historical-memory"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -485,10 +485,35 @@ def _sys_norm_market(v):
     return s
 
 
+def _sys_float64_series(values, index) -> pd.Series:
+    """Normalize nullable pandas numerics/booleans to plain float64 + np.nan.
+
+    BigQuery DataFrames frequently use pandas nullable Int64/Float64/boolean
+    extension dtypes. Comparisons on those dtypes can produce pd.NA, and a later
+    .astype("int8") then raises "cannot convert NA to integer". System rules are
+    deterministic 0/1 flags, so missing inputs must remain np.nan until the
+    DataReady/rule expression explicitly resolves them.
+    """
+    if isinstance(values, pd.Series):
+        numeric = pd.to_numeric(values, errors="coerce")
+        try:
+            arr = numeric.to_numpy(dtype=np.float64, na_value=np.nan)
+        except TypeError:
+            arr = np.asarray(numeric.astype("float64"), dtype=np.float64)
+        return pd.Series(arr, index=index, dtype="float64")
+
+    numeric = pd.to_numeric(pd.Series(values, index=index), errors="coerce")
+    try:
+        arr = numeric.to_numpy(dtype=np.float64, na_value=np.nan)
+    except TypeError:
+        arr = np.asarray(numeric.astype("float64"), dtype=np.float64)
+    return pd.Series(arr, index=index, dtype="float64")
+
+
 def _sys_num_series(df: pd.DataFrame, *names, default=np.nan) -> pd.Series:
     for name in names:
         if name in df.columns:
-            return pd.to_numeric(df[name], errors="coerce")
+            return _sys_float64_series(df[name], df.index)
     return pd.Series(default, index=df.index, dtype="float64")
 
 
@@ -496,11 +521,9 @@ def _sys_bool_series(df: pd.DataFrame, *names, default=np.nan) -> pd.Series:
     for name in names:
         if name in df.columns:
             s = df[name]
-            if pd.api.types.is_bool_dtype(s):
-                return s.astype("float64")
-            if pd.api.types.is_numeric_dtype(s):
-                return pd.to_numeric(s, errors="coerce")
-            t = s.astype(str).str.lower().str.strip()
+            if pd.api.types.is_bool_dtype(s) or pd.api.types.is_numeric_dtype(s):
+                return _sys_float64_series(s, df.index)
+            t = s.astype("string").str.lower().str.strip()
             out = pd.Series(np.nan, index=df.index, dtype="float64")
             out[t.isin(["1", "true", "yes", "y", "t"])] = 1.0
             out[t.isin(["0", "false", "no", "n", "f"])] = 0.0
@@ -1840,11 +1863,13 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
 
     # Standard current aliases used by the rule engine.
     tg["Is_Road"] = (tg["Is_Home"] == 0).astype("int8")
-    tg["Is_Plus_Money"] = (pd.to_numeric(tg["ML_Odds"], errors="coerce") > 0).astype("int8")
+    tg["Is_Plus_Money"] = (
+        _sys_float64_series(tg["ML_Odds"], tg.index).gt(0)
+    ).fillna(False).astype("int8")
     tg["Role_Flip_Dog_To_Favorite"] = (
-        pd.to_numeric(tg["Opening_Is_ML_Dog"], errors="coerce").eq(1) &
-        pd.to_numeric(tg["Is_ML_Favorite"], errors="coerce").eq(1)
-    ).astype("int8")
+        _sys_float64_series(tg["Opening_Is_ML_Dog"], tg.index).eq(1) &
+        _sys_float64_series(tg["Is_ML_Favorite"], tg.index).eq(1)
+    ).fillna(False).astype("int8")
 
     tg.drop(columns=["__fb_spread_dog", "__fb_spread_fav"], inplace=True, errors="ignore")
     tg = add_pathi_bigal_rule_flags(tg)
@@ -1861,7 +1886,11 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     sport = s["Sport"].astype(str).str.upper()
 
     def n(name, default=np.nan):
-        return pd.to_numeric(s[name], errors="coerce") if name in s.columns else pd.Series(default, index=s.index, dtype="float64")
+        # Always return plain float64. This prevents nullable BooleanArray values
+        # from carrying pd.NA into deterministic .astype("int8") rule flags.
+        if name in s.columns:
+            return _sys_float64_series(s[name], s.index)
+        return pd.Series(default, index=s.index, dtype="float64")
 
     def ready(*names):
         if not names:
