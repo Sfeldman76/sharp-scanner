@@ -6240,6 +6240,26 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
     )
     outcome_prob = np.clip(outcome_prob, eps, 1.0 - eps)
 
+    # V12.0.9: a new artifact may shrink a weak NCAAF spread Outcome head
+    # toward the market baseline (0.50) using only leakage-safe OOF evidence.
+    # Legacy champions without this config are bit-for-bit unchanged.
+    outcome_guard = cfg.get("outcome_market_guard") or {}
+    if bool(outcome_guard.get("enabled", False)):
+        try:
+            _cw = float(outcome_guard.get("core_weight", 1.0))
+        except Exception:
+            _cw = 1.0
+        if not np.isfinite(_cw):
+            _cw = 0.0
+        _cw = float(np.clip(_cw, 0.0, 1.0))
+        outcome_prob = np.clip(0.5 + _cw * (outcome_prob - 0.5), eps, 1.0 - eps)
+        logger.info(
+            "[OUTCOME-MARKET-GUARD] status=%s core_weight=%.3f proper_score_gate=%s",
+            str(outcome_guard.get("status", "unknown")),
+            _cw,
+            "PASS" if bool(outcome_guard.get("gate_pass", False)) else "NO",
+        )
+
     if len(outcome_prob) != len(meta_prob):
         logger.warning(
             "⚠️ Meta blend length mismatch (outcome=%d, meta=%d); using outcome head.",
@@ -6258,23 +6278,10 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         100.0 * meta_weight,
     )
 
-    # V12.0.8 protected Statistical Brain route.  df_rows is the authoritative
-    # enriched runtime frame (after historical/stat/Brain reconstruction), not the
-    # pruned model matrix.
+    # V12.0.9 validation-gated Statistical Brain route.  There is deliberately
+    # NO migration fallback for legacy champions: an old champion without the
+    # saved fresh gate remains untouched.
     stat_cfg = cfg.get("ncaaf_stat_protected_route") or {}
-    # Migration-safe fallback: the current production champion may predate the
-    # protected-route config but already contains the independently validated
-    # NCAAF Statistical Brain artifact.  Preserve champion model weights while
-    # enabling the safe capped route from that saved expert.
-    if not stat_cfg and isinstance(bundle, dict) and isinstance(bundle.get("ncaaf_statistical_brain"), dict):
-        stat_cfg = {
-            "enabled": True,
-            "edge_weight": 0.50,
-            "max_abs_correction": 0.02,
-            "min_row_trust": 0.03,
-            "mode": "legacy_champion_stat_sidecar_fallback",
-        }
-        logger.info("[NCAAF-STAT-PROTECTED] using migration-safe legacy champion route config")
     if bool(stat_cfg.get("enabled", False)) and len(df_rows) == len(combined):
         try:
             def _stat_col(name, default):
@@ -6285,39 +6292,49 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
             stat_prob = _stat_col("NCAAF_Stat_Prob", np.nan).to_numpy(dtype=float)
             stat_base = _stat_col("NCAAF_Stat_Market_Baseline_Prob", 0.5).fillna(0.5).to_numpy(dtype=float)
             min_trust = float(stat_cfg.get("min_row_trust", 0.03))
-            edge_weight = float(stat_cfg.get("edge_weight", 0.50))
-            cap = float(stat_cfg.get("max_abs_correction", 0.02))
             eligible = stat_active & np.isfinite(stat_prob) & np.isfinite(stat_base) & np.isfinite(stat_trust) & (stat_trust >= min_trust)
             if int(stat_active.sum()) > 0 and int(eligible.sum()) == 0:
                 logger.error(
                     "[NCAAF-STAT-PROTECTED-CONTRACT] FAIL source_active=%d eligible=0; leaving probabilities unchanged",
                     int(stat_active.sum()),
                 )
-            elif eligible.any():
-                correction = np.zeros(len(combined), dtype=np.float64)
-                correction[eligible] = np.clip(edge_weight * (stat_prob[eligible] - stat_base[eligible]), -cap, cap)
-                combined = np.clip(combined + correction, eps, 1.0 - eps)
+            elif not bool(stat_cfg.get("deployment_gate_pass", False)):
                 logger.info(
-                    "[NCAAF-STAT-PROTECTED] active=%d/%d mean_abs_corr=%.5f max_abs_corr=%.5f",
-                    int(eligible.sum()), len(combined), float(np.mean(np.abs(correction[eligible]))), float(np.max(np.abs(correction[eligible])))
+                    "[NCAAF-STAT-PROTECTED] source_active=%d eligible=%d/%d gate=CLOSED weight=0",
+                    int(stat_active.sum()), int(eligible.sum()), len(combined),
                 )
+            elif eligible.any():
+                edge_weight = float(stat_cfg.get("effective_edge_weight", 0.0))
+                cap = float(stat_cfg.get("max_abs_correction", 0.01))
+                if np.isfinite(edge_weight) and edge_weight > 0:
+                    correction = np.zeros(len(combined), dtype=np.float64)
+                    correction[eligible] = np.clip(edge_weight * (stat_prob[eligible] - stat_base[eligible]), -cap, cap)
+                    combined = np.clip(combined + correction, eps, 1.0 - eps)
+                    logger.info(
+                        "[NCAAF-STAT-PROTECTED] active=%d/%d gate=PASS edge_weight=%.4f mean_abs_corr=%.5f max_abs_corr=%.5f",
+                        int(eligible.sum()), len(combined), edge_weight,
+                        float(np.mean(np.abs(correction[eligible]))), float(np.max(np.abs(correction[eligible])))
+                    )
+                else:
+                    logger.info("[NCAAF-STAT-PROTECTED] gate=PASS but effective_edge_weight=0; unchanged")
             else:
                 logger.info("[NCAAF-STAT-PROTECTED] active=0/%d status=LEAKAGE_GATED_OR_INACTIVE", len(combined))
         except Exception as e:
             logger.warning("⚠️ NCAAF Stat protected route failed closed: %s", e)
 
-    # V12.0.8 protected Pathi/Big Al historical-memory route.  Only directional
-    # memories survive upstream role filtering; full-history memory is future-only.
+    # V12.0.9 Pathi/Big Al memory route.  Each family must independently earn
+    # fresh current-season authority.  Context-only Pathi fields remain excluded
+    # upstream and never become directional memory bets.
     memory_cfg = cfg.get("system_memory_protected_route") or {}
     if bool(memory_cfg.get("enabled", False)) and len(df_rows) == len(combined):
         try:
-            weight = float(memory_cfg.get("edge_weight", 0.50))
-            fam_cap = float(memory_cfg.get("max_abs_family_correction", 0.01))
-            total_cap = float(memory_cfg.get("max_abs_total_correction", 0.015))
+            fam_cap = float(memory_cfg.get("max_abs_family_correction", 0.0075))
+            total_cap = float(memory_cfg.get("max_abs_total_correction", 0.01))
             min_trust = float(memory_cfg.get("min_trust", 0.05))
             min_edge = float(memory_cfg.get("min_abs_posterior_edge", 0.01))
+            family_gates = memory_cfg.get("family_gates") or {}
             total_corr = np.zeros(len(combined), dtype=np.float64)
-            fam_counts = {}
+            fam_counts = {}; fam_applied = {}
             for fam in ("Pathi", "BigAl"):
                 _post = pd.to_numeric(df_rows.get(f"{fam}_Historical_Posterior_Prob", 0.5), errors="coerce")
                 if not isinstance(_post, pd.Series):
@@ -6330,16 +6347,23 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
                 edge = post - 0.5
                 eligible = np.isfinite(edge) & np.isfinite(trust) & (trust >= min_trust) & (np.abs(edge) >= min_edge)
                 fam_counts[fam] = int(eligible.sum())
+                gate = family_gates.get(fam) or {}
+                gate_pass = bool(gate.get("gate_pass", False))
+                weight = float(gate.get("effective_edge_weight", 0.0)) if gate_pass else 0.0
                 fc = np.zeros(len(combined), dtype=np.float64)
-                fc[eligible] = np.clip(weight * trust[eligible] * edge[eligible], -fam_cap, fam_cap)
+                if gate_pass and np.isfinite(weight) and weight > 0:
+                    fc[eligible] = np.clip(weight * trust[eligible] * edge[eligible], -fam_cap, fam_cap)
+                fam_applied[fam] = int((np.abs(fc) > 0).sum())
                 total_corr += fc
             total_corr = np.clip(total_corr, -total_cap, total_cap)
             active = np.abs(total_corr) > 0
             if active.any():
                 combined = np.clip(combined + total_corr, eps, 1.0 - eps)
             logger.info(
-                "[SYSTEM-MEMORY-PROTECTED] Pathi_active=%d BigAl_active=%d active_any=%d/%d mean_abs_corr=%.5f max_abs_corr=%.5f",
-                fam_counts.get("Pathi",0), fam_counts.get("BigAl",0), int(active.sum()), len(combined),
+                "[SYSTEM-MEMORY-PROTECTED] Pathi_eligible=%d Pathi_applied=%d BigAl_eligible=%d BigAl_applied=%d active_any=%d/%d mean_abs_corr=%.5f max_abs_corr=%.5f",
+                fam_counts.get("Pathi",0), fam_applied.get("Pathi",0),
+                fam_counts.get("BigAl",0), fam_applied.get("BigAl",0),
+                int(active.sum()), len(combined),
                 float(np.mean(np.abs(total_corr[active]))) if active.any() else 0.0,
                 float(np.max(np.abs(total_corr[active]))) if active.any() else 0.0,
             )
@@ -10877,7 +10901,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-08-v12.0.8-protected-stat-system-memory-routing"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-08-v12.0.9-fresh-gated-sidecars-market-guard"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
