@@ -10108,6 +10108,24 @@ def apply_blended_sharp_score(
             # receive neutral inactive columns.
             df_canon = apply_historical_core_runtime_feature(df_canon, bundle, mkt)
             df_canon = apply_ncaaf_statistical_brain_feature(df_canon, bundle.get("ncaaf_statistical_brain") if isinstance(bundle, dict) else None, mkt)
+            # V13 is a shadow-only NCAAF spread scorer.  It produces fair value,
+            # projected close, cover probability and EV columns but never replaces
+            # Model_Sharp_Win_Prob in this version.
+            if str(sport).upper().strip() == "NCAAF" and str(mkt).lower().strip() == "spreads":
+                df_canon = apply_ncaaf_v13_shadow(
+                    df_canon,
+                    bundle.get("ncaaf_v13_value_architecture") if isinstance(bundle, dict) else None,
+                )
+                _v13_active = int(pd.to_numeric(df_canon.get("V13_Active"), errors="coerce").fillna(0).sum())
+                _v13_prob = pd.to_numeric(df_canon.get("V13_Cover_Prob"), errors="coerce")
+                _v13_edge = pd.to_numeric(df_canon.get("V13_Fundamental_Edge_Points"), errors="coerce")
+                logger.info(
+                    "[V13-RUNTIME] active=%d/%d mean_prob=%s mean_abs_fund_edge=%s version=%s",
+                    _v13_active, len(df_canon),
+                    f"{float(_v13_prob.mean()):.4f}" if _v13_prob.notna().any() else "nan",
+                    f"{float(_v13_edge.abs().mean()):.3f}" if _v13_edge.notna().any() else "nan",
+                    NCAAF_V13_VERSION,
+                )
             if str(sport).upper().strip() == "NCAAF":
                 _ns_active = int(pd.to_numeric(df_canon.get("NCAAF_Stat_Active"), errors="coerce").fillna(0).sum())
                 _ns_trust = float(pd.to_numeric(df_canon.get("NCAAF_Stat_Trust"), errors="coerce").fillna(0).mean())
@@ -10202,6 +10220,20 @@ def apply_blended_sharp_score(
                 'Scored_By_Model':      False,
                 'Scoring_Market':       mkt,
             }
+            if str(sport).upper().strip() == 'NCAAF' and str(mkt).lower().strip() == 'spreads':
+                for _c, _v in {
+                    'V13_Active': 0, 'V13_Fair_Margin': np.nan, 'V13_Fair_Total': np.nan,
+                    'V13_Fundamental_Edge_Points': np.nan, 'V13_Pred_Close_Margin': np.nan,
+                    'V13_Market_Edge_Points': np.nan, 'V13_Cover_Prob': np.nan,
+                    'V13_BreakEven_Prob': np.nan, 'V13_Probability_Edge': np.nan,
+                    'V13_EV_Per_Dollar': np.nan, 'V13_Horizon_Hours': np.nan,
+                    'V13_State_Freshness': 0.0, 'V13_Current_Season_Games': 0.0,
+                    'V13_Status': 'UNAVAILABLE', 'V13_Version': NCAAF_V13_VERSION,
+                }.items():
+                    if _c not in df_canon.columns:
+                        df_canon[_c] = _v
+                    if _c not in df.columns:
+                        df[_c] = _v
             for col, default in cols_to_write_defaults.items():
                 if col not in df_canon.columns:
                     df_canon[col] = default
@@ -10238,6 +10270,13 @@ def apply_blended_sharp_score(
         
             # ✅ Write back predictions ONLY to the rows we actually scored
             cols_to_write = ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']
+            if str(sport).upper().strip() == 'NCAAF' and str(mkt).lower().strip() == 'spreads':
+                cols_to_write += [c for c in [
+                    'V13_Active','V13_Fair_Margin','V13_Fair_Total','V13_Fundamental_Edge_Points',
+                    'V13_Pred_Close_Margin','V13_Market_Edge_Points','V13_Cover_Prob',
+                    'V13_BreakEven_Prob','V13_Probability_Edge','V13_EV_Per_Dollar',
+                    'V13_Horizon_Hours','V13_State_Freshness','V13_Current_Season_Games','V13_Status','V13_Version'
+                ] if c in df_canon.columns]
             df.loc[df_canon.index, cols_to_write] = df_canon[cols_to_write].values
         
         except Exception as e:
@@ -10282,19 +10321,49 @@ def apply_blended_sharp_score(
                     frame['Market'].fillna('').astype(str).str.lower().str.strip()
                 )
         
+            _canon_pred_cols = ['Team_Key_Base','Bookmaker','Model_Sharp_Win_Prob','Model_Confidence']
+            if str(sport).upper().strip() == 'NCAAF' and str(mkt).lower().strip() == 'spreads':
+                _canon_pred_cols += [c for c in [
+                    'V13_Active','V13_Fair_Margin','V13_Fair_Total','V13_Pred_Close_Margin',
+                    'V13_Cover_Prob','V13_Horizon_Hours','V13_State_Freshness',
+                    'V13_Current_Season_Games','V13_Status','V13_Version'
+                ] if c in df_canon.columns]
+            _rename = {
+                'Model_Sharp_Win_Prob': 'Model_Sharp_Win_Prob_opponent',
+                'Model_Confidence':     'Model_Confidence_opponent'
+            }
+            for _c in _canon_pred_cols:
+                if _c.startswith('V13_'):
+                    _rename[_c] = _c + '_opponent'
             df_canon_preds = (
-                df_canon[['Team_Key_Base','Bookmaker','Model_Sharp_Win_Prob','Model_Confidence']]
+                df_canon[_canon_pred_cols]
                 .drop_duplicates(subset=['Team_Key_Base','Bookmaker'])
-                .rename(columns={
-                    'Model_Sharp_Win_Prob': 'Model_Sharp_Win_Prob_opponent',
-                    'Model_Confidence':     'Model_Confidence_opponent'
-                })
+                .rename(columns=_rename)
             )
         
             df_inverse = df_inverse.merge(df_canon_preds, on=['Team_Key_Base','Bookmaker'], how='left')
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob_opponent']
             df_inverse['Model_Confidence']     = 1 - df_inverse['Model_Confidence_opponent']
             df_inverse.drop(columns=['Model_Sharp_Win_Prob_opponent','Model_Confidence_opponent'], inplace=True, errors='ignore')
+            if str(sport).upper().strip() == 'NCAAF' and str(mkt).lower().strip() == 'spreads' and 'V13_Fair_Margin_opponent' in df_inverse.columns:
+                df_inverse['V13_Fair_Margin'] = -pd.to_numeric(df_inverse['V13_Fair_Margin_opponent'], errors='coerce')
+                df_inverse['V13_Fair_Total'] = pd.to_numeric(df_inverse.get('V13_Fair_Total_opponent'), errors='coerce')
+                df_inverse['V13_Pred_Close_Margin'] = -pd.to_numeric(df_inverse.get('V13_Pred_Close_Margin_opponent'), errors='coerce')
+                _iv = pd.to_numeric(df_inverse.get('Value'), errors='coerce')
+                df_inverse['V13_Fundamental_Edge_Points'] = df_inverse['V13_Fair_Margin'] + _iv
+                df_inverse['V13_Market_Edge_Points'] = df_inverse['V13_Pred_Close_Margin'] + _iv
+                df_inverse['V13_Cover_Prob'] = 1.0 - pd.to_numeric(df_inverse.get('V13_Cover_Prob_opponent'), errors='coerce')
+                _ibe = _ncaaf_v13_break_even_prob(pd.to_numeric(df_inverse.get('Odds_Price'), errors='coerce'))
+                _iprof = _ncaaf_v13_profit_per_dollar(pd.to_numeric(df_inverse.get('Odds_Price'), errors='coerce'))
+                _ip = pd.to_numeric(df_inverse['V13_Cover_Prob'], errors='coerce').to_numpy(dtype=float, na_value=np.nan)
+                df_inverse['V13_BreakEven_Prob'] = _ibe
+                df_inverse['V13_Probability_Edge'] = _ip - _ibe
+                df_inverse['V13_EV_Per_Dollar'] = _ip * _iprof - (1.0 - _ip)
+                for _c in ['V13_Active','V13_Horizon_Hours','V13_State_Freshness','V13_Current_Season_Games','V13_Status','V13_Version']:
+                    _opp = _c + '_opponent'
+                    if _opp in df_inverse.columns:
+                        df_inverse[_c] = df_inverse[_opp]
+                df_inverse.drop(columns=[c for c in df_inverse.columns if c.startswith('V13_') and c.endswith('_opponent')], inplace=True, errors='ignore')
         
             df_inverse['Was_Canonical']   = False
             df_inverse['Scored_By_Model'] = True
@@ -10441,6 +10510,13 @@ def apply_blended_sharp_score(
         
             # ===== WRITEBACK: push canon + inverse features/preds back to base df by index =====
             must_cols = ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market','Was_Canonical']
+            if str(sport).upper().strip() == 'NCAAF' and str(mkt).lower().strip() == 'spreads':
+                must_cols += [c for c in [
+                    'V13_Active','V13_Fair_Margin','V13_Fair_Total','V13_Fundamental_Edge_Points',
+                    'V13_Pred_Close_Margin','V13_Market_Edge_Points','V13_Cover_Prob',
+                    'V13_BreakEven_Prob','V13_Probability_Edge','V13_EV_Per_Dollar',
+                    'V13_Horizon_Hours','V13_State_Freshness','V13_Current_Season_Games','V13_Status','V13_Version'
+                ] if c in df_inverse.columns]
             existing_cols = set(df.columns)
             df_canon['Was_Canonical'] = True
             if 'Was_Canonical' not in df_inverse.columns:
@@ -14574,6 +14650,18 @@ def attach_pathi_bigal_backend_features(current_rows: pd.DataFrame, sport: str |
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
 NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness"
+
+# ============================================================================
+# V13 NCAAF VALUE ARCHITECTURE
+# Football-first fair value -> market price discovery -> calibrated cover value.
+# V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
+# ============================================================================
+NCAAF_V13_VERSION = "2026-09-08-v13.0.0-football-fair-value-market-intelligence"
+NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
+NCAAF_V13_MIN_TRAIN_GAMES = 500
+NCAAF_V13_MIN_VALID_GAMES = 100
+_NCAAF_V13_CACHE = {}
+
 NCAAF_STAT_PREFIX = "NCAAF_Stat_"
 _NCAAF_STAT_TRAIN_CACHE = {}
 try:
@@ -15492,6 +15580,168 @@ def _ncaaf_stat_profile_similarity(X, sb):
     with np.errstate(all="ignore"): meanz=np.nanmean(z,axis=1)
     cov=valid.mean(axis=1); meanz=np.where(np.isfinite(meanz),meanz,4)
     return np.clip(np.exp(-.18*meanz)*(.60+.40*cov),.10,1.0)
+
+
+# ============================================================================
+# V13 NCAAF VALUE ARCHITECTURE — RUNTIME SHADOW SCORER
+# ============================================================================
+def _ncaaf_v13_pair_predict(models, X, weight=0.80):
+    if not isinstance(models,(tuple,list)) or len(models)!=2:
+        return np.full(len(X),np.nan,dtype=float)
+    try:
+        p1=np.asarray(models[0].predict(X),dtype=float)
+        p2=np.asarray(models[1].predict(X),dtype=float)
+        w=float(np.clip(weight,0.0,1.0))
+        return w*p1+(1.0-w)*p2
+    except Exception:
+        return np.full(len(X),np.nan,dtype=float)
+
+
+def _ncaaf_v13_break_even_prob(odds):
+    o=pd.to_numeric(pd.Series(odds),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    p=np.full(len(o),np.nan,dtype=float); neg=o<0; pos=o>0
+    p[neg]=(-o[neg])/((-o[neg])+100.0); p[pos]=100.0/(o[pos]+100.0)
+    return p
+
+
+def _ncaaf_v13_profit_per_dollar(odds):
+    o=pd.to_numeric(pd.Series(odds),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    prof=np.full(len(o),np.nan,dtype=float); neg=o<0; pos=o>0
+    prof[neg]=100.0/(-o[neg]); prof[pos]=o[pos]/100.0
+    return prof
+
+
+def _ncaaf_v13_market_runtime_features(rows: pd.DataFrame):
+    """Build book-aware current market state at the physical game grain, then map to rows."""
+    d=rows.copy()
+    idx=d.index
+    home=d.get("Home_Team_Norm",d.get("Home_Team",pd.Series("",index=idx))).astype(str).str.lower().str.strip()
+    away=d.get("Away_Team_Norm",d.get("Away_Team",pd.Series("",index=idx))).astype(str).str.lower().str.strip()
+    outcome=d.get("Outcome_Norm",d.get("Outcome",pd.Series("",index=idx))).astype(str).str.lower().str.strip()
+    value=pd.to_numeric(d.get("Value",np.nan),errors="coerce")
+    openv=None
+    for c in ("First_Line_Value","Open_Value","Opening_Line","Opening_Spread"):
+        if c in d.columns:
+            ss=pd.to_numeric(d[c],errors="coerce")
+            if ss.notna().any(): openv=ss; break
+    if openv is None: openv=pd.Series(np.nan,index=idx,dtype=float)
+    is_home=outcome.eq(home)|outcome.eq("home"); is_away=outcome.eq(away)|outcome.eq("away")
+    d["__v13_home_spread"]=np.where(is_home,value,np.where(is_away,-value,np.nan))
+    d["__v13_open_home_spread"]=np.where(is_home,openv,np.where(is_away,-openv,np.nan))
+    book=d.get("Bookmaker",d.get("Book",pd.Series("",index=idx))).astype(str).str.lower().str.strip()
+    d["__v13_book"]=book
+    sharp_set={str(x).lower().strip() for x in SHARP_BOOKS}; rec_set={str(x).lower().strip() for x in REC_BOOKS}
+    d["__v13_sharp"]=book.isin(sharp_set); d["__v13_rec"]=book.isin(rec_set)
+    if "Game_Key" in d.columns:
+        g=d["Game_Key"].astype(str).str.lower().str.strip()
+        bad=g.eq("")|g.eq("nan")|g.eq("none")
+    else:
+        g=pd.Series("",index=idx); bad=pd.Series(True,index=idx)
+    gs=pd.to_datetime(d.get("Game_Start",pd.NaT),errors="coerce",utc=True)
+    fallback=home+"|"+away+"|"+gs.dt.strftime("%Y-%m-%dT%H:%M").fillna("")
+    d["__v13_group"]=g.where(~bad,fallback)
+    snap=pd.to_datetime(d.get("Snapshot_Timestamp",pd.NaT),errors="coerce",utc=True)
+    hours=(gs-snap).dt.total_seconds().div(3600.0)
+    d["__v13_hours"]=hours
+
+    feat=pd.DataFrame(index=idx)
+    for _,gx in d.groupby("__v13_group",sort=False):
+        gi=gx.index
+        hm=-pd.to_numeric(gx["__v13_home_spread"],errors="coerce")
+        om=-pd.to_numeric(gx["__v13_open_home_spread"],errors="coerce")
+        sm=-pd.to_numeric(gx.loc[gx["__v13_sharp"],"__v13_home_spread"],errors="coerce")
+        rm=-pd.to_numeric(gx.loc[gx["__v13_rec"],"__v13_home_spread"],errors="coerce")
+        current=float(hm.median()) if hm.notna().any() else np.nan
+        op=float(om.median()) if om.notna().any() else current
+        sh=float(sm.median()) if sm.notna().any() else current
+        rc=float(rm.median()) if rm.notna().any() else current
+        hh=float(pd.to_numeric(gx["__v13_hours"],errors="coerce").median()) if pd.to_numeric(gx["__v13_hours"],errors="coerce").notna().any() else 6.0
+        hgrid=np.asarray(NCAAF_V13_HORIZONS_HOURS,dtype=float)
+        huse=float(hgrid[np.argmin(np.abs(hgrid-hh))]) if np.isfinite(hh) else 6.0
+        vals={
+            "Current_Margin":current,"Open_Margin":op,"Sharp_Current_Margin":sh,"Rec_Current_Margin":rc,
+            "SharpMinusRec":sh-rc,"Move_From_Open":current-op,"Sharp_Move_From_Open":sh-op,"Rec_Move_From_Open":rc-op,
+            "Book_Dispersion":float(hm.std(ddof=0)) if hm.notna().sum()>1 else 0.0,
+            "Book_Count":float(gx["__v13_book"].nunique()),"Sharp_Book_Count":float(gx.loc[gx["__v13_sharp"],"__v13_book"].nunique()),
+            "Rec_Book_Count":float(gx.loc[gx["__v13_rec"],"__v13_book"].nunique()),"Horizon_Hours":huse,
+        }
+        for key in (3,7,10,14): vals[f"Dist_to_Key_{key}"]=abs(abs(current)-float(key)) if np.isfinite(current) else np.nan
+        for c,v in vals.items(): feat.loc[gi,c]=v
+    return feat
+
+
+def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
+    """Calculate V13 value diagnostics only. Never overwrites production probability."""
+    out=rows.copy(); n=len(out)
+    defaults={
+        "V13_Active":0,"V13_Fair_Margin":np.nan,"V13_Fair_Total":np.nan,
+        "V13_Fundamental_Edge_Points":np.nan,"V13_Pred_Close_Margin":np.nan,"V13_Market_Edge_Points":np.nan,
+        "V13_Cover_Prob":np.nan,"V13_BreakEven_Prob":np.nan,"V13_Probability_Edge":np.nan,"V13_EV_Per_Dollar":np.nan,
+        "V13_Horizon_Hours":np.nan,"V13_State_Freshness":0.0,"V13_Current_Season_Games":0.0,
+        "V13_Status":"UNAVAILABLE","V13_Version":NCAAF_V13_VERSION,
+    }
+    for c,v in defaults.items(): out[c]=v
+    if not isinstance(bundle,dict) or out.empty: return out
+    if str(bundle.get("sport","NCAAF")).upper()!="NCAAF" or str(bundle.get("market","spreads")).lower()!="spreads": return out
+    fund=bundle.get("fundamental") or {}; market=bundle.get("market_intelligence") or {}; cover=bundle.get("cover_calibrator") or {}
+    if not isinstance(fund,dict) or not fund.get("margin_features"): return out
+    try:
+        Xstate=_ncaaf_stat_runtime_frame(out,fund)
+        fm_cols=list(fund.get("margin_features") or []); ft_cols=list(fund.get("total_features") or [])
+        fair_home=_ncaaf_v13_pair_predict(fund.get("margin_models"),Xstate.reindex(columns=fm_cols),float(fund.get("linear_weight",0.80)))
+        fair_total=_ncaaf_v13_pair_predict(fund.get("total_models"),Xstate.reindex(columns=ft_cols),float(fund.get("linear_weight",0.80)))
+        home=out.get("Home_Team_Norm",out.get("Home_Team",pd.Series("",index=out.index))).astype(str).str.lower().str.strip()
+        away=out.get("Away_Team_Norm",out.get("Away_Team",pd.Series("",index=out.index))).astype(str).str.lower().str.strip()
+        outcome=out.get("Outcome_Norm",out.get("Outcome",pd.Series("",index=out.index))).astype(str).str.lower().str.strip()
+        is_home=outcome.eq(home)|outcome.eq("home"); is_away=outcome.eq(away)|outcome.eq("away")
+        orient=np.where(is_home,1.0,np.where(is_away,-1.0,np.nan))
+        fair_side=fair_home*orient
+        offered_spread=pd.to_numeric(out.get("Value",np.nan),errors="coerce").to_numpy(dtype=float,na_value=np.nan) if isinstance(out.get("Value",None),pd.Series) else np.full(n,np.nan)
+        offered_margin=-offered_spread
+        fundamental_edge=fair_side-offered_margin
+        mf=_ncaaf_v13_market_runtime_features(out)
+        pred_close_home=np.full(n,np.nan,dtype=float)
+        if isinstance(market,dict) and market.get("models") is not None:
+            mcols=list(market.get("feature_cols") or [])
+            pred_close_home=_ncaaf_v13_pair_predict(market.get("models"),mf.reindex(columns=mcols),float(market.get("linear_weight",0.75)))
+        pred_close_side=pred_close_home*orient
+        market_edge=pred_close_side-offered_margin
+        prob=np.full(n,np.nan,dtype=float)
+        if isinstance(cover,dict) and cover.get("model") is not None:
+            cf=pd.DataFrame(index=out.index)
+            cf["Fundamental_Edge"]=fundamental_edge; cf["Market_Edge"]=market_edge
+            cf["Abs_Fundamental_Edge"]=np.abs(fundamental_edge); cf["Abs_Market_Edge"]=np.abs(market_edge)
+            cf["Edge_Agreement"]=np.sign(fundamental_edge)*np.sign(market_edge)
+            cf["Fundamental_vs_Close"]=(fair_home-pred_close_home)*orient
+            cf["Fair_Total"]=fair_total; cf["Current_Margin"]=offered_margin
+            for c in ("Horizon_Hours","Dist_to_Key_3","Dist_to_Key_7","Dist_to_Key_10","Dist_to_Key_14"):
+                cf[c]=pd.to_numeric(mf.get(c),errors="coerce")
+            ccols=list(cover.get("feature_cols") or [])
+            prob=np.asarray(cover["model"].predict_proba(cf.reindex(columns=ccols))[:,1],dtype=float)
+            prob=np.clip(prob,0.01,0.99)
+        odds=pd.to_numeric(out.get("Odds_Price",np.nan),errors="coerce") if "Odds_Price" in out.columns else pd.Series(np.nan,index=out.index)
+        be=_ncaaf_v13_break_even_prob(odds); prof=_ncaaf_v13_profit_per_dollar(odds)
+        ev=prob*prof-(1.0-prob)
+        fresh=pd.to_numeric(Xstate.get("__Stat_State_Freshness",0.20),errors="coerce").fillna(0.20).to_numpy(dtype=float)
+        curg=pd.to_numeric(Xstate.get("__Stat_Current_Season_Games",0),errors="coerce").fillna(0).to_numpy(dtype=float)
+        eligible=np.isfinite(fair_side)&np.isfinite(offered_margin)
+        status=np.where(curg>0,"SHADOW_CURRENT_SEASON","SHADOW_PRIOR_SEASON_ONLY")
+        out["V13_Fair_Margin"]=fair_side.astype("float32")
+        out["V13_Fair_Total"]=fair_total.astype("float32")
+        out["V13_Fundamental_Edge_Points"]=fundamental_edge.astype("float32")
+        out["V13_Pred_Close_Margin"]=pred_close_side.astype("float32")
+        out["V13_Market_Edge_Points"]=market_edge.astype("float32")
+        out["V13_Cover_Prob"]=prob.astype("float32")
+        out["V13_BreakEven_Prob"]=be.astype("float32")
+        out["V13_Probability_Edge"]=(prob-be).astype("float32")
+        out["V13_EV_Per_Dollar"]=ev.astype("float32")
+        out["V13_Horizon_Hours"]=pd.to_numeric(mf.get("Horizon_Hours"),errors="coerce").to_numpy(dtype=np.float32,na_value=np.nan)
+        out["V13_State_Freshness"]=fresh.astype("float32"); out["V13_Current_Season_Games"]=curg.astype("float32")
+        out["V13_Status"]=status; out["V13_Active"]=eligible.astype("int8")
+        return out
+    except Exception as e:
+        logging.warning("V13 NCAAF shadow scoring unavailable: %s",e,exc_info=True)
+        return out
 
 
 def apply_ncaaf_statistical_brain_feature(df: pd.DataFrame, sb, market: str):
@@ -17417,6 +17667,7 @@ def load_model_from_gcs(
             "multihead_config": payload.get("multihead_config") or {},
             "historical_core_expert": payload.get("historical_core_expert"),
             "ncaaf_statistical_brain": payload.get("ncaaf_statistical_brain"),
+            "ncaaf_v13_value_architecture": payload.get("ncaaf_v13_value_architecture"),
             "calibrator": {"iso_blend": iso_blend},
             "flip_flag": flip_flag,
             "iso_blend": iso_blend,
