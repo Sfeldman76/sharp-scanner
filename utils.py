@@ -14662,7 +14662,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-08-v13.0.1-market-residual-qualified-fair-value"
+NCAAF_V13_VERSION = "2026-09-08-v13.0.2-independent-qualification-closer-diagnostics"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -15677,7 +15677,7 @@ def _ncaaf_v13_market_runtime_features(rows: pd.DataFrame):
 
 
 def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
-    """Calculate V13.0.1 value diagnostics only; never overwrites production probability."""
+    """Calculate V13.0.2 value diagnostics only; never overwrites production probability."""
     out=rows.copy(); n=len(out)
     defaults={
         "V13_Active":0,
@@ -15782,7 +15782,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         out["V13_Status"]=status; out["V13_Active"]=eligible.astype("int8")
         return out
     except Exception as e:
-        logging.warning("V13.0.1 NCAAF shadow scoring unavailable: %s",e,exc_info=True)
+        logging.warning("V13.0.2 NCAAF shadow scoring unavailable: %s",e,exc_info=True)
         return out
 
 
