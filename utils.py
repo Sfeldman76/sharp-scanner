@@ -6004,6 +6004,7 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         "three_head_plus_meta_v5_6_1_hard_handicapper_overlay_contract",
         "three_head_plus_meta_v5_7_conservative_meta_earlystop",
         "three_head_plus_meta_v5_8_residual_meta_49pct_stability",
+        "three_head_plus_meta_v12_ncaaf_statistical_brain",
     }
     if family and family not in _supported_multihead_families:
         logger.warning("⚠️ Unsupported multihead model family %s; using outcome-only fallback", family)
@@ -6256,6 +6257,36 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         100.0 * outcome_weight,
         100.0 * meta_weight,
     )
+
+    # V12.0.7 protected Statistical Brain route.  The main Outcome AutoFS may
+    # legitimately reject the structural columns because final-refit Stat Brain
+    # predictions are neutral inside its source window.  For future NCAAF spreads,
+    # apply the independently shadow-validated, already trust-shrunk Stat edge as
+    # a capped residual correction after the saved outcome/meta blend.
+    stat_cfg = cfg.get("ncaaf_stat_protected_route") or {}
+    if bool(stat_cfg.get("enabled", False)) and len(df_rows) == len(combined):
+        try:
+            def _stat_col(name, default):
+                src = df_rows[name] if name in df_rows.columns else pd.Series(default, index=df_rows.index)
+                return pd.to_numeric(src, errors="coerce")
+            stat_active = _stat_col("NCAAF_Stat_Active", 0).fillna(0).eq(1).to_numpy(dtype=bool)
+            stat_trust = _stat_col("NCAAF_Stat_Trust", 0).fillna(0).to_numpy(dtype=float)
+            stat_prob = _stat_col("NCAAF_Stat_Prob", np.nan).to_numpy(dtype=float)
+            stat_base = _stat_col("NCAAF_Stat_Market_Baseline_Prob", 0.5).fillna(0.5).to_numpy(dtype=float)
+            min_trust = float(stat_cfg.get("min_row_trust", 0.03))
+            edge_weight = float(stat_cfg.get("edge_weight", 0.50))
+            cap = float(stat_cfg.get("max_abs_correction", 0.02))
+            eligible = stat_active & np.isfinite(stat_prob) & np.isfinite(stat_base) & np.isfinite(stat_trust) & (stat_trust >= min_trust)
+            if eligible.any():
+                correction = np.zeros(len(combined), dtype=np.float64)
+                correction[eligible] = np.clip(edge_weight * (stat_prob[eligible] - stat_base[eligible]), -cap, cap)
+                combined = np.clip(combined + correction, eps, 1.0 - eps)
+                logger.info(
+                    "🧠 NCAAF Stat protected route active=%d/%d mean_abs_corr=%.5f max_abs_corr=%.5f",
+                    int(eligible.sum()), len(combined), float(np.mean(np.abs(correction[eligible]))), float(np.max(np.abs(correction[eligible])))
+                )
+        except Exception as e:
+            logger.warning("⚠️ NCAAF Stat protected route failed closed: %s", e)
 
     return np.clip(combined, eps, 1.0 - eps)
 
@@ -10788,7 +10819,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-07-v12.0.6-sport-specific-system-memory"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-08-v12.0.7-context-pathi-memory-protected-stat-route"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
