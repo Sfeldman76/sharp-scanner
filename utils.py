@@ -6005,6 +6005,7 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         "three_head_plus_meta_v5_7_conservative_meta_earlystop",
         "three_head_plus_meta_v5_8_residual_meta_49pct_stability",
         "three_head_plus_meta_v12_ncaaf_statistical_brain",
+        "three_head_plus_meta_v12_2_core_anchored_specialists",
     }
     if family and family not in _supported_multihead_families:
         logger.warning("⚠️ Unsupported multihead model family %s; using outcome-only fallback", family)
@@ -6085,6 +6086,24 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
                 })
             x[c] = pd.to_numeric(x[c], errors="coerce")
         return x.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype("float32")
+
+    # V12.2 regime residual specialist: corrections are relative to the preserved
+    # Outcome Core and were admitted only by paired chronological proper-score gain.
+    regime_cfg = cfg.get("regime_residual_route") or {}
+    regime_model = bundle.get("regime_residual_model")
+    if bool(regime_cfg.get("gate_pass", False)) and regime_model is not None:
+        try:
+            feats=[str(c) for c in (regime_cfg.get("features") or [])]
+            Xr=_matrix(feats,{}) if feats else None
+            if Xr is not None and Xr.shape[1]>0:
+                corr=np.asarray(regime_model.predict(Xr),dtype=np.float64).reshape(-1)
+                w=float(regime_cfg.get("weight",0.0)); cap=float(regime_cfg.get("cap",0.02))
+                if np.isfinite(w) and w>0:
+                    applied=np.clip(w*corr,-cap,cap)
+                    p_outcome=np.clip(p_outcome+applied,eps,1.0-eps)
+                    logger.info("[REGIME-RESIDUAL] gate=PASS features=%d weight=%.2f mean_abs_corr=%.5f max_abs_corr=%.5f",len(feats),w,float(np.mean(np.abs(applied))),float(np.max(np.abs(applied))))
+        except Exception as e:
+            logger.warning("⚠️ Regime residual specialist failed closed: %s", e)
 
     # Training uses neutral specialist defaults when a specialist head is unavailable.
     p_situation = np.full(n, 0.5, dtype=np.float64)
@@ -13756,7 +13775,7 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
     # ------------------------------------------------------------------
     # 12) Expert ensemble summaries from real active states only.
     # ------------------------------------------------------------------
-    expert_names = ['BigAl','Pathi','Market','Power','Form','Schedule','Price','Historical','NCAAFStat']
+    expert_names = ['BigAl','Pathi','Market','Power','Form','Schedule','Price','Historical']
     intensity_cols = [f'Brain_Expert_{n}_Intensity' for n in expert_names]
     active_cols = [f'Brain_Expert_{n}_Active' for n in expert_names]
     ex = out[intensity_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
@@ -14540,7 +14559,7 @@ def attach_pathi_bigal_backend_features(current_rows: pd.DataFrame, sport: str |
 
 
 # ============================================================================
-# V12.0 NCAAF STATISTICAL BRAIN
+# V12.2 NCAAF STATISTICAL BRAIN
 # Structural football expert: opponent-aware efficiency + projected margin/total
 # + market shrinkage + empirical football residual distribution.
 #
@@ -14554,7 +14573,7 @@ def attach_pathi_bigal_backend_features(current_rows: pd.DataFrame, sport: str |
 #     plus information available before kickoff.
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
-NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.1.0-qualified-stat-feature-gate"
+NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness"
 NCAAF_STAT_PREFIX = "NCAAF_Stat_"
 _NCAAF_STAT_TRAIN_CACHE = {}
 try:
@@ -14565,6 +14584,7 @@ NCAAF_STAT_MODEL_FEATURES = (
     "NCAAF_Stat_Prob", "NCAAF_Stat_Raw_Prob", "NCAAF_Stat_Edge",
     "NCAAF_Stat_Market_Baseline_Prob", "NCAAF_Stat_Active", "NCAAF_Stat_Trust",
     "NCAAF_Stat_Base_Trust", "NCAAF_Stat_Profile_Similarity", "NCAAF_Stat_Recency_Factor",
+    "NCAAF_Stat_State_Freshness", "NCAAF_Stat_Current_Season_Games",
     "NCAAF_Stat_Expected_Margin", "NCAAF_Stat_Expected_Total", "NCAAF_Stat_Expected_Team_Points",
     "NCAAF_Stat_Expected_Opp_Points", "NCAAF_Stat_Uncertainty",
 )
@@ -14591,6 +14611,62 @@ _NCAAF_STAT_ADJ_METRICS = (
     "GameAdj_Off_Points_Per_Play", "GameAdj_Def_Points_Per_Play",
 )
 _NCAAF_STAT_PROFILE_METRICS = _NCAAF_STAT_METRICS + _NCAAF_STAT_ADJ_METRICS
+
+
+_NCAAF_STAT_MATCHUP_PAIRS = (
+    ("YPP", "Off_YPP", "Def_YPP_Allowed"),
+    ("Pass_YPA", "Off_Pass_YPA", "Def_Pass_YPA_Allowed"),
+    ("Rush_YPA", "Off_Rush_YPA", "Def_Rush_YPA_Allowed"),
+    ("Points_Per_Play", "Off_Points_Per_Play", "Def_Points_Per_Play_Allowed"),
+    ("Turnover_Pressure", "Off_Turnover_Rate", "Def_Takeaway_Rate"),
+)
+
+
+def _ncaaf_season_from_timestamp(values):
+    """NCAAF season year from kickoff time; January games belong to the prior season."""
+    ts = pd.to_datetime(values, errors="coerce", utc=True)
+    if isinstance(ts, pd.Series):
+        season = ts.dt.year.astype("float64")
+        season = season.where(ts.dt.month.ne(1), season - 1.0)
+        return season
+    idx = getattr(values, "index", None)
+    s = pd.Series(ts, index=idx)
+    season = s.dt.year.astype("float64")
+    return season.where(s.dt.month.ne(1), season - 1.0)
+
+
+def _ncaaf_stat_add_pair_features(frame: pd.DataFrame):
+    """Add total-combination and offense-vs-defense matchup candidates in one concat.
+
+    These are candidate generators only. V12.2 qualification decides independently
+    whether each feature is admitted to margin or total production models.
+    """
+    out = frame.copy()
+    derived = {}
+    for prefix in ("State", "Recent3"):
+        for metric in _NCAAF_STAT_PROFILE_METRICS:
+            ac = f"A_{prefix}_{metric}"; bc = f"B_{prefix}_{metric}"
+            if ac not in out.columns or bc not in out.columns:
+                continue
+            a = pd.to_numeric(out[ac], errors="coerce")
+            b = pd.to_numeric(out[bc], errors="coerce")
+            derived[f"Sum_{prefix}_{metric}"] = (a + b).astype("float64")
+            derived[f"Mean_{prefix}_{metric}"] = ((a + b) / 2.0).astype("float64")
+
+        for label, off_metric, def_metric in _NCAAF_STAT_MATCHUP_PAIRS:
+            ao=f"A_{prefix}_{off_metric}"; bo=f"B_{prefix}_{off_metric}"
+            ad=f"A_{prefix}_{def_metric}"; bd=f"B_{prefix}_{def_metric}"
+            if not all(c in out.columns for c in (ao,bo,ad,bd)):
+                continue
+            ma = pd.to_numeric(out[ao], errors="coerce") - pd.to_numeric(out[bd], errors="coerce")
+            mb = pd.to_numeric(out[bo], errors="coerce") - pd.to_numeric(out[ad], errors="coerce")
+            derived[f"Matchup_A_{prefix}_{label}"] = ma.astype("float64")
+            derived[f"Matchup_B_{prefix}_{label}"] = mb.astype("float64")
+            derived[f"Matchup_Diff_{prefix}_{label}"] = (ma-mb).astype("float64")
+            derived[f"Matchup_Sum_{prefix}_{label}"] = (ma+mb).astype("float64")
+    if derived:
+        out = pd.concat([out, pd.DataFrame(derived, index=out.index)], axis=1, copy=False)
+    return out.replace([np.inf,-np.inf],np.nan), list(derived.keys())
 
 
 def _ncaaf_stat_safe_ratio(num, den):
@@ -14707,6 +14783,10 @@ def _ncaaf_stat_new_qualification_model():
 def _ncaaf_stat_feature_family(feature_name: str) -> str:
     """Readable family label for diagnostics; does not control acceptance."""
     c = str(feature_name or "")
+    if c.startswith("Matchup_"):
+        return "matchup"
+    if c.startswith("Sum_") or c.startswith("Mean_"):
+        return "total_combination"
     if c.startswith("Context_"):
         return "context"
     for prefix in ("A_State_", "B_State_", "Diff_State_", "A_Recent3_", "B_Recent3_", "Diff_Recent3_"):
@@ -14906,14 +14986,25 @@ def _ncaaf_stat_qualify_features(
     for c in accepted_real:
         fam = _ncaaf_stat_feature_family(c)
         family_counts[fam] = family_counts.get(fam, 0) + 1
+    _br=float(base_eval.get("rmse",np.nan)); _fr=float(current_eval.get("rmse",np.nan))
+    _bm=float(base_eval.get("mae",np.nan)); _fm=float(current_eval.get("mae",np.nan))
     log_func(
         f"[NCAAF-STAT-FEATURE-GATE] target={label} qual_seasons={qual_seasons} "
         f"candidates={len(candidates)} accepted={len(accepted_real)} rejected={len(rejected)} "
-        f"rmse={current_eval.get('rmse', np.nan):.4f} mae={current_eval.get('mae', np.nan):.4f} "
-        f"families={family_counts}"
+        f"baseline_rmse={_br:.4f} final_rmse={_fr:.4f} rmse_gain={_br-_fr:+.4f} "
+        f"baseline_mae={_bm:.4f} final_mae={_fm:.4f} mae_gain={_bm-_fm:+.4f} families={family_counts}"
     )
     if accepted_real:
         log_func(f"[NCAAF-STAT-FEATURE-GATE] target={label} accepted_cols={accepted_real}")
+        for _c in accepted_real:
+            _d=diagnostics.get(_c,{})
+            log_func(
+                f"[NCAAF-STAT-FEATURE-ACCEPT] target={label} feature={_c} family={_d.get('family')} "
+                f"screen_gain={float(_d.get('rmse_gain',np.nan)):+.4f} "
+                f"incremental_gain={float(_d.get('incremental_rmse_gain',np.nan)):+.4f} "
+                f"mae_gain={float(_d.get('incremental_mae_gain',np.nan)):+.4f} "
+                f"fold_positive={float(_d.get('incremental_positive_fold_frac',0.0)):.0%}"
+            )
     return accepted, {
         "target": label,
         "qualification_seasons": qual_seasons,
@@ -15108,6 +15199,10 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
     anchor["Context_Cross_Subdivision"] = anchor["Context_A_FBS"].ne(anchor["Context_B_FBS"]).astype(float)
     feature_cols += [_NCAAF_STAT_INTERCEPT_FEATURE,"Context_Is_Neutral","Context_Week","Context_A_FBS","Context_B_FBS","Context_Cross_Subdivision"]
 
+    # V12.2: totals need combinations; spreads need explicit offense-vs-defense matchups.
+    anchor, _derived_pair_cols = _ncaaf_stat_add_pair_features(anchor)
+    feature_cols += _derived_pair_cols
+
     anchor["Actual_Margin"] = pd.to_numeric(anchor["Team_Score"],errors="coerce") - pd.to_numeric(anchor["Opponent_Score"],errors="coerce")
     anchor["Actual_Total"] = pd.to_numeric(anchor["Team_Score"],errors="coerce") + pd.to_numeric(anchor["Opponent_Score"],errors="coerce")
     anchor["Market_Open_Margin"] = -pd.to_numeric(anchor["Consensus_Open_Spread"], errors="coerce")
@@ -15122,19 +15217,33 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
     pa=_amer(anchor["Consensus_Open_Moneyline"]); pb=_amer(anchor["Opp_Consensus_Open_Moneyline"]); den=pa+pb
     anchor["Market_Open_H2H_Fair"]=(pa/den.where(den>0)).clip(0.01,0.99)
 
-    # Latest season profile saved for runtime next-season carry-forward.
+    # Latest loaded-season profile saved for the NEXT game. It mirrors the
+    # historical three-pseudo-game prior-season shrinkage, so serving and training
+    # use the same transition when partial current-season box scores are loaded.
     max_season = int(pd.to_numeric(r["Season"], errors="coerce").dropna().max())
     last = r.loc[pd.to_numeric(r["Season"],errors="coerce").eq(max_season)].copy()
     prof_rows=[]
-    nat_last = last[list(_NCAAF_STAT_PROFILE_METRICS)].mean(numeric_only=True)
     for team, g in last.groupby("Team_Norm", sort=False):
-        rec={"Team_Norm":team,"Profile_Season":max_season}
+        g=g.sort_values(["Game_Date","Source_Game_ID"],kind="stable")
+        rec={"Team_Norm":team,"Profile_Season":max_season,"Profile_Games":int(len(g))}
+        n_games=float(len(g))
         for c in _NCAAF_STAT_PROFILE_METRICS:
             vals=pd.to_numeric(g[c],errors="coerce")
-            m=float(vals.mean()) if vals.notna().any() else np.nan
-            n=float(nat_last.get(c,np.nan)) if c in nat_last.index else np.nan
-            rec[f"Profile_{c}"] = 0.75*m + 0.25*n if np.isfinite(m) and np.isfinite(n) else (m if np.isfinite(m) else n)
-            rec[f"Profile_Recent3_{c}"] = float(vals.tail(3).mean()) if vals.tail(3).notna().any() else rec[f"Profile_{c}"]
+            cur=float(vals.mean()) if vals.notna().any() else np.nan
+            prev_team=pd.to_numeric(g.get(f"__PrevSeason_{c}"),errors="coerce") if f"__PrevSeason_{c}" in g.columns else pd.Series(np.nan,index=g.index)
+            prev_nat=pd.to_numeric(g.get(f"__PrevNat_{c}"),errors="coerce") if f"__PrevNat_{c}" in g.columns else pd.Series(np.nan,index=g.index)
+            pt=float(prev_team.dropna().iloc[-1]) if prev_team.notna().any() else np.nan
+            pn=float(prev_nat.dropna().iloc[-1]) if prev_nat.notna().any() else np.nan
+            preseason=(0.72*pt+0.28*pn) if np.isfinite(pt) and np.isfinite(pn) else (pt if np.isfinite(pt) else pn)
+            if np.isfinite(cur) and np.isfinite(preseason):
+                nxt=(3.0*preseason+n_games*cur)/(3.0+n_games)
+            elif np.isfinite(cur): nxt=cur
+            else: nxt=preseason
+            rec[f"Profile_{c}"]=nxt
+            rec3=float(vals.tail(3).mean()) if vals.tail(3).notna().any() else np.nan
+            # Recent-3 becomes increasingly current, but missing/ultra-early state
+            # falls back to the stabilized next-game profile.
+            rec[f"Profile_Recent3_{c}"]=rec3 if np.isfinite(rec3) else nxt
         prof_rows.append(rec)
     latest_profiles=pd.DataFrame(prof_rows)
 
@@ -15155,7 +15264,7 @@ def _ncaaf_stat_fit_models_for_rows(df, margin_feature_cols, total_feature_cols,
 
 
 def fit_ncaaf_statistical_brain(log_func=print):
-    """Fit V12.1 structural NCAAF expert with feature qualification + protected shadow."""
+    """Fit V12.2 structural NCAAF expert: matchup-aware, target-qualified, freshness-gated."""
     if isinstance(_NCAAF_STAT_TRAIN_CACHE.get("bundle"), dict):
         b = _NCAAF_STAT_TRAIN_CACHE["bundle"]
         log_func(f"[NCAAF-STAT] cache_reuse rows={b.get('rows',0)} version={b.get('version')}")
@@ -15265,12 +15374,12 @@ def fit_ncaaf_statistical_brain(log_func=print):
 
     bundle={
         "version":NCAAF_STAT_FEATURE_VERSION,
-        "architecture":"structural_margin_total__qualified_target_specific_features__opponent_aware_efficiency__prior_season_shrinkage__85pct_market_anchor__empirical_oof_distribution",
+        "architecture":"v12.2_core_residual_stat__matchup_plus_sum_features__target_qualified__serving_training_state_parity__85pct_market_anchor__empirical_oof_distribution",
         "candidate_feature_cols":list(candidate_feature_cols),
         "feature_cols":feature_cols,
         "margin_feature_cols":list(margin_feature_cols),
         "total_feature_cols":list(total_feature_cols),
-        "feature_qualification":{"version":"v12.1-season-forward-greedy-ridge-admission","margin":margin_qual,"total":total_qual},
+        "feature_qualification":{"version":"v12.2-season-forward-greedy-ridge-matchup-admission","margin":margin_qual,"total":total_qual},
         "margin_models":margin_models,
         "total_models":total_models,
         "linear_weight":linear_weight,
@@ -15319,7 +15428,7 @@ def _ncaaf_stat_runtime_baseline(df, market):
 
 
 def _ncaaf_stat_runtime_frame(df: pd.DataFrame, sb: dict):
-    """Reconstruct structural features for future games from saved latest profiles."""
+    """Reconstruct future structural state with explicit source-season freshness."""
     out=pd.DataFrame(index=df.index)
     profiles=sb.get("latest_profiles")
     if not isinstance(profiles,pd.DataFrame) or profiles.empty:
@@ -15339,18 +15448,40 @@ def _ncaaf_stat_runtime_frame(df: pd.DataFrame, sb: dict):
         out[f"A_Recent3_{metric}"]=pd.to_numeric(ar,errors="coerce")
         out[f"B_Recent3_{metric}"]=pd.to_numeric(br,errors="coerce")
         out[f"Diff_Recent3_{metric}"]=out[f"A_Recent3_{metric}"]-out[f"B_Recent3_{metric}"]
+    out, _ = _ncaaf_stat_add_pair_features(out)
     out[_NCAAF_STAT_INTERCEPT_FEATURE] = 0.0
     neutral=pd.to_numeric(df.get("Is_Neutral_Site",df.get("Is_Neutral",0)),errors="coerce")
     out["Context_Is_Neutral"]=pd.Series(neutral,index=df.index).fillna(0).astype(float)
     out["Context_Week"]=pd.to_numeric(df.get("Week_Number",df.get("BigAl_Context_Week_Number",df.get("Week",np.nan))),errors="coerce")
-    # Runtime alignment context if available; otherwise neutral missing values are imputed by saved models.
     hs=df.get("Home_Subdivision",pd.Series("",index=df.index)).astype(str).str.upper()
     ass=df.get("Away_Subdivision",pd.Series("",index=df.index)).astype(str).str.upper()
     out["Context_A_FBS"]=hs.eq("FBS").astype(float).where(hs.ne(""),np.nan)
     out["Context_B_FBS"]=ass.eq("FBS").astype(float).where(ass.ne(""),np.nan)
     out["Context_Cross_Subdivision"]=out["Context_A_FBS"].ne(out["Context_B_FBS"]).astype(float).where(out[["Context_A_FBS","Context_B_FBS"]].notna().all(axis=1),np.nan)
-    return out.replace([np.inf,-np.inf],np.nan)
 
+    # Profile metadata is used for trust/gating, never as a result label.
+    profile_season_col = "Profile_Season" if "Profile_Season" in p.columns else None
+    profile_games_col = "Profile_Games" if "Profile_Games" in p.columns else None
+    hs_src = home.map(p[profile_season_col]) if profile_season_col else pd.Series(np.nan,index=df.index)
+    as_src = away.map(p[profile_season_col]) if profile_season_col else pd.Series(np.nan,index=df.index)
+    hg = pd.to_numeric(home.map(p[profile_games_col]),errors="coerce") if profile_games_col else pd.Series(0.0,index=df.index)
+    ag = pd.to_numeric(away.map(p[profile_games_col]),errors="coerce") if profile_games_col else pd.Series(0.0,index=df.index)
+    src_season = pd.concat([pd.to_numeric(hs_src,errors="coerce"),pd.to_numeric(as_src,errors="coerce")],axis=1).min(axis=1,skipna=True)
+    game_season = pd.to_numeric(df.get("Season"),errors="coerce") if "Season" in df.columns else pd.Series(np.nan,index=df.index)
+    derived_season = _ncaaf_season_from_timestamp(df.get("Game_Start",pd.Series(pd.NaT,index=df.index)))
+    game_season = pd.Series(game_season,index=df.index).where(pd.Series(game_season,index=df.index).notna(),derived_season)
+    same = src_season.eq(game_season) & game_season.notna()
+    loaded_games = pd.concat([hg,ag],axis=1).min(axis=1,skipna=True).fillna(0.0).clip(lower=0.0)
+    current_games = loaded_games.where(same,0.0)
+    # Conservative smooth transition: prior-only profiles retain diagnostic value
+    # but cannot earn fresh deployment authority until current-season data exists.
+    fresh = pd.Series(0.20,index=df.index,dtype="float64")
+    fresh.loc[same] = 0.25 + 0.75*(1.0-np.exp(-current_games.loc[same]/3.0))
+    out["__Stat_Source_Season"] = src_season.astype("float64")
+    out["__Stat_Game_Season"] = game_season.astype("float64")
+    out["__Stat_Current_Season_Games"] = current_games.astype("float64")
+    out["__Stat_State_Freshness"] = fresh.clip(0.0,1.0).astype("float64")
+    return out.replace([np.inf,-np.inf],np.nan)
 
 def _ncaaf_stat_profile_similarity(X, sb):
     med=np.asarray(sb.get("profile_median",[]),dtype=float); scale=np.asarray(sb.get("profile_scale",[]),dtype=float)
@@ -15367,6 +15498,7 @@ def apply_ncaaf_statistical_brain_feature(df: pd.DataFrame, sb, market: str):
     out=df.copy(); defaults={
         "NCAAF_Stat_Prob":.5,"NCAAF_Stat_Raw_Prob":.5,"NCAAF_Stat_Edge":0.,"NCAAF_Stat_Market_Baseline_Prob":.5,
         "NCAAF_Stat_Active":0,"NCAAF_Stat_Trust":0.,"NCAAF_Stat_Base_Trust":0.,"NCAAF_Stat_Profile_Similarity":1.,"NCAAF_Stat_Recency_Factor":1.,
+        "NCAAF_Stat_State_Freshness":0.20,"NCAAF_Stat_Current_Season_Games":0.,"NCAAF_Stat_Source_Season":np.nan,"NCAAF_Stat_Game_Season":np.nan,
         "NCAAF_Stat_Expected_Margin":np.nan,"NCAAF_Stat_Expected_Total":np.nan,"NCAAF_Stat_Expected_Team_Points":np.nan,"NCAAF_Stat_Expected_Opp_Points":np.nan,"NCAAF_Stat_Uncertainty":1.,
     }
     for c,v in defaults.items(): out[c]=v
@@ -15441,7 +15573,8 @@ def apply_ncaaf_statistical_brain_feature(df: pd.DataFrame, sb, market: str):
         cutoff=pd.to_datetime(sb.get("historical_max_date"),errors="coerce",utc=True); gt=pd.to_datetime(out.get("Game_Start"),errors="coerce",utc=True)
         age=(gt-cutoff).dt.total_seconds().to_numpy(dtype=float)/86400.; age=np.where(np.isfinite(age),np.maximum(age,0),np.inf)
         rec=np.clip(np.exp(-np.log(2)*age/730.),.20,1.0)
-        eff=np.clip(base_trust*sim*rec,0,1)
+        state_fresh=pd.to_numeric(Xall.get("__Stat_State_Freshness",0.20),errors="coerce").fillna(0.20).clip(0,1).to_numpy(dtype=float)
+        eff=np.clip(base_trust*sim*rec*state_fresh,0,1)
         final=np.clip(baseline+eff*(np.asarray(rawp,dtype=float)-baseline),.01,.99); edge=final-baseline
         eligible=(gt>cutoff).fillna(False).to_numpy(dtype=bool)&np.isfinite(rawp)&np.isfinite(eff)&(eff>=.03)
         # V12 leakage contract: only expose final structural-model outputs after the historical cutoff.
@@ -15450,6 +15583,10 @@ def apply_ncaaf_statistical_brain_feature(df: pd.DataFrame, sb, market: str):
         out.loc[eligible,"NCAAF_Stat_Base_Trust"]=np.float32(base_trust)
         out.loc[eligible,"NCAAF_Stat_Profile_Similarity"]=sim[eligible].astype("float32")
         out.loc[eligible,"NCAAF_Stat_Recency_Factor"]=rec[eligible].astype("float32")
+        out.loc[eligible,"NCAAF_Stat_State_Freshness"]=state_fresh[eligible].astype("float32")
+        out.loc[eligible,"NCAAF_Stat_Current_Season_Games"]=pd.to_numeric(Xall.get("__Stat_Current_Season_Games",0),errors="coerce").fillna(0).to_numpy(dtype=np.float32)[eligible]
+        out.loc[eligible,"NCAAF_Stat_Source_Season"]=pd.to_numeric(Xall.get("__Stat_Source_Season",np.nan),errors="coerce").to_numpy(dtype=np.float32)[eligible]
+        out.loc[eligible,"NCAAF_Stat_Game_Season"]=pd.to_numeric(Xall.get("__Stat_Game_Season",np.nan),errors="coerce").to_numpy(dtype=np.float32)[eligible]
         _row_margin=np.asarray(np.where(is_home,exp_margin,np.where(is_away,-exp_margin,exp_margin)),dtype="float32")
         out.loc[eligible,"NCAAF_Stat_Expected_Margin"]=_row_margin[eligible]
         out.loc[eligible,"NCAAF_Stat_Expected_Total"]=np.asarray(exp_total,dtype="float32")[eligible]
@@ -17275,6 +17412,7 @@ def load_model_from_gcs(
             "model_value_cls": payload.get("model_value_cls"),
             "model_value_reg": payload.get("model_value_reg"),
             "meta_model": payload.get("meta_model"),
+            "regime_residual_model": payload.get("regime_residual_model"),
             "meta_calibrator": payload.get("meta_calibrator"),
             "multihead_config": payload.get("multihead_config") or {},
             "historical_core_expert": payload.get("historical_core_expert"),
