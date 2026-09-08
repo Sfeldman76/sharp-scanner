@@ -14237,7 +14237,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-08-v13.0.1-market-residual-qualified-fair-value"
+NCAAF_V13_VERSION = "2026-09-08-v13.0.2-independent-qualification-closer-diagnostics"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -15411,6 +15411,75 @@ def _ncaaf_v13_edge_beta(x, y, alpha=NCAAF_V13_EDGE_RIDGE_ALPHA):
     return float(np.clip(beta, 0.0, 1.0)), int(ok.sum())
 
 
+def _ncaaf_v13_closer_bucket_rows(actual, market, raw, tradable=None):
+    """Summarize whether V13 is closer to the realized margin than the market.
+
+    Buckets are based on the absolute RAW independent disagreement versus market.
+    This directly answers the research question: when V13 differs from the market
+    by 1.5, 2, 3+ points, is V13 more often closer to the actual game margin?
+    """
+    a=np.asarray(actual,dtype=float); m=np.asarray(market,dtype=float); r=np.asarray(raw,dtype=float)
+    t=np.asarray(tradable,dtype=float) if tradable is not None else np.full(len(a),np.nan,dtype=float)
+    ok=np.isfinite(a)&np.isfinite(m)&np.isfinite(r)
+    if not ok.any():
+        return []
+    edge=np.abs(r-m)
+    market_err=np.abs(a-m); raw_err=np.abs(a-r)
+    trad_err=np.abs(a-t)
+    specs=[
+        ("lt_0.5",0.0,0.5),
+        ("0.5_to_1.5",0.5,1.5),
+        ("1.5_to_2.5",1.5,2.5),
+        ("2.5_to_3.5",2.5,3.5),
+        ("3.5_plus",3.5,np.inf),
+    ]
+    rows=[]
+    for label,lo,hi in specs:
+        sel=ok&(edge>=lo)&(edge<hi)
+        n=int(sel.sum())
+        if n==0:
+            continue
+        raw_imp=market_err[sel]-raw_err[sel]
+        raw_closer=float(np.mean(raw_imp>0.0))
+        raw_tie=float(np.mean(np.isclose(raw_imp,0.0,atol=1e-12)))
+        signed=(r[sel]-m[sel])*(a[sel]-m[sel])
+        direction=float(np.mean(signed>0.0)) if len(signed) else np.nan
+        trad_ok=sel&np.isfinite(t)
+        if trad_ok.any():
+            trad_imp=market_err[trad_ok]-trad_err[trad_ok]
+            trad_closer=float(np.mean(trad_imp>0.0))
+            trad_avg=float(np.mean(trad_imp))
+        else:
+            trad_closer=np.nan; trad_avg=np.nan
+        rows.append({
+            "bucket":label,"n":n,
+            "raw_closer_rate":raw_closer,"raw_tie_rate":raw_tie,
+            "raw_avg_abs_error_improvement":float(np.mean(raw_imp)),
+            "raw_median_abs_error_improvement":float(np.median(raw_imp)),
+            "edge_direction_accuracy":direction,
+            "tradable_closer_rate":trad_closer,
+            "tradable_avg_abs_error_improvement":trad_avg,
+        })
+    return rows
+
+
+def _ncaaf_v13_log_closer_buckets(actual, market, raw, tradable, *, season_label, log_func=print):
+    rows=_ncaaf_v13_closer_bucket_rows(actual,market,raw,tradable)
+    for rec in rows:
+        tc=rec["tradable_closer_rate"]; ta=rec["tradable_avg_abs_error_improvement"]
+        tc_txt=f"{tc:.1%}" if np.isfinite(tc) else "NA"
+        ta_txt=f"{ta:+.3f}" if np.isfinite(ta) else "NA"
+        log_func(
+            f"[V13-CLOSER-BUCKET] season={season_label} bucket={rec['bucket']} n={rec['n']} "
+            f"raw_closer={rec['raw_closer_rate']:.1%} raw_tie={rec['raw_tie_rate']:.1%} "
+            f"raw_avg_improve={rec['raw_avg_abs_error_improvement']:+.3f} "
+            f"raw_median_improve={rec['raw_median_abs_error_improvement']:+.3f} "
+            f"edge_direction={rec['edge_direction_accuracy']:.1%} "
+            f"tradable_closer={tc_txt} tradable_avg_improve={ta_txt}"
+        )
+    return rows
+
+
 def _ncaaf_v13_learn_tradable_edges(games, raw_margin_oof, raw_total_oof, *, log_func=print):
     """Learn how much independent V13 disagreement deserves tradable authority.
 
@@ -15427,6 +15496,7 @@ def _ncaaf_v13_learn_tradable_edges(games, raw_margin_oof, raw_total_oof, *, log
     raw_m = np.asarray(raw_margin_oof, dtype=float); raw_t = np.asarray(raw_total_oof, dtype=float)
     trad_m = np.full(len(d), np.nan, dtype=float); trad_t = np.full(len(d), np.nan, dtype=float)
     metrics = []
+    closer_metrics = []
     seasons = sorted(int(x) for x in pd.Series(season).dropna().unique())
 
     for val in seasons:
@@ -15468,6 +15538,12 @@ def _ncaaf_v13_learn_tradable_edges(games, raw_margin_oof, raw_total_oof, *, log
                 f"tradable_rmse={rec['tradable_margin_rmse']:.3f} gain_vs_market={gain:+.3f} "
                 f"edge_direction={dir_acc:.1%} total_beta={bt:.4f}"
             )
+            _buckets=_ncaaf_v13_log_closer_buckets(
+                actual_m[vm], market_m[vm], raw_m[vm], trad_m[vm],
+                season_label=int(val), log_func=log_func,
+            )
+            for _b in _buckets:
+                closer_metrics.append({"season":int(val), **_b})
 
     # Current NCAA season rows are state/evaluation rows, not coefficient-fitting
     # rows.  Final beta is learned from completed prior-season OOF evidence only.
@@ -15479,11 +15555,21 @@ def _ncaaf_v13_learn_tradable_edges(games, raw_margin_oof, raw_total_oof, *, log
     bt, nt = _ncaaf_v13_edge_beta(
         (raw_t-market_t)[fit_hist], (actual_t-market_t)[fit_hist]
     )
+    pooled_mask = fit_hist & np.isfinite(actual_m) & np.isfinite(market_m) & np.isfinite(raw_m)
+    if pooled_mask.any():
+        pooled_trad = market_m[pooled_mask] + bm*(raw_m[pooled_mask]-market_m[pooled_mask])
+        pooled_buckets = _ncaaf_v13_log_closer_buckets(
+            actual_m[pooled_mask], market_m[pooled_mask], raw_m[pooled_mask], pooled_trad,
+            season_label="POOLED_PRIOR", log_func=log_func,
+        )
+        for _b in pooled_buckets:
+            closer_metrics.append({"season":"POOLED_PRIOR", **_b})
     log_func(f"[V13-EDGE-SHRINK] final_margin_beta={bm:.4f} n={nm} final_total_beta={bt:.4f} n_total={nt} coefficient_season_max={now_season-1}")
     return {
         "margin_beta": bm, "margin_beta_train_n": nm,
         "total_beta": bt, "total_beta_train_n": nt,
         "season_metrics": metrics,
+        "closer_bucket_metrics": closer_metrics,
         "tradable_margin_oof": trad_m,
         "tradable_total_oof": trad_t,
         "coefficient_season_max": now_season-1,
@@ -15533,16 +15619,25 @@ def _ncaaf_v13_build_fundamental(raw: pd.DataFrame, bq=None, log_func=print):
     if len(seasons) < 3:
         return None
 
-    # Market-free feature qualification.  The current/latest season is automatically
-    # excluded by the qualification routine, so 2026 Week 1 cannot select its own
-    # predictors even though it is available to build the next-game state profile.
+    # V13.0.2 independent qualification contract.  IMPORTANT: the inherited
+    # qualification helper names this argument `market_weight`, but internally it
+    # is the STRUCTURAL-model weight in:
+    #     blended = (1 - structural_weight) * market + structural_weight * structural
+    # Therefore structural_weight=1.0 is the only correct setting for V13's
+    # independent football line (0% market contribution).  Keep this explicit so
+    # a future refactor cannot accidentally reintroduce the V13.0.1 inversion bug.
+    v13_structural_weight = 1.0
+    log_func(
+        f"[V13-FUNDAMENTAL-QUAL-CONTRACT] structural_weight={v13_structural_weight:.3f} "
+        f"market_contribution={1.0-v13_structural_weight:.3f} current_season_excluded=TRUE"
+    )
     margin_cols, margin_qual = _ncaaf_stat_qualify_features(
         games, candidate_margin, "Actual_Margin", "Market_Open_Margin", seasons,
-        market_weight=0.0, label="v13_margin_independent", log_func=log_func,
+        market_weight=v13_structural_weight, label="v13_margin_independent", log_func=log_func,
     )
     total_cols, total_qual = _ncaaf_stat_qualify_features(
         games, candidate_total, "Actual_Total", "Market_Open_Total", seasons,
-        market_weight=0.0, label="v13_total_independent", log_func=log_func,
+        market_weight=v13_structural_weight, label="v13_total_independent", log_func=log_func,
     )
     if len(margin_cols) < 2 or len(total_cols) < 2:
         log_func(f"[V13-FUNDAMENTAL] qualification left too few features margin={margin_cols} total={total_cols}")
@@ -15633,7 +15728,7 @@ def _ncaaf_v13_build_fundamental(raw: pd.DataFrame, bq=None, log_func=print):
     log_func(
         f"[V13-FUNDAMENTAL] games={len(games)} qualified_margin={len(margin_cols)-1} qualified_total={len(total_cols)-1} "
         f"raw_oof_rmse={pooled_rmse:.3f} market_open_rmse={pooled_market:.3f} tradable_oof_rmse={pooled_trad:.3f} "
-        f"margin_beta={bundle['margin_edge_beta']:.4f} coefficient_season_max={bundle['coefficient_season_max']} independent_market_weight=0.000"
+        f"margin_beta={bundle['margin_edge_beta']:.4f} coefficient_season_max={bundle['coefficient_season_max']} independent_market_contribution=0.000"
     )
     return bundle
 
@@ -15988,7 +16083,7 @@ def _ncaaf_v13_fit_cover_calibrator(fundamental: dict, market: dict, log_func=pr
 
 
 def fit_ncaaf_v13_value_architecture(log_func=print):
-    """Fit NCAAF-only V13.0.1 shadow value architecture."""
+    """Fit NCAAF-only V13.0.2 shadow value architecture."""
     if isinstance(_NCAAF_V13_CACHE.get("bundle"),dict): return _NCAAF_V13_CACHE["bundle"]
     try:
         bq,_=get_bq_clients()
@@ -16019,7 +16114,7 @@ def fit_ncaaf_v13_value_architecture(log_func=print):
         "situational_layer":{"Pathi":"V12_PRODUCTION_ONLY__V13_1_INCREMENTAL_TEST_PENDING","BigAl":"V12_PRODUCTION_ONLY__V13_1_INCREMENTAL_TEST_PENDING","reason":"establish_clean_v13_fundamental_plus_market_baseline_before_residual_admission"},
     }
     _NCAAF_V13_CACHE["bundle"]=bundle
-    log_func(f"[V13-CONTRACT] version={NCAAF_V13_VERSION} status={status} shadow_only=TRUE horizons={list(NCAAF_V13_HORIZONS_HOURS)} raw_fundamental_market_weight=0.000 margin_beta={fundamental.get('margin_edge_beta',0.0):.4f} current_season_state_loaded={fundamental.get('current_season_state_loaded')}")
+    log_func(f"[V13-CONTRACT] version={NCAAF_V13_VERSION} status={status} shadow_only=TRUE horizons={list(NCAAF_V13_HORIZONS_HOURS)} raw_fundamental_market_contribution=0.000 margin_beta={fundamental.get('margin_edge_beta',0.0):.4f} current_season_state_loaded={fundamental.get('current_season_state_loaded')}")
     log_func("[V13-SITUATIONAL] Pathi=V12_PRODUCTION_ONLY BigAl=V12_PRODUCTION_ONLY V13_residual_admission=DEFERRED_UNTIL_BASELINE_VALIDATED")
     return bundle
 
