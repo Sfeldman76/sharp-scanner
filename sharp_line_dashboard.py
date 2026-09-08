@@ -14231,6 +14231,18 @@ def _hc_apply_system_memory(out: pd.DataFrame, hb: dict) -> pd.DataFrame:
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
 NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness"
+
+# ============================================================================
+# V13 NCAAF VALUE ARCHITECTURE
+# Football-first fair value -> market price discovery -> calibrated cover value.
+# V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
+# ============================================================================
+NCAAF_V13_VERSION = "2026-09-08-v13.0.0-football-fair-value-market-intelligence"
+NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
+NCAAF_V13_MIN_TRAIN_GAMES = 500
+NCAAF_V13_MIN_VALID_GAMES = 100
+_NCAAF_V13_CACHE = {}
+
 NCAAF_STAT_PREFIX = "NCAAF_Stat_"
 _NCAAF_STAT_TRAIN_CACHE = {}
 try:
@@ -15226,6 +15238,522 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
     return anchor.reset_index(drop=True), list(dict.fromkeys(feature_cols)), latest_profiles
 
 
+# ============================================================================
+# V13 NCAAF VALUE ARCHITECTURE — TRAINING / SHADOW RESEARCH
+# ============================================================================
+def _ncaaf_v13_norm_team_series(values):
+    return (pd.Series(values).astype(str).str.lower().str.strip()
+            .str.replace(".","",regex=False).str.replace("&","and",regex=False))
+
+def _ncaaf_v13_pair_key(season, team_a, team_b):
+    ss=pd.to_numeric(pd.Series(season),errors="coerce").round().astype("Int64").astype(str)
+    aa=_ncaaf_v13_norm_team_series(team_a); bb=_ncaaf_v13_norm_team_series(team_b)
+    lo=np.where(aa.to_numpy()<=bb.to_numpy(),aa.to_numpy(),bb.to_numpy())
+    hi=np.where(aa.to_numpy()<=bb.to_numpy(),bb.to_numpy(),aa.to_numpy())
+    return ss+"|"+pd.Series(lo,index=aa.index)+"|"+pd.Series(hi,index=aa.index)
+
+def _ncaaf_v13_matchup_key(season, game_date, team_a, team_b):
+    dd=pd.to_datetime(pd.Series(game_date),errors="coerce",utc=True).dt.strftime("%Y-%m-%d")
+    return _ncaaf_v13_pair_key(season,team_a,team_b)+"|"+dd.fillna("")
+
+
+def _ncaaf_v13_fundamental_feature_cols(games: pd.DataFrame):
+    """Small, expert-designed football representation. No market/odds columns."""
+    wanted_margin = [
+        "Context_Is_Neutral", "Context_Week", "Context_A_FBS", "Context_B_FBS", "Context_Cross_Subdivision",
+        "Diff_State_Off_YPP", "Diff_State_Off_Pass_YPA", "Diff_State_Off_Rush_YPA",
+        "Diff_State_Off_Completion_Rate", "Diff_State_Off_Points_Per_Play",
+        "Diff_State_Off_Turnover_Rate", "Diff_State_Off_FirstDown_Rate",
+        "Diff_State_Def_YPP_Allowed", "Diff_State_Def_Pass_YPA_Allowed", "Diff_State_Def_Rush_YPA_Allowed",
+        "Diff_State_Def_Points_Per_Play_Allowed", "Diff_State_Def_Takeaway_Rate",
+        "Diff_State_GameAdj_Off_YPP", "Diff_State_GameAdj_Def_YPP",
+        "Diff_State_GameAdj_Off_Pass_YPA", "Diff_State_GameAdj_Def_Pass_YPA",
+        "Diff_State_GameAdj_Off_Rush_YPA", "Diff_State_GameAdj_Def_Rush_YPA",
+        "Diff_State_GameAdj_Off_Points_Per_Play", "Diff_State_GameAdj_Def_Points_Per_Play",
+        "Diff_Recent3_Off_YPP", "Diff_Recent3_Off_Pass_YPA", "Diff_Recent3_Off_Rush_YPA",
+        "Diff_Recent3_Off_Points_Per_Play", "Diff_Recent3_Def_YPP_Allowed",
+        "Diff_Recent3_Def_Pass_YPA_Allowed", "Diff_Recent3_Def_Rush_YPA_Allowed",
+        "Diff_Recent3_Def_Points_Per_Play_Allowed",
+        "Matchup_Diff_State_YPP", "Matchup_Diff_State_Pass_YPA", "Matchup_Diff_State_Rush_YPA",
+        "Matchup_Diff_State_Points_Per_Play", "Matchup_Diff_State_Turnover_Pressure",
+        "Matchup_Diff_Recent3_YPP", "Matchup_Diff_Recent3_Pass_YPA", "Matchup_Diff_Recent3_Rush_YPA",
+        "Matchup_Diff_Recent3_Points_Per_Play", "Matchup_Diff_Recent3_Turnover_Pressure",
+    ]
+    wanted_total = [
+        "Context_Is_Neutral", "Context_Week", "Context_A_FBS", "Context_B_FBS", "Context_Cross_Subdivision",
+        "Sum_State_Off_YPP", "Sum_State_Off_Pass_YPA", "Sum_State_Off_Rush_YPA",
+        "Sum_State_Off_Points_Per_Play", "Sum_State_Off_Plays_Per_Game",
+        "Sum_State_Def_YPP_Allowed", "Sum_State_Def_Pass_YPA_Allowed", "Sum_State_Def_Rush_YPA_Allowed",
+        "Sum_State_Def_Points_Per_Play_Allowed", "Sum_State_Def_Plays_Faced",
+        "Sum_Recent3_Off_YPP", "Sum_Recent3_Off_Pass_YPA", "Sum_Recent3_Off_Rush_YPA",
+        "Sum_Recent3_Off_Points_Per_Play", "Sum_Recent3_Off_Plays_Per_Game",
+        "Sum_Recent3_Def_YPP_Allowed", "Sum_Recent3_Def_Pass_YPA_Allowed", "Sum_Recent3_Def_Rush_YPA_Allowed",
+        "Sum_Recent3_Def_Points_Per_Play_Allowed", "Sum_Recent3_Def_Plays_Faced",
+        "Matchup_Sum_State_YPP", "Matchup_Sum_State_Pass_YPA", "Matchup_Sum_State_Rush_YPA",
+        "Matchup_Sum_State_Points_Per_Play", "Matchup_Sum_State_Turnover_Pressure",
+        "Matchup_Sum_Recent3_YPP", "Matchup_Sum_Recent3_Pass_YPA", "Matchup_Sum_Recent3_Rush_YPA",
+        "Matchup_Sum_Recent3_Points_Per_Play", "Matchup_Sum_Recent3_Turnover_Pressure",
+    ]
+    margin = [c for c in wanted_margin if c in games.columns]
+    total = [c for c in wanted_total if c in games.columns]
+    return margin, total
+
+
+def _ncaaf_v13_new_regressors():
+    """Stable linear core plus shallow nonlinear residual capacity."""
+    from sklearn.pipeline import Pipeline
+    from sklearn.impute import SimpleImputer
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.linear_model import Ridge
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    linear = Pipeline([
+        ("imputer", SimpleImputer(strategy="median", add_indicator=True)),
+        ("scale", StandardScaler()),
+        ("ridge", Ridge(alpha=24.0)),
+    ])
+    nonlinear = Pipeline([
+        ("imputer", SimpleImputer(strategy="median", add_indicator=False)),
+        ("hgb", HistGradientBoostingRegressor(
+            loss="squared_error", learning_rate=0.035, max_iter=120,
+            max_leaf_nodes=12, max_depth=3, min_samples_leaf=30,
+            l2_regularization=4.0, random_state=1300,
+        )),
+    ])
+    return linear, nonlinear
+
+
+def _ncaaf_v13_fit_regression_pair(X, y):
+    models = _ncaaf_v13_new_regressors()
+    yy = pd.to_numeric(pd.Series(y), errors="coerce")
+    good = yy.notna().to_numpy()
+    models[0].fit(X.loc[good], yy.loc[good].to_numpy(dtype=float))
+    models[1].fit(X.loc[good], yy.loc[good].to_numpy(dtype=float))
+    return models
+
+
+def _ncaaf_v13_regression_predict(models, X, linear_weight=0.80):
+    p1 = np.asarray(models[0].predict(X), dtype=float)
+    p2 = np.asarray(models[1].predict(X), dtype=float)
+    w = float(np.clip(linear_weight, 0.0, 1.0))
+    return w * p1 + (1.0 - w) * p2
+
+
+def _ncaaf_v13_rmse(y, p):
+    y=np.asarray(y,dtype=float); p=np.asarray(p,dtype=float); ok=np.isfinite(y)&np.isfinite(p)
+    return float(np.sqrt(np.mean((y[ok]-p[ok])**2))) if ok.any() else np.nan
+
+
+def _ncaaf_v13_mae(y, p):
+    y=np.asarray(y,dtype=float); p=np.asarray(p,dtype=float); ok=np.isfinite(y)&np.isfinite(p)
+    return float(np.mean(np.abs(y[ok]-p[ok]))) if ok.any() else np.nan
+
+
+def _ncaaf_v13_build_fundamental(raw: pd.DataFrame, log_func=print):
+    games, _, latest_profiles = _ncaaf_stat_build_game_frame(raw)
+    if games.empty:
+        return None
+    margin_cols, total_cols = _ncaaf_v13_fundamental_feature_cols(games)
+    if len(margin_cols) < 15 or len(total_cols) < 12:
+        log_func(f"[V13-FUNDAMENTAL] insufficient compact features margin={len(margin_cols)} total={len(total_cols)}")
+        return None
+    games=games.copy()
+    games["V13_Pair_Key"]=_ncaaf_v13_pair_key(games["Season"],games["Team_Norm"],games["Opponent_Norm"])
+    games["V13_Matchup_Key"]=_ncaaf_v13_matchup_key(games["Season"],games["Game_Date"],games["Team_Norm"],games["Opponent_Norm"])
+    seasons=sorted(int(x) for x in pd.to_numeric(games["Season"],errors="coerce").dropna().unique())
+    season_arr=pd.to_numeric(games["Season"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    ym=pd.to_numeric(games["Actual_Margin"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    yt=pd.to_numeric(games["Actual_Total"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    oof_m=np.full(len(games),np.nan); oof_t=np.full(len(games),np.nan)
+    fold_metrics=[]
+    for val in seasons[1:]:
+        tr=np.isfinite(season_arr)&(season_arr<float(val))&np.isfinite(ym)&np.isfinite(yt)
+        va=np.isfinite(season_arr)&(season_arr==float(val))&np.isfinite(ym)&np.isfinite(yt)
+        if int(tr.sum())<NCAAF_V13_MIN_TRAIN_GAMES or int(va.sum())<NCAAF_V13_MIN_VALID_GAMES:
+            continue
+        mm=_ncaaf_v13_fit_regression_pair(games.loc[tr,margin_cols],ym[tr])
+        tm=_ncaaf_v13_fit_regression_pair(games.loc[tr,total_cols],yt[tr])
+        pm=_ncaaf_v13_regression_predict(mm,games.loc[va,margin_cols],0.80)
+        pt=_ncaaf_v13_regression_predict(tm,games.loc[va,total_cols],0.80)
+        idx=np.where(va)[0]; oof_m[idx]=pm; oof_t[idx]=pt
+        market_m=pd.to_numeric(games.loc[va,"Market_Open_Margin"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+        market_t=pd.to_numeric(games.loc[va,"Market_Open_Total"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+        rec={
+            "season":int(val),"n":int(va.sum()),
+            "margin_rmse":_ncaaf_v13_rmse(ym[idx],pm),"margin_mae":_ncaaf_v13_mae(ym[idx],pm),
+            "market_margin_rmse":_ncaaf_v13_rmse(ym[idx],market_m),"market_margin_mae":_ncaaf_v13_mae(ym[idx],market_m),
+            "total_rmse":_ncaaf_v13_rmse(yt[idx],pt),"total_mae":_ncaaf_v13_mae(yt[idx],pt),
+            "market_total_rmse":_ncaaf_v13_rmse(yt[idx],market_t),"market_total_mae":_ncaaf_v13_mae(yt[idx],market_t),
+        }
+        fold_metrics.append(rec)
+        log_func(
+            f"[V13-FUNDAMENTAL-SEASON] season={val} n={rec['n']} "
+            f"margin_rmse={rec['margin_rmse']:.3f} market={rec['market_margin_rmse']:.3f} "
+            f"total_rmse={rec['total_rmse']:.3f} market={rec['market_total_rmse']:.3f}"
+        )
+    valid_oof=np.isfinite(oof_m)&np.isfinite(oof_t)
+    if int(valid_oof.sum()) < 500:
+        log_func(f"[V13-FUNDAMENTAL] insufficient season-forward OOF rows={int(valid_oof.sum())}")
+        return None
+    final_margin=_ncaaf_v13_fit_regression_pair(games[margin_cols],ym)
+    final_total=_ncaaf_v13_fit_regression_pair(games[total_cols],yt)
+    residual_margin=(ym-oof_m)[np.isfinite(ym)&np.isfinite(oof_m)]
+    residual_total=(yt-oof_t)[np.isfinite(yt)&np.isfinite(oof_t)]
+    out=games[["Season","Game_Date","V13_Pair_Key","V13_Matchup_Key","Team_Norm","Opponent_Norm","Actual_Margin","Actual_Total","Market_Open_Margin","Market_Open_Total"]].copy()
+    out["V13_Fair_Margin_OOF"]=oof_m
+    out["V13_Fair_Total_OOF"]=oof_t
+    bundle={
+        "margin_features":margin_cols,"total_features":total_cols,
+        "margin_models":final_margin,"total_models":final_total,"linear_weight":0.80,
+        "latest_profiles":latest_profiles,
+        "residual_margin":np.asarray(residual_margin,dtype=np.float32),
+        "residual_total":np.asarray(residual_total,dtype=np.float32),
+        "season_metrics":fold_metrics,"seasons":seasons,
+        "historical_max_date":pd.Timestamp(games["Game_Date"].max()).isoformat(),
+        "historical_max_season":max(seasons),
+        "oof_frame":out,
+    }
+    pooled_rmse=_ncaaf_v13_rmse(ym,oof_m); pooled_market=_ncaaf_v13_rmse(ym,pd.to_numeric(games["Market_Open_Margin"],errors="coerce"))
+    log_func(
+        f"[V13-FUNDAMENTAL] games={len(games)} features_margin={len(margin_cols)} features_total={len(total_cols)} "
+        f"oof_margin_rmse={pooled_rmse:.3f} market_open_rmse={pooled_market:.3f} independent_market_weight=0.000"
+    )
+    return bundle
+
+
+def _ncaaf_v13_fetch_spread_snapshots(log_func=print):
+    """Schema-safe skinny pull from odds_snapshot_log for genuine future-close targets."""
+    try:
+        bq,bqs=get_bq_clients()
+        schema={f.name for f in bq.get_table(SNAPSHOTS_TABLE).schema}
+    except Exception as e:
+        log_func(f"[V13-MARKET] snapshot schema unavailable: {e}")
+        return pd.DataFrame()
+    def pick(*names):
+        return next((x for x in names if x in schema),None)
+    sportc=pick("Sport","sport"); marketc=pick("Market","market"); snapc=pick("Snapshot_Timestamp","snapshot_timestamp")
+    gamec=pick("Game_Start","feat_Game_Start","Commence_Hour","commence_time")
+    bookc=pick("Bookmaker","Book","bookmaker"); valuec=pick("Value","Line","Spread")
+    oddsc=pick("Odds_Price","Price","Odds"); outc=pick("Outcome_Norm","Outcome","Team")
+    homec=pick("Home_Team_Norm","Home_Team"); awayc=pick("Away_Team_Norm","Away_Team")
+    keyc=pick("Game_Key","Merge_Key_Short","Event_ID")
+    openc=pick("First_Line_Value","Open_Value","Opening_Line","Opening_Spread")
+    required=[sportc,marketc,snapc,gamec,bookc,valuec,outc,homec,awayc]
+    if any(x is None for x in required):
+        log_func(f"[V13-MARKET] snapshot source missing required fields required={required}")
+        return pd.DataFrame()
+    def expr(c,alias):
+        return f"CAST(`{c}` AS STRING) AS `{alias}`" if c else f"CAST(NULL AS STRING) AS `{alias}`"
+    sql=f"""
+      SELECT
+        {expr(keyc,'Game_Key')},
+        TIMESTAMP(`{snapc}`) AS Snapshot_Timestamp,
+        TIMESTAMP(`{gamec}`) AS Game_Start,
+        {expr(bookc,'Bookmaker')},
+        SAFE_CAST(`{valuec}` AS FLOAT64) AS Value,
+        {('SAFE_CAST(`'+oddsc+'` AS FLOAT64)') if oddsc else 'CAST(NULL AS FLOAT64)'} AS Odds_Price,
+        {('SAFE_CAST(`'+openc+'` AS FLOAT64)') if openc else 'CAST(NULL AS FLOAT64)'} AS Open_Value,
+        {expr(outc,'Outcome')}, {expr(homec,'Home_Team_Norm')}, {expr(awayc,'Away_Team_Norm')}
+      FROM `{SNAPSHOTS_TABLE}`
+      WHERE UPPER(CAST(`{sportc}` AS STRING))='NCAAF'
+        AND LOWER(CAST(`{marketc}` AS STRING))='spreads'
+        AND `{snapc}` IS NOT NULL AND `{gamec}` IS NOT NULL
+        AND TIMESTAMP(`{gamec}`) >= TIMESTAMP('2022-01-01')
+        AND TIMESTAMP(`{gamec}`) < CURRENT_TIMESTAMP()
+        AND TIMESTAMP(`{snapc}`) < TIMESTAMP(`{gamec}`)
+        AND TIMESTAMP(`{snapc}`) >= TIMESTAMP_SUB(TIMESTAMP(`{gamec}`), INTERVAL 36 HOUR)
+    """
+    try:
+        df=bq.query(sql).to_dataframe(bqstorage_client=bqs)
+        log_func(f"[V13-MARKET] raw_snapshots={len(df)} source={SNAPSHOTS_TABLE}")
+        return df
+    except Exception as e:
+        log_func(f"[V13-MARKET] snapshot pull unavailable: {e}")
+        return pd.DataFrame()
+
+
+def _ncaaf_v13_build_market_horizons(snaps: pd.DataFrame, log_func=print):
+    if snaps is None or snaps.empty:
+        return pd.DataFrame(), []
+    d=snaps.copy()
+    d["Snapshot_Timestamp"]=pd.to_datetime(d["Snapshot_Timestamp"],errors="coerce",utc=True)
+    d["Game_Start"]=pd.to_datetime(d["Game_Start"],errors="coerce",utc=True)
+    for c in ("Bookmaker","Outcome","Home_Team_Norm","Away_Team_Norm"):
+        d[c]=d[c].astype(str).str.lower().str.strip()
+    d["Value"]=pd.to_numeric(d["Value"],errors="coerce")
+    d["Open_Value"]=pd.to_numeric(d.get("Open_Value"),errors="coerce")
+    d["Odds_Price"]=pd.to_numeric(d.get("Odds_Price"),errors="coerce")
+    is_home=d["Outcome"].eq(d["Home_Team_Norm"])|d["Outcome"].eq("home")
+    is_away=d["Outcome"].eq(d["Away_Team_Norm"])|d["Outcome"].eq("away")
+    d["Home_Spread"]=np.where(is_home,d["Value"],np.where(is_away,-d["Value"],np.nan))
+    d["Open_Home_Spread"]=np.where(is_home,d["Open_Value"],np.where(is_away,-d["Open_Value"],np.nan))
+    d=d.loc[np.isfinite(pd.to_numeric(d["Home_Spread"],errors="coerce"))].copy()
+    d["Season"]=_ncaaf_season_from_timestamp(d["Game_Start"])
+    d["V13_Pair_Key"]=_ncaaf_v13_pair_key(d["Season"],d["Home_Team_Norm"],d["Away_Team_Norm"])
+    d["V13_Matchup_Key"]=_ncaaf_v13_matchup_key(d["Season"],d["Game_Start"],d["Home_Team_Norm"],d["Away_Team_Norm"])
+    d["__sharp"]=d["Bookmaker"].isin({str(x).lower().strip() for x in SHARP_BOOKS})
+    d["__rec"]=d["Bookmaker"].isin({str(x).lower().strip() for x in REC_BOOKS})
+    # final pre-kick snapshot per book -> sharp consensus close target
+    last=(d.sort_values("Snapshot_Timestamp").groupby(["V13_Matchup_Key","Bookmaker"],sort=False,as_index=False).tail(1))
+    last["__close_age_h"]=(last["Game_Start"]-last["Snapshot_Timestamp"]).dt.total_seconds().div(3600.0)
+    def close_agg(g):
+        # Prefer a genuine near-kick sharp quote.  If a sharp book has no quote
+        # inside two hours, fall back to its latest pre-kick quote, then all books.
+        near=g.loc[g["__sharp"] & pd.to_numeric(g["__close_age_h"],errors="coerce").between(0,2,inclusive="both")]
+        sharp_src=near if not near.empty else g.loc[g["__sharp"]]
+        sharp=(-pd.to_numeric(sharp_src["Home_Spread"],errors="coerce")).median()
+        allv=(-pd.to_numeric(g["Home_Spread"],errors="coerce")).median()
+        close_age=float(pd.to_numeric(sharp_src.get("__close_age_h"),errors="coerce").median()) if not sharp_src.empty else np.nan
+        return pd.Series({"Sharp_Close_Margin":sharp if np.isfinite(sharp) else allv,"Sharp_Close_Age_Hours":close_age})
+    close=last.groupby("V13_Matchup_Key",sort=False).apply(close_agg).reset_index()
+    frames=[]
+    feature_cols=[
+        "Current_Margin","Open_Margin","Sharp_Current_Margin","Rec_Current_Margin",
+        "SharpMinusRec","Move_From_Open","Sharp_Move_From_Open","Rec_Move_From_Open",
+        "Book_Dispersion","Book_Count","Sharp_Book_Count","Rec_Book_Count","Horizon_Hours",
+        "Dist_to_Key_3","Dist_to_Key_7","Dist_to_Key_10","Dist_to_Key_14",
+    ]
+    for h in NCAAF_V13_HORIZONS_HOURS:
+        cutoff=d["Game_Start"]-pd.to_timedelta(float(h),unit="h")
+        # Decision snapshots must be reasonably close to the requested horizon.
+        # This prevents a three-day-old quote from masquerading as a 6h decision.
+        tol_h={24.0:12.0,6.0:3.0,1.0:1.0}.get(float(h),max(1.0,float(h)/2.0))
+        lower=cutoff-pd.to_timedelta(tol_h,unit="h")
+        eligible=d.loc[d["Snapshot_Timestamp"].le(cutoff) & d["Snapshot_Timestamp"].ge(lower)].copy()
+        if eligible.empty: continue
+        cur=(eligible.sort_values("Snapshot_Timestamp").groupby(["V13_Matchup_Key","Bookmaker"],sort=False,as_index=False).tail(1))
+        def agg(g):
+            margins=-pd.to_numeric(g["Home_Spread"],errors="coerce")
+            sm=-pd.to_numeric(g.loc[g["__sharp"],"Home_Spread"],errors="coerce")
+            rm=-pd.to_numeric(g.loc[g["__rec"],"Home_Spread"],errors="coerce")
+            om=-pd.to_numeric(g["Open_Home_Spread"],errors="coerce")
+            current=float(margins.median()) if margins.notna().any() else np.nan
+            op=float(om.median()) if om.notna().any() else current
+            sharp=float(sm.median()) if sm.notna().any() else current
+            rec=float(rm.median()) if rm.notna().any() else current
+            one=g.iloc[-1]
+            out={
+                "Season":float(one["Season"]),"Game_Start":one["Game_Start"],
+                "Home_Team_Norm":one["Home_Team_Norm"],"Away_Team_Norm":one["Away_Team_Norm"],
+                "Current_Margin":current,"Open_Margin":op,"Sharp_Current_Margin":sharp,"Rec_Current_Margin":rec,
+                "SharpMinusRec":sharp-rec,"Move_From_Open":current-op,"Sharp_Move_From_Open":sharp-op,
+                "Rec_Move_From_Open":rec-op,"Book_Dispersion":float(margins.std(ddof=0)) if margins.notna().sum()>1 else 0.0,
+                "Book_Count":float(g["Bookmaker"].nunique()),"Sharp_Book_Count":float(g.loc[g["__sharp"],"Bookmaker"].nunique()),
+                "Rec_Book_Count":float(g.loc[g["__rec"],"Bookmaker"].nunique()),"Horizon_Hours":float(h),
+            }
+            for key in (3,7,10,14): out[f"Dist_to_Key_{key}"]=abs(abs(current)-float(key)) if np.isfinite(current) else np.nan
+            return pd.Series(out)
+        a=cur.groupby("V13_Matchup_Key",sort=False).apply(agg).reset_index()
+        a["V13_Pair_Key"]=_ncaaf_v13_pair_key(a["Season"],a["Home_Team_Norm"],a["Away_Team_Norm"])
+        a=a.merge(close,on="V13_Matchup_Key",how="left",validate="one_to_one")
+        frames.append(a)
+    out=pd.concat(frames,ignore_index=True) if frames else pd.DataFrame()
+    out=out.replace([np.inf,-np.inf],np.nan)
+    log_func(f"[V13-MARKET-HORIZONS] rows={len(out)} games={out['V13_Matchup_Key'].nunique() if not out.empty else 0} horizons={sorted(out['Horizon_Hours'].dropna().unique().tolist()) if not out.empty else []}")
+    return out, feature_cols
+
+
+def _ncaaf_v13_fit_market_intelligence(frame: pd.DataFrame, feature_cols, log_func=print):
+    if frame is None or frame.empty: return None
+    d=frame.copy(); seasons=sorted(int(x) for x in pd.to_numeric(d["Season"],errors="coerce").dropna().unique())
+    season_arr=pd.to_numeric(d["Season"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    y=pd.to_numeric(d["Sharp_Close_Margin"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    oof=np.full(len(d),np.nan); metrics=[]
+    for val in seasons[1:]:
+        tr=np.isfinite(season_arr)&(season_arr<float(val))&np.isfinite(y)
+        va=np.isfinite(season_arr)&(season_arr==float(val))&np.isfinite(y)
+        if int(tr.sum())<500 or int(va.sum())<75: continue
+        model=_ncaaf_v13_fit_regression_pair(d.loc[tr,feature_cols],y[tr])
+        pred=_ncaaf_v13_regression_predict(model,d.loc[va,feature_cols],0.75)
+        idx=np.where(va)[0]; oof[idx]=pred
+        cur=pd.to_numeric(d.loc[va,"Current_Margin"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+        rec={"season":int(val),"n":int(va.sum()),"rmse":_ncaaf_v13_rmse(y[idx],pred),"mae":_ncaaf_v13_mae(y[idx],pred),"no_move_rmse":_ncaaf_v13_rmse(y[idx],cur),"no_move_mae":_ncaaf_v13_mae(y[idx],cur)}
+        metrics.append(rec)
+        log_func(f"[V13-MARKET-SEASON] season={val} n={rec['n']} close_rmse={rec['rmse']:.3f} current_line={rec['no_move_rmse']:.3f} close_mae={rec['mae']:.3f} current_mae={rec['no_move_mae']:.3f}")
+    good=np.isfinite(oof)&np.isfinite(y)
+    if int(good.sum())<400:
+        log_func(f"[V13-MARKET] insufficient OOF rows={int(good.sum())}")
+        return None
+    final=_ncaaf_v13_fit_regression_pair(d[feature_cols],y)
+    d["V13_Pred_Close_OOF"]=oof
+    return {"feature_cols":feature_cols,"models":final,"linear_weight":0.75,"season_metrics":metrics,"oof_frame":d}
+
+
+def _ncaaf_v13_new_cover_model():
+    from sklearn.pipeline import Pipeline
+    from sklearn.impute import SimpleImputer
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.linear_model import LogisticRegression
+    return Pipeline([
+        ("imputer",SimpleImputer(strategy="median",add_indicator=True)),
+        ("scale",StandardScaler()),
+        ("logit",LogisticRegression(C=0.35,solver="lbfgs",max_iter=1000,random_state=1300)),
+    ])
+
+
+def _ncaaf_v13_cover_metrics(y,p):
+    from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
+    y=np.asarray(y,dtype=int); p=np.asarray(p,dtype=float); ok=np.isfinite(p)
+    if ok.sum()<20 or np.unique(y[ok]).size<2: return {"n":int(ok.sum()),"auc":np.nan,"logloss":np.nan,"brier":np.nan}
+    return {"n":int(ok.sum()),"auc":float(roc_auc_score(y[ok],p[ok])),"logloss":float(log_loss(y[ok],np.clip(p[ok],1e-6,1-1e-6),labels=[0,1])),"brier":float(brier_score_loss(y[ok],p[ok]))}
+
+
+def _ncaaf_v13_cluster_bootstrap_skill(frame, y, p, reps=300, seed=1300):
+    """95% CI for proper-score skill, resampling physical game+horizon clusters."""
+    yy=np.asarray(y,dtype=int); pp=np.asarray(p,dtype=float)
+    ok=np.isfinite(pp)
+    if int(ok.sum())<200:
+        return {"clusters":0,"ll_skill_ci95":[np.nan,np.nan],"brier_skill_ci95":[np.nan,np.nan]}
+    f=frame.loc[ok,["V13_Matchup_Key","Horizon_Hours"]].copy().reset_index(drop=True)
+    yy=yy[ok]; pp=np.clip(pp[ok],1e-6,1-1e-6)
+    f["__cluster"]=f["V13_Matchup_Key"].astype(str)+"|"+pd.to_numeric(f["Horizon_Hours"],errors="coerce").astype(str)
+    groups=[np.asarray(ix,dtype=int) for _,ix in f.groupby("__cluster",sort=False).groups.items()]
+    if len(groups)<80:
+        return {"clusters":len(groups),"ll_skill_ci95":[np.nan,np.nan],"brier_skill_ci95":[np.nan,np.nan]}
+    rng=np.random.default_rng(seed); ll_skill=[]; br_skill=[]
+    for _ in range(int(reps)):
+        picks=rng.integers(0,len(groups),size=len(groups))
+        ix=np.concatenate([groups[j] for j in picks])
+        yb=yy[ix]; pb=pp[ix]
+        model_ll=float(-np.mean(yb*np.log(pb)+(1-yb)*np.log(1-pb)))
+        base_ll=float(-np.mean(yb*np.log(0.5)+(1-yb)*np.log(0.5)))
+        model_br=float(np.mean((pb-yb)**2)); base_br=float(np.mean((0.5-yb)**2))
+        ll_skill.append(base_ll-model_ll); br_skill.append(base_br-model_br)
+    return {
+        "clusters":len(groups),
+        "ll_skill_ci95":[float(np.quantile(ll_skill,0.025)),float(np.quantile(ll_skill,0.975))],
+        "brier_skill_ci95":[float(np.quantile(br_skill,0.025)),float(np.quantile(br_skill,0.975))],
+    }
+
+
+def _ncaaf_v13_fit_cover_calibrator(fundamental: dict, market: dict, log_func=print):
+    if not isinstance(fundamental,dict) or not isinstance(market,dict): return None
+    f=fundamental["oof_frame"].copy(); m=market["oof_frame"].copy()
+    # Pair by season+teams first, then choose the nearest calendar date.  This is
+    # robust to late-night games whose UTC kickoff falls one date after a source
+    # that stores the local Saturday date, while still disambiguating rematches.
+    z=m.merge(f,on="V13_Pair_Key",how="inner",suffixes=("_m","_f"))
+    if z.empty: return None
+    _md=pd.to_datetime(z["Game_Start"],errors="coerce",utc=True)
+    _fd=pd.to_datetime(z["Game_Date"],errors="coerce",utc=True)
+    z["__v13_date_gap_days"]=( _md.dt.normalize()-_fd.dt.normalize() ).abs().dt.total_seconds().div(86400.0)
+    z=z.loc[pd.to_numeric(z["__v13_date_gap_days"],errors="coerce").le(1.0)].copy()
+    if z.empty: return None
+    z=z.sort_values("__v13_date_gap_days",kind="stable").drop_duplicates(["V13_Matchup_Key_m","Horizon_Hours"],keep="first")
+    # Preserve the market-side physical-game key for clustered validation.
+    z["V13_Matchup_Key"]=z["V13_Matchup_Key_m"]
+    # Fundamental anchor can be either listed home or away for neutral-site source rows.
+    home=z["Home_Team_Norm"].astype(str).str.lower().str.strip(); anchor=z["Team_Norm"].astype(str).str.lower().str.strip(); opp=z["Opponent_Norm"].astype(str).str.lower().str.strip()
+    orient=np.where(home.eq(anchor),1.0,np.where(home.eq(opp),-1.0,np.nan))
+    z["Fair_Home_Margin"]=orient*pd.to_numeric(z["V13_Fair_Margin_OOF"],errors="coerce")
+    z["Actual_Home_Margin"]=orient*pd.to_numeric(z["Actual_Margin"],errors="coerce")
+    z["Fair_Total"]=pd.to_numeric(z["V13_Fair_Total_OOF"],errors="coerce")
+    z["Fundamental_Edge"]=z["Fair_Home_Margin"]-pd.to_numeric(z["Current_Margin"],errors="coerce")
+    z["Market_Edge"]=pd.to_numeric(z["V13_Pred_Close_OOF"],errors="coerce")-pd.to_numeric(z["Current_Margin"],errors="coerce")
+    z["Edge_Agreement"]=(np.sign(z["Fundamental_Edge"])*np.sign(z["Market_Edge"])).astype(float)
+    z["Abs_Fundamental_Edge"]=z["Fundamental_Edge"].abs(); z["Abs_Market_Edge"]=z["Market_Edge"].abs()
+    z["Fundamental_vs_Close"]=z["Fair_Home_Margin"]-pd.to_numeric(z["V13_Pred_Close_OOF"],errors="coerce")
+    z["Cover_Margin"]=z["Actual_Home_Margin"]-pd.to_numeric(z["Current_Margin"],errors="coerce")
+    push=np.isclose(pd.to_numeric(z["Cover_Margin"],errors="coerce"),0.0,atol=1e-9)
+    # Second-level training begins only when BOTH upstream brains have genuine
+    # season-forward OOF predictions.  This avoids training a 2023 cover fold on
+    # 2022 rows where one or both upstream OOF signals cannot yet exist.
+    upstream_ok=(
+        pd.to_numeric(z["Fundamental_Edge"],errors="coerce").notna()
+        & pd.to_numeric(z["Market_Edge"],errors="coerce").notna()
+        & pd.to_numeric(z["Fair_Total"],errors="coerce").notna()
+    )
+    z=z.loc[~push & pd.to_numeric(z["Cover_Margin"],errors="coerce").notna() & upstream_ok].copy()
+    z["Cover"]=(z["Cover_Margin"]>0).astype(int)
+    cover_cols=["Fundamental_Edge","Market_Edge","Abs_Fundamental_Edge","Abs_Market_Edge","Edge_Agreement","Fundamental_vs_Close","Fair_Total","Current_Margin","Horizon_Hours","Dist_to_Key_3","Dist_to_Key_7","Dist_to_Key_10","Dist_to_Key_14"]
+    # Train both team-side perspectives.  Mirroring the same physical game enforces
+    # the intended symmetry: an edge toward the away side is the negative of the
+    # home edge, while total/horizon/key-distance context is unchanged.
+    mirror=z.copy()
+    for c in ("Fundamental_Edge","Market_Edge","Fundamental_vs_Close","Current_Margin"):
+        mirror[c]=-pd.to_numeric(mirror[c],errors="coerce")
+    mirror["Cover"]=1-z["Cover"].to_numpy(dtype=int)
+    z=pd.concat([z,mirror],ignore_index=True)
+    seasons=sorted(int(x) for x in pd.to_numeric(z["Season_m"],errors="coerce").dropna().unique())
+    season_arr=pd.to_numeric(z["Season_m"],errors="coerce").to_numpy(dtype=float,na_value=np.nan); y=z["Cover"].to_numpy(dtype=int)
+    oof=np.full(len(z),np.nan); folds=[]
+    for val in seasons[1:]:
+        tr=np.isfinite(season_arr)&(season_arr<float(val)); va=np.isfinite(season_arr)&(season_arr==float(val))
+        if int(tr.sum())<500 or int(va.sum())<75 or np.unique(y[tr]).size<2: continue
+        model=_ncaaf_v13_new_cover_model(); model.fit(z.loc[tr,cover_cols],y[tr]); p=model.predict_proba(z.loc[va,cover_cols])[:,1]
+        idx=np.where(va)[0]; oof[idx]=p; met=_ncaaf_v13_cover_metrics(y[idx],p); base=_ncaaf_v13_cover_metrics(y[idx],np.full(len(idx),0.5))
+        met.update({"season":int(val),"baseline_logloss":base["logloss"],"baseline_brier":base["brier"]}); folds.append(met)
+        log_func(f"[V13-COVER-SEASON] season={val} n={met['n']} auc={met['auc']:.4f} ll={met['logloss']:.6f} brier={met['brier']:.6f} vs50_ll={base['logloss']-met['logloss']:+.6f}")
+    valid=np.isfinite(oof); pooled=_ncaaf_v13_cover_metrics(y[valid],oof[valid]); base=_ncaaf_v13_cover_metrics(y[valid],np.full(int(valid.sum()),0.5))
+    if int(valid.sum())<500: return None
+    boot=_ncaaf_v13_cluster_bootstrap_skill(z,y,oof,reps=300,seed=1300)
+    positive_folds=sum(
+        1 for m in folds
+        if np.isfinite(m.get("logloss",np.nan)) and np.isfinite(m.get("brier",np.nan))
+        and (m.get("baseline_logloss",np.nan)-m.get("logloss",np.nan))>0
+        and (m.get("baseline_brier",np.nan)-m.get("brier",np.nan))>0
+    )
+    need_positive=max(2,int(np.ceil(max(1,len(folds))*2/3))) if len(folds)>=2 else 1
+    ll_low=float((boot.get("ll_skill_ci95") or [np.nan,np.nan])[0]); br_low=float((boot.get("brier_skill_ci95") or [np.nan,np.nan])[0])
+    research_gate=bool(
+        np.isfinite(ll_low) and np.isfinite(br_low) and ll_low>0 and br_low>0
+        and positive_folds>=need_positive
+    )
+    # Final stacker may use every row whose upstream inputs were OOF; it does not
+    # need to discard the earliest upstream-valid season merely because that season
+    # could not itself receive a second-level OOF prediction.
+    final=_ncaaf_v13_new_cover_model(); final.fit(z[cover_cols],y)
+    log_func(
+        f"[V13-COVER] oof_n={pooled['n']} auc={pooled['auc']:.4f} ll={pooled['logloss']:.6f} "
+        f"brier={pooled['brier']:.6f} ll_skill_vs_50={base['logloss']-pooled['logloss']:+.6f} "
+        f"brier_skill={base['brier']-pooled['brier']:+.6f} clusters={boot.get('clusters',0)} "
+        f"ll_ci95={boot.get('ll_skill_ci95')} brier_ci95={boot.get('brier_skill_ci95')} "
+        f"positive_seasons={positive_folds}/{len(folds)} research_gate={'PASS' if research_gate else 'CLOSED'}"
+    )
+    return {
+        "feature_cols":cover_cols,"model":final,"season_metrics":folds,"oof_metrics":pooled,
+        "baseline_metrics":base,"oof_rows":int(valid.sum()),"bootstrap":boot,
+        "positive_season_folds":int(positive_folds),"research_gate_pass":research_gate,
+    }
+
+
+def fit_ncaaf_v13_value_architecture(log_func=print):
+    """Fit NCAAF-only V13 shadow: football fair value -> predicted sharp close -> cover probability."""
+    if isinstance(_NCAAF_V13_CACHE.get("bundle"),dict): return _NCAAF_V13_CACHE["bundle"]
+    try:
+        bq,_=get_bq_clients()
+        raw=bq.query(f"SELECT * FROM `{NCAAF_STAT_RAW_TABLE}` WHERE Team_Score IS NOT NULL AND Opponent_Score IS NOT NULL").to_dataframe()
+    except Exception as e:
+        log_func(f"[V13] fundamental source unavailable: {e}"); return None
+    fundamental=_ncaaf_v13_build_fundamental(raw,log_func=log_func)
+    if not isinstance(fundamental,dict): return None
+    snaps=_ncaaf_v13_fetch_spread_snapshots(log_func=log_func)
+    horizon_frame,market_features=_ncaaf_v13_build_market_horizons(snaps,log_func=log_func)
+    market=_ncaaf_v13_fit_market_intelligence(horizon_frame,market_features,log_func=log_func)
+    cover=_ncaaf_v13_fit_cover_calibrator(fundamental,market,log_func=log_func) if isinstance(market,dict) else None
+    if isinstance(cover,dict):
+        status="READY_SHADOW_GATE_PASS" if bool(cover.get("research_gate_pass")) else "READY_SHADOW_GATE_CLOSED"
+    else:
+        status="FUNDAMENTAL_ONLY"
+    bundle={
+        "version":NCAAF_V13_VERSION,"status":status,"shadow_only":True,"sport":"NCAAF","market":"spreads",
+        "architecture":"independent_fundamental_margin_total__sharp_close_intelligence__proper_score_cover_calibrator",
+        "fundamental":{k:v for k,v in fundamental.items() if k!="oof_frame"},
+        "market_intelligence":({k:v for k,v in market.items() if k!="oof_frame"} if isinstance(market,dict) else None),
+        "cover_calibrator":cover,
+        "horizons_hours":list(NCAAF_V13_HORIZONS_HOURS),
+        "training_contract":"season_forward_upstream_oof__game_horizon_equal_unit__no_market_in_fundamental",
+        "situational_layer":{
+            "Pathi":"V12_PRODUCTION_ONLY__V13_1_INCREMENTAL_TEST_PENDING",
+            "BigAl":"V12_PRODUCTION_ONLY__V13_1_INCREMENTAL_TEST_PENDING",
+            "reason":"establish_clean_v13_fundamental_plus_market_baseline_before_residual_admission",
+        },
+    }
+    _NCAAF_V13_CACHE["bundle"]=bundle
+    log_func(f"[V13-CONTRACT] version={NCAAF_V13_VERSION} status={status} shadow_only=TRUE horizons={list(NCAAF_V13_HORIZONS_HOURS)} fundamental_market_weight=0.000")
+    log_func("[V13-SITUATIONAL] Pathi=V12_PRODUCTION_ONLY BigAl=V12_PRODUCTION_ONLY V13_residual_admission=DEFERRED_UNTIL_BASELINE_VALIDATED")
+    return bundle
+
+
 def _ncaaf_stat_fit_models_for_rows(df, margin_feature_cols, total_feature_cols, mask):
     Xm=df.loc[mask,margin_feature_cols]
     Xt=df.loc[mask,total_feature_cols]
@@ -15853,9 +16381,14 @@ def train_sharp_model_from_bq(
     # microstructure and never changes the modern row grain.
     historical_core_expert = None
     ncaaf_statistical_brain = None
+    ncaaf_v13_value_architecture = None
     if str(sport).upper().strip() == "NCAAF":
         historical_core_expert = fit_historical_ncaaf_core_expert(market, log_func=log_func)
         ncaaf_statistical_brain = fit_ncaaf_statistical_brain(log_func=log_func)
+        # V13 is intentionally NCAAF-spreads-only until its season-forward shadow
+        # proves superior. It never alters the V12 production probability here.
+        if str(market).lower().strip() == "spreads":
+            ncaaf_v13_value_architecture = fit_ncaaf_v13_value_architecture(log_func=log_func)
     
     # pull completed scores from game_scores_final
     df_results = bq_client.query("""
@@ -24968,6 +25501,18 @@ def train_sharp_model_from_bq(
                         "total_rejected_count": len((((ncaaf_statistical_brain or {}).get("feature_qualification") or {}).get("total") or {}).get("rejected", [])),
                     }) if isinstance(ncaaf_statistical_brain, dict) else {},
                 }),
+                "ncaaf_v13_shadow": ({
+                    "enabled": bool(ncaaf_v13_value_architecture),
+                    "version": (ncaaf_v13_value_architecture or {}).get("version") if isinstance(ncaaf_v13_value_architecture, dict) else None,
+                    "status": (ncaaf_v13_value_architecture or {}).get("status") if isinstance(ncaaf_v13_value_architecture, dict) else None,
+                    "shadow_only": True,
+                    "training_contract": (ncaaf_v13_value_architecture or {}).get("training_contract") if isinstance(ncaaf_v13_value_architecture, dict) else None,
+                    "fundamental_season_metrics": (((ncaaf_v13_value_architecture or {}).get("fundamental") or {}).get("season_metrics", [])) if isinstance(ncaaf_v13_value_architecture, dict) else [],
+                    "market_season_metrics": (((ncaaf_v13_value_architecture or {}).get("market_intelligence") or {}).get("season_metrics", [])) if isinstance(ncaaf_v13_value_architecture, dict) else [],
+                    "cover_oof_metrics": (((ncaaf_v13_value_architecture or {}).get("cover_calibrator") or {}).get("oof_metrics", {})) if isinstance(ncaaf_v13_value_architecture, dict) else {},
+                    "cover_bootstrap": (((ncaaf_v13_value_architecture or {}).get("cover_calibrator") or {}).get("bootstrap", {})) if isinstance(ncaaf_v13_value_architecture, dict) else {},
+                    "research_gate_pass": bool((((ncaaf_v13_value_architecture or {}).get("cover_calibrator") or {}).get("research_gate_pass", False))) if isinstance(ncaaf_v13_value_architecture, dict) else False,
+                }),
                 "ncaaf_stat_protected_route": dict(_stat_route_cfg),
                 "system_memory_protected_route": dict(_system_memory_route_cfg),
                 "outcome_market_guard": dict(OUTCOME_MARKET_GUARD),
@@ -25110,6 +25655,7 @@ def train_sharp_model_from_bq(
             "book_reliability_map": book_reliability_map,
             "historical_core_expert": historical_core_expert,
             "ncaaf_statistical_brain": ncaaf_statistical_brain,
+            "ncaaf_v13_value_architecture": ncaaf_v13_value_architecture,
         
             "feature_cols":         list(feature_cols_outcome),
             "feature_cols_outcome": list(feature_cols_outcome),
@@ -25129,6 +25675,9 @@ def train_sharp_model_from_bq(
                 "historical_core_diagnostic_available": bool(historical_core_expert),
                 "ncaaf_statistical_brain_enabled": bool(ncaaf_statistical_brain),
                 "ncaaf_statistical_brain_version": NCAAF_STAT_FEATURE_VERSION,
+                "ncaaf_v13_shadow_enabled": bool(ncaaf_v13_value_architecture),
+                "ncaaf_v13_version": (ncaaf_v13_value_architecture or {}).get("version") if isinstance(ncaaf_v13_value_architecture, dict) else None,
+                "ncaaf_v13_status": (ncaaf_v13_value_architecture or {}).get("status") if isinstance(ncaaf_v13_value_architecture, dict) else None,
                 "ncaaf_stat_protected_route": dict(_stat_route_cfg),
                 "system_memory_protected_route": dict(_system_memory_route_cfg),
                 "outcome_market_guard": dict(OUTCOME_MARKET_GUARD),
@@ -25193,6 +25742,7 @@ def train_sharp_model_from_bq(
                 "flip_flag":     bool(flip_flag),
                 "historical_core_expert": historical_core_expert,
                 "ncaaf_statistical_brain": ncaaf_statistical_brain,
+                "ncaaf_v13_value_architecture": ncaaf_v13_value_architecture,
         
                 "model_situation_cls": model_situation_cls,
                 "model_value_cls":     model_value_cls,
@@ -25203,7 +25753,10 @@ def train_sharp_model_from_bq(
         
                 "multihead_config": {
                     "schema_version": 5,
-                    "model_family": "three_head_plus_meta_v12_2_core_anchored_specialists",
+                    "model_family": "three_head_plus_meta_v12_2_core_anchored_specialists__v13_ncaaf_shadow",
+                    "ncaaf_v13_shadow_enabled": bool(ncaaf_v13_value_architecture),
+                    "ncaaf_v13_version": (ncaaf_v13_value_architecture or {}).get("version") if isinstance(ncaaf_v13_value_architecture, dict) else None,
+                    "ncaaf_v13_status": (ncaaf_v13_value_architecture or {}).get("status") if isinstance(ncaaf_v13_value_architecture, dict) else None,
                     "ncaaf_stat_protected_route": dict(_stat_route_cfg),
                     "system_memory_protected_route": dict(_system_memory_route_cfg),
                     "outcome_market_guard": dict(OUTCOME_MARKET_GUARD),
