@@ -404,7 +404,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-07-v12.0.6-sport-specific-system-memory"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-08-v12.0.7-context-pathi-memory-protected-stat-route"
 HISTORY_DIAGNOSTIC_VERSION = "2026-09-07-v12.0.5-exact-history-ablation"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
@@ -13399,6 +13399,8 @@ def add_market_structure_features_training(
 #   * historical information is Outcome/Core only; specialist heads remain modern-only
 # ============================================================================
 HISTORICAL_NCAAF_CORE_VIEW = "sharplogger.sharp_data.ncaaf_historical_core_training_vw"
+HISTORICAL_NCAAF_CONTEXT_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_context"
+_HC_PATHI_CONTEXT_CACHE = {}
 HISTORICAL_CORE_FEATURE_NAME = "Historical_Core_Prob"
 HISTORICAL_CORE_RAW_NAME = "Historical_Core_Raw_Prob"
 HISTORICAL_CORE_EDGE_NAME = "Historical_Core_Edge"
@@ -13892,73 +13894,229 @@ def _hc_fit_one_horizon(hh: pd.DataFrame, y: np.ndarray, market: str, label: str
     return expert
 
 
-def _hc_build_system_history_stats(h: pd.DataFrame, log_func=print) -> dict:
-    """Sport-specific historical system reliability for NCAAF.
+def _hc_context_join_keys(left: pd.DataFrame, right: pd.DataFrame):
+    """Choose the strongest leakage-safe row key shared by the historical view and context table."""
+    candidates = [
+        ["Season", "Source_Game_ID", "Team_Norm"],
+        ["Season", "Source_Game_ID", "Team"],
+        ["Game_Key", "Team_Norm"],
+        ["Game_Key", "Team"],
+        ["Season", "Game_Date", "Team_Norm", "Opponent_Norm"],
+        ["Season", "Game_Date", "Team", "Opponent"],
+    ]
+    for keys in candidates:
+        if all(k in left.columns and k in right.columns for k in keys):
+            return keys
+    return []
 
-    V12.0.6 fixes the old cross-sport inventory bug: MLB Pathi M1-M9 rules are
-    excluded from NCAAF. Football Pathi key/role signals plus NCAAF Big Al exact,
-    enhancer and tightener signals are audited with READY/FIRED/GRADED counts.
-    Past outcomes inform trust only; they never redefine a rule.
+
+def _hc_normalize_context_keys(df: pd.DataFrame, keys) -> pd.DataFrame:
+    out = df.copy()
+    for k in keys:
+        if k == "Season":
+            out[k] = pd.to_numeric(out[k], errors="coerce").astype("Int64")
+        elif k == "Game_Date":
+            out[k] = pd.to_datetime(out[k], errors="coerce", utc=True).dt.normalize()
+        else:
+            out[k] = out[k].astype("string").str.lower().str.strip()
+    return out
+
+
+def _hc_fetch_pathi_context(log_func=print) -> pd.DataFrame:
+    """Fetch the authoritative NCAAF historical context once per training process."""
+    hit = _HC_PATHI_CONTEXT_CACHE.get("frame")
+    if isinstance(hit, pd.DataFrame):
+        return hit.copy()
+    try:
+        ctx = bq_client.query(f"SELECT * FROM `{HISTORICAL_NCAAF_CONTEXT_TABLE}`").to_dataframe()
+    except Exception as e:
+        log_func(f"[PATHI-HISTORY-BRIDGE] context fetch failed: {e}")
+        return pd.DataFrame()
+    if ctx is None:
+        ctx = pd.DataFrame()
+    _HC_PATHI_CONTEXT_CACHE["frame"] = ctx.copy()
+    return ctx
+
+
+def _hc_restore_authoritative_pathi_flags(h: pd.DataFrame, log_func=print):
+    """Return historical rows with Pathi football flags sourced from the validated context table.
+
+    Context values have first priority.  Existing precomputed flags from the historical
+    training view are second priority.  Only flags unavailable from either source are
+    reconstructed from the historical open/close fields.  This prevents the live-market
+    feature builder from overwriting valid historical Pathi states with zeros.
+    """
+    base = h.copy()
+    inventory = list(dict.fromkeys(list(PATHI_KEY_EVENT_COLS) + list(PATHI_ROLE_CONTEXT_COLS)))
+    original = {c: pd.to_numeric(base[c], errors="coerce").copy() for c in inventory if c in base.columns}
+
+    # Fallback reconstruction is deliberately isolated from the authoritative columns.
+    derived = base.copy()
+    derived["Sport"] = "NCAAF"
+    derived["Market"] = "spreads"
+    if "Consensus_Close_Spread_Audit" in derived.columns:
+        derived["Spread_Value"] = pd.to_numeric(derived["Consensus_Close_Spread_Audit"], errors="coerce")
+    elif "Closing_Spread_For_Team" in derived.columns:
+        derived["Spread_Value"] = pd.to_numeric(derived["Closing_Spread_For_Team"], errors="coerce")
+    if "Opening_Spread" not in derived.columns and "Consensus_Open_Spread" in derived.columns:
+        derived["Opening_Spread"] = pd.to_numeric(derived["Consensus_Open_Spread"], errors="coerce")
+    try:
+        derived = add_pathi_football_key_features(derived)
+    except Exception as e:
+        log_func(f"[PATHI-HISTORY-BRIDGE] fallback derivation unavailable: {e}")
+
+    ctx = _hc_fetch_pathi_context(log_func=log_func)
+    authoritative = [c for c in inventory if c in ctx.columns] if not ctx.empty else []
+    matched_rows = 0
+    source_counts = {}
+
+    if not ctx.empty and authoritative:
+        keys = _hc_context_join_keys(base, ctx)
+        if not keys:
+            log_func("[PATHI-HISTORY-BRIDGE] FAIL no shared context join key; Pathi historical memory disabled")
+            return base, False, {"reason": "no_shared_join_key"}
+        l = _hc_normalize_context_keys(base, keys)
+        r = _hc_normalize_context_keys(ctx[keys + authoritative + (["ATS_Win"] if "ATS_Win" in ctx.columns else [])], keys)
+        # Context is one row per historical team-side.  A duplicate here is a data-contract problem.
+        dup = r.duplicated(keys, keep=False)
+        if bool(dup.any()):
+            log_func(f"[PATHI-HISTORY-BRIDGE] FAIL duplicate context keys={keys} rows={int(dup.sum())}; Pathi memory disabled")
+            return base, False, {"reason": "duplicate_context_keys", "keys": keys}
+        rename = {c: f"__ctx_{c}" for c in authoritative}
+        if "ATS_Win" in r.columns:
+            rename["ATS_Win"] = "__ctx_ATS_Win"
+        r = r.rename(columns=rename)
+        merged = l.merge(r, on=keys, how="left", validate="many_to_one", sort=False)
+        ctx_probe = [f"__ctx_{c}" for c in authoritative]
+        matched_rows = int(merged[ctx_probe].notna().any(axis=1).sum()) if ctx_probe else 0
+        # restore original row ordering/index contract
+        merged.index = base.index
+        base = merged
+        for c in authoritative:
+            cv = pd.to_numeric(base.get(f"__ctx_{c}"), errors="coerce")
+            source_counts[c] = int(cv.fillna(0).eq(1).sum())
+            base[c] = cv
+        if "__ctx_ATS_Win" in base.columns and "ATS_Win" not in base.columns:
+            base["ATS_Win"] = pd.to_numeric(base["__ctx_ATS_Win"], errors="coerce")
+
+    # Fill only missing/non-authoritative Pathi columns; never overwrite context values.
+    for c in inventory:
+        if c in authoritative:
+            continue
+        if c in original:
+            base[c] = original[c]
+        elif c in derived.columns:
+            base[c] = pd.to_numeric(derived[c], errors="coerce").reindex(base.index)
+
+    # Strip join helpers.
+    base.drop(columns=[c for c in base.columns if str(c).startswith("__ctx_")], inplace=True, errors="ignore")
+
+    final_counts = {c: int(pd.to_numeric(base.get(c), errors="coerce").fillna(0).eq(1).sum()) for c in inventory if c in base.columns}
+    movement_source = {c: source_counts.get(c) for c in PATHI_KEY_EVENT_COLS if c in source_counts}
+    movement_final = {c: final_counts.get(c, 0) for c in PATHI_KEY_EVENT_COLS if c in final_counts}
+
+    # Fail closed if the authoritative context says a known movement exists but the
+    # joined historical frame loses it, or if a large context table has all-zero key events.
+    parity_bad = [c for c, n in movement_source.items() if n is not None and movement_final.get(c, -1) != n]
+    source_total = sum(int(v or 0) for v in movement_source.values())
+    if parity_bad or (len(ctx) >= 1000 and movement_source and source_total == 0):
+        log_func(
+            f"[PATHI-HISTORY-BRIDGE] FAIL parity_bad={parity_bad} source_total={source_total} "
+            f"matched={matched_rows}/{len(base)}; Pathi historical memory disabled"
+        )
+        return base, False, {"reason": "parity_failure", "source_counts": movement_source, "final_counts": movement_final}
+
+    # Coverage must be substantial when the context table is present.
+    if not ctx.empty and authoritative and matched_rows < int(0.90 * len(base)):
+        log_func(f"[PATHI-HISTORY-BRIDGE] FAIL low match coverage={matched_rows}/{len(base)}; Pathi memory disabled")
+        return base, False, {"reason": "low_match_coverage", "matched": matched_rows, "rows": len(base)}
+
+    log_func(
+        f"[PATHI-HISTORY-BRIDGE] PASS source=context matched={matched_rows}/{len(base)} "
+        f"authoritative_flags={len(authoritative)} movement_counts={movement_final}"
+    )
+    if "Season" in base.columns:
+        _season_num = pd.to_numeric(base["Season"], errors="coerce")
+        for _yr in sorted(int(x) for x in _season_num.dropna().unique()):
+            _m = _season_num.eq(_yr)
+            _parts = []
+            for _c in PATHI_KEY_EVENT_COLS:
+                if _c in base.columns:
+                    _parts.append(f"{_c.replace('Pathi_FB_','')}={int(pd.to_numeric(base.loc[_m,_c],errors='coerce').fillna(0).eq(1).sum())}")
+            log_func(f"[PATHI-HISTORY-BRIDGE-SEASON] season={_yr} rows={int(_m.sum())} " + " ".join(_parts))
+    return base, True, {"matched": matched_rows, "authoritative_flags": authoritative, "counts": final_counts}
+
+
+def _hc_build_system_history_stats(h: pd.DataFrame, log_func=print) -> dict:
+    """Sport-specific historical reliability for NCAAF Pathi and Big Al.
+
+    V12.0.7 uses ncaaf_historical_game_side_context as the authoritative Pathi
+    history source.  Big Al's validated V12.0.6 logic is intentionally unchanged.
     """
     stats = {}
     try:
-        s = h.copy()
-        s["Sport"] = "NCAAF"
-        if "Consensus_Close_Spread_Audit" in s.columns:
-            s["Spread_Value"] = pd.to_numeric(s["Consensus_Close_Spread_Audit"], errors="coerce")
-
-        # Reconstruct both the named rule engine and the football-specific Pathi
-        # market/key-number layer from the historical rows.
-        s = add_pathi_bigal_rule_flags(s)
-        s = add_pathi_football_key_features(s)
-        target = pd.to_numeric(s.get("ATS_Win"), errors="coerce")
-
-        # NCAAF inventory only.  Do not mix MLB Pathi systems into football memory.
-        pathi_inventory = list(dict.fromkeys(list(PATHI_KEY_EVENT_COLS) + list(PATHI_ROLE_CONTEXT_COLS)))
+        # -----------------------------
+        # Big Al: preserve V12.0.6 path
+        # -----------------------------
+        s_bigal = h.copy()
+        s_bigal["Sport"] = "NCAAF"
+        if "Consensus_Close_Spread_Audit" in s_bigal.columns:
+            s_bigal["Spread_Value"] = pd.to_numeric(s_bigal["Consensus_Close_Spread_Audit"], errors="coerce")
+        s_bigal = add_pathi_bigal_rule_flags(s_bigal)
+        target_bigal = pd.to_numeric(s_bigal.get("ATS_Win"), errors="coerce")
         bigal_inventory = [c for c in BIGAL_EXACT_SIGNAL_COLS if _system_feature_valid_for_sport(c, "NCAAF")]
         bigal_inventory += [c for c in BIGAL_ENHANCER_COLS if _system_feature_valid_for_sport(c, "NCAAF")]
         bigal_inventory += [c for c in BIGAL_TIGHTENER_PARENT if _system_feature_valid_for_sport(c, "NCAAF")]
-        inventory = list(dict.fromkeys(pathi_inventory + bigal_inventory))
+        bigal_inventory = list(dict.fromkeys(bigal_inventory))
 
         report_parts = []
-        for name in inventory:
-            if name not in s.columns or not _system_feature_valid_for_sport(name, "NCAAF"):
+        for name in bigal_inventory:
+            if name not in s_bigal.columns:
                 continue
-            sig = pd.to_numeric(s[name], errors="coerce")
+            sig = pd.to_numeric(s_bigal[name], errors="coerce")
             ready_name = name + "_DataReady"
-            if ready_name in s.columns:
-                ready_mask = pd.to_numeric(s[ready_name], errors="coerce").fillna(0).eq(1)
-            else:
-                # Football key/role flags are deterministic when their engineered
-                # value is non-null; no separate DataReady flag is required.
-                ready_mask = sig.notna()
+            ready_mask = (pd.to_numeric(s_bigal[ready_name], errors="coerce").fillna(0).eq(1)
+                          if ready_name in s_bigal.columns else sig.notna())
             fire = ready_mask & sig.fillna(0).eq(1)
-            graded = fire & target.notna()
-            ready_n = int(ready_mask.sum())
-            fired_n = int(fire.sum())
-            n = int(graded.sum())
-            wins = float(target.loc[graded].sum()) if n else 0.0
+            graded = fire & target_bigal.notna()
+            ready_n, fired_n, n = int(ready_mask.sum()), int(fire.sum()), int(graded.sum())
+            wins = float(target_bigal.loc[graded].sum()) if n else 0.0
             raw_ats = float(wins / n) if n else float("nan")
-            # Beta(15,15): strong shrinkage toward 50% for sparse samples.
             posterior = float((wins + 15.0) / (n + 30.0))
             trust = float((n / (n + 50.0)) * np.clip(abs(posterior - 0.5) / 0.08, 0.0, 1.0)) if n else 0.0
-            family = "Pathi" if name.startswith("Pathi_") else "BigAl"
-            stats[name] = {
-                "family": family,
-                "ready": ready_n,
-                "fired": fired_n,
-                "sample": n,
-                "graded": n,
-                "wins": wins,
-                "raw_ats": raw_ats,
-                "posterior_prob": posterior,
-                "trust": trust,
-            }
+            stats[name] = {"family":"BigAl","ready":ready_n,"fired":fired_n,"sample":n,"graded":n,
+                           "wins":wins,"raw_ats":raw_ats,"posterior_prob":posterior,"trust":trust}
             ats_txt = f"{raw_ats:.3f}" if np.isfinite(raw_ats) else "NA"
-            report_parts.append(
-                f"{name}:ready={ready_n} fired={fired_n} graded={n} ats={ats_txt} "
-                f"post={posterior:.3f} trust={trust:.3f}"
-            )
+            report_parts.append(f"{name}:ready={ready_n} fired={fired_n} graded={n} ats={ats_txt} post={posterior:.3f} trust={trust:.3f}")
+
+        # ------------------------------------------------------
+        # Pathi: authoritative historical context-table bridge
+        # ------------------------------------------------------
+        s_pathi, pathi_ok, bridge = _hc_restore_authoritative_pathi_flags(h, log_func=log_func)
+        if pathi_ok:
+            target_pathi = pd.to_numeric(s_pathi.get("ATS_Win"), errors="coerce")
+            pathi_inventory = list(dict.fromkeys(list(PATHI_KEY_EVENT_COLS) + list(PATHI_ROLE_CONTEXT_COLS)))
+            for name in pathi_inventory:
+                if name not in s_pathi.columns:
+                    continue
+                sig = pd.to_numeric(s_pathi[name], errors="coerce")
+                ready_name = name + "_DataReady"
+                ready_mask = (pd.to_numeric(s_pathi[ready_name], errors="coerce").fillna(0).eq(1)
+                              if ready_name in s_pathi.columns else sig.notna())
+                fire = ready_mask & sig.fillna(0).eq(1)
+                graded = fire & target_pathi.notna()
+                ready_n, fired_n, n = int(ready_mask.sum()), int(fire.sum()), int(graded.sum())
+                wins = float(target_pathi.loc[graded].sum()) if n else 0.0
+                raw_ats = float(wins / n) if n else float("nan")
+                posterior = float((wins + 15.0) / (n + 30.0))
+                trust = float((n / (n + 50.0)) * np.clip(abs(posterior - 0.5) / 0.08, 0.0, 1.0)) if n else 0.0
+                stats[name] = {"family":"Pathi","ready":ready_n,"fired":fired_n,"sample":n,"graded":n,
+                               "wins":wins,"raw_ats":raw_ats,"posterior_prob":posterior,"trust":trust}
+                ats_txt = f"{raw_ats:.3f}" if np.isfinite(raw_ats) else "NA"
+                report_parts.append(f"{name}:ready={ready_n} fired={fired_n} graded={n} ats={ats_txt} post={posterior:.3f} trust={trust:.3f}")
+        else:
+            log_func(f"[HISTORICAL-SYSTEM-MEMORY:NCAAF] Pathi disabled fail-closed bridge={bridge}")
+
         if report_parts:
             log_func("[HISTORICAL-SYSTEM-MEMORY:NCAAF] " + " | ".join(report_parts))
     except Exception as e:
@@ -14031,6 +14189,49 @@ NCAAF_STAT_MODEL_FEATURES = (
     "NCAAF_Stat_Expected_Margin", "NCAAF_Stat_Expected_Total", "NCAAF_Stat_Expected_Team_Points",
     "NCAAF_Stat_Expected_Opp_Points", "NCAAF_Stat_Uncertainty",
 )
+
+# V12.0.7 protected Statistical Brain route.  The structural expert is independently
+# shadow-validated, so its trusted residual correction is applied AFTER AutoFS/meta.
+# This prevents AutoFS from silently deleting the entire expert while avoiding any
+# attempt to train the main head on in-source-window final-refit predictions.
+NCAAF_STAT_PROTECTED_ROUTE_VERSION = "2026-09-08-v12.0.7-protected-residual-route"
+NCAAF_STAT_PROTECTED_EDGE_WEIGHT = 0.50
+NCAAF_STAT_PROTECTED_MAX_ABS_CORRECTION = 0.020
+NCAAF_STAT_PROTECTED_MIN_TRUST = 0.030
+
+def _apply_ncaaf_stat_protected_route(base_prob, rows: pd.DataFrame, market: str, *, log_func=None, config=None):
+    p = np.asarray(base_prob, dtype=np.float64).reshape(-1)
+    if rows is None or len(rows) != len(p) or _sys_norm_market(market) != "spreads":
+        return p
+    cfg = config or {}
+    enabled = bool(cfg.get("enabled", True))
+    if not enabled:
+        return p
+    weight = float(cfg.get("edge_weight", NCAAF_STAT_PROTECTED_EDGE_WEIGHT))
+    cap = float(cfg.get("max_abs_correction", NCAAF_STAT_PROTECTED_MAX_ABS_CORRECTION))
+    min_trust = float(cfg.get("min_row_trust", NCAAF_STAT_PROTECTED_MIN_TRUST))
+    def _rcol(name, default):
+        src = rows[name] if name in rows.columns else pd.Series(default, index=rows.index)
+        return pd.to_numeric(src, errors="coerce")
+    active = _rcol("NCAAF_Stat_Active", 0).fillna(0).eq(1).to_numpy(dtype=bool)
+    trust = _rcol("NCAAF_Stat_Trust", 0).fillna(0).to_numpy(dtype=float)
+    sp = _rcol("NCAAF_Stat_Prob", np.nan).to_numpy(dtype=float)
+    sb = _rcol("NCAAF_Stat_Market_Baseline_Prob", 0.5).fillna(0.5).to_numpy(dtype=float)
+    eligible = active & np.isfinite(sp) & np.isfinite(sb) & np.isfinite(trust) & (trust >= min_trust)
+    if not eligible.any():
+        if log_func is not None:
+            log_func(f"[NCAAF-STAT-PROTECTED] active=0/{len(p)} route={NCAAF_STAT_PROTECTED_ROUTE_VERSION}")
+        return p
+    correction = np.zeros(len(p), dtype=np.float64)
+    correction[eligible] = np.clip(weight * (sp[eligible] - sb[eligible]), -cap, cap)
+    out = np.clip(p + correction, 0.01, 0.99)
+    if log_func is not None:
+        log_func(
+            f"[NCAAF-STAT-PROTECTED] active={int(eligible.sum())}/{len(p)} "
+            f"edge_weight={weight:.2f} mean_abs_corr={float(np.mean(np.abs(correction[eligible]))):.5f} "
+            f"max_abs_corr={float(np.max(np.abs(correction[eligible]))):.5f} route={NCAAF_STAT_PROTECTED_ROUTE_VERSION}"
+        )
+    return out
 
 _NCAAF_STAT_METRICS = (
     "Off_YPP", "Off_Pass_YPA", "Off_Rush_YPA", "Off_Completion_Rate",
@@ -22611,6 +22812,28 @@ def train_sharp_model_from_bq(
             CLIP, 1.0 - CLIP,
         ).astype(np.float64)
 
+        # V12.0.7: protected NCAAF Statistical Brain residual route.  This is
+        # outside AutoFS by design; the expert already passed an independent
+        # latest-season shadow test and its row probability is itself trust-shrunk.
+        _stat_route_cfg = {
+            "enabled": bool(str(sport).upper().strip() == "NCAAF" and _sys_norm_market(market) == "spreads"),
+            "version": NCAAF_STAT_PROTECTED_ROUTE_VERSION,
+            "edge_weight": NCAAF_STAT_PROTECTED_EDGE_WEIGHT,
+            "max_abs_correction": NCAAF_STAT_PROTECTED_MAX_ABS_CORRECTION,
+            "min_row_trust": NCAAF_STAT_PROTECTED_MIN_TRUST,
+            "mode": "trusted_stat_edge_residual_to_market_baseline",
+        }
+        if _stat_route_cfg["enabled"]:
+            final_bet_score_train = _apply_ncaaf_stat_protected_route(
+                final_bet_score_train, X_df_train_outcome, market, config=_stat_route_cfg
+            )
+            final_bet_score_hold = _apply_ncaaf_stat_protected_route(
+                final_bet_score_hold, X_df_hold_outcome, market, config=_stat_route_cfg
+            )
+            final_bet_score_full = _apply_ncaaf_stat_protected_route(
+                final_bet_score_full, X_df_full_outcome_autofs, market, log_func=print, config=_stat_route_cfg
+            )
+
         st.write({
             "meta_calibrator_used": str(meta_cal_name),
             "meta_calibration_source": "second_level_oof",
@@ -23568,6 +23791,7 @@ def train_sharp_model_from_bq(
                     "trust_by_market": (ncaaf_statistical_brain or {}).get("trust_by_market", {}) if isinstance(ncaaf_statistical_brain, dict) else {},
                     "shadow_metrics": (ncaaf_statistical_brain or {}).get("shadow_metrics", {}) if isinstance(ncaaf_statistical_brain, dict) else {},
                 }),
+                "ncaaf_stat_protected_route": dict(_stat_route_cfg),
                 "historical_core_expert": ({
                     "enabled": bool(historical_core_expert),
                     "market": (historical_core_expert or {}).get("market") if isinstance(historical_core_expert, dict) else None,
@@ -23719,6 +23943,7 @@ def train_sharp_model_from_bq(
                 "historical_core_expert_enabled": bool(historical_core_expert),
                 "ncaaf_statistical_brain_enabled": bool(ncaaf_statistical_brain),
                 "ncaaf_statistical_brain_version": NCAAF_STAT_FEATURE_VERSION,
+                "ncaaf_stat_protected_route": dict(_stat_route_cfg),
                 "historical_brain_version": "v11.5.10-residual-walkforward-calibrated",
                 "outcome_head": "model_logloss/model_auc + iso_blend",
                 "situation_head": "model_situation_cls",
@@ -23788,6 +24013,7 @@ def train_sharp_model_from_bq(
                 "multihead_config": {
                     "schema_version": 3,
                     "model_family": "three_head_plus_meta_v12_ncaaf_statistical_brain",
+                    "ncaaf_stat_protected_route": dict(_stat_route_cfg),
                     "meta_features": list(meta_train_df.columns),
                     "meta_calibrator": str(meta_cal_name),
                     "meta_oof_auc_for_weight": (None if not np.isfinite(META_OOF_AUC) else float(META_OOF_AUC)),
