@@ -10228,6 +10228,10 @@ def apply_blended_sharp_score(
                     'V13_BreakEven_Prob': np.nan, 'V13_Probability_Edge': np.nan,
                     'V13_EV_Per_Dollar': np.nan, 'V13_Horizon_Hours': np.nan,
                     'V13_State_Freshness': 0.0, 'V13_Current_Season_Games': 0.0,
+                    'V13_Result_Disagreement_Bucket': 'UNAVAILABLE', 'V13_Result_Profile_N': 0.0,
+                    'V13_Result_Historical_Closer_Rate': np.nan, 'V13_Result_Historical_Direction_Accuracy': np.nan,
+                    'V13_Result_Historical_Avg_Error_Improvement': np.nan, 'V13_Result_Historical_Closer_CI_Low': np.nan,
+                    'V13_Result_Historical_Closer_CI_High': np.nan, 'V13_Result_Profile_Used_In_EV': 0,
                     'V13_Status': 'UNAVAILABLE', 'V13_Version': NCAAF_V13_VERSION,
                 }.items():
                     if _c not in df_canon.columns:
@@ -10275,7 +10279,7 @@ def apply_blended_sharp_score(
                     'V13_Active','V13_Fair_Margin','V13_Raw_Fair_Margin','V13_Tradable_Fair_Margin','V13_Fair_Total','V13_Raw_Fair_Total','V13_Tradable_Fair_Total','V13_Raw_Fundamental_Edge_Points','V13_Fundamental_Edge_Points','V13_Fundamental_Edge_Beta',
                     'V13_Pred_Close_Margin','V13_Market_Edge_Points','V13_Cover_Prob',
                     'V13_BreakEven_Prob','V13_Probability_Edge','V13_EV_Per_Dollar',
-                    'V13_Horizon_Hours','V13_State_Freshness','V13_Current_Season_Games','V13_Status','V13_Version'
+                    'V13_Horizon_Hours','V13_State_Freshness','V13_Current_Season_Games','V13_Result_Disagreement_Bucket','V13_Result_Profile_N','V13_Result_Historical_Closer_Rate','V13_Result_Historical_Direction_Accuracy','V13_Result_Historical_Avg_Error_Improvement','V13_Result_Historical_Closer_CI_Low','V13_Result_Historical_Closer_CI_High','V13_Result_Profile_Used_In_EV','V13_Status','V13_Version'
                 ] if c in df_canon.columns]
             df.loc[df_canon.index, cols_to_write] = df_canon[cols_to_write].values
         
@@ -10326,7 +10330,7 @@ def apply_blended_sharp_score(
                 _canon_pred_cols += [c for c in [
                     'V13_Active','V13_Fair_Margin','V13_Raw_Fair_Margin','V13_Tradable_Fair_Margin','V13_Fair_Total','V13_Raw_Fair_Total','V13_Tradable_Fair_Total','V13_Pred_Close_Margin',
                     'V13_Cover_Prob','V13_Fundamental_Edge_Beta','V13_Horizon_Hours','V13_State_Freshness',
-                    'V13_Current_Season_Games','V13_Status','V13_Version'
+                    'V13_Current_Season_Games','V13_Result_Disagreement_Bucket','V13_Result_Profile_N','V13_Result_Historical_Closer_Rate','V13_Result_Historical_Direction_Accuracy','V13_Result_Historical_Avg_Error_Improvement','V13_Result_Historical_Closer_CI_Low','V13_Result_Historical_Closer_CI_High','V13_Result_Profile_Used_In_EV','V13_Status','V13_Version'
                 ] if c in df_canon.columns]
             _rename = {
                 'Model_Sharp_Win_Prob': 'Model_Sharp_Win_Prob_opponent',
@@ -10365,7 +10369,7 @@ def apply_blended_sharp_score(
                 df_inverse['V13_BreakEven_Prob'] = _ibe
                 df_inverse['V13_Probability_Edge'] = _ip - _ibe
                 df_inverse['V13_EV_Per_Dollar'] = _ip * _iprof - (1.0 - _ip)
-                for _c in ['V13_Active','V13_Horizon_Hours','V13_State_Freshness','V13_Current_Season_Games','V13_Status','V13_Version']:
+                for _c in ['V13_Active','V13_Horizon_Hours','V13_State_Freshness','V13_Current_Season_Games','V13_Result_Disagreement_Bucket','V13_Result_Profile_N','V13_Result_Historical_Closer_Rate','V13_Result_Historical_Direction_Accuracy','V13_Result_Historical_Avg_Error_Improvement','V13_Result_Historical_Closer_CI_Low','V13_Result_Historical_Closer_CI_High','V13_Result_Profile_Used_In_EV','V13_Status','V13_Version']:
                     _opp = _c + '_opponent'
                     if _opp in df_inverse.columns:
                         df_inverse[_c] = df_inverse[_opp]
@@ -10521,7 +10525,7 @@ def apply_blended_sharp_score(
                     'V13_Active','V13_Fair_Margin','V13_Raw_Fair_Margin','V13_Tradable_Fair_Margin','V13_Fair_Total','V13_Raw_Fair_Total','V13_Tradable_Fair_Total','V13_Raw_Fundamental_Edge_Points','V13_Fundamental_Edge_Points','V13_Fundamental_Edge_Beta',
                     'V13_Pred_Close_Margin','V13_Market_Edge_Points','V13_Cover_Prob',
                     'V13_BreakEven_Prob','V13_Probability_Edge','V13_EV_Per_Dollar',
-                    'V13_Horizon_Hours','V13_State_Freshness','V13_Current_Season_Games','V13_Status','V13_Version'
+                    'V13_Horizon_Hours','V13_State_Freshness','V13_Current_Season_Games','V13_Result_Disagreement_Bucket','V13_Result_Profile_N','V13_Result_Historical_Closer_Rate','V13_Result_Historical_Direction_Accuracy','V13_Result_Historical_Avg_Error_Improvement','V13_Result_Historical_Closer_CI_Low','V13_Result_Historical_Closer_CI_High','V13_Result_Profile_Used_In_EV','V13_Status','V13_Version'
                 ] if c in df_inverse.columns]
             existing_cols = set(df.columns)
             df_canon['Was_Canonical'] = True
@@ -14662,7 +14666,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-08-v13.0.2-independent-qualification-closer-diagnostics"
+NCAAF_V13_VERSION = "2026-09-08-v13.0.4-dual-result-market-scorecard"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -15676,8 +15680,20 @@ def _ncaaf_v13_market_runtime_features(rows: pd.DataFrame):
     return feat
 
 
+
+def _ncaaf_v13_runtime_result_bucket(abs_edge):
+    x=np.asarray(abs_edge,dtype=float)
+    out=np.full(len(x),"UNAVAILABLE",dtype=object)
+    ok=np.isfinite(x)
+    out[ok&(x<0.5)]="lt_0.5"
+    out[ok&(x>=0.5)&(x<1.5)]="0.5_to_1.5"
+    out[ok&(x>=1.5)&(x<2.5)]="1.5_to_2.5"
+    out[ok&(x>=2.5)&(x<3.5)]="2.5_to_3.5"
+    out[ok&(x>=3.5)]="3.5_plus"
+    return out
+
 def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
-    """Calculate V13.0.2 value diagnostics only; never overwrites production probability."""
+    """Calculate V13.0.4 value diagnostics only; never overwrites production probability."""
     out=rows.copy(); n=len(out)
     defaults={
         "V13_Active":0,
@@ -15687,6 +15703,10 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         "V13_Pred_Close_Margin":np.nan,"V13_Market_Edge_Points":np.nan,
         "V13_Cover_Prob":np.nan,"V13_BreakEven_Prob":np.nan,"V13_Probability_Edge":np.nan,"V13_EV_Per_Dollar":np.nan,
         "V13_Horizon_Hours":np.nan,"V13_State_Freshness":0.0,"V13_Current_Season_Games":0.0,
+        "V13_Result_Disagreement_Bucket":"UNAVAILABLE","V13_Result_Profile_N":0.0,
+        "V13_Result_Historical_Closer_Rate":np.nan,"V13_Result_Historical_Direction_Accuracy":np.nan,
+        "V13_Result_Historical_Avg_Error_Improvement":np.nan,"V13_Result_Historical_Closer_CI_Low":np.nan,
+        "V13_Result_Historical_Closer_CI_High":np.nan,"V13_Result_Profile_Used_In_EV":0,
         "V13_Status":"UNAVAILABLE","V13_Version":NCAAF_V13_VERSION,
     }
     for c,v in defaults.items(): out[c]=v
@@ -15723,6 +15743,26 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         tradable_fair_home=tradable_fair_side*orient
         raw_fundamental_edge=raw_fair_side-offered_margin
         fundamental_edge=tradable_fair_side-offered_margin
+
+        # Historical result profile is descriptive only in V13.0.4.  It tells the
+        # UI how often comparable OOS disagreements were closer to the final result,
+        # but it does not alter probability, line, or EV.
+        result_bucket=_ncaaf_v13_runtime_result_bucket(np.abs(raw_fundamental_edge))
+        result_n=np.zeros(n,dtype=float); result_closer=np.full(n,np.nan); result_dir=np.full(n,np.nan)
+        result_imp=np.full(n,np.nan); result_ci_lo=np.full(n,np.nan); result_ci_hi=np.full(n,np.nan)
+        rp=fund.get("result_profile") or (fund.get("edge_shrinkage") or {}).get("result_profile") or {}
+        if isinstance(rp,dict):
+            lookup={str(x.get("bucket")):x for x in (rp.get("buckets") or []) if isinstance(x,dict)}
+            for _i,_b in enumerate(result_bucket):
+                _rec=lookup.get(str(_b))
+                if not _rec: continue
+                result_n[_i]=float(_rec.get("n",0) or 0)
+                result_closer[_i]=float(_rec.get("tradable_closer_rate",np.nan))
+                result_dir[_i]=float(_rec.get("edge_direction_accuracy",np.nan))
+                result_imp[_i]=float(_rec.get("tradable_avg_error_improvement",np.nan))
+                _ci=_rec.get("tradable_closer_ci95") or [np.nan,np.nan]
+                if len(_ci)>=2:
+                    result_ci_lo[_i]=float(_ci[0]); result_ci_hi[_i]=float(_ci[1])
 
         # Totals use the same learned market-residual shrinkage when a live total is
         # attached to the spread row; otherwise retain the independent raw total.
@@ -15779,10 +15819,18 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         out["V13_EV_Per_Dollar"]=ev.astype("float32")
         out["V13_Horizon_Hours"]=pd.to_numeric(mf.get("Horizon_Hours"),errors="coerce").to_numpy(dtype=np.float32,na_value=np.nan)
         out["V13_State_Freshness"]=fresh.astype("float32"); out["V13_Current_Season_Games"]=curg.astype("float32")
+        out["V13_Result_Disagreement_Bucket"]=result_bucket
+        out["V13_Result_Profile_N"]=result_n.astype("float32")
+        out["V13_Result_Historical_Closer_Rate"]=result_closer.astype("float32")
+        out["V13_Result_Historical_Direction_Accuracy"]=result_dir.astype("float32")
+        out["V13_Result_Historical_Avg_Error_Improvement"]=result_imp.astype("float32")
+        out["V13_Result_Historical_Closer_CI_Low"]=result_ci_lo.astype("float32")
+        out["V13_Result_Historical_Closer_CI_High"]=result_ci_hi.astype("float32")
+        out["V13_Result_Profile_Used_In_EV"]=np.int8(0)
         out["V13_Status"]=status; out["V13_Active"]=eligible.astype("int8")
         return out
     except Exception as e:
-        logging.warning("V13.0.2 NCAAF shadow scoring unavailable: %s",e,exc_info=True)
+        logging.warning("V13.0.4 NCAAF shadow scoring unavailable: %s",e,exc_info=True)
         return out
 
 
