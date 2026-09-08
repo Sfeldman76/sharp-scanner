@@ -14217,7 +14217,7 @@ def _hc_apply_system_memory(out: pd.DataFrame, hb: dict) -> pd.DataFrame:
 #     plus information available before kickoff.
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
-NCAAF_STAT_FEATURE_VERSION = "2026-09-07-v12.0.2-nullable-state-paired-promotion-audit"
+NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.1.0-qualified-stat-feature-gate"
 NCAAF_STAT_PREFIX = "NCAAF_Stat_"
 _NCAAF_STAT_TRAIN_CACHE = {}
 try:
@@ -14555,10 +14555,18 @@ def _apply_system_memory_protected_route(base_prob, rows: pd.DataFrame, market: 
     return (out,info) if return_info else out
 
 _NCAAF_STAT_METRICS = (
+    # Core efficiency / finishing proxies available in the historical box-score feed.
     "Off_YPP", "Off_Pass_YPA", "Off_Rush_YPA", "Off_Completion_Rate",
     "Off_Points_Per_Play", "Off_Turnover_Rate", "Off_FirstDown_Rate",
+    # Tempo / play-mix / passing-efficiency candidates.  These are calculated for
+    # every game but are not automatically admitted to the fitted Statistical Brain.
+    "Off_Plays_Per_Game", "Off_Pass_Rate", "Off_Rush_Rate", "Off_Yards_Per_Completion",
+    # Defensive mirrors, obtained from the opponent's same-game offense and shifted
+    # before they can be used as predictors.
     "Def_YPP_Allowed", "Def_Pass_YPA_Allowed", "Def_Rush_YPA_Allowed",
     "Def_Points_Per_Play_Allowed", "Def_Takeaway_Rate",
+    "Def_Plays_Faced", "Def_Pass_Rate_Faced", "Def_Rush_Rate_Faced",
+    "Def_Yards_Per_Completion_Allowed",
 )
 
 _NCAAF_STAT_ADJ_METRICS = (
@@ -14651,6 +14659,268 @@ def _ncaaf_stat_blend_predict(models, X, linear_weight=0.75):
     return w*p1 + (1.0-w)*p2
 
 
+# -----------------------------------------------------------------------------
+# V12.1 Statistical Brain feature qualification
+# -----------------------------------------------------------------------------
+# All candidate football statistics are still calculated.  Admission to the
+# production structural model is earned separately for margin and total using
+# chronological, season-forward validation that excludes the latest protected
+# shadow season.  A synthetic intercept column lets every real feature be rejected
+# if it fails to add out-of-sample value.
+_NCAAF_STAT_INTERCEPT_FEATURE = "Context_Intercept"
+_NCAAF_STAT_QUAL_MIN_TRAIN_ROWS = 450
+_NCAAF_STAT_QUAL_MIN_VALID_ROWS = 75
+_NCAAF_STAT_QUAL_MIN_RMSE_GAIN = 0.010       # points; deliberately small but non-zero
+_NCAAF_STAT_QUAL_MAX_MAE_GIVEBACK = 0.005   # do not buy RMSE with material MAE damage
+_NCAAF_STAT_QUAL_MIN_POSITIVE_FOLD_FRAC = 0.50
+_NCAAF_STAT_QUAL_MAX_FEATURES_PER_TARGET = 48
+
+
+def _ncaaf_stat_new_qualification_model():
+    """Fast regularized model used only to decide whether a candidate earns entry."""
+    from sklearn.pipeline import Pipeline
+    from sklearn.impute import SimpleImputer
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.linear_model import Ridge
+    return Pipeline([
+        ("imputer", SimpleImputer(strategy="median", add_indicator=True)),
+        ("scale", StandardScaler()),
+        ("ridge", Ridge(alpha=24.0)),
+    ])
+
+
+def _ncaaf_stat_feature_family(feature_name: str) -> str:
+    """Readable family label for diagnostics; does not control acceptance."""
+    c = str(feature_name or "")
+    if c.startswith("Context_"):
+        return "context"
+    for prefix in ("A_State_", "B_State_", "Diff_State_", "A_Recent3_", "B_Recent3_", "Diff_Recent3_"):
+        if c.startswith(prefix):
+            metric = c[len(prefix):]
+            if metric.startswith("GameAdj_"):
+                return "opponent_adjusted"
+            if "Plays" in metric or "Pass_Rate" in metric or "Rush_Rate" in metric:
+                return "tempo_play_mix"
+            if "Pass" in metric or "Completion" in metric:
+                return "passing"
+            if "Rush" in metric:
+                return "rushing"
+            if "Turnover" in metric or "Takeaway" in metric:
+                return "turnovers"
+            if "FirstDown" in metric:
+                return "down_conversion_proxy"
+            if "YPP" in metric or "Points_Per_Play" in metric:
+                return "efficiency"
+            return "other_stat"
+    return "other"
+
+
+def _ncaaf_stat_qualification_eval(
+    games: pd.DataFrame,
+    feature_cols,
+    target_col: str,
+    market_col: str,
+    qualification_seasons,
+    *,
+    market_weight: float = 0.15,
+):
+    """Chronological OOF evaluation for one candidate feature set.
+
+    The latest season is never supplied here.  Each validation season is predicted
+    only by a Ridge model fit on strictly earlier seasons.  The score is evaluated
+    after the same market shrinkage used by the production Statistical Brain.
+    """
+    cols = list(dict.fromkeys([c for c in feature_cols if c in games.columns]))
+    if not cols:
+        cols = [_NCAAF_STAT_INTERCEPT_FEATURE]
+    season = pd.to_numeric(games.get("Season"), errors="coerce").to_numpy(dtype=float, na_value=np.nan)
+    y_all = pd.to_numeric(games.get(target_col), errors="coerce").to_numpy(dtype=float, na_value=np.nan)
+    market_all = pd.to_numeric(games.get(market_col), errors="coerce").to_numpy(dtype=float, na_value=np.nan)
+    pred_all = np.full(len(games), np.nan, dtype=float)
+    fold_rows = []
+
+    for val_season in qualification_seasons:
+        tr = np.isfinite(season) & (season < float(val_season)) & np.isfinite(y_all)
+        va = np.isfinite(season) & (season == float(val_season)) & np.isfinite(y_all)
+        if int(tr.sum()) < _NCAAF_STAT_QUAL_MIN_TRAIN_ROWS or int(va.sum()) < _NCAAF_STAT_QUAL_MIN_VALID_ROWS:
+            continue
+        model = _ncaaf_stat_new_qualification_model()
+        try:
+            model.fit(games.loc[tr, cols], y_all[tr])
+            structural = np.asarray(model.predict(games.loc[va, cols]), dtype=float)
+        except Exception:
+            continue
+        mv = market_all[va]
+        blended = np.where(np.isfinite(mv), (1.0-market_weight)*mv + market_weight*structural, structural)
+        idx = np.where(va)[0]
+        pred_all[idx] = blended
+        ok = np.isfinite(blended) & np.isfinite(y_all[idx])
+        if int(ok.sum()) < 20:
+            continue
+        err = y_all[idx][ok] - blended[ok]
+        market_ok = np.isfinite(mv[ok])
+        market_rmse = float(np.sqrt(np.mean((y_all[idx][ok][market_ok] - mv[ok][market_ok])**2))) if market_ok.any() else np.nan
+        market_mae = float(np.mean(np.abs(y_all[idx][ok][market_ok] - mv[ok][market_ok]))) if market_ok.any() else np.nan
+        fold_rows.append({
+            "season": int(val_season),
+            "n": int(ok.sum()),
+            "rmse": float(np.sqrt(np.mean(err**2))),
+            "mae": float(np.mean(np.abs(err))),
+            "market_rmse": market_rmse,
+            "market_mae": market_mae,
+        })
+
+    ok = np.isfinite(pred_all) & np.isfinite(y_all)
+    if int(ok.sum()) < 50:
+        return {"n": int(ok.sum()), "rmse": np.nan, "mae": np.nan, "folds": fold_rows}
+    err = y_all[ok] - pred_all[ok]
+    return {
+        "n": int(ok.sum()),
+        "rmse": float(np.sqrt(np.mean(err**2))),
+        "mae": float(np.mean(np.abs(err))),
+        "folds": fold_rows,
+    }
+
+
+def _ncaaf_stat_feature_qualifies(base_eval: dict, trial_eval: dict):
+    br = float(base_eval.get("rmse", np.nan)); tr = float(trial_eval.get("rmse", np.nan))
+    bm = float(base_eval.get("mae", np.nan)); tm = float(trial_eval.get("mae", np.nan))
+    if not np.isfinite(br) or not np.isfinite(tr) or not np.isfinite(bm) or not np.isfinite(tm):
+        return False, {"rmse_gain": np.nan, "mae_gain": np.nan, "positive_fold_frac": 0.0}
+    rmse_gain = br - tr
+    mae_gain = bm - tm
+    bf = {int(x.get("season")): x for x in base_eval.get("folds", []) if np.isfinite(x.get("rmse", np.nan))}
+    tf = {int(x.get("season")): x for x in trial_eval.get("folds", []) if np.isfinite(x.get("rmse", np.nan))}
+    common = sorted(set(bf).intersection(tf))
+    fold_gains = [float(bf[s]["rmse"] - tf[s]["rmse"]) for s in common]
+    positive_frac = float(np.mean(np.asarray(fold_gains) > 0.0)) if fold_gains else 0.0
+    # One usable fold needs a little more absolute evidence.  With two or more,
+    # require at least half of chronological folds to agree on direction.
+    min_gain = _NCAAF_STAT_QUAL_MIN_RMSE_GAIN * (2.0 if len(common) <= 1 else 1.0)
+    fold_ok = bool(fold_gains) and (positive_frac >= (1.0 if len(common) <= 1 else _NCAAF_STAT_QUAL_MIN_POSITIVE_FOLD_FRAC))
+    ok = (
+        rmse_gain >= min_gain
+        and mae_gain >= -_NCAAF_STAT_QUAL_MAX_MAE_GIVEBACK
+        and fold_ok
+    )
+    return bool(ok), {
+        "rmse_gain": float(rmse_gain),
+        "mae_gain": float(mae_gain),
+        "positive_fold_frac": float(positive_frac),
+        "fold_gains": fold_gains,
+    }
+
+
+def _ncaaf_stat_qualify_features(
+    games: pd.DataFrame,
+    candidate_feature_cols,
+    target_col: str,
+    market_col: str,
+    seasons,
+    *,
+    market_weight: float,
+    label: str,
+    log_func=print,
+):
+    """Greedy chronological admission test; every accepted real feature adds OOS skill."""
+    seasons = [int(s) for s in seasons]
+    latest = max(seasons)
+    qual_seasons = [s for s in seasons[1:] if s < latest]
+    # If history is only three seasons, there is still one pre-shadow validation season.
+    if not qual_seasons and len(seasons) >= 2:
+        qual_seasons = [seasons[-2]]
+
+    baseline_cols = [_NCAAF_STAT_INTERCEPT_FEATURE]
+    base_eval = _ncaaf_stat_qualification_eval(
+        games, baseline_cols, target_col, market_col, qual_seasons, market_weight=market_weight
+    )
+    diagnostics = {}
+    ranked = []
+    candidates = [
+        c for c in list(dict.fromkeys(candidate_feature_cols))
+        if c in games.columns and c != _NCAAF_STAT_INTERCEPT_FEATURE
+    ]
+
+    # Fast individual screen against the same intercept-only chronological baseline.
+    for feat in candidates:
+        trial = _ncaaf_stat_qualification_eval(
+            games, baseline_cols + [feat], target_col, market_col, qual_seasons, market_weight=market_weight
+        )
+        ok, delta = _ncaaf_stat_feature_qualifies(base_eval, trial)
+        diagnostics[feat] = {
+            "family": _ncaaf_stat_feature_family(feat),
+            "screen_pass": bool(ok),
+            "screen_rmse": float(trial.get("rmse", np.nan)),
+            "screen_mae": float(trial.get("mae", np.nan)),
+            **delta,
+        }
+        if ok:
+            ranked.append((float(delta.get("rmse_gain", -np.inf)), feat))
+    ranked.sort(reverse=True)
+
+    accepted = list(baseline_cols)
+    current_eval = base_eval
+    for _, feat in ranked:
+        if len(accepted) - 1 >= _NCAAF_STAT_QUAL_MAX_FEATURES_PER_TARGET:
+            diagnostics[feat]["accepted"] = False
+            diagnostics[feat]["reject_reason"] = "feature_cap"
+            continue
+        trial = _ncaaf_stat_qualification_eval(
+            games, accepted + [feat], target_col, market_col, qual_seasons, market_weight=market_weight
+        )
+        ok, delta = _ncaaf_stat_feature_qualifies(current_eval, trial)
+        diagnostics[feat]["incremental_rmse_gain"] = float(delta.get("rmse_gain", np.nan))
+        diagnostics[feat]["incremental_mae_gain"] = float(delta.get("mae_gain", np.nan))
+        diagnostics[feat]["incremental_positive_fold_frac"] = float(delta.get("positive_fold_frac", 0.0))
+        diagnostics[feat]["accepted"] = bool(ok)
+        if ok:
+            accepted.append(feat)
+            current_eval = trial
+        else:
+            diagnostics[feat]["reject_reason"] = "no_incremental_oos_gain"
+
+    for feat in candidates:
+        diagnostics.setdefault(feat, {"family": _ncaaf_stat_feature_family(feat)})
+        diagnostics[feat].setdefault("accepted", False)
+        if not diagnostics[feat].get("screen_pass", False):
+            diagnostics[feat].setdefault("reject_reason", "failed_individual_oos_screen")
+
+    accepted_real = [c for c in accepted if c != _NCAAF_STAT_INTERCEPT_FEATURE]
+    rejected = [c for c in candidates if c not in set(accepted_real)]
+    family_counts = {}
+    for c in accepted_real:
+        fam = _ncaaf_stat_feature_family(c)
+        family_counts[fam] = family_counts.get(fam, 0) + 1
+    log_func(
+        f"[NCAAF-STAT-FEATURE-GATE] target={label} qual_seasons={qual_seasons} "
+        f"candidates={len(candidates)} accepted={len(accepted_real)} rejected={len(rejected)} "
+        f"rmse={current_eval.get('rmse', np.nan):.4f} mae={current_eval.get('mae', np.nan):.4f} "
+        f"families={family_counts}"
+    )
+    if accepted_real:
+        log_func(f"[NCAAF-STAT-FEATURE-GATE] target={label} accepted_cols={accepted_real}")
+    return accepted, {
+        "target": label,
+        "qualification_seasons": qual_seasons,
+        "candidate_count": len(candidates),
+        "accepted": accepted_real,
+        "rejected": rejected,
+        "baseline_eval": base_eval,
+        "final_eval": current_eval,
+        "family_counts": family_counts,
+        "diagnostics": diagnostics,
+        "rules": {
+            "min_train_rows": _NCAAF_STAT_QUAL_MIN_TRAIN_ROWS,
+            "min_valid_rows": _NCAAF_STAT_QUAL_MIN_VALID_ROWS,
+            "min_rmse_gain": _NCAAF_STAT_QUAL_MIN_RMSE_GAIN,
+            "max_mae_giveback": _NCAAF_STAT_QUAL_MAX_MAE_GIVEBACK,
+            "min_positive_fold_frac": _NCAAF_STAT_QUAL_MIN_POSITIVE_FOLD_FRAC,
+            "max_features": _NCAAF_STAT_QUAL_MAX_FEATURES_PER_TARGET,
+            "latest_shadow_excluded": True,
+        },
+    }
+
+
 def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
     """Create one leakage-safe structural row per physical historical game."""
     if raw is None or raw.empty:
@@ -14682,6 +14952,10 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
     r["Off_Points_Per_Play"] = _ncaaf_stat_safe_ratio(r["Team_Score"], r["Postgame_Total_Plays"])
     r["Off_Turnover_Rate"] = _ncaaf_stat_safe_ratio(r["Postgame_Turnovers"], r["Postgame_Total_Plays"])
     r["Off_FirstDown_Rate"] = _ncaaf_stat_safe_ratio(r["Postgame_First_Downs"], r["Postgame_Total_Plays"])
+    r["Off_Plays_Per_Game"] = pd.to_numeric(r["Postgame_Total_Plays"], errors="coerce")
+    r["Off_Pass_Rate"] = _ncaaf_stat_safe_ratio(r["Postgame_Pass_Att"], r["Postgame_Total_Plays"])
+    r["Off_Rush_Rate"] = _ncaaf_stat_safe_ratio(r["Postgame_Rush_Att"], r["Postgame_Total_Plays"])
+    r["Off_Yards_Per_Completion"] = _ncaaf_stat_safe_ratio(r["Postgame_Pass_Yards"], r["Postgame_Pass_Comp"])
 
     # Current-game opponent offense is used only to define this game's defensive
     # performance. Every defensive predictor below is subsequently shifted.
@@ -14694,6 +14968,10 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
     r["Def_Rush_YPA_Allowed"] = r["__OppActual_Off_Rush_YPA"]
     r["Def_Points_Per_Play_Allowed"] = r["__OppActual_Off_Points_Per_Play"]
     r["Def_Takeaway_Rate"] = r["__OppActual_Off_Turnover_Rate"]
+    r["Def_Plays_Faced"] = r["__OppActual_Off_Plays_Per_Game"]
+    r["Def_Pass_Rate_Faced"] = r["__OppActual_Off_Pass_Rate"]
+    r["Def_Rush_Rate_Faced"] = r["__OppActual_Off_Rush_Rate"]
+    r["Def_Yards_Per_Completion_Allowed"] = r["__OppActual_Off_Yards_Per_Completion"]
 
     r = r.sort_values(["Team_Norm","Season","Game_Date","Source_Game_ID"], kind="stable").reset_index(drop=True)
     grp_keys = [r["Season"], r["Team_Norm"]]
@@ -14807,12 +15085,13 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
             anchor[nm] = val.astype("float64")
             feature_cols.append(nm)
 
+    anchor[_NCAAF_STAT_INTERCEPT_FEATURE] = 0.0
     anchor["Context_Is_Neutral"] = pd.to_numeric(anchor["Is_Neutral"], errors="coerce").fillna(0).astype(float)
     anchor["Context_Week"] = pd.to_numeric(anchor.get("Week"), errors="coerce").astype(float)
     anchor["Context_A_FBS"] = anchor.get("Subdivision", pd.Series("",index=anchor.index)).astype(str).str.upper().eq("FBS").astype(float)
     anchor["Context_B_FBS"] = anchor.get("Opponent_Subdivision", pd.Series("",index=anchor.index)).astype(str).str.upper().eq("FBS").astype(float)
     anchor["Context_Cross_Subdivision"] = anchor["Context_A_FBS"].ne(anchor["Context_B_FBS"]).astype(float)
-    feature_cols += ["Context_Is_Neutral","Context_Week","Context_A_FBS","Context_B_FBS","Context_Cross_Subdivision"]
+    feature_cols += [_NCAAF_STAT_INTERCEPT_FEATURE,"Context_Is_Neutral","Context_Week","Context_A_FBS","Context_B_FBS","Context_Cross_Subdivision"]
 
     anchor["Actual_Margin"] = pd.to_numeric(anchor["Team_Score"],errors="coerce") - pd.to_numeric(anchor["Opponent_Score"],errors="coerce")
     anchor["Actual_Total"] = pd.to_numeric(anchor["Team_Score"],errors="coerce") + pd.to_numeric(anchor["Opponent_Score"],errors="coerce")
@@ -14848,19 +15127,20 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
     return anchor.reset_index(drop=True), list(dict.fromkeys(feature_cols)), latest_profiles
 
 
-def _ncaaf_stat_fit_models_for_rows(df, feature_cols, mask):
-    X=df.loc[mask,feature_cols]
+def _ncaaf_stat_fit_models_for_rows(df, margin_feature_cols, total_feature_cols, mask):
+    Xm=df.loc[mask,margin_feature_cols]
+    Xt=df.loc[mask,total_feature_cols]
     ym=pd.to_numeric(df.loc[mask,"Actual_Margin"],errors="coerce")
     yt=pd.to_numeric(df.loc[mask,"Actual_Total"],errors="coerce")
     goodm=ym.notna(); goodt=yt.notna()
     mm=_ncaaf_stat_new_margin_models(); tm=_ncaaf_stat_new_margin_models()
-    mm[0].fit(X.loc[goodm],ym.loc[goodm]); mm[1].fit(X.loc[goodm],ym.loc[goodm])
-    tm[0].fit(X.loc[goodt],yt.loc[goodt]); tm[1].fit(X.loc[goodt],yt.loc[goodt])
+    mm[0].fit(Xm.loc[goodm],ym.loc[goodm]); mm[1].fit(Xm.loc[goodm],ym.loc[goodm])
+    tm[0].fit(Xt.loc[goodt],yt.loc[goodt]); tm[1].fit(Xt.loc[goodt],yt.loc[goodt])
     return mm,tm
 
 
 def fit_ncaaf_statistical_brain(log_func=print):
-    """Fit V12 structural NCAAF expert with season-forward OOF and protected latest season."""
+    """Fit V12.1 structural NCAAF expert with feature qualification + protected shadow."""
     if isinstance(_NCAAF_STAT_TRAIN_CACHE.get("bundle"), dict):
         b = _NCAAF_STAT_TRAIN_CACHE["bundle"]
         log_func(f"[NCAAF-STAT] cache_reuse rows={b.get('rows',0)} version={b.get('version')}")
@@ -14873,7 +15153,7 @@ def fit_ncaaf_statistical_brain(log_func=print):
     except Exception as e:
         log_func(f"[NCAAF-STAT] unavailable: {e}")
         return None
-    games, feature_cols, latest_profiles = _ncaaf_stat_build_game_frame(raw)
+    games, candidate_feature_cols, latest_profiles = _ncaaf_stat_build_game_frame(raw)
     if games.empty or len(games) < 1000:
         log_func(f"[NCAAF-STAT] insufficient game rows n={len(games)}")
         return None
@@ -14884,22 +15164,33 @@ def fit_ncaaf_statistical_brain(log_func=print):
     latest=seasons[-1]
     linear_weight=0.75; market_weight=0.15
 
-    # BigQuery/pandas may return nullable Int64/Float64 season columns. Convert
-    # once to a plain NumPy float array so every mask below is guaranteed bool,
-    # never object/pd.NA (which NumPy cannot use as an index).
+    # Qualify margin and total features independently.  The latest season is held
+    # completely outside this decision and remains the protected transfer shadow.
+    margin_feature_cols, margin_qual = _ncaaf_stat_qualify_features(
+        games, candidate_feature_cols, "Actual_Margin", "Market_Open_Margin", seasons,
+        market_weight=market_weight, label="margin", log_func=log_func,
+    )
+    total_feature_cols, total_qual = _ncaaf_stat_qualify_features(
+        games, candidate_feature_cols, "Actual_Total", "Market_Open_Total", seasons,
+        market_weight=market_weight, label="total", log_func=log_func,
+    )
+    # Backward-compatible union; old readers can still use feature_cols while new
+    # runtime code uses the target-specific lists.
+    feature_cols = list(dict.fromkeys(list(margin_feature_cols) + list(total_feature_cols)))
+
     season_arr = _sys_float64_series(games["Season"], games.index).to_numpy(
         dtype=np.float64, na_value=np.nan
     )
 
-    # Season-forward OOF residuals; each validation season is unseen by its model.
+    # Season-forward OOF residuals using only features that survived qualification.
     oof_margin=np.full(len(games),np.nan); oof_total=np.full(len(games),np.nan)
     for val_season in seasons[1:]:
         tr=np.isfinite(season_arr) & (season_arr < float(val_season))
         va=np.isfinite(season_arr) & (season_arr == float(val_season))
         if tr.sum()<500 or va.sum()<100: continue
-        mm,tm=_ncaaf_stat_fit_models_for_rows(games,feature_cols,tr)
-        sm=_ncaaf_stat_blend_predict(mm,games.loc[va,feature_cols],linear_weight)
-        stot=_ncaaf_stat_blend_predict(tm,games.loc[va,feature_cols],linear_weight)
+        mm,tm=_ncaaf_stat_fit_models_for_rows(games,margin_feature_cols,total_feature_cols,tr)
+        sm=_ncaaf_stat_blend_predict(mm,games.loc[va,margin_feature_cols],linear_weight)
+        stot=_ncaaf_stat_blend_predict(tm,games.loc[va,total_feature_cols],linear_weight)
         market_m=pd.to_numeric(games.loc[va,"Market_Open_Margin"],errors="coerce").to_numpy(dtype=float)
         market_t=pd.to_numeric(games.loc[va,"Market_Open_Total"],errors="coerce").to_numpy(dtype=float)
         cm=np.where(np.isfinite(market_m),(1-market_weight)*market_m+market_weight*sm,sm)
@@ -14944,21 +15235,27 @@ def fit_ncaaf_statistical_brain(log_func=print):
     trust_tot=_trust(ll_tot,auc_tot)
     trust_h=_trust(ll_h,auc_h,ll_h_market if np.isfinite(ll_h_market) else 0.69314718056)
 
-    # Refit final structural estimators on every historical game only after shadow evaluation.
+    # Refit final structural estimators only after all qualification + shadow work.
     allmask=np.isfinite(actual_m)
-    margin_models,total_models=_ncaaf_stat_fit_models_for_rows(games,feature_cols,allmask)
+    margin_models,total_models=_ncaaf_stat_fit_models_for_rows(
+        games,margin_feature_cols,total_feature_cols,allmask
+    )
     all_oof=np.isfinite(oof_margin)&np.isfinite(actual_m); all_oof_t=np.isfinite(oof_total)&np.isfinite(actual_t)
     residual_margin=(actual_m[all_oof]-oof_margin[all_oof]); residual_total=(actual_t[all_oof_t]-oof_total[all_oof_t])
 
-    # feature profile for runtime drift gating
+    # Drift profile uses only production-admitted features (union of both targets).
     Xprof=games.loc[allmask,feature_cols].apply(pd.to_numeric,errors="coerce")
     med=Xprof.median(axis=0,skipna=True).to_numpy(dtype=float)
     q75=Xprof.quantile(.75); q25=Xprof.quantile(.25); scale=(q75-q25).replace(0,np.nan).fillna(Xprof.std()).replace(0,1).fillna(1).to_numpy(dtype=float)
 
     bundle={
         "version":NCAAF_STAT_FEATURE_VERSION,
-        "architecture":"structural_margin_total__opponent_aware_efficiency__prior_season_shrinkage__85pct_market_anchor__empirical_oof_distribution",
+        "architecture":"structural_margin_total__qualified_target_specific_features__opponent_aware_efficiency__prior_season_shrinkage__85pct_market_anchor__empirical_oof_distribution",
+        "candidate_feature_cols":list(candidate_feature_cols),
         "feature_cols":feature_cols,
+        "margin_feature_cols":list(margin_feature_cols),
+        "total_feature_cols":list(total_feature_cols),
+        "feature_qualification":{"version":"v12.1-season-forward-greedy-ridge-admission","margin":margin_qual,"total":total_qual},
         "margin_models":margin_models,
         "total_models":total_models,
         "linear_weight":linear_weight,
@@ -14967,6 +15264,7 @@ def fit_ncaaf_statistical_brain(log_func=print):
         "residual_total":np.asarray(residual_total,dtype=np.float32),
         "latest_profiles":latest_profiles,
         "historical_max_date":pd.Timestamp(games["Game_Date"].max()).isoformat(),
+        "profile_feature_cols":feature_cols,
         "profile_median":med.astype(np.float32), "profile_scale":scale.astype(np.float32),
         "trust_by_market":{"spreads":trust_sp,"totals":trust_tot,"h2h":trust_h},
         "shadow_metrics":{
@@ -14979,13 +15277,13 @@ def fit_ncaaf_statistical_brain(log_func=print):
     }
     _NCAAF_STAT_TRAIN_CACHE["bundle"] = bundle
     log_func(
-        f"[NCAAF-STAT] rows={len(games)} seasons={seasons[0]}-{seasons[-1]} features={len(feature_cols)} "
-        f"spread_shadow_auc={auc_sp:.4f} ll={ll_sp:.4f} trust={trust_sp:.3f} "
+        f"[NCAAF-STAT] rows={len(games)} seasons={seasons[0]}-{seasons[-1]} "
+        f"candidate_features={len(candidate_feature_cols)} margin_features={len(margin_feature_cols)-1} "
+        f"total_features={len(total_feature_cols)-1} spread_shadow_auc={auc_sp:.4f} ll={ll_sp:.4f} trust={trust_sp:.3f} "
         f"total_auc={auc_tot:.4f} ll={ll_tot:.4f} trust={trust_tot:.3f} "
         f"h2h_auc={auc_h:.4f} ll={ll_h:.4f} trust={trust_h:.3f}"
     )
     return bundle
-
 
 def _ncaaf_stat_runtime_baseline(df, market):
     m=_sys_norm_market(market); idx=df.index
@@ -15026,6 +15324,7 @@ def _ncaaf_stat_runtime_frame(df: pd.DataFrame, sb: dict):
         out[f"A_Recent3_{metric}"]=pd.to_numeric(ar,errors="coerce")
         out[f"B_Recent3_{metric}"]=pd.to_numeric(br,errors="coerce")
         out[f"Diff_Recent3_{metric}"]=out[f"A_Recent3_{metric}"]-out[f"B_Recent3_{metric}"]
+    out[_NCAAF_STAT_INTERCEPT_FEATURE] = 0.0
     neutral=pd.to_numeric(df.get("Is_Neutral_Site",df.get("Is_Neutral",0)),errors="coerce")
     out["Context_Is_Neutral"]=pd.Series(neutral,index=df.index).fillna(0).astype(float)
     out["Context_Week"]=pd.to_numeric(df.get("Week_Number",df.get("BigAl_Context_Week_Number",df.get("Week",np.nan))),errors="coerce")
@@ -15058,11 +15357,18 @@ def apply_ncaaf_statistical_brain_feature(df: pd.DataFrame, sb, market: str):
     for c,v in defaults.items(): out[c]=v
     if not isinstance(sb,dict) or out.empty or not out.get("Sport",pd.Series("",index=out.index)).astype(str).str.upper().eq("NCAAF").any(): return out
     try:
-        m=_sys_norm_market(market); feature_cols=list(sb.get("feature_cols") or [])
-        X=_ncaaf_stat_runtime_frame(out,sb).reindex(columns=feature_cols)
-        if X.empty or not feature_cols: return out
-        sm=_ncaaf_stat_blend_predict(sb["margin_models"],X,float(sb.get("linear_weight",.75)))
-        stot=_ncaaf_stat_blend_predict(sb["total_models"],X,float(sb.get("linear_weight",.75)))
+        m=_sys_norm_market(market)
+        legacy_cols=list(sb.get("feature_cols") or [])
+        margin_cols=list(sb.get("margin_feature_cols") or legacy_cols)
+        total_cols=list(sb.get("total_feature_cols") or legacy_cols)
+        profile_cols=list(sb.get("profile_feature_cols") or list(dict.fromkeys(margin_cols + total_cols)) or legacy_cols)
+        Xall=_ncaaf_stat_runtime_frame(out,sb)
+        if Xall.empty or not margin_cols or not total_cols: return out
+        Xm=Xall.reindex(columns=margin_cols)
+        Xt=Xall.reindex(columns=total_cols)
+        Xp=Xall.reindex(columns=profile_cols)
+        sm=_ncaaf_stat_blend_predict(sb["margin_models"],Xm,float(sb.get("linear_weight",.75)))
+        stot=_ncaaf_stat_blend_predict(sb["total_models"],Xt,float(sb.get("linear_weight",.75)))
         outcome=out.get("Outcome",pd.Series("",index=out.index)).astype(str).str.lower().str.strip()
         home=out.get("Home_Team_Norm",out.get("Home_Team",pd.Series("",index=out.index))).astype(str).str.lower().str.strip()
         away=out.get("Away_Team_Norm",out.get("Away_Team",pd.Series("",index=out.index))).astype(str).str.lower().str.strip()
@@ -15116,7 +15422,7 @@ def apply_ncaaf_statistical_brain_feature(df: pd.DataFrame, sb, market: str):
             exp_team=np.where(is_home,(exp_total+exp_margin)/2,np.where(is_away,(exp_total-exp_margin)/2,np.nan)); exp_opp=exp_total-exp_team
         baseline=_ncaaf_stat_runtime_baseline(out,m).to_numpy(dtype=float)
         base_trust=float(np.clip((sb.get("trust_by_market") or {}).get(m,0.0),0,1))
-        sim=_ncaaf_stat_profile_similarity(X,sb)
+        sim=_ncaaf_stat_profile_similarity(Xp,sb)
         cutoff=pd.to_datetime(sb.get("historical_max_date"),errors="coerce",utc=True); gt=pd.to_datetime(out.get("Game_Start"),errors="coerce",utc=True)
         age=(gt-cutoff).dt.total_seconds().to_numpy(dtype=float)/86400.; age=np.where(np.isfinite(age),np.maximum(age,0),np.inf)
         rec=np.clip(np.exp(-np.log(2)*age/730.),.20,1.0)
@@ -24397,6 +24703,13 @@ def train_sharp_model_from_bq(
                     "seasons": (ncaaf_statistical_brain or {}).get("seasons", []) if isinstance(ncaaf_statistical_brain, dict) else [],
                     "trust_by_market": (ncaaf_statistical_brain or {}).get("trust_by_market", {}) if isinstance(ncaaf_statistical_brain, dict) else {},
                     "shadow_metrics": (ncaaf_statistical_brain or {}).get("shadow_metrics", {}) if isinstance(ncaaf_statistical_brain, dict) else {},
+                    "feature_qualification": ({
+                        "version": ((ncaaf_statistical_brain or {}).get("feature_qualification") or {}).get("version"),
+                        "margin_accepted": list((((ncaaf_statistical_brain or {}).get("feature_qualification") or {}).get("margin") or {}).get("accepted", [])),
+                        "margin_rejected_count": len((((ncaaf_statistical_brain or {}).get("feature_qualification") or {}).get("margin") or {}).get("rejected", [])),
+                        "total_accepted": list((((ncaaf_statistical_brain or {}).get("feature_qualification") or {}).get("total") or {}).get("accepted", [])),
+                        "total_rejected_count": len((((ncaaf_statistical_brain or {}).get("feature_qualification") or {}).get("total") or {}).get("rejected", [])),
+                    }) if isinstance(ncaaf_statistical_brain, dict) else {},
                 }),
                 "ncaaf_stat_protected_route": dict(_stat_route_cfg),
                 "system_memory_protected_route": dict(_system_memory_route_cfg),
