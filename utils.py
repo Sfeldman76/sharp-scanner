@@ -6258,12 +6258,23 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         100.0 * meta_weight,
     )
 
-    # V12.0.7 protected Statistical Brain route.  The main Outcome AutoFS may
-    # legitimately reject the structural columns because final-refit Stat Brain
-    # predictions are neutral inside its source window.  For future NCAAF spreads,
-    # apply the independently shadow-validated, already trust-shrunk Stat edge as
-    # a capped residual correction after the saved outcome/meta blend.
+    # V12.0.8 protected Statistical Brain route.  df_rows is the authoritative
+    # enriched runtime frame (after historical/stat/Brain reconstruction), not the
+    # pruned model matrix.
     stat_cfg = cfg.get("ncaaf_stat_protected_route") or {}
+    # Migration-safe fallback: the current production champion may predate the
+    # protected-route config but already contains the independently validated
+    # NCAAF Statistical Brain artifact.  Preserve champion model weights while
+    # enabling the safe capped route from that saved expert.
+    if not stat_cfg and isinstance(bundle, dict) and isinstance(bundle.get("ncaaf_statistical_brain"), dict):
+        stat_cfg = {
+            "enabled": True,
+            "edge_weight": 0.50,
+            "max_abs_correction": 0.02,
+            "min_row_trust": 0.03,
+            "mode": "legacy_champion_stat_sidecar_fallback",
+        }
+        logger.info("[NCAAF-STAT-PROTECTED] using migration-safe legacy champion route config")
     if bool(stat_cfg.get("enabled", False)) and len(df_rows) == len(combined):
         try:
             def _stat_col(name, default):
@@ -6277,16 +6288,63 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
             edge_weight = float(stat_cfg.get("edge_weight", 0.50))
             cap = float(stat_cfg.get("max_abs_correction", 0.02))
             eligible = stat_active & np.isfinite(stat_prob) & np.isfinite(stat_base) & np.isfinite(stat_trust) & (stat_trust >= min_trust)
-            if eligible.any():
+            if int(stat_active.sum()) > 0 and int(eligible.sum()) == 0:
+                logger.error(
+                    "[NCAAF-STAT-PROTECTED-CONTRACT] FAIL source_active=%d eligible=0; leaving probabilities unchanged",
+                    int(stat_active.sum()),
+                )
+            elif eligible.any():
                 correction = np.zeros(len(combined), dtype=np.float64)
                 correction[eligible] = np.clip(edge_weight * (stat_prob[eligible] - stat_base[eligible]), -cap, cap)
                 combined = np.clip(combined + correction, eps, 1.0 - eps)
                 logger.info(
-                    "🧠 NCAAF Stat protected route active=%d/%d mean_abs_corr=%.5f max_abs_corr=%.5f",
+                    "[NCAAF-STAT-PROTECTED] active=%d/%d mean_abs_corr=%.5f max_abs_corr=%.5f",
                     int(eligible.sum()), len(combined), float(np.mean(np.abs(correction[eligible]))), float(np.max(np.abs(correction[eligible])))
                 )
+            else:
+                logger.info("[NCAAF-STAT-PROTECTED] active=0/%d status=LEAKAGE_GATED_OR_INACTIVE", len(combined))
         except Exception as e:
             logger.warning("⚠️ NCAAF Stat protected route failed closed: %s", e)
+
+    # V12.0.8 protected Pathi/Big Al historical-memory route.  Only directional
+    # memories survive upstream role filtering; full-history memory is future-only.
+    memory_cfg = cfg.get("system_memory_protected_route") or {}
+    if bool(memory_cfg.get("enabled", False)) and len(df_rows) == len(combined):
+        try:
+            weight = float(memory_cfg.get("edge_weight", 0.50))
+            fam_cap = float(memory_cfg.get("max_abs_family_correction", 0.01))
+            total_cap = float(memory_cfg.get("max_abs_total_correction", 0.015))
+            min_trust = float(memory_cfg.get("min_trust", 0.05))
+            min_edge = float(memory_cfg.get("min_abs_posterior_edge", 0.01))
+            total_corr = np.zeros(len(combined), dtype=np.float64)
+            fam_counts = {}
+            for fam in ("Pathi", "BigAl"):
+                _post = pd.to_numeric(df_rows.get(f"{fam}_Historical_Posterior_Prob", 0.5), errors="coerce")
+                if not isinstance(_post, pd.Series):
+                    _post = pd.Series(_post, index=df_rows.index)
+                _trust = pd.to_numeric(df_rows.get(f"{fam}_Historical_Trust", 0.0), errors="coerce")
+                if not isinstance(_trust, pd.Series):
+                    _trust = pd.Series(_trust, index=df_rows.index)
+                post = _post.fillna(0.5).to_numpy(dtype=float)
+                trust = _trust.fillna(0.0).to_numpy(dtype=float)
+                edge = post - 0.5
+                eligible = np.isfinite(edge) & np.isfinite(trust) & (trust >= min_trust) & (np.abs(edge) >= min_edge)
+                fam_counts[fam] = int(eligible.sum())
+                fc = np.zeros(len(combined), dtype=np.float64)
+                fc[eligible] = np.clip(weight * trust[eligible] * edge[eligible], -fam_cap, fam_cap)
+                total_corr += fc
+            total_corr = np.clip(total_corr, -total_cap, total_cap)
+            active = np.abs(total_corr) > 0
+            if active.any():
+                combined = np.clip(combined + total_corr, eps, 1.0 - eps)
+            logger.info(
+                "[SYSTEM-MEMORY-PROTECTED] Pathi_active=%d BigAl_active=%d active_any=%d/%d mean_abs_corr=%.5f max_abs_corr=%.5f",
+                fam_counts.get("Pathi",0), fam_counts.get("BigAl",0), int(active.sum()), len(combined),
+                float(np.mean(np.abs(total_corr[active]))) if active.any() else 0.0,
+                float(np.max(np.abs(total_corr[active]))) if active.any() else 0.0,
+            )
+        except Exception as e:
+            logger.warning("⚠️ System-memory protected route failed closed: %s", e)
 
     return np.clip(combined, eps, 1.0 - eps)
 
@@ -10819,7 +10877,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-08-v12.0.7-context-pathi-memory-protected-stat-route"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-08-v12.0.8-protected-stat-system-memory-routing"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -13444,15 +13502,20 @@ def add_ai_betting_brain_features(df: pd.DataFrame) -> pd.DataFrame:
     key_dir = key_toward.astype(int) - key_away.astype(int)
     pathi_dir = sgn(pathi_net)
     pathi_dir = pathi_dir.where(~pathi_dir.eq(0), sgn(key_dir)).astype('int8')
-    key_evidence = (
+    pathi_context_events = (
         flag('Pathi_FB_Moved_Through_Key').astype(float)
-        + key_toward.astype(float) + key_away.astype(float)
         + flag('Pathi_FB_Moved_Onto_Key').astype(float)
         + flag('Pathi_FB_Moved_Off_Key').astype(float)
+        + flag('Pathi_FB_On_Key_3').astype(float)
+        + flag('Pathi_FB_On_Key_7').astype(float)
+        + flag('Pathi_FB_On_Key_10').astype(float)
+        + flag('Pathi_FB_On_Key_14').astype(float)
     )
-    pathi_active = pathi_count.gt(0) | key_dir.ne(0) | key_evidence.gt(0)
-    pathi_intensity = np.tanh((pathi_count + 0.50*key_evidence) / 2.0)
+    pathi_directional_evidence = key_toward.astype(float) + key_away.astype(float)
+    pathi_active = (pathi_count.gt(0) | key_dir.ne(0)) & pathi_dir.ne(0)
+    pathi_intensity = np.tanh((pathi_count + 0.75*pathi_directional_evidence) / 2.0)
     install_expert('Pathi', pathi_active, pathi_dir, pathi_intensity)
+    out['Brain_Pathi_Context_Event_Count'] = pathi_context_events.astype('float32')
 
     # ------------------------------------------------------------------
     # 5) MARKET expert state.
@@ -15226,7 +15289,21 @@ def _hist_core_profile_similarity(X: pd.DataFrame, expert: dict):
     return np.clip(np.exp(-0.22 * mean_z) * (0.65 + 0.35 * coverage), 0.10, 1.0)
 
 
+_PATHI_CONTEXT_ONLY_MEMORY_COLS_RUNTIME = {
+    "Pathi_FB_Moved_Through_Key",
+    "Pathi_FB_Moved_Onto_Key",
+    "Pathi_FB_Moved_Off_Key",
+    "Pathi_FB_On_Key_3", "Pathi_FB_On_Key_7",
+    "Pathi_FB_On_Key_10", "Pathi_FB_On_Key_14",
+}
+
+
 def _hist_core_apply_system_memory(out: pd.DataFrame, hb: dict) -> pd.DataFrame:
+    """Runtime system memory; context-only Pathi events are descriptive only.
+
+    The explicit name guard also protects migration from V12.0.7 artifacts whose
+    stored system-history records predate the persisted ``role`` field.
+    """
     for fam in ("BigAl", "Pathi"):
         out[f"{fam}_Historical_Posterior_Prob"] = np.float32(0.5)
         out[f"{fam}_Historical_Trust"] = np.float32(0.0)
@@ -15236,6 +15313,10 @@ def _hist_core_apply_system_memory(out: pd.DataFrame, hb: dict) -> pd.DataFrame:
         nume = np.zeros(len(out), dtype=float); den = np.zeros(len(out), dtype=float); sample = np.zeros(len(out), dtype=float)
         for name, stt in stats.items():
             if stt.get("family") != fam or name not in out.columns:
+                continue
+            if name in _PATHI_CONTEXT_ONLY_MEMORY_COLS_RUNTIME:
+                continue
+            if str(stt.get("role", "directional")).lower() != "directional":
                 continue
             on = pd.to_numeric(out[name], errors="coerce").fillna(0).eq(1).to_numpy(dtype=float)
             t = float(np.clip(stt.get("trust", 0.0), 0.0, 1.0)); p = float(np.clip(stt.get("posterior_prob", 0.5), 0.01, 0.99)); n = float(max(0, stt.get("sample", 0)))
@@ -15297,17 +15378,36 @@ def apply_historical_core_runtime_feature(df: pd.DataFrame, bundle, market: str)
                 sim=np.where(den>0,(S*W).sum(axis=0)/np.maximum(den,1e-12),1.0)
                 rec=np.where(den>0,(R*W).sum(axis=0)/np.maximum(den,1e-12),1.0)
         cutoff=pd.to_datetime(hb.get("historical_max_date"),errors="coerce",utc=True); game_t=pd.to_datetime(out.get("Game_Start"),errors="coerce",utc=True)
-        eligible=game_t.gt(cutoff).to_numpy() & np.isfinite(raw) & np.isfinite(eff) & (eff>=0.03)
+        core_enabled=bool(hb.get("deployment_enabled", False))
+        eligible=game_t.gt(cutoff).to_numpy() & np.isfinite(raw) & np.isfinite(eff) & (eff>=0.03) & core_enabled
         final_p=np.clip(baseline+eff*(raw-baseline),0.01,0.99); edge=final_p-baseline
-        out[HISTORICAL_CORE_BASELINE_NAME]=baseline.astype("float32"); out[HISTORICAL_CORE_RAW_NAME]=np.asarray(raw,dtype="float32")
-        out[HISTORICAL_CORE_DRIFT_NAME]=np.asarray(sim,dtype="float32"); out[HISTORICAL_CORE_RECENCY_NAME]=np.asarray(rec,dtype="float32"); out[HISTORICAL_CORE_AGREEMENT_NAME]=np.asarray(agree,dtype="float32")
-        out[HISTORICAL_CORE_BASE_TRUST_NAME]=np.float32(float(np.clip(hb.get("trust",0.0),0.0,1.0)))
-        out[HISTORICAL_CORE_HORIZON_COUNT_NAME]=np.int8(len(experts) if experts else (1 if hb.get("model") is not None else 0))
+        out[HISTORICAL_CORE_BASELINE_NAME]=baseline.astype("float32")
+        # Deployment-off means neutral predictor state, not merely Active=0.  This
+        # keeps legacy champions from consuming Historical Core raw values through
+        # an old selected feature while preserving the market baseline audit field.
+        out.loc[eligible,HISTORICAL_CORE_RAW_NAME]=np.asarray(raw,dtype="float32")[eligible]
+        out.loc[eligible,HISTORICAL_CORE_DRIFT_NAME]=np.asarray(sim,dtype="float32")[eligible]
+        out.loc[eligible,HISTORICAL_CORE_RECENCY_NAME]=np.asarray(rec,dtype="float32")[eligible]
+        out.loc[eligible,HISTORICAL_CORE_AGREEMENT_NAME]=np.asarray(agree,dtype="float32")[eligible]
+        out.loc[eligible,HISTORICAL_CORE_BASE_TRUST_NAME]=np.float32(float(np.clip(hb.get("trust",0.0),0.0,1.0)))
+        out.loc[eligible,HISTORICAL_CORE_HORIZON_COUNT_NAME]=np.int8(len(experts) if experts else (1 if hb.get("model") is not None else 0))
         out.loc[eligible,HISTORICAL_CORE_FEATURE_NAME]=final_p[eligible].astype("float32"); out.loc[eligible,HISTORICAL_CORE_EDGE_NAME]=edge[eligible].astype("float32")
         out.loc[eligible,HISTORICAL_CORE_ACTIVE_NAME]=np.int8(1); out.loc[eligible,HISTORICAL_CORE_TRUST_NAME]=eff[eligible].astype("float32")
-        out[HISTORICAL_CORE_UNCERTAINTY_NAME]=(1.0-np.clip(np.asarray(eff)*np.asarray(agree),0.0,1.0)).astype("float32")
+        out.loc[eligible,HISTORICAL_CORE_UNCERTAINTY_NAME]=(1.0-np.clip(np.asarray(eff)[eligible]*np.asarray(agree)[eligible],0.0,1.0)).astype("float32")
+        # Independent future-only system-memory leakage gate.
         out=_hist_core_apply_system_memory(out,hb)
-        logging.info("[HISTORICAL-BRAIN-RUNTIME] market=%s active=%d/%d horizons=%d mean_trust=%.3f",m,int(eligible.sum()),len(out),int(out[HISTORICAL_CORE_HORIZON_COUNT_NAME].iloc[0]) if len(out) else 0,float(np.mean(eff)) if len(eff) else 0.0)
+        memory_cutoff=pd.to_datetime(hb.get("system_memory_cutoff_date") or hb.get("historical_max_date"),errors="coerce",utc=True)
+        memory_eligible=game_t.gt(memory_cutoff).to_numpy() & bool(hb.get("system_memory_deployment_enabled", True))
+        for _fam in ("BigAl","Pathi"):
+            out.loc[~memory_eligible,f"{_fam}_Historical_Posterior_Prob"]=np.float32(0.5)
+            out.loc[~memory_eligible,f"{_fam}_Historical_Trust"]=np.float32(0.0)
+            out.loc[~memory_eligible,f"{_fam}_Historical_Sample"]=np.float32(0.0)
+        logging.info(
+            "[HISTORICAL-BRAIN-RUNTIME] market=%s core_active=%d/%d core_enabled=%s Pathi_memory=%d BigAl_memory=%d",
+            m,int(eligible.sum()),len(out),core_enabled,
+            int(pd.to_numeric(out.get("Pathi_Historical_Trust"),errors="coerce").fillna(0).gt(0).sum()),
+            int(pd.to_numeric(out.get("BigAl_Historical_Trust"),errors="coerce").fillna(0).gt(0).sum()),
+        )
     except Exception as e:
         logging.warning("[HISTORICAL-BRAIN-RUNTIME] disabled: %s",e,exc_info=True)
     return out
