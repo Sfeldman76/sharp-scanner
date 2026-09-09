@@ -14666,7 +14666,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-09-v13.0.8-market-horizon-tail-audit"
+NCAAF_V13_VERSION = "2026-09-09-v13.0.9-market-residual-trust-audit"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -15809,7 +15809,12 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         pred_close_home=np.full(n,np.nan,dtype=float)
         if isinstance(market,dict) and market.get("models") is not None:
             mcols=list(market.get("feature_cols") or [])
-            pred_close_home=_ncaaf_v13_pair_predict(market.get("models"),mf.reindex(columns=mcols),float(market.get("linear_weight",0.75)))
+            _mp=_ncaaf_v13_pair_predict(market.get("models"),mf.reindex(columns=mcols),float(market.get("linear_weight",0.75)))
+            if str(market.get("target_mode","")).upper()=="CLOSE_MOVE_RESIDUAL":
+                _cur_home=pd.to_numeric(mf.get("Current_Margin"),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+                pred_close_home=_cur_home+np.asarray(_mp,dtype=float)
+            else:
+                pred_close_home=np.asarray(_mp,dtype=float)
         pred_close_side=pred_close_home*orient
         market_edge=pred_close_side-offered_margin
         prob=np.full(n,np.nan,dtype=float)
