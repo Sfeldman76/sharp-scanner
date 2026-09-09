@@ -14239,7 +14239,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-09-v13.0.11-stability-research"
+NCAAF_V13_VERSION = "2026-09-09-v13.0.12-walkforward-selective-calibration"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -16154,6 +16154,49 @@ def _ncaaf_v13_build_fundamental(raw: pd.DataFrame, bq=None, log_func=print):
     final_margin=_ncaaf_v13_fit_regression_pair(games.loc[coefficient_mask,margin_cols],ym[coefficient_mask])
     final_total=_ncaaf_v13_fit_regression_pair(games.loc[coefficient_mask,total_cols],yt[coefficient_mask])
 
+    # V13.0.12 prospective replay.  The structural coefficients and admitted
+    # feature set are frozen on seasons strictly before the current season.  We
+    # may therefore score completed current-season games for research without
+    # lowering the historical >=100-game OOF gate or refitting on 2026 results.
+    prospective_frame=pd.DataFrame()
+    _pros_mask=np.isfinite(ym)&np.isfinite(yt)&(season_arr==float(now_season))
+    if int(_pros_mask.sum())>0:
+        try:
+            _pxm=games.loc[_pros_mask,margin_cols]
+            _pxt=games.loc[_pros_mask,total_cols]
+            _p_lin=np.asarray(final_margin[0].predict(_pxm),dtype=float)
+            _p_hgb=np.asarray(final_margin[1].predict(_pxm),dtype=float)
+            _p_raw=0.80*_p_lin+0.20*_p_hgb
+            _p_tot=_ncaaf_v13_regression_predict(final_total,_pxt,0.80)
+            _pmkt=pd.to_numeric(games.loc[_pros_mask,"Market_Open_Margin"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+            _ptotmkt=pd.to_numeric(games.loc[_pros_mask,"Market_Open_Total"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+            _mb=float(edge.get("margin_beta",0.0)); _tb=float(edge.get("total_beta",0.0))
+            _p_trad=_pmkt+_mb*(_p_raw-_pmkt)
+            _p_trad_t=_ptotmkt+_tb*(_p_tot-_ptotmkt)
+            _base_cols=["Season","Game_Date","V13_Pair_Key","V13_Matchup_Key","Team_Norm","Opponent_Norm","Actual_Margin","Actual_Total","Market_Open_Margin","Market_Open_Total"]
+            prospective_frame=games.loc[_pros_mask,_base_cols].copy().reset_index(drop=True)
+            prospective_frame["V13_Raw_Fair_Margin_OOF"]=_p_raw
+            prospective_frame["V13_Tradable_Fair_Margin_OOF"]=_p_trad
+            prospective_frame["V13_Raw_Fair_Total_OOF"]=_p_tot
+            prospective_frame["V13_Tradable_Fair_Total_OOF"]=_p_trad_t
+            prospective_frame["V13_Linear_Fair_Margin_OOF"]=_p_lin
+            prospective_frame["V13_HGB_Fair_Margin_OOF"]=_p_hgb
+            for _c in ("Context_Week","Context_Cross_Subdivision","Context_Is_Neutral"):
+                if _c in games.columns:
+                    prospective_frame[_c]=pd.to_numeric(games.loc[_pros_mask,_c],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+            prospective_frame["V13_Eval_Mode"]="PROSPECTIVE_REPLAY_FROZEN_PRIOR_SEASONS"
+            _pa=ym[_pros_mask]
+            _pr_skill=_ncaaf_v13_bootstrap_regression_skill(_pa,_pmkt,_p_trad,reps=600,seed=13180)
+            log_func(
+                f"[V13-PROSPECTIVE-FUND] season={now_season} n={len(prospective_frame)} "
+                f"raw_rmse={_ncaaf_v13_rmse(_pa,_p_raw):.3f} market_rmse={_ncaaf_v13_rmse(_pa,_pmkt):.3f} "
+                f"tradable_rmse={_ncaaf_v13_rmse(_pa,_p_trad):.3f} rmse_gain={_pr_skill.get('rmse_skill',np.nan):+.4f} "
+                f"mae_gain={_pr_skill.get('mae_skill',np.nan):+.4f} frozen_through={now_season-1} authority=RESEARCH_ONLY"
+            )
+        except Exception as _e:
+            log_func(f"[V13-PROSPECTIVE-FUND] unavailable={_e}")
+            prospective_frame=pd.DataFrame()
+
     residual_margin=(ym-trad_m)[np.isfinite(ym)&np.isfinite(trad_m)]
     residual_total=(yt-trad_t)[np.isfinite(yt)&np.isfinite(trad_t)]
     out=games[["Season","Game_Date","V13_Pair_Key","V13_Matchup_Key","Team_Norm","Opponent_Norm","Actual_Margin","Actual_Total","Market_Open_Margin","Market_Open_Total"]].copy()
@@ -16190,6 +16233,7 @@ def _ncaaf_v13_build_fundamental(raw: pd.DataFrame, bq=None, log_func=print):
         "historical_max_date":pd.Timestamp(games["Game_Date"].max()).isoformat(),
         "historical_max_season":max(seasons),
         "oof_frame":out,
+        "prospective_frame":prospective_frame,
     }
     pooled_rmse=_ncaaf_v13_rmse(ym,oof_m)
     market_all=pd.to_numeric(games["Market_Open_Margin"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
@@ -17532,8 +17576,16 @@ def _ncaaf_v13_market_stability_research(market: dict, log_func=print):
             pm=hm.predict_proba(X.loc[va])[:,1]
         ph=cur[va]+pm*gv*move_raw; pred_hurdle[va]=ph
         rg=groups[va]; s1=_ncaaf_v13_bootstrap_regression_skill(close[va],cur[va],ps,groups=rg,reps=250,seed=13140+fold); s2=_ncaaf_v13_bootstrap_regression_skill(close[va],cur[va],ph,groups=rg,reps=250,seed=13150+fold)
+        # Always retain direct fold skill even when the fold is too small for a
+        # stable clustered bootstrap interval.  This fixes the 13.0.11 NaN-only
+        # diagnostics while keeping CI-based authority fail-closed.
+        d1r=_ncaaf_v13_rmse(close[va],cur[va])-_ncaaf_v13_rmse(close[va],ps)
+        d1m=_ncaaf_v13_mae(close[va],cur[va])-_ncaaf_v13_mae(close[va],ps)
+        d2r=_ncaaf_v13_rmse(close[va],cur[va])-_ncaaf_v13_rmse(close[va],ph)
+        d2m=_ncaaf_v13_mae(close[va],cur[va])-_ncaaf_v13_mae(close[va],ph)
+        s1["rmse_skill_direct"]=d1r; s1["mae_skill_direct"]=d1m; s2["rmse_skill_direct"]=d2r; s2["mae_skill_direct"]=d2m
         fold_rows.append({"fold":fold,"shrink":s1,"hurdle":s2,"gamma":gamma,"gamma_h":gh})
-        log_func(f"[V13-MARKET-STABILITY-FOLD] fold={fold} train_games={len(set(tg))} valid_games={len(set(vg))} gamma={gamma:.3f} gamma_1h={gh.get(1.0,gamma):.3f} gamma_6h={gh.get(6.0,gamma):.3f} gamma_24h={gh.get(24.0,gamma):.3f} shrink_rmse_gain={s1.get('rmse_skill',np.nan):+.4f} shrink_mae_gain={s1.get('mae_skill',np.nan):+.4f} hurdle_rmse_gain={s2.get('rmse_skill',np.nan):+.4f} hurdle_mae_gain={s2.get('mae_skill',np.nan):+.4f}")
+        log_func(f"[V13-MARKET-STABILITY-FOLD] fold={fold} train_games={len(set(tg))} valid_games={len(set(vg))} gamma={gamma:.3f} gamma_1h={gh.get(1.0,gamma):.3f} gamma_6h={gh.get(6.0,gamma):.3f} gamma_24h={gh.get(24.0,gamma):.3f} shrink_rmse_gain={d1r:+.4f} shrink_mae_gain={d1m:+.4f} hurdle_rmse_gain={d2r:+.4f} hurdle_mae_gain={d2m:+.4f} ci_available={bool(np.isfinite((s1.get('rmse_skill_ci95') or [np.nan])[0]))}")
     result={"folds":fold_rows}
     for label,pred in (("ASOF_HORIZON_SHRUNK_LITE",pred_shrink),("HURDLE_SHRUNK_LITE",pred_hurdle)):
         ok=np.isfinite(pred); ng=len(pd.unique(groups[ok]))
@@ -17547,27 +17599,335 @@ def _ncaaf_v13_market_stability_research(market: dict, log_func=print):
     return result
 
 
+
+def _ncaaf_v13_all_eval_cover_frame(fundamental: dict) -> pd.DataFrame:
+    """Historical walk-forward OOF plus frozen-current-season prospective replay."""
+    hist=_ncaaf_v13_fundamental_cover_frame(fundamental)
+    parts=[]
+    if isinstance(hist,pd.DataFrame) and not hist.empty:
+        hist=hist.copy(); hist["V13_Eval_Mode"]="HISTORICAL_WALK_FORWARD_OOS"; parts.append(hist)
+    pros=fundamental.get("prospective_frame") if isinstance(fundamental,dict) else None
+    if isinstance(pros,pd.DataFrame) and not pros.empty:
+        tmp=dict(fundamental); tmp["oof_frame"]=pros
+        pp=_ncaaf_v13_fundamental_cover_frame(tmp)
+        if isinstance(pp,pd.DataFrame) and not pp.empty:
+            pp=pp.copy(); pp["V13_Eval_Mode"]="PROSPECTIVE_REPLAY_FROZEN_PRIOR_SEASONS"; parts.append(pp)
+    return pd.concat(parts,ignore_index=True,sort=False) if parts else pd.DataFrame()
+
+
+def _ncaaf_v13_weighted_tail_probability(resid, threshold, weights=None):
+    """Jeffreys-smoothed weighted empirical P(residual > threshold)."""
+    rr=np.asarray(resid,dtype=float); th=np.asarray(threshold,dtype=float)
+    ok=np.isfinite(rr); rr=rr[ok]
+    if weights is None:
+        ww=np.ones(len(rr),dtype=float)
+    else:
+        w0=np.asarray(weights,dtype=float)[ok]; ww=np.where(np.isfinite(w0)&(w0>0),w0,0.0)
+    if len(rr)<50 or float(np.sum(ww))<=0:
+        return np.full(len(th),np.nan),0.0
+    order=np.argsort(rr); sr=rr[order]; sw=ww[order]; cw=np.cumsum(sw); total=float(cw[-1])
+    pos=np.searchsorted(sr,th,side="right")
+    below=np.where(pos>0,cw[np.maximum(pos-1,0)],0.0)
+    tail=total-below
+    avgw=total/max(len(sr),1)
+    p=(tail+0.5*avgw)/(total+avgw)
+    neff=(total*total)/max(float(np.sum(sw*sw)),1e-12)
+    return np.clip(p,1e-5,1-1e-5),float(neff)
+
+
+def _ncaaf_v13_aurc(y,p,confidence):
+    """Area under 0/1 risk-coverage curve; lower is better."""
+    yy=np.asarray(y,dtype=int); pp=np.asarray(p,dtype=float); cc=np.asarray(confidence,dtype=float)
+    ok=np.isfinite(pp)&np.isfinite(cc)
+    if int(ok.sum())<40: return np.nan
+    yy=yy[ok]; pp=pp[ok]; cc=cc[ok]
+    order=np.argsort(cc)[::-1]; err=((pp[order]>=.5).astype(int)!=yy[order]).astype(float)
+    cum=np.cumsum(err)/np.arange(1,len(err)+1)
+    cov=np.arange(1,len(err)+1)/len(err)
+    return float(np.trapz(cum,cov))
+
+
+def _ncaaf_v13_selective_metrics(y,p,confidence,label,season_label,log_func=print):
+    yy=np.asarray(y,dtype=int); pp=np.asarray(p,dtype=float); cc=np.asarray(confidence,dtype=float)
+    ok=np.isfinite(pp)&np.isfinite(cc)
+    if int(ok.sum())<75: return None
+    idx=np.where(ok)[0]; order=idx[np.argsort(cc[idx])[::-1]]
+    aurc=_ncaaf_v13_aurc(yy[idx],pp[idx],cc[idx]); out={"aurc":aurc,"n":len(order),"coverages":{}}
+    for frac in (1.0,.50,.25,.10,.05):
+        n=max(20,int(np.floor(len(order)*frac))); use=order[:n]
+        met=_ncaaf_v13_prob_metrics_with_ece(yy[use],pp[use]); out["coverages"][frac]=met
+        log_func(f"[V13-RISK-COVERAGE] season={season_label} score={label} coverage={frac:.0%} n={met['n']} auc={met['auc']:.4f} ll={met['logloss']:.6f} brier={met['brier']:.6f} acc={met['accuracy']:.3%} ece={met['ece']:.4f} aurc={aurc:.5f}")
+    return out
+
+
+
+def _ncaaf_v13_calibration_slope_intercept(y,p):
+    yy=np.asarray(y,dtype=int); pp=np.asarray(p,dtype=float); ok=np.isfinite(pp)
+    yy=yy[ok]; pp=np.clip(pp[ok],1e-5,1-1e-5)
+    if len(yy)<100 or np.unique(yy).size<2: return {"intercept":np.nan,"slope":np.nan}
+    try:
+        from sklearn.linear_model import LogisticRegression
+        x=np.log(pp/(1-pp)).reshape(-1,1)
+        m=LogisticRegression(C=1e6,solver="lbfgs",max_iter=1000).fit(x,yy)
+        return {"intercept":float(m.intercept_[0]),"slope":float(m.coef_[0,0])}
+    except Exception:
+        return {"intercept":np.nan,"slope":np.nan}
+
+
+def _ncaaf_v13_temporal_empirical_intervals(fundamental: dict, log_func=print):
+    """Conformal-style temporal residual intervals; research only.
+
+    We intentionally call these empirical temporal intervals rather than claiming
+    exchangeable split-conformal guarantees. Each validation season uses only
+    residuals from earlier seasons, matching the nonstationary sports setting.
+    """
+    z=_ncaaf_v13_all_eval_cover_frame(fundamental)
+    if z.empty: return None
+    ss=pd.to_numeric(z.get("Season"),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    actual=pd.to_numeric(z.get("Actual_Margin"),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    raw=pd.to_numeric(z.get("V13_Raw_Fair_Margin_OOF"),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    resid=actual-raw; seasons=sorted(int(v) for v in pd.Series(ss).dropna().unique()); rows=[]
+    for val in seasons:
+        tr=np.isfinite(ss)&(ss<float(val))&np.isfinite(resid); va=np.isfinite(ss)&(ss==float(val))&np.isfinite(actual)&np.isfinite(raw)
+        if int(tr.sum())<500 or int(va.sum())<50: continue
+        rr=resid[tr]
+        for level in (.60,.80,.90):
+            a=(1-level)/2; qlo,qhi=np.quantile(rr,[a,1-a]); lo=raw[va]+qlo; hi=raw[va]+qhi
+            cov=float(np.mean((actual[va]>=lo)&(actual[va]<=hi))); width=float(np.mean(hi-lo))
+            rows.append({"season":val,"level":level,"coverage":cov,"width":width,"n":int(va.sum())})
+            log_func(f"[V13-TEMPORAL-INTERVAL] season={val} nominal={level:.0%} n={int(va.sum())} coverage={cov:.3%} avg_width={width:.2f} qlo={qlo:.2f} qhi={qhi:.2f} authority=RESEARCH_ONLY")
+    return rows
+
+def _ncaaf_v13_residual_cdf_v2_research(fundamental: dict, log_func=print):
+    """Nested multi-season empirical residual probability + selective-risk research.
+
+    Candidate distribution/calibration/confidence choices are selected only from
+    earlier validation seasons.  The current season is a frozen prospective replay
+    and never participates in coefficient or candidate selection before its game.
+    """
+    z=_ncaaf_v13_all_eval_cover_frame(fundamental)
+    if z.empty: return None
+    ss=pd.to_numeric(z.get("Season"),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    actual=pd.to_numeric(z.get("Actual_Margin"),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    market=pd.to_numeric(z.get("Market_Open_Margin"),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    raw=pd.to_numeric(z.get("V13_Raw_Fair_Margin_OOF"),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    trad=pd.to_numeric(z.get("V13_Tradable_Fair_Margin_OOF"),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    comp=pd.to_numeric(z.get("Component_Disagreement"),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    y=z["Cover"].to_numpy(dtype=int)
+    raw_resid=actual-raw; trad_resid=actual-trad
+    seasons=sorted(int(v) for v in pd.Series(ss).dropna().unique())
+    candidates=("EXPANDING_TRAD","EXPANDING_RAW","ROLLING2_RAW","DECAY_RAW")
+    preds={k:np.full(len(z),np.nan) for k in candidates}; neffs={k:np.full(len(z),np.nan) for k in candidates}
+    season_metrics={k:{} for k in candidates}
+    selected=np.full(len(z),np.nan); selected_name={}
+    prior_scores={k:[] for k in candidates}
+    for val in seasons:
+        va=np.isfinite(ss)&(ss==float(val))&np.isfinite(actual)&np.isfinite(market)&np.isfinite(raw)
+        if int(va.sum())<50: continue
+        # Need at least one earlier OOF residual season.  2024 therefore uses 2023;
+        # 2025 uses 2023-24; 2026 uses 2023-25.
+        tr_all=np.isfinite(ss)&(ss<float(val))&np.isfinite(raw_resid)&np.isfinite(trad_resid)
+        if int(tr_all.sum())<500: continue
+        idx=np.where(va)[0]
+        specs={
+            "EXPANDING_TRAD":(trad_resid[tr_all],market[va]-trad[va],None),
+            "EXPANDING_RAW":(raw_resid[tr_all],market[va]-raw[va],None),
+        }
+        tr_roll=tr_all&(ss>=float(val-2))
+        if int(tr_roll.sum())<400: tr_roll=tr_all
+        specs["ROLLING2_RAW"]=(raw_resid[tr_roll],market[va]-raw[va],None)
+        # Season-decayed residual pool: current-minus-1 receives weight 1, then .65.
+        sval=ss[tr_all]; wdec=np.power(.65,np.maximum((float(val)-1.0)-sval,0.0))
+        specs["DECAY_RAW"]=(raw_resid[tr_all],market[va]-raw[va],wdec)
+        for name,(rr,thr,ww) in specs.items():
+            pv,ne=_ncaaf_v13_weighted_tail_probability(rr,thr,ww); preds[name][idx]=pv; neffs[name][idx]=ne
+            met=_ncaaf_v13_prob_metrics_with_ece(y[idx],pv); _cal=_ncaaf_v13_calibration_slope_intercept(y[idx],pv); met.update({"calibration_intercept":_cal["intercept"],"calibration_slope":_cal["slope"]}); season_metrics[name][val]=met
+            prior_scores[name].append((val,met["logloss"],met["brier"]))
+            log_func(f"[V13-RESIDUAL-V2-SEASON] season={val} candidate={name} n={met['n']} auc={met['auc']:.4f} ll={met['logloss']:.6f} brier={met['brier']:.6f} ece={met['ece']:.4f} cal_intercept={_cal['intercept']:+.3f} cal_slope={_cal['slope']:.3f} neff={ne:.1f} authority=RESEARCH_ONLY")
+        # Strict nested candidate selection. First eligible season uses the proven
+        # 13.0.11 baseline; later seasons choose the lowest prior-season log loss,
+        # with Brier as a deterministic tie-breaker.
+        eligible_prior={k:[r for r in prior_scores[k] if r[0] < val] for k in candidates}
+        if val==min(v for v in seasons if v>=val):
+            pass
+        choice="EXPANDING_TRAD"
+        scored=[]
+        for k,rows in eligible_prior.items():
+            if rows:
+                scored.append((float(np.mean([r[1] for r in rows])),float(np.mean([r[2] for r in rows])),k))
+        if scored: choice=sorted(scored)[0][2]
+        selected[idx]=preds[choice][idx]; selected_name[val]=choice
+        log_func(f"[V13-RESIDUAL-ASOF-SELECT] season={val} selected={choice} prior_validation_seasons={[r[0] for r in eligible_prior.get(choice,[])]} rule=MIN_PRIOR_LOGLOSS_THEN_BRIER authority=RESEARCH_ONLY")
+    # Post-hoc calibrators are themselves season-forward. Beta and sigmoid are
+    # retained; isotonic is excluded because our per-season sample is too small.
+    beta=_ncaaf_v13_calibrate_probability_asof(selected,y,ss,"beta")
+    sigmoid=_ncaaf_v13_calibrate_probability_asof(selected,y,ss,"sigmoid")
+    calibration={}
+    for name,pv in (("IDENTITY",selected),("BETA",beta),("SIGMOID",sigmoid)):
+        calibration[name]={}
+        for val in seasons:
+            m=np.isfinite(ss)&(ss==float(val))&np.isfinite(pv)
+            if int(m.sum())<50: continue
+            met=_ncaaf_v13_prob_metrics_with_ece(y[m],pv[m]); calibration[name][val]=met
+            log_func(f"[V13-RESIDUAL-CAL-SEASON] season={val} method={name} n={met['n']} auc={met['auc']:.4f} ll={met['logloss']:.6f} brier={met['brier']:.6f} ece={met['ece']:.4f} authority=RESEARCH_ONLY")
+    # Confidence estimators: probability distance, finite-sample standardized
+    # distance, and standardized distance penalized smoothly by base-model
+    # disagreement. Choice for each season is based only on earlier AURC.
+    # Use selected candidate's effective N for the standard-error calculation.
+    ne_sel=np.full(len(z),np.nan)
+    for val,ch in selected_name.items():
+        m=np.isfinite(ss)&(ss==float(val)); ne_sel[m]=neffs[ch][m]
+    se=np.sqrt(np.clip(selected*(1-selected),1e-6,None)/np.maximum(ne_sel,1.0))
+    confs={
+        "PROB_DISTANCE":np.abs(selected-.5),
+        "STANDARDIZED_DISTANCE":np.abs(selected-.5)/np.maximum(se,1e-4),
+        "STD_DISTANCE_COMPONENT_PENALTY":np.abs(selected-.5)/np.maximum(se,1e-4)/(1.0+np.nan_to_num(comp,nan=0.0)/5.0),
+    }
+    risk={k:{} for k in confs}; chosen_conf={}
+    for val in seasons:
+        m=np.isfinite(ss)&(ss==float(val))&np.isfinite(selected)
+        if int(m.sum())<75: continue
+        for k,c in confs.items():
+            rr=_ncaaf_v13_selective_metrics(y[m],selected[m],c[m],k,val,log_func=log_func); risk[k][val]=rr
+        prior=[]
+        for k in confs:
+            vals=[risk[k][s0]["aurc"] for s0 in risk[k] if s0<val and risk[k][s0] and np.isfinite(risk[k][s0]["aurc"])]
+            if vals: prior.append((float(np.mean(vals)),k))
+        ck=sorted(prior)[0][1] if prior else "PROB_DISTANCE"; chosen_conf[val]=ck
+        log_func(f"[V13-CONFIDENCE-ASOF-SELECT] season={val} score={ck} prior_seasons={[s0 for s0 in risk[ck] if s0<val]} rule=MIN_PRIOR_AURC authority=RESEARCH_ONLY")
+    # Pooled proper-score diagnostics are descriptive; promotion still requires
+    # season-by-season stability and prospective confirmation.
+    out={"season_metrics":season_metrics,"selected_candidate":selected_name,"calibration":calibration,"risk_coverage":risk,"confidence_selected":chosen_conf}
+    good=np.isfinite(selected)
+    if int(good.sum())>=300:
+        met=_ncaaf_v13_prob_metrics_with_ece(y[good],selected[good]); dec=_ncaaf_v13_brier_decomposition(y[good],selected[good])
+        log_func(f"[V13-RESIDUAL-V2] model=ASOF_SELECTED_EMPIRICAL_CDF n={met['n']} auc={met['auc']:.4f} ll={met['logloss']:.6f} brier={met['brier']:.6f} ece={met['ece']:.4f} reliability={dec['reliability']:.6f} resolution={dec['resolution']:.6f} authority=RESEARCH_ONLY")
+        out["pooled"]=met
+        # Promotion-readiness is deliberately stricter than pooled performance:
+        # two positive historical walk-forward seasons, positive clustered proper-
+        # score CI on those historical seasons, and a positive current-season
+        # prospective replay when >=75 games are available.
+        mode=z.get("V13_Eval_Mode",pd.Series("",index=z.index)).astype(str).to_numpy(dtype=object)
+        hist=np.isfinite(selected)&np.char.startswith(mode.astype(str),"HISTORICAL")
+        hist_seasons=sorted(int(v) for v in pd.Series(ss[hist]).dropna().unique())
+        pos_hist=0
+        for sv in hist_seasons:
+            hm=hist&(ss==float(sv)); hmet=_ncaaf_v13_prob_metrics_with_ece(y[hm],selected[hm])
+            if hmet["logloss"]<np.log(2.0) and hmet["brier"]<.25: pos_hist+=1
+        tmp=z.copy(); tmp["Horizon_Hours"]=0.0
+        hboot=_ncaaf_v13_cluster_bootstrap_skill(tmp,y,np.where(hist,selected,np.nan),reps=700,seed=13190) if int(hist.sum())>=200 else {}
+        ll_lo=float((hboot.get("ll_skill_ci95") or [np.nan,np.nan])[0]); br_lo=float((hboot.get("brier_skill_ci95") or [np.nan,np.nan])[0])
+        pros=np.isfinite(selected)&np.char.startswith(mode.astype(str),"PROSPECTIVE")
+        pros_ok=True; pros_met=None
+        if int(pros.sum())>=75:
+            pros_met=_ncaaf_v13_prob_metrics_with_ece(y[pros],selected[pros]); pros_ok=bool(pros_met["logloss"]<np.log(2.0) and pros_met["brier"]<.25)
+        gate=bool(len(hist_seasons)>=2 and pos_hist>=2 and np.isfinite(ll_lo) and np.isfinite(br_lo) and ll_lo>0 and br_lo>0 and pros_ok)
+        log_func(f"[V13-RESIDUAL-PROMOTION-GATE] historical_seasons={hist_seasons} positive_historical={pos_hist}/{len(hist_seasons)} hist_ll_ci95={hboot.get('ll_skill_ci95')} hist_brier_ci95={hboot.get('brier_skill_ci95')} prospective_n={int(pros.sum())} prospective_ll={(pros_met or {}).get('logloss',np.nan):.6f} prospective_brier={(pros_met or {}).get('brier',np.nan):.6f} gate={'PASS' if gate else 'CLOSED'} authority=RESEARCH_ONLY")
+        out["promotion_readiness"]={"gate":gate,"positive_historical":pos_hist,"historical_seasons":hist_seasons,"bootstrap":hboot,"prospective_metrics":pros_met}
+    return out
+
+
+def _ncaaf_v13_fixed_validation_learning_curve(fundamental: dict, log_func=print):
+    """Comparable learning curve: same validation season, expanding prior history."""
+    z=_ncaaf_v13_meta_ready_frame(fundamental)
+    if z.empty: return None
+    ss=pd.to_numeric(z.get("Season"),errors="coerce"); seasons=sorted(int(v) for v in ss.dropna().unique())
+    if len(seasons)<2: return None
+    val=seasons[-1]; va=ss.eq(val); trpool=ss.lt(val)
+    if int(va.sum())<200 or int(trpool.sum())<400: return None
+    core,_=_ncaaf_v13_fundamental_cover_feature_sets(); y=z["Cover"].to_numpy(dtype=int)
+    order=pd.to_datetime(z.get("Game_Date"),errors="coerce",utc=True).sort_values().index
+    tridx=[i for i in order if bool(trpool.iloc[i])]; vidx=np.where(va.to_numpy())[0]
+    rows=[]
+    for n in (300,500,750,1000,1500):
+        if len(tridx)<n: continue
+        use=np.asarray(tridx[-n:],dtype=int); m=_ncaaf_v13_new_cover_model(); m.fit(z.loc[use,core],y[use]); p=m.predict_proba(z.loc[vidx,core])[:,1]
+        met=_ncaaf_v13_prob_metrics_with_ece(y[vidx],p); rows.append({"train_games":n,**met})
+        log_func(f"[V13-LEARNING-CURVE-FIXED] validation_season={val} train_games={n} validation_games={met['n']} auc={met['auc']:.4f} ll={met['logloss']:.6f} brier={met['brier']:.6f} ece={met['ece']:.4f}")
+    return rows
+
+
+def _ncaaf_v13_asof_blend_research(fundamental: dict, log_func=print):
+    """Choose Ridge/HGB convex weight only from prior OOS seasons."""
+    z=_ncaaf_v13_all_eval_cover_frame(fundamental)
+    if z.empty: return None
+    ss=pd.to_numeric(z.get("Season"),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    y=pd.to_numeric(z.get("Actual_Margin"),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    lin=pd.to_numeric(z.get("V13_Linear_Fair_Margin_OOF"),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    hgb=pd.to_numeric(z.get("V13_HGB_Fair_Margin_OOF"),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    weights=np.arange(.50,1.001,.05); seasons=sorted(int(v) for v in pd.Series(ss).dropna().unique()); out=[]
+    for val in seasons:
+        tr=np.isfinite(ss)&(ss<float(val))&np.isfinite(y)&np.isfinite(lin)&np.isfinite(hgb)
+        va=np.isfinite(ss)&(ss==float(val))&np.isfinite(y)&np.isfinite(lin)&np.isfinite(hgb)
+        if int(tr.sum())<500 or int(va.sum())<50: continue
+        scores=[]
+        for w in weights:
+            p=w*lin[tr]+(1-w)*hgb[tr]; scores.append((_ncaaf_v13_rmse(y[tr],p),_ncaaf_v13_mae(y[tr],p),float(w)))
+        _,_,w=sorted(scores)[0]; p=w*lin[va]+(1-w)*hgb[va]; base=.80*lin[va]+.20*hgb[va]
+        rec={"season":val,"weight":w,"rmse":_ncaaf_v13_rmse(y[va],p),"baseline_rmse":_ncaaf_v13_rmse(y[va],base),"mae":_ncaaf_v13_mae(y[va],p),"baseline_mae":_ncaaf_v13_mae(y[va],base)}; out.append(rec)
+        log_func(f"[V13-ASOF-BLEND] season={val} selected_linear_weight={w:.2f} prior_n={int(tr.sum())} n={int(va.sum())} rmse={rec['rmse']:.3f} baseline80_rmse={rec['baseline_rmse']:.3f} rmse_gain={rec['baseline_rmse']-rec['rmse']:+.3f} mae_gain={rec['baseline_mae']-rec['mae']:+.3f} authority=RESEARCH_ONLY")
+    return out
+
+
+def _ncaaf_v13_market_direction_research(market: dict, log_func=print):
+    """Ask a simpler market question: direction of meaningful remaining movement."""
+    if not isinstance(market,dict) or not isinstance(market.get("oof_frame"),pd.DataFrame): return None
+    d=market["oof_frame"].copy(); cur=pd.to_numeric(d.get("Current_Margin"),errors="coerce"); close=pd.to_numeric(d.get("Sharp_Close_Margin"),errors="coerce")
+    move=close-cur; meaningful=move.abs().ge(.5)&move.notna()&d.get("Game_Start").notna()
+    work=d.loc[meaningful].copy().reset_index(drop=True)
+    if len(work)<60: return None
+    y=(pd.to_numeric(work["Sharp_Close_Margin"],errors="coerce")-pd.to_numeric(work["Current_Margin"],errors="coerce")).gt(0).astype(int).to_numpy()
+    cols=(market.get("market_lite") or {}).get("feature_cols") or []
+    X=work.reindex(columns=cols).apply(pd.to_numeric,errors="coerce"); groups=work["V13_Matchup_Key"].astype(str).to_numpy(dtype=object); gs=pd.to_datetime(work["Game_Start"],errors="coerce",utc=True)
+    ug=(pd.DataFrame({"g":groups,"t":gs}).groupby("g",sort=False)["t"].min().sort_values().index.tolist())
+    if len(ug)<50: return None
+    initial=max(35,int(len(ug)*.45)); block=max(15,int((len(ug)-initial)/3)); pred=np.full(len(work),np.nan); folds=[]; start=initial
+    while start<len(ug):
+        vg=ug[start:min(start+block,len(ug))]; tg=ug[:start]; start+=block
+        tr=np.isin(groups,tg); va=np.isin(groups,vg)
+        if int(tr.sum())<35 or int(va.sum())<10 or np.unique(y[tr]).size<2: continue
+        m=_ncaaf_v13_new_cover_model(); m.fit(X.loc[tr],y[tr]); pred[va]=m.predict_proba(X.loc[va])[:,1]
+        met=_ncaaf_v13_prob_metrics_with_ece(y[va],pred[va]); folds.append(met)
+        log_func(f"[V13-MARKET-DIRECTION-FOLD] train_games={len(set(tg))} valid_games={len(set(vg))} n={met['n']} auc={met['auc']:.4f} ll={met['logloss']:.6f} brier={met['brier']:.6f} acc={met['accuracy']:.3%} authority=RESEARCH_ONLY")
+    ok=np.isfinite(pred)
+    if int(ok.sum())<30: return {"folds":folds}
+    met=_ncaaf_v13_prob_metrics_with_ece(y[ok],pred[ok]); log_func(f"[V13-MARKET-DIRECTION] n={met['n']} games={len(pd.unique(groups[ok]))} auc={met['auc']:.4f} ll={met['logloss']:.6f} brier={met['brier']:.6f} acc={met['accuracy']:.3%} meaningful_move_only=TRUE authority=RESEARCH_ONLY")
+    return {"folds":folds,"metrics":met}
+
 def _ncaaf_v13_stability_research(fundamental, fundamental_cover, market, raw, log_func=print):
     out={}
-    try: out["margin_distribution"]=_ncaaf_v13_margin_distribution_research(fundamental,fundamental_cover,log_func=log_func)
+    # Retain 13.0.11 diagnostics for continuity, but 13.0.12 promotion research is
+    # centered on empirical residual probabilities, nested calibration, and
+    # selective risk/coverage rather than the rejected quantile-normal route.
+    try: out["margin_distribution_legacy"]=_ncaaf_v13_margin_distribution_research(fundamental,fundamental_cover,log_func=log_func)
     except Exception as e: log_func(f"[V13-STABILITY-RESEARCH] margin_distribution_error={e}")
-    try: out["learning_curve"]=_ncaaf_v13_cover_learning_curve_research(fundamental,log_func=log_func)
+    try: out["residual_cdf_v2"]=_ncaaf_v13_residual_cdf_v2_research(fundamental,log_func=log_func)
+    except Exception as e: log_func(f"[V13-STABILITY-RESEARCH] residual_cdf_v2_error={e}")
+    try: out["temporal_intervals"]=_ncaaf_v13_temporal_empirical_intervals(fundamental,log_func=log_func)
+    except Exception as e: log_func(f"[V13-STABILITY-RESEARCH] temporal_interval_error={e}")
+    try: out["learning_curve_legacy"]=_ncaaf_v13_cover_learning_curve_research(fundamental,log_func=log_func)
     except Exception as e: log_func(f"[V13-STABILITY-RESEARCH] learning_curve_error={e}")
+    try: out["learning_curve_fixed"]=_ncaaf_v13_fixed_validation_learning_curve(fundamental,log_func=log_func)
+    except Exception as e: log_func(f"[V13-STABILITY-RESEARCH] fixed_learning_curve_error={e}")
     try: out["history_window"]=_ncaaf_v13_rolling_expanding_research(fundamental,log_func=log_func)
     except Exception as e: log_func(f"[V13-STABILITY-RESEARCH] history_window_error={e}")
+    try: out["asof_blend"]=_ncaaf_v13_asof_blend_research(fundamental,log_func=log_func)
+    except Exception as e: log_func(f"[V13-STABILITY-RESEARCH] asof_blend_error={e}")
     try: out["cross_subdivision_proxy"]=_ncaaf_v13_cross_subdivision_weight_proxy(fundamental,log_func=log_func)
     except Exception as e: log_func(f"[V13-STABILITY-RESEARCH] cross_subdivision_error={e}")
     try: out["latent_strength"]=_ncaaf_v13_latent_strength_research(raw,log_func=log_func)
     except Exception as e: log_func(f"[V13-STABILITY-RESEARCH] latent_strength_error={e}")
     try: out["market_stability"]=_ncaaf_v13_market_stability_research(market,log_func=log_func)
     except Exception as e: log_func(f"[V13-STABILITY-RESEARCH] market_stability_error={e}")
-    log_func("[V13-STABILITY-CONTRACT] authority=RESEARCH_ONLY production_predictions_unchanged=TRUE admission=CHRONOLOGICAL_OOS_PLUS_CROSS_SEASON_PROPER_SCORE_GATE")
+    try: out["market_direction"]=_ncaaf_v13_market_direction_research(market,log_func=log_func)
+    except Exception as e: log_func(f"[V13-STABILITY-RESEARCH] market_direction_error={e}")
+    log_func("[V13-STABILITY-CONTRACT] version=13.0.12 authority=RESEARCH_ONLY production_predictions_unchanged=TRUE admission=NESTED_WALKFORWARD_PROPER_SCORE_PLUS_RISK_COVERAGE_PLUS_PROSPECTIVE_CONFIRMATION")
     return out
 
 
 
 def fit_ncaaf_v13_value_architecture(log_func=print):
-    """Fit NCAAF-only V13.0.10 shadow value architecture."""
+    """Fit NCAAF-only V13.0.12 shadow value architecture."""
     if isinstance(_NCAAF_V13_CACHE.get("bundle"),dict): return _NCAAF_V13_CACHE["bundle"]
     try:
         bq,_=get_bq_clients()
@@ -17602,12 +17962,12 @@ def fit_ncaaf_v13_value_architecture(log_func=print):
     _fund_public["comparison_oof_frame"]=fundamental["oof_frame"][_pair_cols].copy()
     bundle={
         "version":NCAAF_V13_VERSION,"status":status,"shadow_only":True,"sport":"NCAAF","market":"spreads",
-        "architecture":"independent_result_forecast__paired_market_residual_tradable_fair__distributional_uncertainty__discovered_sharp_close_intelligence__proper_score_cover_calibrator",
+        "architecture":"independent_result_forecast__market_anchor__empirical_residual_probability__nested_selective_calibration__discovered_sharp_close_intelligence",
         "fundamental":_fund_public,
         "market_intelligence":({k:v for k,v in market.items() if k!="oof_frame"} if isinstance(market,dict) else None),
         "cover_calibrator":cover,"fundamental_cover_calibrator":fundamental_cover,"stability_research":stability_research,"stat_source_provenance":provenance,
         "horizons_hours":list(NCAAF_V13_HORIZONS_HOURS),
-        "training_contract":"raw_fair_targets_actual_result__market_free_feature_qualification__separate_result_and_market_scorecards__paired_season_forward_skill__current_season_state_only__authoritative_scores_with_features_market_history__irregular_asof_horizon_carryforward__market_residual_shrinkage__game_horizon_equal_unit__distributional_uncertainty_research__market_hurdle_research__cross_season_stability_gate__tail_diagnostics_not_used_in_ev",
+        "training_contract":"raw_fair_targets_actual_result__market_free_feature_qualification__separate_result_and_market_scorecards__paired_season_forward_skill__current_season_state_only__authoritative_scores_with_features_market_history__irregular_asof_horizon_carryforward__market_residual_shrinkage__game_horizon_equal_unit__empirical_residual_walkforward__nested_beta_sigmoid_calibration__risk_coverage_abstention__prospective_current_season_replay__market_direction_research__cross_season_stability_gate__tail_diagnostics_not_used_in_ev",
         "situational_layer":{"Pathi":"V12_PRODUCTION_ONLY__V13_1_INCREMENTAL_TEST_PENDING","BigAl":"V12_PRODUCTION_ONLY__V13_1_INCREMENTAL_TEST_PENDING","reason":"establish_clean_v13_fundamental_plus_market_baseline_before_residual_admission"},
     }
     _NCAAF_V13_CACHE["bundle"]=bundle
