@@ -14239,7 +14239,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-09-v13.0.7-authoritative-scores-market-history"
+NCAAF_V13_VERSION = "2026-09-09-v13.0.8-market-horizon-tail-audit"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -15358,6 +15358,21 @@ def _ncaaf_v13_new_regressors():
     return linear, nonlinear
 
 
+
+def _ncaaf_v13_new_robust_regressor():
+    """Research-only robust margin candidate; never receives authority automatically."""
+    from sklearn.pipeline import Pipeline
+    from sklearn.impute import SimpleImputer
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    return Pipeline([
+        ("imputer", SimpleImputer(strategy="median", add_indicator=False)),
+        ("hgb", HistGradientBoostingRegressor(
+            loss="absolute_error", learning_rate=0.035, max_iter=120,
+            max_leaf_nodes=12, max_depth=3, min_samples_leaf=30,
+            l2_regularization=4.0, random_state=1308,
+        )),
+    ])
+
 def _ncaaf_v13_fit_regression_pair(X, y):
     models = _ncaaf_v13_new_regressors()
     yy = pd.to_numeric(pd.Series(y), errors="coerce")
@@ -15549,6 +15564,121 @@ def _ncaaf_v13_log_closer_buckets(actual, market, raw, tradable, *, season_label
     return rows
 
 
+
+
+def _ncaaf_v13_log_tail_audit(games, actual, market, raw, tradable, linear=None, nonlinear=None, robust=None, log_func=print):
+    """Diagnose why large independent disagreements underperform.
+
+    Purely diagnostic in V13.0.8.  No subgroup result is used to alter predictions,
+    feature admission, edge shrinkage, Cover, or EV.
+    """
+    g=games.copy().reset_index(drop=True)
+    a=np.asarray(actual,dtype=float); m=np.asarray(market,dtype=float); r=np.asarray(raw,dtype=float)
+    t=np.asarray(tradable,dtype=float)
+    n=min(len(g),len(a),len(m),len(r),len(t))
+    if n<=0: return []
+    g=g.iloc[:n].copy(); a=a[:n];m=m[:n];r=r[:n];t=t[:n]
+    edge=r-m
+    base=np.isfinite(a)&np.isfinite(m)&np.isfinite(r)&(np.abs(edge)>=3.5)
+    if not base.any(): return []
+    market_err=np.abs(a-m); raw_err=np.abs(a-r); trad_err=np.abs(a-t)
+    rows=[]
+
+    def emit(dim,bucket,mask):
+        sel=base & np.asarray(mask,dtype=bool)
+        nn=int(sel.sum())
+        if nn<20: return
+        signed=edge[sel]*(a[sel]-m[sel])
+        raw_imp=market_err[sel]-raw_err[sel]
+        tok=sel&np.isfinite(t)
+        trad_cl=float(np.mean((market_err[tok]-trad_err[tok])>0)) if tok.any() else np.nan
+        trad_avg=float(np.mean(market_err[tok]-trad_err[tok])) if tok.any() else np.nan
+        rec={"dimension":dim,"bucket":bucket,"n":nn,
+             "direction":float(np.mean(signed>0)),
+             "raw_closer":float(np.mean(raw_imp>0)),
+             "raw_avg_improve":float(np.mean(raw_imp)),
+             "tradable_closer":trad_cl,"tradable_avg_improve":trad_avg}
+        rows.append(rec)
+        log_func(
+            f"[V13-TAIL-AUDIT] dimension={dim} bucket={bucket} n={nn} "
+            f"direction={rec['direction']:.1%} raw_closer={rec['raw_closer']:.1%} "
+            f"raw_avg_improve={rec['raw_avg_improve']:+.3f} "
+            f"tradable_closer={trad_cl:.1%} tradable_avg_improve={trad_avg:+.3f}"
+            if np.isfinite(trad_cl) else
+            f"[V13-TAIL-AUDIT] dimension={dim} bucket={bucket} n={nn} "
+            f"direction={rec['direction']:.1%} raw_closer={rec['raw_closer']:.1%} "
+            f"raw_avg_improve={rec['raw_avg_improve']:+.3f} tradable_closer=NA tradable_avg_improve=NA"
+        )
+
+    ae=np.abs(edge)
+    for label,lo,hi in [("3.5_to_5",3.5,5),("5_to_7",5,7),("7_to_10",7,10),("10_to_14",10,14),("14_plus",14,np.inf)]:
+        emit("edge_size",label,(ae>=lo)&(ae<hi))
+
+    am=np.abs(m)
+    for label,lo,hi in [("market_lt_3.5",0,3.5),("market_3.5_to_7",3.5,7),("market_7_to_14",7,14),("market_14_plus",14,np.inf)]:
+        emit("market_spread",label,(am>=lo)&(am<hi))
+
+    # Direction of the disagreement itself.
+    emit("edge_direction","V13_HIGHER_THAN_MARKET",edge>0)
+    emit("edge_direction","V13_LOWER_THAN_MARKET",edge<0)
+
+    if "Context_Week" in g.columns:
+        wk=pd.to_numeric(g["Context_Week"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+        emit("season_stage","week_1_to_4",np.isfinite(wk)&(wk<=4))
+        emit("season_stage","week_5_to_9",np.isfinite(wk)&(wk>=5)&(wk<=9))
+        emit("season_stage","week_10_plus",np.isfinite(wk)&(wk>=10))
+
+    if "Context_Cross_Subdivision" in g.columns:
+        cs=pd.to_numeric(g["Context_Cross_Subdivision"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+        emit("subdivision","FBS_vs_FCS",cs==1)
+        emit("subdivision","same_subdivision",cs==0)
+
+    # Market orientation; margin is home-oriented in the physical game frame.
+    emit("market_side","HOME_FAVORITE",m>0)
+    emit("market_side","HOME_UNDERDOG",m<0)
+    emit("market_side","PICKEM",np.isclose(m,0,atol=.25))
+
+    if linear is not None and nonlinear is not None:
+        pl=np.asarray(linear,dtype=float)[:n]; pn=np.asarray(nonlinear,dtype=float)[:n]
+        md=np.abs(pl-pn)
+        for label,lo,hi in [("components_lt_2",0,2),("components_2_to_5",2,5),("components_5_plus",5,np.inf)]:
+            emit("component_disagreement",label,np.isfinite(md)&(md>=lo)&(md<hi))
+        good=base&np.isfinite(pl)&np.isfinite(pn)
+        if good.any():
+            msg=(f"[V13-FUNDAMENTAL-COMPONENT] scope=TAIL_3.5_PLUS n={int(good.sum())} "
+                 f"linear_rmse={_ncaaf_v13_rmse(a[good],pl[good]):.3f} "
+                 f"hgb_rmse={_ncaaf_v13_rmse(a[good],pn[good]):.3f} "
+                 f"blend_rmse={_ncaaf_v13_rmse(a[good],r[good]):.3f}")
+            if robust is not None:
+                pr=np.asarray(robust,dtype=float)[:n]
+                rg=good&np.isfinite(pr)
+                if rg.any():
+                    msg += f" robust_abs_loss_rmse={_ncaaf_v13_rmse(a[rg],pr[rg]):.3f}"
+            log_func(msg)
+
+    return rows
+
+
+def _ncaaf_v13_log_blend_grid(actual, market, linear, nonlinear, log_func=print):
+    """Counterfactual OOS blend audit only; fixed production blend is unchanged."""
+    a=np.asarray(actual,dtype=float); m=np.asarray(market,dtype=float)
+    pl=np.asarray(linear,dtype=float); pn=np.asarray(nonlinear,dtype=float)
+    ok=np.isfinite(a)&np.isfinite(m)&np.isfinite(pl)&np.isfinite(pn)
+    if int(ok.sum())<200: return []
+    rows=[]
+    for w in (0.50,0.60,0.70,0.80,0.90,1.00):
+        p=w*pl+(1-w)*pn
+        tail=ok&(np.abs(p-m)>=3.5)
+        rec={"linear_weight":w,"n":int(ok.sum()),"rmse":_ncaaf_v13_rmse(a[ok],p[ok]),"mae":_ncaaf_v13_mae(a[ok],p[ok]),
+             "tail_n":int(tail.sum()),"tail_rmse":_ncaaf_v13_rmse(a[tail],p[tail]) if tail.any() else np.nan,
+             "tail_direction":float(np.mean(((p[tail]-m[tail])*(a[tail]-m[tail]))>0)) if tail.any() else np.nan}
+        rows.append(rec)
+        log_func(
+            f"[V13-BLEND-DIAGNOSTIC] used_in_predictions=FALSE linear_weight={w:.2f} n={rec['n']} "
+            f"rmse={rec['rmse']:.3f} mae={rec['mae']:.3f} tail_n={rec['tail_n']} "
+            f"tail_rmse={rec['tail_rmse']:.3f} tail_direction={rec['tail_direction']:.1%}"
+        )
+    return rows
 
 def _ncaaf_v13_result_profile(actual, market, raw, tradable, groups=None, reps=500, seed=1304):
     """Build an OOS result-accuracy profile separate from market-value calibration.
@@ -15850,6 +15980,7 @@ def _ncaaf_v13_build_fundamental(raw: pd.DataFrame, bq=None, log_func=print):
     ym=pd.to_numeric(games["Actual_Margin"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
     yt=pd.to_numeric(games["Actual_Total"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
     oof_m=np.full(len(games),np.nan); oof_t=np.full(len(games),np.nan)
+    oof_m_linear=np.full(len(games),np.nan); oof_m_hgb=np.full(len(games),np.nan); oof_m_robust=np.full(len(games),np.nan)
     fold_metrics=[]
     fold_feature_sets={}
     for val in seasons[1:]:
@@ -15884,9 +16015,21 @@ def _ncaaf_v13_build_fundamental(raw: pd.DataFrame, bq=None, log_func=print):
         fold_feature_sets[int(val)]={"margin":list(fold_margin_cols),"total":list(fold_total_cols),"qualification_seasons":list(prior_qual)}
         mm=_ncaaf_v13_fit_regression_pair(games.loc[tr,fold_margin_cols],ym[tr])
         tm=_ncaaf_v13_fit_regression_pair(games.loc[tr,fold_total_cols],yt[tr])
-        pm=_ncaaf_v13_regression_predict(mm,games.loc[va,fold_margin_cols],0.80)
+        _xm=games.loc[va,fold_margin_cols]
+        p_lin=np.asarray(mm[0].predict(_xm),dtype=float)
+        p_hgb=np.asarray(mm[1].predict(_xm),dtype=float)
+        pm=0.80*p_lin+0.20*p_hgb
         pt=_ncaaf_v13_regression_predict(tm,games.loc[va,fold_total_cols],0.80)
         idx=np.where(va)[0]; oof_m[idx]=pm; oof_t[idx]=pt
+        oof_m_linear[idx]=p_lin; oof_m_hgb[idx]=p_hgb
+        # Research-only robust candidate.  It is logged OOS but does not affect
+        # Raw Fair, Tradable Fair, feature admission, Cover, or EV in V13.0.8.
+        try:
+            _rob=_ncaaf_v13_new_robust_regressor()
+            _rob.fit(games.loc[tr,fold_margin_cols],ym[tr])
+            oof_m_robust[idx]=np.asarray(_rob.predict(_xm),dtype=float)
+        except Exception as _e:
+            log_func(f"[V13-ROBUST-CANDIDATE] season={int(val)} unavailable={_e}")
         log_func(f"[V13-FUNDAMENTAL-ASOF] season={int(val)} qual_seasons={prior_qual} margin_features={len(fold_margin_cols)-1} total_features={len(fold_total_cols)-1}")
         market_m=pd.to_numeric(games.loc[va,"Market_Open_Margin"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
         market_t=pd.to_numeric(games.loc[va,"Market_Open_Total"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
@@ -15977,13 +16120,36 @@ def _ncaaf_v13_build_fundamental(raw: pd.DataFrame, bq=None, log_func=print):
         f"raw_oof_rmse_all={pooled_rmse:.3f} paired_market_rmse={common_market:.3f} paired_tradable_rmse={common_trad:.3f} "
         f"margin_beta={bundle['margin_edge_beta']:.4f} coefficient_season_max={bundle['coefficient_season_max']} independent_market_contribution=0.000"
     )
+
+    # V13.0.8 tail research: measure, do not force.  These diagnostics are based on
+    # the same season-forward OOF predictions used above and are never inputs.
+    try:
+        bundle["tail_audit"]=_ncaaf_v13_log_tail_audit(
+            games,ym,market_all,oof_m,trad_m,
+            linear=oof_m_linear,nonlinear=oof_m_hgb,robust=oof_m_robust,log_func=log_func,
+        )
+        bundle["blend_diagnostic"]=_ncaaf_v13_log_blend_grid(
+            ym,market_all,oof_m_linear,oof_m_hgb,log_func=log_func,
+        )
+        rg=np.isfinite(ym)&np.isfinite(oof_m_robust)
+        if int(rg.sum())>=200:
+            tail=rg&np.isfinite(market_all)&(np.abs(oof_m-market_all)>=3.5)
+            log_func(
+                f"[V13-ROBUST-CANDIDATE] used_in_predictions=FALSE n={int(rg.sum())} "
+                f"rmse={_ncaaf_v13_rmse(ym[rg],oof_m_robust[rg]):.3f} "
+                f"mae={_ncaaf_v13_mae(ym[rg],oof_m_robust[rg]):.3f} "
+                f"tail_n={int(tail.sum())} tail_rmse={_ncaaf_v13_rmse(ym[tail],oof_m_robust[tail]) if tail.any() else np.nan:.3f}"
+            )
+    except Exception as _e:
+        log_func(f"[V13-TAIL-AUDIT] unavailable={_e}")
+
     return bundle
 
 
 def _ncaaf_v13_fetch_spread_snapshots(log_func=print):
     """Discover the deepest genuine repeated historical NCAAF spread stream.
 
-    V13.0.7 treats scores_with_features as the authoritative historical market
+    V13.0.8 treats scores_with_features as the authoritative historical market
     training/backtest source. It already persists completed/scored historical
     market rows with the feature pipeline's canonical game metadata. The recent
     moves_with_features_merged view and raw/generic market tables are fallbacks
@@ -16035,7 +16201,7 @@ def _ncaaf_v13_fetch_spread_snapshots(log_func=print):
         return "TRUE"
 
     tables=[]
-    # V13.0.7 source lineage contract:
+    # V13.0.8 source lineage contract:
     #   scores_with_features       = authoritative completed historical market history
     #   moves_with_features_merged = recent/current enriched market fallback
     #   sharp_moves_master         = raw market fallback / metadata source
@@ -16261,7 +16427,16 @@ def _ncaaf_v13_fetch_spread_snapshots(log_func=print):
         "games_2025":int(best.get('games_2025',0)),"min_snapshot":str(best['min_snapshot']),"max_snapshot":str(best['max_snapshot'])}
     return df
 
+
 def _ncaaf_v13_build_market_horizons(snaps: pd.DataFrame, log_func=print):
+    """Build leak-safe 24h/6h/1h market states from irregular historical snapshots.
+
+    V13.0.8 keeps the fixed decision-horizon architecture, but no longer requires a
+    quote to land in an unrealistically narrow clock window.  At horizon H we use
+    only observations timestamped at or BEFORE Game_Start-H and carry the most
+    recent one forward within a predeclared staleness cap.  Staleness is exposed
+    to the model as a feature and logged explicitly; no future quote is ever used.
+    """
     if snaps is None or snaps.empty:
         return pd.DataFrame(), []
     d=snaps.copy()
@@ -16276,18 +16451,39 @@ def _ncaaf_v13_build_market_horizons(snaps: pd.DataFrame, log_func=print):
     is_away=d["Outcome"].eq(d["Away_Team_Norm"])|d["Outcome"].eq("away")
     d["Home_Spread"]=np.where(is_home,d["Value"],np.where(is_away,-d["Value"],np.nan))
     d["Open_Home_Spread"]=np.where(is_home,d["Open_Value"],np.where(is_away,-d["Open_Value"],np.nan))
-    d=d.loc[np.isfinite(pd.to_numeric(d["Home_Spread"],errors="coerce"))].copy()
+    d=d.loc[
+        np.isfinite(pd.to_numeric(d["Home_Spread"],errors="coerce"))
+        & d["Snapshot_Timestamp"].notna()
+        & d["Game_Start"].notna()
+        & d["Snapshot_Timestamp"].lt(d["Game_Start"])
+    ].copy()
     d["Season"]=_ncaaf_season_from_timestamp(d["Game_Start"])
     d["V13_Pair_Key"]=_ncaaf_v13_pair_key(d["Season"],d["Home_Team_Norm"],d["Away_Team_Norm"])
     d["V13_Matchup_Key"]=_ncaaf_v13_matchup_key(d["Season"],d["Game_Start"],d["Home_Team_Norm"],d["Away_Team_Norm"])
     d["__sharp"]=d["Bookmaker"].isin({str(x).lower().strip() for x in SHARP_BOOKS})
     d["__rec"]=d["Bookmaker"].isin({str(x).lower().strip() for x in REC_BOOKS})
+    d["__age_h"]=(d["Game_Start"]-d["Snapshot_Timestamp"]).dt.total_seconds().div(3600.0)
+    d=d.loc[pd.to_numeric(d["__age_h"],errors="coerce").between(0,36,inclusive="both")].copy()
+
+    # Source cadence audit.  Many rows can be simultaneous bookmaker/outcome
+    # observations rather than distinct time snapshots, so report physical-game
+    # temporal repetition rather than raw row density.
+    if not d.empty:
+        per_game=(d.groupby("V13_Matchup_Key",sort=False)["Snapshot_Timestamp"].nunique())
+        repeated=float((per_game>=2).mean()) if len(per_game) else np.nan
+        ages=pd.to_numeric(d["__age_h"],errors="coerce").dropna()
+        q=ages.quantile([.10,.25,.50,.75,.90]).to_dict() if len(ages) else {}
+        log_func(
+            f"[V13-MARKET-CADENCE] rows={len(d)} games={d['V13_Matchup_Key'].nunique()} "
+            f"repeat_physical_game_frac={repeated:.3f} unique_snapshots_median={float(per_game.median()) if len(per_game) else np.nan:.2f} "
+            f"age_h_p10={q.get(.10,np.nan):.2f} p25={q.get(.25,np.nan):.2f} p50={q.get(.50,np.nan):.2f} "
+            f"p75={q.get(.75,np.nan):.2f} p90={q.get(.90,np.nan):.2f}"
+        )
+
     # final pre-kick snapshot per book -> sharp consensus close target
     last=(d.sort_values("Snapshot_Timestamp").groupby(["V13_Matchup_Key","Bookmaker"],sort=False,as_index=False).tail(1))
     last["__close_age_h"]=(last["Game_Start"]-last["Snapshot_Timestamp"]).dt.total_seconds().div(3600.0)
     def close_agg(g):
-        # Prefer a genuine near-kick sharp quote.  If a sharp book has no quote
-        # inside two hours, fall back to its latest pre-kick quote, then all books.
         near=g.loc[g["__sharp"] & pd.to_numeric(g["__close_age_h"],errors="coerce").between(0,2,inclusive="both")]
         sharp_src=near if not near.empty else g.loc[g["__sharp"]]
         sharp=(-pd.to_numeric(sharp_src["Home_Spread"],errors="coerce")).median()
@@ -16295,35 +16491,55 @@ def _ncaaf_v13_build_market_horizons(snaps: pd.DataFrame, log_func=print):
         close_age=float(pd.to_numeric(sharp_src.get("__close_age_h"),errors="coerce").median()) if not sharp_src.empty else np.nan
         return pd.Series({"Sharp_Close_Margin":sharp if np.isfinite(sharp) else allv,"Sharp_Close_Age_Hours":close_age})
     close=last.groupby("V13_Matchup_Key",sort=False).apply(close_agg).reset_index()
+
     frames=[]
     feature_cols=[
         "Current_Margin","Open_Margin","Sharp_Current_Margin","Rec_Current_Margin",
         "SharpMinusRec","Move_From_Open","Sharp_Move_From_Open","Rec_Move_From_Open",
         "Book_Dispersion","Book_Count","Sharp_Book_Count","Rec_Book_Count","Horizon_Hours",
+        "Snapshot_Age_Hours","Snapshot_Staleness_Hours","Snapshot_Freshness_Weight",
         "Dist_to_Key_3","Dist_to_Key_7","Dist_to_Key_10","Dist_to_Key_14",
         "Abs_Move_From_Open","Abs_SharpMinusRec","Current_vs_Sharp","SharpRec_Move_Agreement",
         "Sharp_Book_Fraction","Rec_Book_Fraction","Consensus_Tightness","Nearest_Key_Distance",
         "Key_Cross_3","Key_Cross_7","Key_Cross_10","Key_Cross_14",
     ]
+
+    # Predeclared operational staleness caps.  These are coverage/semantics rules,
+    # not outcome-tuned parameters.  They preserve "as of H hours" while allowing
+    # irregular historical capture cadence.
+    staleness_caps={24.0:12.0, 6.0:12.0, 1.0:5.0}
+    old_tols={24.0:12.0,6.0:3.0,1.0:1.0}
+
     for h in NCAAF_V13_HORIZONS_HOURS:
-        cutoff=d["Game_Start"]-pd.to_timedelta(float(h),unit="h")
-        # Decision snapshots must be reasonably close to the requested horizon.
-        # This prevents a three-day-old quote from masquerading as a 6h decision.
-        tol_h={24.0:12.0,6.0:3.0,1.0:1.0}.get(float(h),max(1.0,float(h)/2.0))
-        lower=cutoff-pd.to_timedelta(tol_h,unit="h")
-        eligible=d.loc[d["Snapshot_Timestamp"].le(cutoff) & d["Snapshot_Timestamp"].ge(lower)].copy()
-        if eligible.empty: continue
-        cur=(eligible.sort_values("Snapshot_Timestamp").groupby(["V13_Matchup_Key","Bookmaker"],sort=False,as_index=False).tail(1))
+        h=float(h)
+        cap=float(staleness_caps.get(h,max(3.0,h/2.0)))
+        narrow=float(old_tols.get(h,max(1.0,h/2.0)))
+
+        # Age >= h guarantees the quote existed by the decision time.
+        narrow_mask=pd.to_numeric(d["__age_h"],errors="coerce").between(h,h+narrow,inclusive="both")
+        eligible_mask=pd.to_numeric(d["__age_h"],errors="coerce").between(h,h+cap,inclusive="both")
+        narrow_games=int(d.loc[narrow_mask,"V13_Matchup_Key"].nunique())
+        eligible=d.loc[eligible_mask].copy()
+        if eligible.empty:
+            log_func(f"[V13-MARKET-HORIZON-COVERAGE] horizon={h:.0f}h narrow_games={narrow_games} asof_games=0 staleness_cap_h={cap:.1f}")
+            continue
+
+        cur=(eligible.sort_values("Snapshot_Timestamp")
+             .groupby(["V13_Matchup_Key","Bookmaker"],sort=False,as_index=False).tail(1))
+
         def agg(g):
             margins=-pd.to_numeric(g["Home_Spread"],errors="coerce")
             sm=-pd.to_numeric(g.loc[g["__sharp"],"Home_Spread"],errors="coerce")
             rm=-pd.to_numeric(g.loc[g["__rec"],"Home_Spread"],errors="coerce")
             om=-pd.to_numeric(g["Open_Home_Spread"],errors="coerce")
+            ages=pd.to_numeric(g["__age_h"],errors="coerce")
             current=float(margins.median()) if margins.notna().any() else np.nan
             op=float(om.median()) if om.notna().any() else current
             sharp=float(sm.median()) if sm.notna().any() else current
             rec=float(rm.median()) if rm.notna().any() else current
-            one=g.iloc[-1]
+            age=float(ages.median()) if ages.notna().any() else np.nan
+            stale=max(0.0,age-h) if np.isfinite(age) else np.nan
+            one=g.sort_values("Snapshot_Timestamp").iloc[-1]
             out={
                 "Season":float(one["Season"]),"Game_Start":one["Game_Start"],
                 "Home_Team_Norm":one["Home_Team_Norm"],"Away_Team_Norm":one["Away_Team_Norm"],
@@ -16331,7 +16547,9 @@ def _ncaaf_v13_build_market_horizons(snaps: pd.DataFrame, log_func=print):
                 "SharpMinusRec":sharp-rec,"Move_From_Open":current-op,"Sharp_Move_From_Open":sharp-op,
                 "Rec_Move_From_Open":rec-op,"Book_Dispersion":float(margins.std(ddof=0)) if margins.notna().sum()>1 else 0.0,
                 "Book_Count":float(g["Bookmaker"].nunique()),"Sharp_Book_Count":float(g.loc[g["__sharp"],"Bookmaker"].nunique()),
-                "Rec_Book_Count":float(g.loc[g["__rec"],"Bookmaker"].nunique()),"Horizon_Hours":float(h),
+                "Rec_Book_Count":float(g.loc[g["__rec"],"Bookmaker"].nunique()),"Horizon_Hours":h,
+                "Snapshot_Age_Hours":age,"Snapshot_Staleness_Hours":stale,
+                "Snapshot_Freshness_Weight":float(np.exp(-stale/max(cap,1.0))) if np.isfinite(stale) else np.nan,
             }
             for key in (3,7,10,14):
                 out[f"Dist_to_Key_{key}"]=abs(abs(current)-float(key)) if np.isfinite(current) else np.nan
@@ -16353,14 +16571,25 @@ def _ncaaf_v13_build_market_horizons(snaps: pd.DataFrame, log_func=print):
             _ds=[out[f"Dist_to_Key_{k}"] for k in (3,7,10,14) if np.isfinite(out[f"Dist_to_Key_{k}"])]
             out["Nearest_Key_Distance"]=min(_ds) if _ds else np.nan
             return pd.Series(out)
+
         a=cur.groupby("V13_Matchup_Key",sort=False).apply(agg).reset_index()
         a["V13_Pair_Key"]=_ncaaf_v13_pair_key(a["Season"],a["Home_Team_Norm"],a["Away_Team_Norm"])
         a=a.merge(close,on="V13_Matchup_Key",how="left",validate="one_to_one")
         frames.append(a)
+
+        stale=pd.to_numeric(a["Snapshot_Staleness_Hours"],errors="coerce").dropna()
+        log_func(
+            f"[V13-MARKET-HORIZON-COVERAGE] horizon={h:.0f}h narrow_games={narrow_games} "
+            f"asof_games={a['V13_Matchup_Key'].nunique()} staleness_cap_h={cap:.1f} "
+            f"median_staleness_h={float(stale.median()) if len(stale) else np.nan:.2f} "
+            f"p90_staleness_h={float(stale.quantile(.90)) if len(stale) else np.nan:.2f}"
+        )
+
     out=pd.concat(frames,ignore_index=True) if frames else pd.DataFrame()
     out=out.replace([np.inf,-np.inf],np.nan)
     log_func(f"[V13-MARKET-HORIZONS] rows={len(out)} games={out['V13_Matchup_Key'].nunique() if not out.empty else 0} horizons={sorted(out['Horizon_Hours'].dropna().unique().tolist()) if not out.empty else []}")
     return out, feature_cols
+
 
 
 def _ncaaf_v13_fit_market_intelligence(frame: pd.DataFrame, feature_cols, log_func=print):
@@ -16370,29 +16599,48 @@ def _ncaaf_v13_fit_market_intelligence(frame: pd.DataFrame, feature_cols, log_fu
     y=pd.to_numeric(d["Sharp_Close_Margin"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
     oof=np.full(len(d),np.nan); metrics=[]
 
-    # V13.0.5 uses expanding chronological GAME blocks, not only season boundaries.
-    # All 1h/6h/24h rows for a physical game stay in the same fold.
+    # Expanding chronological PHYSICAL-GAME blocks.  Thresholds are adaptive to
+    # the proven archive size, but remain conservative and fail closed through the
+    # paired bootstrap gate.  No horizon from a validation game can appear in train.
     game_clock=(d.loc[d["Game_Start"].notna(),["V13_Matchup_Key","Game_Start"]]
                   .drop_duplicates("V13_Matchup_Key")
                   .sort_values("Game_Start",kind="stable")
                   .reset_index(drop=True))
     n_games=len(game_clock)
-    min_train_games=max(250,min(450,int(n_games*0.40))) if n_games else 250
-    val_games=max(75,min(175,int(max(n_games-min_train_games,0)/4))) if n_games>min_train_games else 75
+    if n_games < 180:
+        log_func(f"[V13-MARKET] insufficient physical games after horizon construction n_games={n_games}")
+        return None
+
+    min_train_games=max(140,min(250,int(n_games*0.45)))
+    remaining=max(n_games-min_train_games,0)
+    val_games=max(45,min(100,int(max(remaining,1)/3)))
+    log_func(
+        f"[V13-MARKET-FOLD-CONTRACT] physical_games={n_games} min_train_games={min_train_games} "
+        f"validation_block_games={val_games} features={len(feature_cols)} grouping=PHYSICAL_GAME chronological=TRUE"
+    )
+
     folds=[]
     cursor=min_train_games
-    while cursor<n_games and len(folds)<5:
+    while cursor<n_games and len(folds)<6:
         stop=min(n_games,cursor+val_games)
-        va_keys=set(game_clock.iloc[cursor:stop]["V13_Matchup_Key"].astype(str))
+        va_slice=game_clock.iloc[cursor:stop]
+        if len(va_slice)<35: break
+        va_keys=set(va_slice["V13_Matchup_Key"].astype(str))
         tr_keys=set(game_clock.iloc[:cursor]["V13_Matchup_Key"].astype(str))
-        if len(va_keys)<50: break
-        folds.append((tr_keys,va_keys,game_clock.iloc[cursor:stop]["Game_Start"].min(),game_clock.iloc[cursor:stop]["Game_Start"].max()))
+        folds.append((tr_keys,va_keys,va_slice["Game_Start"].min(),va_slice["Game_Start"].max()))
         cursor=stop
 
+    min_train_rows=max(200,6*max(1,len(feature_cols)))
     for j,(tr_keys,va_keys,vmin,vmax) in enumerate(folds,1):
         tr=d["V13_Matchup_Key"].astype(str).isin(tr_keys).to_numpy() & np.isfinite(y)
         va=d["V13_Matchup_Key"].astype(str).isin(va_keys).to_numpy() & np.isfinite(y)
-        if len(tr_keys)<250 or int(tr.sum())<500 or int(va.sum())<75: continue
+        if len(tr_keys)<min_train_games or int(tr.sum())<min_train_rows or int(va.sum())<40:
+            log_func(
+                f"[V13-MARKET-PERIOD-SKIP] fold={j} train_games={len(tr_keys)} train_rows={int(tr.sum())} "
+                f"valid_games={len(va_keys)} valid_rows={int(va.sum())} "
+                f"requirements=train_games>={min_train_games},train_rows>={min_train_rows},valid_rows>=40"
+            )
+            continue
         model=_ncaaf_v13_fit_regression_pair(d.loc[tr,feature_cols],y[tr])
         pred=_ncaaf_v13_regression_predict(model,d.loc[va,feature_cols],0.75)
         idx=np.where(va)[0]; oof[idx]=pred
@@ -16407,9 +16655,11 @@ def _ncaaf_v13_fit_market_intelligence(frame: pd.DataFrame, feature_cols, log_fu
 
     cur_all=pd.to_numeric(d["Current_Margin"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
     good=np.isfinite(oof)&np.isfinite(y)&np.isfinite(cur_all)
-    if int(good.sum())<400:
-        log_func(f"[V13-MARKET] insufficient OOF rows={int(good.sum())} games={d.loc[good,'V13_Matchup_Key'].nunique() if good.any() else 0}")
+    good_games=int(d.loc[good,"V13_Matchup_Key"].nunique()) if good.any() else 0
+    if int(good.sum())<180 or good_games<90:
+        log_func(f"[V13-MARKET] insufficient OOF rows={int(good.sum())} games={good_games} requirements=rows>=180,games>=90")
         return None
+
     # Horizons from the same physical game are correlated; bootstrap the whole game.
     groups=d.loc[good,"V13_Matchup_Key"].astype(str).to_numpy(dtype=object)
     boot=_ncaaf_v13_bootstrap_regression_skill(y[good],cur_all[good],oof[good],groups=groups,reps=600,seed=13032)
@@ -16531,7 +16781,7 @@ def _ncaaf_v13_fit_cover_calibrator(fundamental: dict, market: dict, log_func=pr
 
 
 def fit_ncaaf_v13_value_architecture(log_func=print):
-    """Fit NCAAF-only V13.0.7 shadow value architecture."""
+    """Fit NCAAF-only V13.0.8 shadow value architecture."""
     if isinstance(_NCAAF_V13_CACHE.get("bundle"),dict): return _NCAAF_V13_CACHE["bundle"]
     try:
         bq,_=get_bq_clients()
@@ -16564,7 +16814,7 @@ def fit_ncaaf_v13_value_architecture(log_func=print):
         "market_intelligence":({k:v for k,v in market.items() if k!="oof_frame"} if isinstance(market,dict) else None),
         "cover_calibrator":cover,"stat_source_provenance":provenance,
         "horizons_hours":list(NCAAF_V13_HORIZONS_HOURS),
-        "training_contract":"raw_fair_targets_actual_result__market_free_feature_qualification__separate_result_and_market_scorecards__paired_season_forward_skill__current_season_state_only__authoritative_scores_with_features_market_history__market_residual_shrinkage__game_horizon_equal_unit",
+        "training_contract":"raw_fair_targets_actual_result__market_free_feature_qualification__separate_result_and_market_scorecards__paired_season_forward_skill__current_season_state_only__authoritative_scores_with_features_market_history__irregular_asof_horizon_carryforward__market_residual_shrinkage__game_horizon_equal_unit__tail_diagnostics_not_used_in_ev",
         "situational_layer":{"Pathi":"V12_PRODUCTION_ONLY__V13_1_INCREMENTAL_TEST_PENDING","BigAl":"V12_PRODUCTION_ONLY__V13_1_INCREMENTAL_TEST_PENDING","reason":"establish_clean_v13_fundamental_plus_market_baseline_before_residual_admission"},
     }
     _NCAAF_V13_CACHE["bundle"]=bundle
