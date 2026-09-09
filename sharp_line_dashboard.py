@@ -170,6 +170,7 @@ BQ_FULL_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
 MARKET_WEIGHTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.market_weights"
 LINE_HISTORY_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.line_history_master"
 SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
+MOVES_FEATURES_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.moves_with_features_merged"
 
 RATINGS_HISTORY_TABLE = "sharplogger.sharp_data.ratings_history"  # <- fully qualified
 
@@ -14237,7 +14238,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-08-v13.0.5-handicap-enhanced-deep-market-history"
+NCAAF_V13_VERSION = "2026-09-08-v13.0.6-feature-merged-market-history"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -15981,10 +15982,12 @@ def _ncaaf_v13_build_fundamental(raw: pd.DataFrame, bq=None, log_func=print):
 def _ncaaf_v13_fetch_spread_snapshots(log_func=print):
     """Discover the deepest genuine repeated historical NCAAF spread stream.
 
-    V13.0.5 profiles every plausible observation-time column across the live and
-    archive tables before selecting a source.  This specifically protects older
-    history stored under legacy fields such as `Time`, `Inserted_Timestamp`, or
-    `Created_At` from being hidden by a newer `Snapshot_Timestamp` column.
+    V13.0.6 treats moves_with_features_merged as the preferred historical market
+    stream because it is the table already consumed by the existing enriched
+    sharp-move pipeline. For that source, legacy `Time` is tested before the
+    newer `Snapshot_Timestamp`, and every candidate timestamp must prove genuine
+    repeated pre-kick 2025 coverage before the Market Brain can use it. Raw
+    sharp_moves_master and the generic archive tables remain fail-safe fallbacks.
     """
     try:
         bq,bqs=get_bq_clients()
@@ -16023,8 +16026,10 @@ def _ncaaf_v13_fetch_spread_snapshots(log_func=print):
     def ts(alias, field): return f"SAFE_CAST({alias}.`{field}` AS TIMESTAMP)"
 
     tables=[]
-    # Dedicated history first for profiling, but selection is evidence-based.
-    for table in (LINE_HISTORY_TABLE,SNAPSHOTS_TABLE,BQ_FULL_TABLE):
+    # V13.0.6: prefer the same enriched move stream already used by the backend.
+    # Raw master is the reconstruction fallback; generic archive tables are only
+    # secondary fallbacks if they prove deeper legitimate pre-kick history.
+    for table in (MOVES_FEATURES_TABLE,BQ_FULL_TABLE,LINE_HISTORY_TABLE,SNAPSHOTS_TABLE):
         if table and table not in tables: tables.append(table)
     schemas={table:schema_for(table) for table in tables}
     meta_schema=schemas.get(BQ_FULL_TABLE,set())
@@ -16063,6 +16068,14 @@ def _ncaaf_v13_fetch_spread_snapshots(log_func=print):
         if not sch: continue
         f={k:pick(sch,k) for k in aliases}
         snap_candidates=[x for x in aliases["snap"] if x in sch]
+        if table == MOVES_FEATURES_TABLE:
+            # Existing production pregame logic defines historical observation age
+            # using Game_Start - Time. Test that semantics first, but still profile
+            # Snapshot_Timestamp and every other available timestamp field.
+            snap_candidates=sorted(
+                snap_candidates,
+                key=lambda x:(0 if x == "Time" else 1 if x == "Snapshot_Timestamp" else 2, aliases["snap"].index(x))
+            )
         game_candidates=[x for x in aliases["game"] if x in sch]
         quote_ok=all(f.get(k) for k in ("book","value","outcome"))
         direct_meta=all(f.get(k) for k in ("sport","market","home","away"))
@@ -16129,11 +16142,17 @@ def _ncaaf_v13_fetch_spread_snapshots(log_func=print):
     if not viable:
         log_func(f"[V13-MARKET] no viable historical snapshot stream attempts={attempts[:20]}")
         return pd.DataFrame()
-    # Prefer genuine 2025 coverage, then deepest history, then game/row coverage.
+    # Prefer genuine 2025 coverage. Among verified streams, give the enriched
+    # moves view first right of refusal, then raw master, then generic archives.
+    source_priority={MOVES_FEATURES_TABLE:3,BQ_FULL_TABLE:2,LINE_HISTORY_TABLE:1,SNAPSHOTS_TABLE:0}
     def _score(s):
         depth_days=(pd.Timestamp.now(tz='UTC')-s['min_snapshot']).total_seconds()/86400.0 if pd.notna(s['min_snapshot']) else 0.0
-        return (1 if s['covers_2025'] else 0, depth_days, s['games'], s['valid'])
+        return (1 if s['covers_2025'] else 0, source_priority.get(s['table'],-1), depth_days, s['games'], s['valid'])
     best=max(viable,key=_score)
+    log_func(
+        f"[V13-MARKET-PRIMARY] preferred={MOVES_FEATURES_TABLE} selected={best['table']} "
+        f"selected_snap={best['snap']} selected_game={best['game']} verified_2025={best['covers_2025']}"
+    )
     log_func(
         f"[V13-MARKET-HISTORY-VERIFY] expected_start_year=2025 verified={'TRUE' if best['covers_2025'] else 'FALSE'} "
         f"source={best['table']} route={best['route']} snap_col={best['snap']} game_col={best['game']} "
@@ -16201,8 +16220,9 @@ def _ncaaf_v13_fetch_spread_snapshots(log_func=print):
     reps=np.nan
     if 'Game_Key' in df.columns and df['Game_Key'].notna().any():
         reps=(df.groupby('Game_Key',dropna=False)['Snapshot_Timestamp'].nunique()>=2).mean()
-    log_func(f"[V13-MARKET-SOURCE] source={table} join_mode={best['route']} rows={len(df)} snap_col={sf} game_col={gf} repeated_game_frac={reps if np.isfinite(reps) else 'NA'}")
-    df.attrs['v13_market_source']={"source":table,"join_mode":best['route'],"snapshot_col":sf,"game_col":gf,"rows":int(len(df)),"covers_2025":bool(best['covers_2025']),"min_snapshot":str(best['min_snapshot']),"max_snapshot":str(best['max_snapshot'])}
+    role="PRIMARY_ENRICHED" if table==MOVES_FEATURES_TABLE else ("RAW_FALLBACK" if table==BQ_FULL_TABLE else "ARCHIVE_FALLBACK")
+    log_func(f"[V13-MARKET-SOURCE] source={table} source_role={role} join_mode={best['route']} rows={len(df)} snap_col={sf} game_col={gf} repeated_game_frac={reps if np.isfinite(reps) else 'NA'}")
+    df.attrs['v13_market_source']={"source":table,"source_role":role,"join_mode":best['route'],"snapshot_col":sf,"game_col":gf,"rows":int(len(df)),"covers_2025":bool(best['covers_2025']),"rows_2025":int(best.get('rows_2025',0)),"games_2025":int(best.get('games_2025',0)),"min_snapshot":str(best['min_snapshot']),"max_snapshot":str(best['max_snapshot'])}
     return df
 
 def _ncaaf_v13_build_market_horizons(snaps: pd.DataFrame, log_func=print):
