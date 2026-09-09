@@ -14666,7 +14666,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-08-v13.0.4-dual-result-market-scorecard"
+NCAAF_V13_VERSION = "2026-09-08-v13.0.5-handicap-enhanced-deep-market-history"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -14717,6 +14717,12 @@ _NCAAF_STAT_MATCHUP_PAIRS = (
     ("Rush_YPA", "Off_Rush_YPA", "Def_Rush_YPA_Allowed"),
     ("Points_Per_Play", "Off_Points_Per_Play", "Def_Points_Per_Play_Allowed"),
     ("Turnover_Pressure", "Off_Turnover_Rate", "Def_Takeaway_Rate"),
+    # V13.0.5 handicap candidate expansion.  These all use pre-existing,
+    # leakage-safe profile metrics; the qualification gate can reject every one.
+    ("Yards_Per_Completion", "Off_Yards_Per_Completion", "Def_Yards_Per_Completion_Allowed"),
+    ("Pass_Rate", "Off_Pass_Rate", "Def_Pass_Rate_Faced"),
+    ("Rush_Rate", "Off_Rush_Rate", "Def_Rush_Rate_Faced"),
+    ("Pace", "Off_Plays_Per_Game", "Def_Plays_Faced"),
 )
 
 
@@ -15014,14 +15020,20 @@ def _ncaaf_stat_qualify_features(
     market_weight: float,
     label: str,
     log_func=print,
+    qual_seasons_override=None,
 ):
     """Greedy chronological admission test; every accepted real feature adds OOS skill."""
     seasons = [int(s) for s in seasons]
     latest = max(seasons)
-    qual_seasons = [s for s in seasons[1:] if s < latest]
-    # If history is only three seasons, there is still one pre-shadow validation season.
-    if not qual_seasons and len(seasons) >= 2:
-        qual_seasons = [seasons[-2]]
+    if qual_seasons_override is None:
+        qual_seasons = [s for s in seasons[1:] if s < latest]
+        # If history is only three seasons, there is still one pre-shadow validation season.
+        if not qual_seasons and len(seasons) >= 2:
+            qual_seasons = [seasons[-2]]
+    else:
+        # V13 nested/as-of research path: feature admission itself may only use
+        # validation seasons that occurred strictly before the season being predicted.
+        qual_seasons = sorted({int(s) for s in qual_seasons_override if int(s) in set(seasons)})
 
     baseline_cols = [_NCAAF_STAT_INTERCEPT_FEATURE]
     base_eval = _ncaaf_stat_qualification_eval(
@@ -15675,7 +15687,25 @@ def _ncaaf_v13_market_runtime_features(rows: pd.DataFrame):
             "Book_Count":float(gx["__v13_book"].nunique()),"Sharp_Book_Count":float(gx.loc[gx["__v13_sharp"],"__v13_book"].nunique()),
             "Rec_Book_Count":float(gx.loc[gx["__v13_rec"],"__v13_book"].nunique()),"Horizon_Hours":huse,
         }
-        for key in (3,7,10,14): vals[f"Dist_to_Key_{key}"]=abs(abs(current)-float(key)) if np.isfinite(current) else np.nan
+        for key in (3,7,10,14):
+            vals[f"Dist_to_Key_{key}"]=abs(abs(current)-float(key)) if np.isfinite(current) else np.nan
+            if np.isfinite(current) and np.isfinite(op):
+                a0=abs(op)-float(key); a1=abs(current)-float(key)
+                vals[f"Key_Cross_{key}"]=float((a0*a1)<=0 and not np.isclose(op,current,atol=1e-9))
+            else:
+                vals[f"Key_Cross_{key}"]=np.nan
+        vals["Abs_Move_From_Open"]=abs(current-op) if np.isfinite(current) and np.isfinite(op) else np.nan
+        vals["Abs_SharpMinusRec"]=abs(sh-rc) if np.isfinite(sh) and np.isfinite(rc) else np.nan
+        vals["Current_vs_Sharp"]=current-sh if np.isfinite(current) and np.isfinite(sh) else np.nan
+        smove=sh-op if np.isfinite(sh) and np.isfinite(op) else np.nan
+        rmove=rc-op if np.isfinite(rc) and np.isfinite(op) else np.nan
+        vals["SharpRec_Move_Agreement"]=float(np.sign(smove)*np.sign(rmove)) if np.isfinite(smove) and np.isfinite(rmove) else np.nan
+        bc=max(float(vals["Book_Count"]),1.0)
+        vals["Sharp_Book_Fraction"]=float(vals["Sharp_Book_Count"])/bc
+        vals["Rec_Book_Fraction"]=float(vals["Rec_Book_Count"])/bc
+        vals["Consensus_Tightness"]=1.0/(1.0+max(float(vals["Book_Dispersion"]),0.0)) if np.isfinite(vals["Book_Dispersion"]) else np.nan
+        _ds=[vals[f"Dist_to_Key_{k}"] for k in (3,7,10,14) if np.isfinite(vals[f"Dist_to_Key_{k}"])]
+        vals["Nearest_Key_Distance"]=min(_ds) if _ds else np.nan
         for c,v in vals.items(): feat.loc[gi,c]=v
     return feat
 
@@ -15693,7 +15723,7 @@ def _ncaaf_v13_runtime_result_bucket(abs_edge):
     return out
 
 def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
-    """Calculate V13.0.4 value diagnostics only; never overwrites production probability."""
+    """Calculate V13.0.5 value diagnostics only; never overwrites production probability."""
     out=rows.copy(); n=len(out)
     defaults={
         "V13_Active":0,
@@ -15744,7 +15774,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         raw_fundamental_edge=raw_fair_side-offered_margin
         fundamental_edge=tradable_fair_side-offered_margin
 
-        # Historical result profile is descriptive only in V13.0.4.  It tells the
+        # Historical result profile is descriptive only in V13.0.5.  It tells the
         # UI how often comparable OOS disagreements were closer to the final result,
         # but it does not alter probability, line, or EV.
         result_bucket=_ncaaf_v13_runtime_result_bucket(np.abs(raw_fundamental_edge))
@@ -15830,7 +15860,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         out["V13_Status"]=status; out["V13_Active"]=eligible.astype("int8")
         return out
     except Exception as e:
-        logging.warning("V13.0.4 NCAAF shadow scoring unavailable: %s",e,exc_info=True)
+        logging.warning("V13.0.5 NCAAF shadow scoring unavailable: %s",e,exc_info=True)
         return out
 
 
