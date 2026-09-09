@@ -14237,7 +14237,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-08-v13.0.4-dual-result-market-scorecard"
+NCAAF_V13_VERSION = "2026-09-08-v13.0.5-handicap-enhanced-deep-market-history"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -14609,6 +14609,12 @@ _NCAAF_STAT_MATCHUP_PAIRS = (
     ("Rush_YPA", "Off_Rush_YPA", "Def_Rush_YPA_Allowed"),
     ("Points_Per_Play", "Off_Points_Per_Play", "Def_Points_Per_Play_Allowed"),
     ("Turnover_Pressure", "Off_Turnover_Rate", "Def_Takeaway_Rate"),
+    # V13.0.5 handicap candidate expansion.  These all use pre-existing,
+    # leakage-safe profile metrics; the qualification gate can reject every one.
+    ("Yards_Per_Completion", "Off_Yards_Per_Completion", "Def_Yards_Per_Completion_Allowed"),
+    ("Pass_Rate", "Off_Pass_Rate", "Def_Pass_Rate_Faced"),
+    ("Rush_Rate", "Off_Rush_Rate", "Def_Rush_Rate_Faced"),
+    ("Pace", "Off_Plays_Per_Game", "Def_Plays_Faced"),
 )
 
 
@@ -14906,14 +14912,20 @@ def _ncaaf_stat_qualify_features(
     market_weight: float,
     label: str,
     log_func=print,
+    qual_seasons_override=None,
 ):
     """Greedy chronological admission test; every accepted real feature adds OOS skill."""
     seasons = [int(s) for s in seasons]
     latest = max(seasons)
-    qual_seasons = [s for s in seasons[1:] if s < latest]
-    # If history is only three seasons, there is still one pre-shadow validation season.
-    if not qual_seasons and len(seasons) >= 2:
-        qual_seasons = [seasons[-2]]
+    if qual_seasons_override is None:
+        qual_seasons = [s for s in seasons[1:] if s < latest]
+        # If history is only three seasons, there is still one pre-shadow validation season.
+        if not qual_seasons and len(seasons) >= 2:
+            qual_seasons = [seasons[-2]]
+    else:
+        # V13 nested/as-of research path: feature admission itself may only use
+        # validation seasons that occurred strictly before the season being predicted.
+        qual_seasons = sorted({int(s) for s in qual_seasons_override if int(s) in set(seasons)})
 
     baseline_cols = [_NCAAF_STAT_INTERCEPT_FEATURE]
     base_eval = _ncaaf_stat_qualification_eval(
@@ -15267,36 +15279,54 @@ def _ncaaf_v13_fundamental_feature_cols(games: pd.DataFrame):
         "Diff_State_Off_YPP", "Diff_State_Off_Pass_YPA", "Diff_State_Off_Rush_YPA",
         "Diff_State_Off_Completion_Rate", "Diff_State_Off_Points_Per_Play",
         "Diff_State_Off_Turnover_Rate", "Diff_State_Off_FirstDown_Rate",
+        "Diff_State_Off_Plays_Per_Game", "Diff_State_Off_Pass_Rate", "Diff_State_Off_Rush_Rate",
+        "Diff_State_Off_Yards_Per_Completion",
         "Diff_State_Def_YPP_Allowed", "Diff_State_Def_Pass_YPA_Allowed", "Diff_State_Def_Rush_YPA_Allowed",
         "Diff_State_Def_Points_Per_Play_Allowed", "Diff_State_Def_Takeaway_Rate",
+        "Diff_State_Def_Plays_Faced", "Diff_State_Def_Pass_Rate_Faced", "Diff_State_Def_Rush_Rate_Faced",
+        "Diff_State_Def_Yards_Per_Completion_Allowed",
         "Diff_State_GameAdj_Off_YPP", "Diff_State_GameAdj_Def_YPP",
         "Diff_State_GameAdj_Off_Pass_YPA", "Diff_State_GameAdj_Def_Pass_YPA",
         "Diff_State_GameAdj_Off_Rush_YPA", "Diff_State_GameAdj_Def_Rush_YPA",
         "Diff_State_GameAdj_Off_Points_Per_Play", "Diff_State_GameAdj_Def_Points_Per_Play",
         "Diff_Recent3_Off_YPP", "Diff_Recent3_Off_Pass_YPA", "Diff_Recent3_Off_Rush_YPA",
-        "Diff_Recent3_Off_Points_Per_Play", "Diff_Recent3_Def_YPP_Allowed",
-        "Diff_Recent3_Def_Pass_YPA_Allowed", "Diff_Recent3_Def_Rush_YPA_Allowed",
-        "Diff_Recent3_Def_Points_Per_Play_Allowed",
+        "Diff_Recent3_Off_Points_Per_Play", "Diff_Recent3_Off_Plays_Per_Game",
+        "Diff_Recent3_Off_Pass_Rate", "Diff_Recent3_Off_Rush_Rate", "Diff_Recent3_Off_Yards_Per_Completion",
+        "Diff_Recent3_Def_YPP_Allowed", "Diff_Recent3_Def_Pass_YPA_Allowed", "Diff_Recent3_Def_Rush_YPA_Allowed",
+        "Diff_Recent3_Def_Points_Per_Play_Allowed", "Diff_Recent3_Def_Plays_Faced",
+        "Diff_Recent3_Def_Pass_Rate_Faced", "Diff_Recent3_Def_Rush_Rate_Faced", "Diff_Recent3_Def_Yards_Per_Completion_Allowed",
         "Matchup_Diff_State_YPP", "Matchup_Diff_State_Pass_YPA", "Matchup_Diff_State_Rush_YPA",
         "Matchup_Diff_State_Points_Per_Play", "Matchup_Diff_State_Turnover_Pressure",
+        "Matchup_Diff_State_Yards_Per_Completion", "Matchup_Diff_State_Pass_Rate",
+        "Matchup_Diff_State_Rush_Rate", "Matchup_Diff_State_Pace",
         "Matchup_Diff_Recent3_YPP", "Matchup_Diff_Recent3_Pass_YPA", "Matchup_Diff_Recent3_Rush_YPA",
         "Matchup_Diff_Recent3_Points_Per_Play", "Matchup_Diff_Recent3_Turnover_Pressure",
+        "Matchup_Diff_Recent3_Yards_Per_Completion", "Matchup_Diff_Recent3_Pass_Rate",
+        "Matchup_Diff_Recent3_Rush_Rate", "Matchup_Diff_Recent3_Pace",
         "Power_Rating_Diff",
     ]
     wanted_total = [
         "Context_Is_Neutral", "Context_Week", "Context_A_FBS", "Context_B_FBS", "Context_Cross_Subdivision",
         "Sum_State_Off_YPP", "Sum_State_Off_Pass_YPA", "Sum_State_Off_Rush_YPA",
         "Sum_State_Off_Points_Per_Play", "Sum_State_Off_Plays_Per_Game",
+        "Sum_State_Off_Pass_Rate", "Sum_State_Off_Rush_Rate", "Sum_State_Off_Yards_Per_Completion",
         "Sum_State_Def_YPP_Allowed", "Sum_State_Def_Pass_YPA_Allowed", "Sum_State_Def_Rush_YPA_Allowed",
         "Sum_State_Def_Points_Per_Play_Allowed", "Sum_State_Def_Plays_Faced",
+        "Sum_State_Def_Pass_Rate_Faced", "Sum_State_Def_Rush_Rate_Faced", "Sum_State_Def_Yards_Per_Completion_Allowed",
         "Sum_Recent3_Off_YPP", "Sum_Recent3_Off_Pass_YPA", "Sum_Recent3_Off_Rush_YPA",
         "Sum_Recent3_Off_Points_Per_Play", "Sum_Recent3_Off_Plays_Per_Game",
+        "Sum_Recent3_Off_Pass_Rate", "Sum_Recent3_Off_Rush_Rate", "Sum_Recent3_Off_Yards_Per_Completion",
         "Sum_Recent3_Def_YPP_Allowed", "Sum_Recent3_Def_Pass_YPA_Allowed", "Sum_Recent3_Def_Rush_YPA_Allowed",
         "Sum_Recent3_Def_Points_Per_Play_Allowed", "Sum_Recent3_Def_Plays_Faced",
+        "Sum_Recent3_Def_Pass_Rate_Faced", "Sum_Recent3_Def_Rush_Rate_Faced", "Sum_Recent3_Def_Yards_Per_Completion_Allowed",
         "Matchup_Sum_State_YPP", "Matchup_Sum_State_Pass_YPA", "Matchup_Sum_State_Rush_YPA",
         "Matchup_Sum_State_Points_Per_Play", "Matchup_Sum_State_Turnover_Pressure",
+        "Matchup_Sum_State_Yards_Per_Completion", "Matchup_Sum_State_Pass_Rate",
+        "Matchup_Sum_State_Rush_Rate", "Matchup_Sum_State_Pace",
         "Matchup_Sum_Recent3_YPP", "Matchup_Sum_Recent3_Pass_YPA", "Matchup_Sum_Recent3_Rush_YPA",
         "Matchup_Sum_Recent3_Points_Per_Play", "Matchup_Sum_Recent3_Turnover_Pressure",
+        "Matchup_Sum_Recent3_Yards_Per_Completion", "Matchup_Sum_Recent3_Pass_Rate",
+        "Matchup_Sum_Recent3_Rush_Rate", "Matchup_Sum_Recent3_Pace",
     ]
     margin = [c for c in wanted_margin if c in games.columns]
     total = [c for c in wanted_total if c in games.columns]
@@ -15523,7 +15553,7 @@ def _ncaaf_v13_result_profile(actual, market, raw, tradable, groups=None, reps=5
 
     RAW fair margin is judged only on proximity to the realized game margin.
     TRADABLE fair margin is judged as a conservative betting estimate relative to
-    the market.  This profile is diagnostic in V13.0.4 and is NOT an input to EV.
+    the market.  This profile is diagnostic in V13.0.5 and is NOT an input to EV.
     """
     a=np.asarray(actual,dtype=float); m=np.asarray(market,dtype=float)
     r=np.asarray(raw,dtype=float); t=np.asarray(tradable,dtype=float)
@@ -15696,7 +15726,7 @@ def _ncaaf_v13_learn_tradable_edges(games, raw_margin_oof, raw_total_oof, *, log
         for _b in pooled_buckets:
             closer_metrics.append({"season":"POOLED_FORWARD", **_b})
 
-    # V13.0.4 keeps a distinct result-accuracy scorecard.  This asks whether the
+    # V13.0.5 keeps a distinct result-accuracy scorecard.  This asks whether the
     # raw football opinion (and separately the tradable line) was closer to the
     # realized final margin than the market.  It is OOS diagnostic evidence only
     # and does not alter cover probability or EV.
@@ -15819,16 +15849,43 @@ def _ncaaf_v13_build_fundamental(raw: pd.DataFrame, bq=None, log_func=print):
     yt=pd.to_numeric(games["Actual_Total"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
     oof_m=np.full(len(games),np.nan); oof_t=np.full(len(games),np.nan)
     fold_metrics=[]
+    fold_feature_sets={}
     for val in seasons[1:]:
         tr=np.isfinite(season_arr)&(season_arr<float(val))&np.isfinite(ym)&np.isfinite(yt)
         va=np.isfinite(season_arr)&(season_arr==float(val))&np.isfinite(ym)&np.isfinite(yt)
         if int(tr.sum())<NCAAF_V13_MIN_TRAIN_GAMES or int(va.sum())<NCAAF_V13_MIN_VALID_GAMES:
             continue
-        mm=_ncaaf_v13_fit_regression_pair(games.loc[tr,margin_cols],ym[tr])
-        tm=_ncaaf_v13_fit_regression_pair(games.loc[tr,total_cols],yt[tr])
-        pm=_ncaaf_v13_regression_predict(mm,games.loc[va,margin_cols],0.80)
-        pt=_ncaaf_v13_regression_predict(tm,games.loc[va,total_cols],0.80)
+
+        # Fully as-of feature admission: a 2024 prediction cannot use evidence from
+        # 2024/2025 to decide which columns are good.  The first OOF season uses the
+        # predeclared candidate set as a warm-up; later folds earn features only on
+        # earlier validation seasons.
+        prior_qual=[s for s in seasons[1:] if s < int(val)]
+        if prior_qual:
+            fold_margin_cols,_=_ncaaf_stat_qualify_features(
+                games,candidate_margin,"Actual_Margin","Market_Open_Margin",seasons,
+                market_weight=1.0,label=f"v13_margin_asof_{int(val)}",log_func=log_func,
+                qual_seasons_override=prior_qual,
+            )
+            fold_total_cols,_=_ncaaf_stat_qualify_features(
+                games,candidate_total,"Actual_Total","Market_Open_Total",seasons,
+                market_weight=1.0,label=f"v13_total_asof_{int(val)}",log_func=log_func,
+                qual_seasons_override=prior_qual,
+            )
+        else:
+            fold_margin_cols=[_NCAAF_STAT_INTERCEPT_FEATURE]+list(candidate_margin)
+            fold_total_cols=[_NCAAF_STAT_INTERCEPT_FEATURE]+list(candidate_total)
+            log_func(f"[V13-FUNDAMENTAL-ASOF] season={int(val)} policy=PREDECLARED_CANDIDATE_WARMUP margin={len(fold_margin_cols)-1} total={len(fold_total_cols)-1}")
+        if len(fold_margin_cols)<2 or len(fold_total_cols)<2:
+            log_func(f"[V13-FUNDAMENTAL-ASOF] season={int(val)} insufficient_features margin={len(fold_margin_cols)-1} total={len(fold_total_cols)-1}")
+            continue
+        fold_feature_sets[int(val)]={"margin":list(fold_margin_cols),"total":list(fold_total_cols),"qualification_seasons":list(prior_qual)}
+        mm=_ncaaf_v13_fit_regression_pair(games.loc[tr,fold_margin_cols],ym[tr])
+        tm=_ncaaf_v13_fit_regression_pair(games.loc[tr,fold_total_cols],yt[tr])
+        pm=_ncaaf_v13_regression_predict(mm,games.loc[va,fold_margin_cols],0.80)
+        pt=_ncaaf_v13_regression_predict(tm,games.loc[va,fold_total_cols],0.80)
         idx=np.where(va)[0]; oof_m[idx]=pm; oof_t[idx]=pt
+        log_func(f"[V13-FUNDAMENTAL-ASOF] season={int(val)} qual_seasons={prior_qual} margin_features={len(fold_margin_cols)-1} total_features={len(fold_total_cols)-1}")
         market_m=pd.to_numeric(games.loc[va,"Market_Open_Margin"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
         market_t=pd.to_numeric(games.loc[va,"Market_Open_Total"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
         rec={
@@ -15883,7 +15940,7 @@ def _ncaaf_v13_build_fundamental(raw: pd.DataFrame, bq=None, log_func=print):
         "latest_profiles":latest_profiles,
         "residual_margin":np.asarray(residual_margin,dtype=np.float32),
         "residual_total":np.asarray(residual_total,dtype=np.float32),
-        "season_metrics":fold_metrics,"seasons":seasons,
+        "season_metrics":fold_metrics,"seasons":seasons,"fold_feature_sets":fold_feature_sets,
         "edge_shrinkage":{k:v for k,v in edge.items() if not str(k).startswith("tradable_")},
         "result_profile":edge.get("result_profile",{}),
         "margin_edge_beta":float(edge.get("margin_beta",0.0)),
@@ -15911,7 +15968,7 @@ def _ncaaf_v13_build_fundamental(raw: pd.DataFrame, bq=None, log_func=print):
         f"[V13-FUNDAMENTAL-OOS] n={int(common.sum())} raw_rmse={common_raw:.3f} market_rmse={common_market:.3f} "
         f"tradable_rmse={common_trad:.3f} rmse_gain={oos_skill.get('rmse_skill',np.nan):+.4f} "
         f"rmse_ci95={oos_skill.get('rmse_skill_ci95')} mae_gain={oos_skill.get('mae_skill',np.nan):+.4f} "
-        f"mae_ci95={oos_skill.get('mae_skill_ci95')} comparison=PAIRED_SEASON_FORWARD_ONLY"
+        f"mae_ci95={oos_skill.get('mae_skill_ci95')} comparison=PAIRED_NESTED_ASOF_SEASON_FORWARD"
     )
     log_func(
         f"[V13-FUNDAMENTAL] games={len(games)} qualified_margin={len(margin_cols)-1} qualified_total={len(total_cols)-1} "
@@ -15922,13 +15979,12 @@ def _ncaaf_v13_build_fundamental(raw: pd.DataFrame, bq=None, log_func=print):
 
 
 def _ncaaf_v13_fetch_spread_snapshots(log_func=print):
-    """Discover a genuine repeated historical NCAAF spread stream.
+    """Discover the deepest genuine repeated historical NCAAF spread stream.
 
-    V13.0.3 first tests sharp_moves_master (the application's actual snapshot
-    source), then explicit history/snapshot tables.  It profiles candidate game
-    timestamp columns and chooses the one with the most valid pre-kick quotes in
-    the final 36 hours.  This avoids silently selecting a populated-but-wrong
-    timestamp column or an empty archive table.
+    V13.0.5 profiles every plausible observation-time column across the live and
+    archive tables before selecting a source.  This specifically protects older
+    history stored under legacy fields such as `Time`, `Inserted_Timestamp`, or
+    `Created_At` from being hidden by a newer `Snapshot_Timestamp` column.
     """
     try:
         bq,bqs=get_bq_clients()
@@ -15939,7 +15995,10 @@ def _ncaaf_v13_fetch_spread_snapshots(log_func=print):
     aliases = {
         "sport": ("Sport","sport","Sport_Key","sport_key"),
         "market": ("Market","market","Market_Key","market_key"),
-        "snap": ("Snapshot_Timestamp","snapshot_timestamp","Observed_At","Captured_At","Scraped_At","Timestamp","Insert_Timestamp"),
+        "snap": (
+            "Snapshot_Timestamp","snapshot_timestamp","Time","Observed_At","Captured_At","Scraped_At",
+            "Timestamp","Insert_Timestamp","Inserted_Timestamp","Inserted_At","Created_At","Updated_At"
+        ),
         "game": ("Game_Start","feat_Game_Start","Commence_Hour","Commence_Time","commence_time"),
         "book": ("Bookmaker","Book","bookmaker","Bookmaker_Norm","Book_Norm"),
         "value": ("Value","Line","Spread","Line_Value"),
@@ -15958,166 +16017,193 @@ def _ncaaf_v13_fetch_spread_snapshots(log_func=print):
         except Exception as e:
             log_func(f"[V13-MARKET-SCHEMA] source={table} unavailable={e}")
             return set()
-    def pick(schema, kind):
-        return next((x for x in aliases[kind] if x in schema),None)
-    def cast_str(alias, field):
-        return f"CAST({alias}.`{field}` AS STRING)" if field else "CAST(NULL AS STRING)"
-    def cast_float(alias, field):
-        return f"SAFE_CAST({alias}.`{field}` AS FLOAT64)" if field else "CAST(NULL AS FLOAT64)"
-    def ts(alias, field):
-        return f"SAFE_CAST({alias}.`{field}` AS TIMESTAMP)"
+    def pick(schema, kind): return next((x for x in aliases[kind] if x in schema),None)
+    def cast_str(alias, field): return f"CAST({alias}.`{field}` AS STRING)" if field else "CAST(NULL AS STRING)"
+    def cast_float(alias, field): return f"SAFE_CAST({alias}.`{field}` AS FLOAT64)" if field else "CAST(NULL AS FLOAT64)"
+    def ts(alias, field): return f"SAFE_CAST({alias}.`{field}` AS TIMESTAMP)"
 
-    candidates=[]
-    for t in (BQ_FULL_TABLE, LINE_HISTORY_TABLE, SNAPSHOTS_TABLE):
-        if t and t not in candidates: candidates.append(t)
+    tables=[]
+    # Dedicated history first for profiling, but selection is evidence-based.
+    for table in (LINE_HISTORY_TABLE,SNAPSHOTS_TABLE,BQ_FULL_TABLE):
+        if table and table not in tables: tables.append(table)
+    schemas={table:schema_for(table) for table in tables}
+    meta_schema=schemas.get(BQ_FULL_TABLE,set())
+    specs=[]; attempts=[]
 
-    attempts=[]
-    for table in candidates:
-        sch=schema_for(table)
-        if not sch:
-            attempts.append((table,"no_schema")); continue
+    def _record_profile(table,route,snap_col,game_col,row,key_col=None,meta=None):
+        try:
+            valid=int(row.get("prekick_36h_rows") or 0)
+            games_n=int(row.get("distinct_games") or 0)
+            mn=pd.to_datetime(row.get("min_valid_snapshot"),errors="coerce",utc=True)
+            mx=pd.to_datetime(row.get("max_valid_snapshot"),errors="coerce",utc=True)
+            min_game=pd.to_datetime(row.get("min_valid_game"),errors="coerce",utc=True)
+            max_game=pd.to_datetime(row.get("max_valid_game"),errors="coerce",utc=True)
+            rows_2025=int(row.get("valid_2025_rows") or 0)
+            games_2025=int(row.get("valid_2025_games") or 0)
+            # Verification means actual valid pre-kick snapshot observations occurred
+            # in calendar 2025; a min/max range spanning 2025 is not sufficient.
+            covers_2025=bool(rows_2025>0 and games_2025>0)
+            year_span=int(max(0,(mx.year-mn.year))) if pd.notna(mn) and pd.notna(mx) else 0
+            log_func(
+                f"[V13-MARKET-PROFILE] source={table} route={route} snap_col={snap_col} game_col={game_col} "
+                f"prekick36={valid} games={games_n} rows_2025={rows_2025} games_2025={games_2025} "
+                f"snapshot_range={mn}..{mx} game_range={min_game}..{max_game} covers_2025={covers_2025}"
+            )
+            if valid>0 and games_n>0 and pd.notna(mn) and pd.notna(mx):
+                specs.append({"table":table,"route":route,"snap":snap_col,"game":game_col,"key":key_col,
+                              "meta":meta,"valid":valid,"games":games_n,"rows_2025":rows_2025,"games_2025":games_2025,
+                              "min_snapshot":mn,"max_snapshot":mx,
+                              "min_game":min_game,"max_game":max_game,"covers_2025":covers_2025,"year_span":year_span})
+        except Exception as e:
+            attempts.append((table,f"profile_parse_error:{e}"))
+
+    # Direct sources: profile every plausible snapshot-time x game-time pair.
+    for table in tables:
+        sch=schemas.get(table,set())
+        if not sch: continue
         f={k:pick(sch,k) for k in aliases}
-        quote_ok=all(f[k] for k in ("snap","book","value","outcome"))
-        if not quote_ok:
-            attempts.append((table,f"quote_schema_missing fields={f}")); continue
-
-        # Identify the game timestamp column by evidence, not alias order.
+        snap_candidates=[x for x in aliases["snap"] if x in sch]
         game_candidates=[x for x in aliases["game"] if x in sch]
-        best_game=None; best_valid=-1; profile_rows=[]
-        if f.get("sport") and f.get("market") and game_candidates:
-            for gf in game_candidates:
-                sql=f"""
-                  SELECT
-                    COUNT(*) AS total_rows,
-                    COUNTIF(UPPER(TRIM(CAST(s.`{f['sport']}` AS STRING))) IN ({sport_in})) AS sport_rows,
-                    COUNTIF(UPPER(TRIM(CAST(s.`{f['sport']}` AS STRING))) IN ({sport_in})
-                            AND LOWER(TRIM(CAST(s.`{f['market']}` AS STRING))) IN ('spread','spreads')) AS spread_rows,
-                    COUNTIF(UPPER(TRIM(CAST(s.`{f['sport']}` AS STRING))) IN ({sport_in})
-                            AND LOWER(TRIM(CAST(s.`{f['market']}` AS STRING))) IN ('spread','spreads')
-                            AND {ts('s',f['snap'])} IS NOT NULL AND {ts('s',gf)} IS NOT NULL
-                            AND {ts('s',f['snap'])} < {ts('s',gf)}) AS prekick_rows,
-                    COUNTIF(UPPER(TRIM(CAST(s.`{f['sport']}` AS STRING))) IN ({sport_in})
-                            AND LOWER(TRIM(CAST(s.`{f['market']}` AS STRING))) IN ('spread','spreads')
-                            AND {ts('s',f['snap'])} IS NOT NULL AND {ts('s',gf)} IS NOT NULL
-                            AND {ts('s',f['snap'])} < {ts('s',gf)}
-                            AND {ts('s',f['snap'])} >= TIMESTAMP_SUB({ts('s',gf)}, INTERVAL 36 HOUR)) AS prekick_36h_rows,
-                    MIN({ts('s',f['snap'])}) AS min_snapshot,
-                    MAX({ts('s',f['snap'])}) AS max_snapshot,
-                    MIN({ts('s',gf)}) AS min_game,
-                    MAX({ts('s',gf)}) AS max_game
-                  FROM `{table}` s
-                """
-                try:
-                    pr=bq.query(sql).to_dataframe()
-                    if not pr.empty:
-                        r=pr.iloc[0].to_dict(); valid=int(r.get("prekick_36h_rows") or 0)
-                        profile_rows.append((gf,valid,r))
-                        log_func(
-                            f"[V13-MARKET-PROFILE] source={table} game_col={gf} total={int(r.get('total_rows') or 0)} "
-                            f"sport={int(r.get('sport_rows') or 0)} spreads={int(r.get('spread_rows') or 0)} "
-                            f"prekick={int(r.get('prekick_rows') or 0)} prekick36={valid} "
-                            f"snapshot_range={r.get('min_snapshot')}..{r.get('max_snapshot')} game_range={r.get('min_game')}..{r.get('max_game')}"
-                        )
-                        if valid>best_valid:
-                            best_valid=valid; best_game=gf
-                except Exception as e:
-                    attempts.append((table,f"profile_{gf}_error:{e}"))
-        if best_game:
-            f["game"]=best_game
+        quote_ok=all(f.get(k) for k in ("book","value","outcome"))
+        direct_meta=all(f.get(k) for k in ("sport","market","home","away"))
+        if quote_ok and direct_meta and snap_candidates and game_candidates:
+            key_expr=cast_str('s',f.get('key')) if f.get('key') else "CONCAT(COALESCE(CAST(s.`%s` AS STRING),''),'|',COALESCE(CAST(s.`%s` AS STRING),''),'|',CAST(%s AS STRING))"%(f['home'],f['away'],ts('s',game_candidates[0]))
+            for sf in snap_candidates:
+                for gf in game_candidates:
+                    cond=(f"UPPER(TRIM(CAST(s.`{f['sport']}` AS STRING))) IN ({sport_in}) AND "
+                          f"LOWER(TRIM(CAST(s.`{f['market']}` AS STRING))) IN ('spread','spreads') AND "
+                          f"{ts('s',sf)} IS NOT NULL AND {ts('s',gf)} IS NOT NULL AND {ts('s',sf)} < {ts('s',gf)} AND "
+                          f"{ts('s',sf)} >= TIMESTAMP_SUB({ts('s',gf)}, INTERVAL 36 HOUR)")
+                    kexpr=cast_str('s',f.get('key')) if f.get('key') else f"CONCAT(CAST(s.`{f['home']}` AS STRING),'|',CAST(s.`{f['away']}` AS STRING),'|',CAST({ts('s',gf)} AS STRING))"
+                    sql=f"""
+                      SELECT COUNTIF({cond}) AS prekick_36h_rows,
+                             COUNT(DISTINCT IF({cond},{kexpr},NULL)) AS distinct_games,
+                             COUNTIF(({cond}) AND EXTRACT(YEAR FROM {ts('s',sf)})=2025) AS valid_2025_rows,
+                             COUNT(DISTINCT IF(({cond}) AND EXTRACT(YEAR FROM {ts('s',sf)})=2025,{kexpr},NULL)) AS valid_2025_games,
+                             MIN(IF({cond},{ts('s',sf)},NULL)) AS min_valid_snapshot,
+                             MAX(IF({cond},{ts('s',sf)},NULL)) AS max_valid_snapshot,
+                             MIN(IF({cond},{ts('s',gf)},NULL)) AS min_valid_game,
+                             MAX(IF({cond},{ts('s',gf)},NULL)) AS max_valid_game
+                      FROM `{table}` s
+                    """
+                    try:
+                        pr=bq.query(sql).to_dataframe()
+                        if not pr.empty: _record_profile(table,"direct",sf,gf,pr.iloc[0].to_dict(),key_col=f.get('key'))
+                    except Exception as e: attempts.append((table,f"direct_profile_{sf}_{gf}:{e}"))
 
-        direct_ok=quote_ok and all(f.get(k) for k in ("sport","market","game","home","away")) and best_valid>0
-        if direct_ok:
-            sql=f"""
-              SELECT
-                {cast_str('s',f['key'])} AS Game_Key,
-                {ts('s',f['snap'])} AS Snapshot_Timestamp,
-                {ts('s',f['game'])} AS Game_Start,
-                {cast_str('s',f['book'])} AS Bookmaker,
-                {cast_float('s',f['value'])} AS Value,
-                {cast_float('s',f['odds'])} AS Odds_Price,
-                {cast_float('s',f['open'])} AS Open_Value,
-                {cast_str('s',f['outcome'])} AS Outcome,
-                {cast_str('s',f['home'])} AS Home_Team_Norm,
-                {cast_str('s',f['away'])} AS Away_Team_Norm
-              FROM `{table}` s
-              WHERE UPPER(TRIM(CAST(s.`{f['sport']}` AS STRING))) IN ({sport_in})
-                AND LOWER(TRIM(CAST(s.`{f['market']}` AS STRING))) IN ('spread','spreads')
-                AND {ts('s',f['snap'])} IS NOT NULL AND {ts('s',f['game'])} IS NOT NULL
-                AND {ts('s',f['game'])} >= TIMESTAMP('2022-01-01')
-                AND {ts('s',f['game'])} < CURRENT_TIMESTAMP()
-                AND {ts('s',f['snap'])} < {ts('s',f['game'])}
-                AND {ts('s',f['snap'])} >= TIMESTAMP_SUB({ts('s',f['game'])}, INTERVAL 36 HOUR)
-            """
-            try:
-                df=bq.query(sql).to_dataframe(bqstorage_client=bqs)
-                if not df.empty:
-                    # Require real repeated price discovery, not one final row/game.
-                    kcol="Game_Key" if "Game_Key" in df.columns and df["Game_Key"].notna().any() else None
-                    if kcol:
-                        reps=(df.groupby(kcol,dropna=False)["Snapshot_Timestamp"].nunique()>=2).mean()
-                    else:
-                        reps=np.nan
-                    log_func(f"[V13-MARKET-SOURCE] source={table} join_mode=direct rows={len(df)} snap_col={f['snap']} game_col={f['game']} repeated_game_frac={reps if np.isfinite(reps) else 'NA'}")
-                    df.attrs["v13_market_source"]={"source":table,"join_mode":"direct","snapshot_col":f['snap'],"game_col":f['game'],"rows":int(len(df))}
-                    return df
-                attempts.append((table,"direct_empty"))
-            except Exception as e:
-                attempts.append((table,f"direct_error:{e}"))
-
-        # Key-join fallback for quote-only streams.
-        meta_schema=schema_for(BQ_FULL_TABLE) if table != BQ_FULL_TABLE else sch
-        if quote_ok and f.get("key") and meta_schema:
+        # Key-join archive sources: use sharp_moves_master only for game metadata.
+        if table!=BQ_FULL_TABLE and quote_ok and f.get('key') and meta_schema and snap_candidates:
             mf={k:pick(meta_schema,k) for k in aliases}
-            common_key=None
-            for kc in aliases["key"]:
-                if kc in sch and kc in meta_schema:
-                    common_key=kc; break
-            meta_game_candidates=[x for x in aliases["game"] if x in meta_schema]
-            mg=mf.get("game") or (meta_game_candidates[0] if meta_game_candidates else None)
-            if common_key and all(mf.get(k) for k in ("sport","market","home","away")) and mg:
-                sql=f"""
-                  WITH meta AS (
-                    SELECT
-                      CAST(`{common_key}` AS STRING) AS __join_key,
-                      ANY_VALUE(CAST(`{mf['sport']}` AS STRING)) AS Sport,
-                      ANY_VALUE(CAST(`{mf['market']}` AS STRING)) AS Market,
-                      MAX(SAFE_CAST(`{mg}` AS TIMESTAMP)) AS Game_Start,
-                      ANY_VALUE(CAST(`{mf['home']}` AS STRING)) AS Home_Team_Norm,
-                      ANY_VALUE(CAST(`{mf['away']}` AS STRING)) AS Away_Team_Norm
-                    FROM `{BQ_FULL_TABLE}`
-                    WHERE UPPER(TRIM(CAST(`{mf['sport']}` AS STRING))) IN ({sport_in})
-                      AND LOWER(TRIM(CAST(`{mf['market']}` AS STRING))) IN ('spread','spreads')
-                    GROUP BY __join_key
-                  )
-                  SELECT
-                    CAST(s.`{common_key}` AS STRING) AS Game_Key,
-                    {ts('s',f['snap'])} AS Snapshot_Timestamp,
-                    m.Game_Start,
-                    {cast_str('s',f['book'])} AS Bookmaker,
-                    {cast_float('s',f['value'])} AS Value,
-                    {cast_float('s',f['odds'])} AS Odds_Price,
-                    {cast_float('s',f['open'])} AS Open_Value,
-                    {cast_str('s',f['outcome'])} AS Outcome,
-                    m.Home_Team_Norm, m.Away_Team_Norm
-                  FROM `{table}` s
-                  JOIN meta m ON CAST(s.`{common_key}` AS STRING)=m.__join_key
-                  WHERE {ts('s',f['snap'])} IS NOT NULL
-                    AND {ts('s',f['snap'])} < m.Game_Start
-                    AND m.Game_Start >= TIMESTAMP('2022-01-01') AND m.Game_Start < CURRENT_TIMESTAMP()
-                    AND {ts('s',f['snap'])} >= TIMESTAMP_SUB(m.Game_Start, INTERVAL 36 HOUR)
-                """
-                try:
-                    df=bq.query(sql).to_dataframe(bqstorage_client=bqs)
-                    if not df.empty:
-                        log_func(f"[V13-MARKET-SOURCE] source={table} join_mode=key_join metadata={BQ_FULL_TABLE} key={common_key} rows={len(df)}")
-                        df.attrs["v13_market_source"]={"source":table,"join_mode":"key_join","metadata":BQ_FULL_TABLE,"key":common_key,"rows":int(len(df))}
-                        return df
-                    attempts.append((table,"key_join_empty"))
-                except Exception as e:
-                    attempts.append((table,f"key_join_error:{e}"))
+            common_key=next((kc for kc in aliases['key'] if kc in sch and kc in meta_schema),None)
+            meta_games=[x for x in aliases['game'] if x in meta_schema]
+            if common_key and all(mf.get(k) for k in ("sport","market","home","away")) and meta_games:
+                for sf in snap_candidates:
+                    for mg in meta_games:
+                        cond=(f"{ts('s',sf)} IS NOT NULL AND m.Game_Start IS NOT NULL AND {ts('s',sf)} < m.Game_Start AND "
+                              f"{ts('s',sf)} >= TIMESTAMP_SUB(m.Game_Start, INTERVAL 36 HOUR)")
+                        sql=f"""
+                          WITH meta AS (
+                            SELECT CAST(`{common_key}` AS STRING) AS __join_key,
+                                   MAX(SAFE_CAST(`{mg}` AS TIMESTAMP)) AS Game_Start
+                            FROM `{BQ_FULL_TABLE}`
+                            WHERE UPPER(TRIM(CAST(`{mf['sport']}` AS STRING))) IN ({sport_in})
+                              AND LOWER(TRIM(CAST(`{mf['market']}` AS STRING))) IN ('spread','spreads')
+                            GROUP BY __join_key
+                          )
+                          SELECT COUNTIF({cond}) AS prekick_36h_rows,
+                                 COUNT(DISTINCT IF({cond},CAST(s.`{common_key}` AS STRING),NULL)) AS distinct_games,
+                                 COUNTIF(({cond}) AND EXTRACT(YEAR FROM {ts('s',sf)})=2025) AS valid_2025_rows,
+                                 COUNT(DISTINCT IF(({cond}) AND EXTRACT(YEAR FROM {ts('s',sf)})=2025,CAST(s.`{common_key}` AS STRING),NULL)) AS valid_2025_games,
+                                 MIN(IF({cond},{ts('s',sf)},NULL)) AS min_valid_snapshot,
+                                 MAX(IF({cond},{ts('s',sf)},NULL)) AS max_valid_snapshot,
+                                 MIN(IF({cond},m.Game_Start,NULL)) AS min_valid_game,
+                                 MAX(IF({cond},m.Game_Start,NULL)) AS max_valid_game
+                          FROM `{table}` s JOIN meta m ON CAST(s.`{common_key}` AS STRING)=m.__join_key
+                        """
+                        try:
+                            pr=bq.query(sql).to_dataframe()
+                            if not pr.empty: _record_profile(table,"key_join",sf,mg,pr.iloc[0].to_dict(),key_col=common_key,meta=BQ_FULL_TABLE)
+                        except Exception as e: attempts.append((table,f"key_profile_{sf}_{mg}:{e}"))
 
-    log_func(f"[V13-MARKET] no viable historical snapshot stream attempts={attempts}")
-    return pd.DataFrame()
+    viable=[s for s in specs if s['valid']>=50 and s['games']>=20]
+    if not viable:
+        log_func(f"[V13-MARKET] no viable historical snapshot stream attempts={attempts[:20]}")
+        return pd.DataFrame()
+    # Prefer genuine 2025 coverage, then deepest history, then game/row coverage.
+    def _score(s):
+        depth_days=(pd.Timestamp.now(tz='UTC')-s['min_snapshot']).total_seconds()/86400.0 if pd.notna(s['min_snapshot']) else 0.0
+        return (1 if s['covers_2025'] else 0, depth_days, s['games'], s['valid'])
+    best=max(viable,key=_score)
+    log_func(
+        f"[V13-MARKET-HISTORY-VERIFY] expected_start_year=2025 verified={'TRUE' if best['covers_2025'] else 'FALSE'} "
+        f"source={best['table']} route={best['route']} snap_col={best['snap']} game_col={best['game']} "
+        f"snapshot_range={best['min_snapshot']}..{best['max_snapshot']} games={best['games']} rows={best['valid']} "
+        f"rows_2025={best.get('rows_2025',0)} games_2025={best.get('games_2025',0)}"
+    )
+
+    table=best['table']; sch=schemas[table]; f={k:pick(sch,k) for k in aliases}; sf=best['snap']; gf=best['game']
+    if best['route']=='direct':
+        sql=f"""
+          SELECT {cast_str('s',f.get('key'))} AS Game_Key,
+                 {ts('s',sf)} AS Snapshot_Timestamp,
+                 {ts('s',gf)} AS Game_Start,
+                 {cast_str('s',f.get('book'))} AS Bookmaker,
+                 {cast_float('s',f.get('value'))} AS Value,
+                 {cast_float('s',f.get('odds'))} AS Odds_Price,
+                 {cast_float('s',f.get('open'))} AS Open_Value,
+                 {cast_str('s',f.get('outcome'))} AS Outcome,
+                 {cast_str('s',f.get('home'))} AS Home_Team_Norm,
+                 {cast_str('s',f.get('away'))} AS Away_Team_Norm
+          FROM `{table}` s
+          WHERE UPPER(TRIM(CAST(s.`{f['sport']}` AS STRING))) IN ({sport_in})
+            AND LOWER(TRIM(CAST(s.`{f['market']}` AS STRING))) IN ('spread','spreads')
+            AND {ts('s',sf)} IS NOT NULL AND {ts('s',gf)} IS NOT NULL
+            AND {ts('s',gf)} >= TIMESTAMP('2022-01-01') AND {ts('s',gf)} < CURRENT_TIMESTAMP()
+            AND {ts('s',sf)} < {ts('s',gf)}
+            AND {ts('s',sf)} >= TIMESTAMP_SUB({ts('s',gf)}, INTERVAL 36 HOUR)
+        """
+    else:
+        mf={k:pick(meta_schema,k) for k in aliases}; common_key=best['key']; mg=best['game']
+        sql=f"""
+          WITH meta AS (
+            SELECT CAST(`{common_key}` AS STRING) AS __join_key,
+                   ANY_VALUE(CAST(`{mf['sport']}` AS STRING)) AS Sport,
+                   ANY_VALUE(CAST(`{mf['market']}` AS STRING)) AS Market,
+                   MAX(SAFE_CAST(`{mg}` AS TIMESTAMP)) AS Game_Start,
+                   ANY_VALUE(CAST(`{mf['home']}` AS STRING)) AS Home_Team_Norm,
+                   ANY_VALUE(CAST(`{mf['away']}` AS STRING)) AS Away_Team_Norm
+            FROM `{BQ_FULL_TABLE}`
+            WHERE UPPER(TRIM(CAST(`{mf['sport']}` AS STRING))) IN ({sport_in})
+              AND LOWER(TRIM(CAST(`{mf['market']}` AS STRING))) IN ('spread','spreads')
+            GROUP BY __join_key
+          )
+          SELECT CAST(s.`{common_key}` AS STRING) AS Game_Key,
+                 {ts('s',sf)} AS Snapshot_Timestamp,m.Game_Start,
+                 {cast_str('s',f.get('book'))} AS Bookmaker,
+                 {cast_float('s',f.get('value'))} AS Value,
+                 {cast_float('s',f.get('odds'))} AS Odds_Price,
+                 {cast_float('s',f.get('open'))} AS Open_Value,
+                 {cast_str('s',f.get('outcome'))} AS Outcome,
+                 m.Home_Team_Norm,m.Away_Team_Norm
+          FROM `{table}` s JOIN meta m ON CAST(s.`{common_key}` AS STRING)=m.__join_key
+          WHERE {ts('s',sf)} IS NOT NULL AND {ts('s',sf)} < m.Game_Start
+            AND m.Game_Start >= TIMESTAMP('2022-01-01') AND m.Game_Start < CURRENT_TIMESTAMP()
+            AND {ts('s',sf)} >= TIMESTAMP_SUB(m.Game_Start, INTERVAL 36 HOUR)
+        """
+    try:
+        df=bq.query(sql).to_dataframe(bqstorage_client=bqs)
+    except Exception as e:
+        log_func(f"[V13-MARKET] selected source query failed: {e}")
+        return pd.DataFrame()
+    if df.empty:
+        log_func("[V13-MARKET] selected historical source returned zero rows")
+        return df
+    reps=np.nan
+    if 'Game_Key' in df.columns and df['Game_Key'].notna().any():
+        reps=(df.groupby('Game_Key',dropna=False)['Snapshot_Timestamp'].nunique()>=2).mean()
+    log_func(f"[V13-MARKET-SOURCE] source={table} join_mode={best['route']} rows={len(df)} snap_col={sf} game_col={gf} repeated_game_frac={reps if np.isfinite(reps) else 'NA'}")
+    df.attrs['v13_market_source']={"source":table,"join_mode":best['route'],"snapshot_col":sf,"game_col":gf,"rows":int(len(df)),"covers_2025":bool(best['covers_2025']),"min_snapshot":str(best['min_snapshot']),"max_snapshot":str(best['max_snapshot'])}
+    return df
 
 def _ncaaf_v13_build_market_horizons(snaps: pd.DataFrame, log_func=print):
     if snaps is None or snaps.empty:
@@ -16159,6 +16245,9 @@ def _ncaaf_v13_build_market_horizons(snaps: pd.DataFrame, log_func=print):
         "SharpMinusRec","Move_From_Open","Sharp_Move_From_Open","Rec_Move_From_Open",
         "Book_Dispersion","Book_Count","Sharp_Book_Count","Rec_Book_Count","Horizon_Hours",
         "Dist_to_Key_3","Dist_to_Key_7","Dist_to_Key_10","Dist_to_Key_14",
+        "Abs_Move_From_Open","Abs_SharpMinusRec","Current_vs_Sharp","SharpRec_Move_Agreement",
+        "Sharp_Book_Fraction","Rec_Book_Fraction","Consensus_Tightness","Nearest_Key_Distance",
+        "Key_Cross_3","Key_Cross_7","Key_Cross_10","Key_Cross_14",
     ]
     for h in NCAAF_V13_HORIZONS_HOURS:
         cutoff=d["Game_Start"]-pd.to_timedelta(float(h),unit="h")
@@ -16188,7 +16277,25 @@ def _ncaaf_v13_build_market_horizons(snaps: pd.DataFrame, log_func=print):
                 "Book_Count":float(g["Bookmaker"].nunique()),"Sharp_Book_Count":float(g.loc[g["__sharp"],"Bookmaker"].nunique()),
                 "Rec_Book_Count":float(g.loc[g["__rec"],"Bookmaker"].nunique()),"Horizon_Hours":float(h),
             }
-            for key in (3,7,10,14): out[f"Dist_to_Key_{key}"]=abs(abs(current)-float(key)) if np.isfinite(current) else np.nan
+            for key in (3,7,10,14):
+                out[f"Dist_to_Key_{key}"]=abs(abs(current)-float(key)) if np.isfinite(current) else np.nan
+                if np.isfinite(current) and np.isfinite(op):
+                    a0=abs(op)-float(key); a1=abs(current)-float(key)
+                    out[f"Key_Cross_{key}"]=float((a0*a1)<=0 and not np.isclose(op,current,atol=1e-9))
+                else:
+                    out[f"Key_Cross_{key}"]=np.nan
+            out["Abs_Move_From_Open"]=abs(current-op) if np.isfinite(current) and np.isfinite(op) else np.nan
+            out["Abs_SharpMinusRec"]=abs(sharp-rec) if np.isfinite(sharp) and np.isfinite(rec) else np.nan
+            out["Current_vs_Sharp"]=current-sharp if np.isfinite(current) and np.isfinite(sharp) else np.nan
+            smove=sharp-op if np.isfinite(sharp) and np.isfinite(op) else np.nan
+            rmove=rec-op if np.isfinite(rec) and np.isfinite(op) else np.nan
+            out["SharpRec_Move_Agreement"]=float(np.sign(smove)*np.sign(rmove)) if np.isfinite(smove) and np.isfinite(rmove) else np.nan
+            bc=max(float(out["Book_Count"]),1.0)
+            out["Sharp_Book_Fraction"]=float(out["Sharp_Book_Count"])/bc
+            out["Rec_Book_Fraction"]=float(out["Rec_Book_Count"])/bc
+            out["Consensus_Tightness"]=1.0/(1.0+max(float(out["Book_Dispersion"]),0.0)) if np.isfinite(out["Book_Dispersion"]) else np.nan
+            _ds=[out[f"Dist_to_Key_{k}"] for k in (3,7,10,14) if np.isfinite(out[f"Dist_to_Key_{k}"])]
+            out["Nearest_Key_Distance"]=min(_ds) if _ds else np.nan
             return pd.Series(out)
         a=cur.groupby("V13_Matchup_Key",sort=False).apply(agg).reset_index()
         a["V13_Pair_Key"]=_ncaaf_v13_pair_key(a["Season"],a["Home_Team_Norm"],a["Away_Team_Norm"])
@@ -16202,42 +16309,62 @@ def _ncaaf_v13_build_market_horizons(snaps: pd.DataFrame, log_func=print):
 
 def _ncaaf_v13_fit_market_intelligence(frame: pd.DataFrame, feature_cols, log_func=print):
     if frame is None or frame.empty: return None
-    d=frame.copy(); seasons=sorted(int(x) for x in pd.to_numeric(d["Season"],errors="coerce").dropna().unique())
-    season_arr=pd.to_numeric(d["Season"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    d=frame.copy()
+    d["Game_Start"]=pd.to_datetime(d["Game_Start"],errors="coerce",utc=True)
     y=pd.to_numeric(d["Sharp_Close_Margin"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
     oof=np.full(len(d),np.nan); metrics=[]
-    for val in seasons[1:]:
-        tr=np.isfinite(season_arr)&(season_arr<float(val))&np.isfinite(y)
-        va=np.isfinite(season_arr)&(season_arr==float(val))&np.isfinite(y)
-        if int(tr.sum())<500 or int(va.sum())<75: continue
+
+    # V13.0.5 uses expanding chronological GAME blocks, not only season boundaries.
+    # All 1h/6h/24h rows for a physical game stay in the same fold.
+    game_clock=(d.loc[d["Game_Start"].notna(),["V13_Matchup_Key","Game_Start"]]
+                  .drop_duplicates("V13_Matchup_Key")
+                  .sort_values("Game_Start",kind="stable")
+                  .reset_index(drop=True))
+    n_games=len(game_clock)
+    min_train_games=max(250,min(450,int(n_games*0.40))) if n_games else 250
+    val_games=max(75,min(175,int(max(n_games-min_train_games,0)/4))) if n_games>min_train_games else 75
+    folds=[]
+    cursor=min_train_games
+    while cursor<n_games and len(folds)<5:
+        stop=min(n_games,cursor+val_games)
+        va_keys=set(game_clock.iloc[cursor:stop]["V13_Matchup_Key"].astype(str))
+        tr_keys=set(game_clock.iloc[:cursor]["V13_Matchup_Key"].astype(str))
+        if len(va_keys)<50: break
+        folds.append((tr_keys,va_keys,game_clock.iloc[cursor:stop]["Game_Start"].min(),game_clock.iloc[cursor:stop]["Game_Start"].max()))
+        cursor=stop
+
+    for j,(tr_keys,va_keys,vmin,vmax) in enumerate(folds,1):
+        tr=d["V13_Matchup_Key"].astype(str).isin(tr_keys).to_numpy() & np.isfinite(y)
+        va=d["V13_Matchup_Key"].astype(str).isin(va_keys).to_numpy() & np.isfinite(y)
+        if len(tr_keys)<250 or int(tr.sum())<500 or int(va.sum())<75: continue
         model=_ncaaf_v13_fit_regression_pair(d.loc[tr,feature_cols],y[tr])
         pred=_ncaaf_v13_regression_predict(model,d.loc[va,feature_cols],0.75)
         idx=np.where(va)[0]; oof[idx]=pred
         cur=pd.to_numeric(d.loc[va,"Current_Margin"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
-        rec={"season":int(val),"n":int(va.sum()),"rmse":_ncaaf_v13_rmse(y[idx],pred),"mae":_ncaaf_v13_mae(y[idx],pred),"no_move_rmse":_ncaaf_v13_rmse(y[idx],cur),"no_move_mae":_ncaaf_v13_mae(y[idx],cur)}
+        rec={"fold":j,"n":int(va.sum()),"games":int(len(va_keys)),"valid_start":str(vmin),"valid_end":str(vmax),
+             "rmse":_ncaaf_v13_rmse(y[idx],pred),"mae":_ncaaf_v13_mae(y[idx],pred),
+             "no_move_rmse":_ncaaf_v13_rmse(y[idx],cur),"no_move_mae":_ncaaf_v13_mae(y[idx],cur)}
         rec["rmse_gain_vs_current"]=rec["no_move_rmse"]-rec["rmse"]
         rec["mae_gain_vs_current"]=rec["no_move_mae"]-rec["mae"]
         metrics.append(rec)
-        log_func(f"[V13-MARKET-SEASON] season={val} n={rec['n']} close_rmse={rec['rmse']:.3f} current_line={rec['no_move_rmse']:.3f} rmse_gain={rec['rmse_gain_vs_current']:+.3f} close_mae={rec['mae']:.3f} current_mae={rec['no_move_mae']:.3f} mae_gain={rec['mae_gain_vs_current']:+.3f}")
+        log_func(f"[V13-MARKET-PERIOD] fold={j} games={rec['games']} rows={rec['n']} window={vmin}..{vmax} close_rmse={rec['rmse']:.3f} current_line={rec['no_move_rmse']:.3f} rmse_gain={rec['rmse_gain_vs_current']:+.3f} close_mae={rec['mae']:.3f} current_mae={rec['no_move_mae']:.3f} mae_gain={rec['mae_gain_vs_current']:+.3f}")
+
     cur_all=pd.to_numeric(d["Current_Margin"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
     good=np.isfinite(oof)&np.isfinite(y)&np.isfinite(cur_all)
     if int(good.sum())<400:
-        log_func(f"[V13-MARKET] insufficient OOF rows={int(good.sum())}")
+        log_func(f"[V13-MARKET] insufficient OOF rows={int(good.sum())} games={d.loc[good,'V13_Matchup_Key'].nunique() if good.any() else 0}")
         return None
-    groups=(d.loc[good,"V13_Matchup_Key"].astype(str)+"|"+pd.to_numeric(d.loc[good,"Horizon_Hours"],errors="coerce").astype(str)).to_numpy(dtype=object)
+    # Horizons from the same physical game are correlated; bootstrap the whole game.
+    groups=d.loc[good,"V13_Matchup_Key"].astype(str).to_numpy(dtype=object)
     boot=_ncaaf_v13_bootstrap_regression_skill(y[good],cur_all[good],oof[good],groups=groups,reps=600,seed=13032)
-    positive_seasons=sum(1 for r in metrics if r.get("rmse_gain_vs_current",0)>0 and r.get("mae_gain_vs_current",0)>0)
+    positive_periods=sum(1 for r in metrics if r.get("rmse_gain_vs_current",0)>0 and r.get("mae_gain_vs_current",0)>0)
     needed=max(1,int(np.ceil(len(metrics)*0.5))) if metrics else 1
     rm_low=float((boot.get("rmse_skill_ci95") or [np.nan,np.nan])[0]); ma_low=float((boot.get("mae_skill_ci95") or [np.nan,np.nan])[0])
-    gate=bool(np.isfinite(rm_low) and np.isfinite(ma_low) and rm_low>0 and ma_low>0 and positive_seasons>=needed)
-    log_func(
-        f"[V13-MARKET-GATE] oof_n={int(good.sum())} groups={boot.get('groups',0)} rmse_gain={boot.get('rmse_skill',np.nan):+.4f} "
-        f"rmse_ci95={boot.get('rmse_skill_ci95')} mae_gain={boot.get('mae_skill',np.nan):+.4f} mae_ci95={boot.get('mae_skill_ci95')} "
-        f"positive_seasons={positive_seasons}/{len(metrics)} gate={'PASS' if gate else 'CLOSED'}"
-    )
+    gate=bool(np.isfinite(rm_low) and np.isfinite(ma_low) and rm_low>0 and ma_low>0 and positive_periods>=needed)
+    log_func(f"[V13-MARKET-GATE] oof_n={int(good.sum())} games={boot.get('groups',0)} rmse_gain={boot.get('rmse_skill',np.nan):+.4f} rmse_ci95={boot.get('rmse_skill_ci95')} mae_gain={boot.get('mae_skill',np.nan):+.4f} mae_ci95={boot.get('mae_skill_ci95')} positive_periods={positive_periods}/{len(metrics)} gate={'PASS' if gate else 'CLOSED'}")
     final=_ncaaf_v13_fit_regression_pair(d[feature_cols],y)
     d["V13_Pred_Close_OOF"]=oof
-    return {"feature_cols":feature_cols,"models":final,"linear_weight":0.75,"season_metrics":metrics,"oof_frame":d,"bootstrap":boot,"research_gate_pass":gate,"positive_seasons":int(positive_seasons)}
+    return {"feature_cols":feature_cols,"models":final,"linear_weight":0.75,"period_metrics":metrics,"season_metrics":metrics,"oof_frame":d,"bootstrap":boot,"research_gate_pass":gate,"positive_periods":int(positive_periods)}
 
 def _ncaaf_v13_new_cover_model():
     from sklearn.pipeline import Pipeline
@@ -16266,7 +16393,8 @@ def _ncaaf_v13_cluster_bootstrap_skill(frame, y, p, reps=300, seed=1300):
         return {"clusters":0,"ll_skill_ci95":[np.nan,np.nan],"brier_skill_ci95":[np.nan,np.nan]}
     f=frame.loc[ok,["V13_Matchup_Key","Horizon_Hours"]].copy().reset_index(drop=True)
     yy=yy[ok]; pp=np.clip(pp[ok],1e-6,1-1e-6)
-    f["__cluster"]=f["V13_Matchup_Key"].astype(str)+"|"+pd.to_numeric(f["Horizon_Hours"],errors="coerce").astype(str)
+    # Treat all decision horizons from one physical game as one bootstrap cluster.
+    f["__cluster"]=f["V13_Matchup_Key"].astype(str)
     groups=[np.asarray(ix,dtype=int) for _,ix in f.groupby("__cluster",sort=False).groups.items()]
     if len(groups)<80:
         return {"clusters":len(groups),"ll_skill_ci95":[np.nan,np.nan],"brier_skill_ci95":[np.nan,np.nan]}
@@ -16347,7 +16475,7 @@ def _ncaaf_v13_fit_cover_calibrator(fundamental: dict, market: dict, log_func=pr
 
 
 def fit_ncaaf_v13_value_architecture(log_func=print):
-    """Fit NCAAF-only V13.0.4 shadow value architecture."""
+    """Fit NCAAF-only V13.0.5 shadow value architecture."""
     if isinstance(_NCAAF_V13_CACHE.get("bundle"),dict): return _NCAAF_V13_CACHE["bundle"]
     try:
         bq,_=get_bq_clients()
