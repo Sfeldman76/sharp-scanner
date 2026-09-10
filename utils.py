@@ -10417,7 +10417,7 @@ def apply_blended_sharp_score(
                 df_inverse['V13_BreakEven_Prob'] = _ibe
                 df_inverse['V13_Probability_Edge'] = _ip - _ibe
                 df_inverse['V13_EV_Per_Dollar'] = _ip * _iprof - (1.0 - _ip)
-                for _c in ['V13_Active','V13_Horizon_Hours','V13_State_Freshness','V13_Current_Season_Games','V13_Result_Disagreement_Bucket','V13_Result_Profile_N','V13_Result_Historical_Closer_Rate','V13_Result_Historical_Direction_Accuracy','V13_Result_Historical_Avg_Error_Improvement','V13_Result_Historical_Closer_CI_Low','V13_Result_Historical_Closer_CI_High','V13_Result_Profile_Used_In_EV','V13_Status','V13_Version','V13_Promotion_Mode','V13_Early_Season_Warning','V13_Drift_Scale','V13_Maturity_Bucket','V13_Maturity_Beta','V13_Early_Situational_Active','V12_Legacy_Model_Prob']:
+                for _c in ['V13_Active','V13_Horizon_Hours','V13_State_Freshness','V13_Current_Season_Games','V13_Result_Disagreement_Bucket','V13_Result_Profile_N','V13_Result_Historical_Closer_Rate','V13_Result_Historical_Direction_Accuracy','V13_Result_Historical_Avg_Error_Improvement','V13_Result_Historical_Closer_CI_Low','V13_Result_Historical_Closer_CI_High','V13_Result_Profile_Used_In_EV','V13_Status','V13_Version','V13_Promotion_Mode','V13_Early_Season_Warning','V13_Drift_Scale','V13_Maturity_Bucket','V13_Maturity_Beta','V13_Early_Situational_Active','V13_Fundamental_Overlay_Regime','V13_Market_Overlay_Regime','V13_Pathi_Overlay_Regime','V13_BigAl_Overlay_Regime','V12_Legacy_Model_Prob']:
                     _opp = _c + '_opponent'
                     if _opp in df_inverse.columns:
                         df_inverse[_c] = df_inverse[_opp]
@@ -14759,8 +14759,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-10-v13.1.0-calibrated-autofs-core"
-NCAAF_V13_HOTFIX = "NONE__V13.1.0_NEW_ARCHITECTURE"
+NCAAF_V13_VERSION = "2026-09-10-v13.1.1-regime-specialists-calibration"
+NCAAF_V13_HOTFIX = "NONE__V13.1.1_REGIME_SPECIALISTS_CALIBRATION"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -15922,16 +15922,16 @@ V13_SPECIALIST_OUTPUT_COLS = [
     "V13_AutoFS_Core_Prob","V13_Core_Calibrated_Prob","V13_Core_Adjusted_Prob",
     "V13_Core_Calibration_Method","V13_Core_Calibration_Active",
     "V13_Fundamental_Overlay_Prob","V13_Fundamental_Overlay_Weight",
-    "V13_Fundamental_Overlay_Active","V13_Fundamental_Overlay_Contribution",
+    "V13_Fundamental_Overlay_Active","V13_Fundamental_Overlay_Contribution","V13_Fundamental_Overlay_Regime",
     # Legacy HF3 bridge fields remain populated for schema compatibility. In V13.1
     # Outcome AutoFS is primary, so these are diagnostics rather than a bridge weight.
     "V13_AutoFS_Core_Weight","V13_AutoFS_Core_Active","V13_AutoFS_Core_Contribution",
     "V13_Overlay_PreTemperature_Prob","V13_Overlay_Combined_Prob",
     "V13_Overlay_Temperature","V13_Overlay_Temperature_Contribution","V13_Overlay_Calibration_Active",
     "V13_Specialist_Overlay_Gate",
-    "V13_Market_Overlay_Prob","V13_Market_Overlay_Weight","V13_Market_Overlay_Active","V13_Market_Overlay_Contribution",
-    "V13_Pathi_Overlay_Prob","V13_Pathi_Overlay_Weight","V13_Pathi_Overlay_Active","V13_Pathi_Overlay_Contribution",
-    "V13_BigAl_Overlay_Prob","V13_BigAl_Overlay_Weight","V13_BigAl_Overlay_Active","V13_BigAl_Overlay_Contribution",
+    "V13_Market_Overlay_Prob","V13_Market_Overlay_Weight","V13_Market_Overlay_Active","V13_Market_Overlay_Contribution","V13_Market_Overlay_Regime",
+    "V13_Pathi_Overlay_Prob","V13_Pathi_Overlay_Weight","V13_Pathi_Overlay_Active","V13_Pathi_Overlay_Contribution","V13_Pathi_Overlay_Regime",
+    "V13_BigAl_Overlay_Prob","V13_BigAl_Overlay_Weight","V13_BigAl_Overlay_Active","V13_BigAl_Overlay_Contribution","V13_BigAl_Overlay_Regime",
 ]
 
 def _v13_overlay_logit(p):
@@ -15942,65 +15942,92 @@ def _v13_overlay_sigmoid(z):
     z=np.clip(np.asarray(z,dtype=float),-20.0,20.0)
     return 1.0/(1.0+np.exp(-z))
 
-def _apply_v131_core_calibration_runtime(core_prob, art: dict):
-    """Apply V13.1 core calibration with exact canonical/inverse symmetry."""
-    raw=np.asarray(core_prob,dtype=float).ravel()
-    final=raw.copy(); valid=np.isfinite(raw)
-    rec=(art.get("params") or {"method":"identity"}) if isinstance(art,dict) else {"method":"identity"}
-    method=str(rec.get("method",(art or {}).get("active_method","identity") if isinstance(art,dict) else "identity") or "identity").lower().strip()
+def _v131_runtime_numeric_series(rows: pd.DataFrame, names, default=np.nan):
+    if rows is None: return pd.Series(dtype=float)
+    for c in names:
+        if c in rows.columns:
+            z=pd.to_numeric(rows[c],errors="coerce")
+            if isinstance(z,pd.Series): return z.reindex(rows.index)
+    return pd.Series(default,index=rows.index,dtype=float)
 
-    def _raw_map(q):
+
+def _v131_runtime_family_regime_labels(rows: pd.DataFrame, family: str, maturity=None):
+    n=0 if rows is None else len(rows)
+    if n==0: return np.asarray([],dtype=object)
+    fam=str(family); mat=np.asarray(maturity if maturity is not None else ["UNKNOWN"]*n,dtype=object)
+    if fam=="Fundamental": return mat.astype(object)
+    spread=_v131_runtime_numeric_series(rows,("Value","Spread_Value","Current_Spread","Opening_Spread")); sv=spread.to_numpy(dtype=float,na_value=np.nan); a=np.abs(sv); key=np.zeros(n,dtype=bool)
+    for k in (3.0,7.0,10.0,14.0): key |= np.isfinite(a)&(np.abs(a-k)<=0.75)
+    for c in ("Crossed_Key_3","Crossed_Key_7","Crossed_Key_10","Crossed_Key_14","Pathi_FB_Moved_Through_Key","Pathi_FB_Crossed_Key_Toward_Team","Pathi_FB_Crossed_Key_Away_From_Team","Pathi_FB_Moved_Onto_Key","Pathi_FB_Moved_Off_Key"):
+        if c in rows.columns: key |= pd.to_numeric(rows[c],errors="coerce").fillna(0).to_numpy(dtype=float)>0
+    if fam=="Market":
+        move=np.zeros(n,dtype=bool)
+        for c in ("Line_Move_30m","Line_Move_60m","Line_Move_120m","Line_Move_Last30m","Line_Move_Last60m","Line_Move_From_Open","Sharp_Book_Move_30m","Sharp_Book_Move_60m","Sharp_Move_Before_Market","Sharp_Soft_Divergence","OddsMove_Magnitude","SharpMove_Magnitude"):
+            if c in rows.columns: move |= np.abs(pd.to_numeric(rows[c],errors="coerce").fillna(0).to_numpy(dtype=float))>1e-6
+        lab=np.full(n,"QUIET",dtype=object); lab[move]="ACTIVE_MOVE"; lab[key]="KEY_ZONE"; lab[key&move]="KEY_MOVE"; return lab
+    if fam=="Pathi":
+        active=np.zeros(n,dtype=bool)
+        for c in rows.columns:
+            sl=str(c).lower()
+            if sl.startswith("pathi_") and any(tok in sl for tok in ("cross","key","hook","dog","favorite","role","protected","move")):
+                z=pd.to_numeric(rows[c],errors="coerce"); active |= z.fillna(0).abs().to_numpy(dtype=float)>1e-9
+        lab=np.full(n,"OTHER",dtype=object); lab[active]="SYSTEM_ACTIVE"; lab[key]="KEY_NUMBER"; return lab
+    if fam=="BigAl":
+        conf=np.zeros(n,dtype=bool)
+        if "BigAl_Context_Conference_Home_Dog" in rows.columns: conf=pd.to_numeric(rows["BigAl_Context_Conference_Home_Dog"],errors="coerce").fillna(0).to_numpy(dtype=float)>0
+        home=_v131_runtime_numeric_series(rows,("Is_Home","Is_Home_Team_Bet"),default=0).fillna(0).to_numpy(dtype=float)>0.5
+        fav=_v131_runtime_numeric_series(rows,("Is_Favorite_Bet","Is_Favorite_Context"),default=np.nan).to_numpy(dtype=float,na_value=np.nan); isfav=np.where(np.isfinite(fav),fav>0.5,np.isfinite(sv)&(sv<0)); dog=np.isfinite(sv)&(sv>0)
+        lab=np.full(n,"OTHER",dtype=object); lab[isfav]="FAVORITE"; lab[dog&~home]="ROAD_DOG"; lab[dog&home]="HOME_DOG"; lab[conf]="CONFERENCE_HOME_DOG"; return lab
+    return np.full(n,"OTHER",dtype=object)
+
+def _apply_v131_core_calibration_runtime(core_prob, art: dict, maturity=None):
+    """Apply frozen V13.1.1 global calibration and validated maturity temperatures."""
+    raw=np.asarray(core_prob,dtype=float).ravel(); final=raw.copy(); valid=np.isfinite(raw)
+    rec=(art.get("params") or {"method":"identity"}) if isinstance(art,dict) else {"method":"identity"}; method=str(rec.get("method",(art or {}).get("active_method","identity") if isinstance(art,dict) else "identity") or "identity").lower().strip()
+    def raw_map(q):
         q=np.clip(np.asarray(q,dtype=float),1e-5,1-1e-5)
-        if method=="temperature":
-            t=max(float(rec.get("temperature",1.0) or 1.0),1e-6)
-            return _v13_overlay_sigmoid(_v13_overlay_logit(q)/t)
+        if method=="temperature": return _v13_overlay_sigmoid(_v13_overlay_logit(q)/max(float(rec.get("temperature",1.0) or 1.0),1e-6))
         if method=="platt":
-            coef=list(rec.get("coef") or [1.0])
-            return _v13_overlay_sigmoid(float(rec.get("intercept",0.0) or 0.0)+float(coef[0])*_v13_overlay_logit(q))
+            c=list(rec.get("coef") or [1.0]); return _v13_overlay_sigmoid(float(rec.get("intercept",0.0) or 0.0)+float(c[0])*_v13_overlay_logit(q))
         if method=="beta":
-            coef=list(rec.get("coef") or [1.0,1.0])
-            if len(coef)<2: coef=[1.0,1.0]
-            z=(float(rec.get("intercept",0.0) or 0.0)+float(coef[0])*np.log(q)+float(coef[1])*(-np.log1p(-q)))
-            return _v13_overlay_sigmoid(z)
+            c=list(rec.get("coef") or [1.0,1.0]); c=c if len(c)>=2 else [1.0,1.0]; return _v13_overlay_sigmoid(float(rec.get("intercept",0.0) or 0.0)+float(c[0])*np.log(q)+float(c[1])*(-np.log1p(-q)))
         return q
-
     if valid.any():
         q=np.clip(raw[valid],1e-5,1-1e-5)
         try:
-            fq=np.asarray(_raw_map(q),dtype=float)
-            if method in {"platt","beta"}:
-                f_inv=np.asarray(_raw_map(1.0-q),dtype=float)
-                fq=0.5*(fq+(1.0-f_inv))
+            fq=np.asarray(raw_map(q),dtype=float)
+            if method in {"platt","beta"}: fq=0.5*(fq+(1.0-np.asarray(raw_map(1.0-q),dtype=float)))
             final[valid]=fq
         except Exception as e:
-            logging.warning("V13.1 core calibration runtime failed closed to identity: %s",e)
-            final[valid]=q; method="identity"
-    final=np.clip(final,0.01,0.99)
-    return final,{"method":method,"active":np.asarray(valid & (method!="identity"),dtype=np.int8),
-                  "contribution":np.asarray(final-raw,dtype=float)}
+            logging.warning("V13.1 core calibration runtime failed closed to identity: %s",e); final[valid]=q; method="identity"
+    temps=(art.get("maturity_temperatures") or {}) if isinstance(art,dict) else {}; buckets=np.asarray(maturity if maturity is not None else ["UNKNOWN"]*len(final),dtype=object); regime_temp=np.ones(len(final),dtype=float)
+    if isinstance(temps,dict):
+        for b,t in temps.items():
+            try: tv=float(t)
+            except Exception: continue
+            m=(buckets.astype(str)==str(b))&np.isfinite(final)
+            if m.any() and np.isfinite(tv) and abs(tv-1)>1e-12:
+                final[m]=_v13_overlay_sigmoid(_v13_overlay_logit(final[m])/tv); regime_temp[m]=tv
+    final=np.clip(final,0.01,0.99); active=valid&((method!="identity")|(np.abs(regime_temp-1.0)>1e-12))
+    return final,{"method":method,"active":active.astype(np.int8),"contribution":np.asarray(final-raw,dtype=float),"maturity_temperature":regime_temp}
 
 
-def _apply_v131_fundamental_overlay_runtime(core_prob, fundamental_prob, overlay: dict):
-    """Apply only validated centered fundamental evidence around calibrated AutoFS core."""
-    core=np.asarray(core_prob,dtype=float).ravel()
-    fund=np.asarray(fundamental_prob,dtype=float).ravel()
-    if len(fund)!=len(core): fund=np.full(len(core),np.nan,dtype=float)
-    final=core.copy(); gate=False; weight=0.0; center=0.5
+
+def _apply_v131_fundamental_overlay_runtime(core_prob, fundamental_prob, overlay: dict, maturity=None):
+    """Apply only Fundamental maturity regimes that passed training + shadow gates."""
+    core=np.asarray(core_prob,dtype=float).ravel(); fund=np.asarray(fundamental_prob,dtype=float).ravel(); n=len(core)
+    if len(fund)!=n: fund=np.full(n,np.nan,dtype=float)
+    mat=np.asarray(maturity if maturity is not None else ["UNKNOWN"]*n,dtype=object); final=core.copy(); gate=False; center=0.5; warr=np.zeros(n,dtype=float)
     if isinstance(overlay,dict):
-        gate=bool(overlay.get("gate_pass",False))
-        weight=float(np.clip(overlay.get("weight",0.0) or 0.0,0.0,1.0))
-        center=float(np.clip(overlay.get("center_prob",0.5) or 0.5,0.01,0.99))
-    valid=np.isfinite(core)&np.isfinite(fund)
-    active=valid & gate & (weight>0.0)
-    if active.any():
-        evidence=_v13_overlay_logit(fund[active])-float(_v13_overlay_logit(np.asarray([center]))[0])
-        final[active]=_v13_overlay_sigmoid(_v13_overlay_logit(core[active])+weight*evidence)
+        gate=bool(overlay.get("gate_pass",False)); center=float(np.clip(overlay.get("center_prob",0.5) or 0.5,0.01,0.99)); rw=overlay.get("regime_weights") or {}
+        if gate and isinstance(rw,dict) and rw:
+            for b,w in rw.items(): warr[mat.astype(str)==str(b)]=float(np.clip(w,0,1))
+        elif gate: warr[:]=float(np.clip(overlay.get("weight",0.0) or 0.0,0,1))
+    valid=np.isfinite(core)&np.isfinite(fund); active=valid&(warr>0)
+    if active.any(): final[active]=_v13_overlay_sigmoid(_v13_overlay_logit(core[active])+warr[active]*(_v13_overlay_logit(fund[active])-float(_v13_overlay_logit(np.asarray([center]))[0])))
     final=np.clip(final,0.01,0.99)
-    return final,{
-        "gate_pass":bool(gate),"weight":np.where(valid,weight,0.0).astype(float),
-        "active":active.astype(np.int8),"contribution":np.asarray(final-core,dtype=float),
-        "center_prob":float(center),
-    }
+    return final,{"gate_pass":gate,"weight":np.where(valid,warr,0.0),"active":active.astype(np.int8),"contribution":np.asarray(final-core,dtype=float),"center_prob":center,"regime":mat}
+
 
 
 def _apply_v13_autofs_core_bridge_runtime(base_prob, core_prob, bridge: dict):
@@ -16036,62 +16063,27 @@ def _apply_v13_autofs_core_bridge_runtime(base_prob, core_prob, bridge: dict):
 
 
 def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overlay: dict, maturity_bucket):
-    """Apply validation-gated *incremental* Market/Pathi/BigAl evidence to V13 base.
-
-    Each specialist is centered on its training base rate before entering the logit
-    combiner.  This prevents the same global prior/intercept from being counted once
-    in V13 base and again in every specialist model.
-    """
-    n=len(rows); base=np.asarray(base_prob,dtype=float)
-    final=base.copy(); details={}
-    if not isinstance(overlay,dict) or not overlay.get("gate_pass",False):
-        return final,details,False
-    weights=overlay.get("weights") or {}; regime=overlay.get("regime_scales") or {}
-    centers=overlay.get("centers") or {}
-    z=_v13_overlay_logit(base)
-    maturity=np.asarray(maturity_bucket,dtype=object)
+    """Apply only Market/Pathi/BigAl regimes with stored non-zero validated authority."""
+    n=len(rows); base=np.asarray(base_prob,dtype=float); final=base.copy(); details={}
+    if not isinstance(overlay,dict) or not overlay.get("gate_pass",False): return final,details,False
+    centers=overlay.get("centers") or {}; rweights=overlay.get("regime_weights") or {}; legacy=overlay.get("weights") or {}; z=_v13_overlay_logit(base); maturity=np.asarray(maturity_bucket,dtype=object)
     for fam in ("Market","Pathi","BigAl"):
-        rec=((overlay.get("families") or {}).get(fam) or {})
-        feats=list(rec.get("selected_features") or []); mdl=rec.get("model")
-        center=float(np.clip(centers.get(fam,rec.get("center_prob",0.5)) or 0.5,1e-5,1-1e-5))
-        pf=np.full(n,center,dtype=float)
-        predict_ok=False
+        rec=((overlay.get("families") or {}).get(fam) or {}); feats=list(rec.get("selected_features") or []); mdl=rec.get("model"); center=float(np.clip(centers.get(fam,rec.get("center_prob",0.5)) or 0.5,1e-5,1-1e-5)); pf=np.full(n,center,dtype=float); predict_ok=False
         if mdl is not None and feats:
             try:
-                xx=rows.reindex(columns=feats).apply(pd.to_numeric,errors="coerce").replace([np.inf,-np.inf],np.nan).fillna(0.0)
-                pf=np.asarray(mdl.predict_proba(xx)[:,1],dtype=float)
-                predict_ok=True
-            except Exception as e:
-                logging.warning("V13 %s specialist runtime unavailable: %s",fam,e)
-        w=float(weights.get(fam,0.0) or 0.0)
-        rs=regime.get(fam,{}) if isinstance(regime,dict) else {}
-        scale=np.ones(n,dtype=float)
-        early=np.isin(maturity,["FIRST_TWO_GAMES"])
-        if isinstance(rs,dict):
-            scale[early]=float(rs.get("FIRST_TWO_GAMES",1.0))
-            scale[~early]=float(rs.get("MATURE",1.0))
-        eff=w*scale
-        pf_safe=np.where(np.isfinite(pf),pf,center)
-        evidence=_v13_overlay_logit(pf_safe)-float(_v13_overlay_logit(np.asarray([center]))[0])
-        if predict_ok and w>0:
-            z=z+eff*evidence
+                xx=rows.reindex(columns=feats).apply(pd.to_numeric,errors="coerce").replace([np.inf,-np.inf],np.nan).fillna(0.0); pf=np.asarray(mdl.predict_proba(xx)[:,1],dtype=float); predict_ok=True
+            except Exception as e: logging.warning("V13 %s specialist runtime unavailable: %s",fam,e)
+        labels=_v131_runtime_family_regime_labels(rows,fam,maturity); rw=(rweights.get(fam) or {}) if isinstance(rweights,dict) else {}
+        if rw: eff=np.asarray([float(rw.get(str(x),0.0) or 0.0) for x in labels],dtype=float)
+        else: eff=np.full(n,float(legacy.get(fam,0.0) or 0.0),dtype=float)
+        pf_safe=np.where(np.isfinite(pf),pf,center); evidence=_v13_overlay_logit(pf_safe)-float(_v13_overlay_logit(np.asarray([center]))[0])
+        if predict_ok: z=z+eff*evidence
         one=_v13_overlay_sigmoid(_v13_overlay_logit(base)+eff*evidence)
-        details[fam]={
-            "prob":pf,
-            "weight":np.asarray(eff,dtype=float),
-            "active":np.asarray((eff>0)&predict_ok,dtype=np.int8),
-            "contribution":np.asarray(one-base,dtype=float),
-        }
-    raw_final=np.clip(_v13_overlay_sigmoid(z),0.01,0.99)
-    temperature=max(1.0,float(overlay.get("post_temperature",1.0) or 1.0))
-    final=np.clip(_v13_overlay_sigmoid(_v13_overlay_logit(raw_final)/temperature),0.01,0.99)
-    details["_calibration"]={
-        "temperature":float(temperature),
-        "pretemperature_prob":np.asarray(raw_final,dtype=float),
-        "temperature_contribution":np.asarray(final-raw_final,dtype=float),
-        "active":np.asarray(np.full(n,temperature>1.0),dtype=np.int8),
-    }
+        details[fam]={"prob":pf,"weight":eff,"active":((eff>0)&predict_ok).astype(np.int8),"contribution":np.asarray(one-base,dtype=float),"regime":labels}
+    raw_final=np.clip(_v13_overlay_sigmoid(z),0.01,0.99); temperature=max(1.0,float(overlay.get("post_temperature",1.0) or 1.0)); final=np.clip(_v13_overlay_sigmoid(_v13_overlay_logit(raw_final)/temperature),0.01,0.99)
+    details["_calibration"]={"temperature":temperature,"pretemperature_prob":raw_final,"temperature_contribution":np.asarray(final-raw_final,dtype=float),"active":np.full(n,temperature>1.0,dtype=np.int8)}
     return final,details,True
+
 
 
 def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
@@ -16132,6 +16124,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         "V13_Market_Overlay_Prob":np.nan,"V13_Market_Overlay_Weight":0.0,"V13_Market_Overlay_Active":0,"V13_Market_Overlay_Contribution":0.0,
         "V13_Pathi_Overlay_Prob":np.nan,"V13_Pathi_Overlay_Weight":0.0,"V13_Pathi_Overlay_Active":0,"V13_Pathi_Overlay_Contribution":0.0,
         "V13_BigAl_Overlay_Prob":np.nan,"V13_BigAl_Overlay_Weight":0.0,"V13_BigAl_Overlay_Active":0,"V13_BigAl_Overlay_Contribution":0.0,
+        "V13_Fundamental_Overlay_Regime":"UNKNOWN","V13_Market_Overlay_Regime":"OTHER","V13_Pathi_Overlay_Regime":"OTHER","V13_BigAl_Overlay_Regime":"OTHER",
     }
     for c,v in defaults.items(): out[c]=v
     out["V13_AutoFS_Core_Prob"] = _incoming_core.astype("float32")
@@ -16272,10 +16265,10 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         _is_v131=bool(_arch.startswith("outcome_autofs_primary") or isinstance(bundle.get("core_calibration"),dict))
         if _is_v131:
             core_calibrated,_core_cal_details=_apply_v131_core_calibration_runtime(
-                core_prob,bundle.get("core_calibration") or {}
+                core_prob,bundle.get("core_calibration") or {},maturity=maturity_bucket
             )
             core_adjusted,_fund_details=_apply_v131_fundamental_overlay_runtime(
-                core_calibrated,fundamental_prob,bundle.get("fundamental_overlay") or {}
+                core_calibrated,fundamental_prob,bundle.get("fundamental_overlay") or {},maturity=maturity_bucket
             )
             prob,_overlay_details,_overlay_gate=_apply_v13_specialist_overlays_runtime(
                 out,core_adjusted,bundle.get("specialist_overlays") or {},maturity_bucket
@@ -16291,6 +16284,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
             out["V13_Fundamental_Overlay_Weight"]=np.asarray(_fund_details.get("weight",np.zeros(n)),dtype="float32")
             out["V13_Fundamental_Overlay_Active"]=np.asarray(_fund_details.get("active",np.zeros(n)),dtype="int8")
             out["V13_Fundamental_Overlay_Contribution"]=np.asarray(_fund_details.get("contribution",np.zeros(n)),dtype="float32")
+            out["V13_Fundamental_Overlay_Regime"]=np.asarray(_fund_details.get("regime",maturity_bucket),dtype=object)
             # Compatibility fields: AutoFS is the core itself, not a partial bridge.
             out["V13_AutoFS_Core_Weight"]=np.where(np.isfinite(core_prob),1.0,0.0).astype("float32")
             out["V13_AutoFS_Core_Active"]=np.isfinite(core_prob).astype("int8")
@@ -16314,6 +16308,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
             out["V13_Fundamental_Overlay_Weight"]=np.float32(0.0)
             out["V13_Fundamental_Overlay_Active"]=np.int8(0)
             out["V13_Fundamental_Overlay_Contribution"]=np.float32(0.0)
+            out["V13_Fundamental_Overlay_Regime"]=maturity_bucket
             out["V13_AutoFS_Core_Weight"]=np.asarray(_core_details.get("weight",np.zeros(n)),dtype="float32")
             out["V13_AutoFS_Core_Active"]=np.asarray(_core_details.get("active",np.zeros(n)),dtype="int8")
             out["V13_AutoFS_Core_Contribution"]=np.asarray(_core_details.get("contribution",np.zeros(n)),dtype="float32")
@@ -16330,6 +16325,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
             out[f"V13_{_fam}_Overlay_Weight"]=np.asarray(_dd.get("weight",np.zeros(n)),dtype="float32")
             out[f"V13_{_fam}_Overlay_Active"]=np.asarray(_dd.get("active",np.zeros(n)),dtype="int8")
             out[f"V13_{_fam}_Overlay_Contribution"]=np.asarray(_dd.get("contribution",np.zeros(n)),dtype="float32")
+            out[f"V13_{_fam}_Overlay_Regime"]=np.asarray(_dd.get("regime",np.full(n,"OTHER",dtype=object)),dtype=object)
         odds=pd.to_numeric(out.get("Odds_Price",np.nan),errors="coerce") if "Odds_Price" in out.columns else pd.Series(np.nan,index=out.index)
         be=_ncaaf_v13_break_even_prob(odds); prof=_ncaaf_v13_profit_per_dollar(odds)
         ev=prob*prof-(1.0-prob)
