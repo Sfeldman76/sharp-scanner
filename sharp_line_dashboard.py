@@ -7263,7 +7263,12 @@ def _cv_auc_for_feature_set(
                     d_tr,
                     num_boost_round=int(xgb_num_round),
                     evals=[(d_va, "val")],
-                    early_stopping_rounds=(int(early_stop_rounds) if early_stop_rounds else None),
+                    # Generic CV evaluator intentionally keeps historical/final validation
+                    # semantics unchanged. AutoFS candidate evaluators below use real
+                    # early stopping for speed; this outer evaluator is also used by
+                    # final/diagnostic CV paths where fold-selected stopping would alter
+                    # the benchmark contract.
+                    early_stopping_rounds=None,
                     verbose_eval=False,
                 )
                 if hasattr(booster, "best_iteration") and booster.best_iteration is not None:
