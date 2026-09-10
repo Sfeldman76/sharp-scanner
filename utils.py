@@ -10401,7 +10401,7 @@ def apply_blended_sharp_score(
                         df_inverse[_c] = df_inverse[_opp]
                 # Probability diagnostics are side-oriented and must complement for
                 # the inverse side. Contributions are signed probability deltas.
-                for _c in ['V13_Early_Situational_Prob','V13_Base_Cover_Prob','V13_Overlay_Combined_Prob',
+                for _c in ['V13_Early_Situational_Prob','V13_Base_Cover_Prob','V13_Overlay_PreTemperature_Prob','V13_Overlay_Combined_Prob',
                            'V13_Market_Overlay_Prob','V13_Pathi_Overlay_Prob','V13_BigAl_Overlay_Prob']:
                     _opp=_c+'_opponent'
                     if _opp in df_inverse.columns:
@@ -10416,6 +10416,14 @@ def apply_blended_sharp_score(
                         df_inverse[_c]=-pd.to_numeric(df_inverse[_opp],errors='coerce')
                 if 'V13_Specialist_Overlay_Gate_opponent' in df_inverse.columns:
                     df_inverse['V13_Specialist_Overlay_Gate']=df_inverse['V13_Specialist_Overlay_Gate_opponent']
+                for _c in ('V13_Overlay_Temperature','V13_Overlay_Calibration_Active'):
+                    _opp=_c+'_opponent'
+                    if _opp in df_inverse.columns:
+                        df_inverse[_c]=df_inverse[_opp]
+                if 'V13_Overlay_Temperature_Contribution_opponent' in df_inverse.columns:
+                    df_inverse['V13_Overlay_Temperature_Contribution']=-pd.to_numeric(
+                        df_inverse['V13_Overlay_Temperature_Contribution_opponent'],errors='coerce'
+                    )
                 df_inverse.drop(columns=[c for c in df_inverse.columns if c.startswith('V13_') and c.endswith('_opponent')], inplace=True, errors='ignore')
         
             df_inverse['Was_Canonical']   = False
@@ -14716,7 +14724,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
 NCAAF_V13_VERSION = "2026-09-09-v13.0.16-market-pathi-bigal-specialist-overlays"
-NCAAF_V13_HOTFIX = "2026-09-09-v13.0.16-hf1-scalar-index-calibration"
+NCAAF_V13_HOTFIX = "2026-09-10-v13.0.16-hf2-leakage-safe-specialists-calibration"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -15874,7 +15882,9 @@ def _ncaaf_v13_promoted_empirical_probability(preview, thresholds, games_prior, 
 
 
 V13_SPECIALIST_OUTPUT_COLS = [
-    "V13_Base_Cover_Prob","V13_Overlay_Combined_Prob","V13_Specialist_Overlay_Gate",
+    "V13_Base_Cover_Prob","V13_Overlay_PreTemperature_Prob","V13_Overlay_Combined_Prob",
+    "V13_Overlay_Temperature","V13_Overlay_Temperature_Contribution","V13_Overlay_Calibration_Active",
+    "V13_Specialist_Overlay_Gate",
     "V13_Market_Overlay_Prob","V13_Market_Overlay_Weight","V13_Market_Overlay_Active","V13_Market_Overlay_Contribution",
     "V13_Pathi_Overlay_Prob","V13_Pathi_Overlay_Weight","V13_Pathi_Overlay_Active","V13_Pathi_Overlay_Contribution",
     "V13_BigAl_Overlay_Prob","V13_BigAl_Overlay_Weight","V13_BigAl_Overlay_Active","V13_BigAl_Overlay_Contribution",
@@ -15935,7 +15945,15 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
             "active":np.asarray((eff>0)&predict_ok,dtype=np.int8),
             "contribution":np.asarray(one-base,dtype=float),
         }
-    final=np.clip(_v13_overlay_sigmoid(z),0.01,0.99)
+    raw_final=np.clip(_v13_overlay_sigmoid(z),0.01,0.99)
+    temperature=max(1.0,float(overlay.get("post_temperature",1.0) or 1.0))
+    final=np.clip(_v13_overlay_sigmoid(_v13_overlay_logit(raw_final)/temperature),0.01,0.99)
+    details["_calibration"]={
+        "temperature":float(temperature),
+        "pretemperature_prob":np.asarray(raw_final,dtype=float),
+        "temperature_contribution":np.asarray(final-raw_final,dtype=float),
+        "active":np.asarray(np.full(n,temperature>1.0),dtype=np.int8),
+    }
     return final,details,True
 
 
@@ -15957,7 +15975,9 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         "V13_Status":"UNAVAILABLE","V13_Version":NCAAF_V13_VERSION,
         "V13_Promotion_Mode":"SHADOW","V13_Early_Season_Warning":0,"V13_Drift_Scale":1.0,
         "V13_Maturity_Bucket":"UNKNOWN","V13_Maturity_Beta":np.nan,"V13_Early_Situational_Prob":np.nan,"V13_Early_Situational_Active":0,
-        "V13_Base_Cover_Prob":np.nan,"V13_Overlay_Combined_Prob":np.nan,"V13_Specialist_Overlay_Gate":0,
+        "V13_Base_Cover_Prob":np.nan,"V13_Overlay_PreTemperature_Prob":np.nan,"V13_Overlay_Combined_Prob":np.nan,
+        "V13_Overlay_Temperature":1.0,"V13_Overlay_Temperature_Contribution":0.0,"V13_Overlay_Calibration_Active":0,
+        "V13_Specialist_Overlay_Gate":0,
         "V13_Market_Overlay_Prob":np.nan,"V13_Market_Overlay_Weight":0.0,"V13_Market_Overlay_Active":0,"V13_Market_Overlay_Contribution":0.0,
         "V13_Pathi_Overlay_Prob":np.nan,"V13_Pathi_Overlay_Weight":0.0,"V13_Pathi_Overlay_Active":0,"V13_Pathi_Overlay_Contribution":0.0,
         "V13_BigAl_Overlay_Prob":np.nan,"V13_BigAl_Overlay_Weight":0.0,"V13_BigAl_Overlay_Active":0,"V13_BigAl_Overlay_Contribution":0.0,
@@ -16093,7 +16113,12 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
             out,base_prob,bundle.get("specialist_overlays") or {},maturity_bucket
         )
         out["V13_Base_Cover_Prob"]=base_prob.astype("float32")
+        _ocal=_overlay_details.get("_calibration") or {}
+        out["V13_Overlay_PreTemperature_Prob"]=np.asarray(_ocal.get("pretemperature_prob",prob),dtype="float32")
         out["V13_Overlay_Combined_Prob"]=np.asarray(prob,dtype="float32")
+        out["V13_Overlay_Temperature"]=np.float32(_ocal.get("temperature",1.0) or 1.0)
+        out["V13_Overlay_Temperature_Contribution"]=np.asarray(_ocal.get("temperature_contribution",np.zeros(n)),dtype="float32")
+        out["V13_Overlay_Calibration_Active"]=np.asarray(_ocal.get("active",np.zeros(n)),dtype="int8")
         out["V13_Specialist_Overlay_Gate"]=np.int8(1 if _overlay_gate else 0)
         for _fam in ("Market","Pathi","BigAl"):
             _dd=_overlay_details.get(_fam) or {}
