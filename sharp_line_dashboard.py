@@ -12170,6 +12170,18 @@ CHAMPION_META_VERSION = 2
 PROMOTION_ROW_KEY_VERSION = "v1_game_market_outcome_book_snapshot_value_odds"
 
 
+@dataclass
+class ChampionMeta:
+    sport: str
+    market: str
+    model_path: str              # GCS path to pickle
+    created_at: str              # ISO8601 timestamp
+    metrics: Dict[str, float]    # holdout + CV metrics
+    config: Dict[str, Any]       # training configuration / search metadata
+    holdout_eval: Optional[Dict[str, Any]] = None
+    version: int = CHAMPION_META_VERSION
+
+
 def _promotion_row_keys(df: pd.DataFrame) -> np.ndarray:
     """Build stable row identities for exact champion/challenger pairing.
 
