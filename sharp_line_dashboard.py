@@ -32394,6 +32394,13 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 'Model Prob','Confidence Tier',
                 'Confidence Trend','Confidence Spark','Line/Model Direction','Tier Δ','Why Model Likes It',
                 'System_Signals_Text','Pathi_Active_Text','BigAl_Active_Text',
+                # Model-source diagnostics. These make it explicit which probability
+                # is actually driving Model Prob in the UI and, when V13 is promoted,
+                # which validated specialist overlays are active on the row.
+                'Scoring_Market','V13_Version','V13_Promotion_Mode',
+                'V13_Market_Overlay_Active','V13_Pathi_Overlay_Active','V13_BigAl_Overlay_Active',
+                'V13_Market_Overlay_Weight','V13_Pathi_Overlay_Weight','V13_BigAl_Overlay_Weight',
+                'V12_Legacy_Model_Prob','V13_Cover_Prob',
                 'Game_Key','Snapshot_Timestamp','Timing_Stage','Timing_Opportunity_Score',
                 # Optional backend estimates are carried when available, but are not
                 # required for Edge / EV / BET-PASS.
@@ -32462,6 +32469,38 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 filtered_df['Pathi_Active_Text'] = '—'
             if 'BigAl_Active_Text' not in filtered_df.columns:
                 filtered_df['BigAl_Active_Text'] = '—'
+
+            # Explicit UI probability provenance. Scoring_Market is the authoritative
+            # runtime indicator because V13_Cover_Prob may be calculated in shadow even
+            # while the incumbent V12 probability continues to drive the UI.
+            def _ui_probability_source_row(r):
+                _scoring = str(r.get('Scoring_Market', '') or '').strip().lower()
+                _market = str(r.get('Market', '') or '').strip().lower()
+                if 'v13_promoted' in _scoring:
+                    _ver = str(r.get('V13_Version', '') or '').strip()
+                    # Keep the table compact even when V13_Version contains a dated build label.
+                    return 'V13.0.16' if '13.0.16' in _ver or not _ver else _ver
+                if _market in ('spread', 'spreads') and pd.notna(r.get('V12_Legacy_Model_Prob', np.nan)):
+                    return 'V12 Champion'
+                return 'Current Champion'
+
+            def _ui_v13_overlay_status_row(r):
+                _scoring = str(r.get('Scoring_Market', '') or '').strip().lower()
+                if 'v13_promoted' not in _scoring:
+                    return 'Not driving UI'
+                _parts = []
+                for _fam, _label in [('Market','Market'), ('Pathi','Pathi'), ('BigAl','Big Al')]:
+                    _active = pd.to_numeric(pd.Series([r.get(f'V13_{_fam}_Overlay_Active', 0)]), errors='coerce').fillna(0).iloc[0] > 0
+                    _weight = pd.to_numeric(pd.Series([r.get(f'V13_{_fam}_Overlay_Weight', 0.0)]), errors='coerce').fillna(0).iloc[0]
+                    if _active and float(_weight) > 0:
+                        _parts.append(f'{_label} ON ({float(_weight)*100:.1f}%)')
+                    else:
+                        _parts.append(f'{_label} OFF')
+                return ' | '.join(_parts)
+
+            filtered_df['Probability Source'] = filtered_df.apply(_ui_probability_source_row, axis=1)
+            filtered_df['V13 Overlays'] = filtered_df.apply(_ui_v13_overlay_status_row, axis=1)
+
             _summary_agg = {
                 'Rec Line': 'mean',
                 'Sharp Line': 'mean',
@@ -32470,6 +32509,8 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 'Rec Move': 'mean',
                 'Sharp Move': 'mean',
                 'Model Prob': 'mean',
+                'Probability Source': 'first',
+                'V13 Overlays': 'first',
                 'Timing_Opportunity_Score': 'first',
                 'Timing_Stage': 'first',
                 'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else (x.iloc[0] if not x.empty else "⚠️ Missing"),
@@ -32613,7 +32654,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 'Date + Time (EST)', 'Matchup', 'Market', 'Outcome',
                 'Bet/Pass', 'Edge', 'EV / $1', 'Fair Odds', 'Fair Line',
                 'Rec Line', 'Rec Odds', 'Sharp Line', 'Sharp Odds', 'Rec Move', 'Sharp Move',
-                'Model Prob', 'Confidence Tier', 'Timing_Stage',
+                'Model Prob', 'Probability Source', 'V13 Overlays', 'Confidence Tier', 'Timing_Stage',
                 'Pathi Active', 'Big Al Active',
                 'Why Model Likes It', 'Confidence Trend','Confidence Spark', 'Tier Δ', 
             ]
@@ -32631,6 +32672,20 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             # === Final Output
             # === Final Output
             st.subheader(f"📊 Sharp vs Rec Book Summary Table – {label}")
+
+            # Prominent source banner so the user never has to infer which model is
+            # driving the displayed probability. When V13 is live, also summarize the
+            # specialist overlays that are actually active in the filtered table.
+            _src_vals = [str(x) for x in summary_grouped.get('Probability Source', pd.Series(dtype=str)).dropna().unique() if str(x).strip()]
+            _overlay_vals = [str(x) for x in summary_grouped.get('V13 Overlays', pd.Series(dtype=str)).dropna().unique() if str(x).strip()]
+            if len(_src_vals) == 1:
+                _banner = f"Probability Source: {_src_vals[0]}"
+                if _src_vals[0].startswith('V13') and len(_overlay_vals) == 1:
+                    _banner += f" | {_overlay_vals[0]}"
+                st.info(_banner)
+            elif len(_src_vals) > 1:
+                st.info("Probability Sources in filtered table: " + ", ".join(sorted(_src_vals)))
+
             st.info(f"✅ Summary table shape: {summary_grouped.shape}")
             
             # === CSS Styling for All Tables (keep this once)
