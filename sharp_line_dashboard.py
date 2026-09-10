@@ -14433,7 +14433,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
 NCAAF_V13_VERSION = "2026-09-10-v13.1.2-residual-experts-game-balanced-validation"
-NCAAF_V13_HOTFIX = "NONE__V13.1.2_RESIDUAL_EXPERTS_GAME_BALANCED_VALIDATION"
+NCAAF_V13_HOTFIX = "HF2__ACTIVE_SOURCE_METRICS__RESIDUAL_SUBSET_SHADOW_FIX__LEGACY_ROUTE_ISOLATION"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -18770,58 +18770,179 @@ def _v1312_apply_residual_engine(base_prob, family_probs, labels, centers, engin
 
 
 def _v1312_fit_residual_specialist_engine(y,base,family_probs,family_shadow_probs,labels_by_family,centers,regime_weights,folds,select_mask,shadow_mask,sw,groups,log_func=print):
-    """Turn validated named methodologies into shrunken conditional residual experts."""
+    """Turn validated named methodologies into shrunken conditional residual experts.
+
+    HF2 fixes two important contracts:
+      1) selection OOF probabilities are NEVER reused on later-shadow rows;
+      2) passing experts are subset-tested on selection data, then the frozen best
+         subset must independently improve the later shadow lane.  A bad companion
+         expert therefore cannot automatically zero out a genuinely useful expert.
+    """
+    import itertools
+
     y=np.asarray(y,dtype=int); base=np.asarray(base,dtype=float); sw=np.asarray(sw,dtype=float); groups=np.asarray(groups,dtype=object)
     profiles={}; pair_inputs={}; seq=['Market','BigAl','Pathi']
     for fam in seq:
-        pf=np.asarray(family_probs.get(fam,np.full(len(y),np.nan)),dtype=float); ps=np.asarray(family_shadow_probs.get(fam,np.full(len(y),np.nan)),dtype=float)
-        labels=np.asarray(labels_by_family.get(fam,np.full(len(y),'OTHER',dtype=object)),dtype=object); center=float(centers.get(fam,0.5) or 0.5)
-        sign,strength,ev=_v1312_signal_components(pf,center); ssign,sstrength,sev=_v1312_signal_components(ps,center)
+        pf=np.asarray(family_probs.get(fam,np.full(len(y),np.nan)),dtype=float)
+        ps=np.asarray(family_shadow_probs.get(fam,np.full(len(y),np.nan)),dtype=float)
+        labels=np.asarray(labels_by_family.get(fam,np.full(len(y),'OTHER',dtype=object)),dtype=object)
+        center=float(centers.get(fam,0.5) or 0.5)
+        sign,strength,ev=_v1312_signal_components(pf,center)
+        ssign,sstrength,sev=_v1312_signal_components(ps,center)
         _allowed={
             "Market":{"ACTIVE_MOVE","KEY_ZONE","KEY_MOVE"},
             "Pathi":{"SYSTEM_ACTIVE","KEY_NUMBER"},
             "BigAl":{"SYSTEM_ACTIVE","FAVORITE","ROAD_DOG","HOME_DOG","CONFERENCE_HOME_DOG"},
         }.get(fam,set())
-        admitted=[str(r) for r in pd.unique(labels) if str(r) in _allowed]; profiles[fam]={}
+        admitted=[str(r) for r in pd.unique(labels) if str(r) in _allowed]
+        profiles[fam]={}
         parent_mask=select_mask&np.isfinite(base)&np.isfinite(pf)&(sign!=0)&np.isin(labels.astype(str),admitted)
         parent_edge=_v1312_weighted_mean(sign[parent_mask]*(y[parent_mask]-base[parent_mask]),sw[parent_mask]) if parent_mask.any() else 0.0
         pair_inputs[fam]=(ev,labels,admitted)
         for reg in admitted:
-            rm=labels.astype(str)==str(reg); sm=select_mask&rm&np.isfinite(base)&np.isfinite(pf)&(sign!=0); shm=shadow_mask&rm&np.isfinite(base)&np.isfinite(ps)&(ssign!=0)
+            rm=labels.astype(str)==str(reg)
+            sm=select_mask&rm&np.isfinite(base)&np.isfinite(pf)&(sign!=0)
+            shm=shadow_mask&rm&np.isfinite(base)&np.isfinite(ps)&(ssign!=0)
             ng=_v1312_game_count(sm,groups); shg=_v1312_game_count(shm,groups)
             raw_edge=_v1312_weighted_mean(sign[sm]*(y[sm]-base[sm]),sw[sm]) if sm.any() else np.nan
             shadow_edge=_v1312_weighted_mean(ssign[shm]*(y[shm]-base[shm]),sw[shm]) if shm.any() else np.nan
-            alpha=float(ng/(ng+V13_RESIDUAL_PRIOR_GAMES)) if ng>0 else 0.0; shrunk=float(alpha*raw_edge+(1-alpha)*parent_edge) if np.isfinite(raw_edge) else 0.0
+            alpha=float(ng/(ng+V13_RESIDUAL_PRIOR_GAMES)) if ng>0 else 0.0
+            shrunk=float(alpha*raw_edge+(1-alpha)*parent_edge) if np.isfinite(raw_edge) else 0.0
             frec=[]
             for fi,(_tr,va) in enumerate(list(folds or [])):
-                va=np.asarray(va,dtype=int); vm=va[rm[va]&np.isfinite(base[va])&np.isfinite(pf[va])&(sign[va]!=0)]
+                va=np.asarray(va,dtype=int)
+                vm=va[rm[va]&np.isfinite(base[va])&np.isfinite(pf[va])&(sign[va]!=0)]
                 vg=_v1312_game_count(np.isin(np.arange(len(y)),vm),groups) if len(vm) else 0
                 fe=_v1312_weighted_mean(sign[vm]*(y[vm]-base[vm]),sw[vm]) if len(vm) else np.nan
-                if vg>=V13_RESIDUAL_MIN_FOLD_GAMES and np.isfinite(fe): frec.append({'fold':fi,'games':vg,'edge':fe})
-            pos=sum(1 for r in frec if r['edge']>0); need=max(1,int(np.ceil(V13_RESIDUAL_MIN_POSITIVE_FOLD_FRAC*len(frec)))) if frec else 99; frac=(pos/len(frec)) if frec else 0.0
+                if vg>=V13_RESIDUAL_MIN_FOLD_GAMES and np.isfinite(fe):
+                    frec.append({'fold':fi,'games':vg,'edge':fe})
+            pos=sum(1 for r in frec if r['edge']>0)
+            need=max(1,int(np.ceil(V13_RESIDUAL_MIN_POSITIVE_FOLD_FRAC*len(frec)))) if frec else 99
+            frac=(pos/len(frec)) if frec else 0.0
             sample_trust=min(1.0,ng/250.0); shadow_sample=min(1.0,shg/75.0)
             transfer_trust=float(np.clip(max(0.0,shadow_edge)/(max(abs(shrunk),0.005)),0.0,1.0)) if np.isfinite(shadow_edge) else 0.0
             trust=float(np.clip((0.45*sample_trust+0.35*frac+0.20*shadow_sample)*transfer_trust,0,1))
             sc=float(np.nanmedian(strength[sm])) if sm.any() and np.isfinite(strength[sm]).any() else 1.0; sc=max(sc,0.05)
-            gate=bool(ng>=V13_RESIDUAL_MIN_SELECTION_GAMES and shg>=V13_RESIDUAL_MIN_SHADOW_GAMES and len(frec)>=V13_REGIME_MIN_READY_FOLDS and pos>=need and np.isfinite(shrunk) and shrunk>=V13_RESIDUAL_MIN_EDGE and np.isfinite(shadow_edge) and shadow_edge>=0)
-            profiles[fam][str(reg)]={'gate_pass':gate,'selection_games':ng,'shadow_games':shg,'raw_edge':float(raw_edge) if np.isfinite(raw_edge) else np.nan,'parent_edge':float(parent_edge) if np.isfinite(parent_edge) else 0.0,'shrunk_edge':float(max(0,shrunk)),'shadow_edge':float(shadow_edge) if np.isfinite(shadow_edge) else np.nan,'positive_folds':pos,'eligible_folds':len(frec),'required_positive_folds':need,'trust':trust if gate else 0.0,'strength_scale':sc,'fold_records':frec}
-            log_func(f"[V13.1.2-RESIDUAL-EXPERT] family={fam} regime={reg} gate={'PASS' if gate else 'CLOSED'} games={ng} shadow_games={shg} raw_edge={raw_edge:+.4f} parent_edge={parent_edge:+.4f} shrunk_edge={shrunk:+.4f} shadow_edge={shadow_edge:+.4f} positive_folds={pos}/{len(frec)} trust={(trust if gate else 0.0):.3f}")
+            gate=bool(
+                ng>=V13_RESIDUAL_MIN_SELECTION_GAMES
+                and shg>=V13_RESIDUAL_MIN_SHADOW_GAMES
+                and len(frec)>=V13_REGIME_MIN_READY_FOLDS
+                and pos>=need
+                and np.isfinite(shrunk) and shrunk>=V13_RESIDUAL_MIN_EDGE
+                and np.isfinite(shadow_edge) and shadow_edge>=0
+            )
+            profiles[fam][str(reg)]={
+                'gate_pass':gate,'selection_games':ng,'shadow_games':shg,
+                'raw_edge':float(raw_edge) if np.isfinite(raw_edge) else np.nan,
+                'parent_edge':float(parent_edge) if np.isfinite(parent_edge) else 0.0,
+                'shrunk_edge':float(max(0,shrunk)),
+                'shadow_edge':float(shadow_edge) if np.isfinite(shadow_edge) else np.nan,
+                'positive_folds':pos,'eligible_folds':len(frec),'required_positive_folds':need,
+                'trust':trust if gate else 0.0,'strength_scale':sc,'fold_records':frec
+            }
+            log_func(
+                f"[V13.1.2-RESIDUAL-EXPERT] family={fam} regime={reg} gate={'PASS' if gate else 'CLOSED'} "
+                f"games={ng} shadow_games={shg} raw_edge={raw_edge:+.4f} parent_edge={parent_edge:+.4f} "
+                f"shrunk_edge={shrunk:+.4f} shadow_edge={shadow_edge:+.4f} positive_folds={pos}/{len(frec)} "
+                f"trust={(trust if gate else 0.0):.3f}"
+            )
+
+    # Correlation is estimated only on selection OOF evidence.
     corr={f:{} for f in seq}
     for i,a in enumerate(seq):
         eva,laba,ra=pair_inputs.get(a,(None,None,[]))
         if eva is None: continue
         ma=select_mask&np.isfinite(eva)&np.isin(laba.astype(str),[str(x) for x in ra])
         for b in seq[:i]:
-            evb,labb,rb=pair_inputs.get(b,(None,None,[])); mb=select_mask&np.isfinite(evb)&np.isin(labb.astype(str),[str(x) for x in rb]) if evb is not None else np.zeros(len(y),bool); m=ma&mb
+            evb,labb,rb=pair_inputs.get(b,(None,None,[]))
+            mb=select_mask&np.isfinite(evb)&np.isin(labb.astype(str),[str(x) for x in rb]) if evb is not None else np.zeros(len(y),bool)
+            m=ma&mb
             rho=float(np.corrcoef(eva[m],evb[m])[0,1]) if int(m.sum())>=50 and np.nanstd(eva[m])>1e-9 and np.nanstd(evb[m])>1e-9 else 0.0
             corr[a][b]=rho; corr[b][a]=rho
-    engine={'version':V13_RESIDUAL_EXPERT_VERSION,'gate_pass':any(pr.get('gate_pass') for fp in profiles.values() for pr in fp.values()),'profiles':profiles,'pairwise_corr':corr,'sequence':seq,'max_family_delta':V13_RESIDUAL_MAX_FAMILY_DELTA,'max_total_delta':V13_RESIDUAL_MAX_TOTAL_DELTA,'contract':'TRIGGER__CORE_RESIDUAL__PARTIAL_POOLING__TEMPORAL_TRUST__CORRELATION_DISCOUNT__BOUNDED_DELTA'}
-    pred,det=_v1312_apply_residual_engine(base,family_probs,labels_by_family,centers,engine)
-    sm=select_mask&np.isfinite(base)&np.isfinite(pred); sh=shadow_mask&np.isfinite(base)&np.isfinite(pred)
-    bm=_ncaaf_v13_specialist_metrics(y[sm],base[sm],sw[sm]); fm=_ncaaf_v13_specialist_metrics(y[sm],pred[sm],sw[sm]); sb=_ncaaf_v13_specialist_metrics(y[sh],base[sh],sw[sh]); sf=_ncaaf_v13_specialist_metrics(y[sh],pred[sh],sw[sh])
-    engine['selection_metrics']=fm; engine['selection_ll_gain']=bm['logloss']-fm['logloss']; engine['selection_brier_gain']=bm['brier']-fm['brier']; engine['shadow_metrics']=sf; engine['shadow_ll_gain']=sb['logloss']-sf['logloss']; engine['shadow_brier_gain']=sb['brier']-sf['brier']
-    engine['gate_pass']=bool(engine['gate_pass'] and engine['selection_ll_gain']>=0 and engine['selection_brier_gain']>=0 and engine['shadow_ll_gain']>=0 and engine['shadow_brier_gain']>=0)
-    log_func(f"[V13.1.2-RESIDUAL-COMBINE] gate={'PASS' if engine['gate_pass'] else 'CLOSED'} selection_ll_gain={engine['selection_ll_gain']:+.6f} selection_brier_gain={engine['selection_brier_gain']:+.6f} shadow_ll_gain={engine['shadow_ll_gain']:+.6f} shadow_brier_gain={engine['shadow_brier_gain']:+.6f} corr={corr}")
+
+    eligible_families=[fam for fam in seq if any(isinstance(pr,dict) and pr.get('gate_pass',False) for pr in (profiles.get(fam) or {}).values())]
+    base_engine={
+        'version':V13_RESIDUAL_EXPERT_VERSION,'gate_pass':bool(eligible_families),
+        'profiles':profiles,'pairwise_corr':corr,'sequence':list(eligible_families),
+        'max_family_delta':V13_RESIDUAL_MAX_FAMILY_DELTA,'max_total_delta':V13_RESIDUAL_MAX_TOTAL_DELTA,
+        'contract':'TRIGGER__CORE_RESIDUAL__PARTIAL_POOLING__TEMPORAL_TRUST__CORRELATION_DISCOUNT__BOUNDED_DELTA__SUBSET_SELECTION__DISJOINT_SHADOW'
+    }
+
+    # Selection-only subset search.  With three expert families there are at most
+    # seven non-empty subsets, so this is transparent and cheap.  We deliberately
+    # do NOT choose the subset on the shadow period; shadow is validation only.
+    subset_records=[]
+    select_eval=select_mask&np.isfinite(base)
+    base_sel=_ncaaf_v13_specialist_metrics(y[select_eval],base[select_eval],sw[select_eval])
+    best_subset=()
+    best_obj=float(base_sel.get('objective',np.inf))
+    best_sel_metrics=base_sel
+    best_sel_pred=np.asarray(base,dtype=float).copy()
+    best_sel_details={}
+
+    for r in range(1,len(eligible_families)+1):
+        for subset in itertools.combinations(eligible_families,r):
+            cand=dict(base_engine); cand['gate_pass']=True; cand['sequence']=list(subset)
+            psel,dsel=_v1312_apply_residual_engine(base,family_probs,labels_by_family,centers,cand)
+            sm=select_eval&np.isfinite(psel)
+            fm=_ncaaf_v13_specialist_metrics(y[sm],psel[sm],sw[sm])
+            bm=_ncaaf_v13_specialist_metrics(y[sm],base[sm],sw[sm])
+            llg=bm['logloss']-fm['logloss']; brg=bm['brier']-fm['brier']
+            obj=float(fm.get('objective',np.inf))
+            eligible=bool(np.isfinite(obj) and llg>=0 and brg>=0)
+            rec={'subset':list(subset),'selection_n':int(fm.get('n',0)),'selection_ll_gain':float(llg),'selection_brier_gain':float(brg),'objective':obj,'selection_pass':eligible}
+            subset_records.append(rec)
+            log_func(f"[V13.1.2-RESIDUAL-SUBSET] subset={'+'.join(subset)} selection_pass={eligible} selection_n={rec['selection_n']} ll_gain={llg:+.6f} brier_gain={brg:+.6f} objective={obj:.6f}")
+            # Prefer the best proper-score objective. If effectively tied, prefer
+            # the simpler subset so one marginal expert cannot add needless variance.
+            if eligible:
+                materially_better=(obj < best_obj-1e-6)
+                tied_simpler=(abs(obj-best_obj)<=1e-6 and (not best_subset or len(subset)<len(best_subset)))
+                if materially_better or tied_simpler:
+                    best_subset=tuple(subset); best_obj=obj; best_sel_metrics=fm; best_sel_pred=psel; best_sel_details=dsel
+
+    engine=dict(base_engine)
+    engine['subset_records']=subset_records
+    engine['selected_families']=list(best_subset)
+    engine['sequence']=list(best_subset)
+    engine['selection_metrics']=best_sel_metrics
+    engine['selection_ll_gain']=float(base_sel['logloss']-best_sel_metrics['logloss']) if best_subset else 0.0
+    engine['selection_brier_gain']=float(base_sel['brier']-best_sel_metrics['brier']) if best_subset else 0.0
+
+    # True disjoint later-shadow evaluation: use family_shadow_probs, never the
+    # selection OOF arrays. This fixes the prior artificial +0.000000 shadow result.
+    shadow_eval=shadow_mask&np.isfinite(base)
+    base_sh=_ncaaf_v13_specialist_metrics(y[shadow_eval],base[shadow_eval],sw[shadow_eval])
+    if best_subset:
+        frozen=dict(engine); frozen['gate_pass']=True
+        pshadow,dshadow=_v1312_apply_residual_engine(base,family_shadow_probs,labels_by_family,centers,frozen)
+        sh=shadow_eval&np.isfinite(pshadow)
+        sf=_ncaaf_v13_specialist_metrics(y[sh],pshadow[sh],sw[sh])
+        sb=_ncaaf_v13_specialist_metrics(y[sh],base[sh],sw[sh])
+        sh_ll=float(sb['logloss']-sf['logloss']); sh_br=float(sb['brier']-sf['brier'])
+    else:
+        pshadow=np.asarray(base,dtype=float).copy(); dshadow={}; sf=base_sh; sh_ll=0.0; sh_br=0.0
+
+    engine['shadow_metrics']=sf
+    engine['shadow_ll_gain']=sh_ll
+    engine['shadow_brier_gain']=sh_br
+    engine['gate_pass']=bool(
+        best_subset
+        and engine['selection_ll_gain']>=0
+        and engine['selection_brier_gain']>=0
+        and sh_ll>=0
+        and sh_br>=0
+    )
+    if not engine['gate_pass']:
+        engine['selected_families']=[]
+        engine['sequence']=[]
+
+    log_func(
+        f"[V13.1.2-RESIDUAL-COMBINE] gate={'PASS' if engine['gate_pass'] else 'CLOSED'} "
+        f"selected={'+'.join(best_subset) if best_subset else 'CORE_ONLY'} "
+        f"selection_ll_gain={engine['selection_ll_gain']:+.6f} selection_brier_gain={engine['selection_brier_gain']:+.6f} "
+        f"shadow_ll_gain={engine['shadow_ll_gain']:+.6f} shadow_brier_gain={engine['shadow_brier_gain']:+.6f} corr={corr}"
+    )
     return engine
 
 def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X_train: pd.DataFrame,
@@ -19145,7 +19266,17 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
     bundle["specialist_overlays"]=artifact
     if isinstance(bundle.get("production_preview"),dict):
         bundle["production_preview"]["specialist_overlay_gate_pass"]=final_gate; bundle["production_preview"]["specialist_overlay_weights"]=dict(best_weights); bundle["production_preview"]["specialist_overlay_regime_weights"]=regime_weights; bundle["production_preview"]["specialist_overlay_centers"]=dict(family_centers); bundle["production_preview"]["specialist_overlay_temperature"]=float(post_temperature)
-    log_func(f"[V13.1-SPECIALIST-COMBINE] gate={'PASS' if final_gate else 'CLOSED'} selection_n={sec_final['n']} ll_gain={ll_gain:+.6f} brier_gain={br_gain:+.6f} shadow_n={shadow_final['n']} shadow_ll_gain={sh_ll:+.6f} shadow_brier_gain={sh_br:+.6f} temperature={post_temperature:.3f} regime_weights={regime_weights}")
+    _re_sel_ll=float(_residual_engine.get("selection_ll_gain",0.0) or 0.0)
+    _re_sel_br=float(_residual_engine.get("selection_brier_gain",0.0) or 0.0)
+    _re_sh_ll=float(_residual_engine.get("shadow_ll_gain",0.0) or 0.0)
+    _re_sh_br=float(_residual_engine.get("shadow_brier_gain",0.0) or 0.0)
+    _re_selected=list(_residual_engine.get("selected_families",[]) or [])
+    log_func(
+        f"[V13.1-SPECIALIST-COMBINE] gate={'PASS' if final_gate else 'CLOSED'} mode=RESIDUAL_EXPERT "
+        f"selected={_re_selected} selection_ll_gain={_re_sel_ll:+.6f} selection_brier_gain={_re_sel_br:+.6f} "
+        f"shadow_ll_gain={_re_sh_ll:+.6f} shadow_brier_gain={_re_sh_br:+.6f} "
+        f"legacy_regime_weight_gate={artifact['legacy_regime_weight_gate_pass']} legacy_regime_weights={regime_weights}"
+    )
     return bundle
 
 
@@ -26482,22 +26613,48 @@ def train_sharp_model_from_bq(
             selected=list(odf.index[odf["overlay_selected"]])[:12] if not odf.empty else []
             return selected, odf
 
-        def _fit_regime_residual_specialist(Xdf, y, core_oof, times, features, *, sample_weight=None, label="outcome"):
-            """Secondary chronological residual model for REGIME_DEPENDENT features.
+        def _fit_regime_residual_specialist(Xdf, y, core_oof, times, features, *, sample_weight=None, label="outcome", shadow_folds=None):
+            """Legacy secondary residual lane, retained for non-NCAAF research only.
 
-            It never replaces Core. It must improve paired OOF log loss AND Brier
-            score before any correction is saved for deployment.
+            HF2 requires a disjoint later-shadow PASS and scales the correction cap
+            to the dispersion of the core probability.  NCAAF spreads bypass this
+            lane entirely because V13.1.2 has the newer residual-expert system.
             """
             feats=[c for c in dict.fromkeys(features or []) if c in Xdf.columns][:24]
-            out={"enabled":False,"gate_pass":False,"features":feats,"weight":0.0,"cap":0.02,"status":"no_features","oof_correction":np.full(len(y),np.nan)}
+            out={"enabled":False,"gate_pass":False,"features":feats,"weight":0.0,"cap":0.0,"status":"no_features","oof_correction":np.full(len(y),np.nan)}
             if not feats: return None,out
             yy=np.asarray(y,dtype=int).reshape(-1); core=np.asarray(core_oof,dtype=float).reshape(-1)
             tt=pd.to_datetime(np.asarray(times),errors="coerce",utc=True)
             valid=np.isfinite(core)&pd.notna(tt)
             if int(valid.sum())<500 or np.unique(yy[valid]).size<2:
                 out["status"]="insufficient_oof_support"; return None,out
+
+            # Reserve every later-shadow validation row from selection/refit used to
+            # decide whether this old lane is trustworthy.
+            shadow_idx=np.asarray([],dtype=int)
+            try:
+                _sv=[]
+                for _tr,_va in list(shadow_folds or []):
+                    _sv.extend(np.asarray(_va,dtype=int).tolist())
+                if _sv:
+                    shadow_idx=np.unique(np.asarray(_sv,dtype=int))
+                    shadow_idx=shadow_idx[(shadow_idx>=0)&(shadow_idx<len(yy))]
+            except Exception:
+                shadow_idx=np.asarray([],dtype=int)
+            shadow_mask=np.zeros(len(yy),dtype=bool); shadow_mask[shadow_idx]=True
+            select_valid=valid&(~shadow_mask)
+            if int(select_valid.sum())<400:
+                out["status"]="insufficient_pre_shadow_support"; return None,out
+
+            # A residual lane must never have enough authority to dominate a tightly
+            # clustered core.  Cap at 1.5x the core probability standard deviation,
+            # with a 2pp absolute ceiling and a small 0.1pp floor.
+            core_std=float(np.nanstd(core[select_valid]))
+            dynamic_cap=float(min(0.02,max(0.001,1.5*core_std)))
+            out["cap"]=dynamic_cap; out["core_prob_std"]=core_std
+
             X=Xdf.reindex(columns=feats).apply(pd.to_numeric,errors="coerce").replace([np.inf,-np.inf],np.nan)
-            order=np.where(valid)[0][np.argsort(np.asarray(tt)[valid])]
+            order=np.where(select_valid)[0][np.argsort(np.asarray(tt)[select_valid])]
             n=len(order); cuts=[(0.45,0.62),(0.62,0.79),(0.79,1.00)]
             corr_oof=np.full(len(yy),np.nan); fold_stats=[]
             from sklearn.pipeline import Pipeline
@@ -26512,38 +26669,64 @@ def train_sharp_model_from_bq(
                 if len(va)<80: continue
                 mdl=_new(); resid=yy[tr]-core[tr]
                 try:
-                    if sample_weight is not None:
-                        # Pipeline sample_weight routing varies by sklearn version; ridge
-                        # fit without weights is safer than silently misrouting them.
-                        mdl.fit(X.iloc[tr],resid)
-                    else: mdl.fit(X.iloc[tr],resid)
-                    cr=np.clip(np.asarray(mdl.predict(X.iloc[va]),dtype=float),-0.04,0.04)
+                    mdl.fit(X.iloc[tr],resid)
+                    cr=np.clip(np.asarray(mdl.predict(X.iloc[va]),dtype=float),-2*dynamic_cap,2*dynamic_cap)
                     corr_oof[va]=cr
                     fold_stats.append({"fold":fno,"n":len(va)})
                 except Exception: continue
-            ev=np.isfinite(corr_oof)&np.isfinite(core)
+            ev=np.isfinite(corr_oof)&np.isfinite(core)&select_valid
             if int(ev.sum())<250:
                 out["status"]="insufficient_secondary_oof"; return None,out
             base_ll=float(log_loss(yy[ev],np.clip(core[ev],1e-6,1-1e-6),labels=[0,1])); base_br=float(brier_score_loss(yy[ev],core[ev]))
             best=None
             for w in (0.25,0.50,0.75,1.00):
-                trial=np.clip(core[ev]+np.clip(w*corr_oof[ev],-0.02,0.02),1e-6,1-1e-6)
+                trial=np.clip(core[ev]+np.clip(w*corr_oof[ev],-dynamic_cap,dynamic_cap),1e-6,1-1e-6)
                 ll=float(log_loss(yy[ev],trial,labels=[0,1])); br=float(brier_score_loss(yy[ev],trial)); auc=float(roc_auc_score(yy[ev],trial)) if np.unique(yy[ev]).size==2 else np.nan
                 score=ll+0.50*br
                 if best is None or score<best[0]: best=(score,w,ll,br,auc)
             _,w,ll,br,auc=best; ll_imp=base_ll-ll; br_imp=base_br-br
-            # Fold consistency at chosen weight.
             positives=[]
             for a,b in cuts:
                 tr_end=max(150,int(round(n*a))); va_end=min(n,int(round(n*b))); va=order[tr_end:va_end]
                 m=np.isfinite(corr_oof[va])
                 if int(m.sum())<40: continue
-                idx=va[m]; p0=np.clip(core[idx],1e-6,1-1e-6); p1=np.clip(core[idx]+np.clip(w*corr_oof[idx],-0.02,0.02),1e-6,1-1e-6)
+                idx=va[m]; p0=np.clip(core[idx],1e-6,1-1e-6); p1=np.clip(core[idx]+np.clip(w*corr_oof[idx],-dynamic_cap,dynamic_cap),1e-6,1-1e-6)
                 positives.append(float(log_loss(yy[idx],p0,labels=[0,1])-log_loss(yy[idx],p1,labels=[0,1]))>0)
             pos_frac=float(np.mean(positives)) if positives else 0.0
-            gate=bool(ll_imp>=0.0005 and br_imp>=0.0002 and pos_frac>=0.50)
-            out.update({"enabled":True,"gate_pass":gate,"status":"PASS" if gate else "REJECTED_NO_INCREMENTAL_SKILL","weight":float(w if gate else 0.0),"n_oof":int(ev.sum()),"base_logloss":base_ll,"trial_logloss":ll,"logloss_improvement":ll_imp,"base_brier":base_br,"trial_brier":br,"brier_improvement":br_imp,"auc":auc,"positive_fold_frac":pos_frac,"oof_correction":corr_oof})
-            print(f"[REGIME-RESIDUAL-GATE:{label}] features={len(feats)} n={int(ev.sum())} ll_improve={ll_imp:+.6f} brier_improve={br_imp:+.6f} fold_positive={pos_frac:.0%} gate={'PASS' if gate else 'CLOSED'} weight={out['weight']:.2f}")
+            selection_gate=bool(ll_imp>=0.0005 and br_imp>=0.0002 and pos_frac>=0.50)
+
+            # Frozen pre-shadow model: fit only on selection-era rows, then evaluate
+            # the disjoint later-shadow rows.  No shadow PASS means no authority.
+            shadow_ll_imp=float("nan"); shadow_br_imp=float("nan"); shadow_n=0; shadow_pass=False
+            if selection_gate and len(shadow_idx):
+                sh=shadow_idx[np.isfinite(core[shadow_idx])]
+                shadow_n=int(len(sh))
+                if shadow_n>=80 and np.unique(yy[sh]).size==2:
+                    try:
+                        smdl=_new(); smdl.fit(X.loc[select_valid],yy[select_valid]-core[select_valid])
+                        scorr=np.asarray(smdl.predict(X.iloc[sh]),dtype=float)
+                        p0=np.clip(core[sh],1e-6,1-1e-6)
+                        p1=np.clip(core[sh]+np.clip(w*scorr,-dynamic_cap,dynamic_cap),1e-6,1-1e-6)
+                        sll0=float(log_loss(yy[sh],p0,labels=[0,1])); sll1=float(log_loss(yy[sh],p1,labels=[0,1]))
+                        sbr0=float(brier_score_loss(yy[sh],p0)); sbr1=float(brier_score_loss(yy[sh],p1))
+                        shadow_ll_imp=sll0-sll1; shadow_br_imp=sbr0-sbr1
+                        shadow_pass=bool(shadow_ll_imp>=0 and shadow_br_imp>=0)
+                    except Exception:
+                        shadow_pass=False
+            gate=bool(selection_gate and shadow_pass)
+            out.update({
+                "enabled":True,"gate_pass":gate,"status":"PASS" if gate else "REJECTED_NO_DISJOINT_SHADOW_SKILL",
+                "weight":float(w if gate else 0.0),"n_oof":int(ev.sum()),"base_logloss":base_ll,"trial_logloss":ll,
+                "logloss_improvement":ll_imp,"base_brier":base_br,"trial_brier":br,"brier_improvement":br_imp,"auc":auc,
+                "positive_fold_frac":pos_frac,"shadow_n":shadow_n,"shadow_logloss_improvement":shadow_ll_imp,
+                "shadow_brier_improvement":shadow_br_imp,"shadow_pass":bool(shadow_pass),"oof_correction":corr_oof
+            })
+            print(
+                f"[REGIME-RESIDUAL-GATE:{label}] features={len(feats)} n={int(ev.sum())} core_std={core_std:.6f} cap={dynamic_cap:.6f} "
+                f"ll_improve={ll_imp:+.6f} brier_improve={br_imp:+.6f} fold_positive={pos_frac:.0%} "
+                f"shadow_n={shadow_n} shadow_ll_improve={shadow_ll_imp:+.6f} shadow_brier_improve={shadow_br_imp:+.6f} "
+                f"gate={'PASS' if gate else 'CLOSED'} weight={out['weight']:.2f}"
+            )
             if not gate: return None,out
             final=_new(); final.fit(X.loc[valid],yy[valid]-core[valid])
             return final,out
@@ -28704,19 +28887,29 @@ def train_sharp_model_from_bq(
         regime_residual_model = None
         REGIME_RESIDUAL_ROUTE = {"enabled":False,"gate_pass":False,"features":[],"weight":0.0,"cap":0.02,"status":"not_applicable"}
         try:
-            _regime_feats=(autofs_outcome.get("regime_candidates",[]) if autofs_outcome is not None else [])
-            regime_residual_model, REGIME_RESIDUAL_ROUTE = _fit_regime_residual_specialist(
-                X_df_train_outcome, y_train, p_outcome_oof_train, t_train, _regime_feats,
-                sample_weight=w_train_outcome if "w_train_outcome" in locals() else None, label="outcome"
-            )
-            _oof_corr=np.asarray(REGIME_RESIDUAL_ROUTE.pop("oof_correction",np.full(len(y_train),np.nan)),dtype=float)
-            if REGIME_RESIDUAL_ROUTE.get("gate_pass") and regime_residual_model is not None:
-                _m=np.isfinite(_oof_corr)&np.isfinite(p_outcome_oof_train)
-                _rw=float(REGIME_RESIDUAL_ROUTE.get("weight",0.0)); _rc=float(REGIME_RESIDUAL_ROUTE.get("cap",0.02))
-                p_outcome_oof_train[_m]=np.clip(p_outcome_oof_train[_m]+np.clip(_rw*_oof_corr[_m],-_rc,_rc),CLIP,1-CLIP)
-                p_train_vec=_apply_regime_residual_model(p_train_vec,X_df_train_outcome,regime_residual_model,REGIME_RESIDUAL_ROUTE)
-                p_hold_vec=_apply_regime_residual_model(p_hold_vec,X_df_hold_outcome,regime_residual_model,REGIME_RESIDUAL_ROUTE)
-                p_full_vec=_apply_regime_residual_model(p_full_vec,X_df_full_outcome_autofs,regime_residual_model,REGIME_RESIDUAL_ROUTE)
+            _legacy_residual_disabled_for_v13 = bool(str(sport).upper().strip()=="NCAAF" and _sys_norm_market(market)=="spreads")
+            if _legacy_residual_disabled_for_v13:
+                REGIME_RESIDUAL_ROUTE={
+                    "enabled":False,"gate_pass":False,"features":[],"weight":0.0,"cap":0.0,
+                    "status":"DISABLED_NCAAF_V13_RESIDUAL_EXPERTS_AUTHORITATIVE"
+                }
+                regime_residual_model=None
+                print("[REGIME-RESIDUAL-GATE:outcome] status=DISABLED reason=NCAAF_V13_1_2_RESIDUAL_EXPERTS_AUTHORITATIVE")
+            else:
+                _regime_feats=(autofs_outcome.get("regime_candidates",[]) if autofs_outcome is not None else [])
+                regime_residual_model, REGIME_RESIDUAL_ROUTE = _fit_regime_residual_specialist(
+                    X_df_train_outcome, y_train, p_outcome_oof_train, t_train, _regime_feats,
+                    sample_weight=w_train_outcome if "w_train_outcome" in locals() else None, label="outcome",
+                    shadow_folds=shadow_folds_outcome
+                )
+                _oof_corr=np.asarray(REGIME_RESIDUAL_ROUTE.pop("oof_correction",np.full(len(y_train),np.nan)),dtype=float)
+                if REGIME_RESIDUAL_ROUTE.get("gate_pass") and regime_residual_model is not None:
+                    _m=np.isfinite(_oof_corr)&np.isfinite(p_outcome_oof_train)
+                    _rw=float(REGIME_RESIDUAL_ROUTE.get("weight",0.0)); _rc=float(REGIME_RESIDUAL_ROUTE.get("cap",0.0))
+                    p_outcome_oof_train[_m]=np.clip(p_outcome_oof_train[_m]+np.clip(_rw*_oof_corr[_m],-_rc,_rc),CLIP,1-CLIP)
+                    p_train_vec=_apply_regime_residual_model(p_train_vec,X_df_train_outcome,regime_residual_model,REGIME_RESIDUAL_ROUTE)
+                    p_hold_vec=_apply_regime_residual_model(p_hold_vec,X_df_hold_outcome,regime_residual_model,REGIME_RESIDUAL_ROUTE)
+                    p_full_vec=_apply_regime_residual_model(p_full_vec,X_df_full_outcome_autofs,regime_residual_model,REGIME_RESIDUAL_ROUTE)
         except Exception as _regime_err:
             print(f"[REGIME-RESIDUAL-GATE:outcome] unavailable: {_regime_err}")
             regime_residual_model=None
@@ -30188,13 +30381,13 @@ def train_sharp_model_from_bq(
                     market_ll_hold = float(log_loss(y_hold_vec[_mk_ok], _market_p_hold[_mk_ok], labels=[0,1]))
                     market_br_hold = float(brier_score_loss(y_hold_vec[_mk_ok], _market_p_hold[_mk_ok]))
                     print(
-                        f"[MARKET-BENCHMARK] rows={int(_mk_ok.sum())} auc={market_auc_hold:.4f} "
+                        f"[LEGACY-MARKET-BENCHMARK] rows={int(_mk_ok.sum())} auc={market_auc_hold:.4f} "
                         f"logloss={market_ll_hold:.6f} brier={market_br_hold:.6f} | "
-                        f"outcome_ll_skill={market_ll_hold-logloss_hold_f:+.6f} "
-                        f"outcome_br_skill={market_br_hold-brier_hold_f:+.6f}"
+                        f"legacy_outcome_ll_skill={market_ll_hold-logloss_hold_f:+.6f} "
+                        f"legacy_outcome_br_skill={market_br_hold-brier_hold_f:+.6f}"
                     )
         except Exception as _market_bench_err:
-            print(f"[MARKET-BENCHMARK] unavailable: {_market_bench_err}")
+            print(f"[LEGACY-MARKET-BENCHMARK] unavailable: {_market_bench_err}")
 
         # -------------------------------------------------------------------
         # V13.1 DIAGNOSTIC: final recipe versus raw Outcome AutoFS core on outer holdout
@@ -30566,14 +30759,14 @@ def train_sharp_model_from_bq(
                 # Full deployed probability can differ from the outcome head when the
                 # meta layer earns nonzero trust. Keep it as the final table row.
                 _deploy_row = _hist_metric_row(
-                    "Full deployed model",
+                    "LEGACY V12 LANE - full deployed model",
                     final_bet_score_hold,
                     _hist_base_metrics,
                 )
                 if _deploy_row is not None:
                     _history_ablation_diag.append(_deploy_row)
 
-                print("[HISTORY-ABLATION-TABLE] paired outer-holdout counterfactual; positive LL/Brier improvement is better")
+                print("[HISTORY-ABLATION-TABLE] LEGACY V12 LANE DIAGNOSTIC only; paired outer-holdout counterfactual; positive LL/Brier improvement is better")
                 for _r in _history_ablation_diag:
                     print(
                         "[HISTORY-ABLATION] "
@@ -30672,8 +30865,8 @@ def train_sharp_model_from_bq(
                         for _c in ["AUC", "LogLoss", "Brier", "AUC_Lift_vs_Base", "LogLoss_Improvement_vs_Base", "Brier_Improvement_vs_Base"]:
                             if _c in _show.columns:
                                 _show[_c] = pd.to_numeric(_show[_c], errors="coerce").round(6)
-                        st.markdown("#### Historical Value Ablation — Paired Outer Holdout")
-                        st.caption("Same holdout rows and fitted models. Historical lanes are neutralized/restored without retraining. Positive LogLoss/Brier improvement vs Base is better.")
+                        st.markdown("#### Legacy V12 Lane Diagnostic — Historical Value Ablation")
+                        st.caption("Legacy V12 lane diagnostic only; this table does not describe the active V13.1.2 probability. Same holdout rows and fitted models; positive LogLoss/Brier improvement vs Base is better.")
                         st.dataframe(_show, hide_index=True, use_container_width=True)
                     if _history_system_diag:
                         _sys_df = pd.DataFrame(_history_system_diag)
@@ -30747,53 +30940,85 @@ def train_sharp_model_from_bq(
                 f"rows={len(artifact_holdout_eval.get('row_keys', []))} raw_holdout={len(y_hold_vec)} "
                 f"probability_source={_artifact_probability_source}"
             )
+            # HF2: all top-level holdout metrics describe the probability that is
+            # actually staged for promotion.  Legacy Outcome/Meta diagnostics are
+            # preserved under explicit legacy_* names so they cannot be mistaken for
+            # the active candidate.
+            _active_mask=np.isfinite(_artifact_hold_prob)
+            _active_auc=_active_acc=_active_ll=_active_br=_active_ece=float("nan")
+            _active_pos=float("nan")
+            if int(_active_mask.sum())>=100 and np.unique(y_hold_vec[_active_mask]).size==2:
+                _ap=np.clip(np.asarray(_artifact_hold_prob[_active_mask],dtype=float),1e-6,1-1e-6)
+                _ay=np.asarray(y_hold_vec[_active_mask],dtype=int)
+                _active_auc=float(roc_auc_score(_ay,_ap))
+                _active_acc=float(accuracy_score(_ay,(_ap>=0.5).astype(int)))
+                _active_ll=float(log_loss(_ay,_ap,labels=[0,1]))
+                _active_br=float(brier_score_loss(_ay,_ap))
+                _active_ece=float(expected_calibration_error(_ay,_ap,n_bins=10))
+                _active_pos=float(np.mean(_ap>=0.5))
+
+            _active_ll_skill=(market_ll_hold-_active_ll) if np.isfinite(market_ll_hold) and np.isfinite(_active_ll) else float("nan")
+            _active_br_skill=(market_br_hold-_active_br) if np.isfinite(market_br_hold) and np.isfinite(_active_br) else float("nan")
+            print(
+                f"[ACTIVE-CANDIDATE-METRICS] source={_artifact_probability_source} rows={int(_active_mask.sum())} "
+                f"auc={_active_auc:.6f} accuracy={_active_acc:.6f} logloss={_active_ll:.6f} "
+                f"brier={_active_br:.6f} ece={_active_ece:.6f} p50_positive={_active_pos:.2%}"
+            )
+            print(
+                f"[ACTIVE-MARKET-BENCHMARK] source={_artifact_probability_source} rows={int(_active_mask.sum())} "
+                f"model_auc={_active_auc:.4f} model_logloss={_active_ll:.6f} model_brier={_active_br:.6f} "
+                f"market_auc={market_auc_hold:.4f} market_logloss={market_ll_hold:.6f} market_brier={market_br_hold:.6f} "
+                f"ll_skill={_active_ll_skill:+.6f} br_skill={_active_br_skill:+.6f}"
+            )
+
             artifact_metrics = {
-                "auc_holdout": auc_hold_f,
-                "logloss_holdout": logloss_hold_f,
-                "brier_holdout": brier_hold_f,
-                "accuracy_holdout": acc_hold_f,
-                "auc_gap_train_holdout": auc_gap_f,
-                "ece_holdout": float(ece_ho),
-                "ece_meta_holdout": float(meta_ece_ho),
+                # Active probability source -- authoritative promotion/readout metrics.
+                "auc_holdout": _active_auc,
+                "logloss_holdout": _active_ll,
+                "brier_holdout": _active_br,
+                "accuracy_holdout": _active_acc,
+                "ece_holdout": _active_ece,
+                "holdout_n": int(_active_mask.sum()),
+                "positive_rate_active_holdout": _active_pos,
+                "active_probability_source": _artifact_probability_source,
                 "market_auc_holdout": market_auc_hold,
                 "market_logloss_holdout": market_ll_hold,
                 "market_brier_holdout": market_br_hold,
-                "model_logloss_skill_vs_market": (
-                    market_ll_hold - logloss_hold_f if np.isfinite(market_ll_hold) else float("nan")
-                ),
-                "model_brier_skill_vs_market": (
-                    market_br_hold - brier_hold_f if np.isfinite(market_br_hold) else float("nan")
-                ),
-        
+                "model_logloss_skill_vs_market": _active_ll_skill,
+                "model_brier_skill_vs_market": _active_br_skill,
+
+                # Backward-compatible meta names now mirror the active candidate so
+                # downstream promotion/reporting cannot mix V13 with stale legacy Meta.
+                "auc_meta_holdout": _active_auc,
+                "accuracy_meta_holdout": _active_acc,
+                "logloss_meta_holdout": _active_ll,
+                "brier_meta_holdout": _active_br,
+                "ece_meta_holdout": _active_ece,
+                "positive_rate_meta_holdout": _active_pos,
+
+                # A train-vs-holdout AUC gap is only meaningful for the legacy path
+                # unless an exact V13 training recipe probability is available.
+                "auc_gap_train_holdout": (float(auc_gap_f) if _artifact_probability_source=="LEGACY_META" else float("nan")),
+                "legacy_auc_gap_train_holdout": float(auc_gap_f),
+
+                # Explicit legacy diagnostics -- never authoritative for V13.
+                "legacy_outcome_auc_holdout": auc_hold_f,
+                "legacy_outcome_accuracy_holdout": acc_hold_f,
+                "legacy_outcome_logloss_holdout": logloss_hold_f,
+                "legacy_outcome_brier_holdout": brier_hold_f,
+                "legacy_meta_auc_holdout": auc_meta_hold_f,
+                "legacy_meta_accuracy_holdout": acc_meta_hold_f,
+                "legacy_meta_logloss_holdout": logloss_meta_hold_f,
+                "legacy_meta_brier_holdout": brier_meta_hold_f,
+                "legacy_meta_ece_holdout": float(meta_ece_ho),
+                "legacy_outcome_ece_holdout": float(ece_ho),
+
                 "auc_situation_holdout": auc_situation_hold_f,
                 "auc_value_holdout": auc_value_hold_f,
                 "rmse_value_holdout": rmse_value_hold,
                 "mae_value_holdout": mae_value_hold,
-                "holdout_n": int(len(y_hold_vec)),
-                "positive_rate_meta_holdout": (
-                    float(np.mean(np.asarray(final_bet_score_hold, dtype=float) >= 0.5))
-                    if final_bet_score_hold is not None and len(final_bet_score_hold) > 0
-                    else float("nan")
-                ),
-
-                "auc_meta_holdout": auc_meta_hold_f,
-                "accuracy_meta_holdout": acc_meta_hold_f,
-                "logloss_meta_holdout": logloss_meta_hold_f,
-                "brier_meta_holdout": brier_meta_hold_f,
                 "meta_top_decile_mean_util": meta_top_decile_mean_util,
-                "active_probability_source": _artifact_probability_source,
             }
-            if _artifact_probability_source.startswith("V13"):
-                _am=np.isfinite(_artifact_hold_prob)
-                if int(_am.sum())>=100 and np.unique(y_hold_vec[_am]).size==2:
-                    _ap=np.clip(_artifact_hold_prob[_am],1e-6,1-1e-6); _ay=y_hold_vec[_am]
-                    _aa=float(roc_auc_score(_ay,_ap)); _all=float(log_loss(_ay,_ap,labels=[0,1])); _abr=float(brier_score_loss(_ay,_ap)); _ae=float(expected_calibration_error(_ay,_ap,n_bins=10))
-                    _aac=float(accuracy_score(_ay,(_ap>=0.5).astype(int)))
-                    artifact_metrics.update({
-                        "auc_holdout":_aa,"auc_meta_holdout":_aa,"logloss_holdout":_all,"logloss_meta_holdout":_all,
-                        "brier_holdout":_abr,"brier_meta_holdout":_abr,"accuracy_holdout":_aac,"accuracy_meta_holdout":_aac,
-                        "ece_holdout":_ae,"ece_meta_holdout":_ae,"holdout_n":int(_am.sum()),
-                    })
             artifact_config = {
                 "sport": sport,
                 "market": market,
@@ -30804,7 +31029,7 @@ def train_sharp_model_from_bq(
                 "blend_space": "logit",
                 "active_probability_source": _artifact_probability_source,
         
-                "model_family": "three_head_plus_meta_v12_2_core_anchored_specialists_market_benchmarked",
+                "model_family": "v13_1_2_hf2_autofs_core_residual_experts_active_source_metrics",
                 "history_diagnostics": {
                     "version": HISTORY_DIAGNOSTIC_VERSION,
                     "method": "paired_outer_holdout_counterfactual_neutralization_no_retraining",
@@ -31216,21 +31441,30 @@ def train_sharp_model_from_bq(
         # -------------------------------------------------------------------
         # Status box
         # -------------------------------------------------------------------
+        _status_source = str((artifact_metrics or {}).get("active_probability_source","LEGACY_META")) if isinstance(artifact_metrics,dict) else "LEGACY_META"
+        _status_auc = float((artifact_metrics or {}).get("auc_holdout",auc_hold_f)) if isinstance(artifact_metrics,dict) else float(auc_hold_f)
+        _status_acc = float((artifact_metrics or {}).get("accuracy_holdout",acc_hold_f)) if isinstance(artifact_metrics,dict) else float(acc_hold_f)
+        _status_ll = float((artifact_metrics or {}).get("logloss_holdout",logloss_hold_f)) if isinstance(artifact_metrics,dict) else float(logloss_hold_f)
+        _status_br = float((artifact_metrics or {}).get("brier_holdout",brier_hold_f)) if isinstance(artifact_metrics,dict) else float(brier_hold_f)
+        _status_ece = float((artifact_metrics or {}).get("ece_holdout",ece_ho)) if isinstance(artifact_metrics,dict) else float(ece_ho)
+        _legacy_note = ""
+        if _status_source.startswith("V13"):
+            _legacy_note = (
+                f"\n        - Legacy diagnostic only — Outcome AUC: {auc_hold_f:.4f}, LL: {logloss_hold_f:.4f}, Brier: {brier_hold_f:.4f}"
+                f"\n        - Legacy diagnostic only — Meta AUC: {auc_meta_hold_f:.4f}, LL: {logloss_meta_hold_f:.4f}, Brier: {brier_meta_hold_f:.4f}"
+            )
         status.write(
             f"""✅ Trained + saved ensemble model for {str(market).upper()}
-        - Outcome AUC: {auc_hold_f:.4f}
-        - Outcome Accuracy: {acc_hold_f:.4f}
-        - Outcome Log Loss: {logloss_hold_f:.4f}
-        - Outcome Brier Score: {brier_hold_f:.4f}
-        - Situation-head Outcome AUC: {auc_situation_hold_f:.4f}
-        - Value-head Outcome AUC: {auc_value_hold_f:.4f}
+        - ACTIVE CANDIDATE SOURCE: {_status_source}
+        - Active AUC: {_status_auc:.4f}
+        - Active Accuracy: {_status_acc:.4f}
+        - Active Log Loss: {_status_ll:.4f}
+        - Active Brier Score: {_status_br:.4f}
+        - Active ECE: {_status_ece:.4f}
+        - Situation-head diagnostic AUC: {auc_situation_hold_f:.4f}
+        - Value-head diagnostic AUC: {auc_value_hold_f:.4f}
         - Value RMSE: {rmse_value_hold:.4f}
-        - Value MAE: {mae_value_hold:.4f}
-        - Meta Outcome AUC: {auc_meta_hold_f:.4f}
-        - Meta Outcome Accuracy: {acc_meta_hold_f:.4f}
-        - Meta Outcome Log Loss: {logloss_meta_hold_f:.4f}
-        - Meta Outcome Brier Score: {brier_meta_hold_f:.4f}
-        - Meta Top Decile Mean Util: {meta_top_decile_mean_util:.4f}
+        - Value MAE: {mae_value_hold:.4f}{_legacy_note}
         """
         )
         pb.progress(min(100, max(0, pct)))
