@@ -12215,115 +12215,61 @@ def _promotion_row_keys(df: pd.DataFrame) -> np.ndarray:
     return np.asarray([hashlib.sha256(v.encode("utf-8")).hexdigest()[:24] for v in raw], dtype=object)
 
 
-def _promotion_eval_payload(row_keys, y, p) -> Dict[str, Any]:
-    row_keys = np.asarray(row_keys, dtype=object).reshape(-1)
-    y = np.asarray(y, dtype=float).reshape(-1)
-    p = np.asarray(p, dtype=float).reshape(-1)
-    if not (len(row_keys) == len(y) == len(p)):
-        raise ValueError("promotion holdout payload length mismatch")
-    ok = np.asarray([bool(str(k)) for k in row_keys]) & np.isfinite(y) & np.isfinite(p)
-    return {
-        "key_version": PROMOTION_ROW_KEY_VERSION,
-        "row_keys": row_keys[ok].astype(str).tolist(),
-        "y": y[ok].astype(int).tolist(),
-        "p": np.clip(p[ok], 1e-6, 1 - 1e-6).astype(float).tolist(),
-    }
+def _promotion_eval_payload(row_keys, y, p, physical_game_keys=None, horizon_hours=None, segment_labels=None) -> Dict[str, Any]:
+    row_keys=np.asarray(row_keys,dtype=object).reshape(-1); y=np.asarray(y,dtype=float).reshape(-1); p=np.asarray(p,dtype=float).reshape(-1); n=len(row_keys)
+    if not (n==len(y)==len(p)): raise ValueError("promotion holdout payload length mismatch")
+    phys=np.asarray(physical_game_keys if physical_game_keys is not None else row_keys,dtype=object).reshape(-1); hz=np.asarray(horizon_hours if horizon_hours is not None else np.full(n,np.nan),dtype=float).reshape(-1); seg=np.asarray(segment_labels if segment_labels is not None else np.full(n,'ALL',dtype=object),dtype=object).reshape(-1)
+    if len(phys)!=n: phys=row_keys.copy()
+    if len(hz)!=n: hz=np.full(n,np.nan)
+    if len(seg)!=n: seg=np.full(n,'ALL',dtype=object)
+    ok=np.asarray([bool(str(k)) for k in row_keys])&np.isfinite(y)&np.isfinite(p)
+    return {"key_version":PROMOTION_ROW_KEY_VERSION,"row_keys":row_keys[ok].astype(str).tolist(),"y":y[ok].astype(int).tolist(),"p":np.clip(p[ok],1e-6,1-1e-6).astype(float).tolist(),"physical_game_keys":phys[ok].astype(str).tolist(),"horizon_hours":hz[ok].astype(float).tolist(),"segment_labels":seg[ok].astype(str).tolist()}
 
 
-def _paired_promotion_metrics(
-    challenger_eval: Optional[Dict[str, Any]],
-    champion_eval: Optional[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    """Re-score both candidates on the exact intersection of holdout rows."""
-    if not challenger_eval or not champion_eval:
-        return None
-    if challenger_eval.get("key_version") != champion_eval.get("key_version"):
-        return None
-
-    def _as_map(ev):
-        ks = list(ev.get("row_keys", []))
-        ys = list(ev.get("y", []))
-        ps = list(ev.get("p", []))
-        if not (len(ks) == len(ys) == len(ps)):
-            return {}
-        out = {}
-        for k, yv, pv in zip(ks, ys, ps):
-            try:
-                yv = int(yv); pv = float(pv)
-            except Exception:
-                continue
-            if yv not in (0, 1) or not np.isfinite(pv):
-                continue
-            out[str(k)] = (yv, float(np.clip(pv, 1e-6, 1 - 1e-6)))
+def _paired_promotion_metrics(challenger_eval: Optional[Dict[str, Any]], champion_eval: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not challenger_eval or not champion_eval or challenger_eval.get("key_version")!=champion_eval.get("key_version"): return None
+    def amap(ev):
+        ks=list(ev.get('row_keys',[])); ys=list(ev.get('y',[])); ps=list(ev.get('p',[])); ph=list(ev.get('physical_game_keys',[])); hz=list(ev.get('horizon_hours',[])); sg=list(ev.get('segment_labels',[])); out={}
+        for i,(k,yv,pv) in enumerate(zip(ks,ys,ps)):
+            try: yv=int(yv); pv=float(pv)
+            except Exception: continue
+            if yv not in (0,1) or not np.isfinite(pv): continue
+            out[str(k)]=(yv,float(np.clip(pv,1e-6,1-1e-6)),str(ph[i]) if i<len(ph) else '',float(hz[i]) if i<len(hz) and np.isfinite(hz[i]) else np.nan,str(sg[i]) if i<len(sg) else 'ALL')
         return out
-
-    cm = _as_map(challenger_eval)
-    hm = _as_map(champion_eval)
-    common = sorted(set(cm).intersection(hm))
-    if not common:
-        return {"paired_n": 0, "label_mismatch_n": 0}
-
-    yc=[]; pc=[]; ph=[]; mism=0
+    cm=amap(challenger_eval); hm=amap(champion_eval); common=sorted(set(cm).intersection(hm))
+    if not common: return {"paired_n":0,"label_mismatch_n":0}
+    y=[]; pc=[]; ph=[]; gg=[]; hh=[]; ss=[]; mism=0
     for k in common:
-        y1, p1 = cm[k]; y2, p2 = hm[k]
-        if y1 != y2:
-            mism += 1
-            continue
-        yc.append(y1); pc.append(p1); ph.append(p2)
-    y = np.asarray(yc, dtype=int)
-    p_c = np.asarray(pc, dtype=float)
-    p_h = np.asarray(ph, dtype=float)
-
-    def _ece(yv, pv, bins=10):
-        if len(yv) == 0:
-            return float("nan")
-        edges=np.linspace(0.0,1.0,bins+1)
-        b=np.clip(np.digitize(pv, edges[1:-1], right=False),0,bins-1)
-        out=0.0
-        for i in range(bins):
-            m=b==i
-            if m.any():
-                out += float(m.mean()) * abs(float(yv[m].mean()) - float(pv[m].mean()))
-        return float(out)
-
-    def _metrics(pv):
-        if len(y) == 0:
-            return {"holdout_n": 0}
-        auc = float(roc_auc_score(y, pv)) if np.unique(y).size == 2 else float("nan")
-        return {
-            "auc_holdout": auc,
-            "auc_meta_holdout": auc,
-            "logloss_holdout": float(log_loss(y, pv, labels=[0,1])),
-            "logloss_meta_holdout": float(log_loss(y, pv, labels=[0,1])),
-            "brier_holdout": float(brier_score_loss(y, pv)),
-            "brier_meta_holdout": float(brier_score_loss(y, pv)),
-            "accuracy_holdout": float(accuracy_score(y, (pv >= 0.5).astype(int))),
-            "accuracy_meta_holdout": float(accuracy_score(y, (pv >= 0.5).astype(int))),
-            "ece_holdout": _ece(y, pv),
-            "ece_meta_holdout": _ece(y, pv),
-            "holdout_n": int(len(y)),
-            # A paired comparison has no comparable train-vs-holdout gap metric.
-            "auc_gap_train_holdout": 0.0,
-        }
-
-    return {
-        "paired_n": int(len(y)),
-        "label_mismatch_n": int(mism),
-        "challenger_metrics": _metrics(p_c),
-        "champion_metrics": _metrics(p_h),
-    }
-
-
-@dataclass
-class ChampionMeta:
-    sport: str
-    market: str
-    model_path: str              # GCS path to pickle
-    created_at: str              # ISO8601 timestamp
-    metrics: Dict[str, float]    # holdout + CV metrics
-    config: Dict[str, Any]       # any training config you want (search space, seeds, etc.)
-    holdout_eval: Optional[Dict[str, Any]] = None
-    version: int = CHAMPION_META_VERSION
+        c=cm[k]; h=hm[k]
+        if c[0]!=h[0]: mism+=1; continue
+        y.append(c[0]); pc.append(c[1]); ph.append(h[1]); gg.append(c[2] or h[2] or k); hh.append(c[3] if np.isfinite(c[3]) else h[3]); ss.append(c[4] or 'ALL')
+    y=np.asarray(y,dtype=int); pc=np.asarray(pc); ph=np.asarray(ph); gg=np.asarray(gg,dtype=object); hh=np.asarray(hh,dtype=float); ss=np.asarray(ss,dtype=object)
+    def row_metrics(pv):
+        if len(y)==0:return {'holdout_n':0}
+        def ece(p):
+            edges=np.linspace(0,1,11); z=0.0
+            for i in range(10):
+                m=(p>=edges[i])&(p<(edges[i+1]+(1e-12 if i==9 else 0)))
+                if m.any(): z+=m.mean()*abs(y[m].mean()-p[m].mean())
+            return float(z)
+        auc=float(roc_auc_score(y,pv)) if np.unique(y).size==2 else np.nan
+        return {'auc_holdout':auc,'auc_meta_holdout':auc,'logloss_holdout':float(log_loss(y,pv,labels=[0,1])),'logloss_meta_holdout':float(log_loss(y,pv,labels=[0,1])),'brier_holdout':float(brier_score_loss(y,pv)),'brier_meta_holdout':float(brier_score_loss(y,pv)),'accuracy_holdout':float(accuracy_score(y,(pv>=.5).astype(int))),'accuracy_meta_holdout':float(accuracy_score(y,(pv>=.5).astype(int))),'ece_holdout':ece(pv),'ece_meta_holdout':ece(pv),'holdout_n':int(len(y)),'auc_gap_train_holdout':0.0}
+    gb_c=_ncaaf_v13_weighted_metrics(y,pc,gg); gb_h=_ncaaf_v13_weighted_metrics(y,ph,gg); cal_c=_ncaaf_v13_weighted_calibration_diagnostics(y,pc,gg); cal_h=_ncaaf_v13_weighted_calibration_diagnostics(y,ph,gg); boot=_ncaaf_v13_paired_model_bootstrap(y,ph,pc,gg,reps=V13_PROMOTION_BOOTSTRAP_REPS,seed=13120)
+    horizon={}
+    for name,m in [('NEAR_1H',np.isfinite(hh)&(hh>=0)&(hh<=2)),('NEAR_6H',np.isfinite(hh)&(hh>2)&(hh<=12)),('NEAR_24H',np.isfinite(hh)&(hh>12)&(hh<=36)),('EARLY_GT36H',np.isfinite(hh)&(hh>36))]:
+        if int(m.sum())>=20:
+            horizon[name]={'rows':int(m.sum()),'games':int(len(pd.unique(gg[m]))),'challenger':_ncaaf_v13_weighted_metrics(y[m],pc[m],gg[m]),'champion':_ncaaf_v13_weighted_metrics(y[m],ph[m],gg[m]),'challenger_cal':_ncaaf_v13_weighted_calibration_diagnostics(y[m],pc[m],gg[m]),'champion_cal':_ncaaf_v13_weighted_calibration_diagnostics(y[m],ph[m],gg[m])}
+    # Closest-to-kick per physical game.
+    closest=np.zeros(len(y),dtype=bool)
+    for g in pd.unique(gg):
+        ids=np.where(gg==g)[0]; finite=ids[np.isfinite(hh[ids])]
+        if len(finite): closest[finite[np.argmin(np.abs(hh[finite]))]]=True
+    if int(closest.sum())>=20: horizon['CLOSEST_TO_KICK']={'rows':int(closest.sum()),'games':int(len(pd.unique(gg[closest]))),'challenger':_ncaaf_v13_weighted_metrics(y[closest],pc[closest],gg[closest]),'champion':_ncaaf_v13_weighted_metrics(y[closest],ph[closest],gg[closest]),'challenger_cal':_ncaaf_v13_weighted_calibration_diagnostics(y[closest],pc[closest],gg[closest]),'champion_cal':_ncaaf_v13_weighted_calibration_diagnostics(y[closest],ph[closest],gg[closest])}
+    segments={}
+    for seg in pd.unique(ss):
+        m=ss==seg
+        if int(m.sum())>=20: segments[str(seg)]={'rows':int(m.sum()),'games':int(len(pd.unique(gg[m]))),'challenger':_ncaaf_v13_weighted_metrics(y[m],pc[m],gg[m]),'champion':_ncaaf_v13_weighted_metrics(y[m],ph[m],gg[m])}
+    return {'paired_n':int(len(y)),'paired_games':int(len(pd.unique(gg))),'label_mismatch_n':int(mism),'challenger_metrics':row_metrics(pc),'champion_metrics':row_metrics(ph),'game_balanced_challenger_metrics':gb_c,'game_balanced_champion_metrics':gb_h,'game_balanced_challenger_calibration':cal_c,'game_balanced_champion_calibration':cal_h,'game_clustered_bootstrap':boot,'horizon_metrics':horizon,'segment_metrics':segments}
 
 
 def _champion_meta_blob_name(sport: str, market: str) -> str:
@@ -12646,6 +12592,15 @@ def train_with_champion_wrapper(
                 champion_metrics=paired_metrics_champion,
             )
             comparison_mode = "paired_exact_intersection"
+            if isinstance(paired,dict) and paired.get("game_balanced_challenger_metrics"):
+                dbg["game_balanced_challenger_metrics"]=paired.get("game_balanced_challenger_metrics")
+                dbg["game_balanced_champion_metrics"]=paired.get("game_balanced_champion_metrics")
+                dbg["game_balanced_challenger_calibration"]=paired.get("game_balanced_challenger_calibration")
+                dbg["game_balanced_champion_calibration"]=paired.get("game_balanced_champion_calibration")
+                dbg["game_clustered_bootstrap"]=paired.get("game_clustered_bootstrap")
+                dbg["horizon_metrics"]=paired.get("horizon_metrics")
+                dbg["segment_metrics"]=paired.get("segment_metrics")
+                dbg["paired_physical_games"]=paired.get("paired_games",0)
             dbg.update({
                 "comparison_mode": comparison_mode,
                 "paired_holdout_n": _paired_n,
@@ -12753,15 +12708,18 @@ def train_with_champion_wrapper(
             # non-inferiority guardrail; ranking improvement alone cannot promote V13.
             # This comparison is evaluation-only and does not alter recipe weights.
             if not isinstance(dbg,dict): dbg={}
-            _ll_imp=float(dbg.get("logloss_improvement",np.nan))
-            _br_imp=float(dbg.get("brier_improvement",np.nan))
-            _ece_imp=float(dbg.get("ece_improvement",np.nan))
-            _auc_imp=float(dbg.get("auc_improvement",np.nan))
+            _gbc=dbg.get("game_balanced_challenger_metrics") or {}; _gbh=dbg.get("game_balanced_champion_metrics") or {}; _gcc=dbg.get("game_balanced_challenger_calibration") or {}; _gch=dbg.get("game_balanced_champion_calibration") or {}; _gboot=dbg.get("game_clustered_bootstrap") or {}
+            _use_gb=bool(_gbc and _gbh and int(dbg.get("paired_physical_games",0) or 0)>=50)
+            if _use_gb:
+                _ll_imp=float(_gbh.get("logloss",np.nan)-_gbc.get("logloss",np.nan)); _br_imp=float(_gbh.get("brier",np.nan)-_gbc.get("brier",np.nan)); _ece_imp=float(_gch.get("ece",np.nan)-_gcc.get("ece",np.nan)); _ici_imp=float(_gch.get("ici_smooth",np.nan)-_gcc.get("ici_smooth",np.nan)); _auc_imp=float(_gbc.get("auc",np.nan)-_gbh.get("auc",np.nan))
+            else:
+                _ll_imp=float(dbg.get("logloss_improvement",np.nan)); _br_imp=float(dbg.get("brier_improvement",np.nan)); _ece_imp=float(dbg.get("ece_improvement",np.nan)); _ici_imp=np.nan; _auc_imp=float(dbg.get("auc_improvement",np.nan))
             _proper_noninferior=bool(np.isfinite(_ll_imp) and np.isfinite(_br_imp) and _ll_imp>=-0.00010 and _br_imp>=-0.00005)
             _proper_material=bool((_ll_imp>=0.00050) or (_br_imp>=0.00025)) if _proper_noninferior else False
-            _cal_noninferior=bool((not np.isfinite(_ece_imp)) or _ece_imp>=-0.0050)
-            _cal_material=bool(np.isfinite(_ece_imp) and _ece_imp>=0.0050)
-            _auc_noninferior=bool((not np.isfinite(_auc_imp)) or _auc_imp>=-0.0150)
+            _cal_ece_ok=bool((not np.isfinite(_ece_imp)) or _ece_imp>=-0.0100); _cal_ici_ok=bool((not np.isfinite(_ici_imp)) or _ici_imp>=-0.0100)
+            _rel_ok=bool((not _use_gb) or (np.isfinite(_gcc.get("reliability",np.nan)) and np.isfinite(_gch.get("reliability",np.nan)) and _gcc["reliability"]<=_gch["reliability"]+0.0025))
+            _slope_ok=bool((not _use_gb) or (not np.isfinite(_gcc.get("calibration_slope",np.nan))) or (not np.isfinite(_gch.get("calibration_slope",np.nan))) or abs(_gcc["calibration_slope"]-1)<=abs(_gch["calibration_slope"]-1)+0.75)
+            _cal_noninferior=bool(_cal_ece_ok and _cal_ici_ok and _rel_ok and _slope_ok); _cal_material=bool((np.isfinite(_ece_imp) and _ece_imp>=0.0050) or (np.isfinite(_ici_imp) and _ici_imp>=0.0050)); _auc_noninferior=bool((not np.isfinite(_auc_imp)) or _auc_imp>=-0.0150)
             _v13_no_champion=bool(champion_meta is None)
             _v13_outer_quality_pass=bool(
                 _v13_no_champion or (
@@ -12781,12 +12739,13 @@ def train_with_champion_wrapper(
                 "v13_calibration_noninferior":_cal_noninferior,
                 "v13_calibration_material_improvement":_cal_material,
                 "v13_auc_noninferior":_auc_noninferior,
+                "v13_game_balanced_primary":_use_gb,"v13_ici_improvement":_ici_imp,"v13_calibration_ece_ok":_cal_ece_ok,"v13_calibration_ici_ok":_cal_ici_ok,"v13_calibration_reliability_ok":_rel_ok,"v13_calibration_slope_ok":_slope_ok,
                 "runtime_kill_switch":"V13_PROMOTION_ENABLED=0",
                 "legacy_probability_preserved_in_artifact":True,
             })
             logger.warning(
-                "[V13.1-PROMOTION] internal_ready=TRUE probability_quality_gate=%s ll_imp=%+.6f br_imp=%+.6f ece_imp=%+.6f auc_imp=%+.6f specialist_gate=%s",
-                _v13_outer_quality_pass,_ll_imp,_br_imp,_ece_imp,_auc_imp,_v13_spec_gate
+                "[V13.1.2-PROMOTION] internal_ready=TRUE game_balanced_primary=%s probability_quality_gate=%s ll_imp=%+.6f br_imp=%+.6f ece_imp=%+.6f ici_imp=%+.6f auc_imp=%+.6f specialist_gate=%s",
+                _use_gb,_v13_outer_quality_pass,_ll_imp,_br_imp,_ece_imp,_ici_imp,_auc_imp,_v13_spec_gate
             )
 
     # Streamlit-friendly logging
@@ -14461,8 +14420,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-10-v13.1.1-regime-specialists-calibration"
-NCAAF_V13_HOTFIX = "NONE__V13.1.1_REGIME_SPECIALISTS_CALIBRATION"
+NCAAF_V13_VERSION = "2026-09-10-v13.1.2-residual-experts-game-balanced-validation"
+NCAAF_V13_HOTFIX = "NONE__V13.1.2_RESIDUAL_EXPERTS_GAME_BALANCED_VALIDATION"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -17344,97 +17303,87 @@ def _ncaaf_v13_weighted_metrics(y,p,groups):
 
 
 def _ncaaf_v13_weighted_calibration_diagnostics(y,p,groups,bins=10):
-    """Game-balanced calibration diagnostics for direct V12/V13 comparisons."""
+    """Game-balanced calibration diagnostics, including a smooth quantile-bin ICI."""
     yy=np.asarray(y,dtype=int); pp=np.asarray(p,dtype=float); gg=np.asarray(groups,dtype=object)
-    ok=np.isfinite(pp)
-    yy=yy[ok]; pp=np.clip(pp[ok],1e-6,1-1e-6); gg=gg[ok]
+    ok=np.isfinite(pp); yy=yy[ok]; pp=np.clip(pp[ok],1e-6,1-1e-6); gg=gg[ok]
     if len(yy)<50 or np.unique(yy).size<2:
-        return {"n":int(len(yy)),"ece":np.nan,"reliability":np.nan,"resolution":np.nan,
-                "uncertainty":np.nan,"brier_reconstructed":np.nan,"calibration_intercept":np.nan,
-                "calibration_slope":np.nan}
+        return {"n":int(len(yy)),"ece":np.nan,"ici_smooth":np.nan,"reliability":np.nan,"resolution":np.nan,
+                "uncertainty":np.nan,"brier_reconstructed":np.nan,"calibration_intercept":np.nan,"calibration_slope":np.nan}
     cnt=pd.Series(gg).groupby(pd.Series(gg),sort=False).transform("count").to_numpy(dtype=float)
-    w=1.0/np.maximum(cnt,1.0); total=float(np.sum(w))
-    base=float(np.average(yy,weights=w)); unc=base*(1.0-base)
-    ece=0.0; rel=0.0; res=0.0
-    edges=np.linspace(0.0,1.0,int(bins)+1)
+    w=1.0/np.maximum(cnt,1.0); total=float(np.sum(w)); base=float(np.average(yy,weights=w)); unc=base*(1.0-base)
+    ece=0.0; rel=0.0; res=0.0; edges=np.linspace(0.0,1.0,int(bins)+1)
     for bi in range(int(bins)):
-        hi=edges[bi+1]+(1e-12 if bi==int(bins)-1 else 0.0)
-        bm=(pp>=edges[bi])&(pp<hi)
+        hi=edges[bi+1]+(1e-12 if bi==int(bins)-1 else 0.0); bm=(pp>=edges[bi])&(pp<hi)
         if not bm.any(): continue
-        wb=w[bm]; mass=float(np.sum(wb))/max(total,1e-12)
-        pbar=float(np.average(pp[bm],weights=wb)); ybar=float(np.average(yy[bm],weights=wb))
-        ece += mass*abs(pbar-ybar)
-        rel += mass*(pbar-ybar)**2
-        res += mass*(ybar-base)**2
+        wb=w[bm]; mass=float(np.sum(wb))/max(total,1e-12); pbar=float(np.average(pp[bm],weights=wb)); ybar=float(np.average(yy[bm],weights=wb))
+        ece+=mass*abs(pbar-ybar); rel+=mass*(pbar-ybar)**2; res+=mass*(ybar-base)**2
+    # Smooth calibration error: equal-weight quantile bins, then interpolate the observed
+    # rate across probability. This avoids relying on one fixed set of 0.1-wide bins.
+    ici=np.nan
+    try:
+        order=np.argsort(pp); ps=pp[order]; ys=yy[order]; ws=w[order]
+        chunks=np.array_split(np.arange(len(ps)),min(20,max(5,len(pd.unique(gg))//10)))
+        xp=[]; yp=[]
+        for ch in chunks:
+            if len(ch)<2 or float(np.sum(ws[ch]))<=0: continue
+            xp.append(float(np.average(ps[ch],weights=ws[ch]))); yp.append(float(np.average(ys[ch],weights=ws[ch])))
+        if len(xp)>=3:
+            xp=np.asarray(xp); yp=np.asarray(yp); oo=np.argsort(xp); xp=xp[oo]; yp=yp[oo]
+            smooth=np.interp(pp,xp,yp,left=yp[0],right=yp[-1]); ici=float(np.average(np.abs(pp-smooth),weights=w))
+    except Exception: pass
     intercept=slope=np.nan
     try:
         from sklearn.linear_model import LogisticRegression
-        x=np.log(pp/(1.0-pp)).reshape(-1,1)
-        mdl=LogisticRegression(C=1e6,solver="lbfgs",max_iter=1000).fit(x,yy,sample_weight=w)
+        x=np.log(pp/(1.0-pp)).reshape(-1,1); mdl=LogisticRegression(C=1e6,solver="lbfgs",max_iter=1000).fit(x,yy,sample_weight=w)
         intercept=float(mdl.intercept_[0]); slope=float(mdl.coef_[0,0])
-    except Exception:
-        pass
-    return {"n":int(len(yy)),"ece":float(ece),"reliability":float(rel),"resolution":float(res),
-            "uncertainty":float(unc),"brier_reconstructed":float(rel-res+unc),
-            "calibration_intercept":intercept,"calibration_slope":slope}
+    except Exception: pass
+    return {"n":int(len(yy)),"ece":float(ece),"ici_smooth":float(ici) if np.isfinite(ici) else np.nan,"reliability":float(rel),"resolution":float(res),
+            "uncertainty":float(unc),"brier_reconstructed":float(rel-res+unc),"calibration_intercept":intercept,"calibration_slope":slope}
 
 
 def _ncaaf_v13_paired_model_bootstrap(y,p12,p13,groups,reps=800,seed=13100):
+    """Physical-game clustered paired bootstrap for proper scores and calibration deltas."""
     yy=np.asarray(y,dtype=int); a=np.asarray(p12,dtype=float); b=np.asarray(p13,dtype=float); gg=np.asarray(groups,dtype=object)
     ok=np.isfinite(a)&np.isfinite(b); yy=yy[ok]; a=np.clip(a[ok],1e-6,1-1e-6); b=np.clip(b[ok],1e-6,1-1e-6); gg=gg[ok]
-    uniq=pd.unique(gg); rng=np.random.default_rng(seed); ll=[]; br=[]
-    by={g:np.where(gg==g)[0] for g in uniq}
+    uniq=pd.unique(gg); rng=np.random.default_rng(seed); ll=[]; br=[]; ece=[]; ici=[]; rel=[]; slope=[]; intercept=[]; by={g:np.where(gg==g)[0] for g in uniq}
     for _ in range(int(reps)):
-        picks=rng.integers(0,len(uniq),size=len(uniq)); ix=[]; wg=[]
-        for j in picks:
-            ids=by[uniq[j]]; ix.extend(ids.tolist()); wg.extend((np.ones(len(ids))/max(1,len(ids))).tolist())
-        ix=np.asarray(ix,dtype=int); w=np.asarray(wg,dtype=float)
+        picks=rng.integers(0,len(uniq),size=len(uniq)); ix=[]; wg=[]; bg=[]
+        for jj,j in enumerate(picks):
+            ids=by[uniq[j]]; ix.extend(ids.tolist()); wg.extend((np.ones(len(ids))/max(1,len(ids))).tolist()); bg.extend([f'b{jj}']*len(ids))
+        ix=np.asarray(ix,dtype=int); w=np.asarray(wg,dtype=float); bg=np.asarray(bg,dtype=object)
         l12=-(yy[ix]*np.log(a[ix])+(1-yy[ix])*np.log(1-a[ix])); l13=-(yy[ix]*np.log(b[ix])+(1-yy[ix])*np.log(1-b[ix]))
-        ll.append(float(np.average(l12-l13,weights=w)))
-        br.append(float(np.average((a[ix]-yy[ix])**2-(b[ix]-yy[ix])**2,weights=w)))
-    return {"games":int(len(uniq)),"ll_improvement_ci95":[float(np.quantile(ll,.025)),float(np.quantile(ll,.975))],"brier_improvement_ci95":[float(np.quantile(br,.025)),float(np.quantile(br,.975))]}
+        ll.append(float(np.average(l12-l13,weights=w))); br.append(float(np.average((a[ix]-yy[ix])**2-(b[ix]-yy[ix])**2,weights=w)))
+        ca=_ncaaf_v13_weighted_calibration_diagnostics(yy[ix],a[ix],bg); cb=_ncaaf_v13_weighted_calibration_diagnostics(yy[ix],b[ix],bg)
+        ece.append(float(ca.get('ece',np.nan)-cb.get('ece',np.nan))); ici.append(float(ca.get('ici_smooth',np.nan)-cb.get('ici_smooth',np.nan)))
+        rel.append(float(ca.get('reliability',np.nan)-cb.get('reliability',np.nan)))
+        slope.append(float(abs(ca.get('calibration_slope',np.nan)-1)-abs(cb.get('calibration_slope',np.nan)-1)))
+        intercept.append(float(abs(ca.get('calibration_intercept',np.nan))-abs(cb.get('calibration_intercept',np.nan))))
+    def ci(x):
+        q=np.asarray(x,dtype=float); q=q[np.isfinite(q)]; return [float(np.quantile(q,.025)),float(np.quantile(q,.975))] if len(q)>=20 else [np.nan,np.nan]
+    return {"games":int(len(uniq)),"ll_improvement_ci95":ci(ll),"brier_improvement_ci95":ci(br),"ece_improvement_ci95":ci(ece),
+            "ici_improvement_ci95":ci(ici),"reliability_improvement_ci95":ci(rel),"slope_closeness_improvement_ci95":ci(slope),
+            "intercept_closeness_improvement_ci95":ci(intercept)}
 
 
 
 # ============================================================================
-# V13.0.16 VALIDATION-GATED SPECIALIST OVERLAYS
-# Statistics remain the foundation. Market / Pathi / BigAl are independently
-# selected and may only adjust V13 after out-of-fold incremental validation.
+# V13.1.2 CALIBRATED AUTOfs CORE + CONDITIONAL RESIDUAL EXPERTS
 # ============================================================================
-V13_SPECIALIST_OVERLAY_VERSION = "2026-09-10-v13.1.1-regime-qualified-specialists"
-# Conservative first-production authority. Specialists correct the calibrated V13
-# foundation; they do not overpower it until repeated forward seasons justify more.
+V13_SPECIALIST_OVERLAY_VERSION = "2026-09-10-v13.1.2-residual-qualified-specialists"
 V13_SPECIALIST_WEIGHT_GRID = (0.0, 0.025, 0.05, 0.075, 0.10, 0.15)
 V13_SPECIALIST_MAX_TOTAL_WEIGHT = 0.20
 V13_SPECIALIST_MIN_OOF_ROWS = 500
 V13_SPECIALIST_MIN_LL_GAIN = 0.0005
 V13_SPECIALIST_MIN_BRIER_GAIN = 0.0002
-# Hard fail-closed sanity checks. An ATS specialist that appears nearly perfect is
-# almost certainly seeing a current-result/future-target field rather than a real
-# pregame edge.
 V13_SPECIALIST_MAX_SANITY_AUC = 0.80
 V13_SPECIALIST_MIN_SANITY_LOGLOSS = 0.45
-# Calibration non-inferiority limits for the overlay layer itself. Promotion has
-# the same philosophy, but specialists should not reach that stage if they already
-# damage probability reliability.
 V13_SPECIALIST_MAX_ECE_INCREASE = 0.010
 V13_SPECIALIST_MAX_RELIABILITY_INCREASE = 0.0025
-# One-parameter post-overlay softening only. T>=1 can reduce overconfidence without
-# changing rank/AUC; identity remains available.
 V13_SPECIALIST_TEMPERATURE_GRID = (1.0, 1.10, 1.20, 1.35, 1.50, 1.75, 2.00, 2.50)
-
-# HF3 specialist stability/model competition. AutoFS discovers candidates; a
-# selection-only permutation audit removes features whose incremental value does
-# not reproduce across chronological validation folds. The later shadow lane is
-# never used to choose features or model class.
 V13_SPECIALIST_STABILITY_MIN_POS_FRAC = 0.60
 V13_SPECIALIST_STABILITY_MIN_MEAN_OBJECTIVE_DROP = 0.0
 V13_SPECIALIST_LOGISTIC_C_GRID = (0.05, 0.20, 1.00)
 
-# HF3 AutoFS Core bridge. V13's statistical/maturity foundation is deliberately
-# conservative; the leakage-safe Outcome AutoFS head has materially more ranking
-# resolution. It may contribute only centered OOF evidence and only after a
-# selection + later-shadow proper-score gate. This is not the legacy meta score.
 V13_AUTOFS_CORE_BRIDGE_VERSION = "2026-09-10-v13.0.16-hf3-oof-autofs-core-bridge"
 V13_AUTOFS_CORE_WEIGHT_GRID = (0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30)
 V13_AUTOFS_CORE_MIN_OOF_ROWS = 500
@@ -17444,33 +17393,14 @@ V13_AUTOFS_CORE_MAX_ECE_INCREASE = 0.010
 V13_AUTOFS_CORE_MAX_RELIABILITY_INCREASE = 0.0025
 V13_AUTOFS_CORE_MIN_POSITIVE_FOLD_FRAC = 0.60
 
-# V13 is probability-quality first. AUC is a broad non-inferiority guardrail,
-# not the promotion objective. Proper-score superiority remains mandatory.
 V13_PROMOTION_MAX_AUC_DROP = 0.05
 V13_PROMOTION_MAX_ECE_INCREASE = 0.01
 V13_PROMOTION_MAX_RELIABILITY_INCREASE = 0.0025
-# Do not promote from a selectively matched slice.  The direct paired comparator
-# must cover most of the holdout and a meaningful number of physical games.
 V13_PROMOTION_MIN_MATCH_RATE = 0.80
 V13_PROMOTION_MIN_MATCHED_GAMES = 100
 
-
-# ============================================================================
-# V13.1.1 CALIBRATED AUTOfs CORE
-#
-# Outcome AutoFS is now the primary probability engine. The football/fundamental
-# model, Market, BigAl and Pathi are optional incremental specialists around that
-# calibrated core. This reverses the HF3 bridge because the latest untouched
-# holdout showed the Outcome AutoFS head had materially stronger resolution and
-# proper scores than the fundamental probability, while the legacy Meta layer
-# degraded calibration without improving rank.
-# ============================================================================
-V13_CORE_CALIBRATION_VERSION = "2026-09-10-v13.1.1-recency-aware-calibration-stability"
+V13_CORE_CALIBRATION_VERSION = "2026-09-10-v13.1.2-recency-aware-calibration-stability"
 V13_CORE_CALIBRATION_METHODS = ("identity", "temperature", "platt", "beta")
-# 13.1.1 explicitly researches sharpening as well as softening. The 13.1.0
-# outer holdout slope (>1) indicated under-confident/compressed probabilities.
-# Selection remains strictly chronological OOF; the untouched outer holdout never
-# chooses a temperature or any other calibration parameter.
 V13_CORE_CALIBRATION_T_GRID = (0.50, 0.60, 0.70, 0.80, 0.90, 1.00, 1.10, 1.25, 1.50, 1.75, 2.00)
 V13_CORE_CALIBRATION_RECENT_GAME_WINDOWS = (750, 1000)
 V13_CORE_CALIBRATION_HALF_LIFE_DAYS = (365.0, 730.0)
@@ -17481,17 +17411,13 @@ V13_CORE_CALIBRATION_MAX_ECE_INCREASE = 0.005
 V13_CORE_CALIBRATION_MAX_RELIABILITY_INCREASE = 0.0015
 V13_CORE_CALIBRATION_MAX_LL_WORSEN = 0.00025
 V13_CORE_CALIBRATION_MAX_BRIER_WORSEN = 0.00010
-# Maturity-specific calibration may become active in 13.1.1 only when its own
-# nested-forward and later-shadow transfer gates pass; otherwise runtime stays global/identity.
 V13_CORE_MATURITY_CAL_MIN_FIT_ROWS = 250
 V13_CORE_MATURITY_CAL_MIN_VALID_ROWS = 50
-# Final champion promotion remains probability-quality first and adds clustered
-# uncertainty checks around calibration deterioration.
 V13_PROMOTION_BOOTSTRAP_REPS = 400
 V13_PROMOTION_MAX_ECE_CI_INCREASE = 0.010
 V13_PROMOTION_MAX_RELIABILITY_CI_INCREASE = 0.0025
 
-V13_FUNDAMENTAL_OVERLAY_VERSION = "2026-09-10-v13.1.1-regime-fundamental-overlay"
+V13_FUNDAMENTAL_OVERLAY_VERSION = "2026-09-10-v13.1.2-residual-fundamental-overlay"
 V13_FUNDAMENTAL_WEIGHT_GRID = (0.0, 0.025, 0.05, 0.075, 0.10, 0.15)
 V13_FUNDAMENTAL_MIN_OOF_ROWS = 500
 V13_FUNDAMENTAL_MIN_LL_GAIN = 0.0005
@@ -17499,18 +17425,11 @@ V13_FUNDAMENTAL_MIN_BRIER_GAIN = 0.0002
 V13_FUNDAMENTAL_MIN_POSITIVE_FOLD_FRAC = 0.60
 V13_FUNDAMENTAL_MAX_ECE_INCREASE = 0.0075
 V13_FUNDAMENTAL_MAX_RELIABILITY_INCREASE = 0.0020
-
 V13_INTERNAL_CORE_MIN_AUC = 0.515
 V13_INTERNAL_CORE_MAX_LOGLOSS = 0.700
 V13_INTERNAL_CORE_MAX_BRIER = 0.255
-
-# Specialists are now admitted sequentially: Market -> BigAl -> Pathi. A later
-# family must improve the already-qualified recipe, not merely the raw core.
 V13_SPECIALIST_SEQUENCE = ("Market", "BigAl", "Pathi")
 
-# V13.1.1 regime qualification: a specialist does not need to be globally useful.
-# It may earn a small weight only in a predeclared, live-identifiable regime that
-# reproduces across chronological folds and the later internal shadow period.
 V13_REGIME_MIN_SELECTION_ROWS = 150
 V13_REGIME_MIN_SHADOW_ROWS = 60
 V13_REGIME_MIN_FOLD_ROWS = 20
@@ -17520,6 +17439,20 @@ V13_REGIME_MIN_LL_GAIN = 0.00025
 V13_REGIME_MIN_BRIER_GAIN = 0.00010
 V13_FUNDAMENTAL_REGIMES = ("FIRST_TWO_GAMES", "GAMES_3_4", "GAMES_5_8", "GAME_9_PLUS", "UNKNOWN")
 
+# Named systems are conditional expert priors, not forced votes. Their effect is
+# learned from OOF residuals of the calibrated core, partially pooled toward a
+# family prior, time-stability weighted, correlation-discounted, and hard capped.
+V13_RESIDUAL_EXPERT_VERSION = "2026-09-10-v13.1.2-residual-experts-v1"
+V13_RESIDUAL_PRIOR_GAMES = 150.0
+V13_RESIDUAL_MIN_SELECTION_GAMES = 75
+V13_RESIDUAL_MIN_SHADOW_GAMES = 30
+V13_RESIDUAL_MIN_FOLD_GAMES = 20
+V13_RESIDUAL_MIN_EDGE = 0.0015
+V13_RESIDUAL_MIN_POSITIVE_FOLD_FRAC = 0.60
+V13_RESIDUAL_MAX_FAMILY_DELTA = 0.020
+V13_RESIDUAL_MAX_TOTAL_DELTA = 0.030
+V13_RESIDUAL_CORR_DISCOUNT_START = 0.25
+V13_RESIDUAL_CORR_MAX_DISCOUNT = 0.50
 
 def _v13_log_exception(log_func, prefix: str, exc: Exception, limit: int = 8):
     """Emit a compact one-record traceback so Cloud logs retain the failing line."""
@@ -18167,16 +18100,19 @@ def _ncaaf_v131_family_regime_labels(rows: pd.DataFrame, family: str, maturity=N
             conf=pd.to_numeric(rows["BigAl_Context_Conference_Home_Dog"],errors="coerce").fillna(0).to_numpy(dtype=float)>0
         home=_ncaaf_v131_numeric_series(rows,("Is_Home","Is_Home_Team_Bet"),default=0).fillna(0).to_numpy(dtype=float)>0.5
         fav=_ncaaf_v131_numeric_series(rows,("Is_Favorite_Bet","Is_Favorite_Context"),default=np.nan).to_numpy(dtype=float,na_value=np.nan)
-        isfav=np.where(np.isfinite(fav),fav>0.5,np.isfinite(sv)&(sv<0))
-        dog=np.isfinite(sv)&(sv>0)
+        isfav=np.where(np.isfinite(fav),fav>0.5,np.isfinite(sv)&(sv<0)); dog=np.isfinite(sv)&(sv>0)
+        exact=np.zeros(n,dtype=bool)
+        for c in BIGAL_EXACT_SIGNAL_COLS:
+            if c in rows.columns:
+                exact |= pd.to_numeric(rows[c],errors="coerce").fillna(0).abs().to_numpy(dtype=float)>1e-9
         lab=np.full(n,"OTHER",dtype=object)
-        lab[isfav]="FAVORITE"; lab[dog&~home]="ROAD_DOG"; lab[dog&home]="HOME_DOG"; lab[conf]="CONFERENCE_HOME_DOG"
+        lab[isfav]="FAVORITE"; lab[dog&~home]="ROAD_DOG"; lab[dog&home]="HOME_DOG"; lab[conf]="CONFERENCE_HOME_DOG"; lab[exact]="SYSTEM_ACTIVE"
         return lab
     return np.full(n,"OTHER",dtype=object)
 
 def _ncaaf_v131_fit_core_calibration(bundle: dict, train_rows: pd.DataFrame, y_train, core_oof,
                                       folds, shadow_folds=None, sample_weight=None, log_func=print):
-    """V13.1.1 probability calibration: global/recent/recency candidates plus maturity temperatures.
+    """V13.1.2 probability calibration: global/recent/recency candidates plus maturity temperatures.
 
     Every candidate is selected only from chronological OOF predictions. A later
     disjoint shadow period must confirm transfer. The outer champion holdout is never
@@ -18352,16 +18288,26 @@ def _ncaaf_v131_fit_core_calibration(bundle: dict, train_rows: pd.DataFrame, y_t
 
 
 
+def _v1312_apply_fundamental_residual(core,fund,mat,overlay):
+    core=np.asarray(core,dtype=float); fund=np.asarray(fund,dtype=float); mat=np.asarray(mat,dtype=object); final=core.copy(); n=len(core)
+    profiles=(overlay.get('residual_profiles') or {}) if isinstance(overlay,dict) else {}; center=float((overlay or {}).get('center_prob',0.5) or 0.5); sign,strength,_=_v1312_signal_components(fund,center)
+    trust=np.zeros(n); edge=np.zeros(n); active=np.zeros(n,dtype=bool)
+    for reg,pr in profiles.items():
+        if not isinstance(pr,dict) or not pr.get('gate_pass',False): continue
+        m=(mat.astype(str)==str(reg))&np.isfinite(core)&np.isfinite(fund)&(sign!=0)
+        if not m.any(): continue
+        sc=max(float(pr.get('strength_scale',1.0) or 1.0),0.05); tr=float(np.clip(pr.get('trust',0.0) or 0.0,0,1)); ed=float(max(0,pr.get('shrunk_edge',0.0) or 0.0)); ss=np.clip(strength[m]/sc,0,1.25)
+        delta=sign[m]*np.minimum(V13_RESIDUAL_MAX_FAMILY_DELTA,ed*tr*ss); final[m]=np.clip(core[m]+delta,0.01,0.99); trust[m]=tr; edge[m]=ed; active[m]=True
+    return final,{'gate_pass':bool(active.any()),'weight':trust,'active':active.astype(np.int8),'contribution':final-core,'fundamental_prob':fund,'center_prob':center,'regime':mat,'residual_edge':edge,'trust':trust}
+
 def _ncaaf_v131_apply_fundamental_overlay(core_prob, fundamental_prob, overlay: dict, maturity=None):
-    """Apply only the maturity regimes in which Fundamental evidence earned authority."""
+    """Apply residual-qualified Fundamental expert; V13.1.1 weight route is fallback."""
     core=np.asarray(core_prob,dtype=float).reshape(-1); fund=np.asarray(fundamental_prob,dtype=float).reshape(-1)
     if len(fund)!=len(core): fund=np.full(len(core),np.nan,dtype=float)
     mat=np.asarray(maturity if maturity is not None else ["UNKNOWN"]*len(core),dtype=object)
-    final=core.copy(); gate=bool(isinstance(overlay,dict) and overlay.get("gate_pass",False))
-    center=float(np.clip((overlay or {}).get("center_prob",0.5) or 0.5,0.01,0.99)) if isinstance(overlay,dict) else 0.5
-    rw=(overlay or {}).get("regime_weights") or {} if isinstance(overlay,dict) else {}
-    legacy=float(np.clip((overlay or {}).get("weight",0.0) or 0.0,0.0,1.0)) if isinstance(overlay,dict) else 0.0
-    warr=np.zeros(len(core),dtype=float)
+    if isinstance(overlay,dict) and overlay.get('residual_gate_pass',False): return _v1312_apply_fundamental_residual(core,fund,mat,overlay)
+    final=core.copy(); gate=bool(isinstance(overlay,dict) and overlay.get("gate_pass",False)); center=float(np.clip((overlay or {}).get("center_prob",0.5) or 0.5,0.01,0.99)) if isinstance(overlay,dict) else 0.5
+    rw=(overlay or {}).get("regime_weights") or {} if isinstance(overlay,dict) else {}; legacy=float(np.clip((overlay or {}).get("weight",0.0) or 0.0,0.0,1.0)) if isinstance(overlay,dict) else 0.0; warr=np.zeros(len(core),dtype=float)
     if gate:
         if isinstance(rw,dict) and rw:
             for b,w in rw.items(): warr[mat.astype(str)==str(b)]=float(np.clip(w,0.0,1.0))
@@ -18369,9 +18315,7 @@ def _ncaaf_v131_apply_fundamental_overlay(core_prob, fundamental_prob, overlay: 
     ok=np.isfinite(core)&np.isfinite(fund); active=ok&(warr>0)
     if active.any():
         ev=_v13_logit(fund[active])-float(_v13_logit([center])[0]); final[active]=_v13_sigmoid(_v13_logit(core[active])+warr[active]*ev)
-    return np.clip(final,0.01,0.99),{"gate_pass":gate,"weight":np.where(ok,warr,0.0),"active":active.astype(np.int8),
-        "contribution":np.asarray(final-core,dtype=float),"fundamental_prob":fund,"center_prob":center,"regime":mat}
-
+    return np.clip(final,0.01,0.99),{"gate_pass":gate,"weight":np.where(ok,warr,0.0),"active":active.astype(np.int8),"contribution":np.asarray(final-core,dtype=float),"fundamental_prob":fund,"center_prob":center,"regime":mat}
 
 
 def _ncaaf_v131_fit_fundamental_overlay(bundle: dict, train_rows: pd.DataFrame, y_train, core_crossfit,
@@ -18430,17 +18374,36 @@ def _ncaaf_v131_fit_fundamental_overlay(bundle: dict, train_rows: pd.DataFrame, 
             regime_weights[regime]=best_w; adjusted[nok]=nested[nok]; adjusted[sidx]=sp
         regime_results[regime]={"gate_pass":gate,"selected_weight":best_w,"selection_rows":int(rs.sum()),"shadow_rows":int(sh.sum()),"rolling_ll_gain":rll,"rolling_brier_gain":rbr,"positive_folds":pos,"required_positive_folds":need,"shadow_ll_gain":sll,"shadow_brier_gain":sbr,"fold_records":frec}
         log_func(f"[V13.1-FUNDAMENTAL-REGIME] regime={regime} gate={'PASS' if gate else 'CLOSED'} weight={best_w:.3f} rolling_ll_gain={rll:+.6f} rolling_brier_gain={rbr:+.6f} positive_folds={pos}/{len(elig)} required={need} shadow_ll_gain={sll:+.6f} shadow_brier_gain={sbr:+.6f}")
-    final=bool(regime_weights); art={"version":V13_FUNDAMENTAL_OVERLAY_VERSION,"status":"PASS" if final else "GATE_CLOSED","gate_pass":final,
-        "weight":max(regime_weights.values()) if regime_weights else 0.0,"regime_weights":regime_weights,"regime_results":regime_results,"center_prob":center,"match_diagnostics":match_diag,
-        "contract":"AUTOFS_CORE_PRIMARY__MATURITY_SPECIFIC_FUNDAMENTAL_AUTHORITY__NESTED_FORWARD_AND_SHADOW_PER_REGIME__ZERO_OUTSIDE_PROVEN_REGIMES"}
+    # V13.1.2 residual qualification for the statistical/fundamental opinion. This
+    # can discover a modest repeatable core miss even when one fixed logit weight
+    # was too unstable to pass globally.
+    residual_profiles={}; parent_mask=select_mask&valid; psign,pstrength,_=_v1312_signal_components(fund,center)
+    parent_edge=_v1312_weighted_mean(psign[parent_mask]*(y[parent_mask]-core[parent_mask]),sw[parent_mask]) if parent_mask.any() else 0.0
+    for regime in V13_FUNDAMENTAL_REGIMES:
+        rm=maturity.astype(str)==str(regime); sm=select_mask&valid&rm&(psign!=0); shm=shadow_mask&valid&rm&(psign!=0); ng=_v1312_game_count(sm,groups); shg=_v1312_game_count(shm,groups)
+        raw_edge=_v1312_weighted_mean(psign[sm]*(y[sm]-core[sm]),sw[sm]) if sm.any() else np.nan; shadow_edge=_v1312_weighted_mean(psign[shm]*(y[shm]-core[shm]),sw[shm]) if shm.any() else np.nan
+        alpha=float(ng/(ng+V13_RESIDUAL_PRIOR_GAMES)) if ng else 0.0; shrunk=float(alpha*raw_edge+(1-alpha)*parent_edge) if np.isfinite(raw_edge) else 0.0; fre=[]
+        for fi,(_tr,va) in enumerate(list(folds or [])):
+            va=np.asarray(va,dtype=int); vm=va[valid[va]&rm[va]&(psign[va]!=0)]; vg=len(pd.unique(np.asarray(groups,dtype=object)[vm])) if len(vm) else 0; fe=_v1312_weighted_mean(psign[vm]*(y[vm]-core[vm]),sw[vm]) if len(vm) else np.nan
+            if vg>=V13_RESIDUAL_MIN_FOLD_GAMES and np.isfinite(fe): fre.append({'fold':fi,'games':int(vg),'edge':float(fe)})
+        pos=sum(1 for r in fre if r['edge']>0); need=max(1,int(np.ceil(V13_RESIDUAL_MIN_POSITIVE_FOLD_FRAC*len(fre)))) if fre else 99; frac=pos/len(fre) if fre else 0.0
+        transfer_trust=float(np.clip(max(0.0,shadow_edge)/(max(abs(shrunk),0.005)),0.0,1.0)) if np.isfinite(shadow_edge) else 0.0
+        trust=float(np.clip((0.45*min(1,ng/250)+0.35*frac+0.20*min(1,shg/75))*transfer_trust,0,1)); sc=max(float(np.nanmedian(pstrength[sm])) if sm.any() and np.isfinite(pstrength[sm]).any() else 1.0,0.05)
+        gate=bool(ng>=V13_RESIDUAL_MIN_SELECTION_GAMES and shg>=V13_RESIDUAL_MIN_SHADOW_GAMES and len(fre)>=V13_REGIME_MIN_READY_FOLDS and pos>=need and shrunk>=V13_RESIDUAL_MIN_EDGE and np.isfinite(shadow_edge) and shadow_edge>=0)
+        residual_profiles[regime]={'gate_pass':gate,'selection_games':ng,'shadow_games':shg,'raw_edge':float(raw_edge) if np.isfinite(raw_edge) else np.nan,'parent_edge':float(parent_edge),'shrunk_edge':max(0.0,float(shrunk)),'shadow_edge':float(shadow_edge) if np.isfinite(shadow_edge) else np.nan,'positive_folds':pos,'eligible_folds':len(fre),'required_positive_folds':need,'trust':trust if gate else 0.0,'strength_scale':sc,'fold_records':fre}
+        log_func(f"[V13.1.2-FUNDAMENTAL-RESIDUAL] regime={regime} gate={'PASS' if gate else 'CLOSED'} games={ng} shadow_games={shg} shrunk_edge={shrunk:+.4f} shadow_edge={shadow_edge:+.4f} positive_folds={pos}/{len(fre)} trust={(trust if gate else 0.0):.3f}")
+    residual_gate=any(r.get('gate_pass') for r in residual_profiles.values()); final=bool(regime_weights) or residual_gate; art={"version":V13_FUNDAMENTAL_OVERLAY_VERSION,"status":"PASS" if final else "GATE_CLOSED","gate_pass":final,
+        "weight":max(regime_weights.values()) if regime_weights else 0.0,"regime_weights":regime_weights,"regime_results":regime_results,"residual_profiles":residual_profiles,"residual_gate_pass":residual_gate,"center_prob":center,"match_diagnostics":match_diag,
+        "contract":"AUTOFS_CORE_PRIMARY__MATURITY_TRIGGER__CORE_RESIDUAL__PARTIAL_POOLING__TEMPORAL_TRUST__BOUNDED_STATISTICAL_CORRECTION"}
+    if residual_gate: adjusted,_=_v1312_apply_fundamental_residual(core,fund,maturity,art)
     bundle["fundamental_overlay"]=art
-    log_func(f"[V13.1-FUNDAMENTAL] gate={'PASS' if final else 'CLOSED'} active_regimes={regime_weights}")
+    log_func(f"[V13.1.2-FUNDAMENTAL] gate={'PASS' if final else 'CLOSED'} legacy_active_regimes={regime_weights} residual_active_regimes={[k for k,v in residual_profiles.items() if v.get('gate_pass')]}")
     return bundle,adjusted
 
 
 
 def _ncaaf_v131_apply_full_core(rows: pd.DataFrame, bundle: dict, core_prob, return_diagnostics=False):
-    """Apply V13.1.1 global + maturity calibration, then maturity-qualified Fundamental overlay."""
+    """Apply V13.1.2 global + maturity calibration, then maturity-qualified Fundamental overlay."""
     raw=np.asarray(core_prob,dtype=float).reshape(-1); cal_art=(bundle.get("core_calibration") or {}) if isinstance(bundle,dict) else {}
     fund,maturity,diag=_ncaaf_v13_preoverlay_oof_for_rows(rows,bundle,return_diagnostics=True)
     cal=_ncaaf_v131_apply_core_calibration_bundle(raw,cal_art,maturity=maturity)
@@ -18746,6 +18709,109 @@ def _ncaaf_v13_combine_specialist_probs(base_prob, family_probs: dict, weights: 
 
 
 
+def _v1312_weighted_mean(x,w):
+    x=np.asarray(x,dtype=float); w=np.asarray(w,dtype=float); m=np.isfinite(x)&np.isfinite(w)&(w>0)
+    return float(np.average(x[m],weights=w[m])) if m.any() else np.nan
+
+
+def _v1312_game_count(mask, groups):
+    m=np.asarray(mask,dtype=bool); g=np.asarray(groups,dtype=object)
+    return int(len(pd.unique(g[m]))) if m.any() else 0
+
+
+def _v1312_signal_components(prob, center):
+    p=np.clip(np.asarray(prob,dtype=float),1e-5,1-1e-5); c=float(np.clip(center,1e-5,1-1e-5))
+    ev=_v13_logit(p)-float(_v13_logit([c])[0]); sign=np.sign(ev); strength=np.abs(ev)
+    return sign,strength,ev
+
+
+def _v1312_apply_residual_engine(base_prob, family_probs, labels, centers, engine):
+    """Apply shrunken residual edge only in admitted expert domains, with overlap discount."""
+    base=np.asarray(base_prob,dtype=float).copy(); n=len(base); total=np.zeros(n,dtype=float); details={}; prev={}
+    if not isinstance(engine,dict) or not engine.get('gate_pass',False): return base,details
+    profiles=engine.get('profiles') or {}; corr=engine.get('pairwise_corr') or {}; seq=engine.get('sequence') or ['Market','BigAl','Pathi']
+    fam_cap=float(engine.get('max_family_delta',V13_RESIDUAL_MAX_FAMILY_DELTA)); total_cap=float(engine.get('max_total_delta',V13_RESIDUAL_MAX_TOTAL_DELTA))
+    for fam in seq:
+        pf=np.asarray((family_probs or {}).get(fam,np.full(n,np.nan)),dtype=float); lab=np.asarray((labels or {}).get(fam,np.full(n,'OTHER',dtype=object)),dtype=object)
+        center=float((centers or {}).get(fam,0.5) or 0.5); sign,strength,ev=_v1312_signal_components(pf,center)
+        delta=np.zeros(n,dtype=float); trust=np.zeros(n,dtype=float); edge=np.zeros(n,dtype=float); indep=np.ones(n,dtype=float); active=np.zeros(n,dtype=bool)
+        fprof=profiles.get(fam) or {}
+        for reg,pr in fprof.items():
+            if not isinstance(pr,dict) or not pr.get('gate_pass',False): continue
+            m=(lab.astype(str)==str(reg))&np.isfinite(pf)&np.isfinite(base)&(sign!=0)
+            if not m.any(): continue
+            sc=max(float(pr.get('strength_scale',1.0) or 1.0),1e-4); ss=np.clip(strength[m]/sc,0.0,1.25)
+            tr=float(np.clip(pr.get('trust',0.0) or 0.0,0,1)); ed=float(max(0.0,pr.get('shrunk_edge',0.0) or 0.0))
+            raw=sign[m]*np.minimum(fam_cap,ed*tr*ss)
+            ii=np.ones(np.sum(m),dtype=float)
+            for prevfam,pd in prev.items():
+                rho=float(max(0.0,(corr.get(fam,{}) or {}).get(prevfam,(corr.get(prevfam,{}) or {}).get(fam,0.0)) or 0.0))
+                if rho<=V13_RESIDUAL_CORR_DISCOUNT_START: continue
+                same=np.sign(raw)==np.sign(pd['delta'][m]); discount=min(V13_RESIDUAL_CORR_MAX_DISCOUNT,0.5*rho)
+                ii[same]*=(1.0-discount)
+            raw*=ii; delta[m]=raw; trust[m]=tr; edge[m]=ed; indep[m]=ii; active[m]=True
+        proposed=np.clip(total+delta,-total_cap,total_cap); actual=proposed-total; total=proposed
+        details[fam]={'contribution':actual,'trust':trust,'residual_edge':edge,'independence':indep,'active':active.astype(np.int8),'regime':lab,'prob':pf}
+        prev[fam]={'delta':actual,'evidence':ev}
+    final=np.clip(base+total,0.01,0.99)
+    return final,details
+
+
+def _v1312_fit_residual_specialist_engine(y,base,family_probs,family_shadow_probs,labels_by_family,centers,regime_weights,folds,select_mask,shadow_mask,sw,groups,log_func=print):
+    """Turn validated named methodologies into shrunken conditional residual experts."""
+    y=np.asarray(y,dtype=int); base=np.asarray(base,dtype=float); sw=np.asarray(sw,dtype=float); groups=np.asarray(groups,dtype=object)
+    profiles={}; pair_inputs={}; seq=['Market','BigAl','Pathi']
+    for fam in seq:
+        pf=np.asarray(family_probs.get(fam,np.full(len(y),np.nan)),dtype=float); ps=np.asarray(family_shadow_probs.get(fam,np.full(len(y),np.nan)),dtype=float)
+        labels=np.asarray(labels_by_family.get(fam,np.full(len(y),'OTHER',dtype=object)),dtype=object); center=float(centers.get(fam,0.5) or 0.5)
+        sign,strength,ev=_v1312_signal_components(pf,center); ssign,sstrength,sev=_v1312_signal_components(ps,center)
+        _allowed={
+            "Market":{"ACTIVE_MOVE","KEY_ZONE","KEY_MOVE"},
+            "Pathi":{"SYSTEM_ACTIVE","KEY_NUMBER"},
+            "BigAl":{"SYSTEM_ACTIVE","FAVORITE","ROAD_DOG","HOME_DOG","CONFERENCE_HOME_DOG"},
+        }.get(fam,set())
+        admitted=[str(r) for r in pd.unique(labels) if str(r) in _allowed]; profiles[fam]={}
+        parent_mask=select_mask&np.isfinite(base)&np.isfinite(pf)&(sign!=0)&np.isin(labels.astype(str),admitted)
+        parent_edge=_v1312_weighted_mean(sign[parent_mask]*(y[parent_mask]-base[parent_mask]),sw[parent_mask]) if parent_mask.any() else 0.0
+        pair_inputs[fam]=(ev,labels,admitted)
+        for reg in admitted:
+            rm=labels.astype(str)==str(reg); sm=select_mask&rm&np.isfinite(base)&np.isfinite(pf)&(sign!=0); shm=shadow_mask&rm&np.isfinite(base)&np.isfinite(ps)&(ssign!=0)
+            ng=_v1312_game_count(sm,groups); shg=_v1312_game_count(shm,groups)
+            raw_edge=_v1312_weighted_mean(sign[sm]*(y[sm]-base[sm]),sw[sm]) if sm.any() else np.nan
+            shadow_edge=_v1312_weighted_mean(ssign[shm]*(y[shm]-base[shm]),sw[shm]) if shm.any() else np.nan
+            alpha=float(ng/(ng+V13_RESIDUAL_PRIOR_GAMES)) if ng>0 else 0.0; shrunk=float(alpha*raw_edge+(1-alpha)*parent_edge) if np.isfinite(raw_edge) else 0.0
+            frec=[]
+            for fi,(_tr,va) in enumerate(list(folds or [])):
+                va=np.asarray(va,dtype=int); vm=va[rm[va]&np.isfinite(base[va])&np.isfinite(pf[va])&(sign[va]!=0)]
+                vg=_v1312_game_count(np.isin(np.arange(len(y)),vm),groups) if len(vm) else 0
+                fe=_v1312_weighted_mean(sign[vm]*(y[vm]-base[vm]),sw[vm]) if len(vm) else np.nan
+                if vg>=V13_RESIDUAL_MIN_FOLD_GAMES and np.isfinite(fe): frec.append({'fold':fi,'games':vg,'edge':fe})
+            pos=sum(1 for r in frec if r['edge']>0); need=max(1,int(np.ceil(V13_RESIDUAL_MIN_POSITIVE_FOLD_FRAC*len(frec)))) if frec else 99; frac=(pos/len(frec)) if frec else 0.0
+            sample_trust=min(1.0,ng/250.0); shadow_sample=min(1.0,shg/75.0)
+            transfer_trust=float(np.clip(max(0.0,shadow_edge)/(max(abs(shrunk),0.005)),0.0,1.0)) if np.isfinite(shadow_edge) else 0.0
+            trust=float(np.clip((0.45*sample_trust+0.35*frac+0.20*shadow_sample)*transfer_trust,0,1))
+            sc=float(np.nanmedian(strength[sm])) if sm.any() and np.isfinite(strength[sm]).any() else 1.0; sc=max(sc,0.05)
+            gate=bool(ng>=V13_RESIDUAL_MIN_SELECTION_GAMES and shg>=V13_RESIDUAL_MIN_SHADOW_GAMES and len(frec)>=V13_REGIME_MIN_READY_FOLDS and pos>=need and np.isfinite(shrunk) and shrunk>=V13_RESIDUAL_MIN_EDGE and np.isfinite(shadow_edge) and shadow_edge>=0)
+            profiles[fam][str(reg)]={'gate_pass':gate,'selection_games':ng,'shadow_games':shg,'raw_edge':float(raw_edge) if np.isfinite(raw_edge) else np.nan,'parent_edge':float(parent_edge) if np.isfinite(parent_edge) else 0.0,'shrunk_edge':float(max(0,shrunk)),'shadow_edge':float(shadow_edge) if np.isfinite(shadow_edge) else np.nan,'positive_folds':pos,'eligible_folds':len(frec),'required_positive_folds':need,'trust':trust if gate else 0.0,'strength_scale':sc,'fold_records':frec}
+            log_func(f"[V13.1.2-RESIDUAL-EXPERT] family={fam} regime={reg} gate={'PASS' if gate else 'CLOSED'} games={ng} shadow_games={shg} raw_edge={raw_edge:+.4f} parent_edge={parent_edge:+.4f} shrunk_edge={shrunk:+.4f} shadow_edge={shadow_edge:+.4f} positive_folds={pos}/{len(frec)} trust={(trust if gate else 0.0):.3f}")
+    corr={f:{} for f in seq}
+    for i,a in enumerate(seq):
+        eva,laba,ra=pair_inputs.get(a,(None,None,[]))
+        if eva is None: continue
+        ma=select_mask&np.isfinite(eva)&np.isin(laba.astype(str),[str(x) for x in ra])
+        for b in seq[:i]:
+            evb,labb,rb=pair_inputs.get(b,(None,None,[])); mb=select_mask&np.isfinite(evb)&np.isin(labb.astype(str),[str(x) for x in rb]) if evb is not None else np.zeros(len(y),bool); m=ma&mb
+            rho=float(np.corrcoef(eva[m],evb[m])[0,1]) if int(m.sum())>=50 and np.nanstd(eva[m])>1e-9 and np.nanstd(evb[m])>1e-9 else 0.0
+            corr[a][b]=rho; corr[b][a]=rho
+    engine={'version':V13_RESIDUAL_EXPERT_VERSION,'gate_pass':any(pr.get('gate_pass') for fp in profiles.values() for pr in fp.values()),'profiles':profiles,'pairwise_corr':corr,'sequence':seq,'max_family_delta':V13_RESIDUAL_MAX_FAMILY_DELTA,'max_total_delta':V13_RESIDUAL_MAX_TOTAL_DELTA,'contract':'TRIGGER__CORE_RESIDUAL__PARTIAL_POOLING__TEMPORAL_TRUST__CORRELATION_DISCOUNT__BOUNDED_DELTA'}
+    pred,det=_v1312_apply_residual_engine(base,family_probs,labels_by_family,centers,engine)
+    sm=select_mask&np.isfinite(base)&np.isfinite(pred); sh=shadow_mask&np.isfinite(base)&np.isfinite(pred)
+    bm=_ncaaf_v13_specialist_metrics(y[sm],base[sm],sw[sm]); fm=_ncaaf_v13_specialist_metrics(y[sm],pred[sm],sw[sm]); sb=_ncaaf_v13_specialist_metrics(y[sh],base[sh],sw[sh]); sf=_ncaaf_v13_specialist_metrics(y[sh],pred[sh],sw[sh])
+    engine['selection_metrics']=fm; engine['selection_ll_gain']=bm['logloss']-fm['logloss']; engine['selection_brier_gain']=bm['brier']-fm['brier']; engine['shadow_metrics']=sf; engine['shadow_ll_gain']=sb['logloss']-sf['logloss']; engine['shadow_brier_gain']=sb['brier']-sf['brier']
+    engine['gate_pass']=bool(engine['gate_pass'] and engine['selection_ll_gain']>=0 and engine['selection_brier_gain']>=0 and engine['shadow_ll_gain']>=0 and engine['shadow_brier_gain']>=0)
+    log_func(f"[V13.1.2-RESIDUAL-COMBINE] gate={'PASS' if engine['gate_pass'] else 'CLOSED'} selection_ll_gain={engine['selection_ll_gain']:+.6f} selection_brier_gain={engine['selection_brier_gain']:+.6f} shadow_ll_gain={engine['shadow_ll_gain']:+.6f} shadow_brier_gain={engine['shadow_brier_gain']:+.6f} corr={corr}")
+    return engine
+
 def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X_train: pd.DataFrame,
                                         y_train, folds, shadow_folds=None, sample_weight=None, log_func=print,
                                         base_override=None):
@@ -18977,7 +19043,7 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
                  f"oof_n={sm['n']} auc={sm['auc']:.4f} ll={sm['logloss']:.6f} brier={sm['brier']:.6f} "
                  f"ece={sm['ece']:.4f} reliability={sm['reliability']:.6f} center={family_centers[fam]:.4f} sanity={'PASS' if _sanity_pass else 'CLOSED'}")
 
-    # V13.1.1 regime-specific sequential admission. A family may be globally zero
+    # V13.1.2 regime-specific sequential admission. A family may be globally zero
     # yet active in a small predeclared context that independently clears rolling
     # and later-shadow proper-score gates. Authority remains capped conservatively.
     best_weights={"Market":0.0,"Pathi":0.0,"BigAl":0.0}; regime_weights={"Market":{},"Pathi":{},"BigAl":{}}
@@ -19051,6 +19117,19 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
         "shadow_ll_gain":sh_ll,"shadow_brier_gain":sh_br,"weights":best_weights,"regime_weights":regime_weights,"centers":family_centers,"regime_scales":regime_scales,
         "families":family_artifacts,"sequential_records":sequential_records,"selection_oof_rows":int(selection_base_ok.sum()),"shadow_rows":int(shadow_eval.sum()),"sequence":list(V13_SPECIALIST_SEQUENCE),
         "contract":"AUTOFS_CORE_PRIMARY__PREDECLARED_REGIME_MARKET_BIGAL_PATHI__FAMILY_AUTOFs__STABILITY_FILTER__NESTED_FORWARD_AND_DISJOINT_SHADOW_PER_REGIME__CENTERED_LOGIT_EVIDENCE__ZERO_OUTSIDE_PROVEN_REGIMES__20PCT_MAX_FAMILY_SUM"}
+    # V13.1.2: the regime gate establishes eligibility; the residual engine decides
+    # how much of the calibrated core's historical miss is trustworthy enough to use.
+    _labels_for_residual={f:_ncaaf_v131_family_regime_labels(train_rows,f,maturity) for f in ("Market","Pathi","BigAl")}
+    _residual_engine=_v1312_fit_residual_specialist_engine(
+        y,base,family_probs,family_shadow_probs,_labels_for_residual,family_centers,regime_weights,
+        folds,select_mask,shadow_mask,sw_spec,_spec_groups,log_func=log_func
+    )
+    artifact["residual_engine"]=_residual_engine
+    artifact["legacy_regime_weight_gate_pass"]=bool(final_gate)
+    artifact["gate_pass"]=bool(_residual_engine.get("gate_pass",False))
+    artifact["final_gate_pass"]=bool(_residual_engine.get("gate_pass",False))
+    artifact["status"]="PASS" if artifact["final_gate_pass"] else "GATE_CLOSED"
+    final_gate=artifact["final_gate_pass"]
     bundle["specialist_overlays"]=artifact
     if isinstance(bundle.get("production_preview"),dict):
         bundle["production_preview"]["specialist_overlay_gate_pass"]=final_gate; bundle["production_preview"]["specialist_overlay_weights"]=dict(best_weights); bundle["production_preview"]["specialist_overlay_regime_weights"]=regime_weights; bundle["production_preview"]["specialist_overlay_centers"]=dict(family_centers); bundle["production_preview"]["specialist_overlay_temperature"]=float(post_temperature)
@@ -19059,7 +19138,7 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
 
 
 def _ncaaf_v13_predict_specialist_overlays(rows: pd.DataFrame, base_prob, overlay: dict, maturity=None):
-    """Apply only specialist regimes that passed their own forward + shadow gates."""
+    """Apply validated residual experts; retain V13.1.1 weighted overlay as artifact fallback."""
     n=len(rows); base=np.asarray(base_prob,dtype=float); family_probs={}; info={}
     if not isinstance(overlay,dict) or not overlay.get("gate_pass",False): return base,{"gate_pass":False,"family_probs":family_probs,"contributions":{}}
     centers=overlay.get("centers") or {}; rweights=overlay.get("regime_weights") or {}; labels={}
@@ -19070,16 +19149,21 @@ def _ncaaf_v13_predict_specialist_overlays(rows: pd.DataFrame, base_prob, overla
                 xx=rows.reindex(columns=feats).apply(pd.to_numeric,errors="coerce").replace([np.inf,-np.inf],np.nan).fillna(0.0); pf=np.asarray(mdl.predict_proba(xx)[:,1],dtype=float)
             except Exception as e: info[fam+"_error"]=str(e)
         family_probs[fam]=pf; labels[fam]=_ncaaf_v131_family_regime_labels(rows,fam,maturity)
+    engine=overlay.get('residual_engine') or {}
+    if isinstance(engine,dict) and engine.get('gate_pass',False):
+        final,det=_v1312_apply_residual_engine(base,family_probs,labels,centers,engine); contributions={}; actual_weights={}
+        for fam in ("Market","Pathi","BigAl"):
+            dd=det.get(fam) or {}; contributions[fam]=np.asarray(dd.get('contribution',np.zeros(n)),dtype=float); actual_weights[fam]=np.asarray(dd.get('trust',np.zeros(n)),dtype=float)
+        info.update({"gate_pass":True,"mode":"RESIDUAL_EXPERT","family_probs":family_probs,"contributions":contributions,"weights":actual_weights,"regimes":labels,"centers":centers,"residual_details":det,"temperature":1.0,"pretemperature_prob":final,"temperature_contribution":np.zeros(n)})
+        return final,info
     final_raw=_ncaaf_v13_combine_specialist_probs(base,family_probs,overlay.get("weights") or {},maturity=maturity,centers=centers,rows=rows,regime_weights=rweights,regime_labels=labels)
     temperature=max(1.0,float(overlay.get("post_temperature",1.0) or 1.0)); final=_ncaaf_v13_apply_temperature(final_raw,temperature); contributions={}; actual_weights={}
     for fam in ("Market","Pathi","BigAl"):
         rw=(rweights.get(fam) or {}) if isinstance(rweights,dict) else {}; warr=np.asarray([float(rw.get(str(x),0.0) or 0.0) for x in labels[fam]],dtype=float) if rw else np.full(n,float((overlay.get("weights") or {}).get(fam,0.0) or 0.0))
         one=_ncaaf_v13_combine_specialist_probs(base,{fam:family_probs[fam]},{fam:0.0},maturity=maturity,centers=centers,rows=rows,regime_weights={fam:rw},regime_labels={fam:labels[fam]}) if rw else _ncaaf_v13_combine_specialist_probs(base,{fam:family_probs[fam]},{fam:float((overlay.get("weights") or {}).get(fam,0.0) or 0.0)},maturity=maturity,centers=centers)
         contributions[fam]=one-base; actual_weights[fam]=warr
-    info.update({"gate_pass":True,"family_probs":family_probs,"contributions":contributions,"weights":actual_weights,"regimes":labels,"centers":centers,"temperature":temperature,"pretemperature_prob":final_raw,"temperature_contribution":np.asarray(final-final_raw,dtype=float)})
+    info.update({"gate_pass":True,"mode":"LEGACY_REGIME_WEIGHT","family_probs":family_probs,"contributions":contributions,"weights":actual_weights,"regimes":labels,"centers":centers,"temperature":temperature,"pretemperature_prob":final_raw,"temperature_contribution":np.asarray(final-final_raw,dtype=float)})
     return final,info
-
-
 
 
 def _ncaaf_v13_full_recipe_for_rows(rows: pd.DataFrame, bundle: dict, core_prob=None, p_core=None):
@@ -19163,14 +19247,14 @@ def _ncaaf_v13_compare_v12_holdout(hold_rows: pd.DataFrame, y_hold, p_v12, bundl
                 "coverage_gate_pass":coverage_ok,"coverage_by_season":_coverage,
                 "status":"INSUFFICIENT","promotion_gate_pass":False}
         log_func(f"[V13.1-CORE-RECIPE] status=INSUFFICIENT matched_rows={int(matched.sum())}/{len(d)} "
-                 f"match_rate={match_rate:.1%} matched_physical_games={matched_games} final_recipe=V13_1_1")
+                 f"match_rate={match_rate:.1%} matched_physical_games={matched_games} final_recipe=V13_1_2")
         return result
 
     m12=_ncaaf_v13_weighted_metrics(yy[matched],p12[matched],phys[matched])
     m13=_ncaaf_v13_weighted_metrics(yy[matched],p13[matched],phys[matched])
     mb=_ncaaf_v13_weighted_metrics(yy[matched],p13_base[matched],phys[matched])
     mc=_ncaaf_v13_weighted_metrics(yy[matched],p13_core[matched],phys[matched])
-    boot=_ncaaf_v13_paired_model_bootstrap(yy[matched],p12[matched],p13[matched],phys[matched],reps=800,seed=13160)
+    boot=_ncaaf_v13_paired_model_bootstrap(yy[matched],p12[matched],p13[matched],phys[matched],reps=V13_PROMOTION_BOOTSTRAP_REPS,seed=13160)
     ll_gain=float(m12["logloss"]-m13["logloss"]); br_gain=float(m12["brier"]-m13["brier"])
     ll_ci=(boot.get("ll_improvement_ci95") or [np.nan,np.nan]); br_ci=(boot.get("brier_improvement_ci95") or [np.nan,np.nan])
     cal12=_ncaaf_v13_weighted_calibration_diagnostics(yy[matched],p12[matched],phys[matched])
@@ -19213,7 +19297,7 @@ def _ncaaf_v13_compare_v12_holdout(hold_rows: pd.DataFrame, y_hold, p_v12, bundl
         except Exception:
             market_met=None
 
-    log_func(f"[V13.1-CORE-RECIPE] status=DEVELOPMENT_ONLY comparator={comparator_name} final_recipe=V13_1_1 "
+    log_func(f"[V13.1-CORE-RECIPE] status=DEVELOPMENT_ONLY comparator={comparator_name} final_recipe=V13_1_2 "
              f"matched_rows={m13['n']} matched_physical_games={m13['games']} match_rate={match_rate:.1%} weighting=EQUAL_PHYSICAL_GAME "
              f"comparator_auc={m12['auc']:.4f} v13_raw_core_auc={mb['auc']:.4f} v13_core_auc={mc['auc']:.4f} v13_final_auc={m13['auc']:.4f} "
              f"comparator_ll={m12['logloss']:.6f} v13_ll={m13['logloss']:.6f} ll_improvement={ll_gain:+.6f} "
@@ -19224,8 +19308,8 @@ def _ncaaf_v13_compare_v12_holdout(hold_rows: pd.DataFrame, y_hold, p_v12, bundl
     log_func(f"[V13.1-CORE-RECIPE-CI] physical_game_clustered=TRUE ll_improvement_ci95={ll_ci} "
              f"brier_improvement_ci95={br_ci} final_proof_status=REQUIRES_UNTOUCHED_FORWARD")
     log_func(
-        f"[V13.1-CORE-RECIPE-PROB-QUALITY] weighting=EQUAL_PHYSICAL_GAME "
-        f"comparator_ece={cal12['ece']:.5f} v13_raw_core_ece={calbase['ece']:.5f} v13_final_ece={cal13['ece']:.5f} "
+        f"[V13.1.2-CORE-RECIPE-PROB-QUALITY] weighting=EQUAL_PHYSICAL_GAME "
+        f"comparator_ece={cal12['ece']:.5f} v13_raw_core_ece={calbase['ece']:.5f} v13_final_ece={cal13['ece']:.5f} comparator_ici={cal12.get('ici_smooth',np.nan):.5f} v13_ici={cal13.get('ici_smooth',np.nan):.5f} "
         f"comparator_reliability={cal12['reliability']:.6f} v13_reliability={cal13['reliability']:.6f} "
         f"comparator_resolution={cal12['resolution']:.6f} v13_resolution={cal13['resolution']:.6f} "
         f"comparator_cal_intercept={cal12['calibration_intercept']:+.4f} v13_cal_intercept={cal13['calibration_intercept']:+.4f} "
@@ -19233,6 +19317,24 @@ def _ncaaf_v13_compare_v12_holdout(hold_rows: pd.DataFrame, y_hold, p_v12, bundl
         f"calibration_noninferior={calibration_noninferior} auc_drop={auc_drop:+.4f} auc_noninferior={auc_noninferior} "
         f"coverage_noninferior={coverage_ok} match_rate={match_rate:.1%}"
     )
+
+    # Evaluation-only horizon and active-expert diagnostics. These never tune weights.
+    _hz=pd.to_numeric(d.get("Horizon_Hours",d.get("V13_Horizon_Hours",pd.Series(np.nan,index=d.index))),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    if not np.isfinite(_hz).any() and "Snapshot_Timestamp" in d.columns:
+        _gs=pd.to_datetime(d.get("Game_Start",d.get("Commence_Time",pd.Series(pd.NaT,index=d.index))),errors="coerce",utc=True); _ss=pd.to_datetime(d["Snapshot_Timestamp"],errors="coerce",utc=True); _hz=((_gs-_ss).dt.total_seconds()/3600.0).to_numpy(dtype=float)
+    for _hn,_hm in (("NEAR_1H",np.isfinite(_hz)&(_hz>=0)&(_hz<=2)),("NEAR_6H",np.isfinite(_hz)&(_hz>2)&(_hz<=12)),("NEAR_24H",np.isfinite(_hz)&(_hz>12)&(_hz<=36)),("EARLY_GT36H",np.isfinite(_hz)&(_hz>36))):
+        _x=matched&_hm
+        if int(_x.sum())>=20:
+            _a=_ncaaf_v13_weighted_metrics(yy[_x],p12[_x],phys[_x]); _b=_ncaaf_v13_weighted_metrics(yy[_x],p13[_x],phys[_x]); _ca=_ncaaf_v13_weighted_calibration_diagnostics(yy[_x],p12[_x],phys[_x]); _cb=_ncaaf_v13_weighted_calibration_diagnostics(yy[_x],p13[_x],phys[_x]); log_func(f"[V13.1.2-HORIZON] bucket={_hn} games={_b['games']} ll_gain={_a['logloss']-_b['logloss']:+.6f} brier_gain={_a['brier']-_b['brier']:+.6f} ece_gain={_ca['ece']-_cb['ece']:+.5f} ici_gain={_ca.get('ici_smooth',np.nan)-_cb.get('ici_smooth',np.nan):+.5f}")
+    try:
+        _rd=(overlay_info.get("residual_details") or {}) if isinstance(overlay_info,dict) else {}
+        for _fam in ("Market","BigAl","Pathi"):
+            _dd=_rd.get(_fam) or {}; _aa=np.asarray(_dd.get("active",np.zeros(len(d))),dtype=int)>0; _rr=np.asarray(_dd.get("regime",np.full(len(d),"OTHER",dtype=object)),dtype=object)
+            for _reg in pd.unique(_rr[_aa]) if _aa.any() else []:
+                _x=matched&_aa&(_rr.astype(str)==str(_reg))
+                if int(_x.sum())>=20:
+                    _a=_ncaaf_v13_weighted_metrics(yy[_x],p12[_x],phys[_x]); _b=_ncaaf_v13_weighted_metrics(yy[_x],p13[_x],phys[_x]); log_func(f"[V13.1.2-ACTIVE-EXPERT-HOLDOUT] family={_fam} regime={_reg} games={_b['games']} ll_gain={_a['logloss']-_b['logloss']:+.6f} brier_gain={_a['brier']-_b['brier']:+.6f}")
+    except Exception as _segerr: log_func(f"[V13.1.2-ACTIVE-EXPERT-HOLDOUT] unavailable={_segerr}")
 
     return {
         "comparator_name":str(comparator_name),"v12_challenger":m12,"comparator_metrics":m12,
@@ -26914,7 +27016,7 @@ def train_sharp_model_from_bq(
         _assert_autofs_propagation(autofs_situation, "situation")
         _assert_autofs_propagation(autofs_value, "value")
 
-        # V13.1.1: prepare isolated chronological folds now, but defer fitting
+        # V13.1.2: prepare isolated chronological folds now, but defer fitting
         # Market/Pathi/BigAl until the Outcome AutoFS Core OOF probability exists.
         # This lets every specialist prove incremental value over V13 + admitted Core.
         _v13_spec_folds=[]; _v13_spec_shadow=[]
@@ -28608,7 +28710,7 @@ def train_sharp_model_from_bq(
             regime_residual_model=None
             REGIME_RESIDUAL_ROUTE={"enabled":False,"gate_pass":False,"features":[],"weight":0.0,"cap":0.02,"status":"error"}
 
-        # V13.1.1 integration order:
+        # V13.1.2 integration order:
         #   Outcome AutoFS -> cross-fit probability calibration -> optional fundamental
         #   fair-line correction -> sequential Market/BigAl/Pathi specialists.
         # The legacy Meta score is intentionally outside the V13 probability path.
@@ -30599,7 +30701,7 @@ def train_sharp_model_from_bq(
                     _min_stage=max(500,int(np.ceil(0.80*len(y_hold_vec))))
                     if int(_p13_ok.sum())>=_min_stage:
                         _artifact_hold_prob=np.asarray(_p13_hold,dtype=float)
-                        _artifact_probability_source="V13_1_1"
+                        _artifact_probability_source="V13_1_2"
                         print(f"[V13.1-ARTIFACT-STAGE] status=READY rows={int(_p13_ok.sum())}/{len(y_hold_vec)} core_source=RAW_OUTCOME_AUTOFS outer_holdout_recipe_tuning=FALSE")
                     else:
                         print(f"[V13.1-ARTIFACT-STAGE] status=CLOSED reason=INSUFFICIENT_FINAL_PROB_COVERAGE rows={int(_p13_ok.sum())}/{len(y_hold_vec)} required={_min_stage}")
@@ -30607,8 +30709,26 @@ def train_sharp_model_from_bq(
                     _v13_log_exception(print,"[V13.1-ARTIFACT-STAGE] fallback=LEGACY_META error",_artifact_v13_err)
             else:
                 print("[V13.1-ARTIFACT-STAGE] status=CLOSED reason=INTERNAL_TRAINING_GATE")
+            _promotion_phys=(hold_meta_df.get("Merge_Key_Short",hold_meta_df.get("Game_Key",pd.Series(_promotion_keys,index=hold_meta_df.index))).astype(str).str.lower().str.strip().to_numpy(dtype=object))
+            _promotion_horizon=pd.to_numeric(hold_meta_df.get("Horizon_Hours",hold_meta_df.get("V13_Horizon_Hours",pd.Series(np.nan,index=hold_meta_df.index))),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+            if not np.isfinite(_promotion_horizon).any() and "Snapshot_Timestamp" in hold_meta_df.columns:
+                _gs=pd.to_datetime(hold_meta_df.get("Game_Start",hold_meta_df.get("Commence_Time",pd.Series(pd.NaT,index=hold_meta_df.index))),errors="coerce",utc=True)
+                _ss=pd.to_datetime(hold_meta_df["Snapshot_Timestamp"],errors="coerce",utc=True)
+                _promotion_horizon=((_gs-_ss).dt.total_seconds()/3600.0).to_numpy(dtype=float)
+            _promotion_segments=np.full(len(y_hold_vec),"CORE_ONLY",dtype=object)
+            try:
+                if _artifact_probability_source=="V13_1_2" and isinstance(_p13_info,dict):
+                    _si=_p13_info.get("specialist_info") or {}; _bits=[[] for _ in range(len(y_hold_vec))]
+                    _fi=_p13_info.get("fundamental_info") or {}; _fa=np.asarray(_fi.get("active",np.zeros(len(y_hold_vec))),dtype=int); _fr=np.asarray(_fi.get("regime",np.full(len(y_hold_vec),"UNKNOWN",dtype=object)),dtype=object)
+                    for _i in np.where(_fa>0)[0]: _bits[_i].append("FUND:"+str(_fr[_i]))
+                    for _fam in ("Market","BigAl","Pathi"):
+                        _dd=((_si.get("residual_details") or {}).get(_fam) or {}); _aa=np.asarray(_dd.get("active",np.zeros(len(y_hold_vec))),dtype=int); _rr=np.asarray(_dd.get("regime",np.full(len(y_hold_vec),"OTHER",dtype=object)),dtype=object)
+                        for _i in np.where(_aa>0)[0]: _bits[_i].append(_fam.upper()+":"+str(_rr[_i]))
+                    _promotion_segments=np.asarray(["+".join(x) if x else "CORE_ONLY" for x in _bits],dtype=object)
+            except Exception as _segerr: print(f"[V13.1.2-SEGMENT-PAYLOAD] fallback=CORE_ONLY error={_segerr}")
             artifact_holdout_eval = _promotion_eval_payload(
-                _promotion_keys, y_hold_vec, _artifact_hold_prob
+                _promotion_keys, y_hold_vec, _artifact_hold_prob, physical_game_keys=_promotion_phys,
+                horizon_hours=_promotion_horizon, segment_labels=_promotion_segments
             )
             print(
                 f"[PROMOTION-HOLDOUT-CONTRACT] key_version={PROMOTION_ROW_KEY_VERSION} "
@@ -30715,6 +30835,7 @@ def train_sharp_model_from_bq(
                     "fundamental_cover_oof_metrics": (((ncaaf_v13_value_architecture or {}).get("fundamental_cover_calibrator") or {}).get("oof_metrics", {})) if isinstance(ncaaf_v13_value_architecture, dict) else {},
                     "fundamental_cover_bootstrap": (((ncaaf_v13_value_architecture or {}).get("fundamental_cover_calibrator") or {}).get("bootstrap", {})) if isinstance(ncaaf_v13_value_architecture, dict) else {},
                     "v13_core_recipe_development_comparison": (_v13_v12_head_to_head if isinstance(_v13_v12_head_to_head,dict) else {}),
+                    "game_balanced_holdout_validation": (_v13_v12_head_to_head if isinstance(_v13_v12_head_to_head,dict) else {}),
                     "v12_v13_development_comparison": (_v13_v12_head_to_head if isinstance(_v13_v12_head_to_head,dict) else {}),
                     "research_gate_pass": bool((((ncaaf_v13_value_architecture or {}).get("cover_calibrator") or {}).get("research_gate_pass", False))) if isinstance(ncaaf_v13_value_architecture, dict) else False,
                     "v13_internal_ready_gate_pass": bool((((ncaaf_v13_value_architecture or {}).get("v13_1_internal_ready") or {}).get("gate_pass", False))) if isinstance(ncaaf_v13_value_architecture, dict) else False,
@@ -30728,6 +30849,7 @@ def train_sharp_model_from_bq(
                     "fundamental_overlay_weight": float((((ncaaf_v13_value_architecture or {}).get("fundamental_overlay") or {}).get("weight", 0.0)) or 0.0) if isinstance(ncaaf_v13_value_architecture, dict) else 0.0,
                     "specialist_overlay_gate_pass": bool((((ncaaf_v13_value_architecture or {}).get("specialist_overlays") or {}).get("final_gate_pass", False))) if isinstance(ncaaf_v13_value_architecture, dict) else False,
                     "specialist_overlay_weights": (((ncaaf_v13_value_architecture or {}).get("specialist_overlays") or {}).get("weights", {})) if isinstance(ncaaf_v13_value_architecture, dict) else {},
+                    "specialist_residual_engine": (((ncaaf_v13_value_architecture or {}).get("specialist_overlays") or {}).get("residual_engine", {})) if isinstance(ncaaf_v13_value_architecture, dict) else {},
                     "specialist_overlay_regime_scales": (((ncaaf_v13_value_architecture or {}).get("specialist_overlays") or {}).get("regime_scales", {})) if isinstance(ncaaf_v13_value_architecture, dict) else {},
                     "specialist_overlay_features": ({
                         _fam: list(
@@ -30931,7 +31053,7 @@ def train_sharp_model_from_bq(
                     "fundamental_overlay_gate_pass": bool((((ncaaf_v13_value_architecture or {}).get("fundamental_overlay") or {}).get("gate_pass",False))) if isinstance(ncaaf_v13_value_architecture,dict) else False,
                     "fundamental_overlay_weight": float((((ncaaf_v13_value_architecture or {}).get("fundamental_overlay") or {}).get("weight",0.0)) or 0.0) if isinstance(ncaaf_v13_value_architecture,dict) else 0.0,
                     "specialist_overlay_gate_pass": bool(((ncaaf_v13_value_architecture or {}).get("specialist_overlays") or {}).get("final_gate_pass",False)) if isinstance(ncaaf_v13_value_architecture,dict) else False,
-                    "probability_recipe": "OUTCOME_AUTOFS_PRIMARY__CORE_CALIBRATION__FUNDAMENTAL__SEQUENTIAL_MARKET_BIGAL_PATHI",
+                    "probability_recipe": "OUTCOME_AUTOFS_PRIMARY__CORE_CALIBRATION__RESIDUAL_FUNDAMENTAL__RESIDUAL_MARKET_BIGAL_PATHI",
                 },
                 "ncaaf_stat_protected_route": dict(_stat_route_cfg),
                 "system_memory_protected_route": dict(_system_memory_route_cfg),
@@ -31028,7 +31150,7 @@ def train_sharp_model_from_bq(
                         "fundamental_overlay_gate_pass": bool((((ncaaf_v13_value_architecture or {}).get("fundamental_overlay") or {}).get("gate_pass",False))) if isinstance(ncaaf_v13_value_architecture,dict) else False,
                         "fundamental_overlay_weight": float((((ncaaf_v13_value_architecture or {}).get("fundamental_overlay") or {}).get("weight",0.0)) or 0.0) if isinstance(ncaaf_v13_value_architecture,dict) else 0.0,
                         "specialist_overlay_gate_pass": bool(((ncaaf_v13_value_architecture or {}).get("specialist_overlays") or {}).get("final_gate_pass",False)) if isinstance(ncaaf_v13_value_architecture,dict) else False,
-                        "probability_recipe": "OUTCOME_AUTOFS_PRIMARY__CORE_CALIBRATION__FUNDAMENTAL__SEQUENTIAL_MARKET_BIGAL_PATHI",
+                        "probability_recipe": "OUTCOME_AUTOFS_PRIMARY__CORE_CALIBRATION__RESIDUAL_FUNDAMENTAL__RESIDUAL_MARKET_BIGAL_PATHI",
                     },
                     "ncaaf_stat_protected_route": dict(_stat_route_cfg),
                     "system_memory_protected_route": dict(_system_memory_route_cfg),
@@ -33543,7 +33665,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 if 'v13_promoted' in _scoring:
                     _ver = str(r.get('V13_Version', '') or '').strip()
                     # Keep the table compact even when V13_Version contains a dated build label.
-                    return 'V13.1.1' if ('13.1.1' in _ver or '13.1.0' in _ver or not _ver) else _ver
+                    return 'V13.1.2' if ('13.1.2' in _ver or '13.1.1' in _ver or '13.1.0' in _ver or not _ver) else _ver
                 if _market in ('spread', 'spreads') and pd.notna(r.get('V12_Legacy_Model_Prob', np.nan)):
                     return 'V12 Champion'
                 return 'Current Champion'
@@ -33552,15 +33674,21 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 _scoring = str(r.get('Scoring_Market', '') or '').strip().lower()
                 if 'v13_promoted' not in _scoring:
                     return 'Not driving UI'
-                _parts = ['AutoFS Core PRIMARY']
+                _parts = ['AutoFS Core PRIMARY · residual experts']
                 _cal = str(r.get('V13_Core_Calibration_Method', 'identity') or 'identity').upper()
                 _cal_active = pd.to_numeric(pd.Series([r.get('V13_Core_Calibration_Active', 0)]), errors='coerce').fillna(0).iloc[0] > 0
                 _parts.append(f'Cal {_cal}' if _cal_active else 'Cal IDENTITY')
+                _is_residual_v = '13.1.2' in str(r.get('V13_Version', '') or '')
                 _f_active = pd.to_numeric(pd.Series([r.get('V13_Fundamental_Overlay_Active', 0)]), errors='coerce').fillna(0).iloc[0] > 0
                 _f_weight = pd.to_numeric(pd.Series([r.get('V13_Fundamental_Overlay_Weight', 0.0)]), errors='coerce').fillna(0).iloc[0]
                 if _f_active and float(_f_weight) > 0:
                     _freg = str(r.get('V13_Fundamental_Overlay_Regime', '') or '').strip()
-                    _parts.append(f'Fundamental ON ({float(_f_weight)*100:.1f}%{" · " + _freg if _freg else ""})')
+                    if _is_residual_v:
+                        _edge = pd.to_numeric(pd.Series([r.get('V13_Fundamental_Residual_Edge', 0.0)]), errors='coerce').fillna(0).iloc[0]
+                        _trust = pd.to_numeric(pd.Series([r.get('V13_Fundamental_Residual_Trust', _f_weight)]), errors='coerce').fillna(0).iloc[0]
+                        _parts.append(f'Fundamental ON (Trust {float(_trust)*100:.0f}% · Edge {float(_edge)*100:+.1f}pp{" · " + _freg if _freg else ""})')
+                    else:
+                        _parts.append(f'Fundamental ON ({float(_f_weight)*100:.1f}%{" · " + _freg if _freg else ""})')
                 else:
                     _parts.append('Fundamental OFF')
                 for _fam, _label in [('Market','Market'), ('BigAl','Big Al'), ('Pathi','Pathi')]:
@@ -33568,7 +33696,14 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                     _weight = pd.to_numeric(pd.Series([r.get(f'V13_{_fam}_Overlay_Weight', 0.0)]), errors='coerce').fillna(0).iloc[0]
                     if _active and float(_weight) > 0:
                         _reg = str(r.get(f'V13_{_fam}_Overlay_Regime', '') or '').strip()
-                        _parts.append(f'{_label} ON ({float(_weight)*100:.1f}%{" · " + _reg if _reg else ""})')
+                        if _is_residual_v:
+                            _edge = pd.to_numeric(pd.Series([r.get(f'V13_{_fam}_Residual_Edge', 0.0)]), errors='coerce').fillna(0).iloc[0]
+                            _trust = pd.to_numeric(pd.Series([r.get(f'V13_{_fam}_Residual_Trust', _weight)]), errors='coerce').fillna(0).iloc[0]
+                            _ind = pd.to_numeric(pd.Series([r.get(f'V13_{_fam}_Independence', 1.0)]), errors='coerce').fillna(1).iloc[0]
+                            _ind_txt = f' · Indep {float(_ind)*100:.0f}%' if float(_ind) < 0.999 else ''
+                            _parts.append(f'{_label} ON (Trust {float(_trust)*100:.0f}% · Edge {float(_edge)*100:+.1f}pp{_ind_txt}{" · " + _reg if _reg else ""})')
+                        else:
+                            _parts.append(f'{_label} ON ({float(_weight)*100:.1f}%{" · " + _reg if _reg else ""})')
                     else:
                         _parts.append(f'{_label} OFF')
                 return ' | '.join(_parts)
