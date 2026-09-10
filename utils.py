@@ -5863,6 +5863,22 @@ def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
             or (bundle.get("polarity", +1) == -1)
         )
 
+    # HF3 parity contract: new artifacts explicitly declare the probability blend
+    # space used during OOF weight selection. Legacy artifacts remain linear so the
+    # live V12 champion cannot change merely because newer code is deployed.
+    blend_space = str(bundle.get("blend_space", "linear") if isinstance(bundle, dict) else "linear").lower().strip()
+
+    def _blend_two_probs(p_left, p_right, weight):
+        a = np.clip(np.asarray(p_left, dtype=float).ravel(), eps, 1.0 - eps)
+        b = np.clip(np.asarray(p_right, dtype=float).ravel(), eps, 1.0 - eps)
+        wgt = float(np.clip(weight, 0.0, 1.0))
+        if blend_space == "logit":
+            za = np.log(a / (1.0 - a))
+            zb = np.log(b / (1.0 - b))
+            z = wgt * za + (1.0 - wgt) * zb
+            return 1.0 / (1.0 + np.exp(-np.clip(z, -30.0, 30.0)))
+        return wgt * a + (1.0 - wgt) * b
+
     # Tuple/list bundle
     if isinstance(bundle, (tuple, list)) and len(bundle) >= 1 and model is None and iso is None:
         model = bundle[0]
@@ -5887,7 +5903,7 @@ def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
                 p_raw = _predict_one(m_single, None, X)
             else:
                 if pL is not None and pA is not None and len(pL) == len(pA):
-                    p_raw = (w * pL + (1.0 - w) * pA)
+                    p_raw = _blend_two_probs(pL, pA, w)
                 else:
                     p_raw = pL if pL is not None else pA
 
@@ -5920,7 +5936,7 @@ def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
             pA = _predict_one(mA, cA, X) if (mA is not None or cA is not None) else None
 
             if pL is not None and pA is not None and len(pL) == len(pA):
-                p = (w * np.asarray(pL, float) + (1.0 - w) * np.asarray(pA, float)).ravel()
+                p = _blend_two_probs(pL, pA, w).ravel()
                 p = np.clip(p, eps, 1 - eps)
                 p = _apply_flip_if_needed(p)  # ✅ flip after blend (already calibrated heads)
                 return np.clip(p, eps, 1 - eps)
@@ -10114,26 +10130,6 @@ def apply_blended_sharp_score(
             df_canon = add_ai_betting_brain_features(df_canon)
             if len(df_canon) != _brain_rows_before:
                 raise RuntimeError(f"runtime Brain attach changed row count {_brain_rows_before}->{len(df_canon)}")
-            # V13 NCAAF-spreads scorer. When its validated artifact is published,
-            # promotion override, V13 probability becomes the active production
-            # probability while V12 is preserved for rollback/comparison.
-            if str(sport).upper().strip() == "NCAAF" and str(mkt).lower().strip() == "spreads":
-                df_canon = apply_ncaaf_v13_shadow(
-                    df_canon,
-                    bundle.get("ncaaf_v13_value_architecture") if isinstance(bundle, dict) else None,
-                )
-                _v13_active = int(pd.to_numeric(df_canon.get("V13_Active"), errors="coerce").fillna(0).sum())
-                _v13_prob = pd.to_numeric(df_canon.get("V13_Cover_Prob"), errors="coerce")
-                _v13_edge = pd.to_numeric(df_canon.get("V13_Fundamental_Edge_Points"), errors="coerce")
-                if str(os.getenv("V13_PROMOTION_ENABLED","1")).strip().lower() in {"0","false","no","off"}:
-                    logger.warning("[V13-RUNTIME] promotion disabled by V13_PROMOTION_ENABLED=0; using embedded V12 legacy probability")
-                logger.info(
-                    "[V13-RUNTIME] active=%d/%d mean_prob=%s mean_abs_fund_edge=%s version=%s",
-                    _v13_active, len(df_canon),
-                    f"{float(_v13_prob.mean()):.4f}" if _v13_prob.notna().any() else "nan",
-                    f"{float(_v13_edge.abs().mean()):.3f}" if _v13_edge.notna().any() else "nan",
-                    NCAAF_V13_VERSION,
-                )
             if str(sport).upper().strip() == "NCAAF":
                 _ns_active = int(pd.to_numeric(df_canon.get("NCAAF_Stat_Active"), errors="coerce").fillna(0).sum())
                 _ns_trust = float(pd.to_numeric(df_canon.get("NCAAF_Stat_Trust"), errors="coerce").fillna(0).mean())
@@ -10268,6 +10264,30 @@ def apply_blended_sharp_score(
                     df_canon['Scoring_Market']       = mkt
                 else:
                     outcome_preds = np.clip(np.asarray(outcome_preds, dtype=float).ravel(), 1e-6, 1-1e-6)
+                    # HF3: the calibrated Raw Outcome AutoFS probability is a dedicated
+                    # V13 core-bridge input. Score V13 only after Outcome exists so live
+                    # serving matches the training recipe: V13 base -> AutoFS Core ->
+                    # validation-gated Market/Pathi/BigAl specialists.
+                    if str(sport).upper().strip() == "NCAAF" and str(mkt).lower().strip() == "spreads":
+                        df_canon["V13_AutoFS_Core_Prob"] = outcome_preds.astype("float32")
+                        df_canon = apply_ncaaf_v13_shadow(
+                            df_canon,
+                            bundle.get("ncaaf_v13_value_architecture") if isinstance(bundle, dict) else None,
+                        )
+                        _v13_active = int(pd.to_numeric(df_canon.get("V13_Active"), errors="coerce").fillna(0).sum())
+                        _v13_prob = pd.to_numeric(df_canon.get("V13_Cover_Prob"), errors="coerce")
+                        _v13_edge = pd.to_numeric(df_canon.get("V13_Fundamental_Edge_Points"), errors="coerce")
+                        _v13_core_w = pd.to_numeric(df_canon.get("V13_AutoFS_Core_Weight"), errors="coerce").fillna(0.0)
+                        if str(os.getenv("V13_PROMOTION_ENABLED","1")).strip().lower() in {"0","false","no","off"}:
+                            logger.warning("[V13-RUNTIME] promotion disabled by V13_PROMOTION_ENABLED=0; using embedded V12 legacy probability")
+                        logger.info(
+                            "[V13-RUNTIME] active=%d/%d mean_prob=%s mean_abs_fund_edge=%s core_bridge_mean_w=%.4f version=%s",
+                            _v13_active, len(df_canon),
+                            f"{float(_v13_prob.mean()):.4f}" if _v13_prob.notna().any() else "nan",
+                            f"{float(_v13_edge.abs().mean()):.3f}" if _v13_edge.notna().any() else "nan",
+                            float(_v13_core_w.mean()) if len(_v13_core_w) else 0.0,
+                            NCAAF_V13_VERSION,
+                        )
                     # New three-head artifacts use Situation + Value + Meta when available.
                     # Legacy artifacts have no meta_model and continue on outcome_preds unchanged.
                     meta_preds = predict_multihead_meta(bundle, df_canon, outcome_preds)
@@ -10401,11 +10421,20 @@ def apply_blended_sharp_score(
                         df_inverse[_c] = df_inverse[_opp]
                 # Probability diagnostics are side-oriented and must complement for
                 # the inverse side. Contributions are signed probability deltas.
-                for _c in ['V13_Early_Situational_Prob','V13_Base_Cover_Prob','V13_Overlay_PreTemperature_Prob','V13_Overlay_Combined_Prob',
+                for _c in ['V13_Early_Situational_Prob','V13_Base_Cover_Prob','V13_AutoFS_Core_Prob','V13_Core_Adjusted_Prob',
+                           'V13_Overlay_PreTemperature_Prob','V13_Overlay_Combined_Prob',
                            'V13_Market_Overlay_Prob','V13_Pathi_Overlay_Prob','V13_BigAl_Overlay_Prob']:
                     _opp=_c+'_opponent'
                     if _opp in df_inverse.columns:
                         df_inverse[_c]=1.0-pd.to_numeric(df_inverse[_opp],errors='coerce')
+                for _c in ('V13_AutoFS_Core_Weight','V13_AutoFS_Core_Active'):
+                    _opp=_c+'_opponent'
+                    if _opp in df_inverse.columns:
+                        df_inverse[_c]=df_inverse[_opp]
+                if 'V13_AutoFS_Core_Contribution_opponent' in df_inverse.columns:
+                    df_inverse['V13_AutoFS_Core_Contribution']=-pd.to_numeric(
+                        df_inverse['V13_AutoFS_Core_Contribution_opponent'],errors='coerce'
+                    )
                 for _fam in ('Market','Pathi','BigAl'):
                     for _suffix in ('Overlay_Weight','Overlay_Active'):
                         _c=f'V13_{_fam}_{_suffix}'; _opp=_c+'_opponent'
@@ -14724,7 +14753,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
 NCAAF_V13_VERSION = "2026-09-09-v13.0.16-market-pathi-bigal-specialist-overlays"
-NCAAF_V13_HOTFIX = "2026-09-10-v13.0.16-hf2-leakage-safe-specialists-calibration"
+NCAAF_V13_HOTFIX = "2026-09-10-v13.0.16-hf3-performance-stability-core-bridge"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -15882,7 +15911,9 @@ def _ncaaf_v13_promoted_empirical_probability(preview, thresholds, games_prior, 
 
 
 V13_SPECIALIST_OUTPUT_COLS = [
-    "V13_Base_Cover_Prob","V13_Overlay_PreTemperature_Prob","V13_Overlay_Combined_Prob",
+    "V13_Base_Cover_Prob","V13_AutoFS_Core_Prob","V13_Core_Adjusted_Prob",
+    "V13_AutoFS_Core_Weight","V13_AutoFS_Core_Active","V13_AutoFS_Core_Contribution",
+    "V13_Overlay_PreTemperature_Prob","V13_Overlay_Combined_Prob",
     "V13_Overlay_Temperature","V13_Overlay_Temperature_Contribution","V13_Overlay_Calibration_Active",
     "V13_Specialist_Overlay_Gate",
     "V13_Market_Overlay_Prob","V13_Market_Overlay_Weight","V13_Market_Overlay_Active","V13_Market_Overlay_Contribution",
@@ -15897,6 +15928,38 @@ def _v13_overlay_logit(p):
 def _v13_overlay_sigmoid(z):
     z=np.clip(np.asarray(z,dtype=float),-20.0,20.0)
     return 1.0/(1.0+np.exp(-z))
+
+def _apply_v13_autofs_core_bridge_runtime(base_prob, core_prob, bridge: dict):
+    """Apply the frozen HF3 Raw Outcome AutoFS bridge as centered logit evidence.
+
+    Identity is guaranteed when its training/shadow gate is closed. The specialist
+    layer receives this adjusted probability, never the unbridged base.
+    """
+    base=np.asarray(base_prob,dtype=float).ravel()
+    core=np.asarray(core_prob,dtype=float).ravel()
+    n=len(base)
+    final=base.copy()
+    weight=0.0; center=0.5; gate=False
+    if isinstance(bridge,dict):
+        gate=bool(bridge.get("gate_pass",False))
+        weight=float(np.clip(bridge.get("weight",0.0) or 0.0,0.0,1.0))
+        center=float(np.clip(bridge.get("center_prob",0.5) or 0.5,1e-5,1-1e-5))
+    valid=np.isfinite(base)&np.isfinite(core)
+    active=valid & gate & (weight>0.0)
+    if np.any(active):
+        zbase=_v13_overlay_logit(base[active])
+        zcore=_v13_overlay_logit(core[active])
+        zcenter=float(_v13_overlay_logit(np.asarray([center]))[0])
+        final[active]=_v13_overlay_sigmoid(zbase+weight*(zcore-zcenter))
+    final=np.clip(final,0.01,0.99)
+    return final,{
+        "gate_pass":bool(gate),
+        "weight":np.where(valid,weight,0.0).astype(float),
+        "active":active.astype(np.int8),
+        "contribution":np.asarray(final-base,dtype=float),
+        "center_prob":float(center),
+    }
+
 
 def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overlay: dict, maturity_bucket):
     """Apply validation-gated *incremental* Market/Pathi/BigAl evidence to V13 base.
@@ -15960,6 +16023,14 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
 def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
     """Calculate V13 diagnostics and promoted NCAAF-spreads probability when enabled."""
     out=rows.copy(); n=len(out)
+    # Outcome AutoFS is computed immediately before this call in HF3. Preserve that
+    # inbound probability while stale V13 diagnostics from source rows are reset.
+    _incoming_core = pd.to_numeric(
+        out.get("V13_AutoFS_Core_Prob", pd.Series(np.nan, index=out.index)), errors="coerce"
+    )
+    if not isinstance(_incoming_core, pd.Series):
+        _incoming_core = pd.Series(np.full(n, float(_incoming_core) if np.isfinite(_incoming_core) else np.nan), index=out.index)
+    _incoming_core = _incoming_core.reindex(out.index).copy()
     defaults={
         "V13_Active":0,
         "V13_Fair_Margin":np.nan,"V13_Raw_Fair_Margin":np.nan,"V13_Tradable_Fair_Margin":np.nan,
@@ -15975,7 +16046,9 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         "V13_Status":"UNAVAILABLE","V13_Version":NCAAF_V13_VERSION,
         "V13_Promotion_Mode":"SHADOW","V13_Early_Season_Warning":0,"V13_Drift_Scale":1.0,
         "V13_Maturity_Bucket":"UNKNOWN","V13_Maturity_Beta":np.nan,"V13_Early_Situational_Prob":np.nan,"V13_Early_Situational_Active":0,
-        "V13_Base_Cover_Prob":np.nan,"V13_Overlay_PreTemperature_Prob":np.nan,"V13_Overlay_Combined_Prob":np.nan,
+        "V13_Base_Cover_Prob":np.nan,"V13_AutoFS_Core_Prob":np.nan,"V13_Core_Adjusted_Prob":np.nan,
+        "V13_AutoFS_Core_Weight":0.0,"V13_AutoFS_Core_Active":0,"V13_AutoFS_Core_Contribution":0.0,
+        "V13_Overlay_PreTemperature_Prob":np.nan,"V13_Overlay_Combined_Prob":np.nan,
         "V13_Overlay_Temperature":1.0,"V13_Overlay_Temperature_Contribution":0.0,"V13_Overlay_Calibration_Active":0,
         "V13_Specialist_Overlay_Gate":0,
         "V13_Market_Overlay_Prob":np.nan,"V13_Market_Overlay_Weight":0.0,"V13_Market_Overlay_Active":0,"V13_Market_Overlay_Contribution":0.0,
@@ -15983,6 +16056,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         "V13_BigAl_Overlay_Prob":np.nan,"V13_BigAl_Overlay_Weight":0.0,"V13_BigAl_Overlay_Active":0,"V13_BigAl_Overlay_Contribution":0.0,
     }
     for c,v in defaults.items(): out[c]=v
+    out["V13_AutoFS_Core_Prob"] = _incoming_core.astype("float32")
     if not isinstance(bundle,dict) or out.empty: return out
     if str(bundle.get("sport","NCAAF")).upper()!="NCAAF" or str(bundle.get("market","spreads")).lower()!="spreads": return out
     fund=bundle.get("fundamental") or {}; market=bundle.get("market_intelligence") or {}; cover=bundle.get("cover_calibrator") or {}; preview=bundle.get("production_preview") or {}
@@ -16105,14 +16179,28 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
             ccols=list(cover.get("feature_cols") or [])
             prob=np.asarray(cover["model"].predict_proba(cf.reindex(columns=ccols))[:,1],dtype=float)
             prob=np.clip(prob,0.01,0.99)
-        # V13.0.16 specialist merge. Statistics+maturity/early-situational create
-        # the base probability; Market, Pathi and BigAl may adjust it only when the
-        # stored rolling second-level OOF gate passed during training.
+        # HF3 exact production recipe: statistics+maturity/early-situational create
+        # V13 base; the validated Raw Outcome AutoFS Core contributes centered logit
+        # evidence; Market/Pathi/BigAl may then add only separately validated evidence.
         base_prob=np.asarray(prob,dtype=float).copy()
+        _core_series=pd.to_numeric(
+            out.get("V13_AutoFS_Core_Prob",pd.Series(np.nan,index=out.index)),errors="coerce"
+        )
+        if not isinstance(_core_series,pd.Series):
+            _core_series=pd.Series(np.full(n,float(_core_series) if np.isfinite(_core_series) else np.nan),index=out.index)
+        core_prob=_core_series.to_numpy(dtype=float,na_value=np.nan)
+        core_adjusted,_core_details=_apply_v13_autofs_core_bridge_runtime(
+            base_prob,core_prob,bundle.get("autofs_core_bridge") or {}
+        )
         prob,_overlay_details,_overlay_gate=_apply_v13_specialist_overlays_runtime(
-            out,base_prob,bundle.get("specialist_overlays") or {},maturity_bucket
+            out,core_adjusted,bundle.get("specialist_overlays") or {},maturity_bucket
         )
         out["V13_Base_Cover_Prob"]=base_prob.astype("float32")
+        out["V13_AutoFS_Core_Prob"]=core_prob.astype("float32")
+        out["V13_Core_Adjusted_Prob"]=np.asarray(core_adjusted,dtype="float32")
+        out["V13_AutoFS_Core_Weight"]=np.asarray(_core_details.get("weight",np.zeros(n)),dtype="float32")
+        out["V13_AutoFS_Core_Active"]=np.asarray(_core_details.get("active",np.zeros(n)),dtype="int8")
+        out["V13_AutoFS_Core_Contribution"]=np.asarray(_core_details.get("contribution",np.zeros(n)),dtype="float32")
         _ocal=_overlay_details.get("_calibration") or {}
         out["V13_Overlay_PreTemperature_Prob"]=np.asarray(_ocal.get("pretemperature_prob",prob),dtype="float32")
         out["V13_Overlay_Combined_Prob"]=np.asarray(prob,dtype="float32")
@@ -18084,6 +18172,7 @@ def load_model_from_gcs(
             "single_model": single_model,
             "model": single_model,  # alias used by predict_blended single-model path
             "best_w": best_w,
+            "blend_space": str(payload.get("blend_space", "linear") or "linear").lower(),
             "feature_cols": feature_cols,
             "feature_cols_outcome": payload.get("feature_cols_outcome") or feature_cols,
             "feature_cols_situation": payload.get("feature_cols_situation") or [],
