@@ -14808,8 +14808,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.6-observed-stats-unshrunk-latent-
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-11-v13.2.6-canonical-registry-current-rich"
-NCAAF_V13_HOTFIX = "V13_2_6__UNIFIED_2022_2026_CANONICAL_REGISTRY__CURRENT_RICH_OVERLAP__HIST_SYSTEM_BASE_AUTHORITY__OBSERVED_STATS_UNSHRUNK"
+NCAAF_V13_VERSION = "2026-09-11-v13.2.7-incremental-system-influence"
+NCAAF_V13_HOTFIX = "V13_2_7__UNIFIED_2022_2026__UNSHRUNK_SYSTEM_EVIDENCE__INCREMENTAL_CORE_INFLUENCE__POST_MARKET_RICH_RULE_REGISTRY"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -17784,7 +17784,7 @@ def _ncaaf_v13_paired_model_bootstrap(y,p12,p13,groups,reps=800,seed=13100):
 # ============================================================================
 # V13.1.2 CALIBRATED AUTOfs CORE + CONDITIONAL RESIDUAL EXPERTS
 # ============================================================================
-V13_SPECIALIST_OVERLAY_VERSION = "2026-09-11-v13.2.5-individual-rule-expert-stack"
+V13_SPECIALIST_OVERLAY_VERSION = "2026-09-11-v13.2.7-incremental-system-influence-stack"
 V13_SPECIALIST_WEIGHT_GRID = (0.0, 0.025, 0.05, 0.075, 0.10, 0.15)
 V13_SPECIALIST_MAX_TOTAL_WEIGHT = 0.20
 V13_SPECIALIST_MIN_OOF_ROWS = 500
@@ -17875,7 +17875,7 @@ V13_RESIDUAL_CORR_MAX_DISCOUNT = 0.50
 # Each deterministic trigger earns its own cross-fitted log-odds coefficient,
 # partially pooled toward its family on TRAINING data only. Shadow data is used
 # solely as a transfer veto; the outer champion holdout remains untouched.
-V132_RULE_EXPERT_VERSION = "2026-09-11-v13.2.6-historical-base-plus-full-rich-registry"
+V132_RULE_EXPERT_VERSION = "2026-09-11-v13.2.7-unshrunk-history-incremental-core-influence"
 V132_RULE_MIN_SELECTION_GAMES = 12
 V132_RULE_MIN_SHADOW_GAMES = 5
 V132_RULE_MIN_FOLD_GAMES = 3
@@ -17903,6 +17903,13 @@ V132_RULE_MAX_TOTAL_PROB_DELTA = 0.150
 V132_RULE_CORR_DISCOUNT_START = 0.50
 V132_RULE_CORR_MAX_DISCOUNT = 0.50
 V132_RULE_POSTSTACK_TEMPERATURE_GRID = (0.80, 0.90, 1.00, 1.10, 1.25, 1.50, 1.75)
+# V13.2.7: historical ATS evidence remains unchanged.  This coefficient measures
+# only the incremental probability influence that the named-system stack earns
+# beyond the already-trained Core.  It is selected on prior OOF predictions, never
+# by rewriting the system record or by counting rich/history duplicates twice.
+V132_RULE_INCREMENTAL_SCALE_GRID = (0.00, 0.25, 0.50, 0.75, 1.00)
+V132_RULE_INCREMENTAL_SCALE_MIN_PRIOR_GAMES = 12
+
 
 # Published 2025 CF1 examples from BigAl.com are used only as a source-lineage
 # unit test. They are NOT labels or training rows. The historical rule builder
@@ -20011,6 +20018,62 @@ def _v132_prob_metrics(y,p,w,mask,groups=None) -> dict:
     return {"n":int(len(yy)),"logloss":ll,"brier":br,"hit":hit}
 
 
+def _v132_scale_rule_prediction(base, rule_pred, scale):
+    """Scale only the RULE STACK'S incremental log-odds contribution.
+
+    This does not change any historical ATS record.  ``scale=1`` applies the full
+    system-derived probability move, while ``scale=0`` leaves Core unchanged.
+    A scalar or row vector is accepted so chronological folds can use coefficients
+    learned only from earlier OOF folds.
+    """
+    b=np.asarray(base,dtype=float).reshape(-1); r=np.asarray(rule_pred,dtype=float).reshape(-1)
+    if len(b)!=len(r): return b.copy()
+    sc=np.asarray(scale,dtype=float)
+    if sc.ndim==0:
+        sc=np.full(len(b),float(sc),dtype=float)
+    else:
+        sc=sc.reshape(-1)
+        if len(sc)!=len(b): sc=np.full(len(b),1.0,dtype=float)
+    sc=np.clip(np.where(np.isfinite(sc),sc,0.0),0.0,1.0)
+    out=b.copy(); ok=np.isfinite(b)&np.isfinite(r)
+    if ok.any():
+        db=_v13_logit(np.clip(r[ok],1e-6,1-1e-6))-_v13_logit(np.clip(b[ok],1e-6,1-1e-6))
+        out[ok]=_v13_sigmoid(_v13_logit(np.clip(b[ok],1e-6,1-1e-6))+sc[ok]*db)
+    return np.clip(out,0.01,0.99)
+
+
+def _v132_choose_incremental_rule_scale(y,base,rule_pred,mask,w,groups):
+    """Choose incremental system-to-Core influence on ACTIVE physical game-sides.
+
+    Historical win rates remain untouched.  The coefficient answers a different
+    question: how much of that predeclared system edge is incremental to Core?
+    Selection requires both LogLoss and Brier to be non-inferior to Core.
+    """
+    yy=np.asarray(y,dtype=int); bb=np.asarray(base,dtype=float); rr=np.asarray(rule_pred,dtype=float)
+    mm=np.asarray(mask,dtype=bool)&np.isfinite(bb)&np.isfinite(rr)
+    if len(bb)!=len(rr):
+        return 0.0,0,{},{}
+    active=mm&(np.abs(_v13_logit(np.clip(rr,1e-6,1-1e-6))-_v13_logit(np.clip(bb,1e-6,1-1e-6)))>1e-10)
+    ng=_v132_group_count(active,groups)
+    bm=_v132_prob_metrics(yy,bb,w,active,groups)
+    if ng<=0 or not np.isfinite(bm.get("logloss",np.nan)):
+        return 0.0,ng,bm,bm
+    best_scale=0.0; best=bm; best_obj=float(bm["logloss"]+bm["brier"])
+    for sc in V132_RULE_INCREMENTAL_SCALE_GRID:
+        pp=_v132_scale_rule_prediction(bb,rr,float(sc))
+        mmx=_v132_prob_metrics(yy,pp,w,active,groups)
+        if not np.isfinite(mmx.get("logloss",np.nan)) or not np.isfinite(mmx.get("brier",np.nan)):
+            continue
+        # The coefficient may reduce influence, but never worsens both proper scores
+        # merely to preserve nominal system authority.  Historical evidence remains
+        # in the artifact even if the incremental Core coefficient is zero.
+        if mmx["logloss"]<=bm["logloss"]+1e-12 and mmx["brier"]<=bm["brier"]+1e-12:
+            obj=float(mmx["logloss"]+mmx["brier"]);
+            if obj<best_obj-1e-12 or (abs(obj-best_obj)<=1e-12 and float(sc)<best_scale):
+                best_scale=float(sc); best=mmx; best_obj=obj
+    return best_scale,ng,bm,best
+
+
 def _v132_fit_offset_beta(y,base,active,w,groups,prior_beta=0.0,prior_games=0.0) -> tuple[float,int]:
     yy=np.asarray(y,dtype=int); bb=np.asarray(base,dtype=float); aa=np.asarray(active,dtype=bool); ww=np.asarray(w,dtype=float)
     ok=aa&np.isfinite(bb)&np.isfinite(ww)&(ww>0); ng=_v132_group_count(ok,groups)
@@ -20038,7 +20101,7 @@ def _v132_family_prior_beta(y,base,triggers,family,specs,idx,w,groups) -> float:
 
 
 
-def _v132_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict, beta_overrides: dict|None=None):
+def _v132_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict, beta_overrides: dict|None=None, stack_scale_override=None):
     rows=_v132_prepare_rule_rows(rows,log_func=None)
     base=np.asarray(base_prob,dtype=float).copy(); n=len(base); final=base.copy()
     detail={"Pathi":{"contribution":np.zeros(n),"weight":np.zeros(n),"active":np.zeros(n,dtype=np.int8),"residual_edge":np.zeros(n),"independence":np.ones(n),"names":np.full(n,"OTHER",dtype=object)},
@@ -20093,8 +20156,22 @@ def _v132_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict, beta_ov
         names=dd["names"]
         for j in idx: names[j]=name if names[j]=="OTHER" else str(names[j])+"+"+name
         full_delta=np.zeros(n); full_delta[idx]=actual; prev.append((name,active,full_delta,hist_auth))
+
+    # V13.2.7: preserve every system's historical ATS evidence exactly, but make
+    # the probability INFLUENCE incremental to Core.  The learned stack coefficient
+    # is applied after all named-system contributions, so it cannot rewrite a rule's
+    # record, direction, or canonical sample count.
+    _scale = engine.get("rule_stack_incremental_scale",1.0) if stack_scale_override is None else stack_scale_override
+    raw_final=final.copy(); final=_v132_scale_rule_prediction(base,raw_final,_scale)
+    raw_delta=raw_final-base; scaled_delta=final-base
+    ratio=np.zeros(n,dtype=float); nz=np.isfinite(raw_delta)&(np.abs(raw_delta)>1e-12)
+    ratio[nz]=scaled_delta[nz]/raw_delta[nz]
+    ratio=np.clip(np.where(np.isfinite(ratio),ratio,0.0),0.0,1.0)
     for fam in ("Pathi","BigAl"):
-        detail[fam]["prob"]=np.clip(base+detail[fam]["contribution"],0.01,0.99); detail[fam]["regime"]=detail[fam].pop("names")
+        detail[fam]["contribution"]*=ratio
+        detail[fam]["prob"]=np.clip(base+detail[fam]["contribution"],0.01,0.99)
+        detail[fam]["incremental_scale"]=np.asarray(ratio,dtype=float)
+        detail[fam]["regime"]=detail[fam].pop("names")
     return final,detail
 
 
@@ -20199,7 +20276,13 @@ def _v132_fit_rule_expert_engine(y,base,rows,folds,shadow_folds,sample_weight=No
             "shadow_ll_gain":float(shll) if np.isfinite(shll) else np.nan,"shadow_brier_gain":float(shbr) if np.isfinite(shbr) else np.nan,
             "positive_folds":pos,"eligible_folds":len(frec),"required_positive_folds":need,"fold_records":frec,"canonical_evidence":evidence,
         }
-        beta_oof[name]=bvec
+        # OOF parity: an unqualified rich-data modifier must not contaminate the
+        # historical system's selection prediction.  Historical evidence stays
+        # active; only an admitted modifier is added to it.
+        if hist_authority:
+            beta_oof[name]=bvec if modifier_gate else hist_beta_vec.copy()
+        else:
+            beta_oof[name]=bvec
         log_func(f"[V13.2-RULE-EXPERT] family={fam} expert={name} gate={'PASS' if gate else 'CLOSED'} historical_authority={hist_authority} hist_n={profiles[name]['historical_sample']} hist_ats={profiles[name]['historical_raw_ats']:.4f} hist_beta={profiles[name]['historical_base_beta']:+.4f} rich_fit_games={all_games} rich_registry={evidence.get('rich_unique',all_games)} overlap={evidence.get('overlap',0)} modifier_gate={modifier_gate} modifier_beta={(modifier_beta if np.isfinite(modifier_beta) else np.nan):+.4f} sel_games={sel_games} shadow_games={sh_games} modifier_sel_ll={selll:+.6f} modifier_sel_br={selbr:+.6f} modifier_shadow_ll={shll:+.6f} modifier_shadow_br={shbr:+.6f} reasons={gate_reasons or modifier_reasons or ['PASS']}")
 
     historical_selected=[n for n,p in profiles.items() if p.get("gate_pass") and p.get("historical_authority")]
@@ -20213,27 +20296,128 @@ def _v132_fit_rule_expert_engine(y,base,rows,folds,shadow_folds,sample_weight=No
             if not np.isfinite(rho): rho=0.0
             corr[a][b]=rho; corr[b][a]=rho
 
-    # Historical systems are the base stack. Greedy selection applies only to
-    # modern-only discovered experts; it cannot delete a historical authority rule.
-    greedy_records=[]; current_engine={"version":V132_RULE_EXPERT_VERSION,"gate_pass":bool(selected),"specs":specs,"profiles":profiles,"selected_experts":selected,"pairwise_corr":corr}
-    current_oof,_=_v132_apply_rule_engine(base,rule_rows,current_engine,beta_overrides=beta_oof) if selected else (np.asarray(base,dtype=float).copy(),{})
+    # Historical systems remain the evidence base.  Modern-only candidates are
+    # still greedily screened, but an admitted historical system's observed ATS
+    # record is never rewritten.  V13.2.7 calibrates only the STACK'S incremental
+    # influence relative to Core after this deterministic evidence is assembled.
+    greedy_records=[]
+    current_engine={"version":V132_RULE_EXPERT_VERSION,"gate_pass":bool(selected),"specs":specs,"profiles":profiles,"selected_experts":selected,"pairwise_corr":corr,"rule_stack_incremental_scale":1.0}
+    current_oof,_=_v132_apply_rule_engine(base,rule_rows,current_engine,beta_overrides=beta_oof,stack_scale_override=1.0) if selected else (np.asarray(base,dtype=float).copy(),{})
     sel_all=select&np.isfinite(base); current_metrics=_ncaaf_v13_specialist_metrics(y[sel_all],current_oof[sel_all],w[sel_all])
     modern_candidates.sort(key=lambda nm:(profiles[nm].get("selection_ll_gain",0),profiles[nm].get("selection_games",0)),reverse=True)
     for cand_name in modern_candidates:
-        trial_names=selected+[cand_name]; trial_engine={"version":V132_RULE_EXPERT_VERSION,"gate_pass":True,"specs":specs,"profiles":profiles,"selected_experts":trial_names,"pairwise_corr":corr}
-        trial_oof,_=_v132_apply_rule_engine(base,rule_rows,trial_engine,beta_overrides=beta_oof); tm=_ncaaf_v13_specialist_metrics(y[sel_all],trial_oof[sel_all],w[sel_all]); llg=float(current_metrics.get("logloss",np.nan)-tm.get("logloss",np.nan)); brg=float(current_metrics.get("brier",np.nan)-tm.get("brier",np.nan)); accept=bool(np.isfinite(llg) and np.isfinite(brg) and llg>=-1e-12 and brg>=-1e-12 and (llg>1e-10 or brg>1e-10))
-        greedy_records.append({"expert":cand_name,"accepted":accept,"incremental_selection_ll_gain":llg,"incremental_selection_brier_gain":brg}); log_func(f"[V13.2-RULE-PORTFOLIO] expert={cand_name} {'KEEP' if accept else 'REJECT'} incremental_sel_ll={llg:+.6f} incremental_sel_br={brg:+.6f} historical_base_preserved=TRUE")
-        if accept: selected.append(cand_name); current_oof=trial_oof; current_metrics=tm
+        trial_names=selected+[cand_name]
+        trial_engine={"version":V132_RULE_EXPERT_VERSION,"gate_pass":True,"specs":specs,"profiles":profiles,"selected_experts":trial_names,"pairwise_corr":corr,"rule_stack_incremental_scale":1.0}
+        trial_oof,_=_v132_apply_rule_engine(base,rule_rows,trial_engine,beta_overrides=beta_oof,stack_scale_override=1.0)
+        tm=_ncaaf_v13_specialist_metrics(y[sel_all],trial_oof[sel_all],w[sel_all])
+        llg=float(current_metrics.get("logloss",np.nan)-tm.get("logloss",np.nan)); brg=float(current_metrics.get("brier",np.nan)-tm.get("brier",np.nan))
+        accept=bool(np.isfinite(llg) and np.isfinite(brg) and llg>=-1e-12 and brg>=-1e-12 and (llg>1e-10 or brg>1e-10))
+        greedy_records.append({"expert":cand_name,"accepted":accept,"incremental_selection_ll_gain":llg,"incremental_selection_brier_gain":brg})
+        log_func(f"[V13.2-RULE-PORTFOLIO] expert={cand_name} {'KEEP' if accept else 'REJECT'} incremental_sel_ll={llg:+.6f} incremental_sel_br={brg:+.6f} historical_evidence_preserved=TRUE")
+        if accept:
+            selected.append(cand_name); current_oof=trial_oof; current_metrics=tm
 
     for _name,_pr in profiles.items():
         if isinstance(_pr,dict): _pr["stack_selected"]=bool(_name in set(selected))
-    engine={"version":V132_RULE_EXPERT_VERSION,"gate_pass":bool(selected),"specs":specs,"profiles":profiles,"selected_experts":selected,"historical_base_experts":historical_selected,"modern_only_experts":[n for n in selected if n not in historical_selected],"portfolio_selection_records":greedy_records,"pairwise_corr":corr,"canonical_evidence_contract":"HISTORY_AND_RICH_SAME_GAME_SIDE_UNION__NO_DOUBLE_COUNT","contract":"HISTORICAL_SYSTEM_BASE_AUTHORITY__UNSHRUNK_OBSERVED_ATS_LOGIT__ASOF_DATE_NO_LEAKAGE__RICH_DATA_CONTEXT_MODIFIER__MULTIHOT__MODERN_ONLY_GREEDY_PORTFOLIO"}
-    oof=np.asarray(base,dtype=float).copy(); sh=np.asarray(base,dtype=float).copy()
+
+    # First generate the FULL, unscaled named-system proposal.  This contains the
+    # exact as-of historical ATS logit plus only those rich modifiers that passed
+    # their own gate.  The next stage learns how much of that proposal is truly
+    # incremental to Core; it does NOT alter the historical record itself.
+    raw_engine={
+        "version":V132_RULE_EXPERT_VERSION,"gate_pass":bool(selected),"specs":specs,"profiles":profiles,
+        "selected_experts":selected,"historical_base_experts":historical_selected,
+        "modern_only_experts":[n for n in selected if n not in historical_selected],
+        "portfolio_selection_records":greedy_records,"pairwise_corr":corr,"rule_stack_incremental_scale":1.0,
+    }
+    raw_oof=np.asarray(base,dtype=float).copy(); raw_sh=np.asarray(base,dtype=float).copy()
     if selected:
-        oof,_=_v132_apply_rule_engine(base,rule_rows,engine,beta_overrides=beta_oof); sh,_=_v132_apply_rule_engine(base,rule_rows,engine)
-    selm=select&np.isfinite(oof)&np.isfinite(base); shm=shadow&np.isfinite(sh)&np.isfinite(base); bsel=_ncaaf_v13_specialist_metrics(y[selm],base[selm],w[selm]); fsel=_ncaaf_v13_specialist_metrics(y[selm],oof[selm],w[selm]); bsh=_ncaaf_v13_specialist_metrics(y[shm],base[shm],w[shm]); fsh=_ncaaf_v13_specialist_metrics(y[shm],sh[shm],w[shm])
-    engine.update({"selection_metrics":fsel,"shadow_metrics":fsh,"selection_ll_gain":float(bsel.get('logloss',np.nan)-fsel.get('logloss',np.nan)) if np.isfinite(bsel.get('logloss',np.nan)) and np.isfinite(fsel.get('logloss',np.nan)) else np.nan,"selection_brier_gain":float(bsel.get('brier',np.nan)-fsel.get('brier',np.nan)) if np.isfinite(bsel.get('brier',np.nan)) and np.isfinite(fsel.get('brier',np.nan)) else np.nan,"shadow_ll_gain":float(bsh.get('logloss',np.nan)-fsh.get('logloss',np.nan)) if np.isfinite(bsh.get('logloss',np.nan)) and np.isfinite(fsh.get('logloss',np.nan)) else np.nan,"shadow_brier_gain":float(bsh.get('brier',np.nan)-fsh.get('brier',np.nan)) if np.isfinite(bsh.get('brier',np.nan)) and np.isfinite(fsh.get('brier',np.nan)) else np.nan})
-    log_func(f"[V13.2-RULE-STACK] gate={'PASS' if engine.get('gate_pass') else 'CLOSED'} historical_base={historical_selected} modern_selected={engine.get('modern_only_experts')} selection_ll={engine.get('selection_ll_gain',np.nan):+.6f} selection_br={engine.get('selection_brier_gain',np.nan):+.6f} shadow_ll={engine.get('shadow_ll_gain',np.nan):+.6f} shadow_br={engine.get('shadow_brier_gain',np.nan):+.6f} historical_base_preserved=TRUE")
+        raw_oof,_=_v132_apply_rule_engine(base,rule_rows,raw_engine,beta_overrides=beta_oof,stack_scale_override=1.0)
+        raw_sh,_=_v132_apply_rule_engine(base,rule_rows,raw_engine,stack_scale_override=1.0)
+
+    # Chronological OOF influence: each validation fold uses only PRIOR OOF folds
+    # to learn the system-to-Core coefficient.  Until enough prior active physical
+    # game-sides exist, the predeclared historical system uses its full scale=1.
+    # That default is evidence-preserving and label-free; later folds may reduce it
+    # if Core already captures part of the same signal.
+    scale_oof=np.ones(n,dtype=float); scale_fold_records=[]; prior_val=[]
+    for fi,(_tr,va) in enumerate(list(folds or [])):
+        va=np.asarray(va,dtype=int); pm=np.zeros(n,dtype=bool)
+        if prior_val: pm[np.asarray(prior_val,dtype=int)]=True
+        sc,ng,bm,sm=_v132_choose_incremental_rule_scale(y,base,raw_oof,pm,w,groups)
+        if ng < V132_RULE_INCREMENTAL_SCALE_MIN_PRIOR_GAMES:
+            sc=1.0; status="HISTORICAL_DEFAULT_FULL"
+        else:
+            status="LEARNED_FROM_PRIOR_OOF"
+        scale_oof[va]=float(sc)
+        scale_fold_records.append({"fold":fi,"prior_active_games":int(ng),"scale":float(sc),"status":status,
+                                   "prior_base_logloss":float(bm.get("logloss",np.nan)),"prior_scaled_logloss":float(sm.get("logloss",np.nan)),
+                                   "prior_base_brier":float(bm.get("brier",np.nan)),"prior_scaled_brier":float(sm.get("brier",np.nan))})
+        prior_val.extend(va.tolist())
+    oof=_v132_scale_rule_prediction(base,raw_oof,scale_oof) if selected else np.asarray(base,dtype=float).copy()
+
+    # Production coefficient is chosen from the complete chronological SELECTION
+    # OOF predictions, then the later shadow is a transfer veto.  No shadow tuning.
+    selected_scale,sel_scale_games,sel_scale_base,sel_scale_met=_v132_choose_incremental_rule_scale(y,base,raw_oof,select,w,groups)
+    if selected and sel_scale_games < V132_RULE_INCREMENTAL_SCALE_MIN_PRIOR_GAMES:
+        selected_scale=1.0
+        sel_scale_status="HISTORICAL_DEFAULT_FULL_INSUFFICIENT_OVERLAP"
+    else:
+        sel_scale_status="LEARNED_SELECTION_OOF"
+    sh_trial=_v132_scale_rule_prediction(base,raw_sh,selected_scale) if selected else np.asarray(base,dtype=float).copy()
+    sh_active=shadow&np.isfinite(base)&np.isfinite(raw_sh)&(np.abs(_v13_logit(np.clip(raw_sh,1e-6,1-1e-6))-_v13_logit(np.clip(base,1e-6,1-1e-6)))>1e-10)
+    sh_scale_games=_v132_group_count(sh_active,groups)
+    sh_scale_base=_v132_prob_metrics(y,base,w,sh_active,groups); sh_scale_met=_v132_prob_metrics(y,sh_trial,w,sh_active,groups)
+    shadow_transfer=bool(
+        sh_scale_games==0 or (
+            np.isfinite(sh_scale_base.get("logloss",np.nan)) and np.isfinite(sh_scale_met.get("logloss",np.nan))
+            and np.isfinite(sh_scale_base.get("brier",np.nan)) and np.isfinite(sh_scale_met.get("brier",np.nan))
+            and sh_scale_met["logloss"]<=sh_scale_base["logloss"]+1e-12
+            and sh_scale_met["brier"]<=sh_scale_base["brier"]+1e-12
+        )
+    )
+    active_scale=float(selected_scale if shadow_transfer else 0.0)
+    sh=_v132_scale_rule_prediction(base,raw_sh,active_scale) if selected else np.asarray(base,dtype=float).copy()
+    log_func(
+        f"[V13.2-SYSTEM-INCREMENTAL-SCALE] selected_scale={selected_scale:.2f} active_scale={active_scale:.2f} "
+        f"selection_active_games={sel_scale_games} shadow_active_games={sh_scale_games} "
+        f"selection_ll={(sel_scale_base.get('logloss',np.nan)-sel_scale_met.get('logloss',np.nan)):+.6f} "
+        f"selection_br={(sel_scale_base.get('brier',np.nan)-sel_scale_met.get('brier',np.nan)):+.6f} "
+        f"shadow_ll={(sh_scale_base.get('logloss',np.nan)-sh_scale_met.get('logloss',np.nan)):+.6f} "
+        f"shadow_br={(sh_scale_base.get('brier',np.nan)-sh_scale_met.get('brier',np.nan)):+.6f} "
+        f"shadow_transfer={'PASS' if shadow_transfer else 'CLOSED'} evidence_record=UNSHRUNK influence_role=INCREMENTAL_TO_CORE"
+    )
+
+    engine={
+        "version":V132_RULE_EXPERT_VERSION,"gate_pass":bool(selected and active_scale>0),"specs":specs,"profiles":profiles,
+        "selected_experts":selected,"historical_base_experts":historical_selected,
+        "modern_only_experts":[n for n in selected if n not in historical_selected],
+        "portfolio_selection_records":greedy_records,"pairwise_corr":corr,
+        "rule_stack_incremental_scale":active_scale,"rule_stack_selected_scale":float(selected_scale),
+        "rule_stack_shadow_transfer_pass":bool(shadow_transfer),"rule_stack_scale_fold_records":scale_fold_records,
+        "rule_stack_selection_active_games":int(sel_scale_games),"rule_stack_shadow_active_games":int(sh_scale_games),
+        "historical_evidence_preserved":True,
+        "canonical_evidence_contract":"HISTORY_AND_RICH_SAME_GAME_SIDE_UNION__NO_DOUBLE_COUNT",
+        "contract":"UNSHRUNK_HISTORICAL_SYSTEM_EVIDENCE__ASOF_NO_LEAKAGE__OOF_INCREMENTAL_SYSTEM_TO_CORE_SCALE__RICH_CONTEXT_MODIFIER__SHADOW_VETO__NO_HISTORICAL_SAFETY_BYPASS"
+    }
+
+    selm=select&np.isfinite(oof)&np.isfinite(base); shm=shadow&np.isfinite(sh)&np.isfinite(base)
+    bsel=_ncaaf_v13_specialist_metrics(y[selm],base[selm],w[selm]); fsel=_ncaaf_v13_specialist_metrics(y[selm],oof[selm],w[selm])
+    bsh=_ncaaf_v13_specialist_metrics(y[shm],base[shm],w[shm]); fsh=_ncaaf_v13_specialist_metrics(y[shm],sh[shm],w[shm])
+    engine.update({
+        "selection_metrics":fsel,"shadow_metrics":fsh,
+        "selection_ll_gain":float(bsel.get('logloss',np.nan)-fsel.get('logloss',np.nan)) if np.isfinite(bsel.get('logloss',np.nan)) and np.isfinite(fsel.get('logloss',np.nan)) else np.nan,
+        "selection_brier_gain":float(bsel.get('brier',np.nan)-fsel.get('brier',np.nan)) if np.isfinite(bsel.get('brier',np.nan)) and np.isfinite(fsel.get('brier',np.nan)) else np.nan,
+        "shadow_ll_gain":float(bsh.get('logloss',np.nan)-fsh.get('logloss',np.nan)) if np.isfinite(bsh.get('logloss',np.nan)) and np.isfinite(fsh.get('logloss',np.nan)) else np.nan,
+        "shadow_brier_gain":float(bsh.get('brier',np.nan)-fsh.get('brier',np.nan)) if np.isfinite(bsh.get('brier',np.nan)) and np.isfinite(fsh.get('brier',np.nan)) else np.nan,
+    })
+    log_func(
+        f"[V13.2-RULE-STACK] gate={'PASS' if engine.get('gate_pass') else 'CLOSED'} historical_base={historical_selected} "
+        f"modern_selected={engine.get('modern_only_experts')} incremental_scale={active_scale:.2f} "
+        f"selection_ll={engine.get('selection_ll_gain',np.nan):+.6f} selection_br={engine.get('selection_brier_gain',np.nan):+.6f} "
+        f"shadow_ll={engine.get('shadow_ll_gain',np.nan):+.6f} shadow_br={engine.get('shadow_brier_gain',np.nan):+.6f} "
+        f"historical_evidence_preserved=TRUE"
+    )
     return engine,oof,sh
 
 
@@ -20253,7 +20437,7 @@ def _v132_fit_post_stack_calibration(y,selection_pred,shadow_pred,select_mask,sh
             f"shadow_ll={base_sh.get('logloss',np.nan):.6f}->{base_sh.get('logloss',np.nan):.6f}"
         )
         return {
-            "version":"2026-09-11-v13.2.5-post-stack-temperature",
+            "version":"2026-09-11-v13.2.7-post-stack-temperature",
             "temperature":1.0,"selected_temperature":1.0,"shadow_transfer_pass":True,
             "skipped_no_active_components":True,
             "selection_base_metrics":base_sel,"selection_calibrated_metrics":base_sel,
@@ -20269,7 +20453,7 @@ def _v132_fit_post_stack_calibration(y,selection_pred,shadow_pred,select_mask,sh
     transfer=bool(best_t==1.0 or (hm.any() and _ncaaf_v13_calibration_noninferior(base_sh,shcand,max_ece_increase=0.0025,max_reliability_increase=0.00075) and shcand.get("logloss",np.inf)<=base_sh.get("logloss",np.inf)+1e-12 and shcand.get("brier",np.inf)<=base_sh.get("brier",np.inf)+1e-12))
     active_t=best_t if transfer else 1.0
     log_func(f"[V13.2-POST-STACK-CAL] selected_T={best_t:.2f} active_T={active_t:.2f} shadow_transfer={'PASS' if transfer else 'CLOSED'} sel_ll={base_sel.get('logloss',np.nan):.6f}->{best.get('logloss',np.nan):.6f} shadow_ll={base_sh.get('logloss',np.nan):.6f}->{shcand.get('logloss',np.nan):.6f}")
-    return {"version":"2026-09-11-v13.2.5-post-stack-temperature","temperature":float(active_t),"selected_temperature":float(best_t),"shadow_transfer_pass":bool(transfer),"skipped_no_active_components":False,"selection_base_metrics":base_sel,"selection_calibrated_metrics":best,"shadow_base_metrics":base_sh,"shadow_calibrated_metrics":shcand}
+    return {"version":"2026-09-11-v13.2.7-post-stack-temperature","temperature":float(active_t),"selected_temperature":float(best_t),"shadow_transfer_pass":bool(transfer),"skipped_no_active_components":False,"selection_base_metrics":base_sel,"selection_calibrated_metrics":best,"shadow_base_metrics":base_sh,"shadow_calibrated_metrics":shcand}
 
 
 def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X_train: pd.DataFrame,
@@ -20661,11 +20845,11 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
         )
     )
     _historical_base_active=bool(list((_rule_engine or {}).get("historical_base_experts") or []))
-    # Rich-data selection/shadow is a diagnostic and modifier gate for historically
-    # established systems, not a second proof requirement that can erase their
-    # historical authority.  The untouched outer promotion holdout still judges
-    # whether the complete challenger is safe to promote.
-    _full_stack_activation_safe=bool(_full_stack_diagnostic_safe or _historical_base_active)
+    # V13.2.7: historical AUTHORITY is evidence metadata, not a license to bypass
+    # portfolio safety.  The system record remains preserved even when its learned
+    # incremental Core coefficient is zero, but any probability-changing stack must
+    # pass the exact selection+shadow proper-score/calibration safety contract.
+    _full_stack_activation_safe=bool(_full_stack_diagnostic_safe)
     _overlay_any=bool(_component_any and _full_stack_activation_safe)
     log_func(
         f"[V13.2-FULL-STACK-SAFETY] component_any={_component_any} diagnostic_gate={'PASS' if _full_stack_diagnostic_safe else 'CLOSED'} "
@@ -20675,7 +20859,8 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
     )
     artifact["full_stack_safety_pass"]=_full_stack_diagnostic_safe
     artifact["full_stack_activation_pass"]=_full_stack_activation_safe
-    artifact["historical_base_authority_override"]=bool(_historical_base_active and not _full_stack_diagnostic_safe)
+    artifact["historical_base_authority_override"]=False
+    artifact["historical_base_evidence_preserved"]=bool(_historical_base_active)
     artifact["full_stack_selection_base_metrics"]=_full_base_sel
     artifact["full_stack_selection_final_metrics"]=_full_final_sel
     artifact["full_stack_selection_ll_gain"]=_full_sel_ll
@@ -20692,7 +20877,7 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
     artifact["final_gate_pass"]=_overlay_any
     artifact["status"]="PASS" if _overlay_any else "GATE_CLOSED"
     artifact["version"]=V13_SPECIALIST_OVERLAY_VERSION
-    artifact["contract"]="AUTOFS_CORE_PRIMARY__MARKET_FAMILY_RESIDUAL__INDIVIDUAL_PATHI_BIGAL_HISTORICAL_BASE_EXPERTS__RICH_CONTEXT_MODIFIERS__CANONICAL_GAME_UNION__MULTIHOT__POST_STACK_CALIBRATION__OUTER_HOLDOUT_UNTOUCHED"
+    artifact["contract"]="AUTOFS_CORE_PRIMARY__MARKET_FAMILY_RESIDUAL__INDIVIDUAL_PATHI_BIGAL_UNSHRUNK_HISTORICAL_EVIDENCE__OOF_INCREMENTAL_CORE_INFLUENCE__RICH_CONTEXT_MODIFIERS__CANONICAL_GAME_UNION__NO_SAFETY_BYPASS__POST_STACK_CALIBRATION__OUTER_HOLDOUT_UNTOUCHED"
     final_gate=artifact["final_gate_pass"]
     bundle["specialist_overlays"]=artifact
     if isinstance(bundle.get("production_preview"),dict):
@@ -20821,7 +21006,7 @@ def _ncaaf_v13_compare_v12_holdout(hold_rows: pd.DataFrame, y_hold, p_v12, bundl
                 "coverage_gate_pass":coverage_ok,"coverage_by_season":_coverage,
                 "status":"INSUFFICIENT","promotion_gate_pass":False}
         log_func(f"[V13.1-CORE-RECIPE] status=INSUFFICIENT matched_rows={int(matched.sum())}/{len(d)} "
-                 f"match_rate={match_rate:.1%} matched_physical_games={matched_games} final_recipe=V13_2_5")
+                 f"match_rate={match_rate:.1%} matched_physical_games={matched_games} final_recipe=V13_2_7")
         return result
 
     m12=_ncaaf_v13_weighted_metrics(yy[matched],p12[matched],phys[matched])
@@ -20871,7 +21056,7 @@ def _ncaaf_v13_compare_v12_holdout(hold_rows: pd.DataFrame, y_hold, p_v12, bundl
         except Exception:
             market_met=None
 
-    log_func(f"[V13.1-CORE-RECIPE] status=DEVELOPMENT_ONLY comparator={comparator_name} final_recipe=V13_2_5 "
+    log_func(f"[V13.1-CORE-RECIPE] status=DEVELOPMENT_ONLY comparator={comparator_name} final_recipe=V13_2_7 "
              f"matched_rows={m13['n']} matched_physical_games={m13['games']} match_rate={match_rate:.1%} weighting=EQUAL_PHYSICAL_GAME "
              f"comparator_auc={m12['auc']:.4f} v13_raw_core_auc={mb['auc']:.4f} v13_core_auc={mc['auc']:.4f} v13_final_auc={m13['auc']:.4f} "
              f"comparator_ll={m12['logloss']:.6f} v13_ll={m13['logloss']:.6f} ll_improvement={ll_gain:+.6f} "
@@ -23445,12 +23630,14 @@ def train_sharp_model_from_bq(
             # used to tune the chronological 2025 modifier unless they are already
             # in its training folds.
             if isinstance(ncaaf_v13_value_architecture,dict):
-                _rich_rule_registry=_v132_collect_rich_rule_occurrences(system_state_train,log_func=print)
+                _rich_rule_registry=_v132_collect_rich_rule_occurrences(system_state_train,log_func=None)
                 _hist_map=ncaaf_v13_value_architecture.get("historical_system_history") or {}
                 for _nm,_recs in _rich_rule_registry.items():
                     _entry=_hist_map.setdefault(_nm,{"source_validation_pass":True,"occurrences":[],"season_stats":{}})
                     _entry["rich_occurrences"]=_recs
                 ncaaf_v13_value_architecture["historical_system_history"]=_hist_map
+                _pre_keys={str(_r.get("key")) for _recs in _rich_rule_registry.values() for _r in list(_recs or []) if isinstance(_r,dict) and _r.get("key")}
+                print(f"[V13.2-RICH-RULE-REGISTRY-PREMARKET] rules={len(_rich_rule_registry)} unique_rule_side_keys={len(_pre_keys)} stage=BEFORE_MARKET_TIMING role=PARTIAL_AVAILABILITY_AUDIT")
                 _hist_games=set((historical_core_expert or {}).get("canonical_history_game_keys") or []) if isinstance(historical_core_expert,dict) else set()
                 _rich_games={k for k in _v132_canonical_game_keys(system_state_train).tolist() if k}
                 _ov=_hist_games & _rich_games; _un=_hist_games | _rich_games
@@ -24214,6 +24401,45 @@ def train_sharp_model_from_bq(
             df_market = attach_pathi_bigal_training_features_lowmem(df_market, system_state_train)
         else:
             df_market = add_pathi_football_key_features(df_market)
+
+        # V13.2.7: augment the rich-rule registry AFTER snapshot/market-structure
+        # features and low-memory deterministic state have both been attached.
+        # The early registry proves current-game availability; this enriched pass
+        # captures Pathi key crossings/hooks and any other rule whose trigger needs
+        # market timing.  Canonical keys de-duplicate snapshots and history overlap.
+        if (str(sport).upper().strip()=="NCAAF" and _sys_norm_market(market)=="spreads"
+                and isinstance(ncaaf_v13_value_architecture,dict)):
+            try:
+                _enriched_registry=_v132_collect_rich_rule_occurrences(df_market,log_func=None)
+                _hist_map=ncaaf_v13_value_architecture.get("historical_system_history") or {}
+                _all_rule_keys=set(); _by_rule_season={}
+                for _nm,_recs in _enriched_registry.items():
+                    _entry=_hist_map.setdefault(_nm,{"source_validation_pass":True,"occurrences":[],"season_stats":{}})
+                    _merged={}
+                    for _r in list(_entry.get("rich_occurrences") or [])+list(_recs or []):
+                        if not isinstance(_r,dict): continue
+                        _k=str(_r.get("key","") or "")
+                        if _k: _merged[_k]=dict(_r)
+                    _entry["rich_occurrences"]=list(_merged.values())
+                    for _r in _entry["rich_occurrences"]:
+                        _k=str(_r.get("key","") or "")
+                        if _k: _all_rule_keys.add(_k)
+                        _yr=_r.get("season")
+                        if _yr is not None:
+                            try: _yr=int(_yr)
+                            except Exception: continue
+                            _by_rule_season[_yr]=_by_rule_season.get(_yr,0)+1
+                ncaaf_v13_value_architecture["historical_system_history"]=_hist_map
+                ncaaf_v13_value_architecture["rich_rule_registry_enriched"]={
+                    "rules":len(_enriched_registry),"unique_rule_side_keys":len(_all_rule_keys),
+                    "by_season_rule_occurrences":dict(sorted(_by_rule_season.items())),
+                    "stage":"POST_MARKET_TIMING_AND_DETERMINISTIC_ATTACH",
+                    "role":"OPTIONAL_ENRICHMENT_NOT_SEPARATE_DATASET",
+                }
+                print(f"[V13.2-RICH-RULE-REGISTRY-ENRICHED] rules={len(_enriched_registry)} unique_rule_side_keys={len(_all_rule_keys)} by_season_rule_occurrences={dict(sorted(_by_rule_season.items()))} stage=POST_MARKET_TIMING_AND_DETERMINISTIC_ATTACH double_counted=0")
+            except Exception as _rich_enrich_exc:
+                print(f"[V13.2-RICH-RULE-REGISTRY-ENRICHED] unavailable: {_rich_enrich_exc}")
+
         # V12.0.9 Historical Core is diagnostic-only; independent Pathi/Big Al system memory
         # is future-only and leakage-gated at the same full-history cutoff.
         df_market = apply_historical_core_expert_feature(df_market, historical_core_expert, market)
@@ -32399,7 +32625,7 @@ def train_sharp_model_from_bq(
                     _min_stage=max(500,int(np.ceil(0.80*len(y_hold_vec))))
                     if int(_p13_ok.sum())>=_min_stage:
                         _artifact_hold_prob=np.asarray(_p13_hold,dtype=float)
-                        _artifact_probability_source="V13_2_5"
+                        _artifact_probability_source="V13_2_7"
                         print(f"[V13.1-ARTIFACT-STAGE] status=READY rows={int(_p13_ok.sum())}/{len(y_hold_vec)} core_source=RAW_OUTCOME_AUTOFS outer_holdout_recipe_tuning=FALSE")
                     else:
                         print(f"[V13.1-ARTIFACT-STAGE] status=CLOSED reason=INSUFFICIENT_FINAL_PROB_COVERAGE rows={int(_p13_ok.sum())}/{len(y_hold_vec)} required={_min_stage}")
@@ -32415,7 +32641,7 @@ def train_sharp_model_from_bq(
                 _promotion_horizon=((_gs-_ss).dt.total_seconds()/3600.0).to_numpy(dtype=float)
             _promotion_segments=np.full(len(y_hold_vec),"CORE_ONLY",dtype=object)
             try:
-                if _artifact_probability_source=="V13_2_5" and isinstance(_p13_info,dict):
+                if _artifact_probability_source=="V13_2_7" and isinstance(_p13_info,dict):
                     _si=_p13_info.get("specialist_info") or {}; _bits=[[] for _ in range(len(y_hold_vec))]
                     _fi=_p13_info.get("fundamental_info") or {}; _fa=np.asarray(_fi.get("active",np.zeros(len(y_hold_vec))),dtype=int); _fr=np.asarray(_fi.get("regime",np.full(len(y_hold_vec),"UNKNOWN",dtype=object)),dtype=object)
                     for _i in np.where(_fa>0)[0]: _bits[_i].append("FUND:"+str(_fr[_i]))
