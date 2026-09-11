@@ -14801,15 +14801,15 @@ def _hc_apply_system_memory(out: pd.DataFrame, hb: dict) -> pd.DataFrame:
 #     plus information available before kickoff.
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
-NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.4-observed-stats-unshrunk-latent-state-separate"
+NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.5-observed-stats-unshrunk-latent-state-separate"
 
 # ============================================================================
 # V13 NCAAF VALUE ARCHITECTURE
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-11-v13.2.4-canonical-evidence-unshrunk-stats"
-NCAAF_V13_HOTFIX = "V13_2_4__CANONICAL_GAME_EVIDENCE__HIST_SYSTEM_BASE_AUTHORITY__RICH_CONTEXT_MODIFIER__OBSERVED_STATS_UNSHRUNK"
+NCAAF_V13_VERSION = "2026-09-11-v13.2.5-canonical-evidence-unshrunk-stats"
+NCAAF_V13_HOTFIX = "V13_2_5__CANONICAL_GAME_EVIDENCE__HIST_SYSTEM_BASE_AUTHORITY__RICH_CONTEXT_MODIFIER__OBSERVED_STATS_UNSHRUNK"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -14840,7 +14840,7 @@ NCAAF_STAT_MODEL_FEATURES = (
 # post-source-cutoff, unique-game/team-side validation gate passes.  This prevents
 # a previously validated expert from receiving permanent authority when current-
 # season transfer is weak, while keeping the lane available to earn influence.
-NCAAF_STAT_PROTECTED_ROUTE_VERSION = "2026-09-08-v12.2.0-core-incremental-freshness-gated"
+NCAAF_STAT_PROTECTED_ROUTE_VERSION = "2026-09-11-v12.2.1-source-contract-wiring-vs-trust-gate"
 NCAAF_STAT_PROTECTED_MAX_EDGE_WEIGHT = 0.25
 NCAAF_STAT_PROTECTED_MAX_ABS_CORRECTION = 0.010
 NCAAF_STAT_PROTECTED_MIN_TRUST = 0.030
@@ -15089,13 +15089,42 @@ def _apply_ncaaf_stat_protected_route(base_prob, rows: pd.DataFrame, market: str
     sp=_rcol("NCAAF_Stat_Prob",np.nan).to_numpy(dtype=float)
     sb=_rcol("NCAAF_Stat_Market_Baseline_Prob",0.5).fillna(0.5).to_numpy(dtype=float)
     min_trust=float(cfg.get("min_row_trust",NCAAF_STAT_PROTECTED_MIN_TRUST))
-    eligible=active & np.isfinite(sp) & np.isfinite(sb) & np.isfinite(trust) & (trust>=min_trust)
-    info.update({"source_active":int(active.sum()),"eligible":int(eligible.sum())})
-    if int(active.sum())>0 and int(eligible.sum())==0:
-        info["status"]="FAIL_source_active_but_route_zero"
-        msg=f"[NCAAF-STAT-PROTECTED-CONTRACT] FAIL source_active={int(active.sum())} eligible=0 rows={len(p)} route={NCAAF_STAT_PROTECTED_ROUTE_VERSION}"
+    # V13.2.5 contract semantics: source wiring and deployment eligibility are
+    # different questions.  An active row with finite Stat probability/baseline/
+    # trust proves the protected route is wired even when its trust is below the
+    # deployment threshold.  The old contract incorrectly raised in that normal
+    # low-trust state, preventing the model from training at all.
+    source_wired=active & np.isfinite(sp) & np.isfinite(sb) & np.isfinite(trust)
+    eligible=source_wired & (trust>=min_trust)
+    n_active=int(active.sum()); n_wired=int(source_wired.sum()); n_eligible=int(eligible.sum())
+    info.update({
+        "source_active":n_active,
+        "source_wired":n_wired,
+        "eligible":n_eligible,
+        "trust_blocked":int(max(n_wired-n_eligible,0)),
+        "min_row_trust":float(min_trust),
+    })
+    strict_contract=bool(cfg.get("strict_source_contract",False))
+    if n_active>0 and n_wired==0:
+        info["status"]="FAIL_source_active_but_not_wired"
+        msg=(f"[NCAAF-STAT-PROTECTED-CONTRACT] FAIL source_active={n_active} "
+             f"source_wired=0 eligible={n_eligible} rows={len(p)} "
+             f"route={NCAAF_STAT_PROTECTED_ROUTE_VERSION}")
         if log_func is not None: log_func(msg)
-        if bool(cfg.get("strict_source_contract",False)): raise RuntimeError(msg)
+        if strict_contract: raise RuntimeError(msg)
+        return (p,info) if return_info else p
+    if n_active>0 and n_eligible==0 and log_func is not None:
+        log_func(
+            f"[NCAAF-STAT-PROTECTED-CONTRACT] PASS source_active={n_active} "
+            f"source_wired={n_wired} eligible=0 trust_blocked={int(max(n_wired-n_eligible,0))} "
+            f"min_trust={min_trust:.4f} note=SOURCE_WIRED_DEPLOYMENT_TRUST_BELOW_MIN "
+            f"route={NCAAF_STAT_PROTECTED_ROUTE_VERSION}"
+        )
+    # A strict source-contract call is a wiring dry run, not a deployment test.
+    # Once finite source outputs exist, return unchanged probabilities and let the
+    # real freshness/trust gate be evaluated later on graded unique game-sides.
+    if strict_contract:
+        info["status"]="source_contract_pass" if n_active>0 else "source_contract_no_active_rows"
         return (p,info) if return_info else p
     gate_pass=bool(cfg.get("deployment_gate_pass",False))
     weight=float(cfg.get("effective_edge_weight",cfg.get("edge_weight",0.0))) if gate_pass else 0.0
@@ -15722,7 +15751,7 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
     # A game performance is measured against what that opponent had allowed/
     # produced BEFORE the game.  The residual itself is then shifted into future
     # games, so current-game statistics never leak into the current prediction.
-    # Q3/final blowout context is retained as diagnostic metadata only.  V13.2.4
+    # Q3/final blowout context is retained as diagnostic metadata only.  V13.2.5
     # does not rewrite the observed box-score performance; ML may learn whether
     # competitive-game context changes the predictive value of those observations.
     # -----------------------------------------------------------------
@@ -17755,7 +17784,7 @@ def _ncaaf_v13_paired_model_bootstrap(y,p12,p13,groups,reps=800,seed=13100):
 # ============================================================================
 # V13.1.2 CALIBRATED AUTOfs CORE + CONDITIONAL RESIDUAL EXPERTS
 # ============================================================================
-V13_SPECIALIST_OVERLAY_VERSION = "2026-09-11-v13.2.4-individual-rule-expert-stack"
+V13_SPECIALIST_OVERLAY_VERSION = "2026-09-11-v13.2.5-individual-rule-expert-stack"
 V13_SPECIALIST_WEIGHT_GRID = (0.0, 0.025, 0.05, 0.075, 0.10, 0.15)
 V13_SPECIALIST_MAX_TOTAL_WEIGHT = 0.20
 V13_SPECIALIST_MIN_OOF_ROWS = 500
@@ -17846,7 +17875,7 @@ V13_RESIDUAL_CORR_MAX_DISCOUNT = 0.50
 # Each deterministic trigger earns its own cross-fitted log-odds coefficient,
 # partially pooled toward its family on TRAINING data only. Shadow data is used
 # solely as a transfer veto; the outer champion holdout remains untouched.
-V132_RULE_EXPERT_VERSION = "2026-09-11-v13.2.4-historical-base-plus-rich-context-modifier"
+V132_RULE_EXPERT_VERSION = "2026-09-11-v13.2.5-historical-base-plus-rich-context-modifier"
 V132_RULE_MIN_SELECTION_GAMES = 12
 V132_RULE_MIN_SHADOW_GAMES = 5
 V132_RULE_MIN_FOLD_GAMES = 3
@@ -17855,7 +17884,7 @@ V132_RULE_MIN_POSITIVE_FOLD_FRAC = 0.60
 # Family pooling is deliberately modest: individual methodologies must be allowed
 # to differ. Historical rule evidence enters only as a leakage-safe, pre-season
 # weak prior and can never by itself open the deployment gate.
-# V13.2.4: predefined handicap systems are not reduced to a weak family prior.
+# V13.2.5: predefined handicap systems are not reduced to a weak family prior.
 # Their leakage-safe historical ATS record is the BASE expert. Market-rich data
 # learns an incremental context/redundancy modifier around that base. The observed
 # historical rate is not shrunk toward 50%; sample size controls whether the base
@@ -20165,7 +20194,7 @@ def _v132_fit_post_stack_calibration(y,selection_pred,shadow_pred,select_mask,sh
             f"shadow_ll={base_sh.get('logloss',np.nan):.6f}->{base_sh.get('logloss',np.nan):.6f}"
         )
         return {
-            "version":"2026-09-11-v13.2.4-post-stack-temperature",
+            "version":"2026-09-11-v13.2.5-post-stack-temperature",
             "temperature":1.0,"selected_temperature":1.0,"shadow_transfer_pass":True,
             "skipped_no_active_components":True,
             "selection_base_metrics":base_sel,"selection_calibrated_metrics":base_sel,
@@ -20181,7 +20210,7 @@ def _v132_fit_post_stack_calibration(y,selection_pred,shadow_pred,select_mask,sh
     transfer=bool(best_t==1.0 or (hm.any() and _ncaaf_v13_calibration_noninferior(base_sh,shcand,max_ece_increase=0.0025,max_reliability_increase=0.00075) and shcand.get("logloss",np.inf)<=base_sh.get("logloss",np.inf)+1e-12 and shcand.get("brier",np.inf)<=base_sh.get("brier",np.inf)+1e-12))
     active_t=best_t if transfer else 1.0
     log_func(f"[V13.2-POST-STACK-CAL] selected_T={best_t:.2f} active_T={active_t:.2f} shadow_transfer={'PASS' if transfer else 'CLOSED'} sel_ll={base_sel.get('logloss',np.nan):.6f}->{best.get('logloss',np.nan):.6f} shadow_ll={base_sh.get('logloss',np.nan):.6f}->{shcand.get('logloss',np.nan):.6f}")
-    return {"version":"2026-09-11-v13.2.4-post-stack-temperature","temperature":float(active_t),"selected_temperature":float(best_t),"shadow_transfer_pass":bool(transfer),"skipped_no_active_components":False,"selection_base_metrics":base_sel,"selection_calibrated_metrics":best,"shadow_base_metrics":base_sh,"shadow_calibrated_metrics":shcand}
+    return {"version":"2026-09-11-v13.2.5-post-stack-temperature","temperature":float(active_t),"selected_temperature":float(best_t),"shadow_transfer_pass":bool(transfer),"skipped_no_active_components":False,"selection_base_metrics":base_sel,"selection_calibrated_metrics":best,"shadow_base_metrics":base_sh,"shadow_calibrated_metrics":shcand}
 
 
 def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X_train: pd.DataFrame,
@@ -20733,7 +20762,7 @@ def _ncaaf_v13_compare_v12_holdout(hold_rows: pd.DataFrame, y_hold, p_v12, bundl
                 "coverage_gate_pass":coverage_ok,"coverage_by_season":_coverage,
                 "status":"INSUFFICIENT","promotion_gate_pass":False}
         log_func(f"[V13.1-CORE-RECIPE] status=INSUFFICIENT matched_rows={int(matched.sum())}/{len(d)} "
-                 f"match_rate={match_rate:.1%} matched_physical_games={matched_games} final_recipe=V13_2_4")
+                 f"match_rate={match_rate:.1%} matched_physical_games={matched_games} final_recipe=V13_2_5")
         return result
 
     m12=_ncaaf_v13_weighted_metrics(yy[matched],p12[matched],phys[matched])
@@ -20783,7 +20812,7 @@ def _ncaaf_v13_compare_v12_holdout(hold_rows: pd.DataFrame, y_hold, p_v12, bundl
         except Exception:
             market_met=None
 
-    log_func(f"[V13.1-CORE-RECIPE] status=DEVELOPMENT_ONLY comparator={comparator_name} final_recipe=V13_2_4 "
+    log_func(f"[V13.1-CORE-RECIPE] status=DEVELOPMENT_ONLY comparator={comparator_name} final_recipe=V13_2_5 "
              f"matched_rows={m13['n']} matched_physical_games={m13['games']} match_rate={match_rate:.1%} weighting=EQUAL_PHYSICAL_GAME "
              f"comparator_auc={m12['auc']:.4f} v13_raw_core_auc={mb['auc']:.4f} v13_core_auc={mc['auc']:.4f} v13_final_auc={m13['auc']:.4f} "
              f"comparator_ll={m12['logloss']:.6f} v13_ll={m13['logloss']:.6f} ll_improvement={ll_gain:+.6f} "
@@ -22654,7 +22683,7 @@ def apply_ncaaf_statistical_brain_feature(df: pd.DataFrame, sb, market: str):
         rec=np.clip(np.exp(-np.log(2)*age/730.),.20,1.0)
         state_fresh=pd.to_numeric(Xall.get("__Stat_State_Freshness",0.20),errors="coerce").fillna(0.20).clip(0,1).to_numpy(dtype=float)
         eff=np.clip(base_trust*sim*rec*state_fresh,0,1)
-        # V13.2.4: probability is the model's unshrunk structural opinion. Reliability,
+        # V13.2.5: probability is the model's unshrunk structural opinion. Reliability,
         # profile similarity and freshness remain separate metadata/features so the
         # downstream ML/gates can learn influence without rewriting performance.
         final=np.clip(np.asarray(rawp,dtype=float),.01,.99); edge=final-baseline
@@ -24126,7 +24155,9 @@ def train_sharp_model_from_bq(
                 )
                 print(
                     f"[NCAAF-STAT-PROTECTED-CONTRACT] source_active={_src_stat_info.get('source_active',0)} "
-                    f"eligible={_src_stat_info.get('eligible',0)} status={_src_stat_info.get('status')} PASS"
+                    f"source_wired={_src_stat_info.get('source_wired',0)} "
+                    f"eligible={_src_stat_info.get('eligible',0)} trust_blocked={_src_stat_info.get('trust_blocked',0)} "
+                    f"status={_src_stat_info.get('status')} PASS"
                 )
                 _sm_cfg = {
                     "enabled": True,
@@ -32281,7 +32312,7 @@ def train_sharp_model_from_bq(
                     _min_stage=max(500,int(np.ceil(0.80*len(y_hold_vec))))
                     if int(_p13_ok.sum())>=_min_stage:
                         _artifact_hold_prob=np.asarray(_p13_hold,dtype=float)
-                        _artifact_probability_source="V13_2_4"
+                        _artifact_probability_source="V13_2_5"
                         print(f"[V13.1-ARTIFACT-STAGE] status=READY rows={int(_p13_ok.sum())}/{len(y_hold_vec)} core_source=RAW_OUTCOME_AUTOFS outer_holdout_recipe_tuning=FALSE")
                     else:
                         print(f"[V13.1-ARTIFACT-STAGE] status=CLOSED reason=INSUFFICIENT_FINAL_PROB_COVERAGE rows={int(_p13_ok.sum())}/{len(y_hold_vec)} required={_min_stage}")
@@ -32297,7 +32328,7 @@ def train_sharp_model_from_bq(
                 _promotion_horizon=((_gs-_ss).dt.total_seconds()/3600.0).to_numpy(dtype=float)
             _promotion_segments=np.full(len(y_hold_vec),"CORE_ONLY",dtype=object)
             try:
-                if _artifact_probability_source=="V13_2_4" and isinstance(_p13_info,dict):
+                if _artifact_probability_source=="V13_2_5" and isinstance(_p13_info,dict):
                     _si=_p13_info.get("specialist_info") or {}; _bits=[[] for _ in range(len(y_hold_vec))]
                     _fi=_p13_info.get("fundamental_info") or {}; _fa=np.asarray(_fi.get("active",np.zeros(len(y_hold_vec))),dtype=int); _fr=np.asarray(_fi.get("regime",np.full(len(y_hold_vec),"UNKNOWN",dtype=object)),dtype=object)
                     for _i in np.where(_fa>0)[0]: _bits[_i].append("FUND:"+str(_fr[_i]))
