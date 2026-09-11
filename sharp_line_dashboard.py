@@ -14801,15 +14801,15 @@ def _hc_apply_system_memory(out: pd.DataFrame, hb: dict) -> pd.DataFrame:
 #     plus information available before kickoff.
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
-NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.5-observed-stats-unshrunk-latent-state-separate"
+NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.6-observed-stats-unshrunk-latent-state-separate"
 
 # ============================================================================
 # V13 NCAAF VALUE ARCHITECTURE
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-11-v13.2.5-canonical-evidence-unshrunk-stats"
-NCAAF_V13_HOTFIX = "V13_2_5__CANONICAL_GAME_EVIDENCE__HIST_SYSTEM_BASE_AUTHORITY__RICH_CONTEXT_MODIFIER__OBSERVED_STATS_UNSHRUNK"
+NCAAF_V13_VERSION = "2026-09-11-v13.2.6-canonical-registry-current-rich"
+NCAAF_V13_HOTFIX = "V13_2_6__UNIFIED_2022_2026_CANONICAL_REGISTRY__CURRENT_RICH_OVERLAP__HIST_SYSTEM_BASE_AUTHORITY__OBSERVED_STATS_UNSHRUNK"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -17875,7 +17875,7 @@ V13_RESIDUAL_CORR_MAX_DISCOUNT = 0.50
 # Each deterministic trigger earns its own cross-fitted log-odds coefficient,
 # partially pooled toward its family on TRAINING data only. Shadow data is used
 # solely as a transfer veto; the outer champion holdout remains untouched.
-V132_RULE_EXPERT_VERSION = "2026-09-11-v13.2.5-historical-base-plus-rich-context-modifier"
+V132_RULE_EXPERT_VERSION = "2026-09-11-v13.2.6-historical-base-plus-full-rich-registry"
 V132_RULE_MIN_SELECTION_GAMES = 12
 V132_RULE_MIN_SHADOW_GAMES = 5
 V132_RULE_MIN_FOLD_GAMES = 3
@@ -18923,7 +18923,7 @@ def _ncaaf_v131_fit_fundamental_overlay(bundle: dict, train_rows: pd.DataFrame, 
     if _cgu:
         _by=_cgu.get("by_season") or {}
         _bytxt=" | ".join(f"{yr}:hist={v.get('history',0)},rich={v.get('rich',0)},overlap={v.get('overlap',0)},unique={v.get('unique',0)}" for yr,v in sorted(_by.items()))
-        log_func(f"[CANONICAL-GAME-MERGE] history_unique={_cgu.get('history_unique',0)} rich_unique={_cgu.get('rich_unique',0)} overlap={_cgu.get('overlap',0)} history_only={_cgu.get('history_only',0)} rich_only={_cgu.get('rich_only',0)} unique_union={_cgu.get('unique_union',0)} double_counted=0 by_season={_bytxt}")
+        log_func(f"[CANONICAL-GAME-MERGE:FIT-WINDOW] history_unique={_cgu.get('history_unique',0)} rich_unique={_cgu.get('rich_unique',0)} overlap={_cgu.get('overlap',0)} history_only={_cgu.get('history_only',0)} rich_only={_cgu.get('rich_only',0)} unique_union={_cgu.get('unique_union',0)} double_counted=0 by_season={_bytxt}")
     select_mask=np.zeros(len(y),dtype=bool); shadow_mask=np.zeros(len(y),dtype=bool)
     for _,va in list(folds or []): select_mask[np.asarray(va,dtype=int)]=True
     for _,va in list(shadow_folds or []): shadow_mask[np.asarray(va,dtype=int)]=True
@@ -19845,9 +19845,68 @@ def _v132_canonical_side_keys(rows: pd.DataFrame) -> np.ndarray:
     return np.asarray(out,dtype=object)
 
 
+def _v132_canonical_game_keys(rows: pd.DataFrame) -> np.ndarray:
+    """Source-agnostic physical GAME key; side/snapshot multiplicity collapses to one game."""
+    n=0 if rows is None else len(rows)
+    if n==0: return np.asarray([],dtype=object)
+    dates=_v132_row_dates(rows); seasons=_v132_row_seasons(rows)
+    home=_hc_team_token(rows.get("Home_Team_Norm",rows.get("Home_Team",pd.Series("",index=rows.index))))
+    away=_hc_team_token(rows.get("Away_Team_Norm",rows.get("Away_Team",pd.Series("",index=rows.index))))
+    team=_hc_team_token(rows.get("Team_Norm",rows.get("Team",pd.Series("",index=rows.index))))
+    opp=_hc_team_token(rows.get("Opponent_Norm",rows.get("Opponent",pd.Series("",index=rows.index))))
+    out=[]
+    for i in range(n):
+        sv=int(seasons[i]) if np.isfinite(seasons[i]) else ""
+        ds=dates.iloc[i].strftime("%Y-%m-%d") if i < len(dates) and pd.notna(dates.iloc[i]) else ""
+        a=str(home.iloc[i]); b=str(away.iloc[i])
+        if not a or not b:
+            a=str(team.iloc[i]); b=str(opp.iloc[i])
+        pair=sorted([x for x in (a,b) if x])
+        if len(pair)<2: out.append("")
+        else: out.append(f"{sv}|{ds}|{pair[0]}|{pair[1]}")
+    return np.asarray(out,dtype=object)
+
+
+def _v132_collect_rich_rule_occurrences(rows: pd.DataFrame, log_func=print) -> dict:
+    """Collect one canonical occurrence per rule/game-side from ALL available rich rows.
+
+    This registry is evidence metadata only.  It does not add current/future rows to
+    the chronological modifier fit.  It exists so 2025/2026 rich information is
+    recognized as enrichment of the same physical games already present in history.
+    """
+    if rows is None or rows.empty: return {}
+    rr=rows.copy().reset_index(drop=True)
+    specs=_v132_rule_specs(rr); keys=_v132_canonical_side_keys(rr); seasons=_v132_row_seasons(rr); dates=_v132_row_dates(rr)
+    result={}
+    for sp in specs:
+        name=sp["name"]
+        try: trig=np.asarray(_v132_rule_trigger(rr,sp),dtype=bool)
+        except Exception: continue
+        recs={}
+        for i in np.flatnonzero(trig):
+            key=str(keys[i]) if i < len(keys) else ""
+            if not key or not key.strip("|"): continue
+            sv=int(seasons[i]) if i < len(seasons) and np.isfinite(seasons[i]) else None
+            ds=dates.iloc[i].strftime("%Y-%m-%d") if i < len(dates) and pd.notna(dates.iloc[i]) else ""
+            recs[key]={"key":key,"season":sv,"date":ds}
+        if recs: result[name]=list(recs.values())
+    if log_func:
+        all_keys=set()
+        by={}
+        for recs in result.values():
+            for r in recs:
+                k=str(r.get("key",'')); all_keys.add(k)
+                yr=r.get("season")
+                if yr is not None: by[int(yr)]=by.get(int(yr),0)+1
+        log_func(f"[V13.2-RICH-RULE-REGISTRY] rules={len(result)} unique_rule_side_keys={len(all_keys)} by_season_rule_occurrences={dict(sorted(by.items()))} role=EVIDENCE_ENRICHMENT_NOT_MODIFIER_TUNING")
+    return result
+
+
 def _v132_system_evidence_audit(name, src, trig, rows, groups, log_func=print):
     hist={str(r.get("key")) for r in list((src or {}).get("occurrences") or []) if isinstance(r,dict) and r.get("key")}
-    rkeys=_v132_canonical_side_keys(rows); rich={str(k) for k,m in zip(rkeys,np.asarray(trig,dtype=bool)) if m and str(k).strip("|")}
+    rkeys=_v132_canonical_side_keys(rows); fit_rich={str(k) for k,m in zip(rkeys,np.asarray(trig,dtype=bool)) if m and str(k).strip("|")}
+    registry_rich={str(r.get("key")) for r in list((src or {}).get("rich_occurrences") or []) if isinstance(r,dict) and r.get("key")}
+    rich=fit_rich | registry_rich
     overlap=hist & rich; union=hist | rich
     by={}
     for key in union:
@@ -19856,10 +19915,10 @@ def _v132_system_evidence_audit(name, src, trig, rows, groups, log_func=print):
         if yr:
             rec=by.setdefault(yr,{"history":0,"rich":0,"overlap":0,"unique":0})
             rec["history"]+=int(key in hist); rec["rich"]+=int(key in rich); rec["overlap"]+=int(key in overlap); rec["unique"]+=1
-    log_func(f"[SYSTEM-EVIDENCE] system={name} history_unique={len(hist)} rich_unique={len(rich)} overlap={len(overlap)} history_only={len(hist-overlap)} rich_only={len(rich-overlap)} unique_union={len(union)} double_counted=0")
+    log_func(f"[SYSTEM-EVIDENCE] system={name} history_unique={len(hist)} rich_fit_unique={len(fit_rich)} rich_registry_unique={len(rich)} overlap={len(overlap)} history_only={len(hist-overlap)} rich_only={len(rich-overlap)} unique_union={len(union)} double_counted=0")
     if by:
         log_func(f"[SYSTEM-EVIDENCE-BY-SEASON] system={name} "+" | ".join(f"{yr}:hist={v['history']},rich={v['rich']},overlap={v['overlap']},unique={v['unique']}" for yr,v in sorted(by.items())))
-    return {"history_unique":len(hist),"rich_unique":len(rich),"overlap":len(overlap),"history_only":len(hist-overlap),"rich_only":len(rich-overlap),"unique_union":len(union),"by_season":by}
+    return {"history_unique":len(hist),"rich_fit_unique":len(fit_rich),"rich_unique":len(rich),"overlap":len(overlap),"history_only":len(hist-overlap),"rich_only":len(rich-overlap),"unique_union":len(union),"by_season":by}
 
 
 
@@ -20141,7 +20200,7 @@ def _v132_fit_rule_expert_engine(y,base,rows,folds,shadow_folds,sample_weight=No
             "positive_folds":pos,"eligible_folds":len(frec),"required_positive_folds":need,"fold_records":frec,"canonical_evidence":evidence,
         }
         beta_oof[name]=bvec
-        log_func(f"[V13.2-RULE-EXPERT] family={fam} expert={name} gate={'PASS' if gate else 'CLOSED'} historical_authority={hist_authority} hist_n={profiles[name]['historical_sample']} hist_ats={profiles[name]['historical_raw_ats']:.4f} hist_beta={profiles[name]['historical_base_beta']:+.4f} rich_games={all_games} overlap={evidence.get('overlap',0)} modifier_gate={modifier_gate} modifier_beta={(modifier_beta if np.isfinite(modifier_beta) else np.nan):+.4f} sel_games={sel_games} shadow_games={sh_games} modifier_sel_ll={selll:+.6f} modifier_sel_br={selbr:+.6f} modifier_shadow_ll={shll:+.6f} modifier_shadow_br={shbr:+.6f} reasons={gate_reasons or modifier_reasons or ['PASS']}")
+        log_func(f"[V13.2-RULE-EXPERT] family={fam} expert={name} gate={'PASS' if gate else 'CLOSED'} historical_authority={hist_authority} hist_n={profiles[name]['historical_sample']} hist_ats={profiles[name]['historical_raw_ats']:.4f} hist_beta={profiles[name]['historical_base_beta']:+.4f} rich_fit_games={all_games} rich_registry={evidence.get('rich_unique',all_games)} overlap={evidence.get('overlap',0)} modifier_gate={modifier_gate} modifier_beta={(modifier_beta if np.isfinite(modifier_beta) else np.nan):+.4f} sel_games={sel_games} shadow_games={sh_games} modifier_sel_ll={selll:+.6f} modifier_sel_br={selbr:+.6f} modifier_shadow_ll={shll:+.6f} modifier_shadow_br={shbr:+.6f} reasons={gate_reasons or modifier_reasons or ['PASS']}")
 
     historical_selected=[n for n,p in profiles.items() if p.get("gate_pass") and p.get("historical_authority")]
     modern_candidates=[n for n,p in profiles.items() if p.get("gate_pass") and not p.get("historical_authority")]
@@ -22780,6 +22839,10 @@ def fit_historical_ncaaf_core_expert(market: str, log_func=print):
         "source_view": HISTORICAL_NCAAF_CORE_VIEW,
         "rows": int(len(hh_all)),
         "system_history": system_history,
+        # V13.2.6 canonical registry: history and rich are information layers on
+        # the same physical games, not separate eras/datasets.  Store compact game
+        # keys so later rich/current-season state can be unioned without double count.
+        "canonical_history_game_keys": [k for k in dict.fromkeys(_v132_canonical_game_keys(h).tolist()) if k],
         "deployment_enabled": False,  # V12.0.9: Historical Core remains diagnostic-only for NCAAF.
         "system_memory_deployment_enabled": True,
         "system_memory_cutoff_date": pd.Timestamp(hh_all["Game_Date"].max()).isoformat(),
@@ -23376,8 +23439,32 @@ def train_sharp_model_from_bq(
                 f"Pathi/Big Al state prepared: {_n_sys} numeric features "
                 f"({PATHI_BIGAL_FEATURE_VERSION}); low-memory attach deferred to market slice."
             )
-        except Exception:
-            pass
+            # V13.2.6: build the ALL-AVAILABLE rich registry before outcome/outer-
+            # holdout filtering.  2025 and 2026 rich rows therefore enrich the same
+            # canonical game records as historical/stat rows.  These rows are NOT
+            # used to tune the chronological 2025 modifier unless they are already
+            # in its training folds.
+            if isinstance(ncaaf_v13_value_architecture,dict):
+                _rich_rule_registry=_v132_collect_rich_rule_occurrences(system_state_train,log_func=print)
+                _hist_map=ncaaf_v13_value_architecture.get("historical_system_history") or {}
+                for _nm,_recs in _rich_rule_registry.items():
+                    _entry=_hist_map.setdefault(_nm,{"source_validation_pass":True,"occurrences":[],"season_stats":{}})
+                    _entry["rich_occurrences"]=_recs
+                ncaaf_v13_value_architecture["historical_system_history"]=_hist_map
+                _hist_games=set((historical_core_expert or {}).get("canonical_history_game_keys") or []) if isinstance(historical_core_expert,dict) else set()
+                _rich_games={k for k in _v132_canonical_game_keys(system_state_train).tolist() if k}
+                _ov=_hist_games & _rich_games; _un=_hist_games | _rich_games
+                _by={}
+                for _k in _un:
+                    try: _yr=int(str(_k).split("|",1)[0])
+                    except Exception: continue
+                    _r=_by.setdefault(_yr,{"history":0,"rich":0,"overlap":0,"unique":0})
+                    _r["history"]+=int(_k in _hist_games); _r["rich"]+=int(_k in _rich_games); _r["overlap"]+=int(_k in _ov); _r["unique"]+=1
+                ncaaf_v13_value_architecture["canonical_game_registry"]={"history_unique":len(_hist_games),"rich_unique":len(_rich_games),"overlap":len(_ov),"history_only":len(_hist_games-_ov),"rich_only":len(_rich_games-_ov),"unique_union":len(_un),"double_counted":0,"by_season":_by,"rich_role":"OPTIONAL_ENRICHMENT","fit_policy":"CHRONOLOGICAL_FOLDS_ONLY"}
+                _txt=" | ".join(f"{yr}:hist={v['history']},rich={v['rich']},overlap={v['overlap']},unique={v['unique']}" for yr,v in sorted(_by.items()))
+                print(f"[CANONICAL-GAME-REGISTRY] history_unique={len(_hist_games)} rich_unique={len(_rich_games)} overlap={len(_ov)} history_only={len(_hist_games-_ov)} rich_only={len(_rich_games-_ov)} unique_union={len(_un)} double_counted=0 by_season={_txt} rich_role=OPTIONAL_ENRICHMENT fit_policy=CHRONOLOGICAL_FOLDS_ONLY")
+        except Exception as _registry_exc:
+            print(f"[V13.2-RICH-REGISTRY] unavailable: {_registry_exc}")
     except Exception as _sys_exc:
         system_state_train = pd.DataFrame()
         # V12.0.2: preserve a real traceback in Cloud Run logs if this fail-closed
