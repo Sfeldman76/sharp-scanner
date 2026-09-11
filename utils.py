@@ -14827,8 +14827,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.6-observed-stats-unshrunk-latent-
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-11-v13.2.6-canonical-registry-current-rich"
-NCAAF_V13_HOTFIX = "V13_2_6__UNIFIED_2022_2026_CANONICAL_REGISTRY__CURRENT_RICH_OVERLAP__HIST_SYSTEM_BASE_AUTHORITY__OBSERVED_STATS_UNSHRUNK"
+NCAAF_V13_VERSION = "2026-09-11-v13.2.7-incremental-system-influence"
+NCAAF_V13_HOTFIX = "V13_2_7__UNIFIED_2022_2026__UNSHRUNK_SYSTEM_EVIDENCE__INCREMENTAL_CORE_INFLUENCE__POST_MARKET_RICH_RULE_REGISTRY"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -16404,7 +16404,13 @@ def _v132_runtime_hist_beta_vector(pr: dict, rows: pd.DataFrame) -> np.ndarray:
 
 
 def _v132_runtime_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict):
-    """Apply named systems exactly as trained: historical base + admitted rich modifier."""
+    """Apply named systems exactly as trained.
+
+    Historical ATS evidence remains intact inside each rule profile.  Runtime applies
+    the learned V13.2.7 incremental system-to-Core coefficient to the aggregate rule
+    probability move, matching training rather than treating the full historical
+    logit as automatically independent of Core.
+    """
     rows=_v132_runtime_prepare_rule_rows(rows)
     base=np.asarray(base_prob,dtype=float).copy(); n=len(base); final=base.copy()
     detail={
@@ -16457,9 +16463,28 @@ def _v132_runtime_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict)
         dd["residual_edge"][idx]=np.maximum(dd["residual_edge"][idx],np.abs(beta_active)); dd["independence"][idx]=np.minimum(dd["independence"][idx],indep)
         for j in idx: dd["names"][j]=name if dd["names"][j]=="OTHER" else str(dd["names"][j])+"+"+name
         full=np.zeros(n); full[idx]=actual; prev.append((name,active,full,hist_auth))
+
+    # Training/runtime parity for V13.2.7 incremental influence.  The system record
+    # is not changed; only its aggregate probability contribution beyond Core is
+    # scaled by the coefficient learned on chronological OOF and transferred to shadow.
+    _scale=float(np.clip(engine.get("rule_stack_incremental_scale",1.0) or 0.0,0.0,1.0))
+    raw_final=final.copy()
+    ok=np.isfinite(base)&np.isfinite(raw_final)
+    scaled_final=base.copy()
+    if ok.any():
+        _delta=_v13_overlay_logit(np.clip(raw_final[ok],1e-6,1-1e-6))-_v13_overlay_logit(np.clip(base[ok],1e-6,1-1e-6))
+        scaled_final[ok]=_v13_overlay_sigmoid(_v13_overlay_logit(np.clip(base[ok],1e-6,1-1e-6))+_scale*_delta)
+    raw_delta=raw_final-base; scaled_delta=scaled_final-base
+    ratio=np.zeros(n,dtype=float); nz=np.isfinite(raw_delta)&(np.abs(raw_delta)>1e-12)
+    ratio[nz]=scaled_delta[nz]/raw_delta[nz]
+    ratio=np.clip(np.where(np.isfinite(ratio),ratio,0.0),0.0,1.0)
+    final=np.clip(scaled_final,0.01,0.99)
     for fam in ("Pathi","BigAl"):
-        detail[fam]["prob"]=np.clip(base+detail[fam]["contribution"],0.01,0.99); detail[fam]["regime"]=detail[fam].pop("names")
-    return np.clip(final,0.01,0.99),detail
+        detail[fam]["contribution"]*=ratio
+        detail[fam]["prob"]=np.clip(base+detail[fam]["contribution"],0.01,0.99)
+        detail[fam]["incremental_scale"]=np.full(n,_scale,dtype=float)
+        detail[fam]["regime"]=detail[fam].pop("names")
+    return final,detail
 
 def _v1312_runtime_residual_specialists(base_prob,family_probs,labels,centers,engine):
     base=np.asarray(base_prob,dtype=float).copy(); n=len(base); total=np.zeros(n); details={}; prev={}; profiles=(engine.get('profiles') or {}) if isinstance(engine,dict) else {}; corr=(engine.get('pairwise_corr') or {}) if isinstance(engine,dict) else {}; seq=(engine.get('sequence') or ['Market','BigAl','Pathi']) if isinstance(engine,dict) else ['Market','BigAl','Pathi']; fam_cap=float((engine or {}).get('max_family_delta',0.02)); total_cap=float((engine or {}).get('max_total_delta',0.03))
