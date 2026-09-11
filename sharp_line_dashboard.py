@@ -424,9 +424,11 @@ PATHI_FOOTBALL_MODEL_FEATURES = [
     "Pathi_FB_Dog_Below_Key_3", "Pathi_FB_Dog_Below_Key_7",
     "Pathi_FB_Favorite_Laying_Hook_3", "Pathi_FB_Favorite_Laying_Hook_7",
 
-    # Dog price bands
+    # Dog price bands + user-provided Pathi total/spread-gap system
     "Pathi_FB_Dog_0_to_3", "Pathi_FB_Dog_3_to_3_5", "Pathi_FB_Dog_3_5_to_6_5",
     "Pathi_FB_Dog_On_7", "Pathi_FB_Dog_Above_7", "Pathi_FB_Dog_10_Plus",
+    "Pathi_FB_Dog_TotalSpread_Gap_LE10", "Pathi_FB_Dog_TotalSpread_Gap_LE10_DataReady",
+    "Pathi_FB_TotalSpread_Gap", "Pathi_FB_Dog_Implied_Team_Total",
 
     # Opening/current key value
     "Pathi_FB_Current_Key_Value", "Pathi_FB_Opening_Key_Value",
@@ -1857,7 +1859,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         "ATS_Win_Streak_Prior", "ATS_Loss_Streak_Prior", "Days_Since_Last_Game_System",
         "Games_Last_2_Days_System", "Games_Last_4_Days_System", "Games_Last_7_Days_System",
         "Is_B2B_System", "Is_3in4_System", "Had_Bye_Last_Game_System", "BigAl_Context_Had_Bye_Proxy",
-        "Prev_SU_Win", "Prev_SU_Loss", "Prev_SU_Margin", "Prev_Points_For", "Prev_Points_Against",
+        "Prev_SU_Win", "Prev_SU_Loss", "Prev_SU_Margin", "Prev_Points_For", "Prev_Points_Against", "Prev_Spread_Value",
         "Prev_ATS_Win", "Prev_ATS_Loss", "Prev_ATS_Cover_Margin", "Prev2_SU_Win", "Prev2_SU_Loss",
         "Prev2_ATS_Win", "Prev2_ATS_Loss", "Prev2_ATS_Cover_Margin",
         "Prev3_SU_Win", "Prev3_SU_Loss", "Prev3_ATS_Win", "Prev3_ATS_Loss", "Prev3_ATS_Cover_Margin",
@@ -2121,6 +2123,18 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     ).astype("int8")
     s["BigAl_CF2_Away_Tightener"] = (s["BigAl_CF2_LateSeasonRevengeDog"].eq(1) & n("Is_Home").eq(0)).astype("int8")
 
+    # User-provided Big Al NCAAF system (2026-09-11): fade a team in its next game
+    # after it was favored by 19+ points and lost outright.  Flags are always placed
+    # on the recommended PLAY-ON side, so this checks the current opponent's prior
+    # game state rather than flagging the team being faded.
+    s["BigAl_CF3_Fade19PlusFavoriteUpsetLoss_DataReady"] = (
+        is_ncaaf & ready("Opp_Prev_Spread_Value", "Opp_Prev_SU_Loss")
+    ).astype("int8")
+    s["BigAl_CF3_Fade19PlusFavoriteUpsetLoss"] = (
+        is_ncaaf & n("Is_Regular_Season").fillna(1).eq(1) &
+        n("Opp_Prev_Spread_Value").le(-19.0) & n("Opp_Prev_SU_Loss").eq(1)
+    ).astype("int8")
+
     # NBA 1 - consecutive-game rematch, double-digit road dog lost SU and ATS prior meeting.
     s["BigAl_NBA1_B2BRematchRoadDog_DataReady"] = ready("Immediate_Rematch_Flag", "Spread_Value", "Prev_SU_Loss", "Prev_ATS_Loss").astype("int8")
     s["BigAl_NBA1_B2BRematchRoadDog"] = (
@@ -2278,6 +2292,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         "BigAl_NFL5_PreseasonLowOffenseOver": (is_nfl, ["Is_Preseason", "Avg_Points_For_Prior", "Opp_Avg_Points_For_Prior"]),
         "BigAl_CF1_Week2Home42Win": (is_ncaaf, ["Team_Game_Number", "Is_Home", "Prev_SU_Win", "Prev_Points_For", "Is_Conference_Game", "Opp_Revenge_Flag_Current"]),
         "BigAl_CF2_LateSeasonRevengeDog": (is_ncaaf, ["Is_Regular_Season", "Team_Game_Number", "Revenge_Flag_Current", "Spread_Value", "Prev_Points_For"]),
+        "BigAl_CF3_Fade19PlusFavoriteUpsetLoss": (is_ncaaf, ["Is_Regular_Season", "Opp_Prev_Spread_Value", "Opp_Prev_SU_Loss"]),
         "BigAl_NBA1_B2BRematchRoadDog": (is_nba, ["Is_Regular_Season", "Immediate_Rematch_Flag", "Is_Home", "Spread_Value", "Prev_SU_Loss", "Prev_ATS_Loss"]),
         "BigAl_NBA2_ThreeMassiveCovers": (is_nba, ["Is_Home", "Prev_ATS_Cover_Margin", "Prev2_ATS_Cover_Margin", "Prev3_ATS_Cover_Margin"]),
         "BigAl_NBA3_FadeHomeAfterChampUpset": (is_nba, ["Opp_Is_Home", "Opp_Prev_SU_Win", "Opp_Prev_Is_Road_Dog_9Plus", "Opp_Prev_Opponent_Is_Defending_Champion"]),
@@ -2333,6 +2348,9 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     _set_bigal_match("BigAl_CF2_LateSeasonRevengeDog", is_ncaaf, [
         n("Is_Regular_Season").eq(1), n("Team_Game_Number").ge(9), n("Revenge_Flag_Current").eq(1),
         n("Spread_Value").gt(0), n("Prev_Points_For").gt(50),
+    ])
+    _set_bigal_match("BigAl_CF3_Fade19PlusFavoriteUpsetLoss", is_ncaaf, [
+        n("Is_Regular_Season").eq(1), n("Opp_Prev_Spread_Value").le(-19.0), n("Opp_Prev_SU_Loss").eq(1),
     ])
     _set_bigal_match("BigAl_NBA1_B2BRematchRoadDog", is_nba, [
         n("Is_Regular_Season").eq(1), n("Immediate_Rematch_Flag").eq(1), n("Is_Home").eq(0),
@@ -2498,7 +2516,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     bigal_base_cols = [
         "BigAl_NFL1_Week1FadePlayoffTeam", "BigAl_NFL2_LateSeasonHomeDog", "BigAl_NFL3_PlayoffHighScoreFade",
         "BigAl_NFL4_PreseasonContrarianMove", "BigAl_NFL5_PreseasonLowOffenseOver",
-        "BigAl_CF1_Week2Home42Win", "BigAl_CF2_LateSeasonRevengeDog",
+        "BigAl_CF1_Week2Home42Win", "BigAl_CF2_LateSeasonRevengeDog", "BigAl_CF3_Fade19PlusFavoriteUpsetLoss",
         "BigAl_NBA1_B2BRematchRoadDog", "BigAl_NBA2_ThreeMassiveCovers", "BigAl_NBA3_FadeHomeAfterChampUpset",
         "BigAl_NBA4_FinalHomeFavRevenge", "BigAl_NBA5_PlayoffBigDogVsChamp", "BigAl_NBA6_FinalsGame4",
         "BigAl_NBA7_TwoTeamEliminationUnder", "BigAl_NBA8_Revenge145FadeFavorite", "BigAl_CBB1_UglyDog20Losses",
@@ -2559,6 +2577,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         "BigAl_NFL5_PreseasonLowOffenseOver": "BIG AL NFL5 OVER",
         "BigAl_CF1_Week2Home42Win": "BIG AL CF1 Week 2",
         "BigAl_CF2_LateSeasonRevengeDog": "BIG AL CF2 Revenge Dog",
+        "BigAl_CF3_Fade19PlusFavoriteUpsetLoss": "BIG AL CF3 Fade 19+ Fav Upset Loss",
         "BigAl_NBA1_B2BRematchRoadDog": "BIG AL NBA1 Rematch Dog",
         "BigAl_NBA1_PriorLoss25_Tightener": "BIG AL NBA1 25+ Tightener",
         "BigAl_NBA2_ThreeMassiveCovers": "BIG AL NBA2 3 Massive Covers",
@@ -2888,12 +2907,12 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
         "Pathi_M6_WeakTeamNewChalk_Screen", "Pathi_M7_BadRoadFavoriteProfile",
         "Pathi_RoadFavLost_StillFavorite_Screen", "Pathi_RoleFlip_DogToFavorite_Cancel",
     ]
-    _pathi_spread = ["Pathi_M9_Plus15_PlusMoney"]
+    _pathi_spread = ["Pathi_M9_Plus15_PlusMoney", "Pathi_FB_Dog_TotalSpread_Gap_LE10"]
     _bigal_side = [
         "BigAl_NFL1_Week1FadePlayoffTeam", "BigAl_NFL1_HomeTightener",
         "BigAl_NFL2_LateSeasonHomeDog", "BigAl_NFL2_OppOffATSLoss_Tightener",
         "BigAl_NFL3_PlayoffHighScoreFade", "BigAl_NFL4_PreseasonContrarianMove",
-        "BigAl_CF1_Week2Home42Win", "BigAl_CF2_LateSeasonRevengeDog", "BigAl_CF2_Away_Tightener",
+        "BigAl_CF1_Week2Home42Win", "BigAl_CF2_LateSeasonRevengeDog", "BigAl_CF2_Away_Tightener", "BigAl_CF3_Fade19PlusFavoriteUpsetLoss",
         "BigAl_NBA1_B2BRematchRoadDog", "BigAl_NBA1_PriorLoss25_Tightener",
         "BigAl_NBA2_ThreeMassiveCovers", "BigAl_NBA3_FadeHomeAfterChampUpset",
         "BigAl_NBA3_WinPct572_Tightener", "BigAl_NBA4_FinalHomeFavRevenge",
@@ -3020,6 +3039,7 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
         "BigAl_NFL5_PreseasonLowOffenseOver": "BIG AL NFL5 OVER",
         "BigAl_CF1_Week2Home42Win": "BIG AL CF1 Week 2",
         "BigAl_CF2_LateSeasonRevengeDog": "BIG AL CF2 Revenge Dog",
+        "BigAl_CF3_Fade19PlusFavoriteUpsetLoss": "BIG AL CF3 Fade 19+ Fav Upset Loss",
         "BigAl_NBA1_B2BRematchRoadDog": "BIG AL NBA1 Rematch Dog",
         "BigAl_NBA2_ThreeMassiveCovers": "BIG AL NBA2 3 Massive Covers",
         "BigAl_NBA3_FadeHomeAfterChampUpset": "BIG AL NBA3 Champ-Upset Fade",
@@ -3715,6 +3735,7 @@ BIGAL_EXACT_SIGNAL_COLS = (
     "BigAl_NFL5_PreseasonLowOffenseOver",
     "BigAl_CF1_Week2Home42Win",
     "BigAl_CF2_LateSeasonRevengeDog",
+    "BigAl_CF3_Fade19PlusFavoriteUpsetLoss",
     "BigAl_NBA1_B2BRematchRoadDog",
     "BigAl_NBA2_ThreeMassiveCovers",
     "BigAl_NBA8_Revenge145FadeFavorite",
@@ -3771,6 +3792,7 @@ PATHI_ROLE_CONTEXT_COLS = (
     "Pathi_FB_Dog_Below_Key_3", "Pathi_FB_Dog_Below_Key_7",
     "Pathi_FB_Favorite_Laying_Hook_3", "Pathi_FB_Favorite_Laying_Hook_7",
     "Pathi_FB_Usually_Dog_Now_Favorite", "Pathi_FB_Usually_Favorite_Now_Dog",
+    "Pathi_FB_Dog_TotalSpread_Gap_LE10",
 )
 
 # Introduced in V12.0.8: Pathi historical-memory roles. Symmetric key events describe the
@@ -3918,6 +3940,24 @@ def add_pathi_football_key_features(df: pd.DataFrame) -> pd.DataFrame:
     out["Pathi_FB_Dog_On_7"] = (is_dog & np.isclose(cur, 7.0, atol=1e-9)).astype("int8")
     out["Pathi_FB_Dog_Above_7"] = (is_dog & cur.gt(7.0) & cur.lt(10.0)).astype("int8")
     out["Pathi_FB_Dog_10_Plus"] = (is_dog & cur.ge(10.0)).astype("int8")
+
+    # User-provided Pathi football system (2026-09-11): when the underdog spread is
+    # within 10 points of the game total, play the dog.  Example: dog +56 / total 62
+    # => gap=6 and the dog qualifies.  Algebraically this means the market-implied
+    # dog team total is 5 points or fewer.  We preserve the exact rule as a binary
+    # expert and expose the continuous gap only as diagnostic/context.
+    _cur_total = _num_candidates("Current_Total", "Total_Value", "Total_Game")
+    _open_total = _num_candidates("Opening_Total", "TOT_Open", "Open_Total")
+    _system_total = _cur_total.combine_first(_open_total)
+    _system_spread = cur.where(_cur_total.notna(), opn.where(_open_total.notna(), cur))
+    _total_spread_gap = _system_total - _system_spread.abs()
+    _gap_ready = fb_spread & _system_total.notna() & _system_spread.notna() & _total_spread_gap.ge(0)
+    out["Pathi_FB_TotalSpread_Gap"] = _total_spread_gap.where(_gap_ready).astype("float32")
+    out["Pathi_FB_Dog_Implied_Team_Total"] = (_total_spread_gap / 2.0).where(_gap_ready & is_dog).astype("float32")
+    out["Pathi_FB_Dog_TotalSpread_Gap_LE10_DataReady"] = _gap_ready.astype("int8")
+    out["Pathi_FB_Dog_TotalSpread_Gap_LE10"] = (
+        _gap_ready & is_dog & _total_spread_gap.le(10.0)
+    ).astype("int8")
 
     # Engineering score for the value of the CURRENT number around 3/7/10/14.
     # Positive = favorable side of nearest key; negative = unfavorable side.
@@ -14340,23 +14380,47 @@ def _hc_prepare_bigal_history_state(h: pd.DataFrame, log_func=print) -> pd.DataF
     score=pd.to_numeric(s.get("Team_Score"),errors="coerce") if "Team_Score" in s.columns else pd.Series(np.nan,index=s.index)
     opp_score=pd.to_numeric(s.get("Opponent_Score"),errors="coerce") if "Opponent_Score" in s.columns else pd.Series(np.nan,index=s.index)
     cur_win=pd.Series(np.where(score.notna()&opp_score.notna(),(score>opp_score).astype(float),np.nan),index=s.index)
-    work=pd.DataFrame({"Season":s["Season"],"team":s["__hc_team"],"date":s["__hc_date"],"score":score,"win":cur_win},index=s.index).loc[order]
+    cur_loss=pd.Series(np.where(cur_win.notna(),1.0-cur_win,np.nan),index=s.index,dtype="float64")
+    work=pd.DataFrame({"Season":s["Season"],"team":s["__hc_team"],"date":s["__hc_date"],"score":score,"win":cur_win,"loss":cur_loss,"spread":pd.to_numeric(s.get("Spread_Value"),errors="coerce")},index=s.index).loc[order]
     prev_score=work.groupby(["Season","team"],dropna=False,sort=False)["score"].shift(1).reindex(s.index)
     prev_win=work.groupby(["Season","team"],dropna=False,sort=False)["win"].shift(1).reindex(s.index)
+    prev_loss=work.groupby(["Season","team"],dropna=False,sort=False)["loss"].shift(1).reindex(s.index)
+    prev_spread=work.groupby(["Season","team"],dropna=False,sort=False)["spread"].shift(1).reindex(s.index)
     ppf=pd.to_numeric(s.get("Prev_Points_For"),errors="coerce") if "Prev_Points_For" in s.columns else pd.Series(np.nan,index=s.index)
     psw=pd.to_numeric(s.get("Prev_SU_Win"),errors="coerce") if "Prev_SU_Win" in s.columns else pd.Series(np.nan,index=s.index)
+    psl=pd.to_numeric(s.get("Prev_SU_Loss"),errors="coerce") if "Prev_SU_Loss" in s.columns else pd.Series(np.nan,index=s.index)
+    psp=pd.to_numeric(s.get("Prev_Spread_Value"),errors="coerce") if "Prev_Spread_Value" in s.columns else pd.Series(np.nan,index=s.index)
     s["Prev_Points_For"]=ppf.where(ppf.notna(),prev_score)
     s["Prev_SU_Win"]=psw.where(psw.notna(),prev_win)
+    s["Prev_SU_Loss"]=psl.where(psl.notna(),prev_loss)
+    s["Prev_Spread_Value"]=psp.where(psp.notna(),prev_spread)
 
-    # Current revenge can be reconstructed from the most recent prior H2H outcome.
+    # Cross-SEASON H2H revenge reconstruction.  The Big Al CF1 source says the
+    # opponent must not be "playing with revenge"; limiting the lookup to the
+    # current season incorrectly made almost every Week-2 opponent unknown.
+    # Ordered team/opponent history lets us identify the immediately previous H2H
+    # meeting across seasons without using any future result.  No observed prior
+    # meeting is a legitimate no-revenge state (0), matching normal system logic.
+    _h2h=pd.DataFrame({
+        "team":s["__hc_team"],"opp":s["__hc_opp"],"date":s["__hc_date"],"win":cur_win
+    },index=s.index).loc[order]
+    _h2h_prev_win=_h2h.groupby(["team","opp"],dropna=False,sort=False)["win"].shift(1).reindex(s.index)
+    _h2h_prev_count=_h2h.groupby(["team","opp"],dropna=False,sort=False).cumcount().reindex(s.index)
+    _no_prior=_h2h_prev_count.eq(0)
+    _known_prior=_h2h_prev_count.gt(0)&_h2h_prev_win.notna()
+    _derived_rev=pd.Series(np.nan,index=s.index,dtype="float64")
+    _derived_rev.loc[_no_prior]=0.0
+    _derived_rev.loc[_known_prior]=(_h2h_prev_win.loc[_known_prior]<0.5).astype(float)
+    _derived_opp_rev=pd.Series(np.nan,index=s.index,dtype="float64")
+    _derived_opp_rev.loc[_no_prior]=0.0
+    _derived_opp_rev.loc[_known_prior]=(_h2h_prev_win.loc[_known_prior]>0.5).astype(float)
+
     rev=pd.to_numeric(s.get("Revenge_Flag_Current"),errors="coerce") if "Revenge_Flag_Current" in s.columns else pd.Series(np.nan,index=s.index)
-    if "Season_H2H_Last_SU_Win_Prior" in s.columns:
-        lastwin=pd.to_numeric(s["Season_H2H_Last_SU_Win_Prior"],errors="coerce")
-        derived_rev=pd.Series(np.where(lastwin.notna(),(lastwin<0.5).astype(float),np.nan),index=s.index)
-        rev=rev.where(rev.notna(),derived_rev)
+    rev=rev.where(rev.notna(),_derived_rev)
     s["Revenge_Flag_Current"]=rev
 
-    # Opponent revenge is the opponent-side current revenge state from the SAME game.
+    # Opponent revenge prefers an explicit same-game opponent state when available,
+    # then falls back to the mathematically equivalent prior-H2H reconstruction.
     opp_rev=pd.to_numeric(s.get("Opp_Revenge_Flag_Current"),errors="coerce") if "Opp_Revenge_Flag_Current" in s.columns else pd.Series(np.nan,index=s.index)
     game_key=None
     for c in ("Game_Key","Source_Game_ID","Merge_Key_Short"):
@@ -14369,12 +14433,29 @@ def _hc_prepare_bigal_history_state(h: pd.DataFrame, log_func=print) -> pd.DataF
         got=q.merge(mapper,on=["__g","__team"],how="left",sort=False)["__opp_rev"]
         got.index=s.index
         opp_rev=opp_rev.where(opp_rev.notna(),pd.to_numeric(got,errors="coerce"))
+    opp_rev=opp_rev.where(opp_rev.notna(),_derived_opp_rev)
     s["Opp_Revenge_Flag_Current"]=opp_rev
+
+    # Same-game opponent mirror for the new 19+ favorite upset-loss fade.
+    opp_prev_spread=pd.to_numeric(s.get("Opp_Prev_Spread_Value"),errors="coerce") if "Opp_Prev_Spread_Value" in s.columns else pd.Series(np.nan,index=s.index)
+    opp_prev_loss=pd.to_numeric(s.get("Opp_Prev_SU_Loss"),errors="coerce") if "Opp_Prev_SU_Loss" in s.columns else pd.Series(np.nan,index=s.index)
+    if game_key is not None:
+        mapper2=pd.DataFrame({"__g":s[game_key].astype(str),"__team":s["__hc_team"],"__ps":pd.to_numeric(s["Prev_Spread_Value"],errors="coerce"),"__pl":pd.to_numeric(s["Prev_SU_Loss"],errors="coerce")})
+        mapper2=mapper2.drop_duplicates(["__g","__team"],keep="last")
+        q2=pd.DataFrame({"__g":s[game_key].astype(str),"__team":s["__hc_opp"]})
+        got2=q2.merge(mapper2,on=["__g","__team"],how="left",sort=False)
+        got2.index=s.index
+        opp_prev_spread=opp_prev_spread.where(opp_prev_spread.notna(),pd.to_numeric(got2["__ps"],errors="coerce"))
+        opp_prev_loss=opp_prev_loss.where(opp_prev_loss.notna(),pd.to_numeric(got2["__pl"],errors="coerce"))
+    s["Opp_Prev_Spread_Value"]=opp_prev_spread
+    s["Opp_Prev_SU_Loss"]=opp_prev_loss
 
     log_func(
         f"[BIGAL-HISTORY-STATE] rows={len(s)} team_game_recomputed=TRUE existing_tgn_mismatch={mismatch} "
         f"prev_points_ready={int(pd.to_numeric(s['Prev_Points_For'],errors='coerce').notna().sum())} "
-        f"opp_revenge_ready={int(pd.to_numeric(s['Opp_Revenge_Flag_Current'],errors='coerce').notna().sum())} line_basis=OPENING_FIRST"
+        f"opp_revenge_ready={int(pd.to_numeric(s['Opp_Revenge_Flag_Current'],errors='coerce').notna().sum())} "
+        f"h2h_no_prior={int(_no_prior.sum())} h2h_known_prior={int(_known_prior.sum())} "
+        f"opp_prev_spread_ready={int(pd.to_numeric(s['Opp_Prev_Spread_Value'],errors='coerce').notna().sum())} line_basis=OPENING_FIRST"
     )
     return s.drop(columns=["__hc_date","__hc_team","__hc_opp"],errors="ignore")
 
@@ -14398,13 +14479,18 @@ def _hc_bigal_attrition_and_golden_audit(s: pd.DataFrame, log_func=print) -> dic
     m &= n("Prev_SU_Win").eq(1); cf1.append(("prev_win",uc(m)))
     m &= n("Prev_Points_For").gt(42); cf1.append(("prev_pts_gt42",uc(m)))
     m &= n("Is_Conference_Game").eq(0); cf1.append(("nonconf",uc(m)))
-    m &= n("Opp_Revenge_Flag_Current").eq(0); cf1.append(("opp_no_revenge",uc(m)))
+    _pre_opp=m.copy(); _or=n("Opp_Revenge_Flag_Current")
+    _opp_zero=uc(_pre_opp&_or.eq(0)); _opp_one=uc(_pre_opp&_or.eq(1)); _opp_unknown=uc(_pre_opp&_or.isna())
+    m &= _or.eq(0); cf1.append(("opp_no_revenge",uc(m)))
     cf2=[]
     q=n("Team_Game_Number").ge(9); cf2.append(("game9plus",uc(q)))
     q &= n("Revenge_Flag_Current").eq(1); cf2.append(("revenge",uc(q)))
     q &= n("Spread_Value").gt(0); cf2.append(("dog",uc(q)))
     q &= n("Prev_Points_For").gt(50); cf2.append(("prev_pts_gt50",uc(q)))
-    log_func("[BIGAL-RULE-ATTRITION] CF1 "+" -> ".join(f"{k}={v}" for k,v in cf1)+" | CF2 "+" -> ".join(f"{k}={v}" for k,v in cf2))
+    cf3=[]
+    r=n("Opp_Prev_Spread_Value").le(-19.0); cf3.append(("opp_prev_fav19plus",uc(r)))
+    r &= n("Opp_Prev_SU_Loss").eq(1); cf3.append(("opp_prev_lost_su",uc(r)))
+    log_func("[BIGAL-RULE-ATTRITION] CF1 "+" -> ".join(f"{k}={v}" for k,v in cf1)+f" [opp_rev_zero={_opp_zero} opp_rev_one={_opp_one} opp_rev_unknown={_opp_unknown}]"+" | CF2 "+" -> ".join(f"{k}={v}" for k,v in cf2)+" | CF3 "+" -> ".join(f"{k}={v}" for k,v in cf3))
 
     season=pd.to_numeric(s.get("Season"),errors="coerce") if "Season" in s.columns else pd.Series(np.nan,index=s.index)
     flag=pd.to_numeric(s.get("BigAl_CF1_Week2Home42Win"),errors="coerce").fillna(0).eq(1) if "BigAl_CF1_Week2Home42Win" in s.columns else pd.Series(False,index=s.index)
@@ -14416,7 +14502,7 @@ def _hc_bigal_attrition_and_golden_audit(s: pd.DataFrame, log_func=print) -> dic
         else: missing.append(label)
     passed=len(missing)==0
     log_func(f"[BIGAL-CF1-GOLDEN-2025] expected=10 found={len(found)} pass={'PASS' if passed else 'FAIL'} found={found} missing={missing}")
-    return {"cf1_golden_pass":passed,"cf1_golden_found":found,"cf1_golden_missing":missing,"cf1_attrition":cf1,"cf2_attrition":cf2}
+    return {"cf1_golden_pass":passed,"cf1_golden_found":found,"cf1_golden_missing":missing,"cf1_attrition":cf1,"cf2_attrition":cf2,"cf3_attrition":cf3}
 
 
 def _hc_build_system_history_stats(h: pd.DataFrame, log_func=print) -> dict:
@@ -14457,13 +14543,23 @@ def _hc_build_system_history_stats(h: pd.DataFrame, log_func=print) -> dict:
             posterior = float((wins + 15.0) / (n + 30.0))
             descriptive_trust = float((n / (n + 50.0)) * np.clip(abs(posterior - 0.5) / 0.08, 0.0, 1.0)) if n else 0.0
             _source_pass = bool(_bigal_source_audit.get("cf1_golden_pass",False)) if name=="BigAl_CF1_Week2Home42Win" else True
+            _source_validation = (
+                "BIGAL_CF1_2025_GOLDEN" if name=="BigAl_CF1_Week2Home42Win"
+                else ("USER_PROVIDED_BIGAL_RULE_2026_09_11" if name=="BigAl_CF3_Fade19PlusFavoriteUpsetLoss" else "DETERMINISTIC_RULE")
+            )
             _model_trust = descriptive_trust if _source_pass else 0.0
+            _season_stats={}
+            if "Season" in s_bigal.columns:
+                _sy=pd.to_numeric(s_bigal["Season"],errors="coerce")
+                for _yr in sorted(int(v) for v in _sy.loc[graded&_sy.notna()].unique()):
+                    _gm=graded&_sy.eq(_yr); _gn=int(_gm.sum()); _gw=float(target_bigal.loc[_gm].sum()) if _gn else 0.0
+                    _season_stats[str(_yr)]={"sample":_gn,"wins":_gw,"raw_ats":(float(_gw/_gn) if _gn else np.nan)}
             stats[name] = {
                 "family":"BigAl", "role":"directional", "ready":ready_n, "fired":fired_n,
                 "sample":n, "graded":n, "wins":wins, "raw_ats":raw_ats,
                 "posterior_prob":posterior, "descriptive_trust":descriptive_trust,
                 "trust":_model_trust,"source_validation_pass":_source_pass,
-                "source_validation":"BIGAL_CF1_2025_GOLDEN" if name=="BigAl_CF1_Week2Home42Win" else "DETERMINISTIC_RULE",
+                "source_validation":_source_validation,"season_stats":_season_stats,
             }
             ats_txt = f"{raw_ats:.3f}" if np.isfinite(raw_ats) else "NA"
             report_parts.append(
@@ -14494,11 +14590,19 @@ def _hc_build_system_history_stats(h: pd.DataFrame, log_func=print) -> dict:
                 descriptive_trust = float((n / (n + 50.0)) * np.clip(abs(posterior - 0.5) / 0.08, 0.0, 1.0)) if n else 0.0
                 role = "context" if name in PATHI_CONTEXT_ONLY_MEMORY_COLS else "directional"
                 model_trust = descriptive_trust if role == "directional" else 0.0
+                _season_stats={}
+                if "Season" in s_pathi.columns:
+                    _sy=pd.to_numeric(s_pathi["Season"],errors="coerce")
+                    for _yr in sorted(int(v) for v in _sy.loc[graded&_sy.notna()].unique()):
+                        _gm=graded&_sy.eq(_yr); _gn=int(_gm.sum()); _gw=float(target_pathi.loc[_gm].sum()) if _gn else 0.0
+                        _season_stats[str(_yr)]={"sample":_gn,"wins":_gw,"raw_ats":(float(_gw/_gn) if _gn else np.nan)}
                 stats[name] = {
                     "family":"Pathi", "role":role, "ready":ready_n, "fired":fired_n,
                     "sample":n, "graded":n, "wins":wins, "raw_ats":raw_ats,
                     "posterior_prob":posterior, "descriptive_trust":descriptive_trust,
                     "trust":model_trust,
+                    "source_validation":("USER_PROVIDED_PATHI_RULE_2026_09_11" if name=="Pathi_FB_Dog_TotalSpread_Gap_LE10" else "PATHI_FOOTBALL_CONCEPT"),
+                    "source_validation_pass":True,"season_stats":_season_stats,
                 }
                 ats_txt = f"{raw_ats:.3f}" if np.isfinite(raw_ats) else "NA"
                 report_parts.append(
@@ -14575,8 +14679,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-10-v13.2.0-individual-handicapper-expert-stack"
-NCAAF_V13_HOTFIX = "V13_2__RULE_LINEAGE__INDIVIDUAL_RESIDUAL_EXPERTS__POST_STACK_CALIBRATION"
+NCAAF_V13_VERSION = "2026-09-11-v13.2.2-history-rule-repair"
+NCAAF_V13_HOTFIX = "V13_2_2__CF1_REVENGE_REPAIR__LEAKSAFE_HIST_PRIORS__ROLE_PARITY__CAL_TRANSFER"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -17524,7 +17628,7 @@ def _ncaaf_v13_paired_model_bootstrap(y,p12,p13,groups,reps=800,seed=13100):
 # ============================================================================
 # V13.1.2 CALIBRATED AUTOfs CORE + CONDITIONAL RESIDUAL EXPERTS
 # ============================================================================
-V13_SPECIALIST_OVERLAY_VERSION = "2026-09-10-v13.2.0-individual-rule-expert-stack"
+V13_SPECIALIST_OVERLAY_VERSION = "2026-09-11-v13.2.2-individual-rule-expert-stack"
 V13_SPECIALIST_WEIGHT_GRID = (0.0, 0.025, 0.05, 0.075, 0.10, 0.15)
 V13_SPECIALIST_MAX_TOTAL_WEIGHT = 0.20
 V13_SPECIALIST_MIN_OOF_ROWS = 500
@@ -17615,13 +17719,18 @@ V13_RESIDUAL_CORR_MAX_DISCOUNT = 0.50
 # Each deterministic trigger earns its own cross-fitted log-odds coefficient,
 # partially pooled toward its family on TRAINING data only. Shadow data is used
 # solely as a transfer veto; the outer champion holdout remains untouched.
-V132_RULE_EXPERT_VERSION = "2026-09-10-v13.2.0-individual-rule-logit-offset"
+V132_RULE_EXPERT_VERSION = "2026-09-11-v13.2.2-individual-rule-logit-offset"
 V132_RULE_MIN_SELECTION_GAMES = 12
 V132_RULE_MIN_SHADOW_GAMES = 5
 V132_RULE_MIN_FOLD_GAMES = 3
 V132_RULE_MIN_READY_FOLDS = 2
 V132_RULE_MIN_POSITIVE_FOLD_FRAC = 0.60
-V132_RULE_PARTIAL_POOL_EQUIV_GAMES = 18.0
+# Family pooling is deliberately modest: individual methodologies must be allowed
+# to differ. Historical rule evidence enters only as a leakage-safe, pre-season
+# weak prior and can never by itself open the deployment gate.
+V132_RULE_PARTIAL_POOL_EQUIV_GAMES = 8.0
+V132_RULE_HIST_PRIOR_MAX_EQUIV_GAMES = 10.0
+V132_RULE_HIST_PRIOR_BETA_CAP = 0.35
 V132_RULE_BETA_LIMIT = 0.50
 V132_RULE_MIN_FINAL_BETA = 0.010
 V132_RULE_MAX_SINGLE_PROB_DELTA = 0.025
@@ -18156,10 +18265,17 @@ def _ncaaf_v131_calibration_fold_support(base: dict, cand: dict) -> bool:
 
 
 def _ncaaf_v131_calibration_gate(base: dict, cand: dict) -> bool:
+    """Strict V13.2.2 calibration admission.
+
+    A non-identity map is not allowed to buy prettier calibration diagnostics by
+    worsening either proper score on the aggregate OOF lane. Fold support still
+    uses the small noninferiority budget, but the final candidate must improve or
+    exactly preserve BOTH log loss and Brier and also improve reliability rank.
+    """
     if not _ncaaf_v131_calibration_proper_noninferior(base,cand): return False
     if not _ncaaf_v13_calibration_noninferior(base,cand,V13_CORE_CALIBRATION_MAX_ECE_INCREASE,V13_CORE_CALIBRATION_MAX_RELIABILITY_INCREASE): return False
-    proper_better=(cand.get("logloss",np.inf)<=base.get("logloss",np.inf)+1e-12 and cand.get("brier",np.inf)<=base.get("brier",np.inf)+1e-12)
-    return bool(_ncaaf_v131_calibration_is_better(base,cand) or proper_better)
+    strict_proper=(cand.get("logloss",np.inf)<=base.get("logloss",np.inf)+1e-12 and cand.get("brier",np.inf)<=base.get("brier",np.inf)+1e-12)
+    return bool(strict_proper and _ncaaf_v131_calibration_is_better(base,cand))
 
 
 def _ncaaf_v131_fit_calibration_params(method: str, p, y, weights=None):
@@ -18459,7 +18575,30 @@ def _ncaaf_v131_fit_core_calibration(bundle: dict, train_rows: pd.DataFrame, y_t
     final_params=_ncaaf_v131_fit_calibration_params(method,raw[fit_idx],y[fit_idx],wfit) if method!="identity" else {"method":"identity"}
     sh_pred=_ncaaf_v131_apply_calibration_params(raw[shadow_ok_mask],final_params) if shadow_ok_mask.any() else np.asarray([])
     sh_met=_ncaaf_v131_calibration_metrics(y[shadow_ok_mask],sh_pred,sw[shadow_ok_mask]) if shadow_ok_mask.any() else _ncaaf_v131_calibration_metrics([],[])
-    shadow_transfer=(method=="identity") or bool(sh_met["n"]>=200 and _ncaaf_v131_calibration_fold_support(base_shadow,sh_met))
+    _shadow_strict_proper=bool(
+        np.isfinite(sh_met.get("logloss",np.nan)) and np.isfinite(sh_met.get("brier",np.nan))
+        and sh_met.get("logloss",np.inf)<=base_shadow.get("logloss",np.inf)+1e-12
+        and sh_met.get("brier",np.inf)<=base_shadow.get("brier",np.inf)+1e-12
+    )
+    _shadow_cal_ok=bool(_ncaaf_v13_calibration_noninferior(
+        base_shadow,sh_met,V13_CORE_CALIBRATION_MAX_ECE_INCREASE,V13_CORE_CALIBRATION_MAX_RELIABILITY_INCREASE
+    ))
+    _shadow_rank_better=bool(_ncaaf_v131_calibration_is_better(base_shadow,sh_met))
+    shadow_transfer=(method=="identity") or bool(sh_met["n"]>=200 and _shadow_strict_proper and _shadow_cal_ok and _shadow_rank_better)
+    try:
+        _fd=dates.iloc[fit_idx] if len(fit_idx) else pd.Series([],dtype="datetime64[ns, UTC]")
+        _fit_min=None if len(_fd)==0 or pd.isna(_fd.min()) else str(_fd.min())
+        _fit_max=None if len(_fd)==0 or pd.isna(_fd.max()) else str(_fd.max())
+        _wf=np.asarray(wfit,dtype=float); _ess=float((_wf.sum()**2)/np.square(_wf).sum()) if len(_wf) and np.square(_wf).sum()>0 else 0.0
+    except Exception:
+        _fit_min=_fit_max=None; _ess=0.0
+    log_func(
+        f"[V13.2-CAL-TRANSFER] selected={selected} method={method} fit_rows={len(fit_idx)} ess={_ess:.1f} "
+        f"fit_date_min={_fit_min} fit_date_max={_fit_max} params={final_params} "
+        f"shadow_n={int(sh_met.get('n',0) or 0)} base_ll={base_shadow.get('logloss',np.nan):.6f} cand_ll={sh_met.get('logloss',np.nan):.6f} "
+        f"base_br={base_shadow.get('brier',np.nan):.6f} cand_br={sh_met.get('brier',np.nan):.6f} "
+        f"base_ece={base_shadow.get('ece',np.nan):.4f} cand_ece={sh_met.get('ece',np.nan):.4f} transfer={'PASS' if shadow_transfer else 'CLOSED'}"
+    )
     active_spec=selected_spec if shadow_transfer else {"name":"identity_global","method":"identity","scope":"global"}
     active_params=final_params if shadow_transfer else {"method":"identity"}
     active_method=str(active_spec.get("method","identity"))
@@ -19225,6 +19364,112 @@ def _v132_rule_balanced_weights(rows: pd.DataFrame, sample_weight=None) -> np.nd
     return out
 
 
+def _v132_prepare_rule_rows(rows: pd.DataFrame, log_func=None) -> pd.DataFrame:
+    """Rebuild deterministic handicapper flags from the live-safe row state.
+
+    V13.2.0 trusted stored rule columns too much.  The log exposed two symptoms:
+    Big Al historical/live coverage disagreed sharply, and the Pathi key-cross
+    DOG/FAVORITE interactions inherited a role column different from the one used
+    to build the parent flag.  Recompute the rowwise rules and repair only the
+    opponent-side aliases needed by named Big Al systems.
+    """
+    if rows is None or rows.empty:
+        return rows.copy() if rows is not None else rows
+    out=rows.copy()
+    try:
+        out=add_pathi_football_key_features(out)
+    except Exception as e:
+        if log_func: log_func(f"[V13.2-RULE-ROW-REBUILD] Pathi rebuild unavailable: {e}")
+
+    # Same-game opponent mirrors.  Do not recompute chronology from repeated quote
+    # rows; Prev_* and Revenge_Flag_Current are already pregame state at this grain.
+    try:
+        game_col=next((c for c in ("Game_Key","Merge_Key_Short") if c in out.columns),None)
+        team_col=next((c for c in ("Outcome_Norm","Outcome","Team_Norm","Team") if c in out.columns),None)
+        opp_col=next((c for c in ("Opponent_Norm","Opponent") if c in out.columns),None)
+        if game_col and team_col and opp_col:
+            g=out[game_col].astype(str).str.lower().str.strip()
+            team=_hc_team_token(out[team_col]); opp=_hc_team_token(out[opp_col])
+            mirror=pd.DataFrame({"__g":g,"__team":team,
+                "__rev":pd.to_numeric(out.get("Revenge_Flag_Current"),errors="coerce"),
+                "__ps":pd.to_numeric(out.get("Prev_Spread_Value"),errors="coerce"),
+                "__pl":pd.to_numeric(out.get("Prev_SU_Loss"),errors="coerce")})
+            mirror=mirror.drop_duplicates(["__g","__team"],keep="last")
+            q=pd.DataFrame({"__g":g,"__team":opp},index=out.index)
+            got=q.merge(mirror,on=["__g","__team"],how="left",sort=False); got.index=out.index
+            for dst,src in (("Opp_Revenge_Flag_Current","__rev"),("Opp_Prev_Spread_Value","__ps"),("Opp_Prev_SU_Loss","__pl")):
+                cur=pd.to_numeric(out.get(dst),errors="coerce") if dst in out.columns else pd.Series(np.nan,index=out.index)
+                out[dst]=cur.where(cur.notna(),pd.to_numeric(got[src],errors="coerce"))
+    except Exception as e:
+        if log_func: log_func(f"[V13.2-RULE-ROW-REBUILD] opponent mirror unavailable: {e}")
+
+    try:
+        out=add_pathi_bigal_rule_flags(out)
+    except Exception as e:
+        if log_func: log_func(f"[V13.2-RULE-ROW-REBUILD] BigAl rebuild unavailable: {e}")
+
+    if log_func:
+        try:
+            gg=_v132_rule_side_groups(out)
+            def gc(mask):
+                m=np.asarray(mask,dtype=bool); return int(len(pd.unique(gg[m]))) if m.any() else 0
+            parts=[]
+            for c in ("BigAl_CF1_Week2Home42Win","BigAl_CF2_LateSeasonRevengeDog","BigAl_CF_Enhancer_RevengeDog","BigAl_CF2_Away_Tightener","BigAl_CF3_Fade19PlusFavoriteUpsetLoss","Pathi_FB_Dog_TotalSpread_Gap_LE10"):
+                if c in out.columns:
+                    parts.append(f"{c}={gc(pd.to_numeric(out[c],errors='coerce').fillna(0).eq(1))}")
+            # Role parity uses the SAME current-line precedence as Pathi key features.
+            spread=pd.to_numeric(out.get("Value"),errors="coerce") if "Value" in out.columns else pd.Series(np.nan,index=out.index)
+            if "Spread_Value" in out.columns:
+                spread=spread.where(spread.notna(),pd.to_numeric(out["Spread_Value"],errors="coerce"))
+            for c in ("Pathi_FB_Crossed_Key_Toward_Team","Pathi_FB_Crossed_Key_Away_From_Team"):
+                if c in out.columns:
+                    m=pd.to_numeric(out[c],errors="coerce").fillna(0).eq(1).to_numpy()
+                    parts.append(f"{c}:dog={gc(m&(spread.to_numpy(dtype=float,na_value=np.nan)>0))},fav={gc(m&(spread.to_numpy(dtype=float,na_value=np.nan)<0))}")
+            log_func("[V13.2-RULE-ROW-REBUILD] "+" | ".join(parts))
+        except Exception as e:
+            log_func(f"[V13.2-RULE-ROW-REBUILD] audit unavailable: {e}")
+    return out
+
+
+def _v132_row_seasons(rows: pd.DataFrame) -> np.ndarray:
+    if rows is None or len(rows)==0: return np.asarray([],dtype=float)
+    ss=pd.to_numeric(rows.get("Season"),errors="coerce") if "Season" in rows.columns else pd.Series(np.nan,index=rows.index)
+    if ss.isna().any():
+        gs=pd.to_datetime(rows.get("Game_Start"),errors="coerce",utc=True) if "Game_Start" in rows.columns else pd.Series(pd.NaT,index=rows.index)
+        drv=_ncaaf_season_from_timestamp(gs)
+        ss=ss.where(ss.notna(),pd.to_numeric(drv,errors="coerce"))
+    return ss.to_numpy(dtype=float,na_value=np.nan)
+
+
+def _v132_history_prior(src: dict, cutoff_season) -> dict:
+    """Weak prior using ONLY historical seasons strictly before the evaluated season."""
+    out={"beta":0.0,"equiv_games":0.0,"sample":0,"wins":0.0,"posterior":0.5,"trust":0.0,"cutoff_season":None}
+    if not isinstance(src,dict) or not bool(src.get("source_validation_pass",True)): return out
+    try: cut=int(float(cutoff_season))
+    except Exception: return out
+    ss=src.get("season_stats") or {}; n=0; wins=0.0
+    for ky,rec in ss.items():
+        try: yr=int(float(ky))
+        except Exception: continue
+        if yr>=cut or not isinstance(rec,dict): continue
+        nn=int(rec.get("sample",0) or 0); ww=float(rec.get("wins",0.0) or 0.0)
+        n+=max(0,nn); wins+=ww
+    if n<=0: return out
+    post=float((wins+15.0)/(n+30.0))
+    trust=float((n/(n+50.0))*np.clip(abs(post-0.5)/0.08,0.0,1.0))
+    beta=float(np.clip(_v13_logit([post])[0]*trust,-V132_RULE_HIST_PRIOR_BETA_CAP,V132_RULE_HIST_PRIOR_BETA_CAP))
+    eq=float(np.clip(V132_RULE_HIST_PRIOR_MAX_EQUIV_GAMES*trust,0.0,V132_RULE_HIST_PRIOR_MAX_EQUIV_GAMES))
+    out.update({"beta":beta,"equiv_games":eq,"sample":int(n),"wins":float(wins),"posterior":post,"trust":trust,"cutoff_season":cut})
+    return out
+
+
+def _v132_combine_priors(family_beta: float, family_games: float, hist: dict) -> tuple[float,float]:
+    fg=float(max(0.0,family_games)); hb=float((hist or {}).get("beta",0.0) or 0.0); hg=float(max(0.0,(hist or {}).get("equiv_games",0.0) or 0.0))
+    den=fg+hg
+    if den<=0: return 0.0,0.0
+    return float((fg*float(family_beta)+hg*hb)/den),float(den)
+
+
 def _v132_rule_specs(rows: pd.DataFrame) -> list[dict]:
     specs=[]
     if rows is None: return specs
@@ -19232,12 +19477,14 @@ def _v132_rule_specs(rows: pd.DataFrame) -> list[dict]:
     # events remain available as interaction ingredients but never vote alone.
     for c in PATHI_DIRECTIONAL_MEMORY_COLS:
         if c in rows.columns:
-            specs.append({"name":c,"family":"Pathi","kind":"column","columns":[c],"source":"PATHI_FOOTBALL_DIRECTIONAL_CONCEPT"})
+            _src=("USER_PROVIDED_PATHI_RULE_2026_09_11" if c=="Pathi_FB_Dog_TotalSpread_Gap_LE10" else "PATHI_FOOTBALL_DIRECTIONAL_CONCEPT")
+            specs.append({"name":c,"family":"Pathi","kind":"column","columns":[c],"source":_src})
     # Big Al: only named NCAAF systems/enhancers/tighteners, never broad context.
     inv=list(BIGAL_EXACT_SIGNAL_COLS)+list(BIGAL_ENHANCER_COLS)+list(BIGAL_TIGHTENER_PARENT.keys())
     for c in dict.fromkeys(inv):
         if c in rows.columns and _system_feature_valid_for_sport(c,"NCAAF") and not _is_retired_bigal_feature_name(c):
-            specs.append({"name":c,"family":"BigAl","kind":"column","columns":[c],"source":"BIGAL_NAMED_RULE"})
+            _src=("USER_PROVIDED_BIGAL_RULE_2026_09_11" if c=="BigAl_CF3_Fade19PlusFavoriteUpsetLoss" else "BIGAL_NAMED_RULE")
+            specs.append({"name":c,"family":"BigAl","kind":"column","columns":[c],"source":_src})
     # Curated multi-hot Pathi interactions. They are independent candidate experts,
     # not replacements for the parent triggers, and survive only with OOF+shadow gain.
     for base in ("Pathi_FB_Crossed_Key_Toward_Team","Pathi_FB_Crossed_Key_Away_From_Team"):
@@ -19257,7 +19504,9 @@ def _v132_rule_trigger(rows: pd.DataFrame, spec: dict) -> np.ndarray:
         m &= np.abs(z)>0.5
     if spec.get("kind")=="column_role":
         spread=None
-        for c in ("Spread_Value","Value","Outcome_Market_Spread","Opening_Spread"):
+        # Match add_pathi_football_key_features(): current row Value is the
+        # authoritative selected-team line, then fall back to engineered aliases.
+        for c in ("Value","Spread_Value","Outcome_Market_Spread","Opening_Spread"):
             if c in rows.columns:
                 spread=pd.to_numeric(rows[c],errors="coerce").to_numpy(dtype=float,na_value=np.nan); break
         if spread is None: return np.zeros(n,dtype=bool)
@@ -19330,6 +19579,7 @@ def _v132_family_prior_beta(y,base,triggers,family,specs,idx,w,groups) -> float:
 
 
 def _v132_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict, beta_overrides: dict|None=None):
+    rows=_v132_prepare_rule_rows(rows,log_func=None)
     base=np.asarray(base_prob,dtype=float).copy(); n=len(base); final=base.copy()
     detail={"Pathi":{"contribution":np.zeros(n),"weight":np.zeros(n),"active":np.zeros(n,dtype=np.int8),"residual_edge":np.zeros(n),"independence":np.ones(n),"names":np.full(n,"OTHER",dtype=object)},
             "BigAl":{"contribution":np.zeros(n),"weight":np.zeros(n),"active":np.zeros(n,dtype=np.int8),"residual_edge":np.zeros(n),"independence":np.ones(n),"names":np.full(n,"OTHER",dtype=object)}}
@@ -19373,32 +19623,47 @@ def _v132_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict, beta_ov
 
 
 def _v132_fit_rule_expert_engine(y,base,rows,folds,shadow_folds,sample_weight=None,source_history=None,log_func=print):
-    """Fit one cross-fitted residual coefficient per deterministic handicapper rule."""
-    y=np.asarray(y,dtype=int); base=np.asarray(base,dtype=float); n=len(y); specs=_v132_rule_specs(rows); groups=_v132_rule_side_groups(rows); w=_v132_rule_balanced_weights(rows,sample_weight)
+    """Fit one cross-fitted residual coefficient per deterministic handicapper rule.
+
+    V13.2.2 uses freshly rebuilt rule flags and a WEAK historical prior composed
+    only from seasons strictly earlier than the fold being evaluated.  Historical
+    ATS evidence can stabilize a sparse coefficient, but it cannot open a gate:
+    selection OOF, later shadow, positive-fold and final portfolio tests are still
+    mandatory.
+    """
+    y=np.asarray(y,dtype=int); base=np.asarray(base,dtype=float); n=len(y)
+    rule_rows=_v132_prepare_rule_rows(rows,log_func=log_func)
+    specs=_v132_rule_specs(rule_rows); groups=_v132_rule_side_groups(rule_rows); w=_v132_rule_balanced_weights(rule_rows,sample_weight); seasons=_v132_row_seasons(rule_rows)
     select=np.zeros(n,dtype=bool); shadow=np.zeros(n,dtype=bool)
     for _,va in list(folds or []): select[np.asarray(va,dtype=int)]=True
     for _,va in list(shadow_folds or []): shadow[np.asarray(va,dtype=int)]=True
-    triggers={sp["name"]:_v132_rule_trigger(rows,sp) for sp in specs}; profiles={}; beta_oof={}; source_history=source_history or {}
+    triggers={sp["name"]:_v132_rule_trigger(rule_rows,sp) for sp in specs}; profiles={}; beta_oof={}; source_history=source_history or {}
     _fam_counts={fam:sum(1 for sp in specs if sp.get("family")==fam) for fam in ("Pathi","BigAl")}
-    log_func(f"[V13.2-RULE-INVENTORY] total={len(specs)} Pathi={_fam_counts['Pathi']} BigAl={_fam_counts['BigAl']} grain=PHYSICAL_GAME_SIDE active_subset_weighting=EQUAL_SIDE_MASS")
+    log_func(f"[V13.2-RULE-INVENTORY] total={len(specs)} Pathi={_fam_counts['Pathi']} BigAl={_fam_counts['BigAl']} grain=PHYSICAL_GAME_SIDE active_subset_weighting=EQUAL_SIDE_MASS historical_prior=PRE_SEASON_ONLY_WEAK")
     for sp in specs:
-        name=sp["name"]; fam=sp["family"]; trig=triggers[name]; bo=np.full(n,np.nan,dtype=float); bvec=np.full(n,np.nan,dtype=float); frec=[]
+        name=sp["name"]; fam=sp["family"]; trig=triggers[name]; parent=name.split("__",1)[0]; src=source_history.get(parent) or source_history.get(name) or {}
+        bo=np.full(n,np.nan,dtype=float); bvec=np.full(n,np.nan,dtype=float); frec=[]; hist_fold=[]
         for fi,(tr,va) in enumerate(list(folds or [])):
-            tr=np.asarray(tr,dtype=int); va=np.asarray(va,dtype=int); fam_prior=_v132_family_prior_beta(y,base,triggers,fam,specs,tr,w,groups)
-            trm=np.zeros(n,dtype=bool); trm[tr]=True; beta,ng=_v132_fit_offset_beta(y,base,trig&trm,w,groups,fam_prior,V132_RULE_PARTIAL_POOL_EQUIV_GAMES)
+            tr=np.asarray(tr,dtype=int); va=np.asarray(va,dtype=int)
+            fam_prior=_v132_family_prior_beta(y,base,triggers,fam,specs,tr,w,groups)
+            vs=seasons[va] if len(va) else np.asarray([]); cut=int(np.nanmin(vs)) if np.isfinite(vs).any() else None
+            hp=_v132_history_prior(src,cut); prior_beta,prior_games=_v132_combine_priors(fam_prior,V132_RULE_PARTIAL_POOL_EQUIV_GAMES,hp)
+            trm=np.zeros(n,dtype=bool); trm[tr]=True; beta,ng=_v132_fit_offset_beta(y,base,trig&trm,w,groups,prior_beta,prior_games)
             vm=np.zeros(n,dtype=bool); vm[va]=True; act=trig&vm&np.isfinite(base); vg=_v132_group_count(act,groups)
             if act.any():
                 bo[act]=_v13_sigmoid(_v13_logit(base[act])+beta); bvec[act]=beta
             if vg>=V132_RULE_MIN_FOLD_GAMES:
                 bm=_v132_prob_metrics(y,base,w,act,groups); fm=_v132_prob_metrics(y,bo,w,act,groups); llg=bm["logloss"]-fm["logloss"]; brg=bm["brier"]-fm["brier"]
-                frec.append({"fold":fi,"games":vg,"train_games":ng,"beta":beta,"ll_gain":llg,"brier_gain":brg,"positive":bool(beta>0 and llg>0 and brg>0)})
+                frec.append({"fold":fi,"games":vg,"train_games":ng,"beta":beta,"ll_gain":llg,"brier_gain":brg,"positive":bool(beta>0 and llg>0 and brg>0),"hist_prior":hp})
+            hist_fold.append(hp)
         sm=select&trig&np.isfinite(base)&np.isfinite(bo); sel_games=_v132_group_count(sm,groups); sb=_v132_prob_metrics(y,base,w,sm,groups); sf=_v132_prob_metrics(y,bo,w,sm,groups); selll=(sb["logloss"]-sf["logloss"]) if np.isfinite(sb["logloss"]) and np.isfinite(sf["logloss"]) else np.nan; selbr=(sb["brier"]-sf["brier"]) if np.isfinite(sb["brier"]) and np.isfinite(sf["brier"]) else np.nan
         pos=sum(1 for r in frec if r["positive"]); need=max(1,int(np.ceil(V132_RULE_MIN_POSITIVE_FOLD_FRAC*len(frec)))) if frec else 99
         fit_idx=np.flatnonzero(select&np.isfinite(base)); fam_prior=_v132_family_prior_beta(y,base,triggers,fam,specs,fit_idx,w,groups); fitmask=np.zeros(n,dtype=bool); fitmask[fit_idx]=True
-        final_beta,fit_games=_v132_fit_offset_beta(y,base,trig&fitmask,w,groups,fam_prior,V132_RULE_PARTIAL_POOL_EQUIV_GAMES)
+        sh_season=seasons[shadow] if shadow.any() else seasons[select]; fit_cut=int(np.nanmin(sh_season)) if np.isfinite(sh_season).any() else None
+        hp_final=_v132_history_prior(src,fit_cut); prior_beta,prior_games=_v132_combine_priors(fam_prior,V132_RULE_PARTIAL_POOL_EQUIV_GAMES,hp_final)
+        final_beta,fit_games=_v132_fit_offset_beta(y,base,trig&fitmask,w,groups,prior_beta,prior_games)
         shm=shadow&trig&np.isfinite(base); sh_games=_v132_group_count(shm,groups); shp=np.asarray(base,dtype=float).copy(); shp[shm]=_v13_sigmoid(_v13_logit(base[shm])+final_beta); shb=_v132_prob_metrics(y,base,w,shm,groups); shf=_v132_prob_metrics(y,shp,w,shm,groups); shll=(shb["logloss"]-shf["logloss"]) if np.isfinite(shb["logloss"]) and np.isfinite(shf["logloss"]) else np.nan; shbr=(shb["brier"]-shf["brier"]) if np.isfinite(shb["brier"]) and np.isfinite(shf["brier"]) else np.nan
-        parent=name.split("__",1)[0]; src=source_history.get(parent) or source_history.get(name) or {}; source_pass=bool(src.get("source_validation_pass",True))
-        all_games=_v132_group_count(trig&np.isfinite(base),groups)
+        source_pass=bool(src.get("source_validation_pass",True)); all_games=_v132_group_count(trig&np.isfinite(base),groups)
         gate_reasons=[]
         if not source_pass: gate_reasons.append("SOURCE_VALIDATION")
         if sel_games<V132_RULE_MIN_SELECTION_GAMES: gate_reasons.append(f"SELECTION_GAMES<{V132_RULE_MIN_SELECTION_GAMES}")
@@ -19412,13 +19677,12 @@ def _v132_fit_rule_expert_engine(y,base,rows,folds,shadow_folds,sample_weight=No
         if not np.isfinite(shbr) or shbr<0: gate_reasons.append("SHADOW_BRIER")
         gate=not gate_reasons
         frac=(pos/len(frec)) if frec else 0.0; trust=float(np.clip(0.30*min(1,sel_games/40)+0.35*frac+0.20*min(1,sh_games/15)+0.15*min(1,max(shll,0)/0.01 if np.isfinite(shll) else 0),0,0.90)) if gate else 0.0
-        profiles[name]={"family":fam,"source":sp.get("source"),"gate_pass":gate,"gate_reasons":gate_reasons,"source_validation_pass":source_pass,"all_trigger_games":all_games,"selection_games":sel_games,"shadow_games":sh_games,"fit_games":fit_games,"family_prior_beta":fam_prior,"final_beta":float(final_beta),"trust":trust,"selection_ll_gain":float(selll) if np.isfinite(selll) else np.nan,"selection_brier_gain":float(selbr) if np.isfinite(selbr) else np.nan,"shadow_ll_gain":float(shll) if np.isfinite(shll) else np.nan,"shadow_brier_gain":float(shbr) if np.isfinite(shbr) else np.nan,"positive_folds":pos,"eligible_folds":len(frec),"required_positive_folds":need,"fold_records":frec,"historical_sample":int(src.get("sample",0) or 0),"historical_posterior":float(src.get("posterior_prob",0.5) or 0.5),"historical_trust":float(src.get("trust",0.0) or 0.0)}
+        profiles[name]={"family":fam,"source":sp.get("source"),"gate_pass":gate,"gate_reasons":gate_reasons,"source_validation_pass":source_pass,"all_trigger_games":all_games,"selection_games":sel_games,"shadow_games":sh_games,"fit_games":fit_games,"family_prior_beta":fam_prior,"historical_prior_beta":float(hp_final.get("beta",0.0)),"historical_prior_equiv_games":float(hp_final.get("equiv_games",0.0)),"historical_prior_sample":int(hp_final.get("sample",0)),"historical_prior_posterior":float(hp_final.get("posterior",0.5)),"historical_prior_cutoff_season":hp_final.get("cutoff_season"),"combined_prior_beta":float(prior_beta),"combined_prior_equiv_games":float(prior_games),"final_beta":float(final_beta),"trust":trust,"selection_ll_gain":float(selll) if np.isfinite(selll) else np.nan,"selection_brier_gain":float(selbr) if np.isfinite(selbr) else np.nan,"shadow_ll_gain":float(shll) if np.isfinite(shll) else np.nan,"shadow_brier_gain":float(shbr) if np.isfinite(shbr) else np.nan,"positive_folds":pos,"eligible_folds":len(frec),"required_positive_folds":need,"fold_records":frec,"historical_sample":int(src.get("sample",0) or 0),"historical_posterior":float(src.get("posterior_prob",0.5) or 0.5),"historical_trust":float(src.get("trust",0.0) or 0.0)}
         beta_oof[name]=bvec
-        log_func(f"[V13.2-RULE-EXPERT] family={fam} expert={name} gate={'PASS' if gate else 'CLOSED'} reasons={gate_reasons or ['PASS']} source_pass={source_pass} all_games={all_games} sel_games={sel_games} shadow_games={sh_games} beta={final_beta:+.4f} trust={trust:.3f} sel_ll={selll:+.6f} sel_br={selbr:+.6f} shadow_ll={shll:+.6f} shadow_br={shbr:+.6f} folds={pos}/{len(frec)} hist_n={profiles[name]['historical_sample']}")
+        log_func(f"[V13.2-RULE-EXPERT] family={fam} expert={name} gate={'PASS' if gate else 'CLOSED'} reasons={gate_reasons or ['PASS']} source_pass={source_pass} all_games={all_games} sel_games={sel_games} shadow_games={sh_games} beta={final_beta:+.4f} trust={trust:.3f} sel_ll={selll:+.6f} sel_br={selbr:+.6f} shadow_ll={shll:+.6f} shadow_br={shbr:+.6f} folds={pos}/{len(frec)} hist_n={profiles[name]['historical_sample']} pre_cut_hist_n={hp_final.get('sample',0)} hist_prior_beta={hp_final.get('beta',0.0):+.4f} hist_eq={hp_final.get('equiv_games',0.0):.2f}")
 
     selected=[n for n,p in profiles.items() if p.get("gate_pass",False)]
     selected.sort(key=lambda n:(profiles[n].get("trust",0)*max(profiles[n].get("selection_ll_gain",0),0),profiles[n].get("selection_games",0)),reverse=True)
-    # Trigger correlation is computed on selection evidence only.
     corr={n:{} for n in selected}
     for i,a in enumerate(selected):
         xa=triggers[a][select].astype(float)
@@ -19426,50 +19690,24 @@ def _v132_fit_rule_expert_engine(y,base,rows,folds,shadow_folds,sample_weight=No
             xb=triggers[b][select].astype(float); rho=float(np.corrcoef(xa,xb)[0,1]) if len(xa)>=20 and np.std(xa)>0 and np.std(xb)>0 else 0.0
             if not np.isfinite(rho): rho=0.0
             corr[a][b]=rho; corr[b][a]=rho
-    # Selection-only portfolio construction.  Each rule has already passed its own
-    # active-subset OOF + disjoint-shadow gate above.  Now admit rules one at a time
-    # using ONLY selection OOF predictions, retaining a candidate only if the exact
-    # production combiner improves BOTH aggregate log loss and Brier.  Shadow is
-    # deliberately not consulted for subset choice; it remains a final frozen veto.
-    all_individually_qualified=list(selected)
-    kept=[]; greedy_records=[]; current_oof=np.asarray(base,dtype=float).copy()
-    sel_all=select&np.isfinite(base)
-    current_metrics=_ncaaf_v13_specialist_metrics(y[sel_all],current_oof[sel_all],w[sel_all])
+    all_individually_qualified=list(selected); kept=[]; greedy_records=[]; current_oof=np.asarray(base,dtype=float).copy(); sel_all=select&np.isfinite(base); current_metrics=_ncaaf_v13_specialist_metrics(y[sel_all],current_oof[sel_all],w[sel_all])
     for cand_name in all_individually_qualified:
-        trial_names=kept+[cand_name]
-        trial_engine={
-            "version":V132_RULE_EXPERT_VERSION,"gate_pass":True,"specs":specs,"profiles":profiles,
-            "selected_experts":trial_names,"pairwise_corr":corr
-        }
-        trial_oof,_=_v132_apply_rule_engine(base,rows,trial_engine,beta_overrides=beta_oof)
-        tm=_ncaaf_v13_specialist_metrics(y[sel_all],trial_oof[sel_all],w[sel_all])
-        llg=float(current_metrics.get("logloss",np.nan)-tm.get("logloss",np.nan))
-        brg=float(current_metrics.get("brier",np.nan)-tm.get("brier",np.nan))
-        accept=bool(np.isfinite(llg) and np.isfinite(brg) and llg>=-1e-12 and brg>=-1e-12 and (llg>1e-10 or brg>1e-10))
-        greedy_records.append({"expert":cand_name,"accepted":accept,"incremental_selection_ll_gain":llg,"incremental_selection_brier_gain":brg,"trial_experts":list(trial_names)})
-        log_func(f"[V13.2-RULE-PORTFOLIO] expert={cand_name} {'KEEP' if accept else 'REJECT'} incremental_sel_ll={llg:+.6f} incremental_sel_br={brg:+.6f} trial_n={len(trial_names)}")
-        if accept:
-            kept.append(cand_name); current_oof=trial_oof; current_metrics=tm
-
+        trial_names=kept+[cand_name]; trial_engine={"version":V132_RULE_EXPERT_VERSION,"gate_pass":True,"specs":specs,"profiles":profiles,"selected_experts":trial_names,"pairwise_corr":corr}
+        trial_oof,_=_v132_apply_rule_engine(base,rule_rows,trial_engine,beta_overrides=beta_oof); tm=_ncaaf_v13_specialist_metrics(y[sel_all],trial_oof[sel_all],w[sel_all]); llg=float(current_metrics.get("logloss",np.nan)-tm.get("logloss",np.nan)); brg=float(current_metrics.get("brier",np.nan)-tm.get("brier",np.nan)); accept=bool(np.isfinite(llg) and np.isfinite(brg) and llg>=-1e-12 and brg>=-1e-12 and (llg>1e-10 or brg>1e-10))
+        greedy_records.append({"expert":cand_name,"accepted":accept,"incremental_selection_ll_gain":llg,"incremental_selection_brier_gain":brg,"trial_experts":list(trial_names)}); log_func(f"[V13.2-RULE-PORTFOLIO] expert={cand_name} {'KEEP' if accept else 'REJECT'} incremental_sel_ll={llg:+.6f} incremental_sel_br={brg:+.6f} trial_n={len(trial_names)}")
+        if accept: kept.append(cand_name); current_oof=trial_oof; current_metrics=tm
     selected=list(kept)
     for _name,_pr in profiles.items():
         if isinstance(_pr,dict): _pr["stack_selected"]=bool(_name in set(selected))
-    engine={"version":V132_RULE_EXPERT_VERSION,"gate_pass":bool(selected),"specs":specs,"profiles":profiles,"selected_experts":selected,
-            "individually_qualified_experts":all_individually_qualified,"portfolio_selection_records":greedy_records,"pairwise_corr":corr,
-            "historical_prior_used_for_fit":False,
-            "contract":"INDIVIDUAL_TRIGGER__LOGIT_OFFSET__LEAKAGE_SAFE_FAMILY_PARTIAL_POOL__ACTIVE_SUBSET_OOF__SELECTION_ONLY_GREEDY_PORTFOLIO__DISJOINT_SHADOW_VETO__MULTIHOT__CORRELATION_DISCOUNT__BOUNDED_PROBABILITY_DELTA"}
-    # Build genuine OOF selection stack using each fold's beta; shadow uses frozen selection beta.
+    engine={"version":V132_RULE_EXPERT_VERSION,"gate_pass":bool(selected),"specs":specs,"profiles":profiles,"selected_experts":selected,"individually_qualified_experts":all_individually_qualified,"portfolio_selection_records":greedy_records,"pairwise_corr":corr,"historical_prior_used_for_fit":True,"contract":"INDIVIDUAL_TRIGGER__LOGIT_OFFSET__LEAKAGE_SAFE_PRESEASON_HISTORICAL_PRIOR__MODEST_FAMILY_PARTIAL_POOL__ACTIVE_SUBSET_OOF__SELECTION_ONLY_GREEDY_PORTFOLIO__DISJOINT_SHADOW_VETO__MULTIHOT__CORRELATION_DISCOUNT__BOUNDED_DELTA"}
     oof=np.asarray(base,dtype=float).copy(); sh=np.asarray(base,dtype=float).copy()
     if selected:
-        oof,_=_v132_apply_rule_engine(base,rows,engine,beta_overrides=beta_oof)
-        sh,_=_v132_apply_rule_engine(base,rows,engine)
+        oof,_=_v132_apply_rule_engine(base,rule_rows,engine,beta_overrides=beta_oof); sh,_=_v132_apply_rule_engine(base,rule_rows,engine)
     selm=select&np.isfinite(oof)&np.isfinite(base); shm=shadow&np.isfinite(sh)&np.isfinite(base); bsel=_ncaaf_v13_specialist_metrics(y[selm],base[selm],w[selm]); fsel=_ncaaf_v13_specialist_metrics(y[selm],oof[selm],w[selm]); bsh=_ncaaf_v13_specialist_metrics(y[shm],base[shm],w[shm]); fsh=_ncaaf_v13_specialist_metrics(y[shm],sh[shm],w[shm])
     engine.update({"selection_metrics":fsel,"shadow_metrics":fsh,"selection_ll_gain":float(bsel.get('logloss',np.nan)-fsel.get('logloss',np.nan)) if np.isfinite(bsel.get('logloss',np.nan)) and np.isfinite(fsel.get('logloss',np.nan)) else np.nan,"selection_brier_gain":float(bsel.get('brier',np.nan)-fsel.get('brier',np.nan)) if np.isfinite(bsel.get('brier',np.nan)) and np.isfinite(fsel.get('brier',np.nan)) else np.nan,"shadow_ll_gain":float(bsh.get('logloss',np.nan)-fsh.get('logloss',np.nan)) if np.isfinite(bsh.get('logloss',np.nan)) and np.isfinite(fsh.get('logloss',np.nan)) else np.nan,"shadow_brier_gain":float(bsh.get('brier',np.nan)-fsh.get('brier',np.nan)) if np.isfinite(bsh.get('brier',np.nan)) and np.isfinite(fsh.get('brier',np.nan)) else np.nan})
-    selection_bad=bool(selected and (not np.isfinite(engine["selection_ll_gain"]) or engine["selection_ll_gain"]<0 or not np.isfinite(engine["selection_brier_gain"]) or engine["selection_brier_gain"]<0))
-    shadow_bad=bool(selected and (not np.isfinite(engine["shadow_ll_gain"]) or engine["shadow_ll_gain"]<0 or not np.isfinite(engine["shadow_brier_gain"]) or engine["shadow_brier_gain"]<0))
+    selection_bad=bool(selected and (not np.isfinite(engine["selection_ll_gain"]) or engine["selection_ll_gain"]<0 or not np.isfinite(engine["selection_brier_gain"]) or engine["selection_brier_gain"]<0)); shadow_bad=bool(selected and (not np.isfinite(engine["shadow_ll_gain"]) or engine["shadow_ll_gain"]<0 or not np.isfinite(engine["shadow_brier_gain"]) or engine["shadow_brier_gain"]<0))
     if selection_bad or shadow_bad:
-        log_func(f"[V13.2-RULE-STACK] combined_veto selection_ll={engine['selection_ll_gain']:+.6f} selection_br={engine['selection_brier_gain']:+.6f} shadow_ll={engine['shadow_ll_gain']:+.6f} shadow_br={engine['shadow_brier_gain']:+.6f}; rule stack CLOSED")
-        engine["gate_pass"]=False; engine["selected_experts"]=[]; oof=np.asarray(base,dtype=float).copy(); sh=np.asarray(base,dtype=float).copy()
+        log_func(f"[V13.2-RULE-STACK] combined_veto selection_ll={engine['selection_ll_gain']:+.6f} selection_br={engine['selection_brier_gain']:+.6f} shadow_ll={engine['shadow_ll_gain']:+.6f} shadow_br={engine['shadow_brier_gain']:+.6f}; rule stack CLOSED"); engine["gate_pass"]=False; engine["selected_experts"]=[]; oof=np.asarray(base,dtype=float).copy(); sh=np.asarray(base,dtype=float).copy()
     log_func(f"[V13.2-RULE-STACK] gate={'PASS' if engine.get('gate_pass') else 'CLOSED'} individually_qualified={all_individually_qualified} selected={engine.get('selected_experts')} selection_ll={engine.get('selection_ll_gain',np.nan):+.6f} selection_br={engine.get('selection_brier_gain',np.nan):+.6f} shadow_ll={engine.get('shadow_ll_gain',np.nan):+.6f} shadow_br={engine.get('shadow_brier_gain',np.nan):+.6f}")
     return engine,oof,sh
 
@@ -19486,7 +19724,7 @@ def _v132_fit_post_stack_calibration(y,selection_pred,shadow_pred,select_mask,sh
     transfer=bool(best_t==1.0 or (hm.any() and _ncaaf_v13_calibration_noninferior(base_sh,shcand,max_ece_increase=0.0025,max_reliability_increase=0.00075) and shcand.get("logloss",np.inf)<=base_sh.get("logloss",np.inf)+1e-12 and shcand.get("brier",np.inf)<=base_sh.get("brier",np.inf)+1e-12))
     active_t=best_t if transfer else 1.0
     log_func(f"[V13.2-POST-STACK-CAL] selected_T={best_t:.2f} active_T={active_t:.2f} shadow_transfer={'PASS' if transfer else 'CLOSED'} sel_ll={base_sel.get('logloss',np.nan):.6f}->{best.get('logloss',np.nan):.6f} shadow_ll={base_sh.get('logloss',np.nan):.6f}->{shcand.get('logloss',np.nan):.6f}")
-    return {"version":"2026-09-10-v13.2.0-post-stack-temperature","temperature":float(active_t),"selected_temperature":float(best_t),"shadow_transfer_pass":bool(transfer),"selection_base_metrics":base_sel,"selection_calibrated_metrics":best,"shadow_base_metrics":base_sh,"shadow_calibrated_metrics":shcand}
+    return {"version":"2026-09-11-v13.2.2-post-stack-temperature","temperature":float(active_t),"selected_temperature":float(best_t),"shadow_transfer_pass":bool(transfer),"selection_base_metrics":base_sel,"selection_calibrated_metrics":best,"shadow_base_metrics":base_sh,"shadow_calibrated_metrics":shcand}
 
 
 def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X_train: pd.DataFrame,
@@ -20021,7 +20259,7 @@ def _ncaaf_v13_compare_v12_holdout(hold_rows: pd.DataFrame, y_hold, p_v12, bundl
                 "coverage_gate_pass":coverage_ok,"coverage_by_season":_coverage,
                 "status":"INSUFFICIENT","promotion_gate_pass":False}
         log_func(f"[V13.1-CORE-RECIPE] status=INSUFFICIENT matched_rows={int(matched.sum())}/{len(d)} "
-                 f"match_rate={match_rate:.1%} matched_physical_games={matched_games} final_recipe=V13_2_0")
+                 f"match_rate={match_rate:.1%} matched_physical_games={matched_games} final_recipe=V13_2_1")
         return result
 
     m12=_ncaaf_v13_weighted_metrics(yy[matched],p12[matched],phys[matched])
@@ -20071,7 +20309,7 @@ def _ncaaf_v13_compare_v12_holdout(hold_rows: pd.DataFrame, y_hold, p_v12, bundl
         except Exception:
             market_met=None
 
-    log_func(f"[V13.1-CORE-RECIPE] status=DEVELOPMENT_ONLY comparator={comparator_name} final_recipe=V13_2_0 "
+    log_func(f"[V13.1-CORE-RECIPE] status=DEVELOPMENT_ONLY comparator={comparator_name} final_recipe=V13_2_1 "
              f"matched_rows={m13['n']} matched_physical_games={m13['games']} match_rate={match_rate:.1%} weighting=EQUAL_PHYSICAL_GAME "
              f"comparator_auc={m12['auc']:.4f} v13_raw_core_auc={mb['auc']:.4f} v13_core_auc={mc['auc']:.4f} v13_final_auc={m13['auc']:.4f} "
              f"comparator_ll={m12['logloss']:.6f} v13_ll={m13['logloss']:.6f} ll_improvement={ll_gain:+.6f} "
@@ -31558,7 +31796,7 @@ def train_sharp_model_from_bq(
                     _min_stage=max(500,int(np.ceil(0.80*len(y_hold_vec))))
                     if int(_p13_ok.sum())>=_min_stage:
                         _artifact_hold_prob=np.asarray(_p13_hold,dtype=float)
-                        _artifact_probability_source="V13_2_0"
+                        _artifact_probability_source="V13_2_1"
                         print(f"[V13.1-ARTIFACT-STAGE] status=READY rows={int(_p13_ok.sum())}/{len(y_hold_vec)} core_source=RAW_OUTCOME_AUTOFS outer_holdout_recipe_tuning=FALSE")
                     else:
                         print(f"[V13.1-ARTIFACT-STAGE] status=CLOSED reason=INSUFFICIENT_FINAL_PROB_COVERAGE rows={int(_p13_ok.sum())}/{len(y_hold_vec)} required={_min_stage}")
@@ -31574,7 +31812,7 @@ def train_sharp_model_from_bq(
                 _promotion_horizon=((_gs-_ss).dt.total_seconds()/3600.0).to_numpy(dtype=float)
             _promotion_segments=np.full(len(y_hold_vec),"CORE_ONLY",dtype=object)
             try:
-                if _artifact_probability_source=="V13_2_0" and isinstance(_p13_info,dict):
+                if _artifact_probability_source=="V13_2_1" and isinstance(_p13_info,dict):
                     _si=_p13_info.get("specialist_info") or {}; _bits=[[] for _ in range(len(y_hold_vec))]
                     _fi=_p13_info.get("fundamental_info") or {}; _fa=np.asarray(_fi.get("active",np.zeros(len(y_hold_vec))),dtype=int); _fr=np.asarray(_fi.get("regime",np.full(len(y_hold_vec),"UNKNOWN",dtype=object)),dtype=object)
                     for _i in np.where(_fa>0)[0]: _bits[_i].append("FUND:"+str(_fr[_i]))
