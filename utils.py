@@ -14820,15 +14820,15 @@ def attach_pathi_bigal_backend_features(current_rows: pd.DataFrame, sport: str |
 #     plus information available before kickoff.
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
-NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.4-observed-stats-unshrunk-latent-state-separate"
+NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.5-observed-stats-unshrunk-latent-state-separate"
 
 # ============================================================================
 # V13 NCAAF VALUE ARCHITECTURE
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-11-v13.2.4-canonical-evidence-unshrunk-stats"
-NCAAF_V13_HOTFIX = "V13_2_4__CANONICAL_GAME_EVIDENCE__HIST_SYSTEM_BASE_AUTHORITY__RICH_CONTEXT_MODIFIER__OBSERVED_STATS_UNSHRUNK"
+NCAAF_V13_VERSION = "2026-09-11-v13.2.5-canonical-evidence-unshrunk-stats"
+NCAAF_V13_HOTFIX = "V13_2_5__CANONICAL_GAME_EVIDENCE__HIST_SYSTEM_BASE_AUTHORITY__RICH_CONTEXT_MODIFIER__OBSERVED_STATS_UNSHRUNK"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -15420,7 +15420,7 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
     # A game performance is measured against what that opponent had allowed/
     # produced BEFORE the game.  The residual itself is then shifted into future
     # games, so current-game statistics never leak into the current prediction.
-    # Q3/final blowout context is retained as diagnostic metadata only.  V13.2.4
+    # Q3/final blowout context is retained as diagnostic metadata only.  V13.2.5
     # does not rewrite the observed box-score performance; ML may learn whether
     # competitive-game context changes the predictive value of those observations.
     # -----------------------------------------------------------------
@@ -16227,7 +16227,7 @@ def _apply_v13_autofs_core_bridge_runtime(base_prob, core_prob, bridge: dict):
 
 
 
-# V13.2.4 runtime constants must match training artifact semantics.
+# V13.2.5 runtime constants must match training artifact semantics.
 V132_RULE_HIST_MIN_GAMES = 20
 V132_RULE_HIST_MIN_ATS = 0.5238
 V132_RULE_HIST_MAX_ABS_BETA = 0.75
@@ -16239,7 +16239,7 @@ V132_RULE_CORR_MAX_DISCOUNT = 0.50
 
 
 def _v132_runtime_prepare_rule_rows(rows: pd.DataFrame) -> pd.DataFrame:
-    """Apply the same selective deterministic-rule rebuild used by V13.2.4 training.
+    """Apply the same selective deterministic-rule rebuild used by V13.2.5 training.
 
     Runtime must never zero a valid upstream Big Al flag merely because a repeated
     quote row lacks one of the state columns required to reconstruct it.  Exact
@@ -16882,7 +16882,7 @@ def apply_ncaaf_statistical_brain_feature(df: pd.DataFrame, sb, market: str):
         rec=np.clip(np.exp(-np.log(2)*age/730.),.20,1.0)
         state_fresh=pd.to_numeric(Xall.get("__Stat_State_Freshness",0.20),errors="coerce").fillna(0.20).clip(0,1).to_numpy(dtype=float)
         eff=np.clip(base_trust*sim*rec*state_fresh,0,1)
-        # V13.2.4: probability is the model's unshrunk structural opinion. Reliability,
+        # V13.2.5: probability is the model's unshrunk structural opinion. Reliability,
         # profile similarity and freshness remain separate metadata/features so the
         # downstream ML/gates can learn influence without rewriting performance.
         final=np.clip(np.asarray(rawp,dtype=float),.01,.99); edge=final-baseline
