@@ -14820,15 +14820,15 @@ def attach_pathi_bigal_backend_features(current_rows: pd.DataFrame, sport: str |
 #     plus information available before kickoff.
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
-NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.5-observed-stats-unshrunk-latent-state-separate"
+NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.6-observed-stats-unshrunk-latent-state-separate"
 
 # ============================================================================
 # V13 NCAAF VALUE ARCHITECTURE
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-11-v13.2.5-canonical-evidence-unshrunk-stats"
-NCAAF_V13_HOTFIX = "V13_2_5__CANONICAL_GAME_EVIDENCE__HIST_SYSTEM_BASE_AUTHORITY__RICH_CONTEXT_MODIFIER__OBSERVED_STATS_UNSHRUNK"
+NCAAF_V13_VERSION = "2026-09-11-v13.2.6-canonical-registry-current-rich"
+NCAAF_V13_HOTFIX = "V13_2_6__UNIFIED_2022_2026_CANONICAL_REGISTRY__CURRENT_RICH_OVERLAP__HIST_SYSTEM_BASE_AUTHORITY__OBSERVED_STATS_UNSHRUNK"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
