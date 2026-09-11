@@ -14759,8 +14759,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-10-v13.1.2-residual-experts-game-balanced-validation"
-NCAAF_V13_HOTFIX = "NONE__V13.1.2_RESIDUAL_EXPERTS_GAME_BALANCED_VALIDATION"
+NCAAF_V13_VERSION = "2026-09-10-v13.2.0-individual-handicapper-expert-stack"
+NCAAF_V13_HOTFIX = "V13_2__RULE_LINEAGE__INDIVIDUAL_RESIDUAL_EXPERTS__POST_STACK_CALIBRATION"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -15987,7 +15987,7 @@ def _v131_runtime_family_regime_labels(rows: pd.DataFrame, family: str, maturity
     return np.full(n,"OTHER",dtype=object)
 
 def _apply_v131_core_calibration_runtime(core_prob, art: dict, maturity=None):
-    """Apply frozen V13.1.2 global calibration and validated maturity temperatures."""
+    """Apply frozen V13 core calibration and validated maturity temperatures."""
     raw=np.asarray(core_prob,dtype=float).ravel(); final=raw.copy(); valid=np.isfinite(raw)
     rec=(art.get("params") or {"method":"identity"}) if isinstance(art,dict) else {"method":"identity"}; method=str(rec.get("method",(art or {}).get("active_method","identity") if isinstance(art,dict) else "identity") or "identity").lower().strip()
     def raw_map(q):
@@ -16075,6 +16075,54 @@ def _apply_v13_autofs_core_bridge_runtime(base_prob, core_prob, bridge: dict):
     }
 
 
+
+# V13.2 runtime constants must match training artifact semantics.
+V132_RULE_MAX_SINGLE_PROB_DELTA = 0.025
+V132_RULE_MAX_FAMILY_PROB_DELTA = 0.040
+V132_RULE_MAX_TOTAL_PROB_DELTA = 0.050
+V132_RULE_CORR_DISCOUNT_START = 0.50
+V132_RULE_CORR_MAX_DISCOUNT = 0.50
+
+
+def _v132_runtime_rule_trigger(rows: pd.DataFrame, spec: dict) -> np.ndarray:
+    n=0 if rows is None else len(rows); m=np.ones(n,dtype=bool)
+    for c in list(spec.get("columns") or []):
+        if c not in rows.columns: return np.zeros(n,dtype=bool)
+        z=pd.to_numeric(rows[c],errors="coerce").fillna(0).to_numpy(dtype=float); m &= np.abs(z)>0.5
+    if spec.get("kind")=="column_role":
+        spread=None
+        for c in ("Spread_Value","Value","Outcome_Market_Spread","Opening_Spread"):
+            if c in rows.columns:
+                spread=pd.to_numeric(rows[c],errors="coerce").to_numpy(dtype=float,na_value=np.nan); break
+        if spread is None: return np.zeros(n,dtype=bool)
+        role=str(spec.get("role") or "").upper(); m &= (spread>0) if role=="DOG" else ((spread<0) if role=="FAVORITE" else np.ones(n,dtype=bool))
+    return m
+
+
+def _v132_runtime_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict):
+    base=np.asarray(base_prob,dtype=float).copy(); n=len(base); final=base.copy()
+    detail={"Pathi":{"contribution":np.zeros(n),"weight":np.zeros(n),"active":np.zeros(n,dtype=np.int8),"residual_edge":np.zeros(n),"independence":np.ones(n),"names":np.full(n,"OTHER",dtype=object)},"BigAl":{"contribution":np.zeros(n),"weight":np.zeros(n),"active":np.zeros(n,dtype=np.int8),"residual_edge":np.zeros(n),"independence":np.ones(n),"names":np.full(n,"OTHER",dtype=object)}}
+    if not isinstance(engine,dict) or not engine.get("gate_pass",False):
+        for fam in ("Pathi","BigAl"): detail[fam]["prob"]=base.copy(); detail[fam]["regime"]=detail[fam].pop("names")
+        return final,detail
+    specs={sp.get("name"):sp for sp in list(engine.get("specs") or []) if isinstance(sp,dict)}; profiles=engine.get("profiles") or {}; selected=list(engine.get("selected_experts") or []); corr=engine.get("pairwise_corr") or {}; fam_used={"Pathi":np.zeros(n),"BigAl":np.zeros(n)}; total_used=np.zeros(n); prev=[]
+    for name in selected:
+        pr=profiles.get(name) or {}; sp=specs.get(name)
+        if sp is None or not pr.get("gate_pass",False): continue
+        active=_v132_runtime_rule_trigger(rows,sp)&np.isfinite(final)
+        if not active.any(): continue
+        fam=str(sp.get("family")); beta=float(pr.get("final_beta",0.0) or 0.0); tr=float(np.clip(pr.get("trust",0.0) or 0.0,0,1)); proposal=_v13_overlay_sigmoid(_v13_overlay_logit(final[active])+beta*tr); raw=np.clip(proposal-final[active],-V132_RULE_MAX_SINGLE_PROB_DELTA,V132_RULE_MAX_SINGLE_PROB_DELTA); indep=np.ones(raw.size)
+        for prev_name,prev_mask,prev_delta in prev:
+            rho=float(max(0.0,(corr.get(name,{}) or {}).get(prev_name,(corr.get(prev_name,{}) or {}).get(name,0.0)) or 0.0))
+            if rho>V132_RULE_CORR_DISCOUNT_START:
+                overlap=prev_mask[active]; same=overlap&(np.sign(raw)==np.sign(prev_delta[active])); indep[same]*=(1.0-min(V132_RULE_CORR_MAX_DISCOUNT,0.5*rho))
+        raw*=indep; idx=np.flatnonzero(active); fam_room=np.maximum(0.0,V132_RULE_MAX_FAMILY_PROB_DELTA-np.abs(fam_used[fam][idx])); total_room=np.maximum(0.0,V132_RULE_MAX_TOTAL_PROB_DELTA-np.abs(total_used[idx])); cap=np.minimum(fam_room,total_room); raw=np.sign(raw)*np.minimum(np.abs(raw),cap); before=final[idx].copy(); final[idx]=np.clip(final[idx]+raw,0.01,0.99); actual=final[idx]-before; fam_used[fam][idx]+=actual; total_used[idx]+=actual
+        dd=detail[fam]; dd["contribution"][idx]+=actual; dd["weight"][idx]=np.maximum(dd["weight"][idx],tr); dd["active"][idx]=1; dd["residual_edge"][idx]=np.maximum(dd["residual_edge"][idx],abs(beta)); dd["independence"][idx]=np.minimum(dd["independence"][idx],indep)
+        for j in idx: dd["names"][j]=name if dd["names"][j]=="OTHER" else str(dd["names"][j])+"+"+name
+        full=np.zeros(n); full[idx]=actual; prev.append((name,active,full))
+    for fam in ("Pathi","BigAl"): detail[fam]["prob"]=np.clip(base+detail[fam]["contribution"],0.01,0.99); detail[fam]["regime"]=detail[fam].pop("names")
+    return np.clip(final,0.01,0.99),detail
+
 def _v1312_runtime_residual_specialists(base_prob,family_probs,labels,centers,engine):
     base=np.asarray(base_prob,dtype=float).copy(); n=len(base); total=np.zeros(n); details={}; prev={}; profiles=(engine.get('profiles') or {}) if isinstance(engine,dict) else {}; corr=(engine.get('pairwise_corr') or {}) if isinstance(engine,dict) else {}; seq=(engine.get('sequence') or ['Market','BigAl','Pathi']) if isinstance(engine,dict) else ['Market','BigAl','Pathi']; fam_cap=float((engine or {}).get('max_family_delta',0.02)); total_cap=float((engine or {}).get('max_total_delta',0.03))
     for fam in seq:
@@ -16093,24 +16141,25 @@ def _v1312_runtime_residual_specialists(base_prob,family_probs,labels,centers,en
     return np.clip(base+total,0.01,0.99),details
 
 def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overlay: dict, maturity_bucket):
-    """Apply residual-qualified experts; use legacy regime weights only for older artifacts."""
+    """V13.2 runtime: Market family residual -> individual Pathi/BigAl rules -> final calibration."""
     n=len(rows); base=np.asarray(base_prob,dtype=float); final=base.copy(); details={}
     if not isinstance(overlay,dict) or not overlay.get("gate_pass",False): return final,details,False
-    centers=overlay.get("centers") or {}; rweights=overlay.get("regime_weights") or {}; legacy=overlay.get("weights") or {}; maturity=np.asarray(maturity_bucket,dtype=object); family_probs={}; labels={}
+    centers=overlay.get("centers") or {}; maturity=np.asarray(maturity_bucket,dtype=object); family_probs={}; labels={}
     for fam in ("Market","Pathi","BigAl"):
-        rec=((overlay.get("families") or {}).get(fam) or {}); feats=list(rec.get("selected_features") or []); mdl=rec.get("model"); center=float(np.clip(centers.get(fam,rec.get("center_prob",0.5)) or 0.5,1e-5,1-1e-5)); pf=np.full(n,center,dtype=float)
+        rec=((overlay.get("families") or {}).get(fam) or {}); feats=list(rec.get("selected_features") or []); mdl=rec.get("model") if fam=="Market" else None; center=float(np.clip(centers.get(fam,rec.get("center_prob",0.5)) or 0.5,1e-5,1-1e-5)); pf=np.full(n,center,dtype=float)
         if mdl is not None and feats:
             try:
                 xx=rows.reindex(columns=feats).apply(pd.to_numeric,errors="coerce").replace([np.inf,-np.inf],np.nan).fillna(0.0); pf=np.asarray(mdl.predict_proba(xx)[:,1],dtype=float)
             except Exception as e: logging.warning("V13 %s specialist runtime unavailable: %s",fam,e)
         family_probs[fam]=pf; labels[fam]=_v131_runtime_family_regime_labels(rows,fam,maturity)
-    engine=overlay.get('residual_engine') or {}
-    if isinstance(engine,dict) and engine.get('gate_pass',False):
-        final,details=_v1312_runtime_residual_specialists(base,family_probs,labels,centers,engine); details['_calibration']={'temperature':1.0,'pretemperature_prob':final,'temperature_contribution':np.zeros(n),'active':np.zeros(n,dtype=np.int8)}; return final,details,True
-    z=_v13_overlay_logit(base)
-    for fam in ("Market","Pathi","BigAl"):
-        pf=family_probs[fam]; center=float(np.clip(centers.get(fam,0.5) or 0.5,1e-5,1-1e-5)); rw=(rweights.get(fam) or {}) if isinstance(rweights,dict) else {}; eff=np.asarray([float(rw.get(str(x),0.0) or 0.0) for x in labels[fam]],dtype=float) if rw else np.full(n,float(legacy.get(fam,0.0) or 0.0)); evidence=_v13_overlay_logit(np.where(np.isfinite(pf),pf,center))-float(_v13_overlay_logit(np.asarray([center]))[0]); z+=eff*evidence; one=_v13_overlay_sigmoid(_v13_overlay_logit(base)+eff*evidence); details[fam]={"prob":pf,"weight":eff,"active":(eff>0).astype(np.int8),"contribution":one-base,"regime":labels[fam]}
-    raw=np.clip(_v13_overlay_sigmoid(z),0.01,0.99); t=max(1.0,float(overlay.get('post_temperature',1.0) or 1.0)); final=np.clip(_v13_overlay_sigmoid(_v13_overlay_logit(raw)/t),0.01,0.99); details['_calibration']={'temperature':t,'pretemperature_prob':raw,'temperature_contribution':final-raw,'active':np.full(n,t>1,dtype=np.int8)}; return final,details,True
+    market_engine=overlay.get("residual_engine") or {}; pre,market_det=_v1312_runtime_residual_specialists(base,family_probs,labels,centers,market_engine)
+    pre2,rule_det=_v132_runtime_apply_rule_engine(pre,rows,overlay.get("rule_expert_engine") or {})
+    cal=overlay.get("post_stack_calibration") or {}; t=float(cal.get("temperature",1.0) or 1.0); final=np.clip(_v13_overlay_sigmoid(_v13_overlay_logit(pre2)/max(t,1e-6)),0.01,0.99)
+    md=market_det.get("Market") or {}; details["Market"]={"prob":family_probs["Market"],"contribution":np.asarray(md.get("contribution",np.zeros(n))),"weight":np.asarray(md.get("trust",np.zeros(n))),"trust":np.asarray(md.get("trust",np.zeros(n))),"residual_edge":np.asarray(md.get("residual_edge",np.zeros(n))),"independence":np.asarray(md.get("independence",np.ones(n))),"active":np.asarray(md.get("active",np.zeros(n,dtype=np.int8))),"regime":np.asarray(md.get("regime",labels["Market"]),dtype=object)}
+    for fam in ("Pathi","BigAl"):
+        dd=rule_det.get(fam) or {}; details[fam]={"prob":np.asarray(dd.get("prob",np.clip(pre+np.asarray(dd.get('contribution',np.zeros(n))),0.01,0.99))),"contribution":np.asarray(dd.get("contribution",np.zeros(n))),"weight":np.asarray(dd.get("weight",np.zeros(n))),"trust":np.asarray(dd.get("weight",np.zeros(n))),"residual_edge":np.asarray(dd.get("residual_edge",np.zeros(n))),"independence":np.asarray(dd.get("independence",np.ones(n))),"active":np.asarray(dd.get("active",np.zeros(n,dtype=np.int8))),"regime":np.asarray(dd.get("regime",np.full(n,"OTHER",dtype=object)),dtype=object)}
+    details["_calibration"]={"temperature":t,"pretemperature_prob":pre2,"temperature_contribution":np.asarray(final-pre2),"active":np.full(n,abs(t-1.0)>1e-12,dtype=np.int8)}
+    return final,details,True
 
 
 def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
@@ -16281,9 +16330,9 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
             ccols=list(cover.get("feature_cols") or [])
             prob=np.asarray(cover["model"].predict_proba(cf.reindex(columns=ccols))[:,1],dtype=float)
             prob=np.clip(prob,0.01,0.99)
-        # V13.1 exact production recipe:
+        # V13.2 exact production recipe:
         #   Outcome AutoFS is PRIMARY -> cross-fit-selected core calibration ->
-        #   optional centered Fundamental correction -> sequential Market/BigAl/Pathi.
+        #   optional Fundamental correction -> Market family residual -> individual Pathi/BigAl rules -> post-stack calibration.
         # Older V13/HF3 artifacts retain the legacy fundamental-base bridge path.
         fundamental_prob=np.asarray(prob,dtype=float).copy()
         _core_series=pd.to_numeric(
