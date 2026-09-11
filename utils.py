@@ -11114,9 +11114,11 @@ PATHI_FOOTBALL_MODEL_FEATURES = [
     "Pathi_FB_Dog_Below_Key_3", "Pathi_FB_Dog_Below_Key_7",
     "Pathi_FB_Favorite_Laying_Hook_3", "Pathi_FB_Favorite_Laying_Hook_7",
 
-    # Dog price bands
+    # Dog price bands + user-provided Pathi total/spread-gap system
     "Pathi_FB_Dog_0_to_3", "Pathi_FB_Dog_3_to_3_5", "Pathi_FB_Dog_3_5_to_6_5",
     "Pathi_FB_Dog_On_7", "Pathi_FB_Dog_Above_7", "Pathi_FB_Dog_10_Plus",
+    "Pathi_FB_Dog_TotalSpread_Gap_LE10", "Pathi_FB_Dog_TotalSpread_Gap_LE10_DataReady",
+    "Pathi_FB_TotalSpread_Gap", "Pathi_FB_Dog_Implied_Team_Total",
 
     # Opening/current key value
     "Pathi_FB_Current_Key_Value", "Pathi_FB_Opening_Key_Value",
@@ -12296,7 +12298,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         "ATS_Win_Streak_Prior", "ATS_Loss_Streak_Prior", "Days_Since_Last_Game_System",
         "Games_Last_2_Days_System", "Games_Last_4_Days_System", "Games_Last_7_Days_System",
         "Is_B2B_System", "Is_3in4_System", "Had_Bye_Last_Game_System", "BigAl_Context_Had_Bye_Proxy",
-        "Prev_SU_Win", "Prev_SU_Loss", "Prev_SU_Margin", "Prev_Points_For", "Prev_Points_Against",
+        "Prev_SU_Win", "Prev_SU_Loss", "Prev_SU_Margin", "Prev_Points_For", "Prev_Points_Against", "Prev_Spread_Value",
         "Prev_ATS_Win", "Prev_ATS_Loss", "Prev_ATS_Cover_Margin", "Prev2_SU_Win", "Prev2_SU_Loss",
         "Prev2_ATS_Win", "Prev2_ATS_Loss", "Prev2_ATS_Cover_Margin",
         "Prev3_SU_Win", "Prev3_SU_Loss", "Prev3_ATS_Win", "Prev3_ATS_Loss", "Prev3_ATS_Cover_Margin",
@@ -12558,6 +12560,16 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     ).astype("int8")
     s["BigAl_CF2_Away_Tightener"] = (s["BigAl_CF2_LateSeasonRevengeDog"].eq(1) & n("Is_Home").eq(0)).astype("int8")
 
+    # User-provided Big Al NCAAF system (2026-09-11): fade a team in its next game
+    # after it was favored by 19+ and lost outright. The flag is on the play-on side.
+    s["BigAl_CF3_Fade19PlusFavoriteUpsetLoss_DataReady"] = (
+        is_ncaaf & ready("Opp_Prev_Spread_Value", "Opp_Prev_SU_Loss")
+    ).astype("int8")
+    s["BigAl_CF3_Fade19PlusFavoriteUpsetLoss"] = (
+        is_ncaaf & n("Is_Regular_Season").fillna(1).eq(1) &
+        n("Opp_Prev_Spread_Value").le(-19.0) & n("Opp_Prev_SU_Loss").eq(1)
+    ).astype("int8")
+
     # NBA 1 - consecutive-game rematch, double-digit road dog lost SU and ATS prior meeting.
     s["BigAl_NBA1_B2BRematchRoadDog_DataReady"] = ready("Immediate_Rematch_Flag", "Spread_Value", "Prev_SU_Loss", "Prev_ATS_Loss").astype("int8")
     s["BigAl_NBA1_B2BRematchRoadDog"] = (
@@ -12715,6 +12727,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         "BigAl_NFL5_PreseasonLowOffenseOver": (is_nfl, ["Is_Preseason", "Avg_Points_For_Prior", "Opp_Avg_Points_For_Prior"]),
         "BigAl_CF1_Week2Home42Win": (is_ncaaf, ["Team_Game_Number", "Is_Home", "Prev_SU_Win", "Prev_Points_For", "Is_Conference_Game", "Opp_Revenge_Flag_Current"]),
         "BigAl_CF2_LateSeasonRevengeDog": (is_ncaaf, ["Is_Regular_Season", "Team_Game_Number", "Revenge_Flag_Current", "Spread_Value", "Prev_Points_For"]),
+        "BigAl_CF3_Fade19PlusFavoriteUpsetLoss": (is_ncaaf, ["Is_Regular_Season", "Opp_Prev_Spread_Value", "Opp_Prev_SU_Loss"]),
         "BigAl_NBA1_B2BRematchRoadDog": (is_nba, ["Is_Regular_Season", "Immediate_Rematch_Flag", "Is_Home", "Spread_Value", "Prev_SU_Loss", "Prev_ATS_Loss"]),
         "BigAl_NBA2_ThreeMassiveCovers": (is_nba, ["Is_Home", "Prev_ATS_Cover_Margin", "Prev2_ATS_Cover_Margin", "Prev3_ATS_Cover_Margin"]),
         "BigAl_NBA3_FadeHomeAfterChampUpset": (is_nba, ["Opp_Is_Home", "Opp_Prev_SU_Win", "Opp_Prev_Is_Road_Dog_9Plus", "Opp_Prev_Opponent_Is_Defending_Champion"]),
@@ -12770,6 +12783,9 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     _set_bigal_match("BigAl_CF2_LateSeasonRevengeDog", is_ncaaf, [
         n("Is_Regular_Season").eq(1), n("Team_Game_Number").ge(9), n("Revenge_Flag_Current").eq(1),
         n("Spread_Value").gt(0), n("Prev_Points_For").gt(50),
+    ])
+    _set_bigal_match("BigAl_CF3_Fade19PlusFavoriteUpsetLoss", is_ncaaf, [
+        n("Is_Regular_Season").eq(1), n("Opp_Prev_Spread_Value").le(-19.0), n("Opp_Prev_SU_Loss").eq(1),
     ])
     _set_bigal_match("BigAl_NBA1_B2BRematchRoadDog", is_nba, [
         n("Is_Regular_Season").eq(1), n("Immediate_Rematch_Flag").eq(1), n("Is_Home").eq(0),
@@ -12935,7 +12951,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     bigal_base_cols = [
         "BigAl_NFL1_Week1FadePlayoffTeam", "BigAl_NFL2_LateSeasonHomeDog", "BigAl_NFL3_PlayoffHighScoreFade",
         "BigAl_NFL4_PreseasonContrarianMove", "BigAl_NFL5_PreseasonLowOffenseOver",
-        "BigAl_CF1_Week2Home42Win", "BigAl_CF2_LateSeasonRevengeDog",
+        "BigAl_CF1_Week2Home42Win", "BigAl_CF2_LateSeasonRevengeDog", "BigAl_CF3_Fade19PlusFavoriteUpsetLoss",
         "BigAl_NBA1_B2BRematchRoadDog", "BigAl_NBA2_ThreeMassiveCovers", "BigAl_NBA3_FadeHomeAfterChampUpset",
         "BigAl_NBA4_FinalHomeFavRevenge", "BigAl_NBA5_PlayoffBigDogVsChamp", "BigAl_NBA6_FinalsGame4",
         "BigAl_NBA7_TwoTeamEliminationUnder", "BigAl_NBA8_Revenge145FadeFavorite", "BigAl_CBB1_UglyDog20Losses",
@@ -12996,6 +13012,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         "BigAl_NFL5_PreseasonLowOffenseOver": "BIG AL NFL5 OVER",
         "BigAl_CF1_Week2Home42Win": "BIG AL CF1 Week 2",
         "BigAl_CF2_LateSeasonRevengeDog": "BIG AL CF2 Revenge Dog",
+    "BigAl_CF3_Fade19PlusFavoriteUpsetLoss": "BIG AL CF3 Fade 19+ Fav Upset Loss",
         "BigAl_NBA1_B2BRematchRoadDog": "BIG AL NBA1 Rematch Dog",
         "BigAl_NBA1_PriorLoss25_Tightener": "BIG AL NBA1 25+ Tightener",
         "BigAl_NBA2_ThreeMassiveCovers": "BIG AL NBA2 3 Massive Covers",
@@ -13318,12 +13335,12 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
         "Pathi_M6_WeakTeamNewChalk_Screen", "Pathi_M7_BadRoadFavoriteProfile",
         "Pathi_RoadFavLost_StillFavorite_Screen", "Pathi_RoleFlip_DogToFavorite_Cancel",
     ]
-    _pathi_spread = ["Pathi_M9_Plus15_PlusMoney"]
+    _pathi_spread = ["Pathi_M9_Plus15_PlusMoney", "Pathi_FB_Dog_TotalSpread_Gap_LE10"]
     _bigal_side = [
         "BigAl_NFL1_Week1FadePlayoffTeam", "BigAl_NFL1_HomeTightener",
         "BigAl_NFL2_LateSeasonHomeDog", "BigAl_NFL2_OppOffATSLoss_Tightener",
         "BigAl_NFL3_PlayoffHighScoreFade", "BigAl_NFL4_PreseasonContrarianMove",
-        "BigAl_CF1_Week2Home42Win", "BigAl_CF2_LateSeasonRevengeDog", "BigAl_CF2_Away_Tightener",
+        "BigAl_CF1_Week2Home42Win", "BigAl_CF2_LateSeasonRevengeDog", "BigAl_CF2_Away_Tightener", "BigAl_CF3_Fade19PlusFavoriteUpsetLoss",
         "BigAl_NBA1_B2BRematchRoadDog", "BigAl_NBA1_PriorLoss25_Tightener",
         "BigAl_NBA2_ThreeMassiveCovers", "BigAl_NBA3_FadeHomeAfterChampUpset",
         "BigAl_NBA3_WinPct572_Tightener", "BigAl_NBA4_FinalHomeFavRevenge",
@@ -13450,6 +13467,7 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
         "BigAl_NFL5_PreseasonLowOffenseOver": "BIG AL NFL5 OVER",
         "BigAl_CF1_Week2Home42Win": "BIG AL CF1 Week 2",
         "BigAl_CF2_LateSeasonRevengeDog": "BIG AL CF2 Revenge Dog",
+    "BigAl_CF3_Fade19PlusFavoriteUpsetLoss": "BIG AL CF3 Fade 19+ Fav Upset Loss",
         "BigAl_NBA1_B2BRematchRoadDog": "BIG AL NBA1 Rematch Dog",
         "BigAl_NBA2_ThreeMassiveCovers": "BIG AL NBA2 3 Massive Covers",
         "BigAl_NBA3_FadeHomeAfterChampUpset": "BIG AL NBA3 Champ-Upset Fade",
@@ -14084,6 +14102,7 @@ BIGAL_EXACT_SIGNAL_COLS = (
     "BigAl_NFL5_PreseasonLowOffenseOver",
     "BigAl_CF1_Week2Home42Win",
     "BigAl_CF2_LateSeasonRevengeDog",
+    "BigAl_CF3_Fade19PlusFavoriteUpsetLoss",
     "BigAl_NBA1_B2BRematchRoadDog",
     "BigAl_NBA2_ThreeMassiveCovers",
     "BigAl_NBA8_Revenge145FadeFavorite",
@@ -14135,6 +14154,7 @@ PATHI_ROLE_CONTEXT_COLS = (
     "Pathi_FB_Dog_Below_Key_3", "Pathi_FB_Dog_Below_Key_7",
     "Pathi_FB_Favorite_Laying_Hook_3", "Pathi_FB_Favorite_Laying_Hook_7",
     "Pathi_FB_Usually_Dog_Now_Favorite", "Pathi_FB_Usually_Favorite_Now_Dog",
+    "Pathi_FB_Dog_TotalSpread_Gap_LE10",
 )
 
 def pathi_bigal_numeric_feature_cols(df: pd.DataFrame) -> list[str]:
@@ -14265,6 +14285,20 @@ def add_pathi_football_key_features(df: pd.DataFrame) -> pd.DataFrame:
     out["Pathi_FB_Dog_On_7"] = (is_dog & np.isclose(cur, 7.0, atol=1e-9)).astype("int8")
     out["Pathi_FB_Dog_Above_7"] = (is_dog & cur.gt(7.0) & cur.lt(10.0)).astype("int8")
     out["Pathi_FB_Dog_10_Plus"] = (is_dog & cur.ge(10.0)).astype("int8")
+
+    # User-provided Pathi football system (2026-09-11): if the underdog spread
+    # is within 10 points of the game total, play the dog. Prefer current/current
+    # lines; when only opening total exists, pair it with opening spread.
+    _cur_total = _num_candidates("Current_Total", "Total_Value", "Total_Game")
+    _open_total = _num_candidates("Opening_Total", "TOT_Open", "Open_Total")
+    _system_total = _cur_total.combine_first(_open_total)
+    _system_spread = cur.where(_cur_total.notna(), opn.where(_open_total.notna(), cur))
+    _total_spread_gap = _system_total - _system_spread.abs()
+    _gap_ready = fb_spread & _system_total.notna() & _system_spread.notna() & _total_spread_gap.ge(0)
+    out["Pathi_FB_TotalSpread_Gap"] = _total_spread_gap.where(_gap_ready).astype("float32")
+    out["Pathi_FB_Dog_Implied_Team_Total"] = (_total_spread_gap / 2.0).where(_gap_ready & is_dog).astype("float32")
+    out["Pathi_FB_Dog_TotalSpread_Gap_LE10_DataReady"] = _gap_ready.astype("int8")
+    out["Pathi_FB_Dog_TotalSpread_Gap_LE10"] = (_gap_ready & is_dog & _total_spread_gap.le(10.0)).astype("int8")
 
     # Engineering score for the value of the CURRENT number around 3/7/10/14.
     # Positive = favorable side of nearest key; negative = unfavorable side.
@@ -14759,8 +14793,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-10-v13.2.0-individual-handicapper-expert-stack"
-NCAAF_V13_HOTFIX = "V13_2__RULE_LINEAGE__INDIVIDUAL_RESIDUAL_EXPERTS__POST_STACK_CALIBRATION"
+NCAAF_V13_VERSION = "2026-09-11-v13.2.2-history-rule-repair"
+NCAAF_V13_HOTFIX = "V13_2_2__CF1_REVENGE_REPAIR__LEAKSAFE_HIST_PRIORS__ROLE_PARITY__CAL_TRANSFER"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -16084,6 +16118,50 @@ V132_RULE_CORR_DISCOUNT_START = 0.50
 V132_RULE_CORR_MAX_DISCOUNT = 0.50
 
 
+def _v132_runtime_prepare_rule_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    """Rebuild V13.2.2 deterministic Pathi/Big Al rule flags from live-safe state.
+
+    Training rebuilds these same flags before rule selection. Runtime must do the
+    same so an artifact never depends on stale stored rule columns. Chronology is
+    deliberately NOT reconstructed here because live rows can contain repeated
+    book/snapshot quotes; only already-pregame state and same-game opponent mirrors
+    are used.
+    """
+    if rows is None or rows.empty:
+        return rows.copy() if rows is not None else rows
+    out=rows.copy()
+    try:
+        out=add_pathi_football_key_features(out)
+    except Exception:
+        pass
+    try:
+        game_col=next((c for c in ("Game_Key","Merge_Key_Short") if c in out.columns),None)
+        team_col=next((c for c in ("Outcome_Norm","Outcome","Team_Norm","Team") if c in out.columns),None)
+        opp_col=next((c for c in ("Opponent_Norm","Opponent") if c in out.columns),None)
+        if game_col and team_col and opp_col:
+            def _tok(v):
+                return pd.Series(v,index=out.index).astype("string").fillna("").str.lower().str.replace(r"[^a-z0-9]+","",regex=True)
+            g=out[game_col].astype(str).str.lower().str.strip()
+            team=_tok(out[team_col]); opp=_tok(out[opp_col])
+            mirror=pd.DataFrame({"__g":g,"__team":team,
+                "__rev":pd.to_numeric(out.get("Revenge_Flag_Current"),errors="coerce"),
+                "__ps":pd.to_numeric(out.get("Prev_Spread_Value"),errors="coerce"),
+                "__pl":pd.to_numeric(out.get("Prev_SU_Loss"),errors="coerce")})
+            mirror=mirror.drop_duplicates(["__g","__team"],keep="last")
+            q=pd.DataFrame({"__g":g,"__team":opp},index=out.index)
+            got=q.merge(mirror,on=["__g","__team"],how="left",sort=False); got.index=out.index
+            for dst,src in (("Opp_Revenge_Flag_Current","__rev"),("Opp_Prev_Spread_Value","__ps"),("Opp_Prev_SU_Loss","__pl")):
+                cur=pd.to_numeric(out.get(dst),errors="coerce") if dst in out.columns else pd.Series(np.nan,index=out.index)
+                out[dst]=cur.where(cur.notna(),pd.to_numeric(got[src],errors="coerce"))
+    except Exception:
+        pass
+    try:
+        out=add_pathi_bigal_rule_flags(out)
+    except Exception:
+        pass
+    return out
+
+
 def _v132_runtime_rule_trigger(rows: pd.DataFrame, spec: dict) -> np.ndarray:
     n=0 if rows is None else len(rows); m=np.ones(n,dtype=bool)
     for c in list(spec.get("columns") or []):
@@ -16091,7 +16169,7 @@ def _v132_runtime_rule_trigger(rows: pd.DataFrame, spec: dict) -> np.ndarray:
         z=pd.to_numeric(rows[c],errors="coerce").fillna(0).to_numpy(dtype=float); m &= np.abs(z)>0.5
     if spec.get("kind")=="column_role":
         spread=None
-        for c in ("Spread_Value","Value","Outcome_Market_Spread","Opening_Spread"):
+        for c in ("Value","Spread_Value","Outcome_Market_Spread","Opening_Spread"):
             if c in rows.columns:
                 spread=pd.to_numeric(rows[c],errors="coerce").to_numpy(dtype=float,na_value=np.nan); break
         if spread is None: return np.zeros(n,dtype=bool)
@@ -16100,6 +16178,7 @@ def _v132_runtime_rule_trigger(rows: pd.DataFrame, spec: dict) -> np.ndarray:
 
 
 def _v132_runtime_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict):
+    rows=_v132_runtime_prepare_rule_rows(rows)
     base=np.asarray(base_prob,dtype=float).copy(); n=len(base); final=base.copy()
     detail={"Pathi":{"contribution":np.zeros(n),"weight":np.zeros(n),"active":np.zeros(n,dtype=np.int8),"residual_edge":np.zeros(n),"independence":np.ones(n),"names":np.full(n,"OTHER",dtype=object)},"BigAl":{"contribution":np.zeros(n),"weight":np.zeros(n),"active":np.zeros(n,dtype=np.int8),"residual_edge":np.zeros(n),"independence":np.ones(n),"names":np.full(n,"OTHER",dtype=object)}}
     if not isinstance(engine,dict) or not engine.get("gate_pass",False):
