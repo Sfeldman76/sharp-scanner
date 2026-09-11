@@ -12259,16 +12259,39 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
     )
     tg["Last_Matchup_SU_Win_System"] = tg.groupby(pair_grp, sort=False)["SU_Win"].shift(1)
     tg["Last_Matchup_SU_Margin_System"] = tg.groupby(pair_grp, sort=False)["SU_Margin"].shift(1)
+    tg["Last_Matchup_Season_System"] = tg.groupby(pair_grp, sort=False)["Season"].shift(1)
 
     # If the source does not explicitly provide a revenge flag, infer the common
     # historical meaning: the team lost its previous meeting with this opponent.
+    _last_h2h_win = pd.to_numeric(tg.get("Last_Matchup_SU_Win_System"), errors="coerce")
     _rev = pd.to_numeric(tg.get("Revenge_Flag_Current"), errors="coerce")
     _rev_infer = np.where(
-        pd.to_numeric(tg.get("Last_Matchup_SU_Win_System"), errors="coerce").notna(),
-        (pd.to_numeric(tg.get("Last_Matchup_SU_Win_System"), errors="coerce") < 0.5).astype(float),
+        _last_h2h_win.notna(),
+        (_last_h2h_win < 0.5).astype(float),
         np.nan,
     )
     tg["Revenge_Flag_Current"] = _rev.combine_first(pd.Series(_rev_infer, index=tg.index, dtype="float64"))
+
+    # CF1-specific revenge horizon.  Big Al's published 2025 CF1 card includes
+    # Louisville/JMU, Florida/USF and BYU/Stanford even though those opponents had
+    # lost the prior H2H in 2022.  Therefore an arbitrary all-history H2H loss is
+    # too broad for this rule.  Treat only current-season or immediately-prior-
+    # season H2H losses as revenge; an older/no prior meeting is no revenge.
+    _cur_season = pd.to_numeric(tg.get("Season"), errors="coerce")
+    _last_h2h_season = pd.to_numeric(tg.get("Last_Matchup_Season_System"), errors="coerce")
+    _season_gap = _cur_season - _last_h2h_season
+    _recent_h2h = _last_h2h_season.notna() & _season_gap.ge(0) & _season_gap.le(1)
+    _rev_recent = pd.Series(np.nan, index=tg.index, dtype="float64")
+    _season_known = _cur_season.notna()
+    _rev_recent.loc[_season_known & ~_recent_h2h] = 0.0
+    _recent_known = _season_known & _recent_h2h & _last_h2h_win.notna()
+    _rev_recent.loc[_recent_known] = (_last_h2h_win.loc[_recent_known] < 0.5).astype(float)
+    _existing_recent = (
+        pd.to_numeric(tg.get("Revenge_Flag_CurrentOrPriorSeason"), errors="coerce")
+        if "Revenge_Flag_CurrentOrPriorSeason" in tg.columns
+        else pd.Series(np.nan, index=tg.index, dtype="float64")
+    )
+    tg["Revenge_Flag_CurrentOrPriorSeason"] = _existing_recent.combine_first(_rev_recent)
 
     # Final-two regular-season window. Exact Week data wins; team-game proxy is explicit.
     tg["Final_Two_Regular_Season_Proxy"] = (
@@ -12304,7 +12327,7 @@ def build_pathi_bigal_team_game_state(df_in: pd.DataFrame) -> pd.DataFrame:
         "Prev3_SU_Win", "Prev3_SU_Loss", "Prev3_ATS_Win", "Prev3_ATS_Loss", "Prev3_ATS_Cover_Margin",
         "Prev_Is_ML_Dog", "Prev_Is_ML_Favorite", "Prev_Is_Road_Favorite", "Prev_Is_Road_Dog_9Plus",
         "Prev_Opponent_Is_Defending_Champion", "Dog_Rate_Last10_Prior", "Avg_Points_For_Prior",
-        "Road_Favorite_ROI_Prior", "Team_Game_Number", "Revenge_Flag_Current",
+        "Road_Favorite_ROI_Prior", "Team_Game_Number", "Revenge_Flag_Current", "Revenge_Flag_CurrentOrPriorSeason",
         "Pathi_FB_Team_Role_ATS_Last5", "Pathi_FB_Team_Role_ATS_Last10", "Pathi_FB_Team_Role_ATS_Season",
         "Team_Is_Defending_Champion", "Team_Prior_Season_Playoff", "Is_Final_Home_Game",
         "Team_Eliminated_With_Loss", "Team_Series_Wins", "Opp_Series_Wins",
@@ -12546,10 +12569,21 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     # College football 1 - Week 2 home off 42+ win, nonconference, opponent no revenge.
     # Published condition is the team's second game; use Team_Game_Number rather than
     # calendar Week_Number so a bye does not misclassify the system.
-    s["BigAl_CF1_Week2Home42Win_DataReady"] = ready("Team_Game_Number", "Prev_SU_Win", "Prev_Points_For", "Is_Conference_Game", "Opp_Revenge_Flag_Current").astype("int8")
+    # V13.2.3 uses current/prior-season revenge when that state exists because Big
+    # Al's published 2025 examples show that a 2022 H2H loss does not disqualify a
+    # 2025 opponent.  Older artifacts can still fall back to the legacy field.
+    _cf1_opp_revenge_field = (
+        "Opp_Revenge_Flag_CurrentOrPriorSeason"
+        if (
+            "Opp_Revenge_Flag_CurrentOrPriorSeason" in s.columns
+            and pd.to_numeric(s["Opp_Revenge_Flag_CurrentOrPriorSeason"],errors="coerce").notna().any()
+        )
+        else "Opp_Revenge_Flag_Current"
+    )
+    s["BigAl_CF1_Week2Home42Win_DataReady"] = ready("Team_Game_Number", "Prev_SU_Win", "Prev_Points_For", "Is_Conference_Game", _cf1_opp_revenge_field).astype("int8")
     s["BigAl_CF1_Week2Home42Win"] = (
         is_ncaaf & n("Team_Game_Number").eq(2) & n("Is_Home").eq(1) & n("Prev_SU_Win").eq(1) &
-        n("Prev_Points_For").gt(42) & n("Is_Conference_Game").eq(0) & n("Opp_Revenge_Flag_Current").eq(0)
+        n("Prev_Points_For").gt(42) & n("Is_Conference_Game").eq(0) & n(_cf1_opp_revenge_field).eq(0)
     ).astype("int8")
 
     # College football 2 - regular season game 9+, revenge dog, prior 50+ points.
@@ -12725,7 +12759,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         "BigAl_NFL3_PlayoffHighScoreFade": (is_nfl, ["Is_Postseason", "Opp_Is_Home", "Opp_Prev_SU_Win", "Opp_Prev_Points_For", "Prev_Points_For"]),
         "BigAl_NFL4_PreseasonContrarianMove": (is_nfl, ["Is_Preseason", "Spread_Value", "Opening_Spread"]),
         "BigAl_NFL5_PreseasonLowOffenseOver": (is_nfl, ["Is_Preseason", "Avg_Points_For_Prior", "Opp_Avg_Points_For_Prior"]),
-        "BigAl_CF1_Week2Home42Win": (is_ncaaf, ["Team_Game_Number", "Is_Home", "Prev_SU_Win", "Prev_Points_For", "Is_Conference_Game", "Opp_Revenge_Flag_Current"]),
+        "BigAl_CF1_Week2Home42Win": (is_ncaaf, ["Team_Game_Number", "Is_Home", "Prev_SU_Win", "Prev_Points_For", "Is_Conference_Game", _cf1_opp_revenge_field]),
         "BigAl_CF2_LateSeasonRevengeDog": (is_ncaaf, ["Is_Regular_Season", "Team_Game_Number", "Revenge_Flag_Current", "Spread_Value", "Prev_Points_For"]),
         "BigAl_CF3_Fade19PlusFavoriteUpsetLoss": (is_ncaaf, ["Is_Regular_Season", "Opp_Prev_Spread_Value", "Opp_Prev_SU_Loss"]),
         "BigAl_NBA1_B2BRematchRoadDog": (is_nba, ["Is_Regular_Season", "Immediate_Rematch_Flag", "Is_Home", "Spread_Value", "Prev_SU_Loss", "Prev_ATS_Loss"]),
@@ -12778,7 +12812,7 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
     ])
     _set_bigal_match("BigAl_CF1_Week2Home42Win", is_ncaaf, [
         n("Team_Game_Number").eq(2), n("Is_Home").eq(1), n("Prev_SU_Win").eq(1),
-        n("Prev_Points_For").gt(42), n("Is_Conference_Game").eq(0), n("Opp_Revenge_Flag_Current").eq(0),
+        n("Prev_Points_For").gt(42), n("Is_Conference_Game").eq(0), n(_cf1_opp_revenge_field).eq(0),
     ])
     _set_bigal_match("BigAl_CF2_LateSeasonRevengeDog", is_ncaaf, [
         n("Is_Regular_Season").eq(1), n("Team_Game_Number").ge(9), n("Revenge_Flag_Current").eq(1),
@@ -14786,15 +14820,15 @@ def attach_pathi_bigal_backend_features(current_rows: pd.DataFrame, sport: str |
 #     plus information available before kickoff.
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
-NCAAF_STAT_FEATURE_VERSION = "2026-09-08-v12.2.0-core-anchored-matchup-freshness"
+NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.4-observed-stats-unshrunk-latent-state-separate"
 
 # ============================================================================
 # V13 NCAAF VALUE ARCHITECTURE
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-11-v13.2.2-history-rule-repair"
-NCAAF_V13_HOTFIX = "V13_2_2__CF1_REVENGE_REPAIR__LEAKSAFE_HIST_PRIORS__ROLE_PARITY__CAL_TRANSFER"
+NCAAF_V13_VERSION = "2026-09-11-v13.2.4-canonical-evidence-unshrunk-stats"
+NCAAF_V13_HOTFIX = "V13_2_4__CANONICAL_GAME_EVIDENCE__HIST_SYSTEM_BASE_AUTHORITY__RICH_CONTEXT_MODIFIER__OBSERVED_STATS_UNSHRUNK"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -14867,15 +14901,19 @@ def _ncaaf_season_from_timestamp(values):
     return season.where(s.dt.month.ne(1), season - 1.0)
 
 
-def _ncaaf_stat_add_pair_features(frame: pd.DataFrame):
-    """Add total-combination and offense-vs-defense matchup candidates in one concat.
 
-    These are candidate generators only. V12.2 qualification decides independently
-    whether each feature is admitted to margin or total production models.
+def _ncaaf_stat_add_pair_features(frame: pd.DataFrame):
+    """Create matchup/total candidates without altering observed team performance.
+
+    ``RawSeason`` and ``RawRecent3`` are direct leakage-safe summaries of games
+    actually played. ``State`` and ``Recent3`` are stabilized latent estimates kept
+    as separate candidates. Feature qualification/regularization decides which
+    representation matters; the preprocessing layer never replaces a raw statistic
+    with a shrunken value.
     """
     out = frame.copy()
     derived = {}
-    for prefix in ("State", "Recent3"):
+    for prefix in ("RawSeason", "RawRecent3", "State", "Recent3"):
         for metric in _NCAAF_STAT_PROFILE_METRICS:
             ac = f"A_{prefix}_{metric}"; bc = f"B_{prefix}_{metric}"
             if ac not in out.columns or bc not in out.columns:
@@ -15021,7 +15059,7 @@ def _ncaaf_stat_feature_family(feature_name: str) -> str:
         return "total_combination"
     if c.startswith("Context_"):
         return "context"
-    for prefix in ("A_State_", "B_State_", "Diff_State_", "A_Recent3_", "B_Recent3_", "Diff_Recent3_"):
+    for prefix in ("A_RawSeason_", "B_RawSeason_", "Diff_RawSeason_", "A_RawRecent3_", "B_RawRecent3_", "Diff_RawRecent3_", "A_State_", "B_State_", "Diff_State_", "A_Recent3_", "B_Recent3_", "Diff_Recent3_"):
         if c.startswith(prefix):
             metric = c[len(prefix):]
             if metric.startswith("GameAdj_"):
@@ -15321,6 +15359,29 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
     grp_keys = [r["Season"], r["Team_Norm"]]
     r["__Games_Prior"] = r.groupby(["Season","Team_Norm"], sort=False).cumcount().astype(float)
 
+    # V13.0.16 early-season situational state.  These fields are all shifted
+    # within team-season, so the current game's result can never enter its own
+    # prediction.  The continuous prior margins let the model learn recency/
+    # overreaction effects; the threshold flags are low-dimensional expert
+    # hypotheses that remain gated by season-forward OOS proper scores.
+    _cur_su = pd.to_numeric(r["Team_Score"], errors="coerce") - pd.to_numeric(r["Opponent_Score"], errors="coerce")
+    _cur_sp = pd.to_numeric(r["Consensus_Open_Spread"], errors="coerce")
+    _cur_ats = _cur_su + _cur_sp
+    # Series expressions do not have a stable source-column name, so shift the
+    # derived values explicitly through temporary columns.
+    r["__Current_SU_Margin"] = _cur_su.astype("float64")
+    r["__Current_ATS_Margin"] = _cur_ats.astype("float64")
+    r["Pregame_Prev_SU_Margin"] = r.groupby(["Season","Team_Norm"], sort=False)["__Current_SU_Margin"].shift(1)
+    r["Pregame_Prev_ATS_Margin"] = r.groupby(["Season","Team_Norm"], sort=False)["__Current_ATS_Margin"].shift(1)
+    r["Pregame_Prev_Points_For"] = r.groupby(["Season","Team_Norm"], sort=False)["Team_Score"].shift(1)
+    r["Pregame_Prev_Points_Against"] = r.groupby(["Season","Team_Norm"], sort=False)["Opponent_Score"].shift(1)
+    _psu = pd.to_numeric(r["Pregame_Prev_SU_Margin"], errors="coerce")
+    _pats = pd.to_numeric(r["Pregame_Prev_ATS_Margin"], errors="coerce")
+    r["Pregame_Prev_BigWin21"] = np.where(_psu.notna(), (_psu >= 21).astype(float), np.nan)
+    r["Pregame_Prev_BigLoss21"] = np.where(_psu.notna(), (_psu <= -21).astype(float), np.nan)
+    r["Pregame_Prev_BigCover10"] = np.where(_pats.notna(), (_pats >= 10).astype(float), np.nan)
+    r["Pregame_Prev_BigMiss10"] = np.where(_pats.notna(), (_pats <= -10).astype(float), np.nan)
+
     # Prior-season profile and national prior for early-season stabilization.
     summaries = r.groupby(["Season","Team_Norm"], as_index=False)[list(_NCAAF_STAT_METRICS)].mean()
     prev = summaries.copy(); prev["Season"] = prev["Season"] + 1
@@ -15343,20 +15404,25 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
         prev_nat = pd.to_numeric(r.get(f"__PrevNat_{c}"), errors="coerce")
         preseason = (0.72*prev_team + 0.28*prev_nat).where(prev_team.notna(), prev_nat)
         n = r["__Games_Prior"].clip(lower=0)
+        # Raw observed summaries are never shrunk.  They are the literal prior-only
+        # season-to-date and recent-3 performance.  Stabilized State/Recent3 remain
+        # separate latent candidates so ML can decide whether stabilization helps.
+        r[f"RawSeason_{c}"] = season_prior.astype("float64")
+        r[f"RawRecent3_{c}"] = recent3.astype("float64")
         blended = (3.0*preseason.fillna(season_prior) + n*season_prior.fillna(preseason)) / (3.0+n).replace(0,np.nan)
         blended = blended.combine_first(season_prior).combine_first(preseason)
         r[f"State_{c}"] = blended.astype("float64")
         r[f"Recent3_{c}"] = recent3.combine_first(blended).astype("float64")
-        state_cols += [f"State_{c}", f"Recent3_{c}"]
+        state_cols += [f"RawSeason_{c}", f"RawRecent3_{c}", f"State_{c}", f"Recent3_{c}"]
 
     # -----------------------------------------------------------------
     # Opponent-adjusted efficiency residuals.
     # A game performance is measured against what that opponent had allowed/
     # produced BEFORE the game.  The residual itself is then shifted into future
     # games, so current-game statistics never leak into the current prediction.
-    # Severe Q3/final blowouts are shrunk because full-game box scores include
-    # more noncompetitive snaps; this is a conservative garbage-time proxy, not
-    # a claim to reproduce possession-level FEI/SP+ filtering.
+    # Q3/final blowout context is retained as diagnostic metadata only.  V13.2.4
+    # does not rewrite the observed box-score performance; ML may learn whether
+    # competitive-game context changes the predictive value of those observations.
     # -----------------------------------------------------------------
     opp_preg_cols = [
         "State_Def_YPP_Allowed","State_Def_Pass_YPA_Allowed","State_Def_Rush_YPA_Allowed",
@@ -15387,7 +15453,10 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
     }
     for name,(lhs,rhs,_) in adj_defs.items():
         lv=pd.to_numeric(r.get(lhs),errors="coerce"); rv=pd.to_numeric(r.get(rhs),errors="coerce")
-        r[name]=(comp_w*(lv-rv)).astype("float64")
+        # Preserve the observed opponent-adjusted performance exactly. Competitive
+        # game weight is retained as context/diagnostic metadata; it no longer
+        # rewrites the team's measured performance before ML sees it.
+        r[name]=(lv-rv).astype("float64")
 
     adj_summaries = r.groupby(["Season","Team_Norm"],as_index=False)[list(_NCAAF_STAT_ADJ_METRICS)].mean()
     adj_prev=adj_summaries.copy(); adj_prev["Season"]=adj_prev["Season"]+1
@@ -15402,20 +15471,28 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
         prev_team=pd.to_numeric(r.get(f"__PrevSeason_{c}"),errors="coerce"); prev_nat=pd.to_numeric(r.get(f"__PrevNat_{c}"),errors="coerce")
         preseason=(0.72*prev_team+0.28*prev_nat).where(prev_team.notna(),prev_nat)
         n=r["__Games_Prior"].clip(lower=0)
+        r[f"RawSeason_{c}"]=season_prior.astype("float64")
+        r[f"RawRecent3_{c}"]=recent3.astype("float64")
         blended=(3.0*preseason.fillna(season_prior)+n*season_prior.fillna(preseason))/(3.0+n).replace(0,np.nan)
         blended=blended.combine_first(season_prior).combine_first(preseason)
         r[f"State_{c}"]=blended.astype("float64"); r[f"Recent3_{c}"]=recent3.combine_first(blended).astype("float64")
-        state_cols += [f"State_{c}",f"Recent3_{c}"]
+        state_cols += [f"RawSeason_{c}",f"RawRecent3_{c}",f"State_{c}",f"Recent3_{c}"]
 
     # One anchor side per game. Home side when known; deterministic first side for neutral games.
     r["__HomeRank"] = np.where(r["Is_Home"].eq(1), 0, np.where(r["Is_Neutral"].eq(1), 1, 2))
     r = r.sort_values(["Season","Source_Game_ID","__HomeRank","Team_Norm"], kind="stable")
     anchor = r.drop_duplicates(["Season","Source_Game_ID"], keep="first").copy()
 
-    opp_state = r[["Season","Source_Game_ID","Team_Norm"] + state_cols + ["Consensus_Open_Moneyline"]].copy()
+    _early_side_cols=[
+        "__Games_Prior","Pregame_Prev_SU_Margin","Pregame_Prev_ATS_Margin",
+        "Pregame_Prev_Points_For","Pregame_Prev_Points_Against",
+        "Pregame_Prev_BigWin21","Pregame_Prev_BigLoss21",
+        "Pregame_Prev_BigCover10","Pregame_Prev_BigMiss10",
+    ]
+    opp_state = r[["Season","Source_Game_ID","Team_Norm"] + state_cols + ["Consensus_Open_Moneyline"] + [c for c in _early_side_cols if c in r.columns]].copy()
     opp_state = opp_state.rename(columns={
         "Team_Norm":"Opponent_Norm", "Consensus_Open_Moneyline":"Opp_Consensus_Open_Moneyline",
-        **{c:f"Opp_{c}" for c in state_cols}
+        **{c:f"Opp_{c}" for c in state_cols}, **{c:f"Opp_{c}" for c in _early_side_cols if c in r.columns}
     })
     anchor = anchor.merge(opp_state, on=["Season","Source_Game_ID","Opponent_Norm"], how="left", validate="one_to_one")
 
@@ -15423,8 +15500,14 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
     for c in state_cols:
         a = pd.to_numeric(anchor[c], errors="coerce")
         b = pd.to_numeric(anchor[f"Opp_{c}"], errors="coerce")
-        base = c.replace("State_", "").replace("Recent3_", "")
-        prefix = "State" if c.startswith("State_") else "Recent3"
+        if c.startswith("RawSeason_"):
+            prefix="RawSeason"; base=c[len("RawSeason_"):]
+        elif c.startswith("RawRecent3_"):
+            prefix="RawRecent3"; base=c[len("RawRecent3_"):]
+        elif c.startswith("State_"):
+            prefix="State"; base=c[len("State_"):]
+        else:
+            prefix="Recent3"; base=c[len("Recent3_"): ]
         for nm, val in ((f"A_{prefix}_{base}",a),(f"B_{prefix}_{base}",b),(f"Diff_{prefix}_{base}",a-b)):
             anchor[nm] = val.astype("float64")
             feature_cols.append(nm)
@@ -15435,7 +15518,29 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
     anchor["Context_A_FBS"] = anchor.get("Subdivision", pd.Series("",index=anchor.index)).astype(str).str.upper().eq("FBS").astype(float)
     anchor["Context_B_FBS"] = anchor.get("Opponent_Subdivision", pd.Series("",index=anchor.index)).astype(str).str.upper().eq("FBS").astype(float)
     anchor["Context_Cross_Subdivision"] = anchor["Context_A_FBS"].ne(anchor["Context_B_FBS"]).astype(float)
-    feature_cols += [_NCAAF_STAT_INTERCEPT_FEATURE,"Context_Is_Neutral","Context_Week","Context_A_FBS","Context_B_FBS","Context_Cross_Subdivision"]
+
+    # Games-played maturity is authoritative for V13 early-season handling.
+    # Calendar week is retained only as a diagnostic because Week 0/Week 1 feeds
+    # can legitimately number the opening full slate differently.
+    anchor["Context_Team_Games_Prior"] = pd.to_numeric(anchor.get("__Games_Prior"), errors="coerce")
+    anchor["Context_Opp_Games_Prior"] = pd.to_numeric(anchor.get("Opp___Games_Prior"), errors="coerce")
+    anchor["Context_Min_Games_Prior"] = pd.concat([anchor["Context_Team_Games_Prior"],anchor["Context_Opp_Games_Prior"]],axis=1).min(axis=1,skipna=True)
+    anchor["Context_Early_FirstTwo"] = anchor["Context_Min_Games_Prior"].le(1).astype(float).where(anchor["Context_Min_Games_Prior"].notna(),np.nan)
+    anchor["Context_Prev_SU_Margin"] = pd.to_numeric(anchor.get("Pregame_Prev_SU_Margin"),errors="coerce")
+    anchor["Context_Opp_Prev_SU_Margin"] = pd.to_numeric(anchor.get("Opp_Pregame_Prev_SU_Margin"),errors="coerce")
+    anchor["Context_Prev_ATS_Margin"] = pd.to_numeric(anchor.get("Pregame_Prev_ATS_Margin"),errors="coerce")
+    anchor["Context_Opp_Prev_ATS_Margin"] = pd.to_numeric(anchor.get("Opp_Pregame_Prev_ATS_Margin"),errors="coerce")
+    for _nm in ("BigWin21","BigLoss21","BigCover10","BigMiss10"):
+        anchor[f"Context_Prev_{_nm}"] = pd.to_numeric(anchor.get(f"Pregame_Prev_{_nm}"),errors="coerce")
+        anchor[f"Context_Opp_Prev_{_nm}"] = pd.to_numeric(anchor.get(f"Opp_Pregame_Prev_{_nm}"),errors="coerce")
+    _conf = anchor.get("Conference",pd.Series("",index=anchor.index)).astype(str).str.strip().str.lower()
+    _oppconf = anchor.get("Opponent_Conference",pd.Series("",index=anchor.index)).astype(str).str.strip().str.lower()
+    _conf_known=_conf.ne("")&_oppconf.ne("")
+    anchor["Context_Is_NonConference"] = np.where(_conf_known,_conf.ne(_oppconf).astype(float),np.nan)
+    feature_cols += [
+        _NCAAF_STAT_INTERCEPT_FEATURE,"Context_Is_Neutral","Context_Week","Context_A_FBS","Context_B_FBS","Context_Cross_Subdivision",
+        "Context_Team_Games_Prior","Context_Opp_Games_Prior","Context_Min_Games_Prior","Context_Early_FirstTwo",
+    ]
 
     # V12.2: totals need combinations; spreads need explicit offense-vs-defense matchups.
     anchor, _derived_pair_cols = _ncaaf_stat_add_pair_features(anchor)
@@ -15477,16 +15582,20 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
                 nxt=(3.0*preseason+n_games*cur)/(3.0+n_games)
             elif np.isfinite(cur): nxt=cur
             else: nxt=preseason
-            rec[f"Profile_{c}"]=nxt
             rec3=float(vals.tail(3).mean()) if vals.tail(3).notna().any() else np.nan
-            # Recent-3 becomes increasingly current, but missing/ultra-early state
-            # falls back to the stabilized next-game profile.
+            # Preserve observed current-season performance separately from latent
+            # stabilization. Missing raw state remains missing; the model receives
+            # Profile_Games so it can learn how much evidence exists.
+            rec[f"Profile_RawSeason_{c}"]=cur
+            rec[f"Profile_RawRecent3_{c}"]=rec3
+            rec[f"Profile_{c}"]=nxt
             rec[f"Profile_Recent3_{c}"]=rec3 if np.isfinite(rec3) else nxt
         prof_rows.append(rec)
     latest_profiles=pd.DataFrame(prof_rows)
 
     anchor = anchor.replace([np.inf,-np.inf],np.nan)
     return anchor.reset_index(drop=True), list(dict.fromkeys(feature_cols)), latest_profiles
+
 
 
 def _ncaaf_stat_fit_models_for_rows(df, margin_feature_cols, total_feature_cols, mask):
@@ -15524,7 +15633,7 @@ def fit_ncaaf_statistical_brain(log_func=print):
         log_func(f"[NCAAF-STAT] insufficient seasons={seasons}")
         return None
     latest=seasons[-1]
-    linear_weight=0.75; market_weight=0.15
+    linear_weight=0.75; market_weight=1.0
 
     # Qualify margin and total features independently.  The latest season is held
     # completely outside this decision and remains the protected transfer shadow.
@@ -15665,8 +15774,9 @@ def _ncaaf_stat_runtime_baseline(df, market):
     return pd.Series(.5,index=idx,dtype=float)
 
 
+
 def _ncaaf_stat_runtime_frame(df: pd.DataFrame, sb: dict):
-    """Reconstruct future structural state with explicit source-season freshness."""
+    """Reconstruct future structural state without rewriting observed performance."""
     out=pd.DataFrame(index=df.index)
     profiles=sb.get("latest_profiles")
     if not isinstance(profiles,pd.DataFrame) or profiles.empty:
@@ -15676,16 +15786,19 @@ def _ncaaf_stat_runtime_frame(df: pd.DataFrame, sb: dict):
     away=df.get("Away_Team_Norm",df.get("Away_Team",pd.Series("",index=df.index))).astype(str).str.lower().str.strip()
     for metric in _NCAAF_STAT_PROFILE_METRICS:
         base_col=f"Profile_{metric}"; rec_col=f"Profile_Recent3_{metric}"
+        raw_col=f"Profile_RawSeason_{metric}"; raw3_col=f"Profile_RawRecent3_{metric}"
         amap=home.map(p[base_col]) if base_col in p.columns else pd.Series(np.nan,index=df.index)
         bmap=away.map(p[base_col]) if base_col in p.columns else pd.Series(np.nan,index=df.index)
         ar=home.map(p[rec_col]) if rec_col in p.columns else amap
         br=away.map(p[rec_col]) if rec_col in p.columns else bmap
-        out[f"A_State_{metric}"]=pd.to_numeric(amap,errors="coerce")
-        out[f"B_State_{metric}"]=pd.to_numeric(bmap,errors="coerce")
-        out[f"Diff_State_{metric}"]=out[f"A_State_{metric}"]-out[f"B_State_{metric}"]
-        out[f"A_Recent3_{metric}"]=pd.to_numeric(ar,errors="coerce")
-        out[f"B_Recent3_{metric}"]=pd.to_numeric(br,errors="coerce")
-        out[f"Diff_Recent3_{metric}"]=out[f"A_Recent3_{metric}"]-out[f"B_Recent3_{metric}"]
+        araw=home.map(p[raw_col]) if raw_col in p.columns else pd.Series(np.nan,index=df.index)
+        braw=away.map(p[raw_col]) if raw_col in p.columns else pd.Series(np.nan,index=df.index)
+        ar3=home.map(p[raw3_col]) if raw3_col in p.columns else pd.Series(np.nan,index=df.index)
+        br3=away.map(p[raw3_col]) if raw3_col in p.columns else pd.Series(np.nan,index=df.index)
+        for prefix,av,bv in (("RawSeason",araw,braw),("RawRecent3",ar3,br3),("State",amap,bmap),("Recent3",ar,br)):
+            out[f"A_{prefix}_{metric}"]=pd.to_numeric(av,errors="coerce")
+            out[f"B_{prefix}_{metric}"]=pd.to_numeric(bv,errors="coerce")
+            out[f"Diff_{prefix}_{metric}"]=out[f"A_{prefix}_{metric}"]-out[f"B_{prefix}_{metric}"]
     out, _ = _ncaaf_stat_add_pair_features(out)
     out[_NCAAF_STAT_INTERCEPT_FEATURE] = 0.0
     neutral=pd.to_numeric(df.get("Is_Neutral_Site",df.get("Is_Neutral",0)),errors="coerce")
@@ -15697,7 +15810,6 @@ def _ncaaf_stat_runtime_frame(df: pd.DataFrame, sb: dict):
     out["Context_B_FBS"]=ass.eq("FBS").astype(float).where(ass.ne(""),np.nan)
     out["Context_Cross_Subdivision"]=out["Context_A_FBS"].ne(out["Context_B_FBS"]).astype(float).where(out[["Context_A_FBS","Context_B_FBS"]].notna().all(axis=1),np.nan)
 
-    # Profile metadata is used for trust/gating, never as a result label.
     profile_season_col = "Profile_Season" if "Profile_Season" in p.columns else None
     profile_games_col = "Profile_Games" if "Profile_Games" in p.columns else None
     hs_src = home.map(p[profile_season_col]) if profile_season_col else pd.Series(np.nan,index=df.index)
@@ -15711,15 +15823,20 @@ def _ncaaf_stat_runtime_frame(df: pd.DataFrame, sb: dict):
     same = src_season.eq(game_season) & game_season.notna()
     loaded_games = pd.concat([hg,ag],axis=1).min(axis=1,skipna=True).fillna(0.0).clip(lower=0.0)
     current_games = loaded_games.where(same,0.0)
-    # Conservative smooth transition: prior-only profiles retain diagnostic value
-    # but cannot earn fresh deployment authority until current-season data exists.
+    # Freshness is metadata/uncertainty only. It never rescales RawSeason or
+    # RawRecent3 values and no longer rewrites the statistical probability.
     fresh = pd.Series(0.20,index=df.index,dtype="float64")
     fresh.loc[same] = 0.25 + 0.75*(1.0-np.exp(-current_games.loc[same]/3.0))
+    out["Context_Team_Games_Prior"]=hg.astype("float64")
+    out["Context_Opp_Games_Prior"]=ag.astype("float64")
+    out["Context_Min_Games_Prior"]=loaded_games.astype("float64")
+    out["Context_Early_FirstTwo"]=loaded_games.le(1).astype(float)
     out["__Stat_Source_Season"] = src_season.astype("float64")
     out["__Stat_Game_Season"] = game_season.astype("float64")
     out["__Stat_Current_Season_Games"] = current_games.astype("float64")
     out["__Stat_State_Freshness"] = fresh.clip(0.0,1.0).astype("float64")
     return out.replace([np.inf,-np.inf],np.nan)
+
 
 def _ncaaf_stat_profile_similarity(X, sb):
     med=np.asarray(sb.get("profile_median",[]),dtype=float); scale=np.asarray(sb.get("profile_scale",[]),dtype=float)
@@ -16110,30 +16227,39 @@ def _apply_v13_autofs_core_bridge_runtime(base_prob, core_prob, bridge: dict):
 
 
 
-# V13.2 runtime constants must match training artifact semantics.
-V132_RULE_MAX_SINGLE_PROB_DELTA = 0.025
-V132_RULE_MAX_FAMILY_PROB_DELTA = 0.040
-V132_RULE_MAX_TOTAL_PROB_DELTA = 0.050
+# V13.2.4 runtime constants must match training artifact semantics.
+V132_RULE_HIST_MIN_GAMES = 20
+V132_RULE_HIST_MIN_ATS = 0.5238
+V132_RULE_HIST_MAX_ABS_BETA = 0.75
+V132_RULE_MAX_SINGLE_PROB_DELTA = 0.100
+V132_RULE_MAX_FAMILY_PROB_DELTA = 0.125
+V132_RULE_MAX_TOTAL_PROB_DELTA = 0.150
 V132_RULE_CORR_DISCOUNT_START = 0.50
 V132_RULE_CORR_MAX_DISCOUNT = 0.50
 
 
 def _v132_runtime_prepare_rule_rows(rows: pd.DataFrame) -> pd.DataFrame:
-    """Rebuild V13.2.2 deterministic Pathi/Big Al rule flags from live-safe state.
+    """Apply the same selective deterministic-rule rebuild used by V13.2.4 training.
 
-    Training rebuilds these same flags before rule selection. Runtime must do the
-    same so an artifact never depends on stale stored rule columns. Chronology is
-    deliberately NOT reconstructed here because live rows can contain repeated
-    book/snapshot quotes; only already-pregame state and same-game opponent mirrors
-    are used.
+    Runtime must never zero a valid upstream Big Al flag merely because a repeated
+    quote row lacks one of the state columns required to reconstruct it.  Exact
+    rules are recomputed only where their complete pregame inputs are available;
+    otherwise the stored upstream flag is preserved.
     """
     if rows is None or rows.empty:
         return rows.copy() if rows is not None else rows
     out=rows.copy()
+
+    def _num(c):
+        if c in out.columns:
+            return pd.to_numeric(out[c],errors="coerce")
+        return pd.Series(np.nan,index=out.index,dtype="float64")
+
     try:
         out=add_pathi_football_key_features(out)
     except Exception:
         pass
+
     try:
         game_col=next((c for c in ("Game_Key","Merge_Key_Short") if c in out.columns),None)
         team_col=next((c for c in ("Outcome_Norm","Outcome","Team_Norm","Team") if c in out.columns),None)
@@ -16143,24 +16269,94 @@ def _v132_runtime_prepare_rule_rows(rows: pd.DataFrame) -> pd.DataFrame:
                 return pd.Series(v,index=out.index).astype("string").fillna("").str.lower().str.replace(r"[^a-z0-9]+","",regex=True)
             g=out[game_col].astype(str).str.lower().str.strip()
             team=_tok(out[team_col]); opp=_tok(out[opp_col])
-            mirror=pd.DataFrame({"__g":g,"__team":team,
-                "__rev":pd.to_numeric(out.get("Revenge_Flag_Current"),errors="coerce"),
-                "__ps":pd.to_numeric(out.get("Prev_Spread_Value"),errors="coerce"),
-                "__pl":pd.to_numeric(out.get("Prev_SU_Loss"),errors="coerce")})
+            mirror=pd.DataFrame({
+                "__g":g,"__team":team,
+                "__rev":_num("Revenge_Flag_Current"),
+                "__rev_recent":_num("Revenge_Flag_CurrentOrPriorSeason"),
+                "__ps":_num("Prev_Spread_Value"),
+                "__pl":_num("Prev_SU_Loss"),
+            })
             mirror=mirror.drop_duplicates(["__g","__team"],keep="last")
             q=pd.DataFrame({"__g":g,"__team":opp},index=out.index)
             got=q.merge(mirror,on=["__g","__team"],how="left",sort=False); got.index=out.index
-            for dst,src in (("Opp_Revenge_Flag_Current","__rev"),("Opp_Prev_Spread_Value","__ps"),("Opp_Prev_SU_Loss","__pl")):
-                cur=pd.to_numeric(out.get(dst),errors="coerce") if dst in out.columns else pd.Series(np.nan,index=out.index)
+            for dst,src in (
+                ("Opp_Revenge_Flag_Current","__rev"),
+                ("Opp_Revenge_Flag_CurrentOrPriorSeason","__rev_recent"),
+                ("Opp_Prev_Spread_Value","__ps"),
+                ("Opp_Prev_SU_Loss","__pl"),
+            ):
+                cur=_num(dst)
                 out[dst]=cur.where(cur.notna(),pd.to_numeric(got[src],errors="coerce"))
     except Exception:
         pass
-    try:
-        out=add_pathi_bigal_rule_flags(out)
-    except Exception:
-        pass
-    return out
 
+    def _n(c):
+        if c in out.columns:
+            return pd.to_numeric(out[c],errors="coerce")
+        return pd.Series(np.nan,index=out.index,dtype="float64")
+
+    sport=(out["Sport"].astype(str).str.upper().str.strip()
+           if "Sport" in out.columns else pd.Series("NCAAF",index=out.index))
+    is_ncaaf=sport.eq("NCAAF")
+    regular=_n("Is_Regular_Season").fillna(1).eq(1)
+
+    def _selective_rule(name, ready_mask, signal_mask):
+        ready=pd.Series(ready_mask,index=out.index).fillna(False).astype(bool)
+        signal=pd.Series(signal_mask,index=out.index).fillna(False).astype(bool)
+        old=_n(name) if name in out.columns else pd.Series(np.nan,index=out.index,dtype="float64")
+        result=old.copy()
+        result.loc[ready]=signal.loc[ready].astype(float)
+        out[name]=result
+        out[name+"_DataReady"]=ready.astype("int8")
+
+    cf1_rev_col=(
+        "Opp_Revenge_Flag_CurrentOrPriorSeason"
+        if (
+            "Opp_Revenge_Flag_CurrentOrPriorSeason" in out.columns
+            and pd.to_numeric(out["Opp_Revenge_Flag_CurrentOrPriorSeason"],errors="coerce").notna().any()
+        )
+        else "Opp_Revenge_Flag_Current"
+    )
+    cf1_ready=is_ncaaf.copy()
+    for c in ("Team_Game_Number","Is_Home","Prev_SU_Win","Prev_Points_For","Is_Conference_Game",cf1_rev_col):
+        cf1_ready &= _n(c).notna()
+    _selective_rule(
+        "BigAl_CF1_Week2Home42Win",cf1_ready,
+        is_ncaaf & _n("Team_Game_Number").eq(2) & _n("Is_Home").eq(1)
+        & _n("Prev_SU_Win").eq(1) & _n("Prev_Points_For").gt(42)
+        & _n("Is_Conference_Game").eq(0) & _n(cf1_rev_col).eq(0)
+    )
+
+    cf2_ready=is_ncaaf.copy()
+    for c in ("Team_Game_Number","Revenge_Flag_Current","Spread_Value","Prev_Points_For"):
+        cf2_ready &= _n(c).notna()
+    _selective_rule(
+        "BigAl_CF2_LateSeasonRevengeDog",cf2_ready,
+        is_ncaaf & regular & _n("Team_Game_Number").ge(9)
+        & _n("Revenge_Flag_Current").eq(1) & _n("Spread_Value").gt(0)
+        & _n("Prev_Points_For").gt(50)
+    )
+
+    cf3_ready=is_ncaaf & _n("Opp_Prev_Spread_Value").notna() & _n("Opp_Prev_SU_Loss").notna()
+    _selective_rule(
+        "BigAl_CF3_Fade19PlusFavoriteUpsetLoss",cf3_ready,
+        is_ncaaf & regular & _n("Opp_Prev_Spread_Value").le(-19.0)
+        & _n("Opp_Prev_SU_Loss").eq(1)
+    )
+
+    revdog_ready=is_ncaaf & _n("Revenge_Flag_Current").notna() & _n("Spread_Value").notna()
+    _selective_rule(
+        "BigAl_CF_Enhancer_RevengeDog",revdog_ready,
+        is_ncaaf & regular & _n("Revenge_Flag_Current").eq(1) & _n("Spread_Value").gt(0)
+    )
+
+    cf2_flag=_n("BigAl_CF2_LateSeasonRevengeDog")
+    _selective_rule(
+        "BigAl_CF2_Away_Tightener",
+        is_ncaaf & cf2_flag.notna() & _n("Is_Home").notna(),
+        is_ncaaf & cf2_flag.eq(1) & _n("Is_Home").eq(0)
+    )
+    return out
 
 def _v132_runtime_rule_trigger(rows: pd.DataFrame, spec: dict) -> np.ndarray:
     n=0 if rows is None else len(rows); m=np.ones(n,dtype=bool)
@@ -16177,29 +16373,92 @@ def _v132_runtime_rule_trigger(rows: pd.DataFrame, spec: dict) -> np.ndarray:
     return m
 
 
+
+def _v132_runtime_row_dates(rows: pd.DataFrame) -> pd.Series:
+    for c in ("Game_Start","feat_Game_Start","Game_Date"):
+        if c in rows.columns:
+            z=pd.to_datetime(rows[c],errors="coerce",utc=True)
+            if z.notna().any(): return pd.Series(z,index=rows.index)
+    return pd.Series(pd.NaT,index=rows.index,dtype="datetime64[ns, UTC]")
+
+
+def _v132_runtime_hist_beta_vector(pr: dict, rows: pd.DataFrame) -> np.ndarray:
+    src=(pr or {}).get("historical_source") or {}; occ=list(src.get("occurrences") or [])
+    out=np.zeros(len(rows),dtype=float)
+    if not occ: return out
+    dates=_v132_runtime_row_dates(rows)
+    parsed=[]
+    for rec in occ:
+        if not isinstance(rec,dict): continue
+        dt=pd.to_datetime(rec.get("date"),errors="coerce",utc=True)
+        try: yy=float(rec.get("ats_win"))
+        except Exception: continue
+        if pd.notna(dt) and np.isfinite(yy): parsed.append((dt,yy))
+    for i,dt in enumerate(dates):
+        vals=[yy for rd,yy in parsed if pd.notna(dt) and rd < dt]
+        if len(vals) < V132_RULE_HIST_MIN_GAMES: continue
+        p=float(np.mean(vals))
+        if p < V132_RULE_HIST_MIN_ATS: continue
+        out[i]=float(np.clip(np.log(np.clip(p,1e-6,1-1e-6)/(1-np.clip(p,1e-6,1-1e-6))),-V132_RULE_HIST_MAX_ABS_BETA,V132_RULE_HIST_MAX_ABS_BETA))
+    return out
+
+
 def _v132_runtime_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict):
+    """Apply named systems exactly as trained: historical base + admitted rich modifier."""
     rows=_v132_runtime_prepare_rule_rows(rows)
     base=np.asarray(base_prob,dtype=float).copy(); n=len(base); final=base.copy()
-    detail={"Pathi":{"contribution":np.zeros(n),"weight":np.zeros(n),"active":np.zeros(n,dtype=np.int8),"residual_edge":np.zeros(n),"independence":np.ones(n),"names":np.full(n,"OTHER",dtype=object)},"BigAl":{"contribution":np.zeros(n),"weight":np.zeros(n),"active":np.zeros(n,dtype=np.int8),"residual_edge":np.zeros(n),"independence":np.ones(n),"names":np.full(n,"OTHER",dtype=object)}}
+    detail={
+        "Pathi":{"contribution":np.zeros(n),"weight":np.zeros(n),"active":np.zeros(n,dtype=np.int8),"residual_edge":np.zeros(n),"independence":np.ones(n),"names":np.full(n,"OTHER",dtype=object)},
+        "BigAl":{"contribution":np.zeros(n),"weight":np.zeros(n),"active":np.zeros(n,dtype=np.int8),"residual_edge":np.zeros(n),"independence":np.ones(n),"names":np.full(n,"OTHER",dtype=object)},
+    }
     if not isinstance(engine,dict) or not engine.get("gate_pass",False):
-        for fam in ("Pathi","BigAl"): detail[fam]["prob"]=base.copy(); detail[fam]["regime"]=detail[fam].pop("names")
+        for fam in ("Pathi","BigAl"):
+            detail[fam]["prob"]=base.copy(); detail[fam]["regime"]=detail[fam].pop("names")
         return final,detail
-    specs={sp.get("name"):sp for sp in list(engine.get("specs") or []) if isinstance(sp,dict)}; profiles=engine.get("profiles") or {}; selected=list(engine.get("selected_experts") or []); corr=engine.get("pairwise_corr") or {}; fam_used={"Pathi":np.zeros(n),"BigAl":np.zeros(n)}; total_used=np.zeros(n); prev=[]
+
+    specs={sp.get("name"):sp for sp in list(engine.get("specs") or []) if isinstance(sp,dict)}
+    profiles=engine.get("profiles") or {}; selected=list(engine.get("selected_experts") or []); corr=engine.get("pairwise_corr") or {}
+    fam_used={"Pathi":np.zeros(n),"BigAl":np.zeros(n)}; total_used=np.zeros(n); prev=[]
     for name in selected:
         pr=profiles.get(name) or {}; sp=specs.get(name)
         if sp is None or not pr.get("gate_pass",False): continue
         active=_v132_runtime_rule_trigger(rows,sp)&np.isfinite(final)
         if not active.any(): continue
-        fam=str(sp.get("family")); beta=float(pr.get("final_beta",0.0) or 0.0); tr=float(np.clip(pr.get("trust",0.0) or 0.0,0,1)); proposal=_v13_overlay_sigmoid(_v13_overlay_logit(final[active])+beta*tr); raw=np.clip(proposal-final[active],-V132_RULE_MAX_SINGLE_PROB_DELTA,V132_RULE_MAX_SINGLE_PROB_DELTA); indep=np.ones(raw.size)
-        for prev_name,prev_mask,prev_delta in prev:
-            rho=float(max(0.0,(corr.get(name,{}) or {}).get(prev_name,(corr.get(prev_name,{}) or {}).get(name,0.0)) or 0.0))
-            if rho>V132_RULE_CORR_DISCOUNT_START:
-                overlap=prev_mask[active]; same=overlap&(np.sign(raw)==np.sign(prev_delta[active])); indep[same]*=(1.0-min(V132_RULE_CORR_MAX_DISCOUNT,0.5*rho))
-        raw*=indep; idx=np.flatnonzero(active); fam_room=np.maximum(0.0,V132_RULE_MAX_FAMILY_PROB_DELTA-np.abs(fam_used[fam][idx])); total_room=np.maximum(0.0,V132_RULE_MAX_TOTAL_PROB_DELTA-np.abs(total_used[idx])); cap=np.minimum(fam_room,total_room); raw=np.sign(raw)*np.minimum(np.abs(raw),cap); before=final[idx].copy(); final[idx]=np.clip(final[idx]+raw,0.01,0.99); actual=final[idx]-before; fam_used[fam][idx]+=actual; total_used[idx]+=actual
-        dd=detail[fam]; dd["contribution"][idx]+=actual; dd["weight"][idx]=np.maximum(dd["weight"][idx],tr); dd["active"][idx]=1; dd["residual_edge"][idx]=np.maximum(dd["residual_edge"][idx],abs(beta)); dd["independence"][idx]=np.minimum(dd["independence"][idx],indep)
+        fam=str(sp.get("family")); hist_auth=bool(pr.get("historical_authority",False))
+        hb=_v132_runtime_hist_beta_vector(pr,rows) if hist_auth else np.zeros(n,dtype=float)
+        if hist_auth:
+            mod=float(pr.get("modern_modifier_beta",0.0) or 0.0) if bool(pr.get("modern_modifier_gate",False)) else 0.0
+            weight_value=1.0
+        else:
+            mod=float(pr.get("final_beta",0.0) or 0.0)
+            weight_value=float(np.clip(pr.get("trust",0.0) or 0.0,0,1))
+        beta_vec=hb+mod
+        active &= np.isfinite(beta_vec)
+        if not active.any(): continue
+        idx=np.flatnonzero(active); beta_active=beta_vec[idx]
+        proposal=_v13_overlay_sigmoid(_v13_overlay_logit(final[idx])+beta_active)
+        raw=np.clip(proposal-final[idx],-V132_RULE_MAX_SINGLE_PROB_DELTA,V132_RULE_MAX_SINGLE_PROB_DELTA)
+        indep=np.ones(raw.size,dtype=float)
+        # Validated historical systems keep their own observed authority.  Only
+        # modern-only discoveries are correlation-discounted for duplicate evidence.
+        if not hist_auth:
+            for prev_name,prev_mask,prev_delta,prev_hist in prev:
+                if prev_hist: continue
+                rho=float(max(0.0,(corr.get(name,{}) or {}).get(prev_name,(corr.get(prev_name,{}) or {}).get(name,0.0)) or 0.0))
+                if rho>V132_RULE_CORR_DISCOUNT_START:
+                    overlap=prev_mask[idx]; same=overlap&(np.sign(raw)==np.sign(prev_delta[idx])); indep[same]*=(1.0-min(V132_RULE_CORR_MAX_DISCOUNT,0.5*rho))
+        raw*=indep
+        fam_room=np.maximum(0.0,V132_RULE_MAX_FAMILY_PROB_DELTA-np.abs(fam_used[fam][idx]))
+        total_room=np.maximum(0.0,V132_RULE_MAX_TOTAL_PROB_DELTA-np.abs(total_used[idx]))
+        cap=np.minimum(fam_room,total_room); raw=np.sign(raw)*np.minimum(np.abs(raw),cap)
+        before=final[idx].copy(); final[idx]=np.clip(final[idx]+raw,0.01,0.99); actual=final[idx]-before
+        fam_used[fam][idx]+=actual; total_used[idx]+=actual
+        dd=detail[fam]; dd["contribution"][idx]+=actual; dd["weight"][idx]=np.maximum(dd["weight"][idx],weight_value); dd["active"][idx]=1
+        dd["residual_edge"][idx]=np.maximum(dd["residual_edge"][idx],np.abs(beta_active)); dd["independence"][idx]=np.minimum(dd["independence"][idx],indep)
         for j in idx: dd["names"][j]=name if dd["names"][j]=="OTHER" else str(dd["names"][j])+"+"+name
-        full=np.zeros(n); full[idx]=actual; prev.append((name,active,full))
-    for fam in ("Pathi","BigAl"): detail[fam]["prob"]=np.clip(base+detail[fam]["contribution"],0.01,0.99); detail[fam]["regime"]=detail[fam].pop("names")
+        full=np.zeros(n); full[idx]=actual; prev.append((name,active,full,hist_auth))
+    for fam in ("Pathi","BigAl"):
+        detail[fam]["prob"]=np.clip(base+detail[fam]["contribution"],0.01,0.99); detail[fam]["regime"]=detail[fam].pop("names")
     return np.clip(final,0.01,0.99),detail
 
 def _v1312_runtime_residual_specialists(base_prob,family_probs,labels,centers,engine):
@@ -16623,8 +16882,11 @@ def apply_ncaaf_statistical_brain_feature(df: pd.DataFrame, sb, market: str):
         rec=np.clip(np.exp(-np.log(2)*age/730.),.20,1.0)
         state_fresh=pd.to_numeric(Xall.get("__Stat_State_Freshness",0.20),errors="coerce").fillna(0.20).clip(0,1).to_numpy(dtype=float)
         eff=np.clip(base_trust*sim*rec*state_fresh,0,1)
-        final=np.clip(baseline+eff*(np.asarray(rawp,dtype=float)-baseline),.01,.99); edge=final-baseline
-        eligible=(gt>cutoff).fillna(False).to_numpy(dtype=bool)&np.isfinite(rawp)&np.isfinite(eff)&(eff>=.03)
+        # V13.2.4: probability is the model's unshrunk structural opinion. Reliability,
+        # profile similarity and freshness remain separate metadata/features so the
+        # downstream ML/gates can learn influence without rewriting performance.
+        final=np.clip(np.asarray(rawp,dtype=float),.01,.99); edge=final-baseline
+        eligible=(gt>cutoff).fillna(False).to_numpy(dtype=bool)&np.isfinite(rawp)
         # V12 leakage contract: only expose final structural-model outputs after the historical cutoff.
         out["NCAAF_Stat_Market_Baseline_Prob"]=baseline.astype("float32")
         out.loc[eligible,"NCAAF_Stat_Raw_Prob"]=np.asarray(rawp,dtype="float32")[eligible]
