@@ -406,7 +406,7 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 # Added 2026-09-01. These flags are kept separate from the learned model so
 # the named systems remain auditable and can also be offered to AutoFS.
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-08-v12.0.9-fresh-gated-sidecars-market-guard"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-12-v13.2.9-core-handicapper-isolated-feature-state"
 HISTORY_DIAGNOSTIC_VERSION = "2026-09-08-v12.0.9-future-lane-noop-aware-ablation"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
@@ -6995,18 +6995,51 @@ def _head_forbidden_feature(col: str, head_name: str | None = None) -> bool:
 # appropriate specialist without making all heads copies of the outcome model.
 # =========================
 def _is_raw_pathi_bigal_state_feature(col: str) -> bool:
-    """Return True for raw deterministic/system-state fields that should not
-    enter the broad Outcome head directly.
-
-    Historical credibility summaries are deliberately exempt: they are shrunken,
-    temporally validated memory features rather than raw rule-state machinery.
-    Brain_* fields are already distilled expert/consensus outputs and do not match
-    these prefixes.
+    """Raw named-handicapper/system state. These fields belong only to the
+    validation-gated V13.2 rule-expert layer, never to Core heads.
     """
     s = str(col or "")
-    if s.startswith(("Pathi_Historical_", "BigAl_Historical_")):
-        return False
     return s.lower().startswith(("pathi_", "bigal_", "system_"))
+
+
+# Brain aggregates below are contaminated by Big Al / Pathi expert state because
+# they are computed across the full expert ensemble.  Keeping them in Core would
+# create a hidden second route even when the specialist gate is closed.
+_HANDICAPPER_CONTAMINATED_BRAIN_EXACT = {
+    "Brain_Expert_Mean_Strength", "Brain_Expert_Max_Strength",
+    "Brain_Expert_Dispersion", "Brain_Expert_Active_Count",
+    "Brain_Conflict_Count", "Brain_Directional_Pair_Count",
+    "Brain_Directional_Agreement_Rate", "Brain_Uncertainty_Proxy",
+    "Brain_Edge_Durability", "Brain_Decision_Readiness",
+    "Brain_AllIndependent_Agree", "Brain_AllCoreExperts_Agree",
+    "Brain_Overlay_Trust_Score", "Brain_Overlay_Trust_Active_Count",
+    "Brain_Overlay_Raw_Active_Count", "Brain_Overlay_Exact_Active_Count",
+    "Brain_Overlay_Tightener_Active_Count", "Brain_Overlay_Enhancer_Active_Count",
+}
+
+def _is_handicapper_core_forbidden_feature(col: str) -> bool:
+    """True when a feature carries named Big Al/Pathi/system information.
+
+    Generic football context remains legal in Core (rest, revenge, ATS history,
+    key-number geometry, market movement, etc.).  Exact named systems, their
+    historical memories, expert-state derivatives, cross-expert agreement fields,
+    and ensemble summaries contaminated by those experts are specialist-only.
+    """
+    s = str(col or "")
+    sl = s.lower()
+    if sl.startswith(("pathi_", "bigal_", "system_")):
+        return True
+    if s.startswith(("Brain_Expert_Pathi", "Brain_Expert_BigAl", "Brain_Pathi_", "Brain_BigAl_")):
+        return True
+    if s in _HANDICAPPER_CONTAMINATED_BRAIN_EXACT:
+        return True
+    if s.startswith("Brain_Overlay_"):
+        return True
+    # Any remaining Brain field explicitly naming either handicapper is derived
+    # from that specialist and therefore cannot enter a supposedly pure Core.
+    if s.startswith("Brain_") and ("BigAl" in s or "Pathi" in s):
+        return True
+    return False
 
 
 def _head_feature_family_allowed(col: str, head_name: str | None = None) -> bool:
@@ -7014,19 +7047,20 @@ def _head_feature_family_allowed(col: str, head_name: str | None = None) -> bool
     sl = s.lower()
     head = str(head_name or "outcome").lower().strip()
 
+    # V13.2.9 hard boundary: named Big Al / Pathi information is never a Core
+    # predictor in Outcome, Situation, Value, or any future head.  It is evaluated
+    # only by the source-backed per-system specialist engine.
+    if _is_handicapper_core_forbidden_feature(s):
+        return False
+
     if head == "outcome":
-        # V12.2 specialist isolation: Statistical Brain is evaluated only as a
-        # paired residual correction to the Core, never as a global AutoFS input.
-        # This prevents stale/prior-season stat state from distorting the Core.
+        # Statistical Brain probability state is also evaluated through its own
+        # validation-gated residual route, never as a global AutoFS input.
         if s.startswith("NCAAF_Stat_") or s.startswith("Brain_Expert_NCAAFStat_"):
             return False
-        return not _is_raw_pathi_bigal_state_feature(s)
+        return True
 
     if head == "situation":
-        # Deterministic situational systems are always situation-eligible.
-        if sl.startswith(("pathi_", "bigal_", "system_")):
-            return True
-
         # Keep generic market-microstructure variables out of the situation head,
         # even when their names contain words such as H2H or role.
         situation_market_exclusions = (
@@ -7065,12 +7099,8 @@ def _head_feature_family_allowed(col: str, head_name: str | None = None) -> bool
         return any(tok in sl for tok in situation_tokens)
 
     if head == "value":
-        # Named deterministic systems belong to the Situation specialist.  The
-        # broad Outcome head can still use them, but Value should remain an
-        # independent market/microstructure specialist.
-        if sl.startswith(("pathi_", "bigal_", "system_")):
-            return False
-
+        # Named handicapper systems were already excluded globally above; Value
+        # remains an independent market/microstructure head.
         # Market/value/microstructure feature families.  The direct synthetic EV
         # target ingredients remain blocked separately by _head_forbidden_feature.
         value_prefixes = (
@@ -12830,7 +12860,7 @@ def train_with_champion_wrapper(
                 "legacy_probability_preserved_in_artifact":True,
             })
             logger.warning(
-                "[V13.1.2-PROMOTION] internal_ready=TRUE game_balanced_primary=%s probability_quality_gate=%s ll_imp=%+.6f br_imp=%+.6f ece_imp=%+.6f ici_imp=%+.6f auc_imp=%+.6f specialist_gate=%s",
+                "[V13.2.9-PROMOTION] internal_ready=TRUE game_balanced_primary=%s probability_quality_gate=%s ll_imp=%+.6f br_imp=%+.6f ece_imp=%+.6f ici_imp=%+.6f auc_imp=%+.6f specialist_gate=%s",
                 _use_gb,_v13_outer_quality_pass,_ll_imp,_br_imp,_ece_imp,_ici_imp,_auc_imp,_v13_spec_gate
             )
 
@@ -14808,8 +14838,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.6-observed-stats-unshrunk-latent-
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-11-v13.2.8-source-backed-per-system-influence"
-NCAAF_V13_HOTFIX = "V13_2_8__UNIFIED_2022_2026__SOURCE_BACKED_EVIDENCE__PER_SYSTEM_CORE_INFLUENCE__POST_MARKET_RICH_RULE_REGISTRY"
+NCAAF_V13_VERSION = "2026-09-12-v13.2.9-core-handicapper-isolation-cleanup"
+NCAAF_V13_HOTFIX = "V13_2_9__UNIFIED_2022_2026__CORE_HANDICAPPER_ISOLATED__SOURCE_BACKED_SYSTEMS__LEGACY_FAMILY_MEMORY_RETIRED"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -14833,14 +14863,14 @@ NCAAF_STAT_MODEL_FEATURES = (
     "NCAAF_Stat_Expected_Opp_Points", "NCAAF_Stat_Uncertainty",
 )
 
-# V12.2 core-incremental validation-gated specialist routes.
+# V13.2.9 validation-gated sidecar routes.
 #
 # The Statistical Brain and historical system memories are always calculated and
 # retained for diagnostics/UI.  They may alter final probability only after a
 # post-source-cutoff, unique-game/team-side validation gate passes.  This prevents
 # a previously validated expert from receiving permanent authority when current-
 # season transfer is weak, while keeping the lane available to earn influence.
-NCAAF_STAT_PROTECTED_ROUTE_VERSION = "2026-09-11-v12.2.1-source-contract-wiring-vs-trust-gate"
+NCAAF_STAT_PROTECTED_ROUTE_VERSION = "2026-09-12-v13.2.9-stat-source-contract-wiring-vs-trust-gate"
 NCAAF_STAT_PROTECTED_MAX_EDGE_WEIGHT = 0.25
 NCAAF_STAT_PROTECTED_MAX_ABS_CORRECTION = 0.010
 NCAAF_STAT_PROTECTED_MIN_TRUST = 0.030
@@ -14850,19 +14880,11 @@ NCAAF_STAT_FRESH_GATE_MIN_LL_IMPROVEMENT = 0.0005
 NCAAF_STAT_FRESH_GATE_MIN_BRIER_IMPROVEMENT = 0.0002
 NCAAF_STAT_FRESH_GATE_MIN_AUC = 0.515
 
-SYSTEM_MEMORY_PROTECTED_ROUTE_VERSION = "2026-09-08-v12.2.0-core-incremental-family-gated"
-SYSTEM_MEMORY_PROTECTED_MAX_EDGE_WEIGHT = 0.25
-SYSTEM_MEMORY_PROTECTED_MAX_FAMILY_CORRECTION = 0.0075
-SYSTEM_MEMORY_PROTECTED_MAX_TOTAL_CORRECTION = 0.010
-SYSTEM_MEMORY_PROTECTED_MIN_TRUST = 0.050
-SYSTEM_MEMORY_PROTECTED_MIN_POSTERIOR_EDGE = 0.010
-SYSTEM_MEMORY_FRESH_GATE_MIN_SIDES = 30
-SYSTEM_MEMORY_FRESH_GATE_FULL_WEIGHT_SIDES = 150
-SYSTEM_MEMORY_FRESH_GATE_MIN_LL_IMPROVEMENT = 0.0005
-SYSTEM_MEMORY_FRESH_GATE_MIN_BRIER_IMPROVEMENT = 0.0002
-SYSTEM_MEMORY_FRESH_GATE_MIN_HIT_RATE = 0.53
+# V13.2.9 cleanup: legacy family-level Pathi/BigAl memory correction constants
+# were removed. Named handicapper authority now exists only in the per-system
+# source-backed V13 rule-expert layer.
 
-OUTCOME_MARKET_GUARD_VERSION = "2026-09-08-v12.2.0-core-anchored-proper-score-market-shrink"
+OUTCOME_MARKET_GUARD_VERSION = "2026-09-12-v13.2.9-core-anchored-proper-score-market-shrink"
 OUTCOME_MARKET_GUARD_MIN_LL_IMPROVEMENT = 0.0005
 OUTCOME_MARKET_GUARD_MIN_BRIER_IMPROVEMENT = 0.0002
 OUTCOME_MARKET_GUARD_MIN_AUC = 0.515
@@ -15019,59 +15041,6 @@ def _evaluate_ncaaf_stat_fresh_gate(rows: pd.DataFrame, y, market: str, *, core_
                  f"orientation={orientation} gate={'PASS' if gate else 'CLOSED'} weight={weight:.4f}")
     return info
 
-def _evaluate_system_memory_fresh_gate(rows: pd.DataFrame, y, family: str, *, core_prob=None, log_func=print):
-    """Evaluate Pathi/BigAl memory only as an incremental correction to the Core."""
-    fam="Pathi" if str(family).lower().startswith("path") else "BigAl"
-    info={"family":fam,"gate_pass":False,"status":"not_applicable","n_unique_sides":0,"effective_edge_weight":0.0}
-    if rows is None: return info
-    pc=f"{fam}_Historical_Posterior_Prob"; tc=f"{fam}_Historical_Trust"
-    if pc not in rows.columns or tc not in rows.columns: info["status"]="missing_columns"; return info
-    d=rows.copy().reset_index(drop=True); yy_all=np.asarray(y).reshape(-1)
-    if len(yy_all)!=len(d): info["status"]="shape_mismatch"; return info
-    if core_prob is not None:
-        cp=np.asarray(core_prob,dtype=float).reshape(-1)
-        if len(cp)!=len(d): info["status"]="core_shape_mismatch"; return info
-        d["__Core_Prob"]=cp
-    post=pd.to_numeric(d[pc],errors="coerce").fillna(.5); trust=pd.to_numeric(d[tc],errors="coerce").fillna(0.)
-    eligible=trust.ge(SYSTEM_MEMORY_PROTECTED_MIN_TRUST)&(post-.5).abs().ge(SYSTEM_MEMORY_PROTECTED_MIN_POSTERIOR_EDGE)
-    season_num=pd.to_numeric(d.get("Season"),errors="coerce") if "Season" in d.columns else pd.Series(np.nan,index=d.index)
-    season_num=pd.Series(season_num,index=d.index).where(pd.Series(season_num,index=d.index).notna(),_ncaaf_season_from_timestamp(d.get("Game_Start",pd.Series(pd.NaT,index=d.index))))
-    known=season_num.loc[eligible&season_num.notna()]; season_used=int(known.max()) if len(known) else None
-    if season_used is not None: eligible &= season_num.eq(season_used)
-    ds=d.loc[eligible].copy(); ys=yy_all[eligible.to_numpy(dtype=bool)]
-    vals=[pc,tc]+(["__Core_Prob"] if core_prob is not None else [])
-    g=_fresh_unique_side_frame(ds,ys,vals)
-    if g.empty:
-        info["status"]="waiting_for_postcutoff_graded_sides"
-        if log_func: log_func(f"[SYSTEM-MEMORY-FRESH-GATE] family={fam} status={info['status']} n=0 gate=CLOSED")
-        return info
-    p=pd.to_numeric(g[pc],errors="coerce").fillna(.5).to_numpy(dtype=float); t=pd.to_numeric(g[tc],errors="coerce").fillna(0).to_numpy(dtype=float); yv=g["__fresh_y"].to_numpy(dtype=int)
-    direct=_fresh_prob_metrics(yv,p); inverse=_fresh_prob_metrics(yv,1-p); hit=float(np.mean((p>=.5)==yv)) if len(yv) else np.nan
-    core=pd.to_numeric(g.get("__Core_Prob",.5),errors="coerce")
-    if not isinstance(core,pd.Series): core=pd.Series(core,index=g.index)
-    core=core.fillna(.5).clip(.01,.99).to_numpy(dtype=float); core_met=_fresh_prob_metrics(yv,core)
-    edge=p-.5; best_weight=0.; best_met=None; best_score=np.inf
-    for w in (.05,.10,.15,.20,.25):
-        corr=np.clip(w*t*edge,-SYSTEM_MEMORY_PROTECTED_MAX_FAMILY_CORRECTION,SYSTEM_MEMORY_PROTECTED_MAX_FAMILY_CORRECTION)
-        trial=np.clip(core+corr,.01,.99); met=_fresh_prob_metrics(yv,trial)
-        if np.isfinite(met["logloss"]) and np.isfinite(met["brier"]):
-            score=met["logloss"]+.5*met["brier"]
-            if score<best_score: best_score=score; best_weight=w; best_met=met
-    ll_imp=float(core_met["logloss"]-best_met["logloss"]) if best_met and np.isfinite(core_met["logloss"]) else np.nan
-    br_imp=float(core_met["brier"]-best_met["brier"]) if best_met and np.isfinite(core_met["brier"]) else np.nan
-    inv_better=bool(np.isfinite(inverse["logloss"]) and np.isfinite(direct["logloss"]) and inverse["logloss"]<direct["logloss"]-.001)
-    gate=bool(direct["n"]>=SYSTEM_MEMORY_FRESH_GATE_MIN_SIDES and not inv_better and np.isfinite(ll_imp) and ll_imp>=SYSTEM_MEMORY_FRESH_GATE_MIN_LL_IMPROVEMENT and np.isfinite(br_imp) and br_imp>=SYSTEM_MEMORY_FRESH_GATE_MIN_BRIER_IMPROVEMENT and np.isfinite(hit) and hit>=SYSTEM_MEMORY_FRESH_GATE_MIN_HIT_RATE and best_weight>0)
-    weight=0.
-    if gate:
-        sf=float(np.clip((direct["n"]-SYSTEM_MEMORY_FRESH_GATE_MIN_SIDES)/max(SYSTEM_MEMORY_FRESH_GATE_FULL_WEIGHT_SIDES-SYSTEM_MEMORY_FRESH_GATE_MIN_SIDES,1),.25,1.0)); weight=float(best_weight*sf)
-    ug=int(g["Game_Key"].nunique()) if "Game_Key" in g.columns else int(direct["n"]); dmin=g["__fresh_game_start"].min() if "__fresh_game_start" in g.columns else pd.NaT; dmax=g["__fresh_game_start"].max() if "__fresh_game_start" in g.columns else pd.NaT
-    info.update({"gate_pass":gate,"status":"PASS" if gate else ("INVERSION_SUSPECT" if inv_better else "WAIT_OR_FAIL"),"n_unique_sides":int(direct["n"]),"n_unique_games":ug,"season_used":season_used,
-                 "game_date_min":None if pd.isna(dmin) else str(dmin),"game_date_max":None if pd.isna(dmax) else str(dmax),"effective_edge_weight":weight,"best_tested_edge_weight":best_weight,
-                 "direct":direct,"inverse":inverse,"core_baseline":core_met,"incremental_trial":best_met,"hit_rate":hit,"logloss_improvement_vs_core":ll_imp,"brier_improvement_vs_core":br_imp})
-    if log_func:
-        log_func(f"[SYSTEM-MEMORY-FRESH-GATE] family={fam} season={season_used} games={ug} n={direct['n']} hit={hit:.3f} core_ll={core_met['logloss']:.6f} trial_ll={(best_met or {}).get('logloss',np.nan):.6f} ll_improve={ll_imp:+.6f} brier_improve={br_imp:+.6f} gate={'PASS' if gate else 'CLOSED'} weight={weight:.4f}")
-    return info
-
 def _apply_ncaaf_stat_protected_route(base_prob, rows: pd.DataFrame, market: str, *, log_func=None, config=None, return_info=False):
     """Apply Stat Brain only after its current-season unique-side gate passes."""
     p=np.asarray(base_prob,dtype=np.float64).reshape(-1)
@@ -15144,41 +15113,8 @@ def _apply_ncaaf_stat_protected_route(base_prob, rows: pd.DataFrame, market: str
     return (out,info) if return_info else out
 
 
-def _apply_system_memory_protected_route(base_prob, rows: pd.DataFrame, market: str, *, log_func=None, config=None, return_info=False):
-    """Apply directional system memory only for families with fresh gate approval."""
-    p=np.asarray(base_prob,dtype=np.float64).reshape(-1)
-    info={"rows":len(p),"Pathi_active":0,"BigAl_active":0,"Pathi_applied":0,"BigAl_applied":0,"status":"disabled"}
-    if rows is None or len(rows)!=len(p) or _sys_norm_market(market)!="spreads":
-        info["status"]="shape_or_market_mismatch"; return (p,info) if return_info else p
-    cfg=config or {}
-    if not bool(cfg.get("enabled",True)): return (p,info) if return_info else p
-    fam_cap=float(cfg.get("max_abs_family_correction",SYSTEM_MEMORY_PROTECTED_MAX_FAMILY_CORRECTION))
-    total_cap=float(cfg.get("max_abs_total_correction",SYSTEM_MEMORY_PROTECTED_MAX_TOTAL_CORRECTION))
-    min_trust=float(cfg.get("min_trust",SYSTEM_MEMORY_PROTECTED_MIN_TRUST)); min_edge=float(cfg.get("min_abs_posterior_edge",SYSTEM_MEMORY_PROTECTED_MIN_POSTERIOR_EDGE))
-    family_gates=cfg.get("family_gates") or {}
-    total_corr=np.zeros(len(p),dtype=np.float64)
-    for fam in ("Pathi","BigAl"):
-        post=pd.to_numeric(rows.get(f"{fam}_Historical_Posterior_Prob",0.5),errors="coerce")
-        if not isinstance(post,pd.Series): post=pd.Series(post,index=rows.index)
-        trust=pd.to_numeric(rows.get(f"{fam}_Historical_Trust",0.0),errors="coerce")
-        if not isinstance(trust,pd.Series): trust=pd.Series(trust,index=rows.index)
-        post=post.fillna(0.5).to_numpy(dtype=float); trust=trust.fillna(0.0).to_numpy(dtype=float); edge=post-0.5
-        eligible=np.isfinite(edge)&np.isfinite(trust)&(trust>=min_trust)&(np.abs(edge)>=min_edge)
-        info[f"{fam}_active"]=int(eligible.sum())
-        gate=family_gates.get(fam) or {}
-        gate_pass=bool(gate.get("gate_pass",False))
-        weight=float(gate.get("effective_edge_weight",0.0)) if gate_pass else 0.0
-        fc=np.zeros(len(p),dtype=np.float64)
-        if gate_pass and weight>0:
-            fc[eligible]=np.clip(weight*trust[eligible]*edge[eligible],-fam_cap,fam_cap)
-            info[f"{fam}_applied"]=int((np.abs(fc)>0).sum())
-        total_corr+=fc
-    total_corr=np.clip(total_corr,-total_cap,total_cap); active=np.abs(total_corr)>0
-    out=np.clip(p+total_corr,0.01,0.99)
-    info.update({"status":"ok" if active.any() else "deployment_gates_closed_or_inactive","active_any":int(active.sum()),"mean_abs_correction":float(np.mean(np.abs(total_corr[active]))) if active.any() else 0.0,"max_abs_correction":float(np.max(np.abs(total_corr[active]))) if active.any() else 0.0})
-    if log_func is not None:
-        log_func(f"[SYSTEM-MEMORY-PROTECTED] Pathi_eligible={info['Pathi_active']} Pathi_applied={info['Pathi_applied']} BigAl_eligible={info['BigAl_active']} BigAl_applied={info['BigAl_applied']} active_any={info['active_any']}/{len(p)} mean_abs_corr={info['mean_abs_correction']:.5f} max_abs_corr={info['max_abs_correction']:.5f} route={SYSTEM_MEMORY_PROTECTED_ROUTE_VERSION}")
-    return (out,info) if return_info else out
+# V13.2.9 cleanup: legacy _apply_system_memory_protected_route removed.
+# The current rule engine owns all Pathi/BigAl probability authority.
 
 _NCAAF_STAT_METRICS = (
     # Core efficiency / finishing proxies available in the historical box-score feed.
@@ -17784,7 +17720,7 @@ def _ncaaf_v13_paired_model_bootstrap(y,p12,p13,groups,reps=800,seed=13100):
 # ============================================================================
 # V13.1.2 CALIBRATED AUTOfs CORE + CONDITIONAL RESIDUAL EXPERTS
 # ============================================================================
-V13_SPECIALIST_OVERLAY_VERSION = "2026-09-11-v13.2.8-source-backed-per-system-influence-stack"
+V13_SPECIALIST_OVERLAY_VERSION = "2026-09-12-v13.2.9-core-handicapper-isolation-stack"
 V13_SPECIALIST_WEIGHT_GRID = (0.0, 0.025, 0.05, 0.075, 0.10, 0.15)
 V13_SPECIALIST_MAX_TOTAL_WEIGHT = 0.20
 V13_SPECIALIST_MIN_OOF_ROWS = 500
@@ -17875,7 +17811,7 @@ V13_RESIDUAL_CORR_MAX_DISCOUNT = 0.50
 # Each deterministic trigger keeps its own evidence lineage and its own
 # incremental-to-Core influence coefficient. Shadow data can veto that rule's
 # learned influence without erasing unrelated systems; outer champion holdout remains untouched.
-V132_RULE_EXPERT_VERSION = "2026-09-11-v13.2.8-source-backed-per-system-core-influence"
+V132_RULE_EXPERT_VERSION = "2026-09-12-v13.2.9-source-backed-per-system-influence-core-isolated"
 V132_RULE_MIN_SELECTION_GAMES = 12
 V132_RULE_MIN_SHADOW_GAMES = 5
 V132_RULE_MIN_FOLD_GAMES = 3
@@ -20300,7 +20236,7 @@ def _v132_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict, beta_ov
 def _v132_fit_rule_expert_engine(y,base,rows,folds,shadow_folds,sample_weight=None,source_history=None,log_func=print):
     """Fit named handicap systems with evidence-source and influence separation.
 
-    V13.2.8 contracts:
+    V13.2.9 contracts:
       * 2022-2026 is one canonical game history; rich rows only add columns.
       * Historical ATS evidence is never shrunken toward 50%.
       * A verified published ATS record may temporarily replace a still-small
@@ -20592,7 +20528,7 @@ def _v132_fit_post_stack_calibration(y,selection_pred,shadow_pred,select_mask,sh
             f"shadow_ll={base_sh.get('logloss',np.nan):.6f}->{base_sh.get('logloss',np.nan):.6f}"
         )
         return {
-            "version":"2026-09-11-v13.2.8-post-stack-temperature",
+            "version":"2026-09-12-v13.2.9-post-stack-temperature",
             "temperature":1.0,"selected_temperature":1.0,"shadow_transfer_pass":True,
             "skipped_no_active_components":True,
             "selection_base_metrics":base_sel,"selection_calibrated_metrics":base_sel,
@@ -20608,7 +20544,7 @@ def _v132_fit_post_stack_calibration(y,selection_pred,shadow_pred,select_mask,sh
     transfer=bool(best_t==1.0 or (hm.any() and _ncaaf_v13_calibration_noninferior(base_sh,shcand,max_ece_increase=0.0025,max_reliability_increase=0.00075) and shcand.get("logloss",np.inf)<=base_sh.get("logloss",np.inf)+1e-12 and shcand.get("brier",np.inf)<=base_sh.get("brier",np.inf)+1e-12))
     active_t=best_t if transfer else 1.0
     log_func(f"[V13.2-POST-STACK-CAL] selected_T={best_t:.2f} active_T={active_t:.2f} shadow_transfer={'PASS' if transfer else 'CLOSED'} sel_ll={base_sel.get('logloss',np.nan):.6f}->{best.get('logloss',np.nan):.6f} shadow_ll={base_sh.get('logloss',np.nan):.6f}->{shcand.get('logloss',np.nan):.6f}")
-    return {"version":"2026-09-11-v13.2.8-post-stack-temperature","temperature":float(active_t),"selected_temperature":float(best_t),"shadow_transfer_pass":bool(transfer),"skipped_no_active_components":False,"selection_base_metrics":base_sel,"selection_calibrated_metrics":best,"shadow_base_metrics":base_sh,"shadow_calibrated_metrics":shcand}
+    return {"version":"2026-09-12-v13.2.9-post-stack-temperature","temperature":float(active_t),"selected_temperature":float(best_t),"shadow_transfer_pass":bool(transfer),"skipped_no_active_components":False,"selection_base_metrics":base_sel,"selection_calibrated_metrics":best,"shadow_base_metrics":base_sh,"shadow_calibrated_metrics":shcand}
 
 
 def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X_train: pd.DataFrame,
@@ -21159,8 +21095,8 @@ def _ncaaf_v13_compare_v12_holdout(hold_rows: pd.DataFrame, y_hold, p_v12, bundl
         result={"matched_rows":int(matched.sum()),"matched_games":int(matched_games),"match_rate":match_rate,
                 "coverage_gate_pass":coverage_ok,"coverage_by_season":_coverage,
                 "status":"INSUFFICIENT","promotion_gate_pass":False}
-        log_func(f"[V13.1-CORE-RECIPE] status=INSUFFICIENT matched_rows={int(matched.sum())}/{len(d)} "
-                 f"match_rate={match_rate:.1%} matched_physical_games={matched_games} final_recipe=V13_2_8")
+        log_func(f"[V13.2.9-CORE-RECIPE] status=INSUFFICIENT matched_rows={int(matched.sum())}/{len(d)} "
+                 f"match_rate={match_rate:.1%} matched_physical_games={matched_games} final_recipe=V13_2_9")
         return result
 
     m12=_ncaaf_v13_weighted_metrics(yy[matched],p12[matched],phys[matched])
@@ -21210,7 +21146,7 @@ def _ncaaf_v13_compare_v12_holdout(hold_rows: pd.DataFrame, y_hold, p_v12, bundl
         except Exception:
             market_met=None
 
-    log_func(f"[V13.1-CORE-RECIPE] status=DEVELOPMENT_ONLY comparator={comparator_name} final_recipe=V13_2_8 "
+    log_func(f"[V13.2.9-CORE-RECIPE] status=DEVELOPMENT_ONLY comparator={comparator_name} final_recipe=V13_2_9 "
              f"matched_rows={m13['n']} matched_physical_games={m13['games']} match_rate={match_rate:.1%} weighting=EQUAL_PHYSICAL_GAME "
              f"comparator_auc={m12['auc']:.4f} v13_raw_core_auc={mb['auc']:.4f} v13_core_auc={mc['auc']:.4f} v13_final_auc={m13['auc']:.4f} "
              f"comparator_ll={m12['logloss']:.6f} v13_ll={m13['logloss']:.6f} ll_improvement={ll_gain:+.6f} "
@@ -24594,8 +24530,8 @@ def train_sharp_model_from_bq(
             except Exception as _rich_enrich_exc:
                 print(f"[V13.2-RICH-RULE-REGISTRY-ENRICHED] unavailable: {_rich_enrich_exc}")
 
-        # V12.0.9 Historical Core is diagnostic-only; independent Pathi/Big Al system memory
-        # is future-only and leakage-gated at the same full-history cutoff.
+        # V13.2.9 Historical/Stat source state remains attached for independent gates; named
+        # Pathi/Big Al probability authority is handled only by the rule-expert layer.
         df_market = apply_historical_core_expert_feature(df_market, historical_core_expert, market)
         df_market = apply_ncaaf_statistical_brain_feature(df_market, ncaaf_statistical_brain, market)
         if str(sport).upper().strip() == "NCAAF":
@@ -24604,7 +24540,7 @@ def train_sharp_model_from_bq(
             print(f"[NCAAF-STAT-CONTRACT] market={market} active_rows={_ns_active} total_rows={len(df_market)} mean_trust={_ns_trust:.3f} version={NCAAF_STAT_FEATURE_VERSION}")
             _hc_active = int(pd.to_numeric(df_market.get(HISTORICAL_CORE_ACTIVE_NAME), errors="coerce").fillna(0).sum())
             print(f"[HISTORICAL-BRAIN-CONTRACT] market={market} active_rows={_hc_active} total_rows={len(df_market)} mean_trust={pd.to_numeric(df_market.get(HISTORICAL_CORE_TRUST_NAME),errors='coerce').fillna(0).mean():.3f} horizons={int(pd.to_numeric(df_market.get(HISTORICAL_CORE_HORIZON_COUNT_NAME),errors='coerce').fillna(0).max())}")
-            # V12.0.9 authoritative source contracts.  These dry runs use the full
+            # V13.2.9 authoritative source contracts.  These dry runs use the full
             # enriched frame BEFORE Outcome/AutoFS filtering, so future/unscored rows
             # can prove that protected deployment routes are actually wired.
             if _sys_norm_market(market) == "spreads":
@@ -24626,25 +24562,7 @@ def train_sharp_model_from_bq(
                     f"eligible={_src_stat_info.get('eligible',0)} trust_blocked={_src_stat_info.get('trust_blocked',0)} "
                     f"status={_src_stat_info.get('status')} PASS"
                 )
-                _sm_cfg = {
-                    "enabled": True,
-                    "family_gates": {
-                        "Pathi": {"gate_pass": False, "effective_edge_weight": 0.0},
-                        "BigAl": {"gate_pass": False, "effective_edge_weight": 0.0},
-                    },
-                    "max_abs_family_correction": SYSTEM_MEMORY_PROTECTED_MAX_FAMILY_CORRECTION,
-                    "max_abs_total_correction": SYSTEM_MEMORY_PROTECTED_MAX_TOTAL_CORRECTION,
-                    "min_trust": SYSTEM_MEMORY_PROTECTED_MIN_TRUST,
-                    "min_abs_posterior_edge": SYSTEM_MEMORY_PROTECTED_MIN_POSTERIOR_EDGE,
-                }
-                _, _src_sm_info = _apply_system_memory_protected_route(
-                    np.full(len(df_market), 0.5, dtype=np.float64), df_market, market,
-                    log_func=print, config=_sm_cfg, return_info=True
-                )
-                print(
-                    f"[SYSTEM-MEMORY-PROTECTED-CONTRACT] Pathi_active={_src_sm_info.get('Pathi_active',0)} "
-                    f"BigAl_active={_src_sm_info.get('BigAl_active',0)} active_any={_src_sm_info.get('active_any',0)} PASS"
-                )
+                print("[CODE-PATH-CLEANUP] legacy_family_memory_source_contract=RETIRED route=V13_RULE_EXPERT_ONLY")
         try:
             log_bigal_training_coverage(df_market, sport, market)
         except Exception as _ba_cov_err:
@@ -25789,6 +25707,7 @@ def train_sharp_model_from_bq(
                 [
                     c for c in PATHI_FOOTBALL_MODEL_FEATURES
                     if c in df_market.columns
+                    and not _is_handicapper_core_forbidden_feature(c)
                 ]
             )
         
@@ -25801,37 +25720,45 @@ def train_sharp_model_from_bq(
                 c for c in PATHI_BIGAL_ADDITIONAL_MODEL_FEATURES
                 if c in df_market.columns
                 and _system_feature_valid_for_sport(c, sport_u)
+                and not _is_handicapper_core_forbidden_feature(c)
             ]
         )
         
         # ---------------------------------------------------------
-        # V11.5.10 historical Brain — Outcome lane only downstream.
-        # Residual probability, dynamic trust/drift/recency, horizon agreement and
-        # shrunken named-system reliability are candidates; AutoFS learns influence.
+        # Historical Core state may remain a generic Core candidate, but named
+        # Big Al/Pathi historical memories are excluded and routed only through
+        # the dedicated source-backed rule engine.
         # ---------------------------------------------------------
         if sport_u == "NCAAF":
-            extend_unique(features, [c for c in HISTORICAL_CORE_MODEL_FEATURES if c in df_market.columns])
-            extend_unique(features, [c for c in NCAAF_STAT_MODEL_FEATURES if c in df_market.columns])
+            extend_unique(features, [
+                c for c in HISTORICAL_CORE_MODEL_FEATURES
+                if c in df_market.columns and not _is_handicapper_core_forbidden_feature(c)
+            ])
+            # NCAAF_Stat_* probability/state fields are retained on df_market for the
+            # independently gated Stat route but are intentionally NOT materialized in
+            # Core candidate matrices.
+            _core_stat_excluded = [c for c in NCAAF_STAT_MODEL_FEATURES if c in df_market.columns]
+            print(f"[CORE-STAT-ISOLATION] excluded_from_core={len(_core_stat_excluded)} route=STAT_GATE_ONLY")
 
         # ---------------------------------------------------------
-        # Dynamic Pathi / Big Al / System features
+        # Dynamic Brain/context features safe for Core. Named Big Al / Pathi /
+        # System state remains on the source frame for the specialist rule engine.
         # ---------------------------------------------------------
-        _dynamic_system_features = pathi_bigal_numeric_feature_cols(df_market)
-        
         _dynamic_system_features = [
-            c for c in _dynamic_system_features
+            c for c in pathi_bigal_numeric_feature_cols(df_market)
             if _system_feature_valid_for_sport(c, sport_u)
+            and not _is_handicapper_core_forbidden_feature(c)
+            and not str(c).startswith(("NCAAF_Stat_", "Brain_Expert_NCAAFStat_"))
         ]
-        
         extend_unique(features, _dynamic_system_features)
 
         # ---------------------------------------------------------
-        # V11.5.6.1 HARD HANDICAPPER PRESENCE CONTRACT
+        # V13.2.9 HANDICAPPER SOURCE-ONLY PRESENCE CONTRACT
         # ---------------------------------------------------------
-        # Deterministic exact systems/tighteners/enhancers must be offered to the
-        # model whenever the upstream rule engine generated the column for this
-        # sport.  This is intentionally independent of dynamic dtype discovery so
-        # a sparse/all-zero exact flag cannot disappear before the overlay lane.
+        # Deterministic exact systems/tighteners/enhancers must remain present on the
+        # source frame whenever the upstream rule engine generated them. They are
+        # deliberately NOT copied into Core; the V13 rule engine consumes them
+        # directly from train_rows/serving rows.
         _handicapper_source_contract = list(dict.fromkeys(
             list(PATHI_EXACT_SIGNAL_COLS)
             + list(BIGAL_EXACT_SIGNAL_COLS)
@@ -25844,13 +25771,24 @@ def train_sharp_model_from_bq(
             and _system_feature_valid_for_sport(c, sport_u)
             and not _is_retired_bigal_feature_name(c)
         ]
-        extend_unique(features, _handicapper_source_present)
+        # Do NOT extend these into Core. They stay on df_market/train_rows and are
+        # consumed only by the dedicated V13.2 rule-expert engine.
         print(
             f"[HANDICAPPER-SOURCE-CONTRACT] sport={sport_u} "
             f"present={len(_handicapper_source_present)} "
             f"exact={sum(c in set(PATHI_EXACT_SIGNAL_COLS) or c in set(BIGAL_EXACT_SIGNAL_COLS) for c in _handicapper_source_present)} "
-            f"cols={_handicapper_source_present}"
+            f"core_included=0 route=V13_RULE_EXPERT_ONLY cols={_handicapper_source_present}"
         )
+        try:
+            _df_shallow_mb = float(df_market.memory_usage(index=True, deep=False).sum()) / (1024.0 * 1024.0)
+            print(
+                f"[MEMORY-CHECKPOINT] stage=core_feature_inventory rows={len(df_market)} "
+                f"df_cols={len(df_market.columns)} core_candidate_cols={len(features)} "
+                f"specialist_source_only={len(_handicapper_source_present)} "
+                f"df_shallow_mb={_df_shallow_mb:.1f}"
+            )
+        except Exception:
+            pass
         
         # ---------------------------------------------------------
         # Final defensive sport filter
@@ -28630,11 +28568,10 @@ def train_sharp_model_from_bq(
             _candidate_cols = [c for c in _leak_safe_cols if _head_feature_family_allowed(c, head_name)]
             _family_excluded = [c for c in _leak_safe_cols if c not in _candidate_cols]
             if str(head_name).lower() == "outcome":
-                _isolated_raw_system = [c for c in _leak_safe_cols if _is_raw_pathi_bigal_state_feature(c)]
+                _isolated_handicapper = [c for c in _leak_safe_cols if _is_handicapper_core_forbidden_feature(c)]
                 log_func(
-                    f"[OUTCOME-SYSTEM-ISOLATION] raw_system_blocked={len(_isolated_raw_system)} "
-                    f"distilled_brain_allowed={sum(str(c).startswith(('Brain_Expert_Pathi','Brain_Expert_BigAl','Brain_Pathi_','Brain_BigAl_')) for c in _candidate_cols)} "
-                    f"sample_blocked={_isolated_raw_system[:20]}"
+                    f"[OUTCOME-SYSTEM-ISOLATION] named_or_derived_blocked={len(_isolated_handicapper)} "
+                    f"distilled_handicapper_allowed=0 sample_blocked={_isolated_handicapper[:20]}"
                 )
             log_func(f"[HEAD-FAMILY:{head_name}] eligible={len(_candidate_cols)}/{len(_leak_safe_cols)} leak-safe candidates")
             if _candidate_cols:
@@ -28644,34 +28581,20 @@ def train_sharp_model_from_bq(
             if not _candidate_cols:
                 return None
 
-            # Sparse deterministic systems use a conditional overlay lane for outcome/situation.
+            # V13.2.9: no named handicapper overlay is embedded inside any Core
+            # head. Exact systems are evaluated once, downstream, by the V13 rule
+            # expert engine. This removes the old hidden Situation/Outcome route.
             overlay_candidates = []
-            if str(head_name).lower() in {"outcome","situation"}:
-                # Build the overlay lane explicitly from the final head matrix, not
-                # indirectly from AutoFS candidate discovery.  This guarantees every
-                # applicable upstream-generated exact system survives even when sparse,
-                # constant, or duplicate of a context column.
-                _overlay_contract_cols = list(dict.fromkeys(
-                    list(PATHI_EXACT_SIGNAL_COLS)
-                    + list(BIGAL_EXACT_SIGNAL_COLS)
-                    + [c for c in BIGAL_TIGHTENER_PARENT.keys() if not _is_retired_bigal_feature_name(c)]
-                    + list(BIGAL_ENHANCER_COLS)
-                ))
-                overlay_candidates = [
-                    c for c in _overlay_contract_cols
-                    if c in X_df_train_head.columns
-                    and c in X_df_hold_head.columns
-                    and c in X_df_full_head.columns
-                    and _system_feature_valid_for_sport(c, sport_u)
-                    and not _is_retired_bigal_feature_name(c)
-                ]
-            core_candidates = [c for c in _candidate_cols if c not in set(overlay_candidates)]
+            core_candidates = list(_candidate_cols)
+            _head_handicapper_blocked = [c for c in _leak_safe_cols if _is_handicapper_core_forbidden_feature(c)]
             log_func(
-                f"[OVERLAY-LANE:{head_name}] core={len(core_candidates)} "
-                f"sparse_overlays={len(overlay_candidates)} overlays={overlay_candidates}"
+                f"[CORE-HANDICAPPER-ISOLATION:{head_name}] core={len(core_candidates)} "
+                f"blocked_named_or_derived={len(_head_handicapper_blocked)} "
+                f"embedded_overlays=0 route=V13_RULE_EXPERT_ONLY "
+                f"sample_blocked={_head_handicapper_blocked[:20]}"
             )
 
-            # V12.0.9 stable market backbone.  Only two distilled market-state
+            # V13.2.9 stable market backbone.  Only two distilled market-state
             # fields are hard-seeded for NCAAF Outcome AutoFS; broader market/price
             # fields are baseline candidates, not forced.  The later temporal shadow
             # audit can still remove the seeds if they do not transfer.
@@ -28786,106 +28709,24 @@ def train_sharp_model_from_bq(
                 classifications.append((neutral_col,"NEUTRAL_FALLBACK"))
                 print(f"[TEMPORAL-CLASS:{head_name}] no shadow-stable core -> {neutral_col}")
 
-            overlay_selected, overlay_trust = _conditional_overlay_trust_audit(
-                _model_proto, X_df_train_head, y_head_train, folds_head, shadow_folds_head or [],
-                robust_core, overlay_candidates, sample_weight=sample_weight_head, head_name=head_name
-            )
-
-            # V12.0.5 SPECIALIST ISOLATION / TRUSTED OVERLAY CONTRACT
-            # Situation keeps the complete deterministic rule inventory so named
-            # systems remain auditable and can be learned by the specialist.
-            # Outcome admits ONLY overlays that independently pass the conditional
-            # OOF + shadow residual-trust gate.  This prevents hundreds of sparse
-            # handcrafted states from diluting the primary probability model.
-            if str(head_name).lower() == "outcome":
-                overlay_always_present = list(dict.fromkeys(overlay_selected))
-            else:
-                overlay_always_present = list(dict.fromkeys(overlay_candidates))
+            # Named handicapper systems are not fitted inside Core heads anymore.
+            # Keep compatibility-shaped empty metadata for downstream artifact code.
+            overlay_selected = []
+            overlay_trust = pd.DataFrame()
+            overlay_always_present = []
             overlay_trust_map = {}
-            if isinstance(overlay_trust, pd.DataFrame) and not overlay_trust.empty:
-                for _c in overlay_selected:
-                    if _c in overlay_trust.index:
-                        _tv = float(pd.to_numeric(pd.Series([overlay_trust.loc[_c, "overlay_trust"]]), errors="coerce").iloc[0])
-                        if np.isfinite(_tv) and _tv > 0:
-                            overlay_trust_map[_c] = _tv
+            feat_cols_head = list(dict.fromkeys(robust_core))
 
-            for _df in (X_df_train_head, X_df_hold_head, X_df_full_head):
-                _score = np.zeros(len(_df), dtype=np.float64)
-                _trusted_active = np.zeros(len(_df), dtype=np.float64)
-                _raw_active = np.zeros(len(_df), dtype=np.float64)
-                _exact_active = np.zeros(len(_df), dtype=np.float64)
-                _tight_active = np.zeros(len(_df), dtype=np.float64)
-                _enh_active = np.zeros(len(_df), dtype=np.float64)
-                for _c in overlay_always_present:
-                    _src = _df[_c] if _c in _df.columns else pd.Series(0.0, index=_df.index)
-                    _x = pd.to_numeric(_src, errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
-                    _on = (np.abs(_x) > 0.5).astype(np.float64)
-                    _raw_active += _on
-                    if _c in set(PATHI_EXACT_SIGNAL_COLS) or _c in _BIGAL_EXACT_OVERLAY:
-                        _exact_active += _on
-                    elif _c in set(BIGAL_ENHANCER_COLS):
-                        _enh_active += _on
-                    elif _c.startswith("BigAl_") and _c.endswith("_Tightener"):
-                        _tight_active += _on
-                    _tv = float(overlay_trust_map.get(_c, 0.0) or 0.0)
-                    if np.isfinite(_tv) and _tv > 0:
-                        _score += _on * _tv
-                        _trusted_active += _on
-                _df["Brain_Overlay_Trust_Score"] = _score.astype(np.float32)
-                _df["Brain_Overlay_Trust_Active_Count"] = _trusted_active.astype(np.float32)
-                _df["Brain_Overlay_Raw_Active_Count"] = _raw_active.astype(np.float32)
-                _df["Brain_Overlay_Exact_Active_Count"] = _exact_active.astype(np.float32)
-                _df["Brain_Overlay_Tightener_Active_Count"] = _tight_active.astype(np.float32)
-                _df["Brain_Overlay_Enhancer_Active_Count"] = _enh_active.astype(np.float32)
-
-            robust_core.extend([
-                "Brain_Overlay_Trust_Score", "Brain_Overlay_Trust_Active_Count",
-                "Brain_Overlay_Raw_Active_Count", "Brain_Overlay_Exact_Active_Count",
-                "Brain_Overlay_Tightener_Active_Count", "Brain_Overlay_Enhancer_Active_Count",
-            ])
-            feat_cols_head = list(dict.fromkeys(robust_core + overlay_always_present))
-            print(
-                f"[HANDICAPPER-OVERLAY:{head_name}] always_present={len(overlay_always_present)} "
-                f"trusted={len(overlay_trust_map)} raw_active_rows="
-                f"{int((X_df_train_head['Brain_Overlay_Raw_Active_Count'] > 0).sum())}"
-            )
-
-            # Hard final exact-system contract. "Available" means the deterministic
-            # flag survived the upstream source/sport contract into this head matrix.
-            # Every available exact Pathi/Big Al system MUST be in the fitted feature
-            # list; trust may still be zero and XGBoost may learn zero effect.
-            if str(head_name).lower() == "situation":
-                _expected_exact = [
-                    c for c in list(PATHI_EXACT_SIGNAL_COLS) + list(BIGAL_EXACT_SIGNAL_COLS)
-                    if c in X_df_train_head.columns
-                    and _system_feature_valid_for_sport(c, sport_u)
-                    and not _is_retired_bigal_feature_name(c)
-                ]
-            elif str(head_name).lower() == "outcome":
-                # Only independently trusted exact systems are contractually
-                # required in Outcome. Unsupported exact rules remain visible in
-                # the source/UI and Situation specialist but do not enter Outcome.
-                _exact_set = set(PATHI_EXACT_SIGNAL_COLS) | set(BIGAL_EXACT_SIGNAL_COLS)
-                _expected_exact = [c for c in overlay_selected if c in _exact_set]
-            else:
-                _expected_exact = []
-            _final_exact = [c for c in _expected_exact if c in feat_cols_head]
-            _missing_exact = [c for c in _expected_exact if c not in feat_cols_head]
-            _active_exact = {
-                c: int((pd.to_numeric(X_df_train_head[c], errors="coerce").fillna(0.0).abs() > 0.5).sum())
-                for c in _expected_exact
-            }
-            print(
-                f"[HANDICAPPER-OVERLAY-CONTRACT:{head_name}] "
-                f"expected_exact={len(_expected_exact)} final_exact={len(_final_exact)} "
-                f"missing_exact={_missing_exact} active_rows={_active_exact} "
-                f"{'PASS' if not _missing_exact else 'FAIL'}"
-            )
-            if _missing_exact:
+            _bad_core_handicapper = [c for c in feat_cols_head if _is_handicapper_core_forbidden_feature(c)]
+            if _bad_core_handicapper:
                 raise RuntimeError(
-                    f"HANDICAPPER OVERLAY CONTRACT FAILED head={head_name}: missing exact systems: "
-                    + ", ".join(_missing_exact)
+                    f"CORE HANDICAPPER ISOLATION FAILED head={head_name}: "
+                    + ", ".join(_bad_core_handicapper)
                 )
+            print(
+                f"[CORE-HANDICAPPER-CONTRACT:{head_name}] PASS final_cols={len(feat_cols_head)} "
+                f"named_handicapper_cols=0 embedded_overlay_cols=0"
+            )
 
             # Leakage audit on the final robust set.
             _audit_rows=[]; _ya=np.asarray(y_head_train,dtype=int).reshape(-1)
@@ -28954,8 +28795,11 @@ def train_sharp_model_from_bq(
             cls=result.get("temporal_classification") or {}
             bad=[c for c in fc if cls.get(c) in {"UNSTABLE","REGIME_DEPENDENT"}]
             if bad:
-                raise RuntimeError(f"V11.5.4 {head_name} unstable features leaked into production list: {bad}")
-            print(f"[FEATURE-PROPAGATION:{head_name}] PASS final_cols={len(fc)}")
+                raise RuntimeError(f"V13.2.9 {head_name} unstable features leaked into production list: {bad}")
+            _bad_handicapper=[c for c in fc if _is_handicapper_core_forbidden_feature(c)]
+            if _bad_handicapper:
+                raise RuntimeError(f"V13.2.9 {head_name} named handicapper leakage into Core: {_bad_handicapper}")
+            print(f"[FEATURE-PROPAGATION:{head_name}] PASS final_cols={len(fc)} handicapper_cols=0")
         # ----------------------------
         # Head AutoFS guards
         # ----------------------------
@@ -30816,7 +30660,7 @@ def train_sharp_model_from_bq(
                     "contract":"TRAINING_OOF_AND_SHADOW_ONLY__OUTER_HOLDOUT_UNUSED_FOR_RECIPE_SELECTION",
                 }
                 print(
-                    f"[V13.1-INTERNAL-READY] gate={'PASS' if _v131_ready else 'CLOSED'} "
+                    f"[V13.2.9-INTERNAL-READY] gate={'PASS' if _v131_ready else 'CLOSED'} "
                     f"core_method={_core_art.get('active_method','identity')} "
                     f"fundamental_gate={bool((ncaaf_v13_value_architecture.get('fundamental_overlay') or {}).get('gate_pass',False))} "
                     f"specialist_gate={bool((ncaaf_v13_value_architecture.get('specialist_overlays') or {}).get('final_gate_pass',False))}"
@@ -30826,7 +30670,7 @@ def train_sharp_model_from_bq(
                 _fund_art = (ncaaf_v13_value_architecture.get("fundamental_overlay") or {})
                 _fund_regs = [str(k) for k,v in ((_fund_art.get("residual_profiles") or {}).items()) if isinstance(v,dict) and v.get("gate_pass",False)]
                 print(
-                    f"[V13.1.2-STAT-BRAIN-STATUS] legacy_stat_rows={_stat_rows} legacy_stat_spread_trust={_stat_trust:.3f} "
+                    f"[V13.2.9-STAT-STATUS] legacy_stat_rows={_stat_rows} legacy_stat_spread_trust={_stat_trust:.3f} "
                     f"legacy_stat_runtime_authority={'ON' if _stat_trust>=0.03 else 'OFF'} "
                     f"v13_fundamental_gate={'PASS' if bool(_fund_art.get('gate_pass',False)) else 'CLOSED'} "
                     f"v13_fundamental_active_regimes={_fund_regs} "
@@ -31668,23 +31512,22 @@ def train_sharp_model_from_bq(
             CLIP, 1.0 - CLIP,
         ).astype(np.float64)
 
-        # V12.0.9 deployment gates are learned only from completed post-cutoff
+        # V13.2.9 Stat deployment gate is learned only from completed post-cutoff
         # physical game/team sides.  The outer historical holdout remains untouched;
         # fresh 2026 evidence controls only the future sidecar authority saved in the
         # artifact.
         _is_ncaaf_spread_route = bool(str(sport).upper().strip() == "NCAAF" and _sys_norm_market(market) == "spreads")
         if _is_ncaaf_spread_route:
             _fresh_stat_gate = _evaluate_ncaaf_stat_fresh_gate(df_full_outcome, y_full_outcome, market, core_prob=final_bet_score_full, log_func=print)
-            _fresh_memory_gates = {
-                "Pathi": _evaluate_system_memory_fresh_gate(df_full_outcome, y_full_outcome, "Pathi", core_prob=final_bet_score_full, log_func=print),
-                "BigAl": _evaluate_system_memory_fresh_gate(df_full_outcome, y_full_outcome, "BigAl", core_prob=final_bet_score_full, log_func=print),
-            }
         else:
             _fresh_stat_gate = {"gate_pass": False, "effective_edge_weight": 0.0, "status": "not_applicable"}
-            _fresh_memory_gates = {
-                "Pathi": {"gate_pass": False, "effective_edge_weight": 0.0, "status": "not_applicable"},
-                "BigAl": {"gate_pass": False, "effective_edge_weight": 0.0, "status": "not_applicable"},
-            }
+        # Legacy family-level Pathi/BigAl memory correction is retired. Source-backed
+        # per-system evidence and per-system incremental influence now live exclusively
+        # in the V13 rule-expert layer. Keep neutral compatibility metadata only.
+        _fresh_memory_gates = {
+            "Pathi": {"gate_pass": False, "effective_edge_weight": 0.0, "status": "retired_v13_2_9_rule_expert_only"},
+            "BigAl": {"gate_pass": False, "effective_edge_weight": 0.0, "status": "retired_v13_2_9_rule_expert_only"},
+        }
         _stat_route_cfg = {
             "enabled": _is_ncaaf_spread_route,
             "version": NCAAF_STAT_PROTECTED_ROUTE_VERSION,
@@ -31696,16 +31539,7 @@ def train_sharp_model_from_bq(
             "mode": "fresh_unique_side_validated_stat_residual",
             "fresh_gate": dict(_fresh_stat_gate),
         }
-        _system_memory_route_cfg = {
-            "enabled": _is_ncaaf_spread_route,
-            "version": SYSTEM_MEMORY_PROTECTED_ROUTE_VERSION,
-            "family_gates": {k: dict(v) for k,v in _fresh_memory_gates.items()},
-            "max_abs_family_correction": SYSTEM_MEMORY_PROTECTED_MAX_FAMILY_CORRECTION,
-            "max_abs_total_correction": SYSTEM_MEMORY_PROTECTED_MAX_TOTAL_CORRECTION,
-            "min_trust": SYSTEM_MEMORY_PROTECTED_MIN_TRUST,
-            "min_abs_posterior_edge": SYSTEM_MEMORY_PROTECTED_MIN_POSTERIOR_EDGE,
-            "mode": "fresh_family_validated_directional_posterior",
-        }
+        print("[CODE-PATH-CLEANUP] legacy_family_memory_probability_route=RETIRED final_probability_calls=0")
         if _stat_route_cfg["enabled"]:
             final_bet_score_train = _apply_ncaaf_stat_protected_route(
                 final_bet_score_train, train_df, market, config=_stat_route_cfg
@@ -31715,15 +31549,6 @@ def train_sharp_model_from_bq(
             )
             final_bet_score_full = _apply_ncaaf_stat_protected_route(
                 final_bet_score_full, df_full_outcome, market, log_func=print, config=_stat_route_cfg
-            )
-            final_bet_score_train = _apply_system_memory_protected_route(
-                final_bet_score_train, train_df, market, config=_system_memory_route_cfg
-            )
-            final_bet_score_hold = _apply_system_memory_protected_route(
-                final_bet_score_hold, hold_df, market, config=_system_memory_route_cfg
-            )
-            final_bet_score_full = _apply_system_memory_protected_route(
-                final_bet_score_full, df_full_outcome, market, log_func=print, config=_system_memory_route_cfg
             )
 
         st.write({
@@ -32279,481 +32104,14 @@ def train_sharp_model_from_bq(
             _v13_log_exception(print,"[V13-V12-PAIR] status=ERROR error",_v13_cmp_err)
 
         # -------------------------------------------------------------------
-        # V12.0.3 PAIRED HISTORICAL VALUE DIAGNOSTICS
+        # V13.2.9 cleanup: legacy V12 lane ablation removed from normal training.
+        # It duplicated full holdout frames and evaluated superseded family-memory
+        # routes. Keep empty keys for artifact/UI compatibility without carrying the
+        # obsolete row-level diagnostic machinery.
         # -------------------------------------------------------------------
-        # Purpose: make the contribution of historical information explicit on the
-        # untouched outer holdout. This is a counterfactual feature ablation of the
-        # ACTUAL fitted outcome models (no retraining and no holdout fitting): each
-        # historical lane is neutralized, Brain aggregates are rebuilt, and the same
-        # model/calibrator is scored on the same y_hold rows. This isolates how much
-        # the deployed model is using each historical lane without contaminating the
-        # holdout or adding a second optimization loop.
         _history_ablation_diag = []
         _history_system_diag = []
-        try:
-            _is_ncaaf_spread = (
-                str(sport).upper().strip() == "NCAAF"
-                and str(market).lower().strip() == "spreads"
-                and len(y_hold_vec) >= 100
-            )
-            if _is_ncaaf_spread:
-                def _hist_neutralize_lane(frame, lane):
-                    f = frame.copy()
-
-                    def _set_existing(name, value):
-                        if name in f.columns:
-                            f[name] = value
-
-                    if lane == "stat":
-                        defaults = {
-                            "NCAAF_Stat_Prob": 0.5,
-                            "NCAAF_Stat_Raw_Prob": 0.5,
-                            "NCAAF_Stat_Edge": 0.0,
-                            "NCAAF_Stat_Market_Baseline_Prob": 0.5,
-                            "NCAAF_Stat_Active": 0,
-                            "NCAAF_Stat_Trust": 0.0,
-                            "NCAAF_Stat_Base_Trust": 0.0,
-                            "NCAAF_Stat_Profile_Similarity": 1.0,
-                            "NCAAF_Stat_Recency_Factor": 1.0,
-                            "NCAAF_Stat_Expected_Margin": np.nan,
-                            "NCAAF_Stat_Expected_Total": np.nan,
-                            "NCAAF_Stat_Expected_Team_Points": np.nan,
-                            "NCAAF_Stat_Expected_Opp_Points": np.nan,
-                            "NCAAF_Stat_Uncertainty": 1.0,
-                        }
-                        for c, v in defaults.items():
-                            _set_existing(c, v)
-
-                    elif lane == "historical_core":
-                        defaults = {
-                            HISTORICAL_CORE_FEATURE_NAME: 0.5,
-                            HISTORICAL_CORE_RAW_NAME: 0.5,
-                            HISTORICAL_CORE_EDGE_NAME: 0.0,
-                            HISTORICAL_CORE_BASELINE_NAME: 0.5,
-                            HISTORICAL_CORE_ACTIVE_NAME: 0,
-                            HISTORICAL_CORE_TRUST_NAME: 0.0,
-                            HISTORICAL_CORE_BASE_TRUST_NAME: 0.0,
-                            HISTORICAL_CORE_DRIFT_NAME: 1.0,
-                            HISTORICAL_CORE_RECENCY_NAME: 1.0,
-                            HISTORICAL_CORE_AGREEMENT_NAME: 1.0,
-                            HISTORICAL_CORE_HORIZON_COUNT_NAME: 0,
-                            HISTORICAL_CORE_UNCERTAINTY_NAME: 1.0,
-                        }
-                        for c, v in defaults.items():
-                            _set_existing(c, v)
-
-                    elif lane in ("pathi_memory", "bigal_memory"):
-                        fam = "Pathi" if lane == "pathi_memory" else "BigAl"
-                        _set_existing(f"{fam}_Historical_Posterior_Prob", 0.5)
-                        _set_existing(f"{fam}_Historical_Trust", 0.0)
-                        _set_existing(f"{fam}_Historical_Sample", 0.0)
-                    return f
-
-                def _hist_patch_dependent_brain(frame, disabled_lanes):
-                    """Patch only Brain fields that depend on the ablated historical lanes.
-
-                    A full add_ai_betting_brain_features() rebuild is intentionally NOT
-                    used here: that routine also recomputes non-historical market/system
-                    state from a holdout-only slice, which can differ from the state
-                    created on the original full chronological frame.  The ablation must
-                    leave every unrelated production feature bit-for-bit unchanged.
-                    """
-                    z = frame.copy()
-                    idx = z.index
-
-                    def n(name, default=0.0):
-                        if name in z.columns:
-                            q = pd.to_numeric(z[name], errors="coerce")
-                        else:
-                            q = pd.Series(np.nan, index=idx, dtype="float64")
-                        if not (isinstance(default, float) and np.isnan(default)):
-                            q = q.fillna(default)
-                        return q
-
-                    def _sgn(q, epsv=1e-12):
-                        q = pd.to_numeric(q, errors="coerce").fillna(0.0)
-                        return pd.Series(np.where(q > epsv, 1, np.where(q < -epsv, -1, 0)), index=idx, dtype="int8")
-
-                    def _install(name, active, direction, intensity):
-                        a = pd.Series(active, index=idx).fillna(False).astype(bool)
-                        d = pd.Series(direction, index=idx).fillna(0).astype("int8").where(a, 0).astype("int8")
-                        it = pd.to_numeric(pd.Series(intensity, index=idx), errors="coerce").fillna(0.0).clip(0,1).where(a,0.0).astype("float32")
-                        z[f"Brain_Expert_{name}_Active"] = a.astype("int8")
-                        z[f"Brain_Expert_{name}_Direction"] = d
-                        z[f"Brain_Expert_{name}_Intensity"] = it
-                        z[f"Brain_Expert_{name}_Strength"] = it
-
-                    disabled_lanes = set(disabled_lanes or set())
-
-                    if "historical_core" in disabled_lanes:
-                        hp = n(HISTORICAL_CORE_FEATURE_NAME, 0.5)
-                        hb = n(HISTORICAL_CORE_BASELINE_NAME, 0.5)
-                        he = n(HISTORICAL_CORE_EDGE_NAME, np.nan)
-                        he = he.where(he.notna(), hp - hb)
-                        ht = n(HISTORICAL_CORE_TRUST_NAME, 0.0).clip(0,1)
-                        ha = n(HISTORICAL_CORE_ACTIVE_NAME, 0).eq(1) & he.notna() & he.abs().ge(0.0025) & ht.gt(0)
-                        hd = _sgn(he, 0.0025)
-                        hi = (np.tanh(he.abs().fillna(0)*8.0) * ht).clip(0,1)
-                        _install("Historical", ha, hd, hi)
-                        z["Brain_Expert_Historical_Prob"] = hp.astype("float32")
-                        z["Brain_Expert_Historical_Trust"] = ht.astype("float32")
-                        z["Brain_Expert_Historical_Edge"] = he.astype("float32")
-                        z["Brain_Historical_Drift_Similarity"] = n(HISTORICAL_CORE_DRIFT_NAME,1).clip(0,1).astype("float32")
-                        z["Brain_Historical_Recency_Factor"] = n(HISTORICAL_CORE_RECENCY_NAME,1).clip(0,1).astype("float32")
-                        z["Brain_Historical_Horizon_Agreement"] = n(HISTORICAL_CORE_AGREEMENT_NAME,1).clip(0,1).astype("float32")
-                        z["Brain_Historical_Uncertainty"] = n(HISTORICAL_CORE_UNCERTAINTY_NAME,1).clip(0,1).astype("float32")
-
-                    if "stat" in disabled_lanes:
-                        sp = n("NCAAF_Stat_Prob",0.5)
-                        sb = n("NCAAF_Stat_Market_Baseline_Prob",0.5)
-                        se = n("NCAAF_Stat_Edge",np.nan)
-                        se = se.where(se.notna(), sp-sb)
-                        stt = n("NCAAF_Stat_Trust",0.0).clip(0,1)
-                        sa = n("NCAAF_Stat_Active",0).eq(1) & se.notna() & se.abs().ge(0.0025) & stt.gt(0)
-                        sd = _sgn(se,0.0025)
-                        si = (np.tanh(se.abs().fillna(0)*10.0)*stt).clip(0,1)
-                        _install("NCAAFStat",sa,sd,si)
-                        z["Brain_Expert_NCAAFStat_Prob"] = sp.astype("float32")
-                        z["Brain_Expert_NCAAFStat_Trust"] = stt.astype("float32")
-                        z["Brain_Expert_NCAAFStat_Edge"] = se.astype("float32")
-
-                    for fam, lane in (("Pathi","pathi_memory"),("BigAl","bigal_memory")):
-                        if lane in disabled_lanes:
-                            z[f"Brain_{fam}_Historical_Posterior_Prob"] = n(f"{fam}_Historical_Posterior_Prob",0.5).astype("float32")
-                            z[f"Brain_{fam}_Historical_Trust"] = n(f"{fam}_Historical_Trust",0.0).clip(0,1).astype("float32")
-                            z[f"Brain_{fam}_Historical_Sample"] = n(f"{fam}_Historical_Sample",0.0).astype("float32")
-
-                    # Only Historical/Stat expert changes can alter ensemble summaries.
-                    if disabled_lanes.intersection({"historical_core","stat"}):
-                        experts = ["BigAl","Pathi","Market","Power","Form","Schedule","Price","Historical"]
-                        ic = [f"Brain_Expert_{x}_Intensity" for x in experts]
-                        acols = [f"Brain_Expert_{x}_Active" for x in experts]
-                        ex = z.reindex(columns=ic, fill_value=0).apply(pd.to_numeric,errors="coerce").fillna(0.0)
-                        ac = z.reindex(columns=acols, fill_value=0).apply(pd.to_numeric,errors="coerce").fillna(0).gt(0)
-                        exa = ex.where(ac.to_numpy())
-                        z["Brain_Expert_Mean_Strength"] = exa.mean(axis=1,skipna=True).fillna(0).astype("float32")
-                        z["Brain_Expert_Max_Strength"] = ex.where(ac.to_numpy(),0.0).max(axis=1).astype("float32")
-                        z["Brain_Expert_Dispersion"] = exa.std(axis=1,ddof=0,skipna=True).fillna(0).astype("float32")
-                        z["Brain_Expert_Active_Count"] = ac.sum(axis=1).astype("int8")
-
-                        def pair(a,b):
-                            aa=n(f"Brain_Expert_{a}_Active",0).eq(1); bb=n(f"Brain_Expert_{b}_Active",0).eq(1)
-                            da=n(f"Brain_Expert_{a}_Direction",0); db=n(f"Brain_Expert_{b}_Direction",0)
-                            elig=aa & bb & da.ne(0) & db.ne(0)
-                            agr=(elig & da.eq(db)).astype("int8"); con=(elig & da.eq(-db)).astype("int8")
-                            return elig.astype("int8"),agr,con
-
-                        bp_e,bp_a,bp_c=pair("BigAl","Pathi"); bm_e,bm_a,bm_c=pair("BigAl","Market"); pm_e,pm_a,pm_c=pair("Pathi","Market")
-                        bh_e,bh_a,bh_c=pair("BigAl","Historical"); ph_e,ph_a,ph_c=pair("Pathi","Historical"); mh_e,mh_a,mh_c=pair("Market","Historical")
-                        z["Brain_BigAl_Pathi_Agreement"]=bp_a; z["Brain_BigAl_Pathi_Conflict"]=bp_c
-                        z["Brain_BigAl_Market_Agreement"]=bm_a; z["Brain_BigAl_Market_Conflict"]=bm_c
-                        z["Brain_Pathi_Market_Agreement"]=pm_a; z["Brain_Pathi_Market_Conflict"]=pm_c
-                        z["Brain_BigAl_Historical_Agreement"]=bh_a; z["Brain_BigAl_Historical_Conflict"]=bh_c
-                        z["Brain_Pathi_Historical_Agreement"]=ph_a; z["Brain_Pathi_Historical_Conflict"]=ph_c
-                        z["Brain_Market_Historical_Agreement"]=mh_a; z["Brain_Market_Historical_Conflict"]=mh_c
-                        z["Brain_AllIndependent_Agree"]=(bp_e.eq(1)&bm_e.eq(1)&pm_e.eq(1)&bp_a.eq(1)&bm_a.eq(1)&pm_a.eq(1)).astype("int8")
-                        z["Brain_AllCoreExperts_Agree"]=(z["Brain_AllIndependent_Agree"].eq(1)&bh_e.eq(1)&ph_e.eq(1)&mh_e.eq(1)&bh_a.eq(1)&ph_a.eq(1)&mh_a.eq(1)).astype("int8")
-                        confs=[bp_c,bm_c,pm_c,bh_c,ph_c,mh_c]; eligs=[bp_e,bm_e,pm_e,bh_e,ph_e,mh_e]; agrs=[bp_a,bm_a,pm_a,bh_a,ph_a,mh_a]
-                        z["Brain_Conflict_Count"]=pd.concat(confs,axis=1).sum(axis=1).astype("int8")
-                        pec=pd.concat(eligs,axis=1).sum(axis=1).astype(float); pac=pd.concat(agrs,axis=1).sum(axis=1).astype(float)
-                        z["Brain_Directional_Pair_Count"]=pec.astype("int8")
-                        z["Brain_Directional_Agreement_Rate"]=np.where(pec>0,pac/pec,np.nan).astype("float32")
-                        active_count=z["Brain_Expert_Active_Count"].astype(float); data_ready=np.clip(active_count/6.0,0,1)
-                        agreement=pd.to_numeric(z["Brain_Directional_Agreement_Rate"],errors="coerce").fillna(0).clip(0,1)
-                        conflict_rate=np.where(pec>0,z["Brain_Conflict_Count"].astype(float)/pec,0.0)
-                        uncertainty=np.clip(0.45*z["Brain_Expert_Dispersion"].astype(float)+0.35*(1-data_ready)+0.20*np.asarray(conflict_rate,float),0,1)
-                        durability=100.0*np.clip(0.25*agreement+0.25*data_ready+0.20*n("Brain_Expert_Market_Intensity",0)+0.20*z["Brain_Expert_Max_Strength"].astype(float)+0.10*np.clip(1-np.asarray(conflict_rate,float),0,1)-0.30*uncertainty,0,1)
-                        z["Brain_Uncertainty_Proxy"]=pd.Series(uncertainty,index=idx).astype("float32")
-                        z["Brain_Edge_Durability"]=pd.Series(durability,index=idx).astype("float32")
-                        z["Brain_Decision_Readiness"]=np.clip((durability/100.0)*data_ready*(1.0-0.5*uncertainty),0,1).astype("float32")
-                    return z
-
-                def _hist_predict_outcome(frame):
-                    xf = _to_numeric_block(frame, feature_cols_outcome)
-                    xf = xf.reindex(columns=feature_cols_outcome, fill_value=0.0)
-                    xa = xf.to_numpy(dtype=np.float32, copy=False)
-                    pa, _ = pos_proba_safe(model_auc, xa, positive=1)
-                    pa = _clip01(pa, eps)
-                    if RUN_LOGLOSS and model_logloss is not None:
-                        pl, _ = pos_proba_safe(model_logloss, xa, positive=1)
-                        pl = _clip01(pl, eps)
-                        zz = (
-                            float(best_w) * _logit(pl, eps)
-                            + (1.0 - float(best_w)) * _logit(pa, eps)
-                        )
-                        pp = _clip01(_sigmoid(zz), eps)
-                    else:
-                        pp = pa
-                    if flip_flag:
-                        pp = 1.0 - pp
-                    pp = np.asarray(_apply_cal(cal_name, cal_obj, pp), dtype=float)
-                    pp = np.clip(pp, CLIP, 1.0 - CLIP)
-                    # Exact deployed Outcome path also applies the validation-gated
-                    # regime residual specialist. V13.0.15 omitted it from this
-                    # counterfactual rebuild, creating the exact 0.020000 mismatch
-                    # seen in the 2026-09-09 log (the route's correction cap).
-                    pp = _apply_regime_residual_model(
-                        pp, frame, regime_residual_model, REGIME_RESIDUAL_ROUTE
-                    )
-                    return np.clip(pp, CLIP, 1.0 - CLIP)
-
-                def _hist_apply_protected_routes(base_p, authoritative_rows, disabled_lanes):
-                    pp = np.asarray(base_p, dtype=float)
-                    rows = authoritative_rows.copy().reset_index(drop=True)
-                    disabled_lanes = set(disabled_lanes or set())
-                    if "stat" in disabled_lanes:
-                        for _c, _v in {
-                            "NCAAF_Stat_Prob":0.5, "NCAAF_Stat_Market_Baseline_Prob":0.5,
-                            "NCAAF_Stat_Active":0, "NCAAF_Stat_Trust":0.0
-                        }.items():
-                            rows[_c] = _v
-                    if "pathi_memory" in disabled_lanes:
-                        rows["Pathi_Historical_Posterior_Prob"] = 0.5
-                        rows["Pathi_Historical_Trust"] = 0.0
-                        rows["Pathi_Historical_Sample"] = 0.0
-                    if "bigal_memory" in disabled_lanes:
-                        rows["BigAl_Historical_Posterior_Prob"] = 0.5
-                        rows["BigAl_Historical_Trust"] = 0.0
-                        rows["BigAl_Historical_Sample"] = 0.0
-                    pp, stat_info = _apply_ncaaf_stat_protected_route(
-                        pp, rows, market, config=_stat_route_cfg, return_info=True
-                    )
-                    pp, memory_info = _apply_system_memory_protected_route(
-                        pp, rows, market, config=_system_memory_route_cfg, return_info=True
-                    )
-                    return pp, stat_info, memory_info
-
-                def _hist_metric_row(label, p, base_metrics=None):
-                    pp = np.asarray(p, dtype=float).reshape(-1)
-                    yy = np.asarray(y_hold_vec, dtype=int).reshape(-1)
-                    ok = np.isfinite(pp)
-                    if int(ok.sum()) < 50 or np.unique(yy[ok]).size < 2:
-                        return None
-                    auc = float(roc_auc_score(yy[ok], pp[ok]))
-                    ll = float(log_loss(yy[ok], np.clip(pp[ok], 1e-6, 1-1e-6), labels=[0, 1]))
-                    br = float(brier_score_loss(yy[ok], np.clip(pp[ok], 1e-6, 1-1e-6)))
-                    row = {
-                        "Configuration": str(label),
-                        "N": int(ok.sum()),
-                        "AUC": auc,
-                        "LogLoss": ll,
-                        "Brier": br,
-                    }
-                    if base_metrics is not None:
-                        row["AUC_Lift_vs_Base"] = auc - float(base_metrics["AUC"])
-                        row["LogLoss_Improvement_vs_Base"] = float(base_metrics["LogLoss"]) - ll
-                        row["Brier_Improvement_vs_Base"] = float(base_metrics["Brier"]) - br
-                    return row
-
-                # Exact contract: use the already-built Outcome-head holdout feature
-                # frame.  Unlike raw hold_df, this contains head-local synthesized
-                # fields such as Brain_Overlay_Trust_Score that were actually seen by
-                # the fitted model.  No non-historical state is recomputed.
-                _hist_hold_frame = X_df_hold_outcome.copy().reset_index(drop=True)
-                _hist_reference_p = _hist_predict_outcome(_hist_hold_frame.copy())
-                _hist_rebuild_diff = float(np.nanmax(np.abs(_hist_reference_p - np.asarray(p_hold_vec,dtype=float))))
-                print(
-                    f"[HISTORY-ABLATION-CONTRACT] version={HISTORY_DIAGNOSTIC_VERSION} "
-                    f"rows={len(y_hold_vec)} untouched_max_abs_diff={_hist_rebuild_diff:.8f}"
-                )
-                if not np.isfinite(_hist_rebuild_diff) or _hist_rebuild_diff > 1e-6:
-                    raise RuntimeError(
-                        f"historical untouched-frame mismatch={_hist_rebuild_diff:.8f}; refusing diagnostic"
-                    )
-
-                # Sequential restoration. Every row uses the exact same holdout rows,
-                # fitted models and calibrator. Only historical information changes.
-                _hist_configs = [
-                    ("Base — historical lanes neutral", {"stat", "historical_core", "pathi_memory", "bigal_memory"}),
-                    ("+ NCAAF Statistical Brain", {"historical_core", "pathi_memory", "bigal_memory"}),
-                    ("+ Historical Core", {"pathi_memory", "bigal_memory"}),
-                    ("+ Pathi historical memory", {"bigal_memory"}),
-                    ("+ Big Al historical memory", set()),
-                ]
-                _hist_pred_by_label = {}
-                _hist_base_metrics = None
-                _hist_hold_authoritative = hold_df.copy().reset_index(drop=True)
-
-                def _hist_lane_has_activity(frame, lane):
-                    def _hs(name, default=0.0):
-                        if name in frame.columns:
-                            return pd.to_numeric(frame[name], errors="coerce").fillna(default)
-                        return pd.Series(default, index=frame.index, dtype="float64")
-                    if lane == "stat":
-                        return bool(_hs("NCAAF_Stat_Active", 0).gt(0).any() or _hs("Brain_Expert_NCAAFStat_Active", 0).gt(0).any())
-                    if lane == "historical_core":
-                        return bool(_hs(HISTORICAL_CORE_ACTIVE_NAME, 0).gt(0).any() or _hs("Brain_Expert_Historical_Active", 0).gt(0).any())
-                    fam = "Pathi" if lane == "pathi_memory" else "BigAl"
-                    if lane in ("pathi_memory", "bigal_memory"):
-                        tr = _hs(f"{fam}_Historical_Trust", 0)
-                        pp = _hs(f"{fam}_Historical_Posterior_Prob", 0.5)
-                        return bool((tr.gt(0) & (pp-0.5).abs().gt(1e-12)).any())
-                    return False
-
-                _lane_activity = {k: _hist_lane_has_activity(_hist_hold_frame, k) for k in ("stat","historical_core","pathi_memory","bigal_memory")}
-                print(f"[HISTORY-ABLATION-LANE-ACTIVITY] {_lane_activity}")
-
-                for _label, _disabled in _hist_configs:
-                    # If a future-only lane is already neutral on this historical
-                    # holdout, do not rebuild aggregate Brain fields.  This prevents
-                    # a no-op lane from being falsely credited/blamed by the
-                    # counterfactual diagnostic.
-                    _effective_disabled = {x for x in _disabled if _lane_activity.get(x, False)}
-                    _f = _hist_hold_frame.copy()
-                    for _lane in _effective_disabled:
-                        _f = _hist_neutralize_lane(_f, _lane)
-                    _f = _hist_patch_dependent_brain(_f, _effective_disabled)
-                    _p_outcome = _hist_predict_outcome(_f)
-                    _p, _stat_info, _mem_info = _hist_apply_protected_routes(
-                        _p_outcome, _hist_hold_authoritative, _disabled
-                    )
-                    _hist_pred_by_label[_label] = _p
-                    _row = _hist_metric_row(_label, _p, _hist_base_metrics)
-                    if _row is not None:
-                        _row["Stat_Route_Eligible_N"] = int(_stat_info.get("eligible", 0))
-                        _row["Pathi_Memory_Eligible_N"] = int(_mem_info.get("Pathi_active", 0))
-                        _row["BigAl_Memory_Eligible_N"] = int(_mem_info.get("BigAl_active", 0))
-                        if ("stat" not in _disabled and _row["Stat_Route_Eligible_N"] == 0):
-                            _row["Stat_Route_Status"] = "LEAKAGE_GATED_ON_OUTER_HOLDOUT"
-                        else:
-                            _row["Stat_Route_Status"] = "ACTIVE_OR_DISABLED"
-                        if (("pathi_memory" not in _disabled or "bigal_memory" not in _disabled)
-                                and (_row["Pathi_Memory_Eligible_N"] + _row["BigAl_Memory_Eligible_N"] == 0)):
-                            _row["System_Memory_Status"] = "LEAKAGE_GATED_ON_OUTER_HOLDOUT"
-                        else:
-                            _row["System_Memory_Status"] = "ACTIVE_OR_DISABLED"
-                        if _hist_base_metrics is None:
-                            _hist_base_metrics = dict(_row)
-                            _row["AUC_Lift_vs_Base"] = 0.0
-                            _row["LogLoss_Improvement_vs_Base"] = 0.0
-                            _row["Brier_Improvement_vs_Base"] = 0.0
-                        _history_ablation_diag.append(_row)
-
-                # Full deployed probability can differ from the outcome head when the
-                # meta layer earns nonzero trust. Keep it as the final table row.
-                _deploy_row = _hist_metric_row(
-                    "LEGACY V12 LANE - full deployed model",
-                    final_bet_score_hold,
-                    _hist_base_metrics,
-                )
-                if _deploy_row is not None:
-                    _history_ablation_diag.append(_deploy_row)
-
-                print("[HISTORY-ABLATION-TABLE] LEGACY V12 LANE DIAGNOSTIC only; paired outer-holdout counterfactual; positive LL/Brier improvement is better")
-                for _r in _history_ablation_diag:
-                    print(
-                        "[HISTORY-ABLATION] "
-                        f"config={_r['Configuration']} n={_r['N']} "
-                        f"auc={_r['AUC']:.6f} ll={_r['LogLoss']:.6f} brier={_r['Brier']:.6f} "
-                        f"auc_lift={_r.get('AUC_Lift_vs_Base', np.nan):+.6f} "
-                        f"ll_improve={_r.get('LogLoss_Improvement_vs_Base', np.nan):+.6f} "
-                        f"brier_improve={_r.get('Brier_Improvement_vs_Base', np.nan):+.6f}"
-                    )
-
-                # Exact-system history table: historical reliability plus current
-                # outer-holdout activity and the probability lift attributable to
-                # that family's historical-memory lane.
-                _system_history = (
-                    (historical_core_expert or {}).get("system_history", {})
-                    if isinstance(historical_core_expert, dict) else {}
-                )
-                _p_before_pathi = _hist_pred_by_label.get("+ Historical Core")
-                _p_with_pathi = _hist_pred_by_label.get("+ Pathi historical memory")
-                _p_before_bigal = _p_with_pathi
-                _p_with_bigal = _hist_pred_by_label.get("+ Big Al historical memory")
-
-                for _name, _stt in sorted(
-                    _system_history.items(),
-                    key=lambda kv: (str(kv[1].get("family", "")), -int(kv[1].get("sample", 0)), str(kv[0]))
-                ):
-                    if _name not in hold_df.columns:
-                        _active = np.zeros(len(hold_df), dtype=bool)
-                    else:
-                        _active = pd.to_numeric(hold_df[_name], errors="coerce").fillna(0).eq(1).to_numpy(dtype=bool)
-                        _ready_name = _name + "_DataReady"
-                        if _ready_name in hold_df.columns:
-                            _active &= pd.to_numeric(hold_df[_ready_name], errors="coerce").fillna(0).eq(1).to_numpy(dtype=bool)
-                    _n_active_quotes = int(_active.sum())
-                    _fam = str(_stt.get("family", ""))
-                    _role = str(_stt.get("role", "directional"))
-                    _hist_n = int(_stt.get("sample", 0) or 0)
-                    _wins = float(_stt.get("wins", 0.0) or 0.0)
-                    _raw_ats = (_wins / _hist_n) if _hist_n > 0 else np.nan
-
-                    # Report holdout activity at unique physical game/team-side grain,
-                    # not repeated bookmaker/snapshot quotes.
-                    _tmp_side = hold_df.copy().reset_index(drop=True)
-                    _tmp_side["__active"] = _active.astype("int8")
-                    _tmp_side["__y"] = np.asarray(y_hold_vec, dtype=float)
-                    _side_keys = [c for c in ("Game_Key", "Outcome_Norm") if c in _tmp_side.columns]
-                    if len(_side_keys) < 2 and "Outcome" in _tmp_side.columns:
-                        _side_keys = (["Game_Key"] if "Game_Key" in _tmp_side.columns else []) + ["Outcome"]
-                    if len(_side_keys) < 2 and "Team_Norm" in _tmp_side.columns:
-                        _side_keys = (["Game_Key"] if "Game_Key" in _tmp_side.columns else []) + ["Team_Norm"]
-                    if not _side_keys:
-                        _side_keys = ["_SOURCE_ROW_ID"] if "_SOURCE_ROW_ID" in _tmp_side.columns else []
-                    _tmp_active = _tmp_side.loc[_tmp_side["__active"].eq(1)].copy()
-                    if _side_keys:
-                        _tmp_active = _tmp_active.drop_duplicates(subset=_side_keys, keep="first")
-                    _n_active = int(len(_tmp_active))
-                    _hold_hit = float(pd.to_numeric(_tmp_active["__y"], errors="coerce").mean()) if _n_active > 0 else np.nan
-                    if _role != "directional":
-                        _model_lift = np.nan
-                    elif _fam == "Pathi" and _p_before_pathi is not None and _p_with_pathi is not None and _n_active_quotes > 0:
-                        _model_lift = float(np.mean(np.asarray(_p_with_pathi)[_active] - np.asarray(_p_before_pathi)[_active]))
-                    elif _fam == "BigAl" and _p_before_bigal is not None and _p_with_bigal is not None and _n_active_quotes > 0:
-                        _model_lift = float(np.mean(np.asarray(_p_with_bigal)[_active] - np.asarray(_p_before_bigal)[_active]))
-                    else:
-                        _model_lift = np.nan
-                    _sr = {
-                        "System": str(_name),
-                        "Family": _fam,
-                        "Role": _role,
-                        "Historical_N": _hist_n,
-                        "Historical_Wins": _wins,
-                        "Raw_ATS": _raw_ats,
-                        "Shrunk_Prob": float(_stt.get("posterior_prob", 0.5)),
-                        "Trust": float(_stt.get("trust", 0.0)),
-                        "Holdout_Active_N": _n_active,
-                        "Holdout_Active_Quotes": _n_active_quotes,
-                        "Holdout_Hit_Rate": _hold_hit,
-                        "Historical_Memory_Model_Lift": _model_lift,
-                    }
-                    _history_system_diag.append(_sr)
-                    print(
-                        "[HISTORY-SYSTEM-LIFT] "
-                        f"system={_name} family={_fam} role={_role} hist_n={_hist_n} "
-                        f"raw_ats={_raw_ats if np.isfinite(_raw_ats) else np.nan:.4f} "
-                        f"shrunk={_sr['Shrunk_Prob']:.4f} trust={_sr['Trust']:.4f} "
-                        f"hold_active_sides={_n_active} hold_active_quotes={_n_active_quotes} hold_hit={_hold_hit if np.isfinite(_hold_hit) else np.nan:.4f} "
-                        f"memory_prob_lift={_model_lift if np.isfinite(_model_lift) else np.nan:+.6f}"
-                    )
-
-                # Streamlit presentation. Training remains headless-safe if UI output
-                # is unavailable; the same diagnostics are always printed to logs.
-                try:
-                    if _history_ablation_diag:
-                        _ab_df = pd.DataFrame(_history_ablation_diag)
-                        _show = _ab_df.copy()
-                        for _c in ["AUC", "LogLoss", "Brier", "AUC_Lift_vs_Base", "LogLoss_Improvement_vs_Base", "Brier_Improvement_vs_Base"]:
-                            if _c in _show.columns:
-                                _show[_c] = pd.to_numeric(_show[_c], errors="coerce").round(6)
-                        st.markdown("#### Legacy V12 Lane Diagnostic — Historical Value Ablation")
-                        st.caption("Legacy V12 lane diagnostic only; this table does not describe the active V13.2 probability. Same holdout rows and fitted models; positive LogLoss/Brier improvement vs Base is better.")
-                        st.dataframe(_show, hide_index=True, use_container_width=True)
-                    if _history_system_diag:
-                        _sys_df = pd.DataFrame(_history_system_diag)
-                        _sys_show = _sys_df.copy()
-                        for _c in ["Raw_ATS", "Shrunk_Prob", "Trust", "Holdout_Hit_Rate", "Historical_Memory_Model_Lift"]:
-                            if _c in _sys_show.columns:
-                                _sys_show[_c] = pd.to_numeric(_sys_show[_c], errors="coerce").round(4 if _c != "Historical_Memory_Model_Lift" else 6)
-                        st.markdown("#### Pathi / Big Al Historical Memory")
-                        st.caption("Historical ATS is descriptive; Shrunk Prob and Trust are the values actually allowed to influence the model.")
-                        st.dataframe(_sys_show, hide_index=True, use_container_width=True)
-                except Exception as _hist_ui_err:
-                    print(f"[HISTORY-DIAGNOSTIC-UI] skipped: {_hist_ui_err}")
-        except Exception as _hist_diag_err:
-            print(f"[HISTORY-ABLATION] unavailable: {type(_hist_diag_err).__name__}: {_hist_diag_err}")
+        print("[CODE-PATH-CLEANUP] legacy_v12_lane_ablation=REMOVED artifact_compatibility_keys=EMPTY")
 
         artifact_metrics = None
         artifact_config  = None
@@ -32779,7 +32137,7 @@ def train_sharp_model_from_bq(
                     _min_stage=max(500,int(np.ceil(0.80*len(y_hold_vec))))
                     if int(_p13_ok.sum())>=_min_stage:
                         _artifact_hold_prob=np.asarray(_p13_hold,dtype=float)
-                        _artifact_probability_source="V13_2_8"
+                        _artifact_probability_source="V13_2_9"
                         print(f"[V13.1-ARTIFACT-STAGE] status=READY rows={int(_p13_ok.sum())}/{len(y_hold_vec)} core_source=RAW_OUTCOME_AUTOFS outer_holdout_recipe_tuning=FALSE")
                     else:
                         print(f"[V13.1-ARTIFACT-STAGE] status=CLOSED reason=INSUFFICIENT_FINAL_PROB_COVERAGE rows={int(_p13_ok.sum())}/{len(y_hold_vec)} required={_min_stage}")
@@ -32795,7 +32153,7 @@ def train_sharp_model_from_bq(
                 _promotion_horizon=((_gs-_ss).dt.total_seconds()/3600.0).to_numpy(dtype=float)
             _promotion_segments=np.full(len(y_hold_vec),"CORE_ONLY",dtype=object)
             try:
-                if _artifact_probability_source=="V13_2_8" and isinstance(_p13_info,dict):
+                if _artifact_probability_source=="V13_2_9" and isinstance(_p13_info,dict):
                     _si=_p13_info.get("specialist_info") or {}; _bits=[[] for _ in range(len(y_hold_vec))]
                     _fi=_p13_info.get("fundamental_info") or {}; _fa=np.asarray(_fi.get("active",np.zeros(len(y_hold_vec))),dtype=int); _fr=np.asarray(_fi.get("regime",np.full(len(y_hold_vec),"UNKNOWN",dtype=object)),dtype=object)
                     for _i in np.where(_fa>0)[0]: _bits[_i].append("FUND:"+str(_fr[_i]))
