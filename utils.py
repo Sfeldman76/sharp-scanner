@@ -8401,7 +8401,21 @@ def attach_fair_value_bet_pass_fields(df: pd.DataFrame) -> pd.DataFrame:
                 return v.reindex(idx)
         return pd.Series(default, index=idx, dtype="float64")
 
-    p = _num_series("Model_Sharp_Win_Prob").clip(1e-6, 1-1e-6)
+    # V13.2.15 canonical downstream contract: if Production_Prob exists, every
+    # EV/fair-odds/BET decision consumes it directly. Model_Sharp_Win_Prob is a
+    # mirrored compatibility field and must not become a second probability path.
+    if "Production_Prob" in out.columns and pd.to_numeric(out["Production_Prob"],errors="coerce").notna().any():
+        p = _num_series("Production_Prob").clip(1e-6, 1-1e-6)
+        _compat=_num_series("Model_Sharp_Win_Prob")
+        _pm=p.notna()&_compat.notna()
+        if _pm.any():
+            _pdiff=float((_compat[_pm]-p[_pm]).abs().max())
+            if np.isfinite(_pdiff) and _pdiff>1e-7:
+                raise RuntimeError(f"Production_Prob downstream parity failure: {_pdiff}")
+        out["Model_Sharp_Win_Prob"]=p.astype("float32")
+        out["Model_Confidence"]=p.astype("float32")
+    else:
+        p = _num_series("Model_Sharp_Win_Prob").clip(1e-6, 1-1e-6)
     odds = _num_series("Odds_Price")
 
     # American market odds -> break-even probability and $1-profit payout.
@@ -10231,7 +10245,7 @@ def apply_blended_sharp_score(
                     'V13_Result_Historical_Closer_Rate': np.nan, 'V13_Result_Historical_Direction_Accuracy': np.nan,
                     'V13_Result_Historical_Avg_Error_Improvement': np.nan, 'V13_Result_Historical_Closer_CI_Low': np.nan,
                     'V13_Result_Historical_Closer_CI_High': np.nan, 'V13_Result_Profile_Used_In_EV': 0,
-                    'V13_Status': 'UNAVAILABLE', 'V13_Version': NCAAF_V13_VERSION, 'V13_Promotion_Mode': 'SHADOW', 'V13_Early_Season_Warning': 0, 'V13_Drift_Scale': 1.0, 'V13_Maturity_Bucket':'UNKNOWN','V13_Maturity_Beta':np.nan,'V13_Early_Situational_Prob':np.nan,'V13_Early_Situational_Active':0, 'V12_Legacy_Model_Prob': np.nan,
+                    'V13_Status': 'UNAVAILABLE', 'V13_Version': NCAAF_V13_VERSION, 'V13_Promotion_Mode': 'SHADOW', 'V13_Early_Season_Warning': 0, 'V13_Drift_Scale': 1.0, 'V13_Maturity_Bucket':'UNKNOWN','V13_Maturity_Beta':np.nan,'V13_Early_Situational_Prob':np.nan,'V13_Early_Situational_Active':0, 'V12_Legacy_Model_Prob': np.nan, 'V13_Candidate_Production_Prob':np.nan, 'Production_Prob':np.nan, 'Production_Probability_Source':'UNAVAILABLE',
                 }.items():
                     if _c not in df_canon.columns:
                         df_canon[_c] = _v
@@ -10301,19 +10315,33 @@ def apply_blended_sharp_score(
                         df_canon['V12_Legacy_Model_Prob'] = np.asarray(preds,dtype=float)
                         _v13_bundle=(bundle.get("ncaaf_v13_value_architecture") if isinstance(bundle,dict) else None) or {}
                         _v13_cfg=((bundle.get("multihead_config") or {}).get("ncaaf_v13_shadow") or {}) if isinstance(bundle,dict) else {}
-                        _v13_validated=bool(_v13_cfg.get("v13_internal_ready_gate_pass",_v13_cfg.get("v13_vs_v12_promotion_gate_pass",False)))
+                        _v13_validated=bool(_v13_cfg.get("v13_internal_ready_gate_pass",_v13_cfg.get("v13_vs_v12_promotion_gate_pass",False)) and _v13_cfg.get("production_calibration_gate_pass",False))
                         _v13_force=str(os.getenv("V13_FORCE_OPERATOR_PROMOTION","0")).strip().lower() in {"1","true","yes","on"}
                         _v13_arch=str(_v13_bundle.get("architecture","") or "").lower()
                         _v13_is_131=bool(_v13_arch.startswith("outcome_autofs_primary") or isinstance(_v13_bundle.get("core_calibration"),dict))
                         _v13_recipe_available=bool(_v13_is_131 or ((_v13_bundle.get("production_preview") or {}).get("enabled",False)))
                         _v13_promoted=bool(_v13_recipe_available and (_v13_validated or _v13_force) and (str(os.getenv("V13_PROMOTION_ENABLED","1")).strip().lower() not in {"0","false","no","off"}))
                         _vp=pd.to_numeric(df_canon.get('V13_Cover_Prob'),errors='coerce')
-                        _use=_v13_promoted & _vp.notna()
+                        df_canon['V13_Candidate_Production_Prob']=_vp.clip(1e-6,1-1e-6)
+                        _legacy=np.asarray(preds,dtype=float).copy()
+                        _production=np.asarray(_legacy,dtype=float).copy()
+                        _source=np.full(len(df_canon),'LEGACY_META_CHAMPION',dtype=object)
+                        _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
-                            df_canon.loc[_use,'Model_Sharp_Win_Prob']=_vp.loc[_use].clip(1e-6,1-1e-6)
-                            df_canon.loc[_use,'Model_Confidence']=_vp.loc[_use].clip(1e-6,1-1e-6)
+                            _production[_use]=_vp.to_numpy(dtype=float)[_use]
+                            _source[_use]='V13_2_15'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
-                            logger.warning("[V13-PROMOTED-RUNTIME] overriding legacy probability on %d/%d NCAAF spread rows; V12 preserved in V12_Legacy_Model_Prob",int(_use.sum()),len(df_canon))
+                            logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
+                        df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
+                        df_canon['Production_Probability_Source']=_source
+                        # SINGLE SOURCE OF TRUTH: all downstream model probability fields mirror Production_Prob.
+                        df_canon['Model_Sharp_Win_Prob']=df_canon['Production_Prob'].to_numpy(dtype=float)
+                        df_canon['Model_Confidence']=df_canon['Production_Prob'].to_numpy(dtype=float)
+                        _par=np.asarray(df_canon['Model_Sharp_Win_Prob'],dtype=float)-np.asarray(df_canon['Production_Prob'],dtype=float)
+                        _parmax=float(np.nanmax(np.abs(_par))) if len(_par) else 0.0
+                        if (not np.isfinite(_parmax)) or _parmax>1e-12:
+                            raise RuntimeError(f"Production_Prob runtime parity failure: {_parmax}")
+                        logger.info("[PRODUCTION-PROB-PARITY] runtime=PASS rows=%d max_abs_diff=%.3e v13_promoted=%s",len(df_canon),_parmax,_v13_promoted)
         
             # ✅ Write back predictions ONLY to the rows we actually scored
             cols_to_write = ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']
@@ -10373,14 +10401,16 @@ def apply_blended_sharp_score(
             if str(sport).upper().strip() == 'NCAAF' and str(mkt).lower().strip() == 'spreads':
                 _canon_pred_cols += [c for c in [
                     'V13_Active','V13_Fair_Margin','V13_Raw_Fair_Margin','V13_Tradable_Fair_Margin','V13_Fair_Total','V13_Raw_Fair_Total','V13_Tradable_Fair_Total','V13_Pred_Close_Margin',
-                    'V13_Cover_Prob','V13_Fundamental_Edge_Beta','V13_Horizon_Hours','V13_State_Freshness',
+                    'V13_Cover_Prob','V13_Candidate_Production_Prob','Production_Prob','Production_Probability_Source','V13_Fundamental_Edge_Beta','V13_Horizon_Hours','V13_State_Freshness',
                     'V13_Current_Season_Games','V13_Result_Disagreement_Bucket','V13_Result_Profile_N','V13_Result_Historical_Closer_Rate','V13_Result_Historical_Direction_Accuracy','V13_Result_Historical_Avg_Error_Improvement','V13_Result_Historical_Closer_CI_Low','V13_Result_Historical_Closer_CI_High','V13_Result_Profile_Used_In_EV','V13_Status','V13_Version','V13_Promotion_Mode','V13_Early_Season_Warning','V13_Drift_Scale','V13_Maturity_Bucket','V13_Maturity_Beta','V13_Early_Situational_Prob','V13_Early_Situational_Active','V12_Legacy_Model_Prob'
                 ] if c in df_canon.columns]
                 _canon_pred_cols += [c for c in V13_SPECIALIST_OUTPUT_COLS if c in df_canon.columns and c not in _canon_pred_cols]
             _rename = {
                 'Model_Sharp_Win_Prob': 'Model_Sharp_Win_Prob_opponent',
                 'Model_Confidence':     'Model_Confidence_opponent',
-                'V12_Legacy_Model_Prob':'V12_Legacy_Model_Prob_opponent'
+                'V12_Legacy_Model_Prob':'V12_Legacy_Model_Prob_opponent',
+                'Production_Prob':'Production_Prob_opponent',
+                'Production_Probability_Source':'Production_Probability_Source_opponent'
             }
             for _c in _canon_pred_cols:
                 if _c.startswith('V13_'):
@@ -10396,7 +10426,13 @@ def apply_blended_sharp_score(
             df_inverse['Model_Confidence']     = 1 - df_inverse['Model_Confidence_opponent']
             if 'V12_Legacy_Model_Prob_opponent' in df_inverse.columns:
                 df_inverse['V12_Legacy_Model_Prob'] = 1.0 - pd.to_numeric(df_inverse['V12_Legacy_Model_Prob_opponent'], errors='coerce')
-            df_inverse.drop(columns=['Model_Sharp_Win_Prob_opponent','Model_Confidence_opponent','V12_Legacy_Model_Prob_opponent'], inplace=True, errors='ignore')
+            if 'Production_Prob_opponent' in df_inverse.columns:
+                df_inverse['Production_Prob'] = 1.0 - pd.to_numeric(df_inverse['Production_Prob_opponent'], errors='coerce')
+                df_inverse['Model_Sharp_Win_Prob'] = df_inverse['Production_Prob']
+                df_inverse['Model_Confidence'] = df_inverse['Production_Prob']
+            if 'Production_Probability_Source_opponent' in df_inverse.columns:
+                df_inverse['Production_Probability_Source']=df_inverse['Production_Probability_Source_opponent']
+            df_inverse.drop(columns=['Model_Sharp_Win_Prob_opponent','Model_Confidence_opponent','V12_Legacy_Model_Prob_opponent','Production_Prob_opponent','Production_Probability_Source_opponent'], inplace=True, errors='ignore')
             if str(sport).upper().strip() == 'NCAAF' and str(mkt).lower().strip() == 'spreads' and 'V13_Fair_Margin_opponent' in df_inverse.columns:
                 df_inverse['V13_Raw_Fair_Margin'] = -pd.to_numeric(df_inverse.get('V13_Raw_Fair_Margin_opponent', df_inverse.get('V13_Fair_Margin_opponent')), errors='coerce')
                 df_inverse['V13_Tradable_Fair_Margin'] = -pd.to_numeric(df_inverse.get('V13_Tradable_Fair_Margin_opponent', df_inverse.get('V13_Fair_Margin_opponent')), errors='coerce')
@@ -10423,7 +10459,7 @@ def apply_blended_sharp_score(
                         df_inverse[_c] = df_inverse[_opp]
                 # Probability diagnostics are side-oriented and must complement for
                 # the inverse side. Contributions are signed probability deltas.
-                for _c in ['V13_Early_Situational_Prob','V13_Base_Cover_Prob','V13_Fundamental_Prob','V13_AutoFS_Core_Prob','V13_Core_Calibrated_Prob','V13_Core_Adjusted_Prob','V13_Fundamental_Overlay_Prob',
+                for _c in ['V13_Candidate_Production_Prob','V13_Early_Situational_Prob','V13_Base_Cover_Prob','V13_Fundamental_Prob','V13_AutoFS_Core_Prob','V13_Core_Calibrated_Prob','V13_Core_Adjusted_Prob','V13_Fundamental_Overlay_Prob',
                            'V13_Overlay_PreTemperature_Prob','V13_Overlay_Combined_Prob',
                            'V13_Market_Overlay_Prob','V13_Pathi_Overlay_Prob','V13_BigAl_Overlay_Prob']:
                     _opp=_c+'_opponent'
@@ -10615,7 +10651,7 @@ def apply_blended_sharp_score(
                     'V13_Active','V13_Fair_Margin','V13_Raw_Fair_Margin','V13_Tradable_Fair_Margin','V13_Fair_Total','V13_Raw_Fair_Total','V13_Tradable_Fair_Total','V13_Raw_Fundamental_Edge_Points','V13_Fundamental_Edge_Points','V13_Fundamental_Edge_Beta',
                     'V13_Pred_Close_Margin','V13_Market_Edge_Points','V13_Cover_Prob',
                     'V13_BreakEven_Prob','V13_Probability_Edge','V13_EV_Per_Dollar',
-                    'V13_Horizon_Hours','V13_State_Freshness','V13_Current_Season_Games','V13_Result_Disagreement_Bucket','V13_Result_Profile_N','V13_Result_Historical_Closer_Rate','V13_Result_Historical_Direction_Accuracy','V13_Result_Historical_Avg_Error_Improvement','V13_Result_Historical_Closer_CI_Low','V13_Result_Historical_Closer_CI_High','V13_Result_Profile_Used_In_EV','V13_Status','V13_Version','V13_Promotion_Mode','V13_Early_Season_Warning','V13_Drift_Scale','V13_Maturity_Bucket','V13_Maturity_Beta','V13_Early_Situational_Prob','V13_Early_Situational_Active','V12_Legacy_Model_Prob'
+                    'V13_Horizon_Hours','V13_State_Freshness','V13_Current_Season_Games','V13_Result_Disagreement_Bucket','V13_Result_Profile_N','V13_Result_Historical_Closer_Rate','V13_Result_Historical_Direction_Accuracy','V13_Result_Historical_Avg_Error_Improvement','V13_Result_Historical_Closer_CI_Low','V13_Result_Historical_Closer_CI_High','V13_Result_Profile_Used_In_EV','V13_Status','V13_Version','V13_Promotion_Mode','V13_Early_Season_Warning','V13_Drift_Scale','V13_Maturity_Bucket','V13_Maturity_Beta','V13_Early_Situational_Prob','V13_Early_Situational_Active','V12_Legacy_Model_Prob','V13_Candidate_Production_Prob','Production_Prob','Production_Probability_Source'
                 ] if c in df_inverse.columns]
                 must_cols += [c for c in V13_SPECIALIST_OUTPUT_COLS if c in df_inverse.columns and c not in must_cols]
             existing_cols = set(df.columns)
@@ -11097,7 +11133,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-12-v13.2.13-core-handicapper-isolated-feature-state"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-12-v13.2.15-core-handicapper-isolated-feature-state"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -14827,9 +14863,9 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.6-observed-stats-unshrunk-latent-
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-12-v13.2.13-bigal-style-market-discovery"
-NCAAF_V13_HOTFIX = "V13_2_13__BIGAL_STYLE_MARKET_DISCOVERY__CHAMPION_SEEDS_MUST_TRANSFER__FIXED_TEMPERATURE_STABILITY__MMI_RESEARCH"
-# V13.2.13 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
+NCAAF_V13_VERSION = "2026-09-12-v13.2.15-production-probability-unification"
+NCAAF_V13_HOTFIX = "V13_2_15__PRODUCTION_PROBABILITY_UNIFICATION__PARITY__CALIBRATION_GATE__TRUTHFUL_UI"
+# V13.2.15 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -16796,6 +16832,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         out["V13_Pred_Close_Margin"]=pred_close_side.astype("float32")
         out["V13_Market_Edge_Points"]=market_edge.astype("float32")
         out["V13_Cover_Prob"]=prob.astype("float32")
+        out["V13_Candidate_Production_Prob"]=prob.astype("float32")
         out["V13_BreakEven_Prob"]=be.astype("float32")
         out["V13_Probability_Edge"]=(prob-be).astype("float32")
         out["V13_EV_Per_Dollar"]=ev.astype("float32")
