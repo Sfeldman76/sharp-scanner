@@ -14827,8 +14827,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.6-observed-stats-unshrunk-latent-
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-11-v13.2.7-incremental-system-influence"
-NCAAF_V13_HOTFIX = "V13_2_7__UNIFIED_2022_2026__UNSHRUNK_SYSTEM_EVIDENCE__INCREMENTAL_CORE_INFLUENCE__POST_MARKET_RICH_RULE_REGISTRY"
+NCAAF_V13_VERSION = "2026-09-11-v13.2.8-source-backed-per-system-influence"
+NCAAF_V13_HOTFIX = "V13_2_8__UNIFIED_2022_2026__SOURCE_BACKED_EVIDENCE__PER_SYSTEM_CORE_INFLUENCE__POST_MARKET_RICH_RULE_REGISTRY"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -16231,6 +16231,8 @@ def _apply_v13_autofs_core_bridge_runtime(base_prob, core_prob, bridge: dict):
 V132_RULE_HIST_MIN_GAMES = 20
 V132_RULE_HIST_MIN_ATS = 0.5238
 V132_RULE_HIST_MAX_ABS_BETA = 0.75
+V132_RULE_INTERNAL_PRIMARY_MIN_GAMES = 100
+V132_RULE_INTERNAL_PRIMARY_MIN_SEASONS = 3
 V132_RULE_MAX_SINGLE_PROB_DELTA = 0.100
 V132_RULE_MAX_FAMILY_PROB_DELTA = 0.125
 V132_RULE_MAX_TOTAL_PROB_DELTA = 0.150
@@ -16383,9 +16385,11 @@ def _v132_runtime_row_dates(rows: pd.DataFrame) -> pd.Series:
 
 
 def _v132_runtime_hist_beta_vector(pr: dict, rows: pd.DataFrame) -> np.ndarray:
+    """Runtime parity for V13.2.8 source-backed/internal evidence selection."""
     src=(pr or {}).get("historical_source") or {}; occ=list(src.get("occurrences") or [])
+    source=(pr or {}).get("source_backed_record") or {}
     out=np.zeros(len(rows),dtype=float)
-    if not occ: return out
+    if not occ and not source: return out
     dates=_v132_runtime_row_dates(rows)
     parsed=[]
     for rec in occ:
@@ -16393,29 +16397,40 @@ def _v132_runtime_hist_beta_vector(pr: dict, rows: pd.DataFrame) -> np.ndarray:
         dt=pd.to_datetime(rec.get("date"),errors="coerce",utc=True)
         try: yy=float(rec.get("ats_win"))
         except Exception: continue
-        if pd.notna(dt) and np.isfinite(yy): parsed.append((dt,yy))
+        try: sy=int(float(rec.get("season")))
+        except Exception: sy=None
+        if pd.notna(dt) and np.isfinite(yy): parsed.append((dt,yy,sy))
+    eff=pd.to_datetime(source.get("effective_from"),errors="coerce",utc=True) if source else pd.NaT
+    src_ats=float(source.get("ats",np.nan)) if source else np.nan
+    src_decisions=int(source.get("wins",0) or 0)+int(source.get("losses",0) or 0) if source else 0
+    min_internal=int(source.get("internal_primary_min_games",V132_RULE_INTERNAL_PRIMARY_MIN_GAMES) or V132_RULE_INTERNAL_PRIMARY_MIN_GAMES) if source else V132_RULE_INTERNAL_PRIMARY_MIN_GAMES
+    min_seasons=int(source.get("internal_primary_min_seasons",V132_RULE_INTERNAL_PRIMARY_MIN_SEASONS) or V132_RULE_INTERNAL_PRIMARY_MIN_SEASONS) if source else V132_RULE_INTERNAL_PRIMARY_MIN_SEASONS
     for i,dt in enumerate(dates):
-        vals=[yy for rd,yy in parsed if pd.notna(dt) and rd < dt]
-        if len(vals) < V132_RULE_HIST_MIN_GAMES: continue
-        p=float(np.mean(vals))
-        if p < V132_RULE_HIST_MIN_ATS: continue
-        out[i]=float(np.clip(np.log(np.clip(p,1e-6,1-1e-6)/(1-np.clip(p,1e-6,1-1e-6))),-V132_RULE_HIST_MAX_ABS_BETA,V132_RULE_HIST_MAX_ABS_BETA))
+        if pd.isna(dt): continue
+        vals=[]; seasons=set()
+        for rd,yy,sy in parsed:
+            if rd < dt:
+                vals.append(yy)
+                if sy is not None: seasons.add(sy)
+        n=len(vals); p=float(np.mean(vals)) if n else np.nan
+        internal_mature=bool(n>=min_internal and len(seasons)>=min_seasons)
+        source_available=bool(source and pd.notna(eff) and dt>=eff and src_decisions>=V132_RULE_HIST_MIN_GAMES and np.isfinite(src_ats))
+        use_p=np.nan
+        if source_available and not internal_mature:
+            use_p=src_ats
+        elif n>=V132_RULE_HIST_MIN_GAMES and np.isfinite(p) and p>=V132_RULE_HIST_MIN_ATS:
+            use_p=p
+        if np.isfinite(use_p) and use_p>=V132_RULE_HIST_MIN_ATS:
+            out[i]=float(np.clip(np.log(np.clip(use_p,1e-6,1-1e-6)/(1-np.clip(use_p,1e-6,1-1e-6))),-V132_RULE_HIST_MAX_ABS_BETA,V132_RULE_HIST_MAX_ABS_BETA))
     return out
 
-
 def _v132_runtime_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict):
-    """Apply named systems exactly as trained.
-
-    Historical ATS evidence remains intact inside each rule profile.  Runtime applies
-    the learned V13.2.7 incremental system-to-Core coefficient to the aggregate rule
-    probability move, matching training rather than treating the full historical
-    logit as automatically independent of Core.
-    """
+    """Apply V13.2.8 named systems with independent per-system Core influence."""
     rows=_v132_runtime_prepare_rule_rows(rows)
     base=np.asarray(base_prob,dtype=float).copy(); n=len(base); final=base.copy()
     detail={
-        "Pathi":{"contribution":np.zeros(n),"weight":np.zeros(n),"active":np.zeros(n,dtype=np.int8),"residual_edge":np.zeros(n),"independence":np.ones(n),"names":np.full(n,"OTHER",dtype=object)},
-        "BigAl":{"contribution":np.zeros(n),"weight":np.zeros(n),"active":np.zeros(n,dtype=np.int8),"residual_edge":np.zeros(n),"independence":np.ones(n),"names":np.full(n,"OTHER",dtype=object)},
+        "Pathi":{"contribution":np.zeros(n),"weight":np.zeros(n),"active":np.zeros(n,dtype=np.int8),"residual_edge":np.zeros(n),"independence":np.ones(n),"incremental_scale":np.zeros(n),"names":np.full(n,"OTHER",dtype=object)},
+        "BigAl":{"contribution":np.zeros(n),"weight":np.zeros(n),"active":np.zeros(n,dtype=np.int8),"residual_edge":np.zeros(n),"independence":np.ones(n),"incremental_scale":np.zeros(n),"names":np.full(n,"OTHER",dtype=object)},
     }
     if not isinstance(engine,dict) or not engine.get("gate_pass",False):
         for fam in ("Pathi","BigAl"):
@@ -16438,15 +16453,14 @@ def _v132_runtime_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict)
         else:
             mod=float(pr.get("final_beta",0.0) or 0.0)
             weight_value=float(np.clip(pr.get("trust",0.0) or 0.0,0,1))
-        beta_vec=hb+mod
-        active &= np.isfinite(beta_vec)
+        sc=float(np.clip(pr.get("active_incremental_scale",pr.get("incremental_scale",1.0)) or 0.0,0.0,1.0))
+        beta_vec=(hb+mod)*sc
+        active &= np.isfinite(beta_vec)&(np.abs(beta_vec)>1e-12)
         if not active.any(): continue
         idx=np.flatnonzero(active); beta_active=beta_vec[idx]
         proposal=_v13_overlay_sigmoid(_v13_overlay_logit(final[idx])+beta_active)
         raw=np.clip(proposal-final[idx],-V132_RULE_MAX_SINGLE_PROB_DELTA,V132_RULE_MAX_SINGLE_PROB_DELTA)
         indep=np.ones(raw.size,dtype=float)
-        # Validated historical systems keep their own observed authority.  Only
-        # modern-only discoveries are correlation-discounted for duplicate evidence.
         if not hist_auth:
             for prev_name,prev_mask,prev_delta,prev_hist in prev:
                 if prev_hist: continue
@@ -16460,31 +16474,14 @@ def _v132_runtime_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict)
         before=final[idx].copy(); final[idx]=np.clip(final[idx]+raw,0.01,0.99); actual=final[idx]-before
         fam_used[fam][idx]+=actual; total_used[idx]+=actual
         dd=detail[fam]; dd["contribution"][idx]+=actual; dd["weight"][idx]=np.maximum(dd["weight"][idx],weight_value); dd["active"][idx]=1
-        dd["residual_edge"][idx]=np.maximum(dd["residual_edge"][idx],np.abs(beta_active)); dd["independence"][idx]=np.minimum(dd["independence"][idx],indep)
+        dd["residual_edge"][idx]=np.maximum(dd["residual_edge"][idx],np.abs(beta_active)); dd["independence"][idx]=np.minimum(dd["independence"][idx],indep); dd["incremental_scale"][idx]=np.maximum(dd["incremental_scale"][idx],sc)
         for j in idx: dd["names"][j]=name if dd["names"][j]=="OTHER" else str(dd["names"][j])+"+"+name
         full=np.zeros(n); full[idx]=actual; prev.append((name,active,full,hist_auth))
 
-    # Training/runtime parity for V13.2.7 incremental influence.  The system record
-    # is not changed; only its aggregate probability contribution beyond Core is
-    # scaled by the coefficient learned on chronological OOF and transferred to shadow.
-    _scale=float(np.clip(engine.get("rule_stack_incremental_scale",1.0) or 0.0,0.0,1.0))
-    raw_final=final.copy()
-    ok=np.isfinite(base)&np.isfinite(raw_final)
-    scaled_final=base.copy()
-    if ok.any():
-        _delta=_v13_overlay_logit(np.clip(raw_final[ok],1e-6,1-1e-6))-_v13_overlay_logit(np.clip(base[ok],1e-6,1-1e-6))
-        scaled_final[ok]=_v13_overlay_sigmoid(_v13_overlay_logit(np.clip(base[ok],1e-6,1-1e-6))+_scale*_delta)
-    raw_delta=raw_final-base; scaled_delta=scaled_final-base
-    ratio=np.zeros(n,dtype=float); nz=np.isfinite(raw_delta)&(np.abs(raw_delta)>1e-12)
-    ratio[nz]=scaled_delta[nz]/raw_delta[nz]
-    ratio=np.clip(np.where(np.isfinite(ratio),ratio,0.0),0.0,1.0)
-    final=np.clip(scaled_final,0.01,0.99)
     for fam in ("Pathi","BigAl"):
-        detail[fam]["contribution"]*=ratio
         detail[fam]["prob"]=np.clip(base+detail[fam]["contribution"],0.01,0.99)
-        detail[fam]["incremental_scale"]=np.full(n,_scale,dtype=float)
         detail[fam]["regime"]=detail[fam].pop("names")
-    return final,detail
+    return np.clip(final,0.01,0.99),detail
 
 def _v1312_runtime_residual_specialists(base_prob,family_probs,labels,centers,engine):
     base=np.asarray(base_prob,dtype=float).copy(); n=len(base); total=np.zeros(n); details={}; prev={}; profiles=(engine.get('profiles') or {}) if isinstance(engine,dict) else {}; corr=(engine.get('pairwise_corr') or {}) if isinstance(engine,dict) else {}; seq=(engine.get('sequence') or ['Market','BigAl','Pathi']) if isinstance(engine,dict) else ['Market','BigAl','Pathi']; fam_cap=float((engine or {}).get('max_family_delta',0.02)); total_cap=float((engine or {}).get('max_total_delta',0.03))
