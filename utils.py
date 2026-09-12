@@ -6103,7 +6103,7 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
             x[c] = pd.to_numeric(x[c], errors="coerce")
         return x.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype("float32")
 
-    # V12.2 regime residual specialist: corrections are relative to the preserved
+    # Compatibility regime residual specialist: corrections are relative to the preserved
     # Outcome Core and were admitted only by paired chronological proper-score gain.
     regime_cfg = cfg.get("regime_residual_route") or {}
     regime_model = bundle.get("regime_residual_model")
@@ -11097,7 +11097,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-08-v12.0.9-fresh-gated-sidecars-market-guard"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-12-v13.2.9-core-handicapper-isolated-feature-state"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -14827,8 +14827,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.6-observed-stats-unshrunk-latent-
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-11-v13.2.8-source-backed-per-system-influence"
-NCAAF_V13_HOTFIX = "V13_2_8__UNIFIED_2022_2026__SOURCE_BACKED_EVIDENCE__PER_SYSTEM_CORE_INFLUENCE__POST_MARKET_RICH_RULE_REGISTRY"
+NCAAF_V13_VERSION = "2026-09-12-v13.2.9-core-handicapper-isolation-cleanup"
+NCAAF_V13_HOTFIX = "V13_2_9__UNIFIED_2022_2026__CORE_HANDICAPPER_ISOLATED__SOURCE_BACKED_SYSTEMS__LEGACY_FAMILY_MEMORY_RETIRED"
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
