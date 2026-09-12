@@ -11097,7 +11097,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-12-v13.2.10-core-handicapper-isolated-feature-state"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-12-v13.2.13-core-handicapper-isolated-feature-state"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -14827,8 +14827,9 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.6-observed-stats-unshrunk-latent-
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-12-v13.2.10-calibration-component-ladder"
-NCAAF_V13_HOTFIX = "V13_2_10__CORE_ISOLATED__FORWARD_CALIBRATION_TRANSFER__COMPONENT_LADDER__PROVISIONAL_INTERNAL_SYSTEMS__LEGACY_ROUTE_CLEANUP"
+NCAAF_V13_VERSION = "2026-09-12-v13.2.13-bigal-style-market-discovery"
+NCAAF_V13_HOTFIX = "V13_2_13__BIGAL_STYLE_MARKET_DISCOVERY__CHAMPION_SEEDS_MUST_TRANSFER__FIXED_TEMPERATURE_STABILITY__MMI_RESEARCH"
+# V13.2.13 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
