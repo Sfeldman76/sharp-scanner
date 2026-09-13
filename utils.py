@@ -8383,7 +8383,7 @@ def _merge_feature_overwrite(left: pd.DataFrame, right: pd.DataFrame, on, how="l
 def attach_fair_value_bet_pass_fields(df: pd.DataFrame) -> pd.DataFrame:
     """Post-model fair value + betting advice.
 
-    V13.2.23 uses a threshold learned on chronological OOF bets and independently
+    V13.2.24 uses a threshold learned on chronological OOF bets and independently
     checked on a later shadow lane.  A row can be called BET only when that policy
     earned VALIDATED_BET authority.  PROMISING_LEAN may emit LEAN.  Old artifacts
     and non-V13 markets retain the legacy transparent heuristic for compatibility.
@@ -10296,7 +10296,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_23'
+                            _source[_use]='V13_2_24'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -11100,7 +11100,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-13-v13.2.23-core-handicapper-isolated-feature-state"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-13-v13.2.24-core-handicapper-isolated-feature-state"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -14831,15 +14831,15 @@ def attach_pathi_bigal_backend_features(current_rows: pd.DataFrame, sport: str |
 #     plus information available before kickoff.
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
-NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.6-observed-stats-unshrunk-latent-state-separate"
+NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.24-market-error-primary-raw-result-auxiliary"
 
 # ============================================================================
 # V13 NCAAF VALUE ARCHITECTURE
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-13-v13.2.23-probability-resolver-bet-policy-promotion-fix"
-NCAAF_V13_HOTFIX = "V13_2_23__SIGNAL_PROBABILITY_RESOLVER__VALIDATED_BET_POLICY__ALL_ASOF_T1H_PROMOTION__ALL_SEASONS__CODE_CLEANUP"
+NCAAF_V13_VERSION = "2026-09-13-v13.2.24-edge-residual-resolver-bet-ledger-champion-replay"
+NCAAF_V13_HOTFIX = "V13_2_24__ANCHORED_RESIDUAL_RESOLVER__MARKET_ERROR_STAT_BRAIN__FULL_OOF_BET_LEDGER__LEGACY_CHAMPION_REPLAY__CLEANUP_PHASE2"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -16537,29 +16537,28 @@ def _v1312_runtime_residual_specialists(base_prob,family_probs,labels,centers,en
         proposed=np.clip(total+delta,-total_cap,total_cap); actual=proposed-total; total=proposed; details[fam]={'prob':pf,'contribution':actual,'weight':trust,'trust':trust,'residual_edge':edge,'independence':indep,'active':active.astype(np.int8),'regime':lab}; prev[fam]={'delta':actual}
     return np.clip(base+total,0.01,0.99),details
 
-def _v13223_runtime_rule_family_engine(engine: dict, family: str) -> dict:
-    if not isinstance(engine,dict): return {}
-    profiles=engine.get("profiles") or {}; fam=str(family)
-    selected=[nm for nm in list(engine.get("selected_experts") or []) if str((profiles.get(nm) or {}).get("family"))==fam]
-    out=dict(engine); out["selected_experts"]=selected
-    active=[nm for nm in selected if float((profiles.get(nm) or {}).get("active_incremental_scale",0.0) or 0.0)>0]
-    out["active_selected_experts"]=active; out["gate_pass"]=bool(active)
-    return out
-
-
-def _v13223_runtime_resolver_matrix(core_cal, base, market, pathi, bigal, combined):
+def _v13224_runtime_resolver_matrix(core_cal, base, market, pathi, bigal):
     cc=np.asarray(core_cal,dtype=float); ba=np.asarray(base,dtype=float); ma=np.asarray(market,dtype=float)
-    pa=np.asarray(pathi,dtype=float); bi=np.asarray(bigal,dtype=float); co=np.asarray(combined,dtype=float)
+    pa=np.asarray(pathi,dtype=float); bi=np.asarray(bigal,dtype=float)
     zc=_v13_overlay_logit(cc); zb=_v13_overlay_logit(ba); zm=_v13_overlay_logit(ma)
-    zp=_v13_overlay_logit(pa); zbi=_v13_overlay_logit(bi); zco=_v13_overlay_logit(co)
+    zp=_v13_overlay_logit(pa); zbi=_v13_overlay_logit(bi)
     return pd.DataFrame({
-        "Core_Logit":zc,"Fundamental_Delta_Logit":zb-zc,"Market_Delta_Logit":zm-zb,
-        "Pathi_Delta_Logit":zp-zm,"BigAl_Delta_Logit":zbi-zm,"Combined_Rule_Delta_Logit":zco-zm,
+        "Fundamental_Delta_Logit":zb-zc,
+        "Market_Delta_Logit":zm-zb,
+        "Pathi_Delta_Logit":zp-zm,
+        "BigAl_Delta_Logit":zbi-zm,
     })
 
 
+def _v13224_runtime_apply_anchored_resolver(core_prob, X, resolver):
+    feats=list(resolver.get("feature_names") or list(X.columns)); xx=X.reindex(columns=feats).to_numpy(dtype=float)
+    beta=np.asarray([float((resolver.get("coefficients") or {}).get(f,0.0) or 0.0) for f in feats],dtype=float)
+    z=_v13_overlay_logit(np.asarray(core_prob,dtype=float))+float(resolver.get("intercept",0.0) or 0.0)+xx.dot(beta)
+    return np.clip(_v13_overlay_sigmoid(z),0.01,0.99)
+
+
 def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overlay: dict, maturity_bucket, core_calibrated_prob=None):
-    """V13.2.23 runtime probability resolver with fail-closed authority routing."""
+    """V13.2.24 anchored residual probability resolver with fail-closed authority routing."""
     n=len(rows); base=np.asarray(base_prob,dtype=float); final=base.copy(); details={}
     core_cal=base.copy() if core_calibrated_prob is None else np.asarray(core_calibrated_prob,dtype=float).reshape(-1)
     if len(core_cal)!=n: core_cal=base.copy()
@@ -16581,21 +16580,34 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
     market_prob,market_det=_v1312_runtime_residual_specialists(base,family_probs,labels,centers,market_engine)
     rule_engine=overlay.get("rule_expert_engine") or {}
     combined_prob,rule_det=_v132_runtime_apply_rule_engine(market_prob,rows,rule_engine)
-    pathi_engine=_v13223_runtime_rule_family_engine(rule_engine,"Pathi")
-    bigal_engine=_v13223_runtime_rule_family_engine(rule_engine,"BigAl")
-    pathi_prob,pathi_det=_v132_runtime_apply_rule_engine(market_prob,rows,pathi_engine)
-    bigal_prob,bigal_det=_v132_runtime_apply_rule_engine(market_prob,rows,bigal_engine)
+    # Use the family attributions from the same combined all-rule application.
+    # This preserves cross-Pathi/BigAl redundancy discounts and prevents the
+    # resolver from re-counting overlapping systems as independent evidence.
+    _pd=(rule_det.get("Pathi") or {}) if isinstance(rule_det,dict) else {}
+    _bd=(rule_det.get("BigAl") or {}) if isinstance(rule_det,dict) else {}
+    pathi_prob=np.asarray(_pd.get("prob",market_prob),dtype=float).reshape(-1)
+    bigal_prob=np.asarray(_bd.get("prob",market_prob),dtype=float).reshape(-1)
+    if len(pathi_prob)!=n: pathi_prob=np.asarray(market_prob,dtype=float).copy()
+    if len(bigal_prob)!=n: bigal_prob=np.asarray(market_prob,dtype=float).copy()
+    pathi_det={"Pathi":_pd}; bigal_det={"BigAl":_bd}
 
     resolver=overlay.get("probability_resolver") or {}
-    resolver_active=bool(resolver.get("gate_pass",False) and resolver.get("model") is not None)
+    resolver_active=bool(resolver.get("gate_pass",False) and (bool(resolver.get("anchored_residual",False)) or resolver.get("model") is not None))
     additive_allowed=bool(overlay.get("additive_stack_fallback_gate_pass",overlay.get("full_stack_activation_pass",False)))
     route="CORE_ONLY"; resolver_error=None
     if resolver_active:
         try:
-            Xr=_v13223_runtime_resolver_matrix(core_cal,base,market_prob,pathi_prob,bigal_prob,combined_prob)
-            feats=list(resolver.get("feature_names") or list(Xr.columns)); Xr=Xr.reindex(columns=feats)
-            if not np.isfinite(Xr.to_numpy(dtype=float)).all(): raise ValueError("nonfinite expert-level resolver inputs")
-            final=np.asarray(resolver["model"].predict_proba(Xr)[:,1],dtype=float); route="PROBABILITY_RESOLVER"
+            if bool(resolver.get("anchored_residual",False)):
+                Xr=_v13224_runtime_resolver_matrix(core_cal,base,market_prob,pathi_prob,bigal_prob)
+                if not np.isfinite(Xr.to_numpy(dtype=float)).all(): raise ValueError("nonfinite anchored resolver inputs")
+                final=_v13224_runtime_apply_anchored_resolver(core_cal,Xr,resolver)
+            else:
+                # Compatibility only for an older saved resolver artifact.
+                Xr=None
+                mdl=resolver.get("model")
+                if mdl is None: raise ValueError("legacy resolver model missing")
+                raise ValueError("legacy resolver active artifact requires its matching pre-13.2.24 runtime")
+            route="PROBABILITY_RESOLVER"
         except Exception as e:
             resolver_error=f"{type(e).__name__}:{e}"; logging.warning("V13 probability resolver fail-closed: %s",e)
             if additive_allowed:
@@ -16989,10 +17001,15 @@ def apply_ncaaf_statistical_brain_feature(df: pd.DataFrame, sb, market: str):
                 if c in out.columns:
                     open_total=pd.to_numeric(out[c],errors="coerce"); break
         if open_total is None: open_total=pd.Series(np.nan,index=out.index,dtype=float)
-        mw=float(np.clip(sb.get("market_weight",.15),0,1))
-        exp_margin=np.where(np.isfinite(market_margin),(1-mw)*market_margin+mw*sm,sm)
+        _target_mode=str(sb.get("target_mode","RAW_RESULT")).upper()
         ot=np.asarray(pd.to_numeric(open_total,errors="coerce"),dtype=float)
-        exp_total=np.where(np.isfinite(ot),(1-mw)*ot+mw*stot,stot)
+        if _target_mode=="MARKET_ERROR_RESIDUAL":
+            exp_margin=np.where(np.isfinite(market_margin),market_margin+sm,np.nan)
+            exp_total=np.where(np.isfinite(ot),ot+stot,np.nan)
+        else:
+            mw=float(np.clip(sb.get("market_weight",.15),0,1))
+            exp_margin=np.where(np.isfinite(market_margin),(1-mw)*market_margin+mw*sm,sm)
+            exp_total=np.where(np.isfinite(ot),(1-mw)*ot+mw*stot,stot)
         current_value=pd.to_numeric(out.get("Value",np.nan),errors="coerce").to_numpy(dtype=float,na_value=np.nan) if isinstance(out.get("Value",None),pd.Series) else np.full(len(out),np.nan)
         if m=="spreads":
             side_margin=np.where(is_home,exp_margin,np.where(is_away,-exp_margin,np.nan))
