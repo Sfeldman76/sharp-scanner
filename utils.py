@@ -8401,7 +8401,7 @@ def attach_fair_value_bet_pass_fields(df: pd.DataFrame) -> pd.DataFrame:
                 return v.reindex(idx)
         return pd.Series(default, index=idx, dtype="float64")
 
-    # V13.2.19 canonical downstream contract: if Production_Prob exists, every
+    # V13.2.21 canonical downstream contract: if Production_Prob exists, every
     # EV/fair-odds/BET decision consumes it directly. Model_Sharp_Win_Prob is a
     # mirrored compatibility field and must not become a second probability path.
     if "Production_Prob" in out.columns and pd.to_numeric(out["Production_Prob"],errors="coerce").notna().any():
@@ -10329,7 +10329,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_19'
+                            _source[_use]='V13_2_21'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -11133,7 +11133,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-12-v13.2.19-core-handicapper-isolated-feature-state"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-13-v13.2.21-core-handicapper-isolated-feature-state"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -14864,9 +14864,9 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.6-observed-stats-unshrunk-latent-
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-12-v13.2.19-final-cutoff-promotion-pairing"
-NCAAF_V13_HOTFIX = "V13_2_19__FINAL_CUTOFF_PROMOTION__SAME_SIDE__BOOTSTRAP_GATE__RAW_ASOF_MMI__STRICT_POSTSTACK_CAL"
-# V13.2.19 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
+NCAAF_V13_VERSION = "2026-09-13-v13.2.21-evidence-strength-redundancy"
+NCAAF_V13_HOTFIX = "V13_2_21__EVIDENCE_STRENGTH_CONFIDENCE__ALL_RULE_REDUNDANCY__FROZEN_T1H_REPLAY__BOOTSTRAP_GATE"
+# V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
@@ -16265,17 +16265,34 @@ def _apply_v13_autofs_core_bridge_runtime(base_prob, core_prob, bridge: dict):
 
 
 
-# V13.2.5 runtime constants must match training artifact semantics.
+# V13.2.21 runtime constants must match training artifact semantics.
 V132_RULE_HIST_MIN_GAMES = 20
 V132_RULE_HIST_MIN_ATS = 0.5238
-V132_RULE_HIST_MAX_ABS_BETA = 0.75
+V132_RULE_EVIDENCE_NEUTRAL_EQUIV_GAMES = 6.0
+V132_RULE_STRONG_ATS_REFERENCE = 0.80
+V132_RULE_HIST_MAX_ABS_BETA = 1.50
 V132_RULE_INTERNAL_PRIMARY_MIN_GAMES = 100
 V132_RULE_INTERNAL_PRIMARY_MIN_SEASONS = 3
 V132_RULE_MAX_SINGLE_PROB_DELTA = 0.100
-V132_RULE_MAX_FAMILY_PROB_DELTA = 0.125
-V132_RULE_MAX_TOTAL_PROB_DELTA = 0.150
+V132_RULE_MAX_SINGLE_PROB_DELTA_STRONG = 0.220
+V132_RULE_MAX_FAMILY_PROB_DELTA = 0.220
+V132_RULE_MAX_TOTAL_PROB_DELTA = 0.250
 V132_RULE_CORR_DISCOUNT_START = 0.50
 V132_RULE_CORR_MAX_DISCOUNT = 0.50
+V132_RULE_REDUNDANCY_DISCOUNT_START = 0.35
+V132_RULE_REDUNDANCY_MAX_DISCOUNT = 0.75
+V132_RULE_REDUNDANCY_STRENGTH = 0.75
+
+def _v132_runtime_evidence_authority(raw_ats, sample):
+    try:
+        p=float(raw_ats); n=float(sample)
+    except Exception:
+        return 0.0
+    if not np.isfinite(p) or not np.isfinite(n) or n<=0 or p<=0.5:
+        return 0.0
+    k=float(max(V132_RULE_EVIDENCE_NEUTRAL_EQUIV_GAMES,0.0))
+    authority=float((p*n + 0.5*k)/max(n+k,1e-12))
+    return float(np.clip(np.log(np.clip(authority,1e-6,1-1e-6)/(1-np.clip(authority,1e-6,1-1e-6))),-V132_RULE_HIST_MAX_ABS_BETA,V132_RULE_HIST_MAX_ABS_BETA))
 
 
 def _v132_runtime_prepare_rule_rows(rows: pd.DataFrame) -> pd.DataFrame:
@@ -16453,13 +16470,13 @@ def _v132_runtime_hist_beta_vector(pr: dict, rows: pd.DataFrame) -> np.ndarray:
         n=len(vals); p=float(np.mean(vals)) if n else np.nan
         internal_mature=bool(n>=min_internal and len(seasons)>=min_seasons)
         source_available=bool(source and pd.notna(eff) and dt>=eff and src_decisions>=V132_RULE_HIST_MIN_GAMES and np.isfinite(src_ats))
-        use_p=np.nan
+        use_p=np.nan; use_n=0
         if source_available and not internal_mature:
-            use_p=src_ats
+            use_p=src_ats; use_n=src_decisions
         elif n>=V132_RULE_HIST_MIN_GAMES and np.isfinite(p) and p>=V132_RULE_HIST_MIN_ATS:
-            use_p=p
+            use_p=p; use_n=n
         if np.isfinite(use_p) and use_p>=V132_RULE_HIST_MIN_ATS:
-            out[i]=float(np.clip(np.log(np.clip(use_p,1e-6,1-1e-6)/(1-np.clip(use_p,1e-6,1-1e-6))),-V132_RULE_HIST_MAX_ABS_BETA,V132_RULE_HIST_MAX_ABS_BETA))
+            out[i]=_v132_runtime_evidence_authority(use_p,use_n)
     return out
 
 def _v132_runtime_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict):
@@ -16476,7 +16493,10 @@ def _v132_runtime_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict)
         return final,detail
 
     specs={sp.get("name"):sp for sp in list(engine.get("specs") or []) if isinstance(sp,dict)}
-    profiles=engine.get("profiles") or {}; selected=list(engine.get("selected_experts") or []); corr=engine.get("pairwise_corr") or {}
+    profiles=engine.get("profiles") or {}; selected=list(engine.get("selected_experts") or [])
+    order=[x for x in list(engine.get("application_order") or selected) if x in set(selected)]
+    selected=order+[x for x in selected if x not in set(order)]
+    corr=engine.get("pairwise_corr") or {}; redund=engine.get("pairwise_redundancy") or {}
     fam_used={"Pathi":np.zeros(n),"BigAl":np.zeros(n)}; total_used=np.zeros(n); prev=[]
     for name in selected:
         pr=profiles.get(name) or {}; sp=specs.get(name)
@@ -16487,7 +16507,7 @@ def _v132_runtime_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict)
         hb=_v132_runtime_hist_beta_vector(pr,rows) if hist_auth else np.zeros(n,dtype=float)
         if hist_auth:
             mod=float(pr.get("modern_modifier_beta",0.0) or 0.0) if bool(pr.get("modern_modifier_gate",False)) else 0.0
-            weight_value=1.0
+            weight_value=float(np.clip(pr.get("trust",pr.get("evidence_confidence",0.0)) or 0.0,0.0,1.0))
         else:
             mod=float(pr.get("final_beta",0.0) or 0.0)
             weight_value=float(np.clip(pr.get("trust",0.0) or 0.0,0,1))
@@ -16497,14 +16517,16 @@ def _v132_runtime_apply_rule_engine(base_prob, rows: pd.DataFrame, engine: dict)
         if not active.any(): continue
         idx=np.flatnonzero(active); beta_active=beta_vec[idx]
         proposal=_v13_overlay_sigmoid(_v13_overlay_logit(final[idx])+beta_active)
-        raw=np.clip(proposal-final[idx],-V132_RULE_MAX_SINGLE_PROB_DELTA,V132_RULE_MAX_SINGLE_PROB_DELTA)
+        single_cap=float(np.clip(pr.get("single_prob_delta_cap",V132_RULE_MAX_SINGLE_PROB_DELTA) or V132_RULE_MAX_SINGLE_PROB_DELTA,V132_RULE_MAX_SINGLE_PROB_DELTA,V132_RULE_MAX_SINGLE_PROB_DELTA_STRONG))
+        raw=np.clip(proposal-final[idx],-single_cap,single_cap)
         indep=np.ones(raw.size,dtype=float)
-        if not hist_auth:
-            for prev_name,prev_mask,prev_delta,prev_hist in prev:
-                if prev_hist: continue
-                rho=float(max(0.0,(corr.get(name,{}) or {}).get(prev_name,(corr.get(prev_name,{}) or {}).get(name,0.0)) or 0.0))
-                if rho>V132_RULE_CORR_DISCOUNT_START:
-                    overlap=prev_mask[idx]; same=overlap&(np.sign(raw)==np.sign(prev_delta[idx])); indep[same]*=(1.0-min(V132_RULE_CORR_MAX_DISCOUNT,0.5*rho))
+        for prev_name,prev_mask,prev_delta,prev_hist in prev:
+            rho=float(max(0.0,(corr.get(name,{}) or {}).get(prev_name,(corr.get(prev_name,{}) or {}).get(name,0.0)) or 0.0))
+            red=float(max(rho,(redund.get(name,{}) or {}).get(prev_name,(redund.get(prev_name,{}) or {}).get(name,0.0)) or 0.0))
+            if red>V132_RULE_REDUNDANCY_DISCOUNT_START:
+                overlap=prev_mask[idx]; same=overlap&(np.sign(raw)==np.sign(prev_delta[idx]))
+                disc=min(V132_RULE_REDUNDANCY_MAX_DISCOUNT,V132_RULE_REDUNDANCY_STRENGTH*red)
+                indep[same]*=(1.0-disc)
         raw*=indep
         fam_room=np.maximum(0.0,V132_RULE_MAX_FAMILY_PROB_DELTA-np.abs(fam_used[fam][idx]))
         total_room=np.maximum(0.0,V132_RULE_MAX_TOTAL_PROB_DELTA-np.abs(total_used[idx]))
