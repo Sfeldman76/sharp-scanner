@@ -12562,7 +12562,7 @@ from google.cloud import storage
 
 CHAMPION_META_VERSION = 2
 PROMOTION_ROW_KEY_VERSION = "v1_game_market_outcome_book_snapshot_value_odds"
-PROMOTION_GAME_PAIR_VERSION = "v5_frozen_t1h_all_asof_exact_legacy_meta_replay"
+PROMOTION_GAME_PAIR_VERSION = "v6_frozen_t1h_all_asof_decision_grain_exact_replay"
 
 
 @dataclass
@@ -13376,7 +13376,7 @@ def should_promote_challenger(
 # V13.2.21 promotion replay: score BOTH stored artifacts on ONE frozen T-1h
 # outer-holdout frame.  Saved holdout prediction payloads are diagnostics only.
 # ---------------------------------------------------------------------------
-V13220_PROMOTION_REPLAY_MAX_STALENESS_H = None  # V13.2.25: all genuinely observed pre-cutoff states are eligible; staleness is audited, never fabricated.
+V13220_PROMOTION_REPLAY_MAX_STALENESS_H = None  # V13.2.26: all genuinely observed pre-cutoff states are eligible; staleness is audited, never fabricated.
 V13220_PROMOTION_REPLAY_AGG_WINDOW_H = 0.25
 
 
@@ -13622,7 +13622,7 @@ def _v13220_score_artifact_rows(bundle: dict, rows: pd.DataFrame, *, market='spr
 def _v13220_frozen_cutoff_groups(frame: pd.DataFrame, *, cutoff_hours=None,
                                    max_staleness_hours=V13220_PROMOTION_REPLAY_MAX_STALENESS_H,
                                    aggregation_window_hours=V13220_PROMOTION_REPLAY_AGG_WINDOW_H):
-    """V13.2.25 frozen T-1h as-of frame.
+    """V13.2.26 frozen T-1h as-of frame.
 
     Select one deterministic canonical side per physical game, then use the latest
     genuinely observed market state at or before the scheduled cutoff.  A stale
@@ -14193,7 +14193,7 @@ def train_with_champion_wrapper(
                 "legacy_probability_preserved_in_artifact":True,
             })
             logger.warning(
-                "[V13.2.25-PROMOTION] internal_ready=TRUE pairing_gate=%s game_balanced_primary=%s probability_quality_gate=%s production_bin_gate=%s bootstrap_proper=%s bootstrap_cal=%s ll_imp=%+.6f br_imp=%+.6f ece_imp=%+.6f ici_imp=%+.6f auc_imp=%+.6f specialist_gate=%s reason=%s",
+                "[V13.2.26-PROMOTION] internal_ready=TRUE pairing_gate=%s game_balanced_primary=%s probability_quality_gate=%s production_bin_gate=%s bootstrap_proper=%s bootstrap_cal=%s ll_imp=%+.6f br_imp=%+.6f ece_imp=%+.6f ici_imp=%+.6f auc_imp=%+.6f specialist_gate=%s reason=%s",
                 _pairing_gate_pass,_use_gb,_v13_outer_quality_pass,_prod_bin_gate,_boot_proper_support,_boot_cal_noninferior,_ll_imp,_br_imp,_ece_imp,_ici_imp,_auc_imp,_v13_spec_gate,_v13_final_reason
             )
 
@@ -15486,7 +15486,7 @@ def _hc_fit_one_horizon(hh: pd.DataFrame, y: np.ndarray, market: str, label: str
             if ll_pl <= ll_id + 0.001:
                 chosen_cal = "platt"
 
-    # V13.2.25 orientation audit.  An apparent sub-.50 AUC is not automatically
+    # V13.2.26 orientation audit.  An apparent sub-.50 AUC is not automatically
     # flipped.  Selection OOF may nominate the inverse orientation, but a protected
     # later shadow must independently confirm better log loss AND Brier with
     # calibration noninferiority before the orientation can change.
@@ -16221,15 +16221,15 @@ def _hc_apply_system_memory(out: pd.DataFrame, hb: dict) -> pd.DataFrame:
 #     plus information available before kickoff.
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
-NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.25-market-error-independent-lanes"
+NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.26-market-error-independent-lanes"
 
 # ============================================================================
 # V13 NCAAF VALUE ARCHITECTURE
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-13-v13.2.25-independent-lanes-orientation-replay-execution"
-NCAAF_V13_HOTFIX = "V13_2_25__INDEPENDENT_EXPERT_LANES__HISTORICAL_ORIENTATION_AUDIT__EXACT_LEGACY_META_REPLAY__EXECUTION_ASSERTIONS__CLEANUP_PHASE3"
+NCAAF_V13_VERSION = "2026-09-13-v13.2.26-decision-grain-shadow-oof-betting-policy"
+NCAAF_V13_HOTFIX = "V13_2_26__TRUE_SHADOW_CORE_OOF__DECISION_GRAIN_RESOLVER__DECISION_PROBABILITY_MAP__BET_LEDGER_SEASON_FIX__EXACT_PROMOTION"
 NCAAF_HISTORY_POLICY = "ALL_AVAILABLE_SEASONS"
 NCAAF_HISTORY_FIXED_LOOKBACK_DAYS = None  # Never silently truncate production history.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -17209,7 +17209,7 @@ def _ncaaf_stat_build_game_frame(raw: pd.DataFrame):
     anchor["Actual_Total"] = pd.to_numeric(anchor["Team_Score"],errors="coerce") + pd.to_numeric(anchor["Opponent_Score"],errors="coerce")
     anchor["Market_Open_Margin"] = -pd.to_numeric(anchor["Consensus_Open_Spread"], errors="coerce")
     anchor["Market_Open_Total"] = pd.to_numeric(anchor["Consensus_Open_Total"], errors="coerce")
-    # V13.2.25: the Statistical/Fundamental brain's primary supervised target is
+    # V13.2.26: the Statistical/Fundamental brain's primary supervised target is
     # the market's error, not the raw football result.  This makes the learned
     # quantity directly answer the betting question: how many points is the
     # posted number mispriced?  Raw result targets remain available as auxiliary
@@ -18021,7 +18021,7 @@ def _ncaaf_v13_build_fundamental(raw: pd.DataFrame, bq=None, log_func=print):
     if len(seasons) < 3:
         return None
 
-    # V13.2.25: make the market mistake the primary football target.  The model
+    # V13.2.26: make the market mistake the primary football target.  The model
     # learns residual points versus the posted opener, then adds that residual back
     # to the market number.  Raw final-margin/total prediction is retained as an
     # auxiliary diagnostic lane only.
@@ -18041,12 +18041,12 @@ def _ncaaf_v13_build_fundamental(raw: pd.DataFrame, bq=None, log_func=print):
     margin_lane_enabled = bool(len(margin_cols) >= 2)
     total_lane_enabled = bool(len(total_cols) >= 2)
     if not margin_lane_enabled:
-        log_func(f"[V13.2.25-EXPERT-LANE] lane=FundamentalSpread gate=CLOSED reason=INSUFFICIENT_MARGIN_FEATURES margin={margin_cols} total={total_cols} architecture_continues=TRUE")
+        log_func(f"[V13.2.26-EXPERT-LANE] lane=FundamentalSpread gate=CLOSED reason=INSUFFICIENT_MARGIN_FEATURES margin={margin_cols} total={total_cols} architecture_continues=TRUE")
         return None
     if not total_lane_enabled:
         # A weak totals residual lane must never abort the NCAAF spread architecture.
         # Keep totals at the observed market baseline for diagnostics only.
-        log_func(f"[V13.2.25-EXPERT-LANE] lane=FundamentalTotals gate=CLOSED reason=INSUFFICIENT_TOTAL_FEATURES total={total_cols} spread_architecture_continues=TRUE")
+        log_func(f"[V13.2.26-EXPERT-LANE] lane=FundamentalTotals gate=CLOSED reason=INSUFFICIENT_TOTAL_FEATURES total={total_cols} spread_architecture_continues=TRUE")
         total_cols=[_NCAAF_STAT_INTERCEPT_FEATURE]
 
     season_arr=pd.to_numeric(games["Season"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
@@ -19166,7 +19166,7 @@ def _ncaaf_v13_paired_model_bootstrap(y,p12,p13,groups,reps=800,seed=13100):
 # ============================================================================
 # V13.1.2 CALIBRATED AUTOfs CORE + CONDITIONAL RESIDUAL EXPERTS
 # ============================================================================
-V13_SPECIALIST_OVERLAY_VERSION = "2026-09-13-v13.2.25-anchored-independent-lanes-resolver-stack"
+V13_SPECIALIST_OVERLAY_VERSION = "2026-09-13-v13.2.26-anchored-independent-lanes-resolver-stack"
 V13_SPECIALIST_WEIGHT_GRID = (0.0, 0.025, 0.05, 0.075, 0.10, 0.15)
 V13_SPECIALIST_MAX_TOTAL_WEIGHT = 0.20
 V13_SPECIALIST_MIN_OOF_ROWS = 500
@@ -19233,7 +19233,7 @@ V13_PROMOTION_BOOTSTRAP_REPS = 400
 V13_PROMOTION_MAX_ECE_CI_INCREASE = 0.010
 V13_PROMOTION_MAX_RELIABILITY_CI_INCREASE = 0.0025
 
-V13_FUNDAMENTAL_OVERLAY_VERSION = "2026-09-13-v13.2.25-market-error-residual-fundamental-overlay"
+V13_FUNDAMENTAL_OVERLAY_VERSION = "2026-09-13-v13.2.26-market-error-residual-fundamental-overlay"
 V13_FUNDAMENTAL_WEIGHT_GRID = (0.0, 0.025, 0.05, 0.075, 0.10, 0.15)
 V13_FUNDAMENTAL_MIN_OOF_ROWS = 500
 V13_FUNDAMENTAL_MIN_LL_GAIN = 0.0005
@@ -20283,7 +20283,7 @@ def _ncaaf_v131_fit_core_calibration(bundle: dict, train_rows: pd.DataFrame, y_t
         for _,va in cal_folds: cal_select_mask[np.asarray(va,dtype=int)]=True
         cal_shadow_mask=np.zeros(len(y),dtype=bool); cal_shadow_mask[transfer_va]=True
         transfer_source="LATEST_CORE_OOF_FOLD"
-        log_func(f"[V13.2.25-CAL-SHADOW-FALLBACK] supplied_raw_rows={int(supplied_shadow_ok.sum())} supplied_games={_supplied_transfer_games} required_games={V13_CORE_CALIBRATION_TRANSFER_MIN_GAMES} fallback=LATEST_CORE_OOF_FOLD")
+        log_func(f"[V13.2.26-CAL-SHADOW-FALLBACK] supplied_raw_rows={int(supplied_shadow_ok.sum())} supplied_games={_supplied_transfer_games} required_games={V13_CORE_CALIBRATION_TRANSFER_MIN_GAMES} fallback=LATEST_CORE_OOF_FOLD")
 
     select_ok=cal_select_mask&np.isfinite(raw); shadow_ok_mask=cal_shadow_mask&np.isfinite(raw)
     base_sel=_ncaaf_v131_calibration_metrics(y[select_ok],raw[select_ok],sw[select_ok])
@@ -20293,7 +20293,7 @@ def _ncaaf_v131_fit_core_calibration(bundle: dict, train_rows: pd.DataFrame, y_t
     else:
         base_shadow=_ncaaf_v131_calibration_metrics([],[])
     _cal_transfer_raw_audit=_v13214_calibration_transfer_audit(train_rows,y,raw,sw,shadow_ok_mask,"RAW_CORE_TRANSFER",log_func=log_func)
-    log_func(f"[V13.2.25-CAL-SPLIT] source={transfer_source} selection_rows={int(select_ok.sum())} transfer_raw_rows={int(shadow_ok_mask.sum())} transfer_sides={int((_shadow_meta or {}).get('sides',0) or 0)} transfer_games={int((_shadow_meta or {}).get('games',0) or 0)} all_core_oof_rows={int((all_selection_mask&np.isfinite(raw)).sum())} outer_holdout_used=FALSE")
+    log_func(f"[V13.2.26-CAL-SPLIT] source={transfer_source} selection_rows={int(select_ok.sum())} transfer_raw_rows={int(shadow_ok_mask.sum())} transfer_sides={int((_shadow_meta or {}).get('sides',0) or 0)} transfer_games={int((_shadow_meta or {}).get('games',0) or 0)} all_core_oof_rows={int((all_selection_mask&np.isfinite(raw)).sum())} outer_holdout_used=FALSE")
 
     if int(select_ok.sum())<V13_CORE_CALIBRATION_MIN_OOF_ROWS:
         art={"version":V13_CORE_CALIBRATION_VERSION,"core_ready":False,"status":"INSUFFICIENT_OOF",
@@ -20301,7 +20301,7 @@ def _ncaaf_v131_fit_core_calibration(bundle: dict, train_rows: pd.DataFrame, y_t
              "params":{"method":"identity"},"maturity_temperatures":{},
              "selection_base_metrics":base_sel,"shadow_base_metrics":base_shadow,"transfer_source":transfer_source}
         bundle["core_calibration"]=art
-        log_func(f"[V13.2.25-CORE-CAL] status=CLOSED reason=INSUFFICIENT_OOF rows={int(select_ok.sum())}")
+        log_func(f"[V13.2.26-CORE-CAL] status=CLOSED reason=INSUFFICIENT_OOF rows={int(select_ok.sum())}")
         return bundle,raw
 
     specs=_ncaaf_v131_calibration_specs(); results={}
@@ -20342,7 +20342,7 @@ def _ncaaf_v131_fit_core_calibration(bundle: dict, train_rows: pd.DataFrame, y_t
                        "positive_folds":int(positive),"required_positive_folds":int(need),"catastrophic_fold":bool(catastrophic),
                        "fold_stability_pass":bool(fold_stability),"selection_gate_pass":bool(valid)}
         _ftxt=(f" fixed_T={float(_fixed_t):.2f}" if _is_fixed else "")
-        log_func(f"[V13.2.25-CAL-CANDIDATE] name={name}{_ftxt} gate={'PASS' if valid else 'CLOSED'} n={met['n']} "
+        log_func(f"[V13.2.26-CAL-CANDIDATE] name={name}{_ftxt} gate={'PASS' if valid else 'CLOSED'} n={met['n']} "
                  f"ll={met.get('logloss',np.nan):.6f} brier={met.get('brier',np.nan):.6f} ece={met.get('ece',np.nan):.4f} ici={met.get('ici_smooth',np.nan):.4f} "
                  f"rel={met.get('reliability',np.nan):.6f} slope={met.get('calibration_slope',np.nan):.3f} intercept={met.get('calibration_intercept',np.nan):+.3f} "
                  f"support_folds={positive}/{len(rr)} required={need} fold_stability={fold_stability} catastrophic={catastrophic} "
@@ -20389,7 +20389,7 @@ def _ncaaf_v131_fit_core_calibration(bundle: dict, train_rows: pd.DataFrame, y_t
     except Exception:
         _fit_min=_fit_max=None; _ess=0.0
     log_func(
-        f"[V13.2.25-CAL-TRANSFER] source={transfer_source} selected={selected} method={method} fit_rows={len(transfer_fit_idx)} ess={_ess:.1f} "
+        f"[V13.2.26-CAL-TRANSFER] source={transfer_source} selected={selected} method={method} fit_rows={len(transfer_fit_idx)} ess={_ess:.1f} "
         f"fit_date_min={_fit_min} fit_date_max={_fit_max} params={transfer_params} "
         f"transfer_sides={int(sh_met.get('n',0) or 0)} transfer_games={int((_shadow_meta or {}).get('games',0) or 0)} base_ll={base_shadow.get('logloss',np.nan):.6f} cand_ll={sh_met.get('logloss',np.nan):.6f} "
         f"base_br={base_shadow.get('brier',np.nan):.6f} cand_br={sh_met.get('brier',np.nan):.6f} "
@@ -20431,7 +20431,7 @@ def _ncaaf_v131_fit_core_calibration(bundle: dict, train_rows: pd.DataFrame, y_t
         maturity_results[bucket]={"gate_pass":gate,"selected_temperature":float(best_t),"selection_rows":int(sel.sum()),"shadow_rows":int(sh.sum()),
             "selection_ll_gain":float(base_m.get('logloss',np.nan)-best_m.get('logloss',np.nan)),"selection_brier_gain":float(base_m.get('brier',np.nan)-best_m.get('brier',np.nan)),
             "shadow_ll_gain":float(sb.get('logloss',np.nan)-sf.get('logloss',np.nan)),"shadow_brier_gain":float(sb.get('brier',np.nan)-sf.get('brier',np.nan))}
-        log_func(f"[V13.2.25-CAL-REGIME] bucket={bucket} gate={'PASS' if gate else 'CLOSED'} T={best_t:.3f} sel_ll={base_m.get('logloss',np.nan):.6f}->{best_m.get('logloss',np.nan):.6f} shadow_ll={sb.get('logloss',np.nan):.6f}->{sf.get('logloss',np.nan):.6f}")
+        log_func(f"[V13.2.26-CAL-REGIME] bucket={bucket} gate={'PASS' if gate else 'CLOSED'} T={best_t:.3f} sel_ll={base_m.get('logloss',np.nan):.6f}->{best_m.get('logloss',np.nan):.6f} shadow_ll={sb.get('logloss',np.nan):.6f}->{sf.get('logloss',np.nan):.6f}")
 
     # Core readiness must evaluate the ACTUAL calibrated Core that would feed the
     # specialist stack, not the superseded raw probability.  Thresholds are unchanged;
@@ -20456,7 +20456,7 @@ def _ncaaf_v131_fit_core_calibration(bundle: dict, train_rows: pd.DataFrame, y_t
     if isinstance(bundle.get("production_preview"),dict):
         bundle["production_preview"]["core_calibration_method"]=active_method; bundle["production_preview"]["core_calibration_active"]=bool(art["calibration_active"])
     _sm=(selected_rec.get('metrics') or {})
-    log_func(f"[V13.2.25-CORE-CAL] core_ready={'PASS' if core_ready else 'CLOSED'} selected={selected} active={art['active_spec']} transfer_source={transfer_source} "
+    log_func(f"[V13.2.26-CORE-CAL] core_ready={'PASS' if core_ready else 'CLOSED'} selected={selected} active={art['active_spec']} transfer_source={transfer_source} "
              f"selection_n={base_sel['n']} raw_auc={base_sel['auc']:.4f} raw_ll={base_sel['logloss']:.6f} raw_brier={base_sel['brier']:.6f} raw_ece={base_sel['ece']:.4f} raw_ici={base_sel.get('ici_smooth',np.nan):.4f} "
              f"cal_ll={_sm.get('logloss',np.nan):.6f} cal_brier={_sm.get('brier',np.nan):.6f} cal_ece={_sm.get('ece',np.nan):.4f} cal_ici={_sm.get('ici_smooth',np.nan):.4f} "
              f"cal_slope={_sm.get('calibration_slope',np.nan):.3f} cal_intercept={_sm.get('calibration_intercept',np.nan):+.3f} transfer={'PASS' if shadow_transfer else 'CLOSED'} "
@@ -22550,10 +22550,10 @@ def _v13217_calibration_transfer_view(rows, y, p, mask, log_func=None, label="TR
               "sides":int(len(view)),"raw_rows":int(len(idx)),"incomplete_games":int(incomplete),"label_conflict_games":int(bad_labels),
               "complement_mae":float(np.mean(np.abs(view.groupby("game")["p"].sum()-1.0))) if not view.empty else np.nan}
         if log_func is not None:
-            log_func(f"[V13.2.25-CAL-TRANSFER-GRAIN] lane={label} raw_rows={meta['raw_rows']} sides={meta['sides']} games={meta['games']} incomplete={meta['incomplete_games']} label_conflicts={meta['label_conflict_games']} complement_mae={meta['complement_mae']:.3e} contract=PHYSICAL_GAME_TEAM_SIDE__EXACT_COMPLEMENTS")
+            log_func(f"[V13.2.26-CAL-TRANSFER-GRAIN] lane={label} raw_rows={meta['raw_rows']} sides={meta['sides']} games={meta['games']} incomplete={meta['incomplete_games']} label_conflicts={meta['label_conflict_games']} complement_mae={meta['complement_mae']:.3e} contract=PHYSICAL_GAME_TEAM_SIDE__EXACT_COMPLEMENTS")
         return view,meta
     except Exception as e:
-        if log_func is not None: log_func(f"[V13.2.25-CAL-TRANSFER-GRAIN] lane={label} ERROR={type(e).__name__}:{e}")
+        if log_func is not None: log_func(f"[V13.2.26-CAL-TRANSFER-GRAIN] lane={label} ERROR={type(e).__name__}:{e}")
         return pd.DataFrame(),{"status":f"ERROR:{type(e).__name__}","games":0,"sides":0}
 
 
@@ -22563,7 +22563,7 @@ def _v13214_calibration_transfer_audit(rows, y, p, weights, mask, label, log_fun
         view,meta=_v13217_calibration_transfer_view(rows,y,p,mask,log_func=None,label=label)
         if view is None or view.empty:
             out={"rows":0,"games":0,**(meta or {})}
-            log_func(f"[V13.2.25-CAL-TRANSFER-AUDIT] lane={label} status={out.get('status','EMPTY')} raw_rows={out.get('raw_rows',0)} games=0 sides=0")
+            log_func(f"[V13.2.26-CAL-TRANSFER-AUDIT] lane={label} status={out.get('status','EMPTY')} raw_rows={out.get('raw_rows',0)} games=0 sides=0")
             return out
         yv=view["y"].to_numpy(dtype=int); pv=view["p"].to_numpy(dtype=float); wv=view["weight"].to_numpy(dtype=float)
         met=_ncaaf_v131_calibration_metrics(yv,pv,wv)
@@ -22572,10 +22572,10 @@ def _v13214_calibration_transfer_audit(rows, y, p, weights, mask, label, log_fun
         ess=float((wv.sum()**2)/max(np.sum(wv*wv),1e-12))
         sums=view.groupby("game",sort=False)["p"].sum(); comp_n=int(len(sums)); comp_mae=float(np.mean(np.abs(sums-1.0))) if comp_n else np.nan; comp_bad=float(np.mean(np.abs(sums-1.0)>.02)) if comp_n else np.nan
         out={"rows":int(len(view)),"raw_rows":int(meta.get("raw_rows",0)),"games":int(meta.get("games",0)),"label_rate":float(np.average(yv,weights=wv)),"mean_prob":float(np.average(pv,weights=wv)),"ess":ess,"prob_quantiles":q,"date_min":date_min,"date_max":date_max,"complement_pairs":comp_n,"complement_sum_mae":comp_mae,"complement_bad_gt2pct":comp_bad,"grain_status":meta.get("status"),**met}
-        log_func(f"[V13.2.25-CAL-TRANSFER-AUDIT] lane={label} raw_rows={out['raw_rows']} sides={len(view)} games={out['games']} label_rate={out['label_rate']:.4f} mean_prob={out['mean_prob']:.4f} ess={ess:.1f} q={q} ll={met.get('logloss',np.nan):.6f} brier={met.get('brier',np.nan):.6f} ece={met.get('ece',np.nan):.4f} ici={met.get('ici_smooth',np.nan):.4f} slope={met.get('calibration_slope',np.nan):.3f} dates={date_min}->{date_max} complement_pairs={comp_n} complement_mae={comp_mae:.3e} complement_bad_gt2pct={comp_bad:.3f} grain=PHYSICAL_GAME_TEAM_SIDE")
+        log_func(f"[V13.2.26-CAL-TRANSFER-AUDIT] lane={label} raw_rows={out['raw_rows']} sides={len(view)} games={out['games']} label_rate={out['label_rate']:.4f} mean_prob={out['mean_prob']:.4f} ess={ess:.1f} q={q} ll={met.get('logloss',np.nan):.6f} brier={met.get('brier',np.nan):.6f} ece={met.get('ece',np.nan):.4f} ici={met.get('ici_smooth',np.nan):.4f} slope={met.get('calibration_slope',np.nan):.3f} dates={date_min}->{date_max} complement_pairs={comp_n} complement_mae={comp_mae:.3e} complement_bad_gt2pct={comp_bad:.3f} grain=PHYSICAL_GAME_TEAM_SIDE")
         return out
     except Exception as e:
-        log_func(f"[V13.2.25-CAL-TRANSFER-AUDIT] lane={label} ERROR={type(e).__name__}:{e}")
+        log_func(f"[V13.2.26-CAL-TRANSFER-AUDIT] lane={label} ERROR={type(e).__name__}:{e}")
         return {"error":f"{type(e).__name__}:{e}"}
 
 
@@ -23244,7 +23244,7 @@ def _v132_fit_post_stack_calibration(y,selection_pred,shadow_pred,select_mask,sh
     transfer=bool(best_t==1.0 or not reasons)
     active_t=best_t if transfer else 1.0
     log_func(
-        f"[V13.2.25-POST-STACK-CAL] selected_T={best_t:.2f} active_T={active_t:.2f} selection_games={sel_games} shadow_games={sh_games} "
+        f"[V13.2.26-POST-STACK-CAL] selected_T={best_t:.2f} active_T={active_t:.2f} selection_games={sel_games} shadow_games={sh_games} "
         f"shadow_transfer={'PASS' if transfer else 'CLOSED'} reasons={reasons or ['PASS']} "
         f"sel_ll={base_sel.get('logloss',np.nan):.6f}->{best.get('logloss',np.nan):.6f} sel_ece={base_sel.get('ece',np.nan):.4f}->{best.get('ece',np.nan):.4f} "
         f"shadow_ll={base_sh.get('logloss',np.nan):.6f}->{shcand.get('logloss',np.nan):.6f} shadow_ece={base_sh.get('ece',np.nan):.4f}->{shcand.get('ece',np.nan):.4f} "
@@ -23257,9 +23257,9 @@ def _v132_fit_post_stack_calibration(y,selection_pred,shadow_pred,select_mask,sh
 
 
 # ---------------------------------------------------------------------------
-# V13.2.25 EDGE -> PROBABILITY RESOLVER + FULL-HISTORY OOF BETTING LEDGER
+# V13.2.26 DECISION-GRAIN PROBABILITY + BETTING ARCHITECTURE
 # ---------------------------------------------------------------------------
-V13224_RESOLVER_VERSION = "2026-09-13-v13.2.25-anchored-residual-expert-resolver"
+V13224_RESOLVER_VERSION = "2026-09-13-v13.2.26-decision-grain-anchored-residual-expert-resolver"
 V13224_RESOLVER_C_GRID = (0.02, 0.05, 0.10, 0.25, 0.50, 1.00)
 V13224_RESOLVER_MIN_SELECTION_GAMES = 100
 V13224_RESOLVER_MIN_SHADOW_GAMES = 50
@@ -23269,13 +23269,101 @@ V13224_RESOLVER_MAX_ECE_INCREASE = 0.0050
 V13224_RESOLVER_MAX_RELIABILITY_INCREASE = 0.0015
 V13224_RESOLVER_MAX_EXPERT_COEF = 1.50
 V13224_RESOLVER_MAX_INTERCEPT = 0.25
-V13224_BET_POLICY_VERSION = "2026-09-13-v13.2.25-full-oof-ledger-shadow-bet-lean-pass"
+V13224_BET_POLICY_VERSION = "2026-09-13-v13.2.26-decision-grain-full-oof-ledger-shadow-bet-lean-pass"
 V13224_BET_EDGE_GRID = (0.010,0.015,0.020,0.025,0.030,0.040,0.050)
 V13224_BET_MIN_SELECTION_BETS = 50
 V13224_BET_MIN_SHADOW_BETS = 30
 V13224_BET_BOOTSTRAP_REPS = 800
 V13224_BET_POLICY_DEV_FRACTION = 0.65
 
+
+V13226_DECISION_MAP_VERSION = "2026-09-13-v13.2.26-signed-temperature-decision-grain-map"
+V13226_DECISION_SCALE_GRID = (0.50,0.67,0.80,1.00,1.20,1.40,1.60,-0.50,-0.67,-0.80,-1.00,-1.20,-1.40,-1.60)
+V13226_DECISION_MIN_SELECTION_GAMES = 100
+V13226_DECISION_MIN_SHADOW_GAMES = 50
+V13226_DECISION_MAX_ECE_INCREASE = 0.005
+V13226_DECISION_MAX_RELIABILITY_INCREASE = 0.0015
+
+def _v13226_infer_season(rows: pd.DataFrame) -> np.ndarray:
+    """Recover NCAAF season from known columns, then game date as a last resort."""
+    d=rows.reset_index(drop=True); n=len(d); out=np.full(n,np.nan,dtype=float)
+    for c in ("Season","season","Season_Year","SeasonYear","feat_Season"):
+        if c in d.columns:
+            z=pd.to_numeric(d[c],errors="coerce").to_numpy(dtype=float)
+            m=np.isfinite(z)&~np.isfinite(out); out[m]=z[m]
+    if (~np.isfinite(out)).any():
+        dt=pd.to_datetime(d.get("Game_Start",d.get("feat_Game_Start",pd.Series(pd.NaT,index=d.index))),errors="coerce",utc=True)
+        yr=dt.dt.year.to_numpy(dtype=float); mo=dt.dt.month.to_numpy(dtype=float)
+        # January/February bowl/playoff games belong to the season that started the prior fall.
+        inferred=np.where(np.isfinite(yr),yr-np.where(np.isfinite(mo)&(mo<=2),1,0),np.nan)
+        m=~np.isfinite(out)&np.isfinite(inferred); out[m]=inferred[m]
+    return out
+
+def _v13226_decision_mask(rows: pd.DataFrame, prob, mask, groups, cutoff_h=1.0) -> np.ndarray:
+    """One outcome-independent betting decision row per physical game.
+
+    Use the freshest genuinely observed state at/before the cutoff.  Within a 15-minute
+    freshness tie, choose the side/price with the largest model probability edge when
+    a real American price exists, otherwise the largest model probability.  Outcome is
+    never consulted.
+    """
+    d=rows.reset_index(drop=True); pp=np.asarray(prob,dtype=float); mm=np.asarray(mask,dtype=bool); gg=np.asarray(groups,dtype=object)
+    hz=_v13224_horizon_hours(d); odds=pd.to_numeric(d.get("Odds_Price",d.get("Price",pd.Series(np.nan,index=d.index))),errors="coerce").to_numpy(dtype=float)
+    imp,_=_v13224_american_terms(odds); score=np.where(np.isfinite(imp),pp-imp,pp)
+    valid=mm&np.isfinite(pp)&np.isfinite(hz)&(hz>=float(cutoff_h)-1e-12)
+    keep=np.zeros(len(d),dtype=bool)
+    for game in pd.unique(gg[valid]):
+        ix=np.flatnonzero(valid&(gg==game))
+        if not len(ix): continue
+        hmin=float(np.nanmin(hz[ix])); ix=ix[hz[ix]<=hmin+0.25+1e-12]
+        if not len(ix): continue
+        s=score[ix]; j=int(ix[np.nanargmax(s)]) if np.isfinite(s).any() else int(ix[0]); keep[j]=True
+    return keep
+
+def _v13226_apply_decision_map(p, scale):
+    return _v13224_sigmoid(float(scale)*_v13224_logit(p))
+
+def _v13226_fit_decision_probability_map(rows,y,selection_prob,shadow_prob,select_mask,shadow_mask,groups,weights,log_func=print):
+    """Final probability mapping learned at the exact grain at which a wager is selected.
+
+    This is a complement-symmetric signed-temperature map (no intercept), so the two ATS
+    sides remain exact complements. A negative orientation is allowed only when both
+    chronological selection and untouched shadow independently prove the inversion.
+    """
+    yy=np.asarray(y,dtype=int); ps=np.asarray(selection_prob,dtype=float); ph=np.asarray(shadow_prob,dtype=float)
+    sm=np.asarray(select_mask,dtype=bool); hm=np.asarray(shadow_mask,dtype=bool); gg=np.asarray(groups,dtype=object); ww=np.asarray(weights,dtype=float)
+    dsel=_v13226_decision_mask(rows,ps,sm,gg,_promotion_latest_cutoff_hours())
+    dsh=_v13226_decision_mask(rows,ph,hm,gg,_promotion_latest_cutoff_hours())
+    dsel &= np.isfinite(ps)&np.isin(yy,[0,1]); dsh &= np.isfinite(ph)&np.isin(yy,[0,1])
+    sg=int(len(pd.unique(gg[dsel]))) if dsel.any() else 0; hg=int(len(pd.unique(gg[dsh]))) if dsh.any() else 0
+    base_sel=_ncaaf_v131_calibration_metrics(yy[dsel],ps[dsel],np.ones(int(dsel.sum()))) if dsel.any() else _ncaaf_v131_calibration_metrics([],[])
+    base_sh=_ncaaf_v131_calibration_metrics(yy[dsh],ph[dsh],np.ones(int(dsh.sum()))) if dsh.any() else _ncaaf_v131_calibration_metrics([],[])
+    out={"version":V13226_DECISION_MAP_VERSION,"gate_pass":False,"status":"CLOSED","active_scale":1.0,"selected_scale":1.0,"selection_games":sg,"shadow_games":hg,"selection_base_metrics":base_sel,"shadow_base_metrics":base_sh,"contract":"ONE_DECISION_PER_PHYSICAL_GAME__LATEST_ASOF_T1H__COMPLEMENT_SYMMETRIC_SIGNED_TEMPERATURE__SELECTION_NOMINATION__SHADOW_VETO"}
+    if sg<V13226_DECISION_MIN_SELECTION_GAMES or hg<V13226_DECISION_MIN_SHADOW_GAMES:
+        out["status"]="INSUFFICIENT_DECISION_GAMES"; log_func(f"[V13.2.26-DECISION-MAP] gate=CLOSED reason=INSUFFICIENT_DECISION_GAMES selection_games={sg} shadow_games={hg}"); return out
+    best=None
+    for sc in V13226_DECISION_SCALE_GRID:
+        pp=_v13226_apply_decision_map(ps[dsel],sc); met=_ncaaf_v131_calibration_metrics(yy[dsel],pp,np.ones(int(dsel.sum())))
+        ll=float(base_sel.get("logloss",np.nan)-met.get("logloss",np.nan)); br=float(base_sel.get("brier",np.nan)-met.get("brier",np.nan))
+        calok=_ncaaf_v13_calibration_noninferior(base_sel,met,V13226_DECISION_MAX_ECE_INCREASE,V13226_DECISION_MAX_RELIABILITY_INCREASE)
+        auc_gain=float(met.get("auc",np.nan)-base_sel.get("auc",np.nan)) if np.isfinite(met.get("auc",np.nan)) and np.isfinite(base_sel.get("auc",np.nan)) else np.nan
+        # Negative scale is an orientation reversal, not ordinary calibration. Require a
+        # substantial ranking improvement already in selection before shadow is consulted.
+        admissible=bool(ll>=0 and br>=0 and calok and (sc>0 or (np.isfinite(auc_gain) and auc_gain>=0.03 and met.get("auc",0)>=0.53)))
+        rank=(0 if admissible else 1,-ll,-br,float(met.get("ece",np.inf)))
+        rec={"scale":float(sc),"metrics":met,"ll_gain":ll,"brier_gain":br,"calibration_ok":bool(calok),"auc_gain":auc_gain,"admissible":admissible,"rank":rank}
+        if best is None or rank<best["rank"]: best=rec
+    if best is None or not best.get("admissible",False):
+        out["status"]="NO_SELECTION_CANDIDATE"; log_func("[V13.2.26-DECISION-MAP] gate=CLOSED reason=NO_SELECTION_CANDIDATE"); return out
+    sc=float(best["scale"]); shp=_v13226_apply_decision_map(ph[dsh],sc); shmet=_ncaaf_v131_calibration_metrics(yy[dsh],shp,np.ones(int(dsh.sum())))
+    shll=float(base_sh.get("logloss",np.nan)-shmet.get("logloss",np.nan)); shbr=float(base_sh.get("brier",np.nan)-shmet.get("brier",np.nan))
+    shcal=_ncaaf_v13_calibration_noninferior(base_sh,shmet,V13226_DECISION_MAX_ECE_INCREASE,V13226_DECISION_MAX_RELIABILITY_INCREASE)
+    shaucgain=float(shmet.get("auc",np.nan)-base_sh.get("auc",np.nan)) if np.isfinite(shmet.get("auc",np.nan)) and np.isfinite(base_sh.get("auc",np.nan)) else np.nan
+    inverse_ok=bool(sc>0 or (np.isfinite(shaucgain) and shaucgain>=0.03 and shmet.get("auc",0)>=0.53))
+    gate=bool(best["ll_gain"]>=0 and best["brier_gain"]>=0 and shll>=0 and shbr>=0 and best["calibration_ok"] and shcal and inverse_ok and (best["ll_gain"]>0.0001 or best["brier_gain"]>0.00005) and (shll>0.0001 or shbr>0.00005))
+    out.update({"gate_pass":gate,"status":"PASS" if gate else "SHADOW_CLOSED","selected_scale":sc,"active_scale":sc if gate else 1.0,"selection_metrics":best["metrics"],"shadow_metrics":shmet,"selection_ll_gain":best["ll_gain"],"selection_brier_gain":best["brier_gain"],"shadow_ll_gain":shll,"shadow_brier_gain":shbr,"selection_auc_gain":best["auc_gain"],"shadow_auc_gain":shaucgain,"shadow_calibration_pass":bool(shcal),"orientation":"INVERTED" if sc<0 else "ORIGINAL"})
+    log_func(f"[V13.2.26-DECISION-MAP] gate={'PASS' if gate else 'CLOSED'} scale={sc:+.2f} orientation={out['orientation']} selection_games={sg} shadow_games={hg} sel_ll={best['ll_gain']:+.6f} sel_br={best['brier_gain']:+.6f} shadow_ll={shll:+.6f} shadow_br={shbr:+.6f} sel_auc_gain={best['auc_gain']:+.4f} shadow_auc_gain={shaucgain:+.4f}")
+    return out
 
 def _v13224_logit(p):
     a=np.clip(np.asarray(p,dtype=float),1e-5,1-1e-5)
@@ -23290,7 +23378,7 @@ def _v13224_sigmoid(z):
 def _v13224_resolver_matrix(core_cal, base, market, pathi, bigal):
     """Independent expert deltas only; Core itself is a fixed logit offset of 1.0.
 
-    Combined_Rule_Delta_Logit was removed in V13.2.25 because it duplicated
+    Combined_Rule_Delta_Logit was removed in V13.2.26 because it duplicated
     Pathi/BigAl information and allowed the same edge to be counted twice.
     """
     cc=np.asarray(core_cal,dtype=float); ba=np.asarray(base,dtype=float); ma=np.asarray(market,dtype=float)
@@ -23339,7 +23427,7 @@ def _v13224_apply_anchored_resolver(core_prob, X, intercept, coefficients, featu
     return _v13224_sigmoid(_v13224_logit(core_prob)+float(intercept or 0.0)+xx.dot(beta))
 
 
-def _v13224_fit_probability_resolver(y, core_cal, base, market_sel, market_shadow,
+def _v13224_fit_probability_resolver(rows, y, core_cal, base, market_sel, market_shadow,
                                       pathi_sel, pathi_shadow, bigal_sel, bigal_shadow,
                                       select_mask, shadow_mask, folds, weights, groups, log_func=print):
     """Anchored expert resolver: Core is fixed at coefficient 1.0.
@@ -23354,6 +23442,9 @@ def _v13224_fit_probability_resolver(y, core_cal, base, market_sel, market_shado
     feat=list(Xsel.columns)
     finite_sel=np.isfinite(Xsel.to_numpy(dtype=float)).all(axis=1)&sm&np.isfinite(core)&np.isfinite(w)&(w>0)
     finite_sh=np.isfinite(Xsh.to_numpy(dtype=float)).all(axis=1)&hm&np.isfinite(core)&np.isfinite(w)&(w>0)
+    # Fit/validate the resolver at the same one-bet-per-game grain used in live advice.
+    finite_sel &= _v13226_decision_mask(rows,core,finite_sel,g,_promotion_latest_cutoff_hours())
+    finite_sh &= _v13226_decision_mask(rows,core,finite_sh,g,_promotion_latest_cutoff_hours())
     sel_games=int(len(pd.unique(g[finite_sel]))) if finite_sel.any() else 0
     sh_games=int(len(pd.unique(g[finite_sh]))) if finite_sh.any() else 0
     base_sel=_ncaaf_v131_calibration_metrics(yy[finite_sel],core[finite_sel],w[finite_sel])
@@ -23368,7 +23459,7 @@ def _v13224_fit_probability_resolver(y, core_cal, base, market_sel, market_shado
     }
     if sel_games<V13224_RESOLVER_MIN_SELECTION_GAMES or sh_games<V13224_RESOLVER_MIN_SHADOW_GAMES:
         out["status"]="INSUFFICIENT_PHYSICAL_GAMES"
-        log_func(f"[V13.2.25-PROB-RESOLVER] gate=CLOSED reason=INSUFFICIENT_PHYSICAL_GAMES selection_games={sel_games} shadow_games={sh_games}")
+        log_func(f"[V13.2.26-PROB-RESOLVER] gate=CLOSED reason=INSUFFICIENT_PHYSICAL_GAMES selection_games={sel_games} shadow_games={sh_games}")
         return out
 
     best=None
@@ -23401,7 +23492,7 @@ def _v13224_fit_probability_resolver(y, core_cal, base, market_sel, market_shado
         if best is None or rank<best["rank"]: best=rec
     if best is None:
         out["status"]="NO_NESTED_OOF_CANDIDATE"
-        log_func("[V13.2.25-PROB-RESOLVER] gate=CLOSED reason=NO_NESTED_OOF_CANDIDATE")
+        log_func("[V13.2.26-PROB-RESOLVER] gate=CLOSED reason=NO_NESTED_OOF_CANDIDATE")
         return out
 
     try:
@@ -23410,7 +23501,7 @@ def _v13224_fit_probability_resolver(y, core_cal, base, market_sel, market_shado
         shpred=np.full(len(yy),np.nan,dtype=float); shpred[finite_sh]=_v13224_apply_anchored_resolver(core[finite_sh],Xsh.loc[finite_sh,feat],a,coef,feat)
     except Exception as e:
         out.update({"status":"FINAL_FIT_ERROR","error":f"{type(e).__name__}:{e}"})
-        log_func(f"[V13.2.25-PROB-RESOLVER] gate=CLOSED reason=FINAL_FIT_ERROR error={e}")
+        log_func(f"[V13.2.26-PROB-RESOLVER] gate=CLOSED reason=FINAL_FIT_ERROR error={e}")
         return out
 
     shmet=_ncaaf_v131_calibration_metrics(yy[finite_sh],shpred[finite_sh],w[finite_sh])
@@ -23429,7 +23520,7 @@ def _v13224_fit_probability_resolver(y, core_cal, base, market_sel, market_shado
         "fold_records":best["fold_records"],"coefficients":coef,"intercept":float(a),
     })
     log_func(
-        f"[V13.2.25-PROB-RESOLVER] gate={'PASS' if gate else 'CLOSED'} core_coef=1.000 C={best['C']:.3f} selection_games={sel_games} shadow_games={sh_games} "
+        f"[V13.2.26-PROB-RESOLVER] gate={'PASS' if gate else 'CLOSED'} core_coef=1.000 C={best['C']:.3f} selection_games={sel_games} shadow_games={sh_games} "
         f"selection_ll={sel_ll:+.6f} selection_br={sel_br:+.6f} shadow_ll={sh_ll:+.6f} shadow_br={sh_br:+.6f} "
         f"selection_cal={sel_cal} shadow_cal={sh_cal} positive_folds={pf}/{vf} intercept={a:+.4f} coefficients={coef} duplicate_combined_rule=REMOVED"
     )
@@ -23475,10 +23566,8 @@ def _v13224_game_bet_candidates(rows,y,p,mask,groups,cutoff_h=1.0):
         hmin=float(np.nanmin(hz[ix])); ix=ix[hz[ix]<=hmin+0.25+1e-12]
         if not len(ix): continue
         j=int(ix[np.nanargmax(ev[ix])])
-        season=np.nan
-        if "Season" in d.columns:
-            try: season=float(pd.to_numeric(d.iloc[j]["Season"],errors="coerce"))
-            except Exception: pass
+        _season_arr=_v13226_infer_season(d)
+        season=float(_season_arr[j]) if len(_season_arr)>j and np.isfinite(_season_arr[j]) else np.nan
         profit=float(payout[j] if yy[j]==1 else -1.0)
         recs.append({"game":str(game),"row":j,"y":int(yy[j]),"p":float(pp[j]),"odds":float(odds[j]),"edge":float(edge[j]),"ev":float(ev[j]),"profit":profit,"horizon_h":float(hz[j]),"staleness_h":float(max(0,hz[j]-cutoff_h)),"season":season,"game_time":game_time.iloc[j] if len(game_time)>j else pd.NaT})
     return pd.DataFrame(recs)
@@ -23514,7 +23603,7 @@ def _v13224_fit_bet_advice_policy(rows,y,selection_prob,shadow_prob,select_mask,
     ledger=_v13224_game_bet_candidates(rows,y,pall,union,groups,cutoff_h=_promotion_latest_cutoff_hours())
     out={"version":V13224_BET_POLICY_VERSION,"bet_gate_pass":False,"lean_gate_pass":False,"status":"UNVALIDATED","edge_threshold":0.020,"min_ev":0.0,"ledger_candidates":int(len(ledger)),"cutoff_hours":float(_promotion_latest_cutoff_hours()),"contract":"ACTUAL_OBSERVED_ODDS__ONE_BET_PER_PHYSICAL_GAME__ALL_OOF_LEDGER__CHRONOLOGICAL_POLICY_DEV_THEN_POLICY_SHADOW__CURRENT_SEASON_MONITORING"}
     if ledger.empty:
-        out["status"]="NO_OOF_LEDGER"; log_func("[V13.2.25-BET-POLICY] bet_gate=CLOSED reason=NO_OOF_LEDGER"); return out
+        out["status"]="NO_OOF_LEDGER"; log_func("[V13.2.26-BET-POLICY] bet_gate=CLOSED reason=NO_OOF_LEDGER"); return out
     led=ledger.copy(); led["game_time"]=pd.to_datetime(led.get("game_time"),errors="coerce",utc=True)
     led=led.sort_values(["game_time","game"],kind="stable",na_position="last").reset_index(drop=True)
     max_season=pd.to_numeric(led.get("season"),errors="coerce").max() if "season" in led.columns else np.nan
@@ -23529,8 +23618,8 @@ def _v13224_fit_bet_advice_policy(rows,y,selection_prob,shadow_prob,select_mask,
     out.update({"ledger_candidates":int(len(led)),"policy_ledger_candidates":int(n),"forward_monitor_candidates":int(len(forward)),"forward_monitor_season":int(max_season) if np.isfinite(max_season) else None,"price_seasons":_price_seasons})
     if n<min_total:
         out.update({"status":"INSUFFICIENT_POLICY_GAMES","selection_candidates":0,"shadow_candidates":0})
-        log_func(f"[V13.2.25-BET-LEDGER] ledger_games={len(led)} policy_prior_season_games={n} forward_monitor={len(forward)} price_seasons={_price_seasons} actual_prices=TRUE synthetic_prices=FALSE latest_season_excluded_from_policy=TRUE")
-        log_func(f"[V13.2.25-BET-POLICY] bet_gate=CLOSED lean_gate=CLOSED reason=INSUFFICIENT_POLICY_GAMES policy_ledger_candidates={n} required={min_total}")
+        log_func(f"[V13.2.26-BET-LEDGER] ledger_games={len(led)} policy_prior_season_games={n} forward_monitor={len(forward)} price_seasons={_price_seasons} actual_prices=TRUE synthetic_prices=FALSE latest_season_excluded_from_policy=TRUE")
+        log_func(f"[V13.2.26-BET-POLICY] bet_gate=CLOSED lean_gate=CLOSED reason=INSUFFICIENT_POLICY_GAMES policy_ledger_candidates={n} required={min_total}")
         return out
     split=int(np.floor(V13224_BET_POLICY_DEV_FRACTION*n))
     split=max(V13224_BET_MIN_SELECTION_BETS,split); split=min(split,n-V13224_BET_MIN_SHADOW_BETS)
@@ -23543,15 +23632,15 @@ def _v13224_fit_bet_advice_policy(rows,y,selection_prob,shadow_prob,select_mask,
             lo=(met.get("roi_ci95") or [np.nan,np.nan])[0]
             choices.append((float(lo) if np.isfinite(lo) else -999.0,float(met.get("roi",-999)),int(met.get("bets",0)),float(th),met))
     if not choices:
-        out["status"]="NO_SELECTION_THRESHOLD"; log_func("[V13.2.25-BET-POLICY] bet_gate=CLOSED lean_gate=CLOSED reason=NO_SELECTION_THRESHOLD"); return out
+        out["status"]="NO_SELECTION_THRESHOLD"; log_func("[V13.2.26-BET-POLICY] bet_gate=CLOSED lean_gate=CLOSED reason=NO_SELECTION_THRESHOLD"); return out
     choices.sort(reverse=True); _,_,_,th,dm=choices[0]; hmtr=_v13224_roi_metrics(sh,th,seed=1322401)
     dev_lo=(dm.get("roi_ci95") or [np.nan,np.nan])[0]; sh_lo=(hmtr.get("roi_ci95") or [np.nan,np.nan])[0]
     lean=bool(probability_gate_pass and dm.get("bets",0)>=V13224_BET_MIN_SELECTION_BETS and hmtr.get("bets",0)>=V13224_BET_MIN_SHADOW_BETS and dm.get("roi",-1)>0 and hmtr.get("roi",-1)>0)
     bet=bool(lean and np.isfinite(dev_lo) and np.isfinite(sh_lo) and dev_lo>0 and sh_lo>0)
     fwd=_v13224_roi_metrics(forward,th,seed=1322402) if not forward.empty else {}
     out.update({"edge_threshold":float(th),"selection_metrics":dm,"shadow_metrics":hmtr,"forward_monitor_metrics":fwd,"lean_gate_pass":lean,"bet_gate_pass":bet,"status":"VALIDATED_BET" if bet else ("PROMISING_LEAN" if lean else "UNVALIDATED"),"probability_gate_pass":bool(probability_gate_pass),"threshold_candidates":[{"threshold":x[3],"metrics":x[4]} for x in choices]})
-    log_func(f"[V13.2.25-BET-LEDGER] ledger_games={len(led)} policy_prior_season_games={n} policy_dev={len(dev)} policy_shadow={len(sh)} forward_monitor={len(forward)} price_seasons={_price_seasons} actual_prices=TRUE synthetic_prices=FALSE latest_season_excluded_from_policy=TRUE")
-    log_func(f"[V13.2.25-BET-POLICY] bet_gate={'PASS' if bet else 'CLOSED'} lean_gate={'PASS' if lean else 'CLOSED'} status={out['status']} threshold={th:.3f} development_bets={dm.get('bets',0)} development_roi={dm.get('roi',np.nan):+.3f} development_ci={dm.get('roi_ci95')} shadow_bets={hmtr.get('bets',0)} shadow_roi={hmtr.get('roi',np.nan):+.3f} shadow_ci={hmtr.get('roi_ci95')} forward_roi={fwd.get('roi',np.nan) if isinstance(fwd,dict) else np.nan}")
+    log_func(f"[V13.2.26-BET-LEDGER] ledger_games={len(led)} policy_prior_season_games={n} policy_dev={len(dev)} policy_shadow={len(sh)} forward_monitor={len(forward)} price_seasons={_price_seasons} actual_prices=TRUE synthetic_prices=FALSE latest_season_excluded_from_policy=TRUE")
+    log_func(f"[V13.2.26-BET-POLICY] bet_gate={'PASS' if bet else 'CLOSED'} lean_gate={'PASS' if lean else 'CLOSED'} status={out['status']} threshold={th:.3f} development_bets={dm.get('bets',0)} development_roi={dm.get('roi',np.nan):+.3f} development_ci={dm.get('roi_ci95')} shadow_bets={hmtr.get('bets',0)} shadow_roi={hmtr.get('roi',np.nan):+.3f} shadow_ci={hmtr.get('roi_ci95')} forward_roi={fwd.get('roi',np.nan) if isinstance(fwd,dict) else np.nan}")
     return out
 
 def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X_train: pd.DataFrame,
@@ -23932,7 +24021,7 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
         log_func=log_func,component_any=_component_any_precal,groups=_spec_groups,folds=folds
     )
 
-    # V13.2.25: the additive stack has repeatedly found useful signals while
+    # V13.2.26: the additive stack has repeatedly found useful signals while
     # failing calibration as a final probability transform.  Fit a small, strongly
     # regularized resolver on expert-level OOF deltas only.  Pathi and Big Al stay
     # interpretable individual rule engines; this layer only learns how much their
@@ -23953,7 +24042,7 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
     _bigal_sel=_family_prob_from_rule_detail(_rule_oof_detail,"BigAl",market_sel)
     _bigal_shadow=_family_prob_from_rule_detail(_rule_shadow_detail,"BigAl",market_shadow)
     _resolver_art=_v13224_fit_probability_resolver(
-        y,_resolver_core_cal,base,market_sel,market_shadow,
+        train_rows,y,_resolver_core_cal,base,market_sel,market_shadow,
         _pathi_sel,_pathi_shadow,_bigal_sel,_bigal_shadow,
         select_mask,shadow_mask,folds,sw_spec,_spec_groups,log_func=log_func
     )
@@ -24022,10 +24111,21 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
     artifact["full_stack_shadow_brier_gain"]=_full_sh_br
     artifact["full_stack_reason_codes"]=list(_full_stack_reason_codes)
     artifact["probability_resolver"]=_resolver_art
-    artifact["probability_authority_route"]=_authority_route
     artifact["additive_stack_fallback_gate_pass"]=bool(_component_any and _full_stack_activation_safe)
     _policy_sel=np.asarray(_resolver_sel_pred if _resolver_active else (_stack_sel_final if (_component_any and _full_stack_activation_safe) else base),dtype=float)
     _policy_sh=np.asarray(_resolver_sh_pred if _resolver_active else (_stack_shadow_final if (_component_any and _full_stack_activation_safe) else base),dtype=float)
+    _decision_map=_v13226_fit_decision_probability_map(
+        train_rows,y,_policy_sel,_policy_sh,select_mask,shadow_mask,_spec_groups,sw_spec,log_func=log_func
+    )
+    _decision_active=bool((_decision_map or {}).get("gate_pass",False))
+    if _decision_active:
+        _dscale=float((_decision_map or {}).get("active_scale",1.0) or 1.0)
+        _policy_sel=_v13226_apply_decision_map(_policy_sel,_dscale)
+        _policy_sh=_v13226_apply_decision_map(_policy_sh,_dscale)
+        _authority_route=("DECISION_GRAIN_MAP+"+_authority_route) if _authority_route!="CORE_ONLY" else "DECISION_GRAIN_MAP"
+    artifact["decision_probability_map"]=_decision_map
+    artifact["probability_authority_route"]=_authority_route
+    _overlay_any=bool(_overlay_any or _decision_active)
     _bet_policy=_v13224_fit_bet_advice_policy(
         train_rows,y,_policy_sel,_policy_sh,select_mask,shadow_mask,_spec_groups,
         probability_gate_pass=bool(np.isfinite(_full_base_sel.get("logloss",np.nan)) and np.isfinite(_full_base_sh.get("logloss",np.nan))),
@@ -24064,7 +24164,7 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
 
 
 def _ncaaf_v13_predict_specialist_overlays(rows: pd.DataFrame, base_prob, overlay: dict, maturity=None, core_calibrated_prob=None):
-    """V13.2.25 production-parity probability resolver.
+    """V13.2.26 production-parity probability resolver.
 
     Raw Pathi/BigAl rule engines remain independently interpretable.  When the
     resolver earned chronological-selection + disjoint-shadow authority, it learns
@@ -24126,7 +24226,7 @@ def _ncaaf_v13_predict_specialist_overlays(rows: pd.DataFrame, base_prob, overla
             else:
                 # Backward-compatible replay only for older saved resolver artifacts.
                 Xr=pd.DataFrame(index=np.arange(n))
-                raise ValueError("legacy resolver model path unavailable in active V13.2.25 training route")
+                raise ValueError("legacy resolver model path unavailable in active V13.2.26 training route")
             route="PROBABILITY_RESOLVER"
         except Exception as e:
             resolver_error=f"{type(e).__name__}:{e}"
@@ -24139,6 +24239,13 @@ def _ncaaf_v13_predict_specialist_overlays(rows: pd.DataFrame, base_prob, overla
     elif additive_allowed:
         t=float(((overlay.get("post_stack_calibration") or {}).get("temperature",1.0)) or 1.0)
         final=_ncaaf_v13_apply_temperature(combined_prob,t); route="ADDITIVE_STACK"
+
+    # Final betting-decision probability map. It is trained/validated on exactly one
+    # latest-as-of-T1h decision per physical game and preserves side complementarity.
+    dmap=overlay.get("decision_probability_map") or {}
+    if bool(dmap.get("gate_pass",False)):
+        final=_v13226_apply_decision_map(final,float(dmap.get("active_scale",1.0) or 1.0))
+        route=("DECISION_GRAIN_MAP+"+route) if route!="CORE_ONLY" else "DECISION_GRAIN_MAP"
 
     # Component diagnostics. Contributions here describe each expert opinion before
     # the resolver; final authority is identified explicitly by authority_route.
@@ -24160,15 +24267,15 @@ def _ncaaf_v13_predict_specialist_overlays(rows: pd.DataFrame, base_prob, overla
     else:
         t=1.0; pretemp=np.asarray(combined_prob,dtype=float); temp_contrib=np.zeros(n,dtype=float); cal_active=False
     details["_resolver"]={
-        "active":np.full(n,route=="PROBABILITY_RESOLVER",dtype=np.int8),
+        "active":np.full(n,"PROBABILITY_RESOLVER" in route,dtype=np.int8),
         "prob":np.asarray(final,dtype=float),"route":route,"error":resolver_error,
         "coefficients":dict(resolver.get("coefficients") or {}),"selected_C":resolver.get("selected_C"),
     }
     details["_calibration"]={"temperature":t,"pretemperature_prob":pretemp,"temperature_contribution":temp_contrib,"active":np.full(n,cal_active,dtype=np.int8)}
     info.update({
         "gate_pass":bool(route!="CORE_ONLY" and not route.startswith("CORE_ONLY_")),
-        "mode":"V13_2_25_ANCHORED_EDGE_PROBABILITY_RESOLVER","authority_route":route,
-        "probability_resolver_active":bool(route=="PROBABILITY_RESOLVER"),"resolver_error":resolver_error,
+        "mode":"V13_2_26_ANCHORED_EDGE_PROBABILITY_RESOLVER","authority_route":route,
+        "probability_resolver_active":bool("PROBABILITY_RESOLVER" in route),"resolver_error":resolver_error,
         "family_probs":family_probs,"contributions":contributions,"weights":weights,"regimes":regimes,
         "centers":centers,"residual_details":details,"rule_experts":rule_engine.get("selected_experts") or [],
         "temperature":t,"pretemperature_prob":pretemp,"temperature_contribution":temp_contrib,
@@ -24307,6 +24414,7 @@ def _v13210_holdout_component_ladder(rows: pd.DataFrame, y, raw_core, bundle: di
         "bigal":bool((big_engine or {}).get("gate_pass",False)),
         "pathi":bool((pathi_engine or {}).get("gate_pass",False)),
         "probability_resolver":bool((overlay.get("probability_resolver") or {}).get("gate_pass",False)),
+        "decision_probability_map":bool((overlay.get("decision_probability_map") or {}).get("gate_pass",False)),
         "additive_stack_fallback":bool(overlay.get("additive_stack_fallback_gate_pass",False)),
         "bet_policy":str((overlay.get("bet_advice_policy") or {}).get("status","UNAVAILABLE")),
         "full_specialist":bool(overlay.get("final_gate_pass",False)),
@@ -24376,8 +24484,8 @@ def _ncaaf_v13_compare_v12_holdout(hold_rows: pd.DataFrame, y_hold, p_v12, bundl
         result={"matched_rows":int(matched.sum()),"matched_games":int(matched_games),"match_rate":match_rate,
                 "coverage_gate_pass":coverage_ok,"coverage_by_season":_coverage,
                 "status":"INSUFFICIENT","promotion_gate_pass":False}
-        log_func(f"[V13.2.25-CORE-RECIPE] status=INSUFFICIENT matched_rows={int(matched.sum())}/{len(d)} "
-                 f"match_rate={match_rate:.1%} matched_physical_games={matched_games} final_recipe=V13_2_25")
+        log_func(f"[V13.2.26-CORE-RECIPE] status=INSUFFICIENT matched_rows={int(matched.sum())}/{len(d)} "
+                 f"match_rate={match_rate:.1%} matched_physical_games={matched_games} final_recipe=V13_2_26")
         return result
 
     m12=_ncaaf_v13_weighted_metrics(yy[matched],p12[matched],phys[matched])
@@ -24430,7 +24538,7 @@ def _ncaaf_v13_compare_v12_holdout(hold_rows: pd.DataFrame, y_hold, p_v12, bundl
         except Exception:
             market_met=None
 
-    log_func(f"[V13.2.25-CORE-RECIPE] status=DEVELOPMENT_ONLY comparator={comparator_name} final_recipe=V13_2_25 "
+    log_func(f"[V13.2.26-CORE-RECIPE] status=DEVELOPMENT_ONLY comparator={comparator_name} final_recipe=V13_2_26 "
              f"matched_rows={m13['n']} matched_physical_games={m13['games']} match_rate={match_rate:.1%} weighting=EQUAL_PHYSICAL_GAME "
              f"comparator_auc={m12['auc']:.4f} v13_raw_core_auc={mb['auc']:.4f} v13_core_auc={mc['auc']:.4f} v13_final_auc={m13['auc']:.4f} "
              f"comparator_ll={m12['logloss']:.6f} v13_ll={m13['logloss']:.6f} ll_improvement={ll_gain:+.6f} "
@@ -25922,7 +26030,7 @@ def fit_ncaaf_v13_value_architecture(log_func=print):
     fundamental=_ncaaf_v13_build_fundamental(raw,bq=bq,log_func=log_func)
     _fundamental_available=isinstance(fundamental,dict)
     if not _fundamental_available:
-        # V13.2.25 independent-lane contract: a weak Statistical/Fundamental expert
+        # V13.2.26 independent-lane contract: a weak Statistical/Fundamental expert
         # earns zero authority, but it cannot abort Core, Market, Pathi, Big Al,
         # the anchored probability resolver, the bet ledger, or Champion testing.
         fundamental={
@@ -25934,9 +26042,9 @@ def fit_ncaaf_v13_value_architecture(log_func=print):
             "current_season_state_loaded":False,"primary_edge_target":"ACTUAL_MINUS_MARKET",
             "raw_result_lane":"AUXILIARY_ONLY",
         }
-        log_func("[V13.2.25-EXPERT-LANE] lane=Fundamental gate=CLOSED authority=0 architecture_continues=TRUE")
+        log_func("[V13.2.26-EXPERT-LANE] lane=Fundamental gate=CLOSED authority=0 architecture_continues=TRUE")
     else:
-        log_func(f"[V13.2.25-EXPERT-LANE] lane=Fundamental gate=AVAILABLE spread_lane={bool(fundamental.get('spread_lane_enabled',True))} total_lane={bool(fundamental.get('total_lane_enabled',True))} architecture_continues=TRUE")
+        log_func(f"[V13.2.26-EXPERT-LANE] lane=Fundamental gate=AVAILABLE spread_lane={bool(fundamental.get('spread_lane_enabled',True))} total_lane={bool(fundamental.get('total_lane_enabled',True))} architecture_continues=TRUE")
     snaps=_ncaaf_v13_fetch_spread_snapshots(log_func=log_func)
     source_contract=dict(getattr(snaps,"attrs",{}).get("v13_market_source",{})) if isinstance(snaps,pd.DataFrame) else {}
     _mmi_authoritative_registry=_v13214_build_mmi_snapshot_registry(snaps,sharp_books=SHARP_BOOKS,log_func=log_func,source_name="AUTHORITATIVE_V13_MARKET_SOURCE") if isinstance(snaps,pd.DataFrame) and not snaps.empty else pd.DataFrame()
@@ -25958,7 +26066,7 @@ def fit_ncaaf_v13_value_architecture(log_func=print):
         )
     else:
         fundamental_cover=None; cover=None; stability_research={}; production_preview=None
-        log_func("[V13.2.25-EXPERT-LANE] lane=FundamentalResearch status=SKIPPED_ZERO_AUTHORITY architecture_continues=TRUE")
+        log_func("[V13.2.26-EXPERT-LANE] lane=FundamentalResearch status=SKIPPED_ZERO_AUTHORITY architecture_continues=TRUE")
     if isinstance(production_preview,dict) and isinstance(stability_research,dict):
         production_preview["calibration_tables"]=(((stability_research.get("promoted_calibration") or {}).get("calibration_tables")) or {})
         production_preview["calibration_summaries"]=(((stability_research.get("promoted_calibration") or {}).get("summaries")) or {})
@@ -25998,7 +26106,7 @@ def fit_ncaaf_v13_value_architecture(log_func=print):
     }
     _NCAAF_V13_CACHE["bundle"]=bundle
     log_func(f"[V13-CONTRACT] version={NCAAF_V13_VERSION} hotfix={NCAAF_V13_HOTFIX} status={status} shadow_only=FALSE promotion=TRAINING_INTERNAL_READY_PLUS_OUTER_PAIRED_CHAMPION_GATE horizons={list(NCAAF_V13_HORIZONS_HOURS)} primary_edge_target=ACTUAL_MINUS_MARKET raw_result_lane=AUXILIARY_ONLY margin_beta={fundamental.get('margin_edge_beta',0.0):.4f} result_profile_used_in_ev=FALSE current_season_state_loaded={fundamental.get('current_season_state_loaded')}")
-    log_func("[V13.2.25-CODE-CLEANUP] active_probability_path=CORE_PLUS_ANCHORED_RESIDUAL_EXPERTS legacy_meta_authority=EXCLUDED compatibility_replay_helpers=RETAINED resolver_duplicate_signal=REMOVED stale_probability_paths=NO_AUTHORITY cleanup_phase=2")
+    log_func("[V13.2.26-CODE-CLEANUP] active_probability_path=CORE_PLUS_ANCHORED_RESIDUAL_EXPERTS legacy_meta_authority=EXCLUDED compatibility_replay_helpers=RETAINED resolver_duplicate_signal=REMOVED stale_probability_paths=NO_AUTHORITY cleanup_phase=2")
     log_func("[V13.2-ARCHITECTURE] Core=OUTCOME_AUTOfs_PRIMARY CoreCalibration=CROSSFIT Fundamental=MARKET_ERROR_RESIDUAL_GATED Market=FAMILY_RESIDUAL Pathi=INDIVIDUAL_RULE_EXPERTS BigAl=INDIVIDUAL_RULE_EXPERTS ProbabilityResolver=CORE_ANCHORED_INDEPENDENT_DELTAS FinalCalibration=POST_STACK_SAFETY MMI=RESEARCH_ONLY_ZERO_AUTHORITY LegacyMeta=EXCLUDED")
     return bundle
 
@@ -26006,7 +26114,7 @@ def fit_ncaaf_v13_value_architecture(log_func=print):
 def _ncaaf_stat_fit_models_for_rows(df, margin_feature_cols, total_feature_cols, mask, *, target_mode="MARKET_ERROR_RESIDUAL"):
     """Fit the structural Statistical Brain.
 
-    V13.2.25 makes MARKET_ERROR_RESIDUAL the production target:
+    V13.2.26 makes MARKET_ERROR_RESIDUAL the production target:
         margin target = Actual_Margin - Market_Open_Margin
         total target  = Actual_Total  - Market_Open_Total
     Raw-result models are still fit separately as auxiliary context.
@@ -26055,7 +26163,7 @@ def fit_ncaaf_statistical_brain(log_func=print):
     linear_weight=0.75
     target_mode="MARKET_ERROR_RESIDUAL"
 
-    # V13.2.25: qualify features on the MARKET ERROR itself.  The zero column is
+    # V13.2.26: qualify features on the MARKET ERROR itself.  The zero column is
     # the natural market-perfect baseline; accepted features must explain OOS
     # residual points beyond that baseline.  Latest season remains untouched shadow.
     margin_feature_cols, margin_qual = _ncaaf_stat_qualify_features(
@@ -26151,7 +26259,7 @@ def fit_ncaaf_statistical_brain(log_func=print):
 
     bundle={
         "version":NCAAF_STAT_FEATURE_VERSION,
-        "architecture":"v13.2.25_market_error_primary__raw_result_auxiliary__matchup_target_qualified__serving_training_state_parity__empirical_oof_distribution",
+        "architecture":"v13.2.26_market_error_primary__raw_result_auxiliary__matchup_target_qualified__serving_training_state_parity__empirical_oof_distribution",
         "target_mode":target_mode,
         "candidate_feature_cols":list(candidate_feature_cols),
         "feature_cols":feature_cols,
@@ -34005,6 +34113,43 @@ def train_sharp_model_from_bq(
         # HF3 preserves the pure Outcome AutoFS probability before legacy regime/meta
         # transforms. This is the only Outcome signal allowed into the V13 Core bridge.
         p_outcome_oof_core = np.asarray(p_outcome_oof_train,dtype=np.float64).copy()
+
+        # V13.2.26: build REAL later-fold Core predictions for the specialist/resolver
+        # shadow. Previous builds passed selection OOF into V13 but left most supplied
+        # shadow rows NaN, starving Pathi/BigAl/resolver validation (8 games in .25).
+        # Each shadow row is predicted by a Core model trained strictly before that
+        # fold, using the already-frozen blend/calibration recipe selected upstream.
+        try:
+            if str(sport).upper().strip()=="NCAAF" and _sys_norm_market(market)=="spreads":
+                _shadow_plan=list(_v13_spec_shadow if "_v13_spec_shadow" in locals() and len(_v13_spec_shadow) else shadow_folds_outcome)
+                _shadow_rows_written=0; _shadow_groups_written=set()
+                for _sfi,(_str,_sva) in enumerate(_shadow_plan):
+                    _str=np.asarray(_str,dtype=int); _sva=np.asarray(_sva,dtype=int)
+                    if len(_str)<50 or len(_sva)<1 or np.unique(y_train[_str]).size<2: continue
+                    _ma=XGBClassifier(**{**base_kwargs,**best_auc_params,"n_estimators":int(FINAL_NTREES_AUC),"n_jobs":1})
+                    _ma.fit(X_train[_str],y_train[_str],sample_weight=w_train_outcome[_str],verbose=False)
+                    _pa,_=pos_proba_safe(_ma,X_train[_sva],positive=1); _pa=_clip01(_pa,eps)
+                    if RUN_LOGLOSS:
+                        _ml=XGBClassifier(**{**base_kwargs,**best_ll_params,"n_estimators":int(FINAL_NTREES_LL),"n_jobs":1})
+                        _ml.fit(X_train[_str],y_train[_str],sample_weight=w_train_outcome[_str],verbose=False)
+                        _pl,_=pos_proba_safe(_ml,X_train[_sva],positive=1); _pl=_clip01(_pl,eps)
+                        _zz=float(best_w)*_logit(_pl,eps)+(1.0-float(best_w))*_logit(_pa,eps)
+                        _pr=_clip01(_sigmoid(_zz),eps)
+                    else:
+                        _pr=_pa
+                    if flip_flag: _pr=1.0-_pr
+                    _pr=np.asarray(_apply_cal(cal_name,cal_obj,_pr),dtype=float)
+                    _pr=np.clip(_pr,CLIP,1.0-CLIP)
+                    p_outcome_oof_core[_sva]=_pr
+                    _shadow_rows_written+=int(np.isfinite(_pr).sum())
+                    try:
+                        _gg=(train_df["Merge_Key_Short"].astype(str).str.lower().str.strip().to_numpy(dtype=object) if "Merge_Key_Short" in train_df.columns else np.asarray(g_train,dtype=object))
+                        _shadow_groups_written.update(_gg[_sva].tolist())
+                    except Exception: pass
+                print(f"[V13.2.26-CORE-SHADOW-OOF] folds={len(_shadow_plan)} rows={_shadow_rows_written} physical_games={len(_shadow_groups_written)} source=STRICT_PRE_FOLD_CORE_BLEND_CALIBRATION outer_holdout_used=FALSE")
+        except Exception as _v13226_shadow_err:
+            print(f"[V13.2.26-CORE-SHADOW-OOF] ERROR fail_closed={type(_v13226_shadow_err).__name__}:{_v13226_shadow_err}")
+
         p_train_outcome_core = np.asarray(p_cal_tr,dtype=np.float64).copy()
         p_hold_outcome_core = np.asarray(p_cal_ho,dtype=np.float64).copy()
         p_full_outcome_core = np.asarray(p_cal_fu,dtype=np.float64).copy()
@@ -34082,7 +34227,7 @@ def train_sharp_model_from_bq(
                 _resolver_status=((_spec_exec.get("probability_resolver") or {}).get("status") or ("PASS" if (_spec_exec.get("probability_resolver") or {}).get("gate_pass") else "CLOSED"))
                 _bet_status=((_spec_exec.get("bet_advice_policy") or {}).get("status") or "UNAVAILABLE")
                 print(
-                    f"[V13.2.25-EXECUTION-AUDIT] gate={'PASS' if _execution_ok else 'CLOSED'} stages={_exec_stages} "
+                    f"[V13.2.26-EXECUTION-AUDIT] gate={'PASS' if _execution_ok else 'CLOSED'} stages={_exec_stages} "
                     f"fundamental_gate={bool(_fund_exec.get('gate_pass',False))} specialist_gate={bool(_spec_exec.get('final_gate_pass',False))} "
                     f"resolver_status={_resolver_status} bet_policy_status={_bet_status} "
                     f"contract=EVERY_EXPERT_LANE_EXECUTES_OR_FAILS_CLOSED_INDEPENDENTLY"
@@ -34110,7 +34255,7 @@ def train_sharp_model_from_bq(
                     "contract":"TRAINING_OOF_AND_SHADOW_ONLY__INDEPENDENT_EXPERT_FAIL_CLOSED__ALL_REQUIRED_STAGES_EXECUTED__OUTER_HOLDOUT_UNUSED_FOR_RECIPE_SELECTION",
                 }
                 print(
-                    f"[V13.2.25-INTERNAL-READY] gate={'PASS' if _v131_ready else 'CLOSED'} "
+                    f"[V13.2.26-INTERNAL-READY] gate={'PASS' if _v131_ready else 'CLOSED'} "
                     f"core_method={_core_art.get('active_method','identity')} execution_gate={_execution_ok} "
                     f"fundamental_gate={bool(_fund_exec.get('gate_pass',False))} "
                     f"specialist_gate={bool(_spec_exec.get('final_gate_pass',False))}"
@@ -34120,7 +34265,7 @@ def train_sharp_model_from_bq(
                 _fund_art = (ncaaf_v13_value_architecture.get("fundamental_overlay") or {})
                 _fund_regs = [str(k) for k,v in ((_fund_art.get("residual_profiles") or {}).items()) if isinstance(v,dict) and v.get("gate_pass",False)]
                 print(
-                    f"[V13.2.25-STAT-STATUS] legacy_stat_rows={_stat_rows} legacy_stat_spread_trust={_stat_trust:.3f} "
+                    f"[V13.2.26-STAT-STATUS] legacy_stat_rows={_stat_rows} legacy_stat_spread_trust={_stat_trust:.3f} "
                     f"legacy_stat_runtime_authority={'ON' if _stat_trust>=0.03 else 'OFF'} "
                     f"v13_fundamental_gate={'PASS' if bool(_fund_art.get('gate_pass',False)) else 'CLOSED'} "
                     f"v13_fundamental_active_regimes={_fund_regs} "
@@ -35035,13 +35180,13 @@ def train_sharp_model_from_bq(
                     V13_DIAGNOSTIC_PROB_TRAIN=_v13diag_tr.copy(); V13_DIAGNOSTIC_PROB_HOLD=_v13diag_ho.copy()
                     V13_DIAGNOSTIC_TRAIN_INFO=_v13diag_tr_info if isinstance(_v13diag_tr_info,dict) else {}
                     V13_DIAGNOSTIC_HOLD_INFO=_v13diag_ho_info if isinstance(_v13diag_ho_info,dict) else {}
-                    V13_DIAGNOSTIC_SOURCE="V13_2_25_DIAGNOSTIC" if not _v13217_internal_ready else "V13_2_25_CANDIDATE"
+                    V13_DIAGNOSTIC_SOURCE="V13_2_26_DIAGNOSTIC" if not _v13217_internal_ready else "V13_2_26_CANDIDATE"
                     print(f"[V13-DIAGNOSTIC-PROB-CONTRACT] status=READY source={V13_DIAGNOSTIC_SOURCE} internal_ready={_v13217_internal_ready} train_rows={int(np.isfinite(_v13diag_tr).sum())}/{len(_v13diag_tr)} hold_rows={int(np.isfinite(_v13diag_ho).sum())}/{len(_v13diag_ho)} deployed_or_staged={_v13217_internal_ready}")
                     if _v13217_internal_ready:
                         PRODUCTION_PROB_TRAIN_CANDIDATE=_v13diag_tr.copy(); PRODUCTION_PROB_HOLD_CANDIDATE=_v13diag_ho.copy()
                         PRODUCTION_PROB_TRAIN_INFO=V13_DIAGNOSTIC_TRAIN_INFO; PRODUCTION_PROB_HOLD_INFO=V13_DIAGNOSTIC_HOLD_INFO
-                        PRODUCTION_PROBABILITY_SOURCE_CANDIDATE="V13_2_25"
-                        print(f"[PRODUCTION-PROB-CONTRACT] status=READY source=V13_2_25 train_rows={int(np.isfinite(_v13diag_tr).sum())}/{len(_v13diag_tr)} hold_rows={int(np.isfinite(_v13diag_ho).sum())}/{len(_v13diag_ho)} single_canonical_array=TRUE")
+                        PRODUCTION_PROBABILITY_SOURCE_CANDIDATE="V13_2_26"
+                        print(f"[PRODUCTION-PROB-CONTRACT] status=READY source=V13_2_26 train_rows={int(np.isfinite(_v13diag_tr).sum())}/{len(_v13diag_tr)} hold_rows={int(np.isfinite(_v13diag_ho).sum())}/{len(_v13diag_ho)} single_canonical_array=TRUE")
                     else:
                         print("[PRODUCTION-PROB-CONTRACT] status=FALLBACK source=LEGACY_META_DIAGNOSTIC reason=V13_INTERNAL_TRAINING_GATE diagnostic_v13_available=TRUE")
                 else:
@@ -35273,12 +35418,12 @@ def train_sharp_model_from_bq(
         if _v13_ui_ready:
             _display_prob=np.asarray(V13_DIAGNOSTIC_PROB_HOLD,dtype=float)
             _display_source=V13_DIAGNOSTIC_SOURCE
-            _display_deployed=bool(_v13217_internal_ready and PRODUCTION_PROBABILITY_SOURCE_CANDIDATE=="V13_2_25")
+            _display_deployed=bool(_v13217_internal_ready and PRODUCTION_PROBABILITY_SOURCE_CANDIDATE=="V13_2_26")
             if _display_deployed:
-                st.markdown("### 🎯 V13.2.25 CANDIDATE PRODUCTION PROBABILITY — HOLDOUT")
+                st.markdown("### 🎯 V13.2.26 CANDIDATE PRODUCTION PROBABILITY — HOLDOUT")
                 st.caption("This is the exact V13 probability staged for the outer Champion comparison. Predicted probability and actual ATS hit rate use the same array.")
             else:
-                st.markdown("### 🔬 V13.2.25 DIAGNOSTIC PROBABILITY — HOLDOUT — NOT DEPLOYED")
+                st.markdown("### 🔬 V13.2.26 DIAGNOSTIC PROBABILITY — HOLDOUT — NOT DEPLOYED")
                 st.caption("This is the exact V13 recipe for diagnostic evaluation. V13 failed an internal readiness gate, so this probability is NOT staged for deployment or promotion. The actual fallback promotion array is shown separately below.")
         else:
             _display_prob=np.asarray(PRODUCTION_PROB_HOLD_CANDIDATE,dtype=float)
@@ -35345,7 +35490,7 @@ def train_sharp_model_from_bq(
         # The actual promotion/deployment candidate remains independently fail-closed.
         # This is the object that artifact metrics and parity checks must follow.
         _prod_cal_quality=_v13215_production_calibration_bin_quality(y_hold.astype(int),PRODUCTION_PROB_HOLD_CANDIDATE,_prod_phys)
-        if PRODUCTION_PROBABILITY_SOURCE_CANDIDATE != "V13_2_25":
+        if PRODUCTION_PROBABILITY_SOURCE_CANDIDATE != "V13_2_26":
             st.markdown("#### ACTUAL PROMOTION/DEPLOYMENT ARRAY — FALLBACK LEGACY META (NOT V13)")
             st.caption("V13 is diagnostic-only in this run. The following fallback probability is the exact array staged for the promotion/deployment contract.")
             _active_bins=list((_prod_cal_quality or {}).get("bins") or [])
