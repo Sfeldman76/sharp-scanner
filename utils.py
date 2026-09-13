@@ -8401,7 +8401,7 @@ def attach_fair_value_bet_pass_fields(df: pd.DataFrame) -> pd.DataFrame:
                 return v.reindex(idx)
         return pd.Series(default, index=idx, dtype="float64")
 
-    # V13.2.17 canonical downstream contract: if Production_Prob exists, every
+    # V13.2.18 canonical downstream contract: if Production_Prob exists, every
     # EV/fair-odds/BET decision consumes it directly. Model_Sharp_Win_Prob is a
     # mirrored compatibility field and must not become a second probability path.
     if "Production_Prob" in out.columns and pd.to_numeric(out["Production_Prob"],errors="coerce").notna().any():
@@ -10329,7 +10329,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_17'
+                            _source[_use]='V13_2_18'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -11133,7 +11133,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-12-v13.2.17-core-handicapper-isolated-feature-state"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-12-v13.2.18-core-handicapper-isolated-feature-state"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -14864,9 +14864,9 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.6-observed-stats-unshrunk-latent-
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-12-v13.2.17-calibration-mmi-rule-authority"
-NCAAF_V13_HOTFIX = "V13_2_17__RAW_ASOF_MMI__STRICT_POSTSTACK_CAL__RULE_AUTHORITY__GAME_CAL_UI"
-# V13.2.17 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
+NCAAF_V13_VERSION = "2026-09-12-v13.2.18-physical-game-promotion-pairing"
+NCAAF_V13_HOTFIX = "V13_2_18__PHYSICAL_GAME_PROMOTION__RAW_ASOF_MMI__STRICT_POSTSTACK_CAL__RULE_AUTHORITY__GAME_CAL_UI"
+# V13.2.18 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
 NCAAF_V13_MIN_VALID_GAMES = 100
