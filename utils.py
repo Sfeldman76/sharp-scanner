@@ -3131,7 +3131,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     logging.info(f"📦 Final row count to upload after filtering and dedup: {len(df)}")
     df = coerce_for_bq(df)
     for _c in [c for c in _pathi_bigal_optional_cols(df) if c in df.columns]:
-        if _c in {"System_Signals_Text", "System_Feature_Version", "Fair_Line_Source", "Bet_Recommendation"}:
+        if _c in {"System_Signals_Text", "System_Feature_Version", "Fair_Line_Source", "Bet_Recommendation", "Bet_Policy_Source", "V13_Probability_Authority_Route", "V13_Bet_Policy_Status", "V13_Bet_Policy_Version"}:
             df[_c] = df[_c].astype("string")
         else:
             df[_c] = pd.to_numeric(df[_c], errors="coerce")
@@ -8381,111 +8381,78 @@ def _merge_feature_overwrite(left: pd.DataFrame, right: pd.DataFrame, on, how="l
 
 # V11.5.5.4: missing-column-safe fair-value/post-model layer
 def attach_fair_value_bet_pass_fields(df: pd.DataFrame) -> pd.DataFrame:
-    """Post-model value layer: fair price/line, EV, and transparent BET/PASS policy.
+    """Post-model fair value + betting advice.
 
-    This does not leak into training targets.  It consumes the calibrated model
-    probability produced by the saved artifact and the current offered odds.
+    V13.2.23 uses a threshold learned on chronological OOF bets and independently
+    checked on a later shadow lane.  A row can be called BET only when that policy
+    earned VALIDATED_BET authority.  PROMISING_LEAN may emit LEAN.  Old artifacts
+    and non-V13 markets retain the legacy transparent heuristic for compatibility.
     """
-    if df is None or df.empty:
-        return df
-    out = df.copy()
-    idx = out.index
-
-    # Always return an index-aligned Series, even when an optional column is absent.
-    # DataFrame.get(..., scalar_default) returns a scalar; downstream .fillna/.gt/.loc
-    # calls then fail (e.g. System_Side_Consensus_Count missing on some scored frames).
+    if df is None or df.empty: return df
+    out=df.copy(); idx=out.index
     def _num_series(name: str, default=np.nan) -> pd.Series:
         if name in out.columns:
-            v = pd.to_numeric(out[name], errors="coerce")
-            if isinstance(v, pd.Series):
-                return v.reindex(idx)
-        return pd.Series(default, index=idx, dtype="float64")
+            v=pd.to_numeric(out[name],errors="coerce")
+            if isinstance(v,pd.Series): return v.reindex(idx)
+        return pd.Series(default,index=idx,dtype="float64")
 
-    # V13.2.21 canonical downstream contract: if Production_Prob exists, every
-    # EV/fair-odds/BET decision consumes it directly. Model_Sharp_Win_Prob is a
-    # mirrored compatibility field and must not become a second probability path.
     if "Production_Prob" in out.columns and pd.to_numeric(out["Production_Prob"],errors="coerce").notna().any():
-        p = _num_series("Production_Prob").clip(1e-6, 1-1e-6)
-        _compat=_num_series("Model_Sharp_Win_Prob")
-        _pm=p.notna()&_compat.notna()
-        if _pm.any():
-            _pdiff=float((_compat[_pm]-p[_pm]).abs().max())
-            if np.isfinite(_pdiff) and _pdiff>1e-7:
-                raise RuntimeError(f"Production_Prob downstream parity failure: {_pdiff}")
-        out["Model_Sharp_Win_Prob"]=p.astype("float32")
-        out["Model_Confidence"]=p.astype("float32")
-    else:
-        p = _num_series("Model_Sharp_Win_Prob").clip(1e-6, 1-1e-6)
-    odds = _num_series("Odds_Price")
+        p=_num_series("Production_Prob").clip(1e-6,1-1e-6); compat=_num_series("Model_Sharp_Win_Prob")
+        pm=p.notna()&compat.notna()
+        if pm.any():
+            diff=float((compat[pm]-p[pm]).abs().max())
+            if np.isfinite(diff) and diff>1e-7: raise RuntimeError(f"Production_Prob downstream parity failure: {diff}")
+        out["Model_Sharp_Win_Prob"]=p.astype("float32"); out["Model_Confidence"]=p.astype("float32")
+    else: p=_num_series("Model_Sharp_Win_Prob").clip(1e-6,1-1e-6)
+    odds=_num_series("Odds_Price")
+    imp=pd.Series(np.nan,index=idx,dtype="float64"); payout=pd.Series(np.nan,index=idx,dtype="float64")
+    pos=odds.gt(0)&odds.notna(); neg=odds.lt(0)&odds.notna()
+    imp.loc[pos]=100.0/(odds.loc[pos]+100.0); imp.loc[neg]=(-odds.loc[neg])/((-odds.loc[neg])+100.0)
+    payout.loc[pos]=odds.loc[pos]/100.0; payout.loc[neg]=100.0/(-odds.loc[neg])
+    out["Market_Breakeven_Prob"]=imp.astype("float32"); out["Model_Edge_Prob"]=(p-imp).astype("float32")
+    out["Model_EV_Per_Unit"]=(p*payout-(1.0-p)).astype("float32")
 
-    # American market odds -> break-even probability and $1-profit payout.
-    imp = pd.Series(np.nan, index=idx, dtype="float64")
-    pos = odds.gt(0) & odds.notna()
-    neg = odds.lt(0) & odds.notna()
-    imp.loc[pos] = 100.0 / (odds.loc[pos] + 100.0)
-    imp.loc[neg] = (-odds.loc[neg]) / ((-odds.loc[neg]) + 100.0)
-    payout = pd.Series(np.nan, index=idx, dtype="float64")
-    payout.loc[pos] = odds.loc[pos] / 100.0
-    payout.loc[neg] = 100.0 / (-odds.loc[neg])
+    fair_odds=pd.Series(np.nan,index=idx,dtype="float64"); fav=p.ge(.5)&p.notna(); dog=p.lt(.5)&p.notna()
+    fair_odds.loc[fav]=-100.0*p.loc[fav]/(1.0-p.loc[fav]); fair_odds.loc[dog]=100.0*(1.0-p.loc[dog])/p.loc[dog]
+    out["Fair_Odds_American"]=fair_odds.astype("float32")
+    m=out.get("Market",pd.Series("",index=idx)).astype(str).str.lower().str.strip()
+    fair_line=pd.Series(np.nan,index=idx,dtype="float64"); source=pd.Series("model fair odds",index=idx,dtype="object")
+    spread_est=_num_series("Outcome_Model_Spread"); total_est=_num_series("TOT_Proj_Total_Baseline")
+    sm=m.isin(["spread","spreads"])&spread_est.notna(); tm=m.isin(["total","totals"])&total_est.notna(); hm=m.isin(["h2h","moneyline","ml","headtohead"])
+    fair_line.loc[sm]=spread_est.loc[sm]; source.loc[sm]="ratings/model spread"
+    fair_line.loc[tm]=total_est.loc[tm]; source.loc[tm]="model total baseline"
+    fair_line.loc[hm]=fair_odds.loc[hm]; source.loc[hm]="model fair odds"
+    out["Fair_Line"]=fair_line.astype("float32"); out["Fair_Line_Source"]=source
 
-    out["Market_Breakeven_Prob"] = imp.astype("float32")
-    out["Model_Edge_Prob"] = (p - imp).astype("float32")
-    out["Model_EV_Per_Unit"] = (p * payout - (1.0 - p)).astype("float32")
+    # Legacy compatibility hurdle (used only when no trained V13 policy exists).
+    legacy_threshold=pd.Series(.020,index=idx,dtype="float64")
+    sample=_num_series("System_Reliability_Sample_Prior"); shr=_num_series("System_Reliability_Shrunk_HitRate_Prior"); stab=_num_series("System_Reliability_Stability_Score")
+    active=_num_series("System_Side_Consensus_Count",0.0).fillna(0.0).gt(0.0)
+    strong=active&sample.ge(25)&shr.ge(.55)&stab.ge(.60); weak=active&sample.ge(25)&shr.lt(.49)
+    legacy_threshold.loc[strong]=.015; legacy_threshold.loc[weak]=.030
 
-    # Fair American odds implied by model probability.
-    fair_odds = pd.Series(np.nan, index=idx, dtype="float64")
-    fav = p.ge(0.5) & p.notna()
-    dog = p.lt(0.5) & p.notna()
-    fair_odds.loc[fav] = -100.0 * p.loc[fav] / (1.0 - p.loc[fav])
-    fair_odds.loc[dog] = 100.0 * (1.0 - p.loc[dog]) / p.loc[dog]
-    out["Fair_Odds_American"] = fair_odds.astype("float32")
+    status=out.get("V13_Bet_Policy_Status",pd.Series("",index=idx)).astype(str).str.upper().reindex(idx)
+    learned_th=_num_series("V13_Bet_Edge_Threshold")
+    learned_ev=_num_series("V13_Bet_Min_EV",0.0).fillna(0.0)
+    bet_gate=_num_series("V13_Bet_Policy_Bet_Gate",0.0).fillna(0.0).gt(0)
+    lean_gate=_num_series("V13_Bet_Policy_Lean_Gate",0.0).fillna(0.0).gt(0)
+    # Presence of any non-placeholder policy status means this is a new V13 artifact.
+    policy_present=status.notna()&~status.isin(["","NAN","NONE","UNAVAILABLE"])&learned_th.notna()
+    threshold=legacy_threshold.copy(); threshold.loc[policy_present]=learned_th.loc[policy_present]
+    out["Bet_Edge_Threshold"]=threshold.astype("float32")
 
-    m = out.get("Market", pd.Series("", index=idx)).astype(str).str.lower().str.strip()
-    fair_line = pd.Series(np.nan, index=idx, dtype="float64")
-    source = pd.Series("model fair odds", index=idx, dtype="object")
-    # Existing ratings/total components are genuine model estimates; do not invent
-    # a point-spread transform when one is unavailable.
-    spread_est = _num_series("Outcome_Model_Spread")
-    total_est = _num_series("TOT_Proj_Total_Baseline")
-    sm = m.isin(["spread", "spreads"]) & spread_est.notna()
-    tm = m.isin(["total", "totals"]) & total_est.notna()
-    hm = m.isin(["h2h", "moneyline", "ml", "headtohead"])
-    fair_line.loc[sm] = spread_est.loc[sm]
-    source.loc[sm] = "ratings/model spread"
-    fair_line.loc[tm] = total_est.loc[tm]
-    source.loc[tm] = "model total baseline"
-    fair_line.loc[hm] = fair_odds.loc[hm]
-    source.loc[hm] = "model fair odds"
-    out["Fair_Line"] = fair_line.astype("float32")
-    out["Fair_Line_Source"] = source
-
-    # Transparent first-generation decision policy.  Base requirement is at least
-    # +2 percentage points of probability edge and +2 cents EV per $1 risked.
-    # Mature, stable system history can reduce the edge hurdle slightly; weak
-    # decaying system history raises it.  Non-system bets retain the base hurdle.
-    threshold = pd.Series(0.020, index=idx, dtype="float64")
-    sample = _num_series("System_Reliability_Sample_Prior")
-    shr = _num_series("System_Reliability_Shrunk_HitRate_Prior")
-    stab = _num_series("System_Reliability_Stability_Score")
-    active = _num_series("System_Side_Consensus_Count", 0.0).fillna(0.0).gt(0.0)
-    strong = active & sample.ge(25) & shr.ge(0.55) & stab.ge(0.60)
-    weak = active & sample.ge(25) & shr.lt(0.49)
-    threshold.loc[strong] = 0.015
-    threshold.loc[weak] = 0.030
-    out["Bet_Edge_Threshold"] = threshold.astype("float32")
-
-    edge = pd.to_numeric(out["Model_Edge_Prob"], errors="coerce")
-    ev = pd.to_numeric(out["Model_EV_Per_Unit"], errors="coerce")
-    valid = p.notna() & imp.notna() & ev.notna()
-    bet = valid & edge.ge(threshold) & ev.ge(0.020)
-    rec = pd.Series("PASS", index=idx, dtype="object")
-    rec.loc[~valid] = "NO MODEL"
-    rec.loc[bet] = "BET"
-    out["Bet_Recommendation"] = rec
-    # 1.0 means exactly at edge hurdle; >1 means greater margin over hurdle.
-    out["Bet_Value_Score"] = np.where(valid, edge / threshold.replace(0, np.nan), np.nan).astype("float32")
+    edge=pd.to_numeric(out["Model_Edge_Prob"],errors="coerce"); ev=pd.to_numeric(out["Model_EV_Per_Unit"],errors="coerce")
+    valid=p.notna()&imp.notna()&ev.notna(); qualifies=valid&edge.ge(threshold)
+    legacy_bet=(~policy_present)&qualifies&ev.ge(.020)
+    validated_bet=policy_present&bet_gate&qualifies&ev.ge(learned_ev)
+    validated_lean=policy_present&~validated_bet&lean_gate&qualifies&ev.gt(0)
+    rec=pd.Series("PASS",index=idx,dtype="object"); rec.loc[~valid]="NO MODEL"; rec.loc[validated_lean]="LEAN"; rec.loc[legacy_bet|validated_bet]="BET"
+    out["Bet_Recommendation"]=rec
+    src=pd.Series("LEGACY_HEURISTIC",index=idx,dtype="object")
+    src.loc[policy_present]="V13_VALIDATED_POLICY"; src.loc[policy_present&~bet_gate&lean_gate]="V13_PROMISING_LEAN_POLICY"; src.loc[policy_present&~bet_gate&~lean_gate]="V13_UNVALIDATED_POLICY_PASS_ONLY"
+    out["Bet_Policy_Source"]=src
+    out["Bet_Value_Score"]=np.where(valid,edge/threshold.replace(0,np.nan),np.nan).astype("float32")
     return out
-
 
 def apply_blended_sharp_score(
     df,
@@ -10329,7 +10296,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_21'
+                            _source[_use]='V13_2_23'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -11133,7 +11100,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-13-v13.2.21-core-handicapper-isolated-feature-state"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-13-v13.2.23-core-handicapper-isolated-feature-state"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -14531,7 +14498,7 @@ def enrich_bigal_context_from_bq(df_rows: pd.DataFrame) -> pd.DataFrame:
 
 _PATHI_BIGAL_HISTORY_CACHE = {}
 _PATHI_BIGAL_HISTORY_TTL_SECONDS = 20 * 60
-_PATHI_BIGAL_DEFAULT_DAYS_BACK = 1200
+_PATHI_BIGAL_DEFAULT_DAYS_BACK = None  # Production: ALL available seasons; positive value = diagnostic override only.
 
 _PATHI_BIGAL_HISTORY_DESIRED_COLS = [
     "Sport", "Market", "Outcome", "Outcome_Norm", "Bookmaker", "Book",
@@ -14559,7 +14526,10 @@ _PATHI_BIGAL_STATE_PERSIST_COLS = [
     "System_Feature_Version", "System_Signals_Text",
     "Market_Breakeven_Prob", "Model_Edge_Prob", "Model_EV_Per_Unit",
     "Fair_Odds_American", "Fair_Line", "Fair_Line_Source",
-    "Bet_Edge_Threshold", "Bet_Recommendation", "Bet_Value_Score",
+    "Bet_Edge_Threshold", "Bet_Recommendation", "Bet_Value_Score", "Bet_Policy_Source",
+    "V13_Probability_Resolver_Prob", "V13_Probability_Resolver_Active", "V13_Probability_Authority_Route",
+    "V13_Bet_Policy_Status", "V13_Bet_Policy_Version", "V13_Bet_Policy_Bet_Gate", "V13_Bet_Policy_Lean_Gate",
+    "V13_Bet_Edge_Threshold", "V13_Bet_Min_EV",
     "ML_Odds", "Opening_ML_Odds", "ML_Fair_Prob", "Opening_ML_Fair_Prob",
     "Is_ML_Dog", "Is_ML_Favorite", "Opening_Is_ML_Dog",
     "Spread_Value", "Opening_Spread", "Spread_Odds", "Current_Total", "Opening_Total",
@@ -14672,7 +14642,7 @@ def _fetch_bq_table_columns(table_fq: str) -> set[str]:
         return set()
 
 
-def _query_pathi_bigal_history_table(table_fq: str, sport: str, days_back: int) -> pd.DataFrame:
+def _query_pathi_bigal_history_table(table_fq: str, sport: str, days_back: int | None) -> pd.DataFrame:
     cols_present = _fetch_bq_table_columns(table_fq)
     if not cols_present:
         return pd.DataFrame()
@@ -14690,7 +14660,7 @@ def _query_pathi_bigal_history_table(table_fq: str, sport: str, days_back: int) 
     aliases = _system_sport_aliases(sport)
     where = ["UPPER(CAST(Sport AS STRING)) IN UNNEST(@sport_aliases)"]
     params = [bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases)]
-    if time_col:
+    if time_col and days_back is not None and int(days_back) > 0:
         where.append(f"TIMESTAMP({time_col}) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days_back DAY)")
         params.append(bigquery.ScalarQueryParameter("days_back", "INT64", int(days_back)))
     if "SHARP_HIT_BOOL" in cols_present:
@@ -14700,7 +14670,7 @@ def _query_pathi_bigal_history_table(table_fq: str, sport: str, days_back: int) 
     # The state builder ultimately keeps ONE representative row per physical
     # game/market/outcome, preferring a sharp book and then the latest snapshot.
     # Do that collapse in BigQuery so we do not download 5-15 duplicate book
-    # rows for every historical outcome across 1,200 days.
+    # rows for every historical outcome across all available seasons.
     if "Merge_Key_Short" in cols_present and "Snapshot_Timestamp" in cols_present:
         _book_col = "Bookmaker" if "Bookmaker" in cols_present else ("Book" if "Book" in cols_present else None)
         _parts = [
@@ -14720,7 +14690,7 @@ def _query_pathi_bigal_history_table(table_fq: str, sport: str, days_back: int) 
     return bq_client.query(q, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe(create_bqstorage_client=True)
 
 
-def _attach_final_scores_to_system_history(hist: pd.DataFrame, sport: str, days_back: int) -> pd.DataFrame:
+def _attach_final_scores_to_system_history(hist: pd.DataFrame, sport: str, days_back: int | None) -> pd.DataFrame:
     if hist is None or hist.empty:
         return hist
     h = _ensure_merge_key_short_for_systems(hist)
@@ -14755,12 +14725,16 @@ def _attach_final_scores_to_system_history(hist: pd.DataFrame, sport: str, days_
     return h
 
 
-def fetch_pathi_bigal_history_backend(sport: str, days_back: int = _PATHI_BIGAL_DEFAULT_DAYS_BACK) -> pd.DataFrame:
-    """Backend history with primary-view + scored-table fallback; cached per process."""
+def fetch_pathi_bigal_history_backend(sport: str, days_back: int | None = _PATHI_BIGAL_DEFAULT_DAYS_BACK) -> pd.DataFrame:
+    """Backend history with primary-view + scored-table fallback; cached per process.
+
+    Production default is ALL available seasons. A positive ``days_back`` exists
+    only for an explicit diagnostic override.
+    """
     canon = _canon_system_sport(sport)
     if not canon:
         return pd.DataFrame()
-    key = (canon, int(days_back))
+    key = (canon, "ALL" if days_back is None else int(days_back))
     now = time.time()
     hit = _PATHI_BIGAL_HISTORY_CACHE.get(key)
     if hit is not None and (now - hit[0]) < _PATHI_BIGAL_HISTORY_TTL_SECONDS:
@@ -14793,7 +14767,7 @@ def fetch_pathi_bigal_history_backend(sport: str, days_back: int = _PATHI_BIGAL_
     return hist
 
 
-def attach_pathi_bigal_backend_features(current_rows: pd.DataFrame, sport: str | None, days_back: int = _PATHI_BIGAL_DEFAULT_DAYS_BACK) -> pd.DataFrame:
+def attach_pathi_bigal_backend_features(current_rows: pd.DataFrame, sport: str | None, days_back: int | None = _PATHI_BIGAL_DEFAULT_DAYS_BACK) -> pd.DataFrame:
     """
     Add system state to current backend rows without changing Game_Key semantics.
     Fails open: any history/schema problem returns the original rows unchanged.
@@ -14864,8 +14838,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-11-v13.2.6-observed-stats-unshrunk-latent-
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-13-v13.2.21-evidence-strength-redundancy"
-NCAAF_V13_HOTFIX = "V13_2_21__EVIDENCE_STRENGTH_CONFIDENCE__ALL_RULE_REDUNDANCY__FROZEN_T1H_REPLAY__BOOTSTRAP_GATE"
+NCAAF_V13_VERSION = "2026-09-13-v13.2.23-probability-resolver-bet-policy-promotion-fix"
+NCAAF_V13_HOTFIX = "V13_2_23__SIGNAL_PROBABILITY_RESOLVER__VALIDATED_BET_POLICY__ALL_ASOF_T1H_PROMOTION__ALL_SEASONS__CODE_CLEANUP"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -16118,6 +16092,9 @@ V13_SPECIALIST_OUTPUT_COLS = [
     "V13_Overlay_PreTemperature_Prob","V13_Overlay_Combined_Prob",
     "V13_Overlay_Temperature","V13_Overlay_Temperature_Contribution","V13_Overlay_Calibration_Active",
     "V13_Specialist_Overlay_Gate",
+    "V13_Probability_Resolver_Prob","V13_Probability_Resolver_Active","V13_Probability_Authority_Route",
+    "V13_Bet_Policy_Status","V13_Bet_Policy_Version","V13_Bet_Policy_Bet_Gate","V13_Bet_Policy_Lean_Gate",
+    "V13_Bet_Edge_Threshold","V13_Bet_Min_EV",
     "V13_Market_Overlay_Prob","V13_Market_Overlay_Weight","V13_Market_Overlay_Active","V13_Market_Overlay_Contribution","V13_Market_Overlay_Regime",
     "V13_Pathi_Overlay_Prob","V13_Pathi_Overlay_Weight","V13_Pathi_Overlay_Active","V13_Pathi_Overlay_Contribution","V13_Pathi_Overlay_Regime",
     "V13_BigAl_Overlay_Prob","V13_BigAl_Overlay_Weight","V13_BigAl_Overlay_Active","V13_BigAl_Overlay_Contribution","V13_BigAl_Overlay_Regime",
@@ -16560,27 +16537,90 @@ def _v1312_runtime_residual_specialists(base_prob,family_probs,labels,centers,en
         proposed=np.clip(total+delta,-total_cap,total_cap); actual=proposed-total; total=proposed; details[fam]={'prob':pf,'contribution':actual,'weight':trust,'trust':trust,'residual_edge':edge,'independence':indep,'active':active.astype(np.int8),'regime':lab}; prev[fam]={'delta':actual}
     return np.clip(base+total,0.01,0.99),details
 
-def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overlay: dict, maturity_bucket):
-    """V13.2 runtime: Market family residual -> individual Pathi/BigAl rules -> final calibration."""
+def _v13223_runtime_rule_family_engine(engine: dict, family: str) -> dict:
+    if not isinstance(engine,dict): return {}
+    profiles=engine.get("profiles") or {}; fam=str(family)
+    selected=[nm for nm in list(engine.get("selected_experts") or []) if str((profiles.get(nm) or {}).get("family"))==fam]
+    out=dict(engine); out["selected_experts"]=selected
+    active=[nm for nm in selected if float((profiles.get(nm) or {}).get("active_incremental_scale",0.0) or 0.0)>0]
+    out["active_selected_experts"]=active; out["gate_pass"]=bool(active)
+    return out
+
+
+def _v13223_runtime_resolver_matrix(core_cal, base, market, pathi, bigal, combined):
+    cc=np.asarray(core_cal,dtype=float); ba=np.asarray(base,dtype=float); ma=np.asarray(market,dtype=float)
+    pa=np.asarray(pathi,dtype=float); bi=np.asarray(bigal,dtype=float); co=np.asarray(combined,dtype=float)
+    zc=_v13_overlay_logit(cc); zb=_v13_overlay_logit(ba); zm=_v13_overlay_logit(ma)
+    zp=_v13_overlay_logit(pa); zbi=_v13_overlay_logit(bi); zco=_v13_overlay_logit(co)
+    return pd.DataFrame({
+        "Core_Logit":zc,"Fundamental_Delta_Logit":zb-zc,"Market_Delta_Logit":zm-zb,
+        "Pathi_Delta_Logit":zp-zm,"BigAl_Delta_Logit":zbi-zm,"Combined_Rule_Delta_Logit":zco-zm,
+    })
+
+
+def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overlay: dict, maturity_bucket, core_calibrated_prob=None):
+    """V13.2.23 runtime probability resolver with fail-closed authority routing."""
     n=len(rows); base=np.asarray(base_prob,dtype=float); final=base.copy(); details={}
-    if not isinstance(overlay,dict) or not overlay.get("gate_pass",False): return final,details,False
+    core_cal=base.copy() if core_calibrated_prob is None else np.asarray(core_calibrated_prob,dtype=float).reshape(-1)
+    if len(core_cal)!=n: core_cal=base.copy()
+    if not isinstance(overlay,dict): return final,details,False
     centers=overlay.get("centers") or {}; maturity=np.asarray(maturity_bucket,dtype=object); family_probs={}; labels={}
     for fam in ("Market","Pathi","BigAl"):
-        rec=((overlay.get("families") or {}).get(fam) or {}); feats=list(rec.get("selected_features") or []); mdl=rec.get("model") if fam=="Market" else None; center=float(np.clip(centers.get(fam,rec.get("center_prob",0.5)) or 0.5,1e-5,1-1e-5)); pf=np.full(n,center,dtype=float)
+        rec=((overlay.get("families") or {}).get(fam) or {}); feats=list(rec.get("selected_features") or [])
+        mdl=rec.get("model") if fam=="Market" else None
+        center=float(np.clip(centers.get(fam,rec.get("center_prob",0.5)) or 0.5,1e-5,1-1e-5)); pf=np.full(n,center,dtype=float)
         if mdl is not None and feats:
             try:
-                xx=rows.reindex(columns=feats).apply(pd.to_numeric,errors="coerce").replace([np.inf,-np.inf],np.nan).fillna(0.0); pf=np.asarray(mdl.predict_proba(xx)[:,1],dtype=float)
-            except Exception as e: logging.warning("V13 %s specialist runtime unavailable: %s",fam,e)
+                xx=rows.reindex(columns=feats).apply(pd.to_numeric,errors="coerce").replace([np.inf,-np.inf],np.nan).fillna(0.0)
+                pf=np.asarray(mdl.predict_proba(xx)[:,1],dtype=float)
+            except Exception as e:
+                logging.warning("V13 %s specialist runtime unavailable: %s",fam,e)
         family_probs[fam]=pf; labels[fam]=_v131_runtime_family_regime_labels(rows,fam,maturity)
-    market_engine=overlay.get("residual_engine") or {}; pre,market_det=_v1312_runtime_residual_specialists(base,family_probs,labels,centers,market_engine)
-    pre2,rule_det=_v132_runtime_apply_rule_engine(pre,rows,overlay.get("rule_expert_engine") or {})
-    cal=overlay.get("post_stack_calibration") or {}; t=float(cal.get("temperature",1.0) or 1.0); final=np.clip(_v13_overlay_sigmoid(_v13_overlay_logit(pre2)/max(t,1e-6)),0.01,0.99)
-    md=market_det.get("Market") or {}; details["Market"]={"prob":family_probs["Market"],"contribution":np.asarray(md.get("contribution",np.zeros(n))),"weight":np.asarray(md.get("trust",np.zeros(n))),"trust":np.asarray(md.get("trust",np.zeros(n))),"residual_edge":np.asarray(md.get("residual_edge",np.zeros(n))),"independence":np.asarray(md.get("independence",np.ones(n))),"active":np.asarray(md.get("active",np.zeros(n,dtype=np.int8))),"regime":np.asarray(md.get("regime",labels["Market"]),dtype=object)}
-    for fam in ("Pathi","BigAl"):
-        dd=rule_det.get(fam) or {}; details[fam]={"prob":np.asarray(dd.get("prob",np.clip(pre+np.asarray(dd.get('contribution',np.zeros(n))),0.01,0.99))),"contribution":np.asarray(dd.get("contribution",np.zeros(n))),"weight":np.asarray(dd.get("weight",np.zeros(n))),"trust":np.asarray(dd.get("weight",np.zeros(n))),"residual_edge":np.asarray(dd.get("residual_edge",np.zeros(n))),"independence":np.asarray(dd.get("independence",np.ones(n))),"active":np.asarray(dd.get("active",np.zeros(n,dtype=np.int8))),"regime":np.asarray(dd.get("regime",np.full(n,"OTHER",dtype=object)),dtype=object)}
-    details["_calibration"]={"temperature":t,"pretemperature_prob":pre2,"temperature_contribution":np.asarray(final-pre2),"active":np.full(n,abs(t-1.0)>1e-12,dtype=np.int8)}
-    return final,details,True
 
+    market_engine=overlay.get("residual_engine") or {}
+    market_prob,market_det=_v1312_runtime_residual_specialists(base,family_probs,labels,centers,market_engine)
+    rule_engine=overlay.get("rule_expert_engine") or {}
+    combined_prob,rule_det=_v132_runtime_apply_rule_engine(market_prob,rows,rule_engine)
+    pathi_engine=_v13223_runtime_rule_family_engine(rule_engine,"Pathi")
+    bigal_engine=_v13223_runtime_rule_family_engine(rule_engine,"BigAl")
+    pathi_prob,pathi_det=_v132_runtime_apply_rule_engine(market_prob,rows,pathi_engine)
+    bigal_prob,bigal_det=_v132_runtime_apply_rule_engine(market_prob,rows,bigal_engine)
+
+    resolver=overlay.get("probability_resolver") or {}
+    resolver_active=bool(resolver.get("gate_pass",False) and resolver.get("model") is not None)
+    additive_allowed=bool(overlay.get("additive_stack_fallback_gate_pass",overlay.get("full_stack_activation_pass",False)))
+    route="CORE_ONLY"; resolver_error=None
+    if resolver_active:
+        try:
+            Xr=_v13223_runtime_resolver_matrix(core_cal,base,market_prob,pathi_prob,bigal_prob,combined_prob)
+            feats=list(resolver.get("feature_names") or list(Xr.columns)); Xr=Xr.reindex(columns=feats)
+            if not np.isfinite(Xr.to_numpy(dtype=float)).all(): raise ValueError("nonfinite expert-level resolver inputs")
+            final=np.asarray(resolver["model"].predict_proba(Xr)[:,1],dtype=float); route="PROBABILITY_RESOLVER"
+        except Exception as e:
+            resolver_error=f"{type(e).__name__}:{e}"; logging.warning("V13 probability resolver fail-closed: %s",e)
+            if additive_allowed:
+                cal=overlay.get("post_stack_calibration") or {}; t=float(cal.get("temperature",1.0) or 1.0)
+                final=np.clip(_v13_overlay_sigmoid(_v13_overlay_logit(combined_prob)/max(t,1e-6)),0.01,0.99); route="ADDITIVE_STACK_FALLBACK"
+            else:
+                final=base.copy(); route="CORE_ONLY_RESOLVER_FAILCLOSED"
+    elif additive_allowed:
+        cal=overlay.get("post_stack_calibration") or {}; t=float(cal.get("temperature",1.0) or 1.0)
+        final=np.clip(_v13_overlay_sigmoid(_v13_overlay_logit(combined_prob)/max(t,1e-6)),0.01,0.99); route="ADDITIVE_STACK"
+
+    md=market_det.get("Market") or {}
+    details["Market"]={"prob":family_probs["Market"],"contribution":np.asarray(md.get("contribution",np.zeros(n))),"weight":np.asarray(md.get("trust",np.zeros(n))),"trust":np.asarray(md.get("trust",np.zeros(n))),"residual_edge":np.asarray(md.get("residual_edge",np.zeros(n))),"independence":np.asarray(md.get("independence",np.ones(n))),"active":np.asarray(md.get("active",np.zeros(n,dtype=np.int8))),"regime":np.asarray(md.get("regime",labels["Market"]),dtype=object)}
+    for fam,det,prob in (("Pathi",pathi_det,pathi_prob),("BigAl",bigal_det,bigal_prob)):
+        dd=det.get(fam) or {}
+        details[fam]={"prob":np.asarray(prob,dtype=float),"contribution":np.asarray(dd.get("contribution",np.zeros(n))),"weight":np.asarray(dd.get("weight",np.zeros(n))),"trust":np.asarray(dd.get("weight",np.zeros(n))),"residual_edge":np.asarray(dd.get("residual_edge",np.zeros(n))),"independence":np.asarray(dd.get("independence",np.ones(n))),"active":np.asarray(dd.get("active",np.zeros(n,dtype=np.int8))),"regime":np.asarray(dd.get("regime",np.full(n,"OTHER",dtype=object)),dtype=object)}
+    if route.startswith("ADDITIVE_STACK"):
+        t=float(((overlay.get("post_stack_calibration") or {}).get("temperature",1.0)) or 1.0)
+        pretemp=combined_prob; tcontrib=np.asarray(final-pretemp); active=abs(t-1.0)>1e-12
+    else:
+        t=1.0; pretemp=combined_prob; tcontrib=np.zeros(n); active=False
+    details["_calibration"]={"temperature":t,"pretemperature_prob":pretemp,"temperature_contribution":tcontrib,"active":np.full(n,active,dtype=np.int8)}
+    details["_resolver"]={"active":np.full(n,route=="PROBABILITY_RESOLVER",dtype=np.int8),"prob":np.asarray(final,dtype=float),"route":route,"error":resolver_error,"coefficients":dict(resolver.get("coefficients") or {})}
+    gate=bool(route=="PROBABILITY_RESOLVER" or route.startswith("ADDITIVE_STACK"))
+    return np.clip(final,0.01,0.99),details,gate
 
 def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
     """Calculate V13 diagnostics and promoted NCAAF-spreads probability when enabled."""
@@ -16617,6 +16657,9 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         "V13_Overlay_PreTemperature_Prob":np.nan,"V13_Overlay_Combined_Prob":np.nan,
         "V13_Overlay_Temperature":1.0,"V13_Overlay_Temperature_Contribution":0.0,"V13_Overlay_Calibration_Active":0,
         "V13_Specialist_Overlay_Gate":0,
+        "V13_Probability_Resolver_Prob":np.nan,"V13_Probability_Resolver_Active":0,"V13_Probability_Authority_Route":"CORE_ONLY",
+        "V13_Bet_Policy_Status":"UNAVAILABLE","V13_Bet_Policy_Version":"UNAVAILABLE","V13_Bet_Policy_Bet_Gate":0,"V13_Bet_Policy_Lean_Gate":0,
+        "V13_Bet_Edge_Threshold":np.nan,"V13_Bet_Min_EV":np.nan,
         "V13_Market_Overlay_Prob":np.nan,"V13_Market_Overlay_Weight":0.0,"V13_Market_Overlay_Active":0,"V13_Market_Overlay_Contribution":0.0,
         "V13_Pathi_Overlay_Prob":np.nan,"V13_Pathi_Overlay_Weight":0.0,"V13_Pathi_Overlay_Active":0,"V13_Pathi_Overlay_Contribution":0.0,
         "V13_BigAl_Overlay_Prob":np.nan,"V13_BigAl_Overlay_Weight":0.0,"V13_BigAl_Overlay_Active":0,"V13_BigAl_Overlay_Contribution":0.0,
@@ -16771,7 +16814,8 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
                 core_calibrated,fundamental_prob,bundle.get("fundamental_overlay") or {},maturity=maturity_bucket
             )
             prob,_overlay_details,_overlay_gate=_apply_v13_specialist_overlays_runtime(
-                out,core_adjusted,bundle.get("specialist_overlays") or {},maturity_bucket
+                out,core_adjusted,bundle.get("specialist_overlays") or {},maturity_bucket,
+                core_calibrated_prob=core_calibrated
             )
             out["V13_Base_Cover_Prob"]=core_calibrated.astype("float32")
             out["V13_Fundamental_Prob"]=fundamental_prob.astype("float32")
@@ -16797,7 +16841,8 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
                 base_prob,core_prob,bundle.get("autofs_core_bridge") or {}
             )
             prob,_overlay_details,_overlay_gate=_apply_v13_specialist_overlays_runtime(
-                out,core_adjusted,bundle.get("specialist_overlays") or {},maturity_bucket
+                out,core_adjusted,bundle.get("specialist_overlays") or {},maturity_bucket,
+                core_calibrated_prob=core_prob
             )
             out["V13_Base_Cover_Prob"]=base_prob.astype("float32")
             out["V13_Fundamental_Prob"]=fundamental_prob.astype("float32")
@@ -16821,6 +16866,17 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         out["V13_Overlay_Temperature_Contribution"]=np.asarray(_ocal.get("temperature_contribution",np.zeros(n)),dtype="float32")
         out["V13_Overlay_Calibration_Active"]=np.asarray(_ocal.get("active",np.zeros(n)),dtype="int8")
         out["V13_Specialist_Overlay_Gate"]=np.int8(1 if _overlay_gate else 0)
+        _rinfo=_overlay_details.get("_resolver") or {}
+        out["V13_Probability_Resolver_Prob"]=np.asarray(_rinfo.get("prob",prob),dtype="float32")
+        out["V13_Probability_Resolver_Active"]=np.asarray(_rinfo.get("active",np.zeros(n)),dtype="int8")
+        out["V13_Probability_Authority_Route"]=str(_rinfo.get("route","CORE_ONLY"))
+        _bp=(bundle.get("specialist_overlays") or {}).get("bet_advice_policy") or {}
+        out["V13_Bet_Policy_Status"]=str(_bp.get("status","UNAVAILABLE"))
+        out["V13_Bet_Policy_Version"]=str(_bp.get("version","UNAVAILABLE"))
+        out["V13_Bet_Policy_Bet_Gate"]=np.int8(1 if _bp.get("bet_gate_pass",False) else 0)
+        out["V13_Bet_Policy_Lean_Gate"]=np.int8(1 if _bp.get("lean_gate_pass",False) else 0)
+        out["V13_Bet_Edge_Threshold"]=np.float32(_bp.get("edge_threshold",np.nan))
+        out["V13_Bet_Min_EV"]=np.float32(_bp.get("min_ev",np.nan))
         for _fam in ("Market","Pathi","BigAl"):
             _dd=_overlay_details.get(_fam) or {}
             out[f"V13_{_fam}_Overlay_Prob"]=np.asarray(_dd.get("prob",np.full(n,np.nan)),dtype="float32")
@@ -17436,7 +17492,7 @@ def _optional_bq_expected_type(name: str, s: pd.Series | None) -> str:
     all-null or object-typed columns.
     """
     name = str(name)
-    if name in {"System_Signals_Text", "System_Feature_Version", "Fair_Line_Source", "Bet_Recommendation"}:
+    if name in {"System_Signals_Text", "System_Feature_Version", "Fair_Line_Source", "Bet_Recommendation", "Bet_Policy_Source", "V13_Probability_Authority_Route", "V13_Bet_Policy_Status", "V13_Bet_Policy_Version"}:
         return "STRING"
     if s is not None:
         if pd.api.types.is_bool_dtype(s):
