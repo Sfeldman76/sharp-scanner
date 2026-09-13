@@ -6340,15 +6340,15 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
             stat_base = _stat_col("NCAAF_Stat_Market_Baseline_Prob", 0.5).fillna(0.5).to_numpy(dtype=float)
             min_trust = float(stat_cfg.get("min_row_trust", 0.03))
             eligible = stat_active & np.isfinite(stat_prob) & np.isfinite(stat_base) & np.isfinite(stat_trust) & (stat_trust >= min_trust)
-            if int(stat_active.sum()) > 0 and int(eligible.sum()) == 0:
-                logger.error(
-                    "[NCAAF-STAT-PROTECTED-CONTRACT] FAIL source_active=%d eligible=0; leaving probabilities unchanged",
-                    int(stat_active.sum()),
-                )
-            elif not bool(stat_cfg.get("deployment_gate_pass", False)):
+            if not bool(stat_cfg.get("deployment_gate_pass", False)):
                 logger.info(
-                    "[NCAAF-STAT-PROTECTED] source_active=%d eligible=%d/%d gate=CLOSED weight=0",
+                    "[NCAAF-STAT-PROTECTED] source_active=%d eligible=%d/%d gate=CLOSED weight=0 status=EXPECTED_NO_AUTHORITY",
                     int(stat_active.sum()), int(eligible.sum()), len(combined),
+                )
+            elif int(stat_active.sum()) > 0 and int(eligible.sum()) == 0:
+                logger.error(
+                    "[NCAAF-STAT-PROTECTED-CONTRACT] FAIL source_active=%d eligible=0 while deployment_gate=OPEN; leaving probabilities unchanged",
+                    int(stat_active.sum()),
                 )
             elif eligible.any():
                 edge_weight = float(stat_cfg.get("effective_edge_weight", 0.0))
@@ -8395,7 +8395,7 @@ def _merge_feature_overwrite(left: pd.DataFrame, right: pd.DataFrame, on, how="l
 def attach_fair_value_bet_pass_fields(df: pd.DataFrame) -> pd.DataFrame:
     """Post-model fair value + betting advice.
 
-    V13.2.28 uses a threshold learned on chronological OOF bets and independently
+    V13.2.29 uses a threshold learned on chronological OOF bets and independently
     checked on a later shadow lane.  A row can be called BET only when that policy
     earned VALIDATED_BET authority.  PROMISING_LEAN may emit LEAN.  Old artifacts
     and non-V13 markets retain the legacy transparent heuristic for compatibility.
@@ -10308,7 +10308,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_28'
+                            _source[_use]='V13_2_29'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -14875,8 +14875,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-13-v13.2.28-independent-fair-market-residual-edge-architecture"
-NCAAF_V13_HOTFIX = "V13_2_28__DYNAMIC_OFFDEF__ROBUST_MARGIN_ENSEMBLE__OOF_WEIGHTING__OWN_PROB_CALIBRATION__INTEGRATION_FIX"
+NCAAF_V13_VERSION = "2026-09-13-v13.2.29-quote-calibrated-resolver-compat-cleanup"
+NCAAF_V13_HOTFIX = "V13_2_29__QUOTE_LEVEL_OWN_FAIR_CAL__ROBUST_DECISION_GRAIN__FROZEN_AUTOFS_COMPAT__BET_LEDGER_DIAGNOSTICS__STAT_NOISE_FIX"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -16118,7 +16118,7 @@ def _ncaaf_v13_promoted_empirical_probability(preview, thresholds, games_prior, 
 
 
 V13_SPECIALIST_OUTPUT_COLS = [
-    "V13_Own_Fair_Margin","V13_Own_Cover_Prob","V13_Own_Push_Prob",
+    "V13_Own_Fair_Margin","V13_Own_Cover_Prob","V13_Own_Push_Prob","V13_Own_Quote_Cal_Active","V13_Own_Quote_Cal_Scale","V13_Own_Quote_Cal_Status",
     "V13_Market_Margin","V13_Market_BreakEven_Prob","V13_Market_NoVig_Prob",
     "V13_Point_Edge","V13_Raw_Probability_Edge","V13_Market_Fair_Probability_Edge","V13_Own_BreakEven_Edge",
     "V13_Final_BreakEven_Edge","V13_Final_EV_Per_Dollar","V13_MarketResidual_Prob","V13_Final_Fair_Prob",
@@ -16628,6 +16628,14 @@ def _v13227_runtime_empirical_cover_probability(residuals, threshold):
     return np.clip(p,0.01,0.99),np.clip(q,0.0,1.0)
 
 
+def _v13229_runtime_apply_quote_calibration(p, artifact):
+    x=np.asarray(p,dtype=float); out=x.copy()
+    if not bool((artifact or {}).get("gate_pass",False)): return np.clip(out,0.01,0.99)
+    sc=float((artifact or {}).get("active_scale",1.0) or 1.0)
+    ok=np.isfinite(out)
+    if ok.any(): out[ok]=_v13_overlay_sigmoid(sc*_v13_overlay_logit(out[ok]))
+    return np.clip(out,0.01,0.99)
+
 def _v13228_runtime_apply_prob_calibrator(p, cal):
     x=np.asarray(p,dtype=float)
     out=np.full(len(x),np.nan,dtype=float)
@@ -16669,7 +16677,7 @@ def _v13228_runtime_dynamic_margin(rows: pd.DataFrame, spec: dict):
 
 
 def _v13228_runtime_own_fair_margin(rows: pd.DataFrame, Xstate: pd.DataFrame, own: dict):
-    """V13.2.28 market-blind ensemble prediction with saved OOF-selected weights."""
+    """V13.2.29 market-blind ensemble prediction with saved OOF-selected weights."""
     n=len(rows)
     cols=list((own or {}).get("margin_features") or [])
     models=(own or {}).get("margin_models")
@@ -16731,7 +16739,7 @@ def _v13227_runtime_novig_spread_prob(rows: pd.DataFrame, break_even):
     return out
 
 def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overlay: dict, maturity_bucket, core_calibrated_prob=None):
-    """V13.2.28 own-fair-anchored residual probability resolver with fail-closed authority routing."""
+    """V13.2.29 own-fair-anchored residual probability resolver with fail-closed authority routing."""
     n=len(rows); base=np.asarray(base_prob,dtype=float); final=base.copy(); details={}
     core_cal=base.copy() if core_calibrated_prob is None else np.asarray(core_calibrated_prob,dtype=float).reshape(-1)
     if len(core_cal)!=n: core_cal=base.copy()
@@ -16832,6 +16840,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         "V13_Pred_Close_Margin":np.nan,"V13_Market_Edge_Points":np.nan,
         "V13_Cover_Prob":np.nan,"V13_BreakEven_Prob":np.nan,"V13_Probability_Edge":np.nan,"V13_EV_Per_Dollar":np.nan,
         "V13_Own_Fair_Margin":np.nan,"V13_Own_Cover_Prob":np.nan,"V13_Own_Push_Prob":np.nan,
+        "V13_Own_Quote_Cal_Active":0,"V13_Own_Quote_Cal_Scale":1.0,"V13_Own_Quote_Cal_Status":"UNAVAILABLE",
         "V13_Market_Margin":np.nan,"V13_Market_BreakEven_Prob":np.nan,"V13_Market_NoVig_Prob":np.nan,
         "V13_Point_Edge":np.nan,"V13_Raw_Probability_Edge":np.nan,"V13_Market_Fair_Probability_Edge":np.nan,
         "V13_Own_BreakEven_Edge":np.nan,"V13_Final_BreakEven_Edge":np.nan,"V13_Final_EV_Per_Dollar":np.nan,
@@ -16890,7 +16899,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
                 Xstate["Power_Rating_Diff"]=np.nan
 
         # Existing Fundamental models are the secondary Market-Residual Brain in
-        # V13.2.28: they predict points of market error, not OUR fair margin.
+        # V13.2.29: they predict points of market error, not OUR fair margin.
         _market_residual_home=_ncaaf_v13_pair_predict(fund.get("margin_models"),Xstate.reindex(columns=fm_cols),float(fund.get("linear_weight",0.80)))
         _market_residual_total=_ncaaf_v13_pair_predict(fund.get("total_models"),Xstate.reindex(columns=ft_cols),float(fund.get("linear_weight",0.80))) if fund.get("total_models") is not None else np.zeros(n,dtype=float)
         _own=(fund.get("independent_fair_value") or {}) if isinstance(fund,dict) else {}
@@ -16918,6 +16927,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
             if len(_ih): own_prob[_ih],own_push[_ih]=_v13227_runtime_empirical_cover_probability(_own_resid,_thr[_ih])
             if len(_ia): own_prob[_ia],own_push[_ia]=_v13227_runtime_empirical_cover_probability(-_own_resid,_thr[_ia])
             own_prob=_v13228_runtime_apply_prob_calibrator(own_prob,_own.get("probability_calibration") or {})
+            own_prob=_v13229_runtime_apply_quote_calibration(own_prob,bundle.get("own_fair_quote_calibration") or {})
         beta_global=float(np.clip(fund.get("margin_edge_beta",(fund.get("edge_shrinkage") or {}).get("margin_beta",0.0)),0.0,1.0))
         beta_arr=np.full(n,beta_global,dtype=float)
         if isinstance(preview,dict) and preview.get("enabled"):
@@ -16930,7 +16940,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         raw_fundamental_edge=raw_fair_side-offered_margin
         fundamental_edge=tradable_fair_side-offered_margin
 
-        # V13.2.28 parity fallback for the secondary Market-Residual Brain.  The
+        # V13.2.29 parity fallback for the secondary Market-Residual Brain.  The
         # model predicts how many points the observed market is wrong; this
         # empirical residual distribution converts that point forecast into a
         # cover probability without making the market our primary fair number.
@@ -17172,6 +17182,10 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         out["V13_Own_Fair_Margin"]=np.asarray(own_fair_side,dtype="float32")
         out["V13_Own_Cover_Prob"]=np.asarray(own_prob,dtype="float32")
         out["V13_Own_Push_Prob"]=np.asarray(own_push,dtype="float32")
+        _qcal=bundle.get("own_fair_quote_calibration") or {}
+        out["V13_Own_Quote_Cal_Active"]=np.int8(1 if _qcal.get("gate_pass",False) else 0)
+        out["V13_Own_Quote_Cal_Scale"]=np.float32(_qcal.get("active_scale",1.0) or 1.0)
+        out["V13_Own_Quote_Cal_Status"]=str(_qcal.get("status","UNAVAILABLE"))
         out["V13_Market_Margin"]=np.asarray(offered_margin,dtype="float32")
         out["V13_Market_BreakEven_Prob"]=np.asarray(be,dtype="float32")
         _novig=np.asarray(_v13227_runtime_novig_spread_prob(out,be),dtype=float)
@@ -17188,7 +17202,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         eligible=(np.isfinite(own_prob)&np.isfinite(prob)) if _is_v13227 else ((np.isfinite(core_prob)&np.isfinite(prob)) if _is_v131 else (np.isfinite(raw_fair_side)&np.isfinite(offered_margin)))
         if _is_v13227:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
-            status=np.where(eligible,"V13_2_28_OWN_FAIR_ACTIVE","V13_2_28_OWN_FAIR_UNAVAILABLE")
+            status=np.where(eligible,"V13_2_29_OWN_FAIR_ACTIVE","V13_2_29_OWN_FAIR_UNAVAILABLE")
         elif _is_v131:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             status=np.where(eligible,"V13_1_AUTOFS_CORE_ACTIVE","V13_1_CORE_UNAVAILABLE")
