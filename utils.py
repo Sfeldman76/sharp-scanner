@@ -6022,7 +6022,7 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         "three_head_plus_meta_v5_8_residual_meta_49pct_stability",
         "three_head_plus_meta_v12_ncaaf_statistical_brain",
         "three_head_plus_meta_v12_2_core_anchored_specialists",
-        # V13.2.25 exact Champion-replay compatibility. These two family labels
+        # V13.2.26 exact Champion-replay compatibility. These two family labels
         # were produced by earlier NCAAF artifacts, but their saved bundle schema
         # still uses the same generic situation/value/meta recipe below. They must
         # be replayed through that saved recipe rather than silently downgraded to
@@ -6037,7 +6037,7 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         "three_head_legacy_plus_v13_1_calibrated_outcome_autofs_core",
         "three_head_plus_meta_v12_2_core_anchored_specialists__v13_ncaaf_shadow",
     }:
-        logger.info("[V13.2.25-LEGACY-META-REPLAY] family=%s route=SAVED_GENERIC_META_RECIPE exact_family_compat=TRUE", family)
+        logger.info("[V13.2.26-LEGACY-META-REPLAY] family=%s route=SAVED_GENERIC_META_RECIPE exact_family_compat=TRUE", family)
 
     def _rebuild_handicapper_overlay_aggregates(src, cols, overlay_trust_map=None):
         cols = [str(c) for c in (cols or [])]
@@ -8395,7 +8395,7 @@ def _merge_feature_overwrite(left: pd.DataFrame, right: pd.DataFrame, on, how="l
 def attach_fair_value_bet_pass_fields(df: pd.DataFrame) -> pd.DataFrame:
     """Post-model fair value + betting advice.
 
-    V13.2.25 uses a threshold learned on chronological OOF bets and independently
+    V13.2.26 uses a threshold learned on chronological OOF bets and independently
     checked on a later shadow lane.  A row can be called BET only when that policy
     earned VALIDATED_BET authority.  PROMISING_LEAN may emit LEAN.  Old artifacts
     and non-V13 markets retain the legacy transparent heuristic for compatibility.
@@ -10308,7 +10308,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_25'
+                            _source[_use]='V13_2_26'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -11112,7 +11112,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-13-v13.2.25-core-handicapper-isolated-feature-state"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-13-v13.2.26-core-handicapper-isolated-feature-state"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -14843,15 +14843,15 @@ def attach_pathi_bigal_backend_features(current_rows: pd.DataFrame, sport: str |
 #     plus information available before kickoff.
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
-NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.25-market-error-independent-lanes"
+NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.26-market-error-independent-lanes"
 
 # ============================================================================
 # V13 NCAAF VALUE ARCHITECTURE
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-13-v13.2.25-independent-lanes-orientation-replay-execution"
-NCAAF_V13_HOTFIX = "V13_2_25__INDEPENDENT_EXPERT_LANES__HISTORICAL_ORIENTATION_AUDIT__EXACT_LEGACY_META_REPLAY__EXECUTION_ASSERTIONS__CLEANUP_PHASE3"
+NCAAF_V13_VERSION = "2026-09-13-v13.2.26-decision-grain-shadow-oof-betting-policy"
+NCAAF_V13_HOTFIX = "V13_2_26__TRUE_SHADOW_CORE_OOF__DECISION_GRAIN_RESOLVER__DECISION_PROBABILITY_MAP__BET_LEDGER_SEASON_FIX__EXACT_PROMOTION"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -16568,9 +16568,17 @@ def _v13224_runtime_apply_anchored_resolver(core_prob, X, resolver):
     z=_v13_overlay_logit(np.asarray(core_prob,dtype=float))+float(resolver.get("intercept",0.0) or 0.0)+xx.dot(beta)
     return np.clip(_v13_overlay_sigmoid(z),0.01,0.99)
 
+def _v13226_runtime_apply_decision_map(prob, decision_map):
+    """Complement-symmetric final decision-grain probability map."""
+    if not isinstance(decision_map,dict) or not decision_map.get("gate_pass",False):
+        return np.asarray(prob,dtype=float)
+    scale=float(decision_map.get("active_scale",1.0) or 1.0)
+    z=scale*_v13_overlay_logit(np.asarray(prob,dtype=float))
+    return np.clip(_v13_overlay_sigmoid(z),0.01,0.99)
+
 
 def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overlay: dict, maturity_bucket, core_calibrated_prob=None):
-    """V13.2.25 anchored residual probability resolver with fail-closed authority routing."""
+    """V13.2.26 anchored residual probability resolver with fail-closed authority routing."""
     n=len(rows); base=np.asarray(base_prob,dtype=float); final=base.copy(); details={}
     core_cal=base.copy() if core_calibrated_prob is None else np.asarray(core_calibrated_prob,dtype=float).reshape(-1)
     if len(core_cal)!=n: core_cal=base.copy()
@@ -16631,6 +16639,11 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
         cal=overlay.get("post_stack_calibration") or {}; t=float(cal.get("temperature",1.0) or 1.0)
         final=np.clip(_v13_overlay_sigmoid(_v13_overlay_logit(combined_prob)/max(t,1e-6)),0.01,0.99); route="ADDITIVE_STACK"
 
+    dmap=overlay.get("decision_probability_map") or {}
+    if bool(dmap.get("gate_pass",False)):
+        final=_v13226_runtime_apply_decision_map(final,dmap)
+        route=("DECISION_GRAIN_MAP+"+route) if route!="CORE_ONLY" else "DECISION_GRAIN_MAP"
+
     md=market_det.get("Market") or {}
     details["Market"]={"prob":family_probs["Market"],"contribution":np.asarray(md.get("contribution",np.zeros(n))),"weight":np.asarray(md.get("trust",np.zeros(n))),"trust":np.asarray(md.get("trust",np.zeros(n))),"residual_edge":np.asarray(md.get("residual_edge",np.zeros(n))),"independence":np.asarray(md.get("independence",np.ones(n))),"active":np.asarray(md.get("active",np.zeros(n,dtype=np.int8))),"regime":np.asarray(md.get("regime",labels["Market"]),dtype=object)}
     for fam,det,prob in (("Pathi",pathi_det,pathi_prob),("BigAl",bigal_det,bigal_prob)):
@@ -16642,8 +16655,9 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
     else:
         t=1.0; pretemp=combined_prob; tcontrib=np.zeros(n); active=False
     details["_calibration"]={"temperature":t,"pretemperature_prob":pretemp,"temperature_contribution":tcontrib,"active":np.full(n,active,dtype=np.int8)}
-    details["_resolver"]={"active":np.full(n,route=="PROBABILITY_RESOLVER",dtype=np.int8),"prob":np.asarray(final,dtype=float),"route":route,"error":resolver_error,"coefficients":dict(resolver.get("coefficients") or {})}
-    gate=bool(route=="PROBABILITY_RESOLVER" or route.startswith("ADDITIVE_STACK"))
+    details["_resolver"]={"active":np.full(n,"PROBABILITY_RESOLVER" in route,dtype=np.int8),"prob":np.asarray(final,dtype=float),"route":route,"error":resolver_error,"coefficients":dict(resolver.get("coefficients") or {})}
+    details["_decision_map"]={"active":np.full(n,bool(dmap.get("gate_pass",False)),dtype=np.int8),"scale":float(dmap.get("active_scale",1.0) or 1.0),"status":str(dmap.get("status","UNAVAILABLE")),"orientation":str(dmap.get("orientation","ORIGINAL")),"prob":np.asarray(final,dtype=float)}
+    gate=bool(route!="CORE_ONLY" and not route.startswith("CORE_ONLY_"))
     return np.clip(final,0.01,0.99),details,gate
 
 def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
@@ -16682,6 +16696,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         "V13_Overlay_Temperature":1.0,"V13_Overlay_Temperature_Contribution":0.0,"V13_Overlay_Calibration_Active":0,
         "V13_Specialist_Overlay_Gate":0,
         "V13_Probability_Resolver_Prob":np.nan,"V13_Probability_Resolver_Active":0,"V13_Probability_Authority_Route":"CORE_ONLY",
+        "V13_Decision_Map_Active":0,"V13_Decision_Map_Scale":1.0,"V13_Decision_Map_Status":"UNAVAILABLE","V13_Decision_Map_Orientation":"ORIGINAL",
         "V13_Bet_Policy_Status":"UNAVAILABLE","V13_Bet_Policy_Version":"UNAVAILABLE","V13_Bet_Policy_Bet_Gate":0,"V13_Bet_Policy_Lean_Gate":0,
         "V13_Bet_Edge_Threshold":np.nan,"V13_Bet_Min_EV":np.nan,
         "V13_Market_Overlay_Prob":np.nan,"V13_Market_Overlay_Weight":0.0,"V13_Market_Overlay_Active":0,"V13_Market_Overlay_Contribution":0.0,
@@ -16894,6 +16909,11 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         out["V13_Probability_Resolver_Prob"]=np.asarray(_rinfo.get("prob",prob),dtype="float32")
         out["V13_Probability_Resolver_Active"]=np.asarray(_rinfo.get("active",np.zeros(n)),dtype="int8")
         out["V13_Probability_Authority_Route"]=str(_rinfo.get("route","CORE_ONLY"))
+        _dinfo=_overlay_details.get("_decision_map") or {}
+        out["V13_Decision_Map_Active"]=np.asarray(_dinfo.get("active",np.zeros(n)),dtype="int8")
+        out["V13_Decision_Map_Scale"]=np.float32(_dinfo.get("scale",1.0) or 1.0)
+        out["V13_Decision_Map_Status"]=str(_dinfo.get("status","UNAVAILABLE"))
+        out["V13_Decision_Map_Orientation"]=str(_dinfo.get("orientation","ORIGINAL"))
         _bp=(bundle.get("specialist_overlays") or {}).get("bet_advice_policy") or {}
         out["V13_Bet_Policy_Status"]=str(_bp.get("status","UNAVAILABLE"))
         out["V13_Bet_Policy_Version"]=str(_bp.get("version","UNAVAILABLE"))
