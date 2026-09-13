@@ -6022,10 +6022,22 @@ def predict_multihead_meta(bundle: dict, df_rows: pd.DataFrame, p_outcome, eps: 
         "three_head_plus_meta_v5_8_residual_meta_49pct_stability",
         "three_head_plus_meta_v12_ncaaf_statistical_brain",
         "three_head_plus_meta_v12_2_core_anchored_specialists",
+        # V13.2.25 exact Champion-replay compatibility. These two family labels
+        # were produced by earlier NCAAF artifacts, but their saved bundle schema
+        # still uses the same generic situation/value/meta recipe below. They must
+        # be replayed through that saved recipe rather than silently downgraded to
+        # outcome-only scoring during Champion comparison.
+        "three_head_legacy_plus_v13_1_calibrated_outcome_autofs_core",
+        "three_head_plus_meta_v12_2_core_anchored_specialists__v13_ncaaf_shadow",
     }
     if family and family not in _supported_multihead_families:
-        logger.warning("⚠️ Unsupported multihead model family %s; using outcome-only fallback", family)
+        logger.warning("⚠️ Unsupported multihead model family %s; exact replay unavailable", family)
         return None
+    if family in {
+        "three_head_legacy_plus_v13_1_calibrated_outcome_autofs_core",
+        "three_head_plus_meta_v12_2_core_anchored_specialists__v13_ncaaf_shadow",
+    }:
+        logger.info("[V13.2.25-LEGACY-META-REPLAY] family=%s route=SAVED_GENERIC_META_RECIPE exact_family_compat=TRUE", family)
 
     def _rebuild_handicapper_overlay_aggregates(src, cols, overlay_trust_map=None):
         cols = [str(c) for c in (cols or [])]
@@ -8383,7 +8395,7 @@ def _merge_feature_overwrite(left: pd.DataFrame, right: pd.DataFrame, on, how="l
 def attach_fair_value_bet_pass_fields(df: pd.DataFrame) -> pd.DataFrame:
     """Post-model fair value + betting advice.
 
-    V13.2.24 uses a threshold learned on chronological OOF bets and independently
+    V13.2.25 uses a threshold learned on chronological OOF bets and independently
     checked on a later shadow lane.  A row can be called BET only when that policy
     earned VALIDATED_BET authority.  PROMISING_LEAN may emit LEAN.  Old artifacts
     and non-V13 markets retain the legacy transparent heuristic for compatibility.
@@ -10296,7 +10308,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_24'
+                            _source[_use]='V13_2_25'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -11100,7 +11112,7 @@ def _dbg_timing(event: str, **kv):
 # ============================================================================
 # Pathi + Big Al deterministic system layer (backend-compatible)
 # ============================================================================
-PATHI_BIGAL_FEATURE_VERSION = "2026-09-13-v13.2.24-core-handicapper-isolated-feature-state"
+PATHI_BIGAL_FEATURE_VERSION = "2026-09-13-v13.2.25-core-handicapper-isolated-feature-state"
 
 PATHI_FOOTBALL_MODEL_FEATURES = [
     # Exact current spread position / key structure
@@ -14831,15 +14843,15 @@ def attach_pathi_bigal_backend_features(current_rows: pd.DataFrame, sport: str |
 #     plus information available before kickoff.
 # ============================================================================
 NCAAF_STAT_RAW_TABLE = "sharplogger.sharp_data.ncaaf_historical_game_side_raw"
-NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.24-market-error-primary-raw-result-auxiliary"
+NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.25-market-error-independent-lanes"
 
 # ============================================================================
 # V13 NCAAF VALUE ARCHITECTURE
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-13-v13.2.24-edge-residual-resolver-bet-ledger-champion-replay"
-NCAAF_V13_HOTFIX = "V13_2_24__ANCHORED_RESIDUAL_RESOLVER__MARKET_ERROR_STAT_BRAIN__FULL_OOF_BET_LEDGER__LEGACY_CHAMPION_REPLAY__CLEANUP_PHASE2"
+NCAAF_V13_VERSION = "2026-09-13-v13.2.25-independent-lanes-orientation-replay-execution"
+NCAAF_V13_HOTFIX = "V13_2_25__INDEPENDENT_EXPERT_LANES__HISTORICAL_ORIENTATION_AUDIT__EXACT_LEGACY_META_REPLAY__EXECUTION_ASSERTIONS__CLEANUP_PHASE3"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -16558,7 +16570,7 @@ def _v13224_runtime_apply_anchored_resolver(core_prob, X, resolver):
 
 
 def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overlay: dict, maturity_bucket, core_calibrated_prob=None):
-    """V13.2.24 anchored residual probability resolver with fail-closed authority routing."""
+    """V13.2.25 anchored residual probability resolver with fail-closed authority routing."""
     n=len(rows); base=np.asarray(base_prob,dtype=float); final=base.copy(); details={}
     core_cal=base.copy() if core_calibrated_prob is None else np.asarray(core_calibrated_prob,dtype=float).reshape(-1)
     if len(core_cal)!=n: core_cal=base.copy()
