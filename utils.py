@@ -5798,10 +5798,25 @@ def _suffix_snapshot(df, tag):
 
 def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
     """
-    Return calibrated/blended probs in [eps, 1-eps] or None.
-    Applies bundle["flip_flag"] (global polarity lock) BEFORE calibration,
-    so the returned value is always "P(win)" for the positive class.
+    Return calibrated/blended probabilities or None.
+
+    New artifacts persist their post-calibration symmetric Core probability clip
+    (NCAAF spreads currently 0.03). Legacy artifacts without that field retain
+    the historical eps-only behavior. The same saved clip is therefore used by
+    training replay, artifact replay, and live serving.
     """
+    final_prob_clip=float(eps)
+    if isinstance(bundle,dict):
+        _recipe=bundle.get('core_feature_recipe') or {}
+        _saved_clip=bundle.get('core_probability_clip',_recipe.get('probability_clip',eps))
+        try:
+            if _saved_clip is not None and np.isfinite(float(_saved_clip)):
+                final_prob_clip=float(np.clip(float(_saved_clip),float(eps),0.499999))
+        except Exception:
+            final_prob_clip=float(eps)
+
+    def _final_clip(p):
+        return np.clip(np.asarray(p,dtype=float).ravel(),final_prob_clip,1.0-final_prob_clip)
 
     def _predict_one(m, cal, X_):
         # Already-calibrated classifier (e.g., CalibratedClassifierCV)
@@ -5924,7 +5939,7 @@ def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
 
             p_cal = np.asarray(p_cal, dtype=float).ravel()
             p_cal = np.nan_to_num(p_cal, nan=0.5, posinf=1 - eps, neginf=eps)
-            return np.clip(p_cal, eps, 1 - eps)
+            return _final_clip(p_cal)
 
         # OLD: per-head calibration, then blend
         if ("model_logloss" in bundle) or ("model_auc" in bundle):
@@ -5939,17 +5954,17 @@ def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
                 p = _blend_two_probs(pL, pA, w).ravel()
                 p = np.clip(p, eps, 1 - eps)
                 p = _apply_flip_if_needed(p)  # ✅ flip after blend (already calibrated heads)
-                return np.clip(p, eps, 1 - eps)
+                return _final_clip(p)
 
             if pL is not None:
                 p = np.clip(np.asarray(pL, dtype=float).ravel(), eps, 1 - eps)
                 p = _apply_flip_if_needed(p)
-                return np.clip(p, eps, 1 - eps)
+                return _final_clip(p)
 
             if pA is not None:
                 p = np.clip(np.asarray(pA, dtype=float).ravel(), eps, 1 - eps)
                 p = _apply_flip_if_needed(p)
-                return np.clip(p, eps, 1 - eps)
+                return _final_clip(p)
 
         # Single pair: {"model": est, "calibrator": cal or {"iso_blend": cal}}
         if ("model" in bundle) or ("calibrator" in bundle):
@@ -5974,7 +5989,7 @@ def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
 
                 p_cal = np.asarray(p_cal, dtype=float).ravel()
                 p_cal = np.nan_to_num(p_cal, nan=0.5, posinf=1 - eps, neginf=eps)
-                return np.clip(p_cal, eps, 1 - eps)
+                return _final_clip(p_cal)
 
             # generic calibrator
             p = _predict_one(m, c, X)
@@ -5982,7 +5997,7 @@ def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
                 return None
             p = np.clip(np.asarray(p, dtype=float).ravel(), eps, 1 - eps)
             p = _apply_flip_if_needed(p)  # ✅ flip after per-model calibration
-            return np.clip(p, eps, 1 - eps)
+            return _final_clip(p)
 
     # Legacy args path
     p = _predict_one(model, iso, X)
@@ -5990,7 +6005,7 @@ def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
         return None
     p = np.clip(np.asarray(p, dtype=float).ravel(), eps, 1 - eps)
     # Legacy path has no bundle dict, so no flip applied here
-    return np.clip(p, eps, 1 - eps)
+    return _final_clip(p)
 
 
 
@@ -10323,7 +10338,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_37'
+                            _source[_use]='V13_2_38'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -14890,8 +14905,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-18-v13.2.37-compact-final-state-production"
-NCAAF_V13_HOTFIX = "V13_2_37__ONE_CANONICAL_FEATURE_MATERIALIZER__FEATURE_PARITY__COMPACT_FINAL_STATE_AUTHORITY__TIMING_COLUMN_RECON__CANONICAL_INFERENCE_GRAPH__FORWARD_SHADOW_READY"
+NCAAF_V13_VERSION = "2026-09-18-v13.2.38-probability-clip-parity-production"
+NCAAF_V13_HOTFIX = "V13_2_38__SAVED_CORE_PROBABILITY_CLIP__EXACT_POSTPROCESS_PARITY__COMPACT_FINAL_STATE_AUTHORITY__CANONICAL_INFERENCE_GRAPH__FORWARD_SHADOW_READY"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -17514,7 +17529,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         if _is_v13232:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             _oa=bool((bundle.get("own_fair_alpha_expert") or {}).get("gate_pass",False))
-            status=np.where(eligible,("V13_2_37_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_2_37_MARKET_RICH_CORE_ACTIVE"),"V13_2_37_CORE_UNAVAILABLE")
+            status=np.where(eligible,("V13_2_38_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_2_38_MARKET_RICH_CORE_ACTIVE"),"V13_2_38_CORE_UNAVAILABLE")
         elif _is_v13227:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             status=np.where(eligible,"V13_2_31_OWN_FAIR_ACTIVE","V13_2_31_OWN_FAIR_UNAVAILABLE")
@@ -19489,6 +19504,8 @@ def load_model_from_gcs(
             "blend_space": str(payload.get("blend_space", "linear") or "linear").lower(),
             "feature_cols": feature_cols,
             "feature_cols_outcome": payload.get("feature_cols_outcome") or feature_cols,
+            "core_feature_recipe": payload.get("core_feature_recipe") or {},
+            "core_probability_clip": payload.get("core_probability_clip", (payload.get("core_feature_recipe") or {}).get("probability_clip")),
             "feature_cols_situation": payload.get("feature_cols_situation") or [],
             "feature_cols_value": payload.get("feature_cols_value") or [],
             "model_situation_cls": payload.get("model_situation_cls"),
@@ -20650,9 +20667,9 @@ def compute_and_write_market_weights(df):
 
 
 # ============================================================================
-# V13.2.37 CANONICAL FEATURE + PRODUCTION INFERENCE API
+# V13.2.38 CANONICAL FEATURE + PRODUCTION INFERENCE API
 # ============================================================================
-NCAAF_CORE_FEATURE_BUILDER_VERSION = "2026-09-18-v13.2.37-core-feature-materializer-v1"
+NCAAF_CORE_FEATURE_BUILDER_VERSION = "2026-09-18-v13.2.38-core-feature-materializer-v1"
 
 def build_ncaaf_core_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     """Canonical numeric materializer for the NCAAF Outcome/AutoFS Core.
@@ -20683,14 +20700,19 @@ def build_ncaaf_core_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dic
         out[c]=pd.to_numeric(col,errors='coerce')
     return out.replace([np.inf,-np.inf],np.nan).fillna(0.0).astype('float32')
 
-def ncaaf_core_feature_recipe(feature_cols) -> dict:
+def ncaaf_core_feature_recipe(feature_cols, probability_clip: float = 0.03) -> dict:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
+    try:
+        pclip=float(np.clip(float(probability_clip),1e-6,0.499999))
+    except Exception:
+        pclip=0.03
     return {
         'version':NCAAF_CORE_FEATURE_BUILDER_VERSION,
         'feature_cols':feats,
         'materialization':'PREGAME_ENRICHED_FRAME_TO_NUMERIC_MATRIX',
         'dtype':'float32','missing_policy':'fill_zero','infinite_policy':'to_nan_then_zero',
         'boolean_policy':'0_1','string_policy':'numeric_coerce','clip_policy':'none',
+        'probability_clip':pclip,'probability_clip_policy':'POST_CALIBRATION_SYMMETRIC',
         'asof_contract':'UPSTREAM_FEATURE_ENGINE_MUST_BE_PREGAME_ONLY',
         'features':{c:{'source_column':c,'formula_owner':'UPSTREAM_FEATURE_ENGINE','materializer':'DIRECT_COLUMN'} for c in feats},
     }
@@ -20745,7 +20767,7 @@ def predict_ncaaf_v13_production(rows: pd.DataFrame, bundle: dict, core_prob=Non
         'maturity':maturity,'fundamental_info':finfo,
         'specialist_info':{'residual_details':spec_details},
         'authority_route':str(out.get('V13_Probability_Authority_Route',pd.Series(['CORE_ONLY'])).iloc[0]) if n else 'CORE_ONLY',
-        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_2_37',
+        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_2_38',
         'canonical_fallback_used':False,
     }
     return (prob,info) if return_stages else prob
