@@ -8395,7 +8395,7 @@ def _merge_feature_overwrite(left: pd.DataFrame, right: pd.DataFrame, on, how="l
 def attach_fair_value_bet_pass_fields(df: pd.DataFrame) -> pd.DataFrame:
     """Post-model fair value + betting advice.
 
-    V13.2.31 uses a threshold learned on chronological OOF bets and independently
+    V13.2.32 uses a threshold learned on chronological OOF bets and independently
     checked on a later shadow lane.  A row can be called BET only when that policy
     earned VALIDATED_BET authority.  PROMISING_LEAN may emit LEAN.  Old artifacts
     and non-V13 markets retain the legacy transparent heuristic for compatibility.
@@ -10315,7 +10315,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_31'
+                            _source[_use]='V13_2_32'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -14883,7 +14883,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
 NCAAF_V13_VERSION = "2026-09-17-v13.2.31-walkforward-distributional-horizon-resolver"
-NCAAF_V13_HOTFIX = "V13_2_31__ASOF_WALKFORWARD_OWN_FAIR__HARD_PROMOTION_SOURCE_INTERLOCK__DISTRIBUTIONAL_MARGIN_ENGINE__MATURITY_SHRUNK_ENSEMBLE_AND_CALIBRATION__DECISION_GRAIN_NESTED_RESOLVER"
+NCAAF_V13_HOTFIX = "V13_2_32__MARKET_RICH_CORE_PRIMARY__OWN_FAIR_ALPHA_EXPERT__SYSTEM_INTEGRITY_HARNESS__GAME_GRAIN_RESOLVER__HARD_PROMOTION_INTERLOCK"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -16813,7 +16813,7 @@ def _v13231_runtime_apply_maturity_margin_calibration(rows: pd.DataFrame, raw_pr
     return out
 
 def _v13228_runtime_own_fair_margin(rows: pd.DataFrame, Xstate: pd.DataFrame, own: dict):
-    """V13.2.31 market-blind ensemble prediction with saved OOF-selected weights."""
+    """V13.2.32 market-blind ensemble prediction with saved OOF-selected weights."""
     n=len(rows)
     cols=list((own or {}).get("margin_features") or [])
     models=(own or {}).get("margin_models")
@@ -16870,8 +16870,24 @@ def _v13227_runtime_novig_spread_prob(rows: pd.DataFrame, break_even):
         if den>0: out[good]=be[good]/den
     return out
 
+
+# V13.2.32 runtime parity: Own Fair is an independent alpha expert around the
+# calibrated market-rich Core. Missing Own Fair never suppresses the Core.
+def _v13232_runtime_apply_own_fair_alpha(core_prob, own_prob, artifact):
+    c=np.asarray(core_prob,dtype=float).reshape(-1); o=np.asarray(own_prob,dtype=float).reshape(-1)
+    out=c.copy(); active=False; sc=0.0
+    if isinstance(artifact,dict) and bool(artifact.get("gate_pass",False)):
+        sc=float(np.clip(artifact.get("active_scale",0.0) or 0.0,0.0,1.0)); active=bool(sc>0)
+        if len(o)==len(c) and sc>0:
+            ok=np.isfinite(c)&np.isfinite(o)
+            if ok.any():
+                zc=_v13_overlay_logit(np.clip(c[ok],1e-6,1-1e-6)); zo=_v13_overlay_logit(np.clip(o[ok],1e-6,1-1e-6))
+                out[ok]=_v13_overlay_sigmoid(zc+sc*(zo-zc))
+    return np.clip(out,0.01,0.99),{"active":active,"scale":sc}
+
+
 def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overlay: dict, maturity_bucket, core_calibrated_prob=None):
-    """V13.2.31 own-fair-anchored residual probability resolver with fail-closed authority routing."""
+    """V13.2.32 Core-anchored expert probability resolver with fail-closed authority routing."""
     n=len(rows); base=np.asarray(base_prob,dtype=float); final=base.copy(); details={}
     core_cal=base.copy() if core_calibrated_prob is None else np.asarray(core_calibrated_prob,dtype=float).reshape(-1)
     if len(core_cal)!=n: core_cal=base.copy()
@@ -17031,7 +17047,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
                 Xstate["Power_Rating_Diff"]=np.nan
 
         # Existing Fundamental models are the secondary Market-Residual Brain in
-        # V13.2.31: they predict points of market error, not OUR fair margin.
+        # V13.2.32: they predict points of market error, not OUR fair margin.
         _market_residual_home=_ncaaf_v13_pair_predict(fund.get("margin_models"),Xstate.reindex(columns=fm_cols),float(fund.get("linear_weight",0.80)))
         _market_residual_total=_ncaaf_v13_pair_predict(fund.get("total_models"),Xstate.reindex(columns=ft_cols),float(fund.get("linear_weight",0.80))) if fund.get("total_models") is not None else np.zeros(n,dtype=float)
         _own=(fund.get("independent_fair_value") or {}) if isinstance(fund,dict) else {}
@@ -17076,7 +17092,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         raw_fundamental_edge=raw_fair_side-offered_margin
         fundamental_edge=tradable_fair_side-offered_margin
 
-        # V13.2.31 parity fallback for the secondary Market-Residual Brain.  The
+        # V13.2.32 parity fallback for the secondary Market-Residual Brain.  The
         # model predicts how many points the observed market is wrong; this
         # empirical residual distribution converts that point forecast into a
         # cover probability without making the market our primary fair number.
@@ -17178,7 +17194,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         # direct empirical residual probability above.  This preserves old saved
         # recipe parity while making the new architecture self-contained.
         _arch_pre=str(bundle.get("architecture","") or "").lower()
-        if _arch_pre.startswith("independent_fair_primary"):
+        if _arch_pre.startswith("independent_fair_primary") or _arch_pre.startswith("market_rich_core_primary"):
             _pp=np.asarray(prob,dtype=float)
             _direct=np.asarray(_market_residual_prob_direct,dtype=float)
             if len(_pp)!=n: _pp=np.full(n,np.nan,dtype=float)
@@ -17193,10 +17209,48 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
             _core_series=pd.Series(np.full(n,float(_core_series) if np.isfinite(_core_series) else np.nan),index=out.index)
         core_prob=_core_series.to_numpy(dtype=float,na_value=np.nan)
         _arch=str(bundle.get("architecture","") or "").lower()
+        _is_v13232=bool(_arch.startswith("market_rich_core_primary"))
         _is_v13227=bool(_arch.startswith("independent_fair_primary"))
-        _is_v131=bool((not _is_v13227) and (_arch.startswith("outcome_autofs_primary") or isinstance(bundle.get("core_calibration"),dict)))
-        if _is_v13227:
-            # V13.2.31 production contract: Own Fair is the primary authority.
+        _is_v131=bool((not _is_v13232) and (not _is_v13227) and (_arch.startswith("outcome_autofs_primary") or isinstance(bundle.get("core_calibration"),dict)))
+        if _is_v13232:
+            # V13.2.32: the leakage-safe market-rich Core is always the baseline.
+            # Own Fair is an independent alpha expert and cannot replace/mask Core.
+            core_calibrated,_core_cal_details=_apply_v131_core_calibration_runtime(
+                core_prob,bundle.get("core_calibration") or {},maturity=maturity_bucket
+            )
+            core_plus_own,_own_alpha_details=_v13232_runtime_apply_own_fair_alpha(
+                core_calibrated,own_prob,bundle.get("own_fair_alpha_expert") or {}
+            )
+            core_adjusted,_fund_details=_apply_v131_fundamental_overlay_runtime(
+                core_plus_own,fundamental_prob,bundle.get("fundamental_overlay") or {},maturity=maturity_bucket
+            )
+            prob,_overlay_details,_overlay_gate=_apply_v13_specialist_overlays_runtime(
+                out,core_adjusted,bundle.get("specialist_overlays") or {},maturity_bucket,
+                core_calibrated_prob=core_plus_own
+            )
+            out["V13_Base_Cover_Prob"]=core_calibrated.astype("float32")
+            out["V13_Fundamental_Prob"]=fundamental_prob.astype("float32")
+            out["V13_AutoFS_Core_Prob"]=core_prob.astype("float32")
+            out["V13_Core_Calibrated_Prob"]=core_calibrated.astype("float32")
+            out["V13_OwnFair_Prob"]=np.asarray(own_prob,dtype="float32")
+            out["V13_OwnFair_Alpha_Prob"]=np.asarray(core_plus_own,dtype="float32")
+            out["V13_OwnFair_Alpha_Scale"]=np.float32(_own_alpha_details.get("scale",0.0) or 0.0)
+            out["V13_OwnFair_Alpha_Active"]=np.int8(1 if _own_alpha_details.get("active",False) else 0)
+            out["V13_Core_Adjusted_Prob"]=np.asarray(core_adjusted,dtype="float32")
+            out["V13_Core_Calibration_Method"]=str(_core_cal_details.get("method","identity"))
+            out["V13_Core_Calibration_Active"]=np.asarray(_core_cal_details.get("active",np.zeros(n)),dtype="int8")
+            out["V13_Fundamental_Overlay_Prob"]=np.asarray(core_adjusted,dtype="float32")
+            out["V13_Fundamental_Overlay_Weight"]=np.asarray(_fund_details.get("weight",np.zeros(n)),dtype="float32")
+            out["V13_Fundamental_Overlay_Active"]=np.asarray(_fund_details.get("active",np.zeros(n)),dtype="int8")
+            out["V13_Fundamental_Overlay_Contribution"]=np.asarray(_fund_details.get("contribution",np.zeros(n)),dtype="float32")
+            out["V13_Fundamental_Overlay_Regime"]=np.asarray(_fund_details.get("regime",maturity_bucket),dtype=object)
+            out["V13_Fundamental_Residual_Edge"]=np.asarray(_fund_details.get("residual_edge",np.zeros(n)),dtype="float32")
+            out["V13_Fundamental_Residual_Trust"]=np.asarray(_fund_details.get("trust",_fund_details.get("weight",np.zeros(n))),dtype="float32")
+            out["V13_AutoFS_Core_Weight"]=np.where(np.isfinite(core_prob),1.0,0.0).astype("float32")
+            out["V13_AutoFS_Core_Active"]=np.isfinite(core_prob).astype("int8")
+            out["V13_AutoFS_Core_Contribution"]=np.asarray(core_calibrated-core_prob,dtype="float32")
+        elif _is_v13227:
+            # V13.2.32 production contract: Own Fair is the primary authority.
             # AutoFS is retained only as a diagnostic/legacy replay field; it may
             # never silently replace a missing Own Fair probability. Missing Own
             # Fair therefore fails closed to no V13 advice for that row.
@@ -17337,8 +17391,12 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         out["V13_Final_Fair_Prob"]=np.asarray(prob,dtype="float32")
         out["V13_Final_BreakEven_Edge"]=np.asarray(prob-be,dtype="float32")
         out["V13_Final_EV_Per_Dollar"]=np.asarray(ev,dtype="float32")
-        eligible=(np.isfinite(own_prob)&np.isfinite(prob)) if _is_v13227 else ((np.isfinite(core_prob)&np.isfinite(prob)) if _is_v131 else (np.isfinite(raw_fair_side)&np.isfinite(offered_margin)))
-        if _is_v13227:
+        eligible=((np.isfinite(core_prob)&np.isfinite(prob)) if _is_v13232 else ((np.isfinite(own_prob)&np.isfinite(prob)) if _is_v13227 else ((np.isfinite(core_prob)&np.isfinite(prob)) if _is_v131 else (np.isfinite(raw_fair_side)&np.isfinite(offered_margin)))))
+        if _is_v13232:
+            _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
+            _oa=bool((bundle.get("own_fair_alpha_expert") or {}).get("gate_pass",False))
+            status=np.where(eligible,("V13_2_32_CORE_PLUS_OWN_FAIR_ALPHA_ACTIVE" if _oa else "V13_2_32_MARKET_RICH_CORE_ACTIVE"),"V13_2_32_CORE_UNAVAILABLE")
+        elif _is_v13227:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             status=np.where(eligible,"V13_2_31_OWN_FAIR_ACTIVE","V13_2_31_OWN_FAIR_UNAVAILABLE")
         elif _is_v131:
@@ -17349,7 +17407,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
             status=np.where(early_sit_active,"PROMOTED_ACTIVE_EARLY_SITUATIONAL",np.where(_early,"PROMOTED_ACTIVE_EARLY_MARKET_ANCHORED","PROMOTED_ACTIVE"))
         else:
             _early=np.zeros(n,dtype=bool); status=np.where(curg>0,"SHADOW_CURRENT_SEASON","SHADOW_PRIOR_SEASON_ONLY")
-        _display_fair=np.where(_is_v13227,own_fair_side,raw_fair_side)
+        _display_fair=np.where(_is_v13232|_is_v13227,own_fair_side,raw_fair_side)
         out["V13_Raw_Fair_Margin"]=_display_fair.astype("float32")
         out["V13_Tradable_Fair_Margin"]=tradable_fair_side.astype("float32")
         out["V13_Fair_Margin"]=_display_fair.astype("float32")
