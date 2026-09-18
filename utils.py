@@ -2617,6 +2617,43 @@ class _CalAdapter:
         return out
 
 
+class _PortableBetaCalibrator:
+    """Runtime-only beta calibrator reconstructed from portable artifact state."""
+    def __init__(self, model=None, eps=1e-6):
+        self.model = model
+        self.eps = float(eps)
+    def predict(self, p):
+        p = np.clip(np.asarray(p, float).reshape(-1), self.eps, 1.0 - self.eps)
+        z = np.log(p / (1.0 - p))
+        X = np.c_[z, z*z]
+        return np.asarray(self.model.predict_proba(X)[:, 1], dtype=float)
+
+
+def _hydrate_portable_calibrator(x):
+    """Hydrate V13.2.39 structural calibrator specs after unpickling."""
+    if not isinstance(x, dict):
+        return x
+    typ = str(x.get("type", ""))
+    if typ == "identity":
+        return _IdentityIsoCal(eps=float(x.get("eps", 1e-6)))
+    if typ == "beta_calibrator_v1":
+        return _PortableBetaCalibrator(model=x.get("model"), eps=float(x.get("eps", 1e-6)))
+    if typ == "cal_adapter_v1":
+        kind = str(x.get("kind", "identity"))
+        model = _hydrate_portable_calibrator(x.get("model"))
+        clip = x.get("clip", [0.001, 0.999])
+        try:
+            clip = (float(clip[0]), float(clip[1]))
+        except Exception:
+            clip = (0.001, 0.999)
+        return _CalAdapter((kind, model), clip=clip)
+    if typ == "cal_tuple_v1":
+        return (str(x.get("kind", "identity")), _hydrate_portable_calibrator(x.get("obj")))
+    if "obj" in x and typ in {"iso", "platt", "beta"}:
+        return _CalAdapter((typ, _hydrate_portable_calibrator(x.get("obj"))))
+    return x
+
+
 def read_recent_sharp_master_cached(hours=120):
     cache_key = f"sharp_master_{hours}h"
     
@@ -10338,7 +10375,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_38'
+                            _source[_use]='V13_2_39'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -14905,8 +14942,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-18-v13.2.38-probability-clip-parity-production"
-NCAAF_V13_HOTFIX = "V13_2_38__SAVED_CORE_PROBABILITY_CLIP__EXACT_POSTPROCESS_PARITY__COMPACT_FINAL_STATE_AUTHORITY__CANONICAL_INFERENCE_GRAPH__FORWARD_SHADOW_READY"
+NCAAF_V13_VERSION = "2026-09-18-v13.2.39-portable-calibrator-replay-parity"
+NCAAF_V13_HOTFIX = "V13_2_39__PORTABLE_CORE_CALIBRATOR__SAVED_ARTIFACT_STAGE_PARITY__EXACT_POSTPROCESS_PARITY__COMPACT_FINAL_STATE_AUTHORITY__FORWARD_SHADOW_READY"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -17529,7 +17566,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         if _is_v13232:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             _oa=bool((bundle.get("own_fair_alpha_expert") or {}).get("gate_pass",False))
-            status=np.where(eligible,("V13_2_38_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_2_38_MARKET_RICH_CORE_ACTIVE"),"V13_2_38_CORE_UNAVAILABLE")
+            status=np.where(eligible,("V13_2_39_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_2_39_MARKET_RICH_CORE_ACTIVE"),"V13_2_39_CORE_UNAVAILABLE")
         elif _is_v13227:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             status=np.where(eligible,"V13_2_31_OWN_FAIR_ACTIVE","V13_2_31_OWN_FAIR_UNAVAILABLE")
@@ -19485,6 +19522,7 @@ def load_model_from_gcs(
             or (payload.get("calibrator", {}) or {}).get("iso_blend")
             or (payload.get("calibrator", {}) or {}).get("iso")
         )
+        iso_blend = _hydrate_portable_calibrator(iso_blend)
 
         flip_flag = bool(
             payload.get("flip_flag", False)
@@ -20667,9 +20705,9 @@ def compute_and_write_market_weights(df):
 
 
 # ============================================================================
-# V13.2.38 CANONICAL FEATURE + PRODUCTION INFERENCE API
+# V13.2.39 CANONICAL FEATURE + PRODUCTION INFERENCE API
 # ============================================================================
-NCAAF_CORE_FEATURE_BUILDER_VERSION = "2026-09-18-v13.2.38-core-feature-materializer-v1"
+NCAAF_CORE_FEATURE_BUILDER_VERSION = "2026-09-18-v13.2.39-core-feature-materializer-v1"
 
 def build_ncaaf_core_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     """Canonical numeric materializer for the NCAAF Outcome/AutoFS Core.
@@ -20767,7 +20805,7 @@ def predict_ncaaf_v13_production(rows: pd.DataFrame, bundle: dict, core_prob=Non
         'maturity':maturity,'fundamental_info':finfo,
         'specialist_info':{'residual_details':spec_details},
         'authority_route':str(out.get('V13_Probability_Authority_Route',pd.Series(['CORE_ONLY'])).iloc[0]) if n else 'CORE_ONLY',
-        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_2_38',
+        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_2_39',
         'canonical_fallback_used':False,
     }
     return (prob,info) if return_stages else prob
