@@ -10317,7 +10317,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_33'
+                            _source[_use]='V13_2_34'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -14884,8 +14884,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-18-v13.2.33-common-market-history-alpha"
-NCAAF_V13_HOTFIX = "V13_2_33__COMMON_MARKET_2022_PLUS__RICH_MICRO_2025_PLUS__OWN_FAIR_ALPHA__E2E_PATH_FIX__GAME_GRAIN_RESOLVER__HARD_PROMOTION_INTERLOCK"
+NCAAF_V13_VERSION = "2026-09-18-v13.2.34-production-hardening"
+NCAAF_V13_HOTFIX = "V13_2_34__COMMON_MARKET_INDEX_FIX__PAIRWISE_COMPONENT_AUDIT__EXACT_REPLAY_PARITY__FRESHNESS_SPLIT__HARD_PROMOTION_INTERLOCK"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -16874,7 +16874,7 @@ def _v13227_runtime_novig_spread_prob(rows: pd.DataFrame, break_even):
 
 
 
-# V13.2.33 runtime Common Market parity.  These functions must mirror the training
+# V13.2.34 runtime Common Market parity.  These functions must mirror the training
 # feature contract exactly: real open/current spread, open/current total and key-number
 # movement only.  No historical book-level microstructure is synthesized.
 def _v13233_runtime_num_first(df: pd.DataFrame,*names):
@@ -16914,12 +16914,13 @@ def _v13233_runtime_common_market_prob(rows: pd.DataFrame, art: dict):
     if not isinstance(art,dict) or art.get("final_models") is None or not art.get("feature_cols"): return out,{"eligible_rows":0,"scored_rows":0}
     X=_v13233_runtime_common_market_features(rows).reindex(columns=list(art.get("feature_cols") or [])); eligible=np.isfinite(pd.to_numeric(X.get("CM_Open_Spread"),errors="coerce"))&np.isfinite(pd.to_numeric(X.get("CM_Current_Spread"),errors="coerce")); idx=eligible.to_numpy(dtype=bool)
     if idx.any():
-        models=art.get("final_models") or {}; p1=np.full(int(idx.sum()),np.nan); p2=np.full(int(idx.sum()),np.nan)
-        try: p1=np.asarray(models.get("logit").predict_proba(X.loc[idx])[:,1],dtype=float)
+        pos=np.flatnonzero(idx)
+        models=art.get("final_models") or {}; p1=np.full(len(pos),np.nan); p2=np.full(len(pos),np.nan)
+        try: p1=np.asarray(models.get("logit").predict_proba(X.iloc[pos])[:,1],dtype=float)
         except Exception: pass
-        try: p2=np.asarray(models.get("hgb").predict_proba(X.loc[idx])[:,1],dtype=float)
+        try: p2=np.asarray(models.get("hgb").predict_proba(X.iloc[pos])[:,1],dtype=float)
         except Exception: pass
-        pp=np.where(np.isfinite(p1)&np.isfinite(p2),0.65*p1+0.35*p2,np.where(np.isfinite(p1),p1,p2)); out[idx]=np.clip(pp,0.01,0.99)
+        pp=np.where(np.isfinite(p1)&np.isfinite(p2),0.65*p1+0.35*p2,np.where(np.isfinite(p1),p1,p2)); out[pos]=np.clip(pp,0.01,0.99)
     return out,{"eligible_rows":int(idx.sum()),"scored_rows":int(np.isfinite(out).sum())}
 
 
@@ -17468,7 +17469,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         if _is_v13232:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             _oa=bool((bundle.get("own_fair_alpha_expert") or {}).get("gate_pass",False))
-            status=np.where(eligible,("V13_2_33_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_2_33_MARKET_RICH_CORE_ACTIVE"),"V13_2_33_CORE_UNAVAILABLE")
+            status=np.where(eligible,("V13_2_34_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_2_34_MARKET_RICH_CORE_ACTIVE"),"V13_2_34_CORE_UNAVAILABLE")
         elif _is_v13227:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             status=np.where(eligible,"V13_2_31_OWN_FAIR_ACTIVE","V13_2_31_OWN_FAIR_UNAVAILABLE")
