@@ -10303,10 +10303,12 @@ def apply_blended_sharp_score(
                         _v13_cfg=((bundle.get("multihead_config") or {}).get("ncaaf_v13_shadow") or {}) if isinstance(bundle,dict) else {}
                         _v13_validated=bool(_v13_cfg.get("v13_internal_ready_gate_pass",_v13_cfg.get("v13_vs_v12_promotion_gate_pass",False)) and _v13_cfg.get("production_calibration_gate_pass",False))
                         _v13_force=str(os.getenv("V13_FORCE_OPERATOR_PROMOTION","0")).strip().lower() in {"1","true","yes","on"}
+                        if _v13_force:
+                            logger.warning("[V13-PROMOTION-INTERLOCK] V13_FORCE_OPERATOR_PROMOTION is ignored; validated Champion promotion is mandatory")
                         _v13_arch=str(_v13_bundle.get("architecture","") or "").lower()
-                        _v13_is_131=bool(_v13_arch.startswith("outcome_autofs_primary") or isinstance(_v13_bundle.get("core_calibration"),dict))
+                        _v13_is_131=bool(_v13_arch.startswith("outcome_autofs_primary") or _v13_arch.startswith("market_rich_core_primary") or isinstance(_v13_bundle.get("core_calibration"),dict))
                         _v13_recipe_available=bool(_v13_is_131 or ((_v13_bundle.get("production_preview") or {}).get("enabled",False)))
-                        _v13_promoted=bool(_v13_recipe_available and (_v13_validated or _v13_force) and (str(os.getenv("V13_PROMOTION_ENABLED","1")).strip().lower() not in {"0","false","no","off"}))
+                        _v13_promoted=bool(_v13_recipe_available and _v13_validated and (str(os.getenv("V13_PROMOTION_ENABLED","1")).strip().lower() not in {"0","false","no","off"}))
                         _vp=pd.to_numeric(df_canon.get('V13_Cover_Prob'),errors='coerce')
                         df_canon['V13_Candidate_Production_Prob']=_vp.clip(1e-6,1-1e-6)
                         _legacy=np.asarray(preds,dtype=float).copy()
@@ -10315,7 +10317,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_32'
+                            _source[_use]='V13_2_33'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -14882,8 +14884,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-17-v13.2.31-walkforward-distributional-horizon-resolver"
-NCAAF_V13_HOTFIX = "V13_2_32__MARKET_RICH_CORE_PRIMARY__OWN_FAIR_ALPHA_EXPERT__SYSTEM_INTEGRITY_HARNESS__GAME_GRAIN_RESOLVER__HARD_PROMOTION_INTERLOCK"
+NCAAF_V13_VERSION = "2026-09-18-v13.2.33-common-market-history-alpha"
+NCAAF_V13_HOTFIX = "V13_2_33__COMMON_MARKET_2022_PLUS__RICH_MICRO_2025_PLUS__OWN_FAIR_ALPHA__E2E_PATH_FIX__GAME_GRAIN_RESOLVER__HARD_PROMOTION_INTERLOCK"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -16871,6 +16873,67 @@ def _v13227_runtime_novig_spread_prob(rows: pd.DataFrame, break_even):
     return out
 
 
+
+# V13.2.33 runtime Common Market parity.  These functions must mirror the training
+# feature contract exactly: real open/current spread, open/current total and key-number
+# movement only.  No historical book-level microstructure is synthesized.
+def _v13233_runtime_num_first(df: pd.DataFrame,*names):
+    s=pd.Series(np.nan,index=df.index,dtype="float64")
+    for c in names:
+        if c in df.columns:
+            z=pd.to_numeric(df[c],errors="coerce"); s=s.where(s.notna(),z)
+    return s
+
+
+def _v13233_runtime_common_market_features(df: pd.DataFrame):
+    x=pd.DataFrame(index=df.index)
+    op=_v13233_runtime_num_first(df,"Opening_Spread","Consensus_Open_Spread","First_Line_Value","Open_Value","Opening_Line")
+    cur=_v13233_runtime_num_first(df,"Value","Spread_Value","Current_Spread","Consensus_Close_Spread_Audit","Closing_Spread_For_Team")
+    move=cur-op; aop=op.abs(); acur=cur.abs()
+    x["CM_Open_Spread"]=op; x["CM_Current_Spread"]=cur; x["CM_Move"]=move; x["CM_Abs_Move"]=move.abs()
+    x["CM_Toward_Team"]=(move<0).where(move.notna()).astype("float64"); x["CM_Away_From_Team"]=(move>0).where(move.notna()).astype("float64")
+    x["CM_Open_Abs"]=aop; x["CM_Current_Abs"]=acur
+    x["CM_Open_Favorite"]=(op<0).where(op.notna()).astype("float64"); x["CM_Open_Dog"]=(op>0).where(op.notna()).astype("float64")
+    x["CM_Current_Favorite"]=(cur<0).where(cur.notna()).astype("float64"); x["CM_Current_Dog"]=(cur>0).where(cur.notna()).astype("float64")
+    x["CM_Dog_To_Favorite"]=(op.gt(0)&cur.lt(0)).where(op.notna()&cur.notna()).astype("float64"); x["CM_Favorite_To_Dog"]=(op.lt(0)&cur.gt(0)).where(op.notna()&cur.notna()).astype("float64")
+    x["CM_Move_x_OpenAbs"]=move*aop; x["CM_Move_x_CurrentAbs"]=move*acur
+    crossed_any=pd.Series(False,index=df.index); toward_any=pd.Series(False,index=df.index); away_any=pd.Series(False,index=df.index)
+    for key in (3.0,7.0,10.0,14.0):
+        k=str(int(key)); valid=op.notna()&cur.notna(); strict=valid&(((aop-key)*(acur-key))<0); touch=valid&((np.isclose(aop,key,atol=1e-9)&~np.isclose(acur,key,atol=1e-9))|(np.isclose(acur,key,atol=1e-9)&~np.isclose(aop,key,atol=1e-9))); cross=strict|touch
+        onto=valid&np.isclose(acur,key,atol=1e-9)&~np.isclose(aop,key,atol=1e-9); off=valid&np.isclose(aop,key,atol=1e-9)&~np.isclose(acur,key,atol=1e-9)
+        x[f"CM_Open_Dist_{k}"]=(aop-key).abs(); x[f"CM_Current_Dist_{k}"]=(acur-key).abs(); x[f"CM_Crossed_Key_{k}"]=cross.astype("float64"); x[f"CM_Crossed_Key_{k}_Toward"]=(cross&(move<0)).astype("float64"); x[f"CM_Crossed_Key_{k}_Away"]=(cross&(move>0)).astype("float64"); x[f"CM_Moved_Onto_Key_{k}"]=onto.astype("float64"); x[f"CM_Moved_Off_Key_{k}"]=off.astype("float64")
+        crossed_any|=cross; toward_any|=(cross&(move<0)); away_any|=(cross&(move>0))
+    x["CM_Crossed_Any_Key"]=crossed_any.astype("float64"); x["CM_Crossed_Key_Toward_Team"]=toward_any.astype("float64"); x["CM_Crossed_Key_Away_From_Team"]=away_any.astype("float64")
+    ot=_v13233_runtime_num_first(df,"Opening_Total","Consensus_Open_Total","TOT_Open","Open_Total"); ct=_v13233_runtime_num_first(df,"Current_Total","Total_Value","Total_Game","Consensus_Close_Total_Audit","Closing_Total"); tm=ct-ot
+    x["CM_Open_Total"]=ot; x["CM_Current_Total"]=ct; x["CM_Total_Move"]=tm; x["CM_Abs_Total_Move"]=tm.abs(); x["CM_Total_Available"]=(ot.notna()&ct.notna()).astype("float64"); x["CM_Common_Market_History_Eligible"]=(op.notna()&cur.notna()).astype("float64")
+    return x.replace([np.inf,-np.inf],np.nan)
+
+
+def _v13233_runtime_common_market_prob(rows: pd.DataFrame, art: dict):
+    n=len(rows); out=np.full(n,np.nan,dtype=float)
+    if not isinstance(art,dict) or art.get("final_models") is None or not art.get("feature_cols"): return out,{"eligible_rows":0,"scored_rows":0}
+    X=_v13233_runtime_common_market_features(rows).reindex(columns=list(art.get("feature_cols") or [])); eligible=np.isfinite(pd.to_numeric(X.get("CM_Open_Spread"),errors="coerce"))&np.isfinite(pd.to_numeric(X.get("CM_Current_Spread"),errors="coerce")); idx=eligible.to_numpy(dtype=bool)
+    if idx.any():
+        models=art.get("final_models") or {}; p1=np.full(int(idx.sum()),np.nan); p2=np.full(int(idx.sum()),np.nan)
+        try: p1=np.asarray(models.get("logit").predict_proba(X.loc[idx])[:,1],dtype=float)
+        except Exception: pass
+        try: p2=np.asarray(models.get("hgb").predict_proba(X.loc[idx])[:,1],dtype=float)
+        except Exception: pass
+        pp=np.where(np.isfinite(p1)&np.isfinite(p2),0.65*p1+0.35*p2,np.where(np.isfinite(p1),p1,p2)); out[idx]=np.clip(pp,0.01,0.99)
+    return out,{"eligible_rows":int(idx.sum()),"scored_rows":int(np.isfinite(out).sum())}
+
+
+def _v13233_runtime_apply_common_market_alpha(core_prob,common_prob,artifact):
+    c=np.asarray(core_prob,dtype=float).reshape(-1); o=np.asarray(common_prob,dtype=float).reshape(-1); out=c.copy(); active=False; sc=0.0
+    if isinstance(artifact,dict) and bool(artifact.get("gate_pass",False)):
+        sc=float(np.clip(artifact.get("active_scale",0.0) or 0.0,0.0,1.0)); active=bool(sc>0)
+        if len(o)==len(c) and sc>0:
+            ok=np.isfinite(c)&np.isfinite(o)
+            if ok.any():
+                zc=_v13_overlay_logit(np.clip(c[ok],1e-6,1-1e-6)); zo=_v13_overlay_logit(np.clip(o[ok],1e-6,1-1e-6)); out[ok]=_v13_overlay_sigmoid(zc+sc*(zo-zc))
+    return np.clip(out,0.01,0.99),{"active":active,"scale":sc}
+
+
 # V13.2.32 runtime parity: Own Fair is an independent alpha expert around the
 # calibrated market-rich Core. Missing Own Fair never suppresses the Core.
 def _v13232_runtime_apply_own_fair_alpha(core_prob, own_prob, artifact):
@@ -17218,8 +17281,12 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
             core_calibrated,_core_cal_details=_apply_v131_core_calibration_runtime(
                 core_prob,bundle.get("core_calibration") or {},maturity=maturity_bucket
             )
+            _common_prob,_common_score_details=_v13233_runtime_common_market_prob(out,bundle.get("common_market_history") or {})
+            core_plus_common,_common_alpha_details=_v13233_runtime_apply_common_market_alpha(
+                core_calibrated,_common_prob,bundle.get("common_market_alpha_expert") or {}
+            )
             core_plus_own,_own_alpha_details=_v13232_runtime_apply_own_fair_alpha(
-                core_calibrated,own_prob,bundle.get("own_fair_alpha_expert") or {}
+                core_plus_common,own_prob,bundle.get("own_fair_alpha_expert") or {}
             )
             core_adjusted,_fund_details=_apply_v131_fundamental_overlay_runtime(
                 core_plus_own,fundamental_prob,bundle.get("fundamental_overlay") or {},maturity=maturity_bucket
@@ -17232,6 +17299,12 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
             out["V13_Fundamental_Prob"]=fundamental_prob.astype("float32")
             out["V13_AutoFS_Core_Prob"]=core_prob.astype("float32")
             out["V13_Core_Calibrated_Prob"]=core_calibrated.astype("float32")
+            out["V13_CommonMarket_Prob"]=np.asarray(_common_prob,dtype="float32")
+            out["V13_CommonMarket_Alpha_Prob"]=np.asarray(core_plus_common,dtype="float32")
+            out["V13_CommonMarket_Alpha_Scale"]=np.float32(_common_alpha_details.get("scale",0.0) or 0.0)
+            out["V13_CommonMarket_Alpha_Active"]=np.int8(1 if _common_alpha_details.get("active",False) else 0)
+            out["V13_CommonMarket_Eligible"]=np.int8(1) * np.isfinite(_common_prob).astype("int8")
+            out["V13_RichMicrostructure_Eligible"]=((pd.to_datetime(out.get("Snapshot_Timestamp"),errors="coerce",utc=True).notna()) if "Snapshot_Timestamp" in out.columns else pd.Series(False,index=out.index)).astype("int8")
             out["V13_OwnFair_Prob"]=np.asarray(own_prob,dtype="float32")
             out["V13_OwnFair_Alpha_Prob"]=np.asarray(core_plus_own,dtype="float32")
             out["V13_OwnFair_Alpha_Scale"]=np.float32(_own_alpha_details.get("scale",0.0) or 0.0)
@@ -17395,7 +17468,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         if _is_v13232:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             _oa=bool((bundle.get("own_fair_alpha_expert") or {}).get("gate_pass",False))
-            status=np.where(eligible,("V13_2_32_CORE_PLUS_OWN_FAIR_ALPHA_ACTIVE" if _oa else "V13_2_32_MARKET_RICH_CORE_ACTIVE"),"V13_2_32_CORE_UNAVAILABLE")
+            status=np.where(eligible,("V13_2_33_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_2_33_MARKET_RICH_CORE_ACTIVE"),"V13_2_33_CORE_UNAVAILABLE")
         elif _is_v13227:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             status=np.where(eligible,"V13_2_31_OWN_FAIR_ACTIVE","V13_2_31_OWN_FAIR_UNAVAILABLE")
