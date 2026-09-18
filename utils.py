@@ -10323,7 +10323,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_36'
+                            _source[_use]='V13_2_37'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -14890,8 +14890,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-18-v13.2.36-canonical-feature-contract-freshness"
-NCAAF_V13_HOTFIX = "V13_2_36__ONE_CANONICAL_FEATURE_MATERIALIZER__FEATURE_PARITY__FRESHNESS_AUTHORITY__CANONICAL_INFERENCE_GRAPH__FORWARD_SHADOW_READY"
+NCAAF_V13_VERSION = "2026-09-18-v13.2.37-compact-final-state-production"
+NCAAF_V13_HOTFIX = "V13_2_37__ONE_CANONICAL_FEATURE_MATERIALIZER__FEATURE_PARITY__COMPACT_FINAL_STATE_AUTHORITY__TIMING_COLUMN_RECON__CANONICAL_INFERENCE_GRAPH__FORWARD_SHADOW_READY"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -17514,7 +17514,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         if _is_v13232:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             _oa=bool((bundle.get("own_fair_alpha_expert") or {}).get("gate_pass",False))
-            status=np.where(eligible,("V13_2_36_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_2_36_MARKET_RICH_CORE_ACTIVE"),"V13_2_35_CORE_UNAVAILABLE")
+            status=np.where(eligible,("V13_2_37_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_2_37_MARKET_RICH_CORE_ACTIVE"),"V13_2_37_CORE_UNAVAILABLE")
         elif _is_v13227:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             status=np.where(eligible,"V13_2_31_OWN_FAIR_ACTIVE","V13_2_31_OWN_FAIR_UNAVAILABLE")
@@ -20650,9 +20650,9 @@ def compute_and_write_market_weights(df):
 
 
 # ============================================================================
-# V13.2.36 CANONICAL FEATURE + PRODUCTION INFERENCE API
+# V13.2.37 CANONICAL FEATURE + PRODUCTION INFERENCE API
 # ============================================================================
-NCAAF_CORE_FEATURE_BUILDER_VERSION = "2026-09-18-v13.2.36-core-feature-materializer-v1"
+NCAAF_CORE_FEATURE_BUILDER_VERSION = "2026-09-18-v13.2.37-core-feature-materializer-v1"
 
 def build_ncaaf_core_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     """Canonical numeric materializer for the NCAAF Outcome/AutoFS Core.
@@ -20745,7 +20745,7 @@ def predict_ncaaf_v13_production(rows: pd.DataFrame, bundle: dict, core_prob=Non
         'maturity':maturity,'fundamental_info':finfo,
         'specialist_info':{'residual_details':spec_details},
         'authority_route':str(out.get('V13_Probability_Authority_Route',pd.Series(['CORE_ONLY'])).iloc[0]) if n else 'CORE_ONLY',
-        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_2_36',
+        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_2_37',
         'canonical_fallback_used':False,
     }
     return (prob,info) if return_stages else prob
