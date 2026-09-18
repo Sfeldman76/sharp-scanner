@@ -10317,7 +10317,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_34'
+                            _source[_use]='V13_2_35'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -14884,8 +14884,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-18-v13.2.34-production-hardening"
-NCAAF_V13_HOTFIX = "V13_2_34__COMMON_MARKET_INDEX_FIX__PAIRWISE_COMPONENT_AUDIT__EXACT_REPLAY_PARITY__FRESHNESS_SPLIT__HARD_PROMOTION_INTERLOCK"
+NCAAF_V13_VERSION = "2026-09-18-v13.2.35-canonical-inference-distributional-shadow"
+NCAAF_V13_HOTFIX = "V13_2_35__ONE_CANONICAL_INFERENCE_GRAPH__STAGE_PARITY__PURGED_DECISION_CV__DISTRIBUTIONAL_UNCERTAINTY__AI_MULTITEST_FIREWALL__FORWARD_SHADOW_READY"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -16874,7 +16874,7 @@ def _v13227_runtime_novig_spread_prob(rows: pd.DataFrame, break_even):
 
 
 
-# V13.2.34 runtime Common Market parity.  These functions must mirror the training
+# V13.2.35 runtime Common Market parity.  These functions must mirror the training
 # feature contract exactly: real open/current spread, open/current total and key-number
 # movement only.  No historical book-level microstructure is synthesized.
 def _v13233_runtime_num_first(df: pd.DataFrame,*names):
@@ -16951,7 +16951,7 @@ def _v13232_runtime_apply_own_fair_alpha(core_prob, own_prob, artifact):
 
 
 def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overlay: dict, maturity_bucket, core_calibrated_prob=None):
-    """V13.2.32 Core-anchored expert probability resolver with fail-closed authority routing."""
+    """V13.2.35 Core-anchored routed expert probability resolver with fail-closed authority routing."""
     n=len(rows); base=np.asarray(base_prob,dtype=float); final=base.copy(); details={}
     core_cal=base.copy() if core_calibrated_prob is None else np.asarray(core_calibrated_prob,dtype=float).reshape(-1)
     if len(core_cal)!=n: core_cal=base.copy()
@@ -17033,6 +17033,25 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
     gate=bool(route!="CORE_ONLY" and not route.startswith("CORE_ONLY_"))
     return np.clip(final,0.01,0.99),details,gate
 
+
+
+def _v13235_runtime_distribution_quantiles(fair_side, orient, rows, engine, fallback):
+    """Conditional fair-margin distribution quantiles from the same residual pools used for cover probability."""
+    fs=np.asarray(fair_side,dtype=float); ori=np.asarray(orient,dtype=float); n=len(fs)
+    q10=np.full(n,np.nan); q50=np.full(n,np.nan); q90=np.full(n,np.nan); width=np.full(n,np.nan)
+    eng=engine or {}; cells=eng.get('cell_pools') or {}; bands=eng.get('band_pools') or {}
+    glob=np.asarray(eng.get('global_pool',fallback),dtype=float); glob=glob[np.isfinite(glob)]
+    fb=np.asarray(fallback,dtype=float); fb=fb[np.isfinite(fb)]
+    home_equiv=np.where(np.isfinite(ori)&(ori!=0),fs*ori,fs); mb=_v13231_runtime_distribution_margin_band(home_equiv); mat=_v13231_runtime_distribution_maturity(rows)
+    for i in range(n):
+        if not (np.isfinite(fs[i]) and np.isfinite(ori[i])): continue
+        key=f'{mb[i]}|{mat[i]}'; pool=np.asarray(cells.get(key,bands.get(str(mb[i]),glob)),dtype=float); pool=pool[np.isfinite(pool)]
+        if len(pool)<50: pool=glob if len(glob)>=50 else fb
+        if len(pool)<50: continue
+        rr=pool if ori[i]>0 else -pool
+        qs=np.quantile(rr,[.10,.50,.90]); q10[i]=fs[i]+qs[0]; q50[i]=fs[i]+qs[1]; q90[i]=fs[i]+qs[2]; width[i]=qs[2]-qs[0]
+    return q10,q50,q90,width
+
 def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
     """Calculate V13 diagnostics and promoted NCAAF-spreads probability when enabled."""
     out=rows.copy(); n=len(out)
@@ -17086,6 +17105,9 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         "V13_Market_Residual_Edge":0.0,"V13_Market_Residual_Trust":0.0,"V13_Market_Independence":1.0,
         "V13_Pathi_Residual_Edge":0.0,"V13_Pathi_Residual_Trust":0.0,"V13_Pathi_Independence":1.0,
         "V13_BigAl_Residual_Edge":0.0,"V13_BigAl_Residual_Trust":0.0,"V13_BigAl_Independence":1.0,
+        "V13_Own_Margin_Q10":np.nan,"V13_Own_Margin_Q50":np.nan,"V13_Own_Margin_Q90":np.nan,"V13_Own_Margin_Q80_Width":np.nan,
+        "V13_Expert_Disagreement_Logit":np.nan,"V13_Uncertainty_Score":np.nan,"V13_Conservative_Fair_Prob":np.nan,"V13_Conservative_BreakEven_Edge":np.nan,
+        "V13_Specialist_Router_Active_Count":0,"V13_Specialist_Router_Conflict":0,
     }
     for c,v in defaults.items(): out[c]=v
     out["V13_AutoFS_Core_Prob"] = _incoming_core.astype("float32")
@@ -17144,6 +17166,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         if np.isfinite(own_prob).any():
             own_prob=_v13228_runtime_apply_prob_calibrator(own_prob,_own.get("probability_calibration") or {})
             own_prob=_v13229_runtime_apply_quote_calibration(own_prob,bundle.get("own_fair_quote_calibration") or {})
+        _q10,_q50,_q90,_qwidth=_v13235_runtime_distribution_quantiles(own_fair_side,orient,out,_dist_eng,_own_resid)
         beta_global=float(np.clip(fund.get("margin_edge_beta",(fund.get("edge_shrinkage") or {}).get("margin_beta",0.0)),0.0,1.0))
         beta_arr=np.full(n,beta_global,dtype=float)
         if isinstance(preview,dict) and preview.get("enabled"):
@@ -17465,11 +17488,27 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         out["V13_Final_Fair_Prob"]=np.asarray(prob,dtype="float32")
         out["V13_Final_BreakEven_Edge"]=np.asarray(prob-be,dtype="float32")
         out["V13_Final_EV_Per_Dollar"]=np.asarray(ev,dtype="float32")
+        out["V13_Own_Margin_Q10"]=np.asarray(_q10,dtype="float32"); out["V13_Own_Margin_Q50"]=np.asarray(_q50,dtype="float32"); out["V13_Own_Margin_Q90"]=np.asarray(_q90,dtype="float32"); out["V13_Own_Margin_Q80_Width"]=np.asarray(_qwidth,dtype="float32")
+        # Uncertainty is diagnostic until prospectively calibrated.  It combines
+        # independent expert disagreement with distribution width and shrinks the
+        # displayed conservative probability toward 0.50; it never increases edge.
+        _plist=[np.asarray(core_calibrated,dtype=float),np.asarray(_common_prob,dtype=float) if '_common_prob' in locals() else np.full(n,np.nan),np.asarray(own_prob,dtype=float),np.asarray(fundamental_prob,dtype=float)]
+        for _fam in ("Pathi","BigAl"):
+            _dd=_overlay_details.get(_fam) or {}; _ap=np.asarray(_dd.get("active",np.zeros(n)),dtype=float)>0; _pp=np.asarray(_dd.get("prob",np.full(n,np.nan)),dtype=float); _plist.append(np.where(_ap,_pp,np.nan))
+        _P=np.column_stack([np.asarray(x,dtype=float).reshape(-1) for x in _plist]); _P=np.clip(_P,1e-5,1-1e-5); _Z=np.log(_P/(1-_P)); _cnt=np.sum(np.isfinite(_Z),axis=1); _zstd=np.nanstd(_Z,axis=1); _zstd=np.where(_cnt>=2,_zstd,np.nan)
+        _wpen=np.where(np.isfinite(_qwidth),np.clip(_qwidth/28.0,0,1),0.35); _unc=np.clip(np.nan_to_num(_zstd,nan=0.0)/2.0+0.35*_wpen,0,1)
+        _cons=0.5+(np.asarray(prob,dtype=float)-0.5)*np.exp(-_unc)
+        out["V13_Expert_Disagreement_Logit"]=np.asarray(_zstd,dtype="float32"); out["V13_Uncertainty_Score"]=np.asarray(_unc,dtype="float32"); out["V13_Conservative_Fair_Prob"]=np.asarray(_cons,dtype="float32"); out["V13_Conservative_BreakEven_Edge"]=np.asarray(_cons-be,dtype="float32")
+        _pa=pd.to_numeric(out.get("V13_Pathi_Overlay_Active",pd.Series(np.zeros(n),index=out.index)),errors="coerce").fillna(0).to_numpy(dtype=int)
+        _ba=pd.to_numeric(out.get("V13_BigAl_Overlay_Active",pd.Series(np.zeros(n),index=out.index)),errors="coerce").fillna(0).to_numpy(dtype=int)
+        _pc=pd.to_numeric(out.get("V13_Pathi_Overlay_Contribution",pd.Series(np.zeros(n),index=out.index)),errors="coerce").fillna(0).to_numpy(dtype=float)
+        _bc=pd.to_numeric(out.get("V13_BigAl_Overlay_Contribution",pd.Series(np.zeros(n),index=out.index)),errors="coerce").fillna(0).to_numpy(dtype=float)
+        out["V13_Specialist_Router_Active_Count"]=(_pa+_ba).astype("int8"); out["V13_Specialist_Router_Conflict"]=((_pa>0)&(_ba>0)&(np.sign(_pc)!=np.sign(_bc))&(np.abs(_pc)>1e-9)&(np.abs(_bc)>1e-9)).astype("int8")
         eligible=((np.isfinite(core_prob)&np.isfinite(prob)) if _is_v13232 else ((np.isfinite(own_prob)&np.isfinite(prob)) if _is_v13227 else ((np.isfinite(core_prob)&np.isfinite(prob)) if _is_v131 else (np.isfinite(raw_fair_side)&np.isfinite(offered_margin)))))
         if _is_v13232:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             _oa=bool((bundle.get("own_fair_alpha_expert") or {}).get("gate_pass",False))
-            status=np.where(eligible,("V13_2_34_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_2_34_MARKET_RICH_CORE_ACTIVE"),"V13_2_34_CORE_UNAVAILABLE")
+            status=np.where(eligible,("V13_2_35_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_2_35_MARKET_RICH_CORE_ACTIVE"),"V13_2_35_CORE_UNAVAILABLE")
         elif _is_v13227:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             status=np.where(eligible,"V13_2_31_OWN_FAIR_ACTIVE","V13_2_31_OWN_FAIR_UNAVAILABLE")
@@ -20602,3 +20641,62 @@ def compute_and_write_market_weights(df):
     return market_weights
 
 
+
+
+# ============================================================================
+# V13.2.35 CANONICAL PRODUCTION INFERENCE API
+# ============================================================================
+def predict_ncaaf_v13_production(rows: pd.DataFrame, bundle: dict, core_prob=None, return_stages=False):
+    """Single source of truth for NCAAF V13 production probabilities.
+
+    Training, artifact replay and serving must all call this function.  It delegates
+    to apply_ncaaf_v13_shadow, the actual runtime graph, then exposes a stable stage
+    payload for parity audits.  No model-selection logic lives here.
+    """
+    src=rows.copy(); n=len(src)
+    if core_prob is not None:
+        cp=np.asarray(core_prob,dtype=float).reshape(-1)
+        if len(cp)!=n: raise ValueError(f'core_prob length {len(cp)} != rows {n}')
+        src['V13_AutoFS_Core_Prob']=cp
+    out=apply_ncaaf_v13_shadow(src,bundle)
+    def _num(name, default=np.nan):
+        if name not in out.columns: return np.full(n,default,dtype=float)
+        return pd.to_numeric(out[name],errors='coerce').to_numpy(dtype=float,na_value=np.nan)
+    prob=_num('V13_Final_Fair_Prob')
+    stage={
+        'raw_core':_num('V13_AutoFS_Core_Prob'),
+        'calibrated_core':_num('V13_Core_Calibrated_Prob'),
+        'common_market':_num('V13_CommonMarket_Prob'),
+        'core_plus_common':_num('V13_CommonMarket_Alpha_Prob'),
+        'own_fair':_num('V13_OwnFair_Prob') if 'V13_OwnFair_Prob' in out.columns else _num('V13_Own_Cover_Prob'),
+        'core_plus_own_fair':_num('V13_OwnFair_Alpha_Prob'),
+        'fundamental':_num('V13_Fundamental_Prob'),
+        'core_adjusted':_num('V13_Core_Adjusted_Prob'),
+        'pretemperature':_num('V13_Overlay_PreTemperature_Prob'),
+        'final':prob,
+    }
+    maturity=np.asarray(out.get('V13_Maturity_Bucket',pd.Series(['UNKNOWN']*n,index=out.index)),dtype=object)
+    spec_details={}
+    for fam in ('Market','Pathi','BigAl'):
+        spec_details[fam]={
+            'active':pd.to_numeric(out.get(f'V13_{fam}_Overlay_Active',pd.Series(np.zeros(n),index=out.index)),errors='coerce').fillna(0).to_numpy(dtype=int),
+            'regime':np.asarray(out.get(f'V13_{fam}_Overlay_Regime',pd.Series(['OTHER']*n,index=out.index)),dtype=object),
+            'prob':_num(f'V13_{fam}_Overlay_Prob'),
+            'contribution':_num(f'V13_{fam}_Overlay_Contribution',0.0),
+        }
+    finfo={
+        'active':pd.to_numeric(out.get('V13_Fundamental_Overlay_Active',pd.Series(np.zeros(n),index=out.index)),errors='coerce').fillna(0).to_numpy(dtype=int),
+        'regime':np.asarray(out.get('V13_Fundamental_Overlay_Regime',pd.Series(['UNKNOWN']*n,index=out.index)),dtype=object),
+    }
+    info={
+        'stage_probabilities':stage,
+        'raw_core_prob':stage['raw_core'],'calibrated_core_prob':stage['calibrated_core'],
+        'independent_fair_prob':stage['own_fair'],'core_plus_own_fair_prob':stage['core_plus_own_fair'],
+        'fundamental_prob':stage['fundamental'],'core_adjusted_prob':stage['core_adjusted'],
+        'maturity':maturity,'fundamental_info':finfo,
+        'specialist_info':{'residual_details':spec_details},
+        'authority_route':str(out.get('V13_Probability_Authority_Route',pd.Series(['CORE_ONLY'])).iloc[0]) if n else 'CORE_ONLY',
+        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_2_35',
+        'canonical_fallback_used':False,
+    }
+    return (prob,info) if return_stages else prob
