@@ -8395,7 +8395,7 @@ def _merge_feature_overwrite(left: pd.DataFrame, right: pd.DataFrame, on, how="l
 def attach_fair_value_bet_pass_fields(df: pd.DataFrame) -> pd.DataFrame:
     """Post-model fair value + betting advice.
 
-    V13.2.30 uses a threshold learned on chronological OOF bets and independently
+    V13.2.31 uses a threshold learned on chronological OOF bets and independently
     checked on a later shadow lane.  A row can be called BET only when that policy
     earned VALIDATED_BET authority.  PROMISING_LEAN may emit LEAN.  Old artifacts
     and non-V13 markets retain the legacy transparent heuristic for compatibility.
@@ -10315,7 +10315,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_30'
+                            _source[_use]='V13_2_31'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -14882,8 +14882,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-17-v13.2.30-production-own-fair-target-horizon"
-NCAAF_V13_HOTFIX = "V13_2_30__TRUE_OWN_FAIR_OOF_OR_LIVE_SCORING__NO_AUTOFS_FALLBACK__TARGET_T1H_RESOLVER__PRODUCTION_GATES"
+NCAAF_V13_VERSION = "2026-09-17-v13.2.31-walkforward-distributional-horizon-resolver"
+NCAAF_V13_HOTFIX = "V13_2_31__ASOF_WALKFORWARD_OWN_FAIR__HARD_PROMOTION_SOURCE_INTERLOCK__DISTRIBUTIONAL_MARGIN_ENGINE__MATURITY_SHRUNK_ENSEMBLE_AND_CALIBRATION__DECISION_GRAIN_NESTED_RESOLVER"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -16608,6 +16608,47 @@ def _v13224_runtime_resolver_matrix(core_cal, base, market, pathi, bigal, featur
     return new
 
 
+
+
+def _v13231_runtime_horizon_hours(rows: pd.DataFrame):
+    d=rows.reset_index(drop=True); n=len(d); hz=np.full(n,np.nan,dtype=float)
+    for c in ("__PROMO_HORIZON_HOURS","V13_Horizon_Hours","Horizon_Hours"):
+        if c in d.columns:
+            v=pd.to_numeric(d[c],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+            m=(~np.isfinite(hz))&np.isfinite(v); hz[m]=v[m]
+    gcol=next((c for c in ("Game_Start","feat_Game_Start","Commence_Time","Start_Time") if c in d.columns),None)
+    scol=next((c for c in ("Snapshot_Timestamp","Time","Captured_At","Observed_At") if c in d.columns),None)
+    if gcol and scol:
+        gs=pd.to_datetime(d[gcol],errors="coerce",utc=True); ss=pd.to_datetime(d[scol],errors="coerce",utc=True)
+        v=(gs-ss).dt.total_seconds().to_numpy(dtype=float)/3600.0
+        m=(~np.isfinite(hz))&np.isfinite(v); hz[m]=v[m]
+    return hz
+
+
+def _v13231_runtime_resolver_matrix(rows, core_cal, base, market, pathi, bigal, feature_names=None):
+    own=np.asarray(core_cal,dtype=float); residual=np.asarray(base,dtype=float); micro=np.asarray(market,dtype=float)
+    pa=np.asarray(pathi,dtype=float); bi=np.asarray(bigal,dtype=float)
+    zo=_v13_overlay_logit(own); zr=_v13_overlay_logit(residual); zm=_v13_overlay_logit(micro)
+    zp=_v13_overlay_logit(pa); zbi=_v13_overlay_logit(bi)
+    hz=_v13231_runtime_horizon_hours(rows)
+    near=np.where(np.isfinite(hz),np.exp(-np.abs(hz-1.0)/20.0),0.5)
+    near=np.clip(near,0.0,1.0); early=1.0-near
+    dm=zm-zr; dp=zp-zm; db=zbi-zm
+    new=pd.DataFrame({
+        "MarketResidual_Delta_Logit":zr-zo,
+        "MarketMicrostructure_Near_Delta_Logit":dm*near,
+        "MarketMicrostructure_Early_Delta_Logit":dm*early,
+        "Pathi_Near_Delta_Logit":dp*near,
+        "Pathi_Early_Delta_Logit":dp*early,
+        "BigAl_Near_Delta_Logit":db*near,
+        "BigAl_Early_Delta_Logit":db*early,
+    })
+    feats=list(feature_names or [])
+    # Exact replay for pre-.31 resolver artifacts.
+    if feats and not set(feats).issubset(set(new.columns)):
+        return _v13224_runtime_resolver_matrix(core_cal,base,market,pathi,bigal,feature_names=feats)
+    return new
+
 def _v13224_runtime_apply_anchored_resolver(core_prob, X, resolver):
     feats=list(resolver.get("feature_names") or list(X.columns)); xx=X.reindex(columns=feats).to_numpy(dtype=float)
     beta=np.asarray([float((resolver.get("coefficients") or {}).get(f,0.0) or 0.0) for f in feats],dtype=float)
@@ -16634,6 +16675,48 @@ def _v13227_runtime_empirical_cover_probability(residuals, threshold):
         p[i]=win/(win+lose) if win+lose>1e-12 else 0.5; q[i]=push
     return np.clip(p,0.01,0.99),np.clip(q,0.0,1.0)
 
+
+
+
+def _v13231_runtime_distribution_margin_band(x):
+    a=np.abs(np.asarray(x,dtype=float)); out=np.full(len(a),"UNKNOWN",dtype=object)
+    out[np.isfinite(a)&(a<3.0)]="MARGIN_0_3"
+    out[np.isfinite(a)&(a>=3.0)&(a<7.0)]="MARGIN_3_7"
+    out[np.isfinite(a)&(a>=7.0)&(a<14.0)]="MARGIN_7_14"
+    out[np.isfinite(a)&(a>=14.0)]="MARGIN_14_PLUS"
+    return out
+
+
+def _v13231_runtime_distribution_maturity(rows: pd.DataFrame):
+    n=len(rows); gp=None
+    for c in ("Context_Min_Games_Prior","NCAAF_Stat_Current_Season_Games","__Stat_Current_Season_Games"):
+        if c in rows.columns:
+            gp=pd.to_numeric(rows[c],errors="coerce"); break
+    if gp is None and "Team_Game_Number" in rows.columns:
+        gp=pd.to_numeric(rows["Team_Game_Number"],errors="coerce")-1.0
+    if gp is None: gp=pd.Series(np.nan,index=rows.index,dtype=float)
+    x=gp.to_numpy(dtype=float,na_value=np.nan); out=np.full(n,"UNKNOWN",dtype=object)
+    out[np.isfinite(x)&(x<=1)]="EARLY_0_1"; out[np.isfinite(x)&(x>=2)&(x<=3)]="EARLY_2_3"
+    out[np.isfinite(x)&(x>=4)&(x<=7)]="MID_4_7"; out[np.isfinite(x)&(x>=8)]="LATE_8_PLUS"
+    return out
+
+
+def _v13231_runtime_distribution_cover(fair_side, offered_margin, orient, rows, engine, fallback):
+    fs=np.asarray(fair_side,dtype=float); om=np.asarray(offered_margin,dtype=float); ori=np.asarray(orient,dtype=float)
+    n=len(fs); out=np.full(n,np.nan,dtype=float); push=np.full(n,np.nan,dtype=float)
+    eng=engine or {}; cells=eng.get("cell_pools") or {}; bands=eng.get("band_pools") or {}
+    glob=np.asarray(eng.get("global_pool",fallback),dtype=float); glob=glob[np.isfinite(glob)]
+    fb=np.asarray(fallback,dtype=float); fb=fb[np.isfinite(fb)]
+    home_equiv=np.where(np.isfinite(ori)&(ori!=0),fs*ori,fs); mb=_v13231_runtime_distribution_margin_band(home_equiv)
+    mat=_v13231_runtime_distribution_maturity(rows); th=om-fs
+    for i in range(n):
+        if not (np.isfinite(th[i]) and np.isfinite(ori[i])): continue
+        key=f"{mb[i]}|{mat[i]}"; pool=np.asarray(cells.get(key,bands.get(str(mb[i]),glob)),dtype=float); pool=pool[np.isfinite(pool)]
+        if len(pool)<50: pool=glob if len(glob)>=50 else fb
+        if len(pool)<50: continue
+        rr=pool if ori[i]>0 else -pool
+        pp,pq=_v13227_runtime_empirical_cover_probability(rr,np.asarray([th[i]],dtype=float)); out[i]=pp[0]; push[i]=pq[0]
+    return np.clip(out,0.01,0.99),np.clip(push,0.0,1.0)
 
 def _v13229_runtime_apply_quote_calibration(p, artifact):
     x=np.asarray(p,dtype=float); out=x.copy()
@@ -16683,8 +16766,54 @@ def _v13228_runtime_dynamic_margin(rows: pd.DataFrame, spec: dict):
     return out
 
 
+
+def _v13231_runtime_apply_maturity_margin_weights(rows: pd.DataFrame, comps, global_weights, maturity_weights):
+    cc=[np.asarray(x,dtype=float) for x in comps]
+    if not cc:
+        return np.asarray([],dtype=float)
+    n=len(cc[0]); mat=_v13231_runtime_distribution_maturity(rows)
+    gw=np.asarray(global_weights,dtype=float)
+    if gw.size!=len(cc) or not np.isfinite(gw).all() or gw.sum()<=1e-12:
+        gw=np.asarray([0.50,0.15,0.20,0.15],dtype=float)[:len(cc)]
+    gw=gw/max(float(gw.sum()),1e-12)
+    C=np.column_stack(cc); out=np.full(n,np.nan,dtype=float)
+    order=("ridge","hgb","robust","dynamic"); mw=maturity_weights or {}
+    for b in np.unique(mat):
+        idx=np.where(mat==b)[0]
+        rec=mw.get(str(b),{}) if isinstance(mw,dict) else {}
+        wd=(rec.get("weights") or {}) if isinstance(rec,dict) else {}
+        w=np.asarray([float(wd.get(k,gw[j])) for j,k in enumerate(order[:len(cc)])],dtype=float)
+        if not np.isfinite(w).all() or w.sum()<=1e-12: w=gw.copy()
+        w=np.clip(w,0.0,None); w=w/max(float(w.sum()),1e-12)
+        Z=C[idx]; ok=np.isfinite(Z)
+        den=(ok*w.reshape(1,-1)).sum(axis=1)
+        num=np.nansum(np.where(ok,Z,0.0)*w.reshape(1,-1),axis=1)
+        good=den>1e-12; vals=np.full(len(idx),np.nan,dtype=float); vals[good]=num[good]/den[good]
+        out[idx]=vals
+    return out
+
+
+
+def _v13231_runtime_apply_maturity_margin_calibration(rows: pd.DataFrame, raw_pred, global_cal, maturity_calibrations):
+    x=np.asarray(raw_pred,dtype=float); mat=_v13231_runtime_distribution_maturity(rows)
+    gc=dict(global_cal or {})
+    gi=float(gc.get("intercept",0.0)); gs=float(gc.get("slope",1.0))
+    if not np.isfinite(gi): gi=0.0
+    if not np.isfinite(gs): gs=1.0
+    out=np.full(len(x),np.nan,dtype=float); mc=maturity_calibrations or {}
+    for b in np.unique(mat):
+        idx=np.where(mat==b)[0]
+        rec=mc.get(str(b),{}) if isinstance(mc,dict) else {}
+        a=float(rec.get("intercept",gi)) if isinstance(rec,dict) else gi
+        z=float(rec.get("slope",gs)) if isinstance(rec,dict) else gs
+        if not np.isfinite(a): a=gi
+        if not np.isfinite(z): z=gs
+        ok=np.isfinite(x[idx]); vals=np.full(len(idx),np.nan,dtype=float)
+        vals[ok]=a+z*x[idx][ok]; out[idx]=vals
+    return out
+
 def _v13228_runtime_own_fair_margin(rows: pd.DataFrame, Xstate: pd.DataFrame, own: dict):
-    """V13.2.30 market-blind ensemble prediction with saved OOF-selected weights."""
+    """V13.2.31 market-blind ensemble prediction with saved OOF-selected weights."""
     n=len(rows)
     cols=list((own or {}).get("margin_features") or [])
     models=(own or {}).get("margin_models")
@@ -16699,18 +16828,14 @@ def _v13228_runtime_own_fair_margin(rows: pd.DataFrame, Xstate: pd.DataFrame, ow
     robust=np.asarray((own.get("robust_margin_model").predict(xx) if own.get("robust_margin_model") is not None else ridge),dtype=float)
     dyn=_v13228_runtime_dynamic_margin(rows,own.get("dynamic_strength") or {})
     w=own.get("ensemble_weights") or {}
-    wr=float(w.get("ridge",0.50)); wh=float(w.get("hgb",0.15)); wb=float(w.get("robust",0.20)); wd=float(w.get("dynamic",0.15))
-    ws=wr+wh+wb+wd
-    if not np.isfinite(ws) or ws<=1e-12:
-        wr,wh,wb,wd,ws=0.50,0.15,0.20,0.15,1.0
-    wr,wh,wb,wd=wr/ws,wh/ws,wb/ws,wd/ws
-    # Missing dynamic team state falls back to the statistical ensemble for that row
-    # rather than turning the full own-fair estimate unavailable.
-    stat_den=max(wr+wh+wb,1e-12)
-    stat=(wr*ridge+wh*hgb+wb*robust)/stat_den
-    raw=np.where(np.isfinite(dyn),(wr*ridge+wh*hgb+wb*robust+wd*dyn),stat)
+    gw=np.asarray([float(w.get("ridge",0.50)),float(w.get("hgb",0.15)),float(w.get("robust",0.20)),float(w.get("dynamic",0.15))],dtype=float)
+    raw=_v13231_runtime_apply_maturity_margin_weights(
+        rows,[ridge,hgb,robust,dyn],gw,own.get("maturity_ensemble_weights") or {}
+    )
     cal=own.get("margin_calibration") or {}
-    pred=float(cal.get("intercept",0.0))+float(cal.get("slope",1.0))*raw
+    pred=_v13231_runtime_apply_maturity_margin_calibration(
+        rows,raw,cal,own.get("maturity_margin_calibration") or {}
+    )
     return np.asarray(pred,dtype=float)
 
 def _v13227_runtime_novig_spread_prob(rows: pd.DataFrame, break_even):
@@ -16746,7 +16871,7 @@ def _v13227_runtime_novig_spread_prob(rows: pd.DataFrame, break_even):
     return out
 
 def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overlay: dict, maturity_bucket, core_calibrated_prob=None):
-    """V13.2.30 own-fair-anchored residual probability resolver with fail-closed authority routing."""
+    """V13.2.31 own-fair-anchored residual probability resolver with fail-closed authority routing."""
     n=len(rows); base=np.asarray(base_prob,dtype=float); final=base.copy(); details={}
     core_cal=base.copy() if core_calibrated_prob is None else np.asarray(core_calibrated_prob,dtype=float).reshape(-1)
     if len(core_cal)!=n: core_cal=base.copy()
@@ -16786,7 +16911,7 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
     if resolver_active:
         try:
             if bool(resolver.get("anchored_residual",False)):
-                Xr=_v13224_runtime_resolver_matrix(core_cal,base,market_prob,pathi_prob,bigal_prob,feature_names=list(resolver.get("feature_names") or []))
+                Xr=_v13231_runtime_resolver_matrix(rows,core_cal,base,market_prob,pathi_prob,bigal_prob,feature_names=list(resolver.get("feature_names") or []))
                 if not np.isfinite(Xr.to_numpy(dtype=float)).all(): raise ValueError("nonfinite anchored resolver inputs")
                 final=_v13224_runtime_apply_anchored_resolver(core_cal,Xr,resolver)
             else:
@@ -16906,7 +17031,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
                 Xstate["Power_Rating_Diff"]=np.nan
 
         # Existing Fundamental models are the secondary Market-Residual Brain in
-        # V13.2.30: they predict points of market error, not OUR fair margin.
+        # V13.2.31: they predict points of market error, not OUR fair margin.
         _market_residual_home=_ncaaf_v13_pair_predict(fund.get("margin_models"),Xstate.reindex(columns=fm_cols),float(fund.get("linear_weight",0.80)))
         _market_residual_total=_ncaaf_v13_pair_predict(fund.get("total_models"),Xstate.reindex(columns=ft_cols),float(fund.get("linear_weight",0.80))) if fund.get("total_models") is not None else np.zeros(n,dtype=float)
         _own=(fund.get("independent_fair_value") or {}) if isinstance(fund,dict) else {}
@@ -16930,9 +17055,13 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         _own_resid=np.asarray(_own.get("residual_margin",[]),dtype=float); own_prob=np.full(n,np.nan); own_push=np.full(n,np.nan)
         _ih=np.flatnonzero(np.asarray(is_home,dtype=bool)); _ia=np.flatnonzero(np.asarray(is_away,dtype=bool))
         _thr=offered_margin-own_fair_side
-        if len(_own_resid)>=50:
+        _dist_eng=_own.get("distributional_engine") or {}
+        if bool(_dist_eng.get("gate_pass",False)):
+            own_prob,own_push=_v13231_runtime_distribution_cover(own_fair_side,offered_margin,orient,out,_dist_eng,_own_resid)
+        elif len(_own_resid)>=50:
             if len(_ih): own_prob[_ih],own_push[_ih]=_v13227_runtime_empirical_cover_probability(_own_resid,_thr[_ih])
             if len(_ia): own_prob[_ia],own_push[_ia]=_v13227_runtime_empirical_cover_probability(-_own_resid,_thr[_ia])
+        if np.isfinite(own_prob).any():
             own_prob=_v13228_runtime_apply_prob_calibrator(own_prob,_own.get("probability_calibration") or {})
             own_prob=_v13229_runtime_apply_quote_calibration(own_prob,bundle.get("own_fair_quote_calibration") or {})
         beta_global=float(np.clip(fund.get("margin_edge_beta",(fund.get("edge_shrinkage") or {}).get("margin_beta",0.0)),0.0,1.0))
@@ -16947,7 +17076,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         raw_fundamental_edge=raw_fair_side-offered_margin
         fundamental_edge=tradable_fair_side-offered_margin
 
-        # V13.2.30 parity fallback for the secondary Market-Residual Brain.  The
+        # V13.2.31 parity fallback for the secondary Market-Residual Brain.  The
         # model predicts how many points the observed market is wrong; this
         # empirical residual distribution converts that point forecast into a
         # cover probability without making the market our primary fair number.
@@ -17067,7 +17196,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         _is_v13227=bool(_arch.startswith("independent_fair_primary"))
         _is_v131=bool((not _is_v13227) and (_arch.startswith("outcome_autofs_primary") or isinstance(bundle.get("core_calibration"),dict)))
         if _is_v13227:
-            # V13.2.30 production contract: Own Fair is the primary authority.
+            # V13.2.31 production contract: Own Fair is the primary authority.
             # AutoFS is retained only as a diagnostic/legacy replay field; it may
             # never silently replace a missing Own Fair probability. Missing Own
             # Fair therefore fails closed to no V13 advice for that row.
@@ -17211,7 +17340,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         eligible=(np.isfinite(own_prob)&np.isfinite(prob)) if _is_v13227 else ((np.isfinite(core_prob)&np.isfinite(prob)) if _is_v131 else (np.isfinite(raw_fair_side)&np.isfinite(offered_margin)))
         if _is_v13227:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
-            status=np.where(eligible,"V13_2_30_OWN_FAIR_ACTIVE","V13_2_30_OWN_FAIR_UNAVAILABLE")
+            status=np.where(eligible,"V13_2_31_OWN_FAIR_ACTIVE","V13_2_31_OWN_FAIR_UNAVAILABLE")
         elif _is_v131:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             status=np.where(eligible,"V13_1_AUTOFS_CORE_ACTIVE","V13_1_CORE_UNAVAILABLE")
