@@ -190,28 +190,38 @@ def main():
     try:
         if market == "All":
             pw.emit("timing", f"[{sport}] Training timing model...", pct=0.05)
-            try:
-                train_timing_model_for_market(sport=sport, bucket_name=bucket, log_func=log_func)
-            except TypeError:
-                train_timing_model_for_market(sport=sport)
+            # Call exactly once. A TypeError raised inside training is a real
+            # training failure and must propagate; retrying the entire model can
+            # duplicate work and mutate production state twice.
+            train_timing_model_for_market(
+                sport=sport, bucket_name=bucket, log_func=log_func
+            )
 
             mkts = ("h2h", "spreads", "totals")
         else:
             mkts = (market,)
 
         n = len(mkts)
+        _trained_market_keys = set()
         for i, mkt in enumerate(mkts, start=1):
+            _market_key = (str(sport).upper().strip(), str(mkt).lower().strip())
+            if _market_key in _trained_market_keys:
+                raise RuntimeError(
+                    f"Duplicate market training blocked in one job: {_market_key}"
+                )
+            _trained_market_keys.add(_market_key)
             pct = 0.10 + 0.80 * (i - 1) / max(1, n)
             pw.emit("train", f"[{sport}] Training sharp model market={mkt}", pct=pct)
 
             hb_mkt_stop = start_heartbeat(pw, f"[{sport}] market={mkt}", 45)
             try:
-                try:
-                    train_sharp_model_for_market(
-                        sport=sport, market=mkt, bucket_name=bucket, log_func=log_func
-                    )
-                except TypeError:
-                    train_sharp_model_for_market(sport=sport, market=mkt, bucket_name=bucket)
+                # EXACTLY ONE sharp-model invocation per market. Do not catch
+                # TypeError here: a TypeError can occur late after artifact
+                # evaluation/promotion, and the old fallback silently retrained
+                # the entire market a second time.
+                train_sharp_model_for_market(
+                    sport=sport, market=mkt, bucket_name=bucket, log_func=log_func
+                )
             finally:
                 hb_mkt_stop.set()
 
