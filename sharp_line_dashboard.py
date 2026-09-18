@@ -13818,6 +13818,17 @@ def _publish_challenger_to_canonical(
     return canonical_path
 
 
+# ---------------------------------------------------------------------------
+# V13.2.31 single-invocation safety guard
+# ---------------------------------------------------------------------------
+# A Cloud Run training execution is allowed to train a given sport/market once.
+# This prevents a launcher-level retry from silently training a second challenger
+# in the same process after the first challenger has already been evaluated or
+# partially promoted. Interactive/UI sessions are unaffected unless HEADLESS=1
+# and TRAIN_RUN_ID is present.
+_TRAIN_WRAPPER_INVOCATION_GUARD = set()
+
+
 def train_with_champion_wrapper(
     sport: str,
     market: str,
@@ -13834,6 +13845,21 @@ def train_with_champion_wrapper(
     """
 
     logger = logging.getLogger(__name__)
+
+    _train_run_id = str(os.getenv("TRAIN_RUN_ID", "") or "").strip()
+    _headless_job = str(os.getenv("HEADLESS", "0") or "0").strip() == "1"
+    _guard_key = (_train_run_id, str(sport).upper().strip(), str(market).lower().strip())
+    if _headless_job and _train_run_id:
+        if _guard_key in _TRAIN_WRAPPER_INVOCATION_GUARD:
+            raise RuntimeError(
+                f"Duplicate training invocation blocked for run_id={_train_run_id} "
+                f"sport={sport} market={market}"
+            )
+        _TRAIN_WRAPPER_INVOCATION_GUARD.add(_guard_key)
+        logger.warning(
+            "[TRAIN-SINGLE-INVOKE] armed run_id=%s sport=%s market=%s",
+            _train_run_id, sport, market,
+        )
 
     # 1) Train challenger with full pipeline (CV, ES, OOF, calibration, etc.)
     logger.info("🏁 Training challenger for %s %s ...", sport, market)
@@ -14234,26 +14260,45 @@ def train_with_champion_wrapper(
         )
         return
 
-    # 4) Promote challenger: publish the staged artifact to the canonical live
-    # model path, then mark that canonical object as champion in metadata.
+    # 4) Promotion is transactional/fail-closed. Build and JSON-validate the
+    # champion metadata BEFORE replacing the canonical live model object.
+    # V13.2.30 could publish the model first and then raise TypeError when
+    # np.isfinite() encountered a string metric such as active_probability_source.
+    _numeric_metrics = {}
+    for _mk, _mv in (challenger_metrics or {}).items():
+        if isinstance(_mv, (int, float, np.integer, np.floating)):
+            try:
+                _fv = float(_mv)
+                if np.isfinite(_fv):
+                    _numeric_metrics[_mk] = _fv
+            except (TypeError, ValueError, OverflowError):
+                continue
+
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    new_meta = ChampionMeta(
+        sport=sport,
+        market=market,
+        model_path=challenger_model_path,  # staged path for serialization preflight
+        created_at=now_iso,
+        metrics=_numeric_metrics,
+        config=challenger.get("config", {}),
+        holdout_eval=challenger_holdout_eval,
+    )
+    # Same serialization path used by save_champion_meta; if this fails, do not
+    # touch the canonical model.
+    json.dumps(asdict(new_meta), indent=2)
+    logger.warning(
+        "[CHAMPION-META-PREFLIGHT] PASS sport=%s market=%s numeric_metrics=%d",
+        sport, market, len(_numeric_metrics),
+    )
+
     canonical_model_path = _publish_challenger_to_canonical(
         bucket_name=bucket_name,
         challenger_model_path=challenger_model_path,
         sport=sport,
         market=market,
     )
-
-    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    new_meta = ChampionMeta(
-        sport=sport,
-        market=market,
-        model_path=canonical_model_path,
-        created_at=now_iso,
-        metrics={k: float(v) for k, v in challenger_metrics.items()
-                 if np.isfinite(v) or isinstance(v, (int, float))},
-        config=challenger.get("config", {}),
-        holdout_eval=challenger_holdout_eval,
-    )
+    new_meta.model_path = canonical_model_path
     save_champion_meta(bucket_name, new_meta)
     logger.info(
         "✅ Challenger PROMOTED to champion for %s %s. AUC_holdout=%.4f, LogLoss_holdout=%.4f",
