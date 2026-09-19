@@ -2630,7 +2630,7 @@ class _PortableBetaCalibrator:
 
 
 def _hydrate_portable_calibrator(x):
-    """Hydrate V13.2.39 structural calibrator specs after unpickling."""
+    """Hydrate V13.2.39.1 structural calibrator specs after unpickling."""
     if not isinstance(x, dict):
         return x
     typ = str(x.get("type", ""))
@@ -10289,7 +10289,7 @@ def apply_blended_sharp_score(
                     'V13_Result_Historical_Closer_Rate': np.nan, 'V13_Result_Historical_Direction_Accuracy': np.nan,
                     'V13_Result_Historical_Avg_Error_Improvement': np.nan, 'V13_Result_Historical_Closer_CI_Low': np.nan,
                     'V13_Result_Historical_Closer_CI_High': np.nan, 'V13_Result_Profile_Used_In_EV': 0,
-                    'V13_Status': 'UNAVAILABLE', 'V13_Version': NCAAF_V13_VERSION, 'V13_Promotion_Mode': 'SHADOW', 'V13_Early_Season_Warning': 0, 'V13_Drift_Scale': 1.0, 'V13_Maturity_Bucket':'UNKNOWN','V13_Maturity_Beta':np.nan,'V13_Early_Situational_Prob':np.nan,'V13_Early_Situational_Active':0, 'V12_Legacy_Model_Prob': np.nan, 'V13_Candidate_Production_Prob':np.nan, 'Production_Prob':np.nan, 'Production_Probability_Source':'UNAVAILABLE',
+                    'V13_Status': 'UNAVAILABLE', 'V13_Version': NCAAF_V13_VERSION, 'V13_Promotion_Mode': 'FORWARD_SHADOW_LOCKED', 'V13_Early_Season_Warning': 0, 'V13_Drift_Scale': 1.0, 'V13_Maturity_Bucket':'UNKNOWN','V13_Maturity_Beta':np.nan,'V13_Early_Situational_Prob':np.nan,'V13_Early_Situational_Active':0, 'V12_Legacy_Model_Prob': np.nan, 'V13_Candidate_Production_Prob':np.nan, 'Production_Prob':np.nan, 'Production_Probability_Source':'UNAVAILABLE',
                 }.items():
                     if _c not in df_canon.columns:
                         df_canon[_c] = _v
@@ -10301,7 +10301,7 @@ def apply_blended_sharp_score(
                 if col not in df.columns:
                     df[col] = default
             if str(sport).upper().strip() == 'NCAAF' and str(mkt).lower().strip() == 'spreads':
-                for _c,_v in [('V12_Legacy_Model_Prob',np.nan),('V13_Promotion_Mode','SHADOW'),('V13_Early_Season_Warning',0),('V13_Drift_Scale',1.0),('V13_Maturity_Bucket','UNKNOWN'),('V13_Maturity_Beta',np.nan),('V13_Early_Situational_Prob',np.nan),('V13_Early_Situational_Active',0)]:
+                for _c,_v in [('V12_Legacy_Model_Prob',np.nan),('V13_Promotion_Mode','FORWARD_SHADOW_LOCKED'),('V13_Early_Season_Warning',0),('V13_Drift_Scale',1.0),('V13_Maturity_Bucket','UNKNOWN'),('V13_Maturity_Beta',np.nan),('V13_Early_Situational_Prob',np.nan),('V13_Early_Situational_Active',0)]:
                     if _c not in df_canon.columns: df_canon[_c]=_v
                     if _c not in df.columns: df[_c]=_v
         
@@ -10375,7 +10375,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_39'
+                            _source[_use]='V13_2_39_1'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -14942,8 +14942,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-18-v13.2.39-portable-calibrator-replay-parity"
-NCAAF_V13_HOTFIX = "V13_2_39__PORTABLE_CORE_CALIBRATOR__SAVED_ARTIFACT_STAGE_PARITY__EXACT_POSTPROCESS_PARITY__COMPACT_FINAL_STATE_AUTHORITY__FORWARD_SHADOW_READY"
+NCAAF_V13_VERSION = "2026-09-18-v13.2.39.1-portable-calibrator-replay-parity"
+NCAAF_V13_HOTFIX = "V13_2_39_1__EXACT_ROW_LINE_ATS_TARGET__PHYSICAL_GAME_GROUPING__BOOK_RELIABILITY_INTERLOCK__ATOMIC_PRICE_SHOPPING__PROSPECTIVE_AUTHORITY_LOCK__UI_FORWARD_SHADOW"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -17566,7 +17566,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         if _is_v13232:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             _oa=bool((bundle.get("own_fair_alpha_expert") or {}).get("gate_pass",False))
-            status=np.where(eligible,("V13_2_39_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_2_39_MARKET_RICH_CORE_ACTIVE"),"V13_2_39_CORE_UNAVAILABLE")
+            status=np.where(eligible,("V13_2_39_1_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_2_39_1_MARKET_RICH_CORE_ACTIVE"),"V13_2_39_1_CORE_UNAVAILABLE")
         elif _is_v13227:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             status=np.where(eligible,"V13_2_31_OWN_FAIR_ACTIVE","V13_2_31_OWN_FAIR_UNAVAILABLE")
@@ -17590,6 +17590,9 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         out["V13_Fundamental_Edge_Beta"]=beta_arr.astype("float32")
         out["V13_Pred_Close_Margin"]=pred_close_side.astype("float32")
         out["V13_Market_Edge_Points"]=market_edge.astype("float32")
+        out["V13_Formal_Bet_Authority"]="LOCKED_PENDING_PROSPECTIVE_VALIDATION"
+        out["V13_State_Authority"]="FORWARD_SHADOW__TRAINED_ON_COMPACT_FINAL_STATE"
+        out["V13_Prospective_Promotion_Required"]=1
         out["V13_Cover_Prob"]=prob.astype("float32")
         out["V13_Candidate_Production_Prob"]=prob.astype("float32")
         out["V13_BreakEven_Prob"]=be.astype("float32")
@@ -17607,7 +17610,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         out["V13_Result_Profile_Used_In_EV"]=np.int8(0)
         out["V13_Status"]=status; out["V13_Active"]=eligible.astype("int8")
         _internal_ready=bool((bundle.get("v13_1_internal_ready") or {}).get("gate_pass",False)) if _is_v131 else bool(isinstance(preview,dict) and preview.get("enabled"))
-        out["V13_Promotion_Mode"]=("ACTIVE_VALIDATED_ARTIFACT" if _internal_ready and _v13_runtime_enabled else "SHADOW")
+        out["V13_Promotion_Mode"]="FORWARD_SHADOW_LOCKED"
         out["V13_Early_Season_Warning"]=_early.astype("int8")
         out["V13_Drift_Scale"]=np.float32(drift_scale)
         out["V13_Maturity_Bucket"]=maturity_bucket
@@ -20705,9 +20708,9 @@ def compute_and_write_market_weights(df):
 
 
 # ============================================================================
-# V13.2.39 CANONICAL FEATURE + PRODUCTION INFERENCE API
+# V13.2.39.1 CANONICAL FEATURE + PRODUCTION INFERENCE API
 # ============================================================================
-NCAAF_CORE_FEATURE_BUILDER_VERSION = "2026-09-18-v13.2.39-core-feature-materializer-v1"
+NCAAF_CORE_FEATURE_BUILDER_VERSION = "2026-09-18-v13.2.39.1-core-feature-materializer-v1"
 
 def build_ncaaf_core_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     """Canonical numeric materializer for the NCAAF Outcome/AutoFS Core.
@@ -20805,7 +20808,7 @@ def predict_ncaaf_v13_production(rows: pd.DataFrame, bundle: dict, core_prob=Non
         'maturity':maturity,'fundamental_info':finfo,
         'specialist_info':{'residual_details':spec_details},
         'authority_route':str(out.get('V13_Probability_Authority_Route',pd.Series(['CORE_ONLY'])).iloc[0]) if n else 'CORE_ONLY',
-        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_2_39',
+        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_2_39_1',
         'canonical_fallback_used':False,
     }
     return (prob,info) if return_stages else prob
