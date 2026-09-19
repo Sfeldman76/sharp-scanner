@@ -95,13 +95,13 @@ MARKET_WEIGHTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.market_weights"
 SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 
 
-# V13.2.39.2 forward-shadow ledger.  These tables are append-only research
+# V13.2.39.3 forward-shadow ledger.  These tables are append-only research
 # evidence.  The exact fitted artifact identity (SHA256), not the human version
 # string, is the primary model-instance key.
-NCAAF_V13_CODE_VERSION = "V13.2.39.2"
+NCAAF_V13_CODE_VERSION = "V13.2.39.3"
 NCAAF_V13_FORWARD_PREDICTIONS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_predictions"
 NCAAF_V13_FORWARD_RESULTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_results"
-NCAAF_V13_FORWARD_LEDGER_VERSION = "2026-09-18-v13.2.39.2-immutable-artifact-aware-forward-ledger-v1"
+NCAAF_V13_FORWARD_LEDGER_VERSION = "2026-09-18-v13.2.39.3-immutable-artifact-aware-forward-ledger-v1"
 _V13_FORWARD_LAST_SETTLE_MONO = 0.0
 
 
@@ -187,14 +187,14 @@ def _v13392_ensure_one_table(client, table_fq: str, schema, partition_field: str
         if missing:
             tbl.schema = list(tbl.schema) + missing
             client.update_table(tbl, ["schema"])
-            logging.info("[V13.2.39.2-LEDGER-SCHEMA] evolved=%s added=%d", table_fq, len(missing))
+            logging.info("[V13.2.39.3-LEDGER-SCHEMA] evolved=%s added=%d", table_fq, len(missing))
         return client.get_table(table_fq)
     except NotFound:
         tbl = bigquery.Table(table_fq, schema=schema)
         tbl.time_partitioning = bigquery.TimePartitioning(type_=bigquery.TimePartitioningType.DAY, field=partition_field)
         tbl.clustering_fields = list(cluster_fields or [])[:4]
         out = client.create_table(tbl)
-        logging.info("[V13.2.39.2-LEDGER-SCHEMA] created=%s", table_fq)
+        logging.info("[V13.2.39.3-LEDGER-SCHEMA] created=%s", table_fq)
         return out
 
 
@@ -208,7 +208,7 @@ def ensure_ncaaf_v13_forward_shadow_tables(client=None) -> dict:
         _v13392_ensure_one_table(client, NCAAF_V13_FORWARD_RESULTS_TABLE, _v13392_result_schema(), "settled_at", ["model_instance_id","physical_game_id","side","lock_type"])
         return {"status":"READY","predictions":NCAAF_V13_FORWARD_PREDICTIONS_TABLE,"results":NCAAF_V13_FORWARD_RESULTS_TABLE}
     except Exception as e:
-        logging.error("[V13.2.39.2-LEDGER-SCHEMA] status=ERROR err=%s:%s", type(e).__name__, e, exc_info=True)
+        logging.error("[V13.2.39.3-LEDGER-SCHEMA] status=ERROR err=%s:%s", type(e).__name__, e, exc_info=True)
         return {"status":"ERROR","error":f"{type(e).__name__}:{e}"}
 
 
@@ -320,7 +320,9 @@ def record_ncaaf_v13_forward_shadow_predictions(df_scored: pd.DataFrame, client=
     d["_edge"]=d["V13_Cover_Prob"]-d["_be"]
     d["_ev"]=d["V13_Cover_Prob"]*d["_profit"]-(1.0-d["V13_Cover_Prob"])
     d["_cons_edge"]=d["V13_Conservative_BreakEven_Edge"]
-    d["_status"]=np.where((d["_edge"]>=0.01)&(d["_ev"]>0)&(d["_cons_edge"].isna()|(d["_cons_edge"]>0)),"SHADOW LEAN","PASS")
+    _coh=pd.to_numeric(d.get("V13_Probability_Coherence_Gate",pd.Series(0,index=d.index)),errors="coerce").fillna(0).eq(1)
+    d["_status"]=np.where(_coh&(d["_edge"]>=0.01)&(d["_ev"]>0)&(d["_cons_edge"].isna()|(d["_cons_edge"]>0)),"SHADOW LEAN","PASS")
+    logging.info("[V13.2.39.3-FORWARD-COHERENCE-GATE] rows=%d gate_rows=%d blocked_rows=%d",len(d),int(_coh.sum()),int((~_coh).sum()))
     d["_hours"]=(d["Game_Start"]-now).dt.total_seconds()/3600.0
     # one executable atomic quote per game-side: best tracked EV at this scan
     gcols=[c for c in ["Merge_Key_Short","Game_Key","Outcome"] if c in d.columns]
@@ -331,6 +333,32 @@ def record_ncaaf_v13_forward_shadow_predictions(df_scored: pd.DataFrame, client=
     d["_side"] = d.get("Outcome",pd.Series("",index=d.index)).astype(str)
     d["_book"] = d.get("Bookmaker",d.get("Book",pd.Series("",index=d.index))).astype(str)
     d["Snapshot_Timestamp"]=pd.to_datetime(d.get("Snapshot_Timestamp",now),errors="coerce",utc=True).fillna(now)
+
+    # Runtime quote-pair audit: verify that the currently executable same-book
+    # spread pairs are symmetric and that final V13 probabilities complement.
+    try:
+        _hn=d.get("Home_Team_Norm",d.get("Home_Team",pd.Series("",index=d.index))).astype(str).str.lower().str.strip()
+        _an=d.get("Away_Team_Norm",d.get("Away_Team",pd.Series("",index=d.index))).astype(str).str.lower().str.strip()
+        _on=d["_side"].astype(str).str.lower().str.strip()
+        d["_role"]=np.where(_on.eq(_hn),"HOME",np.where(_on.eq(_an),"AWAY",""))
+        _pair_sums=[]; _line_err=[]; _pair_games=set()
+        for (_pg,_bk),_bg in d[d["_role"].isin(["HOME","AWAY"])].groupby(["_phys","_book"],sort=False):
+            _bg=_bg.sort_values("Snapshot_Timestamp",ascending=False)
+            _h=_bg[_bg["_role"].eq("HOME")]; _a=_bg[_bg["_role"].eq("AWAY")]
+            if _h.empty or _a.empty: continue
+            _hr=_h.iloc[0]; _ar=_a.iloc[0]
+            _le=abs(float(_hr["Value"])+float(_ar["Value"]))
+            if not np.isfinite(_le) or _le>1e-9: continue
+            _psum=float(_hr["V13_Cover_Prob"])+float(_ar["V13_Cover_Prob"])
+            if not np.isfinite(_psum): continue
+            _pair_sums.append(_psum); _line_err.append(_le); _pair_games.add(str(_pg))
+        _mae=float(np.mean(np.abs(np.asarray(_pair_sums)-1.0))) if _pair_sums else np.nan
+        _bad=float(np.mean(np.abs(np.asarray(_pair_sums)-1.0)>0.02)) if _pair_sums else np.nan
+        logging.info("[V13.2.39.3-RUNTIME-PAIR-AUDIT] physical_games=%d same_book_pairs=%d prob_sum_mae=%s bad_gt2pct=%s line_antisym_mae=%s artifact_coherence_gate=%s",
+                     len(_pair_games),len(_pair_sums),f"{_mae:.6f}" if np.isfinite(_mae) else "nan",f"{_bad:.3%}" if np.isfinite(_bad) else "nan",
+                     f"{float(np.mean(_line_err)):.3e}" if _line_err else "nan",bool(pd.to_numeric(d.get("V13_Probability_Coherence_Gate"),errors="coerce").fillna(0).eq(1).any()))
+    except Exception as _pe:
+        logging.warning("[V13.2.39.3-RUNTIME-PAIR-AUDIT] status=ERROR err=%s:%s",type(_pe).__name__,_pe)
     d=d.sort_values(["_phys","_side","_ev","Snapshot_Timestamp"],ascending=[True,True,False,False]).drop_duplicates(["_phys","_side"],keep="first")
     rows=[]
     for _,r in d.iterrows():
@@ -380,10 +408,10 @@ def record_ncaaf_v13_forward_shadow_predictions(df_scored: pd.DataFrame, client=
     try:
         res=_v13392_merge_insert_dataframe(client,NCAAF_V13_FORWARD_PREDICTIONS_TABLE,pd.DataFrame(rows),"prediction_event_id")
         res.update({"status":"PASS" if res.get("status")=="PASS" else res.get("status"),"model_instances":sorted(set(x["model_instance_id"] for x in rows)),"ledger_version":NCAAF_V13_FORWARD_LEDGER_VERSION,"executable_books":sorted(_exec_books)})
-        logging.info("[V13.2.39.2-FORWARD-LEDGER-WRITE] status=%s attempted=%d inserted=%d instances=%s",res.get("status"),res.get("attempted",0),res.get("inserted",0),res.get("model_instances"))
+        logging.info("[V13.2.39.3-FORWARD-LEDGER-WRITE] status=%s attempted=%d inserted=%d instances=%s",res.get("status"),res.get("attempted",0),res.get("inserted",0),res.get("model_instances"))
         return res
     except Exception as e:
-        logging.error("[V13.2.39.2-FORWARD-LEDGER-WRITE] status=ERROR err=%s:%s",type(e).__name__,e,exc_info=True)
+        logging.error("[V13.2.39.3-FORWARD-LEDGER-WRITE] status=ERROR err=%s:%s",type(e).__name__,e,exc_info=True)
         return {"status":"ERROR","error":f"{type(e).__name__}:{e}","attempted":len(rows),"inserted":0}
 
 
@@ -468,10 +496,10 @@ def settle_ncaaf_v13_forward_shadow_results(client=None, lookback_days: int = 21
             })
         if not out: return {"status":"NO_MATCHED_FINALS","settled":0}
         res=_v13392_merge_insert_dataframe(client,NCAAF_V13_FORWARD_RESULTS_TABLE,pd.DataFrame(out),"result_event_id")
-        logging.info("[V13.2.39.2-FORWARD-SETTLEMENT] status=%s attempted=%d inserted=%d",res.get("status"),res.get("attempted",0),res.get("inserted",0))
+        logging.info("[V13.2.39.3-FORWARD-SETTLEMENT] status=%s attempted=%d inserted=%d",res.get("status"),res.get("attempted",0),res.get("inserted",0))
         return {"status":res.get("status"),"settled":res.get("inserted",0),"attempted":res.get("attempted",0)}
     except Exception as e:
-        logging.error("[V13.2.39.2-FORWARD-SETTLEMENT] status=ERROR err=%s:%s",type(e).__name__,e,exc_info=True)
+        logging.error("[V13.2.39.3-FORWARD-SETTLEMENT] status=ERROR err=%s:%s",type(e).__name__,e,exc_info=True)
         return {"status":"ERROR","error":f"{type(e).__name__}:{e}","settled":0}
 
 
@@ -495,7 +523,7 @@ def read_ncaaf_v13_forward_shadow_summary(client=None, days: int = 60) -> pd.Dat
         """
         return client.query(q).to_dataframe(create_bqstorage_client=False)
     except Exception as e:
-        logging.warning("[V13.2.39.2-FORWARD-SUMMARY] unavailable=%s:%s",type(e).__name__,e)
+        logging.warning("[V13.2.39.3-FORWARD-SUMMARY] unavailable=%s:%s",type(e).__name__,e)
         return pd.DataFrame()
 GCS_BUCKET = "sharp-models"
 API_KEY = "3879659fe861d68dfa2866c211294684"
@@ -3034,7 +3062,7 @@ class _PortableBetaCalibrator:
 
 
 def _hydrate_portable_calibrator(x):
-    """Hydrate V13.2.39.2 structural calibrator specs after unpickling."""
+    """Hydrate V13.2.39.3 structural calibrator specs after unpickling."""
     if not isinstance(x, dict):
         return x
     typ = str(x.get("type", ""))
@@ -10779,7 +10807,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_2_39_2'
+                            _source[_use]='V13_2_39_3'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -15346,8 +15374,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-18-v13.2.39.2-portable-calibrator-replay-parity"
-NCAAF_V13_HOTFIX = "V13_2_39_2__EXACT_ROW_LINE_ATS_TARGET__PHYSICAL_GAME_GROUPING__BOOK_RELIABILITY_INTERLOCK__ATOMIC_PRICE_SHOPPING__PROSPECTIVE_AUTHORITY_LOCK__UI_FORWARD_SHADOW"
+NCAAF_V13_VERSION = "2026-09-18-v13.2.39.3-probability-plumbing-audits"
+NCAAF_V13_HOTFIX = "V13_2_39_3__CLEAN_ROW_ATS__PHYSICAL_GAME_TWO_SIDE_STAT_GATE__PROPER_SCORE_AUTOFS__FINAL_PROBABILITY_COHERENCE__PUSH_FORENSICS__ATOMIC_FORWARD_LEDGER"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -17981,7 +18009,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         if _is_v13232:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             _oa=bool((bundle.get("own_fair_alpha_expert") or {}).get("gate_pass",False))
-            status=np.where(eligible,("V13_2_39_2_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_2_39_2_MARKET_RICH_CORE_ACTIVE"),"V13_2_39_2_CORE_UNAVAILABLE")
+            status=np.where(eligible,("V13_2_39_3_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_2_39_3_MARKET_RICH_CORE_ACTIVE"),"V13_2_39_3_CORE_UNAVAILABLE")
         elif _is_v13227:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             status=np.where(eligible,"V13_2_31_OWN_FAIR_ACTIVE","V13_2_31_OWN_FAIR_UNAVAILABLE")
@@ -18005,7 +18033,12 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         out["V13_Fundamental_Edge_Beta"]=beta_arr.astype("float32")
         out["V13_Pred_Close_Margin"]=pred_close_side.astype("float32")
         out["V13_Market_Edge_Points"]=market_edge.astype("float32")
-        out["V13_Formal_Bet_Authority"]="LOCKED_PENDING_PROSPECTIVE_VALIDATION"
+        _coh_audit=(bundle.get("probability_coherence_audit") or {}) if isinstance(bundle,dict) else {}
+        _coh_gate=bool(_coh_audit.get("gate_pass",False))
+        out["V13_Probability_Coherence_Gate"]=np.int8(1 if _coh_gate else 0)
+        out["V13_Probability_Coherence_Status"]=str(_coh_audit.get("status","UNAVAILABLE"))
+        out["V13_Probability_Coherence_MAE"]=np.float32(_coh_audit.get("probability_sum_mae",np.nan))
+        out["V13_Formal_Bet_Authority"]=("LOCKED_PENDING_PROSPECTIVE_VALIDATION" if _coh_gate else "LOCKED_PROBABILITY_COHERENCE_GATE")
         out["V13_State_Authority"]="FORWARD_SHADOW__TRAINED_ON_COMPACT_FINAL_STATE"
         out["V13_Prospective_Promotion_Required"]=1
         out["V13_Cover_Prob"]=prob.astype("float32")
@@ -19186,7 +19219,7 @@ def detect_sharp_moves(
         df_scored['Pre_Game']  = df_scored['Game_Start'] > now
         df_scored['Post_Game'] = ~df_scored['Pre_Game']
         df_scored = df_scored.drop_duplicates(subset=merge_keys, keep='last')
-        # V13.2.39.2: tracking is backend-driven. Opening/refreshing the UI is NOT
+        # V13.2.39.3: tracking is backend-driven. Opening/refreshing the UI is NOT
         # required to create the prospective record. Failure to persist is visible
         # but never allowed to change a model probability.
         _ledger={"status":"NOT_APPLICABLE","attempted":0,"inserted":0}
@@ -19197,7 +19230,7 @@ def detect_sharp_moves(
                 _settle=settle_ncaaf_v13_forward_shadow_results()
         except Exception as _le:
             _ledger={"status":"ERROR","error":f"{type(_le).__name__}:{_le}","attempted":0,"inserted":0}
-            logging.exception("[V13.2.39.2-FORWARD-LEDGER] unexpected writer error")
+            logging.exception("[V13.2.39.3-FORWARD-LEDGER] unexpected writer error")
         df_scored['V13_Ledger_Status']=str(_ledger.get('status','UNKNOWN'))
         df_scored['V13_Ledger_Events_Attempted']=int(_ledger.get('attempted',0) or 0)
         df_scored['V13_Ledger_Events_Inserted']=int(_ledger.get('inserted',0) or 0)
@@ -21152,9 +21185,9 @@ def compute_and_write_market_weights(df):
 
 
 # ============================================================================
-# V13.2.39.2 CANONICAL FEATURE + PRODUCTION INFERENCE API
+# V13.2.39.3 CANONICAL FEATURE + PRODUCTION INFERENCE API
 # ============================================================================
-NCAAF_CORE_FEATURE_BUILDER_VERSION = "2026-09-18-v13.2.39.2-core-feature-materializer-v1"
+NCAAF_CORE_FEATURE_BUILDER_VERSION = "2026-09-18-v13.2.39.3-core-feature-materializer-v1"
 
 def build_ncaaf_core_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     """Canonical numeric materializer for the NCAAF Outcome/AutoFS Core.
@@ -21252,7 +21285,7 @@ def predict_ncaaf_v13_production(rows: pd.DataFrame, bundle: dict, core_prob=Non
         'maturity':maturity,'fundamental_info':finfo,
         'specialist_info':{'residual_details':spec_details},
         'authority_route':str(out.get('V13_Probability_Authority_Route',pd.Series(['CORE_ONLY'])).iloc[0]) if n else 'CORE_ONLY',
-        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_2_39_2',
+        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_2_39_3',
         'canonical_fallback_used':False,
     }
     return (prob,info) if return_stages else prob
