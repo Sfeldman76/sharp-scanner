@@ -95,14 +95,14 @@ MARKET_WEIGHTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.market_weights"
 SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 
 
-# V13.3.2 forward-shadow ledger.  These tables are append-only research
+# V13.3.3 forward-shadow ledger.  These tables are append-only research
 # evidence.  The exact fitted artifact identity (SHA256), not the human version
 # string, is the primary model-instance key.
-NCAAF_V13_CODE_VERSION = "V13.3.2"
-V133_DEPLOY_BUILD_ID = "2026-09-20-v13.3.2-core-v2-calibration-parity-coherence-1"
+NCAAF_V13_CODE_VERSION = "V13.3.3"
+V133_DEPLOY_BUILD_ID = "2026-09-20-v13.3.3-core-strength-hybrid-1"
 NCAAF_V13_FORWARD_PREDICTIONS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_predictions"
 NCAAF_V13_FORWARD_RESULTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_results"
-NCAAF_V13_FORWARD_LEDGER_VERSION = "2026-09-20-v13.3.2-immutable-artifact-aware-forward-ledger-v1"
+NCAAF_V13_FORWARD_LEDGER_VERSION = "2026-09-20-v13.3.3-immutable-artifact-aware-forward-ledger-v1"
 _V13_FORWARD_LAST_SETTLE_MONO = 0.0
 
 
@@ -192,14 +192,14 @@ def _v13392_ensure_one_table(client, table_fq: str, schema, partition_field: str
         if missing:
             tbl.schema = list(tbl.schema) + missing
             client.update_table(tbl, ["schema"])
-            logging.info("[V13.3.2-LEDGER-SCHEMA] evolved=%s added=%d", table_fq, len(missing))
+            logging.info("[V13.3.3-LEDGER-SCHEMA] evolved=%s added=%d", table_fq, len(missing))
         return client.get_table(table_fq)
     except NotFound:
         tbl = bigquery.Table(table_fq, schema=schema)
         tbl.time_partitioning = bigquery.TimePartitioning(type_=bigquery.TimePartitioningType.DAY, field=partition_field)
         tbl.clustering_fields = list(cluster_fields or [])[:4]
         out = client.create_table(tbl)
-        logging.info("[V13.3.2-LEDGER-SCHEMA] created=%s", table_fq)
+        logging.info("[V13.3.3-LEDGER-SCHEMA] created=%s", table_fq)
         return out
 
 
@@ -213,7 +213,7 @@ def ensure_ncaaf_v13_forward_shadow_tables(client=None) -> dict:
         _v13392_ensure_one_table(client, NCAAF_V13_FORWARD_RESULTS_TABLE, _v13392_result_schema(), "settled_at", ["model_instance_id","physical_game_id","side","lock_type"])
         return {"status":"READY","predictions":NCAAF_V13_FORWARD_PREDICTIONS_TABLE,"results":NCAAF_V13_FORWARD_RESULTS_TABLE}
     except Exception as e:
-        logging.error("[V13.3.2-LEDGER-SCHEMA] status=ERROR err=%s:%s", type(e).__name__, e, exc_info=True)
+        logging.error("[V13.3.3-LEDGER-SCHEMA] status=ERROR err=%s:%s", type(e).__name__, e, exc_info=True)
         return {"status":"ERROR","error":f"{type(e).__name__}:{e}"}
 
 
@@ -327,7 +327,7 @@ def record_ncaaf_v13_forward_shadow_predictions(df_scored: pd.DataFrame, client=
     d["_cons_edge"]=d["V13_Conservative_BreakEven_Edge"]
     _coh=pd.to_numeric(d.get("V13_Probability_Coherence_Gate",pd.Series(0,index=d.index)),errors="coerce").fillna(0).eq(1)
     d["_status"]=np.where(_coh&(d["_edge"]>=0.01)&(d["_ev"]>0)&(d["_cons_edge"].isna()|(d["_cons_edge"]>0)),"SHADOW LEAN","PASS")
-    logging.info("[V13.3.2-FORWARD-COHERENCE-GATE] rows=%d gate_rows=%d blocked_rows=%d",len(d),int(_coh.sum()),int((~_coh).sum()))
+    logging.info("[V13.3.3-FORWARD-COHERENCE-GATE] rows=%d gate_rows=%d blocked_rows=%d",len(d),int(_coh.sum()),int((~_coh).sum()))
     d["_hours"]=(d["Game_Start"]-now).dt.total_seconds()/3600.0
     # one executable atomic quote per game-side: best tracked EV at this scan
     gcols=[c for c in ["Merge_Key_Short","Game_Key","Outcome"] if c in d.columns]
@@ -359,11 +359,11 @@ def record_ncaaf_v13_forward_shadow_predictions(df_scored: pd.DataFrame, client=
             _pair_sums.append(_psum); _line_err.append(_le); _pair_games.add(str(_pg))
         _mae=float(np.mean(np.abs(np.asarray(_pair_sums)-1.0))) if _pair_sums else np.nan
         _bad=float(np.mean(np.abs(np.asarray(_pair_sums)-1.0)>0.02)) if _pair_sums else np.nan
-        logging.info("[V13.3.2-RUNTIME-PAIR-AUDIT] physical_games=%d same_book_pairs=%d prob_sum_mae=%s bad_gt2pct=%s line_antisym_mae=%s artifact_coherence_gate=%s",
+        logging.info("[V13.3.3-RUNTIME-PAIR-AUDIT] physical_games=%d same_book_pairs=%d prob_sum_mae=%s bad_gt2pct=%s line_antisym_mae=%s artifact_coherence_gate=%s",
                      len(_pair_games),len(_pair_sums),f"{_mae:.6f}" if np.isfinite(_mae) else "nan",f"{_bad:.3%}" if np.isfinite(_bad) else "nan",
                      f"{float(np.mean(_line_err)):.3e}" if _line_err else "nan",bool(pd.to_numeric(d.get("V13_Probability_Coherence_Gate"),errors="coerce").fillna(0).eq(1).any()))
     except Exception as _pe:
-        logging.warning("[V13.3.2-RUNTIME-PAIR-AUDIT] status=ERROR err=%s:%s",type(_pe).__name__,_pe)
+        logging.warning("[V13.3.3-RUNTIME-PAIR-AUDIT] status=ERROR err=%s:%s",type(_pe).__name__,_pe)
     d=d.sort_values(["_phys","_side","_ev","Snapshot_Timestamp"],ascending=[True,True,False,False]).drop_duplicates(["_phys","_side"],keep="first")
     rows=[]
     for _,r in d.iterrows():
@@ -419,10 +419,10 @@ def record_ncaaf_v13_forward_shadow_predictions(df_scored: pd.DataFrame, client=
     try:
         res=_v13392_merge_insert_dataframe(client,NCAAF_V13_FORWARD_PREDICTIONS_TABLE,pd.DataFrame(rows),"prediction_event_id")
         res.update({"status":"PASS" if res.get("status")=="PASS" else res.get("status"),"model_instances":sorted(set(x["model_instance_id"] for x in rows)),"ledger_version":NCAAF_V13_FORWARD_LEDGER_VERSION,"executable_books":sorted(_exec_books)})
-        logging.info("[V13.3.2-FORWARD-LEDGER-WRITE] status=%s attempted=%d inserted=%d instances=%s",res.get("status"),res.get("attempted",0),res.get("inserted",0),res.get("model_instances"))
+        logging.info("[V13.3.3-FORWARD-LEDGER-WRITE] status=%s attempted=%d inserted=%d instances=%s",res.get("status"),res.get("attempted",0),res.get("inserted",0),res.get("model_instances"))
         return res
     except Exception as e:
-        logging.error("[V13.3.2-FORWARD-LEDGER-WRITE] status=ERROR err=%s:%s",type(e).__name__,e,exc_info=True)
+        logging.error("[V13.3.3-FORWARD-LEDGER-WRITE] status=ERROR err=%s:%s",type(e).__name__,e,exc_info=True)
         return {"status":"ERROR","error":f"{type(e).__name__}:{e}","attempted":len(rows),"inserted":0}
 
 
@@ -516,10 +516,10 @@ def settle_ncaaf_v13_forward_shadow_results(client=None, lookback_days: int = 21
             })
         if not out: return {"status":"NO_MATCHED_FINALS","settled":0}
         res=_v13392_merge_insert_dataframe(client,NCAAF_V13_FORWARD_RESULTS_TABLE,pd.DataFrame(out),"result_event_id")
-        logging.info("[V13.3.2-FORWARD-SETTLEMENT] status=%s attempted=%d inserted=%d",res.get("status"),res.get("attempted",0),res.get("inserted",0))
+        logging.info("[V13.3.3-FORWARD-SETTLEMENT] status=%s attempted=%d inserted=%d",res.get("status"),res.get("attempted",0),res.get("inserted",0))
         return {"status":res.get("status"),"settled":res.get("inserted",0),"attempted":res.get("attempted",0)}
     except Exception as e:
-        logging.error("[V13.3.2-FORWARD-SETTLEMENT] status=ERROR err=%s:%s",type(e).__name__,e,exc_info=True)
+        logging.error("[V13.3.3-FORWARD-SETTLEMENT] status=ERROR err=%s:%s",type(e).__name__,e,exc_info=True)
         return {"status":"ERROR","error":f"{type(e).__name__}:{e}","settled":0}
 
 
@@ -544,7 +544,7 @@ def read_ncaaf_v13_forward_shadow_summary(client=None, days: int = 60) -> pd.Dat
         """
         return client.query(q).to_dataframe(create_bqstorage_client=False)
     except Exception as e:
-        logging.warning("[V13.3.2-FORWARD-SUMMARY] unavailable=%s:%s",type(e).__name__,e)
+        logging.warning("[V13.3.3-FORWARD-SUMMARY] unavailable=%s:%s",type(e).__name__,e)
         return pd.DataFrame()
 GCS_BUCKET = "sharp-models"
 API_KEY = "3879659fe861d68dfa2866c211294684"
@@ -3083,7 +3083,7 @@ class _PortableBetaCalibrator:
 
 
 def _hydrate_portable_calibrator(x):
-    """Hydrate V13.3.2 structural calibrator specs after unpickling."""
+    """Hydrate V13.3.3 structural calibrator specs after unpickling."""
     if not isinstance(x, dict):
         return x
     typ = str(x.get("type", ""))
@@ -10828,7 +10828,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_3_2'
+                            _source[_use]='V13_3_3'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -15395,8 +15395,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-20-v13.3.2-core-v2-calibration-parity-coherence"
-NCAAF_V13_HOTFIX = "V13_3_2__CORE_V2_ROW_LOCAL_PARITY__MONOTONE_ATS_CALIBRATION__EXACT_PAIR_COHERENCE__SHADOW_ONLY"
+NCAAF_V13_VERSION = "2026-09-20-v13.3.3-core-strength-hybrid-shadow"
+NCAAF_V13_HOTFIX = "V13_3_3__CORE_V3_CONTEXT_PLUS_MARKET_BLIND_STRENGTH__SHADOW_ONLY"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -17567,8 +17567,8 @@ def _v13235_runtime_distribution_quantiles(fair_side, orient, rows, engine, fall
     return q10,q50,q90,width
 
 # ============================================================================
-# V13.3.2 INDEPENDENT HISTORICAL CORE V2 — RUNTIME SHADOW SCORER
-# Core fair margin is generated without market inputs.  The offered spread is
+# V13.3.3 INDEPENDENT CORE V3 (schema-compatible CoreV2 fields) — RUNTIME SHADOW SCORER
+# Core fair margin is generated from broad context + market-blind football strength without market inputs.  The offered spread is
 # consulted only after fair-margin generation to compute point edge / cover prob.
 # ============================================================================
 def _v133_core_rt_first_numeric(df: pd.DataFrame, *names, default=np.nan) -> pd.Series:
@@ -17694,7 +17694,7 @@ def _v133_core_v2_empirical_prob_gt(residual_pool, threshold) -> np.ndarray:
 
 
 def _v1332_core_v2_logit_prob(point_edge, slope: float) -> np.ndarray:
-    """V13.3.2 monotone, symmetric post-prediction Core ATS map."""
+    """V13.3.3 monotone, symmetric post-prediction Core ATS map."""
     e=np.asarray(point_edge,dtype=float)
     out=np.full(e.shape,np.nan,dtype=float)
     good=np.isfinite(e)
@@ -17705,48 +17705,124 @@ def _v1332_core_v2_logit_prob(point_edge, slope: float) -> np.ndarray:
     return out
 
 
+
 def _v133_core_v2_runtime_score(rows: pd.DataFrame, payload: dict) -> dict:
+    """Runtime scorer for the V13.3.3 Core V3 artifact.
+
+    The persisted key/column names retain ``CoreV2`` for schema compatibility.
+    Fair margin is context prediction plus an optional market-blind raw-football
+    strength donor.  No Stat Brain output is consumed.
+    """
     n=len(rows)
     empty={"fair_margin":np.full(n,np.nan),"cover_prob":np.full(n,np.nan),"point_edge":np.full(n,np.nan),
            "model_disagreement":np.full(n,np.nan),"uncertainty_points":np.full(n,np.nan),"feature_coverage":np.zeros(n),
            "active":np.zeros(n,dtype=np.int8),"status":"UNAVAILABLE","selected_model":"UNAVAILABLE"}
     if not isinstance(payload,dict) or not isinstance(payload.get("models"),dict) or not payload.get("feature_cols"):
         return empty
-    models=payload.get("models") or {}; feats=list(payload.get("feature_cols") or [])
+
+    # Branch A: broad historical context.
+    models=payload.get("models") or {}
+    feats=list(payload.get("feature_cols") or [])
     Xraw=_v133_core_v2_feature_frame(rows).reindex(columns=feats)
-    feature_cov=Xraw.notna().mean(axis=1).to_numpy(dtype=float) if len(feats) else np.zeros(n)
+    context_cov=Xraw.notna().mean(axis=1).to_numpy(dtype=float) if len(feats) else np.zeros(n)
     preds={}
     for name,mdl in models.items():
         try:
-            # V13.3.2 parity contract: model output is strictly row-local.  Never
-            # change a row because extra duplicate/opposite-side rows were included
-            # in this particular scoring batch.
             pr=np.asarray(mdl.predict(Xraw),dtype=float)
             preds[str(name)]=pr
         except Exception:
             continue
-    if not preds: return empty
+    if not preds:
+        return empty
     selected=str(payload.get("selected_model") or "ensemble_equal")
     arr=np.column_stack(list(preds.values()))
-    if selected=="ensemble_equal": fair=np.nanmean(arr,axis=1)
-    elif selected in preds: fair=np.asarray(preds[selected],dtype=float)
-    else: fair=np.nanmean(arr,axis=1); selected="ensemble_equal_fallback"
+    if selected=="ensemble_equal":
+        context_fair=np.nanmean(arr,axis=1)
+    elif selected in preds:
+        context_fair=np.asarray(preds[selected],dtype=float)
+    else:
+        context_fair=np.nanmean(arr,axis=1)
+        selected="ensemble_equal_fallback"
+
+    # Branch B: saved market-blind matchup-strength state.  This rebuilds raw
+    # profile features directly; it does NOT read NCAAF_Stat_Prob/Edge/Trust or
+    # any other Stat Brain output.
+    sb=payload.get("strength_branch") or {}
+    sw=float(np.clip(payload.get("strength_weight",0.0) or 0.0,0.0,1.0))
+    strength_side=np.full(n,np.nan,dtype=float)
+    strength_cov=np.zeros(n,dtype=float)
+    strength_selected="UNAVAILABLE"
+    if sw>0.0 and isinstance(sb,dict) and isinstance(sb.get("models"),dict) and sb.get("feature_cols"):
+        try:
+            Xstate=_ncaaf_stat_runtime_frame(rows,{"latest_profiles":sb.get("latest_profiles")})
+            sfeats=list(sb.get("feature_cols") or [])
+            Xs=Xstate.reindex(columns=sfeats)
+            strength_cov=Xs.notna().mean(axis=1).to_numpy(dtype=float) if len(sfeats) else np.zeros(n)
+            spreds={}
+            for name,mdl in (sb.get("models") or {}).items():
+                try:
+                    spreds[str(name)]=np.asarray(mdl.predict(Xs),dtype=float)
+                except Exception:
+                    continue
+            strength_selected=str(sb.get("selected_model") or "hgb")
+            if spreds:
+                if strength_selected in spreds:
+                    home_margin=np.asarray(spreds[strength_selected],dtype=float)
+                else:
+                    home_margin=np.nanmean(np.column_stack(list(spreds.values())),axis=1)
+                    strength_selected="ensemble_equal_fallback"
+                outcome=_v133_core_rt_first_text(rows,"Outcome_Norm","Outcome","Team_Norm","Team").astype(str)
+                home=_v133_core_rt_first_text(rows,"Home_Team_Norm","Home_Team").astype(str)
+                away=_v133_core_rt_first_text(rows,"Away_Team_Norm","Away_Team").astype(str)
+                is_home=outcome.eq(home)|outcome.eq("home")
+                is_away=outcome.eq(away)|outcome.eq("away")
+                strength_side=np.where(is_home.to_numpy(),home_margin,np.where(is_away.to_numpy(),-home_margin,np.nan))
+                neutral=_v133_core_rt_first_numeric(rows,"Is_Neutral_Site","Is_Neutral").fillna(0).to_numpy(dtype=float)>=0.5
+                strength_side=np.where(neutral,np.nan,strength_side)
+        except Exception:
+            strength_side=np.full(n,np.nan,dtype=float)
+            strength_cov=np.zeros(n,dtype=float)
+
+    fair_raw=np.asarray(context_fair,dtype=float).copy()
+    both=np.isfinite(fair_raw)&np.isfinite(strength_side)
+    if sw>0.0:
+        fair_raw[both]=(1.0-sw)*fair_raw[both]+sw*strength_side[both]
+
     margin_scale=float(np.clip(payload.get("margin_shrink_scale",1.0),0.0,1.0))
-    fair=np.asarray(fair,dtype=float)*margin_scale
-    model_dis=(np.nanstd(arr,axis=1)*margin_scale) if arr.shape[1]>=2 else np.zeros(n,dtype=float)
+    fair=fair_raw*margin_scale
+
+    # Uncertainty is intentionally diagnostic. Include all context candidates and
+    # the selected strength donor when present, then add historical residual noise.
+    diag_parts=[np.asarray(v,dtype=float)*margin_scale for v in preds.values()]
+    if np.isfinite(strength_side).any():
+        diag_parts.append(np.asarray(strength_side,dtype=float)*margin_scale)
+    darr=np.column_stack(diag_parts) if diag_parts else np.empty((n,0))
+    model_dis=np.nanstd(darr,axis=1) if darr.shape[1]>=2 else np.zeros(n,dtype=float)
+
+    feature_cov=context_cov.copy()
+    if sw>0.0:
+        feature_cov=np.where(np.isfinite(strength_side),(1.0-sw)*context_cov+sw*strength_cov,context_cov)
+
     spread=_v133_core_rt_first_numeric(rows,"Value","Spread_Value","Closing_Spread_For_Team","Closing_Spread","Opening_Spread")
     offered_margin=-spread.to_numpy(dtype=float,na_value=np.nan)
     point_edge=fair-offered_margin
-    pool=np.asarray(payload.get("residual_margin",[]),dtype=float); pool=pool[np.isfinite(pool)]
+    pool=np.asarray(payload.get("residual_margin",[]),dtype=float)
+    pool=pool[np.isfinite(pool)]
     ats_slope=max(0.0,float(payload.get("ats_logit_slope",0.0) or 0.0))
     prob=_v1332_core_v2_logit_prob(point_edge,ats_slope)
     resid_sd=float(np.nanstd(pool,ddof=0)) if len(pool)>=50 else np.nan
-    uncertainty=np.sqrt(np.maximum(0.0,model_dis**2 + (resid_sd**2 if np.isfinite(resid_sd) else 0.0)))
+    uncertainty=np.sqrt(np.maximum(0.0,model_dis**2+(resid_sd**2 if np.isfinite(resid_sd) else 0.0)))
     active=(np.isfinite(fair)&(feature_cov>=0.40)).astype(np.int8)
-    return {"fair_margin":fair,"cover_prob":prob,"point_edge":point_edge,"model_disagreement":model_dis,
-            "uncertainty_points":uncertainty,"feature_coverage":feature_cov,"active":active,
-            "status":"SHADOW_READY","selected_model":selected,"margin_shrink_scale":margin_scale,"ats_logit_slope":ats_slope}
-
+    status="CORE_V3_SHADOW_READY" if bool(payload.get("generation")=="CORE_V3_CONTEXT_STRENGTH_HYBRID") else "SHADOW_READY"
+    selected_desc=f"{selected}+strength:{strength_selected}@{sw:.2f}" if sw>0.0 else selected
+    return {
+        "fair_margin":fair,"cover_prob":prob,"point_edge":point_edge,
+        "model_disagreement":model_dis,"uncertainty_points":uncertainty,
+        "feature_coverage":feature_cov,"active":active,"status":status,
+        "selected_model":selected_desc,"context_selected_model":selected,
+        "strength_selected_model":strength_selected,"strength_weight":sw,
+        "margin_shrink_scale":margin_scale,"ats_logit_slope":ats_slope,
+    }
 
 def _v1332_physical_game_series(d: pd.DataFrame) -> pd.Series:
     out=pd.Series("",index=d.index,dtype="object")
@@ -17865,7 +17941,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         "V13_Promotion_Mode":"SHADOW","V13_Early_Season_Warning":0,"V13_Drift_Scale":1.0,
         "V13_Maturity_Bucket":"UNKNOWN","V13_Maturity_Beta":np.nan,"V13_Early_Situational_Prob":np.nan,"V13_Early_Situational_Active":0,
         "V13_Base_Cover_Prob":np.nan,"V13_Fundamental_Prob":np.nan,
-        # V13.3.2 clean separation: Core V2 is the independent historical football
+        # V13.3.3 clean separation: Core V2 is the independent historical football
         # model; MarketRich is the frozen legacy AutoFS anchor retained for parity.
         "V13_CoreV2_Fair_Margin":np.nan,"V13_CoreV2_Cover_Prob":np.nan,"V13_CoreV2_Point_Edge":np.nan,
         "V13_CoreV2_Model_Disagreement":np.nan,"V13_CoreV2_Uncertainty_Points":np.nan,"V13_CoreV2_Feature_Coverage":0.0,
@@ -17916,7 +17992,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
     fund=bundle.get("fundamental") or {}; market=bundle.get("market_intelligence") or {}; cover=bundle.get("cover_calibrator") or {}; preview=bundle.get("production_preview") or {}
 
     # Score independent Core V2 before any other expert-lane availability checks.
-    # It remains SHADOW ONLY in V13.3.2 and therefore cannot change Final_Fair_Prob.
+    # It remains SHADOW ONLY in V13.3.3 and therefore cannot change Final_Fair_Prob.
     _corev2=bundle.get("core_v2") or {}
     try:
         _c2=_v133_core_v2_runtime_score(out,_corev2)
@@ -18253,7 +18329,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
             out["V13_AutoFS_Core_Weight"]=np.asarray(_core_details.get("weight",np.zeros(n)),dtype="float32")
             out["V13_AutoFS_Core_Active"]=np.asarray(_core_details.get("active",np.zeros(n)),dtype="int8")
             out["V13_AutoFS_Core_Contribution"]=np.asarray(_core_details.get("contribution",np.zeros(n)),dtype="float32")
-        # V13.3.2: exact complement reconciliation is the final structural
+        # V13.3.3: exact complement reconciliation is the final structural
         # probability operation.  It uses only the two quoted sides of the same
         # exact spread and cannot create directional information.
         _prob_pre_coherence=np.asarray(prob,dtype=float).copy()
@@ -18342,7 +18418,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         if _is_v13232:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             _oa=bool((bundle.get("own_fair_alpha_expert") or {}).get("gate_pass",False))
-            status=np.where(eligible,("V13_3_2_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_3_2_MARKET_RICH_CORE_ACTIVE"),"V13_3_2_CORE_UNAVAILABLE")
+            status=np.where(eligible,("V13_3_3_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_3_3_MARKET_RICH_CORE_ACTIVE"),"V13_3_3_CORE_UNAVAILABLE")
         elif _is_v13227:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             status=np.where(eligible,"V13_2_31_OWN_FAIR_ACTIVE","V13_2_31_OWN_FAIR_UNAVAILABLE")
@@ -19552,7 +19628,7 @@ def detect_sharp_moves(
         df_scored['Pre_Game']  = df_scored['Game_Start'] > now
         df_scored['Post_Game'] = ~df_scored['Pre_Game']
         df_scored = df_scored.drop_duplicates(subset=merge_keys, keep='last')
-        # V13.3.2: tracking is backend-driven. Opening/refreshing the UI is NOT
+        # V13.3.3: tracking is backend-driven. Opening/refreshing the UI is NOT
         # required to create the prospective record. Failure to persist is visible
         # but never allowed to change a model probability.
         _ledger={"status":"NOT_APPLICABLE","attempted":0,"inserted":0}
@@ -19563,7 +19639,7 @@ def detect_sharp_moves(
                 _settle=settle_ncaaf_v13_forward_shadow_results()
         except Exception as _le:
             _ledger={"status":"ERROR","error":f"{type(_le).__name__}:{_le}","attempted":0,"inserted":0}
-            logging.exception("[V13.3.2-FORWARD-LEDGER] unexpected writer error")
+            logging.exception("[V13.3.3-FORWARD-LEDGER] unexpected writer error")
         df_scored['V13_Ledger_Status']=str(_ledger.get('status','UNKNOWN'))
         df_scored['V13_Ledger_Events_Attempted']=int(_ledger.get('attempted',0) or 0)
         df_scored['V13_Ledger_Events_Inserted']=int(_ledger.get('inserted',0) or 0)
@@ -21518,14 +21594,14 @@ def compute_and_write_market_weights(df):
 
 
 # ============================================================================
-# V13.3.2 CANONICAL FEATURE + PRODUCTION INFERENCE API
+# V13.3.3 CANONICAL FEATURE + PRODUCTION INFERENCE API
 # ============================================================================
-NCAAF_CORE_FEATURE_BUILDER_VERSION = "2026-09-20-v13.3.2-market-rich-legacy-feature-materializer-v1"
+NCAAF_CORE_FEATURE_BUILDER_VERSION = "2026-09-20-v13.3.3-market-rich-legacy-feature-materializer-v1"
 
 def build_ncaaf_core_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     """Canonical numeric materializer for the frozen Market-Rich legacy AutoFS anchor.
 
-    V13.3.2 reserves the name Core for the independent historical football model.
+    V13.3.3 reserves the name Core for the independent historical football model.
     This compatibility materializer remains unchanged so legacy anchor replay stays exact.
     """
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -21624,7 +21700,7 @@ def predict_ncaaf_v13_production(rows: pd.DataFrame, bundle: dict, core_prob=Non
         'authority_route':str(out.get('V13_Probability_Authority_Route',pd.Series(['CORE_ONLY'])).iloc[0]) if n else 'CORE_ONLY',
         'pair_coherence_applied_rows':int(pd.to_numeric(out.get('V13_Pair_Coherence_Applied',pd.Series(np.zeros(n),index=out.index)),errors='coerce').fillna(0).sum()),
         'pair_coherence_max_adjustment':float(pd.to_numeric(out.get('V13_Pair_Coherence_Adjustment',pd.Series(np.zeros(n),index=out.index)),errors='coerce').fillna(0).max()) if n else 0.0,
-        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_3_2',
+        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_3_3_CORE_V3_HYBRID',
         'canonical_fallback_used':False,
     }
     return (prob,info) if return_stages else prob
