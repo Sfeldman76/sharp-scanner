@@ -183,7 +183,7 @@ def main():
         train_timing_model_for_market,
     )
 
-    # V13.3.2 fail-fast deployment consistency check.  This catches a mixed
+    # V13.3.3 fail-fast deployment consistency check.  This catches a mixed
     # sharp_line_dashboard.py / utils.py deployment before a long training run.
     import sharp_line_dashboard as _sld
     import utils as _utils
@@ -199,13 +199,13 @@ def main():
     _missing_utils = [n for n in _required_utils if not hasattr(_utils, n)]
     if (not _expected_build) or (_expected_build != _utils_build) or _missing_utils:
         raise RuntimeError(
-            "[V13.3.2-DEPLOY-PREFLIGHT] MIXED_OR_STALE_DEPLOYMENT "
+            "[V13.3.3-DEPLOY-PREFLIGHT] MIXED_OR_STALE_DEPLOYMENT "
             f"dashboard_build={_expected_build!r} utils_build={_utils_build!r} "
             f"missing_utils={_missing_utils}. Replace sharp_line_dashboard.py, utils.py, "
-            "train_job.py, and train_sharp_model_from_bq_extracted.py from the same V13.3.2 bundle."
+            "train_job.py, and train_sharp_model_from_bq_extracted.py from the same V13.3.3 bundle."
         )
     log_func(
-        f"[V13.3.2-DEPLOY-PREFLIGHT] PASS build={_expected_build} "
+        f"[V13.3.3-DEPLOY-PREFLIGHT] PASS build={_expected_build} "
         f"utils={getattr(_utils, '__file__', 'unknown')}"
     )
 
