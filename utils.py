@@ -95,12 +95,12 @@ MARKET_WEIGHTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.market_weights"
 SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 
 
-# V13.3.7 forward-shadow ledger.  These tables are append-only research
+# V13.3.9 forward-shadow ledger.  These tables are append-only research
 # evidence.  The exact fitted artifact identity (SHA256), not the human version
 # string, is the primary model-instance key.
-NCAAF_V13_CODE_VERSION = "V13.3.8"
-V133_DEPLOY_BUILD_ID = "2026-09-21-v13.3.8-core-oof-side-role-bridge-1"
-V1337_SOURCE_TAG = "utils-v13.3.8-core-oof-side-role-bridge"
+NCAAF_V13_CODE_VERSION = "V13.3.9"
+V133_DEPLOY_BUILD_ID = "2026-09-21-v13.3.9-outer-stage-ablation-1"
+V1337_SOURCE_TAG = "utils-v13.3.9-outer-stage-ablation"
 NCAAF_V13_FORWARD_PREDICTIONS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_predictions"
 NCAAF_V13_FORWARD_RESULTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_results"
 NCAAF_V13_FORWARD_LEDGER_VERSION = "2026-09-20-v13.3.5-immutable-artifact-aware-forward-ledger-v1"
@@ -10854,7 +10854,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_3_7'
+                            _source[_use]='V13_3_9'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -15421,7 +15421,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-21-v13.3.8-core-oof-side-role-bridge-shadow"
+NCAAF_V13_VERSION = "2026-09-21-v13.3.9-outer-stage-ablation-shadow"
 NCAAF_V13_HOTFIX = "V13_3_8__CORE_OOF_SIDE_ROLE_BRIDGE__SHADOW_ONLY"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -17579,6 +17579,13 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
     market_prob,market_det=_v1312_runtime_residual_specialists(base,family_probs,labels,centers,market_engine)
     rule_engine=overlay.get("rule_expert_engine") or {}
     combined_prob,rule_det=_v132_runtime_apply_rule_engine(market_prob,rows,rule_engine)
+    # V13.3.9 outer-stage diagnostics. These arrays are observational only and
+    # never participate in fitting, gating, calibration, promotion, or bet policy.
+    _diag_stages={
+        "market_residual":np.asarray(base,dtype=float).copy(),
+        "market_microstructure_overlay":np.asarray(market_prob,dtype=float).copy(),
+        "named_rule_overlay":np.asarray(combined_prob,dtype=float).copy(),
+    }
     # Use the family attributions from the same combined all-rule application.
     # This preserves cross-Pathi/BigAl redundancy discounts and prevents the
     # resolver from re-counting overlapping systems as independent evidence.
@@ -17591,15 +17598,33 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
     pathi_det={"Pathi":_pd}; bigal_det={"BigAl":_bd}
 
     resolver=overlay.get("probability_resolver") or {}
-    resolver_active=bool(resolver.get("gate_pass",False) and (str(resolver.get("mode",""))=="V13_3_7_NEUTRAL_BRAIN_STACK" or bool(resolver.get("anchored_residual",False)) or resolver.get("model") is not None))
+    resolver_active=bool(resolver.get("gate_pass",False) and (str(resolver.get("mode","")) in {"V13_3_9_NEUTRAL_BRAIN_STACK","V13_3_7_NEUTRAL_BRAIN_STACK"} or bool(resolver.get("anchored_residual",False)) or resolver.get("model") is not None))
     additive_allowed=bool(overlay.get("additive_stack_fallback_gate_pass",overlay.get("full_stack_activation_pass",False)))
     route="CORE_ONLY"; resolver_error=None
     if resolver_active:
         try:
-            if str(resolver.get("mode",""))=="V13_3_7_NEUTRAL_BRAIN_STACK":
+            if str(resolver.get("mode","")) in {"V13_3_9_NEUTRAL_BRAIN_STACK","V13_3_7_NEUTRAL_BRAIN_STACK"}:
                 Xr=_v1336_runtime_brain_stack_matrix(rows,core_cal,base,market_prob,pathi_prob,bigal_prob,feature_names=list(resolver.get("feature_names") or []),common_market_delta=common_market_delta,own_fair_delta=own_fair_delta)
-                if not np.isfinite(Xr.to_numpy(dtype=float)).all(): raise ValueError("nonfinite V13.3.7 brain-stack inputs")
+                if not np.isfinite(Xr.to_numpy(dtype=float)).all(): raise ValueError("nonfinite V13.3.9 brain-stack inputs")
+                _co=dict(resolver.get("coefficients") or {})
+                _bt=dict(resolver.get("brain_transfer") or {})
+                def _single_brain_prob(_feat):
+                    if _feat not in Xr.columns: return np.full(n,0.5,dtype=float)
+                    _rec=_bt.get(_feat) or {}
+                    _coef=float(_rec.get("coefficient",_co.get(_feat,0.0)) or 0.0)
+                    _x=pd.to_numeric(Xr[_feat],errors="coerce").fillna(0.0).to_numpy(dtype=float)
+                    return np.clip(_v13_overlay_sigmoid(_x*_coef),0.01,0.99)
+                _diag_stages["core_only_individual"]=_single_brain_prob("IndependentCoreV4_PointEdge_Scaled")
+                _diag_stages["stat_only"]=_single_brain_prob("Stat_PointEdge_Scaled")
+                _diag_stages["market_micro_only"]=_single_brain_prob("MarketMicrostructure_Delta_Logit")
+                _smz=np.zeros(n,dtype=float)
+                for _feat in ("Stat_PointEdge_Scaled","MarketMicrostructure_Delta_Logit"):
+                    if _feat in Xr.columns:
+                        _x=pd.to_numeric(Xr[_feat],errors="coerce").fillna(0.0).to_numpy(dtype=float)
+                        _smz+=_x*float(_co.get(_feat,0.0) or 0.0)
+                _diag_stages["stat_plus_market_raw_resolver"]=np.clip(_v13_overlay_sigmoid(_smz),0.01,0.99)
                 final=_v1336_runtime_apply_brain_stack(Xr,resolver)
+                _diag_stages["resolver_raw"]=np.asarray(final,dtype=float).copy()
             elif bool(resolver.get("anchored_residual",False)):
                 Xr=_v13231_runtime_resolver_matrix(rows,core_cal,base,market_prob,pathi_prob,bigal_prob,feature_names=list(resolver.get("feature_names") or []))
                 if not np.isfinite(Xr.to_numpy(dtype=float)).all(): raise ValueError("nonfinite anchored resolver inputs")
@@ -17627,6 +17652,8 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
     if bool(dmap.get("gate_pass",False)):
         final=_v13226_runtime_apply_decision_map(final,dmap)
         route=("DECISION_GRAIN_MAP+"+route) if route!="CORE_ONLY" else "DECISION_GRAIN_MAP"
+    _diag_stages["decision_map"]=np.asarray(final,dtype=float).copy()
+    _diag_stages["pre_pair"]=np.asarray(final,dtype=float).copy()
 
     md=market_det.get("Market") or {}
     details["Market"]={"prob":family_probs["Market"],"contribution":np.asarray(md.get("contribution",np.zeros(n))),"weight":np.asarray(md.get("trust",np.zeros(n))),"trust":np.asarray(md.get("trust",np.zeros(n))),"residual_edge":np.asarray(md.get("residual_edge",np.zeros(n))),"independence":np.asarray(md.get("independence",np.ones(n))),"active":np.asarray(md.get("active",np.zeros(n,dtype=np.int8))),"regime":np.asarray(md.get("regime",labels["Market"]),dtype=object)}
@@ -17641,6 +17668,7 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
     details["_calibration"]={"temperature":t,"pretemperature_prob":pretemp,"temperature_contribution":tcontrib,"active":np.full(n,active,dtype=np.int8)}
     details["_resolver"]={"active":np.full(n,"PROBABILITY_RESOLVER" in route,dtype=np.int8),"prob":np.asarray(final,dtype=float),"route":route,"error":resolver_error,"coefficients":dict(resolver.get("coefficients") or {})}
     details["_decision_map"]={"active":np.full(n,bool(dmap.get("gate_pass",False)),dtype=np.int8),"scale":float(dmap.get("active_scale",1.0) or 1.0),"status":str(dmap.get("status","UNAVAILABLE")),"orientation":str(dmap.get("orientation","ORIGINAL")),"prob":np.asarray(final,dtype=float)}
+    details["_diagnostic_stages"]=_diag_stages
     gate=bool(route in {"PROBABILITY_RESOLVER","ADDITIVE_STACK","ADDITIVE_STACK_FALLBACK"})
     return np.clip(final,0.01,0.99),details,gate
 
@@ -18446,11 +18474,32 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         # probability operation.  It uses only the two quoted sides of the same
         # exact spread and cannot create directional information.
         _prob_pre_coherence=np.asarray(prob,dtype=float).copy()
+        _diag_stage_runtime=dict((_overlay_details or {}).get("_diagnostic_stages") or {}) if isinstance(_overlay_details,dict) else {}
+        _diag_stage_runtime["pre_pair"]=_prob_pre_coherence.copy()
         prob,_pair_coh=_v1332_enforce_canonical_spread_complements(out,prob)
+        _diag_stage_runtime["final"]=np.asarray(prob,dtype=float).copy()
         _pair_adj=np.abs(np.asarray(prob,dtype=float)-_prob_pre_coherence)
         out["V13_Pair_Coherence_Applied"]=(np.isfinite(_pair_adj)&(_pair_adj>1e-12)).astype("int8")
         out["V13_Pair_Coherence_Adjustment"]=np.nan_to_num(_pair_adj,nan=0.0).astype("float32")
+        _diag_col_map={
+            "core_only_individual":"V13_Diagnostic_CoreOnly_Prob",
+            "stat_only":"V13_Diagnostic_StatOnly_Prob",
+            "market_micro_only":"V13_Diagnostic_MarketMicroOnly_Prob",
+            "stat_plus_market_raw_resolver":"V13_Diagnostic_StatMarketRaw_Prob",
+            "market_residual":"V13_Diagnostic_MarketResidual_Prob",
+            "market_microstructure_overlay":"V13_Diagnostic_MarketMicroOverlay_Prob",
+            "named_rule_overlay":"V13_Diagnostic_NamedRuleOverlay_Prob",
+            "resolver_raw":"V13_Diagnostic_ResolverRaw_Prob",
+            "decision_map":"V13_Diagnostic_DecisionMap_Prob",
+            "pre_pair":"V13_Diagnostic_PrePair_Prob",
+            "final":"V13_Diagnostic_Final_Prob",
+        }
+        for _sn,_cn in _diag_col_map.items():
+            _sv=np.asarray(_diag_stage_runtime.get(_sn,np.full(n,np.nan)),dtype=float).reshape(-1)
+            if len(_sv)!=n: _sv=np.full(n,np.nan)
+            out[_cn]=_sv.astype("float32")
         if isinstance(_overlay_details,dict):
+            _overlay_details["_diagnostic_stages"]=_diag_stage_runtime
             _overlay_details.setdefault("_pair_coherence",{}).update(dict(_pair_coh))
             if isinstance(_overlay_details.get("_resolver"),dict):
                 _overlay_details["_resolver"]["prob"]=np.asarray(prob,dtype=float)
@@ -18531,7 +18580,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         if _is_v13232:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             _oa=bool((bundle.get("own_fair_alpha_expert") or {}).get("gate_pass",False))
-            status=np.where(eligible,("V13_3_7_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_3_7_MARKET_RICH_CORE_ACTIVE"),"V13_3_7_CORE_UNAVAILABLE")
+            status=np.where(eligible,("V13_3_9_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_3_9_MARKET_RICH_CORE_ACTIVE"),"V13_3_9_CORE_UNAVAILABLE")
         elif _is_v13227:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             status=np.where(eligible,"V13_2_31_OWN_FAIR_ACTIVE","V13_2_31_OWN_FAIR_UNAVAILABLE")
@@ -21788,6 +21837,18 @@ def predict_ncaaf_v13_production(rows: pd.DataFrame, bundle: dict, core_prob=Non
         'fundamental':_num('V13_Fundamental_Prob'),
         'core_adjusted':_num('V13_Core_Adjusted_Prob'),
         'pretemperature':_num('V13_Overlay_PreTemperature_Prob'),
+        # V13.3.9 diagnostic-only outer ablation stages. None of these arrays has
+        # fitting, promotion, calibration, or betting authority.
+        'core_only_individual':_num('V13_Diagnostic_CoreOnly_Prob'),
+        'stat_only':_num('V13_Diagnostic_StatOnly_Prob'),
+        'market_micro_only':_num('V13_Diagnostic_MarketMicroOnly_Prob'),
+        'stat_plus_market_raw_resolver':_num('V13_Diagnostic_StatMarketRaw_Prob'),
+        'market_residual':_num('V13_Diagnostic_MarketResidual_Prob'),
+        'market_microstructure_overlay':_num('V13_Diagnostic_MarketMicroOverlay_Prob'),
+        'named_rule_overlay':_num('V13_Diagnostic_NamedRuleOverlay_Prob'),
+        'resolver_raw':_num('V13_Diagnostic_ResolverRaw_Prob'),
+        'decision_map':_num('V13_Diagnostic_DecisionMap_Prob'),
+        'pre_pair':_num('V13_Diagnostic_PrePair_Prob'),
         'final':prob,
     }
     maturity=np.asarray(out.get('V13_Maturity_Bucket',pd.Series(['UNKNOWN']*n,index=out.index)),dtype=object)
@@ -21816,7 +21877,7 @@ def predict_ncaaf_v13_production(rows: pd.DataFrame, bundle: dict, core_prob=Non
         'authority_route':str(out.get('V13_Probability_Authority_Route',pd.Series(['CORE_ONLY'])).iloc[0]) if n else 'CORE_ONLY',
         'pair_coherence_applied_rows':int(pd.to_numeric(out.get('V13_Pair_Coherence_Applied',pd.Series(np.zeros(n),index=out.index)),errors='coerce').fillna(0).sum()),
         'pair_coherence_max_adjustment':float(pd.to_numeric(out.get('V13_Pair_Coherence_Adjustment',pd.Series(np.zeros(n),index=out.index)),errors='coerce').fillna(0).max()) if n else 0.0,
-        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_3_7_CORE_V4_HYBRID',
+        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_3_9_STAT_MARKET_ABLATION',
         'canonical_fallback_used':False,
     }
     return (prob,info) if return_stages else prob
