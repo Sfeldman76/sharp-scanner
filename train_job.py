@@ -202,7 +202,7 @@ def main():
         "_v133_core_v2_runtime_score",
     ]
     _missing_utils = [n for n in _required_utils if not hasattr(_utils, n)]
-    if (not _expected_build) or (_expected_build != _utils_build) or _missing_utils or _dashboard_tag != "dashboard-v13.3.7-oof-bridge-calibration-hardening" or _utils_tag != "utils-v13.3.7-oof-bridge-calibration-hardening" or _wrapper_tag != "wrapper-v13.3.7-oof-bridge-calibration-hardening":
+    if (not _expected_build) or (_expected_build != _utils_build) or _missing_utils or _dashboard_tag != "dashboard-v13.3.7.1-deploy-consistency-hotfix" or _utils_tag != "utils-v13.3.7.1-deploy-consistency-hotfix" or _wrapper_tag != "wrapper-v13.3.7.1-deploy-consistency-hotfix":
         raise RuntimeError(
             "[V13.3.7-DEPLOY-PREFLIGHT] MIXED_OR_STALE_DEPLOYMENT "
             f"dashboard_build={_expected_build!r} utils_build={_utils_build!r} "
