@@ -16601,8 +16601,8 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # from the same deploy bundle.  The simple legacy feature materializer is kept
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
-V133_DEPLOY_BUILD_ID = "2026-09-21-v13.3.7-oof-bridge-calibration-hardening-1"
-V1337_SOURCE_TAG = "dashboard-v13.3.7-oof-bridge-calibration-hardening"
+V133_DEPLOY_BUILD_ID = "2026-09-21-v13.3.7.1-deploy-consistency-hotfix-1"
+V1337_SOURCE_TAG = "dashboard-v13.3.7.1-deploy-consistency-hotfix"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
