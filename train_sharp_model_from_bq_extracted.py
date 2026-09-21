@@ -1,4 +1,4 @@
-V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.3.7.1-deploy-consistency-hotfix"
+V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.3.8-core-oof-side-role-bridge"
 
 from sharp_line_dashboard import (
     train_with_champion_wrapper,
