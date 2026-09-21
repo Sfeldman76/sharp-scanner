@@ -99,8 +99,8 @@ SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 # evidence.  The exact fitted artifact identity (SHA256), not the human version
 # string, is the primary model-instance key.
 NCAAF_V13_CODE_VERSION = "V13.3.7"
-V133_DEPLOY_BUILD_ID = "2026-09-21-v13.3.7-oof-bridge-calibration-hardening-1"
-V1337_SOURCE_TAG = "utils-v13.3.7-oof-bridge-calibration-hardening"
+V133_DEPLOY_BUILD_ID = "2026-09-21-v13.3.7.1-deploy-consistency-hotfix-1"
+V1337_SOURCE_TAG = "utils-v13.3.7.1-deploy-consistency-hotfix"
 NCAAF_V13_FORWARD_PREDICTIONS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_predictions"
 NCAAF_V13_FORWARD_RESULTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_results"
 NCAAF_V13_FORWARD_LEDGER_VERSION = "2026-09-20-v13.3.5-immutable-artifact-aware-forward-ledger-v1"
