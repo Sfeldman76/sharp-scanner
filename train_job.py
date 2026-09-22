@@ -178,20 +178,49 @@ def main():
     if HEADLESS:
         install_streamlit_shim(log_func)
 
-    from train_sharp_model_from_bq_extracted import (
-        train_sharp_model_for_market,
-        train_timing_model_for_market,
-    )
+    # V13.3.11.2.1 deployment-path lock. Load the three training modules from
+    # the exact directory containing this train_job.py, rather than allowing an
+    # older copy elsewhere on PYTHONPATH or in a retained module cache to win.
+    # This does not relax mixed-version protection: a genuinely stale /app file
+    # still fails the version/tag check below.
+    import hashlib
+    import importlib
+    import importlib.util
+    from pathlib import Path
 
-    # V13.3.11.2 fail-fast deployment consistency check.  This catches a mixed
-    # sharp_line_dashboard.py / utils.py deployment before a long training run.
-    import sharp_line_dashboard as _sld
-    import utils as _utils
+    _app_dir = Path(__file__).resolve().parent
+
+    def _load_exact_local_module(_name):
+        _path = (_app_dir / f"{_name}.py").resolve()
+        if not _path.exists():
+            raise RuntimeError(
+                f"[V13.3.11.2.1-DEPLOY-PREFLIGHT] LOCAL_SOURCE_MISSING module={_name} path={_path}"
+            )
+        importlib.invalidate_caches()
+        sys.modules.pop(_name, None)
+        _spec = importlib.util.spec_from_file_location(_name, str(_path))
+        if _spec is None or _spec.loader is None:
+            raise RuntimeError(
+                f"[V13.3.11.2.1-DEPLOY-PREFLIGHT] LOCAL_IMPORT_SPEC_FAILED module={_name} path={_path}"
+            )
+        _mod = importlib.util.module_from_spec(_spec)
+        sys.modules[_name] = _mod
+        _spec.loader.exec_module(_mod)
+        return _mod, _path, hashlib.sha256(_path.read_bytes()).hexdigest()
+
+    # utils first, then dashboard, then wrapper. The wrapper's dashboard import
+    # therefore resolves to the exact local dashboard object already registered.
+    _utils, _utils_path, _utils_sha = _load_exact_local_module("utils")
+    _sld, _dashboard_path, _dashboard_sha = _load_exact_local_module("sharp_line_dashboard")
+    _wrapper, _wrapper_path, _wrapper_sha = _load_exact_local_module("train_sharp_model_from_bq_extracted")
+
+    train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
+    train_timing_model_for_market = _wrapper.train_timing_model_for_market
+
     _expected_build = getattr(_sld, "V133_DEPLOY_BUILD_ID", None)
     _utils_build = getattr(_utils, "V133_DEPLOY_BUILD_ID", None)
     _dashboard_tag = getattr(_sld, "V1337_SOURCE_TAG", None)
     _utils_tag = getattr(_utils, "V1337_SOURCE_TAG", None)
-    import train_sharp_model_from_bq_extracted as _wrapper
     _wrapper_tag = getattr(_wrapper, "V1337_WRAPPER_SOURCE_TAG", None)
     _required_utils = [
         "build_ncaaf_core_feature_frame",
@@ -204,16 +233,21 @@ def main():
         "_v13310_runtime_brain_input_audit",
     ]
     _missing_utils = [n for n in _required_utils if not hasattr(_utils, n)]
-    if (not _expected_build) or (_expected_build != _utils_build) or _missing_utils or _dashboard_tag != "dashboard-v13.3.11.2-native-oof-fingerprint-validation" or _utils_tag != "utils-v13.3.11.2-native-oof-fingerprint-validation" or _wrapper_tag != "wrapper-v13.3.11.2-native-oof-fingerprint-validation":
+    if (not _expected_build) or (_expected_build != _utils_build) or _missing_utils or _dashboard_tag != "dashboard-v13.3.11.2.1-native-oof-deploy-path-lock" or _utils_tag != "utils-v13.3.11.2.1-native-oof-deploy-path-lock" or _wrapper_tag != "wrapper-v13.3.11.2.1-native-oof-deploy-path-lock":
         raise RuntimeError(
-            "[V13.3.11.2-DEPLOY-PREFLIGHT] MIXED_OR_STALE_DEPLOYMENT "
+            "[V13.3.11.2.1-DEPLOY-PREFLIGHT] MIXED_OR_STALE_DEPLOYMENT "
             f"dashboard_build={_expected_build!r} utils_build={_utils_build!r} "
-            f"dashboard_tag={_dashboard_tag!r} utils_tag={_utils_tag!r} wrapper_tag={_wrapper_tag!r} missing_utils={_missing_utils}. Replace sharp_line_dashboard.py, utils.py, "
-            "train_job.py, and train_sharp_model_from_bq_extracted.py from the same V13.3.11.2 bundle."
+            f"dashboard_tag={_dashboard_tag!r} utils_tag={_utils_tag!r} wrapper_tag={_wrapper_tag!r} missing_utils={_missing_utils} "
+            f"dashboard_path={str(_dashboard_path)!r} dashboard_sha={_dashboard_sha[:16]} "
+            f"utils_path={str(_utils_path)!r} utils_sha={_utils_sha[:16]} "
+            f"wrapper_path={str(_wrapper_path)!r} wrapper_sha={_wrapper_sha[:16]}. "
+            "The running container itself contains a mixed source set; rebuild/redeploy the job image from one V13.3.11.2.1 bundle."
         )
     log_func(
-        f"[V13.3.11.2-DEPLOY-PREFLIGHT] PASS build={_expected_build} "
-        f"dashboard_tag={_dashboard_tag} utils_tag={_utils_tag} wrapper_tag={_wrapper_tag} utils={getattr(_utils, '__file__', 'unknown')}"
+        f"[V13.3.11.2.1-DEPLOY-PREFLIGHT] PASS build={_expected_build} "
+        f"dashboard_tag={_dashboard_tag} utils_tag={_utils_tag} wrapper_tag={_wrapper_tag} "
+        f"dashboard_path={_dashboard_path} dashboard_sha={_dashboard_sha[:16]} "
+        f"utils_path={_utils_path} utils_sha={_utils_sha[:16]} wrapper_path={_wrapper_path} wrapper_sha={_wrapper_sha[:16]}"
     )
 
     pw.emit("start", f"Training start run_id={run_id} sport={sport} market={market}", pct=0.0)
