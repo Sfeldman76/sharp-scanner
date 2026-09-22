@@ -1,4 +1,4 @@
-V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.3.11.1-all-brain-chrono-validation"
+V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.3.11.2-native-oof-fingerprint-validation"
 
 from sharp_line_dashboard import (
     train_with_champion_wrapper,
