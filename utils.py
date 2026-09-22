@@ -95,12 +95,12 @@ MARKET_WEIGHTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.market_weights"
 SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 
 
-# V13.3.10 forward-shadow ledger.  These tables are append-only research
+# V13.3.11 forward-shadow ledger.  These tables are append-only research
 # evidence.  The exact fitted artifact identity (SHA256), not the human version
 # string, is the primary model-instance key.
-NCAAF_V13_CODE_VERSION = "V13.3.10"
-V133_DEPLOY_BUILD_ID = "2026-09-21-v13.3.10-stat-runtime-parity-audit-1"
-V1337_SOURCE_TAG = "utils-v13.3.10-stat-runtime-parity-audit"
+NCAAF_V13_CODE_VERSION = "V13.3.11"
+V133_DEPLOY_BUILD_ID = "2026-09-22-v13.3.11-expanded-chrono-validation-1"
+V1337_SOURCE_TAG = "utils-v13.3.11-expanded-chrono-validation"
 NCAAF_V13_FORWARD_PREDICTIONS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_predictions"
 NCAAF_V13_FORWARD_RESULTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_results"
 NCAAF_V13_FORWARD_LEDGER_VERSION = "2026-09-20-v13.3.5-immutable-artifact-aware-forward-ledger-v1"
@@ -10854,7 +10854,7 @@ def apply_blended_sharp_score(
                         _use=np.asarray(_v13_promoted & _vp.notna(),dtype=bool)
                         if bool(np.any(_use)):
                             _production[_use]=_vp.to_numpy(dtype=float)[_use]
-                            _source[_use]='V13_3_10'
+                            _source[_use]='V13_3_11'
                             df_canon.loc[_use,'Scoring_Market']='spreads_v13_promoted'
                             logger.warning("[V13-PROMOTED-RUNTIME] canonical Production_Prob uses V13 on %d/%d NCAAF spread rows; legacy probability preserved",int(_use.sum()),len(df_canon))
                         df_canon['Production_Prob']=np.clip(_production,1e-6,1-1e-6)
@@ -15421,8 +15421,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-21-v13.3.10-stat-runtime-parity-audit-shadow"
-NCAAF_V13_HOTFIX = "V13_3_8__CORE_OOF_SIDE_ROLE_BRIDGE__SHADOW_ONLY"
+NCAAF_V13_VERSION = "2026-09-22-v13.3.11-expanded-chrono-validation-shadow"
+NCAAF_V13_HOTFIX = "V13_3_11__EXPANDED_CHRONO_VALIDATION__ARCHITECTURE_FROZEN__OUTER_CONSUMED__SHADOW_ONLY"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -17210,12 +17210,12 @@ def _v13310_runtime_brain_input_audit(rows: pd.DataFrame, X: pd.DataFrame, reque
     feats=list(requested_features or [])
     missing=[f for f in feats if f not in X.columns]
     if missing:
-        raise ValueError(f"V13.3.10 resolver requested unmaterialized runtime feature(s): {missing}")
+        raise ValueError(f"V13.3.11 resolver requested unmaterialized runtime feature(s): {missing}")
     n=len(X)
     for f in feats:
         z=pd.to_numeric(X[f],errors="coerce").fillna(0.0).to_numpy(dtype=float)
         nz=int(np.sum(np.abs(z)>1e-12)); std=float(np.nanstd(z)) if len(z) else 0.0; uniq=int(pd.Series(np.round(z,12)).nunique(dropna=True)) if len(z) else 0
-        logging.info("[V13.3.10-RUNTIME-BRAIN-INPUT] brain=%s rows=%d nonzero_rows=%d coverage=%.1f%% std=%.8f unique=%d",f,n,nz,100.0*nz/max(1,n),std,uniq)
+        logging.info("[V13.3.11-RUNTIME-BRAIN-INPUT] brain=%s rows=%d nonzero_rows=%d coverage=%.1f%% std=%.8f unique=%d",f,n,nz,100.0*nz/max(1,n),std,uniq)
     if "Stat_PointEdge_Scaled" in feats and isinstance(rows,pd.DataFrame) and len(rows):
         exp=pd.to_numeric(rows.get("NCAAF_Stat_Expected_Margin",pd.Series(np.nan,index=rows.index)),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
         spread=np.full(len(rows),np.nan,dtype=float)
@@ -17228,9 +17228,9 @@ def _v13310_runtime_brain_input_audit(rows: pd.DataFrame, X: pd.DataFrame, reque
         src_n=int(src.sum())
         z=pd.to_numeric(X["Stat_PointEdge_Scaled"],errors="coerce").fillna(0.0).to_numpy(dtype=float)
         nz=int(np.sum(np.abs(z)>1e-12))
-        logging.info("[V13.3.10-RUNTIME-STAT-PARITY] source_available_rows=%d signal_nonzero_rows=%d expected_margin_rows=%d spread_rows=%d contract=EXPECTED_MARGIN_PLUS_SAME_ROW_PREGAME_SPREAD_DIV14",src_n,nz,int(np.isfinite(exp).sum()),int(np.isfinite(spread).sum()))
+        logging.info("[V13.3.11-RUNTIME-STAT-PARITY] source_available_rows=%d signal_nonzero_rows=%d expected_margin_rows=%d spread_rows=%d contract=EXPECTED_MARGIN_PLUS_SAME_ROW_PREGAME_SPREAD_DIV14",src_n,nz,int(np.isfinite(exp).sum()),int(np.isfinite(spread).sum()))
         if src_n>=20 and nz==0:
-            raise ValueError(f"V13.3.10 Stat runtime parity failure: {src_n} source-available rows but Stat_PointEdge_Scaled is all zero")
+            raise ValueError(f"V13.3.11 Stat runtime parity failure: {src_n} source-available rows but Stat_PointEdge_Scaled is all zero")
     return True
 
 
@@ -17644,7 +17644,7 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
     market_prob,market_det=_v1312_runtime_residual_specialists(base,family_probs,labels,centers,market_engine)
     rule_engine=overlay.get("rule_expert_engine") or {}
     combined_prob,rule_det=_v132_runtime_apply_rule_engine(market_prob,rows,rule_engine)
-    # V13.3.10 outer-stage diagnostics. These arrays are observational only and
+    # V13.3.11 outer-stage diagnostics. These arrays are observational only and
     # never participate in fitting, gating, calibration, promotion, or bet policy.
     _diag_stages={
         "market_residual":np.asarray(base,dtype=float).copy(),
@@ -17663,14 +17663,14 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
     pathi_det={"Pathi":_pd}; bigal_det={"BigAl":_bd}
 
     resolver=overlay.get("probability_resolver") or {}
-    resolver_active=bool(resolver.get("gate_pass",False) and (str(resolver.get("mode","")) in {"V13_3_10_NEUTRAL_BRAIN_STACK","V13_3_9_NEUTRAL_BRAIN_STACK","V13_3_7_NEUTRAL_BRAIN_STACK"} or bool(resolver.get("anchored_residual",False)) or resolver.get("model") is not None))
+    resolver_active=bool(resolver.get("gate_pass",False) and (str(resolver.get("mode","")) in {"V13_3_11_NEUTRAL_BRAIN_STACK","V13_3_10_NEUTRAL_BRAIN_STACK","V13_3_9_NEUTRAL_BRAIN_STACK","V13_3_7_NEUTRAL_BRAIN_STACK"} or bool(resolver.get("anchored_residual",False)) or resolver.get("model") is not None))
     additive_allowed=bool(overlay.get("additive_stack_fallback_gate_pass",overlay.get("full_stack_activation_pass",False)))
     route="CORE_ONLY"; resolver_error=None
     if resolver_active:
         try:
-            if str(resolver.get("mode","")) in {"V13_3_10_NEUTRAL_BRAIN_STACK","V13_3_9_NEUTRAL_BRAIN_STACK","V13_3_7_NEUTRAL_BRAIN_STACK"}:
+            if str(resolver.get("mode","")) in {"V13_3_11_NEUTRAL_BRAIN_STACK","V13_3_10_NEUTRAL_BRAIN_STACK","V13_3_9_NEUTRAL_BRAIN_STACK","V13_3_7_NEUTRAL_BRAIN_STACK"}:
                 Xr=_v1336_runtime_brain_stack_matrix(rows,core_cal,base,market_prob,pathi_prob,bigal_prob,feature_names=list(resolver.get("feature_names") or []),common_market_delta=common_market_delta,own_fair_delta=own_fair_delta)
-                if not np.isfinite(Xr.to_numpy(dtype=float)).all(): raise ValueError("nonfinite V13.3.10 brain-stack inputs")
+                if not np.isfinite(Xr.to_numpy(dtype=float)).all(): raise ValueError("nonfinite V13.3.11 brain-stack inputs")
                 _co=dict(resolver.get("coefficients") or {})
                 _bt=dict(resolver.get("brain_transfer") or {})
                 def _single_brain_prob(_feat):
@@ -18645,7 +18645,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         if _is_v13232:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             _oa=bool((bundle.get("own_fair_alpha_expert") or {}).get("gate_pass",False))
-            status=np.where(eligible,("V13_3_10_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_3_10_MARKET_RICH_CORE_ACTIVE"),"V13_3_10_CORE_UNAVAILABLE")
+            status=np.where(eligible,("V13_3_11_CORE_PLUS_TRANSFERRED_EXPERTS_ACTIVE" if (_oa or bool((bundle.get("common_market_alpha_expert") or {}).get("gate_pass",False))) else "V13_3_11_MARKET_RICH_CORE_ACTIVE"),"V13_3_11_CORE_UNAVAILABLE")
         elif _is_v13227:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             status=np.where(eligible,"V13_2_31_OWN_FAIR_ACTIVE","V13_2_31_OWN_FAIR_UNAVAILABLE")
@@ -21902,7 +21902,7 @@ def predict_ncaaf_v13_production(rows: pd.DataFrame, bundle: dict, core_prob=Non
         'fundamental':_num('V13_Fundamental_Prob'),
         'core_adjusted':_num('V13_Core_Adjusted_Prob'),
         'pretemperature':_num('V13_Overlay_PreTemperature_Prob'),
-        # V13.3.10 diagnostic-only outer ablation stages. None of these arrays has
+        # V13.3.11 diagnostic-only outer ablation stages. None of these arrays has
         # fitting, promotion, calibration, or betting authority.
         'core_only_individual':_num('V13_Diagnostic_CoreOnly_Prob'),
         'stat_only':_num('V13_Diagnostic_StatOnly_Prob'),
@@ -21942,7 +21942,7 @@ def predict_ncaaf_v13_production(rows: pd.DataFrame, bundle: dict, core_prob=Non
         'authority_route':str(out.get('V13_Probability_Authority_Route',pd.Series(['CORE_ONLY'])).iloc[0]) if n else 'CORE_ONLY',
         'pair_coherence_applied_rows':int(pd.to_numeric(out.get('V13_Pair_Coherence_Applied',pd.Series(np.zeros(n),index=out.index)),errors='coerce').fillna(0).sum()),
         'pair_coherence_max_adjustment':float(pd.to_numeric(out.get('V13_Pair_Coherence_Adjustment',pd.Series(np.zeros(n),index=out.index)),errors='coerce').fillna(0).max()) if n else 0.0,
-        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_3_10_STAT_POINT_EDGE_PARITY',
+        'canonical_inference_graph':'UTILS_RUNTIME_SINGLE_SOURCE_V13_3_11_EXPANDED_CHRONO_VALIDATION',
         'canonical_fallback_used':False,
     }
     return (prob,info) if return_stages else prob
