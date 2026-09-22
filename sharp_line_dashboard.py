@@ -16665,8 +16665,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-22-v13.3.11.2-native-oof-fingerprint-validation-shadow"
-NCAAF_V13_HOTFIX = "V13_3_11_2__NATIVE_OOF_ALL_BRAIN_VALIDATION__FINGERPRINTS__ARCHITECTURE_FROZEN__OUTER_CONSUMED__SHADOW_ONLY"
+NCAAF_V13_VERSION = "2026-09-22-v13.3.11.2.1-native-oof-deploy-path-lock-shadow"
+NCAAF_V13_HOTFIX = "V13_3_11_2_1__NATIVE_OOF_VALIDATION__DEPLOY_PATH_LOCK__FINGERPRINTS__ARCHITECTURE_FROZEN__OUTER_CONSUMED__SHADOW_ONLY"
 NCAAF_HISTORY_POLICY = "ALL_AVAILABLE_SEASONS"
 NCAAF_HISTORY_FIXED_LOOKBACK_DAYS = None  # Never silently truncate production history.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -16687,8 +16687,8 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # from the same deploy bundle.  The simple legacy feature materializer is kept
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
-V133_DEPLOY_BUILD_ID = "2026-09-22-v13.3.11.2-native-oof-fingerprint-validation-1"
-V1337_SOURCE_TAG = "dashboard-v13.3.11.2-native-oof-fingerprint-validation"
+V133_DEPLOY_BUILD_ID = "2026-09-22-v13.3.11.2.1-native-oof-deploy-path-lock-1"
+V1337_SOURCE_TAG = "dashboard-v13.3.11.2.1-native-oof-deploy-path-lock"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
