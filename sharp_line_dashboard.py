@@ -16665,8 +16665,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-22-v13.3.11-expanded-chrono-validation-shadow"
-NCAAF_V13_HOTFIX = "V13_3_11__EXPANDED_CHRONO_VALIDATION__ARCHITECTURE_FROZEN__OUTER_CONSUMED__SHADOW_ONLY"
+NCAAF_V13_VERSION = "2026-09-22-v13.3.11.1-all-brain-chrono-validation-shadow"
+NCAAF_V13_HOTFIX = "V13_3_11_1__ALL_BRAIN_CHRONO_VALIDATION__ARCHITECTURE_FROZEN__OUTER_CONSUMED__SHADOW_ONLY"
 NCAAF_HISTORY_POLICY = "ALL_AVAILABLE_SEASONS"
 NCAAF_HISTORY_FIXED_LOOKBACK_DAYS = None  # Never silently truncate production history.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -16684,8 +16684,8 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # from the same deploy bundle.  The simple legacy feature materializer is kept
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
-V133_DEPLOY_BUILD_ID = "2026-09-22-v13.3.11-expanded-chrono-validation-1"
-V1337_SOURCE_TAG = "dashboard-v13.3.11-expanded-chrono-validation"
+V133_DEPLOY_BUILD_ID = "2026-09-22-v13.3.11.1-all-brain-chrono-validation-1"
+V1337_SOURCE_TAG = "dashboard-v13.3.11.1-all-brain-chrono-validation"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -26355,55 +26355,213 @@ def _v13311_block_report(records: pd.DataFrame, stages, target_games=500, blocks
     return out
 
 
-def _v13311_expanded_chrono_validation(rows,y,groups,Xs,Xh,select_mask,shadow_mask,resolver_art,log_func=print):
-    """Frozen-architecture chronological diagnostics.
+def _v133111_frozen_brain_coef(resolver_art: dict, feat: str):
+    """Return a coefficient learned before expanded validation; never fit here."""
+    try:
+        tr=((resolver_art or {}).get("brain_transfer") or {}).get(feat) or {}
+        v=float(tr.get("coefficient",np.nan))
+        if np.isfinite(v) and v>=0: return v,"INDIVIDUAL_TRANSFER_FIT"
+    except Exception:
+        pass
+    try:
+        v=float(((resolver_art or {}).get("coefficients") or {}).get(feat,np.nan))
+        if np.isfinite(v) and v>=0: return v,"JOINT_RESOLVER_FIT"
+    except Exception:
+        pass
+    return np.nan,"UNAVAILABLE"
 
-    Stat uses its season-forward OOF point edge over every available historical game.
-    Stat/Market comparisons use only rows where the Market microstructure signal was
-    produced by the existing chronological OOF/shadow machinery. No coefficient,
-    feature, threshold, or authority decision is learned from this report.
+
+def _v133111_rule_history_validation(rows,y,groups,rule_engine,log_func=print):
+    """Describe every Big Al / Pathi rule on every reconstructable historical fire.
+
+    This is occurrence-history validation, not a probability-authority fit.  It never
+    learns a coefficient from these results and it keeps source-backed published
+    history separate from internally reconstructed game outcomes.
+    """
+    out={"systems":{},"families":{},"contract":"ALL_RECONSTRUCTABLE_RULE_FIRES__ONE_SIDE_PER_PHYSICAL_GAME__DESCRIPTIVE_HISTORY_ONLY__NO_COEFFICIENT_OR_AUTHORITY_SELECTION"}
+    if not isinstance(rule_engine,dict) or rows is None or len(rows)==0:
+        return out
+    try:
+        rr=_v132_prepare_rule_rows(rows,log_func=None)
+        yy=np.asarray(y,dtype=int); gg=np.asarray(groups,dtype=object); n=len(rr)
+        if len(yy)!=n or len(gg)!=n: return out
+        chrono,csrc=_v13311_chrono_key(rr); seasons=_v132_row_seasons(rr)
+        profiles=rule_engine.get("profiles") or {}
+        specs={str(sp.get("name")):sp for sp in list(rule_engine.get("specs") or []) if isinstance(sp,dict) and sp.get("name")}
+        selected=set(map(str,list(rule_engine.get("selected_experts") or [])))
+        active=set(map(str,list(rule_engine.get("active_selected_experts") or [])))
+        fam_seen={"Pathi":set(),"BigAl":set()}; fam_occ={"Pathi":0,"BigAl":0}
+        team_col=next((c for c in ("Team","feat_Team","Outcome") if c in rr.columns),None)
+        for name,sp in specs.items():
+            fam=str(sp.get("family","OTHER"))
+            if fam not in ("Pathi","BigAl"): continue
+            try:
+                trig=np.asarray(_v132_rule_trigger(rr,sp),dtype=bool)
+            except Exception:
+                trig=np.zeros(n,dtype=bool)
+            # Remove physical games where the same rule fires for both teams. Multiple
+            # book/snapshot rows for the same team are fine and collapse below.
+            ambiguous=set()
+            if trig.any() and team_col:
+                t=rr[team_col].astype(str).str.lower().str.strip().to_numpy(dtype=object)
+                tmp=pd.DataFrame({"g":gg[trig],"t":t[trig]})
+                for gv,cnt in tmp.groupby("g",sort=False)["t"].nunique().items():
+                    if int(cnt)>1: ambiguous.add(str(gv))
+            elig=trig.copy()
+            if ambiguous:
+                elig &= ~np.isin(gg,np.asarray(list(ambiguous),dtype=object))
+            dec,_=_v13230_target_decision_rows(rr,np.full(n,.5),elig,gg,V13230_TARGET_DECISION_HOURS)
+            idx=np.flatnonzero(dec&elig)
+            recs=[]
+            for i in idx:
+                recs.append({"game":str(gg[i]),"y":int(yy[i]),"chrono":float(chrono[i]) if np.isfinite(chrono[i]) else float(i),"season":int(seasons[i]) if i<len(seasons) and np.isfinite(seasons[i]) else None})
+            d=pd.DataFrame(recs).sort_values(["chrono","game"]).reset_index(drop=True) if recs else pd.DataFrame()
+            hit=float(d["y"].mean()) if len(d) else np.nan
+            sys_seasons=sorted({int(v) for v in d["season"].dropna().tolist()}) if len(d) and "season" in d else []
+            blocks=[]
+            if len(d):
+                nb=min(4,max(1,len(d)//15))
+                for bi,ii in enumerate(np.array_split(np.arange(len(d)),nb),1):
+                    if not len(ii): continue
+                    q=d.iloc[ii]
+                    blocks.append({"block":bi,"games":int(len(q)),"ats_hit_rate":float(q["y"].mean()),"chrono_min":float(q["chrono"].min()),"chrono_max":float(q["chrono"].max())})
+            pr=profiles.get(name) or {}
+            rec={
+                "family":fam,"games":int(len(d)),"ats_hit_rate":hit,"seasons":sys_seasons,"chronology_source":csrc,
+                "ambiguous_two_side_games_excluded":int(len(ambiguous)),"selected_expert":bool(name in selected),"active_expert":bool(name in active),
+                "profile_internal_historical_sample":int(pr.get("internal_historical_sample",0) or 0),
+                "profile_internal_historical_raw_ats":float(pr.get("internal_historical_raw_ats",np.nan)),
+                "profile_source_historical_sample":int(pr.get("source_historical_sample",0) or 0),
+                "profile_source_historical_raw_ats":float(pr.get("source_historical_raw_ats",np.nan)),
+                "active_incremental_scale":float(pr.get("active_incremental_scale",0.0) or 0.0),
+                "blocks":blocks,
+            }
+            out["systems"][name]=rec
+            fam_occ[fam]+=int(len(d)); fam_seen[fam].update(map(str,d["game"].tolist()) if len(d) else [])
+            if len(d) or rec["profile_internal_historical_sample"] or rec["profile_source_historical_sample"]:
+                log_func(
+                    f"[V13.3.11.1-ALL-BRAIN-RULE] family={fam} system={name} games={len(d)} ats={hit:.4f} "
+                    f"seasons={sys_seasons} profile_internal_n={rec['profile_internal_historical_sample']} profile_internal_ats={rec['profile_internal_historical_raw_ats']:.4f} "
+                    f"source_n={rec['profile_source_historical_sample']} source_ats={rec['profile_source_historical_raw_ats']:.4f} selected={name in selected} active={name in active} "
+                    f"active_scale={rec['active_incremental_scale']:.2f} ambiguous_excluded={len(ambiguous)} authority=DESCRIPTIVE_RULE_HISTORY_ONLY"
+                )
+                for br in blocks:
+                    log_func(f"[V13.3.11.1-ALL-BRAIN-RULE-BLOCK] family={fam} system={name} block={br['block']} games={br['games']} ats={br['ats_hit_rate']:.4f} authority=DESCRIPTIVE_RULE_HISTORY_ONLY")
+        for fam in ("Pathi","BigAl"):
+            fs=[n for n,r in out["systems"].items() if r.get("family")==fam]
+            fa=[n for n in fs if out["systems"][n].get("active_expert")]
+            out["families"][fam]={"systems":len(fs),"active_systems":len(fa),"occurrence_records":int(fam_occ[fam]),"unique_physical_games":int(len(fam_seen[fam]))}
+            log_func(f"[V13.3.11.1-ALL-BRAIN-RULE-FAMILY] family={fam} systems={len(fs)} active_systems={len(fa)} occurrence_records={fam_occ[fam]} unique_physical_games={len(fam_seen[fam])} contract=SYSTEM_LEVEL_HISTORY_NO_FORCED_FAMILY_PROBABILITY")
+    except Exception as e:
+        out["status"]="ERROR_FAIL_CLOSED"; out["error"]=f"{type(e).__name__}:{e}"
+        log_func(f"[V13.3.11.1-ALL-BRAIN-RULE] status=ERROR_FAIL_CLOSED error={type(e).__name__}:{e}")
+    return out
+
+
+def _v13311_expanded_chrono_validation(rows,y,groups,Xs,Xh,select_mask,shadow_mask,resolver_art,
+                                        common_market_raw_prob=None,own_fair_raw_prob=None,rule_engine=None,log_func=print):
+    """All-brain, frozen-architecture chronological diagnostics.
+
+    Each brain gets the largest evaluation surface that is leakage-safe for that
+    brain. Historical Core and Stat use season-forward OOF bridges. Common Market
+    and Own Fair use their own pre-resolver OOF probabilities. Rich Market,
+    Market Residual, and continuous rule-family signals are restricted to the
+    existing selection/shadow OOF machinery. Big Al / Pathi are additionally
+    evaluated system-by-system on every reconstructable historical occurrence.
+
+    Nothing in this report changes coefficients, features, thresholds, authority,
+    promotion, or the protected outer holdout.
     """
     try:
         yy=np.asarray(y,dtype=int); g=np.asarray(groups,dtype=object); sm=np.asarray(select_mask,dtype=bool); hm=np.asarray(shadow_mask,dtype=bool)
-        co=dict((resolver_art or {}).get("coefficients") or {})
-        bs=float(co.get("Stat_PointEdge_Scaled",0.0) or 0.0); bm=float(co.get("MarketMicrostructure_Delta_Logit",0.0) or 0.0)
-        xs=Xs.copy(); xh=Xh.copy(); xc=xs.copy(); xc.loc[hm,:]=xh.loc[hm,:]
-        stat_x=pd.to_numeric(xc.get("Stat_PointEdge_Scaled",0.0),errors="coerce").to_numpy(dtype=float)
-        mkt_x=pd.to_numeric(xc.get("MarketMicrostructure_Delta_Logit",0.0),errors="coerce").to_numpy(dtype=float)
-        p_stat=_v13224_sigmoid(bs*stat_x)
-        p_mkt=_v13224_sigmoid(bm*mkt_x)
-        p_combo=_v13224_sigmoid(bs*stat_x+bm*mkt_x)
+        n=len(rows); xs=Xs.copy(); xh=Xh.copy(); xc=xs.copy(); xc.loc[hm,:]=xh.loc[hm,:]
+        seasons=_v132_row_seasons(rows)
+        transfer=(resolver_art or {}).get("brain_transfer") or {}
 
-        # Stat is season-forward OOF across a much larger historical surface.
-        stat_eligible=np.isfinite(stat_x)&(np.abs(stat_x)>1e-12)
-        stat_rec=_v13311_one_game_records(rows,yy,g,stat_eligible,{"stat_only":p_stat})
-        stat_rep=_v13311_block_report(stat_rec,["stat_only"],target_games=500,blocks=4)
-
-        # Fair brain comparison: same games, same OOF/shadow rows, both signals live.
-        common_eligible=(sm|hm)&np.isfinite(stat_x)&np.isfinite(mkt_x)&(np.abs(stat_x)>1e-12)&(np.abs(mkt_x)>1e-12)
-        common_rec=_v13311_one_game_records(rows,yy,g,common_eligible,{"stat_only":p_stat,"market_only":p_mkt,"stat_plus_market":p_combo})
-        common_rep=_v13311_block_report(common_rec,["stat_only","market_only","stat_plus_market"],target_games=500,blocks=4)
-        out={"stat_extended":stat_rep,"common_comparison":common_rep,"coefficients_frozen":{"Stat_PointEdge_Scaled":bs,"MarketMicrostructure_Delta_Logit":bm},"contract":"FROZEN_COEFFICIENTS__STAT_SEASON_FORWARD_OOF__MARKET_EXISTING_OOF_SHADOW_ONLY__CHRONO_BLOCKS__NO_RECIPE_SELECTION__NO_PROMOTION_AUTHORITY"}
-        # retain compact records only until decision-map finalization; removed before serialization
-        out["_common_records"]=common_rec.to_dict("records") if len(common_rec) else []
-        sa=(stat_rep.get("aggregate") or {}).get("stat_only",{})
-        log_func(f"[V13.3.11-CHRONO-VALIDATION-STAT] games={stat_rep.get('games',0)} target=500 target_reached={stat_rep.get('target_reached',False)} auc={float(sa.get('auc',np.nan)):.6f} ll={float(sa.get('logloss',np.nan)):.6f} brier={float(sa.get('brier',np.nan)):.6f} acc={float(sa.get('accuracy',np.nan)):.6f} authority=DIAGNOSTIC_ONLY")
-        ca=common_rep.get("aggregate") or {}
-        for st in ("stat_only","market_only","stat_plus_market"):
-            m=ca.get(st,{})
-            log_func(f"[V13.3.11-CHRONO-VALIDATION-COMMON] stage={st} games={common_rep.get('games',0)} target=500 target_reached={common_rep.get('target_reached',False)} auc={float(m.get('auc',np.nan)):.6f} ll={float(m.get('logloss',np.nan)):.6f} brier={float(m.get('brier',np.nan)):.6f} acc={float(m.get('accuracy',np.nan)):.6f} authority=DIAGNOSTIC_ONLY")
-        for scope,rep in (("STAT_EXTENDED",stat_rep),("COMMON",common_rep)):
+        def _x(feat):
+            return pd.to_numeric(xc.get(feat,pd.Series(np.zeros(n),index=xc.index)),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+        def _coef_prob(feat):
+            z=_x(feat); coef,csrc=_v133111_frozen_brain_coef(resolver_art,feat)
+            if not np.isfinite(coef) or coef<=0: return z,np.full(n,np.nan),coef,csrc
+            return z,_v13224_sigmoid(coef*z),coef,csrc
+        def _raw_prob(v):
+            if v is None: return np.full(n,np.nan)
+            a=np.asarray(v,dtype=float).reshape(-1)
+            return a if len(a)==n else np.full(n,np.nan)
+        def _season_list(mask):
+            m=np.asarray(mask,dtype=bool)
+            return sorted({int(v) for v in seasons[m] if np.isfinite(v)}) if len(seasons)==n and m.any() else []
+        def _brain_report(label,prob,eligible,scope,coef=np.nan,coef_source="NATIVE_PROBABILITY",target=500):
+            e=np.asarray(eligible,dtype=bool)&np.isfinite(np.asarray(prob,dtype=float))
+            rec=_v13311_one_game_records(rows,yy,g,e,{"prob":prob})
+            rep=_v13311_block_report(rec,["prob"],target_games=target,blocks=4)
+            rep.update({"brain":label,"scope":scope,"coefficient":float(coef) if np.isfinite(coef) else None,"coefficient_source":coef_source,"seasons":_season_list(e)})
+            m=(rep.get("aggregate") or {}).get("prob",{})
+            log_func(f"[V13.3.11.1-ALL-BRAIN-VALIDATION] brain={label} games={rep.get('games',0)} target={target} target_reached={rep.get('target_reached',False)} seasons={rep.get('seasons',[])} auc={float(m.get('auc',np.nan)):.6f} ll={float(m.get('logloss',np.nan)):.6f} brier={float(m.get('brier',np.nan)):.6f} acc={float(m.get('accuracy',np.nan)):.6f} scope={scope} coef={float(coef) if np.isfinite(coef) else np.nan:.6f} coef_source={coef_source} authority=DIAGNOSTIC_ONLY")
             for br in rep.get("blocks",[]):
-                mts=br.get("metrics",{})
-                txt=" ".join(f"{st}:auc={float(mm.get('auc',np.nan)):.4f},ll={float(mm.get('logloss',np.nan)):.5f},br={float(mm.get('brier',np.nan)):.5f},acc={float(mm.get('accuracy',np.nan)):.4f}" for st,mm in mts.items())
-                log_func(f"[V13.3.11-CHRONO-VALIDATION-BLOCK] scope={scope} block={br.get('block')} games={br.get('games')} {txt} authority=DIAGNOSTIC_ONLY")
+                mm=(br.get("metrics") or {}).get("prob",{})
+                log_func(f"[V13.3.11.1-ALL-BRAIN-BLOCK] brain={label} block={br.get('block')} games={br.get('games')} auc={float(mm.get('auc',np.nan)):.4f} ll={float(mm.get('logloss',np.nan)):.5f} brier={float(mm.get('brier',np.nan)):.5f} acc={float(mm.get('accuracy',np.nan)):.4f} authority=DIAGNOSTIC_ONLY")
+            return rep,rec
+
+        brains={}; records={}; overlap_mask=(sm|hm)
+        # Core / Stat: true season-forward OOF bridges across the full historical surface.
+        core_x,core_p,core_c,core_cs=_coef_prob("IndependentCoreV4_PointEdge_Scaled")
+        stat_x,stat_p,stat_c,stat_cs=_coef_prob("Stat_PointEdge_Scaled")
+        core_e=np.isfinite(core_x)&(np.abs(core_x)>1e-12)&np.isfinite(core_p)
+        stat_e=np.isfinite(stat_x)&(np.abs(stat_x)>1e-12)&np.isfinite(stat_p)
+        brains["CORE"],records["CORE"]=_brain_report("CORE",core_p,core_e,"MAX_SEASON_FORWARD_OOF",core_c,core_cs)
+        brains["STAT"],records["STAT"]=_brain_report("STAT",stat_p,stat_e,"MAX_SEASON_FORWARD_OOF",stat_c,stat_cs)
+
+        # Common Market / Own Fair: raw OOF probabilities, not transfer-gated zero deltas.
+        common_p=_raw_prob(common_market_raw_prob); common_e=np.isfinite(common_p)&(common_p>0)&(common_p<1)
+        own_p=_raw_prob(own_fair_raw_prob); own_e=np.isfinite(own_p)&(own_p>0)&(own_p<1)
+        brains["COMMON_MARKET"],records["COMMON_MARKET"]=_brain_report("COMMON_MARKET",common_p,common_e,"MAX_NATIVE_OOF_PROBABILITY",np.nan,"NATIVE_PROBABILITY")
+        brains["OWN_FAIR"],records["OWN_FAIR"]=_brain_report("OWN_FAIR",own_p,own_e,"MAX_MARKET_BLIND_OOF_PROBABILITY",np.nan,"NATIVE_PROBABILITY")
+
+        # Residual / rich-market / family continuous lanes only where their existing
+        # OOF or disjoint shadow predictions exist. Do not treat full-fit rows as holdout.
+        for label,feat in (("MARKET_RESIDUAL","MarketResidual_Delta_Logit"),("RICH_MARKET_MICRO","MarketMicrostructure_Delta_Logit"),("PATHI_CONTINUOUS","Pathi_Delta_Logit"),("BIGAL_CONTINUOUS","BigAl_Delta_Logit")):
+            xx,pp,cc,cs=_coef_prob(feat); ee=overlap_mask&np.isfinite(xx)&(np.abs(xx)>1e-12)&np.isfinite(pp)
+            brains[label],records[label]=_brain_report(label,pp,ee,"SELECTION_PLUS_DISJOINT_SHADOW_OOF_ONLY",cc,cs)
+
+        # Same-game comparisons. No new blend weights are fitted here.
+        pairs={}
+        def _pair(name,a_label,b_label,a_prob,b_prob,elig,combo_prob=None):
+            pm={a_label.lower():a_prob,b_label.lower():b_prob}
+            if combo_prob is not None: pm["frozen_combo"]=combo_prob
+            rec=_v13311_one_game_records(rows,yy,g,np.asarray(elig,dtype=bool),pm)
+            rep=_v13311_block_report(rec,list(pm.keys()),target_games=500,blocks=4)
+            pairs[name]=rep
+            ag=rep.get("aggregate") or {}
+            bits=[]
+            for st in pm:
+                mm=ag.get(st,{})
+                bits.append(f"{st}:auc={float(mm.get('auc',np.nan)):.4f},ll={float(mm.get('logloss',np.nan)):.5f},br={float(mm.get('brier',np.nan)):.5f}")
+            log_func(f"[V13.3.11.1-ALL-BRAIN-PAIR] pair={name} games={rep.get('games',0)} target_reached={rep.get('target_reached',False)} {' '.join(bits)} authority=DIAGNOSTIC_ONLY_NO_NEW_WEIGHT_FIT")
+            return rec
+        if np.isfinite(stat_c) and np.isfinite(core_c):
+            _pair("STAT_VS_CORE","STAT","CORE",stat_p,core_p,stat_e&core_e,_v13224_sigmoid(stat_c*stat_x+core_c*core_x))
+        micro_x,micro_p,micro_c,micro_cs=_coef_prob("MarketMicrostructure_Delta_Logit")
+        micro_e=overlap_mask&np.isfinite(micro_x)&(np.abs(micro_x)>1e-12)&np.isfinite(micro_p)
+        common_rec=_pair("STAT_VS_RICH_MARKET","STAT","RICH_MARKET",stat_p,micro_p,stat_e&micro_e,_v13224_sigmoid(stat_c*stat_x+micro_c*micro_x) if np.isfinite(stat_c) and np.isfinite(micro_c) else None)
+        _pair("STAT_VS_COMMON_MARKET","STAT","COMMON_MARKET",stat_p,common_p,stat_e&common_e,None)
+        _pair("STAT_VS_OWN_FAIR","STAT","OWN_FAIR",stat_p,own_p,stat_e&own_e,None)
+
+        rules=_v133111_rule_history_validation(rows,yy,g,rule_engine,log_func=log_func)
+        target_count=sum(1 for r in brains.values() if bool(r.get("target_reached",False)))
+        out={
+            "version":"V13.3.11.1","brains":brains,"pairwise_same_game":pairs,"rule_history":rules,
+            "target_500_brains_reached":int(target_count),
+            "contract":"ALL_BRAINS_MAX_LEAKAGE_SAFE_HISTORY__FOUR_CHRONO_BLOCKS__RAW_COMMON_AND_OWN_OOF__RICH_MARKET_ONLY_EXISTING_OOF_SHADOW__RULES_ALL_RECONSTRUCTABLE_OCCURRENCES__NO_TUNING__OUTER_HOLDOUT_UNUSED",
+            "_common_records":common_rec.to_dict("records") if common_rec is not None and len(common_rec) else [],
+        }
+        log_func(f"[V13.3.11.1-ALL-BRAIN-SUMMARY] continuous_brains={len(brains)} brains_at_least_500_games={target_count} rule_systems={len((rules or {}).get('systems',{}))} outer_holdout_used=FALSE architecture_frozen=TRUE")
         return out
     except Exception as e:
-        log_func(f"[V13.3.11-CHRONO-VALIDATION] status=ERROR_FAIL_CLOSED error={type(e).__name__}:{e}")
+        log_func(f"[V13.3.11.1-ALL-BRAIN-VALIDATION] status=ERROR_FAIL_CLOSED error={type(e).__name__}:{e}")
         return {"status":"ERROR_FAIL_CLOSED","error":f"{type(e).__name__}:{e}","authority":"DIAGNOSTIC_ONLY"}
 
-
-def _v1336_fit_brain_stack_resolver(rows,y,core_cal,base,market_sel,market_shadow,pathi_sel,pathi_shadow,bigal_sel,bigal_shadow,select_mask,shadow_mask,weights,groups,core_v4_edge=None,stat_point_edge=None,common_market_delta=None,own_fair_delta=None,log_func=print):
+def _v1336_fit_brain_stack_resolver(rows,y,core_cal,base,market_sel,market_shadow,pathi_sel,pathi_shadow,bigal_sel,bigal_shadow,select_mask,shadow_mask,weights,groups,core_v4_edge=None,stat_point_edge=None,common_market_delta=None,own_fair_delta=None,common_market_raw_prob=None,own_fair_raw_prob=None,rule_engine=None,log_func=print):
     """Transfer-gated brain selection around a neutral ATS prior; outer holdout unused."""
     yy=np.asarray(y,dtype=int); w=np.ones(len(yy),dtype=float); g=np.asarray(groups,dtype=object); sm=np.asarray(select_mask,dtype=bool); hm=np.asarray(shadow_mask,dtype=bool)
     Xs=_v1336_brain_stack_matrix(rows,core_cal,base,market_sel,pathi_sel,bigal_sel,core_v4_edge,stat_point_edge,common_market_delta,own_fair_delta); Xh=_v1336_brain_stack_matrix(rows,core_cal,base,market_shadow,pathi_shadow,bigal_shadow,core_v4_edge,stat_point_edge,common_market_delta,own_fair_delta)
@@ -26483,7 +26641,10 @@ def _v1336_fit_brain_stack_resolver(rows,y,core_cal,base,market_sel,market_shado
     log_func(f"[V13.3.11-BRAIN-STACK-RESOLVER] gate={'PASS' if gate else 'CLOSED'} anchor=NEUTRAL_0P5 active={active} C={bestj['C']:.3f} selection_ll={bestj['ll']:+.6f} selection_br={bestj['br']:+.6f} shadow_ll={shll:+.6f} shadow_br={shbr:+.6f} positive_folds={bestj['pos']}/{bestj['vf']} coefficients={co}")
     if "Stat_PointEdge_Scaled" in active:
         log_func("[V13.3.11-STAT-RUNTIME-CONTRACT] training_feature=Stat_PointEdge_Scaled training_semantics=SEASON_FORWARD_OOF_FAIR_MARGIN_PLUS_SAME_ROW_PREGAME_SPREAD runtime_semantics=DEPLOYABLE_STAT_EXPECTED_MARGIN_PLUS_SAME_ROW_PREGAME_SPREAD scale=DIV14 silent_reindex_zero=BLOCKED")
-    out["expanded_chronological_validation"]=_v13311_expanded_chrono_validation(rows,yy,g,Xs,Xh,sm,hm,out,log_func=log_func)
+    out["expanded_chronological_validation"]=_v13311_expanded_chrono_validation(
+        rows,yy,g,Xs,Xh,sm,hm,out,
+        common_market_raw_prob=common_market_raw_prob,own_fair_raw_prob=own_fair_raw_prob,rule_engine=rule_engine,log_func=log_func
+    )
     return out
 
 
@@ -27164,7 +27325,8 @@ def _v13232_apply_own_fair_alpha(core_prob, own_prob, artifact):
 def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X_train: pd.DataFrame,
                                         y_train, folds, shadow_folds=None, sample_weight=None, log_func=print,
                                         base_override=None, core_calibrated_override=None, independent_core_v4_edge_override=None,
-                                        stat_point_edge_override=None, common_market_delta_override=None, own_fair_delta_override=None):
+                                        stat_point_edge_override=None, common_market_delta_override=None, own_fair_delta_override=None,
+                                        common_market_raw_prob_override=None, own_fair_raw_prob_override=None):
     """Fit Market/Pathi/BigAl specialists and admit only incremental OOS authority.
 
     AutoFS sees only one family at a time. Selection folds are physical-game
@@ -27232,6 +27394,15 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
         _of=np.asarray(own_fair_delta_override,dtype=float).reshape(-1)
         if len(_of)==len(_resolver_own_delta): _resolver_own_delta=np.where(np.isfinite(_of),np.clip(_of,-3,3),0.0)
     log_func(f"[V13.3.11-SECONDARY-BRAIN-INPUT] common_market_nonzero={int(np.sum(np.abs(_resolver_common_delta)>1e-12))}/{len(y)} own_fair_nonzero={int(np.sum(np.abs(_resolver_own_delta)>1e-12))}/{len(y)} contract=TRANSFER_GATED_STAGE_DELTA_ONLY")
+    _resolver_common_raw_prob=np.full(len(y),np.nan,dtype=float)
+    _resolver_own_raw_prob=np.full(len(y),np.nan,dtype=float)
+    if common_market_raw_prob_override is not None:
+        _rp=np.asarray(common_market_raw_prob_override,dtype=float).reshape(-1)
+        if len(_rp)==len(y): _resolver_common_raw_prob=_rp.copy()
+    if own_fair_raw_prob_override is not None:
+        _rp=np.asarray(own_fair_raw_prob_override,dtype=float).reshape(-1)
+        if len(_rp)==len(y): _resolver_own_raw_prob=_rp.copy()
+    log_func(f"[V13.3.11.1-ALL-BRAIN-RAW-INPUT] common_market_prob_rows={int(np.isfinite(_resolver_common_raw_prob).sum())}/{len(y)} own_fair_prob_rows={int(np.isfinite(_resolver_own_raw_prob).sum())}/{len(y)} contract=NATIVE_OOF_PROBABILITIES_DIAGNOSTIC_ONLY")
     if core_calibrated_override is not None:
         _cc=np.asarray(core_calibrated_override,dtype=float).reshape(-1)
         if len(_cc)==len(_resolver_core_cal):
@@ -27597,7 +27768,9 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
         train_rows,y,_resolver_core_cal,base,market_sel,market_shadow,
         _pathi_sel,_pathi_shadow,_bigal_sel,_bigal_shadow,select_mask,shadow_mask,
         sw_spec,_spec_groups,core_v4_edge=_resolver_core_v4_edge,stat_point_edge=_resolver_stat_edge,
-        common_market_delta=_resolver_common_delta,own_fair_delta=_resolver_own_delta,log_func=log_func
+        common_market_delta=_resolver_common_delta,own_fair_delta=_resolver_own_delta,
+        common_market_raw_prob=_resolver_common_raw_prob,own_fair_raw_prob=_resolver_own_raw_prob,
+        rule_engine=_rule_engine,log_func=log_func
     )
     _resolver_sel_pred=np.asarray((_resolver_art or {}).pop("_selection_prediction",np.full(len(y),np.nan)),dtype=float)
     _resolver_sh_pred=np.asarray((_resolver_art or {}).pop("_shadow_prediction",np.full(len(y),np.nan)),dtype=float)
@@ -27721,15 +27894,18 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
     _crecs=list(_xval.pop("_common_records",[]) or []) if isinstance(_xval,dict) else []
     if _crecs:
         _cdf=pd.DataFrame(_crecs)
-        if "stat_plus_market" in _cdf.columns:
-            _pfin=pd.to_numeric(_cdf["stat_plus_market"],errors="coerce").to_numpy(dtype=float)
+        _combo_col=("stat_plus_market" if "stat_plus_market" in _cdf.columns else ("frozen_combo" if "frozen_combo" in _cdf.columns else None))
+        if _combo_col is not None:
+            _pfin=pd.to_numeric(_cdf[_combo_col],errors="coerce").to_numpy(dtype=float)
             if _decision_active:
                 _pfin=_v13226_apply_decision_map(_pfin,float((_decision_map or {}).get("active_scale",1.0) or 1.0))
             _cdf["final_model"]=_pfin
-            _frep=_v13311_block_report(_cdf,["stat_only","market_only","stat_plus_market","final_model"],target_games=500,blocks=4)
+            _stages=[c for c in ("stat_only","stat","market_only","rich_market",_combo_col,"final_model") if c in _cdf.columns]
+            _stages=list(dict.fromkeys(_stages))
+            _frep=_v13311_block_report(_cdf,_stages,target_games=500,blocks=4)
             _xval["common_comparison_with_final"]=_frep
             _fm=(_frep.get("aggregate") or {}).get("final_model",{})
-            log_func(f"[V13.3.11-CHRONO-VALIDATION-FINAL] games={_frep.get('games',0)} target=500 target_reached={_frep.get('target_reached',False)} auc={float(_fm.get('auc',np.nan)):.6f} ll={float(_fm.get('logloss',np.nan)):.6f} brier={float(_fm.get('brier',np.nan)):.6f} acc={float(_fm.get('accuracy',np.nan)):.6f} rule_probability_authority=0 rule_trigger_authority={len(list((_rule_engine or {}).get('selected_experts') or []))} authority=DIAGNOSTIC_ONLY")
+            log_func(f"[V13.3.11.1-CHRONO-VALIDATION-FINAL] games={_frep.get('games',0)} target=500 target_reached={_frep.get('target_reached',False)} auc={float(_fm.get('auc',np.nan)):.6f} ll={float(_fm.get('logloss',np.nan)):.6f} brier={float(_fm.get('brier',np.nan)):.6f} acc={float(_fm.get('accuracy',np.nan)):.6f} combo_source={_combo_col} rule_probability_authority=0 rule_trigger_authority={len(list((_rule_engine or {}).get('selected_experts') or []))} authority=DIAGNOSTIC_ONLY")
     if isinstance(_resolver_art,dict):
         _resolver_art["expanded_chronological_validation"]=_xval
     artifact["expanded_chronological_validation"]=_xval
@@ -39675,7 +39851,8 @@ def train_sharp_model_from_bq(
                     core_calibrated_override=_v13232_core_plus_own,
                     independent_core_v4_edge_override=_v1337_core_v4_resolver_edge,
                     stat_point_edge_override=_v1337_stat_resolver_edge,
-                    common_market_delta_override=_v1336_common_delta,own_fair_delta_override=_v1336_own_delta
+                    common_market_delta_override=_v1336_common_delta,own_fair_delta_override=_v1336_own_delta,
+                    common_market_raw_prob_override=_v13233_common_prob,own_fair_raw_prob_override=_v13227_own_oof
                 )
                 # The row-level OOF bridge is training-only.  Runtime computes the
                 # current Core V4 point edge from the saved Core models, so retaining
