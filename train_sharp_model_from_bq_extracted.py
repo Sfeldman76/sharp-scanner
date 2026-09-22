@@ -1,4 +1,4 @@
-V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.3.11.2.1-native-oof-deploy-path-lock"
+V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.3.11.3-conditional-incremental-admission"
 
 from sharp_line_dashboard import (
     train_with_champion_wrapper,
