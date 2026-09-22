@@ -1,4 +1,4 @@
-V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.3.10-stat-runtime-parity-audit"
+V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.3.11-expanded-chrono-validation"
 
 from sharp_line_dashboard import (
     train_with_champion_wrapper,
