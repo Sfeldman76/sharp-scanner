@@ -16665,8 +16665,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-22-v13.4.0-production-resolver-freeze-shadow"
-NCAAF_V13_HOTFIX = "V13_4_0__PRODUCTION_RESOLVER_FREEZE__STAT_BASELINE__CORE_OWN_FAIR__RANKING_GUARD__PAIRED_BOOTSTRAP__DEPLOY_PATH_LOCK__OUTER_CONSUMED__SHADOW_ONLY"
+NCAAF_V13_VERSION = "2026-09-22-v13.4.1-stat-only-runtime-bet-threshold-shadow"
+NCAAF_V13_HOTFIX = "V13_4_1__STAT_ONLY_RUNTIME_FREEZE__REAL_PRICE_THRESHOLD_LADDER__DEV_ONLY_SELECTION__PUSH_CLV_AUDIT__PROSPECTIVE_SHADOW_ONLY"
 NCAAF_HISTORY_POLICY = "ALL_AVAILABLE_SEASONS"
 NCAAF_HISTORY_FIXED_LOOKBACK_DAYS = None  # Never silently truncate production history.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -16687,8 +16687,8 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # from the same deploy bundle.  The simple legacy feature materializer is kept
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
-V133_DEPLOY_BUILD_ID = "2026-09-22-v13.4.0-production-resolver-freeze-1"
-V1337_SOURCE_TAG = "dashboard-v13.4.0-production-resolver-freeze"
+V133_DEPLOY_BUILD_ID = "2026-09-22-v13.4.1-stat-only-threshold-validation-1"
+V1337_SOURCE_TAG = "dashboard-v13.4.1-stat-only-threshold-validation"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -25705,8 +25705,8 @@ V13224_RESOLVER_MAX_ECE_INCREASE = 0.0050
 V13224_RESOLVER_MAX_RELIABILITY_INCREASE = 0.0015
 V13224_RESOLVER_MAX_EXPERT_COEF = 1.50
 V13224_RESOLVER_MAX_INTERCEPT = 0.25
-V13224_BET_POLICY_VERSION = "2026-09-20-v13.3.5-compact-final-state-real-price-policy-current-season-forward"
-V13224_BET_EDGE_GRID = (0.010,0.015,0.020,0.025,0.030,0.040,0.050)
+V13224_BET_POLICY_VERSION = "2026-09-22-v13.4.1-stat-only-real-price-threshold-policy"
+V13224_BET_EDGE_GRID = (0.000,0.0025,0.0050,0.0075,0.010,0.015,0.020,0.025,0.030,0.040,0.050)
 V13224_BET_MIN_SELECTION_BETS = 50
 V13224_BET_MIN_SHADOW_BETS = 30
 V13224_BET_BOOTSTRAP_REPS = 800
@@ -27142,13 +27142,65 @@ def _v1336_fit_brain_stack_resolver(rows,y,core_cal,base,market_sel,market_shado
     log_func(f"[V13.3.11-BRAIN-STACK-RESOLVER] gate={'PASS' if gate else 'CLOSED'} anchor=NEUTRAL_0P5 active={active} C={bestj['C']:.3f} selection_ll={bestj['ll']:+.6f} selection_br={bestj['br']:+.6f} shadow_ll={shll:+.6f} shadow_br={shbr:+.6f} positive_folds={bestj['pos']}/{bestj['vf']} coefficients={co}")
     if "Stat_PointEdge_Scaled" in active:
         log_func("[V13.3.11-STAT-RUNTIME-CONTRACT] training_feature=Stat_PointEdge_Scaled training_semantics=SEASON_FORWARD_OOF_FAIR_MARGIN_PLUS_SAME_ROW_PREGAME_SPREAD runtime_semantics=DEPLOYABLE_STAT_EXPECTED_MARGIN_PLUS_SAME_ROW_PREGAME_SPREAD scale=DIV14 silent_reindex_zero=BLOCKED")
-    out["expanded_chronological_validation"]=_v13311_expanded_chrono_validation(
+    _xval=_v13311_expanded_chrono_validation(
         rows,yy,g,Xs,Xh,sm,hm,out,
         common_market_raw_prob=common_market_raw_prob,own_fair_raw_prob=own_fair_raw_prob,rule_engine=rule_engine,
         market_candidate_sel=market_sel,market_candidate_shadow=market_shadow,
         pathi_candidate_sel=pathi_sel,pathi_candidate_shadow=pathi_shadow,
         bigal_candidate_sel=bigal_sel,bigal_candidate_shadow=bigal_shadow,log_func=log_func
     )
+    out["expanded_chronological_validation"]=_xval
+
+    # V13.4.1: convert the V13.4.0 resolver-freeze decision into actual runtime
+    # authority.  The freeze is based only on leakage-safe native OOF history; the
+    # consumed outer holdout has no selection authority.  If every challenger is
+    # closed, STAT becomes the exact production probability resolver with a fixed
+    # unit logit coefficient: sigmoid(Stat_PointEdge / 14).  No calibration map,
+    # market family, Core, Own Fair, Pathi or Big Al continuous probability is
+    # allowed to move the production probability. Named rule triggers remain
+    # separately visible as research/trigger evidence.
+    _freeze=dict((_xval or {}).get("production_resolver_freeze") or {}) if isinstance(_xval,dict) else {}
+    _proposed=list(_freeze.get("proposed_runtime_resolver") or [])
+    _freeze_stat_only=bool(_freeze.get("freeze_ready",False) and _proposed==["STAT"])
+    if _freeze_stat_only:
+        _stat_sel=pd.to_numeric(Xs.get("Stat_PointEdge_Scaled",pd.Series(np.nan,index=Xs.index)),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+        _stat_sh=pd.to_numeric(Xh.get("Stat_PointEdge_Scaled",pd.Series(np.nan,index=Xh.index)),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+        _ps=np.where(np.isfinite(_stat_sel),_v13224_sigmoid(np.clip(_stat_sel,-3.0,3.0)),np.nan)
+        _ph=np.where(np.isfinite(_stat_sh),_v13224_sigmoid(np.clip(_stat_sh,-3.0,3.0)),np.nan)
+        _sel_eval=fs&np.isfinite(_ps); _sh_eval=fh&np.isfinite(_ph)
+        _selm=_ncaaf_v131_calibration_metrics(yy[_sel_eval],_ps[_sel_eval],w[_sel_eval]) if _sel_eval.any() else {}
+        _shm=_ncaaf_v131_calibration_metrics(yy[_sh_eval],_ph[_sh_eval],w[_sh_eval]) if _sh_eval.any() else {}
+        out.update({
+            "version":"V13.4.1","mode":"V13_4_1_STAT_ONLY_FROZEN","gate_pass":True,
+            "status":"FROZEN_STAT_ONLY","feature_names":["Stat_PointEdge_Scaled"],
+            "coefficients":{"Stat_PointEdge_Scaled":1.0},"intercept":0.0,
+            "active_brains":["Stat_PointEdge_Scaled"],"selected_C":None,
+            "production_freeze_applied":True,"runtime_authority_changed":True,
+            "production_probability_authority":["STAT"],
+            "production_zero_authority_brains":list(_freeze.get("zero_probability_authority") or []),
+            "freeze_source":"V13.4.0_NATIVE_OOF_PRODUCTION_RESOLVER_FREEZE",
+            "selection_metrics":_selm,"shadow_metrics":_shm,
+            "_selection_prediction":_ps,"_shadow_prediction":_ph,
+            "contract":"STAT_ONLY_FIXED_UNIT_LOGIT_FROM_POINT_EDGE_DIV14__NO_POST_RESOLVER_CALIBRATION__CHALLENGERS_ZERO_AUTHORITY__NAMED_RULE_TRIGGERS_PRESERVED__OUTER_HOLDOUT_UNUSED",
+        })
+        log_func(
+            f"[V13.4.1-RUNTIME-RESOLVER-FREEZE] gate=PASS mode=STAT_ONLY "
+            f"selection_games={int(len(pd.unique(g[_sel_eval]))) if _sel_eval.any() else 0} "
+            f"shadow_games={int(len(pd.unique(g[_sh_eval]))) if _sh_eval.any() else 0} "
+            f"coefficient=1.000000 probability=sigmoid(clip(Stat_PointEdge_Scaled,-3,3)) "
+            f"zero_authority={out['production_zero_authority_brains']} named_rule_trigger_authority=PRESERVED"
+        )
+    else:
+        # Fail closed rather than silently deploying a resolver different from the
+        # frozen V13.4.0 decision. A future build can explicitly implement a passed
+        # challenger stack if/when the freeze proposes one.
+        out["gate_pass"]=False
+        out["status"]="V13_4_1_FREEZE_NOT_STAT_ONLY_FAIL_CLOSED"
+        out["production_freeze_applied"]=False
+        out["runtime_authority_changed"]=False
+        out["_selection_prediction"]=np.full(len(yy),np.nan)
+        out["_shadow_prediction"]=np.full(len(yy),np.nan)
+        log_func(f"[V13.4.1-RUNTIME-RESOLVER-FREEZE] gate=CLOSED proposed={_proposed} reason=IMPLEMENTATION_LOCK_SUPPORTS_ONLY_EXACT_FROZEN_STAT_ONLY_DECISION")
     return out
 
 
@@ -27249,32 +27301,44 @@ def _v13229_decision_rows(rows: pd.DataFrame, prob, mask, groups, cutoff_h=1.0):
 
 
 def _v13224_game_bet_candidates(rows,y,p,mask,groups,cutoff_h=1.0):
-    """One ex-ante best offered closing/current price per physical game.
+    """One ex-ante best *actual offered* price per physical game.
 
-    The compact historical table stores final/current book prices. Snapshot timestamps
-    are used only to ensure cross-book prices were stored within a contemporaneous
-    window; they are never interpreted as a reconstructed T-1h/T-2h model state.
-    Line shopping uses one atomic row (book + line + odds + probability) and never
-    uses the realized result.
+    V13.4.1 keeps the compact-history constraint explicit: the source represents
+    final/current pregame quotes, not reconstructed T-1h/T-2h states.  Quotes may
+    be line-shopped only inside a contemporaneous window and the chosen atomic
+    row always carries its own line, odds, break-even probability and model
+    probability.  The realized result never participates in quote selection.
     """
-    d=rows.reset_index(drop=True); yy=np.asarray(y,dtype=int); pp=np.asarray(p,dtype=float); mm=np.asarray(mask,dtype=bool); gg=np.asarray(groups,dtype=object)
-    odds=pd.to_numeric(d.get('Odds_Price',pd.Series(np.nan,index=d.index)),errors='coerce').to_numpy(dtype=float)
+    d=rows.reset_index(drop=True)
+    yy=np.asarray(y,dtype=int); pp=np.asarray(p,dtype=float)
+    mm=np.asarray(mask,dtype=bool); gg=np.asarray(groups,dtype=object)
+    odds=pd.to_numeric(d.get("Odds_Price",pd.Series(np.nan,index=d.index)),errors="coerce").to_numpy(dtype=float)
     imp,payout=_v13224_american_terms(odds)
-    edge=pp-imp; ev=pp*payout-(1.0-pp)
+    edge=pp-imp
+    ev=pp*payout-(1.0-pp)
     valid=mm&np.isfinite(pp)&np.isfinite(imp)&np.isfinite(payout)&np.isin(yy,[0,1])
-    recs=[]
     if not valid.any():
         return pd.DataFrame()
-    game_time=pd.to_datetime(d.get('Game_Start',d.get('feat_Game_Start',pd.Series(pd.NaT,index=d.index))),errors='coerce',utc=True)
-    snap_time=pd.to_datetime(d.get('Snapshot_Timestamp',pd.Series(pd.NaT,index=d.index)),errors='coerce',utc=True)
+
+    line_s=_v13237_num_first(d,"Value","Spread_Value","Current_Spread","Outcome_Market_Spread")
+    close_s=_v13237_num_first(d,"Closing_Spread_For_Team","Consensus_Close_Spread_Audit","Closing_Spread","Close_Spread")
+    fav_explicit=pd.to_numeric(d.get("Is_Favorite_Bet",pd.Series(np.nan,index=d.index)),errors="coerce")
+    home_explicit=pd.to_numeric(d.get("Is_Home_Team_Bet",d.get("Is_Home",pd.Series(np.nan,index=d.index))),errors="coerce")
+    outcome=d.get("Outcome_Norm",d.get("Outcome",pd.Series("",index=d.index))).astype(str).str.lower().str.strip()
+    home=d.get("Home_Team_Norm",d.get("Home_Team",pd.Series("",index=d.index))).astype(str).str.lower().str.strip()
+
+    game_time=pd.to_datetime(d.get("Game_Start",d.get("feat_Game_Start",pd.Series(pd.NaT,index=d.index))),errors="coerce",utc=True)
+    snap_time=pd.to_datetime(d.get("Snapshot_Timestamp",pd.Series(pd.NaT,index=d.index)),errors="coerce",utc=True)
     _sim_min=float(os.getenv("V13_BET_SIMULTANEITY_MINUTES","45") or 45.0)
     season_arr=_v13226_infer_season(d)
+    recs=[]
+
     for game in pd.unique(gg[valid]):
         ix=np.flatnonzero(valid&(gg==game))
         if not len(ix):
             continue
-        # Timestamps are NOT used to invent a T-1h model state.  They are used only
-        # to stop historical line shopping across book quotes stored far apart in time.
+
+        # Prevent hindsight line-shopping across prices observed far apart.
         _ts=snap_time.iloc[ix]
         _known=_ts.notna().to_numpy()
         _sim_known=bool(_known.any())
@@ -27282,61 +27346,196 @@ def _v13224_game_bet_candidates(rows,y,p,mask,groups,cutoff_h=1.0):
         if _sim_known:
             _lags=np.asarray([((_latest-t).total_seconds()/60.0) if pd.notna(t) else np.inf for t in _ts],dtype=float)
             _eligible=ix[np.isfinite(_lags)&(_lags<=_sim_min+1e-9)]
-            if len(_eligible)==0: _eligible=ix
+            if len(_eligible)==0:
+                _eligible=ix
         else:
-            _lags=np.full(len(ix),np.nan,dtype=float); _eligible=ix
-        # Ex-ante price shopping only: realized outcome never participates in choice.
+            _lags=np.full(len(ix),np.nan,dtype=float)
+            _eligible=ix
+
+        # Ex-ante best EV among simultaneous real quotes. Outcome is not used.
         j=int(_eligible[np.nanargmax(ev[_eligible])])
         _jloc=int(np.where(ix==j)[0][0])
         _lag=float(_lags[_jloc]) if len(_lags)>_jloc and np.isfinite(_lags[_jloc]) else np.nan
         season=float(season_arr[j]) if len(season_arr)>j and np.isfinite(season_arr[j]) else np.nan
         profit=float(payout[j] if yy[j]==1 else -1.0)
+
+        _line=float(line_s.iloc[j]) if pd.notna(line_s.iloc[j]) else np.nan
+        _close=float(close_s.iloc[j]) if pd.notna(close_s.iloc[j]) else np.nan
+        _clv=float(_line-_close) if np.isfinite(_line) and np.isfinite(_close) else np.nan  # higher team spread = better for bettor
+
+        _fav=fav_explicit.iloc[j] if len(fav_explicit)>j else np.nan
+        if not np.isfinite(_fav) and np.isfinite(_line):
+            _fav=float(_line<0)
+        _side_class=("FAVORITE" if np.isfinite(_fav) and _fav>=0.5 else
+                     "DOG" if np.isfinite(_fav) and _fav<0.5 and (not np.isfinite(_line) or abs(_line)>1e-12) else
+                     "PICKEM")
+
+        _home=home_explicit.iloc[j] if len(home_explicit)>j else np.nan
+        if not np.isfinite(_home):
+            if bool(outcome.iloc[j]) and bool(home.iloc[j]):
+                _home=float(outcome.iloc[j]==home.iloc[j])
+            else:
+                _home=np.nan
+        _venue_class="HOME" if np.isfinite(_home) and _home>=0.5 else ("AWAY" if np.isfinite(_home) else "UNKNOWN")
+
         recs.append({
-            'game':str(game),'row':j,'y':int(yy[j]),'p':float(pp[j]),'odds':float(odds[j]),
-            'line':float(pd.to_numeric(d.get('Value',pd.Series(np.nan,index=d.index)),errors='coerce').iloc[j]) if pd.notna(pd.to_numeric(d.get('Value',pd.Series(np.nan,index=d.index)),errors='coerce').iloc[j]) else np.nan,
-            'book':str(d.get('Bookmaker',pd.Series('',index=d.index)).iloc[j]),
-            'edge':float(edge[j]),'ev':float(ev[j]),'profit':profit,
-            'horizon_h':0.0,'horizon_source':'COMPACT_FINAL_STATE','staleness_h':0.0,
-            'quote_timestamp':snap_time.iloc[j] if len(snap_time)>j else pd.NaT,
-            'quote_lag_minutes':_lag,'simultaneity_known':_sim_known,'simultaneity_window_minutes':_sim_min,
-            'state':'COMPACT_FINAL_STATE','season':season,
-            'game_time':game_time.iloc[j] if len(game_time)>j else pd.NaT,
+            "game":str(game),"row":j,"y":int(yy[j]),"p":float(pp[j]),"odds":float(odds[j]),
+            "line":_line,"close_line":_close,"line_clv_points":_clv,
+            "positive_line_clv":float(_clv>1e-9) if np.isfinite(_clv) else np.nan,
+            "book":str(d.get("Bookmaker",pd.Series("",index=d.index)).iloc[j]),
+            "break_even_prob":float(imp[j]),"payout":float(payout[j]),
+            "edge":float(edge[j]),"predicted_edge":float(edge[j]),
+            "realized_edge":float(yy[j]-imp[j]),"calibration_error":float(yy[j]-pp[j]),
+            "ev":float(ev[j]),"profit":profit,
+            "is_favorite":float(_fav) if np.isfinite(_fav) else np.nan,"side_class":_side_class,
+            "is_home":float(_home) if np.isfinite(_home) else np.nan,"venue_class":_venue_class,
+            "horizon_h":0.0,"horizon_source":"COMPACT_FINAL_STATE","staleness_h":0.0,
+            "quote_timestamp":snap_time.iloc[j] if len(snap_time)>j else pd.NaT,
+            "quote_lag_minutes":_lag,"simultaneity_known":_sim_known,
+            "simultaneity_window_minutes":_sim_min,
+            "state":"COMPACT_FINAL_STATE","season":season,
+            "game_time":game_time.iloc[j] if len(game_time)>j else pd.NaT,
         })
     return pd.DataFrame(recs)
 
 
 def _v13224_roi_metrics(cands: pd.DataFrame, threshold: float, reps=V13224_BET_BOOTSTRAP_REPS, seed=13224):
-    if cands is None or cands.empty: return {"bets":0,"roi":np.nan,"roi_ci95":[np.nan,np.nan],"hit_rate":np.nan,"avg_edge":np.nan,"avg_ev":np.nan,"season_roi":{}}
-    b=cands.loc[(pd.to_numeric(cands["edge"],errors="coerce")>=float(threshold))&(pd.to_numeric(cands["ev"],errors="coerce")>0)].copy()
-    if b.empty: return {"bets":0,"roi":np.nan,"roi_ci95":[np.nan,np.nan],"hit_rate":np.nan,"avg_edge":np.nan,"avg_ev":np.nan,"season_roi":{}}
-    prof=pd.to_numeric(b["profit"],errors="coerce").to_numpy(dtype=float); prof=prof[np.isfinite(prof)]
-    roi=float(np.mean(prof)) if len(prof) else np.nan; rng=np.random.default_rng(seed); boot=[]
-    if len(prof)>=10:
-        for _ in range(int(reps)): boot.append(float(np.mean(prof[rng.integers(0,len(prof),len(prof))])))
-    ci=[float(np.quantile(boot,.025)),float(np.quantile(boot,.975))] if boot else [np.nan,np.nan]
+    """Price-sensitive threshold metrics for one-row-per-game bet candidates."""
+    empty={
+        "bets":0,"roi":np.nan,"roi_ci95":[np.nan,np.nan],
+        "hit_rate":np.nan,"avg_break_even_prob":np.nan,
+        "realized_edge":np.nan,"realized_edge_ci95":[np.nan,np.nan],
+        "avg_pred_prob":np.nan,"calibration_gap":np.nan,"calibration_abs_gap":np.nan,
+        "avg_edge":np.nan,"avg_ev":np.nan,
+        "avg_line_clv":np.nan,"positive_clv_rate":np.nan,"clv_rows":0,
+        "season_roi":{},"chrono_blocks":[],"favorite_dog":{},"home_away":{},
+    }
+    if cands is None or cands.empty:
+        return dict(empty)
+    b=cands.loc[
+        (pd.to_numeric(cands["edge"],errors="coerce")>=float(threshold))&
+        (pd.to_numeric(cands["ev"],errors="coerce")>0)
+    ].copy()
+    if b.empty:
+        return dict(empty)
+
+    for _c in ("profit","y","p","break_even_prob","edge","ev","line_clv_points"):
+        if _c in b.columns:
+            b[_c]=pd.to_numeric(b[_c],errors="coerce")
+    b=b.loc[np.isfinite(b["profit"])&np.isfinite(b["y"])&np.isfinite(b["p"])&np.isfinite(b["break_even_prob"])].copy()
+    if b.empty:
+        return dict(empty)
+
+    def _group_summary(z):
+        if z is None or len(z)==0:
+            return {"bets":0,"roi":np.nan,"hit_rate":np.nan,"break_even_prob":np.nan,"realized_edge":np.nan}
+        _hit=float(pd.to_numeric(z["y"],errors="coerce").mean())
+        _be=float(pd.to_numeric(z["break_even_prob"],errors="coerce").mean())
+        return {
+            "bets":int(len(z)),
+            "roi":float(pd.to_numeric(z["profit"],errors="coerce").mean()),
+            "hit_rate":_hit,
+            "break_even_prob":_be,
+            "realized_edge":float(_hit-_be) if np.isfinite(_hit) and np.isfinite(_be) else np.nan,
+        }
+
+    prof=b["profit"].to_numpy(dtype=float)
+    hit=b["y"].to_numpy(dtype=float)
+    be=b["break_even_prob"].to_numpy(dtype=float)
+    roi=float(np.mean(prof))
+    hit_rate=float(np.mean(hit))
+    avg_be=float(np.mean(be))
+    realized=float(hit_rate-avg_be)
+    avg_p=float(b["p"].mean())
+    cal_gap=float(hit_rate-avg_p)
+
+    rng=np.random.default_rng(seed)
+    boot_roi=[]; boot_real=[]
+    if len(b)>=10:
+        for _ in range(int(reps)):
+            ii=rng.integers(0,len(b),len(b))
+            boot_roi.append(float(np.mean(prof[ii])))
+            boot_real.append(float(np.mean(hit[ii])-np.mean(be[ii])))
+    roi_ci=[float(np.quantile(boot_roi,.025)),float(np.quantile(boot_roi,.975))] if boot_roi else [np.nan,np.nan]
+    real_ci=[float(np.quantile(boot_real,.025)),float(np.quantile(boot_real,.975))] if boot_real else [np.nan,np.nan]
+
     season_roi={}
     if "season" in b.columns:
-        for se,z in b.groupby("season",dropna=True):
-            try: season_roi[str(int(se))]={"bets":int(len(z)),"roi":float(pd.to_numeric(z["profit"],errors="coerce").mean())}
-            except Exception: pass
-    return {"bets":int(len(b)),"roi":roi,"roi_ci95":ci,"hit_rate":float(pd.to_numeric(b["y"],errors="coerce").mean()),"avg_edge":float(pd.to_numeric(b["edge"],errors="coerce").mean()),"avg_ev":float(pd.to_numeric(b["ev"],errors="coerce").mean()),"season_roi":season_roi}
+        for se,z in b.groupby("season",dropna=True,sort=True):
+            try:
+                season_roi[str(int(se))]=_group_summary(z)
+            except Exception:
+                pass
+
+    chrono=[]
+    _chron=b.sort_values(["game_time","game"],kind="stable",na_position="last") if "game_time" in b.columns else b.copy()
+    for bi,idx in enumerate(np.array_split(np.arange(len(_chron)),min(4,len(_chron))) if len(_chron) else []):
+        if len(idx):
+            rec=_group_summary(_chron.iloc[idx])
+            rec["block"]=int(bi+1)
+            chrono.append(rec)
+
+    fd={}
+    if "side_class" in b.columns:
+        for key,z in b.groupby("side_class",dropna=False,sort=True):
+            fd[str(key)]=_group_summary(z)
+    ha={}
+    if "venue_class" in b.columns:
+        for key,z in b.groupby("venue_class",dropna=False,sort=True):
+            ha[str(key)]=_group_summary(z)
+
+    clv=pd.to_numeric(b.get("line_clv_points",pd.Series(np.nan,index=b.index)),errors="coerce")
+    clv_ok=clv.notna()&np.isfinite(clv)
+    avg_clv=float(clv.loc[clv_ok].mean()) if clv_ok.any() else np.nan
+    pos_clv=float((clv.loc[clv_ok]>1e-9).mean()) if clv_ok.any() else np.nan
+
+    return {
+        "bets":int(len(b)),"roi":roi,"roi_ci95":roi_ci,
+        "hit_rate":hit_rate,"avg_break_even_prob":avg_be,
+        "realized_edge":realized,"realized_edge_ci95":real_ci,
+        "avg_pred_prob":avg_p,"calibration_gap":cal_gap,"calibration_abs_gap":abs(cal_gap),
+        "avg_edge":float(b["edge"].mean()),"avg_ev":float(b["ev"].mean()),
+        "avg_line_clv":avg_clv,"positive_clv_rate":pos_clv,"clv_rows":int(clv_ok.sum()),
+        "season_roi":season_roi,"chrono_blocks":chrono,"favorite_dog":fd,"home_away":ha,
+    }
 
 
 def _v13224_fit_bet_advice_policy(rows,y,selection_prob,shadow_prob,select_mask,shadow_mask,groups,probability_gate_pass,log_func=print):
-    """Learn betting hurdle from a full OOF ledger, then validate on a later ledger shadow.
+    """V13.4.1 development-only threshold nomination + later shadow validation.
 
-    Selection/shadow here are POLICY splits, distinct from the probability resolver's
-    own shadow. Every ledger row is an actual observed price and an OOF probability;
-    no synthetic -110 prices or fabricated market states are introduced.
+    The development ledger is the only source allowed to *choose* a threshold.
+    The later historical shadow may validate or reject that nominated threshold,
+    never select it.  Current-season rows are prospective monitoring only.
+    Formal bet authority remains locked until new forward evidence exists.
     """
     sm=np.asarray(select_mask,dtype=bool); hm=np.asarray(shadow_mask,dtype=bool)
     ps=np.asarray(selection_prob,dtype=float); ph=np.asarray(shadow_prob,dtype=float)
-    union=sm|hm; pall=np.full(len(union),np.nan,dtype=float); pall[sm]=ps[sm]; pall[hm]=ph[hm]
+    union=sm|hm
+    pall=np.full(len(union),np.nan,dtype=float)
+    pall[sm]=ps[sm]; pall[hm]=ph[hm]
     ledger=_v13224_game_bet_candidates(rows,y,pall,union,groups,cutoff_h=_promotion_latest_cutoff_hours())
-    out={"version":V13224_BET_POLICY_VERSION,"bet_gate_pass":False,"lean_gate_pass":False,"status":"UNVALIDATED","edge_threshold":0.020,"min_ev":0.0,"ledger_candidates":int(len(ledger)),"decision_state":"COMPACT_FINAL_STATE","cutoff_hours":0.0,"cutoff_role":"RETIRED_COMPACT_FINAL_STATE","contract":"ACTUAL_OBSERVED_FINAL_CURRENT_ODDS__BEST_EX_ANTE_BOOK_PRICE_PER_PHYSICAL_GAME__ALL_OOF_LEDGER__CHRONOLOGICAL_POLICY_DEV_THEN_POLICY_SHADOW__CURRENT_SEASON_MONITORING"}
+    out={
+        "version":V13224_BET_POLICY_VERSION,
+        "resolver_source":"V13_4_1_STAT_ONLY_FROZEN",
+        "bet_gate_pass":False,"lean_gate_pass":False,"status":"UNVALIDATED",
+        "edge_threshold":np.nan,"min_ev":0.0,
+        "ledger_candidates":int(len(ledger)),
+        "decision_state":"COMPACT_FINAL_STATE","cutoff_hours":0.0,
+        "cutoff_role":"RETIRED_COMPACT_FINAL_STATE",
+        "threshold_selection_authority":"DEVELOPMENT_ONLY",
+        "shadow_role":"VALIDATION_ONLY_NO_SELECTION",
+        "current_season_role":"PROSPECTIVE_MONITOR_ONLY",
+        "outer_holdout_consumed":True,"prospective_promotion_required":True,
+        "formal_bet_authority":"LOCKED_PENDING_PROSPECTIVE_VALIDATION",
+        "contract":"ACTUAL_OBSERVED_ODDS__EXACT_BREAK_EVEN__ONE_ATOMIC_BEST_EX_ANTE_QUOTE_PER_PHYSICAL_GAME__DEV_ONLY_THRESHOLD_SELECTION__LATER_SHADOW_VALIDATION__CURRENT_SEASON_PROSPECTIVE_MONITOR",
+    }
     if ledger.empty:
-        out["status"]="NO_OOF_LEDGER"; log_func("[V13.3.11-BET-POLICY] bet_gate=CLOSED reason=NO_OOF_LEDGER"); return out
-    led=ledger.copy(); led["game_time"]=pd.to_datetime(led.get("game_time"),errors="coerce",utc=True)
+        out["status"]="NO_OOF_LEDGER"
+        log_func("[V13.4.1-BET-POLICY] bet_gate=CLOSED reason=NO_OOF_LEDGER resolver=STAT_ONLY")
+        return out
+
+    led=ledger.copy()
+    led["game_time"]=pd.to_datetime(led.get("game_time"),errors="coerce",utc=True)
     led=led.sort_values(["game_time","game"],kind="stable",na_position="last").reset_index(drop=True)
     _season_num=pd.to_numeric(led.get("season"),errors="coerce") if "season" in led.columns else pd.Series(np.nan,index=led.index)
     _price_seasons=sorted({int(x) for x in _season_num.dropna().unique()})
@@ -27344,60 +27543,162 @@ def _v13224_fit_bet_advice_policy(rows,y,selection_prob,shadow_prob,select_mask,
         _current_season=int(_ncaaf_season_from_timestamp(pd.Series([pd.Timestamp.now(tz="UTC")])).iloc[0])
     except Exception:
         _current_season=int(max(_price_seasons)) if _price_seasons else None
+
     _has_current=bool(_current_season is not None and (_season_num==float(_current_season)).any())
     if _has_current:
         forward=led.loc[_season_num.eq(float(_current_season))].copy()
         policy_ledger=led.loc[~_season_num.eq(float(_current_season))].copy()
-        _chronology_mode="CURRENT_SEASON_FORWARD_MONITOR_EXCLUDED"
+        _chronology_mode="CURRENT_SEASON_PROSPECTIVE_MONITOR_EXCLUDED_FROM_SELECTION"
     else:
         forward=pd.DataFrame(columns=led.columns)
         policy_ledger=led.copy()
-        _chronology_mode="HISTORICAL_ONLY_CHRONOLOGICAL_DEV_SHADOW"
-    n=len(policy_ledger); min_total=V13224_BET_MIN_SELECTION_BETS+V13224_BET_MIN_SHADOW_BETS
-    out.update({"ledger_candidates":int(len(led)),"policy_ledger_candidates":int(n),"forward_monitor_candidates":int(len(forward)),
-                "forward_monitor_season":int(_current_season) if _has_current else None,"current_season":_current_season,
-                "price_seasons":_price_seasons,"chronology_mode":_chronology_mode})
+        _chronology_mode="HISTORICAL_ONLY_CHRONOLOGICAL_DEV_THEN_SHADOW"
+
+    n=len(policy_ledger)
+    min_total=V13224_BET_MIN_SELECTION_BETS+V13224_BET_MIN_SHADOW_BETS
+    _clv_cov=int(pd.to_numeric(led.get("line_clv_points",np.nan),errors="coerce").notna().sum()) if len(led) else 0
+    _clv_avg=float(pd.to_numeric(led.get("line_clv_points",np.nan),errors="coerce").mean()) if _clv_cov else np.nan
+    _clv_pos=float((pd.to_numeric(led.get("line_clv_points",np.nan),errors="coerce").dropna()>1e-9).mean()) if _clv_cov else np.nan
+    out.update({
+        "ledger_candidates":int(len(led)),"policy_ledger_candidates":int(n),
+        "forward_monitor_candidates":int(len(forward)),
+        "forward_monitor_season":int(_current_season) if _has_current else None,
+        "current_season":_current_season,"price_seasons":_price_seasons,
+        "chronology_mode":_chronology_mode,
+        "clv_rows":_clv_cov,"clv_coverage":float(_clv_cov/max(len(led),1)),
+        "avg_line_clv":_clv_avg,"positive_clv_rate":_clv_pos,
+    })
+    log_func(
+        f"[V13.4.1-CLV-COVERAGE] ledger_games={len(led)} clv_rows={_clv_cov} "
+        f"coverage={_clv_cov/max(len(led),1):.1%} avg_line_clv={_clv_avg:+.4f} "
+        f"positive_clv_rate={_clv_pos:.1%} source=EXPLICIT_CLOSE_REFERENCE_ONLY"
+        if np.isfinite(_clv_avg) and np.isfinite(_clv_pos)
+        else f"[V13.4.1-CLV-COVERAGE] ledger_games={len(led)} clv_rows={_clv_cov} coverage={_clv_cov/max(len(led),1):.1%} source=EXPLICIT_CLOSE_REFERENCE_ONLY"
+    )
+
     if n<min_total:
         out.update({"status":"INSUFFICIENT_POLICY_GAMES","selection_candidates":0,"shadow_candidates":0})
-        log_func(f"[V13.3.11-BET-LEDGER] ledger_games={len(led)} policy_historical_games={n} forward_monitor={len(forward)} price_seasons={_price_seasons} current_season={_current_season} chronology={_chronology_mode} actual_prices=TRUE synthetic_prices=FALSE")
-        log_func(f"[V13.3.11-BET-POLICY] bet_gate=CLOSED lean_gate=CLOSED reason=INSUFFICIENT_POLICY_GAMES policy_ledger_candidates={n} required={min_total}")
+        log_func(f"[V13.4.1-BET-LEDGER] ledger_games={len(led)} policy_historical_games={n} forward_monitor={len(forward)} price_seasons={_price_seasons} current_season={_current_season} chronology={_chronology_mode} actual_prices=TRUE one_physical_game=TRUE synthetic_prices=FALSE")
+        log_func(f"[V13.4.1-BET-POLICY] bet_gate=CLOSED lean_gate=CLOSED reason=INSUFFICIENT_POLICY_GAMES policy_ledger_candidates={n} required={min_total}")
         return out
+
     split=int(np.floor(V13224_BET_POLICY_DEV_FRACTION*n))
-    split=max(V13224_BET_MIN_SELECTION_BETS,split); split=min(split,n-V13224_BET_MIN_SHADOW_BETS)
-    dev=policy_ledger.iloc[:split].copy(); sh=policy_ledger.iloc[split:].copy()
-    out.update({"selection_candidates":int(len(dev)),"shadow_candidates":int(len(sh)),"policy_split_index":int(split),"policy_dev_fraction":float(split/n)})
-    log_func(f"[V13.3.11-BET-LEDGER] ledger_games={len(led)} policy_historical_games={n} policy_dev={len(dev)} policy_shadow={len(sh)} forward_monitor={len(forward)} price_seasons={_price_seasons} current_season={_current_season} chronology={_chronology_mode} actual_prices=TRUE synthetic_prices=FALSE")
+    split=max(V13224_BET_MIN_SELECTION_BETS,split)
+    split=min(split,n-V13224_BET_MIN_SHADOW_BETS)
+    dev=policy_ledger.iloc[:split].copy()
+    sh=policy_ledger.iloc[split:].copy()
+    out.update({
+        "selection_candidates":int(len(dev)),"shadow_candidates":int(len(sh)),
+        "policy_split_index":int(split),"policy_dev_fraction":float(split/n),
+    })
+    log_func(f"[V13.4.1-BET-LEDGER] ledger_games={len(led)} policy_historical_games={n} policy_dev={len(dev)} policy_shadow={len(sh)} forward_monitor={len(forward)} price_seasons={_price_seasons} current_season={_current_season} chronology={_chronology_mode} actual_prices=TRUE exact_break_even=TRUE one_physical_game=TRUE synthetic_prices=FALSE")
+
     choices=[]; _all_thresholds=[]
     for th in V13224_BET_EDGE_GRID:
-        met=_v13224_roi_metrics(dev,th,seed=13224+int(th*10000))
-        shmet=_v13224_roi_metrics(sh,th,seed=1322401+int(th*10000))
+        met=_v13224_roi_metrics(dev,th,seed=13224+int(round(th*100000)))
+        shmet=_v13224_roi_metrics(sh,th,seed=1322401+int(round(th*100000)))
         _all_thresholds.append({"threshold":float(th),"development":met,"shadow":shmet})
-        log_func(f"[V13.2.32-BET-THRESHOLD] threshold={float(th):.3f} development_bets={met.get('bets',0)} development_roi={met.get('roi',np.nan):+.4f} development_ci={met.get('roi_ci95')} shadow_bets={shmet.get('bets',0)} shadow_roi={shmet.get('roi',np.nan):+.4f} shadow_ci={shmet.get('roi_ci95')}")
-        if met.get("bets",0)>=V13224_BET_MIN_SELECTION_BETS:
+        log_func(
+            f"[V13.4.1-BET-THRESHOLD] threshold={float(th):.4f} "
+            f"development_bets={met.get('bets',0)} development_roi={met.get('roi',np.nan):+.4f} "
+            f"development_ci={met.get('roi_ci95')} development_hit={met.get('hit_rate',np.nan):.4f} "
+            f"development_break_even={met.get('avg_break_even_prob',np.nan):.4f} "
+            f"development_realized_edge={met.get('realized_edge',np.nan):+.4f} "
+            f"development_cal_gap={met.get('calibration_gap',np.nan):+.4f} "
+            f"development_clv={met.get('avg_line_clv',np.nan):+.4f} "
+            f"shadow_bets={shmet.get('bets',0)} shadow_roi={shmet.get('roi',np.nan):+.4f} "
+            f"shadow_ci={shmet.get('roi_ci95')} shadow_hit={shmet.get('hit_rate',np.nan):.4f} "
+            f"shadow_break_even={shmet.get('avg_break_even_prob',np.nan):.4f} "
+            f"shadow_realized_edge={shmet.get('realized_edge',np.nan):+.4f} "
+            f"shadow_clv={shmet.get('avg_line_clv',np.nan):+.4f}"
+        )
+        # Threshold nomination is development-only. Require enough observations
+        # and positive realized economics; shadow results are deliberately ignored.
+        if (met.get("bets",0)>=V13224_BET_MIN_SELECTION_BETS and
+            np.isfinite(met.get("roi",np.nan)) and met.get("roi",np.nan)>0 and
+            np.isfinite(met.get("realized_edge",np.nan)) and met.get("realized_edge",np.nan)>0):
             lo=(met.get("roi_ci95") or [np.nan,np.nan])[0]
-            choices.append((float(lo) if np.isfinite(lo) else -999.0,float(met.get("roi",-999)),int(met.get("bets",0)),float(th),met))
+            re_lo=(met.get("realized_edge_ci95") or [np.nan,np.nan])[0]
+            choices.append((
+                float(lo) if np.isfinite(lo) else -999.0,
+                float(re_lo) if np.isfinite(re_lo) else -999.0,
+                float(met.get("realized_edge",-999)),
+                float(met.get("roi",-999)),
+                int(met.get("bets",0)),
+                -float(th),  # conservative tie-breaker: prefer lower hurdle
+                float(th),met
+            ))
+
     out["all_threshold_diagnostics"]=_all_thresholds
+
+    # Shape diagnostic: a monetizable probability model should generally improve
+    # as the required predicted edge rises. This is diagnostic only; it does not
+    # cherry-pick a threshold.
+    _shape=[x for x in _all_thresholds if int(x["development"].get("bets",0))>=max(20,V13224_BET_MIN_SELECTION_BETS//2)]
+    if len(_shape)>=3:
+        _tx=pd.Series([x["threshold"] for x in _shape],dtype=float)
+        _rr=pd.Series([x["development"].get("realized_edge",np.nan) for x in _shape],dtype=float)
+        _ro=pd.Series([x["development"].get("roi",np.nan) for x in _shape],dtype=float)
+        _rank=lambda z: pd.Series(z).rank(method="average")
+        _re_corr=float(_rank(_tx).corr(_rank(_rr))) if _rr.notna().sum()>=3 else np.nan
+        _roi_corr=float(_rank(_tx).corr(_rank(_ro))) if _ro.notna().sum()>=3 else np.nan
+    else:
+        _re_corr=np.nan; _roi_corr=np.nan
+    out["threshold_shape"]={
+        "eligible_thresholds":int(len(_shape)),
+        "spearman_threshold_vs_realized_edge":_re_corr,
+        "spearman_threshold_vs_roi":_roi_corr,
+        "role":"DIAGNOSTIC_NOT_SELECTION",
+    }
+    log_func(f"[V13.4.1-BET-THRESHOLD-SHAPE] eligible_thresholds={len(_shape)} threshold_vs_realized_edge_spearman={_re_corr:+.4f} threshold_vs_roi_spearman={_roi_corr:+.4f} role=DIAGNOSTIC_ONLY")
+
     if not choices:
-        out["status"]="NO_SELECTION_THRESHOLD"; log_func(f"[V13.3.11-BET-POLICY] bet_gate=CLOSED lean_gate=CLOSED reason=NO_SELECTION_THRESHOLD policy_dev={len(dev)} policy_shadow={len(sh)} min_development_bets={V13224_BET_MIN_SELECTION_BETS} thresholds={list(V13224_BET_EDGE_GRID)}"); return out
-    choices.sort(reverse=True); _,_,_,th,dm=choices[0]; hmtr=_v13224_roi_metrics(sh,th,seed=1322401)
-    dev_lo=(dm.get("roi_ci95") or [np.nan,np.nan])[0]; sh_lo=(hmtr.get("roi_ci95") or [np.nan,np.nan])[0]
-    _research_lean=bool(probability_gate_pass and dm.get("bets",0)>=V13224_BET_MIN_SELECTION_BETS and hmtr.get("bets",0)>=V13224_BET_MIN_SHADOW_BETS and dm.get("roi",-1)>0 and hmtr.get("roi",-1)>0)
-    _historical_ci_support=bool(_research_lean and np.isfinite(dev_lo) and np.isfinite(sh_lo) and dev_lo>0 and sh_lo>0)
-    # The repeated outer/frozen historical sample is now considered consumed.
-    # Historical ROI can nominate research candidates, never grant live bet authority.
-    lean=False; bet=False
+        out["status"]="NO_POSITIVE_DEVELOPMENT_THRESHOLD"
+        log_func(f"[V13.4.1-BET-POLICY] bet_gate=CLOSED lean_gate=CLOSED reason=NO_POSITIVE_DEVELOPMENT_THRESHOLD policy_dev={len(dev)} policy_shadow={len(sh)} min_development_bets={V13224_BET_MIN_SELECTION_BETS} thresholds={list(V13224_BET_EDGE_GRID)} selection_authority=DEVELOPMENT_ONLY")
+        return out
+
+    choices.sort(reverse=True)
+    *_,th,dm=choices[0]
+    hmtr=_v13224_roi_metrics(sh,th,seed=1322401)
     fwd=_v13224_roi_metrics(forward,th,seed=1322402) if not forward.empty else {}
+
+    dev_lo=(dm.get("roi_ci95") or [np.nan,np.nan])[0]
+    sh_lo=(hmtr.get("roi_ci95") or [np.nan,np.nan])[0]
+    _shadow_validation=bool(
+        hmtr.get("bets",0)>=V13224_BET_MIN_SHADOW_BETS and
+        np.isfinite(hmtr.get("roi",np.nan)) and hmtr.get("roi",np.nan)>0 and
+        np.isfinite(hmtr.get("realized_edge",np.nan)) and hmtr.get("realized_edge",np.nan)>0
+    )
+    _research_signal=bool(probability_gate_pass and _shadow_validation)
+    _historical_ci_support=bool(
+        _research_signal and np.isfinite(dev_lo) and np.isfinite(sh_lo) and dev_lo>0 and sh_lo>0
+    )
+
+    # Consumed historical data can support research only. No live authority.
     _sim_known=float(pd.to_numeric(ledger.get("simultaneity_known",False),errors="coerce").fillna(0).mean()) if len(ledger) else 0.0
     _lag90=float(pd.to_numeric(ledger.get("quote_lag_minutes",np.nan),errors="coerce").quantile(.90)) if len(ledger) else np.nan
-    out.update({"edge_threshold":float(th),"selection_metrics":dm,"shadow_metrics":hmtr,"forward_monitor_metrics":fwd,
-                "research_lean_signal_pass":_research_lean,"historical_ci_support":_historical_ci_support,
-                "lean_gate_pass":False,"bet_gate_pass":False,
-                "status":"RESEARCH_LEAN_ONLY" if _research_lean else "UNVALIDATED",
-                "probability_gate_pass":bool(probability_gate_pass),"outer_holdout_consumed":True,
-                "prospective_promotion_required":True,"formal_bet_authority":"LOCKED_PENDING_PROSPECTIVE_VALIDATION",
-                "simultaneity_known_fraction":_sim_known,"quote_lag_p90_minutes":_lag90,
-                "threshold_candidates":[{"threshold":x[3],"metrics":x[4]} for x in choices]})
-    log_func(f"[V13.3.11-BET-POLICY] bet_gate=CLOSED lean_gate=CLOSED research_lean={'PASS' if _research_lean else 'CLOSED'} status={out['status']} threshold={th:.3f} development_bets={dm.get('bets',0)} development_roi={dm.get('roi',np.nan):+.3f} development_ci={dm.get('roi_ci95')} shadow_bets={hmtr.get('bets',0)} shadow_roi={hmtr.get('roi',np.nan):+.3f} shadow_ci={hmtr.get('roi_ci95')} simultaneity_known={_sim_known:.1%} quote_lag_p90_min={_lag90:.1f} prospective_required=TRUE")
+    out.update({
+        "edge_threshold":float(th),"selection_metrics":dm,"shadow_metrics":hmtr,
+        "forward_monitor_metrics":fwd,
+        "shadow_validation_pass":_shadow_validation,
+        "research_lean_signal_pass":_research_signal,
+        "historical_ci_support":_historical_ci_support,
+        "lean_gate_pass":False,"bet_gate_pass":False,
+        "status":"HISTORICAL_THRESHOLD_VALIDATED__PROSPECTIVE_REQUIRED" if _research_signal else "DEVELOPMENT_THRESHOLD_NOT_CONFIRMED_IN_SHADOW",
+        "probability_gate_pass":bool(probability_gate_pass),
+        "simultaneity_known_fraction":_sim_known,"quote_lag_p90_minutes":_lag90,
+        "threshold_candidates":[{"threshold":x[-2],"metrics":x[-1]} for x in choices],
+    })
+    log_func(
+        f"[V13.4.1-BET-POLICY] bet_gate=CLOSED lean_gate=CLOSED "
+        f"historical_validation={'PASS' if _research_signal else 'CLOSED'} status={out['status']} "
+        f"threshold={th:.4f} development_bets={dm.get('bets',0)} development_roi={dm.get('roi',np.nan):+.3f} "
+        f"development_realized_edge={dm.get('realized_edge',np.nan):+.3f} development_ci={dm.get('roi_ci95')} "
+        f"shadow_bets={hmtr.get('bets',0)} shadow_roi={hmtr.get('roi',np.nan):+.3f} "
+        f"shadow_realized_edge={hmtr.get('realized_edge',np.nan):+.3f} shadow_ci={hmtr.get('roi_ci95')} "
+        f"simultaneity_known={_sim_known:.1%} quote_lag_p90_min={_lag90:.1f} "
+        f"selection_authority=DEVELOPMENT_ONLY shadow_role=VALIDATION_ONLY prospective_required=TRUE"
+    )
     return out
 
 
@@ -28335,6 +28636,7 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
     # selection+shadow proper-score/calibration safety contract.
     _full_stack_activation_safe=bool(_full_stack_diagnostic_safe)
     _resolver_active=bool((_resolver_art or {}).get("gate_pass",False))
+    _v1341_stat_only_freeze=bool((_resolver_art or {}).get("production_freeze_applied",False) and str((_resolver_art or {}).get("mode",""))=="V13_4_1_STAT_ONLY_FROZEN")
     _profiles=(_rule_engine or {}).get("profiles") or {}
     _named_shadow_experts=[nm for nm,pr in _profiles.items() if bool(pr.get("gate_pass",False)) and float(pr.get("active_incremental_scale",0.0) or 0.0)>0 and (bool(pr.get("source_backed_hard_ats",False)) or bool(pr.get("maturity_gate",False)))]
     _named_expert_shadow_allowed=bool(_named_shadow_experts)
@@ -28347,17 +28649,25 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
     if isinstance(_rule_engine,dict):
         _rule_engine["end_to_end_model_path_audit"]=_system_e2e
         if _system_e2e.get("status")=="FAIL_CLOSED":
-            # A missing OOF path is a wiring failure, not poor model performance.
+            # A missing named-rule OOF path closes named-rule probability authority.
+            # V13.4.1 STAT-only production authority is independent of that path and
+            # must not be silently disabled by a research-rule wiring problem.
             _rule_engine["gate_pass"]=False
             _component_any=False
             _full_stack_activation_safe=False
-            _resolver_active=False
-            _overlay_any=False
-            if isinstance(_resolver_art,dict):
-                _resolver_art["gate_pass"]=False
-                _resolver_art["status"]="SYSTEM_E2E_INTERLOCK_CLOSED"
-            _authority_route="CORE_ONLY"
-            log_func(f"[V13.3.11-SYSTEM-E2E-INTERLOCK] CLOSED hard_fail={_system_e2e.get('hard_fail_systems')} final_route=CORE_ONLY")
+            if _v1341_stat_only_freeze:
+                _resolver_active=True
+                _overlay_any=True
+                _authority_route="PROBABILITY_RESOLVER"
+                log_func(f"[V13.4.1-SYSTEM-E2E-INTERLOCK] named_rules=CLOSED stat_only_resolver=PRESERVED hard_fail={_system_e2e.get('hard_fail_systems')}")
+            else:
+                _resolver_active=False
+                _overlay_any=False
+                if isinstance(_resolver_art,dict):
+                    _resolver_art["gate_pass"]=False
+                    _resolver_art["status"]="SYSTEM_E2E_INTERLOCK_CLOSED"
+                _authority_route="CORE_ONLY"
+                log_func(f"[V13.3.11-SYSTEM-E2E-INTERLOCK] CLOSED hard_fail={_system_e2e.get('hard_fail_systems')} final_route=CORE_ONLY")
     log_func(
         f"[V13.2-FULL-STACK-SAFETY] component_any={_component_any} diagnostic_gate={'PASS' if _full_stack_diagnostic_safe else 'CLOSED'} "
         f"activation_gate={'PASS' if _full_stack_activation_safe else 'CLOSED'} historical_base_active={_historical_base_active} "
@@ -28382,21 +28692,33 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
     artifact["rule_trigger_authority"]=list((_rule_engine or {}).get("selected_experts") or [])
     artifact["resolver_probability_authority"]=list((_resolver_art or {}).get("active_brains") or [])
     log_func(f"[V13.3.11-AUTHORITY-SEPARATION] rule_trigger_authority={artifact['rule_trigger_authority']} resolver_probability_authority={artifact['resolver_probability_authority']} legacy_resolver_gate={bool((_legacy_resolver_art or {}).get('gate_pass',False))}")
-    artifact["additive_stack_fallback_gate_pass"]=bool(_component_any and _full_stack_activation_safe)
-    artifact["named_expert_shadow_fallback_gate_pass"]=bool(_named_expert_shadow_allowed)
+    artifact["additive_stack_fallback_gate_pass"]=False if _v1341_stat_only_freeze else bool(_component_any and _full_stack_activation_safe)
+    artifact["named_expert_shadow_fallback_gate_pass"]=False if _v1341_stat_only_freeze else bool(_named_expert_shadow_allowed)
     artifact["named_expert_shadow_fallback_experts"]=list(_named_shadow_experts)
+    artifact["named_rule_trigger_authority_preserved"]=True
+    artifact["production_probability_authority"]=["STAT"] if _v1341_stat_only_freeze else list((_resolver_art or {}).get("active_brains") or [])
+    artifact["production_zero_probability_authority"]=(list((_resolver_art or {}).get("production_zero_authority_brains") or []) if _v1341_stat_only_freeze else [])
+    if _v1341_stat_only_freeze:
+        log_func(f"[V13.4.1-ZERO-AUTHORITY-RUNTIME] probability_authority=['STAT'] zero_authority={artifact['production_zero_probability_authority']} named_rule_trigger_authority=PRESERVED additive_fallback=FALSE named_rule_probability_fallback=FALSE")
     artifact["named_expert_shadow_fallback_contract"]="SOURCE_BACKED_HARD_ATS_OR_MATURE_3SEASONS_OR_200GAMES__SHADOW_ONLY__NO_FORMAL_BET_AUTHORITY"
     _policy_sel=np.asarray(_resolver_sel_pred if _resolver_active else (_stack_sel_final if (_component_any and _full_stack_activation_safe) else base),dtype=float)
     _policy_sh=np.asarray(_resolver_sh_pred if _resolver_active else (_stack_shadow_final if (_component_any and _full_stack_activation_safe) else base),dtype=float)
-    _decision_map=_v13226_fit_decision_probability_map(
-        train_rows,y,_policy_sel,_policy_sh,select_mask,shadow_mask,_spec_groups,sw_spec,log_func=log_func
-    )
-    _decision_active=bool((_decision_map or {}).get("gate_pass",False))
-    if _decision_active:
-        _dscale=float((_decision_map or {}).get("active_scale",1.0) or 1.0)
-        _policy_sel=_v13226_apply_decision_map(_policy_sel,_dscale)
-        _policy_sh=_v13226_apply_decision_map(_policy_sh,_dscale)
-        _authority_route=("DECISION_GRAIN_MAP+"+_authority_route) if _authority_route!="CORE_ONLY" else "DECISION_GRAIN_MAP"
+    if _v1341_stat_only_freeze:
+        _decision_map={"gate_pass":False,"status":"FROZEN_IDENTITY","active_scale":1.0,
+                       "reason":"V13_4_1_STAT_ONLY_RUNTIME_FREEZE_NO_POST_RESOLVER_TRANSFORM",
+                       "contract":"IDENTITY_ONLY__NO_HISTORICAL_OR_OUTER_HOLDOUT_RECALIBRATION"}
+        _decision_active=False
+        log_func("[V13.4.1-DECISION-MAP] gate=CLOSED status=FROZEN_IDENTITY reason=STAT_ONLY_PRODUCTION_FREEZE")
+    else:
+        _decision_map=_v13226_fit_decision_probability_map(
+            train_rows,y,_policy_sel,_policy_sh,select_mask,shadow_mask,_spec_groups,sw_spec,log_func=log_func
+        )
+        _decision_active=bool((_decision_map or {}).get("gate_pass",False))
+        if _decision_active:
+            _dscale=float((_decision_map or {}).get("active_scale",1.0) or 1.0)
+            _policy_sel=_v13226_apply_decision_map(_policy_sel,_dscale)
+            _policy_sh=_v13226_apply_decision_map(_policy_sh,_dscale)
+            _authority_route=("DECISION_GRAIN_MAP+"+_authority_route) if _authority_route!="CORE_ONLY" else "DECISION_GRAIN_MAP"
     artifact["decision_probability_map"]=_decision_map
     # V13.3.11: finalize the frozen chronological comparison with the exact decision-map
     # transform. Named Big Al/Pathi systems retain trigger authority only, so they are
@@ -28424,9 +28746,18 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
     _overlay_any=bool(_overlay_any or _decision_active)
     _bet_policy=_v13224_fit_bet_advice_policy(
         train_rows,y,_policy_sel,_policy_sh,select_mask,shadow_mask,_spec_groups,
-        probability_gate_pass=bool(np.isfinite(_full_base_sel.get("logloss",np.nan)) and np.isfinite(_full_base_sh.get("logloss",np.nan))),
+        probability_gate_pass=bool(_v1341_stat_only_freeze or (np.isfinite(_full_base_sel.get("logloss",np.nan)) and np.isfinite(_full_base_sh.get("logloss",np.nan)))),
         log_func=log_func
     )
+    _push_integrity=dict(bundle.get("push_integrity_audit") or {}) if isinstance(bundle,dict) else {}
+    _bet_policy["push_integrity_gate_pass"]=bool(_push_integrity.get("gate_pass",True))
+    _bet_policy["push_integrity_status"]=str(_push_integrity.get("status","UNAVAILABLE"))
+    _bet_policy["real_money_interlocks"]={
+        "prospective_forward_validation":False,
+        "push_integrity":bool(_push_integrity.get("gate_pass",True)),
+        "formal_authority":False,
+    }
+    artifact["push_integrity_audit"]=_push_integrity
     artifact["bet_advice_policy"]=_bet_policy
     artifact["outer_holdout_consumed"]=True
     artifact["prospective_promotion_required"]=True
@@ -28440,7 +28771,7 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
     artifact["final_gate_pass"]=_overlay_any
     artifact["status"]="PASS" if _overlay_any else "GATE_CLOSED"
     artifact["version"]=V13_SPECIALIST_OVERLAY_VERSION
-    artifact["contract"]="MARKET_RICH_CORE_PRIMARY__OWN_FAIR_ALPHA_UPSTREAM__MARKET_RESIDUAL_SECONDARY__MARKET_MICROSTRUCTURE_SECONDARY__AUDITED_RAW_SYSTEM_RECORDS__FORWARD_AUTHORITY_STRENGTH_X_CONFIDENCE__ALL_RULE_REDUNDANCY__PER_SYSTEM_INCREMENTAL_CORE_INFLUENCE__RICH_CONTEXT_MODIFIERS__CANONICAL_GAME_UNION__NO_SAMPLE_ADDITION__CORE_ANCHORED_PROBABILITY_RESOLVER__FULL_STACK_FALLBACK_SAFETY__REAL_PRICE_CHRONOLOGICAL_BET_POLICY__MMI_RESEARCH_ONLY_ZERO_AUTHORITY__OUTER_HOLDOUT_CONSUMED_DIAGNOSTIC_ONLY__PROSPECTIVE_PROMOTION_REQUIRED"
+    artifact["contract"]="MARKET_RICH_CORE_PRIMARY__OWN_FAIR_ALPHA_UPSTREAM__MARKET_RESIDUAL_SECONDARY__MARKET_MICROSTRUCTURE_SECONDARY__AUDITED_RAW_SYSTEM_RECORDS__FORWARD_AUTHORITY_STRENGTH_X_CONFIDENCE__ALL_RULE_REDUNDANCY__PER_SYSTEM_INCREMENTAL_CORE_INFLUENCE__RICH_CONTEXT_MODIFIERS__CANONICAL_GAME_UNION__NO_SAMPLE_ADDITION__CORE_ANCHORED_PROBABILITY_RESOLVER__FULL_STACK_FALLBACK_SAFETY__REAL_PRICE_CHRONOLOGICAL_BET_POLICY__V13_4_1_STAT_ONLY_FREEZE_WHEN_SELECTED__MMI_RESEARCH_ONLY_ZERO_AUTHORITY__OUTER_HOLDOUT_CONSUMED_DIAGNOSTIC_ONLY__PROSPECTIVE_PROMOTION_REQUIRED"
     final_gate=artifact["final_gate_pass"]
     bundle["specialist_overlays"]=artifact
     if isinstance(bundle.get("production_preview"),dict):
@@ -33127,6 +33458,31 @@ def train_sharp_model_from_bq(
         print(f"[V13.3.11-PUSH-OPPORTUNITY-AUDIT] integer_rows={len(_intpf)} integer_physical_games={_ug} exact_push_opportunities={_opp} spread_value_counts={_spread_counts} team_margin_counts_sample={_margin_counts} contract=TEAM_MARGIN_PLUS_EXACT_ROW_VALUE_EQUALS_ZERO")
     except Exception as _pe:
         print(f"[V13.3.11-PUSH-OPPORTUNITY-AUDIT] status=ERROR err={type(_pe).__name__}:{_pe}")
+
+    # V13.4.1 promotion interlock.  Do not fabricate pushes and do not relabel
+    # them as wins/losses; instead make a suspicious zero-push source condition
+    # explicit so it must be explained before real-money authority is possible.
+    _push_material_sample=bool(int(_int_line.sum())>=100)
+    _push_integrity_gate=bool((not _push_material_sample) or _int_pushes>0)
+    _push_status=("PASS" if _push_integrity_gate else "CLOSED_ZERO_PUSHES_WITH_MATERIAL_INTEGER_LINE_SAMPLE")
+    _push_audit={
+        "version":"V13.4.1","gate_pass":_push_integrity_gate,"status":_push_status,
+        "exact_rows":int(_exact.sum()),"integer_line_rows":int(_int_line.sum()),
+        "integer_pushes":int(_int_pushes),"closest_integer_cover_margin":_closest_int,
+        "contract":"PUSH_EQUALS_ZERO_AT_EXACT_ROW_LINE__NO_SYNTHETIC_PUSHES",
+        "promotion_role":"HARD_INTERLOCK_BEFORE_REAL_MONEY",
+    }
+    print(
+        f"[V13.4.1-PUSH-INTEGRITY] gate={'PASS' if _push_integrity_gate else 'CLOSED'} "
+        f"status={_push_status} exact_rows={int(_exact.sum())} integer_line_rows={int(_int_line.sum())} "
+        f"integer_pushes={int(_int_pushes)} closest_integer_cover_margin={_closest_int} "
+        f"promotion_role=HARD_INTERLOCK_BEFORE_REAL_MONEY"
+    )
+    try:
+        if isinstance(ncaaf_v13_value_architecture,dict):
+            ncaaf_v13_value_architecture["push_integrity_audit"]=_push_audit
+    except Exception:
+        pass
 
     df_bt.drop(columns=["__V13391_HOME_SCORE","__V13391_AWAY_SCORE"], inplace=True, errors="ignore")
 
@@ -41501,7 +41857,11 @@ def train_sharp_model_from_bq(
                     V13_DIAGNOSTIC_PROB_TRAIN=_v13diag_tr.copy(); V13_DIAGNOSTIC_PROB_HOLD=_v13diag_ho.copy()
                     V13_DIAGNOSTIC_TRAIN_INFO=_v13diag_tr_info if isinstance(_v13diag_tr_info,dict) else {}
                     V13_DIAGNOSTIC_HOLD_INFO=_v13diag_ho_info if isinstance(_v13diag_ho_info,dict) else {}
-                    V13_DIAGNOSTIC_SOURCE="V13_3_11_DIAGNOSTIC" if not _v13217_internal_ready else "V13_3_11_CANDIDATE"
+                    _diag_resolver_mode=str((((ncaaf_v13_value_architecture.get("specialist_overlays") or {}).get("probability_resolver") or {}).get("mode","")))
+                    if _diag_resolver_mode=="V13_4_1_STAT_ONLY_FROZEN":
+                        V13_DIAGNOSTIC_SOURCE=("V13_4_1_STAT_ONLY_DIAGNOSTIC" if not _v13217_internal_ready else "V13_4_1_STAT_ONLY_CANDIDATE")
+                    else:
+                        V13_DIAGNOSTIC_SOURCE=("V13_3_11_DIAGNOSTIC" if not _v13217_internal_ready else "V13_3_11_CANDIDATE")
                     print(f"[V13-DIAGNOSTIC-PROB-CONTRACT] status=READY source={V13_DIAGNOSTIC_SOURCE} internal_ready={_v13217_internal_ready} train_rows={int(np.isfinite(_v13diag_tr).sum())}/{len(_v13diag_tr)} hold_rows={int(np.isfinite(_v13diag_ho).sum())}/{len(_v13diag_ho)} authentic_own_fair={_authentic_own}")
                     _own_alpha_active_outer=bool((ncaaf_v13_value_architecture.get("own_fair_alpha_expert") or {}).get("gate_pass",False))
                     _own_auth_required_pass=bool((not _own_alpha_active_outer) or _authentic_own)
@@ -41514,9 +41874,10 @@ def train_sharp_model_from_bq(
                     if _v13217_internal_ready and _own_auth_required_pass and _core_prob_parity_pass:
                         PRODUCTION_PROB_TRAIN_CANDIDATE=_v13diag_tr.copy(); PRODUCTION_PROB_HOLD_CANDIDATE=_v13diag_ho.copy()
                         PRODUCTION_PROB_TRAIN_INFO=V13_DIAGNOSTIC_TRAIN_INFO; PRODUCTION_PROB_HOLD_INFO=V13_DIAGNOSTIC_HOLD_INFO
-                        PRODUCTION_PROBABILITY_SOURCE_CANDIDATE="V13_3_11"
+                        _prod_resolver_mode=str((((ncaaf_v13_value_architecture.get("specialist_overlays") or {}).get("probability_resolver") or {}).get("mode","")))
+                        PRODUCTION_PROBABILITY_SOURCE_CANDIDATE=("V13_4_1_STAT_ONLY_FROZEN" if _prod_resolver_mode=="V13_4_1_STAT_ONLY_FROZEN" else "V13_3_11")
                         _auth_status="PASS" if _own_alpha_active_outer else "NOT_REQUIRED_ALPHA_CLOSED"
-                        print(f"[PRODUCTION-PROB-CONTRACT] status=READY source=V13_3_11 train_rows={int(np.isfinite(_v13diag_tr).sum())}/{len(_v13diag_tr)} hold_rows={int(np.isfinite(_v13diag_ho).sum())}/{len(_v13diag_ho)} own_fair_alpha_active={_own_alpha_active_outer} own_fair_authenticity={_auth_status} single_canonical_array=TRUE")
+                        print(f"[PRODUCTION-PROB-CONTRACT] status=READY source={PRODUCTION_PROBABILITY_SOURCE_CANDIDATE} train_rows={int(np.isfinite(_v13diag_tr).sum())}/{len(_v13diag_tr)} hold_rows={int(np.isfinite(_v13diag_ho).sum())}/{len(_v13diag_ho)} own_fair_alpha_active={_own_alpha_active_outer} own_fair_authenticity={_auth_status} single_canonical_array=TRUE")
                     else:
                         if not _v13217_internal_ready:
                             _why="V13_3_11_CANDIDATE_READINESS_GATE"
@@ -41796,7 +42157,7 @@ def train_sharp_model_from_bq(
         if _v13_ui_ready:
             _display_prob=np.asarray(V13_DIAGNOSTIC_PROB_HOLD,dtype=float)
             _display_source=V13_DIAGNOSTIC_SOURCE
-            _display_deployed=bool(_v13217_internal_ready and PRODUCTION_PROBABILITY_SOURCE_CANDIDATE=="V13_3_11")
+            _display_deployed=bool(_v13217_internal_ready and PRODUCTION_PROBABILITY_SOURCE_CANDIDATE.startswith("V13"))
             if _display_deployed:
                 st.markdown("### 🎯 V13.3.8 CANDIDATE PRODUCTION PROBABILITY — HOLDOUT")
                 st.caption("This is the exact V13 probability staged for the outer Champion comparison. Predicted probability and actual ATS hit rate use the same array.")
@@ -41881,19 +42242,21 @@ def train_sharp_model_from_bq(
         _fin_resolver_contract_safe=bool(_fin_resolver or _fin_resolver_zero_safe)
         _fin_bet=((_fin_bundle.get("specialist_overlays") or {}).get("bet_advice_policy") or {})
         _fin_bet_gate=bool(_fin_bet.get("bet_gate_pass",False))
+        _fin_push=((_fin_bundle.get("specialist_overlays") or {}).get("push_integrity_audit") or _fin_bundle.get("push_integrity_audit") or {})
+        _fin_push_gate=bool(_fin_push.get("gate_pass",True))
         _fin_coh=bool((V13_FINAL_COHERENCE_AUDIT or {}).get("gate_pass",False))
         _fin_cal=bool((_prod_cal_quality or {}).get("gate_pass",False))
-        _fin_source_v13=bool(PRODUCTION_PROBABILITY_SOURCE_CANDIDATE=="V13_3_11")
+        _fin_source_v13=bool(PRODUCTION_PROBABILITY_SOURCE_CANDIDATE.startswith("V13"))
         # Finalization cannot pass by accidentally measuring a coherent/calibrated
         # legacy fallback.  The exact V13.3.8 candidate array itself must own the
         # production contract before the prediction stack can be called complete.
         _fin_prediction_ready=bool(_fin_candidate and _fin_source_v13 and _fin_fresh and _fin_coh and _fin_cal and _fin_resolver_contract_safe)
-        _fin_full_ready=bool(_fin_prediction_ready and _fin_bet_gate)
-        _fin_report={"prediction_stack_ready":_fin_prediction_ready,"full_betting_model_ready":_fin_full_ready,"candidate_graph":_fin_candidate,"candidate_source_is_v13_3_10":_fin_source_v13,"data_freshness":_fin_fresh,"pair_coherence":_fin_coh,"probability_calibration":_fin_cal,"resolver_transfer":_fin_resolver,"resolver_zero_authority_safe":_fin_resolver_zero_safe,"resolver_contract_safe":_fin_resolver_contract_safe,"bet_policy":_fin_bet_gate,"production_source":PRODUCTION_PROBABILITY_SOURCE_CANDIDATE,"champion_change_allowed":False}
+        _fin_full_ready=bool(_fin_prediction_ready and _fin_bet_gate and _fin_push_gate)
+        _fin_report={"prediction_stack_ready":_fin_prediction_ready,"full_betting_model_ready":_fin_full_ready,"candidate_graph":_fin_candidate,"candidate_source_is_v13":_fin_source_v13,"data_freshness":_fin_fresh,"pair_coherence":_fin_coh,"probability_calibration":_fin_cal,"resolver_transfer":_fin_resolver,"resolver_zero_authority_safe":_fin_resolver_zero_safe,"resolver_contract_safe":_fin_resolver_contract_safe,"bet_policy":_fin_bet_gate,"push_integrity":_fin_push_gate,"production_source":PRODUCTION_PROBABILITY_SOURCE_CANDIDATE,"champion_change_allowed":False}
         if isinstance(_fin_bundle,dict): _fin_bundle["finalization_readiness"]=_fin_report
-        print(f"[V13.3.11-FINALIZATION-READINESS] prediction_stack={'PASS' if _fin_prediction_ready else 'CLOSED'} full_betting_model={'PASS' if _fin_full_ready else 'CLOSED'} candidate_graph={_fin_candidate} source_is_v13={_fin_source_v13} freshness={_fin_fresh} pair_coherence={_fin_coh} calibration={_fin_cal} resolver_transfer={_fin_resolver} resolver_contract_safe={_fin_resolver_contract_safe} bet_policy={_fin_bet_gate} production_source={PRODUCTION_PROBABILITY_SOURCE_CANDIDATE} champion_unchanged=TRUE")
+        print(f"[V13.4.1-FINALIZATION-READINESS] prediction_stack={'PASS' if _fin_prediction_ready else 'CLOSED'} full_betting_model={'PASS' if _fin_full_ready else 'CLOSED'} candidate_graph={_fin_candidate} source_is_v13={_fin_source_v13} freshness={_fin_fresh} pair_coherence={_fin_coh} calibration={_fin_cal} resolver_transfer={_fin_resolver} resolver_contract_safe={_fin_resolver_contract_safe} bet_policy={_fin_bet_gate} push_integrity={_fin_push_gate} production_source={PRODUCTION_PROBABILITY_SOURCE_CANDIDATE} champion_unchanged=TRUE")
 
-        if PRODUCTION_PROBABILITY_SOURCE_CANDIDATE != "V13_3_11":
+        if not PRODUCTION_PROBABILITY_SOURCE_CANDIDATE.startswith("V13"):
             st.markdown("#### ACTUAL PROMOTION/DEPLOYMENT ARRAY — FALLBACK LEGACY META (NOT V13)")
             st.caption("V13 is diagnostic-only in this run. The following fallback probability is the exact array staged for the promotion/deployment contract.")
             _active_bins=list((_prod_cal_quality or {}).get("bins") or [])
