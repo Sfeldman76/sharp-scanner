@@ -16665,8 +16665,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-22-v13.3.11.2.1-native-oof-deploy-path-lock-shadow"
-NCAAF_V13_HOTFIX = "V13_3_11_2_1__NATIVE_OOF_VALIDATION__DEPLOY_PATH_LOCK__FINGERPRINTS__ARCHITECTURE_FROZEN__OUTER_CONSUMED__SHADOW_ONLY"
+NCAAF_V13_VERSION = "2026-09-22-v13.3.11.3-conditional-incremental-admission-shadow"
+NCAAF_V13_HOTFIX = "V13_3_11_3__NATIVE_OOF_CONDITIONAL_ADMISSION__STAT_BASELINE__CORE_OWN_FAIR__DEPLOY_PATH_LOCK__ARCHITECTURE_FROZEN__OUTER_CONSUMED__SHADOW_ONLY"
 NCAAF_HISTORY_POLICY = "ALL_AVAILABLE_SEASONS"
 NCAAF_HISTORY_FIXED_LOOKBACK_DAYS = None  # Never silently truncate production history.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -16687,8 +16687,8 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # from the same deploy bundle.  The simple legacy feature materializer is kept
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
-V133_DEPLOY_BUILD_ID = "2026-09-22-v13.3.11.2.1-native-oof-deploy-path-lock-1"
-V1337_SOURCE_TAG = "dashboard-v13.3.11.2.1-native-oof-deploy-path-lock"
+V133_DEPLOY_BUILD_ID = "2026-09-22-v13.3.11.3-conditional-incremental-admission-1"
+V1337_SOURCE_TAG = "dashboard-v13.3.11.3-conditional-incremental-admission"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -26470,6 +26470,178 @@ def _v133112_native_report(label, frame, *, score_col=None, prob_col=None, targe
     return rep,rec
 
 
+
+
+def _v133113_native_stack_join(stat_records: pd.DataFrame, candidate_records: dict):
+    """Join native OOF brain records on physical game and orient every candidate to Stat's side.
+
+    Native caches can choose opposite team-sides for the same physical game.  The
+    target itself is therefore used only to make candidate orientation comparable:
+    if candidate_y == 1 - stat_y its score is negated.  No outcome is used to fit a
+    game-specific parameter, select a row, or create a feature beyond that exact
+    complement reconciliation.
+    """
+    if stat_records is None or len(stat_records)==0:
+        return pd.DataFrame()
+    need=[c for c in ("game","chrono","season","y","score") if c in stat_records.columns]
+    if len(need)<5:
+        return pd.DataFrame()
+    z=stat_records[need].copy().rename(columns={"chrono":"chrono_stat","season":"season_stat","y":"y_stat","score":"stat_score"})
+    z["game"]=z["game"].astype(str)
+    for label,rec in (candidate_records or {}).items():
+        if rec is None or len(rec)==0 or not {"game","y","score"}.issubset(set(rec.columns)):
+            return pd.DataFrame()
+        c=rec[[x for x in ("game","chrono","season","y","score") if x in rec.columns]].copy()
+        c=c.rename(columns={"chrono":f"chrono_{label}","season":f"season_{label}","y":f"y_{label}","score":f"score_{label}"})
+        c["game"]=c["game"].astype(str)
+        z=z.merge(c,on="game",how="inner",validate="one_to_one")
+        ys=pd.to_numeric(z["y_stat"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+        yc=pd.to_numeric(z[f"y_{label}"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+        sc=pd.to_numeric(z[f"score_{label}"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+        same=np.isfinite(ys)&np.isfinite(yc)&np.isclose(ys,yc,atol=1e-9)
+        opp=np.isfinite(ys)&np.isfinite(yc)&np.isclose(ys+yc,1.0,atol=1e-9)
+        orient=np.where(same,1.0,np.where(opp,-1.0,np.nan))
+        z[f"{label}_score"]=np.clip(sc*orient,-3.0,3.0)
+        z=z.loc[np.isfinite(z[f"{label}_score"])].copy()
+        z=z.drop(columns=[f"score_{label}"],errors="ignore")
+    z["stat_score"]=np.clip(pd.to_numeric(z["stat_score"],errors="coerce"),-3.0,3.0)
+    z["y"]=pd.to_numeric(z["y_stat"],errors="coerce")
+    z["chrono"]=pd.to_numeric(z["chrono_stat"],errors="coerce")
+    z=z.loc[np.isfinite(z["stat_score"]) & z["y"].isin([0.0,1.0])].copy()
+    if z.empty:
+        return z
+    # Stable fallback keeps missing dates deterministic without looking at outcomes.
+    if not np.isfinite(pd.to_numeric(z["chrono"],errors="coerce")).all():
+        finite=pd.to_numeric(z["chrono"],errors="coerce")
+        mx=float(finite[np.isfinite(finite)].max()) if np.isfinite(finite).any() else 0.0
+        miss=~np.isfinite(finite.to_numpy(dtype=float,na_value=np.nan))
+        z.loc[miss,"chrono"]=mx+1.0+np.arange(int(miss.sum()),dtype=float)
+    return z.sort_values(["chrono","game"],kind="stable").reset_index(drop=True)
+
+
+def _v133113_expanding_native_folds(n: int, blocks: int = 4):
+    """Large-sample expanding chronological folds for native incremental admission."""
+    n=int(n); blocks=max(2,int(blocks))
+    if n<240:
+        return []
+    warm=max(180,int(np.floor(0.40*n)))
+    # Preserve at least ~50 validation games per fold where possible.
+    warm=min(warm,max(120,n-50*blocks))
+    if warm>=n-40:
+        return []
+    edges=np.linspace(warm,n,blocks+1,dtype=int)
+    folds=[]
+    for i in range(blocks):
+        a=int(edges[i]); b=int(edges[i+1])
+        if a<120 or b-a<40: continue
+        folds.append((np.arange(0,a,dtype=int),np.arange(a,b,dtype=int)))
+    return folds
+
+
+def _v133113_native_incremental_test(stat_records: pd.DataFrame, candidate_records: dict, stack_label: str, target_games: int = 500, log_func=print):
+    """Test whether native OOF candidates add proper-score value beyond Stat.
+
+    Both baseline and challenger are refit only on earlier games inside each fold.
+    The challenger is constrained non-negative, so a candidate cannot earn admission
+    by being silently inverted.  This is diagnostic-only in V13.3.11.3: passing the
+    gate marks a brain eligible for a later resolver freeze, but does not change live
+    probability authority in this run.
+    """
+    joined=_v133113_native_stack_join(stat_records,candidate_records)
+    names=list((candidate_records or {}).keys())
+    out={"stack":stack_label,"candidate_names":names,"games":int(len(joined)),"target_games":int(target_games),"gate_pass":False,"status":"CLOSED","authority":"DIAGNOSTIC_ONLY_NO_RUNTIME_AUTHORITY_CHANGE"}
+    if len(joined)<max(240,min(int(target_games),500)):
+        out["status"]="INSUFFICIENT_NATIVE_COMMON_GAMES"
+        log_func(f"[V13.3.11.3-INCREMENTAL-ADMISSION] stack={stack_label} candidates={names} games={len(joined)} target={target_games} gate=CLOSED reason=INSUFFICIENT_NATIVE_COMMON_GAMES authority=DIAGNOSTIC_ONLY")
+        return out
+    folds=_v133113_expanding_native_folds(len(joined),blocks=4)
+    if len(folds)<3:
+        out["status"]="INSUFFICIENT_CHRONO_FOLDS"
+        log_func(f"[V13.3.11.3-INCREMENTAL-ADMISSION] stack={stack_label} candidates={names} games={len(joined)} gate=CLOSED reason=INSUFFICIENT_CHRONO_FOLDS folds={len(folds)} authority=DIAGNOSTIC_ONLY")
+        return out
+    y=joined["y"].to_numpy(dtype=int)
+    base_cols=["stat_score"]
+    full_cols=base_cols+[f"{n}_score" for n in names]
+    Xb=joined[base_cols].to_numpy(dtype=float)
+    Xf=joined[full_cols].to_numpy(dtype=float)
+    weights=np.ones(len(joined),dtype=float)
+    best=None
+    for C in V13224_RESOLVER_C_GRID:
+        pb=np.full(len(joined),np.nan,dtype=float); pf=np.full(len(joined),np.nan,dtype=float)
+        frec=[]; candidate_coef_folds={n:[] for n in names}
+        for bi,(tr,va) in enumerate(folds,1):
+            if np.unique(y[tr]).size<2: continue
+            try:
+                bb=_v1336_fit_nonnegative_brain_coefficients(Xb[tr],y[tr],weights[tr],C)
+                bf=_v1336_fit_nonnegative_brain_coefficients(Xf[tr],y[tr],weights[tr],C)
+                p0=_v13224_sigmoid(Xb[va].dot(bb)); p1=_v13224_sigmoid(Xf[va].dot(bf))
+                pb[va]=p0; pf[va]=p1
+                mb=_v13311_binary_metrics(y[va],p0); mf=_v13311_binary_metrics(y[va],p1)
+                ll=float(mb.get("logloss",np.nan)-mf.get("logloss",np.nan)); br=float(mb.get("brier",np.nan)-mf.get("brier",np.nan)); auc=float(mf.get("auc",np.nan)-mb.get("auc",np.nan))
+                cdict={n:float(bf[1+i]) for i,n in enumerate(names)}
+                for n,v in cdict.items(): candidate_coef_folds[n].append(v)
+                pos=bool(np.isfinite(ll) and np.isfinite(br) and ll>=0 and br>=0 and all(v>1e-8 for v in cdict.values()))
+                frec.append({"block":bi,"games":int(len(va)),"ll_gain":ll,"brier_gain":br,"auc_gain":auc,"positive":pos,"candidate_coefficients":cdict})
+            except Exception as e:
+                frec.append({"block":bi,"games":int(len(va)),"error":f"{type(e).__name__}:{e}"})
+        m=np.isfinite(pb)&np.isfinite(pf)
+        if int(m.sum())<200: continue
+        mb=_v13311_binary_metrics(y[m],pb[m]); mf=_v13311_binary_metrics(y[m],pf[m])
+        ll=float(mb.get("logloss",np.nan)-mf.get("logloss",np.nan)); br=float(mb.get("brier",np.nan)-mf.get("brier",np.nan)); auc=float(mf.get("auc",np.nan)-mb.get("auc",np.nan))
+        valid=[r for r in frec if "ll_gain" in r]; pos=sum(1 for r in valid if r.get("positive")); vf=len(valid)
+        coef_pos={n:sum(1 for v in candidate_coef_folds[n] if np.isfinite(v) and v>1e-8) for n in names}
+        latest=valid[-1] if valid else {}
+        rec={"C":float(C),"baseline_metrics":mb,"challenger_metrics":mf,"ll_gain":ll,"brier_gain":br,"auc_gain":auc,"positive_folds":int(pos),"valid_folds":int(vf),"candidate_positive_coef_folds":coef_pos,"fold_records":valid,"latest_fold":latest,"oof_games":int(m.sum())}
+        rank=(-(ll if np.isfinite(ll) else -999),-(br if np.isfinite(br) else -999),-(auc if np.isfinite(auc) else -999))
+        rec["rank"]=rank
+        if best is None or rank<best["rank"]: best=rec
+    if best is None:
+        out["status"]="NO_VALID_INCREMENTAL_OOF"
+        log_func(f"[V13.3.11.3-INCREMENTAL-ADMISSION] stack={stack_label} candidates={names} games={len(joined)} gate=CLOSED reason=NO_VALID_INCREMENTAL_OOF authority=DIAGNOSTIC_ONLY")
+        return out
+    vf=int(best.get("valid_folds",0)); pf=int(best.get("positive_folds",0)); need_pos=max(3,int(np.ceil(.75*max(vf,1))))
+    coef_ok=all(int((best.get("candidate_positive_coef_folds") or {}).get(n,0))>=need_pos for n in names)
+    latest=best.get("latest_fold") or {}; latest_ok=bool(np.isfinite(latest.get("ll_gain",np.nan)) and np.isfinite(latest.get("brier_gain",np.nan)) and latest.get("ll_gain",0)>=0 and latest.get("brier_gain",0)>=0)
+    material=bool((best.get("ll_gain",-np.inf)>=V13224_RESOLVER_MIN_LL_GAIN) or (best.get("brier_gain",-np.inf)>=V13224_RESOLVER_MIN_BRIER_GAIN))
+    gate=bool(len(joined)>=int(target_games) and vf>=3 and pf>=need_pos and coef_ok and latest_ok and best.get("ll_gain",-np.inf)>=0 and best.get("brier_gain",-np.inf)>=0 and material)
+    out.update({k:v for k,v in best.items() if k!="rank"})
+    out.update({"gate_pass":gate,"status":"PASS" if gate else "INCREMENTAL_CLOSED","required_positive_folds":int(need_pos),"coefficient_stability_pass":bool(coef_ok),"latest_fold_pass":bool(latest_ok),"material_gain_pass":bool(material)})
+    for r in best.get("fold_records",[]):
+        log_func(f"[V13.3.11.3-INCREMENTAL-FOLD] stack={stack_label} block={r.get('block')} games={r.get('games')} ll_gain={float(r.get('ll_gain',np.nan)):+.6f} br_gain={float(r.get('brier_gain',np.nan)):+.6f} auc_gain={float(r.get('auc_gain',np.nan)):+.4f} positive={bool(r.get('positive',False))} candidate_coefficients={r.get('candidate_coefficients',{})} authority=DIAGNOSTIC_ONLY")
+    bm=best.get("baseline_metrics") or {}; cm=best.get("challenger_metrics") or {}
+    log_func(
+        f"[V13.3.11.3-INCREMENTAL-ADMISSION] stack={stack_label} candidates={names} games={len(joined)} target={target_games} gate={'PASS' if gate else 'CLOSED'} C={float(best.get('C',np.nan)):.3f} "
+        f"baseline_auc={float(bm.get('auc',np.nan)):.4f} challenger_auc={float(cm.get('auc',np.nan)):.4f} auc_gain={float(best.get('auc_gain',np.nan)):+.4f} "
+        f"ll_gain={float(best.get('ll_gain',np.nan)):+.6f} br_gain={float(best.get('brier_gain',np.nan)):+.6f} positive_folds={pf}/{vf} required_positive={need_pos} "
+        f"coef_positive_folds={best.get('candidate_positive_coef_folds',{})} latest_fold_pass={latest_ok} material_gain={material} authority=DIAGNOSTIC_ONLY_NO_RUNTIME_AUTHORITY_CHANGE"
+    )
+    return out
+
+
+def _v133113_conditional_admission_audit(records: dict, log_func=print):
+    """Stat-baseline conditional admission audit for Core and Own Fair."""
+    stat=(records or {}).get("STAT")
+    core=(records or {}).get("CORE")
+    own=(records or {}).get("OWN_FAIR")
+    out={"version":"V13.3.11.3","baseline":"STAT","authority_changed":False,"tests":{},"eligible_additions":[],"trio_status":"SKIPPED"}
+    out["tests"]["CORE"]=_v133113_native_incremental_test(stat,{"CORE":core},"STAT_PLUS_CORE",500,log_func)
+    out["tests"]["OWN_FAIR"]=_v133113_native_incremental_test(stat,{"OWN_FAIR":own},"STAT_PLUS_OWN_FAIR",500,log_func)
+    core_ok=bool(out["tests"]["CORE"].get("gate_pass",False)); own_ok=bool(out["tests"]["OWN_FAIR"].get("gate_pass",False))
+    if core_ok: out["eligible_additions"].append("CORE")
+    if own_ok: out["eligible_additions"].append("OWN_FAIR")
+    if core_ok and own_ok:
+        trio=_v133113_native_incremental_test(stat,{"CORE":core,"OWN_FAIR":own},"STAT_PLUS_CORE_PLUS_OWN_FAIR",500,log_func)
+        out["trio"]=trio; out["trio_status"]="PASS" if trio.get("gate_pass") else "CLOSED"
+    else:
+        out["trio"]={"gate_pass":False,"status":"SKIPPED_CANDIDATES_NOT_BOTH_ADMITTED"}
+        log_func(f"[V13.3.11.3-TRIO-ADMISSION] gate=SKIPPED core_incremental={'PASS' if core_ok else 'CLOSED'} own_fair_incremental={'PASS' if own_ok else 'CLOSED'} reason=BOTH_CANDIDATES_MUST_EARN_INCREMENTAL_AUTHORITY_FIRST authority=DIAGNOSTIC_ONLY")
+    trio_ok=bool((out.get("trio") or {}).get("gate_pass",False))
+    proposed=(['STAT','CORE','OWN_FAIR'] if trio_ok else ['STAT']+list(out["eligible_additions"]))
+    out["proposed_freeze_candidate"]=proposed
+    log_func(f"[V13.3.11.3-RESOLVER-FREEZE-CANDIDATE] baseline=STAT core_incremental={'PASS' if core_ok else 'CLOSED'} own_fair_incremental={'PASS' if own_ok else 'CLOSED'} trio={'PASS' if trio_ok else out['trio_status']} proposed={proposed} current_runtime_resolver_unchanged=TRUE authority=DIAGNOSTIC_ONLY")
+    log_func("[V13.3.11.3-ZERO-AUTHORITY-FREEZE] continuous_brains=['COMMON_MARKET','MARKET_RESIDUAL','RICH_MARKET_MICRO','PATHI_CONTINUOUS','BIGAL_CONTINUOUS'] probability_authority=0 named_rule_trigger_authority=PRESERVED reason=NO_NEW_INCREMENTAL_EVIDENCE_IN_THIS_RELEASE")
+    return out
+
 def _v133111_frozen_brain_coef(resolver_art: dict, feat: str):
     """Return a coefficient learned before expanded validation; never fit here."""
     try:
@@ -26579,7 +26751,7 @@ def _v13311_expanded_chrono_validation(rows,y,groups,Xs,Xh,select_mask,shadow_ma
                                         pathi_candidate_sel=None,pathi_candidate_shadow=None,
                                         bigal_candidate_sel=None,bigal_candidate_shadow=None,
                                         log_func=print):
-    """V13.3.11.2 native-OOF all-brain diagnostics with frozen architecture.
+    """V13.3.11.3 native-OOF all-brain + conditional-admission diagnostics.
 
     Core, Stat, Common Market, Own Fair, and Market Residual are evaluated from
     their native season-forward OOF surfaces rather than only after mapping into
@@ -26634,6 +26806,8 @@ def _v13311_expanded_chrono_validation(rows,y,groups,Xs,Xh,select_mask,shadow_ma
             pp=_merge_stage(sel,sh)
             brains[label],records[label]=_aligned_report(label,pp,"SELECTION_PLUS_DISJOINT_SHADOW_NATIVE_STAGE_OOF",500)
 
+        conditional_admission=_v133113_conditional_admission_audit(records,log_func=log_func)
+
         # Same-game resolver-aligned comparisons remain useful because every brain
         # is expressed on exactly the same team-side/game row. They are descriptive
         # only and cannot fit a new weight.
@@ -26678,15 +26852,15 @@ def _v13311_expanded_chrono_validation(rows,y,groups,Xs,Xh,select_mask,shadow_ma
         rules=_v133111_rule_history_validation(rows,yy,g,rule_engine,log_func=log_func)
         target_count=sum(1 for r in brains.values() if bool(r.get("target_reached",False)))
         out={
-            "version":"V13.3.11.2","brains":brains,"pairwise_same_game":pairs,"rule_history":rules,
+            "version":"V13.3.11.3","brains":brains,"pairwise_same_game":pairs,"rule_history":rules,"conditional_incremental_admission":conditional_admission,
             "target_500_brains_reached":int(target_count),
-            "contract":"NATIVE_OOF_PER_BRAIN__COEFFICIENT_INDEPENDENT_DIAGNOSTICS__FOUR_CHRONO_BLOCKS__ONE_PHYSICAL_GAME__SOURCE_AND_SIGNAL_FINGERPRINTS__NO_TUNING__OUTER_HOLDOUT_UNUSED",
+            "contract":"NATIVE_OOF_PER_BRAIN__STAT_BASELINE_CONDITIONAL_INCREMENTAL_ADMISSION__CORE_AND_OWN_FAIR__FOUR_CHRONO_BLOCKS__ONE_PHYSICAL_GAME__SOURCE_AND_SIGNAL_FINGERPRINTS__NO_RUNTIME_AUTHORITY_CHANGE__OUTER_HOLDOUT_UNUSED",
             "_common_records":common_rec.to_dict("records") if common_rec is not None and len(common_rec) else [],
         }
-        log_func(f"[V13.3.11.2-ALL-BRAIN-SUMMARY] continuous_brains={len(brains)} brains_at_least_500_games={target_count} rule_systems={len((rules or {}).get('systems',{}))} outer_holdout_used=FALSE architecture_frozen=TRUE resolver_changed=FALSE")
+        log_func(f"[V13.3.11.3-ALL-BRAIN-SUMMARY] continuous_brains={len(brains)} brains_at_least_500_games={target_count} rule_systems={len((rules or {}).get('systems',{}))} outer_holdout_used=FALSE architecture_frozen=TRUE resolver_changed=FALSE")
         return out
     except Exception as e:
-        log_func(f"[V13.3.11.2-ALL-BRAIN-VALIDATION] status=ERROR_FAIL_CLOSED error={type(e).__name__}:{e}")
+        log_func(f"[V13.3.11.3-ALL-BRAIN-VALIDATION] status=ERROR_FAIL_CLOSED error={type(e).__name__}:{e}")
         return {"status":"ERROR_FAIL_CLOSED","error":f"{type(e).__name__}:{e}","authority":"DIAGNOSTIC_ONLY"}
 
 def _v1336_fit_brain_stack_resolver(rows,y,core_cal,base,market_sel,market_shadow,pathi_sel,pathi_shadow,bigal_sel,bigal_shadow,select_mask,shadow_mask,weights,groups,core_v4_edge=None,stat_point_edge=None,common_market_delta=None,own_fair_delta=None,common_market_raw_prob=None,own_fair_raw_prob=None,rule_engine=None,log_func=print):
