@@ -183,7 +183,7 @@ def main():
         train_timing_model_for_market,
     )
 
-    # V13.3.9 fail-fast deployment consistency check.  This catches a mixed
+    # V13.3.10 fail-fast deployment consistency check.  This catches a mixed
     # sharp_line_dashboard.py / utils.py deployment before a long training run.
     import sharp_line_dashboard as _sld
     import utils as _utils
@@ -200,17 +200,19 @@ def main():
         "_v1332_core_v2_logit_prob",
         "_v1332_enforce_canonical_spread_complements",
         "_v133_core_v2_runtime_score",
+        "_v13310_runtime_stat_live_point_edge",
+        "_v13310_runtime_brain_input_audit",
     ]
     _missing_utils = [n for n in _required_utils if not hasattr(_utils, n)]
-    if (not _expected_build) or (_expected_build != _utils_build) or _missing_utils or _dashboard_tag != "dashboard-v13.3.9-outer-stage-ablation" or _utils_tag != "utils-v13.3.9-outer-stage-ablation" or _wrapper_tag != "wrapper-v13.3.9-outer-stage-ablation":
+    if (not _expected_build) or (_expected_build != _utils_build) or _missing_utils or _dashboard_tag != "dashboard-v13.3.10-stat-runtime-parity-audit" or _utils_tag != "utils-v13.3.10-stat-runtime-parity-audit" or _wrapper_tag != "wrapper-v13.3.10-stat-runtime-parity-audit":
         raise RuntimeError(
-            "[V13.3.9-DEPLOY-PREFLIGHT] MIXED_OR_STALE_DEPLOYMENT "
+            "[V13.3.10-DEPLOY-PREFLIGHT] MIXED_OR_STALE_DEPLOYMENT "
             f"dashboard_build={_expected_build!r} utils_build={_utils_build!r} "
             f"dashboard_tag={_dashboard_tag!r} utils_tag={_utils_tag!r} wrapper_tag={_wrapper_tag!r} missing_utils={_missing_utils}. Replace sharp_line_dashboard.py, utils.py, "
-            "train_job.py, and train_sharp_model_from_bq_extracted.py from the same V13.3.9 bundle."
+            "train_job.py, and train_sharp_model_from_bq_extracted.py from the same V13.3.10 bundle."
         )
     log_func(
-        f"[V13.3.9-DEPLOY-PREFLIGHT] PASS build={_expected_build} "
+        f"[V13.3.10-DEPLOY-PREFLIGHT] PASS build={_expected_build} "
         f"dashboard_tag={_dashboard_tag} utils_tag={_utils_tag} wrapper_tag={_wrapper_tag} utils={getattr(_utils, '__file__', 'unknown')}"
     )
 
