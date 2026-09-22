@@ -1,4 +1,4 @@
-V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.4.0-production-resolver-freeze"
+V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.4.1-stat-only-threshold-validation"
 
 from sharp_line_dashboard import (
     train_with_champion_wrapper,
