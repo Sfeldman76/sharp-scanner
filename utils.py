@@ -98,9 +98,9 @@ SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 # V13.3.11 forward-shadow ledger.  These tables are append-only research
 # evidence.  The exact fitted artifact identity (SHA256), not the human version
 # string, is the primary model-instance key.
-NCAAF_V13_CODE_VERSION = "V13.3.11"
-V133_DEPLOY_BUILD_ID = "2026-09-22-v13.3.11-expanded-chrono-validation-1"
-V1337_SOURCE_TAG = "utils-v13.3.11-expanded-chrono-validation"
+NCAAF_V13_CODE_VERSION = "V13.3.11.1"
+V133_DEPLOY_BUILD_ID = "2026-09-22-v13.3.11.1-all-brain-chrono-validation-1"
+V1337_SOURCE_TAG = "utils-v13.3.11.1-all-brain-chrono-validation"
 NCAAF_V13_FORWARD_PREDICTIONS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_predictions"
 NCAAF_V13_FORWARD_RESULTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_results"
 NCAAF_V13_FORWARD_LEDGER_VERSION = "2026-09-20-v13.3.5-immutable-artifact-aware-forward-ledger-v1"
@@ -15421,8 +15421,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-22-v13.3.11-expanded-chrono-validation-shadow"
-NCAAF_V13_HOTFIX = "V13_3_11__EXPANDED_CHRONO_VALIDATION__ARCHITECTURE_FROZEN__OUTER_CONSUMED__SHADOW_ONLY"
+NCAAF_V13_VERSION = "2026-09-22-v13.3.11.1-all-brain-chrono-validation-shadow"
+NCAAF_V13_HOTFIX = "V13_3_11_1__ALL_BRAIN_CHRONO_VALIDATION__ARCHITECTURE_FROZEN__OUTER_CONSUMED__SHADOW_ONLY"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
