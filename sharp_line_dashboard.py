@@ -16665,8 +16665,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-22-v13.3.11.3-conditional-incremental-admission-shadow"
-NCAAF_V13_HOTFIX = "V13_3_11_3__NATIVE_OOF_CONDITIONAL_ADMISSION__STAT_BASELINE__CORE_OWN_FAIR__DEPLOY_PATH_LOCK__ARCHITECTURE_FROZEN__OUTER_CONSUMED__SHADOW_ONLY"
+NCAAF_V13_VERSION = "2026-09-22-v13.4.0-production-resolver-freeze-shadow"
+NCAAF_V13_HOTFIX = "V13_4_0__PRODUCTION_RESOLVER_FREEZE__STAT_BASELINE__CORE_OWN_FAIR__RANKING_GUARD__PAIRED_BOOTSTRAP__DEPLOY_PATH_LOCK__OUTER_CONSUMED__SHADOW_ONLY"
 NCAAF_HISTORY_POLICY = "ALL_AVAILABLE_SEASONS"
 NCAAF_HISTORY_FIXED_LOOKBACK_DAYS = None  # Never silently truncate production history.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -16687,8 +16687,8 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # from the same deploy bundle.  The simple legacy feature materializer is kept
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
-V133_DEPLOY_BUILD_ID = "2026-09-22-v13.3.11.3-conditional-incremental-admission-1"
-V1337_SOURCE_TAG = "dashboard-v13.3.11.3-conditional-incremental-admission"
+V133_DEPLOY_BUILD_ID = "2026-09-22-v13.4.0-production-resolver-freeze-1"
+V1337_SOURCE_TAG = "dashboard-v13.4.0-production-resolver-freeze"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -26642,6 +26642,205 @@ def _v133113_conditional_admission_audit(records: dict, log_func=print):
     log_func("[V13.3.11.3-ZERO-AUTHORITY-FREEZE] continuous_brains=['COMMON_MARKET','MARKET_RESIDUAL','RICH_MARKET_MICRO','PATHI_CONTINUOUS','BIGAL_CONTINUOUS'] probability_authority=0 named_rule_trigger_authority=PRESERVED reason=NO_NEW_INCREMENTAL_EVIDENCE_IN_THIS_RELEASE")
     return out
 
+
+# ============================================================================
+# V13.4.0 PRODUCTION RESOLVER FREEZE — RANKING-PRESERVING INCREMENTAL ADMISSION
+# ============================================================================
+# These are intentionally conservative production-freeze guards.  Proper-score
+# improvement remains primary, but a candidate may not buy better calibration by
+# materially damaging game ordering.  All tests use native leakage-safe OOF and
+# one row per physical game; the consumed outer holdout has no selection authority.
+V1340_MIN_COMMON_GAMES = 500
+V1340_BLOCKS = 4
+V1340_MAX_AGG_AUC_DROP = 0.005       # <= 0.5 AUC points aggregate degradation
+V1340_MAX_FOLD_AUC_DROP = 0.030      # ordinary fold noninferiority budget
+V1340_MAX_LATEST_AUC_DROP = 0.030    # latest fold must also preserve ranking
+V1340_BOOTSTRAP_REPS = 800
+V1340_BOOT_LL_NONINFERIOR = 0.00025
+V1340_BOOT_BRIER_NONINFERIOR = 0.00010
+V1340_BOOT_AUC_NONINFERIOR = 0.030
+
+
+def _v1340_paired_oof_bootstrap(y, p_base, p_challenger, reps=V1340_BOOTSTRAP_REPS, seed=13400):
+    """Paired physical-game bootstrap for final resolver-freeze evidence.
+
+    Input is already one canonical row per physical game.  Positive LL/Brier
+    values mean the challenger improved on Stat; positive AUC means ranking
+    improved.  This is diagnostic/freeze evidence only and never tunes weights.
+    """
+    yy=np.asarray(y,dtype=int); pb=np.asarray(p_base,dtype=float); pc=np.asarray(p_challenger,dtype=float)
+    ok=np.isin(yy,[0,1]) & np.isfinite(pb) & np.isfinite(pc)
+    yy=yy[ok]; pb=np.clip(pb[ok],1e-6,1-1e-6); pc=np.clip(pc[ok],1e-6,1-1e-6)
+    n=len(yy)
+    out={"games":int(n),"ll_gain_ci95":[np.nan,np.nan],"brier_gain_ci95":[np.nan,np.nan],"auc_gain_ci95":[np.nan,np.nan]}
+    if n<100 or np.unique(yy).size<2:
+        return out
+    rng=np.random.default_rng(int(seed)); lls=[]; brs=[]; aucs=[]
+    for _ in range(int(reps)):
+        ix=rng.integers(0,n,size=n)
+        yb=yy[ix]; b=pb[ix]; c=pc[ix]
+        llb=-np.mean(yb*np.log(b)+(1-yb)*np.log(1-b)); llc=-np.mean(yb*np.log(c)+(1-yb)*np.log(1-c))
+        brb=np.mean((b-yb)**2); brc=np.mean((c-yb)**2)
+        lls.append(float(llb-llc)); brs.append(float(brb-brc))
+        if np.unique(yb).size>=2:
+            mb=_v13311_binary_metrics(yb,b); mc=_v13311_binary_metrics(yb,c)
+            aucs.append(float(mc.get("auc",np.nan)-mb.get("auc",np.nan)))
+    def _ci(v):
+        a=np.asarray(v,dtype=float); a=a[np.isfinite(a)]
+        return [float(np.quantile(a,.025)),float(np.quantile(a,.975))] if len(a)>=50 else [np.nan,np.nan]
+    out.update({"ll_gain_ci95":_ci(lls),"brier_gain_ci95":_ci(brs),"auc_gain_ci95":_ci(aucs)})
+    return out
+
+
+def _v1340_native_incremental_freeze_test(stat_records: pd.DataFrame, candidate_records: dict, stack_label: str,
+                                           target_games: int = V1340_MIN_COMMON_GAMES, log_func=print):
+    """Final production-freeze admission test beyond Stat.
+
+    Requirements:
+      * native common OOF >= target and four expanding chronological folds;
+      * non-negative candidate coefficient in >= 3/4 folds;
+      * proper-score improvement in >= 3/4 folds and in the latest fold;
+      * aggregate proper-score improvement is non-negative and material;
+      * aggregate/latest ranking remain inside explicit AUC noninferiority budgets;
+      * >= 3/4 folds preserve ranking within the fold budget;
+      * paired bootstrap shows no material proper-score or AUC harm.
+
+    Passing marks a resolver freeze candidate only.  Runtime authority stays
+    unchanged in V13.4.0 so the architecture decision cannot contaminate this run.
+    """
+    joined=_v133113_native_stack_join(stat_records,candidate_records)
+    names=list((candidate_records or {}).keys())
+    out={"version":"V13.4.0","stack":stack_label,"candidate_names":names,"games":int(len(joined)),
+         "target_games":int(target_games),"gate_pass":False,"status":"CLOSED",
+         "authority":"FREEZE_DIAGNOSTIC_ONLY_NO_RUNTIME_CHANGE"}
+    if len(joined)<int(target_games):
+        out["status"]="INSUFFICIENT_NATIVE_COMMON_GAMES"
+        log_func(f"[V13.4.0-RESOLVER-FREEZE] stack={stack_label} candidates={names} games={len(joined)} gate=CLOSED reason=INSUFFICIENT_NATIVE_COMMON_GAMES authority=FREEZE_DIAGNOSTIC_ONLY")
+        return out
+    folds=_v133113_expanding_native_folds(len(joined),blocks=V1340_BLOCKS)
+    if len(folds)<V1340_BLOCKS:
+        out["status"]="INSUFFICIENT_CHRONO_FOLDS"
+        log_func(f"[V13.4.0-RESOLVER-FREEZE] stack={stack_label} candidates={names} games={len(joined)} gate=CLOSED reason=INSUFFICIENT_CHRONO_FOLDS folds={len(folds)} authority=FREEZE_DIAGNOSTIC_ONLY")
+        return out
+    y=joined["y"].to_numpy(dtype=int)
+    base_cols=["stat_score"]; full_cols=base_cols+[f"{n}_score" for n in names]
+    Xb=joined[base_cols].to_numpy(dtype=float); Xf=joined[full_cols].to_numpy(dtype=float); w=np.ones(len(joined),dtype=float)
+    best=None
+    for C in V13224_RESOLVER_C_GRID:
+        pb=np.full(len(joined),np.nan,dtype=float); pc=np.full(len(joined),np.nan,dtype=float)
+        frec=[]; coef_hist={n:[] for n in names}
+        for bi,(tr,va) in enumerate(folds,1):
+            if np.unique(y[tr]).size<2 or np.unique(y[va]).size<2: continue
+            try:
+                bb=_v1336_fit_nonnegative_brain_coefficients(Xb[tr],y[tr],w[tr],C)
+                bf=_v1336_fit_nonnegative_brain_coefficients(Xf[tr],y[tr],w[tr],C)
+                p0=_v13224_sigmoid(Xb[va].dot(bb)); p1=_v13224_sigmoid(Xf[va].dot(bf)); pb[va]=p0; pc[va]=p1
+                mb=_v13311_binary_metrics(y[va],p0); mc=_v13311_binary_metrics(y[va],p1)
+                ll=float(mb.get("logloss",np.nan)-mc.get("logloss",np.nan)); br=float(mb.get("brier",np.nan)-mc.get("brier",np.nan)); ag=float(mc.get("auc",np.nan)-mb.get("auc",np.nan))
+                cdict={n:float(bf[1+i]) for i,n in enumerate(names)}
+                for n,v in cdict.items(): coef_hist[n].append(v)
+                proper=bool(np.isfinite(ll) and np.isfinite(br) and ll>=0 and br>=0 and all(v>1e-8 for v in cdict.values()))
+                rank_ok=bool(np.isfinite(ag) and ag>=-V1340_MAX_FOLD_AUC_DROP)
+                frec.append({"block":bi,"games":int(len(va)),"ll_gain":ll,"brier_gain":br,"auc_gain":ag,
+                             "proper_positive":proper,"ranking_noninferior":rank_ok,"candidate_coefficients":cdict})
+            except Exception as e:
+                frec.append({"block":bi,"games":int(len(va)),"error":f"{type(e).__name__}:{e}"})
+        m=np.isfinite(pb)&np.isfinite(pc)
+        if int(m.sum())<300: continue
+        mb=_v13311_binary_metrics(y[m],pb[m]); mc=_v13311_binary_metrics(y[m],pc[m])
+        ll=float(mb.get("logloss",np.nan)-mc.get("logloss",np.nan)); br=float(mb.get("brier",np.nan)-mc.get("brier",np.nan)); ag=float(mc.get("auc",np.nan)-mb.get("auc",np.nan))
+        valid=[r for r in frec if "ll_gain" in r]
+        proper_pos=sum(1 for r in valid if r.get("proper_positive")); rank_pos=sum(1 for r in valid if r.get("ranking_noninferior")); vf=len(valid)
+        coef_pos={n:sum(1 for v in coef_hist[n] if np.isfinite(v) and v>1e-8) for n in names}
+        boot=_v1340_paired_oof_bootstrap(y[m],pb[m],pc[m],reps=V1340_BOOTSTRAP_REPS,seed=13400+int(round(C*1000)))
+        rec={"C":float(C),"baseline_metrics":mb,"challenger_metrics":mc,"ll_gain":ll,"brier_gain":br,"auc_gain":ag,
+             "proper_positive_folds":int(proper_pos),"ranking_noninferior_folds":int(rank_pos),"valid_folds":int(vf),
+             "candidate_positive_coef_folds":coef_pos,"fold_records":valid,"latest_fold":valid[-1] if valid else {},
+             "oof_games":int(m.sum()),"bootstrap":boot,"_pb":pb,"_pc":pc,"_mask":m}
+        # Selection remains driven by proper scoring; ranking is a hard gate later, not an optimization target.
+        rec["rank"]=(-(ll if np.isfinite(ll) else -999),-(br if np.isfinite(br) else -999))
+        if best is None or rec["rank"]<best["rank"]: best=rec
+    if best is None:
+        out["status"]="NO_VALID_INCREMENTAL_OOF"
+        log_func(f"[V13.4.0-RESOLVER-FREEZE] stack={stack_label} candidates={names} games={len(joined)} gate=CLOSED reason=NO_VALID_INCREMENTAL_OOF authority=FREEZE_DIAGNOSTIC_ONLY")
+        return out
+
+    vf=int(best.get("valid_folds",0)); need=max(3,int(np.ceil(.75*max(vf,1))))
+    coef_ok=all(int((best.get("candidate_positive_coef_folds") or {}).get(n,0))>=need for n in names)
+    latest=best.get("latest_fold") or {}
+    latest_proper=bool(latest.get("proper_positive",False))
+    latest_rank=bool(np.isfinite(latest.get("auc_gain",np.nan)) and latest.get("auc_gain",-np.inf)>=-V1340_MAX_LATEST_AUC_DROP)
+    proper_stable=bool(int(best.get("proper_positive_folds",0))>=need)
+    rank_stable=bool(int(best.get("ranking_noninferior_folds",0))>=need)
+    aggregate_rank=bool(np.isfinite(best.get("auc_gain",np.nan)) and best.get("auc_gain",-np.inf)>=-V1340_MAX_AGG_AUC_DROP)
+    material=bool((best.get("ll_gain",-np.inf)>=V13224_RESOLVER_MIN_LL_GAIN) or (best.get("brier_gain",-np.inf)>=V13224_RESOLVER_MIN_BRIER_GAIN))
+    boot=best.get("bootstrap") or {}; llci=boot.get("ll_gain_ci95",[np.nan,np.nan]); brci=boot.get("brier_gain_ci95",[np.nan,np.nan]); auc_ci=boot.get("auc_gain_ci95",[np.nan,np.nan])
+    boot_proper=bool(np.isfinite(llci[0]) and np.isfinite(brci[0]) and llci[0]>=-V1340_BOOT_LL_NONINFERIOR and brci[0]>=-V1340_BOOT_BRIER_NONINFERIOR)
+    boot_rank=bool(np.isfinite(auc_ci[0]) and auc_ci[0]>=-V1340_BOOT_AUC_NONINFERIOR)
+    aggregate_proper=bool(best.get("ll_gain",-np.inf)>=0 and best.get("brier_gain",-np.inf)>=0)
+    gate=bool(vf>=3 and coef_ok and proper_stable and latest_proper and aggregate_proper and material and rank_stable and latest_rank and aggregate_rank and boot_proper and boot_rank)
+
+    # Fit the freeze-candidate coefficients on all native common history only after
+    # hyperparameter/fold selection.  They are stored for inspection, not used by runtime.
+    full_coef={}
+    try:
+        bf=_v1336_fit_nonnegative_brain_coefficients(Xf,y,w,float(best.get("C",1.0)))
+        full_coef={"STAT":float(bf[0])}
+        for i,n in enumerate(names): full_coef[n]=float(bf[1+i])
+    except Exception:
+        full_coef={}
+    bm=best.get("baseline_metrics") or {}; cm=best.get("challenger_metrics") or {}
+    out.update({k:v for k,v in best.items() if k not in {"rank","_pb","_pc","_mask"}})
+    out.update({"gate_pass":gate,"status":"PASS" if gate else "FREEZE_CLOSED","required_positive_folds":int(need),
+                "coefficient_stability_pass":bool(coef_ok),"proper_stability_pass":proper_stable,"latest_proper_pass":latest_proper,
+                "ranking_stability_pass":rank_stable,"latest_ranking_pass":latest_rank,"aggregate_ranking_pass":aggregate_rank,
+                "bootstrap_proper_noninferior":boot_proper,"bootstrap_ranking_noninferior":boot_rank,"material_gain_pass":material,
+                "freeze_candidate_coefficients":full_coef,
+                "guard_contract":{
+                    "max_aggregate_auc_drop":V1340_MAX_AGG_AUC_DROP,"max_fold_auc_drop":V1340_MAX_FOLD_AUC_DROP,
+                    "max_latest_auc_drop":V1340_MAX_LATEST_AUC_DROP,"bootstrap_ll_noninferior":V1340_BOOT_LL_NONINFERIOR,
+                    "bootstrap_brier_noninferior":V1340_BOOT_BRIER_NONINFERIOR,"bootstrap_auc_noninferior":V1340_BOOT_AUC_NONINFERIOR}})
+    for r in best.get("fold_records",[]):
+        log_func(f"[V13.4.0-RESOLVER-FREEZE-FOLD] stack={stack_label} block={r.get('block')} games={r.get('games')} ll_gain={float(r.get('ll_gain',np.nan)):+.6f} br_gain={float(r.get('brier_gain',np.nan)):+.6f} auc_gain={float(r.get('auc_gain',np.nan)):+.4f} proper={bool(r.get('proper_positive',False))} rank_noninferior={bool(r.get('ranking_noninferior',False))} candidate_coefficients={r.get('candidate_coefficients',{})} authority=FREEZE_DIAGNOSTIC_ONLY")
+    log_func(
+        f"[V13.4.0-RESOLVER-FREEZE] stack={stack_label} candidates={names} games={len(joined)} gate={'PASS' if gate else 'CLOSED'} "
+        f"baseline_auc={float(bm.get('auc',np.nan)):.4f} challenger_auc={float(cm.get('auc',np.nan)):.4f} auc_gain={float(best.get('auc_gain',np.nan)):+.4f} "
+        f"ll_gain={float(best.get('ll_gain',np.nan)):+.6f} br_gain={float(best.get('brier_gain',np.nan)):+.6f} "
+        f"proper_folds={best.get('proper_positive_folds',0)}/{vf} rank_noninferior_folds={best.get('ranking_noninferior_folds',0)}/{vf} "
+        f"latest_proper={latest_proper} latest_rank={latest_rank} aggregate_rank={aggregate_rank} boot_proper={boot_proper} boot_rank={boot_rank} "
+        f"ll_ci={llci} br_ci={brci} auc_ci={auc_ci} freeze_coefficients={full_coef} authority=FREEZE_DIAGNOSTIC_ONLY_NO_RUNTIME_CHANGE"
+    )
+    return out
+
+
+def _v1340_resolver_freeze_audit(records: dict, log_func=print):
+    """Final V13.4.0 resolver-freeze decision using native OOF only."""
+    stat=(records or {}).get("STAT"); core=(records or {}).get("CORE"); own=(records or {}).get("OWN_FAIR")
+    out={"version":"V13.4.0","baseline":"STAT","runtime_authority_changed":False,"tests":{},"freeze_ready":False}
+    out["tests"]["CORE"]=_v1340_native_incremental_freeze_test(stat,{"CORE":core},"STAT_PLUS_CORE",V1340_MIN_COMMON_GAMES,log_func)
+    out["tests"]["OWN_FAIR"]=_v1340_native_incremental_freeze_test(stat,{"OWN_FAIR":own},"STAT_PLUS_OWN_FAIR",V1340_MIN_COMMON_GAMES,log_func)
+    core_ok=bool(out["tests"]["CORE"].get("gate_pass",False)); own_ok=bool(out["tests"]["OWN_FAIR"].get("gate_pass",False))
+    trio_ok=False
+    if core_ok and own_ok:
+        out["tests"]["TRIO"]=_v1340_native_incremental_freeze_test(stat,{"CORE":core,"OWN_FAIR":own},"STAT_PLUS_CORE_PLUS_OWN_FAIR",V1340_MIN_COMMON_GAMES,log_func)
+        trio_ok=bool(out["tests"]["TRIO"].get("gate_pass",False))
+    else:
+        out["tests"]["TRIO"]={"gate_pass":False,"status":"SKIPPED_CANDIDATES_NOT_BOTH_ADMITTED"}
+        log_func(f"[V13.4.0-TRIO-FREEZE] gate=SKIPPED core={'PASS' if core_ok else 'CLOSED'} own_fair={'PASS' if own_ok else 'CLOSED'} reason=BOTH_ADDITIONS_MUST_PASS_PRODUCTION_FREEZE_GUARD")
+    proposed=(['STAT','CORE','OWN_FAIR'] if trio_ok else (['STAT','OWN_FAIR'] if own_ok else (['STAT','CORE'] if core_ok else ['STAT'])))
+    out["proposed_runtime_resolver"]=proposed
+    out["freeze_ready"]=True  # a deterministic resolver has been selected even if all additions close
+    out["freeze_coefficients"]=(out["tests"].get("TRIO",{}).get("freeze_candidate_coefficients",{}) if trio_ok else
+                                out["tests"].get("OWN_FAIR",{}).get("freeze_candidate_coefficients",{}) if own_ok else
+                                out["tests"].get("CORE",{}).get("freeze_candidate_coefficients",{}) if core_ok else {})
+    zero=['COMMON_MARKET','MARKET_RESIDUAL','RICH_MARKET_MICRO','PATHI_CONTINUOUS','BIGAL_CONTINUOUS']
+    if not core_ok: zero=['CORE']+zero
+    if not own_ok: zero=['OWN_FAIR']+zero
+    out["zero_probability_authority"]=zero
+    log_func(f"[V13.4.0-PRODUCTION-RESOLVER-FREEZE] freeze_ready=TRUE baseline=STAT core={'PASS' if core_ok else 'CLOSED'} own_fair={'PASS' if own_ok else 'CLOSED'} trio={'PASS' if trio_ok else 'SKIPPED_OR_CLOSED'} proposed={proposed} coefficients={out['freeze_coefficients']} runtime_unchanged=TRUE next_step=IMPLEMENT_FROZEN_RESOLVER_THEN_BET_POLICY")
+    log_func(f"[V13.4.0-ZERO-AUTHORITY-FREEZE] continuous_brains={zero} probability_authority=0 named_rule_trigger_authority=PRESERVED")
+    return out
+
 def _v133111_frozen_brain_coef(resolver_art: dict, feat: str):
     """Return a coefficient learned before expanded validation; never fit here."""
     try:
@@ -26727,21 +26926,21 @@ def _v133111_rule_history_validation(rows,y,groups,rule_engine,log_func=print):
             fam_occ[fam]+=int(len(d)); fam_seen[fam].update(map(str,d["game"].tolist()) if len(d) else [])
             if len(d) or rec["profile_internal_historical_sample"] or rec["profile_source_historical_sample"]:
                 log_func(
-                    f"[V13.3.11.2-ALL-BRAIN-RULE] family={fam} system={name} games={len(d)} ats={hit:.4f} "
+                    f"[V13.4.0-ALL-BRAIN-RULE] family={fam} system={name} games={len(d)} ats={hit:.4f} "
                     f"seasons={sys_seasons} profile_internal_n={rec['profile_internal_historical_sample']} profile_internal_ats={rec['profile_internal_historical_raw_ats']:.4f} "
                     f"source_n={rec['profile_source_historical_sample']} source_ats={rec['profile_source_historical_raw_ats']:.4f} selected={name in selected} active={name in active} "
                     f"active_scale={rec['active_incremental_scale']:.2f} ambiguous_excluded={len(ambiguous)} authority=DESCRIPTIVE_RULE_HISTORY_ONLY"
                 )
                 for br in blocks:
-                    log_func(f"[V13.3.11.2-ALL-BRAIN-RULE-BLOCK] family={fam} system={name} block={br['block']} games={br['games']} ats={br['ats_hit_rate']:.4f} authority=DESCRIPTIVE_RULE_HISTORY_ONLY")
+                    log_func(f"[V13.4.0-ALL-BRAIN-RULE-BLOCK] family={fam} system={name} block={br['block']} games={br['games']} ats={br['ats_hit_rate']:.4f} authority=DESCRIPTIVE_RULE_HISTORY_ONLY")
         for fam in ("Pathi","BigAl"):
             fs=[n for n,r in out["systems"].items() if r.get("family")==fam]
             fa=[n for n in fs if out["systems"][n].get("active_expert")]
             out["families"][fam]={"systems":len(fs),"active_systems":len(fa),"occurrence_records":int(fam_occ[fam]),"unique_physical_games":int(len(fam_seen[fam]))}
-            log_func(f"[V13.3.11.2-ALL-BRAIN-RULE-FAMILY] family={fam} systems={len(fs)} active_systems={len(fa)} occurrence_records={fam_occ[fam]} unique_physical_games={len(fam_seen[fam])} contract=SYSTEM_LEVEL_HISTORY_NO_FORCED_FAMILY_PROBABILITY")
+            log_func(f"[V13.4.0-ALL-BRAIN-RULE-FAMILY] family={fam} systems={len(fs)} active_systems={len(fa)} occurrence_records={fam_occ[fam]} unique_physical_games={len(fam_seen[fam])} contract=SYSTEM_LEVEL_HISTORY_NO_FORCED_FAMILY_PROBABILITY")
     except Exception as e:
         out["status"]="ERROR_FAIL_CLOSED"; out["error"]=f"{type(e).__name__}:{e}"
-        log_func(f"[V13.3.11.2-ALL-BRAIN-RULE] status=ERROR_FAIL_CLOSED error={type(e).__name__}:{e}")
+        log_func(f"[V13.4.0-ALL-BRAIN-RULE] status=ERROR_FAIL_CLOSED error={type(e).__name__}:{e}")
     return out
 
 
@@ -26751,7 +26950,7 @@ def _v13311_expanded_chrono_validation(rows,y,groups,Xs,Xh,select_mask,shadow_ma
                                         pathi_candidate_sel=None,pathi_candidate_shadow=None,
                                         bigal_candidate_sel=None,bigal_candidate_shadow=None,
                                         log_func=print):
-    """V13.3.11.3 native-OOF all-brain + conditional-admission diagnostics.
+    """V13.4.0 native-OOF all-brain + production resolver-freeze diagnostics.
 
     Core, Stat, Common Market, Own Fair, and Market Residual are evaluated from
     their native season-forward OOF surfaces rather than only after mapping into
@@ -26806,7 +27005,7 @@ def _v13311_expanded_chrono_validation(rows,y,groups,Xs,Xh,select_mask,shadow_ma
             pp=_merge_stage(sel,sh)
             brains[label],records[label]=_aligned_report(label,pp,"SELECTION_PLUS_DISJOINT_SHADOW_NATIVE_STAGE_OOF",500)
 
-        conditional_admission=_v133113_conditional_admission_audit(records,log_func=log_func)
+        resolver_freeze=_v1340_resolver_freeze_audit(records,log_func=log_func)
 
         # Same-game resolver-aligned comparisons remain useful because every brain
         # is expressed on exactly the same team-side/game row. They are descriptive
@@ -26821,7 +27020,7 @@ def _v13311_expanded_chrono_validation(rows,y,groups,Xs,Xh,select_mask,shadow_ma
             for st in pm:
                 mm=ag.get(st,{})
                 bits.append(f"{st}:auc={float(mm.get('auc',np.nan)):.4f},ll={float(mm.get('logloss',np.nan)):.5f},br={float(mm.get('brier',np.nan)):.5f}")
-            log_func(f"[V13.3.11.2-ALL-BRAIN-PAIR] pair={name} games={rep.get('games',0)} target_reached={rep.get('target_reached',False)} {' '.join(bits)} scope=RESOLVER_ALIGNED_SAME_GAME authority=DIAGNOSTIC_ONLY_NO_NEW_WEIGHT_FIT")
+            log_func(f"[V13.4.0-ALL-BRAIN-PAIR] pair={name} games={rep.get('games',0)} target_reached={rep.get('target_reached',False)} {' '.join(bits)} scope=RESOLVER_ALIGNED_SAME_GAME authority=DIAGNOSTIC_ONLY_NO_NEW_WEIGHT_FIT")
             return rec
 
         # Resolver-mapped Stat/Core probabilities use the already frozen transfer
@@ -26852,15 +27051,15 @@ def _v13311_expanded_chrono_validation(rows,y,groups,Xs,Xh,select_mask,shadow_ma
         rules=_v133111_rule_history_validation(rows,yy,g,rule_engine,log_func=log_func)
         target_count=sum(1 for r in brains.values() if bool(r.get("target_reached",False)))
         out={
-            "version":"V13.3.11.3","brains":brains,"pairwise_same_game":pairs,"rule_history":rules,"conditional_incremental_admission":conditional_admission,
+            "version":"V13.4.0","brains":brains,"pairwise_same_game":pairs,"rule_history":rules,"production_resolver_freeze":resolver_freeze,
             "target_500_brains_reached":int(target_count),
-            "contract":"NATIVE_OOF_PER_BRAIN__STAT_BASELINE_CONDITIONAL_INCREMENTAL_ADMISSION__CORE_AND_OWN_FAIR__FOUR_CHRONO_BLOCKS__ONE_PHYSICAL_GAME__SOURCE_AND_SIGNAL_FINGERPRINTS__NO_RUNTIME_AUTHORITY_CHANGE__OUTER_HOLDOUT_UNUSED",
+            "contract":"NATIVE_OOF_PER_BRAIN__FINAL_PRODUCTION_RESOLVER_FREEZE__STAT_BASELINE__CORE_OWN_FAIR__PROPER_SCORE_PLUS_RANKING_GUARDS__PAIRED_BOOTSTRAP__ONE_PHYSICAL_GAME__NO_RUNTIME_AUTHORITY_CHANGE__OUTER_HOLDOUT_UNUSED",
             "_common_records":common_rec.to_dict("records") if common_rec is not None and len(common_rec) else [],
         }
-        log_func(f"[V13.3.11.3-ALL-BRAIN-SUMMARY] continuous_brains={len(brains)} brains_at_least_500_games={target_count} rule_systems={len((rules or {}).get('systems',{}))} outer_holdout_used=FALSE architecture_frozen=TRUE resolver_changed=FALSE")
+        log_func(f"[V13.4.0-ALL-BRAIN-SUMMARY] continuous_brains={len(brains)} brains_at_least_500_games={target_count} rule_systems={len((rules or {}).get('systems',{}))} outer_holdout_used=FALSE resolver_freeze_evaluated=TRUE runtime_resolver_changed=FALSE")
         return out
     except Exception as e:
-        log_func(f"[V13.3.11.3-ALL-BRAIN-VALIDATION] status=ERROR_FAIL_CLOSED error={type(e).__name__}:{e}")
+        log_func(f"[V13.4.0-ALL-BRAIN-VALIDATION] status=ERROR_FAIL_CLOSED error={type(e).__name__}:{e}")
         return {"status":"ERROR_FAIL_CLOSED","error":f"{type(e).__name__}:{e}","authority":"DIAGNOSTIC_ONLY"}
 
 def _v1336_fit_brain_stack_resolver(rows,y,core_cal,base,market_sel,market_shadow,pathi_sel,pathi_shadow,bigal_sel,bigal_shadow,select_mask,shadow_mask,weights,groups,core_v4_edge=None,stat_point_edge=None,common_market_delta=None,own_fair_delta=None,common_market_raw_prob=None,own_fair_raw_prob=None,rule_engine=None,log_func=print):
