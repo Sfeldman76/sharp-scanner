@@ -233,7 +233,7 @@ def main():
         "_v13310_runtime_brain_input_audit",
     ]
     _missing_utils = [n for n in _required_utils if not hasattr(_utils, n)]
-    if (not _expected_build) or (_expected_build != _utils_build) or _missing_utils or _dashboard_tag != "dashboard-v13.4.4-stat-source-universe-calibration-forward-retest" or _utils_tag != "utils-v13.4.4-stat-source-universe-calibration-forward-retest" or _wrapper_tag != "wrapper-v13.4.4-stat-source-universe-calibration-forward-retest":
+    if (not _expected_build) or (_expected_build != _utils_build) or _missing_utils or _dashboard_tag != "dashboard-v13.4.6-frozen-stat-lean-fast-ui" or _utils_tag != "utils-v13.4.6-frozen-stat-lean-fast-ui" or _wrapper_tag != "wrapper-v13.4.6-frozen-stat-lean-fast-ui":
         raise RuntimeError(
             "[V13.4.4-DEPLOY-PREFLIGHT] MIXED_OR_STALE_DEPLOYMENT "
             f"dashboard_build={_expected_build!r} utils_build={_utils_build!r} "
