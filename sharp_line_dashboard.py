@@ -16665,8 +16665,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-23-v13.4.4-stat-source-universe-calibration-forward-retest"
-NCAAF_V13_HOTFIX = "V13_4_4__TRUE_STAT_SOURCE_UNIVERSE__EXCLUSION_REASON_AUDIT__V13_CALIBRATION_PATH__FROZEN_2P5__SYSTEM_FORWARD_RETEST__STAT_ONLY_FREEZE"
+NCAAF_V13_VERSION = "2026-09-23-v13.4.6-frozen-stat-lean-fast-ui"
+NCAAF_V13_HOTFIX = "V13_4_6__FROZEN_STAT_UNCHANGED__LEAN_FAST_NCAAF_UI__SPREADS_ONLY__ONE_ROW_PER_GAME__NO_RICH_MARKET_RENDER__CALIBRATION_V2_RESEARCH_ONLY"
 NCAAF_HISTORY_POLICY = "ALL_AVAILABLE_SEASONS"
 NCAAF_HISTORY_FIXED_LOOKBACK_DAYS = None  # Never silently truncate production history.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -16687,8 +16687,8 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # from the same deploy bundle.  The simple legacy feature materializer is kept
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
-V133_DEPLOY_BUILD_ID = "2026-09-23-v13.4.4-stat-source-universe-calibration-forward-retest-1"
-V1337_SOURCE_TAG = "dashboard-v13.4.4-stat-source-universe-calibration-forward-retest"
+V133_DEPLOY_BUILD_ID = "2026-09-23-v13.4.6-frozen-stat-lean-fast-ui-1"
+V1337_SOURCE_TAG = "dashboard-v13.4.6-frozen-stat-lean-fast-ui"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -27758,6 +27758,108 @@ def _v13311_expanded_chrono_validation(rows,y,groups,Xs,Xh,select_mask,shadow_ma
         log_func(f"[V13.4.0-ALL-BRAIN-VALIDATION] status=ERROR_FAIL_CLOSED error={type(e).__name__}:{e}")
         return {"status":"ERROR_FAIL_CLOSED","error":f"{type(e).__name__}:{e}","authority":"DIAGNOSTIC_ONLY"}
 
+
+def _v1345_calibration_v2_feature_frame(rows: pd.DataFrame, base_prob):
+    """Small context-aware probability-mapping feature frame.
+
+    Research only.  The frozen V13.4.4 STAT probability remains the production
+    prediction.  Every feature is pregame and multiplies the base logit so p=.50
+    remains exactly neutral.  This specifically tests the observed possibility
+    that the frozen STAT probabilities are under-dispersed around 50%.
+    """
+    d=rows.reset_index(drop=True)
+    p=np.asarray(base_prob,dtype=float).reshape(-1)
+    p=np.clip(p,1e-6,1-1e-6)
+    z=np.log(p/(1.0-p))
+    def _num(*names):
+        s=pd.Series(np.nan,index=d.index,dtype='float64')
+        for c in names:
+            if c in d.columns:
+                q=pd.to_numeric(d[c],errors='coerce')
+                s=s.where(s.notna(),q)
+        return s.to_numpy(dtype=float,na_value=np.nan)
+    spread=_num('Value','Spread_Value','Current_Spread','Outcome_Market_Spread')
+    total=_num('Current_Total','Total_Value','Total_Game','Opening_Total')
+    games=_num('NCAAF_Stat_Current_Season_Games','Team_Games_Prior','Cum_Games_Prior')
+    spread_scale=np.where(np.isfinite(spread),np.clip(np.abs(spread)/14.0,0.0,2.0),0.0)
+    total_center=np.where(np.isfinite(total),np.clip((total-50.0)/20.0,-1.5,1.5),0.0)
+    early=np.where(np.isfinite(games),(games<4.0).astype(float),0.0)
+    X=np.column_stack([z,z*spread_scale,z*total_center,z*early]).astype(float)
+    names=['BASE_LOGIT','BASE_LOGIT_X_SPREAD_ABS','BASE_LOGIT_X_TOTAL_CENTER','BASE_LOGIT_X_EARLY_SEASON']
+    return X,names
+
+
+def _v1345_fit_calibration_v2_challenger(rows,y,p_sel,p_shadow,select_mask,shadow_mask,groups,weights=None,log_func=print):
+    """Fit a frozen, zero-authority CALIBRATION_V2 challenger.
+
+    Hyperparameters are fixed in code.  The early portion of the selection lane
+    fits an internal check, the later selection portion is evaluated, then the
+    final mapper is fit on the full selection lane and tested once on the disjoint
+    historical shadow.  Outer holdout and post-freeze games have no fitting role.
+    """
+    d=rows.reset_index(drop=True); yy=np.asarray(y,dtype=int).reshape(-1)
+    ps=np.asarray(p_sel,dtype=float).reshape(-1); ph=np.asarray(p_shadow,dtype=float).reshape(-1)
+    sm=np.asarray(select_mask,dtype=bool); hm=np.asarray(shadow_mask,dtype=bool); gg=np.asarray(groups,dtype=object)
+    ww=np.ones(len(yy),dtype=float) if weights is None else np.asarray(weights,dtype=float).reshape(-1)
+    out={
+        'version':'V13.4.5-CALIBRATION_V2','status':'UNAVAILABLE','fit_ok':False,'research_gate_pass':False,
+        'production_authority':0,'bet_authority':0,'probability_authority':0,
+        'feature_names':[],'coefficients':[],'intercept':0.0,'fit_intercept':False,'C':0.25,
+        'contract':'RESEARCH_ONLY__SELECTION_FIT__DISJOINT_SHADOW_TEST__OUTER_HOLDOUT_UNUSED__POSTFREEZE_UNUSED__FROZEN_STAT_UNCHANGED'
+    }
+    try:
+        sk,_=_v13237_compact_decision_rows(d,ps,sm&np.isfinite(ps),gg)
+        hk,_=_v13237_compact_decision_rows(d,ph,hm&np.isfinite(ph),gg)
+        si=np.flatnonzero(sk&np.isfinite(ps)); hi=np.flatnonzero(hk&np.isfinite(ph))
+        out['selection_games']=int(len(si)); out['shadow_games']=int(len(hi))
+        if len(si)<80 or len(hi)<40 or np.unique(yy[si]).size<2 or np.unique(yy[hi]).size<2:
+            out['status']='INSUFFICIENT_GAMES'
+            log_func(f"[V13.4.5-CALIBRATION-V2] status=INSUFFICIENT_GAMES selection_games={len(si)} shadow_games={len(hi)} authority=0")
+            return out
+        # chronological internal split inside selection only
+        gt=pd.to_datetime(d.get('Game_Start',pd.Series(pd.NaT,index=d.index)),errors='coerce',utc=True)
+        order=si[np.argsort(np.where(gt.iloc[si].notna(),gt.iloc[si].astype('int64').to_numpy(),np.asarray(si,dtype=np.int64)))]
+        cut=max(50,min(len(order)-25,int(round(.70*len(order)))))
+        tr=order[:cut]; va=order[cut:]
+        Xs,names=_v1345_calibration_v2_feature_frame(d,ps)
+        Xh,_=_v1345_calibration_v2_feature_frame(d,ph)
+        mdl=LogisticRegression(C=0.25,solver='lbfgs',max_iter=2000,fit_intercept=False)
+        mdl.fit(Xs[tr],yy[tr],sample_weight=ww[tr])
+        p0v=np.clip(ps[va],1e-6,1-1e-6); p1v=np.clip(mdl.predict_proba(Xs[va])[:,1],1e-6,1-1e-6)
+        bm_v=_ncaaf_v131_calibration_metrics(yy[va],p0v,ww[va]); cm_v=_ncaaf_v131_calibration_metrics(yy[va],p1v,ww[va])
+        int_ll=float(bm_v.get('logloss',np.nan)-cm_v.get('logloss',np.nan)); int_br=float(bm_v.get('brier',np.nan)-cm_v.get('brier',np.nan))
+        final=LogisticRegression(C=0.25,solver='lbfgs',max_iter=2000,fit_intercept=False)
+        final.fit(Xs[si],yy[si],sample_weight=ww[si])
+        p0h=np.clip(ph[hi],1e-6,1-1e-6); p1h=np.clip(final.predict_proba(Xh[hi])[:,1],1e-6,1-1e-6)
+        bm_h=_ncaaf_v131_calibration_metrics(yy[hi],p0h,ww[hi]); cm_h=_ncaaf_v131_calibration_metrics(yy[hi],p1h,ww[hi])
+        sh_ll=float(bm_h.get('logloss',np.nan)-cm_h.get('logloss',np.nan)); sh_br=float(bm_h.get('brier',np.nan)-cm_h.get('brier',np.nan))
+        # Conservative research gate: both chronological checks must be proper-score
+        # noninferior, and at least one shadow proper score must materially improve.
+        int_pass=bool(np.isfinite(int_ll) and np.isfinite(int_br) and int_ll>=-0.0005 and int_br>=-0.00025)
+        sh_pass=bool(np.isfinite(sh_ll) and np.isfinite(sh_br) and sh_ll>=-0.0005 and sh_br>=-0.00025 and (sh_ll>=0.00025 or sh_br>=0.000125))
+        coef=np.asarray(final.coef_,dtype=float).reshape(-1)
+        out.update({
+            'status':'SHADOW_PASS_RESEARCH_ONLY' if (int_pass and sh_pass) else 'SHADOW_CLOSED_RESEARCH_ONLY',
+            'fit_ok':True,'research_gate_pass':bool(int_pass and sh_pass),'feature_names':names,
+            'coefficients':[float(x) for x in coef],'intercept':0.0,
+            'internal_valid_games':int(len(va)),'internal_logloss_improvement':int_ll,'internal_brier_improvement':int_br,
+            'shadow_logloss_improvement':sh_ll,'shadow_brier_improvement':sh_br,
+            'base_shadow_metrics':bm_h,'challenger_shadow_metrics':cm_h,
+            'base_shadow_ece':float(bm_h.get('ece',np.nan)),'challenger_shadow_ece':float(cm_h.get('ece',np.nan)),
+            'base_shadow_slope':float(bm_h.get('calibration_slope',np.nan)),'challenger_shadow_slope':float(cm_h.get('calibration_slope',np.nan)),
+        })
+        log_func(
+            f"[V13.4.5-CALIBRATION-V2] status={out['status']} authority=0 selection_games={len(si)} internal_valid_games={len(va)} shadow_games={len(hi)} "
+            f"internal_ll={int_ll:+.6f} internal_br={int_br:+.6f} shadow_ll={sh_ll:+.6f} shadow_br={sh_br:+.6f} "
+            f"shadow_ece={float(bm_h.get('ece',np.nan)):.4f}->{float(cm_h.get('ece',np.nan)):.4f} "
+            f"shadow_slope={float(bm_h.get('calibration_slope',np.nan)):.3f}->{float(cm_h.get('calibration_slope',np.nan)):.3f} coeff={out['coefficients']}"
+        )
+        return out
+    except Exception as e:
+        out['status']='ERROR_FAIL_CLOSED'; out['error']=f'{type(e).__name__}:{e}'
+        log_func(f"[V13.4.5-CALIBRATION-V2] status=ERROR_FAIL_CLOSED authority=0 error={type(e).__name__}:{e}")
+        return out
+
 def _v1336_fit_brain_stack_resolver(rows,y,core_cal,base,market_sel,market_shadow,pathi_sel,pathi_shadow,bigal_sel,bigal_shadow,select_mask,shadow_mask,weights,groups,core_v4_edge=None,stat_point_edge=None,common_market_delta=None,own_fair_delta=None,common_market_raw_prob=None,own_fair_raw_prob=None,rule_engine=None,log_func=print):
     """Transfer-gated brain selection around a neutral ATS prior; outer holdout unused."""
     yy=np.asarray(y,dtype=int); w=np.ones(len(yy),dtype=float); g=np.asarray(groups,dtype=object); sm=np.asarray(select_mask,dtype=bool); hm=np.asarray(shadow_mask,dtype=bool)
@@ -29418,6 +29520,13 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
     )
     _resolver_sel_pred=np.asarray((_resolver_art or {}).pop("_selection_prediction",np.full(len(y),np.nan)),dtype=float)
     _resolver_sh_pred=np.asarray((_resolver_art or {}).pop("_shadow_prediction",np.full(len(y),np.nan)),dtype=float)
+    # V13.4.5 research lane: test whether the frozen STAT probability is too
+    # compressed around 50%.  This mapper has zero production/betting authority.
+    _calibration_v2=_v1345_fit_calibration_v2_challenger(
+        train_rows,y,_resolver_sel_pred,_resolver_sh_pred,select_mask,shadow_mask,
+        _spec_groups,weights=sw_spec,log_func=log_func
+    )
+    artifact["calibration_v2_challenger"]=_calibration_v2
     try:
         _rmask=np.asarray(select_mask,dtype=bool)|np.asarray(shadow_mask,dtype=bool)
         _rgames=int(len(pd.unique(np.asarray(_spec_groups,dtype=object)[_rmask]))) if _rmask.any() else 0
@@ -29619,7 +29728,7 @@ def _ncaaf_v13_fit_specialist_overlays(bundle: dict, train_rows: pd.DataFrame, X
     artifact["final_gate_pass"]=_overlay_any
     artifact["status"]="PASS" if _overlay_any else "GATE_CLOSED"
     artifact["version"]=V13_SPECIALIST_OVERLAY_VERSION
-    artifact["contract"]="MARKET_RICH_CORE_RESEARCH__OWN_FAIR_RESEARCH__MARKET_RESIDUAL_RESEARCH__MARKET_MICROSTRUCTURE_RESEARCH__AUDITED_RAW_SYSTEM_RECORDS__V13_4_4_STAT_ONLY_FROZEN_PROBABILITY_AUTHORITY__DUAL_SOURCE_STAT_REPLAY_LIVE_ADAPTER__INDEPENDENT_PROSPECTIVE_LEDGER__REAL_PRICE_CHRONOLOGICAL_BET_POLICY__CLV_ORIENTATION_DIAGNOSTIC_ONLY__SOURCE_AWARE_PUSH_CONTRACT__SYSTEM_MINER_V3_RESEARCH_ONLY_ZERO_AUTHORITY__OUTER_HOLDOUT_CONSUMED_DIAGNOSTIC_ONLY__PROSPECTIVE_PROMOTION_REQUIRED"
+    artifact["contract"]="MARKET_RICH_CORE_RESEARCH__OWN_FAIR_RESEARCH__MARKET_RESIDUAL_RESEARCH__MARKET_MICROSTRUCTURE_RESEARCH__AUDITED_RAW_SYSTEM_RECORDS__V13_4_4_STAT_ONLY_FROZEN_PROBABILITY_AUTHORITY__DUAL_SOURCE_STAT_REPLAY_LIVE_ADAPTER__INDEPENDENT_PROSPECTIVE_LEDGER__REAL_PRICE_CHRONOLOGICAL_BET_POLICY__CLV_ORIENTATION_DIAGNOSTIC_ONLY__SOURCE_AWARE_PUSH_CONTRACT__SYSTEM_MINER_V3_RESEARCH_ONLY_ZERO_AUTHORITY__CALIBRATION_V2_RESEARCH_ONLY_ZERO_AUTHORITY__UI_PREDICTION_BET_SEPARATION__OUTER_HOLDOUT_CONSUMED_DIAGNOSTIC_ONLY__PROSPECTIVE_PROMOTION_REQUIRED"
     final_gate=artifact["final_gate_pass"]
     bundle["specialist_overlays"]=artifact
     if isinstance(bundle.get("production_preview"),dict):
@@ -45963,6 +46072,191 @@ def _looks_malformed(html_str: str) -> bool:
     )
 
 
+
+def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
+    """Lean NCAAF production-candidate view.
+
+    This path intentionally does not rebuild the legacy rich-market dashboard. It
+    consumes the already-scored future rows, keeps only spread predictions, binds
+    each side to one current executable quote when available, and renders one
+    model-preferred side per physical game. Research diagnostics are optional and
+    never change the frozen STAT probability or betting authority.
+    """
+    if df_moves_raw is None or df_moves_raw.empty:
+        st.warning("No upcoming NCAAF prediction rows are available yet.")
+        return
+
+    d=df_moves_raw.copy()
+    now=pd.Timestamp.now(tz='UTC')
+    if 'Game_Start' in d.columns:
+        d['Game_Start']=pd.to_datetime(d['Game_Start'],errors='coerce',utc=True)
+        d=d[d['Game_Start'].notna() & (d['Game_Start']>now)].copy()
+    if 'Market' in d.columns:
+        d['Market']=d['Market'].astype(str).str.lower().str.strip()
+        d=d[d['Market'].isin(['spread','spreads'])].copy()
+    if 'Pre_Game' in d.columns:
+        d=d[d['Pre_Game'].fillna(False).astype(bool)].copy()
+
+    # Frozen production prediction only. No champion/rich-market probability fallback.
+    d['_pred']=pd.to_numeric(d.get('V13_Cover_Prob',pd.Series(np.nan,index=d.index)),errors='coerce')
+    d=d[d['_pred'].notna()].copy()
+    if d.empty:
+        st.warning("Frozen STAT has not produced an upcoming spread prediction yet.")
+        return
+
+    d['_line']=pd.to_numeric(d.get('Value'),errors='coerce')
+    d['_odds']=pd.to_numeric(d.get('Odds_Price'),errors='coerce')
+    d['_ts']=pd.to_datetime(d.get('Snapshot_Timestamp'),errors='coerce',utc=True)
+    d['_book']=d.get('Bookmaker',pd.Series('',index=d.index)).astype(str).str.strip()
+    d['_book_norm']=d['_book'].str.lower()
+
+    # Prefer user's executable books. If an outcome has none, retain the freshest
+    # tracked quote for prediction visibility but mark it reference-only.
+    _exec_env=str(os.getenv('V13_EXECUTABLE_BOOKS','') or '').strip()
+    _exec_books={x.strip().lower() for x in _exec_env.split(',') if x.strip()} if _exec_env else {str(x).strip().lower() for x in REC_BOOKS}
+    d['_exec']=d['_book_norm'].isin(_exec_books)
+
+    o=d['_odds']
+    d['_be']=np.nan
+    neg=o<0; pos=o>0
+    d.loc[neg,'_be']=(-o.loc[neg])/((-o.loc[neg])+100.0)
+    d.loc[pos,'_be']=100.0/(o.loc[pos]+100.0)
+    d['_profit']=np.nan
+    d.loc[neg,'_profit']=100.0/(-o.loc[neg])
+    d.loc[pos,'_profit']=o.loc[pos]/100.0
+    d['_edge']=d['_pred']-d['_be']
+    d['_ev']=d['_pred']*d['_profit']-(1.0-d['_pred'])
+
+    keys=['Game_Key','Market','Outcome','Bookmaker']
+    keys=[c for c in keys if c in d.columns]
+    if keys:
+        d=d.sort_values('_ts').drop_duplicates(keys,keep='last')
+
+    # Keep quotes close to the latest current market state; stale rows should not
+    # win merely because an old line created a large apparent edge.
+    gok=[c for c in ['Game_Key','Market','Outcome'] if c in d.columns]
+    if gok:
+        d['_latest_side_ts']=d.groupby(gok)['_ts'].transform('max')
+        d['_lag_min']=(d['_latest_side_ts']-d['_ts']).dt.total_seconds().div(60.0)
+        max_lag=float(os.getenv('V13_UI_QUOTE_SIMULTANEITY_MINUTES','45') or 45.0)
+        known=d['_lag_min'].notna()
+        d=d[(~known)|d['_lag_min'].le(max_lag)].copy()
+
+    # Pick one quote per team/outcome: executable first, then best EV, then freshest.
+    side_keys=[c for c in ['Game_Key','Market','Outcome'] if c in d.columns]
+    d['_ev_sort']=d['_ev'].fillna(-999.0)
+    if side_keys:
+        d=d.sort_values(side_keys+['_exec','_ev_sort','_ts'],ascending=[True]*len(side_keys)+[False,False,False])
+        sides=d.drop_duplicates(side_keys,keep='first').copy()
+    else:
+        sides=d.copy()
+
+    # One row per physical game: show the side the frozen model rates more likely
+    # to cover. Betting status remains a separate field.
+    game_keys=[c for c in ['Game_Key','Market'] if c in sides.columns]
+    if game_keys:
+        sides=sides.sort_values(game_keys+['_pred','_edge','_ts'],ascending=[True]*len(game_keys)+[False,False,False])
+        picks=sides.drop_duplicates(game_keys,keep='first').copy()
+    else:
+        picks=sides.copy()
+
+    if picks.empty:
+        st.warning("No current frozen-STAT spread predictions are available.")
+        return
+
+    game_col='Game' if 'Game' in picks.columns else None
+    if game_col:
+        picks['Matchup']=picks[game_col].astype(str)
+    else:
+        home=picks.get('Home_Team_Norm',pd.Series('',index=picks.index)).astype(str)
+        away=picks.get('Away_Team_Norm',pd.Series('',index=picks.index)).astype(str)
+        picks['Matchup']=away+' @ '+home
+
+    picks['Pick']=picks.get('Outcome',pd.Series('—',index=picks.index)).astype(str)
+    picks['STAT Fair Line']=-pd.to_numeric(picks.get('NCAAF_Stat_Expected_Margin',pd.Series(np.nan,index=picks.index)),errors='coerce')
+    picks['Cover Prob']=picks['_pred']
+    picks['Break Even']=picks['_be']
+    picks['Edge']=picks['_edge']
+    picks['EV / $1']=picks['_ev']
+    picks['Line']=picks['_line']
+    picks['Odds']=picks['_odds']
+    picks['Book']=picks['_book']
+    picks['Quote Age Min']=(now-picks['_ts']).dt.total_seconds().div(60.0)
+    picks['Hours to Game']=(picks['Game_Start']-now).dt.total_seconds().div(3600.0)
+
+    # Research confirmation is informational only.
+    picks['Agreement']=picks.get('V13_Research_Agreement_Status',pd.Series('NEUTRAL',index=picks.index)).fillna('NEUTRAL').astype(str)
+    picks['Confirm']=pd.to_numeric(picks.get('V13_Research_Confirm_Count'),errors='coerce').fillna(0).astype(int)
+    picks['Conflict']=pd.to_numeric(picks.get('V13_Research_Conflict_Count'),errors='coerce').fillna(0).astype(int)
+
+    # Frozen discovered-system retest flag. This is a prospective research alert,
+    # never betting authority.
+    prev_margin=pd.to_numeric(picks.get('Prev_SU_Margin',pd.Series(np.nan,index=picks.index)),errors='coerce')
+    ats_loss_streak=pd.to_numeric(picks.get('ATS_Loss_Streak_Prior',pd.Series(np.nan,index=picks.index)),errors='coerce')
+    frozen_retest=picks['Line'].ge(10.0)&prev_margin.le(-14.0)&ats_loss_streak.ge(2.0)
+    picks['Frozen System']=np.where(frozen_retest,'+10 DOG / OFF 14+ LOSS / B2B ATS LOSSES','—')
+
+    def _signal_text(r):
+        vals=[]
+        if str(r.get('Frozen System','—')).strip() not in ('','—','nan','None'):
+            vals.append(str(r.get('Frozen System')))
+        for c,prefix in [('Pathi_Active_Text','Pathi'),('BigAl_Active_Text','Big Al')]:
+            v=str(r.get(c,'—') or '—').strip()
+            if v not in ('','—','nan','None'):
+                vals.append(f'{prefix}: {v}')
+        return ' | '.join(vals) if vals else '—'
+    picks['Systems']=picks.apply(_signal_text,axis=1)
+
+    shadow=(picks['Edge']>=0.025)&(picks['EV / $1']>0)&picks['_exec']
+    picks['Status']=np.where(shadow,'SHADOW 2.5% TRIGGER — BET CLOSED','PREDICTION ONLY — BET CLOSED')
+    picks.loc[~picks['_exec'],'Status']='PREDICTION ONLY — REFERENCE QUOTE'
+    picks['Probability Source']='V13.4.4 Frozen STAT'
+
+    picks['ET Date']=picks['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d')
+    picks['Game Time']=picks['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%a %I:%M %p')
+    dates=['All']+sorted(picks['ET Date'].dropna().unique().tolist())
+    selected_date=st.selectbox('Game date',dates,key='ncaaf-fast-date')
+    if selected_date!='All':
+        picks=picks[picks['ET Date']==selected_date].copy()
+
+    st.subheader('NCAAF — Frozen STAT Predictions')
+    st.caption('Fast production-candidate view: spreads only, one model-preferred side per game, current quote, frozen STAT probability. Rich-market diagnostics are intentionally not rendered.')
+
+    m1,m2,m3,m4=st.columns(4)
+    m1.metric('Upcoming games',int(len(picks)))
+    m2.metric('Shadow 2.5% triggers',int(((picks['Edge']>=0.025)&(picks['EV / $1']>0)&picks['_exec']).sum()))
+    m3.metric('Frozen-system alerts',int((picks['Frozen System']!='—').sum()))
+    m4.metric('Bet authority','CLOSED')
+
+    # Keep the main table intentionally small. No sparkline/history, rich-market
+    # feature columns, model-instance hashes, legacy champion columns or live-odds matrix.
+    picks=picks.sort_values(['Game_Start','Edge'],ascending=[True,False])
+    main=picks[['Game Time','Matchup','Pick','Line','Odds','Book','Cover Prob','STAT Fair Line','Break Even','Edge','EV / $1','Agreement','Systems','Status']].copy()
+    for c in ['Cover Prob','Break Even','Edge']:
+        main[c]=pd.to_numeric(main[c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
+    main['EV / $1']=pd.to_numeric(main['EV / $1'],errors='coerce').map(lambda x:f'{x:+.3f}' if pd.notna(x) else '—')
+    main['Line']=pd.to_numeric(main['Line'],errors='coerce').map(lambda x:f'{x:+.1f}' if pd.notna(x) else '—')
+    main['STAT Fair Line']=pd.to_numeric(main['STAT Fair Line'],errors='coerce').map(lambda x:f'{x:+.1f}' if pd.notna(x) else '—')
+    main['Odds']=pd.to_numeric(main['Odds'],errors='coerce').map(lambda x:f'{x:+.0f}' if pd.notna(x) else '—')
+    st.dataframe(main,use_container_width=True,hide_index=True)
+
+    if st.checkbox('Show research diagnostics',value=False,key='ncaaf-fast-research'):
+        research=picks[['Game Time','Matchup','Pick','Cover Prob','Agreement','Confirm','Conflict','Quote Age Min','Hours to Game']].copy()
+        calp=pd.to_numeric(picks.get('V13_Calibration_V2_Research_Prob',pd.Series(np.nan,index=picks.index)),errors='coerce')
+        cald=pd.to_numeric(picks.get('V13_Calibration_V2_Delta',pd.Series(np.nan,index=picks.index)),errors='coerce')
+        research['Calibration V2 Prob']=calp
+        research['Calibration V2 Delta']=cald
+        research['Calibration V2 Status']=picks.get('V13_Calibration_V2_Status',pd.Series('UNAVAILABLE',index=picks.index)).astype(str)
+        research['Pathi']=picks.get('Pathi_Active_Text',pd.Series('—',index=picks.index)).astype(str)
+        research['Big Al']=picks.get('BigAl_Active_Text',pd.Series('—',index=picks.index)).astype(str)
+        for c in ['Cover Prob','Calibration V2 Prob','Calibration V2 Delta']:
+            research[c]=pd.to_numeric(research[c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
+        research['Quote Age Min']=pd.to_numeric(research['Quote Age Min'],errors='coerce').round(1)
+        research['Hours to Game']=pd.to_numeric(research['Hours to Game'],errors='coerce').round(1)
+        st.dataframe(research,use_container_width=True,hide_index=True)
+
+    print(f"[V13.4.6-LEAN-FAST-UI] rows={len(picks)} spreads_only=TRUE one_side_per_game=TRUE rich_market_render=FALSE live_odds_matrix=FALSE shadow_triggers={int(shadow.sum())} frozen_system_alerts={int(frozen_retest.sum())} probability_source=V13_4_4_STAT_ONLY_FROZEN bet_authority=CLOSED")
+
 def render_scanner_tab(label, sport_key, container, force_reload=False):
 
     if st.session_state.get("pause_refresh_user", False) or st.session_state.get("pause_refresh_lock", False):
@@ -45970,6 +46264,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         return
     with container:
         st.subheader(f"📡 Scanning {label} Sharp Signals")
+        _ncaaf_fast_ui = str(label).upper().strip() == "NCAAF"
         # Inject JS patch to log InvalidCharacterError with class/id context (browser console)
         st.markdown("""
         <script>
@@ -46020,7 +46315,10 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         
         HOURS = 24
         
-        df_all_snapshots = get_recent_history(hours=HOURS, sport=label)
+        # V13.4.6: the NCAAF lean view does not need a second full-history query
+        # for legacy confidence trends/sparklines. The current sharp-move rows are
+        # already the authoritative scored feed for the fast prediction table.
+        df_all_snapshots = pd.DataFrame() if _ncaaf_fast_ui else get_recent_history(hours=HOURS, sport=label)
 
         # === 1) Load/cached sharp moves
         detection_key = f"sharp_moves:{label.upper()}:{HOURS}"
@@ -46092,14 +46390,25 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # BigAl_Active_Text survive even when older stored/scored rows omitted them.
         try:
             _ui_before = len(df_moves_raw)
-            df_moves_raw = attach_pathi_bigal_live_features(df_moves_raw, label)
+            _have_live_system_text = all(c in df_moves_raw.columns for c in ["Pathi_Active_Text","BigAl_Active_Text"])
+            if (not _ncaaf_fast_ui) or (not _have_live_system_text):
+                df_moves_raw = attach_pathi_bigal_live_features(df_moves_raw, label)
+                _sys_mode = "REBUILT"
+            else:
+                _sys_mode = "REUSED_SCORED_ROWS"
             if len(df_moves_raw) != _ui_before:
                 raise RuntimeError(f"UI system enrichment changed row count {_ui_before}->{len(df_moves_raw)}")
             _p_ui = int((df_moves_raw.get("Pathi_Active_Text", pd.Series("—", index=df_moves_raw.index)).astype(str) != "—").sum())
             _b_ui = int((df_moves_raw.get("BigAl_Active_Text", pd.Series("—", index=df_moves_raw.index)).astype(str) != "—").sum())
-            print(f"[UI-SYSTEM-CONTRACT] sport={label} pathi_text_rows={_p_ui} bigal_text_rows={_b_ui} rowcount=PASS")
+            print(f"[UI-SYSTEM-CONTRACT] sport={label} mode={_sys_mode} pathi_text_rows={_p_ui} bigal_text_rows={_b_ui} rowcount=PASS")
         except Exception as _ui_sys_err:
             st.warning(f"Pathi/Big Al UI enrichment unavailable: {_ui_sys_err}")
+
+        # V13.4.6 fast exit: NCAAF no longer builds the legacy rich-market table,
+        # trend/spark history, small-book liquidity panel, or secondary live-odds matrix.
+        if _ncaaf_fast_ui:
+            _render_ncaaf_fast_prediction_ui(df_moves_raw, label)
+            return
 
         # === 3) Load per-market models (BEFORE any sharp-scoring)
         market_list = ['spreads', 'totals', 'h2h']
@@ -46576,10 +46885,18 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                     _qq['_cons_edge']=pd.to_numeric(_qq.get('V13_Conservative_BreakEven_Edge'),errors='coerce')
                     _qq['_unc']=pd.to_numeric(_qq.get('V13_Uncertainty_Score'),errors='coerce')
                     _qq['_hours_to_game']=(pd.to_datetime(_qq.get('Game_Start'),errors='coerce',utc=True)-_now).dt.total_seconds().div(3600.0)
-                    _qq['_shadow_status']=np.where((_qq['_edge']>=0.01)&(_qq['_ev']>0)&(_qq['_cons_edge'].isna()|(_qq['_cons_edge']>0)), 'SHADOW LEAN', 'PASS')
+                    _qq['_stat_expected_margin']=pd.to_numeric(_qq.get('NCAAF_Stat_Expected_Margin'),errors='coerce')
+                    _qq['_stat_fair_line']=-_qq['_stat_expected_margin']
+                    _qq['_calv2_p']=pd.to_numeric(_qq.get('V13_Calibration_V2_Research_Prob'),errors='coerce')
+                    _qq['_calv2_delta']=pd.to_numeric(_qq.get('V13_Calibration_V2_Delta'),errors='coerce')
+                    _qq['_calv2_status']=_qq.get('V13_Calibration_V2_Status',pd.Series('UNAVAILABLE',index=_qq.index)).astype(str)
+                    _qq['_confirm']=pd.to_numeric(_qq.get('V13_Research_Confirm_Count'),errors='coerce')
+                    _qq['_conflict']=pd.to_numeric(_qq.get('V13_Research_Conflict_Count'),errors='coerce')
+                    _qq['_agreement']=_qq.get('V13_Research_Agreement_Status',pd.Series('NEUTRAL',index=_qq.index)).astype(str)
+                    _qq['_shadow_status']=np.where((_qq['_edge']>=0.025)&(_qq['_ev']>0), 'SHADOW 2.5% TRIGGER', 'NO SHADOW TRIGGER')
                     _id_cols=[c for c in ['V13_Model_Version','V13_Model_Instance_ID','V13_Artifact_SHA256','V13_Training_Run_ID','V13_Training_Cutoff_UTC','V13_Ledger_Status','V13_Ledger_Events_Attempted','V13_Ledger_Events_Inserted','V13_Settlement_Status'] if c in _qq.columns]
-                    _v13_shadow_quote_map=_qq[['Game_Key','Market','Outcome','Bookmaker','_line','_odds','_v13_p','_champ_p','_be','_edge','_ev','_cons_p','_cons_edge','_unc','_quote_age_min','_hours_to_game','_shadow_status','Snapshot_Timestamp']+_id_cols].rename(columns={
-                        'Bookmaker':'V13 Best Tracked Book','_line':'V13 Best Line','_odds':'V13 Best Odds','_v13_p':'V13 Shadow Prob','_champ_p':'Champion Prob','_be':'V13 Break Even','_edge':'V13 Raw Edge','_ev':'V13 EV / $1','_cons_p':'V13 Conservative Prob','_cons_edge':'V13 Conservative Edge','_unc':'V13 Uncertainty','_quote_age_min':'V13 Quote Age Min','_hours_to_game':'Hours to Game','_shadow_status':'V13 Shadow Status','Snapshot_Timestamp':'V13 Quote Timestamp',
+                    _v13_shadow_quote_map=_qq[['Game_Key','Market','Outcome','Bookmaker','_line','_odds','_v13_p','_champ_p','_be','_edge','_ev','_cons_p','_cons_edge','_unc','_stat_fair_line','_calv2_p','_calv2_delta','_calv2_status','_confirm','_conflict','_agreement','_quote_age_min','_hours_to_game','_shadow_status','Snapshot_Timestamp']+_id_cols].rename(columns={
+                        'Bookmaker':'V13 Best Tracked Book','_line':'V13 Best Line','_odds':'V13 Best Odds','_v13_p':'V13 Shadow Prob','_champ_p':'Champion Prob','_be':'V13 Break Even','_edge':'V13 Raw Edge','_ev':'V13 EV / $1','_cons_p':'V13 Conservative Prob','_cons_edge':'V13 Conservative Edge','_unc':'V13 Uncertainty','_stat_fair_line':'STAT Fair Line','_calv2_p':'Calibration V2 Research Prob','_calv2_delta':'Calibration V2 Delta','_calv2_status':'Calibration V2 Status','_confirm':'Research Confirm Count','_conflict':'Research Conflict Count','_agreement':'Research Agreement','_quote_age_min':'V13 Quote Age Min','_hours_to_game':'Hours to Game','_shadow_status':'V13 Shadow Status','Snapshot_Timestamp':'V13 Quote Timestamp',
                         'V13_Model_Version':'V13 Model Version','V13_Model_Instance_ID':'V13 Model Instance','V13_Artifact_SHA256':'V13 Artifact SHA256',
                         'V13_Training_Run_ID':'V13 Training Run','V13_Training_Cutoff_UTC':'V13 Training Cutoff',
                         'V13_Ledger_Status':'V13 Ledger Status','V13_Ledger_Events_Attempted':'V13 Ledger Events Attempted','V13_Ledger_Events_Inserted':'V13 Ledger Events Inserted','V13_Settlement_Status':'V13 Settlement Status'
@@ -46785,7 +47102,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 'V13_Market_Overlay_Active','V13_Pathi_Overlay_Active','V13_BigAl_Overlay_Active',
                 'V13_Market_Overlay_Weight','V13_Pathi_Overlay_Weight','V13_BigAl_Overlay_Weight','V13_Market_Overlay_Regime','V13_Pathi_Overlay_Regime','V13_BigAl_Overlay_Regime',
                 'V12_Legacy_Model_Prob','V13_Cover_Prob',
-                'Champion Prob','V13 Shadow Prob','V13 Conservative Prob','V13 Uncertainty',
+                'Champion Prob','V13 Shadow Prob','V13 Conservative Prob','V13 Uncertainty','STAT Fair Line','Calibration V2 Research Prob','Calibration V2 Delta','Calibration V2 Status','Research Confirm Count','Research Conflict Count','Research Agreement',
                 'V13 Best Tracked Book','V13 Best Line','V13 Best Odds','V13 Break Even','V13 Raw Edge','V13 Conservative Edge','V13 EV / $1','V13 Quote Age Min','Hours to Game','V13 Shadow Status','V13 Quote Timestamp','V13 Model Version','V13 Model Instance','V13 Artifact SHA256','V13 Training Run','V13 Training Cutoff','V13 Ledger Status','V13 Ledger Events Attempted','V13 Ledger Events Inserted','V13 Settlement Status','V13 State Authority','V13 Formal Bet Authority',
                 'Game_Key','Snapshot_Timestamp','Timing_Stage','Timing_Opportunity_Score',
                 # Optional backend estimates are carried when available, but are not
@@ -46862,10 +47179,11 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             def _ui_probability_source_row(r):
                 _scoring = str(r.get('Scoring_Market', '') or '').strip().lower()
                 _market = str(r.get('Market', '') or '').strip().lower()
+                if _market in ('spread','spreads') and pd.notna(r.get('V13 Shadow Prob', np.nan)):
+                    return 'V13.4.4 Frozen STAT'
                 if 'v13_promoted' in _scoring:
                     _ver = str(r.get('V13_Version', '') or '').strip()
-                    # Keep the table compact even when V13_Version contains a dated build label.
-                    return 'V13.2.0' if '13.2' in _ver else ('V13.1.2' if ('13.1.2' in _ver or '13.1.1' in _ver or '13.1.0' in _ver or not _ver) else _ver)
+                    return _ver or 'V13'
                 if _market in ('spread', 'spreads') and pd.notna(r.get('V12_Legacy_Model_Prob', np.nan)):
                     return 'V12 Champion'
                 return 'Current Champion'
@@ -46933,7 +47251,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 'BigAl_Active_Text': 'first',
                 'Confidence Spark':'first',
             }
-            for _c in ['Champion Prob','V13 Shadow Prob','V13 Conservative Prob','V13 Uncertainty','V13 Best Tracked Book','V13 Best Line','V13 Best Odds','V13 Break Even','V13 Raw Edge','V13 Conservative Edge','V13 EV / $1','V13 Quote Age Min','Hours to Game','V13 Shadow Status','V13 Quote Timestamp','V13 Model Version','V13 Model Instance','V13 Artifact SHA256','V13 Training Run','V13 Training Cutoff','V13 Ledger Status','V13 Ledger Events Attempted','V13 Ledger Events Inserted','V13 Settlement Status','V13 State Authority','V13 Formal Bet Authority']:
+            for _c in ['Champion Prob','V13 Shadow Prob','V13 Conservative Prob','V13 Uncertainty','STAT Fair Line','Calibration V2 Research Prob','Calibration V2 Delta','Calibration V2 Status','Research Confirm Count','Research Conflict Count','Research Agreement','V13 Best Tracked Book','V13 Best Line','V13 Best Odds','V13 Break Even','V13 Raw Edge','V13 Conservative Edge','V13 EV / $1','V13 Quote Age Min','Hours to Game','V13 Shadow Status','V13 Quote Timestamp','V13 Model Version','V13 Model Instance','V13 Artifact SHA256','V13 Training Run','V13 Training Cutoff','V13 Ledger Status','V13 Ledger Events Attempted','V13 Ledger Events Inserted','V13 Settlement Status','V13 State Authority','V13 Formal Bet Authority']:
                 if _c in filtered_df.columns:
                     _summary_agg[_c]='first'
             # Fair_Line / reliability-adjusted threshold remain optional.  Edge, EV and
@@ -47006,6 +47324,24 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             summary_grouped['EV / $1'] = _ev.apply(lambda x: f"{x:+.3f}" if pd.notna(x) else "—")
             summary_grouped['Fair Odds'] = _fair_odds.apply(lambda x: f"{x:+.0f}" if pd.notna(x) else "—")
 
+            # V13.4.5 UI contract: Prediction quality and betting authorization are
+            # separate concepts.  The frozen STAT prediction may be displayed even
+            # while formal betting authority remains closed.
+            _v13_pred=pd.to_numeric(summary_grouped.get('V13 Shadow Prob',pd.Series(np.nan,index=summary_grouped.index)),errors='coerce')
+            _v13_be=pd.to_numeric(summary_grouped.get('V13 Break Even',pd.Series(np.nan,index=summary_grouped.index)),errors='coerce')
+            _v13_edge=pd.to_numeric(summary_grouped.get('V13 Raw Edge',pd.Series(np.nan,index=summary_grouped.index)),errors='coerce')
+            summary_grouped['Prediction Prob']=_v13_pred.where(_v13_pred.notna(),_p_model)
+            summary_grouped['Market Break Even']=_v13_be.where(_v13_be.notna(),_p_break)
+            summary_grouped['Prediction Edge']=_v13_edge.where(_v13_edge.notna(),_edge)
+            summary_grouped['Prediction Status']=np.where(_v13_pred.notna(),'FROZEN STAT · SHADOW','CURRENT MODEL')
+            _auth=summary_grouped.get('V13 Formal Bet Authority',pd.Series('',index=summary_grouped.index)).astype(str)
+            summary_grouped['Bet Authorization']=np.where(
+                _v13_pred.notna(),
+                np.where(_auth.str.contains('LOCKED',case=False,na=False),'CLOSED · prospective validation required','CLOSED · no V13 bet authority'),
+                'CHAMPION POLICY'
+            )
+            print(f"[V13.4.5-UI-PREDICTION-BET-SEPARATION] rows={len(summary_grouped)} v13_prediction_rows={int(_v13_pred.notna().sum())} contract=PREDICTION_DISPLAY_INDEPENDENT_FROM_BET_AUTHORITY")
+
             # Preserve the existing Fair Line display when the backend supplies a true
             # fair spread/total.  For H2H the model probability itself implies fair ML
             # odds, so use Fair Odds even with an older backend.
@@ -47067,16 +47403,14 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             # === Final Column Order for Display
             view_cols = [
                 'Date + Time (EST)', 'Matchup', 'Market', 'Outcome',
-                'V13 Shadow Status','V13 Best Tracked Book','V13 Best Line','V13 Best Odds',
-                'Champion Prob','V13 Shadow Prob','V13 Conservative Prob','V13 Break Even',
-                'V13 Raw Edge','V13 Conservative Edge','V13 EV / $1','V13 Uncertainty','V13 Quote Age Min','Hours to Game',
-                'V13 Model Instance','V13 Ledger Status','V13 Ledger Events Inserted','V13 Settlement Status',
-                'V13 Formal Bet Authority','V13 State Authority',
-                'Bet/Pass', 'Edge', 'EV / $1', 'Fair Odds', 'Fair Line',
-                'Rec Line', 'Rec Odds', 'Sharp Line', 'Sharp Odds', 'Rec Move', 'Sharp Move',
-                'Model Prob', 'Probability Source', 'V13 Overlays', 'Confidence Tier', 'Timing_Stage',
-                'Pathi Active', 'Big Al Active',
-                'Why Model Likes It', 'Confidence Trend','Confidence Spark', 'Tier Δ', 
+                'Prediction Prob','STAT Fair Line','Market Break Even','Prediction Edge','Prediction Status','Bet Authorization','Probability Source',
+                'Calibration V2 Research Prob','Calibration V2 Delta','Calibration V2 Status','Research Confirm Count','Research Conflict Count','Research Agreement',
+                'V13 Best Tracked Book','V13 Best Line','V13 Best Odds','V13 EV / $1','V13 Uncertainty','V13 Quote Age Min','Hours to Game','V13 Shadow Status',
+                'Pathi Active','Big Al Active','Why Model Likes It',
+                'Champion Prob','V13 Conservative Prob','V13 Conservative Edge',
+                'Rec Line','Rec Odds','Sharp Line','Sharp Odds','Rec Move','Sharp Move',
+                'Confidence Tier','Timing_Stage','Confidence Trend','Confidence Spark','Tier Δ',
+                'V13 Model Instance','V13 Ledger Status','V13 Settlement Status','V13 State Authority'
             ]
             view_cols=[c for c in view_cols if c in summary_grouped.columns]
             summary_grouped = summary_grouped.sort_values(
@@ -47084,14 +47418,14 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 ascending=[True, True, True]
             )
             summary_grouped['Model Prob'] = summary_grouped['Model Prob'].apply(lambda x: f"{round(x * 100, 1)}%" if pd.notna(x) else "—")
-            for _pc in ['Champion Prob','V13 Shadow Prob','V13 Conservative Prob','V13 Break Even','V13 Raw Edge','V13 Conservative Edge','V13 Uncertainty']:
+            for _pc in ['Champion Prob','V13 Shadow Prob','V13 Conservative Prob','V13 Break Even','V13 Raw Edge','V13 Conservative Edge','V13 Uncertainty','Prediction Prob','Market Break Even','Prediction Edge','Calibration V2 Research Prob','Calibration V2 Delta']:
                 if _pc in summary_grouped.columns:
                     summary_grouped[_pc]=pd.to_numeric(summary_grouped[_pc],errors='coerce').apply(lambda x: f"{x*100:.1f}%" if pd.notna(x) else '—')
             if 'V13 EV / $1' in summary_grouped.columns:
                 summary_grouped['V13 EV / $1']=pd.to_numeric(summary_grouped['V13 EV / $1'],errors='coerce').apply(lambda x:f"{x:+.3f}" if pd.notna(x) else '—')
             if 'V13 Best Odds' in summary_grouped.columns:
                 summary_grouped['V13 Best Odds']=pd.to_numeric(summary_grouped['V13 Best Odds'],errors='coerce').apply(lambda x:f"{x:+.0f}" if pd.notna(x) else '—')
-            for _nc in ['V13 Best Line','V13 Quote Age Min','Hours to Game']:
+            for _nc in ['V13 Best Line','STAT Fair Line','V13 Quote Age Min','Hours to Game']:
                 if _nc in summary_grouped.columns:
                     summary_grouped[_nc]=pd.to_numeric(summary_grouped[_nc],errors='coerce').round(1)
     
@@ -47104,7 +47438,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             # === Final Output
             st.subheader(f"📊 Sharp vs Rec Book Summary Table – {label}")
             if str(label).upper().strip()=="NCAAF":
-                st.warning("V13.3.8 is FORWARD SHADOW only. V12 remains Champion. Predictions are written by the backend to an append-only BigQuery ledger keyed to the exact artifact SHA/model instance; SHADOW LEAN is not live BET authority. Promotion requires prospective unseen-game evidence and tracked-close CLV.")
+                st.warning("V13.4.4 Frozen STAT is the active V13 prediction source in shadow. Prediction quality and betting authority are shown separately: formal V13 betting authority remains CLOSED pending prospective unseen-game validation. CALIBRATION_V2 is research-only and does not alter the displayed frozen STAT probability or betting decision.")
                 try:
                     from utils import read_ncaaf_v13_forward_shadow_summary as _v13392_read_shadow_summary
                     _fs=_v13392_read_shadow_summary(days=60)
