@@ -98,9 +98,9 @@ SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 # V13.3.11 forward-shadow ledger.  These tables are append-only research
 # evidence.  The exact fitted artifact identity (SHA256), not the human version
 # string, is the primary model-instance key.
-NCAAF_V13_CODE_VERSION = "V13.4.3"
-V133_DEPLOY_BUILD_ID = "2026-09-23-v13.4.3-stat-contract-push-clv-miner-v3-1"
-V1337_SOURCE_TAG = "utils-v13.4.3-stat-contract-push-clv-miner-v3"
+NCAAF_V13_CODE_VERSION = "V13.4.4"
+V133_DEPLOY_BUILD_ID = "2026-09-23-v13.4.4-stat-source-universe-calibration-forward-retest-1"
+V1337_SOURCE_TAG = "utils-v13.4.4-stat-source-universe-calibration-forward-retest"
 NCAAF_V13_FORWARD_PREDICTIONS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_predictions"
 NCAAF_V13_FORWARD_RESULTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_results"
 NCAAF_V13_FORWARD_LEDGER_VERSION = "2026-09-20-v13.3.5-immutable-artifact-aware-forward-ledger-v1"
@@ -15421,8 +15421,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-23-v13.4.3-stat-contract-push-clv-miner-v3"
-NCAAF_V13_HOTFIX = "V13_4_3__ELIGIBLE_STAT_REPLAY_CONTRACT__FROZEN_2P5_THRESHOLD__SOURCE_PUSH_NA__EXACT_PAIRED_CLV__SYSTEM_MINER_V3__STAT_ONLY_FREEZE"
+NCAAF_V13_VERSION = "2026-09-23-v13.4.4-stat-source-universe-calibration-forward-retest"
+NCAAF_V13_HOTFIX = "V13_4_4__TRUE_STAT_SOURCE_UNIVERSE__EXCLUSION_REASON_AUDIT__V13_CALIBRATION_PATH__FROZEN_2P5__SYSTEM_FORWARD_RETEST__STAT_ONLY_FREEZE"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -17177,7 +17177,7 @@ def _v1336_runtime_stat_delta_logit(rows: pd.DataFrame):
 
 
 def _v13310_runtime_stat_live_point_edge(rows: pd.DataFrame):
-    """V13.4.3 canonical STAT point edge for replay and live scoring.
+    """V13.4.4 canonical STAT point edge for replay and live scoring.
 
     Historical replay must use the leakage-safe season-forward OOF point edge that
     was frozen during training.  Live/current rows use the deployable STAT expected
@@ -17247,11 +17247,11 @@ def _v13310_runtime_brain_input_audit(rows: pd.DataFrame, X: pd.DataFrame, reque
         z=pd.to_numeric(X["Stat_PointEdge_Scaled"],errors="coerce").fillna(0.0).to_numpy(dtype=float)
         nz=int(np.sum(np.abs(z)>1e-12))
         logging.info(
-            "[V13.4.3-RUNTIME-STAT-PARITY] source_available_rows=%d historical_oof_rows=%d live_source_rows=%d signal_nonzero_rows=%d expected_margin_rows=%d spread_rows=%d contract=HISTORICAL_OOF_OR_LIVE_EXPECTED_MARGIN_PLUS_SAME_ROW_PREGAME_SPREAD_DIV14",
+            "[V13.4.4-RUNTIME-STAT-PARITY] source_available_rows=%d historical_oof_rows=%d live_source_rows=%d signal_nonzero_rows=%d expected_margin_rows=%d spread_rows=%d contract=HISTORICAL_OOF_OR_LIVE_EXPECTED_MARGIN_PLUS_SAME_ROW_PREGAME_SPREAD_DIV14",
             src_n,int(hist_src.sum()),int(live_src.sum()),nz,int(np.isfinite(exp).sum()),int(np.isfinite(spread).sum())
         )
         if src_n>=20 and nz==0:
-            raise ValueError(f"V13.4.3 Stat runtime parity failure: {src_n} source-available rows but Stat_PointEdge_Scaled is all zero")
+            raise ValueError(f"V13.4.4 Stat runtime parity failure: {src_n} source-available rows but Stat_PointEdge_Scaled is all zero")
     return True
 
 
@@ -17685,7 +17685,7 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
 
     resolver=overlay.get("probability_resolver") or {}
     _resolver_mode=str(resolver.get("mode",""))
-    _v1342_stat_only_mode=(_resolver_mode in {"V13_4_3_STAT_ONLY_FROZEN","V13_4_2_STAT_ONLY_FROZEN","V13_4_1_STAT_ONLY_FROZEN"})
+    _v1342_stat_only_mode=(_resolver_mode in {"V13_4_4_STAT_ONLY_FROZEN","V13_4_3_STAT_ONLY_FROZEN","V13_4_2_STAT_ONLY_FROZEN","V13_4_1_STAT_ONLY_FROZEN"})
     resolver_active=bool(resolver.get("gate_pass",False) and (_v1342_stat_only_mode or _resolver_mode in {"V13_3_11_NEUTRAL_BRAIN_STACK","V13_3_10_NEUTRAL_BRAIN_STACK","V13_3_9_NEUTRAL_BRAIN_STACK","V13_3_7_NEUTRAL_BRAIN_STACK"} or bool(resolver.get("anchored_residual",False)) or resolver.get("model") is not None))
     additive_allowed=bool(overlay.get("additive_stack_fallback_gate_pass",overlay.get("full_stack_activation_pass",False)))
     if _v1342_stat_only_mode:
@@ -17698,7 +17698,7 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
             if _v1342_stat_only_mode:
                 _required=list(resolver.get("feature_names") or ["Stat_PointEdge_Scaled"])
                 if _required!=["Stat_PointEdge_Scaled"]:
-                    raise ValueError(f"V13.4.3 frozen resolver requires only Stat_PointEdge_Scaled, got {_required}")
+                    raise ValueError(f"V13.4.4 frozen resolver requires only Stat_PointEdge_Scaled, got {_required}")
                 # Do not let the generic brain matrix convert unavailable STAT rows
                 # to a neutral zero logit.  Missing STAT authority must remain NaN.
                 _raw_stat_edge=_v13310_runtime_stat_live_point_edge(rows)
@@ -17712,9 +17712,9 @@ def _apply_v13_specialist_overlays_runtime(rows: pd.DataFrame, base_prob, overla
                 _exp=pd.to_numeric(rows.get("NCAAF_Stat_Expected_Margin",pd.Series(np.nan,index=rows.index)),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
                 _act=pd.to_numeric(rows.get("NCAAF_Stat_Active",pd.Series(0,index=rows.index)),errors="coerce").fillna(0).to_numpy(dtype=float)
                 _live_src=(~_hist_src)&(_act>=.5)&np.isfinite(_exp)&_ok
-                logging.info("[V13.4.3-RUNTIME-STAT-COVERAGE] rows=%d scored=%d coverage=%.1f%% historical_oof=%d live_deploy=%d",n,int(_ok.sum()),100.0*float(_ok.mean()) if n else 0.0,int((_hist_src&_ok).sum()),int(_live_src.sum()))
+                logging.info("[V13.4.4-RUNTIME-STAT-COVERAGE] rows=%d scored=%d coverage=%.1f%% historical_oof=%d live_deploy=%d",n,int(_ok.sum()),100.0*float(_ok.mean()) if n else 0.0,int((_hist_src&_ok).sum()),int(_live_src.sum()))
                 if not _ok.any():
-                    raise ValueError("no finite V13.4.3 Stat-only resolver inputs")
+                    raise ValueError("no finite V13.4.4 Stat-only resolver inputs")
                 final=np.full(n,np.nan,dtype=float)
                 final[_ok]=np.clip(_v13_overlay_sigmoid(_x[_ok]),0.01,0.99)
                 _diag_stages["stat_only"]=np.asarray(final,dtype=float).copy()
@@ -18701,7 +18701,7 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         eligible=(np.isfinite(prob) if _v1341_stat_runtime else ((np.isfinite(core_prob)&np.isfinite(prob)) if _is_v13232 else ((np.isfinite(own_prob)&np.isfinite(prob)) if _is_v13227 else ((np.isfinite(core_prob)&np.isfinite(prob)) if _is_v131 else (np.isfinite(raw_fair_side)&np.isfinite(offered_margin))))))
         if _v1341_stat_runtime:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
-            status=np.where(eligible,"V13_4_3_STAT_ONLY_FROZEN_SHADOW","V13_4_3_STAT_ONLY_RUNTIME_UNAVAILABLE")
+            status=np.where(eligible,"V13_4_4_STAT_ONLY_FROZEN_SHADOW","V13_4_4_STAT_ONLY_RUNTIME_UNAVAILABLE")
         elif _is_v13232:
             _early=np.isin(maturity_bucket,["FIRST_TWO_GAMES"])
             _oa=bool((bundle.get("own_fair_alpha_expert") or {}).get("gate_pass",False))
@@ -22002,7 +22002,7 @@ def predict_ncaaf_v13_production(rows: pd.DataFrame, bundle: dict, core_prob=Non
         'authority_route':str(out.get('V13_Probability_Authority_Route',pd.Series(['CORE_ONLY'])).iloc[0]) if n else 'CORE_ONLY',
         'pair_coherence_applied_rows':int(pd.to_numeric(out.get('V13_Pair_Coherence_Applied',pd.Series(np.zeros(n),index=out.index)),errors='coerce').fillna(0).sum()),
         'pair_coherence_max_adjustment':float(pd.to_numeric(out.get('V13_Pair_Coherence_Adjustment',pd.Series(np.zeros(n),index=out.index)),errors='coerce').fillna(0).max()) if n else 0.0,
-        'canonical_inference_graph':'UTILS_RUNTIME_DUAL_SOURCE_REPLAY_LIVE_V13_4_3_STAT_ONLY_FROZEN_RESOLVER',
+        'canonical_inference_graph':'UTILS_RUNTIME_DUAL_SOURCE_REPLAY_LIVE_V13_4_4_STAT_ONLY_FROZEN_RESOLVER',
         'canonical_fallback_used':False,
     }
     return (prob,info) if return_stages else prob
