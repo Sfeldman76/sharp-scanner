@@ -1,4 +1,4 @@
-V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.4.3-stat-contract-push-clv-miner-v3"
+V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.4.4-stat-source-universe-calibration-forward-retest"
 
 from sharp_line_dashboard import (
     train_with_champion_wrapper,
