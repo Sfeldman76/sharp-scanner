@@ -99,8 +99,8 @@ SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 # evidence.  The exact fitted artifact identity (SHA256), not the human version
 # string, is the primary model-instance key.
 NCAAF_V13_CODE_VERSION = "V13.4.4"
-V133_DEPLOY_BUILD_ID = "2026-09-23-v13.4.4-stat-source-universe-calibration-forward-retest-1"
-V1337_SOURCE_TAG = "utils-v13.4.4-stat-source-universe-calibration-forward-retest"
+V133_DEPLOY_BUILD_ID = "2026-09-23-v13.4.6-frozen-stat-lean-fast-ui-1"
+V1337_SOURCE_TAG = "utils-v13.4.6-frozen-stat-lean-fast-ui"
 NCAAF_V13_FORWARD_PREDICTIONS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_predictions"
 NCAAF_V13_FORWARD_RESULTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_results"
 NCAAF_V13_FORWARD_LEDGER_VERSION = "2026-09-20-v13.3.5-immutable-artifact-aware-forward-ledger-v1"
@@ -15421,8 +15421,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-23-v13.4.4-stat-source-universe-calibration-forward-retest"
-NCAAF_V13_HOTFIX = "V13_4_4__TRUE_STAT_SOURCE_UNIVERSE__EXCLUSION_REASON_AUDIT__V13_CALIBRATION_PATH__FROZEN_2P5__SYSTEM_FORWARD_RETEST__STAT_ONLY_FREEZE"
+NCAAF_V13_VERSION = "2026-09-23-v13.4.6-frozen-stat-lean-fast-ui"
+NCAAF_V13_HOTFIX = "V13_4_6__FROZEN_STAT_UNCHANGED__LEAN_FAST_NCAAF_UI__SPREADS_ONLY__ONE_ROW_PER_GAME__NO_RICH_MARKET_RENDER__CALIBRATION_V2_RESEARCH_ONLY"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
@@ -17577,6 +17577,47 @@ def _v13233_runtime_num_first(df: pd.DataFrame,*names):
     return s
 
 
+
+def _v1345_runtime_calibration_v2_feature_frame(rows: pd.DataFrame, base_prob):
+    d=rows.reset_index(drop=True); p=np.asarray(base_prob,dtype=float).reshape(-1)
+    p=np.clip(p,1e-6,1-1e-6); z=np.log(p/(1.0-p))
+    def _num(*names):
+        s=pd.Series(np.nan,index=d.index,dtype='float64')
+        for c in names:
+            if c in d.columns:
+                q=pd.to_numeric(d[c],errors='coerce'); s=s.where(s.notna(),q)
+        return s.to_numpy(dtype=float,na_value=np.nan)
+    spread=_num('Value','Spread_Value','Current_Spread','Outcome_Market_Spread')
+    total=_num('Current_Total','Total_Value','Total_Game','Opening_Total')
+    games=_num('NCAAF_Stat_Current_Season_Games','Team_Games_Prior','Cum_Games_Prior')
+    spread_scale=np.where(np.isfinite(spread),np.clip(np.abs(spread)/14.0,0.0,2.0),0.0)
+    total_center=np.where(np.isfinite(total),np.clip((total-50.0)/20.0,-1.5,1.5),0.0)
+    early=np.where(np.isfinite(games),(games<4.0).astype(float),0.0)
+    X=np.column_stack([z,z*spread_scale,z*total_center,z*early]).astype(float)
+    names=['BASE_LOGIT','BASE_LOGIT_X_SPREAD_ABS','BASE_LOGIT_X_TOTAL_CENTER','BASE_LOGIT_X_EARLY_SEASON']
+    return X,names
+
+
+def _v1345_runtime_calibration_v2(rows: pd.DataFrame, base_prob, bundle: dict):
+    n=len(rows); out=np.full(n,np.nan,dtype=float)
+    rec=(((bundle.get('specialist_overlays') or {}).get('calibration_v2_challenger') or {}) if isinstance(bundle,dict) else {})
+    status=str(rec.get('status','UNAVAILABLE'))
+    if not bool(rec.get('fit_ok',False)):
+        return out,{'status':status,'authority':0,'available':False}
+    try:
+        X,names=_v1345_runtime_calibration_v2_feature_frame(rows,base_prob)
+        if list(rec.get('feature_names') or [])!=names:
+            raise ValueError('feature_contract_mismatch')
+        co=np.asarray(rec.get('coefficients') or [],dtype=float).reshape(-1)
+        if len(co)!=X.shape[1]: raise ValueError('coefficient_count_mismatch')
+        z=X.dot(co)+float(rec.get('intercept',0.0) or 0.0)
+        q=1.0/(1.0+np.exp(-np.clip(z,-30,30)))
+        ok=np.isfinite(np.asarray(base_prob,dtype=float)); out[ok]=np.clip(q[ok],0.01,0.99)
+        return out,{'status':status,'authority':0,'available':True,'research_gate_pass':bool(rec.get('research_gate_pass',False))}
+    except Exception as e:
+        logging.warning('V13.4.5 calibration V2 research runtime unavailable: %s',e)
+        return out,{'status':'RUNTIME_ERROR_FAIL_CLOSED','authority':0,'available':False,'error':f'{type(e).__name__}:{e}'}
+
 def _v13233_runtime_common_market_features(df: pd.DataFrame):
     x=pd.DataFrame(index=df.index)
     op=_v13233_runtime_num_first(df,"Opening_Spread","Consensus_Open_Spread","First_Line_Value","Open_Value","Opening_Line")
@@ -18737,6 +18778,44 @@ def apply_ncaaf_v13_shadow(rows: pd.DataFrame, bundle: dict):
         out["V13_Formal_Bet_Authority"]=("LOCKED_PENDING_PROSPECTIVE_VALIDATION" if _coh_gate else "LOCKED_PROBABILITY_COHERENCE_GATE")
         out["V13_State_Authority"]="FORWARD_SHADOW__TRAINED_ON_COMPACT_FINAL_STATE"
         out["V13_Prospective_Promotion_Required"]=1
+        # V13.4.5 CALIBRATION_V2 is an observational challenger only.  It is
+        # deliberately excluded from V13_Cover_Prob, EV, bet policy and promotion.
+        _cv2_prob,_cv2_info=_v1345_runtime_calibration_v2(out,prob,bundle)
+        out["V13_Calibration_V2_Research_Prob"]=np.asarray(_cv2_prob,dtype="float32")
+        out["V13_Calibration_V2_Delta"]=np.asarray(_cv2_prob-np.asarray(prob,dtype=float),dtype="float32")
+        out["V13_Calibration_V2_Status"]=str(_cv2_info.get("status","UNAVAILABLE"))
+        out["V13_Calibration_V2_Authority"]=np.int8(0)
+
+        # Research-only confirmation/conflict counts.  These never change the
+        # frozen STAT probability; they simply expose whether separate research
+        # lanes point in the same direction for UI/prospective analysis.
+        _stat_dir=np.sign(np.asarray(prob,dtype=float)-0.5)
+        _confirm=np.zeros(n,dtype=np.int16); _conflict=np.zeros(n,dtype=np.int16)
+        _research_lanes=[]
+        try: _research_lanes.append(np.asarray(_common_prob,dtype=float))
+        except Exception: pass
+        try: _research_lanes.append(np.asarray(own_prob,dtype=float))
+        except Exception: pass
+        for _rp in _research_lanes:
+            if len(_rp)!=n: continue
+            _valid=np.isfinite(_rp)&(np.abs(_rp-0.5)>=0.01)&(_stat_dir!=0)
+            _rd=np.sign(_rp-0.5)
+            _confirm += (_valid&(_rd==_stat_dir)).astype(np.int16)
+            _conflict += (_valid&(_rd==-_stat_dir)).astype(np.int16)
+        for _fam in ("Pathi","BigAl"):
+            _dd=_overlay_details.get(_fam) or {}
+            _ap=np.asarray(_dd.get("active",np.zeros(n)),dtype=float)>0
+            _rp=np.asarray(_dd.get("prob",np.full(n,np.nan)),dtype=float)
+            if len(_rp)!=n: continue
+            _valid=_ap&np.isfinite(_rp)&(np.abs(_rp-0.5)>=0.01)&(_stat_dir!=0)
+            _rd=np.sign(_rp-0.5)
+            _confirm += (_valid&(_rd==_stat_dir)).astype(np.int16)
+            _conflict += (_valid&(_rd==-_stat_dir)).astype(np.int16)
+        _agree=np.where((_confirm>=2)&(_conflict==0),'CONFIRMED',np.where((_conflict>=2)&(_confirm==0),'CONFLICTED',np.where((_confirm>0)&(_conflict>0),'MIXED','NEUTRAL')))
+        out["V13_Research_Confirm_Count"]=_confirm.astype("int8")
+        out["V13_Research_Conflict_Count"]=_conflict.astype("int8")
+        out["V13_Research_Agreement_Status"]=_agree.astype(object)
+        out["V13_Research_Agreement_Authority"]=np.int8(0)
         out["V13_Cover_Prob"]=prob.astype("float32")
         out["V13_Candidate_Production_Prob"]=prob.astype("float32")
         out["V13_BreakEven_Prob"]=be.astype("float32")
