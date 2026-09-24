@@ -99,8 +99,8 @@ SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 # evidence.  The exact fitted artifact identity (SHA256), not the human version
 # string, is the primary model-instance key.
 NCAAF_V13_CODE_VERSION = "V13.4.4"
-V133_DEPLOY_BUILD_ID = "2026-09-23-v13.4.7-live-shadow-bets-fast-ui-1"
-V1337_SOURCE_TAG = "utils-v13.4.7-live-shadow-bets-fast-ui"
+V133_DEPLOY_BUILD_ID = "2026-09-24-v13.5.0-three-market-shadow-ui-1"
+V1337_SOURCE_TAG = "utils-v13.5.0-three-market-shadow-ui"
 NCAAF_V13_FORWARD_PREDICTIONS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_predictions"
 NCAAF_V13_FORWARD_RESULTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_results"
 NCAAF_V13_FORWARD_LEDGER_VERSION = "2026-09-20-v13.3.5-immutable-artifact-aware-forward-ledger-v1"
@@ -15421,7 +15421,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-23-v13.4.7-live-shadow-bets-fast-ui"
+NCAAF_V13_VERSION = "2026-09-24-v13.5.0-three-market-shadow-ui"
 NCAAF_V13_HOTFIX = "V13_4_6__FROZEN_STAT_UNCHANGED__LEAN_FAST_NCAAF_UI__SPREADS_ONLY__ONE_ROW_PER_GAME__NO_RICH_MARKET_RENDER__CALIBRATION_V2_RESEARCH_ONLY"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -16205,6 +16205,70 @@ def _ncaaf_stat_fit_models_for_rows(df, margin_feature_cols, total_feature_cols,
     return mm,tm
 
 
+
+
+def _v1350_binary_calibration_metrics(y, p):
+    """Compact calibration diagnostics for the new H2H/TOTAL shadow siblings.
+
+    Research/monitoring only. Nothing here can alter the frozen spread probability.
+    """
+    yy=np.asarray(y,dtype=float); pp=np.asarray(p,dtype=float)
+    ok=np.isfinite(yy)&np.isfinite(pp)
+    yy=yy[ok].astype(int); pp=np.clip(pp[ok],1e-6,1-1e-6)
+    out={"n":int(len(yy)),"ece":np.nan,"calibration_intercept":np.nan,"calibration_slope":np.nan}
+    if len(yy)<20 or np.unique(yy).size<2:
+        return out
+    edges=np.linspace(0.0,1.0,11); ece=0.0
+    for i in range(10):
+        hi=edges[i+1]+(1e-12 if i==9 else 0.0)
+        m=(pp>=edges[i])&(pp<hi)
+        if m.any():
+            ece += float(m.mean())*abs(float(pp[m].mean())-float(yy[m].mean()))
+    out["ece"]=float(ece)
+    if len(yy)>=100:
+        try:
+            from sklearn.linear_model import LogisticRegression
+            z=np.log(pp/(1.0-pp)).reshape(-1,1)
+            lr=LogisticRegression(C=1e6,solver="lbfgs",max_iter=1000).fit(z,yy)
+            out["calibration_intercept"]=float(lr.intercept_[0])
+            out["calibration_slope"]=float(lr.coef_[0,0])
+        except Exception:
+            pass
+    return out
+
+
+def _v1350_market_shadow_contract(stat_bundle, market):
+    """Return a fail-closed shadow contract for one NCAAF market sibling."""
+    m=_sys_norm_market(market)
+    model_id={"spreads":"SPREAD_STAT_FROZEN","h2h":"H2H_STAT_V1","totals":"TOTAL_STAT_V1"}.get(m,m.upper()+"_STAT_V1")
+    target={"spreads":"ATS_COVER","h2h":"OUTRIGHT_WIN","totals":"OVER_UNDER"}.get(m,"BINARY_OUTCOME")
+    met=((stat_bundle or {}).get("shadow_metrics") or {}).get(m,{}) if isinstance(stat_bundle,dict) else {}
+    n=int(met.get("n",0) or 0)
+    auc=float(met.get("auc",np.nan)) if met.get("auc") is not None else np.nan
+    ll=float(met.get("logloss",np.nan)) if met.get("logloss") is not None else np.nan
+    br=float(met.get("brier",np.nan)) if met.get("brier") is not None else np.nan
+    mll=float(met.get("market_logloss",np.nan)) if met.get("market_logloss") is not None else np.nan
+    mbr=float(met.get("market_brier",np.nan)) if met.get("market_brier") is not None else np.nan
+    if m=="spreads":
+        gate=True  # governed separately by the frozen V13.4.4 spread contract
+        reason="FROZEN_SPREAD_GOVERNANCE"
+    else:
+        proper=bool(np.isfinite(ll) and np.isfinite(mll) and ll < mll and np.isfinite(br) and (not np.isfinite(mbr) or br < mbr))
+        rank=bool(np.isfinite(auc) and auc>=0.52)
+        enough=bool(n>=100)
+        gate=bool(enough and proper and rank)
+        failed=[]
+        if not enough: failed.append("N_LT_100")
+        if not rank: failed.append("AUC_LT_0P52")
+        if not proper: failed.append("NO_PROPER_SCORE_EDGE")
+        reason="PASS_LATEST_SEASON_SHADOW" if gate else "CLOSED_"+"_".join(failed or ["INSUFFICIENT_EVIDENCE"])
+    return {
+        "market":m,"model_id":model_id,"target":target,"status":"SHADOW_ACTIVE" if gate else "RESEARCH_ONLY_CLOSED",
+        "shadow_gate_pass":bool(gate),"reason":reason,"edge_threshold":0.025,"threshold_source":"FIXED_INITIAL_RESEARCH_THRESHOLD_NOT_OPTIMIZED",
+        "production_authority":0,"bet_authority":"SHADOW_ONLY","metrics":dict(met),
+        "spread_model_unchanged":True,"no_cross_market_probability_blend":True,
+    }
+
 def fit_ncaaf_statistical_brain(log_func=print):
     """Fit V12.2 structural NCAAF expert: matchup-aware, target-qualified, freshness-gated."""
     if isinstance(_NCAAF_STAT_TRAIN_CACHE.get("bundle"), dict):
@@ -16291,6 +16355,9 @@ def fit_ncaaf_statistical_brain(log_func=print):
     okh=np.isfinite(ph)&np.isfinite(h2h_market)
     ll_h=_ncaaf_stat_logloss(yh[okh],ph[okh]); auc_h=_ncaaf_stat_auc(yh[okh],ph[okh]); br_h=_ncaaf_stat_brier(yh[okh],ph[okh])
     ll_h_market=_ncaaf_stat_logloss(yh[okh],h2h_market[okh]) if okh.any() else np.nan
+    br_h_market=_ncaaf_stat_brier(yh[okh],h2h_market[okh]) if okh.any() else np.nan
+    _cal_tot=_v1350_binary_calibration_metrics(ytot[valid_tot],ptot[valid_tot])
+    _cal_h=_v1350_binary_calibration_metrics(yh[okh],ph[okh])
 
     def _trust(ll,auc,market_ll=0.69314718056):
         if not np.isfinite(ll) or ll>=market_ll: return 0.0
@@ -16336,11 +16403,21 @@ def fit_ncaaf_statistical_brain(log_func=print):
         "shadow_metrics":{
             "season":latest,
             "spreads":{"n":int(valid_sp.sum()),"auc":auc_sp,"logloss":ll_sp,"brier":br_sp,"market_logloss":0.69314718056,"trust":trust_sp},
-            "totals":{"n":int(valid_tot.sum()),"auc":auc_tot,"logloss":ll_tot,"brier":br_tot,"market_logloss":0.69314718056,"trust":trust_tot},
-            "h2h":{"n":int(okh.sum()),"auc":auc_h,"logloss":ll_h,"brier":br_h,"market_logloss":ll_h_market,"trust":trust_h},
+            "totals":{"n":int(valid_tot.sum()),"auc":auc_tot,"logloss":ll_tot,"brier":br_tot,"market_logloss":0.69314718056,"market_brier":0.25,"trust":trust_tot,**_cal_tot},
+            "h2h":{"n":int(okh.sum()),"auc":auc_h,"logloss":ll_h,"brier":br_h,"market_logloss":ll_h_market,"market_brier":br_h_market,"trust":trust_h,**_cal_h},
         },
         "rows":int(len(games)),"seasons":seasons,
     }
+    bundle["sibling_market_contracts"]={m:_v1350_market_shadow_contract(bundle,m) for m in ("h2h","totals")}
+    for _m,_c in bundle["sibling_market_contracts"].items():
+        _met=_c.get("metrics") or {}
+        log_func(
+            f"[V13.5.0-MARKET-SIBLING-CONTRACT] market={_m} model={_c.get('model_id')} target={_c.get('target')} "
+            f"status={_c.get('status')} gate={'PASS' if _c.get('shadow_gate_pass') else 'CLOSED'} reason={_c.get('reason')} "
+            f"n={int(_met.get('n',0) or 0)} auc={float(_met.get('auc',np.nan)):.4f} ll={float(_met.get('logloss',np.nan)):.6f} "
+            f"market_ll={float(_met.get('market_logloss',np.nan)):.6f} brier={float(_met.get('brier',np.nan)):.6f} market_brier={float(_met.get('market_brier',np.nan)):.6f} "
+            f"ece={float(_met.get('ece',np.nan)):.4f} cal_slope={float(_met.get('calibration_slope',np.nan)):.3f} threshold=0.0250 authority=SHADOW_ONLY production_authority=0"
+        )
     _NCAAF_STAT_TRAIN_CACHE["bundle"] = bundle
     log_func(
         f"[NCAAF-STAT] rows={len(games)} seasons={seasons[0]}-{seasons[-1]} "
@@ -18922,7 +18999,11 @@ def apply_ncaaf_statistical_brain_feature(df: pd.DataFrame, sb, market: str):
             resid=np.asarray(sb.get("residual_margin",[]),dtype=float); rawp=np.full(len(out),np.nan)
             ih=np.where(is_home.to_numpy())[0]; ia=np.where(is_away.to_numpy())[0]
             if ih.size: rawp[ih]=_ncaaf_stat_empirical_prob_gt(-exp_margin[ih],resid)
-            if ia.size: rawp[ia]=_ncaaf_stat_empirical_prob_gt(exp_margin[ia],resid)
+            # Away win is the complement event: home actual margin < 0.
+            # Reverse the home-margin residual orientation rather than reusing
+            # the home residual tail. This keeps H2H team-side probabilities
+            # coherent/complementary without touching the frozen spread lane.
+            if ia.size: rawp[ia]=_ncaaf_stat_empirical_prob_gt(exp_margin[ia],-resid)
             exp_team=np.where(is_home,(exp_total+exp_margin)/2,np.where(is_away,(exp_total-exp_margin)/2,np.nan)); exp_opp=exp_total-exp_team
         baseline=_ncaaf_stat_runtime_baseline(out,m).to_numpy(dtype=float)
         base_trust=float(np.clip((sb.get("trust_by_market") or {}).get(m,0.0),0,1))
