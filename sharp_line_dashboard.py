@@ -16665,7 +16665,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-23-v13.4.6-frozen-stat-lean-fast-ui"
+NCAAF_V13_VERSION = "2026-09-23-v13.4.7-live-shadow-bets-fast-ui"
 NCAAF_V13_HOTFIX = "V13_4_6__FROZEN_STAT_UNCHANGED__LEAN_FAST_NCAAF_UI__SPREADS_ONLY__ONE_ROW_PER_GAME__NO_RICH_MARKET_RENDER__CALIBRATION_V2_RESEARCH_ONLY"
 NCAAF_HISTORY_POLICY = "ALL_AVAILABLE_SEASONS"
 NCAAF_HISTORY_FIXED_LOOKBACK_DAYS = None  # Never silently truncate production history.
@@ -16687,8 +16687,8 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # from the same deploy bundle.  The simple legacy feature materializer is kept
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
-V133_DEPLOY_BUILD_ID = "2026-09-23-v13.4.6-frozen-stat-lean-fast-ui-1"
-V1337_SOURCE_TAG = "dashboard-v13.4.6-frozen-stat-lean-fast-ui"
+V133_DEPLOY_BUILD_ID = "2026-09-23-v13.4.7-live-shadow-bets-fast-ui-1"
+V1337_SOURCE_TAG = "dashboard-v13.4.7-live-shadow-bets-fast-ui"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -46073,6 +46073,116 @@ def _looks_malformed(html_str: str) -> bool:
 
 
 
+@st.cache_resource(ttl=300)
+def _v1347_load_latest_frozen_stat_spread_bundle(bucket_name="sharp-models"):
+    """Load the newest frozen-STAT NCAAF spread challenger for live shadow display.
+
+    The formal champion may intentionally remain the legacy artifact while V13 is
+    in prospective validation.  The UI therefore must not use the champion alias
+    when it is explicitly showing frozen V13 shadow predictions.
+    """
+    try:
+        client=storage.Client()
+        prefix="challengers/ncaaf/spreads/sharp_win_model_ncaaf_spreads_"
+        blobs=[b for b in client.list_blobs(bucket_name,prefix=prefix) if str(b.name).lower().endswith(('.pkl','.pkl.gz','.pkl.bz2'))]
+        blobs=sorted(blobs,key=lambda b:(getattr(b,'updated',None) or datetime.min.replace(tzinfo=timezone.utc), int(getattr(b,'generation',0) or 0)),reverse=True)
+        for blob in blobs[:12]:
+            try:
+                raw=_safe_loads(_maybe_decompress(blob.name,blob.download_as_bytes()))
+                if not isinstance(raw,dict):
+                    continue
+                bundle=_normalize_bundle(raw)
+                arch=(bundle.get('ncaaf_v13_value_architecture') or {}) if isinstance(bundle,dict) else {}
+                mode=str((((arch.get('specialist_overlays') or {}).get('probability_resolver') or {}).get('mode','')))
+                if 'STAT_ONLY_FROZEN' not in mode:
+                    continue
+                bundle['_v1347_shadow_blob']=str(blob.name)
+                bundle['_v1347_shadow_updated']=str(getattr(blob,'updated',None) or '')
+                return bundle
+            except Exception as e:
+                logging.warning("[V13.4.7-SHADOW-ARTIFACT] skipped=%s err=%s:%s",getattr(blob,'name','?'),type(e).__name__,e)
+        return None
+    except Exception as e:
+        logging.warning("[V13.4.7-SHADOW-ARTIFACT] load failed: %s:%s",type(e).__name__,e)
+        return None
+
+
+def _v1347_prepare_live_frozen_stat_shadow_rows(df_moves_raw, label):
+    """Compact current spread quotes and score frozen STAT directly for shadow UI.
+
+    This bypasses the legacy rich-market renderer and legacy champion probability.
+    It deliberately creates *shadow recommendations* only; it does not open formal
+    production betting authority and it does not write the prospective ledger from
+    the browser/UI path.
+    """
+    if df_moves_raw is None or df_moves_raw.empty:
+        return pd.DataFrame(), {'status':'NO_ROWS'}
+    d=df_moves_raw.copy()
+    now=pd.Timestamp.now(tz='UTC')
+    if 'Sport' in d.columns:
+        d=d[d['Sport'].astype(str).str.upper().str.strip().eq('NCAAF')].copy()
+    d['Market']=d.get('Market',pd.Series('',index=d.index)).astype(str).str.lower().str.strip().replace({'spread':'spreads'})
+    d=d[d['Market'].eq('spreads')].copy()
+    if 'Game_Start' in d.columns:
+        d['Game_Start']=pd.to_datetime(d['Game_Start'],errors='coerce',utc=True)
+        d=d[d['Game_Start'].notna() & d['Game_Start'].gt(now)].copy()
+    if 'Pre_Game' in d.columns:
+        d=d[d['Pre_Game'].fillna(True).astype(bool)].copy()
+    if d.empty:
+        return d, {'status':'NO_UPCOMING_SPREAD_ROWS'}
+
+    # Score only one current quote per game/side/book. Historical snapshots are not
+    # needed to produce the frozen STAT probability and were the main UI cost.
+    d['_v1347_ts']=pd.to_datetime(d.get('Snapshot_Timestamp'),errors='coerce',utc=True)
+    qkeys=[c for c in ['Game_Key','Outcome','Bookmaker'] if c in d.columns]
+    if qkeys:
+        d=d.sort_values('_v1347_ts').drop_duplicates(qkeys,keep='last').copy()
+    d.drop(columns=['_v1347_ts'],inplace=True,errors='ignore')
+
+    # Rebuild system state only after compaction. These signals are informational;
+    # frozen STAT remains the sole continuous probability authority.
+    try:
+        have_text=all(c in d.columns for c in ['Pathi_Active_Text','BigAl_Active_Text'])
+        if not have_text:
+            before=len(d)
+            d=attach_pathi_bigal_live_features(d,label)
+            if len(d)!=before:
+                raise RuntimeError(f'Pathi/BigAl enrichment changed row count {before}->{len(d)}')
+    except Exception as e:
+        logging.warning('[V13.4.7-FAST-SYSTEMS] unavailable: %s:%s',type(e).__name__,e)
+
+    # If the current feed already carries frozen probabilities, use them directly.
+    existing=pd.to_numeric(d.get('V13_Cover_Prob',pd.Series(np.nan,index=d.index)),errors='coerce')
+    if existing.notna().any():
+        return d, {'status':'USED_PRE_SCORED_ROWS','rows':int(existing.notna().sum())}
+
+    bundle=_v1347_load_latest_frozen_stat_spread_bundle()
+    if not isinstance(bundle,dict):
+        return d, {'status':'FROZEN_CHALLENGER_ARTIFACT_UNAVAILABLE'}
+    try:
+        from utils import apply_ncaaf_statistical_brain_feature as _attach_stat
+        from utils import apply_ncaaf_v13_shadow as _score_v13
+        if 'Outcome_Norm' not in d.columns:
+            d['Outcome_Norm']=d.get('Outcome',pd.Series('',index=d.index)).astype(str).str.lower().str.strip()
+        if 'Sport' not in d.columns:
+            d['Sport']='NCAAF'
+        d=_attach_stat(d,bundle.get('ncaaf_statistical_brain'),'spreads')
+        arch=bundle.get('ncaaf_v13_value_architecture') or {}
+        d=_score_v13(d,arch)
+        p=pd.to_numeric(d.get('V13_Cover_Prob'),errors='coerce')
+        stat_active=pd.to_numeric(d.get('NCAAF_Stat_Active'),errors='coerce').fillna(0)
+        info={
+            'status':'LIVE_FROZEN_STAT_SCORED' if p.notna().any() else 'LIVE_FROZEN_STAT_NO_FINITE_PROB',
+            'rows':int(len(d)),'scored_rows':int(p.notna().sum()),'stat_active_rows':int(stat_active.gt(0).sum()),
+            'artifact':str(bundle.get('_v1347_shadow_blob','')),
+        }
+        print(f"[V13.4.7-LIVE-SHADOW-SCORER] status={info['status']} rows={info['rows']} scored={info['scored_rows']} stat_active={info['stat_active_rows']} artifact={info['artifact']}")
+        return d,info
+    except Exception as e:
+        logging.exception('[V13.4.7-LIVE-SHADOW-SCORER] failed')
+        return d, {'status':'SCORING_ERROR','error':f'{type(e).__name__}:{e}'}
+
+
 def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     """Lean NCAAF production-candidate view.
 
@@ -46086,22 +46196,17 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
         st.warning("No upcoming NCAAF prediction rows are available yet.")
         return
 
-    d=df_moves_raw.copy()
+    d,_live_info=_v1347_prepare_live_frozen_stat_shadow_rows(df_moves_raw,label)
     now=pd.Timestamp.now(tz='UTC')
-    if 'Game_Start' in d.columns:
-        d['Game_Start']=pd.to_datetime(d['Game_Start'],errors='coerce',utc=True)
-        d=d[d['Game_Start'].notna() & (d['Game_Start']>now)].copy()
-    if 'Market' in d.columns:
-        d['Market']=d['Market'].astype(str).str.lower().str.strip()
-        d=d[d['Market'].isin(['spread','spreads'])].copy()
-    if 'Pre_Game' in d.columns:
-        d=d[d['Pre_Game'].fillna(False).astype(bool)].copy()
+    if d is None or d.empty:
+        st.warning('No upcoming NCAAF spread markets are available yet.')
+        return
 
-    # Frozen production prediction only. No champion/rich-market probability fallback.
+    # Frozen STAT shadow prediction only. No champion/rich-market probability fallback.
     d['_pred']=pd.to_numeric(d.get('V13_Cover_Prob',pd.Series(np.nan,index=d.index)),errors='coerce')
     d=d[d['_pred'].notna()].copy()
     if d.empty:
-        st.warning("Frozen STAT has not produced an upcoming spread prediction yet.")
+        st.warning(f"Frozen STAT could not score the current upcoming spread rows yet. Live shadow scorer status: {_live_info.get('status','UNKNOWN')}.")
         return
 
     d['_line']=pd.to_numeric(d.get('Value'),errors='coerce')
@@ -46208,8 +46313,9 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     picks['Systems']=picks.apply(_signal_text,axis=1)
 
     shadow=(picks['Edge']>=0.025)&(picks['EV / $1']>0)&picks['_exec']
-    picks['Status']=np.where(shadow,'SHADOW 2.5% TRIGGER — BET CLOSED','PREDICTION ONLY — BET CLOSED')
-    picks.loc[~picks['_exec'],'Status']='PREDICTION ONLY — REFERENCE QUOTE'
+    picks['Recommendation']=np.where(shadow,'SHADOW BET','WATCH')
+    picks.loc[~picks['_exec'],'Recommendation']='WATCH — REFERENCE QUOTE'
+    picks['Bet Status']=np.where(shadow,'SHADOW ONLY — NOT PRODUCTION','NO PRODUCTION BET')
     picks['Probability Source']='V13.4.4 Frozen STAT'
 
     picks['ET Date']=picks['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d')
@@ -46219,19 +46325,24 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     if selected_date!='All':
         picks=picks[picks['ET Date']==selected_date].copy()
 
-    st.subheader('NCAAF — Frozen STAT Predictions')
-    st.caption('Fast production-candidate view: spreads only, one model-preferred side per game, current quote, frozen STAT probability. Rich-market diagnostics are intentionally not rendered.')
+    st.subheader('NCAAF — Frozen STAT Predictions & Shadow Bets')
+    st.caption('Live frozen-STAT recommendations. Shadow bets are real model triggers being tracked for validation; production betting authority is not open yet. Rich-market diagnostics are intentionally omitted.')
 
+    _shadow_now=((picks['Edge']>=0.025)&(picks['EV / $1']>0)&picks['_exec'])
     m1,m2,m3,m4=st.columns(4)
     m1.metric('Upcoming games',int(len(picks)))
-    m2.metric('Shadow 2.5% triggers',int(((picks['Edge']>=0.025)&(picks['EV / $1']>0)&picks['_exec']).sum()))
-    m3.metric('Frozen-system alerts',int((picks['Frozen System']!='—').sum()))
-    m4.metric('Bet authority','CLOSED')
+    m2.metric('Shadow bets',int(_shadow_now.sum()))
+    m3.metric('Production bets',0)
+    m4.metric('Frozen-system alerts',int((picks['Frozen System']!='—').sum()))
+    if int(_shadow_now.sum())>0:
+        st.info(f"{int(_shadow_now.sum())} frozen-policy shadow bet(s) currently qualify at the 2.5% edge threshold. These are NOT production bets yet.")
+    else:
+        st.caption('No 2.5% shadow bets qualify at the current prices. Production bets remain 0 while prospective validation is open.')
 
     # Keep the main table intentionally small. No sparkline/history, rich-market
     # feature columns, model-instance hashes, legacy champion columns or live-odds matrix.
     picks=picks.sort_values(['Game_Start','Edge'],ascending=[True,False])
-    main=picks[['Game Time','Matchup','Pick','Line','Odds','Book','Cover Prob','STAT Fair Line','Break Even','Edge','EV / $1','Agreement','Systems','Status']].copy()
+    main=picks[['Game Time','Matchup','Pick','Line','Odds','Book','Cover Prob','STAT Fair Line','Break Even','Edge','EV / $1','Agreement','Systems','Recommendation','Bet Status']].copy()
     for c in ['Cover Prob','Break Even','Edge']:
         main[c]=pd.to_numeric(main[c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
     main['EV / $1']=pd.to_numeric(main['EV / $1'],errors='coerce').map(lambda x:f'{x:+.3f}' if pd.notna(x) else '—')
@@ -46255,7 +46366,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
         research['Hours to Game']=pd.to_numeric(research['Hours to Game'],errors='coerce').round(1)
         st.dataframe(research,use_container_width=True,hide_index=True)
 
-    print(f"[V13.4.6-LEAN-FAST-UI] rows={len(picks)} spreads_only=TRUE one_side_per_game=TRUE rich_market_render=FALSE live_odds_matrix=FALSE shadow_triggers={int(shadow.sum())} frozen_system_alerts={int(frozen_retest.sum())} probability_source=V13_4_4_STAT_ONLY_FROZEN bet_authority=CLOSED")
+    print(f"[V13.4.7-LIVE-SHADOW-FAST-UI] rows={len(picks)} spreads_only=TRUE one_side_per_game=TRUE rich_market_render=FALSE live_odds_matrix=FALSE shadow_bets={int(((picks['Edge']>=0.025)&(picks['EV / $1']>0)&picks['_exec']).sum())} production_bets=0 frozen_system_alerts={int((picks['Frozen System']!='—').sum())} probability_source=V13_4_4_STAT_ONLY_FROZEN production_bet_authority=CLOSED")
 
 def render_scanner_tab(label, sport_key, container, force_reload=False):
 
@@ -46389,18 +46500,18 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # grain before the summary pipeline.  This guarantees Pathi_Active_Text and
         # BigAl_Active_Text survive even when older stored/scored rows omitted them.
         try:
-            _ui_before = len(df_moves_raw)
-            _have_live_system_text = all(c in df_moves_raw.columns for c in ["Pathi_Active_Text","BigAl_Active_Text"])
-            if (not _ncaaf_fast_ui) or (not _have_live_system_text):
-                df_moves_raw = attach_pathi_bigal_live_features(df_moves_raw, label)
-                _sys_mode = "REBUILT"
+            if _ncaaf_fast_ui:
+                # V13.4.7 compacts to current spread quotes before rebuilding Pathi/BigAl
+                # inside the fast scorer; do not enrich the 100k+ raw snapshot frame.
+                print(f"[UI-SYSTEM-CONTRACT] sport={label} mode=DEFERRED_UNTIL_FAST_COMPACTION rowcount={len(df_moves_raw)}")
             else:
-                _sys_mode = "REUSED_SCORED_ROWS"
-            if len(df_moves_raw) != _ui_before:
-                raise RuntimeError(f"UI system enrichment changed row count {_ui_before}->{len(df_moves_raw)}")
-            _p_ui = int((df_moves_raw.get("Pathi_Active_Text", pd.Series("—", index=df_moves_raw.index)).astype(str) != "—").sum())
-            _b_ui = int((df_moves_raw.get("BigAl_Active_Text", pd.Series("—", index=df_moves_raw.index)).astype(str) != "—").sum())
-            print(f"[UI-SYSTEM-CONTRACT] sport={label} mode={_sys_mode} pathi_text_rows={_p_ui} bigal_text_rows={_b_ui} rowcount=PASS")
+                _ui_before = len(df_moves_raw)
+                df_moves_raw = attach_pathi_bigal_live_features(df_moves_raw, label)
+                if len(df_moves_raw) != _ui_before:
+                    raise RuntimeError(f"UI system enrichment changed row count {_ui_before}->{len(df_moves_raw)}")
+                _p_ui = int((df_moves_raw.get("Pathi_Active_Text", pd.Series("—", index=df_moves_raw.index)).astype(str) != "—").sum())
+                _b_ui = int((df_moves_raw.get("BigAl_Active_Text", pd.Series("—", index=df_moves_raw.index)).astype(str) != "—").sum())
+                print(f"[UI-SYSTEM-CONTRACT] sport={label} mode=REBUILT pathi_text_rows={_p_ui} bigal_text_rows={_b_ui} rowcount=PASS")
         except Exception as _ui_sys_err:
             st.warning(f"Pathi/Big Al UI enrichment unavailable: {_ui_sys_err}")
 
