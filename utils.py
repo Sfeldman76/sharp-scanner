@@ -99,8 +99,8 @@ SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 # evidence.  The exact fitted artifact identity (SHA256), not the human version
 # string, is the primary model-instance key.
 NCAAF_V13_CODE_VERSION = "V13.4.4"
-V133_DEPLOY_BUILD_ID = "2026-09-23-v13.4.6-frozen-stat-lean-fast-ui-1"
-V1337_SOURCE_TAG = "utils-v13.4.6-frozen-stat-lean-fast-ui"
+V133_DEPLOY_BUILD_ID = "2026-09-23-v13.4.7-live-shadow-bets-fast-ui-1"
+V1337_SOURCE_TAG = "utils-v13.4.7-live-shadow-bets-fast-ui"
 NCAAF_V13_FORWARD_PREDICTIONS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_predictions"
 NCAAF_V13_FORWARD_RESULTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_results"
 NCAAF_V13_FORWARD_LEDGER_VERSION = "2026-09-20-v13.3.5-immutable-artifact-aware-forward-ledger-v1"
@@ -15421,7 +15421,7 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-23-v13.4.6-frozen-stat-lean-fast-ui"
+NCAAF_V13_VERSION = "2026-09-23-v13.4.7-live-shadow-bets-fast-ui"
 NCAAF_V13_HOTFIX = "V13_4_6__FROZEN_STAT_UNCHANGED__LEAN_FAST_NCAAF_UI__SPREADS_ONLY__ONE_ROW_PER_GAME__NO_RICH_MARKET_RENDER__CALIBRATION_V2_RESEARCH_ONLY"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
