@@ -16665,8 +16665,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-23-v13.4.7-live-shadow-bets-fast-ui"
-NCAAF_V13_HOTFIX = "V13_4_6__FROZEN_STAT_UNCHANGED__LEAN_FAST_NCAAF_UI__SPREADS_ONLY__ONE_ROW_PER_GAME__NO_RICH_MARKET_RENDER__CALIBRATION_V2_RESEARCH_ONLY"
+NCAAF_V13_VERSION = "2026-09-24-v13.5.0-three-market-shadow-ui"
+NCAAF_V13_HOTFIX = "V13_5_0__FROZEN_SPREAD_UNCHANGED__H2H_STAT_V1__TOTAL_STAT_V1__ONE_TABLE__SHADOW_ONLY__NO_RICH_RENDER"
 NCAAF_HISTORY_POLICY = "ALL_AVAILABLE_SEASONS"
 NCAAF_HISTORY_FIXED_LOOKBACK_DAYS = None  # Never silently truncate production history.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -16687,8 +16687,8 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # from the same deploy bundle.  The simple legacy feature materializer is kept
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
-V133_DEPLOY_BUILD_ID = "2026-09-23-v13.4.7-live-shadow-bets-fast-ui-1"
-V1337_SOURCE_TAG = "dashboard-v13.4.7-live-shadow-bets-fast-ui"
+V133_DEPLOY_BUILD_ID = "2026-09-24-v13.5.0-three-market-shadow-ui-1"
+V1337_SOURCE_TAG = "dashboard-v13.5.0-three-market-shadow-ui"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -33296,6 +33296,70 @@ def _ncaaf_stat_fit_models_for_rows(df, margin_feature_cols, total_feature_cols,
     return mm,tm
 
 
+
+
+def _v1350_binary_calibration_metrics(y, p):
+    """Compact calibration diagnostics for the new H2H/TOTAL shadow siblings.
+
+    Research/monitoring only. Nothing here can alter the frozen spread probability.
+    """
+    yy=np.asarray(y,dtype=float); pp=np.asarray(p,dtype=float)
+    ok=np.isfinite(yy)&np.isfinite(pp)
+    yy=yy[ok].astype(int); pp=np.clip(pp[ok],1e-6,1-1e-6)
+    out={"n":int(len(yy)),"ece":np.nan,"calibration_intercept":np.nan,"calibration_slope":np.nan}
+    if len(yy)<20 or np.unique(yy).size<2:
+        return out
+    edges=np.linspace(0.0,1.0,11); ece=0.0
+    for i in range(10):
+        hi=edges[i+1]+(1e-12 if i==9 else 0.0)
+        m=(pp>=edges[i])&(pp<hi)
+        if m.any():
+            ece += float(m.mean())*abs(float(pp[m].mean())-float(yy[m].mean()))
+    out["ece"]=float(ece)
+    if len(yy)>=100:
+        try:
+            from sklearn.linear_model import LogisticRegression
+            z=np.log(pp/(1.0-pp)).reshape(-1,1)
+            lr=LogisticRegression(C=1e6,solver="lbfgs",max_iter=1000).fit(z,yy)
+            out["calibration_intercept"]=float(lr.intercept_[0])
+            out["calibration_slope"]=float(lr.coef_[0,0])
+        except Exception:
+            pass
+    return out
+
+
+def _v1350_market_shadow_contract(stat_bundle, market):
+    """Return a fail-closed shadow contract for one NCAAF market sibling."""
+    m=_sys_norm_market(market)
+    model_id={"spreads":"SPREAD_STAT_FROZEN","h2h":"H2H_STAT_V1","totals":"TOTAL_STAT_V1"}.get(m,m.upper()+"_STAT_V1")
+    target={"spreads":"ATS_COVER","h2h":"OUTRIGHT_WIN","totals":"OVER_UNDER"}.get(m,"BINARY_OUTCOME")
+    met=((stat_bundle or {}).get("shadow_metrics") or {}).get(m,{}) if isinstance(stat_bundle,dict) else {}
+    n=int(met.get("n",0) or 0)
+    auc=float(met.get("auc",np.nan)) if met.get("auc") is not None else np.nan
+    ll=float(met.get("logloss",np.nan)) if met.get("logloss") is not None else np.nan
+    br=float(met.get("brier",np.nan)) if met.get("brier") is not None else np.nan
+    mll=float(met.get("market_logloss",np.nan)) if met.get("market_logloss") is not None else np.nan
+    mbr=float(met.get("market_brier",np.nan)) if met.get("market_brier") is not None else np.nan
+    if m=="spreads":
+        gate=True  # governed separately by the frozen V13.4.4 spread contract
+        reason="FROZEN_SPREAD_GOVERNANCE"
+    else:
+        proper=bool(np.isfinite(ll) and np.isfinite(mll) and ll < mll and np.isfinite(br) and (not np.isfinite(mbr) or br < mbr))
+        rank=bool(np.isfinite(auc) and auc>=0.52)
+        enough=bool(n>=100)
+        gate=bool(enough and proper and rank)
+        failed=[]
+        if not enough: failed.append("N_LT_100")
+        if not rank: failed.append("AUC_LT_0P52")
+        if not proper: failed.append("NO_PROPER_SCORE_EDGE")
+        reason="PASS_LATEST_SEASON_SHADOW" if gate else "CLOSED_"+"_".join(failed or ["INSUFFICIENT_EVIDENCE"])
+    return {
+        "market":m,"model_id":model_id,"target":target,"status":"SHADOW_ACTIVE" if gate else "RESEARCH_ONLY_CLOSED",
+        "shadow_gate_pass":bool(gate),"reason":reason,"edge_threshold":0.025,"threshold_source":"FIXED_INITIAL_RESEARCH_THRESHOLD_NOT_OPTIMIZED",
+        "production_authority":0,"bet_authority":"SHADOW_ONLY","metrics":dict(met),
+        "spread_model_unchanged":True,"no_cross_market_probability_blend":True,
+    }
+
 def fit_ncaaf_statistical_brain(log_func=print):
     """Fit V12.2 structural NCAAF expert: matchup-aware, target-qualified, freshness-gated."""
     if isinstance(_NCAAF_STAT_TRAIN_CACHE.get("bundle"), dict):
@@ -33411,6 +33475,9 @@ def fit_ncaaf_statistical_brain(log_func=print):
     okh=np.isfinite(ph)&np.isfinite(h2h_market)
     ll_h=_ncaaf_stat_logloss(yh[okh],ph[okh]); auc_h=_ncaaf_stat_auc(yh[okh],ph[okh]); br_h=_ncaaf_stat_brier(yh[okh],ph[okh])
     ll_h_market=_ncaaf_stat_logloss(yh[okh],h2h_market[okh]) if okh.any() else np.nan
+    br_h_market=_ncaaf_stat_brier(yh[okh],h2h_market[okh]) if okh.any() else np.nan
+    _cal_tot=_v1350_binary_calibration_metrics(ytot[valid_tot],ptot[valid_tot])
+    _cal_h=_v1350_binary_calibration_metrics(yh[okh],ph[okh])
 
     def _trust(ll,auc,market_ll=0.69314718056):
         if not np.isfinite(ll) or ll>=market_ll: return 0.0
@@ -33468,11 +33535,21 @@ def fit_ncaaf_statistical_brain(log_func=print):
         "shadow_metrics":{
             "season":latest,
             "spreads":{"n":int(valid_sp.sum()),"auc":auc_sp,"logloss":ll_sp,"brier":br_sp,"market_logloss":0.69314718056,"trust":trust_sp},
-            "totals":{"n":int(valid_tot.sum()),"auc":auc_tot,"logloss":ll_tot,"brier":br_tot,"market_logloss":0.69314718056,"trust":trust_tot},
-            "h2h":{"n":int(okh.sum()),"auc":auc_h,"logloss":ll_h,"brier":br_h,"market_logloss":ll_h_market,"trust":trust_h},
+            "totals":{"n":int(valid_tot.sum()),"auc":auc_tot,"logloss":ll_tot,"brier":br_tot,"market_logloss":0.69314718056,"market_brier":0.25,"trust":trust_tot,**_cal_tot},
+            "h2h":{"n":int(okh.sum()),"auc":auc_h,"logloss":ll_h,"brier":br_h,"market_logloss":ll_h_market,"market_brier":br_h_market,"trust":trust_h,**_cal_h},
         },
         "rows":int(len(games)),"seasons":seasons,
     }
+    bundle["sibling_market_contracts"]={m:_v1350_market_shadow_contract(bundle,m) for m in ("h2h","totals")}
+    for _m,_c in bundle["sibling_market_contracts"].items():
+        _met=_c.get("metrics") or {}
+        log_func(
+            f"[V13.5.0-MARKET-SIBLING-CONTRACT] market={_m} model={_c.get('model_id')} target={_c.get('target')} "
+            f"status={_c.get('status')} gate={'PASS' if _c.get('shadow_gate_pass') else 'CLOSED'} reason={_c.get('reason')} "
+            f"n={int(_met.get('n',0) or 0)} auc={float(_met.get('auc',np.nan)):.4f} ll={float(_met.get('logloss',np.nan)):.6f} "
+            f"market_ll={float(_met.get('market_logloss',np.nan)):.6f} brier={float(_met.get('brier',np.nan)):.6f} market_brier={float(_met.get('market_brier',np.nan)):.6f} "
+            f"ece={float(_met.get('ece',np.nan)):.4f} cal_slope={float(_met.get('calibration_slope',np.nan)):.3f} threshold=0.0250 authority=SHADOW_ONLY production_authority=0"
+        )
     _stat_maturity=_v13394_maturity_record(len(games),seasons)
     bundle["maturity"]=dict(_stat_maturity)
     log_func(
@@ -33661,7 +33738,11 @@ def apply_ncaaf_statistical_brain_feature(df: pd.DataFrame, sb, market: str):
             resid=np.asarray(sb.get("residual_margin",[]),dtype=float); rawp=np.full(len(out),np.nan)
             ih=np.where(is_home.to_numpy())[0]; ia=np.where(is_away.to_numpy())[0]
             if ih.size: rawp[ih]=_ncaaf_stat_empirical_prob_gt(-exp_margin[ih],resid)
-            if ia.size: rawp[ia]=_ncaaf_stat_empirical_prob_gt(exp_margin[ia],resid)
+            # Away win is the complement event: home actual margin < 0.
+            # Reverse the home-margin residual orientation rather than reusing
+            # the home residual tail. This keeps H2H team-side probabilities
+            # coherent/complementary without touching the frozen spread lane.
+            if ia.size: rawp[ia]=_ncaaf_stat_empirical_prob_gt(exp_margin[ia],-resid)
             exp_team=np.where(is_home,(exp_total+exp_margin)/2,np.where(is_away,(exp_total-exp_margin)/2,np.nan)); exp_opp=exp_total-exp_team
         baseline=_ncaaf_stat_runtime_baseline(out,m).to_numpy(dtype=float)
         base_trust=float(np.clip((sb.get("trust_by_market") or {}).get(m,0.0),0,1))
@@ -34017,8 +34098,9 @@ def train_sharp_model_from_bq(
     if str(sport).upper().strip() == "NCAAF":
         historical_core_expert = fit_historical_ncaaf_core_expert(market, log_func=log_func)
         ncaaf_statistical_brain = fit_ncaaf_statistical_brain(log_func=log_func)
-        # V13 is intentionally NCAAF-spreads-only until its season-forward shadow
-        # proves superior. It never alters the V12 production probability here.
+        # V13.5 keeps the proven spread lane frozen. H2H_STAT_V1 and TOTAL_STAT_V1
+        # are independent sibling shadow models carried by the Statistical Brain; they
+        # never alter the frozen spread probability or receive production bet authority.
         if str(market).lower().strip() == "spreads":
             ncaaf_v13_value_architecture = fit_ncaaf_v13_value_architecture(log_func=log_func)
             if isinstance(ncaaf_v13_value_architecture,dict) and isinstance(historical_core_expert,dict):
@@ -43908,6 +43990,7 @@ def train_sharp_model_from_bq(
                     "seasons": (ncaaf_statistical_brain or {}).get("seasons", []) if isinstance(ncaaf_statistical_brain, dict) else [],
                     "trust_by_market": (ncaaf_statistical_brain or {}).get("trust_by_market", {}) if isinstance(ncaaf_statistical_brain, dict) else {},
                     "shadow_metrics": (ncaaf_statistical_brain or {}).get("shadow_metrics", {}) if isinstance(ncaaf_statistical_brain, dict) else {},
+                    "sibling_market_contracts": (ncaaf_statistical_brain or {}).get("sibling_market_contracts", {}) if isinstance(ncaaf_statistical_brain, dict) else {},
                     "feature_qualification": ({
                         "version": ((ncaaf_statistical_brain or {}).get("feature_qualification") or {}).get("version"),
                         "margin_accepted": list((((ncaaf_statistical_brain or {}).get("feature_qualification") or {}).get("margin") or {}).get("accepted", [])),
@@ -46107,106 +46190,170 @@ def _v1347_load_latest_frozen_stat_spread_bundle(bucket_name="sharp-models"):
         return None
 
 
-def _v1347_prepare_live_frozen_stat_shadow_rows(df_moves_raw, label):
-    """Compact current spread quotes and score frozen STAT directly for shadow UI.
+def _v1350_american_break_even(odds):
+    o=pd.to_numeric(odds,errors='coerce')
+    p=pd.Series(np.nan,index=o.index,dtype=float)
+    neg=o<0; pos=o>0
+    p.loc[neg]=(-o.loc[neg])/((-o.loc[neg])+100.0)
+    p.loc[pos]=100.0/(o.loc[pos]+100.0)
+    return p
 
-    This bypasses the legacy rich-market renderer and legacy champion probability.
-    It deliberately creates *shadow recommendations* only; it does not open formal
-    production betting authority and it does not write the prospective ledger from
-    the browser/UI path.
+
+def _v1350_fair_american(prob):
+    p=float(prob) if prob is not None and np.isfinite(prob) else np.nan
+    if not np.isfinite(p) or p<=0 or p>=1:
+        return np.nan
+    return -100.0*p/(1.0-p) if p>=0.5 else 100.0*(1.0-p)/p
+
+
+def _v1350_prepare_live_three_market_shadow_rows(df_moves_raw, label):
+    """Score SPREAD, H2H and TOTAL independently from one compact upcoming feed.
+
+    Spread probability authority is the unchanged V13.4.4 frozen STAT resolver.
+    H2H_STAT_V1 and TOTAL_STAT_V1 are separate sibling shadow models with their
+    own targets, calibration diagnostics and shadow gates. No probability blending
+    occurs across markets and none of the sibling lanes has production bet authority.
     """
     if df_moves_raw is None or df_moves_raw.empty:
         return pd.DataFrame(), {'status':'NO_ROWS'}
-    d=df_moves_raw.copy()
-    now=pd.Timestamp.now(tz='UTC')
+    d=df_moves_raw.copy(); now=pd.Timestamp.now(tz='UTC')
     if 'Sport' in d.columns:
         d=d[d['Sport'].astype(str).str.upper().str.strip().eq('NCAAF')].copy()
-    d['Market']=d.get('Market',pd.Series('',index=d.index)).astype(str).str.lower().str.strip().replace({'spread':'spreads'})
-    d=d[d['Market'].eq('spreads')].copy()
+    d['Market']=d.get('Market',pd.Series('',index=d.index)).astype(str).str.lower().str.strip().replace({
+        'spread':'spreads','total':'totals','moneyline':'h2h','ml':'h2h','headtohead':'h2h','head-to-head':'h2h'
+    })
+    d=d[d['Market'].isin(['spreads','h2h','totals'])].copy()
     if 'Game_Start' in d.columns:
         d['Game_Start']=pd.to_datetime(d['Game_Start'],errors='coerce',utc=True)
         d=d[d['Game_Start'].notna() & d['Game_Start'].gt(now)].copy()
     if 'Pre_Game' in d.columns:
         d=d[d['Pre_Game'].fillna(True).astype(bool)].copy()
     if d.empty:
-        return d, {'status':'NO_UPCOMING_SPREAD_ROWS'}
+        return d, {'status':'NO_UPCOMING_MARKET_ROWS'}
 
-    # Score only one current quote per game/side/book. Historical snapshots are not
-    # needed to produce the frozen STAT probability and were the main UI cost.
-    d['_v1347_ts']=pd.to_datetime(d.get('Snapshot_Timestamp'),errors='coerce',utc=True)
-    qkeys=[c for c in ['Game_Key','Outcome','Bookmaker'] if c in d.columns]
+    d['_v1350_ts']=pd.to_datetime(d.get('Snapshot_Timestamp'),errors='coerce',utc=True)
+    qkeys=[c for c in ['Game_Key','Market','Outcome','Bookmaker'] if c in d.columns]
     if qkeys:
-        d=d.sort_values('_v1347_ts').drop_duplicates(qkeys,keep='last').copy()
-    d.drop(columns=['_v1347_ts'],inplace=True,errors='ignore')
+        d=d.sort_values('_v1350_ts').drop_duplicates(qkeys,keep='last').copy()
+    d.drop(columns=['_v1350_ts'],inplace=True,errors='ignore')
 
-    # Rebuild system state only after compaction. These signals are informational;
-    # frozen STAT remains the sole continuous probability authority.
-    try:
-        have_text=all(c in d.columns for c in ['Pathi_Active_Text','BigAl_Active_Text'])
-        if not have_text:
-            before=len(d)
-            d=attach_pathi_bigal_live_features(d,label)
-            if len(d)!=before:
-                raise RuntimeError(f'Pathi/BigAl enrichment changed row count {before}->{len(d)}')
-    except Exception as e:
-        logging.warning('[V13.4.7-FAST-SYSTEMS] unavailable: %s:%s',type(e).__name__,e)
-
-    # If the current feed already carries frozen probabilities, use them directly.
-    existing=pd.to_numeric(d.get('V13_Cover_Prob',pd.Series(np.nan,index=d.index)),errors='coerce')
-    if existing.notna().any():
-        return d, {'status':'USED_PRE_SCORED_ROWS','rows':int(existing.notna().sum())}
+    # Propagate only the two game-level opening anchors needed by the statistical
+    # sibling models. This is a compact cross-market join, not a return to the
+    # legacy rich-market renderer. H2H needs the opening spread to form expected
+    # margin; totals needs the opening total to form expected scoring.
+    if 'Game_Key' in d.columns:
+        try:
+            _sp=d[d['Market'].eq('spreads')].copy()
+            if not _sp.empty:
+                _sp_line=None
+                for _c in ('Opening_Spread','First_Line_Value','Open_Value','Opening_Line'):
+                    if _c in _sp.columns:
+                        _s=pd.to_numeric(_sp[_c],errors='coerce')
+                        if _s.notna().any(): _sp_line=_s; break
+                if _sp_line is not None:
+                    _home=_sp.get('Home_Team_Norm',_sp.get('Home_Team',pd.Series('',index=_sp.index))).astype(str).map(normalize_team)
+                    _away=_sp.get('Away_Team_Norm',_sp.get('Away_Team',pd.Series('',index=_sp.index))).astype(str).map(normalize_team)
+                    _out=_sp.get('Outcome',pd.Series('',index=_sp.index)).astype(str).map(normalize_team)
+                    _home_sp=np.where(_out.eq(_home),_sp_line,np.where(_out.eq(_away),-_sp_line,np.nan))
+                    _sp['_v1350_home_open_spread']=_home_sp
+                    _spmap=_sp.groupby('Game_Key')['_v1350_home_open_spread'].median()
+                    _mapped=d['Game_Key'].map(_spmap)
+                    if 'Opening_Spread' not in d.columns: d['Opening_Spread']=np.nan
+                    d['Opening_Spread']=pd.to_numeric(d['Opening_Spread'],errors='coerce').where(pd.to_numeric(d['Opening_Spread'],errors='coerce').notna(),_mapped)
+            _tt=d[d['Market'].eq('totals')].copy()
+            if not _tt.empty:
+                _tot_line=None
+                for _c in ('Opening_Total','First_Line_Value','Open_Value','Opening_Line'):
+                    if _c in _tt.columns:
+                        _s=pd.to_numeric(_tt[_c],errors='coerce')
+                        if _s.notna().any(): _tot_line=_s; break
+                if _tot_line is not None:
+                    _tt['_v1350_open_total']=_tot_line
+                    _ttmap=_tt.groupby('Game_Key')['_v1350_open_total'].median()
+                    _mapped=d['Game_Key'].map(_ttmap)
+                    if 'Opening_Total' not in d.columns: d['Opening_Total']=np.nan
+                    d['Opening_Total']=pd.to_numeric(d['Opening_Total'],errors='coerce').where(pd.to_numeric(d['Opening_Total'],errors='coerce').notna(),_mapped)
+        except Exception as _anchor_err:
+            logging.warning('[V13.5.0-GAME-ANCHOR-JOIN] unavailable: %s:%s',type(_anchor_err).__name__,_anchor_err)
 
     bundle=_v1347_load_latest_frozen_stat_spread_bundle()
     if not isinstance(bundle,dict):
         return d, {'status':'FROZEN_CHALLENGER_ARTIFACT_UNAVAILABLE'}
+    sb=bundle.get('ncaaf_statistical_brain')
+    if not isinstance(sb,dict):
+        return d, {'status':'STAT_BRAIN_UNAVAILABLE'}
+
     try:
         from utils import apply_ncaaf_statistical_brain_feature as _attach_stat
         from utils import apply_ncaaf_v13_shadow as _score_v13
-        if 'Outcome_Norm' not in d.columns:
-            d['Outcome_Norm']=d.get('Outcome',pd.Series('',index=d.index)).astype(str).str.lower().str.strip()
-        if 'Sport' not in d.columns:
-            d['Sport']='NCAAF'
-        d=_attach_stat(d,bundle.get('ncaaf_statistical_brain'),'spreads')
-        arch=bundle.get('ncaaf_v13_value_architecture') or {}
-        d=_score_v13(d,arch)
-        p=pd.to_numeric(d.get('V13_Cover_Prob'),errors='coerce')
-        stat_active=pd.to_numeric(d.get('NCAAF_Stat_Active'),errors='coerce').fillna(0)
-        info={
-            'status':'LIVE_FROZEN_STAT_SCORED' if p.notna().any() else 'LIVE_FROZEN_STAT_NO_FINITE_PROB',
-            'rows':int(len(d)),'scored_rows':int(p.notna().sum()),'stat_active_rows':int(stat_active.gt(0).sum()),
-            'artifact':str(bundle.get('_v1347_shadow_blob','')),
-        }
-        print(f"[V13.4.7-LIVE-SHADOW-SCORER] status={info['status']} rows={info['rows']} scored={info['scored_rows']} stat_active={info['stat_active_rows']} artifact={info['artifact']}")
-        return d,info
+        pieces=[]; info={'status':'LIVE_THREE_MARKET_SCORED','artifact':str(bundle.get('_v1347_shadow_blob',''))}
+        for m in ('spreads','h2h','totals'):
+            z=d[d['Market'].eq(m)].copy()
+            if z.empty:
+                info[m]={'rows':0,'scored':0,'shadow_gate':False,'status':'NO_ROWS'}
+                continue
+            if 'Outcome_Norm' not in z.columns:
+                z['Outcome_Norm']=z.get('Outcome',pd.Series('',index=z.index)).astype(str).str.lower().str.strip()
+            if 'Sport' not in z.columns:
+                z['Sport']='NCAAF'
+            if m=='spreads':
+                # System text is useful only on spread rows; do not pay this cost on
+                # H2H/TOTAL rows.
+                try:
+                    if not all(c in z.columns for c in ['Pathi_Active_Text','BigAl_Active_Text']):
+                        before=len(z); z=attach_pathi_bigal_live_features(z,label)
+                        if len(z)!=before:
+                            raise RuntimeError(f'Pathi/BigAl enrichment changed row count {before}->{len(z)}')
+                except Exception as e:
+                    logging.warning('[V13.5.0-FAST-SYSTEMS] unavailable: %s:%s',type(e).__name__,e)
+                z=_attach_stat(z,sb,'spreads')
+                arch=bundle.get('ncaaf_v13_value_architecture') or {}
+                z=_score_v13(z,arch)
+                z['_model_prob']=pd.to_numeric(z.get('V13_Cover_Prob'),errors='coerce')
+                z['_model_id']='SPREAD_STAT_FROZEN'
+                z['_prob_source']='V13.4.4 Frozen STAT'
+                z['_shadow_model_gate']=True
+                z['_shadow_gate_reason']='FROZEN_SPREAD_GOVERNANCE'
+                z['_shadow_threshold']=0.025
+            else:
+                z=_attach_stat(z,sb,m)
+                z['_model_prob']=pd.to_numeric(z.get('NCAAF_Stat_Prob'),errors='coerce')
+                contract=((sb.get('sibling_market_contracts') or {}).get(m) or _v1350_market_shadow_contract(sb,m))
+                z['_model_id']=str(contract.get('model_id',m.upper()+'_STAT_V1'))
+                z['_prob_source']=z['_model_id']
+                z['_shadow_model_gate']=bool(contract.get('shadow_gate_pass',False))
+                z['_shadow_gate_reason']=str(contract.get('reason','INSUFFICIENT_EVIDENCE'))
+                z['_shadow_threshold']=float(contract.get('edge_threshold',0.025) or 0.025)
+            pieces.append(z)
+            info[m]={
+                'rows':int(len(z)),'scored':int(pd.to_numeric(z['_model_prob'],errors='coerce').notna().sum()),
+                'shadow_gate':bool(z['_shadow_model_gate'].iloc[0]) if len(z) else False,
+                'status':str(z['_shadow_gate_reason'].iloc[0]) if len(z) else 'NO_ROWS',
+            }
+        out=pd.concat(pieces,ignore_index=True,sort=False) if pieces else pd.DataFrame()
+        info['rows']=int(len(out)); info['scored_rows']=int(pd.to_numeric(out.get('_model_prob'),errors='coerce').notna().sum()) if not out.empty else 0
+        print(f"[V13.5.0-LIVE-THREE-MARKET-SCORER] rows={info['rows']} scored={info['scored_rows']} spread={info.get('spreads')} h2h={info.get('h2h')} totals={info.get('totals')} artifact={info.get('artifact','')}")
+        return out,info
     except Exception as e:
-        logging.exception('[V13.4.7-LIVE-SHADOW-SCORER] failed')
+        logging.exception('[V13.5.0-LIVE-THREE-MARKET-SCORER] failed')
         return d, {'status':'SCORING_ERROR','error':f'{type(e).__name__}:{e}'}
 
 
 def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
-    """Lean NCAAF production-candidate view.
-
-    This path intentionally does not rebuild the legacy rich-market dashboard. It
-    consumes the already-scored future rows, keeps only spread predictions, binds
-    each side to one current executable quote when available, and renders one
-    model-preferred side per physical game. Research diagnostics are optional and
-    never change the frozen STAT probability or betting authority.
-    """
+    """Lean one-table NCAAF view for independent Spread / H2H / Total models."""
     if df_moves_raw is None or df_moves_raw.empty:
-        st.warning("No upcoming NCAAF prediction rows are available yet.")
+        st.warning('No upcoming NCAAF prediction rows are available yet.')
         return
 
-    d,_live_info=_v1347_prepare_live_frozen_stat_shadow_rows(df_moves_raw,label)
+    d,live_info=_v1350_prepare_live_three_market_shadow_rows(df_moves_raw,label)
     now=pd.Timestamp.now(tz='UTC')
     if d is None or d.empty:
-        st.warning('No upcoming NCAAF spread markets are available yet.')
+        st.warning('No upcoming NCAAF spread, H2H or total markets are available yet.')
         return
-
-    # Frozen STAT shadow prediction only. No champion/rich-market probability fallback.
-    d['_pred']=pd.to_numeric(d.get('V13_Cover_Prob',pd.Series(np.nan,index=d.index)),errors='coerce')
+    d['_pred']=pd.to_numeric(d.get('_model_prob'),errors='coerce')
     d=d[d['_pred'].notna()].copy()
     if d.empty:
-        st.warning(f"Frozen STAT could not score the current upcoming spread rows yet. Live shadow scorer status: {_live_info.get('status','UNKNOWN')}.")
+        st.warning(f"The NCAAF sibling models could not score the current upcoming market rows yet. Status: {live_info.get('status','UNKNOWN')}.")
         return
 
     d['_line']=pd.to_numeric(d.get('Value'),errors='coerce')
@@ -46214,159 +46361,148 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     d['_ts']=pd.to_datetime(d.get('Snapshot_Timestamp'),errors='coerce',utc=True)
     d['_book']=d.get('Bookmaker',pd.Series('',index=d.index)).astype(str).str.strip()
     d['_book_norm']=d['_book'].str.lower()
-
-    # Prefer user's executable books. If an outcome has none, retain the freshest
-    # tracked quote for prediction visibility but mark it reference-only.
     _exec_env=str(os.getenv('V13_EXECUTABLE_BOOKS','') or '').strip()
     _exec_books={x.strip().lower() for x in _exec_env.split(',') if x.strip()} if _exec_env else {str(x).strip().lower() for x in REC_BOOKS}
     d['_exec']=d['_book_norm'].isin(_exec_books)
-
-    o=d['_odds']
-    d['_be']=np.nan
-    neg=o<0; pos=o>0
-    d.loc[neg,'_be']=(-o.loc[neg])/((-o.loc[neg])+100.0)
-    d.loc[pos,'_be']=100.0/(o.loc[pos]+100.0)
+    d['_be']=_v1350_american_break_even(d['_odds'])
     d['_profit']=np.nan
-    d.loc[neg,'_profit']=100.0/(-o.loc[neg])
-    d.loc[pos,'_profit']=o.loc[pos]/100.0
+    neg=d['_odds']<0; pos=d['_odds']>0
+    d.loc[neg,'_profit']=100.0/(-d.loc[neg,'_odds'])
+    d.loc[pos,'_profit']=d.loc[pos,'_odds']/100.0
     d['_edge']=d['_pred']-d['_be']
     d['_ev']=d['_pred']*d['_profit']-(1.0-d['_pred'])
 
-    keys=['Game_Key','Market','Outcome','Bookmaker']
-    keys=[c for c in keys if c in d.columns]
+    keys=[c for c in ['Game_Key','Market','Outcome','Bookmaker'] if c in d.columns]
     if keys:
         d=d.sort_values('_ts').drop_duplicates(keys,keep='last')
-
-    # Keep quotes close to the latest current market state; stale rows should not
-    # win merely because an old line created a large apparent edge.
     gok=[c for c in ['Game_Key','Market','Outcome'] if c in d.columns]
     if gok:
         d['_latest_side_ts']=d.groupby(gok)['_ts'].transform('max')
         d['_lag_min']=(d['_latest_side_ts']-d['_ts']).dt.total_seconds().div(60.0)
         max_lag=float(os.getenv('V13_UI_QUOTE_SIMULTANEITY_MINUTES','45') or 45.0)
-        known=d['_lag_min'].notna()
-        d=d[(~known)|d['_lag_min'].le(max_lag)].copy()
+        d=d[d['_lag_min'].isna()|d['_lag_min'].le(max_lag)].copy()
 
-    # Pick one quote per team/outcome: executable first, then best EV, then freshest.
+    # One executable/best-EV quote per outcome, then the highest-edge outcome per market.
     side_keys=[c for c in ['Game_Key','Market','Outcome'] if c in d.columns]
-    d['_ev_sort']=d['_ev'].fillna(-999.0)
+    d['_ev_sort']=d['_ev'].fillna(-999.0); d['_edge_sort']=d['_edge'].fillna(-999.0)
     if side_keys:
         d=d.sort_values(side_keys+['_exec','_ev_sort','_ts'],ascending=[True]*len(side_keys)+[False,False,False])
         sides=d.drop_duplicates(side_keys,keep='first').copy()
     else:
         sides=d.copy()
-
-    # One row per physical game: show the side the frozen model rates more likely
-    # to cover. Betting status remains a separate field.
-    game_keys=[c for c in ['Game_Key','Market'] if c in sides.columns]
-    if game_keys:
-        sides=sides.sort_values(game_keys+['_pred','_edge','_ts'],ascending=[True]*len(game_keys)+[False,False,False])
-        picks=sides.drop_duplicates(game_keys,keep='first').copy()
+    market_keys=[c for c in ['Game_Key','Market'] if c in sides.columns]
+    if market_keys:
+        sides=sides.sort_values(market_keys+['_edge_sort','_ev_sort','_pred','_ts'],ascending=[True]*len(market_keys)+[False,False,False,False])
+        picks=sides.drop_duplicates(market_keys,keep='first').copy()
     else:
         picks=sides.copy()
-
     if picks.empty:
-        st.warning("No current frozen-STAT spread predictions are available.")
+        st.warning('No current three-market NCAAF predictions are available.')
         return
 
-    game_col='Game' if 'Game' in picks.columns else None
-    if game_col:
-        picks['Matchup']=picks[game_col].astype(str)
+    # Common presentation fields.
+    if 'Game' in picks.columns:
+        picks['Matchup']=picks['Game'].astype(str)
     else:
-        home=picks.get('Home_Team_Norm',pd.Series('',index=picks.index)).astype(str)
-        away=picks.get('Away_Team_Norm',pd.Series('',index=picks.index)).astype(str)
+        home=picks.get('Home_Team_Norm',picks.get('Home_Team',pd.Series('',index=picks.index))).astype(str)
+        away=picks.get('Away_Team_Norm',picks.get('Away_Team',pd.Series('',index=picks.index))).astype(str)
         picks['Matchup']=away+' @ '+home
-
     picks['Pick']=picks.get('Outcome',pd.Series('—',index=picks.index)).astype(str)
-    picks['STAT Fair Line']=-pd.to_numeric(picks.get('NCAAF_Stat_Expected_Margin',pd.Series(np.nan,index=picks.index)),errors='coerce')
-    picks['Cover Prob']=picks['_pred']
-    picks['Break Even']=picks['_be']
-    picks['Edge']=picks['_edge']
-    picks['EV / $1']=picks['_ev']
-    picks['Line']=picks['_line']
-    picks['Odds']=picks['_odds']
-    picks['Book']=picks['_book']
     picks['Quote Age Min']=(now-picks['_ts']).dt.total_seconds().div(60.0)
     picks['Hours to Game']=(picks['Game_Start']-now).dt.total_seconds().div(3600.0)
+    picks['_shadow']=picks['_shadow_model_gate'].fillna(False).astype(bool)&picks['_exec']&(picks['_edge']>=pd.to_numeric(picks['_shadow_threshold'],errors='coerce').fillna(.025))&(picks['_ev']>0)
 
-    # Research confirmation is informational only.
-    picks['Agreement']=picks.get('V13_Research_Agreement_Status',pd.Series('NEUTRAL',index=picks.index)).fillna('NEUTRAL').astype(str)
-    picks['Confirm']=pd.to_numeric(picks.get('V13_Research_Confirm_Count'),errors='coerce').fillna(0).astype(int)
-    picks['Conflict']=pd.to_numeric(picks.get('V13_Research_Conflict_Count'),errors='coerce').fillna(0).astype(int)
-
-    # Frozen discovered-system retest flag. This is a prospective research alert,
-    # never betting authority.
-    prev_margin=pd.to_numeric(picks.get('Prev_SU_Margin',pd.Series(np.nan,index=picks.index)),errors='coerce')
-    ats_loss_streak=pd.to_numeric(picks.get('ATS_Loss_Streak_Prior',pd.Series(np.nan,index=picks.index)),errors='coerce')
-    frozen_retest=picks['Line'].ge(10.0)&prev_margin.le(-14.0)&ats_loss_streak.ge(2.0)
-    picks['Frozen System']=np.where(frozen_retest,'+10 DOG / OFF 14+ LOSS / B2B ATS LOSSES','—')
-
-    def _signal_text(r):
-        vals=[]
-        if str(r.get('Frozen System','—')).strip() not in ('','—','nan','None'):
-            vals.append(str(r.get('Frozen System')))
-        for c,prefix in [('Pathi_Active_Text','Pathi'),('BigAl_Active_Text','Big Al')]:
-            v=str(r.get(c,'—') or '—').strip()
-            if v not in ('','—','nan','None'):
-                vals.append(f'{prefix}: {v}')
-        return ' | '.join(vals) if vals else '—'
-    picks['Systems']=picks.apply(_signal_text,axis=1)
-
-    shadow=(picks['Edge']>=0.025)&(picks['EV / $1']>0)&picks['_exec']
-    picks['Recommendation']=np.where(shadow,'SHADOW BET','WATCH')
-    picks.loc[~picks['_exec'],'Recommendation']='WATCH — REFERENCE QUOTE'
-    picks['Bet Status']=np.where(shadow,'SHADOW ONLY — NOT PRODUCTION','NO PRODUCTION BET')
-    picks['Probability Source']='V13.4.4 Frozen STAT'
+    # Spread systems remain attached only to the spread market.
+    picks['Systems']='—'
+    sm=picks['Market'].eq('spreads')
+    if sm.any():
+        prev_margin=pd.to_numeric(picks.get('Prev_SU_Margin',pd.Series(np.nan,index=picks.index)),errors='coerce')
+        ats_loss_streak=pd.to_numeric(picks.get('ATS_Loss_Streak_Prior',pd.Series(np.nan,index=picks.index)),errors='coerce')
+        frozen_retest=picks['_line'].ge(10.0)&prev_margin.le(-14.0)&ats_loss_streak.ge(2.0)&sm
+        picks.loc[frozen_retest,'Systems']='+10 DOG / OFF 14+ LOSS / B2B ATS LOSSES'
+        for idx in picks.index[sm]:
+            vals=[]
+            cur=str(picks.at[idx,'Systems'] or '—').strip()
+            if cur not in ('','—','nan','None'): vals.append(cur)
+            for c,prefix in [('Pathi_Active_Text','Pathi'),('BigAl_Active_Text','Big Al')]:
+                if c in picks.columns:
+                    v=str(picks.at[idx,c] or '—').strip()
+                    if v not in ('','—','nan','None'): vals.append(f'{prefix}: {v}')
+            picks.at[idx,'Systems']=' | '.join(vals) if vals else '—'
 
     picks['ET Date']=picks['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d')
     picks['Game Time']=picks['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%a %I:%M %p')
-    dates=['All']+sorted(picks['ET Date'].dropna().unique().tolist())
+
+    # Collapse the three independent markets into one compact row per physical game.
+    records=[]
+    gcol='Game_Key' if 'Game_Key' in picks.columns else None
+    grouped=picks.groupby(gcol,dropna=False,sort=False) if gcol else [(str(i),picks.loc[[i]]) for i in picks.index]
+    for gk,g in grouped:
+        g=g.sort_values('Game_Start')
+        r0=g.iloc[0]
+        rec={'_game_key':gk,'_game_start':r0.get('Game_Start'),'ET Date':r0.get('ET Date',''),'Game Time':r0.get('Game Time',''),'Matchup':r0.get('Matchup','')}
+        shadow_plays=[]; systems='—'
+        for m,prefix in [('spreads','Spr'),('h2h','H2H'),('totals','Tot')]:
+            x=g[g['Market'].eq(m)]
+            if x.empty:
+                rec.update({f'{prefix} Pick':'—',f'{prefix} Prob':np.nan,f'{prefix} Edge':np.nan,f'{prefix} EV':np.nan,f'{prefix} Fair':np.nan,f'{prefix} Status':'NO PREDICTION'})
+                continue
+            x=x.iloc[0]; pick=str(x.get('Pick','—')); odds=x.get('_odds',np.nan); line=x.get('_line',np.nan)
+            if m=='spreads':
+                label=f"{pick} {float(line):+.1f}" if np.isfinite(line) else pick
+                if np.isfinite(odds): label+=f" ({float(odds):+.0f})"
+                fair=-float(x.get('NCAAF_Stat_Expected_Margin')) if np.isfinite(pd.to_numeric(pd.Series([x.get('NCAAF_Stat_Expected_Margin')]),errors='coerce').iloc[0]) else np.nan
+                systems=str(x.get('Systems','—') or '—')
+            elif m=='h2h':
+                label=pick + (f" {float(odds):+.0f}" if np.isfinite(odds) else '')
+                fair=_v1350_fair_american(x.get('_pred'))
+            else:
+                o=pick.upper() if pick.lower() in ('over','under') else pick
+                label=f"{o} {float(line):.1f}" if np.isfinite(line) else o
+                if np.isfinite(odds): label+=f" ({float(odds):+.0f})"
+                fair=float(x.get('NCAAF_Stat_Expected_Total')) if np.isfinite(pd.to_numeric(pd.Series([x.get('NCAAF_Stat_Expected_Total')]),errors='coerce').iloc[0]) else np.nan
+            status='SHADOW BET' if bool(x.get('_shadow',False)) else ('WATCH' if bool(x.get('_shadow_model_gate',False)) else 'RESEARCH ONLY')
+            rec.update({f'{prefix} Pick':label,f'{prefix} Prob':x.get('_pred',np.nan),f'{prefix} Edge':x.get('_edge',np.nan),f'{prefix} EV':x.get('_ev',np.nan),f'{prefix} Fair':fair,f'{prefix} Status':status})
+            if bool(x.get('_shadow',False)):
+                shadow_plays.append(f"{prefix}: {label}")
+        rec['Shadow Plays']=' | '.join(shadow_plays) if shadow_plays else '—'
+        rec['Systems']=systems
+        records.append(rec)
+    view=pd.DataFrame(records)
+    if view.empty:
+        st.warning('No upcoming three-market predictions are available.')
+        return
+
+    dates=['All']+sorted(view['ET Date'].dropna().astype(str).unique().tolist())
     selected_date=st.selectbox('Game date',dates,key='ncaaf-fast-date')
     if selected_date!='All':
-        picks=picks[picks['ET Date']==selected_date].copy()
+        view=view[view['ET Date']==selected_date].copy()
 
-    st.subheader('NCAAF — Frozen STAT Predictions & Shadow Bets')
-    st.caption('Live frozen-STAT recommendations. Shadow bets are real model triggers being tracked for validation; production betting authority is not open yet. Rich-market diagnostics are intentionally omitted.')
+    st.subheader('NCAAF — Spread, H2H & Total Shadow Board')
+    st.caption('Three independent models in one table. Spread remains the frozen V13.4.4 probability. H2H_STAT_V1 and TOTAL_STAT_V1 are separate shadow-only siblings. Production betting authority remains closed.')
+    spr_n=int((view.get('Spr Status')=='SHADOW BET').sum()) if 'Spr Status' in view else 0
+    h2h_n=int((view.get('H2H Status')=='SHADOW BET').sum()) if 'H2H Status' in view else 0
+    tot_n=int((view.get('Tot Status')=='SHADOW BET').sum()) if 'Tot Status' in view else 0
+    m1,m2,m3,m4,m5=st.columns(5)
+    m1.metric('Upcoming games',int(len(view))); m2.metric('Spread shadow',spr_n); m3.metric('H2H shadow',h2h_n); m4.metric('Total shadow',tot_n); m5.metric('Production bets',0)
+    st.caption('Shadow selections are tracked as if they were bets, but they are not production-authorized wagers.')
 
-    _shadow_now=((picks['Edge']>=0.025)&(picks['EV / $1']>0)&picks['_exec'])
-    m1,m2,m3,m4=st.columns(4)
-    m1.metric('Upcoming games',int(len(picks)))
-    m2.metric('Shadow bets',int(_shadow_now.sum()))
-    m3.metric('Production bets',0)
-    m4.metric('Frozen-system alerts',int((picks['Frozen System']!='—').sum()))
-    if int(_shadow_now.sum())>0:
-        st.info(f"{int(_shadow_now.sum())} frozen-policy shadow bet(s) currently qualify at the 2.5% edge threshold. These are NOT production bets yet.")
-    else:
-        st.caption('No 2.5% shadow bets qualify at the current prices. Production bets remain 0 while prospective validation is open.')
-
-    # Keep the main table intentionally small. No sparkline/history, rich-market
-    # feature columns, model-instance hashes, legacy champion columns or live-odds matrix.
-    picks=picks.sort_values(['Game_Start','Edge'],ascending=[True,False])
-    main=picks[['Game Time','Matchup','Pick','Line','Odds','Book','Cover Prob','STAT Fair Line','Break Even','Edge','EV / $1','Agreement','Systems','Recommendation','Bet Status']].copy()
-    for c in ['Cover Prob','Break Even','Edge']:
+    view=view.sort_values('_game_start')
+    main=view[['Game Time','Matchup','Spr Pick','Spr Prob','Spr Edge','H2H Pick','H2H Prob','H2H Edge','Tot Pick','Tot Prob','Tot Edge','Shadow Plays','Systems']].copy()
+    for c in ['Spr Prob','Spr Edge','H2H Prob','H2H Edge','Tot Prob','Tot Edge']:
         main[c]=pd.to_numeric(main[c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
-    main['EV / $1']=pd.to_numeric(main['EV / $1'],errors='coerce').map(lambda x:f'{x:+.3f}' if pd.notna(x) else '—')
-    main['Line']=pd.to_numeric(main['Line'],errors='coerce').map(lambda x:f'{x:+.1f}' if pd.notna(x) else '—')
-    main['STAT Fair Line']=pd.to_numeric(main['STAT Fair Line'],errors='coerce').map(lambda x:f'{x:+.1f}' if pd.notna(x) else '—')
-    main['Odds']=pd.to_numeric(main['Odds'],errors='coerce').map(lambda x:f'{x:+.0f}' if pd.notna(x) else '—')
     st.dataframe(main,use_container_width=True,hide_index=True)
 
-    if st.checkbox('Show research diagnostics',value=False,key='ncaaf-fast-research'):
-        research=picks[['Game Time','Matchup','Pick','Cover Prob','Agreement','Confirm','Conflict','Quote Age Min','Hours to Game']].copy()
-        calp=pd.to_numeric(picks.get('V13_Calibration_V2_Research_Prob',pd.Series(np.nan,index=picks.index)),errors='coerce')
-        cald=pd.to_numeric(picks.get('V13_Calibration_V2_Delta',pd.Series(np.nan,index=picks.index)),errors='coerce')
-        research['Calibration V2 Prob']=calp
-        research['Calibration V2 Delta']=cald
-        research['Calibration V2 Status']=picks.get('V13_Calibration_V2_Status',pd.Series('UNAVAILABLE',index=picks.index)).astype(str)
-        research['Pathi']=picks.get('Pathi_Active_Text',pd.Series('—',index=picks.index)).astype(str)
-        research['Big Al']=picks.get('BigAl_Active_Text',pd.Series('—',index=picks.index)).astype(str)
-        for c in ['Cover Prob','Calibration V2 Prob','Calibration V2 Delta']:
-            research[c]=pd.to_numeric(research[c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
-        research['Quote Age Min']=pd.to_numeric(research['Quote Age Min'],errors='coerce').round(1)
-        research['Hours to Game']=pd.to_numeric(research['Hours to Game'],errors='coerce').round(1)
-        st.dataframe(research,use_container_width=True,hide_index=True)
+    if st.checkbox('Show market model diagnostics',value=False,key='ncaaf-fast-research'):
+        diag=view[['Game Time','Matchup','Spr Fair','Spr EV','Spr Status','H2H Fair','H2H EV','H2H Status','Tot Fair','Tot EV','Tot Status']].copy()
+        diag['Spr Fair']=pd.to_numeric(diag['Spr Fair'],errors='coerce').map(lambda x:f'{x:+.1f}' if pd.notna(x) else '—')
+        diag['H2H Fair']=pd.to_numeric(diag['H2H Fair'],errors='coerce').map(lambda x:f'{x:+.0f}' if pd.notna(x) else '—')
+        diag['Tot Fair']=pd.to_numeric(diag['Tot Fair'],errors='coerce').map(lambda x:f'{x:.1f}' if pd.notna(x) else '—')
+        for c in ['Spr EV','H2H EV','Tot EV']:
+            diag[c]=pd.to_numeric(diag[c],errors='coerce').map(lambda x:f'{x:+.3f}' if pd.notna(x) else '—')
+        st.dataframe(diag,use_container_width=True,hide_index=True)
 
-    print(f"[V13.4.7-LIVE-SHADOW-FAST-UI] rows={len(picks)} spreads_only=TRUE one_side_per_game=TRUE rich_market_render=FALSE live_odds_matrix=FALSE shadow_bets={int(((picks['Edge']>=0.025)&(picks['EV / $1']>0)&picks['_exec']).sum())} production_bets=0 frozen_system_alerts={int((picks['Frozen System']!='—').sum())} probability_source=V13_4_4_STAT_ONLY_FROZEN production_bet_authority=CLOSED")
+    print(f"[V13.5.0-THREE-MARKET-FAST-UI] games={len(view)} spread_predictions={int(view['Spr Prob'].notna().sum())} h2h_predictions={int(view['H2H Prob'].notna().sum())} total_predictions={int(view['Tot Prob'].notna().sum())} spread_shadow={spr_n} h2h_shadow={h2h_n} total_shadow={tot_n} production_bets=0 rich_market_render=FALSE probability_blend=NONE spread_source=V13_4_4_STAT_ONLY_FROZEN h2h_source=H2H_STAT_V1 total_source=TOTAL_STAT_V1")
 
 def render_scanner_tab(label, sport_key, container, force_reload=False):
 
@@ -46426,7 +46562,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         
         HOURS = 24
         
-        # V13.4.6: the NCAAF lean view does not need a second full-history query
+        # V13.5.0: the NCAAF three-market lean view does not need a second full-history query
         # for legacy confidence trends/sparklines. The current sharp-move rows are
         # already the authoritative scored feed for the fast prediction table.
         df_all_snapshots = pd.DataFrame() if _ncaaf_fast_ui else get_recent_history(hours=HOURS, sport=label)
