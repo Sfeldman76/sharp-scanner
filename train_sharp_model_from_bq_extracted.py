@@ -1,4 +1,4 @@
-V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.4.6-frozen-stat-lean-fast-ui"
+V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.4.7-live-shadow-bets-fast-ui"
 
 from sharp_line_dashboard import (
     train_with_champion_wrapper,
