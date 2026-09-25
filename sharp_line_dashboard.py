@@ -16665,8 +16665,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-24-v13.5.0-three-market-shadow-ui"
-NCAAF_V13_HOTFIX = "V13_5_0__FROZEN_SPREAD_UNCHANGED__H2H_STAT_V1__TOTAL_STAT_V1__ONE_TABLE__SHADOW_ONLY__NO_RICH_RENDER"
+NCAAF_V13_VERSION = "2026-09-24-v13.5.0.1-three-market-shadow-ui-maskfix"
+NCAAF_V13_HOTFIX = "V13_5_0_1__FROZEN_SPREAD_UNCHANGED__H2H_STAT_V1__TOTAL_STAT_V1__ONE_TABLE__SHADOW_ONLY__NO_RICH_RENDER"
 NCAAF_HISTORY_POLICY = "ALL_AVAILABLE_SEASONS"
 NCAAF_HISTORY_FIXED_LOOKBACK_DAYS = None  # Never silently truncate production history.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -16687,8 +16687,8 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # from the same deploy bundle.  The simple legacy feature materializer is kept
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
-V133_DEPLOY_BUILD_ID = "2026-09-24-v13.5.0-three-market-shadow-ui-1"
-V1337_SOURCE_TAG = "dashboard-v13.5.0-three-market-shadow-ui"
+V133_DEPLOY_BUILD_ID = "2026-09-24-v13.5.0.1-three-market-shadow-ui-maskfix-1"
+V1337_SOURCE_TAG = "dashboard-v13.5.0.1-three-market-shadow-ui-maskfix"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -33476,7 +33476,7 @@ def fit_ncaaf_statistical_brain(log_func=print):
     ll_h=_ncaaf_stat_logloss(yh[okh],ph[okh]); auc_h=_ncaaf_stat_auc(yh[okh],ph[okh]); br_h=_ncaaf_stat_brier(yh[okh],ph[okh])
     ll_h_market=_ncaaf_stat_logloss(yh[okh],h2h_market[okh]) if okh.any() else np.nan
     br_h_market=_ncaaf_stat_brier(yh[okh],h2h_market[okh]) if okh.any() else np.nan
-    _cal_tot=_v1350_binary_calibration_metrics(ytot[valid_tot],ptot[valid_tot])
+    _cal_tot=_v1350_binary_calibration_metrics(ytot,ptot)
     _cal_h=_v1350_binary_calibration_metrics(yh[okh],ph[okh])
 
     def _trust(ll,auc,market_ll=0.69314718056):
@@ -33544,7 +33544,7 @@ def fit_ncaaf_statistical_brain(log_func=print):
     for _m,_c in bundle["sibling_market_contracts"].items():
         _met=_c.get("metrics") or {}
         log_func(
-            f"[V13.5.0-MARKET-SIBLING-CONTRACT] market={_m} model={_c.get('model_id')} target={_c.get('target')} "
+            f"[V13.5.0.1-MARKET-SIBLING-CONTRACT] market={_m} model={_c.get('model_id')} target={_c.get('target')} "
             f"status={_c.get('status')} gate={'PASS' if _c.get('shadow_gate_pass') else 'CLOSED'} reason={_c.get('reason')} "
             f"n={int(_met.get('n',0) or 0)} auc={float(_met.get('auc',np.nan)):.4f} ll={float(_met.get('logloss',np.nan)):.6f} "
             f"market_ll={float(_met.get('market_logloss',np.nan)):.6f} brier={float(_met.get('brier',np.nan)):.6f} market_brier={float(_met.get('market_brier',np.nan)):.6f} "
@@ -46274,7 +46274,7 @@ def _v1350_prepare_live_three_market_shadow_rows(df_moves_raw, label):
                     if 'Opening_Total' not in d.columns: d['Opening_Total']=np.nan
                     d['Opening_Total']=pd.to_numeric(d['Opening_Total'],errors='coerce').where(pd.to_numeric(d['Opening_Total'],errors='coerce').notna(),_mapped)
         except Exception as _anchor_err:
-            logging.warning('[V13.5.0-GAME-ANCHOR-JOIN] unavailable: %s:%s',type(_anchor_err).__name__,_anchor_err)
+            logging.warning('[V13.5.0.1-GAME-ANCHOR-JOIN] unavailable: %s:%s',type(_anchor_err).__name__,_anchor_err)
 
     bundle=_v1347_load_latest_frozen_stat_spread_bundle()
     if not isinstance(bundle,dict):
@@ -46305,7 +46305,7 @@ def _v1350_prepare_live_three_market_shadow_rows(df_moves_raw, label):
                         if len(z)!=before:
                             raise RuntimeError(f'Pathi/BigAl enrichment changed row count {before}->{len(z)}')
                 except Exception as e:
-                    logging.warning('[V13.5.0-FAST-SYSTEMS] unavailable: %s:%s',type(e).__name__,e)
+                    logging.warning('[V13.5.0.1-FAST-SYSTEMS] unavailable: %s:%s',type(e).__name__,e)
                 z=_attach_stat(z,sb,'spreads')
                 arch=bundle.get('ncaaf_v13_value_architecture') or {}
                 z=_score_v13(z,arch)
@@ -46332,10 +46332,10 @@ def _v1350_prepare_live_three_market_shadow_rows(df_moves_raw, label):
             }
         out=pd.concat(pieces,ignore_index=True,sort=False) if pieces else pd.DataFrame()
         info['rows']=int(len(out)); info['scored_rows']=int(pd.to_numeric(out.get('_model_prob'),errors='coerce').notna().sum()) if not out.empty else 0
-        print(f"[V13.5.0-LIVE-THREE-MARKET-SCORER] rows={info['rows']} scored={info['scored_rows']} spread={info.get('spreads')} h2h={info.get('h2h')} totals={info.get('totals')} artifact={info.get('artifact','')}")
+        print(f"[V13.5.0.1-LIVE-THREE-MARKET-SCORER] rows={info['rows']} scored={info['scored_rows']} spread={info.get('spreads')} h2h={info.get('h2h')} totals={info.get('totals')} artifact={info.get('artifact','')}")
         return out,info
     except Exception as e:
-        logging.exception('[V13.5.0-LIVE-THREE-MARKET-SCORER] failed')
+        logging.exception('[V13.5.0.1-LIVE-THREE-MARKET-SCORER] failed')
         return d, {'status':'SCORING_ERROR','error':f'{type(e).__name__}:{e}'}
 
 
@@ -46502,7 +46502,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
             diag[c]=pd.to_numeric(diag[c],errors='coerce').map(lambda x:f'{x:+.3f}' if pd.notna(x) else '—')
         st.dataframe(diag,use_container_width=True,hide_index=True)
 
-    print(f"[V13.5.0-THREE-MARKET-FAST-UI] games={len(view)} spread_predictions={int(view['Spr Prob'].notna().sum())} h2h_predictions={int(view['H2H Prob'].notna().sum())} total_predictions={int(view['Tot Prob'].notna().sum())} spread_shadow={spr_n} h2h_shadow={h2h_n} total_shadow={tot_n} production_bets=0 rich_market_render=FALSE probability_blend=NONE spread_source=V13_4_4_STAT_ONLY_FROZEN h2h_source=H2H_STAT_V1 total_source=TOTAL_STAT_V1")
+    print(f"[V13.5.0.1-THREE-MARKET-FAST-UI] games={len(view)} spread_predictions={int(view['Spr Prob'].notna().sum())} h2h_predictions={int(view['H2H Prob'].notna().sum())} total_predictions={int(view['Tot Prob'].notna().sum())} spread_shadow={spr_n} h2h_shadow={h2h_n} total_shadow={tot_n} production_bets=0 rich_market_render=FALSE probability_blend=NONE spread_source=V13_4_4_STAT_ONLY_FROZEN h2h_source=H2H_STAT_V1 total_source=TOTAL_STAT_V1")
 
 def render_scanner_tab(label, sport_key, container, force_reload=False):
 
