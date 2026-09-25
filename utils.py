@@ -99,8 +99,8 @@ SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 # evidence.  The exact fitted artifact identity (SHA256), not the human version
 # string, is the primary model-instance key.
 NCAAF_V13_CODE_VERSION = "V13.4.4"
-V133_DEPLOY_BUILD_ID = "2026-09-24-v13.5.0.1-three-market-shadow-ui-maskfix-1"
-V1337_SOURCE_TAG = "utils-v13.5.0.1-three-market-shadow-ui-maskfix"
+V133_DEPLOY_BUILD_ID = "2026-09-25-v13.5.1-research-challengers-1"
+V1337_SOURCE_TAG = "utils-v13.5.1-research-challengers"
 NCAAF_V13_FORWARD_PREDICTIONS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_predictions"
 NCAAF_V13_FORWARD_RESULTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_results"
 NCAAF_V13_FORWARD_LEDGER_VERSION = "2026-09-20-v13.3.5-immutable-artifact-aware-forward-ledger-v1"
@@ -15421,8 +15421,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-24-v13.5.0.1-three-market-shadow-ui-maskfix"
-NCAAF_V13_HOTFIX = "V13_5_0_1__FROZEN_SPREAD_UNCHANGED__H2H_STAT_V1__TOTAL_STAT_V1__TOTAL_CALIBRATION_MASK_FIX__SHADOW_ONLY"
+NCAAF_V13_VERSION = "2026-09-25-v13.5.1-research-challengers"
+NCAAF_V13_HOTFIX = "V13_5_1__FROZEN_STAT_UNCHANGED__RESEARCH_CHALLENGERS__SHADOW_ONLY"
 # V13.2.21 MMI is training/research diagnostic only; runtime probability behavior is unchanged.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
 NCAAF_V13_MIN_TRAIN_GAMES = 500
