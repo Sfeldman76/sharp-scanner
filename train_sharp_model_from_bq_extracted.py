@@ -1,4 +1,4 @@
-V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.5.0.1-three-market-shadow-ui-maskfix"
+V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.5.1-research-challengers"
 
 from sharp_line_dashboard import (
     train_with_champion_wrapper,
