@@ -16665,8 +16665,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-24-v13.5.0.1-three-market-shadow-ui-maskfix"
-NCAAF_V13_HOTFIX = "V13_5_0_1__FROZEN_SPREAD_UNCHANGED__H2H_STAT_V1__TOTAL_STAT_V1__ONE_TABLE__SHADOW_ONLY__NO_RICH_RENDER"
+NCAAF_V13_VERSION = "2026-09-25-v13.5.1-research-challengers"
+NCAAF_V13_HOTFIX = "V13_5_1__FROZEN_STAT_UNCHANGED__EXTERNAL_CONSENSUS_V1__RIVALRY_V1__H2H_V1__TOTALS_V1__ZERO_AUTHORITY"
 NCAAF_HISTORY_POLICY = "ALL_AVAILABLE_SEASONS"
 NCAAF_HISTORY_FIXED_LOOKBACK_DAYS = None  # Never silently truncate production history.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -16687,8 +16687,8 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # from the same deploy bundle.  The simple legacy feature materializer is kept
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
-V133_DEPLOY_BUILD_ID = "2026-09-24-v13.5.0.1-three-market-shadow-ui-maskfix-1"
-V1337_SOURCE_TAG = "dashboard-v13.5.0.1-three-market-shadow-ui-maskfix"
+V133_DEPLOY_BUILD_ID = "2026-09-25-v13.5.1-research-challengers-1"
+V1337_SOURCE_TAG = "dashboard-v13.5.1-research-challengers"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -24738,6 +24738,19 @@ def _v13214_build_historical_bigal_context(h: pd.DataFrame, log_func=print) -> p
     d["__pair"]=pair
     hgrp=d.sort_values("__date",kind="stable").groupby(["Team_Norm","__pair"],sort=False,dropna=False)
     d["Last_Matchup_SU_Margin_System"]=hgrp["SU_Margin"].shift(1)
+    # V13.5.1 preregistered H2H/rivalry challenger state. All values are prior-only.
+    d["H2H_Consecutive_Wins_Prior_Research"] = 0.0
+    d["H2H_Consecutive_Losses_Prior_Research"] = 0.0
+    for _pair, _ix in hgrp.groups.items():
+        _ix=np.asarray(list(_ix),dtype=int); _vals=pd.to_numeric(d.loc[_ix,"SU_Win"],errors="coerce").to_numpy(dtype=float)
+        _w=np.zeros(len(_ix),dtype=float); _l=np.zeros(len(_ix),dtype=float); cw=cl=0
+        for _j,_v in enumerate(_vals):
+            _w[_j]=cw; _l[_j]=cl
+            if np.isfinite(_v) and _v>=0.5: cw+=1; cl=0
+            elif np.isfinite(_v): cl+=1; cw=0
+        d.loc[_ix,"H2H_Consecutive_Wins_Prior_Research"]=_w
+        d.loc[_ix,"H2H_Consecutive_Losses_Prior_Research"]=_l
+    d["H2H_Prior_Meetings_Research"]=hgrp.cumcount().astype(float)
     d["MMI_Last_Matchup_Is_Home_System"]=hgrp["Is_Home"].shift(1)
     d["MMI_Last_Matchup_Points_For_System"]=hgrp["Points_For"].shift(1)
     d["Revenge_Flag_Current"]=np.where(d["Last_Matchup_SU_Margin_System"].notna(),(d["Last_Matchup_SU_Margin_System"]<0).astype(float),np.nan)
@@ -24758,7 +24771,7 @@ def _v13214_build_historical_bigal_context(h: pd.DataFrame, log_func=print) -> p
             if c in d.columns:
                 z=pd.to_numeric(d[c],errors="coerce"); val=val.where(val.notna(),z)
         d[dst]=val
-    keep=[c for c in ["__game","__date","Season","Team_Norm","Opponent_Norm","team_conf","opp_conf","MMI_Hist_ATS_Y","SU_Win","Opening_Spread","Is_Home","Week_Number","Team_Game_Number","Is_Regular_Season","Is_Bowl","Is_Postseason","Days_Since_Last_Game_System","Opp_Days_Since_Last_Game_System","MMI_First_Home_Game_System","MMI_First_Road_Game_System","SU_Win_Streak_Prior","SU_Loss_Streak_Prior","ATS_Win_Streak_Prior","ATS_Loss_Streak_Prior","Prev_SU_Win","Prev_SU_Loss","Prev_SU_Margin","Prev_Points_For","Prev_ATS_Win","Prev_ATS_Loss","Prev_Is_ML_Dog","Prev_Is_ML_Favorite","Prev2_SU_Win","Prev3_SU_Win","Prev2_ATS_Win","Prev3_ATS_Win","Prev2_Is_ML_Dog","Prev3_Is_ML_Dog","Revenge_Flag_Current","Opp_Revenge_Flag_Current","Last_Matchup_SU_Margin_System","MMI_Last_Matchup_Is_Home_System","MMI_Last_Matchup_Points_For_System","WinPct_Prior_System","Opp_WinPct_Prior_System","MMI_ATS_WinPct_Prior_System","MMI_Opp_ATS_WinPct_Prior_System","Opp_Prev_SU_Win","Opp_Prev_SU_Loss","Opp_Prev_ATS_Win","Opp_Prev_ATS_Loss","Opp_Prev_Is_ML_Dog","Opp_Prev_Is_ML_Favorite","Team_Prior_Season_Playoff","Opponent_Prior_Season_Playoff"] if c in d.columns]
+    keep=[c for c in ["__game","__date","Season","Team_Norm","Opponent_Norm","team_conf","opp_conf","MMI_Hist_ATS_Y","SU_Win","Opening_Spread","Is_Home","Week_Number","Team_Game_Number","Is_Regular_Season","Is_Bowl","Is_Postseason","Days_Since_Last_Game_System","Opp_Days_Since_Last_Game_System","MMI_First_Home_Game_System","MMI_First_Road_Game_System","SU_Win_Streak_Prior","SU_Loss_Streak_Prior","ATS_Win_Streak_Prior","ATS_Loss_Streak_Prior","Prev_SU_Win","Prev_SU_Loss","Prev_SU_Margin","Prev_Points_For","Prev_ATS_Win","Prev_ATS_Loss","Prev_Is_ML_Dog","Prev_Is_ML_Favorite","Prev2_SU_Win","Prev3_SU_Win","Prev2_ATS_Win","Prev3_ATS_Win","Prev2_Is_ML_Dog","Prev3_Is_ML_Dog","Revenge_Flag_Current","Opp_Revenge_Flag_Current","Last_Matchup_SU_Margin_System","MMI_Last_Matchup_Is_Home_System","MMI_Last_Matchup_Points_For_System","WinPct_Prior_System","Opp_WinPct_Prior_System","MMI_ATS_WinPct_Prior_System","MMI_Opp_ATS_WinPct_Prior_System","Opp_Prev_SU_Win","Opp_Prev_SU_Loss","Opp_Prev_ATS_Win","Opp_Prev_ATS_Loss","Opp_Prev_Is_ML_Dog","Opp_Prev_Is_ML_Favorite","Team_Prior_Season_Playoff","Opponent_Prior_Season_Playoff","H2H_Consecutive_Wins_Prior_Research","H2H_Consecutive_Losses_Prior_Research","H2H_Prior_Meetings_Research","Rivalry_Flag","External_Consensus_Margin","External_Consensus_Dispersion","External_Consensus_Model_Count","External_Consensus_Timestamp","External_vs_Open_Edge"] if c in d.columns]
     out=d[keep].copy()
     log_func(f"[MMI-HIST-CONTEXT] rows={len(out)} games={out['__game'].nunique() if '__game' in out else 0} seasons={sorted(pd.to_numeric(out.get('Season'),errors='coerce').dropna().astype(int).unique().tolist())} source={HISTORICAL_NCAAF_CORE_VIEW} market_move_required=FALSE leakage=PRIOR_ONLY")
     return out
@@ -24814,6 +24827,18 @@ def _v13214_historical_bigal_discovery(hist: pd.DataFrame, log_func=print) -> di
     three_suats=psuw.eq(1)&n("Prev2_SU_Win").eq(1)&n("Prev3_SU_Win").eq(1)&patsw.eq(1)&n("Prev2_ATS_Win").eq(1)&n("Prev3_ATS_Win").eq(1); add("THREE_STRAIGHT_SU_ATS_WINS","prior_ats_sequence",three_suats)
     # revenge/market/opponent
     add("REVENGE","revenge",rev.eq(1)); add("REVENGE_PRIOR_HOME_LOSS","revenge_detail",rev.eq(1)&h2hh.eq(1)&h2hm.lt(0)); add("REVENGE_BLOWOUT_14_PLUS","revenge_detail",rev.eq(1)&h2hm.le(-14)); add("REVENGE_SHUTOUT","revenge_detail",rev.eq(1)&h2hpf.eq(0)&h2hm.lt(0)); add("OPPONENT_ALSO_REVENGE","opponent_revenge",orev.eq(1))
+    # V13.5.1 preregistered research atoms. These remain discovery/shadow only.
+    add("H2H_WIN_STREAK_3_PLUS","h2h_streak",n("H2H_Consecutive_Wins_Prior_Research").ge(3))
+    add("H2H_LOSS_STREAK_3_PLUS","h2h_streak",n("H2H_Consecutive_Losses_Prior_Research").ge(3))
+    add("H2H_3PLUS_PRIOR_MEETINGS","h2h_depth",n("H2H_Prior_Meetings_Research").ge(3))
+    if "Rivalry_Flag" in g.columns:
+        add("RIVALRY_GAME","rivalry",n("Rivalry_Flag").eq(1))
+        add("RIVALRY_H2H_WIN_STREAK_3_PLUS","rivalry_momentum",n("Rivalry_Flag").eq(1)&n("H2H_Consecutive_Wins_Prior_Research").ge(3))
+        add("RIVALRY_H2H_LOSS_STREAK_3_PLUS","rivalry_momentum",n("Rivalry_Flag").eq(1)&n("H2H_Consecutive_Losses_Prior_Research").ge(3))
+    if "External_vs_Open_Edge" in g.columns:
+        _ext=n("External_vs_Open_Edge")
+        add("EXTERNAL_CONSENSUS_EDGE_3_PLUS","external_consensus",_ext.ge(3))
+        add("EXTERNAL_CONSENSUS_EDGE_MINUS3_OR_LESS","external_consensus",_ext.le(-3))
     add("CURRENT_DOG","market_role",spread.gt(0)); add("CURRENT_FAVORITE","market_role",spread.lt(0)); add("CURRENT_PICKEM","market_role",spread.abs().le(.5)&spread.notna()); add("HOME","location",home.eq(1)); add("ROAD","location",home.eq(0)); add("ROAD_DOG","market_location",spread.gt(0)&home.eq(0)); add("HOME_DOG","market_location",spread.gt(0)&home.eq(1))
     add("DOG_3_OR_LESS","market_band",spread.gt(0)&spread.le(3.0)); add("DOG_3_5_TO_7","market_band",spread.ge(3.5)&spread.le(7.0)); add("DOG_7_5_TO_10","market_band",spread.ge(7.5)&spread.le(10.0)); add("DOG_10_PLUS","market_band",spread.ge(10.0)); add("DOG_9_5_OR_LESS","market_band",spread.gt(0)&spread.le(9.5)); add("FAVORITE_7_PLUS","market_band",spread.le(-7)); add("SPREAD_GREATER_THAN_MINUS14","market_constraint",spread.gt(-14)&spread.notna()); add("POSTSEASON_DOG_OVER_18","market_band",n("Is_Postseason").eq(1)&spread.gt(18))
     add("OPP_OFF_SU_WIN","opponent_state",n("Opp_Prev_SU_Win").eq(1)); add("OPP_OFF_SU_LOSS","opponent_state",n("Opp_Prev_SU_Loss").eq(1)); add("OPP_OFF_UPSET_WIN","opponent_prior_role",n("Opp_Prev_SU_Win").eq(1)&n("Opp_Prev_Is_ML_Dog").eq(1)); add("OPP_OFF_UPSET_LOSS_AS_FAVORITE","opponent_prior_role",n("Opp_Prev_SU_Loss").eq(1)&n("Opp_Prev_Is_ML_Favorite").eq(1)); add("OPP_OFF_SU_ATS_LOSS","opponent_combo",n("Opp_Prev_SU_Loss").eq(1)&n("Opp_Prev_ATS_Loss").eq(1)); add("OPP_WINNING_RECORD","opponent_record",n("Opp_WinPct_Prior_System").ge(.5)); add("OPP_LOSING_RECORD","opponent_record",n("Opp_WinPct_Prior_System").lt(.5)&n("Opp_WinPct_Prior_System").notna()); add("OPP_ATS_55_PLUS","opponent_ats",n("MMI_Opp_ATS_WinPct_Prior_System").ge(.55)); add("OPP_ATS_45_OR_LESS","opponent_ats",n("MMI_Opp_ATS_WinPct_Prior_System").le(.45)&n("MMI_Opp_ATS_WinPct_Prior_System").notna())
@@ -33245,6 +33270,14 @@ def fit_ncaaf_v13_value_architecture(log_func=print):
             "target_semantics":"TEAM_MARGIN_PLUS_SAME_ROW_VALUE__PUSH_EXCLUDED",
         },
         "core_v2":core_v2,
+        "research_challengers_v1":{
+            "authority":0,"production_weight":0.0,"baseline":"FROZEN_STAT_UNCHANGED",
+            "EXTERNAL_CONSENSUS_V1":{"status":"ACTIVE_WHEN_POINT_IN_TIME_EXTERNAL_RATINGS_AVAILABLE","required":["External_Consensus_Margin","External_Consensus_Timestamp"],"features":["consensus_margin","median_margin","dispersion","model_count","vs_open_edge","vs_stat_edge","agreement_count","open_to_24h_to_6h_to_1h_decay"],"leakage_rule":"rating_timestamp_must_precede_scored_market_snapshot"},
+            "RIVALRY_V1":{"status":"ACTIVE_WHEN_RIVALRY_FLAG_AVAILABLE","features":["rivalry_flag","h2h_win_streak_prior","h2h_loss_streak_prior","h2h_depth","favorite_dog_role","spread_bucket","conference_level"],"preregistered":True},
+            "H2H_V1":{"status":"ACTIVE_RESEARCH","features":["h2h_win_streak_prior","h2h_loss_streak_prior","h2h_depth","last_matchup_margin","revenge","home_away_role_change"],"prior_only":True},
+            "TOTALS_V1":{"status":"SIBLING_TOTAL_STAT_V1_PLUS_RESEARCH_INTERACTIONS","features":["total_stat_probability","h2h_scoring_context","spread_total_interaction","market_total_move","weather_if_point_in_time","travel_rest","roster_qb_continuity_if_point_in_time"],"target_separate_from_spread":True},
+            "validation":"SEASON_FORWARD_OOF__INDEPENDENT_SHADOW__PROPER_SCORES__ATS_OR_OU_BY_MARKET__CALIBRATION__STABILITY__PROSPECTIVE_PROMOTION_REQUIRED"
+        },
         "fundamental":_fund_public,
         "market_intelligence":({k:v for k,v in market.items() if k!="oof_frame"} if isinstance(market,dict) else None),
         "common_market_history":common_market_history,
