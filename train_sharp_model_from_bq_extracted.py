@@ -1,4 +1,4 @@
-V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.5.1-research-challengers"
+V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.5.2-v13-first"
 
 from sharp_line_dashboard import (
     train_with_champion_wrapper,
