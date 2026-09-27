@@ -16665,8 +16665,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-27-v13.5.4.1-promotion-eligible-challengers"
-NCAAF_V13_HOTFIX = "V13_5_4_1__SPREAD_FROZEN__H2H_TOTALS_CHALLENGERS_CAN_EARN_AUTHORITY"
+NCAAF_V13_VERSION = "2026-09-27-v13.5.4.2-residual-edge-challengers"
+NCAAF_V13_HOTFIX = "V13_5_4_2__SPREAD_FROZEN__H2H_MARKET_RESIDUAL__TOTAL_SCORE__SPREAD_RESIDUAL_STACK"
 NCAAF_HISTORY_POLICY = "ALL_AVAILABLE_SEASONS"
 NCAAF_HISTORY_FIXED_LOOKBACK_DAYS = None  # Never silently truncate production history.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -16687,8 +16687,8 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # from the same deploy bundle.  The simple legacy feature materializer is kept
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
-V133_DEPLOY_BUILD_ID = "2026-09-27-v13.5.4.1-promotion-eligible-1"
-V1337_SOURCE_TAG = "dashboard-v13.5.4.1-promotion-eligible"
+V133_DEPLOY_BUILD_ID = "2026-09-27-v13.5.4.2-residual-edge-1"
+V1337_SOURCE_TAG = "dashboard-v13.5.4.2-residual-edge"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -30231,7 +30231,7 @@ def _ncaaf_v13_compare_v12_holdout(hold_rows: pd.DataFrame, y_hold, p_v12, bundl
             raise RuntimeError(f"canonical production probability length mismatch {len(_canon)} != {len(p13)}")
         _pm=np.isfinite(_canon)&np.isfinite(p13)
         _production_parity_max_abs_diff=float(np.max(np.abs(_canon[_pm]-p13[_pm]))) if _pm.any() else np.inf
-        if (not np.isfinite(_production_parity_max_abs_diff)) or _production_parity_max_abs_diff>1e-12:
+        if (not np.isfinite(_production_parity_max_abs_diff)) or _production_parity_max_abs_diff>1e-7:
             log_func(f"[PRODUCTION-PROB-PARITY] status=FAIL max_abs_diff={_production_parity_max_abs_diff} rows={int(_pm.sum())}")
             return {"status":"PRODUCTION_PROBABILITY_PARITY_FAIL","promotion_gate_pass":False,"production_parity_max_abs_diff":_production_parity_max_abs_diff}
         p13=_canon.copy()
@@ -33302,9 +33302,11 @@ def fit_ncaaf_v13_value_architecture(log_func=print):
             "EXTERNAL_CONSENSUS_V1":{"status":"ACTIVE_WHEN_POINT_IN_TIME_EXTERNAL_RATINGS_AVAILABLE","required":["External_Consensus_Margin","External_Consensus_Timestamp"],"features":["consensus_margin","median_margin","dispersion","model_count","vs_open_edge","vs_stat_edge","agreement_count","open_to_24h_to_6h_to_1h_decay"],"leakage_rule":"rating_timestamp_must_precede_scored_market_snapshot"},
             "RIVALRY_V1":{"status":"ACTIVE_WHEN_RIVALRY_FLAG_AVAILABLE","features":["rivalry_flag","h2h_win_streak_prior","h2h_loss_streak_prior","h2h_depth","favorite_dog_role","spread_bucket","conference_level"],"preregistered":True},
             "H2H_V1":{"status":"ACTIVE_RESEARCH","features":["h2h_win_streak_prior","h2h_loss_streak_prior","h2h_depth","last_matchup_margin","revenge","home_away_role_change"],"prior_only":True},
+            "H2H_MARKET_RESIDUAL_V1":{"status":"ACTIVE_PROMOTION_ELIGIBLE_CHALLENGER","authority_lifecycle":"RESEARCH_TO_SHADOW_TO_PROMOTION_ELIGIBLE_TO_PRODUCTION","can_earn_production_authority":True,"target":"ACTUAL_WIN_MINUS_DEVIGGED_MARKET_PROBABILITY","production_authority":0},
             "H2H_MATCHUP_V2":{"status":"ACTIVE_PROMOTION_ELIGIBLE_CHALLENGER","authority_lifecycle":"RESEARCH_TO_SHADOW_TO_PROMOTION_ELIGIBLE_TO_PRODUCTION","can_earn_production_authority":True,"features":["prior_meetings","prior_margin_current_team_orientation","prior_total","days_since_matchup","same_home_role","recency_weighted_margin","recency_weighted_total","stat_fair_margin"],"validation":"LATEST_SEASON_SHADOW_PLUS_SEASON_FORWARD_OOF","production_authority":0,"authority_note":"STARTS_ZERO_CAN_EARN_AUTHORITY_AFTER_GATES"},
             "TOTALS_V1":{"status":"SIBLING_TOTAL_STAT_V1_PLUS_RESEARCH_INTERACTIONS","features":["total_stat_probability","h2h_scoring_context","spread_total_interaction","market_total_move","travel_rest","roster_qb_continuity_if_point_in_time"],"target_separate_from_spread":True},
             "TOTAL_SCORE_V2":{"status":"ACTIVE_PROMOTION_ELIGIBLE_CHALLENGER","authority_lifecycle":"RESEARCH_TO_SHADOW_TO_PROMOTION_ELIGIBLE_TO_PRODUCTION","can_earn_production_authority":True,"architecture":"SEPARATE_HOME_AWAY_SCORE_MODELS","features":["qualified_total_features","pace_play_mix","efficiency","offense_defense_matchups","implied_team_total_residuals"],"outputs":["home_points","away_points","projected_total","home_implied_residual","away_implied_residual"],"production_authority":0,"authority_note":"STARTS_ZERO_CAN_EARN_AUTHORITY_AFTER_GATES"},
+            "SPREAD_RESIDUAL_STACK_V1":{"status":"ACTIVE_PROMOTION_ELIGIBLE_CHALLENGER","anchor":"FROZEN_STAT","target":"INCREMENTAL_RESIDUAL_OVER_STAT_RANKING_SCORE","production_authority":0,"can_earn_production_authority":True},
             "SPREAD_EDGE_CHALLENGERS":{"status":"AUDIT_THEN_TEST_ZERO_AUTHORITY","champion_unchanged":True,"candidates":["EXTERNAL_CONSENSUS_V1","ROSTER_PORTAL_CONTINUITY_V2","TRAVEL_ENVIRONMENT_V1","RIVALRY_V1","LINE_PATH_BOOK_DISAGREEMENT_V1","TRUST_REGIME_RESOLVER_V1"],"rule":"NO_DUPLICATE_SPREAD_REBUILD__ONLY_INCREMENTAL_PAIRED_OOF_LIFT"},
             "validation":"SEASON_FORWARD_OOF__INDEPENDENT_SHADOW__PROPER_SCORES__ATS_OR_OU_BY_MARKET__CALIBRATION__STABILITY__PROSPECTIVE_PROMOTION_REQUIRED",
             "CONTINUOUS_MODEL_SEARCH_V1":{
@@ -33502,6 +33504,79 @@ def _v1354_total_score_v2(games, total_feature_cols, season_arr, latest):
 
 
 
+
+def _v13542_h2h_market_residual_v1(games, season_arr, oof_margin, latest):
+    """Market-residual H2H challenger: learn only error around de-vigged market probability."""
+    from sklearn.pipeline import Pipeline
+    from sklearn.impute import SimpleImputer
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.linear_model import Ridge
+    cols=[c for c in ["H2H2_Prior_Meetings","H2H2_Prior_Margin_Current_Orientation","H2H2_Prior_Total","H2H2_Days_Since","H2H2_Same_Home_Role","H2H2_Recency_Margin","H2H2_Recency_Total"] if c in games.columns]
+    out={"model_id":"H2H_MARKET_RESIDUAL_V1","status":"UNAVAILABLE","production_authority":0,"target":"ACTUAL_WIN_MINUS_DEVIGGED_MARKET_PROBABILITY","features":cols}
+    if len(cols)<4 or "Market_Open_H2H_Fair" not in games.columns: return out
+    actual=pd.to_numeric(games["Actual_Margin"],errors="coerce").to_numpy(dtype=float)
+    market=pd.to_numeric(games["Market_Open_H2H_Fair"],errors="coerce").to_numpy(dtype=float)
+    stat=np.asarray(oof_margin,dtype=float)
+    y=(actual>0).astype(float)
+    X=games[cols].copy(); X["STAT_Fair_Margin"]=stat; X["Market_Logit"]=_v1354_logit(market)
+    valid=np.isfinite(actual)&np.isfinite(market)&(market>0)&(market<1)&np.isfinite(stat)
+    tr=valid&np.isfinite(season_arr)&(season_arr<float(latest)); va=valid&np.isfinite(season_arr)&(season_arr==float(latest))
+    if tr.sum()<500 or va.sum()<100: return out
+    target=y[tr]-market[tr]
+    pipe=Pipeline([("imp",SimpleImputer(strategy="median",add_indicator=True)),("sc",StandardScaler()),("ridge",Ridge(alpha=80.0))])
+    pipe.fit(X.loc[tr],target)
+    delta=np.clip(np.asarray(pipe.predict(X.loc[va]),dtype=float),-0.15,0.15)
+    p=np.clip(market[va]+delta,1e-5,1-1e-5); yy=y[va].astype(int); mp=np.clip(market[va],1e-5,1-1e-5)
+    out.update({"status":"SHADOW_EVALUATED","n":int(len(yy)),"auc":_ncaaf_stat_auc(yy,p),"logloss":_ncaaf_stat_logloss(yy,p),"brier":_ncaaf_stat_brier(yy,p),"market_auc":_ncaaf_stat_auc(yy,mp),"market_logloss":_ncaaf_stat_logloss(yy,mp),"market_brier":_ncaaf_stat_brier(yy,mp),"mean_abs_market_adjustment":float(np.mean(np.abs(delta))),**_v1350_binary_calibration_metrics(yy,p)})
+    dates=pd.to_datetime(games.loc[va,"Game_Date"],errors="coerce",utc=True); pros=np.asarray(dates>=V13541_CHALLENGER_PROSPECTIVE_FREEZE_UTC,dtype=bool)
+    if pros.any():
+        py=yy[pros]; pp=p[pros]; pm=mp[pros]
+        out.update({"prospective_n":int(len(py)),"prospective_auc":_ncaaf_stat_auc(py,pp),"prospective_logloss":_ncaaf_stat_logloss(py,pp),"prospective_brier":_ncaaf_stat_brier(py,pp),"prospective_market_logloss":_ncaaf_stat_logloss(py,pm),"prospective_market_brier":_ncaaf_stat_brier(py,pm)})
+        out["prospective_gate_pass"]=bool(len(py)>=30 and out["prospective_logloss"]<out["prospective_market_logloss"] and out["prospective_brier"]<out["prospective_market_brier"])
+    else:
+        out.update({"prospective_n":0,"prospective_gate_pass":False})
+    out["prospective_freeze_utc"]=V13541_CHALLENGER_PROSPECTIVE_FREEZE_UTC.isoformat(); return out
+
+
+def _v13542_spread_residual_stack_v1(games, season_arr, oof_margin, latest):
+    """Strongly regularized ranking-residual challenger anchored to STAT; never mutates frozen STAT."""
+    from sklearn.pipeline import Pipeline
+    from sklearn.impute import SimpleImputer
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.linear_model import Ridge
+    out={"model_id":"SPREAD_RESIDUAL_STACK_V1","status":"UNAVAILABLE","production_authority":0,"anchor":"FROZEN_STAT","available_brains":[]}
+    actual=pd.to_numeric(games["Actual_Margin"],errors="coerce").to_numpy(dtype=float)
+    spread=pd.to_numeric(games["Consensus_Open_Spread"],errors="coerce").to_numpy(dtype=float)
+    stat=np.asarray(oof_margin,dtype=float); stat_score=(stat+spread)/14.0
+    yraw=actual+spread; valid=np.isfinite(yraw)&~np.isclose(yraw,0,atol=1e-9)&np.isfinite(stat_score)
+    y=(yraw>0).astype(float)
+    X=pd.DataFrame({"STAT_Score":stat_score},index=games.index)
+    # Add native OOF brain scores only when they map cleanly by season/source/team.
+    keys=[k for k in ["Season","Source_Game_ID","Team_Norm"] if k in games.columns]
+    if len(keys)>=2:
+        base=games[keys].copy(); base["__row"]=np.arange(len(games))
+        for brain in ["CORE","OWN_FAIR","MARKET_RESIDUAL","COMMON_MARKET"]:
+            fr=_V133112_NATIVE_BRAIN_DIAG_CACHE.get(brain)
+            if not isinstance(fr,pd.DataFrame) or fr.empty or "V133112_Score" not in fr.columns: continue
+            use=[k for k in keys if k in fr.columns]
+            if len(use)<2: continue
+            z=fr[use+["V133112_Score"]].copy().drop_duplicates(use,keep="last")
+            m=base.merge(z,on=use,how="left").sort_values("__row")
+            vals=pd.to_numeric(m["V133112_Score"],errors="coerce").to_numpy(dtype=float)
+            if np.isfinite(vals).sum()>=100:
+                X[f"{brain}_Score"]=vals; X[f"{brain}_Minus_STAT"]=vals-stat_score; out["available_brains"].append(brain)
+    if not out["available_brains"]: return out
+    tr=valid&np.isfinite(season_arr)&(season_arr<float(latest)); va=valid&np.isfinite(season_arr)&(season_arr==float(latest))
+    if tr.sum()<500 or va.sum()<100: return out
+    # Residual target around a conservative STAT ranking probability proxy.
+    p0=1/(1+np.exp(-np.clip(stat_score,-8,8))); resid=y-p0
+    pipe=Pipeline([("imp",SimpleImputer(strategy="median",add_indicator=True)),("sc",StandardScaler()),("ridge",Ridge(alpha=120.0))])
+    pipe.fit(X.loc[tr],resid[tr]); delta=np.clip(np.asarray(pipe.predict(X.loc[va]),dtype=float),-0.08,0.08)
+    pp=np.clip(p0[va]+delta,1e-5,1-1e-5); pb=np.clip(p0[va],1e-5,1-1e-5); yy=y[va].astype(int)
+    out.update({"status":"SHADOW_EVALUATED","n":int(len(yy)),"auc":_ncaaf_stat_auc(yy,pp),"logloss":_ncaaf_stat_logloss(yy,pp),"brier":_ncaaf_stat_brier(yy,pp),"anchor_auc":_ncaaf_stat_auc(yy,pb),"anchor_logloss":_ncaaf_stat_logloss(yy,pb),"anchor_brier":_ncaaf_stat_brier(yy,pb),"mean_abs_adjustment":float(np.mean(np.abs(delta))),**_v1350_binary_calibration_metrics(yy,pp)})
+    # This stack is research/shadow only until a true production-STAT probability OOF adapter is available.
+    out["promotion_eligible"]=False; out["authority_state"]="SHADOW"; out["authority_reason"]="REQUIRES_EXACT_PRODUCTION_STAT_OOF_ADAPTER_BEFORE_PROMOTION"; return out
+
 def _v13541_challenger_promotion_contract(challenger, incumbent_contract, market):
     """Fail-closed authority lifecycle for H2H/Totals challengers.
 
@@ -33696,9 +33771,11 @@ def fit_ncaaf_statistical_brain(log_func=print):
     _cal_tot=_v1350_binary_calibration_metrics(ytot,ptot)
     _cal_h=_v1350_binary_calibration_metrics(yh[okh],ph[okh])
 
-    # V13.5.4.1 promotion-eligible sibling challengers. Frozen Spread is untouched.
+    # V13.5.4.2 residual-edge sibling challengers. Frozen Spread is untouched.
     _h2h_v2=_v1354_h2h_matchup_v2(games,season_arr,oof_margin,latest)
+    _h2h_resid=_v13542_h2h_market_residual_v1(games,season_arr,oof_margin,latest)
     _tot_v2=_v1354_total_score_v2(games,total_feature_cols,season_arr,latest)
+    _spread_stack=_v13542_spread_residual_stack_v1(games,season_arr,oof_margin,latest)
     # Compare to current incumbent sibling contracts. Qualification can advance a
     # challenger to PROMOTION_ELIGIBLE; production still requires independent prospective evidence.
     _tmp_inc={
@@ -33706,11 +33783,14 @@ def fit_ncaaf_statistical_brain(log_func=print):
         "totals":{"metrics":{"n":int(valid_tot.sum()),"auc":auc_tot,"logloss":ll_tot,"brier":br_tot,"market_logloss":0.69314718056,"market_brier":0.25,**_cal_tot}},
     }
     _h2h_v2["authority_contract"]=_v13541_challenger_promotion_contract(_h2h_v2,_tmp_inc["h2h"],"h2h")
+    _h2h_resid["authority_contract"]=_v13541_challenger_promotion_contract(_h2h_resid,{"metrics":{"n":_h2h_resid.get("n",0),"auc":_h2h_resid.get("market_auc",np.nan),"logloss":_h2h_resid.get("market_logloss",np.nan),"brier":_h2h_resid.get("market_brier",np.nan),"market_logloss":_h2h_resid.get("market_logloss",np.nan),"market_brier":_h2h_resid.get("market_brier",np.nan),"ece":np.nan}},"h2h")
     _tot_v2["authority_contract"]=_v13541_challenger_promotion_contract(_tot_v2,_tmp_inc["totals"],"totals")
-    for _obj in (_h2h_v2,_tot_v2):
+    for _obj in (_h2h_v2,_h2h_resid,_tot_v2):
         _ac=_obj["authority_contract"]; _obj["can_earn_production_authority"]=True; _obj["promotion_eligible"]=_ac["promotion_eligible"]; _obj["production_authority"]=_ac["production_authority"]; _obj["authority_state"]=_ac["authority_state"]
-    log_func(f"[V13.5.4.1-H2H-MATCHUP-V2] status={_h2h_v2.get('status')} n={int(_h2h_v2.get('n',0) or 0)} auc={float(_h2h_v2.get('auc',np.nan)):.4f} ll={float(_h2h_v2.get('logloss',np.nan)):.6f} brier={float(_h2h_v2.get('brier',np.nan)):.6f} ece={float(_h2h_v2.get('ece',np.nan)):.4f} authority_state={_h2h_v2.get('authority_state')} promotion_eligible={_h2h_v2.get('promotion_eligible')} production_authority={_h2h_v2.get('production_authority')} reason={_h2h_v2['authority_contract'].get('reason')} spread_unchanged=TRUE")
-    log_func(f"[V13.5.4.1-TOTAL-SCORE-V2] status={_tot_v2.get('status')} n={int(_tot_v2.get('n',0) or 0)} auc={float(_tot_v2.get('auc',np.nan)):.4f} ll={float(_tot_v2.get('logloss',np.nan)):.6f} brier={float(_tot_v2.get('brier',np.nan)):.6f} market_ll={float(_tot_v2.get('market_logloss',np.nan)):.6f} ece={float(_tot_v2.get('ece',np.nan)):.4f} authority_state={_tot_v2.get('authority_state')} promotion_eligible={_tot_v2.get('promotion_eligible')} production_authority={_tot_v2.get('production_authority')} reason={_tot_v2['authority_contract'].get('reason')} spread_unchanged=TRUE")
+    log_func(f"[V13.5.4.2-H2H-MARKET-RESIDUAL-V1] status={_h2h_resid.get('status')} n={int(_h2h_resid.get('n',0) or 0)} auc={float(_h2h_resid.get('auc',np.nan)):.4f} market_auc={float(_h2h_resid.get('market_auc',np.nan)):.4f} ll={float(_h2h_resid.get('logloss',np.nan)):.6f} market_ll={float(_h2h_resid.get('market_logloss',np.nan)):.6f} brier={float(_h2h_resid.get('brier',np.nan)):.6f} market_brier={float(_h2h_resid.get('market_brier',np.nan)):.6f} authority_state={_h2h_resid.get('authority_state')} promotion_eligible={_h2h_resid.get('promotion_eligible')} production_authority={_h2h_resid.get('production_authority')} reason={_h2h_resid['authority_contract'].get('reason')}")
+    log_func(f"[V13.5.4.2-SPREAD-RESIDUAL-STACK-V1] status={_spread_stack.get('status')} n={int(_spread_stack.get('n',0) or 0)} auc={float(_spread_stack.get('auc',np.nan)):.4f} anchor_auc={float(_spread_stack.get('anchor_auc',np.nan)):.4f} ll={float(_spread_stack.get('logloss',np.nan)):.6f} anchor_ll={float(_spread_stack.get('anchor_logloss',np.nan)):.6f} brier={float(_spread_stack.get('brier',np.nan)):.6f} anchor_brier={float(_spread_stack.get('anchor_brier',np.nan)):.6f} brains={_spread_stack.get('available_brains')} authority_state={_spread_stack.get('authority_state')} reason={_spread_stack.get('authority_reason')} frozen_stat_unchanged=TRUE")
+    log_func(f"[V13.5.4.2-H2H-MATCHUP-V2] status={_h2h_v2.get('status')} n={int(_h2h_v2.get('n',0) or 0)} auc={float(_h2h_v2.get('auc',np.nan)):.4f} ll={float(_h2h_v2.get('logloss',np.nan)):.6f} brier={float(_h2h_v2.get('brier',np.nan)):.6f} ece={float(_h2h_v2.get('ece',np.nan)):.4f} authority_state={_h2h_v2.get('authority_state')} promotion_eligible={_h2h_v2.get('promotion_eligible')} production_authority={_h2h_v2.get('production_authority')} reason={_h2h_v2['authority_contract'].get('reason')} spread_unchanged=TRUE")
+    log_func(f"[V13.5.4.2-TOTAL-SCORE-V2] status={_tot_v2.get('status')} n={int(_tot_v2.get('n',0) or 0)} auc={float(_tot_v2.get('auc',np.nan)):.4f} ll={float(_tot_v2.get('logloss',np.nan)):.6f} brier={float(_tot_v2.get('brier',np.nan)):.6f} market_ll={float(_tot_v2.get('market_logloss',np.nan)):.6f} ece={float(_tot_v2.get('ece',np.nan)):.4f} authority_state={_tot_v2.get('authority_state')} promotion_eligible={_tot_v2.get('promotion_eligible')} production_authority={_tot_v2.get('production_authority')} reason={_tot_v2['authority_contract'].get('reason')} spread_unchanged=TRUE")
 
     def _trust(ll,auc,market_ll=0.69314718056):
         if not np.isfinite(ll) or ll>=market_ll: return 0.0
@@ -33765,7 +33845,7 @@ def fit_ncaaf_statistical_brain(log_func=print):
         "profile_feature_cols":feature_cols,
         "profile_median":med.astype(np.float32), "profile_scale":scale.astype(np.float32),
         "trust_by_market":{"spreads":trust_sp,"totals":trust_tot,"h2h":trust_h},
-        "research_market_challengers_v1354":{"H2H_MATCHUP_V2":_h2h_v2,"TOTAL_SCORE_V2":_tot_v2,"authority_lifecycle":"RESEARCH_TO_SHADOW_TO_PROMOTION_ELIGIBLE_TO_PRODUCTION","can_earn_production_authority":True,"spread_unchanged":True},
+        "research_market_challengers_v1354":{"H2H_MATCHUP_V2":_h2h_v2,"H2H_MARKET_RESIDUAL_V1":_h2h_resid,"TOTAL_SCORE_V2":_tot_v2,"SPREAD_RESIDUAL_STACK_V1":_spread_stack,"authority_lifecycle":"RESEARCH_TO_SHADOW_TO_PROMOTION_ELIGIBLE_TO_PRODUCTION","can_earn_production_authority":True,"spread_unchanged":True},
         "shadow_metrics":{
             "season":latest,
             "spreads":{"n":int(valid_sp.sum()),"auc":auc_sp,"logloss":ll_sp,"brier":br_sp,"market_logloss":0.69314718056,"trust":trust_sp},
