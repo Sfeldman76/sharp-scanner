@@ -194,14 +194,14 @@ def main():
         _path = (_app_dir / f"{_name}.py").resolve()
         if not _path.exists():
             raise RuntimeError(
-                f"[V13.5.3-DEPLOY-PREFLIGHT] LOCAL_SOURCE_MISSING module={_name} path={_path}"
+                f"[V13.5.4.1-DEPLOY-PREFLIGHT] LOCAL_SOURCE_MISSING module={_name} path={_path}"
             )
         importlib.invalidate_caches()
         sys.modules.pop(_name, None)
         _spec = importlib.util.spec_from_file_location(_name, str(_path))
         if _spec is None or _spec.loader is None:
             raise RuntimeError(
-                f"[V13.5.3-DEPLOY-PREFLIGHT] LOCAL_IMPORT_SPEC_FAILED module={_name} path={_path}"
+                f"[V13.5.4.1-DEPLOY-PREFLIGHT] LOCAL_IMPORT_SPEC_FAILED module={_name} path={_path}"
             )
         _mod = importlib.util.module_from_spec(_spec)
         sys.modules[_name] = _mod
@@ -233,9 +233,9 @@ def main():
         "_v13310_runtime_brain_input_audit",
     ]
     _missing_utils = [n for n in _required_utils if not hasattr(_utils, n)]
-    if (not _expected_build) or (_expected_build != _utils_build) or _missing_utils or _dashboard_tag != "dashboard-v13.5.3-source-universe" or _utils_tag != "utils-v13.5.3-source-universe" or _wrapper_tag != "wrapper-v13.5.3-source-universe":
+    if (not _expected_build) or (_expected_build != _utils_build) or _missing_utils or _dashboard_tag != "dashboard-v13.5.4.1-promotion-eligible" or _utils_tag != "utils-v13.5.4.1-promotion-eligible" or _wrapper_tag != "wrapper-v13.5.4.1-promotion-eligible":
         raise RuntimeError(
-            "[V13.5.3-DEPLOY-PREFLIGHT] MIXED_OR_STALE_DEPLOYMENT "
+            "[V13.5.4.1-DEPLOY-PREFLIGHT] MIXED_OR_STALE_DEPLOYMENT "
             f"dashboard_build={_expected_build!r} utils_build={_utils_build!r} "
             f"dashboard_tag={_dashboard_tag!r} utils_tag={_utils_tag!r} wrapper_tag={_wrapper_tag!r} missing_utils={_missing_utils} "
             f"dashboard_path={str(_dashboard_path)!r} dashboard_sha={_dashboard_sha[:16]} "
@@ -244,7 +244,7 @@ def main():
             "The running container itself contains a mixed source set; rebuild/redeploy the job image from one V13.5.0.1 bundle."
         )
     log_func(
-        f"[V13.5.3-DEPLOY-PREFLIGHT] PASS build={_expected_build} "
+        f"[V13.5.4.1-DEPLOY-PREFLIGHT] PASS build={_expected_build} "
         f"dashboard_tag={_dashboard_tag} utils_tag={_utils_tag} wrapper_tag={_wrapper_tag} "
         f"dashboard_path={_dashboard_path} dashboard_sha={_dashboard_sha[:16]} "
         f"utils_path={_utils_path} utils_sha={_utils_sha[:16]} wrapper_path={_wrapper_path} wrapper_sha={_wrapper_sha[:16]}"
