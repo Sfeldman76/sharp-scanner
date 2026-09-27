@@ -1,4 +1,4 @@
-V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.5.4.1-promotion-eligible"
+V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.5.4.2-residual-edge"
 
 from sharp_line_dashboard import (
     train_with_champion_wrapper,
