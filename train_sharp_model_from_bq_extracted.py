@@ -1,4 +1,4 @@
-V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.5.5-system-miner-v2"
+V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.5.6-miner-validation-fix"
 
 from sharp_line_dashboard import (
     train_with_champion_wrapper,
