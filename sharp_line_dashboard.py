@@ -16665,8 +16665,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-26-v13.5.2-v13-first-research-challengers"
-NCAAF_V13_HOTFIX = "V13_5_2__V13_FIRST_SPREAD__LEGACY_EMERGENCY_ONLY__FROZEN_STAT_UNCHANGED__RESEARCH_CHALLENGERS_ZERO_AUTHORITY"
+NCAAF_V13_VERSION = "2026-09-26-v13.5.3-source-universe-continuous-challengers"
+NCAAF_V13_HOTFIX = "V13_5_3__SOURCE_UNIVERSE_FINITE_CONTRACT__CONTINUOUS_CHALLENGERS__LEGACY_EMERGENCY_ONLY"
 NCAAF_HISTORY_POLICY = "ALL_AVAILABLE_SEASONS"
 NCAAF_HISTORY_FIXED_LOOKBACK_DAYS = None  # Never silently truncate production history.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -16687,8 +16687,8 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # from the same deploy bundle.  The simple legacy feature materializer is kept
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
-V133_DEPLOY_BUILD_ID = "2026-09-26-v13.5.2-v13-first-1"
-V1337_SOURCE_TAG = "dashboard-v13.5.2-v13-first"
+V133_DEPLOY_BUILD_ID = "2026-09-26-v13.5.3-source-universe-1"
+V1337_SOURCE_TAG = "dashboard-v13.5.3-source-universe"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -33276,7 +33276,22 @@ def fit_ncaaf_v13_value_architecture(log_func=print):
             "RIVALRY_V1":{"status":"ACTIVE_WHEN_RIVALRY_FLAG_AVAILABLE","features":["rivalry_flag","h2h_win_streak_prior","h2h_loss_streak_prior","h2h_depth","favorite_dog_role","spread_bucket","conference_level"],"preregistered":True},
             "H2H_V1":{"status":"ACTIVE_RESEARCH","features":["h2h_win_streak_prior","h2h_loss_streak_prior","h2h_depth","last_matchup_margin","revenge","home_away_role_change"],"prior_only":True},
             "TOTALS_V1":{"status":"SIBLING_TOTAL_STAT_V1_PLUS_RESEARCH_INTERACTIONS","features":["total_stat_probability","h2h_scoring_context","spread_total_interaction","market_total_move","travel_rest","roster_qb_continuity_if_point_in_time"],"target_separate_from_spread":True},
-            "validation":"SEASON_FORWARD_OOF__INDEPENDENT_SHADOW__PROPER_SCORES__ATS_OR_OU_BY_MARKET__CALIBRATION__STABILITY__PROSPECTIVE_PROMOTION_REQUIRED"
+            "validation":"SEASON_FORWARD_OOF__INDEPENDENT_SHADOW__PROPER_SCORES__ATS_OR_OU_BY_MARKET__CALIBRATION__STABILITY__PROSPECTIVE_PROMOTION_REQUIRED",
+            "CONTINUOUS_MODEL_SEARCH_V1":{
+                "status":"ACTIVE_RESEARCH_ZERO_AUTHORITY",
+                "authority":0,"production_weight":0.0,
+                "champion_policy":"PRODUCTION_CHAMPION_IMMUTABLE_UNTIL_EXPLICIT_PROMOTION",
+                "lanes":{
+                    "STAT":["feature_subset","regularization","interaction_set","alternative_estimator"],
+                    "CORE":["historical_weighting","strength_construction","maturity_weighting","alternative_estimator"],
+                    "MARKET":["signal_subset","timing_interactions","market_residual_structure"],
+                    "SYSTEMS":["new_rule_candidates","system_interactions","independent_replication"],
+                    "CALIBRATION":["calibrator_family","segment_calibration","season_stability"]
+                },
+                "required_validation":["SEASON_FORWARD_OOF","PROPER_SCORE_IMPROVEMENT","CALIBRATION","SEASON_STABILITY","PAIRED_CHAMPION_COMPARISON","PROSPECTIVE_SHADOW"],
+                "promotion_rule":"NO_RESEARCH_LANE_CAN_WRITE_PRODUCTION_OR_REPLACE_CHAMPION_WITHOUT_EXISTING_PROMOTION_GATES",
+                "cross_sport_rule":"NFL_DISCOVERIES_RETURN_TO_NCAAF_AS_NEW_ZERO_AUTHORITY_CHALLENGERS"
+            }
         },
         "fundamental":_fund_public,
         "market_intelligence":({k:v for k,v in market.items() if k!="oof_frame"} if isinstance(market,dict) else None),
@@ -43002,30 +43017,62 @@ def train_sharp_model_from_bq(
                         f"replay_gate={_stat_replay_contract_pass} own_fair_required={not _stat_only_contract} "
                         f"core_probability_required={not _stat_only_contract} zero_authority_contract=TRUE"
                     )
-                    # V13.5.2 hard contract: candidate-source selection and promotion
-                    # readiness are separate concerns. If the V13 runtime graph produced
-                    # complete, contract-valid probabilities, those probabilities MUST be
-                    # the active candidate even when an internal/prospective promotion gate
-                    # is closed. Legacy is reserved only for an actually broken/unavailable
-                    # V13 probability path.
-                    _v1352_v13_runtime_valid=bool(
+                    # V13.5.3 hard contract: validity is evaluated on the independently
+                    # derived V13/STAT source universe, not on unsupported raw rows. Unsupported
+                    # rows remain explicit NaN and are excluded by the source contract; they are
+                    # never silently neutral-filled or relabeled as V13. A non-finite value on
+                    # ANY required/source-eligible row remains a hard failure.
+                    if _stat_only_contract:
+                        _v1353_tr_src=_v1344_stat_source_universe(train_meta_df)
+                        _v1353_ho_src=_v1344_stat_source_universe(hold_meta_df)
+                        _v1353_tr_required=np.asarray(_v1353_tr_src.get("eligible",np.zeros(len(_v13diag_tr),dtype=bool)),dtype=bool)
+                        _v1353_ho_required=np.asarray(_v1353_ho_src.get("eligible",np.zeros(len(_v13diag_ho),dtype=bool)),dtype=bool)
+                    else:
+                        # Non-STAT-only resolver: every row required by the existing coverage
+                        # contract is still required; preserve prior behavior until that resolver
+                        # publishes its own explicit source-universe mask.
+                        _v1353_tr_required=np.ones(len(_v13diag_tr),dtype=bool)
+                        _v1353_ho_required=np.ones(len(_v13diag_ho),dtype=bool)
+                    _v1353_tr_finite=np.isfinite(_v13diag_tr); _v1353_ho_finite=np.isfinite(_v13diag_ho)
+                    _v1353_tr_bad=_v1353_tr_required & ~_v1353_tr_finite
+                    _v1353_ho_bad=_v1353_ho_required & ~_v1353_ho_finite
+                    _v1353_tr_optional_bad=(~_v1353_tr_required) & ~_v1353_tr_finite
+                    _v1353_ho_optional_bad=(~_v1353_ho_required) & ~_v1353_ho_finite
+                    def _v1353_bad_examples(meta, bad_mask, limit=8):
+                        if not np.asarray(bad_mask,dtype=bool).any(): return []
+                        mm=meta.reset_index(drop=True)
+                        cols=[c for c in ["Season","Game_Date","Source_Game_ID","Merge_Key_Short","Game_Key","Team","Team_Norm","Opponent","Opponent_Norm","Value"] if c in mm.columns]
+                        return mm.loc[np.asarray(bad_mask,dtype=bool),cols].head(limit).astype(str).to_dict("records")
+                    print(
+                        f"[V13.5.3-V13-FINITE-AUDIT] split=TRAIN total_rows={len(_v13diag_tr)} required_rows={int(_v1353_tr_required.sum())} "
+                        f"finite_required_rows={int((_v1353_tr_required&_v1353_tr_finite).sum())} nonfinite_required_rows={int(_v1353_tr_bad.sum())} "
+                        f"nonfinite_optional_rows={int(_v1353_tr_optional_bad.sum())} examples={_v1353_bad_examples(train_meta_df,_v1353_tr_bad)}"
+                    )
+                    print(
+                        f"[V13.5.3-V13-FINITE-AUDIT] split=HOLD total_rows={len(_v13diag_ho)} required_rows={int(_v1353_ho_required.sum())} "
+                        f"finite_required_rows={int((_v1353_ho_required&_v1353_ho_finite).sum())} nonfinite_required_rows={int(_v1353_ho_bad.sum())} "
+                        f"nonfinite_optional_rows={int(_v1353_ho_optional_bad.sum())} examples={_v1353_bad_examples(hold_meta_df,_v1353_ho_bad)}"
+                    )
+                    _v1353_v13_runtime_valid=bool(
                         _diag_coverage_ready
                         and _own_auth_required_pass
                         and _core_required_pass
                         and _stat_replay_contract_pass
                         and len(_v13diag_tr)==len(y_train)
                         and len(_v13diag_ho)==len(y_hold)
-                        and np.isfinite(_v13diag_tr).all()
-                        and np.isfinite(_v13diag_ho).all()
+                        and int(_v1353_tr_required.sum())>0
+                        and int(_v1353_ho_required.sum())>0
+                        and not _v1353_tr_bad.any()
+                        and not _v1353_ho_bad.any()
                     )
-                    if _v1352_v13_runtime_valid:
+                    if _v1353_v13_runtime_valid:
                         PRODUCTION_PROB_TRAIN_CANDIDATE=_v13diag_tr.copy(); PRODUCTION_PROB_HOLD_CANDIDATE=_v13diag_ho.copy()
                         PRODUCTION_PROB_TRAIN_INFO=V13_DIAGNOSTIC_TRAIN_INFO; PRODUCTION_PROB_HOLD_INFO=V13_DIAGNOSTIC_HOLD_INFO
                         _prod_resolver_mode=str((((ncaaf_v13_value_architecture.get("specialist_overlays") or {}).get("probability_resolver") or {}).get("mode","")))
                         PRODUCTION_PROBABILITY_SOURCE_CANDIDATE=("V13_4_4_STAT_ONLY_FROZEN" if _prod_resolver_mode in {"V13_4_4_STAT_ONLY_FROZEN","V13_4_3_STAT_ONLY_FROZEN","V13_4_2_STAT_ONLY_FROZEN","V13_4_1_STAT_ONLY_FROZEN"} else "V13_3_11")
                         _auth_status="NOT_REQUIRED_ZERO_AUTHORITY" if _stat_only_contract else ("PASS" if _own_alpha_active_outer else "NOT_REQUIRED_ALPHA_CLOSED")
-                        print(f"[V13.5.2-V13-FIRST] status=ACTIVE source={PRODUCTION_PROBABILITY_SOURCE_CANDIDATE} runtime_valid=TRUE promotion_ready={_v13217_internal_ready} legacy_used=FALSE")
-                        print(f"[PRODUCTION-PROB-CONTRACT] status=READY source={PRODUCTION_PROBABILITY_SOURCE_CANDIDATE} train_rows={int(np.isfinite(_v13diag_tr).sum())}/{len(_v13diag_tr)} hold_rows={int(np.isfinite(_v13diag_ho).sum())}/{len(_v13diag_ho)} own_fair_alpha_active={_own_alpha_active_outer} own_fair_authenticity={_auth_status} stat_replay_gate={_stat_replay_contract_pass} promotion_ready={_v13217_internal_ready} single_canonical_array=TRUE")
+                        print(f"[V13.5.3-V13-FIRST] status=ACTIVE source={PRODUCTION_PROBABILITY_SOURCE_CANDIDATE} runtime_valid=TRUE promotion_ready={_v13217_internal_ready} legacy_used=FALSE")
+                        print(f"[PRODUCTION-PROB-CONTRACT] status=READY source={PRODUCTION_PROBABILITY_SOURCE_CANDIDATE} train_required_finite={int((_v1353_tr_required&_v1353_tr_finite).sum())}/{int(_v1353_tr_required.sum())} hold_required_finite={int((_v1353_ho_required&_v1353_ho_finite).sum())}/{int(_v1353_ho_required.sum())} own_fair_alpha_active={_own_alpha_active_outer} own_fair_authenticity={_auth_status} stat_replay_gate={_stat_replay_contract_pass} promotion_ready={_v13217_internal_ready} single_canonical_array=TRUE")
                     else:
                         if not _stat_replay_contract_pass:
                             _why="STAT_REPLAY_COVERAGE_CONTRACT"
@@ -43035,11 +43082,11 @@ def train_sharp_model_from_bq(
                             _why="CORE_PROBABILITY_PARITY_FAIL"
                         elif len(_v13diag_tr)!=len(y_train) or len(_v13diag_ho)!=len(y_hold):
                             _why="V13_PROBABILITY_LENGTH_MISMATCH"
-                        elif not np.isfinite(_v13diag_tr).all() or not np.isfinite(_v13diag_ho).all():
-                            _why="V13_NONFINITE_PROBABILITY"
+                        elif _v1353_tr_bad.any() or _v1353_ho_bad.any():
+                            _why="V13_NONFINITE_REQUIRED_PROBABILITY"
                         else:
                             _why="V13_RUNTIME_INVALID_UNKNOWN"
-                        print(f"[V13.5.2-V13-FIRST] status=EMERGENCY_LEGACY_FALLBACK source=LEGACY_META_DIAGNOSTIC runtime_valid=FALSE reason={_why} promotion_authority=0")
+                        print(f"[V13.5.3-V13-FIRST] status=EMERGENCY_LEGACY_FALLBACK source=LEGACY_META_DIAGNOSTIC runtime_valid=FALSE reason={_why} promotion_authority=0")
                         print(f"[PRODUCTION-PROB-CONTRACT] status=FALLBACK source=LEGACY_META_DIAGNOSTIC reason={_why} diagnostic_v13_available=TRUE emergency_only=TRUE promotion_authority=0")
                 else:
                     _why_cov=("STAT_SOURCE_UNIVERSE_REPLAY_COVERAGE" if _stat_only_contract else "COVERAGE_OR_LENGTH")
