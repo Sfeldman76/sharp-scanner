@@ -16666,8 +16666,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-27-v13.5.6-miner-validation-fix"
-NCAAF_V13_HOTFIX = "V13_5_6__MINER_VALIDATION__H2H_MARKET_VALUE__SPREAD_PER_BRAIN__SCHEDULE_FAIL_CLOSED"
+NCAAF_V13_VERSION = "2026-09-27-v13.5.7-promotion-infrastructure"
+NCAAF_V13_HOTFIX = "V13_5_7__MULTIPATH_PROMOTION__POST_V13_RESIDUALS__SCHEDULE_HARD_GATE__TRUST_RESEARCH"
 NCAAF_HISTORY_POLICY = "ALL_AVAILABLE_SEASONS"
 NCAAF_HISTORY_FIXED_LOOKBACK_DAYS = None  # Never silently truncate production history.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -16680,6 +16680,7 @@ _V1337_CORE_OOF_TRAIN_CACHE = {}
 # V13.3.11.2: training-only native OOF diagnostic surfaces. These are never
 # serialized into deploy artifacts and never alter resolver authority or picks.
 _V133112_NATIVE_BRAIN_DIAG_CACHE = {}
+_V1357_SPREAD_RESEARCH_CACHE = {}
 NCAAF_V13_EDGE_RIDGE_ALPHA = 100.0
 NCAAF_V13_MIN_EDGE_TRAIN_GAMES = 250
 NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
@@ -16688,8 +16689,8 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # from the same deploy bundle.  The simple legacy feature materializer is kept
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
-V133_DEPLOY_BUILD_ID = "2026-09-27-v13.5.6-miner-validation-fix-1"
-V1337_SOURCE_TAG = "dashboard-v13.5.6-miner-validation-fix"
+V133_DEPLOY_BUILD_ID = "2026-09-27-v13.5.7-promotion-infrastructure-1"
+V1337_SOURCE_TAG = "dashboard-v13.5.7-promotion-infrastructure"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -33811,6 +33812,50 @@ def _v1356_system_miner_v2(games,season_arr,latest,market,log_func=print,max_dep
         log_func(f"[V13.5.6-SYSTEM] market={market} id={sys.get('system_id')} status={sys.get('authority_state')} action={sys.get('system_action')} n={sys.get('selection_games')} rate={float(sys.get('selection_rate',np.nan)):.4f} shadow_n={sys.get('shadow_games')} shadow_rate={float(sys.get('shadow_rate',np.nan)):.4f} remove_best={float(sys.get('remove_best_season_rate',np.nan)):.4f} fdr={float(sys.get('fdr_qvalue',np.nan)):.4f} market_resid={float(sys.get('market_residual',np.nan)):.4f} roi={float(sys.get('historical_roi',np.nan)):.4f} rule={' AND '.join(sys.get('conditions') or [])}")
     return out
 
+def _v1357_system_miner_v2(games,season_arr,latest,market,log_func=print,max_depth=3):
+    """V13.5.7 multi-path qualification. QUALIFIED is prospective-worthy, never automatic production."""
+    out=_v1356_system_miner_v2(games,season_arr,latest,market,log_func=lambda *_:None,max_depth=max_depth)
+    market=_sys_norm_market(market); systems=list(out.get('systems') or [])
+    y,valid,baseline=_v1355_market_target(games,market); season=np.asarray(season_arr,dtype=float)
+    atoms={a['name']:np.asarray(a['mask'],dtype=bool) for a in _v1355_system_atoms(games)}
+    for sys in systems:
+        mm=np.ones(len(games),dtype=bool)
+        for c in sys.get('conditions') or []: mm &= atoms.get(c,np.zeros(len(games),dtype=bool))
+        direction=sys.get('direction'); ix=mm&valid&np.isfinite(season)&(season<float(latest)); hx=mm&valid&np.isfinite(season)&(season==float(latest))
+        obs=np.where(direction=='PLAY_ON',y,1-y)
+        # Standard -110 unit ROI for ATS/totals. H2H keeps the price-aware ROI calculated by 13.5.6.
+        if market in ('spreads','totals'):
+            ret=np.where(obs>0,100.0/110.0,-1.0); sys['historical_roi']=float(np.mean(ret[ix])) if ix.sum() else np.nan
+            sys['shadow_roi']=float(np.mean(ret[hx])) if hx.sum() else np.nan
+        # Leave-one-season-out robustness: every omitted-season aggregate is recomputed.
+        loso=[]
+        for sy in sorted(set(season[ix].astype(int))):
+            jj=ix&(season!=float(sy))
+            if jj.sum()>=50: loso.append(float(np.mean(obs[jj])))
+        sys['loso_rates']=loso; sys['loso_min_rate']=float(min(loso)) if loso else np.nan; sys['loso_positive_fraction']=float(np.mean(np.asarray(loso)>.5)) if loso else np.nan
+        n=int(sys.get('selection_games',0) or 0); rate=float(sys.get('selection_rate',np.nan)); sh=float(sys.get('shadow_rate',np.nan)); rem=float(sys.get('remove_best_season_rate',np.nan)); q=float(sys.get('fdr_qvalue',np.nan)); roi=float(sys.get('historical_roi',np.nan)); stable=float(sys.get('stable_season_fraction',0) or 0)
+        statistical=bool(n>=80 and rate>=.54 and sh>=.50 and rem>=.515 and stable>=.60 and np.isfinite(q) and q<=.20)
+        large_stable=bool(n>=200 and rate>=.545 and sh>=.50 and rem>=.525 and stable>=.60 and np.isfinite(roi) and roi>0 and (not loso or min(loso)>=.515))
+        exceptional=bool(n>=100 and rate>=.575 and sh>=.52 and rem>=.535 and stable>=.60 and np.isfinite(roi) and roi>0)
+        if market=='h2h':
+            econ=bool(np.isfinite(float(sys.get('market_residual',np.nan))) and float(sys.get('market_residual'))>=.02 and np.isfinite(float(sys.get('shadow_market_residual',np.nan))) and float(sys.get('shadow_market_residual'))>=0 and np.isfinite(roi) and roi>0)
+            qualified=bool(econ and (statistical or large_stable or exceptional))
+        else: qualified=bool(statistical or large_stable or exceptional)
+        path='STATISTICAL' if statistical else ('LARGE_STABLE' if large_stable else ('EXCEPTIONAL' if exceptional else 'NONE'))
+        sys['qualification_path']=path; sys['authority_state']='QUALIFIED' if qualified else 'SHADOW'; sys['production_authority']=0
+        sys['qualification_reason']=('PASS_'+path+'_PROSPECTIVE_REQUIRED') if qualified else 'NO_QUALIFICATION_PATH'
+        # First trust/regime research classification. It has zero authority and only describes the discovery.
+        model_conds=[c for c in (sys.get('conditions') or []) if c.startswith(('STAT_EDGE_','H2H_STAT_','TOTAL_MODEL_'))]
+        if model_conds:
+            sys['system_action']='TRUST_BRAIN' if direction=='PLAY_ON' else 'DISTRUST_BRAIN'; sys['trust_brain']='STAT' if any(c.startswith(('STAT_EDGE_','H2H_STAT_')) for c in model_conds) else 'TOTAL_SCORE_V2'
+        else: sys['system_action']='BET' if direction=='PLAY_ON' else 'FADE'; sys['trust_brain']=None
+    out['systems']=systems; out['qualified_count']=sum(x.get('authority_state')=='QUALIFIED' for x in systems); out['shadow_count']=sum(x.get('authority_state')=='SHADOW' for x in systems); out['version']='V13.5.7-SYSTEM-MINER-V2-MULTIPATH'
+    out['qualification_paths']={'STATISTICAL':'FDR+OOS+stability','LARGE_STABLE':'N>=200 + stable edge + positive ROI + LOSO','EXCEPTIONAL':'N>=100 + >=57.5% + robust transfer'}
+    log_func(f"[V13.5.7-SYSTEM-MINER-V2] market={market} atoms={out.get('atoms',0)} tested={out.get('tested_hypotheses',0)} published={len(systems)} qualified={out['qualified_count']} shadow={out['shadow_count']} production_authority=0")
+    for sys in systems[:15]:
+        log_func(f"[V13.5.7-SYSTEM] market={market} id={sys.get('system_id')} status={sys.get('authority_state')} path={sys.get('qualification_path')} action={sys.get('system_action')} n={sys.get('selection_games')} rate={float(sys.get('selection_rate',np.nan)):.4f} roi={float(sys.get('historical_roi',np.nan)):.4f} shadow_n={sys.get('shadow_games')} shadow_rate={float(sys.get('shadow_rate',np.nan)):.4f} remove_best={float(sys.get('remove_best_season_rate',np.nan)):.4f} loso_min={float(sys.get('loso_min_rate',np.nan)):.4f} fdr={float(sys.get('fdr_qvalue',np.nan)):.4f} rule={' AND '.join(sys.get('conditions') or [])}")
+    return out
+
 def _v1355_match_live_systems(rows, registry, market):
     """Cheap live trigger evaluator. Only current displayed rows are evaluated."""
     if rows is None or rows.empty or not isinstance(registry,dict): return rows
@@ -34026,6 +34071,11 @@ def fit_ncaaf_statistical_brain(log_func=print):
     _h2h_v2=_v1354_h2h_matchup_v2(games,season_arr,oof_margin,latest)
     _h2h_resid=_v13542_h2h_market_residual_v1(games,season_arr,oof_margin,latest)
     _tot_v2=_v1354_total_score_v2(games,total_feature_cols,season_arr,latest)
+    _V1357_SPREAD_RESEARCH_CACHE["games"]=games.copy(deep=False)
+    _V1357_SPREAD_RESEARCH_CACHE["season_arr"]=np.asarray(season_arr,dtype=float).copy()
+    _V1357_SPREAD_RESEARCH_CACHE["oof_margin"]=np.asarray(oof_margin,dtype=float).copy()
+    _V1357_SPREAD_RESEARCH_CACHE["latest"]=int(latest)
+    # Early diagnostic remains visible, but authoritative residual evaluation is deferred until V13 has populated exact native OOF caches.
     _spread_stack=_v13542_spread_residual_stack_v1(games,season_arr,oof_margin,latest)
     _miner_games=games.copy()
     _miner_sp=pd.to_numeric(_miner_games.get("Consensus_Open_Spread"),errors="coerce").to_numpy(dtype=float)
@@ -34037,7 +34087,7 @@ def fit_ncaaf_statistical_brain(log_func=print):
     _miner_res=(actual_m-oof_margin)[_miner_pre]
     _miner_stat_h=_ncaaf_stat_empirical_prob_gt(-np.asarray(oof_margin,dtype=float),_miner_res)
     _miner_games["_V1355_H2H_STAT_MINUS_MARKET"]=_miner_stat_h-_miner_hm
-    _system_miner_v2={m:_v1356_system_miner_v2(_miner_games,season_arr,latest,m,log_func=log_func,max_depth=3) for m in ("spreads","h2h","totals")}
+    _system_miner_v2={m:_v1357_system_miner_v2(_miner_games,season_arr,latest,m,log_func=log_func,max_depth=3) for m in ("spreads","h2h","totals")}
     # Compare to current incumbent sibling contracts. Qualification can advance a
     # challenger to PROMOTION_ELIGIBLE; production still requires independent prospective evidence.
     _tmp_inc={
@@ -34680,6 +34730,26 @@ def train_sharp_model_from_bq(
         # never alter the frozen spread probability or receive production bet authority.
         if str(market).lower().strip() == "spreads":
             ncaaf_v13_value_architecture = fit_ncaaf_v13_value_architecture(log_func=log_func)
+            # V13.5.7 authoritative post-V13 residual test: exact native OOF caches now exist.
+            try:
+                _rc=_V1357_SPREAD_RESEARCH_CACHE
+                if _rc.get("games") is not None:
+                    _post=_v13542_spread_residual_stack_v1(_rc["games"],_rc["season_arr"],_rc["oof_margin"],_rc["latest"])
+                    if isinstance(ncaaf_statistical_brain,dict):
+                        ncaaf_statistical_brain.setdefault("research_market_challengers_v1357",{})["SPREAD_RESIDUAL_STACK_V1"]=_post
+                    log_func(f"[V13.5.7-SPREAD-RESIDUAL-POST-V13] status={_post.get('status')} best_brain={_post.get('best_brain')} coverage={_post.get('coverage')} tests={_post.get('brain_tests')} production_authority=0 frozen_stat_unchanged=TRUE")
+            except Exception as _e:
+                log_func(f"[V13.5.7-SPREAD-RESIDUAL-POST-V13] status=ERROR error={type(_e).__name__}:{_e} frozen_stat_unchanged=TRUE")
+            # Mandatory schedule-pair audit. Miner schedule atoms remain fail-closed when this gate is closed.
+            try:
+                _sg=_V1357_SPREAD_RESEARCH_CACHE.get("games")
+                if isinstance(_sg,pd.DataFrame):
+                    _r=pd.to_numeric(_sg.get("Days_Since_Last_Game"),errors="coerce"); _o=pd.to_numeric(_sg.get("Opp_Days_Since_Last_Game"),errors="coerce")
+                    _pair=_r.notna()&_o.notna(); _nonzero=(_r[_pair]-_o[_pair]).abs().gt(0) if int(_pair.sum()) else pd.Series([],dtype=bool)
+                    _gate=bool(int(_pair.sum())>=100 and int(_nonzero.sum())>0)
+                    log_func(f"[V13.5.7-SCHEDULE-PAIR-AUDIT] gate={'PASS' if _gate else 'CLOSED'} paired={int(_pair.sum())} team_present={int(_r.notna().sum())} opp_present={int(_o.notna().sum())} nonzero_diff={int(_nonzero.sum()) if len(_nonzero) else 0} schedule_atoms={'ENABLED' if _gate else 'DISABLED'}")
+            except Exception as _e:
+                log_func(f"[V13.5.7-SCHEDULE-PAIR-AUDIT] gate=CLOSED error={type(_e).__name__}:{_e} schedule_atoms=DISABLED")
             if isinstance(ncaaf_v13_value_architecture,dict) and isinstance(historical_core_expert,dict):
                 ncaaf_v13_value_architecture["historical_system_history"] = dict(historical_core_expert.get("system_history") or {})
                 ncaaf_v13_value_architecture["historical_system_source_view"] = historical_core_expert.get("source_view")
