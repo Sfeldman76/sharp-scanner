@@ -16665,8 +16665,8 @@ NCAAF_STAT_FEATURE_VERSION = "2026-09-13-v13.2.28-market-residual-secondary-lane
 # Football-first fair value -> market price discovery -> calibrated cover value.
 # V13 is NCAAF-only and shadow-deployed. Other sports remain on V12.2.
 # ============================================================================
-NCAAF_V13_VERSION = "2026-09-27-v13.5.4.2-residual-edge-challengers"
-NCAAF_V13_HOTFIX = "V13_5_4_2__SPREAD_FROZEN__H2H_MARKET_RESIDUAL__TOTAL_SCORE__SPREAD_RESIDUAL_STACK"
+NCAAF_V13_VERSION = "2026-09-27-v13.5.5-system-miner-v2"
+NCAAF_V13_HOTFIX = "V13_5_5__SYSTEM_MINER_V2__THREE_MARKETS__LAZY_UI__SPREAD_FROZEN"
 NCAAF_HISTORY_POLICY = "ALL_AVAILABLE_SEASONS"
 NCAAF_HISTORY_FIXED_LOOKBACK_DAYS = None  # Never silently truncate production history.
 NCAAF_V13_HORIZONS_HOURS = (24.0, 6.0, 1.0)
@@ -16687,8 +16687,8 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # from the same deploy bundle.  The simple legacy feature materializer is kept
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
-V133_DEPLOY_BUILD_ID = "2026-09-27-v13.5.4.2-residual-edge-1"
-V1337_SOURCE_TAG = "dashboard-v13.5.4.2-residual-edge"
+V133_DEPLOY_BUILD_ID = "2026-09-27-v13.5.5-system-miner-v2-1"
+V1337_SOURCE_TAG = "dashboard-v13.5.5-system-miner-v2"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -33565,17 +33565,210 @@ def _v13542_spread_residual_stack_v1(games, season_arr, oof_margin, latest):
             vals=pd.to_numeric(m["V133112_Score"],errors="coerce").to_numpy(dtype=float)
             if np.isfinite(vals).sum()>=100:
                 X[f"{brain}_Score"]=vals; X[f"{brain}_Minus_STAT"]=vals-stat_score; out["available_brains"].append(brain)
-    if not out["available_brains"]: return out
+    # V13.5.5 fallback: use aligned OOF/fair-margin columns already present on the
+    # canonical game frame when diagnostic caches are not populated at this stage.
+    fallback_cols={
+        "CORE":["V13_Raw_Fair_Margin_OOF","V13_Linear_Fair_Margin_OOF","V13_HGB_Fair_Margin_OOF"],
+        "OWN_FAIR":["V13227_Independent_Fair_Margin_OOF","Independent_Fair_Margin","Own_Fair_Margin"],
+        "MARKET_RESIDUAL":["Market_Residual_OOF_Score","Market_Residual_OOF_Margin"],
+        "COMMON_MARKET":["Common_Market_Score","Common_Market_Margin"]}
+    for brain,cands in fallback_cols.items():
+        if brain in out["available_brains"]: continue
+        c=next((cc for cc in cands if cc in games.columns and pd.to_numeric(games[cc],errors="coerce").notna().sum()>=100),None)
+        if c is None: continue
+        vals=pd.to_numeric(games[c],errors="coerce").to_numpy(dtype=float)
+        # margin-like fields become a ranking score relative to the open spread;
+        # residual-like fields are standardized by the same conservative scale.
+        score=(vals+spread)/14.0 if ("Margin" in c and "Error" not in c and "Residual" not in c) else vals/14.0
+        X[f"{brain}_Score"]=score; X[f"{brain}_Minus_STAT"]=score-stat_score; out["available_brains"].append(brain)
+    if not out["available_brains"]:
+        out["authority_reason"]="NO_ALIGNED_SECONDARY_BRAIN_INPUTS"; return out
     tr=valid&np.isfinite(season_arr)&(season_arr<float(latest)); va=valid&np.isfinite(season_arr)&(season_arr==float(latest))
     if tr.sum()<500 or va.sum()<100: return out
-    # Residual target around a conservative STAT ranking probability proxy.
-    p0=1/(1+np.exp(-np.clip(stat_score,-8,8))); resid=y-p0
+    # V13.5.5 exact frozen-STAT probability adapter: use only pre-shadow STAT
+    # margin residuals, matching the empirical probability construction used by STAT.
+    pre=np.isfinite(actual)&np.isfinite(stat)&np.isfinite(season_arr)&(season_arr<float(latest))
+    stat_residual=(actual-stat)[pre]
+    p0=np.full(len(games),np.nan,dtype=float)
+    ok0=np.isfinite(stat)&np.isfinite(spread)
+    p0[ok0]=_ncaaf_stat_empirical_prob_gt(-(stat[ok0]+spread[ok0]),stat_residual)
+    valid &= np.isfinite(p0)
+    resid=y-p0
     pipe=Pipeline([("imp",SimpleImputer(strategy="median",add_indicator=True)),("sc",StandardScaler()),("ridge",Ridge(alpha=120.0))])
     pipe.fit(X.loc[tr],resid[tr]); delta=np.clip(np.asarray(pipe.predict(X.loc[va]),dtype=float),-0.08,0.08)
     pp=np.clip(p0[va]+delta,1e-5,1-1e-5); pb=np.clip(p0[va],1e-5,1-1e-5); yy=y[va].astype(int)
     out.update({"status":"SHADOW_EVALUATED","n":int(len(yy)),"auc":_ncaaf_stat_auc(yy,pp),"logloss":_ncaaf_stat_logloss(yy,pp),"brier":_ncaaf_stat_brier(yy,pp),"anchor_auc":_ncaaf_stat_auc(yy,pb),"anchor_logloss":_ncaaf_stat_logloss(yy,pb),"anchor_brier":_ncaaf_stat_brier(yy,pb),"mean_abs_adjustment":float(np.mean(np.abs(delta))),**_v1350_binary_calibration_metrics(yy,pp)})
-    # This stack is research/shadow only until a true production-STAT probability OOF adapter is available.
-    out["promotion_eligible"]=False; out["authority_state"]="SHADOW"; out["authority_reason"]="REQUIRES_EXACT_PRODUCTION_STAT_OOF_ADAPTER_BEFORE_PROMOTION"; return out
+    # Exact STAT adapter is now present. Keep zero production authority until the
+    # normal independent prospective promotion contract is wired/passed.
+    ll_gain=out["anchor_logloss"]-out["logloss"]; br_gain=out["anchor_brier"]-out["brier"]; auc_gain=out["auc"]-out["anchor_auc"]
+    eligible=bool(len(yy)>=100 and ll_gain>0 and br_gain>0 and auc_gain>=-0.005 and float(out.get("ece",1.0))<=0.10)
+    out["promotion_eligible"]=eligible; out["authority_state"]="PROMOTION_ELIGIBLE" if eligible else "SHADOW"; out["authority_reason"]="PASS_INCREMENTAL_STAT_GATE__PROSPECTIVE_REQUIRED" if eligible else "NO_ROBUST_INCREMENTAL_STAT_EDGE"; out["production_authority"]=0; return out
+
+
+# ============================================================================
+# V13.5.5 SYSTEM MINER V2 — shared disciplined discovery across SPREAD/H2H/TOTALS
+# ============================================================================
+def _v1355_bh_qvalues(pvals):
+    a=np.asarray(pvals,dtype=float); out=np.full(len(a),np.nan); ok=np.flatnonzero(np.isfinite(a))
+    if not len(ok): return out
+    order=ok[np.argsort(a[ok])]; m=len(order); prev=1.0
+    for rank in range(m,0,-1):
+        i=order[rank-1]; q=min(prev,float(a[i])*m/rank,1.0); out[i]=q; prev=q
+    return out
+
+def _v1355_system_atoms(g):
+    """Leak-safe, prior/current pregame clauses shared by all three market miners."""
+    n=lambda c: pd.to_numeric(g.get(c,pd.Series(np.nan,index=g.index)),errors='coerce')
+    txt=lambda c: g.get(c,pd.Series('',index=g.index)).astype(str).str.upper().str.strip()
+    atoms=[]
+    def add(name,family,mask,desc=None):
+        mm=pd.Series(mask,index=g.index).fillna(False).astype(bool).to_numpy()
+        if 20<=int(mm.sum())<len(g): atoms.append({'name':name,'family':family,'mask':mm,'description':desc or name})
+    sp=n('Consensus_Open_Spread'); tot=n('Consensus_Open_Total'); rest=n('Days_Since_Last_Game'); opprest=n('Opp_Days_Since_Last_Game')
+    week=n('Context_Week'); game_no=n('Team_Game_Number_Prior').where(n('Team_Game_Number_Prior').notna(),n('Game_Number_Prior'))
+    rev=n('Revenge_Flag'); h2hd=n('Days_Since_Last_Matchup'); h2hm=n('Last_Matchup_Margin')
+    # market role / price regime
+    add('HOME','VENUE',n('Is_Home').eq(1)); add('ROAD','VENUE',n('Is_Home').eq(0))
+    add('CURRENT_DOG','MARKET_ROLE',sp.gt(0)); add('CURRENT_FAVORITE','MARKET_ROLE',sp.lt(0))
+    for lo,hi in [(0,3),(3,7),(7,10),(10,14),(14,99)]: add(f'DOG_{lo}_{hi}', 'MARKET_PRICE', sp.gt(lo)&sp.le(hi))
+    for lo,hi in [(0,3),(3,7),(7,10),(10,14),(14,99)]: add(f'FAV_{lo}_{hi}', 'MARKET_PRICE', (-sp).gt(lo)&(-sp).le(hi))
+    for lo,hi in [(0,45),(45,52),(52,60),(60,99)]: add(f'TOTAL_{lo}_{hi}','TOTAL_REGIME',tot.ge(lo)&tot.lt(hi))
+    # timing / schedule
+    add('EARLY_SEASON_WK1_4','SEASON_TIMING',week.between(1,4)); add('MID_SEASON_WK5_9','SEASON_TIMING',week.between(5,9)); add('LATE_SEASON_WK10_PLUS','SEASON_TIMING',week.ge(10))
+    add('FIRST_THREE_TEAM_GAMES','SEASON_TIMING',game_no.le(3)&game_no.notna()); add('GAME_7_PLUS','SEASON_TIMING',game_no.ge(7))
+    add('SHORT_REST_6_OR_LESS','REST',rest.le(6)&rest.notna()); add('REST_8_PLUS','REST',rest.ge(8)); add('REST_ADV_2_PLUS','REST',(rest-opprest).ge(2)); add('REST_DISADV_2_PLUS','REST',(rest-opprest).le(-2))
+    # rivalry / familiarity / revenge
+    for c in ['Rivalry_Flag','Is_Rivalry','Context_Rivalry_Flag']:
+        if c in g.columns: add('RIVALRY','RIVALRY',n(c).eq(1)); break
+    add('REVENGE','MATCHUP_HISTORY',rev.eq(1)); add('RECENT_H2H_730D','MATCHUP_HISTORY',h2hd.le(730)&h2hd.notna()); add('PRIOR_H2H_LOSS','MATCHUP_HISTORY',h2hm.lt(0)); add('PRIOR_H2H_WIN','MATCHUP_HISTORY',h2hm.gt(0))
+    # model-state / disagreement regimes. These are OOF or pregame-only fields
+    # attached by the training caller; no realized outcome is used as a clause.
+    stat_edge=n('_V1355_STAT_EDGE_POINTS')
+    add('STAT_EDGE_2_PLUS','MODEL_STATE',stat_edge.ge(2)); add('STAT_EDGE_2_MINUS','MODEL_STATE',stat_edge.le(-2)); add('STAT_EDGE_ABS_4_PLUS','MODEL_STATE',stat_edge.abs().ge(4))
+    h2h_gap=n('_V1355_H2H_STAT_MINUS_MARKET')
+    add('H2H_STAT_OVER_MARKET_5P','MODEL_STATE',h2h_gap.ge(.05)); add('H2H_STAT_UNDER_MARKET_5P','MODEL_STATE',h2h_gap.le(-.05))
+    total_gap=n('_V1355_TOTAL_EDGE_POINTS')
+    add('TOTAL_MODEL_OVER_4','MODEL_STATE',total_gap.ge(4)); add('TOTAL_MODEL_UNDER_4','MODEL_STATE',total_gap.le(-4))
+    # prior form
+    add('OFF_SU_WIN','PRIOR_RESULT',n('Prev_SU_Margin').gt(0)); add('OFF_SU_LOSS','PRIOR_RESULT',n('Prev_SU_Margin').lt(0)); add('OFF_BLOWOUT_WIN_14','PRIOR_RESULT',n('Prev_SU_Margin').ge(14)); add('OFF_BLOWOUT_LOSS_14','PRIOR_RESULT',n('Prev_SU_Margin').le(-14))
+    add('ATS_LOSS_STREAK_2','ATS_FORM',n('ATS_Loss_Streak_Prior').ge(2)); add('SU_WIN_STREAK_2','SU_FORM',n('Current_Win_Streak_Prior').ge(2)); add('SU_LOSS_STREAK_2','SU_FORM',n('Current_Loss_Streak_Prior').ge(2))
+    # conference identity/pairs; require meaningful historical support
+    conf_col=next((c for c in ['Conference','Team_Conference','Conference_Norm','Context_Conference'] if c in g.columns),None)
+    opp_conf_col=next((c for c in ['Opponent_Conference','Opp_Conference','Opponent_Conference_Norm','Context_Opp_Conference'] if c in g.columns),None)
+    if conf_col:
+        vc=txt(conf_col).value_counts()
+        for v,cnt in vc.items():
+            if v and v not in {'NAN','NONE','UNKNOWN'} and cnt>=80: add('CONF_'+re.sub(r'[^A-Z0-9]+','_',v)[:28],'CONFERENCE',txt(conf_col).eq(v),f'Conference={v}')
+    if conf_col and opp_conf_col:
+        add('SAME_CONFERENCE','CONFERENCE_PAIR',txt(conf_col).eq(txt(opp_conf_col))&txt(conf_col).ne(''))
+        pairs=(txt(conf_col)+'__VS__'+txt(opp_conf_col)); vc=pairs.value_counts()
+        for v,cnt in vc.items():
+            if '__VS__' in v and cnt>=60 and 'NAN' not in v and 'UNKNOWN' not in v: add('CONFPAIR_'+re.sub(r'[^A-Z0-9]+','_',v)[:36],'CONFERENCE_PAIR',pairs.eq(v),v.replace('__VS__',' vs '))
+    # coaching/era identity when the source data actually carries it.
+    coach_col=next((c for c in ['Head_Coach','Coach','Team_Head_Coach'] if c in g.columns),None)
+    if coach_col:
+        cv=txt(coach_col).value_counts()
+        for v,cnt in cv.items():
+            if v and v not in {'NAN','NONE','UNKNOWN'} and cnt>=40: add('COACH_'+re.sub(r'[^A-Z0-9]+','_',v)[:32],'COACH_ERA',txt(coach_col).eq(v),f'Coach={v}')
+    # team-specific rules get a larger evidence burden downstream
+    team_col=next((c for c in ['Team_Norm','Team'] if c in g.columns),None)
+    if team_col:
+        tv=txt(team_col).value_counts()
+        for v,cnt in tv.items():
+            if v and v not in {'NAN','NONE'} and cnt>=35: add('TEAM_'+re.sub(r'[^A-Z0-9]+','_',v)[:32],'TEAM_SPECIFIC',txt(team_col).eq(v),f'Team={v}')
+    return atoms
+
+def _v1355_market_target(g,market):
+    am=pd.to_numeric(g.get('Actual_Margin'),errors='coerce').to_numpy(dtype=float); at=pd.to_numeric(g.get('Actual_Total'),errors='coerce').to_numpy(dtype=float)
+    sp=pd.to_numeric(g.get('Consensus_Open_Spread'),errors='coerce').to_numpy(dtype=float); tt=pd.to_numeric(g.get('Consensus_Open_Total'),errors='coerce').to_numpy(dtype=float)
+    if market=='spreads': raw=am+sp; valid=np.isfinite(raw)&~np.isclose(raw,0,atol=1e-9); y=(raw>0).astype(float); baseline=np.full(len(g),.5)
+    elif market=='h2h':
+        valid=np.isfinite(am)&~np.isclose(am,0,atol=1e-9); y=(am>0).astype(float); baseline=pd.to_numeric(g.get('Market_Open_H2H_Fair'),errors='coerce').to_numpy(dtype=float)
+    else: raw=at-tt; valid=np.isfinite(raw)&~np.isclose(raw,0,atol=1e-9); y=(raw>0).astype(float); baseline=np.full(len(g),.5)
+    return y,valid,baseline
+
+def _v1355_system_miner_v2(games,season_arr,latest,market,log_func=print,max_depth=3):
+    """Hierarchical, family-aware system discovery. Research/shadow only at discovery."""
+    from math import erf,sqrt
+    market=_sys_norm_market(market); out={'version':'V13.5.5-SYSTEM-MINER-V2','market':market,'status':'NO_SYSTEMS','systems':[],'production_authority':0}
+    if games is None or games.empty: return out
+    y,valid,baseline=_v1355_market_target(games,market); atoms=_v1355_system_atoms(games)
+    season=np.asarray(season_arr,dtype=float); sel=valid&np.isfinite(season)&(season<float(latest)); sh=valid&np.isfinite(season)&(season==float(latest))
+    if sel.sum()<500 or sh.sum()<80: out.update({'status':'INSUFFICIENT_HISTORY','atoms':len(atoms)}); return out
+    # Evaluate simple rules first; only parents with evidence may seed deeper rules.
+    tested=[]; beam=[]; seen=set()
+    def ev(mask,names,fams):
+        ix=np.flatnonzero(mask&sel); hx=np.flatnonzero(mask&sh); team_specific='TEAM_SPECIFIC' in fams
+        min_sel=55 if team_specific else 80; min_sh=10 if team_specific else 15
+        if len(ix)<min_sel or len(hx)<min_sh: return None
+        sr=float(np.mean(y[ix])); hr=float(np.mean(y[hx])); direction='PLAY_ON' if sr>=.5 else 'FADE'; srate=max(sr,1-sr); hrate=hr if direction=='PLAY_ON' else 1-hr
+        # one-sided normal approximation is ranking only; BH + OOS/LOSO are admission controls.
+        z=(srate-.5)/max((.25/len(ix))**.5,1e-9); pval=.5*(1-erf(z/sqrt(2)))
+        # season stability and remove-best-season
+        season_rates=[]; season_ix=[]
+        for sy in sorted(set(season[ix].astype(int))):
+            jj=ix[season[ix]==sy]
+            if len(jj)>=10:
+                rr=float(np.mean(y[jj])); rr=rr if direction=='PLAY_ON' else 1-rr; season_rates.append(rr); season_ix.append((sy,jj,rr))
+        if len(season_rates)<2: return None
+        best=max(season_ix,key=lambda x:x[2])[0]; rem=np.concatenate([jj for sy,jj,rr in season_ix if sy!=best]) if len(season_ix)>1 else np.array([],dtype=int)
+        remove_best=float(np.mean(y[rem] if direction=='PLAY_ON' else 1-y[rem])) if len(rem) else np.nan
+        stable_seasons=float(np.mean(np.asarray(season_rates)>.5));
+        # market residual evidence where a fair probability exists (H2H)
+        b=baseline[ix]; residual=np.nan
+        if np.isfinite(b).sum()>=min_sel:
+            obs=y[ix] if direction=='PLAY_ON' else 1-y[ix]; bb=b if direction=='PLAY_ON' else 1-b; residual=float(np.nanmean(obs-bb))
+        quality=(srate-.5)*2 + max(0,hrate-.5) + max(0,remove_best-.5) + .05*stable_seasons
+        return {'conditions':list(names),'families':list(fams),'direction':direction,'selection_games':len(ix),'selection_rate':srate,'shadow_games':len(hx),'shadow_rate':hrate,'season_rates':season_rates,'stable_season_fraction':stable_seasons,'remove_best_season_rate':remove_best,'market_residual':residual,'nominal_pvalue':pval,'quality':quality,'mask':mask}
+    for i,a in enumerate(atoms):
+        r=ev(a['mask'],(a['name'],),(a['family'],));
+        if r: r['idx']=(i,); tested.append(r); beam.append(r)
+    beam=sorted(beam,key=lambda r:r['quality'],reverse=True)[:32]
+    for depth in range(2,max_depth+1):
+        nxt=[]
+        for st in beam:
+            used=set(st['families'])
+            for i,a in enumerate(atoms):
+                if i in st['idx'] or a['family'] in used: continue
+                names=tuple(sorted(st['conditions']+[a['name']]))
+                if names in seen: continue
+                seen.add(names); r=ev(st['mask']&a['mask'],names,tuple(st['families']+[a['family']]))
+                if r: r['idx']=st['idx']+(i,); tested.append(r); nxt.append(r)
+        beam=sorted(nxt,key=lambda r:r['quality'],reverse=True)[:32]
+        if not beam: break
+    if not tested: out.update({'status':'NO_QUALIFIED_CANDIDATES','atoms':len(atoms)}); return out
+    q=_v1355_bh_qvalues([r['nominal_pvalue'] for r in tested])
+    for r,qq in zip(tested,q): r['fdr_qvalue']=float(qq) if np.isfinite(qq) else np.nan
+    # Deduplicate near-identical condition families by condition signature and keep robust shadow transfers.
+    finals=[]
+    for r in sorted(tested,key=lambda x:(x['quality'],x['selection_games']),reverse=True):
+        robust=bool(r['selection_rate']>=.54 and r['shadow_rate']>=.50 and r['remove_best_season_rate']>=.515 and r['stable_season_fraction']>=.60 and r['fdr_qvalue']<=.20)
+        promising=bool(r['selection_rate']>=.53 and r['shadow_rate']>=.50 and r['remove_best_season_rate']>=.50)
+        if not (robust or promising): continue
+        fam='__'.join(sorted(set(r['families']))); sid='SYS-'+market.upper()+'-'+hashlib.blake2b('|'.join(r['conditions']).encode(),digest_size=4).hexdigest().upper()
+        lifecycle='QUALIFIED' if robust else 'SHADOW'
+        finals.append({k:v for k,v in r.items() if k not in {'mask','idx','quality'}}|{'system_id':sid,'system_family':fam,'authority_state':lifecycle,'production_authority':0,'system_type':'BET' if r['direction']=='PLAY_ON' else 'FADE','discovery_status':'ROBUST_OOS_CANDIDATE' if robust else 'PROMISING_SHADOW','tested_hypotheses':len(tested)})
+        if len(finals)>=50: break
+    out.update({'status':'RESEARCH_COMPLETE','atoms':len(atoms),'tested_hypotheses':len(tested),'systems':finals,'published_count':len(finals),'authority_lifecycle':'RESEARCH_TO_SHADOW_TO_QUALIFIED_TO_PRODUCTION','production_authority':0,'admission_contract':'HIERARCHICAL_SEARCH__FDR__SEASON_STABILITY__REMOVE_BEST_SEASON__LATEST_SEASON_SHADOW__TEAM_SPECIFIC_HIGHER_BURDEN'})
+    log_func(f"[V13.5.5-SYSTEM-MINER-V2] market={market} atoms={len(atoms)} tested={len(tested)} published={len(finals)} qualified={sum(x['authority_state']=='QUALIFIED' for x in finals)} shadow={sum(x['authority_state']=='SHADOW' for x in finals)} production_authority=0")
+    return out
+
+def _v1355_match_live_systems(rows, registry, market):
+    """Cheap live trigger evaluator. Only current displayed rows are evaluated."""
+    if rows is None or rows.empty or not isinstance(registry,dict): return rows
+    systems=list(((registry.get(market) or {}).get('systems') or []));
+    if not systems: rows=rows.copy(); rows['Miner_System_Count']=0; rows['Miner_System_Summary']='—'; rows['Miner_System_IDs']=''; return rows
+    atoms={a['name']:a['mask'] for a in _v1355_system_atoms(rows)}; rows=rows.copy(); summaries=[[] for _ in range(len(rows))]; ids=[[] for _ in range(len(rows))]
+    for sys in systems:
+        cond=sys.get('conditions') or []; mm=np.ones(len(rows),dtype=bool)
+        if not cond: continue
+        for c in cond:
+            if c not in atoms: mm[:]=False; break
+            mm &= np.asarray(atoms[c],dtype=bool)
+        for j in np.flatnonzero(mm):
+            ids[j].append(str(sys.get('system_id'))); summaries[j].append(f"{sys.get('system_id')} [{sys.get('authority_state','RESEARCH')}]")
+    rows['Miner_System_Count']=[len(x) for x in ids]; rows['Miner_System_IDs']=['|'.join(x) for x in ids]; rows['Miner_System_Summary']=[' | '.join(x) if x else '—' for x in summaries]
+    return rows
 
 def _v13541_challenger_promotion_contract(challenger, incumbent_contract, market):
     """Fail-closed authority lifecycle for H2H/Totals challengers.
@@ -33776,6 +33969,17 @@ def fit_ncaaf_statistical_brain(log_func=print):
     _h2h_resid=_v13542_h2h_market_residual_v1(games,season_arr,oof_margin,latest)
     _tot_v2=_v1354_total_score_v2(games,total_feature_cols,season_arr,latest)
     _spread_stack=_v13542_spread_residual_stack_v1(games,season_arr,oof_margin,latest)
+    _miner_games=games.copy()
+    _miner_sp=pd.to_numeric(_miner_games.get("Consensus_Open_Spread"),errors="coerce").to_numpy(dtype=float)
+    _miner_tt=pd.to_numeric(_miner_games.get("Consensus_Open_Total"),errors="coerce").to_numpy(dtype=float)
+    _miner_games["_V1355_STAT_EDGE_POINTS"]=np.asarray(oof_margin,dtype=float)+_miner_sp
+    _miner_games["_V1355_TOTAL_EDGE_POINTS"]=np.asarray(oof_total,dtype=float)-_miner_tt
+    _miner_hm=pd.to_numeric(_miner_games.get("Market_Open_H2H_Fair"),errors="coerce").to_numpy(dtype=float)
+    _miner_pre=np.isfinite(season_arr)&(season_arr<float(latest))&np.isfinite(actual_m)&np.isfinite(oof_margin)
+    _miner_res=(actual_m-oof_margin)[_miner_pre]
+    _miner_stat_h=_ncaaf_stat_empirical_prob_gt(-np.asarray(oof_margin,dtype=float),_miner_res)
+    _miner_games["_V1355_H2H_STAT_MINUS_MARKET"]=_miner_stat_h-_miner_hm
+    _system_miner_v2={m:_v1355_system_miner_v2(_miner_games,season_arr,latest,m,log_func=log_func,max_depth=3) for m in ("spreads","h2h","totals")}
     # Compare to current incumbent sibling contracts. Qualification can advance a
     # challenger to PROMOTION_ELIGIBLE; production still requires independent prospective evidence.
     _tmp_inc={
@@ -33787,10 +33991,10 @@ def fit_ncaaf_statistical_brain(log_func=print):
     _tot_v2["authority_contract"]=_v13541_challenger_promotion_contract(_tot_v2,_tmp_inc["totals"],"totals")
     for _obj in (_h2h_v2,_h2h_resid,_tot_v2):
         _ac=_obj["authority_contract"]; _obj["can_earn_production_authority"]=True; _obj["promotion_eligible"]=_ac["promotion_eligible"]; _obj["production_authority"]=_ac["production_authority"]; _obj["authority_state"]=_ac["authority_state"]
-    log_func(f"[V13.5.4.2-H2H-MARKET-RESIDUAL-V1] status={_h2h_resid.get('status')} n={int(_h2h_resid.get('n',0) or 0)} auc={float(_h2h_resid.get('auc',np.nan)):.4f} market_auc={float(_h2h_resid.get('market_auc',np.nan)):.4f} ll={float(_h2h_resid.get('logloss',np.nan)):.6f} market_ll={float(_h2h_resid.get('market_logloss',np.nan)):.6f} brier={float(_h2h_resid.get('brier',np.nan)):.6f} market_brier={float(_h2h_resid.get('market_brier',np.nan)):.6f} authority_state={_h2h_resid.get('authority_state')} promotion_eligible={_h2h_resid.get('promotion_eligible')} production_authority={_h2h_resid.get('production_authority')} reason={_h2h_resid['authority_contract'].get('reason')}")
-    log_func(f"[V13.5.4.2-SPREAD-RESIDUAL-STACK-V1] status={_spread_stack.get('status')} n={int(_spread_stack.get('n',0) or 0)} auc={float(_spread_stack.get('auc',np.nan)):.4f} anchor_auc={float(_spread_stack.get('anchor_auc',np.nan)):.4f} ll={float(_spread_stack.get('logloss',np.nan)):.6f} anchor_ll={float(_spread_stack.get('anchor_logloss',np.nan)):.6f} brier={float(_spread_stack.get('brier',np.nan)):.6f} anchor_brier={float(_spread_stack.get('anchor_brier',np.nan)):.6f} brains={_spread_stack.get('available_brains')} authority_state={_spread_stack.get('authority_state')} reason={_spread_stack.get('authority_reason')} frozen_stat_unchanged=TRUE")
-    log_func(f"[V13.5.4.2-H2H-MATCHUP-V2] status={_h2h_v2.get('status')} n={int(_h2h_v2.get('n',0) or 0)} auc={float(_h2h_v2.get('auc',np.nan)):.4f} ll={float(_h2h_v2.get('logloss',np.nan)):.6f} brier={float(_h2h_v2.get('brier',np.nan)):.6f} ece={float(_h2h_v2.get('ece',np.nan)):.4f} authority_state={_h2h_v2.get('authority_state')} promotion_eligible={_h2h_v2.get('promotion_eligible')} production_authority={_h2h_v2.get('production_authority')} reason={_h2h_v2['authority_contract'].get('reason')} spread_unchanged=TRUE")
-    log_func(f"[V13.5.4.2-TOTAL-SCORE-V2] status={_tot_v2.get('status')} n={int(_tot_v2.get('n',0) or 0)} auc={float(_tot_v2.get('auc',np.nan)):.4f} ll={float(_tot_v2.get('logloss',np.nan)):.6f} brier={float(_tot_v2.get('brier',np.nan)):.6f} market_ll={float(_tot_v2.get('market_logloss',np.nan)):.6f} ece={float(_tot_v2.get('ece',np.nan)):.4f} authority_state={_tot_v2.get('authority_state')} promotion_eligible={_tot_v2.get('promotion_eligible')} production_authority={_tot_v2.get('production_authority')} reason={_tot_v2['authority_contract'].get('reason')} spread_unchanged=TRUE")
+    log_func(f"[V13.5.5-H2H-MARKET-RESIDUAL-V1] status={_h2h_resid.get('status')} n={int(_h2h_resid.get('n',0) or 0)} auc={float(_h2h_resid.get('auc',np.nan)):.4f} market_auc={float(_h2h_resid.get('market_auc',np.nan)):.4f} ll={float(_h2h_resid.get('logloss',np.nan)):.6f} market_ll={float(_h2h_resid.get('market_logloss',np.nan)):.6f} brier={float(_h2h_resid.get('brier',np.nan)):.6f} market_brier={float(_h2h_resid.get('market_brier',np.nan)):.6f} authority_state={_h2h_resid.get('authority_state')} promotion_eligible={_h2h_resid.get('promotion_eligible')} production_authority={_h2h_resid.get('production_authority')} reason={_h2h_resid['authority_contract'].get('reason')}")
+    log_func(f"[V13.5.5-SPREAD-RESIDUAL-STACK-V1] status={_spread_stack.get('status')} n={int(_spread_stack.get('n',0) or 0)} auc={float(_spread_stack.get('auc',np.nan)):.4f} anchor_auc={float(_spread_stack.get('anchor_auc',np.nan)):.4f} ll={float(_spread_stack.get('logloss',np.nan)):.6f} anchor_ll={float(_spread_stack.get('anchor_logloss',np.nan)):.6f} brier={float(_spread_stack.get('brier',np.nan)):.6f} anchor_brier={float(_spread_stack.get('anchor_brier',np.nan)):.6f} brains={_spread_stack.get('available_brains')} authority_state={_spread_stack.get('authority_state')} reason={_spread_stack.get('authority_reason')} frozen_stat_unchanged=TRUE")
+    log_func(f"[V13.5.5-H2H-MATCHUP-V2] status={_h2h_v2.get('status')} n={int(_h2h_v2.get('n',0) or 0)} auc={float(_h2h_v2.get('auc',np.nan)):.4f} ll={float(_h2h_v2.get('logloss',np.nan)):.6f} brier={float(_h2h_v2.get('brier',np.nan)):.6f} ece={float(_h2h_v2.get('ece',np.nan)):.4f} authority_state={_h2h_v2.get('authority_state')} promotion_eligible={_h2h_v2.get('promotion_eligible')} production_authority={_h2h_v2.get('production_authority')} reason={_h2h_v2['authority_contract'].get('reason')} spread_unchanged=TRUE")
+    log_func(f"[V13.5.5-TOTAL-SCORE-V2] status={_tot_v2.get('status')} n={int(_tot_v2.get('n',0) or 0)} auc={float(_tot_v2.get('auc',np.nan)):.4f} ll={float(_tot_v2.get('logloss',np.nan)):.6f} brier={float(_tot_v2.get('brier',np.nan)):.6f} market_ll={float(_tot_v2.get('market_logloss',np.nan)):.6f} ece={float(_tot_v2.get('ece',np.nan)):.4f} authority_state={_tot_v2.get('authority_state')} promotion_eligible={_tot_v2.get('promotion_eligible')} production_authority={_tot_v2.get('production_authority')} reason={_tot_v2['authority_contract'].get('reason')} spread_unchanged=TRUE")
 
     def _trust(ll,auc,market_ll=0.69314718056):
         if not np.isfinite(ll) or ll>=market_ll: return 0.0
@@ -33845,7 +34049,7 @@ def fit_ncaaf_statistical_brain(log_func=print):
         "profile_feature_cols":feature_cols,
         "profile_median":med.astype(np.float32), "profile_scale":scale.astype(np.float32),
         "trust_by_market":{"spreads":trust_sp,"totals":trust_tot,"h2h":trust_h},
-        "research_market_challengers_v1354":{"H2H_MATCHUP_V2":_h2h_v2,"H2H_MARKET_RESIDUAL_V1":_h2h_resid,"TOTAL_SCORE_V2":_tot_v2,"SPREAD_RESIDUAL_STACK_V1":_spread_stack,"authority_lifecycle":"RESEARCH_TO_SHADOW_TO_PROMOTION_ELIGIBLE_TO_PRODUCTION","can_earn_production_authority":True,"spread_unchanged":True},
+        "system_miner_v2":_system_miner_v2,"research_market_challengers_v1354":{"H2H_MATCHUP_V2":_h2h_v2,"H2H_MARKET_RESIDUAL_V1":_h2h_resid,"TOTAL_SCORE_V2":_tot_v2,"SPREAD_RESIDUAL_STACK_V1":_spread_stack,"authority_lifecycle":"RESEARCH_TO_SHADOW_TO_PROMOTION_ELIGIBLE_TO_PRODUCTION","can_earn_production_authority":True,"spread_unchanged":True},
         "shadow_metrics":{
             "season":latest,
             "spreads":{"n":int(valid_sp.sum()),"auc":auc_sp,"logloss":ll_sp,"brier":br_sp,"market_logloss":0.69314718056,"trust":trust_sp},
@@ -46690,6 +46894,9 @@ def _v1350_prepare_live_three_market_shadow_rows(df_moves_raw, label):
                 z['_shadow_model_gate']=bool(contract.get('shadow_gate_pass',False))
                 z['_shadow_gate_reason']=str(contract.get('reason','INSUFFICIENT_EVIDENCE'))
                 z['_shadow_threshold']=float(contract.get('edge_threshold',0.025) or 0.025)
+            # V13.5.5: evaluate only published system clauses for currently displayed rows.
+            # Full library stays in the artifact and is not rendered unless requested.
+            z=_v1355_match_live_systems(z,sb.get('system_miner_v2') or {},m)
             pieces.append(z)
             info[m]={
                 'rows':int(len(z)),'scored':int(pd.to_numeric(z['_model_prob'],errors='coerce').notna().sum()),
@@ -46778,8 +46985,10 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     picks['Hours to Game']=(picks['Game_Start']-now).dt.total_seconds().div(3600.0)
     picks['_shadow']=picks['_shadow_model_gate'].fillna(False).astype(bool)&picks['_exec']&(picks['_edge']>=pd.to_numeric(picks['_shadow_threshold'],errors='coerce').fillna(.025))&(picks['_ev']>0)
 
-    # Spread systems remain attached only to the spread market.
-    picks['Systems']='—'
+    # V13.5.5: every market can display triggered Miner V2 systems. Named Big Al/Pathi
+    # remain spread-only, but the row-level indicator is common across all markets.
+    picks['Systems']=picks.get('Miner_System_Summary',pd.Series('—',index=picks.index)).fillna('—').astype(str)
+    picks['System Count']=pd.to_numeric(picks.get('Miner_System_Count',pd.Series(0,index=picks.index)),errors='coerce').fillna(0).astype(int)
     sm=picks['Market'].eq('spreads')
     if sm.any():
         prev_margin=pd.to_numeric(picks.get('Prev_SU_Margin',pd.Series(np.nan,index=picks.index)),errors='coerce')
@@ -46795,6 +47004,10 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
                     v=str(picks.at[idx,c] or '—').strip()
                     if v not in ('','—','nan','None'): vals.append(f'{prefix}: {v}')
             picks.at[idx,'Systems']=' | '.join(vals) if vals else '—'
+            # Miner count is already present; add named/frozen spread systems visible in vals.
+            _miner_cnt=int(picks.at[idx,'System Count']) if 'System Count' in picks.columns else 0
+            _named_cnt=sum(1 for _v in vals if not str(_v).startswith('SYS-'))
+            picks.at[idx,'System Count']=_miner_cnt+_named_cnt
 
     picks['ET Date']=picks['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d')
     picks['Game Time']=picks['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%a %I:%M %p')
@@ -46807,7 +47020,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
         g=g.sort_values('Game_Start')
         r0=g.iloc[0]
         rec={'_game_key':gk,'_game_start':r0.get('Game_Start'),'ET Date':r0.get('ET Date',''),'Game Time':r0.get('Game Time',''),'Matchup':r0.get('Matchup','')}
-        shadow_plays=[]; systems='—'
+        shadow_plays=[]; system_parts=[]; system_count=0
         for m,prefix in [('spreads','Spr'),('h2h','H2H'),('totals','Tot')]:
             x=g[g['Market'].eq(m)]
             if x.empty:
@@ -46818,7 +47031,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
                 label=f"{pick} {float(line):+.1f}" if np.isfinite(line) else pick
                 if np.isfinite(odds): label+=f" ({float(odds):+.0f})"
                 fair=-float(x.get('NCAAF_Stat_Expected_Margin')) if np.isfinite(pd.to_numeric(pd.Series([x.get('NCAAF_Stat_Expected_Margin')]),errors='coerce').iloc[0]) else np.nan
-                systems=str(x.get('Systems','—') or '—')
+                pass
             elif m=='h2h':
                 label=pick + (f" {float(odds):+.0f}" if np.isfinite(odds) else '')
                 fair=_v1350_fair_american(x.get('_pred'))
@@ -46829,10 +47042,15 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
                 fair=float(x.get('NCAAF_Stat_Expected_Total')) if np.isfinite(pd.to_numeric(pd.Series([x.get('NCAAF_Stat_Expected_Total')]),errors='coerce').iloc[0]) else np.nan
             status='SHADOW BET' if bool(x.get('_shadow',False)) else ('WATCH' if bool(x.get('_shadow_model_gate',False)) else 'RESEARCH ONLY')
             rec.update({f'{prefix} Pick':label,f'{prefix} Prob':x.get('_pred',np.nan),f'{prefix} Edge':x.get('_edge',np.nan),f'{prefix} EV':x.get('_ev',np.nan),f'{prefix} Fair':fair,f'{prefix} Status':status})
+            _sys=str(x.get('Systems','—') or '—').strip(); _cnt=int(x.get('System Count',0) or 0)
+            if _sys not in ('','—','nan','None'): system_parts.append(f"{prefix}: {_sys}")
+            system_count += _cnt
             if bool(x.get('_shadow',False)):
                 shadow_plays.append(f"{prefix}: {label}")
         rec['Shadow Plays']=' | '.join(shadow_plays) if shadow_plays else '—'
-        rec['Systems']=systems
+        rec['Systems']=' | '.join(system_parts) if system_parts else '—'
+        rec['System Count']=system_count
+        rec['System Trigger']='SYSTEMS '+str(system_count) if system_count else '—'
         records.append(rec)
     view=pd.DataFrame(records)
     if view.empty:
@@ -46854,10 +47072,35 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     st.caption('Shadow selections are tracked as if they were bets, but they are not production-authorized wagers.')
 
     view=view.sort_values('_game_start')
-    main=view[['Game Time','Matchup','Spr Pick','Spr Prob','Spr Edge','H2H Pick','H2H Prob','H2H Edge','Tot Pick','Tot Prob','Tot Edge','Shadow Plays','Systems']].copy()
+    main=view[['Game Time','Matchup','Spr Pick','Spr Prob','Spr Edge','H2H Pick','H2H Prob','H2H Edge','Tot Pick','Tot Prob','Tot Edge','Shadow Plays','System Trigger','Systems']].copy()
     for c in ['Spr Prob','Spr Edge','H2H Prob','H2H Edge','Tot Prob','Tot Edge']:
         main[c]=pd.to_numeric(main[c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
     st.dataframe(main,use_container_width=True,hide_index=True)
+
+    # V13.5.5 lazy system library: artifact contents are only expanded into a DataFrame
+    # after an explicit click, keeping the normal prediction-board render lightweight.
+    if st.button('Published Systems ▾',key='ncaaf-v1355-load-published-systems'):
+        st.session_state['ncaaf_v1355_system_library_loaded']=True
+    if st.session_state.get('ncaaf_v1355_system_library_loaded',False):
+        try:
+            _bundle=_v1347_load_latest_frozen_stat_spread_bundle(); _sb=(_bundle or {}).get('ncaaf_statistical_brain') or {}; _reg=_sb.get('system_miner_v2') or {}
+            _rows=[]
+            for _m,_mr in _reg.items():
+                for _sys in (_mr or {}).get('systems',[]):
+                    _rows.append({'Market':_m.upper(),'System':_sys.get('system_id'),'Status':_sys.get('authority_state'),'Type':_sys.get('system_type'),'Family':_sys.get('system_family'),'Rule':' AND '.join(_sys.get('conditions') or []),'Historical N':_sys.get('selection_games'),'Historical Rate':_sys.get('selection_rate'),'Latest N':_sys.get('shadow_games'),'Latest Rate':_sys.get('shadow_rate'),'Remove Best Season':_sys.get('remove_best_season_rate'),'FDR q':_sys.get('fdr_qvalue'),'Production Influence':_sys.get('production_authority',0)})
+            _lib=pd.DataFrame(_rows)
+            if _lib.empty: st.info('No Miner V2 systems have met publication criteria yet.')
+            else:
+                _mc=st.multiselect('System market',['SPREADS','H2H','TOTALS'],default=['SPREADS','H2H','TOTALS'],key='ncaaf-v1355-system-market')
+                _sc=st.multiselect('System status',sorted(_lib['Status'].dropna().unique().tolist()),default=sorted(_lib['Status'].dropna().unique().tolist()),key='ncaaf-v1355-system-status')
+                _show=_lib[_lib['Market'].isin(_mc)&_lib['Status'].isin(_sc)].copy()
+                st.dataframe(_show,use_container_width=True,hide_index=True)
+                _ids=_show['System'].dropna().astype(str).tolist()
+                if _ids:
+                    _sid=st.selectbox('View system',_ids,key='ncaaf-v1355-system-detail')
+                    _detail=_show[_show['System'].eq(_sid)].iloc[0].to_dict(); st.json(_detail)
+        except Exception as _sys_ui_err:
+            st.warning(f'System library unavailable: {type(_sys_ui_err).__name__}')
 
     if st.checkbox('Show market model diagnostics',value=False,key='ncaaf-fast-research'):
         diag=view[['Game Time','Matchup','Spr Fair','Spr EV','Spr Status','H2H Fair','H2H EV','H2H Status','Tot Fair','Tot EV','Tot Status']].copy()
