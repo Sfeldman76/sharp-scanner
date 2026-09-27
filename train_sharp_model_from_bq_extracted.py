@@ -1,4 +1,4 @@
-V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.5.4.2-residual-edge"
+V1337_WRAPPER_SOURCE_TAG = "wrapper-v13.5.5-system-miner-v2"
 
 from sharp_line_dashboard import (
     train_with_champion_wrapper,
