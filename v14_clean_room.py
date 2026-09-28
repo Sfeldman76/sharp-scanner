@@ -597,10 +597,15 @@ def run_v14_clean_room(*, dashboard_module, log_func=print, hard_fail=True):
             preds[name] = p; fold_rows[name] = fr
             m = eval_mask & np.isfinite(p)
             met = _emit_diagnostics("V14.1-OVERALL", name, y[m], p[m], log_func)
-            met["ll_gain_vs_stat"] = float(base_overall["logloss"] - met["logloss"]) if np.isfinite(met["logloss"]) else np.nan
-            met["brier_gain_vs_stat"] = float(base_overall["brier"] - met["brier"]) if np.isfinite(met["brier"]) else np.nan
+            paired_base = _metrics(y[m], base_p[m])
+            if int(met.get("n", 0)) != int(paired_base.get("n", 0)):
+                raise RuntimeError(f"V14.1 paired comparison row mismatch model={name} model_n={met.get('n')} base_n={paired_base.get('n')}")
+            met["paired_base"] = paired_base
+            met["ll_gain_vs_stat"] = float(paired_base["logloss"] - met["logloss"]) if np.isfinite(met["logloss"]) else np.nan
+            met["brier_gain_vs_stat"] = float(paired_base["brier"] - met["brier"]) if np.isfinite(met["brier"]) else np.nan
             overall[name] = met
-            log_func(f"[V14.1-INCREMENTAL] model={name} ll_gain_vs_stat={met['ll_gain_vs_stat']:+.6f} brier_gain_vs_stat={met['brier_gain_vs_stat']:+.6f} beats_stat_both={bool(met['ll_gain_vs_stat']>0 and met['brier_gain_vs_stat']>0)}")
+            log_func(f"[V14.1-PAIRED-BASE] model={name} n={paired_base['n']} auc={paired_base['auc']:.4f} ll={paired_base['logloss']:.6f} brier={paired_base['brier']:.6f} exact_same_rows=TRUE")
+            log_func(f"[V14.1-INCREMENTAL] model={name} ll_gain_vs_stat={met['ll_gain_vs_stat']:+.6f} brier_gain_vs_stat={met['brier_gain_vs_stat']:+.6f} beats_stat_both={bool(met['ll_gain_vs_stat']>0 and met['brier_gain_vs_stat']>0)} comparison=SAME_EXACT_ROWS")
             for row in _season_rows(name, y, p, base_p, season, eval_seasons):
                 a=row['model']; b=row['base']; bt=row['bet']
                 log_func(f"[V14.1-SEASON-SUMMARY] model={name} season={row['season']} n={row['n']} auc={a['auc']:.4f} ll={a['logloss']:.6f} brier={a['brier']:.6f} base_auc={b['auc']:.4f} base_ll={b['logloss']:.6f} base_brier={b['brier']:.6f} bets_025={bt['bets']} hit_025={bt['hit_rate']:.4f} roi_025={bt['roi']:.4f}")
@@ -619,9 +624,12 @@ def run_v14_clean_room(*, dashboard_module, log_func=print, hard_fail=True):
             season_tested += 1
             if r["model"]["logloss"] < r["base"]["logloss"] and r["model"]["brier"] < r["base"]["brier"]:
                 season_better += 1
-        beats_stat = bool(lm["logloss"] < base_overall["logloss"] and lm["brier"] < base_overall["brier"])
+        leader_base = lm.get("paired_base", {})
+        if int(lm.get("n", 0)) != int(leader_base.get("n", -1)):
+            raise RuntimeError(f"V14.1 leader paired comparison mismatch model_n={lm.get('n')} base_n={leader_base.get('n')}")
+        beats_stat = bool(lm["logloss"] < leader_base["logloss"] and lm["brier"] < leader_base["brier"])
         stable = bool(season_tested >= 2 and season_better >= math.ceil(season_tested / 2))
-        log_func(f"[V14.1-LEADER] model={leader} selection=LOWEST_SEASON_FORWARD_LOGLOSS_THEN_BRIER ll={lm['logloss']:.6f} brier={lm['brier']:.6f} base_ll={base_overall['logloss']:.6f} base_brier={base_overall['brier']:.6f} beats_stat={beats_stat} seasons_better_both={season_better}/{season_tested} stability_pass={stable} production_authority=0")
+        log_func(f"[V14.1-LEADER] model={leader} selection=LOWEST_SEASON_FORWARD_LOGLOSS_THEN_BRIER ll={lm['logloss']:.6f} brier={lm['brier']:.6f} base_ll={leader_base['logloss']:.6f} base_brier={leader_base['brier']:.6f} paired_n={lm['n']} beats_stat={beats_stat} seasons_better_both={season_better}/{season_tested} stability_pass={stable} comparison=SAME_EXACT_ROWS production_authority=0")
 
         ablation = _ablation(g, features, families, seasons, first_eval, leader, lm["logloss"], log_func)
         for r in ablation:
