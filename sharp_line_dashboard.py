@@ -16690,7 +16690,7 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
 V133_DEPLOY_BUILD_ID = "2026-09-27-v13.5.7-promotion-infrastructure-1"
-V1337_SOURCE_TAG = "dashboard-v13.5.7-promotion-infrastructure"
+V1337_SOURCE_TAG = "dashboard-v13.5.7.1-walk-forward-execution-fix"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -33961,11 +33961,22 @@ def _v1357_weekly_walk_forward_replay(games, candidate_feature_cols, log_func=pr
     out={"version":"V13.5.7-WEEKLY-WALK-FORWARD-V1","status":"UNAVAILABLE","production_authority":0,
          "contract":"EXPANDING_WINDOW__PRE_WEEK_ONLY__WEEKLY_FROZEN__FEATURE_REQUALIFICATION_EACH_WEEK",
          "thresholds":{"spreads":float(spread_edge_threshold),"h2h":float(h2h_edge_threshold),"totals":float(totals_edge_threshold)}}
-    if games is None or games.empty: return out
-    g=games.copy(); dates=pd.to_datetime(g.get("Game_Date"),errors="coerce",utc=True)
+    if games is None or games.empty:
+        out["reason"]="EMPTY_GAMES"
+        log_func("[V13.5.7.1-WALK-FORWARD-SUMMARY] status=FAILED reason=EMPTY_GAMES")
+        return out
+    g=games.copy()
+    if "Game_Date" not in g.columns or "Season" not in g.columns:
+        out["reason"]="MISSING_GAME_DATE_OR_SEASON"
+        log_func(f"[V13.5.7.1-WALK-FORWARD-SUMMARY] status=FAILED reason={out['reason']} has_game_date={'Game_Date' in g.columns} has_season={'Season' in g.columns}")
+        return out
+    dates=pd.to_datetime(g["Game_Date"],errors="coerce",utc=True)
     seasons=pd.to_numeric(g.get("Season"),errors="coerce").to_numpy(dtype=float)
     valid_date=dates.notna().to_numpy(); eligible=valid_date & np.isfinite(seasons) & (seasons>=float(start_season))
-    if eligible.sum()<100: out["reason"]="INSUFFICIENT_REPLAY_ROWS"; return out
+    if eligible.sum()<100:
+        out["reason"]="INSUFFICIENT_REPLAY_ROWS"
+        log_func(f"[V13.5.7.1-WALK-FORWARD-SUMMARY] status=FAILED reason=INSUFFICIENT_REPLAY_ROWS eligible_rows={int(eligible.sum())}")
+        return out
     # Monday UTC is the immutable weekly information cutoff.
     week_start=(dates.dt.normalize()-pd.to_timedelta(dates.dt.weekday,unit="D"))
     weeks=sorted(pd.Timestamp(x) for x in week_start[eligible].dropna().unique())
@@ -34020,7 +34031,10 @@ def _v1357_weekly_walk_forward_replay(games, candidate_feature_cols, log_func=pr
                     records.append(base|{"market":"totals","probability":float(prob),"edge":float(edge),"bet":bool(bet),"won":bool(won),"push":False,"unit_return":float((100/110) if won else -1.0) if bet else np.nan})
         except Exception as e:
             skipped.append((str(ws.date()),f"{type(e).__name__}:{e}")); continue
-    if not records: out.update({"status":"NO_REPLAY_PREDICTIONS","skipped_weeks":skipped[-20:]}); return out
+    if not records:
+        out.update({"status":"NO_REPLAY_PREDICTIONS","reason":"NO_REPLAY_PREDICTIONS","skipped_weeks":skipped[-20:]})
+        log_func(f"[V13.5.7.1-WALK-FORWARD-SUMMARY] status=FAILED reason=NO_REPLAY_PREDICTIONS weeks_considered={len(weeks)} skipped_weeks={len(skipped)} skipped_tail={skipped[-5:]}")
+        return out
     rdf=pd.DataFrame(records); summaries={}; by_season={}
     for market in ("spreads","h2h","totals"):
         d=rdf.loc[rdf.market.eq(market)].copy(); b=d.loc[d.bet.eq(True)].copy(); priced=b.loc[np.isfinite(pd.to_numeric(b.unit_return,errors="coerce"))]
@@ -34029,11 +34043,52 @@ def _v1357_weekly_walk_forward_replay(games, candidate_feature_cols, log_func=pr
         for sy,dd in d.groupby("season"):
             bb=dd.loc[dd.bet.eq(True)]; pp=bb.loc[np.isfinite(pd.to_numeric(bb.unit_return,errors="coerce"))]
             by_season[market][int(sy)]={"predictions":int(len(dd)),"bets":int(len(bb)),"wins":int(bb.won.sum()) if len(bb) else 0,"hit_rate":float(bb.won.mean()) if len(bb) else np.nan,"roi":float(pp.unit_return.mean()) if len(pp) else np.nan}
-        log_func(f"[V13.5.7-WALK-FORWARD] market={market} predictions={summaries[market]['predictions']} bets={summaries[market]['bets']} priced_bets={summaries[market]['priced_bets']} wins={summaries[market]['wins']} hit_rate={summaries[market]['hit_rate']:.4f} roi={summaries[market]['roi']:.4f} avg_edge={summaries[market]['avg_edge']:.4f} threshold={out['thresholds'][market]:.4f}")
-        for sy,met in by_season[market].items(): log_func(f"[V13.5.7-WALK-FORWARD-SEASON] market={market} season={sy} predictions={met['predictions']} bets={met['bets']} wins={met['wins']} hit_rate={met['hit_rate']:.4f} roi={met['roi']:.4f}")
+        log_func(f"[V13.5.7.1-WALK-FORWARD] market={market} predictions={summaries[market]['predictions']} bets={summaries[market]['bets']} priced_bets={summaries[market]['priced_bets']} wins={summaries[market]['wins']} hit_rate={summaries[market]['hit_rate']:.4f} roi={summaries[market]['roi']:.4f} avg_edge={summaries[market]['avg_edge']:.4f} threshold={out['thresholds'][market]:.4f}")
+        for sy,met in by_season[market].items(): log_func(f"[V13.5.7.1-WALK-FORWARD-SEASON] market={market} season={sy} predictions={met['predictions']} bets={met['bets']} wins={met['wins']} hit_rate={met['hit_rate']:.4f} roi={met['roi']:.4f}")
     out.update({"status":"PASS","weeks":int(rdf.week_start.nunique()),"summaries":summaries,"by_season":by_season,"skipped_weeks":skipped[-20:],"prediction_rows":int(len(rdf)),"bet_rows":int(rdf.bet.sum())})
-    log_func(f"[V13.5.7-WALK-FORWARD-SUMMARY] status=PASS weeks={out['weeks']} prediction_rows={out['prediction_rows']} bet_rows={out['bet_rows']} skipped_weeks={len(skipped)} production_authority=0 thresholds_frozen=TRUE")
+    log_func(f"[V13.5.7.1-WALK-FORWARD-SUMMARY] status=PASS weeks={out['weeks']} prediction_rows={out['prediction_rows']} bet_rows={out['bet_rows']} skipped_weeks={len(skipped)} production_authority=0 thresholds_frozen=TRUE")
     return out
+
+
+
+def _v13571_ensure_weekly_walk_forward(log_func=print, hard_fail=True):
+    """Job-level execution contract for NCAAF weekly walk-forward replay.
+
+    This is deliberately outside the normal STAT fit path so an existing STAT cache cannot
+    silently bypass validation. It never changes production authority or thresholds.
+    """
+    bundle=_NCAAF_STAT_TRAIN_CACHE.get("bundle")
+    if not isinstance(bundle,dict):
+        msg="STAT_BUNDLE_UNAVAILABLE"
+        log_func(f"[V13.5.7.1-WALK-FORWARD-CONTRACT] status=FAILED reason={msg}")
+        if hard_fail: raise RuntimeError(f"[V13.5.7.1-WALK-FORWARD-CONTRACT] {msg}")
+        return {"status":"FAILED","reason":msg}
+    prior=bundle.get("weekly_walk_forward_v1")
+    if isinstance(prior,dict) and prior.get("status")=="PASS":
+        sm=prior.get("summaries") or {}
+        missing=[m for m in ("spreads","h2h","totals") if int((sm.get(m) or {}).get("predictions",0) or 0)<=0]
+        if not missing:
+            log_func(f"[V13.5.7.1-WALK-FORWARD-CONTRACT] status=PASS source=STAT_FIT_CACHE weeks={int(prior.get('weeks',0) or 0)} prediction_rows={int(prior.get('prediction_rows',0) or 0)} bet_rows={int(prior.get('bet_rows',0) or 0)} markets=spreads,h2h,totals")
+            return prior
+    games=_V1357_SPREAD_RESEARCH_CACHE.get("games")
+    candidate=list(bundle.get("candidate_feature_cols") or [])
+    if not isinstance(games,pd.DataFrame) or games.empty or not candidate:
+        reason=f"REPLAY_INPUTS_UNAVAILABLE games={0 if not isinstance(games,pd.DataFrame) else len(games)} candidate_features={len(candidate)} prior_status={prior.get('status') if isinstance(prior,dict) else None}"
+        log_func(f"[V13.5.7.1-WALK-FORWARD-CONTRACT] status=FAILED reason={reason}")
+        if hard_fail: raise RuntimeError(f"[V13.5.7.1-WALK-FORWARD-CONTRACT] {reason}")
+        return {"status":"FAILED","reason":reason}
+    log_func(f"[V13.5.7.1-WALK-FORWARD-CONTRACT] status=RUNNING source=JOB_LEVEL_CACHE_BYPASS_GUARD rows={len(games)} candidate_features={len(candidate)}")
+    replay=_v1357_weekly_walk_forward_replay(games,candidate,log_func=log_func,start_season=2023,spread_edge_threshold=0.025,h2h_edge_threshold=0.025,totals_edge_threshold=0.025)
+    bundle["weekly_walk_forward_v1"]=replay
+    sm=(replay.get("summaries") or {}) if isinstance(replay,dict) else {}
+    missing=[m for m in ("spreads","h2h","totals") if int((sm.get(m) or {}).get("predictions",0) or 0)<=0]
+    ok=isinstance(replay,dict) and replay.get("status")=="PASS" and not missing and int(replay.get("prediction_rows",0) or 0)>0
+    if not ok:
+        reason=f"REPLAY_NOT_COMPLETE status={replay.get('status') if isinstance(replay,dict) else None} missing_markets={missing} reason={replay.get('reason') if isinstance(replay,dict) else None}"
+        log_func(f"[V13.5.7.1-WALK-FORWARD-CONTRACT] status=FAILED reason={reason}")
+        if hard_fail: raise RuntimeError(f"[V13.5.7.1-WALK-FORWARD-CONTRACT] {reason}")
+    log_func(f"[V13.5.7.1-WALK-FORWARD-CONTRACT] status=PASS source=JOB_LEVEL_EXECUTION weeks={int(replay.get('weeks',0) or 0)} prediction_rows={int(replay.get('prediction_rows',0) or 0)} bet_rows={int(replay.get('bet_rows',0) or 0)} markets=spreads,h2h,totals thresholds_frozen=TRUE production_authority=0")
+    return replay
 
 
 def fit_ncaaf_statistical_brain(log_func=print):
@@ -34833,8 +34888,9 @@ def train_sharp_model_from_bq(
             try:
                 _sg=_V1357_SPREAD_RESEARCH_CACHE.get("games")
                 if isinstance(_sg,pd.DataFrame):
-                    _r=pd.to_numeric(_sg.get("Days_Since_Last_Game"),errors="coerce"); _o=pd.to_numeric(_sg.get("Opp_Days_Since_Last_Game"),errors="coerce")
-                    _pair=_r.notna()&_o.notna(); _nonzero=(_r[_pair]-_o[_pair]).abs().gt(0) if int(_pair.sum()) else pd.Series([],dtype=bool)
+                    _r=pd.to_numeric(_sg["Days_Since_Last_Game"],errors="coerce") if "Days_Since_Last_Game" in _sg.columns else pd.Series(np.nan,index=_sg.index,dtype=float)
+                    _o=pd.to_numeric(_sg["Opp_Days_Since_Last_Game"],errors="coerce") if "Opp_Days_Since_Last_Game" in _sg.columns else pd.Series(np.nan,index=_sg.index,dtype=float)
+                    _pair=_r.notna()&_o.notna(); _nonzero=(_r.loc[_pair]-_o.loc[_pair]).abs().gt(0) if int(_pair.sum()) else pd.Series([],dtype=bool)
                     _gate=bool(int(_pair.sum())>=100 and int(_nonzero.sum())>0)
                     log_func(f"[V13.5.7-SCHEDULE-PAIR-AUDIT] gate={'PASS' if _gate else 'CLOSED'} paired={int(_pair.sum())} team_present={int(_r.notna().sum())} opp_present={int(_o.notna().sum())} nonzero_diff={int(_nonzero.sum()) if len(_nonzero) else 0} schedule_atoms={'ENABLED' if _gate else 'DISABLED'}")
             except Exception as _e:
