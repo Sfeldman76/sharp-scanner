@@ -213,8 +213,7 @@ def main():
     _utils, _utils_path, _utils_sha = _load_exact_local_module("utils")
     _sld, _dashboard_path, _dashboard_sha = _load_exact_local_module("sharp_line_dashboard")
     _wrapper, _wrapper_path, _wrapper_sha = _load_exact_local_module("train_sharp_model_from_bq_extracted")
-    _v14, _v14_path, _v14_sha = _load_exact_local_module("v14_clean_room")
-    _v142, _v142_path, _v142_sha = _load_exact_local_module("v14_stat_reliability")
+    _v143, _v143_path, _v143_sha = _load_exact_local_module("v14_stat_reliability")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
@@ -235,7 +234,7 @@ def main():
         "_v13310_runtime_brain_input_audit",
     ]
     _missing_utils = [n for n in _required_utils if not hasattr(_utils, n)]
-    _required_dashboard = ["_v1357_system_miner_v2","_v1355_match_live_systems","_v13542_spread_residual_stack_v1","_v13571_ensure_weekly_walk_forward","_v13572_emit_walk_forward_diagnostics"]
+    _required_dashboard = ["_v1357_system_miner_v2","_v1355_match_live_systems"]
     _missing_dashboard = [n for n in _required_dashboard if not hasattr(_sld, n)]
     if (not _expected_build) or (_expected_build != _utils_build) or _missing_utils or _missing_dashboard or _dashboard_tag != "dashboard-v13.5.7.2-walk-forward-diagnostics" or _utils_tag != "utils-v13.5.7.2-walk-forward-diagnostics" or _wrapper_tag != "wrapper-v13.5.7.2-walk-forward-diagnostics":
         raise RuntimeError(
@@ -253,25 +252,15 @@ def main():
         f"dashboard_path={_dashboard_path} dashboard_sha={_dashboard_sha[:16]} "
         f"utils_path={_utils_path} utils_sha={_utils_sha[:16]} wrapper_path={_wrapper_path} wrapper_sha={_wrapper_sha[:16]}"
     )
-    _v14_tag = getattr(_v14, "V14_CLEAN_ROOM_SOURCE_TAG", None)
-    if _v14_tag != "v14.1-stat-residual-corrector":
+    _v143_tag = getattr(_v143, "V143_SOURCE_TAG", None)
+    if _v143_tag != "v14.3-stat-reliability-hardening":
         raise RuntimeError(
-            f"[V14.1-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_v14_tag!r} "
-            f"path={str(_v14_path)!r} sha={_v14_sha[:16]}"
+            f"[V14.3-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_v143_tag!r} "
+            f"path={str(_v143_path)!r} sha={_v143_sha[:16]}"
         )
     log_func(
-        f"[V14.1-DEPLOY-PREFLIGHT] PASS source_tag={_v14_tag} "
-        f"path={_v14_path} sha={_v14_sha[:16]} production_authority=0"
-    )
-    _v142_tag = getattr(_v142, "V142_SOURCE_TAG", None)
-    if _v142_tag != "v14.2-stat-reliability-signed-fade":
-        raise RuntimeError(
-            f"[V14.2-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_v142_tag!r} "
-            f"path={str(_v142_path)!r} sha={_v142_sha[:16]}"
-        )
-    log_func(
-        f"[V14.2-DEPLOY-PREFLIGHT] PASS source_tag={_v142_tag} "
-        f"path={_v142_path} sha={_v142_sha[:16]} production_authority=0"
+        f"[V14.3-DEPLOY-PREFLIGHT] PASS source_tag={_v143_tag} "
+        f"path={_v143_path} sha={_v143_sha[:16]} v14_1_runtime=REMOVED production_authority=0"
     )
 
     pw.emit("start", f"Training start run_id={run_id} sport={sport} market={market}", pct=0.0)
@@ -316,24 +305,24 @@ def main():
             finally:
                 hb_mkt_stop.set()
 
-        # V13.5.7.1 authoritative validation contract. This runs after all market training
-        # and cannot be skipped by STAT cache reuse. NCAAF jobs fail closed if the replay
-        # did not produce predictions for all three markets.
-        if str(sport).upper().strip() == "NCAAF":
-            _sld._v13571_ensure_weekly_walk_forward(log_func=log_func, hard_fail=True)
-            # V14.1 correctors are retired after paired validation showed no
-            # incremental value over V13 STAT. The source remains in the bundle
-            # with its cross-row comparison bug fixed for audit reproducibility.
-            # V14.2 studies signed reliability only: FOLLOW good STAT regimes,
-            # FADE persistently bad STAT regimes, otherwise remain neutral.
-            if str(market).lower().strip() in ("all", "spreads"):
-                log_func(
-                    "[V14.1-RETIREMENT] status=RETIRED reason=NO_PAIRED_INCREMENTAL_VALUE "
-                    "prediction_engine=V13_STAT_FROZEN replacement_model=NONE"
-                )
-                _v142.run_v14_stat_reliability(
-                    dashboard_module=_sld, log_func=log_func, hard_fail=True
-                )
+        # V14.3: V13 STAT remains frozen. Retired replacement/corrector and weekly
+        # adaptive-refit experiments no longer execute in the normal job. Reliability
+        # research now asks FOLLOW / FADE / SUPPRESS on season-forward OOF history.
+        if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() in ("all", "spreads"):
+            log_func("[V14.3-RETIREMENT] path=V14_DIRECT_ATS_MODELS state=ARCHIVED runtime_call=REMOVED")
+            log_func("[V14.3-RETIREMENT] path=V14.1_RESIDUAL_CORRECTORS state=ARCHIVED runtime_call=REMOVED")
+            log_func("[V14.3-RETIREMENT] path=WEEKLY_STAT_REFIT state=ARCHIVED runtime_call=REMOVED")
+            log_func("[V14.3-RETIREMENT] path=SPREAD_RESIDUAL_STACK_V1 state=ARCHIVED runtime_call=REMOVED")
+            log_func("[V14.3-RETIREMENT] path=TOTAL_SCORE_V2 state=ARCHIVED runtime_call=REMOVED")
+            _v143.run_v14_stat_reliability(
+                dashboard_module=_sld, log_func=log_func, hard_fail=True
+            )
+            log_func(
+                "[CODE-LIFECYCLE-AUDIT] status=PASS active_production=V13_STAT_FROZEN "
+                "active_research=V14.3_RELIABILITY,SYSTEM_MINER,H2H_SIBLINGS "
+                "retired_runtime=V14_DIRECT_ATS,V14.1_CORRECTORS,WEEKLY_STAT_REFIT,SPREAD_RESIDUAL_STACK,TOTAL_SCORE_V2 "
+                "retired_runtime_calls=0 production_contract=PASS"
+            )
 
         pw.emit("done", "Training complete ✅", pct=1.0)
 
