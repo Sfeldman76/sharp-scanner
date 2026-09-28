@@ -253,13 +253,13 @@ def main():
         f"utils_path={_utils_path} utils_sha={_utils_sha[:16]} wrapper_path={_wrapper_path} wrapper_sha={_wrapper_sha[:16]}"
     )
     _v14_tag = getattr(_v14, "V14_CLEAN_ROOM_SOURCE_TAG", None)
-    if _v14_tag != "v14-clean-room-v1-direct-ats-market-relative":
+    if _v14_tag != "v14.1-stat-residual-corrector":
         raise RuntimeError(
-            f"[V14-CLEANROOM-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_v14_tag!r} "
+            f"[V14.1-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_v14_tag!r} "
             f"path={str(_v14_path)!r} sha={_v14_sha[:16]}"
         )
     log_func(
-        f"[V14-CLEANROOM-DEPLOY-PREFLIGHT] PASS source_tag={_v14_tag} "
+        f"[V14.1-DEPLOY-PREFLIGHT] PASS source_tag={_v14_tag} "
         f"path={_v14_path} sha={_v14_sha[:16]} production_authority=0"
     )
 
@@ -310,9 +310,9 @@ def main():
         # did not produce predictions for all three markets.
         if str(sport).upper().strip() == "NCAAF":
             _sld._v13571_ensure_weekly_walk_forward(log_func=log_func, hard_fail=True)
-            # V14 Clean Room V1 is deliberately research-only and Spread-focused.
-            # It executes after the incumbent V13 validation contract so it cannot
-            # change V13 training, promotion, artifacts, thresholds, or serving.
+            # V14.1 STAT Residual Corrector is deliberately research-only and Spread-focused.
+            # It executes after incumbent V13 validation and cannot change V13
+            # training, promotion, artifacts, thresholds, or serving.
             if str(market).lower().strip() in ("all", "spreads"):
                 _v14.run_v14_clean_room(dashboard_module=_sld, log_func=log_func, hard_fail=True)
 
