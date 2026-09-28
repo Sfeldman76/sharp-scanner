@@ -100,7 +100,7 @@ SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 # string, is the primary model-instance key.
 NCAAF_V13_CODE_VERSION = "V13.4.4"
 V133_DEPLOY_BUILD_ID = "2026-09-27-v13.5.7-promotion-infrastructure-1"
-V1337_SOURCE_TAG = "utils-v13.5.7.1-walk-forward-execution-fix"
+V1337_SOURCE_TAG = "utils-v13.5.7.2-walk-forward-diagnostics"
 NCAAF_V13_FORWARD_PREDICTIONS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_predictions"
 NCAAF_V13_FORWARD_RESULTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.ncaaf_v13_forward_shadow_results"
 NCAAF_V13_FORWARD_LEDGER_VERSION = "2026-09-20-v13.3.5-immutable-artifact-aware-forward-ledger-v1"
