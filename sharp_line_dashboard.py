@@ -16690,7 +16690,7 @@ NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
 # locally as well so training does not depend on a late dynamic import for this
 # compatibility-only operation.
 V133_DEPLOY_BUILD_ID = "2026-09-27-v13.5.7-promotion-infrastructure-1"
-V1337_SOURCE_TAG = "dashboard-v13.5.7.1-walk-forward-execution-fix"
+V1337_SOURCE_TAG = "dashboard-v13.5.7.2-walk-forward-diagnostics"
 
 def _v133_legacy_market_rich_feature_frame(rows: pd.DataFrame, feature_cols, recipe: dict | None = None) -> pd.DataFrame:
     feats=[str(c) for c in dict.fromkeys(list(feature_cols or [])) if c is not None]
@@ -33569,7 +33569,7 @@ def _v13542_spread_residual_stack_v1(games, season_arr, oof_margin, latest):
     def aligned_score(brain,fr):
         if not isinstance(fr,pd.DataFrame) or fr.empty: return np.full(len(games),np.nan), 'CACHE_EMPTY'
         z=fr.copy()
-        score_col=next((c for c in ['V133112_Score','V133112_Prob','CoreV4_OOF_Fair_Margin','Independent_Fair_Margin_OOF','Fair_Margin_OOF'] if c in z.columns),None)
+        score_col=next((c for c in ['V133112_Score','V133112_Prob','V13227_Independent_Cover_Prob_Open_OOF','V13_Fund_Cover_Prob_OOF','CoreV4_OOF_Fair_Margin','Independent_Fair_Margin_OOF','Fair_Margin_OOF'] if c in z.columns),None)
         if score_col is None: return np.full(len(games),np.nan), 'NO_SCORE_COLUMN'
         z['Team_Norm']=z.get('Team_Norm',z.get('Team',pd.Series('',index=z.index))).astype(str).map(normalize_team)
         z['Source_Game_ID']=z.get('Source_Game_ID',pd.Series('',index=z.index)).astype(str).str.lower().str.strip()
@@ -33635,7 +33635,7 @@ def _v1355_system_atoms(g):
     def add(name,family,mask,desc=None):
         mm=pd.Series(mask,index=g.index).fillna(False).astype(bool).to_numpy()
         if 20<=int(mm.sum())<len(g): atoms.append({'name':name,'family':family,'mask':mm,'description':desc or name})
-    sp=n('Consensus_Open_Spread'); tot=n('Consensus_Open_Total'); rest=n('Days_Since_Last_Game'); opprest=n('Opp_Days_Since_Last_Game')
+    sp=n('Consensus_Open_Spread'); tot=n('Consensus_Open_Total'); rest=n('Days_Since_Last_Game_System').where(n('Days_Since_Last_Game_System').notna(),n('Days_Since_Last_Game')); opprest=n('Opp_Days_Since_Last_Game_System').where(n('Opp_Days_Since_Last_Game_System').notna(),n('Opp_Days_Since_Last_Game'))
     week=n('Context_Week'); game_no=n('Team_Game_Number_Prior').where(n('Team_Game_Number_Prior').notna(),n('Game_Number_Prior'))
     rev=n('Revenge_Flag'); h2hd=n('Days_Since_Last_Matchup'); h2hm=n('Last_Matchup_Margin')
     # market role / price regime
@@ -33981,6 +33981,16 @@ def _v1357_weekly_walk_forward_replay(games, candidate_feature_cols, log_func=pr
     week_start=(dates.dt.normalize()-pd.to_timedelta(dates.dt.weekday,unit="D"))
     weeks=sorted(pd.Timestamp(x) for x in week_start[eligible].dropna().unique())
     records=[]; skipped=[]
+    def _binary_system_cols(prefix):
+        outc=[]
+        for c in g.columns:
+            if not str(c).startswith(prefix): continue
+            v=pd.to_numeric(g[c],errors="coerce").dropna()
+            u=set(v.unique()[:20]) if len(v) else set()
+            if u and u.issubset({0,1}): outc.append(c)
+        return outc
+    _bigal_cols=_binary_system_cols("BigAl_")
+    _pathi_cols=_binary_system_cols("Pathi_")
     for wi,ws in enumerate(weeks):
         hist=(valid_date & (dates < ws).to_numpy())
         test=(valid_date & (week_start == ws).to_numpy() & (seasons>=float(start_season)))
@@ -34012,44 +34022,130 @@ def _v1357_weekly_walk_forward_replay(games, candidate_feature_cols, log_func=pr
             ml=pd.to_numeric(gt.get("Consensus_Open_Moneyline"),errors="coerce").to_numpy(dtype=float) if "Consensus_Open_Moneyline" in gt.columns else np.full(len(gt),np.nan)
             oml=pd.to_numeric(gt.get("Opp_Consensus_Open_Moneyline"),errors="coerce").to_numpy(dtype=float) if "Opp_Consensus_Open_Moneyline" in gt.columns else np.full(len(gt),np.nan)
             for j,(idx,row) in enumerate(gt.iterrows()):
-                base={"week_start":ws.isoformat(),"season":int(pd.to_numeric(pd.Series([row.get("Season")]),errors="coerce").iloc[0]) if np.isfinite(pd.to_numeric(pd.Series([row.get("Season")]),errors="coerce").iloc[0]) else None,"game_id":row.get("Source_Game_ID"),"game_date":pd.Timestamp(row.get("Game_Date")).isoformat(),"team":row.get("Team_Norm"),"opponent":row.get("Opponent_Norm")}
+                _ba=sum(1 for c in _bigal_cols if pd.to_numeric(pd.Series([row.get(c)]),errors="coerce").fillna(0).iloc[0]>0)
+                _pa=sum(1 for c in _pathi_cols if pd.to_numeric(pd.Series([row.get(c)]),errors="coerce").fillna(0).iloc[0]>0)
+                base={"week_start":ws.isoformat(),"season":int(pd.to_numeric(pd.Series([row.get("Season")]),errors="coerce").iloc[0]) if np.isfinite(pd.to_numeric(pd.Series([row.get("Season")]),errors="coerce").iloc[0]) else None,"game_id":row.get("Source_Game_ID"),"game_date":pd.Timestamp(row.get("Game_Date")).isoformat(),"team":row.get("Team_Norm"),"opponent":row.get("Opponent_Norm"),"row_index":int(idx) if isinstance(idx,(int,np.integer)) else str(idx),"train_rows":int(len(gh)),"margin_features":int(len(mcols)),"total_features":int(len(tcols)),"bigal_triggers":int(_ba),"pathi_triggers":int(_pa),"any_system_trigger":bool((_ba+_pa)>0)}
                 # Spread: threshold is probability advantage over a 50/50 side market.
                 raw=am[j]+sp[j] if np.isfinite(am[j]) and np.isfinite(sp[j]) else np.nan
                 if np.isfinite(psp[j]) and np.isfinite(raw) and not np.isclose(raw,0,atol=1e-9):
                     side="TEAM" if psp[j]>=.5 else "OPPONENT"; prob=max(psp[j],1-psp[j]); edge=prob-.5; won=(raw>0) if side=="TEAM" else (raw<0); bet=edge>=spread_edge_threshold
-                    records.append(base|{"market":"spreads","probability":float(prob),"edge":float(edge),"bet":bool(bet),"won":bool(won),"push":False,"unit_return":float((100/110) if won else -1.0) if bet else np.nan})
+                    records.append(base|{"market":"spreads","probability":float(prob),"team_probability":float(psp[j]),"market_probability":0.5,"binary_outcome":int(raw>0),"side":side,"edge":float(edge),"bet":bool(bet),"won":bool(won),"push":False,"unit_return":float((100/110) if won else -1.0) if bet else np.nan})
                 # H2H: compare to de-vigged market fair; price-aware return uses carried American price for TEAM.
                 if np.isfinite(ph[j]) and np.isfinite(mh[j]) and np.isfinite(am[j]) and not np.isclose(am[j],0,atol=1e-9):
                     dteam=ph[j]-mh[j]; dopp=(1-ph[j])-(1-mh[j]); side="TEAM" if dteam>=dopp else "OPPONENT"; edge=max(dteam,dopp); won=(am[j]>0) if side=="TEAM" else (am[j]<0); bet=edge>=h2h_edge_threshold
                     price=ml[j] if side=="TEAM" else oml[j]
                     profit=(price/100.0 if price>0 else 100.0/abs(price)) if np.isfinite(price) and price!=0 else np.nan
-                    records.append(base|{"market":"h2h","probability":float(ph[j] if side=="TEAM" else 1-ph[j]),"edge":float(edge),"bet":bool(bet),"won":bool(won),"push":False,"unit_return":float(profit if won else -1.0) if bet and np.isfinite(profit) else np.nan})
+                    records.append(base|{"market":"h2h","probability":float(ph[j] if side=="TEAM" else 1-ph[j]),"team_probability":float(ph[j]),"market_probability":float(mh[j]),"binary_outcome":int(am[j]>0),"side":side,"price":float(price) if np.isfinite(price) else np.nan,"edge":float(edge),"bet":bool(bet),"won":bool(won),"push":False,"unit_return":float(profit if won else -1.0) if bet and np.isfinite(profit) else np.nan})
                 # Totals: over/under probability edge from 50/50, standard -110 return unless price-specific total odds are added later.
                 rawt=at[j]-tot[j] if np.isfinite(at[j]) and np.isfinite(tot[j]) else np.nan
                 if np.isfinite(pt[j]) and np.isfinite(rawt) and not np.isclose(rawt,0,atol=1e-9):
                     side="OVER" if pt[j]>=.5 else "UNDER"; prob=max(pt[j],1-pt[j]); edge=prob-.5; won=(rawt>0) if side=="OVER" else (rawt<0); bet=edge>=totals_edge_threshold
-                    records.append(base|{"market":"totals","probability":float(prob),"edge":float(edge),"bet":bool(bet),"won":bool(won),"push":False,"unit_return":float((100/110) if won else -1.0) if bet else np.nan})
+                    records.append(base|{"market":"totals","probability":float(prob),"team_probability":float(pt[j]),"market_probability":0.5,"binary_outcome":int(rawt>0),"side":side,"edge":float(edge),"bet":bool(bet),"won":bool(won),"push":False,"unit_return":float((100/110) if won else -1.0) if bet else np.nan})
         except Exception as e:
             skipped.append((str(ws.date()),f"{type(e).__name__}:{e}")); continue
     if not records:
         out.update({"status":"NO_REPLAY_PREDICTIONS","reason":"NO_REPLAY_PREDICTIONS","skipped_weeks":skipped[-20:]})
         log_func(f"[V13.5.7.1-WALK-FORWARD-SUMMARY] status=FAILED reason=NO_REPLAY_PREDICTIONS weeks_considered={len(weeks)} skipped_weeks={len(skipped)} skipped_tail={skipped[-5:]}")
         return out
-    rdf=pd.DataFrame(records); summaries={}; by_season={}
+    rdf=pd.DataFrame(records); summaries={}; by_season={}; threshold_diag=[]; edge_buckets=[]
     for market in ("spreads","h2h","totals"):
         d=rdf.loc[rdf.market.eq(market)].copy(); b=d.loc[d.bet.eq(True)].copy(); priced=b.loc[np.isfinite(pd.to_numeric(b.unit_return,errors="coerce"))]
-        summaries[market]={"predictions":int(len(d)),"bets":int(len(b)),"priced_bets":int(len(priced)),"wins":int(b.won.sum()) if len(b) else 0,"hit_rate":float(b.won.mean()) if len(b) else np.nan,"roi":float(priced.unit_return.mean()) if len(priced) else np.nan,"avg_edge":float(b.edge.mean()) if len(b) else np.nan}
+        met=_v13572_binary_metrics(pd.to_numeric(d.binary_outcome,errors="coerce"),pd.to_numeric(d.team_probability,errors="coerce"))
+        mmet=_v13572_binary_metrics(pd.to_numeric(d.binary_outcome,errors="coerce"),pd.to_numeric(d.market_probability,errors="coerce"))
+        summaries[market]={"predictions":int(len(d)),"bets":int(len(b)),"priced_bets":int(len(priced)),"wins":int(b.won.sum()) if len(b) else 0,"hit_rate":float(b.won.mean()) if len(b) else np.nan,"roi":float(priced.unit_return.mean()) if len(priced) else np.nan,"avg_edge":float(b.edge.mean()) if len(b) else np.nan,**met,"market_logloss":mmet.get("logloss",np.nan),"market_brier":mmet.get("brier",np.nan),"market_auc":mmet.get("auc",np.nan)}
         by_season[market]={}
         for sy,dd in d.groupby("season"):
             bb=dd.loc[dd.bet.eq(True)]; pp=bb.loc[np.isfinite(pd.to_numeric(bb.unit_return,errors="coerce"))]
-            by_season[market][int(sy)]={"predictions":int(len(dd)),"bets":int(len(bb)),"wins":int(bb.won.sum()) if len(bb) else 0,"hit_rate":float(bb.won.mean()) if len(bb) else np.nan,"roi":float(pp.unit_return.mean()) if len(pp) else np.nan}
-        log_func(f"[V13.5.7.1-WALK-FORWARD] market={market} predictions={summaries[market]['predictions']} bets={summaries[market]['bets']} priced_bets={summaries[market]['priced_bets']} wins={summaries[market]['wins']} hit_rate={summaries[market]['hit_rate']:.4f} roi={summaries[market]['roi']:.4f} avg_edge={summaries[market]['avg_edge']:.4f} threshold={out['thresholds'][market]:.4f}")
-        for sy,met in by_season[market].items(): log_func(f"[V13.5.7.1-WALK-FORWARD-SEASON] market={market} season={sy} predictions={met['predictions']} bets={met['bets']} wins={met['wins']} hit_rate={met['hit_rate']:.4f} roi={met['roi']:.4f}")
-    out.update({"status":"PASS","weeks":int(rdf.week_start.nunique()),"summaries":summaries,"by_season":by_season,"skipped_weeks":skipped[-20:],"prediction_rows":int(len(rdf)),"bet_rows":int(rdf.bet.sum())})
-    log_func(f"[V13.5.7.1-WALK-FORWARD-SUMMARY] status=PASS weeks={out['weeks']} prediction_rows={out['prediction_rows']} bet_rows={out['bet_rows']} skipped_weeks={len(skipped)} production_authority=0 thresholds_frozen=TRUE")
+            mm=_v13572_binary_metrics(pd.to_numeric(dd.binary_outcome,errors="coerce"),pd.to_numeric(dd.team_probability,errors="coerce"))
+            by_season[market][int(sy)]={"predictions":int(len(dd)),"bets":int(len(bb)),"wins":int(bb.won.sum()) if len(bb) else 0,"hit_rate":float(bb.won.mean()) if len(bb) else np.nan,"roi":float(pp.unit_return.mean()) if len(pp) else np.nan,**mm}
+        for th in (0.01,0.015,0.02,0.025,0.03,0.04,0.05):
+            bb=d.loc[pd.to_numeric(d.edge,errors="coerce").ge(th)].copy(); pp=bb.loc[np.isfinite(pd.to_numeric(bb.unit_return,errors="coerce"))]
+            # unit_return is populated only for the frozen-policy bets; reconstruct standard -110 for spread/totals, H2H requires price.
+            if market in ("spreads","totals"):
+                ret=np.where(bb.won.to_numpy(dtype=bool),100/110,-1.0) if len(bb) else np.array([])
+            else:
+                pr=pd.to_numeric(bb.get("price"),errors="coerce").to_numpy(dtype=float) if len(bb) else np.array([]); ww=bb.won.to_numpy(dtype=bool) if len(bb) else np.array([],dtype=bool)
+                prof=np.where(pr>0,pr/100.0,np.where(pr<0,100.0/np.abs(pr),np.nan)); ret=np.where(ww,prof,-1.0) if len(bb) else np.array([])
+            threshold_diag.append({"market":market,"threshold":th,"bets":int(len(bb)),"wins":int(bb.won.sum()) if len(bb) else 0,"hit_rate":float(bb.won.mean()) if len(bb) else np.nan,"roi":float(np.nanmean(ret)) if len(ret) and np.isfinite(ret).any() else np.nan})
+        bins=[0,.01,.02,.025,.03,.04,.05,np.inf]; labels=["0-.01",".01-.02",".02-.025",".025-.03",".03-.04",".04-.05",".05+"]
+        e=pd.to_numeric(d.edge,errors="coerce")
+        for lo,hi,lab in zip(bins[:-1],bins[1:],labels):
+            dd=d.loc[e.ge(lo)&e.lt(hi)].copy(); pp=dd.loc[np.isfinite(pd.to_numeric(dd.unit_return,errors="coerce"))]
+            edge_buckets.append({"market":market,"bucket":lab,"n":int(len(dd)),"bets":int(dd.bet.sum()) if len(dd) else 0,"hit_rate":float(dd.won.mean()) if len(dd) else np.nan,"roi":float(pp.unit_return.mean()) if len(pp) else np.nan})
+        log_func(f"[V13.5.7.2-WALK-FORWARD] market={market} predictions={summaries[market]['predictions']} bets={summaries[market]['bets']} priced_bets={summaries[market]['priced_bets']} wins={summaries[market]['wins']} hit_rate={summaries[market]['hit_rate']:.4f} roi={summaries[market]['roi']:.4f} avg_edge={summaries[market]['avg_edge']:.4f} auc={summaries[market]['auc']:.4f} ll={summaries[market]['logloss']:.6f} brier={summaries[market]['brier']:.6f} ece={summaries[market]['ece']:.4f} market_ll={summaries[market]['market_logloss']:.6f} market_brier={summaries[market]['market_brier']:.6f} threshold={out['thresholds'][market]:.4f}")
+        for sy,met2 in by_season[market].items(): log_func(f"[V13.5.7.2-WALK-FORWARD-SEASON] market={market} season={sy} predictions={met2['predictions']} bets={met2['bets']} wins={met2['wins']} hit_rate={met2['hit_rate']:.4f} roi={met2['roi']:.4f} auc={met2['auc']:.4f} ll={met2['logloss']:.6f} brier={met2['brier']:.6f} ece={met2['ece']:.4f}")
+    # Paired control: compare weekly-adaptive probabilities with the already-created season-forward OOF
+    # predictions on exactly the same game rows. This is diagnostic only.
+    avf=[]
+    try:
+        _rc=_V1357_SPREAD_RESEARCH_CACHE; _om=np.asarray(_rc.get("oof_margin"),dtype=float); _ot=np.asarray(_rc.get("oof_total"),dtype=float)
+        _sa=pd.to_numeric(games.get("Season"),errors="coerce").to_numpy(dtype=float); _am=pd.to_numeric(games.get("Actual_Margin"),errors="coerce").to_numpy(dtype=float); _at=pd.to_numeric(games.get("Actual_Total"),errors="coerce").to_numpy(dtype=float)
+        _sp=pd.to_numeric(games.get("Consensus_Open_Spread"),errors="coerce").to_numpy(dtype=float); _tt=pd.to_numeric(games.get("Consensus_Open_Total"),errors="coerce").to_numpy(dtype=float)
+        for sy in sorted(int(x) for x in rdf.season.dropna().unique()):
+            hist=np.isfinite(_sa)&(_sa<float(sy))
+            rm=(_am-_om)[hist&np.isfinite(_am)&np.isfinite(_om)]; rt=(_at-_ot)[hist&np.isfinite(_at)&np.isfinite(_ot)]
+            for market in ("spreads","h2h","totals"):
+                dd=rdf.loc[(rdf.market==market)&(rdf.season==sy)].copy(); ids=pd.to_numeric(dd.row_index,errors="coerce").dropna().astype(int)
+                dd=dd.loc[ids.index]; pos=ids.to_numpy(); valid=(pos>=0)&(pos<len(games)); dd=dd.iloc[np.flatnonzero(valid)]; pos=pos[valid]
+                if len(dd)<2: continue
+                if market=="spreads": fp=_ncaaf_stat_empirical_prob_gt(-(_om[pos]+_sp[pos]),rm)
+                elif market=="h2h": fp=_ncaaf_stat_empirical_prob_gt(-_om[pos],rm)
+                else: fp=_ncaaf_stat_empirical_prob_gt(_tt[pos]-_ot[pos],rt)
+                y=pd.to_numeric(dd.binary_outcome,errors="coerce").to_numpy(dtype=float); ap=pd.to_numeric(dd.team_probability,errors="coerce").to_numpy(dtype=float)
+                ma=_v13572_binary_metrics(y,ap); mf=_v13572_binary_metrics(y,fp)
+                avf.append({"market":market,"season":sy,"n":int(min(ma['n'],mf['n'])),"adaptive_auc":ma['auc'],"frozen_auc":mf['auc'],"adaptive_ll":ma['logloss'],"frozen_ll":mf['logloss'],"adaptive_brier":ma['brier'],"frozen_brier":mf['brier']})
+    except Exception as _e:
+        log_func(f"[V13.5.7.2-ADAPTIVE-VS-FROZEN] status=UNAVAILABLE error={type(_e).__name__}:{_e}")
+    system_attribution=[]; by_week=[]
+    for market in ("spreads","h2h","totals"):
+        d=rdf.loc[rdf.market.eq(market)].copy()
+        for flag,label in ((True,"SYSTEM_TRIGGER"),(False,"NO_SYSTEM_TRIGGER")):
+            dd=d.loc[d.any_system_trigger.eq(flag)&d.bet.eq(True)].copy(); pp=dd.loc[np.isfinite(pd.to_numeric(dd.unit_return,errors="coerce"))]
+            system_attribution.append({"market":market,"group":label,"bets":int(len(dd)),"wins":int(dd.won.sum()) if len(dd) else 0,"hit_rate":float(dd.won.mean()) if len(dd) else np.nan,"roi":float(pp.unit_return.mean()) if len(pp) else np.nan})
+        for wk,dd in d.groupby("week_start"):
+            bb=dd.loc[dd.bet.eq(True)]; pp=bb.loc[np.isfinite(pd.to_numeric(bb.unit_return,errors="coerce"))]
+            by_week.append({"market":market,"week":wk,"predictions":int(len(dd)),"bets":int(len(bb)),"wins":int(bb.won.sum()) if len(bb) else 0,"hit_rate":float(bb.won.mean()) if len(bb) else np.nan,"roi":float(pp.unit_return.mean()) if len(pp) else np.nan,"train_rows_min":int(pd.to_numeric(dd.train_rows,errors="coerce").min()),"train_rows_max":int(pd.to_numeric(dd.train_rows,errors="coerce").max())})
+    out.update({"status":"PASS","weeks":int(rdf.week_start.nunique()),"summaries":summaries,"by_season":by_season,"by_week":by_week,"threshold_diagnostics":threshold_diag,"edge_buckets":edge_buckets,"adaptive_vs_frozen":avf,"system_attribution":system_attribution,"skipped_weeks":skipped[-20:],"prediction_rows":int(len(rdf)),"bet_rows":int(rdf.bet.sum()),"records_retained":False})
+    for row in system_attribution: log_func(f"[V13.5.7.2-SYSTEM-ATTRIBUTION] market={row['market']} group={row['group']} bets={row['bets']} wins={row['wins']} hit_rate={row['hit_rate']:.4f} roi={row['roi']:.4f} descriptive_only=TRUE")
+    for row in by_week: log_func(f"[V13.5.7.2-WALK-FORWARD-WEEK] market={row['market']} week={row['week']} predictions={row['predictions']} bets={row['bets']} wins={row['wins']} hit_rate={row['hit_rate']:.4f} roi={row['roi']:.4f} train_rows_min={row['train_rows_min']} train_rows_max={row['train_rows_max']}")
+    for row in avf: log_func(f"[V13.5.7.2-ADAPTIVE-VS-FROZEN] market={row['market']} season={row['season']} n={row['n']} adaptive_auc={row['adaptive_auc']:.4f} frozen_auc={row['frozen_auc']:.4f} adaptive_ll={row['adaptive_ll']:.6f} frozen_ll={row['frozen_ll']:.6f} adaptive_brier={row['adaptive_brier']:.6f} frozen_brier={row['frozen_brier']:.6f}")
+    for row in threshold_diag: log_func(f"[V13.5.7.2-WALK-FORWARD-THRESHOLD] market={row['market']} threshold={row['threshold']:.3f} bets={row['bets']} wins={row['wins']} hit_rate={row['hit_rate']:.4f} roi={row['roi']:.4f} diagnostic_only=TRUE frozen_policy_unchanged=TRUE")
+    for row in edge_buckets: log_func(f"[V13.5.7.2-WALK-FORWARD-EDGE-BUCKET] market={row['market']} bucket={row['bucket']} n={row['n']} bets={row['bets']} hit_rate={row['hit_rate']:.4f} roi={row['roi']:.4f}")
+    log_func(f"[V13.5.7.2-WALK-FORWARD-SUMMARY] status=PASS weeks={out['weeks']} prediction_rows={out['prediction_rows']} bet_rows={out['bet_rows']} skipped_weeks={len(skipped)} production_authority=0 thresholds_frozen=TRUE")
     return out
 
 
+
+
+def _v13572_binary_metrics(y,p):
+    y=np.asarray(y,dtype=float); p=np.asarray(p,dtype=float)
+    ok=np.isfinite(y)&np.isfinite(p)
+    if int(ok.sum())<2: return {"n":int(ok.sum()),"auc":np.nan,"logloss":np.nan,"brier":np.nan,"ece":np.nan}
+    yy=y[ok].astype(int); pp=np.clip(p[ok],1e-6,1-1e-6)
+    cal=_v1350_binary_calibration_metrics(yy,pp)
+    return {"n":int(ok.sum()),"auc":float(_ncaaf_stat_auc(yy,pp)),"logloss":float(_ncaaf_stat_logloss(yy,pp)),"brier":float(_ncaaf_stat_brier(yy,pp)),"ece":float(cal.get("ece",np.nan))}
+
+
+def _v13572_emit_walk_forward_diagnostics(replay, log_func=print):
+    """Re-emit cached replay detail and expanded V13.5.7.2 diagnostics."""
+    if not isinstance(replay,dict) or replay.get("status")!="PASS": return
+    sm=replay.get("summaries") or {}; bs=replay.get("by_season") or {}
+    for m in ("spreads","h2h","totals"):
+        z=sm.get(m) or {}
+        log_func(f"[V13.5.7.2-WALK-FORWARD] market={m} predictions={int(z.get('predictions',0) or 0)} bets={int(z.get('bets',0) or 0)} priced_bets={int(z.get('priced_bets',0) or 0)} wins={int(z.get('wins',0) or 0)} hit_rate={float(z.get('hit_rate',np.nan)):.4f} roi={float(z.get('roi',np.nan)):.4f} avg_edge={float(z.get('avg_edge',np.nan)):.4f} auc={float(z.get('auc',np.nan)):.4f} ll={float(z.get('logloss',np.nan)):.6f} brier={float(z.get('brier',np.nan)):.6f} ece={float(z.get('ece',np.nan)):.4f} market_ll={float(z.get('market_logloss',np.nan)):.6f} market_brier={float(z.get('market_brier',np.nan)):.6f}")
+        for sy,met in sorted((bs.get(m) or {}).items()):
+            log_func(f"[V13.5.7.2-WALK-FORWARD-SEASON] market={m} season={sy} predictions={int(met.get('predictions',0) or 0)} bets={int(met.get('bets',0) or 0)} wins={int(met.get('wins',0) or 0)} hit_rate={float(met.get('hit_rate',np.nan)):.4f} roi={float(met.get('roi',np.nan)):.4f} auc={float(met.get('auc',np.nan)):.4f} ll={float(met.get('logloss',np.nan)):.6f} brier={float(met.get('brier',np.nan)):.6f} ece={float(met.get('ece',np.nan)):.4f}")
+    for row in replay.get("threshold_diagnostics") or []:
+        log_func(f"[V13.5.7.2-WALK-FORWARD-THRESHOLD] market={row.get('market')} threshold={float(row.get('threshold',np.nan)):.3f} bets={int(row.get('bets',0) or 0)} wins={int(row.get('wins',0) or 0)} hit_rate={float(row.get('hit_rate',np.nan)):.4f} roi={float(row.get('roi',np.nan)):.4f} diagnostic_only=TRUE frozen_policy_unchanged=TRUE")
+    for row in replay.get("edge_buckets") or []:
+        log_func(f"[V13.5.7.2-WALK-FORWARD-EDGE-BUCKET] market={row.get('market')} bucket={row.get('bucket')} n={int(row.get('n',0) or 0)} bets={int(row.get('bets',0) or 0)} hit_rate={float(row.get('hit_rate',np.nan)):.4f} roi={float(row.get('roi',np.nan)):.4f}")
+    for row in replay.get("adaptive_vs_frozen") or []:
+        log_func(f"[V13.5.7.2-ADAPTIVE-VS-FROZEN] market={row.get('market')} season={row.get('season')} n={int(row.get('n',0) or 0)} adaptive_auc={float(row.get('adaptive_auc',np.nan)):.4f} frozen_auc={float(row.get('frozen_auc',np.nan)):.4f} adaptive_ll={float(row.get('adaptive_ll',np.nan)):.6f} frozen_ll={float(row.get('frozen_ll',np.nan)):.6f} adaptive_brier={float(row.get('adaptive_brier',np.nan)):.6f} frozen_brier={float(row.get('frozen_brier',np.nan)):.6f}")
+    for row in replay.get("system_attribution") or []:
+        log_func(f"[V13.5.7.2-SYSTEM-ATTRIBUTION] market={row.get('market')} group={row.get('group')} bets={int(row.get('bets',0) or 0)} wins={int(row.get('wins',0) or 0)} hit_rate={float(row.get('hit_rate',np.nan)):.4f} roi={float(row.get('roi',np.nan)):.4f} descriptive_only=TRUE")
+    _required=all((sm.get(m) or {}).get("n",0)>0 for m in ("spreads","h2h","totals")) and len(replay.get("threshold_diagnostics") or [])>=21 and len(replay.get("edge_buckets") or [])>=21 and len(replay.get("adaptive_vs_frozen") or [])>0
+    if not _required: raise RuntimeError("[V13.5.7.2-WALK-FORWARD-REPORT-CONTRACT] detailed diagnostics incomplete")
+    log_func(f"[V13.5.7.2-WALK-FORWARD-REPORT-CONTRACT] status=PASS weeks={int(replay.get('weeks',0) or 0)} prediction_rows={int(replay.get('prediction_rows',0) or 0)} bet_rows={int(replay.get('bet_rows',0) or 0)} detailed_metrics=TRUE adaptive_vs_frozen=TRUE threshold_grid=TRUE edge_buckets=TRUE system_attribution=TRUE thresholds_frozen=TRUE production_authority=0")
 
 def _v13571_ensure_weekly_walk_forward(log_func=print, hard_fail=True):
     """Job-level execution contract for NCAAF weekly walk-forward replay.
@@ -34068,6 +34164,7 @@ def _v13571_ensure_weekly_walk_forward(log_func=print, hard_fail=True):
         sm=prior.get("summaries") or {}
         missing=[m for m in ("spreads","h2h","totals") if int((sm.get(m) or {}).get("predictions",0) or 0)<=0]
         if not missing:
+            _v13572_emit_walk_forward_diagnostics(prior,log_func=log_func)
             log_func(f"[V13.5.7.1-WALK-FORWARD-CONTRACT] status=PASS source=STAT_FIT_CACHE weeks={int(prior.get('weeks',0) or 0)} prediction_rows={int(prior.get('prediction_rows',0) or 0)} bet_rows={int(prior.get('bet_rows',0) or 0)} markets=spreads,h2h,totals")
             return prior
     games=_V1357_SPREAD_RESEARCH_CACHE.get("games")
@@ -34087,6 +34184,7 @@ def _v13571_ensure_weekly_walk_forward(log_func=print, hard_fail=True):
         reason=f"REPLAY_NOT_COMPLETE status={replay.get('status') if isinstance(replay,dict) else None} missing_markets={missing} reason={replay.get('reason') if isinstance(replay,dict) else None}"
         log_func(f"[V13.5.7.1-WALK-FORWARD-CONTRACT] status=FAILED reason={reason}")
         if hard_fail: raise RuntimeError(f"[V13.5.7.1-WALK-FORWARD-CONTRACT] {reason}")
+    _v13572_emit_walk_forward_diagnostics(replay,log_func=log_func)
     log_func(f"[V13.5.7.1-WALK-FORWARD-CONTRACT] status=PASS source=JOB_LEVEL_EXECUTION weeks={int(replay.get('weeks',0) or 0)} prediction_rows={int(replay.get('prediction_rows',0) or 0)} bet_rows={int(replay.get('bet_rows',0) or 0)} markets=spreads,h2h,totals thresholds_frozen=TRUE production_authority=0")
     return replay
 
@@ -34217,6 +34315,7 @@ def fit_ncaaf_statistical_brain(log_func=print):
     _V1357_SPREAD_RESEARCH_CACHE["games"]=games.copy(deep=False)
     _V1357_SPREAD_RESEARCH_CACHE["season_arr"]=np.asarray(season_arr,dtype=float).copy()
     _V1357_SPREAD_RESEARCH_CACHE["oof_margin"]=np.asarray(oof_margin,dtype=float).copy()
+    _V1357_SPREAD_RESEARCH_CACHE["oof_total"]=np.asarray(oof_total,dtype=float).copy()
     _V1357_SPREAD_RESEARCH_CACHE["latest"]=int(latest)
     # Early diagnostic remains visible, but authoritative residual evaluation is deferred until V13 has populated exact native OOF caches.
     _spread_stack=_v13542_spread_residual_stack_v1(games,season_arr,oof_margin,latest)
@@ -34888,11 +34987,13 @@ def train_sharp_model_from_bq(
             try:
                 _sg=_V1357_SPREAD_RESEARCH_CACHE.get("games")
                 if isinstance(_sg,pd.DataFrame):
-                    _r=pd.to_numeric(_sg["Days_Since_Last_Game"],errors="coerce") if "Days_Since_Last_Game" in _sg.columns else pd.Series(np.nan,index=_sg.index,dtype=float)
-                    _o=pd.to_numeric(_sg["Opp_Days_Since_Last_Game"],errors="coerce") if "Opp_Days_Since_Last_Game" in _sg.columns else pd.Series(np.nan,index=_sg.index,dtype=float)
+                    _rcol=next((c for c in ("Days_Since_Last_Game_System","Days_Since_Last_Game") if c in _sg.columns),None)
+                    _ocol=next((c for c in ("Opp_Days_Since_Last_Game_System","Opp_Days_Since_Last_Game") if c in _sg.columns),None)
+                    _r=pd.to_numeric(_sg[_rcol],errors="coerce") if _rcol else pd.Series(np.nan,index=_sg.index,dtype=float)
+                    _o=pd.to_numeric(_sg[_ocol],errors="coerce") if _ocol else pd.Series(np.nan,index=_sg.index,dtype=float)
                     _pair=_r.notna()&_o.notna(); _nonzero=(_r.loc[_pair]-_o.loc[_pair]).abs().gt(0) if int(_pair.sum()) else pd.Series([],dtype=bool)
                     _gate=bool(int(_pair.sum())>=100 and int(_nonzero.sum())>0)
-                    log_func(f"[V13.5.7-SCHEDULE-PAIR-AUDIT] gate={'PASS' if _gate else 'CLOSED'} paired={int(_pair.sum())} team_present={int(_r.notna().sum())} opp_present={int(_o.notna().sum())} nonzero_diff={int(_nonzero.sum()) if len(_nonzero) else 0} schedule_atoms={'ENABLED' if _gate else 'DISABLED'}")
+                    log_func(f"[V13.5.7-SCHEDULE-PAIR-AUDIT] gate={'PASS' if _gate else 'CLOSED'} paired={int(_pair.sum())} team_present={int(_r.notna().sum())} opp_present={int(_o.notna().sum())} nonzero_diff={int(_nonzero.sum()) if len(_nonzero) else 0} schedule_atoms={'ENABLED' if _gate else 'DISABLED'} team_col={_rcol} opp_col={_ocol}")
             except Exception as _e:
                 log_func(f"[V13.5.7-SCHEDULE-PAIR-AUDIT] gate=CLOSED error={type(_e).__name__}:{_e} schedule_atoms=DISABLED")
             if isinstance(ncaaf_v13_value_architecture,dict) and isinstance(historical_core_expert,dict):
