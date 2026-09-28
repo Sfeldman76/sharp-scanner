@@ -214,6 +214,7 @@ def main():
     _sld, _dashboard_path, _dashboard_sha = _load_exact_local_module("sharp_line_dashboard")
     _wrapper, _wrapper_path, _wrapper_sha = _load_exact_local_module("train_sharp_model_from_bq_extracted")
     _v14, _v14_path, _v14_sha = _load_exact_local_module("v14_clean_room")
+    _v142, _v142_path, _v142_sha = _load_exact_local_module("v14_stat_reliability")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
@@ -261,6 +262,16 @@ def main():
     log_func(
         f"[V14.1-DEPLOY-PREFLIGHT] PASS source_tag={_v14_tag} "
         f"path={_v14_path} sha={_v14_sha[:16]} production_authority=0"
+    )
+    _v142_tag = getattr(_v142, "V142_SOURCE_TAG", None)
+    if _v142_tag != "v14.2-stat-reliability-signed-fade":
+        raise RuntimeError(
+            f"[V14.2-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_v142_tag!r} "
+            f"path={str(_v142_path)!r} sha={_v142_sha[:16]}"
+        )
+    log_func(
+        f"[V14.2-DEPLOY-PREFLIGHT] PASS source_tag={_v142_tag} "
+        f"path={_v142_path} sha={_v142_sha[:16]} production_authority=0"
     )
 
     pw.emit("start", f"Training start run_id={run_id} sport={sport} market={market}", pct=0.0)
@@ -310,11 +321,19 @@ def main():
         # did not produce predictions for all three markets.
         if str(sport).upper().strip() == "NCAAF":
             _sld._v13571_ensure_weekly_walk_forward(log_func=log_func, hard_fail=True)
-            # V14.1 STAT Residual Corrector is deliberately research-only and Spread-focused.
-            # It executes after incumbent V13 validation and cannot change V13
-            # training, promotion, artifacts, thresholds, or serving.
+            # V14.1 correctors are retired after paired validation showed no
+            # incremental value over V13 STAT. The source remains in the bundle
+            # with its cross-row comparison bug fixed for audit reproducibility.
+            # V14.2 studies signed reliability only: FOLLOW good STAT regimes,
+            # FADE persistently bad STAT regimes, otherwise remain neutral.
             if str(market).lower().strip() in ("all", "spreads"):
-                _v14.run_v14_clean_room(dashboard_module=_sld, log_func=log_func, hard_fail=True)
+                log_func(
+                    "[V14.1-RETIREMENT] status=RETIRED reason=NO_PAIRED_INCREMENTAL_VALUE "
+                    "prediction_engine=V13_STAT_FROZEN replacement_model=NONE"
+                )
+                _v142.run_v14_stat_reliability(
+                    dashboard_module=_sld, log_func=log_func, hard_fail=True
+                )
 
         pw.emit("done", "Training complete ✅", pct=1.0)
 
