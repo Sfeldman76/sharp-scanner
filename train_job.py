@@ -233,9 +233,9 @@ def main():
         "_v13310_runtime_brain_input_audit",
     ]
     _missing_utils = [n for n in _required_utils if not hasattr(_utils, n)]
-    _required_dashboard = ["_v1357_system_miner_v2","_v1355_match_live_systems","_v13542_spread_residual_stack_v1"]
+    _required_dashboard = ["_v1357_system_miner_v2","_v1355_match_live_systems","_v13542_spread_residual_stack_v1","_v13571_ensure_weekly_walk_forward"]
     _missing_dashboard = [n for n in _required_dashboard if not hasattr(_sld, n)]
-    if (not _expected_build) or (_expected_build != _utils_build) or _missing_utils or _missing_dashboard or _dashboard_tag != "dashboard-v13.5.7-promotion-infrastructure" or _utils_tag != "utils-v13.5.7-promotion-infrastructure" or _wrapper_tag != "wrapper-v13.5.7-promotion-infrastructure":
+    if (not _expected_build) or (_expected_build != _utils_build) or _missing_utils or _missing_dashboard or _dashboard_tag != "dashboard-v13.5.7.1-walk-forward-execution-fix" or _utils_tag != "utils-v13.5.7.1-walk-forward-execution-fix" or _wrapper_tag != "wrapper-v13.5.7.1-walk-forward-execution-fix":
         raise RuntimeError(
             "[V13.5.7-DEPLOY-PREFLIGHT] MIXED_OR_STALE_DEPLOYMENT "
             f"dashboard_build={_expected_build!r} utils_build={_utils_build!r} "
@@ -293,6 +293,12 @@ def main():
                 )
             finally:
                 hb_mkt_stop.set()
+
+        # V13.5.7.1 authoritative validation contract. This runs after all market training
+        # and cannot be skipped by STAT cache reuse. NCAAF jobs fail closed if the replay
+        # did not produce predictions for all three markets.
+        if str(sport).upper().strip() == "NCAAF":
+            _sld._v13571_ensure_weekly_walk_forward(log_func=log_func, hard_fail=True)
 
         pw.emit("done", "Training complete ✅", pct=1.0)
 
