@@ -85,16 +85,49 @@ def _registry_strength(registry_out: dict) -> Dict[Tuple[str, str], str]:
     return out
 
 
+def _occ_team_token(x) -> str:
+    """Match the canonical team-token contract used by historical system memory.
+
+    The historical Big Al/Pathi occurrence ledger strips all non-alphanumeric
+    characters (e.g. ``Penn State`` -> ``pennstate``).  Using a merely lowercased
+    Team_Norm key silently loses those joins.
+    """
+    import re
+    return re.sub(r"[^a-z0-9]+", "", str(x).lower())
+
+
+def _occurrence_side_keys(g: pd.DataFrame):
+    season = pd.to_numeric(g.get("Season"), errors="coerce")
+    date = pd.to_datetime(g.get("Game_Date"), errors="coerce", utc=True)
+    team = g.get("Team_Norm", pd.Series("", index=g.index))
+    opp = g.get("Opponent_Norm", pd.Series("", index=g.index))
+    direct=[]; reverse=[]
+    for i in range(len(g)):
+        sy=season.iloc[i] if i < len(season) else np.nan
+        dt=date.iloc[i] if i < len(date) else pd.NaT
+        if not np.isfinite(sy):
+            direct.append(""); reverse.append(""); continue
+        ds=dt.strftime("%Y-%m-%d") if pd.notna(dt) else ""
+        tm=_occ_team_token(team.iloc[i]); op=_occ_team_token(opp.iloc[i])
+        direct.append(f"{int(sy)}|{ds}|{tm}|{op}")
+        reverse.append(f"{int(sy)}|{ds}|{op}|{tm}")
+    return np.asarray(direct,dtype=object), np.asarray(reverse,dtype=object)
+
+
 def _source_vote_from_occurrences(g: pd.DataFrame, history: dict, family: str,
                                   strength_lookup: dict, min_strength: int = 1):
     """Return a {-1,0,+1} family vote plus an internal-mixed flag.
 
     Occurrence records are side-oriented. +1 means the rule selected the anchor
-    Team_Norm side in g, -1 means it selected the anchor opponent.
+    Team_Norm side in g, -1 means it selected the anchor opponent.  Join using
+    the ledger's canonical ``occurrence['key']`` contract first; reconstruct only
+    as a fallback.
     """
     n = len(g)
     pos = np.zeros(n, dtype=bool); neg = np.zeros(n, dtype=bool)
-    key_to_idx = {str(k): i for i, k in enumerate(_side_key(g).tolist())}
+    direct, reverse = _occurrence_side_keys(g)
+    direct_to_idx = {str(k): i for i, k in enumerate(direct.tolist()) if k}
+    reverse_to_idx = {str(k): i for i, k in enumerate(reverse.tolist()) if k}
     used = []
     for name, rec in (history or {}).items():
         if not isinstance(rec, dict) or str(rec.get("role", "directional")).lower() != "directional":
@@ -108,19 +141,20 @@ def _source_vote_from_occurrences(g: pd.DataFrame, history: dict, family: str,
         for o in rec.get("occurrences") or []:
             if not isinstance(o, dict):
                 continue
-            try:
-                sy = int(o.get("season"))
-            except Exception:
-                continue
-            ds = _norm_text(o.get("date"))
-            tm = _norm_text(o.get("team")); op = _norm_text(o.get("opponent"))
-            k = f"{sy}|{ds}|{tm}|{op}"
-            i = key_to_idx.get(k)
+            k = str(o.get("key") or "").strip().lower()
+            if not k:
+                try:
+                    sy = int(o.get("season"))
+                except Exception:
+                    continue
+                ds = str(o.get("date") or "").strip().lower()
+                tm = _occ_team_token(o.get("team")); op = _occ_team_token(o.get("opponent"))
+                k = f"{sy}|{ds}|{tm}|{op}"
+            i = direct_to_idx.get(k)
             if i is not None:
                 pos[i] = True
                 continue
-            rk = f"{sy}|{ds}|{op}|{tm}"
-            i = key_to_idx.get(rk)
+            i = reverse_to_idx.get(k)
             if i is not None:
                 neg[i] = True
     mixed = pos & neg
