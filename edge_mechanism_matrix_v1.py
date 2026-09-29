@@ -31,7 +31,7 @@ import edge_topology_v1 as et
 import edge_complementarity_v1 as cv1
 import edge_complementarity_v2 as cv2
 
-EDGE_MECHANISM_MATRIX_V1_SOURCE_TAG = "edge-mechanism-matrix-v1-peer-source-orthogonality-clv"
+EDGE_MECHANISM_MATRIX_V1_SOURCE_TAG = "edge-mechanism-matrix-v1.1-peer-source-canonical-joinfix"
 SOURCE_ORDER = ("STAT", "BIGAL", "PATHI", "MINER")
 DISCOVERY_SEASONS = (2023, 2024, 2025)
 CONFIRM_SEASON = 2026
@@ -164,26 +164,37 @@ def _system_rule_masks(g,dashboard_module,registry_out,family: str):
     """Return qualifying BigAl/Pathi rule masks with side orientation and mechanisms."""
     strength=et._registry_strength(registry_out)
     hist=getattr(dashboard_module,"_V143_SYSTEM_HISTORY_CACHE",{})
-    n=len(g); key_to_idx={str(k):i for i,k in enumerate(et._side_key(g).tolist())}
+    n=len(g)
+    direct, reverse = et._occurrence_side_keys(g)
+    direct_to_idx={str(k):i for i,k in enumerate(direct.tolist()) if k}
+    reverse_to_idx={str(k):i for i,k in enumerate(reverse.tolist()) if k}
     rows=[]
     for name,rec in (hist or {}).items():
         if not isinstance(rec,dict) or str(rec.get("role","directional")).lower()!="directional": continue
         if str(rec.get("family","")).upper()!=family.upper(): continue
         st=strength.get((family.upper(),str(name)),"RESEARCH_ONLY")
         if et.STRENGTH_RANK.get(st,0)<1: continue
-        pos=np.zeros(n,bool); neg=np.zeros(n,bool)
+        pos=np.zeros(n,bool); neg=np.zeros(n,bool); occurrence_n=0; matched_n=0
         for o in rec.get("occurrences") or []:
             if not isinstance(o,dict): continue
-            try: sy=int(o.get("season"))
-            except Exception: continue
-            ds=et._norm_text(o.get("date")); tm=et._norm_text(o.get("team")); op=et._norm_text(o.get("opponent"))
-            i=key_to_idx.get(f"{sy}|{ds}|{tm}|{op}")
-            if i is not None: pos[i]=True; continue
-            i=key_to_idx.get(f"{sy}|{ds}|{op}|{tm}")
-            if i is not None: neg[i]=True
+            occurrence_n += 1
+            k=str(o.get("key") or "").strip().lower()
+            if not k:
+                try: sy=int(o.get("season"))
+                except Exception: continue
+                ds=str(o.get("date") or "").strip().lower()
+                tm=et._occ_team_token(o.get("team")); op=et._occ_team_token(o.get("opponent"))
+                k=f"{sy}|{ds}|{tm}|{op}"
+            i=direct_to_idx.get(k)
+            if i is not None:
+                pos[i]=True; matched_n += 1; continue
+            i=reverse_to_idx.get(k)
+            if i is not None:
+                neg[i]=True; matched_n += 1
         mixed=pos&neg; vote=np.zeros(n,float); vote[pos&~mixed]=1.0; vote[neg&~mixed]=-1.0; vote[mixed]=np.nan
         mechs=BIGAL_MECHANISMS.get(str(name),{"BIGAL_OTHER"}) if family.upper()=="BIGAL" else _pathi_mechanisms(str(name))
-        rows.append({"id":str(name),"vote":vote,"mixed":mixed,"strength":st,"mechanisms":set(mechs)})
+        rows.append({"id":str(name),"vote":vote,"mixed":mixed,"strength":st,"mechanisms":set(mechs),
+                     "occurrence_n":occurrence_n,"matched_n":matched_n})
     return rows
 
 
@@ -433,6 +444,20 @@ def run_edge_mechanism_matrix_v1(*,dashboard_module,stat_out:dict,registry_out:d
         rules_c,_=_mechanism_rows(g,dashboard_module,stat_out,registry_out,"CONFIRM")
         rules_by_sample={"DISCOVERY":rules_d,"CONFIRM":rules_c}
         rule_counts={s:len(rules_d.get(s,[])) for s in SOURCE_ORDER}
+        source_coverage={}
+        for src in SOURCE_ORDER:
+            dv,dm=votes_by_sample["DISCOVERY"][src]; cv,cm=votes_by_sample["CONFIRM"][src]
+            da=int(_active(dv,dm).sum()); ca=int(_active(cv,cm).sum())
+            rr=rules_d.get(src,[])
+            occ=sum(int(r.get("occurrence_n",0) or 0) for r in rr) if src in ("BIGAL","PATHI") else None
+            matched=sum(int(r.get("matched_n",0) or 0) for r in rr) if src in ("BIGAL","PATHI") else None
+            source_coverage[src]={"discovery_active":da,"confirm_active":ca,"occurrences":occ,"matched":matched}
+            log_func(
+                f"[EDGE-MECHANISM-V1-SOURCE-COVERAGE] source={src} rules={rule_counts[src]} discovery_active={da} confirm_active={ca} "
+                f"occurrence_records={occ if occ is not None else 'NA'} matched_occurrences={matched if matched is not None else 'NA'} production_authority=0"
+            )
+            if src in ("BIGAL","PATHI") and rule_counts[src]>0 and (occ or 0)>0 and (da+ca)==0:
+                raise RuntimeError(f"{src} rules loaded with historical occurrences but zero joined active games")
         log_func(
             f"[EDGE-MECHANISM-V1-PREFLIGHT] status=PASS source_tag={EDGE_MECHANISM_MATRIX_V1_SOURCE_TAG} games={len(g)} peer_sources={','.join(SOURCE_ORDER)} "
             f"predeclared_exact_source_sets=15 ordered_pair_tests=12 pair_conflict_tests=6 rule_counts={rule_counts} "
