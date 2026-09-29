@@ -33969,6 +33969,7 @@ def fit_ncaaf_statistical_brain(log_func=print):
     _h2h_resid=_v13542_h2h_market_residual_v1(games,season_arr,oof_margin,latest)
     _tot_v2={"status":"RETIRED","reason":"NO_MARKET_PROPER_SCORE_EDGE","production_authority":0}
     _V1357_SPREAD_RESEARCH_CACHE["games"]=games.copy(deep=False)
+    _V1357_SPREAD_RESEARCH_CACHE["candidate_feature_cols"]=list(candidate_feature_cols)
     _V1357_SPREAD_RESEARCH_CACHE["season_arr"]=np.asarray(season_arr,dtype=float).copy()
     _V1357_SPREAD_RESEARCH_CACHE["oof_margin"]=np.asarray(oof_margin,dtype=float).copy()
     _V1357_SPREAD_RESEARCH_CACHE["oof_total"]=np.asarray(oof_total,dtype=float).copy()
