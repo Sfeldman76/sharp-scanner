@@ -222,6 +222,8 @@ def main():
     _emmv1, _emmv1_path, _emmv1_sha = _load_exact_local_module("edge_mechanism_matrix_v1")
     _aegv1, _aegv1_path, _aegv1_sha = _load_exact_local_module("atomic_edge_graph_v1")
     _arrv1, _arrv1_path, _arrv1_sha = _load_exact_local_module("atomic_rule_refinement_v1")
+    _fsepv1, _fsepv1_path, _fsepv1_sha = _load_exact_local_module("frozen_spread_edge_policy_v1")
+    _smev1, _smev1_path, _smev1_sha = _load_exact_local_module("sibling_market_edge_research_v1")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
@@ -342,7 +344,34 @@ def main():
             dashboard_module=_sld, stat_out=_scv21_out, registry_out=_erv2_out, atomic_graph_out=_aegv1_out,
             log_func=log_func, hard_fail=True
         )
-        return _v143_out, _scv21_out, _erv2_out, _etv1_out, _ecv2_out, _emmv1_out, _aegv1_out, _arrv1_out
+        _fsepv1_tag = getattr(_fsepv1, "FROZEN_SPREAD_EDGE_POLICY_V1_SOURCE_TAG", None)
+        if _fsepv1_tag != "frozen-spread-edge-policy-v1-20260929":
+            raise RuntimeError(
+                f"[FROZEN-SPREAD-V1-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_fsepv1_tag!r} "
+                f"path={str(_fsepv1_path)!r} sha={_fsepv1_sha[:16]}"
+            )
+        log_func(
+            f"[FROZEN-SPREAD-V1-DEPLOY-PREFLIGHT] PASS source_tag={_fsepv1_tag} path={_fsepv1_path} "
+            f"sha={_fsepv1_sha[:16]} production_authority=0"
+        )
+        _fsepv1_out = _fsepv1.run_frozen_spread_edge_policy_v1(
+            dashboard_module=_sld, stat_out=_scv21_out, registry_out=_erv2_out, refinement_out=_arrv1_out,
+            log_func=log_func, hard_fail=True
+        )
+        _smev1_tag = getattr(_smev1, "SIBLING_MARKET_EDGE_RESEARCH_V1_SOURCE_TAG", None)
+        if _smev1_tag != "sibling-market-edge-research-v1-h2h-totals-independent":
+            raise RuntimeError(
+                f"[SIBLING-EDGE-V1-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_smev1_tag!r} "
+                f"path={str(_smev1_path)!r} sha={_smev1_sha[:16]}"
+            )
+        log_func(
+            f"[SIBLING-EDGE-V1-DEPLOY-PREFLIGHT] PASS source_tag={_smev1_tag} path={_smev1_path} "
+            f"sha={_smev1_sha[:16]} production_authority=0"
+        )
+        _smev1_out = _smev1.run_sibling_market_edge_research_v1(
+            dashboard_module=_sld, log_func=log_func, hard_fail=True
+        )
+        return _v143_out, _scv21_out, _erv2_out, _etv1_out, _ecv2_out, _emmv1_out, _aegv1_out, _arrv1_out, _fsepv1_out, _smev1_out
 
     _expected_build = getattr(_sld, "V133_DEPLOY_BUILD_ID", None)
     _utils_build = getattr(_utils, "V133_DEPLOY_BUILD_ID", None)
@@ -402,7 +431,7 @@ def main():
             # the flag is off.
             log_func(
                 "[EDGE-RESEARCH-FAST-PREFLIGHT] status=PASS sport=NCAAF "
-                "scope=SPREAD_EDGE_RESEARCH skips=TIMING,H2H_PRODUCTION,TOTALS_PRODUCTION,"
+                "scope=MULTI_MARKET_EDGE_RESEARCH spread=FROZEN_POLICY h2h=RESEARCH totals=RESEARCH skips=TIMING,H2H_PRODUCTION,TOTALS_PRODUCTION,"
                 "GENERIC_AUTOFS,PROMOTION_REPLAY,ARTIFACT_PUBLICATION production_authority=0"
             )
             _t0 = __import__('time').perf_counter()
@@ -435,7 +464,7 @@ def main():
             )
             log_func(
                 "[CODE-LIFECYCLE-AUDIT] status=PASS active_production=UNCHANGED "
-                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,EDGE_TOPOLOGY_V1,EDGE_COMPLEMENTARITY_V2,EDGE_MECHANISM_MATRIX_V1,ATOMIC_EDGE_GRAPH_V1,ATOMIC_RULE_REFINEMENT_V1,SYSTEM_MINER "
+                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,EDGE_TOPOLOGY_V1,EDGE_COMPLEMENTARITY_V2,EDGE_MECHANISM_MATRIX_V1,ATOMIC_EDGE_GRAPH_V1,ATOMIC_RULE_REFINEMENT_V1,FROZEN_SPREAD_EDGE_POLICY_V1,SIBLING_MARKET_EDGE_RESEARCH_V1,SYSTEM_MINER "
                 "fast_path=EDGE_RESEARCH_ONLY skipped_legacy_runtime=TIMING,H2H_PRODUCTION,TOTALS_PRODUCTION,"
                 "GENERIC_AUTOFS,PROMOTION_REPLAY,ARTIFACT_PUBLICATION production_contract=UNCHANGED"
             )
@@ -491,7 +520,7 @@ def main():
             _run_ncaaf_edge_research_stack()
             log_func(
                 "[CODE-LIFECYCLE-AUDIT] status=PASS active_production=V13_STAT_CURRENT_BASELINE "
-                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,EDGE_TOPOLOGY_V1,EDGE_COMPLEMENTARITY_V2,EDGE_MECHANISM_MATRIX_V1,ATOMIC_EDGE_GRAPH_V1,ATOMIC_RULE_REFINEMENT_V1,SYSTEM_MINER,H2H_SIBLINGS "
+                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,EDGE_TOPOLOGY_V1,EDGE_COMPLEMENTARITY_V2,EDGE_MECHANISM_MATRIX_V1,ATOMIC_EDGE_GRAPH_V1,ATOMIC_RULE_REFINEMENT_V1,FROZEN_SPREAD_EDGE_POLICY_V1,SIBLING_MARKET_EDGE_RESEARCH_V1,SYSTEM_MINER,H2H_SIBLINGS "
                 "retired_runtime=V14_DIRECT_ATS,V14.1_CORRECTORS,WEEKLY_STAT_REFIT,SPREAD_RESIDUAL_STACK,TOTAL_SCORE_V2,STAT_COMBINATION_V1,STAT_COMBINATION_V2,DYNAMIC_STRENGTH_V1,EDGE_REGISTRY_V1 "
                 "retired_runtime_calls=0 v13_role=BENCHMARK_NOT_PROTECTED edge_generators=STAT,BIGAL,PATHI,MINER production_contract=PASS"
             )
