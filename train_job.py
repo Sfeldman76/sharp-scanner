@@ -224,6 +224,7 @@ def main():
     _arrv1, _arrv1_path, _arrv1_sha = _load_exact_local_module("atomic_rule_refinement_v1")
     _fsepv1, _fsepv1_path, _fsepv1_sha = _load_exact_local_module("frozen_spread_edge_policy_v1")
     _smev1, _smev1_path, _smev1_sha = _load_exact_local_module("sibling_market_edge_research_v1")
+    _tarv1, _tarv1_path, _tarv1_sha = _load_exact_local_module("totals_atomic_refinement_v1")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
@@ -371,7 +372,20 @@ def main():
         _smev1_out = _smev1.run_sibling_market_edge_research_v1(
             dashboard_module=_sld, log_func=log_func, hard_fail=True
         )
-        return _v143_out, _scv21_out, _erv2_out, _etv1_out, _ecv2_out, _emmv1_out, _aegv1_out, _arrv1_out, _fsepv1_out, _smev1_out
+        _tarv1_tag = getattr(_tarv1, "TOTALS_ATOMIC_REFINEMENT_V1_SOURCE_TAG", None)
+        if _tarv1_tag != "totals-atomic-refinement-v1-play-fade-lineage-family-collapse":
+            raise RuntimeError(
+                f"[TOTALS-REFINE-V1-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_tarv1_tag!r} "
+                f"path={str(_tarv1_path)!r} sha={_tarv1_sha[:16]}"
+            )
+        log_func(
+            f"[TOTALS-REFINE-V1-DEPLOY-PREFLIGHT] PASS source_tag={_tarv1_tag} path={_tarv1_path} "
+            f"sha={_tarv1_sha[:16]} production_authority=0"
+        )
+        _tarv1_out = _tarv1.run_totals_atomic_refinement_v1(
+            dashboard_module=_sld, sibling_out=_smev1_out, sibling_module=_smev1, log_func=log_func, hard_fail=True
+        )
+        return _v143_out, _scv21_out, _erv2_out, _etv1_out, _ecv2_out, _emmv1_out, _aegv1_out, _arrv1_out, _fsepv1_out, _smev1_out, _tarv1_out
 
     _expected_build = getattr(_sld, "V133_DEPLOY_BUILD_ID", None)
     _utils_build = getattr(_utils, "V133_DEPLOY_BUILD_ID", None)
@@ -464,7 +478,7 @@ def main():
             )
             log_func(
                 "[CODE-LIFECYCLE-AUDIT] status=PASS active_production=UNCHANGED "
-                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,EDGE_TOPOLOGY_V1,EDGE_COMPLEMENTARITY_V2,EDGE_MECHANISM_MATRIX_V1,ATOMIC_EDGE_GRAPH_V1,ATOMIC_RULE_REFINEMENT_V1,FROZEN_SPREAD_EDGE_POLICY_V1,SIBLING_MARKET_EDGE_RESEARCH_V1,SYSTEM_MINER "
+                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,EDGE_TOPOLOGY_V1,EDGE_COMPLEMENTARITY_V2,EDGE_MECHANISM_MATRIX_V1,ATOMIC_EDGE_GRAPH_V1,ATOMIC_RULE_REFINEMENT_V1,FROZEN_SPREAD_EDGE_POLICY_V1,SIBLING_MARKET_EDGE_RESEARCH_V1,TOTALS_ATOMIC_REFINEMENT_V1,SYSTEM_MINER "
                 "fast_path=EDGE_RESEARCH_ONLY skipped_legacy_runtime=TIMING,H2H_PRODUCTION,TOTALS_PRODUCTION,"
                 "GENERIC_AUTOFS,PROMOTION_REPLAY,ARTIFACT_PUBLICATION production_contract=UNCHANGED"
             )
