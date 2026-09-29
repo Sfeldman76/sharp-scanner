@@ -299,7 +299,7 @@ def main():
             log_func=log_func, hard_fail=True
         )
         _emmv1_tag = getattr(_emmv1, "EDGE_MECHANISM_MATRIX_V1_SOURCE_TAG", None)
-        if _emmv1_tag != "edge-mechanism-matrix-v1-peer-source-orthogonality-clv":
+        if _emmv1_tag != "edge-mechanism-matrix-v1.1-peer-source-canonical-joinfix":
             raise RuntimeError(
                 f"[EDGE-MECHANISM-V1-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_emmv1_tag!r} "
                 f"path={str(_emmv1_path)!r} sha={_emmv1_sha[:16]}"
