@@ -214,11 +214,59 @@ def main():
     _sld, _dashboard_path, _dashboard_sha = _load_exact_local_module("sharp_line_dashboard")
     _wrapper, _wrapper_path, _wrapper_sha = _load_exact_local_module("train_sharp_model_from_bq_extracted")
     _v143, _v143_path, _v143_sha = _load_exact_local_module("v14_stat_reliability")
-    _scv2, _scv2_path, _scv2_sha = _load_exact_local_module("stat_combination_v2")
-    _erv1, _erv1_path, _erv1_sha = _load_exact_local_module("edge_registry_v1")
+    _scv21, _scv21_path, _scv21_sha = _load_exact_local_module("stat_combination_v2_1")
+    _erv2, _erv2_path, _erv2_sha = _load_exact_local_module("edge_registry_v2")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
+
+    # NCAAF edge-research fast path. This intentionally bypasses the production
+    # champion-training graph and builds only the leakage-safe historical objects
+    # consumed by V14.3 / STAT Combo / Edge Registry. It never publishes or
+    # promotes a model artifact. Enable with NCAAF_EDGE_RESEARCH_ONLY=1 or
+    # MARKET=edge_research.
+    _edge_research_only = bool(
+        str(sport).upper().strip() == "NCAAF" and (
+            str(os.getenv("NCAAF_EDGE_RESEARCH_ONLY", "0")).strip().lower() in {"1","true","yes","on"}
+            or str(market).lower().strip() in {"edge_research","research"}
+        )
+    )
+
+    def _run_ncaaf_edge_research_stack():
+        log_func("[EDGE-RESEARCH-STACK] phase=V14.3_RELIABILITY start=TRUE")
+        _v143_out = _v143.run_v14_stat_reliability(
+            dashboard_module=_sld, log_func=log_func, hard_fail=True
+        )
+        log_func("[STAT-COMBO-V2-RETIREMENT] path=STAT_COMBINATION_V1 state=ARCHIVED reason=GLOBAL_COMBO_NO_STABLE_INCREMENTAL_SKILL runtime_call=REMOVED")
+        log_func("[STAT-COMBO-V2-RETIREMENT] component=DYNAMIC_STRENGTH_V1 state=ARCHIVED reason=CATASTROPHIC_RMSE_UNDERPERFORMANCE runtime_call=REMOVED")
+        _scv21_tag = getattr(_scv21, "SCV21_SOURCE_TAG", None)
+        if _scv21_tag != "stat-combination-v2.1-consensus-tail-recurrence":
+            raise RuntimeError(
+                f"[STAT-COMBO-V2.1-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_scv21_tag!r} "
+                f"path={str(_scv21_path)!r} sha={_scv21_sha[:16]}"
+            )
+        log_func(
+            f"[STAT-COMBO-V2.1-DEPLOY-PREFLIGHT] PASS source_tag={_scv21_tag} path={_scv21_path} "
+            f"sha={_scv21_sha[:16]} production_authority=0"
+        )
+        _scv21_out = _scv21.run_stat_combination_v2_1(
+            dashboard_module=_sld, log_func=log_func, hard_fail=True
+        )
+        _erv2_tag = getattr(_erv2, "EDGE_REGISTRY_V2_SOURCE_TAG", None)
+        if _erv2_tag != "edge-registry-v2-evidence-states":
+            raise RuntimeError(
+                f"[EDGE-REGISTRY-V2-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_erv2_tag!r} "
+                f"path={str(_erv2_path)!r} sha={_erv2_sha[:16]}"
+            )
+        log_func(
+            f"[EDGE-REGISTRY-V2-DEPLOY-PREFLIGHT] PASS source_tag={_erv2_tag} path={_erv2_path} "
+            f"sha={_erv2_sha[:16]} production_authority=0"
+        )
+        _erv2_out = _erv2.run_edge_registry_v2(
+            dashboard_module=_sld, stat_out=_scv21_out, reliability_out=_v143_out,
+            log_func=log_func, hard_fail=True
+        )
+        return _v143_out, _scv21_out, _erv2_out
 
     _expected_build = getattr(_sld, "V133_DEPLOY_BUILD_ID", None)
     _utils_build = getattr(_utils, "V133_DEPLOY_BUILD_ID", None)
@@ -270,6 +318,54 @@ def main():
     hb_stop = start_heartbeat(pw, f"[{sport}] market={market}", 45)
 
     try:
+        if _edge_research_only:
+            # FAST RESEARCH MODE: build only the upstream historical caches that
+            # the edge-research stack consumes. Do not run timing, H2H/Totals
+            # production training, AutoFS heads, promotion replay, or artifact
+            # publication. This keeps normal production behavior unchanged when
+            # the flag is off.
+            log_func(
+                "[EDGE-RESEARCH-FAST-PREFLIGHT] status=PASS sport=NCAAF "
+                "scope=SPREAD_EDGE_RESEARCH skips=TIMING,H2H_PRODUCTION,TOTALS_PRODUCTION,"
+                "GENERIC_AUTOFS,PROMOTION_REPLAY,ARTIFACT_PUBLICATION production_authority=0"
+            )
+            _t0 = __import__('time').perf_counter()
+            _sld.fit_historical_ncaaf_core_expert("spreads", log_func=log_func)
+            _t1 = __import__('time').perf_counter()
+            _sld.fit_ncaaf_statistical_brain(log_func=log_func)
+            _t2 = __import__('time').perf_counter()
+            _cache = getattr(_sld, "_V1357_SPREAD_RESEARCH_CACHE", {})
+            _sys_cache = getattr(_sld, "_V143_SYSTEM_HISTORY_CACHE", {})
+            _games = _cache.get("games") if isinstance(_cache, dict) else None
+            _oof = _cache.get("oof_margin") if isinstance(_cache, dict) else None
+            _miner = ((_cache.get("system_miner_v2") or {}).get("spreads") or {}) if isinstance(_cache, dict) else {}
+            if _games is None or getattr(_games, "empty", True) or _oof is None or not _sys_cache or not (_miner.get("systems") or []):
+                raise RuntimeError(
+                    "[EDGE-RESEARCH-FAST-CACHE] missing required cache "
+                    f"games={0 if _games is None else len(_games)} oof={'READY' if _oof is not None else 'MISSING'} "
+                    f"system_history={len(_sys_cache) if isinstance(_sys_cache,dict) else 0} "
+                    f"spread_miner_systems={len(_miner.get('systems') or [])}"
+                )
+            log_func(
+                f"[EDGE-RESEARCH-FAST-CACHE] status=PASS games={len(_games)} "
+                f"system_history={len(_sys_cache)} spread_miner_systems={len(_miner.get('systems') or [])} "
+                f"historical_seconds={_t1-_t0:.1f} stat_cache_seconds={_t2-_t1:.1f}"
+            )
+            _run_ncaaf_edge_research_stack()
+            _t3 = __import__('time').perf_counter()
+            log_func(
+                f"[EDGE-RESEARCH-FAST-CONTRACT] status=PASS total_seconds={_t3-_t0:.1f} "
+                "production_training_skipped=TRUE artifact_publication=FALSE production_authority=0"
+            )
+            log_func(
+                "[CODE-LIFECYCLE-AUDIT] status=PASS active_production=UNCHANGED "
+                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,SYSTEM_MINER "
+                "fast_path=EDGE_RESEARCH_ONLY skipped_legacy_runtime=TIMING,H2H_PRODUCTION,TOTALS_PRODUCTION,"
+                "GENERIC_AUTOFS,PROMOTION_REPLAY,ARTIFACT_PUBLICATION production_contract=UNCHANGED"
+            )
+            pw.emit("done", "Edge research complete ✅", pct=1.0)
+            return
+
         if market == "All":
             pw.emit("timing", f"[{sport}] Training timing model...", pct=0.05)
             # Call exactly once. A TypeError raised inside training is a real
@@ -316,42 +412,11 @@ def main():
             log_func("[V14.3-RETIREMENT] path=WEEKLY_STAT_REFIT state=ARCHIVED runtime_call=REMOVED")
             log_func("[V14.3-RETIREMENT] path=SPREAD_RESIDUAL_STACK_V1 state=ARCHIVED runtime_call=REMOVED")
             log_func("[V14.3-RETIREMENT] path=TOTAL_SCORE_V2 state=ARCHIVED runtime_call=REMOVED")
-            _v143_out = _v143.run_v14_stat_reliability(
-                dashboard_module=_sld, log_func=log_func, hard_fail=True
-            )
-            log_func("[STAT-COMBO-V2-RETIREMENT] path=STAT_COMBINATION_V1 state=ARCHIVED reason=GLOBAL_COMBO_NO_STABLE_INCREMENTAL_SKILL runtime_call=REMOVED")
-            log_func("[STAT-COMBO-V2-RETIREMENT] component=DYNAMIC_STRENGTH_V1 state=ARCHIVED reason=CATASTROPHIC_RMSE_UNDERPERFORMANCE runtime_call=REMOVED")
-            _scv2_tag = getattr(_scv2, "SCV2_SOURCE_TAG", None)
-            if _scv2_tag != "stat-combination-v2-consensus-tail-market-error":
-                raise RuntimeError(
-                    f"[STAT-COMBO-V2-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_scv2_tag!r} "
-                    f"path={str(_scv2_path)!r} sha={_scv2_sha[:16]}"
-                )
-            log_func(
-                f"[STAT-COMBO-V2-DEPLOY-PREFLIGHT] PASS source_tag={_scv2_tag} path={_scv2_path} "
-                f"sha={_scv2_sha[:16]} production_authority=0"
-            )
-            _scv2_out = _scv2.run_stat_combination_v2(
-                dashboard_module=_sld, log_func=log_func, hard_fail=True
-            )
-            _erv1_tag = getattr(_erv1, "EDGE_REGISTRY_SOURCE_TAG", None)
-            if _erv1_tag != "edge-registry-v1-peer-generators":
-                raise RuntimeError(
-                    f"[EDGE-REGISTRY-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_erv1_tag!r} "
-                    f"path={str(_erv1_path)!r} sha={_erv1_sha[:16]}"
-                )
-            log_func(
-                f"[EDGE-REGISTRY-DEPLOY-PREFLIGHT] PASS source_tag={_erv1_tag} path={_erv1_path} "
-                f"sha={_erv1_sha[:16]} production_authority=0"
-            )
-            _erv1.run_edge_registry_v1(
-                dashboard_module=_sld, stat_out=_scv2_out, reliability_out=_v143_out,
-                log_func=log_func, hard_fail=True
-            )
+            _run_ncaaf_edge_research_stack()
             log_func(
                 "[CODE-LIFECYCLE-AUDIT] status=PASS active_production=V13_STAT_CURRENT_BASELINE "
-                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2,EDGE_REGISTRY_V1,SYSTEM_MINER,H2H_SIBLINGS "
-                "retired_runtime=V14_DIRECT_ATS,V14.1_CORRECTORS,WEEKLY_STAT_REFIT,SPREAD_RESIDUAL_STACK,TOTAL_SCORE_V2,STAT_COMBINATION_V1,DYNAMIC_STRENGTH_V1 "
+                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,SYSTEM_MINER,H2H_SIBLINGS "
+                "retired_runtime=V14_DIRECT_ATS,V14.1_CORRECTORS,WEEKLY_STAT_REFIT,SPREAD_RESIDUAL_STACK,TOTAL_SCORE_V2,STAT_COMBINATION_V1,STAT_COMBINATION_V2,DYNAMIC_STRENGTH_V1,EDGE_REGISTRY_V1 "
                 "retired_runtime_calls=0 v13_role=BENCHMARK_NOT_PROTECTED edge_generators=STAT,BIGAL,PATHI,MINER production_contract=PASS"
             )
 
