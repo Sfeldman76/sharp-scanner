@@ -49337,9 +49337,15 @@ if not HEADLESS:
         st.error(f"Unknown sport selection: {sport!r}")
         st.stop()
 
+    _train_market_options = ["All", "spreads", "h2h", "totals"]
+    if str(sport).upper().strip() == "NCAAF":
+        # Research-only fast path: rebuilds only the historical spread caches used
+        # by V14.3 / STAT Combo / Edge Registry. It does not retrain or publish
+        # production timing/H2H/totals/champion artifacts.
+        _train_market_options.insert(2, "edge_research")
     market_choice = st.sidebar.selectbox(
         "Train which market?",
-        ["All", "spreads", "h2h", "totals"],
+        _train_market_options,
         key=f"train_market_choice_{sport}",
     )
 
@@ -49468,7 +49474,12 @@ if not HEADLESS:
     # ✅ Single train button (unique key per sport + choice)
     train_key = f"train::{sport}::{market_choice}"
     
-    if st.button(f"📈 Train {sport} Sharp Model", key=train_key):
+    _train_button_label = (
+        f"🧪 Run {sport} Edge Research"
+        if str(market_choice).lower().strip() == "edge_research"
+        else f"📈 Train {sport} Sharp Model"
+    )
+    if st.button(_train_button_label, key=train_key):
     
         # Lock UI immediately
         st.session_state["is_training"] = True
