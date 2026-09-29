@@ -33989,6 +33989,11 @@ def fit_ncaaf_statistical_brain(log_func=print):
     _miner_stat_h=_ncaaf_stat_empirical_prob_gt(-np.asarray(oof_margin,dtype=float),_miner_res)
     _miner_games["_V1355_H2H_STAT_MINUS_MARKET"]=_miner_stat_h-_miner_hm
     _system_miner_v2={m:_v1357_system_miner_v2(_miner_games,season_arr,latest,m,log_func=log_func,max_depth=3) for m in ("spreads","h2h","totals")}
+    # EDGE_REGISTRY_V1: expose the exact research-only Miner registry/frame to the
+    # post-training peer edge registry. These are training-process caches only and
+    # are never serialized into production authority.
+    _V1357_SPREAD_RESEARCH_CACHE["system_miner_v2"]=_system_miner_v2
+    _V1357_SPREAD_RESEARCH_CACHE["miner_games"]=_miner_games.copy(deep=False)
     # Weekly adaptive refitting has repeatedly underperformed frozen-season STAT.
     # Retire it from every-run execution; V14.3 supplies the cheaper chronological
     # reliability-policy replay that answers the current research question.
