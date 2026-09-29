@@ -16682,6 +16682,7 @@ _V1337_CORE_OOF_TRAIN_CACHE = {}
 _V133112_NATIVE_BRAIN_DIAG_CACHE = {}
 _V1357_SPREAD_RESEARCH_CACHE = {}
 _V143_SYSTEM_HISTORY_CACHE = {}  # V14.3 directional Big Al/Pathi occurrence ledger
+_EDGE_RESEARCH_CLV_CACHE = pd.DataFrame()  # research-only side-oriented historical close bridge
 NCAAF_V13_EDGE_RIDGE_ALPHA = 100.0
 NCAAF_V13_MIN_EDGE_TRAIN_GAMES = 250
 NCAAF_V13_CURRENT_SEASON_COEFFICIENTS = False
@@ -34339,6 +34340,44 @@ def apply_ncaaf_statistical_brain_feature(df: pd.DataFrame, sb, market: str):
         return out
 
 
+
+def _edge_research_refresh_clv_cache(h: pd.DataFrame, log_func=print):
+    """Build a compact side-oriented close-line bridge for research-only CLV.
+
+    Closing values are evaluation-only and are never attached to predictor
+    features.  Prefer explicit team-oriented close fields, then the compact
+    historical final/current Value used elsewhere in the source contract.
+    """
+    global _EDGE_RESEARCH_CLV_CACHE
+    try:
+        if h is None or h.empty:
+            _EDGE_RESEARCH_CLV_CACHE = pd.DataFrame(); return _EDGE_RESEARCH_CLV_CACHE
+        d=h.copy(); idx=d.index
+        season=pd.to_numeric(d.get("Season"),errors="coerce")
+        date=pd.to_datetime(d.get("Game_Date"),errors="coerce",utc=True).dt.strftime("%Y-%m-%d").fillna("")
+        team=d.get("Team_Norm",d.get("Outcome_Norm",d.get("Outcome",d.get("Team",pd.Series("",index=idx))))).astype(str).str.lower().str.strip()
+        opp=d.get("Opponent_Norm",d.get("Opponent",pd.Series("",index=idx))).astype(str).str.lower().str.strip()
+        close=pd.Series(np.nan,index=idx,dtype="float64")
+        for c in ("Closing_Spread_For_Team","Consensus_Close_Spread_Audit","Closing_Spread","Close_Spread","Value","Spread_Value","Current_Spread"):
+            if c in d.columns:
+                z=pd.to_numeric(d[c],errors="coerce"); close=close.where(close.notna(),z)
+        opn=pd.Series(np.nan,index=idx,dtype="float64")
+        for c in ("Consensus_Open_Spread","Opening_Spread","First_Line_Value","Open_Value","Opening_Line"):
+            if c in d.columns:
+                z=pd.to_numeric(d[c],errors="coerce"); opn=opn.where(opn.notna(),z)
+        out=pd.DataFrame({"season":season,"date":date,"team":team,"opponent":opp,"open_spread":opn,"close_spread":close})
+        out=out.loc[out["season"].notna()&out["date"].ne("")&out["team"].ne("")&out["opponent"].ne("")&out["close_spread"].notna()].copy()
+        out["side_key"]=out["season"].round().astype("Int64").astype(str)+"|"+out["date"]+"|"+out["team"]+"|"+out["opponent"]
+        out=out.sort_values(["side_key"]).drop_duplicates("side_key",keep="last").reset_index(drop=True)
+        _EDGE_RESEARCH_CLV_CACHE=out
+        log_func(f"[EDGE-RESEARCH-CLV-CACHE] status={'READY' if len(out) else 'NO_ROWS'} rows={len(out)} close_rows={int(out['close_spread'].notna().sum()) if len(out) else 0} explicit_open_rows={int(out['open_spread'].notna().sum()) if len(out) else 0} evaluation_only=TRUE predictor_input=FALSE")
+        return out
+    except Exception as e:
+        _EDGE_RESEARCH_CLV_CACHE=pd.DataFrame()
+        log_func(f"[EDGE-RESEARCH-CLV-CACHE] status=UNAVAILABLE error={type(e).__name__}:{e} evaluation_only=TRUE")
+        return _EDGE_RESEARCH_CLV_CACHE
+
+
 def fit_historical_ncaaf_core_expert(market: str, log_func=print):
     """Fit adaptive residual historical experts using expanding OOF and a protected latest shadow."""
     m = _sys_norm_market(market)
@@ -34357,6 +34396,8 @@ def fit_historical_ncaaf_core_expert(market: str, log_func=print):
     log_func(f"[NCAAF-HISTORY-POLICY] layer=HISTORICAL_CORE_AND_PATHI_BIGAL_MEMORY policy={NCAAF_HISTORY_POLICY} fixed_lookback_days=NONE seasons={_hc_seasons} rows={len(h)}")
     h["Game_Date"] = pd.to_datetime(h.get("Game_Date"), errors="coerce", utc=True)
     h = h.loc[h["Game_Date"].notna()].copy()
+    if m == "spreads":
+        _edge_research_refresh_clv_cache(h, log_func=log_func)
     hh_all, y_all = _hc_target_frame(h, m)
     if len(hh_all) < 300 or np.unique(y_all).size < 2:
         log_func(f"[HISTORICAL-CORE] insufficient rows market={m} n={len(hh_all)}")
