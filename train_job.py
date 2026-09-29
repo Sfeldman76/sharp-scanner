@@ -214,7 +214,7 @@ def main():
     _sld, _dashboard_path, _dashboard_sha = _load_exact_local_module("sharp_line_dashboard")
     _wrapper, _wrapper_path, _wrapper_sha = _load_exact_local_module("train_sharp_model_from_bq_extracted")
     _v143, _v143_path, _v143_sha = _load_exact_local_module("v14_stat_reliability")
-    _scv1, _scv1_path, _scv1_sha = _load_exact_local_module("stat_combination_v1")
+    _scv2, _scv2_path, _scv2_sha = _load_exact_local_module("stat_combination_v2")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
@@ -318,23 +318,25 @@ def main():
             _v143.run_v14_stat_reliability(
                 dashboard_module=_sld, log_func=log_func, hard_fail=True
             )
-            _scv1_tag = getattr(_scv1, "SCV1_SOURCE_TAG", None)
-            if _scv1_tag != "stat-combination-v1-market-error-small-ensemble":
+            log_func("[STAT-COMBO-V2-RETIREMENT] path=STAT_COMBINATION_V1 state=ARCHIVED reason=GLOBAL_COMBO_NO_STABLE_INCREMENTAL_SKILL runtime_call=REMOVED")
+            log_func("[STAT-COMBO-V2-RETIREMENT] component=DYNAMIC_STRENGTH_V1 state=ARCHIVED reason=CATASTROPHIC_RMSE_UNDERPERFORMANCE runtime_call=REMOVED")
+            _scv2_tag = getattr(_scv2, "SCV2_SOURCE_TAG", None)
+            if _scv2_tag != "stat-combination-v2-consensus-tail-market-error":
                 raise RuntimeError(
-                    f"[STAT-COMBO-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_scv1_tag!r} "
-                    f"path={str(_scv1_path)!r} sha={_scv1_sha[:16]}"
+                    f"[STAT-COMBO-V2-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_scv2_tag!r} "
+                    f"path={str(_scv2_path)!r} sha={_scv2_sha[:16]}"
                 )
             log_func(
-                f"[STAT-COMBO-DEPLOY-PREFLIGHT] PASS source_tag={_scv1_tag} path={_scv1_path} "
-                f"sha={_scv1_sha[:16]} production_authority=0"
+                f"[STAT-COMBO-V2-DEPLOY-PREFLIGHT] PASS source_tag={_scv2_tag} path={_scv2_path} "
+                f"sha={_scv2_sha[:16]} production_authority=0"
             )
-            _scv1.run_stat_combination_v1(
+            _scv2.run_stat_combination_v2(
                 dashboard_module=_sld, log_func=log_func, hard_fail=True
             )
             log_func(
                 "[CODE-LIFECYCLE-AUDIT] status=PASS active_production=V13_STAT_CURRENT_BASELINE "
-                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V1,SYSTEM_MINER,H2H_SIBLINGS "
-                "retired_runtime=V14_DIRECT_ATS,V14.1_CORRECTORS,WEEKLY_STAT_REFIT,SPREAD_RESIDUAL_STACK,TOTAL_SCORE_V2 "
+                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2,SYSTEM_MINER,H2H_SIBLINGS "
+                "retired_runtime=V14_DIRECT_ATS,V14.1_CORRECTORS,WEEKLY_STAT_REFIT,SPREAD_RESIDUAL_STACK,TOTAL_SCORE_V2,STAT_COMBINATION_V1,DYNAMIC_STRENGTH_V1 "
                 "retired_runtime_calls=0 v13_role=BENCHMARK_NOT_PROTECTED production_contract=PASS"
             )
 
