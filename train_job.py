@@ -221,6 +221,7 @@ def main():
     _ecv2, _ecv2_path, _ecv2_sha = _load_exact_local_module("edge_complementarity_v2")
     _emmv1, _emmv1_path, _emmv1_sha = _load_exact_local_module("edge_mechanism_matrix_v1")
     _aegv1, _aegv1_path, _aegv1_sha = _load_exact_local_module("atomic_edge_graph_v1")
+    _arrv1, _arrv1_path, _arrv1_sha = _load_exact_local_module("atomic_rule_refinement_v1")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
@@ -327,7 +328,21 @@ def main():
             dashboard_module=_sld, stat_out=_scv21_out, registry_out=_erv2_out, mechanism_matrix_out=_emmv1_out,
             log_func=log_func, hard_fail=True
         )
-        return _v143_out, _scv21_out, _erv2_out, _etv1_out, _ecv2_out, _emmv1_out, _aegv1_out
+        _arrv1_tag = getattr(_arrv1, "ATOMIC_RULE_REFINEMENT_V1_SOURCE_TAG", None)
+        if _arrv1_tag != "atomic-rule-refinement-v1-play-fade-lineage-independence":
+            raise RuntimeError(
+                f"[RULE-REFINE-V1-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_arrv1_tag!r} "
+                f"path={str(_arrv1_path)!r} sha={_arrv1_sha[:16]}"
+            )
+        log_func(
+            f"[RULE-REFINE-V1-DEPLOY-PREFLIGHT] PASS source_tag={_arrv1_tag} path={_arrv1_path} "
+            f"sha={_arrv1_sha[:16]} production_authority=0"
+        )
+        _arrv1_out = _arrv1.run_atomic_rule_refinement_v1(
+            dashboard_module=_sld, stat_out=_scv21_out, registry_out=_erv2_out, atomic_graph_out=_aegv1_out,
+            log_func=log_func, hard_fail=True
+        )
+        return _v143_out, _scv21_out, _erv2_out, _etv1_out, _ecv2_out, _emmv1_out, _aegv1_out, _arrv1_out
 
     _expected_build = getattr(_sld, "V133_DEPLOY_BUILD_ID", None)
     _utils_build = getattr(_utils, "V133_DEPLOY_BUILD_ID", None)
@@ -420,7 +435,7 @@ def main():
             )
             log_func(
                 "[CODE-LIFECYCLE-AUDIT] status=PASS active_production=UNCHANGED "
-                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,EDGE_TOPOLOGY_V1,EDGE_COMPLEMENTARITY_V2,EDGE_MECHANISM_MATRIX_V1,ATOMIC_EDGE_GRAPH_V1,SYSTEM_MINER "
+                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,EDGE_TOPOLOGY_V1,EDGE_COMPLEMENTARITY_V2,EDGE_MECHANISM_MATRIX_V1,ATOMIC_EDGE_GRAPH_V1,ATOMIC_RULE_REFINEMENT_V1,SYSTEM_MINER "
                 "fast_path=EDGE_RESEARCH_ONLY skipped_legacy_runtime=TIMING,H2H_PRODUCTION,TOTALS_PRODUCTION,"
                 "GENERIC_AUTOFS,PROMOTION_REPLAY,ARTIFACT_PUBLICATION production_contract=UNCHANGED"
             )
@@ -476,7 +491,7 @@ def main():
             _run_ncaaf_edge_research_stack()
             log_func(
                 "[CODE-LIFECYCLE-AUDIT] status=PASS active_production=V13_STAT_CURRENT_BASELINE "
-                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,EDGE_TOPOLOGY_V1,EDGE_COMPLEMENTARITY_V2,EDGE_MECHANISM_MATRIX_V1,ATOMIC_EDGE_GRAPH_V1,SYSTEM_MINER,H2H_SIBLINGS "
+                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,EDGE_TOPOLOGY_V1,EDGE_COMPLEMENTARITY_V2,EDGE_MECHANISM_MATRIX_V1,ATOMIC_EDGE_GRAPH_V1,ATOMIC_RULE_REFINEMENT_V1,SYSTEM_MINER,H2H_SIBLINGS "
                 "retired_runtime=V14_DIRECT_ATS,V14.1_CORRECTORS,WEEKLY_STAT_REFIT,SPREAD_RESIDUAL_STACK,TOTAL_SCORE_V2,STAT_COMBINATION_V1,STAT_COMBINATION_V2,DYNAMIC_STRENGTH_V1,EDGE_REGISTRY_V1 "
                 "retired_runtime_calls=0 v13_role=BENCHMARK_NOT_PROTECTED edge_generators=STAT,BIGAL,PATHI,MINER production_contract=PASS"
             )
