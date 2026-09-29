@@ -218,6 +218,8 @@ def main():
     _erv2, _erv2_path, _erv2_sha = _load_exact_local_module("edge_registry_v2")
     _etv1, _etv1_path, _etv1_sha = _load_exact_local_module("edge_topology_v1")
     _ecv1, _ecv1_path, _ecv1_sha = _load_exact_local_module("edge_complementarity_v1")
+    _ecv2, _ecv2_path, _ecv2_sha = _load_exact_local_module("edge_complementarity_v2")
+    _emmv1, _emmv1_path, _emmv1_sha = _load_exact_local_module("edge_mechanism_matrix_v1")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
@@ -282,21 +284,35 @@ def main():
             dashboard_module=_sld, stat_out=_scv21_out, registry_out=_erv2_out,
             log_func=log_func, hard_fail=True
         )
-        _ecv1_tag = getattr(_ecv1, "EDGE_COMPLEMENTARITY_V1_SOURCE_TAG", None)
-        if _ecv1_tag != "edge-complementarity-v1-orthogonal-source-signatures":
+        _ecv2_tag = getattr(_ecv2, "EDGE_COMPLEMENTARITY_V2_SOURCE_TAG", None)
+        if _ecv2_tag != "edge-complementarity-v2-regime-vs-direction":
             raise RuntimeError(
-                f"[EDGE-COMPLEMENTARITY-V1-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_ecv1_tag!r} "
-                f"path={str(_ecv1_path)!r} sha={_ecv1_sha[:16]}"
+                f"[EDGE-COMPLEMENTARITY-V2-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_ecv2_tag!r} "
+                f"path={str(_ecv2_path)!r} sha={_ecv2_sha[:16]}"
             )
         log_func(
-            f"[EDGE-COMPLEMENTARITY-V1-DEPLOY-PREFLIGHT] PASS source_tag={_ecv1_tag} path={_ecv1_path} "
-            f"sha={_ecv1_sha[:16]} production_authority=0"
+            f"[EDGE-COMPLEMENTARITY-V2-DEPLOY-PREFLIGHT] PASS source_tag={_ecv2_tag} path={_ecv2_path} "
+            f"sha={_ecv2_sha[:16]} production_authority=0"
         )
-        _ecv1_out = _ecv1.run_edge_complementarity_v1(
+        _ecv2_out = _ecv2.run_edge_complementarity_v2(
             dashboard_module=_sld, stat_out=_scv21_out, registry_out=_erv2_out, topology_out=_etv1_out,
             log_func=log_func, hard_fail=True
         )
-        return _v143_out, _scv21_out, _erv2_out, _etv1_out, _ecv1_out
+        _emmv1_tag = getattr(_emmv1, "EDGE_MECHANISM_MATRIX_V1_SOURCE_TAG", None)
+        if _emmv1_tag != "edge-mechanism-matrix-v1-peer-source-orthogonality-clv":
+            raise RuntimeError(
+                f"[EDGE-MECHANISM-V1-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_emmv1_tag!r} "
+                f"path={str(_emmv1_path)!r} sha={_emmv1_sha[:16]}"
+            )
+        log_func(
+            f"[EDGE-MECHANISM-V1-DEPLOY-PREFLIGHT] PASS source_tag={_emmv1_tag} path={_emmv1_path} "
+            f"sha={_emmv1_sha[:16]} production_authority=0"
+        )
+        _emmv1_out = _emmv1.run_edge_mechanism_matrix_v1(
+            dashboard_module=_sld, stat_out=_scv21_out, registry_out=_erv2_out, topology_out=_etv1_out,
+            complementarity_v2_out=_ecv2_out, log_func=log_func, hard_fail=True
+        )
+        return _v143_out, _scv21_out, _erv2_out, _etv1_out, _ecv2_out, _emmv1_out
 
     _expected_build = getattr(_sld, "V133_DEPLOY_BUILD_ID", None)
     _utils_build = getattr(_utils, "V133_DEPLOY_BUILD_ID", None)
@@ -389,7 +405,7 @@ def main():
             )
             log_func(
                 "[CODE-LIFECYCLE-AUDIT] status=PASS active_production=UNCHANGED "
-                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,EDGE_TOPOLOGY_V1,EDGE_COMPLEMENTARITY_V1,SYSTEM_MINER "
+                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,EDGE_TOPOLOGY_V1,EDGE_COMPLEMENTARITY_V2,EDGE_MECHANISM_MATRIX_V1,SYSTEM_MINER "
                 "fast_path=EDGE_RESEARCH_ONLY skipped_legacy_runtime=TIMING,H2H_PRODUCTION,TOTALS_PRODUCTION,"
                 "GENERIC_AUTOFS,PROMOTION_REPLAY,ARTIFACT_PUBLICATION production_contract=UNCHANGED"
             )
@@ -445,7 +461,7 @@ def main():
             _run_ncaaf_edge_research_stack()
             log_func(
                 "[CODE-LIFECYCLE-AUDIT] status=PASS active_production=V13_STAT_CURRENT_BASELINE "
-                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,EDGE_TOPOLOGY_V1,EDGE_COMPLEMENTARITY_V1,SYSTEM_MINER,H2H_SIBLINGS "
+                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,EDGE_TOPOLOGY_V1,EDGE_COMPLEMENTARITY_V2,EDGE_MECHANISM_MATRIX_V1,SYSTEM_MINER,H2H_SIBLINGS "
                 "retired_runtime=V14_DIRECT_ATS,V14.1_CORRECTORS,WEEKLY_STAT_REFIT,SPREAD_RESIDUAL_STACK,TOTAL_SCORE_V2,STAT_COMBINATION_V1,STAT_COMBINATION_V2,DYNAMIC_STRENGTH_V1,EDGE_REGISTRY_V1 "
                 "retired_runtime_calls=0 v13_role=BENCHMARK_NOT_PROTECTED edge_generators=STAT,BIGAL,PATHI,MINER production_contract=PASS"
             )
