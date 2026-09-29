@@ -445,7 +445,7 @@ def run_stat_combination_v2_1(*,dashboard_module,log_func=print,hard_fail=True):
         log_func(f"[STAT-COMBO-V2.1-COMPARISON-CONTRACT] status=PASS target_season=2026 tail_rows={n} unique_physical_games={u} prior_only_selection=TRUE recurrence_gate=TRUE same_rows_for_v13=TRUE production_authority=0")
         L=primary["leader"]
         log_func(f"[STAT-COMBO-V2.1-CONTRACT] status=PASS source_tag={SCV21_SOURCE_TAG} primary_combo={'+'.join(L['combo'])} threshold={L['threshold']:.2f} primary_status={primary['status']} prior_n={primary['prior']['met']['n']} prior_hit={primary['prior']['met']['hit']:.4f} prior_fire_rate_ratio={primary['prior']['rate_ratio']:.4f} target_2026_n={primary['test']['n']} target_2026_hit={primary['test']['hit']:.4f} target_2026_signed_market_error={primary['test']['signed']:+.3f} role={primary['same_row']['role']} dynamic_strength_v1=RETIRED stat_combo_v1=RETIRED production_authority=0")
-        return {"status":"PASS","source_tag":SCV21_SOURCE_TAG,"primary":primary,"walkforward":{"metrics":wf,"v13":wfv13,"market":wfmarket,"diag":wfdiag,"seasons":wf_seasons,"mask":wf_mask},"production_authority":0}
+        return {"status":"PASS","source_tag":SCV21_SOURCE_TAG,"primary":primary,"walkforward":{"metrics":wf,"v13":wfv13,"market":wfmarket,"diag":wfdiag,"seasons":wf_seasons,"mask":wf_mask,"pred":wf_pred,"policy_tests":policy_tests},"production_authority":0}
     except Exception as e:
         log_func(f"[STAT-COMBO-V2.1-CONTRACT] status=FAILED error={type(e).__name__}:{e} production_authority=0")
         if hard_fail: raise
