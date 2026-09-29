@@ -215,6 +215,7 @@ def main():
     _wrapper, _wrapper_path, _wrapper_sha = _load_exact_local_module("train_sharp_model_from_bq_extracted")
     _v143, _v143_path, _v143_sha = _load_exact_local_module("v14_stat_reliability")
     _scv2, _scv2_path, _scv2_sha = _load_exact_local_module("stat_combination_v2")
+    _erv1, _erv1_path, _erv1_sha = _load_exact_local_module("edge_registry_v1")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
@@ -315,7 +316,7 @@ def main():
             log_func("[V14.3-RETIREMENT] path=WEEKLY_STAT_REFIT state=ARCHIVED runtime_call=REMOVED")
             log_func("[V14.3-RETIREMENT] path=SPREAD_RESIDUAL_STACK_V1 state=ARCHIVED runtime_call=REMOVED")
             log_func("[V14.3-RETIREMENT] path=TOTAL_SCORE_V2 state=ARCHIVED runtime_call=REMOVED")
-            _v143.run_v14_stat_reliability(
+            _v143_out = _v143.run_v14_stat_reliability(
                 dashboard_module=_sld, log_func=log_func, hard_fail=True
             )
             log_func("[STAT-COMBO-V2-RETIREMENT] path=STAT_COMBINATION_V1 state=ARCHIVED reason=GLOBAL_COMBO_NO_STABLE_INCREMENTAL_SKILL runtime_call=REMOVED")
@@ -330,14 +331,28 @@ def main():
                 f"[STAT-COMBO-V2-DEPLOY-PREFLIGHT] PASS source_tag={_scv2_tag} path={_scv2_path} "
                 f"sha={_scv2_sha[:16]} production_authority=0"
             )
-            _scv2.run_stat_combination_v2(
+            _scv2_out = _scv2.run_stat_combination_v2(
                 dashboard_module=_sld, log_func=log_func, hard_fail=True
+            )
+            _erv1_tag = getattr(_erv1, "EDGE_REGISTRY_SOURCE_TAG", None)
+            if _erv1_tag != "edge-registry-v1-peer-generators":
+                raise RuntimeError(
+                    f"[EDGE-REGISTRY-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_erv1_tag!r} "
+                    f"path={str(_erv1_path)!r} sha={_erv1_sha[:16]}"
+                )
+            log_func(
+                f"[EDGE-REGISTRY-DEPLOY-PREFLIGHT] PASS source_tag={_erv1_tag} path={_erv1_path} "
+                f"sha={_erv1_sha[:16]} production_authority=0"
+            )
+            _erv1.run_edge_registry_v1(
+                dashboard_module=_sld, stat_out=_scv2_out, reliability_out=_v143_out,
+                log_func=log_func, hard_fail=True
             )
             log_func(
                 "[CODE-LIFECYCLE-AUDIT] status=PASS active_production=V13_STAT_CURRENT_BASELINE "
-                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2,SYSTEM_MINER,H2H_SIBLINGS "
+                "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2,EDGE_REGISTRY_V1,SYSTEM_MINER,H2H_SIBLINGS "
                 "retired_runtime=V14_DIRECT_ATS,V14.1_CORRECTORS,WEEKLY_STAT_REFIT,SPREAD_RESIDUAL_STACK,TOTAL_SCORE_V2,STAT_COMBINATION_V1,DYNAMIC_STRENGTH_V1 "
-                "retired_runtime_calls=0 v13_role=BENCHMARK_NOT_PROTECTED production_contract=PASS"
+                "retired_runtime_calls=0 v13_role=BENCHMARK_NOT_PROTECTED edge_generators=STAT,BIGAL,PATHI,MINER production_contract=PASS"
             )
 
         pw.emit("done", "Training complete ✅", pct=1.0)
