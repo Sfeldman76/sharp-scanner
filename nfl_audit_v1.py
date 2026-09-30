@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-SOURCE_TAG = "nfl-audit-v1.1-historical-uploader-view-20260930"
+SOURCE_TAG = "nfl-audit-v1.2-calendar-neutral-venue-20260930"
 PROJECT = "sharplogger"
 DATASET = "sharp_data"
 SCORES = f"{PROJECT}.{DATASET}.game_scores_final"
@@ -24,7 +24,7 @@ MARKET = f"{PROJECT}.{DATASET}.sharp_moves_master"
 NFL_RAW = f"{PROJECT}.{DATASET}.nfl_historical_game_side_raw"
 NFL_CONTEXT = f"{PROJECT}.{DATASET}.nfl_historical_game_side_context"
 NFL_VIEW = f"{PROJECT}.{DATASET}.nfl_historical_core_training_vw"
-HIST_REQUIRED = ("Sport", "Season", "Season_Stage", "Source_Name", "Source_Game_ID", "Game_Date", "Week", "Team_Norm", "Team_Score", "Opponent_Score", "Is_Home", "Is_Away")
+HIST_REQUIRED = ("Sport", "Season", "Season_Stage", "Source_Name", "Source_Game_ID", "Game_Date", "Week", "Team_Norm", "Team_Score", "Opponent_Score", "Is_Home", "Is_Away", "Is_Neutral")
 REQUIRED_SCORES = ("Sport", "Game_Start", "Home_Team", "Away_Team", "Score_Home_Score", "Score_Away_Score")
 
 
@@ -136,52 +136,97 @@ def _param_nfl():
 
 
 def audit_uploaded_games(game_rows: pd.DataFrame) -> dict:
-    """Audit authoritative NFL uploader two-side game grain; never infer a season.
+    """Read-only two-side game validation using the uploader's calendar and venue contract.
 
-    The input is already grouped by Season/Source_Name/Source_Game_ID in SQL;
-    keep this pure for fixture-driven regression tests. Zero games or any
-    conflicting side/score/stage/date excludes the source from approval.
+    Regular-season games may extend into January after their named season.
+    Neutral-site games have TWO neutral sides rather than one home and one away.
+    All other date, venue, grain and final-score anomalies remain hard holds.
     """
     if game_rows.empty:
         return {"status": "HOLD", "reason": "HISTORICAL_RAW_EMPTY", "physical_games": 0}
+    required={"Season", "Source_Name", "Source_Game_ID", "side_rows", "distinct_teams",
+              "home_rows", "away_rows", "neutral_rows", "bad_venue_flag_rows", "stage_variants",
+              "stage", "date_variants", "game_date", "missing_scores", "min_team_score",
+              "max_team_score", "min_opponent_score", "max_opponent_score"}
+    missing=sorted(required - set(game_rows.columns))
+    if missing:
+        return {"status":"HOLD", "reason":"AUDIT_AGGREGATE_COLUMNS_MISSING", "missing":missing,
+                "physical_games":int(len(game_rows))}
     d=game_rows.copy()
+    for col in ("side_rows", "distinct_teams", "home_rows", "away_rows", "neutral_rows",
+                "bad_venue_flag_rows", "stage_variants", "date_variants", "missing_scores",
+                "min_team_score", "max_team_score", "min_opponent_score", "max_opponent_score"):
+        d[col]=pd.to_numeric(d[col],errors="coerce")
+    side_ok=d["side_rows"].eq(2) & d["distinct_teams"].eq(2)
+    home_away=(d["home_rows"].eq(1) & d["away_rows"].eq(1) & d["neutral_rows"].eq(0))
+    neutral=(d["home_rows"].eq(0) & d["away_rows"].eq(0) & d["neutral_rows"].eq(2))
+    venue_ok=(home_away | neutral) & d["bad_venue_flag_rows"].eq(0)
+    # Compare reciprocal score multisets, not home/away scores: neutral games
+    # must be checked too. With exactly two side rows, this validates both
+    # sides' final points even if neither has a designated Is_Home flag.
+    reciprocal=(d["min_team_score"].eq(d["min_opponent_score"]) &
+                d["max_team_score"].eq(d["max_opponent_score"]))
+    valid_stage=d["stage"].isin({"REGULAR", "POSTSEASON", "PRESEASON"})
+    season=pd.to_numeric(d["Season"],errors="coerce")
+    dt=pd.to_datetime(d["game_date"],errors="coerce")
+    year,month=dt.dt.year,dt.dt.month
+    regular_valid=(d["stage"].eq("REGULAR") &
+                   ((year.eq(season) & month.ge(8)) |
+                    (year.eq(season+1) & month.eq(1))))
+    post_valid=(d["stage"].eq("POSTSEASON") & year.eq(season+1) & month.isin((1,2)))
+    pre_valid=(d["stage"].eq("PRESEASON") & year.eq(season) & month.between(7,9))
+    date_ok=regular_valid | post_valid | pre_valid
+    bad_date=(~date_ok) | dt.isna() | season.isna()
     errors={
-        "bad_side_counts": int((d['side_rows'] != 2).sum()),
-        "bad_distinct_teams": int((d['distinct_teams'] != 2).sum()),
-        "bad_home_away_counts": int(((d['home_rows'] != 1) | (d['away_rows'] != 1)).sum()),
-        "stage_conflicts": int((d['stage_variants'] != 1).sum()),
-        "date_conflicts": int((d['date_variants'] != 1).sum()),
-        "missing_scores": int((d['missing_scores'] > 0).sum()),
-        "nonreciprocal_scores": int(((d['home_score_home_row'] != d['home_score_away_row']) |
-                                     (d['away_score_away_row'] != d['away_score_home_row'])).sum()),
+        "bad_side_counts":int((~d["side_rows"].eq(2)).sum()),
+        "bad_distinct_teams":int((~d["distinct_teams"].eq(2)).sum()),
+        "bad_home_away_counts":int((~(home_away | neutral)).sum()),
+        "bad_row_venue_flags":int(d["bad_venue_flag_rows"].fillna(1).gt(0).sum()),
+        "stage_conflicts":int((~d["stage_variants"].eq(1)).sum()),
+        "date_conflicts":int((~d["date_variants"].eq(1)).sum()),
+        "missing_scores":int(d["missing_scores"].fillna(1).gt(0).sum()),
+        "nonreciprocal_scores":int((~reciprocal).sum()),
+        "invalid_stage":int((~valid_stage).sum()),
+        "invalid_season":int(season.isna().sum()),
+        "season_date_mismatch":int(bad_date.sum()),
     }
-    stages={"REGULAR", "POSTSEASON", "PRESEASON"}
-    errors['invalid_stage']=int((~d['stage'].isin(stages)).sum())
-    errors['invalid_season']=int(pd.to_numeric(d['Season'],errors='coerce').isna().sum())
-    d['Season']=pd.to_numeric(d['Season'], errors='coerce')
-    dt=pd.to_datetime(d['game_date'], errors='coerce')
-    year=dt.dt.year
-    errors['season_date_mismatch']=int((dt.isna() |
-         ((d['stage']!='POSTSEASON') & (year!=d['Season'])) |
-         ((d['stage']=='POSTSEASON') & (~(year.eq(d['Season']) | year.eq(d['Season']+1))))).sum())
-    counts = d.groupby(['Season','stage'],dropna=False).size()
+    bad=(~side_ok) | (~venue_ok) | (~d["stage_variants"].eq(1)) | (~d["date_variants"].eq(1)) | \
+        d["missing_scores"].fillna(1).gt(0) | (~reciprocal) | (~valid_stage) | bad_date
+    anomaly_samples=[]
+    for i in d.index[bad][:10]:
+        row=d.loc[i]
+        anomaly_samples.append({"Season":None if pd.isna(season.loc[i]) else int(season.loc[i]),
+          "Source_Game_ID":str(row["Source_Game_ID"]), "stage":str(row["stage"]),
+          "game_date":None if pd.isna(dt.loc[i]) else dt.loc[i].date().isoformat(),
+          "side_rows":int(row["side_rows"]) if pd.notna(row["side_rows"]) else None,
+          "home_rows":int(row["home_rows"]) if pd.notna(row["home_rows"]) else None,
+          "away_rows":int(row["away_rows"]) if pd.notna(row["away_rows"]) else None,
+          "neutral_rows":int(row["neutral_rows"]) if pd.notna(row["neutral_rows"]) else None,
+          "date_valid":bool(date_ok.loc[i]), "venue_valid":bool(venue_ok.loc[i]),
+          "scores_reciprocal":bool(reciprocal.loc[i])})
+    counts=d.groupby(["Season","stage"],dropna=False).size()
     by_season={}
     for (y,stage),num in counts.items():
-        yr=str(int(y)) if pd.notna(y) else 'UNKNOWN'
-        by_season.setdefault(yr, {"REGULAR":0,"POSTSEASON":0,"PRESEASON":0})[str(stage)]=int(num)
-    eligible={y: v['REGULAR'] + v['POSTSEASON'] for y,v in by_season.items()}
+        yr=str(int(y)) if pd.notna(y) else "UNKNOWN"
+        by_season.setdefault(yr,{"REGULAR":0,"POSTSEASON":0,"PRESEASON":0})[str(stage)]=int(num)
+    eligible={y:v["REGULAR"]+v["POSTSEASON"] for y,v in by_season.items()}
     full_prior=sorted(int(y) for y,n in eligible.items() if y.isdigit() and int(y)<=2025 and n>=200)
     hard_bad=any(errors.values())
     ready=not hard_bad and len(full_prior)>=3
-    status='HISTORY_COVERAGE_PASS' if ready else 'HOLD'
-    reason=('AUTHORITATIVE_UPLOADER_HISTORY' if ready else
-            'BAD_RAW_GAME_GRAIN_OR_SEASON_STAGE' if hard_bad else 'FEWER_THAN_THREE_FULL_PRIOR_SEASONS')
+    status="HISTORY_COVERAGE_PASS" if ready else "HOLD"
+    reason=("AUTHORITATIVE_UPLOADER_HISTORY" if ready else
+            "BAD_RAW_GAME_GRAIN_OR_SEASON_STAGE" if hard_bad else "FEWER_THAN_THREE_FULL_PRIOR_SEASONS")
     return {"status":status,"reason":reason,"physical_games":len(d),
             "seasons_from_source":"AUTHORITATIVE_UPLOADER_SEASON", "games_by_season_stage":by_season,
             "training_eligible_games_by_season":eligible,"full_prior_seasons_200plus":full_prior,
-            "errors":errors,"first_game_date":dt.min().date().isoformat() if dt.notna().any() else None,
+            "errors":errors,"anomaly_samples":anomaly_samples,
+            "venue_inventory":{"neutral_site_games":int(neutral.sum()),
+                               "home_away_games":int(home_away.sum())},
+            "calendar_inventory":{"regular_games_next_january":int((d["stage"].eq("REGULAR") &
+                            year.eq(season+1) & month.eq(1)).sum())},
+            "first_game_date":dt.min().date().isoformat() if dt.notna().any() else None,
             "last_game_date":dt.max().date().isoformat() if dt.notna().any() else None,
-            "note":"Historical game dates are DATE, not snapshot times; historical closing odds may be labels, NEVER assumed known at earlier model scoring time."}
+            "note":"Uploader Season is authoritative. Neutral-site pairs and regular-season games in the next January are valid. Historical closing odds remain labels, never assumed known earlier."}
 
 
 def _audit_nfl_uploader(client, raw_schema, context_schema, view_schema):
@@ -193,13 +238,14 @@ def _audit_nfl_uploader(client, raw_schema, context_schema, view_schema):
     query=f"""SELECT Season, Source_Name, Source_Game_ID,
       COUNT(*) AS side_rows, COUNT(DISTINCT Team_Norm) AS distinct_teams,
       COUNTIF(Is_Home=1) AS home_rows, COUNTIF(Is_Away=1) AS away_rows,
+      COUNTIF(Is_Neutral=1) AS neutral_rows,
+      COUNTIF(Is_Home IS NULL OR Is_Away IS NULL OR Is_Neutral IS NULL OR
+              COALESCE(Is_Home,0)+COALESCE(Is_Away,0)+COALESCE(Is_Neutral,0) != 1) AS bad_venue_flag_rows,
       COUNT(DISTINCT Season_Stage) AS stage_variants, ANY_VALUE(Season_Stage) AS stage,
       COUNT(DISTINCT Game_Date) AS date_variants, MIN(Game_Date) AS game_date,
       COUNTIF(Team_Score IS NULL OR Opponent_Score IS NULL) AS missing_scores,
-      MAX(IF(Is_Home=1,Team_Score,NULL)) AS home_score_home_row,
-      MAX(IF(Is_Away=1,Opponent_Score,NULL)) AS home_score_away_row,
-      MAX(IF(Is_Away=1,Team_Score,NULL)) AS away_score_away_row,
-      MAX(IF(Is_Home=1,Opponent_Score,NULL)) AS away_score_home_row
+      MIN(Team_Score) AS min_team_score, MAX(Team_Score) AS max_team_score,
+      MIN(Opponent_Score) AS min_opponent_score, MAX(Opponent_Score) AS max_opponent_score
       FROM `{NFL_RAW}` WHERE UPPER(CAST(Sport AS STRING))=@sport
       GROUP BY Season,Source_Name,Source_Game_ID ORDER BY Season,Source_Name,Source_Game_ID"""
     result=audit_uploaded_games(_query(client,query,_param_nfl()))
