@@ -290,8 +290,8 @@ def main():
             raise
         return
 
-    # NFL Intelligence V1.7 — CORE agreement + documented Big Al replication +
-    # Pathi engineering translations + bounded system miner. Research only.
+    # NFL Intelligence V1.8 — residual/error research + market arbitration +
+    # stricter system miner + within-family reconciliation. Research only.
     if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_intelligence":
         import importlib.util
         from pathlib import Path
@@ -315,13 +315,13 @@ def main():
         _challenge = _load_nfl_intel_exact("nfl_challenger_v1", "nfl-challenger-v1.4-season-forward-three-market-no-publish-20260930")
         _special = _load_nfl_intel_exact("nfl_specialized_v1", "nfl-specialized-v1.5-score-domain-h2h-stack-20260930")
         _score = _load_nfl_intel_exact("nfl_score_engine_v1", "nfl-score-engine-v1.6-team-offense-defense-20260930")
-        _intel = _load_nfl_intel_exact("nfl_intelligence_v1", "nfl-intelligence-v1.7-core-bigal-pathi-miner-20260930")
-        pw.emit("audit", f"[NFL-INTEL-V1] Recheck historical and prior-only audits run={run_id}", pct=0.05)
+        _intel = _load_nfl_intel_exact("nfl_intelligence_v1", "nfl-intelligence-v1.8-residual-arbitration-reconciliation-20260930")
+        pw.emit("audit", f"[NFL-INTEL-V1.8] Recheck historical and prior-only audits run={run_id}", pct=0.05)
         try:
             _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
             if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
                 raise RuntimeError("[NFL-INTEL-V1-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
-            pw.emit("sandbox", "[NFL-INTEL-V1] CORE + Big Al + Pathi + Miner; discovery 2021-23, shadow 2024, confirm 2025; 2026 sealed", pct=0.37)
+            pw.emit("sandbox", "[NFL-INTEL-V1.8] CORE residuals + market arbitration + Big Al + Pathi + stricter Miner; 2026 sealed", pct=0.37)
             _result = _intel.run_nfl_intelligence_v1(
                 bq_client=bigquery.Client(project="sharplogger"),
                 audit_report=_audit_report, log_func=log_func)
