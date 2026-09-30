@@ -15,12 +15,16 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-SOURCE_TAG = "nfl-audit-v1-read-only-dataset-incumbent-contract-20260930"
+SOURCE_TAG = "nfl-audit-v1.1-historical-uploader-view-20260930"
 PROJECT = "sharplogger"
 DATASET = "sharp_data"
 SCORES = f"{PROJECT}.{DATASET}.game_scores_final"
 FEATURES = f"{PROJECT}.{DATASET}.scores_with_features"
 MARKET = f"{PROJECT}.{DATASET}.sharp_moves_master"
+NFL_RAW = f"{PROJECT}.{DATASET}.nfl_historical_game_side_raw"
+NFL_CONTEXT = f"{PROJECT}.{DATASET}.nfl_historical_game_side_context"
+NFL_VIEW = f"{PROJECT}.{DATASET}.nfl_historical_core_training_vw"
+HIST_REQUIRED = ("Sport", "Season", "Season_Stage", "Source_Name", "Source_Game_ID", "Game_Date", "Week", "Team_Norm", "Team_Score", "Opponent_Score", "Is_Home", "Is_Away")
 REQUIRED_SCORES = ("Sport", "Game_Start", "Home_Team", "Away_Team", "Score_Home_Score", "Score_Away_Score")
 
 
@@ -131,16 +135,133 @@ def _param_nfl():
     return bigquery.ScalarQueryParameter("sport", "STRING", "NFL")
 
 
+def audit_uploaded_games(game_rows: pd.DataFrame) -> dict:
+    """Audit authoritative NFL uploader two-side game grain; never infer a season.
+
+    The input is already grouped by Season/Source_Name/Source_Game_ID in SQL;
+    keep this pure for fixture-driven regression tests. Zero games or any
+    conflicting side/score/stage/date excludes the source from approval.
+    """
+    if game_rows.empty:
+        return {"status": "HOLD", "reason": "HISTORICAL_RAW_EMPTY", "physical_games": 0}
+    d=game_rows.copy()
+    errors={
+        "bad_side_counts": int((d['side_rows'] != 2).sum()),
+        "bad_distinct_teams": int((d['distinct_teams'] != 2).sum()),
+        "bad_home_away_counts": int(((d['home_rows'] != 1) | (d['away_rows'] != 1)).sum()),
+        "stage_conflicts": int((d['stage_variants'] != 1).sum()),
+        "date_conflicts": int((d['date_variants'] != 1).sum()),
+        "missing_scores": int((d['missing_scores'] > 0).sum()),
+        "nonreciprocal_scores": int(((d['home_score_home_row'] != d['home_score_away_row']) |
+                                     (d['away_score_away_row'] != d['away_score_home_row'])).sum()),
+    }
+    stages={"REGULAR", "POSTSEASON", "PRESEASON"}
+    errors['invalid_stage']=int((~d['stage'].isin(stages)).sum())
+    errors['invalid_season']=int(pd.to_numeric(d['Season'],errors='coerce').isna().sum())
+    d['Season']=pd.to_numeric(d['Season'], errors='coerce')
+    dt=pd.to_datetime(d['game_date'], errors='coerce')
+    year=dt.dt.year
+    errors['season_date_mismatch']=int((dt.isna() |
+         ((d['stage']!='POSTSEASON') & (year!=d['Season'])) |
+         ((d['stage']=='POSTSEASON') & (~(year.eq(d['Season']) | year.eq(d['Season']+1))))).sum())
+    counts = d.groupby(['Season','stage'],dropna=False).size()
+    by_season={}
+    for (y,stage),num in counts.items():
+        yr=str(int(y)) if pd.notna(y) else 'UNKNOWN'
+        by_season.setdefault(yr, {"REGULAR":0,"POSTSEASON":0,"PRESEASON":0})[str(stage)]=int(num)
+    eligible={y: v['REGULAR'] + v['POSTSEASON'] for y,v in by_season.items()}
+    full_prior=sorted(int(y) for y,n in eligible.items() if y.isdigit() and int(y)<=2025 and n>=200)
+    hard_bad=any(errors.values())
+    ready=not hard_bad and len(full_prior)>=3
+    status='HISTORY_COVERAGE_PASS' if ready else 'HOLD'
+    reason=('AUTHORITATIVE_UPLOADER_HISTORY' if ready else
+            'BAD_RAW_GAME_GRAIN_OR_SEASON_STAGE' if hard_bad else 'FEWER_THAN_THREE_FULL_PRIOR_SEASONS')
+    return {"status":status,"reason":reason,"physical_games":len(d),
+            "seasons_from_source":"AUTHORITATIVE_UPLOADER_SEASON", "games_by_season_stage":by_season,
+            "training_eligible_games_by_season":eligible,"full_prior_seasons_200plus":full_prior,
+            "errors":errors,"first_game_date":dt.min().date().isoformat() if dt.notna().any() else None,
+            "last_game_date":dt.max().date().isoformat() if dt.notna().any() else None,
+            "note":"Historical game dates are DATE, not snapshot times; historical closing odds may be labels, NEVER assumed known at earlier model scoring time."}
+
+
+def _audit_nfl_uploader(client, raw_schema, context_schema, view_schema):
+    raw_cols=set(raw_schema.get('columns') or [])
+    missing=sorted(set(HIST_REQUIRED)-raw_cols)
+    if raw_schema.get('status')!='AVAILABLE' or missing:
+        return {"status":"HOLD", "reason":"HISTORICAL_RAW_SCHEMA_MISSING", "missing":missing,
+                "raw_schema_status":raw_schema.get('status')}
+    query=f"""SELECT Season, Source_Name, Source_Game_ID,
+      COUNT(*) AS side_rows, COUNT(DISTINCT Team_Norm) AS distinct_teams,
+      COUNTIF(Is_Home=1) AS home_rows, COUNTIF(Is_Away=1) AS away_rows,
+      COUNT(DISTINCT Season_Stage) AS stage_variants, ANY_VALUE(Season_Stage) AS stage,
+      COUNT(DISTINCT Game_Date) AS date_variants, MIN(Game_Date) AS game_date,
+      COUNTIF(Team_Score IS NULL OR Opponent_Score IS NULL) AS missing_scores,
+      MAX(IF(Is_Home=1,Team_Score,NULL)) AS home_score_home_row,
+      MAX(IF(Is_Away=1,Opponent_Score,NULL)) AS home_score_away_row,
+      MAX(IF(Is_Away=1,Team_Score,NULL)) AS away_score_away_row,
+      MAX(IF(Is_Home=1,Opponent_Score,NULL)) AS away_score_home_row
+      FROM `{NFL_RAW}` WHERE UPPER(CAST(Sport AS STRING))=@sport
+      GROUP BY Season,Source_Name,Source_Game_ID ORDER BY Season,Source_Name,Source_Game_ID"""
+    result=audit_uploaded_games(_query(client,query,_param_nfl()))
+    result['source_table']=NFL_RAW
+    # The view is the separately built prior-game feature source, not the legacy
+    # live score/feature tables. Check its grain and eligibility without
+    # claiming that its feature expressions are leakage safe.
+    view_cols=set(view_schema.get('columns') or [])
+    req={'Season','Source_Game_ID','Historical_Core_Eligible'}
+    view_report={"status":"HOLD", "reason":"HISTORICAL_TRAIN_VIEW_SCHEMA_MISSING",
+                 "missing":sorted(req-view_cols)}
+    if view_schema.get('status')=='AVAILABLE' and not(req-view_cols):
+        view_sql=f"""SELECT Season, COUNT(*) AS source_rows,
+          COUNT(DISTINCT CAST(Source_Game_ID AS STRING)) AS physical_games,
+          COUNTIF(Historical_Core_Eligible=1) AS training_eligible_rows
+          FROM `{NFL_VIEW}` GROUP BY Season ORDER BY Season"""
+        v=_query(client,view_sql)
+        per={str(int(r.Season)): {"source_rows":int(r.source_rows),"physical_games":int(r.physical_games),
+             "training_eligible_rows":int(r.training_eligible_rows)} for r in v.itertuples(index=False)}
+        mismatches={}
+        for year,games in result.get('training_eligible_games_by_season',{}).items():
+            p=per.get(year)
+            if p is None or p['physical_games']!=sum(result['games_by_season_stage'][year].values()) or p['source_rows']!=2*p['physical_games'] or p['training_eligible_rows']!=2*games:
+                mismatches[year]={"raw_eligible_games":games,"view":p}
+        view_report={"status":"GRAIN_AND_ELIGIBILITY_PASS" if per and not mismatches else "HOLD",
+                     "reason":"COUNTS_MATCH_UPLOADER" if per and not mismatches else "RAW_VIEW_GRAIN_MISMATCH",
+                     "source_table":NFL_VIEW,"by_season":per,"mismatches":mismatches,
+                     "note":"Feature column availability and prior-only expression safety still need inspection."}
+    result['training_view']=view_report
+    ccols=set(context_schema.get('columns') or [])
+    prior=("Prev_Points_For", "Prev_Points_Against", "Prev_Total_Yards", "Prev_Total_Plays",
+           "Prev_Off_Yards_Per_Play","Prev_Turnover_Margin","WinPct_Prior_System","ATS_WinPct_Prior_System")
+    creq={'Team_Game_Number','Season','Source_Game_ID',*prior}
+    c_report={"status":"HOLD","reason":"CONTEXT_SCHEMA_MISSING","missing":sorted(creq-ccols)}
+    if context_schema.get('status')=='AVAILABLE' and not(creq-ccols):
+        violation=' OR '.join(f'`{col}` IS NOT NULL' for col in prior)
+        cq=f"""SELECT COUNT(*) AS context_rows,
+          COUNTIF(Team_Game_Number=1) AS first_game_rows,
+          COUNTIF(Team_Game_Number=1 AND ({violation})) AS first_game_leakage_rows
+          FROM `{NFL_CONTEXT}`"""
+        r=_query(client,cq).iloc[0]
+        count=int(r['first_game_leakage_rows'])
+        c_report={"status":"FIRST_GAME_CHECK_PASS" if count==0 else "HOLD",
+                  "reason":"FIRST_GAME_PRIOR_ONLY" if count==0 else "FIRST_GAME_LEAKAGE",
+                  "context_rows":int(r['context_rows']),"first_game_rows":int(r['first_game_rows']),
+                  "first_game_leakage_rows":count,
+                  "note":"First-game null guard is necessary but not full prior-only or as-of proof."}
+    result['context']=c_report
+    return result
+
+
 def _summarize_feature_source(client, schema):
     cols = set(schema.get("columns") or [])
     if schema.get("status") != "AVAILABLE" or "Sport" not in cols:
         return {"status": "HOLD", "reason": "SOURCE_OR_SPORT_COLUMN_UNAVAILABLE"}
     # Inspect only schema and small aggregated counts; no label/feature assumptions.
     ts = next((c for c in ("feat_Game_Start", "Game_Start", "Commence_Hour", "Snapshot_Timestamp") if c in cols), None)
-    count_sql = f"SELECT COUNT(*) AS rows FROM `{FEATURES}` WHERE UPPER(CAST(`Sport` AS STRING)) = @sport"
-    n = int(_query(client, count_sql, _param_nfl()).iloc[0]["rows"])
-    if not ts:
-        return {"status": "HOLD", "reason": "TIMESTAMP_COLUMN_MISSING", "rows": n}
+    count_sql = f"SELECT COUNT(*) AS row_count FROM `{FEATURES}` WHERE UPPER(CAST(`Sport` AS STRING)) = @sport"
+    n = int(_query(client, count_sql, _param_nfl()).iloc[0]["row_count"])
+    if not ts or n==0:
+        return {"status": "HOLD", "reason": "TIMESTAMP_COLUMN_MISSING" if not ts else "NO_NFL_ROWS_IN_LEGACY_FEATURES",
+                "rows": n, "note":"This legacy generic table is NOT the NFL historical core training view."}
     year_sql = f"""SELECT EXTRACT(YEAR FROM DATE(SAFE_CAST(`{ts}` AS TIMESTAMP))) AS calendar_year,
           COUNT(*) AS source_rows
           FROM `{FEATURES}` WHERE UPPER(CAST(`Sport` AS STRING)) = @sport
@@ -152,7 +273,7 @@ def _summarize_feature_source(client, schema):
             "calendar_year_rows": {str(int(row.calendar_year)) if pd.notna(row.calendar_year) else "UNKNOWN": int(row.source_rows)
                                   for row in yearly.itertuples(index=False)},
             "candidate_named_columns": len(candidate_like), "candidate_sample": sorted(candidate_like)[:25],
-            "note": "Column names do not establish feature leakage-safety; inspect contracts before training."}
+            "note": "Legacy generic feature inventory only. NFL uploader view is audited separately; column names cannot prove leakage safety."}
 
 
 def _summarize_market_source(client, schema):
@@ -215,7 +336,7 @@ def run_nfl_audit_v1(*, bq_client=None, storage_client=None, bucket_name="sharp-
     out={"source_tag": SOURCE_TAG, "run_utc":datetime.now(timezone.utc).isoformat(),"sport":"NFL",
          "scope":"READ_ONLY_PREFLIGHT", "model_publication":False,"production_authority":0}
     log_func(f"[NFL-AUDIT-V1-PREFLIGHT] status=START tag={SOURCE_TAG} sport=NFL publication=FALSE authority=0")
-    schemas={key:_schema(bq,key) for key in (SCORES,FEATURES,MARKET)}
+    schemas={key:_schema(bq,key) for key in (SCORES,FEATURES,MARKET,NFL_RAW,NFL_CONTEXT,NFL_VIEW)}
     out["sources"]={name:{"status":v["status"],"type":v.get("type"),"row_metadata":v.get("rows_metadata"),
                             "column_count":len(v.get("columns") or []),"error":v.get("error")}
                     for name,v in schemas.items()}
@@ -228,7 +349,15 @@ def run_nfl_audit_v1(*, bq_client=None, storage_client=None, bucket_name="sharp-
         sql=f"SELECT {projection} FROM `{SCORES}` WHERE UPPER(CAST(`Sport` AS STRING)) = @sport"
         score_report=audit_scores(_query(bq,sql,_param_nfl()))
     out["scores"]=score_report
-    log_func(f"[NFL-AUDIT-V1-SCORES] {json.dumps(score_report,default=str,sort_keys=True)}")
+    log_func(f"[NFL-AUDIT-V1-LIVE-SCORES] {json.dumps(score_report,default=str,sort_keys=True)}")
+    # LIVE-SCORES are a secondary inventory: they are not the historical NFL
+    # uploader and cannot override its authoritative Season and Season_Stage.
+    try:
+        out["historical_uploader"]=_audit_nfl_uploader(bq,schemas[NFL_RAW],schemas[NFL_CONTEXT],schemas[NFL_VIEW])
+    except Exception as exc:
+        out["historical_uploader"]={"status":"HOLD","reason":"HISTORICAL_SOURCE_QUERY_FAILED",
+                                    "error":f"{type(exc).__name__}: {exc}"}
+    log_func(f"[NFL-AUDIT-V1-HISTORICAL] {json.dumps(out['historical_uploader'],default=str,sort_keys=True)}")
     try:
         out["training_source"]=_summarize_feature_source(bq, schemas[FEATURES])
     except Exception as e:
@@ -249,20 +378,24 @@ def run_nfl_audit_v1(*, bq_client=None, storage_client=None, bucket_name="sharp-
     except Exception as e:
         out["incumbents"]={"status":"HOLD", "reason":"ARTIFACT_METADATA_FAILED", "error":f"{type(e).__name__}: {e}"}
     log_func(f"[NFL-AUDIT-V1-INCUMBENTS] {json.dumps(out['incumbents'],default=str,sort_keys=True)}")
-    ready=(score_report.get("status")=="READY_FOR_FEATURE_AND_ASOF_AUDIT"
-           and out["training_source"].get("status")=="INVENTORY_ONLY"
-           and out["market_source"].get("status")=="INVENTORY_ONLY"
-           and isinstance(out["incumbents"],list)
-           and all(x["status"]=="PRESENT_METADATA_ONLY" for x in out["incumbents"]))
-    out["status"]="READY_FOR_LEAKAGE_AND_CHALLENGER_VALIDATION" if ready else "HOLD_REVIEW_COVERAGE"
-    out["next_step"]=("Verify point-in-time feature derivation, retrieve true incumbent OOF/prospective predictions, "
-                      "then run separate season-forward SPREAD/H2H/TOTALS challengers. No automatic promotion.")
-    log_func(f"[NFL-AUDIT-V1-CONTRACT] status={out['status']} season_source={score_report.get('season_source','UNKNOWN')} "
+    hist=out['historical_uploader']
+    hist_ok=(hist.get('status')=='HISTORY_COVERAGE_PASS' and
+             hist.get('training_view',{}).get('status')=='GRAIN_AND_ELIGIBILITY_PASS' and
+             hist.get('context',{}).get('status')=='FIRST_GAME_CHECK_PASS')
+    # Live score table and the generic score-with-features table are *secondary*
+    # sources, not the historical uploader. A coverage PASS is NOT a model PASS.
+    out["status"]=("READY_FOR_OFFLINE_FEATURE_LEAKAGE_REVIEW" if hist_ok else "HOLD_REVIEW_HISTORICAL_SOURCE")
+    out["next_step"]=("Inspect the core-view SQL for strictly prior-only derivation and season/team alignment; "
+                      "audit historical closing lines separately from time-stamped odds; find archived incumbent "
+                      "OOF/prospective predictions, then test independent Spread/H2H/Totals season-forward challengers. "
+                      "Do not use 2026 to select challengers or auto-promote models.")
+    log_func(f"[NFL-AUDIT-V1-CONTRACT] status={out['status']} historical_source=AUTHORITATIVE_NFL_UPLOADER "
+             f"hist_status={hist.get('status')} view_status={hist.get('training_view',{}).get('status')} "
+             f"context_status={hist.get('context',{}).get('status')} "
              f"publication=FALSE production_authority=0 legacy_nfl=UNCHANGED ncaaf=UNCHANGED "
              f"data_coverage_only=TRUE champion_win_claim=FALSE")
-    if hard_fail and score_report.get("status")=="HOLD" and score_report.get("reason") in {
-            "MISSING_REQUIRED_SCORE_COLUMNS","GAME_SCORES_FINAL_SCHEMA_MISSING","CONFLICTING_FINAL_SCORES","NO_FINAL_NFL_SCORES"}:
-        raise RuntimeError(f"[NFL-AUDIT-V1-CONTRACT] HARD_HOLD reason={score_report.get('reason')}; no model mutated")
+    if hard_fail and hist.get('reason')=='BAD_RAW_GAME_GRAIN_OR_SEASON_STAGE':
+        raise RuntimeError('[NFL-AUDIT-V1-CONTRACT] HARD_HOLD invalid historical NFL game side grain; no model mutated')
     return out
 
 
