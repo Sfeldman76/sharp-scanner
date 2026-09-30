@@ -195,7 +195,8 @@ def main():
         if not _feature_path.is_file():
             raise RuntimeError(f"[NFL-FEATURE-V1-DEPLOY-PREFLIGHT] MISSING {_feature_path}")
         # Load and register this exact local module for the audit's import.
-        import sys
+        # Use the module-level sys import: importing sys inside main() creates
+        # a local binding that breaks the earlier NFL challenger nested loader.
         _feature_spec = importlib.util.spec_from_file_location("nfl_feature_audit_v1", _feature_path)
         _feature = importlib.util.module_from_spec(_feature_spec)
         sys.modules["nfl_feature_audit_v1"] = _feature
