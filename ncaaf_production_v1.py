@@ -137,6 +137,47 @@ def _home_away(group: pd.DataFrame) -> Tuple[str, str]:
     return home, away
 
 
+def _attach_production_game_identity(rows: pd.DataFrame) -> pd.DataFrame:
+    """Physical NCAAF game key, independent of market/outcome/book/quote.
+
+    utils.build_game_key intentionally includes Market and Outcome for legacy
+    snapshot lineage, so Game_Key MUST NOT group production edge evidence.
+    Use the same home/away/UTC kickoff-hour representation as
+    utils.build_merge_key. Preserve Game_Key unchanged for legacy consumers.
+    A row without an unambiguous matchup/kickoff is not eligible for a pick.
+    """
+    out = rows.copy()
+    if out.empty:
+        out["_prod_game_id"] = pd.Series(dtype="string")
+        return out
+
+    def name(v):
+        return _norm_team(v).replace(".", "").replace("&", "and")
+
+    def teams(normalized, original):
+        primary = out.get(normalized, pd.Series("", index=out.index)).fillna("").map(name)
+        fallback = out.get(original, pd.Series("", index=out.index)).fillna("").map(name)
+        return primary.where(~primary.isin(("", "nan", "none", "<na>")), fallback)
+
+    h = teams("Home_Team_Norm", "Home_Team")
+    a = teams("Away_Team_Norm", "Away_Team")
+    kickoff = pd.to_datetime(out.get("Game_Start"), errors="coerce", utc=True)
+    if not isinstance(kickoff, pd.Series):
+        raise ValueError("Production input requires Game_Start on every row")
+    valid = (kickoff.notna() & h.ne("") & a.ne("") & h.ne(a)
+             & ~h.isin(("nan", "none", "<na>"))
+             & ~a.isin(("nan", "none", "<na>")))
+    out = out.loc[valid].copy()
+    if out.empty:
+        out["_prod_game_id"] = pd.Series(dtype="string")
+        return out
+    hour = kickoff.loc[out.index].dt.floor("h").dt.strftime("%Y-%m-%d %H:%M:%S")
+    out["_prod_game_id"] = (h.loc[out.index] + "_" + a.loc[out.index] + "_" + hour).astype("string")
+    # The source Merge_Key_Short remains untouched; the prospective ledger
+    # explicitly prefers this calculated production ID when present.
+    return out
+
+
 def _opposite_team(target: str, home: str, away: str) -> str:
     t = _norm_team(target)
     if t == home: return away
@@ -871,10 +912,11 @@ def apply_live_authority(sides: pd.DataFrame, contract: dict | None) -> pd.DataF
     for c,v in defaults.items(): out[c]=v
     if not isinstance(contract,dict) or int(contract.get("production_authority",0) or 0)!=1:
         return out
-    gcols=[c for c in ("Game_Key","Market") if c in out.columns]
-    if len(gcols)<2:
+    if "_prod_game_id" not in out.columns:
+        out=_attach_production_game_identity(out)
+    if out.empty or "Market" not in out.columns:
         return out
-    for _,ix in out.groupby(gcols,dropna=False,sort=False).groups.items():
+    for _,ix in out.groupby(["_prod_game_id","Market"],dropna=False,sort=False).groups.items():
         idx=list(ix); g=out.loc[idx].copy(); market=str(g["Market"].iloc[0]).lower()
         if market=="h2h":
             out.loc[idx,"_prod_decision"]="MODEL_ONLY"
@@ -884,8 +926,8 @@ def apply_live_authority(sides: pd.DataFrame, contract: dict | None) -> pd.DataF
         if market=="spreads":
             votes,diag=_spread_votes(g,contract)
         else:
-            game_key=g["Game_Key"].iloc[0] if "Game_Key" in g.columns else None
-            spread_ctx=out[(out.get("Game_Key")==game_key)&(out.get("Market").astype(str).str.lower()=="spreads")].copy() if game_key is not None else pd.DataFrame()
+            game_id=g["_prod_game_id"].iloc[0]
+            spread_ctx=out[(out["_prod_game_id"]==game_id)&(out["Market"].astype(str).str.lower()=="spreads")].copy()
             votes,diag=_totals_votes(g,contract,spread_ctx)
         if not votes:
             out.loc[idx,"_prod_decision"]="PASS"
@@ -931,10 +973,11 @@ def select_market_rows(sides: pd.DataFrame) -> pd.DataFrame:
     if sides is None or sides.empty:
         return pd.DataFrame()
     picked=[]
-    gcols=[c for c in ("Game_Key","Market") if c in sides.columns]
-    if len(gcols)<2:
-        return sides.copy()
-    for _,g in sides.groupby(gcols,dropna=False,sort=False):
+    if "_prod_game_id" not in sides.columns:
+        sides=_attach_production_game_identity(sides)
+    if sides.empty or "Market" not in sides.columns:
+        return pd.DataFrame()
+    for _,g in sides.groupby(["_prod_game_id","Market"],dropna=False,sort=False):
         dec=str(g.get("_prod_decision",pd.Series("",index=g.index)).iloc[0])
         target=_norm_team(g.get("_prod_target",pd.Series("",index=g.index)).iloc[0])
         chosen=None
@@ -951,7 +994,10 @@ def select_market_rows(sides: pd.DataFrame) -> pd.DataFrame:
             gg=gg.sort_values(["__edge","__ev","__pred"],ascending=[False,False,False])
             chosen=gg.iloc[0].drop(labels=["__edge","__ev","__pred"],errors="ignore")
         picked.append(chosen)
-    return pd.DataFrame(picked).reset_index(drop=True)
+    chosen=pd.DataFrame(picked).reset_index(drop=True)
+    if not chosen.empty and chosen.duplicated(["_prod_game_id","Market"]).any():
+        raise RuntimeError("NCAAF production selected multiple outcomes for one physical game and market")
+    return chosen
 
 
 def prepare_current_market_rows(raw: pd.DataFrame, *, now=None) -> pd.DataFrame:
@@ -975,11 +1021,13 @@ def prepare_current_market_rows(raw: pd.DataFrame, *, now=None) -> pd.DataFrame:
     if "Pre_Game" in d:
         d=d[d["Pre_Game"].fillna(True).astype(bool)].copy()
     if d.empty: return d
+    d=_attach_production_game_identity(d)
+    if d.empty: return d
     d["_ncaaf_prod_ts"]=pd.to_datetime(d.get("Snapshot_Timestamp"),errors="coerce",utc=True)
     qkeys=[c for c in ("Game_Key","Market","Outcome","Bookmaker") if c in d]
     if qkeys: d=d.sort_values("_ncaaf_prod_ts").drop_duplicates(qkeys,keep="last").copy()
     d.drop(columns=["_ncaaf_prod_ts"],inplace=True,errors="ignore")
-    if "Game_Key" not in d: return d
+    if "_prod_game_id" not in d: return d
     norm=lambda z: str(z).strip().lower().replace(".","").replace("&","and")
     sp=d[d.Market.eq("spreads")].copy()
     if not sp.empty:
@@ -993,7 +1041,7 @@ def prepare_current_market_rows(raw: pd.DataFrame, *, now=None) -> pd.DataFrame:
             away=sp.get("Away_Team_Norm",sp.get("Away_Team",pd.Series("",index=sp.index))).astype(str).map(norm)
             out=sp.get("Outcome",pd.Series("",index=sp.index)).astype(str).map(norm)
             sp["_prod_home_open"]=np.where(out.eq(home),line,np.where(out.eq(away),-line,np.nan))
-            mapped=d["Game_Key"].map(sp.groupby("Game_Key")["_prod_home_open"].median())
+            mapped=d["_prod_game_id"].map(sp.groupby("_prod_game_id")["_prod_home_open"].median())
             if "Opening_Spread" not in d: d["Opening_Spread"]=np.nan
             o=pd.to_numeric(d["Opening_Spread"],errors="coerce")
             d["Opening_Spread"]=o.where(o.notna(),mapped)
@@ -1009,7 +1057,7 @@ def prepare_current_market_rows(raw: pd.DataFrame, *, now=None) -> pd.DataFrame:
                 if val.notna().any(): line=val; break
         if line is not None:
             tt["_prod_open_total"]=line
-            mapped=d["Game_Key"].map(tt.groupby("Game_Key")["_prod_open_total"].median())
+            mapped=d["_prod_game_id"].map(tt.groupby("_prod_game_id")["_prod_open_total"].median())
             if "Opening_Total" not in d: d["Opening_Total"]=np.nan
             current=pd.to_numeric(d["Opening_Total"],errors="coerce")
             d["Opening_Total"]=current.where(current.notna(),mapped)
@@ -1030,9 +1078,13 @@ def choose_current_production_picks(scored: pd.DataFrame,contract: dict,*,execut
     """
     if not isinstance(contract,dict) or int(contract.get("production_authority",0) or 0)!=1:
         return pd.DataFrame()
-    if scored is None or scored.empty or not {"Game_Key","Market","Outcome","Bookmaker","Game_Start"}.issubset(scored.columns):
+    if scored is None or scored.empty or not {"Market","Outcome","Bookmaker","Game_Start"}.issubset(scored.columns):
         return pd.DataFrame()
-    d=scored.copy(); d["_pred"]=pd.to_numeric(d.get("_model_prob"),errors="coerce")
+    # Recalculate the physical identity even if a caller supplied an obsolete
+    # outcome-specific _prod_game_id. Never use the legacy side-specific Game_Key.
+    d=_attach_production_game_identity(scored)
+    if d.empty: return d
+    d["_pred"]=pd.to_numeric(d.get("_model_prob"),errors="coerce")
     d=d[d["_pred"].between(0.0,1.0)].copy()
     if d.empty: return d
     d["_line"]=pd.to_numeric(d.get("Value"),errors="coerce")
@@ -1051,15 +1103,27 @@ def choose_current_production_picks(scored: pd.DataFrame,contract: dict,*,execut
     d.loc[pos,"_profit"]=d.loc[pos,"_odds"]/100.0
     d["_edge"]=d["_pred"]-d["_be"]
     d["_ev"]=d["_pred"]*d["_profit"]-(1.0-d["_pred"])
-    keys=[c for c in ("Game_Key","Market","Outcome","Bookmaker") if c in d]
+    def canonical_outcome(r):
+        v=_outcome_norm(r)
+        if str(r.get("Market")).lower()=="totals":
+            return v if v in {"over","under"} else ""
+        home=_norm_team(r.get("Home_Team_Norm",r.get("Home_Team")))
+        away=_norm_team(r.get("Away_Team_Norm",r.get("Away_Team")))
+        if v=="home": v=home
+        elif v=="away": v=away
+        return v if v in {home,away} and home!=away else ""
+    d["_prod_outcome"]=d.apply(canonical_outcome,axis=1)
+    d=d[d["_prod_outcome"].ne("")].copy()
+    if d.empty: return d
+    keys=["_prod_game_id","Market","_prod_outcome","Bookmaker"]
     d=d.sort_values("_ts").drop_duplicates(keys,keep="last")
-    d["_latest_side_ts"]=d.groupby(["Game_Key","Market","Outcome"])["_ts"].transform("max")
+    d["_latest_side_ts"]=d.groupby(["_prod_game_id","Market","_prod_outcome"])["_ts"].transform("max")
     d["_lag_min"]=(d["_latest_side_ts"]-d["_ts"]).dt.total_seconds()/60.0
     max_lag=float(os.getenv("V13_UI_QUOTE_SIMULTANEITY_MINUTES","45") or 45.0)
     d=d[d["_lag_min"].isna() | d["_lag_min"].le(max_lag)].copy()
     if d.empty: return d
     d["_ev_sort"]=d["_ev"].fillna(-999.0); d["_edge_sort"]=d["_edge"].fillna(-999.0)
-    sides=d.sort_values(["Game_Key","Market","Outcome","_exec","_ev_sort","_ts"],ascending=[True]*3+[False,False,False]).drop_duplicates(["Game_Key","Market","Outcome"]).copy()
+    sides=d.sort_values(["_prod_game_id","Market","_prod_outcome","_exec","_ev_sort","_ts"],ascending=[True]*3+[False,False,False]).drop_duplicates(["_prod_game_id","Market","_prod_outcome"]).copy()
     sides=apply_live_authority(sides,contract)
     picks=select_market_rows(sides)
     if picks.empty: return picks
@@ -1068,7 +1132,7 @@ def choose_current_production_picks(scored: pd.DataFrame,contract: dict,*,execut
     norm=lambda z: _norm_team(z)
     for ix,r in picks.iterrows():
         if str(r.get("_prod_decision")) in ("EDGE_SINGLE","EDGE_MULTI"):
-            target=norm(r.get("_prod_target")); actual=_outcome_norm(r)
+            target=norm(r.get("_prod_target")); actual=norm(r.get("_prod_outcome"))
             if not target or target!=actual:
                 picks.at[ix,"_prod_decision"]="PASS"
                 picks.at[ix,"_prod_action"]="PASS"
@@ -1076,4 +1140,6 @@ def choose_current_production_picks(scored: pd.DataFrame,contract: dict,*,execut
                 picks.at[ix,"_prod_reason"]="PROMOTED_TARGET_QUOTE_UNAVAILABLE"
             elif not bool(r.get("_exec")) or not np.isfinite(r.get("_odds",np.nan)) or float(r.get("_odds"))==0:
                 picks.at[ix,"_prod_action"]="EDGE — NO EXEC QUOTE"
+    if picks.duplicated(["_prod_game_id","Market"]).any():
+        raise RuntimeError("NCAAF PRODUCTION GAME IDENTITY FAIL: multiple selected outcomes in one market")
     return picks
