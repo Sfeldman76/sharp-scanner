@@ -237,14 +237,35 @@ def _schema_results():
     return [S(k,t,"REQUIRED" if k in ("result_event_id","prediction_event_id") else "NULLABLE") for k,t in f.items()]
 
 
+# BigQuery's Python API can return canonical field_type names (FLOAT, BOOLEAN,
+# INTEGER) for schemas originally declared as FLOAT64, BOOL, INT64. Comparing
+# those names literally causes a false schema mismatch on an EXISTING table.
+# Normalize aliases only; a genuine type change must still fail closed.
+_BQ_TYPE_ALIASES = {
+    "FLOAT64": "FLOAT", "FLOAT": "FLOAT",
+    "BOOL": "BOOLEAN", "BOOLEAN": "BOOLEAN",
+    "INT64": "INTEGER", "INTEGER": "INTEGER",
+}
+
+
+def _bq_type(v):
+    name = str(v).strip().upper()
+    return _BQ_TYPE_ALIASES.get(name, name)
+
+
 def _ensure_one(client,table_fq,schema,partition,clusters):
     from google.cloud import bigquery as b
     from google.api_core.exceptions import NotFound
     try:
         t=client.get_table(table_fq)
         d={x.name:x.field_type for x in t.schema}
-        conflicts=[f.name for f in schema if f.name in d and d[f.name]!=f.field_type]
-        if conflicts: raise RuntimeError(f"schema type mismatch {table_fq}: {conflicts}")
+        conflicts=[f.name for f in schema if f.name in d and _bq_type(d[f.name])!=_bq_type(f.field_type)]
+        if conflicts:
+            detail={name:{"existing":d[name],"expected":next(f.field_type for f in schema if f.name==name)} for name in conflicts}
+            raise RuntimeError(f"schema type mismatch {table_fq}: {detail}")
+        aliases=[f.name for f in schema if f.name in d and str(d[f.name]).strip().upper()!=str(f.field_type).strip().upper()]
+        if aliases:
+            logging.info("[NCAAF-PROD-V1-SCHEMA] status=ALIAS_COMPATIBLE table=%s fields=%s",table_fq,",".join(aliases))
         missing=[f for f in schema if f.name not in d]
         if missing:
             t.schema=list(t.schema)+missing
