@@ -95,6 +95,59 @@ MARKET_WEIGHTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.market_weights"
 SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 
 
+# Production V1 ledger is additive. Its prospectively locked picks do not
+# share the retired V13 shadow prediction or result tables.
+_NCAAF_PROD_V1_CONTRACT_CACHE = {"loaded_at":0.0,"contract":None}
+
+
+def _ncaaf_prod_v1_contract_cached():
+    """Refresh on a short TTL: artifact republish must not leave stale workers."""
+    now=time.monotonic()
+    if now-float(_NCAAF_PROD_V1_CONTRACT_CACHE.get("loaded_at",0))<300:
+        return _NCAAF_PROD_V1_CONTRACT_CACHE.get("contract")
+    from ncaaf_production_v1 import load_production_contract
+    contract=load_production_contract(bucket_name=GCS_BUCKET)
+    _NCAAF_PROD_V1_CONTRACT_CACHE.update({"contract":contract,"loaded_at":now})
+    return contract
+
+
+def score_and_record_ncaaf_production_v1(df_scan: pd.DataFrame, client=None) -> dict:
+    """Background scan: the exact frozen production scorer and dashboard selector.
+
+    This is not a V13 prediction, research replay, or a UI-triggered write.
+    Errors are logged and do not change the legacy odds collection path.
+    """
+    if str(os.getenv("NCAAF_PROD_V1_LEDGER_ENABLED","1")).lower().strip() in ("0","false","no","off"):
+        return {"status":"DISABLED","attempted":0,"inserted":0}
+    try:
+        from ncaaf_production_v1 import prepare_current_market_rows,score_live_rows,choose_current_production_picks
+        from ncaaf_production_ledger_v1 import record_predictions
+        contract=_ncaaf_prod_v1_contract_cached()
+        if not isinstance(contract,dict) or not contract.get("_artifact_sha256"):
+            return {"status":"CONTRACT_NOT_PUBLISHED","attempted":0,"inserted":0}
+        base=prepare_current_market_rows(df_scan)
+        if base.empty: return {"status":"NO_PREGAME_ROWS","attempted":0,"inserted":0}
+        scored=score_live_rows(base,contract)
+        scored_count=int(pd.to_numeric(scored.get("_model_prob"),errors="coerce").notna().sum())
+        picks=choose_current_production_picks(scored,contract,executable_books=REC_BOOKS)
+        result=record_predictions(picks,contract,client=client,source="BACKGROUND_SCANNER")
+        logging.info("[NCAAF-PROD-V1-BACKGROUND] status=%s scored_rows=%d selected_markets=%d attempted=%d inserted=%d artifact=%s",
+          result.get("status"),scored_count,len(picks),int(result.get("attempted",0) or 0),int(result.get("inserted",0) or 0),str(contract.get("_artifact_sha256"))[:16])
+        return {**result,"scored_rows":scored_count,"selected_markets":len(picks)}
+    except Exception as exc:
+        logging.exception("[NCAAF-PROD-V1-BACKGROUND] failed")
+        return {"status":"ERROR","error":f"{type(exc).__name__}:{exc}","attempted":0,"inserted":0}
+
+
+def settle_ncaaf_production_v1(client=None) -> dict:
+    """Grade locked picks against the existing final-scores table, never rescore."""
+    try:
+        from ncaaf_production_ledger_v1 import settle_results
+        return settle_results(client=client)
+    except Exception as exc:
+        logging.exception("[NCAAF-PROD-V1-SETTLEMENT] failed")
+        return {"status":"ERROR","error":f"{type(exc).__name__}:{exc}","settled":0}
+
 # V13.3.11 forward-shadow ledger.  These tables are append-only research
 # evidence.  The exact fitted artifact identity (SHA256), not the human version
 # string, is the primary model-instance key.
@@ -19584,6 +19637,13 @@ def detect_sharp_moves(
     history_hours: int = 120,         # 0/None to skip history
 ):
 
+    # Settle previously locked Production V1 picks even on an empty-odds scan.
+    _is_ncaaf=str(sport_label or "").upper().strip()=="NCAAF" or str(sport_key or "").lower().strip() in ("ncaaf","americanfootball_ncaaf")
+    if _is_ncaaf:
+        _settled_v1=settle_ncaaf_production_v1()
+        logging.info("[NCAAF-PROD-V1-BACKGROUND-SETTLEMENT] status=%s settled=%d",
+          _settled_v1.get("status"),int(_settled_v1.get("settled",0) or 0))
+
     if not current:
         logging.warning("⚠️ No current odds data provided.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -20091,6 +20151,11 @@ def detect_sharp_moves(
         df_scored['V13_Ledger_Events_Attempted']=int(_ledger.get('attempted',0) or 0)
         df_scored['V13_Ledger_Events_Inserted']=int(_ledger.get('inserted',0) or 0)
         df_scored['V13_Settlement_Status']=str(_settle.get('status','UNKNOWN'))
+        if _is_ncaaf:
+            _p1=score_and_record_ncaaf_production_v1(df_scored)
+            df_scored['NCAAF_Prod_V1_Ledger_Status']=str(_p1.get('status','UNKNOWN'))
+            df_scored['NCAAF_Prod_V1_Locks_Attempted']=int(_p1.get('attempted',0) or 0)
+            df_scored['NCAAF_Prod_V1_Locks_Inserted']=int(_p1.get('inserted',0) or 0)
         summary_df = summarize_consensus(df_scored, SHARP_BOOKS, REC_BOOKS)
     else:
         logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
