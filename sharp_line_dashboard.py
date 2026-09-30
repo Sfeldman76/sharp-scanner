@@ -49417,9 +49417,9 @@ if not HEADLESS:
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_intelligence":
         st.sidebar.caption(
-            "NFL V1.7 research: combines independent CORE model agreement with documented Big Al NFL systems, "
-            "Pathi football engineering translations and a bounded system miner. Discovery 2021-23, shadow 2024, "
-            "confirmation 2025; 2026 remains sealed. No publication or production authority."
+            "NFL V1.8 research: mines CORE/market errors, tests when CORE beats the market, adds uncertainty and threshold stability, "
+            "uses market-relative H2H validation, Big Al/Pathi shrinkage, condition ablation and within-family reconciliation. "
+            "Discovery 2021-23, shadow 2024, confirmation 2025; 2026 remains sealed. No publication."
         )
 
     
@@ -49557,7 +49557,7 @@ if not HEADLESS:
                 "Run NFL Team Score Engine V1.6 (No Publish)"
                 if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_score_engine"
                 else (
-                    "Run NFL Intelligence V1.7 (No Publish)"
+                    "Run NFL Intelligence V1.8 (No Publish)"
                     if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_intelligence"
                     else (
                     "Publish NCAAF Production V1"
