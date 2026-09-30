@@ -46844,6 +46844,20 @@ def _v1347_load_latest_frozen_stat_spread_bundle(bucket_name="sharp-models"):
         return None
 
 
+@st.cache_resource(ttl=300)
+def _ncaaf_prod_v1_load_contract(bucket_name="sharp-models"):
+    """Load only the explicitly promoted NCAAF Production V1 edge contract.
+
+    Fail closed: absence/staleness never falls back to a research challenger.
+    """
+    try:
+        import ncaaf_production_v1 as _npv1
+        return _npv1.load_production_contract(bucket_name=bucket_name)
+    except Exception as e:
+        logging.warning("[NCAAF-PROD-V1-LOAD] unavailable: %s:%s",type(e).__name__,e)
+        return None
+
+
 def _v1350_american_break_even(odds):
     o=pd.to_numeric(odds,errors='coerce')
     p=pd.Series(np.nan,index=o.index,dtype=float)
@@ -46861,12 +46875,12 @@ def _v1350_fair_american(prob):
 
 
 def _v1350_prepare_live_three_market_shadow_rows(df_moves_raw, label):
-    """Score SPREAD, H2H and TOTAL independently from one compact upcoming feed.
+    """Score NCAAF with the compact Production V1 fixed-backbone contract.
 
-    Spread probability authority is the unchanged V13.4.4 frozen STAT resolver.
-    H2H_STAT_V1 and TOTAL_STAT_V1 are separate sibling shadow models with their
-    own targets, calibration diagnostics and shadow gates. No probability blending
-    occurs across markets and none of the sibling lanes has production bet authority.
+    The live dashboard does not execute V13 multi-head resolution, generic AutoFS,
+    all-feature selection, rich-market inference, or challenger research. Spread,
+    H2H and Totals are independent frozen production heads stored in one compact
+    NCAAF production artifact; the edge selector is applied separately afterward.
     """
     if df_moves_raw is None or df_moves_raw.empty:
         return pd.DataFrame(), {'status':'NO_ROWS'}
@@ -46914,6 +46928,16 @@ def _v1350_prepare_live_three_market_shadow_rows(df_moves_raw, label):
                     _mapped=d['Game_Key'].map(_spmap)
                     if 'Opening_Spread' not in d.columns: d['Opening_Spread']=np.nan
                     d['Opening_Spread']=pd.to_numeric(d['Opening_Spread'],errors='coerce').where(pd.to_numeric(d['Opening_Spread'],errors='coerce').notna(),_mapped)
+                    # Production V1 system atoms are frozen against the historical
+                    # consensus-open spread.  Carry the canonical home opening
+                    # anchor across all market rows without rebuilding rich market.
+                    if 'Consensus_Open_Spread' not in d.columns: d['Consensus_Open_Spread']=np.nan
+                    # Production models and fixed system atoms are trained in a
+                    # canonical home orientation.  Force the canonical home opening
+                    # spread onto every row for this game; the offered side-specific
+                    # line remains in Value.
+                    _existing=pd.to_numeric(d['Consensus_Open_Spread'],errors='coerce')
+                    d['Consensus_Open_Spread']=_mapped.where(_mapped.notna(),_existing)
             _tt=d[d['Market'].eq('totals')].copy()
             if not _tt.empty:
                 _tot_line=None
@@ -46927,72 +46951,57 @@ def _v1350_prepare_live_three_market_shadow_rows(df_moves_raw, label):
                     _mapped=d['Game_Key'].map(_ttmap)
                     if 'Opening_Total' not in d.columns: d['Opening_Total']=np.nan
                     d['Opening_Total']=pd.to_numeric(d['Opening_Total'],errors='coerce').where(pd.to_numeric(d['Opening_Total'],errors='coerce').notna(),_mapped)
+                    if 'Consensus_Open_Total' not in d.columns: d['Consensus_Open_Total']=np.nan
+                    d['Consensus_Open_Total']=pd.to_numeric(d['Consensus_Open_Total'],errors='coerce').where(pd.to_numeric(d['Consensus_Open_Total'],errors='coerce').notna(),_mapped)
         except Exception as _anchor_err:
             logging.warning('[V13.5.0.1-GAME-ANCHOR-JOIN] unavailable: %s:%s',type(_anchor_err).__name__,_anchor_err)
 
-    bundle=_v1347_load_latest_frozen_stat_spread_bundle()
-    if not isinstance(bundle,dict):
-        return d, {'status':'FROZEN_CHALLENGER_ARTIFACT_UNAVAILABLE'}
-    sb=bundle.get('ncaaf_statistical_brain')
-    if not isinstance(sb,dict):
-        return d, {'status':'STAT_BRAIN_UNAVAILABLE'}
+    _prod_contract=_ncaaf_prod_v1_load_contract(GCS_BUCKET)
+    if not isinstance(_prod_contract,dict):
+        return d, {'status':'NCAAF_PRODUCTION_V1_CONTRACT_UNAVAILABLE'}
 
     try:
-        from utils import apply_ncaaf_statistical_brain_feature as _attach_stat
-        from utils import apply_ncaaf_v13_shadow as _score_v13
-        pieces=[]; info={'status':'LIVE_THREE_MARKET_SCORED','artifact':str(bundle.get('_v1347_shadow_blob',''))}
+        import ncaaf_production_v1 as _npv1
+        pieces=[]
         for m in ('spreads','h2h','totals'):
             z=d[d['Market'].eq(m)].copy()
             if z.empty:
-                info[m]={'rows':0,'scored':0,'shadow_gate':False,'status':'NO_ROWS'}
                 continue
             if 'Outcome_Norm' not in z.columns:
                 z['Outcome_Norm']=z.get('Outcome',pd.Series('',index=z.index)).astype(str).str.lower().str.strip()
             if 'Sport' not in z.columns:
                 z['Sport']='NCAAF'
             if m=='spreads':
-                # System text is useful only on spread rows; do not pay this cost on
-                # H2H/TOTAL rows.
+                # Only the named, already-validated spread systems are attached
+                # live. The research Miner library stays lazy/off-path.
                 try:
                     if not all(c in z.columns for c in ['Pathi_Active_Text','BigAl_Active_Text']):
                         before=len(z); z=attach_pathi_bigal_live_features(z,label)
                         if len(z)!=before:
                             raise RuntimeError(f'Pathi/BigAl enrichment changed row count {before}->{len(z)}')
                 except Exception as e:
-                    logging.warning('[V13.5.0.1-FAST-SYSTEMS] unavailable: %s:%s',type(e).__name__,e)
-                z=_attach_stat(z,sb,'spreads')
-                arch=bundle.get('ncaaf_v13_value_architecture') or {}
-                z=_score_v13(z,arch)
-                z['_model_prob']=pd.to_numeric(z.get('V13_Cover_Prob'),errors='coerce')
-                z['_model_id']='SPREAD_STAT_FROZEN'
-                z['_prob_source']='V13.4.4 Frozen STAT'
-                z['_shadow_model_gate']=True
-                z['_shadow_gate_reason']='FROZEN_SPREAD_GOVERNANCE'
-                z['_shadow_threshold']=0.025
-            else:
-                z=_attach_stat(z,sb,m)
-                z['_model_prob']=pd.to_numeric(z.get('NCAAF_Stat_Prob'),errors='coerce')
-                contract=((sb.get('sibling_market_contracts') or {}).get(m) or _v1350_market_shadow_contract(sb,m))
-                z['_model_id']=str(contract.get('model_id',m.upper()+'_STAT_V1'))
-                z['_prob_source']=z['_model_id']
-                z['_shadow_model_gate']=bool(contract.get('shadow_gate_pass',False))
-                z['_shadow_gate_reason']=str(contract.get('reason','INSUFFICIENT_EVIDENCE'))
-                z['_shadow_threshold']=float(contract.get('edge_threshold',0.025) or 0.025)
-            # V13.5.5: evaluate only published system clauses for currently displayed rows.
-            # Full library stays in the artifact and is not rendered unless requested.
-            z=_v1355_match_live_systems(z,sb.get('system_miner_v2') or {},m)
+                    logging.warning('[NCAAF-PROD-V1-NAMED-SYSTEMS] unavailable: %s:%s',type(e).__name__,e)
             pieces.append(z)
+        base=pd.concat(pieces,ignore_index=True,sort=False) if pieces else pd.DataFrame()
+        out=_npv1.score_live_rows(base,_prod_contract)
+        info={
+            'status':'NCAAF_PRODUCTION_V1_SCORED',
+            'artifact':str(_npv1.NCAAF_PRODUCTION_V1_ARTIFACT),
+            'production_contract':'ACTIVE',
+            'production_source_tag':str(_prod_contract.get('source_tag','')),
+        }
+        for m in ('spreads','h2h','totals'):
+            zz=out[out['Market'].eq(m)] if not out.empty else pd.DataFrame()
             info[m]={
-                'rows':int(len(z)),'scored':int(pd.to_numeric(z['_model_prob'],errors='coerce').notna().sum()),
-                'shadow_gate':bool(z['_shadow_model_gate'].iloc[0]) if len(z) else False,
-                'status':str(z['_shadow_gate_reason'].iloc[0]) if len(z) else 'NO_ROWS',
+                'rows':int(len(zz)),
+                'scored':int(pd.to_numeric(zz.get('_model_prob'),errors='coerce').notna().sum()) if not zz.empty else 0,
+                'status':str((zz.get('_model_id',pd.Series('',index=zz.index)).iloc[0] if not zz.empty else 'NO_ROWS')),
             }
-        out=pd.concat(pieces,ignore_index=True,sort=False) if pieces else pd.DataFrame()
         info['rows']=int(len(out)); info['scored_rows']=int(pd.to_numeric(out.get('_model_prob'),errors='coerce').notna().sum()) if not out.empty else 0
-        print(f"[V13.5.0.1-LIVE-THREE-MARKET-SCORER] rows={info['rows']} scored={info['scored_rows']} spread={info.get('spreads')} h2h={info.get('h2h')} totals={info.get('totals')} artifact={info.get('artifact','')}")
+        print(f"[NCAAF-PROD-V1-LIVE-SCORER] rows={info['rows']} scored={info['scored_rows']} spread={info.get('spreads')} h2h={info.get('h2h')} totals={info.get('totals')} artifact={info.get('artifact','')} edge_contract=ACTIVE edge_source={info.get('production_source_tag','')} generic_autofs=FALSE multi_head=FALSE rich_market_model=FALSE")
         return out,info
     except Exception as e:
-        logging.exception('[V13.5.0.1-LIVE-THREE-MARKET-SCORER] failed')
+        logging.exception('[NCAAF-PROD-V1-LIVE-SCORER] failed')
         return d, {'status':'SCORING_ERROR','error':f'{type(e).__name__}:{e}'}
 
 
@@ -47039,7 +47048,10 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
         max_lag=float(os.getenv('V13_UI_QUOTE_SIMULTANEITY_MINUTES','45') or 45.0)
         d=d[d['_lag_min'].isna()|d['_lag_min'].le(max_lag)].copy()
 
-    # One executable/best-EV quote per outcome, then the highest-edge outcome per market.
+    # NCAAF Production V1: first pick one executable/best-EV quote per outcome,
+    # then let the promoted edge selector choose the outcome.  If no promoted
+    # edge fires, the table still shows the probability model's best edge as a
+    # MODEL/PASS observation.  The dashboard never runs feature selection.
     side_keys=[c for c in ['Game_Key','Market','Outcome'] if c in d.columns]
     d['_ev_sort']=d['_ev'].fillna(-999.0); d['_edge_sort']=d['_edge'].fillna(-999.0)
     if side_keys:
@@ -47047,12 +47059,20 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
         sides=d.drop_duplicates(side_keys,keep='first').copy()
     else:
         sides=d.copy()
-    market_keys=[c for c in ['Game_Key','Market'] if c in sides.columns]
-    if market_keys:
-        sides=sides.sort_values(market_keys+['_edge_sort','_ev_sort','_pred','_ts'],ascending=[True]*len(market_keys)+[False,False,False,False])
-        picks=sides.drop_duplicates(market_keys,keep='first').copy()
-    else:
-        picks=sides.copy()
+    try:
+        import ncaaf_production_v1 as _npv1
+        _prod_contract=_ncaaf_prod_v1_load_contract(GCS_BUCKET)
+        sides=_npv1.apply_live_authority(sides,_prod_contract)
+        picks=_npv1.select_market_rows(sides)
+    except Exception as _prod_err:
+        logging.exception('[NCAAF-PROD-V1-LIVE-AUTHORITY] failed')
+        sides['_prod_decision']='MODEL_ONLY'; sides['_prod_action']='MODEL ONLY'; sides['_prod_sources']=''; sides['_prod_mechanisms']=''; sides['_prod_authority']=0; sides['_prod_reason']=f'ENGINE_ERROR:{type(_prod_err).__name__}'
+        market_keys=[c for c in ['Game_Key','Market'] if c in sides.columns]
+        if market_keys:
+            sides=sides.sort_values(market_keys+['_edge_sort','_ev_sort','_pred','_ts'],ascending=[True]*len(market_keys)+[False,False,False,False])
+            picks=sides.drop_duplicates(market_keys,keep='first').copy()
+        else:
+            picks=sides.copy()
     if picks.empty:
         st.warning('No current three-market NCAAF predictions are available.')
         return
@@ -47067,8 +47087,6 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     picks['Pick']=picks.get('Outcome',pd.Series('—',index=picks.index)).astype(str)
     picks['Quote Age Min']=(now-picks['_ts']).dt.total_seconds().div(60.0)
     picks['Hours to Game']=(picks['Game_Start']-now).dt.total_seconds().div(3600.0)
-    picks['_shadow']=picks['_shadow_model_gate'].fillna(False).astype(bool)&picks['_exec']&(picks['_edge']>=pd.to_numeric(picks['_shadow_threshold'],errors='coerce').fillna(.025))&(picks['_ev']>0)
-
     # V13.5.5: every market can display triggered Miner V2 systems. Named Big Al/Pathi
     # remain spread-only, but the row-level indicator is common across all markets.
     picks['Systems']=picks.get('Miner_System_Summary',pd.Series('—',index=picks.index)).fillna('—').astype(str)
@@ -47096,7 +47114,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     picks['ET Date']=picks['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d')
     picks['Game Time']=picks['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%a %I:%M %p')
 
-    # Collapse the three independent markets into one compact row per physical game.
+    # Collapse the three independent markets into one compact production row per game.
     records=[]
     gcol='Game_Key' if 'Game_Key' in picks.columns else None
     grouped=picks.groupby(gcol,dropna=False,sort=False) if gcol else [(str(i),picks.loc[[i]]) for i in picks.index]
@@ -47104,18 +47122,17 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
         g=g.sort_values('Game_Start')
         r0=g.iloc[0]
         rec={'_game_key':gk,'_game_start':r0.get('Game_Start'),'ET Date':r0.get('ET Date',''),'Game Time':r0.get('Game Time',''),'Matchup':r0.get('Matchup','')}
-        shadow_plays=[]; system_parts=[]; system_count=0
+        production_plays=[]; edge_parts=[]; system_parts=[]; system_count=0
         for m,prefix in [('spreads','Spr'),('h2h','H2H'),('totals','Tot')]:
             x=g[g['Market'].eq(m)]
             if x.empty:
-                rec.update({f'{prefix} Pick':'—',f'{prefix} Prob':np.nan,f'{prefix} Edge':np.nan,f'{prefix} EV':np.nan,f'{prefix} Fair':np.nan,f'{prefix} Status':'NO PREDICTION'})
+                rec.update({f'{prefix} Action':'NO PREDICTION',f'{prefix} Pick':'—',f'{prefix} Prob':np.nan,f'{prefix} Edge':np.nan,f'{prefix} EV':np.nan,f'{prefix} Fair':np.nan,f'{prefix} Status':'NO PREDICTION',f'{prefix} Source':'—'})
                 continue
             x=x.iloc[0]; pick=str(x.get('Pick','—')); odds=x.get('_odds',np.nan); line=x.get('_line',np.nan)
             if m=='spreads':
                 label=f"{pick} {float(line):+.1f}" if np.isfinite(line) else pick
                 if np.isfinite(odds): label+=f" ({float(odds):+.0f})"
                 fair=-float(x.get('NCAAF_Stat_Expected_Margin')) if np.isfinite(pd.to_numeric(pd.Series([x.get('NCAAF_Stat_Expected_Margin')]),errors='coerce').iloc[0]) else np.nan
-                pass
             elif m=='h2h':
                 label=pick + (f" {float(odds):+.0f}" if np.isfinite(odds) else '')
                 fair=_v1350_fair_american(x.get('_pred'))
@@ -47124,17 +47141,41 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
                 label=f"{o} {float(line):.1f}" if np.isfinite(line) else o
                 if np.isfinite(odds): label+=f" ({float(odds):+.0f})"
                 fair=float(x.get('NCAAF_Stat_Expected_Total')) if np.isfinite(pd.to_numeric(pd.Series([x.get('NCAAF_Stat_Expected_Total')]),errors='coerce').iloc[0]) else np.nan
-            status='SHADOW BET' if bool(x.get('_shadow',False)) else ('WATCH' if bool(x.get('_shadow_model_gate',False)) else 'RESEARCH ONLY')
-            rec.update({f'{prefix} Pick':label,f'{prefix} Prob':x.get('_pred',np.nan),f'{prefix} Edge':x.get('_edge',np.nan),f'{prefix} EV':x.get('_ev',np.nan),f'{prefix} Fair':fair,f'{prefix} Status':status})
+
+            decision=str(x.get('_prod_decision','MODEL_ONLY') or 'MODEL_ONLY')
+            action=str(x.get('_prod_action','MODEL ONLY') or 'MODEL ONLY')
+            # A promoted edge is only actionable when the selected quote is from an
+            # executable book and carries a real price.  Edge authority itself is
+            # preserved in Source/Status even when an executable quote is absent.
+            has_exec_quote=bool(x.get('_exec',False)) and np.isfinite(pd.to_numeric(pd.Series([odds]),errors='coerce').iloc[0])
+            if decision in ('EDGE_SINGLE','EDGE_MULTI') and not has_exec_quote:
+                action='EDGE — NO EXEC QUOTE'
+            status=decision
+            source=str(x.get('_prod_sources','') or '').strip() or '—'
+            mechs=str(x.get('_prod_mechanisms','') or '').strip()
+            rec.update({f'{prefix} Action':action,f'{prefix} Pick':label,f'{prefix} Prob':x.get('_pred',np.nan),f'{prefix} Edge':x.get('_edge',np.nan),f'{prefix} EV':x.get('_ev',np.nan),f'{prefix} Fair':fair,f'{prefix} Status':status,f'{prefix} Source':source})
+            if action in ('PLAY','STRONG PLAY'):
+                production_plays.append(f"{prefix}: {label}")
+            if source!='—':
+                edge_parts.append(f"{prefix}: {source}" + (f" [{mechs}]" if mechs else ''))
+                # Surface production system triggers directly in the compact row.
+                # STAT is a model selector, not a named system; BigAl/Pathi/Miner
+                # and promoted totals rules are system evidence.
+                for _src in [q.strip() for q in source.split(' | ') if q.strip()]:
+                    if not _src.upper().startswith('STAT '):
+                        system_parts.append(f"{prefix}: {_src}")
+                        system_count += 1
             _sys=str(x.get('Systems','—') or '—').strip(); _cnt=int(x.get('System Count',0) or 0)
-            if _sys not in ('','—','nan','None'): system_parts.append(f"{prefix}: {_sys}")
+            if _sys not in ('','—','nan','None'):
+                _entry=f"{prefix}: {_sys}"
+                if _entry not in system_parts: system_parts.append(_entry)
             system_count += _cnt
-            if bool(x.get('_shadow',False)):
-                shadow_plays.append(f"{prefix}: {label}")
-        rec['Shadow Plays']=' | '.join(shadow_plays) if shadow_plays else '—'
-        rec['Systems']=' | '.join(system_parts) if system_parts else '—'
-        rec['System Count']=system_count
-        rec['System Trigger']='SYSTEMS '+str(system_count) if system_count else '—'
+        rec['Production Plays']=' | '.join(production_plays) if production_plays else '—'
+        rec['Edge Sources']=' | '.join(edge_parts) if edge_parts else '—'
+        _unique_system_parts=list(dict.fromkeys(system_parts))
+        rec['Systems']=' | '.join(_unique_system_parts) if _unique_system_parts else '—'
+        rec['System Count']=len(_unique_system_parts)
+        rec['System Trigger']=' | '.join(_unique_system_parts) if _unique_system_parts else '—'
         records.append(rec)
     view=pd.DataFrame(records)
     if view.empty:
@@ -47146,24 +47187,53 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     if selected_date!='All':
         view=view[view['ET Date']==selected_date].copy()
 
-    st.subheader('NCAAF — Spread, H2H & Total Shadow Board')
-    st.caption('Three independent models in one table. Spread remains the frozen V13.4.4 probability. H2H_STAT_V1 and TOTAL_STAT_V1 are separate shadow-only siblings. Production betting authority remains closed.')
-    spr_n=int((view.get('Spr Status')=='SHADOW BET').sum()) if 'Spr Status' in view else 0
-    h2h_n=int((view.get('H2H Status')=='SHADOW BET').sum()) if 'H2H Status' in view else 0
-    tot_n=int((view.get('Tot Status')=='SHADOW BET').sum()) if 'Tot Status' in view else 0
+    _prod_contract=_ncaaf_prod_v1_load_contract(GCS_BUCKET)
+    st.subheader('NCAAF Production — Spread, H2H & Totals')
+    if isinstance(_prod_contract,dict):
+        st.caption('Production V1 is active. Spread/H2H/Totals remain separate frozen probability models. The promoted edge engine chooses production actions without rewriting model probabilities. H2H remains model-only because no repeatable H2H edge challenger passed.')
+        _backs=_prod_contract.get('backbones') or {}
+        _spf=len(((_backs.get('spread') or {}).get('feature_cols') or [])); _h2f=len(((_backs.get('h2h') or {}).get('feature_cols') or [])); _ttf=len(((_backs.get('totals') or {}).get('feature_cols') or []))
+        st.caption(f'Fast production path: Spread {_spf} fixed features • H2H {_h2f} fixed features • Totals {_ttf} fixed features • cadence FROZEN • AutoFS OFF • multi-head runtime OFF • rich-market model OFF.')
+    else:
+        st.warning('NCAAF Production V1 edge contract is not published yet. The board is showing model output only. Run the training job with MARKET=ncaaf_production (or NCAAF_PROMOTE_EDGE_V1=1) once after deploying this bundle.')
+
+    spr_n=int(view.get('Spr Action',pd.Series('',index=view.index)).isin(['PLAY','STRONG PLAY']).sum())
+    tot_n=int(view.get('Tot Action',pd.Series('',index=view.index)).isin(['PLAY','STRONG PLAY']).sum())
+    h2h_n=int(view.get('H2H Prob',pd.Series(np.nan,index=view.index)).notna().sum())
+    prod_n=int(view.get('Production Plays',pd.Series('—',index=view.index)).ne('—').sum())
+    strong_n=int(view.get('Spr Action',pd.Series('',index=view.index)).eq('STRONG PLAY').sum())
     m1,m2,m3,m4,m5=st.columns(5)
-    m1.metric('Upcoming games',int(len(view))); m2.metric('Spread shadow',spr_n); m3.metric('H2H shadow',h2h_n); m4.metric('Total shadow',tot_n); m5.metric('Production bets',0)
-    st.caption('Shadow selections are tracked as if they were bets, but they are not production-authorized wagers.')
+    m1.metric('Upcoming games',int(len(view))); m2.metric('Spread plays',spr_n); m3.metric('Totals plays',tot_n); m4.metric('H2H model-only',h2h_n); m5.metric('Production games',prod_n)
+    if strong_n:
+        st.caption(f'{strong_n} spread game(s) currently have EDGE_MULTI / independent-mechanism agreement and are marked STRONG PLAY.')
 
     view=view.sort_values('_game_start')
-    main=view[['Game Time','Matchup','Spr Pick','Spr Prob','Spr Edge','H2H Pick','H2H Prob','H2H Edge','Tot Pick','Tot Prob','Tot Edge','Shadow Plays','System Trigger','Systems']].copy()
-    for c in ['Spr Prob','Spr Edge','H2H Prob','H2H Edge','Tot Prob','Tot Edge']:
+    main=view[['Game Time','Matchup','Spr Action','Spr Pick','Spr Prob','Spr Edge','H2H Action','H2H Pick','H2H Prob','H2H Edge','Tot Action','Tot Pick','Tot Prob','Tot Edge','Production Plays','Edge Sources','System Trigger']].copy()
+    main=main.rename(columns={'Spr Edge':'Spr Model Edge','H2H Edge':'H2H Model Edge','Tot Edge':'Tot Model Edge'})
+    for c in ['Spr Prob','Spr Model Edge','H2H Prob','H2H Model Edge','Tot Prob','Tot Model Edge']:
         main[c]=pd.to_numeric(main[c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
     st.dataframe(main,use_container_width=True,hide_index=True)
 
+    if isinstance(_prod_contract,dict):
+        with st.expander('Production edge evidence',expanded=False):
+            _perf=(_prod_contract.get('performance') or {})
+            _rows=[]
+            for _market,_items in [('Spread',_perf.get('spread') or {}),('Totals',_perf.get('totals') or {})]:
+                for _sample,_met in _items.items():
+                    if not isinstance(_met,dict) or not _met: continue
+                    _rows.append({'Market':_market,'Sample':_sample.replace('_',' '),'N':_met.get('n'),'Hit':_met.get('hit'),'ROI':_met.get('roi'),'Signed Edge':_met.get('signed'),'CLV':_met.get('clv')})
+            _e=pd.DataFrame(_rows)
+            if not _e.empty:
+                for _c in ['Hit','ROI']:
+                    _e[_c]=pd.to_numeric(_e[_c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
+                for _c in ['Signed Edge','CLV']:
+                    _e[_c]=pd.to_numeric(_e[_c],errors='coerce').map(lambda x:f'{x:+.2f}' if pd.notna(x) else '—')
+                st.dataframe(_e,use_container_width=True,hide_index=True)
+            st.caption('Spread EDGE_MULTI is allowed only when at least two independent mechanisms agree. Totals family overlap does not receive a stronger action because the two-mechanism 2026 confirmation did not repeat. H2H edge authority remains closed.')
+
     # V13.5.5 lazy system library: artifact contents are only expanded into a DataFrame
     # after an explicit click, keeping the normal prediction-board render lightweight.
-    if st.button('Published Systems ▾',key='ncaaf-v1355-load-published-systems'):
+    if st.button('Research System Library ▾',key='ncaaf-v1355-load-published-systems'):
         st.session_state['ncaaf_v1355_system_library_loaded']=True
     if st.session_state.get('ncaaf_v1355_system_library_loaded',False):
         try:
@@ -47195,7 +47265,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
             diag[c]=pd.to_numeric(diag[c],errors='coerce').map(lambda x:f'{x:+.3f}' if pd.notna(x) else '—')
         st.dataframe(diag,use_container_width=True,hide_index=True)
 
-    print(f"[V13.5.0.1-THREE-MARKET-FAST-UI] games={len(view)} spread_predictions={int(view['Spr Prob'].notna().sum())} h2h_predictions={int(view['H2H Prob'].notna().sum())} total_predictions={int(view['Tot Prob'].notna().sum())} spread_shadow={spr_n} h2h_shadow={h2h_n} total_shadow={tot_n} production_bets=0 rich_market_render=FALSE probability_blend=NONE spread_source=V13_4_4_STAT_ONLY_FROZEN h2h_source=H2H_STAT_V1 total_source=TOTAL_STAT_V1")
+    print(f"[NCAAF-PROD-V1-FAST-UI] games={len(view)} spread_predictions={int(view['Spr Prob'].notna().sum())} h2h_predictions={int(view['H2H Prob'].notna().sum())} total_predictions={int(view['Tot Prob'].notna().sum())} spread_plays={spr_n} spread_strong={strong_n} totals_plays={tot_n} h2h_model_only={h2h_n} production_games={prod_n} production_contract={'ACTIVE' if isinstance(_prod_contract,dict) else 'MISSING'} generic_autofs=RETIRED multi_head_runtime=RETIRED rich_market_render=FALSE probability_blend=NONE spread_model=FROZEN_SEPARATE h2h_model=FROZEN_SEPARATE totals_model=FROZEN_SEPARATE")
 
 def render_scanner_tab(label, sport_key, container, force_reload=False):
 
