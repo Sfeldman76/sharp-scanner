@@ -211,6 +211,43 @@ def main():
             raise
         return
 
+    # NFL Challenger V1.4 — score-only sandbox; audit is rerun in the SAME job.
+    # It never writes production artifacts, alters NCAAF, or enters legacy trainer.
+    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_challenger":
+        import importlib.util
+        from pathlib import Path
+        from google.cloud import bigquery
+        _dir = Path(__file__).resolve().parent
+
+        def _load_nfl_exact(_name, _tag):
+            _path = _dir / (_name + ".py")
+            if not _path.is_file():
+                raise RuntimeError(f"[NFL-CHALLENGER-V1-DEPLOY-PREFLIGHT] MISSING {_path}")
+            _spec = importlib.util.spec_from_file_location(_name, _path)
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules[_name] = _mod
+            _spec.loader.exec_module(_mod)
+            if getattr(_mod, "SOURCE_TAG", "") != _tag:
+                raise RuntimeError("[NFL-CHALLENGER-V1-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
+            return _mod
+
+        _feature = _load_nfl_exact("nfl_feature_audit_v1", "nfl-feature-audit-v1.3-prior-only-20260930")
+        _audit = _load_nfl_exact("nfl_audit_v1", "nfl-audit-v1.3-prior-feature-provenance-20260930")
+        _challenge = _load_nfl_exact("nfl_challenger_v1", "nfl-challenger-v1.4-season-forward-three-market-no-publish-20260930")
+        pw.emit("audit", f"[NFL-CHALLENGER-V1] Recheck historical and prior-only audits run={run_id}", pct=0.05)
+        try:
+            _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
+            if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
+                raise RuntimeError("[NFL-CHALLENGER-V1-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
+            pw.emit("sandbox", "[NFL-CHALLENGER-V1] Run season-forward experiments 2021-2025; 2026 sealed", pct=0.37)
+            _result = _challenge.run_nfl_challenger_v1(bq_client=bigquery.Client(project="sharplogger"),
+                        audit_report=_audit_report, log_func=log_func)
+            pw.emit("done", "NFL score-only challenger complete: "+_result["status"]+" (no model published)", pct=1.0)
+        except Exception as exc:
+            pw.emit("error", "NFL challenger failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            raise
+        return
+
     # V13.5.0 deployment-path lock. Load the three training modules from
     # the exact directory containing this train_job.py, rather than allowing an
     # older copy elsewhere on PYTHONPATH or in a retained module cache to win.
