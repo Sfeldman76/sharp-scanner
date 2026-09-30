@@ -189,7 +189,7 @@ def main():
         _spec = importlib.util.spec_from_file_location("nfl_audit_v1", _audit_path)
         _audit = importlib.util.module_from_spec(_spec)
         _spec.loader.exec_module(_audit)
-        if getattr(_audit, "SOURCE_TAG", "") != "nfl-audit-v1.1-historical-uploader-view-20260930":
+        if getattr(_audit, "SOURCE_TAG", "") != "nfl-audit-v1.2-calendar-neutral-venue-20260930":
             raise RuntimeError("[NFL-AUDIT-V1-DEPLOY-PREFLIGHT] STALE_OR_MIXED_SOURCE")
         pw.emit("audit", f"[NFL-AUDIT-V1] Read-only NFL inventory start run={run_id}", pct=0.1)
         try:
