@@ -225,6 +225,7 @@ def main():
     _fsepv1, _fsepv1_path, _fsepv1_sha = _load_exact_local_module("frozen_spread_edge_policy_v1")
     _smev1, _smev1_path, _smev1_sha = _load_exact_local_module("sibling_market_edge_research_v1")
     _tarv1, _tarv1_path, _tarv1_sha = _load_exact_local_module("totals_atomic_refinement_v1")
+    _rcv1, _rcv1_path, _rcv1_sha = _load_exact_local_module("refit_cadence_test_v1")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
@@ -385,7 +386,20 @@ def main():
         _tarv1_out = _tarv1.run_totals_atomic_refinement_v1(
             dashboard_module=_sld, sibling_out=_smev1_out, sibling_module=_smev1, log_func=log_func, hard_fail=True
         )
-        return _v143_out, _scv21_out, _erv2_out, _etv1_out, _ecv2_out, _emmv1_out, _aegv1_out, _arrv1_out, _fsepv1_out, _smev1_out, _tarv1_out
+        _rcv1_tag = getattr(_rcv1, "REFIT_CADENCE_TEST_V1_SOURCE_TAG", None)
+        if _rcv1_tag != "refit-cadence-test-v1-fixed-backbones-asof":
+            raise RuntimeError(
+                f"[CADENCE-V1-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_rcv1_tag!r} "
+                f"path={str(_rcv1_path)!r} sha={_rcv1_sha[:16]}"
+            )
+        log_func(
+            f"[CADENCE-V1-DEPLOY-PREFLIGHT] PASS source_tag={_rcv1_tag} path={_rcv1_path} "
+            f"sha={_rcv1_sha[:16]} production_authority=0"
+        )
+        _rcv1_out = _rcv1.run_refit_cadence_test_v1(
+            dashboard_module=_sld, log_func=log_func, hard_fail=True
+        )
+        return _v143_out, _scv21_out, _erv2_out, _etv1_out, _ecv2_out, _emmv1_out, _aegv1_out, _arrv1_out, _fsepv1_out, _smev1_out, _tarv1_out, _rcv1_out
 
     _expected_build = getattr(_sld, "V133_DEPLOY_BUILD_ID", None)
     _utils_build = getattr(_utils, "V133_DEPLOY_BUILD_ID", None)
