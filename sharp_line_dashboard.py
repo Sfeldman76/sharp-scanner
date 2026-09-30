@@ -49388,8 +49388,8 @@ if not HEADLESS:
         # Production is the explicit, separate one-time artifact publishing path.
         _train_market_options[2:2] = ["edge_research", "ncaaf_production"]
     if str(sport).upper().strip() == "NFL":
-        # Explicit diagnostic only. No NFL model is fitted, replaced or published.
-        _train_market_options.insert(1, "nfl_audit")
+        # NFL audit and sandbox are independent of the legacy training routes.
+        _train_market_options[1:1] = ["nfl_audit", "nfl_challenger"]
     market_choice = st.sidebar.selectbox(
         "Train which market?",
         _train_market_options,
@@ -49404,6 +49404,11 @@ if not HEADLESS:
         st.sidebar.caption(
             "Read-only NFL history, market/as-of, and incumbent artifact inventory. "
             "No training, grading changes or production promotion."
+        )
+    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_challenger":
+        st.sidebar.caption(
+            "Research-only NFL Spread / H2H / Totals baseline tournament. Rechecks the V1.3 audit, "
+            "then runs 2021–2025 season-forward validation; 2026 sealed. No promotion or production changes."
         )
 
     
@@ -49535,12 +49540,16 @@ if not HEADLESS:
         "Run NFL History & Champion Audit"
         if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_audit"
         else (
-            "Publish NCAAF Production V1"
-            if str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production"
+            "Run NFL Challenger Sandbox (No Publish)"
+            if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_challenger"
             else (
-                f"🧪 Run {sport} Edge Research"
-                if str(market_choice).lower().strip() == "edge_research"
-                else f"📈 Train {sport} Sharp Model"
+                "Publish NCAAF Production V1"
+                if str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production"
+                else (
+                    f"🧪 Run {sport} Edge Research"
+                    if str(market_choice).lower().strip() == "edge_research"
+                    else f"📈 Train {sport} Sharp Model"
+                )
             )
         )
     )
