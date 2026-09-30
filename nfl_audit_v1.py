@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-SOURCE_TAG = "nfl-audit-v1.2-calendar-neutral-venue-20260930"
+SOURCE_TAG = "nfl-audit-v1.3-prior-feature-provenance-20260930"
 PROJECT = "sharplogger"
 DATASET = "sharp_data"
 SCORES = f"{PROJECT}.{DATASET}.game_scores_final"
@@ -440,6 +440,20 @@ def run_nfl_audit_v1(*, bq_client=None, storage_client=None, bucket_name="sharp-
              f"context_status={hist.get('context',{}).get('status')} "
              f"publication=FALSE production_authority=0 legacy_nfl=UNCHANGED ncaaf=UNCHANGED "
              f"data_coverage_only=TRUE champion_win_claim=FALSE")
+    # V1.3 additional read-only prior-feature audit. The authoritative history
+    # gate remains independent; do not run this on an unverified raw dataset.
+    if out['status']=='READY_FOR_OFFLINE_FEATURE_LEAKAGE_REVIEW':
+        try:
+            import nfl_feature_audit_v1 as _feature_v13
+            out['feature_leakage_review']=_feature_v13.run_feature_audit(bq,out,log_func=log_func)
+        except Exception as e:
+            out['feature_leakage_review']={'status':'HOLD','reason':'FEATURE_AUDIT_IMPORT_OR_EXECUTION_FAILED',
+                                           'error':f'{type(e).__name__}: {e}'}
+            log_func('[NFL-FEATURE-V1-CONTRACT] status=HOLD_FEATURE_REVIEW reason=FEATURE_AUDIT_EXCEPTION '
+                     f'error={type(e).__name__}: {e} publication=FALSE authority=0')
+        out['status']=out['feature_leakage_review']['status']
+        log_func('[NFL-AUDIT-V1.3-FINAL] status='+out['status']+
+                 ' publication=FALSE production_authority=0 ncaaf=UNCHANGED legacy_nfl=UNCHANGED')
     if hard_fail and hist.get('reason')=='BAD_RAW_GAME_GRAIN_OR_SEASON_STAGE':
         raise RuntimeError('[NFL-AUDIT-V1-CONTRACT] HARD_HOLD invalid historical NFL game side grain; no model mutated')
     return out
