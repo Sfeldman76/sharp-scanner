@@ -46858,6 +46858,18 @@ def _ncaaf_prod_v1_load_contract(bucket_name="sharp-models"):
         return None
 
 
+@st.cache_data(ttl=180,show_spinner=False)
+def _ncaaf_prod_v1_grading_summary_cached():
+    from ncaaf_production_ledger_v1 import read_summary
+    return read_summary(days=60)
+
+
+@st.cache_data(ttl=180,show_spinner=False)
+def _ncaaf_prod_v1_grading_details_cached(lock_type="FIRST"):
+    from ncaaf_production_ledger_v1 import read_details
+    return read_details(days=60,lock_type=lock_type)
+
+
 def _v1350_american_break_even(odds):
     o=pd.to_numeric(odds,errors='coerce')
     p=pd.Series(np.nan,index=o.index,dtype=float)
@@ -46884,77 +46896,12 @@ def _v1350_prepare_live_three_market_shadow_rows(df_moves_raw, label):
     """
     if df_moves_raw is None or df_moves_raw.empty:
         return pd.DataFrame(), {'status':'NO_ROWS'}
-    d=df_moves_raw.copy(); now=pd.Timestamp.now(tz='UTC')
-    if 'Sport' in d.columns:
-        d=d[d['Sport'].astype(str).str.upper().str.strip().eq('NCAAF')].copy()
-    d['Market']=d.get('Market',pd.Series('',index=d.index)).astype(str).str.lower().str.strip().replace({
-        'spread':'spreads','total':'totals','moneyline':'h2h','ml':'h2h','headtohead':'h2h','head-to-head':'h2h'
-    })
-    d=d[d['Market'].isin(['spreads','h2h','totals'])].copy()
-    if 'Game_Start' in d.columns:
-        d['Game_Start']=pd.to_datetime(d['Game_Start'],errors='coerce',utc=True)
-        d=d[d['Game_Start'].notna() & d['Game_Start'].gt(now)].copy()
-    if 'Pre_Game' in d.columns:
-        d=d[d['Pre_Game'].fillna(True).astype(bool)].copy()
+    # Use the same frozen opening-anchor preparation as the background scanner.
+    # No prediction is persisted from the dashboard; only utils does pregame locks.
+    import ncaaf_production_v1 as _npv1
+    d=_npv1.prepare_current_market_rows(df_moves_raw)
     if d.empty:
         return d, {'status':'NO_UPCOMING_MARKET_ROWS'}
-
-    d['_v1350_ts']=pd.to_datetime(d.get('Snapshot_Timestamp'),errors='coerce',utc=True)
-    qkeys=[c for c in ['Game_Key','Market','Outcome','Bookmaker'] if c in d.columns]
-    if qkeys:
-        d=d.sort_values('_v1350_ts').drop_duplicates(qkeys,keep='last').copy()
-    d.drop(columns=['_v1350_ts'],inplace=True,errors='ignore')
-
-    # Propagate only the two game-level opening anchors needed by the statistical
-    # sibling models. This is a compact cross-market join, not a return to the
-    # legacy rich-market renderer. H2H needs the opening spread to form expected
-    # margin; totals needs the opening total to form expected scoring.
-    if 'Game_Key' in d.columns:
-        try:
-            _sp=d[d['Market'].eq('spreads')].copy()
-            if not _sp.empty:
-                _sp_line=None
-                for _c in ('Opening_Spread','First_Line_Value','Open_Value','Opening_Line'):
-                    if _c in _sp.columns:
-                        _s=pd.to_numeric(_sp[_c],errors='coerce')
-                        if _s.notna().any(): _sp_line=_s; break
-                if _sp_line is not None:
-                    _home=_sp.get('Home_Team_Norm',_sp.get('Home_Team',pd.Series('',index=_sp.index))).astype(str).map(normalize_team)
-                    _away=_sp.get('Away_Team_Norm',_sp.get('Away_Team',pd.Series('',index=_sp.index))).astype(str).map(normalize_team)
-                    _out=_sp.get('Outcome',pd.Series('',index=_sp.index)).astype(str).map(normalize_team)
-                    _home_sp=np.where(_out.eq(_home),_sp_line,np.where(_out.eq(_away),-_sp_line,np.nan))
-                    _sp['_v1350_home_open_spread']=_home_sp
-                    _spmap=_sp.groupby('Game_Key')['_v1350_home_open_spread'].median()
-                    _mapped=d['Game_Key'].map(_spmap)
-                    if 'Opening_Spread' not in d.columns: d['Opening_Spread']=np.nan
-                    d['Opening_Spread']=pd.to_numeric(d['Opening_Spread'],errors='coerce').where(pd.to_numeric(d['Opening_Spread'],errors='coerce').notna(),_mapped)
-                    # Production V1 system atoms are frozen against the historical
-                    # consensus-open spread.  Carry the canonical home opening
-                    # anchor across all market rows without rebuilding rich market.
-                    if 'Consensus_Open_Spread' not in d.columns: d['Consensus_Open_Spread']=np.nan
-                    # Production models and fixed system atoms are trained in a
-                    # canonical home orientation.  Force the canonical home opening
-                    # spread onto every row for this game; the offered side-specific
-                    # line remains in Value.
-                    _existing=pd.to_numeric(d['Consensus_Open_Spread'],errors='coerce')
-                    d['Consensus_Open_Spread']=_mapped.where(_mapped.notna(),_existing)
-            _tt=d[d['Market'].eq('totals')].copy()
-            if not _tt.empty:
-                _tot_line=None
-                for _c in ('Opening_Total','First_Line_Value','Open_Value','Opening_Line'):
-                    if _c in _tt.columns:
-                        _s=pd.to_numeric(_tt[_c],errors='coerce')
-                        if _s.notna().any(): _tot_line=_s; break
-                if _tot_line is not None:
-                    _tt['_v1350_open_total']=_tot_line
-                    _ttmap=_tt.groupby('Game_Key')['_v1350_open_total'].median()
-                    _mapped=d['Game_Key'].map(_ttmap)
-                    if 'Opening_Total' not in d.columns: d['Opening_Total']=np.nan
-                    d['Opening_Total']=pd.to_numeric(d['Opening_Total'],errors='coerce').where(pd.to_numeric(d['Opening_Total'],errors='coerce').notna(),_mapped)
-                    if 'Consensus_Open_Total' not in d.columns: d['Consensus_Open_Total']=np.nan
-                    d['Consensus_Open_Total']=pd.to_numeric(d['Consensus_Open_Total'],errors='coerce').where(pd.to_numeric(d['Consensus_Open_Total'],errors='coerce').notna(),_mapped)
-        except Exception as _anchor_err:
-            logging.warning('[V13.5.0.1-GAME-ANCHOR-JOIN] unavailable: %s:%s',type(_anchor_err).__name__,_anchor_err)
 
     _prod_contract=_ncaaf_prod_v1_load_contract(GCS_BUCKET)
     if not isinstance(_prod_contract,dict):
@@ -47016,63 +46963,18 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     if d is None or d.empty:
         st.warning('No upcoming NCAAF spread, H2H or total markets are available yet.')
         return
-    d['_pred']=pd.to_numeric(d.get('_model_prob'),errors='coerce')
-    d=d[d['_pred'].notna()].copy()
-    if d.empty:
-        st.warning(f"The NCAAF sibling models could not score the current upcoming market rows yet. Status: {live_info.get('status','UNKNOWN')}.")
-        return
-
-    d['_line']=pd.to_numeric(d.get('Value'),errors='coerce')
-    d['_odds']=pd.to_numeric(d.get('Odds_Price'),errors='coerce')
-    d['_ts']=pd.to_datetime(d.get('Snapshot_Timestamp'),errors='coerce',utc=True)
-    d['_book']=d.get('Bookmaker',pd.Series('',index=d.index)).astype(str).str.strip()
-    d['_book_norm']=d['_book'].str.lower()
-    _exec_env=str(os.getenv('V13_EXECUTABLE_BOOKS','') or '').strip()
-    _exec_books={x.strip().lower() for x in _exec_env.split(',') if x.strip()} if _exec_env else {str(x).strip().lower() for x in REC_BOOKS}
-    d['_exec']=d['_book_norm'].isin(_exec_books)
-    d['_be']=_v1350_american_break_even(d['_odds'])
-    d['_profit']=np.nan
-    neg=d['_odds']<0; pos=d['_odds']>0
-    d.loc[neg,'_profit']=100.0/(-d.loc[neg,'_odds'])
-    d.loc[pos,'_profit']=d.loc[pos,'_odds']/100.0
-    d['_edge']=d['_pred']-d['_be']
-    d['_ev']=d['_pred']*d['_profit']-(1.0-d['_pred'])
-
-    keys=[c for c in ['Game_Key','Market','Outcome','Bookmaker'] if c in d.columns]
-    if keys:
-        d=d.sort_values('_ts').drop_duplicates(keys,keep='last')
-    gok=[c for c in ['Game_Key','Market','Outcome'] if c in d.columns]
-    if gok:
-        d['_latest_side_ts']=d.groupby(gok)['_ts'].transform('max')
-        d['_lag_min']=(d['_latest_side_ts']-d['_ts']).dt.total_seconds().div(60.0)
-        max_lag=float(os.getenv('V13_UI_QUOTE_SIMULTANEITY_MINUTES','45') or 45.0)
-        d=d[d['_lag_min'].isna()|d['_lag_min'].le(max_lag)].copy()
-
-    # NCAAF Production V1: first pick one executable/best-EV quote per outcome,
-    # then let the promoted edge selector choose the outcome.  If no promoted
-    # edge fires, the table still shows the probability model's best edge as a
-    # MODEL/PASS observation.  The dashboard never runs feature selection.
-    side_keys=[c for c in ['Game_Key','Market','Outcome'] if c in d.columns]
-    d['_ev_sort']=d['_ev'].fillna(-999.0); d['_edge_sort']=d['_edge'].fillna(-999.0)
-    if side_keys:
-        d=d.sort_values(side_keys+['_exec','_ev_sort','_ts'],ascending=[True]*len(side_keys)+[False,False,False])
-        sides=d.drop_duplicates(side_keys,keep='first').copy()
-    else:
-        sides=d.copy()
+    # Identical quote/edge selection in UI and utils scanner. The UI is read-only
+    # with respect to the immutable pregame prediction ledger.
     try:
         import ncaaf_production_v1 as _npv1
         _prod_contract=_ncaaf_prod_v1_load_contract(GCS_BUCKET)
-        sides=_npv1.apply_live_authority(sides,_prod_contract)
-        picks=_npv1.select_market_rows(sides)
+        picks=_npv1.choose_current_production_picks(d,_prod_contract,executable_books=REC_BOOKS)
     except Exception as _prod_err:
         logging.exception('[NCAAF-PROD-V1-LIVE-AUTHORITY] failed')
-        sides['_prod_decision']='MODEL_ONLY'; sides['_prod_action']='MODEL ONLY'; sides['_prod_sources']=''; sides['_prod_mechanisms']=''; sides['_prod_authority']=0; sides['_prod_reason']=f'ENGINE_ERROR:{type(_prod_err).__name__}'
-        market_keys=[c for c in ['Game_Key','Market'] if c in sides.columns]
-        if market_keys:
-            sides=sides.sort_values(market_keys+['_edge_sort','_ev_sort','_pred','_ts'],ascending=[True]*len(market_keys)+[False,False,False,False])
-            picks=sides.drop_duplicates(market_keys,keep='first').copy()
-        else:
-            picks=sides.copy()
+        picks=pd.DataFrame()
+    if picks.empty and live_info.get('status')!='NCAAF_PRODUCTION_V1_SCORED':
+        st.warning(f"NCAAF production model did not score the current rows: {live_info.get('status','UNKNOWN')}.")
+        return
     if picks.empty:
         st.warning('No current three-market NCAAF predictions are available.')
         return
@@ -47114,10 +47016,17 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     picks['ET Date']=picks['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d')
     picks['Game Time']=picks['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%a %I:%M %p')
 
-    # Collapse the three independent markets into one compact production row per game.
+    # Production identity excludes Market/Outcome (legacy Game_Key includes both).
+    # Fail closed rather than showing conflicting PLAY actions if a caller ever
+    # reintroduces side-specific grouping or a malformed physical game ID.
+    if '_prod_game_id' not in picks.columns or picks['_prod_game_id'].isna().any():
+        st.error('NCAAF production game identity unavailable; predictions withheld.')
+        return
+    if picks.duplicated(['_prod_game_id','Market']).any():
+        st.error('NCAAF duplicate physical game/market detected; conflicting selections withheld.')
+        return
     records=[]
-    gcol='Game_Key' if 'Game_Key' in picks.columns else None
-    grouped=picks.groupby(gcol,dropna=False,sort=False) if gcol else [(str(i),picks.loc[[i]]) for i in picks.index]
+    grouped=picks.groupby('_prod_game_id',dropna=False,sort=False)
     for gk,g in grouped:
         g=g.sort_values('Game_Start')
         r0=g.iloc[0]
@@ -47178,6 +47087,9 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
         rec['System Trigger']=' | '.join(_unique_system_parts) if _unique_system_parts else '—'
         records.append(rec)
     view=pd.DataFrame(records)
+    if not view.empty and view['_game_key'].duplicated().any():
+        st.error('NCAAF production board has duplicate game identities; predictions withheld.')
+        return
     if view.empty:
         st.warning('No upcoming three-market predictions are available.')
         return
@@ -47213,6 +47125,28 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     for c in ['Spr Prob','Spr Model Edge','H2H Prob','H2H Model Edge','Tot Prob','Tot Model Edge']:
         main[c]=pd.to_numeric(main[c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
     st.dataframe(main,use_container_width=True,hide_index=True)
+
+    # Results are written by the background NCAAF scanner, not when users open
+    # this page. Surface first/T-24/T-6/T-1 historical locks without retraining.
+    with st.expander('Production V1 — prospective pick grading',expanded=False):
+        st.caption('These results use immutable pregame scanner locks, not regenerated postgame predictions. FIRST, T24, T6 and T1 remain separate; V13 history is unchanged.')
+        try:
+            _grade=_ncaaf_prod_v1_grading_summary_cached()
+            if _grade.empty:
+                st.info('No Production V1 pregame locks have been graded yet. Verify the background scanner is deployed with the Production V1 ledger module.')
+            else:
+                _grade=_grade.rename(columns={'model_instance_id':'Model instance','market':'Market','lock_type':'Lock','action':'Action','captured':'Captured','decided':'Decided','wins':'Wins','pushes':'Pushes','hit_rate':'Hit rate','play_roi':'Play ROI','brier':'Brier','log_loss':'Log loss','avg_clv_points':'CLV points','last_prediction':'Last prediction'})
+                st.dataframe(_grade,use_container_width=True,hide_index=True)
+            _lock=st.selectbox('Inspect recorded pick snapshot',['FIRST','T24','T6','T1'],key='ncaaf-prod-v1-grade-lock')
+            _details=_ncaaf_prod_v1_grading_details_cached(_lock)
+            if _details.empty:
+                st.info(f'No {_lock} snapshots have been recorded yet.')
+            else:
+                st.caption('PENDING means no matching final score has been settled. Quoted picks, prices and probabilities are original scanner captures; CLV uses the latest same-book selected rolling quote when available, not necessarily the true sportsbook close.')
+                st.dataframe(_details,use_container_width=True,hide_index=True)
+        except Exception as _grade_err:
+            st.warning(f'Production grading ledger unavailable: {type(_grade_err).__name__}. Check BigQuery table permissions and background scanner logs.')
+
 
     if isinstance(_prod_contract,dict):
         with st.expander('Production edge evidence',expanded=False):
