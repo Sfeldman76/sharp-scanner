@@ -20,7 +20,8 @@ import pandas as pd
 
 PRED_TABLE = "sharplogger.sharp_data.ncaaf_production_v1_predictions"
 RESULT_TABLE = "sharplogger.sharp_data.ncaaf_production_v1_results"
-LEDGER_VERSION = "ncaaf-production-v1-prospective-ledger-20260930"
+# Segregates pre-fix (outcome-keyed) predictions without rewriting immutable history.
+LEDGER_VERSION = "ncaaf-production-v1-physical-game-key-fix-20260930"
 _ALLOWED_MARKETS = {"spreads", "h2h", "totals"}
 _ALLOWED_ACTIONS = {"PLAY", "STRONG PLAY", "MODEL ONLY", "PASS", "PASS — CONFLICT", "EDGE — NO EXEC QUOTE"}
 
@@ -83,7 +84,7 @@ def _team_value(r,normalized,original):
 
 
 def _physical(r):
-    for c in ("Merge_Key_Short", "Physical_Game_ID", "physical_game_id"):
+    for c in ("_prod_game_id", "Merge_Key_Short", "Physical_Game_ID", "physical_game_id"):
         x=_str(r.get(c))
         if x: return x.lower(), "PHYSICAL_ID"
     h=_slug(_team_value(r,"Home_Team_Norm","Home_Team"))
@@ -124,11 +125,23 @@ def prepare_prediction_events(picks, contract, *, now=None, source="BACKGROUND_S
     sha=_str(contract.get("_artifact_sha256"))
     if len(sha)!=64:
         return pd.DataFrame(), {"status":"MISSING_ARTIFACT_HASH", "attempted":0}
-    instance="NCAAF_PROD_V1__"+sha[:16]
+    # A distinct selector instance prevents the old, incorrectly side-keyed
+    # FIRST lock from blocking a corrected pregame pick for the same artifact.
+    instance="NCAAF_PROD_V1_GIDFIX1__"+sha[:16]
     n=_utc_now(now)
     seen=set(); records=[]; rejected={}
     def reject(k): rejected[k]=rejected.get(k,0)+1
-    for _,r in picks.iterrows():
+    # Safety for mixed/partial deployments: if a caller supplies both outcomes
+    # for one physical game and market, lock NEITHER. First-row-wins is unsafe.
+    candidate_keys=[]
+    for _,candidate in picks.iterrows():
+        physical_id,_=_physical(candidate)
+        candidate_keys.append((physical_id,_market(candidate.get("Market"))))
+    from collections import Counter
+    ambiguous={key for key,count in Counter(candidate_keys).items() if key[0] and count>1}
+    for (_,r),physical_key in zip(picks.iterrows(),candidate_keys):
+        if physical_key in ambiguous:
+            reject("AMBIGUOUS_PHYSICAL_GAME_MARKET"); continue
         market=_market(r.get("Market"))
         if market not in _ALLOWED_MARKETS: reject("MARKET"); continue
         g=_ts(r.get("Game_Start")); q=_ts(r.get("Snapshot_Timestamp"))
@@ -465,6 +478,7 @@ def read_summary(*,client=None,days=60):
                  MAX(p.prediction_timestamp) AS last_prediction
           FROM `{PRED_TABLE}` p LEFT JOIN `{RESULT_TABLE}` r USING(prediction_event_id)
           WHERE p.prediction_timestamp>=TIMESTAMP_SUB(CURRENT_TIMESTAMP(),INTERVAL {days} DAY)
+            AND p.ledger_version='{LEDGER_VERSION}'
             AND p.lock_type IN ('FIRST','T24','T6','T1')
           GROUP BY 1,2,3,4 ORDER BY last_prediction DESC
         """).to_dataframe(create_bqstorage_client=False)
@@ -496,6 +510,7 @@ def read_details(*,client=None,days=60,lock_type="FIRST",limit=300):
                    r.settled_at
             FROM `{PRED_TABLE}` p LEFT JOIN `{RESULT_TABLE}` r USING(prediction_event_id)
             WHERE p.prediction_timestamp>=TIMESTAMP_SUB(CURRENT_TIMESTAMP(),INTERVAL {d} DAY)
+              AND p.ledger_version='{LEDGER_VERSION}'
               AND p.lock_type='{lock}'
             ORDER BY p.game_start DESC LIMIT {n}
         """).to_dataframe(create_bqstorage_client=False)
