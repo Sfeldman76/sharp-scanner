@@ -49450,15 +49450,19 @@ if not HEADLESS:
 
     _train_market_options = ["All", "spreads", "h2h", "totals"]
     if str(sport).upper().strip() == "NCAAF":
-        # Research-only fast path: rebuilds only the historical spread caches used
-        # by V14.3 / STAT Combo / Edge Registry. It does not retrain or publish
-        # production timing/H2H/totals/champion artifacts.
-        _train_market_options.insert(2, "edge_research")
+        # Research evaluates challengers without changing the live contract.
+        # Production is the explicit, separate one-time artifact publishing path.
+        _train_market_options[2:2] = ["edge_research", "ncaaf_production"]
     market_choice = st.sidebar.selectbox(
         "Train which market?",
         _train_market_options,
         key=f"train_market_choice_{sport}",
     )
+    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_production":
+        st.sidebar.caption(
+            "Publishes the frozen NCAAF Production V1 contract for Spread, H2H and Totals. "
+            "This is not a legacy Spread train or research-only run."
+        )
 
     
     # -----------------------------
@@ -49586,9 +49590,13 @@ if not HEADLESS:
     train_key = f"train::{sport}::{market_choice}"
     
     _train_button_label = (
-        f"🧪 Run {sport} Edge Research"
-        if str(market_choice).lower().strip() == "edge_research"
-        else f"📈 Train {sport} Sharp Model"
+        "Publish NCAAF Production V1"
+        if str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production"
+        else (
+            f"🧪 Run {sport} Edge Research"
+            if str(market_choice).lower().strip() == "edge_research"
+            else f"📈 Train {sport} Sharp Model"
+        )
     )
     if st.button(_train_button_label, key=train_key):
     
