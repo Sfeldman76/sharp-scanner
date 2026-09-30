@@ -181,9 +181,20 @@ def physical_games(df:pd.DataFrame)->pd.DataFrame:
 
 def _feature_matrix(train,valid,cols):
     # Train-only medians. Never fit preprocessing on validation or on 2026.
-    a=train.loc[:,cols].apply(pd.to_numeric,errors='coerce').replace([np.inf,-np.inf],np.nan)
-    b=valid.loc[:,cols].apply(pd.to_numeric,errors='coerce').replace([np.inf,-np.inf],np.nan)
-    med=a.median(axis=0).fillna(0.)
+    # BigQuery/pandas may materialize integer features as nullable Int64.  A
+    # train-fold median can legitimately be fractional (for example 107.5),
+    # and pandas Int64 refuses that value during fillna.  Normalize predictors
+    # to float64 before computing/applying medians so missing-value imputation
+    # is dtype-safe while preserving the same train-only preprocessing contract.
+    a=(train.loc[:,cols]
+       .apply(pd.to_numeric,errors='coerce')
+       .astype(np.float64)
+       .replace([np.inf,-np.inf],np.nan))
+    b=(valid.loc[:,cols]
+       .apply(pd.to_numeric,errors='coerce')
+       .astype(np.float64)
+       .replace([np.inf,-np.inf],np.nan))
+    med=a.median(axis=0).fillna(0.0).astype(np.float64)
     A=a.fillna(med).to_numpy(dtype=np.float64)
     B=b.fillna(med).to_numpy(dtype=np.float64)
     return A,B
