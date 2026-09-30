@@ -136,6 +136,21 @@ def build_intelligence_query(view_columns: Iterable[str] | None = None) -> str:
     )
 
 
+
+
+def _float_array(values) -> np.ndarray:
+    """Convert pandas nullable numeric data to ordinary float64 with NaN.
+
+    BigQuery integer columns can arrive as pandas nullable Int64/Float64 arrays.
+    Their ``to_numpy(float)`` path raises when ``pd.NA`` is present unless an
+    explicit NA representation is provided.  Normalize once here so every
+    research path has identical, predictable missing-value semantics.
+    """
+    x = pd.to_numeric(values, errors="coerce")
+    if isinstance(x, pd.Series):
+        return x.astype("float64").to_numpy(dtype=np.float64, copy=False)
+    return np.asarray(x, dtype=np.float64)
+
 def _status_from_margin(v: float) -> str:
     if not math.isfinite(v):
         return "MISSING"
@@ -224,7 +239,7 @@ def _prepare_side_state(side_rows: pd.DataFrame) -> pd.DataFrame:
     # Pair opponent's independently-derived state at the same physical game.
     for c in ("calc_prev1_su_loss", "calc_prev2_su_loss", "calc_prev1_su_win", "calc_prev1_points",
               "calc_prev1_ats_loss", "calc_win_pct_prior", "calc_dog_rate_prior"):
-        d["Opp_" + c] = _swap_within_game(pd.to_numeric(d[c], errors="coerce").to_numpy(float), d)
+        d["Opp_" + c] = _swap_within_game(_float_array(d[c]), d)
 
     # Prior-season playoff membership is reconstructed from observed postseason participation;
     # the source's excluded prior-playoff flags are not used.
@@ -237,7 +252,7 @@ def _prepare_side_state(side_rows: pd.DataFrame) -> pd.DataFrame:
         for s, t in zip(d.Season, d.Team_Norm)
     ]
     d["Opp_calc_prior_season_playoff"] = _swap_within_game(
-        pd.to_numeric(d.calc_prior_season_playoff, errors="coerce").to_numpy(float), d
+        _float_array(d.calc_prior_season_playoff), d
     )
 
     reg = d.loc[d.Season_Stage.eq("REGULAR")].copy()
@@ -287,14 +302,14 @@ def _generate_oof_core(side_rows: pd.DataFrame) -> pd.DataFrame:
     out["spread_consensus_edge"] = (out.direct_spread_edge + out.score_spread_edge) / 2.0
     out["spread_model_gap"] = (pd.to_numeric(out.direct_margin_pred, errors="coerce") - pd.to_numeric(out.score_margin_pred, errors="coerce")).abs()
     out["spread_models_agree"] = (
-        np.sign(out.direct_spread_edge.to_numpy(float)) == np.sign(out.score_spread_edge.to_numpy(float))
+        np.sign(_float_array(out.direct_spread_edge)) == np.sign(_float_array(out.score_spread_edge))
     ) & np.isfinite(out.direct_spread_edge) & np.isfinite(out.score_spread_edge) & out.direct_spread_edge.ne(0) & out.score_spread_edge.ne(0)
     out["direct_total_edge"] = pd.to_numeric(out.direct_total_pred, errors="coerce") - tt
     out["score_total_edge"] = pd.to_numeric(out.score_total_pred, errors="coerce") - tt
     out["total_consensus_edge"] = (out.direct_total_edge + out.score_total_edge) / 2.0
     out["total_model_gap"] = (pd.to_numeric(out.direct_total_pred, errors="coerce") - pd.to_numeric(out.score_total_pred, errors="coerce")).abs()
     out["total_models_agree"] = (
-        np.sign(out.direct_total_edge.to_numpy(float)) == np.sign(out.score_total_edge.to_numpy(float))
+        np.sign(_float_array(out.direct_total_edge)) == np.sign(_float_array(out.score_total_edge))
     ) & np.isfinite(out.direct_total_edge) & np.isfinite(out.score_total_edge) & out.direct_total_edge.ne(0) & out.score_total_edge.ne(0)
     out["h2h_market_delta"] = pd.to_numeric(out.h2h_prob, errors="coerce") - pd.to_numeric(out.H2H_close_novig_reference, errors="coerce")
     return out
@@ -393,7 +408,7 @@ def _miner_atoms(g: pd.DataFrame) -> List[dict]:
     atoms=[]
     def add(name,family,mask,desc=None):
         mm=pd.Series(mask,index=g.index).fillna(False).astype(bool).to_numpy()
-        disc=np.isin(pd.to_numeric(g.Season,errors="coerce").to_numpy(float),DISCOVERY_SEASONS)
+        disc=np.isin(_float_array(g.Season),DISCOVERY_SEASONS)
         cnt=int((mm&disc).sum())
         if 30<=cnt<int(disc.sum()):
             atoms.append({"name":name,"family":family,"mask":mm,"description":desc or name})
@@ -438,8 +453,8 @@ def _miner_atoms(g: pd.DataFrame) -> List[dict]:
 
 
 def _target(g: pd.DataFrame, market: str):
-    am=pd.to_numeric(g.actual_margin,errors="coerce").to_numpy(float); at=pd.to_numeric(g.actual_total,errors="coerce").to_numpy(float)
-    sp=pd.to_numeric(g.Spread_Value,errors="coerce").to_numpy(float); tt=pd.to_numeric(g.Current_Total,errors="coerce").to_numpy(float)
+    am=_float_array(g.actual_margin); at=_float_array(g.actual_total)
+    sp=_float_array(g.Spread_Value); tt=_float_array(g.Current_Total)
     if market=="spreads":
         raw=am+sp; valid=np.isfinite(raw)&~np.isclose(raw,0,atol=1e-9); y=(raw>0).astype(float)
     elif market=="totals":
@@ -461,7 +476,7 @@ def _bh(pvals: List[float]) -> np.ndarray:
 
 def _miner(g: pd.DataFrame, market: str, max_depth: int = 2) -> dict:
     from math import erf, sqrt
-    y,valid=_target(g,market); atoms=_miner_atoms(g); season=pd.to_numeric(g.Season,errors="coerce").to_numpy(float)
+    y,valid=_target(g,market); atoms=_miner_atoms(g); season=_float_array(g.Season)
     disc=valid&np.isin(season,DISCOVERY_SEASONS); shadow=valid&(season==SHADOW_SEASON); confirm=valid&(season==CONFIRM_SEASON)
     if disc.sum()<700 or shadow.sum()<250 or confirm.sum()<250:
         return {"status":"INSUFFICIENT_HISTORY","market":market,"atoms":len(atoms),"production_authority":0}
