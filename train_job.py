@@ -178,6 +178,28 @@ def main():
     if HEADLESS:
         install_streamlit_shim(log_func)
 
+    # NFL AUDIT V1: isolate read-only inventory from heavyweight NCAAF research
+    # imports and every legacy NFL training / model publication path.
+    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_audit":
+        import importlib.util
+        from pathlib import Path
+        _audit_path = Path(__file__).resolve().parent / "nfl_audit_v1.py"
+        if not _audit_path.is_file():
+            raise RuntimeError(f"[NFL-AUDIT-V1-DEPLOY-PREFLIGHT] MISSING {_audit_path}")
+        _spec = importlib.util.spec_from_file_location("nfl_audit_v1", _audit_path)
+        _audit = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_audit)
+        if getattr(_audit, "SOURCE_TAG", "") != "nfl-audit-v1-read-only-dataset-incumbent-contract-20260930":
+            raise RuntimeError("[NFL-AUDIT-V1-DEPLOY-PREFLIGHT] STALE_OR_MIXED_SOURCE")
+        pw.emit("audit", f"[NFL-AUDIT-V1] Read-only NFL inventory start run={run_id}", pct=0.1)
+        try:
+            result = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
+            pw.emit("done", f"NFL audit complete: {result['status']} (no model published)", pct=1.0)
+        except Exception as exc:
+            pw.emit("error", f"NFL audit failed: {exc}\n{traceback.format_exc()}", pct=1.0)
+            raise
+        return
+
     # V13.5.0 deployment-path lock. Load the three training modules from
     # the exact directory containing this train_job.py, rather than allowing an
     # older copy elsewhere on PYTHONPATH or in a retained module cache to win.
