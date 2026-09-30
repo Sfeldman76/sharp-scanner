@@ -20,6 +20,8 @@ absolute scaled market-error threshold 0.75.
 from __future__ import annotations
 
 import gzip
+import hashlib
+import os
 import json
 import pickle
 from datetime import datetime, timezone
@@ -637,6 +639,11 @@ def load_production_contract(bucket_name: str = "sharp-models", storage_client=N
         obj=pickle.loads(gzip.decompress(payload))
         if not isinstance(obj,dict) or obj.get("source_tag") != NCAAF_PRODUCTION_V1_SOURCE_TAG or int(obj.get("production_authority",0) or 0)!=1:
             return None
+        # Identity belongs to the exact bytes used for inference. It is not
+        # a mutable human-readable version string or a training timestamp.
+        obj["_artifact_sha256"]=hashlib.sha256(payload).hexdigest()
+        obj["_artifact_generation"]=str(getattr(blob,"generation",None) or "")
+        obj["_artifact_gcs_uri"]=f"gs://{bucket_name}/{NCAAF_PRODUCTION_V1_ARTIFACT}"
         return obj
     except Exception:
         return None
@@ -945,3 +952,128 @@ def select_market_rows(sides: pd.DataFrame) -> pd.DataFrame:
             chosen=gg.iloc[0].drop(labels=["__edge","__ev","__pred"],errors="ignore")
         picked.append(chosen)
     return pd.DataFrame(picked).reset_index(drop=True)
+
+
+def prepare_current_market_rows(raw: pd.DataFrame, *, now=None) -> pd.DataFrame:
+    """Shared production input preparation for scanner and dashboard.
+
+    Carries only frozen home-oriented opening spread/total anchors across the
+    three markets. Never inserts results or performs feature selection.
+    """
+    d=raw.copy() if isinstance(raw,pd.DataFrame) else pd.DataFrame()
+    if d.empty: return d
+    n=pd.Timestamp.now(tz="UTC") if now is None else pd.to_datetime(now,utc=True)
+    if "Sport" in d:
+        d=d[d["Sport"].astype(str).str.upper().str.strip().eq("NCAAF")].copy()
+    if "Market" not in d or "Game_Start" not in d: return d.iloc[0:0].copy()
+    d["Market"]=d["Market"].astype(str).str.lower().str.strip().replace({
+        "spread":"spreads","ats":"spreads","total":"totals","moneyline":"h2h",
+        "ml":"h2h","headtohead":"h2h","head-to-head":"h2h"})
+    d=d[d["Market"].isin(["spreads","h2h","totals"])].copy()
+    d["Game_Start"]=pd.to_datetime(d["Game_Start"],errors="coerce",utc=True)
+    d=d[d["Game_Start"].notna() & d["Game_Start"].gt(n)].copy()
+    if "Pre_Game" in d:
+        d=d[d["Pre_Game"].fillna(True).astype(bool)].copy()
+    if d.empty: return d
+    d["_ncaaf_prod_ts"]=pd.to_datetime(d.get("Snapshot_Timestamp"),errors="coerce",utc=True)
+    qkeys=[c for c in ("Game_Key","Market","Outcome","Bookmaker") if c in d]
+    if qkeys: d=d.sort_values("_ncaaf_prod_ts").drop_duplicates(qkeys,keep="last").copy()
+    d.drop(columns=["_ncaaf_prod_ts"],inplace=True,errors="ignore")
+    if "Game_Key" not in d: return d
+    norm=lambda z: str(z).strip().lower().replace(".","").replace("&","and")
+    sp=d[d.Market.eq("spreads")].copy()
+    if not sp.empty:
+        line=None
+        for col in ("Opening_Spread","First_Line_Value","Open_Value","Opening_Line"):
+            if col in sp:
+                val=pd.to_numeric(sp[col],errors="coerce")
+                if val.notna().any(): line=val; break
+        if line is not None:
+            home=sp.get("Home_Team_Norm",sp.get("Home_Team",pd.Series("",index=sp.index))).astype(str).map(norm)
+            away=sp.get("Away_Team_Norm",sp.get("Away_Team",pd.Series("",index=sp.index))).astype(str).map(norm)
+            out=sp.get("Outcome",pd.Series("",index=sp.index)).astype(str).map(norm)
+            sp["_prod_home_open"]=np.where(out.eq(home),line,np.where(out.eq(away),-line,np.nan))
+            mapped=d["Game_Key"].map(sp.groupby("Game_Key")["_prod_home_open"].median())
+            if "Opening_Spread" not in d: d["Opening_Spread"]=np.nan
+            o=pd.to_numeric(d["Opening_Spread"],errors="coerce")
+            d["Opening_Spread"]=o.where(o.notna(),mapped)
+            if "Consensus_Open_Spread" not in d: d["Consensus_Open_Spread"]=np.nan
+            current=pd.to_numeric(d["Consensus_Open_Spread"],errors="coerce")
+            d["Consensus_Open_Spread"]=mapped.where(mapped.notna(),current)
+    tt=d[d.Market.eq("totals")].copy()
+    if not tt.empty:
+        line=None
+        for col in ("Opening_Total","First_Line_Value","Open_Value","Opening_Line"):
+            if col in tt:
+                val=pd.to_numeric(tt[col],errors="coerce")
+                if val.notna().any(): line=val; break
+        if line is not None:
+            tt["_prod_open_total"]=line
+            mapped=d["Game_Key"].map(tt.groupby("Game_Key")["_prod_open_total"].median())
+            if "Opening_Total" not in d: d["Opening_Total"]=np.nan
+            current=pd.to_numeric(d["Opening_Total"],errors="coerce")
+            d["Opening_Total"]=current.where(current.notna(),mapped)
+            if "Consensus_Open_Total" not in d: d["Consensus_Open_Total"]=np.nan
+            current=pd.to_numeric(d["Consensus_Open_Total"],errors="coerce")
+            d["Consensus_Open_Total"]=current.where(current.notna(),mapped)
+    if "Outcome_Norm" not in d:
+        d["Outcome_Norm"]=d.get("Outcome",pd.Series("",index=d.index)).astype(str).str.lower().str.strip()
+    if "Sport" not in d: d["Sport"]="NCAAF"
+    return d
+
+
+def choose_current_production_picks(scored: pd.DataFrame,contract: dict,*,executable_books=None) -> pd.DataFrame:
+    """One canonical selected quote per game and market for BOTH dashboard and scanner.
+
+    The edge engine never rewrites ML probabilities. A non-executable winning
+    family is recorded as a non-actionable observation, not a bet recommendation.
+    """
+    if not isinstance(contract,dict) or int(contract.get("production_authority",0) or 0)!=1:
+        return pd.DataFrame()
+    if scored is None or scored.empty or not {"Game_Key","Market","Outcome","Bookmaker","Game_Start"}.issubset(scored.columns):
+        return pd.DataFrame()
+    d=scored.copy(); d["_pred"]=pd.to_numeric(d.get("_model_prob"),errors="coerce")
+    d=d[d["_pred"].between(0.0,1.0)].copy()
+    if d.empty: return d
+    d["_line"]=pd.to_numeric(d.get("Value"),errors="coerce")
+    d["_odds"]=pd.to_numeric(d.get("Odds_Price"),errors="coerce")
+    d["_ts"]=pd.to_datetime(d.get("Snapshot_Timestamp"),errors="coerce",utc=True)
+    d["_book"]=d["Bookmaker"].astype(str).str.strip()
+    d["_book_norm"]=d["_book"].str.lower()
+    env=str(os.getenv("V13_EXECUTABLE_BOOKS","") or "").strip()
+    execs={x.strip().lower() for x in env.split(",") if x.strip()} if env else {str(x).strip().lower() for x in (executable_books or [])}
+    d["_exec"]=d["_book_norm"].isin(execs)
+    d["_be"]=np.nan; d["_profit"]=np.nan
+    neg=d["_odds"]<0; pos=d["_odds"]>0
+    d.loc[neg,"_be"]=(-d.loc[neg,"_odds"])/((-d.loc[neg,"_odds"])+100.0)
+    d.loc[pos,"_be"]=100.0/(d.loc[pos,"_odds"]+100.0)
+    d.loc[neg,"_profit"]=100.0/(-d.loc[neg,"_odds"])
+    d.loc[pos,"_profit"]=d.loc[pos,"_odds"]/100.0
+    d["_edge"]=d["_pred"]-d["_be"]
+    d["_ev"]=d["_pred"]*d["_profit"]-(1.0-d["_pred"])
+    keys=[c for c in ("Game_Key","Market","Outcome","Bookmaker") if c in d]
+    d=d.sort_values("_ts").drop_duplicates(keys,keep="last")
+    d["_latest_side_ts"]=d.groupby(["Game_Key","Market","Outcome"])["_ts"].transform("max")
+    d["_lag_min"]=(d["_latest_side_ts"]-d["_ts"]).dt.total_seconds()/60.0
+    max_lag=float(os.getenv("V13_UI_QUOTE_SIMULTANEITY_MINUTES","45") or 45.0)
+    d=d[d["_lag_min"].isna() | d["_lag_min"].le(max_lag)].copy()
+    if d.empty: return d
+    d["_ev_sort"]=d["_ev"].fillna(-999.0); d["_edge_sort"]=d["_edge"].fillna(-999.0)
+    sides=d.sort_values(["Game_Key","Market","Outcome","_exec","_ev_sort","_ts"],ascending=[True]*3+[False,False,False]).drop_duplicates(["Game_Key","Market","Outcome"]).copy()
+    sides=apply_live_authority(sides,contract)
+    picks=select_market_rows(sides)
+    if picks.empty: return picks
+    # If the promoted target has no corresponding outcome quote, the selector
+    # must fail closed; the 'best model' alternative is not an edge-authorized bet.
+    norm=lambda z: _norm_team(z)
+    for ix,r in picks.iterrows():
+        if str(r.get("_prod_decision")) in ("EDGE_SINGLE","EDGE_MULTI"):
+            target=norm(r.get("_prod_target")); actual=_outcome_norm(r)
+            if not target or target!=actual:
+                picks.at[ix,"_prod_decision"]="PASS"
+                picks.at[ix,"_prod_action"]="PASS"
+                picks.at[ix,"_prod_authority"]=0
+                picks.at[ix,"_prod_reason"]="PROMOTED_TARGET_QUOTE_UNAVAILABLE"
+            elif not bool(r.get("_exec")) or not np.isfinite(r.get("_odds",np.nan)) or float(r.get("_odds"))==0:
+                picks.at[ix,"_prod_action"]="EDGE — NO EXEC QUOTE"
+    return picks
