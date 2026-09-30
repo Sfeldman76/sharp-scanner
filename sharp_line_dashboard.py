@@ -49387,6 +49387,9 @@ if not HEADLESS:
         # Research evaluates challengers without changing the live contract.
         # Production is the explicit, separate one-time artifact publishing path.
         _train_market_options[2:2] = ["edge_research", "ncaaf_production"]
+    if str(sport).upper().strip() == "NFL":
+        # Explicit diagnostic only. No NFL model is fitted, replaced or published.
+        _train_market_options.insert(1, "nfl_audit")
     market_choice = st.sidebar.selectbox(
         "Train which market?",
         _train_market_options,
@@ -49396,6 +49399,11 @@ if not HEADLESS:
         st.sidebar.caption(
             "Publishes the frozen NCAAF Production V1 contract for Spread, H2H and Totals. "
             "This is not a legacy Spread train or research-only run."
+        )
+    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_audit":
+        st.sidebar.caption(
+            "Read-only NFL history, market/as-of, and incumbent artifact inventory. "
+            "No training, grading changes or production promotion."
         )
 
     
@@ -49524,12 +49532,16 @@ if not HEADLESS:
     train_key = f"train::{sport}::{market_choice}"
     
     _train_button_label = (
-        "Publish NCAAF Production V1"
-        if str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production"
+        "Run NFL History & Champion Audit"
+        if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_audit"
         else (
-            f"🧪 Run {sport} Edge Research"
-            if str(market_choice).lower().strip() == "edge_research"
-            else f"📈 Train {sport} Sharp Model"
+            "Publish NCAAF Production V1"
+            if str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production"
+            else (
+                f"🧪 Run {sport} Edge Research"
+                if str(market_choice).lower().strip() == "edge_research"
+                else f"📈 Train {sport} Sharp Model"
+            )
         )
     )
     if st.button(_train_button_label, key=train_key):
