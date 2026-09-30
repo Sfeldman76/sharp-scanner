@@ -228,6 +228,7 @@ def run_totals_atomic_refinement_v1(*, dashboard_module, sibling_out, sibling_mo
 
         # Re-test stacks after family collapse. Family internally abstains on conflicting directions.
         repeat_fams=[f for f in families if f["repeatable"]]
+        stack_metrics={}
         for label,period in (("DISCOVERY",dmask),("CONFIRM_2026",cmask)):
             vote=np.zeros(len(g),float); indep=np.zeros(len(g),int); conflicts=np.zeros(len(g),bool); famcount=np.zeros(len(g),int)
             for i in np.flatnonzero(period):
@@ -251,6 +252,7 @@ def run_totals_atomic_refinement_v1(*, dashboard_module, sibling_out, sibling_mo
                 mm=period & ~conflicts & (indep>=k) & _active(vote)
                 if mm.sum() < (15 if label=="DISCOVERY" else 5): continue
                 met=sibling_module._totals_metrics(g,vote,mm)
+                stack_metrics[(label,k)]=dict(met)
                 log_func(f"[TOTALS-REFINE-V1-STACK] sample={label} min_independent_mechanisms={k} n={met['n']} hit={met['hit']:.4f} roi={met['roi']:+.4f} signed={met['signed']:+.3f} clv={met['clv']:+.3f} family_collapsed=TRUE production_authority=0")
             log_func(f"[TOTALS-REFINE-V1-COUNTS] sample={label} games_with_repeatable_family={int(((famcount>0)&period).sum())} conflicts={int((conflicts&period).sum())} max_active_families={int(famcount[period].max()) if period.any() else 0} max_independent_mechanisms={int(indep[period].max()) if period.any() else 0} production_authority=0")
 
@@ -259,7 +261,7 @@ def run_totals_atomic_refinement_v1(*, dashboard_module, sibling_out, sibling_mo
         addv=sum(s=="REFINEMENT_ADDS_VALUE_BOTH" for _,_,s in lineage_rows)
         nov=sum(s=="NO_INCREMENTAL_VALUE" for _,_,s in lineage_rows)
         log_func(f"[TOTALS-REFINE-V1-CONTRACT] status=PASS input_candidates={len(base)} miner_rules={len(miners)} sibling_repeatable_rules={pre_repeat} refined_repeatable_rules={refined_repeat} evidence_families={len(families)} repeatable_evidence_families={len(repeat_fams)} exact_duplicate_pairs={len(exact_pairs)} related_correlation_pairs={len(corr_pairs)} lineage_edges={len(lineage_rows)} lineage_add_value_both={addv} lineage_no_incremental_value={nov} stat_thresholds_not_promoted=TRUE related_rules_count_once=TRUE independent_mechanisms_matched_conservatively=TRUE orientation_selected_from_discovery_only=TRUE confirm_2026_not_used_for_selection=TRUE production_authority=0")
-        return {"status":"PASS","source_tag":TOTALS_ATOMIC_REFINEMENT_V1_SOURCE_TAG,"rules":rows,"families":families,"lineage":lineage_rows,"production_authority":0}
+        return {"status":"PASS","source_tag":TOTALS_ATOMIC_REFINEMENT_V1_SOURCE_TAG,"rules":rows,"families":families,"lineage":lineage_rows,"stack_metrics":stack_metrics,"production_authority":0}
     except Exception as e:
         log_func(f"[TOTALS-REFINE-V1-CONTRACT] status=FAILED error={type(e).__name__}:{e} production_authority=0")
         if hard_fail: raise
