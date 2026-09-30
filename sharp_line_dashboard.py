@@ -49407,8 +49407,8 @@ if not HEADLESS:
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_challenger":
         st.sidebar.caption(
-            "Research-only NFL Spread / H2H / Totals baseline tournament. Rechecks the V1.3 audit, "
-            "then runs 2021–2025 season-forward validation; 2026 sealed. No promotion or production changes."
+            "NFL V1.5 research: H2H calibrated blends, Spread fair-margin models, and Totals expected-points models. "
+            "Uses 2021–2025 development folds with 2026 sealed. No publication or production changes."
         )
 
     
@@ -49540,7 +49540,7 @@ if not HEADLESS:
         "Run NFL History & Champion Audit"
         if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_audit"
         else (
-            "Run NFL Challenger Sandbox (No Publish)"
+            "Run NFL Specialized Modeling V1.5 (No Publish)"
             if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_challenger"
             else (
                 "Publish NCAAF Production V1"
