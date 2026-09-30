@@ -189,8 +189,19 @@ def main():
         _spec = importlib.util.spec_from_file_location("nfl_audit_v1", _audit_path)
         _audit = importlib.util.module_from_spec(_spec)
         _spec.loader.exec_module(_audit)
-        if getattr(_audit, "SOURCE_TAG", "") != "nfl-audit-v1.2-calendar-neutral-venue-20260930":
+        if getattr(_audit, "SOURCE_TAG", "") != "nfl-audit-v1.3-prior-feature-provenance-20260930":
             raise RuntimeError("[NFL-AUDIT-V1-DEPLOY-PREFLIGHT] STALE_OR_MIXED_SOURCE")
+        _feature_path = Path(__file__).resolve().parent / "nfl_feature_audit_v1.py"
+        if not _feature_path.is_file():
+            raise RuntimeError(f"[NFL-FEATURE-V1-DEPLOY-PREFLIGHT] MISSING {_feature_path}")
+        # Load and register this exact local module for the audit's import.
+        import sys
+        _feature_spec = importlib.util.spec_from_file_location("nfl_feature_audit_v1", _feature_path)
+        _feature = importlib.util.module_from_spec(_feature_spec)
+        sys.modules["nfl_feature_audit_v1"] = _feature
+        _feature_spec.loader.exec_module(_feature)
+        if getattr(_feature, "SOURCE_TAG", "") != "nfl-feature-audit-v1.3-prior-only-20260930":
+            raise RuntimeError("[NFL-FEATURE-V1-DEPLOY-PREFLIGHT] STALE_OR_MIXED_SOURCE")
         pw.emit("audit", f"[NFL-AUDIT-V1] Read-only NFL inventory start run={run_id}", pct=0.1)
         try:
             result = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
