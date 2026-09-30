@@ -226,18 +226,26 @@ def main():
     _smev1, _smev1_path, _smev1_sha = _load_exact_local_module("sibling_market_edge_research_v1")
     _tarv1, _tarv1_path, _tarv1_sha = _load_exact_local_module("totals_atomic_refinement_v1")
     _rcv1, _rcv1_path, _rcv1_sha = _load_exact_local_module("refit_cadence_test_v1")
+    _npv1, _npv1_path, _npv1_sha = _load_exact_local_module("ncaaf_production_v1")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
 
-    # NCAAF edge-research fast path. This intentionally bypasses the production
-    # champion-training graph and builds only the leakage-safe historical objects
-    # consumed by V14.3 / STAT Combo / Edge Registry. It never publishes or
-    # promotes a model artifact. Enable with NCAAF_EDGE_RESEARCH_ONLY=1 or
-    # MARKET=edge_research.
+    # NCAAF edge fast path. Research mode remains zero-authority.  The explicit
+    # production-promotion mode runs the same leakage-safe evidence stack once,
+    # then publishes only the frozen NCAAF Production V1 edge contract.  It does
+    # NOT revive timing, generic AutoFS, multi-head training, or legacy artifact
+    # publication.
+    _ncaaf_prod_promote = bool(
+        str(sport).upper().strip() == "NCAAF" and (
+            str(os.getenv("NCAAF_PROMOTE_EDGE_V1", "0")).strip().lower() in {"1","true","yes","on"}
+            or str(market).lower().strip() in {"ncaaf_production","production_v1"}
+        )
+    )
     _edge_research_only = bool(
         str(sport).upper().strip() == "NCAAF" and (
-            str(os.getenv("NCAAF_EDGE_RESEARCH_ONLY", "0")).strip().lower() in {"1","true","yes","on"}
+            _ncaaf_prod_promote
+            or str(os.getenv("NCAAF_EDGE_RESEARCH_ONLY", "0")).strip().lower() in {"1","true","yes","on"}
             or str(market).lower().strip() in {"edge_research","research"}
         )
     )
@@ -445,6 +453,16 @@ def main():
         f"[V14.3-DEPLOY-PREFLIGHT] PASS source_tag={_v143_tag} "
         f"path={_v143_path} sha={_v143_sha[:16]} v14_1_runtime=REMOVED production_authority=0"
     )
+    _npv1_tag = getattr(_npv1, "NCAAF_PRODUCTION_V1_SOURCE_TAG", None)
+    if _npv1_tag != "ncaaf-production-v1-fixed-backbones-edge-authority-20260929":
+        raise RuntimeError(
+            f"[NCAAF-PROD-V1-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_npv1_tag!r} "
+            f"path={str(_npv1_path)!r} sha={_npv1_sha[:16]}"
+        )
+    log_func(
+        f"[NCAAF-PROD-V1-DEPLOY-PREFLIGHT] PASS source_tag={_npv1_tag} "
+        f"path={_npv1_path} sha={_npv1_sha[:16]} promotion_requested={_ncaaf_prod_promote}"
+    )
 
     pw.emit("start", f"Training start run_id={run_id} sport={sport} market={market}", pct=0.0)
 
@@ -459,8 +477,10 @@ def main():
             # the flag is off.
             log_func(
                 "[EDGE-RESEARCH-FAST-PREFLIGHT] status=PASS sport=NCAAF "
-                "scope=MULTI_MARKET_EDGE_RESEARCH spread=FROZEN_POLICY h2h=RESEARCH totals=RESEARCH skips=TIMING,H2H_PRODUCTION,TOTALS_PRODUCTION,"
-                "GENERIC_AUTOFS,PROMOTION_REPLAY,ARTIFACT_PUBLICATION production_authority=0"
+                f"scope={'NCAAF_PRODUCTION_V1_PROMOTION' if _ncaaf_prod_promote else 'MULTI_MARKET_EDGE_RESEARCH'} "
+                "spread=FROZEN_POLICY h2h=MODEL_ONLY totals=FAMILY_COLLAPSED skips=TIMING,H2H_PRODUCTION,TOTALS_PRODUCTION,"
+                f"GENERIC_AUTOFS,PROMOTION_REPLAY artifact_publication={'EDGE_CONTRACT_ONLY' if _ncaaf_prod_promote else 'FALSE'} "
+                f"production_authority={1 if _ncaaf_prod_promote else 0}"
             )
             _t0 = __import__('time').perf_counter()
             _sld.fit_historical_ncaaf_core_expert("spreads", log_func=log_func)
@@ -484,19 +504,35 @@ def main():
                 f"system_history={len(_sys_cache)} spread_miner_systems={len(_miner.get('systems') or [])} "
                 f"historical_seconds={_t1-_t0:.1f} stat_cache_seconds={_t2-_t1:.1f}"
             )
-            _run_ncaaf_edge_research_stack()
+            _edge_outputs = _run_ncaaf_edge_research_stack()
+            if _ncaaf_prod_promote:
+                (_v143_out, _scv21_out, _erv2_out, _etv1_out, _ecv2_out, _emmv1_out,
+                 _aegv1_out, _arrv1_out, _fsepv1_out, _smev1_out, _tarv1_out, _rcv1_out) = _edge_outputs
+                _npv1.build_production_contract(
+                    dashboard_module=_sld, stat_module=_scv21, stat_out=_scv21_out,
+                    frozen_spread_out=_fsepv1_out, totals_out=_tarv1_out,
+                    cadence_module=_rcv1, cadence_out=_rcv1_out,
+                    bucket_name=bucket, storage_client=gcs, log_func=log_func
+                )
+                log_func(
+                    "[NCAAF-PROD-V1-CONTRACT] status=PASS probability_models=FROZEN_AND_SEPARATE "
+                    "probability_runtime=FIXED_FEATURE_CONTRACT spread_features=3 totals_features=2 h2h_features=8 "
+                    "spread_edge_authority=PROMOTED totals_edge_authority=PROMOTED_SINGLE_FAMILY "
+                    "h2h_edge_authority=CLOSED cadence=FROZEN generic_autofs_runtime=RETIRED multi_head_runtime=RETIRED production_authority=1"
+                )
             _t3 = __import__('time').perf_counter()
             log_func(
                 f"[EDGE-RESEARCH-FAST-CONTRACT] status=PASS total_seconds={_t3-_t0:.1f} "
-                "production_training_skipped=TRUE artifact_publication=FALSE production_authority=0"
+                f"legacy_production_training_skipped=TRUE compact_fixed_backbones={'FIT_AND_PUBLISHED' if _ncaaf_prod_promote else 'NOT_PUBLISHED'} artifact_publication={'NCAAF_PRODUCTION_V1' if _ncaaf_prod_promote else 'FALSE'} "
+                f"production_authority={1 if _ncaaf_prod_promote else 0}"
             )
             log_func(
-                "[CODE-LIFECYCLE-AUDIT] status=PASS active_production=UNCHANGED "
+                f"[CODE-LIFECYCLE-AUDIT] status=PASS active_production={'NCAAF_PRODUCTION_V1' if _ncaaf_prod_promote else 'UNCHANGED'} "
                 "active_research=V14.3_RELIABILITY,STAT_COMBINATION_V2_1,EDGE_REGISTRY_V2,EDGE_TOPOLOGY_V1,EDGE_COMPLEMENTARITY_V2,EDGE_MECHANISM_MATRIX_V1,ATOMIC_EDGE_GRAPH_V1,ATOMIC_RULE_REFINEMENT_V1,FROZEN_SPREAD_EDGE_POLICY_V1,SIBLING_MARKET_EDGE_RESEARCH_V1,TOTALS_ATOMIC_REFINEMENT_V1,SYSTEM_MINER "
                 "fast_path=EDGE_RESEARCH_ONLY skipped_legacy_runtime=TIMING,H2H_PRODUCTION,TOTALS_PRODUCTION,"
-                "GENERIC_AUTOFS,PROMOTION_REPLAY,ARTIFACT_PUBLICATION production_contract=UNCHANGED"
+                f"GENERIC_AUTOFS,PROMOTION_REPLAY legacy_artifact_publication=SKIPPED production_contract={'NCAAF_V1_PROMOTED' if _ncaaf_prod_promote else 'UNCHANGED'}"
             )
-            pw.emit("done", "Edge research complete ✅", pct=1.0)
+            pw.emit("done", "NCAAF Production V1 contract published ✅" if _ncaaf_prod_promote else "Edge research complete ✅", pct=1.0)
             return
 
         if market == "All":
