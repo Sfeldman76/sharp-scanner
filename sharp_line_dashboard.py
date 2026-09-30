@@ -49389,7 +49389,7 @@ if not HEADLESS:
         _train_market_options[2:2] = ["edge_research", "ncaaf_production"]
     if str(sport).upper().strip() == "NFL":
         # NFL audit and sandbox are independent of the legacy training routes.
-        _train_market_options[1:1] = ["nfl_audit", "nfl_challenger"]
+        _train_market_options[1:1] = ["nfl_audit", "nfl_challenger", "nfl_score_engine"]
     market_choice = st.sidebar.selectbox(
         "Train which market?",
         _train_market_options,
@@ -49409,6 +49409,11 @@ if not HEADLESS:
         st.sidebar.caption(
             "NFL V1.5 research: H2H calibrated blends, Spread fair-margin models, and Totals expected-points models. "
             "Uses 2021–2025 development folds with 2026 sealed. No publication or production changes."
+        )
+    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_score_engine":
+        st.sidebar.caption(
+            "NFL V1.6 research: predicts each team's points from offense and opponent-defense components, "
+            "then derives projected score, margin, total and market disagreement. 2026 remains sealed; no publication."
         )
 
     
@@ -49543,12 +49548,16 @@ if not HEADLESS:
             "Run NFL Specialized Modeling V1.5 (No Publish)"
             if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_challenger"
             else (
-                "Publish NCAAF Production V1"
+                "Run NFL Team Score Engine V1.6 (No Publish)"
+                if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_score_engine"
+                else (
+                    "Publish NCAAF Production V1"
                 if str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production"
                 else (
                     f"🧪 Run {sport} Edge Research"
                     if str(market_choice).lower().strip() == "edge_research"
                     else f"📈 Train {sport} Sharp Model"
+                )
                 )
             )
         )
