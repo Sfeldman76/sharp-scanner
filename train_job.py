@@ -692,6 +692,60 @@ def main():
             raise
         return
 
+    # NFL Research V2.0.2 — attribution diagnostic for the exact frozen PBP CORE2.
+    # This route does not retrain/tune CORE2. It reuses the frozen OOF/context/model
+    # artifacts and tests disagreement, residual, confirmation, regime and system
+    # interaction value against the protected incumbent CORE. 2026 remains sealed.
+    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_pbp_diagnostic":
+        import importlib.util
+        from pathlib import Path
+        from google.cloud import bigquery
+        _dir = Path(__file__).resolve().parent
+
+        def _load_nfl_v202_diag_exact(_name, _tag):
+            _path = _dir / (_name + ".py")
+            if not _path.is_file():
+                raise RuntimeError(f"[NFL-RESEARCH-V2-PBP-DIAG-PREFLIGHT] MISSING {_path}")
+            _spec = importlib.util.spec_from_file_location(_name, _path)
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules[_name] = _mod
+            _spec.loader.exec_module(_mod)
+            if getattr(_mod, "SOURCE_TAG", "") != _tag:
+                raise RuntimeError("[NFL-RESEARCH-V2-PBP-DIAG-PREFLIGHT] STALE_OR_MIXED_"+_name)
+            return _mod
+
+        _contract_v2 = _load_nfl_v202_diag_exact(
+            "nfl_research_v2_contract",
+            "nfl-research-v2.0-foundation-expansion-20261001",
+        )
+        _diag = _load_nfl_v202_diag_exact(
+            "nfl_pbp_attribution_v1",
+            "nfl-pbp-attribution-v1-research-v2.0.2-frozen-core2-20261001",
+        )
+        _audit = _load_nfl_v202_diag_exact(
+            "nfl_audit_v1",
+            "nfl-audit-v1.3-prior-feature-provenance-20260930",
+        )
+        pw.emit("research", f"[NFL-RESEARCH-V2-PBP-DIAG] Start run={run_id}; frozen CORE2 attribution only; no PBP refit; 2026 sealed", pct=0.05)
+        try:
+            _contract_v2.assert_contract()
+            _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
+            if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
+                raise RuntimeError("[NFL-RESEARCH-V2-PBP-DIAG-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
+            pw.emit("research", "[NFL-RESEARCH-V2-PBP-DIAG] Verify SHA 741474dc..., reuse frozen OOF/context/bundle, test independent Spread/Total/H2H/system attribution", pct=0.20)
+            _result = _diag.run_nfl_pbp_attribution_v1(
+                bq_client=bigquery.Client(project="sharplogger"),
+                storage_client=gcs,
+                bucket_name=bucket,
+                audit_report=_audit_report,
+                log_func=log_func,
+            )
+            pw.emit("done", "NFL Research V2 PBP attribution complete: "+_result["status"], pct=1.0)
+        except Exception as exc:
+            pw.emit("error", "NFL Research V2 PBP attribution failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            raise
+        return
+
     # NFL Research V2.0 — independent situational System Lab.
     # Reuses the NCAAF System Miner V3 research discipline but never imports
     # CORE/model predictions into system discovery.  Big Al, Pathi translations,
