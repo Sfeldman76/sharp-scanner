@@ -447,6 +447,40 @@ def run_nfl_system_lab_v1(*,bq_client,storage_client,bucket_name="sharp-models",
     report={"status":STATUS,"registry":registry,"bigal":{"documented_close_reference":bigal_report,"opening_line_retest":bigal_open},"pathi_engineering":pathi_report,"academic_replications":academic,"cross_sport_preregistered_retests":cross_sport,"miner":{"spreads":spread_miner,"totals":total_miner},"production_authority":0,"year_2026_queried":False,"ncaaf":"UNCHANGED","legacy_nfl":"UNCHANGED"}
     prefix=f"nfl-research/v2_0/system_lab/{sha[:16]}"
     arts={"registry":_upload_immutable(storage_client,bucket_name,f"{prefix}/system_registry.json",json.dumps(registry,sort_keys=True,indent=2).encode(),"application/json"),"report":_upload_immutable(storage_client,bucket_name,f"{prefix}/system_lab_report.json",json.dumps(report,sort_keys=True,default=str).encode(),"application/json")}
+    # Logging-only detail surface: expose every frozen promising rule so Cloud Run
+    # logs are sufficient to review the System Lab without separately downloading
+    # the GCS report. This does not alter search, ranking, status, registry, or artifacts.
+    for _market_name, _miner in (("SPREADS", spread_miner), ("TOTALS", total_miner)):
+        for _r in _miner.get("promising_rules", []):
+            _detail = {
+                "market": _market_name,
+                "rule_id": "__".join(_r.get("conditions", [])),
+                "rank": _r.get("rank"),
+                "conditions": _r.get("conditions", []),
+                "families": _r.get("families", []),
+                "direction": _r.get("direction"),
+                "records": _r.get("records", {}),
+                "discovery_year_by_year": _r.get("discovery_year_by_year", {}),
+                "chronological_folds": _r.get("chronological_folds", {}),
+                "min_fold_rate": _r.get("min_fold_rate"),
+                "min_loso_rate": _r.get("min_loso_rate"),
+                "remove_best_season": _r.get("remove_best_season"),
+                "remove_best_season_record": _r.get("remove_best_season_record", {}),
+                "structural_floor": _r.get("structural_floor"),
+                "bootstrap_ci95": _r.get("bootstrap_ci95"),
+                "nominal_pvalue": _r.get("nominal_pvalue"),
+                "permutation_max_pvalue": _r.get("permutation_max_pvalue"),
+                "global_fdr_qvalue": _r.get("global_fdr_qvalue"),
+                "hierarchical_family_qvalue": _r.get("hierarchical_family_qvalue"),
+                "within_family_qvalue": _r.get("within_family_qvalue"),
+                "multiple_testing_pass": _r.get("multiple_testing_pass"),
+                "team_specific": _r.get("team_specific"),
+                "ambiguous_both_sides": _r.get("ambiguous_both_sides"),
+                "status": _r.get("status"),
+                "production_authority": 0,
+            }
+            log_func("[NFL-RESEARCH-V2-SYSTEM-PROMISING] "+json.dumps(_detail,sort_keys=True,default=str))
+
     log_func("[NFL-RESEARCH-V2-SYSTEM-BIGAL] "+json.dumps({"documented_ids":sorted(bigal_report),"opening_retest":bigal_open},sort_keys=True,default=str))
     log_func("[NFL-RESEARCH-V2-SYSTEM-ACADEMIC] "+json.dumps(academic,sort_keys=True,default=str))
     log_func("[NFL-RESEARCH-V2-SYSTEM-CROSS-SPORT] "+json.dumps(cross_sport,sort_keys=True,default=str))
