@@ -584,6 +584,49 @@ def main():
             raise
         return
 
+    # NFL Production V1 — live-pregame feature parity audit.
+    # This is the mandatory bridge between offline historical research and live
+    # production scoring. It does not fit or publish a model. It independently
+    # replays the compact production feature contract against 2025, then builds
+    # the same compact features for current upcoming games using only pregame
+    # information. Any mismatch fails closed.
+    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_live_feature_parity":
+        import importlib.util
+        from pathlib import Path
+        from google.cloud import bigquery
+        _dir = Path(__file__).resolve().parent
+
+        def _load_nfl_prod_parity_exact(_name, _tag):
+            _path = _dir / (_name + ".py")
+            if not _path.is_file():
+                raise RuntimeError(f"[NFL-PROD-V1-LIVE-PARITY-PREFLIGHT] MISSING {_path}")
+            _spec = importlib.util.spec_from_file_location(_name, _path)
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules[_name] = _mod
+            _spec.loader.exec_module(_mod)
+            if getattr(_mod, "SOURCE_TAG", "") != _tag:
+                raise RuntimeError("[NFL-PROD-V1-LIVE-PARITY-PREFLIGHT] STALE_OR_MIXED_"+_name)
+            return _mod
+
+        _parity = _load_nfl_prod_parity_exact(
+            "nfl_live_feature_parity_v1",
+            "nfl-production-v1-live-feature-parity-v1.0-20261001",
+        )
+        pw.emit("audit", f"[NFL-PROD-V1] Live-pregame feature parity start run={run_id}; no model fit or publication", pct=0.10)
+        try:
+            _result = _parity.run_nfl_live_feature_parity_v1(
+                bq_client=bigquery.Client(project="sharplogger"),
+                log_func=log_func,
+            )
+            if _result.get("status") != "NFL_PRODUCTION_V1_LIVE_FEATURE_PARITY_PASS":
+                pw.emit("hold", "NFL Production V1 live feature parity HOLD: "+_result.get("status","UNKNOWN"), pct=1.0)
+            else:
+                pw.emit("done", "NFL Production V1 live feature parity PASS; ready to freeze production backbones", pct=1.0)
+        except Exception as exc:
+            pw.emit("error", "NFL Production V1 live feature parity failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            raise
+        return
+
     # NFL V1.9.5 — prospective new-information shadow collector.
     # This route does NOT retrain historical models.  It establishes/continues an
     # append-only post-deployment market clock, captures timestamped book quotes,
