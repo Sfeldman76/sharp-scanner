@@ -357,7 +357,7 @@ def main():
         _special = _load_nfl_v19_exact("nfl_specialized_v1", "nfl-specialized-v1.5-score-domain-h2h-stack-20260930")
         _score = _load_nfl_v19_exact("nfl_score_engine_v1", "nfl-score-engine-v1.6-team-offense-defense-20260930")
         _intel = _load_nfl_v19_exact("nfl_intelligence_v1", "nfl-intelligence-v1.8-residual-arbitration-reconciliation-20260930")
-        _ledger = _load_nfl_v19_exact("nfl_prospective_ledger_v1", "nfl-prospective-ledger-v1.9-20260930")
+        _ledger = _load_nfl_v19_exact("nfl_prospective_ledger_v1", "nfl-prospective-ledger-v1.9.2-sharp-research-20261001")
         _stats = _load_nfl_v19_exact("nfl_stats_context_v1", "nfl-stats-context-v1.9.1-existing-dataset-only-20261001")
         _v19 = _load_nfl_v19_exact("nfl_frozen_confirmation_v1", "nfl-frozen-confirmation-v1.9.1-expanded-stats-2026-holdout-20261001")
         pw.emit("audit", f"[NFL-V1.9.1] Recheck audits before opening expanded frozen 2026 holdout run={run_id}", pct=0.05)
@@ -372,6 +372,69 @@ def main():
             pw.emit("done", "NFL V1.9.1 expanded stats frozen confirmation complete: "+_result["status"]+" (zero production authority)", pct=1.0)
         except Exception as exc:
             pw.emit("error", "NFL V1.9.1 expanded stats frozen confirmation failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            raise
+        return
+
+    # NFL V1.9.2 — protected research architecture + isolated prospective ledger.
+    # Infrastructure/contract validation only: no production publication and no
+    # retuning of the already-observed 2026 V1.9.1 holdout.
+    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_research_foundation":
+        import json
+        import importlib.util
+        from pathlib import Path
+        from google.cloud import bigquery
+        _dir = Path(__file__).resolve().parent
+
+        def _load_nfl_v192_exact(_name, _tag):
+            _path = _dir / (_name + ".py")
+            if not _path.is_file():
+                raise RuntimeError(f"[NFL-V1.9.2-DEPLOY-PREFLIGHT] MISSING {_path}")
+            _spec = importlib.util.spec_from_file_location(_name, _path)
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules[_name] = _mod
+            _spec.loader.exec_module(_mod)
+            if getattr(_mod, "SOURCE_TAG", "") != _tag:
+                raise RuntimeError("[NFL-V1.9.2-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
+            return _mod
+
+        _contract = _load_nfl_v192_exact(
+            "nfl_research_contract_v1",
+            "nfl-research-contract-v1.9.2-protected-architecture-20261001",
+        )
+        _attribution = _load_nfl_v192_exact(
+            "nfl_edge_attribution_v1",
+            "nfl-edge-attribution-v1.9.2-independent-margin-20261001",
+        )
+        _ledger = _load_nfl_v192_exact(
+            "nfl_prospective_ledger_v1",
+            "nfl-prospective-ledger-v1.9.2-sharp-research-20261001",
+        )
+        _settlement = _load_nfl_v192_exact(
+            "nfl_prospective_settlement_v1",
+            "nfl-prospective-settlement-v1.9.2-append-only-20261001",
+        )
+        pw.emit("audit", f"[NFL-V1.9.2] Validate protected architecture and sharp_research ledger run={run_id}", pct=0.10)
+        try:
+            _contract_report = _contract.assert_contract()
+            pw.emit("contract", "[NFL-V1.9.2] Protected CORE + MARKET + STAT + systems/miner contract PASS", pct=0.35)
+            _health = _ledger.ledger_health_check(
+                bigquery.Client(project="sharplogger"),
+                service_identity_hint="sharp-train-sa@sharplogger.iam.gserviceaccount.com",
+            )
+            _result = {
+                "status": "NFL_V1_9_2_RESEARCH_FOUNDATION_READY",
+                "contract": _contract_report,
+                "ledger_health": _health,
+                "edge_attribution_source_tag": _attribution.SOURCE_TAG,
+                "settlement_source_tag": _settlement.SOURCE_TAG,
+                "production_authority": 0,
+                "ncaaf": "UNCHANGED",
+                "legacy_nfl": "UNCHANGED",
+            }
+            log_func("[NFL-V1.9.2-CONTRACT] "+json.dumps(_result, sort_keys=True, default=str))
+            pw.emit("done", "NFL V1.9.2 research foundation ready (zero production authority)", pct=1.0)
+        except Exception as exc:
+            pw.emit("error", "NFL V1.9.2 research foundation failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
             raise
         return
 
