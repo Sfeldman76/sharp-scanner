@@ -1,5 +1,5 @@
 {
-  "version": "NFL_RESEARCH_V2_DECISION_HISTORY_20261001_V6",
+  "version": "NFL_RESEARCH_V2_DECISION_HISTORY_20261001_V7",
   "purpose": "Standing model-manager record. Do not rerun a prior experiment under a new name unless the information source, target, or validation design is genuinely new.",
   "governance": {
     "protect_good_work": true,
@@ -130,5 +130,17 @@
     ],
     "rule": "ONE_MECHANISM_FAMILY_ONE_VOTE; specialist variants are diagnostic, not independent votes",
     "production_authority": 0
+  },
+  "production_v1_transition": {
+    "status": "LIVE_PREGAME_FEATURE_PARITY_AUDIT_NEXT",
+    "system_research": "FROZEN_FOR_PROSPECTIVE_COLLECTION",
+    "production_backbones": "DO_NOT_PUBLISH_UNTIL_LIVE_FEATURE_PARITY_PASS",
+    "feature_contract": "COMPACT_FIXED_SPREAD_H2H_TOTALS_BACKBONES",
+    "retraining_governance": "NFL_PRODUCTION_V1_GOVERNANCE_20261001",
+    "weekly_challenger_retrain": true,
+    "automatic_production_promotion": false,
+    "promotion_checkpoint": "EVERY_4_COMPLETED_WEEKS_OR_APPROX_60_PLUS_NEW_GAMES",
+    "heavy_research_cadence": "EVERY_4_COMPLETED_WEEKS",
+    "new_system_policy": "FREEZE_DEFINITION_THEN_START_NEW_PROSPECTIVE_CLOCK"
   }
 }
