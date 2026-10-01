@@ -1,5 +1,5 @@
 {
-  "version": "NFL_RESEARCH_V2_DECISION_HISTORY_20261001_V4",
+  "version": "NFL_RESEARCH_V2_DECISION_HISTORY_20261001_V5",
   "purpose": "Standing model-manager record. Do not rerun a prior experiment under a new name unless the information source, target, or validation design is genuinely new.",
   "governance": {
     "protect_good_work": true,
@@ -58,6 +58,11 @@
       "stage": "Research V2.1 System Lab / Miner V2",
       "tested": "NCAAF System Miner V3-style direct ATS/Totals discovery with expanded prior-only streak/H2H atoms and tiered LEGIT/PROMISING/WATCH research retention",
       "decision": "Separate betting-system discovery from residual mining. Keep strict LEGIT/prospective admission, but retain historically promising/watch systems instead of discarding them because every 2023/2024/2025 block does not individually clear break-even. Production authority remains zero."
+    },
+    {
+      "stage": "Research V2.2 System Lab / Mechanism Families",
+      "tested": "V2.1 retained rules collapsed into independent mechanism families; mutually exclusive LEGIT/PROMISING/WATCH counts; both-sides ambiguity safeguard; per-family prospective freeze",
+      "decision": "Count correlated variants as one mechanism family. Continue existing NFL_ROLE_FLIP_FADE clock. Start new prospective clocks for NFL_SPREAD_HOME_FAVORITE_OFF_SU_LOSS_FADE and NFL_TOTAL_EARLY_DIVISION_UNDER after the V3 family registry is frozen. Keep weak-team-vs-weak-opponent research-only unless a side-defining unambiguous variant qualifies. Zero production authority."
     }
   ],
   "reused_ncaaf_research": {
@@ -79,7 +84,7 @@
   },
   "research_v2_lanes": {
     "PBP_CORE2": "FROZEN RESEARCH SIDECAR: does not replace Spread/H2H/Totals production; possible disagreement/veto information remains shadow-only; no further development now.",
-    "SYSTEM_LAB": "PERMANENT DIRECT BETTING-SYSTEM RESEARCH BRAIN: NCAAF-style Miner V3 methodology, LEGIT/PROMISING/WATCH retention, documented Big Al/Pathi lanes separate, zero automatic authority; NFL_ROLE_FLIP_FADE remains frozen for prospective tracking.",
+    "SYSTEM_LAB": "PERMANENT DIRECT BETTING-SYSTEM RESEARCH BRAIN: V3 collapses correlated rules into mechanism families, uses exclusive LEGIT/PROMISING/WATCH statuses, holds ambiguous both-side mechanisms from prospective clocks, and freezes supported LEGIT families for append-only prospective tracking; zero automatic authority.",
     "MARKET_V1_9_5": "NEW INFORMATION: prospective book lead/lag, velocity, dispersion, key moves, price/line divergence",
     "EXTERNAL_CONTEXT": "NEXT NEW INFORMATION: pregame starter/QB, injuries/availability, weather, participation/depth, travel/body-clock",
     "RECONCILIATION": "DEFERRED until independent lanes demonstrate evidence",
@@ -106,5 +111,19 @@
       "feature_count": 67,
       "next_action": "NFL_RESEARCH_V2_PBP_ATTRIBUTION_DIAGNOSTIC_V1; no PBP refit or tuning"
     }
+  },
+  "prospective_mechanism_policy": {
+    "continue_existing": [
+      "NFL_SPREAD_ROLE_FLIP_DOG_TO_FAVORITE_FADE"
+    ],
+    "start_new_after_v3_registry_freeze": [
+      "NFL_SPREAD_HOME_FAVORITE_OFF_SU_LOSS_FADE",
+      "NFL_TOTAL_EARLY_DIVISION_UNDER"
+    ],
+    "research_only_due_to_current_ambiguity_or_strength": [
+      "NFL_SPREAD_WEAK_TEAM_VS_WEAK_OPP"
+    ],
+    "rule": "ONE_MECHANISM_FAMILY_ONE_VOTE; specialist variants are diagnostic, not independent votes",
+    "production_authority": 0
   }
 }
