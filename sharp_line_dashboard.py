@@ -49383,16 +49383,49 @@ if not HEADLESS:
         st.stop()
 
     _train_market_options = ["All", "spreads", "h2h", "totals"]
+    _train_market_labels = {}
     if str(sport).upper().strip() == "NCAAF":
         # Research evaluates challengers without changing the live contract.
         # Production is the explicit, separate one-time artifact publishing path.
         _train_market_options[2:2] = ["edge_research", "ncaaf_production"]
     if str(sport).upper().strip() == "NFL":
-        # NFL audit and sandbox are independent of the legacy training routes.
-        _train_market_options[1:1] = ["nfl_audit", "nfl_challenger", "nfl_score_engine", "nfl_intelligence", "nfl_frozen_confirmation", "nfl_research_foundation", "nfl_research_engine", "nfl_edge_gate", "nfl_prospective_shadow", "nfl_pbp_foundation", "nfl_pbp_diagnostic", "nfl_system_lab"]
+        # Permanent NFL workflow. One-time build/diagnostic routes stay callable
+        # but are intentionally hidden from the normal control surface.
+        _nfl_primary = ["nfl_system_lab", "nfl_research_engine", "nfl_prospective_shadow"]
+        _show_nfl_advanced = st.sidebar.checkbox(
+            "Show advanced / legacy NFL research runs",
+            value=False,
+            key="show_nfl_advanced_research_runs",
+            help="Shows one-time audits, old challenger stages, PBP diagnostics, and legacy generic training routes. Normal NFL work does not require these.",
+        )
+        _nfl_advanced = [
+            "nfl_audit", "nfl_challenger", "nfl_score_engine", "nfl_intelligence",
+            "nfl_frozen_confirmation", "nfl_research_foundation", "nfl_edge_gate",
+            "nfl_pbp_foundation", "nfl_pbp_diagnostic", "All", "spreads", "h2h", "totals",
+        ]
+        _train_market_options = _nfl_primary + (_nfl_advanced if _show_nfl_advanced else [])
+        _train_market_labels = {
+            "nfl_research_engine": "NFL Challenger Research",
+            "nfl_system_lab": "NFL System Research / Miner",
+            "nfl_prospective_shadow": "NFL Prospective Shadow",
+            "nfl_audit": "Advanced: NFL Audit",
+            "nfl_challenger": "Advanced: V1.5 Challenger",
+            "nfl_score_engine": "Advanced: V1.6 Score Engine",
+            "nfl_intelligence": "Advanced: V1.8 Intelligence",
+            "nfl_frozen_confirmation": "Advanced: V1.9.1 Frozen Confirmation",
+            "nfl_research_foundation": "Advanced: V1.9.2 Research Foundation",
+            "nfl_edge_gate": "Advanced: V1.9.4 Edge Gate",
+            "nfl_pbp_foundation": "Advanced: PBP Foundation",
+            "nfl_pbp_diagnostic": "Advanced: PBP Diagnostic",
+            "All": "Advanced: Legacy Train All",
+            "spreads": "Advanced: Legacy Train Spread",
+            "h2h": "Advanced: Legacy Train H2H",
+            "totals": "Advanced: Legacy Train Totals",
+        }
     market_choice = st.sidebar.selectbox(
-        "Train which market?",
+        "NFL workflow" if str(sport).upper().strip() == "NFL" else "Train which market?",
         _train_market_options,
+        format_func=(lambda x: _train_market_labels.get(x, x)),
         key=f"train_market_choice_{sport}",
     )
     if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_production":
@@ -49466,9 +49499,9 @@ if not HEADLESS:
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_system_lab":
         st.sidebar.caption(
-            "NFL Research V2 System Lab: independent systems brain using 2017-2022 discovery, 2023 shadow, 2024 confirmation and untouched 2025 final check. "
-            "Replicates documented Big Al systems, keeps Pathi football rules explicitly labeled as engineering translations, tests academic/domain hypotheses, "
-            "and ports the NCAAF Miner V3 research discipline with mask deduplication, bootstrap/LOSO/folds and FDR/max-stat controls. No CORE/model-state input and zero production authority."
+            "NFL System Research / Miner V2: direct ATS and Totals betting-system discovery modeled on the NCAAF System Miner V3. "
+            "Discovery stays 2017-2022 with frozen 2023-2025 validation and 2026 sealed. Systems are retained as LEGIT, PROMISING, WATCH or EXPLORATORY; "
+            "only LEGIT candidates can advance to prospective proof. Big Al/documented systems remain separate. No CORE/PBP/model-state input and zero automatic production authority."
         )
 
     
@@ -49604,12 +49637,12 @@ if not HEADLESS:
             "nfl_intelligence": "Run NFL Intelligence V1.8 (No Publish)",
             "nfl_frozen_confirmation": "Run NFL V1.9.1 Expanded Stats 2026 Confirmation",
             "nfl_research_foundation": "Validate NFL V1.9.2 Research Foundation",
-            "nfl_research_engine": "Run NFL V1.9.3 Protected Challenger Research",
+            "nfl_research_engine": "Run NFL Challenger Research",
             "nfl_edge_gate": "Run NFL V1.9.4 Edge Gate Research",
-            "nfl_prospective_shadow": "Run NFL V1.9.5 Prospective Market Shadow",
+            "nfl_prospective_shadow": "Update NFL Prospective Shadow",
             "nfl_pbp_foundation": "Run NFL Research V2 PBP Foundation",
             "nfl_pbp_diagnostic": "Run NFL Research V2 PBP Attribution Diagnostic",
-            "nfl_system_lab": "Run NFL Research V2 System Lab",
+            "nfl_system_lab": "Run NFL System Research / Miner",
         }
         _train_button_label = _nfl_train_labels.get(str(market_choice).lower().strip(), f"📈 Train {sport} Sharp Model")
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production":
