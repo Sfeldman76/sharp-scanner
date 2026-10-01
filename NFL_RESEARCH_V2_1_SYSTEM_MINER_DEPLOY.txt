@@ -1,0 +1,33 @@
+NFL Research V2.1 — System Miner V2 + dashboard cleanup
+
+Overlay the DELTA files on the current sharp-train-job source, or deploy the COMPLETE_FLAT package.
+Rebuild/redeploy the Cloud Run job and dashboard using the existing deployment process.
+
+NORMAL NFL DROPDOWN
+  1. NFL System Research / Miner
+  2. NFL Challenger Research
+  3. NFL Prospective Shadow
+
+All prior one-time audit/foundation/PBP/edge-gate and legacy generic train routes remain available under:
+  Show advanced / legacy NFL research runs
+
+FIRST RUN
+  SPORT=NFL
+  MARKET=nfl_system_lab
+  TRAIN_MODE=0
+
+Expected markers:
+  [NFL-RESEARCH-V2-SYSTEM-V2] Start
+  [NFL-RESEARCH-V2-SYSTEM-MINER-V2] market=SPREADS ... legit=... promising=... watch=... retained=...
+  [NFL-RESEARCH-V2-SYSTEM-MINER-V2] market=TOTALS ... legit=... promising=... watch=... retained=...
+  [NFL-RESEARCH-V2-SYSTEM-RETAINED] ...
+  [NFL-RESEARCH-V2-SYSTEM-CONTRACT] ...
+
+SAFETY CONTRACT
+  2026 is sealed from system discovery.
+  production_authority=0.
+  No frozen production artifact is overwritten.
+  PBP CORE2 stays parked as a frozen research sidecar.
+  NCAAF is unchanged.
+
+After this run, review the retained LEGIT/PROMISING/WATCH systems before freezing any new prospective system family.
