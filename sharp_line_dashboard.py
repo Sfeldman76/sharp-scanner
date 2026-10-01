@@ -49389,7 +49389,7 @@ if not HEADLESS:
         _train_market_options[2:2] = ["edge_research", "ncaaf_production"]
     if str(sport).upper().strip() == "NFL":
         # NFL audit and sandbox are independent of the legacy training routes.
-        _train_market_options[1:1] = ["nfl_audit", "nfl_challenger", "nfl_score_engine", "nfl_intelligence", "nfl_frozen_confirmation", "nfl_research_foundation", "nfl_research_engine"]
+        _train_market_options[1:1] = ["nfl_audit", "nfl_challenger", "nfl_score_engine", "nfl_intelligence", "nfl_frozen_confirmation", "nfl_research_foundation", "nfl_research_engine", "nfl_edge_gate"]
     market_choice = st.sidebar.selectbox(
         "Train which market?",
         _train_market_options,
@@ -49439,6 +49439,12 @@ if not HEADLESS:
             "NFL V1.9.3 protected challenger research: history through 2025 only. Builds structured market-residual family models, "
             "new market-independent CORE margin/total challengers, disagreement attribution and Residual Miner V2 with discovery/shadow/confirmation + FDR. "
             "Freezes research artifacts for a new prospective shadow clock. Does not query 2026, auto-promote, or change legacy NFL/NCAAF."
+        )
+    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_edge_gate":
+        st.sidebar.caption(
+            "NFL V1.9.4 edge-gate research: keeps incumbent CORE as the independent fair-line benchmark, fixes dead/all-null research features, "
+            "separates fair-line MAE/RMSE from betting-edge probability, tests transparent disagreement gates and compact season-forward logistic edge gates, "
+            "and freezes a new shadow registry through 2025 only. No 2026 query, threshold optimization, auto-promotion, legacy NFL change, or NCAAF change."
         )
 
     
@@ -49588,12 +49594,16 @@ if not HEADLESS:
                                 "Run NFL V1.9.3 Protected Challenger Research"
                                 if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_research_engine"
                                 else (
+                                    "Run NFL V1.9.4 Edge Gate Research"
+                                    if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_edge_gate"
+                                    else (
                     "Publish NCAAF Production V1"
                 if str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production"
                 else (
                     f"🧪 Run {sport} Edge Research"
                     if str(market_choice).lower().strip() == "edge_research"
                     else f"📈 Train {sport} Sharp Model"
+                )
                 )
                 )
                 )
