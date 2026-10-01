@@ -49389,7 +49389,7 @@ if not HEADLESS:
         _train_market_options[2:2] = ["edge_research", "ncaaf_production"]
     if str(sport).upper().strip() == "NFL":
         # NFL audit and sandbox are independent of the legacy training routes.
-        _train_market_options[1:1] = ["nfl_audit", "nfl_challenger", "nfl_score_engine", "nfl_intelligence"]
+        _train_market_options[1:1] = ["nfl_audit", "nfl_challenger", "nfl_score_engine", "nfl_intelligence", "nfl_frozen_confirmation"]
     market_choice = st.sidebar.selectbox(
         "Train which market?",
         _train_market_options,
@@ -49420,6 +49420,13 @@ if not HEADLESS:
             "NFL V1.8 research: mines CORE/market errors, tests when CORE beats the market, adds uncertainty and threshold stability, "
             "uses market-relative H2H validation, Big Al/Pathi shrinkage, condition ablation and within-family reconciliation. "
             "Discovery 2021-23, shadow 2024, confirmation 2025; 2026 remains sealed. No publication."
+        )
+    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_frozen_confirmation":
+        st.sidebar.caption(
+            "NFL V1.9.1 expanded stats frozen confirmation: hashes the complete registry before opening the sealed 2026 results. "
+            "Adds division/rematch, home-road form, opponent-adjusted strength, run/pass matchup, pace/efficiency, turnover regression, "
+            "non-offensive scoring, half/quarter profile, discipline/fourth-down, volatility/trend and fixed stats-only residual challengers. "
+            "Models fit only through 2025; no 2026 tuning or production authority."
         )
 
     
@@ -49560,12 +49567,16 @@ if not HEADLESS:
                     "Run NFL Intelligence V1.8 (No Publish)"
                     if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_intelligence"
                     else (
+                        "Run NFL V1.9.1 Expanded Stats 2026 Confirmation"
+                        if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_frozen_confirmation"
+                        else (
                     "Publish NCAAF Production V1"
                 if str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production"
                 else (
                     f"🧪 Run {sport} Edge Research"
                     if str(market_choice).lower().strip() == "edge_research"
                     else f"📈 Train {sport} Sharp Model"
+                )
                 )
                 )
                 )
