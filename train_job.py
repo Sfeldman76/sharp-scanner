@@ -773,28 +773,28 @@ def main():
             "nfl-research-v2.0-foundation-expansion-20261001",
         )
         _systems = _load_nfl_v2_system_exact(
-            "nfl_system_lab_v1",
-            "nfl-system-lab-v1-research-v2.0-ncaaf-miner-v3-methodology-20261001",
+            "nfl_system_lab_v2",
+            "nfl-system-lab-v2-research-v2.1-ncaaf-miner-v3-tiered-retention-20261001",
         )
         _audit = _load_nfl_v2_system_exact(
             "nfl_audit_v1",
             "nfl-audit-v1.3-prior-feature-provenance-20260930",
         )
-        pw.emit("research", f"[NFL-RESEARCH-V2-SYSTEM] Start run={run_id}; discovery=2017-2022 shadow=2023 confirm=2024 final=2025; 2026 sealed", pct=0.05)
+        pw.emit("research", f"[NFL-RESEARCH-V2-SYSTEM-V2] Start run={run_id}; direct ATS/OU system discovery=2017-2022; frozen validation=2023-2025; 2026 sealed", pct=0.05)
         try:
             _contract_v2.assert_contract()
             _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
             if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
                 raise RuntimeError("[NFL-RESEARCH-V2-SYSTEM-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
-            pw.emit("research", "[NFL-RESEARCH-V2-SYSTEM] Replicate documented systems + academic hypotheses; run independent domain Miner with V3-style robustness controls", pct=0.20)
-            _result = _systems.run_nfl_system_lab_v1(
+            pw.emit("research", "[NFL-RESEARCH-V2-SYSTEM-V2] Replicate documented systems + run NCAAF-style direct betting-system Miner with LEGIT/PROMISING/WATCH retention", pct=0.20)
+            _result = _systems.run_nfl_system_lab_v2(
                 bq_client=bigquery.Client(project="sharplogger"),
                 storage_client=gcs,
                 bucket_name=bucket,
                 audit_report=_audit_report,
                 log_func=log_func,
             )
-            pw.emit("done", "NFL Research V2 System Lab complete: "+_result["status"], pct=1.0)
+            pw.emit("done", "NFL System Research / Miner V2 complete: "+_result["status"], pct=1.0)
         except Exception as exc:
             pw.emit("error", "NFL Research V2 System Lab failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
             raise
