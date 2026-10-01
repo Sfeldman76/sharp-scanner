@@ -438,6 +438,77 @@ def main():
             raise
         return
 
+    # NFL V1.9.3 — protected challenger research engine.
+    # Uses history only through 2025. 2026 is not queried by this route; the
+    # resulting registry starts a new prospective shadow clock after deployment.
+    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_research_engine":
+        import json
+        import importlib.util
+        from pathlib import Path
+        from google.cloud import bigquery
+        _dir = Path(__file__).resolve().parent
+
+        def _load_nfl_v193_exact(_name, _tag):
+            _path = _dir / (_name + ".py")
+            if not _path.is_file():
+                raise RuntimeError(f"[NFL-V1.9.3-DEPLOY-PREFLIGHT] MISSING {_path}")
+            _spec = importlib.util.spec_from_file_location(_name, _path)
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules[_name] = _mod
+            _spec.loader.exec_module(_mod)
+            if getattr(_mod, "SOURCE_TAG", "") != _tag:
+                raise RuntimeError("[NFL-V1.9.3-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
+            return _mod
+
+        _audit = _load_nfl_v193_exact(
+            "nfl_audit_v1",
+            "nfl-audit-v1.3-prior-feature-provenance-20260930",
+        )
+        _contract = _load_nfl_v193_exact(
+            "nfl_research_contract_v1",
+            "nfl-research-contract-v1.9.2-protected-architecture-20261001",
+        )
+        _structured = _load_nfl_v193_exact(
+            "nfl_structured_research_v1",
+            "nfl-structured-research-v1.9.3-nested-season-forward-20261001",
+        )
+        _miner = _load_nfl_v193_exact(
+            "nfl_residual_miner_v2",
+            "nfl-residual-miner-v2.0-market-error-fdr-20261001",
+        )
+        _ledger2 = _load_nfl_v193_exact(
+            "nfl_prospective_ledger_v2",
+            "nfl-prospective-ledger-v2-v1.9.3-enhanced-shadow-20261001",
+        )
+        _engine = _load_nfl_v193_exact(
+            "nfl_research_engine_v1",
+            "nfl-research-engine-v1.9.3-protected-challengers-20261001",
+        )
+        pw.emit("audit", f"[NFL-V1.9.3] Protected challenger research start run={run_id}; history through 2025 only", pct=0.05)
+        try:
+            _contract.assert_contract()
+            _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
+            if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
+                raise RuntimeError("[NFL-V1.9.3-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
+            _health = _ledger2.ledger_health_check(
+                bigquery.Client(project="sharplogger"),
+                service_identity_hint="sharp-train-sa@sharplogger.iam.gserviceaccount.com",
+            )
+            pw.emit("research", "[NFL-V1.9.3] Run structured residual + independent CORE challengers + residual Miner V2", pct=0.30)
+            _result = _engine.run_nfl_research_engine_v1(
+                bq_client=bigquery.Client(project="sharplogger"),
+                storage_client=gcs,
+                bucket_name=bucket,
+                audit_report=_audit_report,
+                ledger_health=_health,
+                log_func=log_func,
+            )
+            pw.emit("done", "NFL V1.9.3 research engine complete and frozen for prospective shadow: "+_result["status"], pct=1.0)
+        except Exception as exc:
+            pw.emit("error", "NFL V1.9.3 research engine failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            raise
+        return
+
     # V13.5.0 deployment-path lock. Load the three training modules from
     # the exact directory containing this train_job.py, rather than allowing an
     # older copy elsewhere on PYTHONPATH or in a retained module cache to win.
