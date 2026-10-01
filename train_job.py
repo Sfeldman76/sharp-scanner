@@ -584,6 +584,164 @@ def main():
             raise
         return
 
+    # NFL V1.9.5 — prospective new-information shadow collector.
+    # This route does NOT retrain historical models.  It establishes/continues an
+    # append-only post-deployment market clock, captures timestamped book quotes,
+    # builds fixed T-120/T-60/T-30/current market states, and settles prior states.
+    # Pre-clock quotes are excluded from V1.9.5 evidence by contract.
+    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_prospective_shadow":
+        import json
+        import importlib.util
+        from pathlib import Path
+        from google.cloud import bigquery
+        _dir = Path(__file__).resolve().parent
+
+        def _load_nfl_v195_exact(_name, _tag):
+            _path = _dir / (_name + ".py")
+            if not _path.is_file():
+                raise RuntimeError(f"[NFL-V1.9.5-DEPLOY-PREFLIGHT] MISSING {_path}")
+            _spec = importlib.util.spec_from_file_location(_name, _path)
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules[_name] = _mod
+            _spec.loader.exec_module(_mod)
+            if getattr(_mod, "SOURCE_TAG", "") != _tag:
+                raise RuntimeError("[NFL-V1.9.5-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
+            return _mod
+
+        _ledger4 = _load_nfl_v195_exact(
+            "nfl_prospective_ledger_v4",
+            "nfl-prospective-ledger-v4-v1.9.5-market-microstructure-20261001",
+        )
+        _market_shadow = _load_nfl_v195_exact(
+            "nfl_market_shadow_v1",
+            "nfl-market-shadow-v1.9.5-prospective-microstructure-20261001",
+        )
+        _shadow = _load_nfl_v195_exact(
+            "nfl_prospective_shadow_v1",
+            "nfl-prospective-shadow-v1.9.5-new-information-clock-20261001",
+        )
+        pw.emit("research", f"[NFL-V1.9.5] Prospective new-information shadow start run={run_id}; pre-clock quotes forbidden", pct=0.10)
+        try:
+            _result = _shadow.run_nfl_prospective_shadow_v1(
+                bq_client=bigquery.Client(project="sharplogger"),
+                storage_client=gcs,
+                bucket_name=bucket,
+                log_func=log_func,
+            )
+            pw.emit("done", "NFL V1.9.5 prospective market shadow active: "+_result["status"], pct=1.0)
+        except Exception as exc:
+            pw.emit("error", "NFL V1.9.5 prospective market shadow failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            raise
+        return
+
+    # NFL Research V2.0 — genuinely new market-blind play-by-play information.
+    # This route keeps incumbent CORE protected and tests one fixed Ridge
+    # challenger built only from prior-game PBP football efficiency.  2026 is
+    # sealed and PBP final scores are never authoritative labels.
+    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_pbp_foundation":
+        import importlib.util
+        from pathlib import Path
+        from google.cloud import bigquery
+        _dir = Path(__file__).resolve().parent
+
+        def _load_nfl_v2_exact(_name, _tag):
+            _path = _dir / (_name + ".py")
+            if not _path.is_file():
+                raise RuntimeError(f"[NFL-RESEARCH-V2-DEPLOY-PREFLIGHT] MISSING {_path}")
+            _spec = importlib.util.spec_from_file_location(_name, _path)
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules[_name] = _mod
+            _spec.loader.exec_module(_mod)
+            if getattr(_mod, "SOURCE_TAG", "") != _tag:
+                raise RuntimeError("[NFL-RESEARCH-V2-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
+            return _mod
+
+        _contract_v2 = _load_nfl_v2_exact(
+            "nfl_research_v2_contract",
+            "nfl-research-v2.0-foundation-expansion-20261001",
+        )
+        _pbp = _load_nfl_v2_exact(
+            "nfl_pbp_foundation_v1",
+            "nfl-pbp-foundation-v1-research-v2.0-20261001",
+        )
+        _audit = _load_nfl_v2_exact(
+            "nfl_audit_v1",
+            "nfl-audit-v1.3-prior-feature-provenance-20260930",
+        )
+        pw.emit("research", f"[NFL-RESEARCH-V2-PBP] Start run={run_id}; download/aggregate nflverse 2017-2025 only; 2026 sealed", pct=0.05)
+        try:
+            _contract_v2.assert_contract()
+            _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
+            if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
+                raise RuntimeError("[NFL-RESEARCH-V2-PBP-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
+            pw.emit("research", "[NFL-RESEARCH-V2-PBP] Build prior-only PBP efficiency/QB-history context and season-forward market-blind CORE2 challenger", pct=0.20)
+            _result = _pbp.run_nfl_pbp_foundation_v1(
+                bq_client=bigquery.Client(project="sharplogger"),
+                storage_client=gcs,
+                bucket_name=bucket,
+                audit_report=_audit_report,
+                log_func=log_func,
+            )
+            pw.emit("done", "NFL Research V2 PBP foundation complete: "+_result["status"], pct=1.0)
+        except Exception as exc:
+            pw.emit("error", "NFL Research V2 PBP foundation failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            raise
+        return
+
+    # NFL Research V2.0 — independent situational System Lab.
+    # Reuses the NCAAF System Miner V3 research discipline but never imports
+    # CORE/model predictions into system discovery.  Big Al, Pathi translations,
+    # academic replications and mined/domain systems remain separately labelled.
+    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_system_lab":
+        import importlib.util
+        from pathlib import Path
+        from google.cloud import bigquery
+        _dir = Path(__file__).resolve().parent
+
+        def _load_nfl_v2_system_exact(_name, _tag):
+            _path = _dir / (_name + ".py")
+            if not _path.is_file():
+                raise RuntimeError(f"[NFL-RESEARCH-V2-DEPLOY-PREFLIGHT] MISSING {_path}")
+            _spec = importlib.util.spec_from_file_location(_name, _path)
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules[_name] = _mod
+            _spec.loader.exec_module(_mod)
+            if getattr(_mod, "SOURCE_TAG", "") != _tag:
+                raise RuntimeError("[NFL-RESEARCH-V2-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
+            return _mod
+
+        _contract_v2 = _load_nfl_v2_system_exact(
+            "nfl_research_v2_contract",
+            "nfl-research-v2.0-foundation-expansion-20261001",
+        )
+        _systems = _load_nfl_v2_system_exact(
+            "nfl_system_lab_v1",
+            "nfl-system-lab-v1-research-v2.0-ncaaf-miner-v3-methodology-20261001",
+        )
+        _audit = _load_nfl_v2_system_exact(
+            "nfl_audit_v1",
+            "nfl-audit-v1.3-prior-feature-provenance-20260930",
+        )
+        pw.emit("research", f"[NFL-RESEARCH-V2-SYSTEM] Start run={run_id}; discovery=2017-2022 shadow=2023 confirm=2024 final=2025; 2026 sealed", pct=0.05)
+        try:
+            _contract_v2.assert_contract()
+            _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
+            if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
+                raise RuntimeError("[NFL-RESEARCH-V2-SYSTEM-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
+            pw.emit("research", "[NFL-RESEARCH-V2-SYSTEM] Replicate documented systems + academic hypotheses; run independent domain Miner with V3-style robustness controls", pct=0.20)
+            _result = _systems.run_nfl_system_lab_v1(
+                bq_client=bigquery.Client(project="sharplogger"),
+                storage_client=gcs,
+                bucket_name=bucket,
+                audit_report=_audit_report,
+                log_func=log_func,
+            )
+            pw.emit("done", "NFL Research V2 System Lab complete: "+_result["status"], pct=1.0)
+        except Exception as exc:
+            pw.emit("error", "NFL Research V2 System Lab failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            raise
+        return
+
     # V13.5.0 deployment-path lock. Load the three training modules from
     # the exact directory containing this train_job.py, rather than allowing an
     # older copy elsewhere on PYTHONPATH or in a retained module cache to win.
