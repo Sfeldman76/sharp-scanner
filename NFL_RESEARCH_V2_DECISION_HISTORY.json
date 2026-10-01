@@ -1,5 +1,5 @@
 {
-  "version": "NFL_RESEARCH_V2_DECISION_HISTORY_20261001_V5",
+  "version": "NFL_RESEARCH_V2_DECISION_HISTORY_20261001_V6",
   "purpose": "Standing model-manager record. Do not rerun a prior experiment under a new name unless the information source, target, or validation design is genuinely new.",
   "governance": {
     "protect_good_work": true,
@@ -63,6 +63,11 @@
       "stage": "Research V2.2 System Lab / Mechanism Families",
       "tested": "V2.1 retained rules collapsed into independent mechanism families; mutually exclusive LEGIT/PROMISING/WATCH counts; both-sides ambiguity safeguard; per-family prospective freeze",
       "decision": "Count correlated variants as one mechanism family. Continue existing NFL_ROLE_FLIP_FADE clock. Start new prospective clocks for NFL_SPREAD_HOME_FAVORITE_OFF_SU_LOSS_FADE and NFL_TOTAL_EARLY_DIVISION_UNDER after the V3 family registry is frozen. Keep weak-team-vs-weak-opponent research-only unless a side-defining unambiguous variant qualifies. Zero production authority."
+    },
+    {
+      "stage": "Research V2.2.3 Prospective Week Context Join",
+      "tested": "authoritative NFL Week_Number resolution for the frozen Early Division UNDER prospective family using bigal_game_context_enriched; exact source-key or exact kickoff/home/away identity only",
+      "decision": "Use market Week_Number when explicitly present; otherwise fill only from the authoritative Big Al game-context view by exact identity. Never infer NFL week from calendar dates or game counts. Unmatched/conflicting games remain fail-closed. No system definitions, historical records, clocks, or production authority are changed."
     }
   ],
   "reused_ncaaf_research": {
