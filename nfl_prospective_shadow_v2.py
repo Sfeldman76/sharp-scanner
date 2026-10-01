@@ -20,7 +20,7 @@ import nfl_market_shadow_v1 as market
 import nfl_system_shadow_v1 as system_shadow
 import nfl_system_shadow_v2 as family_shadow
 
-SOURCE_TAG = "nfl-prospective-shadow-v1.9.6-system-family-v2-20261001"
+SOURCE_TAG = "nfl-prospective-shadow-v1.9.6.1-system-family-pointer-hotfix-20261001"
 PRODUCTION_AUTHORITY = 0
 RECOMMENDED_CADENCE_MINUTES = 30
 
