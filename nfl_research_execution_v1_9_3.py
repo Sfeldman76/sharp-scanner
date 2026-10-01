@@ -775,3 +775,22 @@ def record_settlements(
     }
     _emit(log_func, "[NFL-V1.9.3-SETTLEMENT]", out)
     return out
+
+def run_after_v192_foundation(*, dashboard_module=None, log_func=None):
+    """Canonical train_job entrypoint for V1.9.3 after V1.9.2 bootstrap."""
+    _emit(
+        log_func,
+        "[NFL-V1.9.3-ORCHESTRATION]",
+        {
+            "status": "ENTER",
+            "source_tag": V193_SOURCE_TAG,
+            "production_authority": 0,
+            "legacy_nfl": "UNCHANGED",
+            "ncaaf": "UNCHANGED",
+        },
+    )
+    return run_nfl_research_execution_v1_9_3(
+        dashboard_module=dashboard_module,
+        log_func=log_func,
+    )
+
