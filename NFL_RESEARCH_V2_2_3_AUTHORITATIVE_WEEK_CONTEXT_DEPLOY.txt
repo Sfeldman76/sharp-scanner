@@ -1,0 +1,37 @@
+NFL Research V2.2.3 — Authoritative Week Context Join
+Date: 2026-10-01
+
+Purpose
+-------
+Activate the already-frozen NFL_TOTAL_EARLY_DIVISION_UNDER prospective family without approximating NFL week from dates.
+
+Change
+------
+- nfl_system_shadow_v2 now resolves Week_Number in this order:
+  1) explicit Week_Number/Week/NFL_Week already present in sharp_moves_master;
+  2) exact game-key match to sharplogger.sharp_data.bigal_game_context_enriched;
+  3) exact kickoff timestamp + normalized home team + normalized away team match to the same authoritative context view.
+- No fuzzy date matching, calendar-week arithmetic, or team-game-number substitution is permitted.
+- Missing or conflicting authoritative matches remain fail-closed and cannot generate a trigger.
+- Existing Role Flip and Home Favorite Off SU Loss clocks are unchanged.
+- No system definition changes. Production authority remains 0.
+
+Deploy
+------
+Overlay the DELTA files on the currently deployed V2.2.2 tree and redeploy sharp-train-job.
+
+Run after deploy
+----------------
+SPORT=NFL
+MARKET=nfl_prospective_shadow
+TRAIN_MODE=0
+
+Do NOT rerun nfl_system_lab. The frozen V2.2 family registry and clocks remain valid.
+
+Expected evidence
+-----------------
+Look for [NFL-RESEARCH-V2-SYSTEM-FAMILY-SHADOW-V2]. For NFL_TOTAL_EARLY_DIVISION_UNDER, opening_meta should contain:
+- status=READY when at least one upcoming total has an exact authoritative week;
+- week_context_view=sharplogger.sharp_data.bigal_game_context_enriched;
+- week_resolution matched_by_key and/or matched_by_identity;
+- no HOLD_WEEK_NUMBER_UNAVAILABLE unless the authoritative context truly has no exact match.
