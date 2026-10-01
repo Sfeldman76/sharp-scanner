@@ -1,0 +1,72 @@
+{
+  "version": "NFL_RESEARCH_V2_DECISION_HISTORY_20261001",
+  "purpose": "Standing model-manager record. Do not rerun a prior experiment under a new name unless the information source, target, or validation design is genuinely new.",
+  "governance": {
+    "protect_good_work": true,
+    "new_research_adds_not_silently_replaces": true,
+    "fundamental_system_market_lanes_independent_until_reconciliation": true,
+    "2026_not_used_for_v2_development": true,
+    "automatic_promotion": false
+  },
+  "prior_nfl_research": [
+    {
+      "stage": "V1.4-V1.6",
+      "tested": "generic/specialized historical-stat models, direct margin/total, score decomposition",
+      "decision": "INCUMBENT_CORE_PROTECTED; score and direct are one correlated CORE family; do not recreate them as separate votes"
+    },
+    {
+      "stage": "V1.7-V1.8",
+      "tested": "Big Al/Pathi research lanes, generic Miner, residual/arbitration, uncertainty, reconciliation",
+      "decision": "keep documented systems and research infrastructure; arbitration weak; residual Miner found no stable generic rules; do not inflate correlated mechanisms"
+    },
+    {
+      "stage": "V1.9.1",
+      "tested": "expanded box-score context and broad/structured market residual corrections with frozen 2026 confirmation",
+      "decision": "market strong benchmark; ALL_STATS development correction weak; 2026 observations cannot be reused as untouched confirmation for later influenced models"
+    },
+    {
+      "stage": "V1.9.2",
+      "tested": "protected research architecture and isolated sharp_research ledger",
+      "decision": "KEEP; append-only research governance is infrastructure"
+    },
+    {
+      "stage": "V1.9.3",
+      "tested": "new Ridge CORE challengers, structured residual families, residual Miner V2",
+      "decision": "new CORE challengers did not beat incumbent on MAE; broad residual weak; totals turnover regression shadow only; do not repeat generic algorithms on same box-score universe"
+    },
+    {
+      "stage": "V1.9.4",
+      "tested": "learned Edge Gate plus fixed disagreement gates",
+      "decision": "learned gate near random and poorly calibrated; simple gates unstable; do not add another meta-model using the same signal universe"
+    },
+    {
+      "stage": "V1.9.5",
+      "tested": "prospective timestamped multi-book market collection",
+      "decision": "KEEP AS NEW-INFORMATION INFRASTRUCTURE; collect forward market behavior because it cannot be reconstructed reliably later"
+    }
+  ],
+  "reused_ncaaf_research": {
+    "system_miner_v3": [
+      "bounded domain-guided beam search",
+      "logical redundancy pruning",
+      "near-duplicate mask collapse",
+      "chronological folds",
+      "leave-one-season-out",
+      "bootstrap confidence intervals",
+      "remove-best-season robustness",
+      "drop-one-condition robustness",
+      "boundary/neighborhood sensitivity",
+      "permutation max-statistic",
+      "global/hierarchical FDR",
+      "frozen prospective retest"
+    ],
+    "external_transfer_hypothesis": "PLAY_ON dog +10 or more, off 14+ SU loss, off back-to-back ATS losses; test in NFL as cross-sport replication, never as NFL-discovered proof"
+  },
+  "research_v2_lanes": {
+    "PBP_CORE2": "NEW INFORMATION: play-by-play EPA/success/pass-rush/early-down/explosive/red-zone/prior-QB performance; market-blind challenger",
+    "SYSTEM_LAB": "INDEPENDENT BRAIN: documented Big Al, Pathi engineering translations, academic/domain hypotheses, V3-style miner",
+    "MARKET_V1_9_5": "NEW INFORMATION: prospective book lead/lag, velocity, dispersion, key moves, price/line divergence",
+    "EXTERNAL_CONTEXT": "NEXT NEW INFORMATION: pregame starter/QB, injuries/availability, weather, participation/depth, travel/body-clock",
+    "RECONCILIATION": "DEFERRED until independent lanes demonstrate evidence"
+  }
+}
