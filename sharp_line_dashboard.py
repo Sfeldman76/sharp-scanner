@@ -49389,7 +49389,7 @@ if not HEADLESS:
         _train_market_options[2:2] = ["edge_research", "ncaaf_production"]
     if str(sport).upper().strip() == "NFL":
         # NFL audit and sandbox are independent of the legacy training routes.
-        _train_market_options[1:1] = ["nfl_audit", "nfl_challenger", "nfl_score_engine", "nfl_intelligence", "nfl_frozen_confirmation", "nfl_research_foundation"]
+        _train_market_options[1:1] = ["nfl_audit", "nfl_challenger", "nfl_score_engine", "nfl_intelligence", "nfl_frozen_confirmation", "nfl_research_foundation", "nfl_research_engine"]
     market_choice = st.sidebar.selectbox(
         "Train which market?",
         _train_market_options,
@@ -49433,6 +49433,12 @@ if not HEADLESS:
             "NFL V1.9.2 research foundation: preserves independent CORE fair margin/score models, market baseline, "
             "stats-residual correction, documented systems, residual Miner, context and uncertainty as separate research components. "
             "Validates the isolated sharp_research append-only ledger and result-settlement contract. No model promotion or production authority."
+        )
+    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_research_engine":
+        st.sidebar.caption(
+            "NFL V1.9.3 protected challenger research: history through 2025 only. Builds structured market-residual family models, "
+            "new market-independent CORE margin/total challengers, disagreement attribution and Residual Miner V2 with discovery/shadow/confirmation + FDR. "
+            "Freezes research artifacts for a new prospective shadow clock. Does not query 2026, auto-promote, or change legacy NFL/NCAAF."
         )
 
     
@@ -49579,12 +49585,16 @@ if not HEADLESS:
                             "Validate NFL V1.9.2 Research Foundation"
                             if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_research_foundation"
                             else (
+                                "Run NFL V1.9.3 Protected Challenger Research"
+                                if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_research_engine"
+                                else (
                     "Publish NCAAF Production V1"
                 if str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production"
                 else (
                     f"🧪 Run {sport} Edge Research"
                     if str(market_choice).lower().strip() == "edge_research"
                     else f"📈 Train {sport} Sharp Model"
+                )
                 )
                 )
                 )
