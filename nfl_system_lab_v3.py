@@ -662,7 +662,10 @@ def run_nfl_system_lab_v3(*,bq_client,storage_client,bucket_name="sharp-models",
     family_sha=hashlib.sha256(json.dumps(family_payload,sort_keys=True,separators=(",",":")).encode()).hexdigest()
     family_payload["family_registry_sha256"]=family_sha
     family_prefix=f"nfl-research/v2_0/system_lab/mechanism_families/{family_sha[:16]}"
-    family_uri=_upload_immutable(storage_client,bucket_name,f"{family_prefix}/family_registry.json",json.dumps(family_payload,sort_keys=True,indent=2).encode(),"application/json")
+    family_upload=_upload_immutable(storage_client,bucket_name,f"{family_prefix}/family_registry.json",json.dumps(family_payload,sort_keys=True,indent=2).encode(),"application/json")
+    family_uri=str(family_upload.get("uri") or "")
+    if not family_uri.startswith(f"gs://{bucket_name}/"):
+        raise RuntimeError("NFL_SYSTEM_FAMILY_V3_REGISTRY_UPLOAD_URI_INVALID")
     pointer={"family_registry_uri":family_uri,"family_registry_sha256":family_sha,"source_tag":SOURCE_TAG,"production_authority":0}
     pointer_uri=_write_family_pointer(storage_client,bucket_name,pointer)
 
@@ -682,7 +685,7 @@ def run_nfl_system_lab_v3(*,bq_client,storage_client,bucket_name="sharp-models",
     sha=hashlib.sha256(json.dumps(registry,sort_keys=True,separators=(",",":")).encode()).hexdigest();registry["registry_sha256"]=sha
     report={"status":STATUS,"registry":registry,"mechanism_families":mechanism_families,"family_registry":family_payload,"bigal":{"documented_close_reference":bigal_report,"opening_line_retest":bigal_open},"pathi_engineering":pathi_report,"academic_replications":academic,"cross_sport_preregistered_retests":cross_sport,"miner":{"spreads":spread_miner,"totals":total_miner},"production_authority":0,"year_2026_queried":False,"ncaaf":"UNCHANGED","legacy_nfl":"UNCHANGED"}
     prefix=f"nfl-research/v2_0/system_lab/{sha[:16]}"
-    arts={"registry":_upload_immutable(storage_client,bucket_name,f"{prefix}/system_registry.json",json.dumps(registry,sort_keys=True,indent=2).encode(),"application/json"),"report":_upload_immutable(storage_client,bucket_name,f"{prefix}/system_lab_report.json",json.dumps(report,sort_keys=True,default=str).encode(),"application/json"),"family_registry":{"created":True,"uri":family_uri},"family_pointer":{"created":True,"uri":pointer_uri}}
+    arts={"registry":_upload_immutable(storage_client,bucket_name,f"{prefix}/system_registry.json",json.dumps(registry,sort_keys=True,indent=2).encode(),"application/json"),"report":_upload_immutable(storage_client,bucket_name,f"{prefix}/system_lab_report.json",json.dumps(report,sort_keys=True,default=str).encode(),"application/json"),"family_registry":family_upload,"family_pointer":{"created":True,"uri":pointer_uri}}
     for _market_name, _miner in (("SPREADS", spread_miner), ("TOTALS", total_miner)):
         for _r in _miner.get("retained_rules", []):
             _detail = {
