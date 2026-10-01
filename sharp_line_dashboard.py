@@ -49389,7 +49389,7 @@ if not HEADLESS:
         _train_market_options[2:2] = ["edge_research", "ncaaf_production"]
     if str(sport).upper().strip() == "NFL":
         # NFL audit and sandbox are independent of the legacy training routes.
-        _train_market_options[1:1] = ["nfl_audit", "nfl_challenger", "nfl_score_engine", "nfl_intelligence", "nfl_frozen_confirmation", "nfl_research_foundation", "nfl_research_engine", "nfl_edge_gate"]
+        _train_market_options[1:1] = ["nfl_audit", "nfl_challenger", "nfl_score_engine", "nfl_intelligence", "nfl_frozen_confirmation", "nfl_research_foundation", "nfl_research_engine", "nfl_edge_gate", "nfl_prospective_shadow", "nfl_pbp_foundation", "nfl_system_lab"]
     market_choice = st.sidebar.selectbox(
         "Train which market?",
         _train_market_options,
@@ -49445,6 +49445,24 @@ if not HEADLESS:
             "NFL V1.9.4 edge-gate research: keeps incumbent CORE as the independent fair-line benchmark, fixes dead/all-null research features, "
             "separates fair-line MAE/RMSE from betting-edge probability, tests transparent disagreement gates and compact season-forward logistic edge gates, "
             "and freezes a new shadow registry through 2025 only. No 2026 query, threshold optimization, auto-promotion, legacy NFL change, or NCAAF change."
+        )
+    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_prospective_shadow":
+        st.sidebar.caption(
+            "NFL V1.9.5 prospective new-information shadow: does not retrain the offline stack. Establishes the post-deployment research clock, "
+            "captures timestamped pregame book quotes into sharp_research, builds fixed T-120/T-60/T-30 and current market-microstructure states, "
+            "and settles them append-only. Pre-clock quotes are excluded. T-60 is the primary evaluation snapshot; zero production authority."
+        )
+    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_pbp_foundation":
+        st.sidebar.caption(
+            "NFL Research V2 PBP Foundation: adds genuinely new market-blind play-by-play football information from nflverse for 2017-2025. "
+            "Builds EPA/success/pass-rush/early-down/explosive/red-zone/QB-history context using strict prior-only shifts, then tests one fixed Ridge CORE2 challenger against protected incumbent CORE and the historical market reference. "
+            "PBP scores are never authoritative, current-game observed QB/PBP cannot enter predictors, and 2026 remains sealed."
+        )
+    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_system_lab":
+        st.sidebar.caption(
+            "NFL Research V2 System Lab: independent systems brain using 2017-2022 discovery, 2023 shadow, 2024 confirmation and untouched 2025 final check. "
+            "Replicates documented Big Al systems, keeps Pathi football rules explicitly labeled as engineering translations, tests academic/domain hypotheses, "
+            "and ports the NCAAF Miner V3 research discipline with mask deduplication, bootstrap/LOSO/folds and FDR/max-stat controls. No CORE/model-state input and zero production authority."
         )
 
     
@@ -49572,47 +49590,27 @@ if not HEADLESS:
     # ✅ Single train button (unique key per sport + choice)
     train_key = f"train::{sport}::{market_choice}"
     
-    _train_button_label = (
-        "Run NFL History & Champion Audit"
-        if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_audit"
-        else (
-            "Run NFL Specialized Modeling V1.5 (No Publish)"
-            if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_challenger"
-            else (
-                "Run NFL Team Score Engine V1.6 (No Publish)"
-                if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_score_engine"
-                else (
-                    "Run NFL Intelligence V1.8 (No Publish)"
-                    if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_intelligence"
-                    else (
-                        "Run NFL V1.9.1 Expanded Stats 2026 Confirmation"
-                        if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_frozen_confirmation"
-                        else (
-                            "Validate NFL V1.9.2 Research Foundation"
-                            if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_research_foundation"
-                            else (
-                                "Run NFL V1.9.3 Protected Challenger Research"
-                                if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_research_engine"
-                                else (
-                                    "Run NFL V1.9.4 Edge Gate Research"
-                                    if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_edge_gate"
-                                    else (
-                    "Publish NCAAF Production V1"
-                if str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production"
-                else (
-                    f"🧪 Run {sport} Edge Research"
-                    if str(market_choice).lower().strip() == "edge_research"
-                    else f"📈 Train {sport} Sharp Model"
-                )
-                )
-                )
-                )
-                )
-                )
-                )
-            )
-        )
-    )
+    if str(sport).upper().strip() == "NFL":
+        _nfl_train_labels = {
+            "nfl_audit": "Run NFL History & Champion Audit",
+            "nfl_challenger": "Run NFL Specialized Modeling V1.5 (No Publish)",
+            "nfl_score_engine": "Run NFL Team Score Engine V1.6 (No Publish)",
+            "nfl_intelligence": "Run NFL Intelligence V1.8 (No Publish)",
+            "nfl_frozen_confirmation": "Run NFL V1.9.1 Expanded Stats 2026 Confirmation",
+            "nfl_research_foundation": "Validate NFL V1.9.2 Research Foundation",
+            "nfl_research_engine": "Run NFL V1.9.3 Protected Challenger Research",
+            "nfl_edge_gate": "Run NFL V1.9.4 Edge Gate Research",
+            "nfl_prospective_shadow": "Run NFL V1.9.5 Prospective Market Shadow",
+            "nfl_pbp_foundation": "Run NFL Research V2 PBP Foundation",
+            "nfl_system_lab": "Run NFL Research V2 System Lab",
+        }
+        _train_button_label = _nfl_train_labels.get(str(market_choice).lower().strip(), f"📈 Train {sport} Sharp Model")
+    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production":
+        _train_button_label = "Publish NCAAF Production V1"
+    elif str(market_choice).lower().strip() == "edge_research":
+        _train_button_label = f"🧪 Run {sport} Edge Research"
+    else:
+        _train_button_label = f"📈 Train {sport} Sharp Model"
     if st.button(_train_button_label, key=train_key):
     
         # Lock UI immediately
