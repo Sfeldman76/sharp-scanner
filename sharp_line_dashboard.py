@@ -49391,7 +49391,7 @@ if not HEADLESS:
     if str(sport).upper().strip() == "NFL":
         # Permanent NFL workflow. One-time build/diagnostic routes stay callable
         # but are intentionally hidden from the normal control surface.
-        _nfl_primary = ["nfl_system_lab", "nfl_research_engine", "nfl_prospective_shadow"]
+        _nfl_primary = ["nfl_system_lab", "nfl_research_engine", "nfl_prospective_shadow", "nfl_live_feature_parity"]
         _show_nfl_advanced = st.sidebar.checkbox(
             "Show advanced / legacy NFL research runs",
             value=False,
@@ -49408,6 +49408,7 @@ if not HEADLESS:
             "nfl_research_engine": "NFL Challenger Research",
             "nfl_system_lab": "NFL System Research / Miner",
             "nfl_prospective_shadow": "NFL Prospective Shadow",
+            "nfl_live_feature_parity": "NFL Production V1 Live Feature Parity",
             "nfl_audit": "Advanced: NFL Audit",
             "nfl_challenger": "Advanced: V1.5 Challenger",
             "nfl_score_engine": "Advanced: V1.6 Score Engine",
@@ -49483,6 +49484,11 @@ if not HEADLESS:
         st.sidebar.caption(
             "NFL V1.9.6 prospective shadow: continues the market-microstructure clock and the existing Role-Flip system clock, while adding separate append-only clocks for newly frozen mechanism families. "
             "Pregame quotes and system triggers are settled prospectively only; no historical backfill, retuning, or automatic production authority."
+        )
+    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_live_feature_parity":
+        st.sidebar.caption(
+            "NFL Production V1 live feature parity: independently rebuilds the fixed compact Spread/H2H/Totals pregame features from prior completed NFL games, replays them against the 2025 historical training view, and builds the same features for current upcoming games. "
+            "Audit only: no model fit, no prediction publication, no threshold tuning, and no production authority until parity passes."
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_pbp_foundation":
         st.sidebar.caption(
@@ -49639,6 +49645,7 @@ if not HEADLESS:
             "nfl_research_engine": "Run NFL Challenger Research",
             "nfl_edge_gate": "Run NFL V1.9.4 Edge Gate Research",
             "nfl_prospective_shadow": "Update NFL Prospective Shadow",
+            "nfl_live_feature_parity": "Run NFL Production V1 Live Feature Parity",
             "nfl_pbp_foundation": "Run NFL Research V2 PBP Foundation",
             "nfl_pbp_diagnostic": "Run NFL Research V2 PBP Attribution Diagnostic",
             "nfl_system_lab": "Run NFL System Research / Miner",
