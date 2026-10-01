@@ -622,7 +622,7 @@ def main():
         )
         _family_shadow = _load_nfl_v195_exact(
             "nfl_system_shadow_v2",
-            "nfl-system-shadow-v2.2.1-pointer-hotfix-20261001",
+            "nfl-system-shadow-v2.2.3-authoritative-week-context-20261001",
         )
         _shadow = _load_nfl_v195_exact(
             "nfl_prospective_shadow_v2",
