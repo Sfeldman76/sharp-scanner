@@ -1,5 +1,5 @@
 {
-  "version": "NFL_RESEARCH_V2_DECISION_HISTORY_20261001_V3",
+  "version": "NFL_RESEARCH_V2_DECISION_HISTORY_20261001_V4",
   "purpose": "Standing model-manager record. Do not rerun a prior experiment under a new name unless the information source, target, or validation design is genuinely new.",
   "governance": {
     "protect_good_work": true,
@@ -32,7 +32,7 @@
     {
       "stage": "V1.9.3",
       "tested": "new Ridge CORE challengers, structured residual families, residual Miner V2",
-      "decision": "new CORE challengers did not beat incumbent on MAE; broad residual weak; totals turnover regression shadow only; do not repeat generic algorithms on same box-score universe"
+      "decision": "new CORE challengers did not beat incumbent on MAE; broad residual weak; totals turnover regression shadow only; Residual Miner V2 found no stable residual-correction rules. DO NOT interpret that as failure of direct betting-system discovery."
     },
     {
       "stage": "V1.9.4",
@@ -53,6 +53,11 @@
       "stage": "Research V2.0 System Lab",
       "tested": "NFL-native domain/system search with 2017-2022 discovery, 2023 shadow, 2024 confirmation, 2025 final historical check, max-stat/FDR and robustness gates",
       "decision": "Freeze NFL_ROLE_FLIP_FADE as one correlated system family with three exact variants; do not count variants as independent votes; no further boundary tuning; start prospective clock"
+    },
+    {
+      "stage": "Research V2.1 System Lab / Miner V2",
+      "tested": "NCAAF System Miner V3-style direct ATS/Totals discovery with expanded prior-only streak/H2H atoms and tiered LEGIT/PROMISING/WATCH research retention",
+      "decision": "Separate betting-system discovery from residual mining. Keep strict LEGIT/prospective admission, but retain historically promising/watch systems instead of discarding them because every 2023/2024/2025 block does not individually clear break-even. Production authority remains zero."
     }
   ],
   "reused_ncaaf_research": {
@@ -73,11 +78,12 @@
     "external_transfer_hypothesis": "PLAY_ON dog +10 or more, off 14+ SU loss, off back-to-back ATS losses; test in NFL as cross-sport replication, never as NFL-discovered proof"
   },
   "research_v2_lanes": {
-    "PBP_CORE2": "FROZEN NEW-INFORMATION BENCHMARK: registry SHA 741474dc5ca410d32572275c8df08b7c1fd11745f8db81406626953d5f96b710; no production authority; diagnose independent/confirmation value before any further model work",
-    "SYSTEM_LAB": "INDEPENDENT BRAIN: NFL_ROLE_FLIP_FADE frozen for prospective tracking; documented Big Al, Pathi translations, academic/domain hypotheses retained; future mining must be a new research question, not retuning this family",
+    "PBP_CORE2": "FROZEN RESEARCH SIDECAR: does not replace Spread/H2H/Totals production; possible disagreement/veto information remains shadow-only; no further development now.",
+    "SYSTEM_LAB": "PERMANENT DIRECT BETTING-SYSTEM RESEARCH BRAIN: NCAAF-style Miner V3 methodology, LEGIT/PROMISING/WATCH retention, documented Big Al/Pathi lanes separate, zero automatic authority; NFL_ROLE_FLIP_FADE remains frozen for prospective tracking.",
     "MARKET_V1_9_5": "NEW INFORMATION: prospective book lead/lag, velocity, dispersion, key moves, price/line divergence",
     "EXTERNAL_CONTEXT": "NEXT NEW INFORMATION: pregame starter/QB, injuries/availability, weather, participation/depth, travel/body-clock",
-    "RECONCILIATION": "DEFERRED until independent lanes demonstrate evidence"
+    "RECONCILIATION": "DEFERRED until independent lanes demonstrate evidence",
+    "RESIDUAL_MINER": "SEPARATE RESEARCH BRAIN: asks whether a factor improves fair-line/market residuals. Its null results do not imply no profitable ATS/OU systems exist."
   },
   "frozen_system_families": {
     "NFL_ROLE_FLIP_FADE": {
