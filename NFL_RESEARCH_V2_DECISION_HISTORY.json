@@ -1,5 +1,5 @@
 {
-  "version": "NFL_RESEARCH_V2_DECISION_HISTORY_20261001_V2",
+  "version": "NFL_RESEARCH_V2_DECISION_HISTORY_20261001_V3",
   "purpose": "Standing model-manager record. Do not rerun a prior experiment under a new name unless the information source, target, or validation design is genuinely new.",
   "governance": {
     "protect_good_work": true,
@@ -45,6 +45,11 @@
       "decision": "KEEP AS NEW-INFORMATION INFRASTRUCTURE; collect forward market behavior because it cannot be reconstructed reliably later"
     },
     {
+      "stage": "Research V2.0 PBP CORE2 foundation",
+      "tested": "market-blind nflverse play-by-play prior-only Ridge foundation, 67 curated PBP features, season-forward OOF 2021-2025",
+      "decision": "Freeze exact artifact SHA 741474dc5ca410d32572275c8df08b7c1fd11745f8db81406626953d5f96b710; do not replace incumbent CORE or tune/refit yet; next run is attribution/diagnostic for independent Spread, confirmation/veto, Totals, H2H directional, feature-family, regime, and frozen-system interaction value"
+    },
+    {
       "stage": "Research V2.0 System Lab",
       "tested": "NFL-native domain/system search with 2017-2022 discovery, 2023 shadow, 2024 confirmation, 2025 final historical check, max-stat/FDR and robustness gates",
       "decision": "Freeze NFL_ROLE_FLIP_FADE as one correlated system family with three exact variants; do not count variants as independent votes; no further boundary tuning; start prospective clock"
@@ -68,7 +73,7 @@
     "external_transfer_hypothesis": "PLAY_ON dog +10 or more, off 14+ SU loss, off back-to-back ATS losses; test in NFL as cross-sport replication, never as NFL-discovered proof"
   },
   "research_v2_lanes": {
-    "PBP_CORE2": "NEW INFORMATION: play-by-play EPA/success/pass-rush/early-down/explosive/red-zone/prior-QB performance; market-blind challenger",
+    "PBP_CORE2": "FROZEN NEW-INFORMATION BENCHMARK: registry SHA 741474dc5ca410d32572275c8df08b7c1fd11745f8db81406626953d5f96b710; no production authority; diagnose independent/confirmation value before any further model work",
     "SYSTEM_LAB": "INDEPENDENT BRAIN: NFL_ROLE_FLIP_FADE frozen for prospective tracking; documented Big Al, Pathi translations, academic/domain hypotheses retained; future mining must be a new research question, not retuning this family",
     "MARKET_V1_9_5": "NEW INFORMATION: prospective book lead/lag, velocity, dispersion, key moves, price/line divergence",
     "EXTERNAL_CONTEXT": "NEXT NEW INFORMATION: pregame starter/QB, injuries/availability, weather, participation/depth, travel/body-clock",
@@ -85,6 +90,15 @@
         "ROLE_FLIP_DOG_TO_FAVORITE__NEGATIVE_LAST5_MARGIN__HOME__OFF_ATS_LOSS",
         "ROLE_FLIP_DOG_TO_FAVORITE__NEGATIVE_LAST5_MARGIN__HOME__OFF_ATS_LOSS__OPP_WINPCT_LE_500"
       ]
+    }
+  },
+  "frozen_pbp_artifacts": {
+    "PBP_CORE2_FIXED_RIDGE": {
+      "registry_sha256": "741474dc5ca410d32572275c8df08b7c1fd11745f8db81406626953d5f96b710",
+      "status": "NFL_RESEARCH_V2_PBP_FOUNDATION_FROZEN_FOR_PROSPECTIVE_SHADOW",
+      "authority": 0,
+      "feature_count": 67,
+      "next_action": "NFL_RESEARCH_V2_PBP_ATTRIBUTION_DIAGNOSTIC_V1; no PBP refit or tuning"
     }
   }
 }
