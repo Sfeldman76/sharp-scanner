@@ -23,7 +23,7 @@ import nfl_market_shadow_v1 as market
 import nfl_system_shadow_v1 as roleflip_shadow
 import nfl_prospective_ledger_v4 as ledger
 
-SOURCE_TAG = "nfl-system-shadow-v2.2-mechanism-family-tracker-20261001"
+SOURCE_TAG = "nfl-system-shadow-v2.2.1-pointer-hotfix-20261001"
 PRODUCTION_AUTHORITY = 0
 POINTER_KEY = "nfl-research/v2_0/system_lab/latest_family_registry_pointer_v3.json"
 PROJECT_ID = ledger.PROJECT_ID
@@ -79,7 +79,14 @@ def verify_family_registry(storage_client:storage.Client,bucket_name="sharp-mode
     if not pblob.exists():
         raise RuntimeError("NFL_SYSTEM_FAMILY_V2_POINTER_MISSING_RUN_SYSTEM_LAB_V3_FIRST")
     ptr=json.loads(pblob.download_as_bytes().decode("utf-8"))
-    uri=str(ptr.get("family_registry_uri") or "")
+    raw_uri=ptr.get("family_registry_uri")
+    # V2.2 initial writer accidentally stored the immutable-upload result object
+    # instead of only its gs:// URI. Accept that one deployed shape so the
+    # successful family freeze does not need to be rerun; all new pointers are
+    # written canonically as strings by nfl_system_lab_v3.
+    if isinstance(raw_uri,dict):
+        raw_uri=raw_uri.get("uri")
+    uri=str(raw_uri or "")
     sha=str(ptr.get("family_registry_sha256") or "")
     prefix=f"gs://{bucket_name}/"
     if not uri.startswith(prefix) or not sha:
