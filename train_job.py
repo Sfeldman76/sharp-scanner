@@ -616,6 +616,10 @@ def main():
             "nfl_market_shadow_v1",
             "nfl-market-shadow-v1.9.5-prospective-microstructure-20261001",
         )
+        _system_shadow = _load_nfl_v195_exact(
+            "nfl_system_shadow_v1",
+            "nfl-system-shadow-v1.9.5.1-role-flip-family-20261001",
+        )
         _shadow = _load_nfl_v195_exact(
             "nfl_prospective_shadow_v1",
             "nfl-prospective-shadow-v1.9.5-new-information-clock-20261001",
