@@ -17,6 +17,7 @@ from google.cloud import storage
 
 import nfl_prospective_ledger_v4 as ledger
 import nfl_market_shadow_v1 as market
+import nfl_system_shadow_v1 as system_shadow
 
 SOURCE_TAG = "nfl-prospective-shadow-v1.9.5-new-information-clock-20261001"
 PRODUCTION_AUTHORITY = 0
@@ -80,6 +81,13 @@ def run_nfl_prospective_shadow_v1(*, bq_client=None, storage_client=None, bucket
         results=market.settle_states(pending,scores,settled_at=started)
         rwrite=ledger.append_idempotent(results,table=ledger.STATE_RESULT_TABLE,id_col="state_result_event_id",time_cols=("settled_at",),client=c)
 
+    # Freeze/track the newly discovered NFL-native ROLE_FLIP_FADE system family
+    # as one correlated SYSTEM family. This lane never mines or retunes rules.
+    system_family = system_shadow.run_system_family_shadow(
+        bq_client=c, storage_client=gcs, bucket_name=bucket_name, now=started,
+        lookahead_days=int(os.getenv("NFL_SHADOW_LOOKAHEAD_DAYS","8")), log_func=log_func,
+    )
+
     # Exact incumbent CORE live prediction capture is intentionally not fabricated.
     # V1.9.5 first creates a clean new-information clock; exact live feature parity
     # will be a separate, auditable contract before CORE predictions enter this ledger.
@@ -105,6 +113,7 @@ def run_nfl_prospective_shadow_v1(*, bq_client=None, storage_client=None, bucket
         "quote_write":qwrite,"state_write":swrite,"result_write":rwrite,
         "market_source_contract":source_map,"quote_meta":qmeta,"state_meta":smeta,
         "live_core_capture":live_core,
+        "system_family_tracker":system_family,
         "new_research_paths":{
             "SHARP_VS_SOFT_LEAD_LAG":"COLLECTING",
             "CROSS_BOOK_DISAGREEMENT":"COLLECTING",
@@ -127,7 +136,11 @@ def run_nfl_prospective_shadow_v1(*, bq_client=None, storage_client=None, bucket
         "clock_activated_at":clock_start.isoformat(),"preclock_quotes_admitted":False,
         "primary_snapshot":"T_MINUS_60","event_stream":"APPEND_ONLY",
         "frozen_v1_9_4_registry_sha256":ledger.FROZEN_V194_REGISTRY_SHA256,
-        "live_core_capture_status":live_core["status"],"automatic_promotion":False,
+        "live_core_capture_status":live_core["status"],
+        "system_family_tracker_status":system_family.get("status"),
+        "system_family_id":system_shadow.SYSTEM_FAMILY_ID,
+        "system_family_clock_id":system_shadow.SYSTEM_CLOCK_ID,
+        "automatic_promotion":False,
         "production_authority":0,"legacy_nfl":"UNCHANGED","ncaaf":"UNCHANGED",
     },sort_keys=True,default=str))
     return summary
