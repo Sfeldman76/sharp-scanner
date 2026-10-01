@@ -331,6 +331,50 @@ def main():
             raise
         return
 
+    # NFL V1.9.1 — expanded stats-only frozen 2026 holdout confirmation. The registry
+    # is defined and hashed before 2026 is queried. No 2026 row can tune anything.
+    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_frozen_confirmation":
+        import importlib.util
+        from pathlib import Path
+        from google.cloud import bigquery
+        _dir = Path(__file__).resolve().parent
+
+        def _load_nfl_v19_exact(_name, _tag):
+            _path = _dir / (_name + ".py")
+            if not _path.is_file():
+                raise RuntimeError(f"[NFL-V1.9.1-DEPLOY-PREFLIGHT] MISSING {_path}")
+            _spec = importlib.util.spec_from_file_location(_name, _path)
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules[_name] = _mod
+            _spec.loader.exec_module(_mod)
+            if getattr(_mod, "SOURCE_TAG", "") != _tag:
+                raise RuntimeError("[NFL-V1.9.1-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
+            return _mod
+
+        _feature = _load_nfl_v19_exact("nfl_feature_audit_v1", "nfl-feature-audit-v1.3-prior-only-20260930")
+        _audit = _load_nfl_v19_exact("nfl_audit_v1", "nfl-audit-v1.3-prior-feature-provenance-20260930")
+        _challenge = _load_nfl_v19_exact("nfl_challenger_v1", "nfl-challenger-v1.4-season-forward-three-market-no-publish-20260930")
+        _special = _load_nfl_v19_exact("nfl_specialized_v1", "nfl-specialized-v1.5-score-domain-h2h-stack-20260930")
+        _score = _load_nfl_v19_exact("nfl_score_engine_v1", "nfl-score-engine-v1.6-team-offense-defense-20260930")
+        _intel = _load_nfl_v19_exact("nfl_intelligence_v1", "nfl-intelligence-v1.8-residual-arbitration-reconciliation-20260930")
+        _ledger = _load_nfl_v19_exact("nfl_prospective_ledger_v1", "nfl-prospective-ledger-v1.9-20260930")
+        _stats = _load_nfl_v19_exact("nfl_stats_context_v1", "nfl-stats-context-v1.9.1-existing-dataset-only-20261001")
+        _v19 = _load_nfl_v19_exact("nfl_frozen_confirmation_v1", "nfl-frozen-confirmation-v1.9.1-expanded-stats-2026-holdout-20261001")
+        pw.emit("audit", f"[NFL-V1.9.1] Recheck audits before opening expanded frozen 2026 holdout run={run_id}", pct=0.05)
+        try:
+            _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
+            if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
+                raise RuntimeError("[NFL-V1.9.1-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
+            pw.emit("holdout", "[NFL-V1.9.1] Freeze expanded stats registry first; fit only through 2025; score 2026 once; initialize append-only research ledger", pct=0.37)
+            _result = _v19.run_nfl_frozen_confirmation_v1(
+                bq_client=bigquery.Client(project="sharplogger"),
+                audit_report=_audit_report, log_func=log_func, ensure_ledger=True)
+            pw.emit("done", "NFL V1.9.1 expanded stats frozen confirmation complete: "+_result["status"]+" (zero production authority)", pct=1.0)
+        except Exception as exc:
+            pw.emit("error", "NFL V1.9.1 expanded stats frozen confirmation failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            raise
+        return
+
     # V13.5.0 deployment-path lock. Load the three training modules from
     # the exact directory containing this train_job.py, rather than allowing an
     # older copy elsewhere on PYTHONPATH or in a retained module cache to win.
