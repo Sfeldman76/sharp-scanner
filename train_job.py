@@ -622,11 +622,11 @@ def main():
         )
         _family_shadow = _load_nfl_v195_exact(
             "nfl_system_shadow_v2",
-            "nfl-system-shadow-v2.2-mechanism-family-tracker-20261001",
+            "nfl-system-shadow-v2.2.1-pointer-hotfix-20261001",
         )
         _shadow = _load_nfl_v195_exact(
             "nfl_prospective_shadow_v2",
-            "nfl-prospective-shadow-v1.9.6-system-family-v2-20261001",
+            "nfl-prospective-shadow-v1.9.6.1-system-family-pointer-hotfix-20261001",
         )
         pw.emit("research", f"[NFL-V1.9.6] Prospective market + mechanism-family shadow start run={run_id}; pre-clock quotes forbidden", pct=0.10)
         try:
