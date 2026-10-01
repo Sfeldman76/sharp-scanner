@@ -49389,7 +49389,7 @@ if not HEADLESS:
         _train_market_options[2:2] = ["edge_research", "ncaaf_production"]
     if str(sport).upper().strip() == "NFL":
         # NFL audit and sandbox are independent of the legacy training routes.
-        _train_market_options[1:1] = ["nfl_audit", "nfl_challenger", "nfl_score_engine", "nfl_intelligence", "nfl_frozen_confirmation", "nfl_research_foundation", "nfl_research_engine", "nfl_edge_gate", "nfl_prospective_shadow", "nfl_pbp_foundation", "nfl_system_lab"]
+        _train_market_options[1:1] = ["nfl_audit", "nfl_challenger", "nfl_score_engine", "nfl_intelligence", "nfl_frozen_confirmation", "nfl_research_foundation", "nfl_research_engine", "nfl_edge_gate", "nfl_prospective_shadow", "nfl_pbp_foundation", "nfl_pbp_diagnostic", "nfl_system_lab"]
     market_choice = st.sidebar.selectbox(
         "Train which market?",
         _train_market_options,
@@ -49457,6 +49457,12 @@ if not HEADLESS:
             "NFL Research V2 PBP Foundation: adds genuinely new market-blind play-by-play football information from nflverse for 2017-2025. "
             "Builds EPA/success/pass-rush/early-down/explosive/red-zone/QB-history context using strict prior-only shifts, then tests one fixed Ridge CORE2 challenger against protected incumbent CORE and the historical market reference. "
             "PBP scores are never authoritative, current-game observed QB/PBP cannot enter predictors, and 2026 remains sealed."
+        )
+    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_pbp_diagnostic":
+        st.sidebar.caption(
+            "NFL Research V2 PBP Attribution Diagnostic: evaluates the exact frozen CORE2 artifact without retraining it. "
+            "Measures standalone Spread signal, independence/disagreement versus incumbent CORE, market residuals, confirmation/veto value, edge buckets, Totals/H2H directional value, feature-family attribution and system interactions. "
+            "Reads frozen 2017-2025 research artifacts only; 2026 remains sealed and production authority stays zero."
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_system_lab":
         st.sidebar.caption(
@@ -49602,6 +49608,7 @@ if not HEADLESS:
             "nfl_edge_gate": "Run NFL V1.9.4 Edge Gate Research",
             "nfl_prospective_shadow": "Run NFL V1.9.5 Prospective Market Shadow",
             "nfl_pbp_foundation": "Run NFL Research V2 PBP Foundation",
+            "nfl_pbp_diagnostic": "Run NFL Research V2 PBP Attribution Diagnostic",
             "nfl_system_lab": "Run NFL Research V2 System Lab",
         }
         _train_button_label = _nfl_train_labels.get(str(market_choice).lower().strip(), f"📈 Train {sport} Sharp Model")
