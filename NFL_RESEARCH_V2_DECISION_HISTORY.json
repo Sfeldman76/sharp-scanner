@@ -1,5 +1,5 @@
 {
-  "version": "NFL_RESEARCH_V2_DECISION_HISTORY_20261001",
+  "version": "NFL_RESEARCH_V2_DECISION_HISTORY_20261001_V2",
   "purpose": "Standing model-manager record. Do not rerun a prior experiment under a new name unless the information source, target, or validation design is genuinely new.",
   "governance": {
     "protect_good_work": true,
@@ -43,6 +43,11 @@
       "stage": "V1.9.5",
       "tested": "prospective timestamped multi-book market collection",
       "decision": "KEEP AS NEW-INFORMATION INFRASTRUCTURE; collect forward market behavior because it cannot be reconstructed reliably later"
+    },
+    {
+      "stage": "Research V2.0 System Lab",
+      "tested": "NFL-native domain/system search with 2017-2022 discovery, 2023 shadow, 2024 confirmation, 2025 final historical check, max-stat/FDR and robustness gates",
+      "decision": "Freeze NFL_ROLE_FLIP_FADE as one correlated system family with three exact variants; do not count variants as independent votes; no further boundary tuning; start prospective clock"
     }
   ],
   "reused_ncaaf_research": {
@@ -64,9 +69,22 @@
   },
   "research_v2_lanes": {
     "PBP_CORE2": "NEW INFORMATION: play-by-play EPA/success/pass-rush/early-down/explosive/red-zone/prior-QB performance; market-blind challenger",
-    "SYSTEM_LAB": "INDEPENDENT BRAIN: documented Big Al, Pathi engineering translations, academic/domain hypotheses, V3-style miner",
+    "SYSTEM_LAB": "INDEPENDENT BRAIN: NFL_ROLE_FLIP_FADE frozen for prospective tracking; documented Big Al, Pathi translations, academic/domain hypotheses retained; future mining must be a new research question, not retuning this family",
     "MARKET_V1_9_5": "NEW INFORMATION: prospective book lead/lag, velocity, dispersion, key moves, price/line divergence",
     "EXTERNAL_CONTEXT": "NEXT NEW INFORMATION: pregame starter/QB, injuries/availability, weather, participation/depth, travel/body-clock",
     "RECONCILIATION": "DEFERRED until independent lanes demonstrate evidence"
+  },
+  "frozen_system_families": {
+    "NFL_ROLE_FLIP_FADE": {
+      "registry_sha256": "b9fc3d469248f40f580211f5e5decc792976c90596a0b09abd38e279c46cbc81",
+      "prospective_clock": "NFL_RESEARCH_V2_ROLE_FLIP_FADE_PROSPECTIVE_CLOCK",
+      "authority": 0,
+      "independence_policy": "ONE_CORRELATED_FAMILY_NOT_THREE_VOTES",
+      "variants": [
+        "ROLE_FLIP_DOG_TO_FAVORITE__OFF_SU_LOSS__HOME__NEGATIVE_LAST5_MARGIN",
+        "ROLE_FLIP_DOG_TO_FAVORITE__NEGATIVE_LAST5_MARGIN__HOME__OFF_ATS_LOSS",
+        "ROLE_FLIP_DOG_TO_FAVORITE__NEGATIVE_LAST5_MARGIN__HOME__OFF_ATS_LOSS__OPP_WINPCT_LE_500"
+      ]
+    }
   }
 }
