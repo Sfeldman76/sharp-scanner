@@ -49481,9 +49481,8 @@ if not HEADLESS:
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_prospective_shadow":
         st.sidebar.caption(
-            "NFL V1.9.5 prospective new-information shadow: does not retrain the offline stack. Establishes the post-deployment research clock, "
-            "captures timestamped pregame book quotes into sharp_research, builds fixed T-120/T-60/T-30 and current market-microstructure states, "
-            "and settles them append-only. Pre-clock quotes are excluded. T-60 is the primary evaluation snapshot; zero production authority."
+            "NFL V1.9.6 prospective shadow: continues the market-microstructure clock and the existing Role-Flip system clock, while adding separate append-only clocks for newly frozen mechanism families. "
+            "Pregame quotes and system triggers are settled prospectively only; no historical backfill, retuning, or automatic production authority."
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_pbp_foundation":
         st.sidebar.caption(
@@ -49499,9 +49498,9 @@ if not HEADLESS:
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_system_lab":
         st.sidebar.caption(
-            "NFL System Research / Miner V2: direct ATS and Totals betting-system discovery modeled on the NCAAF System Miner V3. "
-            "Discovery stays 2017-2022 with frozen 2023-2025 validation and 2026 sealed. Systems are retained as LEGIT, PROMISING, WATCH or EXPLORATORY; "
-            "only LEGIT candidates can advance to prospective proof. Big Al/documented systems remain separate. No CORE/PBP/model-state input and zero automatic production authority."
+            "NFL System Research / Miner V3: direct ATS and Totals discovery plus mechanism-family consolidation. "
+            "Discovery stays 2017-2022 with frozen 2023-2025 validation and 2026 sealed. Correlated variants count as one mechanism family, ambiguous both-side rules are held from prospective tracking, and LEGIT families receive frozen prospective definitions. "
+            "Big Al/documented systems remain separate. No CORE/PBP/model-state input and zero automatic production authority."
         )
 
     
