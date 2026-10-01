@@ -244,13 +244,64 @@ def _existing_ids(client, table, id_col, ids):
     return set(d[id_col].astype(str)) if not d.empty else set()
 
 
+def _json_safe_value(value):
+    """Convert pandas/numpy values to strict JSON-safe Python values.
+
+    BigQuery's insertAll endpoint rejects non-standard JSON numeric tokens such as
+    NaN and Infinity.  Pandas float columns can retain NaN even after a
+    ``where(..., None)`` operation because the dtype remains float, so sanitation
+    must happen after records are materialized.
+    """
+    if isinstance(value, dict):
+        return {str(k): _json_safe_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_value(v) for v in value]
+    if isinstance(value, pd.Timestamp):
+        return None if pd.isna(value) else value.isoformat()
+    if value is None:
+        return None
+
+    # Convert numpy scalar objects (when present) before finite/missing checks.
+    item = getattr(value, "item", None)
+    if callable(item) and value.__class__.__module__.startswith("numpy"):
+        try:
+            value = item()
+        except Exception:
+            pass
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+
+    try:
+        missing = pd.isna(value)
+        if isinstance(missing, bool) and missing:
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
 def _serialize_records(df: pd.DataFrame, time_cols: Iterable[str]):
+    # Cast to object first so pandas can actually hold Python None in numeric
+    # columns; then recursively sanitize every value so insert_rows_json receives
+    # strict RFC-compatible JSON (no NaN/Infinity tokens).
+    raw = df.astype(object).where(pd.notna(df), None).to_dict("records")
     recs=[]
-    for rec in df.where(pd.notna(df),None).to_dict("records"):
+    for raw_rec in raw:
+        rec=_json_safe_value(raw_rec)
         for k in time_cols:
             v=rec.get(k)
-            if isinstance(v,pd.Timestamp): rec[k]=v.isoformat()
+            if isinstance(v,pd.Timestamp):
+                rec[k]=None if pd.isna(v) else v.isoformat()
         recs.append(rec)
+
+    # Fail locally with a clear contract error rather than sending malformed JSON
+    # to BigQuery.  This catches any future non-finite value that escapes the
+    # sanitizer.
+    try:
+        json.dumps(recs, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"NFL_V1_9_5_JSON_SERIALIZATION_FAILED: {exc}") from exc
     return recs
 
 
