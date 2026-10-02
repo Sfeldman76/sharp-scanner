@@ -1,0 +1,63 @@
+{
+  "architecture": "NFL_PRODUCTION_V2_WITH_BETTING_ENGINE_V1",
+  "as_of": "2026-10-02",
+  "betting_engine": {
+    "2026_training_use": false,
+    "automatic_promotion": false,
+    "automatic_wagering": false,
+    "final_training": "2021-2025 only",
+    "fixed_candidate_bet_ev": 0.02,
+    "fixed_logistic_C": 0.35,
+    "historical_validation": {
+      "2023": "train 2021-2022",
+      "2024": "train 2021-2023",
+      "2025": "train 2021-2024"
+    },
+    "markets": [
+      "SPREADS",
+      "H2H",
+      "TOTALS"
+    ],
+    "model_family": "regularized logistic regression",
+    "source_tag": "nfl-betting-engine-v1.0-unified-decision-20261002"
+  },
+  "cleanup": "cleanup_nfl_repository.py",
+  "operator_routes": {
+    "challenger_research": {
+      "label": "NFL Challenger Research"
+    },
+    "historical_validation": {
+      "label": "NFL Betting Engine \u2014 Historical Validation",
+      "market": "nfl_production_replay"
+    },
+    "system_research": {
+      "label": "NFL System Research / Miner"
+    },
+    "weekly_update": {
+      "label": "NFL Production \u2014 Weekly Update",
+      "market": "nfl_production_weekly"
+    }
+  },
+  "production": {
+    "betting_decision_engine": "nfl_betting_engine_v1.py",
+    "dashboard": "sharp_line_dashboard.py",
+    "fair_value_backbones": "nfl_production_v1.py",
+    "historical_nested_validation": "nfl_production_replay_v1.py",
+    "job_router": "train_job.py",
+    "live_feature_parity": "nfl_live_feature_parity_v1.py",
+    "live_paired_ledger_and_bet_scoring": "nfl_production_live_v1.py"
+  },
+  "research_preserved": [
+    "nfl_research_engine_v2.py",
+    "nfl_system_lab_v3.py",
+    "nfl_market_shadow_v1.py",
+    "nfl_residual_miner_v2.py",
+    "nfl_system_shadow_v1.py",
+    "nfl_system_shadow_v2.py",
+    "nfl_pbp_foundation_v1.py",
+    "nfl_pbp_attribution_v1.py"
+  ],
+  "retired_active_production_path": [
+    "nfl_production_recommendations_v1.py"
+  ]
+}
