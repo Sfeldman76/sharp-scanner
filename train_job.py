@@ -584,6 +584,106 @@ def main():
             raise
         return
 
+    # NFL Production V1.3 — historical weekly walk-forward replay.
+    # Mirrors the live architecture on 2021-2025 without future leakage:
+    # each season has a frozen pre-season control and a weekly adaptive challenger.
+    # Read-only against BigQuery; never mutates champion/challenger pointers.
+    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_production_replay":
+        import importlib.util
+        from pathlib import Path
+        from google.cloud import bigquery
+        _dir = Path(__file__).resolve().parent
+
+        def _load_nfl_prod_replay_exact(_name, _tag):
+            _path = _dir / (_name + ".py")
+            if not _path.is_file():
+                raise RuntimeError(f"[NFL-PROD-V1-REPLAY-PREFLIGHT] MISSING {_path}")
+            _spec = importlib.util.spec_from_file_location(_name, _path)
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules[_name] = _mod
+            _spec.loader.exec_module(_mod)
+            if getattr(_mod, "SOURCE_TAG", "") != _tag:
+                raise RuntimeError("[NFL-PROD-V1-REPLAY-PREFLIGHT] STALE_OR_MIXED_"+_name)
+            return _mod
+
+        _prod = _load_nfl_prod_replay_exact(
+            "nfl_production_v1",
+            "nfl-production-v1.1.1-publish-receipt-normalization-20261002",
+        )
+        _replay = _load_nfl_prod_replay_exact(
+            "nfl_production_replay_v1",
+            "nfl-production-v1.3-historical-weekly-replay-20261002",
+        )
+        pw.emit("audit", f"[NFL-PROD-V1.3] Historical weekly replay start run={run_id}; 2021-2025 OOS only", pct=0.05)
+        try:
+            _result = _replay.run_nfl_production_historical_replay(
+                bq_client=bigquery.Client(project="sharplogger"),
+                storage_client=gcs,
+                bucket_name=bucket,
+                log_func=log_func,
+            )
+            pw.emit("done", "NFL Production V1 historical replay complete: "+_result["status"], pct=1.0)
+        except Exception as exc:
+            pw.emit("error", "NFL Production V1 historical replay failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            raise
+        return
+
+    # NFL Production V1.2 — live champion/challenger scoring + paired ledger.
+    # Scores the frozen champion and the latest weekly challenger on the exact
+    # same parity-approved pregame feature snapshot. One pair per physical game
+    # is append-only; later challenger refreshes cannot rewrite that game.
+    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_production_score":
+        import importlib.util
+        from pathlib import Path
+        from google.cloud import bigquery
+        _dir = Path(__file__).resolve().parent
+
+        def _load_nfl_prod_live_exact(_name, _tag):
+            _path = _dir / (_name + ".py")
+            if not _path.is_file():
+                raise RuntimeError(f"[NFL-PROD-V1-LIVE-PREFLIGHT] MISSING {_path}")
+            _spec = importlib.util.spec_from_file_location(_name, _path)
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules[_name] = _mod
+            _spec.loader.exec_module(_mod)
+            if getattr(_mod, "SOURCE_TAG", "") != _tag:
+                raise RuntimeError("[NFL-PROD-V1-LIVE-PREFLIGHT] STALE_OR_MIXED_"+_name)
+            return _mod
+
+        _parity = _load_nfl_prod_live_exact(
+            "nfl_live_feature_parity_v1",
+            "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002",
+        )
+        _prod = _load_nfl_prod_live_exact(
+            "nfl_production_v1",
+            "nfl-production-v1.1.1-publish-receipt-normalization-20261002",
+        )
+        _live = _load_nfl_prod_live_exact(
+            "nfl_production_live_v1",
+            "nfl-production-v1.2-live-paired-ledger-20261002",
+        )
+        pw.emit("audit", f"[NFL-PROD-V1.2] Verify live parity before paired scoring run={run_id}", pct=0.05)
+        try:
+            _bq = bigquery.Client(project="sharplogger")
+            _parity_result = _parity.run_nfl_live_feature_parity_v1(
+                bq_client=_bq,
+                log_func=log_func,
+            )
+            if _parity_result.get("status") != "NFL_PRODUCTION_V1_LIVE_FEATURE_PARITY_PASS":
+                raise RuntimeError("[NFL-PROD-V1-LIVE-HOLD] LIVE_FEATURE_PARITY_NOT_GREEN "+str(_parity_result.get("status")))
+            pw.emit("score", "NFL Production V1 parity PASS; score champion + challenger and update append-only paired ledger", pct=0.40)
+            _result = _live.run_nfl_production_live_score(
+                bq_client=_bq,
+                storage_client=gcs,
+                bucket_name=bucket,
+                log_func=log_func,
+            )
+            pw.emit("done", "NFL Production V1 live paired ledger updated: "+_result["status"], pct=1.0)
+        except Exception as exc:
+            pw.emit("error", "NFL Production V1 live scoring failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            raise
+        return
+
     # NFL Production V1 — fixed compact backbones + weekly challenger refresh.
     # The first successful run freezes the 2017-2025 champion contract. Every
     # later run refits a challenger with all completed games but cannot replace
