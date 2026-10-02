@@ -21,7 +21,7 @@ import pandas as pd
 
 from nfl_feature_audit_v1 import EXPLICIT_FEATURE_MANIFEST, EXCLUDED_SOURCE_FIELDS, VIEW, _flatten_manifest, fold_blueprint
 
-SOURCE_TAG = 'nfl-challenger-v1.4-season-forward-three-market-no-publish-20260930'
+SOURCE_TAG = 'nfl-challenger-v1.4.1-production-contract-no-unverified-live-context-20261001'
 EXPERIMENT_SEASONS = tuple(range(2017, 2026))
 VALIDATION_SEASONS = (2021, 2022, 2023, 2024, 2025)
 SEALED_YEAR = 2026
@@ -37,21 +37,23 @@ REQUIRED_COLUMNS = tuple(dict.fromkeys((
 )))
 # Explicitly small human-reviewable feature family; no market/current-game values.
 COMPACT_FEATURES = {
- 'SPREADS': ('Week_Number','Is_Home','Is_Neutral','Is_Division_Game',
+ 'SPREADS': ('Week_Number','Is_Home','Is_Division_Game',
   'Rest_Differential_Days','WinPct_Prior_Diff','ATS_WinPct_Prior_Diff',
   'Avg_SU_Margin_Last5_Diff','Off_YPP_vs_Opp_Def_Last3_Diff',
   'Def_YPP_vs_Opp_Off_Last3_Diff','Prior_Season_WinPct_Diff'),
- 'H2H': ('Week_Number','Is_Home','Is_Neutral','Is_Division_Game',
+ 'H2H': ('Week_Number','Is_Home','Is_Division_Game',
   'Rest_Differential_Days','WinPct_Prior_Diff','Avg_SU_Margin_Last5_Diff',
   'Off_YPP_vs_Opp_Def_Last3_Diff','Def_YPP_vs_Opp_Off_Last3_Diff',
   'Prior_Season_WinPct_Diff'),
- 'TOTALS': ('Week_Number','Is_Home','Is_Neutral','Is_Night_Game',
-  'Is_Division_Game','Rest_Differential_Days','Avg_Points_For_Last5_Prior',
+ 'TOTALS': ('Week_Number','Is_Home','Is_Division_Game',
+  'Rest_Differential_Days','Avg_Points_For_Last5_Prior',
   'Avg_Points_Against_Last5_Prior','Opp_Avg_Points_For_Last5_Prior',
   'Opp_Avg_Points_Against_Last5_Prior','Avg_Off_YPP_Last3_Prior',
   'Avg_Def_YPP_Last3_Prior','Opp_Avg_Off_YPP_Last3_Prior',
   'Opp_Avg_Def_YPP_Last3_Prior'),
 }
+# Is_Neutral and Is_Night_Game are intentionally research-only until a live
+# source can reproduce them with exact historical/live parity.
 assert all(set(f).issubset(set(_flatten_manifest())) for f in COMPACT_FEATURES.values())
 assert not (set(_flatten_manifest()) & set(EXCLUDED_SOURCE_FIELDS))
 assert not ({'Season','Source_Game_ID','Team_Score','Opponent_Score','Spread_Value','Current_Total','ML_Odds'} & set(_flatten_manifest()))
