@@ -38,7 +38,7 @@ from google.cloud import bigquery
 import nfl_live_feature_parity_v1 as parity
 import nfl_production_v1 as prod
 
-SOURCE_TAG = "nfl-production-v1.2-live-paired-ledger-20261002"
+SOURCE_TAG = "nfl-production-v1.2.1-ledger-permission-gate-20261002"
 EXPECTED_PARITY_TAG = "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002"
 EXPECTED_PROD_TAG = "nfl-production-v1.1.1-publish-receipt-normalization-20261002"
 
@@ -186,21 +186,49 @@ def _settlement_schema():
 
 
 def _ensure_table(client, table_id: str, schema, partition_field: str, clustering_fields):
+    """Validate a pre-created ledger table; never request schema-creation IAM.
+
+    The production Cloud Run service account intentionally has runtime data access
+    but may not have bigquery.tables.create on sharp_data.  Ledger DDL is therefore
+    a one-time operator action.  Runtime fails closed if either table is absent.
+    """
     try:
         t = client.get_table(table_id)
-        existing = {f.name: (f.field_type, f.mode) for f in t.schema}
-        required = {f.name for f in schema}
-        missing = sorted(required - set(existing))
-        if missing:
-            raise RuntimeError("[NFL-PROD-V1-LIVE-HOLD] LEDGER_SCHEMA_MISSING " + table_id + " " + str(missing))
-        return {"table": table_id, "created": False, "rows": int(getattr(t, "num_rows", 0) or 0)}
-    except NotFound:
-        t = bigquery.Table(table_id, schema=schema)
-        t.time_partitioning = bigquery.TimePartitioning(type_=bigquery.TimePartitioningType.DAY, field=partition_field)
-        t.clustering_fields = list(clustering_fields)
-        t.description = "Append-only NFL Production V1 prospective champion/challenger evidence. No betting-decision authority and no automatic promotion."
-        t = client.create_table(t)
-        return {"table": table_id, "created": True, "rows": int(getattr(t, "num_rows", 0) or 0)}
+    except NotFound as exc:
+        raise RuntimeError(
+            "[NFL-PROD-V1-LIVE-HOLD] LEDGER_TABLE_MISSING_SETUP_REQUIRED "
+            + table_id
+            + " RUN_SQL=nfl_production_v1_ledger_setup.sql"
+        ) from exc
+    existing = {f.name: (f.field_type, f.mode) for f in t.schema}
+    expected = {f.name: (f.field_type, f.mode) for f in schema}
+    missing = sorted(set(expected) - set(existing))
+    if missing:
+        raise RuntimeError("[NFL-PROD-V1-LIVE-HOLD] LEDGER_SCHEMA_MISSING " + table_id + " " + str(missing))
+    type_mismatch = {
+        k: {"expected": expected[k][0], "actual": existing[k][0]}
+        for k in expected
+        if k in existing and str(existing[k][0]).upper() != str(expected[k][0]).upper()
+    }
+    if type_mismatch:
+        raise RuntimeError("[NFL-PROD-V1-LIVE-HOLD] LEDGER_SCHEMA_TYPE_MISMATCH " + table_id + " " + json.dumps(type_mismatch, sort_keys=True))
+    # Partition/clustering are part of the operator-created contract.  Validate
+    # them when the API exposes metadata so a subtly wrong table cannot collect
+    # prospective evidence.
+    tp = getattr(t, "time_partitioning", None)
+    actual_partition = getattr(tp, "field", None) if tp is not None else None
+    if actual_partition != partition_field:
+        raise RuntimeError(
+            "[NFL-PROD-V1-LIVE-HOLD] LEDGER_PARTITION_MISMATCH "
+            + table_id + " expected=" + str(partition_field) + " actual=" + str(actual_partition)
+        )
+    actual_cluster = list(getattr(t, "clustering_fields", None) or [])
+    if actual_cluster != list(clustering_fields):
+        raise RuntimeError(
+            "[NFL-PROD-V1-LIVE-HOLD] LEDGER_CLUSTERING_MISMATCH "
+            + table_id + " expected=" + str(list(clustering_fields)) + " actual=" + str(actual_cluster)
+        )
+    return {"table": table_id, "created": False, "rows": int(getattr(t, "num_rows", 0) or 0)}
 
 
 def _ensure_ledger(client):
