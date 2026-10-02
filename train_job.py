@@ -609,7 +609,7 @@ def main():
         _parity = _load_nfl_weekly_exact("nfl_live_feature_parity_v1", "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002")
         _prod = _load_nfl_weekly_exact("nfl_production_v1", "nfl-production-v1.1.1-publish-receipt-normalization-20261002")
         _shared = _load_nfl_weekly_exact("sports_edge_authority_v1", "sports-edge-authority-v1.0-cross-sport-standard-20261002")
-        _edge = _load_nfl_weekly_exact("nfl_edge_authority_v2", "nfl-edge-authority-v2.0-ncaaf-method-transfer-20261002")
+        _edge = _load_nfl_weekly_exact("nfl_edge_authority_v2", "nfl-edge-authority-v2.1-full-ncaaf-research-diagnostics-20261002")
         _live = _load_nfl_weekly_exact("nfl_production_live_v1", "nfl-production-v2.1-live-edge-authority-v2-20261002")
         pw.emit("audit", f"[NFL-EDGE-V2] Weekly production update start run={run_id}", pct=0.05)
         try:
@@ -636,11 +636,11 @@ def main():
             raise
         return
 
-    # NFL Edge Authority V2 / Production V2.1 — historical confirmation + V1 benchmark.
-    # Replays the fair-value layer on 2021-2025 without future leakage, then
-    # trains/validates the second-stage betting engine using season-forward folds:
-    # each season has a frozen pre-season control and a weekly adaptive challenger.
-    # Read-only against BigQuery; never mutates champion/challenger pointers.
+    # NFL Edge Authority V2.1 — full NCAAF-depth historical research + authority confirmation.
+    # One operator action now runs the complete protected research stack first:
+    # audit -> structured CORE/STAT research -> residual Miner -> edge gates ->
+    # direct System Miner V3/mechanism registry -> production replay -> authority.
+    # 2026 remains sealed from all historical selection/confirmation work.
     if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_production_replay":
         import importlib.util
         from pathlib import Path
@@ -659,37 +659,53 @@ def main():
                 raise RuntimeError("[NFL-PROD-V1-REPLAY-PREFLIGHT] STALE_OR_MIXED_"+_name)
             return _mod
 
-        _prod = _load_nfl_prod_replay_exact(
-            "nfl_production_v1",
-            "nfl-production-v1.1.1-publish-receipt-normalization-20261002",
-        )
-        _bet = _load_nfl_prod_replay_exact(
-            "nfl_betting_engine_v1",
-            "nfl-betting-engine-v1.0-unified-decision-20261002",
-        )
-        _shared = _load_nfl_prod_replay_exact(
-            "sports_edge_authority_v1",
-            "sports-edge-authority-v1.0-cross-sport-standard-20261002",
-        )
-        _edge = _load_nfl_prod_replay_exact(
-            "nfl_edge_authority_v2",
-            "nfl-edge-authority-v2.0-ncaaf-method-transfer-20261002",
-        )
-        _replay = _load_nfl_prod_replay_exact(
-            "nfl_production_replay_v1",
-            "nfl-production-v2.1-historical-edge-authority-v2-20261002",
-        )
-        pw.emit("audit", f"[NFL-EDGE-V2] Historical validation start run={run_id}; NCAAF-method transfer; 2026 untouched", pct=0.05)
+        # Exact protected-research dependencies.  These checks deliberately make
+        # a mixed deployment fail closed instead of silently shortening the run.
+        _audit = _load_nfl_prod_replay_exact("nfl_audit_v1", "nfl-audit-v1.3-prior-feature-provenance-20260930")
+        _rcontract = _load_nfl_prod_replay_exact("nfl_research_contract_v1", "nfl-research-contract-v1.9.2-protected-architecture-20261001")
+        _structured = _load_nfl_prod_replay_exact("nfl_structured_research_v2", "nfl-structured-research-v1.9.4-null-safe-season-forward-20261001")
+        _resid = _load_nfl_prod_replay_exact("nfl_residual_miner_v2", "nfl-residual-miner-v2.0-market-error-fdr-20261001")
+        _egate = _load_nfl_prod_replay_exact("nfl_edge_gate_v1", "nfl-edge-gate-v1.9.4-season-forward-dual-scorecard-20261001")
+        _ledger3 = _load_nfl_prod_replay_exact("nfl_prospective_ledger_v3", "nfl-prospective-ledger-v3-v1.9.4-edge-gate-shadow-20261001")
+        _research = _load_nfl_prod_replay_exact("nfl_research_engine_v2", "nfl-research-engine-v1.9.4-edge-gate-manager-20261001")
+        _syscontract = _load_nfl_prod_replay_exact("nfl_research_v2_contract", "nfl-research-v2.0-foundation-expansion-20261001")
+        _systems = _load_nfl_prod_replay_exact("nfl_system_lab_v3", "nfl-system-lab-v3-research-v2.2-mechanism-family-freeze-20261001")
+        _prod = _load_nfl_prod_replay_exact("nfl_production_v1", "nfl-production-v1.1.1-publish-receipt-normalization-20261002")
+        _bet = _load_nfl_prod_replay_exact("nfl_betting_engine_v1", "nfl-betting-engine-v1.0-unified-decision-20261002")
+        _shared = _load_nfl_prod_replay_exact("sports_edge_authority_v1", "sports-edge-authority-v1.0-cross-sport-standard-20261002")
+        _edge = _load_nfl_prod_replay_exact("nfl_edge_authority_v2", "nfl-edge-authority-v2.1-full-ncaaf-research-diagnostics-20261002")
+        _replay = _load_nfl_prod_replay_exact("nfl_production_replay_v1", "nfl-production-v2.2-historical-full-edge-research-20261002")
+
+        pw.emit("audit", f"[NFL-EDGE-V2.1] Full historical validation start run={run_id}; CORE + STAT + residual + System Miner V3 + authority; 2026 untouched", pct=0.03)
         try:
-            _result = _replay.run_nfl_production_historical_replay(
-                bq_client=bigquery.Client(project="sharplogger"),
-                storage_client=gcs,
-                bucket_name=bucket,
-                log_func=log_func,
+            _bq=bigquery.Client(project="sharplogger")
+            _rcontract.assert_contract()
+            _syscontract.assert_contract()
+            _audit_report=_audit.run_nfl_audit_v1(storage_client=gcs,bucket_name=bucket,log_func=log_func)
+            if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
+                raise RuntimeError("[NFL-EDGE-V2.1-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
+            _health=_ledger3.ledger_health_check(_bq,service_identity_hint="sharp-train-sa@sharplogger.iam.gserviceaccount.com")
+
+            pw.emit("research", "Audit PASS; run full CORE / STAT / residual / edge-gate research", pct=0.18)
+            _research_report=_research.run_nfl_research_engine_v2(
+                bq_client=_bq,storage_client=gcs,bucket_name=bucket,
+                audit_report=_audit_report,ledger_health=_health,log_func=log_func,
             )
-            pw.emit("done", "NFL Edge Authority V2 historical validation complete: "+_result["status"], pct=1.0)
+
+            pw.emit("systems", "CORE/STAT research complete; run full direct System Miner V3 and freeze mechanism-family registry", pct=0.48)
+            _system_report=_systems.run_nfl_system_lab_v3(
+                bq_client=_bq,storage_client=gcs,bucket_name=bucket,
+                audit_report=_audit_report,log_func=log_func,
+            )
+
+            pw.emit("replay", "System registry frozen; run leak-safe production replay + Betting Engine V1 benchmark + Edge Authority V2.1", pct=0.72)
+            _result = _replay.run_nfl_production_historical_replay(
+                bq_client=_bq,storage_client=gcs,bucket_name=bucket,log_func=log_func,
+                research_report=_research_report,system_report=_system_report,
+            )
+            pw.emit("done", "NFL Edge Authority V2.1 full historical validation complete: "+_result["status"], pct=1.0)
         except Exception as exc:
-            pw.emit("error", "NFL Production V1 historical replay failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            pw.emit("error", "NFL Edge Authority V2.1 historical validation failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
             raise
         return
 
@@ -733,7 +749,7 @@ def main():
         )
         _edge = _load_nfl_prod_live_exact(
             "nfl_edge_authority_v2",
-            "nfl-edge-authority-v2.0-ncaaf-method-transfer-20261002",
+            "nfl-edge-authority-v2.1-full-ncaaf-research-diagnostics-20261002",
         )
         _live = _load_nfl_prod_live_exact(
             "nfl_production_live_v1",

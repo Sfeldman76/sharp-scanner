@@ -46876,7 +46876,7 @@ def _ncaaf_prod_v1_grading_details_cached(lock_type="FIRST"):
 def _nfl_edge_authority_v2_state_cached():
     try:
         import nfl_edge_authority_v2 as _edge
-        if getattr(_edge,"SOURCE_TAG","") != "nfl-edge-authority-v2.0-ncaaf-method-transfer-20261002":
+        if getattr(_edge,"SOURCE_TAG","") != "nfl-edge-authority-v2.1-full-ncaaf-research-diagnostics-20261002":
             return {"status":"STALE_EDGE_AUTHORITY_V2_MODULE"}
         return _edge.read_dashboard_state(storage_client=storage.Client(),bucket_name=GCS_BUCKET)
     except Exception as e:
@@ -46955,6 +46955,50 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     with st.expander("Validated edge-family registry",expanded=False):
         if fam_rows: st.dataframe(pd.DataFrame(fam_rows),use_container_width=True,hide_index=True)
         st.caption("One mechanism family = one vote. Threshold variants, aliases, and nested systems cannot create artificial multi-signal support.")
+
+    research=meta.get("research_summary") or {}
+    if research:
+        with st.expander("CORE / STAT / System research diagnostics",expanded=False):
+            st.caption("This is the historical research evidence behind the authority layer. CORE predicts fair value; STAT/residual families test structured corrections/selectors; System Miner searches independent situational mechanisms. None of these rows receives authority merely for appearing here.")
+            _cc=research.get("core_contract") or {}
+            if _cc:
+                _contract_rows=[]
+                for _m,_b in _cc.items():
+                    _contract_rows.append({"Market":_m,"Family":(_b or {}).get("family"),"Target":(_b or {}).get("target"),"Features":", ".join((_b or {}).get("features") or []),"Ridge α":(_b or {}).get("ridge_alpha"),"Logistic C":(_b or {}).get("logistic_C")})
+                st.markdown("**Frozen CORE contract**")
+                st.dataframe(pd.DataFrame(_contract_rows),use_container_width=True,hide_index=True)
+            core_rows=[]
+            for _m,_block in (research.get("core") or {}).items():
+                _overall=(_block or {}).get("overall") or {}
+                core_rows.append({"Market":_m,"Model":"FROZEN CORE","N":_overall.get("n"),"MAE":_overall.get("mae"),"RMSE":_overall.get("rmse"),"Corr":_overall.get("corr"),"AUC":_overall.get("auc"),"Log Loss":_overall.get("log_loss"),"Brier":_overall.get("brier")})
+            for _m,_models in (research.get("core_challengers") or {}).items():
+                for _name,_met in (_models or {}).items():
+                    core_rows.append({"Market":str(_m).upper(),"Model":_name,"N":(_met or {}).get("n"),"MAE":(_met or {}).get("mae"),"RMSE":(_met or {}).get("rmse"),"Corr":(_met or {}).get("corr"),"AUC":(_met or {}).get("auc"),"Log Loss":(_met or {}).get("log_loss"),"Brier":(_met or {}).get("brier"),"Δ MAE vs CORE":(_met or {}).get("mae_improvement_vs_baseline")})
+            if core_rows:
+                st.markdown("**CORE and independent CORE challengers**")
+                st.dataframe(pd.DataFrame(core_rows),use_container_width=True,hide_index=True)
+
+            stat_rows=[]
+            for _m,_block in (research.get("stat") or {}).items():
+                _selected=set((_block or {}).get("selected_families") or [])
+                for _fam,_met in ((_block or {}).get("families") or {}).items():
+                    _met=_met or {}
+                    _ys=_met.get("by_season") or {}
+                    stat_rows.append({"Market":_m,"Family":_fam,"Selected":_fam in _selected,"N":_met.get("n"),"MAE":_met.get("mae"),"RMSE":_met.get("rmse"),"Δ MAE":_met.get("mae_improvement_vs_baseline"),"Weighted Improvement":_ys.get("weighted_improvement"),"Positive Seasons":_ys.get("positive_seasons"),"Season Count":_ys.get("season_count"),"Latest Δ":_ys.get("last_season_improvement")})
+            if stat_rows:
+                st.markdown("**STAT / structured residual families**")
+                st.dataframe(pd.DataFrame(stat_rows),use_container_width=True,hide_index=True)
+
+            _sys=research.get("systems") or {}; _reg=_sys.get("registry") or {}; _fams=_sys.get("mechanism_families") or []; _search=_sys.get("search_summary") or {}
+            st.markdown("**Direct System Miner V3**")
+            _ss=_search.get("SPREADS") or {}; _ts=_search.get("TOTALS") or {}
+            st.caption(f"Spread search: {_ss.get('raw_tested','—')} raw → {_ss.get('unique_hypotheses','—')} unique → {_ss.get('retained_rules','—')} retained; LEGIT {len(_reg.get('spread_legit_rule_ids') or [])} • PROMISING {len(_reg.get('spread_promising_rule_ids') or [])} • WATCH {len(_reg.get('spread_watch_rule_ids') or [])}. Totals search: {_ts.get('raw_tested','—')} raw → {_ts.get('unique_hypotheses','—')} unique → {_ts.get('retained_rules','—')} retained; LEGIT {len(_reg.get('total_legit_rule_ids') or [])} • PROMISING {len(_reg.get('total_promising_rule_ids') or [])} • WATCH {len(_reg.get('total_watch_rule_ids') or [])}. Mechanism families {len(_fams)} • Prospective families {len(_reg.get('prospective_family_ids') or [])}.")
+            _sys_rows=[]
+            for _f in _fams:
+                _rr=_f.get("representative_records") or {}; _disc=_rr.get("discovery") or {}; _val=_rr.get("validation_2023_2025") or {}
+                _sys_rows.append({"Market":_f.get("market"),"Family":_f.get("system_family_id"),"Status":_f.get("family_status"),"Direction":_f.get("direction"),"Representative":_f.get("representative_rule_id"),"Discovery N":_disc.get("n"),"Discovery Rate":_nfl_be_pct(_disc.get("rate")),"Validation N":_val.get("n"),"Validation Rate":_nfl_be_pct(_val.get("rate")),"Prospective":_f.get("prospective_action")})
+            if _sys_rows:
+                st.dataframe(pd.DataFrame(_sys_rows),use_container_width=True,hide_index=True)
 
     benchmark=_nfl_betting_engine_v1_benchmark_cached()
     bm=(benchmark.get("meta") or {}) if isinstance(benchmark,dict) else {}

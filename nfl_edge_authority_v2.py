@@ -36,7 +36,7 @@ import nfl_production_v1 as prod
 import nfl_betting_engine_v1 as benchmark
 import sports_edge_authority_v1 as shared
 
-SOURCE_TAG="nfl-edge-authority-v2.0-ncaaf-method-transfer-20261002"
+SOURCE_TAG="nfl-edge-authority-v2.1-full-ncaaf-research-diagnostics-20261002"
 ENGINE_VERSION="NFL_EDGE_AUTHORITY_V2"
 PROJECT="sharplogger"; DATASET="sharp_data"
 PREFIX="production/nfl/v2/edge_authority"
@@ -159,9 +159,10 @@ def _historical_system_family_context(bq_client)->dict[str,dict]:
         h=hrows.iloc[0]; home=_norm(h.Team_Norm); away=_norm(h.Opponent_Norm); votes=[]
         for _,r in g.iterrows():
             op=_num(r.get("Opening_Spread")); prevdog=_num(r.get("prev_open_dog"))
-            if prevdog==1.0 and math.isfinite(op) and op<0:
+            prevmargin=_num(r.get("prev_margin"))
+            if prevdog==1.0 and math.isfinite(prevmargin) and prevmargin<0 and math.isfinite(op) and op<0:
                 play=_norm(r.get("Opponent_Norm")); direction=1 if play==home else -1 if play==away else 0
-                if direction:votes.append({"market":"SPREADS","family":ROLE_FLIP_FAMILY,"direction":direction,"label":"Role Flip dog→favorite fade"})
+                if direction:votes.append({"market":"SPREADS","family":ROLE_FLIP_FAMILY,"direction":direction,"label":"Role Flip dog→favorite off-SU-loss fade"})
         hop=_num(h.get("Opening_Spread")); hprev=_num(h.get("prev_margin"))
         if math.isfinite(hop) and hop<0 and math.isfinite(hprev) and hprev<0:
             votes.append({"market":"SPREADS","family":HOME_FAV_FAMILY,"direction":-1,"label":"Home favorite off SU loss fade"})
@@ -242,7 +243,181 @@ def _system_candidate_frame(replay:pd.DataFrame,ctx:dict,family:str,market:str)-
     return pd.DataFrame(rec)
 
 
-def _research_families(*,bq_client,replay_rows,games,log_func=print):
+
+def _minus110_record_from_rate(rec:dict|None)->dict:
+    rec=rec or {}; n=int(rec.get("n") or 0); rate=_num(rec.get("rate"))
+    wins=int(rec.get("wins") or (round(rate*n) if math.isfinite(rate) else 0))
+    losses=max(0,n-wins)
+    roi=(wins*(100.0/110.0)-losses)/n if n else np.nan
+    return {"n":n,"graded_n":n,"wins":wins,"losses":losses,"pushes":0,
+            "hit_rate":round(wins/n,6) if n else None,
+            "roi_per_unit":round(float(roi),6) if n else None,
+            "wilson95":rec.get("wilson95") or shared.wilson95(wins,n)}
+
+
+def _system_family_variants_from_report(system_report:dict|None,log_func=print)->list[dict]:
+    if not isinstance(system_report,dict):
+        log_func('[NFL-EDGE-V2-SYSTEM-AUTHORITY-SOURCE] status=HOLD reason=SYSTEM_LAB_REPORT_MISSING no_system_family_may_receive_authority=TRUE')
+        return []
+    fams=list(system_report.get("mechanism_families") or [])
+    miners=(system_report.get("miner") or {})
+    rule_lookup={}
+    for market in ("spreads","totals"):
+        for r in ((miners.get(market) or {}).get("retained_rules") or []):
+            rid="__".join(r.get("conditions") or [])
+            rule_lookup[(str(r.get("market") or market).upper(),rid)]=r
+    out=[]
+    for fam in fams:
+        if not fam.get("prospective_eligible") or not str(fam.get("family_status") or '').startswith('LEGIT'):
+            continue
+        market=str(fam.get("market") or '').upper()
+        if market not in {"SPREADS","TOTALS"}: continue
+        rid=str(fam.get("representative_rule_id") or '')
+        rep=rule_lookup.get((market,rid),{})
+        recs=fam.get("representative_records") or rep.get("records") or {}
+        disc=_minus110_record_from_rate(recs.get("discovery"))
+        conf=_minus110_record_from_rate(recs.get("validation_2023_2025"))
+        dby={str(y):_minus110_record_from_rate((rep.get("discovery_year_by_year") or {}).get(str(y))) for y in SYSTEM_DISCOVERY_SEASONS}
+        cby={
+            "2023":_minus110_record_from_rate(recs.get("shadow")),
+            "2024":_minus110_record_from_rate(recs.get("confirmation")),
+            "2025":_minus110_record_from_rate(recs.get("final_2025")),
+        }
+        dg=_discovery_gate(disc,dby,market,"SYSTEM")
+        v={"mechanism_family_id":str(fam.get("system_family_id")),"mechanism_class":"SYSTEM","market":market,
+           "variant_id":rid,"threshold":None,"complexity":max(1,len(fam.get("representative_conditions") or [])),
+           "discovery":disc,"confirmation":conf,"discovery_by_season":dby,"confirmation_by_season":cby,
+           "discovery_gate":dg,"evidence_windows":{"discovery":list(SYSTEM_DISCOVERY_SEASONS),"confirmation":list(SYSTEM_CONFIRM_SEASONS)},
+           "system_lab_family_status":fam.get("family_status"),"system_lab_prospective_action":fam.get("prospective_action"),
+           "representative_conditions":fam.get("representative_conditions") or [],"representative_records":recs,
+           "system_lab_registry_sha256":((system_report.get("family_registry") or {}).get("family_registry_sha256") or (system_report.get("registry") or {}).get("family_registry_sha256"))}
+        out.append(v)
+        log_func("[NFL-EDGE-V2-SYSTEM-AUTHORITY-SOURCE] "+json.dumps({k:v.get(k) for k in ("mechanism_family_id","market","variant_id","representative_conditions","discovery","confirmation","system_lab_family_status","system_lab_prospective_action")},sort_keys=True,default=str))
+    return out
+
+
+def _core_perf_line(replay:pd.DataFrame,market:str,season=None)->dict:
+    q=replay if season is None else replay.loc[pd.to_numeric(replay.season,errors="coerce").eq(int(season))]
+    if market=="SPREADS":
+        a=pd.to_numeric(q.actual_margin,errors="coerce").to_numpy(float); p=pd.to_numeric(q.frozen_fair_margin,errors="coerce").to_numpy(float)
+        m=np.isfinite(a)&np.isfinite(p)
+        return {"n":int(m.sum()),"mae":round(float(np.mean(np.abs(a[m]-p[m]))),6) if m.any() else None,"rmse":round(float(np.sqrt(np.mean((a[m]-p[m])**2))),6) if m.any() else None,"corr":round(float(np.corrcoef(a[m],p[m])[0,1]),6) if m.sum()>2 else None}
+    if market=="TOTALS":
+        a=pd.to_numeric(q.actual_total,errors="coerce").to_numpy(float); p=pd.to_numeric(q.frozen_fair_total,errors="coerce").to_numpy(float)
+        m=np.isfinite(a)&np.isfinite(p)
+        return {"n":int(m.sum()),"mae":round(float(np.mean(np.abs(a[m]-p[m]))),6) if m.any() else None,"rmse":round(float(np.sqrt(np.mean((a[m]-p[m])**2))),6) if m.any() else None,"corr":round(float(np.corrcoef(a[m],p[m])[0,1]),6) if m.sum()>2 else None}
+    y=pd.to_numeric(q.home_win_label,errors="coerce").to_numpy(float); p=pd.to_numeric(q.frozen_home_win_probability,errors="coerce").to_numpy(float); m=np.isfinite(y)&np.isfinite(p)
+    if not m.any(): return {"n":0}
+    from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
+    return {"n":int(m.sum()),"auc":round(float(roc_auc_score(y[m],p[m])),6) if len(np.unique(y[m]))>1 else None,"log_loss":round(float(log_loss(y[m],np.clip(p[m],1e-6,1-1e-6))),6),"brier":round(float(brier_score_loss(y[m],p[m])),6)}
+
+
+def _build_research_summary(replay_rows:pd.DataFrame,research_report:dict|None,system_report:dict|None)->dict:
+    _all_model_seasons=tuple(sorted(set(DISCOVERY_SEASONS+CONFIRM_SEASONS)))
+    core={m:{"overall":_core_perf_line(replay_rows,m),"by_season":{str(y):_core_perf_line(replay_rows,m,y) for y in _all_model_seasons}} for m in ("SPREADS","H2H","TOTALS")}
+    structured=((research_report or {}).get("structured") or {})
+    stat={}
+    for m in ("spreads","totals"):
+        rr=((structured.get("residual") or {}).get(m) or {})
+        stat[m.upper()]={"selected_families":rr.get("prospective_freeze_selected_families") or [],"families":rr.get("families") or {},"nested_stable_blend":rr.get("nested_stable_blend") or {},"selection_detail":rr.get("prospective_selection_detail") or {},"nested_selection":rr.get("nested_selection") or {}}
+    _sm=(system_report or {}).get("miner") or {}
+    systems={
+        "registry":(system_report or {}).get("registry") or {},
+        "mechanism_families":(system_report or {}).get("mechanism_families") or [],
+        "search_summary":{
+            m.upper():{
+                "raw_tested":((_sm.get(m) or {}).get("raw_tested")),
+                "unique_hypotheses":((_sm.get(m) or {}).get("unique_hypotheses")),
+                "retained_rules":len(((_sm.get(m) or {}).get("retained_rules") or [])),
+            } for m in ("spreads","totals")
+        },
+    }
+    return {
+        "core_contract":(prod.production_contract().get("backbones") or {}),
+        "core":core,"core_challengers":structured.get("core_challengers") or {},"stat":stat,"systems":systems,
+        "core_stat_disagreement":structured.get("disagreement") or {},
+        "residual_miner":((research_report or {}).get("miner") or {}),"edge_gate":((research_report or {}).get("edge_gate") or {})
+    }
+
+
+def _emit_full_research_diagnostics(replay_rows:pd.DataFrame,research_report:dict|None,system_report:dict|None,summary:dict,log_func=print):
+    pc=prod.production_contract(); backs=pc.get("backbones") or {}
+    for market in ("SPREADS","H2H","TOTALS"):
+        b=backs.get(market) or backs.get(market.lower()) or {}
+        log_func("[NFL-EDGE-V2-CORE-CONTRACT] "+json.dumps({"market":market,"family":b.get("family"),"target":b.get("target"),"features":b.get("features") or [],"ridge_alpha":b.get("ridge_alpha"),"logistic_C":b.get("logistic_C"),"role":"FROZEN_FAIR_VALUE_BACKBONE_MARKET_INDEPENDENT_CURRENT_GAME"},sort_keys=True,default=str))
+        _cp=((summary.get("core") or {}).get(market) or {})
+        log_func("[NFL-EDGE-V2-CORE-PERFORMANCE] "+json.dumps({"market":market,"sample":"ALL_2021_2025",**(_cp.get("overall") or {})},sort_keys=True,default=str))
+        for _sy,_met in (_cp.get("by_season") or {}).items():
+            log_func("[NFL-EDGE-V2-CORE-PERFORMANCE] "+json.dumps({"market":market,"sample":str(_sy),**(_met or {})},sort_keys=True,default=str))
+    for market,models in ((summary.get("core_challengers") or {}).items()):
+        for name,met in (models or {}).items():
+            log_func("[NFL-EDGE-V2-CORE-CHALLENGER] "+json.dumps({"market":market.upper(),"model":name,**(met or {})},sort_keys=True,default=str))
+    for market,block in (summary.get("stat") or {}).items():
+        selected=set(block.get("selected_families") or [])
+        for fam,met in (block.get("families") or {}).items():
+            log_func("[NFL-EDGE-V2-STAT-FAMILY] "+json.dumps({"market":market,"family":fam,"selected_for_prospective_shadow":fam in selected,**(met or {})},sort_keys=True,default=str))
+        log_func("[NFL-EDGE-V2-STAT-SELECTION] "+json.dumps({"market":market,"selected_families":sorted(selected),"nested_stable_blend":block.get("nested_stable_blend") or {},"selection_detail":block.get("selection_detail") or {},"nested_selection":block.get("nested_selection") or {},"role":"MARKET_RESIDUAL_SELECTOR_NOT_CORE_REWRITE"},sort_keys=True,default=str))
+    for market,diag in (summary.get("core_stat_disagreement") or {}).items():
+        log_func("[NFL-EDGE-V2-CORE-STAT-DISAGREEMENT] "+json.dumps({"market":market.upper(),**(diag or {})},sort_keys=True,default=str))
+    edge_gate=summary.get("edge_gate") or {}
+    for market,diag in ((edge_gate.get("markets") or {}).items()):
+        log_func("[NFL-EDGE-V2-EDGE-GATE] "+json.dumps({
+            "market":market.upper(),
+            "fair_line_scorecard":diag.get("fair_line_scorecard") or {},
+            "transparent_gates":diag.get("transparent_gates") or {},
+            "core_gate_probability":diag.get("core_gate_probability") or {},
+            "core_gate_by_season":diag.get("core_gate_by_season") or {},
+            "core_gate_fixed_probability_bands":diag.get("core_gate_fixed_probability_bands") or {},
+            "consensus_gate_probability":diag.get("consensus_gate_probability") or {},
+            "consensus_gate_by_season":diag.get("consensus_gate_by_season") or {},
+            "prospective_selected_residual_families":diag.get("prospective_selected_residual_families") or [],
+            "selection_policy":diag.get("selection_policy"),
+        },sort_keys=True,default=str))
+    disagreement=summary.get("core_stat_disagreement") or {}
+    for market,block in disagreement.items():
+        if market=="production_authority" or not isinstance(block,dict): continue
+        log_func("[NFL-EDGE-V2-CORE-STAT-DISAGREEMENT] "+json.dumps({"market":str(market).upper(),**block},sort_keys=True,default=str))
+    edge_gate=summary.get("edge_gate") or {}
+    for market,block in ((edge_gate.get("markets") or {}).items()):
+        log_func("[NFL-EDGE-V2-EDGE-GATE] "+json.dumps({
+            "market":str(market).upper(),
+            "fair_line_scorecard":(block or {}).get("fair_line_scorecard") or {},
+            "transparent_gates":(block or {}).get("transparent_gates") or {},
+            "core_gate_probability":(block or {}).get("core_gate_probability") or {},
+            "core_gate_by_season":(block or {}).get("core_gate_by_season") or {},
+            "core_gate_fixed_probability_bands":(block or {}).get("core_gate_fixed_probability_bands") or {},
+            "consensus_gate_probability":(block or {}).get("consensus_gate_probability") or {},
+            "consensus_gate_by_season":(block or {}).get("consensus_gate_by_season") or {},
+            "prospective_selected_residual_families":(block or {}).get("prospective_selected_residual_families") or [],
+            "prospective_consensus_gate_applicable":bool((block or {}).get("prospective_consensus_gate_applicable")),
+            "selection_policy":(block or {}).get("selection_policy"),
+        },sort_keys=True,default=str))
+    miner=summary.get("residual_miner") or {}
+    for market,mr in ((miner.get("markets") or {}).items()):
+        log_func("[NFL-EDGE-V2-RESIDUAL-MINER-SUMMARY] "+json.dumps({"market":market.upper(),"candidate_conditions":mr.get("candidate_conditions"),"single_discovery_fdr_pass":mr.get("single_discovery_fdr_pass"),"pair_discovery_fdr_pass":mr.get("pair_discovery_fdr_pass"),"validated_rule_count":mr.get("validated_rule_count"),"promising_count":mr.get("promising_count"),"selection_basis":mr.get("selection_basis")},sort_keys=True,default=str))
+        for r in (mr.get("promising_rules") or [])[:20]:
+            log_func("[NFL-EDGE-V2-RESIDUAL-MINER-TOP] "+json.dumps({"market":market.upper(),"rule_id":r.get("rule_id"),"type":r.get("type"),"direction":r.get("direction"),"conditions":r.get("conditions"),"discovery":r.get("discovery"),"shadow":r.get("shadow"),"confirm":r.get("confirm"),"same_direction_all_splits":r.get("same_direction_all_splits")},sort_keys=True,default=str))
+    sr=summary.get("systems") or {}; reg=sr.get("registry") or {}
+    _sm=(system_report or {}).get("miner") or {}
+    log_func("[NFL-EDGE-V2-SYSTEM-MINER-SUMMARY] "+json.dumps({
+        "status":(system_report or {}).get("status"),
+        "spread_raw_tested":((_sm.get("spreads") or {}).get("raw_tested")),
+        "spread_unique_hypotheses":((_sm.get("spreads") or {}).get("unique_hypotheses")),
+        "spread_retained":len(((_sm.get("spreads") or {}).get("retained_rules") or [])),
+        "spread_legit":len(reg.get("spread_legit_rule_ids") or []),"spread_promising":len(reg.get("spread_promising_rule_ids") or []),"spread_watch":len(reg.get("spread_watch_rule_ids") or []),
+        "total_raw_tested":((_sm.get("totals") or {}).get("raw_tested")),
+        "total_unique_hypotheses":((_sm.get("totals") or {}).get("unique_hypotheses")),
+        "total_retained":len(((_sm.get("totals") or {}).get("retained_rules") or [])),
+        "total_legit":len(reg.get("total_legit_rule_ids") or []),"total_promising":len(reg.get("total_promising_rule_ids") or []),"total_watch":len(reg.get("total_watch_rule_ids") or []),
+        "mechanism_families":len(sr.get("mechanism_families") or []),"prospective_family_ids":reg.get("prospective_family_ids") or [],"family_registry_sha256":reg.get("family_registry_sha256")
+    },sort_keys=True,default=str))
+    for fam in sr.get("mechanism_families") or []:
+        log_func("[NFL-EDGE-V2-SYSTEM-FAMILY-DETAIL] "+json.dumps({k:fam.get(k) for k in ("system_family_id","market","direction","family_status","member_count","representative_rule_id","representative_conditions","representative_records","strongest_validation_rule_id","strongest_validation_records","prospective_action","prospective_eligible")},sort_keys=True,default=str))
+    for market,mr in (((system_report or {}).get("miner") or {}).items()):
+        for r in (mr.get("retained_rules") or [])[:25]:
+            log_func("[NFL-EDGE-V2-SYSTEM-TOP] "+json.dumps({"market":market.upper(),"rank":r.get("rank"),"status":r.get("status"),"rule_id":"__".join(r.get("conditions") or []),"conditions":r.get("conditions"),"families":r.get("families"),"direction":r.get("direction"),"records":r.get("records"),"min_fold_rate":r.get("min_fold_rate"),"min_loso_rate":r.get("min_loso_rate"),"remove_best":r.get("remove_best_season_record"),"bootstrap_ci95":r.get("bootstrap_ci95"),"maxstat_p":r.get("permutation_max_pvalue"),"hierarchical_fdr_q":r.get("hierarchical_family_qvalue")},sort_keys=True,default=str))
+
+def _research_families(*,bq_client,replay_rows,games,log_func=print,research_report=None,system_report=None):
     base=benchmark.build_historical_engine_rows(bq_client=bq_client,replay_rows=replay_rows,games=games)
     base=_attach_actuals(base,replay_rows)
     sysctx=_historical_system_family_context(bq_client)
@@ -263,16 +438,9 @@ def _research_families(*,bq_client,replay_rows,games,log_func=print):
         for t in STAT_THRESHOLDS:
             mask=agree & pd.to_numeric(d.selector_scaled,errors="coerce").ge(t).to_numpy(bool)
             variants.append(_variant(d,market,f"NFL_{market}_STAT_SHARED_EDGE","STAT_SELECTOR",f"SCALED_GE_{t}",t,mask))
-    # Frozen direct system definitions: preserve their prior discovery/confirmation philosophy.
-    for fam,market in ((ROLE_FLIP_FAMILY,"SPREADS"),(HOME_FAV_FAMILY,"SPREADS"),(EARLY_DIV_UNDER_FAMILY,"TOTALS")):
-        d=_system_candidate_frame(replay_rows,sysctx,fam,market)
-        if d.empty:
-            v={"mechanism_family_id":fam,"mechanism_class":"SYSTEM","market":market,"variant_id":fam,"threshold":None,"complexity":1,
-               "discovery":{"n":0},"confirmation":{"n":0},"discovery_by_season":{},"confirmation_by_season":{},"discovery_gate":{"status":"HOLD","reasons":["NO_ROWS"]},
-               "evidence_windows":{"discovery":list(SYSTEM_DISCOVERY_SEASONS),"confirmation":list(SYSTEM_CONFIRM_SEASONS)}}
-        else:
-            v=_variant(d,market,fam,"SYSTEM",fam,None,np.ones(len(d),bool),SYSTEM_DISCOVERY_SEASONS,SYSTEM_CONFIRM_SEASONS)
-        variants.append(v)
+    # SYSTEM evidence comes from the authoritative System Miner V3 mechanism-family registry.
+    # Never reconstruct 2017-2022 discovery from the shorter 2021-2025 production replay.
+    variants.extend(_system_family_variants_from_report(system_report,log_func=log_func))
     collapsed=shared.collapse_family_variants(variants)
     families=[]
     for f in collapsed:
@@ -329,9 +497,11 @@ def _resolved_performance(base,families,selector_oof_by_market,sysctx,market,sea
     return out
 
 
-def train_publish_edge_authority(*,bq_client,storage_client,bucket_name:str,replay_rows:pd.DataFrame,games:pd.DataFrame,log_func=print)->dict:
+def train_publish_edge_authority(*,bq_client,storage_client,bucket_name:str,replay_rows:pd.DataFrame,games:pd.DataFrame,research_report=None,system_report=None,log_func=print)->dict:
     log_func("[NFL-EDGE-V2-PREFLIGHT] "+json.dumps({"status":"START","source_tag":SOURCE_TAG,"shared_framework":shared.framework_contract(),"discovery_seasons":list(DISCOVERY_SEASONS),"confirmation_seasons":list(CONFIRM_SEASONS),"year_2026_queried":False,"betting_engine_v1_role":"BENCHMARK_SHADOW"},sort_keys=True))
-    families,selectors,base,sysctx=_research_families(bq_client=bq_client,replay_rows=replay_rows,games=games,log_func=log_func)
+    families,selectors,base,sysctx=_research_families(bq_client=bq_client,replay_rows=replay_rows,games=games,research_report=research_report,system_report=system_report,log_func=log_func)
+    research_summary=_build_research_summary(replay_rows,research_report,system_report)
+    _emit_full_research_diagnostics(replay_rows,research_report,system_report,research_summary,log_func=log_func)
     # Recreate selector OOF lookup for action-state validation.
     selector_oof={}
     for market in ("SPREADS","TOTALS"):
@@ -351,7 +521,7 @@ def train_publish_edge_authority(*,bq_client,storage_client,bucket_name:str,repl
     contract={"status":"NFL_EDGE_AUTHORITY_V2_ACTIVE","source_tag":SOURCE_TAG,"engine_version":ENGINE_VERSION,"framework":shared.framework_contract(),
               "production_contract_sha256":prod.production_contract()["contract_sha256"],"discovery_seasons":list(DISCOVERY_SEASONS),"confirmation_seasons":list(CONFIRM_SEASONS),
               "system_evidence_windows":{"discovery":list(SYSTEM_DISCOVERY_SEASONS),"confirmation":list(SYSTEM_CONFIRM_SEASONS)},"year_2026_queried":False,
-              "families":stable_families,"markets":market_contract,"historical_action_performance":action_perf,"betting_engine_v1_role":"BENCHMARK_SHADOW",
+              "families":stable_families,"markets":market_contract,"historical_action_performance":action_perf,"research_summary":research_summary,"betting_engine_v1_role":"BENCHMARK_SHADOW",
               "automatic_execution":False,"automatic_model_promotion":False}
     fingerprint=_sha({"framework":contract["framework"]["contract_sha256"],"families":[{k:f.get(k) for k in ("mechanism_family_id","variant_id","threshold","family_status")} for f in stable_families],"markets":market_contract})
     contract["contract_sha256"]=fingerprint

@@ -40,7 +40,7 @@ import nfl_betting_engine_v1 as betting
 import nfl_edge_authority_v2 as edge_v2
 from nfl_feature_audit_v1 import VIEW
 
-SOURCE_TAG = "nfl-production-v2.1-historical-edge-authority-v2-20261002"
+SOURCE_TAG = "nfl-production-v2.2-historical-full-edge-research-20261002"
 VALIDATION_SEASONS = (2021, 2022, 2023, 2024, 2025)
 VALIDATION_STAGE = "REGULAR"
 MARKET_COLUMNS = (
@@ -464,7 +464,7 @@ def _publish(storage_client, bucket_name: str, report: dict, rows: pd.DataFrame)
     return {"replay_sha256":digest,"report_uri":rr["uri"],"rows_uri":dr["uri"],"report_created":rr.get("created"),"rows_created":dr.get("created")}
 
 
-def run_nfl_production_historical_replay(*, bq_client, storage_client=None, bucket_name="sharp-models", log_func=print, now=None) -> dict:
+def run_nfl_production_historical_replay(*, bq_client, storage_client=None, bucket_name="sharp-models", log_func=print, now=None, research_report=None, system_report=None) -> dict:
     now = now or datetime.now(timezone.utc)
     contract = prod.production_contract()
     log_func("[NFL-PROD-V1-REPLAY-PREFLIGHT] " + json.dumps({
@@ -503,7 +503,8 @@ def run_nfl_production_historical_replay(*, bq_client, storage_client=None, buck
         )
         edge_meta = edge_v2.train_publish_edge_authority(
             bq_client=bq_client, storage_client=storage_client, bucket_name=bucket_name,
-            replay_rows=replay, games=games, log_func=log_func,
+            replay_rows=replay, games=games, research_report=research_report,
+            system_report=system_report, log_func=log_func,
         )
 
     report = {
@@ -523,6 +524,11 @@ def run_nfl_production_historical_replay(*, bq_client, storage_client=None, buck
         "systems":"EDGE_AUTHORITY_V2_COUNTS_ONE_VOTE_PER_INDEPENDENT_MECHANISM_FAMILY; ALIASES_DO_NOT_INFLATE_AUTHORITY",
         "betting_engine_v1_benchmark":betting_meta,
         "edge_authority_v2":edge_meta,
+        "research_diagnostics": {
+            "research_status": (research_report or {}).get("status") if isinstance(research_report,dict) else None,
+            "system_status": (system_report or {}).get("status") if isinstance(system_report,dict) else None,
+            "system_family_registry_sha256": (((system_report or {}).get("registry") or {}).get("family_registry_sha256") if isinstance(system_report,dict) else None),
+        },
     }
     pub = _publish(storage_client,bucket_name,report,replay) if storage_client is not None else {}
     report["artifacts"] = pub
@@ -534,6 +540,7 @@ def run_nfl_production_historical_replay(*, bq_client, storage_client=None, buck
         "betting_engine_v1_benchmark_status":betting_meta.get("status"),
         "edge_authority_v2_status":edge_meta.get("status"),
         "edge_authority_v2_markets":edge_meta.get("markets",{}),
+        "research_diagnostics":report.get("research_diagnostics",{}),
         "current_report_uri":report.get("current_report_uri"),
         "production_authority":0, "automatic_promotion":False,
         "next_step":"RUN_WEEKLY_UPDATE_TO_APPLY_EDGE_AUTHORITY_V2_AND_ACCUMULATE_PROSPECTIVE_EDGE_PERFORMANCE",
