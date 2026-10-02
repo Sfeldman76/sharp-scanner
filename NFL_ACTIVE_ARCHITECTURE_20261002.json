@@ -1,51 +1,45 @@
 {
-  "architecture": "NFL_PRODUCTION_V2_WITH_BETTING_ENGINE_V1",
+  "architecture": "NFL_PRODUCTION_V2_1_WITH_SHARED_EDGE_AUTHORITY_V2",
   "as_of": "2026-10-02",
-  "betting_engine": {
-    "2026_training_use": false,
-    "automatic_promotion": false,
-    "automatic_wagering": false,
-    "final_training": "2021-2025 only",
-    "fixed_candidate_bet_ev": 0.02,
-    "fixed_logistic_C": 0.35,
-    "historical_validation": {
-      "2023": "train 2021-2022",
-      "2024": "train 2021-2023",
-      "2025": "train 2021-2024"
-    },
-    "markets": [
-      "SPREADS",
-      "H2H",
-      "TOTALS"
-    ],
-    "model_family": "regularized logistic regression",
-    "source_tag": "nfl-betting-engine-v1.0-unified-decision-20261002"
+  "shared_standard": {
+    "module": "sports_edge_authority_v1.py",
+    "document": "SPORTS_EDGE_AUTHORITY_STANDARD_V1.md",
+    "source_tag": "sports-edge-authority-v1.0-cross-sport-standard-20261002",
+    "rule": "sport adapters change; prediction-vs-authority separation, family collapse, confirmation, independent-mechanism counting and conflict rules do not"
   },
-  "cleanup": "cleanup_nfl_repository.py",
+  "primary_decision_engine": {
+    "module": "nfl_edge_authority_v2.py",
+    "source_tag": "nfl-edge-authority-v2.0-ncaaf-method-transfer-20261002",
+    "method_origin": "NCAAF Production V1 edge-authority architecture",
+    "mechanism_classes": ["FAIR_VALUE", "STAT_SELECTOR", "SYSTEM", "MARKET_CONFIRMATION"],
+    "new_selector_discovery": [2021, 2022, 2023],
+    "new_selector_confirmation": [2024, 2025],
+    "system_discovery": [2017, 2018, 2019, 2020, 2021, 2022],
+    "system_confirmation": [2023, 2024, 2025],
+    "2026_training_use": false,
+    "automatic_wagering": false,
+    "automatic_model_promotion": false
+  },
+  "benchmark_only": {
+    "module": "nfl_betting_engine_v1.py",
+    "role": "FAILED_PROMOTION_BENCHMARK_SHADOW",
+    "reason": "generic second-stage logistic engine failed historical betting-authority gates; retained so future sports/research do not repeat the architecture unknowingly"
+  },
   "operator_routes": {
-    "challenger_research": {
-      "label": "NFL Challenger Research"
-    },
-    "historical_validation": {
-      "label": "NFL Betting Engine \u2014 Historical Validation",
-      "market": "nfl_production_replay"
-    },
-    "system_research": {
-      "label": "NFL System Research / Miner"
-    },
-    "weekly_update": {
-      "label": "NFL Production \u2014 Weekly Update",
-      "market": "nfl_production_weekly"
-    }
+    "weekly_update": {"label": "NFL Production — Weekly Update", "market": "nfl_production_weekly"},
+    "historical_validation": {"label": "NFL Edge Authority — Historical Validation", "market": "nfl_production_replay"},
+    "challenger_research": {"label": "NFL Challenger Research"},
+    "system_research": {"label": "NFL System Research / Miner"}
   },
   "production": {
-    "betting_decision_engine": "nfl_betting_engine_v1.py",
-    "dashboard": "sharp_line_dashboard.py",
     "fair_value_backbones": "nfl_production_v1.py",
-    "historical_nested_validation": "nfl_production_replay_v1.py",
-    "job_router": "train_job.py",
+    "edge_authority": "nfl_edge_authority_v2.py",
+    "shared_authority_framework": "sports_edge_authority_v1.py",
+    "historical_validation": "nfl_production_replay_v1.py",
     "live_feature_parity": "nfl_live_feature_parity_v1.py",
-    "live_paired_ledger_and_bet_scoring": "nfl_production_live_v1.py"
+    "live_paired_ledger_and_edge_scoring": "nfl_production_live_v1.py",
+    "dashboard": "sharp_line_dashboard.py",
+    "job_router": "train_job.py"
   },
   "research_preserved": [
     "nfl_research_engine_v2.py",
@@ -56,8 +50,5 @@
     "nfl_system_shadow_v2.py",
     "nfl_pbp_foundation_v1.py",
     "nfl_pbp_attribution_v1.py"
-  ],
-  "retired_active_production_path": [
-    "nfl_production_recommendations_v1.py"
   ]
 }
