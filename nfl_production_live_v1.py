@@ -1,9 +1,9 @@
-"""NFL Production V2.0 — live scoring, paired ledger, unified Betting Engine V1.
+"""NFL Production V2.1 — live scoring, paired ledger, Edge Authority V2.
 
 Purpose
 -------
 This module starts the *prospective* evidence clock for NFL Production V1.
-It does not train fair-value models or promote a challenger. Betting actions are produced only by the separately frozen Betting Engine V1 artifact.
+It does not train fair-value models or promote a challenger. Betting authority is produced only by the separately frozen Edge Authority V2 contract; Betting Engine V1 remains benchmark-only.
 
 For each upcoming physical game it:
 1. Rebuilds the already-proven live Production V1 feature frame.
@@ -38,8 +38,9 @@ from google.cloud import bigquery
 import nfl_live_feature_parity_v1 as parity
 import nfl_production_v1 as prod
 import nfl_betting_engine_v1 as betting
+import nfl_edge_authority_v2 as edge_v2
 
-SOURCE_TAG = "nfl-production-v2.0-live-betting-engine-20261002"
+SOURCE_TAG = "nfl-production-v2.1-live-edge-authority-v2-20261002"
 EXPECTED_PARITY_TAG = "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002"
 EXPECTED_PROD_TAG = "nfl-production-v1.1.1-publish-receipt-normalization-20261002"
 
@@ -611,17 +612,16 @@ def run_nfl_production_live_score(*, bq_client, storage_client, bucket_name="sha
     log_func("[NFL-PROD-V1-PROMOTION-CLOCK] " + json.dumps(clock, sort_keys=True, default=str))
 
     try:
-        betting_state = betting.update_live_state(
+        edge_state = edge_v2.update_live_state(
             bq_client=bq_client, storage_client=storage_client, bucket_name=bucket_name,
-            prediction_rows=prediction_rows, champion_sha=champion_ptr.get("registry_sha256"),
-            now=now, log_func=log_func,
+            prediction_rows=prediction_rows, now=now, log_func=log_func,
         )
     except Exception as exc:
-        betting_state={"status":"HOLD_BETTING_ENGINE_ERROR","error":f"{type(exc).__name__}:{exc}","action_counts":{}}
-        log_func("[NFL-BET-ENGINE-V1-LIVE] "+json.dumps(betting_state,sort_keys=True,default=str))
+        edge_state={"status":"HOLD_EDGE_AUTHORITY_V2_ERROR","error":f"{type(exc).__name__}:{exc}","action_counts":{}}
+        log_func("[NFL-EDGE-V2-LIVE] "+json.dumps(edge_state,sort_keys=True,default=str))
 
-    _live_rows = betting_state.get("live_rows", []) if isinstance(betting_state, dict) else []
-    _action_counts = betting_state.get("action_counts", {}) if isinstance(betting_state, dict) else {}
+    _live_rows = edge_state.get("live_rows", []) if isinstance(edge_state, dict) else []
+    _action_counts = edge_state.get("action_counts", {}) if isinstance(edge_state, dict) else {}
 
     report = {
         "status": "NFL_PRODUCTION_V1_LIVE_PAIRED_LEDGER_ACTIVE",
@@ -635,17 +635,17 @@ def run_nfl_production_live_score(*, bq_client, storage_client, bucket_name="sha
         "settlement_write": settle_write,
         "promotion_clock": clock,
         "model_prediction_authority": True,
-        "betting_decision_authority": bool(((betting_state.get("engine_meta") or {}).get("betting_decision_authority"))) if isinstance(betting_state, dict) else False,
+        "betting_decision_authority": bool(any(bool((x or {}).get("production_authority")) for x in (((edge_state.get("contract") or {}).get("markets") or {}).values()))) if isinstance(edge_state, dict) else False,
         "automatic_promotion": False,
-        "betting_engine": {
-            "status": betting_state.get("status"),
+        "edge_authority_v2": {
+            "status": edge_state.get("status"),
             "action_counts": _action_counts,
-            "live_bet_performance": betting_state.get("live_bet_performance",{}),
-            "prospective_model_performance": betting_state.get("prospective_model_performance",{}),
-            "current_uri": betting_state.get("current_uri"),
+            "live_performance": edge_state.get("live_performance",{}),
+            "current_uri": edge_state.get("current_uri"),
             "automatic_execution": False,
         },
-        "next_step": "CONTINUE_WEEKLY_UPDATE_AND_ACCUMULATE_UNIFIED_BETTING_ENGINE_PERFORMANCE",
+        "betting_engine_v1": {"role":"BENCHMARK_SHADOW"},
+        "next_step": "CONTINUE_WEEKLY_UPDATE_AND_ACCUMULATE_EDGE_AUTHORITY_V2_PROSPECTIVE_PERFORMANCE",
     }
     report["status_uri"] = _write_status(storage_client, bucket_name, report)
     log_func("[NFL-PROD-V1-LIVE-CONTRACT] " + json.dumps(report, sort_keys=True, default=str))
@@ -653,7 +653,7 @@ def run_nfl_production_live_score(*, bq_client, storage_client, bucket_name="sha
 
 
 def _self_test():
-    assert SOURCE_TAG.startswith("nfl-production-v2.0-")
+    assert SOURCE_TAG.startswith("nfl-production-v2.1-")
     assert MIN_PROMOTION_SETTLED_GAMES == 60
     assert PROMOTION_REVIEW_CADENCE_DAYS == 28
     assert prod.SOURCE_TAG == EXPECTED_PROD_TAG
