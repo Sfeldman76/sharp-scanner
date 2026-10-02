@@ -612,7 +612,7 @@ def main():
         )
         _prod = _load_nfl_prod_refresh_exact(
             "nfl_production_v1",
-            "nfl-production-v1.1-fixed-backbones-refresh-baseline-gates-20261002",
+            "nfl-production-v1.1.1-publish-receipt-normalization-20261002",
         )
         pw.emit("audit", f"[NFL-PROD-V1] Verify live parity before refresh run={run_id}", pct=0.05)
         try:
