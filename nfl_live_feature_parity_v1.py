@@ -9,9 +9,7 @@ The audit has zero production authority and writes no predictions.
 The historical replay deliberately recomputes the compact prior-state features
 from the authoritative raw team-side history instead of reading them from the
 training view.  The recomputed values are then compared field-for-field to the
-historical training view.  Upcoming Week_Number is reconstructed from the authoritative uploader's Week-1
-schedule using the NFL Tuesday-to-Monday regular-season week boundary.  That rule
-must replay every historical REGULAR-season Week label exactly before live use.
+historical training view.  Upcoming Week_Number uses the uploader-proven Tuesday-to-Monday regular-season calendar on standard live schedule days. Tuesday/Wednesday games are exception-gated and require an authoritative exact-date Week label before live use.
 Postseason week numbering is deliberately outside this live contract and remains
 fail-closed until a separate stage-aware adapter is proven. Division context comes
 from fixed NFL alignment and is replay-validated. Unproven live fields remain
@@ -32,7 +30,7 @@ from google.cloud import bigquery as b
 
 from nfl_challenger_v1 import COMPACT_FEATURES
 
-SOURCE_TAG = "nfl-production-v1-live-feature-parity-v1.0.3-tuesday-week-boundary-20261001"
+SOURCE_TAG = "nfl-production-v1-live-feature-parity-v1.0.4-standard-week-exception-gate-20261001"
 PROJECT = "sharplogger"
 DATASET = "sharp_data"
 RAW = f"{PROJECT}.{DATASET}.nfl_historical_game_side_raw"
@@ -411,17 +409,18 @@ def fetch_upcoming_games(client, now=None, lookahead_days=8):
 
 
 def validate_week_calendar(raw: pd.DataFrame) -> dict:
-    """Prove the NFL regular-season Tuesday-to-Monday week calendar.
+    """Prove the live-eligible NFL regular-season week adapter.
 
-    NFL regular-season weeks are operational schedule buckets rather than simply
-    seven days beginning with the first game.  A Tuesday boundary correctly keeps
-    Thu-Mon games together and handles special Wednesday games (for example the
-    2024 Christmas slate) without using a hand-written holiday exception.
+    Standard NFL schedule days are reconstructed from the Tuesday-to-Monday
+    schedule bucket learned from each season's authoritative uploader Week-1
+    labels. Historical Tuesday/Wednesday regular-season rows are audited
+    separately because rescheduled COVID-era games can retain the prior NFL
+    week label after crossing the normal calendar boundary.
 
-    The boundary is learned only from each season's authoritative uploader Week-1
-    label and is replayed against every REGULAR-season row.  POSTSEASON rows are
-    excluded because playoff bye weeks make their numbering a separate stage-aware
-    contract.
+    Live Production V1 may therefore infer Week_Number only for standard
+    schedule weekdays (Thu-Mon plus Fri/Sat). A future Tuesday/Wednesday game
+    fails closed unless an authoritative uploader Week label is available for
+    that exact date. POSTSEASON remains outside this adapter.
     """
     d=raw.copy()
     d["Game_Date"]=pd.to_datetime(d.Game_Date, errors="coerce").dt.normalize()
@@ -431,26 +430,35 @@ def validate_week_calendar(raw: pd.DataFrame) -> dict:
     d["__stage"]=stage
     labeled=d.loc[d.Game_Date.notna() & d.Week_Num.notna() & d.Season_Num.notna()].copy()
     postseason_rows=int(labeled.__stage.eq("POSTSEASON").sum())
-    d=labeled.loc[labeled.__stage.eq("REGULAR")].copy()
-    d["Season_Num"]=d.Season_Num.astype(int)
+    reg=labeled.loc[labeled.__stage.eq("REGULAR")].copy()
+    reg["Season_Num"]=reg.Season_Num.astype(int)
+    reg["__weekday"]=reg.Game_Date.dt.weekday
 
     anchors={}
     max_week={}
-    for season,g in d.groupby("Season_Num",sort=True):
+    date_week_labels={}
+    for season,g in reg.groupby("Season_Num",sort=True):
         w1=g.loc[g.Week_Num.eq(1),"Game_Date"]
         if w1.empty:
             continue
         first=pd.Timestamp(w1.min())
-        # Python weekday: Monday=0, Tuesday=1. Move backward to the Tuesday
-        # containing the first authoritative Week-1 game.
         days_since_tuesday=(int(first.weekday())-1) % 7
         anchor=(first-pd.Timedelta(days=days_since_tuesday)).normalize()
         anchors[int(season)]=anchor
         mw=pd.to_numeric(g.Week_Num,errors="coerce").max()
         if pd.notna(mw): max_week[int(season)]=int(mw)
+        for gd,gg in g.groupby("Game_Date"):
+            vals=sorted(set(int(x) for x in pd.to_numeric(gg.Week_Num,errors="coerce").dropna().tolist()))
+            if len(vals)==1:
+                date_week_labels[f"{int(season)}|{pd.Timestamp(gd).date()}"]=vals[0]
+
+    # Tue/Wed require authoritative exact-date Week metadata; all other regular
+    # schedule days use the standard calendar adapter.
+    exceptional=reg.loc[reg.__weekday.isin([1,2])].copy()
+    standard=reg.loc[~reg.__weekday.isin([1,2])].copy()
 
     rows=[]; mismatch=[]; season_mismatch=[]
-    for r in d.itertuples(index=False):
+    for r in standard.itertuples(index=False):
         season=int(r.Season_Num)
         inferred_season=_season_from_date(r.Game_Date)
         if inferred_season != season:
@@ -464,16 +472,40 @@ def validate_week_calendar(raw: pd.DataFrame) -> dict:
             mismatch.append({"season":season,"game_date":str(pd.Timestamp(r.Game_Date).date()),"reference_week":float(r.Week_Num),"rebuilt_week":int(pred)})
     total=len(rows)
     mm=sum(1 for _,a,z in rows if abs(a-z)>1e-9)
+
+    exc_samples=[]; exc_mismatch=0
+    for r in exceptional.itertuples(index=False):
+        anchor=anchors.get(int(r.Season_Num))
+        pred=None if anchor is None else 1+int((pd.Timestamp(r.Game_Date)-anchor).days//7)
+        bad=pred is None or abs(float(r.Week_Num)-float(pred))>1e-9
+        exc_mismatch += int(bad)
+        if len(exc_samples)<20:
+            exc_samples.append({
+                "season":int(r.Season_Num),
+                "game_date":str(pd.Timestamp(r.Game_Date).date()),
+                "weekday":pd.Timestamp(r.Game_Date).day_name().upper(),
+                "reference_week":float(r.Week_Num),
+                "calendar_week":None if pred is None else int(pred),
+                "requires_authoritative_week":True,
+                "calendar_mismatch":bool(bad),
+            })
+
     status="PASS" if total>0 and mm==0 and not season_mismatch else "HOLD"
     return {
-        "status":status,"scope":"REGULAR_SEASON_ONLY","rows_checked":int(total),
-        "postseason_rows_excluded":postseason_rows,
+        "status":status,"scope":"REGULAR_SEASON_STANDARD_LIVE_ELIGIBLE_DAYS",
+        "rows_checked":int(total),"postseason_rows_excluded":postseason_rows,
+        "exception_tue_wed_rows":int(len(exceptional)),
+        "exception_tue_wed_calendar_mismatch_rows":int(exc_mismatch),
+        "exception_policy":"TUESDAY_WEDNESDAY_REQUIRE_AUTHORITATIVE_EXACT_DATE_WEEK_LABEL",
+        "exception_samples":exc_samples,
         "week_mismatch_rows":int(mm),"season_date_mismatch_rows":int(len(season_mismatch)),
         "week_mismatch_samples":mismatch,"season_mismatch_samples":season_mismatch[:20],
         "anchors":{str(k):str(v.date()) for k,v in anchors.items()},
         "max_labeled_regular_week":{str(k):int(v) for k,v in max_week.items()},
-        "rule":"regular season only; week=1+floor((game_date-week1_tuesday_boundary)/7)",
+        "authoritative_date_week_labels":date_week_labels,
+        "rule":"standard live days use Tuesday-to-Monday bucket; Tue/Wed require exact authoritative label",
         "boundary":"TUESDAY_00_ET_THROUGH_MONDAY_23_59_ET",
+        "live_inference_weekdays":["THURSDAY","FRIDAY","SATURDAY","SUNDAY","MONDAY"],
         "postseason_policy":"FAIL_CLOSED_UNTIL_STAGE_AWARE_POSTSEASON_ADAPTER_PROVEN",
         "date_or_week_guessing":False,
     }
@@ -482,13 +514,21 @@ def _calendar_week_for_game(game_start, calendar:dict):
     ts=pd.to_datetime(game_start,utc=True,errors="coerce")
     if pd.isna(ts): return None,None
     local=ts.tz_convert("America/New_York")
+    local_date=pd.Timestamp(local.date())
     season=_season_from_date(local.tz_localize(None))
-    anchor_txt=(calendar.get("anchors") or {}).get(str(int(season))) if pd.notna(season) else None
-    if not anchor_txt:return None,None
-    anchor=pd.Timestamp(anchor_txt)
-    week=1+int((pd.Timestamp(local.date())-anchor).days//7)
-    # Current NFL regular season has 18 schedule weeks.  Anything outside the
-    # regular-season range fails closed rather than being treated as postseason.
+    if season is None:return None,None
+    weekday=int(local_date.weekday())
+    # Tuesday/Wednesday are historically exception-prone. Accept them only when
+    # this exact season/date already has one unambiguous authoritative Week label.
+    if weekday in (1,2):
+        exact=(calendar.get("authoritative_date_week_labels") or {}).get(f"{int(season)}|{local_date.date()}")
+        if exact is None:return None,None
+        week=int(exact)
+    else:
+        anchor_txt=(calendar.get("anchors") or {}).get(str(int(season)))
+        if not anchor_txt:return None,None
+        anchor=pd.Timestamp(anchor_txt)
+        week=1+int((local_date-anchor).days//7)
     if week < 1 or week > 18:return None,None
     return int(season),int(week)
 
@@ -549,7 +589,7 @@ def build_upcoming_features(raw: pd.DataFrame, upcoming: pd.DataFrame, calendar:
         "missing_by_feature":missing_by_feature,"schedule_missing":schedule_missing,
         "research_only_excluded_features":["Is_Neutral","Is_Night_Game"],
         "division_source":"STATIC_NFL_ALIGNMENT_VALIDATED_BY_HISTORICAL_REPLAY",
-        "week_source":"AUTHORITATIVE_UPLOADER_WEEK1_TUESDAY_BOUNDARY_HISTORICALLY_VERIFIED_REGULAR_SEASON",
+        "week_source":"AUTHORITATIVE_UPLOADER_WEEK1_STANDARD_CALENDAR_WITH_TUE_WED_EXCEPTION_GATE",
     }
 
 
