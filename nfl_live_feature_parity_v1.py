@@ -28,7 +28,7 @@ from google.cloud import bigquery as b
 
 from nfl_challenger_v1 import COMPACT_FEATURES
 
-SOURCE_TAG = "nfl-production-v1-live-feature-parity-v1.0-20261001"
+SOURCE_TAG = "nfl-production-v1-live-feature-parity-v1.0.1-upcoming-join-diagnostics-20261001"
 PROJECT = "sharplogger"
 DATASET = "sharp_data"
 RAW = f"{PROJECT}.{DATASET}.nfl_historical_game_side_raw"
@@ -242,11 +242,21 @@ def compare_replay(reference: pd.DataFrame, rebuilt: pd.DataFrame) -> dict:
         diff = (a-z).abs()
         mism = one_missing | (finite & diff.gt(FLOAT_TOL))
         n = int(len(m)); mm = int(mism.sum())
+        sample_cols = [c for c in ("Source_Name","Source_Game_ID","Game_Date","Team_Norm","Opponent_Norm") if c in m.columns]
+        samples=[]
+        if mm:
+            idx=m.index[mism][:12]
+            for j in idx:
+                rec={c:(None if pd.isna(m.at[j,c]) else str(m.at[j,c])) for c in sample_cols}
+                rec["reference_value"]=None if pd.isna(a.at[j]) else float(a.at[j])
+                rec["rebuilt_value"]=None if pd.isna(z.at[j]) else float(z.at[j])
+                samples.append(rec)
         fields[target] = {
             "n":n,"mismatch_rows":mm,"missing_side_disagreement":int(one_missing.sum()),
             "max_abs_diff":float(diff[finite].max()) if finite.any() else None,
             "mean_abs_diff":float(diff[finite].mean()) if finite.any() else None,
             "status":"PASS" if mm==0 else "MISMATCH",
+            "mismatch_samples":samples,
         }
         hard_mismatch += mm
     missing_rebuilt = int(m._merge.ne("both").sum())
@@ -342,11 +352,21 @@ def _schedule_schema(client):
 
 
 def fetch_schedule_context(client, upcoming: pd.DataFrame):
-    if upcoming is None or upcoming.empty:return pd.DataFrame(),{"status":"NO_UPCOMING_GAMES"}
+    if upcoming is None or upcoming.empty:
+        return pd.DataFrame(),{"status":"NO_UPCOMING_GAMES"}
     m=_schedule_schema(client)
-    start=(upcoming.game_start.min()-pd.Timedelta(hours=2)).to_pydatetime(); end=(upcoming.game_start.max()+pd.Timedelta(hours=2)).to_pydatetime()
+    start=(upcoming.game_start.min()-pd.Timedelta(hours=2)).to_pydatetime()
+    end=(upcoming.game_start.max()+pd.Timedelta(hours=2)).to_pydatetime()
     key_expr=f"CAST(`{m['game_key']}` AS STRING)" if m.get("game_key") else "CAST(NULL AS STRING)"
     neutral_expr=f"SAFE_CAST(`{m['neutral']}` AS INT64)" if m.get("neutral") else "CAST(NULL AS INT64)"
+    source_keys=[]
+    if m.get("game_key") and "source_game_key" in upcoming.columns:
+        source_keys=sorted({str(x).strip() for x in upcoming.source_game_key.tolist() if x is not None and str(x).strip() and str(x).strip().lower()!='nan'})
+    predicates=[f"SAFE_CAST(`{m['game_start']}` AS TIMESTAMP) BETWEEN @start AND @end"]
+    params=[b.ScalarQueryParameter("start","TIMESTAMP",start),b.ScalarQueryParameter("end","TIMESTAMP",end)]
+    if source_keys:
+        predicates.append(f"CAST(`{m['game_key']}` AS STRING) IN UNNEST(@source_keys)")
+        params.append(b.ArrayQueryParameter("source_keys","STRING",source_keys))
     sql=f"""
       SELECT {key_expr} source_game_key,
              SAFE_CAST(`{m['game_start']}` AS TIMESTAMP) game_start,
@@ -358,36 +378,63 @@ def fetch_schedule_context(client, upcoming: pd.DataFrame):
              {neutral_expr} is_neutral
       FROM `{SCHEDULE_VIEW}`
       WHERE UPPER(TRIM(CAST(Sport AS STRING)))='NFL'
-        AND SAFE_CAST(`{m['game_start']}` AS TIMESTAMP) BETWEEN @start AND @end
+        AND ({' OR '.join(predicates)})
     """
-    ctx=_query_df(client,sql,[b.ScalarQueryParameter("start","TIMESTAMP",start),b.ScalarQueryParameter("end","TIMESTAMP",end)])
-    if ctx.empty:return ctx,{"status":"HOLD_NO_AUTHORITATIVE_SCHEDULE_ROWS"}
-    for z in (ctx,):
-        z["game_start"]=pd.to_datetime(z.game_start,utc=True,errors="coerce")
-        z["home_key"]=z.home_team.map(_norm_name); z["away_key"]=z.away_team.map(_norm_name)
-    ctx=ctx.sort_values("game_start").drop_duplicates(["game_start","home_key","away_key"],keep="last")
-    return ctx,{"status":"READY","rows":int(len(ctx))}
+    ctx=_query_df(client,sql,params)
+    if ctx.empty:
+        return ctx,{"status":"HOLD_NO_AUTHORITATIVE_SCHEDULE_ROWS","queried_source_keys":int(len(source_keys)),"schedule_view":SCHEDULE_VIEW}
+    ctx["game_start"]=pd.to_datetime(ctx.game_start,utc=True,errors="coerce")
+    ctx["home_key"]=ctx.home_team.map(_norm_name)
+    ctx["away_key"]=ctx.away_team.map(_norm_name)
+    ctx["source_game_key"]=ctx.source_game_key.fillna("").astype(str).str.strip()
+    ctx=ctx.sort_values("game_start").drop_duplicates(["source_game_key","game_start","home_key","away_key"],keep="last")
+    return ctx,{"status":"READY","rows":int(len(ctx)),"queried_source_keys":int(len(source_keys)),"schedule_view":SCHEDULE_VIEW}
 
 
 def build_upcoming_features(raw: pd.DataFrame, upcoming: pd.DataFrame, schedule: pd.DataFrame) -> tuple[pd.DataFrame,dict]:
-    if upcoming.empty:return pd.DataFrame(),{"status":"NO_UPCOMING_GAMES"}
+    if upcoming is None or upcoming.empty:
+        return pd.DataFrame(),{"status":"NO_UPCOMING_GAMES"}
+    if schedule is None or schedule.empty:
+        return pd.DataFrame(),{
+            "status":"HOLD_AUTHORITATIVE_SCHEDULE_UNAVAILABLE",
+            "upcoming_games":int(len(upcoming)),
+            "missing_schedule_games":int(len(upcoming)),
+            "matched_by_source_key":0,
+            "matched_by_identity":0,
+        }
     u=upcoming.copy(); s=schedule.copy()
-    u["__identity"]=[f"{pd.Timestamp(gs).round('s').isoformat()}|{h}|{a}" for gs,h,a in zip(u.game_start,u.home_key,u.away_key)]
-    s["__identity"]=[f"{pd.Timestamp(gs).round('s').isoformat()}|{h}|{a}" for gs,h,a in zip(s.game_start,s.home_key,s.away_key)]
-    sm=s.drop_duplicates("__identity").set_index("__identity")
-    missing_identity=[]; rows=[]
+    for z in (u,s):
+        z["game_start"]=pd.to_datetime(z.game_start,utc=True,errors="coerce")
+        if "home_key" not in z.columns:z["home_key"]=z.home_team.map(_norm_name)
+        if "away_key" not in z.columns:z["away_key"]=z.away_team.map(_norm_name)
+        if "source_game_key" not in z.columns:z["source_game_key"]=""
+        z["__source_key"]=z.source_game_key.fillna("").astype(str).str.strip().str.casefold()
+        z["__identity"]=[f"{pd.Timestamp(gs).round('s').isoformat()}|{h}|{a}" if pd.notna(gs) else f"|{h}|{a}" for gs,h,a in zip(z.game_start,z.home_key,z.away_key)]
 
-    # Precompute team histories from raw outcomes. Use derive_compact_from_raw
-    # plus append-only update from completed games; the last raw row contains the
-    # prior-state entering that game, so we recompute all outcomes from raw for
-    # an upcoming synthetic row below instead of carrying the prior row forward.
+    # Only exact/unique source-key mappings are eligible. Conflicting keys fail over
+    # to exact kickoff/home/away identity; there is no fuzzy or date-derived match.
+    by_key={}
+    for k,g in s.loc[s.__source_key.ne("")].groupby("__source_key",sort=False):
+        uniq=g.drop_duplicates(["game_start","home_key","away_key","season","week_number","is_division_game","is_neutral"])
+        if len(uniq)==1:by_key[k]=uniq.iloc[0]
+    by_identity={}
+    for ident,g in s.groupby("__identity",sort=False):
+        uniq=g.drop_duplicates(["season","week_number","is_division_game","is_neutral"])
+        if len(uniq)==1:by_identity[ident]=uniq.iloc[0]
+
+    missing_identity=[]; rows=[]; row_schedule={}; matched_key=0; matched_identity=0
     base=raw.copy()
     for _,g in u.iterrows():
         ident=g.__identity
-        if ident not in sm.index:
+        sc=None
+        if g.__source_key and g.__source_key in by_key:
+            sc=by_key[g.__source_key]; matched_key+=1
+        elif ident in by_identity:
+            sc=by_identity[ident]; matched_identity+=1
+        if sc is None:
             missing_identity.append(ident); continue
-        sc=sm.loc[ident]
         season=int(sc.season); week=float(sc.week_number) if pd.notna(sc.week_number) else np.nan
+        row_schedule[ident]=sc
         for side in ("home","away"):
             team=g.home_team if side=="home" else g.away_team
             opp=g.away_team if side=="home" else g.home_team
@@ -401,20 +448,22 @@ def build_upcoming_features(raw: pd.DataFrame, upcoming: pd.DataFrame, schedule:
             })
             rows.append(syn)
     if not rows:
-        return pd.DataFrame(),{"status":"HOLD_NO_EXACT_SCHEDULE_MATCH","missing_schedule_games":int(len(missing_identity))}
+        return pd.DataFrame(),{
+            "status":"HOLD_NO_EXACT_SCHEDULE_MATCH",
+            "missing_schedule_games":int(len(missing_identity)),
+            "matched_by_source_key":int(matched_key),
+            "matched_by_identity":int(matched_identity),
+        }
     synthetic=pd.DataFrame(rows)
     combo=pd.concat([base[list(RAW_REQUIRED)],synthetic[list(RAW_REQUIRED)]],ignore_index=True,sort=False)
     rebuilt=derive_compact_from_raw(combo)
     live=rebuilt.loc[rebuilt.Source_Name.eq("LIVE_PARITY")].copy()
     if live.empty:return live,{"status":"HOLD_LIVE_FEATURE_BUILD_EMPTY"}
 
-    # Attach authoritative static schedule fields and opponent aliases.
-    sched_lookup={}
-    for ident,r in sm.iterrows():sched_lookup[ident]=r
     live["__identity"]=live.Source_Game_ID.astype(str)
-    live["Week_Number"]=[float(sched_lookup[i].week_number) if i in sched_lookup and pd.notna(sched_lookup[i].week_number) else np.nan for i in live.__identity]
-    live["Is_Division_Game"]=[float(sched_lookup[i].is_division_game) if i in sched_lookup and pd.notna(sched_lookup[i].is_division_game) else np.nan for i in live.__identity]
-    live["Is_Neutral"]=[float(sched_lookup[i].is_neutral) if i in sched_lookup and pd.notna(sched_lookup[i].is_neutral) else _num(live.Is_Neutral).iloc[j] for j,i in enumerate(live.__identity)]
+    live["Week_Number"]=[float(row_schedule[i].week_number) if i in row_schedule and pd.notna(row_schedule[i].week_number) else np.nan for i in live.__identity]
+    live["Is_Division_Game"]=[float(row_schedule[i].is_division_game) if i in row_schedule and pd.notna(row_schedule[i].is_division_game) else np.nan for i in live.__identity]
+    live["Is_Neutral"]=[float(row_schedule[i].is_neutral) if i in row_schedule and pd.notna(row_schedule[i].is_neutral) else _num(live.Is_Neutral).iloc[j] for j,i in enumerate(live.__identity)]
     game_start_by_identity = dict(zip(u["__identity"], u["game_start"]))
     live["Is_Night_Game"]=[
         float(pd.Timestamp(game_start_by_identity[i]).tz_convert("America/New_York").hour >= 18)
@@ -425,8 +474,13 @@ def build_upcoming_features(raw: pd.DataFrame, upcoming: pd.DataFrame, schedule:
 
     missing_by_feature={c:int(pd.to_numeric(live.get(c),errors="coerce").isna().sum()) for c in PRODUCTION_FEATURES}
     all_required_ready=all(v==0 for v in missing_by_feature.values())
-    return live,{"status":"READY" if all_required_ready else "HOLD_MISSING_UPCOMING_FEATURES","rows":int(len(live)),"games":int(live.Source_Game_ID.nunique()),"missing_schedule_games":int(len(missing_identity)),"missing_by_feature":missing_by_feature}
-
+    return live,{
+        "status":"READY" if all_required_ready else "HOLD_MISSING_UPCOMING_FEATURES",
+        "rows":int(len(live)),"games":int(live.Source_Game_ID.nunique()),
+        "missing_schedule_games":int(len(missing_identity)),
+        "matched_by_source_key":int(matched_key),"matched_by_identity":int(matched_identity),
+        "missing_by_feature":missing_by_feature,
+    }
 
 def run_nfl_live_feature_parity_v1(*, bq_client=None, log_func=print, now=None):
     c=bq_client or b.Client(project=PROJECT)
