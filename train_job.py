@@ -234,7 +234,7 @@ def main():
 
         _feature = _load_nfl_exact("nfl_feature_audit_v1", "nfl-feature-audit-v1.3-prior-only-20260930")
         _audit = _load_nfl_exact("nfl_audit_v1", "nfl-audit-v1.3-prior-feature-provenance-20260930")
-        _challenge = _load_nfl_exact("nfl_challenger_v1", "nfl-challenger-v1.4-season-forward-three-market-no-publish-20260930")
+        _challenge = _load_nfl_exact("nfl_challenger_v1", "nfl-challenger-v1.4.1-production-contract-no-unverified-live-context-20261001")
         _special = _load_nfl_exact("nfl_specialized_v1", "nfl-specialized-v1.5-score-domain-h2h-stack-20260930")
         pw.emit("audit", f"[NFL-CHALLENGER-V1] Recheck historical and prior-only audits run={run_id}", pct=0.05)
         try:
@@ -272,7 +272,7 @@ def main():
 
         _feature = _load_nfl_score_exact("nfl_feature_audit_v1", "nfl-feature-audit-v1.3-prior-only-20260930")
         _audit = _load_nfl_score_exact("nfl_audit_v1", "nfl-audit-v1.3-prior-feature-provenance-20260930")
-        _challenge = _load_nfl_score_exact("nfl_challenger_v1", "nfl-challenger-v1.4-season-forward-three-market-no-publish-20260930")
+        _challenge = _load_nfl_score_exact("nfl_challenger_v1", "nfl-challenger-v1.4.1-production-contract-no-unverified-live-context-20261001")
         _special = _load_nfl_score_exact("nfl_specialized_v1", "nfl-specialized-v1.5-score-domain-h2h-stack-20260930")
         _score = _load_nfl_score_exact("nfl_score_engine_v1", "nfl-score-engine-v1.6-team-offense-defense-20260930")
         pw.emit("audit", f"[NFL-SCORE-V1] Recheck historical and prior-only audits run={run_id}", pct=0.05)
@@ -312,7 +312,7 @@ def main():
 
         _feature = _load_nfl_intel_exact("nfl_feature_audit_v1", "nfl-feature-audit-v1.3-prior-only-20260930")
         _audit = _load_nfl_intel_exact("nfl_audit_v1", "nfl-audit-v1.3-prior-feature-provenance-20260930")
-        _challenge = _load_nfl_intel_exact("nfl_challenger_v1", "nfl-challenger-v1.4-season-forward-three-market-no-publish-20260930")
+        _challenge = _load_nfl_intel_exact("nfl_challenger_v1", "nfl-challenger-v1.4.1-production-contract-no-unverified-live-context-20261001")
         _special = _load_nfl_intel_exact("nfl_specialized_v1", "nfl-specialized-v1.5-score-domain-h2h-stack-20260930")
         _score = _load_nfl_intel_exact("nfl_score_engine_v1", "nfl-score-engine-v1.6-team-offense-defense-20260930")
         _intel = _load_nfl_intel_exact("nfl_intelligence_v1", "nfl-intelligence-v1.8-residual-arbitration-reconciliation-20260930")
@@ -353,7 +353,7 @@ def main():
 
         _feature = _load_nfl_v19_exact("nfl_feature_audit_v1", "nfl-feature-audit-v1.3-prior-only-20260930")
         _audit = _load_nfl_v19_exact("nfl_audit_v1", "nfl-audit-v1.3-prior-feature-provenance-20260930")
-        _challenge = _load_nfl_v19_exact("nfl_challenger_v1", "nfl-challenger-v1.4-season-forward-three-market-no-publish-20260930")
+        _challenge = _load_nfl_v19_exact("nfl_challenger_v1", "nfl-challenger-v1.4.1-production-contract-no-unverified-live-context-20261001")
         _special = _load_nfl_v19_exact("nfl_specialized_v1", "nfl-specialized-v1.5-score-domain-h2h-stack-20260930")
         _score = _load_nfl_v19_exact("nfl_score_engine_v1", "nfl-score-engine-v1.6-team-offense-defense-20260930")
         _intel = _load_nfl_v19_exact("nfl_intelligence_v1", "nfl-intelligence-v1.8-residual-arbitration-reconciliation-20260930")
@@ -610,7 +610,7 @@ def main():
 
         _parity = _load_nfl_prod_parity_exact(
             "nfl_live_feature_parity_v1",
-            "nfl-production-v1-live-feature-parity-v1.0.1-upcoming-join-diagnostics-20261001",
+            "nfl-production-v1-live-feature-parity-v1.0.2-verified-calendar-static-division-20261001",
         )
         pw.emit("audit", f"[NFL-PROD-V1] Live-pregame feature parity start run={run_id}; no model fit or publication", pct=0.10)
         try:
