@@ -39,7 +39,7 @@ import nfl_live_feature_parity_v1 as parity
 import nfl_production_v1 as prod
 import nfl_production_recommendations_v1 as recommendations
 
-SOURCE_TAG = "nfl-production-v1.4-live-recommendation-performance-20261002"
+SOURCE_TAG = "nfl-production-v1.4.1-live-weekly-contract-hotfix-20261002"
 EXPECTED_PARITY_TAG = "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002"
 EXPECTED_PROD_TAG = "nfl-production-v1.1.1-publish-receipt-normalization-20261002"
 
@@ -620,6 +620,13 @@ def run_nfl_production_live_score(*, bq_client, storage_client, bucket_name="sha
         recommendation_state={"status":"HOLD_RECOMMENDATION_LAYER_ERROR","error":f"{type(exc).__name__}:{exc}","recommendation_count":0}
         log_func("[NFL-PROD-V1-RECOMMENDATIONS] "+json.dumps(recommendation_state,sort_keys=True,default=str))
 
+    _live_rows = recommendation_state.get("live_rows", []) if isinstance(recommendation_state, dict) else []
+    _action_counts = {
+        "PLAY": sum(1 for x in _live_rows if x.get("action") == "PLAY"),
+        "MODEL_LEAN": sum(1 for x in _live_rows if x.get("action") == "MODEL LEAN"),
+        "NO_MARKET": sum(1 for x in _live_rows if x.get("action") == "NO MARKET"),
+    }
+
     report = {
         "status": "NFL_PRODUCTION_V1_LIVE_PAIRED_LEDGER_ACTIVE",
         "source_tag": SOURCE_TAG,
@@ -637,6 +644,7 @@ def run_nfl_production_live_score(*, bq_client, storage_client, bucket_name="sha
         "recommendations": {
             "status": recommendation_state.get("status"),
             "recommendation_count": recommendation_state.get("recommendation_count",0),
+            "action_counts": _action_counts,
             "performance": recommendation_state.get("performance",{}),
             "prospective_model_performance": recommendation_state.get("prospective_model_performance",{}),
             "current_uri": recommendation_state.get("current_uri"),
