@@ -155,6 +155,7 @@ def start_heartbeat(pw, label, every_sec=45):
 
 
 def main():
+    import json  # initialize function-local binding before any route uses it
     run_id = os.environ.get("TRAIN_RUN_ID") or str(uuid.uuid4())[:8]
     sport = os.environ.get("SPORT", "NBA")
     market = os.environ.get("MARKET", "All")
@@ -608,7 +609,7 @@ def main():
         _parity = _load_nfl_weekly_exact("nfl_live_feature_parity_v1", "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002")
         _prod = _load_nfl_weekly_exact("nfl_production_v1", "nfl-production-v1.1.1-publish-receipt-normalization-20261002")
         _rec = _load_nfl_weekly_exact("nfl_production_recommendations_v1", "nfl-production-v1.4-recommendation-performance-ui-20261002")
-        _live = _load_nfl_weekly_exact("nfl_production_live_v1", "nfl-production-v1.4-live-recommendation-performance-20261002")
+        _live = _load_nfl_weekly_exact("nfl_production_live_v1", "nfl-production-v1.4.1-live-weekly-contract-hotfix-20261002")
         pw.emit("audit", f"[NFL-PROD-V1.4] Weekly production update start run={run_id}", pct=0.05)
         try:
             _bq=bigquery.Client(project="sharplogger")
@@ -714,7 +715,7 @@ def main():
         )
         _live = _load_nfl_prod_live_exact(
             "nfl_production_live_v1",
-            "nfl-production-v1.4-live-recommendation-performance-20261002",
+            "nfl-production-v1.4.1-live-weekly-contract-hotfix-20261002",
         )
         pw.emit("audit", f"[NFL-PROD-V1.2] Verify live parity before paired scoring run={run_id}", pct=0.05)
         try:
