@@ -1,5 +1,5 @@
 {
-  "version": "NFL_RESEARCH_V2_DECISION_HISTORY_20261001_V7",
+  "version": "NFL_RESEARCH_V2_DECISION_HISTORY_20261001_V6",
   "purpose": "Standing model-manager record. Do not rerun a prior experiment under a new name unless the information source, target, or validation design is genuinely new.",
   "governance": {
     "protect_good_work": true,
@@ -132,7 +132,7 @@
     "production_authority": 0
   },
   "production_v1_transition": {
-    "status": "LIVE_PREGAME_FEATURE_PARITY_AUDIT_NEXT",
+    "status": "LIVE_PREGAME_FEATURE_PARITY_V1_0_2_VERIFYING_18_FEATURE_CONTRACT",
     "system_research": "FROZEN_FOR_PROSPECTIVE_COLLECTION",
     "production_backbones": "DO_NOT_PUBLISH_UNTIL_LIVE_FEATURE_PARITY_PASS",
     "feature_contract": "COMPACT_FIXED_SPREAD_H2H_TOTALS_BACKBONES",
@@ -141,6 +141,14 @@
     "automatic_production_promotion": false,
     "promotion_checkpoint": "EVERY_4_COMPLETED_WEEKS_OR_APPROX_60_PLUS_NEW_GAMES",
     "heavy_research_cadence": "EVERY_4_COMPLETED_WEEKS",
-    "new_system_policy": "FREEZE_DEFINITION_THEN_START_NEW_PROSPECTIVE_CLOCK"
+    "new_system_policy": "FREEZE_DEFINITION_THEN_START_NEW_PROSPECTIVE_CLOCK",
+    "production_feature_contract": "18 VERIFIED-LIVE FEATURES",
+    "research_only_unverified_live_features": [
+      "Is_Neutral",
+      "Is_Night_Game"
+    ],
+    "week_number_live_source": "AUTHORITATIVE_UPLOADER_WEEK1_ANCHOR_WITH_FULL_HISTORICAL_7_DAY_REPLAY_GATE",
+    "division_live_source": "STATIC_NFL_DIVISION_ALIGNMENT_WITH_HISTORICAL_REPLAY_GATE",
+    "external_future_schedule_dependency": false
   }
 }
