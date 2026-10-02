@@ -17,7 +17,7 @@ from pathlib import Path
 ARCHIVE_DIR = Path("archive/nfl_legacy_20261002")
 
 # These are superseded in the active production architecture and have no active
-# dependency in the V1 Betting Engine / current dashboard workflow.
+# dependency in the Edge Authority V2 / current dashboard workflow.
 SAFE_SUPERSEDED_CODE = [
     "nfl_production_recommendations_v1.py",  # replaced by nfl_betting_engine_v1.py
     "nfl_system_lab_v2.py",                 # superseded by V3; V3 is self-contained
@@ -28,6 +28,7 @@ SAFE_SUPERSEDED_CODE = [
 # Keep these despite old-looking names: current research/diagnostic routes still
 # import them directly or via dependency chains.
 PRESERVE_NOTE = {
+    "nfl_betting_engine_v1.py": "retained benchmark/shadow documenting the failed generic second-stage architecture",
     "nfl_research_engine_v1.py": "legacy research route in train_job still references it",
     "nfl_structured_research_v1.py": "dependency of legacy V1.9.3 research route",
     "nfl_system_lab_v1.py": "still imported by current PBP attribution diagnostic",
@@ -59,6 +60,9 @@ DOC_PATTERNS = [
 
 KEEP_DOCS = {
     "README_NFL_BETTING_ENGINE_V1.txt",
+    "README_NFL_EDGE_AUTHORITY_V2.txt",
+    "NFL_EDGE_AUTHORITY_V2_DEPLOY.txt",
+    "SPORTS_EDGE_AUTHORITY_STANDARD_V1.md",
     "NFL_BETTING_ENGINE_V1_DEPLOY.txt",
     "NFL_REPOSITORY_CLEANUP_20261002.txt",
     "NFL_ACTIVE_ARCHITECTURE_20261002.json",
