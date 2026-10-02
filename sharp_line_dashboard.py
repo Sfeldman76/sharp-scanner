@@ -46872,19 +46872,19 @@ def _ncaaf_prod_v1_grading_details_cached(lock_type="FIRST"):
 
 
 
-@st.cache_data(ttl=90,show_spinner=False)
-def _nfl_prod_v14_state_cached():
+@st.cache_data(ttl=60,show_spinner=False)
+def _nfl_betting_engine_v1_state_cached():
     try:
-        import nfl_production_recommendations_v1 as _nrec
-        if getattr(_nrec,"SOURCE_TAG","") != "nfl-production-v1.4-recommendation-performance-ui-20261002":
-            return {"status":"STALE_RECOMMENDATION_MODULE"}
-        return _nrec.read_dashboard_state(storage_client=storage.Client(),bucket_name=GCS_BUCKET)
+        import nfl_betting_engine_v1 as _be
+        if getattr(_be,"SOURCE_TAG","") != "nfl-betting-engine-v1.0-unified-decision-20261002":
+            return {"status":"STALE_BETTING_ENGINE_MODULE"}
+        return _be.read_dashboard_state(storage_client=storage.Client(),bucket_name=GCS_BUCKET)
     except Exception as e:
-        logging.warning("[NFL-PROD-V1-UI] state unavailable: %s:%s",type(e).__name__,e)
+        logging.warning("[NFL-BET-ENGINE-V1-UI] state unavailable: %s:%s",type(e).__name__,e)
         return {"status":"UNAVAILABLE","error":f"{type(e).__name__}:{e}"}
 
 
-def _nfl_prod_v14_pct(x):
+def _nfl_be_pct(x):
     try:
         z=float(x)
         return f"{100*z:.1f}%" if np.isfinite(z) else "—"
@@ -46892,7 +46892,7 @@ def _nfl_prod_v14_pct(x):
         return "—"
 
 
-def _nfl_prod_v14_num(x,dec=2):
+def _nfl_be_num(x,dec=2):
     try:
         z=float(x)
         return f"{z:.{dec}f}" if np.isfinite(z) else "—"
@@ -46900,100 +46900,107 @@ def _nfl_prod_v14_num(x,dec=2):
         return "—"
 
 
-def _nfl_prod_v14_hist_cell(pm,period="confirmation"):
-    b=(pm or {}).get(period) or {}
-    c=b.get("CLOSE") or {}
-    n=c.get("priced_n") if "priced_n" in c else c.get("n")
-    roi=c.get("roi_historical_moneyline") if "roi_historical_moneyline" in c else c.get("roi_minus110_proxy")
-    return {"n":int(n or 0),"hit":c.get("hit_rate"),"roi":roi}
-
-
-def _render_nfl_production_v14_ui(df_moves_raw,label):
-    """Read-only NFL Production V1.4 recommendations + performance panel."""
-    state=_nfl_prod_v14_state_cached()
-    if not isinstance(state,dict) or state.get("status") in ("UNAVAILABLE","STALE_RECOMMENDATION_MODULE"):
-        st.info("NFL Production recommendations are not available yet. Run Historical Validation, then Weekly Update.")
+def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
+    """Unified NFL betting decision + historical/live performance panel."""
+    state=_nfl_betting_engine_v1_state_cached()
+    if not isinstance(state,dict) or state.get("status") in ("UNAVAILABLE","STALE_BETTING_ENGINE_MODULE"):
+        st.info("NFL Betting Engine V1 is not available yet. Run Historical Validation, then Weekly Update.")
         return
-    cur=state.get("current") or {}; pol=state.get("policy") or {}; report=state.get("report") or {}
-    st.subheader("NFL Production V1 — Recommendations & Performance")
-    st.caption("Recommendations use the frozen champion plus a policy selected on 2021–2023 and independently confirmed on 2024–2025. Active system triggers are shown separately and do not count as extra model votes. No automatic wagering or automatic model promotion.")
+    meta=state.get("meta") or {}; cur=state.get("current") or {}
+    if not meta:
+        st.info("NFL Betting Engine V1 has not been trained yet. Run NFL Betting Engine — Historical Validation once.")
+        return
 
-    # Historical predictive performance + genuinely prospective performance.
-    frozen=((report.get("frozen") or {}).get("predictive") or {})
-    model_live=cur.get("prospective_model_performance") or {}
-    rec_perf=(cur.get("performance") or {}).get("ALL") or {}
-    c1,c2,c3,c4=st.columns(4)
-    with c1:
-        st.metric("Historical Spread MAE",_nfl_prod_v14_num((frozen.get("SPREADS") or {}).get("mae")))
-        st.caption("2021–2025 walk-forward frozen control")
-    with c2:
-        st.metric("Historical H2H AUC",_nfl_prod_v14_num((frozen.get("H2H") or {}).get("auc"),3))
-        st.caption("H2H log loss "+_nfl_prod_v14_num((frozen.get("H2H") or {}).get("log_loss"),3))
-    with c3:
-        st.metric("Historical Totals MAE",_nfl_prod_v14_num((frozen.get("TOTALS") or {}).get("mae")))
-        st.caption("2021–2025 walk-forward frozen control")
-    with c4:
-        _rn=int(rec_perf.get("n") or 0); _rw=int(rec_perf.get("wins") or 0); _rl=int(rec_perf.get("losses") or 0); _rp=int(rec_perf.get("pushes") or 0)
-        st.metric("Live recommendation record",f"{_rw}-{_rl}-{_rp}" if _rn else "0 settled")
-        st.caption(f"ROI {_nfl_prod_v14_pct(rec_perf.get('roi_per_unit'))} | {_rn} settled")
+    st.subheader("NFL Betting Engine V1")
+    st.caption(
+        "One decision layer over the frozen Spread/H2H/Totals fair-value models. The engine is trained only on leak-safe historical replay predictions; "
+        "market movement, model disagreement, pregame context, and validated system support are inputs. BET requires both positive model EV and a passed walk-forward market gate. "
+        "No automatic wagering or automatic champion promotion."
+    )
 
-    settled=int(model_live.get("settled_games") or 0)
-    if settled:
-        st.caption(
-            f"Prospective paired model evidence ({settled} settled): "
-            f"Spread MAE champion {_nfl_prod_v14_num(model_live.get('champion_spread_mae'))} vs challenger {_nfl_prod_v14_num(model_live.get('challenger_spread_mae'))}; "
-            f"H2H log loss {_nfl_prod_v14_num(model_live.get('champion_h2h_log_loss'),3)} vs {_nfl_prod_v14_num(model_live.get('challenger_h2h_log_loss'),3)}; "
-            f"Totals MAE {_nfl_prod_v14_num(model_live.get('champion_total_mae'))} vs {_nfl_prod_v14_num(model_live.get('challenger_total_mae'))}."
-        )
-    else:
-        st.caption("Prospective model performance: 0 settled post-freeze games so far.")
+    hist=meta.get("historical_oos") or {}; gates=meta.get("market_gates") or {}; liveperf=cur.get("live_bet_performance") or {}
+    cards=st.columns(4)
+    with cards[0]:
+        g=gates.get("SPREADS") or {}; h=(hist.get("SPREADS") or {}).get("bets") or {}
+        st.metric("Spread engine", "BET ACTIVE" if g.get("betting_decision_authority") else "SHADOW")
+        st.caption(f"OOS {h.get('wins',0)}-{h.get('losses',0)} | ROI {_nfl_be_pct(h.get('roi_per_unit'))}")
+    with cards[1]:
+        g=gates.get("H2H") or {}; h=(hist.get("H2H") or {}).get("bets") or {}
+        st.metric("H2H engine", "BET ACTIVE" if g.get("betting_decision_authority") else "SHADOW")
+        st.caption(f"OOS {h.get('wins',0)}-{h.get('losses',0)} | ROI {_nfl_be_pct(h.get('roi_per_unit'))}")
+    with cards[2]:
+        g=gates.get("TOTALS") or {}; h=(hist.get("TOTALS") or {}).get("bets") or {}
+        st.metric("Totals engine", "BET ACTIVE" if g.get("betting_decision_authority") else "SHADOW")
+        st.caption(f"OOS {h.get('wins',0)}-{h.get('losses',0)} | ROI {_nfl_be_pct(h.get('roi_per_unit'))}")
+    with cards[3]:
+        lp=(liveperf.get("ALL") or {})
+        st.metric("Live engine record", f"{lp.get('wins',0)}-{lp.get('losses',0)}-{lp.get('pushes',0)}")
+        st.caption(f"Prospective ROI {_nfl_be_pct(lp.get('roi_per_unit'))} | {lp.get('n',0)} settled")
 
-    # Frozen recommendation policy performance by market.
-    pm=(pol.get("markets") or {})
+    # Historical walk-forward detail is the engine's actual betting-model test,
+    # not raw fair-value accuracy or a cherry-picked edge threshold table.
     hist_rows=[]
     for m in ("SPREADS","H2H","TOTALS"):
-        x=pm.get(m) or {}; conf=_nfl_prod_v14_hist_cell(x,"confirmation"); allp=_nfl_prod_v14_hist_cell(x,"all_period")
+        x=hist.get(m) or {}; p=x.get("predictive") or {}; b=x.get("bets") or {}; y25=((x.get("by_season") or {}).get("2025") or {}).get("bets") or {}
         hist_rows.append({
-            "Market":m,"Policy":x.get("status","—"),"Threshold":x.get("threshold"),
-            "2024-25 N":conf["n"],"2024-25 Hit":_nfl_prod_v14_pct(conf["hit"]),"2024-25 ROI":_nfl_prod_v14_pct(conf["roi"]),
-            "2021-25 N":allp["n"],"2021-25 Hit":_nfl_prod_v14_pct(allp["hit"]),"2021-25 ROI":_nfl_prod_v14_pct(allp["roi"]),
+            "Market":m,
+            "Gate":x.get("authority_status","—"),
+            "OOS N":p.get("n",0),
+            "AUC":_nfl_be_num(p.get("auc"),3),
+            "Log Loss":_nfl_be_num(p.get("log_loss"),3),
+            "BET N":b.get("n",0),
+            "BET W-L":f"{b.get('wins',0)}-{b.get('losses',0)}",
+            "BET Hit":_nfl_be_pct(b.get("hit_rate")),
+            "BET ROI":_nfl_be_pct(b.get("roi_per_unit")),
+            "2025 BET N":y25.get("n",0),
+            "2025 ROI":_nfl_be_pct(y25.get("roi_per_unit")),
         })
-    if hist_rows:
-        with st.expander("Historical recommendation-policy performance",expanded=False):
-            st.dataframe(pd.DataFrame(hist_rows),use_container_width=True,hide_index=True)
-            st.caption("Spread/Totals ROI uses the replay's -110 proxy; H2H uses stored historical moneylines. 2024–2025 is the independent confirmation window.")
+    with st.expander("Historical walk-forward betting-engine performance",expanded=False):
+        st.dataframe(pd.DataFrame(hist_rows),use_container_width=True,hide_index=True)
+        st.caption("Validation is season-forward: 2023 is trained on 2021–22, 2024 on 2021–23, and 2025 on 2021–24. The +2% expected-value BET threshold is fixed, not optimized from historical ROI.")
 
-    live=cur.get("live_rows") or []
-    if not live:
-        st.info("No captured Production V1 recommendation snapshot yet. Run NFL Production — Weekly Update after Historical Validation.")
+    rows=cur.get("live_rows") or []
+    if not rows:
+        st.info("No current Betting Engine snapshot yet. Run NFL Production — Weekly Update.")
         return
-    recs=[]
-    for r in live:
-        hp=r.get("historical_policy") or {}; conf=_nfl_prod_v14_hist_cell(hp,"confirmation"); allp=_nfl_prod_v14_hist_cell(hp,"all_period")
+    table=[]
+    for r in rows:
         gs=pd.to_datetime(r.get("game_start"),utc=True,errors="coerce")
-        systems=r.get("systems") or []
-        syst=" | ".join([str(x.get("family") or x.get("direction") or "SYSTEM")+(f": {x.get('play')}" if x.get('play') else "") for x in systems]) if systems else "—"
-        edge=r.get("model_edge"); m=r.get("market")
-        edge_txt=_nfl_prod_v14_pct(edge) if m=="H2H" else _nfl_prod_v14_num(edge)
-        th=r.get("threshold"); th_txt=_nfl_prod_v14_pct(th) if m=="H2H" else _nfl_prod_v14_num(th)
-        mv=r.get("market_value"); modelv=r.get("model_value")
-        recs.append({
+        m=r.get("market"); mv=r.get("market_value"); mod=r.get("model_value")
+        labels=r.get("system_labels") or []
+        table.append({
             "Game Time":gs.tz_convert("US/Eastern").strftime("%a %I:%M %p") if pd.notna(gs) else "—",
-            "Matchup":f"{r.get('away_team','')} @ {r.get('home_team','')}","Market":m,"Action":r.get("action"),"Recommendation":r.get("selected") or "—",
-            "Model Edge":edge_txt,"Policy Threshold":th_txt,"Market":m,
-            "Market Ref":_nfl_prod_v14_pct(mv) if m=="H2H" else _nfl_prod_v14_num(mv),
-            "Model Value":_nfl_prod_v14_pct(modelv) if m=="H2H" else _nfl_prod_v14_num(modelv),
-            "Confirm N":conf["n"],"Confirm Hit":_nfl_prod_v14_pct(conf["hit"]),"Confirm ROI":_nfl_prod_v14_pct(conf["roi"]),
-            "All N":allp["n"],"All Hit":_nfl_prod_v14_pct(allp["hit"]),"All ROI":_nfl_prod_v14_pct(allp["roi"]),
-            "System Trigger":syst,
+            "Matchup":f"{r.get('away_team','')} @ {r.get('home_team','')}",
+            "Market":m,
+            "Action":r.get("action"),
+            "Pick":r.get("selected") or "—",
+            "Price":_nfl_be_num(r.get("selected_price"),0),
+            "Market Ref":_nfl_be_pct(mv) if m=="H2H" else _nfl_be_num(mv),
+            "Model Fair":_nfl_be_pct(mod) if m=="H2H" else _nfl_be_num(mod),
+            "Raw Edge":_nfl_be_pct(r.get("raw_model_edge")) if m=="H2H" else _nfl_be_num(r.get("raw_model_edge")),
+            "Bet Win Prob":_nfl_be_pct(r.get("bet_win_probability")),
+            "Break-even":_nfl_be_pct(r.get("break_even_probability")),
+            "Expected Value":_nfl_be_pct(r.get("expected_value")),
+            "System Support":_nfl_be_num(r.get("system_net_support"),1),
+            "System Trigger": " | ".join(map(str,labels)) if labels else "—",
         })
-    view=pd.DataFrame(recs)
+    view=pd.DataFrame(table)
     if not view.empty:
-        view["__rank"]=view["Action"].map({"PLAY":0,"MODEL LEAN":1,"NO MARKET":2}).fillna(3)
+        rank={"BET":0,"LEAN":1,"PASS":2,"NO MARKET":3}
+        view["__rank"]=view.Action.map(rank).fillna(4)
         view=view.sort_values(["__rank","Game Time","Matchup","Market"]).drop(columns="__rank")
-        plays=int(view.Action.eq("PLAY").sum())
-        st.caption(f"Current snapshot: {plays} historically confirmed recommendation(s); model leans remain visible but are not counted in the recommendation record.")
+        counts=cur.get("action_counts") or {}
+        st.caption(f"Current engine snapshot: BET {counts.get('BET',0)} | LEAN {counts.get('LEAN',0)} | PASS {counts.get('PASS',0)} | NO MARKET {counts.get('NO MARKET',0)}")
         st.dataframe(view,use_container_width=True,hide_index=True)
+
+    mp=cur.get("prospective_model_performance") or {}
+    if int(mp.get("settled_games") or 0):
+        st.caption(
+            f"Paired fair-value model performance ({int(mp.get('settled_games') or 0)} settled): "
+            f"Spread MAE champion {_nfl_be_num(mp.get('champion_spread_mae'))} vs challenger {_nfl_be_num(mp.get('challenger_spread_mae'))}; "
+            f"H2H log loss {_nfl_be_num(mp.get('champion_h2h_log_loss'),3)} vs {_nfl_be_num(mp.get('challenger_h2h_log_loss'),3)}; "
+            f"Totals MAE {_nfl_be_num(mp.get('champion_total_mae'))} vs {_nfl_be_num(mp.get('challenger_total_mae'))}."
+        )
 
 def _v1350_american_break_even(odds):
     o=pd.to_numeric(odds,errors='coerce')
@@ -47475,7 +47482,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             st.warning(f"Pathi/Big Al UI enrichment unavailable: {_ui_sys_err}")
 
         if _nfl_prod_ui:
-            _render_nfl_production_v14_ui(df_moves_raw,label)
+            _render_nfl_betting_engine_v1_ui(df_moves_raw,label)
             st.caption("Legacy NFL scanner detail remains below; Production V1 recommendations/performance above are the frozen production path.")
 
         # V13.4.6 fast exit: NCAAF no longer builds the legacy rich-market table,
@@ -49523,21 +49530,19 @@ if not HEADLESS:
         # but are intentionally hidden from the normal control surface.
         _nfl_primary = ["nfl_production_weekly", "nfl_production_replay", "nfl_research_engine", "nfl_system_lab"]
         _show_nfl_advanced = st.sidebar.checkbox(
-            "Show advanced / legacy NFL research runs",
+            "Show advanced NFL controls",
             value=False,
             key="show_nfl_advanced_research_runs",
-            help="Shows one-time audits, old challenger stages, PBP diagnostics, and legacy generic training routes. Normal NFL work does not require these.",
+            help="Shows support/audit controls that are still active. Superseded NFL stages are archived from the normal repository surface.",
         )
         _nfl_advanced = [
-            "nfl_production_refresh", "nfl_production_score", "nfl_live_feature_parity", "nfl_prospective_shadow",
-            "nfl_audit", "nfl_challenger", "nfl_score_engine", "nfl_intelligence",
-            "nfl_frozen_confirmation", "nfl_research_foundation", "nfl_edge_gate",
-            "nfl_pbp_foundation", "nfl_pbp_diagnostic", "All", "spreads", "h2h", "totals",
+            "nfl_production_refresh", "nfl_production_score", "nfl_live_feature_parity",
+            "nfl_prospective_shadow", "nfl_audit", "nfl_pbp_diagnostic",
         ]
         _train_market_options = _nfl_primary + (_nfl_advanced if _show_nfl_advanced else [])
         _train_market_labels = {
             "nfl_production_weekly": "NFL Production — Weekly Update",
-            "nfl_production_replay": "NFL Production — Historical Validation",
+            "nfl_production_replay": "NFL Betting Engine — Historical Validation",
             "nfl_production_refresh": "Advanced: Production Train / Refresh",
             "nfl_production_score": "Advanced: Production Score / Paired Ledger",
             "nfl_research_engine": "NFL Challenger Research",
@@ -49622,7 +49627,7 @@ if not HEADLESS:
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
         st.sidebar.caption(
-            "Weekly Update is the normal NFL production run: verify parity, refresh or reuse the challenger only when completed-game data changed, score the frozen champion/challenger pair, settle prior games, capture historically confirmed recommendations, update live performance, and update the promotion clock. No automatic wagering or automatic model promotion."
+            "Weekly Update is the normal NFL run: verify parity, refresh/reuse the challenger only when completed-game data changed, update the paired fair-value ledger, score the unified Betting Engine, settle prior BETs, update live betting performance, and update the promotion clock. No automatic wagering or automatic model promotion."
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_refresh":
         st.sidebar.caption(
@@ -49631,7 +49636,7 @@ if not HEADLESS:
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_replay":
         st.sidebar.caption(
-            "NFL Production Historical Validation: walk-forwards 2021-2025 using the exact final 18-feature production contract. Each season compares a frozen pre-season control against a challenger refit before each NFL week using only already-completed games. Reports fair-value accuracy, H2H calibration, adaptive-vs-frozen results, model-vs-close edge thresholds and edge buckets. Historical closing lines are retrospective references only. Read-only: no champion mutation, betting authority, or automatic promotion."
+            "NFL Betting Engine Historical Validation: rebuilds the 2021–2025 leak-safe fair-value replay, then trains and season-forward validates second-stage Spread/H2H/Totals bet-decision models. The betting engine learns when model-vs-market disagreement is actionable using market movement, model disagreement, pregame context, and validated system support. 2026 remains prospective and untouched."
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_score":
         st.sidebar.caption(
@@ -49790,7 +49795,7 @@ if not HEADLESS:
     if str(sport).upper().strip() == "NFL":
         _nfl_train_labels = {
             "nfl_production_weekly": "Run NFL Production Weekly Update",
-            "nfl_production_replay": "Run NFL Production Historical Validation",
+            "nfl_production_replay": "Run NFL Betting Engine Historical Validation",
             "nfl_production_refresh": "Advanced: Train / Refresh NFL Production V1",
             "nfl_production_score": "Advanced: Score NFL Production V1 / Update Paired Ledger",
             "nfl_audit": "Run NFL History & Champion Audit",
