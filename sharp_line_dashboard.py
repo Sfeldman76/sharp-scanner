@@ -46873,14 +46873,25 @@ def _ncaaf_prod_v1_grading_details_cached(lock_type="FIRST"):
 
 
 @st.cache_data(ttl=60,show_spinner=False)
-def _nfl_betting_engine_v1_state_cached():
+def _nfl_edge_authority_v2_state_cached():
+    try:
+        import nfl_edge_authority_v2 as _edge
+        if getattr(_edge,"SOURCE_TAG","") != "nfl-edge-authority-v2.0-ncaaf-method-transfer-20261002":
+            return {"status":"STALE_EDGE_AUTHORITY_V2_MODULE"}
+        return _edge.read_dashboard_state(storage_client=storage.Client(),bucket_name=GCS_BUCKET)
+    except Exception as e:
+        logging.warning("[NFL-EDGE-V2-UI] state unavailable: %s:%s",type(e).__name__,e)
+        return {"status":"UNAVAILABLE","error":f"{type(e).__name__}:{e}"}
+
+
+@st.cache_data(ttl=300,show_spinner=False)
+def _nfl_betting_engine_v1_benchmark_cached():
     try:
         import nfl_betting_engine_v1 as _be
         if getattr(_be,"SOURCE_TAG","") != "nfl-betting-engine-v1.0-unified-decision-20261002":
-            return {"status":"STALE_BETTING_ENGINE_MODULE"}
+            return {"status":"STALE_BENCHMARK"}
         return _be.read_dashboard_state(storage_client=storage.Client(),bucket_name=GCS_BUCKET)
     except Exception as e:
-        logging.warning("[NFL-BET-ENGINE-V1-UI] state unavailable: %s:%s",type(e).__name__,e)
         return {"status":"UNAVAILABLE","error":f"{type(e).__name__}:{e}"}
 
 
@@ -46901,106 +46912,80 @@ def _nfl_be_num(x,dec=2):
 
 
 def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
-    """Unified NFL betting decision + historical/live performance panel."""
-    state=_nfl_betting_engine_v1_state_cached()
-    if not isinstance(state,dict) or state.get("status") in ("UNAVAILABLE","STALE_BETTING_ENGINE_MODULE"):
-        st.info("NFL Betting Engine V1 is not available yet. Run Historical Validation, then Weekly Update.")
+    """Primary NFL Edge Authority V2 panel; Betting Engine V1 is benchmark-only."""
+    state=_nfl_edge_authority_v2_state_cached()
+    if not isinstance(state,dict) or state.get("status") in ("UNAVAILABLE","STALE_EDGE_AUTHORITY_V2_MODULE"):
+        st.info("NFL Edge Authority V2 is not available yet. Run NFL Edge Authority — Historical Validation, then Weekly Update.")
         return
     meta=state.get("meta") or {}; cur=state.get("current") or {}
     if not meta:
-        st.info("NFL Betting Engine V1 has not been trained yet. Run NFL Betting Engine — Historical Validation once.")
+        st.info("NFL Edge Authority V2 has not been frozen yet. Run NFL Edge Authority — Historical Validation once.")
         return
 
-    st.subheader("NFL Betting Engine V1")
+    st.subheader("NFL Edge Authority V2")
     st.caption(
-        "One decision layer over the frozen Spread/H2H/Totals fair-value models. The engine is trained only on leak-safe historical replay predictions; "
-        "market movement, model disagreement, pregame context, and validated system support are inputs. BET requires both positive model EV and a passed walk-forward market gate. "
-        "No automatic wagering or automatic champion promotion."
+        "Shared NCAAF-derived authority architecture: frozen fair-value predictions stay separate from betting authority. "
+        "FAIR_VALUE, STAT_SELECTOR, SYSTEM, and MARKET_CONFIRMATION mechanisms are validated independently, aliases collapse to one family/vote, "
+        "opposing validated mechanisms force PASS — CONFLICT, and only independently confirmed mechanisms can create PLAY/STRONG PLAY. "
+        "2026 remains prospective. Betting Engine V1 is retained only as a benchmark/shadow."
     )
 
-    hist=meta.get("historical_oos") or {}; gates=meta.get("market_gates") or {}; liveperf=cur.get("live_bet_performance") or {}
+    markets=meta.get("markets") or {}; liveperf=cur.get("live_performance") or {}
     cards=st.columns(4)
-    with cards[0]:
-        g=gates.get("SPREADS") or {}; h=(hist.get("SPREADS") or {}).get("bets") or {}
-        st.metric("Spread engine", "BET ACTIVE" if g.get("betting_decision_authority") else "SHADOW")
-        st.caption(f"OOS {h.get('wins',0)}-{h.get('losses',0)} | ROI {_nfl_be_pct(h.get('roi_per_unit'))}")
-    with cards[1]:
-        g=gates.get("H2H") or {}; h=(hist.get("H2H") or {}).get("bets") or {}
-        st.metric("H2H engine", "BET ACTIVE" if g.get("betting_decision_authority") else "SHADOW")
-        st.caption(f"OOS {h.get('wins',0)}-{h.get('losses',0)} | ROI {_nfl_be_pct(h.get('roi_per_unit'))}")
-    with cards[2]:
-        g=gates.get("TOTALS") or {}; h=(hist.get("TOTALS") or {}).get("bets") or {}
-        st.metric("Totals engine", "BET ACTIVE" if g.get("betting_decision_authority") else "SHADOW")
-        st.caption(f"OOS {h.get('wins',0)}-{h.get('losses',0)} | ROI {_nfl_be_pct(h.get('roi_per_unit'))}")
+    for i,m in enumerate(("SPREADS","H2H","TOTALS")):
+        mc=markets.get(m) or {}; hp=((meta.get("historical_action_performance") or {}).get(m) or {}).get("confirmation") or {}; allp=hp.get("ALL") or {}
+        with cards[i]:
+            st.metric(m.title(), "EDGE ACTIVE" if mc.get("production_authority") else "MODEL ONLY")
+            st.caption(f"Families {len(mc.get('legit_family_ids') or [])} | confirm {allp.get('wins',0)}-{allp.get('losses',0)} | ROI {_nfl_be_pct(allp.get('roi_per_unit'))}")
     with cards[3]:
-        lp=(liveperf.get("ALL") or {})
-        st.metric("Live engine record", f"{lp.get('wins',0)}-{lp.get('losses',0)}-{lp.get('pushes',0)}")
+        lp=liveperf.get("ALL") or {}
+        st.metric("Live edge record",f"{lp.get('wins',0)}-{lp.get('losses',0)}-{lp.get('pushes',0)}")
         st.caption(f"Prospective ROI {_nfl_be_pct(lp.get('roi_per_unit'))} | {lp.get('n',0)} settled")
 
-    # Historical walk-forward detail is the engine's actual betting-model test,
-    # not raw fair-value accuracy or a cherry-picked edge threshold table.
-    hist_rows=[]
-    for m in ("SPREADS","H2H","TOTALS"):
-        x=hist.get(m) or {}; p=x.get("predictive") or {}; b=x.get("bets") or {}; y25=((x.get("by_season") or {}).get("2025") or {}).get("bets") or {}
-        hist_rows.append({
-            "Market":m,
-            "Gate":x.get("authority_status","—"),
-            "OOS N":p.get("n",0),
-            "AUC":_nfl_be_num(p.get("auc"),3),
-            "Log Loss":_nfl_be_num(p.get("log_loss"),3),
-            "BET N":b.get("n",0),
-            "BET W-L":f"{b.get('wins',0)}-{b.get('losses',0)}",
-            "BET Hit":_nfl_be_pct(b.get("hit_rate")),
-            "BET ROI":_nfl_be_pct(b.get("roi_per_unit")),
-            "2025 BET N":y25.get("n",0),
-            "2025 ROI":_nfl_be_pct(y25.get("roi_per_unit")),
+    fam_rows=[]
+    for f in meta.get("families") or []:
+        d=f.get("discovery") or {}; c=f.get("confirmation") or {}; gate=f.get("confirmation_gate") or {}
+        fam_rows.append({
+            "Market":f.get("market"),"Mechanism":f.get("mechanism_class"),"Family":f.get("mechanism_family_id"),
+            "Representative":f.get("variant_id"),"Threshold":f.get("threshold"),"Status":f.get("family_status"),
+            "Disc N":d.get("n",0),"Disc Hit":_nfl_be_pct(d.get("hit_rate")),"Disc ROI":_nfl_be_pct(d.get("roi_per_unit")),
+            "Confirm N":c.get("n",0),"Confirm Hit":_nfl_be_pct(c.get("hit_rate")),"Confirm ROI":_nfl_be_pct(c.get("roi_per_unit")),
+            "Gate":"PASS" if gate.get("status")=="PASS" else "HOLD",
         })
-    with st.expander("Historical walk-forward betting-engine performance",expanded=False):
-        st.dataframe(pd.DataFrame(hist_rows),use_container_width=True,hide_index=True)
-        st.caption("Validation is season-forward: 2023 is trained on 2021–22, 2024 on 2021–23, and 2025 on 2021–24. The +2% expected-value BET threshold is fixed, not optimized from historical ROI.")
+    with st.expander("Validated edge-family registry",expanded=False):
+        if fam_rows: st.dataframe(pd.DataFrame(fam_rows),use_container_width=True,hide_index=True)
+        st.caption("One mechanism family = one vote. Threshold variants, aliases, and nested systems cannot create artificial multi-signal support.")
+
+    benchmark=_nfl_betting_engine_v1_benchmark_cached()
+    bm=(benchmark.get("meta") or {}) if isinstance(benchmark,dict) else {}
+    if bm:
+        with st.expander("Betting Engine V1 benchmark — failed promotion",expanded=False):
+            hist=bm.get("historical_oos") or {}; rows=[]
+            for m in ("SPREADS","H2H","TOTALS"):
+                x=hist.get(m) or {}; b=x.get("bets") or {}; rows.append({"Market":m,"Gate":x.get("authority_status"),"N":b.get("n",0),"W-L":f"{b.get('wins',0)}-{b.get('losses',0)}","ROI":_nfl_be_pct(b.get("roi_per_unit"))})
+            st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+            st.caption("Retained deliberately so future research does not forget that the generic second-stage logistic decision model was tested and failed its authority gate.")
 
     rows=cur.get("live_rows") or []
     if not rows:
-        st.info("No current Betting Engine snapshot yet. Run NFL Production — Weekly Update.")
+        st.info("No current Edge Authority V2 snapshot yet. Run NFL Production — Weekly Update.")
         return
     table=[]
     for r in rows:
-        gs=pd.to_datetime(r.get("game_start"),utc=True,errors="coerce")
-        m=r.get("market"); mv=r.get("market_value"); mod=r.get("model_value")
-        labels=r.get("system_labels") or []
+        gs=pd.to_datetime(r.get("game_start"),utc=True,errors="coerce"); m=r.get("market")
         table.append({
             "Game Time":gs.tz_convert("US/Eastern").strftime("%a %I:%M %p") if pd.notna(gs) else "—",
-            "Matchup":f"{r.get('away_team','')} @ {r.get('home_team','')}",
-            "Market":m,
-            "Action":r.get("action"),
-            "Pick":r.get("selected") or "—",
-            "Price":_nfl_be_num(r.get("selected_price"),0),
-            "Market Ref":_nfl_be_pct(mv) if m=="H2H" else _nfl_be_num(mv),
-            "Model Fair":_nfl_be_pct(mod) if m=="H2H" else _nfl_be_num(mod),
+            "Matchup":f"{r.get('away_team','')} @ {r.get('home_team','')}","Market":m,"Action":r.get("action"),"Pick":r.get("selected") or "—",
+            "Price":_nfl_be_num(r.get("selected_price"),0),"Market Ref":_nfl_be_pct(r.get("market_value")) if m=="H2H" else _nfl_be_num(r.get("market_value")),
+            "Model Fair":_nfl_be_pct(r.get("model_value")) if m=="H2H" else _nfl_be_num(r.get("model_value")),
             "Raw Edge":_nfl_be_pct(r.get("raw_model_edge")) if m=="H2H" else _nfl_be_num(r.get("raw_model_edge")),
-            "Bet Win Prob":_nfl_be_pct(r.get("bet_win_probability")),
-            "Break-even":_nfl_be_pct(r.get("break_even_probability")),
-            "Expected Value":_nfl_be_pct(r.get("expected_value")),
-            "System Support":_nfl_be_num(r.get("system_net_support"),1),
-            "System Trigger": " | ".join(map(str,labels)) if labels else "—",
+            "Independent Mechs":r.get("independent_mechanisms",0),"Edge Sources":" | ".join(map(str,r.get("edge_sources") or [])) or "—",
+            "System Trigger":" | ".join(map(str,r.get("system_labels") or [])) or "—",
         })
-    view=pd.DataFrame(table)
-    if not view.empty:
-        rank={"BET":0,"LEAN":1,"PASS":2,"NO MARKET":3}
-        view["__rank"]=view.Action.map(rank).fillna(4)
-        view=view.sort_values(["__rank","Game Time","Matchup","Market"]).drop(columns="__rank")
-        counts=cur.get("action_counts") or {}
-        st.caption(f"Current engine snapshot: BET {counts.get('BET',0)} | LEAN {counts.get('LEAN',0)} | PASS {counts.get('PASS',0)} | NO MARKET {counts.get('NO MARKET',0)}")
-        st.dataframe(view,use_container_width=True,hide_index=True)
-
-    mp=cur.get("prospective_model_performance") or {}
-    if int(mp.get("settled_games") or 0):
-        st.caption(
-            f"Paired fair-value model performance ({int(mp.get('settled_games') or 0)} settled): "
-            f"Spread MAE champion {_nfl_be_num(mp.get('champion_spread_mae'))} vs challenger {_nfl_be_num(mp.get('challenger_spread_mae'))}; "
-            f"H2H log loss {_nfl_be_num(mp.get('champion_h2h_log_loss'),3)} vs {_nfl_be_num(mp.get('challenger_h2h_log_loss'),3)}; "
-            f"Totals MAE {_nfl_be_num(mp.get('champion_total_mae'))} vs {_nfl_be_num(mp.get('challenger_total_mae'))}."
-        )
+    view=pd.DataFrame(table); rank={"STRONG PLAY":0,"PLAY":1,"EDGE — NO EXEC QUOTE":2,"PASS — CONFLICT":3,"MODEL ONLY":4,"NO MARKET":5}; view["__rank"]=view.Action.map(rank).fillna(6);view=view.sort_values(["__rank","Game Time","Matchup","Market"]).drop(columns="__rank")
+    counts=cur.get("action_counts") or {}
+    st.caption(f"Current Edge Authority snapshot: STRONG PLAY {counts.get('STRONG PLAY',0)} | PLAY {counts.get('PLAY',0)} | CONFLICT {counts.get('PASS — CONFLICT',0)} | MODEL ONLY {counts.get('MODEL ONLY',0)} | NO MARKET {counts.get('NO MARKET',0)}")
+    st.dataframe(view,use_container_width=True,hide_index=True)
 
 def _v1350_american_break_even(odds):
     o=pd.to_numeric(odds,errors='coerce')
@@ -49542,7 +49527,7 @@ if not HEADLESS:
         _train_market_options = _nfl_primary + (_nfl_advanced if _show_nfl_advanced else [])
         _train_market_labels = {
             "nfl_production_weekly": "NFL Production — Weekly Update",
-            "nfl_production_replay": "NFL Betting Engine — Historical Validation",
+            "nfl_production_replay": "NFL Edge Authority — Historical Validation",
             "nfl_production_refresh": "Advanced: Production Train / Refresh",
             "nfl_production_score": "Advanced: Production Score / Paired Ledger",
             "nfl_research_engine": "NFL Challenger Research",
@@ -49627,7 +49612,7 @@ if not HEADLESS:
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
         st.sidebar.caption(
-            "Weekly Update is the normal NFL run: verify parity, refresh/reuse the challenger only when completed-game data changed, update the paired fair-value ledger, score the unified Betting Engine, settle prior BETs, update live betting performance, and update the promotion clock. No automatic wagering or automatic model promotion."
+            "Weekly Update is the normal NFL run: verify parity, refresh/reuse the challenger only when completed-game data changed, update the paired fair-value ledger, apply Edge Authority V2, settle prior edge plays, update prospective edge performance, and update the promotion clock. Betting Engine V1 remains benchmark-only. No automatic wagering or automatic model promotion."
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_refresh":
         st.sidebar.caption(
@@ -49636,7 +49621,7 @@ if not HEADLESS:
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_replay":
         st.sidebar.caption(
-            "NFL Betting Engine Historical Validation: rebuilds the 2021–2025 leak-safe fair-value replay, then trains and season-forward validates second-stage Spread/H2H/Totals bet-decision models. The betting engine learns when model-vs-market disagreement is actionable using market movement, model disagreement, pregame context, and validated system support. 2026 remains prospective and untouched."
+            "NFL Edge Authority Historical Validation: rebuilds the leak-safe fair-value replay, then applies the shared NCAAF-derived authority method. Discovery fixes FAIR_VALUE / STAT_SELECTOR / SYSTEM / MARKET_CONFIRMATION representatives; untouched historical confirmation decides which mechanism families may become PLAY authority. Aliases collapse to one vote, conflicts PASS, and 2026 remains prospective."
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_score":
         st.sidebar.caption(
@@ -49795,7 +49780,7 @@ if not HEADLESS:
     if str(sport).upper().strip() == "NFL":
         _nfl_train_labels = {
             "nfl_production_weekly": "Run NFL Production Weekly Update",
-            "nfl_production_replay": "Run NFL Betting Engine Historical Validation",
+            "nfl_production_replay": "Run NFL Edge Authority Historical Validation",
             "nfl_production_refresh": "Advanced: Train / Refresh NFL Production V1",
             "nfl_production_score": "Advanced: Score NFL Production V1 / Update Paired Ledger",
             "nfl_audit": "Run NFL History & Champion Audit",
