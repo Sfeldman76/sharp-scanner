@@ -1,4 +1,4 @@
-"""NFL Production V1.2 — live champion/challenger scoring + append-only paired ledger.
+"""NFL Production V1.4 — live scoring, paired ledger, recommendations + performance.
 
 Purpose
 -------
@@ -37,8 +37,9 @@ from google.cloud import bigquery
 
 import nfl_live_feature_parity_v1 as parity
 import nfl_production_v1 as prod
+import nfl_production_recommendations_v1 as recommendations
 
-SOURCE_TAG = "nfl-production-v1.2.2-streaming-ledger-writes-20261002"
+SOURCE_TAG = "nfl-production-v1.4-live-recommendation-performance-20261002"
 EXPECTED_PARITY_TAG = "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002"
 EXPECTED_PROD_TAG = "nfl-production-v1.1.1-publish-receipt-normalization-20261002"
 
@@ -609,6 +610,16 @@ def run_nfl_production_live_score(*, bq_client, storage_client, bucket_name="sha
     clock["automatic_promotion"] = False
     log_func("[NFL-PROD-V1-PROMOTION-CLOCK] " + json.dumps(clock, sort_keys=True, default=str))
 
+    try:
+        recommendation_state = recommendations.update_recommendation_state(
+            bq_client=bq_client, storage_client=storage_client, bucket_name=bucket_name,
+            prediction_rows=prediction_rows, champion_sha=champion_ptr.get("registry_sha256"),
+            now=now, log_func=log_func,
+        )
+    except Exception as exc:
+        recommendation_state={"status":"HOLD_RECOMMENDATION_LAYER_ERROR","error":f"{type(exc).__name__}:{exc}","recommendation_count":0}
+        log_func("[NFL-PROD-V1-RECOMMENDATIONS] "+json.dumps(recommendation_state,sort_keys=True,default=str))
+
     report = {
         "status": "NFL_PRODUCTION_V1_LIVE_PAIRED_LEDGER_ACTIVE",
         "source_tag": SOURCE_TAG,
@@ -623,7 +634,14 @@ def run_nfl_production_live_score(*, bq_client, storage_client, bucket_name="sha
         "model_prediction_authority": True,
         "betting_decision_authority": False,
         "automatic_promotion": False,
-        "next_step": "CONTINUE_PAIRED_LEDGER_UNTIL_PROMOTION_REVIEW_GATE_OR_BUILD_LIVE_UI",
+        "recommendations": {
+            "status": recommendation_state.get("status"),
+            "recommendation_count": recommendation_state.get("recommendation_count",0),
+            "performance": recommendation_state.get("performance",{}),
+            "prospective_model_performance": recommendation_state.get("prospective_model_performance",{}),
+            "current_uri": recommendation_state.get("current_uri"),
+        },
+        "next_step": "CONTINUE_WEEKLY_UPDATE_AND_ACCUMULATE_RECOMMENDATION_PLUS_PAIRED_PERFORMANCE",
     }
     report["status_uri"] = _write_status(storage_client, bucket_name, report)
     log_func("[NFL-PROD-V1-LIVE-CONTRACT] " + json.dumps(report, sort_keys=True, default=str))
@@ -631,7 +649,7 @@ def run_nfl_production_live_score(*, bq_client, storage_client, bucket_name="sha
 
 
 def _self_test():
-    assert SOURCE_TAG.startswith("nfl-production-v1.2-")
+    assert SOURCE_TAG.startswith("nfl-production-v1.4-")
     assert MIN_PROMOTION_SETTLED_GAMES == 60
     assert PROMOTION_REVIEW_CADENCE_DAYS == 28
     assert prod.SOURCE_TAG == EXPECTED_PROD_TAG
