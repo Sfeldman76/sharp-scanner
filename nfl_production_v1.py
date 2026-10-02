@@ -111,6 +111,35 @@ def _sha(x: Any) -> str:
     return hashlib.sha256(_json_bytes(x)).hexdigest()
 
 
+def _training_data_sha256(games: pd.DataFrame) -> str:
+    """Deterministic fingerprint of every field that can affect Production V1 fitting."""
+    cols = [
+        "physical_game_id", "Season", "Game_Date",
+        *PRODUCTION_FEATURES, "actual_margin", "actual_total", "H2H_label",
+    ]
+    missing = [c for c in cols if c not in games.columns]
+    if missing:
+        raise RuntimeError("[NFL-PROD-V1-HOLD] TRAINING_FINGERPRINT_COLUMNS_MISSING " + str(missing))
+    d = games.loc[:, cols].copy().sort_values(["Season", "Game_Date", "physical_game_id"], kind="mergesort").reset_index(drop=True)
+    recs = []
+    for rec in d.to_dict("records"):
+        out = {}
+        for k, v in rec.items():
+            if isinstance(v, (pd.Timestamp, datetime)):
+                t = pd.to_datetime(v, utc=True, errors="coerce")
+                out[k] = None if pd.isna(t) else t.isoformat()
+            elif isinstance(v, (np.integer,)):
+                out[k] = int(v)
+            elif isinstance(v, (np.floating, float)):
+                out[k] = None if not math.isfinite(float(v)) else round(float(v), 12)
+            elif pd.isna(v):
+                out[k] = None
+            else:
+                out[k] = v
+        recs.append(out)
+    return _sha(recs)
+
+
 def production_contract() -> dict:
     c = {
         "source_tag": SOURCE_TAG,
@@ -566,38 +595,59 @@ def run_nfl_production_refresh(*, bq_client, storage_client, bucket_name="sharp-
     if len(all_games)<len(baseline_games):
         raise RuntimeError("[NFL-PROD-V1-HOLD] CURRENT_HISTORY_SMALLER_THAN_BASELINE")
     post_2025_training_games=all_games.loc[(all_games.Season>BASELINE_MAX_SEASON)].copy()
-    challenger_bundle=fit_bundle(all_games,role="WEEKLY_CHALLENGER",cutoff_label="LATEST_COMPLETED_GAMES")
     cutoff=pd.to_datetime(all_games.Game_Date,errors="coerce").max()
     cutoff_s=cutoff.strftime("%Y%m%d") if pd.notna(cutoff) else "unknown"
-    ch_reg=_training_registry(role="WEEKLY_CHALLENGER",games=all_games,oof=oof,validation_gate=gate,freeze_utc=None)
-    ch_reg.update({
-        "champion_registry_sha256":existing.get("registry_sha256"),
-        "completed_training_games_after_2025":int(len(post_2025_training_games)),
-        "promotion_review_target_min_postfreeze_paired_games":60,
-        "promotion_review_target_cadence_weeks":4,
-        "postfreeze_paired_games":0,
-        "promotion_count_gate_met":False,
-        "promotion_evidence_policy":"ONLY_PREDICTIONS_RECORDED_AFTER_CHAMPION_AND_LEDGER_ACTIVATION_COUNT",
-        "promotion_status":"NOT_EVALUATED_PROSPECTIVE_PAIRED_LEDGER_REQUIRED",
-    })
-    ch_reg["registry_sha256"]=_sha(ch_reg)
-    prefix=f"{BASE_PREFIX}/challengers/{cutoff_s}-{ch_reg['registry_sha256'][:12]}"
-    ch_pub=_publish_bundle(storage_client,bucket_name,challenger_bundle,ch_reg,prefix)
-    ch_pointer={
-        "status":"NFL_PRODUCTION_V1_WEEKLY_CHALLENGER_READY","source_tag":SOURCE_TAG,
-        "registry_sha256":ch_reg["registry_sha256"],"artifact_sha256":ch_pub["artifact_sha256"],
-        "artifact_uri":ch_pub["artifact"]["uri"],"registry_uri":ch_pub["registry"]["uri"],
-        "data_cutoff":str(cutoff),"completed_training_games_after_2025":int(len(post_2025_training_games)),
-        "postfreeze_paired_games":0,"promotion_count_gate_met":False,"automatic_promotion":False,
-        "production_authority":0,
-    }
-    _write_pointer(storage_client,bucket_name,CHALLENGER_POINTER,ch_pointer)
-    log_func("[NFL-PROD-V1-CHALLENGER] "+json.dumps(ch_pointer,sort_keys=True,default=str))
+    training_data_sha256=_training_data_sha256(all_games)
+
+    # Reuse the exact same challenger when the completed-game training frame has
+    # not changed. This makes weekly refresh idempotent and prevents a no-new-data
+    # rerun from manufacturing a new prospective challenger identity.
+    prior_ch=_blob_json(storage_client,bucket_name,CHALLENGER_POINTER)
+    challenger_reused_existing=bool(
+        isinstance(prior_ch,dict)
+        and prior_ch.get("source_tag")==SOURCE_TAG
+        and prior_ch.get("training_data_sha256")==training_data_sha256
+        and prior_ch.get("champion_registry_sha256")==existing.get("registry_sha256")
+        and prior_ch.get("artifact_uri")
+        and prior_ch.get("registry_uri")
+    )
+    if challenger_reused_existing:
+        ch_pointer=prior_ch
+    else:
+        challenger_bundle=fit_bundle(all_games,role="WEEKLY_CHALLENGER",cutoff_label="LATEST_COMPLETED_GAMES")
+        ch_reg=_training_registry(role="WEEKLY_CHALLENGER",games=all_games,oof=oof,validation_gate=gate,freeze_utc=None)
+        ch_reg.update({
+            "champion_registry_sha256":existing.get("registry_sha256"),
+            "training_data_sha256":training_data_sha256,
+            "completed_training_games_after_2025":int(len(post_2025_training_games)),
+            "promotion_review_target_min_postfreeze_paired_games":60,
+            "promotion_review_target_cadence_weeks":4,
+            "postfreeze_paired_games":0,
+            "promotion_count_gate_met":False,
+            "promotion_evidence_policy":"ONLY_PREDICTIONS_RECORDED_AFTER_CHAMPION_AND_LEDGER_ACTIVATION_COUNT",
+            "promotion_status":"NOT_EVALUATED_PROSPECTIVE_PAIRED_LEDGER_REQUIRED",
+        })
+        ch_reg["registry_sha256"]=_sha(ch_reg)
+        prefix=f"{BASE_PREFIX}/challengers/{cutoff_s}-{ch_reg['registry_sha256'][:12]}"
+        ch_pub=_publish_bundle(storage_client,bucket_name,challenger_bundle,ch_reg,prefix)
+        ch_pointer={
+            "status":"NFL_PRODUCTION_V1_WEEKLY_CHALLENGER_READY","source_tag":SOURCE_TAG,
+            "registry_sha256":ch_reg["registry_sha256"],"artifact_sha256":ch_pub["artifact_sha256"],
+            "artifact_uri":ch_pub["artifact"]["uri"],"registry_uri":ch_pub["registry"]["uri"],
+            "champion_registry_sha256":existing.get("registry_sha256"),
+            "training_data_sha256":training_data_sha256,
+            "data_cutoff":str(cutoff),"completed_training_games_after_2025":int(len(post_2025_training_games)),
+            "postfreeze_paired_games":0,"promotion_count_gate_met":False,"automatic_promotion":False,
+            "production_authority":0,
+        }
+        _write_pointer(storage_client,bucket_name,CHALLENGER_POINTER,ch_pointer)
+    log_func("[NFL-PROD-V1-CHALLENGER] "+json.dumps({**ch_pointer,"reused_existing":challenger_reused_existing},sort_keys=True,default=str))
 
     report={
         "status":"NFL_PRODUCTION_V1_BACKBONES_FROZEN_AND_CHALLENGER_REFRESHED",
         "source_tag":SOURCE_TAG,"contract_sha256":contract["contract_sha256"],
         "champion":existing,"champion_created_now":baseline_created,"challenger":ch_pointer,
+        "challenger_reused_existing":challenger_reused_existing,
         "oof_summary":oof["summary"],"validation_gate":gate,
         "backbones":contract["backbones"],"production_feature_count":len(PRODUCTION_FEATURES),
         "completed_training_games_after_2025":int(len(post_2025_training_games)),
