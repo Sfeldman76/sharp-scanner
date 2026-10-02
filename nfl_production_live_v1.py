@@ -38,7 +38,7 @@ from google.cloud import bigquery
 import nfl_live_feature_parity_v1 as parity
 import nfl_production_v1 as prod
 
-SOURCE_TAG = "nfl-production-v1.2.1-ledger-permission-gate-20261002"
+SOURCE_TAG = "nfl-production-v1.2.2-streaming-ledger-writes-20261002"
 EXPECTED_PARITY_TAG = "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002"
 EXPECTED_PROD_TAG = "nfl-production-v1.1.1-publish-receipt-normalization-20261002"
 
@@ -268,9 +268,36 @@ def _append_idempotent(client, table_id: str, id_col: str, rows: list[dict], tim
     new = [r for r in rows if str(r[id_col]) not in existing]
     if new:
         payload = [_jsonable_record(r, time_cols=time_cols) for r in new]
-        job = client.load_table_from_json(payload, table_id, job_config=bigquery.LoadJobConfig(write_disposition=bigquery.WriteDisposition.WRITE_APPEND))
-        job.result()
-    return {"input_rows": len(rows), "existing_rows": len(rows) - len(new), "inserted_rows": len(new)}
+        # Use BigQuery streaming inserts rather than a load job.  Load jobs can
+        # require bigquery.tables.create even when the destination table already
+        # exists.  This runtime is intentionally restricted to writing existing
+        # operator-created ledger tables, so insertAll/insert_rows_json is the
+        # correct primitive: table must already exist and write authority is
+        # bigquery.tables.updateData.  row_ids add a second best-effort duplicate
+        # guard on top of the explicit primary-key pre-query above.
+        chunk_size = 500
+        for start in range(0, len(payload), chunk_size):
+            chunk = payload[start:start + chunk_size]
+            chunk_ids = [str(new[start + i][id_col]) for i in range(len(chunk))]
+            errors = client.insert_rows_json(
+                table_id,
+                chunk,
+                row_ids=chunk_ids,
+                skip_invalid_rows=False,
+                ignore_unknown_values=False,
+            )
+            if errors:
+                compact = errors[:10] if isinstance(errors, list) else errors
+                raise RuntimeError(
+                    "[NFL-PROD-V1-LIVE-HOLD] LEDGER_STREAM_INSERT_FAILED "
+                    + table_id + " " + json.dumps(compact, sort_keys=True, default=str)
+                )
+    return {
+        "input_rows": len(rows),
+        "existing_rows": len(rows) - len(new),
+        "inserted_rows": len(new),
+        "write_method": "BIGQUERY_STREAMING_INSERT_EXISTING_TABLE_ONLY",
+    }
 
 
 def _feature_payload(row: pd.Series) -> dict:
