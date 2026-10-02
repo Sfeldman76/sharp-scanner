@@ -1,4 +1,4 @@
-"""NFL Production V2.0 — historical replay + unified Betting Engine V1 validation.
+"""NFL Production V2.1 — historical replay + Edge Authority V2 validation.
 
 Purpose
 -------
@@ -20,8 +20,7 @@ moneyline when available. Neither is represented as verified executable pricing.
 
 This module is read-only with respect to BigQuery and never changes champion,
 challenger, or model-promotion authority. After generating leak-safe replay rows,
-it trains/publishes Betting Engine V1 from 2021-2025 only and reports nested
-season-forward betting performance. It may also publish replay artifacts to GCS.
+it preserves Betting Engine V1 as a benchmark and trains/publishes Edge Authority V2 using the shared NCAAF-derived family/confirmation framework. It may also publish replay artifacts to GCS.
 """
 from __future__ import annotations
 
@@ -38,9 +37,10 @@ import pandas as pd
 
 import nfl_production_v1 as prod
 import nfl_betting_engine_v1 as betting
+import nfl_edge_authority_v2 as edge_v2
 from nfl_feature_audit_v1 import VIEW
 
-SOURCE_TAG = "nfl-production-v2.0-historical-betting-engine-20261002"
+SOURCE_TAG = "nfl-production-v2.1-historical-edge-authority-v2-20261002"
 VALIDATION_SEASONS = (2021, 2022, 2023, 2024, 2025)
 VALIDATION_STAGE = "REGULAR"
 MARKET_COLUMNS = (
@@ -451,7 +451,7 @@ def _adaptive_vs_frozen(rows: pd.DataFrame) -> dict:
 
 
 def _publish(storage_client, bucket_name: str, report: dict, rows: pd.DataFrame) -> dict:
-    stable_report = {k:v for k,v in report.items() if k not in ("generated_at_utc","artifacts","betting_engine")}
+    stable_report = {k:v for k,v in report.items() if k not in ("generated_at_utc","artifacts","betting_engine","betting_engine_v1_benchmark","edge_authority_v2")}
     digest = _sha_obj({"source_tag":SOURCE_TAG,"contract":prod.production_contract()["contract_sha256"],"report":stable_report})
     prefix = f"{ARTIFACT_PREFIX}/{digest[:16]}"
     report_name = f"{prefix}/report.json"
@@ -494,8 +494,14 @@ def run_nfl_production_historical_replay(*, bq_client, storage_client=None, buck
         log_func(f"[NFL-PROD-V1-REPLAY-EDGE-{_m}] " + json.dumps(_compact_edge_log(edge_all,_m), sort_keys=True, default=str))
 
     betting_meta = {}
+    edge_meta = {}
     if storage_client is not None:
+        # V1 remains a frozen benchmark/shadow. V2 is the primary authority research path.
         betting_meta = betting.train_publish_engine(
+            bq_client=bq_client, storage_client=storage_client, bucket_name=bucket_name,
+            replay_rows=replay, games=games, log_func=log_func,
+        )
+        edge_meta = edge_v2.train_publish_edge_authority(
             bq_client=bq_client, storage_client=storage_client, bucket_name=bucket_name,
             replay_rows=replay, games=games, log_func=log_func,
         )
@@ -514,8 +520,9 @@ def run_nfl_production_historical_replay(*, bq_client, storage_client=None, buck
         "market_reference_policy":"Historical opening and closing lines/prices are source-provided retrospective references only; no independently verified executable-price or historical CLV claim.",
         "production_authority":0, "betting_decision_authority":False, "automatic_promotion":False,
         "live_paired_ledger":"SEPARATE_AND_CONTINUES_UNCHANGED",
-        "systems":"VALIDATED_SYSTEM_SUPPORT_IS_AN_EXPLICIT_BETTING_ENGINE_FEATURE; SYSTEMS_ARE_NOT_COUNTED_AS_EXTRA_VOTES",
-        "betting_engine":betting_meta,
+        "systems":"EDGE_AUTHORITY_V2_COUNTS_ONE_VOTE_PER_INDEPENDENT_MECHANISM_FAMILY; ALIASES_DO_NOT_INFLATE_AUTHORITY",
+        "betting_engine_v1_benchmark":betting_meta,
+        "edge_authority_v2":edge_meta,
     }
     pub = _publish(storage_client,bucket_name,report,replay) if storage_client is not None else {}
     report["artifacts"] = pub
@@ -524,11 +531,12 @@ def run_nfl_production_historical_replay(*, bq_client, storage_client=None, buck
     log_func("[NFL-PROD-V1-REPLAY-CONTRACT] " + json.dumps({
         "status":report["status"], "source_tag":SOURCE_TAG, "weeks":report["weeks"], "prediction_games":report["prediction_games"],
         "adaptive_vs_frozen":compare, "artifacts":pub,
-        "betting_engine_status":betting_meta.get("status"),
-        "betting_engine_market_gates":betting_meta.get("market_gates",{}),
+        "betting_engine_v1_benchmark_status":betting_meta.get("status"),
+        "edge_authority_v2_status":edge_meta.get("status"),
+        "edge_authority_v2_markets":edge_meta.get("markets",{}),
         "current_report_uri":report.get("current_report_uri"),
         "production_authority":0, "automatic_promotion":False,
-        "next_step":"RUN_WEEKLY_UPDATE_TO_SCORE_UNIFIED_BETTING_ENGINE_AND_ACCUMULATE_PROSPECTIVE_BET_PERFORMANCE",
+        "next_step":"RUN_WEEKLY_UPDATE_TO_APPLY_EDGE_AUTHORITY_V2_AND_ACCUMULATE_PROSPECTIVE_EDGE_PERFORMANCE",
     }, sort_keys=True, default=str))
     return report
 
