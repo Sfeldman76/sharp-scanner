@@ -36,7 +36,7 @@ import pandas as pd
 
 from nfl_feature_audit_v1 import VIEW
 
-SOURCE_TAG = "nfl-production-v1.1-fixed-backbones-refresh-baseline-gates-20261002"
+SOURCE_TAG = "nfl-production-v1.1.1-publish-receipt-normalization-20261002"
 BASELINE_MAX_SEASON = 2025
 MARKETS = ("SPREADS", "H2H", "TOTALS")
 
@@ -464,10 +464,41 @@ def _serialize(bundle: dict) -> bytes:
 
 
 def _publish_bundle(storage_client,bucket_name,bundle:dict,registry:dict,prefix:str):
-    data=_serialize(bundle); art_sha=hashlib.sha256(data).hexdigest(); registry=dict(registry); registry["artifact_sha256"]=art_sha
-    a=_upload_immutable(storage_client,bucket_name,f"{prefix}/backbones.joblib",data,"application/octet-stream")
-    r=_upload_immutable(storage_client,bucket_name,f"{prefix}/registry.json",json.dumps(registry,sort_keys=True,indent=2,default=str).encode(),"application/json")
-    return {"artifact":a,"registry":r,"artifact_sha256":art_sha,"registry":registry}
+    """Publish immutable model + registry and return a stable URI contract.
+
+    Do not depend on the exact receipt shape returned by the upload helper. The
+    immutable object names are deterministic, so their gs:// URIs are known
+    before upload. This also makes retries after a partial publish safe.
+    """
+    data=_serialize(bundle)
+    art_sha=hashlib.sha256(data).hexdigest()
+    registry=dict(registry)
+    registry["artifact_sha256"]=art_sha
+
+    artifact_name=f"{prefix}/backbones.joblib"
+    registry_name=f"{prefix}/registry.json"
+    artifact_uri=f"gs://{bucket_name}/{artifact_name}"
+    registry_uri=f"gs://{bucket_name}/{registry_name}"
+
+    a_receipt=_upload_immutable(
+        storage_client,bucket_name,artifact_name,data,"application/octet-stream"
+    )
+    r_receipt=_upload_immutable(
+        storage_client,bucket_name,registry_name,
+        json.dumps(registry,sort_keys=True,indent=2,default=str).encode(),
+        "application/json",
+    )
+
+    # Normalize the outward-facing contract even if a storage helper/version
+    # returns only creation metadata. Preserve the raw receipts for diagnostics.
+    artifact={"uri":artifact_uri,"object_name":artifact_name,"upload_receipt":a_receipt}
+    registry_pub={"uri":registry_uri,"object_name":registry_name,"upload_receipt":r_receipt}
+    return {
+        "artifact":artifact,
+        "registry":registry_pub,
+        "artifact_sha256":art_sha,
+        "registry_payload":registry,
+    }
 
 
 def _training_registry(*,role,games,oof,validation_gate,freeze_utc=None):
