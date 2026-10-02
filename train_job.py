@@ -610,7 +610,7 @@ def main():
 
         _parity = _load_nfl_prod_parity_exact(
             "nfl_live_feature_parity_v1",
-            "nfl-production-v1-live-feature-parity-v1.0.2-verified-calendar-static-division-20261001",
+            "nfl-production-v1-live-feature-parity-v1.0.3-tuesday-week-boundary-20261001",
         )
         pw.emit("audit", f"[NFL-PROD-V1] Live-pregame feature parity start run={run_id}; no model fit or publication", pct=0.10)
         try:
