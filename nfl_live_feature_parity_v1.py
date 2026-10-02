@@ -9,9 +9,10 @@ The audit has zero production authority and writes no predictions.
 The historical replay deliberately recomputes the compact prior-state features
 from the authoritative raw team-side history instead of reading them from the
 training view.  The recomputed values are then compared field-for-field to the
-historical training view.  Upcoming schedule metadata is resolved from the
-existing authoritative Big Al schedule/context view; no week/date inference is
-used for division/week metadata.
+historical training view.  Upcoming Week_Number is reconstructed from the authoritative uploader's Week-1
+anchor using a seven-day calendar that must replay historical Week labels exactly.
+Division context comes from fixed NFL alignment and is replay-validated.  Unproven
+live fields remain research-only.
 """
 from __future__ import annotations
 
@@ -28,16 +29,65 @@ from google.cloud import bigquery as b
 
 from nfl_challenger_v1 import COMPACT_FEATURES
 
-SOURCE_TAG = "nfl-production-v1-live-feature-parity-v1.0.1-upcoming-join-diagnostics-20261001"
+SOURCE_TAG = "nfl-production-v1-live-feature-parity-v1.0.2-verified-calendar-static-division-20261001"
 PROJECT = "sharplogger"
 DATASET = "sharp_data"
 RAW = f"{PROJECT}.{DATASET}.nfl_historical_game_side_raw"
 VIEW = f"{PROJECT}.{DATASET}.nfl_historical_core_training_vw"
 MARKET_SOURCE = f"{PROJECT}.{DATASET}.sharp_moves_master"
-SCHEDULE_VIEW = f"{PROJECT}.{DATASET}.bigal_game_context_enriched"
 PRODUCTION_AUTHORITY = 0
 HISTORICAL_REPLAY_SEASON = 2025
 FLOAT_TOL = 1e-6
+
+# Live-production context is deliberately limited to fields we can reproduce
+# exactly from the authoritative uploader history plus current matchup identity.
+# Is_Neutral and Is_Night_Game remain available to research, but are not part
+# of Production V1 until a live source proves exact historical/live parity.
+_TEAM_ALIASES = {
+    "ari":"ARI","arizona":"ARI","arizona cardinals":"ARI","cardinals":"ARI",
+    "atl":"ATL","atlanta":"ATL","atlanta falcons":"ATL","falcons":"ATL",
+    "bal":"BAL","baltimore":"BAL","baltimore ravens":"BAL","ravens":"BAL",
+    "buf":"BUF","buffalo":"BUF","buffalo bills":"BUF","bills":"BUF",
+    "car":"CAR","carolina":"CAR","carolina panthers":"CAR","panthers":"CAR",
+    "chi":"CHI","chicago":"CHI","chicago bears":"CHI","bears":"CHI",
+    "cin":"CIN","cincinnati":"CIN","cincinnati bengals":"CIN","bengals":"CIN",
+    "cle":"CLE","cleveland":"CLE","cleveland browns":"CLE","browns":"CLE",
+    "dal":"DAL","dallas":"DAL","dallas cowboys":"DAL","cowboys":"DAL",
+    "den":"DEN","denver":"DEN","denver broncos":"DEN","broncos":"DEN",
+    "det":"DET","detroit":"DET","detroit lions":"DET","lions":"DET",
+    "gb":"GB","green bay":"GB","green bay packers":"GB","packers":"GB",
+    "hou":"HOU","houston":"HOU","houston texans":"HOU","texans":"HOU",
+    "ind":"IND","indianapolis":"IND","indianapolis colts":"IND","colts":"IND",
+    "jax":"JAX","jac":"JAX","jacksonville":"JAX","jacksonville jaguars":"JAX","jaguars":"JAX",
+    "kc":"KC","kansas city":"KC","kansas city chiefs":"KC","chiefs":"KC",
+    "lv":"LV","las vegas":"LV","las vegas raiders":"LV","raiders":"LV","oakland raiders":"LV","oak":"LV",
+    "lac":"LAC","la chargers":"LAC","los angeles chargers":"LAC","chargers":"LAC",
+    "lar":"LAR","la rams":"LAR","los angeles rams":"LAR","rams":"LAR","st louis rams":"LAR",
+    "mia":"MIA","miami":"MIA","miami dolphins":"MIA","dolphins":"MIA",
+    "min":"MIN","minnesota":"MIN","minnesota vikings":"MIN","vikings":"MIN",
+    "ne":"NE","new england":"NE","new england patriots":"NE","patriots":"NE",
+    "no":"NO","new orleans":"NO","new orleans saints":"NO","saints":"NO",
+    "nyg":"NYG","new york giants":"NYG","giants":"NYG",
+    "nyj":"NYJ","new york jets":"NYJ","jets":"NYJ",
+    "phi":"PHI","philadelphia":"PHI","philadelphia eagles":"PHI","eagles":"PHI",
+    "pit":"PIT","pittsburgh":"PIT","pittsburgh steelers":"PIT","steelers":"PIT",
+    "sea":"SEA","seattle":"SEA","seattle seahawks":"SEA","seahawks":"SEA",
+    "sf":"SF","san francisco":"SF","san francisco 49ers":"SF","49ers":"SF","niners":"SF",
+    "tb":"TB","tampa bay":"TB","tampa bay buccaneers":"TB","buccaneers":"TB","bucs":"TB",
+    "ten":"TEN","tennessee":"TEN","tennessee titans":"TEN","titans":"TEN",
+    "was":"WAS","wsh":"WAS","washington":"WAS","washington commanders":"WAS","commanders":"WAS",
+    "washington football team":"WAS","washington redskins":"WAS","redskins":"WAS",
+}
+_DIVISION = {
+    "BUF":"AFC_EAST","MIA":"AFC_EAST","NE":"AFC_EAST","NYJ":"AFC_EAST",
+    "BAL":"AFC_NORTH","CIN":"AFC_NORTH","CLE":"AFC_NORTH","PIT":"AFC_NORTH",
+    "HOU":"AFC_SOUTH","IND":"AFC_SOUTH","JAX":"AFC_SOUTH","TEN":"AFC_SOUTH",
+    "DEN":"AFC_WEST","KC":"AFC_WEST","LV":"AFC_WEST","LAC":"AFC_WEST",
+    "DAL":"NFC_EAST","NYG":"NFC_EAST","PHI":"NFC_EAST","WAS":"NFC_EAST",
+    "CHI":"NFC_NORTH","DET":"NFC_NORTH","GB":"NFC_NORTH","MIN":"NFC_NORTH",
+    "ATL":"NFC_SOUTH","CAR":"NFC_SOUTH","NO":"NFC_SOUTH","TB":"NFC_SOUTH",
+    "ARI":"NFC_WEST","LAR":"NFC_WEST","SF":"NFC_WEST","SEA":"NFC_WEST",
+}
 
 # Only the compact features intended for the fast frozen Production V1 backbones.
 PRODUCTION_FEATURES = tuple(OrderedDict.fromkeys(
@@ -45,7 +95,7 @@ PRODUCTION_FEATURES = tuple(OrderedDict.fromkeys(
 ))
 
 SCHEDULE_FEATURES = (
-    "Week_Number", "Is_Home", "Is_Neutral", "Is_Night_Game", "Is_Division_Game",
+    "Week_Number", "Is_Home", "Is_Division_Game",
 )
 DERIVED_FEATURES = tuple(x for x in PRODUCTION_FEATURES if x not in SCHEDULE_FEATURES)
 
@@ -73,6 +123,24 @@ def _norm_name(x):
         pass
     s = re.sub(r"[^a-z0-9]+", " ", str(x).strip().lower())
     return re.sub(r"\s+", " ", s).strip()
+
+
+def _team_code(x):
+    s=_norm_name(x)
+    return _TEAM_ALIASES.get(s, s.upper() if s else "")
+
+
+def _division_flag(team, opp):
+    a,b=_team_code(team),_team_code(opp)
+    if not a or not b or a not in _DIVISION or b not in _DIVISION:
+        return np.nan
+    return float(_DIVISION[a] == _DIVISION[b])
+
+
+def _season_from_date(x):
+    dt=pd.to_datetime(x, errors="coerce")
+    if pd.isna(dt): return np.nan
+    return int(dt.year-1 if dt.month <= 3 else dt.year)
 
 
 def _num(x):
@@ -179,9 +247,13 @@ def derive_compact_from_raw(raw: pd.DataFrame) -> pd.DataFrame:
     prior_map = (reg.groupby(["Season","Team_Norm"], sort=False)["su_win_value"].mean().to_dict())
     d["Prior_Season_WinPct"] = [prior_map.get((int(season)-1, team), np.nan) for season,team in zip(d.Season,d.Team_Norm)]
 
-    # Historical schedule values that can be independently reconstructed from raw.
+    # Production schedule/context values independently reconstructable from raw
+    # identity or the fixed NFL divisional alignment.
     d["Week_Number_Rebuilt"] = pd.to_numeric(d["Week"], errors="coerce")
-    d["Is_Night_Game_Rebuilt"] = _night_from_start(d.Game_Date, d.Start_Time_ET)
+    d["Is_Home_Rebuilt"] = _num(d["Is_Home"])
+    d["Is_Division_Game_Rebuilt"] = [
+        _division_flag(t,o) for t,o in zip(d.Team_Norm,d.Opponent_Norm)
+    ]
 
     # Pair opponent's *prior* state at the same game.
     pair_cols = [
@@ -210,7 +282,7 @@ def derive_compact_from_raw(raw: pd.DataFrame) -> pd.DataFrame:
 
     keep = list(OrderedDict.fromkeys((
         "Season","Source_Name","Source_Game_ID","Game_Date","Team_Norm","Opponent_Norm",
-        "Is_Home","Is_Away","Is_Neutral","Week_Number_Rebuilt","Is_Night_Game_Rebuilt",
+        "Is_Home","Is_Away","Is_Neutral","Week_Number_Rebuilt","Is_Home_Rebuilt","Is_Division_Game_Rebuilt",
         *DERIVED_FEATURES,
     )))
     return d[keep].copy()
@@ -226,7 +298,8 @@ def compare_replay(reference: pd.DataFrame, rebuilt: pd.DataFrame) -> dict:
     # schedule values that can be independently replayed from raw
     replay_map = {
         "Week_Number":"Week_Number_Rebuilt",
-        "Is_Night_Game":"Is_Night_Game_Rebuilt",
+        "Is_Home":"Is_Home_Rebuilt",
+        "Is_Division_Game":"Is_Division_Game_Rebuilt",
         **{c:c for c in DERIVED_FEATURES},
     }
     hard_mismatch = 0
@@ -265,7 +338,7 @@ def compare_replay(reference: pd.DataFrame, rebuilt: pd.DataFrame) -> dict:
         "status":status,"season":HISTORICAL_REPLAY_SEASON,"rows":int(len(m)),
         "missing_rebuilt_rows":missing_rebuilt,"total_field_mismatch_rows":int(hard_mismatch),
         "float_tolerance":FLOAT_TOL,"fields":fields,
-        "note":"Static Is_Home/Is_Neutral/Is_Division_Game are separately validated as upcoming schedule-source contract; replay independently checks Week, night flag, and every derived compact predictor.",
+        "note":"Production V1 replays Week_Number, Is_Home, static Is_Division_Game, and every derived compact predictor. Is_Neutral and Is_Night_Game are research-only until exact live parity is proven.",
     }
 
 
@@ -334,153 +407,122 @@ def fetch_upcoming_games(client, now=None, lookahead_days=8):
     return d.reset_index(drop=True),{"status":"READY","games":int(len(d))}
 
 
-def _schedule_schema(client):
-    cols={f.name for f in client.get_table(SCHEDULE_VIEW).schema}
-    def first(*xs): return next((x for x in xs if x in cols),None)
-    m={
-        "game_key":first("Merge_Key_Short","Game_Key","Event_ID","Game_ID"),
-        "game_start":first("Game_Start","feat_Game_Start","Commence_Hour"),
-        "home":first("Home_Team_Norm","Home_Context_Team_Norm","Home_Team"),
-        "away":first("Away_Team_Norm","Away_Context_Team_Norm","Away_Team"),
-        "season":first("Season"),"week":first("Week_Number","Week","Game_Week"),
-        "division":first("Is_Division_Game"),"neutral":first("Is_Neutral_Site","Is_Neutral"),
-    }
-    required=("game_start","home","away","season","week","division")
-    miss=[x for x in required if not m.get(x)]
-    if miss: raise RuntimeError("NFL_PROD_V1_SCHEDULE_SCHEMA_MISSING "+str(miss)+" resolved="+str(m))
-    return m
+def validate_week_calendar(raw: pd.DataFrame) -> dict:
+    """Prove the deterministic season/week calendar against uploader labels.
 
-
-def fetch_schedule_context(client, upcoming: pd.DataFrame):
-    if upcoming is None or upcoming.empty:
-        return pd.DataFrame(),{"status":"NO_UPCOMING_GAMES"}
-    m=_schedule_schema(client)
-    start=(upcoming.game_start.min()-pd.Timedelta(hours=2)).to_pydatetime()
-    end=(upcoming.game_start.max()+pd.Timedelta(hours=2)).to_pydatetime()
-    key_expr=f"CAST(`{m['game_key']}` AS STRING)" if m.get("game_key") else "CAST(NULL AS STRING)"
-    neutral_expr=f"SAFE_CAST(`{m['neutral']}` AS INT64)" if m.get("neutral") else "CAST(NULL AS INT64)"
-    source_keys=[]
-    if m.get("game_key") and "source_game_key" in upcoming.columns:
-        source_keys=sorted({str(x).strip() for x in upcoming.source_game_key.tolist() if x is not None and str(x).strip() and str(x).strip().lower()!='nan'})
-    predicates=[f"SAFE_CAST(`{m['game_start']}` AS TIMESTAMP) BETWEEN @start AND @end"]
-    params=[b.ScalarQueryParameter("start","TIMESTAMP",start),b.ScalarQueryParameter("end","TIMESTAMP",end)]
-    if source_keys:
-        predicates.append(f"CAST(`{m['game_key']}` AS STRING) IN UNNEST(@source_keys)")
-        params.append(b.ArrayQueryParameter("source_keys","STRING",source_keys))
-    sql=f"""
-      SELECT {key_expr} source_game_key,
-             SAFE_CAST(`{m['game_start']}` AS TIMESTAMP) game_start,
-             CAST(`{m['home']}` AS STRING) home_team,
-             CAST(`{m['away']}` AS STRING) away_team,
-             SAFE_CAST(`{m['season']}` AS INT64) season,
-             SAFE_CAST(`{m['week']}` AS INT64) week_number,
-             SAFE_CAST(`{m['division']}` AS INT64) is_division_game,
-             {neutral_expr} is_neutral
-      FROM `{SCHEDULE_VIEW}`
-      WHERE UPPER(TRIM(CAST(Sport AS STRING)))='NFL'
-        AND ({' OR '.join(predicates)})
+    The live rule is learned only from the authoritative current season Week-1
+    anchor.  Before use, the same seven-day reconstruction is checked against
+    every labeled historical NFL row.  If it does not reproduce uploader Week,
+    the live audit fails closed.
     """
-    ctx=_query_df(client,sql,params)
-    if ctx.empty:
-        return ctx,{"status":"HOLD_NO_AUTHORITATIVE_SCHEDULE_ROWS","queried_source_keys":int(len(source_keys)),"schedule_view":SCHEDULE_VIEW}
-    ctx["game_start"]=pd.to_datetime(ctx.game_start,utc=True,errors="coerce")
-    ctx["home_key"]=ctx.home_team.map(_norm_name)
-    ctx["away_key"]=ctx.away_team.map(_norm_name)
-    ctx["source_game_key"]=ctx.source_game_key.fillna("").astype(str).str.strip()
-    ctx=ctx.sort_values("game_start").drop_duplicates(["source_game_key","game_start","home_key","away_key"],keep="last")
-    return ctx,{"status":"READY","rows":int(len(ctx)),"queried_source_keys":int(len(source_keys)),"schedule_view":SCHEDULE_VIEW}
+    d=raw.copy()
+    d["Game_Date"]=pd.to_datetime(d.Game_Date, errors="coerce").dt.normalize()
+    d["Week_Num"]=pd.to_numeric(d.Week, errors="coerce")
+    d["Season_Num"]=pd.to_numeric(d.Season, errors="coerce")
+    d=d.loc[d.Game_Date.notna() & d.Week_Num.notna() & d.Season_Num.notna()].copy()
+    d["Season_Num"]=d.Season_Num.astype(int)
+    anchors={}
+    for season,g in d.groupby("Season_Num",sort=True):
+        w1=g.loc[g.Week_Num.eq(1),"Game_Date"]
+        if not w1.empty: anchors[int(season)]=pd.Timestamp(w1.min())
+    rows=[]; mismatch=[]; season_mismatch=[]
+    for r in d.itertuples(index=False):
+        season=int(r.Season_Num)
+        inferred_season=_season_from_date(r.Game_Date)
+        if inferred_season != season:
+            season_mismatch.append({"season":season,"game_date":str(pd.Timestamp(r.Game_Date).date()),"inferred_season":inferred_season})
+        anchor=anchors.get(season)
+        if anchor is None: continue
+        pred=1+int((pd.Timestamp(r.Game_Date)-anchor).days//7)
+        rows.append((season,float(r.Week_Num),pred))
+        if abs(float(r.Week_Num)-float(pred))>1e-9 and len(mismatch)<20:
+            mismatch.append({"season":season,"game_date":str(pd.Timestamp(r.Game_Date).date()),"reference_week":float(r.Week_Num),"rebuilt_week":int(pred)})
+    total=len(rows)
+    mm=sum(1 for _,a,z in rows if abs(a-z)>1e-9)
+    status="PASS" if total>0 and mm==0 and not season_mismatch else "HOLD"
+    return {
+        "status":status,"rows_checked":int(total),"week_mismatch_rows":int(mm),
+        "season_date_mismatch_rows":int(len(season_mismatch)),
+        "week_mismatch_samples":mismatch,"season_mismatch_samples":season_mismatch[:20],
+        "anchors":{str(k):str(v.date()) for k,v in anchors.items()},
+        "rule":"season=calendar year except Jan-Mar belongs to prior season; week=1+floor((game_date-week1_anchor)/7)",
+        "date_or_week_guessing":False,
+    }
 
 
-def build_upcoming_features(raw: pd.DataFrame, upcoming: pd.DataFrame, schedule: pd.DataFrame) -> tuple[pd.DataFrame,dict]:
+def _calendar_week_for_game(game_start, calendar:dict):
+    ts=pd.to_datetime(game_start,utc=True,errors="coerce")
+    if pd.isna(ts): return None,None
+    local=ts.tz_convert("America/New_York")
+    season=_season_from_date(local.tz_localize(None))
+    anchor_txt=(calendar.get("anchors") or {}).get(str(int(season))) if pd.notna(season) else None
+    if not anchor_txt:return None,None
+    anchor=pd.Timestamp(anchor_txt)
+    week=1+int((pd.Timestamp(local.date())-anchor).days//7)
+    if week < 1 or week > 30:return None,None
+    return int(season),int(week)
+
+
+def build_upcoming_features(raw: pd.DataFrame, upcoming: pd.DataFrame, calendar: dict) -> tuple[pd.DataFrame,dict]:
     if upcoming is None or upcoming.empty:
         return pd.DataFrame(),{"status":"NO_UPCOMING_GAMES"}
-    if schedule is None or schedule.empty:
-        return pd.DataFrame(),{
-            "status":"HOLD_AUTHORITATIVE_SCHEDULE_UNAVAILABLE",
-            "upcoming_games":int(len(upcoming)),
-            "missing_schedule_games":int(len(upcoming)),
-            "matched_by_source_key":0,
-            "matched_by_identity":0,
-        }
-    u=upcoming.copy(); s=schedule.copy()
-    for z in (u,s):
-        z["game_start"]=pd.to_datetime(z.game_start,utc=True,errors="coerce")
-        if "home_key" not in z.columns:z["home_key"]=z.home_team.map(_norm_name)
-        if "away_key" not in z.columns:z["away_key"]=z.away_team.map(_norm_name)
-        if "source_game_key" not in z.columns:z["source_game_key"]=""
-        z["__source_key"]=z.source_game_key.fillna("").astype(str).str.strip().str.casefold()
-        z["__identity"]=[f"{pd.Timestamp(gs).round('s').isoformat()}|{h}|{a}" if pd.notna(gs) else f"|{h}|{a}" for gs,h,a in zip(z.game_start,z.home_key,z.away_key)]
+    if not isinstance(calendar,dict) or calendar.get("status")!="PASS":
+        return pd.DataFrame(),{"status":"HOLD_WEEK_CALENDAR_NOT_PROVEN","upcoming_games":int(len(upcoming))}
+    u=upcoming.copy()
+    u["game_start"]=pd.to_datetime(u.game_start,utc=True,errors="coerce")
+    if "home_key" not in u.columns:u["home_key"]=u.home_team.map(_norm_name)
+    if "away_key" not in u.columns:u["away_key"]=u.away_team.map(_norm_name)
+    u["__identity"]=[f"{pd.Timestamp(gs).round('s').isoformat()}|{h}|{a}" if pd.notna(gs) else f"|{h}|{a}" for gs,h,a in zip(u.game_start,u.home_key,u.away_key)]
 
-    # Only exact/unique source-key mappings are eligible. Conflicting keys fail over
-    # to exact kickoff/home/away identity; there is no fuzzy or date-derived match.
-    by_key={}
-    for k,g in s.loc[s.__source_key.ne("")].groupby("__source_key",sort=False):
-        uniq=g.drop_duplicates(["game_start","home_key","away_key","season","week_number","is_division_game","is_neutral"])
-        if len(uniq)==1:by_key[k]=uniq.iloc[0]
-    by_identity={}
-    for ident,g in s.groupby("__identity",sort=False):
-        uniq=g.drop_duplicates(["season","week_number","is_division_game","is_neutral"])
-        if len(uniq)==1:by_identity[ident]=uniq.iloc[0]
-
-    missing_identity=[]; rows=[]; row_schedule={}; matched_key=0; matched_identity=0
-    base=raw.copy()
+    rows=[]; metadata={}; unresolved=[]
     for _,g in u.iterrows():
-        ident=g.__identity
-        sc=None
-        if g.__source_key and g.__source_key in by_key:
-            sc=by_key[g.__source_key]; matched_key+=1
-        elif ident in by_identity:
-            sc=by_identity[ident]; matched_identity+=1
-        if sc is None:
-            missing_identity.append(ident); continue
-        season=int(sc.season); week=float(sc.week_number) if pd.notna(sc.week_number) else np.nan
-        row_schedule[ident]=sc
+        season,week=_calendar_week_for_game(g.game_start,calendar)
+        home_code,away_code=_team_code(g.home_team),_team_code(g.away_team)
+        div=_division_flag(g.home_team,g.away_team)
+        if season is None or week is None or pd.isna(div) or home_code not in _DIVISION or away_code not in _DIVISION:
+            unresolved.append(g.__identity); continue
+        metadata[g.__identity]={"season":season,"week":week,"is_division_game":float(div)}
         for side in ("home","away"):
             team=g.home_team if side=="home" else g.away_team
             opp=g.away_team if side=="home" else g.home_team
             syn={c:np.nan for c in RAW_REQUIRED}
             syn.update({
-                "Season":season,"Season_Stage":"REGULAR","Source_Name":"LIVE_PARITY","Source_Game_ID":ident,
+                "Season":season,"Season_Stage":"REGULAR","Source_Name":"LIVE_PARITY","Source_Game_ID":g.__identity,
                 "Game_Date":pd.Timestamp(g.game_start).tz_convert("America/New_York").date(),"Week":week,
                 "Start_Time_ET":pd.Timestamp(g.game_start).tz_convert("America/New_York").strftime("%I:%M %p"),
                 "Team_Norm":team,"Opponent_Norm":opp,"Is_Home":1 if side=="home" else 0,
-                "Is_Away":0 if side=="home" else 1,"Is_Neutral":float(sc.is_neutral) if pd.notna(sc.is_neutral) else 0.0,
+                "Is_Away":0 if side=="home" else 1,"Is_Neutral":0.0,
             })
             rows.append(syn)
     if not rows:
-        return pd.DataFrame(),{
-            "status":"HOLD_NO_EXACT_SCHEDULE_MATCH",
-            "missing_schedule_games":int(len(missing_identity)),
-            "matched_by_source_key":int(matched_key),
-            "matched_by_identity":int(matched_identity),
-        }
+        return pd.DataFrame(),{"status":"HOLD_NO_RESOLVABLE_UPCOMING_GAMES","unresolved_games":int(len(unresolved)),"upcoming_games":int(len(u))}
+
     synthetic=pd.DataFrame(rows)
-    combo=pd.concat([base[list(RAW_REQUIRED)],synthetic[list(RAW_REQUIRED)]],ignore_index=True,sort=False)
+    combo=pd.concat([raw[list(RAW_REQUIRED)],synthetic[list(RAW_REQUIRED)]],ignore_index=True,sort=False)
     rebuilt=derive_compact_from_raw(combo)
     live=rebuilt.loc[rebuilt.Source_Name.eq("LIVE_PARITY")].copy()
     if live.empty:return live,{"status":"HOLD_LIVE_FEATURE_BUILD_EMPTY"}
-
     live["__identity"]=live.Source_Game_ID.astype(str)
-    live["Week_Number"]=[float(row_schedule[i].week_number) if i in row_schedule and pd.notna(row_schedule[i].week_number) else np.nan for i in live.__identity]
-    live["Is_Division_Game"]=[float(row_schedule[i].is_division_game) if i in row_schedule and pd.notna(row_schedule[i].is_division_game) else np.nan for i in live.__identity]
-    live["Is_Neutral"]=[float(row_schedule[i].is_neutral) if i in row_schedule and pd.notna(row_schedule[i].is_neutral) else _num(live.Is_Neutral).iloc[j] for j,i in enumerate(live.__identity)]
-    game_start_by_identity = dict(zip(u["__identity"], u["game_start"]))
-    live["Is_Night_Game"]=[
-        float(pd.Timestamp(game_start_by_identity[i]).tz_convert("America/New_York").hour >= 18)
-        if i in game_start_by_identity and pd.notna(game_start_by_identity[i]) else np.nan
-        for i in live.__identity
-    ]
+    live["Week_Number"]=[float(metadata[i]["week"]) if i in metadata else np.nan for i in live.__identity]
+    live["Is_Division_Game"]=[float(metadata[i]["is_division_game"]) if i in metadata else np.nan for i in live.__identity]
     live["Is_Home"]=_num(live.Is_Home)
 
     missing_by_feature={c:int(pd.to_numeric(live.get(c),errors="coerce").isna().sum()) for c in PRODUCTION_FEATURES}
-    all_required_ready=all(v==0 for v in missing_by_feature.values())
+    # First-game/team prior-state NULLs are legitimate historical behavior.  The
+    # model pipeline imputes those fields.  Schedule/context fields must never be NULL.
+    schedule_missing={c:missing_by_feature[c] for c in SCHEDULE_FEATURES}
+    context_ready=all(v==0 for v in schedule_missing.values())
     return live,{
-        "status":"READY" if all_required_ready else "HOLD_MISSING_UPCOMING_FEATURES",
+        "status":"READY" if context_ready and not unresolved else "HOLD_UPCOMING_CONTEXT_INCOMPLETE",
         "rows":int(len(live)),"games":int(live.Source_Game_ID.nunique()),
-        "missing_schedule_games":int(len(missing_identity)),
-        "matched_by_source_key":int(matched_key),"matched_by_identity":int(matched_identity),
-        "missing_by_feature":missing_by_feature,
+        "upcoming_games":int(len(u)),"unresolved_games":int(len(unresolved)),
+        "unresolved_samples":unresolved[:20],
+        "missing_by_feature":missing_by_feature,"schedule_missing":schedule_missing,
+        "research_only_excluded_features":["Is_Neutral","Is_Night_Game"],
+        "division_source":"STATIC_NFL_ALIGNMENT_VALIDATED_BY_HISTORICAL_REPLAY",
+        "week_source":"AUTHORITATIVE_UPLOADER_WEEK1_ANCHOR_PLUS_HISTORICALLY_VERIFIED_7_DAY_CALENDAR",
     }
+
 
 def run_nfl_live_feature_parity_v1(*, bq_client=None, log_func=print, now=None):
     c=bq_client or b.Client(project=PROJECT)
@@ -497,17 +539,19 @@ def run_nfl_live_feature_parity_v1(*, bq_client=None, log_func=print, now=None):
     replay=compare_replay(ref,rebuilt25)
     log_func("[NFL-PROD-V1-HISTORICAL-REPLAY] "+json.dumps(replay,sort_keys=True,default=str))
 
+    calendar=validate_week_calendar(raw)
+    log_func("[NFL-PROD-V1-WEEK-CALENDAR] "+json.dumps(calendar,sort_keys=True,default=str))
     upcoming,umeta=fetch_upcoming_games(c,now=started)
-    sched,smeta=fetch_schedule_context(c,upcoming) if not upcoming.empty else (pd.DataFrame(),{"status":"NO_UPCOMING_GAMES"})
-    live,lmeta=build_upcoming_features(raw,upcoming,sched) if not upcoming.empty else (pd.DataFrame(),{"status":"NO_UPCOMING_GAMES"})
+    live,lmeta=build_upcoming_features(raw,upcoming,calendar) if not upcoming.empty else (pd.DataFrame(),{"status":"NO_UPCOMING_GAMES"})
     schedule_contract={
-        "market":umeta,"authoritative_schedule":smeta,
-        "upcoming_feature_build":lmeta,"schedule_view":SCHEDULE_VIEW,
-        "date_or_week_inference_for_schedule_metadata":False,
+        "market":umeta,"week_calendar":calendar,
+        "upcoming_feature_build":lmeta,
+        "research_only_excluded_features":["Is_Neutral","Is_Night_Game"],
+        "external_future_schedule_dependency":False,
     }
     log_func("[NFL-PROD-V1-UPCOMING-FEATURES] "+json.dumps(schedule_contract,sort_keys=True,default=str))
 
-    ready = replay.get("status")=="PASS" and lmeta.get("status")=="READY"
+    ready = replay.get("status")=="PASS" and calendar.get("status")=="PASS" and lmeta.get("status")=="READY"
     status = "NFL_PRODUCTION_V1_LIVE_FEATURE_PARITY_PASS" if ready else "HOLD_LIVE_FEATURE_PARITY"
     summary={
         "status":status,"source_tag":SOURCE_TAG,"production_authority":0,
@@ -526,16 +570,15 @@ def run_nfl_live_feature_parity_v1(*, bq_client=None, log_func=print, now=None):
 
 
 def synthetic_self_test():
-    # Three seasons, four games/team in current season, deterministic opponent pair.
+    # Two seasons, four games/team, deterministic divisional opponent pair.
     rows=[]
-    teams=("alpha","beta")
     gid=0
     for season in (2024,2025):
         for wk in range(1,5):
             gid+=1
             for team,opp,home,score,oscore,yards,plays,ats in [
-                ("alpha","beta",1,20+wk,17+wk,320+wk*5,60,"WIN" if wk%2 else "LOSS"),
-                ("beta","alpha",0,17+wk,20+wk,300+wk*4,58,"LOSS" if wk%2 else "WIN"),
+                ("buffalo bills","miami dolphins",1,20+wk,17+wk,320+wk*5,60,"WIN" if wk%2 else "LOSS"),
+                ("miami dolphins","buffalo bills",0,17+wk,20+wk,300+wk*4,58,"LOSS" if wk%2 else "WIN"),
             ]:
                 rows.append({"Season":season,"Season_Stage":"REGULAR","Source_Name":"T","Source_Game_ID":str(gid),
                     "Game_Date":pd.Timestamp(f"{season}-09-{wk*7:02d}"),"Week":wk,"Start_Time_ET":"08:20 PM",
@@ -543,9 +586,12 @@ def synthetic_self_test():
                     "Team_Score":score,"Opponent_Score":oscore,"ATS_Result_Close":ats,
                     "Postgame_Total_Yards":yards,"Postgame_Total_Plays":plays})
     d=derive_compact_from_raw(pd.DataFrame(rows))
-    r=d.loc[(d.Season.eq(2025)) & d.Team_Norm.eq("alpha")].sort_values("Game_Date").iloc[-1]
+    r=d.loc[(d.Season.eq(2025)) & d.Team_Norm.eq("buffalo bills")].sort_values("Game_Date").iloc[-1]
     if not np.isfinite(float(r.WinPct_Prior_Diff)):
         raise AssertionError("WIN_PCT_DIFF_MISSING")
-    if float(r.Is_Night_Game_Rebuilt)!=1.0:
-        raise AssertionError("NIGHT_FLAG_BAD")
-    return {"status":"PASS","rows":int(len(d)),"production_feature_count":len(PRODUCTION_FEATURES)}
+    if float(r.Is_Division_Game_Rebuilt)!=1.0:
+        raise AssertionError("DIVISION_FLAG_BAD")
+    cal=validate_week_calendar(pd.DataFrame(rows))
+    if cal.get("status")!="PASS":
+        raise AssertionError("WEEK_CALENDAR_BAD "+str(cal))
+    return {"status":"PASS","rows":int(len(d)),"production_feature_count":len(PRODUCTION_FEATURES),"week_calendar":cal.get("status")}
