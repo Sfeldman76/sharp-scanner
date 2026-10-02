@@ -584,6 +584,57 @@ def main():
             raise
         return
 
+    # NFL Production V1 — fixed compact backbones + weekly challenger refresh.
+    # The first successful run freezes the 2017-2025 champion contract. Every
+    # later run refits a challenger with all completed games but cannot replace
+    # the champion. Promotion requires a separate prospective paired review.
+    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_production_refresh":
+        import importlib.util
+        from pathlib import Path
+        from google.cloud import bigquery
+        _dir = Path(__file__).resolve().parent
+
+        def _load_nfl_prod_refresh_exact(_name, _tag):
+            _path = _dir / (_name + ".py")
+            if not _path.is_file():
+                raise RuntimeError(f"[NFL-PROD-V1-REFRESH-PREFLIGHT] MISSING {_path}")
+            _spec = importlib.util.spec_from_file_location(_name, _path)
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules[_name] = _mod
+            _spec.loader.exec_module(_mod)
+            if getattr(_mod, "SOURCE_TAG", "") != _tag:
+                raise RuntimeError("[NFL-PROD-V1-REFRESH-PREFLIGHT] STALE_OR_MIXED_"+_name)
+            return _mod
+
+        _parity = _load_nfl_prod_refresh_exact(
+            "nfl_live_feature_parity_v1",
+            "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002",
+        )
+        _prod = _load_nfl_prod_refresh_exact(
+            "nfl_production_v1",
+            "nfl-production-v1.1-fixed-backbones-refresh-baseline-gates-20261002",
+        )
+        pw.emit("audit", f"[NFL-PROD-V1] Verify live parity before refresh run={run_id}", pct=0.05)
+        try:
+            _parity_result = _parity.run_nfl_live_feature_parity_v1(
+                bq_client=bigquery.Client(project="sharplogger"),
+                log_func=log_func,
+            )
+            if _parity_result.get("status") != "NFL_PRODUCTION_V1_LIVE_FEATURE_PARITY_PASS":
+                raise RuntimeError("[NFL-PROD-V1-REFRESH-HOLD] LIVE_FEATURE_PARITY_NOT_GREEN "+str(_parity_result.get("status")))
+            pw.emit("train", "NFL Production V1 parity PASS; freeze/refresh fixed Spread, H2H and Totals backbones", pct=0.35)
+            _result = _prod.run_nfl_production_refresh(
+                bq_client=bigquery.Client(project="sharplogger"),
+                storage_client=gcs,
+                bucket_name=bucket,
+                log_func=log_func,
+            )
+            pw.emit("done", "NFL Production V1 backbones frozen/refreshed: "+_result["status"], pct=1.0)
+        except Exception as exc:
+            pw.emit("error", "NFL Production V1 refresh failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            raise
+        return
+
     # NFL Production V1 — live-pregame feature parity audit.
     # This is the mandatory bridge between offline historical research and live
     # production scoring. It does not fit or publish a model. It independently
@@ -610,7 +661,7 @@ def main():
 
         _parity = _load_nfl_prod_parity_exact(
             "nfl_live_feature_parity_v1",
-            "nfl-production-v1-live-feature-parity-v1.0.4-standard-week-exception-gate-20261001",
+            "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002",
         )
         pw.emit("audit", f"[NFL-PROD-V1] Live-pregame feature parity start run={run_id}; no model fit or publication", pct=0.10)
         try:
