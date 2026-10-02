@@ -28,9 +28,31 @@ import numpy as np
 import pandas as pd
 from google.cloud import bigquery as b
 
-from nfl_challenger_v1 import COMPACT_FEATURES
+# Frozen locally so later research changes cannot silently mutate the production
+# parity contract. These lists intentionally match NFL Production V1.1.
+COMPACT_FEATURES = {
+    "SPREADS": (
+        "Week_Number", "Is_Home", "Is_Division_Game", "Rest_Differential_Days",
+        "WinPct_Prior_Diff", "ATS_WinPct_Prior_Diff", "Avg_SU_Margin_Last5_Diff",
+        "Off_YPP_vs_Opp_Def_Last3_Diff", "Def_YPP_vs_Opp_Off_Last3_Diff",
+        "Prior_Season_WinPct_Diff",
+    ),
+    "H2H": (
+        "Week_Number", "Is_Home", "Is_Division_Game", "Rest_Differential_Days",
+        "WinPct_Prior_Diff", "Avg_SU_Margin_Last5_Diff",
+        "Off_YPP_vs_Opp_Def_Last3_Diff", "Def_YPP_vs_Opp_Off_Last3_Diff",
+        "Prior_Season_WinPct_Diff",
+    ),
+    "TOTALS": (
+        "Week_Number", "Is_Home", "Is_Division_Game", "Rest_Differential_Days",
+        "Avg_Points_For_Last5_Prior", "Avg_Points_Against_Last5_Prior",
+        "Opp_Avg_Points_For_Last5_Prior", "Opp_Avg_Points_Against_Last5_Prior",
+        "Avg_Off_YPP_Last3_Prior", "Avg_Def_YPP_Last3_Prior",
+        "Opp_Avg_Off_YPP_Last3_Prior", "Opp_Avg_Def_YPP_Last3_Prior",
+    ),
+}
 
-SOURCE_TAG = "nfl-production-v1-live-feature-parity-v1.0.4-standard-week-exception-gate-20261001"
+SOURCE_TAG = "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002"
 PROJECT = "sharplogger"
 DATASET = "sharp_data"
 RAW = f"{PROJECT}.{DATASET}.nfl_historical_game_side_raw"
