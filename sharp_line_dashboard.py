@@ -49391,7 +49391,7 @@ if not HEADLESS:
     if str(sport).upper().strip() == "NFL":
         # Permanent NFL workflow. One-time build/diagnostic routes stay callable
         # but are intentionally hidden from the normal control surface.
-        _nfl_primary = ["nfl_system_lab", "nfl_research_engine", "nfl_prospective_shadow", "nfl_live_feature_parity"]
+        _nfl_primary = ["nfl_production_refresh", "nfl_prospective_shadow", "nfl_system_lab", "nfl_research_engine", "nfl_live_feature_parity"]
         _show_nfl_advanced = st.sidebar.checkbox(
             "Show advanced / legacy NFL research runs",
             value=False,
@@ -49405,6 +49405,7 @@ if not HEADLESS:
         ]
         _train_market_options = _nfl_primary + (_nfl_advanced if _show_nfl_advanced else [])
         _train_market_labels = {
+            "nfl_production_refresh": "NFL Production V1 — Train / Refresh",
             "nfl_research_engine": "NFL Challenger Research",
             "nfl_system_lab": "NFL System Research / Miner",
             "nfl_prospective_shadow": "NFL Prospective Shadow",
@@ -49485,9 +49486,14 @@ if not HEADLESS:
             "NFL V1.9.6 prospective shadow: continues the market-microstructure clock and the existing Role-Flip system clock, while adding separate append-only clocks for newly frozen mechanism families. "
             "Pregame quotes and system triggers are settled prospectively only; no historical backfill, retuning, or automatic production authority."
         )
+    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_refresh":
+        st.sidebar.caption(
+            "NFL Production V1 Train / Refresh: verifies live feature parity, freezes the initial 2017-2025 compact Spread/H2H/Totals champion if one does not exist, then trains a separate weekly challenger using all completed games. "
+            "Spread and Totals are compact Ridge fair-value backbones; H2H is the compact logistic backbone. The final 18-feature contract must clear season-forward baseline gates before the first champion freeze. Weekly refresh never auto-promotes; only post-freeze paired predictions can support a later promotion review."
+        )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_live_feature_parity":
         st.sidebar.caption(
-            "NFL Production V1 live feature parity: independently rebuilds the fixed compact Spread/H2H/Totals pregame features from prior completed NFL games, replays them against the 2025 historical training view, verifies the uploader-based Tuesday-to-Monday NFL regular-season week calendar and static division contract, and builds the same features for current upcoming games. Is_Neutral and Is_Night_Game remain research-only until exact live parity is proven. "
+            "NFL Production V1 live feature parity: independently rebuilds the locally frozen 18-feature Spread/H2H/Totals pregame contract from prior completed NFL games, replays them against the 2025 historical training view, verifies the uploader-based Tuesday-to-Monday NFL regular-season week calendar and static division contract, and builds the same features for current upcoming games. Is_Neutral and Is_Night_Game remain research-only until exact live parity is proven. "
             "Audit only: no model fit, no prediction publication, no threshold tuning, and no production authority until parity passes."
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_pbp_foundation":
@@ -49636,6 +49642,7 @@ if not HEADLESS:
     
     if str(sport).upper().strip() == "NFL":
         _nfl_train_labels = {
+            "nfl_production_refresh": "Train / Refresh NFL Production V1",
             "nfl_audit": "Run NFL History & Champion Audit",
             "nfl_challenger": "Run NFL Specialized Modeling V1.5 (No Publish)",
             "nfl_score_engine": "Run NFL Team Score Engine V1.6 (No Publish)",
