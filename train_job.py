@@ -584,6 +584,56 @@ def main():
             raise
         return
 
+    # NFL Production V1.4 — unified weekly production update.
+    # One operator action: parity -> challenger refresh/reuse -> paired live score
+    # -> recommendation capture/settlement -> performance/promotion clocks.
+    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_production_weekly":
+        import importlib.util
+        from pathlib import Path
+        from google.cloud import bigquery
+        _dir = Path(__file__).resolve().parent
+
+        def _load_nfl_weekly_exact(_name, _tag):
+            _path = _dir / (_name + ".py")
+            if not _path.is_file():
+                raise RuntimeError(f"[NFL-PROD-V1-WEEKLY-PREFLIGHT] MISSING {_path}")
+            _spec = importlib.util.spec_from_file_location(_name, _path)
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules[_name] = _mod
+            _spec.loader.exec_module(_mod)
+            if getattr(_mod, "SOURCE_TAG", "") != _tag:
+                raise RuntimeError("[NFL-PROD-V1-WEEKLY-PREFLIGHT] STALE_OR_MIXED_"+_name)
+            return _mod
+
+        _parity = _load_nfl_weekly_exact("nfl_live_feature_parity_v1", "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002")
+        _prod = _load_nfl_weekly_exact("nfl_production_v1", "nfl-production-v1.1.1-publish-receipt-normalization-20261002")
+        _rec = _load_nfl_weekly_exact("nfl_production_recommendations_v1", "nfl-production-v1.4-recommendation-performance-ui-20261002")
+        _live = _load_nfl_weekly_exact("nfl_production_live_v1", "nfl-production-v1.4-live-recommendation-performance-20261002")
+        pw.emit("audit", f"[NFL-PROD-V1.4] Weekly production update start run={run_id}", pct=0.05)
+        try:
+            _bq=bigquery.Client(project="sharplogger")
+            _parity_result=_parity.run_nfl_live_feature_parity_v1(bq_client=_bq,log_func=log_func)
+            if _parity_result.get("status") != "NFL_PRODUCTION_V1_LIVE_FEATURE_PARITY_PASS":
+                raise RuntimeError("[NFL-PROD-V1-WEEKLY-HOLD] LIVE_FEATURE_PARITY_NOT_GREEN "+str(_parity_result.get("status")))
+            pw.emit("train", "Parity PASS; refresh/reuse weekly challenger", pct=0.30)
+            _refresh=_prod.run_nfl_production_refresh(bq_client=_bq,storage_client=gcs,bucket_name=bucket,log_func=log_func)
+            pw.emit("score", "Challenger ready; score paired ledger, recommendations and performance", pct=0.65)
+            _score=_live.run_nfl_production_live_score(bq_client=_bq,storage_client=gcs,bucket_name=bucket,log_func=log_func)
+            _result={"status":"NFL_PRODUCTION_V1_WEEKLY_UPDATE_PASS","refresh":_refresh,"score":_score}
+            log_func("[NFL-PROD-V1-WEEKLY-CONTRACT] "+json.dumps({
+                "status":_result["status"],
+                "challenger_reused_existing":bool(_refresh.get("challenger_reused_existing",False)),
+                "live_status":_score.get("status"),
+                "recommendations":_score.get("recommendations",{}),
+                "promotion_clock":_score.get("promotion_clock",{}),
+                "automatic_promotion":False,
+            },sort_keys=True,default=str))
+            pw.emit("done", "NFL Production weekly update complete", pct=1.0)
+        except Exception as exc:
+            pw.emit("error", "NFL Production weekly update failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            raise
+        return
+
     # NFL Production V1.3 — historical weekly walk-forward replay.
     # Mirrors the live architecture on 2021-2025 without future leakage:
     # each season has a frozen pre-season control and a weekly adaptive challenger.
@@ -612,7 +662,7 @@ def main():
         )
         _replay = _load_nfl_prod_replay_exact(
             "nfl_production_replay_v1",
-            "nfl-production-v1.3-historical-weekly-replay-20261002",
+            "nfl-production-v1.4-historical-policy-ui-20261002",
         )
         pw.emit("audit", f"[NFL-PROD-V1.3] Historical weekly replay start run={run_id}; 2021-2025 OOS only", pct=0.05)
         try:
@@ -658,9 +708,13 @@ def main():
             "nfl_production_v1",
             "nfl-production-v1.1.1-publish-receipt-normalization-20261002",
         )
+        _rec = _load_nfl_prod_live_exact(
+            "nfl_production_recommendations_v1",
+            "nfl-production-v1.4-recommendation-performance-ui-20261002",
+        )
         _live = _load_nfl_prod_live_exact(
             "nfl_production_live_v1",
-            "nfl-production-v1.2.2-streaming-ledger-writes-20261002",
+            "nfl-production-v1.4-live-recommendation-performance-20261002",
         )
         pw.emit("audit", f"[NFL-PROD-V1.2] Verify live parity before paired scoring run={run_id}", pct=0.05)
         try:
