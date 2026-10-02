@@ -49487,7 +49487,7 @@ if not HEADLESS:
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_live_feature_parity":
         st.sidebar.caption(
-            "NFL Production V1 live feature parity: independently rebuilds the fixed compact Spread/H2H/Totals pregame features from prior completed NFL games, replays them against the 2025 historical training view, and builds the same features for current upcoming games. "
+            "NFL Production V1 live feature parity: independently rebuilds the fixed compact Spread/H2H/Totals pregame features from prior completed NFL games, replays them against the 2025 historical training view, verifies the uploader-based NFL week calendar and static division contract, and builds the same features for current upcoming games. Is_Neutral and Is_Night_Game remain research-only until exact live parity is proven. "
             "Audit only: no model fit, no prediction publication, no threshold tuning, and no production authority until parity passes."
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_pbp_foundation":
