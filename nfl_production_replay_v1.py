@@ -1,4 +1,4 @@
-"""NFL Production V1.3 — historical weekly walk-forward replay.
+"""NFL Production V1.4 — historical weekly replay + recommendation policy.
 
 Purpose
 -------
@@ -38,7 +38,7 @@ import pandas as pd
 import nfl_production_v1 as prod
 from nfl_feature_audit_v1 import VIEW
 
-SOURCE_TAG = "nfl-production-v1.3-historical-weekly-replay-20261002"
+SOURCE_TAG = "nfl-production-v1.4-historical-policy-ui-20261002"
 VALIDATION_SEASONS = (2021, 2022, 2023, 2024, 2025)
 VALIDATION_STAGE = "REGULAR"
 MARKET_COLUMNS = (
@@ -49,6 +49,11 @@ BASE_COLUMNS = tuple(OrderedDict.fromkeys((*prod.QUERY_COLUMNS, *MARKET_COLUMNS)
 EDGE_THRESHOLDS_POINTS = (0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
 H2H_EDGE_THRESHOLDS = (0.0, 0.02, 0.05, 0.075, 0.10, 0.15)
 ARTIFACT_PREFIX = "production/nfl/v1/historical_replay"
+CURRENT_REPORT_OBJECT = f"{ARTIFACT_PREFIX}/current_report.json"
+CURRENT_POLICY_OBJECT = f"{ARTIFACT_PREFIX}/current_policy.json"
+POLICY_DISCOVERY_SEASONS = (2021, 2022, 2023)
+POLICY_CONFIRMATION_SEASONS = (2024, 2025)
+POLICY_VERSION = "NFL_PROD_V1_2021_23_DISCOVERY_2024_25_CONFIRMATION"
 
 
 def _f(v):
@@ -398,6 +403,105 @@ def _market_edge_summary(rows: pd.DataFrame, role: str, reference: str) -> dict:
     }
 
 
+
+def _edge_metric(rows: pd.DataFrame, market: str, reference: str, threshold: float) -> dict:
+    role="frozen"
+    if market in ("SPREADS","TOTALS"):
+        if reference=="close":
+            sp_col,to_col="close_spread","close_total"
+        else:
+            sp_col,to_col="opening_spread","opening_total"
+        if market=="SPREADS":
+            line=pd.to_numeric(rows[sp_col],errors="coerce")
+            edge=pd.to_numeric(rows[f"{role}_fair_margin"],errors="coerce")+line
+            settle=pd.to_numeric(rows.actual_margin,errors="coerce")+line
+        else:
+            line=pd.to_numeric(rows[to_col],errors="coerce")
+            edge=pd.to_numeric(rows[f"{role}_fair_total"],errors="coerce")-line
+            settle=pd.to_numeric(rows.actual_total,errors="coerce")-line
+        return _minus110_table(edge,settle,thresholds=(float(threshold),))[str(float(threshold))]
+    table=_h2h_edge_table(rows,role,reference)
+    return table[str(float(threshold))]
+
+
+def _recommendation_policy(rows: pd.DataFrame) -> dict:
+    """Freeze recommendation thresholds with a discovery/confirmation split.
+
+    Thresholds are selected from the fixed predeclared grid only.  A threshold
+    must be profitable on 2021-2023 discovery and independently profitable on
+    BOTH opening and closing 2024-2025 confirmation references.  We select the
+    lowest threshold that passes, rather than the highest historical ROI, to
+    reduce threshold cherry-picking.
+    """
+    disc=rows[rows.season.isin(POLICY_DISCOVERY_SEASONS)].copy()
+    conf=rows[rows.season.isin(POLICY_CONFIRMATION_SEASONS)].copy()
+    allr=rows.copy()
+    out={}
+    for market,grid in (("SPREADS",EDGE_THRESHOLDS_POINTS[1:]),("H2H",H2H_EDGE_THRESHOLDS[1:]),("TOTALS",EDGE_THRESHOLDS_POINTS[1:])):
+        candidates=[]
+        for th in grid:
+            metrics={}
+            for label,frame in (("discovery",disc),("confirmation",conf),("all_period",allr)):
+                metrics[label]={ref.upper():_edge_metric(frame,market,ref,float(th)) for ref in ("open","close")}
+            if market=="H2H":
+                def n(m): return int(m.get("priced_n") or 0)
+                def roi(m): return _f(m.get("roi_historical_moneyline"))
+                min_disc,min_conf,min_all=60,30,90
+            else:
+                def n(m): return int(m.get("n") or 0)
+                def roi(m): return _f(m.get("roi_minus110_proxy"))
+                min_disc,min_conf,min_all=80,40,120
+            dcl=metrics["discovery"]["CLOSE"]; ccl=metrics["confirmation"]["CLOSE"]; cop=metrics["confirmation"]["OPEN"]
+            acl=metrics["all_period"]["CLOSE"]; aop=metrics["all_period"]["OPEN"]
+            gate=(
+                n(dcl)>=min_disc and n(ccl)>=min_conf and n(cop)>=min_conf and n(acl)>=min_all and n(aop)>=min_all
+                and math.isfinite(roi(dcl)) and roi(dcl)>0
+                and math.isfinite(roi(ccl)) and roi(ccl)>0
+                and math.isfinite(roi(cop)) and roi(cop)>0
+                and math.isfinite(roi(acl)) and roi(acl)>0
+                and math.isfinite(roi(aop)) and roi(aop)>0
+            )
+            candidates.append({"threshold":float(th),"passes":bool(gate),**metrics})
+        chosen=next((x for x in candidates if x["passes"]),None)
+        out[market]={
+            "status":"CONFIRMED" if chosen else "NO_CONFIRMED_THRESHOLD",
+            "threshold":None if chosen is None else chosen["threshold"],
+            "selection_rule":"LOWEST_PREDECLARED_THRESHOLD_PASSING_DISCOVERY_AND_BOTH_OPEN_CLOSE_CONFIRMATION",
+            "discovery":None if chosen is None else chosen["discovery"],
+            "confirmation":None if chosen is None else chosen["confirmation"],
+            "all_period":None if chosen is None else chosen["all_period"],
+            "candidates":candidates,
+        }
+    policy={
+        "status":"NFL_PRODUCTION_V1_RECOMMENDATION_POLICY_READY" if any(v["status"]=="CONFIRMED" for v in out.values()) else "NFL_PRODUCTION_V1_RECOMMENDATION_POLICY_PARTIAL",
+        "source_tag":SOURCE_TAG,"policy_version":POLICY_VERSION,
+        "discovery_seasons":list(POLICY_DISCOVERY_SEASONS),"confirmation_seasons":list(POLICY_CONFIRMATION_SEASONS),
+        "markets":out,"formal_betting_authority":False,"automatic_execution":False,
+        "note":"Historical-confirmation recommendation policy for UI/advisory use. Prospective evidence remains separate and is required for future formal promotion."
+    }
+    policy["policy_sha256"]=_sha_obj(policy)
+    return policy
+
+
+def _compact_edge_log(edge: dict, market: str) -> dict:
+    out={}
+    for role in ("FROZEN","ADAPTIVE"):
+        out[role]={}
+        for ref in ("OPEN","CLOSE"):
+            block=edge[role][ref]
+            out[role][ref]={
+                "thresholds":block.get(market,{}),
+                "buckets":block.get("edge_buckets",{}).get(market,{}),
+            }
+    return out
+
+
+def _write_current(storage_client,bucket_name,name,payload):
+    storage_client.bucket(bucket_name).blob(name).upload_from_string(
+        json.dumps(payload,sort_keys=True,indent=2,default=str),content_type="application/json"
+    )
+    return f"gs://{bucket_name}/{name}"
+
 def _adaptive_vs_frozen(rows: pd.DataFrame) -> dict:
     frozen = _predictive_summary(rows, "frozen")
     adaptive = _predictive_summary(rows, "adaptive")
@@ -465,8 +569,16 @@ def run_nfl_production_historical_replay(*, bq_client, storage_client=None, buck
     frozen_edge = {"OPEN": _market_edge_summary(replay, "frozen", "open"), "CLOSE": _market_edge_summary(replay, "frozen", "close")}
     adaptive_edge = {"OPEN": _market_edge_summary(replay, "adaptive", "open"), "CLOSE": _market_edge_summary(replay, "adaptive", "close")}
 
+    edge_all={"FROZEN":frozen_edge,"ADAPTIVE":adaptive_edge}
+    policy=_recommendation_policy(replay)
     log_func("[NFL-PROD-V1-REPLAY-PREDICTIVE] " + json.dumps({"FROZEN":frozen_pred,"ADAPTIVE":adaptive_pred,"adaptive_vs_frozen":compare}, sort_keys=True, default=str))
-    log_func("[NFL-PROD-V1-REPLAY-EDGE] " + json.dumps({"FROZEN":frozen_edge,"ADAPTIVE":adaptive_edge}, sort_keys=True, default=str))
+    for _m in ("SPREADS","H2H","TOTALS"):
+        log_func(f"[NFL-PROD-V1-REPLAY-EDGE-{_m}] " + json.dumps(_compact_edge_log(edge_all,_m), sort_keys=True, default=str))
+    log_func("[NFL-PROD-V1-RECOMMENDATION-POLICY] " + json.dumps({
+        "status":policy["status"],"policy_sha256":policy["policy_sha256"],
+        "markets":{m:{"status":v["status"],"threshold":v["threshold"],"confirmation":v["confirmation"],"all_period":v["all_period"]} for m,v in policy["markets"].items()},
+        "formal_betting_authority":False,
+    },sort_keys=True,default=str))
 
     report = {
         "status":"NFL_PRODUCTION_V1_HISTORICAL_WEEKLY_REPLAY_PASS",
@@ -483,13 +595,20 @@ def run_nfl_production_historical_replay(*, bq_client, storage_client=None, buck
         "production_authority":0, "betting_decision_authority":False, "automatic_promotion":False,
         "live_paired_ledger":"SEPARATE_AND_CONTINUES_UNCHANGED",
         "systems":"SEPARATE_EVIDENCE_LAYER_NOT_USED_AS_MODEL_INPUT",
+        "recommendation_policy":policy,
     }
     pub = _publish(storage_client,bucket_name,report,replay) if storage_client is not None else {}
     report["artifacts"] = pub
+    if storage_client is not None:
+        report["current_report_uri"]=_write_current(storage_client,bucket_name,CURRENT_REPORT_OBJECT,report)
+        report["current_policy_uri"]=_write_current(storage_client,bucket_name,CURRENT_POLICY_OBJECT,policy)
     log_func("[NFL-PROD-V1-REPLAY-CONTRACT] " + json.dumps({
         "status":report["status"], "source_tag":SOURCE_TAG, "weeks":report["weeks"], "prediction_games":report["prediction_games"],
-        "adaptive_vs_frozen":compare, "artifacts":pub, "production_authority":0, "automatic_promotion":False,
-        "next_step":"RUN_LIVE_SCORE_PAIRED_LEDGER_AND_ACCUMULATE_POSTFREEZE_EVIDENCE",
+        "adaptive_vs_frozen":compare, "artifacts":pub, "recommendation_policy_sha256":policy["policy_sha256"],
+        "confirmed_markets":[m for m,v in policy["markets"].items() if v["status"]=="CONFIRMED"],
+        "current_report_uri":report.get("current_report_uri"),"current_policy_uri":report.get("current_policy_uri"),
+        "production_authority":0, "automatic_promotion":False,
+        "next_step":"RUN_WEEKLY_UPDATE_TO_CAPTURE_RECOMMENDATIONS_AND_PROSPECTIVE_PERFORMANCE",
     }, sort_keys=True, default=str))
     return report
 
@@ -497,6 +616,7 @@ def run_nfl_production_historical_replay(*, bq_client, storage_client=None, buck
 def _self_test():
     assert len(prod.PRODUCTION_FEATURES)==18
     assert set(VALIDATION_SEASONS)==set(range(2021,2026))
+    assert POLICY_DISCOVERY_SEASONS==(2021,2022,2023) and POLICY_CONFIRMATION_SEASONS==(2024,2025)
     # Edge direction sanity: favorite/home fair margin better than market and Over fair total.
     t=_minus110_table(np.array([3.,-3.]),np.array([1.,-1.]),thresholds=(0,))
     assert t["0"]["wins"]==2 and t["0"]["losses"]==0
