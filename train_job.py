@@ -585,9 +585,9 @@ def main():
             raise
         return
 
-    # NFL Production V1.4 — unified weekly production update.
+    # NFL Betting Engine V1 / Production V2.0 — unified weekly production update.
     # One operator action: parity -> challenger refresh/reuse -> paired live score
-    # -> recommendation capture/settlement -> performance/promotion clocks.
+    # -> unified betting-engine decisions/settlement -> performance/promotion clocks.
     if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_production_weekly":
         import importlib.util
         from pathlib import Path
@@ -608,9 +608,9 @@ def main():
 
         _parity = _load_nfl_weekly_exact("nfl_live_feature_parity_v1", "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002")
         _prod = _load_nfl_weekly_exact("nfl_production_v1", "nfl-production-v1.1.1-publish-receipt-normalization-20261002")
-        _rec = _load_nfl_weekly_exact("nfl_production_recommendations_v1", "nfl-production-v1.4-recommendation-performance-ui-20261002")
-        _live = _load_nfl_weekly_exact("nfl_production_live_v1", "nfl-production-v1.4.1-live-weekly-contract-hotfix-20261002")
-        pw.emit("audit", f"[NFL-PROD-V1.4] Weekly production update start run={run_id}", pct=0.05)
+        _bet = _load_nfl_weekly_exact("nfl_betting_engine_v1", "nfl-betting-engine-v1.0-unified-decision-20261002")
+        _live = _load_nfl_weekly_exact("nfl_production_live_v1", "nfl-production-v2.0-live-betting-engine-20261002")
+        pw.emit("audit", f"[NFL-BET-ENGINE-V1] Weekly production update start run={run_id}", pct=0.05)
         try:
             _bq=bigquery.Client(project="sharplogger")
             _parity_result=_parity.run_nfl_live_feature_parity_v1(bq_client=_bq,log_func=log_func)
@@ -618,14 +618,14 @@ def main():
                 raise RuntimeError("[NFL-PROD-V1-WEEKLY-HOLD] LIVE_FEATURE_PARITY_NOT_GREEN "+str(_parity_result.get("status")))
             pw.emit("train", "Parity PASS; refresh/reuse weekly challenger", pct=0.30)
             _refresh=_prod.run_nfl_production_refresh(bq_client=_bq,storage_client=gcs,bucket_name=bucket,log_func=log_func)
-            pw.emit("score", "Challenger ready; score paired ledger, recommendations and performance", pct=0.65)
+            pw.emit("score", "Challenger ready; score paired ledger + unified betting engine and performance", pct=0.65)
             _score=_live.run_nfl_production_live_score(bq_client=_bq,storage_client=gcs,bucket_name=bucket,log_func=log_func)
             _result={"status":"NFL_PRODUCTION_V1_WEEKLY_UPDATE_PASS","refresh":_refresh,"score":_score}
             log_func("[NFL-PROD-V1-WEEKLY-CONTRACT] "+json.dumps({
                 "status":_result["status"],
                 "challenger_reused_existing":bool(_refresh.get("challenger_reused_existing",False)),
                 "live_status":_score.get("status"),
-                "recommendations":_score.get("recommendations",{}),
+                "betting_engine":_score.get("betting_engine",{}),
                 "promotion_clock":_score.get("promotion_clock",{}),
                 "automatic_promotion":False,
             },sort_keys=True,default=str))
@@ -635,8 +635,9 @@ def main():
             raise
         return
 
-    # NFL Production V1.3 — historical weekly walk-forward replay.
-    # Mirrors the live architecture on 2021-2025 without future leakage:
+    # NFL Betting Engine V1 / Production V2.0 — historical nested walk-forward validation.
+    # Replays the fair-value layer on 2021-2025 without future leakage, then
+    # trains/validates the second-stage betting engine using season-forward folds:
     # each season has a frozen pre-season control and a weekly adaptive challenger.
     # Read-only against BigQuery; never mutates champion/challenger pointers.
     if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_production_replay":
@@ -661,11 +662,15 @@ def main():
             "nfl_production_v1",
             "nfl-production-v1.1.1-publish-receipt-normalization-20261002",
         )
+        _bet = _load_nfl_prod_replay_exact(
+            "nfl_betting_engine_v1",
+            "nfl-betting-engine-v1.0-unified-decision-20261002",
+        )
         _replay = _load_nfl_prod_replay_exact(
             "nfl_production_replay_v1",
-            "nfl-production-v1.4-historical-policy-ui-20261002",
+            "nfl-production-v2.0-historical-betting-engine-20261002",
         )
-        pw.emit("audit", f"[NFL-PROD-V1.3] Historical weekly replay start run={run_id}; 2021-2025 OOS only", pct=0.05)
+        pw.emit("audit", f"[NFL-BET-ENGINE-V1] Historical validation + betting-engine fit start run={run_id}; 2021-2025 OOS only", pct=0.05)
         try:
             _result = _replay.run_nfl_production_historical_replay(
                 bq_client=bigquery.Client(project="sharplogger"),
@@ -709,13 +714,13 @@ def main():
             "nfl_production_v1",
             "nfl-production-v1.1.1-publish-receipt-normalization-20261002",
         )
-        _rec = _load_nfl_prod_live_exact(
-            "nfl_production_recommendations_v1",
-            "nfl-production-v1.4-recommendation-performance-ui-20261002",
+        _bet = _load_nfl_prod_live_exact(
+            "nfl_betting_engine_v1",
+            "nfl-betting-engine-v1.0-unified-decision-20261002",
         )
         _live = _load_nfl_prod_live_exact(
             "nfl_production_live_v1",
-            "nfl-production-v1.4.1-live-weekly-contract-hotfix-20261002",
+            "nfl-production-v2.0-live-betting-engine-20261002",
         )
         pw.emit("audit", f"[NFL-PROD-V1.2] Verify live parity before paired scoring run={run_id}", pct=0.05)
         try:
