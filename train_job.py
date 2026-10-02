@@ -660,7 +660,7 @@ def main():
         )
         _live = _load_nfl_prod_live_exact(
             "nfl_production_live_v1",
-            "nfl-production-v1.2.1-ledger-permission-gate-20261002",
+            "nfl-production-v1.2.2-streaming-ledger-writes-20261002",
         )
         pw.emit("audit", f"[NFL-PROD-V1.2] Verify live parity before paired scoring run={run_id}", pct=0.05)
         try:
