@@ -46859,6 +46859,16 @@ def _ncaaf_prod_v1_load_contract(bucket_name="sharp-models"):
         return None
 
 
+@st.cache_data(ttl=300,show_spinner=False)
+def _ncaaf_research_v2_report_cached():
+    try:
+        import ncaaf_research_v2 as _rv2
+        return _rv2.load_current_report(bucket_name=GCS_BUCKET, storage_client=storage.Client())
+    except Exception as e:
+        logging.warning("[NCAAF-RV2-UI] report unavailable: %s:%s",type(e).__name__,e)
+        return None
+
+
 @st.cache_data(ttl=180,show_spinner=False)
 def _ncaaf_prod_v1_grading_summary_cached():
     from ncaaf_production_ledger_v1 import read_summary
@@ -47196,6 +47206,16 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
         st.warning('No current three-market NCAAF predictions are available.')
         return
 
+    # Research V2 is attribution/shadow only. It may tag a live row with a frozen
+    # research system, but it cannot change Production V1 probabilities/actions.
+    try:
+        import ncaaf_research_v2 as _rv2
+        _rv2_report=_ncaaf_research_v2_report_cached()
+        if isinstance(_rv2_report,dict):
+            picks=_rv2.match_live_systems(picks,_rv2_report,dashboard_module=sys.modules[__name__])
+    except Exception as _rv2_live_err:
+        logging.warning('[NCAAF-RV2-LIVE-TAGS] unavailable: %s:%s',type(_rv2_live_err).__name__,_rv2_live_err)
+
     # Common presentation fields.
     if 'Game' in picks.columns:
         picks['Matchup']=picks['Game'].astype(str)
@@ -47210,6 +47230,13 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     # remain spread-only, but the row-level indicator is common across all markets.
     picks['Systems']=picks.get('Miner_System_Summary',pd.Series('—',index=picks.index)).fillna('—').astype(str)
     picks['System Count']=pd.to_numeric(picks.get('Miner_System_Count',pd.Series(0,index=picks.index)),errors='coerce').fillna(0).astype(int)
+    if 'NCAAF_RV2_System_Summary' in picks.columns:
+        for _idx in picks.index:
+            _r2=str(picks.at[_idx,'NCAAF_RV2_System_Summary'] or '—').strip()
+            if _r2 not in ('','—','nan','None'):
+                _cur=str(picks.at[_idx,'Systems'] or '—').strip()
+                picks.at[_idx,'Systems']=(('' if _cur in ('','—','nan','None') else _cur+' | ')+f'R2 SHADOW: {_r2}')
+                picks.at[_idx,'System Count']=int(picks.at[_idx,'System Count'])+int(picks.at[_idx,'NCAAF_RV2_System_Count'] or 0)
     sm=picks['Market'].eq('spreads')
     if sm.any():
         prev_margin=pd.to_numeric(picks.get('Prev_SU_Margin',pd.Series(np.nan,index=picks.index)),errors='coerce')
@@ -47406,6 +47433,36 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
                     _detail=_show[_show['System'].eq(_sid)].iloc[0].to_dict(); st.json(_detail)
         except Exception as _sys_ui_err:
             st.warning(f'System library unavailable: {type(_sys_ui_err).__name__}')
+
+    if st.button('Research V2 — Miner + Orthogonal STAT ▾',key='ncaaf-rv2-load-report'):
+        st.session_state['ncaaf_rv2_report_loaded']=True
+    if st.session_state.get('ncaaf_rv2_report_loaded',False):
+        try:
+            _r2=_ncaaf_research_v2_report_cached()
+            if not isinstance(_r2,dict):
+                st.info('No NCAAF Research V2 artifact is published yet. Run the NCAAF Research V2 workflow first.')
+            else:
+                st.caption('Research-only. Discovery is frozen through 2023, 2024-2025 are confirmation only, and 2026+ is prospective. Nothing in this panel changes Production V1 authority.')
+                _sf=[]
+                for _fam,_markets in ((_r2.get('orthogonal_stat') or {}).get('families') or {}).items():
+                    for _m,_v in (_markets or {}).items():
+                        _sf.append({'Family':_fam,'Market':_m,'Features':_v.get('feature_count'),'Discovery':_v.get('discovery_pass'),'Confirmation':_v.get('confirmation_pass'),'Discovery MAE Gain':_v.get('discovery_mean_improvement'),'Confirmation MAE Gain':_v.get('confirmation_mean_improvement'),'State':_v.get('authority_state'),'Production Influence':_v.get('production_authority',0)})
+                _sdf=pd.DataFrame(_sf)
+                if not _sdf.empty:
+                    st.markdown('**Orthogonal STAT families**')
+                    st.dataframe(_sdf,use_container_width=True,hide_index=True)
+                _mf=[]
+                for _m,_mr in (_r2.get('system_miner_v3') or {}).items():
+                    for _x in (_mr or {}).get('mechanism_families',[]):
+                        _mf.append({'Market':str(_m).upper(),'Mechanism':_x.get('mechanism_id'),'State':_x.get('authority_state'),'Members':_x.get('member_count'),'Discovery N':_x.get('discovery_n'),'Discovery Rate':_x.get('discovery_rate'),'Confirmation N':_x.get('confirmation_n'),'Confirmation Rate':_x.get('confirmation_rate'),'Representative':_x.get('representative_system_id'),'Families':' + '.join(_x.get('families') or []),'Production Influence':_x.get('production_authority',0)})
+                _mdf=pd.DataFrame(_mf)
+                if not _mdf.empty:
+                    st.markdown('**Collapsed System Miner V3 mechanisms**')
+                    st.dataframe(_mdf,use_container_width=True,hide_index=True)
+                _ma=_r2.get('market_rich') or {}
+                st.caption(f"Utils market-rich historical coverage: {len(_ma.get('historical_fields_present') or [])}/{len(_ma.get('historical_fields_requested') or [])} fields; live backend remains Utils → sharp_moves_master / moves_with_features_merged.")
+        except Exception as _rv2_ui_err:
+            st.warning(f'Research V2 report unavailable: {type(_rv2_ui_err).__name__}')
 
     if st.checkbox('Show market model diagnostics',value=False,key='ncaaf-fast-research'):
         diag=view[['Game Time','Matchup','Spr Fair','Spr EV','Spr Status','H2H Fair','H2H EV','H2H Status','Tot Fair','Tot EV','Tot Status']].copy()
@@ -49607,9 +49664,15 @@ if not HEADLESS:
     _train_market_options = ["All", "spreads", "h2h", "totals"]
     _train_market_labels = {}
     if str(sport).upper().strip() == "NCAAF":
-        # Research evaluates challengers without changing the live contract.
-        # Production is the explicit, separate one-time artifact publishing path.
-        _train_market_options[2:2] = ["edge_research", "ncaaf_production"]
+        # Production is frozen. Research V2 transfers the improved NFL research
+        # discipline (residual STAT, richer Miner, dependency collapse) without
+        # granting authority or rewriting Production V1.
+        _train_market_options[2:2] = ["ncaaf_research_v2", "edge_research", "ncaaf_production"]
+        _train_market_labels.update({
+            "ncaaf_research_v2": "NCAAF Research V2 — Miner + Orthogonal STAT",
+            "edge_research": "NCAAF Legacy Edge Research",
+            "ncaaf_production": "NCAAF Production V1 — Publish Frozen Contract",
+        })
     if str(sport).upper().strip() == "NFL":
         # Permanent NFL operator surface: production, validation, challenger research, systems.
         # Old one-off build/diagnostic routes are retired from the active repository.
@@ -49626,6 +49689,10 @@ if not HEADLESS:
         format_func=(lambda x: _train_market_labels.get(x, x)),
         key=f"train_market_choice_{sport}",
     )
+    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_research_v2":
+        st.sidebar.caption(
+            "Research-only challenger path. Keeps Production V1 frozen; tests orthogonal residual STAT families and System Miner V3 with discovery through 2023, untouched 2024-2025 confirmation, dependency collapse, and 2026+ prospective shadow."
+        )
     if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_production":
         st.sidebar.caption(
             "Publishes the frozen NCAAF Production V1 contract for Spread, H2H and Totals. "
@@ -49781,6 +49848,8 @@ if not HEADLESS:
             "nfl_system_lab": "Run NFL System Research / Miner",
         }
         _train_button_label = _nfl_train_labels.get(str(market_choice).lower().strip(), "Run NFL Workflow")
+    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_research_v2":
+        _train_button_label = "Run NCAAF Research V2"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production":
         _train_button_label = "Publish NCAAF Production V1"
     elif str(market_choice).lower().strip() == "edge_research":

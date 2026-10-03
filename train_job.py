@@ -475,6 +475,7 @@ def main():
     _tarv1, _tarv1_path, _tarv1_sha = _load_exact_local_module("totals_atomic_refinement_v1")
     _rcv1, _rcv1_path, _rcv1_sha = _load_exact_local_module("refit_cadence_test_v1")
     _npv1, _npv1_path, _npv1_sha = _load_exact_local_module("ncaaf_production_v1")
+    _nrv2, _nrv2_path, _nrv2_sha = _load_exact_local_module("ncaaf_research_v2")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
@@ -489,6 +490,10 @@ def main():
             str(os.getenv("NCAAF_PROMOTE_EDGE_V1", "0")).strip().lower() in {"1","true","yes","on"}
             or str(market).lower().strip() in {"ncaaf_production","production_v1"}
         )
+    )
+    _ncaaf_research_v2 = bool(
+        str(sport).upper().strip() == "NCAAF" and
+        str(market).lower().strip() in {"ncaaf_research_v2","research_v2"}
     )
     _edge_research_only = bool(
         str(sport).upper().strip() == "NCAAF" and (
@@ -711,12 +716,55 @@ def main():
         f"[NCAAF-PROD-V1-DEPLOY-PREFLIGHT] PASS source_tag={_npv1_tag} "
         f"path={_npv1_path} sha={_npv1_sha[:16]} promotion_requested={_ncaaf_prod_promote}"
     )
+    _nrv2_tag = getattr(_nrv2, "NCAAF_RESEARCH_V2_SOURCE_TAG", None)
+    if _nrv2_tag != "ncaaf-research-v2-orthogonal-stat-miner-v3-20261003":
+        raise RuntimeError(
+            f"[NCAAF-RV2-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv2_tag!r} "
+            f"path={str(_nrv2_path)!r} sha={_nrv2_sha[:16]}"
+        )
+    log_func(
+        f"[NCAAF-RV2-DEPLOY-PREFLIGHT] PASS source_tag={_nrv2_tag} path={_nrv2_path} "
+        f"sha={_nrv2_sha[:16]} production_authority=0"
+    )
 
     pw.emit("start", f"Training start run_id={run_id} sport={sport} market={market}", pct=0.0)
 
     hb_stop = start_heartbeat(pw, f"[{sport}] market={market}", 45)
 
     try:
+        if _ncaaf_research_v2:
+            log_func(
+                "[NCAAF-RV2-START] scope=RESEARCH_ONLY benchmark=FROZEN_NCAAF_PRODUCTION_V1 "
+                "discovery=THROUGH_2023 confirmation=2024_2025 prospective=2026_PLUS "
+                "lanes=ORTHOGONAL_STAT,SYSTEM_MINER_V3,DEPENDENCY_COLLAPSE,MARKET_RICH_AUDIT production_authority=0"
+            )
+            pw.emit("research", "NCAAF Research V2: build frozen historical/STAT caches", pct=0.10)
+            _sld.fit_historical_ncaaf_core_expert("spreads", log_func=log_func)
+            _sld.fit_ncaaf_statistical_brain(log_func=log_func)
+            _cache = getattr(_sld, "_V1357_SPREAD_RESEARCH_CACHE", {}) or {}
+            _games = _cache.get("games") if isinstance(_cache, dict) else None
+            _oof = _cache.get("oof_margin") if isinstance(_cache, dict) else None
+            if _games is None or getattr(_games, "empty", True) or _oof is None:
+                raise RuntimeError("[NCAAF-RV2-CACHE] historical research cache unavailable")
+            pw.emit("research", "NCAAF Research V2: orthogonal residual STAT + Miner V3", pct=0.45)
+            _rv2 = _nrv2.run_ncaaf_research_v2(
+                dashboard_module=_sld, utils_module=_utils, bucket_name=bucket, storage_client=gcs,
+                log_func=log_func, hard_fail=True
+            )
+            if _rv2.get("status") != "NCAAF_RESEARCH_V2_COMPLETE":
+                raise RuntimeError("[NCAAF-RV2-HOLD] "+str(_rv2.get("status")))
+            log_func("[NCAAF-RV2-FINAL] "+json.dumps({
+                "status":_rv2.get("status"),
+                "production_authority":_rv2.get("production_authority"),
+                "production_contract_mutated":_rv2.get("production_contract_mutated"),
+                "confirmed_spread_stat_families":((_rv2.get("orthogonal_stat") or {}).get("confirmed_spread_families") or []),
+                "confirmed_totals_stat_families":((_rv2.get("orthogonal_stat") or {}).get("confirmed_totals_families") or []),
+                "confirmed_miner_mechanisms":sum(int((x or {}).get("confirmed_mechanism_count",0) or 0) for x in (_rv2.get("system_miner_v3") or {}).values()),
+                "artifact":_rv2.get("artifact"),
+            },sort_keys=True,default=str))
+            pw.emit("done", "NCAAF Research V2 complete — production unchanged", pct=1.0)
+            return
+
         if _edge_research_only:
             # FAST RESEARCH MODE: build only the upstream historical caches that
             # the edge-research stack consumes. Do not run timing, H2H/Totals

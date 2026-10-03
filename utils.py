@@ -20988,30 +20988,50 @@ DEFAULT_MOVES_VIEW = "sharp_data.moves_with_features_merged"
 def read_recent_sharp_moves(
     hours: int = 120,
     table: str = DEFAULT_MOVES_VIEW,
-    pregame_only: bool = True
+    pregame_only: bool = True,
+    sport: str | None = None,
+    game_start_after = None,
+    game_start_before = None,
+    use_bq_storage: bool = True,
 ) -> pd.DataFrame:
     """
-    Load recent sharp moves (enriched with team features) from BigQuery.
+    Load recent sharp moves from BigQuery.
 
-    - `table` should usually be the merged view:
-        sharp_data.moves_with_features_merged
-      (no totals duplication; has home_/away_ feature columns)
-
-    - Set `pregame_only=False` if you also want in-play/post-game rows.
+    Backward-compatible with the original API, with optional server-side filters
+    for sport and game-start window.  Production callers should use these filters
+    instead of loading every sport into pandas and filtering afterward.
     """
     try:
-        client = bq_client  # reuse your existing client
+        client = bq_client
 
         where_clauses = [
             "Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)"
         ]
+        query_parameters = [bigquery.ScalarQueryParameter("hours", "INT64", int(hours))]
+
         if pregame_only:
             where_clauses += [
                 "COALESCE(Pre_Game, TRUE)",
                 "Game_Start IS NOT NULL",
                 "Time IS NOT NULL",
-                "TIMESTAMP_DIFF(Game_Start, Time, SECOND) >= 0"
+                "TIMESTAMP_DIFF(Game_Start, Time, SECOND) >= 0",
             ]
+
+        if sport is not None and str(sport).strip():
+            where_clauses.append("UPPER(TRIM(CAST(Sport AS STRING))) = UPPER(@sport)")
+            query_parameters.append(bigquery.ScalarQueryParameter("sport", "STRING", str(sport).strip()))
+
+        if game_start_after is not None:
+            ts = pd.to_datetime(game_start_after, utc=True, errors="coerce")
+            if pd.notna(ts):
+                where_clauses.append("Game_Start > @game_start_after")
+                query_parameters.append(bigquery.ScalarQueryParameter("game_start_after", "TIMESTAMP", ts.to_pydatetime()))
+
+        if game_start_before is not None:
+            ts = pd.to_datetime(game_start_before, utc=True, errors="coerce")
+            if pd.notna(ts):
+                where_clauses.append("Game_Start <= @game_start_before")
+                query_parameters.append(bigquery.ScalarQueryParameter("game_start_before", "TIMESTAMP", ts.to_pydatetime()))
 
         query = f"""
             SELECT *
@@ -21019,18 +21039,25 @@ def read_recent_sharp_moves(
             WHERE {' AND '.join(where_clauses)}
         """
 
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("hours", "INT64", hours)]
+        job_config = bigquery.QueryJobConfig(query_parameters=query_parameters)
+        df = client.query(query, job_config=job_config).to_dataframe(
+            create_bqstorage_client=bool(use_bq_storage)
         )
 
-        df = client.query(query, job_config=job_config).to_dataframe(create_bqstorage_client=True)
-
-        # Normalize timestamps to pandas UTC datetimes
         for col in ("Commence_Hour", "Game_Start", "Time", "Snapshot_Timestamp"):
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
 
-        print(f"✅ Loaded {len(df):,} rows from {table} (last {hours}h, pregame_only={pregame_only})")
+        _filter_desc = []
+        if sport:
+            _filter_desc.append(f"sport={sport}")
+        if game_start_after is not None or game_start_before is not None:
+            _filter_desc.append("game_start_window=bounded")
+        _filter_text = (", " + ", ".join(_filter_desc)) if _filter_desc else ""
+        print(
+            f"✅ Loaded {len(df):,} rows from {table} (last {hours}h, "
+            f"pregame_only={pregame_only}{_filter_text}, bq_storage={bool(use_bq_storage)})"
+        )
         return df
 
     except Exception as e:
