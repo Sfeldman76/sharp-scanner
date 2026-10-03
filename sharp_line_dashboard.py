@@ -46968,7 +46968,9 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     """Lean one-table NFL Production V1 view matching the NCAAF board layout.
 
     The table is one physical game per row with Spread / H2H / Totals side by side.
-    MODEL -> ACTION remains authoritative; research lanes are attribution only.
+    Frozen fair values remain the prediction champion. Production Betting V2
+    authorizes Spread only when both approved independent system families agree,
+    authorizes the approved early-division Under for Totals, and keeps H2H model-only.
     """
     state=_nfl_model_authority_v26_state_cached()
     if not isinstance(state,dict) or state.get("status") in ("UNAVAILABLE","STALE_MODEL_AUTHORITY_V26_MODULE"):
@@ -47080,7 +47082,9 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     st.subheader("NFL Production — Spread, H2H & Totals")
     st.caption(
         "Same compact production board as NCAAF: one game per row with Spread, H2H and Totals side by side. "
-        "Weekly Update creates/reuses frozen fair values; the background scanner reapplies MODEL → ACTION to fresh market prices without refitting the model."
+        "Weekly Update creates/reuses frozen fair values and refreshes the frozen Production Betting V2 selector. "
+        "Spread requires both approved independent mechanisms to agree; Totals uses the approved early-division Under; H2H remains model-only. "
+        "The background scanner reapplies the frozen selector and current-price gate without refitting the model."
     )
     _bg=cur.get("background_refresh") or {}
     if _bg:
@@ -47110,7 +47114,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     st.dataframe(main,use_container_width=True,hide_index=True)
 
     # NCAAF-style secondary diagnostics: hidden by default, never a second legacy board.
-    with st.expander("Production V1 — decision details",expanded=False):
+    with st.expander("Production Betting V2 — decision details",expanded=False):
         detail=[]
         for r in rows:
             m=str(r.get("market") or "")
@@ -47122,7 +47126,10 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                 "Model Fair":r.get("model_value"),
                 "Current Market":r.get("market_value"),
                 "Model Edge":r.get("raw_model_edge"),
-                "Frozen Gate":r.get("model_policy_threshold"),
+                "Model Threshold (shadow)":r.get("model_policy_threshold"),
+                "Production Edge Count":r.get("production_edge_mechanism_count"),
+                "Production Edge Families":" | ".join(str(x) for x in (r.get("production_edge_families") or [])),
+                "Approved Edge Contract":r.get("approved_edge_contract_match"),
                 "Current Price":r.get("selected_price"),
                 "Execution Book":r.get("selected_book"),
                 "Quote Age Minutes":r.get("quote_age_minutes"),
@@ -47133,36 +47140,56 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
             })
         st.dataframe(pd.DataFrame(detail),use_container_width=True,hide_index=True)
 
-    markets=meta.get("markets") or {}
-    with st.expander("Frozen model betting-policy validation",expanded=False):
-        vrows=[]
-        for m in ("SPREADS","H2H","TOTALS"):
-            mc=markets.get(m) or {}; d=mc.get("discovery") or {}; c=mc.get("confirmation") or {}
-            vrows.append({
-                "Market":m,"Authority":"ACTIVE" if mc.get("production_authority") else "MODEL ONLY","Frozen Threshold":mc.get("threshold"),
-                "Discovery N":d.get("n"),"Discovery W-L":f"{d.get('wins',0)}-{d.get('losses',0)}","Discovery Hit":_nfl_be_pct(d.get("hit_rate")),"Discovery ROI":_nfl_be_pct(d.get("roi_per_unit")),
-                "Confirm N":c.get("n"),"Confirm W-L":f"{c.get('wins',0)}-{c.get('losses',0)}","Confirm Hit":_nfl_be_pct(c.get("hit_rate")),"Confirm ROI":_nfl_be_pct(c.get("roi_per_unit")),
-            })
-        st.dataframe(pd.DataFrame(vrows),use_container_width=True,hide_index=True)
-        st.caption("2021-2023 selects the first/smallest predeclared model-edge threshold that passes discovery. 2024-2025 can only confirm or reject that frozen threshold.")
+    policy=cur.get("production_betting_policy") or {}
+    with st.expander("NFL Production Betting V2 — frozen policy",expanded=False):
+        prows=[
+            {
+                "Market":"SPREADS",
+                "Production Authority":"ACTIVE",
+                "Rule":"Both approved independent Spread mechanisms must trigger the same side",
+                "Approved Families":" | ".join((policy.get("spread") or {}).get("family_ids") or []),
+                "Execution Gate":"-110 or better",
+            },
+            {
+                "Market":"H2H",
+                "Production Authority":"MODEL ONLY",
+                "Rule":"No approved H2H betting edge",
+                "Approved Families":"—",
+                "Execution Gate":"—",
+            },
+            {
+                "Market":"TOTALS",
+                "Production Authority":"ACTIVE",
+                "Rule":"Approved early-division UNDER mechanism",
+                "Approved Families":" | ".join((policy.get("totals") or {}).get("family_ids") or []),
+                "Execution Gate":"-110 or better",
+            },
+        ]
+        st.dataframe(pd.DataFrame(prows),use_container_width=True,hide_index=True)
+        st.caption(
+            f"Frozen selector: {policy.get('source_tag','nfl-production-betting-v2-system-selector-20261003')} • "
+            f"approved Edge V2 contract: {policy.get('approved_edge_contract_sha256','—')}. "
+            "A later Heavy Research run cannot silently change production; a different edge-contract SHA is held for explicit review."
+        )
 
     edge_state=_nfl_edge_authority_v2_state_cached()
     edge_meta=(edge_state.get("meta") or {}) if isinstance(edge_state,dict) else {}
     if edge_meta:
         with st.expander("Research / shadow diagnostics",expanded=False):
-            st.caption("CORE / STAT / SYSTEM / MARKET remain research attribution only and cannot override MODEL → ACTION.")
+            st.caption("Only the explicitly frozen Production Betting V2 system families can authorize Spread/Totals bets. CORE, STAT, PBP, MARKET and every other discovered system remain research/shadow until explicitly promoted.")
             fam=[]
             for f in edge_meta.get("families") or []:
                 fam.append({
                     "Market":f.get("market"),"Mechanism":f.get("mechanism_class"),"Family":f.get("mechanism_family_id"),
-                    "Status":f.get("family_status"),"Production Influence":0,
+                    "Status":f.get("family_status"),
+                    "Production Influence":"APPROVED" if str(f.get("mechanism_family_id") or "") in set(((policy.get("spread") or {}).get("family_ids") or [])+((policy.get("totals") or {}).get("family_ids") or [])) else "SHADOW",
                     "Confirm N":(f.get("confirmation") or {}).get("n"),"Confirm Hit":_nfl_be_pct((f.get("confirmation") or {}).get("hit_rate")),
                     "Confirm ROI":_nfl_be_pct((f.get("confirmation") or {}).get("roi_per_unit")),
                 })
             if fam:
                 st.dataframe(pd.DataFrame(fam),use_container_width=True,hide_index=True)
 
-    print(f"[NFL-PROD-V1-FAST-UI] games={len(view)} spread_bets={spr_n} totals_bets={tot_n} h2h_model_only={h2h_model_only} production_games={prod_n} legacy_board=REMOVED layout=NCAAF_MATCH")
+    print(f"[NFL-PROD-V1-FAST-UI] games={len(view)} spread_bets={spr_n} totals_bets={tot_n} h2h_model_only={h2h_model_only} production_games={prod_n} legacy_board=REMOVED layout=NCAAF_MATCH production_policy=NFL_PRODUCTION_BETTING_V2")
 
 def _v1350_american_break_even(odds):
     o=pd.to_numeric(odds,errors='coerce')
@@ -49797,11 +49824,11 @@ if not HEADLESS:
         )
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
         st.sidebar.caption(
-            "WHEN: once each week after prior games settle / the new slate is ready. Creates or reuses frozen fair values, settles the prospective ledger and updates the promotion clock. After that, line and price changes refresh automatically through the background scanner—do NOT rerun for market moves."
+            "WHEN: once each week after prior games settle / the new slate is ready. Creates or reuses frozen fair values, settles the prospective ledger, refreshes the frozen Production Betting V2 selector, and updates the promotion clock. After that, line and price changes refresh automatically through the background scanner—do NOT rerun for market moves."
         )
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_replay":
         st.sidebar.caption(
-            "WHEN: run the heavy research when we add/change research ideas or data, and periodically during the season (about every 4 weeks) to refresh challenger evidence. Runs CORE/STAT/residual research, System Miner V3, PBP/EPA diagnostics, advanced STAT and the protected historical replay. 2026 stays prospective, production is not automatically promoted, and line changes do not require this run."
+            "WHEN: run after meaningful research/data changes and periodically during the season (about every 4 weeks). Searches CORE/STAT/residual/PBP/system challengers and updates evidence. It may flag a new candidate, but it cannot silently replace the frozen Production Betting V2 contract; any new edge-contract SHA requires explicit promotion approval. Line changes do not require this run."
         )
 
     

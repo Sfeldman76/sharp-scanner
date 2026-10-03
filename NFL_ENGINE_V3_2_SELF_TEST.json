@@ -1,0 +1,15 @@
+{
+  "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
+  "compiled_and_checked": 31,
+  "components": 31,
+  "engine_source_tag": "nfl-engine-v3.2-production-betting-v2-20261003",
+  "failures": [],
+  "missing_critical_symbols": [],
+  "shared_external_required": [
+    "utils.py",
+    "sports_edge_authority_v1.py"
+  ],
+  "status": "PASS",
+  "utils_backend_required": true,
+  "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
+}
