@@ -46876,7 +46876,7 @@ def _ncaaf_prod_v1_grading_details_cached(lock_type="FIRST"):
 def _nfl_edge_authority_v2_state_cached():
     try:
         import nfl_edge_authority_v2 as _edge
-        if getattr(_edge,"SOURCE_TAG","") != "nfl-edge-authority-v2.4-advanced-stat-research-shadow-20261003":
+        if getattr(_edge,"SOURCE_TAG","") != "nfl-edge-authority-v2.5-four-lane-multidimensional-research-20261003":
             return {"status":"STALE_EDGE_AUTHORITY_V2_MODULE"}
         return _edge.read_dashboard_state(storage_client=storage.Client(),bucket_name=GCS_BUCKET)
     except Exception as e:
@@ -46912,20 +46912,20 @@ def _nfl_be_num(x,dec=2):
 
 
 def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
-    """Primary NFL Edge Authority V2.4 panel; Betting Engine V1 is benchmark-only."""
+    """Primary NFL Edge Authority V2.5 panel; Betting Engine V1 is benchmark-only."""
     state=_nfl_edge_authority_v2_state_cached()
     if not isinstance(state,dict) or state.get("status") in ("UNAVAILABLE","STALE_EDGE_AUTHORITY_V2_MODULE"):
-        st.info("NFL Edge Authority V2.4 is not available yet. Run NFL Edge Authority — Historical Validation, then Weekly Update.")
+        st.info("NFL Edge Authority V2.5 is not available yet. Run NFL Edge Authority — Historical Validation, then Weekly Update.")
         return
     meta=state.get("meta") or {}; cur=state.get("current") or {}
     if not meta:
-        st.info("NFL Edge Authority V2.4 has not been frozen yet. Run NFL Edge Authority — Historical Validation once.")
+        st.info("NFL Edge Authority V2.5 has not been frozen yet. Run NFL Edge Authority — Historical Validation once.")
         return
 
-    st.subheader("NFL Edge Authority V2.4")
+    st.subheader("NFL Edge Authority V2.5")
     st.caption(
-        "Shared NCAAF-derived authority architecture: frozen fair-value predictions stay separate from betting authority. V2.4 adds research-only orthogonal advanced STAT diagnostics while preserving V2.3 betting authority and audited system dependency keys. "
-        "FAIR_VALUE, STAT_SELECTOR, SYSTEM, and MARKET_CONFIRMATION mechanisms are validated independently, aliases collapse to one family/vote, "
+        "Shared NCAAF-derived authority architecture: frozen fair-value predictions stay separate from betting authority. V2.5 adds a research-only four-lane multidimensional matrix across CORE + advanced STAT + SYSTEMS + MARKET while preserving the existing frozen betting authority. "
+        "Historical MARKET is explicitly an opening-to-close proxy; rich T-60 microstructure remains prospective-only. FAIR_VALUE, STAT_SELECTOR, SYSTEM, and MARKET_CONFIRMATION mechanisms are validated independently, aliases collapse to one family/vote, "
         "opposing validated mechanisms force PASS — CONFLICT, and only independently confirmed mechanisms can create PLAY/STRONG PLAY. "
         "2026 remains prospective. Betting Engine V1 is retained only as a benchmark/shadow."
     )
@@ -47048,6 +47048,38 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                 st.caption("Football-performance features are residualized against the frozen CORE feature set. MARKET_ORTHOGONAL asks what market error remains after CORE; CORE_CORRECTION asks what outcome error CORE itself leaves unexplained. Situational CORE-like families are excluded. Results are retrospective research only; no V2.4 result can create live authority until separately frozen and prospectively tested.")
                 st.dataframe(pd.DataFrame(_v24_rows),use_container_width=True,hide_index=True)
 
+            _mv25=research.get("multidimensional_edge_v25") or {}
+            _combo_rows=[]
+            _state_rows=[]
+            for _m,_block in ((_mv25.get("markets") or {}).items()):
+                for _c in ((_block or {}).get("combinations") or []):
+                    _d=(_c or {}).get("discovery") or {}; _v=(_c or {}).get("confirmation") or {}
+                    _combo_rows.append({
+                        "Market":_m,"Combination":(_c or {}).get("combo"),"Lanes":(_c or {}).get("lane_count"),"Class":(_c or {}).get("classification"),
+                        "Disc N":_d.get("n"),"Disc Hit":_nfl_be_pct(_d.get("hit_rate")),"Disc ROI":_nfl_be_pct(_d.get("roi_per_unit")),
+                        "Confirm N":_v.get("n"),"Confirm Hit":_nfl_be_pct(_v.get("hit_rate")),"Confirm ROI":_nfl_be_pct(_v.get("roi_per_unit")),
+                    })
+                for _x in ((_block or {}).get("exact_states") or []):
+                    if (_x or {}).get("classification")=="NO_REPEATABLE_COMBINATION_EDGE":
+                        continue
+                    _d=(_x or {}).get("discovery") or {}; _v=(_x or {}).get("confirmation") or {}
+                    _state_rows.append({
+                        "Market":_m,"STAT":(_x or {}).get("stat_state"),"SYSTEM":(_x or {}).get("system_state"),"MARKET":(_x or {}).get("market_state"),
+                        "CORE Edge":(_x or {}).get("core_edge_bucket"),"Class":(_x or {}).get("classification"),
+                        "Disc N":_d.get("n"),"Disc Hit":_nfl_be_pct(_d.get("hit_rate")),"Disc ROI":_nfl_be_pct(_d.get("roi_per_unit")),
+                        "Confirm N":_v.get("n"),"Confirm Hit":_nfl_be_pct(_v.get("hit_rate")),"Confirm ROI":_nfl_be_pct(_v.get("roi_per_unit")),
+                    })
+            if _combo_rows:
+                st.markdown("**V2.5 four-lane multidimensional research — CORE + STAT + SYSTEMS + MARKET**")
+                st.caption("Predeclared combinations test whether the interpretable lanes agree or conflict. 2021–2023 is discovery and 2024–2025 is retrospective confirmation. Historical MARKET uses only the available opening-to-close movement proxy; it is not a backtest of modern T-60 book microstructure. No V2.5 combination has production authority from this retrospective run.")
+                _cdf=pd.DataFrame(_combo_rows)
+                _cdf["_repeat"]=_cdf["Class"].eq("RETROSPECTIVE_REPEATABLE_REQUIRES_PROSPECTIVE")
+                _cdf=_cdf.sort_values(["_repeat","Lanes","Confirm N"],ascending=[False,False,False]).drop(columns=["_repeat"])
+                st.dataframe(_cdf,use_container_width=True,hide_index=True)
+                if _state_rows:
+                    with st.expander("Four-lane agreement / conflict state matrix",expanded=False):
+                        st.dataframe(pd.DataFrame(_state_rows),use_container_width=True,hide_index=True)
+
             _pbp24=research.get("pbp_advanced_diagnostic_v24") or {}
             if _pbp24:
                 _cl=_pbp24.get("classification") or {}
@@ -47115,7 +47147,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
 
     rows=cur.get("live_rows") or []
     if not rows:
-        st.info("No current Edge Authority V2.4 snapshot yet. Run NFL Production — Weekly Update.")
+        st.info("No current Edge Authority V2.5 snapshot yet. Run NFL Production — Weekly Update.")
         return
     table=[]
     for r in rows:
@@ -49766,7 +49798,7 @@ if not HEADLESS:
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
         st.sidebar.caption(
-            "Weekly Update is the normal NFL run: verify parity, refresh/reuse the challenger only when completed-game data changed, update the paired fair-value ledger, apply Edge Authority V2.4, settle prior edge plays, update prospective edge performance, and update the promotion clock. Betting Engine V1 remains benchmark-only. No automatic wagering or automatic model promotion."
+            "Weekly Update is the normal NFL run: verify parity, refresh/reuse the challenger only when completed-game data changed, update the paired fair-value ledger, apply Edge Authority V2.5, settle prior edge plays, update prospective edge performance, and update the promotion clock. Betting Engine V1 remains benchmark-only. No automatic wagering or automatic model promotion."
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_refresh":
         st.sidebar.caption(

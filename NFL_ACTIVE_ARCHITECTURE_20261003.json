@@ -1,5 +1,5 @@
 {
-  "architecture": "NFL_PRODUCTION_V2_4_ADVANCED_ORTHOGONAL_STAT_RESEARCH",
+  "architecture": "NFL_PRODUCTION_V2_5_FOUR_LANE_MULTIDIMENSIONAL_RESEARCH",
   "as_of": "2026-10-03",
   "benchmark_only": {
     "module": "nfl_betting_engine_v1.py",
@@ -11,9 +11,9 @@
       "label": "NFL Challenger Research"
     },
     "historical_validation": {
+      "behavior": "audit + CORE/structured research + V2.3 STAT benchmark + residual miner + System Miner V3 + frozen PBP/EPA sidecar + V2.4 orthogonal advanced STAT + V2.5 CORE/STAT/SYSTEM/MARKET multidimensional combination matrix + dependency audit + replay + edge authority confirmation",
       "label": "NFL Edge Authority \u2014 Historical Validation (Full Research)",
-      "market": "nfl_production_replay",
-      "behavior": "audit + CORE/structured research + V2.3 STAT benchmark + residual miner + System Miner V3 + frozen PBP/EPA confirmation-veto sidecar + V2.4 dual-target orthogonal advanced STAT + dependency audit + replay + edge authority confirmation"
+      "market": "nfl_production_replay"
     },
     "system_research": {
       "label": "NFL System Research / Miner"
@@ -24,29 +24,7 @@
     }
   },
   "primary_decision_engine": {
-    "module": "nfl_edge_authority_v2.py",
-    "source_tag": "nfl-edge-authority-v2.4-advanced-stat-research-shadow-20261003",
-    "method_origin": "NCAAF Production V1 edge-authority architecture, extended with NFL-specific orthogonal/PBP research",
-    "mechanism_classes": [
-      "FAIR_VALUE",
-      "STAT_SELECTOR",
-      "SYSTEM",
-      "MARKET_CONFIRMATION"
-    ],
-    "live_authority_change_from_v23": "NONE_FROM_V2_4_RETROSPECTIVE_RESEARCH",
-    "v23_stat_selector": {
-      "module": "nfl_stat_selector_v23.py",
-      "source_tag": "nfl-stat-selector-v2.3-ncaaf-style-market-reliability-20261002",
-      "status": "FAILED_TO_VALIDATE_ANY_STAT_SELECTOR; RETAINED_AS_RESEARCH_BENCHMARK"
-    },
     "advanced_stat_v24": {
-      "module": "nfl_advanced_stat_research_v24.py",
-      "source_tag": "nfl-advanced-stat-v2.4-orthogonal-hidden-signal-research-20261003",
-      "target_modes": [
-        "MARKET_ORTHOGONAL",
-        "CORE_CORRECTION"
-      ],
-      "method": "FWL-style residualization of football-performance STAT features against frozen CORE features; discovery-only reliability scaling and threshold selection",
       "advanced_roles": [
         "CREATE",
         "CONFIRM",
@@ -58,21 +36,69 @@
         2022,
         2023
       ],
+      "method": "FWL-style residualization of football-performance STAT features against frozen CORE features; discovery-only reliability scaling and threshold selection",
+      "module": "nfl_advanced_stat_research_v24.py",
+      "production_authority": 0,
       "retrospective_confirmation": [
         2024,
         2025
       ],
-      "true_prospective_confirmation": "2026 onward",
-      "production_authority": 0
+      "source_tag": "nfl-advanced-stat-v2.4-orthogonal-hidden-signal-research-20261003",
+      "target_modes": [
+        "MARKET_ORTHOGONAL",
+        "CORE_CORRECTION"
+      ],
+      "true_prospective_confirmation": "2026 onward"
+    },
+    "automatic_model_promotion": false,
+    "automatic_wagering": false,
+    "live_authority_change_from_v23": "NONE_FROM_V2_4_OR_V2_5_RETROSPECTIVE_RESEARCH",
+    "mechanism_classes": [
+      "FAIR_VALUE",
+      "STAT_SELECTOR",
+      "SYSTEM",
+      "MARKET_CONFIRMATION"
+    ],
+    "method_origin": "NCAAF Production V1 edge-authority architecture, extended with NFL-specific orthogonal STAT and four-lane multidimensional combination research",
+    "module": "nfl_edge_authority_v2.py",
+    "multidimensional_v25": {
+      "design": "interpretable agreement/conflict matrix; all 15 non-empty lane subsets are reported; no opaque meta-model",
+      "discovery": [
+        2021,
+        2022,
+        2023
+      ],
+      "historical_market_lane": "BASIC_OPEN_TO_CLOSE_PROXY_ONLY",
+      "lanes": [
+        "CORE",
+        "STAT",
+        "SYSTEM",
+        "MARKET"
+      ],
+      "module": "nfl_multidimensional_edge_v25.py",
+      "production_authority": 0,
+      "retrospective_confirmation": [
+        2024,
+        2025
+      ],
+      "rich_market_lane": "PROSPECTIVE_T60_TIMESTAMPED_BOOK_MICROSTRUCTURE",
+      "source_tag": "nfl-multidimensional-edge-v2.5-four-lane-research-20261003"
     },
     "pbp_advanced_sidecar": {
-      "module": "nfl_pbp_attribution_v1.py",
-      "source_tag": "nfl-pbp-attribution-v1-research-v2.0.2-frozen-core2-20261001",
       "features": "EPA/success/early-down/explosive/neutral-pass/CPOE/air-yards/YAC/red-zone/sack-turnover context",
+      "module": "nfl_pbp_attribution_v1.py",
+      "production_authority": 0,
       "role": "CONFIRMATION_VETO_RESEARCH_ONLY",
-      "production_authority": 0
+      "source_tag": "nfl-pbp-attribution-v1-research-v2.0.2-frozen-core2-20261001"
     },
+    "source_tag": "nfl-edge-authority-v2.5-four-lane-multidimensional-research-20261003",
     "system_authority_source": "AUTHORITATIVE_SYSTEM_MINER_V3_MECHANISM_FAMILY_REGISTRY",
+    "system_confirmation": [
+      2023,
+      2024,
+      2025
+    ],
+    "system_dependency_policy": "PARENT_CHILD_AND_OVERLAP_AUDIT_BEFORE_MULTI_ESCALATION",
     "system_discovery": [
       2017,
       2018,
@@ -81,26 +107,24 @@
       2021,
       2022
     ],
-    "system_confirmation": [
-      2023,
-      2024,
-      2025
-    ],
-    "system_dependency_policy": "PARENT_CHILD_AND_OVERLAP_AUDIT_BEFORE_MULTI_ESCALATION",
-    "automatic_model_promotion": false,
-    "automatic_wagering": false
+    "v23_stat_selector": {
+      "module": "nfl_stat_selector_v23.py",
+      "source_tag": "nfl-stat-selector-v2.3-ncaaf-style-market-reliability-20261002",
+      "status": "FAILED_TO_VALIDATE_ANY_STAT_SELECTOR; RETAINED_AS_RESEARCH_BENCHMARK"
+    }
   },
   "production": {
-    "fair_value_backbones": "nfl_production_v1.py",
-    "live_feature_parity": "nfl_live_feature_parity_v1.py",
-    "historical_validation": "nfl_production_replay_v1.py (v2.4)",
-    "live_paired_ledger_and_edge_scoring": "nfl_production_live_v1.py (v2.4 research-aware; V2.4 research itself has no live authority)",
-    "edge_authority": "nfl_edge_authority_v2.py",
-    "stat_selector_benchmark": "nfl_stat_selector_v23.py",
     "advanced_stat_research": "nfl_advanced_stat_research_v24.py",
-    "shared_authority_framework": "sports_edge_authority_v1.py (V1.1 dependency-aware)",
+    "dashboard": "sharp_line_dashboard.py",
+    "edge_authority": "nfl_edge_authority_v2.py",
+    "fair_value_backbones": "nfl_production_v1.py",
+    "historical_validation": "nfl_production_replay_v1.py (v2.5)",
     "job_router": "train_job.py",
-    "dashboard": "sharp_line_dashboard.py"
+    "live_feature_parity": "nfl_live_feature_parity_v1.py",
+    "live_paired_ledger_and_edge_scoring": "nfl_production_live_v1.py (v2.5 research-aware; V2.4/V2.5 retrospective research has no live authority)",
+    "multidimensional_research": "nfl_multidimensional_edge_v25.py",
+    "shared_authority_framework": "sports_edge_authority_v1.py (V1.1 dependency-aware)",
+    "stat_selector_benchmark": "nfl_stat_selector_v23.py"
   },
   "research_preserved": [
     "nfl_research_engine_v2.py",
@@ -115,8 +139,9 @@
   "shared_standard": {
     "document": "SPORTS_EDGE_AUTHORITY_STANDARD_V1.md",
     "module": "sports_edge_authority_v1.py",
-    "source_tag": "sports-edge-authority-v1.1-dependency-aware-cross-sport-standard-20261002",
     "rule": "sport adapters change; prediction-vs-authority separation, rich-research/small-production, discovery/confirmation, family/dependency collapse, independent-mechanism counting and conflict rules do not",
-    "v24_addendum": "STAT must demonstrate incremental information after CORE, not merely repeat the same primitives; orthogonalization/residual targets are preferred research tests when CORE overlap is material."
+    "source_tag": "sports-edge-authority-v1.1-dependency-aware-cross-sport-standard-20261002",
+    "v24_addendum": "STAT must demonstrate incremental information after CORE, not merely repeat the same primitives; orthogonalization/residual targets are preferred research tests when CORE overlap is material.",
+    "v25_addendum": "Test CORE, STAT, SYSTEM and MARKET as explicit independent lanes and as predeclared combinations. Historical basic market movement is only a proxy; rich T-60 microstructure is prospective-only. Combination success never bypasses dependency collapse or prospective promotion."
   }
 }

@@ -1,4 +1,4 @@
-"""NFL Production V2.4 — historical replay + advanced STAT research + Edge Authority validation.
+"""NFL Production V2.5 — historical replay + four-lane multidimensional Edge Authority validation.
 
 Purpose
 -------
@@ -20,7 +20,7 @@ moneyline when available. Neither is represented as verified executable pricing.
 
 This module is read-only with respect to BigQuery and never changes champion,
 challenger, or model-promotion authority. After generating leak-safe replay rows,
-it preserves Betting Engine V1 as a benchmark and trains/publishes the Edge Authority contract while attaching V2.4 research-only advanced-stat diagnostics using the shared NCAAF-derived family/confirmation framework. It may also publish replay artifacts to GCS.
+it preserves Betting Engine V1 as a benchmark and trains/publishes the Edge Authority contract while attaching V2.5 research-only CORE + STAT + SYSTEMS + MARKET combination diagnostics using the shared NCAAF-derived family/confirmation framework. It may also publish replay artifacts to GCS.
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ import nfl_betting_engine_v1 as betting
 import nfl_edge_authority_v2 as edge_v2
 from nfl_feature_audit_v1 import VIEW
 
-SOURCE_TAG = "nfl-production-v2.4-historical-advanced-stat-research-20261003"
+SOURCE_TAG = "nfl-production-v2.5-historical-four-lane-multidimensional-research-20261003"
 VALIDATION_SEASONS = (2021, 2022, 2023, 2024, 2025)
 VALIDATION_STAGE = "REGULAR"
 MARKET_COLUMNS = (
@@ -540,10 +540,11 @@ def run_nfl_production_historical_replay(*, bq_client, storage_client=None, buck
         "betting_engine_v1_benchmark_status":betting_meta.get("status"),
         "edge_authority_v2_status":edge_meta.get("status"),
         "edge_authority_v2_markets":edge_meta.get("markets",{}),
+        "multidimensional_research_contract_sha256":edge_meta.get("multidimensional_research_contract_sha256"),
         "research_diagnostics":report.get("research_diagnostics",{}),
         "current_report_uri":report.get("current_report_uri"),
         "production_authority":0, "automatic_promotion":False,
-        "next_step":"RUN_WEEKLY_UPDATE_TO_APPLY_EDGE_AUTHORITY_V2_AND_ACCUMULATE_PROSPECTIVE_EDGE_PERFORMANCE",
+        "next_step":"REVIEW V2.5 FOUR-LANE COMBINATION RESULTS; THEN FREEZE SURVIVORS BEFORE 2026 PROSPECTIVE USE",
     }, sort_keys=True, default=str))
     return report
 

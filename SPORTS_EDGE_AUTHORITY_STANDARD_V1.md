@@ -49,3 +49,12 @@ Direct System Miner families retain their natural 2017–2022 discovery and 2023
 ## V2.4 cross-sport STAT-independence addendum
 
 When CORE already consumes broad team strength or box-score summaries, a new STAT lane should not be credited merely for relearning those same primitives. The preferred research test is incremental: explicitly exclude CORE/context variables, residualize football-performance STAT inputs against the frozen CORE feature contract when overlap is material, and test whether the remaining signal explains market error, CORE outcome error, system confirmation, or system contradiction. A sport may legitimately end with no incremental STAT authority. Retrospective redesigns are new hypotheses and require new prospective evidence before promotion.
+
+## V2.5 four-lane multidimensional addendum
+
+The reusable decision space is `CORE + STAT + SYSTEM + MARKET`. Research may test every predeclared non-empty lane subset and exact agreement/conflict state, but it must remain interpretable: no opaque second-stage model is allowed to turn correlated evidence into artificial certainty. CORE is the frozen fair-value direction, STAT is incremental football-performance information after CORE separation, SYSTEM is family/dependency-collapsed situational evidence, and MARKET is independent price/flow information.
+
+When full historical microstructure does not exist, opening-to-closing movement may be used only as a clearly labeled historical market proxy. It must never be described as a backtest of modern T-60 book microstructure. Rich cross-book disagreement, key-crossing persistence, line/price divergence, velocity/persistence, quote staleness/dispersion, and sharp-vs-soft lead/lag remain prospective until timestamped evidence accumulates.
+
+Combination research follows the same governance as individual mechanisms: discovery chooses, retrospective confirmation only checks repeatability, dependency collapse precedes mechanism counting, conflict fails closed, and prospective evidence is required before any new authority is promoted.
+
