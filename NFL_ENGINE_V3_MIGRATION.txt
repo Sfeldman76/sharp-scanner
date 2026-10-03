@@ -1,0 +1,26 @@
+NFL ENGINE V3.0 CONSOLIDATION — 2026-10-03
+
+Active NFL Python files after migration: 1
+  nfl_engine.py
+
+Shared files that remain separate because they are not NFL-only:
+  utils.py                         canonical market-rich/current-market backend
+  sports_edge_authority_v1.py     cross-sport authority standard
+  train_job.py                     shared job router (updated)
+  sharp_line_dashboard.py          shared UI (updated)
+
+The engine embeds the 31 currently active NFL modules byte-for-byte and
+installs an in-memory importer. Old versioned nfl_*.py files are no longer required.
+The production ledger DDL is embedded as nfl_engine.PRODUCTION_LEDGER_SQL.
+
+Validation:
+  python nfl_engine.py --self-test
+
+Cleanup dry run:
+  python nfl_engine.py --cleanup-dry-run --repo .
+
+Cleanup apply:
+  python nfl_engine.py --cleanup-apply --repo .
+
+To print the one-time production ledger DDL:
+  python nfl_engine.py --print-ledger-sql

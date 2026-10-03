@@ -1,1 +1,0 @@
-Deploy over NFL Production V1.0.3. Rerun only nfl_live_feature_parity. No System Lab or Prospective Shadow rerun required.

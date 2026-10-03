@@ -78,6 +78,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 import warnings
+import nfl_engine as _nfl_engine_bundle  # consolidated NFL runtime/import registry
 
 warnings.filterwarnings(
     "ignore",

@@ -190,16 +190,8 @@ def main():
         _dir = Path(__file__).resolve().parent
 
         def _load_nfl_v194_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-V1.9.4-DEPLOY-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-V1.9.4-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
+            import nfl_engine as _nfl_engine
+            return _nfl_engine.load_component(_name, _tag)
 
         _audit = _load_nfl_v194_exact(
             "nfl_audit_v1",
@@ -254,7 +246,7 @@ def main():
             raise
         return
 
-    # NFL Production V2.6.1 — unified weekly update with frozen production-model betting authority.
+    # NFL Engine V3 / Production V2.6.1 — unified weekly update with frozen production-model betting authority.
     # One operator action: parity -> challenger refresh/reuse -> paired live score
     # -> model-authority decisions/settlement -> performance/promotion clocks.
     if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_production_weekly":
@@ -264,16 +256,8 @@ def main():
         _dir = Path(__file__).resolve().parent
 
         def _load_nfl_weekly_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-PROD-V1-WEEKLY-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-PROD-V1-WEEKLY-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
+            import nfl_engine as _nfl_engine
+            return _nfl_engine.load_component(_name, _tag)
 
         _parity = _load_nfl_weekly_exact("nfl_live_feature_parity_v1", "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002")
         _prod = _load_nfl_weekly_exact("nfl_production_v1", "nfl-production-v1.1.1-publish-receipt-normalization-20261002")
@@ -324,16 +308,8 @@ def main():
         _dir = Path(__file__).resolve().parent
 
         def _load_nfl_prod_replay_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-PROD-V1-REPLAY-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-PROD-V1-REPLAY-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
+            import nfl_engine as _nfl_engine
+            return _nfl_engine.load_component(_name, _tag)
 
         # Exact protected-research dependencies.  These checks deliberately make
         # a mixed deployment fail closed instead of silently shortening the run.
@@ -415,16 +391,8 @@ def main():
         _dir = Path(__file__).resolve().parent
 
         def _load_nfl_v2_system_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-RESEARCH-V2-DEPLOY-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-RESEARCH-V2-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
+            import nfl_engine as _nfl_engine
+            return _nfl_engine.load_component(_name, _tag)
 
         _contract_v2 = _load_nfl_v2_system_exact(
             "nfl_research_v2_contract",

@@ -1,6 +1,0 @@
-{
-  "status": "SUPERSEDED_COMPATIBILITY_POINTER",
-  "superseded_by": "NFL_ACTIVE_ARCHITECTURE_20261003.json",
-  "current_architecture": "NFL_PRODUCTION_V2_4_ADVANCED_ORTHOGONAL_STAT_RESEARCH",
-  "note": "Retained only so V2.4 delta overlays do not leave a stale V2.3 active-contract document."
-}
