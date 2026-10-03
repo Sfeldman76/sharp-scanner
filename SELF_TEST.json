@@ -1,0 +1,16 @@
+{
+  "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
+  "compiled_and_checked": 32,
+  "components": 32,
+  "engine_source_tag": "nfl-engine-v3.4-cross-fitted-layer-stacking-20261003",
+  "failures": [],
+  "heavy_research": "CROSS_FITTED_LAYER_STACKING_PLUS_FDR_REGIME_DISCOVERY_RESEARCH_ONLY",
+  "missing_critical_symbols": [],
+  "shared_external_required": [
+    "utils.py",
+    "sports_edge_authority_v1.py"
+  ],
+  "status": "PASS",
+  "utils_backend_required": true,
+  "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
+}

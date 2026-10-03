@@ -49802,10 +49802,10 @@ if not HEADLESS:
         # Operator surface only: weekly production + full protected research.
         # Live line/price changes refresh automatically in the background, so
         # neither workflow is required merely because the market moved.
-        _train_market_options = ["nfl_production_weekly", "nfl_production_replay"]
+        _train_market_options = ["nfl_production_weekly", "nfl_research_heavy"]
         _train_market_labels = {
             "nfl_production_weekly": "NFL Production — Weekly Update",
-            "nfl_production_replay": "NFL Research — Heavy Challenger Search",
+            "nfl_research_heavy": "NFL Research — Heavy Challenger Search",
         }
         _workflow_title = "NFL model maintenance"
     market_choice = st.sidebar.selectbox(
@@ -49826,9 +49826,9 @@ if not HEADLESS:
         st.sidebar.caption(
             "WHEN: once each week after prior games settle / the new slate is ready. Creates or reuses frozen fair values, settles the prospective ledger, refreshes the frozen Production Betting V2 selector, and updates the promotion clock. After that, line and price changes refresh automatically through the background scanner—do NOT rerun for market moves."
         )
-    elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_replay":
+    elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_research_heavy":
         st.sidebar.caption(
-            "WHEN: run after meaningful research/data changes and periodically during the season (about every 4 weeks). Searches CORE/STAT/residual/PBP/system challengers and updates evidence. It may flag a new candidate, but it cannot silently replace the frozen Production Betting V2 contract; any new edge-contract SHA requires explicit promotion approval. Line changes do not require this run."
+            "WHEN: after meaningful research/data changes and periodically during the season. Runs protected CORE, season-forward STAT, SYSTEM, MARKET and frozen PBP research, then fits a regularized cross-fitted betting META model using continuous signal strength. Hyperparameters and betting thresholds are chosen on discovery only; the frozen fit is scored on 2024–2025 confirmation. H2H is price/EV-aware. A separate FDR-protected regime miner explains useful combinations. SYSTEM is one lane, never a required gate. 2026 stays sealed and Production Betting V2 cannot be mutated by this job."
         )
 
     
@@ -49958,7 +49958,7 @@ if not HEADLESS:
     
     if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_production_weekly":
         _train_button_label = "Run NFL Weekly Production Update"
-    elif str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_production_replay":
+    elif str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_research_heavy":
         _train_button_label = "Run NFL Heavy Research"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_research_v2":
         _train_button_label = "Run NCAAF Research Update V2.1"
