@@ -1,7 +1,9 @@
-"""Offline contract tests for NFL Model Authority V2.6."""
+"""Offline contract tests for NFL Model Authority V2.6.1."""
 import copy
+from pathlib import Path
 import pandas as pd
 import nfl_model_authority_v26 as ma
+import nfl_market_backend_v261 as mb
 
 
 def replay_fixture(confirm_spread_win_rate=0.60):
@@ -84,51 +86,113 @@ def test_shadow_conflict_cannot_change_model_bet():
     assert r["shadow_edge_action"] == "PASS — CONFLICT"
 
 
+def _synthetic_snapshot(with_price=True):
+    key=(pd.Timestamp("2026-10-04T17:00:00Z").round("s").isoformat(),ma._norm("Home Team"),ma._norm("Away Team"))
+    return {
+        "quotes":{key:{
+            "current_home_spread":-3.0,"open_home_spread":-2.5,
+            "current_home_spread_odds":-110.0 if with_price else float("nan"),
+            "current_away_spread_odds":-105.0 if with_price else float("nan"),
+            "current_home_spread_book":"Book A","current_away_spread_book":"Book B",
+            "current_spread_snapshot_ts":"2026-10-03T15:00:00+00:00",
+            "current_total":44.0,"open_total":44.5,"current_over_odds":-105.0,"current_under_odds":-108.0,
+            "current_over_book":"Book A","current_under_book":"Book B","current_total_snapshot_ts":"2026-10-03T15:00:00+00:00",
+            "current_home_novig_probability":0.55,"open_home_novig_probability":0.53,
+            "current_home_ml":-130.0,"current_away_ml":115.0,"current_home_ml_book":"Book A","current_away_ml_book":"Book B",
+            "current_h2h_snapshot_ts":"2026-10-03T15:00:00+00:00",
+        }},
+        "rich":{(key[0],key[1],key[2],"spreads",key[1]):{
+            "market_rich_source":"UTILS:moves_with_features_merged+build_30min_line_timing_features",
+            "market_rich_Line_Move_60m":-0.5,"market_rich_t60_value":-2.5,
+        }},
+        "meta":{
+            "source_tag":mb.SOURCE_TAG,"utils_path":"/app/utils.py",
+            "raw_table":"sharplogger.sharp_data.sharp_moves_master",
+            "enriched_table":"sharp_data.moves_with_features_merged",
+            "direct_bigquery_queries":0,
+        },
+    }
+
+
 def test_authoritative_quote_rows_do_not_require_shadow_engine():
-    old=ma._authoritative_consensus_market
+    old=ma._authoritative_market_snapshot
     try:
-        ma._authoritative_consensus_market=lambda client,now:{
-            (pd.Timestamp("2026-10-04T17:00:00Z").round("s").isoformat(),ma._norm("Home Team"),ma._norm("Away Team")):{
-                "current_home_spread":-3.0,"open_home_spread":-2.5,
-                "current_home_spread_odds":-110.0,"current_away_spread_odds":-110.0,
-                "current_total":44.0,"open_total":44.5,"current_over_odds":-105.0,"current_under_odds":-115.0,
-                "current_home_novig_probability":0.55,"open_home_novig_probability":0.53,
-                "current_home_ml":-130.0,"current_away_ml":115.0,
-            }
-        }
+        ma._authoritative_market_snapshot=lambda client,now:_synthetic_snapshot(True)
         pred=[{"prediction_pair_id":"p1","game_start":"2026-10-04T17:00:00Z","home_team":"Home Team","away_team":"Away Team",
                "champion_fair_margin":7.0,"champion_fair_total":47.0,"champion_home_win_probability":0.62}]
         base=ma.build_authoritative_market_rows(bq_client=None,prediction_rows=pred,now=pd.Timestamp("2026-10-03T16:00:00Z"))
         assert len(base)==3
         sp=next(x for x in base if x["market"]=="SPREADS")
         assert sp["selected"]=="Home Team" and sp["raw_model_edge"]==4.0
+        assert sp["market_backend"]=="UTILS"
+        assert sp["selected_book"]=="Book A"
+        assert sp["market_rich_Line_Move_60m"]==-0.5
         merged=ma.merge_shadow_evidence(base,[])
         assert all(x["shadow_evidence_status"]=="UNAVAILABLE" for x in merged)
     finally:
-        ma._authoritative_consensus_market=old
+        ma._authoritative_market_snapshot=old
 
 
-
-def test_authoritative_consensus_never_fabricates_minus110():
-    old=ma.benchmark._fetch_market_rows
+def test_utils_market_backend_never_fabricates_minus110():
+    old=mb._load_frames
+    raw=pd.DataFrame([
+        {"Sport":"NFL","Market":"spreads","Outcome":"Home Team","Value":-3.0,"Odds_Price":float("nan"),"Bookmaker":"Book A",
+         "Game_Start":"2026-10-04T17:00:00Z","Snapshot_Timestamp":"2026-10-03T15:00:00Z","Time":"2026-10-03T15:00:00Z",
+         "Home_Team_Norm":"Home Team","Away_Team_Norm":"Away Team","Game_Key":"g1"},
+        {"Sport":"NFL","Market":"spreads","Outcome":"Away Team","Value":3.0,"Odds_Price":float("nan"),"Bookmaker":"Book A",
+         "Game_Start":"2026-10-04T17:00:00Z","Snapshot_Timestamp":"2026-10-03T15:00:00Z","Time":"2026-10-03T15:00:00Z",
+         "Home_Team_Norm":"Home Team","Away_Team_Norm":"Away Team","Game_Key":"g1"},
+    ])
+    class U:
+        SHARP_BOOKS=[]
+        @staticmethod
+        def build_30min_line_timing_features(*args,**kwargs): return pd.DataFrame()
     try:
-        ma.benchmark._fetch_market_rows=lambda client,now:pd.DataFrame([
-            {"market":"spreads","outcome":"Home Team","value":-3.0,"odds":float("nan"),"bookmaker":"Book A",
-             "game_start":pd.Timestamp("2026-10-04T17:00:00Z"),"snapshot_ts":pd.Timestamp("2026-10-03T15:00:00Z"),
-             "home_team":"Home Team","away_team":"Away Team","home_key":ma._norm("Home Team"),"away_key":ma._norm("Away Team"),
-             "outcome_key":ma._norm("Home Team"),"market_norm":"spreads"},
-            {"market":"spreads","outcome":"Away Team","value":3.0,"odds":float("nan"),"bookmaker":"Book A",
-             "game_start":pd.Timestamp("2026-10-04T17:00:00Z"),"snapshot_ts":pd.Timestamp("2026-10-03T15:00:00Z"),
-             "home_team":"Home Team","away_team":"Away Team","home_key":ma._norm("Home Team"),"away_key":ma._norm("Away Team"),
-             "outcome_key":ma._norm("Away Team"),"market_norm":"spreads"},
-        ])
-        q=ma._authoritative_consensus_market(None,pd.Timestamp("2026-10-03T16:00:00Z"))
-        rec=next(iter(q.values()))
+        mb._load_frames=lambda bq_client,now,lookback_hours:(U(),Path(__file__).resolve(),raw,pd.DataFrame(),"sharp_data.sharp_moves_master","sharp_data.moves_with_features_merged")
+        snap=mb.build_market_snapshot(bq_client=None,now=pd.Timestamp("2026-10-03T16:00:00Z"))
+        rec=next(iter(snap["quotes"].values()))
         assert pd.isna(rec["current_home_spread_odds"])
         assert pd.isna(rec["current_away_spread_odds"])
+        assert snap["meta"]["direct_bigquery_queries"]==0
     finally:
-        ma.benchmark._fetch_market_rows=old
+        mb._load_frames=old
 
+
+
+
+def test_utils_market_backend_market_rich_from_utils():
+    old=mb._load_frames
+    rows=[
+        {"Sport":"NFL","Market":"spreads","Outcome":"Home Team","Value":-2.5,"Odds_Price":-110,"Bookmaker":"Book A",
+         "Game_Start":"2026-10-04T17:00:00Z","Snapshot_Timestamp":"2026-10-03T14:00:00Z","Time":"2026-10-03T14:00:00Z",
+         "Home_Team_Norm":"Home Team","Away_Team_Norm":"Away Team","Game_Key":"G1"},
+        {"Sport":"NFL","Market":"spreads","Outcome":"Home Team","Value":-3.0,"Odds_Price":-105,"Bookmaker":"Book A",
+         "Game_Start":"2026-10-04T17:00:00Z","Snapshot_Timestamp":"2026-10-03T15:00:00Z","Time":"2026-10-03T15:00:00Z",
+         "Home_Team_Norm":"Home Team","Away_Team_Norm":"Away Team","Game_Key":"G1"},
+        {"Sport":"NFL","Market":"spreads","Outcome":"Away Team","Value":3.0,"Odds_Price":-105,"Bookmaker":"Book A",
+         "Game_Start":"2026-10-04T17:00:00Z","Snapshot_Timestamp":"2026-10-03T15:00:00Z","Time":"2026-10-03T15:00:00Z",
+         "Home_Team_Norm":"Home Team","Away_Team_Norm":"Away Team","Game_Key":"G1"},
+    ]
+    raw=pd.DataFrame(rows)
+    enriched=raw.copy()
+    class U:
+        SHARP_BOOKS=["book a"]
+        @staticmethod
+        def build_30min_line_timing_features(*args,**kwargs):
+            return pd.DataFrame([{
+                "Game_Key":"g1","Market":"spreads","Outcome":"home team","Bookmaker":"book a",
+                "Line_Move_60m":-0.5,"Line_Move_120m":-0.5,"Sharp_Book_Move_60m":-0.5,
+                "Sharp_Soft_Divergence":0.0,"Key_Cross_Persistence":1.0,
+            }])
+    try:
+        mb._load_frames=lambda bq_client,now,lookback_hours:(U(),Path(__file__).resolve(),raw,enriched,"sharp_data.sharp_moves_master","sharp_data.moves_with_features_merged")
+        snap=mb.build_market_snapshot(bq_client=None,now=pd.Timestamp("2026-10-03T16:00:00Z"))
+        rich=mb.rich_for_selection(snap,game_start="2026-10-04T17:00:00Z",home_team="Home Team",away_team="Away Team",market="SPREADS",selected="Home Team")
+        assert rich["market_rich_Line_Move_60m"]==-0.5
+        assert rich["market_rich_t60_value"]==-2.5
+        assert "moves_with_features_merged" in rich["market_rich_source"]
+    finally:
+        mb._load_frames=old
 
 def test_execution_price_gate_fails_closed():
     contract={"markets":{"SPREADS":{"production_authority":True,"threshold":3.0,"status":"MODEL_BET_AUTHORITY_FROZEN"}}}

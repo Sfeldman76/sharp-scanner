@@ -1,4 +1,4 @@
-"""NFL Model Authority V2.6 — frozen production-model betting policy.
+"""NFL Model Authority V2.6.1 — frozen production-model betting policy.
 
 The frozen NFL production model is the only betting authority. CORE/STAT/SYSTEM/
 MARKET research remains evidence/attribution and cannot create, reverse, or
@@ -33,12 +33,11 @@ except ModuleNotFoundError:
     bigquery = None
 
 import nfl_production_v1 as prod
-import nfl_betting_engine_v1 as benchmark
+import nfl_market_backend_v261 as market_backend
 
-SOURCE_TAG = "nfl-model-authority-v2.6-frozen-model-bet-policy-20261003"
-ENGINE_VERSION = "NFL_MODEL_AUTHORITY_V2_6"
-EXPECTED_MARKET_ADAPTER_TAG = "nfl-betting-engine-v1.0-unified-decision-20261002"
-PREFIX = "production/nfl/v1/model_authority_v26"
+SOURCE_TAG = "nfl-model-authority-v2.6.1-utils-market-backend-20261003"
+ENGINE_VERSION = "NFL_MODEL_AUTHORITY_V2_6_1"
+PREFIX = "production/nfl/v1/model_authority_v261"
 CONTRACT_OBJECT = f"{PREFIX}/current_contract.json"
 CURRENT_OBJECT = f"{PREFIX}/current_state.json"
 EVENT_PREFIX = f"{PREFIX}/events"
@@ -72,10 +71,7 @@ def _num(x):
 
 
 def _norm(x):
-    # Use the exact live market/team normalization contract already proven by the
-    # production quote join. This keeps the authoritative MODEL -> ACTION path
-    # independent from the V2.5 shadow resolver while preserving quote parity.
-    return benchmark._norm(x)
+    return " ".join(str(x or "").strip().lower().replace(".", " ").replace("_", " ").split())
 
 
 def _sha(x: Any) -> str:
@@ -365,89 +361,18 @@ def _price_ok(market, price):
     return True
 
 
-def _authoritative_consensus_market(client, now) -> dict:
-    """Production quote consensus with no fabricated execution prices.
+def _authoritative_market_snapshot(client, now) -> dict:
+    """Canonical live market state through Utils only.
 
-    The legacy benchmark helper intentionally substitutes -110 when spread/total
-    odds are missing. That is useful for retrospective modeling but is not an
-    acceptable live execution gate. This V2.6 path preserves the same line/value
-    consensus while leaving an unobserved price as NaN so action fails closed as
-    EDGE — NO EXEC QUOTE.
+    Utils reads both sharp_moves_master (current/raw market) and
+    moves_with_features_merged (MARKET-RICH), and also owns the 30/60/120-minute
+    timing-feature builder. This authority layer performs no direct market query.
     """
-    if getattr(benchmark, "SOURCE_TAG", "") != EXPECTED_MARKET_ADAPTER_TAG:
-        raise RuntimeError("[NFL-MODEL-AUTH-V26-HOLD] MARKET_ADAPTER_STALE_OR_MIXED")
-    d = benchmark._fetch_market_rows(client, now)
-    out = {}
-    if d is None or d.empty:
-        return out
-    d = d.sort_values("snapshot_ts")
-    first = d.drop_duplicates(["game_start","home_key","away_key","market_norm","outcome_key","bookmaker"], keep="first")
-    last = d.drop_duplicates(["game_start","home_key","away_key","market_norm","outcome_key","bookmaker"], keep="last")
-    for (gs, hk, ak), _ in d.groupby(["game_start","home_key","away_key"], sort=False):
-        rec = {"game_start": gs, "home_key": hk, "away_key": ak}
-        for label, frame in (("open", first), ("current", last)):
-            g = frame[(frame.game_start.eq(gs)) & (frame.home_key.eq(hk)) & (frame.away_key.eq(ak))]
-
-            sp = g[g.market_norm.eq("spreads")].copy()
-            vals = []
-            for _, r in sp.iterrows():
-                v = _num(r.value)
-                if not math.isfinite(v):
-                    continue
-                if r.outcome_key == hk:
-                    vals.append(v)
-                elif r.outcome_key == ak:
-                    vals.append(-v)
-            if vals:
-                line = float(np.median(vals))
-                rec[label + "_home_spread"] = line
-                hodd = pd.to_numeric(sp.loc[sp.outcome_key.eq(hk) & pd.to_numeric(sp.value, errors="coerce").sub(line).abs().lt(.011), "odds"], errors="coerce").dropna()
-                aodd = pd.to_numeric(sp.loc[sp.outcome_key.eq(ak) & pd.to_numeric(sp.value, errors="coerce").add(line).abs().lt(.011), "odds"], errors="coerce").dropna()
-                rec[label + "_home_spread_odds"] = float(hodd.max()) if len(hodd) else np.nan
-                rec[label + "_away_spread_odds"] = float(aodd.max()) if len(aodd) else np.nan
-                ts = pd.to_datetime(sp.snapshot_ts, utc=True, errors="coerce").dropna()
-                rec[label + "_spread_snapshot_ts"] = ts.max().isoformat() if len(ts) else None
-
-            to = g[g.market_norm.eq("totals")].copy()
-            ov = to[to.outcome.astype(str).str.lower().str.contains("over", na=False)]
-            uv = to[to.outcome.astype(str).str.lower().str.contains("under", na=False)]
-            tv = pd.to_numeric(ov.value, errors="coerce").dropna()
-            if len(tv):
-                line = float(np.median(tv))
-                rec[label + "_total"] = line
-                oo = pd.to_numeric(ov.loc[pd.to_numeric(ov.value, errors="coerce").sub(line).abs().lt(.011), "odds"], errors="coerce").dropna()
-                uo = pd.to_numeric(uv.loc[pd.to_numeric(uv.value, errors="coerce").sub(line).abs().lt(.011), "odds"], errors="coerce").dropna()
-                rec[label + "_over_odds"] = float(oo.max()) if len(oo) else np.nan
-                rec[label + "_under_odds"] = float(uo.max()) if len(uo) else np.nan
-                ts = pd.to_datetime(to.snapshot_ts, utc=True, errors="coerce").dropna()
-                rec[label + "_total_snapshot_ts"] = ts.max().isoformat() if len(ts) else None
-
-            h2 = g[g.market_norm.eq("h2h")].copy()
-            probs, hos, aos = [], [], []
-            for _, bg in h2.groupby("bookmaker", sort=False):
-                ho = pd.to_numeric(bg.loc[bg.outcome_key.eq(hk), "odds"], errors="coerce").dropna()
-                ao = pd.to_numeric(bg.loc[bg.outcome_key.eq(ak), "odds"], errors="coerce").dropna()
-                if len(ho):
-                    hos.extend(ho.tolist())
-                if len(ao):
-                    aos.extend(ao.tolist())
-                if len(ho) and len(ao):
-                    ih = benchmark._american_implied(ho.iloc[-1])
-                    ia = benchmark._american_implied(ao.iloc[-1])
-                    if math.isfinite(ih) and math.isfinite(ia) and ih + ia > 0:
-                        probs.append(ih / (ih + ia))
-            if probs:
-                rec[label + "_home_novig_probability"] = float(np.median(probs))
-            if hos:
-                rec[label + "_home_ml"] = float(max(hos))
-            if aos:
-                rec[label + "_away_ml"] = float(max(aos))
-            if not h2.empty:
-                ts = pd.to_datetime(h2.snapshot_ts, utc=True, errors="coerce").dropna()
-                rec[label + "_h2h_snapshot_ts"] = ts.max().isoformat() if len(ts) else None
-        out[(pd.Timestamp(gs).round("s").isoformat(), hk, ak)] = rec
-    return out
-
+    snap = market_backend.build_market_snapshot(bq_client=client, now=now)
+    meta = (snap or {}).get("meta") or {}
+    if int(meta.get("direct_bigquery_queries") or 0) != 0:
+        raise RuntimeError("[NFL-MODEL-AUTH-V261-HOLD] MARKET_BACKEND_BYPASSED_UTILS")
+    return snap
 
 def _authoritative_market_base_row(p: dict, market: str, q: dict) -> dict | None:
     """Build MODEL-vs-current-market rows without loading any research resolver.
@@ -475,6 +400,7 @@ def _authoritative_market_base_row(p: dict, market: str, q: dict) -> dict | None
             "market_value": line if direction >= 0 else -line,
             "model_value": fair * direction if direction else fair,
             "selected_price": odds,
+            "selected_book": q.get("current_home_spread_book" if direction >= 0 else "current_away_spread_book") if direction else None,
             "quote_timestamp": q.get("current_spread_snapshot_ts"),
         }
     if market == "TOTALS":
@@ -495,6 +421,7 @@ def _authoritative_market_base_row(p: dict, market: str, q: dict) -> dict | None
             "market_value": line,
             "model_value": fair,
             "selected_price": odds,
+            "selected_book": q.get("current_over_book" if direction >= 0 else "current_under_book") if direction else None,
             "quote_timestamp": q.get("current_total_snapshot_ts"),
         }
     if market == "H2H":
@@ -515,6 +442,7 @@ def _authoritative_market_base_row(p: dict, market: str, q: dict) -> dict | None
             "market_value": ref if direction >= 0 else 1.0 - ref,
             "model_value": fair if direction >= 0 else 1.0 - fair,
             "selected_price": odds,
+            "selected_book": q.get("current_home_ml_book" if direction >= 0 else "current_away_ml_book") if direction else None,
             "quote_timestamp": q.get("current_h2h_snapshot_ts"),
         }
     raise ValueError(market)
@@ -527,7 +455,9 @@ def build_authoritative_market_rows(*, bq_client, prediction_rows, now) -> list[
     artifact. If shadow research is unavailable, the production model can still
     produce its own gated action.
     """
-    quotes = _authoritative_consensus_market(bq_client, now)
+    snapshot = _authoritative_market_snapshot(bq_client, now)
+    quotes = (snapshot or {}).get("quotes") or {}
+    backend_meta = (snapshot or {}).get("meta") or {}
     out = []
     for p in prediction_rows or []:
         gs = pd.to_datetime(p.get("game_start"), utc=True, errors="coerce")
@@ -557,12 +487,23 @@ def build_authoritative_market_rows(*, bq_client, prediction_rows, now) -> list[
                 "betting_decision_authority": False,
                 "automatic_execution": False,
             }
+            backend_fields = {
+                "market_backend": "UTILS",
+                "current_market_source": str(backend_meta.get("raw_table") or "sharp_moves_master"),
+                "market_rich_source": str(backend_meta.get("enriched_table") or "moves_with_features_merged"),
+                "market_backend_source_tag": backend_meta.get("source_tag"),
+                "utils_path": backend_meta.get("utils_path"),
+            }
             if base is None:
-                out.append({**common, "action": "NO MARKET", "decision": "NO MARKET"})
+                out.append({**common, **backend_fields, "action": "NO MARKET", "decision": "NO MARKET"})
             else:
                 qt = pd.to_datetime(base.get("quote_timestamp"), utc=True, errors="coerce")
                 base["quote_age_minutes"] = None if pd.isna(qt) else max(0.0, (pd.to_datetime(now, utc=True) - qt).total_seconds() / 60.0)
-                out.append({**common, **base, "action": "MODEL ONLY", "decision": "MODEL_ONLY_PRE_POLICY"})
+                rich = market_backend.rich_for_selection(
+                    snapshot, game_start=p.get("game_start"), home_team=p.get("home_team"),
+                    away_team=p.get("away_team"), market=market, selected=base.get("selected"),
+                )
+                out.append({**common, **backend_fields, **base, **rich, "action": "MODEL ONLY", "decision": "MODEL_ONLY_PRE_POLICY"})
     return out
 
 

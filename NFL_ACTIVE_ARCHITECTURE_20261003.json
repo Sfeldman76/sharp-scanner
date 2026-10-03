@@ -1,7 +1,7 @@
 {
-  "architecture": "NFL_PRODUCTION_V2_6_MODEL_AUTHORITY_FINAL_UI",
+  "architecture": "NFL_PRODUCTION_V2_6_1_UTILS_MARKET_BACKEND",
   "as_of": "2026-10-03",
-  "governing_rule": "MODEL -> ACTION. The frozen production model is the only betting-decision authority; CORE/STAT/SYSTEM/MARKET/PBP/V2.5 research can explain or challenge the model but cannot create, reverse, or escalate a wager.",
+  "governing_rule": "MODEL -> ACTION. The frozen production model is the only betting-decision authority. Utils is the canonical live-market backend: sharp_moves_master provides the current executable market; moves_with_features_merged plus Utils timing features provide MARKET-RICH attribution. Research lanes cannot create, reverse, or escalate a wager.",
   "automatic_wagering": false,
   "automatic_model_promotion": false,
   "production": {
@@ -12,7 +12,7 @@
     },
     "betting_authority": {
       "module": "nfl_model_authority_v26.py",
-      "source_tag": "nfl-model-authority-v2.6-frozen-model-bet-policy-20261003",
+      "source_tag": "nfl-model-authority-v2.6.1-utils-market-backend-20261003",
       "authority": "FROZEN_PRODUCTION_MODEL_ONLY",
       "discovery_seasons": [
         2021,
@@ -28,7 +28,7 @@
       ],
       "threshold_rule": "FIRST_SMALLEST_PREDECLARED_MODEL_EDGE_THRESHOLD_PASS_IN_DISCOVERY_THEN_CONFIRMATION_ONLY",
       "confirmation_reselection": false,
-      "live_action": "MODEL_EDGE_VS_CURRENT_MARKET_PLUS_EXECUTION_PRICE_GATE",
+      "live_action": "FROZEN_MODEL_EDGE_VS_UTILS_CURRENT_MARKET_PLUS_EXECUTION_PRICE_GATE",
       "strong_play_allowed": false,
       "fail_closed": true,
       "spread_total_live_price_gate": "OBSERVED_EXECUTION_PRICE_REQUIRED_AND_NO_WORSE_THAN_MINUS_110",
@@ -36,15 +36,16 @@
     },
     "historical_validation": {
       "module": "nfl_production_replay_v1.py",
-      "source_tag": "nfl-production-v2.6-historical-model-authority-freeze-20261003",
+      "source_tag": "nfl-production-v2.6.1-historical-model-authority-freeze-20261003",
       "role": "LEAK_SAFE_REPLAY_PLUS_MODEL_AUTHORITY_FREEZE",
       "year_2026_queried_for_policy": false
     },
     "live": {
       "module": "nfl_production_live_v1.py",
-      "source_tag": "nfl-production-v2.6-live-model-authority-20261003",
+      "source_tag": "nfl-production-v2.6.1-utils-market-backend-20261003",
       "role": "PAIRED_LEDGER_PLUS_MODEL_ACTION_PLUS_SHADOW_ATTRIBUTION",
-      "authority_quote_path_independent_from_shadow_engine": true
+      "authority_quote_path_independent_from_shadow_engine": true,
+      "market_backend": "UTILS_ONLY"
     },
     "dashboard": {
       "module": "sharp_line_dashboard.py",
@@ -53,6 +54,7 @@
         "Model Action",
         "Pick",
         "Price",
+        "Book",
         "Quote Age",
         "Market Ref",
         "Model Fair",
@@ -64,10 +66,28 @@
         "MARKET",
         "V2.5 Shadow",
         "Reason"
+      ],
+      "detail_market_rich": [
+        "T-60 Value",
+        "60m Move",
+        "120m Move",
+        "Sharp 60m Move",
+        "Sharp/Soft Divergence",
+        "Key Cross Persistence"
       ]
     },
     "job_router": "train_job.py",
-    "live_feature_parity": "nfl_live_feature_parity_v1.py"
+    "live_feature_parity": "nfl_live_feature_parity_v1.py",
+    "market_backend": {
+      "module": "nfl_market_backend_v261.py",
+      "source_tag": "nfl-market-backend-v2.6.1-utils-canonical-20261003",
+      "backend": "utils.py",
+      "current_market_source": "sharp_data.sharp_moves_master",
+      "market_rich_source": "sharp_data.moves_with_features_merged",
+      "timing_builder": "utils.build_30min_line_timing_features",
+      "direct_bigquery_queries_from_authority_layer": 0,
+      "role": "CANONICAL_LIVE_MARKET_BACKEND"
+    }
   },
   "research_shadow": {
     "edge_authority_v25": {
@@ -116,22 +136,29 @@
       "market": "nfl_production_replay",
       "label": "NFL Model Authority \u2014 Historical Validation",
       "normal_run": false,
-      "purpose": "Run full protected research/replay and freeze or re-read the V2.6 model-authority contract without using 2026 for selection."
+      "purpose": "Run protected replay/research and freeze/re-read the V2.6.1 model-authority contract without using 2026 for selection."
     },
     "challenger_research": {
-      "label": "NFL Challenger Research"
+      "market": "nfl_research_engine",
+      "label": "NFL Challenger Research",
+      "normal_run": false
     },
     "system_research": {
-      "label": "NFL System Research / Miner"
+      "market": "nfl_system_lab",
+      "label": "NFL System Research / Miner",
+      "normal_run": false
     }
   },
   "release_invariants": [
     "A shadow/research disagreement never changes MODEL action.",
     "A missing V2.5 live artifact does not suppress an otherwise valid MODEL action.",
     "No market receives BET authority unless its discovery-frozen threshold passes untouched 2024-2025 confirmation.",
-    "2026 is prospective only and cannot retune the V2.6 policy.",
+    "2026 is prospective only and cannot retune the V2.6.1 policy.",
     "Strong-play escalation is disabled.",
     "Automatic wager execution is disabled.",
-    "Automatic model promotion is disabled."
+    "Automatic model promotion is disabled.",
+    "All live market reads for MODEL -> ACTION enter through utils.py.",
+    "sharp_moves_master is the current executable market source; moves_with_features_merged is MARKET-RICH attribution.",
+    "Retired one-off NFL operator routes are removed from train_job and dashboard."
   ]
 }

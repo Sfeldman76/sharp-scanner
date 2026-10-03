@@ -1,4 +1,4 @@
-"""NFL Production V2.6 — historical replay + frozen model betting-authority policy.
+"""NFL Production V2.6.1 — historical replay + frozen model betting-authority policy.
 
 Purpose
 -------
@@ -41,7 +41,7 @@ import nfl_edge_authority_v2 as edge_v2
 import nfl_model_authority_v26 as model_auth
 from nfl_feature_audit_v1 import VIEW
 
-SOURCE_TAG = "nfl-production-v2.6-historical-model-authority-freeze-20261003"
+SOURCE_TAG = "nfl-production-v2.6.1-historical-model-authority-freeze-20261003"
 VALIDATION_SEASONS = (2021, 2022, 2023, 2024, 2025)
 VALIDATION_STAGE = "REGULAR"
 MARKET_COLUMNS = (

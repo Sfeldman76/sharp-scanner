@@ -1,9 +1,9 @@
-"""NFL Production V2.6 — live scoring, paired ledger, frozen production-model betting authority.
+"""NFL Production V2.6.1 — live scoring, paired ledger, frozen production-model betting authority.
 
 Purpose
 -------
 This module starts the *prospective* evidence clock for NFL Production V1.
-It does not train fair-value models or promote a challenger. Betting authority comes only from the frozen production model plus its separately frozen V2.6 model-edge betting policy. Edge Authority V2.5, STAT, SYSTEM and MARKET remain evidence/attribution only and cannot create, reverse or escalate a wager.
+It does not train fair-value models or promote a challenger. Betting authority comes only from the frozen production model plus its separately frozen V2.6.1 model-edge betting policy. Edge Authority V2.5, STAT, SYSTEM and MARKET remain evidence/attribution only and cannot create, reverse or escalate a wager.
 
 For each upcoming physical game it:
 1. Rebuilds the already-proven live Production V1 feature frame.
@@ -46,7 +46,7 @@ except Exception as _edge_import_exc:
     _EDGE_V2_IMPORT_ERROR = f"{type(_edge_import_exc).__name__}:{_edge_import_exc}"
 import nfl_model_authority_v26 as model_auth
 
-SOURCE_TAG = "nfl-production-v2.6-live-model-authority-20261003"
+SOURCE_TAG = "nfl-production-v2.6.1-utils-market-backend-20261003"
 EXPECTED_PARITY_TAG = "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002"
 EXPECTED_PROD_TAG = "nfl-production-v1.1.1-publish-receipt-normalization-20261002"
 EXPECTED_EDGE_SHADOW_TAG = "nfl-edge-authority-v2.5-four-lane-multidimensional-research-20261003"

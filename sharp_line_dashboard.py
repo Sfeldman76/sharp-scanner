@@ -46888,7 +46888,7 @@ def _nfl_edge_authority_v2_state_cached():
 def _nfl_model_authority_v26_state_cached():
     try:
         import nfl_model_authority_v26 as _ma
-        if getattr(_ma,"SOURCE_TAG","") != "nfl-model-authority-v2.6-frozen-model-bet-policy-20261003":
+        if getattr(_ma,"SOURCE_TAG","") != "nfl-model-authority-v2.6.1-utils-market-backend-20261003":
             return {"status":"STALE_MODEL_AUTHORITY_V26_MODULE"}
         return _ma.read_dashboard_state(storage_client=storage.Client(),bucket_name=GCS_BUCKET)
     except Exception as e:
@@ -46932,17 +46932,17 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     """
     state=_nfl_model_authority_v26_state_cached()
     if not isinstance(state,dict) or state.get("status") in ("UNAVAILABLE","STALE_MODEL_AUTHORITY_V26_MODULE"):
-        st.info("NFL Model Authority V2.6 is not available yet. Run NFL Model Authority — Historical Validation once, then NFL Production — Weekly Update.")
+        st.info("NFL Model Authority V2.6.1 is not available yet. Run NFL Model Authority — Historical Validation once, then NFL Production — Weekly Update.")
         return
     meta=state.get("meta") or {}; cur=state.get("current") or {}
     if not meta:
-        st.info("NFL Model Authority V2.6 has not been frozen yet. Run NFL Model Authority — Historical Validation once; 2021-2023 selects the model gate and 2024-2025 only confirms it.")
+        st.info("NFL Model Authority V2.6.1 has not been frozen yet. Run NFL Model Authority — Historical Validation once; 2021-2023 selects the model gate and 2024-2025 only confirms it.")
         return
 
     st.subheader("NFL Production V1 — Model Authority")
     st.caption(
         "MODEL → ACTION is authoritative. The frozen production model chooses the side/total, and a frozen model-edge threshold plus current-price gate decides BET or PASS. "
-        "STAT, SYSTEM, MARKET and the V2.5 multidimensional resolver are shadow evidence only: they are shown for attribution and prospective research but cannot create, reverse, or strengthen a wager. 2026 is prospective and is not used to retune the frozen policy."
+        "Utils is the canonical live-market backend: sharp_moves_master supplies the current executable market and moves_with_features_merged supplies MARKET-RICH attribution. STAT, SYSTEM, MARKET and the V2.5 multidimensional resolver are shadow evidence only: they are shown for attribution and prospective research but cannot create, reverse, or strengthen a wager. 2026 is prospective and is not used to retune the frozen policy."
     )
 
     markets=meta.get("markets") or {}; perf=cur.get("live_performance") or {}
@@ -46984,6 +46984,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                 "Model Action":r.get("action"),
                 "Pick":r.get("selected") or "—",
                 "Price":_nfl_be_num(price,0),
+                "Book":r.get("selected_book") or "—",
                 "Quote Age":("—" if r.get("quote_age_minutes") is None else f"{float(r.get('quote_age_minutes')):.0f}m"),
                 "Market Ref":ref_txt,
                 "Model Fair":fair_txt,
@@ -47020,8 +47021,21 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                     "Model Edge":r.get("raw_model_edge"),
                     "Frozen Gate":r.get("model_policy_threshold"),
                     "Current Price":r.get("selected_price"),
+                    "Execution Book":r.get("selected_book"),
                     "Quote Timestamp":r.get("quote_timestamp"),
                     "Quote Age Minutes":r.get("quote_age_minutes"),
+                    "Market Backend":r.get("market_backend"),
+                    "Current Market Source":r.get("current_market_source"),
+                    "Market Rich Source":r.get("market_rich_source"),
+                    "T-60 Value":r.get("market_rich_t60_value"),
+                    "60m Move":r.get("market_rich_Line_Move_60m"),
+                    "120m Move":r.get("market_rich_Line_Move_120m"),
+                    "Sharp 60m Move":r.get("market_rich_Sharp_Book_Move_60m"),
+                    "Sharp/Soft Divergence":r.get("market_rich_Sharp_Soft_Divergence"),
+                    "Sharp Consensus":r.get("market_rich_Sharp_Consensus_Direction"),
+                    "Key 3 Cross":r.get("market_rich_Crossed_Key_3_Last60m"),
+                    "Key 7 Cross":r.get("market_rich_Crossed_Key_7_Last60m"),
+                    "Key Cross Persistence":r.get("market_rich_Key_Cross_Persistence"),
                     "H2H Model EV":r.get("model_live_ev"),
                     "Decision Reason":r.get("decision_reason"),
                     "STAT State":r.get("stat_state"),
@@ -47031,7 +47045,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                     "Shadow Sources":" | ".join(map(str,r.get("edge_sources") or [])) or "—",
                 })
             st.dataframe(pd.DataFrame(detail),use_container_width=True,hide_index=True)
-            st.caption("Shadow disagreement is diagnostic. It never overrides the model action in V2.6.")
+            st.caption("Utils owns live market ingestion and MARKET-RICH calculations. Shadow disagreement remains diagnostic and never overrides the model action in V2.6.1.")
 
     with st.expander("Frozen model betting-policy validation",expanded=False):
         vrows=[]
@@ -47049,7 +47063,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     edge_meta=(edge_state.get("meta") or {}) if isinstance(edge_state,dict) else {}
     if edge_meta:
         with st.expander("Shadow evidence — CORE / STAT / SYSTEM / MARKET",expanded=False):
-            st.caption("Research-only attribution. No item in this section has betting-decision authority in V2.6.")
+            st.caption("Research-only attribution. No item in this section has betting-decision authority in V2.6.1.")
             fam=[]
             for f in edge_meta.get("families") or []:
                 fam.append({
@@ -49596,42 +49610,14 @@ if not HEADLESS:
         # Production is the explicit, separate one-time artifact publishing path.
         _train_market_options[2:2] = ["edge_research", "ncaaf_production"]
     if str(sport).upper().strip() == "NFL":
-        # Permanent NFL workflow. One-time build/diagnostic routes stay callable
-        # but are intentionally hidden from the normal control surface.
-        _nfl_primary = ["nfl_production_weekly", "nfl_production_replay", "nfl_research_engine", "nfl_system_lab"]
-        _show_nfl_advanced = st.sidebar.checkbox(
-            "Show advanced NFL controls",
-            value=False,
-            key="show_nfl_advanced_research_runs",
-            help="Shows support/audit controls that are still active. Superseded NFL stages are archived from the normal repository surface.",
-        )
-        _nfl_advanced = [
-            "nfl_production_refresh", "nfl_production_score", "nfl_live_feature_parity",
-            "nfl_prospective_shadow", "nfl_audit", "nfl_pbp_diagnostic",
-        ]
-        _train_market_options = _nfl_primary + (_nfl_advanced if _show_nfl_advanced else [])
+        # Permanent NFL operator surface: production, validation, challenger research, systems.
+        # Old one-off build/diagnostic routes are retired from the active repository.
+        _train_market_options = ["nfl_production_weekly", "nfl_production_replay", "nfl_research_engine", "nfl_system_lab"]
         _train_market_labels = {
             "nfl_production_weekly": "NFL Production — Weekly Update",
             "nfl_production_replay": "NFL Model Authority — Historical Validation",
-            "nfl_production_refresh": "Advanced: Production Train / Refresh",
-            "nfl_production_score": "Advanced: Production Score / Paired Ledger",
             "nfl_research_engine": "NFL Challenger Research",
             "nfl_system_lab": "NFL System Research / Miner",
-            "nfl_prospective_shadow": "Advanced: NFL Prospective Shadow",
-            "nfl_live_feature_parity": "Advanced: Production Live Feature Parity",
-            "nfl_audit": "Advanced: NFL Audit",
-            "nfl_challenger": "Advanced: V1.5 Challenger",
-            "nfl_score_engine": "Advanced: V1.6 Score Engine",
-            "nfl_intelligence": "Advanced: V1.8 Intelligence",
-            "nfl_frozen_confirmation": "Advanced: V1.9.1 Frozen Confirmation",
-            "nfl_research_foundation": "Advanced: V1.9.2 Research Foundation",
-            "nfl_edge_gate": "Advanced: V1.9.4 Edge Gate",
-            "nfl_pbp_foundation": "Advanced: PBP Foundation",
-            "nfl_pbp_diagnostic": "Advanced: PBP Diagnostic",
-            "All": "Advanced: Legacy Train All",
-            "spreads": "Advanced: Legacy Train Spread",
-            "h2h": "Advanced: Legacy Train H2H",
-            "totals": "Advanced: Legacy Train Totals",
         }
     market_choice = st.sidebar.selectbox(
         "NFL workflow" if str(sport).upper().strip() == "NFL" else "Train which market?",
@@ -49644,97 +49630,21 @@ if not HEADLESS:
             "Publishes the frozen NCAAF Production V1 contract for Spread, H2H and Totals. "
             "This is not a legacy Spread train or research-only run."
         )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_audit":
-        st.sidebar.caption(
-            "Read-only NFL history, market/as-of, and incumbent artifact inventory. "
-            "No training, grading changes or production promotion."
-        )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_challenger":
-        st.sidebar.caption(
-            "NFL V1.5 research: H2H calibrated blends, Spread fair-margin models, and Totals expected-points models. "
-            "Uses 2021–2025 development folds with 2026 sealed. No publication or production changes."
-        )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_score_engine":
-        st.sidebar.caption(
-            "NFL V1.6 research: predicts each team's points from offense and opponent-defense components, "
-            "then derives projected score, margin, total and market disagreement. 2026 remains sealed; no publication."
-        )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_intelligence":
-        st.sidebar.caption(
-            "NFL V1.8 research: mines CORE/market errors, tests when CORE beats the market, adds uncertainty and threshold stability, "
-            "uses market-relative H2H validation, Big Al/Pathi shrinkage, condition ablation and within-family reconciliation. "
-            "Discovery 2021-23, shadow 2024, confirmation 2025; 2026 remains sealed. No publication."
-        )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_frozen_confirmation":
-        st.sidebar.caption(
-            "NFL V1.9.1 expanded stats frozen confirmation: hashes the complete registry before opening the sealed 2026 results. "
-            "Adds division/rematch, home-road form, opponent-adjusted strength, run/pass matchup, pace/efficiency, turnover regression, "
-            "non-offensive scoring, half/quarter profile, discipline/fourth-down, volatility/trend and fixed stats-only residual challengers. "
-            "Models fit only through 2025; no 2026 tuning or production authority."
-        )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_research_foundation":
-        st.sidebar.caption(
-            "NFL V1.9.2 research foundation: preserves independent CORE fair margin/score models, market baseline, "
-            "stats-residual correction, documented systems, residual Miner, context and uncertainty as separate research components. "
-            "Validates the isolated sharp_research append-only ledger and result-settlement contract. No model promotion or production authority."
-        )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_research_engine":
-        st.sidebar.caption(
-            "NFL V1.9.3 protected challenger research: history through 2025 only. Builds structured market-residual family models, "
-            "new market-independent CORE margin/total challengers, disagreement attribution and Residual Miner V2 with discovery/shadow/confirmation + FDR. "
-            "Freezes research artifacts for a new prospective shadow clock. Does not query 2026, auto-promote, or change legacy NFL/NCAAF."
-        )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_edge_gate":
-        st.sidebar.caption(
-            "NFL V1.9.4 edge-gate research: keeps incumbent CORE as the independent fair-line benchmark, fixes dead/all-null research features, "
-            "separates fair-line MAE/RMSE from betting-edge probability, tests transparent disagreement gates and compact season-forward logistic edge gates, "
-            "and freezes a new shadow registry through 2025 only. No 2026 query, threshold optimization, auto-promotion, legacy NFL change, or NCAAF change."
-        )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_prospective_shadow":
-        st.sidebar.caption(
-            "NFL V1.9.6 prospective shadow: continues the market-microstructure clock and the existing Role-Flip system clock, while adding separate append-only clocks for newly frozen mechanism families. "
-            "Pregame quotes and system triggers are settled prospectively only; no historical backfill, retuning, or automatic production authority."
-        )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
         st.sidebar.caption(
-            "Weekly Update is the normal NFL run: verify parity, refresh/reuse the challenger only when completed-game data changed, update the paired fair-value ledger, then let the frozen production model and its frozen V2.6 edge/price policy emit BET or PASS. V2.5 STAT/SYSTEM/MARKET evidence is diagnostics-only. No automatic wagering or automatic model promotion."
-        )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_refresh":
-        st.sidebar.caption(
-            "NFL Production V1 Train / Refresh: verifies live feature parity, freezes the initial 2017-2025 compact Spread/H2H/Totals champion if one does not exist, then trains a separate weekly challenger using all completed games. "
-            "Spread and Totals are compact Ridge fair-value backbones; H2H is the compact logistic backbone. The final 18-feature contract must clear season-forward baseline gates before the first champion freeze. Weekly refresh never auto-promotes; only post-freeze paired predictions can support a later promotion review."
+            "Normal NFL run. Verifies live feature parity, refreshes/reuses the weekly challenger, scores the frozen production model, reads the current executable market through Utils → sharp_moves_master, attaches MARKET-RICH evidence through Utils → moves_with_features_merged, then applies the frozen V2.6.1 model edge/price gate. No automatic wagering or promotion."
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_replay":
         st.sidebar.caption(
-            "NFL Model Authority Historical Validation: rebuilds the leak-safe frozen-model replay, preserves the full V2.5 research diagnostics, and freezes the model-only betting policy. 2021-2023 selects the first/smallest predeclared model-edge threshold that clears the discovery gate; 2024-2025 can only confirm or reject that frozen threshold. STAT, SYSTEM and MARKET research cannot create or override a bet, and 2026 remains prospective."
+            "Historical validation. Rebuilds the protected replay/research stack and freezes the model-only betting gate using 2021-2023 discovery and untouched 2024-2025 confirmation. 2026 remains prospective."
         )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_score":
+    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_research_engine":
         st.sidebar.caption(
-            "NFL Production V1 Score / Paired Ledger: scores the frozen champion and latest weekly challenger on the same parity-approved live feature snapshot, then appends one immutable prospective pair per physical game. "
-            "Later challenger refreshes cannot rewrite an already-recorded game. The frozen production model then applies the separately frozen V2.6 model-edge/price gate to produce BET or PASS; research lanes remain shadow-only. Final results settle append-only. No automatic wagering or automatic promotion."
-        )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_live_feature_parity":
-        st.sidebar.caption(
-            "NFL Production V1 live feature parity: independently rebuilds the locally frozen 18-feature Spread/H2H/Totals pregame contract from prior completed NFL games, replays them against the 2025 historical training view, verifies the uploader-based Tuesday-to-Monday NFL regular-season week calendar and static division contract, and builds the same features for current upcoming games. Is_Neutral and Is_Night_Game remain research-only until exact live parity is proven. "
-            "Audit only: no model fit, no prediction publication, no threshold tuning, and no production authority until parity passes."
-        )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_pbp_foundation":
-        st.sidebar.caption(
-            "NFL Research V2 PBP Foundation: adds genuinely new market-blind play-by-play football information from nflverse for 2017-2025. "
-            "Builds EPA/success/pass-rush/early-down/explosive/red-zone/QB-history context using strict prior-only shifts, then tests one fixed Ridge CORE2 challenger against protected incumbent CORE and the historical market reference. "
-            "PBP scores are never authoritative, current-game observed QB/PBP cannot enter predictors, and 2026 remains sealed."
-        )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_pbp_diagnostic":
-        st.sidebar.caption(
-            "NFL Research V2 PBP Attribution Diagnostic: evaluates the exact frozen CORE2 artifact without retraining it. "
-            "Measures standalone Spread signal, independence/disagreement versus incumbent CORE, market residuals, confirmation/veto value, edge buckets, Totals/H2H directional value, feature-family attribution and system interactions. "
-            "Reads frozen 2017-2025 research artifacts only; 2026 remains sealed and production authority stays zero."
+            "Permanent NFL challenger research. Runs the latest protected structured research, Residual Miner V2, fair-line/edge scorecards and season-forward edge gates through 2025 only. No production authority or automatic promotion."
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_system_lab":
         st.sidebar.caption(
-            "NFL System Research / Miner V3: direct ATS and Totals discovery plus mechanism-family consolidation. "
-            "Discovery stays 2017-2022 with frozen 2023-2025 validation and 2026 sealed. Correlated variants count as one mechanism family, ambiguous both-side rules are held from prospective tracking, and LEGIT families receive frozen prospective definitions. "
-            "Big Al/documented systems remain separate. No CORE/PBP/model-state input and zero automatic production authority."
+            "NFL System Research / Miner V3. Direct ATS/Totals system discovery and mechanism-family consolidation with frozen validation; 2026 is sealed and systems receive no automatic production authority."
         )
 
     
@@ -49866,23 +49776,10 @@ if not HEADLESS:
         _nfl_train_labels = {
             "nfl_production_weekly": "Run NFL Production Weekly Update",
             "nfl_production_replay": "Run NFL Model Authority Historical Validation",
-            "nfl_production_refresh": "Advanced: Train / Refresh NFL Production V1",
-            "nfl_production_score": "Advanced: Score NFL Production V1 / Update Paired Ledger",
-            "nfl_audit": "Run NFL History & Champion Audit",
-            "nfl_challenger": "Run NFL Specialized Modeling V1.5 (No Publish)",
-            "nfl_score_engine": "Run NFL Team Score Engine V1.6 (No Publish)",
-            "nfl_intelligence": "Run NFL Intelligence V1.8 (No Publish)",
-            "nfl_frozen_confirmation": "Run NFL V1.9.1 Expanded Stats 2026 Confirmation",
-            "nfl_research_foundation": "Validate NFL V1.9.2 Research Foundation",
             "nfl_research_engine": "Run NFL Challenger Research",
-            "nfl_edge_gate": "Run NFL V1.9.4 Edge Gate Research",
-            "nfl_prospective_shadow": "Update NFL Prospective Shadow",
-            "nfl_live_feature_parity": "Run NFL Production V1 Live Feature Parity",
-            "nfl_pbp_foundation": "Run NFL Research V2 PBP Foundation",
-            "nfl_pbp_diagnostic": "Run NFL Research V2 PBP Attribution Diagnostic",
             "nfl_system_lab": "Run NFL System Research / Miner",
         }
-        _train_button_label = _nfl_train_labels.get(str(market_choice).lower().strip(), f"📈 Train {sport} Sharp Model")
+        _train_button_label = _nfl_train_labels.get(str(market_choice).lower().strip(), "Run NFL Workflow")
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production":
         _train_button_label = "Publish NCAAF Production V1"
     elif str(market_choice).lower().strip() == "edge_research":

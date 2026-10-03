@@ -179,341 +179,10 @@ def main():
     if HEADLESS:
         install_streamlit_shim(log_func)
 
-    # NFL AUDIT V1: isolate read-only inventory from heavyweight NCAAF research
-    # imports and every legacy NFL training / model publication path.
-    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_audit":
-        import importlib.util
-        from pathlib import Path
-        _audit_path = Path(__file__).resolve().parent / "nfl_audit_v1.py"
-        if not _audit_path.is_file():
-            raise RuntimeError(f"[NFL-AUDIT-V1-DEPLOY-PREFLIGHT] MISSING {_audit_path}")
-        _spec = importlib.util.spec_from_file_location("nfl_audit_v1", _audit_path)
-        _audit = importlib.util.module_from_spec(_spec)
-        _spec.loader.exec_module(_audit)
-        if getattr(_audit, "SOURCE_TAG", "") != "nfl-audit-v1.3-prior-feature-provenance-20260930":
-            raise RuntimeError("[NFL-AUDIT-V1-DEPLOY-PREFLIGHT] STALE_OR_MIXED_SOURCE")
-        _feature_path = Path(__file__).resolve().parent / "nfl_feature_audit_v1.py"
-        if not _feature_path.is_file():
-            raise RuntimeError(f"[NFL-FEATURE-V1-DEPLOY-PREFLIGHT] MISSING {_feature_path}")
-        # Load and register this exact local module for the audit's import.
-        # Use the module-level sys import: importing sys inside main() creates
-        # a local binding that breaks the earlier NFL challenger nested loader.
-        _feature_spec = importlib.util.spec_from_file_location("nfl_feature_audit_v1", _feature_path)
-        _feature = importlib.util.module_from_spec(_feature_spec)
-        sys.modules["nfl_feature_audit_v1"] = _feature
-        _feature_spec.loader.exec_module(_feature)
-        if getattr(_feature, "SOURCE_TAG", "") != "nfl-feature-audit-v1.3-prior-only-20260930":
-            raise RuntimeError("[NFL-FEATURE-V1-DEPLOY-PREFLIGHT] STALE_OR_MIXED_SOURCE")
-        pw.emit("audit", f"[NFL-AUDIT-V1] Read-only NFL inventory start run={run_id}", pct=0.1)
-        try:
-            result = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
-            pw.emit("done", f"NFL audit complete: {result['status']} (no model published)", pct=1.0)
-        except Exception as exc:
-            pw.emit("error", f"NFL audit failed: {exc}\n{traceback.format_exc()}", pct=1.0)
-            raise
-        return
-
-    # NFL Challenger V1.5 — specialized score-domain sandbox; audit reruns in SAME job.
-    # It never writes production artifacts, alters NCAAF, or enters legacy trainer.
-    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_challenger":
-        import importlib.util
-        from pathlib import Path
-        from google.cloud import bigquery
-        _dir = Path(__file__).resolve().parent
-
-        def _load_nfl_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-CHALLENGER-V1-DEPLOY-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-CHALLENGER-V1-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
-
-        _feature = _load_nfl_exact("nfl_feature_audit_v1", "nfl-feature-audit-v1.3-prior-only-20260930")
-        _audit = _load_nfl_exact("nfl_audit_v1", "nfl-audit-v1.3-prior-feature-provenance-20260930")
-        _challenge = _load_nfl_exact("nfl_challenger_v1", "nfl-challenger-v1.4.1-production-contract-no-unverified-live-context-20261001")
-        _special = _load_nfl_exact("nfl_specialized_v1", "nfl-specialized-v1.5-score-domain-h2h-stack-20260930")
-        pw.emit("audit", f"[NFL-CHALLENGER-V1] Recheck historical and prior-only audits run={run_id}", pct=0.05)
-        try:
-            _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
-            if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
-                raise RuntimeError("[NFL-CHALLENGER-V1-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
-            pw.emit("sandbox", "[NFL-SPECIALIZED-V1] H2H blend + Spread margin + Totals points; 2026 sealed", pct=0.37)
-            _result = _special.run_nfl_specialized_v1(bq_client=bigquery.Client(project="sharplogger"),
-                        audit_report=_audit_report, log_func=log_func)
-            pw.emit("done", "NFL specialized modeling complete: "+_result["status"]+" (no model published)", pct=1.0)
-        except Exception as exc:
-            pw.emit("error", "NFL challenger failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
-            raise
-        return
-
-    # NFL Score Engine V1.6 — team offense + opponent defense -> projected score.
-    # Research only: audit reruns in the same job; 2026 remains sealed.
-    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_score_engine":
-        import importlib.util
-        from pathlib import Path
-        from google.cloud import bigquery
-        _dir = Path(__file__).resolve().parent
-
-        def _load_nfl_score_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-SCORE-V1-DEPLOY-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-SCORE-V1-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
-
-        _feature = _load_nfl_score_exact("nfl_feature_audit_v1", "nfl-feature-audit-v1.3-prior-only-20260930")
-        _audit = _load_nfl_score_exact("nfl_audit_v1", "nfl-audit-v1.3-prior-feature-provenance-20260930")
-        _challenge = _load_nfl_score_exact("nfl_challenger_v1", "nfl-challenger-v1.4.1-production-contract-no-unverified-live-context-20261001")
-        _special = _load_nfl_score_exact("nfl_specialized_v1", "nfl-specialized-v1.5-score-domain-h2h-stack-20260930")
-        _score = _load_nfl_score_exact("nfl_score_engine_v1", "nfl-score-engine-v1.6-team-offense-defense-20260930")
-        pw.emit("audit", f"[NFL-SCORE-V1] Recheck historical and prior-only audits run={run_id}", pct=0.05)
-        try:
-            _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
-            if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
-                raise RuntimeError("[NFL-SCORE-V1-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
-            pw.emit("sandbox", "[NFL-SCORE-V1] Team offense + opponent defense score engine; 2026 sealed", pct=0.37)
-            _result = _score.run_nfl_score_engine_v1(
-                bq_client=bigquery.Client(project="sharplogger"),
-                audit_report=_audit_report, log_func=log_func)
-            pw.emit("done", "NFL score-engine modeling complete: "+_result["status"]+" (no model published)", pct=1.0)
-        except Exception as exc:
-            pw.emit("error", "NFL score engine failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
-            raise
-        return
-
-    # NFL Intelligence V1.8 — residual/error research + market arbitration +
-    # stricter system miner + within-family reconciliation. Research only.
-    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_intelligence":
-        import importlib.util
-        from pathlib import Path
-        from google.cloud import bigquery
-        _dir = Path(__file__).resolve().parent
-
-        def _load_nfl_intel_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-INTEL-V1-DEPLOY-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-INTEL-V1-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
-
-        _feature = _load_nfl_intel_exact("nfl_feature_audit_v1", "nfl-feature-audit-v1.3-prior-only-20260930")
-        _audit = _load_nfl_intel_exact("nfl_audit_v1", "nfl-audit-v1.3-prior-feature-provenance-20260930")
-        _challenge = _load_nfl_intel_exact("nfl_challenger_v1", "nfl-challenger-v1.4.1-production-contract-no-unverified-live-context-20261001")
-        _special = _load_nfl_intel_exact("nfl_specialized_v1", "nfl-specialized-v1.5-score-domain-h2h-stack-20260930")
-        _score = _load_nfl_intel_exact("nfl_score_engine_v1", "nfl-score-engine-v1.6-team-offense-defense-20260930")
-        _intel = _load_nfl_intel_exact("nfl_intelligence_v1", "nfl-intelligence-v1.8-residual-arbitration-reconciliation-20260930")
-        pw.emit("audit", f"[NFL-INTEL-V1.8] Recheck historical and prior-only audits run={run_id}", pct=0.05)
-        try:
-            _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
-            if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
-                raise RuntimeError("[NFL-INTEL-V1-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
-            pw.emit("sandbox", "[NFL-INTEL-V1.8] CORE residuals + market arbitration + Big Al + Pathi + stricter Miner; 2026 sealed", pct=0.37)
-            _result = _intel.run_nfl_intelligence_v1(
-                bq_client=bigquery.Client(project="sharplogger"),
-                audit_report=_audit_report, log_func=log_func)
-            pw.emit("done", "NFL intelligence research complete: "+_result["status"]+" (no model/system published)", pct=1.0)
-        except Exception as exc:
-            pw.emit("error", "NFL intelligence research failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
-            raise
-        return
-
-    # NFL V1.9.1 — expanded stats-only frozen 2026 holdout confirmation. The registry
-    # is defined and hashed before 2026 is queried. No 2026 row can tune anything.
-    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_frozen_confirmation":
-        import importlib.util
-        from pathlib import Path
-        from google.cloud import bigquery
-        _dir = Path(__file__).resolve().parent
-
-        def _load_nfl_v19_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-V1.9.1-DEPLOY-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-V1.9.1-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
-
-        _feature = _load_nfl_v19_exact("nfl_feature_audit_v1", "nfl-feature-audit-v1.3-prior-only-20260930")
-        _audit = _load_nfl_v19_exact("nfl_audit_v1", "nfl-audit-v1.3-prior-feature-provenance-20260930")
-        _challenge = _load_nfl_v19_exact("nfl_challenger_v1", "nfl-challenger-v1.4.1-production-contract-no-unverified-live-context-20261001")
-        _special = _load_nfl_v19_exact("nfl_specialized_v1", "nfl-specialized-v1.5-score-domain-h2h-stack-20260930")
-        _score = _load_nfl_v19_exact("nfl_score_engine_v1", "nfl-score-engine-v1.6-team-offense-defense-20260930")
-        _intel = _load_nfl_v19_exact("nfl_intelligence_v1", "nfl-intelligence-v1.8-residual-arbitration-reconciliation-20260930")
-        _ledger = _load_nfl_v19_exact("nfl_prospective_ledger_v1", "nfl-prospective-ledger-v1.9.2-sharp-research-20261001")
-        _stats = _load_nfl_v19_exact("nfl_stats_context_v1", "nfl-stats-context-v1.9.1-existing-dataset-only-20261001")
-        _v19 = _load_nfl_v19_exact("nfl_frozen_confirmation_v1", "nfl-frozen-confirmation-v1.9.1-expanded-stats-2026-holdout-20261001")
-        pw.emit("audit", f"[NFL-V1.9.1] Recheck audits before opening expanded frozen 2026 holdout run={run_id}", pct=0.05)
-        try:
-            _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
-            if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
-                raise RuntimeError("[NFL-V1.9.1-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
-            pw.emit("holdout", "[NFL-V1.9.1] Freeze expanded stats registry first; fit only through 2025; score 2026 once; initialize append-only research ledger", pct=0.37)
-            _result = _v19.run_nfl_frozen_confirmation_v1(
-                bq_client=bigquery.Client(project="sharplogger"),
-                audit_report=_audit_report, log_func=log_func, ensure_ledger=True)
-            pw.emit("done", "NFL V1.9.1 expanded stats frozen confirmation complete: "+_result["status"]+" (zero production authority)", pct=1.0)
-        except Exception as exc:
-            pw.emit("error", "NFL V1.9.1 expanded stats frozen confirmation failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
-            raise
-        return
-
-    # NFL V1.9.2 — protected research architecture + isolated prospective ledger.
-    # Infrastructure/contract validation only: no production publication and no
-    # retuning of the already-observed 2026 V1.9.1 holdout.
-    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_research_foundation":
-        import json
-        import importlib.util
-        from pathlib import Path
-        from google.cloud import bigquery
-        _dir = Path(__file__).resolve().parent
-
-        def _load_nfl_v192_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-V1.9.2-DEPLOY-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-V1.9.2-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
-
-        _contract = _load_nfl_v192_exact(
-            "nfl_research_contract_v1",
-            "nfl-research-contract-v1.9.2-protected-architecture-20261001",
-        )
-        _attribution = _load_nfl_v192_exact(
-            "nfl_edge_attribution_v1",
-            "nfl-edge-attribution-v1.9.2-independent-margin-20261001",
-        )
-        _ledger = _load_nfl_v192_exact(
-            "nfl_prospective_ledger_v1",
-            "nfl-prospective-ledger-v1.9.2-sharp-research-20261001",
-        )
-        _settlement = _load_nfl_v192_exact(
-            "nfl_prospective_settlement_v1",
-            "nfl-prospective-settlement-v1.9.2-append-only-20261001",
-        )
-        pw.emit("audit", f"[NFL-V1.9.2] Validate protected architecture and sharp_research ledger run={run_id}", pct=0.10)
-        try:
-            _contract_report = _contract.assert_contract()
-            pw.emit("contract", "[NFL-V1.9.2] Protected CORE + MARKET + STAT + systems/miner contract PASS", pct=0.35)
-            _health = _ledger.ledger_health_check(
-                bigquery.Client(project="sharplogger"),
-                service_identity_hint="sharp-train-sa@sharplogger.iam.gserviceaccount.com",
-            )
-            _result = {
-                "status": "NFL_V1_9_2_RESEARCH_FOUNDATION_READY",
-                "contract": _contract_report,
-                "ledger_health": _health,
-                "edge_attribution_source_tag": _attribution.SOURCE_TAG,
-                "settlement_source_tag": _settlement.SOURCE_TAG,
-                "production_authority": 0,
-                "ncaaf": "UNCHANGED",
-                "legacy_nfl": "UNCHANGED",
-            }
-            log_func("[NFL-V1.9.2-CONTRACT] "+json.dumps(_result, sort_keys=True, default=str))
-            pw.emit("done", "NFL V1.9.2 research foundation ready (zero production authority)", pct=1.0)
-        except Exception as exc:
-            pw.emit("error", "NFL V1.9.2 research foundation failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
-            raise
-        return
-
-    # NFL V1.9.3 — protected challenger research engine.
-    # Uses history only through 2025. 2026 is not queried by this route; the
-    # resulting registry starts a new prospective shadow clock after deployment.
+    # NFL Challenger Research — permanent protected research/challenger route.
+    # Uses the latest V1.9.4 structured research + residual Miner + fair-line/edge
+    # scorecards. 2026 is never queried by this route and production authority stays zero.
     if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_research_engine":
-        import json
-        import importlib.util
-        from pathlib import Path
-        from google.cloud import bigquery
-        _dir = Path(__file__).resolve().parent
-
-        def _load_nfl_v193_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-V1.9.3-DEPLOY-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-V1.9.3-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
-
-        _audit = _load_nfl_v193_exact(
-            "nfl_audit_v1",
-            "nfl-audit-v1.3-prior-feature-provenance-20260930",
-        )
-        _contract = _load_nfl_v193_exact(
-            "nfl_research_contract_v1",
-            "nfl-research-contract-v1.9.2-protected-architecture-20261001",
-        )
-        _structured = _load_nfl_v193_exact(
-            "nfl_structured_research_v1",
-            "nfl-structured-research-v1.9.3-nested-season-forward-20261001",
-        )
-        _miner = _load_nfl_v193_exact(
-            "nfl_residual_miner_v2",
-            "nfl-residual-miner-v2.0-market-error-fdr-20261001",
-        )
-        _ledger2 = _load_nfl_v193_exact(
-            "nfl_prospective_ledger_v2",
-            "nfl-prospective-ledger-v2-v1.9.3-enhanced-shadow-20261001",
-        )
-        _engine = _load_nfl_v193_exact(
-            "nfl_research_engine_v1",
-            "nfl-research-engine-v1.9.3-protected-challengers-20261001",
-        )
-        pw.emit("audit", f"[NFL-V1.9.3] Protected challenger research start run={run_id}; history through 2025 only", pct=0.05)
-        try:
-            _contract.assert_contract()
-            _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
-            if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
-                raise RuntimeError("[NFL-V1.9.3-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
-            _health = _ledger2.ledger_health_check(
-                bigquery.Client(project="sharplogger"),
-                service_identity_hint="sharp-train-sa@sharplogger.iam.gserviceaccount.com",
-            )
-            pw.emit("research", "[NFL-V1.9.3] Run structured residual + independent CORE challengers + residual Miner V2", pct=0.30)
-            _result = _engine.run_nfl_research_engine_v1(
-                bq_client=bigquery.Client(project="sharplogger"),
-                storage_client=gcs,
-                bucket_name=bucket,
-                audit_report=_audit_report,
-                ledger_health=_health,
-                log_func=log_func,
-            )
-            pw.emit("done", "NFL V1.9.3 research engine complete and frozen for prospective shadow: "+_result["status"], pct=1.0)
-        except Exception as exc:
-            pw.emit("error", "NFL V1.9.3 research engine failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
-            raise
-        return
-
-    # NFL V1.9.4 — dual-scorecard edge-gate research manager.
-    # Re-runs the protected through-2025 research stack, then trains season-forward
-    # edge-probability gates. 2026 is never queried and production authority stays zero.
-    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_edge_gate":
         import json
         import importlib.util
         from pathlib import Path
@@ -560,7 +229,7 @@ def main():
             "nfl_research_engine_v2",
             "nfl-research-engine-v1.9.4-edge-gate-manager-20261001",
         )
-        pw.emit("audit", f"[NFL-V1.9.4] Edge-gate research start run={run_id}; protected history through 2025 only", pct=0.05)
+        pw.emit("audit", f"[NFL-CHALLENGER-RESEARCH] Protected challenger research start run={run_id}; history through 2025 only", pct=0.05)
         try:
             _contract.assert_contract()
             _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
@@ -570,7 +239,7 @@ def main():
                 bigquery.Client(project="sharplogger"),
                 service_identity_hint="sharp-train-sa@sharplogger.iam.gserviceaccount.com",
             )
-            pw.emit("research", "[NFL-V1.9.4] Run null-safe structured research + Miner V2 + fair-line/edge dual scorecards + season-forward edge gates", pct=0.25)
+            pw.emit("research", "[NFL-CHALLENGER-RESEARCH] Run null-safe structured research + Miner V2 + fair-line/edge dual scorecards + season-forward edge gates", pct=0.25)
             _result = _engine2.run_nfl_research_engine_v2(
                 bq_client=bigquery.Client(project="sharplogger"),
                 storage_client=gcs,
@@ -579,13 +248,13 @@ def main():
                 ledger_health=_health,
                 log_func=log_func,
             )
-            pw.emit("done", "NFL V1.9.4 edge-gate research complete and frozen for prospective shadow: "+_result["status"], pct=1.0)
+            pw.emit("done", "NFL Challenger Research complete and frozen for prospective comparison: "+_result["status"], pct=1.0)
         except Exception as exc:
-            pw.emit("error", "NFL V1.9.4 edge-gate research failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            pw.emit("error", "NFL Challenger Research failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
             raise
         return
 
-    # NFL Production V2.6 — unified weekly update with frozen production-model betting authority.
+    # NFL Production V2.6.1 — unified weekly update with frozen production-model betting authority.
     # One operator action: parity -> challenger refresh/reuse -> paired live score
     # -> model-authority decisions/settlement -> performance/promotion clocks.
     if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_production_weekly":
@@ -611,11 +280,14 @@ def main():
         # Production MODEL -> ACTION must not be blocked by a research-only module.
         # nfl_production_live_v1 loads V2.5 shadow evidence opportunistically and
         # fails that lane open-to-diagnostics / closed-to-authority if unavailable.
-        _modelauth = _load_nfl_weekly_exact("nfl_model_authority_v26", "nfl-model-authority-v2.6-frozen-model-bet-policy-20261003")
-        _live = _load_nfl_weekly_exact("nfl_production_live_v1", "nfl-production-v2.6-live-model-authority-20261003")
+        _market_backend = _load_nfl_weekly_exact("nfl_market_backend_v261", "nfl-market-backend-v2.6.1-utils-canonical-20261003")
+        _modelauth = _load_nfl_weekly_exact("nfl_model_authority_v26", "nfl-model-authority-v2.6.1-utils-market-backend-20261003")
+        _live = _load_nfl_weekly_exact("nfl_production_live_v1", "nfl-production-v2.6.1-utils-market-backend-20261003")
         pw.emit("audit", f"[NFL-EDGE-V2] Weekly production update start run={run_id}", pct=0.05)
         try:
             _bq=bigquery.Client(project="sharplogger")
+            _market_preflight=_market_backend.preflight(bq_client=_bq)
+            log_func("[NFL-MARKET-BACKEND-V261-PREFLIGHT] "+json.dumps(_market_preflight,sort_keys=True,default=str))
             _parity_result=_parity.run_nfl_live_feature_parity_v1(bq_client=_bq,log_func=log_func)
             if _parity_result.get("status") != "NFL_PRODUCTION_V1_LIVE_FEATURE_PARITY_PASS":
                 raise RuntimeError("[NFL-PROD-V1-WEEKLY-HOLD] LIVE_FEATURE_PARITY_NOT_GREEN "+str(_parity_result.get("status")))
@@ -628,6 +300,7 @@ def main():
                 "status":_result["status"],
                 "challenger_reused_existing":bool(_refresh.get("challenger_reused_existing",False)),
                 "live_status":_score.get("status"),
+                "market_backend":_market_preflight,
                 "model_authority_v26":_score.get("model_authority_v26",{}),
                 "edge_authority_v2":_score.get("edge_authority_v2",{}),
                 "promotion_clock":_score.get("promotion_clock",{}),
@@ -681,8 +354,8 @@ def main():
         _multi25 = _load_nfl_prod_replay_exact("nfl_multidimensional_edge_v25", "nfl-multidimensional-edge-v2.5-four-lane-research-20261003")
         _pbpdiag = _load_nfl_prod_replay_exact("nfl_pbp_attribution_v1", "nfl-pbp-attribution-v1-research-v2.0.2-frozen-core2-20261001")
         _edge = _load_nfl_prod_replay_exact("nfl_edge_authority_v2", "nfl-edge-authority-v2.5-four-lane-multidimensional-research-20261003")
-        _modelauth = _load_nfl_prod_replay_exact("nfl_model_authority_v26", "nfl-model-authority-v2.6-frozen-model-bet-policy-20261003")
-        _replay = _load_nfl_prod_replay_exact("nfl_production_replay_v1", "nfl-production-v2.6-historical-model-authority-freeze-20261003")
+        _modelauth = _load_nfl_prod_replay_exact("nfl_model_authority_v26", "nfl-model-authority-v2.6.1-utils-market-backend-20261003")
+        _replay = _load_nfl_prod_replay_exact("nfl_production_replay_v1", "nfl-production-v2.6.1-historical-model-authority-freeze-20261003")
 
         pw.emit("audit", f"[NFL-MODEL-AUTH-V2.6] Historical validation start run={run_id}; preserve full V2.5 research then freeze MODEL -> ACTION policy; 2026 untouched", pct=0.03)
         try:
@@ -725,330 +398,9 @@ def main():
                 bq_client=_bq,storage_client=gcs,bucket_name=bucket,log_func=log_func,
                 research_report=_research_report,system_report=_system_report,
             )
-            pw.emit("done", "NFL Model Authority V2.6 historical validation complete: "+_result["status"], pct=1.0)
+            pw.emit("done", "NFL Model Authority V2.6.1 historical validation complete: "+_result["status"], pct=1.0)
         except Exception as exc:
-            pw.emit("error", "NFL Model Authority V2.6 historical validation failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
-            raise
-        return
-
-    # NFL Production V1.2 — live champion/challenger scoring + paired ledger.
-    # Scores the frozen champion and the latest weekly challenger on the exact
-    # same parity-approved pregame feature snapshot. One pair per physical game
-    # is append-only; later challenger refreshes cannot rewrite that game.
-    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_production_score":
-        import importlib.util
-        from pathlib import Path
-        from google.cloud import bigquery
-        _dir = Path(__file__).resolve().parent
-
-        def _load_nfl_prod_live_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-PROD-V1-LIVE-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-PROD-V1-LIVE-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
-
-        _parity = _load_nfl_prod_live_exact(
-            "nfl_live_feature_parity_v1",
-            "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002",
-        )
-        _prod = _load_nfl_prod_live_exact(
-            "nfl_production_v1",
-            "nfl-production-v1.1.1-publish-receipt-normalization-20261002",
-        )
-        # Shadow research dependencies are optional for production scoring in V2.6.
-        _modelauth = _load_nfl_prod_live_exact(
-            "nfl_model_authority_v26",
-            "nfl-model-authority-v2.6-frozen-model-bet-policy-20261003",
-        )
-        _live = _load_nfl_prod_live_exact(
-            "nfl_production_live_v1",
-            "nfl-production-v2.6-live-model-authority-20261003",
-        )
-        pw.emit("audit", f"[NFL-PROD-V1.2] Verify live parity before paired scoring run={run_id}", pct=0.05)
-        try:
-            _bq = bigquery.Client(project="sharplogger")
-            _parity_result = _parity.run_nfl_live_feature_parity_v1(
-                bq_client=_bq,
-                log_func=log_func,
-            )
-            if _parity_result.get("status") != "NFL_PRODUCTION_V1_LIVE_FEATURE_PARITY_PASS":
-                raise RuntimeError("[NFL-PROD-V1-LIVE-HOLD] LIVE_FEATURE_PARITY_NOT_GREEN "+str(_parity_result.get("status")))
-            pw.emit("score", "NFL Production V1 parity PASS; score champion + challenger and update append-only paired ledger", pct=0.40)
-            _result = _live.run_nfl_production_live_score(
-                bq_client=_bq,
-                storage_client=gcs,
-                bucket_name=bucket,
-                log_func=log_func,
-            )
-            pw.emit("done", "NFL Production V1 live paired ledger updated: "+_result["status"], pct=1.0)
-        except Exception as exc:
-            pw.emit("error", "NFL Production V1 live scoring failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
-            raise
-        return
-
-    # NFL Production V1 — fixed compact backbones + weekly challenger refresh.
-    # The first successful run freezes the 2017-2025 champion contract. Every
-    # later run refits a challenger with all completed games but cannot replace
-    # the champion. Promotion requires a separate prospective paired review.
-    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_production_refresh":
-        import importlib.util
-        from pathlib import Path
-        from google.cloud import bigquery
-        _dir = Path(__file__).resolve().parent
-
-        def _load_nfl_prod_refresh_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-PROD-V1-REFRESH-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-PROD-V1-REFRESH-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
-
-        _parity = _load_nfl_prod_refresh_exact(
-            "nfl_live_feature_parity_v1",
-            "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002",
-        )
-        _prod = _load_nfl_prod_refresh_exact(
-            "nfl_production_v1",
-            "nfl-production-v1.1.1-publish-receipt-normalization-20261002",
-        )
-        pw.emit("audit", f"[NFL-PROD-V1] Verify live parity before refresh run={run_id}", pct=0.05)
-        try:
-            _parity_result = _parity.run_nfl_live_feature_parity_v1(
-                bq_client=bigquery.Client(project="sharplogger"),
-                log_func=log_func,
-            )
-            if _parity_result.get("status") != "NFL_PRODUCTION_V1_LIVE_FEATURE_PARITY_PASS":
-                raise RuntimeError("[NFL-PROD-V1-REFRESH-HOLD] LIVE_FEATURE_PARITY_NOT_GREEN "+str(_parity_result.get("status")))
-            pw.emit("train", "NFL Production V1 parity PASS; freeze/refresh fixed Spread, H2H and Totals backbones", pct=0.35)
-            _result = _prod.run_nfl_production_refresh(
-                bq_client=bigquery.Client(project="sharplogger"),
-                storage_client=gcs,
-                bucket_name=bucket,
-                log_func=log_func,
-            )
-            pw.emit("done", "NFL Production V1 backbones frozen/refreshed: "+_result["status"], pct=1.0)
-        except Exception as exc:
-            pw.emit("error", "NFL Production V1 refresh failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
-            raise
-        return
-
-    # NFL Production V1 — live-pregame feature parity audit.
-    # This is the mandatory bridge between offline historical research and live
-    # production scoring. It does not fit or publish a model. It independently
-    # replays the compact production feature contract against 2025, then builds
-    # the same compact features for current upcoming games using only pregame
-    # information. Any mismatch fails closed.
-    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_live_feature_parity":
-        import importlib.util
-        from pathlib import Path
-        from google.cloud import bigquery
-        _dir = Path(__file__).resolve().parent
-
-        def _load_nfl_prod_parity_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-PROD-V1-LIVE-PARITY-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-PROD-V1-LIVE-PARITY-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
-
-        _parity = _load_nfl_prod_parity_exact(
-            "nfl_live_feature_parity_v1",
-            "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002",
-        )
-        pw.emit("audit", f"[NFL-PROD-V1] Live-pregame feature parity start run={run_id}; no model fit or publication", pct=0.10)
-        try:
-            _result = _parity.run_nfl_live_feature_parity_v1(
-                bq_client=bigquery.Client(project="sharplogger"),
-                log_func=log_func,
-            )
-            if _result.get("status") != "NFL_PRODUCTION_V1_LIVE_FEATURE_PARITY_PASS":
-                pw.emit("hold", "NFL Production V1 live feature parity HOLD: "+_result.get("status","UNKNOWN"), pct=1.0)
-            else:
-                pw.emit("done", "NFL Production V1 live feature parity PASS; ready to freeze production backbones", pct=1.0)
-        except Exception as exc:
-            pw.emit("error", "NFL Production V1 live feature parity failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
-            raise
-        return
-
-    # NFL V1.9.5 — prospective new-information shadow collector.
-    # This route does NOT retrain historical models.  It establishes/continues an
-    # append-only post-deployment market clock, captures timestamped book quotes,
-    # builds fixed T-120/T-60/T-30/current market states, and settles prior states.
-    # Pre-clock quotes are excluded from V1.9.5 evidence by contract.
-    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_prospective_shadow":
-        import json
-        import importlib.util
-        from pathlib import Path
-        from google.cloud import bigquery
-        _dir = Path(__file__).resolve().parent
-
-        def _load_nfl_v195_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-V1.9.5-DEPLOY-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-V1.9.5-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
-
-        _ledger4 = _load_nfl_v195_exact(
-            "nfl_prospective_ledger_v4",
-            "nfl-prospective-ledger-v4-v1.9.5-market-microstructure-20261001",
-        )
-        _market_shadow = _load_nfl_v195_exact(
-            "nfl_market_shadow_v1",
-            "nfl-market-shadow-v1.9.5-prospective-microstructure-20261001",
-        )
-        _system_shadow = _load_nfl_v195_exact(
-            "nfl_system_shadow_v1",
-            "nfl-system-shadow-v1.9.5.1-role-flip-family-20261001",
-        )
-        _family_shadow = _load_nfl_v195_exact(
-            "nfl_system_shadow_v2",
-            "nfl-system-shadow-v2.2.3-authoritative-week-context-20261001",
-        )
-        _shadow = _load_nfl_v195_exact(
-            "nfl_prospective_shadow_v2",
-            "nfl-prospective-shadow-v1.9.6.1-system-family-pointer-hotfix-20261001",
-        )
-        pw.emit("research", f"[NFL-V1.9.6] Prospective market + mechanism-family shadow start run={run_id}; pre-clock quotes forbidden", pct=0.10)
-        try:
-            _result = _shadow.run_nfl_prospective_shadow_v2(
-                bq_client=bigquery.Client(project="sharplogger"),
-                storage_client=gcs,
-                bucket_name=bucket,
-                log_func=log_func,
-            )
-            pw.emit("done", "NFL V1.9.6 prospective market/system shadow active: "+_result["status"], pct=1.0)
-        except Exception as exc:
-            pw.emit("error", "NFL V1.9.5 prospective market shadow failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
-            raise
-        return
-
-    # NFL Research V2.0 — genuinely new market-blind play-by-play information.
-    # This route keeps incumbent CORE protected and tests one fixed Ridge
-    # challenger built only from prior-game PBP football efficiency.  2026 is
-    # sealed and PBP final scores are never authoritative labels.
-    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_pbp_foundation":
-        import importlib.util
-        from pathlib import Path
-        from google.cloud import bigquery
-        _dir = Path(__file__).resolve().parent
-
-        def _load_nfl_v2_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-RESEARCH-V2-DEPLOY-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-RESEARCH-V2-DEPLOY-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
-
-        _contract_v2 = _load_nfl_v2_exact(
-            "nfl_research_v2_contract",
-            "nfl-research-v2.0-foundation-expansion-20261001",
-        )
-        _pbp = _load_nfl_v2_exact(
-            "nfl_pbp_foundation_v1",
-            "nfl-pbp-foundation-v1-research-v2.0-20261001",
-        )
-        _audit = _load_nfl_v2_exact(
-            "nfl_audit_v1",
-            "nfl-audit-v1.3-prior-feature-provenance-20260930",
-        )
-        pw.emit("research", f"[NFL-RESEARCH-V2-PBP] Start run={run_id}; download/aggregate nflverse 2017-2025 only; 2026 sealed", pct=0.05)
-        try:
-            _contract_v2.assert_contract()
-            _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
-            if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
-                raise RuntimeError("[NFL-RESEARCH-V2-PBP-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
-            pw.emit("research", "[NFL-RESEARCH-V2-PBP] Build prior-only PBP efficiency/QB-history context and season-forward market-blind CORE2 challenger", pct=0.20)
-            _result = _pbp.run_nfl_pbp_foundation_v1(
-                bq_client=bigquery.Client(project="sharplogger"),
-                storage_client=gcs,
-                bucket_name=bucket,
-                audit_report=_audit_report,
-                log_func=log_func,
-            )
-            pw.emit("done", "NFL Research V2 PBP foundation complete: "+_result["status"], pct=1.0)
-        except Exception as exc:
-            pw.emit("error", "NFL Research V2 PBP foundation failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
-            raise
-        return
-
-    # NFL Research V2.0.2 — attribution diagnostic for the exact frozen PBP CORE2.
-    # This route does not retrain/tune CORE2. It reuses the frozen OOF/context/model
-    # artifacts and tests disagreement, residual, confirmation, regime and system
-    # interaction value against the protected incumbent CORE. 2026 remains sealed.
-    if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_pbp_diagnostic":
-        import importlib.util
-        from pathlib import Path
-        from google.cloud import bigquery
-        _dir = Path(__file__).resolve().parent
-
-        def _load_nfl_v202_diag_exact(_name, _tag):
-            _path = _dir / (_name + ".py")
-            if not _path.is_file():
-                raise RuntimeError(f"[NFL-RESEARCH-V2-PBP-DIAG-PREFLIGHT] MISSING {_path}")
-            _spec = importlib.util.spec_from_file_location(_name, _path)
-            _mod = importlib.util.module_from_spec(_spec)
-            sys.modules[_name] = _mod
-            _spec.loader.exec_module(_mod)
-            if getattr(_mod, "SOURCE_TAG", "") != _tag:
-                raise RuntimeError("[NFL-RESEARCH-V2-PBP-DIAG-PREFLIGHT] STALE_OR_MIXED_"+_name)
-            return _mod
-
-        _contract_v2 = _load_nfl_v202_diag_exact(
-            "nfl_research_v2_contract",
-            "nfl-research-v2.0-foundation-expansion-20261001",
-        )
-        _diag = _load_nfl_v202_diag_exact(
-            "nfl_pbp_attribution_v1",
-            "nfl-pbp-attribution-v1-research-v2.0.2-frozen-core2-20261001",
-        )
-        _audit = _load_nfl_v202_diag_exact(
-            "nfl_audit_v1",
-            "nfl-audit-v1.3-prior-feature-provenance-20260930",
-        )
-        pw.emit("research", f"[NFL-RESEARCH-V2-PBP-DIAG] Start run={run_id}; frozen CORE2 attribution only; no PBP refit; 2026 sealed", pct=0.05)
-        try:
-            _contract_v2.assert_contract()
-            _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
-            if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
-                raise RuntimeError("[NFL-RESEARCH-V2-PBP-DIAG-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
-            pw.emit("research", "[NFL-RESEARCH-V2-PBP-DIAG] Verify SHA 741474dc..., reuse frozen OOF/context/bundle, test independent Spread/Total/H2H/system attribution", pct=0.20)
-            _result = _diag.run_nfl_pbp_attribution_v1(
-                bq_client=bigquery.Client(project="sharplogger"),
-                storage_client=gcs,
-                bucket_name=bucket,
-                audit_report=_audit_report,
-                log_func=log_func,
-            )
-            pw.emit("done", "NFL Research V2 PBP attribution complete: "+_result["status"], pct=1.0)
-        except Exception as exc:
-            pw.emit("error", "NFL Research V2 PBP attribution failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            pw.emit("error", "NFL Model Authority V2.6.1 historical validation failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
             raise
         return
 
