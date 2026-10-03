@@ -23,8 +23,8 @@ from pathlib import Path
 import sys
 import zlib
 
-SOURCE_TAG = "nfl-engine-v3.0.1-weekly-memory-safe-20261003"
-ENGINE_VERSION = "3.0"
+SOURCE_TAG = "nfl-engine-v3.1-background-live-market-refresh-20261003"
+ENGINE_VERSION = "3.1"
 BUNDLED_COMPONENT_COUNT = 31
 
 _COMPONENT_MANIFEST = {'nfl_advanced_stat_research_v24': {'lines': 510,
@@ -301,8 +301,284 @@ def preflight() -> dict:
         "missing_critical_symbols":missing,
         "utils_backend_required":True,
         "weekly_memory_guard":"SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER",
+        "background_live_refresh":"SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
         "shared_external_required":["utils.py","sports_edge_authority_v1.py"],
     }
+
+
+# ---------------------------------------------------------------------------
+# V3.1 lightweight background MODEL -> ACTION refresh
+# ---------------------------------------------------------------------------
+# The weekly production workflow remains responsible for feature parity,
+# champion/challenger scoring, settlements and promotion clocks.  This path is
+# intentionally much lighter: it reuses the already-stored frozen champion fair
+# values, overlays the newest scanner quotes, reapplies the frozen model-authority
+# price/edge policy, and publishes only the current dashboard state.
+NFL_BACKGROUND_LIVE_REFRESH_TAG = "nfl-engine-v3.1-background-live-market-refresh-20261003"
+NFL_BACKGROUND_LIVE_LOOKAHEAD_DAYS = 8
+
+
+def _bg_num(value):
+    import math
+    try:
+        x=float(value)
+        return x if math.isfinite(x) else None
+    except Exception:
+        return None
+
+
+def _bg_prediction_rows(bq_client, storage_client, bucket_name: str, now, lookahead_days: int = NFL_BACKGROUND_LIVE_LOOKAHEAD_DAYS):
+    """Load the frozen champion fair values already produced by Weekly Update.
+
+    No model refit or rescoring occurs here.  First paired prediction per physical
+    game remains authoritative, matching the production ledger contract.
+    """
+    import pandas as pd
+    from google.cloud import bigquery
+
+    prod=load_component("nfl_production_v1")
+    live=load_component("nfl_production_live_v1")
+    champion_ptr=live._load_pointer(storage_client,bucket_name,prod.BASELINE_POINTER)
+    champion_sha=str(champion_ptr.get("registry_sha256") or "")
+    if not champion_sha:
+        return [], {"status":"NO_CHAMPION_POINTER","champion_registry_sha256":""}
+    now_ts=pd.to_datetime(now,utc=True)
+    hi=now_ts+pd.Timedelta(days=int(lookahead_days))
+    sql=f"""
+      SELECT
+        prediction_pair_id, captured_at, game_start, game_identity,
+        home_team, away_team,
+        champion_fair_margin, champion_home_win_probability, champion_fair_total,
+        champion_registry_sha256
+      FROM `{live.PRED_TABLE}`
+      WHERE champion_registry_sha256=@champion_sha
+        AND game_start > @now_ts
+        AND game_start <= @hi_ts
+      QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY game_identity
+        ORDER BY captured_at ASC, prediction_pair_id ASC
+      ) = 1
+      ORDER BY game_start ASC
+    """
+    cfg=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("champion_sha","STRING",champion_sha),
+        bigquery.ScalarQueryParameter("now_ts","TIMESTAMP",now_ts.to_pydatetime()),
+        bigquery.ScalarQueryParameter("hi_ts","TIMESTAMP",hi.to_pydatetime()),
+    ])
+    df=bq_client.query(sql,job_config=cfg).to_dataframe(create_bqstorage_client=False)
+    if df is None or df.empty:
+        return [], {"status":"NO_UPCOMING_FROZEN_PREDICTIONS","champion_registry_sha256":champion_sha,"rows":0}
+    for c in ("captured_at","game_start"):
+        if c in df.columns:
+            df[c]=pd.to_datetime(df[c],utc=True,errors="coerce")
+    rows=df.to_dict("records")
+    return rows, {"status":"READY","champion_registry_sha256":champion_sha,"rows":len(rows)}
+
+
+def _bg_overlay_current_quotes(snapshot: dict, live_market_rows, now):
+    """Overlay this scanner cycle on the Utils/BQ snapshot before BQ persistence.
+
+    This prevents a one-scan lag when the odds collector has fetched a new line but
+    sharp_moves_master has not yet received that exact cycle.  Historical/open and
+    MARKET-RICH features still come from Utils' canonical backend.
+    """
+    import math
+    import pandas as pd
+    import numpy as np
+
+    if live_market_rows is None or getattr(live_market_rows,"empty",True):
+        return snapshot, 0
+    mb=load_component("nfl_market_backend_v261")
+    try:
+        raw=mb._canonicalize(live_market_rows,now,NFL_BACKGROUND_LIVE_LOOKAHEAD_DAYS)
+    except Exception:
+        return snapshot, 0
+    if raw is None or raw.empty:
+        return snapshot, 0
+    raw=raw.sort_values("snapshot_ts")
+    last=raw.drop_duplicates(
+        ["game_start","home_key","away_key","market_norm","outcome_key","book_key"],keep="last"
+    )
+    quotes=(snapshot or {}).setdefault("quotes",{})
+    for (gs,hk,ak),g in last.groupby(["game_start","home_key","away_key"],sort=False):
+        key=(pd.Timestamp(gs).round("s").isoformat(),hk,ak)
+        rec=quotes.setdefault(key,{"game_start":gs,"home_key":hk,"away_key":ak})
+        rec["market_backend"]="UTILS+CURRENT_SCANNER_OVERLAY"
+        rec["current_market_source"]="CURRENT_SCANNER_OVERLAY"
+
+        sp=g[g.market_norm.eq("spreads")].copy(); vals=[]
+        for _,r in sp.iterrows():
+            v=mb._num(r.value)
+            if not math.isfinite(v):
+                continue
+            if r.outcome_key==hk: vals.append(v)
+            elif r.outcome_key==ak: vals.append(-v)
+        if vals:
+            line=float(np.median(vals)); rec["current_home_spread"]=line
+            hs=sp.loc[sp.outcome_key.eq(hk)&pd.to_numeric(sp.value,errors="coerce").sub(line).abs().lt(.011)]
+            aw=sp.loc[sp.outcome_key.eq(ak)&pd.to_numeric(sp.value,errors="coerce").add(line).abs().lt(.011)]
+            hp,hb=mb._best_price(hs); ap,ab=mb._best_price(aw)
+            rec["current_home_spread_odds"]=hp; rec["current_home_spread_book"]=hb
+            rec["current_away_spread_odds"]=ap; rec["current_away_spread_book"]=ab
+            ts=pd.to_datetime(sp.snapshot_ts,utc=True,errors="coerce").dropna()
+            rec["current_spread_snapshot_ts"]=ts.max().isoformat() if len(ts) else None
+
+        to=g[g.market_norm.eq("totals")].copy()
+        ov=to[to.outcome.astype(str).str.lower().str.contains("over",na=False)]
+        uv=to[to.outcome.astype(str).str.lower().str.contains("under",na=False)]
+        tv=pd.to_numeric(ov.value,errors="coerce").dropna()
+        if len(tv):
+            line=float(np.median(tv)); rec["current_total"]=line
+            oo=ov.loc[pd.to_numeric(ov.value,errors="coerce").sub(line).abs().lt(.011)]
+            uu=uv.loc[pd.to_numeric(uv.value,errors="coerce").sub(line).abs().lt(.011)]
+            op,ob=mb._best_price(oo); up,ub=mb._best_price(uu)
+            rec["current_over_odds"]=op; rec["current_over_book"]=ob
+            rec["current_under_odds"]=up; rec["current_under_book"]=ub
+            ts=pd.to_datetime(to.snapshot_ts,utc=True,errors="coerce").dropna()
+            rec["current_total_snapshot_ts"]=ts.max().isoformat() if len(ts) else None
+
+        h2=g[g.market_norm.eq("h2h")].copy(); probs=[]
+        for _,bg in h2.groupby("book_key",sort=False):
+            ho=pd.to_numeric(bg.loc[bg.outcome_key.eq(hk),"odds"],errors="coerce").dropna()
+            ao=pd.to_numeric(bg.loc[bg.outcome_key.eq(ak),"odds"],errors="coerce").dropna()
+            if len(ho) and len(ao):
+                ih,ia=mb._american_implied(ho.iloc[-1]),mb._american_implied(ao.iloc[-1])
+                if math.isfinite(ih) and math.isfinite(ia) and ih+ia>0:
+                    probs.append(ih/(ih+ia))
+        if probs:
+            rec["current_home_novig_probability"]=float(np.median(probs))
+        hp,hb=mb._best_price(h2.loc[h2.outcome_key.eq(hk)])
+        ap,ab=mb._best_price(h2.loc[h2.outcome_key.eq(ak)])
+        rec["current_home_ml"]=hp; rec["current_home_ml_book"]=hb
+        rec["current_away_ml"]=ap; rec["current_away_ml_book"]=ab
+        if not h2.empty:
+            ts=pd.to_datetime(h2.snapshot_ts,utc=True,errors="coerce").dropna()
+            rec["current_h2h_snapshot_ts"]=ts.max().isoformat() if len(ts) else None
+
+    meta=(snapshot or {}).setdefault("meta",{})
+    meta["current_scanner_overlay_rows"]=int(len(raw))
+    meta["current_scanner_overlay_applied"]=True
+    return snapshot,int(len(raw))
+
+
+def _bg_authoritative_rows_from_snapshot(prediction_rows, snapshot: dict, now):
+    import math
+    import pandas as pd
+    import numpy as np
+    auth=load_component("nfl_model_authority_v26")
+    mb=load_component("nfl_market_backend_v261")
+    quotes=(snapshot or {}).get("quotes") or {}
+    backend_meta=(snapshot or {}).get("meta") or {}
+    out=[]
+    for p in prediction_rows or []:
+        gs=pd.to_datetime(p.get("game_start"),utc=True,errors="coerce")
+        key=(gs.round("s").isoformat(),auth._norm(p.get("home_team")),auth._norm(p.get("away_team"))) if pd.notna(gs) else None
+        q=quotes.get(key,{}) if key else {}
+        for market in ("SPREADS","H2H","TOTALS"):
+            base=auth._authoritative_market_base_row(p,market,q)
+            common={
+                "prediction_pair_id":p.get("prediction_pair_id"),"game_start":p.get("game_start"),
+                "home_team":p.get("home_team"),"away_team":p.get("away_team"),"market":market,
+                "edge_votes":[],"edge_sources":[],"system_labels":[],"stat_selector_support":[],
+                "stat_selector_live_status":"BACKGROUND_REUSE_OR_UNAVAILABLE","independent_mechanisms":0,
+                "independence_keys":[],"shadow_evidence_status":"BACKGROUND_REUSE_OR_UNAVAILABLE",
+                "shadow_evidence_only":True,"betting_decision_authority":False,"automatic_execution":False,
+            }
+            backend_fields={
+                "market_backend":"UTILS",
+                "current_market_source":str(backend_meta.get("raw_table") or "sharp_moves_master"),
+                "market_rich_source":str(backend_meta.get("enriched_table") or "moves_with_features_merged"),
+                "market_backend_source_tag":backend_meta.get("source_tag"),
+                "utils_path":backend_meta.get("utils_path"),
+            }
+            if base is None:
+                out.append({**common,**backend_fields,"action":"NO MARKET","decision":"NO MARKET"})
+                continue
+            qt=pd.to_datetime(base.get("quote_timestamp"),utc=True,errors="coerce")
+            base["quote_age_minutes"]=None if pd.isna(qt) else max(0.0,(pd.to_datetime(now,utc=True)-qt).total_seconds()/60.0)
+            rich=mb.rich_for_selection(snapshot,game_start=p.get("game_start"),home_team=p.get("home_team"),away_team=p.get("away_team"),market=market,selected=base.get("selected"))
+            out.append({**common,**backend_fields,**base,**rich,"action":"MODEL ONLY","decision":"MODEL_ONLY_PRE_POLICY"})
+    return out
+
+
+def _bg_reuse_prior_shadow(rows, prior_rows):
+    """Carry forward only diagnostics that do not control MODEL -> ACTION."""
+    prior={(str(r.get("prediction_pair_id") or ""),str(r.get("market") or "").upper()):r for r in (prior_rows or [])}
+    copy_fields=(
+        "edge_sources","edge_votes","system_labels","stat_selector_support","stat_selector_live_status",
+        "independent_mechanisms","independence_keys","edge_contract_sha256","shadow_edge_action",
+        "shadow_edge_decision","shadow_evidence_status",
+    )
+    out=[]
+    for src in rows or []:
+        r=dict(src); old=prior.get((str(r.get("prediction_pair_id") or ""),str(r.get("market") or "").upper()))
+        if old:
+            for k in copy_fields:
+                if k in old: r[k]=old.get(k)
+            r["shadow_evidence_status"]="REUSED_FROM_LAST_WEEKLY_OR_RESEARCH_REFRESH"
+        out.append(r)
+    return out
+
+
+def run_background_live_market_refresh(*, bq_client, storage_client, bucket_name="sharp-models", live_market_rows=None, log_func=print, now=None):
+    """Refresh NFL recommendations from new quotes without running Weekly Update.
+
+    This function is safe to call from the normal odds scanner on every NFL scan.
+    It never retrains, never refreshes the challenger, never changes the frozen
+    policy, and never promotes a model.  It only reapplies the frozen policy to
+    the newest executable market and overwrites the dashboard's current snapshot.
+    """
+    import pandas as pd
+    now=pd.Timestamp.now(tz="UTC") if now is None else pd.to_datetime(now,utc=True)
+    auth=load_component("nfl_model_authority_v26")
+    mb=load_component("nfl_market_backend_v261")
+    preds,pred_meta=_bg_prediction_rows(bq_client,storage_client,bucket_name,now)
+    if not preds:
+        result={"status":"NFL_BACKGROUND_LIVE_REFRESH_NO_PREDICTIONS","source_tag":NFL_BACKGROUND_LIVE_REFRESH_TAG,**pred_meta}
+        log_func("[NFL-BACKGROUND-LIVE-REFRESH] "+json.dumps(result,sort_keys=True,default=str))
+        return result
+
+    prior_state=auth.read_dashboard_state(storage_client=storage_client,bucket_name=bucket_name)
+    prior_cur=(prior_state or {}).get("current") or {}
+    snapshot=mb.build_market_snapshot(bq_client=bq_client,now=now)
+    snapshot,overlay_rows=_bg_overlay_current_quotes(snapshot,live_market_rows,now)
+    rows=_bg_authoritative_rows_from_snapshot(preds,snapshot,now)
+    rows=_bg_reuse_prior_shadow(rows,prior_cur.get("live_rows") or [])
+    contract=auth.load_contract(storage_client=storage_client,bucket_name=bucket_name)
+    rows=auth.apply_model_authority_rows(rows,contract)
+    actions=("BET","PASS","MODEL ONLY","EDGE — NO EXEC QUOTE","NO MARKET")
+    counts={a:sum(1 for r in rows if r.get("action")==a) for a in actions}
+    state={
+        "status":"NFL_MODEL_AUTHORITY_V2_6_BACKGROUND_LIVE_ACTIVE",
+        "source_tag":auth.SOURCE_TAG,
+        "generated_at_utc":now.isoformat(),
+        "contract":contract,
+        "live_rows":rows,
+        "action_counts":counts,
+        "capture":prior_cur.get("capture") or {},
+        "settlement":prior_cur.get("settlement") or {},
+        "live_performance":prior_cur.get("live_performance") or {},
+        "betting_authority":"FROZEN_PRODUCTION_MODEL_ONLY",
+        "shadow_evidence_role":"REUSED_STATIC_DIAGNOSTICS_MARKET_STATE_RECOMPUTED",
+        "automatic_execution":False,
+        "background_refresh":{
+            "source_tag":NFL_BACKGROUND_LIVE_REFRESH_TAG,
+            "mode":"MARKET_ONLY_NO_MODEL_REFIT",
+            "frozen_prediction_games":len(preds),
+            "current_scanner_overlay_rows":overlay_rows,
+            "market_backend_meta":snapshot.get("meta") or {},
+            "weekly_update_required_for_new_fair_values":True,
+        },
+    }
+    state["current_uri"]=auth._write_json(storage_client,bucket_name,auth.CURRENT_OBJECT,state)
+    result={
+        "status":"NFL_BACKGROUND_LIVE_REFRESH_PASS","source_tag":NFL_BACKGROUND_LIVE_REFRESH_TAG,
+        "prediction_games":len(preds),"live_rows":len(rows),"action_counts":counts,
+        "overlay_rows":overlay_rows,"current_uri":state["current_uri"],
+        "automatic_promotion":False,"model_refit":False,"challenger_refresh":False,
+    }
+    log_func("[NFL-BACKGROUND-LIVE-REFRESH] "+json.dumps(result,sort_keys=True,default=str))
+    return result
 
 
 # Files made obsolete by this consolidated engine. The cleanup command is intentionally

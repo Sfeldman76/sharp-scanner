@@ -148,6 +148,39 @@ def settle_ncaaf_production_v1(client=None) -> dict:
         logging.exception("[NCAAF-PROD-V1-SETTLEMENT] failed")
         return {"status":"ERROR","error":f"{type(exc).__name__}:{exc}","settled":0}
 
+
+def refresh_nfl_production_live_market(df_scan: pd.DataFrame, client=None) -> dict:
+    """Background NFL market-only refresh driven by the normal odds scanner.
+
+    Reuses fair values already produced by NFL Production — Weekly Update. It
+    never refits the model, refreshes the challenger, changes the frozen betting
+    policy, or promotes anything. The current scanner cycle is overlaid directly
+    so the dashboard recommendation can react to a line change without waiting
+    for another Weekly Update or for BigQuery persistence of this exact cycle.
+    """
+    if str(os.getenv("NFL_BACKGROUND_LIVE_REFRESH_ENABLED","1")).lower().strip() in ("0","false","no","off"):
+        return {"status":"DISABLED"}
+    try:
+        import nfl_engine
+        from google.cloud import storage as _gcs_storage
+        _client=client or bq_client
+        result=nfl_engine.run_background_live_market_refresh(
+            bq_client=_client,
+            storage_client=_gcs_storage.Client(),
+            bucket_name=GCS_BUCKET,
+            live_market_rows=df_scan,
+            log_func=logging.info,
+        )
+        logging.info(
+            "[NFL-BACKGROUND-LIVE-REFRESH-HOOK] status=%s prediction_games=%s live_rows=%s overlay_rows=%s",
+            result.get("status"),result.get("prediction_games"),result.get("live_rows"),result.get("overlay_rows")
+        )
+        return result
+    except Exception as exc:
+        # Odds collection must continue even if the recommendation refresh fails.
+        logging.exception("[NFL-BACKGROUND-LIVE-REFRESH-HOOK] failed")
+        return {"status":"ERROR","error":f"{type(exc).__name__}:{exc}"}
+
 # V13.3.11 forward-shadow ledger.  These tables are append-only research
 # evidence.  The exact fitted artifact identity (SHA256), not the human version
 # string, is the primary model-instance key.
@@ -19639,6 +19672,7 @@ def detect_sharp_moves(
 
     # Settle previously locked Production V1 picks even on an empty-odds scan.
     _is_ncaaf=str(sport_label or "").upper().strip()=="NCAAF" or str(sport_key or "").lower().strip() in ("ncaaf","americanfootball_ncaaf")
+    _is_nfl=str(sport_label or "").upper().strip()=="NFL" or str(sport_key or "").lower().strip() in ("nfl","americanfootball_nfl")
     if _is_ncaaf:
         _settled_v1=settle_ncaaf_production_v1()
         logging.info("[NCAAF-PROD-V1-BACKGROUND-SETTLEMENT] status=%s settled=%d",
@@ -20162,6 +20196,18 @@ def detect_sharp_moves(
         df_scored = pd.DataFrame()
         summary_df = pd.DataFrame()
     
+    # NFL V3.1: refresh MODEL -> ACTION on every normal odds scan.  Use the
+    # scored frame when available, otherwise the normalized current market frame;
+    # recommendation freshness must not depend on a legacy scoring model.
+    if _is_nfl:
+        try:
+            _nfl_refresh_input = df_scored if df_scored is not None and not df_scored.empty else df
+            _nfl_live=refresh_nfl_production_live_market(_nfl_refresh_input)
+            if df_scored is not None and not df_scored.empty:
+                df_scored['NFL_Background_Live_Refresh_Status']=str(_nfl_live.get('status','UNKNOWN'))
+        except Exception:
+            logging.exception("[NFL-BACKGROUND-LIVE-REFRESH-HOOK] terminal hook failed")
+
     logging.info("⏱ detect TOTAL %s: %.2fs", _sport_label or _sport_key, time.perf_counter() - _detect_started)
     return df_scored, snaps, summary_df
 

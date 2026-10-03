@@ -1,0 +1,19 @@
+{
+  "status": "PASS",
+  "source_tag": "ncaaf-research-v2.1-price-aware-h2h-sparse-stat-20261003",
+  "families": [
+    "MARKET_MICROSTRUCTURE",
+    "RUN_PASS_MATCHUP"
+  ],
+  "qvalues": [
+    0.03,
+    0.06,
+    0.20000000000000004
+  ],
+  "american_unit_profit_test": [
+    2.0,
+    0.5
+  ],
+  "h2h_price_gate": "OBSERVED_TEAM_AND_OPPONENT_ML_ONLY",
+  "confirmation_gate": "BOTH_2024_AND_2025"
+}
