@@ -1,147 +1,137 @@
 {
-  "architecture": "NFL_PRODUCTION_V2_5_FOUR_LANE_MULTIDIMENSIONAL_RESEARCH",
+  "architecture": "NFL_PRODUCTION_V2_6_MODEL_AUTHORITY_FINAL_UI",
   "as_of": "2026-10-03",
-  "benchmark_only": {
-    "module": "nfl_betting_engine_v1.py",
-    "reason": "generic second-stage logistic engine failed historical betting-authority gates; retained so future sports/research do not repeat the architecture unknowingly",
-    "role": "FAILED_PROMOTION_BENCHMARK_SHADOW"
-  },
-  "operator_routes": {
-    "challenger_research": {
-      "label": "NFL Challenger Research"
+  "governing_rule": "MODEL -> ACTION. The frozen production model is the only betting-decision authority; CORE/STAT/SYSTEM/MARKET/PBP/V2.5 research can explain or challenge the model but cannot create, reverse, or escalate a wager.",
+  "automatic_wagering": false,
+  "automatic_model_promotion": false,
+  "production": {
+    "fair_value_backbones": {
+      "module": "nfl_production_v1.py",
+      "source_tag": "nfl-production-v1.1.1-publish-receipt-normalization-20261002",
+      "role": "FROZEN_PRODUCTION_MODEL"
     },
-    "historical_validation": {
-      "behavior": "audit + CORE/structured research + V2.3 STAT benchmark + residual miner + System Miner V3 + frozen PBP/EPA sidecar + V2.4 orthogonal advanced STAT + V2.5 CORE/STAT/SYSTEM/MARKET multidimensional combination matrix + dependency audit + replay + edge authority confirmation",
-      "label": "NFL Edge Authority \u2014 Historical Validation (Full Research)",
-      "market": "nfl_production_replay"
-    },
-    "system_research": {
-      "label": "NFL System Research / Miner"
-    },
-    "weekly_update": {
-      "label": "NFL Production \u2014 Weekly Update",
-      "market": "nfl_production_weekly"
-    }
-  },
-  "primary_decision_engine": {
-    "advanced_stat_v24": {
-      "advanced_roles": [
-        "CREATE",
-        "CONFIRM",
-        "VETO",
-        "SYSTEM_FILTER"
-      ],
-      "discovery": [
+    "betting_authority": {
+      "module": "nfl_model_authority_v26.py",
+      "source_tag": "nfl-model-authority-v2.6-frozen-model-bet-policy-20261003",
+      "authority": "FROZEN_PRODUCTION_MODEL_ONLY",
+      "discovery_seasons": [
         2021,
         2022,
         2023
       ],
-      "method": "FWL-style residualization of football-performance STAT features against frozen CORE features; discovery-only reliability scaling and threshold selection",
-      "module": "nfl_advanced_stat_research_v24.py",
-      "production_authority": 0,
-      "retrospective_confirmation": [
+      "confirmation_seasons": [
         2024,
         2025
       ],
-      "source_tag": "nfl-advanced-stat-v2.4-orthogonal-hidden-signal-research-20261003",
-      "target_modes": [
-        "MARKET_ORTHOGONAL",
-        "CORE_CORRECTION"
+      "prospective_seasons": [
+        2026
       ],
-      "true_prospective_confirmation": "2026 onward"
+      "threshold_rule": "FIRST_SMALLEST_PREDECLARED_MODEL_EDGE_THRESHOLD_PASS_IN_DISCOVERY_THEN_CONFIRMATION_ONLY",
+      "confirmation_reselection": false,
+      "live_action": "MODEL_EDGE_VS_CURRENT_MARKET_PLUS_EXECUTION_PRICE_GATE",
+      "strong_play_allowed": false,
+      "fail_closed": true,
+      "spread_total_live_price_gate": "OBSERVED_EXECUTION_PRICE_REQUIRED_AND_NO_WORSE_THAN_MINUS_110",
+      "h2h_live_price_gate": "OBSERVED_EXECUTION_PRICE_REQUIRED_AND_MODEL_EV_MUST_BE_POSITIVE"
     },
-    "automatic_model_promotion": false,
-    "automatic_wagering": false,
-    "live_authority_change_from_v23": "NONE_FROM_V2_4_OR_V2_5_RETROSPECTIVE_RESEARCH",
-    "mechanism_classes": [
-      "FAIR_VALUE",
-      "STAT_SELECTOR",
-      "SYSTEM",
-      "MARKET_CONFIRMATION"
-    ],
-    "method_origin": "NCAAF Production V1 edge-authority architecture, extended with NFL-specific orthogonal STAT and four-lane multidimensional combination research",
-    "module": "nfl_edge_authority_v2.py",
+    "historical_validation": {
+      "module": "nfl_production_replay_v1.py",
+      "source_tag": "nfl-production-v2.6-historical-model-authority-freeze-20261003",
+      "role": "LEAK_SAFE_REPLAY_PLUS_MODEL_AUTHORITY_FREEZE",
+      "year_2026_queried_for_policy": false
+    },
+    "live": {
+      "module": "nfl_production_live_v1.py",
+      "source_tag": "nfl-production-v2.6-live-model-authority-20261003",
+      "role": "PAIRED_LEDGER_PLUS_MODEL_ACTION_PLUS_SHADOW_ATTRIBUTION",
+      "authority_quote_path_independent_from_shadow_engine": true
+    },
+    "dashboard": {
+      "module": "sharp_line_dashboard.py",
+      "primary_view": "NFL Production V1 \u2014 Model Authority",
+      "primary_columns": [
+        "Model Action",
+        "Pick",
+        "Price",
+        "Quote Age",
+        "Market Ref",
+        "Model Fair",
+        "Model Edge",
+        "Bet Gate",
+        "Confidence",
+        "STAT",
+        "SYSTEM",
+        "MARKET",
+        "V2.5 Shadow",
+        "Reason"
+      ]
+    },
+    "job_router": "train_job.py",
+    "live_feature_parity": "nfl_live_feature_parity_v1.py"
+  },
+  "research_shadow": {
+    "edge_authority_v25": {
+      "module": "nfl_edge_authority_v2.py",
+      "source_tag": "nfl-edge-authority-v2.5-four-lane-multidimensional-research-20261003",
+      "role": "SHADOW_EVIDENCE_ONLY",
+      "betting_decision_authority": false
+    },
     "multidimensional_v25": {
-      "design": "interpretable agreement/conflict matrix; all 15 non-empty lane subsets are reported; no opaque meta-model",
-      "discovery": [
-        2021,
-        2022,
-        2023
-      ],
-      "historical_market_lane": "BASIC_OPEN_TO_CLOSE_PROXY_ONLY",
+      "module": "nfl_multidimensional_edge_v25.py",
+      "source_tag": "nfl-multidimensional-edge-v2.5-four-lane-research-20261003",
       "lanes": [
         "CORE",
         "STAT",
         "SYSTEM",
         "MARKET"
       ],
-      "module": "nfl_multidimensional_edge_v25.py",
-      "production_authority": 0,
-      "retrospective_confirmation": [
-        2024,
-        2025
-      ],
-      "rich_market_lane": "PROSPECTIVE_T60_TIMESTAMPED_BOOK_MICROSTRUCTURE",
-      "source_tag": "nfl-multidimensional-edge-v2.5-four-lane-research-20261003"
+      "role": "PROSPECTIVE_ATTRIBUTION_AND_CHALLENGER_RESEARCH_ONLY",
+      "betting_decision_authority": false
     },
-    "pbp_advanced_sidecar": {
-      "features": "EPA/success/early-down/explosive/neutral-pass/CPOE/air-yards/YAC/red-zone/sack-turnover context",
+    "advanced_stat_v24": {
+      "module": "nfl_advanced_stat_research_v24.py",
+      "source_tag": "nfl-advanced-stat-v2.4-orthogonal-hidden-signal-research-20261003",
+      "betting_decision_authority": false
+    },
+    "pbp_core2": {
       "module": "nfl_pbp_attribution_v1.py",
-      "production_authority": 0,
-      "role": "CONFIRMATION_VETO_RESEARCH_ONLY",
-      "source_tag": "nfl-pbp-attribution-v1-research-v2.0.2-frozen-core2-20261001"
+      "source_tag": "nfl-pbp-attribution-v1-research-v2.0.2-frozen-core2-20261001",
+      "role": "FROZEN_PROSPECTIVE_SHADOW",
+      "betting_decision_authority": false
     },
-    "source_tag": "nfl-edge-authority-v2.5-four-lane-multidimensional-research-20261003",
-    "system_authority_source": "AUTHORITATIVE_SYSTEM_MINER_V3_MECHANISM_FAMILY_REGISTRY",
-    "system_confirmation": [
-      2023,
-      2024,
-      2025
-    ],
-    "system_dependency_policy": "PARENT_CHILD_AND_OVERLAP_AUDIT_BEFORE_MULTI_ESCALATION",
-    "system_discovery": [
-      2017,
-      2018,
-      2019,
-      2020,
-      2021,
-      2022
-    ],
-    "v23_stat_selector": {
-      "module": "nfl_stat_selector_v23.py",
-      "source_tag": "nfl-stat-selector-v2.3-ncaaf-style-market-reliability-20261002",
-      "status": "FAILED_TO_VALIDATE_ANY_STAT_SELECTOR; RETAINED_AS_RESEARCH_BENCHMARK"
+    "legacy_betting_engine_v1": {
+      "module": "nfl_betting_engine_v1.py",
+      "source_tag": "nfl-betting-engine-v1.0-unified-decision-20261002",
+      "role": "FAILED_PROMOTION_BENCHMARK_SHADOW",
+      "betting_decision_authority": false
     }
   },
-  "production": {
-    "advanced_stat_research": "nfl_advanced_stat_research_v24.py",
-    "dashboard": "sharp_line_dashboard.py",
-    "edge_authority": "nfl_edge_authority_v2.py",
-    "fair_value_backbones": "nfl_production_v1.py",
-    "historical_validation": "nfl_production_replay_v1.py (v2.5)",
-    "job_router": "train_job.py",
-    "live_feature_parity": "nfl_live_feature_parity_v1.py",
-    "live_paired_ledger_and_edge_scoring": "nfl_production_live_v1.py (v2.5 research-aware; V2.4/V2.5 retrospective research has no live authority)",
-    "multidimensional_research": "nfl_multidimensional_edge_v25.py",
-    "shared_authority_framework": "sports_edge_authority_v1.py (V1.1 dependency-aware)",
-    "stat_selector_benchmark": "nfl_stat_selector_v23.py"
+  "operator_routes": {
+    "weekly_update": {
+      "market": "nfl_production_weekly",
+      "label": "NFL Production \u2014 Weekly Update",
+      "normal_run": true
+    },
+    "historical_validation": {
+      "market": "nfl_production_replay",
+      "label": "NFL Model Authority \u2014 Historical Validation",
+      "normal_run": false,
+      "purpose": "Run full protected research/replay and freeze or re-read the V2.6 model-authority contract without using 2026 for selection."
+    },
+    "challenger_research": {
+      "label": "NFL Challenger Research"
+    },
+    "system_research": {
+      "label": "NFL System Research / Miner"
+    }
   },
-  "research_preserved": [
-    "nfl_research_engine_v2.py",
-    "nfl_system_lab_v3.py",
-    "nfl_market_shadow_v1.py",
-    "nfl_residual_miner_v2.py",
-    "nfl_system_shadow_v1.py",
-    "nfl_system_shadow_v2.py",
-    "nfl_pbp_foundation_v1.py",
-    "nfl_pbp_attribution_v1.py"
-  ],
-  "shared_standard": {
-    "document": "SPORTS_EDGE_AUTHORITY_STANDARD_V1.md",
-    "module": "sports_edge_authority_v1.py",
-    "rule": "sport adapters change; prediction-vs-authority separation, rich-research/small-production, discovery/confirmation, family/dependency collapse, independent-mechanism counting and conflict rules do not",
-    "source_tag": "sports-edge-authority-v1.1-dependency-aware-cross-sport-standard-20261002",
-    "v24_addendum": "STAT must demonstrate incremental information after CORE, not merely repeat the same primitives; orthogonalization/residual targets are preferred research tests when CORE overlap is material.",
-    "v25_addendum": "Test CORE, STAT, SYSTEM and MARKET as explicit independent lanes and as predeclared combinations. Historical basic market movement is only a proxy; rich T-60 microstructure is prospective-only. Combination success never bypasses dependency collapse or prospective promotion."
-  }
+  "release_invariants": [
+    "A shadow/research disagreement never changes MODEL action.",
+    "A missing V2.5 live artifact does not suppress an otherwise valid MODEL action.",
+    "No market receives BET authority unless its discovery-frozen threshold passes untouched 2024-2025 confirmation.",
+    "2026 is prospective only and cannot retune the V2.6 policy.",
+    "Strong-play escalation is disabled.",
+    "Automatic wager execution is disabled.",
+    "Automatic model promotion is disabled."
+  ]
 }

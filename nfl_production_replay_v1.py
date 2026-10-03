@@ -1,4 +1,4 @@
-"""NFL Production V2.5 — historical replay + four-lane multidimensional Edge Authority validation.
+"""NFL Production V2.6 — historical replay + frozen model betting-authority policy.
 
 Purpose
 -------
@@ -20,7 +20,7 @@ moneyline when available. Neither is represented as verified executable pricing.
 
 This module is read-only with respect to BigQuery and never changes champion,
 challenger, or model-promotion authority. After generating leak-safe replay rows,
-it preserves Betting Engine V1 as a benchmark and trains/publishes the Edge Authority contract while attaching V2.5 research-only CORE + STAT + SYSTEMS + MARKET combination diagnostics using the shared NCAAF-derived family/confirmation framework. It may also publish replay artifacts to GCS.
+it preserves Betting Engine V1 and Edge Authority V2.5 as research/attribution benchmarks, then freezes a separate V2.6 betting policy whose only authority source is the frozen production model. CORE/STAT/SYSTEM/MARKET diagnostics cannot create or reverse a wager. It may also publish replay artifacts to GCS.
 """
 from __future__ import annotations
 
@@ -38,9 +38,10 @@ import pandas as pd
 import nfl_production_v1 as prod
 import nfl_betting_engine_v1 as betting
 import nfl_edge_authority_v2 as edge_v2
+import nfl_model_authority_v26 as model_auth
 from nfl_feature_audit_v1 import VIEW
 
-SOURCE_TAG = "nfl-production-v2.5-historical-four-lane-multidimensional-research-20261003"
+SOURCE_TAG = "nfl-production-v2.6-historical-model-authority-freeze-20261003"
 VALIDATION_SEASONS = (2021, 2022, 2023, 2024, 2025)
 VALIDATION_STAGE = "REGULAR"
 MARKET_COLUMNS = (
@@ -451,7 +452,7 @@ def _adaptive_vs_frozen(rows: pd.DataFrame) -> dict:
 
 
 def _publish(storage_client, bucket_name: str, report: dict, rows: pd.DataFrame) -> dict:
-    stable_report = {k:v for k,v in report.items() if k not in ("generated_at_utc","artifacts","betting_engine","betting_engine_v1_benchmark","edge_authority_v2")}
+    stable_report = {k:v for k,v in report.items() if k not in ("generated_at_utc","artifacts","betting_engine","betting_engine_v1_benchmark","edge_authority_v2","edge_authority_v2_shadow","model_authority_v26")}
     digest = _sha_obj({"source_tag":SOURCE_TAG,"contract":prod.production_contract()["contract_sha256"],"report":stable_report})
     prefix = f"{ARTIFACT_PREFIX}/{digest[:16]}"
     report_name = f"{prefix}/report.json"
@@ -472,7 +473,7 @@ def run_nfl_production_historical_replay(*, bq_client, storage_client=None, buck
         "production_contract_sha256":contract["contract_sha256"], "production_feature_count":len(prod.PRODUCTION_FEATURES),
         "validation_seasons":list(VALIDATION_SEASONS), "validation_stage":VALIDATION_STAGE,
         "cadence":"FROZEN_SEASON_CONTROL_VS_WEEKLY_ADAPTIVE_CHALLENGER",
-        "production_authority":0, "betting_decision_authority":False, "automatic_promotion":False,
+        "production_authority":"FROZEN_MODEL_POLICY_PENDING", "betting_decision_authority":False, "automatic_promotion":False,
     }, sort_keys=True))
     games = _load_games(bq_client)
     replay, weeks = _make_replay_rows(games, log_func=log_func)
@@ -495,8 +496,10 @@ def run_nfl_production_historical_replay(*, bq_client, storage_client=None, buck
 
     betting_meta = {}
     edge_meta = {}
+    model_auth_meta = {}
     if storage_client is not None:
-        # V1 remains a frozen benchmark/shadow. V2 is the primary authority research path.
+        # V1 Betting Engine and V2.5 Edge Authority remain benchmark/evidence layers.
+        # V2.6 freezes betting authority from the production model itself.
         betting_meta = betting.train_publish_engine(
             bq_client=bq_client, storage_client=storage_client, bucket_name=bucket_name,
             replay_rows=replay, games=games, log_func=log_func,
@@ -505,6 +508,9 @@ def run_nfl_production_historical_replay(*, bq_client, storage_client=None, buck
             bq_client=bq_client, storage_client=storage_client, bucket_name=bucket_name,
             replay_rows=replay, games=games, research_report=research_report,
             system_report=system_report, log_func=log_func,
+        )
+        model_auth_meta = model_auth.train_publish_model_authority(
+            replay_rows=replay, storage_client=storage_client, bucket_name=bucket_name, log_func=log_func,
         )
 
     report = {
@@ -519,11 +525,14 @@ def run_nfl_production_historical_replay(*, bq_client, storage_client=None, buck
         "week_cutoffs":weeks,
         "leakage_contract":"Each validation week is scored before its first game; adaptive training max Game_Date is strictly earlier than that cutoff. Frozen control is trained only on seasons before the validation season.",
         "market_reference_policy":"Historical opening and closing lines/prices are source-provided retrospective references only; no independently verified executable-price or historical CLV claim.",
-        "production_authority":0, "betting_decision_authority":False, "automatic_promotion":False,
+        "production_authority":"FROZEN_PRODUCTION_MODEL_ONLY",
+        "betting_decision_authority":bool(any(bool((x or {}).get("production_authority")) for x in (model_auth_meta.get("markets") or {}).values())),
+        "automatic_promotion":False,
         "live_paired_ledger":"SEPARATE_AND_CONTINUES_UNCHANGED",
-        "systems":"EDGE_AUTHORITY_V2_COUNTS_ONE_VOTE_PER_INDEPENDENT_MECHANISM_FAMILY; ALIASES_DO_NOT_INFLATE_AUTHORITY",
+        "systems":"SHADOW_EVIDENCE_ONLY; SYSTEMS_CANNOT_CREATE_REVERSE_OR_ESCALATE_A_BET",
         "betting_engine_v1_benchmark":betting_meta,
-        "edge_authority_v2":edge_meta,
+        "edge_authority_v2_shadow":edge_meta,
+        "model_authority_v26":model_auth_meta,
         "research_diagnostics": {
             "research_status": (research_report or {}).get("status") if isinstance(research_report,dict) else None,
             "system_status": (system_report or {}).get("status") if isinstance(system_report,dict) else None,
@@ -538,13 +547,15 @@ def run_nfl_production_historical_replay(*, bq_client, storage_client=None, buck
         "status":report["status"], "source_tag":SOURCE_TAG, "weeks":report["weeks"], "prediction_games":report["prediction_games"],
         "adaptive_vs_frozen":compare, "artifacts":pub,
         "betting_engine_v1_benchmark_status":betting_meta.get("status"),
-        "edge_authority_v2_status":edge_meta.get("status"),
-        "edge_authority_v2_markets":edge_meta.get("markets",{}),
+        "edge_authority_v2_shadow_status":edge_meta.get("status"),
         "multidimensional_research_contract_sha256":edge_meta.get("multidimensional_research_contract_sha256"),
+        "model_authority_v26_status":model_auth_meta.get("status"),
+        "model_authority_v26_contract_sha256":model_auth_meta.get("contract_sha256"),
+        "model_authority_v26_markets":model_auth_meta.get("markets",{}),
         "research_diagnostics":report.get("research_diagnostics",{}),
         "current_report_uri":report.get("current_report_uri"),
-        "production_authority":0, "automatic_promotion":False,
-        "next_step":"REVIEW V2.5 FOUR-LANE COMBINATION RESULTS; THEN FREEZE SURVIVORS BEFORE 2026 PROSPECTIVE USE",
+        "production_authority":"FROZEN_PRODUCTION_MODEL_ONLY", "automatic_promotion":False,
+        "next_step":"RUN NFL PRODUCTION — WEEKLY UPDATE; FINAL UI USES MODEL -> ACTION AND SHADOW LANES FOR ATTRIBUTION ONLY",
     }, sort_keys=True, default=str))
     return report
 

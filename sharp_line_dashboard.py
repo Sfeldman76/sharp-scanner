@@ -46884,6 +46884,18 @@ def _nfl_edge_authority_v2_state_cached():
         return {"status":"UNAVAILABLE","error":f"{type(e).__name__}:{e}"}
 
 
+@st.cache_data(ttl=60,show_spinner=False)
+def _nfl_model_authority_v26_state_cached():
+    try:
+        import nfl_model_authority_v26 as _ma
+        if getattr(_ma,"SOURCE_TAG","") != "nfl-model-authority-v2.6-frozen-model-bet-policy-20261003":
+            return {"status":"STALE_MODEL_AUTHORITY_V26_MODULE"}
+        return _ma.read_dashboard_state(storage_client=storage.Client(),bucket_name=GCS_BUCKET)
+    except Exception as e:
+        logging.warning("[NFL-MODEL-AUTH-V26-UI] state unavailable: %s:%s",type(e).__name__,e)
+        return {"status":"UNAVAILABLE","error":f"{type(e).__name__}:{e}"}
+
+
 @st.cache_data(ttl=300,show_spinner=False)
 def _nfl_betting_engine_v1_benchmark_cached():
     try:
@@ -46912,266 +46924,153 @@ def _nfl_be_num(x,dec=2):
 
 
 def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
-    """Primary NFL Edge Authority V2.5 panel; Betting Engine V1 is benchmark-only."""
-    state=_nfl_edge_authority_v2_state_cached()
-    if not isinstance(state,dict) or state.get("status") in ("UNAVAILABLE","STALE_EDGE_AUTHORITY_V2_MODULE"):
-        st.info("NFL Edge Authority V2.5 is not available yet. Run NFL Edge Authority — Historical Validation, then Weekly Update.")
+    """Final NFL betting screen: frozen production model -> action.
+
+    V2.5 CORE/STAT/SYSTEM/MARKET evidence is attribution/shadow only. It can
+    explain or challenge a model bet, but it cannot create, reverse or escalate
+    the betting action.
+    """
+    state=_nfl_model_authority_v26_state_cached()
+    if not isinstance(state,dict) or state.get("status") in ("UNAVAILABLE","STALE_MODEL_AUTHORITY_V26_MODULE"):
+        st.info("NFL Model Authority V2.6 is not available yet. Run NFL Model Authority — Historical Validation once, then NFL Production — Weekly Update.")
         return
     meta=state.get("meta") or {}; cur=state.get("current") or {}
     if not meta:
-        st.info("NFL Edge Authority V2.5 has not been frozen yet. Run NFL Edge Authority — Historical Validation once.")
+        st.info("NFL Model Authority V2.6 has not been frozen yet. Run NFL Model Authority — Historical Validation once; 2021-2023 selects the model gate and 2024-2025 only confirms it.")
         return
 
-    st.subheader("NFL Edge Authority V2.5")
+    st.subheader("NFL Production V1 — Model Authority")
     st.caption(
-        "Shared NCAAF-derived authority architecture: frozen fair-value predictions stay separate from betting authority. V2.5 adds a research-only four-lane multidimensional matrix across CORE + advanced STAT + SYSTEMS + MARKET while preserving the existing frozen betting authority. "
-        "Historical MARKET is explicitly an opening-to-close proxy; rich T-60 microstructure remains prospective-only. FAIR_VALUE, STAT_SELECTOR, SYSTEM, and MARKET_CONFIRMATION mechanisms are validated independently, aliases collapse to one family/vote, "
-        "opposing validated mechanisms force PASS — CONFLICT, and only independently confirmed mechanisms can create PLAY/STRONG PLAY. "
-        "2026 remains prospective. Betting Engine V1 is retained only as a benchmark/shadow."
+        "MODEL → ACTION is authoritative. The frozen production model chooses the side/total, and a frozen model-edge threshold plus current-price gate decides BET or PASS. "
+        "STAT, SYSTEM, MARKET and the V2.5 multidimensional resolver are shadow evidence only: they are shown for attribution and prospective research but cannot create, reverse, or strengthen a wager. 2026 is prospective and is not used to retune the frozen policy."
     )
 
-    markets=meta.get("markets") or {}; liveperf=cur.get("live_performance") or {}
+    markets=meta.get("markets") or {}; perf=cur.get("live_performance") or {}
     cards=st.columns(4)
     for i,m in enumerate(("SPREADS","H2H","TOTALS")):
-        mc=markets.get(m) or {}; hp=((meta.get("historical_action_performance") or {}).get(m) or {}).get("confirmation") or {}; allp=hp.get("ALL") or {}
+        mc=markets.get(m) or {}; th=mc.get("threshold")
         with cards[i]:
-            st.metric(m.title(), "EDGE ACTIVE" if mc.get("production_authority") else "MODEL ONLY")
-            st.caption(f"Families {len(mc.get('legit_family_ids') or [])} | confirm {allp.get('wins',0)}-{allp.get('losses',0)} | ROI {_nfl_be_pct(allp.get('roi_per_unit'))}")
+            st.metric(m.title(), "BET AUTHORITY" if mc.get("production_authority") else "MODEL ONLY")
+            unit=" pts" if m!="H2H" else " prob"
+            th_txt="—" if th is None else (f"{float(th):.1f}{unit}" if m!="H2H" else f"{100*float(th):.1f}% edge")
+            c=mc.get("confirmation") or {}
+            st.caption(f"Gate {th_txt} | confirm {c.get('wins',0)}-{c.get('losses',0)} | ROI {_nfl_be_pct(c.get('roi_per_unit'))}")
     with cards[3]:
-        lp=liveperf.get("ALL") or {}
-        st.metric("Live edge record",f"{lp.get('wins',0)}-{lp.get('losses',0)}-{lp.get('pushes',0)}")
-        st.caption(f"Prospective ROI {_nfl_be_pct(lp.get('roi_per_unit'))} | {lp.get('n',0)} settled")
+        lp=perf.get("ALL") or {}
+        st.metric("Prospective model bets",f"{lp.get('wins',0)}-{lp.get('losses',0)}-{lp.get('pushes',0)}")
+        st.caption(f"ROI {_nfl_be_pct(lp.get('roi_per_unit'))} | {lp.get('n',0)} settled")
 
-    fam_rows=[]
-    for f in meta.get("families") or []:
-        d=f.get("discovery") or {}; c=f.get("confirmation") or {}; gate=f.get("confirmation_gate") or {}
-        fam_rows.append({
-            "Market":f.get("market"),"Mechanism":f.get("mechanism_class"),"Family":f.get("mechanism_family_id"),
-            "Representative":f.get("variant_id"),"Independence Key":f.get("independence_key"),
-            "Threshold":f.get("threshold"),"Core Gap Min":f.get("core_gap_min"),"Status":f.get("family_status"),
-            "Disc N":d.get("n",0),"Disc Hit":_nfl_be_pct(d.get("hit_rate")),"Disc ROI":_nfl_be_pct(d.get("roi_per_unit")),
-            "Confirm N":c.get("n",0),"Confirm Hit":_nfl_be_pct(c.get("hit_rate")),"Confirm ROI":_nfl_be_pct(c.get("roi_per_unit")),
-            "Gate":"PASS" if gate.get("status")=="PASS" else "HOLD",
-        })
-    with st.expander("Validated edge-family registry",expanded=False):
-        if fam_rows: st.dataframe(pd.DataFrame(fam_rows),use_container_width=True,hide_index=True)
-        st.caption("One mechanism family = one vote. Threshold variants, aliases, and nested systems cannot create artificial multi-signal support.")
+    rows=cur.get("live_rows") or []
+    if not rows:
+        st.info("No current model-authority snapshot yet. Run NFL Production — Weekly Update.")
+    else:
+        table=[]
+        for r in rows:
+            gs=pd.to_datetime(r.get("game_start"),utc=True,errors="coerce"); m=str(r.get("market") or "")
+            fair=r.get("model_value"); ref=r.get("market_value"); edge=r.get("raw_model_edge"); price=r.get("selected_price")
+            fair_txt=_nfl_be_pct(fair) if m=="H2H" else _nfl_be_num(fair)
+            ref_txt=_nfl_be_pct(ref) if m=="H2H" else _nfl_be_num(ref)
+            edge_txt=_nfl_be_pct(edge) if m=="H2H" else _nfl_be_num(edge)
+            th=r.get("model_policy_threshold")
+            th_txt="—" if th is None else (_nfl_be_pct(th) if m=="H2H" else _nfl_be_num(th))
+            stat_state=str(r.get("stat_state") or "NEUTRAL")
+            system_state=str(r.get("system_state") or "NEUTRAL")
+            market_state=str(r.get("market_state") or "NEUTRAL")
+            systems=" | ".join(map(str,r.get("system_labels") or [])) or "—"
+            table.append({
+                "Game Time":gs.tz_convert("US/Eastern").strftime("%a %I:%M %p") if pd.notna(gs) else "—",
+                "Matchup":f"{r.get('away_team','')} @ {r.get('home_team','')}",
+                "Market":m,
+                "Model Action":r.get("action"),
+                "Pick":r.get("selected") or "—",
+                "Price":_nfl_be_num(price,0),
+                "Quote Age":("—" if r.get("quote_age_minutes") is None else f"{float(r.get('quote_age_minutes')):.0f}m"),
+                "Market Ref":ref_txt,
+                "Model Fair":fair_txt,
+                "Model Edge":edge_txt,
+                "Bet Gate":th_txt,
+                "Confidence":r.get("model_confidence") or "—",
+                "STAT":stat_state,
+                "SYSTEM":system_state,
+                "MARKET":market_state,
+                "Triggered Systems":systems,
+                "V2.5 Shadow":r.get("shadow_edge_action") or "—",
+                "Reason":r.get("decision_reason") or "—",
+            })
+        view=pd.DataFrame(table)
+        rank={"BET":0,"EDGE — NO EXEC QUOTE":1,"PASS":2,"MODEL ONLY":3,"NO MARKET":4}
+        view["__rank"]=view["Model Action"].map(rank).fillna(9)
+        view=view.sort_values(["__rank","Game Time","Matchup","Market"]).drop(columns="__rank")
+        counts=cur.get("action_counts") or {}
+        st.caption(
+            f"Current model snapshot: BET {counts.get('BET',0)} | PASS {counts.get('PASS',0)} | "
+            f"MODEL ONLY {counts.get('MODEL ONLY',0)} | NO EXEC QUOTE {counts.get('EDGE — NO EXEC QUOTE',0)} | NO MARKET {counts.get('NO MARKET',0)}"
+        )
+        st.dataframe(view,use_container_width=True,hide_index=True)
 
-    research=meta.get("research_summary") or {}
-    if research:
-        with st.expander("CORE / STAT / System research diagnostics",expanded=False):
-            st.caption("This is the historical research evidence behind the authority layer. CORE predicts fair value; STAT/residual families test structured corrections/selectors; System Miner searches independent situational mechanisms. None of these rows receives authority merely for appearing here.")
-            _cc=research.get("core_contract") or {}
-            if _cc:
-                _contract_rows=[]
-                for _m,_b in _cc.items():
-                    _contract_rows.append({"Market":_m,"Family":(_b or {}).get("family"),"Target":(_b or {}).get("target"),"Features":", ".join((_b or {}).get("features") or []),"Ridge α":(_b or {}).get("ridge_alpha"),"Logistic C":(_b or {}).get("logistic_C")})
-                st.markdown("**Frozen CORE contract**")
-                st.dataframe(pd.DataFrame(_contract_rows),use_container_width=True,hide_index=True)
-            core_rows=[]
-            for _m,_block in (research.get("core") or {}).items():
-                _overall=(_block or {}).get("overall") or {}
-                core_rows.append({"Market":_m,"Model":"FROZEN CORE","N":_overall.get("n"),"MAE":_overall.get("mae"),"RMSE":_overall.get("rmse"),"Corr":_overall.get("corr"),"AUC":_overall.get("auc"),"Log Loss":_overall.get("log_loss"),"Brier":_overall.get("brier")})
-            for _m,_models in (research.get("core_challengers") or {}).items():
-                for _name,_met in (_models or {}).items():
-                    core_rows.append({"Market":str(_m).upper(),"Model":_name,"N":(_met or {}).get("n"),"MAE":(_met or {}).get("mae"),"RMSE":(_met or {}).get("rmse"),"Corr":(_met or {}).get("corr"),"AUC":(_met or {}).get("auc"),"Log Loss":(_met or {}).get("log_loss"),"Brier":(_met or {}).get("brier"),"Δ MAE vs CORE":(_met or {}).get("mae_improvement_vs_baseline")})
-            if core_rows:
-                st.markdown("**CORE and independent CORE challengers**")
-                st.dataframe(pd.DataFrame(core_rows),use_container_width=True,hide_index=True)
-
-            stat_rows=[]
-            for _m,_block in (research.get("stat") or {}).items():
-                _selected=set((_block or {}).get("selected_families") or [])
-                for _fam,_met in ((_block or {}).get("families") or {}).items():
-                    _met=_met or {}
-                    _ys=_met.get("by_season") or {}
-                    stat_rows.append({"Market":_m,"Family":_fam,"Selected":_fam in _selected,"N":_met.get("n"),"MAE":_met.get("mae"),"RMSE":_met.get("rmse"),"Δ MAE":_met.get("mae_improvement_vs_baseline"),"Weighted Improvement":_ys.get("weighted_improvement"),"Positive Seasons":_ys.get("positive_seasons"),"Season Count":_ys.get("season_count"),"Latest Δ":_ys.get("last_season_improvement")})
-            if stat_rows:
-                st.markdown("**STAT / structured residual families**")
-                st.dataframe(pd.DataFrame(stat_rows),use_container_width=True,hide_index=True)
-
-            _sv23=research.get("stat_selector_v23") or {}
-            _selector_rows=[]
-            _selector_top=[]
-            for _m,_block in ((_sv23.get("markets") or {}).items()):
-                for _c in ((_block or {}).get("preregistered") or []):
-                    _d=(_c or {}).get("discovery") or {}; _v=(_c or {}).get("confirmation") or {}
-                    _selector_rows.append({
-                        "Market":_m,"Rank":(_c or {}).get("preregistered_rank"),"STAT Family":(_c or {}).get("family"),
-                        "Dependency Group":(_c or {}).get("dependency_group"),"Ridge α":(_c or {}).get("alpha"),
-                        "Scaled Threshold":(_c or {}).get("selector_threshold"),"CORE Gap Min":(_c or {}).get("core_gap_min"),
-                        "Disc N":_d.get("n"),"Disc Hit":_nfl_be_pct(_d.get("hit_rate")),"Disc ROI":_nfl_be_pct(_d.get("roi_per_unit")),
-                        "Confirm N":_v.get("n"),"Confirm Hit":_nfl_be_pct(_v.get("hit_rate")),"Confirm ROI":_nfl_be_pct(_v.get("roi_per_unit")),
-                        "Discovery Gate":((_c or {}).get("discovery_gate") or {}).get("status"),
-                        "Confirmation Gate":((_c or {}).get("confirmation_gate") or {}).get("status"),
-                        "Status":(_c or {}).get("status"),
-                    })
-                for _i,_c in enumerate(((_block or {}).get("top_discovery_representatives") or [])[:8],start=1):
-                    _d=(_c or {}).get("discovery") or {}
-                    _selector_top.append({
-                        "Market":_m,"Discovery Rank":_i,"STAT Family":(_c or {}).get("family"),
-                        "Dependency Group":(_c or {}).get("dependency_group"),"Ridge α":(_c or {}).get("alpha"),
-                        "Scaled Threshold":(_c or {}).get("selector_threshold"),"CORE Gap Min":(_c or {}).get("core_gap_min"),
-                        "N":_d.get("n"),"Hit":_nfl_be_pct(_d.get("hit_rate")),"ROI":_nfl_be_pct(_d.get("roi_per_unit")),
-                        "Gate":((_c or {}).get("discovery_gate") or {}).get("status"),
-                    })
-            if _selector_rows or _selector_top:
-                st.markdown("**NCAAF-style STAT edge selectors**")
-                st.caption("These models predict market residual reliability, not the final score. 2021–2023 fixes family/alpha/strength/CORE-gap representatives; 2024–2025 only validates those frozen definitions. All validated STAT selectors count as one STAT mechanism.")
-                if _selector_rows:
-                    st.dataframe(pd.DataFrame(_selector_rows),use_container_width=True,hide_index=True)
-                if _selector_top:
-                    with st.expander("Top discovery-only STAT family representatives",expanded=False):
-                        st.dataframe(pd.DataFrame(_selector_top),use_container_width=True,hide_index=True)
-
-            _sv24=research.get("advanced_stat_v24") or {}
-            _v24_rows=[]
-            for _m,_block in ((_sv24.get("markets") or {}).items()):
-                for _f in ((_block or {}).get("families") or []):
-                    _d=(_f or {}).get("discovery") or {}; _c=(_f or {}).get("confirmation") or {}
-                    _ci=(_f or {}).get("core_interaction") or {}; _cc=(_ci.get("CONFIRMATION") or {})
-                    _si=(_f or {}).get("system_interaction") or {}; _sc=(_si.get("CONFIRMATION") or {})
-                    _v24_rows.append({
-                        "Market":_m,"Target Lane":(_f or {}).get("target_mode"),"Advanced Family":(_f or {}).get("family"),"Class":(_f or {}).get("classification"),
-                        "Ridge α":(_f or {}).get("alpha"),"Reliability β":(_f or {}).get("reliability_beta"),
-                        "Threshold":((_f or {}).get("selected_threshold") or {}).get("label"),
-                        "Disc N":_d.get("n"),"Disc Hit":_nfl_be_pct(_d.get("hit_rate")),"Disc ROI":_nfl_be_pct(_d.get("roi_per_unit")),
-                        "Confirm N":_c.get("n"),"Confirm Hit":_nfl_be_pct(_c.get("hit_rate")),"Confirm ROI":_nfl_be_pct(_c.get("roi_per_unit")),
-                        "CORE+STAT agree":_nfl_be_pct((_cc.get("CORE_WHEN_STAT_AGREES") or {}).get("hit_rate")),
-                        "CORE+STAT conflict":_nfl_be_pct((_cc.get("CORE_WHEN_STAT_CONFLICTS") or {}).get("hit_rate")),
-                        "Corrected CORE":_nfl_be_pct((_cc.get("CORE_PLUS_STAT_CORRECTION") or {}).get("hit_rate")),
-                        "Systems+STAT agree":_nfl_be_pct((_sc.get("SYSTEM_STAT_AGREE") or {}).get("hit_rate")),
-                        "Systems+STAT conflict":_nfl_be_pct((_sc.get("SYSTEM_STAT_CONFLICT") or {}).get("hit_rate")),
-                    })
-            if _v24_rows:
-                st.markdown("**V2.4 orthogonal advanced STAT research — research only**")
-                st.caption("Football-performance features are residualized against the frozen CORE feature set. MARKET_ORTHOGONAL asks what market error remains after CORE; CORE_CORRECTION asks what outcome error CORE itself leaves unexplained. Situational CORE-like families are excluded. Results are retrospective research only; no V2.4 result can create live authority until separately frozen and prospectively tested.")
-                st.dataframe(pd.DataFrame(_v24_rows),use_container_width=True,hide_index=True)
-
-            _mv25=research.get("multidimensional_edge_v25") or {}
-            _combo_rows=[]
-            _state_rows=[]
-            for _m,_block in ((_mv25.get("markets") or {}).items()):
-                for _c in ((_block or {}).get("combinations") or []):
-                    _d=(_c or {}).get("discovery") or {}; _v=(_c or {}).get("confirmation") or {}
-                    _combo_rows.append({
-                        "Market":_m,"Combination":(_c or {}).get("combo"),"Lanes":(_c or {}).get("lane_count"),"Class":(_c or {}).get("classification"),
-                        "Disc N":_d.get("n"),"Disc Hit":_nfl_be_pct(_d.get("hit_rate")),"Disc ROI":_nfl_be_pct(_d.get("roi_per_unit")),
-                        "Confirm N":_v.get("n"),"Confirm Hit":_nfl_be_pct(_v.get("hit_rate")),"Confirm ROI":_nfl_be_pct(_v.get("roi_per_unit")),
-                    })
-                for _x in ((_block or {}).get("exact_states") or []):
-                    if (_x or {}).get("classification")=="NO_REPEATABLE_COMBINATION_EDGE":
-                        continue
-                    _d=(_x or {}).get("discovery") or {}; _v=(_x or {}).get("confirmation") or {}
-                    _state_rows.append({
-                        "Market":_m,"STAT":(_x or {}).get("stat_state"),"SYSTEM":(_x or {}).get("system_state"),"MARKET":(_x or {}).get("market_state"),
-                        "CORE Edge":(_x or {}).get("core_edge_bucket"),"Class":(_x or {}).get("classification"),
-                        "Disc N":_d.get("n"),"Disc Hit":_nfl_be_pct(_d.get("hit_rate")),"Disc ROI":_nfl_be_pct(_d.get("roi_per_unit")),
-                        "Confirm N":_v.get("n"),"Confirm Hit":_nfl_be_pct(_v.get("hit_rate")),"Confirm ROI":_nfl_be_pct(_v.get("roi_per_unit")),
-                    })
-            if _combo_rows:
-                st.markdown("**V2.5 four-lane multidimensional research — CORE + STAT + SYSTEMS + MARKET**")
-                st.caption("Predeclared combinations test whether the interpretable lanes agree or conflict. 2021–2023 is discovery and 2024–2025 is retrospective confirmation. Historical MARKET uses only the available opening-to-close movement proxy; it is not a backtest of modern T-60 book microstructure. No V2.5 combination has production authority from this retrospective run.")
-                _cdf=pd.DataFrame(_combo_rows)
-                _cdf["_repeat"]=_cdf["Class"].eq("RETROSPECTIVE_REPEATABLE_REQUIRES_PROSPECTIVE")
-                _cdf=_cdf.sort_values(["_repeat","Lanes","Confirm N"],ascending=[False,False,False]).drop(columns=["_repeat"])
-                st.dataframe(_cdf,use_container_width=True,hide_index=True)
-                if _state_rows:
-                    with st.expander("Four-lane agreement / conflict state matrix",expanded=False):
-                        st.dataframe(pd.DataFrame(_state_rows),use_container_width=True,hide_index=True)
-
-            _pbp24=research.get("pbp_advanced_diagnostic_v24") or {}
-            if _pbp24:
-                _cl=_pbp24.get("classification") or {}
-                st.markdown("**Frozen PBP / EPA advanced-stat sidecar**")
-                st.caption(f"Status {_pbp24.get('status','—')} | Spread role {(_cl.get('RECOMMENDED_ROLE') or '—')} | production authority 0. EPA/success/CPOE/neutral-pass/red-zone/explosive information remains a separate confirmation-veto research lane, not a replacement model.")
-
-            _dis_rows=[]
-            for _m,_block in (research.get("core_stat_disagreement") or {}).items():
-                if _m=="production_authority" or not isinstance(_block,dict): continue
-                _same=(_block.get("core_stat_same_direction") or {}).get("same") or {}
-                _diff=(_block.get("core_stat_same_direction") or {}).get("different_or_zero") or {}
-                _dis_rows.append({"Market":str(_m).upper(),"CORE+STAT Same N":_same.get("n"),"Same-dir Correct":_nfl_be_pct(_same.get("rate")),"Other N":_diff.get("n"),"Other Correct":_nfl_be_pct(_diff.get("rate")),"Same-direction games":_block.get("same_direction_games")})
-            if _dis_rows:
-                st.markdown("**CORE × STAT disagreement diagnostics**")
-                st.dataframe(pd.DataFrame(_dis_rows),use_container_width=True,hide_index=True)
-
-            _gate_rows=[]
-            for _m,_block in (((research.get("edge_gate") or {}).get("markets") or {}).items()):
-                _cg=(_block or {}).get("core_gate_probability") or {}; _sg=(_block or {}).get("consensus_gate_probability") or {}; _fl=(_block or {}).get("fair_line_scorecard") or {}
-                _gate_rows.append({"Market":str(_m).upper(),"Fair-line MAE":_fl.get("core_mae") if _fl.get("core_mae") is not None else _fl.get("mae"),"Core Gate N":_cg.get("n"),"Core Gate AUC":_cg.get("auc"),"Core Gate Log Loss":_cg.get("log_loss"),"Consensus Gate N":_sg.get("n"),"Consensus Gate AUC":_sg.get("auc"),"Consensus Gate Log Loss":_sg.get("log_loss"),"Consensus Applicable":bool((_block or {}).get("prospective_consensus_gate_applicable"))})
-            if _gate_rows:
-                st.markdown("**Betting-edge gate diagnostics**")
-                st.dataframe(pd.DataFrame(_gate_rows),use_container_width=True,hide_index=True)
-
-            _sys=research.get("systems") or {}; _reg=_sys.get("registry") or {}; _fams=_sys.get("mechanism_families") or []; _search=_sys.get("search_summary") or {}
-            st.markdown("**Direct System Miner V3**")
-            _ss=_search.get("SPREADS") or {}; _ts=_search.get("TOTALS") or {}
-            st.caption(f"Spread search: {_ss.get('raw_tested','—')} raw → {_ss.get('unique_hypotheses','—')} unique → {_ss.get('retained_rules','—')} retained; LEGIT {len(_reg.get('spread_legit_rule_ids') or [])} • PROMISING {len(_reg.get('spread_promising_rule_ids') or [])} • WATCH {len(_reg.get('spread_watch_rule_ids') or [])}. Totals search: {_ts.get('raw_tested','—')} raw → {_ts.get('unique_hypotheses','—')} unique → {_ts.get('retained_rules','—')} retained; LEGIT {len(_reg.get('total_legit_rule_ids') or [])} • PROMISING {len(_reg.get('total_promising_rule_ids') or [])} • WATCH {len(_reg.get('total_watch_rule_ids') or [])}. Mechanism families {len(_fams)} • Prospective families {len(_reg.get('prospective_family_ids') or [])}.")
-            _sys_rows=[]
-            for _f in _fams:
-                _rr=_f.get("representative_records") or {}; _disc=_rr.get("discovery") or {}; _val=_rr.get("validation_2023_2025") or {}
-                _sys_rows.append({"Market":_f.get("market"),"Family":_f.get("system_family_id"),"Status":_f.get("family_status"),"Direction":_f.get("direction"),"Representative":_f.get("representative_rule_id"),"Discovery N":_disc.get("n"),"Discovery Rate":_nfl_be_pct(_disc.get("rate")),"Validation N":_val.get("n"),"Validation Rate":_nfl_be_pct(_val.get("rate")),"Prospective":_f.get("prospective_action")})
-            if _sys_rows:
-                st.dataframe(pd.DataFrame(_sys_rows),use_container_width=True,hide_index=True)
-
-            _dep=research.get("system_dependency_audit_v23") or meta.get("system_dependency_audit") or {}
-            _dep_rows=[]
-            for _p in (_dep.get("pairs") or []):
-                _co=(_p.get("confirmation") or {})
-                _both=_co.get("both_same_direction") or {}; _ao=_co.get("a_only") or {}; _bo=_co.get("b_only") or {}
-                _dep_rows.append({
-                    "Family A":_p.get("family_a"),"Family B":_p.get("family_b"),
-                    "Shared Conditions":", ".join(map(str,_p.get("shared_conditions") or [])) or "—",
-                    "Jaccard":_p.get("jaccard"),"Confirm Overlap N":_both.get("n"),
-                    "Overlap Hit":_nfl_be_pct(_both.get("hit_rate")),"Overlap ROI":_nfl_be_pct(_both.get("roi_per_unit")),
-                    "A-only Hit":_nfl_be_pct(_ao.get("hit_rate")),"B-only Hit":_nfl_be_pct(_bo.get("hit_rate")),
-                    "Incrementality":((_p.get("incrementality_gate") or {}).get("status")),
-                    "Independent for STRONG":bool(_p.get("independent_for_escalation")),
-                    "Reason":_p.get("dependency_reason"),
+        with st.expander("Why the model made each decision",expanded=False):
+            detail=[]
+            for r in rows:
+                m=str(r.get("market") or "")
+                detail.append({
+                    "Matchup":f"{r.get('away_team','')} @ {r.get('home_team','')}",
+                    "Market":m,
+                    "Action":r.get("action"),
+                    "Model Pick":r.get("selected"),
+                    "Model Edge":r.get("raw_model_edge"),
+                    "Frozen Gate":r.get("model_policy_threshold"),
+                    "Current Price":r.get("selected_price"),
+                    "Quote Timestamp":r.get("quote_timestamp"),
+                    "Quote Age Minutes":r.get("quote_age_minutes"),
+                    "H2H Model EV":r.get("model_live_ev"),
+                    "Decision Reason":r.get("decision_reason"),
+                    "STAT State":r.get("stat_state"),
+                    "SYSTEM State":r.get("system_state"),
+                    "MARKET State":r.get("market_state"),
+                    "V2.5 Shadow Action":r.get("shadow_edge_action"),
+                    "Shadow Sources":" | ".join(map(str,r.get("edge_sources") or [])) or "—",
                 })
-            if _dep_rows:
-                st.markdown("**System parent/child and independence audit**")
-                st.caption("Two named systems only count as two mechanisms when the overlap/parent-child audit supports genuine incrementality. Otherwise they share one independence key and cannot manufacture a STRONG PLAY.")
-                st.dataframe(pd.DataFrame(_dep_rows),use_container_width=True,hide_index=True)
+            st.dataframe(pd.DataFrame(detail),use_container_width=True,hide_index=True)
+            st.caption("Shadow disagreement is diagnostic. It never overrides the model action in V2.6.")
+
+    with st.expander("Frozen model betting-policy validation",expanded=False):
+        vrows=[]
+        for m in ("SPREADS","H2H","TOTALS"):
+            mc=markets.get(m) or {}; d=mc.get("discovery") or {}; c=mc.get("confirmation") or {}
+            vrows.append({
+                "Market":m,"Authority":"ACTIVE" if mc.get("production_authority") else "MODEL ONLY","Frozen Threshold":mc.get("threshold"),
+                "Discovery N":d.get("n"),"Discovery W-L":f"{d.get('wins',0)}-{d.get('losses',0)}","Discovery Hit":_nfl_be_pct(d.get("hit_rate")),"Discovery ROI":_nfl_be_pct(d.get("roi_per_unit")),
+                "Confirm N":c.get("n"),"Confirm W-L":f"{c.get('wins',0)}-{c.get('losses',0)}","Confirm Hit":_nfl_be_pct(c.get("hit_rate")),"Confirm ROI":_nfl_be_pct(c.get("roi_per_unit")),
+            })
+        st.dataframe(pd.DataFrame(vrows),use_container_width=True,hide_index=True)
+        st.caption("2021-2023 selects the first/smallest predeclared model-edge threshold that passes the discovery gate. 2024-2025 can only confirm or reject that frozen threshold; it cannot select a different one.")
+
+    edge_state=_nfl_edge_authority_v2_state_cached()
+    edge_meta=(edge_state.get("meta") or {}) if isinstance(edge_state,dict) else {}
+    if edge_meta:
+        with st.expander("Shadow evidence — CORE / STAT / SYSTEM / MARKET",expanded=False):
+            st.caption("Research-only attribution. No item in this section has betting-decision authority in V2.6.")
+            fam=[]
+            for f in edge_meta.get("families") or []:
+                fam.append({
+                    "Market":f.get("market"),"Mechanism":f.get("mechanism_class"),"Family":f.get("mechanism_family_id"),
+                    "Status":f.get("family_status"),"Production Influence":0,
+                    "Confirm N":(f.get("confirmation") or {}).get("n"),"Confirm Hit":_nfl_be_pct((f.get("confirmation") or {}).get("hit_rate")),
+                    "Confirm ROI":_nfl_be_pct((f.get("confirmation") or {}).get("roi_per_unit")),
+                })
+            if fam:
+                st.dataframe(pd.DataFrame(fam),use_container_width=True,hide_index=True)
+            rs=edge_meta.get("research_summary") or {}; mv=(rs.get("multidimensional_v25") or {})
+            if mv:
+                st.caption(f"V2.5 four-lane contract {mv.get('research_contract_sha256','—')} remains frozen for prospective attribution; historical rich-market backtest = false.")
 
     benchmark=_nfl_betting_engine_v1_benchmark_cached()
     bm=(benchmark.get("meta") or {}) if isinstance(benchmark,dict) else {}
     if bm:
-        with st.expander("Betting Engine V1 benchmark — failed promotion",expanded=False):
-            hist=bm.get("historical_oos") or {}; rows=[]
-            for m in ("SPREADS","H2H","TOTALS"):
-                x=hist.get(m) or {}; b=x.get("bets") or {}; rows.append({"Market":m,"Gate":x.get("authority_status"),"N":b.get("n",0),"W-L":f"{b.get('wins',0)}-{b.get('losses',0)}","ROI":_nfl_be_pct(b.get("roi_per_unit"))})
-            st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
-            st.caption("Retained deliberately so future research does not forget that the generic second-stage logistic decision model was tested and failed its authority gate.")
+        with st.expander("Legacy Betting Engine V1 benchmark",expanded=False):
+            st.caption("Retained as a failed-promotion benchmark only. It has zero betting authority and is not part of MODEL → ACTION.")
 
-    rows=cur.get("live_rows") or []
-    if not rows:
-        st.info("No current Edge Authority V2.5 snapshot yet. Run NFL Production — Weekly Update.")
-        return
-    table=[]
-    for r in rows:
-        gs=pd.to_datetime(r.get("game_start"),utc=True,errors="coerce"); m=r.get("market")
-        table.append({
-            "Game Time":gs.tz_convert("US/Eastern").strftime("%a %I:%M %p") if pd.notna(gs) else "—",
-            "Matchup":f"{r.get('away_team','')} @ {r.get('home_team','')}","Market":m,"Action":r.get("action"),"Pick":r.get("selected") or "—",
-            "Price":_nfl_be_num(r.get("selected_price"),0),"Market Ref":_nfl_be_pct(r.get("market_value")) if m=="H2H" else _nfl_be_num(r.get("market_value")),
-            "Model Fair":_nfl_be_pct(r.get("model_value")) if m=="H2H" else _nfl_be_num(r.get("model_value")),
-            "Raw Edge":_nfl_be_pct(r.get("raw_model_edge")) if m=="H2H" else _nfl_be_num(r.get("raw_model_edge")),
-            "Independent Mechs":r.get("independent_mechanisms",0),
-            "Independence Keys":" | ".join(map(str,r.get("independence_keys") or [])) or "—",
-            "Edge Sources":" | ".join(map(str,r.get("edge_sources") or [])) or "—",
-            "STAT Selector":" | ".join(
-                f"{x.get('family')} {float(x.get('selector_scaled')):.2f}x"
-                for x in (r.get("stat_selector_support") or [])
-                if x.get("qualifies") and x.get("selector_scaled") is not None
-            ) or "—",
-            "System Trigger":" | ".join(map(str,r.get("system_labels") or [])) or "—",
-        })
-    view=pd.DataFrame(table); rank={"STRONG PLAY":0,"PLAY":1,"EDGE — NO EXEC QUOTE":2,"PASS — CONFLICT":3,"MODEL ONLY":4,"NO MARKET":5}; view["__rank"]=view.Action.map(rank).fillna(6);view=view.sort_values(["__rank","Game Time","Matchup","Market"]).drop(columns="__rank")
-    counts=cur.get("action_counts") or {}
-    st.caption(f"Current Edge Authority snapshot: STRONG PLAY {counts.get('STRONG PLAY',0)} | PLAY {counts.get('PLAY',0)} | CONFLICT {counts.get('PASS — CONFLICT',0)} | MODEL ONLY {counts.get('MODEL ONLY',0)} | NO MARKET {counts.get('NO MARKET',0)}")
-    st.dataframe(view,use_container_width=True,hide_index=True)
+    print(f"[NFL-MODEL-AUTH-V26-UI] rows={len(rows)} bets={sum(1 for r in rows if r.get('action')=='BET')} authority=FROZEN_PRODUCTION_MODEL shadow_lanes=ATTRIBUTION_ONLY")
 
 def _v1350_american_break_even(odds):
     o=pd.to_numeric(odds,errors='coerce')
@@ -49713,7 +49612,7 @@ if not HEADLESS:
         _train_market_options = _nfl_primary + (_nfl_advanced if _show_nfl_advanced else [])
         _train_market_labels = {
             "nfl_production_weekly": "NFL Production — Weekly Update",
-            "nfl_production_replay": "NFL Edge Authority — Historical Validation",
+            "nfl_production_replay": "NFL Model Authority — Historical Validation",
             "nfl_production_refresh": "Advanced: Production Train / Refresh",
             "nfl_production_score": "Advanced: Production Score / Paired Ledger",
             "nfl_research_engine": "NFL Challenger Research",
@@ -49798,7 +49697,7 @@ if not HEADLESS:
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
         st.sidebar.caption(
-            "Weekly Update is the normal NFL run: verify parity, refresh/reuse the challenger only when completed-game data changed, update the paired fair-value ledger, apply Edge Authority V2.5, settle prior edge plays, update prospective edge performance, and update the promotion clock. Betting Engine V1 remains benchmark-only. No automatic wagering or automatic model promotion."
+            "Weekly Update is the normal NFL run: verify parity, refresh/reuse the challenger only when completed-game data changed, update the paired fair-value ledger, then let the frozen production model and its frozen V2.6 edge/price policy emit BET or PASS. V2.5 STAT/SYSTEM/MARKET evidence is diagnostics-only. No automatic wagering or automatic model promotion."
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_refresh":
         st.sidebar.caption(
@@ -49807,12 +49706,12 @@ if not HEADLESS:
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_replay":
         st.sidebar.caption(
-            "NFL Edge Authority Historical Validation: rebuilds the leak-safe fair-value replay, then applies the shared NCAAF-derived authority method. Discovery fixes FAIR_VALUE / STAT_SELECTOR / SYSTEM / MARKET_CONFIRMATION representatives; untouched historical confirmation decides which mechanism families may become PLAY authority. Aliases collapse to one vote, conflicts PASS, and 2026 remains prospective."
+            "NFL Model Authority Historical Validation: rebuilds the leak-safe frozen-model replay, preserves the full V2.5 research diagnostics, and freezes the model-only betting policy. 2021-2023 selects the first/smallest predeclared model-edge threshold that clears the discovery gate; 2024-2025 can only confirm or reject that frozen threshold. STAT, SYSTEM and MARKET research cannot create or override a bet, and 2026 remains prospective."
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_score":
         st.sidebar.caption(
             "NFL Production V1 Score / Paired Ledger: scores the frozen champion and latest weekly challenger on the same parity-approved live feature snapshot, then appends one immutable prospective pair per physical game. "
-            "Later challenger refreshes cannot rewrite an already-recorded game. Final results settle into a separate append-only table. This job has model-prediction authority only: no betting action and no automatic promotion."
+            "Later challenger refreshes cannot rewrite an already-recorded game. The frozen production model then applies the separately frozen V2.6 model-edge/price gate to produce BET or PASS; research lanes remain shadow-only. Final results settle append-only. No automatic wagering or automatic promotion."
         )
     if str(sport).upper().strip() == "NFL" and market_choice == "nfl_live_feature_parity":
         st.sidebar.caption(
@@ -49966,7 +49865,7 @@ if not HEADLESS:
     if str(sport).upper().strip() == "NFL":
         _nfl_train_labels = {
             "nfl_production_weekly": "Run NFL Production Weekly Update",
-            "nfl_production_replay": "Run NFL Edge Authority Historical Validation",
+            "nfl_production_replay": "Run NFL Model Authority Historical Validation",
             "nfl_production_refresh": "Advanced: Train / Refresh NFL Production V1",
             "nfl_production_score": "Advanced: Score NFL Production V1 / Update Paired Ledger",
             "nfl_audit": "Run NFL History & Champion Audit",

@@ -1,9 +1,9 @@
-"""NFL Production V2.5 — live scoring, paired ledger, Edge Authority V2.5 research-aware contract.
+"""NFL Production V2.6 — live scoring, paired ledger, frozen production-model betting authority.
 
 Purpose
 -------
 This module starts the *prospective* evidence clock for NFL Production V1.
-It does not train fair-value models or promote a challenger. Betting authority is produced only by the separately frozen Edge Authority V2.5 four-lane research-aware contract; Betting Engine V1 remains benchmark-only.
+It does not train fair-value models or promote a challenger. Betting authority comes only from the frozen production model plus its separately frozen V2.6 model-edge betting policy. Edge Authority V2.5, STAT, SYSTEM and MARKET remain evidence/attribution only and cannot create, reverse or escalate a wager.
 
 For each upcoming physical game it:
 1. Rebuilds the already-proven live Production V1 feature frame.
@@ -38,11 +38,18 @@ from google.cloud import bigquery
 import nfl_live_feature_parity_v1 as parity
 import nfl_production_v1 as prod
 import nfl_betting_engine_v1 as betting
-import nfl_edge_authority_v2 as edge_v2
+try:
+    import nfl_edge_authority_v2 as edge_v2
+    _EDGE_V2_IMPORT_ERROR = None
+except Exception as _edge_import_exc:
+    edge_v2 = None
+    _EDGE_V2_IMPORT_ERROR = f"{type(_edge_import_exc).__name__}:{_edge_import_exc}"
+import nfl_model_authority_v26 as model_auth
 
-SOURCE_TAG = "nfl-production-v2.5-live-four-lane-research-aware-20261003"
+SOURCE_TAG = "nfl-production-v2.6-live-model-authority-20261003"
 EXPECTED_PARITY_TAG = "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002"
 EXPECTED_PROD_TAG = "nfl-production-v1.1.1-publish-receipt-normalization-20261002"
+EXPECTED_EDGE_SHADOW_TAG = "nfl-edge-authority-v2.5-four-lane-multidimensional-research-20261003"
 
 PROJECT = "sharplogger"
 DATASET = "sharp_data"
@@ -611,17 +618,44 @@ def run_nfl_production_live_score(*, bq_client, storage_client, bucket_name="sha
     clock["automatic_promotion"] = False
     log_func("[NFL-PROD-V1-PROMOTION-CLOCK] " + json.dumps(clock, sort_keys=True, default=str))
 
+    # Build the authoritative MODEL -> ACTION input independently from every
+    # research/shadow artifact. A V2.5/STAT/SYSTEM failure must never suppress a
+    # production-model action when the model + current quote are otherwise valid.
     try:
-        edge_state = edge_v2.update_live_state(
-            bq_client=bq_client, storage_client=storage_client, bucket_name=bucket_name,
-            prediction_rows=prediction_rows, now=now, log_func=log_func,
+        authoritative_rows = model_auth.build_authoritative_market_rows(
+            bq_client=bq_client, prediction_rows=prediction_rows, now=now,
         )
     except Exception as exc:
-        edge_state={"status":"HOLD_EDGE_AUTHORITY_V2_ERROR","error":f"{type(exc).__name__}:{exc}","action_counts":{}}
-        log_func("[NFL-EDGE-V2-LIVE] "+json.dumps(edge_state,sort_keys=True,default=str))
+        authoritative_rows = []
+        log_func("[NFL-MODEL-AUTH-V26-MARKET-HOLD] "+json.dumps({"status":"HOLD_AUTHORITATIVE_MARKET_BUILD","error":f"{type(exc).__name__}:{exc}"},sort_keys=True,default=str))
 
-    _live_rows = edge_state.get("live_rows", []) if isinstance(edge_state, dict) else []
-    _action_counts = edge_state.get("action_counts", {}) if isinstance(edge_state, dict) else {}
+    # V2.5 remains a diagnostics-only lane. Merge only its whitelisted evidence
+    # fields; never copy its action/selection/price back into the model path.
+    try:
+        if edge_v2 is None:
+            raise RuntimeError("SHADOW_MODULE_UNAVAILABLE " + str(_EDGE_V2_IMPORT_ERROR or "UNKNOWN"))
+        if getattr(edge_v2, "SOURCE_TAG", "") != EXPECTED_EDGE_SHADOW_TAG:
+            raise RuntimeError("SHADOW_MODULE_STALE_OR_MIXED")
+        shadow_rows = edge_v2.score_live(
+            bq_client=bq_client, storage_client=storage_client, bucket_name=bucket_name,
+            prediction_rows=prediction_rows, now=now,
+        )
+    except Exception as exc:
+        shadow_rows=[]
+        log_func("[NFL-EDGE-V2-SHADOW-HOLD] "+json.dumps({"status":"HOLD_SHADOW_EVIDENCE","error":f"{type(exc).__name__}:{exc}","production_model_action_blocked":False},sort_keys=True,default=str))
+    evidence_rows = model_auth.merge_shadow_evidence(authoritative_rows, shadow_rows)
+
+    try:
+        model_state = model_auth.update_live_state(
+            bq_client=bq_client, storage_client=storage_client, bucket_name=bucket_name,
+            evidence_rows=evidence_rows, now=now, log_func=log_func,
+        )
+    except Exception as exc:
+        model_state={"status":"HOLD_MODEL_AUTHORITY_V26_ERROR","error":f"{type(exc).__name__}:{exc}","action_counts":{},"live_rows":[]}
+        log_func("[NFL-MODEL-AUTH-V26-LIVE] "+json.dumps(model_state,sort_keys=True,default=str))
+
+    _live_rows = model_state.get("live_rows", []) if isinstance(model_state, dict) else []
+    _action_counts = model_state.get("action_counts", {}) if isinstance(model_state, dict) else {}
 
     report = {
         "status": "NFL_PRODUCTION_V1_LIVE_PAIRED_LEDGER_ACTIVE",
@@ -635,17 +669,23 @@ def run_nfl_production_live_score(*, bq_client, storage_client, bucket_name="sha
         "settlement_write": settle_write,
         "promotion_clock": clock,
         "model_prediction_authority": True,
-        "betting_decision_authority": bool(any(bool((x or {}).get("production_authority")) for x in (((edge_state.get("contract") or {}).get("markets") or {}).values()))) if isinstance(edge_state, dict) else False,
+        "betting_decision_authority": bool(any(bool((x or {}).get("production_authority")) for x in (((model_state.get("contract") or {}).get("markets") or {}).values()))) if isinstance(model_state, dict) else False,
+        "betting_authority": "FROZEN_PRODUCTION_MODEL_ONLY",
         "automatic_promotion": False,
-        "edge_authority_v2": {
-            "status": edge_state.get("status"),
+        "model_authority_v26": {
+            "status": model_state.get("status"),
             "action_counts": _action_counts,
-            "live_performance": edge_state.get("live_performance",{}),
-            "current_uri": edge_state.get("current_uri"),
+            "live_performance": model_state.get("live_performance",{}),
+            "current_uri": model_state.get("current_uri"),
             "automatic_execution": False,
         },
+        "edge_authority_v2": {
+            "role":"SHADOW_EVIDENCE_ONLY",
+            "rows":len(shadow_rows),
+            "betting_decision_authority":False,
+        },
         "betting_engine_v1": {"role":"BENCHMARK_SHADOW"},
-        "next_step": "CONTINUE_WEEKLY_UPDATE_AND_ACCUMULATE_EDGE_AUTHORITY_V2_PROSPECTIVE_PERFORMANCE",
+        "next_step": "CONTINUE_WEEKLY_UPDATE; MODEL -> ACTION IS AUTHORITATIVE WHILE CORE/STAT/SYSTEM/MARKET ACCUMULATE SHADOW ATTRIBUTION",
     }
     report["status_uri"] = _write_status(storage_client, bucket_name, report)
     log_func("[NFL-PROD-V1-LIVE-CONTRACT] " + json.dumps(report, sort_keys=True, default=str))
@@ -653,7 +693,7 @@ def run_nfl_production_live_score(*, bq_client, storage_client, bucket_name="sha
 
 
 def _self_test():
-    assert SOURCE_TAG.startswith("nfl-production-v2.1-")
+    assert SOURCE_TAG.startswith("nfl-production-v2.6-")
     assert MIN_PROMOTION_SETTLED_GAMES == 60
     assert PROMOTION_REVIEW_CADENCE_DAYS == 28
     assert prod.SOURCE_TAG == EXPECTED_PROD_TAG

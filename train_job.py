@@ -585,9 +585,9 @@ def main():
             raise
         return
 
-    # NFL Edge Authority V2.5 / Production V2.5 — unified weekly production update.
+    # NFL Production V2.6 — unified weekly update with frozen production-model betting authority.
     # One operator action: parity -> challenger refresh/reuse -> paired live score
-    # -> unified betting-engine decisions/settlement -> performance/promotion clocks.
+    # -> model-authority decisions/settlement -> performance/promotion clocks.
     if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_production_weekly":
         import importlib.util
         from pathlib import Path
@@ -608,12 +608,11 @@ def main():
 
         _parity = _load_nfl_weekly_exact("nfl_live_feature_parity_v1", "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002")
         _prod = _load_nfl_weekly_exact("nfl_production_v1", "nfl-production-v1.1.1-publish-receipt-normalization-20261002")
-        _shared = _load_nfl_weekly_exact("sports_edge_authority_v1", "sports-edge-authority-v1.1-dependency-aware-cross-sport-standard-20261002")
-        _stat23 = _load_nfl_weekly_exact("nfl_stat_selector_v23", "nfl-stat-selector-v2.3-ncaaf-style-market-reliability-20261002")
-        _stat24 = _load_nfl_weekly_exact("nfl_advanced_stat_research_v24", "nfl-advanced-stat-v2.4-orthogonal-hidden-signal-research-20261003")
-        _multi25 = _load_nfl_weekly_exact("nfl_multidimensional_edge_v25", "nfl-multidimensional-edge-v2.5-four-lane-research-20261003")
-        _edge = _load_nfl_weekly_exact("nfl_edge_authority_v2", "nfl-edge-authority-v2.5-four-lane-multidimensional-research-20261003")
-        _live = _load_nfl_weekly_exact("nfl_production_live_v1", "nfl-production-v2.5-live-four-lane-research-aware-20261003")
+        # Production MODEL -> ACTION must not be blocked by a research-only module.
+        # nfl_production_live_v1 loads V2.5 shadow evidence opportunistically and
+        # fails that lane open-to-diagnostics / closed-to-authority if unavailable.
+        _modelauth = _load_nfl_weekly_exact("nfl_model_authority_v26", "nfl-model-authority-v2.6-frozen-model-bet-policy-20261003")
+        _live = _load_nfl_weekly_exact("nfl_production_live_v1", "nfl-production-v2.6-live-model-authority-20261003")
         pw.emit("audit", f"[NFL-EDGE-V2] Weekly production update start run={run_id}", pct=0.05)
         try:
             _bq=bigquery.Client(project="sharplogger")
@@ -622,13 +621,14 @@ def main():
                 raise RuntimeError("[NFL-PROD-V1-WEEKLY-HOLD] LIVE_FEATURE_PARITY_NOT_GREEN "+str(_parity_result.get("status")))
             pw.emit("train", "Parity PASS; refresh/reuse weekly challenger", pct=0.30)
             _refresh=_prod.run_nfl_production_refresh(bq_client=_bq,storage_client=gcs,bucket_name=bucket,log_func=log_func)
-            pw.emit("score", "Challenger ready; score paired ledger + Edge Authority V2.5 and performance", pct=0.65)
+            pw.emit("score", "Challenger ready; score paired ledger + frozen production-model betting authority and shadow evidence", pct=0.65)
             _score=_live.run_nfl_production_live_score(bq_client=_bq,storage_client=gcs,bucket_name=bucket,log_func=log_func)
             _result={"status":"NFL_PRODUCTION_V1_WEEKLY_UPDATE_PASS","refresh":_refresh,"score":_score}
             log_func("[NFL-PROD-V1-WEEKLY-CONTRACT] "+json.dumps({
                 "status":_result["status"],
                 "challenger_reused_existing":bool(_refresh.get("challenger_reused_existing",False)),
                 "live_status":_score.get("status"),
+                "model_authority_v26":_score.get("model_authority_v26",{}),
                 "edge_authority_v2":_score.get("edge_authority_v2",{}),
                 "promotion_clock":_score.get("promotion_clock",{}),
                 "automatic_promotion":False,
@@ -639,7 +639,7 @@ def main():
             raise
         return
 
-    # NFL Edge Authority V2.5 — CORE + STAT + SYSTEMS + MARKET multidimensional research with dependency-aware authority confirmation.
+    # NFL V2.6 historical validation — preserve V2.5 research, then freeze model-only betting policy.
     # One operator action now runs the complete protected research stack first:
     # audit -> structured CORE/STAT research -> residual Miner -> edge gates ->
     # direct System Miner V3/mechanism registry -> production replay -> authority.
@@ -681,16 +681,17 @@ def main():
         _multi25 = _load_nfl_prod_replay_exact("nfl_multidimensional_edge_v25", "nfl-multidimensional-edge-v2.5-four-lane-research-20261003")
         _pbpdiag = _load_nfl_prod_replay_exact("nfl_pbp_attribution_v1", "nfl-pbp-attribution-v1-research-v2.0.2-frozen-core2-20261001")
         _edge = _load_nfl_prod_replay_exact("nfl_edge_authority_v2", "nfl-edge-authority-v2.5-four-lane-multidimensional-research-20261003")
-        _replay = _load_nfl_prod_replay_exact("nfl_production_replay_v1", "nfl-production-v2.5-historical-four-lane-multidimensional-research-20261003")
+        _modelauth = _load_nfl_prod_replay_exact("nfl_model_authority_v26", "nfl-model-authority-v2.6-frozen-model-bet-policy-20261003")
+        _replay = _load_nfl_prod_replay_exact("nfl_production_replay_v1", "nfl-production-v2.6-historical-model-authority-freeze-20261003")
 
-        pw.emit("audit", f"[NFL-EDGE-V2.5] Full historical validation start run={run_id}; CORE + rich STAT selector + residual + System Miner V3 + dependency audit + authority; 2026 untouched", pct=0.03)
+        pw.emit("audit", f"[NFL-MODEL-AUTH-V2.6] Historical validation start run={run_id}; preserve full V2.5 research then freeze MODEL -> ACTION policy; 2026 untouched", pct=0.03)
         try:
             _bq=bigquery.Client(project="sharplogger")
             _rcontract.assert_contract()
             _syscontract.assert_contract()
             _audit_report=_audit.run_nfl_audit_v1(storage_client=gcs,bucket_name=bucket,log_func=log_func)
             if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
-                raise RuntimeError("[NFL-EDGE-V2.5-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
+                raise RuntimeError("[NFL-MODEL-AUTH-V2.6-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
             _health=_ledger3.ledger_health_check(_bq,service_identity_hint="sharp-train-sa@sharplogger.iam.gserviceaccount.com")
 
             pw.emit("research", "Audit PASS; run full CORE / STAT / residual / edge-gate research", pct=0.18)
@@ -719,14 +720,14 @@ def main():
             _research_report=dict(_research_report or {})
             _research_report["pbp_advanced_diagnostic_v24"]=_pbp_report
 
-            pw.emit("replay", "PBP sidecar checked; run leak-safe replay + orthogonal STAT + four-lane multidimensional combination research + dependency-aware Edge Authority", pct=0.72)
+            pw.emit("replay", "PBP sidecar checked; run leak-safe replay + V2.5 research + freeze model-only betting thresholds on discovery/confirmation", pct=0.72)
             _result = _replay.run_nfl_production_historical_replay(
                 bq_client=_bq,storage_client=gcs,bucket_name=bucket,log_func=log_func,
                 research_report=_research_report,system_report=_system_report,
             )
-            pw.emit("done", "NFL Edge Authority V2.5 historical validation complete: "+_result["status"], pct=1.0)
+            pw.emit("done", "NFL Model Authority V2.6 historical validation complete: "+_result["status"], pct=1.0)
         except Exception as exc:
-            pw.emit("error", "NFL Edge Authority V2.5 historical validation failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            pw.emit("error", "NFL Model Authority V2.6 historical validation failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
             raise
         return
 
@@ -760,33 +761,14 @@ def main():
             "nfl_production_v1",
             "nfl-production-v1.1.1-publish-receipt-normalization-20261002",
         )
-        _bet = _load_nfl_prod_live_exact(
-            "nfl_betting_engine_v1",
-            "nfl-betting-engine-v1.0-unified-decision-20261002",
-        )
-        _shared = _load_nfl_prod_live_exact(
-            "sports_edge_authority_v1",
-            "sports-edge-authority-v1.1-dependency-aware-cross-sport-standard-20261002",
-        )
-        _stat23 = _load_nfl_prod_live_exact(
-            "nfl_stat_selector_v23",
-            "nfl-stat-selector-v2.3-ncaaf-style-market-reliability-20261002",
-        )
-        _stat24 = _load_nfl_prod_live_exact(
-            "nfl_advanced_stat_research_v24",
-            "nfl-advanced-stat-v2.4-orthogonal-hidden-signal-research-20261003",
-        )
-        _multi25 = _load_nfl_prod_live_exact(
-            "nfl_multidimensional_edge_v25",
-            "nfl-multidimensional-edge-v2.5-four-lane-research-20261003",
-        )
-        _edge = _load_nfl_prod_live_exact(
-            "nfl_edge_authority_v2",
-            "nfl-edge-authority-v2.5-four-lane-multidimensional-research-20261003",
+        # Shadow research dependencies are optional for production scoring in V2.6.
+        _modelauth = _load_nfl_prod_live_exact(
+            "nfl_model_authority_v26",
+            "nfl-model-authority-v2.6-frozen-model-bet-policy-20261003",
         )
         _live = _load_nfl_prod_live_exact(
             "nfl_production_live_v1",
-            "nfl-production-v2.5-live-four-lane-research-aware-20261003",
+            "nfl-production-v2.6-live-model-authority-20261003",
         )
         pw.emit("audit", f"[NFL-PROD-V1.2] Verify live parity before paired scoring run={run_id}", pct=0.05)
         try:

@@ -821,9 +821,10 @@ def score_live(*,bq_client,storage_client,bucket_name,prediction_rows,now):
                 elif market=="H2H":selected=p.get("away_team") if core>0 else p.get("home_team")
             out.append({"prediction_pair_id":p.get("prediction_pair_id"),"game_start":p.get("game_start"),"home_team":p.get("home_team"),"away_team":p.get("away_team"),"market":market,
                         "action":action,"decision":res["decision"],"selected":selected,"market_value":b["market_value"],"model_value":b["model_value"],"raw_model_edge":b["raw_edge"],"selected_price":b["selected_price"],
+                        "model_direction":core,"market_move_toward_model":b.get("move_toward_core"),
                         "independent_mechanisms":res["independent_mechanisms"],"independence_keys":res.get("independence_keys") or [],"edge_sources":res["families"],"edge_votes":res["votes"],
                         "system_labels":[x["label"] for x in sys if x["market"]==market],"stat_selector_support":stat_support,"stat_selector_live_status":stat_live_meta.get("status"),
-                        "betting_decision_authority":bool(action in {"PLAY","STRONG PLAY"}),"automatic_execution":False,"edge_contract_sha256":meta.get("contract_sha256")})
+                        "betting_decision_authority":False,"shadow_evidence_only":True,"automatic_execution":False,"edge_contract_sha256":meta.get("contract_sha256")})
     return out
 
 
