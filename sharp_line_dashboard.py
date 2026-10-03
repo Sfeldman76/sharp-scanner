@@ -46972,11 +46972,11 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     """
     state=_nfl_model_authority_v26_state_cached()
     if not isinstance(state,dict) or state.get("status") in ("UNAVAILABLE","STALE_MODEL_AUTHORITY_V26_MODULE"):
-        st.info("NFL Model Authority V2.6.1 is not available yet. Run NFL Model Authority — Historical Validation once, then NFL Production — Weekly Update.")
+        st.info("NFL production authority is not available. This requires a maintenance revalidation; it is intentionally not a normal operator dropdown run.")
         return
     meta=state.get("meta") or {}; cur=state.get("current") or {}
     if not meta:
-        st.info("NFL Model Authority V2.6.1 has not been frozen yet. Run NFL Model Authority — Historical Validation once; 2021-2023 selects the model gate and 2024-2025 only confirms it.")
+        st.info("NFL production authority has not been frozen. This requires a maintenance revalidation; it is intentionally not a normal operator dropdown run.")
         return
 
     rows=cur.get("live_rows") or []
@@ -47413,7 +47413,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     _prod_contract=_ncaaf_prod_v1_load_contract(GCS_BUCKET)
     st.subheader('NCAAF Production — Spread, H2H & Totals')
     if isinstance(_prod_contract,dict):
-        st.caption('Production V1 is active. Spread/H2H/Totals remain separate frozen probability models. The promoted edge engine chooses production actions without rewriting model probabilities. H2H remains model-only because no repeatable H2H edge challenger passed.')
+        st.caption('Production V1 is active. Spread/H2H/Totals remain separate frozen probability models. The promoted edge engine chooses production actions without rewriting model probabilities. H2H remains model-only unless a price-aware challenger is prospectively validated and explicitly promoted.')
         _backs=_prod_contract.get('backbones') or {}
         _spf=len(((_backs.get('spread') or {}).get('feature_cols') or [])); _h2f=len(((_backs.get('h2h') or {}).get('feature_cols') or [])); _ttf=len(((_backs.get('totals') or {}).get('feature_cols') or []))
         st.caption(f'Fast production path: Spread {_spf} fixed features • H2H {_h2f} fixed features • Totals {_ttf} fixed features • cadence FROZEN • AutoFS OFF • multi-head runtime OFF • rich-market model OFF.')
@@ -47476,60 +47476,74 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
                 st.dataframe(_e,use_container_width=True,hide_index=True)
             st.caption('Spread EDGE_MULTI is allowed only when at least two independent mechanisms agree. Totals family overlap does not receive a stronger action because the two-mechanism 2026 confirmation did not repeat. H2H edge authority remains closed.')
 
-    # V13.5.5 lazy system library: artifact contents are only expanded into a DataFrame
-    # after an explicit click, keeping the normal prediction-board render lightweight.
-    if st.button('Research System Library ▾',key='ncaaf-v1355-load-published-systems'):
-        st.session_state['ncaaf_v1355_system_library_loaded']=True
-    if st.session_state.get('ncaaf_v1355_system_library_loaded',False):
-        try:
-            _bundle=_v1347_load_latest_frozen_stat_spread_bundle(); _sb=(_bundle or {}).get('ncaaf_statistical_brain') or {}; _reg=_sb.get('system_miner_v2') or {}
-            _rows=[]
-            for _m,_mr in _reg.items():
-                for _sys in (_mr or {}).get('systems',[]):
-                    _rows.append({'Market':_m.upper(),'System':_sys.get('system_id'),'Status':_sys.get('authority_state'),'Type':_sys.get('system_type'),'Family':_sys.get('system_family'),'Rule':' AND '.join(_sys.get('conditions') or []),'Historical N':_sys.get('selection_games'),'Historical Rate':_sys.get('selection_rate'),'Latest N':_sys.get('shadow_games'),'Latest Rate':_sys.get('shadow_rate'),'Remove Best Season':_sys.get('remove_best_season_rate'),'FDR q':_sys.get('fdr_qvalue'),'Market Residual':_sys.get('market_residual'),'Historical ROI':_sys.get('historical_roi'),'Qualification':_sys.get('qualification_reason'),'Production Influence':_sys.get('production_authority',0)})
-            _lib=pd.DataFrame(_rows)
-            if _lib.empty: st.info('No Miner V2 systems have met publication criteria yet.')
-            else:
-                _mc=st.multiselect('System market',['SPREADS','H2H','TOTALS'],default=['SPREADS','H2H','TOTALS'],key='ncaaf-v1355-system-market')
-                _sc=st.multiselect('System status',sorted(_lib['Status'].dropna().unique().tolist()),default=sorted(_lib['Status'].dropna().unique().tolist()),key='ncaaf-v1355-system-status')
-                _show=_lib[_lib['Market'].isin(_mc)&_lib['Status'].isin(_sc)].copy()
-                st.dataframe(_show,use_container_width=True,hide_index=True)
-                _ids=_show['System'].dropna().astype(str).tolist()
-                if _ids:
-                    _sid=st.selectbox('View system',_ids,key='ncaaf-v1355-system-detail')
-                    _detail=_show[_show['System'].eq(_sid)].iloc[0].to_dict(); st.json(_detail)
-        except Exception as _sys_ui_err:
-            st.warning(f'System library unavailable: {type(_sys_ui_err).__name__}')
-
-    if st.button('Research V2 — Miner + Orthogonal STAT ▾',key='ncaaf-rv2-load-report'):
-        st.session_state['ncaaf_rv2_report_loaded']=True
-    if st.session_state.get('ncaaf_rv2_report_loaded',False):
+    # One research surface only. Legacy Miner V2/system-library tables are retired
+    # from the operator UI; V2.1 is the current research registry.
+    if st.button('Research V2.1 — Results ▾',key='ncaaf-rv21-load-report'):
+        st.session_state['ncaaf_rv21_report_loaded']=True
+    if st.session_state.get('ncaaf_rv21_report_loaded',False):
         try:
             _r2=_ncaaf_research_v2_report_cached()
             if not isinstance(_r2,dict):
-                st.info('No NCAAF Research V2 artifact is published yet. Run the NCAAF Research V2 workflow first.')
+                st.info('No NCAAF Research V2.1 artifact is published yet. Run NCAAF Research Update from Model maintenance.')
             else:
-                st.caption('Research-only. Discovery is frozen through 2023, 2024-2025 are confirmation only, and 2026+ is prospective. Nothing in this panel changes Production V1 authority.')
-                _sf=[]
-                for _fam,_markets in ((_r2.get('orthogonal_stat') or {}).get('families') or {}).items():
-                    for _m,_v in (_markets or {}).items():
-                        _sf.append({'Family':_fam,'Market':_m,'Features':_v.get('feature_count'),'Discovery':_v.get('discovery_pass'),'Confirmation':_v.get('confirmation_pass'),'Discovery MAE Gain':_v.get('discovery_mean_improvement'),'Confirmation MAE Gain':_v.get('confirmation_mean_improvement'),'State':_v.get('authority_state'),'Production Influence':_v.get('production_authority',0)})
-                _sdf=pd.DataFrame(_sf)
+                st.caption('Research-only. Discovery is frozen through 2023; BOTH 2024 and 2025 must confirm; 2026+ is sealed prospective shadow. Nothing here changes Production V1 authority.')
+
+                _sparse=[]
+                for _x in ((_r2.get('sparse_stat_v21') or {}).get('candidates') or []):
+                    _sparse.append({
+                        'Market':_x.get('market'),'Candidate':_x.get('candidate_name'),'Features':' + '.join(_x.get('features') or []),
+                        'Discovery':_x.get('discovery_pass'),'Confirmation':_x.get('confirmation_pass'),
+                        'Disc MAE Gain':_x.get('discovery_mean_improvement'),'Disc RMSE Gain':_x.get('discovery_mean_rmse_improvement'),
+                        'Conf MAE Gain':_x.get('confirmation_mean_improvement'),'Conf RMSE Gain':_x.get('confirmation_mean_rmse_improvement'),
+                        'State':_x.get('authority_state'),'Production Influence':0,
+                    })
+                _sdf=pd.DataFrame(_sparse)
                 if not _sdf.empty:
-                    st.markdown('**Orthogonal STAT families**')
+                    st.markdown('**Sparse residual STAT challengers**')
                     st.dataframe(_sdf,use_container_width=True,hide_index=True)
-                _mf=[]
-                for _m,_mr in (_r2.get('system_miner_v3') or {}).items():
-                    for _x in (_mr or {}).get('mechanism_families',[]):
-                        _mf.append({'Market':str(_m).upper(),'Mechanism':_x.get('mechanism_id'),'State':_x.get('authority_state'),'Members':_x.get('member_count'),'Discovery N':_x.get('discovery_n'),'Discovery Rate':_x.get('discovery_rate'),'Confirmation N':_x.get('confirmation_n'),'Confirmation Rate':_x.get('confirmation_rate'),'Representative':_x.get('representative_system_id'),'Families':' + '.join(_x.get('families') or []),'Production Influence':_x.get('production_authority',0)})
-                _mdf=pd.DataFrame(_mf)
-                if not _mdf.empty:
-                    st.markdown('**Collapsed System Miner V3 mechanisms**')
-                    st.dataframe(_mdf,use_container_width=True,hide_index=True)
+
+                _hrows=[]
+                for _x in (((_r2.get('system_miner_v3') or {}).get('h2h') or {}).get('mechanism_families') or []):
+                    _hrows.append({
+                        'Mechanism':_x.get('mechanism_id'),'State':_x.get('authority_state'),
+                        'Rule':' AND '.join(_x.get('representative_conditions') or []),'Members':_x.get('member_count'),
+                        'Disc N':_x.get('discovery_n'),'Disc Win Rate':_x.get('discovery_rate'),'Disc ROI':_x.get('discovery_price_roi'),
+                        'Disc Market Edge':_x.get('discovery_market_residual'),'Disc Price Bands':_x.get('price_band_robust_discovery'),
+                        'Confirm N':_x.get('confirmation_n'),'Confirm Win Rate':_x.get('confirmation_rate'),'Confirm ROI':_x.get('confirmation_price_roi'),
+                        'Confirm Market Edge':_x.get('confirmation_market_residual'),'Confirm Price Bands':_x.get('price_band_robust_confirmation'),
+                        'Production Influence':0,
+                    })
+                _hdf=pd.DataFrame(_hrows)
+                if not _hdf.empty:
+                    st.markdown('**Price-aware H2H mechanisms**')
+                    st.caption('Observed historical moneyline prices are required. High win rate alone cannot qualify a moneyline system.')
+                    st.dataframe(_hdf,use_container_width=True,hide_index=True)
+
+                _trows=[]
+                for _x in (((_r2.get('system_miner_v3') or {}).get('totals') or {}).get('mechanism_families') or []):
+                    _a=_x.get('attribution') or {}; _tc=_a.get('team_concentration') or {}; _cc=_a.get('conference_concentration') or {}
+                    _trows.append({
+                        'Mechanism':_x.get('mechanism_id'),'State':_x.get('authority_state'),
+                        'Rule':_a.get('rule') or ' AND '.join(_x.get('representative_conditions') or []),
+                        'Disc N':_x.get('discovery_n'),'Disc Rate':_x.get('discovery_rate'),'Confirm N':_x.get('confirmation_n'),'Confirm Rate':_x.get('confirmation_rate'),
+                        'Remove Best':_a.get('remove_best_discovery_rate'),'Season Breakdown':json.dumps(_a.get('season_breakdown') or [],default=str),
+                        'Top Team':_tc.get('top'),'Team Share':_tc.get('top_share'),'Top Conference':_cc.get('top'),'Conference Share':_cc.get('top_share'),
+                        'Production Influence':0,
+                    })
+                _tdf=pd.DataFrame(_trows)
+                if not _tdf.empty:
+                    st.markdown('**Totals mechanism attribution**')
+                    st.dataframe(_tdf,use_container_width=True,hide_index=True)
+
+                _pro=pd.DataFrame(((_r2.get('prospective_shadow_2026') or {}).get('mechanisms') or []))
+                if not _pro.empty:
+                    st.markdown('**2026 sealed prospective shadow**')
+                    st.dataframe(_pro,use_container_width=True,hide_index=True)
+
                 _ma=_r2.get('market_rich') or {}
                 st.caption(f"Utils market-rich historical coverage: {len(_ma.get('historical_fields_present') or [])}/{len(_ma.get('historical_fields_requested') or [])} fields; live backend remains Utils → sharp_moves_master / moves_with_features_merged.")
         except Exception as _rv2_ui_err:
-            st.warning(f'Research V2 report unavailable: {type(_rv2_ui_err).__name__}')
+            st.warning(f'Research V2.1 report unavailable: {type(_rv2_ui_err).__name__}')
 
     if st.checkbox('Show market model diagnostics',value=False,key='ncaaf-fast-research'):
         diag=view[['Game Time','Matchup','Spr Fair','Spr EV','Spr Status','H2H Fair','H2H EV','H2H Status','Tot Fair','Tot EV','Tot Status']].copy()
@@ -49746,56 +49760,48 @@ if not HEADLESS:
 
     _train_market_options = ["All", "spreads", "h2h", "totals"]
     _train_market_labels = {}
+    _workflow_title = "Train which market?"
     if str(sport).upper().strip() == "NCAAF":
-        # Production is frozen. Research V2 transfers the improved NFL research
-        # discipline (residual STAT, richer Miner, dependency collapse) without
-        # granting authority or rewriting Production V1.
-        _train_market_options[2:2] = ["ncaaf_research_v2", "edge_research", "ncaaf_production"]
-        _train_market_labels.update({
-            "ncaaf_research_v2": "NCAAF Research V2 — Miner + Orthogonal STAT",
-            "edge_research": "NCAAF Legacy Edge Research",
-            "ncaaf_production": "NCAAF Production V1 — Publish Frozen Contract",
-        })
-    if str(sport).upper().strip() == "NFL":
-        # Permanent NFL operator surface: production, validation, challenger research, systems.
-        # Old one-off build/diagnostic routes are retired from the active repository.
-        _train_market_options = ["nfl_production_weekly", "nfl_production_replay", "nfl_research_engine", "nfl_system_lab"]
+        # Operator surface only: research refresh + explicit production publish.
+        # Legacy All/spread/H2H/totals and old edge-research routes remain backend
+        # code only and are intentionally removed from the normal dropdown.
+        _train_market_options = ["ncaaf_research_v2", "ncaaf_production"]
+        _train_market_labels = {
+            "ncaaf_research_v2": "NCAAF Research Update — V2.1",
+            "ncaaf_production": "NCAAF Production — Publish Approved Contract",
+        }
+        _workflow_title = "NCAAF model maintenance"
+    elif str(sport).upper().strip() == "NFL":
+        # Operator surface only: weekly production + full protected research.
+        # Live line/price changes refresh automatically in the background, so
+        # neither workflow is required merely because the market moved.
+        _train_market_options = ["nfl_production_weekly", "nfl_production_replay"]
         _train_market_labels = {
             "nfl_production_weekly": "NFL Production — Weekly Update",
-            "nfl_production_replay": "NFL Model Authority — Historical Validation",
-            "nfl_research_engine": "NFL Challenger Research",
-            "nfl_system_lab": "NFL System Research / Miner",
+            "nfl_production_replay": "NFL Research — Heavy Challenger Search",
         }
+        _workflow_title = "NFL model maintenance"
     market_choice = st.sidebar.selectbox(
-        "NFL workflow" if str(sport).upper().strip() == "NFL" else "Train which market?",
+        _workflow_title,
         _train_market_options,
         format_func=(lambda x: _train_market_labels.get(x, x)),
         key=f"train_market_choice_{sport}",
     )
     if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_research_v2":
         st.sidebar.caption(
-            "Research-only challenger path. Keeps Production V1 frozen; tests orthogonal residual STAT families and System Miner V3 with discovery through 2023, untouched 2024-2025 confirmation, dependency collapse, and 2026+ prospective shadow."
+            "WHEN: after the week's games are settled, or after research/data changes. Updates V2.1 sparse STAT, price-aware H2H, totals attribution and the sealed 2026 shadow record. Does NOT change Production V1 or current bets."
         )
-    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_production":
+    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_production":
         st.sidebar.caption(
-            "Publishes the frozen NCAAF Production V1 contract for Spread, H2H and Totals. "
-            "This is not a legacy Spread train or research-only run."
+            "WHEN: only after we explicitly approve a new production champion/edge contract, or if the production artifact is missing. Do NOT run this weekly and do NOT run it for line changes."
         )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
+    elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
         st.sidebar.caption(
-            "Normal NFL run. Verifies live feature parity, refreshes/reuses the weekly challenger, scores the frozen production model, reads the current executable market through Utils → sharp_moves_master, attaches MARKET-RICH evidence through Utils → moves_with_features_merged, then applies the frozen V2.6.1 model edge/price gate. No automatic wagering or promotion."
+            "WHEN: once each week after prior games settle / the new slate is ready. Creates or reuses frozen fair values, settles the prospective ledger and updates the promotion clock. After that, line and price changes refresh automatically through the background scanner—do NOT rerun for market moves."
         )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_replay":
+    elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_replay":
         st.sidebar.caption(
-            "Historical validation. Rebuilds the protected replay/research stack and freezes the model-only betting gate using 2021-2023 discovery and untouched 2024-2025 confirmation. 2026 remains prospective."
-        )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_research_engine":
-        st.sidebar.caption(
-            "Permanent NFL challenger research. Runs the latest protected structured research, Residual Miner V2, fair-line/edge scorecards and season-forward edge gates through 2025 only. No production authority or automatic promotion."
-        )
-    if str(sport).upper().strip() == "NFL" and market_choice == "nfl_system_lab":
-        st.sidebar.caption(
-            "NFL System Research / Miner V3. Direct ATS/Totals system discovery and mechanism-family consolidation with frozen validation; 2026 is sealed and systems receive no automatic production authority."
+            "WHEN: run the heavy research when we add/change research ideas or data, and periodically during the season (about every 4 weeks) to refresh challenger evidence. Runs CORE/STAT/residual research, System Miner V3, PBP/EPA diagnostics, advanced STAT and the protected historical replay. 2026 stays prospective, production is not automatically promoted, and line changes do not require this run."
         )
 
     
@@ -49923,18 +49929,14 @@ if not HEADLESS:
     # ✅ Single train button (unique key per sport + choice)
     train_key = f"train::{sport}::{market_choice}"
     
-    if str(sport).upper().strip() == "NFL":
-        _nfl_train_labels = {
-            "nfl_production_weekly": "Run NFL Production Weekly Update",
-            "nfl_production_replay": "Run NFL Model Authority Historical Validation",
-            "nfl_research_engine": "Run NFL Challenger Research",
-            "nfl_system_lab": "Run NFL System Research / Miner",
-        }
-        _train_button_label = _nfl_train_labels.get(str(market_choice).lower().strip(), "Run NFL Workflow")
+    if str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_production_weekly":
+        _train_button_label = "Run NFL Weekly Production Update"
+    elif str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_production_replay":
+        _train_button_label = "Run NFL Heavy Research"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_research_v2":
-        _train_button_label = "Run NCAAF Research V2"
+        _train_button_label = "Run NCAAF Research Update V2.1"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production":
-        _train_button_label = "Publish NCAAF Production V1"
+        _train_button_label = "Publish Approved NCAAF Production Contract"
     elif str(market_choice).lower().strip() == "edge_research":
         _train_button_label = f"🧪 Run {sport} Edge Research"
     else:
