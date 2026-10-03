@@ -35,9 +35,10 @@ except ModuleNotFoundError:
 import nfl_production_v1 as prod
 import nfl_betting_engine_v1 as benchmark
 import sports_edge_authority_v1 as shared
+import nfl_stat_selector_v23 as statv23
 
-SOURCE_TAG="nfl-edge-authority-v2.1-full-ncaaf-research-diagnostics-20261002"
-ENGINE_VERSION="NFL_EDGE_AUTHORITY_V2"
+SOURCE_TAG="nfl-edge-authority-v2.3-stat-selector-system-dependency-20261002"
+ENGINE_VERSION="NFL_EDGE_AUTHORITY_V2_3"
 PROJECT="sharplogger"; DATASET="sharp_data"
 PREFIX="production/nfl/v2/edge_authority"
 ARTIFACT_OBJECT=f"{PREFIX}/current_edge_engine.joblib"
@@ -52,9 +53,6 @@ DISCOVERY_SEASONS=(2021,2022,2023)
 CONFIRM_SEASONS=(2024,2025)
 SYSTEM_DISCOVERY_SEASONS=(2017,2018,2019,2020,2021,2022)
 SYSTEM_CONFIRM_SEASONS=(2023,2024,2025)
-STAT_ALPHA=24.0
-SPREAD_STAT_FEATURES=tuple(prod.SPREAD_FEATURES)
-TOTAL_STAT_FEATURES=tuple(prod.TOTAL_FEATURES)
 
 ROLE_FLIP_FAMILY="NFL_SPREAD_ROLE_FLIP_DOG_TO_FAVORITE_FADE"
 HOME_FAV_FAMILY="NFL_SPREAD_HOME_FAVORITE_OFF_SU_LOSS_FADE"
@@ -62,7 +60,6 @@ EARLY_DIV_UNDER_FAMILY="NFL_TOTAL_EARLY_DIVISION_UNDER"
 
 FAIR_THRESHOLDS={"SPREADS":(2.,3.,4.,5.,6.),"TOTALS":(2.,3.,4.,5.,6.),"H2H":(.02,.05,.075,.10,.15)}
 MARKET_THRESHOLDS={"SPREADS":(.5,1.,1.5,2.),"TOTALS":(.5,1.,1.5,2.),"H2H":(.01,.02,.03,.05)}
-STAT_THRESHOLDS=(.25,.5,.75,1.0)
 
 FAMILY_POLICY={
     "FAIR_VALUE":{"min_discovery_n":80,"min_confirmation_n":40},
@@ -169,7 +166,7 @@ def _historical_system_family_context(bq_client)->dict[str,dict]:
         wk=_num(h.get("Week_Number")); div=_num(h.get("Is_Division_Game"))
         if div==1.0 and math.isfinite(wk) and 1<=wk<=4:
             votes.append({"market":"TOTALS","family":EARLY_DIV_UNDER_FAMILY,"direction":-1,"label":"Early division UNDER"})
-        out[str(gid)]={"home":home,"away":away,"votes":votes}
+        out[str(gid)]={"home":home,"away":away,"season":int(h.Season),"actual_margin":_num(h.actual_margin),"opening_spread":_num(h.Opening_Spread),"votes":votes}
     return out
 
 
@@ -177,39 +174,6 @@ def _attach_actuals(rows:dict[str,pd.DataFrame],replay:pd.DataFrame)->dict[str,p
     keep=["physical_game_id","actual_margin","actual_total","close_spread","close_total","home_win_label","home_close_ml","away_close_ml"]
     base=replay.loc[:,[c for c in keep if c in replay.columns]].drop_duplicates("physical_game_id")
     return {m:d.merge(base,on="physical_game_id",how="left",validate="one_to_one") for m,d in rows.items()}
-
-
-def _selector_oof(games:pd.DataFrame,market:str)->tuple[pd.DataFrame,dict]:
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.linear_model import Ridge
-    feature_cols=list(SPREAD_STAT_FEATURES if market=="SPREADS" else TOTAL_STAT_FEATURES)
-    g=games.copy(); g=g.loc[g.Season_Stage.eq("REGULAR")].copy()
-    if market=="SPREADS":
-        g["selector_target"]=pd.to_numeric(g.actual_margin,errors="coerce")+pd.to_numeric(g.Spread_Value,errors="coerce")
-    else:
-        g["selector_target"]=pd.to_numeric(g.actual_total,errors="coerce")-pd.to_numeric(g.Current_Total,errors="coerce")
-    outs=[]
-    for sy in range(2021,2026):
-        tr=g.loc[g.Season.lt(sy)].copy(); va=g.loc[g.Season.eq(sy)].copy()
-        x=tr[feature_cols].apply(pd.to_numeric,errors="coerce").replace([np.inf,-np.inf],np.nan); med=x.median().fillna(0.0); x=x.fillna(med)
-        y=pd.to_numeric(tr.selector_target,errors="coerce"); ok=y.notna(); x=x.loc[ok]; y=y.loc[ok]
-        xv=va[feature_cols].apply(pd.to_numeric,errors="coerce").replace([np.inf,-np.inf],np.nan).fillna(med).fillna(0.0)
-        sc=StandardScaler().fit(x.to_numpy(float)); model=Ridge(alpha=STAT_ALPHA).fit(sc.transform(x.to_numpy(float)),y.to_numpy(float))
-        pred=model.predict(sc.transform(xv.to_numpy(float))); resid=y.to_numpy(float)-model.predict(sc.transform(x.to_numpy(float)))
-        scale=float(np.nanstd(resid,ddof=0)); scale=scale if math.isfinite(scale) and scale>1e-9 else 1.0
-        outs.append(pd.DataFrame({"physical_game_id":va.physical_game_id.astype(str).to_numpy(),"season":int(sy),"selector_prediction":pred,"selector_scaled":np.abs(pred)/scale,"selector_scale":scale}))
-    # final live bundle through 2025
-    tr=g.loc[g.Season.le(2025)].copy(); x=tr[feature_cols].apply(pd.to_numeric,errors="coerce").replace([np.inf,-np.inf],np.nan); med=x.median().fillna(0.0); x=x.fillna(med)
-    y=pd.to_numeric(tr.selector_target,errors="coerce"); ok=y.notna(); x=x.loc[ok];y=y.loc[ok]
-    sc=StandardScaler().fit(x.to_numpy(float)); model=Ridge(alpha=STAT_ALPHA).fit(sc.transform(x.to_numpy(float)),y.to_numpy(float)); resid=y.to_numpy(float)-model.predict(sc.transform(x.to_numpy(float)))
-    scale=float(np.nanstd(resid,ddof=0)); scale=scale if math.isfinite(scale) and scale>1e-9 else 1.0
-    return pd.concat(outs,ignore_index=True),{"market":market,"feature_cols":feature_cols,"medians":med.to_dict(),"scaler":sc,"model":model,"scale":scale,"alpha":STAT_ALPHA}
-
-
-def _selector_predict(bundle:dict,feature_dict:dict)->float:
-    x=pd.DataFrame([{c:feature_dict.get(c) for c in bundle["feature_cols"]}]).apply(pd.to_numeric,errors="coerce").replace([np.inf,-np.inf],np.nan)
-    x=x.fillna(pd.Series(bundle["medians"])).fillna(0.0)
-    return float(bundle["model"].predict(bundle["scaler"].transform(x.to_numpy(float)))[0])
 
 
 def _variant(d,market,fid,kind,variant_id,threshold,mask,disc_seasons=DISCOVERY_SEASONS,conf_seasons=CONFIRM_SEASONS,complexity=1):
@@ -296,6 +260,124 @@ def _system_family_variants_from_report(system_report:dict|None,log_func=print)-
     return out
 
 
+
+def _system_trigger_map(sysctx:dict, family_id:str)->dict[str,int]:
+    out={}
+    for gid,ctx in (sysctx or {}).items():
+        for v in (ctx.get("votes") or []):
+            if str(v.get("family"))==str(family_id) and str(v.get("market"))=="SPREADS":
+                out[str(gid)]=int(v.get("direction") or 0)
+                break
+    return out
+
+
+def _system_record_for_ids(sysctx:dict, ids:set[str], dirs:dict[str,int])->dict:
+    y=[]
+    for gid in sorted(ids):
+        ctx=(sysctx or {}).get(str(gid)) or {}
+        direction=int(dirs.get(str(gid),0) or 0)
+        actual=_num(ctx.get("actual_margin")); line=_num(ctx.get("opening_spread"))
+        if direction==0 or not (math.isfinite(actual) and math.isfinite(line)):
+            continue
+        settle=direction*(actual+line)
+        if abs(settle)<=1e-12:
+            y.append(.5)
+        else:
+            y.append(1.0 if settle>0 else 0.0)
+    return shared.record(y,np.full(len(y),100.0/110.0)) if y else shared.record([])
+
+
+def _pair_system_dependency(a:dict,b:dict,sysctx:dict)->dict:
+    aid=str(a.get("mechanism_family_id")); bid=str(b.get("mechanism_family_id"))
+    amap=_system_trigger_map(sysctx,aid); bmap=_system_trigger_map(sysctx,bid)
+    aset=set(amap); bset=set(bmap); union=aset|bset; inter=aset&bset
+    same={g for g in inter if int(amap.get(g,0))==int(bmap.get(g,0)) and int(amap.get(g,0))!=0}
+    conflict={g for g in inter if int(amap.get(g,0))!=int(bmap.get(g,0))}
+    aonly=aset-bset; bonly=bset-aset
+    shared_conditions=sorted(set(a.get("representative_conditions") or []) & set(b.get("representative_conditions") or []))
+    def in_seasons(ids,seasons):
+        return {g for g in ids if int(((sysctx.get(g) or {}).get("season") or -1)) in set(seasons)}
+    out={
+        "family_a":aid,"family_b":bid,
+        "shared_conditions":shared_conditions,
+        "jaccard":round(len(inter)/len(union),6) if union else 0.0,
+        "overlap_games":len(inter),"same_direction_overlap_games":len(same),"conflict_overlap_games":len(conflict),
+    }
+    for label,seasons in (("discovery",SYSTEM_DISCOVERY_SEASONS),("confirmation",SYSTEM_CONFIRM_SEASONS)):
+        sa=in_seasons(same,seasons); aa=in_seasons(aonly,seasons); bb=in_seasons(bonly,seasons)
+        both_dirs={g:amap[g] for g in sa}; adirs={g:amap[g] for g in aa}; bdirs={g:bmap[g] for g in bb}
+        out[label]={
+            "both_same_direction":_system_record_for_ids(sysctx,sa,both_dirs),
+            "a_only":_system_record_for_ids(sysctx,aa,adirs),
+            "b_only":_system_record_for_ids(sysctx,bb,bdirs),
+            "conflict_n":len(in_seasons(conflict,seasons)),
+        }
+    conf=out["confirmation"]; both=conf["both_same_direction"]; ao=conf["a_only"]; bo=conf["b_only"]
+    bh=_num(both.get("hit_rate")); br=_num(both.get("roi_per_unit")); ah=_num(ao.get("hit_rate")); ch=_num(bo.get("hit_rate"))
+    comparators=[x for x in (ah,ch) if math.isfinite(x)]
+    best_single=max(comparators) if comparators else .50
+    incremental_pass=(
+        int(both.get("n") or 0)>=30 and math.isfinite(br) and br>0.03
+        and math.isfinite(bh) and bh>shared.BREAK_EVEN_110
+        and bh>=best_single+0.025
+        and _num((out["discovery"]["both_same_direction"] or {}).get("roi_per_unit"))>0
+    )
+    structurally_correlated=bool(shared_conditions) or out["jaccard"]>=0.20
+    out["incrementality_gate"]={
+        "status":"PASS" if incremental_pass else "HOLD",
+        "requires_confirmation_overlap_n":30,"requires_confirmation_overlap_roi_gt":0.03,
+        "requires_overlap_hit_advantage_vs_best_single":0.025,"best_single_confirmation_hit":best_single,
+    }
+    out["independent_for_escalation"]=bool((not structurally_correlated) or incremental_pass)
+    out["dependency_reason"]=(
+        "INCREMENTAL_CONFIRMATION_OVERRIDES_SHARED_PARENT" if structurally_correlated and incremental_pass
+        else "CORRELATED_SHARED_PARENT_OR_OVERLAP" if structurally_correlated
+        else "DISTINCT_MECHANISMS"
+    )
+    return out
+
+
+def _apply_system_dependency_audit(families:list[dict],sysctx:dict,log_func=print)->tuple[list[dict],dict]:
+    fams=[dict(f) for f in families]
+    for f in fams:
+        f["independence_key"]=str(f.get("mechanism_family_id"))
+        if f.get("mechanism_class")=="STAT_SELECTOR":
+            f["independence_key"]=f"NFL_{f.get('market')}_STAT_SELECTOR"
+        elif f.get("mechanism_class")=="FAIR_VALUE":
+            f["independence_key"]=f"NFL_{f.get('market')}_FAIR_VALUE"
+        elif f.get("mechanism_class")=="MARKET_CONFIRMATION":
+            f["independence_key"]=f"NFL_{f.get('market')}_MARKET_CONFIRMATION"
+    systems=[f for f in fams if f.get("mechanism_class")=="SYSTEM" and f.get("production_authority") and f.get("market")=="SPREADS"]
+    parent={str(f["mechanism_family_id"]):str(f["mechanism_family_id"]) for f in systems}
+    def find(x):
+        while parent.get(x,x)!=x:
+            parent[x]=parent.get(parent[x],parent[x]);x=parent[x]
+        return x
+    def union(a,b):
+        ra,rb=find(a),find(b)
+        if ra!=rb: parent[max(ra,rb)]=min(ra,rb)
+    pairs=[]
+    for i,a in enumerate(systems):
+        for b in systems[i+1:]:
+            d=_pair_system_dependency(a,b,sysctx);pairs.append(d)
+            if not d.get("independent_for_escalation"):
+                union(str(a["mechanism_family_id"]),str(b["mechanism_family_id"]))
+            log_func("[NFL-EDGE-V23-SYSTEM-DEPENDENCY] "+json.dumps(d,sort_keys=True,default=str))
+    clusters={}
+    for fid in parent:
+        clusters.setdefault(find(fid),[]).append(fid)
+    cluster_key={}
+    for root,members in clusters.items():
+        members=sorted(members)
+        key=members[0] if len(members)==1 else "NFL_SPREAD_SYSTEM_CLUSTER_"+hashlib.sha256("|".join(members).encode()).hexdigest()[:12]
+        for fid in members:cluster_key[fid]=key
+    for f in fams:
+        fid=str(f.get("mechanism_family_id"))
+        if fid in cluster_key:f["independence_key"]=cluster_key[fid]
+    report={"pairs":pairs,"clusters":clusters,"independence_key_by_family":{str(f.get("mechanism_family_id")):f.get("independence_key") for f in fams}}
+    log_func("[NFL-EDGE-V23-INDEPENDENCE-MAP] "+json.dumps(report,sort_keys=True,default=str))
+    return fams,report
+
 def _core_perf_line(replay:pd.DataFrame,market:str,season=None)->dict:
     q=replay if season is None else replay.loc[pd.to_numeric(replay.season,errors="coerce").eq(int(season))]
     if market=="SPREADS":
@@ -357,22 +439,6 @@ def _emit_full_research_diagnostics(replay_rows:pd.DataFrame,research_report:dic
         for fam,met in (block.get("families") or {}).items():
             log_func("[NFL-EDGE-V2-STAT-FAMILY] "+json.dumps({"market":market,"family":fam,"selected_for_prospective_shadow":fam in selected,**(met or {})},sort_keys=True,default=str))
         log_func("[NFL-EDGE-V2-STAT-SELECTION] "+json.dumps({"market":market,"selected_families":sorted(selected),"nested_stable_blend":block.get("nested_stable_blend") or {},"selection_detail":block.get("selection_detail") or {},"nested_selection":block.get("nested_selection") or {},"role":"MARKET_RESIDUAL_SELECTOR_NOT_CORE_REWRITE"},sort_keys=True,default=str))
-    for market,diag in (summary.get("core_stat_disagreement") or {}).items():
-        log_func("[NFL-EDGE-V2-CORE-STAT-DISAGREEMENT] "+json.dumps({"market":market.upper(),**(diag or {})},sort_keys=True,default=str))
-    edge_gate=summary.get("edge_gate") or {}
-    for market,diag in ((edge_gate.get("markets") or {}).items()):
-        log_func("[NFL-EDGE-V2-EDGE-GATE] "+json.dumps({
-            "market":market.upper(),
-            "fair_line_scorecard":diag.get("fair_line_scorecard") or {},
-            "transparent_gates":diag.get("transparent_gates") or {},
-            "core_gate_probability":diag.get("core_gate_probability") or {},
-            "core_gate_by_season":diag.get("core_gate_by_season") or {},
-            "core_gate_fixed_probability_bands":diag.get("core_gate_fixed_probability_bands") or {},
-            "consensus_gate_probability":diag.get("consensus_gate_probability") or {},
-            "consensus_gate_by_season":diag.get("consensus_gate_by_season") or {},
-            "prospective_selected_residual_families":diag.get("prospective_selected_residual_families") or [],
-            "selection_policy":diag.get("selection_policy"),
-        },sort_keys=True,default=str))
     disagreement=summary.get("core_stat_disagreement") or {}
     for market,block in disagreement.items():
         if market=="production_authority" or not isinstance(block,dict): continue
@@ -421,8 +487,9 @@ def _research_families(*,bq_client,replay_rows,games,log_func=print,research_rep
     base=benchmark.build_historical_engine_rows(bq_client=bq_client,replay_rows=replay_rows,games=games)
     base=_attach_actuals(base,replay_rows)
     sysctx=_historical_system_family_context(bq_client)
-    variants=[]; selector_bundles={}
-    # FAIR_VALUE + MARKET_CONFIRMATION families use frozen CORE direction.
+    variants=[]
+    # FAIR_VALUE + MARKET_CONFIRMATION use frozen CORE direction. These remain
+    # interpretable benchmarks and are not allowed to rewrite fair-value models.
     for market in ("SPREADS","H2H","TOTALS"):
         d=base[market]
         for t in FAIR_THRESHOLDS[market]:
@@ -430,16 +497,9 @@ def _research_families(*,bq_client,replay_rows,games,log_func=print,research_rep
         move_col="market_prob_move_toward_selected" if market=="H2H" else "line_move_toward_selected"
         for t in MARKET_THRESHOLDS[market]:
             variants.append(_variant(d,market,f"NFL_{market}_MARKET_CONFIRMATION","MARKET_CONFIRMATION",f"MOVE_GE_{t}",t,pd.to_numeric(d.get(move_col),errors="coerce").ge(t).to_numpy(bool)))
-    # STAT selector: season-forward predicted market error, only when it agrees with CORE direction.
-    for market in ("SPREADS","TOTALS"):
-        oof,bundle=_selector_oof(games,market); selector_bundles[market]=bundle; d=base[market].merge(oof[["physical_game_id","selector_prediction","selector_scaled"]],on="physical_game_id",how="left")
-        core_dir=np.where(pd.to_numeric(d.selected_is_home if market=="SPREADS" else d.selected_over,errors="coerce").eq(1),1,-1)
-        sel_dir=np.sign(pd.to_numeric(d.selector_prediction,errors="coerce").to_numpy(float)); agree=sel_dir==core_dir
-        for t in STAT_THRESHOLDS:
-            mask=agree & pd.to_numeric(d.selector_scaled,errors="coerce").ge(t).to_numpy(bool)
-            variants.append(_variant(d,market,f"NFL_{market}_STAT_SHARED_EDGE","STAT_SELECTOR",f"SCALED_GE_{t}",t,mask))
-    # SYSTEM evidence comes from the authoritative System Miner V3 mechanism-family registry.
-    # Never reconstruct 2017-2022 discovery from the shorter 2021-2025 production replay.
+
+    # SYSTEM evidence comes from the authoritative full-history System Miner V3
+    # mechanism registry, never reconstructed from the shorter production replay.
     variants.extend(_system_family_variants_from_report(system_report,log_func=log_func))
     collapsed=shared.collapse_family_variants(variants)
     families=[]
@@ -448,36 +508,79 @@ def _research_families(*,bq_client,replay_rows,games,log_func=print,research_rep
         f={**f,"confirmation_gate":gate,"family_status":"LEGIT_FAMILY_REQUIRES_PROSPECTIVE" if gate["status"]=="PASS" else "HOLD_HISTORICAL","production_authority":bool(gate["status"]=="PASS")}
         families.append(f)
         log_func("[NFL-EDGE-V2-FAMILY] "+json.dumps({k:f.get(k) for k in ("mechanism_family_id","mechanism_class","market","variant_id","threshold","discovery","confirmation","discovery_gate","confirmation_gate","family_status")},sort_keys=True,default=str))
-    return families,selector_bundles,base,sysctx
+
+    # NCAAF-method STAT layer: rich prior-only statistical families predict market
+    # residual reliability. Discovery fixes representatives; confirmation only validates.
+    stat_report,stat_bundles,stat_lookup=statv23.run_historical_selector_research(
+        bq_client=bq_client,games=games,replay_rows=replay_rows,log_func=log_func,
+    )
+    for market in ("SPREADS","TOTALS"):
+        block=((stat_report.get("markets") or {}).get(market) or {})
+        for c in (block.get("preregistered") or []):
+            rank=int(c.get("preregistered_rank") or 0)
+            group=str(c.get("dependency_group") or c.get("family") or "STAT")
+            fid=f"NFL_{market}_STAT_V23_{group}_{rank}"
+            passed=(c.get("confirmation_gate") or {}).get("status")=="PASS"
+            f={
+                "mechanism_family_id":fid,"mechanism_class":"STAT_SELECTOR","market":market,
+                "variant_id":c.get("selector_id"),"selector_id":c.get("selector_id"),
+                "threshold":c.get("selector_threshold"),"selector_threshold":c.get("selector_threshold"),
+                "core_gap_min":c.get("core_gap_min"),"alpha":c.get("alpha"),"stat_family":c.get("family"),
+                "stat_dependency_group":group,"complexity":1,
+                "discovery":c.get("discovery") or {},"confirmation":c.get("confirmation") or {},
+                "discovery_by_season":c.get("discovery_by_season") or {},"confirmation_by_season":c.get("confirmation_by_season") or {},
+                "discovery_gate":c.get("discovery_gate") or {},"confirmation_gate":c.get("confirmation_gate") or {},
+                "family_status":"LEGIT_FAMILY_REQUIRES_PROSPECTIVE" if passed else "HOLD_CONFIRMATION",
+                "production_authority":bool(passed),
+                "evidence_windows":{"discovery":list(DISCOVERY_SEASONS),"confirmation":list(CONFIRM_SEASONS)},
+                "correlation_policy":"ALL_VALIDATED_STAT_SELECTORS_COLLAPSE_TO_ONE_STAT_MECHANISM",
+            }
+            families.append(f)
+            log_func("[NFL-EDGE-V2-FAMILY] "+json.dumps({k:f.get(k) for k in ("mechanism_family_id","mechanism_class","market","variant_id","threshold","core_gap_min","stat_family","stat_dependency_group","discovery","confirmation","discovery_gate","confirmation_gate","family_status")},sort_keys=True,default=str))
+
+    # Parent/child and overlap audit is applied *after* historical family gates.
+    # Correlated system families receive one shared independence key unless their
+    # overlap demonstrates predeclared incremental confirmation.
+    families,dependency_report=_apply_system_dependency_audit(families,sysctx,log_func=log_func)
+    return families,stat_bundles,stat_lookup,base,sysctx,stat_report,dependency_report
 
 
 def _family_lookup(families):return {f["mechanism_family_id"]:f for f in families if f.get("production_authority")}
 
 
-def _historical_votes_for_game(market,row,families,selector_oof_by_market,sysctx):
+def _historical_votes_for_game(market,row,families,stat_lookup,sysctx):
     legit=_family_lookup(families); votes=[]; gid=str(row.physical_game_id)
     core_dir=1 if ((market=="SPREADS" and _num(row.get("selected_is_home"))==1) or (market=="TOTALS" and _num(row.get("selected_over"))==1) or (market=="H2H" and _num(row.get("selected_is_home"))==1)) else -1
     fid=f"NFL_{market}_FAIR_VALUE_EDGE"
-    if fid in legit and _num(row.get("raw_edge"))>=_num(legit[fid].get("threshold")):votes.append({"mechanism_family_id":fid,"direction":core_dir,"label":"Fair-value edge"})
+    if fid in legit and _num(row.get("raw_edge"))>=_num(legit[fid].get("threshold")):
+        votes.append({"mechanism_family_id":fid,"independence_key":legit[fid].get("independence_key",fid),"direction":core_dir,"label":"Fair-value edge"})
     fid=f"NFL_{market}_MARKET_CONFIRMATION"; move_col="market_prob_move_toward_selected" if market=="H2H" else "line_move_toward_selected"
-    if fid in legit and _num(row.get(move_col))>=_num(legit[fid].get("threshold")):votes.append({"mechanism_family_id":fid,"direction":core_dir,"label":"Market confirmation"})
+    if fid in legit and _num(row.get(move_col))>=_num(legit[fid].get("threshold")):
+        votes.append({"mechanism_family_id":fid,"independence_key":legit[fid].get("independence_key",fid),"direction":core_dir,"label":"Market confirmation"})
     if market in {"SPREADS","TOTALS"}:
-        fid=f"NFL_{market}_STAT_SHARED_EDGE"
-        if fid in legit:
-            oo=selector_oof_by_market[market].get(gid)
-            if oo:
-                sdir=int(np.sign(_num(oo.get("selector_prediction")))) if math.isfinite(_num(oo.get("selector_prediction"))) else 0
-                if sdir==core_dir and _num(oo.get("selector_scaled"))>=_num(legit[fid].get("threshold")):votes.append({"mechanism_family_id":fid,"direction":core_dir,"label":"STAT shared-edge selector"})
+        for sfid,f in legit.items():
+            if f.get("market")!=market or f.get("mechanism_class")!="STAT_SELECTOR":continue
+            sid=str(f.get("selector_id") or f.get("variant_id") or "")
+            oo=(((stat_lookup or {}).get(market) or {}).get(sid) or {}).get(gid)
+            if not oo:continue
+            pred=_num(oo.get("selector_prediction")); scaled=_num(oo.get("selector_scaled"))
+            sdir=int(np.sign(pred)) if math.isfinite(pred) else 0
+            if (sdir==core_dir and math.isfinite(scaled) and scaled>=_num(f.get("selector_threshold"))
+                    and _num(row.get("raw_edge"))>=_num(f.get("core_gap_min"))):
+                votes.append({"mechanism_family_id":sfid,"independence_key":f.get("independence_key",f"NFL_{market}_STAT_SELECTOR"),"direction":core_dir,
+                              "label":f"STAT {f.get('stat_family')}","selector_id":sid,"selector_scaled":scaled})
     for v in (sysctx.get(gid,{}).get("votes") or []):
-        if v["market"]==market and v["family"] in legit:votes.append({"mechanism_family_id":v["family"],"direction":int(v["direction"]),"label":v.get("label",v["family"])})
+        if v["market"]==market and v["family"] in legit:
+            f=legit[v["family"]]
+            votes.append({"mechanism_family_id":v["family"],"independence_key":f.get("independence_key",v["family"]),"direction":int(v["direction"]),"label":v.get("label",v["family"])})
     return votes
 
 
-def _resolved_performance(base,families,selector_oof_by_market,sysctx,market,seasons):
+def _resolved_performance(base,families,stat_lookup,sysctx,market,seasons):
     d=base[market]; rec=[]
     for _,r in d.iterrows():
         if int(r.season) not in seasons:continue
-        votes=_historical_votes_for_game(market,r,families,selector_oof_by_market,sysctx); res=shared.resolve_votes(votes,strong_play_allowed=True)
+        votes=_historical_votes_for_game(market,r,families,stat_lookup,sysctx); res=shared.resolve_votes(votes,strong_play_allowed=True)
         if res["direction"]==0:continue
         core_dir=1 if ((market=="SPREADS" and _num(r.get("selected_is_home"))==1) or (market=="TOTALS" and _num(r.get("selected_over"))==1) or (market=="H2H" and _num(r.get("selected_is_home"))==1)) else -1
         # If resolved direction differs from CORE, invert target/profit only for spread/totals (-110).
@@ -498,40 +601,77 @@ def _resolved_performance(base,families,selector_oof_by_market,sysctx,market,sea
 
 
 def train_publish_edge_authority(*,bq_client,storage_client,bucket_name:str,replay_rows:pd.DataFrame,games:pd.DataFrame,research_report=None,system_report=None,log_func=print)->dict:
-    log_func("[NFL-EDGE-V2-PREFLIGHT] "+json.dumps({"status":"START","source_tag":SOURCE_TAG,"shared_framework":shared.framework_contract(),"discovery_seasons":list(DISCOVERY_SEASONS),"confirmation_seasons":list(CONFIRM_SEASONS),"year_2026_queried":False,"betting_engine_v1_role":"BENCHMARK_SHADOW"},sort_keys=True))
-    families,selectors,base,sysctx=_research_families(bq_client=bq_client,replay_rows=replay_rows,games=games,research_report=research_report,system_report=system_report,log_func=log_func)
+    log_func("[NFL-EDGE-V2-PREFLIGHT] "+json.dumps({
+        "status":"START","source_tag":SOURCE_TAG,"shared_framework":shared.framework_contract(),
+        "discovery_seasons":list(DISCOVERY_SEASONS),"confirmation_seasons":list(CONFIRM_SEASONS),
+        "year_2026_queried":False,"betting_engine_v1_role":"BENCHMARK_SHADOW",
+        "stat_selector_source_tag":statv23.SOURCE_TAG,
+    },sort_keys=True))
+    families,stat_bundles,stat_lookup,base,sysctx,stat_report,dependency_report=_research_families(
+        bq_client=bq_client,replay_rows=replay_rows,games=games,research_report=research_report,
+        system_report=system_report,log_func=log_func,
+    )
     research_summary=_build_research_summary(replay_rows,research_report,system_report)
+    research_summary["stat_selector_v23"]=stat_report
+    research_summary["system_dependency_audit_v23"]=dependency_report
     _emit_full_research_diagnostics(replay_rows,research_report,system_report,research_summary,log_func=log_func)
-    # Recreate selector OOF lookup for action-state validation.
-    selector_oof={}
-    for market in ("SPREADS","TOTALS"):
-        oo,_=_selector_oof(games,market); selector_oof[market]={str(r.physical_game_id):r.to_dict() for _,r in oo.iterrows()}
+
     action_perf={}; market_contract={}
     for market in ("SPREADS","H2H","TOTALS"):
-        disc=_resolved_performance(base,families,selector_oof,sysctx,market,DISCOVERY_SEASONS)
-        conf=_resolved_performance(base,families,selector_oof,sysctx,market,CONFIRM_SEASONS)
-        strong=conf.get("EDGE_MULTI") or {"n":0}; strong_allowed=bool(int(strong.get("n") or 0)>=10 and _num(strong.get("roi_per_unit"))>0 and (market=="H2H" or _num(strong.get("hit_rate"))>shared.BREAK_EVEN_110))
+        disc=_resolved_performance(base,families,stat_lookup,sysctx,market,DISCOVERY_SEASONS)
+        conf=_resolved_performance(base,families,stat_lookup,sysctx,market,CONFIRM_SEASONS)
+        dmulti=disc.get("EDGE_MULTI") or {"n":0}; cmulti=conf.get("EDGE_MULTI") or {"n":0}
+        strong_allowed=bool(
+            int(dmulti.get("n") or 0)>=30 and _num(dmulti.get("roi_per_unit"))>0
+            and int(cmulti.get("n") or 0)>=20 and _num(cmulti.get("roi_per_unit"))>0
+            and (market=="H2H" or (_num(cmulti.get("hit_rate"))>shared.BREAK_EVEN_110 and _num(dmulti.get("hit_rate"))>shared.BREAK_EVEN_110))
+        )
         legit=[f for f in families if f.get("market")==market and f.get("production_authority")]
-        market_contract[market]={"production_authority":bool(legit),"legit_family_ids":[f["mechanism_family_id"] for f in legit],"strong_play_allowed":strong_allowed,"policy":"FAMILY_COLLAPSED_EDGE_AUTHORITY" if legit else "MODEL_ONLY"}
+        keys=sorted(set(str(f.get("independence_key") or f.get("mechanism_family_id")) for f in legit))
+        market_contract[market]={
+            "production_authority":bool(legit),"legit_family_ids":[f["mechanism_family_id"] for f in legit],
+            "independence_keys":keys,"independent_mechanism_count":len(keys),
+            "strong_play_allowed":strong_allowed,
+            "policy":"FAMILY_COLLAPSED_EDGE_AUTHORITY" if legit else "MODEL_ONLY",
+        }
         action_perf[market]={"discovery":disc,"confirmation":conf}
-        log_func("[NFL-EDGE-V2-ACTION-STATE] "+json.dumps({"market":market,"legit_families":market_contract[market]["legit_family_ids"],"strong_play_allowed":strong_allowed,"discovery":disc,"confirmation":conf},sort_keys=True,default=str))
+        log_func("[NFL-EDGE-V2-ACTION-STATE] "+json.dumps({
+            "market":market,"legit_families":market_contract[market]["legit_family_ids"],
+            "independence_keys":keys,"strong_play_allowed":strong_allowed,
+            "strong_play_gate":{"discovery_multi_min_n":30,"confirmation_multi_min_n":20,"requires_positive_roi_both":True},
+            "discovery":disc,"confirmation":conf,
+        },sort_keys=True,default=str))
     stable_families=[]
     for f in families:
-        stable_families.append({k:v for k,v in f.items() if k not in {"model","scaler"}})
-    contract={"status":"NFL_EDGE_AUTHORITY_V2_ACTIVE","source_tag":SOURCE_TAG,"engine_version":ENGINE_VERSION,"framework":shared.framework_contract(),
-              "production_contract_sha256":prod.production_contract()["contract_sha256"],"discovery_seasons":list(DISCOVERY_SEASONS),"confirmation_seasons":list(CONFIRM_SEASONS),
-              "system_evidence_windows":{"discovery":list(SYSTEM_DISCOVERY_SEASONS),"confirmation":list(SYSTEM_CONFIRM_SEASONS)},"year_2026_queried":False,
-              "families":stable_families,"markets":market_contract,"historical_action_performance":action_perf,"research_summary":research_summary,"betting_engine_v1_role":"BENCHMARK_SHADOW",
-              "automatic_execution":False,"automatic_model_promotion":False}
-    fingerprint=_sha({"framework":contract["framework"]["contract_sha256"],"families":[{k:f.get(k) for k in ("mechanism_family_id","variant_id","threshold","family_status")} for f in stable_families],"markets":market_contract})
+        stable_families.append({k:v for k,v in f.items() if k not in {"model","scaler","pipeline"}})
+    contract={
+        "status":"NFL_EDGE_AUTHORITY_V2_ACTIVE","source_tag":SOURCE_TAG,"engine_version":ENGINE_VERSION,
+        "framework":shared.framework_contract(),"production_contract_sha256":prod.production_contract()["contract_sha256"],
+        "discovery_seasons":list(DISCOVERY_SEASONS),"confirmation_seasons":list(CONFIRM_SEASONS),
+        "system_evidence_windows":{"discovery":list(SYSTEM_DISCOVERY_SEASONS),"confirmation":list(SYSTEM_CONFIRM_SEASONS)},
+        "year_2026_queried":False,"families":stable_families,"markets":market_contract,
+        "historical_action_performance":action_perf,"research_summary":research_summary,
+        "stat_selector_contract_sha256":stat_report.get("selector_contract_sha256"),
+        "system_dependency_audit":dependency_report,
+        "betting_engine_v1_role":"BENCHMARK_SHADOW","automatic_execution":False,"automatic_model_promotion":False,
+    }
+    fingerprint=_sha({
+        "framework":contract["framework"]["contract_sha256"],
+        "stat_selector":contract.get("stat_selector_contract_sha256"),
+        "families":[{k:f.get(k) for k in ("mechanism_family_id","variant_id","threshold","core_gap_min","family_status","independence_key")} for f in stable_families],
+        "markets":market_contract,
+    })
     contract["contract_sha256"]=fingerprint
-    obj={"metadata":contract,"selector_bundles":selectors}
+    obj={"metadata":contract,"stat_selector_bundles":stat_bundles}
     bio=io.BytesIO(); joblib.dump(obj,bio,compress=3); payload=bio.getvalue(); artifact_sha=hashlib.sha256(payload).hexdigest()
     storage_client.bucket(bucket_name).blob(ARTIFACT_OBJECT).upload_from_string(payload,content_type="application/octet-stream")
     contract["artifact_sha256"]=artifact_sha; contract["artifact_uri"]=f"gs://{bucket_name}/{ARTIFACT_OBJECT}"
-    meta_uri=_write_json(storage_client,bucket_name,META_OBJECT,contract)
-    contract["meta_uri"]=meta_uri
-    log_func("[NFL-EDGE-V2-PUBLISH] "+json.dumps({"status":contract["status"],"contract_sha256":fingerprint,"artifact_sha256":artifact_sha,"artifact_uri":contract["artifact_uri"],"market_contract":market_contract,"betting_engine_v1_role":"BENCHMARK_SHADOW"},sort_keys=True,default=str))
+    meta_uri=_write_json(storage_client,bucket_name,META_OBJECT,contract); contract["meta_uri"]=meta_uri
+    log_func("[NFL-EDGE-V2-PUBLISH] "+json.dumps({
+        "status":contract["status"],"contract_sha256":fingerprint,"artifact_sha256":artifact_sha,"artifact_uri":contract["artifact_uri"],
+        "market_contract":market_contract,"stat_selector_contract_sha256":contract.get("stat_selector_contract_sha256"),
+        "betting_engine_v1_role":"BENCHMARK_SHADOW",
+    },sort_keys=True,default=str))
     return contract
 
 
@@ -592,30 +732,63 @@ def _market_base_row(p,market,q):
 
 
 def score_live(*,bq_client,storage_client,bucket_name,prediction_rows,now):
-    eng=_load_engine(storage_client,bucket_name); meta=eng["metadata"]; selectors=eng.get("selector_bundles") or {}; legit={f["mechanism_family_id"]:f for f in meta.get("families",[]) if f.get("production_authority")}
+    eng=_load_engine(storage_client,bucket_name); meta=eng["metadata"]
+    stat_bundles=eng.get("stat_selector_bundles") or {}
+    legit={f["mechanism_family_id"]:f for f in meta.get("families",[]) if f.get("production_authority")}
     quotes=benchmark._consensus_market(bq_client,now); systems=_live_system_events(bq_client,now); out=[]
+    stat_legit=[f for f in legit.values() if f.get("mechanism_class")=="STAT_SELECTOR"]
+    stat_features={}; stat_live_meta={"status":"NOT_REQUIRED_NO_VALIDATED_STAT_SELECTOR"}
+    if stat_legit:
+        try:
+            stat_features,stat_live_meta=statv23.build_live_feature_map(bq_client=bq_client,prediction_rows=prediction_rows)
+        except Exception as exc:
+            stat_features={};stat_live_meta={"status":"HOLD_LIVE_STAT_FEATURE_BUILD","error":f"{type(exc).__name__}:{exc}"}
     for p in prediction_rows:
-        gs=pd.to_datetime(p.get("game_start"),utc=True,errors="coerce");k=(gs.round("s").isoformat(),_norm(p.get("home_team")),_norm(p.get("away_team"))) if pd.notna(gs) else None;q=quotes.get(k,{}) if k else {};sys=systems.get(k,[]) if k else []
+        pid=str(p.get("prediction_pair_id") or "")
+        gs=pd.to_datetime(p.get("game_start"),utc=True,errors="coerce")
+        k=(gs.round("s").isoformat(),_norm(p.get("home_team")),_norm(p.get("away_team"))) if pd.notna(gs) else None
+        q=quotes.get(k,{}) if k else {};sys=systems.get(k,[]) if k else []
+        rich_features=stat_features.get(pid)
         for market in ("SPREADS","H2H","TOTALS"):
             b=_market_base_row(p,market,q)
             if not b or b["core_direction"]==0:
-                out.append({"prediction_pair_id":p.get("prediction_pair_id"),"game_start":p.get("game_start"),"home_team":p.get("home_team"),"away_team":p.get("away_team"),"market":market,"action":"NO MARKET","edge_sources":[],"system_labels":[x["label"] for x in sys if x["market"]==market]});continue
-            votes=[];core=b["core_direction"]
+                out.append({"prediction_pair_id":p.get("prediction_pair_id"),"game_start":p.get("game_start"),"home_team":p.get("home_team"),"away_team":p.get("away_team"),"market":market,"action":"NO MARKET","edge_sources":[],"system_labels":[x["label"] for x in sys if x["market"]==market],"stat_selector_live_status":stat_live_meta.get("status")});continue
+            votes=[];core=b["core_direction"];stat_support=[]
             fid=f"NFL_{market}_FAIR_VALUE_EDGE"
-            if fid in legit and b["raw_edge"]>=_num(legit[fid].get("threshold")):votes.append({"mechanism_family_id":fid,"direction":core,"label":"FAIR_VALUE"})
+            if fid in legit and b["raw_edge"]>=_num(legit[fid].get("threshold")):
+                votes.append({"mechanism_family_id":fid,"independence_key":legit[fid].get("independence_key",fid),"direction":core,"label":"FAIR_VALUE"})
             fid=f"NFL_{market}_MARKET_CONFIRMATION"
-            if fid in legit and _num(b.get("move_toward_core"))>=_num(legit[fid].get("threshold")):votes.append({"mechanism_family_id":fid,"direction":core,"label":"MARKET_CONFIRMATION"})
-            if market in {"SPREADS","TOTALS"}:
-                fid=f"NFL_{market}_STAT_SHARED_EDGE"
-                if fid in legit and market in selectors:
-                    pred=_selector_predict(selectors[market],b["features"]); scaled=abs(pred)/max(_num(selectors[market].get("scale")),1e-9);sdir=int(np.sign(pred))
-                    if sdir==core and scaled>=_num(legit[fid].get("threshold")):votes.append({"mechanism_family_id":fid,"direction":core,"label":"STAT_SELECTOR","selector_prediction":pred,"selector_scaled":scaled})
-            for s in sys:
-                if s["market"]==market and s["family"] in legit:votes.append({"mechanism_family_id":s["family"],"direction":int(s["direction"]),"label":s["label"]})
+            if fid in legit and _num(b.get("move_toward_core"))>=_num(legit[fid].get("threshold")):
+                votes.append({"mechanism_family_id":fid,"independence_key":legit[fid].get("independence_key",fid),"direction":core,"label":"MARKET_CONFIRMATION"})
+            if market in {"SPREADS","TOTALS"} and rich_features:
+                for sfid,f in legit.items():
+                    if f.get("market")!=market or f.get("mechanism_class")!="STAT_SELECTOR":continue
+                    sid=str(f.get("selector_id") or f.get("variant_id") or "")
+                    bundle=((stat_bundles.get(market) or {}).get(sid))
+                    if not bundle:continue
+                    scored=statv23.score_live_bundle(bundle,rich_features)
+                    qualifies=bool(
+                        scored.get("status")=="SCORED"
+                        and int(scored.get("selector_direction") or 0)==core
+                        and _num(scored.get("selector_scaled"))>=_num(f.get("selector_threshold"))
+                        and b["raw_edge"]>=_num(f.get("core_gap_min"))
+                    )
+                    stat_support.append({
+                        "family":f.get("stat_family"),"dependency_group":f.get("stat_dependency_group"),
+                        "selector_id":sid,"selector_threshold":f.get("selector_threshold"),
+                        "core_gap_min":f.get("core_gap_min"),"qualifies":qualifies,**scored,
+                    })
+                    if not qualifies:continue
+                    votes.append({"mechanism_family_id":sfid,"independence_key":f.get("independence_key",f"NFL_{market}_STAT_SELECTOR"),
+                                  "direction":core,"label":f"STAT {f.get('stat_family')}","selector_id":sid,
+                                  "selector_prediction":scored.get("selector_prediction"),"selector_scaled":scored.get("selector_scaled")})
+            for sv in sys:
+                if sv["market"]==market and sv["family"] in legit:
+                    f=legit[sv["family"]]
+                    votes.append({"mechanism_family_id":sv["family"],"independence_key":f.get("independence_key",sv["family"]),"direction":int(sv["direction"]),"label":sv["label"]})
             mc=(meta.get("markets") or {}).get(market,{})
             res=shared.resolve_votes(votes,strong_play_allowed=bool(mc.get("strong_play_allowed")))
             action=res["action"]
-            # A valid edge without a selected execution price is visible but not a formal play.
             if action in {"PLAY","STRONG PLAY"} and not math.isfinite(_num(b.get("selected_price"))):action="EDGE — NO EXEC QUOTE"
             selected=b["selected"]
             if res["direction"] and res["direction"]!=core:
@@ -624,7 +797,8 @@ def score_live(*,bq_client,storage_client,bucket_name,prediction_rows,now):
                 elif market=="H2H":selected=p.get("away_team") if core>0 else p.get("home_team")
             out.append({"prediction_pair_id":p.get("prediction_pair_id"),"game_start":p.get("game_start"),"home_team":p.get("home_team"),"away_team":p.get("away_team"),"market":market,
                         "action":action,"decision":res["decision"],"selected":selected,"market_value":b["market_value"],"model_value":b["model_value"],"raw_model_edge":b["raw_edge"],"selected_price":b["selected_price"],
-                        "independent_mechanisms":res["independent_mechanisms"],"edge_sources":res["families"],"edge_votes":res["votes"],"system_labels":[x["label"] for x in sys if x["market"]==market],
+                        "independent_mechanisms":res["independent_mechanisms"],"independence_keys":res.get("independence_keys") or [],"edge_sources":res["families"],"edge_votes":res["votes"],
+                        "system_labels":[x["label"] for x in sys if x["market"]==market],"stat_selector_support":stat_support,"stat_selector_live_status":stat_live_meta.get("status"),
                         "betting_decision_authority":bool(action in {"PLAY","STRONG PLAY"}),"automatic_execution":False,"edge_contract_sha256":meta.get("contract_sha256")})
     return out
 
@@ -690,9 +864,10 @@ def _performance(sc,bucket):
 def update_live_state(*,bq_client,storage_client,bucket_name,prediction_rows,now,log_func=print):
     eng=_load_engine(storage_client,bucket_name);meta=eng["metadata"];rows=score_live(bq_client=bq_client,storage_client=storage_client,bucket_name=bucket_name,prediction_rows=prediction_rows,now=now);capture=_capture(storage_client,bucket_name,rows,now,meta.get("contract_sha256"));settle=_settle(bq_client,storage_client,bucket_name,now);perf=_performance(storage_client,bucket_name)
     counts={a:sum(1 for r in rows if r.get("action")==a) for a in ("PLAY","STRONG PLAY","MODEL ONLY","PASS — CONFLICT","EDGE — NO EXEC QUOTE","NO MARKET")}
-    state={"status":"NFL_EDGE_AUTHORITY_V2_LIVE_ACTIVE","source_tag":SOURCE_TAG,"generated_at_utc":pd.to_datetime(now,utc=True).isoformat(),"contract":meta,"live_rows":rows,"action_counts":counts,"capture":capture,"settlement":settle,"live_performance":perf,"automatic_execution":False}
+    state={"status":"NFL_EDGE_AUTHORITY_V2_3_LIVE_ACTIVE","source_tag":SOURCE_TAG,"generated_at_utc":pd.to_datetime(now,utc=True).isoformat(),"contract":meta,"live_rows":rows,"action_counts":counts,"capture":capture,"settlement":settle,"live_performance":perf,"automatic_execution":False}
     state["current_uri"]=_write_json(storage_client,bucket_name,CURRENT_OBJECT,state)
-    log_func("[NFL-EDGE-V2-LIVE] "+json.dumps({"status":state["status"],"action_counts":counts,"capture":capture,"settlement":settle,"live_performance":perf,"contract_sha256":meta.get("contract_sha256")},sort_keys=True,default=str))
+    _stat_status=sorted(set(str(r.get("stat_selector_live_status") or "") for r in rows if r.get("stat_selector_live_status")))
+    log_func("[NFL-EDGE-V2-LIVE] "+json.dumps({"status":state["status"],"action_counts":counts,"capture":capture,"settlement":settle,"live_performance":perf,"stat_selector_live_status":_stat_status,"contract_sha256":meta.get("contract_sha256")},sort_keys=True,default=str))
     return state
 
 
@@ -701,7 +876,7 @@ def read_dashboard_state(*,storage_client,bucket_name="sharp-models"):
 
 
 def _self_test():
-    assert shared.framework_contract()["framework_version"]=="SPORTS_EDGE_AUTHORITY_V1"
+    assert shared.framework_contract()["framework_version"]=="SPORTS_EDGE_AUTHORITY_V1_1"
     assert set(DISCOVERY_SEASONS).isdisjoint(CONFIRM_SEASONS)
     assert 2026 not in DISCOVERY_SEASONS+CONFIRM_SEASONS
     v=shared.resolve_votes([{"mechanism_family_id":"A","direction":1},{"mechanism_family_id":"B","direction":1}],strong_play_allowed=False)

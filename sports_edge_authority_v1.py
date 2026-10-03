@@ -23,8 +23,8 @@ from typing import Any, Iterable
 
 import numpy as np
 
-SOURCE_TAG = "sports-edge-authority-v1.0-cross-sport-standard-20261002"
-FRAMEWORK_VERSION = "SPORTS_EDGE_AUTHORITY_V1"
+SOURCE_TAG = "sports-edge-authority-v1.1-dependency-aware-cross-sport-standard-20261002"
+FRAMEWORK_VERSION = "SPORTS_EDGE_AUTHORITY_V1_1"
 BREAK_EVEN_110 = 110.0 / 210.0
 
 
@@ -129,34 +129,63 @@ def collapse_family_variants(variants:list[dict]) -> list[dict]:
 
 
 def resolve_votes(votes:list[dict], *, strong_play_allowed:bool=True) -> dict:
-    """Resolve one vote per independent mechanism family."""
-    uniq={}
+    """Resolve one vote per independent mechanism, not merely per rule/family id.
+
+    Sports may provide ``independence_key`` after a parent/child or overlap audit.
+    Multiple validated families sharing the same independence key are collapsed to
+    one mechanism for escalation.  This preserves the NCAAF rule that aliases,
+    nested systems, and correlated variants cannot manufacture a STRONG PLAY.
+    """
+    by_family={}
     for v in votes:
         fid=str(v.get("mechanism_family_id") or "")
         direction=int(np.sign(_num(v.get("direction")))) if math.isfinite(_num(v.get("direction"))) else 0
         if not fid or direction==0:
             continue
-        # same family cannot inflate evidence; conflicting aliases invalidate family
-        if fid in uniq and int(uniq[fid]["direction"])!=direction:
-            uniq[fid]={"mechanism_family_id":fid,"direction":0,"label":fid,"conflicted_aliases":True}
-        elif fid not in uniq:
-            uniq[fid]={**v,"direction":direction}
-    clean=[v for v in uniq.values() if int(v.get("direction") or 0)!=0]
-    alias_conflicts=[v for v in uniq.values() if int(v.get("direction") or 0)==0]
-    dirs=sorted(set(int(v["direction"]) for v in clean))
-    if alias_conflicts or len(dirs)>1:
+        if fid in by_family and int(by_family[fid]["direction"])!=direction:
+            by_family[fid]={"mechanism_family_id":fid,"direction":0,"label":fid,"conflicted_aliases":True}
+        elif fid not in by_family:
+            by_family[fid]={**v,"direction":direction}
+    clean_family=[v for v in by_family.values() if int(v.get("direction") or 0)!=0]
+    alias_conflicts=[v for v in by_family.values() if int(v.get("direction") or 0)==0]
+    if alias_conflicts:
         return {"decision":"PASS_CONFLICT","action":"PASS — CONFLICT","direction":0,
-                "independent_mechanisms":len(clean),"families":sorted(uniq),"votes":clean,
-                "reason":"VALIDATED_EDGE_CONFLICT" if len(dirs)>1 else "INTRA_FAMILY_ALIAS_CONFLICT"}
-    if not clean:
+                "independent_mechanisms":0,"families":sorted(by_family),"votes":clean_family,
+                "reason":"INTRA_FAMILY_ALIAS_CONFLICT"}
+
+    # Collapse correlated families to their audited independence key.
+    by_mechanism={}
+    for v in clean_family:
+        key=str(v.get("independence_key") or v.get("mechanism_family_id") or "")
+        if not key:
+            continue
+        if key not in by_mechanism:
+            by_mechanism[key]={"direction":int(v["direction"]),"families":[str(v.get("mechanism_family_id"))],"votes":[v]}
+        else:
+            by_mechanism[key]["families"].append(str(v.get("mechanism_family_id")))
+            by_mechanism[key]["votes"].append(v)
+            if int(by_mechanism[key]["direction"])!=int(v["direction"]):
+                by_mechanism[key]["direction"]=0
+    mechanism_conflicts=[k for k,z in by_mechanism.items() if int(z.get("direction") or 0)==0]
+    clean_mech={k:z for k,z in by_mechanism.items() if int(z.get("direction") or 0)!=0}
+    dirs=sorted(set(int(z["direction"]) for z in clean_mech.values()))
+    if mechanism_conflicts or len(dirs)>1:
+        return {"decision":"PASS_CONFLICT","action":"PASS — CONFLICT","direction":0,
+                "independent_mechanisms":len(clean_mech),"families":sorted(by_family),"votes":clean_family,
+                "independence_keys":sorted(by_mechanism),
+                "reason":"INDEPENDENCE_CLUSTER_CONFLICT" if mechanism_conflicts else "VALIDATED_EDGE_CONFLICT"}
+    if not clean_mech:
         return {"decision":"MODEL_ONLY","action":"MODEL ONLY","direction":0,
-                "independent_mechanisms":0,"families":[],"votes":[],"reason":"NO_VALIDATED_EDGE_FAMILY"}
-    n=len(clean); direction=dirs[0]
+                "independent_mechanisms":0,"families":[],"votes":[],"independence_keys":[],
+                "reason":"NO_VALIDATED_EDGE_FAMILY"}
+    n=len(clean_mech); direction=dirs[0]
     if n>=2 and strong_play_allowed:
         return {"decision":"EDGE_MULTI","action":"STRONG PLAY","direction":direction,
-                "independent_mechanisms":n,"families":sorted(uniq),"votes":clean,"reason":"MULTIPLE_INDEPENDENT_MECHANISMS"}
+                "independent_mechanisms":n,"families":sorted(by_family),"votes":clean_family,
+                "independence_keys":sorted(clean_mech),"reason":"MULTIPLE_INDEPENDENT_MECHANISMS"}
     return {"decision":"EDGE_SINGLE" if n==1 else "EDGE_MULTI_NO_BONUS","action":"PLAY","direction":direction,
-            "independent_mechanisms":n,"families":sorted(uniq),"votes":clean,"reason":"VALIDATED_EDGE_FAMILY"}
+            "independent_mechanisms":n,"families":sorted(by_family),"votes":clean_family,
+            "independence_keys":sorted(clean_mech),"reason":"VALIDATED_EDGE_FAMILY"}
 
 
 def framework_contract() -> dict:
@@ -164,6 +193,7 @@ def framework_contract() -> dict:
         "framework_version":FRAMEWORK_VERSION,"source_tag":SOURCE_TAG,
         "prediction_and_betting_authority_separate":True,
         "family_collapse":"ONE_MECHANISM_FAMILY_ONE_VOTE",
+        "dependency_collapse":"AUDITED_INDEPENDENCE_KEY_ONE_VOTE",
         "discovery_selects_confirmation_only_validates":True,
         "conflict_rule":"PASS_CONFLICT",
         "multi_rule":"ONLY_INDEPENDENT_MECHANISMS_MAY_ESCALATE",
@@ -179,8 +209,12 @@ def _self_test():
     assert resolve_votes([{"mechanism_family_id":"A","direction":1}])["action"]=="PLAY"
     assert resolve_votes([{"mechanism_family_id":"A","direction":1},{"mechanism_family_id":"B","direction":1}])["action"]=="STRONG PLAY"
     assert resolve_votes([{"mechanism_family_id":"A","direction":1},{"mechanism_family_id":"B","direction":-1}])["action"]=="PASS — CONFLICT"
-    # aliases do not create a second vote
     assert resolve_votes([{"mechanism_family_id":"A","direction":1},{"mechanism_family_id":"A","direction":1}])["independent_mechanisms"]==1
+    dep=resolve_votes([
+        {"mechanism_family_id":"A","independence_key":"PARENT_X","direction":1},
+        {"mechanism_family_id":"B","independence_key":"PARENT_X","direction":1},
+    ])
+    assert dep["independent_mechanisms"]==1 and dep["action"]=="PLAY"
     return {"status":"PASS",**framework_contract()}
 
 if __name__=="__main__":

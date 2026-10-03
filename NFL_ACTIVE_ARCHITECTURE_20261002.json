@@ -1,5 +1,5 @@
 {
-  "architecture": "NFL_PRODUCTION_V2_2_FULL_NCAAF_STYLE_RESEARCH_AUDIT",
+  "architecture": "NFL_PRODUCTION_V2_3_NCAAF_STAT_SELECTOR_DEPENDENCY_AUDIT",
   "as_of": "2026-10-02",
   "benchmark_only": {
     "module": "nfl_betting_engine_v1.py",
@@ -7,69 +7,46 @@
     "role": "FAILED_PROMOTION_BENCHMARK_SHADOW"
   },
   "operator_routes": {
-    "challenger_research": {
-      "label": "NFL Challenger Research"
-    },
+    "challenger_research": {"label": "NFL Challenger Research"},
     "historical_validation": {
-      "label": "NFL Edge Authority \u2014 Historical Validation (Full Research)",
+      "label": "NFL Edge Authority — Historical Validation (Full Research)",
       "market": "nfl_production_replay",
-      "behavior": "audit + full CORE/STAT/residual research + System Miner V3 + replay + edge authority confirmation"
+      "behavior": "audit + CORE/structured research + rich STAT market-residual selector + residual miner + System Miner V3 + dependency audit + replay + edge authority confirmation"
     },
-    "system_research": {
-      "label": "NFL System Research / Miner"
-    },
-    "weekly_update": {
-      "label": "NFL Production \u2014 Weekly Update",
-      "market": "nfl_production_weekly"
-    }
+    "system_research": {"label": "NFL System Research / Miner"},
+    "weekly_update": {"label": "NFL Production — Weekly Update", "market": "nfl_production_weekly"}
   },
   "primary_decision_engine": {
-    "2026_training_use": false,
-    "automatic_model_promotion": false,
-    "automatic_wagering": false,
-    "historical_validation": "FULL_CORE_STAT_RESIDUAL_SYSTEM_MINER_V3_PLUS_AUTHORITY",
-    "mechanism_classes": [
-      "FAIR_VALUE",
-      "STAT_SELECTOR",
-      "SYSTEM",
-      "MARKET_CONFIRMATION"
-    ],
-    "method_origin": "NCAAF Production V1 edge-authority architecture",
     "module": "nfl_edge_authority_v2.py",
-    "new_selector_confirmation": [
-      2024,
-      2025
-    ],
-    "new_selector_discovery": [
-      2021,
-      2022,
-      2023
-    ],
-    "source_tag": "nfl-edge-authority-v2.1-full-ncaaf-research-diagnostics-20261002",
+    "source_tag": "nfl-edge-authority-v2.3-stat-selector-system-dependency-20261002",
+    "method_origin": "NCAAF Production V1 edge-authority architecture",
+    "mechanism_classes": ["FAIR_VALUE", "STAT_SELECTOR", "SYSTEM", "MARKET_CONFIRMATION"],
+    "new_stat_selector": {
+      "module": "nfl_stat_selector_v23.py",
+      "source_tag": "nfl-stat-selector-v2.3-ncaaf-style-market-reliability-20261002",
+      "target": "market_residual_reliability",
+      "discovery": [2021, 2022, 2023],
+      "confirmation": [2024, 2025],
+      "2026_training_use": false,
+      "family_collapse": "ONE_STAT_INDEPENDENCE_KEY_PER_MARKET"
+    },
     "system_authority_source": "AUTHORITATIVE_SYSTEM_MINER_V3_MECHANISM_FAMILY_REGISTRY",
-    "system_confirmation": [
-      2023,
-      2024,
-      2025
-    ],
-    "system_discovery": [
-      2017,
-      2018,
-      2019,
-      2020,
-      2021,
-      2022
-    ]
+    "system_discovery": [2017, 2018, 2019, 2020, 2021, 2022],
+    "system_confirmation": [2023, 2024, 2025],
+    "system_dependency_policy": "PARENT_CHILD_AND_OVERLAP_AUDIT_BEFORE_MULTI_ESCALATION",
+    "automatic_model_promotion": false,
+    "automatic_wagering": false
   },
   "production": {
-    "dashboard": "sharp_line_dashboard.py",
-    "edge_authority": "nfl_edge_authority_v2.py",
     "fair_value_backbones": "nfl_production_v1.py",
-    "historical_validation": "nfl_production_replay_v1.py (v2.2 full research audit)",
-    "job_router": "train_job.py",
     "live_feature_parity": "nfl_live_feature_parity_v1.py",
-    "live_paired_ledger_and_edge_scoring": "nfl_production_live_v1.py",
-    "shared_authority_framework": "sports_edge_authority_v1.py"
+    "historical_validation": "nfl_production_replay_v1.py (v2.3)",
+    "live_paired_ledger_and_edge_scoring": "nfl_production_live_v1.py (v2.3)",
+    "edge_authority": "nfl_edge_authority_v2.py",
+    "stat_selector": "nfl_stat_selector_v23.py",
+    "shared_authority_framework": "sports_edge_authority_v1.py (V1.1 dependency-aware)",
+    "job_router": "train_job.py",
+    "dashboard": "sharp_line_dashboard.py"
   },
   "research_preserved": [
     "nfl_research_engine_v2.py",
@@ -84,7 +61,7 @@
   "shared_standard": {
     "document": "SPORTS_EDGE_AUTHORITY_STANDARD_V1.md",
     "module": "sports_edge_authority_v1.py",
-    "rule": "sport adapters change; prediction-vs-authority separation, family collapse, confirmation, independent-mechanism counting and conflict rules do not",
-    "source_tag": "sports-edge-authority-v1.0-cross-sport-standard-20261002"
+    "source_tag": "sports-edge-authority-v1.1-dependency-aware-cross-sport-standard-20261002",
+    "rule": "sport adapters change; prediction-vs-authority separation, rich-research/small-production, discovery/confirmation, family/dependency collapse, independent-mechanism counting and conflict rules do not"
   }
 }

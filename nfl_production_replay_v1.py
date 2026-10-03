@@ -1,4 +1,4 @@
-"""NFL Production V2.1 — historical replay + Edge Authority V2 validation.
+"""NFL Production V2.3 — historical replay + Edge Authority V2.3 validation.
 
 Purpose
 -------
@@ -20,7 +20,7 @@ moneyline when available. Neither is represented as verified executable pricing.
 
 This module is read-only with respect to BigQuery and never changes champion,
 challenger, or model-promotion authority. After generating leak-safe replay rows,
-it preserves Betting Engine V1 as a benchmark and trains/publishes Edge Authority V2 using the shared NCAAF-derived family/confirmation framework. It may also publish replay artifacts to GCS.
+it preserves Betting Engine V1 as a benchmark and trains/publishes Edge Authority V2.3 using the shared NCAAF-derived family/confirmation framework. It may also publish replay artifacts to GCS.
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ import nfl_betting_engine_v1 as betting
 import nfl_edge_authority_v2 as edge_v2
 from nfl_feature_audit_v1 import VIEW
 
-SOURCE_TAG = "nfl-production-v2.2-historical-full-edge-research-20261002"
+SOURCE_TAG = "nfl-production-v2.3-historical-stat-selector-system-dependency-20261002"
 VALIDATION_SEASONS = (2021, 2022, 2023, 2024, 2025)
 VALIDATION_STAGE = "REGULAR"
 MARKET_COLUMNS = (

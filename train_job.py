@@ -585,7 +585,7 @@ def main():
             raise
         return
 
-    # NFL Edge Authority V2 / Production V2.1 — unified weekly production update.
+    # NFL Edge Authority V2.3 / Production V2.3 — unified weekly production update.
     # One operator action: parity -> challenger refresh/reuse -> paired live score
     # -> unified betting-engine decisions/settlement -> performance/promotion clocks.
     if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_production_weekly":
@@ -608,9 +608,10 @@ def main():
 
         _parity = _load_nfl_weekly_exact("nfl_live_feature_parity_v1", "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002")
         _prod = _load_nfl_weekly_exact("nfl_production_v1", "nfl-production-v1.1.1-publish-receipt-normalization-20261002")
-        _shared = _load_nfl_weekly_exact("sports_edge_authority_v1", "sports-edge-authority-v1.0-cross-sport-standard-20261002")
-        _edge = _load_nfl_weekly_exact("nfl_edge_authority_v2", "nfl-edge-authority-v2.1-full-ncaaf-research-diagnostics-20261002")
-        _live = _load_nfl_weekly_exact("nfl_production_live_v1", "nfl-production-v2.1-live-edge-authority-v2-20261002")
+        _shared = _load_nfl_weekly_exact("sports_edge_authority_v1", "sports-edge-authority-v1.1-dependency-aware-cross-sport-standard-20261002")
+        _stat23 = _load_nfl_weekly_exact("nfl_stat_selector_v23", "nfl-stat-selector-v2.3-ncaaf-style-market-reliability-20261002")
+        _edge = _load_nfl_weekly_exact("nfl_edge_authority_v2", "nfl-edge-authority-v2.3-stat-selector-system-dependency-20261002")
+        _live = _load_nfl_weekly_exact("nfl_production_live_v1", "nfl-production-v2.3-live-stat-selector-edge-authority-20261002")
         pw.emit("audit", f"[NFL-EDGE-V2] Weekly production update start run={run_id}", pct=0.05)
         try:
             _bq=bigquery.Client(project="sharplogger")
@@ -619,7 +620,7 @@ def main():
                 raise RuntimeError("[NFL-PROD-V1-WEEKLY-HOLD] LIVE_FEATURE_PARITY_NOT_GREEN "+str(_parity_result.get("status")))
             pw.emit("train", "Parity PASS; refresh/reuse weekly challenger", pct=0.30)
             _refresh=_prod.run_nfl_production_refresh(bq_client=_bq,storage_client=gcs,bucket_name=bucket,log_func=log_func)
-            pw.emit("score", "Challenger ready; score paired ledger + Edge Authority V2 and performance", pct=0.65)
+            pw.emit("score", "Challenger ready; score paired ledger + Edge Authority V2.3 and performance", pct=0.65)
             _score=_live.run_nfl_production_live_score(bq_client=_bq,storage_client=gcs,bucket_name=bucket,log_func=log_func)
             _result={"status":"NFL_PRODUCTION_V1_WEEKLY_UPDATE_PASS","refresh":_refresh,"score":_score}
             log_func("[NFL-PROD-V1-WEEKLY-CONTRACT] "+json.dumps({
@@ -636,7 +637,7 @@ def main():
             raise
         return
 
-    # NFL Edge Authority V2.1 — full NCAAF-depth historical research + authority confirmation.
+    # NFL Edge Authority V2.3 — rich NCAAF-style STAT selector + dependency-aware authority confirmation.
     # One operator action now runs the complete protected research stack first:
     # audit -> structured CORE/STAT research -> residual Miner -> edge gates ->
     # direct System Miner V3/mechanism registry -> production replay -> authority.
@@ -672,18 +673,19 @@ def main():
         _systems = _load_nfl_prod_replay_exact("nfl_system_lab_v3", "nfl-system-lab-v3-research-v2.2-mechanism-family-freeze-20261001")
         _prod = _load_nfl_prod_replay_exact("nfl_production_v1", "nfl-production-v1.1.1-publish-receipt-normalization-20261002")
         _bet = _load_nfl_prod_replay_exact("nfl_betting_engine_v1", "nfl-betting-engine-v1.0-unified-decision-20261002")
-        _shared = _load_nfl_prod_replay_exact("sports_edge_authority_v1", "sports-edge-authority-v1.0-cross-sport-standard-20261002")
-        _edge = _load_nfl_prod_replay_exact("nfl_edge_authority_v2", "nfl-edge-authority-v2.1-full-ncaaf-research-diagnostics-20261002")
-        _replay = _load_nfl_prod_replay_exact("nfl_production_replay_v1", "nfl-production-v2.2-historical-full-edge-research-20261002")
+        _shared = _load_nfl_prod_replay_exact("sports_edge_authority_v1", "sports-edge-authority-v1.1-dependency-aware-cross-sport-standard-20261002")
+        _stat23 = _load_nfl_prod_replay_exact("nfl_stat_selector_v23", "nfl-stat-selector-v2.3-ncaaf-style-market-reliability-20261002")
+        _edge = _load_nfl_prod_replay_exact("nfl_edge_authority_v2", "nfl-edge-authority-v2.3-stat-selector-system-dependency-20261002")
+        _replay = _load_nfl_prod_replay_exact("nfl_production_replay_v1", "nfl-production-v2.3-historical-stat-selector-system-dependency-20261002")
 
-        pw.emit("audit", f"[NFL-EDGE-V2.1] Full historical validation start run={run_id}; CORE + STAT + residual + System Miner V3 + authority; 2026 untouched", pct=0.03)
+        pw.emit("audit", f"[NFL-EDGE-V2.3] Full historical validation start run={run_id}; CORE + rich STAT selector + residual + System Miner V3 + dependency audit + authority; 2026 untouched", pct=0.03)
         try:
             _bq=bigquery.Client(project="sharplogger")
             _rcontract.assert_contract()
             _syscontract.assert_contract()
             _audit_report=_audit.run_nfl_audit_v1(storage_client=gcs,bucket_name=bucket,log_func=log_func)
             if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
-                raise RuntimeError("[NFL-EDGE-V2.1-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
+                raise RuntimeError("[NFL-EDGE-V2.3-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
             _health=_ledger3.ledger_health_check(_bq,service_identity_hint="sharp-train-sa@sharplogger.iam.gserviceaccount.com")
 
             pw.emit("research", "Audit PASS; run full CORE / STAT / residual / edge-gate research", pct=0.18)
@@ -698,14 +700,14 @@ def main():
                 audit_report=_audit_report,log_func=log_func,
             )
 
-            pw.emit("replay", "System registry frozen; run leak-safe production replay + Betting Engine V1 benchmark + Edge Authority V2.1", pct=0.72)
+            pw.emit("replay", "System registry frozen; run leak-safe production replay + rich STAT selector + dependency audit + Edge Authority V2.3", pct=0.72)
             _result = _replay.run_nfl_production_historical_replay(
                 bq_client=_bq,storage_client=gcs,bucket_name=bucket,log_func=log_func,
                 research_report=_research_report,system_report=_system_report,
             )
-            pw.emit("done", "NFL Edge Authority V2.1 full historical validation complete: "+_result["status"], pct=1.0)
+            pw.emit("done", "NFL Edge Authority V2.3 historical validation complete: "+_result["status"], pct=1.0)
         except Exception as exc:
-            pw.emit("error", "NFL Edge Authority V2.1 historical validation failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            pw.emit("error", "NFL Edge Authority V2.3 historical validation failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
             raise
         return
 
@@ -745,15 +747,19 @@ def main():
         )
         _shared = _load_nfl_prod_live_exact(
             "sports_edge_authority_v1",
-            "sports-edge-authority-v1.0-cross-sport-standard-20261002",
+            "sports-edge-authority-v1.1-dependency-aware-cross-sport-standard-20261002",
+        )
+        _stat23 = _load_nfl_prod_live_exact(
+            "nfl_stat_selector_v23",
+            "nfl-stat-selector-v2.3-ncaaf-style-market-reliability-20261002",
         )
         _edge = _load_nfl_prod_live_exact(
             "nfl_edge_authority_v2",
-            "nfl-edge-authority-v2.1-full-ncaaf-research-diagnostics-20261002",
+            "nfl-edge-authority-v2.3-stat-selector-system-dependency-20261002",
         )
         _live = _load_nfl_prod_live_exact(
             "nfl_production_live_v1",
-            "nfl-production-v2.1-live-edge-authority-v2-20261002",
+            "nfl-production-v2.3-live-stat-selector-edge-authority-20261002",
         )
         pw.emit("audit", f"[NFL-PROD-V1.2] Verify live parity before paired scoring run={run_id}", pct=0.05)
         try:
