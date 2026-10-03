@@ -1,9 +1,9 @@
-"""NFL Production V2.3 — live scoring, paired ledger, Edge Authority V2.3.
+"""NFL Production V2.4 — live scoring, paired ledger, Edge Authority V2.4 research-aware contract.
 
 Purpose
 -------
 This module starts the *prospective* evidence clock for NFL Production V1.
-It does not train fair-value models or promote a challenger. Betting authority is produced only by the separately frozen Edge Authority V2.3 contract; Betting Engine V1 remains benchmark-only.
+It does not train fair-value models or promote a challenger. Betting authority is produced only by the separately frozen Edge Authority V2.4 research-aware contract; Betting Engine V1 remains benchmark-only.
 
 For each upcoming physical game it:
 1. Rebuilds the already-proven live Production V1 feature frame.
@@ -40,7 +40,7 @@ import nfl_production_v1 as prod
 import nfl_betting_engine_v1 as betting
 import nfl_edge_authority_v2 as edge_v2
 
-SOURCE_TAG = "nfl-production-v2.3-live-stat-selector-edge-authority-20261002"
+SOURCE_TAG = "nfl-production-v2.4-live-advanced-stat-research-aware-20261003"
 EXPECTED_PARITY_TAG = "nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002"
 EXPECTED_PROD_TAG = "nfl-production-v1.1.1-publish-receipt-normalization-20261002"
 

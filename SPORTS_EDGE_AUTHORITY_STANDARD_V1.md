@@ -45,3 +45,7 @@ NFL Edge Authority V2.3 keeps Betting Engine V1 as a failed benchmark/shadow and
 For new STAT selectors, 2021–2023 is discovery, 2024–2025 is confirmation, and 2026 is prospective only. Rich NFL statistical families predict market residual reliability rather than rewriting CORE. All validated STAT selectors collapse to one STAT independence key per market.
 
 Direct System Miner families retain their natural 2017–2022 discovery and 2023–2025 frozen validation windows. A parent/child and overlap audit assigns system independence keys before any `STRONG PLAY` escalation is allowed.
+
+## V2.4 cross-sport STAT-independence addendum
+
+When CORE already consumes broad team strength or box-score summaries, a new STAT lane should not be credited merely for relearning those same primitives. The preferred research test is incremental: explicitly exclude CORE/context variables, residualize football-performance STAT inputs against the frozen CORE feature contract when overlap is material, and test whether the remaining signal explains market error, CORE outcome error, system confirmation, or system contradiction. A sport may legitimately end with no incremental STAT authority. Retrospective redesigns are new hypotheses and require new prospective evidence before promotion.

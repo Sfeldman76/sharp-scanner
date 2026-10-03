@@ -36,9 +36,10 @@ import nfl_production_v1 as prod
 import nfl_betting_engine_v1 as benchmark
 import sports_edge_authority_v1 as shared
 import nfl_stat_selector_v23 as statv23
+import nfl_advanced_stat_research_v24 as statv24
 
-SOURCE_TAG="nfl-edge-authority-v2.3-stat-selector-system-dependency-20261002"
-ENGINE_VERSION="NFL_EDGE_AUTHORITY_V2_3"
+SOURCE_TAG="nfl-edge-authority-v2.4-advanced-stat-research-shadow-20261003"
+ENGINE_VERSION="NFL_EDGE_AUTHORITY_V2_4"
 PROJECT="sharplogger"; DATASET="sharp_data"
 PREFIX="production/nfl/v2/edge_authority"
 ARTIFACT_OBJECT=f"{PREFIX}/current_edge_engine.joblib"
@@ -538,11 +539,20 @@ def _research_families(*,bq_client,replay_rows,games,log_func=print,research_rep
             families.append(f)
             log_func("[NFL-EDGE-V2-FAMILY] "+json.dumps({k:f.get(k) for k in ("mechanism_family_id","mechanism_class","market","variant_id","threshold","core_gap_min","stat_family","stat_dependency_group","discovery","confirmation","discovery_gate","confirmation_gate","family_status")},sort_keys=True,default=str))
 
+    # Advanced V2.4 STAT research is deliberately research-only. It orthogonalizes
+    # football-performance statistics against the frozen CORE feature set and tests
+    # both unexplained MARKET residual and unexplained CORE outcome error, then
+    # evaluates CREATE / CONFIRM / VETO / SYSTEM_FILTER roles. No V2.4 family can enter
+    # betting authority from this retrospective run.
+    advanced_stat_report=statv24.run_advanced_stat_research(
+        bq_client=bq_client,games=games,replay_rows=replay_rows,sysctx=sysctx,log_func=log_func,
+    )
+
     # Parent/child and overlap audit is applied *after* historical family gates.
     # Correlated system families receive one shared independence key unless their
     # overlap demonstrates predeclared incremental confirmation.
     families,dependency_report=_apply_system_dependency_audit(families,sysctx,log_func=log_func)
-    return families,stat_bundles,stat_lookup,base,sysctx,stat_report,dependency_report
+    return families,stat_bundles,stat_lookup,base,sysctx,stat_report,advanced_stat_report,dependency_report
 
 
 def _family_lookup(families):return {f["mechanism_family_id"]:f for f in families if f.get("production_authority")}
@@ -605,14 +615,16 @@ def train_publish_edge_authority(*,bq_client,storage_client,bucket_name:str,repl
         "status":"START","source_tag":SOURCE_TAG,"shared_framework":shared.framework_contract(),
         "discovery_seasons":list(DISCOVERY_SEASONS),"confirmation_seasons":list(CONFIRM_SEASONS),
         "year_2026_queried":False,"betting_engine_v1_role":"BENCHMARK_SHADOW",
-        "stat_selector_source_tag":statv23.SOURCE_TAG,
+        "stat_selector_source_tag":statv23.SOURCE_TAG,"advanced_stat_source_tag":statv24.SOURCE_TAG,
     },sort_keys=True))
-    families,stat_bundles,stat_lookup,base,sysctx,stat_report,dependency_report=_research_families(
+    families,stat_bundles,stat_lookup,base,sysctx,stat_report,advanced_stat_report,dependency_report=_research_families(
         bq_client=bq_client,replay_rows=replay_rows,games=games,research_report=research_report,
         system_report=system_report,log_func=log_func,
     )
     research_summary=_build_research_summary(replay_rows,research_report,system_report)
     research_summary["stat_selector_v23"]=stat_report
+    research_summary["advanced_stat_v24"]=advanced_stat_report
+    research_summary["pbp_advanced_diagnostic_v24"]=(research_report or {}).get("pbp_advanced_diagnostic_v24") or {}
     research_summary["system_dependency_audit_v23"]=dependency_report
     _emit_full_research_diagnostics(replay_rows,research_report,system_report,research_summary,log_func=log_func)
 
@@ -652,12 +664,14 @@ def train_publish_edge_authority(*,bq_client,storage_client,bucket_name:str,repl
         "year_2026_queried":False,"families":stable_families,"markets":market_contract,
         "historical_action_performance":action_perf,"research_summary":research_summary,
         "stat_selector_contract_sha256":stat_report.get("selector_contract_sha256"),
+        "advanced_stat_research_contract_sha256":advanced_stat_report.get("research_contract_sha256"),
         "system_dependency_audit":dependency_report,
         "betting_engine_v1_role":"BENCHMARK_SHADOW","automatic_execution":False,"automatic_model_promotion":False,
     }
     fingerprint=_sha({
         "framework":contract["framework"]["contract_sha256"],
         "stat_selector":contract.get("stat_selector_contract_sha256"),
+        "advanced_stat_research":contract.get("advanced_stat_research_contract_sha256"),
         "families":[{k:f.get(k) for k in ("mechanism_family_id","variant_id","threshold","core_gap_min","family_status","independence_key")} for f in stable_families],
         "markets":market_contract,
     })
@@ -670,6 +684,7 @@ def train_publish_edge_authority(*,bq_client,storage_client,bucket_name:str,repl
     log_func("[NFL-EDGE-V2-PUBLISH] "+json.dumps({
         "status":contract["status"],"contract_sha256":fingerprint,"artifact_sha256":artifact_sha,"artifact_uri":contract["artifact_uri"],
         "market_contract":market_contract,"stat_selector_contract_sha256":contract.get("stat_selector_contract_sha256"),
+        "advanced_stat_research_contract_sha256":contract.get("advanced_stat_research_contract_sha256"),
         "betting_engine_v1_role":"BENCHMARK_SHADOW",
     },sort_keys=True,default=str))
     return contract
@@ -864,7 +879,7 @@ def _performance(sc,bucket):
 def update_live_state(*,bq_client,storage_client,bucket_name,prediction_rows,now,log_func=print):
     eng=_load_engine(storage_client,bucket_name);meta=eng["metadata"];rows=score_live(bq_client=bq_client,storage_client=storage_client,bucket_name=bucket_name,prediction_rows=prediction_rows,now=now);capture=_capture(storage_client,bucket_name,rows,now,meta.get("contract_sha256"));settle=_settle(bq_client,storage_client,bucket_name,now);perf=_performance(storage_client,bucket_name)
     counts={a:sum(1 for r in rows if r.get("action")==a) for a in ("PLAY","STRONG PLAY","MODEL ONLY","PASS — CONFLICT","EDGE — NO EXEC QUOTE","NO MARKET")}
-    state={"status":"NFL_EDGE_AUTHORITY_V2_3_LIVE_ACTIVE","source_tag":SOURCE_TAG,"generated_at_utc":pd.to_datetime(now,utc=True).isoformat(),"contract":meta,"live_rows":rows,"action_counts":counts,"capture":capture,"settlement":settle,"live_performance":perf,"automatic_execution":False}
+    state={"status":"NFL_EDGE_AUTHORITY_V2_4_LIVE_ACTIVE","source_tag":SOURCE_TAG,"generated_at_utc":pd.to_datetime(now,utc=True).isoformat(),"contract":meta,"live_rows":rows,"action_counts":counts,"capture":capture,"settlement":settle,"live_performance":perf,"automatic_execution":False}
     state["current_uri"]=_write_json(storage_client,bucket_name,CURRENT_OBJECT,state)
     _stat_status=sorted(set(str(r.get("stat_selector_live_status") or "") for r in rows if r.get("stat_selector_live_status")))
     log_func("[NFL-EDGE-V2-LIVE] "+json.dumps({"status":state["status"],"action_counts":counts,"capture":capture,"settlement":settle,"live_performance":perf,"stat_selector_live_status":_stat_status,"contract_sha256":meta.get("contract_sha256")},sort_keys=True,default=str))

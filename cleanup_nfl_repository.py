@@ -17,7 +17,7 @@ from pathlib import Path
 ARCHIVE_DIR = Path("archive/nfl_legacy_20261002")
 
 # These are superseded in the active production architecture and have no active
-# dependency in the Edge Authority V2 / current dashboard workflow.
+# dependency in the Edge Authority V2.4 / current dashboard workflow.
 SAFE_SUPERSEDED_CODE = [
     "nfl_production_recommendations_v1.py",  # replaced by nfl_betting_engine_v1.py
     "nfl_system_lab_v2.py",                 # superseded by V3; V3 is self-contained
@@ -65,7 +65,10 @@ KEEP_DOCS = {
     "SPORTS_EDGE_AUTHORITY_STANDARD_V1.md",
     "NFL_BETTING_ENGINE_V1_DEPLOY.txt",
     "NFL_REPOSITORY_CLEANUP_20261002.txt",
-    "NFL_ACTIVE_ARCHITECTURE_20261002.json",
+    "NFL_ACTIVE_ARCHITECTURE_20261003.json",
+    "README_NFL_EDGE_AUTHORITY_V2_4_ADVANCED_STAT_RESEARCH.txt",
+    "NFL_EDGE_AUTHORITY_V2_4_ADVANCED_STAT_RESEARCH_DEPLOY.txt",
+    "SHA256_NFL_EDGE_AUTHORITY_V2_4_ADVANCED_STAT_RESEARCH.txt",
     "SHA256_NFL_BETTING_ENGINE_V1.txt",
 }
 
