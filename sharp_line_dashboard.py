@@ -46938,6 +46938,42 @@ def _nfl_model_authority_v26_state_cached():
 
 
 @st.cache_data(ttl=300,show_spinner=False)
+def _nfl_system_rules_index_cached():
+    """Read the human-facing NFL System Rules Index published by System Lab V3.1.
+
+    The index is research metadata only. Reading it cannot change any production
+    action, probability, system vote, or market execution decision.
+    """
+    try:
+        client=storage.Client(); bucket=client.bucket(GCS_BUCKET)
+        key="nfl-research/v2_0/system_lab/latest_rules_index_pointer_v1.json"
+        blob=bucket.blob(key)
+        if not blob.exists():
+            return {"status":"RULES_INDEX_UNAVAILABLE","rows":[],"coverage":{}}
+        ptr=json.loads(blob.download_as_text())
+        prefix=f"gs://{GCS_BUCKET}/"
+        uri=str(ptr.get("rules_index_uri") or "")
+        if not uri.startswith(prefix):
+            return {"status":"RULES_INDEX_POINTER_INVALID","rows":[],"coverage":{},"pointer":ptr}
+        ib=bucket.blob(uri[len(prefix):])
+        if not ib.exists():
+            return {"status":"RULES_INDEX_OBJECT_MISSING","rows":[],"coverage":{},"pointer":ptr}
+        idx=json.loads(ib.download_as_text())
+        cov={}; cu=str(ptr.get("coverage_audit_uri") or "")
+        if cu.startswith(prefix):
+            cb=bucket.blob(cu[len(prefix):])
+            if cb.exists(): cov=json.loads(cb.download_as_text())
+        return {"status":"READY","rows":idx.get("rows") or [],"index":idx,"coverage":cov,"pointer":ptr}
+    except Exception as e:
+        logging.warning("[NFL-SYSTEM-RULES-UI] unavailable: %s:%s",type(e).__name__,e)
+        return {"status":"UNAVAILABLE","rows":[],"coverage":{},"error":f"{type(e).__name__}:{e}"}
+
+
+def _nfl_system_rule_record_pct(text):
+    return str(text or "—")
+
+
+@st.cache_data(ttl=300,show_spinner=False)
 def _nfl_betting_engine_v1_benchmark_cached():
     try:
         import nfl_betting_engine_v1 as _be
@@ -47050,6 +47086,12 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
             label=_nfl_pick_label(r,market)
             sources=[str(x) for x in (r.get("edge_sources") or []) if str(x).strip()]
             systems=[str(x) for x in (r.get("system_labels") or []) if str(x).strip()]
+            for _fid in (r.get("production_edge_families") or []):
+                _fid=str(_fid or "").strip()
+                if _fid and _fid not in systems: systems.append(_fid)
+            for _v in (r.get("edge_votes") or []):
+                _fid=str((_v or {}).get("mechanism_family_id") or "").strip() if isinstance(_v,dict) else ""
+                if _fid and _fid not in systems: systems.append(_fid)
             source=" | ".join(sources) if sources else "—"
             rec.update({
                 f"{prefix} Action":action,f"{prefix} Pick":label,f"{prefix} Prob":prob,
@@ -47171,6 +47213,50 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
             f"approved Edge V2 contract: {policy.get('approved_edge_contract_sha256','—')}. "
             "A later Heavy Research run cannot silently change production; a different edge-contract SHA is held for explicit review."
         )
+
+    rules_state=_nfl_system_rules_index_cached()
+    with st.expander("NFL System Rules Index — mined + published + framework",expanded=False):
+        if not isinstance(rules_state,dict) or rules_state.get("status")!="READY":
+            st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.7.")
+        else:
+            rr=pd.DataFrame(rules_state.get("rows") or [])
+            cov=rules_state.get("coverage") or {}
+            active_ids=set()
+            for _r in rows:
+                for _fid in (_r.get("production_edge_families") or []):
+                    if str(_fid).strip(): active_ids.add(str(_fid).strip())
+                for _v in (_r.get("edge_votes") or []):
+                    if isinstance(_v,dict) and str(_v.get("mechanism_family_id") or "").strip():
+                        active_ids.add(str(_v.get("mechanism_family_id")).strip())
+            if rr.empty:
+                st.info("Rules Index exists but contains no rows.")
+            else:
+                rr["Active Now"]=rr.get("system_id",pd.Series("",index=rr.index)).astype(str).isin(active_ids)
+                src_opts=sorted(rr.get("source",pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+                status_opts=sorted(rr.get("status",pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+                c1,c2=st.columns(2)
+                with c1:
+                    src_sel=st.multiselect("Rule source",src_opts,default=src_opts,key="nfl-system-rules-source")
+                with c2:
+                    status_sel=st.multiselect("Rule status",status_opts,default=status_opts,key="nfl-system-rules-status")
+                show=rr.copy()
+                if src_sel: show=show[show["source"].astype(str).isin(src_sel)]
+                if status_sel: show=show[show["status"].astype(str).isin(status_sel)]
+                cols=[c for c in ["Active Now","system_id","name","source","market","action","rule_text","discovery","validation_2023_2025","status","prospective_action","live_scoring"] if c in show.columns]
+                show=show[cols].copy()
+                show=show.rename(columns={"system_id":"System ID","name":"System","source":"Source","market":"Market","action":"Action","rule_text":"Rule","discovery":"Discovery","validation_2023_2025":"2023-25 Validation","status":"Status","prospective_action":"Next Step","live_scoring":"Live Role"})
+                st.dataframe(show,use_container_width=True,hide_index=True)
+                st.caption("Active Now is based only on system mechanism IDs already attached by the production/shadow engine. Research-only mined families are indexed here but are not silently scored into production.")
+            if cov:
+                bigal_missing=cov.get("bigal_missing_ids") or []
+                pf=cov.get("pathi_framework_coverage") or {}
+                exec_cov=cov.get("market_execution_coverage") or {}
+                st.caption(f"Coverage audit: {cov.get('status','—')} • Big Al missing: {', '.join(bigal_missing) if bigal_missing else 'none'} • mined families indexed: {cov.get('mined_family_count','—')}.")
+                with st.expander("Pathi / market-execution coverage audit",expanded=False):
+                    audit_rows=[]
+                    for k,v in pf.items(): audit_rows.append({"Area":k,"Status":(v or {}).get("status"),"Evidence":" | ".join((v or {}).get("evidence") or [])})
+                    for k,v in exec_cov.items(): audit_rows.append({"Area":"MARKET: "+k,"Status":(v or {}).get("status"),"Evidence":" | ".join((v or {}).get("fields") or [])})
+                    if audit_rows: st.dataframe(pd.DataFrame(audit_rows),use_container_width=True,hide_index=True)
 
     edge_state=_nfl_edge_authority_v2_state_cached()
     edge_meta=(edge_state.get("meta") or {}) if isinstance(edge_state,dict) else {}
@@ -49828,7 +49914,7 @@ if not HEADLESS:
         )
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_research_heavy":
         st.sidebar.caption(
-            "WHEN: after meaningful research/data changes and periodically during the season. Runs protected CORE, season-forward STAT, SYSTEM, MARKET and frozen PBP research, then fits a regularized cross-fitted betting META model using continuous signal strength. Hyperparameters and betting thresholds are chosen on discovery only; the frozen fit is scored on 2024–2025 confirmation. H2H is price/EV-aware. A separate FDR-protected regime miner explains useful combinations. SYSTEM is one lane, never a required gate. 2026 stays sealed and Production Betting V2 cannot be mutated by this job."
+            "WHEN: after meaningful research/data changes and periodically during the season. Runs protected CORE/STAT/PBP research plus System Miner V3.1. The frozen 0.575 Spread distribution benchmark remains unchanged; the run now also publishes a human-readable Rules Index, adds the externally published Big Al Week-1 prior-loser-vs-prior-winner rule for descriptive retest, audits Pathi/market-execution coverage, and preserves H2H price-aware research. 2026 stays sealed and Production Betting V2 cannot be mutated by this job."
         )
 
     

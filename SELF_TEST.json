@@ -1,47 +1,21 @@
 {
-  "build_status": "PASS",
-  "changed_nonheavy_components": [],
-  "engine_preflight": {
-    "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
-    "compiled_and_checked": 32,
-    "components": 32,
-    "engine_source_tag": "nfl-engine-v3.6-selective-trust-partial-pooling-h2h-freeze-20261003",
-    "failures": [],
-    "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_SELECTIVE_TRUST_PARTIAL_POOLING_PRICE_AWARE_EV_RESEARCH_ONLY",
-    "missing_critical_symbols": [],
-    "shared_external_required": [
-      "utils.py",
-      "sports_edge_authority_v1.py"
-    ],
+  "status": "PASS",
+  "engine_source_tag": "nfl-engine-v3.7-rules-index-bigal6-coverage-20261004",
+  "engine_components": 32,
+  "engine_failures": [],
+  "engine_missing_critical_symbols": [],
+  "system_lab_self_test": {
     "status": "PASS",
-    "utils_backend_required": true,
-    "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
+    "version": "NFL_SYSTEM_LAB_V3_1",
+    "rules_index_rows_synthetic": 9,
+    "bigal6_indexed": true,
+    "coverage_status": "PASS",
+    "year_2026_queried": false
   },
-  "heavy_self_test": {
-    "2026_sealed": true,
-    "architecture": "FROZEN_0575_CORE_BENCHMARK_PLUS_SELECTIVE_TRUST_PARTIAL_POOLING_PRICE_AWARE_EV",
-    "frozen_spread_base_threshold": 0.575,
-    "h2h_dev_frame_refresh": true,
-    "market_movement_as_predictor": false,
-    "models": [
-      "RIDGE_24",
-      "HUBER",
-      "HGB_SHALLOW",
-      "RIDGE_HUBER_50",
-      "RIDGE_HGB_50"
-    ],
-    "partial_pooling": true,
-    "price_aware_ev": true,
-    "production_authority": 0,
-    "selective_trust": true,
-    "source_tag": "nfl-heavy-research-v2.10-selective-trust-partial-pooling-h2h-freeze-20261003",
-    "stat_families": [
-      "UNDERLYING_EFFICIENCY_COMPOSITE",
-      "SUSTAINABILITY_REGRESSION_COMPOSITE",
-      "COACHING_GAMEFLOW_COMPOSITE",
-      "MATCHUP_NONLINEAR"
-    ],
-    "status": "PASS"
+  "bigal6_synthetic_trigger_test": "PASS",
+  "v36_component_diff": {
+    "changed": ["nfl_intelligence_v1", "nfl_system_lab_v3"],
+    "unchanged_count": 30
   },
-  "unchanged_embedded_components": 31
+  "production_mutation": false
 }
