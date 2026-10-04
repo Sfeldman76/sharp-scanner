@@ -1,41 +1,16 @@
 {
-  "architecture_regression_check": {
-    "closest_prior": "V3.8 System Miner/evidence lifecycle",
-    "new": "sequential-context grammar + team-context memory + schedule-derived island context",
-    "preserves_frozen_core_0575": true,
-    "reintroduces_retired_giant_model": false,
-    "verdict": "PROCEED"
-  },
-  "engine": {
-    "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
-    "compiled_and_checked": 32,
-    "components": 32,
-    "engine_source_tag": "nfl-engine-v3.9-sequential-context-team-memory-20261004",
-    "failures": [],
-    "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_PERMANENT_SYSTEM_EVIDENCE_LIFECYCLE_RESEARCH_ONLY",
-    "missing_critical_symbols": [],
-    "shared_external_required": [
-      "utils.py",
-      "sports_edge_authority_v1.py"
-    ],
-    "status": "PASS",
-    "utils_backend_required": true,
-    "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
-  },
-  "system_lab_v33": {
-    "bigal6_indexed": true,
-    "coverage_status": "PASS",
-    "discovery_evidence_permanent": true,
-    "dormant_family_preserved": true,
-    "island_slot_context": true,
-    "model_state_in_discovery": false,
-    "raw_tested": 3,
-    "rules_index_rows": 9,
-    "sequential_context_grammar": true,
-    "status": "PASS",
-    "team_context_history": true,
-    "unique_hypotheses": 3,
-    "version": "NFL_SYSTEM_LAB_V3_3",
-    "year_2026_queried": false
-  }
+  "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
+  "compiled_and_checked": 32,
+  "components": 32,
+  "engine_source_tag": "nfl-engine-v3.9.1-pathi-scored-overlay-20261004",
+  "failures": [],
+  "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_PERMANENT_SYSTEM_EVIDENCE_LIFECYCLE_RESEARCH_ONLY",
+  "missing_critical_symbols": [],
+  "shared_external_required": [
+    "utils.py",
+    "sports_edge_authority_v1.py"
+  ],
+  "status": "PASS",
+  "utils_backend_required": true,
+  "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
 }

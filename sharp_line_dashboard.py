@@ -2888,6 +2888,24 @@ def add_pathi_bigal_rule_flags(state: pd.DataFrame) -> pd.DataFrame:
         "Pathi_M7_BadRoadFavoriteProfile": "PATHI M7 Bad Road Favorite",
         "Pathi_M9_Plus15_PlusMoney": "PATHI M9 +1.5 Plus Money",
         "Pathi_RoleFlip_DogToFavorite_Cancel": "PATHI CANCEL: Dog->Favorite",
+        "Pathi_FB_Dog_Hook_Above_3": "PATHI Dog >3 to <4",
+        "Pathi_FB_Dog_Hook_Above_7": "PATHI Dog >7 to <8",
+        "Pathi_FB_Dog_Hook_Above_10": "PATHI Dog >10 to <11",
+        "Pathi_FB_Dog_10_Plus": "PATHI Dog 10+",
+        "Pathi_FB_Dog_Below_Key_3": "PATHI Dog Below 3",
+        "Pathi_FB_Dog_Below_Key_7": "PATHI Dog Below 7",
+        "Pathi_FB_Favorite_Below_Key_3": "PATHI Favorite Below 3",
+        "Pathi_FB_Favorite_Below_Key_7": "PATHI Favorite Below 7",
+        "Pathi_FB_Favorite_Below_Key_10": "PATHI Favorite Below 10",
+        "Pathi_FB_Favorite_Laying_Hook_3": "PATHI Favorite Laying >3 to <4",
+        "Pathi_FB_Favorite_Laying_Hook_7": "PATHI Favorite Laying >7 to <8",
+        "Pathi_FB_Dog_TotalSpread_Gap_LE10": "PATHI Dog Total-Spread Gap <=10",
+        "Pathi_FB_Dog_Moved_Below_Key_3": "PATHI Dog Moved Below 3",
+        "Pathi_FB_Dog_Moved_Above_Key_3": "PATHI Dog Moved Above 3",
+        "Pathi_FB_Dog_Moved_Below_Key_7": "PATHI Dog Moved Below 7",
+        "Pathi_FB_Dog_Moved_Above_Key_7": "PATHI Dog Moved Above 7",
+        "Pathi_FB_Dog_Moved_Below_Key_10": "PATHI Dog Moved Below 10",
+        "Pathi_FB_Dog_Moved_Above_Key_10": "PATHI Dog Moved Above 10",
         "BigAl_NFL1_Week1FadePlayoffTeam": "BIG AL NFL1 Week 1 Fade",
         "BigAl_NFL1_HomeTightener": "BIG AL NFL1 Home Tightener",
         "BigAl_NFL2_LateSeasonHomeDog": "BIG AL NFL2 Late Home Dog",
@@ -3352,6 +3370,24 @@ def attach_pathi_bigal_features_to_market_rows(df_rows: pd.DataFrame, state: pd.
         "Pathi_M7_BadRoadFavoriteProfile": "PATHI M7 Bad Road Favorite",
         "Pathi_M9_Plus15_PlusMoney": "PATHI M9 +1.5 Plus Money",
         "Pathi_RoleFlip_DogToFavorite_Cancel": "PATHI CANCEL Dog->Favorite",
+        "Pathi_FB_Dog_Hook_Above_3": "PATHI Dog >3 to <4",
+        "Pathi_FB_Dog_Hook_Above_7": "PATHI Dog >7 to <8",
+        "Pathi_FB_Dog_Hook_Above_10": "PATHI Dog >10 to <11",
+        "Pathi_FB_Dog_10_Plus": "PATHI Dog 10+",
+        "Pathi_FB_Dog_Below_Key_3": "PATHI Dog Below 3",
+        "Pathi_FB_Dog_Below_Key_7": "PATHI Dog Below 7",
+        "Pathi_FB_Favorite_Below_Key_3": "PATHI Favorite Below 3",
+        "Pathi_FB_Favorite_Below_Key_7": "PATHI Favorite Below 7",
+        "Pathi_FB_Favorite_Below_Key_10": "PATHI Favorite Below 10",
+        "Pathi_FB_Favorite_Laying_Hook_3": "PATHI Favorite Laying >3 to <4",
+        "Pathi_FB_Favorite_Laying_Hook_7": "PATHI Favorite Laying >7 to <8",
+        "Pathi_FB_Dog_TotalSpread_Gap_LE10": "PATHI Dog Total-Spread Gap <=10",
+        "Pathi_FB_Dog_Moved_Below_Key_3": "PATHI Dog Moved Below 3",
+        "Pathi_FB_Dog_Moved_Above_Key_3": "PATHI Dog Moved Above 3",
+        "Pathi_FB_Dog_Moved_Below_Key_7": "PATHI Dog Moved Below 7",
+        "Pathi_FB_Dog_Moved_Above_Key_7": "PATHI Dog Moved Above 7",
+        "Pathi_FB_Dog_Moved_Below_Key_10": "PATHI Dog Moved Below 10",
+        "Pathi_FB_Dog_Moved_Above_Key_10": "PATHI Dog Moved Above 10",
         "BigAl_NFL1_Week1FadePlayoffTeam": "BIG AL NFL1 Week 1 Fade",
         "BigAl_NFL2_LateSeasonHomeDog": "BIG AL NFL2 Late Home Dog",
         "BigAl_NFL3_PlayoffHighScoreFade": "BIG AL NFL3 Playoff Fade",
@@ -4254,6 +4290,17 @@ def add_pathi_football_key_features(df: pd.DataFrame) -> pd.DataFrame:
         k = str(int(key))
         out[f"Pathi_FB_Dog_Below_Key_{k}"] = (is_dog & cur.lt(key) & cur.gt(key - 1.0)).astype("int8")
         out[f"Pathi_FB_Favorite_Laying_Hook_{k}"] = (is_fav & abs_cur.gt(key) & abs_cur.lt(key + 1.0)).astype("int8")
+
+    # Directional dog key-cross systems: distinguish the market transition from
+    # the static current spread band. These remain an overlay and never modify CORE.
+    for key in (3.0, 7.0, 10.0):
+        k = str(int(key))
+        out[f"Pathi_FB_Dog_Moved_Below_Key_{k}"] = (
+            fb_spread & is_dog & has_open & opn.gt(key) & cur.lt(key) & cur.gt(0)
+        ).astype("int8")
+        out[f"Pathi_FB_Dog_Moved_Above_Key_{k}"] = (
+            fb_spread & is_dog & has_open & opn.gt(0) & opn.lt(key) & cur.gt(key)
+        ).astype("int8")
 
     # Dog bands: explicit rather than assuming one unpublished Pathi cutoff.
     out["Pathi_FB_Dog_0_to_3"] = (is_dog & cur.gt(0) & cur.lt(3.0)).astype("int8")
@@ -46973,6 +47020,62 @@ def _nfl_system_rule_record_pct(text):
     return str(text or "—")
 
 
+def _nfl_physical_hour_key(home, away, game_start):
+    try:
+        h=str(home or "").lower().strip(); a=str(away or "").lower().strip()
+        left,right=sorted([h,a])
+        gs=pd.to_datetime(game_start,utc=True,errors="coerce")
+        if pd.isna(gs): return ""
+        return f"{left}_{right}_{gs.floor('h').strftime('%Y-%m-%dT%H:00Z')}"
+    except Exception:
+        return ""
+
+
+def _nfl_pathi_live_overlay(df_moves_raw, rules_state):
+    """Return current Pathi system triggers with measured W/L records.
+
+    This is presentation/shadow evidence only. It cannot change CORE fair values,
+    the frozen Production Betting V2 selector, or an official BET action.
+    """
+    if df_moves_raw is None or getattr(df_moves_raw,"empty",True): return {},set()
+    if not isinstance(rules_state,dict) or rules_state.get("status")!="READY": return {},set()
+    rr={str(x.get("system_id")):x for x in (rules_state.get("rows") or []) if str(x.get("source"))=="PATHI_SYSTEM"}
+    if not rr: return {},set()
+    try:
+        d=build_game_key(df_moves_raw.copy())
+        # The normal dashboard path already enriches these rows. Rebuild only if
+        # none of the scored Pathi columns survived the caller path.
+        if not any(sid in d.columns for sid in rr):
+            d=attach_pathi_bigal_live_features(d,"NFL")
+            d=build_game_key(d)
+        market=d.get("Market",pd.Series("",index=d.index)).astype(str).str.lower().str.strip()
+        d=d.loc[market.eq("spreads")].copy()
+        out={}; active=set(); seen=set()
+        for idx,r in d.iterrows():
+            key=str(r.get("Merge_Key_Short") or "").lower().strip()
+            if not key: continue
+            team=str(r.get("Outcome") or r.get("Team_Norm") or "").strip()
+            for sid,meta in rr.items():
+                if sid not in d.columns: continue
+                try: fired=float(pd.to_numeric(pd.Series([r.get(sid)]),errors="coerce").fillna(0).iloc[0])==1.0
+                except Exception: fired=False
+                if not fired: continue
+                sig=(key,team.lower(),sid)
+                if sig in seen: continue
+                seen.add(sig); active.add(sid)
+                status=str(meta.get("status") or "")
+                out.setdefault(key,[]).append({
+                    "system_id":sid,"team":team,"name":str(meta.get("name") or sid),
+                    "validation":str(meta.get("validation_2023_2025") or "—"),
+                    "overall":str(meta.get("overall_2017_2025") or "—"),
+                    "status":status,"support":status=="PATHI_VALIDATED_SUPPORT",
+                })
+        return out,active
+    except Exception as e:
+        logging.warning("[NFL-PATHI-OVERLAY-UI] unavailable: %s:%s",type(e).__name__,e)
+        return {},set()
+
+
 @st.cache_data(ttl=300,show_spinner=False)
 def _nfl_betting_engine_v1_benchmark_cached():
     try:
@@ -47044,6 +47147,11 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
             return label
         return pick
 
+    # Pathi is an independent evidence overlay above CORE. The Rules Index carries
+    # the historical W/L record; live flags identify which side/system is active now.
+    rules_state=_nfl_system_rules_index_cached()
+    pathi_live,pathi_active_ids=_nfl_pathi_live_overlay(df_moves_raw,rules_state)
+
     # One physical game per row, exactly like the NCAAF production board.
     records=[]
     grouped={}
@@ -47064,7 +47172,8 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
             "Game Time":gs.tz_convert("US/Eastern").strftime("%a %I:%M %p") if pd.notna(gs) else "—",
             "Matchup":f"{r0.get('away_team','')} @ {r0.get('home_team','')}",
         }
-        production_plays=[]; edge_parts=[]; system_parts=[]
+        production_plays=[]; edge_parts=[]; system_parts=[]; pathi_parts=[]; pathi_states=[]
+        _pathi_key=_nfl_physical_hour_key(r0.get("home_team"),r0.get("away_team"),gs)
         bym={str(r.get("market") or "").upper():r for r in grows}
         for market,prefix in (("SPREADS","Spr"),("H2H","H2H"),("TOTALS","Tot")):
             r=bym.get(market)
@@ -47103,8 +47212,23 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
             for s in systems:
                 entry=f"{prefix}: {s}"
                 if entry not in system_parts: system_parts.append(entry)
+            if market=="SPREADS":
+                _model_team=str(r.get("selected") or "").lower().strip()
+                for _p in pathi_live.get(_pathi_key,[]):
+                    _pt=str(_p.get("team") or "").lower().strip()
+                    if _p.get("support"):
+                        _state="SUPPORT" if _pt and _pt==_model_team else "CONFLICT"
+                    else:
+                        _state="TRACK"
+                    _txt=f"{_state}: {_p.get('team') or 'qualifier'} · {_p.get('name')} · 2023-25 {_p.get('validation')}"
+                    pathi_parts.append(_txt); pathi_states.append(_state)
+                    _entry=f"Spr: PATHI {_txt}"
+                    if _entry not in system_parts: system_parts.append(_entry)
         rec["Production Plays"]=" | ".join(production_plays) if production_plays else "—"
         rec["Edge Sources"]=" | ".join(edge_parts) if edge_parts else "—"
+        rec["Pathi Overlay"]=" | ".join(pathi_parts) if pathi_parts else "—"
+        _ps=set(pathi_states)
+        rec["Pathi State"]=("MIXED" if "SUPPORT" in _ps and "CONFLICT" in _ps else ("SUPPORT" if "SUPPORT" in _ps else ("CONFLICT" if "CONFLICT" in _ps else ("TRACK" if "TRACK" in _ps else "—"))))
         rec["System Trigger"]=" | ".join(system_parts) if system_parts else "—"
         records.append(rec)
 
@@ -47145,7 +47269,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
 
     view=view.sort_values("_game_start")
     # Deliberately use the same visible column order/names as NCAAF.
-    main=view[["Game Time","Matchup","Spr Action","Spr Pick","Spr Prob","Spr Edge","H2H Action","H2H Pick","H2H Prob","H2H Edge","Tot Action","Tot Pick","Tot Prob","Tot Edge","Production Plays","Edge Sources","System Trigger"]].copy()
+    main=view[["Game Time","Matchup","Spr Action","Spr Pick","Spr Prob","Spr Edge","H2H Action","H2H Pick","H2H Prob","H2H Edge","Tot Action","Tot Pick","Tot Prob","Tot Edge","Production Plays","Pathi State","Pathi Overlay","Edge Sources","System Trigger"]].copy()
     main=main.rename(columns={"Spr Edge":"Spr Model Edge","H2H Edge":"H2H Model Edge","Tot Edge":"Tot Model Edge"})
     main["Spr Prob"]=pd.to_numeric(main["Spr Prob"],errors="coerce").map(lambda x:f"{x*100:.1f}%" if pd.notna(x) else "—")
     main["H2H Prob"]=pd.to_numeric(main["H2H Prob"],errors="coerce").map(lambda x:f"{x*100:.1f}%" if pd.notna(x) else "—")
@@ -47214,14 +47338,13 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
             "A later Heavy Research run cannot silently change production; a different edge-contract SHA is held for explicit review."
         )
 
-    rules_state=_nfl_system_rules_index_cached()
-    with st.expander("NFL System Rules Index — mined + published + framework",expanded=False):
+    with st.expander("NFL System Rules Index — mined + published + Pathi systems",expanded=False):
         if not isinstance(rules_state,dict) or rules_state.get("status")!="READY":
-            st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.9.")
+            st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.9.1.")
         else:
             rr=pd.DataFrame(rules_state.get("rows") or [])
             cov=rules_state.get("coverage") or {}
-            active_ids=set()
+            active_ids=set(pathi_active_ids)
             for _r in rows:
                 for _fid in (_r.get("production_edge_families") or []):
                     if str(_fid).strip(): active_ids.add(str(_fid).strip())
@@ -47242,11 +47365,11 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                 show=rr.copy()
                 if src_sel: show=show[show["source"].astype(str).isin(src_sel)]
                 if status_sel: show=show[show["status"].astype(str).isin(status_sel)]
-                cols=[c for c in ["Active Now","system_id","name","source","market","action","rule_text","discovery","validation_2023_2025","historical_discovery_status","current_evidence_state","status","prospective_action","live_scoring"] if c in show.columns]
+                cols=[c for c in ["Active Now","system_id","name","source","market","action","rule_text","discovery","validation_2023_2025","overall_2017_2025","historical_discovery_status","current_evidence_state","status","prospective_action","live_scoring"] if c in show.columns]
                 show=show[cols].copy()
-                show=show.rename(columns={"system_id":"System ID","name":"System","source":"Source","market":"Market","action":"Action","rule_text":"Rule","discovery":"Discovery","validation_2023_2025":"2023-25 Validation","historical_discovery_status":"Discovery Evidence","current_evidence_state":"Current Evidence","status":"Family Status","prospective_action":"Next Step","live_scoring":"Live Role"})
+                show=show.rename(columns={"system_id":"System ID","name":"System","source":"Source","market":"Market","action":"Action","rule_text":"Rule","discovery":"2017-22 Discovery","validation_2023_2025":"2023-25 Validation","overall_2017_2025":"2017-25 Overall","historical_discovery_status":"Discovery Evidence","current_evidence_state":"Current Evidence","status":"Family Status","prospective_action":"Next Step","live_scoring":"Live Role"})
                 st.dataframe(show,use_container_width=True,hide_index=True)
-                st.caption("Evidence lifecycle: an established 2017-2022 discovery is never erased just because 2023-2025 weakens. Later evidence changes current authority/state (validated, weakened, dormant, watch), while the original rule remains in the index. Active Now is based only on mechanism IDs already attached by the production/shadow engine; research-only families cannot silently create production bets.")
+                st.caption("Evidence lifecycle: W-L-P and ATS% are shown directly. Pathi rows are scored engineering translations of the Pathi football framework, not claimed verbatim published formulas. A Pathi rule can show SUPPORT in the overlay only when its 2023-25 record clears the -110 break-even gate with n>=30; overlapping Pathi rules remain one evidence lane and cannot silently create a production BET or alter CORE fair values.")
             if cov:
                 bigal_missing=cov.get("bigal_missing_ids") or []
                 pf=cov.get("pathi_framework_coverage") or {}
