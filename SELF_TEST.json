@@ -1,16 +1,47 @@
 {
-  "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
-  "compiled_and_checked": 32,
-  "components": 32,
-  "engine_source_tag": "nfl-engine-v3.5-residual-distributional-edge-20261003",
-  "failures": [],
-  "heavy_research": "FROZEN_CORE_RESIDUAL_CORRECTION_PLUS_CONDITIONAL_EMPIRICAL_DISTRIBUTION_RESEARCH_ONLY",
-  "missing_critical_symbols": [],
-  "shared_external_required": [
-    "utils.py",
-    "sports_edge_authority_v1.py"
-  ],
-  "status": "PASS",
-  "utils_backend_required": true,
-  "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
+  "build_status": "PASS",
+  "changed_nonheavy_components": [],
+  "engine_preflight": {
+    "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
+    "compiled_and_checked": 32,
+    "components": 32,
+    "engine_source_tag": "nfl-engine-v3.6-selective-trust-partial-pooling-h2h-freeze-20261003",
+    "failures": [],
+    "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_SELECTIVE_TRUST_PARTIAL_POOLING_PRICE_AWARE_EV_RESEARCH_ONLY",
+    "missing_critical_symbols": [],
+    "shared_external_required": [
+      "utils.py",
+      "sports_edge_authority_v1.py"
+    ],
+    "status": "PASS",
+    "utils_backend_required": true,
+    "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
+  },
+  "heavy_self_test": {
+    "2026_sealed": true,
+    "architecture": "FROZEN_0575_CORE_BENCHMARK_PLUS_SELECTIVE_TRUST_PARTIAL_POOLING_PRICE_AWARE_EV",
+    "frozen_spread_base_threshold": 0.575,
+    "h2h_dev_frame_refresh": true,
+    "market_movement_as_predictor": false,
+    "models": [
+      "RIDGE_24",
+      "HUBER",
+      "HGB_SHALLOW",
+      "RIDGE_HUBER_50",
+      "RIDGE_HGB_50"
+    ],
+    "partial_pooling": true,
+    "price_aware_ev": true,
+    "production_authority": 0,
+    "selective_trust": true,
+    "source_tag": "nfl-heavy-research-v2.10-selective-trust-partial-pooling-h2h-freeze-20261003",
+    "stat_families": [
+      "UNDERLYING_EFFICIENCY_COMPOSITE",
+      "SUSTAINABILITY_REGRESSION_COMPOSITE",
+      "COACHING_GAMEFLOW_COMPOSITE",
+      "MATCHUP_NONLINEAR"
+    ],
+    "status": "PASS"
+  },
+  "unchanged_embedded_components": 31
 }

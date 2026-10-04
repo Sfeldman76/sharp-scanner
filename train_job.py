@@ -179,10 +179,10 @@ def main():
     if HEADLESS:
         install_streamlit_shim(log_func)
 
-    # NFL Heavy Research V2.9 / Engine V3.5 — residual + distributional edge research.
+    # NFL Heavy Research V2.10 / Engine V3.6 — frozen 0.575 benchmark + selective trust + partial pooling.
     # Research-only: frozen CORE remains the fair-value anchor. STAT/PBP/context learn
-    # residual corrections; SYSTEM is an optional regime overlay; the market is used
-    # only as the offered benchmark/query threshold. 2026 stays sealed.
+    # residual corrections; SYSTEM/STAT/PBP become selective trust lanes; a partially pooled
+    # distribution is a challenger; actual price is required for live EV. 2026 stays sealed.
     if str(sport).upper().strip() == "NFL" and str(market).lower().strip() == "nfl_research_heavy":
         from google.cloud import bigquery
 
@@ -197,16 +197,16 @@ def main():
         _research = _load_nfl_heavy_exact("nfl_research_engine_v2", "nfl-research-engine-v1.9.4-edge-gate-manager-20261001")
         _systems = _load_nfl_heavy_exact("nfl_system_lab_v3", "nfl-system-lab-v3-research-v2.2-mechanism-family-freeze-20261001")
         _pbpdiag = _load_nfl_heavy_exact("nfl_pbp_attribution_v1", "nfl-pbp-attribution-v1-research-v2.0.2-frozen-core2-20261001")
-        _heavy = _load_nfl_heavy_exact("nfl_heavy_research_v29", "nfl-heavy-research-v2.9-residual-distributional-edge-20261003")
+        _heavy = _load_nfl_heavy_exact("nfl_heavy_research_v30", "nfl-heavy-research-v2.10-selective-trust-partial-pooling-h2h-freeze-20261003")
 
-        pw.emit("audit", f"[NFL-HEAVY-V29] Start run={run_id}; frozen CORE + residual correction + conditional empirical distribution; price-aware H2H; production mutation forbidden; 2026 sealed", pct=0.03)
+        pw.emit("audit", f"[NFL-HEAVY-V210] Start run={run_id}; frozen V29 Spread 0.575 benchmark + selective trust + partial pooling + price-aware EV + H2H freeze fix; production mutation forbidden; 2026 sealed", pct=0.03)
         try:
             _bq = bigquery.Client(project="sharplogger")
             _rcontract.assert_contract()
             _syscontract.assert_contract()
             _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
             if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
-                raise RuntimeError("[NFL-HEAVY-V29-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
+                raise RuntimeError("[NFL-HEAVY-V210-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
             _health = _ledger3.ledger_health_check(_bq, service_identity_hint="sharp-train-sa@sharplogger.iam.gserviceaccount.com")
 
             pw.emit("core_stat", "Audit PASS; run protected CORE/STAT/residual challenger research", pct=0.16)
@@ -229,17 +229,17 @@ def main():
                 )
             except Exception as _pbp_exc:
                 _pbp_report = {"status":"PBP_ADVANCED_DIAGNOSTIC_UNAVAILABLE","error":f"{type(_pbp_exc).__name__}:{_pbp_exc}","production_authority":0}
-                log_func("[NFL-HEAVY-V29-PBP-HOLD] "+json.dumps(_pbp_report, sort_keys=True, default=str))
+                log_func("[NFL-HEAVY-V210-PBP-HOLD] "+json.dumps(_pbp_report, sort_keys=True, default=str))
 
-            pw.emit("fusion", "Run residual-correction challengers + conditional empirical error distribution + price-aware H2H; SYSTEM is an optional overlay, not a gate", pct=0.68)
+            pw.emit("fusion", "Run frozen 0.575 Spread benchmark + selective-trust challengers + partially pooled distribution + price-aware EV + H2H freeze fix", pct=0.68)
             _result = _heavy.run_nfl_heavy_research(
                 bq_client=_bq, storage_client=gcs, bucket_name=bucket,
                 audit_report=_audit_report, research_report=_research_report,
                 system_report=_system_report, pbp_report=_pbp_report, log_func=log_func,
             )
             if _result.get("production_mutated") is not False or int(_result.get("production_authority") or 0) != 0:
-                raise RuntimeError("[NFL-HEAVY-V29-HOLD] RESEARCH_ROUTE_ATTEMPTED_PRODUCTION_AUTHORITY")
-            log_func("[NFL-HEAVY-V29-OPERATOR-CONTRACT] "+json.dumps({
+                raise RuntimeError("[NFL-HEAVY-V210-HOLD] RESEARCH_ROUTE_ATTEMPTED_PRODUCTION_AUTHORITY")
+            log_func("[NFL-HEAVY-V210-OPERATOR-CONTRACT] "+json.dumps({
                 "status":_result.get("status"),
                 "research_contract_sha256":_result.get("research_contract_sha256"),
                 "production_mutated":False,
@@ -249,16 +249,22 @@ def main():
                 "spread_residual_model":(((_result.get("markets") or {}).get("SPREADS") or {}).get("selected_residual_model")),
                 "spread_policy":(((_result.get("markets") or {}).get("SPREADS") or {}).get("betting_policy") or {}).get("status"),
                 "spread_threshold":(((_result.get("markets") or {}).get("SPREADS") or {}).get("betting_policy") or {}).get("selected_threshold"),
+                "spread_frozen_base_threshold":(((_result.get("markets") or {}).get("SPREADS") or {}).get("frozen_base_policy") or {}).get("threshold"),
+                "spread_frozen_base_reproduced":(((_result.get("markets") or {}).get("SPREADS") or {}).get("frozen_base_policy") or {}).get("reproduced_in_current_run"),
+                "spread_partial_pool_threshold":(((_result.get("markets") or {}).get("SPREADS") or {}).get("partial_pooling_policy") or {}).get("selected_threshold"),
+                "spread_selective_trust_enhancers":(((_result.get("markets") or {}).get("SPREADS") or {}).get("selective_trust") or {}).get("frozen_enhancer_challengers"),
+                "spread_veto_watchlist":(((_result.get("markets") or {}).get("SPREADS") or {}).get("selective_trust") or {}).get("veto_watchlist"),
                 "totals_residual_model":(((_result.get("markets") or {}).get("TOTALS") or {}).get("selected_residual_model")),
                 "totals_policy":(((_result.get("markets") or {}).get("TOTALS") or {}).get("betting_policy") or {}).get("status"),
                 "totals_threshold":(((_result.get("markets") or {}).get("TOTALS") or {}).get("betting_policy") or {}).get("selected_threshold"),
+                "totals_partial_pool_threshold":(((_result.get("markets") or {}).get("TOTALS") or {}).get("partial_pooling_policy") or {}).get("selected_threshold"),
                 "h2h_policy":((_result.get("h2h") or {}).get("betting_policy") or {}).get("status"),
                 "h2h_core_weight":(_result.get("h2h") or {}).get("selected_core_weight"),
                 "h2h_min_ev":((_result.get("h2h") or {}).get("betting_policy") or {}).get("selected_min_ev"),
             }, sort_keys=True, default=str))
-            pw.emit("done", "NFL Heavy Research V2.9 complete: "+str(_result.get("status")), pct=1.0)
+            pw.emit("done", "NFL Heavy Research V2.10 complete: "+str(_result.get("status")), pct=1.0)
         except Exception as exc:
-            pw.emit("error", "NFL Heavy Research V2.9 failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            pw.emit("error", "NFL Heavy Research V2.10 failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
             raise
         return
 
