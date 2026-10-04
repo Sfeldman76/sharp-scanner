@@ -1,12 +1,8 @@
 {
-  "status": "PASS",
-  "checks": {
-    "dashboard_compiles": true,
-    "has_heavy_report_reader": true,
-    "has_system_attribution_renderer": true,
-    "has_core_system_states": true,
-    "has_individual_sources": true,
-    "production_results_title_updated": true,
-    "no_engine_change_required": true
-  }
+  "compile": "PASS",
+  "nested_expander_in_results_helper": false,
+  "nested_miner_audit_expander_removed": true,
+  "visible_system_metrics": true,
+  "defensive_heavy_parser": true,
+  "production_logic_changed": false
 }

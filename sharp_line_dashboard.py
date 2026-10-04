@@ -47231,7 +47231,7 @@ def _nfl_heavy_system_results_cached():
 def _nfl_system_record_row(label,rec,base=None):
     rec=rec or {}; base=base or {}
     try:
-        n=int(rec.get("n") or 0); w=int(rec.get("wins") or 0); l=int(rec.get("losses") or 0); p=int(rec.get("pushes") or 0)
+        n=int(rec.get("n") or rec.get("graded_n") or 0); w=int(rec.get("wins") or 0); l=int(rec.get("losses") or 0); p=int(rec.get("pushes") or 0)
     except Exception:
         n=w=l=p=0
     hit=pd.to_numeric(pd.Series([rec.get("hit_rate")]),errors="coerce").iloc[0]
@@ -47248,21 +47248,78 @@ def _nfl_system_record_row(label,rec,base=None):
     }
 
 
+def _nfl_walk_dicts(obj):
+    if isinstance(obj,dict):
+        yield obj
+        for _v in obj.values():
+            yield from _nfl_walk_dicts(_v)
+    elif isinstance(obj,list):
+        for _v in obj:
+            yield from _nfl_walk_dicts(_v)
+
+
+def _nfl_extract_system_result_blocks(heavy):
+    """Best-effort read of the immutable Heavy Research report without assuming one JSON layout."""
+    out={"exact_states":None,"threshold":None,"confirmation":None,"core":None}
+    if not isinstance(heavy,dict):
+        return out
+
+    # Preferred contract if the report explicitly publishes same-pool CORE/system states.
+    spr=((heavy.get("markets") or {}).get("SPREADS") or {}) if isinstance(heavy.get("markets"),dict) else {}
+    ov=(spr.get("overlay_diagnostics") or {}) if isinstance(spr,dict) else {}
+    states=(ov.get("states") or {}) if isinstance(ov,dict) else {}
+    if isinstance(states,dict) and states.get("BASE"):
+        out["exact_states"]=states
+        out["threshold"]=ov.get("threshold_used")
+
+    # V2.11 report also contains repeated STAT/system-interaction diagnostics.  SYSTEM_ALL and
+    # SYSTEM_MULTI_ALL are the same system-pool confirmation records repeated across STAT families.
+    for d in _nfl_walk_dicts(heavy):
+        if str(d.get("market") or "").upper()!="SPREADS":
+            continue
+        inter=d.get("interaction")
+        conf=(inter or {}).get("CONFIRMATION") if isinstance(inter,dict) else None
+        if isinstance(conf,dict) and isinstance(conf.get("SYSTEM_ALL"),dict) and isinstance(conf.get("SYSTEM_MULTI_ALL"),dict):
+            out["confirmation"]=conf
+            break
+
+    # Frozen Spread CORE benchmark selected by the Heavy Research threshold scan.
+    for d in _nfl_walk_dicts(heavy):
+        if str(d.get("market") or "").upper()!="SPREADS":
+            continue
+        for k in ("legacy_probability_scan","partial_pool_probability_scan"):
+            arr=d.get(k)
+            if not isinstance(arr,list):
+                continue
+            for rec in arr:
+                if not isinstance(rec,dict):
+                    continue
+                try: thr=float(rec.get("threshold"))
+                except Exception: continue
+                if abs(thr-0.575)<1e-9 and bool(rec.get("robust_for_2026_freeze")):
+                    out["core"]=rec
+                    out["threshold"]=thr
+                    return out
+    return out
+
+
 def _render_nfl_system_results_attribution():
-    """Show what the system lane adds to CORE, plus each indexed system's record."""
+    """Show system-pool performance and each indexed system without overstating causality."""
     st.markdown("**SYSTEM RESULTS — what the overlays are actually doing**")
     st.caption(
-        "The first table is the frozen 2023–25 development attribution from Heavy Research at the Spread CORE threshold. "
-        "It compares the same CORE-qualified pool with system agreement/opposition. ROI is a flat -110 historical reference, not an executable prospective price. "
-        "The second table preserves each Miner, Pathi and Big Al rule separately. Actual prospective Bet Authority results remain in the production ledger section below."
+        "Historical system evidence is shown separately from the 2026 prospective ledger. "
+        "Where the Heavy Research artifact publishes an exact same-game CORE/system intersection, that comparison is labeled explicitly. "
+        "Otherwise the system pool is compared with the frozen CORE benchmark as a benchmark difference, not claimed causal lift."
     )
 
     heavy=_nfl_heavy_system_results_cached()
-    spr=((heavy.get("markets") or {}).get("SPREADS") or {}) if isinstance(heavy,dict) else {}
-    ov=(spr.get("overlay_diagnostics") or {}) if isinstance(spr,dict) else {}
-    states=(ov.get("states") or {}) if isinstance(ov,dict) else {}
-    base=states.get("BASE") or {}
-    if states and base:
+    blocks=_nfl_extract_system_result_blocks(heavy)
+    exact=blocks.get("exact_states") or {}
+    core_rec=blocks.get("core") or {}
+    conf=blocks.get("confirmation") or {}
+
+    if exact and exact.get("BASE"):
+        base=exact.get("BASE") or {}
         labels=[
             ("CORE only / all qualifiers","BASE"),
             ("CORE + ≥1 system agrees","SYSTEM_AGREE"),
@@ -47270,16 +47327,53 @@ def _render_nfl_system_results_attribution():
             ("CORE + system opposes","SYSTEM_OPPOSE"),
             ("CORE + no system","SYSTEM_NEUTRAL"),
         ]
-        rows=[_nfl_system_record_row(lbl,states.get(key) or {},base) for lbl,key in labels if key in states]
-        st.markdown("**Spread CORE + system attribution — 2023–25 development**")
-        st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+        rows=[_nfl_system_record_row(lbl,exact.get(key) or {},base) for lbl,key in labels if key in exact]
+        st.markdown("**Spread CORE + system attribution — exact same-pool comparison**")
+        if rows:
+            st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
         st.caption(
-            f"Heavy Research threshold used: {_nfl_be_num(ov.get('threshold_used'),3)}. "
-            "SYSTEM_MULTI_AGREE is the cleanest historical test of whether multiple system confirmations improve the CORE-selected subset. "
-            "This is development evidence and is not substituted for the 2026 prospective ledger."
+            f"Heavy Research threshold used: {_nfl_be_num(blocks.get('threshold'),3)}. "
+            "These rows are eligible to be interpreted as system agreement/opposition conditional on the same CORE-qualified pool."
+        )
+    elif conf:
+        sys_all=conf.get("SYSTEM_ALL") or {}
+        sys_multi=conf.get("SYSTEM_MULTI_ALL") or {}
+        st.markdown("**Spread historical confirmation — CORE benchmark vs system signals**")
+
+        def _rec_values(rec):
+            rec=rec or {}
+            n=int(rec.get("n") or rec.get("graded_n") or 0)
+            w=int(rec.get("wins") or 0); l=int(rec.get("losses") or 0); p=int(rec.get("pushes") or 0)
+            hit=pd.to_numeric(pd.Series([rec.get("hit_rate")]),errors="coerce").iloc[0]
+            roi=pd.to_numeric(pd.Series([rec.get("roi_per_unit")]),errors="coerce").iloc[0]
+            return n,w,l,p,hit,roi
+
+        cn,cw,cl,cp,ch,cr=_rec_values(core_rec)
+        an,aw,al,ap,ah,ar=_rec_values(sys_all)
+        mn,mw,ml,mp,mh,mr=_rec_values(sys_multi)
+        c1,c2,c3=st.columns(3)
+        with c1:
+            st.metric("Frozen Spread CORE",_nfl_result_pct(ch) if pd.notna(ch) else "—")
+            st.caption(f"{cn} graded • {cw}-{cl}-{cp} • ROI {_nfl_result_pct(cr)}")
+        with c2:
+            st.metric("Any system signal",_nfl_result_pct(ah) if pd.notna(ah) else "—",delta=(f"{100*(ah-ch):+.1f} pp vs CORE benchmark" if pd.notna(ah) and pd.notna(ch) else None))
+            st.caption(f"{an} graded • {aw}-{al}-{ap} • ROI {_nfl_result_pct(ar)}" + (f" • ROI diff {100*(ar-cr):+.1f} pp" if pd.notna(ar) and pd.notna(cr) else ""))
+        with c3:
+            st.metric("Multiple system signals",_nfl_result_pct(mh) if pd.notna(mh) else "—",delta=(f"{100*(mh-ch):+.1f} pp vs CORE benchmark" if pd.notna(mh) and pd.notna(ch) else None))
+            st.caption(f"{mn} graded • {mw}-{ml}-{mp} • ROI {_nfl_result_pct(mr)}" + (f" • ROI diff {100*(mr-cr):+.1f} pp" if pd.notna(mr) and pd.notna(cr) else ""))
+
+        summary=[]
+        if core_rec: summary.append(_nfl_system_record_row("Frozen CORE benchmark",core_rec,core_rec))
+        summary.append(_nfl_system_record_row("Any system signal",sys_all,core_rec))
+        summary.append(_nfl_system_record_row("Multiple system signals",sys_multi,core_rec))
+        st.dataframe(pd.DataFrame(summary),use_container_width=True,hide_index=True)
+        st.caption(
+            "Important: SYSTEM_ALL and SYSTEM_MULTI_ALL are the published 2023–25 system-pool confirmation records. "
+            "They are not automatically the same games as the frozen CORE 0.575 pool, so the displayed differences are benchmark differences, not proof of incremental causal lift. "
+            "An exact CORE∩system lift requires an explicitly published same-game intersection or prospective event attribution."
         )
     else:
-        st.info("The latest Heavy Research report does not yet contain system-overlay attribution. Run NFL Research — Heavy Challenger Search once.")
+        st.info("The latest Heavy Research report could not expose a system-pool confirmation block in a supported format. The Rules Index is still available below.")
 
     rules=_nfl_system_rules_index_cached()
     if isinstance(rules,dict) and rules.get("status")=="READY":
@@ -47305,6 +47399,11 @@ def _render_nfl_system_results_attribution():
         st.markdown("**Individual system evidence — latest Rules Index**")
         if detail:
             dd=pd.DataFrame(detail)
+            src_counts=dd.groupby("Source",dropna=False).size().to_dict()
+            a,b,c=st.columns(3)
+            a.metric("Miner systems",int(src_counts.get("MINER",0)))
+            b.metric("Pathi systems",int(src_counts.get("PATHI",0)))
+            c.metric("Big Al systems",int(src_counts.get("BIG AL",0)))
             source_filter=st.multiselect("System source",["MINER","PATHI","BIG AL"],default=["MINER","PATHI","BIG AL"],key="nfl-system-results-source-filter")
             if source_filter:
                 dd=dd[dd["Source"].isin(source_filter)].copy()
@@ -47391,7 +47490,8 @@ def _render_nfl_production_results(cur):
             st.markdown("**CORE H2H calibration**")
             st.dataframe(cr[["Bucket","Games","Avg CORE Confidence","Actual Hit Rate"]],use_container_width=True,hide_index=True)
 
-        with st.expander("Settled CORE game detail",expanded=False):
+        _show_core_detail=st.checkbox("Show settled CORE game detail",value=False,key="nfl-results-core-detail")
+        if _show_core_detail:
             detail=core.copy()
             detail["Matchup"]=detail["away_team"].astype(str)+" @ "+detail["home_team"].astype(str)
             detail["Game"]=pd.to_datetime(detail["game_start"],utc=True,errors="coerce").dt.tz_convert("US/Eastern").dt.strftime("%Y-%m-%d")
@@ -47429,7 +47529,8 @@ def _render_nfl_production_results(cur):
             attr["Hit Rate"]=attr["Hit Rate"].map(_nfl_result_pct); attr["ROI / Bet"]=attr["ROI / Bet"].map(_nfl_result_pct); attr["Units"]=pd.to_numeric(attr["Units"],errors="coerce").round(2)
             st.markdown("**Prospective Bet Authority attribution — settled production wagers**")
             st.dataframe(attr,use_container_width=True,hide_index=True)
-            with st.expander("Settled production bet detail",expanded=False):
+            _show_bet_detail=st.checkbox("Show settled production bet detail",value=False,key="nfl-results-bet-detail")
+            if _show_bet_detail:
                 st.dataframe(bets.sort_values("Game Start",ascending=False),use_container_width=True,hide_index=True)
         else:
             st.caption("No captured production BET events have settled yet.")
@@ -47731,7 +47832,8 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                 exec_cov=cov.get("market_execution_coverage") or {}
                 anatomy=cov.get("miner_anatomy_coverage") or {}
                 st.caption(f"Coverage audit: {cov.get('status','—')} • Big Al missing: {', '.join(bigal_missing) if bigal_missing else 'none'} • mined families indexed: {cov.get('mined_family_count','—')}.")
-                with st.expander("Miner anatomy / Pathi / market-execution coverage audit",expanded=False):
+                _show_cov=st.checkbox("Show Miner anatomy / Pathi / market-execution coverage audit",value=False,key="nfl-system-rules-coverage-audit")
+                if _show_cov:
                     audit_rows=[]
                     for k,v in anatomy.items():
                         if k!="production_authority": audit_rows.append({"Area":"MINER: "+k,"Status":str(v),"Evidence":"prior-only system-discovery context"})
