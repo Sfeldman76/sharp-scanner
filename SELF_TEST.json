@@ -1,15 +1,56 @@
 {
-  "compiled_components": 32,
-  "deployment_files_compile": true,
-  "engine_failures": [],
-  "engine_source_tag": "nfl-engine-v3.10.0-advanced-system-miner-20261004",
-  "engine_version": "3.10.0",
+  "deployment_contract": {
+    "discovery_seasons": [
+      2017,
+      2018,
+      2019,
+      2020,
+      2021,
+      2022
+    ],
+    "production_authority": 0,
+    "sealed_season": 2026,
+    "system_lab_source_tag": "nfl-system-lab-v3.10.1-horizon-symmetric-miner-20261004",
+    "train_job_exact_tag_occurrences": 3
+  },
+  "engine": {
+    "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
+    "compiled_and_checked": 32,
+    "components": 32,
+    "engine_source_tag": "nfl-engine-v3.10.1-horizon-symmetric-miner-20261004",
+    "failures": [],
+    "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_V3101_HORIZON_SYMMETRIC_SYSTEM_MINER_RESEARCH_ONLY",
+    "missing_critical_symbols": [],
+    "shared_external_required": [
+      "utils.py",
+      "sports_edge_authority_v1.py"
+    ],
+    "status": "PASS",
+    "utils_backend_required": true,
+    "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
+  },
+  "horizon_symmetry": {
+    "lookback_1": "PASS",
+    "lookback_2_exact_sequences": "PASS",
+    "lookback_2_magnitude": "PASS",
+    "lookback_2_opponent_symmetry": "PASS",
+    "lookback_3_preserved": "PASS",
+    "required_spread_atoms_checked": 31,
+    "required_totals_atoms_checked": 10,
+    "sequence_depth_cap": 3,
+    "spread_atom_count": 72,
+    "spread_atom_smoke_test": "PASS",
+    "totals_atom_count": 54,
+    "totals_atom_smoke_test": "PASS"
+  },
   "status": "PASS",
   "system_lab": {
     "bigal6_indexed": true,
     "coverage_status": "PASS",
     "discovery_evidence_permanent": true,
     "dormant_family_preserved": true,
+    "exact_sequence_2_game": true,
+    "horizon_symmetry_1_2_3": true,
     "island_slot_context": true,
     "magnitude_intelligence": true,
     "model_state_in_discovery": false,
@@ -22,18 +63,7 @@
     "team_context_history": true,
     "team_sequence_memory": true,
     "unique_hypotheses": 3,
-    "version": "NFL_SYSTEM_LAB_V3_10",
+    "version": "NFL_SYSTEM_LAB_V3_10_1",
     "year_2026_queried": false
-  },
-  "v310_contract": {
-    "automatic_promotion": false,
-    "core_unchanged": true,
-    "magnitude_intelligence": true,
-    "opponent_sequence_symmetry": true,
-    "pathi_normalization_preserved": true,
-    "prior_three_sequence_cap": 3,
-    "production_authority": 0,
-    "sealed_2026": true,
-    "team_sequence_memory": true
   }
 }
