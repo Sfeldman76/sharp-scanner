@@ -195,7 +195,7 @@ def main():
         _syscontract = _load_nfl_heavy_exact("nfl_research_v2_contract", "nfl-research-v2.0-foundation-expansion-20261001")
         _ledger3 = _load_nfl_heavy_exact("nfl_prospective_ledger_v3", "nfl-prospective-ledger-v3-v1.9.4-edge-gate-shadow-20261001")
         _research = _load_nfl_heavy_exact("nfl_research_engine_v2", "nfl-research-engine-v1.9.4-edge-gate-manager-20261001")
-        _systems = _load_nfl_heavy_exact("nfl_system_lab_v3", "nfl-system-lab-v3.3.2-pathi-normalized-family-overlay-20261004")
+        _systems = _load_nfl_heavy_exact("nfl_system_lab_v3", "nfl-system-lab-v3.10.0-advanced-sequence-miner-20261004")
         _pbpdiag = _load_nfl_heavy_exact("nfl_pbp_attribution_v1", "nfl-pbp-attribution-v1-research-v2.0.2-frozen-core2-20261001")
         _heavy = _load_nfl_heavy_exact("nfl_heavy_research_v31", "nfl-heavy-research-v2.11-evidence-lifecycle-provenance-20261004")
 
@@ -215,7 +215,7 @@ def main():
                 audit_report=_audit_report, ledger_health=_health, log_func=log_func,
             )
 
-            pw.emit("systems", "CORE/STAT complete; run System Miner V3.3, permanent discovery-evidence lifecycle, Big Al 6 external retest, mechanism-family collapse, rules index and coverage audit", pct=0.36)
+            pw.emit("systems", "CORE/STAT complete; run System Miner V3.10 Advanced, prior-three sequences/magnitude/opponent symmetry/team memory, permanent discovery-evidence lifecycle, Big Al 6 external retest, mechanism-family collapse, rules index and coverage audit", pct=0.36)
             _system_report = _systems.run_nfl_system_lab_v3(
                 bq_client=_bq, storage_client=gcs, bucket_name=bucket,
                 audit_report=_audit_report, log_func=log_func,
@@ -418,7 +418,7 @@ def main():
         _ledger3 = _load_nfl_prod_replay_exact("nfl_prospective_ledger_v3", "nfl-prospective-ledger-v3-v1.9.4-edge-gate-shadow-20261001")
         _research = _load_nfl_prod_replay_exact("nfl_research_engine_v2", "nfl-research-engine-v1.9.4-edge-gate-manager-20261001")
         _syscontract = _load_nfl_prod_replay_exact("nfl_research_v2_contract", "nfl-research-v2.0-foundation-expansion-20261001")
-        _systems = _load_nfl_prod_replay_exact("nfl_system_lab_v3", "nfl-system-lab-v3.3.2-pathi-normalized-family-overlay-20261004")
+        _systems = _load_nfl_prod_replay_exact("nfl_system_lab_v3", "nfl-system-lab-v3.10.0-advanced-sequence-miner-20261004")
         _prod = _load_nfl_prod_replay_exact("nfl_production_v1", "nfl-production-v1.1.1-publish-receipt-normalization-20261002")
         _bet = _load_nfl_prod_replay_exact("nfl_betting_engine_v1", "nfl-betting-engine-v1.0-unified-decision-20261002")
         _shared = _load_nfl_prod_replay_exact("sports_edge_authority_v1", "sports-edge-authority-v1.1-dependency-aware-cross-sport-standard-20261002")
@@ -497,7 +497,7 @@ def main():
         )
         _systems = _load_nfl_v2_system_exact(
             "nfl_system_lab_v3",
-            "nfl-system-lab-v3.3.2-pathi-normalized-family-overlay-20261004",
+            "nfl-system-lab-v3.10.0-advanced-sequence-miner-20261004",
         )
         _audit = _load_nfl_v2_system_exact(
             "nfl_audit_v1",
@@ -509,7 +509,7 @@ def main():
             _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
             if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
                 raise RuntimeError("[NFL-RESEARCH-V2-SYSTEM-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
-            pw.emit("research", "[NFL-RESEARCH-V2-SYSTEM-V3] Run direct System Miner V3.3, retain established 2017-2022 discovery evidence even when later periods weaken, collapse correlated variants, add Big Al 6, publish human rules index/coverage audit, freeze prospective family registry", pct=0.20)
+            pw.emit("research", "[NFL-RESEARCH-V2-SYSTEM-V310] Run Advanced System Miner V3.10 with bounded prior-three sequences, magnitude, opponent symmetry and team-memory lanes; retain established 2017-2022 discovery evidence even when later periods weaken, collapse correlated variants, add Big Al 6, publish human rules index/coverage audit, freeze prospective family registry", pct=0.20)
             _result = _systems.run_nfl_system_lab_v3(
                 bq_client=bigquery.Client(project="sharplogger"),
                 storage_client=gcs,

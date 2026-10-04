@@ -1,53 +1,39 @@
 {
-  "compile": {
-    "nfl_engine.py": "PASS",
-    "sharp_line_dashboard.py": "PASS",
-    "train_job.py": "PASS"
-  },
-  "engine_self_test": {
-    "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
-    "compiled_and_checked": 32,
-    "components": 32,
-    "engine_source_tag": "nfl-engine-v3.9.2-pathi-normalized-family-overlay-20261004",
-    "failures": [],
-    "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_PERMANENT_SYSTEM_EVIDENCE_LIFECYCLE_RESEARCH_ONLY",
-    "missing_critical_symbols": [],
-    "shared_external_required": [
-      "utils.py",
-      "sports_edge_authority_v1.py"
-    ],
+  "compiled_components": 32,
+  "deployment_files_compile": true,
+  "engine_failures": [],
+  "engine_source_tag": "nfl-engine-v3.10.0-advanced-system-miner-20261004",
+  "engine_version": "3.10.0",
+  "status": "PASS",
+  "system_lab": {
+    "bigal6_indexed": true,
+    "coverage_status": "PASS",
+    "discovery_evidence_permanent": true,
+    "dormant_family_preserved": true,
+    "island_slot_context": true,
+    "magnitude_intelligence": true,
+    "model_state_in_discovery": false,
+    "opponent_sequence_symmetry": true,
+    "prior_three_sequence_cap": 3,
+    "raw_tested": 3,
+    "rules_index_rows": 9,
+    "sequential_context_grammar": true,
     "status": "PASS",
-    "utils_backend_required": true,
-    "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
+    "team_context_history": true,
+    "team_sequence_memory": true,
+    "unique_hypotheses": 3,
+    "version": "NFL_SYSTEM_LAB_V3_10",
+    "year_2026_queried": false
   },
-  "normalized_family_count": 13,
-  "pathi_evidence_classifier": {
-    "dog_below_3": {
-      "actual": "NO_SUPPORT",
-      "expected": "NO_SUPPORT",
-      "pass": true
-    },
-    "dog_hook_above_7": {
-      "actual": "STRONG_SUPPORT",
-      "expected": "STRONG_SUPPORT",
-      "pass": true
-    },
-    "dog_moved_above_7": {
-      "actual": "EMERGING_SUPPORT",
-      "expected": "EMERGING_SUPPORT",
-      "pass": true
-    },
-    "favorite_below_3": {
-      "actual": "WEAK_SUPPORT",
-      "expected": "WEAK_SUPPORT",
-      "pass": true
-    },
-    "favorite_hook_3": {
-      "actual": "REGIME_REVERSAL",
-      "expected": "REGIME_REVERSAL",
-      "pass": true
-    }
-  },
-  "pathi_vote_policy": "ONE_PATHI_FAMILY_ONE_VOTE__ONE_PATHI_LANE_VOTE_PER_GAME__NO_PRODUCTION_AUTHORITY",
-  "status": "PASS"
+  "v310_contract": {
+    "automatic_promotion": false,
+    "core_unchanged": true,
+    "magnitude_intelligence": true,
+    "opponent_sequence_symmetry": true,
+    "pathi_normalization_preserved": true,
+    "prior_three_sequence_cap": 3,
+    "production_authority": 0,
+    "sealed_2026": true,
+    "team_sequence_memory": true
+  }
 }
