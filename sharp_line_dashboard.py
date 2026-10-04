@@ -47318,7 +47318,18 @@ def _render_nfl_system_results_attribution():
     core_rec=blocks.get("core") or {}
     conf=blocks.get("confirmation") or {}
 
-    if exact and exact.get("BASE"):
+    # Some V2.11 Heavy artifacts publish the exact-state schema before the system-attribution
+    # rows are populated.  In that case BASE/NO_SYSTEM contain the whole CORE pool while every
+    # system agreement/opposition bucket is zero.  Do not let that empty shell suppress the
+    # real historical SYSTEM_ALL / SYSTEM_MULTI_ALL confirmation records.
+    _overlay_keys=("SYSTEM_AGREE","SYSTEM_MULTI_AGREE","SYSTEM_OPPOSE")
+    exact_overlay_populated=any(
+        int((exact.get(_k) or {}).get("n") or (exact.get(_k) or {}).get("graded_n") or 0)>0
+        for _k in _overlay_keys
+    ) if isinstance(exact,dict) else False
+    benchmark_core=(exact.get("BASE") or core_rec) if isinstance(exact,dict) else core_rec
+
+    if exact and exact.get("BASE") and exact_overlay_populated:
         base=exact.get("BASE") or {}
         labels=[
             ("CORE only / all qualifiers","BASE"),
@@ -47348,7 +47359,7 @@ def _render_nfl_system_results_attribution():
             roi=pd.to_numeric(pd.Series([rec.get("roi_per_unit")]),errors="coerce").iloc[0]
             return n,w,l,p,hit,roi
 
-        cn,cw,cl,cp,ch,cr=_rec_values(core_rec)
+        cn,cw,cl,cp,ch,cr=_rec_values(benchmark_core)
         an,aw,al,ap,ah,ar=_rec_values(sys_all)
         mn,mw,ml,mp,mh,mr=_rec_values(sys_multi)
         c1,c2,c3=st.columns(3)
@@ -47363,14 +47374,19 @@ def _render_nfl_system_results_attribution():
             st.caption(f"{mn} graded • {mw}-{ml}-{mp} • ROI {_nfl_result_pct(mr)}" + (f" • ROI diff {100*(mr-cr):+.1f} pp" if pd.notna(mr) and pd.notna(cr) else ""))
 
         summary=[]
-        if core_rec: summary.append(_nfl_system_record_row("Frozen CORE benchmark",core_rec,core_rec))
-        summary.append(_nfl_system_record_row("Any system signal",sys_all,core_rec))
-        summary.append(_nfl_system_record_row("Multiple system signals",sys_multi,core_rec))
+        if benchmark_core: summary.append(_nfl_system_record_row("Frozen CORE benchmark",benchmark_core,benchmark_core))
+        summary.append(_nfl_system_record_row("Any system signal",sys_all,benchmark_core))
+        summary.append(_nfl_system_record_row("Multiple system signals",sys_multi,benchmark_core))
         st.dataframe(pd.DataFrame(summary),use_container_width=True,hide_index=True)
+        if exact and exact.get("BASE") and not exact_overlay_populated:
+            st.info(
+                "The current Heavy artifact contains the exact CORE/system state schema, but its system-attributed buckets are still empty (0 games). "
+                "So the empty same-pool table is suppressed here and the published 2023–25 system-pool confirmation results are shown instead."
+            )
         st.caption(
             "Important: SYSTEM_ALL and SYSTEM_MULTI_ALL are the published 2023–25 system-pool confirmation records. "
             "They are not automatically the same games as the frozen CORE 0.575 pool, so the displayed differences are benchmark differences, not proof of incremental causal lift. "
-            "An exact CORE∩system lift requires an explicitly published same-game intersection or prospective event attribution."
+            "An exact CORE∩system lift requires an explicitly populated same-game intersection or prospective event attribution."
         )
     else:
         st.info("The latest Heavy Research report could not expose a system-pool confirmation block in a supported format. The Rules Index is still available below.")

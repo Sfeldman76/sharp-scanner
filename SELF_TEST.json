@@ -1,8 +1,9 @@
 {
-  "compile": "PASS",
-  "nested_expander_in_results_helper": false,
-  "nested_miner_audit_expander_removed": true,
-  "visible_system_metrics": true,
-  "defensive_heavy_parser": true,
-  "production_logic_changed": false
+  "version": "NFL_V3_10_2_3_SYSTEM_RESULTS_DISPLAY_FIX",
+  "py_compile": "PASS",
+  "empty_exact_state_suppression": "PASS",
+  "historical_confirmation_fallback": "PASS",
+  "model_or_miner_changes": false,
+  "weekly_rerun_required": false,
+  "heavy_rerun_required": false
 }
