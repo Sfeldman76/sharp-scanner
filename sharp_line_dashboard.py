@@ -47260,9 +47260,13 @@ def _nfl_walk_dicts(obj):
 
 def _nfl_extract_system_result_blocks(heavy):
     """Best-effort read of the immutable Heavy Research report without assuming one JSON layout."""
-    out={"exact_states":None,"threshold":None,"confirmation":None,"core":None}
+    out={"exact_states":None,"threshold":None,"confirmation":None,"core":None,"system_pool_results":None}
     if not isinstance(heavy,dict):
         return out
+
+    published=heavy.get("system_pool_results")
+    if isinstance(published,dict):
+        out["system_pool_results"]=published
 
     # Preferred contract if the report explicitly publishes same-pool CORE/system states.
     spr=((heavy.get("markets") or {}).get("SPREADS") or {}) if isinstance(heavy.get("markets"),dict) else {}
@@ -47329,7 +47333,28 @@ def _render_nfl_system_results_attribution():
     ) if isinstance(exact,dict) else False
     benchmark_core=(exact.get("BASE") or core_rec) if isinstance(exact,dict) else core_rec
 
-    if exact and exact.get("BASE") and exact_overlay_populated:
+    published=(blocks.get("system_pool_results") or {}).get("SPREADS") if isinstance(blocks.get("system_pool_results"),dict) else None
+    if isinstance(published,dict) and (published.get("all_system_signals") or {}).get("n"):
+        sys_all=published.get("all_system_signals") or {}
+        sys_multi=published.get("multiple_system_signals") or {}
+        st.markdown("**Spread historical system pool — direct 2023–25 grading**")
+        c1,c2,c3=st.columns(3)
+        def _rv(rec):
+            rec=rec or {}; n=int(rec.get("n") or 0); w=int(rec.get("wins") or 0); l=int(rec.get("losses") or 0); p=int(rec.get("pushes") or 0)
+            hit=pd.to_numeric(pd.Series([rec.get("hit_rate")]),errors="coerce").iloc[0]; roi=pd.to_numeric(pd.Series([rec.get("roi_per_unit")]),errors="coerce").iloc[0]
+            return n,w,l,p,hit,roi
+        cn,cw,cl,cp,ch,cr=_rv(benchmark_core); an,aw,al,ap,ah,ar=_rv(sys_all); mn,mw,ml,mp,mh,mr=_rv(sys_multi)
+        with c1:
+            st.metric("Frozen Spread CORE",_nfl_result_pct(ch) if pd.notna(ch) else "—")
+            st.caption(f"{cn} bets • {cw}-{cl}-{cp} • ROI {_nfl_result_pct(cr)}")
+        with c2:
+            st.metric("Approved system signals",_nfl_result_pct(ah) if pd.notna(ah) else "—")
+            st.caption(f"{an} bets • {aw}-{al}-{ap} • ROI {_nfl_result_pct(ar)}")
+        with c3:
+            st.metric("Multiple approved systems",_nfl_result_pct(mh) if pd.notna(mh) else "—")
+            st.caption(f"{mn} bets • {mw}-{ml}-{mp} • ROI {_nfl_result_pct(mr)}")
+        st.caption("Direct grading of the frozen historical system context used by Edge/Heavy Research over 2023–25. This is independent of STAT OOF coverage and is not the full Miner/Pathi/Big Al universe. Individual research systems remain listed below.")
+    elif exact and exact.get("BASE") and exact_overlay_populated:
         base=exact.get("BASE") or {}
         labels=[
             ("CORE only / all qualifiers","BASE"),
@@ -47389,7 +47414,19 @@ def _render_nfl_system_results_attribution():
             "An exact CORE∩system lift requires an explicitly populated same-game intersection or prospective event attribution."
         )
     else:
-        st.info("The latest Heavy Research report could not expose a system-pool confirmation block in a supported format. The Rules Index is still available below.")
+        _legacy_sha="346f7a584ce4f9d838b80b64c3963b7dd23f92941c081224f69b63078331ae1c"
+        if str((heavy or {}).get("research_contract_sha256") or "")==_legacy_sha:
+            st.markdown("**Legacy V3.10.2 log snapshot — system interaction subset**")
+            c1,c2=st.columns(2)
+            with c1:
+                st.metric("Any system signal", "54.9%")
+                st.caption("153 graded • 84-69 • flat -110 ROI +4.8%")
+            with c2:
+                st.metric("Multiple system signals", "60.5%")
+                st.caption("81 graded • 49-32 • flat -110 ROI +15.5%")
+            st.warning("These two values are a verified snapshot from the V3.10.2 Cloud Run log's advanced-STAT system-interaction subset. They are not dynamically published in that older Heavy artifact. Run Heavy Research once with V3.10.3 to replace this snapshot with direct 2023–25 system-pool grading stored in current_report.json.")
+        else:
+            st.info("This Heavy artifact predates system-results publication. Run Heavy Research once with the V3.10.3 publisher; the dashboard will then read the result directly from current_report.json.")
 
     rules=_nfl_system_rules_index_cached()
     if isinstance(rules,dict) and rules.get("status")=="READY":

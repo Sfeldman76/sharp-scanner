@@ -1,9 +1,17 @@
 {
-  "version": "NFL_V3_10_2_3_SYSTEM_RESULTS_DISPLAY_FIX",
-  "py_compile": "PASS",
-  "empty_exact_state_suppression": "PASS",
-  "historical_confirmation_fallback": "PASS",
-  "model_or_miner_changes": false,
-  "weekly_rerun_required": false,
-  "heavy_rerun_required": false
+  "status": "PASS",
+  "engine_version": "3.10.3",
+  "heavy_source_tag": "nfl-heavy-research-v2.11.1-system-results-publisher-20261004",
+  "heavy_sha256": "943c70522d575bdea1173377dbce592c9a5fdfec374e9069322bfb79a347e360",
+  "checks": [
+    "dashboard_compile",
+    "train_job_compile",
+    "engine_compile",
+    "embedded_heavy_compile",
+    "direct_system_pool_publisher_present",
+    "current_report_system_pool_results_present",
+    "legacy_sha_locked_snapshot_present",
+    "2026_seal_unchanged",
+    "production_authority_unchanged"
+  ]
 }
