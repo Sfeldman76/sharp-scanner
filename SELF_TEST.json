@@ -2,9 +2,9 @@
   "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
   "compiled_and_checked": 32,
   "components": 32,
-  "engine_source_tag": "nfl-engine-v3.4-cross-fitted-layer-stacking-20261003",
+  "engine_source_tag": "nfl-engine-v3.5-residual-distributional-edge-20261003",
   "failures": [],
-  "heavy_research": "CROSS_FITTED_LAYER_STACKING_PLUS_FDR_REGIME_DISCOVERY_RESEARCH_ONLY",
+  "heavy_research": "FROZEN_CORE_RESIDUAL_CORRECTION_PLUS_CONDITIONAL_EMPIRICAL_DISTRIBUTION_RESEARCH_ONLY",
   "missing_critical_symbols": [],
   "shared_external_required": [
     "utils.py",
