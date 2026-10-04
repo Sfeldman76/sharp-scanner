@@ -1,3 +1,6 @@
+# NFL Results Attribution UI Patch V3.10.2.1 — 2026-10-04
+# Adds CORE-vs-system historical lift and individual Miner/Pathi/Big Al evidence.
+# No prediction, miner, authority, threshold, or production-policy change.
 # V11.2: Expert Active/Direction/Intensity layer + Pathi/BigAl/Brain integrity audit
 
 import streamlit as st
@@ -47205,6 +47208,112 @@ def _nfl_bet_authority_results_cached():
         return {"status":"UNAVAILABLE","error":f"{type(e).__name__}:{e}","events":[],"settlements":[]}
 
 
+@st.cache_data(ttl=300,show_spinner=False)
+def _nfl_heavy_system_results_cached():
+    """Read the latest Heavy Research report for read-only system attribution.
+
+    This is development/historical evidence only.  It never changes production
+    authority, thresholds, model probabilities, or the prospective ledgers.
+    """
+    try:
+        sc=storage.Client(); bucket=sc.bucket(GCS_BUCKET)
+        key="research/nfl/heavy/v211/current_report.json"
+        blob=bucket.blob(key)
+        if not blob.exists():
+            return {"status":"HEAVY_REPORT_UNAVAILABLE","markets":{}}
+        report=json.loads(blob.download_as_text())
+        return report if isinstance(report,dict) else {"status":"HEAVY_REPORT_INVALID","markets":{}}
+    except Exception as e:
+        logging.warning("[NFL-SYSTEM-RESULTS-UI] heavy report unavailable: %s:%s",type(e).__name__,e)
+        return {"status":"UNAVAILABLE","error":f"{type(e).__name__}:{e}","markets":{}}
+
+
+def _nfl_system_record_row(label,rec,base=None):
+    rec=rec or {}; base=base or {}
+    try:
+        n=int(rec.get("n") or 0); w=int(rec.get("wins") or 0); l=int(rec.get("losses") or 0); p=int(rec.get("pushes") or 0)
+    except Exception:
+        n=w=l=p=0
+    hit=pd.to_numeric(pd.Series([rec.get("hit_rate")]),errors="coerce").iloc[0]
+    roi=pd.to_numeric(pd.Series([rec.get("roi_per_unit")]),errors="coerce").iloc[0]
+    bh=pd.to_numeric(pd.Series([base.get("hit_rate")]),errors="coerce").iloc[0]
+    br=pd.to_numeric(pd.Series([base.get("roi_per_unit")]),errors="coerce").iloc[0]
+    hit_lift=(float(hit)-float(bh)) if pd.notna(hit) and pd.notna(bh) else np.nan
+    roi_lift=(float(roi)-float(br)) if pd.notna(roi) and pd.notna(br) else np.nan
+    return {
+        "State":label,"Bets":n,"W":w,"L":l,"P":p,
+        "Hit Rate":_nfl_result_pct(hit),"ROI / Unit":_nfl_result_pct(roi),
+        "Hit Lift vs CORE":("—" if pd.isna(hit_lift) else f"{100*hit_lift:+.1f} pp"),
+        "ROI Lift vs CORE":("—" if pd.isna(roi_lift) else f"{100*roi_lift:+.1f} pp"),
+    }
+
+
+def _render_nfl_system_results_attribution():
+    """Show what the system lane adds to CORE, plus each indexed system's record."""
+    st.markdown("**SYSTEM RESULTS — what the overlays are actually doing**")
+    st.caption(
+        "The first table is the frozen 2023–25 development attribution from Heavy Research at the Spread CORE threshold. "
+        "It compares the same CORE-qualified pool with system agreement/opposition. ROI is a flat -110 historical reference, not an executable prospective price. "
+        "The second table preserves each Miner, Pathi and Big Al rule separately. Actual prospective Bet Authority results remain in the production ledger section below."
+    )
+
+    heavy=_nfl_heavy_system_results_cached()
+    spr=((heavy.get("markets") or {}).get("SPREADS") or {}) if isinstance(heavy,dict) else {}
+    ov=(spr.get("overlay_diagnostics") or {}) if isinstance(spr,dict) else {}
+    states=(ov.get("states") or {}) if isinstance(ov,dict) else {}
+    base=states.get("BASE") or {}
+    if states and base:
+        labels=[
+            ("CORE only / all qualifiers","BASE"),
+            ("CORE + ≥1 system agrees","SYSTEM_AGREE"),
+            ("CORE + ≥2 systems agree","SYSTEM_MULTI_AGREE"),
+            ("CORE + system opposes","SYSTEM_OPPOSE"),
+            ("CORE + no system","SYSTEM_NEUTRAL"),
+        ]
+        rows=[_nfl_system_record_row(lbl,states.get(key) or {},base) for lbl,key in labels if key in states]
+        st.markdown("**Spread CORE + system attribution — 2023–25 development**")
+        st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+        st.caption(
+            f"Heavy Research threshold used: {_nfl_be_num(ov.get('threshold_used'),3)}. "
+            "SYSTEM_MULTI_AGREE is the cleanest historical test of whether multiple system confirmations improve the CORE-selected subset. "
+            "This is development evidence and is not substituted for the 2026 prospective ledger."
+        )
+    else:
+        st.info("The latest Heavy Research report does not yet contain system-overlay attribution. Run NFL Research — Heavy Challenger Search once.")
+
+    rules=_nfl_system_rules_index_cached()
+    if isinstance(rules,dict) and rules.get("status")=="READY":
+        raw=[r for r in (rules.get("rows") or []) if str(r.get("source") or "") in {"MINED","PATHI_SYSTEM","BIG_AL_PUBLISHED"}]
+        detail=[]
+        for r in raw:
+            src=str(r.get("source") or "")
+            src_label={"MINED":"MINER","PATHI_SYSTEM":"PATHI","BIG_AL_PUBLISHED":"BIG AL"}.get(src,src)
+            family=str(r.get("pathi_family_label") or r.get("system_id") or "—")
+            detail.append({
+                "Source":src_label,
+                "System":r.get("name") or r.get("system_id"),
+                "Family":family,
+                "Market":r.get("market"),
+                "2023-25 Validation":r.get("validation_2023_2025") or "—",
+                "2017-25 Overall":r.get("overall_2017_2025") or "—",
+                "Evidence":r.get("evidence_level") or r.get("current_evidence_state") or r.get("status") or "—",
+                "Status":r.get("status") or "—",
+                "Next Step":r.get("prospective_action") or "—",
+                "Live Role":r.get("live_scoring") or "—",
+                "Normalized Vote":bool(r.get("normalized_vote_eligible")) if src=="PATHI_SYSTEM" else bool(r.get("prospective_eligible")),
+            })
+        st.markdown("**Individual system evidence — latest Rules Index**")
+        if detail:
+            dd=pd.DataFrame(detail)
+            source_filter=st.multiselect("System source",["MINER","PATHI","BIG AL"],default=["MINER","PATHI","BIG AL"],key="nfl-system-results-source-filter")
+            if source_filter:
+                dd=dd[dd["Source"].isin(source_filter)].copy()
+            st.dataframe(dd,use_container_width=True,hide_index=True)
+        else:
+            st.caption("No Miner / Pathi / Big Al rows are available in the latest Rules Index.")
+    else:
+        st.caption("Individual system evidence is unavailable until the System Rules Index is published.")
+
 def _nfl_result_pct(v):
     try:
         x=float(v)
@@ -47290,7 +47399,10 @@ def _render_nfl_production_results(cur):
             detail=detail[[c for c in cols if c in detail.columns]].rename(columns={"champion_fair_margin":"CORE Fair Margin","actual_margin":"Actual Margin","champion_spread_abs_error":"Spread Abs Error","champion_home_win_probability":"CORE Home Win Prob","home_win_label":"Home Win","champion_fair_total":"CORE Fair Total","actual_total":"Actual Total","champion_total_abs_error":"Total Abs Error","promotion_evidence_eligible":"Promotion Eligible"})
             st.dataframe(detail,use_container_width=True,hide_index=True)
 
-    # 3) Captured production wager detail and attribution by the exact approved family set.
+    # 3) System attribution: historical overlay lift + individual Miner/Pathi/Big Al evidence.
+    _render_nfl_system_results_attribution()
+
+    # 4) Captured production wager detail and attribution by the exact approved family set.
     hist=_nfl_bet_authority_results_cached()
     if hist.get("status")=="READY":
         events={str(x.get("model_bet_event_id")):x for x in (hist.get("events") or [])}
@@ -47315,7 +47427,7 @@ def _render_nfl_production_results(cur):
                 _attr.append({"Market":_m,"Family Set":_f,"Bets":len(g),"W":w,"L":l,"P":psh,"Hit Rate":(w/(w+l) if w+l else np.nan),"Units":g["Profit / Unit"].sum(min_count=1),"ROI / Bet":g["Profit / Unit"].mean()})
             attr=pd.DataFrame(_attr)
             attr["Hit Rate"]=attr["Hit Rate"].map(_nfl_result_pct); attr["ROI / Bet"]=attr["ROI / Bet"].map(_nfl_result_pct); attr["Units"]=pd.to_numeric(attr["Units"],errors="coerce").round(2)
-            st.markdown("**Bet Authority attribution — settled production wagers**")
+            st.markdown("**Prospective Bet Authority attribution — settled production wagers**")
             st.dataframe(attr,use_container_width=True,hide_index=True)
             with st.expander("Settled production bet detail",expanded=False):
                 st.dataframe(bets.sort_values("Game Start",ascending=False),use_container_width=True,hide_index=True)
@@ -47519,7 +47631,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     main["Tot Model Edge"]=pd.to_numeric(main["Tot Model Edge"],errors="coerce").map(lambda x:f"{x:.2f} pts" if pd.notna(x) else "—")
     st.dataframe(main,use_container_width=True,hide_index=True)
 
-    with st.expander("NFL Production Results — prospective scoreboard",expanded=False):
+    with st.expander("NFL Production Results — CORE + Systems + Bet Authority",expanded=False):
         _render_nfl_production_results(cur)
 
     # NCAAF-style secondary diagnostics: hidden by default, never a second legacy board.
