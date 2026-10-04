@@ -47148,6 +47148,188 @@ def _nfl_be_num(x,dec=2):
         return "—"
 
 
+
+@st.cache_data(ttl=300,show_spinner=False)
+def _nfl_production_core_results_cached():
+    """Read-only prospective scoreboard for the frozen NFL production champion.
+
+    The paired prediction/settlement ledger is immutable and is the clean source for
+    post-freeze model performance.  This function never writes, retrains or promotes.
+    """
+    try:
+        q="""
+        SELECT
+          p.prediction_pair_id, p.captured_at, p.game_start, p.season, p.week_number,
+          p.home_team, p.away_team, p.champion_registry_sha256, p.challenger_registry_sha256,
+          p.promotion_evidence_eligible,
+          p.champion_fair_margin, p.challenger_fair_margin,
+          p.champion_home_win_probability, p.challenger_home_win_probability,
+          p.champion_fair_total, p.challenger_fair_total,
+          s.settled_at, s.actual_home_score, s.actual_away_score, s.actual_margin, s.actual_total,
+          s.home_win_label,
+          s.champion_spread_abs_error, s.challenger_spread_abs_error,
+          s.champion_total_abs_error, s.challenger_total_abs_error,
+          s.champion_h2h_log_loss, s.challenger_h2h_log_loss,
+          s.champion_h2h_brier, s.challenger_h2h_brier
+        FROM `sharplogger.sharp_data.nfl_production_v1_paired_predictions` p
+        JOIN `sharplogger.sharp_data.nfl_production_v1_paired_settlements` s
+          USING(prediction_pair_id)
+        WHERE p.model_prediction_authority=TRUE
+        ORDER BY p.game_start DESC
+        """
+        return bq_client.query(q).to_dataframe(create_bqstorage_client=False)
+    except Exception as e:
+        return pd.DataFrame([{"__error":f"{type(e).__name__}:{e}"}])
+
+
+@st.cache_data(ttl=300,show_spinner=False)
+def _nfl_bet_authority_results_cached():
+    """Read immutable captured BET events and their settled outcomes from GCS."""
+    try:
+        import nfl_model_authority_v26 as _ma
+        if getattr(_ma,"SOURCE_TAG","")!="nfl-model-authority-v2.6.1-utils-market-backend-20261003":
+            return {"status":"STALE_MODEL_AUTHORITY","events":[],"settlements":[]}
+        sc=storage.Client(); bucket=sc.bucket(GCS_BUCKET)
+        def _load(prefix):
+            out=[]
+            for b in sc.list_blobs(GCS_BUCKET,prefix=prefix):
+                if not str(b.name).endswith(".json"):
+                    continue
+                try: out.append(json.loads(b.download_as_text()))
+                except Exception: pass
+            return out
+        events=_load(_ma.EVENT_PREFIX)
+        settlements=_load(_ma.SETTLEMENT_PREFIX)
+        return {"status":"READY","events":events,"settlements":settlements}
+    except Exception as e:
+        return {"status":"UNAVAILABLE","error":f"{type(e).__name__}:{e}","events":[],"settlements":[]}
+
+
+def _nfl_result_pct(v):
+    try:
+        x=float(v)
+        return f"{100*x:.1f}%" if np.isfinite(x) else "—"
+    except Exception:
+        return "—"
+
+
+def _render_nfl_production_results(cur):
+    """Prospective production scoreboard: CORE prediction quality + actual BET results."""
+    st.caption(
+        "Two separate scoreboards are shown deliberately: CORE is graded on frozen fair-value prediction quality from the paired ledger; "
+        "Bet Authority is graded on actual captured production wagers at the recorded line/price. Historical backtests are not mixed into either result."
+    )
+
+    # 1) Actual production BET authority results. These are captured before kickoff and settled later.
+    perf=(cur or {}).get("live_performance") or {}
+    allp=perf.get("ALL") or {}
+    c1,c2,c3,c4,c5=st.columns(5)
+    c1.metric("Settled production bets",int(allp.get("n") or 0))
+    c2.metric("W-L-P",f"{int(allp.get('wins') or 0)}-{int(allp.get('losses') or 0)}-{int(allp.get('pushes') or 0)}")
+    c3.metric("Bet hit rate",_nfl_result_pct(allp.get("hit_rate")))
+    c4.metric("ROI / unit",_nfl_result_pct(allp.get("roi_per_unit")))
+    c5.metric("Result source","Prospective")
+
+    by_market=[]
+    for m in ("SPREADS","H2H","TOTALS"):
+        x=perf.get(m) or {}
+        by_market.append({"Market":m,"Bets":int(x.get("n") or 0),"W":int(x.get("wins") or 0),"L":int(x.get("losses") or 0),"P":int(x.get("pushes") or 0),"Hit Rate":_nfl_result_pct(x.get("hit_rate")),"ROI / Unit":_nfl_result_pct(x.get("roi_per_unit"))})
+    st.dataframe(pd.DataFrame(by_market),use_container_width=True,hide_index=True)
+
+    # 2) Frozen CORE fair-value scoreboard from paired predictions/settlements.
+    core=_nfl_production_core_results_cached()
+    if "__error" in core.columns:
+        st.warning("CORE prospective ledger could not be read: "+str(core.iloc[0]["__error"]))
+    elif core.empty:
+        st.info("No settled frozen CORE predictions are available yet.")
+    else:
+        for col in ["champion_fair_margin","challenger_fair_margin","champion_home_win_probability","challenger_home_win_probability","champion_fair_total","challenger_fair_total","actual_margin","actual_total","home_win_label","champion_spread_abs_error","challenger_spread_abs_error","champion_total_abs_error","challenger_total_abs_error","champion_h2h_log_loss","challenger_h2h_log_loss","champion_h2h_brier","challenger_h2h_brier"]:
+            if col in core.columns: core[col]=pd.to_numeric(core[col],errors="coerce")
+        p=core["champion_home_win_probability"]
+        y=core["home_win_label"]
+        valid=p.notna()&y.isin([0,1])
+        h2h_acc=float((((p>=.5)&y.eq(1))|((p<.5)&y.eq(0)))[valid].mean()) if int(valid.sum()) else np.nan
+        m1,m2,m3,m4,m5,m6=st.columns(6)
+        m1.metric("Settled CORE games",int(len(core)))
+        m2.metric("Spread MAE",_nfl_be_num(core["champion_spread_abs_error"].mean(),2))
+        m3.metric("Total MAE",_nfl_be_num(core["champion_total_abs_error"].mean(),2))
+        m4.metric("H2H accuracy",_nfl_result_pct(h2h_acc))
+        m5.metric("H2H Brier",_nfl_be_num(core["champion_h2h_brier"].mean(),4))
+        m6.metric("H2H log loss",_nfl_be_num(core["champion_h2h_log_loss"].mean(),4))
+
+        compare=pd.DataFrame([
+            {"Metric":"Spread MAE","CORE":core["champion_spread_abs_error"].mean(),"Weekly Challenger":core["challenger_spread_abs_error"].mean(),"Lower is better":True},
+            {"Metric":"Total MAE","CORE":core["champion_total_abs_error"].mean(),"Weekly Challenger":core["challenger_total_abs_error"].mean(),"Lower is better":True},
+            {"Metric":"H2H Brier","CORE":core["champion_h2h_brier"].mean(),"Weekly Challenger":core["challenger_h2h_brier"].mean(),"Lower is better":True},
+            {"Metric":"H2H Log Loss","CORE":core["champion_h2h_log_loss"].mean(),"Weekly Challenger":core["challenger_h2h_log_loss"].mean(),"Lower is better":True},
+        ])
+        compare["CORE"]=pd.to_numeric(compare["CORE"],errors="coerce").round(4)
+        compare["Weekly Challenger"]=pd.to_numeric(compare["Weekly Challenger"],errors="coerce").round(4)
+        compare["Challenger minus CORE"]=(compare["Weekly Challenger"]-compare["CORE"]).round(4)
+        st.dataframe(compare,use_container_width=True,hide_index=True)
+
+        # Confidence calibration: if CORE says its selected H2H side is X%, how often did that side win?
+        if int(valid.sum()):
+            cal=core.loc[valid,["champion_home_win_probability","home_win_label"]].copy()
+            cal["CORE Confidence"]=np.maximum(cal["champion_home_win_probability"],1-cal["champion_home_win_probability"])
+            cal["Correct"]=(((cal["champion_home_win_probability"]>=.5)&cal["home_win_label"].eq(1))|((cal["champion_home_win_probability"]<.5)&cal["home_win_label"].eq(0))).astype(float)
+            bins=[.50,.52,.54,.56,.58,.60,1.000001]
+            labels=["50-52%","52-54%","54-56%","56-58%","58-60%","60%+"]
+            cal["Bucket"]=pd.cut(cal["CORE Confidence"],bins=bins,labels=labels,include_lowest=True,right=False)
+            cr=cal.groupby("Bucket",observed=True).agg(Games=("Correct","size"),Actual_Hit_Rate=("Correct","mean"),Avg_CORE_Confidence=("CORE Confidence","mean")).reset_index()
+            cr["Actual Hit Rate"]=cr["Actual_Hit_Rate"].map(_nfl_result_pct)
+            cr["Avg CORE Confidence"]=cr["Avg_CORE_Confidence"].map(_nfl_result_pct)
+            st.markdown("**CORE H2H calibration**")
+            st.dataframe(cr[["Bucket","Games","Avg CORE Confidence","Actual Hit Rate"]],use_container_width=True,hide_index=True)
+
+        with st.expander("Settled CORE game detail",expanded=False):
+            detail=core.copy()
+            detail["Matchup"]=detail["away_team"].astype(str)+" @ "+detail["home_team"].astype(str)
+            detail["Game"]=pd.to_datetime(detail["game_start"],utc=True,errors="coerce").dt.tz_convert("US/Eastern").dt.strftime("%Y-%m-%d")
+            cols=["Game","Matchup","champion_fair_margin","actual_margin","champion_spread_abs_error","champion_home_win_probability","home_win_label","champion_fair_total","actual_total","champion_total_abs_error","promotion_evidence_eligible"]
+            detail=detail[[c for c in cols if c in detail.columns]].rename(columns={"champion_fair_margin":"CORE Fair Margin","actual_margin":"Actual Margin","champion_spread_abs_error":"Spread Abs Error","champion_home_win_probability":"CORE Home Win Prob","home_win_label":"Home Win","champion_fair_total":"CORE Fair Total","actual_total":"Actual Total","champion_total_abs_error":"Total Abs Error","promotion_evidence_eligible":"Promotion Eligible"})
+            st.dataframe(detail,use_container_width=True,hide_index=True)
+
+    # 3) Captured production wager detail and attribution by the exact approved family set.
+    hist=_nfl_bet_authority_results_cached()
+    if hist.get("status")=="READY":
+        events={str(x.get("model_bet_event_id")):x for x in (hist.get("events") or [])}
+        settlements={str(x.get("model_bet_event_id")):x for x in (hist.get("settlements") or [])}
+        joined=[]
+        for eid,e in events.items():
+            z=settlements.get(eid)
+            if not z: continue
+            fam=sorted(str(x) for x in (e.get("production_edge_families") or []) if str(x).strip())
+            joined.append({
+                "Captured":e.get("captured_at"),"Game Start":e.get("game_start"),"Matchup":f"{e.get('away_team','')} @ {e.get('home_team','')}",
+                "Market":str(e.get("market") or ""),"Pick":e.get("selected"),"Line":e.get("market_value"),"Price":e.get("selected_price"),"Model Fair":e.get("model_value"),"Model Edge":e.get("raw_model_edge"),
+                "Family Set":" + ".join(fam) if fam else "NO_APPROVED_FAMILY_LABEL","STAT":e.get("stat_state"),"SYSTEM":e.get("system_state"),"MARKET":e.get("market_state"),
+                "Result":z.get("result"),"Profit / Unit":z.get("profit_per_unit"),
+            })
+        if joined:
+            bets=pd.DataFrame(joined)
+            bets["Profit / Unit"]=pd.to_numeric(bets["Profit / Unit"],errors="coerce")
+            _attr=[]
+            for (_m,_f),g in bets.groupby(["Market","Family Set"],dropna=False):
+                w=int(g["Result"].eq("WIN").sum()); l=int(g["Result"].eq("LOSS").sum()); psh=int(g["Result"].eq("PUSH").sum())
+                _attr.append({"Market":_m,"Family Set":_f,"Bets":len(g),"W":w,"L":l,"P":psh,"Hit Rate":(w/(w+l) if w+l else np.nan),"Units":g["Profit / Unit"].sum(min_count=1),"ROI / Bet":g["Profit / Unit"].mean()})
+            attr=pd.DataFrame(_attr)
+            attr["Hit Rate"]=attr["Hit Rate"].map(_nfl_result_pct); attr["ROI / Bet"]=attr["ROI / Bet"].map(_nfl_result_pct); attr["Units"]=pd.to_numeric(attr["Units"],errors="coerce").round(2)
+            st.markdown("**Bet Authority attribution — settled production wagers**")
+            st.dataframe(attr,use_container_width=True,hide_index=True)
+            with st.expander("Settled production bet detail",expanded=False):
+                st.dataframe(bets.sort_values("Game Start",ascending=False),use_container_width=True,hide_index=True)
+        else:
+            st.caption("No captured production BET events have settled yet.")
+    elif hist.get("status") not in (None,"UNAVAILABLE"):
+        st.caption("Bet Authority history status: "+str(hist.get("status")))
+
+    st.caption(
+        "Interpretation: CORE spread/total results above measure fair-value error, not ATS ROI, because the paired CORE ledger does not store an executable market quote for every model prediction. "
+        "Actual W-L-P and ROI are therefore taken only from immutable Bet Authority events that recorded the wager line and price before kickoff."
+    )
+
+
 def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     """Lean one-table NFL Production V1 view matching the NCAAF board layout.
 
@@ -47337,6 +47519,9 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     main["Tot Model Edge"]=pd.to_numeric(main["Tot Model Edge"],errors="coerce").map(lambda x:f"{x:.2f} pts" if pd.notna(x) else "—")
     st.dataframe(main,use_container_width=True,hide_index=True)
 
+    with st.expander("NFL Production Results — prospective scoreboard",expanded=False):
+        _render_nfl_production_results(cur)
+
     # NCAAF-style secondary diagnostics: hidden by default, never a second legacy board.
     with st.expander("Production Betting V2 — decision details",expanded=False):
         detail=[]
@@ -47398,7 +47583,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
 
     with st.expander("NFL System Rules Index — mined + published + Pathi systems",expanded=False):
         if not isinstance(rules_state,dict) or rules_state.get("status")!="READY":
-            st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.10.1.")
+            st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.10.2.")
         else:
             rr=pd.DataFrame(rules_state.get("rows") or [])
             cov=rules_state.get("coverage") or {}
@@ -50098,7 +50283,7 @@ if not HEADLESS:
         )
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_research_heavy":
         st.sidebar.caption(
-            "WHEN: after meaningful research/data changes and periodically during the season. Runs protected CORE/STAT/PBP research plus System Miner V3.10.1 with symmetric 1/2/3-game horizons. The frozen 0.575 Spread distribution benchmark remains unchanged. Established 2017-2022 system discoveries are permanent evidence: later weakness can downgrade current authority or move a system dormant, but cannot erase it. The run publishes the human-readable Rules Index, Big Al coverage, Pathi/market-execution audit, and H2H price-aware research. 2026 stays sealed and Production Betting V2 cannot be mutated by this job."
+            "WHEN: after meaningful research/data changes and periodically during the season. Runs protected CORE/STAT/PBP research plus System Miner V3.10.2 with symmetric 1/2/3-game horizons. The frozen 0.575 Spread distribution benchmark remains unchanged. Established 2017-2022 system discoveries are permanent evidence: later weakness can downgrade current authority or move a system dormant, but cannot erase it. The run publishes the human-readable Rules Index, Big Al coverage, Pathi/market-execution audit, and H2H price-aware research. 2026 stays sealed and Production Betting V2 cannot be mutated by this job."
         )
 
     

@@ -8,18 +8,20 @@
       2021,
       2022
     ],
+    "nullable_boolean_guard": "PASS",
     "production_authority": 0,
+    "results_dashboard": "PASS",
     "sealed_season": 2026,
-    "system_lab_source_tag": "nfl-system-lab-v3.10.1-horizon-symmetric-miner-20261004",
+    "system_lab_source_tag": "nfl-system-lab-v3.10.2-horizon-symmetric-nullsafe-miner-20261004",
     "train_job_exact_tag_occurrences": 3
   },
   "engine": {
     "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
     "compiled_and_checked": 32,
     "components": 32,
-    "engine_source_tag": "nfl-engine-v3.10.1-horizon-symmetric-miner-20261004",
+    "engine_source_tag": "nfl-engine-v3.10.2-results-nullsafe-miner-20261004",
     "failures": [],
-    "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_V3101_HORIZON_SYMMETRIC_SYSTEM_MINER_RESEARCH_ONLY",
+    "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_V3102_HORIZON_SYMMETRIC_NULLSAFE_SYSTEM_MINER_RESEARCH_ONLY",
     "missing_critical_symbols": [],
     "shared_external_required": [
       "utils.py",
@@ -63,7 +65,7 @@
     "team_context_history": true,
     "team_sequence_memory": true,
     "unique_hypotheses": 3,
-    "version": "NFL_SYSTEM_LAB_V3_10_1",
+    "version": "NFL_SYSTEM_LAB_V3_10_2",
     "year_2026_queried": false
   }
 }
