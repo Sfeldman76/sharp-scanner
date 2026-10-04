@@ -46939,7 +46939,7 @@ def _nfl_model_authority_v26_state_cached():
 
 @st.cache_data(ttl=300,show_spinner=False)
 def _nfl_system_rules_index_cached():
-    """Read the human-facing NFL System Rules Index published by System Lab V3.1.
+    """Read the human-facing NFL System Rules Index published by System Lab V3.3.
 
     The index is research metadata only. Reading it cannot change any production
     action, probability, system vote, or market execution decision.
@@ -47217,7 +47217,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     rules_state=_nfl_system_rules_index_cached()
     with st.expander("NFL System Rules Index — mined + published + framework",expanded=False):
         if not isinstance(rules_state,dict) or rules_state.get("status")!="READY":
-            st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.7.")
+            st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.9.")
         else:
             rr=pd.DataFrame(rules_state.get("rows") or [])
             cov=rules_state.get("coverage") or {}
@@ -47242,18 +47242,21 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                 show=rr.copy()
                 if src_sel: show=show[show["source"].astype(str).isin(src_sel)]
                 if status_sel: show=show[show["status"].astype(str).isin(status_sel)]
-                cols=[c for c in ["Active Now","system_id","name","source","market","action","rule_text","discovery","validation_2023_2025","status","prospective_action","live_scoring"] if c in show.columns]
+                cols=[c for c in ["Active Now","system_id","name","source","market","action","rule_text","discovery","validation_2023_2025","historical_discovery_status","current_evidence_state","status","prospective_action","live_scoring"] if c in show.columns]
                 show=show[cols].copy()
-                show=show.rename(columns={"system_id":"System ID","name":"System","source":"Source","market":"Market","action":"Action","rule_text":"Rule","discovery":"Discovery","validation_2023_2025":"2023-25 Validation","status":"Status","prospective_action":"Next Step","live_scoring":"Live Role"})
+                show=show.rename(columns={"system_id":"System ID","name":"System","source":"Source","market":"Market","action":"Action","rule_text":"Rule","discovery":"Discovery","validation_2023_2025":"2023-25 Validation","historical_discovery_status":"Discovery Evidence","current_evidence_state":"Current Evidence","status":"Family Status","prospective_action":"Next Step","live_scoring":"Live Role"})
                 st.dataframe(show,use_container_width=True,hide_index=True)
-                st.caption("Active Now is based only on system mechanism IDs already attached by the production/shadow engine. Research-only mined families are indexed here but are not silently scored into production.")
+                st.caption("Evidence lifecycle: an established 2017-2022 discovery is never erased just because 2023-2025 weakens. Later evidence changes current authority/state (validated, weakened, dormant, watch), while the original rule remains in the index. Active Now is based only on mechanism IDs already attached by the production/shadow engine; research-only families cannot silently create production bets.")
             if cov:
                 bigal_missing=cov.get("bigal_missing_ids") or []
                 pf=cov.get("pathi_framework_coverage") or {}
                 exec_cov=cov.get("market_execution_coverage") or {}
+                anatomy=cov.get("miner_anatomy_coverage") or {}
                 st.caption(f"Coverage audit: {cov.get('status','—')} • Big Al missing: {', '.join(bigal_missing) if bigal_missing else 'none'} • mined families indexed: {cov.get('mined_family_count','—')}.")
-                with st.expander("Pathi / market-execution coverage audit",expanded=False):
+                with st.expander("Miner anatomy / Pathi / market-execution coverage audit",expanded=False):
                     audit_rows=[]
+                    for k,v in anatomy.items():
+                        if k!="production_authority": audit_rows.append({"Area":"MINER: "+k,"Status":str(v),"Evidence":"prior-only system-discovery context"})
                     for k,v in pf.items(): audit_rows.append({"Area":k,"Status":(v or {}).get("status"),"Evidence":" | ".join((v or {}).get("evidence") or [])})
                     for k,v in exec_cov.items(): audit_rows.append({"Area":"MARKET: "+k,"Status":(v or {}).get("status"),"Evidence":" | ".join((v or {}).get("fields") or [])})
                     if audit_rows: st.dataframe(pd.DataFrame(audit_rows),use_container_width=True,hide_index=True)
@@ -49914,7 +49917,7 @@ if not HEADLESS:
         )
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_research_heavy":
         st.sidebar.caption(
-            "WHEN: after meaningful research/data changes and periodically during the season. Runs protected CORE/STAT/PBP research plus System Miner V3.1. The frozen 0.575 Spread distribution benchmark remains unchanged; the run now also publishes a human-readable Rules Index, adds the externally published Big Al Week-1 prior-loser-vs-prior-winner rule for descriptive retest, audits Pathi/market-execution coverage, and preserves H2H price-aware research. 2026 stays sealed and Production Betting V2 cannot be mutated by this job."
+            "WHEN: after meaningful research/data changes and periodically during the season. Runs protected CORE/STAT/PBP research plus System Miner V3.3. The frozen 0.575 Spread distribution benchmark remains unchanged. Established 2017-2022 system discoveries are permanent evidence: later weakness can downgrade current authority or move a system dormant, but cannot erase it. The run publishes the human-readable Rules Index, Big Al coverage, Pathi/market-execution audit, and H2H price-aware research. 2026 stays sealed and Production Betting V2 cannot be mutated by this job."
         )
 
     
