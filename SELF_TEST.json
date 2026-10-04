@@ -1,16 +1,53 @@
 {
-  "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
-  "compiled_and_checked": 32,
-  "components": 32,
-  "engine_source_tag": "nfl-engine-v3.9.1-pathi-scored-overlay-20261004",
-  "failures": [],
-  "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_PERMANENT_SYSTEM_EVIDENCE_LIFECYCLE_RESEARCH_ONLY",
-  "missing_critical_symbols": [],
-  "shared_external_required": [
-    "utils.py",
-    "sports_edge_authority_v1.py"
-  ],
-  "status": "PASS",
-  "utils_backend_required": true,
-  "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
+  "compile": {
+    "nfl_engine.py": "PASS",
+    "sharp_line_dashboard.py": "PASS",
+    "train_job.py": "PASS"
+  },
+  "engine_self_test": {
+    "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
+    "compiled_and_checked": 32,
+    "components": 32,
+    "engine_source_tag": "nfl-engine-v3.9.2-pathi-normalized-family-overlay-20261004",
+    "failures": [],
+    "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_PERMANENT_SYSTEM_EVIDENCE_LIFECYCLE_RESEARCH_ONLY",
+    "missing_critical_symbols": [],
+    "shared_external_required": [
+      "utils.py",
+      "sports_edge_authority_v1.py"
+    ],
+    "status": "PASS",
+    "utils_backend_required": true,
+    "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
+  },
+  "normalized_family_count": 13,
+  "pathi_evidence_classifier": {
+    "dog_below_3": {
+      "actual": "NO_SUPPORT",
+      "expected": "NO_SUPPORT",
+      "pass": true
+    },
+    "dog_hook_above_7": {
+      "actual": "STRONG_SUPPORT",
+      "expected": "STRONG_SUPPORT",
+      "pass": true
+    },
+    "dog_moved_above_7": {
+      "actual": "EMERGING_SUPPORT",
+      "expected": "EMERGING_SUPPORT",
+      "pass": true
+    },
+    "favorite_below_3": {
+      "actual": "WEAK_SUPPORT",
+      "expected": "WEAK_SUPPORT",
+      "pass": true
+    },
+    "favorite_hook_3": {
+      "actual": "REGIME_REVERSAL",
+      "expected": "REGIME_REVERSAL",
+      "pass": true
+    }
+  },
+  "pathi_vote_policy": "ONE_PATHI_FAMILY_ONE_VOTE__ONE_PATHI_LANE_VOTE_PER_GAME__NO_PRODUCTION_AUTHORITY",
+  "status": "PASS"
 }

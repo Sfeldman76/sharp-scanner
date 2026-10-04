@@ -47032,15 +47032,33 @@ def _nfl_physical_hour_key(home, away, game_start):
 
 
 def _nfl_pathi_live_overlay(df_moves_raw, rules_state):
-    """Return current Pathi system triggers with measured W/L records.
+    """Return normalized current Pathi family triggers with measured W/L records.
 
-    This is presentation/shadow evidence only. It cannot change CORE fair values,
-    the frozen Production Betting V2 selector, or an official BET action.
+    Raw dog/favorite mirrors and directly nested variants stay visible in the Rules
+    Index for audit, but they collapse to one family vote here.  The returned lane
+    is shadow/advisory evidence only: it cannot change CORE fair values or the
+    frozen Production Betting V2 action.
     """
     if df_moves_raw is None or getattr(df_moves_raw,"empty",True): return {},set()
     if not isinstance(rules_state,dict) or rules_state.get("status")!="READY": return {},set()
     rr={str(x.get("system_id")):x for x in (rules_state.get("rows") or []) if str(x.get("source"))=="PATHI_SYSTEM"}
     if not rr: return {},set()
+
+    _level_rank={
+        "NO_SAMPLE":0,"NO_SUPPORT":1,"REGIME_REVERSAL":2,
+        "EMERGING_SUPPORT":3,"WEAK_SUPPORT":4,"STRONG_SUPPORT":5,
+    }
+    def _rank(meta):
+        try: return int(meta.get("evidence_rank"))
+        except Exception: return _level_rank.get(str(meta.get("evidence_level") or ""),0)
+    def _rate(meta):
+        try:
+            x=float(meta.get("validation_hit_rate")); return x if np.isfinite(x) else -1.0
+        except Exception: return -1.0
+    def _n(meta):
+        try: return int(meta.get("validation_n") or 0)
+        except Exception: return 0
+
     try:
         d=build_game_key(df_moves_raw.copy())
         # The normal dashboard path already enriches these rows. Rebuild only if
@@ -47050,8 +47068,8 @@ def _nfl_pathi_live_overlay(df_moves_raw, rules_state):
             d=build_game_key(d)
         market=d.get("Market",pd.Series("",index=d.index)).astype(str).str.lower().str.strip()
         d=d.loc[market.eq("spreads")].copy()
-        out={}; active=set(); seen=set()
-        for idx,r in d.iterrows():
+        raw={}; active=set(); seen=set()
+        for _,r in d.iterrows():
             key=str(r.get("Merge_Key_Short") or "").lower().strip()
             if not key: continue
             team=str(r.get("Outcome") or r.get("Team_Norm") or "").strip()
@@ -47063,16 +47081,43 @@ def _nfl_pathi_live_overlay(df_moves_raw, rules_state):
                 sig=(key,team.lower(),sid)
                 if sig in seen: continue
                 seen.add(sig); active.add(sid)
-                status=str(meta.get("status") or "")
-                out.setdefault(key,[]).append({
+                fid=str(meta.get("pathi_family_id") or sid)
+                raw.setdefault(key,{}).setdefault(fid,[]).append({
                     "system_id":sid,"team":team,"name":str(meta.get("name") or sid),
+                    "family_id":fid,"family_label":str(meta.get("pathi_family_label") or fid),
                     "validation":str(meta.get("validation_2023_2025") or "—"),
                     "overall":str(meta.get("overall_2017_2025") or "—"),
-                    "status":status,"support":status=="PATHI_VALIDATED_SUPPORT",
+                    "evidence_level":str(meta.get("evidence_level") or "NO_SUPPORT"),
+                    "evidence_rank":_rank(meta),
+                    "validation_hit_rate":_rate(meta),
+                    "validation_n":_n(meta),
+                    "vote_eligible":bool(meta.get("normalized_vote_eligible")),
+                    "major_regime_reversal":bool(meta.get("major_regime_reversal")),
+                })
+
+        out={}
+        for key,families in raw.items():
+            for fid,candidates in families.items():
+                # One Pathi family = one vote.  Mirrors/subsets never count twice.
+                ordered=sorted(
+                    candidates,
+                    key=lambda x:(int(x.get("evidence_rank") or 0),float(x.get("validation_hit_rate") or -1.0),int(x.get("validation_n") or 0)),
+                    reverse=True,
+                )
+                chosen=ordered[0]
+                eligible=[x for x in ordered if bool(x.get("vote_eligible"))]
+                if eligible:
+                    chosen=eligible[0]
+                out.setdefault(key,[]).append({
+                    **chosen,
+                    "support":bool(chosen.get("vote_eligible")),
+                    "member_system_ids":[x.get("system_id") for x in candidates],
+                    "member_count":len(candidates),
+                    "correlation_policy":"ONE_PATHI_FAMILY_ONE_VOTE",
                 })
         return out,active
     except Exception as e:
-        logging.warning("[NFL-PATHI-OVERLAY-UI] unavailable: %s:%s",type(e).__name__,e)
+        logging.warning("[NFL-PATHI-NORMALIZED-OVERLAY-UI] unavailable: %s:%s",type(e).__name__,e)
         return {},set()
 
 
@@ -47147,8 +47192,8 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
             return label
         return pick
 
-    # Pathi is an independent evidence overlay above CORE. The Rules Index carries
-    # the historical W/L record; live flags identify which side/system is active now.
+    # Pathi is an independent normalized evidence overlay above CORE. The Rules Index carries
+    # historical W/L plus family/evidence metadata; mirrors/subsets collapse before the lane vote.
     rules_state=_nfl_system_rules_index_cached()
     pathi_live,pathi_active_ids=_nfl_pathi_live_overlay(df_moves_raw,rules_state)
 
@@ -47216,19 +47261,32 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                 _model_team=str(r.get("selected") or "").lower().strip()
                 for _p in pathi_live.get(_pathi_key,[]):
                     _pt=str(_p.get("team") or "").lower().strip()
+                    _rank=int(_p.get("evidence_rank") or 0)
                     if _p.get("support"):
                         _state="SUPPORT" if _pt and _pt==_model_team else "CONFLICT"
                     else:
                         _state="TRACK"
-                    _txt=f"{_state}: {_p.get('team') or 'qualifier'} · {_p.get('name')} · 2023-25 {_p.get('validation')}"
-                    pathi_parts.append(_txt); pathi_states.append(_state)
+                    _level=str(_p.get("evidence_level") or "TRACK")
+                    _family=str(_p.get("family_label") or _p.get("family_id") or _p.get("name") or "Pathi")
+                    _txt=f"{_state}: {_p.get('team') or 'qualifier'} · {_family} · {_level} · 2023-25 {_p.get('validation')}"
+                    pathi_parts.append(_txt); pathi_states.append((_state,_rank))
                     _entry=f"Spr: PATHI {_txt}"
                     if _entry not in system_parts: system_parts.append(_entry)
         rec["Production Plays"]=" | ".join(production_plays) if production_plays else "—"
         rec["Edge Sources"]=" | ".join(edge_parts) if edge_parts else "—"
         rec["Pathi Overlay"]=" | ".join(pathi_parts) if pathi_parts else "—"
-        _ps=set(pathi_states)
-        rec["Pathi State"]=("MIXED" if "SUPPORT" in _ps and "CONFLICT" in _ps else ("SUPPORT" if "SUPPORT" in _ps else ("CONFLICT" if "CONFLICT" in _ps else ("TRACK" if "TRACK" in _ps else "—"))))
+        # One Pathi lane vote per game.  If several normalized families fire, the
+        # strongest eligible evidence tier governs; equal-strength opposite sides
+        # produce MIXED rather than multiple independent votes.
+        _eligible=[x for x in pathi_states if x[0] in {"SUPPORT","CONFLICT"}]
+        if _eligible:
+            _mx=max(x[1] for x in _eligible)
+            _top={x[0] for x in _eligible if x[1]==_mx}
+            rec["Pathi State"]=("MIXED" if len(_top)>1 else next(iter(_top)))
+        elif pathi_states:
+            rec["Pathi State"]="TRACK"
+        else:
+            rec["Pathi State"]="—"
         rec["System Trigger"]=" | ".join(system_parts) if system_parts else "—"
         records.append(rec)
 
@@ -47340,7 +47398,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
 
     with st.expander("NFL System Rules Index — mined + published + Pathi systems",expanded=False):
         if not isinstance(rules_state,dict) or rules_state.get("status")!="READY":
-            st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.9.1.")
+            st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.9.2.")
         else:
             rr=pd.DataFrame(rules_state.get("rows") or [])
             cov=rules_state.get("coverage") or {}
@@ -47365,9 +47423,9 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                 show=rr.copy()
                 if src_sel: show=show[show["source"].astype(str).isin(src_sel)]
                 if status_sel: show=show[show["status"].astype(str).isin(status_sel)]
-                cols=[c for c in ["Active Now","system_id","name","source","market","action","rule_text","discovery","validation_2023_2025","overall_2017_2025","historical_discovery_status","current_evidence_state","status","prospective_action","live_scoring"] if c in show.columns]
+                cols=[c for c in ["Active Now","system_id","name","source","pathi_family_label","evidence_level","normalized_vote_eligible","market","action","rule_text","discovery","validation_2023_2025","overall_2017_2025","historical_discovery_status","current_evidence_state","status","prospective_action","live_scoring"] if c in show.columns]
                 show=show[cols].copy()
-                show=show.rename(columns={"system_id":"System ID","name":"System","source":"Source","market":"Market","action":"Action","rule_text":"Rule","discovery":"2017-22 Discovery","validation_2023_2025":"2023-25 Validation","overall_2017_2025":"2017-25 Overall","historical_discovery_status":"Discovery Evidence","current_evidence_state":"Current Evidence","status":"Family Status","prospective_action":"Next Step","live_scoring":"Live Role"})
+                show=show.rename(columns={"system_id":"System ID","name":"System","source":"Source","pathi_family_label":"Pathi Family","evidence_level":"Evidence Level","normalized_vote_eligible":"Normalized Vote","market":"Market","action":"Action","rule_text":"Rule","discovery":"2017-22 Discovery","validation_2023_2025":"2023-25 Validation","overall_2017_2025":"2017-25 Overall","historical_discovery_status":"Discovery Evidence","current_evidence_state":"Current Evidence","status":"Family Status","prospective_action":"Next Step","live_scoring":"Live Role"})
                 st.dataframe(show,use_container_width=True,hide_index=True)
                 st.caption("Evidence lifecycle: W-L-P and ATS% are shown directly. Pathi rows are scored engineering translations of the Pathi football framework, not claimed verbatim published formulas. A Pathi rule can show SUPPORT in the overlay only when its 2023-25 record clears the -110 break-even gate with n>=30; overlapping Pathi rules remain one evidence lane and cannot silently create a production BET or alter CORE fair values.")
             if cov:
