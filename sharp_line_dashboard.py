@@ -47038,9 +47038,9 @@ def _nfl_pathi_live_overlay(df_moves_raw, rules_state):
     """Return normalized current Pathi family triggers with measured W/L records.
 
     Raw dog/favorite mirrors and directly nested variants stay visible in the Rules
-    Index for audit, but they collapse to one family vote here.  The returned lane
-    is shadow/advisory evidence only: it cannot change CORE fair values or the
-    frozen Production Betting V2 action.
+    Index for audit, but they collapse to one family vote here. This helper is the
+    UI display lane only; Production Betting V3 consumes separately normalized live
+    triggers from the frozen state. Pathi never changes CORE fair values or reverses CORE.
     """
     if df_moves_raw is None or getattr(df_moves_raw,"empty",True): return {},set()
     if not isinstance(rules_state,dict) or rules_state.get("status")!="READY": return {},set()
@@ -47676,9 +47676,11 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     """Lean one-table NFL Production V1 view matching the NCAAF board layout.
 
     The table is one physical game per row with Spread / H2H / Totals side by side.
-    Frozen fair values remain the prediction champion. Production Betting V2
-    authorizes Spread only when both approved independent system families agree,
-    authorizes the approved early-division Under for Totals, and keeps H2H model-only.
+    Frozen fair values remain the prediction champion. Production Betting V3 is
+    CORE-first: Spread CORE must clear the frozen 57.5% cover-probability gate and
+    +2% executable-price EV gate. Qualified normalized systems are bounded overlays
+    that may strengthen or strongly veto; they cannot create or reverse the CORE bet.
+    H2H and Totals remain model-only until they earn frozen betting gates.
     """
     state=_nfl_model_authority_v26_state_cached()
     if not isinstance(state,dict) or state.get("status") in ("UNAVAILABLE","STALE_MODEL_AUTHORITY_V26_MODULE"):
@@ -47756,10 +47758,15 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
             action=_nfl_action_display(r.get("action"))
             model_value=pd.to_numeric(pd.Series([r.get("model_value")]),errors="coerce").iloc[0]
             edge=pd.to_numeric(pd.Series([r.get("raw_model_edge")]),errors="coerce").iloc[0]
-            # NFL production exposes a probability directly only for H2H. Spread
-            # and totals are fair points/totals, so their probability cells remain
-            # blank rather than fabricating a cover/total probability.
-            prob=(float(model_value) if market=="H2H" and pd.notna(model_value) else np.nan)
+            # V3 publishes the frozen empirical selected-side cover probability for Spread.
+            # H2H still displays its direct model probability; Totals has no frozen betting probability gate.
+            if market=="SPREADS":
+                _cp=pd.to_numeric(pd.Series([r.get("core_cover_probability")]),errors="coerce").iloc[0]
+                prob=float(_cp) if pd.notna(_cp) else np.nan
+            elif market=="H2H":
+                prob=float(model_value) if pd.notna(model_value) else np.nan
+            else:
+                prob=np.nan
             fair=(float(model_value) if pd.notna(model_value) else np.nan)
             label=_nfl_pick_label(r,market)
             sources=[str(x) for x in (r.get("edge_sources") or []) if str(x).strip()]
@@ -47776,7 +47783,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                 f"{prefix} Edge":edge,f"{prefix} Fair":fair,f"{prefix} Status":r.get("decision_reason") or "—",
                 f"{prefix} Source":source,
             })
-            if action=="BET": production_plays.append(f"{prefix}: {label}")
+            if action in {"BET","STRONG BET"}: production_plays.append(f"{prefix}: {label}")
             if source!="—": edge_parts.append(f"{prefix}: {source}")
             for s in systems:
                 entry=f"{prefix}: {s}"
@@ -47830,21 +47837,22 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     st.subheader("NFL Production — Spread, H2H & Totals")
     st.caption(
         "Same compact production board as NCAAF: one game per row with Spread, H2H and Totals side by side. "
-        "Weekly Update creates/reuses frozen fair values and refreshes the frozen Production Betting V2 selector. "
-        "Spread requires both approved independent mechanisms to agree; Totals uses the approved early-division Under; H2H remains model-only. "
-        "The background scanner reapplies the frozen selector and current-price gate without refitting the model."
+        "Weekly Update creates/reuses frozen fair values. Production Betting V3 is CORE-first: Spread requires frozen CORE cover probability ≥57.5% and live EV ≥2%. "
+        "Qualified Miner/Pathi/Big Al families are bounded overlays: 2+ independent supporters produce STRONG BET; 2+ net independent conflicts can veto. "
+        "Systems never manufacture or reverse a CORE wager. H2H and Totals remain model-only. The background scanner refreshes recommendations from current prices without refitting CORE."
     )
     _bg=cur.get("background_refresh") or {}
     if _bg:
         st.caption(f"Live recommendation refresh: background market-only • generated {cur.get('generated_at_utc','—')} • weekly model refit: no")
 
-    spr_n=int(view.get("Spr Action",pd.Series("",index=view.index)).eq("BET").sum())
-    tot_n=int(view.get("Tot Action",pd.Series("",index=view.index)).eq("BET").sum())
+    spr_n=int(view.get("Spr Action",pd.Series("",index=view.index)).isin(["BET","STRONG BET"]).sum())
+    strong_n=int(view.get("Spr Action",pd.Series("",index=view.index)).eq("STRONG BET").sum())
+    tot_n=int(view.get("Tot Action",pd.Series("",index=view.index)).isin(["BET","STRONG BET"]).sum())
     h2h_model_only=int(view.get("H2H Action",pd.Series("",index=view.index)).eq("MODEL ONLY").sum())
     prod_n=int(view.get("Production Plays",pd.Series("—",index=view.index)).ne("—").sum())
     m1,m2,m3,m4,m5=st.columns(5)
     m1.metric("Upcoming games",int(len(view)))
-    m2.metric("Spread plays",spr_n)
+    m2.metric("Spread plays",spr_n,delta=(f"{strong_n} strong" if strong_n else None))
     m3.metric("Totals plays",tot_n)
     m4.metric("H2H model-only",h2h_model_only)
     m5.metric("Production games",prod_n)
@@ -47865,7 +47873,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
         _render_nfl_production_results(cur)
 
     # NCAAF-style secondary diagnostics: hidden by default, never a second legacy board.
-    with st.expander("Production Betting V2 — decision details",expanded=False):
+    with st.expander("Production Betting V3 — decision details",expanded=False):
         detail=[]
         for r in rows:
             m=str(r.get("market") or "")
@@ -47877,10 +47885,18 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                 "Model Fair":r.get("model_value"),
                 "Current Market":r.get("market_value"),
                 "Model Edge":r.get("raw_model_edge"),
-                "Model Threshold (shadow)":r.get("model_policy_threshold"),
-                "Production Edge Count":r.get("production_edge_mechanism_count"),
-                "Production Edge Families":" | ".join(str(x) for x in (r.get("production_edge_families") or [])),
-                "Approved Edge Contract":r.get("approved_edge_contract_match"),
+                "CORE Cover Prob":r.get("core_cover_probability"),
+                "CORE Prob Gate":r.get("core_probability_threshold"),
+                "CORE Live EV":r.get("core_live_ev"),
+                "CORE EV Gate":r.get("core_min_live_ev"),
+                "CORE Qualifies":r.get("core_candidate_qualifies"),
+                "System Support Count":r.get("qualified_system_support_count"),
+                "System Support Families":" | ".join(str(x) for x in (r.get("qualified_system_support_families") or [])),
+                "System Support Sources":" | ".join(str(x) for x in (r.get("qualified_system_support_sources") or [])),
+                "System Conflict Count":r.get("qualified_system_conflict_count"),
+                "System Conflict Families":" | ".join(str(x) for x in (r.get("qualified_system_conflict_families") or [])),
+                "System Conflict Sources":" | ".join(str(x) for x in (r.get("qualified_system_conflict_sources") or [])),
+                "Confidence":r.get("recommendation_confidence"),
                 "Current Price":r.get("selected_price"),
                 "Execution Book":r.get("selected_book"),
                 "Quote Age Minutes":r.get("quote_age_minutes"),
@@ -47892,50 +47908,52 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
         st.dataframe(pd.DataFrame(detail),use_container_width=True,hide_index=True)
 
     policy=cur.get("production_betting_policy") or {}
-    with st.expander("NFL Production Betting V2 — frozen policy",expanded=False):
+    with st.expander("NFL Production Betting V3 — CORE-first bounded-overlay policy",expanded=False):
+        _sp=policy.get("spread") or {}
         prows=[
             {
                 "Market":"SPREADS",
-                "Production Authority":"ACTIVE",
-                "Rule":"Both approved independent Spread mechanisms must trigger the same side",
-                "Approved Families":" | ".join((policy.get("spread") or {}).get("family_ids") or []),
-                "Execution Gate":"-110 or better",
+                "Production Authority":"ACTIVE — CORE",
+                "CORE Gate":f"Cover probability ≥ {100*float(_sp.get('core_probability_threshold') or 0.575):.1f}%",
+                "Execution Gate":f"Live EV ≥ {100*float(_sp.get('min_live_ev') or 0.02):.1f}%",
+                "Overlay Rule":"2+ independent supports = STRONG BET; 2+ net conflicts = PASS",
             },
             {
                 "Market":"H2H",
                 "Production Authority":"MODEL ONLY",
-                "Rule":"No approved H2H betting edge",
-                "Approved Families":"—",
+                "CORE Gate":"No frozen betting-EV threshold",
                 "Execution Gate":"—",
+                "Overlay Rule":"Systems cannot create a wager",
             },
             {
                 "Market":"TOTALS",
-                "Production Authority":"ACTIVE",
-                "Rule":"Approved early-division UNDER mechanism",
-                "Approved Families":" | ".join((policy.get("totals") or {}).get("family_ids") or []),
-                "Execution Gate":"-110 or better",
+                "Production Authority":"MODEL ONLY",
+                "CORE Gate":"No frozen CORE probability threshold",
+                "Execution Gate":"—",
+                "Overlay Rule":"Systems cannot create a wager",
             },
         ]
         st.dataframe(pd.DataFrame(prows),use_container_width=True,hide_index=True)
         st.caption(
-            f"Frozen selector: {policy.get('source_tag','nfl-production-betting-v2-system-selector-20261003')} • "
-            f"approved Edge V2 contract: {policy.get('approved_edge_contract_sha256','—')}. "
-            "A later Heavy Research run cannot silently change production; a different edge-contract SHA is held for explicit review."
+            f"Frozen Bet Authority policy: {policy.get('source_tag','nfl-production-betting-v3-core-first-bounded-overlay-20261005')}. "
+            "CORE is the only prediction authority. Miner, Pathi and Big Al are normalized to one independent family per vote and can only SUPPORT/CONFLICT after current qualification. "
+            "STAT and MARKET remain bounded diagnostics. Heavy Research may publish new evidence but cannot silently change this production policy."
         )
 
     with st.expander("NFL System Rules Index — mined + published + Pathi systems",expanded=False):
         if not isinstance(rules_state,dict) or rules_state.get("status")!="READY":
-            st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.10.4.")
+            st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.10.4 or later.")
         else:
             rr=pd.DataFrame(rules_state.get("rows") or [])
             cov=rules_state.get("coverage") or {}
             active_ids=set(pathi_active_ids)
             for _r in rows:
-                for _fid in (_r.get("production_edge_families") or []):
+                for _fid in ((_r.get("qualified_system_support_families") or [])+(_r.get("qualified_system_conflict_families") or [])):
                     if str(_fid).strip(): active_ids.add(str(_fid).strip())
-                for _v in (_r.get("edge_votes") or []):
-                    if isinstance(_v,dict) and str(_v.get("mechanism_family_id") or "").strip():
-                        active_ids.add(str(_v.get("mechanism_family_id")).strip())
+                for _v in (_r.get("system_trigger_votes") or []):
+                    if isinstance(_v,dict):
+                        for _k in ("system_id","family","system_family_id"):
+                            if str(_v.get(_k) or "").strip(): active_ids.add(str(_v.get(_k)).strip())
             if rr.empty:
                 st.info("Rules Index exists but contains no rows.")
             else:
@@ -47954,7 +47972,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                 show=show[cols].copy()
                 show=show.rename(columns={"system_id":"System ID","name":"System","source":"Source","pathi_family_label":"Pathi Family","evidence_level":"Evidence Level","normalized_vote_eligible":"Normalized Vote","market":"Market","action":"Action","rule_text":"Rule","discovery":"2017-22 Discovery","validation_2023_2025":"2023-25 Validation","overall_2017_2025":"2017-25 Overall","historical_discovery_status":"Discovery Evidence","current_evidence_state":"Current Evidence","status":"Family Status","prospective_action":"Next Step","live_scoring":"Live Role"})
                 st.dataframe(show,use_container_width=True,hide_index=True)
-                st.caption("Evidence lifecycle: W-L-P and ATS% are shown directly. Pathi rows are scored engineering translations of the Pathi football framework, not claimed verbatim published formulas. A Pathi rule can show SUPPORT in the overlay only when its 2023-25 record clears the -110 break-even gate with n>=30; overlapping Pathi rules remain one evidence lane and cannot silently create a production BET or alter CORE fair values.")
+                st.caption("Evidence lifecycle: W-L-P and ATS% are shown directly. Qualified Miner/Pathi/Big Al rows may contribute one normalized bounded overlay vote in Production Betting V3. They cannot create a bet, reverse CORE, or alter CORE fair values; correlated/mirror variants collapse to one independent family.")
             if cov:
                 bigal_missing=cov.get("bigal_missing_ids") or []
                 pf=cov.get("pathi_framework_coverage") or {}
@@ -47974,20 +47992,20 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     edge_meta=(edge_state.get("meta") or {}) if isinstance(edge_state,dict) else {}
     if edge_meta:
         with st.expander("Research / shadow diagnostics",expanded=False):
-            st.caption("Only the explicitly frozen Production Betting V2 system families can authorize Spread/Totals bets. CORE, STAT, PBP, MARKET and every other discovered system remain research/shadow until explicitly promoted.")
+            st.caption("CORE is prediction authority. Qualified Miner/Pathi/Big Al systems are bounded SUPPORT/CONFLICT overlays in Spread Bet Authority; STAT/MARKET/PBP remain diagnostic. No research lane can manufacture or reverse a CORE wager.")
             fam=[]
             for f in edge_meta.get("families") or []:
                 fam.append({
                     "Market":f.get("market"),"Mechanism":f.get("mechanism_class"),"Family":f.get("mechanism_family_id"),
                     "Status":f.get("family_status"),
-                    "Production Influence":"APPROVED" if str(f.get("mechanism_family_id") or "") in set(((policy.get("spread") or {}).get("family_ids") or [])+((policy.get("totals") or {}).get("family_ids") or [])) else "SHADOW",
+                    "Production Influence":"BOUNDED OVERLAY" if str(f.get("mechanism_class") or "").upper()=="SYSTEM" else "DIAGNOSTIC",
                     "Confirm N":(f.get("confirmation") or {}).get("n"),"Confirm Hit":_nfl_be_pct((f.get("confirmation") or {}).get("hit_rate")),
                     "Confirm ROI":_nfl_be_pct((f.get("confirmation") or {}).get("roi_per_unit")),
                 })
             if fam:
                 st.dataframe(pd.DataFrame(fam),use_container_width=True,hide_index=True)
 
-    print(f"[NFL-PROD-V1-FAST-UI] games={len(view)} spread_bets={spr_n} totals_bets={tot_n} h2h_model_only={h2h_model_only} production_games={prod_n} legacy_board=REMOVED layout=NCAAF_MATCH production_policy=NFL_PRODUCTION_BETTING_V2")
+    print(f"[NFL-PROD-V1-FAST-UI] games={len(view)} spread_bets={spr_n} totals_bets={tot_n} h2h_model_only={h2h_model_only} production_games={prod_n} legacy_board=REMOVED layout=NCAAF_MATCH production_policy=NFL_PRODUCTION_BETTING_V3_CORE_FIRST")
 
 def _v1350_american_break_even(odds):
     o=pd.to_numeric(odds,errors='coerce')
@@ -50622,11 +50640,11 @@ if not HEADLESS:
         )
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
         st.sidebar.caption(
-            "WHEN: once each week after prior games settle / the new slate is ready. Creates or reuses frozen fair values, settles the prospective ledger, refreshes the frozen Production Betting V2 selector, and updates the promotion clock. After that, line and price changes refresh automatically through the background scanner—do NOT rerun for market moves."
+            "WHEN: once each week after prior games settle / the new slate is ready. Creates or reuses frozen fair values, refreshes live system triggers, settles the prospective ledger, and applies Production Betting V3 CORE-first Bet Authority. After that, line and price changes refresh automatically through the background scanner—do NOT rerun for market moves."
         )
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_research_heavy":
         st.sidebar.caption(
-            "WHEN: after meaningful research/data changes and periodically during the season. Runs protected CORE/STAT/PBP research plus System Miner V3.10.3 with normalized source/confluence attribution and symmetric 1/2/3-game horizons. The frozen 0.575 Spread distribution benchmark remains unchanged. Established 2017-2022 system discoveries are permanent evidence: later weakness can downgrade current authority or move a system dormant, but cannot erase it. The run publishes the human-readable Rules Index, Big Al coverage, Pathi/market-execution audit, and H2H price-aware research. 2026 stays sealed and Production Betting V2 cannot be mutated by this job."
+            "WHEN: after meaningful research/data changes and periodically during the season. Runs protected CORE/STAT/PBP research plus System Miner V3.10.4 with normalized source/confluence attribution and symmetric 1/2/3-game horizons. The frozen 0.575 Spread distribution benchmark remains unchanged. Established 2017-2022 system discoveries are permanent evidence: later weakness can downgrade current authority or move a system dormant, but cannot erase it. The run publishes the human-readable Rules Index, Big Al coverage, Pathi/market-execution audit, and H2H price-aware research. 2026 stays sealed and Production Betting V3 cannot be mutated by this job; Heavy only publishes bounded research evidence."
         )
 
     

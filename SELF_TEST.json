@@ -1,16 +1,58 @@
 {
-  "automatic_promotion": false,
-  "best_system_ui_present": true,
-  "bundled_components": 32,
-  "confluence_system_ui_present": true,
-  "engine_preflight": "PASS",
-  "engine_source_tag": "nfl-engine-v3.10.4-source-confluence-best-system-ranking-20261004",
-  "engine_version": "3.10.4",
-  "production_authority": 0,
-  "py_compile_all": true,
-  "source_attribution_publisher_present": true,
-  "source_combination_ui_present": true,
-  "system_lab_self_test": "PASS",
-  "system_lab_version": "NFL_SYSTEM_LAB_V3_10_3",
-  "year_2026_queried": false
+  "dashboard_compile": "PASS",
+  "edge_authority_self_test": {
+    "confirmation": [
+      2024,
+      2025
+    ],
+    "discovery": [
+      2021,
+      2022,
+      2023
+    ],
+    "shared_framework_sha": "a5d3e7944a9c48922b36b77c9a86c6fc6988cc282820b8afa7224ef9b94aa720",
+    "source_tag": "nfl-edge-authority-v2.5-four-lane-multidimensional-research-20261003",
+    "status": "PASS"
+  },
+  "engine_preflight": {
+    "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
+    "compiled_and_checked": 32,
+    "components": 32,
+    "engine_source_tag": "nfl-engine-v3.10.5-core-first-bounded-overlay-bet-authority-20261005",
+    "failures": [],
+    "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_V3104_SOURCE_CONFLUENCE_ATTRIBUTION_SYSTEM_MINER_RESEARCH_ONLY",
+    "missing_critical_symbols": [],
+    "shared_external_required": [
+      "utils.py",
+      "sports_edge_authority_v1.py"
+    ],
+    "status": "PASS",
+    "utils_backend_required": true,
+    "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
+  },
+  "model_authority_self_test": {
+    "automatic_execution": false,
+    "betting_policy_source_tag": "nfl-production-betting-v3-core-first-bounded-overlay-20261005",
+    "h2h": "MODEL_ONLY",
+    "source_tag": "nfl-model-authority-v2.6.1-utils-market-backend-20261003",
+    "spread": "CORE_0575_PLUS_2PCT_EV",
+    "status": "PASS",
+    "strong_bet": "2PLUS_QUALIFIED_INDEPENDENT_SYSTEM_SUPPORT",
+    "totals": "MODEL_ONLY",
+    "veto": "2PLUS_NET_QUALIFIED_INDEPENDENT_SYSTEM_CONFLICT"
+  },
+  "policy_checks": {
+    "automatic_execution": false,
+    "background_immutable_capture": true,
+    "core_prediction_authority_only": true,
+    "h2h_model_only": true,
+    "minimum_live_ev": 0.02,
+    "spread_probability_threshold": 0.575,
+    "systems_cannot_create_or_reverse": true,
+    "totals_model_only": true,
+    "two_plus_net_conflict_veto": true,
+    "two_plus_support_strong_bet": true
+  },
+  "status": "PASS",
+  "train_job_compile": "PASS"
 }
