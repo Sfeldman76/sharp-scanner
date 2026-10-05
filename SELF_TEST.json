@@ -1,12 +1,39 @@
 {
-  "engine_source_tag": "nfl-engine-v3.10.7-live-system-trigger-fix-20261005",
-  "engine_version": "3.10.7",
-  "known_current_slate_expectation": "At +7.5 Miami can be confirmed by qualified PATHI_KEY_7_HOOK; at -2.5 Pittsburgh can be confirmed by qualified PATHI_KEY_3_BELOW, subject to the live Heavy registry still marking those families qualified.",
-  "miner_bigal": "Existing live trigger-table votes preserved; no synthetic Miner/Big Al signal is invented when current trigger context is unavailable.",
+  "betting_policy_source_tag": "nfl-production-betting-v3.2-live-miner-pathi-confirmation-20261005",
+  "dashboard_compile": "PASS",
+  "engine_preflight": {
+    "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
+    "compiled_and_checked": 32,
+    "components": 32,
+    "engine_source_tag": "nfl-engine-v3.10.8-live-miner-evaluator-20261005",
+    "failures": [],
+    "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_V3104_SOURCE_CONFLUENCE_ATTRIBUTION_SYSTEM_MINER_RESEARCH_ONLY",
+    "missing_critical_symbols": [],
+    "shared_external_required": [
+      "utils.py",
+      "sports_edge_authority_v1.py"
+    ],
+    "status": "PASS",
+    "utils_backend_required": true,
+    "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
+  },
+  "engine_source_tag": "nfl-engine-v3.10.8-live-miner-evaluator-20261005",
+  "engine_version": "3.10.8",
+  "live_miner_tests": {
+    "2026_role": "TRIGGER_CONTEXT_ONLY_NO_QUALIFICATION",
+    "one_family_one_vote": true,
+    "pathi_plus_miner_independent_confluence_strong_bet": "PASS",
+    "prior_ats_role_change_family_trigger": "PASS",
+    "qualification_uses_2026_outcomes": false,
+    "road_dog_family_trigger": "PASS",
+    "two_miner_families_opposite_core_veto": "PASS",
+    "two_miner_families_same_side_strong_bet": "PASS",
+    "unsupported_atom_fail_closed": "PASS"
+  },
   "model_authority_self_test": {
     "automatic_execution": false,
     "bet": "1_QUALIFIED_INDEPENDENT_SYSTEM_SUPPORT",
-    "betting_policy_source_tag": "nfl-production-betting-v3.1.1-live-pathi-confirmation-20261005",
+    "betting_policy_source_tag": "nfl-production-betting-v3.2-live-miner-pathi-confirmation-20261005",
     "h2h": "MODEL_ONLY",
     "single_conflict": "CANDIDATE_NO_WAGER",
     "source_tag": "nfl-model-authority-v2.6.1-utils-market-backend-20261003",
@@ -16,11 +43,6 @@
     "totals": "MODEL_ONLY",
     "veto": "2PLUS_NET_QUALIFIED_INDEPENDENT_SYSTEM_CONFLICT"
   },
-  "regressions": [
-    "dashboard_spr_n_nameerror_fixed",
-    "qualified_pathi_key7_hook_live_support",
-    "qualified_pathi_favorite_below3_live_support",
-    "core_unconfirmed_remains_candidate"
-  ],
-  "status": "PASS"
+  "status": "PASS",
+  "train_job_unchanged": true
 }
