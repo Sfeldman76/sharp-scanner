@@ -1,16 +1,12 @@
 {
-  "component_count": 32,
-  "decision_ladder_test": [
-    "CANDIDATE",
-    "BET",
-    "STRONG BET",
-    "PASS"
-  ],
-  "engine_version": "3.10.6",
-  "model_self_test": {
+  "engine_source_tag": "nfl-engine-v3.10.7-live-system-trigger-fix-20261005",
+  "engine_version": "3.10.7",
+  "known_current_slate_expectation": "At +7.5 Miami can be confirmed by qualified PATHI_KEY_7_HOOK; at -2.5 Pittsburgh can be confirmed by qualified PATHI_KEY_3_BELOW, subject to the live Heavy registry still marking those families qualified.",
+  "miner_bigal": "Existing live trigger-table votes preserved; no synthetic Miner/Big Al signal is invented when current trigger context is unavailable.",
+  "model_authority_self_test": {
     "automatic_execution": false,
     "bet": "1_QUALIFIED_INDEPENDENT_SYSTEM_SUPPORT",
-    "betting_policy_source_tag": "nfl-production-betting-v3.1-core-candidate-confirmed-20261005",
+    "betting_policy_source_tag": "nfl-production-betting-v3.1.1-live-pathi-confirmation-20261005",
     "h2h": "MODEL_ONLY",
     "single_conflict": "CANDIDATE_NO_WAGER",
     "source_tag": "nfl-model-authority-v2.6.1-utils-market-backend-20261003",
@@ -20,8 +16,11 @@
     "totals": "MODEL_ONLY",
     "veto": "2PLUS_NET_QUALIFIED_INDEPENDENT_SYSTEM_CONFLICT"
   },
-  "policy_source_tag": "nfl-production-betting-v3.1-core-candidate-confirmed-20261005",
-  "source_tag": "nfl-engine-v3.10.6-core-candidate-system-confirmed-20261005",
-  "status": "PASS",
-  "train_job_unchanged": true
+  "regressions": [
+    "dashboard_spr_n_nameerror_fixed",
+    "qualified_pathi_key7_hook_live_support",
+    "qualified_pathi_favorite_below3_live_support",
+    "core_unconfirmed_remains_candidate"
+  ],
+  "status": "PASS"
 }

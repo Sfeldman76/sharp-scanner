@@ -47790,6 +47790,13 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                 if entry not in system_parts: system_parts.append(entry)
             if market=="SPREADS":
                 _model_team=str(r.get("selected") or "").lower().strip()
+                _prod_pathi_support="PATHI" in {str(x).upper() for x in (r.get("qualified_system_support_sources") or [])}
+                _prod_pathi_conflict="PATHI" in {str(x).upper() for x in (r.get("qualified_system_conflict_sources") or [])}
+                _prod_pathi_fams=[str(x) for x in ((r.get("qualified_system_support_families") or [])+(r.get("qualified_system_conflict_families") or [])) if str(x).startswith("PATHI_")]
+                if (_prod_pathi_support or _prod_pathi_conflict) and not pathi_live.get(_pathi_key,[]):
+                    _state="SUPPORT" if _prod_pathi_support and not _prod_pathi_conflict else "CONFLICT" if _prod_pathi_conflict and not _prod_pathi_support else "MIXED"
+                    _txt=f"{_state}: production-qualified live Pathi · {' | '.join(_prod_pathi_fams) or 'PATHI'}"
+                    pathi_parts.append(_txt); pathi_states.append((_state,99))
                 for _p in pathi_live.get(_pathi_key,[]):
                     _pt=str(_p.get("team") or "").lower().strip()
                     _rank=int(_p.get("evidence_rank") or 0)
@@ -47873,7 +47880,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
         _render_nfl_production_results(cur)
 
     # NCAAF-style secondary diagnostics: hidden by default, never a second legacy board.
-    with st.expander("Production Betting V3.1 — candidate / bet decision details",expanded=False):
+    with st.expander("Production Betting V3.1.1 — candidate / bet decision details",expanded=False):
         detail=[]
         for r in rows:
             m=str(r.get("market") or "")
@@ -47908,7 +47915,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
         st.dataframe(pd.DataFrame(detail),use_container_width=True,hide_index=True)
 
     policy=cur.get("production_betting_policy") or {}
-    with st.expander("NFL Production Betting V3.1 — CORE candidate + system confirmation policy",expanded=False):
+    with st.expander("NFL Production Betting V3.1.1 — CORE candidate + system confirmation policy",expanded=False):
         _sp=policy.get("spread") or {}
         prows=[
             {
@@ -47935,7 +47942,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
         ]
         st.dataframe(pd.DataFrame(prows),use_container_width=True,hide_index=True)
         st.caption(
-            f"Frozen Bet Authority policy: {policy.get('source_tag','nfl-production-betting-v3.1-core-candidate-confirmed-20261005')}. "
+            f"Frozen Bet Authority policy: {policy.get('source_tag','nfl-production-betting-v3.1.1-live-pathi-confirmation-20261005')}. "
             "CORE is the only prediction authority. Clearing the CORE/price gates creates a CANDIDATE only. Miner, Pathi and Big Al are normalized to one independent family per vote; one qualified supporter is required for BET and two for STRONG BET. "
             "STAT and MARKET remain bounded diagnostics until their incremental production gate is validated. Heavy Research may publish new evidence but cannot silently change this production policy."
         )
@@ -48005,7 +48012,8 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
             if fam:
                 st.dataframe(pd.DataFrame(fam),use_container_width=True,hide_index=True)
 
-    print(f"[NFL-PROD-V1-FAST-UI] games={len(view)} spread_bets={spr_n} totals_bets={tot_n} h2h_model_only={h2h_model_only} production_games={prod_n} legacy_board=REMOVED layout=NCAAF_MATCH production_policy=NFL_PRODUCTION_BETTING_V3_1_CORE_CANDIDATE_CONFIRMED")
+    tot_bets=int(view.get("Tot Action",pd.Series("",index=view.index)).isin(["BET","STRONG BET"]).sum())
+    print(f"[NFL-PROD-V1-FAST-UI] games={len(view)} spread_bets={spr_bets} totals_bets={tot_bets} h2h_model_only={h2h_model_only} production_games={prod_n} legacy_board=REMOVED layout=NCAAF_MATCH production_policy=NFL_PRODUCTION_BETTING_V3_1_1_LIVE_PATHI")
 
 def _v1350_american_break_even(odds):
     o=pd.to_numeric(odds,errors='coerce')
