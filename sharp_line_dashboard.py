@@ -47676,7 +47676,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     """Lean one-table NFL Production V1 view matching the NCAAF board layout.
 
     The table is one physical game per row with Spread / H2H / Totals side by side.
-    Frozen fair values remain the prediction champion. Production Betting V3 is
+    Frozen fair values remain the prediction champion. Production Betting V3.1 is
     CORE-first: Spread CORE must clear the frozen 57.5% cover-probability gate and
     +2% executable-price EV gate. Qualified normalized systems are bounded overlays
     that may strengthen or strongly veto; they cannot create or reverse the CORE bet.
@@ -47837,25 +47837,25 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     st.subheader("NFL Production — Spread, H2H & Totals")
     st.caption(
         "Same compact production board as NCAAF: one game per row with Spread, H2H and Totals side by side. "
-        "Weekly Update creates/reuses frozen fair values. Production Betting V3 is CORE-first: Spread requires frozen CORE cover probability ≥57.5% and live EV ≥2%. "
-        "Qualified Miner/Pathi/Big Al families are bounded overlays: 2+ independent supporters produce STRONG BET; 2+ net independent conflicts can veto. "
-        "Systems never manufacture or reverse a CORE wager. H2H and Totals remain model-only. The background scanner refreshes recommendations from current prices without refitting CORE."
+        "Weekly Update creates/reuses frozen fair values. Production Betting V3.1 is CORE-first: Spread CORE cover probability ≥57.5% and live EV ≥2% creates a CANDIDATE, not a wager. "
+        "One qualified independent Miner/Pathi/Big Al family confirms BET; 2+ independent supporters confirm STRONG BET; mixed/single conflict stays CANDIDATE and 2+ net conflicts can veto to PASS. "
+        "Systems cannot create a candidate or reverse CORE. H2H and Totals remain model-only. The background scanner refreshes recommendations from current prices without refitting CORE."
     )
     _bg=cur.get("background_refresh") or {}
     if _bg:
         st.caption(f"Live recommendation refresh: background market-only • generated {cur.get('generated_at_utc','—')} • weekly model refit: no")
 
-    spr_n=int(view.get("Spr Action",pd.Series("",index=view.index)).isin(["BET","STRONG BET"]).sum())
+    spr_bets=int(view.get("Spr Action",pd.Series("",index=view.index)).isin(["BET","STRONG BET"]).sum())
+    candidate_n=int(view.get("Spr Action",pd.Series("",index=view.index)).eq("CANDIDATE").sum())
     strong_n=int(view.get("Spr Action",pd.Series("",index=view.index)).eq("STRONG BET").sum())
-    tot_n=int(view.get("Tot Action",pd.Series("",index=view.index)).isin(["BET","STRONG BET"]).sum())
     h2h_model_only=int(view.get("H2H Action",pd.Series("",index=view.index)).eq("MODEL ONLY").sum())
     prod_n=int(view.get("Production Plays",pd.Series("—",index=view.index)).ne("—").sum())
     m1,m2,m3,m4,m5=st.columns(5)
     m1.metric("Upcoming games",int(len(view)))
-    m2.metric("Spread plays",spr_n,delta=(f"{strong_n} strong" if strong_n else None))
-    m3.metric("Totals plays",tot_n)
-    m4.metric("H2H model-only",h2h_model_only)
-    m5.metric("Production games",prod_n)
+    m2.metric("CORE candidates",candidate_n)
+    m3.metric("Confirmed spread bets",spr_bets)
+    m4.metric("Strong bets",strong_n)
+    m5.metric("H2H model-only",h2h_model_only)
 
     view=view.sort_values("_game_start")
     # Deliberately use the same visible column order/names as NCAAF.
@@ -47873,7 +47873,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
         _render_nfl_production_results(cur)
 
     # NCAAF-style secondary diagnostics: hidden by default, never a second legacy board.
-    with st.expander("Production Betting V3 — decision details",expanded=False):
+    with st.expander("Production Betting V3.1 — candidate / bet decision details",expanded=False):
         detail=[]
         for r in rows:
             m=str(r.get("market") or "")
@@ -47908,15 +47908,15 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
         st.dataframe(pd.DataFrame(detail),use_container_width=True,hide_index=True)
 
     policy=cur.get("production_betting_policy") or {}
-    with st.expander("NFL Production Betting V3 — CORE-first bounded-overlay policy",expanded=False):
+    with st.expander("NFL Production Betting V3.1 — CORE candidate + system confirmation policy",expanded=False):
         _sp=policy.get("spread") or {}
         prows=[
             {
                 "Market":"SPREADS",
-                "Production Authority":"ACTIVE — CORE",
+                "Production Authority":"CORE CANDIDATE → SYSTEM CONFIRMATION",
                 "CORE Gate":f"Cover probability ≥ {100*float(_sp.get('core_probability_threshold') or 0.575):.1f}%",
-                "Execution Gate":f"Live EV ≥ {100*float(_sp.get('min_live_ev') or 0.02):.1f}%",
-                "Overlay Rule":"2+ independent supports = STRONG BET; 2+ net conflicts = PASS",
+                "Execution Gate":f"Live EV ≥ {100*float(_sp.get('min_live_ev') or 0.02):.1f}% creates CANDIDATE",
+                "Overlay Rule":"1 support = BET; 2+ supports = STRONG BET; mixed/single conflict = CANDIDATE; 2+ net conflicts = PASS",
             },
             {
                 "Market":"H2H",
@@ -47935,9 +47935,9 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
         ]
         st.dataframe(pd.DataFrame(prows),use_container_width=True,hide_index=True)
         st.caption(
-            f"Frozen Bet Authority policy: {policy.get('source_tag','nfl-production-betting-v3-core-first-bounded-overlay-20261005')}. "
-            "CORE is the only prediction authority. Miner, Pathi and Big Al are normalized to one independent family per vote and can only SUPPORT/CONFLICT after current qualification. "
-            "STAT and MARKET remain bounded diagnostics. Heavy Research may publish new evidence but cannot silently change this production policy."
+            f"Frozen Bet Authority policy: {policy.get('source_tag','nfl-production-betting-v3.1-core-candidate-confirmed-20261005')}. "
+            "CORE is the only prediction authority. Clearing the CORE/price gates creates a CANDIDATE only. Miner, Pathi and Big Al are normalized to one independent family per vote; one qualified supporter is required for BET and two for STRONG BET. "
+            "STAT and MARKET remain bounded diagnostics until their incremental production gate is validated. Heavy Research may publish new evidence but cannot silently change this production policy."
         )
 
     with st.expander("NFL System Rules Index — mined + published + Pathi systems",expanded=False):
@@ -47972,7 +47972,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                 show=show[cols].copy()
                 show=show.rename(columns={"system_id":"System ID","name":"System","source":"Source","pathi_family_label":"Pathi Family","evidence_level":"Evidence Level","normalized_vote_eligible":"Normalized Vote","market":"Market","action":"Action","rule_text":"Rule","discovery":"2017-22 Discovery","validation_2023_2025":"2023-25 Validation","overall_2017_2025":"2017-25 Overall","historical_discovery_status":"Discovery Evidence","current_evidence_state":"Current Evidence","status":"Family Status","prospective_action":"Next Step","live_scoring":"Live Role"})
                 st.dataframe(show,use_container_width=True,hide_index=True)
-                st.caption("Evidence lifecycle: W-L-P and ATS% are shown directly. Qualified Miner/Pathi/Big Al rows may contribute one normalized bounded overlay vote in Production Betting V3. They cannot create a bet, reverse CORE, or alter CORE fair values; correlated/mirror variants collapse to one independent family.")
+                st.caption("Evidence lifecycle: W-L-P and ATS% are shown directly. Qualified Miner/Pathi/Big Al rows may contribute one normalized confirmation/conflict vote in Production Betting V3.1. They cannot create a CORE candidate, reverse CORE, or alter CORE fair values; correlated/mirror variants collapse to one independent family.")
             if cov:
                 bigal_missing=cov.get("bigal_missing_ids") or []
                 pf=cov.get("pathi_framework_coverage") or {}
@@ -47992,7 +47992,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     edge_meta=(edge_state.get("meta") or {}) if isinstance(edge_state,dict) else {}
     if edge_meta:
         with st.expander("Research / shadow diagnostics",expanded=False):
-            st.caption("CORE is prediction authority. Qualified Miner/Pathi/Big Al systems are bounded SUPPORT/CONFLICT overlays in Spread Bet Authority; STAT/MARKET/PBP remain diagnostic. No research lane can manufacture or reverse a CORE wager.")
+            st.caption("CORE is prediction authority and creates candidates. Qualified Miner/Pathi/Big Al systems confirm or conflict with a CORE candidate; STAT/MARKET/PBP remain diagnostic. No research lane can create a candidate or reverse CORE.")
             fam=[]
             for f in edge_meta.get("families") or []:
                 fam.append({
@@ -48005,7 +48005,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
             if fam:
                 st.dataframe(pd.DataFrame(fam),use_container_width=True,hide_index=True)
 
-    print(f"[NFL-PROD-V1-FAST-UI] games={len(view)} spread_bets={spr_n} totals_bets={tot_n} h2h_model_only={h2h_model_only} production_games={prod_n} legacy_board=REMOVED layout=NCAAF_MATCH production_policy=NFL_PRODUCTION_BETTING_V3_CORE_FIRST")
+    print(f"[NFL-PROD-V1-FAST-UI] games={len(view)} spread_bets={spr_n} totals_bets={tot_n} h2h_model_only={h2h_model_only} production_games={prod_n} legacy_board=REMOVED layout=NCAAF_MATCH production_policy=NFL_PRODUCTION_BETTING_V3_1_CORE_CANDIDATE_CONFIRMED")
 
 def _v1350_american_break_even(odds):
     o=pd.to_numeric(odds,errors='coerce')
@@ -50644,7 +50644,7 @@ if not HEADLESS:
         )
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_research_heavy":
         st.sidebar.caption(
-            "WHEN: after meaningful research/data changes and periodically during the season. Runs protected CORE/STAT/PBP research plus System Miner V3.10.4 with normalized source/confluence attribution and symmetric 1/2/3-game horizons. The frozen 0.575 Spread distribution benchmark remains unchanged. Established 2017-2022 system discoveries are permanent evidence: later weakness can downgrade current authority or move a system dormant, but cannot erase it. The run publishes the human-readable Rules Index, Big Al coverage, Pathi/market-execution audit, and H2H price-aware research. 2026 stays sealed and Production Betting V3 cannot be mutated by this job; Heavy only publishes bounded research evidence."
+            "WHEN: after meaningful research/data changes and periodically during the season. Runs protected CORE/STAT/PBP research plus System Miner V3.10.4 with normalized source/confluence attribution and symmetric 1/2/3-game horizons. The frozen 0.575 Spread distribution benchmark remains unchanged. Established 2017-2022 system discoveries are permanent evidence: later weakness can downgrade current authority or move a system dormant, but cannot erase it. The run publishes the human-readable Rules Index, Big Al coverage, Pathi/market-execution audit, and H2H price-aware research. 2026 stays sealed and Production Betting V3.1 cannot be mutated by this job; Heavy only publishes bounded research evidence."
         )
 
     
