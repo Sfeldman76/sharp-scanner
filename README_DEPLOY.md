@@ -1,108 +1,84 @@
-# NCAAF V2.2 — Advanced Miner + CORE-First Bet Authority
+# NCAAF V2.3 — Protected CORE Challenger Search
 
-## Files to replace
-Replace these six files together from this bundle:
+This release adds a **research-only Spread CORE challenger lane** on top of the current NCAAF V2.2.1 production stack. It does not change the frozen Production V1 model, the V2.2.1 Bet Authority rules, the Miner authority gate, the prospective ledger, or any live bet.
 
-- `ncaaf_research_v2.py`
-- `ncaaf_production_v1.py`
-- `ncaaf_production_ledger_v1.py`
-- `utils.py`
-- `train_job.py`
-- `sharp_line_dashboard.py`
+## Why this exists
 
-Do not mix these with older copies.
+The current NCAAF Spread CORE is intentionally tiny and stable. The new lane asks a narrower question: can a different **compact fair-line recipe** beat that frozen CORE on untouched historical confirmation seasons?
 
-## Deployment sequence
-1. Replace all six files.
-2. Rebuild/redeploy the dashboard/scanner and training job from the same source set.
-3. In Model maintenance select **NCAAF Research Update — V2.2** and run it once.
-4. Do **not** run **NCAAF Production — Publish Approved Contract** merely for this release. The frozen Production V1 probability artifact is intentionally unchanged.
-5. When the V2.2 research job finishes, the normal scanner automatically reads the frozen qualified Miner registry and evaluates current pregame triggers. The report cache retries immediately when no V2.2 artifact exists and otherwise refreshes on a short TTL.
+The search is protected:
 
-## Bet Authority V2
-The frozen Spread / H2H / Totals model probabilities remain separate and unchanged.
+- 2022 = initial model fit
+- 2023 = discovery / feature and recipe selection
+- 2024 = untouched confirmation
+- 2025 = untouched confirmation
+- 2026+ = sealed; never used for feature selection, model choice, tuning, confirmation, ranking, promotion, or threshold choice
 
-For Spread and Totals:
+No production artifact can be written by this workflow.
 
-- CORE candidate gate: model edge over break-even >= 2 percentage points AND live expected value >= +2%.
-- CORE below gate -> `PASS`.
-- CORE qualifies but has no independent confirming evidence -> `CANDIDATE`.
-- CORE + 1 clean independent supporting evidence family -> `BET`.
-- Spread CORE + 2+ clean independent supporting evidence families -> `STRONG BET`.
-- Totals never escalates to `STRONG BET` from multi-system overlap; the prior prospective evidence did not validate that escalation.
-- Mixed support/conflict -> `CANDIDATE` / caution.
-- 2+ independent conflicts with no support -> `PASS — CONFLICT`.
-- Systems may not create a wager without CORE, reverse CORE, or rewrite CORE probability.
-- H2H remains `MODEL ONLY`.
+## What it tests
 
-Evidence lanes include the existing frozen STAT / Pathi / Big Al / promoted system evidence plus confirmed V2.2 Miner mechanism families.
+The current frozen Spread CORE recipe is replayed as the benchmark:
 
-## System Miner V4
-Research source tag:
-`ncaaf-research-v2.2-advanced-miner-live-overlay-20261005`
+- `Context_Intercept`
+- `Diff_RawRecent3_Off_YPP`
+- `B_RawSeason_GameAdj_Def_Rush_YPA`
+- market-residual target
+- Ridge + shallow HGB blend, 75% Ridge
 
-Research contract:
-- Discovery: through 2023 only.
-- Confirmation: 2024 AND 2025.
-- 2026+: prospective only; never used for search, family selection, direction selection, or qualification.
-- Search depth up to 5 condition families, beam width 64.
-- Symmetric 1/2/3-game SU and ATS sequences.
-- Prior SU / ATS magnitude and streak state.
-- Conference and conference-pair context.
-- Rivalry, revenge and H2H history.
-- Role changes and team price history.
-- Rest / season timing.
-- Team / coach identity where historical support permits.
-- Market path, sharp-soft, and key-cross context when leakage-safe historical fields exist.
-- FDR + season robustness + remove-best-season controls.
-- Dependency / near-duplicate collapse to one vote per mechanism family.
-- Unknown live atoms fail closed (`NOT EVALUABLE` / no vote), never guessed.
+The challenger searches the existing leakage-safe pregame feature universe and builds only compact recipes:
 
-## Live Miner bridge
-The V2.2 report publishes frozen confirmed mechanism definitions. The scanner evaluates only those definitions against the current pregame state. Current-season outcomes can satisfy a prior-state trigger but cannot qualify or rerank a system.
+1. **FAIR_MARGIN_COMPACT** — market-blind model of actual game margin.
+2. **RESIDUAL_COMPACT** — model of market opening-line error, converted back to a fair margin.
+3. **HYBRID_COMPACT** — frozen discovery-selected blend of the market-blind and residual fair margins.
 
-Dashboard diagnostics show:
-- qualified Miner families
-- live-evaluable Miner families
-- triggers fired
-- supports CORE
-- conflicts CORE
+Search limits are deliberately small:
 
-## New dashboard
-The NCAAF board now shows:
-- `CANDIDATE / BET / STRONG BET / PASS`
-- CORE probability, edge and EV
-- support/conflict source and family attribution
-- Pathi state
-- Miner state
-- triggered systems
-- full Bet Authority decision-reason table
-- historical confirmed Miner pools
-- 2+ independent Miner confluence
-- best individual Miner systems ranked with Wilson lower bound
-- best Miner systems when participating in independent-family confluence
+- max 6 non-intercept features
+- max 2 features from one feature family
+- discovery screen limited before greedy admission
+- Ridge alpha grid: 12 / 24 / 48
+- Ridge/HGB blend grid: 50% / 75% / 100% Ridge
+- hybrid weights: 25% / 50% / 75% market-blind fair margin
 
-## Prospective ledger
-New policy records use:
-`ncaaf-production-v2-core-candidate-bet-authority-20261005`
+2024 and 2025 do not reselect any feature, model, alpha, blend, or hybrid weight.
 
-and a new model-instance prefix:
-`NCAAF_PROD_BETAUTH_V2__...`
+## Confirmation output
 
-This segregates the new decision policy from prior Production V1 pick history without deleting or rewriting old records.
+For the incumbent and each challenger the report publishes:
 
-Only `BET`, `STRONG BET`, historical `PLAY`, and historical `STRONG PLAY` are treated as wager actions in ROI reporting. `CANDIDATE` is recorded for prospective audit but is not treated as a wager.
+- RMSE / MAE versus actual margin
+- improvement versus the opening market
+- rate the model is closer to the result than the opening market
+- ATS-direction diagnostics at 1 / 2 / 3 / 4 / 5 point fair-line disagreement bands
+- 2024 and 2025 results separately
+- pooled paired-bootstrap RMSE and MAE gain versus the incumbent
 
-## Validation performed
-- All six Python files compile.
-- Research V2.2 self-test passes.
-- Live Miner frozen-rule trigger test passes.
-- Bet Authority synthetic ladder passes:
-  - CORE only -> CANDIDATE
-  - CORE + one Miner -> BET
-  - CORE + Miner + Pathi -> STRONG BET
-  - CORE + one conflict -> CANDIDATE
-  - CORE + two independent conflicts -> PASS — CONFLICT
-  - CORE below gate -> PASS
-  - Totals + two supports -> BET, not STRONG BET
-- Ledger action mapping passes.
+Possible research states:
+
+- `NO_IMPROVEMENT`
+- `MIXED`
+- `PROMOTION_ELIGIBLE_RESEARCH`
+- `STRONG_CHALLENGER`
+
+Even `STRONG_CHALLENGER` receives **zero production authority**. The next step would be to freeze that exact recipe into a prospective 2026 paired shadow. Production promotion would remain a separate explicit decision.
+
+## Deploy
+
+Starting from NCAAF V2.2.1, replace/add only these files:
+
+1. **ADD** `ncaaf_core_challenger_v1.py`
+2. **REPLACE** `train_job.py`
+3. **REPLACE** `sharp_line_dashboard.py`
+
+The included `ncaaf_production_v1.py`, `ncaaf_production_ledger_v1.py`, `ncaaf_research_v2.py`, and `utils.py` are unchanged from V2.2.1 and are included only to keep this archive self-contained.
+
+After redeploying, choose:
+
+**NCAAF CORE — Challenger Search**
+
+Run it once and review the Cloud Run log or open **CORE Challenger — 2024/25 Confirmation Results** in the NCAAF dashboard.
+
+## Do not run
+
+Do **not** run `NCAAF Production — Publish Approved Contract` for this research test. No Heavy/legacy route is required.

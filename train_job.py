@@ -573,6 +573,7 @@ def main():
     _rcv1, _rcv1_path, _rcv1_sha = _load_exact_local_module("refit_cadence_test_v1")
     _npv1, _npv1_path, _npv1_sha = _load_exact_local_module("ncaaf_production_v1")
     _nrv22, _nrv22_path, _nrv22_sha = _load_exact_local_module("ncaaf_research_v2")
+    _nccv1, _nccv1_path, _nccv1_sha = _load_exact_local_module("ncaaf_core_challenger_v1")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
@@ -584,6 +585,9 @@ def main():
     # publication.
     _ncaaf_rv22_run = bool(
         str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_research_v2"
+    )
+    _ncaaf_core_challenger_run = bool(
+        str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_core_challenger"
     )
     _ncaaf_prod_promote = bool(
         str(sport).upper().strip() == "NCAAF" and (
@@ -822,14 +826,53 @@ def main():
         f"[NCAAF-RV22-DEPLOY-PREFLIGHT] PASS source_tag={_nrv22_tag} "
         f"path={_nrv22_path} sha={_nrv22_sha[:16]} production_authority=0"
     )
+    _nccv1_tag = getattr(_nccv1, "NCAAF_CORE_CHALLENGER_V1_SOURCE_TAG", None)
+    if _nccv1_tag != "ncaaf-core-challenger-v1.0-compact-fairline-20261005":
+        raise RuntimeError(
+            f"[NCAAF-CORE-CHALLENGER-V1-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nccv1_tag!r} "
+            f"path={str(_nccv1_path)!r} sha={_nccv1_sha[:16]}"
+        )
+    log_func(
+        f"[NCAAF-CORE-CHALLENGER-V1-DEPLOY-PREFLIGHT] PASS source_tag={_nccv1_tag} "
+        f"path={_nccv1_path} sha={_nccv1_sha[:16]} production_authority=0 automatic_promotion=FALSE"
+    )
 
     pw.emit("start", f"Training start run_id={run_id} sport={sport} market={market}", pct=0.0)
 
     hb_stop = start_heartbeat(pw, f"[{sport}] market={market}", 45)
 
     try:
+        if _ncaaf_core_challenger_run:
+            # Protected NCAAF CORE challenger.  Build the same leakage-safe game frame
+            # used by Production V1, then hand only <=2025 rows to the challenger.
+            # Production V1 is never mutated and 2026 is sealed from selection/confirmation.
+            log_func("[NCAAF-CORE-CHALLENGER-RUN] phase=HISTORICAL_CACHE start=TRUE production_mutation=FALSE year_2026_selection=FALSE")
+            _t0=__import__('time').perf_counter()
+            _sld.fit_historical_ncaaf_core_expert("spreads",log_func=log_func)
+            _sld.fit_ncaaf_statistical_brain(log_func=log_func)
+            _cache=getattr(_sld,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}
+            _games=_cache.get("games") if isinstance(_cache,dict) else None
+            _features=_cache.get("candidate_feature_cols") if isinstance(_cache,dict) else None
+            if _games is None or getattr(_games,"empty",True) or not _features:
+                raise RuntimeError("[NCAAF-CORE-CHALLENGER-CACHE] historical game frame/candidate features missing")
+            log_func(f"[NCAAF-CORE-CHALLENGER-CACHE] status=PASS games={len(_games)} candidate_features={len(_features)}")
+            _report=_nccv1.run_ncaaf_core_challenger_v1(
+                dashboard_module=_sld,bucket_name=bucket,storage_client=gcs,log_func=log_func,hard_fail=True
+            )
+            if not isinstance(_report,dict) or _report.get("status")!="NCAAF_CORE_CHALLENGER_V1_COMPLETE":
+                raise RuntimeError(f"[NCAAF-CORE-CHALLENGER-RUN] report failed status={getattr(_report,'get',lambda *_:None)('status')}")
+            _t1=__import__('time').perf_counter()
+            _best=_report.get("best_challenger") or {}
+            log_func(
+                f"[NCAAF-CORE-CHALLENGER-RUN] status=PASS seconds={_t1-_t0:.1f} best={_best.get('name')} "
+                f"state={_best.get('state')} recommendation={_report.get('recommendation')} "
+                "year_2026_queried=FALSE production_mutation=FALSE automatic_promotion=FALSE"
+            )
+            pw.emit("done","NCAAF CORE Challenger Search complete ✅",pct=1.0)
+            return
+
         if _ncaaf_rv22_run:
-            # Dedicated protected NCAAF Research V2.2 route. Build only the
+            # Dedicated protected NCAAF Research V2.2.1 route. Build only the
             # historical/OOF caches required by the challenger; never publish or
             # mutate the frozen Production V1 probability/edge artifact.
             log_func("[NCAAF-RV22-RUN] phase=HISTORICAL_CACHE start=TRUE production_mutation=FALSE")
@@ -857,7 +900,7 @@ def main():
                 f"[NCAAF-RV22-RUN] status=PASS seconds={_t1-_t0:.1f} confirmed_mechanisms={_confirmed} "
                 "miner=V4_HORIZON_SYMMETRIC live_bridge=PUBLISHED 2026_selection_influence=0 production_mutation=FALSE"
             )
-            pw.emit("done","NCAAF Research V2.2 complete ✅",pct=1.0)
+            pw.emit("done","NCAAF Research V2.2.1 complete ✅",pct=1.0)
             return
 
         if _edge_research_only:

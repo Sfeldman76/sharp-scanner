@@ -1,4 +1,4 @@
-"""NCAAF Research V2 — orthogonal residual STAT + disciplined System Miner V3.
+"""NCAAF Research V2 — orthogonal residual STAT + disciplined System Miner V4.
 
 Research-only architecture built around the frozen NCAAF Production V1 benchmark.
 Nothing in this module can grant or mutate production authority.
@@ -33,7 +33,10 @@ import numpy as np
 import pandas as pd
 
 NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.2-advanced-miner-live-overlay-20261005"
-NCAAF_RESEARCH_V2_VERSION = "2.2.0"
+NCAAF_RESEARCH_V2_VERSION = "2.2.1"
+NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
+NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
+NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
 DISCOVERY_MAX_SEASON = 2023
 CONFIRMATION_SEASONS = (2024, 2025)
 PROSPECTIVE_MIN_SEASON = 2026
@@ -835,8 +838,18 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
              "confirmation_n":rep["confirmation_n"],"confirmation_pass":bool(rep["confirmation_pass"]),
              "authority_state":"CONFIRMED_SHADOW" if rep["confirmation_pass"] else "DISCOVERY_FROZEN","production_authority":0,
              "attribution":_mechanism_attribution(games,seasons,rep,market)}
-        fam["current_qualified"]=bool(rep["confirmation_pass"])
-        fam["evidence_level"]=("STRONG_VALIDATED" if bool(rep["confirmation_pass"]) and int(rep.get("confirmation_n",0) or 0)>=60 and float(rep.get("confirmation_rate",0) or 0)>=.56 else ("VALIDATED" if bool(rep["confirmation_pass"]) else "RESEARCH_SHADOW"))
+        strong_validated=bool(
+            rep["confirmation_pass"] and
+            int(rep.get("confirmation_n",0) or 0) >= NCAAF_MINER_LIVE_MIN_CONFIRMATION_N and
+            float(rep.get("confirmation_rate",0) or 0) >= NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE
+        )
+        # Confirmation and live betting authority are deliberately different gates.
+        # CONFIRMED_SHADOW remains valuable research/prospective evidence; only the
+        # stronger validation tier may cast a live Bet Authority vote.
+        fam["current_qualified"]=strong_validated
+        fam["live_authority_eligible"]=strong_validated
+        fam["live_authority_policy"]=NCAAF_MINER_LIVE_AUTHORITY_POLICY
+        fam["evidence_level"]=("STRONG_VALIDATED" if strong_validated else ("VALIDATED_SHADOW" if bool(rep["confirmation_pass"]) else "RESEARCH_SHADOW"))
         if market=="h2h":
             fam["discovery_price_roi"]=(rep.get("h2h_discovery_price") or {}).get("roi")
             fam["confirmation_price_roi"]=(rep.get("h2h_confirmation_price") or {}).get("roi")
@@ -962,6 +975,23 @@ def _norm_team_live(v: Any) -> str:
     return " ".join(str(v or "").strip().lower().split())
 
 
+def _miner_live_authority_eligible(mech: dict[str,Any] | None) -> bool:
+    """Frozen historical gate for whether a Miner family may influence Bet Authority.
+
+    2026+ outcomes are intentionally absent from this decision. A family must have
+    passed the original 2024+2025 confirmation gate AND clear the stronger pooled
+    confirmation sample/rate floor. We recompute from immutable report fields so
+    the V2.2 report already published before this runtime patch remains usable.
+    """
+    m=mech or {}
+    if not bool(m.get("confirmation_pass")): return False
+    try: n=int(m.get("confirmation_n",0) or 0)
+    except Exception: n=0
+    try: rate=float(m.get("confirmation_rate",0) or 0)
+    except Exception: rate=0.0
+    return bool(n>=NCAAF_MINER_LIVE_MIN_CONFIRMATION_N and np.isfinite(rate) and rate>=NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE)
+
+
 def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard_module=None) -> pd.DataFrame:
     """Evaluate frozen confirmed Miner mechanisms against current pregame context.
 
@@ -993,13 +1023,19 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     cdf=pd.DataFrame(ctx).reset_index(drop=True)
     atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(cdf,dashboard_module,for_live=True)}
     registry=report.get("system_miner_v3") or {}
-    votes_by_game={k:[] for k in keys}; qualified=0; evaluable=0
+    authority_votes_by_game={k:[] for k in keys}; research_votes_by_game={k:[] for k in keys}
+    confirmed_research=0; authority_qualified=0; authority_evaluable=0; research_evaluable=0
     for market,mr in registry.items():
         for mech in (mr or {}).get("mechanism_families",[]):
             if not mech.get("confirmation_pass"): continue
-            qualified+=1; cond=list(mech.get("representative_conditions") or [])
+            confirmed_research+=1
+            live_eligible=_miner_live_authority_eligible(mech)
+            if live_eligible: authority_qualified+=1
+            cond=list(mech.get("representative_conditions") or [])
             if not cond or any(c not in atoms for c in cond): continue
-            evaluable+=1; mask=np.ones(len(cdf),dtype=bool)
+            research_evaluable+=1
+            if live_eligible: authority_evaluable+=1
+            mask=np.ones(len(cdf),dtype=bool)
             for c in cond: mask &= atoms[c]
             direction=str(mech.get("direction") or "PLAY_ON").upper()
             for j in np.flatnonzero(mask):
@@ -1007,16 +1043,35 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
                 if str(market).lower()=="totals": target="over" if direction=="PLAY_ON" else "under"
                 else: target=home if direction=="PLAY_ON" else away
                 if not target: continue
-                votes_by_game[keys[j]].append({"source_type":"MINER","family_id":str(mech.get("mechanism_id")),"target":target,"market":str(market).lower(),
-                                               "mechanisms":list(mech.get("families") or [str(mech.get("mechanism_id"))]),"rule":" AND ".join(cond),
-                                               "confirmation_n":mech.get("confirmation_n"),"confirmation_rate":mech.get("confirmation_rate"),"evidence_level":mech.get("evidence_level")})
-    out["NCAAF_RV22_Miner_Votes"]=[votes_by_game.get(k,[]) for k in out[keycol]]
-    out["NCAAF_Miner_Qualified"]=qualified; out["NCAAF_Miner_Evaluable"]=evaluable
-    counts=[]; summaries=[]
+                vote={"source_type":"MINER","family_id":str(mech.get("mechanism_id")),"target":target,"market":str(market).lower(),
+                      "mechanisms":list(mech.get("families") or [str(mech.get("mechanism_id"))]),"rule":" AND ".join(cond),
+                      "confirmation_n":mech.get("confirmation_n"),"confirmation_rate":mech.get("confirmation_rate"),
+                      "evidence_level":"STRONG_VALIDATED" if live_eligible else "VALIDATED_SHADOW",
+                      "live_authority_eligible":live_eligible,"live_authority_policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY}
+                research_votes_by_game[keys[j]].append(vote)
+                if live_eligible: authority_votes_by_game[keys[j]].append(vote)
+    # Production consumes ONLY authority-qualified votes. The full confirmed set is
+    # preserved separately for research display/prospective tracking.
+    out["NCAAF_RV22_Miner_Votes"]=[authority_votes_by_game.get(k,[]) for k in out[keycol]]
+    out["NCAAF_RV22_Miner_Research_Votes"]=[research_votes_by_game.get(k,[]) for k in out[keycol]]
+    out["NCAAF_Miner_Confirmed_Research"]=confirmed_research
+    out["NCAAF_Miner_Qualified"]=authority_qualified
+    out["NCAAF_Miner_Evaluable"]=authority_evaluable
+    out["NCAAF_Miner_Research_Evaluable"]=research_evaluable
+    out["NCAAF_Miner_Live_Authority_Policy"]=NCAAF_MINER_LIVE_AUTHORITY_POLICY
+    live_counts=[]; live_summaries=[]; research_counts=[]; research_summaries=[]
     for _,r in out.iterrows():
-        m=str(r.get("Market") or "").lower(); vv=[v for v in (r.get("NCAAF_RV22_Miner_Votes") or []) if v.get("market")==m]
-        counts.append(len(vv)); summaries.append(" | ".join(f"{v['family_id']}: {v.get('rule') or 'rule'} → {v['target']}" for v in vv) if vv else "—")
-    out["NCAAF_Miner_Live_Trigger_Count"]=counts; out["NCAAF_RV2_System_Count"]=counts; out["NCAAF_RV2_System_Summary"]=summaries
+        m=str(r.get("Market") or "").lower()
+        vv=[v for v in (r.get("NCAAF_RV22_Miner_Votes") or []) if v.get("market")==m]
+        rv=[v for v in (r.get("NCAAF_RV22_Miner_Research_Votes") or []) if v.get("market")==m]
+        live_counts.append(len(vv)); research_counts.append(len(rv))
+        live_summaries.append(" | ".join(f"{v['family_id']} [STRONG]: {v.get('rule') or 'rule'} → {v['target']}" for v in vv) if vv else "—")
+        research_summaries.append(" | ".join(f"{v['family_id']} [{'LIVE' if v.get('live_authority_eligible') else 'SHADOW'}]: {v.get('rule') or 'rule'} → {v['target']}" for v in rv) if rv else "—")
+    out["NCAAF_Miner_Live_Trigger_Count"]=live_counts
+    out["NCAAF_Miner_Research_Trigger_Count"]=research_counts
+    out["NCAAF_RV2_System_Count"]=live_counts
+    out["NCAAF_RV2_System_Summary"]=live_summaries
+    out["NCAAF_RV2_Research_System_Summary"]=research_summaries
     return out
 
 def _market_rich_audit(games: pd.DataFrame, utils_module=None) -> dict[str,Any]:
@@ -1058,7 +1113,8 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
                 "benchmark":"FROZEN_NCAAF_PRODUCTION_V1","discovery_max_season":DISCOVERY_MAX_SEASON,"confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"system_miner_v3":miners,
                 "prospective_shadow_2026":prospective,"system_results":system_results,"market_rich":market_audit,
-                "next_step":"KEEP PRODUCTION V1 FROZEN; TRACK PRICE-AWARE H2H / TOTALS MECHANISMS AND SPARSE STAT CHALLENGERS PROSPECTIVELY"}
+                "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False},
+                "next_step":"KEEP PRODUCTION V1 FROZEN; CONFIRMED_SHADOW TRACKS PROSPECTIVELY; ONLY STRONG_VALIDATED MINER FAMILIES MAY CAST LIVE BET-AUTHORITY VOTES"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
         bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
         if storage_client is None:
@@ -1070,7 +1126,8 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
         b.blob(hist).upload_from_string(body,content_type="application/json"); b.blob(REPORT_CURRENT_BLOB).upload_from_string(body,content_type="application/json")
         bio=io.BytesIO(); pickle.dump(bundle,bio,protocol=pickle.HIGHEST_PROTOCOL); bio.seek(0); pdata=bio.read(); b.blob(BUNDLE_CURRENT_BLOB).upload_from_string(pdata,content_type="application/octet-stream")
         report["artifact"]={"current_report":f"gs://{bucket_name}/{REPORT_CURRENT_BLOB}","current_bundle":f"gs://{bucket_name}/{BUNDLE_CURRENT_BLOB}","history_report":f"gs://{bucket_name}/{hist}","sha256":sha}
-        log_func(f"[NCAAF-RV22-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
+        _strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if _miner_live_authority_eligible(_m))
+        log_func(f"[NCAAF-RV221-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} miner_live_authority={_strong} prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
         return report
     except Exception as exc:
         log_func(f"[NCAAF-RV2-FAIL] {type(exc).__name__}: {exc}")
@@ -1110,6 +1167,11 @@ def self_test() -> dict[str,Any]:
         "families":sorted(fam),"qvalues":q.tolist(),"american_unit_profit_test":ret.tolist(),
         "h2h_price_gate":"OBSERVED_TEAM_AND_OPPONENT_ML_ONLY",
         "confirmation_gate":"BOTH_2024_AND_2025",
+        "live_authority_policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,
+        "live_min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,
+        "live_min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,
+        "weak_confirmed_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":109,"confirmation_rate":0.5229}),
+        "strong_confirmed_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.6222}),
     }
 
 

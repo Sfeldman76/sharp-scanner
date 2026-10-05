@@ -1,89 +1,33 @@
 {
-  "status": "PASS",
-  "checks": {
-    "candidate": {
-      "action": "CANDIDATE",
-      "decision": "CANDIDATE",
-      "support": 0,
-      "conflict": 0,
-      "reason": "CORE_CANDIDATE_AWAITING_INDEPENDENT_CONFIRMATION"
-    },
-    "bet_one_miner": {
-      "action": "BET",
-      "decision": "BET",
-      "support": 1,
-      "conflict": 0,
-      "reason": "CORE_CANDIDATE_CONFIRMED_BY_1_INDEPENDENT_EVIDENCE_FAMILY"
-    },
-    "strong_miner_pathi": {
-      "action": "STRONG BET",
-      "decision": "STRONG_BET",
-      "support": 2,
-      "conflict": 0,
-      "reason": "CORE_CANDIDATE_CONFIRMED_BY_2_INDEPENDENT_EVIDENCE_FAMILY"
-    },
-    "candidate_one_conflict": {
-      "action": "CANDIDATE",
-      "decision": "CANDIDATE",
-      "support": 0,
-      "conflict": 1,
-      "reason": "CORE_CANDIDATE_HELD_SYSTEM_CONFLICT_OR_MIXED_EVIDENCE"
-    },
-    "pass_two_conflicts": {
-      "action": "PASS \u2014 CONFLICT",
-      "decision": "PASS_CONFLICT",
-      "support": 0,
-      "conflict": 2,
-      "reason": "CORE_CANDIDATE_VETOED_BY_2PLUS_INDEPENDENT_CONFLICTS"
-    },
-    "pass_below_gate": {
-      "action": "PASS",
-      "decision": "PASS",
-      "support": 1,
-      "conflict": 0,
-      "reason": "CORE_BELOW_PRICE_AWARE_GATE"
-    },
-    "totals_two_support_no_strong": {
-      "action": "BET",
-      "decision": "BET",
-      "support": 2,
-      "conflict": 0,
-      "reason": "CORE_CANDIDATE_CONFIRMED_BY_2_INDEPENDENT_EVIDENCE_FAMILY"
-    },
-    "live_miner": {
-      "qualified": 1,
-      "evaluable": 1,
-      "triggers": [
-        1,
-        1
-      ],
-      "summary": "MTEST \u2192 home"
-    },
-    "research_self_test": {
-      "status": "PASS",
-      "source_tag": "ncaaf-research-v2.2-advanced-miner-live-overlay-20261005",
-      "families": [
-        "MARKET_MICROSTRUCTURE",
-        "RUN_PASS_MATCHUP"
-      ],
-      "qvalues": [
-        0.03,
-        0.06,
-        0.20000000000000004
-      ],
-      "american_unit_profit_test": [
-        2.0,
-        0.5
-      ],
-      "h2h_price_gate": "OBSERVED_TEAM_AND_OPPONENT_ML_ONLY",
-      "confirmation_gate": "BOTH_2024_AND_2025"
-    },
-    "ledger_actions": {
-      "CANDIDATE": "CANDIDATE",
-      "BET": "BET",
-      "STRONG_BET": "STRONG BET",
-      "PASS": "PASS",
-      "PASS_CONFLICT": "PASS \u2014 CONFLICT"
-    }
+  "compile_files": [
+    "ncaaf_core_challenger_v1.py",
+    "train_job.py",
+    "sharp_line_dashboard.py"
+  ],
+  "core_challenger_self_test": {
+    "automatic_promotion": false,
+    "incumbent_features": [
+      "Context_Intercept",
+      "Diff_RawRecent3_Off_YPP",
+      "B_RawSeason_GameAdj_Def_Rush_YPA"
+    ],
+    "production_authority": 0,
+    "source_tag": "ncaaf-core-challenger-v1.0-compact-fairline-20261005",
+    "status": "PASS",
+    "year_2026_queried": false
+  },
+  "deployment_contract": {
+    "automatic_promotion": false,
+    "confirmation": [
+      2024,
+      2025
+    ],
+    "discovery_train": [
+      2022
+    ],
+    "discovery_validation": 2023,
+    "production_mutation": false,
+    "prospective_min_season": 2026,
+    "workflow": "ncaaf_core_challenger"
   }
 }

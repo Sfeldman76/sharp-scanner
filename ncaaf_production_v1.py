@@ -39,7 +39,9 @@ NCAAF_PRODUCTION_V1_FREEZE_UTC = "2026-09-29T22:47:00+00:00"
 # Runtime Bet Authority V2: the frozen probability artifact remains unchanged.
 # CORE must first clear price-aware candidate gates; bounded evidence may confirm
 # or oppose that candidate but can never create or reverse the CORE prediction.
-NCAAF_BET_AUTHORITY_POLICY = "NCAAF_PRODUCTION_BETTING_V2_CORE_CANDIDATE_SYSTEM_CONFIRMED_20261005"
+NCAAF_BET_AUTHORITY_POLICY = "NCAAF_PRODUCTION_BETTING_V2_1_STRONG_VALIDATED_MINER_ONLY_20261005"
+NCAAF_RESEARCH_MINER_MIN_CONFIRMATION_N = 60
+NCAAF_RESEARCH_MINER_MIN_CONFIRMATION_RATE = 0.56
 NCAAF_CORE_MIN_EDGE = 0.02
 NCAAF_CORE_MIN_EV = 0.02
 
@@ -918,7 +920,15 @@ def _research_miner_votes(group: pd.DataFrame, market: str) -> List[dict]:
         for v in raw:
             if not isinstance(v,dict) or str(v.get("market") or "").lower()!=mk: continue
             fid=str(v.get("family_id") or "").strip(); target=_norm_team(v.get("target"))
-            if not fid or not target: continue
+            # Defense-in-depth: the research bridge should already emit only
+            # STRONG_VALIDATED votes, but Bet Authority independently rechecks the
+            # frozen 2024-25 gate so a stale/mixed deployment cannot promote a weak family.
+            try: _cn=int(v.get("confirmation_n",0) or 0)
+            except Exception: _cn=0
+            try: _cr=float(v.get("confirmation_rate",0) or 0)
+            except Exception: _cr=0.0
+            _eligible=bool(str(v.get("evidence_level") or "").upper()=="STRONG_VALIDATED" and _cn>=NCAAF_RESEARCH_MINER_MIN_CONFIRMATION_N and np.isfinite(_cr) and _cr>=NCAAF_RESEARCH_MINER_MIN_CONFIRMATION_RATE)
+            if not fid or not target or not _eligible: continue
             key=(fid,target)
             if key in seen: continue
             seen.add(key)
@@ -946,8 +956,9 @@ def apply_live_authority(sides: pd.DataFrame, contract: dict | None) -> pd.DataF
     """CORE-first price-aware Bet Authority over frozen NCAAF probabilities.
 
     CORE alone creates a candidate: edge over break-even >= 2pp and live EV >=2%.
-    Frozen STAT/Pathi/Big Al/legacy systems plus confirmed Research V2.2 Miner
-    families are bounded evidence. They may confirm or oppose CORE, but may not
+    Frozen STAT/Pathi/Big Al/legacy systems plus STRONG_VALIDATED Research V2.2
+    Miner families are bounded evidence. CONFIRMED_SHADOW Miner families remain
+    research/prospective only. Eligible evidence may confirm or oppose CORE, but may not
     manufacture a wager, flip the predicted side, or rewrite model probability.
     """
     out=sides.copy()

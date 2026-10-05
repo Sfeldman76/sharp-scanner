@@ -21,7 +21,7 @@ import pandas as pd
 PRED_TABLE = "sharplogger.sharp_data.ncaaf_production_v1_predictions"
 RESULT_TABLE = "sharplogger.sharp_data.ncaaf_production_v1_results"
 # Segregates pre-fix (outcome-keyed) predictions without rewriting immutable history.
-LEDGER_VERSION = "ncaaf-production-v2-core-candidate-bet-authority-20261005"
+LEDGER_VERSION = "ncaaf-production-v2.1-strong-validated-miner-authority-20261005"
 _ALLOWED_MARKETS = {"spreads", "h2h", "totals"}
 _ALLOWED_ACTIONS = {"BET", "STRONG BET", "CANDIDATE", "PLAY", "STRONG PLAY", "MODEL ONLY", "PASS", "PASS — CONFLICT", "EDGE — NO EXEC QUOTE"}
 
@@ -132,7 +132,7 @@ def prepare_prediction_events(picks, contract, *, now=None, source="BACKGROUND_S
         return pd.DataFrame(), {"status":"MISSING_ARTIFACT_HASH", "attempted":0}
     # A distinct selector instance prevents the old, incorrectly side-keyed
     # FIRST lock from blocking a corrected pregame pick for the same artifact.
-    instance="NCAAF_PROD_BETAUTH_V2__"+sha[:16]
+    instance="NCAAF_PROD_BETAUTH_V2_1__"+sha[:16]
     n=_utc_now(now)
     seen=set(); records=[]; rejected={}
     def reject(k): rejected[k]=rejected.get(k,0)+1
