@@ -21,9 +21,9 @@ import pandas as pd
 PRED_TABLE = "sharplogger.sharp_data.ncaaf_production_v1_predictions"
 RESULT_TABLE = "sharplogger.sharp_data.ncaaf_production_v1_results"
 # Segregates pre-fix (outcome-keyed) predictions without rewriting immutable history.
-LEDGER_VERSION = "ncaaf-production-v1-physical-game-key-fix-20260930"
+LEDGER_VERSION = "ncaaf-production-v2-core-candidate-bet-authority-20261005"
 _ALLOWED_MARKETS = {"spreads", "h2h", "totals"}
-_ALLOWED_ACTIONS = {"PLAY", "STRONG PLAY", "MODEL ONLY", "PASS", "PASS — CONFLICT", "EDGE — NO EXEC QUOTE"}
+_ALLOWED_ACTIONS = {"BET", "STRONG BET", "CANDIDATE", "PLAY", "STRONG PLAY", "MODEL ONLY", "PASS", "PASS — CONFLICT", "EDGE — NO EXEC QUOTE"}
 
 
 def _slug(v):
@@ -102,6 +102,12 @@ def _market(v):
 def _action(r):
     decision=_str(r.get("_prod_decision")).upper()
     act=_str(r.get("_prod_action")).upper()
+    if decision in ("BET","STRONG_BET"):
+        if not bool(r.get("_exec", False)) or _flt(r.get("_odds",r.get("Odds_Price"))) is None:
+            return "EDGE — NO EXEC QUOTE"
+        return "STRONG BET" if decision=="STRONG_BET" else "BET"
+    if decision=="CANDIDATE": return "CANDIDATE"
+    # Backward compatibility for historical pre-V2 selectors.
     if decision in ("EDGE_SINGLE", "EDGE_MULTI"):
         if not bool(r.get("_exec", False)) or _flt(r.get("_odds",r.get("Odds_Price"))) is None:
             return "EDGE — NO EXEC QUOTE"
@@ -109,7 +115,6 @@ def _action(r):
     if decision=="PASS_CONFLICT": return "PASS — CONFLICT"
     if decision=="PASS": return "PASS"
     return "MODEL ONLY" if act=="MODEL ONLY" else "PASS"
-
 
 def prepare_prediction_events(picks, contract, *, now=None, source="BACKGROUND_SCANNER", max_quote_age_minutes=180):
     """Convert the SAME model+edge-selected rows used by the UI into pregame locks.
@@ -127,7 +132,7 @@ def prepare_prediction_events(picks, contract, *, now=None, source="BACKGROUND_S
         return pd.DataFrame(), {"status":"MISSING_ARTIFACT_HASH", "attempted":0}
     # A distinct selector instance prevents the old, incorrectly side-keyed
     # FIRST lock from blocking a corrected pregame pick for the same artifact.
-    instance="NCAAF_PROD_V1_GIDFIX1__"+sha[:16]
+    instance="NCAAF_PROD_BETAUTH_V2__"+sha[:16]
     n=_utc_now(now)
     seen=set(); records=[]; rejected={}
     def reject(k): rejected[k]=rejected.get(k,0)+1
@@ -166,7 +171,7 @@ def prepare_prediction_events(picks, contract, *, now=None, source="BACKGROUND_S
         seen.add(game_key)
         exec_quote=bool(r.get("_exec",False)) and odds is not None and odds!=0
         act=_action(r)
-        if act in ("PLAY","STRONG PLAY") and not exec_quote: act="EDGE — NO EXEC QUOTE"
+        if act in ("BET","STRONG BET","PLAY","STRONG PLAY") and not exec_quote: act="EDGE — NO EXEC QUOTE"
         edge=prob-_be(odds) if _be(odds) is not None else None
         ev=prob*_win_profit(odds)-(1-prob) if _win_profit(odds) is not None else None
         common={
@@ -184,11 +189,17 @@ def prepare_prediction_events(picks, contract, *, now=None, source="BACKGROUND_S
             "edge_family_count":int(r.get("_prod_family_count",0) or 0),
             "independent_mechanisms":int(r.get("_prod_independent_mechanisms",0) or 0),
             "edge_reason":_str(r.get("_prod_reason")),
+            "bet_authority_policy":_str(r.get("_bet_authority_policy")),"core_qualifies":bool(r.get("_core_qualifies",False)),
+            "core_edge_gate":_flt(r.get("_core_edge_gate")),"core_ev_gate":_flt(r.get("_core_ev_gate")),
+            "system_support_count":int(r.get("_system_support_count",0) or 0),"system_support_families":_str(r.get("_system_support_families")),
+            "system_support_sources":_str(r.get("_system_support_sources")),"system_conflict_count":int(r.get("_system_conflict_count",0) or 0),
+            "system_conflict_families":_str(r.get("_system_conflict_families")),"system_conflict_sources":_str(r.get("_system_conflict_sources")),
+            "bet_authority_confidence":_str(r.get("_bet_authority_confidence")),
             "pathi_active":_str(r.get("Pathi_Active_Text")),"bigal_active":_str(r.get("BigAl_Active_Text")),
-            "miner_system_summary":_str(r.get("Miner_System_Summary")),
+            "miner_system_summary":_str(r.get("NCAAF_RV2_System_Summary")) or _str(r.get("Miner_System_Summary")),
             "system_triggers":" | ".join(dict.fromkeys(x for x in (
                 _str(r.get("_prod_sources")),_str(r.get("Pathi_Active_Text")),
-                _str(r.get("BigAl_Active_Text")),_str(r.get("Miner_System_Summary")))
+                _str(r.get("BigAl_Active_Text")),_str(r.get("NCAAF_RV2_System_Summary")),_str(r.get("Miner_System_Summary")))
                 if x and x not in ("—","-"))),
             "line_hash":_str(r.get("Line_Hash")),
         }
@@ -219,6 +230,9 @@ def _schema_predictions():
       "prediction_source":"STRING","is_prospective":"BOOL","model_probability":"FLOAT64","break_even_probability":"FLOAT64","model_edge":"FLOAT64","model_ev":"FLOAT64",
       "model_id":"STRING","decision":"STRING","action":"STRING","production_authority":"INT64","quote_executable":"BOOL","edge_sources":"STRING",
       "edge_mechanisms":"STRING","edge_family_count":"INT64","independent_mechanisms":"INT64","edge_reason":"STRING",
+      "bet_authority_policy":"STRING","core_qualifies":"BOOL","core_edge_gate":"FLOAT64","core_ev_gate":"FLOAT64",
+      "system_support_count":"INT64","system_support_families":"STRING","system_support_sources":"STRING",
+      "system_conflict_count":"INT64","system_conflict_families":"STRING","system_conflict_sources":"STRING","bet_authority_confidence":"STRING",
       "pathi_active":"STRING","bigal_active":"STRING","miner_system_summary":"STRING","system_triggers":"STRING","line_hash":"STRING","lock_type":"STRING",
     }
     return [S(k,t,"REQUIRED" if k=="prediction_event_id" else "NULLABLE") for k,t in fields.items()]
@@ -493,8 +507,8 @@ def read_summary(*,client=None,days=60):
                  COUNTIF(r.result IN ('WIN','LOSS')) AS decided,
                  COUNTIF(r.result='WIN') AS wins,COUNTIF(r.result='PUSH') AS pushes,
                  SAFE_DIVIDE(COUNTIF(r.result='WIN'),COUNTIF(r.result IN ('WIN','LOSS'))) AS hit_rate,
-                 SAFE_DIVIDE(SUM(IF(p.action IN ('PLAY','STRONG PLAY') AND p.quote_executable AND r.result IN ('WIN','LOSS','PUSH'), r.profit_per_unit, NULL)),
-                   COUNTIF(p.action IN ('PLAY','STRONG PLAY') AND p.quote_executable AND r.result IN ('WIN','LOSS','PUSH'))) AS play_roi,
+                 SAFE_DIVIDE(SUM(IF(p.action IN ('PLAY','STRONG PLAY','BET','STRONG BET') AND p.quote_executable AND r.result IN ('WIN','LOSS','PUSH'), r.profit_per_unit, NULL)),
+                   COUNTIF(p.action IN ('PLAY','STRONG PLAY','BET','STRONG BET') AND p.quote_executable AND r.result IN ('WIN','LOSS','PUSH'))) AS play_roi,
                  AVG(r.brier) AS brier,AVG(r.log_loss) AS log_loss,AVG(r.clv_points) AS avg_clv_points,
                  MAX(p.prediction_timestamp) AS last_prediction
           FROM `{PRED_TABLE}` p LEFT JOIN `{RESULT_TABLE}` r USING(prediction_event_id)

@@ -36,6 +36,13 @@ NCAAF_PRODUCTION_V1_ARTIFACT = "production/ncaaf/ncaaf_production_v1.pkl.gz"
 NCAAF_PRODUCTION_V1_META = "production/ncaaf/ncaaf_production_v1.json"
 NCAAF_PRODUCTION_V1_FREEZE_UTC = "2026-09-29T22:47:00+00:00"
 
+# Runtime Bet Authority V2: the frozen probability artifact remains unchanged.
+# CORE must first clear price-aware candidate gates; bounded evidence may confirm
+# or oppose that candidate but can never create or reverse the CORE prediction.
+NCAAF_BET_AUTHORITY_POLICY = "NCAAF_PRODUCTION_BETTING_V2_CORE_CANDIDATE_SYSTEM_CONFIRMED_20261005"
+NCAAF_CORE_MIN_EDGE = 0.02
+NCAAF_CORE_MIN_EV = 0.02
+
 EXPECTED_STAT_COMBO = ("rushing",)
 EXPECTED_STAT_THRESHOLD = 0.75
 EXPECTED_TOTAL_REPRESENTATIVES = {
@@ -845,7 +852,7 @@ def _spread_votes(group: pd.DataFrame, contract: dict) -> Tuple[List[dict], List
     if not vals.empty:
         v=float(vals.iloc[0])
         if abs(v)>=threshold:
-            votes.append({"family_id":"SPREAD_STAT_COMBO","target":home if v>0 else away,"mechanisms":list(stat_spec.get("mechanisms") or ["STATISTICAL_MATCHUP"]),"source":f"STAT rushing {v:+.2f}"})
+            votes.append({"family_id":"SPREAD_STAT_COMBO","target":home if v>0 else away,"mechanisms":list(stat_spec.get("mechanisms") or ["STATISTICAL_MATCHUP"]),"source":f"STAT rushing {v:+.2f}","source_type":"STAT"})
 
     # 2) Named Big Al / Pathi rules are side-aware live flags.
     def side_flag_votes(col,fid,fade=False):
@@ -860,7 +867,7 @@ def _spread_votes(group: pd.DataFrame, contract: dict) -> Tuple[List[dict], List
         targets=sorted(set(x for x in targets if x))
         if len(targets)==1:
             sp=specs.get(fid) or {}
-            votes.append({"family_id":fid,"target":targets[0],"mechanisms":list(sp.get("mechanisms") or []),"source":fid})
+            votes.append({"family_id":fid,"target":targets[0],"mechanisms":list(sp.get("mechanisms") or [fid]),"source":fid,"source_type":"BIG_AL" if fid.startswith("BIGAL") else "PATHI"})
         elif len(targets)>1:
             diag.append(f"{fid}:INTERNAL_CONFLICT")
     side_flag_votes("BigAl_CF1_Week2Home42Win","BIGAL_CF1_WEEK2_HOME42",False)
@@ -876,7 +883,7 @@ def _spread_votes(group: pd.DataFrame, contract: dict) -> Tuple[List[dict], List
         direction=str(sp.get("system_direction") or "PLAY_ON").upper()
         base=home
         target=base if direction=="PLAY_ON" else away
-        votes.append({"family_id":fid,"target":target,"mechanisms":list(sp.get("mechanisms") or []),"source":fid})
+        votes.append({"family_id":fid,"target":target,"mechanisms":list(sp.get("mechanisms") or [fid]),"source":fid,"source_type":"MINER"})
     return votes,diag
 
 
@@ -893,83 +900,157 @@ def _totals_votes(group: pd.DataFrame, contract: dict, context_group: pd.DataFra
         if not _rule_true(ctx,fam.get("conditions") or []): continue
         ori=str(fam.get("orientation") or "PLAY").upper()
         target="over" if ori=="PLAY" else "under"
-        votes.append({"family_id":fam.get("family_id"),"target":target,"mechanisms":list(fam.get("mechanisms") or []),"source":str(fam.get("representative") or fam.get("family_id"))})
+        votes.append({"family_id":fam.get("family_id"),"target":target,"mechanisms":list(fam.get("mechanisms") or [str(fam.get("family_id"))]),"source":str(fam.get("representative") or fam.get("family_id")),"source_type":"MINER"})
     return votes,diag
 
 
-def apply_live_authority(sides: pd.DataFrame, contract: dict | None) -> pd.DataFrame:
-    """Attach promoted edge action to one-best-quote-per-outcome rows.
+def _research_miner_votes(group: pd.DataFrame, market: str) -> List[dict]:
+    """Read frozen V2.2 live Miner votes already attached to scored rows.
 
-    Probability columns are untouched.  The edge engine only chooses whether a
-    market has production edge authority and which outcome that authority points to.
+    The research module owns qualification and live rule evaluation. This adapter
+    only normalizes/deduplicates those bounded votes for Bet Authority.
+    """
+    if group is None or group.empty or "NCAAF_RV22_Miner_Votes" not in group.columns:
+        return []
+    seen=set(); out=[]; mk=str(market or "").lower()
+    for raw in group["NCAAF_RV22_Miner_Votes"].tolist():
+        if not isinstance(raw,(list,tuple)): continue
+        for v in raw:
+            if not isinstance(v,dict) or str(v.get("market") or "").lower()!=mk: continue
+            fid=str(v.get("family_id") or "").strip(); target=_norm_team(v.get("target"))
+            if not fid or not target: continue
+            key=(fid,target)
+            if key in seen: continue
+            seen.add(key)
+            mechs=list(v.get("mechanisms") or [fid])
+            out.append({
+                "family_id":fid,"target":target,"mechanisms":mechs,
+                "source":f"MINER {fid}","source_type":"MINER",
+                "rule":str(v.get("rule") or ""),"evidence_level":v.get("evidence_level"),
+                "confirmation_n":v.get("confirmation_n"),"confirmation_rate":v.get("confirmation_rate"),
+            })
+    return out
+
+
+def _core_leader(group: pd.DataFrame) -> pd.Series | None:
+    if group is None or group.empty: return None
+    g=group.copy()
+    g["__edge"]=pd.to_numeric(g.get("_edge"),errors="coerce").fillna(-999.0)
+    g["__ev"]=pd.to_numeric(g.get("_ev"),errors="coerce").fillna(-999.0)
+    g["__pred"]=pd.to_numeric(g.get("_pred"),errors="coerce").fillna(-999.0)
+    g=g.sort_values(["__edge","__ev","__pred"],ascending=[False,False,False])
+    return g.iloc[0]
+
+
+def apply_live_authority(sides: pd.DataFrame, contract: dict | None) -> pd.DataFrame:
+    """CORE-first price-aware Bet Authority over frozen NCAAF probabilities.
+
+    CORE alone creates a candidate: edge over break-even >= 2pp and live EV >=2%.
+    Frozen STAT/Pathi/Big Al/legacy systems plus confirmed Research V2.2 Miner
+    families are bounded evidence. They may confirm or oppose CORE, but may not
+    manufacture a wager, flip the predicted side, or rewrite model probability.
     """
     out=sides.copy()
     defaults={
         "_prod_decision":"MODEL_ONLY","_prod_target":"","_prod_action":"MODEL ONLY",
         "_prod_sources":"","_prod_mechanisms":"","_prod_family_count":0,
         "_prod_independent_mechanisms":0,"_prod_authority":0,"_prod_reason":"PRODUCTION_CONTRACT_UNAVAILABLE",
+        "_bet_authority_policy":NCAAF_BET_AUTHORITY_POLICY,"_core_qualifies":False,
+        "_core_edge_gate":NCAAF_CORE_MIN_EDGE,"_core_ev_gate":NCAAF_CORE_MIN_EV,
+        "_system_support_count":0,"_system_support_families":"","_system_support_sources":"",
+        "_system_conflict_count":0,"_system_conflict_families":"","_system_conflict_sources":"",
+        "_bet_authority_confidence":"MODEL_ONLY",
     }
     for c,v in defaults.items(): out[c]=v
     if not isinstance(contract,dict) or int(contract.get("production_authority",0) or 0)!=1:
         return out
-    if "_prod_game_id" not in out.columns:
-        out=_attach_production_game_identity(out)
-    if out.empty or "Market" not in out.columns:
-        return out
+    if "_prod_game_id" not in out.columns: out=_attach_production_game_identity(out)
+    if out.empty or "Market" not in out.columns: return out
+
     for _,ix in out.groupby(["_prod_game_id","Market"],dropna=False,sort=False).groups.items():
         idx=list(ix); g=out.loc[idx].copy(); market=str(g["Market"].iloc[0]).lower()
+        core=_core_leader(g)
+        if core is None: continue
+        core_target=_norm_team(core.get("_prod_outcome") or _outcome_norm(core))
+        core_edge=_f(core.get("_edge"),np.nan); core_ev=_f(core.get("_ev"),np.nan)
+        core_exec=bool(core.get("_exec",False)) and np.isfinite(_f(core.get("_odds"),np.nan)) and _f(core.get("_odds"),0.0)!=0.0
+        core_ok=bool(np.isfinite(core_edge) and np.isfinite(core_ev) and core_edge>=NCAAF_CORE_MIN_EDGE and core_ev>=NCAAF_CORE_MIN_EV)
+        out.loc[idx,"_prod_target"]=core_target
+        out.loc[idx,"_core_qualifies"]=core_ok
+
         if market=="h2h":
-            out.loc[idx,"_prod_decision"]="MODEL_ONLY"
-            out.loc[idx,"_prod_action"]="MODEL ONLY"
-            out.loc[idx,"_prod_reason"]="H2H_EDGE_AUTHORITY_CLOSED"
+            out.loc[idx,"_prod_decision"]="MODEL_ONLY"; out.loc[idx,"_prod_action"]="MODEL ONLY"
+            out.loc[idx,"_prod_reason"]="H2H_HAS_NO_FROZEN_BETTING_GATE"; out.loc[idx,"_bet_authority_confidence"]="MODEL_ONLY"
             continue
+
         if market=="spreads":
             votes,diag=_spread_votes(g,contract)
         else:
             game_id=g["_prod_game_id"].iloc[0]
             spread_ctx=out[(out["_prod_game_id"]==game_id)&(out["Market"].astype(str).str.lower()=="spreads")].copy()
             votes,diag=_totals_votes(g,contract,spread_ctx)
-        if not votes:
-            out.loc[idx,"_prod_decision"]="PASS"
-            out.loc[idx,"_prod_action"]="PASS"
-            out.loc[idx,"_prod_reason"]="NO_PROMOTED_EDGE_FAMILY"
+        votes.extend(_research_miner_votes(g,market))
+
+        # Deduplicate exact source-family-direction repeats before independence count.
+        dedup=[]; seen=set()
+        for v in votes:
+            fid=str(v.get("family_id") or ""); tgt=_norm_team(v.get("target")); st=str(v.get("source_type") or "SYSTEM")
+            key=(st,fid,tgt)
+            if not fid or not tgt or key in seen: continue
+            seen.add(key); dedup.append(v)
+        votes=dedup
+        support=[v for v in votes if _norm_team(v.get("target"))==core_target]
+        conflict=[v for v in votes if _norm_team(v.get("target")) and _norm_team(v.get("target"))!=core_target]
+        sup_ind=_maximum_matching(support) if support else 0
+        con_ind=_maximum_matching(conflict) if conflict else 0
+        sfam=" | ".join(dict.fromkeys(str(v.get("family_id")) for v in support))
+        cfam=" | ".join(dict.fromkeys(str(v.get("family_id")) for v in conflict))
+        ssrc=" | ".join(dict.fromkeys(str(v.get("source_type") or "SYSTEM") for v in support))
+        csrc=" | ".join(dict.fromkeys(str(v.get("source_type") or "SYSTEM") for v in conflict))
+        all_sources=" | ".join(dict.fromkeys(str(v.get("source")) for v in votes if v.get("source")))
+        mechs=sorted({str(m) for v in votes for m in (v.get("mechanisms") or []) if str(m)})
+        out.loc[idx,"_prod_sources"]=all_sources; out.loc[idx,"_prod_mechanisms"]=" + ".join(mechs)
+        out.loc[idx,"_prod_family_count"]=len(votes); out.loc[idx,"_prod_independent_mechanisms"]=int(sup_ind)
+        out.loc[idx,"_system_support_count"]=int(sup_ind); out.loc[idx,"_system_support_families"]=sfam; out.loc[idx,"_system_support_sources"]=ssrc
+        out.loc[idx,"_system_conflict_count"]=int(con_ind); out.loc[idx,"_system_conflict_families"]=cfam; out.loc[idx,"_system_conflict_sources"]=csrc
+
+        if not core_ok:
+            out.loc[idx,"_prod_decision"]="PASS"; out.loc[idx,"_prod_action"]="PASS"; out.loc[idx,"_prod_authority"]=0
+            out.loc[idx,"_prod_reason"]="CORE_BELOW_PRICE_AWARE_GATE"; out.loc[idx,"_bet_authority_confidence"]="CORE_BELOW_GATE"
             continue
-        targets=sorted(set(_norm_team(v.get("target")) for v in votes if _norm_team(v.get("target"))))
-        sources=" | ".join(str(v.get("source")) for v in votes)
-        mechs=sorted({m for v in votes for m in (v.get("mechanisms") or [])})
-        if len(targets)!=1 or diag:
-            out.loc[idx,"_prod_decision"]="PASS_CONFLICT"
-            out.loc[idx,"_prod_action"]="PASS — CONFLICT"
-            out.loc[idx,"_prod_sources"]=sources
-            out.loc[idx,"_prod_mechanisms"]=" + ".join(mechs)
-            out.loc[idx,"_prod_family_count"]=len(votes)
-            out.loc[idx,"_prod_reason"]="VALIDATED_EDGE_CONFLICT"
+        if diag:
+            out.loc[idx,"_prod_decision"]="CANDIDATE"; out.loc[idx,"_prod_action"]="CANDIDATE"; out.loc[idx,"_prod_authority"]=0
+            out.loc[idx,"_prod_reason"]="CORE_CANDIDATE_HELD_INTERNAL_EVIDENCE_CONFLICT"; out.loc[idx,"_bet_authority_confidence"]="CANDIDATE_CAUTION"
             continue
-        target=targets[0]
-        if market=="spreads":
-            independent=_maximum_matching(votes)
-            decision="EDGE_MULTI" if independent>=2 else "EDGE_SINGLE"
-            action="STRONG PLAY" if decision=="EDGE_MULTI" else "PLAY"
+        if con_ind>=2 and sup_ind==0:
+            out.loc[idx,"_prod_decision"]="PASS_CONFLICT"; out.loc[idx,"_prod_action"]="PASS — CONFLICT"; out.loc[idx,"_prod_authority"]=0
+            out.loc[idx,"_prod_reason"]="CORE_CANDIDATE_VETOED_BY_2PLUS_INDEPENDENT_CONFLICTS"; out.loc[idx,"_bet_authority_confidence"]="VETOED"
+            continue
+        if con_ind>0:
+            out.loc[idx,"_prod_decision"]="CANDIDATE"; out.loc[idx,"_prod_action"]="CANDIDATE"; out.loc[idx,"_prod_authority"]=0
+            out.loc[idx,"_prod_reason"]="CORE_CANDIDATE_HELD_SYSTEM_CONFLICT_OR_MIXED_EVIDENCE"; out.loc[idx,"_bet_authority_confidence"]="CANDIDATE_CAUTION"
+            continue
+        if sup_ind<=0:
+            out.loc[idx,"_prod_decision"]="CANDIDATE"; out.loc[idx,"_prod_action"]="CANDIDATE"; out.loc[idx,"_prod_authority"]=0
+            out.loc[idx,"_prod_reason"]="CORE_CANDIDATE_AWAITING_INDEPENDENT_CONFIRMATION"; out.loc[idx,"_bet_authority_confidence"]="CANDIDATE_UNCONFIRMED"
+            continue
+
+        if market=="spreads" and sup_ind>=2:
+            decision="STRONG_BET"; action="STRONG BET"; conf="MULTI_SYSTEM_CONFIRMED"
         else:
-            # Two-mechanism totals overlap were explicitly NOT promoted as a
-            # stronger state after 2026 failed to confirm the discovery boost.
-            independent=1
-            decision="EDGE_SINGLE"
-            action="PLAY"
-        out.loc[idx,"_prod_decision"]=decision
-        out.loc[idx,"_prod_target"]=target
-        out.loc[idx,"_prod_action"]=action
-        out.loc[idx,"_prod_sources"]=sources
-        out.loc[idx,"_prod_mechanisms"]=" + ".join(mechs)
-        out.loc[idx,"_prod_family_count"]=len(votes)
-        out.loc[idx,"_prod_independent_mechanisms"]=int(independent)
-        out.loc[idx,"_prod_authority"]=1
-        out.loc[idx,"_prod_reason"]="PROMOTED_EDGE_AUTHORITY"
+            # Preserve the frozen totals conclusion: multiple systems do not
+            # receive a stronger action until that escalation is prospectively validated.
+            decision="BET"; action="BET"; conf="SYSTEM_CONFIRMED"
+        if not core_exec:
+            action="EDGE — NO EXEC QUOTE"; conf="CONFIRMED_NO_EXEC_QUOTE"
+        out.loc[idx,"_prod_decision"]=decision; out.loc[idx,"_prod_action"]=action
+        out.loc[idx,"_prod_authority"]=1 if core_exec else 0
+        out.loc[idx,"_prod_reason"]=(f"CORE_CANDIDATE_CONFIRMED_BY_{sup_ind}_INDEPENDENT_EVIDENCE_FAMILY" if core_exec else "CORE_CONFIRMED_BUT_EXECUTABLE_QUOTE_UNAVAILABLE")
+        out.loc[idx,"_bet_authority_confidence"]=conf
     return out
 
-
 def select_market_rows(sides: pd.DataFrame) -> pd.DataFrame:
-    """Choose the promoted edge side when one exists; otherwise show model leader."""
+    """Choose the CORE target; evidence changes action, never prediction direction."""
     if sides is None or sides.empty:
         return pd.DataFrame()
     picked=[]
@@ -981,7 +1062,7 @@ def select_market_rows(sides: pd.DataFrame) -> pd.DataFrame:
         dec=str(g.get("_prod_decision",pd.Series("",index=g.index)).iloc[0])
         target=_norm_team(g.get("_prod_target",pd.Series("",index=g.index)).iloc[0])
         chosen=None
-        if dec in {"EDGE_SINGLE","EDGE_MULTI"} and target:
+        if dec in {"CANDIDATE","BET","STRONG_BET","PASS_CONFLICT"} and target:
             on=g.apply(_outcome_norm,axis=1)
             hit=g.loc[on.eq(target)]
             if not hit.empty:
@@ -1131,15 +1212,16 @@ def choose_current_production_picks(scored: pd.DataFrame,contract: dict,*,execut
     # must fail closed; the 'best model' alternative is not an edge-authorized bet.
     norm=lambda z: _norm_team(z)
     for ix,r in picks.iterrows():
-        if str(r.get("_prod_decision")) in ("EDGE_SINGLE","EDGE_MULTI"):
+        if str(r.get("_prod_decision")) in ("CANDIDATE","BET","STRONG_BET","PASS_CONFLICT"):
             target=norm(r.get("_prod_target")); actual=norm(r.get("_prod_outcome"))
             if not target or target!=actual:
                 picks.at[ix,"_prod_decision"]="PASS"
                 picks.at[ix,"_prod_action"]="PASS"
                 picks.at[ix,"_prod_authority"]=0
-                picks.at[ix,"_prod_reason"]="PROMOTED_TARGET_QUOTE_UNAVAILABLE"
-            elif not bool(r.get("_exec")) or not np.isfinite(r.get("_odds",np.nan)) or float(r.get("_odds"))==0:
+                picks.at[ix,"_prod_reason"]="CORE_TARGET_QUOTE_UNAVAILABLE"
+            elif str(r.get("_prod_decision")) in ("BET","STRONG_BET") and (not bool(r.get("_exec")) or not np.isfinite(r.get("_odds",np.nan)) or float(r.get("_odds"))==0):
                 picks.at[ix,"_prod_action"]="EDGE — NO EXEC QUOTE"
+                picks.at[ix,"_prod_authority"]=0
     if picks.duplicated(["_prod_game_id","Market"]).any():
         raise RuntimeError("NCAAF PRODUCTION GAME IDENTITY FAIL: multiple selected outcomes in one market")
     return picks

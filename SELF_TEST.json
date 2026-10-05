@@ -1,48 +1,89 @@
 {
-  "betting_policy_source_tag": "nfl-production-betting-v3.2-live-miner-pathi-confirmation-20261005",
-  "dashboard_compile": "PASS",
-  "engine_preflight": {
-    "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
-    "compiled_and_checked": 32,
-    "components": 32,
-    "engine_source_tag": "nfl-engine-v3.10.8-live-miner-evaluator-20261005",
-    "failures": [],
-    "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_V3104_SOURCE_CONFLUENCE_ATTRIBUTION_SYSTEM_MINER_RESEARCH_ONLY",
-    "missing_critical_symbols": [],
-    "shared_external_required": [
-      "utils.py",
-      "sports_edge_authority_v1.py"
-    ],
-    "status": "PASS",
-    "utils_backend_required": true,
-    "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
-  },
-  "engine_source_tag": "nfl-engine-v3.10.8-live-miner-evaluator-20261005",
-  "engine_version": "3.10.8",
-  "live_miner_tests": {
-    "2026_role": "TRIGGER_CONTEXT_ONLY_NO_QUALIFICATION",
-    "one_family_one_vote": true,
-    "pathi_plus_miner_independent_confluence_strong_bet": "PASS",
-    "prior_ats_role_change_family_trigger": "PASS",
-    "qualification_uses_2026_outcomes": false,
-    "road_dog_family_trigger": "PASS",
-    "two_miner_families_opposite_core_veto": "PASS",
-    "two_miner_families_same_side_strong_bet": "PASS",
-    "unsupported_atom_fail_closed": "PASS"
-  },
-  "model_authority_self_test": {
-    "automatic_execution": false,
-    "bet": "1_QUALIFIED_INDEPENDENT_SYSTEM_SUPPORT",
-    "betting_policy_source_tag": "nfl-production-betting-v3.2-live-miner-pathi-confirmation-20261005",
-    "h2h": "MODEL_ONLY",
-    "single_conflict": "CANDIDATE_NO_WAGER",
-    "source_tag": "nfl-model-authority-v2.6.1-utils-market-backend-20261003",
-    "spread": "CORE_0575_PLUS_2PCT_EV_CREATES_CANDIDATE",
-    "status": "PASS",
-    "strong_bet": "2PLUS_QUALIFIED_INDEPENDENT_SYSTEM_SUPPORT",
-    "totals": "MODEL_ONLY",
-    "veto": "2PLUS_NET_QUALIFIED_INDEPENDENT_SYSTEM_CONFLICT"
-  },
   "status": "PASS",
-  "train_job_unchanged": true
+  "checks": {
+    "candidate": {
+      "action": "CANDIDATE",
+      "decision": "CANDIDATE",
+      "support": 0,
+      "conflict": 0,
+      "reason": "CORE_CANDIDATE_AWAITING_INDEPENDENT_CONFIRMATION"
+    },
+    "bet_one_miner": {
+      "action": "BET",
+      "decision": "BET",
+      "support": 1,
+      "conflict": 0,
+      "reason": "CORE_CANDIDATE_CONFIRMED_BY_1_INDEPENDENT_EVIDENCE_FAMILY"
+    },
+    "strong_miner_pathi": {
+      "action": "STRONG BET",
+      "decision": "STRONG_BET",
+      "support": 2,
+      "conflict": 0,
+      "reason": "CORE_CANDIDATE_CONFIRMED_BY_2_INDEPENDENT_EVIDENCE_FAMILY"
+    },
+    "candidate_one_conflict": {
+      "action": "CANDIDATE",
+      "decision": "CANDIDATE",
+      "support": 0,
+      "conflict": 1,
+      "reason": "CORE_CANDIDATE_HELD_SYSTEM_CONFLICT_OR_MIXED_EVIDENCE"
+    },
+    "pass_two_conflicts": {
+      "action": "PASS \u2014 CONFLICT",
+      "decision": "PASS_CONFLICT",
+      "support": 0,
+      "conflict": 2,
+      "reason": "CORE_CANDIDATE_VETOED_BY_2PLUS_INDEPENDENT_CONFLICTS"
+    },
+    "pass_below_gate": {
+      "action": "PASS",
+      "decision": "PASS",
+      "support": 1,
+      "conflict": 0,
+      "reason": "CORE_BELOW_PRICE_AWARE_GATE"
+    },
+    "totals_two_support_no_strong": {
+      "action": "BET",
+      "decision": "BET",
+      "support": 2,
+      "conflict": 0,
+      "reason": "CORE_CANDIDATE_CONFIRMED_BY_2_INDEPENDENT_EVIDENCE_FAMILY"
+    },
+    "live_miner": {
+      "qualified": 1,
+      "evaluable": 1,
+      "triggers": [
+        1,
+        1
+      ],
+      "summary": "MTEST \u2192 home"
+    },
+    "research_self_test": {
+      "status": "PASS",
+      "source_tag": "ncaaf-research-v2.2-advanced-miner-live-overlay-20261005",
+      "families": [
+        "MARKET_MICROSTRUCTURE",
+        "RUN_PASS_MATCHUP"
+      ],
+      "qvalues": [
+        0.03,
+        0.06,
+        0.20000000000000004
+      ],
+      "american_unit_profit_test": [
+        2.0,
+        0.5
+      ],
+      "h2h_price_gate": "OBSERVED_TEAM_AND_OPPONENT_ML_ONLY",
+      "confirmation_gate": "BOTH_2024_AND_2025"
+    },
+    "ledger_actions": {
+      "CANDIDATE": "CANDIDATE",
+      "BET": "BET",
+      "STRONG_BET": "STRONG BET",
+      "PASS": "PASS",
+      "PASS_CONFLICT": "PASS \u2014 CONFLICT"
+    }
+  }
 }

@@ -98,6 +98,7 @@ SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 # Production V1 ledger is additive. Its prospectively locked picks do not
 # share the retired V13 shadow prediction or result tables.
 _NCAAF_PROD_V1_CONTRACT_CACHE = {"loaded_at":0.0,"contract":None}
+_NCAAF_RV22_REPORT_CACHE = {"loaded_at":0.0,"report":None}
 
 
 def _ncaaf_prod_v1_contract_cached():
@@ -109,6 +110,20 @@ def _ncaaf_prod_v1_contract_cached():
     contract=load_production_contract(bucket_name=GCS_BUCKET)
     _NCAAF_PROD_V1_CONTRACT_CACHE.update({"contract":contract,"loaded_at":now})
     return contract
+
+
+def _ncaaf_rv22_report_cached():
+    """Short-TTL research registry cache used only for bounded live Miner votes."""
+    now=time.monotonic()
+    if now-float(_NCAAF_RV22_REPORT_CACHE.get("loaded_at",0))<300:
+        return _NCAAF_RV22_REPORT_CACHE.get("report")
+    try:
+        from ncaaf_research_v2 import load_current_report
+        report=load_current_report(bucket_name=GCS_BUCKET)
+    except Exception:
+        report=None
+    _NCAAF_RV22_REPORT_CACHE.update({"report":report,"loaded_at":now if isinstance(report,dict) else 0.0})
+    return report
 
 
 def score_and_record_ncaaf_production_v1(df_scan: pd.DataFrame, client=None) -> dict:
@@ -129,6 +144,15 @@ def score_and_record_ncaaf_production_v1(df_scan: pd.DataFrame, client=None) -> 
         if base.empty: return {"status":"NO_PREGAME_ROWS","attempted":0,"inserted":0}
         scored=score_live_rows(base,contract)
         scored_count=int(pd.to_numeric(scored.get("_model_prob"),errors="coerce").notna().sum())
+        # V2.2 live Miner is bounded evidence only: qualification came from the
+        # sealed <=2025 research artifact. Current rows merely evaluate triggers.
+        try:
+            from ncaaf_research_v2 import attach_live_miner_votes
+            _rv22=_ncaaf_rv22_report_cached()
+            if isinstance(_rv22,dict):
+                scored=attach_live_miner_votes(scored,_rv22)
+        except Exception as _miner_exc:
+            logging.warning("[NCAAF-RV22-LIVE-MINER] unavailable: %s:%s",type(_miner_exc).__name__,_miner_exc)
         picks=choose_current_production_picks(scored,contract,executable_books=REC_BOOKS)
         result=record_predictions(picks,contract,client=client,source="BACKGROUND_SCANNER")
         logging.info("[NCAAF-PROD-V1-BACKGROUND] status=%s scored_rows=%d selected_markets=%d attempted=%d inserted=%d artifact=%s",

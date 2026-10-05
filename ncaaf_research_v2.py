@@ -32,8 +32,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.1-price-aware-h2h-sparse-stat-20261003"
-NCAAF_RESEARCH_V2_VERSION = "2.1.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.2-advanced-miner-live-overlay-20261005"
+NCAAF_RESEARCH_V2_VERSION = "2.2.0"
 DISCOVERY_MAX_SEASON = 2023
 CONFIRMATION_SEASONS = (2024, 2025)
 PROSPECTIVE_MIN_SEASON = 2026
@@ -296,80 +296,244 @@ def run_sparse_stat_research(games: pd.DataFrame, seasons: np.ndarray, oof_margi
 # ---------------------------------------------------------------------------
 # System Miner V3 — fixed discovery / untouched confirmation / dependence collapse
 # ---------------------------------------------------------------------------
-def _extended_atoms(g: pd.DataFrame, dashboard_module=None) -> list[dict[str,Any]]:
-    atoms=[]
-    # Retain all existing leakage-safe Miner V2 atoms first.
-    try:
-        if dashboard_module is not None and hasattr(dashboard_module,"_v1355_system_atoms"):
-            for a in dashboard_module._v1355_system_atoms(g):
-                atoms.append({"name":str(a["name"]),"family":str(a["family"]),"mask":np.asarray(a["mask"],dtype=bool),"description":str(a.get("description") or a["name"])})
-    except Exception:
-        pass
-    names={a["name"] for a in atoms}
-    def add(name,family,mask,desc=None,min_n=30):
-        if name in names: return
-        mm=pd.Series(mask,index=g.index).fillna(False).astype(bool).to_numpy()
-        if min_n<=int(mm.sum())<len(g):
-            atoms.append({"name":name,"family":family,"mask":mm,"description":desc or name}); names.add(name)
-    n=lambda c:_num(g,c)
-    # Market path / sharp-vs-soft / key-cross context from Utils-derived historical features.
-    for mins in (30,60,120):
-        c=f"Line_Move_{mins}m"; s=n(c)
-        if s.notna().sum()>=80:
-            add(f"LINE_MOVE_{mins}M_POS","MARKET_PATH",s.ge(0.5)); add(f"LINE_MOVE_{mins}M_NEG","MARKET_PATH",s.le(-0.5))
-    s=n("Line_Move_From_Open")
-    if s.notna().sum()>=80:
-        add("LINE_FROM_OPEN_2_PLUS","MARKET_PATH",s.ge(2)); add("LINE_FROM_OPEN_2_MINUS","MARKET_PATH",s.le(-2))
-    s=n("Direction_Changes_Count")
-    if s.notna().sum()>=80: add("MARKET_REVERSAL_2_PLUS","MARKET_PATH",s.ge(2))
-    s=n("Sharp_Book_Move_60m")
-    if s.notna().sum()>=80:
-        add("SHARP_MOVE_60_POS","SHARP_SOFT",s.ge(0.5)); add("SHARP_MOVE_60_NEG","SHARP_SOFT",s.le(-0.5))
-    s=n("Sharp_Soft_Divergence")
-    if s.notna().sum()>=80:
-        add("SHARP_SOFT_DIV_POS","SHARP_SOFT",s.ge(0.5)); add("SHARP_SOFT_DIV_NEG","SHARP_SOFT",s.le(-0.5))
-    s=n("Sharp_Consensus_Direction")
-    if s.notna().sum()>=80:
-        add("SHARP_CONSENSUS_POS","SHARP_SOFT",s.ge(0.5)); add("SHARP_CONSENSUS_NEG","SHARP_SOFT",s.le(-0.5))
-    for key in (3,7,10,14):
-        c=f"Crossed_Key_{key}_Last60m"; s=n(c)
-        if s.notna().sum()>=80: add(f"KEY_{key}_CROSSED_60M","KEY_NUMBER",s.eq(1))
-    for c,name in [("Key_Cross_Confirmed_By_Sharp_Books","KEY_CROSS_SHARP_CONFIRMED"),("Key_Cross_Reversed","KEY_CROSS_REVERSED"),("Key_Cross_Persistence","KEY_CROSS_PERSISTENT")]:
-        s=n(c)
-        if s.notna().sum()>=80: add(name,"KEY_NUMBER",s.ge(1))
-    # Deeper H2H / revenge state.
-    for c,thr,name in [("Revenge_Depth",2,"REVENGE_DEPTH_2_PLUS"),("H2H_Meetings_Since_Last_Win",3,"H2H_3_PLUS_SINCE_WIN")]:
-        s=n(c)
-        if s.notna().sum()>=80: add(name,"MATCHUP_HISTORY",s.ge(thr))
-    s=n("H2H_Last_Loss_Margin")
-    if s.notna().sum()>=80:
-        add("H2H_LAST_LOSS_14_PLUS","MATCHUP_HISTORY",s.le(-14)); add("H2H_LAST_LOSS_7_PLUS","MATCHUP_HISTORY",s.le(-7))
-    # Prior ATS shape, beyond simple streak counts.
-    for c,thr,name,op in [
-        ("Prev_ATS_Margin",-7,"OFF_ATS_LOSS_7","le"),("Prev_ATS_Margin",7,"OFF_ATS_WIN_7","ge"),
-        ("ATS_Margin_Mean_Last3",-3,"ATS_LAST3_BAD","le"),("ATS_Margin_Mean_Last3",3,"ATS_LAST3_GOOD","ge")]:
-        s=n(c)
-        if s.notna().sum()>=80: add(name,"ATS_FORM",getattr(s,op)(thr))
-    # Role change / historical team price context.
-    for c,name in [("Pathi_FB_Usually_Dog_Now_Favorite","ROLE_FLIP_DOG_TO_FAV"),("Pathi_FB_Usually_Favorite_Now_Dog","ROLE_FLIP_FAV_TO_DOG")]:
-        s=n(c)
-        if s.notna().sum()>=80: add(name,"ROLE_HISTORY",s.eq(1))
-    s=n("Role_Price_Shift")
-    if s.notna().sum()>=80:
-        add("ROLE_PRICE_SHIFT_POS","ROLE_HISTORY",s.ge(2)); add("ROLE_PRICE_SHIFT_NEG","ROLE_HISTORY",s.le(-2))
-    s=n("ML_Price_ZScore_vs_TeamHistory")
-    if s.notna().sum()>=80:
-        add("ML_PRICE_Z_1P5_HIGH","ROLE_HISTORY",s.ge(1.5)); add("ML_PRICE_Z_1P5_LOW","ROLE_HISTORY",s.le(-1.5))
-    # Schedule sequencing / rest extremes.
-    s=n("Days_Since_Last_Game_System").where(n("Days_Since_Last_Game_System").notna(),n("Days_Since_Last_Game"))
-    if s.notna().sum()>=80:
-        add("REST_5_OR_LESS","SCHEDULE_SEQUENCE",s.le(5)); add("REST_10_PLUS","SCHEDULE_SEQUENCE",s.ge(10))
-    # FBS/FCS or conference-class context if available.
-    for c in ("Opponent_Subdivision","Opp_Subdivision","Context_Opp_Subdivision"):
-        if c in g.columns:
-            t=_txt(g,c); add("VS_FCS","OPPONENT_CLASS",t.str.contains("FCS",na=False),min_n=20); break
-    return atoms
+def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=False) -> list[dict[str,Any]]:
+    """Leak-safe NCAAF System Miner atom catalog.
 
+    Historical mode applies support floors so sparse identities cannot flood the
+    search. Live mode materializes the same named atoms without sample-size
+    filtering so a frozen/confirmed rule can be evaluated on one current game.
+    Unknown/unavailable inputs fail closed (the atom exists only when its source
+    field is actually present).
+    """
+    atoms=[]; names=set()
+
+    # Keep the legacy dashboard atom catalog when available for exact continuity.
+    # Live evaluation cannot rely on it because the legacy helper intentionally
+    # suppresses atoms with fewer than 20 historical matches, so every important
+    # atom is also reproduced below in this module.
+    if (not for_live) and dashboard_module is not None and hasattr(dashboard_module,"_v1355_system_atoms"):
+        try:
+            for a in dashboard_module._v1355_system_atoms(g):
+                nm=str(a["name"])
+                if nm in names: continue
+                atoms.append({"name":nm,"family":str(a["family"]),"mask":np.asarray(a["mask"],dtype=bool),"description":str(a.get("description") or nm)})
+                names.add(nm)
+        except Exception:
+            pass
+
+    def has(*cols): return any(c in g.columns for c in cols)
+    def nfirst(*cols):
+        out=pd.Series(np.nan,index=g.index,dtype=float)
+        for c in cols:
+            if c not in g.columns: continue
+            v=pd.to_numeric(g[c],errors="coerce")
+            out=out.where(out.notna(),v)
+        return out
+    def tfirst(*cols):
+        out=pd.Series("",index=g.index,dtype=str)
+        for c in cols:
+            if c not in g.columns: continue
+            v=g[c].astype(str).str.upper().str.strip().replace({"NAN":"","NONE":"","<NA>":""})
+            out=out.where(out.ne(""),v)
+        return out
+    def add(name,family,mask,desc=None,min_n=30,source_ok=True):
+        if name in names or not source_ok: return
+        mm=pd.Series(mask,index=g.index).fillna(False).astype(bool).to_numpy()
+        if for_live or (min_n<=int(mm.sum())<len(g)):
+            atoms.append({"name":name,"family":family,"mask":mm,"description":desc or name}); names.add(name)
+
+    sp=nfirst("Consensus_Open_Spread","Opening_Spread")
+    tot=nfirst("Consensus_Open_Total","Opening_Total")
+    week=nfirst("Context_Week","Week")
+    game_no=nfirst("Team_Game_Number_Prior","Game_Number_Prior","Context_Team_Games_Prior")
+    is_home=nfirst("Is_Home")
+
+    # Core market role / price regimes.
+    add("HOME","VENUE",is_home.eq(1),source_ok=has("Is_Home"))
+    add("ROAD","VENUE",is_home.eq(0),source_ok=has("Is_Home"))
+    add("CURRENT_DOG","MARKET_ROLE",sp.gt(0),source_ok=has("Consensus_Open_Spread","Opening_Spread"))
+    add("CURRENT_FAVORITE","MARKET_ROLE",sp.lt(0),source_ok=has("Consensus_Open_Spread","Opening_Spread"))
+    for lo,hi in ((0,3),(3,7),(7,10),(10,14),(14,99)):
+        add(f"DOG_{lo}_{hi}","MARKET_PRICE",sp.gt(lo)&sp.le(hi),source_ok=has("Consensus_Open_Spread","Opening_Spread"))
+        add(f"FAV_{lo}_{hi}","MARKET_PRICE",(-sp).gt(lo)&(-sp).le(hi),source_ok=has("Consensus_Open_Spread","Opening_Spread"))
+    for lo,hi in ((0,45),(45,52),(52,60),(60,99)):
+        add(f"TOTAL_{lo}_{hi}","TOTAL_REGIME",tot.ge(lo)&tot.lt(hi),source_ok=has("Consensus_Open_Total","Opening_Total"))
+
+    # Timing / schedule / rest.
+    add("EARLY_SEASON_WK1_4","SEASON_TIMING",week.between(1,4),source_ok=has("Context_Week","Week"))
+    add("MID_SEASON_WK5_9","SEASON_TIMING",week.between(5,9),source_ok=has("Context_Week","Week"))
+    add("LATE_SEASON_WK10_PLUS","SEASON_TIMING",week.ge(10),source_ok=has("Context_Week","Week"))
+    add("FIRST_THREE_TEAM_GAMES","SEASON_TIMING",game_no.le(3)&game_no.notna(),source_ok=has("Team_Game_Number_Prior","Game_Number_Prior","Context_Team_Games_Prior"))
+    add("GAME_7_PLUS","SEASON_TIMING",game_no.ge(7),source_ok=has("Team_Game_Number_Prior","Game_Number_Prior","Context_Team_Games_Prior"))
+    rest=nfirst("Days_Since_Last_Game_System","Days_Since_Last_Game")
+    opprest=nfirst("Opp_Days_Since_Last_Game_System","Opp_Days_Since_Last_Game")
+    rest_pair=rest.notna()&opprest.notna()
+    if for_live or (int(rest_pair.sum())>=100 and (rest[rest_pair]-opprest[rest_pair]).abs().gt(0).any()):
+        add("SHORT_REST_6_OR_LESS","REST",rest_pair&rest.le(6),source_ok=has("Days_Since_Last_Game_System","Days_Since_Last_Game"))
+        add("REST_8_PLUS","REST",rest_pair&rest.ge(8),source_ok=has("Days_Since_Last_Game_System","Days_Since_Last_Game"))
+        add("REST_ADV_2_PLUS","REST",rest_pair&(rest-opprest).ge(2),source_ok=has("Days_Since_Last_Game_System","Days_Since_Last_Game") and has("Opp_Days_Since_Last_Game_System","Opp_Days_Since_Last_Game"))
+        add("REST_DISADV_2_PLUS","REST",rest_pair&(rest-opprest).le(-2),source_ok=has("Days_Since_Last_Game_System","Days_Since_Last_Game") and has("Opp_Days_Since_Last_Game_System","Opp_Days_Since_Last_Game"))
+
+    # Rivalry / matchup history / revenge.
+    riv=tfirst("Rivalry_Flag","Is_Rivalry","Context_Rivalry_Flag")
+    if has("Rivalry_Flag","Is_Rivalry","Context_Rivalry_Flag"):
+        rv=nfirst("Rivalry_Flag","Is_Rivalry","Context_Rivalry_Flag")
+        add("RIVALRY","RIVALRY",rv.eq(1),source_ok=True,min_n=20)
+    rev=nfirst("Revenge_Flag","Opp_Revenge_Flag_CurrentOrPriorSeason")
+    add("REVENGE","MATCHUP_HISTORY",rev.eq(1),source_ok=has("Revenge_Flag","Opp_Revenge_Flag_CurrentOrPriorSeason"),min_n=20)
+    h2hd=nfirst("Days_Since_Last_Matchup","Days_Since_Last_Matchup_System","H2H2_Days_Since")
+    add("RECENT_H2H_730D","MATCHUP_HISTORY",h2hd.le(730)&h2hd.notna(),source_ok=has("Days_Since_Last_Matchup","Days_Since_Last_Matchup_System","H2H2_Days_Since"),min_n=20)
+    h2hm=nfirst("Last_Matchup_Margin","Last_Matchup_SU_Margin_System","H2H2_Prior_Margin_Current_Orientation")
+    add("PRIOR_H2H_LOSS","MATCHUP_HISTORY",h2hm.lt(0),source_ok=has("Last_Matchup_Margin","Last_Matchup_SU_Margin_System","H2H2_Prior_Margin_Current_Orientation"),min_n=20)
+    add("PRIOR_H2H_WIN","MATCHUP_HISTORY",h2hm.gt(0),source_ok=has("Last_Matchup_Margin","Last_Matchup_SU_Margin_System","H2H2_Prior_Margin_Current_Orientation"),min_n=20)
+    meetings=nfirst("H2H2_Prior_Meetings","H2H_Prior_Meetings_Research")
+    add("H2H_2_PLUS_MEETINGS","MATCHUP_HISTORY",meetings.ge(2),source_ok=has("H2H2_Prior_Meetings","H2H_Prior_Meetings_Research"),min_n=20)
+    depth=nfirst("Revenge_Depth","H2H_Meetings_Since_Last_Win")
+    add("REVENGE_DEPTH_2_PLUS","MATCHUP_HISTORY",depth.ge(2),source_ok=has("Revenge_Depth"),min_n=20)
+    add("H2H_3_PLUS_SINCE_WIN","MATCHUP_HISTORY",nfirst("H2H_Meetings_Since_Last_Win").ge(3),source_ok=has("H2H_Meetings_Since_Last_Win"),min_n=20)
+    last_loss=nfirst("H2H_Last_Loss_Margin")
+    add("H2H_LAST_LOSS_14_PLUS","MATCHUP_HISTORY",last_loss.le(-14),source_ok=has("H2H_Last_Loss_Margin"),min_n=20)
+    add("H2H_LAST_LOSS_7_PLUS","MATCHUP_HISTORY",last_loss.le(-7),source_ok=has("H2H_Last_Loss_Margin"),min_n=20)
+
+    # Model-state / market-relative disagreement regimes. Historical values are OOF.
+    stat_edge=nfirst("_V1355_STAT_EDGE_POINTS")
+    add("STAT_EDGE_2_PLUS","MODEL_STATE",stat_edge.ge(2),source_ok=has("_V1355_STAT_EDGE_POINTS"))
+    add("STAT_EDGE_2_MINUS","MODEL_STATE",stat_edge.le(-2),source_ok=has("_V1355_STAT_EDGE_POINTS"))
+    add("STAT_EDGE_ABS_4_PLUS","MODEL_STATE",stat_edge.abs().ge(4),source_ok=has("_V1355_STAT_EDGE_POINTS"))
+    h2h_gap=nfirst("_V1355_H2H_STAT_MINUS_MARKET")
+    add("H2H_STAT_OVER_MARKET_5P","MODEL_STATE",h2h_gap.ge(.05),source_ok=has("_V1355_H2H_STAT_MINUS_MARKET"))
+    add("H2H_STAT_UNDER_MARKET_5P","MODEL_STATE",h2h_gap.le(-.05),source_ok=has("_V1355_H2H_STAT_MINUS_MARKET"))
+    total_gap=nfirst("_V1355_TOTAL_EDGE_POINTS")
+    add("TOTAL_MODEL_OVER_4","MODEL_STATE",total_gap.ge(4),source_ok=has("_V1355_TOTAL_EDGE_POINTS"))
+    add("TOTAL_MODEL_UNDER_4","MODEL_STATE",total_gap.le(-4),source_ok=has("_V1355_TOTAL_EDGE_POINTS"))
+
+    # One-game prior state and magnitude.
+    psu=nfirst("Pregame_Prev_SU_Margin","Prev_SU_Margin","Context_Prev_SU_Margin")
+    pats=nfirst("Pregame_Prev_ATS_Margin","Prev_ATS_Margin","Prev_ATS_Cover_Margin","Context_Prev_ATS_Margin")
+    add("OFF_SU_WIN","PRIOR_RESULT",psu.gt(0),source_ok=has("Pregame_Prev_SU_Margin","Prev_SU_Margin","Context_Prev_SU_Margin"))
+    add("OFF_SU_LOSS","PRIOR_RESULT",psu.lt(0),source_ok=has("Pregame_Prev_SU_Margin","Prev_SU_Margin","Context_Prev_SU_Margin"))
+    for t in (7,14,21):
+        add(f"OFF_SU_WIN_{t}_PLUS","PRIOR_MARGIN_MAGNITUDE",psu.ge(t),source_ok=has("Pregame_Prev_SU_Margin","Prev_SU_Margin","Context_Prev_SU_Margin"))
+        add(f"OFF_SU_LOSS_{t}_PLUS","PRIOR_MARGIN_MAGNITUDE",psu.le(-t),source_ok=has("Pregame_Prev_SU_Margin","Prev_SU_Margin","Context_Prev_SU_Margin"))
+    for t in (7,14):
+        add(f"OFF_ATS_COVER_{t}_PLUS","PRIOR_ATS_MAGNITUDE",pats.ge(t),source_ok=has("Pregame_Prev_ATS_Margin","Prev_ATS_Margin","Prev_ATS_Cover_Margin","Context_Prev_ATS_Margin"))
+        add(f"OFF_ATS_MISS_{t}_PLUS","PRIOR_ATS_MAGNITUDE",pats.le(-t),source_ok=has("Pregame_Prev_ATS_Margin","Prev_ATS_Margin","Prev_ATS_Cover_Margin","Context_Prev_ATS_Margin"))
+    add("ATS_LOSS_STREAK_2","ATS_FORM",nfirst("ATS_Loss_Streak_Prior").ge(2),source_ok=has("ATS_Loss_Streak_Prior"))
+    add("ATS_WIN_STREAK_2","ATS_FORM",nfirst("ATS_Win_Streak_Prior").ge(2),source_ok=has("ATS_Win_Streak_Prior"))
+    add("SU_WIN_STREAK_2","SU_FORM",nfirst("Current_Win_Streak_Prior","Core_Win_Streak_Prior").ge(2),source_ok=has("Current_Win_Streak_Prior","Core_Win_Streak_Prior"))
+    add("SU_LOSS_STREAK_2","SU_FORM",nfirst("Current_Loss_Streak_Prior","Core_Loss_Streak_Prior").ge(2),source_ok=has("Current_Loss_Streak_Prior","Core_Loss_Streak_Prior"))
+
+    # Horizon-symmetric SU / ATS sequences (oldest -> newest in the atom name).
+    def sign_series(kind,lag):
+        if kind=="SU":
+            if lag==1: return nfirst("Prev_SU_Margin","Pregame_Prev_SU_Margin","Context_Prev_SU_Margin")
+            return nfirst(f"Prev{lag}_SU_Margin")
+        if lag==1: return nfirst("Prev_ATS_Margin","Prev_ATS_Cover_Margin","Pregame_Prev_ATS_Margin","Context_Prev_ATS_Margin")
+        return nfirst(f"Prev{lag}_ATS_Margin",f"Prev{lag}_ATS_Cover_Margin")
+    for kind,fam in (("SU","SU_SEQUENCE"),("ATS","ATS_SEQUENCE")):
+        v1=sign_series(kind,1); ok1=v1.notna()
+        add(f"{kind}_SEQ1_W",fam,ok1&v1.gt(0),source_ok=bool(ok1.any()) or (for_live and any(c in g.columns for c in (["Prev_SU_Margin","Pregame_Prev_SU_Margin"] if kind=="SU" else ["Prev_ATS_Margin","Prev_ATS_Cover_Margin","Pregame_Prev_ATS_Margin"]))))
+        add(f"{kind}_SEQ1_L",fam,ok1&v1.lt(0),source_ok=bool(ok1.any()) or (for_live and any(c in g.columns for c in (["Prev_SU_Margin","Pregame_Prev_SU_Margin"] if kind=="SU" else ["Prev_ATS_Margin","Prev_ATS_Cover_Margin","Pregame_Prev_ATS_Margin"]))))
+        v2=sign_series(kind,2); ok2=ok1&v2.notna()
+        for a in "WL":
+            for b in "WL":
+                m=ok2 & (v2.gt(0) if a=="W" else v2.lt(0)) & (v1.gt(0) if b=="W" else v1.lt(0))
+                add(f"{kind}_SEQ2_{a}{b}",fam,m,source_ok=bool(v2.notna().any()))
+        v3=sign_series(kind,3); ok3=ok2&v3.notna()
+        for a in "WL":
+            for b in "WL":
+                for c in "WL":
+                    m=ok3 & (v3.gt(0) if a=="W" else v3.lt(0)) & (v2.gt(0) if b=="W" else v2.lt(0)) & (v1.gt(0) if c=="W" else v1.lt(0))
+                    add(f"{kind}_SEQ3_{a}{b}{c}",fam,m,source_ok=bool(v3.notna().any()))
+
+    # Trend direction from the same exact 1/2/3-game margins.
+    p1=nfirst("Prev_ATS_Margin","Prev_ATS_Cover_Margin","Pregame_Prev_ATS_Margin"); p2=nfirst("Prev2_ATS_Margin","Prev2_ATS_Cover_Margin"); p3=nfirst("Prev3_ATS_Margin","Prev3_ATS_Cover_Margin")
+    add("ATS_MARGIN_IMPROVING_2","ATS_TREND",p1.gt(p2)&p1.notna()&p2.notna(),source_ok=has("Prev2_ATS_Margin","Prev2_ATS_Cover_Margin"))
+    add("ATS_MARGIN_WORSENING_2","ATS_TREND",p1.lt(p2)&p1.notna()&p2.notna(),source_ok=has("Prev2_ATS_Margin","Prev2_ATS_Cover_Margin"))
+    add("ATS_MARGIN_IMPROVING_3","ATS_TREND",p1.gt(p2)&p2.gt(p3)&p3.notna(),source_ok=has("Prev3_ATS_Margin","Prev3_ATS_Cover_Margin"))
+    add("ATS_MARGIN_WORSENING_3","ATS_TREND",p1.lt(p2)&p2.lt(p3)&p3.notna(),source_ok=has("Prev3_ATS_Margin","Prev3_ATS_Cover_Margin"))
+
+    # Opponent prior state and quality.
+    opsu=nfirst("Context_Opp_Prev_SU_Margin","Opp_Pregame_Prev_SU_Margin","Opp_Prev_SU_Margin")
+    opats=nfirst("Context_Opp_Prev_ATS_Margin","Opp_Pregame_Prev_ATS_Margin")
+    add("OPP_OFF_SU_WIN","OPP_PRIOR_SU1",opsu.gt(0),source_ok=has("Context_Opp_Prev_SU_Margin","Opp_Pregame_Prev_SU_Margin","Opp_Prev_SU_Margin"))
+    add("OPP_OFF_SU_LOSS","OPP_PRIOR_SU1",opsu.lt(0),source_ok=has("Context_Opp_Prev_SU_Margin","Opp_Pregame_Prev_SU_Margin","Opp_Prev_SU_Margin"))
+    add("OPP_OFF_ATS_WIN","OPP_PRIOR_ATS1",opats.gt(0),source_ok=has("Context_Opp_Prev_ATS_Margin","Opp_Pregame_Prev_ATS_Margin"))
+    add("OPP_OFF_ATS_LOSS","OPP_PRIOR_ATS1",opats.lt(0),source_ok=has("Context_Opp_Prev_ATS_Margin","Opp_Pregame_Prev_ATS_Margin"))
+    twp=nfirst("Team_WinPct_Prior","Core_Team_WinPct_Prior","WinPct_Prior_System","HC_WinPct_Prior")
+    owp=nfirst("Opp_WinPct_Prior","Core_Opp_WinPct_Prior","Opp_WinPct_Prior_System","HC_Opp_WinPct_Prior")
+    for nm,ser,fam,ok in (("TEAM",twp,"TEAM_STATE",has("Team_WinPct_Prior","Core_Team_WinPct_Prior","WinPct_Prior_System","HC_WinPct_Prior")),("OPP",owp,"OPP_STATE",has("Opp_WinPct_Prior","Core_Opp_WinPct_Prior","Opp_WinPct_Prior_System","HC_Opp_WinPct_Prior"))):
+        add(f"{nm}_WINPCT_LE_400",fam,ser.le(.400),source_ok=ok)
+        add(f"{nm}_WINPCT_LE_500",fam,ser.le(.500),source_ok=ok)
+        add(f"{nm}_WINPCT_GE_600",fam,ser.ge(.600),source_ok=ok)
+
+    # Role-change / team-price memory.
+    prev_dog=nfirst("Prev_Is_ML_Dog")
+    prev_fav=nfirst("Prev_Is_ML_Favorite")
+    if not prev_fav.notna().any() and prev_dog.notna().any(): prev_fav=1-prev_dog
+    add("PRIOR_DOG","ROLE_CHANGE",prev_dog.eq(1),source_ok=has("Prev_Is_ML_Dog"))
+    add("PRIOR_FAVORITE","ROLE_CHANGE",prev_fav.eq(1),source_ok=has("Prev_Is_ML_Favorite","Prev_Is_ML_Dog"))
+    add("ROLE_FLIP_FAVORITE_TO_DOG","ROLE_CHANGE",prev_fav.eq(1)&sp.gt(0),source_ok=has("Prev_Is_ML_Favorite","Prev_Is_ML_Dog") and has("Consensus_Open_Spread","Opening_Spread"))
+    add("ROLE_FLIP_DOG_TO_FAVORITE","ROLE_CHANGE",prev_dog.eq(1)&sp.lt(0),source_ok=has("Prev_Is_ML_Dog") and has("Consensus_Open_Spread","Opening_Spread"))
+    for c,name in (("Pathi_FB_Usually_Dog_Now_Favorite","ROLE_FLIP_DOG_TO_FAV_HISTORY"),("Pathi_FB_Usually_Favorite_Now_Dog","ROLE_FLIP_FAV_TO_DOG_HISTORY")):
+        add(name,"ROLE_HISTORY",nfirst(c).eq(1),source_ok=has(c))
+    role_shift=nfirst("Role_Price_Shift")
+    add("ROLE_PRICE_SHIFT_POS","ROLE_HISTORY",role_shift.ge(2),source_ok=has("Role_Price_Shift"))
+    add("ROLE_PRICE_SHIFT_NEG","ROLE_HISTORY",role_shift.le(-2),source_ok=has("Role_Price_Shift"))
+    price_z=nfirst("ML_Price_ZScore_vs_TeamHistory")
+    add("ML_PRICE_Z_1P5_HIGH","ROLE_HISTORY",price_z.ge(1.5),source_ok=has("ML_Price_ZScore_vs_TeamHistory"))
+    add("ML_PRICE_Z_1P5_LOW","ROLE_HISTORY",price_z.le(-1.5),source_ok=has("ML_Price_ZScore_vs_TeamHistory"))
+
+    # Market path / sharp-soft / key crossing.
+    for mins in (30,60,120):
+        c=f"Line_Move_{mins}m"; mv=nfirst(c)
+        add(f"LINE_MOVE_{mins}M_POS","MARKET_PATH",mv.ge(.5),source_ok=has(c))
+        add(f"LINE_MOVE_{mins}M_NEG","MARKET_PATH",mv.le(-.5),source_ok=has(c))
+    mfo=nfirst("Line_Move_From_Open")
+    add("LINE_FROM_OPEN_2_PLUS","MARKET_PATH",mfo.ge(2),source_ok=has("Line_Move_From_Open"))
+    add("LINE_FROM_OPEN_2_MINUS","MARKET_PATH",mfo.le(-2),source_ok=has("Line_Move_From_Open"))
+    revs=nfirst("Direction_Changes_Count")
+    add("MARKET_REVERSAL_2_PLUS","MARKET_PATH",revs.ge(2),source_ok=has("Direction_Changes_Count"))
+    sm=nfirst("Sharp_Book_Move_60m")
+    add("SHARP_MOVE_60_POS","SHARP_SOFT",sm.ge(.5),source_ok=has("Sharp_Book_Move_60m"))
+    add("SHARP_MOVE_60_NEG","SHARP_SOFT",sm.le(-.5),source_ok=has("Sharp_Book_Move_60m"))
+    div=nfirst("Sharp_Soft_Divergence")
+    add("SHARP_SOFT_DIV_POS","SHARP_SOFT",div.ge(.5),source_ok=has("Sharp_Soft_Divergence"))
+    add("SHARP_SOFT_DIV_NEG","SHARP_SOFT",div.le(-.5),source_ok=has("Sharp_Soft_Divergence"))
+    cons=nfirst("Sharp_Consensus_Direction")
+    add("SHARP_CONSENSUS_POS","SHARP_SOFT",cons.ge(.5),source_ok=has("Sharp_Consensus_Direction"))
+    add("SHARP_CONSENSUS_NEG","SHARP_SOFT",cons.le(-.5),source_ok=has("Sharp_Consensus_Direction"))
+    for key in (3,7,10,14):
+        c=f"Crossed_Key_{key}_Last60m"; add(f"KEY_{key}_CROSSED_60M","KEY_NUMBER",nfirst(c).eq(1),source_ok=has(c),min_n=20)
+    for c,name in (("Key_Cross_Confirmed_By_Sharp_Books","KEY_CROSS_SHARP_CONFIRMED"),("Key_Cross_Reversed","KEY_CROSS_REVERSED"),("Key_Cross_Persistence","KEY_CROSS_PERSISTENT")):
+        add(name,"KEY_NUMBER",nfirst(c).ge(1),source_ok=has(c),min_n=20)
+
+    # Conference identity / pairs, rivalry and team-specific memory.
+    conf=tfirst("Conference","Team_Conference","Conference_Norm","Context_Conference")
+    oppconf=tfirst("Opponent_Conference","Opp_Conference","Opponent_Conference_Norm","Context_Opp_Conference")
+    if conf.ne("").any():
+        vc=conf.value_counts()
+        for v,cnt in vc.items():
+            if v and v not in {"UNKNOWN"} and (for_live or cnt>=80):
+                add("CONF_"+re.sub(r"[^A-Z0-9]+","_",v)[:28],"CONFERENCE",conf.eq(v),f"Conference={v}",source_ok=True)
+    if conf.ne("").any() and oppconf.ne("").any():
+        add("SAME_CONFERENCE","CONFERENCE_PAIR",conf.eq(oppconf)&conf.ne(""),source_ok=True)
+        pairs=conf+"__VS__"+oppconf; vc=pairs.value_counts()
+        for v,cnt in vc.items():
+            if "__VS__" in v and "UNKNOWN" not in v and (for_live or cnt>=60):
+                add("CONFPAIR_"+re.sub(r"[^A-Z0-9]+","_",v)[:36],"CONFERENCE_PAIR",pairs.eq(v),v.replace("__VS__"," vs "),source_ok=True)
+    coach=tfirst("Head_Coach","Coach","Team_Head_Coach")
+    if coach.ne("").any():
+        for v,cnt in coach.value_counts().items():
+            if v and (for_live or cnt>=40): add("COACH_"+re.sub(r"[^A-Z0-9]+","_",v)[:32],"COACH_ERA",coach.eq(v),f"Coach={v}",source_ok=True)
+    team=tfirst("Team_Norm","Team","Home_Team_Norm","Home_Team")
+    if team.ne("").any():
+        for v,cnt in team.value_counts().items():
+            if v and (for_live or cnt>=35): add("TEAM_"+re.sub(r"[^A-Z0-9]+","_",v)[:32],"TEAM_SPECIFIC",team.eq(v),f"Team={v}",source_ok=True)
+
+    subdiv=tfirst("Opponent_Subdivision","Opp_Subdivision","Context_Opp_Subdivision")
+    add("VS_FCS","OPPONENT_CLASS",subdiv.str.contains("FCS",na=False),source_ok=has("Opponent_Subdivision","Opp_Subdivision","Context_Opp_Subdivision"),min_n=20)
+    return atoms
 
 def _market_target(g: pd.DataFrame, market: str):
     market=str(market).lower(); am=_num(g,"Actual_Margin").to_numpy(dtype=float); at=_num(g,"Actual_Total").to_numpy(dtype=float)
@@ -581,7 +745,7 @@ def _mechanism_attribution(g: pd.DataFrame, seasons: np.ndarray, rep: dict[str,A
 def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, dashboard_module=None,
                         log_func=print, max_depth: int=4) -> dict[str,Any]:
     market=str(market).lower(); y,valid,baseline=_market_target(games,market); atoms=_extended_atoms(games,dashboard_module)
-    out={"version":"NCAAF-RV2.1-SYSTEM-MINER-V3-PRICE-AWARE","market":market,"production_authority":0,"discovery_max_season":DISCOVERY_MAX_SEASON,
+    out={"version":"NCAAF-RV2.2-SYSTEM-MINER-V4-HORIZON-SYMMETRIC","market":market,"production_authority":0,"discovery_max_season":DISCOVERY_MAX_SEASON,
          "confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,"atoms":len(atoms),"systems":[],"mechanism_families":[]}
     if valid.sum()<500: out["status"]="INSUFFICIENT_HISTORY"; return out
     tested=[]; beam=[]; seen=set()
@@ -605,7 +769,7 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
     for i,a in enumerate(atoms):
         r=ev(a["mask"],(a["name"],),(a["family"],),(i,))
         if r: tested.append(r); beam.append(r)
-    beam=sorted(beam,key=lambda z:z["quality"],reverse=True)[:48]
+    beam=sorted(beam,key=lambda z:z["quality"],reverse=True)[:64]
     for depth in range(2,max_depth+1):
         nxt=[]
         for st in beam:
@@ -616,7 +780,7 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
                 if names in seen: continue
                 seen.add(names); r=ev(st["mask"]&a["mask"],names,tuple(st["families"]+[a["family"]]),st["idx"]+(i,))
                 if r: tested.append(r); nxt.append(r)
-        beam=sorted(nxt,key=lambda z:z["quality"],reverse=True)[:48]
+        beam=sorted(nxt,key=lambda z:z["quality"],reverse=True)[:64]
         if not beam: break
     if not tested: out.update({"status":"NO_CANDIDATES","tested_hypotheses":0}); return out
     q=_bh_qvalues([z["nominal_pvalue"] for z in tested])
@@ -642,7 +806,7 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
                      "admission_note":"2024 AND 2025 must confirm frozen discovery; H2H requires observed moneyline ROI/EV and price-band robustness"})
         item["_mask_internal"]=z["mask"]
         finalists.append(item)
-        if len(finalists)>=120: break
+        if len(finalists)>=160: break
     families=[]; used=set()
     for i,a in enumerate(finalists):
         if i in used: continue
@@ -671,6 +835,8 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
              "confirmation_n":rep["confirmation_n"],"confirmation_pass":bool(rep["confirmation_pass"]),
              "authority_state":"CONFIRMED_SHADOW" if rep["confirmation_pass"] else "DISCOVERY_FROZEN","production_authority":0,
              "attribution":_mechanism_attribution(games,seasons,rep,market)}
+        fam["current_qualified"]=bool(rep["confirmation_pass"])
+        fam["evidence_level"]=("STRONG_VALIDATED" if bool(rep["confirmation_pass"]) and int(rep.get("confirmation_n",0) or 0)>=60 and float(rep.get("confirmation_rate",0) or 0)>=.56 else ("VALIDATED" if bool(rep["confirmation_pass"]) else "RESEARCH_SHADOW"))
         if market=="h2h":
             fam["discovery_price_roi"]=(rep.get("h2h_discovery_price") or {}).get("roi")
             fam["confirmation_price_roi"]=(rep.get("h2h_confirmation_price") or {}).get("roi")
@@ -685,20 +851,20 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
     out.update({"status":"RESEARCH_COMPLETE","tested_hypotheses":len(tested),"systems":clean,"published_systems":len(clean),
                 "mechanism_families":families,"mechanism_family_count":len(families),
                 "confirmed_mechanism_count":sum(x["confirmation_pass"] for x in families),
-                "admission_contract":"DISCOVERY_2022_2023_ONLY__MARKET_RELATIVE_FDR_FOR_H2H__OBSERVED_ML_ROI__PRICE_BAND_ROBUSTNESS__BOTH_2024_AND_2025_CONFIRM__DEPENDENCY_COLLAPSE__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY"})
-    log_func(f"[NCAAF-RV21-MINER] market={market} atoms={len(atoms)} tested={len(tested)} systems={len(clean)} mechanisms={len(families)} confirmed_mechanisms={out['confirmed_mechanism_count']} authority=0")
+                "admission_contract":"DISCOVERY_2022_2023_ONLY__HORIZON_SYMMETRIC_1_2_3__CONFERENCE_RIVALRY_H2H_ROLE_TEAM_MEMORY__MARKET_RELATIVE_FDR_FOR_H2H__OBSERVED_ML_ROI__PRICE_BAND_ROBUSTNESS__BOTH_2024_AND_2025_CONFIRM__DEPENDENCY_COLLAPSE__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY"})
+    log_func(f"[NCAAF-RV22-MINER] market={market} atoms={len(atoms)} tested={len(tested)} systems={len(clean)} mechanisms={len(families)} confirmed_mechanisms={out['confirmed_mechanism_count']} authority=0")
     for x in families[:20]:
         extra=(f" d_roi={x.get('discovery_price_roi')} c_roi={x.get('confirmation_price_roi')} d_resid={x.get('discovery_market_residual')} c_resid={x.get('confirmation_market_residual')}" if market=="h2h" else "")
-        log_func(f"[NCAAF-RV21-MECHANISM] market={market} id={x['mechanism_id']} status={x['authority_state']} members={x['member_count']} discovery={x['discovery_rate']:.4f}/{x['discovery_n']} confirmation={x['confirmation_rate']:.4f}/{x['confirmation_n']} rule={' AND '.join(x.get('representative_conditions') or [])}{extra}")
+        log_func(f"[NCAAF-RV22-MECHANISM] market={market} id={x['mechanism_id']} status={x['authority_state']} members={x['member_count']} discovery={x['discovery_rate']:.4f}/{x['discovery_n']} confirmation={x['confirmation_rate']:.4f}/{x['confirmation_n']} rule={' AND '.join(x.get('representative_conditions') or [])}{extra}")
         if market=="totals" and x.get("confirmation_pass"):
             a=x.get("attribution") or {}
-            log_func(f"[NCAAF-RV21-TOTALS-ATTRIBUTION] id={x['mechanism_id']} rule={a.get('rule')} seasons={json.dumps(a.get('season_breakdown') or [],sort_keys=True,default=str)} remove_best={a.get('remove_best_discovery_rate')} team_concentration={json.dumps(a.get('team_concentration') or {},sort_keys=True,default=str)} conference_concentration={json.dumps(a.get('conference_concentration') or {},sort_keys=True,default=str)}")
+            log_func(f"[NCAAF-RV22-TOTALS-ATTRIBUTION] id={x['mechanism_id']} rule={a.get('rule')} seasons={json.dumps(a.get('season_breakdown') or [],sort_keys=True,default=str)} remove_best={a.get('remove_best_discovery_rate')} team_concentration={json.dumps(a.get('team_concentration') or {},sort_keys=True,default=str)} conference_concentration={json.dumps(a.get('conference_concentration') or {},sort_keys=True,default=str)}")
     return out
 
 
 def _prospective_shadow(full_games: pd.DataFrame, full_seasons: np.ndarray, miners: dict[str,Any], dashboard_module=None, log_func=print) -> dict[str,Any]:
     if full_games is None or full_games.empty or len(full_games)!=len(full_seasons): return {"status":"UNAVAILABLE","production_authority":0}
-    atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(full_games,dashboard_module)}
+    atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(full_games,dashboard_module,for_live=False)}
     out={"status":"PASS","season_min":PROSPECTIVE_MIN_SEASON,"mechanisms":[],"production_authority":0,"selection_influence":0}
     for market,mr in (miners or {}).items():
         y,valid,baseline=_market_target(full_games,market)
@@ -719,9 +885,139 @@ def _prospective_shadow(full_games: pd.DataFrame, full_seasons: np.ndarray, mine
                 pm=_h2h_price_metrics(full_games,pmask&valid,y,baseline,full_seasons,direction,sorted(set(int(x) for x in full_seasons[pmask&np.isfinite(full_seasons)])))
                 row["price_roi"]=pm.get("roi"); row["market_residual"]=pm.get("market_residual"); row["priced_n"]=pm.get("priced_n")
             out["mechanisms"].append(row)
-            log_func(f"[NCAAF-RV21-PROSPECTIVE] market={market} mechanism={row['mechanism_id']} triggers={row['trigger_n']} settled={row['settled_n']} rate={row.get('rate')} roi={row.get('roi_at_minus110',row.get('price_roi'))} authority=0")
+            log_func(f"[NCAAF-RV22-PROSPECTIVE] market={market} mechanism={row['mechanism_id']} triggers={row['trigger_n']} settled={row['settled_n']} rate={row.get('rate')} roi={row.get('roi_at_minus110',row.get('price_roi'))} authority=0")
     return out
 
+
+
+def _wilson95_low(wins: int, n: int) -> float:
+    n=int(n or 0); wins=int(wins or 0)
+    if n<=0: return float("nan")
+    z=1.959963984540054; p=wins/n; den=1+z*z/n
+    ctr=p+z*z/(2*n); rad=z*math.sqrt((p*(1-p)+z*z/(4*n))/n)
+    return float((ctr-rad)/den)
+
+
+def _minus110_roi(rate: float) -> float:
+    return float(rate*(100.0/110.0)-(1.0-rate)) if np.isfinite(rate) else float("nan")
+
+
+def _build_system_results(games: pd.DataFrame, seasons: np.ndarray, miners: dict[str,Any], dashboard_module=None) -> dict[str,Any]:
+    """Direct 2024-25 grading of confirmed Miner mechanisms and confluence.
+
+    Mechanism families are already dependency-collapsed. A multi-system row is
+    counted only when 2+ confirmed mechanism families point the same direction
+    and no confirmed mechanism points the opposite direction.
+    """
+    if games is None or games.empty: return {"status":"UNAVAILABLE"}
+    atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(games,dashboard_module,for_live=False)}
+    out={"status":"PASS","confirmation_seasons":list(CONFIRMATION_SEASONS),"markets":{}}
+    for market,mr in (miners or {}).items():
+        y,valid,baseline=_market_target(games,market)
+        scope=valid&np.isfinite(seasons)&np.isin(seasons,np.asarray(CONFIRMATION_SEASONS,dtype=float))
+        mechs=[]
+        for mech in (mr or {}).get("mechanism_families",[]):
+            if not mech.get("confirmation_pass"): continue
+            cond=list(mech.get("representative_conditions") or []); mask=np.ones(len(games),dtype=bool)
+            evaluable=bool(cond)
+            for c in cond:
+                if c not in atoms: evaluable=False; mask[:]=False; break
+                mask &= atoms[c]
+            if not evaluable: continue
+            direction=str(mech.get("direction") or "PLAY_ON").upper()
+            obs=y if direction=="PLAY_ON" else 1-y
+            m=mask&scope; n=int(m.sum()); w=int(np.nansum(obs[m])) if n else 0; l=n-w
+            rate=float(w/n) if n else np.nan
+            mechs.append({"mechanism_id":mech.get("mechanism_id"),"direction":direction,"mask":mask,"obs":obs,"families":list(mech.get("families") or []),
+                          "rule":" AND ".join(cond),"n":n,"wins":w,"losses":l,"hit_rate":rate,"roi_at_minus110":_minus110_roi(rate) if market in ("spreads","totals") else np.nan,
+                          "wilson95_low":_wilson95_low(w,n),"evidence_level":mech.get("evidence_level"),"current_qualified":True})
+        best=sorted([{k:v for k,v in z.items() if k not in {"mask","obs"}} for z in mechs],key=lambda z:(z.get("wilson95_low",-9),z.get("n",0)),reverse=True)
+        play=np.zeros(len(games),dtype=int); fade=np.zeros(len(games),dtype=int)
+        for z in mechs:
+            if z["direction"]=="PLAY_ON": play += z["mask"].astype(int)
+            else: fade += z["mask"].astype(int)
+        agreed=((play>0)^(fade>0))&scope
+        multi=(((play>=2)&(fade==0))|((fade>=2)&(play==0)))&scope
+        conflict=(play>0)&(fade>0)&scope
+        def pool(mask):
+            idx=np.flatnonzero(mask)
+            if not len(idx): return {"n":0,"wins":0,"losses":0,"hit_rate":None,"roi_at_minus110":None,"wilson95_low":None}
+            chosen=np.where(play[idx]>0,y[idx],1-y[idx]); w=int(np.nansum(chosen)); n=int(len(idx)); rate=float(w/n)
+            return {"n":n,"wins":w,"losses":n-w,"hit_rate":rate,"roi_at_minus110":_minus110_roi(rate) if market in ("spreads","totals") else None,"wilson95_low":_wilson95_low(w,n)}
+        best_conf=[]
+        for z in mechs:
+            same_count=play if z["direction"]=="PLAY_ON" else fade; opp_count=fade if z["direction"]=="PLAY_ON" else play
+            mm=z["mask"]&scope&(same_count>=2)&(opp_count==0); n=int(mm.sum())
+            if not n: continue
+            obs=z["obs"]; w=int(np.nansum(obs[mm])); rate=float(w/n)
+            best_conf.append({"mechanism_id":z["mechanism_id"],"rule":z["rule"],"confluence_n":n,"wins":w,"losses":n-w,"hit_rate":rate,
+                              "roi_at_minus110":_minus110_roi(rate) if market in ("spreads","totals") else np.nan,"wilson95_low":_wilson95_low(w,n)})
+        best_conf=sorted(best_conf,key=lambda z:(z["wilson95_low"],z["confluence_n"]),reverse=True)
+        out["markets"][market]={"confirmed_mechanisms":len(mechs),"any_confirmed_system":pool(agreed),"two_plus_independent":pool(multi),"conflict_rows":int(conflict.sum()),
+                                "best_systems":best,"best_in_confluence":best_conf}
+    return out
+
+
+def _norm_team_live(v: Any) -> str:
+    return " ".join(str(v or "").strip().lower().split())
+
+
+def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard_module=None) -> pd.DataFrame:
+    """Evaluate frozen confirmed Miner mechanisms against current pregame context.
+
+    Historical Miner semantics are canonical-home oriented. Live evaluation first
+    reconstructs one home-side context row per physical game, evaluates exactly
+    the frozen representative conditions, then attaches directional votes to every
+    market row for Bet Authority. 2026 outcomes never select/qualify a mechanism.
+    """
+    if rows is None or rows.empty or not isinstance(report,dict): return rows
+    out=rows.copy()
+    keycol="_prod_game_id" if "_prod_game_id" in out.columns else None
+    if keycol is None:
+        h=out.get("Home_Team_Norm",out.get("Home_Team",pd.Series("",index=out.index))).astype(str).str.lower().str.strip()
+        a=out.get("Away_Team_Norm",out.get("Away_Team",pd.Series("",index=out.index))).astype(str).str.lower().str.strip()
+        t=pd.to_datetime(out.get("Game_Start"),errors="coerce",utc=True).dt.floor("h").astype(str)
+        out["_rv22_game_id"]=h+"|"+a+"|"+t; keycol="_rv22_game_id"
+    ctx=[]; keys=[]
+    for gid,g in out.groupby(keycol,sort=False,dropna=False):
+        home=_norm_team_live(g.get("Home_Team_Norm",g.get("Home_Team",pd.Series("",index=g.index))).iloc[0])
+        spg=g[g.get("Market",pd.Series("",index=g.index)).astype(str).str.lower().eq("spreads")].copy()
+        pick=None
+        if not spg.empty:
+            for ix,r in spg.iterrows():
+                outcome=_norm_team_live(r.get("Outcome_Norm",r.get("Outcome","")))
+                if outcome==home: pick=r.copy(); break
+        if pick is None: pick=g.iloc[0].copy()
+        pick["_rv22_game_id_key"]=gid; ctx.append(pick); keys.append(gid)
+    if not ctx: return out
+    cdf=pd.DataFrame(ctx).reset_index(drop=True)
+    atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(cdf,dashboard_module,for_live=True)}
+    registry=report.get("system_miner_v3") or {}
+    votes_by_game={k:[] for k in keys}; qualified=0; evaluable=0
+    for market,mr in registry.items():
+        for mech in (mr or {}).get("mechanism_families",[]):
+            if not mech.get("confirmation_pass"): continue
+            qualified+=1; cond=list(mech.get("representative_conditions") or [])
+            if not cond or any(c not in atoms for c in cond): continue
+            evaluable+=1; mask=np.ones(len(cdf),dtype=bool)
+            for c in cond: mask &= atoms[c]
+            direction=str(mech.get("direction") or "PLAY_ON").upper()
+            for j in np.flatnonzero(mask):
+                r=cdf.iloc[j]; home=_norm_team_live(r.get("Home_Team_Norm",r.get("Home_Team",""))); away=_norm_team_live(r.get("Away_Team_Norm",r.get("Away_Team","")))
+                if str(market).lower()=="totals": target="over" if direction=="PLAY_ON" else "under"
+                else: target=home if direction=="PLAY_ON" else away
+                if not target: continue
+                votes_by_game[keys[j]].append({"source_type":"MINER","family_id":str(mech.get("mechanism_id")),"target":target,"market":str(market).lower(),
+                                               "mechanisms":list(mech.get("families") or [str(mech.get("mechanism_id"))]),"rule":" AND ".join(cond),
+                                               "confirmation_n":mech.get("confirmation_n"),"confirmation_rate":mech.get("confirmation_rate"),"evidence_level":mech.get("evidence_level")})
+    out["NCAAF_RV22_Miner_Votes"]=[votes_by_game.get(k,[]) for k in out[keycol]]
+    out["NCAAF_Miner_Qualified"]=qualified; out["NCAAF_Miner_Evaluable"]=evaluable
+    counts=[]; summaries=[]
+    for _,r in out.iterrows():
+        m=str(r.get("Market") or "").lower(); vv=[v for v in (r.get("NCAAF_RV22_Miner_Votes") or []) if v.get("market")==m]
+        counts.append(len(vv)); summaries.append(" | ".join(f"{v['family_id']}: {v.get('rule') or 'rule'} → {v['target']}" for v in vv) if vv else "—")
+    out["NCAAF_Miner_Live_Trigger_Count"]=counts; out["NCAAF_RV2_System_Count"]=counts; out["NCAAF_RV2_System_Summary"]=summaries
+    return out
 
 def _market_rich_audit(games: pd.DataFrame, utils_module=None) -> dict[str,Any]:
     wanted=["Line_Move_30m","Line_Move_60m","Line_Move_120m","Line_Move_From_Open","Direction_Changes_Count","Sharp_Book_Move_60m",
@@ -750,20 +1046,21 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
         historic=np.isfinite(seasons)&(seasons<=max(CONFIRMATION_SEASONS))
         if historic.sum()<500: raise RuntimeError(f"insufficient <=2025 history n={int(historic.sum())}")
         g=games.loc[historic].reset_index(drop=True); mg=miner_games.loc[historic].reset_index(drop=True); sy=seasons[historic]; om=oof_margin[historic]; ot=oof_total[historic]
-        log_func(f"[NCAAF-RV2-PREFLIGHT] source={NCAAF_RESEARCH_V2_SOURCE_TAG} rows={len(g)} seasons={sorted(set(sy.astype(int)))} discovery<=2023 confirmation=2024,2025 prospective>=2026 production_authority=0")
+        log_func(f"[NCAAF-RV22-PREFLIGHT] source={NCAAF_RESEARCH_V2_SOURCE_TAG} rows={len(g)} seasons={sorted(set(sy.astype(int)))} discovery<=2023 confirmation=2024,2025 prospective>=2026 production_authority=0")
         stat=run_orthogonal_stat_research(g,sy,om,ot,cols,log_func=log_func)
         sparse_stat=run_sparse_stat_research(g,sy,om,ot,log_func=log_func)
-        miners={m:run_system_miner_v3(mg,sy,m,dashboard_module=dashboard_module,log_func=log_func,max_depth=4) for m in ("spreads","h2h","totals")}
+        miners={m:run_system_miner_v3(mg,sy,m,dashboard_module=dashboard_module,log_func=log_func,max_depth=5) for m in ("spreads","h2h","totals")}
+        system_results=_build_system_results(mg,sy,miners,dashboard_module=dashboard_module)
         prospective=_prospective_shadow(miner_games.reset_index(drop=True),seasons,miners,dashboard_module=dashboard_module,log_func=log_func)
         market_audit=_market_rich_audit(g,utils_module)
         report={"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG,"version":NCAAF_RESEARCH_V2_VERSION,"created_utc":_now(),
                 "status":"NCAAF_RESEARCH_V2_COMPLETE","production_authority":0,"production_contract_mutated":False,
                 "benchmark":"FROZEN_NCAAF_PRODUCTION_V1","discovery_max_season":DISCOVERY_MAX_SEASON,"confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"system_miner_v3":miners,
-                "prospective_shadow_2026":prospective,"market_rich":market_audit,
+                "prospective_shadow_2026":prospective,"system_results":system_results,"market_rich":market_audit,
                 "next_step":"KEEP PRODUCTION V1 FROZEN; TRACK PRICE-AWARE H2H / TOTALS MECHANISMS AND SPARSE STAT CHALLENGERS PROSPECTIVELY"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
-        bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
+        bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
         if storage_client is None:
             from google.cloud import storage
             storage_client=storage.Client()
@@ -773,7 +1070,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
         b.blob(hist).upload_from_string(body,content_type="application/json"); b.blob(REPORT_CURRENT_BLOB).upload_from_string(body,content_type="application/json")
         bio=io.BytesIO(); pickle.dump(bundle,bio,protocol=pickle.HIGHEST_PROTOCOL); bio.seek(0); pdata=bio.read(); b.blob(BUNDLE_CURRENT_BLOB).upload_from_string(pdata,content_type="application/octet-stream")
         report["artifact"]={"current_report":f"gs://{bucket_name}/{REPORT_CURRENT_BLOB}","current_bundle":f"gs://{bucket_name}/{BUNDLE_CURRENT_BLOB}","history_report":f"gs://{bucket_name}/{hist}","sha256":sha}
-        log_func(f"[NCAAF-RV21-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
+        log_func(f"[NCAAF-RV22-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
         return report
     except Exception as exc:
         log_func(f"[NCAAF-RV2-FAIL] {type(exc).__name__}: {exc}")
@@ -795,37 +1092,17 @@ def load_current_report(bucket_name="sharp-models", storage_client=None) -> dict
 
 
 def match_live_systems(rows: pd.DataFrame, report: dict[str,Any], dashboard_module=None) -> pd.DataFrame:
-    """Attach only confirmed/collapsed V2.1 research mechanisms to live rows.
-
-    This is display/prospective attribution only and can never modify production
-    actions, probabilities, edge thresholds, or bet sizing.
-    """
-    if rows is None or rows.empty or not isinstance(report,dict): return rows
-    out=rows.copy(); atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(out,dashboard_module)}
-    summaries=[[] for _ in range(len(out))]
-    market_col=out.get("Market",pd.Series("",index=out.index)).astype(str).str.lower()
-    reg=report.get("system_miner_v3") or {}
-    for m,mr in reg.items():
-        for mech in (mr or {}).get("mechanism_families",[]):
-            if not mech.get("confirmation_pass"): continue
-            cond=list(mech.get("representative_conditions") or [])
-            mask=np.ones(len(out),dtype=bool)&market_col.eq(str(m).lower()).to_numpy()
-            for c in cond:
-                if c not in atoms: mask[:]=False; break
-                mask &= atoms[c]
-            label=f"{mech.get('mechanism_id')} [CONFIRMED SHADOW]"
-            for j in np.flatnonzero(mask): summaries[j].append(label)
-    out["NCAAF_RV2_System_Summary"]=[" | ".join(x) if x else "—" for x in summaries]
-    out["NCAAF_RV2_System_Count"]=[len(x) for x in summaries]
-    return out
-
+    """Backward-compatible UI wrapper for the V2.2 live Miner evaluator."""
+    return attach_live_miner_votes(rows,report,dashboard_module=dashboard_module)
 
 def self_test() -> dict[str,Any]:
+    live_atoms={a["name"] for a in _extended_atoms(pd.DataFrame({"Consensus_Open_Spread":[3.5],"Prev_SU_Margin":[-7.0],"Prev2_SU_Margin":[10.0],"Prev3_SU_Margin":[-3.0],"Prev_ATS_Margin":[8.0],"Prev2_ATS_Margin":[-2.0],"Prev3_ATS_Margin":[5.0]}),for_live=True)}
     q=_bh_qvalues([.01,.04,.20]); fam=_classify_feature_families(["Rush_EPA","Opp_Rush_EPA","Line_Move_60m","Sharp_Soft_Divergence","Actual_Margin"])
     odds=np.asarray([200.0,-200.0]); won=np.asarray([1.0,1.0]); ret=_american_unit_return(odds,won)
     ok=bool(
         len(q)==3 and "RUN_PASS_MATCHUP" in fam and "MARKET_MICROSTRUCTURE" in fam and
         all("Actual_Margin" not in x for v in fam.values() for x in v) and
+        "SU_SEQ3_LWL" in live_atoms and "OFF_ATS_COVER_7_PLUS" in live_atoms and
         np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False)
     )
     return {
