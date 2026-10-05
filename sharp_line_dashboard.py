@@ -1,4 +1,4 @@
-# NFL Results Attribution UI Patch V3.10.2.1 — 2026-10-04
+# NFL Results Attribution UI Patch V3.10.4 — source confluence + best-system ranking — 2026-10-04
 # Adds CORE-vs-system historical lift and individual Miner/Pathi/Big Al evidence.
 # No prediction, miner, authority, threshold, or production-policy change.
 # V11.2: Expert Active/Direction/Intensity layer + Pathi/BigAl/Brain integrity audit
@@ -47424,9 +47424,85 @@ def _render_nfl_system_results_attribution():
             with c2:
                 st.metric("Multiple system signals", "60.5%")
                 st.caption("81 graded • 49-32 • flat -110 ROI +15.5%")
-            st.warning("These two values are a verified snapshot from the V3.10.2 Cloud Run log's advanced-STAT system-interaction subset. They are not dynamically published in that older Heavy artifact. Run Heavy Research once with V3.10.3 to replace this snapshot with direct 2023–25 system-pool grading stored in current_report.json.")
+            st.warning("These two values are a verified snapshot from the V3.10.2 Cloud Run log's advanced-STAT system-interaction subset. They are not dynamically published in that older Heavy artifact. Run Heavy Research once with V3.10.4 to replace this snapshot with direct 2023–25 system-pool grading stored in current_report.json.")
         else:
             st.info("This Heavy artifact predates system-results publication. Run Heavy Research once with the V3.10.3 publisher; the dashboard will then read the result directly from current_report.json.")
+
+
+    # V3.10.4: full research-universe source/confluence attribution. This is deliberately
+    # separate from the frozen approved-system pool above. One normalized mechanism family
+    # gets one vote; same-direction agreement is required before a confluence record is graded.
+    attr=(heavy or {}).get("research_system_attribution") or {}
+    if isinstance(attr,dict) and attr.get("status")=="READY":
+        st.markdown("**Research-system source attribution — normalized independent families**")
+        st.caption(
+            "Descriptive 2023–25 research attribution across Miner, Pathi and Big Al. "
+            "Miner variants are collapsed to one mechanism family, Pathi mirrors/nested rules to one normalized family, "
+            "and Big Al nested variants do not count as extra independent votes. Same-direction agreement is required. "
+            "This is historical evidence, not 2026 prospective proof."
+        )
+        qa=attr.get("qualified_current") or {}
+
+        def _research_rec_metric(rec,label,col):
+            rec=rec or {}; n=int(rec.get("n") or 0); g=int(rec.get("graded_n") or 0); w=int(rec.get("wins") or 0); l=int(rec.get("losses") or 0); p=int(rec.get("pushes") or 0)
+            hr=pd.to_numeric(pd.Series([rec.get("hit_rate")]),errors="coerce").iloc[0]
+            roi=pd.to_numeric(pd.Series([rec.get("flat_minus110_roi_reference")]),errors="coerce").iloc[0]
+            with col:
+                st.metric(label,_nfl_result_pct(hr) if pd.notna(hr) else "—")
+                st.caption(f"{n} bets • {w}-{l}-{p}" + (f" • -110 ref ROI {_nfl_result_pct(roi)}" if pd.notna(roi) else ""))
+
+        c1,c2,c3=st.columns(3)
+        _research_rec_metric(qa.get("two_plus_independent_families"),"2+ independent families agree",c1)
+        _research_rec_metric(qa.get("two_plus_independent_sources"),"2+ independent sources agree",c2)
+        _research_rec_metric(qa.get("three_independent_sources"),"Big Al + Miner + Pathi agree",c3)
+
+        combo_rows=[]
+        for x in qa.get("source_combinations") or []:
+            if int((x or {}).get("n") or 0)<=0:continue
+            combo_rows.append({
+                "Source combination":x.get("combination"),"Bets":int(x.get("n") or 0),"W":int(x.get("wins") or 0),"L":int(x.get("losses") or 0),"P":int(x.get("pushes") or 0),
+                "Hit Rate":_nfl_result_pct(x.get("hit_rate")),"Flat -110 ROI ref":_nfl_result_pct(x.get("flat_minus110_roi_reference")),
+            })
+        if combo_rows:
+            st.markdown("**Which source combinations are working**")
+            st.dataframe(pd.DataFrame(combo_rows),use_container_width=True,hide_index=True)
+
+        rankings=list(attr.get("system_rankings") or [])
+        top=[]
+        for r in rankings:
+            if r.get("validation_rank") is None or int(r.get("graded_n") or 0)<20:continue
+            ci=r.get("wilson95") or [None,None]
+            top.append({
+                "Rank":int(r.get("validation_rank")),"Source":r.get("source"),"System / family":r.get("name") or r.get("family_id"),
+                "Evidence":r.get("evidence") or "—","Current qualified":bool(r.get("qualified_current")),"Graded":int(r.get("graded_n") or 0),
+                "W-L-P":f"{int(r.get('wins') or 0)}-{int(r.get('losses') or 0)}-{int(r.get('pushes') or 0)}",
+                "Hit Rate":_nfl_result_pct(r.get("hit_rate")),"Flat -110 ROI ref":_nfl_result_pct(r.get("flat_minus110_roi_reference")),
+                "Wilson 95% low":_nfl_result_pct(ci[0] if len(ci)>0 else None),
+            })
+        if top:
+            st.markdown("**Best independent systems — conservative 2023–25 ranking**")
+            st.caption("Minimum 20 graded results. Ranked by the lower bound of the 95% Wilson interval, then hit rate and sample size, so tiny high-win samples do not automatically rise to the top.")
+            st.dataframe(pd.DataFrame(top[:15]),use_container_width=True,hide_index=True)
+
+        multi=[]
+        for r in rankings:
+            mr=r.get("multi_confluence") or {}; ci=mr.get("wilson95") or [None,None]
+            if int(mr.get("graded_n") or 0)<10:continue
+            multi.append({
+                "Source":r.get("source"),"System / family":r.get("name") or r.get("family_id"),"Confluence graded":int(mr.get("graded_n") or 0),
+                "W-L-P":f"{int(mr.get('wins') or 0)}-{int(mr.get('losses') or 0)}-{int(mr.get('pushes') or 0)}",
+                "Hit Rate":_nfl_result_pct(mr.get("hit_rate")),"Flat -110 ROI ref":_nfl_result_pct(mr.get("flat_minus110_roi_reference")),
+                "Wilson 95% low":_nfl_result_pct(ci[0] if len(ci)>0 else None),"Current qualified":bool(r.get("qualified_current")),
+                "_sort":float(ci[0]) if len(ci)>0 and ci[0] is not None else -1.0,
+            })
+        if multi:
+            multi=sorted(multi,key=lambda x:(x["_sort"],pd.to_numeric(pd.Series([x["Confluence graded"]]),errors="coerce").iloc[0]),reverse=True)
+            for x in multi:x.pop("_sort",None)
+            st.markdown("**Best systems when they are part of 2+ independent-family agreement**")
+            st.caption("This answers which individual systems have performed best specifically inside the multi-system confluence games. Minimum 10 graded confluence appearances.")
+            st.dataframe(pd.DataFrame(multi[:15]),use_container_width=True,hide_index=True)
+
+        st.caption(str(attr.get("selection_caveat") or ""))
 
     rules=_nfl_system_rules_index_cached()
     if isinstance(rules,dict) and rules.get("status")=="READY":
@@ -47849,7 +47925,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
 
     with st.expander("NFL System Rules Index — mined + published + Pathi systems",expanded=False):
         if not isinstance(rules_state,dict) or rules_state.get("status")!="READY":
-            st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.10.2.")
+            st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.10.4.")
         else:
             rr=pd.DataFrame(rules_state.get("rows") or [])
             cov=rules_state.get("coverage") or {}
@@ -50550,7 +50626,7 @@ if not HEADLESS:
         )
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_research_heavy":
         st.sidebar.caption(
-            "WHEN: after meaningful research/data changes and periodically during the season. Runs protected CORE/STAT/PBP research plus System Miner V3.10.2 with symmetric 1/2/3-game horizons. The frozen 0.575 Spread distribution benchmark remains unchanged. Established 2017-2022 system discoveries are permanent evidence: later weakness can downgrade current authority or move a system dormant, but cannot erase it. The run publishes the human-readable Rules Index, Big Al coverage, Pathi/market-execution audit, and H2H price-aware research. 2026 stays sealed and Production Betting V2 cannot be mutated by this job."
+            "WHEN: after meaningful research/data changes and periodically during the season. Runs protected CORE/STAT/PBP research plus System Miner V3.10.3 with normalized source/confluence attribution and symmetric 1/2/3-game horizons. The frozen 0.575 Spread distribution benchmark remains unchanged. Established 2017-2022 system discoveries are permanent evidence: later weakness can downgrade current authority or move a system dormant, but cannot erase it. The run publishes the human-readable Rules Index, Big Al coverage, Pathi/market-execution audit, and H2H price-aware research. 2026 stays sealed and Production Betting V2 cannot be mutated by this job."
         )
 
     

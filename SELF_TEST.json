@@ -1,17 +1,16 @@
 {
-  "status": "PASS",
-  "engine_version": "3.10.3",
-  "heavy_source_tag": "nfl-heavy-research-v2.11.1-system-results-publisher-20261004",
-  "heavy_sha256": "943c70522d575bdea1173377dbce592c9a5fdfec374e9069322bfb79a347e360",
-  "checks": [
-    "dashboard_compile",
-    "train_job_compile",
-    "engine_compile",
-    "embedded_heavy_compile",
-    "direct_system_pool_publisher_present",
-    "current_report_system_pool_results_present",
-    "legacy_sha_locked_snapshot_present",
-    "2026_seal_unchanged",
-    "production_authority_unchanged"
-  ]
+  "automatic_promotion": false,
+  "best_system_ui_present": true,
+  "bundled_components": 32,
+  "confluence_system_ui_present": true,
+  "engine_preflight": "PASS",
+  "engine_source_tag": "nfl-engine-v3.10.4-source-confluence-best-system-ranking-20261004",
+  "engine_version": "3.10.4",
+  "production_authority": 0,
+  "py_compile_all": true,
+  "source_attribution_publisher_present": true,
+  "source_combination_ui_present": true,
+  "system_lab_self_test": "PASS",
+  "system_lab_version": "NFL_SYSTEM_LAB_V3_10_3",
+  "year_2026_queried": false
 }

@@ -195,18 +195,18 @@ def main():
         _syscontract = _load_nfl_heavy_exact("nfl_research_v2_contract", "nfl-research-v2.0-foundation-expansion-20261001")
         _ledger3 = _load_nfl_heavy_exact("nfl_prospective_ledger_v3", "nfl-prospective-ledger-v3-v1.9.4-edge-gate-shadow-20261001")
         _research = _load_nfl_heavy_exact("nfl_research_engine_v2", "nfl-research-engine-v1.9.4-edge-gate-manager-20261001")
-        _systems = _load_nfl_heavy_exact("nfl_system_lab_v3", "nfl-system-lab-v3.10.2-horizon-symmetric-nullsafe-miner-20261004")
+        _systems = _load_nfl_heavy_exact("nfl_system_lab_v3", "nfl-system-lab-v3.10.3-source-attribution-publisher-20261004")
         _pbpdiag = _load_nfl_heavy_exact("nfl_pbp_attribution_v1", "nfl-pbp-attribution-v1-research-v2.0.2-frozen-core2-20261001")
-        _heavy = _load_nfl_heavy_exact("nfl_heavy_research_v31", "nfl-heavy-research-v2.11.1-system-results-publisher-20261004")
+        _heavy = _load_nfl_heavy_exact("nfl_heavy_research_v31", "nfl-heavy-research-v2.11.2-source-confluence-attribution-20261004")
 
-        pw.emit("audit", f"[NFL-HEAVY-V2111] Start run={run_id}; frozen V29 Spread 0.575 benchmark + selective trust + rules index + Big Al 6 coverage + price-aware EV; production mutation forbidden; 2026 sealed", pct=0.03)
+        pw.emit("audit", f"[NFL-HEAVY-V2112] Start run={run_id}; frozen V29 Spread 0.575 benchmark + selective trust + rules index + Big Al 6 coverage + price-aware EV; production mutation forbidden; 2026 sealed", pct=0.03)
         try:
             _bq = bigquery.Client(project="sharplogger")
             _rcontract.assert_contract()
             _syscontract.assert_contract()
             _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
             if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
-                raise RuntimeError("[NFL-HEAVY-V2111-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
+                raise RuntimeError("[NFL-HEAVY-V2112-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
             _health = _ledger3.ledger_health_check(_bq, service_identity_hint="sharp-train-sa@sharplogger.iam.gserviceaccount.com")
 
             pw.emit("core_stat", "Audit PASS; run protected CORE/STAT/residual challenger research", pct=0.16)
@@ -215,7 +215,7 @@ def main():
                 audit_report=_audit_report, ledger_health=_health, log_func=log_func,
             )
 
-            pw.emit("systems", "CORE/STAT complete; run System Miner V3.10.2 Advanced, horizon-symmetric 1/2/3-game sequences/magnitude/opponent symmetry/team memory, permanent discovery-evidence lifecycle, Big Al 6 external retest, mechanism-family collapse, rules index and coverage audit", pct=0.36)
+            pw.emit("systems", "CORE/STAT complete; run System Miner V3.10.3 Advanced + source/confluence attribution, horizon-symmetric 1/2/3-game sequences/magnitude/opponent symmetry/team memory, permanent discovery-evidence lifecycle, Big Al 6 external retest, mechanism-family collapse, rules index and coverage audit", pct=0.36)
             _system_report = _systems.run_nfl_system_lab_v3(
                 bq_client=_bq, storage_client=gcs, bucket_name=bucket,
                 audit_report=_audit_report, log_func=log_func,
@@ -238,8 +238,8 @@ def main():
                 system_report=_system_report, pbp_report=_pbp_report, log_func=log_func,
             )
             if _result.get("production_mutated") is not False or int(_result.get("production_authority") or 0) != 0:
-                raise RuntimeError("[NFL-HEAVY-V2111-HOLD] RESEARCH_ROUTE_ATTEMPTED_PRODUCTION_AUTHORITY")
-            log_func("[NFL-HEAVY-V2111-OPERATOR-CONTRACT] "+json.dumps({
+                raise RuntimeError("[NFL-HEAVY-V2112-HOLD] RESEARCH_ROUTE_ATTEMPTED_PRODUCTION_AUTHORITY")
+            log_func("[NFL-HEAVY-V2112-OPERATOR-CONTRACT] "+json.dumps({
                 "status":_result.get("status"),
                 "research_contract_sha256":_result.get("research_contract_sha256"),
                 "production_mutated":False,
@@ -418,7 +418,7 @@ def main():
         _ledger3 = _load_nfl_prod_replay_exact("nfl_prospective_ledger_v3", "nfl-prospective-ledger-v3-v1.9.4-edge-gate-shadow-20261001")
         _research = _load_nfl_prod_replay_exact("nfl_research_engine_v2", "nfl-research-engine-v1.9.4-edge-gate-manager-20261001")
         _syscontract = _load_nfl_prod_replay_exact("nfl_research_v2_contract", "nfl-research-v2.0-foundation-expansion-20261001")
-        _systems = _load_nfl_prod_replay_exact("nfl_system_lab_v3", "nfl-system-lab-v3.10.2-horizon-symmetric-nullsafe-miner-20261004")
+        _systems = _load_nfl_prod_replay_exact("nfl_system_lab_v3", "nfl-system-lab-v3.10.3-source-attribution-publisher-20261004")
         _prod = _load_nfl_prod_replay_exact("nfl_production_v1", "nfl-production-v1.1.1-publish-receipt-normalization-20261002")
         _bet = _load_nfl_prod_replay_exact("nfl_betting_engine_v1", "nfl-betting-engine-v1.0-unified-decision-20261002")
         _shared = _load_nfl_prod_replay_exact("sports_edge_authority_v1", "sports-edge-authority-v1.1-dependency-aware-cross-sport-standard-20261002")
@@ -497,7 +497,7 @@ def main():
         )
         _systems = _load_nfl_v2_system_exact(
             "nfl_system_lab_v3",
-            "nfl-system-lab-v3.10.2-horizon-symmetric-nullsafe-miner-20261004",
+            "nfl-system-lab-v3.10.3-source-attribution-publisher-20261004",
         )
         _audit = _load_nfl_v2_system_exact(
             "nfl_audit_v1",
