@@ -149,15 +149,26 @@ def _home_away(group: pd.DataFrame) -> Tuple[str, str]:
 def _attach_production_game_identity(rows: pd.DataFrame) -> pd.DataFrame:
     """Physical NCAAF game key, independent of market/outcome/book/quote.
 
-    utils.build_game_key intentionally includes Market and Outcome for legacy
-    snapshot lineage, so Game_Key MUST NOT group production edge evidence.
-    Use the same home/away/UTC kickoff-hour representation as
-    utils.build_merge_key. Preserve Game_Key unchanged for legacy consumers.
-    A row without an unambiguous matchup/kickoff is not eligible for a pick.
+    ``Game_Key`` intentionally includes Market/Outcome for legacy snapshot
+    lineage, so it MUST NOT group production evidence.  The upstream odds feed
+    can occasionally carry the same physical game at two different kickoff
+    times (schedule refresh/stale-provider variants).  Hour-only identity would
+    treat those as two games and could create duplicate dashboard/ledger rows.
+
+    Production therefore clusters the same directional home/away matchup when
+    kickoff variants are within 18 hours, chooses one canonical kickoff from
+    the freshest/highest-coverage variant, and assigns every row in that cluster
+    the same production ID.  Normal games with one kickoff retain the exact
+    legacy ``home_away_UTC-hour`` identity, so this is migration-safe for the
+    ordinary case.  The source kickoff remains in ``_prod_source_game_start``;
+    ``_prod_game_start`` is the canonical production kickoff.
     """
     out = rows.copy()
     if out.empty:
         out["_prod_game_id"] = pd.Series(dtype="string")
+        out["_prod_game_start"] = pd.Series(dtype="datetime64[ns, UTC]")
+        out["_prod_schedule_conflict"] = pd.Series(dtype="bool")
+        out["_prod_schedule_variant_count"] = pd.Series(dtype="int64")
         return out
 
     def name(v):
@@ -179,11 +190,82 @@ def _attach_production_game_identity(rows: pd.DataFrame) -> pd.DataFrame:
     out = out.loc[valid].copy()
     if out.empty:
         out["_prod_game_id"] = pd.Series(dtype="string")
+        out["_prod_game_start"] = pd.Series(dtype="datetime64[ns, UTC]")
+        out["_prod_schedule_conflict"] = pd.Series(dtype="bool")
+        out["_prod_schedule_variant_count"] = pd.Series(dtype="int64")
         return out
-    hour = kickoff.loc[out.index].dt.floor("h").dt.strftime("%Y-%m-%d %H:%M:%S")
-    out["_prod_game_id"] = (h.loc[out.index] + "_" + a.loc[out.index] + "_" + hour).astype("string")
-    # The source Merge_Key_Short remains untouched; the prospective ledger
-    # explicitly prefers this calculated production ID when present.
+
+    h = h.loc[out.index]
+    a = a.loc[out.index]
+    kickoff = kickoff.loc[out.index]
+    pair = (h + "_" + a).astype("string")
+    snap = pd.to_datetime(out.get("Snapshot_Timestamp", pd.Series(pd.NaT, index=out.index)), errors="coerce", utc=True)
+    if not isinstance(snap, pd.Series):
+        snap = pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns, UTC]")
+
+    out["_prod_source_game_start"] = kickoff
+    out["_prod_game_start"] = kickoff
+    out["_prod_schedule_conflict"] = False
+    out["_prod_schedule_variant_count"] = 1
+    out["_prod_game_id"] = pd.Series("", index=out.index, dtype="string")
+
+    cluster_hours = float(os.getenv("NCAAF_PROD_GAME_CLUSTER_HOURS", "18") or 18.0)
+    cluster_hours = max(1.0, min(cluster_hours, 36.0))
+
+    meta = pd.DataFrame({
+        "pair": pair,
+        "kickoff": kickoff,
+        "snapshot": snap.reindex(out.index),
+    }, index=out.index)
+
+    # Cluster only within one directional home/away matchup.  This avoids
+    # collapsing genuine future rematches while still absorbing stale kickoff
+    # variants for the same physical game.
+    for pair_key, pg in meta.groupby("pair", sort=False, dropna=False):
+        starts = sorted(pd.DatetimeIndex(pg["kickoff"].dropna().unique()).tolist())
+        if not starts:
+            continue
+        clusters = []
+        cur = [starts[0]]
+        for st in starts[1:]:
+            gap = (pd.Timestamp(st) - pd.Timestamp(cur[-1])).total_seconds() / 3600.0
+            if gap <= cluster_hours:
+                cur.append(st)
+            else:
+                clusters.append(cur); cur = [st]
+        clusters.append(cur)
+
+        for members in clusters:
+            member_set = set(pd.Timestamp(x) for x in members)
+            ix = pg.index[pg["kickoff"].map(lambda x: pd.Timestamp(x) in member_set if pd.notna(x) else False)]
+            if len(ix) == 0:
+                continue
+            stats = (meta.loc[ix]
+                     .groupby("kickoff", dropna=False)
+                     .agg(last_snapshot=("snapshot", "max"), quote_rows=("snapshot", "size"))
+                     .reset_index())
+            # Prefer the kickoff represented by the freshest snapshot.  If a
+            # provider batch contains both variants at the same timestamp, use
+            # the variant with broader row coverage, then the later kickoff as
+            # a deterministic final tie-breaker (schedule changes more often
+            # move later than earlier).
+            stats = stats.sort_values(
+                ["last_snapshot", "quote_rows", "kickoff"],
+                ascending=[False, False, False],
+                na_position="last",
+                kind="stable",
+            )
+            canonical = pd.to_datetime(stats.iloc[0]["kickoff"], utc=True)
+            variants = int(len(stats))
+            hour = canonical.floor("h").strftime("%Y-%m-%d %H:%M:%S")
+            out.loc[ix, "_prod_game_start"] = canonical
+            out.loc[ix, "_prod_schedule_variant_count"] = variants
+            out.loc[ix, "_prod_schedule_conflict"] = bool(variants > 1)
+            out.loc[ix, "_prod_game_id"] = str(pair_key) + "_" + hour
+
+    out["_prod_game_id"] = out["_prod_game_id"].astype("string")
+    out["_prod_schedule_variant_count"] = pd.to_numeric(out["_prod_schedule_variant_count"], errors="coerce").fillna(1).astype(int)
+    out["_prod_schedule_conflict"] = out["_prod_schedule_conflict"].fillna(False).astype(bool)
     return out
 
 
@@ -1235,4 +1317,8 @@ def choose_current_production_picks(scored: pd.DataFrame,contract: dict,*,execut
                 picks.at[ix,"_prod_authority"]=0
     if picks.duplicated(["_prod_game_id","Market"]).any():
         raise RuntimeError("NCAAF PRODUCTION GAME IDENTITY FAIL: multiple selected outcomes in one market")
+    if "_prod_game_start" in picks.columns:
+        _canon = pd.to_datetime(picks["_prod_game_start"], errors="coerce", utc=True)
+        _orig = pd.to_datetime(picks.get("Game_Start"), errors="coerce", utc=True)
+        picks["Game_Start"] = _canon.where(_canon.notna(), _orig)
     return picks

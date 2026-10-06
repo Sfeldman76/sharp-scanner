@@ -1,97 +1,70 @@
-# NCAAF V2.5.1 — Expert/Specialist CORE Research (Preflight Hotfix)
+# NCAAF V2.5.2 — Physical-Game Dedupe + Authority Diagnostics Fix
 
-This release keeps the frozen Production V1 models and current V2.2.1 Bet Authority unchanged. It expands only the protected NCAAF Spread CORE challenger inside **NCAAF Research — Heavy Challenger Search**.
+This is a narrow runtime/UI patch on top of V2.5.1. It fixes the two issues visible in the current NCAAF Weekly tables without changing CORE, model probabilities, research qualification, Miner thresholds, or Bet Authority.
 
-## V2.5.1 hotfix
+## Fix 1 — duplicate physical games
 
-V2.5 contained one stale deploy-preflight block that still referenced the retired `ncaaf_core_challenger_v1` variable after the runtime had been switched to `ncaaf_core_challenger_v2`. That caused the Heavy Research job to stop before any research ran with `NameError: _nccv1 is not defined`.
+The live feed can occasionally carry the same matchup with two kickoff-time variants. The previous production identity used home + away + UTC kickoff hour, so a stale schedule time could make one real game appear twice.
 
-V2.5.1 changes only that preflight check:
+V2.5.2 changes only physical-game identity handling:
 
-- validates `ncaaf_core_challenger_v2.SOURCE_TAG`
-- requires `ncaaf-core-challenger-v2.0-expert-specialist-strength-20261005`
-- logs `[NCAAF-CORE-CHALLENGER-V2-DEPLOY-PREFLIGHT] PASS`
-- contains no `_nccv1` / V1 challenger references in `train_job.py`
+- groups the same directional home/away matchup when kickoff variants are within 18 hours;
+- chooses one canonical kickoff using the freshest snapshot first, then row coverage, then the later kickoff as a deterministic tie-breaker;
+- preserves the original kickoff in `_prod_source_game_start`;
+- stores the canonical kickoff in `_prod_game_start`;
+- assigns all variants to one `_prod_game_id`;
+- uses the canonical kickoff for the selected production row and prospective-ledger lock timing;
+- leaves normal one-kickoff games on the same legacy `home_away_UTC-hour` production ID, minimizing ledger identity churn;
+- exposes a dashboard caption when schedule-time conflicts were normalized.
 
-No production model, Bet Authority rule, Miner rule, research logic, or validation window changed.
+The current exported board had 61 rows but only 59 unique matchups. The duplicated matchups were Arizona State–Hawaii and Indiana–Ohio State. This patch collapses those schedule variants before the board is built.
 
-## Why this exists
+## Fix 2 — blank Miner / Pathi / Big Al detail fields
 
-The first compact challenger search showed that ordinary feature reshuffling did not beat the incumbent two-stat market-residual CORE in either 2024 or 2025. V2.5 therefore tests genuinely different football information rather than just adding more of the same box-score variables.
+The compact board was correctly using the authoritative support/conflict fields, but the expanded "Why Bet Authority made each decision" table relied mostly on optional presentation columns (`NCAAF_RV2_System_Summary`, `Pathi_Active_Text`, `BigAl_Active_Text`). That made the detail fields look blank even when Bet Authority had actually consumed a frozen Miner or Pathi vote.
 
-## Expert CORE lanes
+V2.5.2 makes the detail table derive diagnostics from the same authoritative fields used by Bet Authority:
 
-The challenger now builds and tests:
+- `_system_support_sources`
+- `_system_support_families`
+- `_system_conflict_sources`
+- `_system_conflict_families`
 
-1. **POWER_SOS_CONTEXT**
-   - Sequential pregame-only team power
-   - Team and opponent strength of schedule
-   - Conference member strength
-   - Cross-conference residual strength
-   - Home/away/neutral role
-   - Rest differential
-   - Season maturity / games played
-   - Power-rating disagreement with the opening market
+It still shows the richer raw RV2 / Pathi / Big Al text when available, but now falls back to explicit normalized states such as:
 
-2. **STRUCTURED_STATS**
-   - Opponent-adjusted efficiency
-   - Passing and rushing efficiency
-   - Turnover/takeaway pressure
-   - First-down / conversion proxy
-   - Tempo and play mix
-   - Offense-vs-defense matchup features
-   - Any EPA / success-rate / explosiveness / havoc / line-yards / field-position style numeric fields already present in the processed research frame
+- `SUPPORT: MINER_DOG_3_7`
+- `CONFLICT: MINER_DOG_3_7`
+- `SUPPORT: PATHI_CROSSED_KEY_AWAY_FADE`
+- `CONFLICT: PATHI_CROSSED_KEY_AWAY_FADE`
 
-3. **EXPERT_COMBINED**
-   - Power/SOS/conference context + the strongest discovery-selected football statistics + preregistered matchup/trend interactions
+The current exported detail table contained 17 rows with actual Miner support/conflict and 19 rows with actual Pathi support/conflict, while all of the old display-only diagnostic columns were blank. The new helper surfaces those real authority states.
 
-4. **PROGRAM_HIERARCHY**
-   - Regularized team, opponent, conference and opponent-conference categorical effects
-   - Compact numeric football/strength context
-   - This is designed to learn persistent program/conference strength without hard-coding school rankings.
+## What did NOT change
 
-5. **INCUMBENT_PLUS_SPECIALIST**
-   - A frozen discovery-selected blend of the current Production V1 CORE and the strongest specialist challenger
-   - Allows incremental specialist information to help without forcing a full CORE replacement.
-
-## Validation contract
-
-- 2022: initial training
-- 2023: feature/model/blend selection only
-- 2024: untouched confirmation
-- 2025: untouched confirmation
-- 2026+: sealed and never queried by CORE research
-
-A challenger is not promotion-eligible unless it beats the incumbent RMSE in **both 2024 and 2025**, improves pooled RMSE, does not worsen pooled MAE, and then survives paired-bootstrap review. Even a passing challenger remains research-only and must be frozen into prospective shadow before any manual production promotion.
-
-## Production safety
-
-- Production V1 CORE: unchanged
-- Production probabilities: unchanged
-- NCAAF Bet Authority: unchanged
-- Miner authority: unchanged
-- Weekly workflow: unchanged
-- Automatic model promotion: disabled
-- Automatic policy promotion: disabled
-
-No Pathi, Big Al, Miner, closing line, live line movement, or 2026 result can enter this CORE challenger.
-
-## Operator workflows
-
-The UI remains the same two-workflow model:
-
-- **NCAAF Production — Weekly Update** — normal weekly production refresh. No research/refit/promotion.
-- **NCAAF Research — Heavy Challenger Search** — runs STAT/System Miner research and this new expert CORE challenger.
+- NCAAF Spread CORE: unchanged
+- H2H CORE: unchanged
+- Totals CORE: unchanged
+- CORE 2% edge + 2% EV candidate gates: unchanged
+- STAT authority: unchanged
+- Pathi rules: unchanged
+- Big Al rules: unchanged
+- Miner qualification: unchanged
+- `STRONG_VALIDATED` live-authority gate: unchanged
+- Bet Authority: unchanged
+- Heavy Research: unchanged
+- 2026 remains sealed from research selection
+- Production contract source tag: unchanged
+- Automatic model/policy promotion: disabled
 
 ## Deploy
 
-From NCAAF V2.4:
+From V2.5.1, only two runtime files need to change:
 
-1. Add `ncaaf_core_challenger_v2.py`.
-2. Replace `train_job.py`.
-3. Replace `sharp_line_dashboard.py`.
-4. Remove the retired `ncaaf_core_challenger_v1.py` after the new deployment is confirmed.
+1. `ncaaf_production_v1.py`
+2. `sharp_line_dashboard.py`
 
-The full bundle also includes the unchanged current `ncaaf_research_v2.py`, `ncaaf_production_v1.py`, `ncaaf_production_ledger_v1.py`, and `utils.py` for a complete synchronized snapshot.
+The full ZIP includes the synchronized unchanged files as well.
 
-Then run **NCAAF Research — Heavy Challenger Search** once and review the CORE Challenger V2 section/log. Do not publish a new production contract unless a challenger later passes the full promotion process and is explicitly approved.
+After deployment, run **NCAAF Production — Weekly Update** once so the current board is rebuilt with canonical physical-game identity. You do **not** need to rerun Heavy Research for this patch.
+
+The normal background scanner will then continue using the same dedupe logic for prospective captures.

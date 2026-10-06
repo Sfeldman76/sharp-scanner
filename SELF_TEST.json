@@ -1,81 +1,35 @@
 {
-  "automatic_promotion": false,
-  "core_v2_self_test": {
-    "audit": {
-      "conference_k": 0.08,
-      "coverage": {
-        "Expert_AbsOpenMargin": 1.0,
-        "Expert_ConferenceMemberPowerDiff": 1.0,
-        "Expert_ConferenceVsMarket": 1.0,
-        "Expert_CrossConferenceRatingDiff": 1.0,
-        "Expert_EarlyGame": 1.0,
-        "Expert_FavoriteRole": 1.0,
-        "Expert_HomeRole": 1.0,
-        "Expert_MinGamesPrior": 1.0,
-        "Expert_OpenMargin": 1.0,
-        "Expert_OppGamesPrior": 1.0,
-        "Expert_OppPower": 1.0,
-        "Expert_OppSOS": 0.0,
-        "Expert_OppVsConference": 1.0,
-        "Expert_PowerDiff": 1.0,
-        "Expert_PowerUncertainty": 1.0,
-        "Expert_PowerVsMarket": 1.0,
-        "Expert_RestDiffDays": 0.0,
-        "Expert_SOSDiff": 0.0,
-        "Expert_SameConference": 1.0,
-        "Expert_TeamGamesPrior": 1.0,
-        "Expert_TeamPower": 1.0,
-        "Expert_TeamSOS": 0.5,
-        "Expert_TeamVsConference": 1.0
-      },
-      "feature_count": 23,
-      "offseason_shrink": 0.68,
-      "power_k": 0.16
-    },
-    "automatic_promotion": false,
-    "expert_feature_count": 23,
-    "production_authority": 0,
-    "source_tag": "ncaaf-core-challenger-v2.0-expert-specialist-strength-20261005",
-    "status": "PASS",
-    "year_2026_queried": false
+  "authority_diagnostics": {
+    "big_al_rows_in_current_export": 0,
+    "miner_authority_rows_expected": 17,
+    "miner_authority_rows_resolved": 17,
+    "pathi_authority_rows_expected": 19,
+    "pathi_authority_rows_resolved": 19,
+    "status": "PASS"
   },
-  "heavy_route_v2": true,
-  "production_mutation": false,
+  "bet_authority_changed": false,
+  "core_changed": false,
+  "deploy": {
+    "heavy_research_required": false,
+    "replace": [
+      "ncaaf_production_v1.py",
+      "sharp_line_dashboard.py"
+    ],
+    "rerun": "NCAAF Production \u2014 Weekly Update"
+  },
+  "physical_game_identity": {
+    "canonical_variant_count": 2,
+    "cluster_hours": 18,
+    "separate_rematch_preserved": true,
+    "status": "PASS",
+    "synthetic_two_kickoff_variants_collapsed": true,
+    "user_export_board_rows": 61,
+    "user_export_duplicate_matchup_rows": 4,
+    "user_export_unique_matchups": 59
+  },
+  "production_logic_changed": false,
   "python_compile": true,
-  "release": "NCAAF_V2_5_1_PREFLIGHT_HOTFIX",
-  "research_v22_self_test": {
-    "american_unit_profit_test": [
-      2.0,
-      0.5
-    ],
-    "confirmation_gate": "BOTH_2024_AND_2025",
-    "families": [
-      "MARKET_MICROSTRUCTURE",
-      "RUN_PASS_MATCHUP"
-    ],
-    "h2h_price_gate": "OBSERVED_TEAM_AND_OPPONENT_ML_ONLY",
-    "live_authority_policy": "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005",
-    "live_min_confirmation_n": 60,
-    "live_min_confirmation_rate": 0.56,
-    "qvalues": [
-      0.03,
-      0.06,
-      0.20000000000000004
-    ],
-    "source_tag": "ncaaf-research-v2.2-advanced-miner-live-overlay-20261005",
-    "status": "PASS",
-    "strong_confirmed_authority": true,
-    "weak_confirmed_authority": false
-  },
-  "status": "PASS",
-  "two_workflow_ui": true,
-  "v251_preflight_hotfix": {
-    "loads_v2_variable": "_nccv2",
-    "production_logic_changed": false,
-    "python_compile": true,
-    "research_logic_changed": false,
-    "stale_v1_references_in_train_job": 0,
-    "status": "PASS",
-    "v2_source_tag": "ncaaf-core-challenger-v2.0-expert-specialist-strength-20261005"
-  }
+  "release": "NCAAF_V2_5_2_PHYSICAL_GAME_DEDUPE_AUTHORITY_DIAGNOSTICS",
+  "research_changed": false,
+  "status": "PASS"
 }

@@ -48124,6 +48124,66 @@ def _v1350_prepare_live_three_market_shadow_rows(df_moves_raw, label):
         return d, {'status':'SCORING_ERROR','error':f'{type(e).__name__}:{e}'}
 
 
+def _ncaaf_clean_diag_text(v):
+    """Normalize dashboard diagnostic text without converting real zeroes to blanks."""
+    if v is None:
+        return "—"
+    try:
+        if pd.isna(v):
+            return "—"
+    except Exception:
+        pass
+    t=str(v).strip()
+    return "—" if t in ("", "—", "nan", "None", "<NA>") else t
+
+
+def _ncaaf_authority_source_detail(row, source_type, raw_col=None):
+    """Explain the actual bounded evidence that reached Bet Authority.
+
+    Raw Pathi/Big-Al/RV2 text is useful when present, but older frozen systems
+    and some normalized authority votes do not populate those presentation
+    columns.  Reconstruct from the authoritative support/conflict source+family
+    fields so the detail table can never claim there was no trigger when Bet
+    Authority actually consumed one.
+    """
+    src_type=str(source_type or "").upper().strip()
+    parts=[]
+    raw=_ncaaf_clean_diag_text(row.get(raw_col)) if raw_col else "—"
+    if raw != "—":
+        parts.append(raw)
+
+    def split(v):
+        t=_ncaaf_clean_diag_text(v)
+        return [] if t=="—" else [x.strip() for x in t.split("|") if x.strip()]
+
+    prefix_map={
+        "MINER": ("MINER_", "NCAAF-MECH-"),
+        "PATHI": ("PATHI_",),
+        "BIG_AL": ("BIGAL_", "BIG_AL_"),
+        "STAT": ("SPREAD_STAT_COMBO", "STAT_"),
+    }
+    for direction,src_col,fam_col in (
+        ("SUPPORT","_system_support_sources","_system_support_families"),
+        ("CONFLICT","_system_conflict_sources","_system_conflict_families"),
+    ):
+        srcs=split(row.get(src_col)); fams=split(row.get(fam_col))
+        selected=[]
+        if srcs and fams and len(srcs)==len(fams):
+            selected=[fam for src,fam in zip(srcs,fams) if str(src).upper().strip()==src_type]
+        elif src_type in [str(x).upper().strip() for x in srcs]:
+            prefixes=prefix_map.get(src_type,())
+            selected=[fam for fam in fams if (not prefixes or str(fam).upper().startswith(prefixes))]
+            if not selected and len(srcs)==1:
+                selected=fams
+        for fam in selected:
+            token=f"{direction}: {fam}"
+            # Keep the richer raw rule text, but add normalized authority state
+            # when it is not already obvious from that text.
+            if fam not in " | ".join(parts) or direction not in " | ".join(parts).upper():
+                parts.append(token)
+    return " | ".join(dict.fromkeys(parts)) if parts else "—"
+
+
 def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     """Lean one-table NCAAF view for independent Spread / H2H / Total models."""
     if df_moves_raw is None or df_moves_raw.empty:
@@ -48336,6 +48396,9 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     _mc[0].metric('Confirmed research',_miner_confirmed); _mc[1].metric('Strong/live authority',_miner_qualified); _mc[2].metric('Evaluable live',_miner_evaluable); _mc[3].metric('Authority triggers',_miner_triggers); _mc[4].metric('Supports CORE',_miner_support); _mc[5].metric('Conflicts CORE',_miner_conflict)
     _shadow_only=max(0,_miner_research_triggers-_miner_triggers)
     st.caption(f'Miner authority gate: 2024–25 confirmation N ≥ 60 and hit rate ≥ 56%, after the original BOTH-2024-and-2025 confirmation gate. 2026 outcomes do not qualify a family. Current research triggers: {_miner_research_triggers}; shadow-only triggers: {_shadow_only}.')
+    _schedule_conflict_games=(int(picks.loc[picks.get('_prod_schedule_conflict',pd.Series(False,index=picks.index)).fillna(False).astype(bool),'_prod_game_id'].nunique()) if '_prod_game_id' in picks.columns else 0)
+    if _schedule_conflict_games:
+        st.caption(f'Schedule normalization merged {_schedule_conflict_games} matchup(s) that arrived with conflicting kickoff-time variants. The freshest/highest-coverage kickoff is used for the production board and ledger identity.')
 
     view=view.sort_values('_game_start')
     main=view[['Game Time','Matchup','Spr Action','Spr Pick','Spr Prob','Spr Edge','Spr Support','Spr Conflict','H2H Action','H2H Pick','H2H Prob','H2H Edge','Tot Action','Tot Pick','Tot Prob','Tot Edge','Tot Support','Tot Conflict','Production Plays','Pathi State','Miner State','System Trigger']].copy()
@@ -48354,7 +48417,10 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
                 'Support Count':_r.get('_system_support_count'),'Support Sources':_r.get('_system_support_sources'),'Support Families':_r.get('_system_support_families'),
                 'Conflict Count':_r.get('_system_conflict_count'),'Conflict Sources':_r.get('_system_conflict_sources'),'Conflict Families':_r.get('_system_conflict_families'),
                 'Confidence':_r.get('_bet_authority_confidence'),'Reason':_r.get('_prod_reason'),
-                'Miner Authority Triggers':_r.get('NCAAF_RV2_System_Summary','—'),'Miner Research Triggers':_r.get('NCAAF_RV2_Research_System_Summary','—'),'Pathi':_r.get('Pathi_Active_Text','—'),'Big Al':_r.get('BigAl_Active_Text','—'),
+                'Miner Authority Triggers':_ncaaf_authority_source_detail(_r,'MINER','NCAAF_RV2_System_Summary'),
+                'Miner Research Triggers':_ncaaf_clean_diag_text(_r.get('NCAAF_RV2_Research_System_Summary','—')),
+                'Pathi':_ncaaf_authority_source_detail(_r,'PATHI','Pathi_Active_Text'),
+                'Big Al':_ncaaf_authority_source_detail(_r,'BIG_AL','BigAl_Active_Text'),
                 'Book':_r.get('_book'),'Price':_r.get('_odds'),'Quote Age Min':(now-_r.get('_ts')).total_seconds()/60.0 if pd.notna(_r.get('_ts')) else np.nan,
             })
         st.dataframe(pd.DataFrame(_detail),use_container_width=True,hide_index=True)
