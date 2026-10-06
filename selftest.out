@@ -29,8 +29,5 @@
     "ESPN_FPI": "lineespn",
     "PIGSKIN_INDEX": "Pigskin Index"
   },
-  "pt_fuzzy_header_rejected": true,
-  "pt_relay_csv_payload": true,
-  "pt_relay_named_markdown": true,
-  "expert_side_bridge": true
+  "pt_fuzzy_header_rejected": true
 }

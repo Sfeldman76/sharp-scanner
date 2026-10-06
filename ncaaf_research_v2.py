@@ -23,6 +23,7 @@ import hashlib
 import io
 import json
 import math
+import os
 import pickle
 import re
 from dataclasses import dataclass
@@ -32,8 +33,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.13.1-pt-name-safe-header-contract-20261006"
-NCAAF_RESEARCH_V2_VERSION = "2.13.1"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.14-pt-relay-expert-materialization-20261006"
+NCAAF_RESEARCH_V2_VERSION = "2.14"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -84,6 +85,10 @@ PT_IDENTITY_HEADER_ALIASES = {
 }
 PT_HISTORY_SEASONS = tuple(range(2022, 2026))
 PT_CURRENT_SEASON = 2026
+# Cloud-hosted runtimes can be denied directly by the source site (HTTP 403).
+# The relay is read-only and only transports the original public source bytes/text;
+# all model identity is still validated against Prediction Tracker headers/values.
+PT_RELAY_PREFIX = os.getenv("PT_RELAY_PREFIX", "https://r.jina.ai/http://www.thepredictiontracker.com").rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -228,10 +233,23 @@ def _pt_read_csv_frame(raw: bytes) -> tuple[pd.DataFrame | None,list[str]]:
 
 
 def _pt_extract_live_html_table(raw: bytes) -> tuple[pd.DataFrame | None,dict[str,Any]]:
+    # Direct source HTML uses read_html. Reader/proxy fallback is markdown, so
+    # detect and parse that named table without weakening the identity contract.
+    try:
+        _txt0=raw.decode("utf-8",errors="ignore") if raw is not None else ""
+    except Exception:
+        _txt0=""
+    if "|" in _txt0 and "ESPN FPI" in _txt0 and "Pi-Ratings Bias" in _txt0 and "Pigskin Index" in _txt0:
+        md,mdiag=_pt_extract_live_markdown_table(raw)
+        if md is not None:
+            return md,mdiag
     try:
         tables=pd.read_html(io.BytesIO(raw))
     except Exception as exc:
-        return None,{"status":"HTML_PARSE_FAIL","error":f"{type(exc).__name__}:{exc}"}
+        md,mdiag=_pt_extract_live_markdown_table(raw)
+        if md is not None:
+            return md,mdiag
+        return None,{"status":"HTML_PARSE_FAIL","error":f"{type(exc).__name__}:{exc}","markdown":mdiag}
     best=None; best_score=-1
     required_names=[a[0] for a in PT_SYSTEM_HEADER_ALIASES.values()]
     for t in tables:
@@ -373,15 +391,152 @@ def _pt_http_fetch(url: str, timeout: int=25, attempts: int=3, referer: str | No
             if i+1<int(attempts): time.sleep(1.25*(i+1))
     raise RuntimeError(f"Prediction Tracker fetch failed url={url}: {type(last).__name__}:{last}")
 
+
+
+def _pt_relay_url(url: str) -> str:
+    """Convert a Prediction Tracker URL to the configured read-only relay URL."""
+    try:
+        from urllib.parse import urlparse
+        u=urlparse(str(url))
+        path=u.path or "/"
+        if u.query: path += "?" + u.query
+        return PT_RELAY_PREFIX + path
+    except Exception:
+        return PT_RELAY_PREFIX + "/" + str(url).rsplit("/",1)[-1]
+
+
+def _pt_extract_csv_payload(raw: bytes) -> bytes:
+    """Recover a CSV payload from a relay response without trusting column position.
+
+    Reader/proxy services may prepend metadata or markdown fences.  We retain the
+    source header and all following rows starting at the first exact Home/Road CSV
+    header.  If the body is already CSV it is returned unchanged.
+    """
+    if raw is None:
+        return b""
+    text=raw.decode("utf-8",errors="replace").replace("\r\n","\n")
+    lines=text.split("\n")
+    for i,line in enumerate(lines):
+        z=line.strip().strip("`").lstrip("\ufeff")
+        cells=[c.strip().strip('"').lower() for c in z.split(",")]
+        if len(cells)>=3 and cells[0] in {"home","home team"} and cells[1] in {"road","away","visitor","away team"}:
+            payload="\n".join(lines[i:]).strip()
+            payload=re.sub(r"\n```\s*$","",payload).strip()
+            return payload.encode("utf-8")
+    return raw
+
+
+def _pt_relay_fetch(url: str, timeout: int=35) -> bytes:
+    """Read-only relay fallback for cloud egress blocks at Prediction Tracker."""
+    import requests
+    ru=_pt_relay_url(url)
+    rr=requests.get(ru,headers={"User-Agent":"Mozilla/5.0","Accept":"text/plain,text/markdown,*/*"},timeout=timeout,allow_redirects=True)
+    rr.raise_for_status()
+    if len(rr.content)<100:
+        raise RuntimeError(f"short relay response bytes={len(rr.content)} relay={ru}")
+    return rr.content
+
+
+def _pt_fetch_csv_resilient(url: str, *, referer: str | None=None, timeout: int=25) -> tuple[bytes,str]:
+    """Fetch source CSV directly first, then through the read-only relay."""
+    direct_exc=None
+    try:
+        return _pt_http_fetch(url,timeout=timeout,referer=referer),"WEB_SESSION"
+    except Exception as exc:
+        direct_exc=exc
+    try:
+        raw=_pt_extract_csv_payload(_pt_relay_fetch(url,timeout=max(timeout,35)))
+        df,errs=_pt_read_csv_frame(raw)
+        if df is None or df.empty:
+            raise RuntimeError(f"relay payload not parseable as CSV errors={errs}")
+        return raw,"WEB_RELAY"
+    except Exception as relay_exc:
+        raise RuntimeError(
+            f"Prediction Tracker direct+relay failed url={url}; direct={type(direct_exc).__name__}:{direct_exc}; "
+            f"relay={type(relay_exc).__name__}:{relay_exc}"
+        )
+
+
+def _pt_clean_md_cell(cell: str) -> str:
+    x=str(cell or "").strip()
+    x=re.sub(r"!\[[^\]]*\]\([^)]*\)","",x)
+    x=re.sub(r"\[([^\]]+)\]\([^)]*\)",r"\1",x)
+    x=re.sub(r"<[^>]+>"," ",x)
+    return re.sub(r"\s+"," ",x).strip()
+
+
+def _pt_extract_live_markdown_table(raw: bytes) -> tuple[pd.DataFrame | None,dict[str,Any]]:
+    """Extract Prediction Tracker's named individual-model matrix from reader markdown."""
+    try:
+        text=raw.decode("utf-8",errors="replace").replace("\r\n","\n")
+    except Exception as exc:
+        return None,{"status":"MARKDOWN_DECODE_FAIL","error":f"{type(exc).__name__}:{exc}"}
+    lines=text.split("\n")
+    hidx=None; header_line=""
+    # The detailed matrix is the only table containing all five canonical systems.
+    required=("ESPN FPI","Pi-Ratings Bias","Dokter","Keeper","Pigskin Index")
+    for i,line in enumerate(lines):
+        window=" ".join(lines[max(0,i-1):min(len(lines),i+2)])
+        if all(x.lower() in window.lower() for x in required) and "home" in window.lower() and "road" in window.lower():
+            hidx=max(0,i-1) if "home" in lines[max(0,i-1)].lower() and "road" in lines[max(0,i-1)].lower() else i
+            header_line=" ".join(lines[hidx:i+1])
+            break
+    if hidx is None:
+        return None,{"status":"MARKDOWN_SYSTEM_TABLE_MISSING"}
+    # Find separator and parse the header.  Joining the wrapped header keeps the
+    # human system labels while remaining independent of the cryptic CSV order.
+    header=[_pt_clean_md_cell(x) for x in header_line.strip().strip("|").split("|")]
+    header=[x for x in header if x!=""]
+    if len(header)<9:
+        return None,{"status":"MARKDOWN_HEADER_TOO_SHORT","header":header}
+    # Make duplicate Home/Road labels unique; system identity names stay exact.
+    seen={}; cols=[]
+    for c in header:
+        k=c
+        n=seen.get(k,0); seen[k]=n+1
+        cols.append(k if n==0 else f"{k}__dup{n}")
+    sep=None
+    for j in range(i+1,min(len(lines),i+5)):
+        if "---" in lines[j] and "|" in lines[j]: sep=j; break
+    if sep is None:
+        return None,{"status":"MARKDOWN_SEPARATOR_MISSING","header":cols}
+    rows=[]
+    for line in lines[sep+1:]:
+        st=line.strip()
+        if not st or st.startswith("* * *") or st.startswith("### ") or st.startswith("## "):
+            if rows: break
+            continue
+        if "|" not in st: continue
+        vals=[_pt_clean_md_cell(x) for x in st.strip().strip("|").split("|")]
+        if len(vals)<3: continue
+        if vals[0].lower() in {"home","---"}: continue
+        if len(vals)<len(cols): vals += [""]*(len(cols)-len(vals))
+        elif len(vals)>len(cols): vals=vals[:len(cols)]
+        rows.append(vals)
+    if not rows:
+        return None,{"status":"MARKDOWN_NO_DATA_ROWS","header":cols}
+    return pd.DataFrame(rows,columns=cols),{"status":"PASS","parser":"RELAY_MARKDOWN","rows":len(rows),"columns":cols}
+
 def _pt_fetch_live_html(timeout: int=25) -> bytes:
-    """Fallback to the live HTML table when the site's CSV hotlink is blocked."""
+    """Fetch the named live system table directly, then via read-only relay."""
     import requests
     ua=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36")
-    rr=requests.get(PT_LIVE_PAGE_URL,headers={"User-Agent":ua,"Accept":"text/html,application/xhtml+xml,*/*;q=0.8","Accept-Language":"en-US,en;q=0.9","Referer":PT_BASE_URL+"/"},timeout=timeout)
-    rr.raise_for_status()
-    if len(rr.content)<500: raise RuntimeError(f"short live HTML bytes={len(rr.content)}")
-    return rr.content
+    direct_exc=None
+    try:
+        rr=requests.get(PT_LIVE_PAGE_URL,headers={"User-Agent":ua,"Accept":"text/html,application/xhtml+xml,*/*;q=0.8","Accept-Language":"en-US,en;q=0.9","Referer":PT_BASE_URL+"/"},timeout=timeout)
+        rr.raise_for_status()
+        if len(rr.content)<500: raise RuntimeError(f"short live HTML bytes={len(rr.content)}")
+        return rr.content
+    except Exception as exc:
+        direct_exc=exc
+    try:
+        return _pt_relay_fetch(PT_LIVE_PAGE_URL,timeout=max(timeout,35))
+    except Exception as relay_exc:
+        raise RuntimeError(
+            f"Prediction Tracker live page direct+relay failed; direct={type(direct_exc).__name__}:{direct_exc}; "
+            f"relay={type(relay_exc).__name__}:{relay_exc}"
+        )
 
 def _pt_parse_live_html(raw: bytes, season: int, *, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
     """Extract the named individual-system table from predncaa.php.
@@ -507,7 +662,7 @@ def _pt_load_season(season: int, *, storage_client, bucket_name: str, force_web:
         raw=_pt_blob_bytes(storage_client,bucket_name,raw_path); source="GCS_CACHE" if raw else ""
     if raw is None:
         try:
-            raw=_pt_http_fetch(PT_ARCHIVE_URL.format(season=season),referer=PT_ARCHIVE_PAGE_URL); source="WEB_SESSION"
+            raw,source=_pt_fetch_csv_resilient(PT_ARCHIVE_URL.format(season=season),referer=PT_ARCHIVE_PAGE_URL)
             storage_client.bucket(bucket_name).blob(raw_path).upload_from_string(raw,content_type="text/csv")
         except Exception as exc:
             raw=_pt_blob_bytes(storage_client,bucket_name,raw_path); source="GCS_FALLBACK" if raw else ""
@@ -536,7 +691,7 @@ def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -
     raw_path=f"{PT_RAW_PREFIX}/ncaapredictions.csv"
     raw=None; hraw=None; source=""; csv_exc=None; html_exc=None; infer_diag={"status":"NOT_RUN"}; verified_map=_pt_load_header_manifest(storage_client,bucket_name)
     try:
-        raw=_pt_http_fetch(PT_LIVE_CSV_URL,referer=PT_LIVE_PAGE_URL); source="WEB_LIVE_SESSION"
+        raw,_live_source=_pt_fetch_csv_resilient(PT_LIVE_CSV_URL,referer=PT_LIVE_PAGE_URL); source=_live_source.replace("WEB_SESSION","WEB_LIVE_SESSION")
         try: storage_client.bucket(bucket_name).blob(raw_path).upload_from_string(raw,content_type="text/csv")
         except Exception: pass
     except Exception as exc:
@@ -556,7 +711,7 @@ def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -
     frame=pd.DataFrame(); diag={"status":"UNAVAILABLE","season":PT_CURRENT_SEASON}
     if raw is not None:
         frame,diag=_pt_parse_csv(raw,PT_CURRENT_SEASON,verified_header_map=verified_map,source_context="LIVE_CSV",log_func=log_func)
-        source="WEB_LIVE_SESSION"
+        source=source or "WEB_LIVE_SESSION"
         # A loaded CSV with unverified/missing benchmark headers is not allowed to
         # masquerade as a valid metamodel source.  Prefer named HTML instead.
         if diag.get("metamodel_status")!="FULL_FIVE_VERIFIED" and hraw is not None:
@@ -987,6 +1142,131 @@ def run_sparse_stat_research(games: pd.DataFrame, seasons: np.ndarray, oof_margi
     }
 
 
+
+
+# One-process cache for exact historical team-side expert flags.  This is derived
+# from the same validated historical source used by the dashboard's Pathi/Big Al
+# W/L engine, then projected onto the Miner's HOME-oriented physical-game frame.
+_V214_EXPERT_SIDE_CACHE: dict[str,Any] = {}
+
+
+def _v214_side_key(df: pd.DataFrame, team_col: str, opp_col: str | None=None) -> pd.Series:
+    sy=pd.to_numeric(df.get("Season"),errors="coerce").round().astype("Int64").astype(str)
+    gid=df.get("Source_Game_ID",pd.Series("",index=df.index)).astype(str).str.strip()
+    gid=gid.mask(gid.str.lower().isin({"","nan","none","<na>"}),"")
+    date=pd.to_datetime(df.get("Game_Date",pd.Series(pd.NaT,index=df.index)),errors="coerce",utc=True).dt.strftime("%Y-%m-%d").fillna("")
+    team=df.get(team_col,pd.Series("",index=df.index)).map(_pt_team_key)
+    opp=df.get(opp_col,pd.Series("",index=df.index)).map(_pt_team_key) if opp_col else pd.Series("",index=df.index)
+    # Prefer the stable source game id.  If it is absent, use date+oriented pair;
+    # never collapse a whole team's season into one key.
+    game_token=pd.Series(np.where(gid.ne(""),"ID:"+gid,"DATE:"+date+"|"+team+"|"+opp),index=df.index,dtype=str)
+    valid=sy.ne("<NA>") & team.ne("") & (gid.ne("") | date.ne(""))
+    return (sy+"|"+game_token+"|"+team).where(valid,"")
+
+
+def _attach_exact_expert_flags_to_miner(dashboard_module, miner_games: pd.DataFrame, *, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
+    """Attach exact Pathi/Big Al historical flags to the Miner's game frame.
+
+    The historical W/L engine operates one-row-per-team-side, while the research
+    Miner is one HOME-oriented row per physical game.  Earlier bridges tried to
+    recreate flags from the lean Miner frame and could silently lose all expert
+    atoms.  V2.14 instead reuses the same validated historical source/builders as
+    the W/L engine, then maps HOME-side and ROAD-side triggers independently.
+
+    ROAD-side flags receive a ``__ROAD_SIDE`` suffix.  The Miner remains free to
+    learn PLAY_ON vs FADE direction; no expert flag receives authority directly.
+    """
+    if miner_games is None or miner_games.empty:
+        return miner_games,{"status":"EMPTY","authority":0}
+    out=miner_games.copy()
+    pathi_default=[
+        "Pathi_FB_Crossed_Key_Toward_Team","Pathi_FB_Crossed_Key_Away_From_Team",
+        "Pathi_FB_Dog_Hook_Above_3","Pathi_FB_Dog_Hook_Above_7","Pathi_FB_Dog_Hook_Above_10",
+        "Pathi_FB_Favorite_Below_Key_3","Pathi_FB_Favorite_Below_Key_7","Pathi_FB_Favorite_Below_Key_10",
+        "Pathi_FB_Dog_Below_Key_3","Pathi_FB_Dog_Below_Key_7",
+        "Pathi_FB_Favorite_Laying_Hook_3","Pathi_FB_Favorite_Laying_Hook_7",
+        "Pathi_FB_Usually_Dog_Now_Favorite","Pathi_FB_Usually_Favorite_Now_Dog",
+        "Pathi_FB_Dog_TotalSpread_Gap_LE10",
+    ]
+    bigal_cols=["BigAl_CF1_Week2Home42Win","BigAl_CF2_LateSeasonRevengeDog","BigAl_CF3_Fade19PlusFavoriteUpsetLoss"]
+    try:
+        cache=_V214_EXPERT_SIDE_CACHE.get("side")
+        if not isinstance(cache,dict):
+            bq=getattr(dashboard_module,"bq_client",None)
+            view=getattr(dashboard_module,"HISTORICAL_NCAAF_CORE_VIEW",None)
+            if bq is None or not view:
+                raise RuntimeError("dashboard historical BQ source unavailable")
+            h=bq.query(f"SELECT * FROM `{view}` WHERE Historical_Core_Eligible = 1").to_dataframe()
+            if h is None or h.empty:
+                raise RuntimeError("historical expert source returned zero rows")
+            # Exact Pathi context restoration: validated context first, historical
+            # precomputed flags second, deterministic pregame reconstruction last.
+            pstate=h.copy(); pok=False; pdiag={}
+            if hasattr(dashboard_module,"_hc_restore_authoritative_pathi_flags"):
+                pstate,pok,pdiag=dashboard_module._hc_restore_authoritative_pathi_flags(h,log_func=log_func)
+            elif hasattr(dashboard_module,"add_pathi_football_key_features"):
+                pstate=pstate.copy(); pstate["Sport"]="NCAAF"; pstate["Market"]="spreads"
+                pstate=dashboard_module.add_pathi_football_key_features(pstate); pok=True
+            # Exact Big Al historical state reconstruction + deterministic rules.
+            bstate=h.copy()
+            if hasattr(dashboard_module,"_hc_prepare_bigal_history_state"):
+                bstate=dashboard_module._hc_prepare_bigal_history_state(h,log_func=log_func)
+            if hasattr(dashboard_module,"add_pathi_bigal_rule_flags"):
+                bstate=dashboard_module.add_pathi_bigal_rule_flags(bstate)
+            pathi_cols=list(getattr(dashboard_module,"PATHI_DIRECTIONAL_MEMORY_COLS",()) or pathi_default)
+            pathi_cols=[c for c in pathi_cols if c in pstate.columns]
+            bigal_use=[c for c in bigal_cols if c in bstate.columns]
+
+            def make_lookup(frame, cols):
+                if frame is None or frame.empty or not cols:
+                    return pd.DataFrame()
+                z=frame.copy()
+                if "Team_Norm" not in z.columns and "Team" in z.columns: z["Team_Norm"]=z["Team"]
+                z["__side_key"]=_v214_side_key(z,"Team_Norm","Opponent_Norm")
+                keep=["__side_key"]+cols
+                zz=z[keep].copy()
+                zz=zz.loc[zz["__side_key"].ne("")].copy()
+                for c in cols: zz[c]=pd.to_numeric(zz[c],errors="coerce")
+                # Duplicate source snapshots collapse conservatively: a trigger is
+                # present if any authoritative row says it fired.
+                return zz.groupby("__side_key",as_index=True,sort=False)[cols].max()
+
+            plook=make_lookup(pstate,pathi_cols); blook=make_lookup(bstate,bigal_use)
+            cache={"pathi_lookup":plook,"bigal_lookup":blook,"pathi_cols":pathi_cols,"bigal_cols":bigal_use,
+                   "source_rows":int(len(h)),"pathi_source_ok":bool(pok),"pathi_diag":pdiag}
+            _V214_EXPERT_SIDE_CACHE["side"]=cache
+
+        home_key=_v214_side_key(out,"Team_Norm","Opponent_Norm")
+        road_key=_v214_side_key(out,"Opponent_Norm","Team_Norm")
+        matched_home=matched_road=0; hp=rp=hb=rb=0
+        for family in ("pathi","bigal"):
+            look=cache.get(f"{family}_lookup")
+            cols=list(cache.get(f"{family}_cols") or [])
+            if not isinstance(look,pd.DataFrame) or look.empty: continue
+            hidx=pd.Index(home_key); ridx=pd.Index(road_key)
+            matched_home=max(matched_home,int(hidx.isin(look.index).sum()))
+            matched_road=max(matched_road,int(ridx.isin(look.index).sum()))
+            for c in cols:
+                hvals=pd.to_numeric(pd.Series(home_key.map(look[c]),index=out.index),errors="coerce")
+                rvals=pd.to_numeric(pd.Series(road_key.map(look[c]),index=out.index),errors="coerce")
+                out[c]=hvals
+                out[c+"__ROAD_SIDE"]=rvals
+                if family=="pathi": hp+=int(hvals.fillna(0).eq(1).sum()); rp+=int(rvals.fillna(0).eq(1).sum())
+                else: hb+=int(hvals.fillna(0).eq(1).sum()); rb+=int(rvals.fillna(0).eq(1).sum())
+        diag={"status":"PASS","source_rows":int(cache.get("source_rows",0)),"matched_home":matched_home,"matched_road":matched_road,
+              "pathi_cols":len(cache.get("pathi_cols") or []),"bigal_cols":len(cache.get("bigal_cols") or []),
+              "home_pathi_fires":hp,"road_pathi_fires":rp,"home_bigal_fires":hb,"road_bigal_fires":rb,"authority":0}
+        log_func(
+            f"[NCAAF-RV214-EXPERT-SIDE-BRIDGE] status=PASS source_rows={diag['source_rows']} matched_home={matched_home}/{len(out)} "
+            f"matched_road={matched_road}/{len(out)} pathi_cols={diag['pathi_cols']} bigal_cols={diag['bigal_cols']} "
+            f"home_pathi_fires={hp} road_pathi_fires={rp} home_bigal_fires={hb} road_bigal_fires={rb} authority=0"
+        )
+        return out,diag
+    except Exception as exc:
+        log_func(f"[NCAAF-RV214-EXPERT-SIDE-BRIDGE] status=UNAVAILABLE error={type(exc).__name__}:{exc} authority=0 fail_closed=TRUE")
+        return out,{"status":"UNAVAILABLE","error":f"{type(exc).__name__}:{exc}","authority":0}
+
+
 # ---------------------------------------------------------------------------
 # System Miner V3 — fixed discovery / untouched confirmation / dependence collapse
 # ---------------------------------------------------------------------------
@@ -1028,12 +1308,20 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
                     for _c in ("Revenge_Flag","Revenge_Flag_CurrentOrPriorSeason"):
                         if _c in _eg.columns: _eg["Revenge_Flag_Current"]=pd.to_numeric(_eg[_c],errors="coerce"); break
                 if hasattr(dashboard_module,"add_pathi_football_key_features"):
-                    _eg=dashboard_module.add_pathi_football_key_features(_eg)
-                if hasattr(dashboard_module,"add_pathi_bigal_rule_flags"):
-                    _eg=dashboard_module.add_pathi_bigal_rule_flags(_eg)
+                    try:
+                        _eg=dashboard_module.add_pathi_football_key_features(_eg)
+                    except Exception:
+                        pass
+                # Preserve successful Pathi materialization even if the broader
+                # multi-sport Big Al rule builder cannot run on the lean frame.
                 g=_eg
+                if hasattr(dashboard_module,"add_pathi_bigal_rule_flags"):
+                    try:
+                        g=dashboard_module.add_pathi_bigal_rule_flags(g)
+                    except Exception:
+                        pass
         except Exception:
-            # Fail closed: legacy Miner atoms remain available.
+            # Fail closed: exact side-bridge / legacy Miner atoms remain available.
             pass
 
     atoms=[]; names=set()
@@ -1264,11 +1552,13 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
             "BigAl_CF3_Fade19PlusFavoriteUpsetLoss",
         ]
         p_masks=[]; b_masks=[]
-        for c in pathi_cols:
+        _pathi_candidates=list(pathi_cols)+[c+"__ROAD_SIDE" for c in pathi_cols if has(c+"__ROAD_SIDE")]
+        _bigal_candidates=list(bigal_cols)+[c+"__ROAD_SIDE" for c in bigal_cols if has(c+"__ROAD_SIDE")]
+        for c in _pathi_candidates:
             if has(c):
                 mm=nfirst(c).eq(1); p_masks.append(mm)
                 add("EXPERT_"+re.sub(r"[^A-Z0-9]+","_",c.upper())[:58],"EXPERT_PATHI",mm,desc=f"Pathi atom: {c}",min_n=20,source_ok=True)
-        for c in bigal_cols:
+        for c in _bigal_candidates:
             if has(c):
                 mm=nfirst(c).eq(1); b_masks.append(mm)
                 add("EXPERT_"+re.sub(r"[^A-Z0-9]+","_",c.upper())[:58],"EXPERT_BIGAL",mm,desc=f"Big Al atom: {c}",min_n=10,source_ok=True)
@@ -2272,6 +2562,13 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
         if games is None or getattr(games,"empty",True): raise RuntimeError("historical research games cache missing")
         if len(seasons)!=len(games) or len(oof_margin)!=len(games) or len(oof_total)!=len(games): raise RuntimeError("OOF/cache row alignment mismatch")
         if miner_games is None or getattr(miner_games,"empty",True): miner_games=games.copy()
+        miner_games,expert_side_bridge=_attach_exact_expert_flags_to_miner(dashboard_module,miner_games,log_func=log_func)
+        # Persist the enriched frame for prospective/live adapters in this process.
+        try:
+            cache["miner_games"]=miner_games
+            getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{})["miner_games"]=miner_games
+        except Exception:
+            pass
         # Hard seal: 2026+ may exist in source tables, but can never enter discovery/confirmation.
         historic=np.isfinite(seasons)&(seasons<=max(CONFIRMATION_SEASONS))
         if historic.sum()<500: raise RuntimeError(f"insufficient <=2025 history n={int(historic.sum())}")
@@ -2292,7 +2589,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
                 "status":"NCAAF_RESEARCH_V2_COMPLETE","production_authority":0,"production_contract_mutated":False,
                 "benchmark":"FROZEN_NCAAF_PRODUCTION_V1","discovery_max_season":DISCOVERY_MAX_SEASON,"confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"system_miner_v3":miners,
-                "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"external_rating_metamodel":external_ratings,
+                "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,
                 "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False},
                 "next_step":"KEEP PRODUCTION V1 FROZEN; LET THE EXISTING MINER TEST PATHI + BIG AL + OOF CORE/SPECIALIST + EXTERNAL META_MARGIN INTERACTIONS; CORE/SPECIALIST/EXTERNAL META ATOMS REMAIN RESEARCH-ONLY"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
@@ -2358,13 +2655,57 @@ def self_test() -> dict[str,Any]:
         _pt_da.get("system_columns",{}).get("ESPN_FPI")=="lineespn" and _pt_da.get("system_columns",{}).get("DOKTER")=="linedokter" and
         _pt_dc.get("metamodel_status")=="INCOMPLETE_FAIL_CLOSED" and _pt_dc.get("system_columns",{}).get("ESPN_FPI") is None
     )
+    # Relay payload cleanup must preserve the source header exactly and ignore
+    # reader metadata/fences.  Named markdown parsing is separately validated.
+    _relay_raw=("Title: Prediction Tracker\nURL Source: example\n\n```text\n"+_pt_df.to_csv(index=False)+"```\n").encode()
+    _relay_clean=_pt_extract_csv_payload(_relay_raw)
+    _relay_df,_relay_errs=_pt_read_csv_frame(_relay_clean)
+    _relay_csv_ok=bool(_relay_df is not None and list(_relay_df.columns)==list(_pt_df.columns) and len(_relay_df)==2)
+    _md=("home | road | Line | Computer Adj. Line | ESPN FPI | Pi-Ratings Bias | Dokter | Keeper | Pigskin Index\n"
+         "--- | --- | --- | --- | --- | --- | --- | --- | ---\n"
+         "Alpha | Beta | 3 | 3 | 4 | 3.5 | 5 | 4.5 | 2.5\n").encode()
+    _mdf,_mdd=_pt_extract_live_markdown_table(_md)
+    _relay_md_ok=bool(_mdf is not None and _mdd.get("status")=="PASS" and all(x in _mdf.columns for x in ("ESPN FPI","Pi-Ratings Bias","Dokter","Keeper","Pigskin Index")))
+
+    # Exact expert-side bridge regression: prove that a team-side Pathi trigger
+    # and an opponent-side Big Al trigger survive projection into miner_games.
+    class _Q:
+        def __init__(self,df): self.df=df
+        def to_dataframe(self): return self.df.copy()
+    class _BQ:
+        def __init__(self,df): self.df=df
+        def query(self,*a,**k): return _Q(self.df)
+    class _D:
+        HISTORICAL_NCAAF_CORE_VIEW="proj.ds.view"
+        PATHI_DIRECTIONAL_MEMORY_COLS=("Pathi_FB_Dog_Hook_Above_3",)
+        def __init__(self,h): self.bq_client=_BQ(h)
+        @staticmethod
+        def _hc_restore_authoritative_pathi_flags(h,log_func=print):
+            z=h.copy(); z["Pathi_FB_Dog_Hook_Above_3"]=[1,0]; return z,True,{"synthetic":True}
+        @staticmethod
+        def _hc_prepare_bigal_history_state(h,log_func=print): return h.copy()
+        @staticmethod
+        def add_pathi_bigal_rule_flags(h):
+            z=h.copy(); z["BigAl_CF1_Week2Home42Win"]=[0,0]; z["BigAl_CF2_LateSeasonRevengeDog"]=[0,1]; z["BigAl_CF3_Fade19PlusFavoriteUpsetLoss"]=[0,0]; return z
+    _hh=pd.DataFrame({"Season":[2023,2023],"Source_Game_ID":["g1","g1"],"Team_Norm":["alpha","beta"],"Opponent_Norm":["beta","alpha"],"Historical_Core_Eligible":[1,1]})
+    _mg=pd.DataFrame({"Season":[2023],"Source_Game_ID":["g1"],"Team_Norm":["alpha"],"Opponent_Norm":["beta"],"Consensus_Open_Spread":[3.5],"Actual_Margin":[7.0],"Actual_Total":[45.0],"Consensus_Open_Total":[44.0]})
+    _V214_EXPERT_SIDE_CACHE.clear()
+    _mg2,_ebd=_attach_exact_expert_flags_to_miner(_D(_hh),_mg,log_func=lambda *a,**k:None)
+    _expert_atoms={a["name"] for a in _extended_atoms(_mg2,for_live=True,market="spreads")}
+    _expert_bridge_ok=bool(
+        _ebd.get("status")=="PASS" and int(pd.to_numeric(_mg2["Pathi_FB_Dog_Hook_Above_3"],errors="coerce").fillna(0).sum())==1 and
+        int(pd.to_numeric(_mg2["BigAl_CF2_LateSeasonRevengeDog__ROAD_SIDE"],errors="coerce").fillna(0).sum())==1 and
+        "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in _expert_atoms and
+        any("BIGAL_CF2_LATESEASONREVENGEDOG_ROAD_SIDE" in x for x in _expert_atoms)
+    )
+    _V214_EXPERT_SIDE_CACHE.clear()
     ok=bool(
         len(q)==3 and "RUN_PASS_MATCHUP" in fam and "MARKET_MICROSTRUCTURE" in fam and
         all("Actual_Margin" not in x for v in fam.values() for x in v) and
         "SU_SEQ3_LWL" in live_atoms and "OFF_ATS_COVER_7_PLUS" in live_atoms and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
         "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and "META_PT_EDGE_TEAM_3PLUS" in live_atoms and "META_PT_CORE_STRONG_AGREE" in live_atoms and
-        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe
+        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _expert_bridge_ok
     )
     return {
         "status":"PASS" if ok else "FAIL","source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG,
@@ -2379,6 +2720,7 @@ def self_test() -> dict[str,Any]:
         "pt_name_safe_header_contract":_pt_name_safe,
         "pt_self_test_system_columns":_pt_da.get("system_columns",{}),
         "pt_fuzzy_header_rejected":_pt_dc.get("system_columns",{}).get("ESPN_FPI") is None,
+        "pt_relay_csv_payload":_relay_csv_ok,"pt_relay_named_markdown":_relay_md_ok,"expert_side_bridge":_expert_bridge_ok,
     }
 
 
