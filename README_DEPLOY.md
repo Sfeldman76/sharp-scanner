@@ -1,9 +1,9 @@
-# NCAAF Engine V2.13 — Prediction Tracker Name-Safe Header Contract
+# NCAAF Engine V2.13.1 — Prediction Tracker Name-Safe Header Contract
 
 This is a narrow patch on top of V2.12. Production V1 remains frozen.
 
 ## Why this patch exists
-Prediction Tracker CSV exports can use cryptic headers such as `linedokter` and `lineespn`, while the website displays human system names such as Dokter and ESPN FPI. V2.13 removes any possibility that a system prediction can be assigned by column position or fuzzy substring guessing.
+Prediction Tracker CSV exports can use cryptic headers such as `linedokter` and `lineespn`, while the website displays human system names such as Dokter and ESPN FPI. V2.13.1 removes any possibility that a system prediction can be assigned by column position or fuzzy substring guessing.
 
 ## Name-safe contract
 - Home/Road identities resolve only by exact normalized header names. There is no positional fallback.
@@ -14,7 +14,7 @@ Prediction Tracker CSV exports can use cryptic headers such as `linedokter` and 
 - A single source column cannot be assigned to two canonical systems.
 
 ## Automatic cryptic-header verification
-When both the live CSV and live HTML table are available, V2.13 compares the actual prediction vectors game-by-game. A cryptic CSV header is associated with a named system only when one unique column reproduces the human-named HTML values across at least 8 games with >=98% agreement to 0.01 points. The verified mapping is cached at:
+When both the live CSV and live HTML table are available, V2.13.1 compares the actual prediction vectors game-by-game. A cryptic CSV header is associated with a named system only when one unique column reproduces the human-named HTML values across at least 8 games with >=98% agreement to 0.01 points. The verified mapping is cached at:
 
 `gs://sharp-models/research/ncaaf/external/prediction_tracker/header_manifest.json`
 
@@ -48,3 +48,10 @@ Redeploy and run **NCAAF Research — Heavy Challenger Search**.
 - Header-order regression PASS: shuffling columns does not change system identity or META_MARGIN.
 - Fuzzy near-miss regression PASS: `lineespn_extra` is rejected rather than treated as ESPN FPI.
 - Synthetic live HTML↔CSV vector verification PASS for all five canonical systems.
+
+
+## V2.13.1 deploy-preflight hotfix
+
+The V2.13 package had an internal preflight mismatch: `ncaaf_research_v2.py` reported the new name-safe header source tag while `train_job.py` still required the older V2.11/V2.12 external-meta tag. V2.13.1 synchronizes both files on `ncaaf-research-v2.13.1-pt-name-safe-header-contract-20261006`. Stale-file protection remains strict.
+
+From V2.13 replace **both** `ncaaf_research_v2.py` and `train_job.py`, redeploy, then run **NCAAF Research — Heavy Challenger Search**.

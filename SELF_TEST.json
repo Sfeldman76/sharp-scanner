@@ -1,7 +1,7 @@
 {
   "research": {
     "status": "PASS",
-    "source_tag": "ncaaf-research-v2.9-pt-name-safe-header-contract-20261006",
+    "source_tag": "ncaaf-research-v2.13.1-pt-name-safe-header-contract-20261006",
     "families": [
       "MARKET_MICROSTRUCTURE",
       "RUN_PASS_MATCHUP"
@@ -33,44 +33,44 @@
     "pt_fuzzy_header_rejected": true
   },
   "core": {
-    "status": "PASS",
-    "source_tag": "ncaaf-core-challenger-v2.4-expert-model-atom-bridge-20261006",
-    "production_authority": 0,
-    "automatic_promotion": false,
-    "year_2026_queried": false,
-    "expert_feature_count": 23,
-    "regime_spec_count": 11,
-    "nullable_mask_regression": true,
     "audit": {
-      "feature_count": 23,
+      "conference_k": 0.08,
       "coverage": {
-        "Expert_TeamPower": 1.0,
-        "Expert_OppPower": 1.0,
-        "Expert_PowerDiff": 1.0,
-        "Expert_TeamSOS": 0.5,
-        "Expert_OppSOS": 0.0,
-        "Expert_SOSDiff": 0.0,
+        "Expert_AbsOpenMargin": 1.0,
         "Expert_ConferenceMemberPowerDiff": 1.0,
+        "Expert_ConferenceVsMarket": 1.0,
         "Expert_CrossConferenceRatingDiff": 1.0,
-        "Expert_TeamVsConference": 1.0,
-        "Expert_OppVsConference": 1.0,
+        "Expert_EarlyGame": 1.0,
+        "Expert_FavoriteRole": 1.0,
         "Expert_HomeRole": 1.0,
+        "Expert_MinGamesPrior": 1.0,
+        "Expert_OpenMargin": 1.0,
+        "Expert_OppGamesPrior": 1.0,
+        "Expert_OppPower": 1.0,
+        "Expert_OppSOS": 0.0,
+        "Expert_OppVsConference": 1.0,
+        "Expert_PowerDiff": 1.0,
+        "Expert_PowerUncertainty": 1.0,
+        "Expert_PowerVsMarket": 1.0,
         "Expert_RestDiffDays": 0.0,
+        "Expert_SOSDiff": 0.0,
         "Expert_SameConference": 1.0,
         "Expert_TeamGamesPrior": 1.0,
-        "Expert_OppGamesPrior": 1.0,
-        "Expert_MinGamesPrior": 1.0,
-        "Expert_EarlyGame": 1.0,
-        "Expert_OpenMargin": 1.0,
-        "Expert_AbsOpenMargin": 1.0,
-        "Expert_FavoriteRole": 1.0,
-        "Expert_PowerVsMarket": 1.0,
-        "Expert_ConferenceVsMarket": 1.0,
-        "Expert_PowerUncertainty": 1.0
+        "Expert_TeamPower": 1.0,
+        "Expert_TeamSOS": 0.5,
+        "Expert_TeamVsConference": 1.0
       },
-      "power_k": 0.16,
+      "feature_count": 23,
       "offseason_shrink": 0.68,
-      "conference_k": 0.08
-    }
+      "power_k": 0.16
+    },
+    "automatic_promotion": false,
+    "expert_feature_count": 23,
+    "nullable_mask_regression": true,
+    "production_authority": 0,
+    "regime_spec_count": 11,
+    "source_tag": "ncaaf-core-challenger-v2.4-expert-model-atom-bridge-20261006",
+    "status": "PASS",
+    "year_2026_queried": false
   }
 }
