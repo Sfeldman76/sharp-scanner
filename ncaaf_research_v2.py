@@ -33,8 +33,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.14.1-pt-relay-save-validation-20261006"
-NCAAF_RESEARCH_V2_VERSION = "2.14"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.14.2-pt-challenge-expert-mask-hotfix-20261006"
+NCAAF_RESEARCH_V2_VERSION = "2.14.2"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -53,6 +53,7 @@ PT_ARCHIVE_URL = PT_BASE_URL + "/ncaa{season}.csv"
 PT_ARCHIVE_PAGE_URL = PT_BASE_URL + "/ncaaarchive.html"
 PT_LIVE_CSV_URL = PT_BASE_URL + "/ncaapredictions.csv"
 PT_LIVE_PAGE_URL = PT_BASE_URL + "/predncaa.php"
+PT_LIVE_PAGE_ALT_URL = PT_BASE_URL + "/predncaa.html"
 PT_RAW_PREFIX = "research/ncaaf/external/prediction_tracker/raw"
 PT_NORMALIZED_PREFIX = "research/ncaaf/external/prediction_tracker/normalized"
 PT_CURRENT_BLOB = "research/ncaaf/external/prediction_tracker/current.csv"  # merged current-season archive + live week
@@ -386,6 +387,8 @@ def _pt_http_fetch(url: str, timeout: int=25, attempts: int=3, referer: str | No
             rr=sess.get(url,headers={**base_headers,"Accept":"text/csv,text/plain,*/*","Referer":parent,"Sec-Fetch-Site":"same-origin","Sec-Fetch-Mode":"navigate"},timeout=timeout,allow_redirects=True)
             rr.raise_for_status(); data=rr.content
             if len(data)<100: raise RuntimeError(f"short response bytes={len(data)}")
+            if _pt_is_challenge_payload(data):
+                raise RuntimeError("anti-bot challenge page returned instead of Prediction Tracker data")
             return data
         except Exception as exc:
             last=exc
@@ -394,16 +397,22 @@ def _pt_http_fetch(url: str, timeout: int=25, attempts: int=3, referer: str | No
 
 
 
-def _pt_relay_url(url: str) -> str:
-    """Convert a Prediction Tracker URL to the configured read-only relay URL."""
+def _pt_relay_urls(url: str) -> list[str]:
+    """Read-only relay variants; HTTPS is preferred, HTTP-origin is fallback."""
     try:
         from urllib.parse import urlparse
-        u=urlparse(str(url))
-        path=u.path or "/"
+        u=urlparse(str(url)); path=u.path or "/"
         if u.query: path += "?" + u.query
-        return PT_RELAY_PREFIX + path
+        https_url=PT_RELAY_PREFIX + path
+        http_url="https://r.jina.ai/http://www.thepredictiontracker.com" + path
+        return list(dict.fromkeys([https_url,http_url]))
     except Exception:
-        return PT_RELAY_PREFIX + "/" + str(url).rsplit("/",1)[-1]
+        leaf=str(url).rsplit("/",1)[-1]
+        return [PT_RELAY_PREFIX+"/"+leaf,"https://r.jina.ai/http://www.thepredictiontracker.com/"+leaf]
+
+def _pt_relay_url(url: str) -> str:
+    """Backward-compatible primary relay URL used by diagnostics."""
+    return _pt_relay_urls(url)[0]
 
 
 def _pt_extract_csv_payload(raw: bytes) -> bytes:
@@ -427,15 +436,34 @@ def _pt_extract_csv_payload(raw: bytes) -> bytes:
     return raw
 
 
+def _pt_is_challenge_payload(raw: bytes) -> bool:
+    """Reject anti-bot/interstitial pages before they can be parsed or cached as PT data."""
+    if not raw:
+        return True
+    head=raw[:12000].decode("utf-8",errors="ignore").lower()
+    markers=(
+        "title: just a moment", "<title>just a moment", "cf-chl-", "challenge-platform",
+        "cloudflare ray id", "enable javascript and cookies", "checking your browser",
+    )
+    return any(m in head for m in markers)
+
+
 def _pt_relay_fetch(url: str, timeout: int=35) -> bytes:
-    """Read-only relay fallback for cloud egress blocks at Prediction Tracker."""
+    """Read-only relay fallback; try HTTPS-origin then HTTP-origin variants."""
     import requests
-    ru=_pt_relay_url(url)
-    rr=requests.get(ru,headers={"User-Agent":"Mozilla/5.0","Accept":"text/plain,text/markdown,*/*"},timeout=timeout,allow_redirects=True)
-    rr.raise_for_status()
-    if len(rr.content)<100:
-        raise RuntimeError(f"short relay response bytes={len(rr.content)} relay={ru}")
-    return rr.content
+    errs=[]
+    for ru in _pt_relay_urls(url):
+        try:
+            rr=requests.get(ru,headers={"User-Agent":"Mozilla/5.0","Accept":"text/plain,text/markdown,*/*"},timeout=timeout,allow_redirects=True)
+            rr.raise_for_status()
+            if len(rr.content)<100:
+                raise RuntimeError(f"short relay response bytes={len(rr.content)}")
+            if _pt_is_challenge_payload(rr.content):
+                raise RuntimeError("anti-bot challenge page")
+            return rr.content
+        except Exception as exc:
+            errs.append(f"{ru}=>{type(exc).__name__}:{exc}")
+    raise RuntimeError("all relay variants failed: "+" | ".join(errs))
 
 
 def _pt_fetch_csv_resilient(url: str, *, referer: str | None=None, timeout: int=25) -> tuple[bytes,str]:
@@ -519,25 +547,27 @@ def _pt_extract_live_markdown_table(raw: bytes) -> tuple[pd.DataFrame | None,dic
     return pd.DataFrame(rows,columns=cols),{"status":"PASS","parser":"RELAY_MARKDOWN","rows":len(rows),"columns":cols}
 
 def _pt_fetch_live_html(timeout: int=25) -> bytes:
-    """Fetch the named live system table directly, then via read-only relay."""
+    """Fetch named live table from .php or static .html, direct then relay."""
     import requests
     ua=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36")
-    direct_exc=None
-    try:
-        rr=requests.get(PT_LIVE_PAGE_URL,headers={"User-Agent":ua,"Accept":"text/html,application/xhtml+xml,*/*;q=0.8","Accept-Language":"en-US,en;q=0.9","Referer":PT_BASE_URL+"/"},timeout=timeout)
-        rr.raise_for_status()
-        if len(rr.content)<500: raise RuntimeError(f"short live HTML bytes={len(rr.content)}")
-        return rr.content
-    except Exception as exc:
-        direct_exc=exc
-    try:
-        return _pt_relay_fetch(PT_LIVE_PAGE_URL,timeout=max(timeout,35))
-    except Exception as relay_exc:
-        raise RuntimeError(
-            f"Prediction Tracker live page direct+relay failed; direct={type(direct_exc).__name__}:{direct_exc}; "
-            f"relay={type(relay_exc).__name__}:{relay_exc}"
-        )
+    errs=[]
+    for page in (PT_LIVE_PAGE_URL,PT_LIVE_PAGE_ALT_URL):
+        try:
+            rr=requests.get(page,headers={"User-Agent":ua,"Accept":"text/html,application/xhtml+xml,*/*;q=0.8","Accept-Language":"en-US,en;q=0.9","Referer":PT_BASE_URL+"/"},timeout=timeout)
+            rr.raise_for_status()
+            if len(rr.content)<500: raise RuntimeError(f"short live HTML bytes={len(rr.content)}")
+            if _pt_is_challenge_payload(rr.content): raise RuntimeError("anti-bot challenge page")
+            return rr.content
+        except Exception as exc:
+            errs.append(f"direct:{page}=>{type(exc).__name__}:{exc}")
+        try:
+            raw=_pt_relay_fetch(page,timeout=max(timeout,35))
+            if _pt_is_challenge_payload(raw): raise RuntimeError("anti-bot challenge page")
+            return raw
+        except Exception as exc:
+            errs.append(f"relay:{page}=>{type(exc).__name__}:{exc}")
+    raise RuntimeError("Prediction Tracker live page variants failed: "+" | ".join(errs))
 
 def _pt_parse_live_html(raw: bytes, season: int, *, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
     """Extract the named individual-system table from predncaa.php.
@@ -1180,6 +1210,18 @@ def _v214_side_key(df: pd.DataFrame, team_col: str, opp_col: str | None=None) ->
     return (sy+"|"+game_token+"|"+team).where(valid,"")
 
 
+def _v214_occurrence_key(df: pd.DataFrame, team_col: str, opp_col: str) -> pd.Series:
+    """Key compatible with dashboard historical-system occurrence ledgers."""
+    season=pd.to_numeric(df.get("Season"),errors="coerce")
+    date=pd.to_datetime(df.get("Game_Date",df.get("Game_Start",pd.Series(pd.NaT,index=df.index))),errors="coerce",utc=True)
+    team=df.get(team_col,pd.Series("",index=df.index)).map(_pt_team_key)
+    opp=df.get(opp_col,pd.Series("",index=df.index)).map(_pt_team_key)
+    yr=season.round().astype("Int64").astype(str)
+    ds=date.dt.strftime("%Y-%m-%d").fillna("")
+    valid=yr.ne("<NA>") & ds.ne("") & team.ne("") & opp.ne("")
+    return (yr+"|"+ds+"|"+team+"|"+opp).where(valid,"")
+
+
 def _attach_exact_expert_flags_to_miner(dashboard_module, miner_games: pd.DataFrame, *, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
     """Attach exact Pathi/Big Al historical flags to the Miner's game frame.
 
@@ -1195,6 +1237,47 @@ def _attach_exact_expert_flags_to_miner(dashboard_module, miner_games: pd.DataFr
     if miner_games is None or miner_games.empty:
         return miner_games,{"status":"EMPTY","authority":0}
     out=miner_games.copy()
+
+    # Primary source: reuse the exact validated directional-system occurrence
+    # ledger already used by the dashboard W/L engine.  This prevents a second
+    # reconstruction from drifting away from the systems we actually graded.
+    hist_cache=getattr(dashboard_module,"_V143_SYSTEM_HISTORY_CACHE",None)
+    if isinstance(hist_cache,dict) and hist_cache:
+        try:
+            home_occ=_v214_occurrence_key(out,"Team_Norm","Opponent_Norm")
+            road_occ=_v214_occurrence_key(out,"Opponent_Norm","Team_Norm")
+            hp=rp=hb=rb=0; pc=bc=0
+            for name,st in hist_cache.items():
+                if not isinstance(st,dict) or str(st.get("role","")).lower()!="directional":
+                    continue
+                fam=str(st.get("family",""))
+                if fam not in {"Pathi","BigAl"}:
+                    continue
+                occ=st.get("occurrences") or []
+                keys={str(r.get("key","")) for r in occ if isinstance(r,dict) and str(r.get("key",""))}
+                if not keys:
+                    continue
+                hv=home_occ.isin(keys).astype("int8")
+                rv=road_occ.isin(keys).astype("int8")
+                out[name]=hv
+                out[name+"__ROAD_SIDE"]=rv
+                if fam=="Pathi":
+                    pc+=1; hp+=int(hv.sum()); rp+=int(rv.sum())
+                else:
+                    bc+=1; hb+=int(hv.sum()); rb+=int(rv.sum())
+            if pc or bc:
+                diag={"status":"PASS_OCCURRENCE_LEDGER","source_rows":int(len(out)*2),
+                      "matched_home":int(home_occ.ne("").sum()),"matched_road":int(road_occ.ne("").sum()),
+                      "pathi_cols":pc,"bigal_cols":bc,"home_pathi_fires":hp,"road_pathi_fires":rp,
+                      "home_bigal_fires":hb,"road_bigal_fires":rb,"authority":0}
+                log_func(
+                    f"[NCAAF-RV2142-EXPERT-OCCURRENCE-BRIDGE] status=PASS pathi_cols={pc} bigal_cols={bc} "
+                    f"home_pathi_fires={hp} road_pathi_fires={rp} home_bigal_fires={hb} road_bigal_fires={rb} authority=0"
+                )
+                return out,diag
+        except Exception as _occ_exc:
+            log_func(f"[NCAAF-RV2142-EXPERT-OCCURRENCE-BRIDGE] status=FALLBACK error={type(_occ_exc).__name__}:{_occ_exc} authority=0")
+
     pathi_default=[
         "Pathi_FB_Crossed_Key_Toward_Team","Pathi_FB_Crossed_Key_Away_From_Team",
         "Pathi_FB_Dog_Hook_Above_3","Pathi_FB_Dog_Hook_Above_7","Pathi_FB_Dog_Hook_Above_10",
@@ -1265,8 +1348,8 @@ def _attach_exact_expert_flags_to_miner(dashboard_module, miner_games: pd.DataFr
             for c in cols:
                 hvals=pd.to_numeric(pd.Series(home_key.map(look[c]),index=out.index),errors="coerce")
                 rvals=pd.to_numeric(pd.Series(road_key.map(look[c]),index=out.index),errors="coerce")
-                out[c]=hvals
-                out[c+"__ROAD_SIDE"]=rvals
+                out[c]=hvals.fillna(0).eq(1).astype("int8")
+                out[c+"__ROAD_SIDE"]=rvals.fillna(0).eq(1).astype("int8")
                 if family=="pathi": hp+=int(hvals.fillna(0).eq(1).sum()); rp+=int(rvals.fillna(0).eq(1).sum())
                 else: hb+=int(hvals.fillna(0).eq(1).sum()); rb+=int(rvals.fillna(0).eq(1).sum())
         diag={"status":"PASS","source_rows":int(cache.get("source_rows",0)),"matched_home":matched_home,"matched_road":matched_road,
@@ -1572,18 +1655,18 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
         _bigal_candidates=list(bigal_cols)+[c+"__ROAD_SIDE" for c in bigal_cols if has(c+"__ROAD_SIDE")]
         for c in _pathi_candidates:
             if has(c):
-                mm=nfirst(c).eq(1); p_masks.append(mm)
+                mm=pd.to_numeric(nfirst(c),errors="coerce").fillna(0).eq(1).astype(bool); p_masks.append(mm)
                 add("EXPERT_"+re.sub(r"[^A-Z0-9]+","_",c.upper())[:58],"EXPERT_PATHI",mm,desc=f"Pathi atom: {c}",min_n=20,source_ok=True)
         for c in _bigal_candidates:
             if has(c):
-                mm=nfirst(c).eq(1); b_masks.append(mm)
+                mm=pd.to_numeric(nfirst(c),errors="coerce").fillna(0).eq(1).astype(bool); b_masks.append(mm)
                 add("EXPERT_"+re.sub(r"[^A-Z0-9]+","_",c.upper())[:58],"EXPERT_BIGAL",mm,desc=f"Big Al atom: {c}",min_n=10,source_ok=True)
         if p_masks:
-            psum=sum(x.astype(int) for x in p_masks)
+            psum=sum(x.fillna(False).astype(bool).astype("int8") for x in p_masks)
             add("EXPERT_PATHI_ANY","EXPERT_PATHI",psum.ge(1),desc="Any directional Pathi atom",min_n=20,source_ok=True)
             add("EXPERT_PATHI_MULTI_2PLUS","EXPERT_PATHI",psum.ge(2),desc="Two or more directional Pathi atoms",min_n=20,source_ok=True)
         if b_masks:
-            bsum=sum(x.astype(int) for x in b_masks)
+            bsum=sum(x.fillna(False).astype(bool).astype("int8") for x in b_masks)
             add("EXPERT_BIGAL_ANY","EXPERT_BIGAL",bsum.ge(1),desc="Any Big Al NCAAF atom",min_n=10,source_ok=True)
 
         # Market-journey context is distinct from a directional Pathi recommendation.
@@ -2683,6 +2766,7 @@ def self_test() -> dict[str,Any]:
     _mdf,_mdd=_pt_extract_live_markdown_table(_md)
     _relay_md_ok=bool(_mdf is not None and _mdd.get("status")=="PASS" and all(x in _mdf.columns for x in ("ESPN FPI","Pi-Ratings Bias","Dokter","Keeper","Pigskin Index")))
     _relay_url_ok=(_pt_relay_url(PT_LIVE_PAGE_URL)=="https://r.jina.ai/https://www.thepredictiontracker.com/predncaa.php")
+    _challenge_rejected=_pt_is_challenge_payload(b"Title: Just a moment...\nChecking your browser before accessing thepredictiontracker.com")
     # Current-season merge must replace only the newest overlapping occurrence,
     # preserving an older same-home/road rematch in the archive.
     _ma=pd.DataFrame({"home_key":["alpha","alpha","gamma"],"away_key":["beta","beta","delta"],"meta_margin_home":[1.0,2.0,3.0],"source_row":[1,9,4]})
@@ -2728,7 +2812,7 @@ def self_test() -> dict[str,Any]:
         "SU_SEQ3_LWL" in live_atoms and "OFF_ATS_COVER_7_PLUS" in live_atoms and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
         "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and "META_PT_EDGE_TEAM_3PLUS" in live_atoms and "META_PT_CORE_STRONG_AGREE" in live_atoms and
-        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _merge_rematch_ok and _expert_bridge_ok
+        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _expert_bridge_ok
     )
     return {
         "status":"PASS" if ok else "FAIL","source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG,
@@ -2743,7 +2827,7 @@ def self_test() -> dict[str,Any]:
         "pt_name_safe_header_contract":_pt_name_safe,
         "pt_self_test_system_columns":_pt_da.get("system_columns",{}),
         "pt_fuzzy_header_rejected":_pt_dc.get("system_columns",{}).get("ESPN_FPI") is None,
-        "pt_relay_csv_payload":_relay_csv_ok,"pt_relay_named_markdown":_relay_md_ok,"pt_relay_https_target":_relay_url_ok,"pt_current_merge_preserves_rematch":_merge_rematch_ok,"expert_side_bridge":_expert_bridge_ok,
+        "pt_relay_csv_payload":_relay_csv_ok,"pt_relay_named_markdown":_relay_md_ok,"pt_relay_https_target":_relay_url_ok,"pt_challenge_rejected":_challenge_rejected,"pt_current_merge_preserves_rematch":_merge_rematch_ok,"expert_side_bridge":_expert_bridge_ok,
     }
 
 
