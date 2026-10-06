@@ -32,8 +32,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.7-live-plus-archive-external-meta-bridge-20261006"
-NCAAF_RESEARCH_V2_VERSION = "2.6.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.8-pt-session-fallback-expert-atom-bridge-20261006"
+NCAAF_RESEARCH_V2_VERSION = "2.8.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -49,6 +49,7 @@ REPORT_HISTORY_PREFIX = "research/ncaaf/v2/history"
 # published external benchmark; we do not re-fit them on our NCAAF outcomes.
 PT_BASE_URL = "https://www.thepredictiontracker.com"
 PT_ARCHIVE_URL = PT_BASE_URL + "/ncaa{season}.csv"
+PT_ARCHIVE_PAGE_URL = PT_BASE_URL + "/ncaaarchive.html"
 PT_LIVE_CSV_URL = PT_BASE_URL + "/ncaapredictions.csv"
 PT_LIVE_PAGE_URL = PT_BASE_URL + "/predncaa.php"
 PT_RAW_PREFIX = "research/ncaaf/external/prediction_tracker/raw"
@@ -183,31 +184,78 @@ def _pt_numeric(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s.astype(str).str.replace(r"[^0-9+\-.]","",regex=True).replace({"":"nan",".":"nan","-":"nan","+":"nan"}),errors="coerce")
 
 
-def _pt_http_fetch(url: str, timeout: int=25, attempts: int=3) -> bytes:
+def _pt_http_fetch(url: str, timeout: int=25, attempts: int=3, referer: str | None=None) -> bytes:
+    """Browser-like same-origin fetch for Prediction Tracker.
+
+    The site can reject direct Cloud Run CSV hotlinks with HTTP 403.  We therefore
+    establish a same-origin session on the parent HTML page first, retain any
+    cookies, and then request the CSV with a real browser Referer.
+    """
     import time
-    from urllib.request import Request, urlopen
+    import requests
     last=None
+    parent=referer or (PT_LIVE_PAGE_URL if "ncaapredictions" in url else PT_ARCHIVE_PAGE_URL)
+    ua=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36")
+    base_headers={
+        "User-Agent":ua,"Accept-Language":"en-US,en;q=0.9","Cache-Control":"no-cache",
+        "Pragma":"no-cache","Connection":"keep-alive",
+    }
     for i in range(max(1,int(attempts))):
         try:
-            req=Request(url,headers={"User-Agent":"Mozilla/5.0 NCAAF-Research-Meta/2.11","Accept":"text/csv,text/plain,*/*"})
-            with urlopen(req,timeout=timeout) as r:
-                data=r.read()
+            sess=requests.Session()
+            # Same-origin warm-up is intentionally best effort.  The CSV request
+            # still runs if the parent page is temporarily unavailable.
+            try:
+                sess.get(parent,headers={**base_headers,"Accept":"text/html,application/xhtml+xml,*/*;q=0.8","Referer":PT_BASE_URL+"/"},timeout=timeout)
+            except Exception:
+                pass
+            rr=sess.get(url,headers={**base_headers,"Accept":"text/csv,text/plain,*/*","Referer":parent,"Sec-Fetch-Site":"same-origin","Sec-Fetch-Mode":"navigate"},timeout=timeout,allow_redirects=True)
+            rr.raise_for_status(); data=rr.content
             if len(data)<100: raise RuntimeError(f"short response bytes={len(data)}")
             return data
         except Exception as exc:
             last=exc
-            # Some Cloud Run images negotiate this legacy site more reliably via
-            # requests than urllib; try it before consuming the next retry.
-            try:
-                import requests
-                rr=requests.get(url,headers={"User-Agent":"Mozilla/5.0 NCAAF-Research-Meta/2.11","Accept":"text/csv,text/plain,*/*"},timeout=timeout)
-                rr.raise_for_status(); data=rr.content
-                if len(data)<100: raise RuntimeError(f"short response bytes={len(data)}")
-                return data
-            except Exception as exc2:
-                last=exc2
             if i+1<int(attempts): time.sleep(1.25*(i+1))
     raise RuntimeError(f"Prediction Tracker fetch failed url={url}: {type(last).__name__}:{last}")
+
+def _pt_fetch_live_html(timeout: int=25) -> bytes:
+    """Fallback to the live HTML table when the site's CSV hotlink is blocked."""
+    import requests
+    ua=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36")
+    rr=requests.get(PT_LIVE_PAGE_URL,headers={"User-Agent":ua,"Accept":"text/html,application/xhtml+xml,*/*;q=0.8","Accept-Language":"en-US,en;q=0.9","Referer":PT_BASE_URL+"/"},timeout=timeout)
+    rr.raise_for_status()
+    if len(rr.content)<500: raise RuntimeError(f"short live HTML bytes={len(rr.content)}")
+    return rr.content
+
+def _pt_parse_live_html(raw: bytes, season: int) -> tuple[pd.DataFrame,dict[str,Any]]:
+    """Extract the individual-system table from predncaa.php."""
+    errs=[]
+    try:
+        tables=pd.read_html(io.BytesIO(raw))
+    except Exception as exc:
+        return pd.DataFrame(),{"status":"HTML_PARSE_FAIL","season":int(season),"error":f"{type(exc).__name__}:{exc}"}
+    target=None
+    for t in tables:
+        x=t.copy()
+        if isinstance(x.columns,pd.MultiIndex):
+            x.columns=[" ".join(str(v) for v in tup if str(v).lower() not in {"nan","none"} and not str(v).startswith("Unnamed")).strip() for tup in x.columns]
+        else:
+            x.columns=[str(c) for c in x.columns]
+        keys=[_pt_col_key(c) for c in x.columns]
+        score=sum(any(a in k for k in keys) for a in ("espn fpi","pi ratings bias","dokter","keeper","pigskin index"))
+        if score>=3 and any(k in {"home","home team"} or k.startswith("home ") for k in keys) and any(k in {"road","away","visitor"} or k.startswith("road ") for k in keys):
+            target=x; break
+    if target is None:
+        return pd.DataFrame(),{"status":"HTML_SYSTEM_TABLE_MISSING","season":int(season),"table_count":len(tables)}
+    try:
+        frame,diag=_pt_parse_csv(target.to_csv(index=False).encode(),season)
+        diag["parser"]="LIVE_HTML_TABLE_FALLBACK"
+        return frame,diag
+    except Exception as exc:
+        errs.append(f"{type(exc).__name__}:{exc}")
+        return pd.DataFrame(),{"status":"HTML_NORMALIZE_FAIL","season":int(season),"errors":errs}
 
 
 def _pt_parse_csv(raw: bytes, season: int) -> tuple[pd.DataFrame, dict[str,Any]]:
@@ -299,7 +347,7 @@ def _pt_load_season(season: int, *, storage_client, bucket_name: str, force_web:
         raw=_pt_blob_bytes(storage_client,bucket_name,raw_path); source="GCS_CACHE" if raw else ""
     if raw is None:
         try:
-            raw=_pt_http_fetch(PT_ARCHIVE_URL.format(season=season)); source="WEB"
+            raw=_pt_http_fetch(PT_ARCHIVE_URL.format(season=season),referer=PT_ARCHIVE_PAGE_URL); source="WEB_SESSION"
             storage_client.bucket(bucket_name).blob(raw_path).upload_from_string(raw,content_type="text/csv")
         except Exception as exc:
             raw=_pt_blob_bytes(storage_client,bucket_name,raw_path); source="GCS_FALLBACK" if raw else ""
@@ -324,15 +372,22 @@ def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -
     raw_path=f"{PT_RAW_PREFIX}/ncaapredictions.csv"
     raw=None; source=""
     try:
-        raw=_pt_http_fetch(PT_LIVE_CSV_URL); source="WEB_LIVE"
+        raw=_pt_http_fetch(PT_LIVE_CSV_URL,referer=PT_LIVE_PAGE_URL); source="WEB_LIVE_SESSION"
         try: storage_client.bucket(bucket_name).blob(raw_path).upload_from_string(raw,content_type="text/csv")
         except Exception: pass
+        frame,diag=_pt_parse_csv(raw,PT_CURRENT_SEASON)
     except Exception as exc:
-        raw=_pt_blob_bytes(storage_client,bucket_name,raw_path); source="GCS_LIVE_FALLBACK" if raw else ""
-        if raw is None:
-            log_func(f"[NCAAF-PT-LIVE] season={PT_CURRENT_SEASON} status=UNAVAILABLE error={type(exc).__name__}:{exc} authority=0")
-            return pd.DataFrame(),{"status":"UNAVAILABLE","season":PT_CURRENT_SEASON,"error":f"{type(exc).__name__}:{exc}","url":PT_LIVE_CSV_URL,"authority":0}
-    frame,diag=_pt_parse_csv(raw,PT_CURRENT_SEASON)
+        # The live HTML page contains the same individual-system predictions and
+        # is often accessible even when the raw CSV hotlink is blocked.
+        try:
+            hraw=_pt_fetch_live_html(); frame,diag=_pt_parse_live_html(hraw,PT_CURRENT_SEASON); source="WEB_LIVE_HTML_FALLBACK"
+            if frame.empty: raise RuntimeError(diag.get("status","live HTML parse empty"))
+        except Exception as html_exc:
+            raw=_pt_blob_bytes(storage_client,bucket_name,raw_path); source="GCS_LIVE_FALLBACK" if raw else ""
+            if raw is None:
+                log_func(f"[NCAAF-PT-LIVE] season={PT_CURRENT_SEASON} status=UNAVAILABLE csv_error={type(exc).__name__}:{exc} html_error={type(html_exc).__name__}:{html_exc} authority=0")
+                return pd.DataFrame(),{"status":"UNAVAILABLE","season":PT_CURRENT_SEASON,"error":f"CSV={type(exc).__name__}:{exc}; HTML={type(html_exc).__name__}:{html_exc}","url":PT_LIVE_CSV_URL,"page_url":PT_LIVE_PAGE_URL,"authority":0}
+            frame,diag=_pt_parse_csv(raw,PT_CURRENT_SEASON)
     if not frame.empty:
         frame=frame.copy(); frame["source_kind"]="LIVE_CURRENT"; frame["source_priority"]=2
         try: storage_client.bucket(bucket_name).blob(PT_CURRENT_LIVE_BLOB).upload_from_string(frame.to_csv(index=False).encode(),content_type="text/csv")
@@ -420,6 +475,7 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
     key=pd.Series([f"{int(s)}|{h}|{a}" if np.isfinite(s) and h and a else "" for s,h,a in zip(season.to_numpy(float),home,away)],index=g.index)
     gd=pd.to_datetime(g.get("Game_Date",pd.Series(pd.NaT,index=g.index)),errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
     meta=np.full(len(g),np.nan); cnt=np.full(len(g),np.nan); pavg=np.full(len(g),np.nan); extline=np.full(len(g),np.nan)
+    comp={k:np.full(len(g),np.nan) for k in PT_PUBLISHED_WEIGHTS}
     matched=0
     for i,k in enumerate(key.astype(str)):
         if not k: continue
@@ -433,15 +489,33 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         orient=1.0 if is_home.iloc[i]==1 else -1.0
         meta[i]=orient*hm; cnt[i]=float(r.get("meta_system_count",np.nan)); pavg[i]=orient*float(r.get("prediction_avg_home",np.nan)) if pd.notna(r.get("prediction_avg_home",np.nan)) else np.nan
         extline[i]=orient*float(r.get("tracker_open_home",np.nan)) if pd.notna(r.get("tracker_open_home",np.nan)) else np.nan
+        for _k in PT_PUBLISHED_WEIGHTS:
+            _v=pd.to_numeric(pd.Series([r.get(_k,np.nan)]),errors="coerce").iloc[0]
+            if pd.notna(_v): comp[_k][i]=orient*float(_v)
         matched+=1
     market_margin=pd.to_numeric(g.get("Market_Open_Margin"),errors="coerce").to_numpy(float) if "Market_Open_Margin" in g.columns else -pd.to_numeric(g.get("Consensus_Open_Spread"),errors="coerce").to_numpy(float)
     meta_edge=meta-market_margin
+    comp_edges={k:(v-market_margin) for k,v in comp.items()}
+    comp_mat=np.column_stack([comp[k] for k in PT_PUBLISHED_WEIGHTS])
+    edge_mat=np.column_stack([comp_edges[k] for k in PT_PUBLISHED_WEIGHTS])
+    finite_comp=np.isfinite(comp_mat)
+    comp_n=finite_comp.sum(axis=1)
+    comp_std=np.full(len(g),np.nan); _std_ok=comp_n>=2
+    if _std_ok.any(): comp_std[_std_ok]=np.nanstd(comp_mat[_std_ok],axis=1)
+    agree_team=np.sum(np.isfinite(edge_mat)&(edge_mat>0),axis=1).astype(float)
+    agree_opp=np.sum(np.isfinite(edge_mat)&(edge_mat<0),axis=1).astype(float)
     for df in (g,m):
         df["_V210_PT_META_MARGIN_TEAM"]=meta
         df["_V210_PT_META_EDGE_POINTS"]=meta_edge
         df["_V210_PT_META_SYSTEM_COUNT"]=cnt
         df["_V210_PT_PREDICTION_AVG_TEAM"]=pavg
         df["_V210_PT_ARCHIVE_OPEN_MARGIN_TEAM"]=extline
+        df["_V212_PT_COMPONENT_STD"]=comp_std
+        df["_V212_PT_COMPONENT_TEAM_AGREE_COUNT"]=agree_team
+        df["_V212_PT_COMPONENT_OPP_AGREE_COUNT"]=agree_opp
+        for _k in PT_PUBLISHED_WEIGHTS:
+            df[f"_V212_PT_{_k}_MARGIN_TEAM"]=comp[_k]
+            df[f"_V212_PT_{_k}_EDGE_POINTS"]=comp_edges[_k]
     # Core bridge exists only on miner frame; attach meta-vs-core state there.
     if "_V29_CORE_INCUMBENT_EDGE_POINTS" in m.columns:
         ce=pd.to_numeric(m["_V29_CORE_INCUMBENT_EDGE_POINTS"],errors="coerce").to_numpy(float)
@@ -738,6 +812,43 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
     Unknown/unavailable inputs fail closed (the atom exists only when its source
     field is actually present).
     """
+    # Materialize deterministic Pathi/Big Al flags directly on the Miner frame.
+    # The dashboard's historical W/L engine uses a richer state frame, while the
+    # Miner cache is intentionally lean.  Without this bridge the systems can be
+    # graded correctly yet appear as zero Miner atoms.
+    _mkt0=str(market or "").lower().strip()
+    if _mkt0 in {"", "spreads"} and dashboard_module is not None:
+        try:
+            _need=not any(str(c).startswith(("Pathi_FB_","BigAl_CF")) for c in g.columns)
+            if _need:
+                _eg=g.copy()
+                if "Sport" not in _eg.columns: _eg["Sport"]="NCAAF"
+                if "Market" not in _eg.columns: _eg["Market"]="spreads"
+                if "Value" not in _eg.columns:
+                    for _c in ("Spread_Value","Current_Spread","Consensus_Open_Spread","Opening_Spread"):
+                        if _c in _eg.columns: _eg["Value"]=pd.to_numeric(_eg[_c],errors="coerce"); break
+                if "Spread_Value" not in _eg.columns and "Value" in _eg.columns: _eg["Spread_Value"]=pd.to_numeric(_eg["Value"],errors="coerce")
+                if "Opening_Spread" not in _eg.columns and "Consensus_Open_Spread" in _eg.columns: _eg["Opening_Spread"]=pd.to_numeric(_eg["Consensus_Open_Spread"],errors="coerce")
+                if "Current_Total" not in _eg.columns:
+                    for _c in ("Total_Value","Consensus_Open_Total","Opening_Total"):
+                        if _c in _eg.columns: _eg["Current_Total"]=pd.to_numeric(_eg[_c],errors="coerce"); break
+                if "Is_Regular_Season" not in _eg.columns: _eg["Is_Regular_Season"]=1
+                if "Team_Game_Number" not in _eg.columns:
+                    for _c in ("Team_Game_Number_Prior","Context_Team_Games_Prior","Game_Number_Prior"):
+                        if _c in _eg.columns:
+                            _eg["Team_Game_Number"]=pd.to_numeric(_eg[_c],errors="coerce")+1; break
+                if "Revenge_Flag_Current" not in _eg.columns:
+                    for _c in ("Revenge_Flag","Revenge_Flag_CurrentOrPriorSeason"):
+                        if _c in _eg.columns: _eg["Revenge_Flag_Current"]=pd.to_numeric(_eg[_c],errors="coerce"); break
+                if hasattr(dashboard_module,"add_pathi_football_key_features"):
+                    _eg=dashboard_module.add_pathi_football_key_features(_eg)
+                if hasattr(dashboard_module,"add_pathi_bigal_rule_flags"):
+                    _eg=dashboard_module.add_pathi_bigal_rule_flags(_eg)
+                g=_eg
+        except Exception:
+            # Fail closed: legacy Miner atoms remain available.
+            pass
+
     atoms=[]; names=set()
 
     # Keep the legacy dashboard atom catalog when available for exact continuity.
@@ -1010,6 +1121,31 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
                 add("META_PT_CORE_STRONG_AGREE","EXTERNAL_META_MARGIN",good&(meta_edge.abs().ge(2))&(core.abs().ge(2))&(np.sign(meta_edge)==np.sign(core)),desc="External metamodel and CORE both >=2 points same direction",min_n=30)
                 add("META_PT_CORE_STRONG_CONFLICT","EXTERNAL_META_MARGIN",good&(meta_edge.abs().ge(2))&(core.abs().ge(2))&(np.sign(meta_edge)!=np.sign(core)),desc="External metamodel and CORE both >=2 points opposite direction",min_n=30)
                 add("META_PT_CORE_GAP_4PLUS","EXTERNAL_META_MARGIN",good&(meta_edge-core).abs().ge(4),desc="External metamodel differs from CORE edge by >=4 points",min_n=30)
+
+        # Preserve the five component ratings as diagnostics/research atoms instead
+        # of reducing the external family to one weighted average.  They remain one
+        # correlated EXTERNAL family for authority purposes; five agreements are not
+        # five independent Bet Authority votes.
+        for _k in PT_PUBLISHED_WEIGHTS:
+            _ec=f"_V212_PT_{_k}_EDGE_POINTS"
+            if has(_ec):
+                _ee=nfirst(_ec); _slug=re.sub(r"[^A-Z0-9]+","_",_k.upper())
+                add(f"META_PT_{_slug}_TEAM_2PLUS","EXTERNAL_COMPONENT",_ee.ge(2),desc=f"{_k} external edge >= +2",min_n=30)
+                add(f"META_PT_{_slug}_OPP_2PLUS","EXTERNAL_COMPONENT",_ee.le(-2),desc=f"{_k} external edge <= -2",min_n=30)
+                if has("_V29_CORE_INCUMBENT_EDGE_POINTS"):
+                    _good=_ee.notna()&core.notna()&(_ee.abs().ge(2))&(core.abs().ge(2))
+                    add(f"META_PT_{_slug}_CORE_AGREE", "EXTERNAL_COMPONENT", _good&(np.sign(_ee)==np.sign(core)), desc=f"{_k} and CORE strong agreement", min_n=30)
+                    add(f"META_PT_{_slug}_CORE_CONFLICT", "EXTERNAL_COMPONENT", _good&(np.sign(_ee)!=np.sign(core)), desc=f"{_k} and CORE strong conflict", min_n=30)
+        _ta=nfirst("_V212_PT_COMPONENT_TEAM_AGREE_COUNT"); _oa=nfirst("_V212_PT_COMPONENT_OPP_AGREE_COUNT"); _ds=nfirst("_V212_PT_COMPONENT_STD")
+        if has("_V212_PT_COMPONENT_TEAM_AGREE_COUNT"):
+            add("META_PT_COMPONENTS_5_OF_5_TEAM","EXTERNAL_CONSENSUS",_ta.ge(5),desc="All five external systems favor team vs market",min_n=30)
+            add("META_PT_COMPONENTS_4PLUS_TEAM","EXTERNAL_CONSENSUS",_ta.ge(4),desc="At least four of five external systems favor team vs market",min_n=30)
+        if has("_V212_PT_COMPONENT_OPP_AGREE_COUNT"):
+            add("META_PT_COMPONENTS_5_OF_5_OPP","EXTERNAL_CONSENSUS",_oa.ge(5),desc="All five external systems favor opponent vs market",min_n=30)
+            add("META_PT_COMPONENTS_4PLUS_OPP","EXTERNAL_CONSENSUS",_oa.ge(4),desc="At least four of five external systems favor opponent vs market",min_n=30)
+        if has("_V212_PT_COMPONENT_STD"):
+            add("META_PT_LOW_DISPERSION_LE3","EXTERNAL_CONSENSUS",_ds.le(3)&_ds.notna(),desc="Five-system margin dispersion <=3 points",min_n=30)
+            add("META_PT_HIGH_DISPERSION_GE6","EXTERNAL_CONSENSUS",_ds.ge(6),desc="Five-system margin dispersion >=6 points",min_n=30)
 
         spec_edge_cols=[c for c in g.columns if str(c).startswith("_V29_SPEC_") and str(c).endswith("_EDGE_POINTS")]
         for c in sorted(spec_edge_cols):
@@ -1460,10 +1596,10 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
     market=str(market).lower(); y,valid,baseline=_market_target(games,market); atoms=_extended_atoms(games,dashboard_module,market=market)
     _fam_counts={}
     for _a in atoms: _fam_counts[_a.get("family")]=int(_fam_counts.get(_a.get("family"),0))+1
-    _bridge_atoms=sum(v for k,v in _fam_counts.items() if str(k).startswith(("EXPERT_","RESEARCH_CORE_STATE","RESEARCH_SPECIALIST_","MARKET_KEY_")))
+    _bridge_atoms=sum(v for k,v in _fam_counts.items() if str(k).startswith(("EXPERT_","RESEARCH_CORE_STATE","RESEARCH_SPECIALIST_","MARKET_KEY_","EXTERNAL_")))
     out={"version":"NCAAF-RV2.5-SYSTEM-MINER-V5-EXPERT-MODEL-BRIDGE","market":market,"production_authority":0,"discovery_max_season":DISCOVERY_MAX_SEASON,
          "confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,"atoms":len(atoms),"atom_family_counts":_fam_counts,"expert_model_bridge_atoms":int(_bridge_atoms),"systems":[],"mechanism_families":[]}
-    log_func(f"[NCAAF-RV25-ATOM-BRIDGE] market={market} atoms={len(atoms)} bridge_atoms={_bridge_atoms} pathi={_fam_counts.get('EXPERT_PATHI',0)} bigal={_fam_counts.get('EXPERT_BIGAL',0)} core={_fam_counts.get('RESEARCH_CORE_STATE',0)} specialist={sum(v for k,v in _fam_counts.items() if str(k).startswith('RESEARCH_SPECIALIST_'))} authority=0")
+    log_func(f"[NCAAF-RV25-ATOM-BRIDGE] market={market} atoms={len(atoms)} bridge_atoms={_bridge_atoms} pathi={_fam_counts.get('EXPERT_PATHI',0)} bigal={_fam_counts.get('EXPERT_BIGAL',0)} core={_fam_counts.get('RESEARCH_CORE_STATE',0)} specialist={sum(v for k,v in _fam_counts.items() if str(k).startswith('RESEARCH_SPECIALIST_'))} external={sum(v for k,v in _fam_counts.items() if str(k).startswith('EXTERNAL_'))} authority=0")
     if valid.sum()<500: out["status"]="INSUFFICIENT_HISTORY"; return out
     tested=[]; beam=[]; seen=set()
     def ev(mask,names,fams,idx):
@@ -1776,6 +1912,7 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
         ex=ex.loc[ex["home_i"].notna()&ex["away_i"].notna()].copy(); ex["pair_key"]=ex["home_i"].astype(str)+"|"+ex["away_i"].astype(str)
         vc=ex["pair_key"].value_counts(); ex=ex.loc[ex["pair_key"].map(vc).eq(1)].set_index("pair_key",drop=False)
         meta=np.full(len(out),np.nan); cnt=np.full(len(out),np.nan); pavg=np.full(len(out),np.nan)
+        comp={k:np.full(len(out),np.nan) for k in PT_PUBLISHED_WEIGHTS}
         for i,(h,a) in enumerate(zip(homes,aways)):
             k=f"{h}|{a}"
             if k not in ex.index: continue
@@ -1784,11 +1921,24 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
             meta[i]=float(pd.to_numeric(pd.Series([r.get("meta_margin_home")]),errors="coerce").iloc[0])
             cnt[i]=float(pd.to_numeric(pd.Series([r.get("meta_system_count")]),errors="coerce").iloc[0])
             pavg[i]=float(pd.to_numeric(pd.Series([r.get("prediction_avg_home")]),errors="coerce").iloc[0])
+            for _k in PT_PUBLISHED_WEIGHTS:
+                _v=pd.to_numeric(pd.Series([r.get(_k,np.nan)]),errors="coerce").iloc[0]
+                if pd.notna(_v): comp[_k][i]=float(_v)
         spread=pd.to_numeric(out.get("Consensus_Open_Spread",out.get("Opening_Spread",pd.Series(np.nan,index=out.index))),errors="coerce").to_numpy(float)
+        market=-spread
         out["_V210_PT_META_MARGIN_TEAM"]=meta
-        out["_V210_PT_META_EDGE_POINTS"]=meta+spread
+        out["_V210_PT_META_EDGE_POINTS"]=meta-market
         out["_V210_PT_META_SYSTEM_COUNT"]=cnt
         out["_V210_PT_PREDICTION_AVG_TEAM"]=pavg
+        _cm=np.column_stack([comp[k] for k in PT_PUBLISHED_WEIGHTS]); _em=np.column_stack([comp[k]-market for k in PT_PUBLISHED_WEIGHTS])
+        _cn=np.isfinite(_cm).sum(axis=1); _std=np.full(len(out),np.nan); _ok=_cn>=2
+        if _ok.any(): _std[_ok]=np.nanstd(_cm[_ok],axis=1)
+        out["_V212_PT_COMPONENT_STD"]=_std
+        out["_V212_PT_COMPONENT_TEAM_AGREE_COUNT"]=np.sum(np.isfinite(_em)&(_em>0),axis=1).astype(float)
+        out["_V212_PT_COMPONENT_OPP_AGREE_COUNT"]=np.sum(np.isfinite(_em)&(_em<0),axis=1).astype(float)
+        for _k in PT_PUBLISHED_WEIGHTS:
+            out[f"_V212_PT_{_k}_MARGIN_TEAM"]=comp[_k]
+            out[f"_V212_PT_{_k}_EDGE_POINTS"]=comp[_k]-market
         return out,{"status":"PASS","matched":int(np.isfinite(meta).sum()),"rows":int(len(out)),"authority":0}
     except Exception as exc:
         return out,{"status":"UNAVAILABLE","matched":0,"error":f"{type(exc).__name__}:{exc}","authority":0}
