@@ -1,6 +1,6 @@
 {
   "status": "PASS",
-  "source_tag": "ncaaf-research-v2.14-pt-relay-expert-materialization-20261006",
+  "source_tag": "ncaaf-research-v2.14.1-pt-relay-save-validation-20261006",
   "families": [
     "MARKET_MICROSTRUCTURE",
     "RUN_PASS_MATCHUP"
@@ -29,5 +29,10 @@
     "ESPN_FPI": "lineespn",
     "PIGSKIN_INDEX": "Pigskin Index"
   },
-  "pt_fuzzy_header_rejected": true
+  "pt_fuzzy_header_rejected": true,
+  "pt_relay_csv_payload": true,
+  "pt_relay_named_markdown": true,
+  "pt_relay_https_target": true,
+  "pt_current_merge_preserves_rematch": true,
+  "expert_side_bridge": true
 }

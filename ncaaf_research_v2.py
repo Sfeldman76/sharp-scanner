@@ -33,7 +33,7 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.14-pt-relay-expert-materialization-20261006"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.14.1-pt-relay-save-validation-20261006"
 NCAAF_RESEARCH_V2_VERSION = "2.14"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
@@ -59,6 +59,7 @@ PT_CURRENT_BLOB = "research/ncaaf/external/prediction_tracker/current.csv"  # me
 PT_CURRENT_ARCHIVE_BLOB = "research/ncaaf/external/prediction_tracker/current_archive.csv"
 PT_CURRENT_LIVE_BLOB = "research/ncaaf/external/prediction_tracker/current_live.csv"
 PT_CURRENT_META_BLOB = "research/ncaaf/external/prediction_tracker/current_meta.json"
+PT_LIVE_HTML_RAW_BLOB = "research/ncaaf/external/prediction_tracker/raw/predncaa_live_page.txt"
 PT_HEADER_MANIFEST_BLOB = "research/ncaaf/external/prediction_tracker/header_manifest.json"
 PT_PUBLISHED_WEIGHTS = {
     "DOKTER": 0.242406,
@@ -88,7 +89,7 @@ PT_CURRENT_SEASON = 2026
 # Cloud-hosted runtimes can be denied directly by the source site (HTTP 403).
 # The relay is read-only and only transports the original public source bytes/text;
 # all model identity is still validated against Prediction Tracker headers/values.
-PT_RELAY_PREFIX = os.getenv("PT_RELAY_PREFIX", "https://r.jina.ai/http://www.thepredictiontracker.com").rstrip("/")
+PT_RELAY_PREFIX = os.getenv("PT_RELAY_PREFIX", "https://r.jina.ai/https://www.thepredictiontracker.com").rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -698,6 +699,10 @@ def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -
         csv_exc=exc
     try:
         hraw=_pt_fetch_live_html()
+        try:
+            storage_client.bucket(bucket_name).blob(PT_LIVE_HTML_RAW_BLOB).upload_from_string(hraw,content_type="text/plain")
+        except Exception:
+            pass
     except Exception as exc:
         html_exc=exc
 
@@ -752,10 +757,21 @@ def _pt_merge_current_season(archive: pd.DataFrame, live: pd.DataFrame, *, log_f
     def pair(df):
         if df.empty: return pd.Series(dtype=str)
         return df.get("home_key",pd.Series("",index=df.index)).astype(str)+"|"+df.get("away_key",pd.Series("",index=df.index)).astype(str)
-    live_pairs=set(pair(l).loc[lambda z:z.str.len().gt(1)].tolist()) if not l.empty else set()
+    lp=pair(l) if not l.empty else pd.Series(dtype=str)
+    live_counts=lp.loc[lp.str.len().gt(1)].value_counts().to_dict() if not l.empty else {}
     removed=0
-    if not a.empty and live_pairs:
-        ap=pair(a); keep=~ap.isin(live_pairs); removed=int((~keep).sum()); a=a.loc[keep].copy()
+    if not a.empty and live_counts:
+        ap=pair(a)
+        drop_idx=[]
+        # Replace only the newest N archive occurrence(s) for each live pair.
+        # Earlier same-season rematches are preserved rather than being wiped out.
+        for pkey,n_live in live_counts.items():
+            hits=list(a.index[ap.eq(pkey)])
+            if hits:
+                take=min(len(hits),int(n_live))
+                drop_idx.extend(hits[-take:])
+        if drop_idx:
+            removed=len(drop_idx); a=a.drop(index=drop_idx).copy()
     merged=pd.concat([a,l],ignore_index=True,sort=False) if (not a.empty or not l.empty) else pd.DataFrame()
     diag={
         "status":"PASS" if not merged.empty else "UNAVAILABLE","season":PT_CURRENT_SEASON,
@@ -929,7 +945,7 @@ def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client
             if not current_frame.empty:
                 try:
                     storage_client.bucket(bucket_name).blob(PT_CURRENT_BLOB).upload_from_string(current_frame.to_csv(index=False).encode(),content_type="text/csv")
-                    meta={"season":PT_CURRENT_SEASON,"updated_utc":_now(),"rows":len(current_frame),"archive_rows":len(current_archive),"live_rows":len(current_live),"full_five_rows":int(np.isfinite(pd.to_numeric(current_frame.get('meta_margin_home'),errors='coerce')).sum()),"live_full_five_rows":int(np.isfinite(pd.to_numeric(current_live.get('meta_margin_home'),errors='coerce')).sum()) if not current_live.empty else 0,"source":"Prediction Tracker archive + live current week","archive_url":PT_ARCHIVE_URL.format(season=PT_CURRENT_SEASON),"live_csv_url":PT_LIVE_CSV_URL,"live_page_url":PT_LIVE_PAGE_URL,"header_manifest_gcs":f"gs://{bucket_name}/{PT_HEADER_MANIFEST_BLOB}","authority":0}
+                    meta={"season":PT_CURRENT_SEASON,"updated_utc":_now(),"rows":len(current_frame),"archive_rows":len(current_archive),"live_rows":len(current_live),"full_five_rows":int(np.isfinite(pd.to_numeric(current_frame.get('meta_margin_home'),errors='coerce')).sum()),"live_full_five_rows":int(np.isfinite(pd.to_numeric(current_live.get('meta_margin_home'),errors='coerce')).sum()) if not current_live.empty else 0,"source":"Prediction Tracker archive + live current week","archive_url":PT_ARCHIVE_URL.format(season=PT_CURRENT_SEASON),"live_csv_url":PT_LIVE_CSV_URL,"live_page_url":PT_LIVE_PAGE_URL,"header_manifest_gcs":f"gs://{bucket_name}/{PT_HEADER_MANIFEST_BLOB}","live_page_raw_gcs":f"gs://{bucket_name}/{PT_LIVE_HTML_RAW_BLOB}","relay_prefix":PT_RELAY_PREFIX,"authority":0}
                     storage_client.bucket(bucket_name).blob(PT_CURRENT_META_BLOB).upload_from_string(json.dumps(meta,sort_keys=True).encode(),content_type="application/json")
                 except Exception: pass
         if include_history:
@@ -2666,6 +2682,13 @@ def self_test() -> dict[str,Any]:
          "Alpha | Beta | 3 | 3 | 4 | 3.5 | 5 | 4.5 | 2.5\n").encode()
     _mdf,_mdd=_pt_extract_live_markdown_table(_md)
     _relay_md_ok=bool(_mdf is not None and _mdd.get("status")=="PASS" and all(x in _mdf.columns for x in ("ESPN FPI","Pi-Ratings Bias","Dokter","Keeper","Pigskin Index")))
+    _relay_url_ok=(_pt_relay_url(PT_LIVE_PAGE_URL)=="https://r.jina.ai/https://www.thepredictiontracker.com/predncaa.php")
+    # Current-season merge must replace only the newest overlapping occurrence,
+    # preserving an older same-home/road rematch in the archive.
+    _ma=pd.DataFrame({"home_key":["alpha","alpha","gamma"],"away_key":["beta","beta","delta"],"meta_margin_home":[1.0,2.0,3.0],"source_row":[1,9,4]})
+    _ml=pd.DataFrame({"home_key":["alpha"],"away_key":["beta"],"meta_margin_home":[4.0]})
+    _mm,_mmd=_pt_merge_current_season(_ma,_ml,log_func=lambda *a,**k:None)
+    _merge_rematch_ok=bool(len(_mm)==3 and (_mm["home_key"].eq("alpha")&_mm["away_key"].eq("beta")).sum()==2 and 1.0 in set(pd.to_numeric(_mm["meta_margin_home"],errors="coerce").dropna()))
 
     # Exact expert-side bridge regression: prove that a team-side Pathi trigger
     # and an opponent-side Big Al trigger survive projection into miner_games.
@@ -2705,7 +2728,7 @@ def self_test() -> dict[str,Any]:
         "SU_SEQ3_LWL" in live_atoms and "OFF_ATS_COVER_7_PLUS" in live_atoms and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
         "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and "META_PT_EDGE_TEAM_3PLUS" in live_atoms and "META_PT_CORE_STRONG_AGREE" in live_atoms and
-        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _expert_bridge_ok
+        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _merge_rematch_ok and _expert_bridge_ok
     )
     return {
         "status":"PASS" if ok else "FAIL","source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG,
@@ -2720,7 +2743,7 @@ def self_test() -> dict[str,Any]:
         "pt_name_safe_header_contract":_pt_name_safe,
         "pt_self_test_system_columns":_pt_da.get("system_columns",{}),
         "pt_fuzzy_header_rejected":_pt_dc.get("system_columns",{}).get("ESPN_FPI") is None,
-        "pt_relay_csv_payload":_relay_csv_ok,"pt_relay_named_markdown":_relay_md_ok,"expert_side_bridge":_expert_bridge_ok,
+        "pt_relay_csv_payload":_relay_csv_ok,"pt_relay_named_markdown":_relay_md_ok,"pt_relay_https_target":_relay_url_ok,"pt_current_merge_preserves_rematch":_merge_rematch_ok,"expert_side_bridge":_expert_bridge_ok,
     }
 
 

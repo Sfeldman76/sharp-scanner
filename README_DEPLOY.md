@@ -68,3 +68,16 @@ Redeploy, then run **NCAAF Research — Heavy Challenger Search** once. Do not r
 - 2026 remains excluded from discovery/confirmation/threshold selection.
 - Prediction Tracker, Pathi and Big Al bridge atoms are research evidence only unless they independently satisfy the existing Miner authority policy.
 - External ratings remain one correlated evidence family; five external models are not five authority votes.
+
+
+## V2.14.1 validation hotfix
+
+This hotfix was produced after a source/save audit of the Prediction Tracker bridge.
+
+- Reader relay default corrected to `https://r.jina.ai/https://www.thepredictiontracker.com/...` so the target remains HTTPS.
+- Live named page bytes/markdown are persisted to `gs://sharp-models/research/ncaaf/external/prediction_tracker/raw/predncaa_live_page.txt` for provenance/debugging.
+- Current-season archive + live merge replaces only the newest overlapping archive occurrence for a matchup, preserving older same-season rematches.
+- Existing strict header identity, value-verified five-system mapping, fail-closed META margin, exact Pathi/Big Al side bridge, and zero-authority rules are unchanged.
+- Self-test now explicitly validates relay URL construction and same-pair rematch preservation.
+
+From V2.14 replace `ncaaf_research_v2.py` and `train_job.py`, redeploy, then run **NCAAF Research — Heavy Challenger Search**.
