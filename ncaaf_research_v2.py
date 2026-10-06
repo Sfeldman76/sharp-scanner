@@ -1,4 +1,4 @@
-"""NCAAF Research V2.3 — orthogonal residual STAT + disciplined Miner lineage and published-system attribution.
+"""NCAAF Research V2.4 — evidence decomposition, Miner lineage, published-system attribution, and self-auditing logs.
 
 Research-only architecture built around the frozen NCAAF Production V1 benchmark.
 Nothing in this module can grant or mutate production authority.
@@ -32,8 +32,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.3-lineage-published-system-attribution-20261006"
-NCAAF_RESEARCH_V2_VERSION = "2.3.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.4-evidence-decomposition-self-audit-20261006"
+NCAAF_RESEARCH_V2_VERSION = "2.4.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -919,15 +919,21 @@ def _grade_published_ncaaf_systems(g: pd.DataFrame, seasons: np.ndarray) -> dict
             m=graded&np.isin(seasons,np.asarray(list(years),dtype=float))
             n=int(m.sum()); w=int(np.sum(obs[m]>0.5)) if n else 0; rate=float(w/n) if n else np.nan
             roi=(rate*(100/110.0)-(1-rate)) if n and spec["market"] in ("spreads","totals") else np.nan
-            return {"n":n,"wins":w,"losses":n-w,"hit_rate":rate,"roi_at_minus110":roi,"shrunk_hit_rate_beta15":_beta_shrunk_rate(w,n)}
+            return {"n":n,"wins":w,"losses":n-w,"hit_rate":rate,"roi_at_minus110":roi,
+                    "shrunk_hit_rate_beta15":_beta_shrunk_rate(w,n),"wilson95_low":_wilson95_low(w,n)}
         discovery=scope_stats([x for x in sorted(set(seasons[np.isfinite(seasons)].astype(int))) if x<=DISCOVERY_MAX_SEASON])
         confirmation=scope_stats(CONFIRMATION_SEASONS)
         year_rows=[]
         for sy in sorted(set(int(x) for x in seasons[graded&np.isfinite(seasons)])):
             st=scope_stats([sy]); year_rows.append({"season":sy,**st})
+        cn=int(confirmation.get("n",0) or 0); cr=float(confirmation.get("hit_rate",np.nan))
+        assessment=("SOURCE_DIRECTION_SUPPORT" if cn>=50 and np.isfinite(cr) and cr>=.55 else
+                    "SOURCE_DIRECTION_WEAK" if cn>=50 and np.isfinite(cr) and cr<=.45 else "MIXED_OR_SMALL_SAMPLE")
         rows.append({**spec,"direction":"PLAY_ON","status":"GRADED" if int(graded.sum()) else "NO_GRADED_TRIGGERS",
                      "ready_n":int(ready.sum()),"trigger_n":int(fire.sum()),"graded_n":int(graded.sum()),
                      "discovery":discovery,"confirmation":confirmation,"by_season":year_rows,
+                     "source_direction_assessment":assessment,
+                     "confirmation_inverse_hit_rate":(1.0-cr if cn and np.isfinite(cr) else np.nan),
                      "selection_influence":0,"production_authority":0})
     available=[x for x in rows if x.get("status")!="MISSING_FIELD"]
     return {"status":"PASS","systems":rows,"available_systems":len(available),"graded_systems":sum(int(x.get("graded_n",0) or 0)>0 for x in rows),
@@ -1068,6 +1074,31 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
             a=x.get("attribution") or {}
             log_func(f"[NCAAF-RV23-TOTALS-ATTRIBUTION] id={x['mechanism_id']} rule={a.get('rule')} seasons={json.dumps(a.get('season_breakdown') or [],sort_keys=True,default=str)} remove_best={a.get('remove_best_discovery_rate')} team_concentration={json.dumps(a.get('team_concentration') or {},sort_keys=True,default=str)} conference_concentration={json.dumps(a.get('conference_concentration') or {},sort_keys=True,default=str)}")
     return out
+
+
+def _log_v24_evidence_audit(*, miners: dict[str,Any], system_results: dict[str,Any], published_system_results: dict[str,Any],
+                            threshold_neighborhood: dict[str,Any], log_func=print) -> None:
+    """Emit concise audit lines for report sections that previously existed only in JSON/UI."""
+    for market,mr in (miners or {}).items():
+        lin=(mr or {}).get("lineage") or {}; pairs=list(lin.get("pairs") or [])
+        roots=sum(1 for x in (mr or {}).get("systems",[]) if not x.get("parent_system_id"))
+        children=sum(1 for x in (mr or {}).get("systems",[]) if x.get("parent_system_id"))
+        log_func(f"[NCAAF-RV24-LINEAGE] market={market} pairs={len(pairs)} roots={roots} children={children} nested_total_variants={int(lin.get('nested_total_variants',0) or 0)} selection_influence=0 authority=0")
+        ranked=sorted([x for x in pairs if int(x.get("confirmation_child_n",0) or 0)>=20 and np.isfinite(float(x.get("confirmation_rate_delta_vs_parent_only",np.nan)))],
+                      key=lambda x:(float(x.get("confirmation_rate_delta_vs_parent_only",-9)),int(x.get("confirmation_child_n",0) or 0)),reverse=True)[:8]
+        for x in ranked:
+            log_func(f"[NCAAF-RV24-LINEAGE-TOP] market={market} parent={x.get('parent_system_id')} child={x.get('child_system_id')} added={'+'.join(map(str,x.get('added_conditions') or []))} nested_total={bool(x.get('nested_total_variant'))} conf_child_n={x.get('confirmation_child_n')} conf_parent_only_n={x.get('confirmation_parent_only_n')} conf_rate_delta={float(x.get('confirmation_rate_delta_vs_parent_only')):+.4f} authority=0")
+
+    for x in (published_system_results or {}).get("systems",[]):
+        d=x.get("discovery") or {}; c=x.get("confirmation") or {}; by={int(z.get("season")):z for z in (x.get("by_season") or []) if z.get("season") is not None}
+        log_func(f"[NCAAF-RV24-PUBLISHED] source={x.get('source')} system={x.get('system')} label={x.get('label')} status={x.get('status')} assessment={x.get('source_direction_assessment')} d_n={d.get('n',0)} d_rate={d.get('hit_rate')} d_wilson={d.get('wilson95_low')} c_n={c.get('n',0)} c_rate={c.get('hit_rate')} c_shrunk={c.get('shrunk_hit_rate_beta15')} c_wilson={c.get('wilson95_low')} y2024_n={(by.get(2024) or {}).get('n',0)} y2024_rate={(by.get(2024) or {}).get('hit_rate')} y2025_n={(by.get(2025) or {}).get('n',0)} y2025_rate={(by.get(2025) or {}).get('hit_rate')} authority=0")
+
+    for market,z in ((system_results or {}).get("markets") or {}).items():
+        anyr=z.get("any_confirmed_system") or {}; multi=z.get("two_plus_independent") or {}
+        log_func(f"[NCAAF-RV24-SYSTEM-RESULTS] market={market} confirmed_mechanisms={z.get('confirmed_mechanisms',0)} any_n={anyr.get('n',0)} any_rate={anyr.get('hit_rate')} any_wilson={anyr.get('wilson95_low')} multi_n={multi.get('n',0)} multi_rate={multi.get('hit_rate')} multi_wilson={multi.get('wilson95_low')} conflicts={z.get('conflict_rows',0)} authority=0")
+
+    for x in (threshold_neighborhood or {}).get("grid",[]):
+        log_func(f"[NCAAF-RV24-THRESHOLD] min_n={x.get('min_confirmation_n')} min_rate={x.get('min_confirmation_rate')} qualified={x.get('qualified_count')} by_market={json.dumps(x.get('by_market') or {},sort_keys=True)} frozen_gate={bool(x.get('is_frozen_live_gate'))} selection_influence=0 authority=0")
 
 
 def _prospective_shadow(full_games: pd.DataFrame, full_seasons: np.ndarray, miners: dict[str,Any], dashboard_module=None, log_func=print) -> dict[str,Any]:
@@ -1329,6 +1360,8 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
         system_results=_build_system_results(mg,sy,miners,dashboard_module=dashboard_module)
         published_system_results=_grade_published_ncaaf_systems(mg,sy)
         miner_threshold_neighborhood=_miner_authority_threshold_neighborhood(miners)
+        _log_v24_evidence_audit(miners=miners,system_results=system_results,published_system_results=published_system_results,
+                                threshold_neighborhood=miner_threshold_neighborhood,log_func=log_func)
         prospective=_prospective_shadow(miner_games.reset_index(drop=True),seasons,miners,dashboard_module=dashboard_module,log_func=log_func)
         market_audit=_market_rich_audit(g,utils_module)
         report={"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG,"version":NCAAF_RESEARCH_V2_VERSION,"created_utc":_now(),
@@ -1337,7 +1370,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"system_miner_v3":miners,
                 "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,
                 "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False},
-                "next_step":"KEEP PRODUCTION V1 FROZEN; USE LINEAGE/PUBLISHED-SYSTEM W-L/ATTRIBUTION FOR RESEARCH; ONLY STRONG_VALIDATED MINER FAMILIES MAY CAST LIVE BET-AUTHORITY VOTES"}
+                "next_step":"KEEP PRODUCTION V1 FROZEN; USE SELF-AUDITED LINEAGE/PUBLISHED-SYSTEM W-L/ATTRIBUTION FOR RESEARCH; ONLY STRONG_VALIDATED MINER FAMILIES MAY CAST LIVE BET-AUTHORITY VOTES"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
         bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
         if storage_client is None:

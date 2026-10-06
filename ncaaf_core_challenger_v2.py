@@ -13,7 +13,7 @@ Research chronology
 * 2024 and 2025 = untouched confirmation seasons.
 * 2026+ = completely sealed; never queried by this module.
 
-What V2.2 adds
+What V2.3 adds
 --------------
 1. Pregame-only sequential team power ratings.
 2. Strength-of-schedule and conference-strength estimates derived only from
@@ -56,8 +56,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-SOURCE_TAG = "ncaaf-core-challenger-v2.2-existing-feed-coverage-completion-20261006"
-VERSION = "2.2.0"
+SOURCE_TAG = "ncaaf-core-challenger-v2.3-coverage-decomposition-consistent-watch-20261006"
+VERSION = "2.3.0"
 REPORT_CURRENT_BLOB = "research/ncaaf/core_challenger/v2/current_report.json"
 REPORT_HISTORY_PREFIX = "research/ncaaf/core_challenger/v2/history"
 BUNDLE_CURRENT_BLOB = "research/ncaaf/core_challenger/v2/current_bundle.pkl"
@@ -807,7 +807,7 @@ def _conditional_specialist_attribution(g: pd.DataFrame, tuned: list[dict[str,An
     """
     tr22=g[_num(g,"Season").eq(2022)].copy(); va23=g[_num(g,"Season").eq(2023)].copy()
     inc23=_incumbent_predict(tr22,va23); base_specs=_regime_specs(g)
-    registry=[]; selected_all=[]; qualified=[]
+    registry=[]; selected_all=[]; qualified=[]; consistent_watch=[]
     for t in tuned:
         recipe=t.get("recipe") or {}; name=str(recipe.get("name") or "SPECIALIST")
         sp23=_predict_recipe(tr22,va23,recipe)
@@ -844,13 +844,23 @@ def _conditional_specialist_attribution(g: pd.DataFrame, tuned: list[dict[str,An
             both_gain=all(_safe((conf[str(y)] or {}).get("blend_rmse_gain"),-9)>0 for y in CONFIRMATION_SEASONS)
             pooled_gain=_safe(pooled.get("blend_rmse_gain"),-9)>0 and _safe(pooled.get("blend_mae_gain"),-9)>=0
             ci_low=_safe((boot.get("blend_rmse_gain_ci95") or [None,None])[0],-9)
-            state="QUALIFIED_PROSPECTIVE_SHADOW" if both_n and both_gain and pooled_gain and ci_low>0 else "MIXED" if pooled_gain else "NO_INCREMENTAL_VALUE"
+            if both_n and both_gain and pooled_gain and ci_low>0:
+                state="QUALIFIED_PROSPECTIVE_SHADOW"
+            elif both_n and both_gain:
+                state="CONSISTENT_RMSE_WATCH"
+            elif pooled_gain:
+                state="MIXED"
+            else:
+                state="NO_INCREMENTAL_VALUE"
             agree=_safe(pooled.get("agreement_rate"),0.5)
             role="SUPPORT_SHADOW" if agree>=0.60 else "CAUTION_SHADOW" if agree<=0.40 else "CONTEXT_SHADOW"
             out={"specialist":name,"recipe":recipe,"regime":spec,"role":role,"state":state,"discovery":rec.get("discovery"),"confirmation":conf,"pooled":pooled,"bootstrap":boot,"neighborhood":neighborhood,"production_authority":0,"bet_authority_vote":False}
             selected_all.append(out)
             if state=="QUALIFIED_PROSPECTIVE_SHADOW": qualified.append(out)
-    log_func(f"[NCAAF-CORE-V22-ATTR-REGISTRY] tested={len(registry)} selected={len(selected_all)} qualified_shadow={len(qualified)} production_authority=0 bet_authority_vote=FALSE year_2026_queried=FALSE")
+            elif state=="CONSISTENT_RMSE_WATCH":
+                consistent_watch.append(out)
+                log_func(f"[NCAAF-CORE-V23-ATTR-WATCH] specialist={name} regime={spec['name']} role={role} y2024_rmse={_safe((conf.get('2024') or {}).get('blend_rmse_gain')):+.4f} y2025_rmse={_safe((conf.get('2025') or {}).get('blend_rmse_gain')):+.4f} pooled_rmse={_safe(pooled.get('blend_rmse_gain')):+.4f} pooled_mae={_safe(pooled.get('blend_mae_gain')):+.4f} ci_low={ci_low:+.4f} state=CONSISTENT_RMSE_WATCH authority=0")
+    log_func(f"[NCAAF-CORE-V23-ATTR-REGISTRY] tested={len(registry)} selected={len(selected_all)} qualified_shadow={len(qualified)} consistent_rmse_watch={len(consistent_watch)} production_authority=0 bet_authority_vote=FALSE year_2026_queried=FALSE")
     return {
         "policy":"DISCOVERY_2023_SELECTS_MAX_2_REGIMES_PER_SPECIALIST__2024_AND_2025_BOTH_CONFIRM__PAIRED_BOOTSTRAP_REQUIRED__SHADOW_ONLY",
         "blend_specialist_weight":ATTRIBUTION_BLEND_WEIGHT,
@@ -859,6 +869,7 @@ def _conditional_specialist_attribution(g: pd.DataFrame, tuned: list[dict[str,An
         "tested_regimes":registry,
         "selected_regimes":selected_all,
         "qualified_shadow_regimes":qualified,
+        "consistent_rmse_watch_regimes":consistent_watch,
         "production_authority":0,"bet_authority_vote":False,"automatic_promotion":False,"year_2026_queried":False,
     }
 
@@ -949,6 +960,17 @@ def _coverage_recipe_ablation(g: pd.DataFrame, recipe: dict[str,Any] | None) -> 
     rows.sort(key=lambda x:_safe(x.get("rmse_loss_when_removed"),-9),reverse=True)
     return {"status":"PASS","features":rows,"policy":"FIXED_DISCOVERY_RECIPE__REMOVE_ONE_FEATURE__2024_2025_POOLED_DIAGNOSTIC_ONLY","production_authority":0}
 
+def _log_v23_coverage_decomposition(coverage_registry: dict[str,Any], incremental: dict[str,Any], ablation: dict[str,Any], log_func=print) -> None:
+    counts=(coverage_registry or {}).get("counts") or {}
+    if int(counts.get("complete_r5",0) or 0)==0:
+        log_func("[NCAAF-CORE-V23-R5-SOURCE-GAP] complete_r5=0 state=SOURCE_NOT_PRESENT action=DO_NOT_FABRICATE recommendation=ADD_LEAKAGE_SAFE_R5_UPSTREAM_ONLY_IF_RAW_PRIOR_GAME_STATS_ARE_AVAILABLE authority=0")
+    for x in (incremental or {}).get("features",[]):
+        d=x.get("discovery") or {}; c=x.get("confirmation") or {}; c24=c.get("2024") or {}; c25=c.get("2025") or {}
+        log_func(f"[NCAAF-CORE-V23-COVERAGE-INCREMENTAL] feature={x.get('feature')} d2023_rmse={_safe(d.get('rmse_gain')):+.4f} y2024_rmse={_safe(c24.get('rmse_gain')):+.4f} y2025_rmse={_safe(c25.get('rmse_gain')):+.4f} both_rmse_pos={bool(x.get('both_confirmation_rmse_positive'))} both_mae_nonneg={bool(x.get('both_confirmation_mae_nonnegative'))} authority=0")
+    for x in (ablation or {}).get("features",[])[:12]:
+        log_func(f"[NCAAF-CORE-V23-COVERAGE-ABLATION] feature={x.get('feature')} pooled_rmse_loss_when_removed={_safe(x.get('rmse_loss_when_removed')):+.4f} pooled_mae_loss_when_removed={_safe(x.get('mae_loss_when_removed')):+.4f} interpretation={'HELPS_BUNDLE' if _safe(x.get('rmse_loss_when_removed'))>0 else 'HURTS_OR_REDUNDANT_BUNDLE'} authority=0")
+
+
 def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models", storage_client=None, log_func=print, hard_fail=True) -> dict[str,Any]:
     try:
         cache=getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}; games=cache.get("games"); base_candidates=list(cache.get("candidate_feature_cols") or [])
@@ -1035,6 +1057,7 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
         attribution=_conditional_specialist_attribution(g,tuned,log_func=log_func)
         _coverage_recipe=next((t.get("recipe") for t in tuned if (t.get("recipe") or {}).get("name")=="FEED_COVERAGE"),None)
         coverage_ablation=_coverage_recipe_ablation(g,_coverage_recipe)
+        _log_v23_coverage_decomposition(coverage_registry,coverage_incremental,coverage_ablation,log_func=log_func)
         ranked=sorted(candidates,key=lambda c:(_safe((c.get("vs_incumbent_pooled") or {}).get("rmse_gain"),-9),_safe((c.get("vs_incumbent_pooled") or {}).get("mae_gain"),-9)),reverse=True)
         best=ranked[0]; recommendation="CHALLENGER_DESERVES_PROSPECTIVE_SHADOW" if best.get("state") in {"STRONG_CHALLENGER","PROMOTION_ELIGIBLE_RESEARCH"} else "KEEP_INCUMBENT"
 

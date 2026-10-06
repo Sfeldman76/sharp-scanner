@@ -1,10 +1,24 @@
-# NCAAF Engine V2.7 — Existing-Feed Coverage Completion + System Attribution
+# NCAAF Engine V2.8 — Evidence Decomposition + Self-Auditing Research
 
 This release extends the protected NCAAF research path while leaving **Production V1 frozen**. It does not create another global model or another parallel market backend. The purpose is to finish representation of useful data that already exists, test where it adds independent value, and make system evidence easier to audit.
 
 ## What changed
 
-### 1. Existing-feed coverage completion (CORE Challenger V2.2)
+### 0. V2.8 run-driven refinements
+
+The first V2.7 Heavy run confirmed that the new FEED_COVERAGE bundle should **not** replace or enlarge the incumbent globally. V2.8 therefore does not add another model. It makes the research evidence easier to decompose and audit:
+
+- conditional regimes that improve RMSE in both 2024 and 2025 but miss the full bootstrap gate are retained as `CONSISTENT_RMSE_WATCH` research states with zero authority;
+- the Cloud Run log now prints coverage incremental tests and ablations instead of leaving them only in JSON/UI;
+- Miner parent/child lineage summaries and the strongest child-v-parent deltas are printed to the log;
+- published Pathi / Big Al discovery and 2024-25 confirmation W-L, shrinkage, Wilson lower bounds, and year splits are printed to the log;
+- the 50/55 through 70/57 Miner threshold neighborhood is printed to the log;
+- if no protected Recent-5 source exists, Heavy Research emits an explicit source-gap line and refuses to fabricate R5.
+
+These additions are diagnostic only. They have zero selection or production authority.
+
+
+### 1. Existing-feed coverage completion (CORE Challenger V2.3)
 
 Heavy Research now audits every compatible historical feed against a standard representation contract:
 
@@ -46,7 +60,7 @@ Conditional specialist regimes retain the existing 2023 selection -> 2024/2025 c
 
 This is a robustness check only. It does not retune the selected regime after seeing confirmation data.
 
-### 5. Miner parent/child lineage + incremental attribution (Research V2.3)
+### 5. Miner parent/child lineage + incremental attribution (Research V2.4)
 
 Miner systems now explicitly identify nested rule lineage. For a child system that adds conditions to a broader parent, the report includes:
 
@@ -61,7 +75,7 @@ This prevents a tighter version of the same mechanism from being mistaken for an
 
 ### 6. Published Pathi / Big Al NCAAF W-L table
 
-Research V2.3 directly grades directional NCAAF Pathi and Big Al flags that already exist in the historical frame. The dashboard now shows discovery and 2024-2025 confirmation W-L, hit rate, flat -110 ROI reference, and a shrunk hit-rate diagnostic.
+Research V2.4 directly grades directional NCAAF Pathi and Big Al flags that already exist in the historical frame. The dashboard now shows discovery and 2024-2025 confirmation W-L, hit rate, flat -110 ROI reference, and a shrunk hit-rate diagnostic.
 
 Included Pathi families cover the directional football spread bands/key-number systems already in the codebase, including dog below 3, dog on/above 7, dog 10+, hook bands, line moves across key numbers, and the total-spread-gap <= 10 condition. Big Al CF1/CF2/CF3 and the CF2 away tightener are included when historical fields are available.
 
@@ -127,7 +141,7 @@ This release keeps the useful V2.6/V2.2 machinery rather than rebuilding it unde
 - 2026 outcomes remain excluded from research selection;
 - no automatic promotion.
 
-The following production/backend files are byte-for-byte unchanged from V2.6 in this package:
+The following production/backend files remain unchanged from the V2.7 package:
 
 - `ncaaf_production_v1.py`
 - `ncaaf_production_ledger_v1.py`

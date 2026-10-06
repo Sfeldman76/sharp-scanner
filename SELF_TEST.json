@@ -1,29 +1,30 @@
 {
-  "package": "NCAAF_ENGINE_V2_7_EXISTING_FEED_COVERAGE_COMPLETION",
+  "authority_contract": {
+    "automatic_promotion": false,
+    "miner_live_min_confirmation_n": 60,
+    "miner_live_min_confirmation_rate": 0.56,
+    "production_v1_frozen": true,
+    "research_production_authority": 0,
+    "year_2026_used_for_selection": false
+  },
   "date": "2026-10-06",
+  "note": "Local tests validate syntax, module self-tests and targeted new-feature behavior. The cloud Heavy Research job itself must be run after deployment to generate results against BigQuery/GCS history.",
+  "package": "NCAAF_ENGINE_V2_7_EXISTING_FEED_COVERAGE_COMPLETION",
+  "source_tags": {
+    "core_challenger": "ncaaf-core-challenger-v2.3-coverage-decomposition-consistent-watch-20261006",
+    "research": "ncaaf-research-v2.4-evidence-decomposition-self-audit-20261006"
+  },
   "status": "PASS",
   "tests": {
-    "python_compile_all": "PASS",
+    "coverage_derivation_smoke": "PASS",
+    "miner_parent_child_lineage_smoke": "PASS",
     "ncaaf_core_challenger_v2_self_test": "PASS",
     "ncaaf_research_v2_self_test": "PASS",
-    "coverage_derivation_smoke": "PASS",
-    "published_system_wl_smoke": "PASS",
-    "miner_parent_child_lineage_smoke": "PASS",
-    "production_v1_sha_matches_v2_6": "PASS",
     "production_ledger_sha_matches_v2_6": "PASS",
+    "production_v1_sha_matches_v2_6": "PASS",
+    "published_system_wl_smoke": "PASS",
+    "python_compile_all": "PASS",
     "utils_sha_matches_v2_6": "PASS"
   },
-  "source_tags": {
-    "core_challenger": "ncaaf-core-challenger-v2.2-existing-feed-coverage-completion-20261006",
-    "research": "ncaaf-research-v2.3-lineage-published-system-attribution-20261006"
-  },
-  "authority_contract": {
-    "production_v1_frozen": true,
-    "automatic_promotion": false,
-    "research_production_authority": 0,
-    "year_2026_used_for_selection": false,
-    "miner_live_min_confirmation_n": 60,
-    "miner_live_min_confirmation_rate": 0.56
-  },
-  "note": "Local tests validate syntax, module self-tests and targeted new-feature behavior. The cloud Heavy Research job itself must be run after deployment to generate results against BigQuery/GCS history."
+  "v2_8_evidence_self_audit": "PASS"
 }

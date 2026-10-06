@@ -826,17 +826,17 @@ def main():
         f"path={_npv1_path} sha={_npv1_sha[:16]} promotion_requested={_ncaaf_prod_promote}"
     )
     _nrv22_tag = getattr(_nrv22, "NCAAF_RESEARCH_V2_SOURCE_TAG", None)
-    if _nrv22_tag != "ncaaf-research-v2.3-lineage-published-system-attribution-20261006":
+    if _nrv22_tag != "ncaaf-research-v2.4-evidence-decomposition-self-audit-20261006":
         raise RuntimeError(
-            f"[NCAAF-RV23-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv22_tag!r} "
+            f"[NCAAF-RV24-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv22_tag!r} "
             f"path={str(_nrv22_path)!r} sha={_nrv22_sha[:16]}"
         )
     log_func(
-        f"[NCAAF-RV23-DEPLOY-PREFLIGHT] PASS source_tag={_nrv22_tag} "
+        f"[NCAAF-RV24-DEPLOY-PREFLIGHT] PASS source_tag={_nrv22_tag} "
         f"path={_nrv22_path} sha={_nrv22_sha[:16]} production_authority=0"
     )
     _nccv2_tag = getattr(_nccv2, "SOURCE_TAG", None)
-    if _nccv2_tag != "ncaaf-core-challenger-v2.2-existing-feed-coverage-completion-20261006":
+    if _nccv2_tag != "ncaaf-core-challenger-v2.3-coverage-decomposition-consistent-watch-20261006":
         raise RuntimeError(
             f"[NCAAF-CORE-CHALLENGER-V2-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nccv2_tag!r} "
             f"path={str(_nccv2_path)!r} sha={_nccv2_sha[:16]}"
@@ -919,7 +919,7 @@ def main():
                 raise RuntimeError("[NCAAF-HEAVY-CACHE] miner_games cache missing")
             log_func(f"[NCAAF-HEAVY-CACHE] status=PASS games={len(_games)} miner_games={len(_miner_games)} candidate_features={len(_features)}")
 
-            pw.emit("systems","NCAAF Heavy Research: run protected STAT + Miner lineage/published-system attribution",pct=0.40)
+            pw.emit("systems","NCAAF Heavy Research: run protected STAT + Miner lineage/published-system self-audit",pct=0.40)
             _research=_nrv22.run_ncaaf_research_v2(
                 dashboard_module=_sld,utils_module=_utils,bucket_name=bucket,
                 storage_client=gcs,log_func=log_func,hard_fail=True

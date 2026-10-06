@@ -48523,7 +48523,8 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
                         _adf[_c]=pd.to_numeric(_adf[_c],errors='coerce').map(lambda x:f'{x:+.4f}' if pd.notna(x) else '—')
                     _adf['Agreement Rate']=pd.to_numeric(_adf['Agreement Rate'],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
                     st.dataframe(_adf,use_container_width=True,hide_index=True)
-                    st.caption(f"Qualified prospective-shadow regimes: {len(_qual)}. These are observation-only until enough true 2026+ prospective evidence accumulates.")
+                    _watch=(_attr.get('consistent_rmse_watch_regimes') or [])
+                    st.caption(f"Qualified prospective-shadow regimes: {len(_qual)}; consistent two-year RMSE watch regimes: {len(_watch)}. Both are zero-authority research states; only qualified shadows clear the full bootstrap gate.")
                 else:
                     st.info('No specialist regime cleared the 2023 discovery screen for protected 2024/25 attribution testing.')
 
@@ -48590,15 +48591,15 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
 
     # One research surface only. Legacy Miner V2/system-library tables are retired
     # from the operator UI; V2.1 is the current research registry.
-    if st.button('Research V2.3 — Miner Lineage + Published Systems ▾',key='ncaaf-rv21-load-report'):
+    if st.button('Research V2.4 — Miner Lineage + Published Systems ▾',key='ncaaf-rv21-load-report'):
         st.session_state['ncaaf_rv21_report_loaded']=True
     if st.session_state.get('ncaaf_rv21_report_loaded',False):
         try:
             _r2=_ncaaf_research_v2_report_cached()
             if not isinstance(_r2,dict):
-                st.info('No NCAAF Research V2.3 artifact is published yet. Run NCAAF Research — Heavy Challenger Search from Model maintenance.')
+                st.info('No NCAAF Research V2.4 artifact is published yet. Run NCAAF Research — Heavy Challenger Search from Model maintenance.')
             else:
-                st.caption('Research qualification is frozen through 2023 discovery with BOTH 2024 and 2025 confirmation; 2026+ remains sealed from selection. V2.3 adds parent/child incremental attribution and direct W/L grading for directional Pathi/Big Al NCAAF systems. Only STRONG_VALIDATED Miner families (confirmation N ≥ 60 and hit rate ≥ 56%) may supply bounded live support/conflict to Bet Authority; these diagnostics cannot alter CORE probability or create a wager.')
+                st.caption('Research qualification is frozen through 2023 discovery with BOTH 2024 and 2025 confirmation; 2026+ remains sealed from selection. V2.4 adds self-audited parent/child incremental attribution and direct W/L grading for directional Pathi/Big Al NCAAF systems. Only STRONG_VALIDATED Miner families (confirmation N ≥ 60 and hit rate ≥ 56%) may supply bounded live support/conflict to Bet Authority; these diagnostics cannot alter CORE probability or create a wager.')
 
                 _pub=(_r2.get('published_system_results') or {}).get('systems') or []
                 _pub_rows=[]
@@ -48606,12 +48607,12 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
                     _d=_x.get('discovery') or {}; _c=_x.get('confirmation') or {}
                     _pub_rows.append({'Source':_x.get('source'),'System':_x.get('label') or _x.get('system'),'State':_x.get('status'),
                                       'Discovery N':_d.get('n'),'Discovery W-L':f"{_d.get('wins',0)}-{_d.get('losses',0)}",'Discovery Hit':_d.get('hit_rate'),'Discovery Shrunk':_d.get('shrunk_hit_rate_beta15'),'Discovery ROI':_d.get('roi_at_minus110'),
-                                      '2024-25 N':_c.get('n'),'2024-25 W-L':f"{_c.get('wins',0)}-{_c.get('losses',0)}",'2024-25 Hit':_c.get('hit_rate'),'2024-25 Shrunk':_c.get('shrunk_hit_rate_beta15'),'2024-25 ROI':_c.get('roi_at_minus110'),
-                                      'Parent':_x.get('parent') or '—','Authority':0})
+                                      '2024-25 N':_c.get('n'),'2024-25 W-L':f"{_c.get('wins',0)}-{_c.get('losses',0)}",'2024-25 Hit':_c.get('hit_rate'),'2024-25 Shrunk':_c.get('shrunk_hit_rate_beta15'),'2024-25 Wilson Low':_c.get('wilson95_low'),'2024-25 ROI':_c.get('roi_at_minus110'),
+                                      'Assessment':_x.get('source_direction_assessment'),'Parent':_x.get('parent') or '—','Authority':0})
                 if _pub_rows:
                     st.markdown('**Published Pathi / Big Al directional systems — direct historical W/L**')
                     _pubdf=pd.DataFrame(_pub_rows)
-                    for _c in ['Discovery Hit','Discovery Shrunk','Discovery ROI','2024-25 Hit','2024-25 Shrunk','2024-25 ROI']:
+                    for _c in ['Discovery Hit','Discovery Shrunk','Discovery ROI','2024-25 Hit','2024-25 Shrunk','2024-25 Wilson Low','2024-25 ROI']:
                         _pubdf[_c]=pd.to_numeric(_pubdf[_c],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
                     st.dataframe(_pubdf,use_container_width=True,hide_index=True)
                     st.caption('Only directional recommended-side flags are graded here. Symmetric Pathi key events and ambiguous screens remain context rather than being assigned artificial W/L records.')
