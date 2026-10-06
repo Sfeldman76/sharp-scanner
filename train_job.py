@@ -836,7 +836,7 @@ def main():
         f"path={_nrv22_path} sha={_nrv22_sha[:16]} production_authority=0"
     )
     _nccv2_tag = getattr(_nccv2, "SOURCE_TAG", None)
-    if _nccv2_tag != "ncaaf-core-challenger-v2.0-expert-specialist-strength-20261005":
+    if _nccv2_tag != "ncaaf-core-challenger-v2.1-conditional-specialist-attribution-20261006":
         raise RuntimeError(
             f"[NCAAF-CORE-CHALLENGER-V2-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nccv2_tag!r} "
             f"path={str(_nccv2_path)!r} sha={_nccv2_sha[:16]}"
@@ -929,17 +929,20 @@ def main():
             _miners=_research.get("system_miner_v3") or {}
             _confirmed=sum(int((v or {}).get("confirmed_mechanism_count",0) or 0) for v in _miners.values())
 
-            pw.emit("core","NCAAF Heavy Research: run expert/specialist protected Spread CORE challenger search",pct=0.72)
+            pw.emit("core","NCAAF Heavy Research: run expert/specialist CORE + conditional attribution research",pct=0.72)
             _core=_nccv2.run_ncaaf_core_challenger_v2(
                 dashboard_module=_sld,bucket_name=bucket,storage_client=gcs,log_func=log_func,hard_fail=True
             )
             if not isinstance(_core,dict) or _core.get("status")!="NCAAF_CORE_CHALLENGER_V2_COMPLETE":
                 raise RuntimeError(f"[NCAAF-HEAVY-RUN] core challenger failed status={getattr(_core,'get',lambda *_:None)('status')}")
             _best=_core.get("best_challenger") or {}
+            _attr=_core.get("conditional_specialist_attribution") or {}
+            _attr_q=len(_attr.get("qualified_shadow_regimes") or []) if isinstance(_attr,dict) else 0
             _t1=__import__('time').perf_counter()
             log_func(
                 f"[NCAAF-HEAVY-RUN] status=PASS seconds={_t1-_t0:.1f} confirmed_mechanisms={_confirmed} "
                 f"best_core={_best.get('name')} core_state={_best.get('state')} core_recommendation={_core.get('recommendation')} "
+                f"conditional_specialist_shadow_qualified={_attr_q} "
                 "2026_selection_influence=0 production_mutation=FALSE automatic_promotion=FALSE"
             )
             pw.emit("done","NCAAF Heavy Challenger Research complete ✅",pct=1.0)

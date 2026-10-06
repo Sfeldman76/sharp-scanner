@@ -1,70 +1,118 @@
-# NCAAF V2.5.2 — Physical-Game Dedupe + Authority Diagnostics Fix
+# NCAAF V2.6 — Conditional Specialist Attribution + Advanced-Data Readiness
 
-This is a narrow runtime/UI patch on top of V2.5.1. It fixes the two issues visible in the current NCAAF Weekly tables without changing CORE, model probabilities, research qualification, Miner thresholds, or Bet Authority.
+This release builds on V2.5.2. Production V1 remains frozen. The change is on the protected Heavy Research path: instead of continuing to search only for a globally larger CORE, the research layer now asks where an independent specialist adds incremental value to the frozen CORE.
 
-## Fix 1 — duplicate physical games
+## What changed
 
-The live feed can occasionally carry the same matchup with two kickoff-time variants. The previous production identity used home + away + UTC kickoff hour, so a stale schedule time could make one real game appear twice.
+### 1. Conditional specialist attribution
 
-V2.5.2 changes only physical-game identity handling:
+Heavy Research now evaluates these independent specialist branches:
 
-- groups the same directional home/away matchup when kickoff variants are within 18 hours;
-- chooses one canonical kickoff using the freshest snapshot first, then row coverage, then the later kickoff as a deterministic tie-breaker;
-- preserves the original kickoff in `_prod_source_game_start`;
-- stores the canonical kickoff in `_prod_game_start`;
-- assigns all variants to one `_prod_game_id`;
-- uses the canonical kickoff for the selected production row and prospective-ledger lock timing;
-- leaves normal one-kickoff games on the same legacy `home_away_UTC-hour` production ID, minimizing ledger identity churn;
-- exposes a dashboard caption when schedule-time conflicts were normalized.
+- POWER_SOS_CONTEXT
+- STRUCTURED_STATS
+- MATCHUP_CONTEXT (new standalone matchup/trend specialist)
+- ADVANCED_STATS (only when real historical advanced fields exist)
+- EXPERT_COMBINED
+- PROGRAM_HIERARCHY
 
-The current exported board had 61 rows but only 59 unique matchups. The duplicated matchups were Arizona State–Hawaii and Indiana–Ohio State. This patch collapses those schedule variants before the board is built.
+The global challenger comparison is retained, but a specialist no longer has to beat CORE on every game to be useful. A separate attribution layer tests pregame regimes such as:
 
-## Fix 2 — blank Miner / Pathi / Big Al detail fields
+- cross-conference vs same-conference
+- early season vs mature season
+- large strength-of-schedule gap
+- large power-vs-market disagreement
+- large conference-strength gap
+- big spreads
+- CORE and specialist strong agreement
+- CORE and specialist strong conflict
+- large specialist-vs-CORE divergence
 
-The compact board was correctly using the authoritative support/conflict fields, but the expanded "Why Bet Authority made each decision" table relied mostly on optional presentation columns (`NCAAF_RV2_System_Summary`, `Pathi_Active_Text`, `BigAl_Active_Text`). That made the detail fields look blank even when Bet Authority had actually consumed a frozen Miner or Pathi vote.
+Regime numeric cut points are frozen from 2023 discovery only. At most two regimes per specialist advance to confirmation. They are then evaluated independently in 2024 and 2025.
 
-V2.5.2 makes the detail table derive diagnostics from the same authoritative fields used by Bet Authority:
+A regime can become `QUALIFIED_PROSPECTIVE_SHADOW` only when:
 
-- `_system_support_sources`
-- `_system_support_families`
-- `_system_conflict_sources`
-- `_system_conflict_families`
+- each confirmation season has at least 40 games;
+- a fixed 25% specialist / 75% incumbent blend improves RMSE in BOTH 2024 and 2025;
+- pooled RMSE improves;
+- pooled MAE is non-inferior;
+- the paired-bootstrap 95% lower bound for RMSE improvement is above zero.
 
-It still shows the richer raw RV2 / Pathi / Big Al text when available, but now falls back to explicit normalized states such as:
+Even then it has:
 
-- `SUPPORT: MINER_DOG_3_7`
-- `CONFLICT: MINER_DOG_3_7`
-- `SUPPORT: PATHI_CROSSED_KEY_AWAY_FADE`
-- `CONFLICT: PATHI_CROSSED_KEY_AWAY_FADE`
+- production_authority = 0
+- bet_authority_vote = false
+- automatic_promotion = false
 
-The current exported detail table contained 17 rows with actual Miner support/conflict and 19 rows with actual Pathi support/conflict, while all of the old display-only diagnostic columns were blank. The new helper surfaces those real authority states.
+So this release cannot change a live wager or rewrite CORE.
+
+### 2. Standalone matchup specialist
+
+V2.5 created matchup/trend interactions, but they were primarily consumed inside the broad expert model. V2.6 now screens and tunes a separate `MATCHUP_CONTEXT` specialist so passing/rushing mismatches, recent-vs-season trends, and matchup interactions can be judged independently.
+
+### 3. Advanced-data readiness contract
+
+Heavy Research now publishes explicit historical coverage for genuinely new data families rather than silently substituting box-score proxies:
+
+- EPA/play
+- success rate
+- explosiveness
+- havoc
+- line yards
+- stuff rate
+- power success
+- field position
+- drive efficiency
+- sack / pressure rate
+- early-down efficiency
+- passing-down efficiency
+- QB efficiency
+- returning production / roster continuity
+- recruiting / talent
+
+Each family is `READY`, `PARTIAL`, or `MISSING`. Missing sources are never fabricated. Once real leakage-safe historical columns are populated, the existing Heavy Research path can test them automatically.
+
+### 4. Dashboard research UI
+
+The CORE Challenger panel now adds:
+
+- conditional specialist attribution table;
+- 2024 and 2025 regime-specific gains;
+- pooled gain and bootstrap lower bound;
+- SUPPORT_SHADOW / CAUTION_SHADOW / CONTEXT_SHADOW role;
+- count of qualified prospective-shadow regimes;
+- advanced-data readiness table.
 
 ## What did NOT change
 
-- NCAAF Spread CORE: unchanged
-- H2H CORE: unchanged
-- Totals CORE: unchanged
-- CORE 2% edge + 2% EV candidate gates: unchanged
-- STAT authority: unchanged
-- Pathi rules: unchanged
-- Big Al rules: unchanged
-- Miner qualification: unchanged
-- `STRONG_VALIDATED` live-authority gate: unchanged
-- Bet Authority: unchanged
-- Heavy Research: unchanged
-- 2026 remains sealed from research selection
-- Production contract source tag: unchanged
-- Automatic model/policy promotion: disabled
+- frozen NCAAF Spread CORE
+- frozen H2H CORE
+- frozen Totals CORE
+- current production probability artifact
+- 2% CORE edge + 2% live EV candidate gates
+- frozen STAT selector
+- Pathi
+- Big Al
+- Miner qualification / STRONG_VALIDATED gate
+- Bet Authority
+- physical-game dedupe
+- prospective ledger identity
+- 2026 outcomes remain sealed from research selection
+- no automatic promotion
 
 ## Deploy
 
-From V2.5.1, only two runtime files need to change:
+From V2.5.2 replace:
 
-1. `ncaaf_production_v1.py`
-2. `sharp_line_dashboard.py`
+1. `ncaaf_core_challenger_v2.py`
+2. `train_job.py`
+3. `sharp_line_dashboard.py`
 
-The full ZIP includes the synchronized unchanged files as well.
+The ZIP also contains the synchronized unchanged NCAAF files for a full deployment snapshot.
 
-After deployment, run **NCAAF Production — Weekly Update** once so the current board is rebuilt with canonical physical-game identity. You do **not** need to rerun Heavy Research for this patch.
+After deployment run **NCAAF Research — Heavy Challenger Search** once. That creates the new conditional-attribution and advanced-data-readiness report. You do not need to run Production Publish, and you do not need to rerun Weekly solely because of this research patch.
 
-The normal background scanner will then continue using the same dedupe logic for prospective captures.
+Normal weekly operation remains:
+
+1. update 2026 YTD statistics;
+2. validate the uploader;
+3. run **NCAAF Production — Weekly Update**.

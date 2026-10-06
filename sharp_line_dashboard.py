@@ -48476,8 +48476,8 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
                 st.info('No NCAAF CORE Challenger artifact is published yet. Run NCAAF Research — Heavy Challenger Search from Model maintenance.')
             else:
                 _best=_cc.get('best_challenger') or {}
-                st.markdown('**CORE CHALLENGER V2 — expert/specialist research**')
-                st.caption('2022 is initial fit; 2023 selects the specialist recipe; 2024 and 2025 are untouched confirmation. 2026 is sealed. Team power, strength of schedule, conference strength, rest/home context, structured matchup statistics, trends and regularized program/conference effects are research-only and cannot change Production V1 or Bet Authority.')
+                st.markdown('**CORE CHALLENGER V2.1 — expert/specialist + conditional attribution research**')
+                st.caption('2022 is initial fit; 2023 selects specialist recipes and conditional regimes; 2024 and 2025 are protected confirmation. 2026 is sealed. Team power, strength of schedule, conference strength, rest/home context, structured matchup statistics, trends, program/conference effects and conditional attribution are research-only and cannot change Production V1 or Bet Authority.')
                 _bc1,_bc2,_bc3=st.columns(3)
                 _bc1.metric('Recommendation',str(_cc.get('recommendation') or '—'))
                 _bc2.metric('Best challenger',str(_best.get('name') or '—'))
@@ -48500,9 +48500,48 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
                 st.caption(f"Discovery-selected structured football statistics: {', '.join(map(str,_sr)) if _sr else '—'}")
                 st.caption(f"Specialist matchup/trend interactions available: {', '.join(map(str,_ix)) if _ix else '—'}")
                 st.caption(f"Conference coverage: {float(_ed.get('conference_coverage',0) or 0):.1%}; advanced EPA/success/explosiveness/havoc-style named fields detected in the current processed frame: {len(_ed.get('advanced_named_fields_present') or [])}.")
+
+                _attr=_cc.get('conditional_specialist_attribution') or {}
+                _sel=_attr.get('selected_regimes') or [] if isinstance(_attr,dict) else []
+                _qual=_attr.get('qualified_shadow_regimes') or [] if isinstance(_attr,dict) else []
+                st.markdown('**Conditional specialist attribution — where a specialist may add value**')
+                st.caption('Regimes are selected from 2023 only, then tested separately in 2024 and 2025. QUALIFIED_PROSPECTIVE_SHADOW remains zero-authority: no Bet Authority vote, no CORE rewrite, and no automatic promotion.')
+                if _sel:
+                    _ar=[]
+                    for _z in _sel:
+                        _cf=_z.get('confirmation') or {}; _p=_z.get('pooled') or {}; _b=_z.get('bootstrap') or {}; _rg=_z.get('regime') or {}
+                        _ar.append({
+                            'Specialist':_z.get('specialist'),'Regime':_rg.get('name'),'Role':_z.get('role'),'State':_z.get('state'),
+                            '2024 N':(_cf.get('2024') or {}).get('n'),'2024 Blend RMSE Gain':(_cf.get('2024') or {}).get('blend_rmse_gain'),
+                            '2025 N':(_cf.get('2025') or {}).get('n'),'2025 Blend RMSE Gain':(_cf.get('2025') or {}).get('blend_rmse_gain'),
+                            'Pooled N':_p.get('n'),'Pooled Blend RMSE Gain':_p.get('blend_rmse_gain'),'Pooled Blend MAE Gain':_p.get('blend_mae_gain'),
+                            'Agreement Rate':_p.get('agreement_rate'),'RMSE Gain CI Low':((_b.get('blend_rmse_gain_ci95') or [None,None])[0]),
+                        })
+                    _adf=pd.DataFrame(_ar)
+                    for _c in ['2024 Blend RMSE Gain','2025 Blend RMSE Gain','Pooled Blend RMSE Gain','Pooled Blend MAE Gain','RMSE Gain CI Low']:
+                        _adf[_c]=pd.to_numeric(_adf[_c],errors='coerce').map(lambda x:f'{x:+.4f}' if pd.notna(x) else '—')
+                    _adf['Agreement Rate']=pd.to_numeric(_adf['Agreement Rate'],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
+                    st.dataframe(_adf,use_container_width=True,hide_index=True)
+                    st.caption(f"Qualified prospective-shadow regimes: {len(_qual)}. These are observation-only until enough true 2026+ prospective evidence accumulates.")
+                else:
+                    st.info('No specialist regime cleared the 2023 discovery screen for protected 2024/25 attribution testing.')
+
+                _adr=_cc.get('advanced_data_readiness') or {}
+                _af=_adr.get('families') or [] if isinstance(_adr,dict) else []
+                if _af:
+                    st.markdown('**Advanced football-data readiness**')
+                    _afd=pd.DataFrame([{
+                        'Data family':_x.get('family'),'State':_x.get('state'),
+                        'Historical coverage':_x.get('max_historical_coverage'),
+                        'Detected columns':', '.join(map(str,_x.get('columns') or [])) if (_x.get('columns') or []) else '—'
+                    } for _x in _af])
+                    _afd['Historical coverage']=pd.to_numeric(_afd['Historical coverage'],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
+                    st.dataframe(_afd,use_container_width=True,hide_index=True)
+                    st.caption('MISSING means the model will not invent or proxy that source. When historically populated, Heavy Research can test it automatically while preserving the same 2022/2023 discovery and 2024/2025 confirmation contract.')
+
                 if _best:
                     _ci=(_best.get('vs_incumbent_pooled') or {}).get('rmse_gain_ci95') or []
-                    st.caption(f"Best challenger paired-bootstrap RMSE-gain 95% CI: {_ci}. Promotion remains manual; even PROMOTION_ELIGIBLE_RESEARCH first requires prospective shadow.")
+                    st.caption(f"Best global challenger paired-bootstrap RMSE-gain 95% CI: {_ci}. Global promotion remains manual; conditional specialist regimes are separately shadow-only.")
         except Exception as _cc_err:
             st.warning(f'CORE Challenger report unavailable: {type(_cc_err).__name__}')
 
