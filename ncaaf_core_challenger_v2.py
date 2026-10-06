@@ -13,8 +13,8 @@ Research chronology
 * 2024 and 2025 = untouched confirmation seasons.
 * 2026+ = completely sealed; never queried by this module.
 
-What V2 adds
-------------
+What V2.2 adds
+--------------
 1. Pregame-only sequential team power ratings.
 2. Strength-of-schedule and conference-strength estimates derived only from
    games already completed before kickoff.
@@ -32,7 +32,9 @@ What V2 adds
    by untouched 2024 and 2025 confirmation to determine where Power/SOS,
    structured-stat, matchup, program, or advanced-data specialists add
    incremental value without replacing CORE globally.
-9. Explicit advanced-data readiness inventory for EPA/play, success rate,
+9. Existing-feed coverage completion with an auditable ST/R3/R5/OA/team-v-opponent/matchup/trend registry.
+10. Incremental one-feature attribution, coverage-specialist ablation, and nearby blend/edge diagnostics.
+11. Explicit advanced-data readiness inventory for EPA/play, success rate,
    explosiveness, havoc, line yards, stuff rate, power success, field position,
    drive efficiency, pressure/sack rate, QB efficiency, roster continuity and
    talent/recruiting inputs when those columns become available.
@@ -47,14 +49,15 @@ import hashlib
 import io
 import json
 import pickle
+import re
 from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-SOURCE_TAG = "ncaaf-core-challenger-v2.1-conditional-specialist-attribution-20261006"
-VERSION = "2.1.0"
+SOURCE_TAG = "ncaaf-core-challenger-v2.2-existing-feed-coverage-completion-20261006"
+VERSION = "2.2.0"
 REPORT_CURRENT_BLOB = "research/ncaaf/core_challenger/v2/current_report.json"
 REPORT_HISTORY_PREFIX = "research/ncaaf/core_challenger/v2/history"
 BUNDLE_CURRENT_BLOB = "research/ncaaf/core_challenger/v2/current_bundle.pkl"
@@ -82,6 +85,8 @@ MIN_CONFIRM_ROWS = 400
 MAX_STRUCTURED_STATS = 18
 MAX_MATCHUP_STATS = 12
 MAX_ADVANCED_STATS = 12
+MAX_COVERAGE_STATS = 16
+COVERAGE_SCREEN_MAX = 220
 TOP_PER_FAMILY = 3
 ATTRIBUTION_BLEND_WEIGHT = 0.25
 ATTRIBUTION_DISCOVERY_MIN_N = 60
@@ -327,6 +332,186 @@ def _add_trend_interactions(g: pd.DataFrame) -> tuple[pd.DataFrame,list[str]]:
         z["Expert_PowerMarket_x_Certainty"]=_num(z,"Expert_PowerVsMarket")*(1.0-_num(z,"Expert_PowerUncertainty")); made.append("Expert_PowerMarket_x_Certainty")
     return z,made
 
+
+
+# ---------------------------------------------------------------------------
+# V2.2 existing-feed coverage completion
+# ---------------------------------------------------------------------------
+_COVERAGE_MATCHUP_PAIRS = (
+    ("YPP", "Off_YPP", "Def_YPP_Allowed"),
+    ("Pass_YPA", "Off_Pass_YPA", "Def_Pass_YPA_Allowed"),
+    ("Rush_YPA", "Off_Rush_YPA", "Def_Rush_YPA_Allowed"),
+    ("Points_Per_Play", "Off_Points_Per_Play", "Def_Points_Per_Play_Allowed"),
+    ("FirstDown_Rate", "Off_FirstDown_Rate", "Def_FirstDown_Rate_Allowed"),
+)
+_COVERAGE_OA_SENSIBLE = (
+    "ypp", "ypa", "yards", "epa", "success", "explos", "havoc", "line_yards",
+    "stuff", "power_success", "points_per_play", "points_per_drive", "drive_eff",
+    "firstdown", "third_down", "fourth_down", "sack", "pressure", "field_position",
+    "early_down", "passing_down", "qb_", "tempo", "pace",
+)
+
+
+def _coverage_base_metric(metric: str) -> str:
+    x=str(metric or "").strip("_")
+    x=re.sub(r"^GameAdj_", "", x, flags=re.I)
+    x=re.sub(r"^(Off|Def)_", "", x, flags=re.I)
+    x=re.sub(r"_Allowed$", "", x, flags=re.I)
+    return x or "UNKNOWN"
+
+
+def _coverage_parse_column(col: str) -> dict[str,Any] | None:
+    """Parse only known pregame feature naming contracts; never infer outcomes."""
+    c=str(col)
+    m=re.match(r"^(A|B|Diff|Mean)_Raw(Season|Recent3|Recent5)_(.+)$",c)
+    if m:
+        role,horizon,metric=m.groups(); oa=metric.lower().startswith("gameadj_")
+        return {"base":_coverage_base_metric(metric),"role":role.lower(),"horizon":horizon.lower(),"oa":oa,"kind":"team_opponent"}
+    m=re.match(r"^Coverage_Diff_Raw(Season|Recent3|Recent5)_(.+)$",c)
+    if m:
+        horizon,metric=m.groups(); oa=metric.lower().startswith("gameadj_")
+        return {"base":_coverage_base_metric(metric),"role":"diff","horizon":horizon.lower(),"oa":oa,"kind":"team_opponent"}
+    m=re.match(r"^Matchup_(?:Diff_)?Raw(Season|Recent3|Recent5)_(.+)$",c)
+    if m:
+        horizon,metric=m.groups()
+        return {"base":_coverage_base_metric(metric),"role":"matchup","horizon":horizon.lower(),"oa":"gameadj" in metric.lower(),"kind":"matchup"}
+    m=re.match(r"^Coverage_Matchup_Raw(Season|Recent3|Recent5)_(.+)$",c)
+    if m:
+        horizon,metric=m.groups()
+        return {"base":_coverage_base_metric(metric),"role":"matchup","horizon":horizon.lower(),"oa":"gameadj" in metric.lower(),"kind":"matchup"}
+    # Parse the specific completed trend contract before the generic Expert/Trend
+    # form so R3/R5 prefixes do not become part of the feed identity.
+    m=re.match(r"^Coverage_Trend_(?:R3|R5)_vs_Season_(.+)$",c)
+    if m:
+        return {"base":_coverage_base_metric(m.group(1)),"role":"trend","horizon":"trend","oa":"gameadj" in m.group(1).lower(),"kind":"trend"}
+    m=re.match(r"^(?:Expert|Coverage)_Trend_(.+)$",c)
+    if m:
+        return {"base":_coverage_base_metric(m.group(1)),"role":"trend","horizon":"trend","oa":"gameadj" in m.group(1).lower(),"kind":"trend"}
+    return None
+
+
+def _coverage_opp_adjust_sensible(base: str) -> bool:
+    lc=str(base).lower()
+    return any(t in lc for t in _COVERAGE_OA_SENSIBLE)
+
+
+def _complete_feed_coverage(g: pd.DataFrame, candidate_cols: list[str]) -> tuple[pd.DataFrame,dict[str,Any]]:
+    """Complete algebraically safe representations already supported by the feed.
+
+    This function deliberately does NOT manufacture Recent-5 or opponent-adjusted
+    history from postgame box scores.  It only derives a team-v-opponent difference,
+    an offense-v-defense matchup difference, or recent-v-season trend when both
+    leakage-safe pregame ingredients already exist in the protected frame.
+    """
+    z=g.copy(); made=[]
+    universe=list(dict.fromkeys([str(c) for c in candidate_cols]+[str(c) for c in z.columns]))
+
+    # A minus B for identical pregame metrics: team-v-opponent differential.
+    for horizon in ("Season","Recent3","Recent5"):
+        prefix=f"Raw{horizon}_"
+        amap={c[len(f'A_{prefix}'):]:c for c in universe if c.startswith(f"A_{prefix}") and c in z.columns}
+        bmap={c[len(f'B_{prefix}'):]:c for c in universe if c.startswith(f"B_{prefix}") and c in z.columns}
+        for metric,a in amap.items():
+            b=bmap.get(metric)
+            if not b: continue
+            nm=f"Coverage_Diff_{prefix}{metric}"
+            if nm not in z.columns:
+                z[nm]=_num(z,a)-_num(z,b); made.append(nm)
+
+    # Offense-vs-opponent-defense matchup differences for football quantities
+    # where the subtraction has a clear interpretation.
+    for horizon in ("Season","Recent3","Recent5"):
+        for adj in ("", "GameAdj_"):
+            for label,off,defn in _COVERAGE_MATCHUP_PAIRS:
+                a=f"A_Raw{horizon}_{adj}{off}"; b=f"B_Raw{horizon}_{adj}{defn}"
+                if a not in z.columns or b not in z.columns: continue
+                suffix=("GameAdj_" if adj else "")+label
+                nm=f"Coverage_Matchup_Raw{horizon}_{suffix}"
+                if nm not in z.columns:
+                    z[nm]=_num(z,a)-_num(z,b); made.append(nm)
+
+    # Recent-vs-season trend on the same orientation. Prefer an existing Diff
+    # column; otherwise use the newly derived Coverage_Diff equivalent.
+    for recent,tag in (("Recent3","R3"),("Recent5","R5")):
+        season_map={}
+        recent_map={}
+        for c in list(z.columns):
+            for stem,dst in (("Diff_RawSeason_",season_map),("Coverage_Diff_RawSeason_",season_map),
+                             (f"Diff_Raw{recent}_",recent_map),(f"Coverage_Diff_Raw{recent}_",recent_map)):
+                if c.startswith(stem): dst.setdefault(c[len(stem):],c)
+        for metric,rc in recent_map.items():
+            sc=season_map.get(metric)
+            if not sc: continue
+            nm=f"Coverage_Trend_{tag}_vs_Season_{metric}"
+            if nm not in z.columns:
+                z[nm]=_num(z,rc)-_num(z,sc); made.append(nm)
+
+    # Build an auditable coverage registry. Recent-5 is explicitly optional; it
+    # upgrades a COMPLETE_CORE row to COMPLETE_R5 but cannot demote a sound R3 feed.
+    rows=[]; by_base={}
+    for c in list(dict.fromkeys(universe+made)):
+        if c not in z.columns: continue
+        meta=_coverage_parse_column(c)
+        if not meta: continue
+        d=by_base.setdefault(meta["base"],{"columns":[],"season":False,"recent3":False,"recent5":False,"oa":False,"team_vs_opponent":False,"matchup":False,"trend":False})
+        d["columns"].append(c)
+        h=meta["horizon"]
+        if h=="season": d["season"]=True
+        elif h=="recent3": d["recent3"]=True
+        elif h=="recent5": d["recent5"]=True
+        if meta["oa"]: d["oa"]=True
+        if meta["role"]=="diff": d["team_vs_opponent"]=True
+        if meta["kind"]=="matchup": d["matchup"]=True
+        if meta["kind"]=="trend": d["trend"]=True
+    matchup_bases={x[0].lower() for x in _COVERAGE_MATCHUP_PAIRS}
+    for base,d in sorted(by_base.items()):
+        expect_oa=_coverage_opp_adjust_sensible(base)
+        expect_matchup=base.lower() in matchup_bases or any(x in base.lower() for x in ("ypp","ypa","points_per_play","firstdown"))
+        required=[d["season"],d["recent3"],d["team_vs_opponent"],d["trend"]]
+        if expect_oa: required.append(d["oa"])
+        if expect_matchup: required.append(d["matchup"])
+        complete=all(required) if required else False
+        status="COMPLETE_R5" if complete and d["recent5"] else "COMPLETE_CORE" if complete else "PARTIAL"
+        cov=max([float(_num(z,c).notna().mean()) for c in d["columns"]],default=0.0)
+        rows.append({"feed":base,"status":status,"season_to_date":d["season"],"recent3":d["recent3"],"recent5":d["recent5"],
+                     "opponent_adjusted":d["oa"],"opponent_adjusted_expected":expect_oa,"team_vs_opponent":d["team_vs_opponent"],
+                     "matchup_differential":d["matchup"],"matchup_expected":expect_matchup,"recent_vs_season_trend":d["trend"],
+                     "max_historical_coverage":cov,"columns":d["columns"][:30]})
+    candidate=[c for c in list(dict.fromkeys(universe+made)) if _coverage_parse_column(c) is not None and c in z.columns]
+    # Keep screening bounded and deterministic: prioritize derived/completed fields,
+    # then higher protected-history coverage.
+    disc=z[_num(z,"Season").isin([2022,2023])]
+    candidate=sorted(candidate,key=lambda c:(c.startswith("Coverage_"),float(_num(disc,c).notna().mean()),c),reverse=True)[:COVERAGE_SCREEN_MAX]
+    audit={
+        "policy":"EXISTING_FEED_ONLY__ALGEBRAIC_DERIVATIONS_FROM_PREGAME_FIELDS__NO_POSTGAME_BACKFILL__R5_OPTIONAL__OA_ONLY_WHEN_SOURCE_EXISTS",
+        "derived_columns":made,
+        "candidate_columns":candidate,
+        "feeds":rows,
+        "counts":{"feeds":len(rows),"complete_core":sum(x["status"] in {"COMPLETE_CORE","COMPLETE_R5"} for x in rows),"complete_r5":sum(x["status"]=="COMPLETE_R5" for x in rows),"partial":sum(x["status"]=="PARTIAL" for x in rows),"derived":len(made)},
+    }
+    return z,audit
+
+
+def _coverage_incremental_report(g: pd.DataFrame, features: list[str]) -> dict[str,Any]:
+    """Frozen one-feature-at-a-time value test against the incumbent backbone."""
+    rows=[]
+    for f in list(dict.fromkeys(features))[:MAX_COVERAGE_STATS]:
+        if f not in g.columns: continue
+        fold={}
+        for yr in (2023,)+tuple(CONFIRMATION_SEASONS):
+            tr=g[_num(g,"Season").lt(yr)].copy(); va=g[_num(g,"Season").eq(yr)].copy()
+            if tr.empty or va.empty: continue
+            ip=_incumbent_predict(tr,va)
+            try: ap=_fit_predict_numeric(tr,va,list(INCUMBENT_FEATURES)+[f],alpha=24.0,blend=1.0)
+            except Exception: continue
+            y=_num(va,"Actual_Margin").to_numpy(float)
+            fold[str(yr)]={"n":int(len(va)),"rmse_gain":_rmse(y,ip)-_rmse(y,ap),"mae_gain":_mae(y,ip)-_mae(y,ap)}
+        c=[fold.get(str(y),{}) for y in CONFIRMATION_SEASONS]
+        rows.append({"feature":f,"discovery":fold.get("2023",{}),"confirmation":{str(y):fold.get(str(y),{}) for y in CONFIRMATION_SEASONS},
+                     "both_confirmation_rmse_positive":bool(len(c)==2 and all(_safe(x.get("rmse_gain"),-9)>0 for x in c)),
+                     "both_confirmation_mae_nonnegative":bool(len(c)==2 and all(_safe(x.get("mae_gain"),-9)>=0 for x in c))})
+    rows.sort(key=lambda x:(_safe((x.get("discovery") or {}).get("rmse_gain"),-9),x.get("both_confirmation_rmse_positive",False)),reverse=True)
+    return {"policy":"ONE_FEATURE_INCREMENT_OVER_FROZEN_INCUMBENT__DISCOVERY_2023__CONFIRM_2024_2025__DIAGNOSTIC_ONLY","features":rows,"production_authority":0}
 
 def _feature_family(c: str, dashboard_module=None) -> str:
     s=str(c)
@@ -588,6 +773,21 @@ def _attribution_metrics(df: pd.DataFrame, inc_pred: np.ndarray, spec_pred: np.n
     }
 
 
+
+def _attribution_neighborhood(df: pd.DataFrame, inc_pred: np.ndarray, spec_pred: np.ndarray, mask: np.ndarray) -> dict[str,Any]:
+    """Diagnostics only: nearby blend weights and edge floors, never selection knobs."""
+    m=np.asarray(mask,bool); a=_num(df,"Actual_Margin").to_numpy(float); ip=np.asarray(inc_pred,float); sp=np.asarray(spec_pred,float)
+    rows=[]
+    for w in (0.15,0.25,0.35):
+        bp=(1.0-w)*ip+w*sp; ok=m&np.isfinite(a)&np.isfinite(ip)&np.isfinite(bp)
+        rows.append({"specialist_weight":w,"n":int(ok.sum()),"rmse_gain":_rmse(a[ok],ip[ok])-_rmse(a[ok],bp[ok]) if ok.any() else None,
+                     "mae_gain":_mae(a[ok],ip[ok])-_mae(a[ok],bp[ok]) if ok.any() else None})
+    edge=[]
+    bp=(1.0-ATTRIBUTION_BLEND_WEIGHT)*ip+ATTRIBUTION_BLEND_WEIGHT*sp
+    for floor in (1.0,2.0,3.0): edge.append({"edge_floor":floor,"blend_ats":_ats_side_metrics(df,bp,m,edge_floor=floor)})
+    gains=[_safe(x.get("rmse_gain"),-9) for x in rows]
+    return {"blend_weight_neighborhood":rows,"edge_floor_neighborhood":edge,"all_nearby_blends_rmse_positive":bool(gains and min(gains)>0),"selection_influence":0}
+
 def _bootstrap_attribution(df: pd.DataFrame, inc_pred: np.ndarray, spec_pred: np.ndarray, mask: np.ndarray, reps: int=BOOTSTRAP_REPS) -> dict[str,Any]:
     a=_num(df,"Actual_Margin").to_numpy(float); ip=np.asarray(inc_pred,float); sp=np.asarray(spec_pred,float); blend=(1.0-ATTRIBUTION_BLEND_WEIGHT)*ip+ATTRIBUTION_BLEND_WEIGHT*sp
     ok=np.asarray(mask,bool)&np.isfinite(a)&np.isfinite(ip)&np.isfinite(sp)&np.isfinite(blend)
@@ -630,16 +830,16 @@ def _conditional_specialist_attribution(g: pd.DataFrame, tuned: list[dict[str,An
             registry.append(rec)
             if rec["selected_for_confirmation"]:
                 d=rec.get("discovery") or {}
-                log_func(f"[NCAAF-CORE-V21-ATTR-DISCOVERY] specialist={name} regime={rec['regime']['name']} n={d.get('n')} blend_rmse_gain={_safe(d.get('blend_rmse_gain')):+.4f} agreement={_safe(d.get('agreement_rate')):.3f}")
+                log_func(f"[NCAAF-CORE-V22-ATTR-DISCOVERY] specialist={name} regime={rec['regime']['name']} n={d.get('n')} blend_rmse_gain={_safe(d.get('blend_rmse_gain')):+.4f} agreement={_safe(d.get('agreement_rate')):.3f}")
         for rec in selected:
             spec=rec["regime"]; conf={}; pooled_frames=[]; pooled_i=[]; pooled_s=[]; pooled_masks=[]
             for yr in CONFIRMATION_SEASONS:
                 tr=g[_num(g,"Season").lt(yr)].copy(); va=g[_num(g,"Season").eq(yr)].copy(); ip=_incumbent_predict(tr,va); sp=_predict_recipe(tr,va,recipe)
                 mask=_regime_mask(va,spec,ip,sp,discovery_divergence_cut=_safe(spec.get("value"),div_cut)); met=_attribution_metrics(va,ip,sp,mask); conf[str(yr)]=met
                 pooled_frames.append(va); pooled_i.append(ip); pooled_s.append(sp); pooled_masks.append(mask)
-                log_func(f"[NCAAF-CORE-V21-ATTR-CONFIRM] specialist={name} regime={spec['name']} season={yr} n={met.get('n',0)} blend_rmse_gain={_safe(met.get('blend_rmse_gain')):+.4f} blend_mae_gain={_safe(met.get('blend_mae_gain')):+.4f} agreement={_safe(met.get('agreement_rate')):.3f}")
+                log_func(f"[NCAAF-CORE-V22-ATTR-CONFIRM] specialist={name} regime={spec['name']} season={yr} n={met.get('n',0)} blend_rmse_gain={_safe(met.get('blend_rmse_gain')):+.4f} blend_mae_gain={_safe(met.get('blend_mae_gain')):+.4f} agreement={_safe(met.get('agreement_rate')):.3f}")
             pdf=pd.concat(pooled_frames,ignore_index=True); pi=np.concatenate(pooled_i); ps=np.concatenate(pooled_s); pm=np.concatenate(pooled_masks)
-            pooled=_attribution_metrics(pdf,pi,ps,pm); boot=_bootstrap_attribution(pdf,pi,ps,pm)
+            pooled=_attribution_metrics(pdf,pi,ps,pm); boot=_bootstrap_attribution(pdf,pi,ps,pm); neighborhood=_attribution_neighborhood(pdf,pi,ps,pm)
             both_n=all(int((conf[str(y)] or {}).get("n",0) or 0)>=ATTRIBUTION_CONFIRM_MIN_N for y in CONFIRMATION_SEASONS)
             both_gain=all(_safe((conf[str(y)] or {}).get("blend_rmse_gain"),-9)>0 for y in CONFIRMATION_SEASONS)
             pooled_gain=_safe(pooled.get("blend_rmse_gain"),-9)>0 and _safe(pooled.get("blend_mae_gain"),-9)>=0
@@ -647,10 +847,10 @@ def _conditional_specialist_attribution(g: pd.DataFrame, tuned: list[dict[str,An
             state="QUALIFIED_PROSPECTIVE_SHADOW" if both_n and both_gain and pooled_gain and ci_low>0 else "MIXED" if pooled_gain else "NO_INCREMENTAL_VALUE"
             agree=_safe(pooled.get("agreement_rate"),0.5)
             role="SUPPORT_SHADOW" if agree>=0.60 else "CAUTION_SHADOW" if agree<=0.40 else "CONTEXT_SHADOW"
-            out={"specialist":name,"recipe":recipe,"regime":spec,"role":role,"state":state,"discovery":rec.get("discovery"),"confirmation":conf,"pooled":pooled,"bootstrap":boot,"production_authority":0,"bet_authority_vote":False}
+            out={"specialist":name,"recipe":recipe,"regime":spec,"role":role,"state":state,"discovery":rec.get("discovery"),"confirmation":conf,"pooled":pooled,"bootstrap":boot,"neighborhood":neighborhood,"production_authority":0,"bet_authority_vote":False}
             selected_all.append(out)
             if state=="QUALIFIED_PROSPECTIVE_SHADOW": qualified.append(out)
-    log_func(f"[NCAAF-CORE-V21-ATTR-REGISTRY] tested={len(registry)} selected={len(selected_all)} qualified_shadow={len(qualified)} production_authority=0 bet_authority_vote=FALSE year_2026_queried=FALSE")
+    log_func(f"[NCAAF-CORE-V22-ATTR-REGISTRY] tested={len(registry)} selected={len(selected_all)} qualified_shadow={len(qualified)} production_authority=0 bet_authority_vote=FALSE year_2026_queried=FALSE")
     return {
         "policy":"DISCOVERY_2023_SELECTS_MAX_2_REGIMES_PER_SPECIALIST__2024_AND_2025_BOTH_CONFIRM__PAIRED_BOOTSTRAP_REQUIRED__SHADOW_ONLY",
         "blend_specialist_weight":ATTRIBUTION_BLEND_WEIGHT,
@@ -731,6 +931,24 @@ def _score_candidate(c: dict[str,Any], incumbent: dict[str,Any], log_func=print)
     log_func(f"[NCAAF-CORE-V2-SCORECARD] candidate={c['name']} state={c['state']} pooled_rmse_gain={_safe(b.get('rmse_gain')):+.4f} pooled_mae_gain={_safe(b.get('mae_gain')):+.4f} rmse_ci95={b.get('rmse_gain_ci95')} year_gains={yg} production_authority=0")
 
 
+
+def _coverage_recipe_ablation(g: pd.DataFrame, recipe: dict[str,Any] | None) -> dict[str,Any]:
+    r=dict(recipe or {})
+    if r.get("type")!="NUMERIC" or r.get("name")!="FEED_COVERAGE": return {"status":"NOT_APPLICABLE","production_authority":0}
+    feats=[f for f in (r.get("features") or []) if f!="Context_Intercept"]
+    if not feats: return {"status":"NO_FEATURES","production_authority":0}
+    full=_evaluate(g,r,"FEED_COVERAGE_ABLATION_FULL")
+    fp=((full.get("pooled") or {}).get("point") or {})
+    rows=[]
+    for f in feats[:MAX_COVERAGE_STATS]:
+        rr=dict(r); rr["features"]=[x for x in (r.get("features") or []) if x!=f]
+        ev=_evaluate(g,rr,"FEED_COVERAGE_ABLATE_"+re.sub(r"[^A-Za-z0-9]+","_",f)[:40])
+        p=((ev.get("pooled") or {}).get("point") or {})
+        rows.append({"feature":f,"full_rmse":fp.get("rmse"),"ablated_rmse":p.get("rmse"),"rmse_loss_when_removed":_safe(p.get("rmse"))-_safe(fp.get("rmse")),
+                     "full_mae":fp.get("mae"),"ablated_mae":p.get("mae"),"mae_loss_when_removed":_safe(p.get("mae"))-_safe(fp.get("mae"))})
+    rows.sort(key=lambda x:_safe(x.get("rmse_loss_when_removed"),-9),reverse=True)
+    return {"status":"PASS","features":rows,"policy":"FIXED_DISCOVERY_RECIPE__REMOVE_ONE_FEATURE__2024_2025_POOLED_DIAGNOSTIC_ONLY","production_authority":0}
+
 def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models", storage_client=None, log_func=print, hard_fail=True) -> dict[str,Any]:
     try:
         cache=getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}; games=cache.get("games"); base_candidates=list(cache.get("candidate_feature_cols") or [])
@@ -741,11 +959,13 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
         if int((_num(g,"Season")>=2026).sum())!=0: raise RuntimeError("2026 seal failed")
         missing=[c for c in INCUMBENT_FEATURES if c not in g.columns]
         if missing: raise RuntimeError(f"incumbent features missing {missing}")
-        log_func(f"[NCAAF-CORE-V2-PREFLIGHT] status=PASS source={SOURCE_TAG} rows={len(g)} seasons={seasons} discovery_train=2022 discovery_validate=2023 confirmation=2024,2025 year_2026_queried=FALSE production_authority=0")
+        log_func(f"[NCAAF-CORE-V22-PREFLIGHT] status=PASS source={SOURCE_TAG} rows={len(g)} seasons={seasons} discovery_train=2022 discovery_validate=2023 confirmation=2024,2025 year_2026_queried=FALSE production_authority=0")
 
         g,strength_cols,strength_audit=_add_strength_context(g); g,interaction_cols=_add_trend_interactions(g)
+        g,coverage_registry=_complete_feed_coverage(g,base_candidates+interaction_cols)
+        coverage_candidates=list(coverage_registry.get("candidate_columns") or [])
         advanced_candidates=[c for c in g.columns if any(t in str(c).lower() for t in _ADVANCED_TOKENS)]
-        safe=_safe_pool(g,base_candidates+interaction_cols+advanced_candidates)
+        safe=_safe_pool(g,base_candidates+interaction_cols+advanced_candidates+coverage_candidates)
         stat_rank=_rank_stats(g,safe,dashboard_module=dashboard_module)
         structured_stats=list(stat_rank.get("selected") or [])
         matchup_pool=[c for c in safe if str(c).startswith("Matchup_") or str(c).startswith("Expert_Trend_") or "Mismatch" in str(c) or "_x_" in str(c)]
@@ -754,25 +974,31 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
         advanced_pool=[c for c in safe if any(tok in str(c).lower() for tok in _ADVANCED_TOKENS)]
         advanced_rank=_rank_subset_features(g,advanced_pool,max_features=MAX_ADVANCED_STATS) if advanced_pool else {"selected":[],"top_ranked":[]}
         advanced_stats=list(advanced_rank.get("selected") or [])
+        coverage_pool=[c for c in safe if c in set(coverage_candidates)]
+        coverage_rank=_rank_subset_features(g,coverage_pool,max_features=MAX_COVERAGE_STATS) if coverage_pool else {"selected":[],"top_ranked":[]}
+        coverage_stats=list(coverage_rank.get("selected") or [])
+        coverage_incremental=_coverage_incremental_report(g,coverage_stats)
         power_cols=[c for c in strength_cols if c in g.columns and float(_num(g,c).notna().mean())>=0.20]
         # Do not let market magnitude dominate the power-only branch; disagreement with the market is allowed.
         power_core=[c for c in power_cols if c not in {"Expert_OpenMargin","Expert_FavoriteRole"}]
-        combined=list(dict.fromkeys(["Context_Intercept"]+power_core+structured_stats+interaction_cols))
+        combined=list(dict.fromkeys(["Context_Intercept"]+power_core+structured_stats+interaction_cols+coverage_stats))
         combined=[c for c in combined if c in g.columns]
         power_features=["Context_Intercept"]+power_core
         stat_features=["Context_Intercept"]+structured_stats
         matchup_features=["Context_Intercept"]+matchup_stats
         advanced_features=["Context_Intercept"]+advanced_stats
+        coverage_features=["Context_Intercept"]+coverage_stats
         # Program hierarchy gets compact numeric context; identity effects are regularized categorical terms.
         program_nums=[c for c in (power_core+structured_stats[:8]) if c in g.columns]
 
         advanced_present=[c for c in g.columns if any(t in str(c).lower() for t in _ADVANCED_TOKENS)]
         advanced_readiness=_advanced_data_readiness(g)
         conf_cov=float(g.get("Conference",pd.Series("",index=g.index)).astype(str).str.strip().ne("").mean()) if "Conference" in g.columns else 0.0
-        log_func(f"[NCAAF-CORE-V2-EXPERT-DESIGN] power_features={len(power_features)-1} structured_stats={len(structured_stats)} matchup_stats={len(matchup_stats)} interactions={len(interaction_cols)} combined_features={len(combined)-1} conference_coverage={conf_cov:.1%} advanced_named_fields={len(advanced_present)}")
+        log_func(f"[NCAAF-CORE-V22-EXPERT-DESIGN] power_features={len(power_features)-1} structured_stats={len(structured_stats)} matchup_stats={len(matchup_stats)} coverage_stats={len(coverage_stats)} coverage_derived={len(coverage_registry.get('derived_columns') or [])} interactions={len(interaction_cols)} combined_features={len(combined)-1} conference_coverage={conf_cov:.1%} advanced_named_fields={len(advanced_present)}")
+        log_func(f"[NCAAF-CORE-V22-COVERAGE] counts={coverage_registry.get('counts')} selected={coverage_stats}")
         log_func(f"[NCAAF-CORE-V2-STRUCTURED-STATS] selected={structured_stats}")
-        log_func(f"[NCAAF-CORE-V21-MATCHUP-STATS] selected={matchup_stats}")
-        log_func(f"[NCAAF-CORE-V21-ADVANCED-READINESS] ready={advanced_readiness.get('ready_families')} partial={advanced_readiness.get('partial_families')} missing={advanced_readiness.get('missing_families')}")
+        log_func(f"[NCAAF-CORE-V22-MATCHUP-STATS] selected={matchup_stats}")
+        log_func(f"[NCAAF-CORE-V22-ADVANCED-READINESS] ready={advanced_readiness.get('ready_families')} partial={advanced_readiness.get('partial_families')} missing={advanced_readiness.get('missing_families')}")
 
         incumbent_recipe={"type":"INCUMBENT","name":"INCUMBENT_RECIPE","features":list(INCUMBENT_FEATURES)}
         inc=_evaluate(g,incumbent_recipe,"INCUMBENT_RECIPE",log_func=log_func)
@@ -782,6 +1008,7 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
         if len(stat_features)>1: tuned.append(_tune_numeric(g,stat_features,"STRUCTURED_STATS",log_func=log_func))
         if len(matchup_features)>1: tuned.append(_tune_numeric(g,matchup_features,"MATCHUP_CONTEXT",log_func=log_func))
         if len(advanced_features)>1: tuned.append(_tune_numeric(g,advanced_features,"ADVANCED_STATS",log_func=log_func))
+        if len(coverage_features)>1: tuned.append(_tune_numeric(g,coverage_features,"FEED_COVERAGE",log_func=log_func))
         if len(combined)>1: tuned.append(_tune_numeric(g,combined,"EXPERT_COMBINED",log_func=log_func))
         if program_nums: tuned.append(_tune_program(g,program_nums,log_func=log_func))
         if not tuned: raise RuntimeError("no specialist recipes available")
@@ -806,6 +1033,8 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
 
         for c in candidates: _score_candidate(c,inc,log_func=log_func)
         attribution=_conditional_specialist_attribution(g,tuned,log_func=log_func)
+        _coverage_recipe=next((t.get("recipe") for t in tuned if (t.get("recipe") or {}).get("name")=="FEED_COVERAGE"),None)
+        coverage_ablation=_coverage_recipe_ablation(g,_coverage_recipe)
         ranked=sorted(candidates,key=lambda c:(_safe((c.get("vs_incumbent_pooled") or {}).get("rmse_gain"),-9),_safe((c.get("vs_incumbent_pooled") or {}).get("mae_gain"),-9)),reverse=True)
         best=ranked[0]; recommendation="CHALLENGER_DESERVES_PROSPECTIVE_SHADOW" if best.get("state") in {"STRONG_CHALLENGER","PROMOTION_ELIGIBLE_RESEARCH"} else "KEEP_INCUMBENT"
 
@@ -817,11 +1046,14 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
             "incumbent":{"features":list(INCUMBENT_FEATURES),"recipe":incumbent_recipe,"evaluation":clean(inc)},
             "expert_design":{
                 "strength_context":strength_audit,"conference_coverage":conf_cov,"advanced_named_fields_present":advanced_present[:50],
-                "power_features":power_features,"structured_stat_selection":stat_rank,"matchup_stat_selection":matchup_rank,"advanced_stat_selection":advanced_rank,"interaction_features":interaction_cols,
+                "power_features":power_features,"structured_stat_selection":stat_rank,"matchup_stat_selection":matchup_rank,"advanced_stat_selection":advanced_rank,"coverage_stat_selection":coverage_rank,"interaction_features":interaction_cols,
                 "program_numeric_features":program_nums,
-                "principles":["prior-only sequential team power","strength of schedule","conference member strength","cross-conference residual strength","rest/home/maturity","structured matchup statistics","standalone matchup specialist","recent-vs-season trends","regularized program/conference hierarchy","discovery-only blend selection","conditional specialist attribution"],
+                "principles":["prior-only sequential team power","strength of schedule","conference member strength","cross-conference residual strength","rest/home/maturity","structured matchup statistics","standalone matchup specialist","existing-feed coverage completion","season/recent3/recent5 when available","opponent-adjusted where source-supported","team-v-opponent and matchup differentials","recent-vs-season trends","regularized program/conference hierarchy","discovery-only blend selection","conditional specialist attribution","nearby-threshold diagnostics without retuning"],
             },
             "advanced_data_readiness":advanced_readiness,
+            "existing_feed_coverage_registry":coverage_registry,
+            "coverage_incremental_attribution":coverage_incremental,
+            "coverage_feature_ablation":coverage_ablation,
             "conditional_specialist_attribution":attribution,
             "discovery_recipes":[{"recipe":t["recipe"],"discovery_metrics":t["discovery_metrics"]} for t in tuned],
             "incumbent_specialist_blend_grid":blend_grid,
@@ -829,7 +1061,7 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
             "best_challenger":{"name":best.get("name"),"state":best.get("state"),"recipe":best.get("recipe"),"vs_incumbent_pooled":best.get("vs_incumbent_pooled"),"vs_incumbent_by_season":best.get("vs_incumbent_by_season")},
             "recommendation":recommendation,
             "promotion_contract":"NO_AUTOMATIC_PROMOTION__2024_AND_2025_BOTH_MUST_BEAT_INCUMBENT_RMSE__POOLED_MAE_NONINFERIOR__PAIRED_BOOTSTRAP_REVIEW__PROSPECTIVE_SHADOW_REQUIRED",
-            "next_step":"Keep Production V1 frozen. Use conditional specialist attribution to identify support/caution regimes; any QUALIFIED_PROSPECTIVE_SHADOW regime remains zero-authority until prospectively observed. Enrich historical advanced-data families before testing a larger CORE.",
+            "next_step":"Keep Production V1 frozen. Complete and audit existing-feed ST/R3/R5/OA/team-v-opponent/matchup/trend coverage first; use conditional specialist attribution, incremental tests, ablation and threshold-neighborhood diagnostics to retain only independently useful information. Any QUALIFIED_PROSPECTIVE_SHADOW regime remains zero-authority until prospectively observed.",
         }
         if storage_client is None:
             from google.cloud import storage
@@ -838,10 +1070,10 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
         b.blob(hist).upload_from_string(raw,content_type="application/json"); b.blob(REPORT_CURRENT_BLOB).upload_from_string(raw,content_type="application/json")
         bio=io.BytesIO(); pickle.dump({"report":report,"source_tag":SOURCE_TAG},bio,protocol=pickle.HIGHEST_PROTOCOL); b.blob(BUNDLE_CURRENT_BLOB).upload_from_string(bio.getvalue(),content_type="application/octet-stream")
         report["artifact"]={"current_report":f"gs://{bucket_name}/{REPORT_CURRENT_BLOB}","current_bundle":f"gs://{bucket_name}/{BUNDLE_CURRENT_BLOB}","history_report":f"gs://{bucket_name}/{hist}","sha256":sha}
-        log_func(f"[NCAAF-CORE-V2-CONTRACT] status=PASS best={best.get('name')} best_state={best.get('state')} recommendation={recommendation} conditional_shadow_qualified={len((attribution or {}).get('qualified_shadow_regimes') or [])} report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} year_2026_queried=FALSE production_authority=0 production_mutated=FALSE")
+        log_func(f"[NCAAF-CORE-V22-CONTRACT] status=PASS best={best.get('name')} best_state={best.get('state')} recommendation={recommendation} conditional_shadow_qualified={len((attribution or {}).get('qualified_shadow_regimes') or [])} report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} year_2026_queried=FALSE production_authority=0 production_mutated=FALSE")
         return report
     except Exception as exc:
-        log_func(f"[NCAAF-CORE-V2-FAIL] {type(exc).__name__}: {exc}")
+        log_func(f"[NCAAF-CORE-V22-FAIL] {type(exc).__name__}: {exc}")
         if hard_fail: raise
         return {"source_tag":SOURCE_TAG,"version":VERSION,"status":"FAILED","error":f"{type(exc).__name__}:{exc}","production_authority":0}
 

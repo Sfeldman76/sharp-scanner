@@ -1,58 +1,29 @@
 {
-  "advanced_readiness_ui_present": true,
-  "conditional_attribution_synthetic": {
-    "bet_authority_vote": false,
-    "production_authority": 0,
-    "qualified_shadow_regimes": 0,
-    "selected_regimes": 2,
-    "tested_regimes": 11,
-    "year_2026_queried": false
-  },
-  "conditional_ui_present": true,
-  "core_self_test": {
-    "audit": {
-      "conference_k": 0.08,
-      "coverage": {
-        "Expert_AbsOpenMargin": 1.0,
-        "Expert_ConferenceMemberPowerDiff": 1.0,
-        "Expert_ConferenceVsMarket": 1.0,
-        "Expert_CrossConferenceRatingDiff": 1.0,
-        "Expert_EarlyGame": 1.0,
-        "Expert_FavoriteRole": 1.0,
-        "Expert_HomeRole": 1.0,
-        "Expert_MinGamesPrior": 1.0,
-        "Expert_OpenMargin": 1.0,
-        "Expert_OppGamesPrior": 1.0,
-        "Expert_OppPower": 1.0,
-        "Expert_OppSOS": 0.0,
-        "Expert_OppVsConference": 1.0,
-        "Expert_PowerDiff": 1.0,
-        "Expert_PowerUncertainty": 1.0,
-        "Expert_PowerVsMarket": 1.0,
-        "Expert_RestDiffDays": 0.0,
-        "Expert_SOSDiff": 0.0,
-        "Expert_SameConference": 1.0,
-        "Expert_TeamGamesPrior": 1.0,
-        "Expert_TeamPower": 1.0,
-        "Expert_TeamSOS": 0.5,
-        "Expert_TeamVsConference": 1.0
-      },
-      "feature_count": 23,
-      "offseason_shrink": 0.68,
-      "power_k": 0.16
-    },
-    "automatic_promotion": false,
-    "expert_feature_count": 23,
-    "production_authority": 0,
-    "regime_spec_count": 11,
-    "source_tag": "ncaaf-core-challenger-v2.1-conditional-specialist-attribution-20261006",
-    "status": "PASS",
-    "year_2026_queried": false
-  },
-  "ledger_unchanged": true,
-  "production_v1_unchanged": true,
-  "research_v2_unchanged": true,
-  "source_tag_in_train_job": true,
+  "package": "NCAAF_ENGINE_V2_7_EXISTING_FEED_COVERAGE_COMPLETION",
+  "date": "2026-10-06",
   "status": "PASS",
-  "utils_unchanged": true
+  "tests": {
+    "python_compile_all": "PASS",
+    "ncaaf_core_challenger_v2_self_test": "PASS",
+    "ncaaf_research_v2_self_test": "PASS",
+    "coverage_derivation_smoke": "PASS",
+    "published_system_wl_smoke": "PASS",
+    "miner_parent_child_lineage_smoke": "PASS",
+    "production_v1_sha_matches_v2_6": "PASS",
+    "production_ledger_sha_matches_v2_6": "PASS",
+    "utils_sha_matches_v2_6": "PASS"
+  },
+  "source_tags": {
+    "core_challenger": "ncaaf-core-challenger-v2.2-existing-feed-coverage-completion-20261006",
+    "research": "ncaaf-research-v2.3-lineage-published-system-attribution-20261006"
+  },
+  "authority_contract": {
+    "production_v1_frozen": true,
+    "automatic_promotion": false,
+    "research_production_authority": 0,
+    "year_2026_used_for_selection": false,
+    "miner_live_min_confirmation_n": 60,
+    "miner_live_min_confirmation_rate": 0.56
+  },
+  "note": "Local tests validate syntax, module self-tests and targeted new-feature behavior. The cloud Heavy Research job itself must be run after deployment to generate results against BigQuery/GCS history."
 }
