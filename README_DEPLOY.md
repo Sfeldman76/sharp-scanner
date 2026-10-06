@@ -1,6 +1,19 @@
-# NCAAF V2.5 — Expert/Specialist CORE Research
+# NCAAF V2.5.1 — Expert/Specialist CORE Research (Preflight Hotfix)
 
 This release keeps the frozen Production V1 models and current V2.2.1 Bet Authority unchanged. It expands only the protected NCAAF Spread CORE challenger inside **NCAAF Research — Heavy Challenger Search**.
+
+## V2.5.1 hotfix
+
+V2.5 contained one stale deploy-preflight block that still referenced the retired `ncaaf_core_challenger_v1` variable after the runtime had been switched to `ncaaf_core_challenger_v2`. That caused the Heavy Research job to stop before any research ran with `NameError: _nccv1 is not defined`.
+
+V2.5.1 changes only that preflight check:
+
+- validates `ncaaf_core_challenger_v2.SOURCE_TAG`
+- requires `ncaaf-core-challenger-v2.0-expert-specialist-strength-20261005`
+- logs `[NCAAF-CORE-CHALLENGER-V2-DEPLOY-PREFLIGHT] PASS`
+- contains no `_nccv1` / V1 challenger references in `train_job.py`
+
+No production model, Bet Authority rule, Miner rule, research logic, or validation window changed.
 
 ## Why this exists
 

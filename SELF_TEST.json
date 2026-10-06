@@ -42,6 +42,7 @@
   "heavy_route_v2": true,
   "production_mutation": false,
   "python_compile": true,
+  "release": "NCAAF_V2_5_1_PREFLIGHT_HOTFIX",
   "research_v22_self_test": {
     "american_unit_profit_test": [
       2.0,
@@ -67,5 +68,14 @@
     "weak_confirmed_authority": false
   },
   "status": "PASS",
-  "two_workflow_ui": true
+  "two_workflow_ui": true,
+  "v251_preflight_hotfix": {
+    "loads_v2_variable": "_nccv2",
+    "production_logic_changed": false,
+    "python_compile": true,
+    "research_logic_changed": false,
+    "stale_v1_references_in_train_job": 0,
+    "status": "PASS",
+    "v2_source_tag": "ncaaf-core-challenger-v2.0-expert-specialist-strength-20261005"
+  }
 }

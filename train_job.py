@@ -835,15 +835,15 @@ def main():
         f"[NCAAF-RV22-DEPLOY-PREFLIGHT] PASS source_tag={_nrv22_tag} "
         f"path={_nrv22_path} sha={_nrv22_sha[:16]} production_authority=0"
     )
-    _nccv1_tag = getattr(_nccv1, "NCAAF_CORE_CHALLENGER_V1_SOURCE_TAG", None)
-    if _nccv1_tag != "ncaaf-core-challenger-v1.0-compact-fairline-20261005":
+    _nccv2_tag = getattr(_nccv2, "SOURCE_TAG", None)
+    if _nccv2_tag != "ncaaf-core-challenger-v2.0-expert-specialist-strength-20261005":
         raise RuntimeError(
-            f"[NCAAF-CORE-CHALLENGER-V1-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nccv1_tag!r} "
-            f"path={str(_nccv1_path)!r} sha={_nccv1_sha[:16]}"
+            f"[NCAAF-CORE-CHALLENGER-V2-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nccv2_tag!r} "
+            f"path={str(_nccv2_path)!r} sha={_nccv2_sha[:16]}"
         )
     log_func(
-        f"[NCAAF-CORE-CHALLENGER-V1-DEPLOY-PREFLIGHT] PASS source_tag={_nccv1_tag} "
-        f"path={_nccv1_path} sha={_nccv1_sha[:16]} production_authority=0 automatic_promotion=FALSE"
+        f"[NCAAF-CORE-CHALLENGER-V2-DEPLOY-PREFLIGHT] PASS source_tag={_nccv2_tag} "
+        f"path={_nccv2_path} sha={_nccv2_sha[:16]} production_authority=0 automatic_promotion=FALSE"
     )
 
     pw.emit("start", f"Training start run_id={run_id} sport={sport} market={market}", pct=0.0)
