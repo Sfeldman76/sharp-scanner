@@ -1,33 +1,71 @@
 {
-  "compile_files": [
-    "ncaaf_core_challenger_v1.py",
-    "train_job.py",
-    "sharp_line_dashboard.py"
-  ],
-  "core_challenger_self_test": {
+  "automatic_promotion": false,
+  "core_v2_self_test": {
+    "audit": {
+      "conference_k": 0.08,
+      "coverage": {
+        "Expert_AbsOpenMargin": 1.0,
+        "Expert_ConferenceMemberPowerDiff": 1.0,
+        "Expert_ConferenceVsMarket": 1.0,
+        "Expert_CrossConferenceRatingDiff": 1.0,
+        "Expert_EarlyGame": 1.0,
+        "Expert_FavoriteRole": 1.0,
+        "Expert_HomeRole": 1.0,
+        "Expert_MinGamesPrior": 1.0,
+        "Expert_OpenMargin": 1.0,
+        "Expert_OppGamesPrior": 1.0,
+        "Expert_OppPower": 1.0,
+        "Expert_OppSOS": 0.0,
+        "Expert_OppVsConference": 1.0,
+        "Expert_PowerDiff": 1.0,
+        "Expert_PowerUncertainty": 1.0,
+        "Expert_PowerVsMarket": 1.0,
+        "Expert_RestDiffDays": 0.0,
+        "Expert_SOSDiff": 0.0,
+        "Expert_SameConference": 1.0,
+        "Expert_TeamGamesPrior": 1.0,
+        "Expert_TeamPower": 1.0,
+        "Expert_TeamSOS": 0.5,
+        "Expert_TeamVsConference": 1.0
+      },
+      "feature_count": 23,
+      "offseason_shrink": 0.68,
+      "power_k": 0.16
+    },
     "automatic_promotion": false,
-    "incumbent_features": [
-      "Context_Intercept",
-      "Diff_RawRecent3_Off_YPP",
-      "B_RawSeason_GameAdj_Def_Rush_YPA"
-    ],
+    "expert_feature_count": 23,
     "production_authority": 0,
-    "source_tag": "ncaaf-core-challenger-v1.0-compact-fairline-20261005",
+    "source_tag": "ncaaf-core-challenger-v2.0-expert-specialist-strength-20261005",
     "status": "PASS",
     "year_2026_queried": false
   },
-  "deployment_contract": {
-    "automatic_promotion": false,
-    "confirmation": [
-      2024,
-      2025
+  "heavy_route_v2": true,
+  "production_mutation": false,
+  "python_compile": true,
+  "research_v22_self_test": {
+    "american_unit_profit_test": [
+      2.0,
+      0.5
     ],
-    "discovery_train": [
-      2022
+    "confirmation_gate": "BOTH_2024_AND_2025",
+    "families": [
+      "MARKET_MICROSTRUCTURE",
+      "RUN_PASS_MATCHUP"
     ],
-    "discovery_validation": 2023,
-    "production_mutation": false,
-    "prospective_min_season": 2026,
-    "workflow": "ncaaf_core_challenger"
-  }
+    "h2h_price_gate": "OBSERVED_TEAM_AND_OPPONENT_ML_ONLY",
+    "live_authority_policy": "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005",
+    "live_min_confirmation_n": 60,
+    "live_min_confirmation_rate": 0.56,
+    "qvalues": [
+      0.03,
+      0.06,
+      0.20000000000000004
+    ],
+    "source_tag": "ncaaf-research-v2.2-advanced-miner-live-overlay-20261005",
+    "status": "PASS",
+    "strong_confirmed_authority": true,
+    "weak_confirmed_authority": false
+  },
+  "status": "PASS",
+  "two_workflow_ui": true
 }

@@ -1,84 +1,84 @@
-# NCAAF V2.3 — Protected CORE Challenger Search
+# NCAAF V2.5 — Expert/Specialist CORE Research
 
-This release adds a **research-only Spread CORE challenger lane** on top of the current NCAAF V2.2.1 production stack. It does not change the frozen Production V1 model, the V2.2.1 Bet Authority rules, the Miner authority gate, the prospective ledger, or any live bet.
+This release keeps the frozen Production V1 models and current V2.2.1 Bet Authority unchanged. It expands only the protected NCAAF Spread CORE challenger inside **NCAAF Research — Heavy Challenger Search**.
 
 ## Why this exists
 
-The current NCAAF Spread CORE is intentionally tiny and stable. The new lane asks a narrower question: can a different **compact fair-line recipe** beat that frozen CORE on untouched historical confirmation seasons?
+The first compact challenger search showed that ordinary feature reshuffling did not beat the incumbent two-stat market-residual CORE in either 2024 or 2025. V2.5 therefore tests genuinely different football information rather than just adding more of the same box-score variables.
 
-The search is protected:
+## Expert CORE lanes
 
-- 2022 = initial model fit
-- 2023 = discovery / feature and recipe selection
-- 2024 = untouched confirmation
-- 2025 = untouched confirmation
-- 2026+ = sealed; never used for feature selection, model choice, tuning, confirmation, ranking, promotion, or threshold choice
+The challenger now builds and tests:
 
-No production artifact can be written by this workflow.
+1. **POWER_SOS_CONTEXT**
+   - Sequential pregame-only team power
+   - Team and opponent strength of schedule
+   - Conference member strength
+   - Cross-conference residual strength
+   - Home/away/neutral role
+   - Rest differential
+   - Season maturity / games played
+   - Power-rating disagreement with the opening market
 
-## What it tests
+2. **STRUCTURED_STATS**
+   - Opponent-adjusted efficiency
+   - Passing and rushing efficiency
+   - Turnover/takeaway pressure
+   - First-down / conversion proxy
+   - Tempo and play mix
+   - Offense-vs-defense matchup features
+   - Any EPA / success-rate / explosiveness / havoc / line-yards / field-position style numeric fields already present in the processed research frame
 
-The current frozen Spread CORE recipe is replayed as the benchmark:
+3. **EXPERT_COMBINED**
+   - Power/SOS/conference context + the strongest discovery-selected football statistics + preregistered matchup/trend interactions
 
-- `Context_Intercept`
-- `Diff_RawRecent3_Off_YPP`
-- `B_RawSeason_GameAdj_Def_Rush_YPA`
-- market-residual target
-- Ridge + shallow HGB blend, 75% Ridge
+4. **PROGRAM_HIERARCHY**
+   - Regularized team, opponent, conference and opponent-conference categorical effects
+   - Compact numeric football/strength context
+   - This is designed to learn persistent program/conference strength without hard-coding school rankings.
 
-The challenger searches the existing leakage-safe pregame feature universe and builds only compact recipes:
+5. **INCUMBENT_PLUS_SPECIALIST**
+   - A frozen discovery-selected blend of the current Production V1 CORE and the strongest specialist challenger
+   - Allows incremental specialist information to help without forcing a full CORE replacement.
 
-1. **FAIR_MARGIN_COMPACT** — market-blind model of actual game margin.
-2. **RESIDUAL_COMPACT** — model of market opening-line error, converted back to a fair margin.
-3. **HYBRID_COMPACT** — frozen discovery-selected blend of the market-blind and residual fair margins.
+## Validation contract
 
-Search limits are deliberately small:
+- 2022: initial training
+- 2023: feature/model/blend selection only
+- 2024: untouched confirmation
+- 2025: untouched confirmation
+- 2026+: sealed and never queried by CORE research
 
-- max 6 non-intercept features
-- max 2 features from one feature family
-- discovery screen limited before greedy admission
-- Ridge alpha grid: 12 / 24 / 48
-- Ridge/HGB blend grid: 50% / 75% / 100% Ridge
-- hybrid weights: 25% / 50% / 75% market-blind fair margin
+A challenger is not promotion-eligible unless it beats the incumbent RMSE in **both 2024 and 2025**, improves pooled RMSE, does not worsen pooled MAE, and then survives paired-bootstrap review. Even a passing challenger remains research-only and must be frozen into prospective shadow before any manual production promotion.
 
-2024 and 2025 do not reselect any feature, model, alpha, blend, or hybrid weight.
+## Production safety
 
-## Confirmation output
+- Production V1 CORE: unchanged
+- Production probabilities: unchanged
+- NCAAF Bet Authority: unchanged
+- Miner authority: unchanged
+- Weekly workflow: unchanged
+- Automatic model promotion: disabled
+- Automatic policy promotion: disabled
 
-For the incumbent and each challenger the report publishes:
+No Pathi, Big Al, Miner, closing line, live line movement, or 2026 result can enter this CORE challenger.
 
-- RMSE / MAE versus actual margin
-- improvement versus the opening market
-- rate the model is closer to the result than the opening market
-- ATS-direction diagnostics at 1 / 2 / 3 / 4 / 5 point fair-line disagreement bands
-- 2024 and 2025 results separately
-- pooled paired-bootstrap RMSE and MAE gain versus the incumbent
+## Operator workflows
 
-Possible research states:
+The UI remains the same two-workflow model:
 
-- `NO_IMPROVEMENT`
-- `MIXED`
-- `PROMOTION_ELIGIBLE_RESEARCH`
-- `STRONG_CHALLENGER`
-
-Even `STRONG_CHALLENGER` receives **zero production authority**. The next step would be to freeze that exact recipe into a prospective 2026 paired shadow. Production promotion would remain a separate explicit decision.
+- **NCAAF Production — Weekly Update** — normal weekly production refresh. No research/refit/promotion.
+- **NCAAF Research — Heavy Challenger Search** — runs STAT/System Miner research and this new expert CORE challenger.
 
 ## Deploy
 
-Starting from NCAAF V2.2.1, replace/add only these files:
+From NCAAF V2.4:
 
-1. **ADD** `ncaaf_core_challenger_v1.py`
-2. **REPLACE** `train_job.py`
-3. **REPLACE** `sharp_line_dashboard.py`
+1. Add `ncaaf_core_challenger_v2.py`.
+2. Replace `train_job.py`.
+3. Replace `sharp_line_dashboard.py`.
+4. Remove the retired `ncaaf_core_challenger_v1.py` after the new deployment is confirmed.
 
-The included `ncaaf_production_v1.py`, `ncaaf_production_ledger_v1.py`, `ncaaf_research_v2.py`, and `utils.py` are unchanged from V2.2.1 and are included only to keep this archive self-contained.
+The full bundle also includes the unchanged current `ncaaf_research_v2.py`, `ncaaf_production_v1.py`, `ncaaf_production_ledger_v1.py`, and `utils.py` for a complete synchronized snapshot.
 
-After redeploying, choose:
-
-**NCAAF CORE — Challenger Search**
-
-Run it once and review the Cloud Run log or open **CORE Challenger — 2024/25 Confirmation Results** in the NCAAF dashboard.
-
-## Do not run
-
-Do **not** run `NCAAF Production — Publish Approved Contract` for this research test. No Heavy/legacy route is required.
+Then run **NCAAF Research — Heavy Challenger Search** once and review the CORE Challenger V2 section/log. Do not publish a new production contract unless a challenger later passes the full promotion process and is explicitly approved.

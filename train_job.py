@@ -573,7 +573,7 @@ def main():
     _rcv1, _rcv1_path, _rcv1_sha = _load_exact_local_module("refit_cadence_test_v1")
     _npv1, _npv1_path, _npv1_sha = _load_exact_local_module("ncaaf_production_v1")
     _nrv22, _nrv22_path, _nrv22_sha = _load_exact_local_module("ncaaf_research_v2")
-    _nccv1, _nccv1_path, _nccv1_sha = _load_exact_local_module("ncaaf_core_challenger_v1")
+    _nccv2, _nccv2_path, _nccv2_sha = _load_exact_local_module("ncaaf_core_challenger_v2")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
@@ -583,6 +583,15 @@ def main():
     # then publishes only the frozen NCAAF Production V1 edge contract.  It does
     # NOT revive timing, generic AutoFS, multi-head training, or legacy artifact
     # publication.
+    # NCAAF operator workflows mirror NFL: one weekly production refresh and one
+    # protected heavy research run.  Legacy granular routes remain backend-only
+    # aliases for recovery/testing, but are intentionally hidden from the UI.
+    _ncaaf_weekly_run = bool(
+        str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_production_weekly"
+    )
+    _ncaaf_research_heavy_run = bool(
+        str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_research_heavy"
+    )
     _ncaaf_rv22_run = bool(
         str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_research_v2"
     )
@@ -842,6 +851,100 @@ def main():
     hb_stop = start_heartbeat(pw, f"[{sport}] market={market}", 45)
 
     try:
+        if _ncaaf_weekly_run:
+            # Normal NCAAF production workflow.  Reuse the explicitly published
+            # frozen Production V1 probability contract; do not refit, research,
+            # republish, retune, or promote anything.  Settle prior immutable
+            # ledger locks, then refresh the current slate from Utils/Move Master
+            # through the exact production scorer and current bounded overlays.
+            from google.cloud import bigquery as _bq
+            _bq_client=_bq.Client(project="sharplogger")
+            _contract=_npv1.load_production_contract(bucket_name=bucket,storage_client=gcs)
+            if not isinstance(_contract,dict) or not _contract.get("_artifact_sha256"):
+                raise RuntimeError(
+                    "[NCAAF-WEEKLY-HOLD] Production V1 contract is missing. "
+                    "Weekly Update cannot create or promote a production contract."
+                )
+            pw.emit("settlement","NCAAF Weekly Update: settle prior immutable production locks",pct=0.20)
+            _settle=_utils.settle_ncaaf_production_v1(client=_bq_client)
+            log_func(
+                f"[NCAAF-WEEKLY-SETTLE] status={_settle.get('status')} "
+                f"settled={int(_settle.get('settled',0) or 0)} artifact={str(_contract.get('_artifact_sha256'))[:16]}"
+            )
+            pw.emit("market","NCAAF Weekly Update: load current pregame market and refresh frozen production scoring",pct=0.50)
+            _moves=_utils.read_recent_sharp_moves(
+                hours=240,table=getattr(_utils,"DEFAULT_MOVES_VIEW","sharp_data.moves_with_features_merged"),
+                pregame_only=True,sport="NCAAF",use_bq_storage=False,
+            )
+            if _moves is None or getattr(_moves,"empty",True):
+                _refresh={"status":"NO_CURRENT_MARKET","attempted":0,"inserted":0,"scored_rows":0,"selected_markets":0}
+            else:
+                _refresh=_utils.score_and_record_ncaaf_production_v1(_moves,client=_bq_client)
+            log_func(
+                f"[NCAAF-WEEKLY-REFRESH] status={_refresh.get('status')} rows={0 if _moves is None else len(_moves)} "
+                f"scored_rows={int(_refresh.get('scored_rows',0) or 0)} selected_markets={int(_refresh.get('selected_markets',0) or 0)} "
+                f"attempted={int(_refresh.get('attempted',0) or 0)} inserted={int(_refresh.get('inserted',0) or 0)} "
+                "probability_refit=FALSE research_run=FALSE production_publish=FALSE automatic_promotion=FALSE"
+            )
+            # Surface registry availability because weekly scoring may use only
+            # already-qualified live Miner definitions; it never changes them.
+            try:
+                _rr=_nrv22.load_current_report(bucket_name=bucket,storage_client=gcs)
+                _miners=(_rr or {}).get("system_miner_v3") or {}
+                _confirmed=sum(int((v or {}).get("confirmed_mechanism_count",0) or 0) for v in _miners.values())
+                log_func(f"[NCAAF-WEEKLY-RESEARCH-REGISTRY] status={'READY' if isinstance(_rr,dict) else 'UNAVAILABLE'} confirmed_mechanisms={_confirmed} mutation=FALSE")
+            except Exception as _reg_exc:
+                log_func(f"[NCAAF-WEEKLY-RESEARCH-REGISTRY] status=UNAVAILABLE error={type(_reg_exc).__name__}:{_reg_exc} mutation=FALSE")
+            pw.emit("done","NCAAF Weekly Production Update complete ✅",pct=1.0)
+            return
+
+        if _ncaaf_research_heavy_run:
+            # One protected research workflow, analogous to NFL Heavy Research.
+            # Build the leakage-safe historical cache once, then run both the
+            # current STAT/System Miner research and the compact CORE challenger.
+            # 2026 remains sealed from discovery/confirmation and no production
+            # artifact or Bet Authority policy is mutated automatically.
+            log_func("[NCAAF-HEAVY-RUN] phase=HISTORICAL_CACHE start=TRUE production_mutation=FALSE year_2026_selection=FALSE")
+            _t0=__import__('time').perf_counter()
+            pw.emit("cache","NCAAF Heavy Research: build protected historical/OOF cache",pct=0.10)
+            _sld.fit_historical_ncaaf_core_expert("spreads",log_func=log_func)
+            _sld.fit_ncaaf_statistical_brain(log_func=log_func)
+            _cache=getattr(_sld,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}
+            _games=_cache.get("games") if isinstance(_cache,dict) else None
+            _features=_cache.get("candidate_feature_cols") if isinstance(_cache,dict) else None
+            _miner_games=_cache.get("miner_games") if isinstance(_cache,dict) else None
+            if _games is None or getattr(_games,"empty",True) or not _features:
+                raise RuntimeError("[NCAAF-HEAVY-CACHE] historical game frame/candidate features missing")
+            if _miner_games is None or getattr(_miner_games,"empty",True):
+                raise RuntimeError("[NCAAF-HEAVY-CACHE] miner_games cache missing")
+            log_func(f"[NCAAF-HEAVY-CACHE] status=PASS games={len(_games)} miner_games={len(_miner_games)} candidate_features={len(_features)}")
+
+            pw.emit("systems","NCAAF Heavy Research: run protected STAT + System Miner V4",pct=0.40)
+            _research=_nrv22.run_ncaaf_research_v2(
+                dashboard_module=_sld,utils_module=_utils,bucket_name=bucket,
+                storage_client=gcs,log_func=log_func,hard_fail=True
+            )
+            if not isinstance(_research,dict) or _research.get("status")!="NCAAF_RESEARCH_V2_COMPLETE":
+                raise RuntimeError(f"[NCAAF-HEAVY-RUN] research report failed status={getattr(_research,'get',lambda *_:None)('status')}")
+            _miners=_research.get("system_miner_v3") or {}
+            _confirmed=sum(int((v or {}).get("confirmed_mechanism_count",0) or 0) for v in _miners.values())
+
+            pw.emit("core","NCAAF Heavy Research: run expert/specialist protected Spread CORE challenger search",pct=0.72)
+            _core=_nccv2.run_ncaaf_core_challenger_v2(
+                dashboard_module=_sld,bucket_name=bucket,storage_client=gcs,log_func=log_func,hard_fail=True
+            )
+            if not isinstance(_core,dict) or _core.get("status")!="NCAAF_CORE_CHALLENGER_V2_COMPLETE":
+                raise RuntimeError(f"[NCAAF-HEAVY-RUN] core challenger failed status={getattr(_core,'get',lambda *_:None)('status')}")
+            _best=_core.get("best_challenger") or {}
+            _t1=__import__('time').perf_counter()
+            log_func(
+                f"[NCAAF-HEAVY-RUN] status=PASS seconds={_t1-_t0:.1f} confirmed_mechanisms={_confirmed} "
+                f"best_core={_best.get('name')} core_state={_best.get('state')} core_recommendation={_core.get('recommendation')} "
+                "2026_selection_influence=0 production_mutation=FALSE automatic_promotion=FALSE"
+            )
+            pw.emit("done","NCAAF Heavy Challenger Research complete ✅",pct=1.0)
+            return
+
         if _ncaaf_core_challenger_run:
             # Protected NCAAF CORE challenger.  Build the same leakage-safe game frame
             # used by Production V1, then hand only <=2025 rows to the challenger.
@@ -856,10 +959,10 @@ def main():
             if _games is None or getattr(_games,"empty",True) or not _features:
                 raise RuntimeError("[NCAAF-CORE-CHALLENGER-CACHE] historical game frame/candidate features missing")
             log_func(f"[NCAAF-CORE-CHALLENGER-CACHE] status=PASS games={len(_games)} candidate_features={len(_features)}")
-            _report=_nccv1.run_ncaaf_core_challenger_v1(
+            _report=_nccv2.run_ncaaf_core_challenger_v2(
                 dashboard_module=_sld,bucket_name=bucket,storage_client=gcs,log_func=log_func,hard_fail=True
             )
-            if not isinstance(_report,dict) or _report.get("status")!="NCAAF_CORE_CHALLENGER_V1_COMPLETE":
+            if not isinstance(_report,dict) or _report.get("status")!="NCAAF_CORE_CHALLENGER_V2_COMPLETE":
                 raise RuntimeError(f"[NCAAF-CORE-CHALLENGER-RUN] report failed status={getattr(_report,'get',lambda *_:None)('status')}")
             _t1=__import__('time').perf_counter()
             _best=_report.get("best_challenger") or {}
@@ -868,7 +971,7 @@ def main():
                 f"state={_best.get('state')} recommendation={_report.get('recommendation')} "
                 "year_2026_queried=FALSE production_mutation=FALSE automatic_promotion=FALSE"
             )
-            pw.emit("done","NCAAF CORE Challenger Search complete ✅",pct=1.0)
+            pw.emit("done","NCAAF CORE Expert/Specialist Challenger Search complete ✅",pct=1.0)
             return
 
         if _ncaaf_rv22_run:

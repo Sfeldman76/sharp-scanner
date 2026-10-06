@@ -46952,7 +46952,7 @@ def _ncaaf_research_v2_report_cached():
 @st.cache_data(ttl=60,show_spinner=False)
 def _ncaaf_core_challenger_report_cached():
     try:
-        import ncaaf_core_challenger_v1 as _cc
+        import ncaaf_core_challenger_v2 as _cc
         return _cc.load_current_report(bucket_name=GCS_BUCKET, storage_client=storage.Client())
     except Exception as e:
         logging.warning("[NCAAF-CORE-CHALLENGER-UI] report unavailable: %s:%s",type(e).__name__,e)
@@ -48307,7 +48307,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
         _spf=len(((_backs.get('spread') or {}).get('feature_cols') or [])); _h2f=len(((_backs.get('h2h') or {}).get('feature_cols') or [])); _ttf=len(((_backs.get('totals') or {}).get('feature_cols') or []))
         st.caption(f'Fast production path: Spread {_spf} fixed features • H2H {_h2f} fixed features • Totals {_ttf} fixed features • cadence FROZEN • AutoFS OFF • multi-head runtime OFF • rich-market model OFF.')
     else:
-        st.warning('NCAAF Production V1 edge contract is not published yet. The board is showing model output only. Run the training job with MARKET=ncaaf_production (or NCAAF_PROMOTE_EDGE_V1=1) once after deploying this bundle.')
+        st.warning('NCAAF Production V1 contract is not published. Weekly Update cannot create a production contract; an explicit approved promotion is required before production scoring can run.')
 
     candidate_n=int(view.get('Spr Action',pd.Series('',index=view.index)).eq('CANDIDATE').sum())+int(view.get('Tot Action',pd.Series('',index=view.index)).eq('CANDIDATE').sum())
     core_qualified_n=int(pd.Series(view.get('Spr CORE Qualifies',False),index=view.index).fillna(False).astype(bool).sum())+int(pd.Series(view.get('Tot CORE Qualifies',False),index=view.index).fillna(False).astype(bool).sum())
@@ -48407,11 +48407,11 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
         try:
             _cc=_ncaaf_core_challenger_report_cached()
             if not isinstance(_cc,dict):
-                st.info('No NCAAF CORE Challenger artifact is published yet. Run NCAAF CORE — Challenger Search from Model maintenance.')
+                st.info('No NCAAF CORE Challenger artifact is published yet. Run NCAAF Research — Heavy Challenger Search from Model maintenance.')
             else:
                 _best=_cc.get('best_challenger') or {}
-                st.markdown('**CORE CHALLENGER — protected fair-line research**')
-                st.caption('2022 is initial fit; 2023 chooses the compact recipe; 2024 and 2025 are untouched confirmation. 2026 is sealed. This report cannot change Production V1 or Bet Authority.')
+                st.markdown('**CORE CHALLENGER V2 — expert/specialist research**')
+                st.caption('2022 is initial fit; 2023 selects the specialist recipe; 2024 and 2025 are untouched confirmation. 2026 is sealed. Team power, strength of schedule, conference strength, rest/home context, structured matchup statistics, trends and regularized program/conference effects are research-only and cannot change Production V1 or Bet Authority.')
                 _bc1,_bc2,_bc3=st.columns(3)
                 _bc1.metric('Recommendation',str(_cc.get('recommendation') or '—'))
                 _bc2.metric('Best challenger',str(_best.get('name') or '—'))
@@ -48428,10 +48428,12 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
                     for _c in ['RMSE','MAE','RMSE Gain vs Inc','MAE Gain vs Inc','2024 RMSE Gain','2025 RMSE Gain']:
                         _cdf[_c]=pd.to_numeric(_cdf[_c],errors='coerce').map(lambda x:f'{x:+.4f}' if pd.notna(x) and 'Gain' in _c else (f'{x:.4f}' if pd.notna(x) else '—'))
                     st.dataframe(_cdf,use_container_width=True,hide_index=True)
-                _fs=_cc.get('feature_search') or {}
-                _fr=(_fs.get('fair_margin') or {}).get('features') or []; _rr=(_fs.get('market_residual') or {}).get('features') or []
-                st.caption(f"Discovery-selected market-blind fair-margin features: {', '.join(map(str,_fr)) if _fr else '—'}")
-                st.caption(f"Discovery-selected market-residual features: {', '.join(map(str,_rr)) if _rr else '—'}")
+                _ed=_cc.get('expert_design') or {}
+                _pc=_ed.get('power_features') or []; _sr=(_ed.get('structured_stat_selection') or {}).get('selected') or []; _ix=_ed.get('interaction_features') or []
+                st.caption(f"Expert strength/context inputs: {', '.join(map(str,_pc)) if _pc else '—'}")
+                st.caption(f"Discovery-selected structured football statistics: {', '.join(map(str,_sr)) if _sr else '—'}")
+                st.caption(f"Specialist matchup/trend interactions available: {', '.join(map(str,_ix)) if _ix else '—'}")
+                st.caption(f"Conference coverage: {float(_ed.get('conference_coverage',0) or 0):.1%}; advanced EPA/success/explosiveness/havoc-style named fields detected in the current processed frame: {len(_ed.get('advanced_named_fields_present') or [])}.")
                 if _best:
                     _ci=(_best.get('vs_incumbent_pooled') or {}).get('rmse_gain_ci95') or []
                     st.caption(f"Best challenger paired-bootstrap RMSE-gain 95% CI: {_ci}. Promotion remains manual; even PROMOTION_ELIGIBLE_RESEARCH first requires prospective shadow.")
@@ -48446,7 +48448,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
         try:
             _r2=_ncaaf_research_v2_report_cached()
             if not isinstance(_r2,dict):
-                st.info('No NCAAF Research V2.2 artifact is published yet. Run NCAAF Research Update from Model maintenance.')
+                st.info('No NCAAF Research V2.2 artifact is published yet. Run NCAAF Research — Heavy Challenger Search from Model maintenance.')
             else:
                 st.caption('Research qualification is frozen through 2023 discovery with BOTH 2024 and 2025 confirmation; 2026+ remains sealed from selection. CONFIRMED_SHADOW families stay visible and continue prospective tracking. Only STRONG_VALIDATED Miner families (confirmation N ≥ 60 and hit rate ≥ 56%) may supply bounded live support/conflict to Bet Authority. They still cannot alter CORE probability or independently create a wager.')
 
@@ -50754,14 +50756,13 @@ if not HEADLESS:
     _train_market_labels = {}
     _workflow_title = "Train which market?"
     if str(sport).upper().strip() == "NCAAF":
-        # Operator surface only: research refresh + explicit production publish.
-        # Legacy All/spread/H2H/totals and old edge-research routes remain backend
-        # code only and are intentionally removed from the normal dropdown.
-        _train_market_options = ["ncaaf_research_v2", "ncaaf_core_challenger", "ncaaf_production"]
+        # Mirror the NFL operator surface: one normal weekly production refresh
+        # and one protected heavy research workflow.  Explicit contract promotion
+        # remains backend-only and is never a routine operator action.
+        _train_market_options = ["ncaaf_production_weekly", "ncaaf_research_heavy"]
         _train_market_labels = {
-            "ncaaf_research_v2": "NCAAF Research Update — V2.2",
-            "ncaaf_core_challenger": "NCAAF CORE — Challenger Search",
-            "ncaaf_production": "NCAAF Production — Publish Approved Contract",
+            "ncaaf_production_weekly": "NCAAF Production — Weekly Update",
+            "ncaaf_research_heavy": "NCAAF Research — Heavy Challenger Search",
         }
         _workflow_title = "NCAAF model maintenance"
     elif str(sport).upper().strip() == "NFL":
@@ -50780,17 +50781,13 @@ if not HEADLESS:
         format_func=(lambda x: _train_market_labels.get(x, x)),
         key=f"train_market_choice_{sport}",
     )
-    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_research_v2":
+    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_production_weekly":
         st.sidebar.caption(
-            "WHEN: after the week's games are settled, or after research/data changes. Runs V2.2 sparse STAT plus System Miner V4 with symmetric 1/2/3-game horizons, conference/rivalry/H2H/role context, dependency collapse, 2024–25 confirmation, and the sealed 2026 prospective record. It publishes bounded live Miner definitions but does NOT refit or mutate the frozen Production V1 probability models."
+            "WHEN: once each week after prior games settle / the new slate is ready. Reuses the frozen Production V1 CORE models, settles immutable prospective locks, refreshes the current slate and live qualified system triggers, and applies the current CORE-first Bet Authority. It does NOT refit CORE, rerun research, republish the production contract, or promote anything. Market moves continue to refresh through the background scanner after this run."
         )
-    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_core_challenger":
+    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_research_heavy":
         st.sidebar.caption(
-            "RESEARCH ONLY. Tests compact Spread CORE recipes using 2022 fit + 2023 discovery, then untouched 2024 and 2025 confirmation. 2026 is sealed. Compares the frozen incumbent recipe with market-blind fair-margin, market-residual and hybrid challengers. It cannot mutate Production V1 or Bet Authority."
-        )
-    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_production":
-        st.sidebar.caption(
-            "WHEN: only after we explicitly approve a new production champion/edge contract, or if the production artifact is missing. Do NOT run this weekly and do NOT run it for line changes."
+            "WHEN: after meaningful research/data changes and periodically during the season. Runs the protected NCAAF STAT/System Miner V4 research plus the expert/specialist Spread CORE search in one job: sequential team power, strength of schedule, conference strength, rest/home/maturity context, structured matchup statistics, recent-vs-season trends, nonlinear residuals and regularized program/conference effects. Discovery/confirmation stay historical, 2026 remains sealed prospective evidence, and no challenger can mutate Production V1 or Bet Authority automatically."
         )
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
         st.sidebar.caption(
@@ -50930,10 +50927,10 @@ if not HEADLESS:
         _train_button_label = "Run NFL Weekly Production Update"
     elif str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_research_heavy":
         _train_button_label = "Run NFL Heavy Research"
-    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_research_v2":
-        _train_button_label = "Run NCAAF Research Update V2.2"
-    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production":
-        _train_button_label = "Publish Approved NCAAF Production Contract"
+    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production_weekly":
+        _train_button_label = "Run NCAAF Weekly Production Update"
+    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_research_heavy":
+        _train_button_label = "Run NCAAF Heavy Research"
     elif str(market_choice).lower().strip() == "edge_research":
         _train_button_label = f"🧪 Run {sport} Edge Research"
     else:
