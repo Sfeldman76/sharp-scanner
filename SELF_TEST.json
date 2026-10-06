@@ -1,5 +1,5 @@
 {
-  "core_self_test": {
+  "core": {
     "audit": {
       "conference_k": 0.08,
       "coverage": {
@@ -39,20 +39,7 @@
     "status": "PASS",
     "year_2026_queried": false
   },
-  "expert_model_atom_bridge_smoke": {
-    "bigal_atom": true,
-    "core_atom": true,
-    "core_bridge_live_authority_blocked": true,
-    "pathi_atom": true,
-    "pathi_live_authority_can_clear_existing_gate": true,
-    "specialist_atom": true
-  },
-  "production_files_unchanged_from_v2_8": {
-    "ncaaf_production_ledger_v1.py": true,
-    "ncaaf_production_v1.py": true,
-    "utils.py": true
-  },
-  "research_self_test": {
+  "research": {
     "american_unit_profit_test": [
       2.0,
       0.5
@@ -71,10 +58,10 @@
       0.06,
       0.20000000000000004
     ],
-    "source_tag": "ncaaf-research-v2.5-expert-model-atom-bridge-20261006",
+    "source_tag": "ncaaf-research-v2.7-live-plus-archive-external-meta-bridge-20261006",
     "status": "PASS",
     "strong_confirmed_authority": true,
     "weak_confirmed_authority": false
   },
-  "status": "PASS"
+  "v211_current_merge": "PASS"
 }

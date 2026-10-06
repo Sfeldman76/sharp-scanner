@@ -826,13 +826,13 @@ def main():
         f"path={_npv1_path} sha={_npv1_sha[:16]} promotion_requested={_ncaaf_prod_promote}"
     )
     _nrv22_tag = getattr(_nrv22, "NCAAF_RESEARCH_V2_SOURCE_TAG", None)
-    if _nrv22_tag != "ncaaf-research-v2.5-expert-model-atom-bridge-20261006":
+    if _nrv22_tag != "ncaaf-research-v2.7-live-plus-archive-external-meta-bridge-20261006":
         raise RuntimeError(
-            f"[NCAAF-RV25-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv22_tag!r} "
+            f"[NCAAF-RV27-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv22_tag!r} "
             f"path={str(_nrv22_path)!r} sha={_nrv22_sha[:16]}"
         )
     log_func(
-        f"[NCAAF-RV25-DEPLOY-PREFLIGHT] PASS source_tag={_nrv22_tag} "
+        f"[NCAAF-RV27-DEPLOY-PREFLIGHT] PASS source_tag={_nrv22_tag} "
         f"path={_nrv22_path} sha={_nrv22_sha[:16]} production_authority=0"
     )
     _nccv2_tag = getattr(_nccv2, "SOURCE_TAG", None)
@@ -895,6 +895,16 @@ def main():
                 log_func(f"[NCAAF-WEEKLY-RESEARCH-REGISTRY] status={'READY' if isinstance(_rr,dict) else 'UNAVAILABLE'} confirmed_mechanisms={_confirmed} mutation=FALSE")
             except Exception as _reg_exc:
                 log_func(f"[NCAAF-WEEKLY-RESEARCH-REGISTRY] status=UNAVAILABLE error={type(_reg_exc).__name__}:{_reg_exc} mutation=FALSE")
+            # V2.11 archive + live current-week external-rating refresh. This only updates the research
+            # snapshot in GCS; it cannot modify production predictions/authority.
+            try:
+                _pt=_nrv22.refresh_prediction_tracker_external(
+                    dashboard_module=None,storage_client=gcs,bucket_name=bucket,
+                    include_history=False,include_current=True,force=True,log_func=log_func
+                )
+                log_func(f"[NCAAF-WEEKLY-PT-REFRESH] status={_pt.get('status')} current_rows={((_pt.get('current') or {}).get('rows',0))} archive_rows={((_pt.get('current') or {}).get('archive_rows',0))} live_rows={((_pt.get('current') or {}).get('live_rows',0))} live_full_five={((_pt.get('current') or {}).get('live_full_five_rows',0))} production_mutation=FALSE authority=0")
+            except Exception as _pt_exc:
+                log_func(f"[NCAAF-WEEKLY-PT-REFRESH] status=UNAVAILABLE error={type(_pt_exc).__name__}:{_pt_exc} production_mutation=FALSE authority=0")
             pw.emit("done","NCAAF Weekly Production Update complete ✅",pct=1.0)
             return
 
@@ -919,7 +929,7 @@ def main():
                 raise RuntimeError("[NCAAF-HEAVY-CACHE] miner_games cache missing")
             log_func(f"[NCAAF-HEAVY-CACHE] status=PASS games={len(_games)} miner_games={len(_miner_games)} candidate_features={len(_features)}")
 
-            # V2.9 ordering is intentional: CORE challenger first publishes leakage-safe
+            # V2.11 ordering is intentional: CORE challenger first publishes leakage-safe
             # season-forward incumbent/specialist state into the research-only Miner frame.
             # The same existing Miner then tests those states together with Pathi/Big Al.
             pw.emit("core","NCAAF Heavy Research: build existing-feed coverage + OOF CORE/specialist Miner bridge",pct=0.40)

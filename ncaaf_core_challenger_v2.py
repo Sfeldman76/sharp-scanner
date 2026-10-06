@@ -899,7 +899,9 @@ def _publish_miner_intelligence_bridge(dashboard_module, full_games: pd.DataFram
         if _selected_names and name not in _selected_names: continue
         specs[name]={"recipe":recipe,"pred":np.full(len(g),np.nan,dtype=float)}
     for yr in (2023,2024,2025):
-        tr=g[_num(g,"Season").lt(yr)].copy(); vm=_num(g,"Season").eq(yr).to_numpy(); va=g.loc[vm].copy()
+        tr=g[_num(g,"Season").lt(yr)].copy()
+        vm=_num(g,"Season").eq(yr).fillna(False).to_numpy(dtype=bool)
+        va=g.loc[vm].copy()
         if tr.empty or va.empty: continue
         inc[vm]=_incumbent_predict(tr,va)
         for name,z in specs.items():
@@ -909,7 +911,7 @@ def _publish_miner_intelligence_bridge(dashboard_module, full_games: pd.DataFram
     core_edge=inc-market
     bridge_cols={"_V29_CORE_INCUMBENT_EDGE_POINTS":core_edge}
     specialists=[]
-    d23=_num(g,"Season").eq(2023).to_numpy()
+    d23=_num(g,"Season").eq(2023).fillna(False).to_numpy(dtype=bool)
     for name,z in specs.items():
         slug=re.sub(r"[^A-Z0-9]+","_",name.upper()).strip("_")[:36]
         pred=np.asarray(z["pred"],float); edge=pred-market; div=np.abs(pred-inc)
@@ -1185,8 +1187,13 @@ def self_test() -> dict[str,Any]:
     ])
     e,cols,audit=_add_strength_context(q)
     specs=_regime_specs(pd.concat([e.assign(Season=2023),e.assign(Season=2023)],ignore_index=True))
-    ok=bool(len(cols)>=10 and abs(float(e.loc[0,"Expert_PowerDiff"]))<1e-12 and float(e.loc[1,"Expert_TeamPower"])>0 and PROSPECTIVE_MIN_SEASON==2026 and any(x.get("name")=="POWER_MARKET_DISAGREEMENT" for x in specs))
-    return {"status":"PASS" if ok else "FAIL","source_tag":SOURCE_TAG,"production_authority":0,"automatic_promotion":False,"year_2026_queried":False,"expert_feature_count":len(cols),"regime_spec_count":len(specs),"audit":audit}
+    # Regression guard: pandas nullable integer comparisons yield a nullable BooleanArray.
+    # NumPy indexing requires a real bool mask, so the Miner bridge must fail closed on NA.
+    nullable_season=pd.Series([2022,2023,2024,pd.NA],dtype="Int64")
+    nullable_mask=nullable_season.eq(2024).fillna(False).to_numpy(dtype=bool)
+    mask_ok=bool(nullable_mask.dtype==np.bool_ and nullable_mask.tolist()==[False,False,True,False])
+    ok=bool(len(cols)>=10 and abs(float(e.loc[0,"Expert_PowerDiff"]))<1e-12 and float(e.loc[1,"Expert_TeamPower"])>0 and PROSPECTIVE_MIN_SEASON==2026 and any(x.get("name")=="POWER_MARKET_DISAGREEMENT" for x in specs) and mask_ok)
+    return {"status":"PASS" if ok else "FAIL","source_tag":SOURCE_TAG,"production_authority":0,"automatic_promotion":False,"year_2026_queried":False,"expert_feature_count":len(cols),"regime_spec_count":len(specs),"nullable_mask_regression":mask_ok,"audit":audit}
 
 
 if __name__=="__main__":

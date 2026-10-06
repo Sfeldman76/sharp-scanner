@@ -32,8 +32,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.5-expert-model-atom-bridge-20261006"
-NCAAF_RESEARCH_V2_VERSION = "2.5.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.7-live-plus-archive-external-meta-bridge-20261006"
+NCAAF_RESEARCH_V2_VERSION = "2.6.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -43,6 +43,29 @@ PROSPECTIVE_MIN_SEASON = 2026
 REPORT_CURRENT_BLOB = "research/ncaaf/v2/current_report.json"
 BUNDLE_CURRENT_BLOB = "research/ncaaf/v2/current_bundle.pkl"
 REPORT_HISTORY_PREFIX = "research/ncaaf/v2/history"
+
+# Prediction Tracker external-rating metamodel.  This is research-only and can
+# never grant Production/Bet Authority.  The five fixed weights are the
+# published external benchmark; we do not re-fit them on our NCAAF outcomes.
+PT_BASE_URL = "https://www.thepredictiontracker.com"
+PT_ARCHIVE_URL = PT_BASE_URL + "/ncaa{season}.csv"
+PT_LIVE_CSV_URL = PT_BASE_URL + "/ncaapredictions.csv"
+PT_LIVE_PAGE_URL = PT_BASE_URL + "/predncaa.php"
+PT_RAW_PREFIX = "research/ncaaf/external/prediction_tracker/raw"
+PT_NORMALIZED_PREFIX = "research/ncaaf/external/prediction_tracker/normalized"
+PT_CURRENT_BLOB = "research/ncaaf/external/prediction_tracker/current.csv"  # merged current-season archive + live week
+PT_CURRENT_ARCHIVE_BLOB = "research/ncaaf/external/prediction_tracker/current_archive.csv"
+PT_CURRENT_LIVE_BLOB = "research/ncaaf/external/prediction_tracker/current_live.csv"
+PT_CURRENT_META_BLOB = "research/ncaaf/external/prediction_tracker/current_meta.json"
+PT_PUBLISHED_WEIGHTS = {
+    "DOKTER": 0.242406,
+    "PI_RATE_BIAS": 0.281205,
+    "KEEPER": 0.135398,
+    "ESPN_FPI": 0.163639,
+    "PIGSKIN_INDEX": 0.114519,
+}
+PT_HISTORY_SEASONS = tuple(range(2022, 2026))
+PT_CURRENT_SEASON = 2026
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +131,413 @@ def _json_safe(x: Any) -> Any:
 def _stable_id(prefix: str, parts: Iterable[str]) -> str:
     payload="|".join(str(x) for x in parts)
     return prefix+hashlib.blake2b(payload.encode("utf-8"),digest_size=5).hexdigest().upper()
+
+
+# ---------------------------------------------------------------------------
+# External rating metamodel — Prediction Tracker automatic bridge
+# ---------------------------------------------------------------------------
+def _pt_col_key(x: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(x).lower()).strip()
+
+
+def _pt_team_key(x: Any) -> str:
+    s=_pt_col_key(x)
+    # Conservative school-name normalization. Mascots are intentionally not
+    # stripped; fuzzy matching below maps short external school names to the
+    # longer canonical team names used by the historical frame.
+    repl={
+        "st":"state","mich":"michigan","fla":"florida","car":"carolina",
+        "ill":"illinois","ind":"indiana","mass":"massachusetts","miss":"mississippi",
+        "mo":"missouri","tenn":"tennessee","tex":"texas","va":"virginia",
+        "wash":"washington","wis":"wisconsin","conn":"connecticut","colo":"colorado",
+        "ark":"arkansas","cal":"california","la":"louisiana","neb":"nebraska",
+    }
+    toks=[]
+    for t in s.split(): toks.append(repl.get(t,t))
+    s=" ".join(toks)
+    # Common tracker spellings.
+    s=s.replace("n c state","north carolina state").replace("nc state","north carolina state")
+    s=s.replace("s c state","south carolina state").replace("sc state","south carolina state")
+    s=s.replace("e michigan","eastern michigan").replace("w michigan","western michigan")
+    s=s.replace("c michigan","central michigan").replace("n illinois","northern illinois")
+    s=s.replace("s mississippi","southern mississippi").replace("southern miss","southern mississippi")
+    return re.sub(r"\s+"," ",s).strip()
+
+
+def _pt_find_col(cols: Iterable[str], aliases: Iterable[str]) -> str | None:
+    keyed={str(c):_pt_col_key(c) for c in cols}
+    aa=[_pt_col_key(x) for x in aliases]
+    # Exact normalized header first.
+    for c,k in keyed.items():
+        if k in aa: return c
+    # Then token-contained match for verbose headers.
+    for a in aa:
+        if len(a)<3: continue
+        hits=[c for c,k in keyed.items() if a in k]
+        if len(hits)==1: return hits[0]
+    return None
+
+
+def _pt_numeric(s: pd.Series) -> pd.Series:
+    if s is None: return pd.Series(dtype=float)
+    return pd.to_numeric(s.astype(str).str.replace(r"[^0-9+\-.]","",regex=True).replace({"":"nan",".":"nan","-":"nan","+":"nan"}),errors="coerce")
+
+
+def _pt_http_fetch(url: str, timeout: int=25, attempts: int=3) -> bytes:
+    import time
+    from urllib.request import Request, urlopen
+    last=None
+    for i in range(max(1,int(attempts))):
+        try:
+            req=Request(url,headers={"User-Agent":"Mozilla/5.0 NCAAF-Research-Meta/2.11","Accept":"text/csv,text/plain,*/*"})
+            with urlopen(req,timeout=timeout) as r:
+                data=r.read()
+            if len(data)<100: raise RuntimeError(f"short response bytes={len(data)}")
+            return data
+        except Exception as exc:
+            last=exc
+            # Some Cloud Run images negotiate this legacy site more reliably via
+            # requests than urllib; try it before consuming the next retry.
+            try:
+                import requests
+                rr=requests.get(url,headers={"User-Agent":"Mozilla/5.0 NCAAF-Research-Meta/2.11","Accept":"text/csv,text/plain,*/*"},timeout=timeout)
+                rr.raise_for_status(); data=rr.content
+                if len(data)<100: raise RuntimeError(f"short response bytes={len(data)}")
+                return data
+            except Exception as exc2:
+                last=exc2
+            if i+1<int(attempts): time.sleep(1.25*(i+1))
+    raise RuntimeError(f"Prediction Tracker fetch failed url={url}: {type(last).__name__}:{last}")
+
+
+def _pt_parse_csv(raw: bytes, season: int) -> tuple[pd.DataFrame, dict[str,Any]]:
+    # The archive has changed column formatting over time; parse permissively but
+    # fail closed on missing team identities or the five-system benchmark.
+    errs=[]; df=None
+    for kwargs in (
+        {"engine":"python","on_bad_lines":"skip"},
+        {"engine":"python","on_bad_lines":"skip","encoding":"latin1"},
+    ):
+        try:
+            df=pd.read_csv(io.BytesIO(raw),**kwargs); break
+        except Exception as e: errs.append(f"{type(e).__name__}:{e}")
+    if df is None or df.empty:
+        return pd.DataFrame(),{"status":"PARSE_FAIL","season":int(season),"errors":errs}
+    # Remove completely empty columns and normalize duplicate-ish headers.
+    df=df.dropna(axis=1,how="all").copy()
+    cols=list(map(str,df.columns))
+    home=_pt_find_col(cols,["home","home team","hometeam"])
+    away=_pt_find_col(cols,["road","away","visitor","visiting team","visitor team","away team"])
+    if home is None or away is None:
+        # Conservative fallback: the tracker normally places Home/Road first.
+        obj=[c for c in cols if df[c].dtype==object]
+        if len(obj)>=2: home=home or obj[0]; away=away or obj[1]
+    if home is None or away is None:
+        return pd.DataFrame(),{"status":"IDENTITY_COLUMNS_MISSING","season":int(season),"columns":cols[:80]}
+    aliases={
+        "DOKTER":["dokter","dokter entropy"],
+        "PI_RATE_BIAS":["pi ratings bias","pi rating bias","pi rate bias","piratings bias"],
+        "KEEPER":["keeper"],
+        "ESPN_FPI":["espn fpi","fpi"],
+        "PIGSKIN_INDEX":["pigskin index","pigskin"],
+    }
+    syscols={k:_pt_find_col(cols,v) for k,v in aliases.items()}
+    line_col=_pt_find_col(cols,["line","updated line","current line","spread"])
+    open_col=_pt_find_col(cols,["line open","opening line","open line","opening"])
+    avg_col=_pt_find_col(cols,["prediction avg","prediction average","system average","average prediction"])
+    med_col=_pt_find_col(cols,["prediction median","median prediction"])
+    date_col=_pt_find_col(cols,["date","game date","gamedate"])
+    out=pd.DataFrame(index=df.index)
+    out["season"]=int(season)
+    out["home_raw"]=df[home].astype(str).str.strip()
+    out["away_raw"]=df[away].astype(str).str.strip()
+    out["home_key"]=out["home_raw"].map(_pt_team_key)
+    out["away_key"]=out["away_raw"].map(_pt_team_key)
+    if date_col:
+        out["game_date"]=pd.to_datetime(df[date_col],errors="coerce").dt.strftime("%Y-%m-%d")
+    else: out["game_date"]=""
+    if line_col: out["tracker_line_home"]=_pt_numeric(df[line_col])
+    else: out["tracker_line_home"]=np.nan
+    if open_col: out["tracker_open_home"]=_pt_numeric(df[open_col])
+    else: out["tracker_open_home"]=np.nan
+    if avg_col: out["prediction_avg_home"]=_pt_numeric(df[avg_col])
+    else: out["prediction_avg_home"]=np.nan
+    if med_col: out["prediction_median_home"]=_pt_numeric(df[med_col])
+    else: out["prediction_median_home"]=np.nan
+    for k,c in syscols.items(): out[k]=_pt_numeric(df[c]) if c else np.nan
+    vals=np.column_stack([pd.to_numeric(out[k],errors="coerce").to_numpy(float) for k in PT_PUBLISHED_WEIGHTS])
+    w=np.asarray([PT_PUBLISHED_WEIGHTS[k] for k in PT_PUBLISHED_WEIGHTS],dtype=float)
+    full=np.isfinite(vals).all(axis=1)
+    meta=np.full(len(out),np.nan,dtype=float); meta[full]=vals[full]@w
+    out["meta_margin_home"]=meta
+    out["meta_system_count"]=np.isfinite(vals).sum(axis=1).astype(int)
+    # Header rows repeated inside the CSV and blank identities are excluded.
+    bad=out["home_key"].isin({"","home","home team"})|out["away_key"].isin({"","road","away","visitor","visitor team"})
+    out=out.loc[~bad].reset_index(drop=True)
+    out["source_row"]=np.arange(len(out),dtype=int)
+    return out,{
+        "status":"PASS","season":int(season),"rows":int(len(out)),"full_five_rows":int(np.isfinite(out["meta_margin_home"]).sum()),
+        "system_columns":syscols,"home_column":home,"away_column":away,"date_column":date_col,"line_column":line_col,"open_line_column":open_col,
+        "prediction_avg_column":avg_col,"weights":dict(PT_PUBLISHED_WEIGHTS),"weight_sum":float(sum(PT_PUBLISHED_WEIGHTS.values())),
+    }
+
+
+def _pt_blob_bytes(storage_client, bucket_name: str, path: str) -> bytes | None:
+    try:
+        b=storage_client.bucket(bucket_name).blob(path)
+        if not b.exists(): return None
+        return b.download_as_bytes()
+    except Exception: return None
+
+
+def _pt_load_season(season: int, *, storage_client, bucket_name: str, force_web: bool=False, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
+    season=int(season); raw_path=f"{PT_RAW_PREFIX}/ncaa{season}.csv"; norm_path=f"{PT_NORMALIZED_PREFIX}/ncaa{season}.csv"
+    current=season>=PT_CURRENT_SEASON
+    raw=None; source=""
+    # Completed seasons are cache-once. Current season is web-first with cached fallback.
+    if not force_web and not current:
+        raw=_pt_blob_bytes(storage_client,bucket_name,raw_path); source="GCS_CACHE" if raw else ""
+    if raw is None:
+        try:
+            raw=_pt_http_fetch(PT_ARCHIVE_URL.format(season=season)); source="WEB"
+            storage_client.bucket(bucket_name).blob(raw_path).upload_from_string(raw,content_type="text/csv")
+        except Exception as exc:
+            raw=_pt_blob_bytes(storage_client,bucket_name,raw_path); source="GCS_FALLBACK" if raw else ""
+            if raw is None:
+                log_func(f"[NCAAF-PT-SEASON] season={season} status=UNAVAILABLE error={type(exc).__name__}:{exc} authority=0")
+                return pd.DataFrame(),{"status":"UNAVAILABLE","season":season,"error":f"{type(exc).__name__}:{exc}","authority":0}
+    frame,diag=_pt_parse_csv(raw,season); diag["source"]=source; diag["url"]=PT_ARCHIVE_URL.format(season=season); diag["authority"]=0
+    if not frame.empty:
+        try: storage_client.bucket(bucket_name).blob(norm_path).upload_from_string(frame.to_csv(index=False).encode(),content_type="text/csv")
+        except Exception: pass
+    log_func(f"[NCAAF-PT-SEASON] season={season} status={diag.get('status')} source={source} rows={len(frame)} full_five={int(np.isfinite(pd.to_numeric(frame.get('meta_margin_home'),errors='coerce')).sum()) if not frame.empty else 0} authority=0")
+    return frame,diag
+
+
+
+def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
+    """Fetch the separate current-week Prediction Tracker CSV.
+
+    The site publishes season-to-date data at ncaaYYYY.csv and the active week at
+    ncaapredictions.csv.  Live is always web-first with a dedicated GCS fallback.
+    """
+    raw_path=f"{PT_RAW_PREFIX}/ncaapredictions.csv"
+    raw=None; source=""
+    try:
+        raw=_pt_http_fetch(PT_LIVE_CSV_URL); source="WEB_LIVE"
+        try: storage_client.bucket(bucket_name).blob(raw_path).upload_from_string(raw,content_type="text/csv")
+        except Exception: pass
+    except Exception as exc:
+        raw=_pt_blob_bytes(storage_client,bucket_name,raw_path); source="GCS_LIVE_FALLBACK" if raw else ""
+        if raw is None:
+            log_func(f"[NCAAF-PT-LIVE] season={PT_CURRENT_SEASON} status=UNAVAILABLE error={type(exc).__name__}:{exc} authority=0")
+            return pd.DataFrame(),{"status":"UNAVAILABLE","season":PT_CURRENT_SEASON,"error":f"{type(exc).__name__}:{exc}","url":PT_LIVE_CSV_URL,"authority":0}
+    frame,diag=_pt_parse_csv(raw,PT_CURRENT_SEASON)
+    if not frame.empty:
+        frame=frame.copy(); frame["source_kind"]="LIVE_CURRENT"; frame["source_priority"]=2
+        try: storage_client.bucket(bucket_name).blob(PT_CURRENT_LIVE_BLOB).upload_from_string(frame.to_csv(index=False).encode(),content_type="text/csv")
+        except Exception: pass
+    diag.update({"source":source,"source_kind":"LIVE_CURRENT","url":PT_LIVE_CSV_URL,"page_url":PT_LIVE_PAGE_URL,"authority":0})
+    log_func(f"[NCAAF-PT-LIVE] season={PT_CURRENT_SEASON} status={diag.get('status')} source={source} rows={len(frame)} full_five={int(np.isfinite(pd.to_numeric(frame.get('meta_margin_home'),errors='coerce')).sum()) if not frame.empty else 0} authority=0")
+    return frame,diag
+
+
+def _pt_merge_current_season(archive: pd.DataFrame, live: pd.DataFrame, *, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
+    """Merge 2026 season archive with the separate live/current-week feed.
+
+    All archive rows are retained except an exact home/away pair also present in
+    the live feed; for that overlap the live row wins because its ratings/line are
+    newer.  This preserves old 2026 ratings while exposing the current week.
+    """
+    a=archive.copy() if isinstance(archive,pd.DataFrame) else pd.DataFrame()
+    l=live.copy() if isinstance(live,pd.DataFrame) else pd.DataFrame()
+    if not a.empty:
+        a["source_kind"]="ARCHIVE_SEASON_TO_DATE"; a["source_priority"]=1
+    if not l.empty:
+        l["source_kind"]="LIVE_CURRENT"; l["source_priority"]=2
+    def pair(df):
+        if df.empty: return pd.Series(dtype=str)
+        return df.get("home_key",pd.Series("",index=df.index)).astype(str)+"|"+df.get("away_key",pd.Series("",index=df.index)).astype(str)
+    live_pairs=set(pair(l).loc[lambda z:z.str.len().gt(1)].tolist()) if not l.empty else set()
+    removed=0
+    if not a.empty and live_pairs:
+        ap=pair(a); keep=~ap.isin(live_pairs); removed=int((~keep).sum()); a=a.loc[keep].copy()
+    merged=pd.concat([a,l],ignore_index=True,sort=False) if (not a.empty or not l.empty) else pd.DataFrame()
+    diag={
+        "status":"PASS" if not merged.empty else "UNAVAILABLE","season":PT_CURRENT_SEASON,
+        "archive_rows":int(len(archive)) if isinstance(archive,pd.DataFrame) else 0,
+        "live_rows":int(len(live)) if isinstance(live,pd.DataFrame) else 0,
+        "archive_overlap_replaced_by_live":removed,"merged_rows":int(len(merged)),
+        "live_full_five_rows":int(np.isfinite(pd.to_numeric(l.get("meta_margin_home"),errors="coerce")).sum()) if not l.empty else 0,
+        "merged_full_five_rows":int(np.isfinite(pd.to_numeric(merged.get("meta_margin_home"),errors="coerce")).sum()) if not merged.empty else 0,
+        "authority":0,
+    }
+    log_func(f"[NCAAF-PT-CURRENT-MERGE] status={diag['status']} archive_rows={diag['archive_rows']} live_rows={diag['live_rows']} overlap_replaced={removed} merged_rows={diag['merged_rows']} live_full_five={diag['live_full_five_rows']} authority=0")
+    return merged,diag
+
+def _pt_candidate_map(external_names: Iterable[str], internal_names: Iterable[str]) -> tuple[dict[str,str],list[str]]:
+    from difflib import SequenceMatcher
+    ints=sorted({_pt_team_key(x) for x in internal_names if _pt_team_key(x)})
+    mapping={}; unresolved=[]
+    for raw in sorted({_pt_team_key(x) for x in external_names if _pt_team_key(x)}):
+        if raw in ints: mapping[raw]=raw; continue
+        rt=set(raw.split()); scored=[]
+        for cand in ints:
+            ct=set(cand.split())
+            subset=rt.issubset(ct) and len(rt)>=1
+            tok=(len(rt&ct)/max(len(rt),1)) if rt else 0.0
+            seq=SequenceMatcher(None,raw,cand).ratio()
+            prefix=1.0 if (cand.startswith(raw+" ") or raw.startswith(cand+" ")) else 0.0
+            score=max(seq,0.88 if subset else 0.0,0.92 if prefix else 0.0,0.55*tok+0.45*seq)
+            scored.append((score,cand))
+        scored.sort(reverse=True)
+        if scored and scored[0][0]>=0.78 and (len(scored)==1 or scored[0][0]-scored[1][0]>=0.035): mapping[raw]=scored[0][1]
+        else: unresolved.append(raw)
+    return mapping,unresolved
+
+
+def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func=print) -> dict[str,Any]:
+    cache=getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}
+    games=cache.get("games"); mg=cache.get("miner_games")
+    if not isinstance(games,pd.DataFrame) or games.empty or not isinstance(mg,pd.DataFrame) or len(mg)!=len(games):
+        return {"status":"CACHE_UNAVAILABLE","matched_rows":0,"authority":0}
+    g=games.copy(); m=mg.copy()
+    season=pd.to_numeric(g.get("Season"),errors="coerce")
+    team=g.get("Team_Norm",g.get("Team",pd.Series("",index=g.index))).astype(str).map(_pt_team_key)
+    opp=g.get("Opponent_Norm",g.get("Opponent",pd.Series("",index=g.index))).astype(str).map(_pt_team_key)
+    is_home=pd.to_numeric(g.get("Is_Home",pd.Series(np.nan,index=g.index)),errors="coerce")
+    internal_names=pd.concat([team,opp],ignore_index=True).dropna().astype(str).tolist()
+    emap,unresolved=_pt_candidate_map(pd.concat([ext.get("home_key",pd.Series(dtype=str)),ext.get("away_key",pd.Series(dtype=str))],ignore_index=True),internal_names)
+    ex=ext.copy(); ex["home_i"]=ex["home_key"].map(emap); ex["away_i"]=ex["away_key"].map(emap)
+    ex=ex.loc[ex["home_i"].notna()&ex["away_i"].notna()].copy()
+    ex["pair_key"]=ex["season"].astype(int).astype(str)+"|"+ex["home_i"].astype(str)+"|"+ex["away_i"].astype(str)
+    counts=ex["pair_key"].value_counts(); unique=ex.loc[ex["pair_key"].map(counts).eq(1)].copy().set_index("pair_key",drop=False)
+    # Duplicate season matchups (e.g., conference-title rematches) are matched only
+    # when both sources expose the same calendar date; otherwise they fail closed.
+    ex_date=ex.copy(); ex_date["date_key"]=ex_date["pair_key"].astype(str)+"|"+ex_date.get("game_date",pd.Series("",index=ex_date.index)).fillna("").astype(str)
+    dvc=ex_date["date_key"].value_counts(); ex_date=ex_date.loc[ex_date["date_key"].str.len().gt(ex_date["pair_key"].str.len()+1)&ex_date["date_key"].map(dvc).eq(1)].set_index("date_key",drop=False)
+    home=np.where(is_home.eq(1),team,np.where(is_home.eq(0),opp,"")); away=np.where(is_home.eq(1),opp,np.where(is_home.eq(0),team,""))
+    key=pd.Series([f"{int(s)}|{h}|{a}" if np.isfinite(s) and h and a else "" for s,h,a in zip(season.to_numpy(float),home,away)],index=g.index)
+    gd=pd.to_datetime(g.get("Game_Date",pd.Series(pd.NaT,index=g.index)),errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+    meta=np.full(len(g),np.nan); cnt=np.full(len(g),np.nan); pavg=np.full(len(g),np.nan); extline=np.full(len(g),np.nan)
+    matched=0
+    for i,k in enumerate(key.astype(str)):
+        if not k: continue
+        dk=f"{k}|{gd.iloc[i]}" if gd.iloc[i] else ""
+        if dk and dk in ex_date.index: r=ex_date.loc[dk]
+        elif k in unique.index: r=unique.loc[k]
+        else: continue
+        if isinstance(r,pd.DataFrame): continue
+        hm=float(pd.to_numeric(pd.Series([r.get("meta_margin_home")]),errors="coerce").iloc[0])
+        if not np.isfinite(hm): continue
+        orient=1.0 if is_home.iloc[i]==1 else -1.0
+        meta[i]=orient*hm; cnt[i]=float(r.get("meta_system_count",np.nan)); pavg[i]=orient*float(r.get("prediction_avg_home",np.nan)) if pd.notna(r.get("prediction_avg_home",np.nan)) else np.nan
+        extline[i]=orient*float(r.get("tracker_open_home",np.nan)) if pd.notna(r.get("tracker_open_home",np.nan)) else np.nan
+        matched+=1
+    market_margin=pd.to_numeric(g.get("Market_Open_Margin"),errors="coerce").to_numpy(float) if "Market_Open_Margin" in g.columns else -pd.to_numeric(g.get("Consensus_Open_Spread"),errors="coerce").to_numpy(float)
+    meta_edge=meta-market_margin
+    for df in (g,m):
+        df["_V210_PT_META_MARGIN_TEAM"]=meta
+        df["_V210_PT_META_EDGE_POINTS"]=meta_edge
+        df["_V210_PT_META_SYSTEM_COUNT"]=cnt
+        df["_V210_PT_PREDICTION_AVG_TEAM"]=pavg
+        df["_V210_PT_ARCHIVE_OPEN_MARGIN_TEAM"]=extline
+    # Core bridge exists only on miner frame; attach meta-vs-core state there.
+    if "_V29_CORE_INCUMBENT_EDGE_POINTS" in m.columns:
+        ce=pd.to_numeric(m["_V29_CORE_INCUMBENT_EDGE_POINTS"],errors="coerce").to_numpy(float)
+        m["_V210_PT_META_MINUS_CORE_EDGE"]=meta_edge-ce
+    cache["games"]=g; cache["miner_games"]=m
+    try: setattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",cache)
+    except Exception: pass
+    diag={"status":"PASS","matched_rows":int(matched),"total_rows":int(len(g)),"coverage":float(matched/max(len(g),1)),"mapped_external_teams":int(len(emap)),"unresolved_external_teams":unresolved[:50],"authority":0}
+    log_func(f"[NCAAF-PT-MATCH] status=PASS matched_rows={matched}/{len(g)} coverage={diag['coverage']:.3f} mapped_teams={len(emap)} unresolved_teams={len(unresolved)} authority=0")
+    return diag
+
+
+def _pt_research_metrics(g: pd.DataFrame) -> dict[str,Any]:
+    meta=pd.to_numeric(g.get("_V210_PT_META_MARGIN_TEAM"),errors="coerce").to_numpy(float)
+    actual=pd.to_numeric(g.get("Actual_Margin"),errors="coerce").to_numpy(float)
+    spread=pd.to_numeric(g.get("Consensus_Open_Spread"),errors="coerce").to_numpy(float)
+    market=pd.to_numeric(g.get("Market_Open_Margin"),errors="coerce").to_numpy(float) if "Market_Open_Margin" in g.columns else -spread
+    season=pd.to_numeric(g.get("Season"),errors="coerce").to_numpy(float)
+    ishome=pd.to_numeric(g.get("Is_Home",pd.Series(np.nan,index=g.index)),errors="coerce").to_numpy(float)
+    core_edge=pd.to_numeric(g.get("_V29_CORE_INCUMBENT_EDGE_POINTS",pd.Series(np.nan,index=g.index)),errors="coerce").to_numpy(float)
+    core_margin=market+core_edge
+    physical=(ishome==1) if np.isfinite(ishome).any() else np.ones(len(g),dtype=bool)
+    rows=[]
+    for yr in sorted({int(x) for x in season[np.isfinite(season)] if int(x)<=2025}):
+        mk=physical&(season==yr)&np.isfinite(meta)&np.isfinite(actual)
+        if not mk.any(): continue
+        mm={"season":yr,"n":int(mk.sum()),"meta_mae":_mae(actual[mk],meta[mk]),"meta_rmse":_rmse(actual[mk],meta[mk]),"market_mae":_mae(actual[mk],market[mk]),"market_rmse":_rmse(actual[mk],market[mk])}
+        ck=mk&np.isfinite(core_margin)
+        if ck.any(): mm.update({"core_n":int(ck.sum()),"core_mae":_mae(actual[ck],core_margin[ck]),"core_rmse":_rmse(actual[ck],core_margin[ck]),"meta_minus_core_mae_gain":_mae(actual[ck],core_margin[ck])-_mae(actual[ck],meta[ck]),"meta_minus_core_rmse_gain":_rmse(actual[ck],core_margin[ck])-_rmse(actual[ck],meta[ck])})
+        edge=meta-market; cover=actual+spread; sel=mk&np.isfinite(edge)&np.isfinite(cover)&(np.abs(edge)>3)&(~np.isclose(cover,0,atol=1e-9))
+        if sel.any(): mm.update({"edge_gt3_n":int(sel.sum()),"edge_gt3_ats":float(np.mean(np.sign(edge[sel])*cover[sel]>0))})
+        else: mm.update({"edge_gt3_n":0,"edge_gt3_ats":np.nan})
+        rows.append(mm)
+    pooled=physical&np.isfinite(meta)&np.isfinite(actual)&(season<=2025)
+    pp={"n":int(pooled.sum()),"meta_mae":_mae(actual[pooled],meta[pooled]),"meta_rmse":_rmse(actual[pooled],meta[pooled]),"market_mae":_mae(actual[pooled],market[pooled]),"market_rmse":_rmse(actual[pooled],market[pooled])}
+    cp=pooled&np.isfinite(core_margin)
+    if cp.any(): pp.update({"core_n":int(cp.sum()),"core_mae":_mae(actual[cp],core_margin[cp]),"core_rmse":_rmse(actual[cp],core_margin[cp]),"meta_minus_core_mae_gain":_mae(actual[cp],core_margin[cp])-_mae(actual[cp],meta[cp]),"meta_minus_core_rmse_gain":_rmse(actual[cp],core_margin[cp])-_rmse(actual[cp],meta[cp])})
+    return {"status":"PASS" if pooled.any() else "NO_MATCHED_ROWS","season_metrics":rows,"pooled":pp,"authority":0,"selection_influence":0}
+
+
+def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client=None, bucket_name="sharp-models", include_history=True, include_current=True, force=False, log_func=print) -> dict[str,Any]:
+    """Fetch/cache Prediction Tracker and attach fixed-weight META_MARGIN research fields.
+
+    Completed seasons are cache-once in GCS. The current season is web-first with
+    cached fallback. Failure is non-fatal and always fail-closed: no external
+    field can mutate Production V1 or grant Bet Authority.
+    """
+    try:
+        if storage_client is None:
+            from google.cloud import storage
+            storage_client=storage.Client()
+        # Reuse already attached history within the same process unless forced.
+        cache=getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) if dashboard_module is not None else {}
+        prior=(cache or {}).get("prediction_tracker_external") if isinstance(cache,dict) else None
+        if include_history and (not include_current) and not force and isinstance(prior,dict) and prior.get("status")=="PASS" and prior.get("history_attached"):
+            return prior
+        frames=[]; diags=[]
+        if include_history:
+            for sy in PT_HISTORY_SEASONS:
+                f,d=_pt_load_season(sy,storage_client=storage_client,bucket_name=bucket_name,force_web=False,log_func=log_func); diags.append(d)
+                if not f.empty: frames.append(f)
+        current_frame=pd.DataFrame(); current_diag=None; current_archive=pd.DataFrame(); current_live=pd.DataFrame(); current_merge={"status":"NOT_RUN","authority":0}
+        if include_current:
+            # 2026 is split by the source site: ncaa2026.csv is the season archive,
+            # while ncaapredictions.csv is the active/current week.  Fetch BOTH.
+            current_archive,current_archive_diag=_pt_load_season(PT_CURRENT_SEASON,storage_client=storage_client,bucket_name=bucket_name,force_web=True,log_func=log_func)
+            if not current_archive.empty:
+                current_archive=current_archive.copy(); current_archive["source_kind"]="ARCHIVE_SEASON_TO_DATE"; current_archive["source_priority"]=1
+                try: storage_client.bucket(bucket_name).blob(PT_CURRENT_ARCHIVE_BLOB).upload_from_string(current_archive.to_csv(index=False).encode(),content_type="text/csv")
+                except Exception: pass
+            current_live,current_live_diag=_pt_load_live_current(storage_client=storage_client,bucket_name=bucket_name,log_func=log_func)
+            current_frame,current_merge=_pt_merge_current_season(current_archive,current_live,log_func=log_func)
+            current_diag={"status":current_merge.get("status"),"season":PT_CURRENT_SEASON,"archive":current_archive_diag,"live":current_live_diag,"merge":current_merge,"authority":0}
+            diags.extend([current_archive_diag,current_live_diag,current_diag])
+            if not current_frame.empty:
+                try:
+                    storage_client.bucket(bucket_name).blob(PT_CURRENT_BLOB).upload_from_string(current_frame.to_csv(index=False).encode(),content_type="text/csv")
+                    meta={"season":PT_CURRENT_SEASON,"updated_utc":_now(),"rows":len(current_frame),"archive_rows":len(current_archive),"live_rows":len(current_live),"full_five_rows":int(np.isfinite(pd.to_numeric(current_frame.get('meta_margin_home'),errors='coerce')).sum()),"live_full_five_rows":int(np.isfinite(pd.to_numeric(current_live.get('meta_margin_home'),errors='coerce')).sum()) if not current_live.empty else 0,"source":"Prediction Tracker archive + live current week","archive_url":PT_ARCHIVE_URL.format(season=PT_CURRENT_SEASON),"live_csv_url":PT_LIVE_CSV_URL,"live_page_url":PT_LIVE_PAGE_URL,"authority":0}
+                    storage_client.bucket(bucket_name).blob(PT_CURRENT_META_BLOB).upload_from_string(json.dumps(meta,sort_keys=True).encode(),content_type="application/json")
+                except Exception: pass
+        match={"status":"NOT_ATTACHED","authority":0}; metrics={"status":"NOT_RUN","authority":0}
+        if include_history and dashboard_module is not None and frames:
+            hist=pd.concat(frames,ignore_index=True,sort=False)
+            match=_pt_attach_history_to_cache(dashboard_module,hist,log_func=log_func)
+            c=getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}; gg=c.get("miner_games")
+            if isinstance(gg,pd.DataFrame) and not gg.empty: metrics=_pt_research_metrics(gg)
+        result={"status":"PASS" if any((d or {}).get('status')=='PASS' for d in diags) else "UNAVAILABLE","source":"THE_PREDICTION_TRACKER","history_attached":bool(include_history and match.get('status')=='PASS'),"season_diagnostics":diags,"match":match,"metrics":metrics,"current":{"rows":int(len(current_frame)),"archive_rows":int(len(current_archive)),"live_rows":int(len(current_live)),"full_five_rows":int(np.isfinite(pd.to_numeric(current_frame.get('meta_margin_home'),errors='coerce')).sum()) if not current_frame.empty else 0,"live_full_five_rows":int(np.isfinite(pd.to_numeric(current_live.get('meta_margin_home'),errors='coerce')).sum()) if not current_live.empty else 0,"merge":current_merge,"gcs":f"gs://{bucket_name}/{PT_CURRENT_BLOB}","archive_gcs":f"gs://{bucket_name}/{PT_CURRENT_ARCHIVE_BLOB}","live_gcs":f"gs://{bucket_name}/{PT_CURRENT_LIVE_BLOB}"},"published_weights":dict(PT_PUBLISHED_WEIGHTS),"production_authority":0,"bet_authority_vote":False,"automatic_promotion":False,"selection_influence":0}
+        if dashboard_module is not None:
+            c=getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}; c["prediction_tracker_external"]=result
+            try: setattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",c)
+            except Exception: pass
+        log_func(f"[NCAAF-PT-CONTRACT] status={result['status']} history_attached={result['history_attached']} current_rows={result['current']['rows']} archive_rows={result['current'].get('archive_rows',0)} live_rows={result['current'].get('live_rows',0)} live_full_five={result['current'].get('live_full_five_rows',0)} matched_rows={match.get('matched_rows',0)} production_authority=0 bet_authority_vote=FALSE")
+        return result
+    except Exception as exc:
+        log_func(f"[NCAAF-PT-FAIL] {type(exc).__name__}: {exc} authority=0 fail_closed=TRUE")
+        return {"status":"FAILED","error":f"{type(exc).__name__}:{exc}","production_authority":0,"bet_authority_vote":False,"selection_influence":0}
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +995,21 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
             add("CORE_OOF_EDGE_TEAM_4PLUS","RESEARCH_CORE_STATE",core.ge(4),desc="Incumbent CORE OOF edge >= +4",min_n=30)
             add("CORE_OOF_EDGE_OPP_2PLUS","RESEARCH_CORE_STATE",core.le(-2),desc="Incumbent CORE OOF edge <= -2",min_n=30)
             add("CORE_OOF_EDGE_ABS_4PLUS","RESEARCH_CORE_STATE",core.abs().ge(4),desc="Incumbent CORE OOF absolute edge >= 4",min_n=30)
+
+        # External fixed-weight Prediction Tracker metamodel. These states are
+        # independent research intelligence and always research-only in V2.11.
+        meta_edge=nfirst("_V210_PT_META_EDGE_POINTS")
+        if has("_V210_PT_META_EDGE_POINTS"):
+            add("META_PT_EDGE_TEAM_2PLUS","EXTERNAL_META_MARGIN",meta_edge.ge(2),desc="Prediction Tracker five-system metamodel edge >= +2",min_n=30)
+            add("META_PT_EDGE_TEAM_3PLUS","EXTERNAL_META_MARGIN",meta_edge.ge(3),desc="Prediction Tracker five-system metamodel edge >= +3",min_n=30)
+            add("META_PT_EDGE_OPP_2PLUS","EXTERNAL_META_MARGIN",meta_edge.le(-2),desc="Prediction Tracker five-system metamodel edge <= -2",min_n=30)
+            add("META_PT_EDGE_OPP_3PLUS","EXTERNAL_META_MARGIN",meta_edge.le(-3),desc="Prediction Tracker five-system metamodel edge <= -3",min_n=30)
+            add("META_PT_EDGE_ABS_4PLUS","EXTERNAL_META_MARGIN",meta_edge.abs().ge(4),desc="Prediction Tracker metamodel absolute edge >= 4",min_n=30)
+            if has("_V29_CORE_INCUMBENT_EDGE_POINTS"):
+                good=meta_edge.notna()&core.notna()
+                add("META_PT_CORE_STRONG_AGREE","EXTERNAL_META_MARGIN",good&(meta_edge.abs().ge(2))&(core.abs().ge(2))&(np.sign(meta_edge)==np.sign(core)),desc="External metamodel and CORE both >=2 points same direction",min_n=30)
+                add("META_PT_CORE_STRONG_CONFLICT","EXTERNAL_META_MARGIN",good&(meta_edge.abs().ge(2))&(core.abs().ge(2))&(np.sign(meta_edge)!=np.sign(core)),desc="External metamodel and CORE both >=2 points opposite direction",min_n=30)
+                add("META_PT_CORE_GAP_4PLUS","EXTERNAL_META_MARGIN",good&(meta_edge-core).abs().ge(4),desc="External metamodel differs from CORE edge by >=4 points",min_n=30)
 
         spec_edge_cols=[c for c in g.columns if str(c).startswith("_V29_SPEC_") and str(c).endswith("_EDGE_POINTS")]
         for c in sorted(spec_edge_cols):
@@ -1184,7 +1629,7 @@ def _prospective_shadow(full_games: pd.DataFrame, full_seasons: np.ndarray, mine
         for mech in (mr or {}).get("mechanism_families",[]):
             if not mech.get("confirmation_pass"): continue
             cond=mech.get("representative_conditions") or []; mask=np.ones(len(full_games),dtype=bool)
-            _research_bridge=any(str(c).startswith("CORE_OOF_") or str(c).startswith("SPEC_") for c in cond)
+            _research_bridge=any(str(c).startswith("CORE_OOF_") or str(c).startswith("SPEC_") or str(c).startswith("META_PT_") for c in cond)
             if _research_bridge:
                 out["mechanisms"].append({"market":market,"mechanism_id":mech.get("mechanism_id"),"rule":" AND ".join(cond),"trigger_n":None,"settled_n":None,
                                           "prospective_evaluable":False,"reason":"OOF_CORE_SPECIALIST_LIVE_BRIDGE_NOT_WIRED","production_authority":0})
@@ -1306,6 +1751,49 @@ def _norm_team_live(v: Any) -> str:
     return " ".join(str(v or "").strip().lower().split())
 
 
+def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> tuple[pd.DataFrame,dict[str,Any]]:
+    """Attach the latest GCS-cached Prediction Tracker META_MARGIN to live home rows.
+
+    This is display/research context only. Missing/stale/unmatched data simply
+    leaves the external fields NaN; no production scoring path depends on it.
+    """
+    out=cdf.copy()
+    try:
+        if dashboard_module is None: return out,{"status":"NO_DASHBOARD","matched":0}
+        bucket_name=str(getattr(dashboard_module,"GCS_BUCKET","sharp-models") or "sharp-models")
+        sc=getattr(dashboard_module,"gcs_client",None)
+        if sc is None:
+            from google.cloud import storage
+            sc=storage.Client()
+        raw=sc.bucket(bucket_name).blob(PT_CURRENT_BLOB).download_as_bytes()
+        ex=pd.read_csv(io.BytesIO(raw))
+        if ex.empty: return out,{"status":"EMPTY","matched":0}
+        homes=out.get("Home_Team_Norm",out.get("Home_Team",pd.Series("",index=out.index))).astype(str).map(_pt_team_key)
+        aways=out.get("Away_Team_Norm",out.get("Away_Team",pd.Series("",index=out.index))).astype(str).map(_pt_team_key)
+        internal=pd.concat([homes,aways],ignore_index=True).tolist()
+        emap,_un=_pt_candidate_map(pd.concat([ex.get("home_key",pd.Series(dtype=str)),ex.get("away_key",pd.Series(dtype=str))],ignore_index=True),internal)
+        ex=ex.copy(); ex["home_i"]=ex.get("home_key",pd.Series("",index=ex.index)).map(emap); ex["away_i"]=ex.get("away_key",pd.Series("",index=ex.index)).map(emap)
+        ex=ex.loc[ex["home_i"].notna()&ex["away_i"].notna()].copy(); ex["pair_key"]=ex["home_i"].astype(str)+"|"+ex["away_i"].astype(str)
+        vc=ex["pair_key"].value_counts(); ex=ex.loc[ex["pair_key"].map(vc).eq(1)].set_index("pair_key",drop=False)
+        meta=np.full(len(out),np.nan); cnt=np.full(len(out),np.nan); pavg=np.full(len(out),np.nan)
+        for i,(h,a) in enumerate(zip(homes,aways)):
+            k=f"{h}|{a}"
+            if k not in ex.index: continue
+            r=ex.loc[k]
+            if isinstance(r,pd.DataFrame): continue
+            meta[i]=float(pd.to_numeric(pd.Series([r.get("meta_margin_home")]),errors="coerce").iloc[0])
+            cnt[i]=float(pd.to_numeric(pd.Series([r.get("meta_system_count")]),errors="coerce").iloc[0])
+            pavg[i]=float(pd.to_numeric(pd.Series([r.get("prediction_avg_home")]),errors="coerce").iloc[0])
+        spread=pd.to_numeric(out.get("Consensus_Open_Spread",out.get("Opening_Spread",pd.Series(np.nan,index=out.index))),errors="coerce").to_numpy(float)
+        out["_V210_PT_META_MARGIN_TEAM"]=meta
+        out["_V210_PT_META_EDGE_POINTS"]=meta+spread
+        out["_V210_PT_META_SYSTEM_COUNT"]=cnt
+        out["_V210_PT_PREDICTION_AVG_TEAM"]=pavg
+        return out,{"status":"PASS","matched":int(np.isfinite(meta).sum()),"rows":int(len(out)),"authority":0}
+    except Exception as exc:
+        return out,{"status":"UNAVAILABLE","matched":0,"error":f"{type(exc).__name__}:{exc}","authority":0}
+
+
 def _miner_live_authority_eligible(mech: dict[str,Any] | None) -> bool:
     """Frozen historical gate for whether a Miner family may influence Bet Authority.
 
@@ -1316,7 +1804,7 @@ def _miner_live_authority_eligible(mech: dict[str,Any] | None) -> bool:
     """
     m=mech or {}
     _conds=[str(x) for x in (m.get("representative_conditions") or m.get("conditions") or [])]
-    if any(x.startswith("CORE_OOF_") or x.startswith("SPEC_") for x in _conds): return False
+    if any(x.startswith("CORE_OOF_") or x.startswith("SPEC_") or x.startswith("META_PT_") for x in _conds): return False
     if not bool(m.get("confirmation_pass")): return False
     try: n=int(m.get("confirmation_n",0) or 0)
     except Exception: n=0
@@ -1354,6 +1842,7 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
         pick["_rv22_game_id_key"]=gid; ctx.append(pick); keys.append(gid)
     if not ctx: return out
     cdf=pd.DataFrame(ctx).reset_index(drop=True)
+    cdf,_pt_live_diag=_pt_attach_current_live_frame(cdf,dashboard_module=dashboard_module)
     registry=report.get("system_miner_v3") or {}
     authority_votes_by_game={k:[] for k in keys}; research_votes_by_game={k:[] for k in keys}
     confirmed_research=0; authority_qualified=0; authority_evaluable=0; research_evaluable=0
@@ -1392,6 +1881,16 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     out["NCAAF_Miner_Evaluable"]=authority_evaluable
     out["NCAAF_Miner_Research_Evaluable"]=research_evaluable
     out["NCAAF_Miner_Live_Authority_Policy"]=NCAAF_MINER_LIVE_AUTHORITY_POLICY
+    # Expose current external metamodel as read-only context on every market row.
+    # The canonical context row is home-oriented; no production decision consumes
+    # these fields because all META_PT mechanisms are authority-ineligible.
+    _pt_meta_by={keys[i]:cdf.iloc[i].get("_V210_PT_META_MARGIN_TEAM",np.nan) for i in range(len(cdf))}
+    _pt_edge_by={keys[i]:cdf.iloc[i].get("_V210_PT_META_EDGE_POINTS",np.nan) for i in range(len(cdf))}
+    _pt_cnt_by={keys[i]:cdf.iloc[i].get("_V210_PT_META_SYSTEM_COUNT",np.nan) for i in range(len(cdf))}
+    out["NCAAF_PT_Meta_Margin_Home"]=[_pt_meta_by.get(k,np.nan) for k in out[keycol]]
+    out["NCAAF_PT_Meta_Edge_Home"]=[_pt_edge_by.get(k,np.nan) for k in out[keycol]]
+    out["NCAAF_PT_Meta_System_Count"]=[_pt_cnt_by.get(k,np.nan) for k in out[keycol]]
+    out["NCAAF_PT_Meta_Status"]=_pt_live_diag.get("status","UNAVAILABLE")
     live_counts=[]; live_summaries=[]; research_counts=[]; research_summaries=[]
     for _,r in out.iterrows():
         m=str(r.get("Market") or "").lower()
@@ -1424,6 +1923,12 @@ def _report_without_models(bundle: dict[str,Any]) -> dict[str,Any]:
 def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="sharp-models", storage_client=None,
                           log_func=print, hard_fail=True) -> dict[str,Any]:
     try:
+        # Standalone-safe: ensure the automatic external-rating bridge has had a
+        # chance to populate the same Miner frame before research begins.
+        external_ratings=refresh_prediction_tracker_external(
+            dashboard_module=dashboard_module,storage_client=storage_client,bucket_name=bucket_name,
+            include_history=True,include_current=True,force=False,log_func=log_func
+        )
         cache=getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}
         games=cache.get("games"); seasons=np.asarray(cache.get("season_arr"),dtype=float); oof_margin=np.asarray(cache.get("oof_margin"),dtype=float); oof_total=np.asarray(cache.get("oof_total"),dtype=float)
         cols=list(cache.get("candidate_feature_cols") or []); miner_games=cache.get("miner_games")
@@ -1450,11 +1955,11 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
                 "status":"NCAAF_RESEARCH_V2_COMPLETE","production_authority":0,"production_contract_mutated":False,
                 "benchmark":"FROZEN_NCAAF_PRODUCTION_V1","discovery_max_season":DISCOVERY_MAX_SEASON,"confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"system_miner_v3":miners,
-                "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,
+                "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"external_rating_metamodel":external_ratings,
                 "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False},
-                "next_step":"KEEP PRODUCTION V1 FROZEN; LET THE EXISTING MINER TEST PATHI + BIG AL + OOF CORE/SPECIALIST STATE INTERACTIONS; CORE/SPECIALIST BRIDGE ATOMS REMAIN RESEARCH-ONLY UNTIL A LIKE-FOR-LIKE LIVE BRIDGE EXISTS"}
+                "next_step":"KEEP PRODUCTION V1 FROZEN; LET THE EXISTING MINER TEST PATHI + BIG AL + OOF CORE/SPECIALIST + EXTERNAL META_MARGIN INTERACTIONS; CORE/SPECIALIST/EXTERNAL META ATOMS REMAIN RESEARCH-ONLY"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
-        bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
+        bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"external_rating_metamodel":external_ratings,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
         if storage_client is None:
             from google.cloud import storage
             storage_client=storage.Client()
@@ -1465,7 +1970,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
         bio=io.BytesIO(); pickle.dump(bundle,bio,protocol=pickle.HIGHEST_PROTOCOL); bio.seek(0); pdata=bio.read(); b.blob(BUNDLE_CURRENT_BLOB).upload_from_string(pdata,content_type="application/octet-stream")
         report["artifact"]={"current_report":f"gs://{bucket_name}/{REPORT_CURRENT_BLOB}","current_bundle":f"gs://{bucket_name}/{BUNDLE_CURRENT_BLOB}","history_report":f"gs://{bucket_name}/{hist}","sha256":sha}
         _strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if _miner_live_authority_eligible(_m))
-        _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_")) for c in (_m.get("representative_conditions") or [])))
+        _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_","META_PT_")) for c in (_m.get("representative_conditions") or [])))
         log_func(f"[NCAAF-RV25-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
         return report
     except Exception as exc:
@@ -1494,7 +1999,8 @@ def match_live_systems(rows: pd.DataFrame, report: dict[str,Any], dashboard_modu
 def self_test() -> dict[str,Any]:
     _tf=pd.DataFrame({"Consensus_Open_Spread":[3.5],"Prev_SU_Margin":[-7.0],"Prev2_SU_Margin":[10.0],"Prev3_SU_Margin":[-3.0],"Prev_ATS_Margin":[8.0],"Prev2_ATS_Margin":[-2.0],"Prev3_ATS_Margin":[5.0],
                       "Pathi_FB_Dog_Hook_Above_3":[1],"BigAl_CF2_LateSeasonRevengeDog":[1],"_V29_CORE_INCUMBENT_EDGE_POINTS":[3.0],
-                      "_V29_SPEC_STRUCTURED_STATS_EDGE_POINTS":[2.5],"_V29_SPEC_STRUCTURED_STATS_DIVERGENCE_FROM_CORE":[1.5],"_V29_SPEC_STRUCTURED_STATS_DIVERGENCE_CUT":[1.0]})
+                      "_V29_SPEC_STRUCTURED_STATS_EDGE_POINTS":[2.5],"_V29_SPEC_STRUCTURED_STATS_DIVERGENCE_FROM_CORE":[1.5],"_V29_SPEC_STRUCTURED_STATS_DIVERGENCE_CUT":[1.0],
+                      "_V210_PT_META_MARGIN_TEAM":[6.5],"_V210_PT_META_EDGE_POINTS":[3.0],"_V210_PT_META_SYSTEM_COUNT":[5]})
     live_atoms={a["name"] for a in _extended_atoms(_tf,for_live=True,market="spreads")}
     q=_bh_qvalues([.01,.04,.20]); fam=_classify_feature_families(["Rush_EPA","Opp_Rush_EPA","Line_Move_60m","Sharp_Soft_Divergence","Actual_Margin"])
     odds=np.asarray([200.0,-200.0]); won=np.asarray([1.0,1.0]); ret=_american_unit_return(odds,won)
@@ -1503,7 +2009,7 @@ def self_test() -> dict[str,Any]:
         all("Actual_Margin" not in x for v in fam.values() for x in v) and
         "SU_SEQ3_LWL" in live_atoms and "OFF_ATS_COVER_7_PLUS" in live_atoms and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
-        "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and
+        "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and "META_PT_EDGE_TEAM_3PLUS" in live_atoms and "META_PT_CORE_STRONG_AGREE" in live_atoms and
         np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False)
     )
     return {

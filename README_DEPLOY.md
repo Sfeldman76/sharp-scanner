@@ -1,123 +1,143 @@
-# NCAAF Engine V2.9 — Expert / Model Atom Bridge
+# NCAAF Engine V2.11.1 — Miner Bridge Boolean-Mask Hotfix
 
-This release extends the protected NCAAF research path while leaving **Production V1 frozen**. It does not create a new Miner, new global model, or new market backend. It connects intelligence that previously ran largely in parallel and lets the **existing Miner** test whether those sources add incremental value together.
 
-## Main change
+## V2.11.1 hotfix
 
-The existing Miner can now research combinations involving:
+V2.11.1 fixes a Heavy Research crash in `ncaaf_core_challenger_v2.py` inside `_publish_miner_intelligence_bridge`. When `Season` is stored as pandas nullable `Int64`, `.eq(year).to_numpy()` can produce an object array containing nullable booleans. NumPy rejects that object array as an index.
 
-- deterministic Pathi football systems;
-- base Big Al NCAAF systems;
-- the existing conference / rivalry / H2H / timing / team-memory / ATS / SU / spread / total / market-path atoms;
-- season-forward OOF incumbent CORE state from the protected CORE challenger;
-- season-forward OOF specialist state for discovery-selected specialists;
-- richer key-number journey context.
+The bridge now uses `fillna(False).to_numpy(dtype=bool)` for both the year-validation mask and the 2023 discovery mask. This does not change any model logic, thresholds, features, authority, or chronology; it only makes the existing season-forward OOF bridge robust to nullable pandas dtypes. A regression guard for nullable `Int64` season masks was added to the built-in self-test.
 
-Examples of questions the same Miner can now test are:
+V2.11 keeps **Production V1 frozen** and fixes the current-season ingestion contract: Prediction Tracker uses one season-to-date archive and a separate live/current-week feed. Both are now fetched and merged automatically.
 
-- `PATHI dog hook above 3 + same conference + game 7+`;
-- `BIG AL CF2 + road`;
-- `PATHI rule + incumbent CORE support`;
-- `BIG AL rule + specialist/CORE divergence`;
-- `CORE strong edge + Pathi support + opponent off ATS loss`.
+## What changed
 
-All combinations still pass through the existing discovery, FDR, 2024/2025 confirmation, dependency collapse, parent/child lineage, shrinkage, and prospective framework.
+The NCAAF research pipeline now automatically retrieves the Prediction Tracker NCAA season CSVs from:
 
-## 1. Pathi atoms
+- `https://www.thepredictiontracker.com/ncaa2022.csv`
+- `https://www.thepredictiontracker.com/ncaa2023.csv`
+- `https://www.thepredictiontracker.com/ncaa2024.csv`
+- `https://www.thepredictiontracker.com/ncaa2025.csv`
+- 2026 season-to-date archive: `https://www.thepredictiontracker.com/ncaa2026.csv`
+- 2026 active/current week: `https://www.thepredictiontracker.com/ncaapredictions.csv`
+- live reference page: `https://www.thepredictiontracker.com/predncaa.php`
 
-Directional Pathi concepts already reconstructed in the historical frame are exposed to the Miner as one `EXPERT_PATHI` family. Because the Miner allows only one atom per family inside a rule, it cannot stack several correlated Pathi flags and count them as independent evidence. A separate `PATHI_MULTI_2PLUS` atom allows multiplicity itself to be tested without double-counting the individual flags.
+Completed seasons are cached in GCS after the first successful fetch. For 2026, **both** the season archive and the separate live/current-week CSV are fetched. The merged snapshot retains all older 2026 archive rows, then overlays the live row only when the same home/away matchup appears in both sources. The live feed is web-first with its own GCS fallback.
 
-Market-key events that are context rather than directional recommendations remain context atoms rather than being assigned artificial W/L direction.
+GCS keeps all three current-season representations:
 
-## 2. Big Al atoms
+- `current_archive.csv` — older/completed 2026 archive rows;
+- `current_live.csv` — current-week ratings only;
+- `current.csv` — merged archive + current week used by live dashboard attachment.
 
-The Miner receives the **base** Big Al NCAAF hypotheses:
+Every current-season row carries `source_kind` and `source_priority`. `LIVE_CURRENT` wins an overlap; prior archive rows are never discarded globally.
 
-- CF1 Week 2 home off 42+ win;
-- CF2 late-season revenge dog;
-- CF3 fade 19+ favorite after upset loss.
+## Published META_MARGIN benchmark
 
-Hand-tightened children such as CF2 Away are **not** inserted as primitive Miner atoms. The Miner can instead test `CF2 + ROAD` itself. Existing parent/child lineage can then determine whether the added ROAD condition genuinely improves the parent out of sample.
+V2.11 reproduces the published no-intercept five-system benchmark exactly:
 
-The direct published-system W/L table still grades CF2 Away separately for source-system tracking.
+- Dokter Entropy: `0.242406`
+- Pi-Rate Bias: `0.281205`
+- Keeper: `0.135398`
+- ESPN Football Power Index: `0.163639`
+- Pigskin Index: `0.114519`
 
-## 3. OOF incumbent CORE state bridge
+`META_MARGIN` is emitted only when **all five** system predictions are finite for a game. Missing systems fail closed; the code does not replace a missing component with the site's overall prediction average and does not re-fit the published coefficients on our outcomes.
 
-The CORE challenger now publishes an incumbent CORE state into the Miner frame using only season-forward predictions:
+## Historical matching
 
-- 2023 predicted from 2022;
-- 2024 predicted from seasons before 2024;
-- 2025 predicted from seasons before 2025;
-- no 2026 state is used for selection.
+The loader:
 
-Miner atoms include strong positive/negative CORE edge and large absolute CORE edge. These atoms are explicitly labeled research CORE state.
+1. parses each season with flexible header matching;
+2. normalizes external school names;
+3. conservatively maps short tracker names to our historical canonical team names;
+4. matches by season + home/away pair;
+5. uses calendar date for duplicate same-season matchups when both sources expose a date;
+6. leaves ambiguous/unresolved matches unmatched rather than guessing.
 
-## 4. OOF specialist-state bridge
+Historical META_MARGIN is converted to each team-row orientation and attached as:
 
-Specialists that survive the 2023 conditional-attribution discovery screen can also publish season-forward state into the Miner frame. For each bridged specialist the Miner may test:
+- `_V210_PT_META_MARGIN_TEAM`
+- `_V210_PT_META_EDGE_POINTS`
+- `_V210_PT_META_SYSTEM_COUNT`
+- `_V210_PT_PREDICTION_AVG_TEAM` (diagnostic only)
+- `_V210_PT_ARCHIVE_OPEN_MARGIN_TEAM` (diagnostic only)
+- `_V210_PT_META_MINUS_CORE_EDGE` when the OOF CORE bridge exists
 
-- specialist edge toward the current team;
-- specialist edge toward the opponent;
-- strong CORE/specialist agreement;
-- strong CORE/specialist conflict;
-- specialist-vs-CORE divergence using a cutoff frozen from 2023 discovery.
+## New Miner atoms
 
-This does **not** feed confirmation outcomes back into the feature definition.
+The **same existing Miner** may now test:
 
-## 5. Research-only authority guard
+- `META_PT_EDGE_TEAM_2PLUS`
+- `META_PT_EDGE_TEAM_3PLUS`
+- `META_PT_EDGE_OPP_2PLUS`
+- `META_PT_EDGE_OPP_3PLUS`
+- `META_PT_EDGE_ABS_4PLUS`
+- `META_PT_CORE_STRONG_AGREE`
+- `META_PT_CORE_STRONG_CONFLICT`
+- `META_PT_CORE_GAP_4PLUS`
 
-Any Miner mechanism containing `CORE_OOF_*` or `SPEC_*` atoms is research-only in V2.9. Even if it confirms historically, it cannot become a live Bet Authority family yet because there is not yet a proven like-for-like live scorer for those OOF state fields.
+These can combine with the existing Pathi, Big Al, conference, rivalry, H2H, timing, market, team-memory, OOF CORE, and specialist atoms.
 
-Pathi and Big Al atoms remain deterministic pregame rules and therefore remain live-evaluable under the existing Miner authority policy if they independently clear all existing qualification gates.
+Examples:
 
-## 6. Heavy Research execution order
+- `PATHI dog hook >3 + META_PT_EDGE_TEAM_3PLUS`
+- `BIG AL CF2 + META_PT_CORE_STRONG_AGREE`
+- `META_PT_CORE_STRONG_CONFLICT + same conference`
 
-Heavy Research now intentionally runs:
+The existing discovery → FDR → 2024/2025 confirmation → dependency collapse → parent/child lineage → prospective workflow remains unchanged.
 
-1. historical / OOF cache;
-2. CORE Challenger and OOF CORE/specialist bridge publication;
-3. the existing Miner with the expanded atom catalog.
+## External metamodel scorecard
 
-This ordering is required so the Miner sees leakage-safe CORE/specialist states during discovery and 2024/2025 confirmation.
+Heavy Research now records per-season and pooled diagnostics for META_MARGIN versus:
 
-## 7. Existing research preserved
+- actual margin;
+- opening market margin;
+- season-forward OOF CORE when available;
+- ATS results when META_MARGIN differs from the opening market by more than 3 points.
 
-V2.9 retains rather than replaces:
+These diagnostics are research-only and do not alter CORE.
 
-- PLAY_ON vs FADE evaluation;
-- discovery FDR controls;
-- 2022-2023 discovery only;
-- both 2024 and 2025 confirmation;
-- dependency/mechanism collapse;
-- parent/child incremental lineage;
-- conference and conference-pair context;
-- rivalry/revenge/H2H context;
-- 1/2/3-game SU/ATS sequence and team-memory atoms;
-- role-change and timing/rest context;
-- market movement, sharp/soft divergence, key crossing and persistence where historical data exists;
-- price-aware H2H validation;
-- published Pathi / Big Al W/L attribution;
-- shrinkage / Wilson diagnostics;
-- Miner threshold-neighborhood diagnostics;
-- sealed 2026 prospective tracking;
-- no automatic production promotion.
+## Automatic current-season refresh
 
-## What intentionally did NOT change
+`NCAAF Production — Weekly Update` now refreshes the current Prediction Tracker season file automatically and stores a normalized snapshot in:
 
-- frozen NCAAF Spread Production V1 model;
-- frozen H2H Production V1 model;
-- frozen Totals Production V1 model;
-- Production V1 probability artifact;
-- frozen STAT selector;
+- `gs://sharp-models/research/ncaaf/external/prediction_tracker/current.csv`
+- `gs://sharp-models/research/ncaaf/external/prediction_tracker/current_meta.json`
+
+The NCAAF dashboard reads that cached current file and displays:
+
+- **PT Meta Home Margin**
+- **PT Meta vs Market**
+
+Current META_MARGIN can also make already-confirmed `META_PT_*` mechanisms evaluable for research display, but it has **zero Bet Authority**.
+
+## Authority guard
+
+Any Miner mechanism containing:
+
+- `CORE_OOF_*`
+- `SPEC_*`
+- `META_PT_*`
+
+is research-only and cannot become a live Bet Authority family in V2.11.
+
+Prediction Tracker failure is non-fatal. If the site is unavailable and no cached copy exists, the external layer simply reports unavailable and the existing NCAAF engine continues normally.
+
+## What did NOT change
+
+- frozen NCAAF Spread Production V1;
+- frozen H2H Production V1;
+- frozen Totals Production V1;
+- CORE probability artifacts;
 - 2% CORE edge + 2% live EV candidate gates;
-- STRONG_VALIDATED Miner live-authority threshold;
-- Bet Authority architecture;
-- Utils / Move Master live market backend;
-- production ledger identity / physical-game dedupe;
+- STRONG_VALIDATED Miner authority policy for eligible non-external mechanisms;
+- Pathi / Big Al semantics;
+- Utils / Move Master market backend;
+- production ledger / physical-game dedupe;
 - 2026 outcomes remain excluded from research selection;
 - no automatic promotion.
 
-The following production/backend files are unchanged from V2.8:
+The production/backend files remain unchanged from V2.9:
 
 - `ncaaf_production_v1.py`
 - `ncaaf_production_ledger_v1.py`
@@ -125,24 +145,42 @@ The following production/backend files are unchanged from V2.8:
 
 ## Files to replace
 
-Replace these four files:
+If V2.11 is already deployed, replace only:
+
+1. `ncaaf_core_challenger_v2.py`
+
+For a clean V2.11.1 deployment from an older version, replace:
 
 1. `ncaaf_core_challenger_v2.py`
 2. `ncaaf_research_v2.py`
 3. `sharp_line_dashboard.py`
 4. `train_job.py`
 
-The ZIP also contains the synchronized unchanged production/backend files as a full repository snapshot.
+
+The ZIP contains the unchanged production/backend files as a complete repository snapshot.
 
 ## After deployment
 
 Run **NCAAF Research — Heavy Challenger Search** once.
 
-In the log, look for:
+Watch for:
 
-- `[NCAAF-CORE-V24-MINER-BRIDGE]` — OOF CORE/specialist state publication;
-- `[NCAAF-RV25-ATOM-BRIDGE]` — Pathi / Big Al / CORE / specialist atom counts by market;
-- normal Miner mechanism lines and lineage diagnostics;
-- `[NCAAF-RV25-CONTRACT]` — final research contract including bridge mechanism count.
+- `[NCAAF-PT-SEASON]` — fetch/cache + five-system coverage by season;
+- `[NCAAF-PT-MATCH]` — historical game/team matching coverage;
+- `[NCAAF-PT-CONTRACT]` — final external bridge status;
+- `[NCAAF-RV25-ATOM-BRIDGE]` — expanded Miner atom inventory;
+- normal Miner mechanism + lineage diagnostics;
+- `[NCAAF-RV25-CONTRACT]` — final research contract.
 
-Do **not** run Production Publish for this research patch.
+After that, normal **NCAAF Production — Weekly Update** keeps the current external file refreshed automatically. Do **not** run Production Publish for this change.
+
+## V2.11 current-season safety contract
+
+2026 archive rows are retained for prospective/intelligence history, while the separate live feed supplies the current week's latest system ratings. 2026 remains sealed from retrospective discovery/confirmation and does not change Production CORE or Bet Authority.
+
+Expected refresh logs now include:
+
+- `[NCAAF-PT-SEASON] season=2026 ...` — season archive
+- `[NCAAF-PT-LIVE] season=2026 ...` — active-week CSV
+- `[NCAAF-PT-CURRENT-MERGE] ...` — archive/live merge and overlap count
+- `[NCAAF-WEEKLY-PT-REFRESH] ... archive_rows=... live_rows=... live_full_five=...`
