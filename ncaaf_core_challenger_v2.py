@@ -56,8 +56,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-SOURCE_TAG = "ncaaf-core-challenger-v2.3-coverage-decomposition-consistent-watch-20261006"
-VERSION = "2.3.0"
+SOURCE_TAG = "ncaaf-core-challenger-v2.4-expert-model-atom-bridge-20261006"
+VERSION = "2.4.0"
 REPORT_CURRENT_BLOB = "research/ncaaf/core_challenger/v2/current_report.json"
 REPORT_HISTORY_PREFIX = "research/ncaaf/core_challenger/v2/history"
 BUNDLE_CURRENT_BLOB = "research/ncaaf/core_challenger/v2/current_bundle.pkl"
@@ -874,6 +874,67 @@ def _conditional_specialist_attribution(g: pd.DataFrame, tuned: list[dict[str,An
     }
 
 
+def _publish_miner_intelligence_bridge(dashboard_module, full_games: pd.DataFrame, g: pd.DataFrame, tuned: list[dict[str,Any]], attribution: dict[str,Any] | None=None, log_func=print) -> dict[str,Any]:
+    """Publish leakage-safe OOF incumbent/specialist states into the Miner frame.
+
+    The bridge is research-only. 2023 is predicted from 2022; 2024/25 use only
+    prior seasons. No 2026 outcome or selection information is read. The Miner
+    may use these states as hypotheses, but mechanisms containing CORE/SPECIALIST
+    bridge atoms are never eligible for live Bet Authority in this version.
+    """
+    cache=getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}
+    mg=cache.get("miner_games")
+    if not isinstance(mg,pd.DataFrame) or mg.empty or not isinstance(full_games,pd.DataFrame) or full_games.empty:
+        return {"status":"UNAVAILABLE","reason":"MINER_FRAME_MISSING","production_authority":0,"selection_influence":0}
+    full_season=_num(full_games,"Season").to_numpy(float)
+    hist_pos=np.flatnonzero(np.isfinite(full_season)&(full_season<=max(CONFIRMATION_SEASONS)))
+    if len(hist_pos)!=len(g) or len(mg)!=len(full_games):
+        return {"status":"UNAVAILABLE","reason":"ROW_ALIGNMENT_MISMATCH","historical_rows":len(g),"mapped_rows":len(hist_pos),"production_authority":0,"selection_influence":0}
+
+    inc=np.full(len(g),np.nan,dtype=float)
+    _selected_names={str((x or {}).get("specialist") or "") for x in ((attribution or {}).get("selected_regimes") or [])}
+    specs={}
+    for t in tuned:
+        recipe=t.get("recipe") or {}; name=str(recipe.get("name") or "SPECIALIST")
+        if _selected_names and name not in _selected_names: continue
+        specs[name]={"recipe":recipe,"pred":np.full(len(g),np.nan,dtype=float)}
+    for yr in (2023,2024,2025):
+        tr=g[_num(g,"Season").lt(yr)].copy(); vm=_num(g,"Season").eq(yr).to_numpy(); va=g.loc[vm].copy()
+        if tr.empty or va.empty: continue
+        inc[vm]=_incumbent_predict(tr,va)
+        for name,z in specs.items():
+            z["pred"][vm]=_predict_recipe(tr,va,z["recipe"])
+
+    market=_num(g,"Market_Open_Margin").to_numpy(float)
+    core_edge=inc-market
+    bridge_cols={"_V29_CORE_INCUMBENT_EDGE_POINTS":core_edge}
+    specialists=[]
+    d23=_num(g,"Season").eq(2023).to_numpy()
+    for name,z in specs.items():
+        slug=re.sub(r"[^A-Z0-9]+","_",name.upper()).strip("_")[:36]
+        pred=np.asarray(z["pred"],float); edge=pred-market; div=np.abs(pred-inc)
+        dv=div[d23&np.isfinite(div)]
+        cut=float(np.quantile(dv,.75)) if len(dv) else np.nan
+        bridge_cols[f"_V29_SPEC_{slug}_EDGE_POINTS"]=edge
+        bridge_cols[f"_V29_SPEC_{slug}_DIVERGENCE_FROM_CORE"]=div
+        bridge_cols[f"_V29_SPEC_{slug}_DIVERGENCE_CUT"]=np.full(len(g),cut,dtype=float)
+        specialists.append({"name":name,"slug":slug,"discovery_divergence_cut":cut,"historical_oof_rows":int(np.isfinite(edge).sum())})
+
+    mg2=mg.copy()
+    for col,vals in bridge_cols.items():
+        arr=np.full(len(mg2),np.nan,dtype=float); arr[hist_pos]=np.asarray(vals,dtype=float); mg2[col]=arr
+    cache["miner_games"]=mg2
+    cache["miner_intelligence_bridge"]={
+        "status":"PASS","source":"CORE_CHALLENGER_SEASON_FORWARD_OOF","core_field":"_V29_CORE_INCUMBENT_EDGE_POINTS",
+        "specialists":specialists,"historical_rows":int(np.isfinite(core_edge).sum()),"year_2026_queried":False,
+        "selection_influence":0,"production_authority":0,"live_authority":0,
+        "contract":"2023_FROM_2022__2024_2025_PRIOR_SEASONS_ONLY__RESEARCH_ONLY_ATOMS__NO_2026_SELECTION"}
+    try: setattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",cache)
+    except Exception: pass
+    log_func(f"[NCAAF-CORE-V24-MINER-BRIDGE] status=PASS core_oof_rows={int(np.isfinite(core_edge).sum())} specialists={len(specialists)} fields={len(bridge_cols)} year_2026_queried=FALSE selection_influence=0 authority=0")
+    return cache["miner_intelligence_bridge"]
+
+
 def _tune_numeric(g: pd.DataFrame, features: list[str], name: str, log_func=print) -> dict[str,Any]:
     tr=g[_num(g,"Season").eq(2022)].copy(); va=g[_num(g,"Season").eq(2023)].copy(); rows=[]
     for a in RIDGE_ALPHAS:
@@ -1055,6 +1116,7 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
 
         for c in candidates: _score_candidate(c,inc,log_func=log_func)
         attribution=_conditional_specialist_attribution(g,tuned,log_func=log_func)
+        miner_intelligence_bridge=_publish_miner_intelligence_bridge(dashboard_module,games,g,tuned,attribution=attribution,log_func=log_func)
         _coverage_recipe=next((t.get("recipe") for t in tuned if (t.get("recipe") or {}).get("name")=="FEED_COVERAGE"),None)
         coverage_ablation=_coverage_recipe_ablation(g,_coverage_recipe)
         _log_v23_coverage_decomposition(coverage_registry,coverage_incremental,coverage_ablation,log_func=log_func)
@@ -1071,13 +1133,14 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
                 "strength_context":strength_audit,"conference_coverage":conf_cov,"advanced_named_fields_present":advanced_present[:50],
                 "power_features":power_features,"structured_stat_selection":stat_rank,"matchup_stat_selection":matchup_rank,"advanced_stat_selection":advanced_rank,"coverage_stat_selection":coverage_rank,"interaction_features":interaction_cols,
                 "program_numeric_features":program_nums,
-                "principles":["prior-only sequential team power","strength of schedule","conference member strength","cross-conference residual strength","rest/home/maturity","structured matchup statistics","standalone matchup specialist","existing-feed coverage completion","season/recent3/recent5 when available","opponent-adjusted where source-supported","team-v-opponent and matchup differentials","recent-vs-season trends","regularized program/conference hierarchy","discovery-only blend selection","conditional specialist attribution","nearby-threshold diagnostics without retuning"],
+                "principles":["prior-only sequential team power","strength of schedule","conference member strength","cross-conference residual strength","rest/home/maturity","structured matchup statistics","standalone matchup specialist","existing-feed coverage completion","season/recent3/recent5 when available","opponent-adjusted where source-supported","team-v-opponent and matchup differentials","recent-vs-season trends","regularized program/conference hierarchy","discovery-only blend selection","conditional specialist attribution","expert/model atom bridge into Miner","nearby-threshold diagnostics without retuning"],
             },
             "advanced_data_readiness":advanced_readiness,
             "existing_feed_coverage_registry":coverage_registry,
             "coverage_incremental_attribution":coverage_incremental,
             "coverage_feature_ablation":coverage_ablation,
             "conditional_specialist_attribution":attribution,
+            "miner_intelligence_bridge":miner_intelligence_bridge,
             "discovery_recipes":[{"recipe":t["recipe"],"discovery_metrics":t["discovery_metrics"]} for t in tuned],
             "incumbent_specialist_blend_grid":blend_grid,
             "challengers":[clean(c) for c in ranked],

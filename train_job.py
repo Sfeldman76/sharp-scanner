@@ -826,17 +826,17 @@ def main():
         f"path={_npv1_path} sha={_npv1_sha[:16]} promotion_requested={_ncaaf_prod_promote}"
     )
     _nrv22_tag = getattr(_nrv22, "NCAAF_RESEARCH_V2_SOURCE_TAG", None)
-    if _nrv22_tag != "ncaaf-research-v2.4-evidence-decomposition-self-audit-20261006":
+    if _nrv22_tag != "ncaaf-research-v2.5-expert-model-atom-bridge-20261006":
         raise RuntimeError(
-            f"[NCAAF-RV24-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv22_tag!r} "
+            f"[NCAAF-RV25-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv22_tag!r} "
             f"path={str(_nrv22_path)!r} sha={_nrv22_sha[:16]}"
         )
     log_func(
-        f"[NCAAF-RV24-DEPLOY-PREFLIGHT] PASS source_tag={_nrv22_tag} "
+        f"[NCAAF-RV25-DEPLOY-PREFLIGHT] PASS source_tag={_nrv22_tag} "
         f"path={_nrv22_path} sha={_nrv22_sha[:16]} production_authority=0"
     )
     _nccv2_tag = getattr(_nccv2, "SOURCE_TAG", None)
-    if _nccv2_tag != "ncaaf-core-challenger-v2.3-coverage-decomposition-consistent-watch-20261006":
+    if _nccv2_tag != "ncaaf-core-challenger-v2.4-expert-model-atom-bridge-20261006":
         raise RuntimeError(
             f"[NCAAF-CORE-CHALLENGER-V2-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nccv2_tag!r} "
             f"path={str(_nccv2_path)!r} sha={_nccv2_sha[:16]}"
@@ -919,7 +919,17 @@ def main():
                 raise RuntimeError("[NCAAF-HEAVY-CACHE] miner_games cache missing")
             log_func(f"[NCAAF-HEAVY-CACHE] status=PASS games={len(_games)} miner_games={len(_miner_games)} candidate_features={len(_features)}")
 
-            pw.emit("systems","NCAAF Heavy Research: run protected STAT + Miner lineage/published-system self-audit",pct=0.40)
+            # V2.9 ordering is intentional: CORE challenger first publishes leakage-safe
+            # season-forward incumbent/specialist state into the research-only Miner frame.
+            # The same existing Miner then tests those states together with Pathi/Big Al.
+            pw.emit("core","NCAAF Heavy Research: build existing-feed coverage + OOF CORE/specialist Miner bridge",pct=0.40)
+            _core=_nccv2.run_ncaaf_core_challenger_v2(
+                dashboard_module=_sld,bucket_name=bucket,storage_client=gcs,log_func=log_func,hard_fail=True
+            )
+            if not isinstance(_core,dict) or _core.get("status")!="NCAAF_CORE_CHALLENGER_V2_COMPLETE":
+                raise RuntimeError(f"[NCAAF-HEAVY-RUN] core challenger failed status={getattr(_core,'get',lambda *_:None)('status')}")
+
+            pw.emit("systems","NCAAF Heavy Research: run same Miner with Pathi + Big Al + OOF CORE/specialist atoms",pct=0.72)
             _research=_nrv22.run_ncaaf_research_v2(
                 dashboard_module=_sld,utils_module=_utils,bucket_name=bucket,
                 storage_client=gcs,log_func=log_func,hard_fail=True
@@ -928,13 +938,6 @@ def main():
                 raise RuntimeError(f"[NCAAF-HEAVY-RUN] research report failed status={getattr(_research,'get',lambda *_:None)('status')}")
             _miners=_research.get("system_miner_v3") or {}
             _confirmed=sum(int((v or {}).get("confirmed_mechanism_count",0) or 0) for v in _miners.values())
-
-            pw.emit("core","NCAAF Heavy Research: run existing-feed coverage + specialist conditional attribution",pct=0.72)
-            _core=_nccv2.run_ncaaf_core_challenger_v2(
-                dashboard_module=_sld,bucket_name=bucket,storage_client=gcs,log_func=log_func,hard_fail=True
-            )
-            if not isinstance(_core,dict) or _core.get("status")!="NCAAF_CORE_CHALLENGER_V2_COMPLETE":
-                raise RuntimeError(f"[NCAAF-HEAVY-RUN] core challenger failed status={getattr(_core,'get',lambda *_:None)('status')}")
             _best=_core.get("best_challenger") or {}
             _attr=_core.get("conditional_specialist_attribution") or {}
             _attr_q=len(_attr.get("qualified_shadow_regimes") or []) if isinstance(_attr,dict) else 0

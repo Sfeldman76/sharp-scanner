@@ -48476,7 +48476,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
                 st.info('No NCAAF CORE Challenger artifact is published yet. Run NCAAF Research — Heavy Challenger Search from Model maintenance.')
             else:
                 _best=_cc.get('best_challenger') or {}
-                st.markdown('**CORE CHALLENGER V2.2 — existing-feed coverage + conditional specialist attribution**')
+                st.markdown('**CORE CHALLENGER V2.4 — coverage + conditional attribution + Miner state bridge**')
                 st.caption('2022 is initial fit; 2023 selects specialist recipes and conditional regimes; 2024 and 2025 are protected confirmation. 2026 is sealed. Team power, strength of schedule, conference strength, rest/home context, structured matchup statistics, trends, program/conference effects and conditional attribution are research-only and cannot change Production V1 or Bet Authority.')
                 _bc1,_bc2,_bc3=st.columns(3)
                 _bc1.metric('Recommendation',str(_cc.get('recommendation') or '—'))
@@ -48591,15 +48591,27 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
 
     # One research surface only. Legacy Miner V2/system-library tables are retired
     # from the operator UI; V2.1 is the current research registry.
-    if st.button('Research V2.4 — Miner Lineage + Published Systems ▾',key='ncaaf-rv21-load-report'):
+    if st.button('Research V2.5 — Expert/Model Atom Bridge + Miner ▾',key='ncaaf-rv21-load-report'):
         st.session_state['ncaaf_rv21_report_loaded']=True
     if st.session_state.get('ncaaf_rv21_report_loaded',False):
         try:
             _r2=_ncaaf_research_v2_report_cached()
             if not isinstance(_r2,dict):
-                st.info('No NCAAF Research V2.4 artifact is published yet. Run NCAAF Research — Heavy Challenger Search from Model maintenance.')
+                st.info('No NCAAF Research V2.5 artifact is published yet. Run NCAAF Research — Heavy Challenger Search from Model maintenance.')
             else:
-                st.caption('Research qualification is frozen through 2023 discovery with BOTH 2024 and 2025 confirmation; 2026+ remains sealed from selection. V2.4 adds self-audited parent/child incremental attribution and direct W/L grading for directional Pathi/Big Al NCAAF systems. Only STRONG_VALIDATED Miner families (confirmation N ≥ 60 and hit rate ≥ 56%) may supply bounded live support/conflict to Bet Authority; these diagnostics cannot alter CORE probability or create a wager.')
+                st.caption('Research qualification is frozen through 2023 discovery with BOTH 2024 and 2025 confirmation; 2026+ remains sealed from selection. V2.5 feeds deterministic Pathi/Big Al hypotheses plus leakage-safe season-forward incumbent CORE/specialist states into the SAME Miner. CORE/specialist bridge atoms are research-only in this version; only live-evaluable STRONG_VALIDATED Miner families may supply bounded support/conflict to Bet Authority. Nothing here alters CORE probability or creates a wager.')
+
+                _ib=_r2.get('intelligence_bridge') or {}
+                _br=[]
+                for _mk,_mr in (_r2.get('system_miner_v3') or {}).items():
+                    _fc=(_mr or {}).get('atom_family_counts') or {}
+                    _br.append({'Market':str(_mk).upper(),'Total atoms':(_mr or {}).get('atoms',0),'Bridge atoms':(_mr or {}).get('expert_model_bridge_atoms',0),
+                                'Pathi atoms':_fc.get('EXPERT_PATHI',0),'Big Al atoms':_fc.get('EXPERT_BIGAL',0),'CORE-state atoms':_fc.get('RESEARCH_CORE_STATE',0),
+                                'Specialist-state atoms':sum(v for k,v in _fc.items() if str(k).startswith('RESEARCH_SPECIALIST_'))})
+                if _br:
+                    st.markdown('**Expert / Model Atom Bridge — same Miner, new hypotheses**')
+                    st.dataframe(pd.DataFrame(_br),use_container_width=True,hide_index=True)
+                    st.caption(f"Bridge status: {_ib.get('status','—')}; historical OOF CORE rows: {_ib.get('historical_rows','—')}. Pathi/Big Al atoms remain deterministic pregame rules. OOF CORE/specialist atoms are research-only until a like-for-like live state bridge is proven, so they cannot earn Bet Authority in this version.")
 
                 _pub=(_r2.get('published_system_results') or {}).get('systems') or []
                 _pub_rows=[]

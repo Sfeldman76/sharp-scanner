@@ -1,30 +1,80 @@
 {
-  "authority_contract": {
+  "core_self_test": {
+    "audit": {
+      "conference_k": 0.08,
+      "coverage": {
+        "Expert_AbsOpenMargin": 1.0,
+        "Expert_ConferenceMemberPowerDiff": 1.0,
+        "Expert_ConferenceVsMarket": 1.0,
+        "Expert_CrossConferenceRatingDiff": 1.0,
+        "Expert_EarlyGame": 1.0,
+        "Expert_FavoriteRole": 1.0,
+        "Expert_HomeRole": 1.0,
+        "Expert_MinGamesPrior": 1.0,
+        "Expert_OpenMargin": 1.0,
+        "Expert_OppGamesPrior": 1.0,
+        "Expert_OppPower": 1.0,
+        "Expert_OppSOS": 0.0,
+        "Expert_OppVsConference": 1.0,
+        "Expert_PowerDiff": 1.0,
+        "Expert_PowerUncertainty": 1.0,
+        "Expert_PowerVsMarket": 1.0,
+        "Expert_RestDiffDays": 0.0,
+        "Expert_SOSDiff": 0.0,
+        "Expert_SameConference": 1.0,
+        "Expert_TeamGamesPrior": 1.0,
+        "Expert_TeamPower": 1.0,
+        "Expert_TeamSOS": 0.5,
+        "Expert_TeamVsConference": 1.0
+      },
+      "feature_count": 23,
+      "offseason_shrink": 0.68,
+      "power_k": 0.16
+    },
     "automatic_promotion": false,
-    "miner_live_min_confirmation_n": 60,
-    "miner_live_min_confirmation_rate": 0.56,
-    "production_v1_frozen": true,
-    "research_production_authority": 0,
-    "year_2026_used_for_selection": false
+    "expert_feature_count": 23,
+    "production_authority": 0,
+    "regime_spec_count": 11,
+    "source_tag": "ncaaf-core-challenger-v2.4-expert-model-atom-bridge-20261006",
+    "status": "PASS",
+    "year_2026_queried": false
   },
-  "date": "2026-10-06",
-  "note": "Local tests validate syntax, module self-tests and targeted new-feature behavior. The cloud Heavy Research job itself must be run after deployment to generate results against BigQuery/GCS history.",
-  "package": "NCAAF_ENGINE_V2_7_EXISTING_FEED_COVERAGE_COMPLETION",
-  "source_tags": {
-    "core_challenger": "ncaaf-core-challenger-v2.3-coverage-decomposition-consistent-watch-20261006",
-    "research": "ncaaf-research-v2.4-evidence-decomposition-self-audit-20261006"
+  "expert_model_atom_bridge_smoke": {
+    "bigal_atom": true,
+    "core_atom": true,
+    "core_bridge_live_authority_blocked": true,
+    "pathi_atom": true,
+    "pathi_live_authority_can_clear_existing_gate": true,
+    "specialist_atom": true
   },
-  "status": "PASS",
-  "tests": {
-    "coverage_derivation_smoke": "PASS",
-    "miner_parent_child_lineage_smoke": "PASS",
-    "ncaaf_core_challenger_v2_self_test": "PASS",
-    "ncaaf_research_v2_self_test": "PASS",
-    "production_ledger_sha_matches_v2_6": "PASS",
-    "production_v1_sha_matches_v2_6": "PASS",
-    "published_system_wl_smoke": "PASS",
-    "python_compile_all": "PASS",
-    "utils_sha_matches_v2_6": "PASS"
+  "production_files_unchanged_from_v2_8": {
+    "ncaaf_production_ledger_v1.py": true,
+    "ncaaf_production_v1.py": true,
+    "utils.py": true
   },
-  "v2_8_evidence_self_audit": "PASS"
+  "research_self_test": {
+    "american_unit_profit_test": [
+      2.0,
+      0.5
+    ],
+    "confirmation_gate": "BOTH_2024_AND_2025",
+    "families": [
+      "MARKET_MICROSTRUCTURE",
+      "RUN_PASS_MATCHUP"
+    ],
+    "h2h_price_gate": "OBSERVED_TEAM_AND_OPPONENT_ML_ONLY",
+    "live_authority_policy": "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005",
+    "live_min_confirmation_n": 60,
+    "live_min_confirmation_rate": 0.56,
+    "qvalues": [
+      0.03,
+      0.06,
+      0.20000000000000004
+    ],
+    "source_tag": "ncaaf-research-v2.5-expert-model-atom-bridge-20261006",
+    "status": "PASS",
+    "strong_confirmed_authority": true,
+    "weak_confirmed_authority": false
+  },
+  "status": "PASS"
 }

@@ -1,4 +1,4 @@
-"""NCAAF Research V2.4 — evidence decomposition, Miner lineage, published-system attribution, and self-auditing logs.
+"""NCAAF Research V2.5 — expert/model atom bridge + evidence decomposition + self-auditing logs.
 
 Research-only architecture built around the frozen NCAAF Production V1 benchmark.
 Nothing in this module can grant or mutate production authority.
@@ -32,8 +32,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.4-evidence-decomposition-self-audit-20261006"
-NCAAF_RESEARCH_V2_VERSION = "2.4.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.5-expert-model-atom-bridge-20261006"
+NCAAF_RESEARCH_V2_VERSION = "2.5.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -299,7 +299,7 @@ def run_sparse_stat_research(games: pd.DataFrame, seasons: np.ndarray, oof_margi
 # ---------------------------------------------------------------------------
 # System Miner V3 — fixed discovery / untouched confirmation / dependence collapse
 # ---------------------------------------------------------------------------
-def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=False) -> list[dict[str,Any]]:
+def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=False, market: str | None=None) -> list[dict[str,Any]]:
     """Leak-safe NCAAF System Miner atom catalog.
 
     Historical mode applies support floors so sparse identities cannot flood the
@@ -510,6 +510,76 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
         c=f"Crossed_Key_{key}_Last60m"; add(f"KEY_{key}_CROSSED_60M","KEY_NUMBER",nfirst(c).eq(1),source_ok=has(c),min_n=20)
     for c,name in (("Key_Cross_Confirmed_By_Sharp_Books","KEY_CROSS_SHARP_CONFIRMED"),("Key_Cross_Reversed","KEY_CROSS_REVERSED"),("Key_Cross_Persistence","KEY_CROSS_PERSISTENT")):
         add(name,"KEY_NUMBER",nfirst(c).ge(1),source_ok=has(c),min_n=20)
+
+    # V2.5 Expert/Model Atom Bridge. These are hypotheses for the existing Miner,
+    # not a new model. Pathi/Big Al flags are deterministic pregame rules. CORE
+    # and specialist states are season-forward OOF fields published by the protected
+    # CORE challenger and are research-only until a like-for-like live bridge exists.
+    _mkt=str(market or "").lower().strip()
+    if _mkt in {"", "spreads"}:
+        pathi_cols=[
+            "Pathi_FB_Dog_Hook_Above_3","Pathi_FB_Dog_Hook_Above_7","Pathi_FB_Dog_Hook_Above_10",
+            "Pathi_FB_Dog_10_Plus","Pathi_FB_Dog_0_to_3","Pathi_FB_Dog_3_to_3_5","Pathi_FB_Dog_3_5_to_6_5",
+            "Pathi_FB_Dog_On_7","Pathi_FB_Dog_Above_7","Pathi_FB_Dog_Below_Key_3","Pathi_FB_Dog_Below_Key_7",
+            "Pathi_FB_Favorite_Below_Key_3","Pathi_FB_Favorite_Below_Key_7","Pathi_FB_Favorite_Below_Key_10",
+            "Pathi_FB_Favorite_Laying_Hook_3","Pathi_FB_Favorite_Laying_Hook_7",
+            "Pathi_FB_Dog_TotalSpread_Gap_LE10","Pathi_FB_Dog_Moved_Below_Key_3","Pathi_FB_Dog_Moved_Above_Key_3",
+            "Pathi_FB_Dog_Moved_Below_Key_7","Pathi_FB_Dog_Moved_Above_Key_7","Pathi_FB_Dog_Moved_Below_Key_10",
+            "Pathi_FB_Dog_Moved_Above_Key_10","Pathi_FB_Crossed_Key_Toward_Team","Pathi_FB_Crossed_Key_Away_From_Team",
+            "Pathi_FB_Usually_Dog_Now_Favorite","Pathi_FB_Usually_Favorite_Now_Dog",
+        ]
+        # Feed base Big Al hypotheses, not hand-tightened children. The Miner can
+        # add ROAD/conference/spread/timing atoms itself and lineage can then judge
+        # whether the child genuinely improves the published parent.
+        bigal_cols=[
+            "BigAl_CF1_Week2Home42Win","BigAl_CF2_LateSeasonRevengeDog",
+            "BigAl_CF3_Fade19PlusFavoriteUpsetLoss",
+        ]
+        p_masks=[]; b_masks=[]
+        for c in pathi_cols:
+            if has(c):
+                mm=nfirst(c).eq(1); p_masks.append(mm)
+                add("EXPERT_"+re.sub(r"[^A-Z0-9]+","_",c.upper())[:58],"EXPERT_PATHI",mm,desc=f"Pathi atom: {c}",min_n=20,source_ok=True)
+        for c in bigal_cols:
+            if has(c):
+                mm=nfirst(c).eq(1); b_masks.append(mm)
+                add("EXPERT_"+re.sub(r"[^A-Z0-9]+","_",c.upper())[:58],"EXPERT_BIGAL",mm,desc=f"Big Al atom: {c}",min_n=10,source_ok=True)
+        if p_masks:
+            psum=sum(x.astype(int) for x in p_masks)
+            add("EXPERT_PATHI_ANY","EXPERT_PATHI",psum.ge(1),desc="Any directional Pathi atom",min_n=20,source_ok=True)
+            add("EXPERT_PATHI_MULTI_2PLUS","EXPERT_PATHI",psum.ge(2),desc="Two or more directional Pathi atoms",min_n=20,source_ok=True)
+        if b_masks:
+            bsum=sum(x.astype(int) for x in b_masks)
+            add("EXPERT_BIGAL_ANY","EXPERT_BIGAL",bsum.ge(1),desc="Any Big Al NCAAF atom",min_n=10,source_ok=True)
+
+        # Market-journey context is distinct from a directional Pathi recommendation.
+        for c,nm in (("Pathi_FB_Moved_Through_Key","KEY_JOURNEY_THROUGH"),("Pathi_FB_Moved_Onto_Key","KEY_JOURNEY_ONTO"),("Pathi_FB_Moved_Off_Key","KEY_JOURNEY_OFF")):
+            add(nm,"MARKET_KEY_JOURNEY",nfirst(c).eq(1),source_ok=has(c),min_n=20)
+        kval=nfirst("Pathi_FB_Key_Value_Change")
+        add("KEY_VALUE_IMPROVED","MARKET_KEY_VALUE",kval.gt(0),source_ok=has("Pathi_FB_Key_Value_Change"),min_n=20)
+        add("KEY_VALUE_WORSENED","MARKET_KEY_VALUE",kval.lt(0),source_ok=has("Pathi_FB_Key_Value_Change"),min_n=20)
+
+        core=nfirst("_V29_CORE_INCUMBENT_EDGE_POINTS")
+        if has("_V29_CORE_INCUMBENT_EDGE_POINTS"):
+            add("CORE_OOF_EDGE_TEAM_2PLUS","RESEARCH_CORE_STATE",core.ge(2),desc="Incumbent CORE OOF edge >= +2",min_n=30)
+            add("CORE_OOF_EDGE_TEAM_4PLUS","RESEARCH_CORE_STATE",core.ge(4),desc="Incumbent CORE OOF edge >= +4",min_n=30)
+            add("CORE_OOF_EDGE_OPP_2PLUS","RESEARCH_CORE_STATE",core.le(-2),desc="Incumbent CORE OOF edge <= -2",min_n=30)
+            add("CORE_OOF_EDGE_ABS_4PLUS","RESEARCH_CORE_STATE",core.abs().ge(4),desc="Incumbent CORE OOF absolute edge >= 4",min_n=30)
+
+        spec_edge_cols=[c for c in g.columns if str(c).startswith("_V29_SPEC_") and str(c).endswith("_EDGE_POINTS")]
+        for c in sorted(spec_edge_cols):
+            slug=str(c)[len("_V29_SPEC_"):-len("_EDGE_POINTS")]
+            se=nfirst(c); divc=f"_V29_SPEC_{slug}_DIVERGENCE_FROM_CORE"; cutc=f"_V29_SPEC_{slug}_DIVERGENCE_CUT"
+            fam="RESEARCH_SPECIALIST_"+slug[:28]
+            add(f"SPEC_{slug}_EDGE_TEAM_2PLUS",fam,se.ge(2),desc=f"{slug} specialist OOF edge >= +2",min_n=30)
+            add(f"SPEC_{slug}_EDGE_OPP_2PLUS",fam,se.le(-2),desc=f"{slug} specialist OOF edge <= -2",min_n=30)
+            if has("_V29_CORE_INCUMBENT_EDGE_POINTS"):
+                good=core.notna()&se.notna()
+                add(f"SPEC_{slug}_CORE_STRONG_AGREE",fam,good&(core.abs().ge(2))&(se.abs().ge(2))&(np.sign(core)==np.sign(se)),desc=f"{slug} and CORE strong agreement",min_n=30)
+                add(f"SPEC_{slug}_CORE_STRONG_CONFLICT",fam,good&(core.abs().ge(2))&(se.abs().ge(2))&(np.sign(core)!=np.sign(se)),desc=f"{slug} and CORE strong conflict",min_n=30)
+            if has(divc,cutc):
+                dv=nfirst(divc); dc=nfirst(cutc)
+                add(f"SPEC_{slug}_CORE_DIVERGENCE",fam,dv.ge(dc)&dc.notna(),desc=f"{slug} discovery-frozen divergence from CORE",min_n=30)
 
     # Conference identity / pairs, rivalry and team-specific memory.
     conf=tfirst("Conference","Team_Conference","Conference_Norm","Context_Conference")
@@ -942,9 +1012,13 @@ def _grade_published_ncaaf_systems(g: pd.DataFrame, seasons: np.ndarray) -> dict
 
 def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, dashboard_module=None,
                         log_func=print, max_depth: int=4) -> dict[str,Any]:
-    market=str(market).lower(); y,valid,baseline=_market_target(games,market); atoms=_extended_atoms(games,dashboard_module)
-    out={"version":"NCAAF-RV2.3-SYSTEM-MINER-V4-LINEAGE","market":market,"production_authority":0,"discovery_max_season":DISCOVERY_MAX_SEASON,
-         "confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,"atoms":len(atoms),"systems":[],"mechanism_families":[]}
+    market=str(market).lower(); y,valid,baseline=_market_target(games,market); atoms=_extended_atoms(games,dashboard_module,market=market)
+    _fam_counts={}
+    for _a in atoms: _fam_counts[_a.get("family")]=int(_fam_counts.get(_a.get("family"),0))+1
+    _bridge_atoms=sum(v for k,v in _fam_counts.items() if str(k).startswith(("EXPERT_","RESEARCH_CORE_STATE","RESEARCH_SPECIALIST_","MARKET_KEY_")))
+    out={"version":"NCAAF-RV2.5-SYSTEM-MINER-V5-EXPERT-MODEL-BRIDGE","market":market,"production_authority":0,"discovery_max_season":DISCOVERY_MAX_SEASON,
+         "confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,"atoms":len(atoms),"atom_family_counts":_fam_counts,"expert_model_bridge_atoms":int(_bridge_atoms),"systems":[],"mechanism_families":[]}
+    log_func(f"[NCAAF-RV25-ATOM-BRIDGE] market={market} atoms={len(atoms)} bridge_atoms={_bridge_atoms} pathi={_fam_counts.get('EXPERT_PATHI',0)} bigal={_fam_counts.get('EXPERT_BIGAL',0)} core={_fam_counts.get('RESEARCH_CORE_STATE',0)} specialist={sum(v for k,v in _fam_counts.items() if str(k).startswith('RESEARCH_SPECIALIST_'))} authority=0")
     if valid.sum()<500: out["status"]="INSUFFICIENT_HISTORY"; return out
     tested=[]; beam=[]; seen=set()
     def ev(mask,names,fams,idx):
@@ -1103,13 +1177,18 @@ def _log_v24_evidence_audit(*, miners: dict[str,Any], system_results: dict[str,A
 
 def _prospective_shadow(full_games: pd.DataFrame, full_seasons: np.ndarray, miners: dict[str,Any], dashboard_module=None, log_func=print) -> dict[str,Any]:
     if full_games is None or full_games.empty or len(full_games)!=len(full_seasons): return {"status":"UNAVAILABLE","production_authority":0}
-    atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(full_games,dashboard_module,for_live=False)}
     out={"status":"PASS","season_min":PROSPECTIVE_MIN_SEASON,"mechanisms":[],"production_authority":0,"selection_influence":0}
     for market,mr in (miners or {}).items():
+        atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(full_games,dashboard_module,for_live=False,market=market)}
         y,valid,baseline=_market_target(full_games,market)
         for mech in (mr or {}).get("mechanism_families",[]):
             if not mech.get("confirmation_pass"): continue
             cond=mech.get("representative_conditions") or []; mask=np.ones(len(full_games),dtype=bool)
+            _research_bridge=any(str(c).startswith("CORE_OOF_") or str(c).startswith("SPEC_") for c in cond)
+            if _research_bridge:
+                out["mechanisms"].append({"market":market,"mechanism_id":mech.get("mechanism_id"),"rule":" AND ".join(cond),"trigger_n":None,"settled_n":None,
+                                          "prospective_evaluable":False,"reason":"OOF_CORE_SPECIALIST_LIVE_BRIDGE_NOT_WIRED","production_authority":0})
+                continue
             for c in cond:
                 if c not in atoms: mask[:]=False; break
                 mask &= atoms[c]
@@ -1175,9 +1254,9 @@ def _build_system_results(games: pd.DataFrame, seasons: np.ndarray, miners: dict
     and no confirmed mechanism points the opposite direction.
     """
     if games is None or games.empty: return {"status":"UNAVAILABLE"}
-    atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(games,dashboard_module,for_live=False)}
     out={"status":"PASS","confirmation_seasons":list(CONFIRMATION_SEASONS),"markets":{}}
     for market,mr in (miners or {}).items():
+        atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(games,dashboard_module,for_live=False,market=market)}
         y,valid,baseline=_market_target(games,market)
         scope=valid&np.isfinite(seasons)&np.isin(seasons,np.asarray(CONFIRMATION_SEASONS,dtype=float))
         mechs=[]
@@ -1236,6 +1315,8 @@ def _miner_live_authority_eligible(mech: dict[str,Any] | None) -> bool:
     the V2.2 report already published before this runtime patch remains usable.
     """
     m=mech or {}
+    _conds=[str(x) for x in (m.get("representative_conditions") or m.get("conditions") or [])]
+    if any(x.startswith("CORE_OOF_") or x.startswith("SPEC_") for x in _conds): return False
     if not bool(m.get("confirmation_pass")): return False
     try: n=int(m.get("confirmation_n",0) or 0)
     except Exception: n=0
@@ -1273,11 +1354,11 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
         pick["_rv22_game_id_key"]=gid; ctx.append(pick); keys.append(gid)
     if not ctx: return out
     cdf=pd.DataFrame(ctx).reset_index(drop=True)
-    atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(cdf,dashboard_module,for_live=True)}
     registry=report.get("system_miner_v3") or {}
     authority_votes_by_game={k:[] for k in keys}; research_votes_by_game={k:[] for k in keys}
     confirmed_research=0; authority_qualified=0; authority_evaluable=0; research_evaluable=0
     for market,mr in registry.items():
+        atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(cdf,dashboard_module,for_live=True,market=market)}
         for mech in (mr or {}).get("mechanism_families",[]):
             if not mech.get("confirmation_pass"): continue
             confirmed_research+=1
@@ -1364,13 +1445,14 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
                                 threshold_neighborhood=miner_threshold_neighborhood,log_func=log_func)
         prospective=_prospective_shadow(miner_games.reset_index(drop=True),seasons,miners,dashboard_module=dashboard_module,log_func=log_func)
         market_audit=_market_rich_audit(g,utils_module)
+        intelligence_bridge=(getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}).get("miner_intelligence_bridge") or {"status":"NOT_AVAILABLE","production_authority":0,"selection_influence":0}
         report={"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG,"version":NCAAF_RESEARCH_V2_VERSION,"created_utc":_now(),
                 "status":"NCAAF_RESEARCH_V2_COMPLETE","production_authority":0,"production_contract_mutated":False,
                 "benchmark":"FROZEN_NCAAF_PRODUCTION_V1","discovery_max_season":DISCOVERY_MAX_SEASON,"confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"system_miner_v3":miners,
-                "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,
+                "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,
                 "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False},
-                "next_step":"KEEP PRODUCTION V1 FROZEN; USE SELF-AUDITED LINEAGE/PUBLISHED-SYSTEM W-L/ATTRIBUTION FOR RESEARCH; ONLY STRONG_VALIDATED MINER FAMILIES MAY CAST LIVE BET-AUTHORITY VOTES"}
+                "next_step":"KEEP PRODUCTION V1 FROZEN; LET THE EXISTING MINER TEST PATHI + BIG AL + OOF CORE/SPECIALIST STATE INTERACTIONS; CORE/SPECIALIST BRIDGE ATOMS REMAIN RESEARCH-ONLY UNTIL A LIKE-FOR-LIKE LIVE BRIDGE EXISTS"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
         bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
         if storage_client is None:
@@ -1383,7 +1465,8 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
         bio=io.BytesIO(); pickle.dump(bundle,bio,protocol=pickle.HIGHEST_PROTOCOL); bio.seek(0); pdata=bio.read(); b.blob(BUNDLE_CURRENT_BLOB).upload_from_string(pdata,content_type="application/octet-stream")
         report["artifact"]={"current_report":f"gs://{bucket_name}/{REPORT_CURRENT_BLOB}","current_bundle":f"gs://{bucket_name}/{BUNDLE_CURRENT_BLOB}","history_report":f"gs://{bucket_name}/{hist}","sha256":sha}
         _strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if _miner_live_authority_eligible(_m))
-        log_func(f"[NCAAF-RV23-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} miner_live_authority={_strong} prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
+        _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_")) for c in (_m.get("representative_conditions") or [])))
+        log_func(f"[NCAAF-RV25-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
         return report
     except Exception as exc:
         log_func(f"[NCAAF-RV2-FAIL] {type(exc).__name__}: {exc}")
@@ -1409,13 +1492,18 @@ def match_live_systems(rows: pd.DataFrame, report: dict[str,Any], dashboard_modu
     return attach_live_miner_votes(rows,report,dashboard_module=dashboard_module)
 
 def self_test() -> dict[str,Any]:
-    live_atoms={a["name"] for a in _extended_atoms(pd.DataFrame({"Consensus_Open_Spread":[3.5],"Prev_SU_Margin":[-7.0],"Prev2_SU_Margin":[10.0],"Prev3_SU_Margin":[-3.0],"Prev_ATS_Margin":[8.0],"Prev2_ATS_Margin":[-2.0],"Prev3_ATS_Margin":[5.0]}),for_live=True)}
+    _tf=pd.DataFrame({"Consensus_Open_Spread":[3.5],"Prev_SU_Margin":[-7.0],"Prev2_SU_Margin":[10.0],"Prev3_SU_Margin":[-3.0],"Prev_ATS_Margin":[8.0],"Prev2_ATS_Margin":[-2.0],"Prev3_ATS_Margin":[5.0],
+                      "Pathi_FB_Dog_Hook_Above_3":[1],"BigAl_CF2_LateSeasonRevengeDog":[1],"_V29_CORE_INCUMBENT_EDGE_POINTS":[3.0],
+                      "_V29_SPEC_STRUCTURED_STATS_EDGE_POINTS":[2.5],"_V29_SPEC_STRUCTURED_STATS_DIVERGENCE_FROM_CORE":[1.5],"_V29_SPEC_STRUCTURED_STATS_DIVERGENCE_CUT":[1.0]})
+    live_atoms={a["name"] for a in _extended_atoms(_tf,for_live=True,market="spreads")}
     q=_bh_qvalues([.01,.04,.20]); fam=_classify_feature_families(["Rush_EPA","Opp_Rush_EPA","Line_Move_60m","Sharp_Soft_Divergence","Actual_Margin"])
     odds=np.asarray([200.0,-200.0]); won=np.asarray([1.0,1.0]); ret=_american_unit_return(odds,won)
     ok=bool(
         len(q)==3 and "RUN_PASS_MATCHUP" in fam and "MARKET_MICROSTRUCTURE" in fam and
         all("Actual_Margin" not in x for v in fam.values() for x in v) and
         "SU_SEQ3_LWL" in live_atoms and "OFF_ATS_COVER_7_PLUS" in live_atoms and
+        "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
+        "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and
         np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False)
     )
     return {

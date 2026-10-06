@@ -1,130 +1,106 @@
-# NCAAF Engine V2.8 — Evidence Decomposition + Self-Auditing Research
+# NCAAF Engine V2.9 — Expert / Model Atom Bridge
 
-This release extends the protected NCAAF research path while leaving **Production V1 frozen**. It does not create another global model or another parallel market backend. The purpose is to finish representation of useful data that already exists, test where it adds independent value, and make system evidence easier to audit.
+This release extends the protected NCAAF research path while leaving **Production V1 frozen**. It does not create a new Miner, new global model, or new market backend. It connects intelligence that previously ran largely in parallel and lets the **existing Miner** test whether those sources add incremental value together.
 
-## What changed
+## Main change
 
-### 0. V2.8 run-driven refinements
+The existing Miner can now research combinations involving:
 
-The first V2.7 Heavy run confirmed that the new FEED_COVERAGE bundle should **not** replace or enlarge the incumbent globally. V2.8 therefore does not add another model. It makes the research evidence easier to decompose and audit:
+- deterministic Pathi football systems;
+- base Big Al NCAAF systems;
+- the existing conference / rivalry / H2H / timing / team-memory / ATS / SU / spread / total / market-path atoms;
+- season-forward OOF incumbent CORE state from the protected CORE challenger;
+- season-forward OOF specialist state for discovery-selected specialists;
+- richer key-number journey context.
 
-- conditional regimes that improve RMSE in both 2024 and 2025 but miss the full bootstrap gate are retained as `CONSISTENT_RMSE_WATCH` research states with zero authority;
-- the Cloud Run log now prints coverage incremental tests and ablations instead of leaving them only in JSON/UI;
-- Miner parent/child lineage summaries and the strongest child-v-parent deltas are printed to the log;
-- published Pathi / Big Al discovery and 2024-25 confirmation W-L, shrinkage, Wilson lower bounds, and year splits are printed to the log;
-- the 50/55 through 70/57 Miner threshold neighborhood is printed to the log;
-- if no protected Recent-5 source exists, Heavy Research emits an explicit source-gap line and refuses to fabricate R5.
+Examples of questions the same Miner can now test are:
 
-These additions are diagnostic only. They have zero selection or production authority.
+- `PATHI dog hook above 3 + same conference + game 7+`;
+- `BIG AL CF2 + road`;
+- `PATHI rule + incumbent CORE support`;
+- `BIG AL rule + specialist/CORE divergence`;
+- `CORE strong edge + Pathi support + opponent off ATS loss`.
 
+All combinations still pass through the existing discovery, FDR, 2024/2025 confirmation, dependency collapse, parent/child lineage, shrinkage, and prospective framework.
 
-### 1. Existing-feed coverage completion (CORE Challenger V2.3)
+## 1. Pathi atoms
 
-Heavy Research now audits every compatible historical feed against a standard representation contract:
+Directional Pathi concepts already reconstructed in the historical frame are exposed to the Miner as one `EXPERT_PATHI` family. Because the Miner allows only one atom per family inside a rule, it cannot stack several correlated Pathi flags and count them as independent evidence. A separate `PATHI_MULTI_2PLUS` atom allows multiplicity itself to be tested without double-counting the individual flags.
 
-- season-to-date;
-- recent 3;
-- recent 5 when the protected source actually contains it;
-- opponent-adjusted where the source and football meaning support it;
-- team vs opponent;
-- offense-vs-opponent-defense matchup differential where semantically valid;
-- recent-vs-season trend.
+Market-key events that are context rather than directional recommendations remain context atoms rather than being assigned artificial W/L direction.
 
-The implementation is deliberately conservative. It may derive algebraic differences/trends only from already leakage-safe pregame inputs. It **does not manufacture Recent-5 history, opponent-adjusted history, or missing advanced data from postgame box scores**.
+## 2. Big Al atoms
 
-A coverage registry is published with COMPLETE_CORE / COMPLETE_R5 / PARTIAL status for each feed. The research UI shows the audit and the safely derived fields.
+The Miner receives the **base** Big Al NCAAF hypotheses:
 
-### 2. Feed-coverage specialist instead of feature dumping
+- CF1 Week 2 home off 42+ win;
+- CF2 late-season revenge dog;
+- CF3 fade 19+ favorite after upset loss.
 
-Coverage-completed fields enter the existing specialist/conditional-attribution framework. They are not automatically dumped into Production CORE.
+Hand-tightened children such as CF2 Away are **not** inserted as primitive Miner atoms. The Miner can instead test `CF2 + ROAD` itself. Existing parent/child lineage can then determine whether the added ROAD condition genuinely improves the parent out of sample.
 
-The FEED_COVERAGE specialist is discovery-selected and then evaluated through the same protected 2024/2025 confirmation framework as the other research specialists.
+The direct published-system W/L table still grades CF2 Away separately for source-system tracking.
 
-### 3. Incremental-value and ablation diagnostics
+## 3. OOF incumbent CORE state bridge
 
-For selected coverage features Heavy Research now publishes:
+The CORE challenger now publishes an incumbent CORE state into the Miner frame using only season-forward predictions:
 
-- one-feature-at-a-time incremental RMSE/MAE value vs the frozen incumbent;
-- separate 2023 discovery, 2024 confirmation, and 2025 confirmation results;
-- remove-one-feature ablation of the frozen FEED_COVERAGE recipe.
+- 2023 predicted from 2022;
+- 2024 predicted from seasons before 2024;
+- 2025 predicted from seasons before 2025;
+- no 2026 state is used for selection.
 
-These diagnostics have zero production authority.
+Miner atoms include strong positive/negative CORE edge and large absolute CORE edge. These atoms are explicitly labeled research CORE state.
 
-### 4. Conditional-attribution neighborhood diagnostics
+## 4. OOF specialist-state bridge
 
-Conditional specialist regimes retain the existing 2023 selection -> 2024/2025 confirmation contract, but now also publish nearby diagnostics:
+Specialists that survive the 2023 conditional-attribution discovery screen can also publish season-forward state into the Miner frame. For each bridged specialist the Miner may test:
 
-- 15%, 25%, and 35% specialist blend weights;
-- nearby 1 / 2 / 3 point edge floors;
-- whether all nearby blend weights retain positive RMSE value.
+- specialist edge toward the current team;
+- specialist edge toward the opponent;
+- strong CORE/specialist agreement;
+- strong CORE/specialist conflict;
+- specialist-vs-CORE divergence using a cutoff frozen from 2023 discovery.
 
-This is a robustness check only. It does not retune the selected regime after seeing confirmation data.
+This does **not** feed confirmation outcomes back into the feature definition.
 
-### 5. Miner parent/child lineage + incremental attribution (Research V2.4)
+## 5. Research-only authority guard
 
-Miner systems now explicitly identify nested rule lineage. For a child system that adds conditions to a broader parent, the report includes:
+Any Miner mechanism containing `CORE_OOF_*` or `SPEC_*` atoms is research-only in V2.9. Even if it confirms historically, it cannot become a live Bet Authority family yet because there is not yet a proven like-for-like live scorer for those OOF state fields.
 
-- parent system ID;
-- lineage depth;
-- added condition(s);
-- child discovery performance vs parent-only performance;
-- child 2024/2025 confirmation performance vs parent-only performance;
-- nested-total-variant flag.
+Pathi and Big Al atoms remain deterministic pregame rules and therefore remain live-evaluable under the existing Miner authority policy if they independently clear all existing qualification gates.
 
-This prevents a tighter version of the same mechanism from being mistaken for an independent discovery merely because it has a new system ID.
+## 6. Heavy Research execution order
 
-### 6. Published Pathi / Big Al NCAAF W-L table
+Heavy Research now intentionally runs:
 
-Research V2.4 directly grades directional NCAAF Pathi and Big Al flags that already exist in the historical frame. The dashboard now shows discovery and 2024-2025 confirmation W-L, hit rate, flat -110 ROI reference, and a shrunk hit-rate diagnostic.
+1. historical / OOF cache;
+2. CORE Challenger and OOF CORE/specialist bridge publication;
+3. the existing Miner with the expanded atom catalog.
 
-Included Pathi families cover the directional football spread bands/key-number systems already in the codebase, including dog below 3, dog on/above 7, dog 10+, hook bands, line moves across key numbers, and the total-spread-gap <= 10 condition. Big Al CF1/CF2/CF3 and the CF2 away tightener are included when historical fields are available.
+This ordering is required so the Miner sees leakage-safe CORE/specialist states during discovery and 2024/2025 confirmation.
 
-Only directional recommended-side flags are graded. Symmetric key events and ambiguous screens remain context and are not assigned artificial system W-L records.
+## 7. Existing research preserved
 
-### 7. Evidence tiers and shrinkage diagnostics
-
-The Miner report adds research-only evidence labels:
-
-- STRONG_VALIDATED — unchanged live-authority gate;
-- PROMISING_SHADOW;
-- VALIDATED_SHADOW;
-- WATCHLIST;
-- RESEARCH_SHADOW.
-
-The new labels do **not** weaken the existing live authority requirement. The frozen live gate remains both-year confirmation plus pooled confirmation N >= 60 and hit rate >= 56%.
-
-Direct system-result tables also publish Beta(15,15) shrunk hit rates and Wilson lower bounds so small samples are not read at face value.
-
-### 8. Miner authority threshold-neighborhood diagnostic
-
-The report shows how many confirmed mechanism families would clear neighboring combinations of:
-
-- confirmation N = 50 / 60 / 70;
-- hit-rate floor = 55% / 56% / 57%.
-
-The existing 60 / 56% gate remains frozen. This table is diagnostic only and cannot retune the threshold.
-
-### 9. Directional market-residual attribution
-
-Spread and totals mechanism attribution now records the magnitude by which the recommended side beat or missed the opening market number, separately for discovery and confirmation. This supplements W-L with directional market error rather than treating every cover by the same amount.
-
-## Existing research preserved
-
-This release keeps the useful V2.6/V2.2 machinery rather than rebuilding it under new names:
+V2.9 retains rather than replaces:
 
 - PLAY_ON vs FADE evaluation;
 - discovery FDR controls;
 - 2022-2023 discovery only;
 - both 2024 and 2025 confirmation;
 - dependency/mechanism collapse;
+- parent/child incremental lineage;
 - conference and conference-pair context;
 - rivalry/revenge/H2H context;
-- 1/2/3-game sequence and team-memory atoms;
-- role changes and timing/rest context;
-- market movement, sharp/soft divergence, key crossing and persistence inputs when historically available;
-- price-aware H2H ROI / market-residual / price-band validation;
-- 2026+ sealed prospective tracking;
-- no opposing automatic production side selection.
+- 1/2/3-game SU/ATS sequence and team-memory atoms;
+- role-change and timing/rest context;
+- market movement, sharp/soft divergence, key crossing and persistence where historical data exists;
+- price-aware H2H validation;
+- published Pathi / Big Al W/L attribution;
+- shrinkage / Wilson diagnostics;
+- Miner threshold-neighborhood diagnostics;
+- sealed 2026 prospective tracking;
+- no automatic production promotion.
 
 ## What intentionally did NOT change
 
@@ -136,12 +112,12 @@ This release keeps the useful V2.6/V2.2 machinery rather than rebuilding it unde
 - 2% CORE edge + 2% live EV candidate gates;
 - STRONG_VALIDATED Miner live-authority threshold;
 - Bet Authority architecture;
-- Utils / Move Master as the live market backend;
+- Utils / Move Master live market backend;
 - production ledger identity / physical-game dedupe;
 - 2026 outcomes remain excluded from research selection;
 - no automatic promotion.
 
-The following production/backend files remain unchanged from the V2.7 package:
+The following production/backend files are unchanged from V2.8:
 
 - `ncaaf_production_v1.py`
 - `ncaaf_production_ledger_v1.py`
@@ -149,33 +125,24 @@ The following production/backend files remain unchanged from the V2.7 package:
 
 ## Files to replace
 
-Replace these four files from V2.6:
+Replace these four files:
 
 1. `ncaaf_core_challenger_v2.py`
 2. `ncaaf_research_v2.py`
 3. `sharp_line_dashboard.py`
 4. `train_job.py`
 
-The ZIP also includes the synchronized unchanged production/backend files so it can be used as a full repository snapshot.
+The ZIP also contains the synchronized unchanged production/backend files as a full repository snapshot.
 
 ## After deployment
 
 Run **NCAAF Research — Heavy Challenger Search** once.
 
-That run will regenerate:
+In the log, look for:
 
-- the coverage registry;
-- coverage incremental/ablation results;
-- conditional attribution + neighborhood diagnostics;
-- Miner lineage diagnostics;
-- published Pathi / Big Al W-L tables;
-- Miner threshold-neighborhood diagnostics;
-- the normal V2 research artifacts.
+- `[NCAAF-CORE-V24-MINER-BRIDGE]` — OOF CORE/specialist state publication;
+- `[NCAAF-RV25-ATOM-BRIDGE]` — Pathi / Big Al / CORE / specialist atom counts by market;
+- normal Miner mechanism lines and lineage diagnostics;
+- `[NCAAF-RV25-CONTRACT]` — final research contract including bridge mechanism count.
 
-You do **not** need to run Production Publish, and this research release should not promote or mutate Production V1.
-
-Normal weekly operation remains:
-
-1. update 2026 YTD statistics;
-2. validate the uploader;
-3. run **NCAAF Production — Weekly Update**.
+Do **not** run Production Publish for this research patch.
