@@ -32,8 +32,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.8-pt-session-fallback-expert-atom-bridge-20261006"
-NCAAF_RESEARCH_V2_VERSION = "2.8.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.9-pt-name-safe-header-contract-20261006"
+NCAAF_RESEARCH_V2_VERSION = "2.9.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -58,12 +58,29 @@ PT_CURRENT_BLOB = "research/ncaaf/external/prediction_tracker/current.csv"  # me
 PT_CURRENT_ARCHIVE_BLOB = "research/ncaaf/external/prediction_tracker/current_archive.csv"
 PT_CURRENT_LIVE_BLOB = "research/ncaaf/external/prediction_tracker/current_live.csv"
 PT_CURRENT_META_BLOB = "research/ncaaf/external/prediction_tracker/current_meta.json"
+PT_HEADER_MANIFEST_BLOB = "research/ncaaf/external/prediction_tracker/header_manifest.json"
 PT_PUBLISHED_WEIGHTS = {
     "DOKTER": 0.242406,
     "PI_RATE_BIAS": 0.281205,
     "KEEPER": 0.135398,
     "ESPN_FPI": 0.163639,
     "PIGSKIN_INDEX": 0.114519,
+}
+# Exact system identity contract.  System columns are NEVER selected by
+# position and NEVER by substring/fuzzy matching.  Human-readable names come
+# from Prediction Tracker's HTML table.  The two cryptic CSV names below are
+# directly self-identifying and were observed in the tracker export; all other
+# cryptic names must be learned from a value-validated live HTML<->CSV manifest.
+PT_SYSTEM_HEADER_ALIASES = {
+    "DOKTER": ("Dokter", "Dokter Entropy", "linedokter"),
+    "PI_RATE_BIAS": ("Pi-Ratings Bias", "Pi Ratings Bias", "Pi-Rating Bias", "Pi Rate Bias"),
+    "KEEPER": ("Keeper", "Keeper Ratings"),
+    "ESPN_FPI": ("ESPN FPI", "FPI", "lineespn"),
+    "PIGSKIN_INDEX": ("Pigskin Index", "Pigskin"),
+}
+PT_IDENTITY_HEADER_ALIASES = {
+    "HOME": ("Home", "Home Team", "HomeTeam"),
+    "AWAY": ("Road", "Away", "Visitor", "Visiting Team", "Visitor Team", "Away Team"),
 }
 PT_HISTORY_SEASONS = tuple(range(2022, 2026))
 PT_CURRENT_SEASON = 2026
@@ -166,18 +183,155 @@ def _pt_team_key(x: Any) -> str:
 
 
 def _pt_find_col(cols: Iterable[str], aliases: Iterable[str]) -> str | None:
+    """Legacy/general resolver for non-system convenience fields only.
+
+    System identity must use _pt_resolve_strict_col; this helper may use a
+    contained match for generic fields such as opening line/date.
+    """
     keyed={str(c):_pt_col_key(c) for c in cols}
     aa=[_pt_col_key(x) for x in aliases]
-    # Exact normalized header first.
     for c,k in keyed.items():
         if k in aa: return c
-    # Then token-contained match for verbose headers.
     for a in aa:
         if len(a)<3: continue
         hits=[c for c,k in keyed.items() if a in k]
         if len(hits)==1: return hits[0]
     return None
 
+
+def _pt_resolve_strict_col(cols: Iterable[str], aliases: Iterable[str]) -> tuple[str | None,list[str]]:
+    """Resolve a column only by an exact normalized header identity.
+
+    Returns (unique_match, all_matches).  More than one match is ambiguous and
+    therefore fails closed.  No position, substring, or fuzzy fallback exists.
+    """
+    alias_keys={_pt_col_key(x) for x in aliases}
+    hits=[str(c) for c in cols if _pt_col_key(c) in alias_keys]
+    uniq=[]
+    for c in hits:
+        if c not in uniq: uniq.append(c)
+    return (uniq[0] if len(uniq)==1 else None),uniq
+
+
+def _pt_read_csv_frame(raw: bytes) -> tuple[pd.DataFrame | None,list[str]]:
+    errs=[]
+    for kwargs in (
+        {"engine":"python","on_bad_lines":"skip"},
+        {"engine":"python","on_bad_lines":"skip","encoding":"latin1"},
+    ):
+        try:
+            df=pd.read_csv(io.BytesIO(raw),**kwargs)
+            if not df.empty: return df.dropna(axis=1,how="all").copy(),errs
+        except Exception as e:
+            errs.append(f"{type(e).__name__}:{e}")
+    return None,errs
+
+
+def _pt_extract_live_html_table(raw: bytes) -> tuple[pd.DataFrame | None,dict[str,Any]]:
+    try:
+        tables=pd.read_html(io.BytesIO(raw))
+    except Exception as exc:
+        return None,{"status":"HTML_PARSE_FAIL","error":f"{type(exc).__name__}:{exc}"}
+    best=None; best_score=-1
+    required_names=[a[0] for a in PT_SYSTEM_HEADER_ALIASES.values()]
+    for t in tables:
+        x=t.copy()
+        if isinstance(x.columns,pd.MultiIndex):
+            x.columns=[" ".join(str(v) for v in tup if str(v).lower() not in {"nan","none"} and not str(v).startswith("Unnamed")).strip() for tup in x.columns]
+        else:
+            x.columns=[str(c) for c in x.columns]
+        cols=list(map(str,x.columns))
+        home,_=_pt_resolve_strict_col(cols,PT_IDENTITY_HEADER_ALIASES["HOME"])
+        away,_=_pt_resolve_strict_col(cols,PT_IDENTITY_HEADER_ALIASES["AWAY"])
+        if home is None or away is None: continue
+        score=0
+        for canon,aliases in PT_SYSTEM_HEADER_ALIASES.items():
+            c,_=_pt_resolve_strict_col(cols,aliases)
+            score+=int(c is not None)
+        if score>best_score:
+            best=x; best_score=score
+    if best is None or best_score<3:
+        return None,{"status":"HTML_SYSTEM_TABLE_MISSING","table_count":len(tables),"best_system_count":best_score}
+    return best,{"status":"PASS","table_count":len(tables),"matched_system_headers":best_score,"columns":list(map(str,best.columns))}
+
+
+def _pt_infer_verified_header_map(csv_raw: bytes, html_raw: bytes) -> tuple[dict[str,str],dict[str,Any]]:
+    """Infer cryptic CSV->system names by comparing actual prediction vectors.
+
+    A mapping is accepted only when a single CSV column reproduces the named
+    live-HTML system values across at least 8 games with >=98% exact-to-0.01
+    agreement.  This turns column order into validation evidence, not identity.
+    """
+    cdf,errs=_pt_read_csv_frame(csv_raw)
+    hdf,hdiag=_pt_extract_live_html_table(html_raw)
+    if cdf is None or hdf is None:
+        return {},{"status":"UNAVAILABLE","csv_errors":errs,"html":hdiag}
+    ccols=list(map(str,cdf.columns)); hcols=list(map(str,hdf.columns))
+    ch,_=_pt_resolve_strict_col(ccols,PT_IDENTITY_HEADER_ALIASES["HOME"]); ca,_=_pt_resolve_strict_col(ccols,PT_IDENTITY_HEADER_ALIASES["AWAY"])
+    hh,_=_pt_resolve_strict_col(hcols,PT_IDENTITY_HEADER_ALIASES["HOME"]); ha,_=_pt_resolve_strict_col(hcols,PT_IDENTITY_HEADER_ALIASES["AWAY"])
+    if None in (ch,ca,hh,ha):
+        return {},{"status":"IDENTITY_COLUMNS_MISSING","csv_columns":ccols,"html_columns":hcols}
+    c=cdf.copy(); h=hdf.copy()
+    c["__pair"]=[_pt_team_key(a)+"|"+_pt_team_key(b) for a,b in zip(c[ch],c[ca])]
+    h["__pair"]=[_pt_team_key(a)+"|"+_pt_team_key(b) for a,b in zip(h[hh],h[ha])]
+    c=c.loc[c["__pair"].ne("") & ~c["__pair"].duplicated(keep=False)].set_index("__pair",drop=False)
+    h=h.loc[h["__pair"].ne("") & ~h["__pair"].duplicated(keep=False)].set_index("__pair",drop=False)
+    common=sorted(set(c.index)&set(h.index))
+    if len(common)<8:
+        return {},{"status":"TOO_FEW_OVERLAP_GAMES","overlap_games":len(common)}
+    excluded={ch,ca}
+    mapping={}; evidence={}; ambiguous={}
+    for canon,aliases in PT_SYSTEM_HEADER_ALIASES.items():
+        hc,hhits=_pt_resolve_strict_col(hcols,aliases)
+        if hc is None:
+            evidence[canon]={"status":"HTML_HEADER_MISSING_OR_AMBIGUOUS","hits":hhits}; continue
+        y=_pt_numeric(h.loc[common,hc]).to_numpy(float)
+        candidates=[]
+        for col in ccols:
+            if col in excluded: continue
+            x=_pt_numeric(c.loc[common,col]).to_numpy(float)
+            ok=np.isfinite(x)&np.isfinite(y)
+            n=int(ok.sum())
+            if n<8: continue
+            diff=np.abs(x[ok]-y[ok])
+            rate=float(np.mean(diff<=0.011)); mae=float(np.mean(diff)); mx=float(np.max(diff))
+            if rate>=0.98 and mae<=0.011:
+                candidates.append((col,n,rate,mae,mx))
+        candidates=sorted(candidates,key=lambda z:(-z[1],z[3],z[4],z[0]))
+        if len(candidates)==1:
+            mapping[canon]=candidates[0][0]
+            evidence[canon]={"status":"VERIFIED_BY_VALUES","csv_column":candidates[0][0],"n":candidates[0][1],"match_rate":candidates[0][2],"mae":candidates[0][3],"max_abs":candidates[0][4],"html_column":hc}
+        elif len(candidates)>1:
+            ambiguous[canon]=[z[0] for z in candidates]
+            evidence[canon]={"status":"AMBIGUOUS_VALUE_MATCH","candidates":ambiguous[canon],"html_column":hc}
+        else:
+            # Exact self-identifying CSV headers are still safe even when the
+            # HTML table contains missing values that prevent vector validation.
+            dc,dhits=_pt_resolve_strict_col(ccols,aliases)
+            if dc is not None:
+                mapping[canon]=dc; evidence[canon]={"status":"VERIFIED_EXACT_HEADER","csv_column":dc,"html_column":hc}
+            else:
+                evidence[canon]={"status":"NO_VERIFIED_CSV_MATCH","html_column":hc,"exact_hits":dhits}
+    status="PASS" if len(mapping)==len(PT_PUBLISHED_WEIGHTS) and not ambiguous else "PARTIAL"
+    return mapping,{"status":status,"overlap_games":len(common),"mapping":mapping,"evidence":evidence,"ambiguous":ambiguous,"csv_headers":ccols,"html_headers":hcols}
+
+
+def _pt_load_header_manifest(storage_client, bucket_name: str) -> dict[str,str]:
+    try:
+        raw=_pt_blob_bytes(storage_client,bucket_name,PT_HEADER_MANIFEST_BLOB)
+        if not raw: return {}
+        obj=json.loads(raw.decode("utf-8")); mp=obj.get("mapping",{}) if isinstance(obj,dict) else {}
+        return {str(k):str(v) for k,v in mp.items() if k in PT_PUBLISHED_WEIGHTS and str(v).strip()}
+    except Exception:
+        return {}
+
+
+def _pt_save_header_manifest(storage_client, bucket_name: str, mapping: dict[str,str], evidence: dict[str,Any]) -> None:
+    try:
+        payload={"updated_utc":_now(),"source":"LIVE_HTML_CSV_VALUE_VALIDATION","mapping":mapping,"evidence":evidence}
+        storage_client.bucket(bucket_name).blob(PT_HEADER_MANIFEST_BLOB).upload_from_string(json.dumps(payload,sort_keys=True,default=str).encode(),content_type="application/json")
+    except Exception:
+        pass
 
 def _pt_numeric(s: pd.Series) -> pd.Series:
     if s is None: return pd.Series(dtype=float)
@@ -229,67 +383,77 @@ def _pt_fetch_live_html(timeout: int=25) -> bytes:
     if len(rr.content)<500: raise RuntimeError(f"short live HTML bytes={len(rr.content)}")
     return rr.content
 
-def _pt_parse_live_html(raw: bytes, season: int) -> tuple[pd.DataFrame,dict[str,Any]]:
-    """Extract the individual-system table from predncaa.php."""
-    errs=[]
-    try:
-        tables=pd.read_html(io.BytesIO(raw))
-    except Exception as exc:
-        return pd.DataFrame(),{"status":"HTML_PARSE_FAIL","season":int(season),"error":f"{type(exc).__name__}:{exc}"}
-    target=None
-    for t in tables:
-        x=t.copy()
-        if isinstance(x.columns,pd.MultiIndex):
-            x.columns=[" ".join(str(v) for v in tup if str(v).lower() not in {"nan","none"} and not str(v).startswith("Unnamed")).strip() for tup in x.columns]
-        else:
-            x.columns=[str(c) for c in x.columns]
-        keys=[_pt_col_key(c) for c in x.columns]
-        score=sum(any(a in k for k in keys) for a in ("espn fpi","pi ratings bias","dokter","keeper","pigskin index"))
-        if score>=3 and any(k in {"home","home team"} or k.startswith("home ") for k in keys) and any(k in {"road","away","visitor"} or k.startswith("road ") for k in keys):
-            target=x; break
+def _pt_parse_live_html(raw: bytes, season: int, *, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
+    """Extract the named individual-system table from predncaa.php.
+
+    The HTML table is preferred for identity because its headers contain the
+    human system names.  The five-system metamodel is computed only when all
+    five exact named headers resolve uniquely.
+    """
+    target,tdiag=_pt_extract_live_html_table(raw)
     if target is None:
-        return pd.DataFrame(),{"status":"HTML_SYSTEM_TABLE_MISSING","season":int(season),"table_count":len(tables)}
-    try:
-        frame,diag=_pt_parse_csv(target.to_csv(index=False).encode(),season)
-        diag["parser"]="LIVE_HTML_TABLE_FALLBACK"
-        return frame,diag
-    except Exception as exc:
-        errs.append(f"{type(exc).__name__}:{exc}")
-        return pd.DataFrame(),{"status":"HTML_NORMALIZE_FAIL","season":int(season),"errors":errs}
+        return pd.DataFrame(),{"status":tdiag.get("status","HTML_SYSTEM_TABLE_MISSING"),"season":int(season),**tdiag}
+    frame,diag=_pt_parse_csv(target.to_csv(index=False).encode(),season,verified_header_map={},source_context="LIVE_HTML",log_func=log_func)
+    diag["parser"]="LIVE_HTML_NAMED_TABLE"
+    diag["html_table_diagnostic"]=tdiag
+    return frame,diag
 
 
-def _pt_parse_csv(raw: bytes, season: int) -> tuple[pd.DataFrame, dict[str,Any]]:
-    # The archive has changed column formatting over time; parse permissively but
-    # fail closed on missing team identities or the five-system benchmark.
-    errs=[]; df=None
-    for kwargs in (
-        {"engine":"python","on_bad_lines":"skip"},
-        {"engine":"python","on_bad_lines":"skip","encoding":"latin1"},
-    ):
-        try:
-            df=pd.read_csv(io.BytesIO(raw),**kwargs); break
-        except Exception as e: errs.append(f"{type(e).__name__}:{e}")
+def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str] | None=None, source_context: str="CSV", log_func=print) -> tuple[pd.DataFrame, dict[str,Any]]:
+    """Parse Prediction Tracker without positional system assumptions.
+
+    Home/Road and all five benchmark systems are resolved by exact header name.
+    Cryptic CSV headers are accepted only when they are self-identifying exact
+    aliases or are present in a previously value-validated live header manifest.
+    """
+    df,errs=_pt_read_csv_frame(raw)
     if df is None or df.empty:
         return pd.DataFrame(),{"status":"PARSE_FAIL","season":int(season),"errors":errs}
-    # Remove completely empty columns and normalize duplicate-ish headers.
-    df=df.dropna(axis=1,how="all").copy()
     cols=list(map(str,df.columns))
-    home=_pt_find_col(cols,["home","home team","hometeam"])
-    away=_pt_find_col(cols,["road","away","visitor","visiting team","visitor team","away team"])
+    log_func(f"[NCAAF-PT-HEADER] season={int(season)} source={source_context} columns={json.dumps(cols,separators=(',',':'))}")
+
+    home,home_hits=_pt_resolve_strict_col(cols,PT_IDENTITY_HEADER_ALIASES["HOME"])
+    away,away_hits=_pt_resolve_strict_col(cols,PT_IDENTITY_HEADER_ALIASES["AWAY"])
     if home is None or away is None:
-        # Conservative fallback: the tracker normally places Home/Road first.
-        obj=[c for c in cols if df[c].dtype==object]
-        if len(obj)>=2: home=home or obj[0]; away=away or obj[1]
-    if home is None or away is None:
-        return pd.DataFrame(),{"status":"IDENTITY_COLUMNS_MISSING","season":int(season),"columns":cols[:80]}
-    aliases={
-        "DOKTER":["dokter","dokter entropy"],
-        "PI_RATE_BIAS":["pi ratings bias","pi rating bias","pi rate bias","piratings bias"],
-        "KEEPER":["keeper"],
-        "ESPN_FPI":["espn fpi","fpi"],
-        "PIGSKIN_INDEX":["pigskin index","pigskin"],
-    }
-    syscols={k:_pt_find_col(cols,v) for k,v in aliases.items()}
+        diag={"status":"IDENTITY_COLUMNS_MISSING","season":int(season),"columns":cols,"home_hits":home_hits,"away_hits":away_hits}
+        log_func(f"[NCAAF-PT-COLUMN-MAP] season={int(season)} source={source_context} status=FAIL identity=HOME:{home_hits},AWAY:{away_hits} authority=0")
+        return pd.DataFrame(),diag
+
+    verified_header_map=verified_header_map or {}
+    syscols={}; ambiguity={}; resolution={}
+    for canon,aliases in PT_SYSTEM_HEADER_ALIASES.items():
+        exact,exact_hits=_pt_resolve_strict_col(cols,aliases)
+        manifest_col=str(verified_header_map.get(canon,"") or "")
+        manifest_match=manifest_col if manifest_col in cols else None
+        candidates=[]
+        if exact: candidates.append((exact,"EXACT_HEADER"))
+        if manifest_match and manifest_match not in [x[0] for x in candidates]: candidates.append((manifest_match,"VERIFIED_MANIFEST"))
+        if len(candidates)==1:
+            syscols[canon]=candidates[0][0]; resolution[canon]=candidates[0][1]
+        elif len(candidates)>1 and len({x[0] for x in candidates})==1:
+            syscols[canon]=candidates[0][0]; resolution[canon]="EXACT_AND_MANIFEST"
+        elif len(candidates)>1:
+            syscols[canon]=None; ambiguity[canon]=[x[0] for x in candidates]; resolution[canon]="AMBIGUOUS"
+        else:
+            syscols[canon]=None; resolution[canon]="MISSING"
+    reverse={}
+    for canon,col in syscols.items():
+        if col: reverse.setdefault(col,[]).append(canon)
+    duplicate_assign={c:v for c,v in reverse.items() if len(v)>1}
+    if duplicate_assign:
+        for c,canons in duplicate_assign.items():
+            for canon in canons:
+                syscols[canon]=None; resolution[canon]="DUPLICATE_SOURCE_COLUMN"; ambiguity[canon]=[c]
+
+    missing=[k for k,v in syscols.items() if v is None]
+    map_status="FULL_FIVE_VERIFIED" if not missing and not ambiguity else "INCOMPLETE_FAIL_CLOSED"
+    log_func(
+        f"[NCAAF-PT-COLUMN-MAP] season={int(season)} source={source_context} status={map_status} "
+        f"DOKTER={syscols.get('DOKTER')} PI_RATE_BIAS={syscols.get('PI_RATE_BIAS')} KEEPER={syscols.get('KEEPER')} "
+        f"ESPN_FPI={syscols.get('ESPN_FPI')} PIGSKIN_INDEX={syscols.get('PIGSKIN_INDEX')} "
+        f"missing={missing} ambiguous={ambiguity} resolution={resolution} authority=0"
+    )
+
     line_col=_pt_find_col(cols,["line","updated line","current line","spread"])
     open_col=_pt_find_col(cols,["line open","opening line","open line","opening"])
     avg_col=_pt_find_col(cols,["prediction avg","prediction average","system average","average prediction"])
@@ -301,34 +465,30 @@ def _pt_parse_csv(raw: bytes, season: int) -> tuple[pd.DataFrame, dict[str,Any]]
     out["away_raw"]=df[away].astype(str).str.strip()
     out["home_key"]=out["home_raw"].map(_pt_team_key)
     out["away_key"]=out["away_raw"].map(_pt_team_key)
-    if date_col:
-        out["game_date"]=pd.to_datetime(df[date_col],errors="coerce").dt.strftime("%Y-%m-%d")
-    else: out["game_date"]=""
-    if line_col: out["tracker_line_home"]=_pt_numeric(df[line_col])
-    else: out["tracker_line_home"]=np.nan
-    if open_col: out["tracker_open_home"]=_pt_numeric(df[open_col])
-    else: out["tracker_open_home"]=np.nan
-    if avg_col: out["prediction_avg_home"]=_pt_numeric(df[avg_col])
-    else: out["prediction_avg_home"]=np.nan
-    if med_col: out["prediction_median_home"]=_pt_numeric(df[med_col])
-    else: out["prediction_median_home"]=np.nan
+    out["game_date"]=pd.to_datetime(df[date_col],errors="coerce").dt.strftime("%Y-%m-%d") if date_col else ""
+    out["tracker_line_home"]=_pt_numeric(df[line_col]) if line_col else np.nan
+    out["tracker_open_home"]=_pt_numeric(df[open_col]) if open_col else np.nan
+    out["prediction_avg_home"]=_pt_numeric(df[avg_col]) if avg_col else np.nan
+    out["prediction_median_home"]=_pt_numeric(df[med_col]) if med_col else np.nan
     for k,c in syscols.items(): out[k]=_pt_numeric(df[c]) if c else np.nan
     vals=np.column_stack([pd.to_numeric(out[k],errors="coerce").to_numpy(float) for k in PT_PUBLISHED_WEIGHTS])
     w=np.asarray([PT_PUBLISHED_WEIGHTS[k] for k in PT_PUBLISHED_WEIGHTS],dtype=float)
-    full=np.isfinite(vals).all(axis=1)
-    meta=np.full(len(out),np.nan,dtype=float); meta[full]=vals[full]@w
+    full=np.isfinite(vals).all(axis=1) if map_status=="FULL_FIVE_VERIFIED" else np.zeros(len(out),dtype=bool)
+    meta=np.full(len(out),np.nan,dtype=float)
+    if full.any(): meta[full]=vals[full]@w
     out["meta_margin_home"]=meta
     out["meta_system_count"]=np.isfinite(vals).sum(axis=1).astype(int)
-    # Header rows repeated inside the CSV and blank identities are excluded.
+    out["pt_header_contract"]=map_status
     bad=out["home_key"].isin({"","home","home team"})|out["away_key"].isin({"","road","away","visitor","visitor team"})
     out=out.loc[~bad].reset_index(drop=True)
     out["source_row"]=np.arange(len(out),dtype=int)
     return out,{
         "status":"PASS","season":int(season),"rows":int(len(out)),"full_five_rows":int(np.isfinite(out["meta_margin_home"]).sum()),
-        "system_columns":syscols,"home_column":home,"away_column":away,"date_column":date_col,"line_column":line_col,"open_line_column":open_col,
+        "metamodel_status":map_status,"system_columns":syscols,"system_column_resolution":resolution,"missing_systems":missing,"ambiguous_systems":ambiguity,
+        "home_column":home,"away_column":away,"date_column":date_col,"line_column":line_col,"open_line_column":open_col,
         "prediction_avg_column":avg_col,"weights":dict(PT_PUBLISHED_WEIGHTS),"weight_sum":float(sum(PT_PUBLISHED_WEIGHTS.values())),
+        "raw_headers":cols,"source_context":source_context,
     }
-
 
 def _pt_blob_bytes(storage_client, bucket_name: str, path: str) -> bytes | None:
     try:
@@ -354,7 +514,9 @@ def _pt_load_season(season: int, *, storage_client, bucket_name: str, force_web:
             if raw is None:
                 log_func(f"[NCAAF-PT-SEASON] season={season} status=UNAVAILABLE error={type(exc).__name__}:{exc} authority=0")
                 return pd.DataFrame(),{"status":"UNAVAILABLE","season":season,"error":f"{type(exc).__name__}:{exc}","authority":0}
-    frame,diag=_pt_parse_csv(raw,season); diag["source"]=source; diag["url"]=PT_ARCHIVE_URL.format(season=season); diag["authority"]=0
+    _verified_map=_pt_load_header_manifest(storage_client,bucket_name)
+    frame,diag=_pt_parse_csv(raw,season,verified_header_map=_verified_map,source_context=f"ARCHIVE_{source}",log_func=log_func)
+    diag["source"]=source; diag["url"]=PT_ARCHIVE_URL.format(season=season); diag["authority"]=0
     if not frame.empty:
         try: storage_client.bucket(bucket_name).blob(norm_path).upload_from_string(frame.to_csv(index=False).encode(),content_type="text/csv")
         except Exception: pass
@@ -364,38 +526,60 @@ def _pt_load_season(season: int, *, storage_client, bucket_name: str, force_web:
 
 
 def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
-    """Fetch the separate current-week Prediction Tracker CSV.
+    """Fetch current-week ratings with a name-safe system identity contract.
 
-    The site publishes season-to-date data at ncaaYYYY.csv and the active week at
-    ncaapredictions.csv.  Live is always web-first with a dedicated GCS fallback.
+    When both CSV and HTML are available we validate cryptic CSV headers against
+    the human-named HTML system columns by comparing prediction vectors.  The
+    resulting exact header manifest is cached and may be reused by archives.
+    If the CSV mapping is incomplete, the named HTML table is preferred.
     """
     raw_path=f"{PT_RAW_PREFIX}/ncaapredictions.csv"
-    raw=None; source=""
+    raw=None; hraw=None; source=""; csv_exc=None; html_exc=None; infer_diag={"status":"NOT_RUN"}; verified_map=_pt_load_header_manifest(storage_client,bucket_name)
     try:
         raw=_pt_http_fetch(PT_LIVE_CSV_URL,referer=PT_LIVE_PAGE_URL); source="WEB_LIVE_SESSION"
         try: storage_client.bucket(bucket_name).blob(raw_path).upload_from_string(raw,content_type="text/csv")
         except Exception: pass
-        frame,diag=_pt_parse_csv(raw,PT_CURRENT_SEASON)
     except Exception as exc:
-        # The live HTML page contains the same individual-system predictions and
-        # is often accessible even when the raw CSV hotlink is blocked.
-        try:
-            hraw=_pt_fetch_live_html(); frame,diag=_pt_parse_live_html(hraw,PT_CURRENT_SEASON); source="WEB_LIVE_HTML_FALLBACK"
-            if frame.empty: raise RuntimeError(diag.get("status","live HTML parse empty"))
-        except Exception as html_exc:
-            raw=_pt_blob_bytes(storage_client,bucket_name,raw_path); source="GCS_LIVE_FALLBACK" if raw else ""
-            if raw is None:
-                log_func(f"[NCAAF-PT-LIVE] season={PT_CURRENT_SEASON} status=UNAVAILABLE csv_error={type(exc).__name__}:{exc} html_error={type(html_exc).__name__}:{html_exc} authority=0")
-                return pd.DataFrame(),{"status":"UNAVAILABLE","season":PT_CURRENT_SEASON,"error":f"CSV={type(exc).__name__}:{exc}; HTML={type(html_exc).__name__}:{html_exc}","url":PT_LIVE_CSV_URL,"page_url":PT_LIVE_PAGE_URL,"authority":0}
-            frame,diag=_pt_parse_csv(raw,PT_CURRENT_SEASON)
-    if not frame.empty:
-        frame=frame.copy(); frame["source_kind"]="LIVE_CURRENT"; frame["source_priority"]=2
-        try: storage_client.bucket(bucket_name).blob(PT_CURRENT_LIVE_BLOB).upload_from_string(frame.to_csv(index=False).encode(),content_type="text/csv")
-        except Exception: pass
-    diag.update({"source":source,"source_kind":"LIVE_CURRENT","url":PT_LIVE_CSV_URL,"page_url":PT_LIVE_PAGE_URL,"authority":0})
-    log_func(f"[NCAAF-PT-LIVE] season={PT_CURRENT_SEASON} status={diag.get('status')} source={source} rows={len(frame)} full_five={int(np.isfinite(pd.to_numeric(frame.get('meta_margin_home'),errors='coerce')).sum()) if not frame.empty else 0} authority=0")
-    return frame,diag
+        csv_exc=exc
+    try:
+        hraw=_pt_fetch_live_html()
+    except Exception as exc:
+        html_exc=exc
 
+    if raw is not None and hraw is not None:
+        inferred,infer_diag=_pt_infer_verified_header_map(raw,hraw)
+        if inferred:
+            verified_map={**verified_map,**inferred}
+            _pt_save_header_manifest(storage_client,bucket_name,verified_map,infer_diag)
+        log_func(f"[NCAAF-PT-HEADER-VERIFY] season={PT_CURRENT_SEASON} status={infer_diag.get('status')} overlap={infer_diag.get('overlap_games',0)} mapping={inferred} ambiguous={infer_diag.get('ambiguous',{})} authority=0")
+
+    frame=pd.DataFrame(); diag={"status":"UNAVAILABLE","season":PT_CURRENT_SEASON}
+    if raw is not None:
+        frame,diag=_pt_parse_csv(raw,PT_CURRENT_SEASON,verified_header_map=verified_map,source_context="LIVE_CSV",log_func=log_func)
+        source="WEB_LIVE_SESSION"
+        # A loaded CSV with unverified/missing benchmark headers is not allowed to
+        # masquerade as a valid metamodel source.  Prefer named HTML instead.
+        if diag.get("metamodel_status")!="FULL_FIVE_VERIFIED" and hraw is not None:
+            hframe,hdiag=_pt_parse_live_html(hraw,PT_CURRENT_SEASON,log_func=log_func)
+            if not hframe.empty and hdiag.get("metamodel_status")=="FULL_FIVE_VERIFIED":
+                frame,diag=hframe,hdiag; source="WEB_LIVE_HTML_NAMED"
+    elif hraw is not None:
+        frame,diag=_pt_parse_live_html(hraw,PT_CURRENT_SEASON,log_func=log_func); source="WEB_LIVE_HTML_FALLBACK"
+
+    if frame.empty:
+        craw=_pt_blob_bytes(storage_client,bucket_name,raw_path)
+        if craw is not None:
+            frame,diag=_pt_parse_csv(craw,PT_CURRENT_SEASON,verified_header_map=verified_map,source_context="GCS_LIVE_FALLBACK",log_func=log_func); source="GCS_LIVE_FALLBACK"
+    if frame.empty:
+        log_func(f"[NCAAF-PT-LIVE] season={PT_CURRENT_SEASON} status=UNAVAILABLE csv_error={type(csv_exc).__name__ if csv_exc else ''}:{csv_exc or ''} html_error={type(html_exc).__name__ if html_exc else ''}:{html_exc or ''} authority=0")
+        return pd.DataFrame(),{"status":"UNAVAILABLE","season":PT_CURRENT_SEASON,"error":f"CSV={type(csv_exc).__name__ if csv_exc else ''}:{csv_exc or ''}; HTML={type(html_exc).__name__ if html_exc else ''}:{html_exc or ''}","url":PT_LIVE_CSV_URL,"page_url":PT_LIVE_PAGE_URL,"authority":0}
+
+    frame=frame.copy(); frame["source_kind"]="LIVE_CURRENT"; frame["source_priority"]=2
+    try: storage_client.bucket(bucket_name).blob(PT_CURRENT_LIVE_BLOB).upload_from_string(frame.to_csv(index=False).encode(),content_type="text/csv")
+    except Exception: pass
+    diag.update({"source":source,"source_kind":"LIVE_CURRENT","url":PT_LIVE_CSV_URL,"page_url":PT_LIVE_PAGE_URL,"header_verification":infer_diag,"verified_header_map":verified_map,"authority":0})
+    log_func(f"[NCAAF-PT-LIVE] season={PT_CURRENT_SEASON} status={diag.get('status')} source={source} header_contract={diag.get('metamodel_status')} rows={len(frame)} full_five={int(np.isfinite(pd.to_numeric(frame.get('meta_margin_home'),errors='coerce')).sum()) if not frame.empty else 0} authority=0")
+    return frame,diag
 
 def _pt_merge_current_season(archive: pd.DataFrame, live: pd.DataFrame, *, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
     """Merge 2026 season archive with the separate live/current-week feed.
@@ -573,29 +757,32 @@ def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client
         if include_history and (not include_current) and not force and isinstance(prior,dict) and prior.get("status")=="PASS" and prior.get("history_attached"):
             return prior
         frames=[]; diags=[]
-        if include_history:
-            for sy in PT_HISTORY_SEASONS:
-                f,d=_pt_load_season(sy,storage_client=storage_client,bucket_name=bucket_name,force_web=False,log_func=log_func); diags.append(d)
-                if not f.empty: frames.append(f)
         current_frame=pd.DataFrame(); current_diag=None; current_archive=pd.DataFrame(); current_live=pd.DataFrame(); current_merge={"status":"NOT_RUN","authority":0}
         if include_current:
-            # 2026 is split by the source site: ncaa2026.csv is the season archive,
-            # while ncaapredictions.csv is the active/current week.  Fetch BOTH.
+            # Fetch the named live table first.  When the live CSV is also
+            # available this creates/refreshes the value-validated cryptic
+            # header manifest BEFORE any archive CSV is parsed.
+            current_live,current_live_diag=_pt_load_live_current(storage_client=storage_client,bucket_name=bucket_name,log_func=log_func)
             current_archive,current_archive_diag=_pt_load_season(PT_CURRENT_SEASON,storage_client=storage_client,bucket_name=bucket_name,force_web=True,log_func=log_func)
             if not current_archive.empty:
                 current_archive=current_archive.copy(); current_archive["source_kind"]="ARCHIVE_SEASON_TO_DATE"; current_archive["source_priority"]=1
                 try: storage_client.bucket(bucket_name).blob(PT_CURRENT_ARCHIVE_BLOB).upload_from_string(current_archive.to_csv(index=False).encode(),content_type="text/csv")
                 except Exception: pass
-            current_live,current_live_diag=_pt_load_live_current(storage_client=storage_client,bucket_name=bucket_name,log_func=log_func)
             current_frame,current_merge=_pt_merge_current_season(current_archive,current_live,log_func=log_func)
             current_diag={"status":current_merge.get("status"),"season":PT_CURRENT_SEASON,"archive":current_archive_diag,"live":current_live_diag,"merge":current_merge,"authority":0}
             diags.extend([current_archive_diag,current_live_diag,current_diag])
             if not current_frame.empty:
                 try:
                     storage_client.bucket(bucket_name).blob(PT_CURRENT_BLOB).upload_from_string(current_frame.to_csv(index=False).encode(),content_type="text/csv")
-                    meta={"season":PT_CURRENT_SEASON,"updated_utc":_now(),"rows":len(current_frame),"archive_rows":len(current_archive),"live_rows":len(current_live),"full_five_rows":int(np.isfinite(pd.to_numeric(current_frame.get('meta_margin_home'),errors='coerce')).sum()),"live_full_five_rows":int(np.isfinite(pd.to_numeric(current_live.get('meta_margin_home'),errors='coerce')).sum()) if not current_live.empty else 0,"source":"Prediction Tracker archive + live current week","archive_url":PT_ARCHIVE_URL.format(season=PT_CURRENT_SEASON),"live_csv_url":PT_LIVE_CSV_URL,"live_page_url":PT_LIVE_PAGE_URL,"authority":0}
+                    meta={"season":PT_CURRENT_SEASON,"updated_utc":_now(),"rows":len(current_frame),"archive_rows":len(current_archive),"live_rows":len(current_live),"full_five_rows":int(np.isfinite(pd.to_numeric(current_frame.get('meta_margin_home'),errors='coerce')).sum()),"live_full_five_rows":int(np.isfinite(pd.to_numeric(current_live.get('meta_margin_home'),errors='coerce')).sum()) if not current_live.empty else 0,"source":"Prediction Tracker archive + live current week","archive_url":PT_ARCHIVE_URL.format(season=PT_CURRENT_SEASON),"live_csv_url":PT_LIVE_CSV_URL,"live_page_url":PT_LIVE_PAGE_URL,"header_manifest_gcs":f"gs://{bucket_name}/{PT_HEADER_MANIFEST_BLOB}","authority":0}
                     storage_client.bucket(bucket_name).blob(PT_CURRENT_META_BLOB).upload_from_string(json.dumps(meta,sort_keys=True).encode(),content_type="application/json")
                 except Exception: pass
+        if include_history:
+            # Archives parse only after the live name contract has had a chance
+            # to refresh the verified cryptic-header manifest.
+            for sy in PT_HISTORY_SEASONS:
+                f,d=_pt_load_season(sy,storage_client=storage_client,bucket_name=bucket_name,force_web=False,log_func=log_func); diags.append(d)
+                if not f.empty: frames.append(f)
         match={"status":"NOT_ATTACHED","authority":0}; metrics={"status":"NOT_RUN","authority":0}
         if include_history and dashboard_module is not None and frames:
             hist=pd.concat(frames,ignore_index=True,sort=False)
@@ -2154,13 +2341,30 @@ def self_test() -> dict[str,Any]:
     live_atoms={a["name"] for a in _extended_atoms(_tf,for_live=True,market="spreads")}
     q=_bh_qvalues([.01,.04,.20]); fam=_classify_feature_families(["Rush_EPA","Opp_Rush_EPA","Line_Move_60m","Sharp_Soft_Divergence","Actual_Margin"])
     odds=np.asarray([200.0,-200.0]); won=np.asarray([1.0,1.0]); ret=_american_unit_return(odds,won)
+    # Name-safe Prediction Tracker contract: system identity must survive an
+    # arbitrary column reorder and near-miss/fuzzy headers must not be accepted.
+    _pt_df=pd.DataFrame({
+        "Home":["Alpha","Gamma"],"Road":["Beta","Delta"],"line":[3.0,-2.0],
+        "lineespn":[4.0,-1.0],"linedokter":[5.0,-3.0],"Pi-Ratings Bias":[3.5,-2.5],
+        "Keeper":[4.5,-1.5],"Pigskin Index":[2.5,-2.0],
+    })
+    _pt_a,_pt_da=_pt_parse_csv(_pt_df.to_csv(index=False).encode(),2025,source_context="SELF_TEST_A",log_func=lambda *a,**k:None)
+    _pt_b,_pt_db=_pt_parse_csv(_pt_df[["Pigskin Index","Road","linedokter","line","Keeper","Home","Pi-Ratings Bias","lineespn"]].to_csv(index=False).encode(),2025,source_context="SELF_TEST_B",log_func=lambda *a,**k:None)
+    _pt_bad=_pt_df.rename(columns={"lineespn":"lineespn_extra"})
+    _pt_c,_pt_dc=_pt_parse_csv(_pt_bad.to_csv(index=False).encode(),2025,source_context="SELF_TEST_BAD",log_func=lambda *a,**k:None)
+    _pt_name_safe=bool(
+        _pt_da.get("metamodel_status")=="FULL_FIVE_VERIFIED" and _pt_db.get("metamodel_status")=="FULL_FIVE_VERIFIED" and
+        np.allclose(pd.to_numeric(_pt_a["meta_margin_home"],errors="coerce"),pd.to_numeric(_pt_b["meta_margin_home"],errors="coerce"),equal_nan=True) and
+        _pt_da.get("system_columns",{}).get("ESPN_FPI")=="lineespn" and _pt_da.get("system_columns",{}).get("DOKTER")=="linedokter" and
+        _pt_dc.get("metamodel_status")=="INCOMPLETE_FAIL_CLOSED" and _pt_dc.get("system_columns",{}).get("ESPN_FPI") is None
+    )
     ok=bool(
         len(q)==3 and "RUN_PASS_MATCHUP" in fam and "MARKET_MICROSTRUCTURE" in fam and
         all("Actual_Margin" not in x for v in fam.values() for x in v) and
         "SU_SEQ3_LWL" in live_atoms and "OFF_ATS_COVER_7_PLUS" in live_atoms and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
         "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and "META_PT_EDGE_TEAM_3PLUS" in live_atoms and "META_PT_CORE_STRONG_AGREE" in live_atoms and
-        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False)
+        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe
     )
     return {
         "status":"PASS" if ok else "FAIL","source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG,
@@ -2172,6 +2376,9 @@ def self_test() -> dict[str,Any]:
         "live_min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,
         "weak_confirmed_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":109,"confirmation_rate":0.5229}),
         "strong_confirmed_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.6222}),
+        "pt_name_safe_header_contract":_pt_name_safe,
+        "pt_self_test_system_columns":_pt_da.get("system_columns",{}),
+        "pt_fuzzy_header_rejected":_pt_dc.get("system_columns",{}).get("ESPN_FPI") is None,
     }
 
 

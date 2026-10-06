@@ -1,1 +1,76 @@
-{"status":"PASS","version":"V2.12","tests":["research_self_test","core_self_test","expert_atom_materialization_synthetic","individual_external_atom_synthetic","live_html_parser_synthetic"],"production_authority":0}
+{
+  "research": {
+    "status": "PASS",
+    "source_tag": "ncaaf-research-v2.9-pt-name-safe-header-contract-20261006",
+    "families": [
+      "MARKET_MICROSTRUCTURE",
+      "RUN_PASS_MATCHUP"
+    ],
+    "qvalues": [
+      0.03,
+      0.06,
+      0.20000000000000004
+    ],
+    "american_unit_profit_test": [
+      2.0,
+      0.5
+    ],
+    "h2h_price_gate": "OBSERVED_TEAM_AND_OPPONENT_ML_ONLY",
+    "confirmation_gate": "BOTH_2024_AND_2025",
+    "live_authority_policy": "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005",
+    "live_min_confirmation_n": 60,
+    "live_min_confirmation_rate": 0.56,
+    "weak_confirmed_authority": false,
+    "strong_confirmed_authority": true,
+    "pt_name_safe_header_contract": true,
+    "pt_self_test_system_columns": {
+      "DOKTER": "linedokter",
+      "PI_RATE_BIAS": "Pi-Ratings Bias",
+      "KEEPER": "Keeper",
+      "ESPN_FPI": "lineespn",
+      "PIGSKIN_INDEX": "Pigskin Index"
+    },
+    "pt_fuzzy_header_rejected": true
+  },
+  "core": {
+    "status": "PASS",
+    "source_tag": "ncaaf-core-challenger-v2.4-expert-model-atom-bridge-20261006",
+    "production_authority": 0,
+    "automatic_promotion": false,
+    "year_2026_queried": false,
+    "expert_feature_count": 23,
+    "regime_spec_count": 11,
+    "nullable_mask_regression": true,
+    "audit": {
+      "feature_count": 23,
+      "coverage": {
+        "Expert_TeamPower": 1.0,
+        "Expert_OppPower": 1.0,
+        "Expert_PowerDiff": 1.0,
+        "Expert_TeamSOS": 0.5,
+        "Expert_OppSOS": 0.0,
+        "Expert_SOSDiff": 0.0,
+        "Expert_ConferenceMemberPowerDiff": 1.0,
+        "Expert_CrossConferenceRatingDiff": 1.0,
+        "Expert_TeamVsConference": 1.0,
+        "Expert_OppVsConference": 1.0,
+        "Expert_HomeRole": 1.0,
+        "Expert_RestDiffDays": 0.0,
+        "Expert_SameConference": 1.0,
+        "Expert_TeamGamesPrior": 1.0,
+        "Expert_OppGamesPrior": 1.0,
+        "Expert_MinGamesPrior": 1.0,
+        "Expert_EarlyGame": 1.0,
+        "Expert_OpenMargin": 1.0,
+        "Expert_AbsOpenMargin": 1.0,
+        "Expert_FavoriteRole": 1.0,
+        "Expert_PowerVsMarket": 1.0,
+        "Expert_ConferenceVsMarket": 1.0,
+        "Expert_PowerUncertainty": 1.0
+      },
+      "power_k": 0.16,
+      "offseason_shrink": 0.68,
+      "conference_k": 0.08
+    }
+  }
+}

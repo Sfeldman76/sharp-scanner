@@ -1,72 +1,50 @@
-# NCAAF Engine V2.12 — PT Session/HTML Fallback + Expert Atom Bridge Fix
+# NCAAF Engine V2.13 — Prediction Tracker Name-Safe Header Contract
 
-This is a narrow research-integration repair on top of V2.11.1. Production V1 remains frozen.
+This is a narrow patch on top of V2.12. Production V1 remains frozen.
 
 ## Why this patch exists
-The 2026-10-06 Heavy run completed successfully after the nullable-mask hotfix, but exposed two separate integration failures:
+Prediction Tracker CSV exports can use cryptic headers such as `linedokter` and `lineespn`, while the website displays human system names such as Dokter and ESPN FPI. V2.13 removes any possibility that a system prediction can be assigned by column position or fuzzy substring guessing.
 
-1. Prediction Tracker archive and live CSV requests returned HTTP 403 from Cloud Run, so no external-rating rows were attached.
-2. The historical Pathi/Big Al W/L cache was populated, but the lean Miner frame did not contain the named deterministic flags, so the Expert/Model Atom Bridge reported Pathi=0 and BigAl=0.
+## Name-safe contract
+- Home/Road identities resolve only by exact normalized header names. There is no positional fallback.
+- The five metamodel systems resolve only by exact human-readable names, exact self-identifying aliases, or an exact cryptic header that was previously verified.
+- No system column is selected by position.
+- No system column is selected by substring/fuzzy match.
+- If a required system is missing or ambiguous, META_MARGIN fails closed for that source/row.
+- A single source column cannot be assigned to two canonical systems.
 
-## V2.12 fixes
+## Automatic cryptic-header verification
+When both the live CSV and live HTML table are available, V2.13 compares the actual prediction vectors game-by-game. A cryptic CSV header is associated with a named system only when one unique column reproduces the human-named HTML values across at least 8 games with >=98% agreement to 0.01 points. The verified mapping is cached at:
 
-### Prediction Tracker retrieval
-- Browser-like `requests.Session` fetch.
-- Same-origin parent-page warm-up/cookie session.
-- Correct Referer for archive and current-week CSV requests.
-- Archive page: `ncaaarchive.html` -> `ncaaYYYY.csv`.
-- Live page: `predncaa.php` -> `ncaapredictions.csv`.
-- If the live CSV is still blocked, parse the individual-system table directly from `predncaa.php`.
-- Existing GCS cache remains the final fail-safe.
+`gs://sharp-models/research/ncaaf/external/prediction_tracker/header_manifest.json`
 
-Historical archives remain fail-closed: no synthetic ratings and no substitution with the site's generic prediction average.
+That exact mapping can then be reused by historical archive CSVs when the same cryptic header exists. Current live HTML remains the preferred fallback when CSV identity is incomplete.
 
-### Pathi / Big Al Miner bridge
-The existing Miner frame now materializes deterministic Pathi/Big Al flags from the pregame fields before atom construction. This connects the already-working historical expert systems to the existing Miner rather than creating a second miner.
+## New audit lines
+The run now prints:
 
-### Individual external ratings retained
-In addition to the fixed published `META_MARGIN`, the research frame now keeps each component separately:
-- ESPN FPI
-- Pi-Ratings Bias
-- Dokter
-- Keeper
-- Pigskin Index
+- `[NCAAF-PT-HEADER]` — complete raw header list for the source.
+- `[NCAAF-PT-HEADER-VERIFY]` — value-validated cryptic-to-human mapping and any ambiguity.
+- `[NCAAF-PT-COLUMN-MAP]` — exact canonical mapping for DOKTER, PI_RATE_BIAS, KEEPER, ESPN_FPI, and PIGSKIN_INDEX, plus missing/ambiguous fields.
+- `[NCAAF-PT-LIVE] ... header_contract=FULL_FIVE_VERIFIED` when the current source is safe to use.
 
-Research-only Miner atoms now include:
-- individual component edge vs market,
-- individual component agreement/conflict with OOF CORE,
-- 4-of-5 and 5-of-5 external consensus,
-- low/high five-system dispersion,
-- META vs CORE agreement/conflict.
+## Fetch order
+On Heavy Research, the current live source is checked first so the verified header manifest can be refreshed before 2022–2025 archive CSVs are parsed.
 
-All external component atoms remain one correlated external evidence family. They are not five Bet Authority votes.
+## Authority
+No change. Prediction Tracker remains research-only, has zero Production/Bet Authority, cannot mutate Production V1, and 2026 remains sealed from retrospective selection.
 
-## Authority contract
-- Production CORE: unchanged.
-- Production ledger: unchanged.
-- Utils/backend: unchanged.
-- External ratings: authority=0.
-- OOF CORE/specialist bridge atoms: authority=0.
-- 2026 outcomes: never used for discovery/confirmation.
-- No automatic promotion.
-
-## Deploy
-If V2.11.1 is already deployed, replace only:
+## Deployment from V2.12
+Replace only:
 
 `ncaaf_research_v2.py`
 
-Redeploy the training job, then run:
+Redeploy and run **NCAAF Research — Heavy Challenger Search**.
 
-**NCAAF Research — Heavy Challenger Search**
-
-Do not run Production Publish.
-
-## Lines to inspect in the next Heavy log
-- `[NCAAF-PT-SEASON]` — completed-season archive retrieval/cache status
-- `[NCAAF-PT-LIVE]` — live CSV or HTML fallback status
-- `[NCAAF-PT-CURRENT-MERGE]` — archive + current-week merge
-- `[NCAAF-PT-MATCH]` — historical game-match coverage
-- `[NCAAF-PT-CONTRACT]` — overall external-rating status
-- `[NCAAF-RV25-ATOM-BRIDGE]` — Pathi/BigAl/CORE/specialist/external atom counts
-- `[NCAAF-RV25-CONTRACT]` — confirmed bridge mechanisms
-- `[NCAAF-HEAVY-RUN] status=PASS`
+## Tests
+- All Python files compile.
+- `ncaaf_core_challenger_v2.py` self-test PASS.
+- `ncaaf_research_v2.py` self-test PASS.
+- Header-order regression PASS: shuffling columns does not change system identity or META_MARGIN.
+- Fuzzy near-miss regression PASS: `lineespn_extra` is rejected rather than treated as ESPN FPI.
+- Synthetic live HTML↔CSV vector verification PASS for all five canonical systems.
