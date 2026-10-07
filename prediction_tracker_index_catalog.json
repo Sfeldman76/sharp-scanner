@@ -1,0 +1,410 @@
+[
+  {
+    "raw_header": "linehow",
+    "canonical_id": "linehow",
+    "display_name": "Howell",
+    "source_cluster": "LINEHOW",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linedokter",
+    "canonical_id": "linedokter",
+    "display_name": "Dokter",
+    "source_cluster": "LINEDOKTER",
+    "current_nonnull_rows": 3,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linebihl",
+    "canonical_id": "linebihl",
+    "display_name": "Bihl System",
+    "source_cluster": "LINEBIHL",
+    "current_nonnull_rows": 0,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linemidweek",
+    "canonical_id": "linemidweek",
+    "display_name": "Midweek",
+    "source_cluster": "LINEMIDWEEK",
+    "current_nonnull_rows": 0,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linekeep",
+    "canonical_id": "linekeep",
+    "display_name": "Keeper",
+    "source_cluster": "LINEKEEP",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linecong",
+    "canonical_id": "linecong",
+    "display_name": "Congrove Computer Rankings",
+    "source_cluster": "LINECONG",
+    "current_nonnull_rows": 55,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linebillings",
+    "canonical_id": "linebillings",
+    "display_name": "Billingsley",
+    "source_cluster": "LINEBILLINGS",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "lineharville",
+    "canonical_id": "lineharville",
+    "display_name": "David Harville",
+    "source_cluster": "LINEHARVILLE",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linebig200",
+    "canonical_id": "linebig200",
+    "display_name": "Big 200",
+    "source_cluster": "LINEBIG200",
+    "current_nonnull_rows": 0,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linepve",
+    "canonical_id": "linepve",
+    "display_name": "PvE Sports Ratings",
+    "source_cluster": "LINEPVE",
+    "current_nonnull_rows": 56,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linepiratings",
+    "canonical_id": "linepiratings",
+    "display_name": "Pi-Ratings",
+    "source_cluster": "PI_RATINGS",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linepimean",
+    "canonical_id": "linepimean",
+    "display_name": "Pi-Ratings Mean",
+    "source_cluster": "PI_RATINGS",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linepibias",
+    "canonical_id": "linepibias",
+    "display_name": "Pi-Ratings Bias",
+    "source_cluster": "PI_RATINGS",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linefei",
+    "canonical_id": "linefei",
+    "display_name": "FEI Projections",
+    "source_cluster": "LINEFEI",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linerwp",
+    "canonical_id": "linerwp",
+    "display_name": "Laffaye RWP",
+    "source_cluster": "LINERWP",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linemassey",
+    "canonical_id": "linemassey",
+    "display_name": "Massey Ratings",
+    "source_cluster": "LINEMASSEY",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "lineclean",
+    "canonical_id": "lineclean",
+    "display_name": "Cleanup Hitter",
+    "source_cluster": "LINECLEAN",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linecraig",
+    "canonical_id": "linecraig",
+    "display_name": "Craig",
+    "source_cluster": "LINECRAIG",
+    "current_nonnull_rows": 1,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linedonchess",
+    "canonical_id": "linedonchess",
+    "display_name": "Donchess",
+    "source_cluster": "LINEDONCHESS",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linesag",
+    "canonical_id": "linesag",
+    "display_name": "Sagarin",
+    "source_cluster": "SAGARIN",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linesagpred",
+    "canonical_id": "linesagpred",
+    "display_name": "Sagarin Predictor",
+    "source_cluster": "SAGARIN",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linesaggm",
+    "canonical_id": "linesaggm",
+    "display_name": "Sagarin GM",
+    "source_cluster": "SAGARIN",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linesagr",
+    "canonical_id": "linesagr",
+    "display_name": "Sagarin Recent",
+    "source_cluster": "SAGARIN",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linenewbury",
+    "canonical_id": "linenewbury",
+    "display_name": "Max Newbury",
+    "source_cluster": "LINENEWBURY",
+    "current_nonnull_rows": 0,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "lineversus",
+    "canonical_id": "lineversus",
+    "display_name": "Versus Sports Simulator",
+    "source_cluster": "LINEVERSUS",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linedwig",
+    "canonical_id": "linedwig",
+    "display_name": "Dwiggins",
+    "source_cluster": "LINEDWIG",
+    "current_nonnull_rows": 57,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linefpi",
+    "canonical_id": "linefpi",
+    "display_name": "ESPN FPI",
+    "source_cluster": "LINEFPI",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linetalis",
+    "canonical_id": "linetalis",
+    "display_name": "Talisman Red",
+    "source_cluster": "LINETALIS",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linecfp",
+    "canonical_id": "linecfp",
+    "display_name": "CFP",
+    "source_cluster": "LINECFP",
+    "current_nonnull_rows": 0,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linepig",
+    "canonical_id": "linepig",
+    "display_name": "Pigskin Index",
+    "source_cluster": "LINEPIG",
+    "current_nonnull_rows": 0,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linefidler",
+    "canonical_id": "linefidler",
+    "display_name": "Fidler Book",
+    "source_cluster": "LINEFIDLER",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linedial",
+    "canonical_id": "linedial",
+    "display_name": "Odds Dial",
+    "source_cluster": "LINEDIAL",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linel2",
+    "canonical_id": "linel2",
+    "display_name": "Least Squares",
+    "source_cluster": "REGRESSION",
+    "current_nonnull_rows": 0,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linepfz",
+    "canonical_id": "linepfz",
+    "display_name": "PerformanZ Ratings",
+    "source_cluster": "LINEPFZ",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linemoore",
+    "canonical_id": "linemoore",
+    "display_name": "Sonny Moore",
+    "source_cluster": "LINEMOORE",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "lineelo",
+    "canonical_id": "lineelo",
+    "display_name": "Beck Elo",
+    "source_cluster": "LINEELO",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linelaz",
+    "canonical_id": "linelaz",
+    "display_name": "Laz Index",
+    "source_cluster": "LINELAZ",
+    "current_nonnull_rows": 57,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linekam",
+    "canonical_id": "linekam",
+    "display_name": "Edward Kambour",
+    "source_cluster": "LINEKAM",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linel2hf",
+    "canonical_id": "linel2hf",
+    "display_name": "Least Squares w/HFA",
+    "source_cluster": "REGRESSION",
+    "current_nonnull_rows": 0,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linekerns",
+    "canonical_id": "linekerns",
+    "display_name": "Stephen Kerns",
+    "source_cluster": "LINEKERNS",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "lineteamrank",
+    "canonical_id": "lineteamrank",
+    "display_name": "TeamRankings",
+    "source_cluster": "LINETEAMRANK",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linefluker",
+    "canonical_id": "linefluker",
+    "display_name": "Slate Fluker",
+    "source_cluster": "LINEFLUKER",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linelog",
+    "canonical_id": "linelog",
+    "display_name": "Logistic Regression",
+    "source_cluster": "REGRESSION",
+    "current_nonnull_rows": 0,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linecons",
+    "canonical_id": "linecons",
+    "display_name": "Massey Consensus",
+    "source_cluster": "LINECONS",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "lineloud",
+    "canonical_id": "lineloud",
+    "display_name": "Loudsound",
+    "source_cluster": "LINELOUD",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linecurry",
+    "canonical_id": "linecurry",
+    "display_name": "Daniel Curry Index",
+    "source_cluster": "LINECURRY",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linedunk",
+    "canonical_id": "linedunk",
+    "display_name": "Dunkel Index",
+    "source_cluster": "LINEDUNK",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linewayward",
+    "canonical_id": "linewayward",
+    "display_name": "Waywardtrends",
+    "source_cluster": "LINEWAYWARD",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "linedoi",
+    "canonical_id": "linedoi",
+    "display_name": "Director of Information",
+    "source_cluster": "LINEDOI",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "lineborn",
+    "canonical_id": "lineborn",
+    "display_name": "Born",
+    "source_cluster": "LINEBORN",
+    "current_nonnull_rows": 0,
+    "current_rows": 58
+  },
+  {
+    "raw_header": "lineca",
+    "canonical_id": "lineca",
+    "display_name": "Computer Adjusted Line",
+    "source_cluster": "LINECA",
+    "current_nonnull_rows": 58,
+    "current_rows": 58
+  }
+]

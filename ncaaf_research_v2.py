@@ -33,8 +33,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.17.1-csv-only-pt-20261007"
-NCAAF_RESEARCH_V2_VERSION = "2.17.1"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.18-full-pt-index-universe-20261007"
+NCAAF_RESEARCH_V2_VERSION = "2.18.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -85,6 +85,102 @@ PT_SYSTEM_HEADER_ALIASES = {
     "ESPN_FPI": ("ESPN FPI", "FPI", "lineespn", "linefpi"),
     "PIGSKIN_INDEX": ("Pigskin Index", "Pigskin", "linepig"),
 }
+
+# V2.18 full Prediction Tracker research universe.
+# The five published benchmark systems above remain frozen and are still the only
+# inputs to META_MARGIN. Separately, every source-native Prediction Tracker
+# `line*` predictor is retained for research/Miner use. Market/summary fields are
+# excluded so they cannot masquerade as independent models.
+PT_INDEX_RESERVED_HEADERS = {"line", "lineopen", "lineavg", "linemedian", "linestd"}
+PT_INDEX_CANONICAL_HEADER_ALIASES = {
+    # Same provider, renamed by Prediction Tracker across seasons.
+    "lineespn": "linefpi",
+    "linemass": "linemassey",
+    "linebill": "linebillings",
+}
+PT_INDEX_DISPLAY_NAMES = {
+    "linehow": "Howell",
+    "linedokter": "Dokter",
+    "linebihl": "Bihl System",
+    "linemidweek": "Midweek",
+    "linekeep": "Keeper",
+    "linecong": "Congrove Computer Rankings",
+    "linebillings": "Billingsley",
+    "lineharville": "David Harville",
+    "linebig200": "Big 200",
+    "linepve": "PvE Sports Ratings",
+    "linepiratings": "Pi-Ratings",
+    "linepimean": "Pi-Ratings Mean",
+    "linepibias": "Pi-Ratings Bias",
+    "linefei": "FEI Projections",
+    "linerwp": "Laffaye RWP",
+    "linemassey": "Massey Ratings",
+    "lineclean": "Cleanup Hitter",
+    "linecraig": "Craig",
+    "linedonchess": "Donchess",
+    "linesag": "Sagarin",
+    "linesagpred": "Sagarin Predictor",
+    "linesaggm": "Sagarin GM",
+    "linesagr": "Sagarin Recent",
+    "linenewbury": "Max Newbury",
+    "lineversus": "Versus Sports Simulator",
+    "linedwig": "Dwiggins",
+    "linefpi": "ESPN FPI",
+    "linetalis": "Talisman Red",
+    "linecfp": "CFP",
+    "linepig": "Pigskin Index",
+    "linefidler": "Fidler Book",
+    "linedial": "Odds Dial",
+    "linel2": "Least Squares",
+    "linepfz": "PerformanZ Ratings",
+    "linemoore": "Sonny Moore",
+    "lineelo": "Beck Elo",
+    "linelaz": "Laz Index",
+    "linekam": "Edward Kambour",
+    "linel2hf": "Least Squares w/HFA",
+    "linekerns": "Stephen Kerns",
+    "lineteamrank": "TeamRankings",
+    "linefluker": "Slate Fluker",
+    "linelog": "Logistic Regression",
+    "linecons": "Massey Consensus",
+    "lineloud": "Loudsound",
+    "linecurry": "Daniel Curry Index",
+    "linedunk": "Dunkel Index",
+    "linewayward": "Waywardtrends",
+    "linedoi": "Director of Information",
+    "lineborn": "Born",
+    "lineca": "Computer Adjusted Line",
+    # Historical/source-retired IDs preserved by exact source header.
+    "linepayne": "Payne Power Ratings",
+    "linepaynep": "Payne Power Ratings P",
+    "linepaynewl": "Payne Power Ratings W/L",
+    "linefox": "Fox",
+    "linepugh": "Pugh",
+    "linecather": "Cather",
+    "lineargh": "ARGH",
+}
+PT_INDEX_SOURCE_CLUSTERS = {
+    "SAGARIN": {"linesag", "linesagpred", "linesaggm", "linesagr"},
+    "PI_RATINGS": {"linepiratings", "linepimean", "linepibias"},
+    "REGRESSION": {"linel2", "linel2hf", "linelog"},
+    "PAYNE": {"linepayne", "linepaynep", "linepaynewl"},
+}
+
+def _pt_index_canonical_header(x: Any) -> str:
+    k=str(x).strip().lower()
+    return PT_INDEX_CANONICAL_HEADER_ALIASES.get(k,k)
+
+def _pt_index_display_name(canon: str) -> str:
+    return PT_INDEX_DISPLAY_NAMES.get(str(canon), str(canon))
+
+def _pt_index_source_cluster(canon: str) -> str:
+    c=str(canon)
+    for cluster,members in PT_INDEX_SOURCE_CLUSTERS.items():
+        if c in members:
+            return cluster
+    # Every other provider is its own source cluster. This prevents Sagarin/Pi
+    # variants from receiving multiple consensus votes while retaining all systems.
+    return c.upper()
 PT_IDENTITY_HEADER_ALIASES = {
     "HOME": ("Home", "Home Team", "HomeTeam"),
     "AWAY": ("Road", "Away", "Visitor", "Visiting Team", "Visitor Team", "Away Team"),
@@ -645,9 +741,10 @@ def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str]
     )
 
     line_col=_pt_find_col(cols,["line","updated line","current line","spread"])
-    open_col=_pt_find_col(cols,["line open","opening line","open line","opening"])
-    avg_col=_pt_find_col(cols,["prediction avg","prediction average","system average","average prediction"])
-    med_col=_pt_find_col(cols,["prediction median","median prediction"])
+    open_col=_pt_find_col(cols,["lineopen","line open","opening line","open line","opening"])
+    avg_col=_pt_find_col(cols,["lineavg","prediction avg","prediction average","system average","average prediction"])
+    med_col=_pt_find_col(cols,["linemedian","prediction median","median prediction"])
+    std_col=_pt_find_col(cols,["linestd","prediction std","prediction standard deviation","system std"])
     date_col=_pt_find_col(cols,["date","game date","gamedate"])
     out=pd.DataFrame(index=df.index)
     out["season"]=int(season)
@@ -660,7 +757,33 @@ def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str]
     out["tracker_open_home"]=_pt_numeric(df[open_col]) if open_col else np.nan
     out["prediction_avg_home"]=_pt_numeric(df[avg_col]) if avg_col else np.nan
     out["prediction_median_home"]=_pt_numeric(df[med_col]) if med_col else np.nan
+    out["prediction_std_home"]=_pt_numeric(df[std_col]) if std_col else np.nan
     for k,c in syscols.items(): out[k]=_pt_numeric(df[c]) if c else np.nan
+
+    # Preserve the full source-native Prediction Tracker predictor universe.
+    # Only exact `line*` fields are eligible, with market/aggregate line fields
+    # explicitly excluded. No positional or fuzzy system identity is introduced.
+    _idx_sources={}; _idx_alias_conflicts={}
+    for _raw in cols:
+        _rk=str(_raw).strip().lower()
+        if not _rk.startswith("line") or _rk in PT_INDEX_RESERVED_HEADERS:
+            continue
+        _canon=_pt_index_canonical_header(_rk)
+        _oc=f"ptidx__{_canon}"
+        _vv=_pt_numeric(df[_raw])
+        _idx_sources.setdefault(_canon,[]).append(str(_raw))
+        if _oc not in out.columns:
+            out[_oc]=_vv
+        else:
+            _prev=pd.to_numeric(out[_oc],errors="coerce")
+            _new=pd.to_numeric(_vv,errors="coerce")
+            _ov=_prev.notna()&_new.notna()
+            if _ov.any():
+                _bad=(_prev[_ov]-_new[_ov]).abs().gt(.011)
+                if bool(_bad.any()):
+                    _idx_alias_conflicts[_canon]=int(_bad.sum())
+            out[_oc]=_prev.where(_prev.notna(),_new)
+
     vals=np.column_stack([pd.to_numeric(out[k],errors="coerce").to_numpy(float) for k in PT_PUBLISHED_WEIGHTS])
     w=np.asarray([PT_PUBLISHED_WEIGHTS[k] for k in PT_PUBLISHED_WEIGHTS],dtype=float)
     full=np.isfinite(vals).all(axis=1) if map_status=="FULL_FIVE_VERIFIED" else np.zeros(len(out),dtype=bool)
@@ -673,6 +796,14 @@ def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str]
     out=out.loc[~bad].reset_index(drop=True)
     out["source_row"]=np.arange(len(out),dtype=int)
     _component_counts=pd.to_numeric(out["meta_system_count"],errors="coerce").fillna(0).astype(int)
+    _idx_cols=[c for c in out.columns if str(c).startswith("ptidx__")]
+    _idx_populated=[c for c in _idx_cols if pd.to_numeric(out[c],errors="coerce").notna().any()]
+    _idx_any=(out[_idx_cols].apply(pd.to_numeric,errors="coerce").notna().any(axis=1) if _idx_cols else pd.Series(False,index=out.index))
+    log_func(
+        f"[NCAAF-PT-INDEX-UNIVERSE] season={int(season)} source={source_context} "
+        f"canonical_indices={len(_idx_cols)} populated_indices={len(_idx_populated)} "
+        f"rows_with_any_index={int(_idx_any.sum())}/{len(out)} alias_conflicts={_idx_alias_conflicts} authority=0"
+    )
     return out,{
         "status":"PASS","season":int(season),"rows":int(len(out)),
         "any_component_rows":int((_component_counts>0).sum()),
@@ -680,7 +811,11 @@ def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str]
         "full_five_rows":int(np.isfinite(out["meta_margin_home"]).sum()),
         "metamodel_status":map_status,"system_columns":syscols,"system_column_resolution":resolution,"missing_systems":missing,"ambiguous_systems":ambiguity,
         "home_column":home,"away_column":away,"date_column":date_col,"line_column":line_col,"open_line_column":open_col,
-        "prediction_avg_column":avg_col,"weights":dict(PT_PUBLISHED_WEIGHTS),"weight_sum":float(sum(PT_PUBLISHED_WEIGHTS.values())),
+        "prediction_avg_column":avg_col,"prediction_median_column":med_col,"prediction_std_column":std_col,
+        "weights":dict(PT_PUBLISHED_WEIGHTS),"weight_sum":float(sum(PT_PUBLISHED_WEIGHTS.values())),
+        "index_columns":{k:v for k,v in sorted(_idx_sources.items())},
+        "index_display_names":{k:_pt_index_display_name(k) for k in sorted(_idx_sources)},
+        "index_alias_conflicts":_idx_alias_conflicts,
         "raw_headers":cols,"source_context":source_context,
     }
 
@@ -911,11 +1046,12 @@ def _pt_candidate_map(external_names: Iterable[str], internal_names: Iterable[st
 def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func=print) -> dict[str,Any]:
     """Attach sparse Prediction Tracker history without shrinking the game universe.
 
-    A matched Prediction Tracker row is allowed to contain 1-5 of the named external
-    systems. Available individual components are preserved. The fixed published
-    META_MARGIN is attached only when all five exact named inputs are present. Missing
-    Prediction Tracker games remain NaN/absent external context and never remove or
-    neutralize an internal NCAAF game.
+    A matched Prediction Tracker row may contain any number of source-native external
+    systems. Every available individual index is preserved for research. The fixed
+    published META_MARGIN remains a separate frozen five-system benchmark and is attached
+    only when all five exact named benchmark inputs are present. Missing Prediction
+    Tracker games remain NaN/absent external context and never remove or neutralize an
+    internal NCAAF game.
     """
     cache=getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}
     games=cache.get("games"); mg=cache.get("miner_games")
@@ -940,10 +1076,18 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
     key=pd.Series([f"{int(s)}|{h}|{a}" if np.isfinite(s) and h and a else "" for s,h,a in zip(season.to_numpy(float),home,away)],index=g.index)
     gd=pd.to_datetime(g.get("Game_Date",pd.Series(pd.NaT,index=g.index)),errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
 
-    meta=np.full(len(g),np.nan); cnt=np.full(len(g),np.nan); pavg=np.full(len(g),np.nan); extline=np.full(len(g),np.nan)
+    meta=np.full(len(g),np.nan); cnt=np.full(len(g),np.nan); pavg=np.full(len(g),np.nan); pmed=np.full(len(g),np.nan); pstd=np.full(len(g),np.nan); extline=np.full(len(g),np.nan)
     listed=np.zeros(len(g),dtype=float); full_five=np.zeros(len(g),dtype=float)
     comp={k:np.full(len(g),np.nan) for k in PT_PUBLISHED_WEIGHTS}
+
+    # Full external research universe. Columns were preserved by _pt_parse_frame
+    # using exact source-native Prediction Tracker headers.
+    _idx_ext_cols=sorted([c for c in ex.columns if str(c).startswith("ptidx__")])
+    _idx_keys=[str(c)[len("ptidx__"):] for c in _idx_ext_cols]
+    idx_comp={k:np.full(len(g),np.nan) for k in _idx_keys}
+
     matched=0; matched_any_component=0; full_five_matched=0; partial_matched=0
+    matched_any_index=0
 
     for i,k in enumerate(key.astype(str)):
         if not k: continue
@@ -964,6 +1108,15 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
                 comp[_k][i]=orient*float(_v)
                 component_count+=1
 
+        _index_count=0
+        for _k,_c in zip(_idx_keys,_idx_ext_cols):
+            _v=pd.to_numeric(pd.Series([r.get(_c,np.nan)]),errors="coerce").iloc[0]
+            if pd.notna(_v):
+                idx_comp[_k][i]=orient*float(_v)
+                _index_count+=1
+        if _index_count>0:
+            matched_any_index+=1
+
         cnt[i]=float(component_count)
         if component_count>0:
             matched_any_component+=1
@@ -981,6 +1134,10 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
 
         _pa=pd.to_numeric(pd.Series([r.get("prediction_avg_home",np.nan)]),errors="coerce").iloc[0]
         if pd.notna(_pa): pavg[i]=orient*float(_pa)
+        _pm=pd.to_numeric(pd.Series([r.get("prediction_median_home",np.nan)]),errors="coerce").iloc[0]
+        if pd.notna(_pm): pmed[i]=orient*float(_pm)
+        _ps=pd.to_numeric(pd.Series([r.get("prediction_std_home",np.nan)]),errors="coerce").iloc[0]
+        if pd.notna(_ps): pstd[i]=float(_ps)
         _ol=pd.to_numeric(pd.Series([r.get("tracker_open_home",np.nan)]),errors="coerce").iloc[0]
         if pd.notna(_ol): extline[i]=orient*float(_ol)
 
@@ -996,11 +1153,82 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
     agree_team=np.sum(np.isfinite(edge_mat)&(edge_mat>0),axis=1).astype(float)
     agree_opp=np.sum(np.isfinite(edge_mat)&(edge_mat<0),axis=1).astype(float)
 
+    # Full Prediction Tracker index-universe aggregates. All of these remain one
+    # correlated external-rating family. Multi-variant providers (Sagarin, Pi,
+    # regression, Payne) are also collapsed to one source-cluster vote for the
+    # cluster-balanced consensus diagnostics.
+    if _idx_keys:
+        idx_mat=np.column_stack([idx_comp[k] for k in _idx_keys])
+        idx_edge=idx_mat-market_margin[:,None]
+        idx_finite=np.isfinite(idx_mat)
+        idx_n=idx_finite.sum(axis=1).astype(float)
+        idx_team_count=np.sum(np.isfinite(idx_edge)&(idx_edge>0),axis=1).astype(float)
+        idx_opp_count=np.sum(np.isfinite(idx_edge)&(idx_edge<0),axis=1).astype(float)
+        idx_strong_team_count=np.sum(np.isfinite(idx_edge)&(idx_edge>=2),axis=1).astype(float)
+        idx_strong_opp_count=np.sum(np.isfinite(idx_edge)&(idx_edge<=-2),axis=1).astype(float)
+
+        idx_mean_margin=np.full(len(g),np.nan); idx_median_margin=np.full(len(g),np.nan)
+        idx_std=np.full(len(g),np.nan); idx_iqr=np.full(len(g),np.nan)
+        for _i in range(len(g)):
+            _v=idx_mat[_i,np.isfinite(idx_mat[_i])]
+            if _v.size:
+                idx_mean_margin[_i]=float(np.mean(_v))
+                idx_median_margin[_i]=float(np.median(_v))
+                if _v.size>=2:
+                    idx_std[_i]=float(np.std(_v))
+                    idx_iqr[_i]=float(np.percentile(_v,75)-np.percentile(_v,25))
+        idx_mean_edge=idx_mean_margin-market_margin
+        idx_median_edge=idx_median_margin-market_margin
+        with np.errstate(divide="ignore",invalid="ignore"):
+            idx_team_frac=np.where(idx_n>0,idx_team_count/idx_n,np.nan)
+            idx_opp_frac=np.where(idx_n>0,idx_opp_count/idx_n,np.nan)
+            idx_strong_team_frac=np.where(idx_n>0,idx_strong_team_count/idx_n,np.nan)
+            idx_strong_opp_frac=np.where(idx_n>0,idx_strong_opp_count/idx_n,np.nan)
+
+        _cluster_members={}
+        for _j,_k in enumerate(_idx_keys):
+            _cluster_members.setdefault(_pt_index_source_cluster(_k),[]).append(_j)
+        _cluster_names=sorted(_cluster_members)
+        _cluster_mat=np.full((len(g),len(_cluster_names)),np.nan)
+        for _cj,_cn in enumerate(_cluster_names):
+            _cols=_cluster_members[_cn]
+            _sub=idx_mat[:,_cols]
+            for _i in range(len(g)):
+                _v=_sub[_i,np.isfinite(_sub[_i])]
+                if _v.size:
+                    _cluster_mat[_i,_cj]=float(np.mean(_v))
+        _cluster_edges=_cluster_mat-market_margin[:,None]
+        idx_cluster_n=np.isfinite(_cluster_mat).sum(axis=1).astype(float)
+        idx_cluster_median_margin=np.full(len(g),np.nan)
+        for _i in range(len(g)):
+            _v=_cluster_mat[_i,np.isfinite(_cluster_mat[_i])]
+            if _v.size:
+                idx_cluster_median_margin[_i]=float(np.median(_v))
+        idx_cluster_median_edge=idx_cluster_median_margin-market_margin
+        _ct=np.sum(np.isfinite(_cluster_edges)&(_cluster_edges>0),axis=1).astype(float)
+        _co=np.sum(np.isfinite(_cluster_edges)&(_cluster_edges<0),axis=1).astype(float)
+        with np.errstate(divide="ignore",invalid="ignore"):
+            idx_cluster_team_frac=np.where(idx_cluster_n>0,_ct/idx_cluster_n,np.nan)
+            idx_cluster_opp_frac=np.where(idx_cluster_n>0,_co/idx_cluster_n,np.nan)
+    else:
+        idx_mat=np.empty((len(g),0)); idx_edge=np.empty((len(g),0)); idx_n=np.zeros(len(g),dtype=float)
+        idx_mean_margin=np.full(len(g),np.nan); idx_median_margin=np.full(len(g),np.nan)
+        idx_mean_edge=np.full(len(g),np.nan); idx_median_edge=np.full(len(g),np.nan)
+        idx_std=np.full(len(g),np.nan); idx_iqr=np.full(len(g),np.nan)
+        idx_team_frac=np.full(len(g),np.nan); idx_opp_frac=np.full(len(g),np.nan)
+        idx_strong_team_frac=np.full(len(g),np.nan); idx_strong_opp_frac=np.full(len(g),np.nan)
+        idx_cluster_n=np.zeros(len(g),dtype=float)
+        idx_cluster_median_edge=np.full(len(g),np.nan)
+        idx_cluster_team_frac=np.full(len(g),np.nan); idx_cluster_opp_frac=np.full(len(g),np.nan)
+        _cluster_names=[]
+
     for df in (g,m):
         df["_V210_PT_META_MARGIN_TEAM"]=meta
         df["_V210_PT_META_EDGE_POINTS"]=meta_edge
         df["_V210_PT_META_SYSTEM_COUNT"]=cnt
         df["_V210_PT_PREDICTION_AVG_TEAM"]=pavg
+        df["_V218_PT_PREDICTION_MEDIAN_TEAM"]=pmed
+        df["_V218_PT_PREDICTION_STD"]=pstd
         df["_V210_PT_ARCHIVE_OPEN_MARGIN_TEAM"]=extline
         df["_V212_PT_COMPONENT_STD"]=comp_std
         df["_V212_PT_COMPONENT_TEAM_AGREE_COUNT"]=agree_team
@@ -1008,9 +1236,41 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         df["_V217_PT_GAME_LISTED"]=listed
         df["_V217_PT_COMPONENT_AVAILABLE_COUNT"]=comp_n.astype(float)
         df["_V217_PT_FULL_FIVE"]=full_five
+
+        # V2.18 full external index universe and aggregate consensus diagnostics.
+        df["_V218_PTIDX_AVAILABLE_COUNT"]=idx_n
+        df["_V218_PTIDX_MEAN_MARGIN_TEAM"]=idx_mean_margin
+        df["_V218_PTIDX_MEAN_EDGE_POINTS"]=idx_mean_edge
+        df["_V218_PTIDX_MEDIAN_MARGIN_TEAM"]=idx_median_margin
+        df["_V218_PTIDX_MEDIAN_EDGE_POINTS"]=idx_median_edge
+        df["_V218_PTIDX_STD"]=idx_std
+        df["_V218_PTIDX_IQR"]=idx_iqr
+        df["_V218_PTIDX_TEAM_AGREE_FRAC"]=idx_team_frac
+        df["_V218_PTIDX_OPP_AGREE_FRAC"]=idx_opp_frac
+        df["_V218_PTIDX_STRONG_TEAM_FRAC"]=idx_strong_team_frac
+        df["_V218_PTIDX_STRONG_OPP_FRAC"]=idx_strong_opp_frac
+        df["_V218_PTIDX_CLUSTER_COUNT"]=idx_cluster_n
+        df["_V218_PTIDX_CLUSTER_MEDIAN_EDGE_POINTS"]=idx_cluster_median_edge
+        df["_V218_PTIDX_CLUSTER_TEAM_AGREE_FRAC"]=idx_cluster_team_frac
+        df["_V218_PTIDX_CLUSTER_OPP_AGREE_FRAC"]=idx_cluster_opp_frac
+        df["_V218_PT_TRACKER_AVG_EDGE_POINTS"]=pavg-market_margin
+        df["_V218_PT_TRACKER_MEDIAN_EDGE_POINTS"]=pmed-market_margin
+
         for _k in PT_PUBLISHED_WEIGHTS:
             df[f"_V212_PT_{_k}_MARGIN_TEAM"]=comp[_k]
             df[f"_V212_PT_{_k}_EDGE_POINTS"]=comp_edges[_k]
+
+    # Bulk-attach the expanded index matrix to avoid DataFrame fragmentation.
+    _idx_extra={}
+    for _k in _idx_keys:
+        _slug=re.sub(r"[^A-Z0-9]+","_",str(_k).upper())
+        _arr=idx_comp[_k]
+        _idx_extra[f"_V218_PTIDX_{_slug}_MARGIN_TEAM"]=_arr
+        _idx_extra[f"_V218_PTIDX_{_slug}_EDGE_POINTS"]=_arr-market_margin
+    if _idx_extra:
+        _idx_extra_df=pd.DataFrame(_idx_extra,index=g.index)
+        g=pd.concat([g,_idx_extra_df],axis=1)
+        m=pd.concat([m,_idx_extra_df.copy()],axis=1)
 
     # Core bridge exists only on miner frame; attach meta-vs-core state there.
     if "_V29_CORE_INCUMBENT_EDGE_POINTS" in m.columns:
@@ -1018,6 +1278,11 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         m["_V210_PT_META_MINUS_CORE_EDGE"]=meta_edge-ce
 
     cache["games"]=g; cache["miner_games"]=m
+    cache["pt_index_catalog"]=[
+        {"id":_k,"name":_pt_index_display_name(_k),"cluster":_pt_index_source_cluster(_k),
+         "matched_nonnull":int(np.isfinite(idx_comp[_k]).sum())}
+        for _k in _idx_keys
+    ]
     try: setattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",cache)
     except Exception: pass
 
@@ -1026,6 +1291,9 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         "status":"PASS",
         "matched_rows":int(matched),
         "matched_any_component_rows":int(matched_any_component),
+        "matched_any_index_rows":int(matched_any_index),
+        "external_index_count":int(len(_idx_keys)),
+        "external_source_cluster_count":int(len(_cluster_names)),
         "full_five_matched_rows":int(full_five_matched),
         "partial_matched_rows":int(partial_matched),
         "no_pt_rows":int(no_pt),
@@ -1039,7 +1307,8 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
     }
     log_func(
         f"[NCAAF-PT-MATCH] status=PASS matched_rows={matched}/{len(g)} coverage={diag['coverage']:.3f} "
-        f"any_component={matched_any_component} partial={partial_matched} full_five={full_five_matched} "
+        f"any_component={matched_any_component} any_index={matched_any_index} indices={len(_idx_keys)} clusters={len(_cluster_names)} "
+        f"partial={partial_matched} full_five={full_five_matched} "
         f"no_pt={no_pt} full_five_coverage={diag['full_five_coverage']:.3f} "
         f"mapped_teams={len(emap)} unresolved_teams={len(unresolved)} sparse=TRUE authority=0"
     )
@@ -1909,16 +2178,16 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
         # independent research intelligence and always research-only in V2.11.
         meta_edge=nfirst("_V210_PT_META_EDGE_POINTS")
         if has("_V210_PT_META_EDGE_POINTS"):
-            add("META_PT_EDGE_TEAM_2PLUS","EXTERNAL_META_MARGIN",meta_edge.ge(2),desc="Prediction Tracker five-system metamodel edge >= +2",min_n=30)
-            add("META_PT_EDGE_TEAM_3PLUS","EXTERNAL_META_MARGIN",meta_edge.ge(3),desc="Prediction Tracker five-system metamodel edge >= +3",min_n=30)
-            add("META_PT_EDGE_OPP_2PLUS","EXTERNAL_META_MARGIN",meta_edge.le(-2),desc="Prediction Tracker five-system metamodel edge <= -2",min_n=30)
-            add("META_PT_EDGE_OPP_3PLUS","EXTERNAL_META_MARGIN",meta_edge.le(-3),desc="Prediction Tracker five-system metamodel edge <= -3",min_n=30)
-            add("META_PT_EDGE_ABS_4PLUS","EXTERNAL_META_MARGIN",meta_edge.abs().ge(4),desc="Prediction Tracker metamodel absolute edge >= 4",min_n=30)
+            add("META_PT_EDGE_TEAM_2PLUS","EXTERNAL_RATINGS_FAMILY",meta_edge.ge(2),desc="Prediction Tracker five-system metamodel edge >= +2",min_n=30)
+            add("META_PT_EDGE_TEAM_3PLUS","EXTERNAL_RATINGS_FAMILY",meta_edge.ge(3),desc="Prediction Tracker five-system metamodel edge >= +3",min_n=30)
+            add("META_PT_EDGE_OPP_2PLUS","EXTERNAL_RATINGS_FAMILY",meta_edge.le(-2),desc="Prediction Tracker five-system metamodel edge <= -2",min_n=30)
+            add("META_PT_EDGE_OPP_3PLUS","EXTERNAL_RATINGS_FAMILY",meta_edge.le(-3),desc="Prediction Tracker five-system metamodel edge <= -3",min_n=30)
+            add("META_PT_EDGE_ABS_4PLUS","EXTERNAL_RATINGS_FAMILY",meta_edge.abs().ge(4),desc="Prediction Tracker metamodel absolute edge >= 4",min_n=30)
             if has("_V29_CORE_INCUMBENT_EDGE_POINTS"):
                 good=meta_edge.notna()&core.notna()
-                add("META_PT_CORE_STRONG_AGREE","EXTERNAL_META_MARGIN",good&(meta_edge.abs().ge(2))&(core.abs().ge(2))&(np.sign(meta_edge)==np.sign(core)),desc="External metamodel and CORE both >=2 points same direction",min_n=30)
-                add("META_PT_CORE_STRONG_CONFLICT","EXTERNAL_META_MARGIN",good&(meta_edge.abs().ge(2))&(core.abs().ge(2))&(np.sign(meta_edge)!=np.sign(core)),desc="External metamodel and CORE both >=2 points opposite direction",min_n=30)
-                add("META_PT_CORE_GAP_4PLUS","EXTERNAL_META_MARGIN",good&(meta_edge-core).abs().ge(4),desc="External metamodel differs from CORE edge by >=4 points",min_n=30)
+                add("META_PT_CORE_STRONG_AGREE","EXTERNAL_RATINGS_FAMILY",good&(meta_edge.abs().ge(2))&(core.abs().ge(2))&(np.sign(meta_edge)==np.sign(core)),desc="External metamodel and CORE both >=2 points same direction",min_n=30)
+                add("META_PT_CORE_STRONG_CONFLICT","EXTERNAL_RATINGS_FAMILY",good&(meta_edge.abs().ge(2))&(core.abs().ge(2))&(np.sign(meta_edge)!=np.sign(core)),desc="External metamodel and CORE both >=2 points opposite direction",min_n=30)
+                add("META_PT_CORE_GAP_4PLUS","EXTERNAL_RATINGS_FAMILY",good&(meta_edge-core).abs().ge(4),desc="External metamodel differs from CORE edge by >=4 points",min_n=30)
 
         # Preserve the five component ratings as diagnostics/research atoms instead
         # of reducing the external family to one weighted average.  They remain one
@@ -1928,24 +2197,108 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
             _ec=f"_V212_PT_{_k}_EDGE_POINTS"
             if has(_ec):
                 _ee=nfirst(_ec); _slug=re.sub(r"[^A-Z0-9]+","_",_k.upper())
-                add(f"META_PT_{_slug}_TEAM_2PLUS","EXTERNAL_COMPONENT",_ee.ge(2),desc=f"{_k} external edge >= +2",min_n=30)
-                add(f"META_PT_{_slug}_OPP_2PLUS","EXTERNAL_COMPONENT",_ee.le(-2),desc=f"{_k} external edge <= -2",min_n=30)
+                add(f"META_PT_{_slug}_TEAM_2PLUS","EXTERNAL_RATINGS_FAMILY",_ee.ge(2),desc=f"{_k} external edge >= +2",min_n=30)
+                add(f"META_PT_{_slug}_OPP_2PLUS","EXTERNAL_RATINGS_FAMILY",_ee.le(-2),desc=f"{_k} external edge <= -2",min_n=30)
                 if has("_V29_CORE_INCUMBENT_EDGE_POINTS"):
                     _good=_ee.notna()&core.notna()&(_ee.abs().ge(2))&(core.abs().ge(2))
-                    add(f"META_PT_{_slug}_CORE_AGREE", "EXTERNAL_COMPONENT", _good&(np.sign(_ee)==np.sign(core)), desc=f"{_k} and CORE strong agreement", min_n=30)
-                    add(f"META_PT_{_slug}_CORE_CONFLICT", "EXTERNAL_COMPONENT", _good&(np.sign(_ee)!=np.sign(core)), desc=f"{_k} and CORE strong conflict", min_n=30)
+                    add(f"META_PT_{_slug}_CORE_AGREE", "EXTERNAL_RATINGS_FAMILY", _good&(np.sign(_ee)==np.sign(core)), desc=f"{_k} and CORE strong agreement", min_n=30)
+                    add(f"META_PT_{_slug}_CORE_CONFLICT", "EXTERNAL_RATINGS_FAMILY", _good&(np.sign(_ee)!=np.sign(core)), desc=f"{_k} and CORE strong conflict", min_n=30)
         _ta=nfirst("_V212_PT_COMPONENT_TEAM_AGREE_COUNT"); _oa=nfirst("_V212_PT_COMPONENT_OPP_AGREE_COUNT"); _ds=nfirst("_V212_PT_COMPONENT_STD")
         _avail=nfirst("_V217_PT_COMPONENT_AVAILABLE_COUNT") if has("_V217_PT_COMPONENT_AVAILABLE_COUNT") else nfirst("_V210_PT_META_SYSTEM_COUNT")
         _all5=_avail.eq(5)
         if has("_V212_PT_COMPONENT_TEAM_AGREE_COUNT"):
-            add("META_PT_COMPONENTS_5_OF_5_TEAM","EXTERNAL_CONSENSUS",_all5&_ta.ge(5),desc="All five available external systems favor team vs market",min_n=30)
-            add("META_PT_COMPONENTS_4PLUS_TEAM","EXTERNAL_CONSENSUS",_all5&_ta.ge(4),desc="At least four of five external systems favor team vs market; full five-system coverage required",min_n=30)
+            add("META_PT_COMPONENTS_5_OF_5_TEAM","EXTERNAL_RATINGS_FAMILY",_all5&_ta.ge(5),desc="All five available external systems favor team vs market",min_n=30)
+            add("META_PT_COMPONENTS_4PLUS_TEAM","EXTERNAL_RATINGS_FAMILY",_all5&_ta.ge(4),desc="At least four of five external systems favor team vs market; full five-system coverage required",min_n=30)
         if has("_V212_PT_COMPONENT_OPP_AGREE_COUNT"):
-            add("META_PT_COMPONENTS_5_OF_5_OPP","EXTERNAL_CONSENSUS",_all5&_oa.ge(5),desc="All five available external systems favor opponent vs market",min_n=30)
-            add("META_PT_COMPONENTS_4PLUS_OPP","EXTERNAL_CONSENSUS",_all5&_oa.ge(4),desc="At least four of five external systems favor opponent vs market; full five-system coverage required",min_n=30)
+            add("META_PT_COMPONENTS_5_OF_5_OPP","EXTERNAL_RATINGS_FAMILY",_all5&_oa.ge(5),desc="All five available external systems favor opponent vs market",min_n=30)
+            add("META_PT_COMPONENTS_4PLUS_OPP","EXTERNAL_RATINGS_FAMILY",_all5&_oa.ge(4),desc="At least four of five external systems favor opponent vs market; full five-system coverage required",min_n=30)
         if has("_V212_PT_COMPONENT_STD"):
-            add("META_PT_LOW_DISPERSION_LE3","EXTERNAL_CONSENSUS",_all5&_ds.le(3)&_ds.notna(),desc="Five-system margin dispersion <=3 points; full five-system coverage required",min_n=30)
-            add("META_PT_HIGH_DISPERSION_GE6","EXTERNAL_CONSENSUS",_all5&_ds.ge(6),desc="Five-system margin dispersion >=6 points; full five-system coverage required",min_n=30)
+            add("META_PT_LOW_DISPERSION_LE3","EXTERNAL_RATINGS_FAMILY",_all5&_ds.le(3)&_ds.notna(),desc="Five-system margin dispersion <=3 points; full five-system coverage required",min_n=30)
+            add("META_PT_HIGH_DISPERSION_GE6","EXTERNAL_RATINGS_FAMILY",_all5&_ds.ge(6),desc="Five-system margin dispersion >=6 points; full five-system coverage required",min_n=30)
+
+        # V2.18: full Prediction Tracker index universe. Every exact source-native
+        # predictor gets a directional edge atom, while all indices remain ONE
+        # correlated external family. The Miner can therefore combine one external
+        # signal with Pathi/Big Al/CORE/specialists, but cannot stack many correlated
+        # rating systems as if they were independent authority votes.
+        _ptidx_cols=sorted([
+            c for c in g.columns
+            if str(c).startswith("_V218_PTIDX_") and str(c).endswith("_EDGE_POINTS")
+            and str(c) not in {
+                "_V218_PTIDX_MEAN_EDGE_POINTS",
+                "_V218_PTIDX_MEDIAN_EDGE_POINTS",
+                "_V218_PTIDX_CLUSTER_MEDIAN_EDGE_POINTS",
+            }
+        ])
+        for _c in _ptidx_cols:
+            _ee=nfirst(_c)
+            _slug=str(_c)[len("_V218_PTIDX_"):-len("_EDGE_POINTS")]
+            add(f"PTIDX_{_slug}_TEAM_2PLUS","EXTERNAL_RATINGS_FAMILY",_ee.ge(2),
+                desc=f"Prediction Tracker {_slug} edge >= +2",min_n=30)
+            add(f"PTIDX_{_slug}_OPP_2PLUS","EXTERNAL_RATINGS_FAMILY",_ee.le(-2),
+                desc=f"Prediction Tracker {_slug} edge <= -2",min_n=30)
+
+        _idx_n=nfirst("_V218_PTIDX_AVAILABLE_COUNT")
+        _idx_med=nfirst("_V218_PTIDX_MEDIAN_EDGE_POINTS")
+        _idx_mean=nfirst("_V218_PTIDX_MEAN_EDGE_POINTS")
+        _idx_tf=nfirst("_V218_PTIDX_TEAM_AGREE_FRAC")
+        _idx_of=nfirst("_V218_PTIDX_OPP_AGREE_FRAC")
+        _idx_stf=nfirst("_V218_PTIDX_STRONG_TEAM_FRAC")
+        _idx_sof=nfirst("_V218_PTIDX_STRONG_OPP_FRAC")
+        _idx_std=nfirst("_V218_PTIDX_STD")
+        _idx_iqr=nfirst("_V218_PTIDX_IQR")
+        _cl_n=nfirst("_V218_PTIDX_CLUSTER_COUNT")
+        _cl_med=nfirst("_V218_PTIDX_CLUSTER_MEDIAN_EDGE_POINTS")
+        _cl_tf=nfirst("_V218_PTIDX_CLUSTER_TEAM_AGREE_FRAC")
+        _cl_of=nfirst("_V218_PTIDX_CLUSTER_OPP_AGREE_FRAC")
+        _enough=_idx_n.ge(8)
+        _cl_enough=_cl_n.ge(8)
+
+        if has("_V218_PTIDX_MEDIAN_EDGE_POINTS"):
+            add("PT_ALL_MEDIAN_EDGE_TEAM_2PLUS","EXTERNAL_RATINGS_FAMILY",_enough&_idx_med.ge(2),desc="All-index median edge >= +2 with >=8 available systems",min_n=30)
+            add("PT_ALL_MEDIAN_EDGE_TEAM_3PLUS","EXTERNAL_RATINGS_FAMILY",_enough&_idx_med.ge(3),desc="All-index median edge >= +3 with >=8 available systems",min_n=30)
+            add("PT_ALL_MEDIAN_EDGE_OPP_2PLUS","EXTERNAL_RATINGS_FAMILY",_enough&_idx_med.le(-2),desc="All-index median edge <= -2 with >=8 available systems",min_n=30)
+            add("PT_ALL_MEDIAN_EDGE_OPP_3PLUS","EXTERNAL_RATINGS_FAMILY",_enough&_idx_med.le(-3),desc="All-index median edge <= -3 with >=8 available systems",min_n=30)
+        if has("_V218_PTIDX_MEAN_EDGE_POINTS"):
+            add("PT_ALL_MEAN_EDGE_TEAM_2PLUS","EXTERNAL_RATINGS_FAMILY",_enough&_idx_mean.ge(2),desc="All-index mean edge >= +2 with >=8 available systems",min_n=30)
+            add("PT_ALL_MEAN_EDGE_OPP_2PLUS","EXTERNAL_RATINGS_FAMILY",_enough&_idx_mean.le(-2),desc="All-index mean edge <= -2 with >=8 available systems",min_n=30)
+        if has("_V218_PTIDX_TEAM_AGREE_FRAC"):
+            for _pct,_cut in ((65,.65),(75,.75),(85,.85)):
+                add(f"PT_ALL_CONSENSUS_TEAM_{_pct}","EXTERNAL_RATINGS_FAMILY",_enough&_idx_tf.ge(_cut),desc=f">={_pct}% of available external indices favor team vs market",min_n=30)
+        if has("_V218_PTIDX_OPP_AGREE_FRAC"):
+            for _pct,_cut in ((65,.65),(75,.75),(85,.85)):
+                add(f"PT_ALL_CONSENSUS_OPP_{_pct}","EXTERNAL_RATINGS_FAMILY",_enough&_idx_of.ge(_cut),desc=f">={_pct}% of available external indices favor opponent vs market",min_n=30)
+        if has("_V218_PTIDX_STRONG_TEAM_FRAC"):
+            add("PT_ALL_STRONG_EDGE_TEAM_65","EXTERNAL_RATINGS_FAMILY",_enough&_idx_stf.ge(.65),desc=">=65% of available external indices have team edge >=2",min_n=30)
+        if has("_V218_PTIDX_STRONG_OPP_FRAC"):
+            add("PT_ALL_STRONG_EDGE_OPP_65","EXTERNAL_RATINGS_FAMILY",_enough&_idx_sof.ge(.65),desc=">=65% of available external indices have opponent edge >=2",min_n=30)
+        if has("_V218_PTIDX_STD"):
+            add("PT_ALL_LOW_DISPERSION_LE3","EXTERNAL_RATINGS_FAMILY",_enough&_idx_std.le(3)&_idx_std.notna(),desc="All-index prediction dispersion <=3 points",min_n=30)
+            add("PT_ALL_HIGH_DISPERSION_GE6","EXTERNAL_RATINGS_FAMILY",_enough&_idx_std.ge(6),desc="All-index prediction dispersion >=6 points",min_n=30)
+        if has("_V218_PTIDX_IQR"):
+            add("PT_ALL_IQR_LE4","EXTERNAL_RATINGS_FAMILY",_enough&_idx_iqr.le(4)&_idx_iqr.notna(),desc="All-index interquartile range <=4 points",min_n=30)
+            add("PT_ALL_IQR_GE8","EXTERNAL_RATINGS_FAMILY",_enough&_idx_iqr.ge(8),desc="All-index interquartile range >=8 points",min_n=30)
+
+        # Source-cluster balanced consensus: Sagarin/Pi/regression/Payne variants
+        # receive one cluster vote each, avoiding accidental over-weighting.
+        if has("_V218_PTIDX_CLUSTER_MEDIAN_EDGE_POINTS"):
+            add("PT_CLUSTER_MEDIAN_TEAM_2PLUS","EXTERNAL_RATINGS_FAMILY",_cl_enough&_cl_med.ge(2),desc="Source-cluster balanced median edge >= +2",min_n=30)
+            add("PT_CLUSTER_MEDIAN_OPP_2PLUS","EXTERNAL_RATINGS_FAMILY",_cl_enough&_cl_med.le(-2),desc="Source-cluster balanced median edge <= -2",min_n=30)
+        if has("_V218_PTIDX_CLUSTER_TEAM_AGREE_FRAC"):
+            add("PT_CLUSTER_CONSENSUS_TEAM_70","EXTERNAL_RATINGS_FAMILY",_cl_enough&_cl_tf.ge(.70),desc=">=70% of external source clusters favor team",min_n=30)
+        if has("_V218_PTIDX_CLUSTER_OPP_AGREE_FRAC"):
+            add("PT_CLUSTER_CONSENSUS_OPP_70","EXTERNAL_RATINGS_FAMILY",_cl_enough&_cl_of.ge(.70),desc=">=70% of external source clusters favor opponent",min_n=30)
+
+        # Prediction Tracker's own aggregate lineavg/linemedian are retained as
+        # separate diagnostics but still part of the same correlated family.
+        _ptavg=nfirst("_V218_PT_TRACKER_AVG_EDGE_POINTS")
+        _ptmed=nfirst("_V218_PT_TRACKER_MEDIAN_EDGE_POINTS")
+        if has("_V218_PT_TRACKER_AVG_EDGE_POINTS"):
+            add("PT_TRACKER_AVG_TEAM_2PLUS","EXTERNAL_RATINGS_FAMILY",_ptavg.ge(2),desc="Prediction Tracker published average edge >= +2",min_n=30)
+            add("PT_TRACKER_AVG_OPP_2PLUS","EXTERNAL_RATINGS_FAMILY",_ptavg.le(-2),desc="Prediction Tracker published average edge <= -2",min_n=30)
+        if has("_V218_PT_TRACKER_MEDIAN_EDGE_POINTS"):
+            add("PT_TRACKER_MEDIAN_TEAM_2PLUS","EXTERNAL_RATINGS_FAMILY",_ptmed.ge(2),desc="Prediction Tracker published median edge >= +2",min_n=30)
+            add("PT_TRACKER_MEDIAN_OPP_2PLUS","EXTERNAL_RATINGS_FAMILY",_ptmed.le(-2),desc="Prediction Tracker published median edge <= -2",min_n=30)
 
         spec_edge_cols=[c for c in g.columns if str(c).startswith("_V29_SPEC_") and str(c).endswith("_EDGE_POINTS")]
         for c in sorted(spec_edge_cols):
@@ -2144,6 +2497,14 @@ def _evaluate_rule(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, valid: np.n
             conf.append(row)
     conf_n=sum(x["n"] for x in conf); conf_rate=float(np.average([x["rate"] for x in conf],weights=[x["n"] for x in conf])) if conf_n else np.nan
 
+    # V2.18 explicit discovery/confirmation split audit. Identical N/rate can occur
+    # by coincidence, but the same row must never appear in both periods.
+    _conf_mask=mask&valid&np.isfinite(seasons)&np.isin(seasons,np.asarray(CONFIRMATION_SEASONS,dtype=float))
+    _split_overlap_n=int(np.sum(disc&_conf_mask))
+    _split_disjoint=bool(_split_overlap_n==0)
+    _disc_years=sorted(set(int(x) for x in seasons[disc&np.isfinite(seasons)]))
+    _conf_years=sorted(set(int(x) for x in seasons[_conf_mask&np.isfinite(seasons)]))
+
     market_resid_disc=market_resid_conf=np.nan; h2h_conf_price={}
     nominal=_one_sided_p(rate,len(ix))
     if market=="h2h":
@@ -2158,7 +2519,15 @@ def _evaluate_rule(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, valid: np.n
         "remove_best_discovery_roi":remove_best_roi,"remove_best_market_residual":remove_best_resid,
         "nominal_pvalue":nominal,"confirmation":conf,"confirmation_n":conf_n,"confirmation_rate":conf_rate,
         "market_residual_discovery":market_resid_disc,"market_residual_confirmation":market_resid_conf,
-        "h2h_discovery_price":h2h_price,"h2h_confirmation_price":h2h_conf_price,"mask":mask,
+        "h2h_discovery_price":h2h_price,"h2h_confirmation_price":h2h_conf_price,
+        "split_audit":{
+            "discovery_years":_disc_years,
+            "confirmation_years":_conf_years,
+            "row_overlap_n":_split_overlap_n,
+            "disjoint":_split_disjoint,
+            "identical_n_rate":bool(conf_n==len(ix) and np.isfinite(conf_rate) and abs(conf_rate-rate)<1e-12),
+        },
+        "mask":mask,
     }
 
 
@@ -2397,7 +2766,7 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
     _fam_counts={}
     for _a in atoms: _fam_counts[_a.get("family")]=int(_fam_counts.get(_a.get("family"),0))+1
     _bridge_atoms=sum(v for k,v in _fam_counts.items() if str(k).startswith(("EXPERT_","RESEARCH_CORE_STATE","RESEARCH_SPECIALIST_","MARKET_KEY_","EXTERNAL_")))
-    out={"version":"NCAAF-RV2.5-SYSTEM-MINER-V5-EXPERT-MODEL-BRIDGE","market":market,"production_authority":0,"discovery_max_season":DISCOVERY_MAX_SEASON,
+    out={"version":"NCAAF-RV2.18-SYSTEM-MINER-V6-FULL-PT-UNIVERSE","market":market,"production_authority":0,"discovery_max_season":DISCOVERY_MAX_SEASON,
          "confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,"atoms":len(atoms),"atom_family_counts":_fam_counts,"expert_model_bridge_atoms":int(_bridge_atoms),"systems":[],"mechanism_families":[]}
     log_func(f"[NCAAF-RV25-ATOM-BRIDGE] market={market} atoms={len(atoms)} bridge_atoms={_bridge_atoms} pathi={_fam_counts.get('EXPERT_PATHI',0)} bigal={_fam_counts.get('EXPERT_BIGAL',0)} core={_fam_counts.get('RESEARCH_CORE_STATE',0)} specialist={sum(v for k,v in _fam_counts.items() if str(k).startswith('RESEARCH_SPECIALIST_'))} external={sum(v for k,v in _fam_counts.items() if str(k).startswith('EXTERNAL_'))} authority=0")
     if valid.sum()<500: out["status"]="INSUFFICIENT_HISTORY"; return out
@@ -2445,12 +2814,14 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
             hp=z.get("h2h_confirmation_price") or {}; cy=[x for x in z.get("confirmation",[]) if int(x.get("season",0)) in CONFIRMATION_SEASONS]
             both_years=bool(len(cy)==2 and all(int(x.get("priced_n",0) or 0)>=15 and np.isfinite(x.get("roi",np.nan)) and x["roi"]>0 and np.isfinite(x.get("market_residual",np.nan)) and x["market_residual"]>=0 for x in cy))
             conf_ok=bool(
+                (z.get("split_audit") or {}).get("disjoint",False) and
                 z["confirmation_n"]>=30 and both_years and int(hp.get("priced_n",0) or 0)>=30 and
                 np.isfinite(hp.get("roi",np.nan)) and hp["roi"]>0 and bool(hp.get("price_band_robust",False)) and
                 np.isfinite(z["market_residual_confirmation"]) and z["market_residual_confirmation"]>=0 and z["fdr_qvalue"]<=.10
             )
         else:
-            conf_ok=bool(z["confirmation_n"]>=30 and np.isfinite(z["confirmation_rate"]) and z["confirmation_rate"]>=.50 and
+            conf_ok=bool((z.get("split_audit") or {}).get("disjoint",False) and
+                         z["confirmation_n"]>=30 and np.isfinite(z["confirmation_rate"]) and z["confirmation_rate"]>=.50 and
                          len([x for x in z["confirmation"] if x["n"]>=10])==2 and all(x["rate"]>=.50 for x in z["confirmation"] if x["n"]>=10))
         item={k:v for k,v in z.items() if k not in {"mask","idx","quality"}}
         item.update({"system_id":_stable_id("NCAAF-RV21-"+market.upper()+"-",z["conditions"]),
@@ -2487,6 +2858,7 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
              "representative_conditions":rep.get("conditions") or [],"member_system_ids":[x["system_id"] for x in members],"member_count":len(members),"families":rep["families"],
              "discovery_rate":rep["discovery_rate"],"discovery_n":rep["discovery_n"],"confirmation_rate":rep["confirmation_rate"],
              "confirmation_n":rep["confirmation_n"],"confirmation_pass":bool(rep["confirmation_pass"]),
+             "split_audit":rep.get("split_audit") or {},
              "authority_state":"CONFIRMED_SHADOW" if rep["confirmation_pass"] else "DISCOVERY_FROZEN","production_authority":0,
              "attribution":_mechanism_attribution(games,seasons,rep,market)}
         strong_validated=bool(
@@ -2520,11 +2892,18 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
                 "mechanism_families":families,"mechanism_family_count":len(families),
                 "confirmed_mechanism_count":sum(x["confirmation_pass"] for x in families),
                 "lineage":lineage,
-                "admission_contract":"DISCOVERY_2022_2023_ONLY__HORIZON_SYMMETRIC_1_2_3__CONFERENCE_RIVALRY_H2H_ROLE_TEAM_MEMORY__MARKET_RELATIVE_FDR_FOR_H2H__OBSERVED_ML_ROI__PRICE_BAND_ROBUSTNESS__BOTH_2024_AND_2025_CONFIRM__DEPENDENCY_COLLAPSE__PARENT_CHILD_INCREMENTAL_ATTRIBUTION__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY"})
+                "admission_contract":"DISCOVERY_2022_2023_ONLY__HORIZON_SYMMETRIC_1_2_3__CONFERENCE_RIVALRY_H2H_ROLE_TEAM_MEMORY__MARKET_RELATIVE_FDR_FOR_H2H__OBSERVED_ML_ROI__PRICE_BAND_ROBUSTNESS__BOTH_2024_AND_2025_CONFIRM__DEPENDENCY_COLLAPSE__PARENT_CHILD_INCREMENTAL_ATTRIBUTION__FULL_PT_INDEX_UNIVERSE_ONE_CORRELATED_FAMILY__SPLIT_OVERLAP_AUDIT__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY"})
     log_func(f"[NCAAF-RV23-MINER] market={market} atoms={len(atoms)} tested={len(tested)} systems={len(clean)} mechanisms={len(families)} confirmed_mechanisms={out['confirmed_mechanism_count']} authority=0")
     for x in families[:20]:
         extra=(f" d_roi={x.get('discovery_price_roi')} c_roi={x.get('confirmation_price_roi')} d_resid={x.get('discovery_market_residual')} c_resid={x.get('confirmation_market_residual')}" if market=="h2h" else "")
         log_func(f"[NCAAF-RV23-MECHANISM] market={market} id={x['mechanism_id']} status={x['authority_state']} members={x['member_count']} discovery={x['discovery_rate']:.4f}/{x['discovery_n']} confirmation={x['confirmation_rate']:.4f}/{x['confirmation_n']} rule={' AND '.join(x.get('representative_conditions') or [])}{extra}")
+        _sa=x.get("split_audit") or {}
+        if _sa.get("identical_n_rate"):
+            log_func(
+                f"[NCAAF-RV218-SPLIT-AUDIT] market={market} id={x['mechanism_id']} identical_n_rate=TRUE "
+                f"row_overlap_n={_sa.get('row_overlap_n')} disjoint={_sa.get('disjoint')} "
+                f"discovery_years={_sa.get('discovery_years')} confirmation_years={_sa.get('confirmation_years')} authority=0"
+            )
         if market=="totals" and x.get("confirmation_pass"):
             a=x.get("attribution") or {}
             log_func(f"[NCAAF-RV23-TOTALS-ATTRIBUTION] id={x['mechanism_id']} rule={a.get('rule')} seasons={json.dumps(a.get('season_breakdown') or [],sort_keys=True,default=str)} remove_best={a.get('remove_best_discovery_rate')} team_concentration={json.dumps(a.get('team_concentration') or {},sort_keys=True,default=str)} conference_concentration={json.dumps(a.get('conference_concentration') or {},sort_keys=True,default=str)}")
