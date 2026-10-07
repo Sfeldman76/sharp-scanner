@@ -1,0 +1,108 @@
+{
+  "version": "3.12.0",
+  "gcs_raw_prefix": "gs://sharp-models/research/nfl/external/prediction_tracker/raw/",
+  "history": {
+    "spread_files": "nfl17.csv through nfl25.csv",
+    "totals_files": "nfltotals17.csv through nfltotals25.csv",
+    "discovery": [
+      2017,
+      2018,
+      2019,
+      2020,
+      2021,
+      2022
+    ],
+    "shadow": [
+      2023
+    ],
+    "confirmation": [
+      2024
+    ],
+    "final_check": [
+      2025
+    ],
+    "sealed": [
+      2026
+    ]
+  },
+  "spread_family": {
+    "family_key": "NFL_SPREAD_EXTERNAL_RATINGS_FAMILY",
+    "market_fields_excluded": [
+      "line",
+      "lineopen",
+      "lineavg",
+      "linemed",
+      "linemedian",
+      "linestd",
+      "linemidweek"
+    ],
+    "outcome_fields_never_features": [
+      "hscore",
+      "rscore",
+      "vscore",
+      "phcover",
+      "phwin",
+      "actual",
+      "total"
+    ],
+    "source_clusters": {
+      "SAGARIN": [
+        "linesag",
+        "linesaggm",
+        "linesagr",
+        "linesagp"
+      ],
+      "PI_RATINGS": [
+        "linepi",
+        "linepim",
+        "linepib"
+      ],
+      "REGRESSION_VARIANTS": [
+        "linel1",
+        "linel2",
+        "linel2h",
+        "linel2to",
+        "linelog"
+      ]
+    }
+  },
+  "totals_family": {
+    "family_key": "NFL_TOTALS_EXTERNAL_RATINGS_FAMILY",
+    "summary_fields_excluded": [
+      "totavg",
+      "totmed",
+      "totmedian",
+      "totstd"
+    ],
+    "linemidweek_policy": "market/reference field, never an external totals predictor"
+  },
+  "miner": {
+    "legacy_lane": "unchanged and insulated from PT atoms",
+    "external_lane_seed_policy": "Prediction Tracker external atoms only",
+    "external_lane_support_policy": "bounded legacy/context/Pathi/Big Al support atoms",
+    "external_lane_depth_cap": 3,
+    "external_lane_beam_width": 48,
+    "one_external_signal_per_rule": true,
+    "multiple_external_predictors_independent_votes": false
+  },
+  "predictor_behavior": {
+    "direction_selected_on": "2017-2022 discovery only",
+    "behaviors": [
+      "FOLLOW",
+      "FADE"
+    ],
+    "edge_bands_reported": [
+      "2 to <3",
+      "3 to <5",
+      "5+"
+    ],
+    "validation": "2023-2025 only",
+    "2026_selection_influence": 0
+  },
+  "production": {
+    "production_mutation": false,
+    "production_authority": 0,
+    "automatic_promotion": false,
+    "current_live_PT_authority": "not enabled in V3.12; historical research first"
+  }
+}
