@@ -33,8 +33,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.17-sparse-pt-manual-gcs-20261007"
-NCAAF_RESEARCH_V2_VERSION = "2.17.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.17.1-csv-only-pt-20261007"
+NCAAF_RESEARCH_V2_VERSION = "2.17.1"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -74,17 +74,16 @@ PT_PUBLISHED_WEIGHTS = {
     "ESPN_FPI": 0.163639,
     "PIGSKIN_INDEX": 0.114519,
 }
-# Exact system identity contract.  System columns are NEVER selected by
-# position and NEVER by substring/fuzzy matching.  Human-readable names come
-# from Prediction Tracker's HTML table.  The two cryptic CSV names below are
-# directly self-identifying and were observed in the tracker export; all other
-# cryptic names must be learned from a value-validated live HTML<->CSV manifest.
+# Exact system identity contract. System columns are NEVER selected by
+# position and NEVER by substring/fuzzy matching. Prediction Tracker's own CSV
+# exports use stable source-native header IDs; those exact IDs are explicitly
+# whitelisted here. No live HTML page is required for the normal contract.
 PT_SYSTEM_HEADER_ALIASES = {
     "DOKTER": ("Dokter", "Dokter Entropy", "linedokter"),
-    "PI_RATE_BIAS": ("Pi-Ratings Bias", "Pi Ratings Bias", "Pi-Rating Bias", "Pi Rate Bias"),
-    "KEEPER": ("Keeper", "Keeper Ratings"),
-    "ESPN_FPI": ("ESPN FPI", "FPI", "lineespn"),
-    "PIGSKIN_INDEX": ("Pigskin Index", "Pigskin"),
+    "PI_RATE_BIAS": ("Pi-Ratings Bias", "Pi Ratings Bias", "Pi-Rating Bias", "Pi Rate Bias", "linepibias"),
+    "KEEPER": ("Keeper", "Keeper Ratings", "linekeep"),
+    "ESPN_FPI": ("ESPN FPI", "FPI", "lineespn", "linefpi"),
+    "PIGSKIN_INDEX": ("Pigskin Index", "Pigskin", "linepig"),
 }
 PT_IDENTITY_HEADER_ALIASES = {
     "HOME": ("Home", "Home Team", "HomeTeam"),
@@ -594,8 +593,8 @@ def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str]
     """Parse Prediction Tracker without positional system assumptions.
 
     Home/Road and all five benchmark systems are resolved by exact header name.
-    Cryptic CSV headers are accepted only when they are self-identifying exact
-    aliases or are present in a previously value-validated live header manifest.
+    Prediction Tracker source-native CSV IDs are accepted only through the
+    explicit exact-header whitelist above. No positional/fuzzy inference is used.
     """
     df,errs=_pt_read_csv_frame(raw)
     if df is None or df.empty:
@@ -785,24 +784,22 @@ def _pt_load_season(season: int, *, storage_client, bucket_name: str, force_web:
 def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
     """Load current-week ratings with GCS-first, name-safe identity validation.
 
-    The manual uploader writes the exact live CSV and optional named live page to
-    GCS. Heavy/Weekly consume those validated artifacts first. Missing games are
+    The manual uploader writes the exact live CSV to GCS. Heavy/Weekly consume
+    that validated CSV directly; no named live HTML page is required. Missing games are
     normal: Prediction Tracker is treated as a sparse external signal, not as the
     authoritative NCAA schedule.
     """
     raw_path=f"{PT_RAW_PREFIX}/ncaapredictions.csv"
     raw,gcsv=_pt_gcs_raw(storage_client,bucket_name,raw_path,max_age_hours=PT_FEEDER_CURRENT_MAX_AGE_HOURS)
-    hraw,ghtml=_pt_gcs_raw(storage_client,bucket_name,PT_LIVE_HTML_RAW_BLOB,max_age_hours=PT_FEEDER_CURRENT_MAX_AGE_HOURS)
-    source=""; csv_exc=None; html_exc=None; infer_diag={"status":"NOT_RUN"}; verified_map=_pt_load_header_manifest(storage_client,bucket_name)
+    hraw=None
+    ghtml={"status":"NOT_REQUIRED_CSV_ONLY","age_hours":None}
+    source=""; csv_exc=None; html_exc=None; infer_diag={"status":"NOT_REQUIRED_CSV_ONLY"}; verified_map={}
     if raw is not None:
         source="GCS_FEEDER_LIVE"
         log_func(f"[NCAAF-PT-GCS] season={PT_CURRENT_SEASON} kind=LIVE_CSV status=PASS age_hours={gcsv.get('age_hours')} path=gs://{bucket_name}/{raw_path} authority=0")
     else:
         log_func(f"[NCAAF-PT-GCS] season={PT_CURRENT_SEASON} kind=LIVE_CSV status={gcsv.get('status')} age_hours={gcsv.get('age_hours')} path=gs://{bucket_name}/{raw_path} authority=0")
-    if hraw is not None:
-        log_func(f"[NCAAF-PT-GCS] season={PT_CURRENT_SEASON} kind=LIVE_HTML status=PASS age_hours={ghtml.get('age_hours')} path=gs://{bucket_name}/{PT_LIVE_HTML_RAW_BLOB} authority=0")
-    else:
-        log_func(f"[NCAAF-PT-GCS] season={PT_CURRENT_SEASON} kind=LIVE_HTML status={ghtml.get('status')} age_hours={ghtml.get('age_hours')} path=gs://{bucket_name}/{PT_LIVE_HTML_RAW_BLOB} authority=0")
+    log_func(f"[NCAAF-PT-GCS] season={PT_CURRENT_SEASON} kind=LIVE_HTML status=NOT_REQUIRED_CSV_ONLY authority=0")
 
     if raw is None and PT_ALLOW_WEB_FALLBACK:
         try:
@@ -811,13 +808,8 @@ def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -
             except Exception: pass
         except Exception as exc:
             csv_exc=exc
-    if hraw is None and PT_ALLOW_WEB_FALLBACK:
-        try:
-            hraw=_pt_fetch_live_html()
-            try: storage_client.bucket(bucket_name).blob(PT_LIVE_HTML_RAW_BLOB).upload_from_string(hraw,content_type="text/html")
-            except Exception: pass
-        except Exception as exc:
-            html_exc=exc
+    # V2.17.1: live HTML is not part of the operational contract.
+    # Current data comes from the manually uploaded Prediction Tracker CSV only.
 
     if raw is not None and hraw is not None:
         inferred,infer_diag=_pt_infer_verified_header_map(raw,hraw)
