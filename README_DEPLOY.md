@@ -1,53 +1,42 @@
-# NCAAF Engine V2.15 — GCS-first Prediction Tracker Feeder + Expert Occurrence Reconciliation
+# NFL Engine V3.11.0 — Expert/System Atom Expansion + Exact Occurrence Bridge
 
-## Cloud deployment
+Base: `NFL_ENGINE_V3_10_8_LIVE_MINER_EVALUATOR.zip`
 
-From V2.14.3, replace only:
+## Replace only
 
-- `ncaaf_research_v2.py`
+- `nfl_engine.py`
 - `train_job.py`
 
-Do **not** replace Production V1, CORE challenger, dashboard, production ledger, or `utils.py`.
+Do **not** replace `utils.py`, `sports_edge_authority_v1.py`, or `sharp_line_dashboard.py` for this patch.
 
-Redeploy `sharp-train-job` and run **NCAAF Research — Heavy Challenger Search** after the feeder has populated GCS.
+## Run
 
-Expected deploy marker:
+Run **NFL Research — Heavy Challenger Search** (`MARKET=nfl_research_heavy`).
 
-`[NCAAF-RV215-DEPLOY-PREFLIGHT] PASS`
+## What changed
 
-## Prediction Tracker architecture
+The existing NFL System Miner remains the single Miner. V3.11.0 adds Pathi and Big Al as first-class research atoms by projecting the exact occurrence ledgers already used to grade those systems onto the same side-state used by the Miner.
 
-V2.15 makes GCS the model-side contract. Heavy and Weekly now read fresh raw Prediction Tracker artifacts from GCS **before** attempting any direct/relay web access.
+No Pathi or Big Al rule is reconstructed a second time. Every `(physical_game_id, bet_team, system_id)` occurrence must match an exact Miner side row or the run fails closed.
 
-Current feeder freshness default: 24 hours (`PT_FEEDER_CURRENT_MAX_AGE_HOURS`).
+Pathi mirror/nested variants share normalized Pathi family categories. Big Al nested variants share their existing independence families. The Miner can also test bounded confluence atoms such as 2+ Pathi families, 3+ Pathi families, 2+ independent Big Al families, and Pathi + Big Al on the same side.
 
-The local/residential feeder is included:
+The existing horizon-symmetric 1/2/3-game grammar, magnitude, opponent symmetry, team memory, FDR/max-stat controls, chronological folds, LOSO, remove-best-season, frozen 2023/2024/2025 validation, and 2026 seal remain intact.
 
-- `prediction_tracker_feeder.py`
-- `requirements_prediction_tracker_feeder.txt`
-- `run_prediction_tracker_feeder.ps1`
-- `README_PREDICTION_TRACKER_FEEDER.md`
+## Authority policy
 
-Run the feeder on a normal residential Windows machine/network. It validates the content first, rejects Cloudflare/challenge pages, preserves exact source bytes, saves immutable timestamped snapshots, and does not overwrite the last good raw blob on a failed fetch.
+New Miner mechanisms containing any `EXPERT_PATHI_*` or `EXPERT_BIGAL_*` atom are **research/shadow only at introduction**. They cannot immediately become a production confirmation family from retrospective evidence alone. Existing qualified Miner/Pathi/Big Al production behavior is unchanged.
 
-## Expert occurrence reconciliation
+CORE remains the prediction authority. H2H and Totals remain model-only. Production V1 and the live market backend are unchanged.
 
-The prior 19-count difference was not missing mapped occurrences. The historical W/L occurrence ledger stores **graded** occurrences, while the system summary `fired` count also includes fired rows lacking a grade/ATS target.
+## Expected log markers
 
-V2.15 logs both explicitly and reconciles against the occurrence ledger:
+Look for:
 
-`[NCAAF-RV215-EXPERT-OCCURRENCE-RECON] ... fired=... graded=... occurrence_records=... projected=... ungraded=... projection_delta=0 ...`
+- `[NFL-SYSTEM-V311-EXPERT-OCCURRENCE-BRIDGE]`
+- `[NFL-RESEARCH-V2-SYSTEM-EXPERT-ATOM-BRIDGE]`
+- `[NFL-RESEARCH-V2-SYSTEM-RETAINED]` rows whose conditions contain `EXPERT_PATHI_` or `EXPERT_BIGAL_`
+- `[NFL-RESEARCH-V2-SYSTEM-MECHANISM-FAMILY]` with `expert_bridge=true`
+- `[NFL-RESEARCH-V2-SYSTEM-CONTRACT]` with nonzero `expert_atom_count`; `expert_bridge_mechanisms` may legitimately be zero if no expert interaction survives the research gates.
 
-The bridge fails closed if `projected != occurrence_records`.
-
-## Expected successful research markers
-
-- `[NCAAF-RV215-EXPERT-OCCURRENCE-RECON] status=PASS ... projection_delta=0`
-- `[NCAAF-RV215-EXPERT-OCCURRENCE-BRIDGE] status=PASS ...`
-- `[NCAAF-PT-FEEDER-MANIFEST] status=READY ...`
-- `[NCAAF-PT-GCS] ... status=PASS ...`
-- `[NCAAF-PT-HEADER-VERIFY] ...`
-- `[NCAAF-PT-CONTRACT] status=PASS ... matched_rows=>0`
-- `[NCAAF-RV25-ATOM-BRIDGE] ... pathi=>0 bigal=>0 external=>0`
-
-The external ratings remain research-only and have zero direct Production/Bet Authority.
+The occurrence bridge should report `pathi_occurrences == pathi_matched` and `bigal_occurrences == bigal_matched`. Any mismatch is a hard failure.

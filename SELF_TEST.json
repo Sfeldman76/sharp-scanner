@@ -1,40 +1,51 @@
 {
-  "status": "PASS",
-  "source_tag": "ncaaf-research-v2.15-gcs-first-pt-feeder-expert-reconciliation-20261006",
-  "families": [
-    "MARKET_MICROSTRUCTURE",
-    "RUN_PASS_MATCHUP"
+  "changed_bundled_components": [
+    "nfl_system_lab_v3"
   ],
-  "qvalues": [
-    0.03,
-    0.06,
-    0.20000000000000004
-  ],
-  "american_unit_profit_test": [
-    2.0,
-    0.5
-  ],
-  "h2h_price_gate": "OBSERVED_TEAM_AND_OPPONENT_ML_ONLY",
-  "confirmation_gate": "BOTH_2024_AND_2025",
-  "live_authority_policy": "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005",
-  "live_min_confirmation_n": 60,
-  "live_min_confirmation_rate": 0.56,
-  "weak_confirmed_authority": false,
-  "strong_confirmed_authority": true,
-  "pt_name_safe_header_contract": true,
-  "pt_self_test_system_columns": {
-    "DOKTER": "linedokter",
-    "PI_RATE_BIAS": "Pi-Ratings Bias",
-    "KEEPER": "Keeper",
-    "ESPN_FPI": "lineespn",
-    "PIGSKIN_INDEX": "Pigskin Index"
+  "engine_preflight": {
+    "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
+    "compiled_and_checked": 32,
+    "components": 32,
+    "engine_source_tag": "nfl-engine-v3.11.0-expert-atom-miner-20261006",
+    "failures": [],
+    "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_V311_EXPERT_OCCURRENCE_ATOM_SYSTEM_MINER_RESEARCH_ONLY",
+    "missing_critical_symbols": [],
+    "shared_external_required": [
+      "utils.py",
+      "sports_edge_authority_v1.py"
+    ],
+    "status": "PASS",
+    "utils_backend_required": true,
+    "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
   },
-  "pt_fuzzy_header_rejected": true,
-  "pt_relay_csv_payload": true,
-  "pt_relay_named_markdown": true,
-  "pt_relay_https_target": true,
-  "pt_challenge_rejected": true,
-  "pt_current_merge_preserves_rematch": true,
-  "expert_side_bridge": true,
-  "expert_occurrence_reconciliation": true
+  "expert_bridge_initial_authority": 0,
+  "production_authority_changed": false,
+  "source_tags": {
+    "engine": "nfl-engine-v3.11.0-expert-atom-miner-20261006",
+    "system_lab": "nfl-system-lab-v3.11.0-expert-occurrence-atom-bridge-20261006"
+  },
+  "system_lab_self_test": {
+    "bigal6_indexed": true,
+    "coverage_status": "PASS",
+    "discovery_evidence_permanent": true,
+    "dormant_family_preserved": true,
+    "exact_sequence_2_game": true,
+    "expert_bridge_shadow_only": true,
+    "expert_occurrence_atom_bridge": true,
+    "horizon_symmetry_1_2_3": true,
+    "island_slot_context": true,
+    "magnitude_intelligence": true,
+    "model_state_in_discovery": false,
+    "opponent_sequence_symmetry": true,
+    "prior_three_sequence_cap": 3,
+    "raw_tested": 3,
+    "rules_index_rows": 9,
+    "sequential_context_grammar": true,
+    "status": "PASS",
+    "team_context_history": true,
+    "team_sequence_memory": true,
+    "unique_hypotheses": 3,
+    "version": "NFL_SYSTEM_LAB_V3_11_0",
+    "year_2026_queried": false
+  }
 }
