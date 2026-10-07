@@ -33,8 +33,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.15-gcs-first-pt-feeder-expert-reconciliation-20261006"
-NCAAF_RESEARCH_V2_VERSION = "2.14.2"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.16-cloud-unblocker-gcs-first-20261007"
+NCAAF_RESEARCH_V2_VERSION = "2.16.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -65,7 +65,7 @@ PT_HEADER_MANIFEST_BLOB = "research/ncaaf/external/prediction_tracker/header_man
 PT_FEEDER_MANIFEST_BLOB = "research/ncaaf/external/prediction_tracker/feeder_manifest.json"
 PT_FEEDER_SNAPSHOT_PREFIX = "research/ncaaf/external/prediction_tracker/snapshots"
 PT_FEEDER_CURRENT_MAX_AGE_HOURS = float(os.getenv("PT_FEEDER_CURRENT_MAX_AGE_HOURS", "24"))
-PT_ALLOW_WEB_FALLBACK = str(os.getenv("PT_ALLOW_WEB_FALLBACK", "1")).strip().lower() not in {"0","false","no","off"}
+PT_ALLOW_WEB_FALLBACK = str(os.getenv("PT_ALLOW_WEB_FALLBACK", "0")).strip().lower() not in {"0","false","no","off"}
 PT_PUBLISHED_WEIGHTS = {
     "DOKTER": 0.242406,
     "PI_RATE_BIAS": 0.281205,
@@ -691,7 +691,7 @@ def _pt_blob_bytes(storage_client, bucket_name: str, path: str) -> bytes | None:
 def _pt_gcs_raw(storage_client, bucket_name: str, path: str, *, max_age_hours: float | None=None) -> tuple[bytes | None,dict[str,Any]]:
     """Read a validated raw Prediction Tracker artifact from GCS.
 
-    V2.15 makes GCS the model-side contract.  A separate residential feeder may
+    V2.15 makes GCS the model-side contract.  A separate cloud web-unblocker feeder may
     refresh these blobs; Heavy/Weekly jobs therefore do not need Prediction
     Tracker network access when a fresh cache is present.  Challenge/interstitial
     payloads are rejected even if a bad historical blob somehow exists.
@@ -778,7 +778,7 @@ def _pt_load_season(season: int, *, storage_client, bucket_name: str, force_web:
 def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
     """Load current-week ratings with GCS-first, name-safe identity validation.
 
-    The residential feeder writes both the exact live CSV and the named live
+    The cloud web-unblocker feeder writes both the exact live CSV and the named live
     page to GCS.  Heavy/Weekly consume those fresh raw artifacts first and only
     attempt direct/relay web access if the cache is missing/stale.
     """
@@ -1016,7 +1016,7 @@ def _pt_research_metrics(g: pd.DataFrame) -> dict[str,Any]:
 def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client=None, bucket_name="sharp-models", include_history=True, include_current=True, force=False, log_func=print) -> dict[str,Any]:
     """Fetch/cache Prediction Tracker and attach fixed-weight META_MARGIN research fields.
 
-    V2.15 uses a GCS-first ingestion contract. A separate residential feeder is
+    V2.15 uses a GCS-first ingestion contract. A separate cloud web-unblocker feeder is
     expected to refresh raw current artifacts; direct/relay web access is only a
     best-effort fallback. Failure is non-fatal and always fail-closed: no external
     field can mutate Production V1 or grant Bet Authority.

@@ -1,42 +1,80 @@
-# NFL Engine V3.11.0 — Expert/System Atom Expansion + Exact Occurrence Bridge
+# NCAAF V2.16 — Cloud-only Prediction Tracker ingestion
 
-Base: `NFL_ENGINE_V3_10_8_LIVE_MINER_EVALUATOR.zip`
+This replaces the V2.15 residential-PC feeder. Nothing runs on the operator's computer.
 
-## Replace only
+## Replace / add in the repository
 
-- `nfl_engine.py`
+Replace:
+- `ncaaf_research_v2.py`
 - `train_job.py`
 
-Do **not** replace `utils.py`, `sports_edge_authority_v1.py`, or `sharp_line_dashboard.py` for this patch.
+Add:
+- `prediction_tracker_cloud_feeder.py`
 
-## Run
+No dashboard change is required. The feeder now runs automatically inside:
+- `NCAAF Production — Weekly Update` (current data only)
+- `NCAAF Research — Heavy Challenger Search` (history + current)
 
-Run **NFL Research — Heavy Challenger Search** (`MARKET=nfl_research_heavy`).
+## Required cloud credential
 
-## What changed
+Prediction Tracker blocks ordinary Cloud Run/datacenter egress, so a web-unblocker/residential-proxy credential is required for a cloud-only design.
 
-The existing NFL System Miner remains the single Miner. V3.11.0 adds Pathi and Big Al as first-class research atoms by projecting the exact occurrence ledgers already used to grade those systems onto the same side-state used by the Miner.
+Supported configuration:
 
-No Pathi or Big Al rule is reconstructed a second time. Every `(physical_game_id, bet_team, system_id)` occurrence must match an exact Miner side row or the run fails closed.
+### Oxylabs Web Unblocker
+Set Cloud Run secrets/env vars:
+- `OXYLABS_USERNAME`
+- `OXYLABS_PASSWORD`
 
-Pathi mirror/nested variants share normalized Pathi family categories. Big Al nested variants share their existing independence families. The Miner can also test bounded confluence atoms such as 2+ Pathi families, 3+ Pathi families, 2+ independent Big Al families, and Pathi + Big Al on the same side.
+Optional:
+- `OXYLABS_ENDPOINT=unblock.oxylabs.io:60000`
+- `PT_UNBLOCKER_GEO=United States`
+- `PT_UNBLOCKER_TIMEOUT=90`
 
-The existing horizon-symmetric 1/2/3-game grammar, magnitude, opponent symmetry, team memory, FDR/max-stat controls, chronological folds, LOSO, remove-best-season, frozen 2023/2024/2025 validation, and 2026 seal remain intact.
+### Generic compatible proxy
+Alternatively set:
+- `PT_UNBLOCKER_PROXY_URL=http://user:password@host:port`
 
-## Authority policy
+## Secret Manager example from Google Cloud Shell
 
-New Miner mechanisms containing any `EXPERT_PATHI_*` or `EXPERT_BIGAL_*` atom are **research/shadow only at introduction**. They cannot immediately become a production confirmation family from retrospective evidence alone. Existing qualified Miner/Pathi/Big Al production behavior is unchanged.
+```bash
+printf '%s' 'YOUR_OXYLABS_USERNAME' | gcloud secrets create pt-oxylabs-username --data-file=- --replication-policy=automatic
+printf '%s' 'YOUR_OXYLABS_PASSWORD' | gcloud secrets create pt-oxylabs-password --data-file=- --replication-policy=automatic
 
-CORE remains the prediction authority. H2H and Totals remain model-only. Production V1 and the live market backend are unchanged.
+gcloud secrets add-iam-policy-binding pt-oxylabs-username \
+  --member='serviceAccount:sharp-train-sa@sharplogger.iam.gserviceaccount.com' \
+  --role='roles/secretmanager.secretAccessor'
 
-## Expected log markers
+gcloud secrets add-iam-policy-binding pt-oxylabs-password \
+  --member='serviceAccount:sharp-train-sa@sharplogger.iam.gserviceaccount.com' \
+  --role='roles/secretmanager.secretAccessor'
 
-Look for:
+gcloud run jobs update sharp-train-job \
+  --project=sharplogger \
+  --region=us-east4 \
+  --set-secrets='OXYLABS_USERNAME=pt-oxylabs-username:latest,OXYLABS_PASSWORD=pt-oxylabs-password:latest'
+```
 
-- `[NFL-SYSTEM-V311-EXPERT-OCCURRENCE-BRIDGE]`
-- `[NFL-RESEARCH-V2-SYSTEM-EXPERT-ATOM-BRIDGE]`
-- `[NFL-RESEARCH-V2-SYSTEM-RETAINED]` rows whose conditions contain `EXPERT_PATHI_` or `EXPERT_BIGAL_`
-- `[NFL-RESEARCH-V2-SYSTEM-MECHANISM-FAMILY]` with `expert_bridge=true`
-- `[NFL-RESEARCH-V2-SYSTEM-CONTRACT]` with nonzero `expert_atom_count`; `expert_bridge_mechanisms` may legitimately be zero if no expert interaction survives the research gates.
+If the secrets already exist, add a new version instead of recreating them.
 
-The occurrence bridge should report `pathi_occurrences == pathi_matched` and `bigal_occurrences == bigal_matched`. Any mismatch is a hard failure.
+## Expected log flow
+
+```text
+[NCAAF-PT-CLOUD-FEEDER-PREFLIGHT] PASS ...
+[NCAAF-PT-CLOUD-FEEDER] source=ncaa2022 status=PASS|SKIPPED_VALID_EXISTING ...
+...
+[NCAAF-PT-CLOUD-FEEDER] source=ncaapredictions status=PASS ...
+[NCAAF-PT-CLOUD-FEEDER] source=predncaa_live_page status=PASS ...
+[NCAAF-PT-CLOUD-FEEDER] status=PASS ...
+[NCAAF-PT-FEEDER-MANIFEST] status=READY ...
+[NCAAF-PT-CONTRACT] status=PASS history_attached=True ... matched_rows>0 ...
+[NCAAF-RV25-ATOM-BRIDGE] market=spreads ... external>0 ...
+```
+
+If credentials are not configured, the NCAAF job continues safely with:
+
+```text
+[NCAAF-PT-CLOUD-FEEDER] status=CONFIG_MISSING ...
+```
+
+Production authority remains zero for this external family.

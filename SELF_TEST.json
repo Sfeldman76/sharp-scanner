@@ -1,51 +1,23 @@
 {
-  "changed_bundled_components": [
-    "nfl_system_lab_v3"
+  "cloud_feeder_self_test": {
+    "challenge_rejected": true,
+    "csv_good": true,
+    "live_names": true,
+    "source_tag": "prediction-tracker-cloud-feeder-v1.0-web-unblocker-20261007",
+    "status": "PASS"
+  },
+  "mock_cloud_run_test": {
+    "challenge_rejection": true,
+    "manifest_written": true,
+    "poisoned_cache_replaced": true,
+    "status": "PASS",
+    "valid_history_reused": true
+  },
+  "production_authority": 0,
+  "python_compile": [
+    "ncaaf_research_v2.py",
+    "train_job.py",
+    "prediction_tracker_cloud_feeder.py"
   ],
-  "engine_preflight": {
-    "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
-    "compiled_and_checked": 32,
-    "components": 32,
-    "engine_source_tag": "nfl-engine-v3.11.0-expert-atom-miner-20261006",
-    "failures": [],
-    "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_V311_EXPERT_OCCURRENCE_ATOM_SYSTEM_MINER_RESEARCH_ONLY",
-    "missing_critical_symbols": [],
-    "shared_external_required": [
-      "utils.py",
-      "sports_edge_authority_v1.py"
-    ],
-    "status": "PASS",
-    "utils_backend_required": true,
-    "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
-  },
-  "expert_bridge_initial_authority": 0,
-  "production_authority_changed": false,
-  "source_tags": {
-    "engine": "nfl-engine-v3.11.0-expert-atom-miner-20261006",
-    "system_lab": "nfl-system-lab-v3.11.0-expert-occurrence-atom-bridge-20261006"
-  },
-  "system_lab_self_test": {
-    "bigal6_indexed": true,
-    "coverage_status": "PASS",
-    "discovery_evidence_permanent": true,
-    "dormant_family_preserved": true,
-    "exact_sequence_2_game": true,
-    "expert_bridge_shadow_only": true,
-    "expert_occurrence_atom_bridge": true,
-    "horizon_symmetry_1_2_3": true,
-    "island_slot_context": true,
-    "magnitude_intelligence": true,
-    "model_state_in_discovery": false,
-    "opponent_sequence_symmetry": true,
-    "prior_three_sequence_cap": 3,
-    "raw_tested": 3,
-    "rules_index_rows": 9,
-    "sequential_context_grammar": true,
-    "status": "PASS",
-    "team_context_history": true,
-    "team_sequence_memory": true,
-    "unique_hypotheses": 3,
-    "version": "NFL_SYSTEM_LAB_V3_11_0",
-    "year_2026_queried": false
-  }
+  "status": "PASS"
 }
