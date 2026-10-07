@@ -33,7 +33,7 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.14.2-pt-challenge-expert-mask-hotfix-20261006"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.14.3-expert-occurrence-key-fix-20261006"
 NCAAF_RESEARCH_V2_VERSION = "2.14.2"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
@@ -1210,12 +1210,23 @@ def _v214_side_key(df: pd.DataFrame, team_col: str, opp_col: str | None=None) ->
     return (sy+"|"+game_token+"|"+team).where(valid,"")
 
 
+def _v214_occurrence_token(x: Any) -> str:
+    """Match dashboard _hc_team_token exactly: lowercase alphanumeric only."""
+    return re.sub(r"[^a-z0-9]+", "", str(x).lower())
+
+
 def _v214_occurrence_key(df: pd.DataFrame, team_col: str, opp_col: str) -> pd.Series:
-    """Key compatible with dashboard historical-system occurrence ledgers."""
+    """Key compatible with dashboard historical-system occurrence ledgers.
+
+    IMPORTANT: the dashboard ledger uses _hc_team_token, which removes all
+    punctuation/whitespace.  Do not use the Prediction-Tracker normalizer here;
+    its space-preserving/abbreviation-expanding semantics produce non-matching
+    keys even when the same physical game is present.
+    """
     season=pd.to_numeric(df.get("Season"),errors="coerce")
     date=pd.to_datetime(df.get("Game_Date",df.get("Game_Start",pd.Series(pd.NaT,index=df.index))),errors="coerce",utc=True)
-    team=df.get(team_col,pd.Series("",index=df.index)).map(_pt_team_key)
-    opp=df.get(opp_col,pd.Series("",index=df.index)).map(_pt_team_key)
+    team=df.get(team_col,pd.Series("",index=df.index)).map(_v214_occurrence_token)
+    opp=df.get(opp_col,pd.Series("",index=df.index)).map(_v214_occurrence_token)
     yr=season.round().astype("Int64").astype(str)
     ds=date.dt.strftime("%Y-%m-%d").fillna("")
     valid=yr.ne("<NA>") & ds.ne("") & team.ne("") & opp.ne("")
@@ -1254,7 +1265,19 @@ def _attach_exact_expert_flags_to_miner(dashboard_module, miner_games: pd.DataFr
                 if fam not in {"Pathi","BigAl"}:
                     continue
                 occ=st.get("occurrences") or []
-                keys={str(r.get("key","")) for r in occ if isinstance(r,dict) and str(r.get("key",""))}
+                keys=set()
+                for r in occ:
+                    if not isinstance(r,dict):
+                        continue
+                    try:
+                        yr=str(int(float(r.get("season"))))
+                    except Exception:
+                        continue
+                    ds=str(r.get("date") or "").strip()[:10]
+                    tm=_v214_occurrence_token(r.get("team",""))
+                    op=_v214_occurrence_token(r.get("opponent",""))
+                    if ds and tm and op:
+                        keys.add(f"{yr}|{ds}|{tm}|{op}")
                 if not keys:
                     continue
                 hv=home_occ.isin(keys).astype("int8")
@@ -1266,15 +1289,26 @@ def _attach_exact_expert_flags_to_miner(dashboard_module, miner_games: pd.DataFr
                 else:
                     bc+=1; hb+=int(hv.sum()); rb+=int(rv.sum())
             if pc or bc:
-                diag={"status":"PASS_OCCURRENCE_LEDGER","source_rows":int(len(out)*2),
+                expected_fires=sum(int(st.get("fired",0) or 0) for st in hist_cache.values()
+                                   if isinstance(st,dict) and str(st.get("role",""))=="directional"
+                                   and str(st.get("family","")) in {"Pathi","BigAl"})
+                projected_fires=hp+rp+hb+rb
+                diag={"status":("PASS_OCCURRENCE_LEDGER" if projected_fires>0 or expected_fires==0 else "FAIL_ZERO_PROJECTION"),
+                      "source_rows":int(len(out)*2),
                       "matched_home":int(home_occ.ne("").sum()),"matched_road":int(road_occ.ne("").sum()),
                       "pathi_cols":pc,"bigal_cols":bc,"home_pathi_fires":hp,"road_pathi_fires":rp,
-                      "home_bigal_fires":hb,"road_bigal_fires":rb,"authority":0}
+                      "home_bigal_fires":hb,"road_bigal_fires":rb,"expected_fires":expected_fires,"authority":0}
+                if projected_fires>0 or expected_fires==0:
+                    log_func(
+                        f"[NCAAF-RV2143-EXPERT-OCCURRENCE-BRIDGE] status=PASS pathi_cols={pc} bigal_cols={bc} "
+                        f"home_pathi_fires={hp} road_pathi_fires={rp} home_bigal_fires={hb} road_bigal_fires={rb} "
+                        f"expected_fires={expected_fires} authority=0"
+                    )
+                    return out,diag
                 log_func(
-                    f"[NCAAF-RV2142-EXPERT-OCCURRENCE-BRIDGE] status=PASS pathi_cols={pc} bigal_cols={bc} "
-                    f"home_pathi_fires={hp} road_pathi_fires={rp} home_bigal_fires={hb} road_bigal_fires={rb} authority=0"
+                    f"[NCAAF-RV2143-EXPERT-OCCURRENCE-BRIDGE] status=FAIL_ZERO_PROJECTION pathi_cols={pc} bigal_cols={bc} "
+                    f"expected_fires={expected_fires} projected_fires=0 fallback=TRUE authority=0"
                 )
-                return out,diag
         except Exception as _occ_exc:
             log_func(f"[NCAAF-RV2142-EXPERT-OCCURRENCE-BRIDGE] status=FALLBACK error={type(_occ_exc).__name__}:{_occ_exc} authority=0")
 
