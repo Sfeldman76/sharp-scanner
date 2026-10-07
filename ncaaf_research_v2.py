@@ -33,8 +33,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.16-cloud-unblocker-gcs-first-20261007"
-NCAAF_RESEARCH_V2_VERSION = "2.16.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.17-sparse-pt-manual-gcs-20261007"
+NCAAF_RESEARCH_V2_VERSION = "2.17.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -64,7 +64,8 @@ PT_LIVE_HTML_RAW_BLOB = "research/ncaaf/external/prediction_tracker/raw/predncaa
 PT_HEADER_MANIFEST_BLOB = "research/ncaaf/external/prediction_tracker/header_manifest.json"
 PT_FEEDER_MANIFEST_BLOB = "research/ncaaf/external/prediction_tracker/feeder_manifest.json"
 PT_FEEDER_SNAPSHOT_PREFIX = "research/ncaaf/external/prediction_tracker/snapshots"
-PT_FEEDER_CURRENT_MAX_AGE_HOURS = float(os.getenv("PT_FEEDER_CURRENT_MAX_AGE_HOURS", "24"))
+PT_FEEDER_CURRENT_MAX_AGE_HOURS = float(os.getenv("PT_FEEDER_CURRENT_MAX_AGE_HOURS", "72"))
+PT_CURRENT_ARCHIVE_MAX_AGE_HOURS = float(os.getenv("PT_CURRENT_ARCHIVE_MAX_AGE_HOURS", "168"))
 PT_ALLOW_WEB_FALLBACK = str(os.getenv("PT_ALLOW_WEB_FALLBACK", "0")).strip().lower() not in {"0","false","no","off"}
 PT_PUBLISHED_WEIGHTS = {
     "DOKTER": 0.242406,
@@ -672,8 +673,12 @@ def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str]
     bad=out["home_key"].isin({"","home","home team"})|out["away_key"].isin({"","road","away","visitor","visitor team"})
     out=out.loc[~bad].reset_index(drop=True)
     out["source_row"]=np.arange(len(out),dtype=int)
+    _component_counts=pd.to_numeric(out["meta_system_count"],errors="coerce").fillna(0).astype(int)
     return out,{
-        "status":"PASS","season":int(season),"rows":int(len(out)),"full_five_rows":int(np.isfinite(out["meta_margin_home"]).sum()),
+        "status":"PASS","season":int(season),"rows":int(len(out)),
+        "any_component_rows":int((_component_counts>0).sum()),
+        "partial_component_rows":int(((_component_counts>0)&(_component_counts<5)).sum()),
+        "full_five_rows":int(np.isfinite(out["meta_margin_home"]).sum()),
         "metamodel_status":map_status,"system_columns":syscols,"system_column_resolution":resolution,"missing_systems":missing,"ambiguous_systems":ambiguity,
         "home_column":home,"away_column":away,"date_column":date_col,"line_column":line_col,"open_line_column":open_col,
         "prediction_avg_column":avg_col,"weights":dict(PT_PUBLISHED_WEIGHTS),"weight_sum":float(sum(PT_PUBLISHED_WEIGHTS.values())),
@@ -691,10 +696,11 @@ def _pt_blob_bytes(storage_client, bucket_name: str, path: str) -> bytes | None:
 def _pt_gcs_raw(storage_client, bucket_name: str, path: str, *, max_age_hours: float | None=None) -> tuple[bytes | None,dict[str,Any]]:
     """Read a validated raw Prediction Tracker artifact from GCS.
 
-    V2.15 makes GCS the model-side contract.  A separate cloud web-unblocker feeder may
-    refresh these blobs; Heavy/Weekly jobs therefore do not need Prediction
-    Tracker network access when a fresh cache is present.  Challenge/interstitial
-    payloads are rejected even if a bad historical blob somehow exists.
+    V2.17 makes validated GCS uploads the model-side contract. Heavy/Weekly do not
+    require direct Prediction Tracker network access. Challenge/interstitial payloads
+    are rejected even if a bad blob somehow exists. Current sources are allowed a
+    practical manual-upload freshness window because Prediction Tracker coverage is
+    intentionally sparse and may be published incrementally.
     """
     meta={"status":"MISSING","path":path,"age_hours":None,"updated_utc":None}
     try:
@@ -739,9 +745,10 @@ def _pt_load_season(season: int, *, storage_client, bucket_name: str, force_web:
     current=season>=PT_CURRENT_SEASON
     raw=None; source=""; web_exc=None
 
-    # V2.15: GCS is the primary model-side interface for every season.  Current
-    # artifacts must also be fresh; completed historical seasons are immutable.
-    max_age=PT_FEEDER_CURRENT_MAX_AGE_HOURS if current else None
+    # V2.17: GCS is the primary model-side interface for every season. Completed
+    # historical seasons are immutable. The current-season YTD archive can remain
+    # valid for a week; the separate live/current feed has the tighter freshness gate.
+    max_age=PT_CURRENT_ARCHIVE_MAX_AGE_HOURS if current else None
     raw,gdiag=_pt_gcs_raw(storage_client,bucket_name,raw_path,max_age_hours=max_age)
     if raw is not None:
         source="GCS_FEEDER_RAW"
@@ -778,9 +785,10 @@ def _pt_load_season(season: int, *, storage_client, bucket_name: str, force_web:
 def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
     """Load current-week ratings with GCS-first, name-safe identity validation.
 
-    The cloud web-unblocker feeder writes both the exact live CSV and the named live
-    page to GCS.  Heavy/Weekly consume those fresh raw artifacts first and only
-    attempt direct/relay web access if the cache is missing/stale.
+    The manual uploader writes the exact live CSV and optional named live page to
+    GCS. Heavy/Weekly consume those validated artifacts first. Missing games are
+    normal: Prediction Tracker is treated as a sparse external signal, not as the
+    authoritative NCAA schedule.
     """
     raw_path=f"{PT_RAW_PREFIX}/ncaapredictions.csv"
     raw,gcsv=_pt_gcs_raw(storage_client,bucket_name,raw_path,max_age_hours=PT_FEEDER_CURRENT_MAX_AGE_HOURS)
@@ -909,10 +917,18 @@ def _pt_candidate_map(external_names: Iterable[str], internal_names: Iterable[st
 
 
 def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func=print) -> dict[str,Any]:
+    """Attach sparse Prediction Tracker history without shrinking the game universe.
+
+    A matched Prediction Tracker row is allowed to contain 1-5 of the named external
+    systems. Available individual components are preserved. The fixed published
+    META_MARGIN is attached only when all five exact named inputs are present. Missing
+    Prediction Tracker games remain NaN/absent external context and never remove or
+    neutralize an internal NCAAF game.
+    """
     cache=getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}
     games=cache.get("games"); mg=cache.get("miner_games")
     if not isinstance(games,pd.DataFrame) or games.empty or not isinstance(mg,pd.DataFrame) or len(mg)!=len(games):
-        return {"status":"CACHE_UNAVAILABLE","matched_rows":0,"authority":0}
+        return {"status":"CACHE_UNAVAILABLE","matched_rows":0,"full_five_matched_rows":0,"partial_matched_rows":0,"no_pt_rows":0,"authority":0}
     g=games.copy(); m=mg.copy()
     season=pd.to_numeric(g.get("Season"),errors="coerce")
     team=g.get("Team_Norm",g.get("Team",pd.Series("",index=g.index))).astype(str).map(_pt_team_key)
@@ -931,9 +947,12 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
     home=np.where(is_home.eq(1),team,np.where(is_home.eq(0),opp,"")); away=np.where(is_home.eq(1),opp,np.where(is_home.eq(0),team,""))
     key=pd.Series([f"{int(s)}|{h}|{a}" if np.isfinite(s) and h and a else "" for s,h,a in zip(season.to_numpy(float),home,away)],index=g.index)
     gd=pd.to_datetime(g.get("Game_Date",pd.Series(pd.NaT,index=g.index)),errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+
     meta=np.full(len(g),np.nan); cnt=np.full(len(g),np.nan); pavg=np.full(len(g),np.nan); extline=np.full(len(g),np.nan)
+    listed=np.zeros(len(g),dtype=float); full_five=np.zeros(len(g),dtype=float)
     comp={k:np.full(len(g),np.nan) for k in PT_PUBLISHED_WEIGHTS}
-    matched=0
+    matched=0; matched_any_component=0; full_five_matched=0; partial_matched=0
+
     for i,k in enumerate(key.astype(str)):
         if not k: continue
         dk=f"{k}|{gd.iloc[i]}" if gd.iloc[i] else ""
@@ -941,15 +960,38 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         elif k in unique.index: r=unique.loc[k]
         else: continue
         if isinstance(r,pd.DataFrame): continue
-        hm=float(pd.to_numeric(pd.Series([r.get("meta_margin_home")]),errors="coerce").iloc[0])
-        if not np.isfinite(hm): continue
+
+        listed[i]=1.0
+        matched+=1
         orient=1.0 if is_home.iloc[i]==1 else -1.0
-        meta[i]=orient*hm; cnt[i]=float(r.get("meta_system_count",np.nan)); pavg[i]=orient*float(r.get("prediction_avg_home",np.nan)) if pd.notna(r.get("prediction_avg_home",np.nan)) else np.nan
-        extline[i]=orient*float(r.get("tracker_open_home",np.nan)) if pd.notna(r.get("tracker_open_home",np.nan)) else np.nan
+
+        component_count=0
         for _k in PT_PUBLISHED_WEIGHTS:
             _v=pd.to_numeric(pd.Series([r.get(_k,np.nan)]),errors="coerce").iloc[0]
-            if pd.notna(_v): comp[_k][i]=orient*float(_v)
-        matched+=1
+            if pd.notna(_v):
+                comp[_k][i]=orient*float(_v)
+                component_count+=1
+
+        cnt[i]=float(component_count)
+        if component_count>0:
+            matched_any_component+=1
+        if component_count==5:
+            full_five[i]=1.0
+            full_five_matched+=1
+        elif component_count>0:
+            partial_matched+=1
+
+        # Preserve the published META contract: no reweighting, imputation, or
+        # renormalization when fewer than five exact systems are available.
+        hm=pd.to_numeric(pd.Series([r.get("meta_margin_home")]),errors="coerce").iloc[0]
+        if pd.notna(hm) and component_count==5:
+            meta[i]=orient*float(hm)
+
+        _pa=pd.to_numeric(pd.Series([r.get("prediction_avg_home",np.nan)]),errors="coerce").iloc[0]
+        if pd.notna(_pa): pavg[i]=orient*float(_pa)
+        _ol=pd.to_numeric(pd.Series([r.get("tracker_open_home",np.nan)]),errors="coerce").iloc[0]
+        if pd.notna(_ol): extline[i]=orient*float(_ol)
+
     market_margin=pd.to_numeric(g.get("Market_Open_Margin"),errors="coerce").to_numpy(float) if "Market_Open_Margin" in g.columns else -pd.to_numeric(g.get("Consensus_Open_Spread"),errors="coerce").to_numpy(float)
     meta_edge=meta-market_margin
     comp_edges={k:(v-market_margin) for k,v in comp.items()}
@@ -961,6 +1003,7 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
     if _std_ok.any(): comp_std[_std_ok]=np.nanstd(comp_mat[_std_ok],axis=1)
     agree_team=np.sum(np.isfinite(edge_mat)&(edge_mat>0),axis=1).astype(float)
     agree_opp=np.sum(np.isfinite(edge_mat)&(edge_mat<0),axis=1).astype(float)
+
     for df in (g,m):
         df["_V210_PT_META_MARGIN_TEAM"]=meta
         df["_V210_PT_META_EDGE_POINTS"]=meta_edge
@@ -970,20 +1013,45 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         df["_V212_PT_COMPONENT_STD"]=comp_std
         df["_V212_PT_COMPONENT_TEAM_AGREE_COUNT"]=agree_team
         df["_V212_PT_COMPONENT_OPP_AGREE_COUNT"]=agree_opp
+        df["_V217_PT_GAME_LISTED"]=listed
+        df["_V217_PT_COMPONENT_AVAILABLE_COUNT"]=comp_n.astype(float)
+        df["_V217_PT_FULL_FIVE"]=full_five
         for _k in PT_PUBLISHED_WEIGHTS:
             df[f"_V212_PT_{_k}_MARGIN_TEAM"]=comp[_k]
             df[f"_V212_PT_{_k}_EDGE_POINTS"]=comp_edges[_k]
+
     # Core bridge exists only on miner frame; attach meta-vs-core state there.
     if "_V29_CORE_INCUMBENT_EDGE_POINTS" in m.columns:
         ce=pd.to_numeric(m["_V29_CORE_INCUMBENT_EDGE_POINTS"],errors="coerce").to_numpy(float)
         m["_V210_PT_META_MINUS_CORE_EDGE"]=meta_edge-ce
+
     cache["games"]=g; cache["miner_games"]=m
     try: setattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",cache)
     except Exception: pass
-    diag={"status":"PASS","matched_rows":int(matched),"total_rows":int(len(g)),"coverage":float(matched/max(len(g),1)),"mapped_external_teams":int(len(emap)),"unresolved_external_teams":unresolved[:50],"authority":0}
-    log_func(f"[NCAAF-PT-MATCH] status=PASS matched_rows={matched}/{len(g)} coverage={diag['coverage']:.3f} mapped_teams={len(emap)} unresolved_teams={len(unresolved)} authority=0")
-    return diag
 
+    no_pt=max(0,int(len(g)-matched))
+    diag={
+        "status":"PASS",
+        "matched_rows":int(matched),
+        "matched_any_component_rows":int(matched_any_component),
+        "full_five_matched_rows":int(full_five_matched),
+        "partial_matched_rows":int(partial_matched),
+        "no_pt_rows":int(no_pt),
+        "total_rows":int(len(g)),
+        "coverage":float(matched/max(len(g),1)),
+        "full_five_coverage":float(full_five_matched/max(len(g),1)),
+        "mapped_external_teams":int(len(emap)),
+        "unresolved_external_teams":unresolved[:50],
+        "sparse_policy":"MISSING_PT_IS_NO_EXTERNAL_SIGNAL; PARTIAL_COMPONENTS_PRESERVED; META_REQUIRES_EXACT_5_OF_5",
+        "authority":0,
+    }
+    log_func(
+        f"[NCAAF-PT-MATCH] status=PASS matched_rows={matched}/{len(g)} coverage={diag['coverage']:.3f} "
+        f"any_component={matched_any_component} partial={partial_matched} full_five={full_five_matched} "
+        f"no_pt={no_pt} full_five_coverage={diag['full_five_coverage']:.3f} "
+        f"mapped_teams={len(emap)} unresolved_teams={len(unresolved)} sparse=TRUE authority=0"
+    )
+    return diag
 
 def _pt_research_metrics(g: pd.DataFrame) -> dict[str,Any]:
     meta=pd.to_numeric(g.get("_V210_PT_META_MARGIN_TEAM"),errors="coerce").to_numpy(float)
@@ -1014,11 +1082,13 @@ def _pt_research_metrics(g: pd.DataFrame) -> dict[str,Any]:
 
 
 def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client=None, bucket_name="sharp-models", include_history=True, include_current=True, force=False, log_func=print) -> dict[str,Any]:
-    """Fetch/cache Prediction Tracker and attach fixed-weight META_MARGIN research fields.
+    """Read validated Prediction Tracker GCS artifacts and attach research fields.
 
-    V2.15 uses a GCS-first ingestion contract. A separate cloud web-unblocker feeder is
-    expected to refresh raw current artifacts; direct/relay web access is only a
-    best-effort fallback. Failure is non-fatal and always fail-closed: no external
+    V2.17 treats Prediction Tracker as sparse optional external intelligence. Games
+    absent from the source remain in the NCAAF model with no external signal. When a
+    listed game has only some of the five benchmark systems, available components are
+    preserved but META_MARGIN remains missing; the published five-system META is never
+    renormalized or imputed. Failure is non-fatal and always fail-closed: no external
     field can mutate Production V1 or grant Bet Authority.
     """
     try:
@@ -1053,7 +1123,14 @@ def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client
             if not current_frame.empty:
                 try:
                     storage_client.bucket(bucket_name).blob(PT_CURRENT_BLOB).upload_from_string(current_frame.to_csv(index=False).encode(),content_type="text/csv")
-                    meta={"season":PT_CURRENT_SEASON,"updated_utc":_now(),"rows":len(current_frame),"archive_rows":len(current_archive),"live_rows":len(current_live),"full_five_rows":int(np.isfinite(pd.to_numeric(current_frame.get('meta_margin_home'),errors='coerce')).sum()),"live_full_five_rows":int(np.isfinite(pd.to_numeric(current_live.get('meta_margin_home'),errors='coerce')).sum()) if not current_live.empty else 0,"source":"Prediction Tracker via GCS-first feeder contract","archive_url":PT_ARCHIVE_URL.format(season=PT_CURRENT_SEASON),"live_csv_url":PT_LIVE_CSV_URL,"live_page_url":PT_LIVE_PAGE_URL,"header_manifest_gcs":f"gs://{bucket_name}/{PT_HEADER_MANIFEST_BLOB}","live_page_raw_gcs":f"gs://{bucket_name}/{PT_LIVE_HTML_RAW_BLOB}","relay_prefix":PT_RELAY_PREFIX,"authority":0}
+                    _cc=pd.to_numeric(current_frame.get("meta_system_count"),errors="coerce").fillna(0) if "meta_system_count" in current_frame.columns else pd.Series(0,index=current_frame.index,dtype=float)
+                    _lcc=pd.to_numeric(current_live.get("meta_system_count"),errors="coerce").fillna(0) if isinstance(current_live,pd.DataFrame) and "meta_system_count" in current_live.columns else pd.Series(dtype=float)
+                    meta={"season":PT_CURRENT_SEASON,"updated_utc":_now(),"rows":len(current_frame),"archive_rows":len(current_archive),"live_rows":len(current_live),
+                          "any_component_rows":int((_cc>0).sum()),"partial_component_rows":int(((_cc>0)&(_cc<5)).sum()),
+                          "full_five_rows":int((_cc==5).sum()),"live_any_component_rows":int((_lcc>0).sum()) if len(_lcc) else 0,
+                          "live_partial_component_rows":int(((_lcc>0)&(_lcc<5)).sum()) if len(_lcc) else 0,
+                          "live_full_five_rows":int((_lcc==5).sum()) if len(_lcc) else 0,
+                          "source":"Prediction Tracker via manual validated GCS upload","archive_url":PT_ARCHIVE_URL.format(season=PT_CURRENT_SEASON),"live_csv_url":PT_LIVE_CSV_URL,"live_page_url":PT_LIVE_PAGE_URL,"header_manifest_gcs":f"gs://{bucket_name}/{PT_HEADER_MANIFEST_BLOB}","live_page_raw_gcs":f"gs://{bucket_name}/{PT_LIVE_HTML_RAW_BLOB}","relay_prefix":PT_RELAY_PREFIX,"sparse_source":True,"authority":0}
                     storage_client.bucket(bucket_name).blob(PT_CURRENT_META_BLOB).upload_from_string(json.dumps(meta,sort_keys=True).encode(),content_type="application/json")
                 except Exception: pass
         if include_history:
@@ -1068,12 +1145,29 @@ def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client
             match=_pt_attach_history_to_cache(dashboard_module,hist,log_func=log_func)
             c=getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}; gg=c.get("miner_games")
             if isinstance(gg,pd.DataFrame) and not gg.empty: metrics=_pt_research_metrics(gg)
-        result={"status":"PASS" if any((d or {}).get('status')=='PASS' for d in diags) else "UNAVAILABLE","source":"THE_PREDICTION_TRACKER","history_attached":bool(include_history and match.get('status')=='PASS'),"season_diagnostics":diags,"match":match,"metrics":metrics,"current":{"rows":int(len(current_frame)),"archive_rows":int(len(current_archive)),"live_rows":int(len(current_live)),"full_five_rows":int(np.isfinite(pd.to_numeric(current_frame.get('meta_margin_home'),errors='coerce')).sum()) if not current_frame.empty else 0,"live_full_five_rows":int(np.isfinite(pd.to_numeric(current_live.get('meta_margin_home'),errors='coerce')).sum()) if not current_live.empty else 0,"merge":current_merge,"gcs":f"gs://{bucket_name}/{PT_CURRENT_BLOB}","archive_gcs":f"gs://{bucket_name}/{PT_CURRENT_ARCHIVE_BLOB}","live_gcs":f"gs://{bucket_name}/{PT_CURRENT_LIVE_BLOB}"},"published_weights":dict(PT_PUBLISHED_WEIGHTS),"feeder_manifest":feeder_manifest,"production_authority":0,"bet_authority_vote":False,"automatic_promotion":False,"selection_influence":0}
+        _cc=pd.to_numeric(current_frame.get("meta_system_count"),errors="coerce").fillna(0) if isinstance(current_frame,pd.DataFrame) and "meta_system_count" in current_frame.columns else pd.Series(dtype=float)
+        _lcc=pd.to_numeric(current_live.get("meta_system_count"),errors="coerce").fillna(0) if isinstance(current_live,pd.DataFrame) and "meta_system_count" in current_live.columns else pd.Series(dtype=float)
+        result={"status":"PASS" if any((d or {}).get('status')=='PASS' for d in diags) else "UNAVAILABLE","source":"THE_PREDICTION_TRACKER","history_attached":bool(include_history and match.get('status')=='PASS'),"season_diagnostics":diags,"match":match,"metrics":metrics,
+                "coverage_policy":"SPARSE_OPTIONAL; MISSING_GAME=NO_EXTERNAL_SIGNAL; PARTIAL_COMPONENTS_PRESERVED; META=EXACT_5_OF_5_ONLY",
+                "current":{"rows":int(len(current_frame)),"archive_rows":int(len(current_archive)),"live_rows":int(len(current_live)),
+                           "any_component_rows":int((_cc>0).sum()) if len(_cc) else 0,"partial_component_rows":int(((_cc>0)&(_cc<5)).sum()) if len(_cc) else 0,
+                           "full_five_rows":int((_cc==5).sum()) if len(_cc) else 0,
+                           "live_any_component_rows":int((_lcc>0).sum()) if len(_lcc) else 0,"live_partial_component_rows":int(((_lcc>0)&(_lcc<5)).sum()) if len(_lcc) else 0,
+                           "live_full_five_rows":int((_lcc==5).sum()) if len(_lcc) else 0,
+                           "merge":current_merge,"gcs":f"gs://{bucket_name}/{PT_CURRENT_BLOB}","archive_gcs":f"gs://{bucket_name}/{PT_CURRENT_ARCHIVE_BLOB}","live_gcs":f"gs://{bucket_name}/{PT_CURRENT_LIVE_BLOB}"},
+                "published_weights":dict(PT_PUBLISHED_WEIGHTS),"feeder_manifest":feeder_manifest,"production_authority":0,"bet_authority_vote":False,"automatic_promotion":False,"selection_influence":0}
         if dashboard_module is not None:
             c=getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}; c["prediction_tracker_external"]=result
             try: setattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",c)
             except Exception: pass
-        log_func(f"[NCAAF-PT-CONTRACT] status={result['status']} history_attached={result['history_attached']} current_rows={result['current']['rows']} archive_rows={result['current'].get('archive_rows',0)} live_rows={result['current'].get('live_rows',0)} live_full_five={result['current'].get('live_full_five_rows',0)} matched_rows={match.get('matched_rows',0)} production_authority=0 bet_authority_vote=FALSE")
+        log_func(
+            f"[NCAAF-PT-CONTRACT] status={result['status']} history_attached={result['history_attached']} "
+            f"current_rows={result['current']['rows']} archive_rows={result['current'].get('archive_rows',0)} live_rows={result['current'].get('live_rows',0)} "
+            f"current_partial={result['current'].get('partial_component_rows',0)} current_full_five={result['current'].get('full_five_rows',0)} "
+            f"live_partial={result['current'].get('live_partial_component_rows',0)} live_full_five={result['current'].get('live_full_five_rows',0)} "
+            f"matched_rows={match.get('matched_rows',0)} matched_partial={match.get('partial_matched_rows',0)} matched_full_five={match.get('full_five_matched_rows',0)} "
+            f"missing_games_expected=TRUE sparse=TRUE production_authority=0 bet_authority_vote=FALSE"
+        )
         return result
     except Exception as exc:
         log_func(f"[NCAAF-PT-FAIL] {type(exc).__name__}: {exc} authority=0 fail_closed=TRUE")
@@ -1849,15 +1943,17 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
                     add(f"META_PT_{_slug}_CORE_AGREE", "EXTERNAL_COMPONENT", _good&(np.sign(_ee)==np.sign(core)), desc=f"{_k} and CORE strong agreement", min_n=30)
                     add(f"META_PT_{_slug}_CORE_CONFLICT", "EXTERNAL_COMPONENT", _good&(np.sign(_ee)!=np.sign(core)), desc=f"{_k} and CORE strong conflict", min_n=30)
         _ta=nfirst("_V212_PT_COMPONENT_TEAM_AGREE_COUNT"); _oa=nfirst("_V212_PT_COMPONENT_OPP_AGREE_COUNT"); _ds=nfirst("_V212_PT_COMPONENT_STD")
+        _avail=nfirst("_V217_PT_COMPONENT_AVAILABLE_COUNT") if has("_V217_PT_COMPONENT_AVAILABLE_COUNT") else nfirst("_V210_PT_META_SYSTEM_COUNT")
+        _all5=_avail.eq(5)
         if has("_V212_PT_COMPONENT_TEAM_AGREE_COUNT"):
-            add("META_PT_COMPONENTS_5_OF_5_TEAM","EXTERNAL_CONSENSUS",_ta.ge(5),desc="All five external systems favor team vs market",min_n=30)
-            add("META_PT_COMPONENTS_4PLUS_TEAM","EXTERNAL_CONSENSUS",_ta.ge(4),desc="At least four of five external systems favor team vs market",min_n=30)
+            add("META_PT_COMPONENTS_5_OF_5_TEAM","EXTERNAL_CONSENSUS",_all5&_ta.ge(5),desc="All five available external systems favor team vs market",min_n=30)
+            add("META_PT_COMPONENTS_4PLUS_TEAM","EXTERNAL_CONSENSUS",_all5&_ta.ge(4),desc="At least four of five external systems favor team vs market; full five-system coverage required",min_n=30)
         if has("_V212_PT_COMPONENT_OPP_AGREE_COUNT"):
-            add("META_PT_COMPONENTS_5_OF_5_OPP","EXTERNAL_CONSENSUS",_oa.ge(5),desc="All five external systems favor opponent vs market",min_n=30)
-            add("META_PT_COMPONENTS_4PLUS_OPP","EXTERNAL_CONSENSUS",_oa.ge(4),desc="At least four of five external systems favor opponent vs market",min_n=30)
+            add("META_PT_COMPONENTS_5_OF_5_OPP","EXTERNAL_CONSENSUS",_all5&_oa.ge(5),desc="All five available external systems favor opponent vs market",min_n=30)
+            add("META_PT_COMPONENTS_4PLUS_OPP","EXTERNAL_CONSENSUS",_all5&_oa.ge(4),desc="At least four of five external systems favor opponent vs market; full five-system coverage required",min_n=30)
         if has("_V212_PT_COMPONENT_STD"):
-            add("META_PT_LOW_DISPERSION_LE3","EXTERNAL_CONSENSUS",_ds.le(3)&_ds.notna(),desc="Five-system margin dispersion <=3 points",min_n=30)
-            add("META_PT_HIGH_DISPERSION_GE6","EXTERNAL_CONSENSUS",_ds.ge(6),desc="Five-system margin dispersion >=6 points",min_n=30)
+            add("META_PT_LOW_DISPERSION_LE3","EXTERNAL_CONSENSUS",_all5&_ds.le(3)&_ds.notna(),desc="Five-system margin dispersion <=3 points; full five-system coverage required",min_n=30)
+            add("META_PT_HIGH_DISPERSION_GE6","EXTERNAL_CONSENSUS",_all5&_ds.ge(6),desc="Five-system margin dispersion >=6 points; full five-system coverage required",min_n=30)
 
         spec_edge_cols=[c for c in g.columns if str(c).startswith("_V29_SPEC_") and str(c).endswith("_EDGE_POINTS")]
         for c in sorted(spec_edge_cols):
@@ -2624,18 +2720,26 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
         ex=ex.loc[ex["home_i"].notna()&ex["away_i"].notna()].copy(); ex["pair_key"]=ex["home_i"].astype(str)+"|"+ex["away_i"].astype(str)
         vc=ex["pair_key"].value_counts(); ex=ex.loc[ex["pair_key"].map(vc).eq(1)].set_index("pair_key",drop=False)
         meta=np.full(len(out),np.nan); cnt=np.full(len(out),np.nan); pavg=np.full(len(out),np.nan)
+        listed=np.zeros(len(out),dtype=float); full_five=np.zeros(len(out),dtype=float)
         comp={k:np.full(len(out),np.nan) for k in PT_PUBLISHED_WEIGHTS}
         for i,(h,a) in enumerate(zip(homes,aways)):
             k=f"{h}|{a}"
             if k not in ex.index: continue
             r=ex.loc[k]
             if isinstance(r,pd.DataFrame): continue
-            meta[i]=float(pd.to_numeric(pd.Series([r.get("meta_margin_home")]),errors="coerce").iloc[0])
-            cnt[i]=float(pd.to_numeric(pd.Series([r.get("meta_system_count")]),errors="coerce").iloc[0])
-            pavg[i]=float(pd.to_numeric(pd.Series([r.get("prediction_avg_home")]),errors="coerce").iloc[0])
+            listed[i]=1.0
+            component_count=0
             for _k in PT_PUBLISHED_WEIGHTS:
                 _v=pd.to_numeric(pd.Series([r.get(_k,np.nan)]),errors="coerce").iloc[0]
-                if pd.notna(_v): comp[_k][i]=float(_v)
+                if pd.notna(_v):
+                    comp[_k][i]=float(_v)
+                    component_count+=1
+            cnt[i]=float(component_count)
+            full_five[i]=1.0 if component_count==5 else 0.0
+            _mv=pd.to_numeric(pd.Series([r.get("meta_margin_home",np.nan)]),errors="coerce").iloc[0]
+            if pd.notna(_mv) and component_count==5: meta[i]=float(_mv)
+            _pa=pd.to_numeric(pd.Series([r.get("prediction_avg_home",np.nan)]),errors="coerce").iloc[0]
+            if pd.notna(_pa): pavg[i]=float(_pa)
         spread=pd.to_numeric(out.get("Consensus_Open_Spread",out.get("Opening_Spread",pd.Series(np.nan,index=out.index))),errors="coerce").to_numpy(float)
         market=-spread
         out["_V210_PT_META_MARGIN_TEAM"]=meta
@@ -2648,10 +2752,13 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
         out["_V212_PT_COMPONENT_STD"]=_std
         out["_V212_PT_COMPONENT_TEAM_AGREE_COUNT"]=np.sum(np.isfinite(_em)&(_em>0),axis=1).astype(float)
         out["_V212_PT_COMPONENT_OPP_AGREE_COUNT"]=np.sum(np.isfinite(_em)&(_em<0),axis=1).astype(float)
+        out["_V217_PT_GAME_LISTED"]=listed
+        out["_V217_PT_COMPONENT_AVAILABLE_COUNT"]=_cn.astype(float)
+        out["_V217_PT_FULL_FIVE"]=full_five
         for _k in PT_PUBLISHED_WEIGHTS:
             out[f"_V212_PT_{_k}_MARGIN_TEAM"]=comp[_k]
             out[f"_V212_PT_{_k}_EDGE_POINTS"]=comp[_k]-market
-        return out,{"status":"PASS","matched":int(np.isfinite(meta).sum()),"rows":int(len(out)),"authority":0}
+        return out,{"status":"PASS","matched":int(listed.sum()),"any_component":int((_cn>0).sum()),"partial":int(((_cn>0)&(_cn<5)).sum()),"full_five":int((_cn==5).sum()),"rows":int(len(out)),"sparse":True,"authority":0}
     except Exception as exc:
         return out,{"status":"UNAVAILABLE","matched":0,"error":f"{type(exc).__name__}:{exc}","authority":0}
 
@@ -2910,6 +3017,36 @@ def self_test() -> dict[str,Any]:
     _mm,_mmd=_pt_merge_current_season(_ma,_ml,log_func=lambda *a,**k:None)
     _merge_rematch_ok=bool(len(_mm)==3 and (_mm["home_key"].eq("alpha")&_mm["away_key"].eq("beta")).sum()==2 and 1.0 in set(pd.to_numeric(_mm["meta_margin_home"],errors="coerce").dropna()))
 
+    # Sparse Prediction Tracker coverage regression: a game listed by PT with
+    # only four of five systems must preserve those four components without
+    # fabricating/renormalizing META. A game absent from PT remains untouched.
+    class _DSP: pass
+    _DSP._V1357_SPREAD_RESEARCH_CACHE={
+        "games":pd.DataFrame({
+            "Season":[2025,2025],"Team_Norm":["alpha","gamma"],"Opponent_Norm":["beta","delta"],
+            "Is_Home":[1,1],"Game_Date":["2025-09-01","2025-09-02"],"Consensus_Open_Spread":[-3.0,2.0],
+        }),
+        "miner_games":pd.DataFrame({
+            "Season":[2025,2025],"Team_Norm":["alpha","gamma"],"Opponent_Norm":["beta","delta"],
+            "Is_Home":[1,1],"Game_Date":["2025-09-01","2025-09-02"],"Consensus_Open_Spread":[-3.0,2.0],
+        }),
+    }
+    _sp_ext=pd.DataFrame({
+        "season":[2025],"home_key":["alpha"],"away_key":["beta"],"game_date":["2025-09-01"],
+        "meta_margin_home":[np.nan],"meta_system_count":[4],"prediction_avg_home":[4.0],"tracker_open_home":[3.0],
+        "DOKTER":[4.0],"PI_RATE_BIAS":[5.0],"KEEPER":[3.5],"ESPN_FPI":[4.5],"PIGSKIN_INDEX":[np.nan],
+    })
+    _sp_diag=_pt_attach_history_to_cache(_DSP,_sp_ext,log_func=lambda *a,**k:None)
+    _sp_mg=_DSP._V1357_SPREAD_RESEARCH_CACHE["miner_games"]
+    _sparse_pt_ok=bool(
+        _sp_diag.get("matched_rows")==1 and _sp_diag.get("partial_matched_rows")==1 and
+        _sp_diag.get("full_five_matched_rows")==0 and _sp_diag.get("no_pt_rows")==1 and
+        pd.isna(_sp_mg.loc[0,"_V210_PT_META_MARGIN_TEAM"]) and
+        float(_sp_mg.loc[0,"_V217_PT_COMPONENT_AVAILABLE_COUNT"])==4.0 and
+        pd.notna(_sp_mg.loc[0,"_V212_PT_DOKTER_MARGIN_TEAM"]) and
+        pd.isna(_sp_mg.loc[1,"_V212_PT_DOKTER_MARGIN_TEAM"])
+    )
+
     # Exact expert-side bridge regression: prove that a team-side Pathi trigger
     # and an opponent-side Big Al trigger survive projection into miner_games.
     class _Q:
@@ -2975,7 +3112,7 @@ def self_test() -> dict[str,Any]:
         "SU_SEQ3_LWL" in live_atoms and "OFF_ATS_COVER_7_PLUS" in live_atoms and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
         "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and "META_PT_EDGE_TEAM_3PLUS" in live_atoms and "META_PT_CORE_STRONG_AGREE" in live_atoms and
-        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _expert_bridge_ok and _occ_recon_ok
+        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _sparse_pt_ok and _expert_bridge_ok and _occ_recon_ok
     )
     return {
         "status":"PASS" if ok else "FAIL","source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG,
@@ -2990,7 +3127,7 @@ def self_test() -> dict[str,Any]:
         "pt_name_safe_header_contract":_pt_name_safe,
         "pt_self_test_system_columns":_pt_da.get("system_columns",{}),
         "pt_fuzzy_header_rejected":_pt_dc.get("system_columns",{}).get("ESPN_FPI") is None,
-        "pt_relay_csv_payload":_relay_csv_ok,"pt_relay_named_markdown":_relay_md_ok,"pt_relay_https_target":_relay_url_ok,"pt_challenge_rejected":_challenge_rejected,"pt_current_merge_preserves_rematch":_merge_rematch_ok,"expert_side_bridge":_expert_bridge_ok,"expert_occurrence_reconciliation":_occ_recon_ok,
+        "pt_relay_csv_payload":_relay_csv_ok,"pt_relay_named_markdown":_relay_md_ok,"pt_relay_https_target":_relay_url_ok,"pt_challenge_rejected":_challenge_rejected,"pt_current_merge_preserves_rematch":_merge_rematch_ok,"pt_sparse_partial_component_preservation":_sparse_pt_ok,"expert_side_bridge":_expert_bridge_ok,"expert_occurrence_reconciliation":_occ_recon_ok,
     }
 
 

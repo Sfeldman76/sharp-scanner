@@ -1,84 +1,43 @@
-# NCAAF V2.16 — VERIFIED REBUILD
+# NCAAF Research V2.17 — Sparse Prediction Tracker / Manual GCS
 
-This is a clean rebuild of V2.16. The three runtime files were recompiled and self-tested together before packaging. **If the deployed Heavy log does not show `[NCAAF-RV216-DEPLOY-PREFLIGHT] PASS`, Cloud Run is not running this package.**
+## Why this patch exists
+Prediction Tracker does not cover every NCAA game, and a listed game can have fewer than all five benchmark systems. V2.17 treats Prediction Tracker as **sparse optional external intelligence** instead of a complete game universe.
 
-# NCAAF V2.16 — Cloud-only Prediction Tracker ingestion
+## Behavior
+- A game absent from Prediction Tracker stays in the NCAAF model normally. It simply has **no PT external signal**.
+- If a PT game has 1–4 of the named systems, those individual component ratings are preserved for research.
+- `META_MARGIN` is still created **only with all five exact named systems**. No imputation, renormalization, or guessed rating is allowed.
+- Five-system consensus/dispersion atoms require full 5-of-5 coverage.
+- PT remains one correlated external family and has **zero Production/Bet Authority** unless separately validated under existing gates.
+- 2026 remains sealed from discovery/confirmation.
+- No paid proxy / Oxylabs / web-unblocker is required. Heavy and Weekly read validated GCS uploads.
+- Current YTD archive freshness defaults to 168 hours; live/current files to 72 hours.
 
-This replaces the V2.15 residential-PC feeder. Nothing runs on the operator's computer.
+## Replace
+Replace these files in the `sharp-train-job` source:
 
-## Replace / add in the repository
-
-Replace:
 - `ncaaf_research_v2.py`
 - `train_job.py`
 
-Add:
-- `prediction_tracker_cloud_feeder.py`
+`prediction_tracker_cloud_feeder.py` is no longer imported or required by V2.17.
 
-No dashboard change is required. The feeder now runs automatically inside:
-- `NCAAF Production — Weekly Update` (current data only)
-- `NCAAF Research — Heavy Challenger Search` (history + current)
+## Deploy
+Redeploy the existing `sharp-train-job` exactly as you normally do from its source directory.
 
-## Required cloud credential
+## Run
+After deployment, run:
 
-Prediction Tracker blocks ordinary Cloud Run/datacenter egress, so a web-unblocker/residential-proxy credential is required for a cloud-only design.
+**NCAAF Research — Heavy Challenger Search**
 
-Supported configuration:
+Do not run Production Publish for this research change.
 
-### Oxylabs Web Unblocker
-Set Cloud Run secrets/env vars:
-- `OXYLABS_USERNAME`
-- `OXYLABS_PASSWORD`
+## Expected log markers
 
-Optional:
-- `OXYLABS_ENDPOINT=unblock.oxylabs.io:60000`
-- `PT_UNBLOCKER_GEO=United States`
-- `PT_UNBLOCKER_TIMEOUT=90`
-
-### Generic compatible proxy
-Alternatively set:
-- `PT_UNBLOCKER_PROXY_URL=http://user:password@host:port`
-
-## Secret Manager example from Google Cloud Shell
-
-```bash
-printf '%s' 'YOUR_OXYLABS_USERNAME' | gcloud secrets create pt-oxylabs-username --data-file=- --replication-policy=automatic
-printf '%s' 'YOUR_OXYLABS_PASSWORD' | gcloud secrets create pt-oxylabs-password --data-file=- --replication-policy=automatic
-
-gcloud secrets add-iam-policy-binding pt-oxylabs-username \
-  --member='serviceAccount:sharp-train-sa@sharplogger.iam.gserviceaccount.com' \
-  --role='roles/secretmanager.secretAccessor'
-
-gcloud secrets add-iam-policy-binding pt-oxylabs-password \
-  --member='serviceAccount:sharp-train-sa@sharplogger.iam.gserviceaccount.com' \
-  --role='roles/secretmanager.secretAccessor'
-
-gcloud run jobs update sharp-train-job \
-  --project=sharplogger \
-  --region=us-east4 \
-  --set-secrets='OXYLABS_USERNAME=pt-oxylabs-username:latest,OXYLABS_PASSWORD=pt-oxylabs-password:latest'
+```
+[NCAAF-RV217-DEPLOY-PREFLIGHT] PASS source_tag=ncaaf-research-v2.17-sparse-pt-manual-gcs-20261007
+[NCAAF-PT-GCS-MANUAL] mode=GCS_ONLY ... paid_proxy_required=FALSE
+[NCAAF-PT-MATCH] ... partial=... full_five=... no_pt=... sparse=TRUE authority=0
+[NCAAF-PT-CONTRACT] ... missing_games_expected=TRUE sparse=TRUE ...
 ```
 
-If the secrets already exist, add a new version instead of recreating them.
-
-## Expected log flow
-
-```text
-[NCAAF-PT-CLOUD-FEEDER-PREFLIGHT] PASS ...
-[NCAAF-PT-CLOUD-FEEDER] source=ncaa2022 status=PASS|SKIPPED_VALID_EXISTING ...
-...
-[NCAAF-PT-CLOUD-FEEDER] source=ncaapredictions status=PASS ...
-[NCAAF-PT-CLOUD-FEEDER] source=predncaa_live_page status=PASS ...
-[NCAAF-PT-CLOUD-FEEDER] status=PASS ...
-[NCAAF-PT-FEEDER-MANIFEST] status=READY ...
-[NCAAF-PT-CONTRACT] status=PASS history_attached=True ... matched_rows>0 ...
-[NCAAF-RV25-ATOM-BRIDGE] market=spreads ... external>0 ...
-```
-
-If credentials are not configured, the NCAAF job continues safely with:
-
-```text
-[NCAAF-PT-CLOUD-FEEDER] status=CONFIG_MISSING ...
-```
-
-Production authority remains zero for this external family.
+The Heavy run should still finish with production mutation disabled.

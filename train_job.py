@@ -574,7 +574,6 @@ def main():
     _npv1, _npv1_path, _npv1_sha = _load_exact_local_module("ncaaf_production_v1")
     _nrv22, _nrv22_path, _nrv22_sha = _load_exact_local_module("ncaaf_research_v2")
     _nccv2, _nccv2_path, _nccv2_sha = _load_exact_local_module("ncaaf_core_challenger_v2")
-    _ptcf, _ptcf_path, _ptcf_sha = _load_exact_local_module("prediction_tracker_cloud_feeder")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
@@ -827,44 +826,20 @@ def main():
         f"path={_npv1_path} sha={_npv1_sha[:16]} promotion_requested={_ncaaf_prod_promote}"
     )
     _nrv22_tag = getattr(_nrv22, "NCAAF_RESEARCH_V2_SOURCE_TAG", None)
-    if _nrv22_tag != "ncaaf-research-v2.16-cloud-unblocker-gcs-first-20261007":
+    if _nrv22_tag != "ncaaf-research-v2.17-sparse-pt-manual-gcs-20261007":
         raise RuntimeError(
-            f"[NCAAF-RV216-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv22_tag!r} "
+            f"[NCAAF-RV217-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv22_tag!r} "
             f"path={str(_nrv22_path)!r} sha={_nrv22_sha[:16]}"
         )
     log_func(
-        f"[NCAAF-RV216-DEPLOY-PREFLIGHT] PASS source_tag={_nrv22_tag} "
+        f"[NCAAF-RV217-DEPLOY-PREFLIGHT] PASS source_tag={_nrv22_tag} "
         f"path={_nrv22_path} sha={_nrv22_sha[:16]} production_authority=0"
     )
-    _ptcf_tag = getattr(_ptcf, "SOURCE_TAG", None)
-    if _ptcf_tag != "prediction-tracker-cloud-feeder-v1.0-web-unblocker-20261007":
-        raise RuntimeError(
-            f"[NCAAF-PT-CLOUD-FEEDER-PREFLIGHT] STALE_OR_MISSING source_tag={_ptcf_tag!r} "
-            f"path={str(_ptcf_path)!r} sha={_ptcf_sha[:16]}"
-        )
     log_func(
-        f"[NCAAF-PT-CLOUD-FEEDER-PREFLIGHT] PASS source_tag={_ptcf_tag} "
-        f"path={_ptcf_path} sha={_ptcf_sha[:16]} production_authority=0"
+        "[NCAAF-PT-GCS-MANUAL] mode=GCS_ONLY sparse_source=TRUE "
+        "missing_game_policy=NO_EXTERNAL_SIGNAL partial_component_policy=PRESERVE_AVAILABLE "
+        "meta_policy=EXACT_5_OF_5_ONLY paid_proxy_required=FALSE production_authority=0"
     )
-
-    def _refresh_pt_cloud_feeder(*, reason: str, include_history: bool) -> dict:
-        try:
-            out = _ptcf.run_prediction_tracker_cloud_feeder(
-                storage_client=gcs, bucket_name=bucket, include_history=include_history,
-                force_history=False, timeout=int(os.getenv("PT_UNBLOCKER_TIMEOUT", "90")), log_func=log_func
-            )
-            log_func(
-                f"[NCAAF-PT-CLOUD-REFRESH] reason={reason} status={out.get('status')} "
-                f"provider={out.get('provider')} pass_count={out.get('pass_count',0)} "
-                f"refreshed_count={out.get('refreshed_count',0)} production_mutation=FALSE authority=0"
-            )
-            return out
-        except Exception as exc:
-            log_func(
-                f"[NCAAF-PT-CLOUD-REFRESH] reason={reason} status=UNAVAILABLE "
-                f"error={type(exc).__name__}:{exc} production_mutation=FALSE authority=0"
-            )
-            return {"status":"UNAVAILABLE","error":f"{type(exc).__name__}:{exc}"}
     _nccv2_tag = getattr(_nccv2, "SOURCE_TAG", None)
     if _nccv2_tag != "ncaaf-core-challenger-v2.4-expert-model-atom-bridge-20261006":
         raise RuntimeError(
@@ -925,10 +900,10 @@ def main():
                 log_func(f"[NCAAF-WEEKLY-RESEARCH-REGISTRY] status={'READY' if isinstance(_rr,dict) else 'UNAVAILABLE'} confirmed_mechanisms={_confirmed} mutation=FALSE")
             except Exception as _reg_exc:
                 log_func(f"[NCAAF-WEEKLY-RESEARCH-REGISTRY] status=UNAVAILABLE error={type(_reg_exc).__name__}:{_reg_exc} mutation=FALSE")
-            # Cloud-only Prediction Tracker acquisition.  The training container routes the
-            # public source through a configured web-unblocker/residential proxy and writes
-            # validated exact bytes to GCS.  No operator PC is involved.
-            _refresh_pt_cloud_feeder(reason="WEEKLY", include_history=False)
+            # Prediction Tracker is now a validated manual-GCS sparse source. No paid
+            # proxy/unblocker is required. Missing source games remain ordinary NCAAF games
+            # with no external-rating signal.
+            log_func("[NCAAF-PT-GCS-MANUAL] reason=WEEKLY refresh_network=FALSE missing_games_expected=TRUE authority=0")
 
             # GCS-first model-side Prediction Tracker refresh. This only updates the research
             # snapshot in GCS; it cannot modify production predictions/authority.
@@ -975,10 +950,10 @@ def main():
                 raise RuntimeError(f"[NCAAF-HEAVY-RUN] core challenger failed status={getattr(_core,'get',lambda *_:None)('status')}")
 
             pw.emit("systems","NCAAF Heavy Research: run same Miner with Pathi + Big Al + OOF CORE/specialist atoms",pct=0.72)
-            # Refresh Prediction Tracker entirely in cloud before research attaches the
-            # external-rating family. Completed valid archives are reused; poisoned/invalid
-            # GCS challenge files are replaced only after a validated unblocker response.
-            _refresh_pt_cloud_feeder(reason="HEAVY", include_history=True)
+            # Prediction Tracker is read only from validated GCS uploads. It is intentionally
+            # sparse: absence from PT never removes a game and partial named-system coverage
+            # remains usable as component research while META still requires exact 5-of-5.
+            log_func("[NCAAF-PT-GCS-MANUAL] reason=HEAVY refresh_network=FALSE missing_games_expected=TRUE sparse=TRUE authority=0")
             _research=_nrv22.run_ncaaf_research_v2(
                 dashboard_module=_sld,utils_module=_utils,bucket_name=bucket,
                 storage_client=gcs,log_func=log_func,hard_fail=True
