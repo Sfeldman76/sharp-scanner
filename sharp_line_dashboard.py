@@ -48279,10 +48279,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     for gk,g in grouped:
         g=g.sort_values('Game_Start')
         r0=g.iloc[0]
-        rec={'_game_key':gk,'_game_start':r0.get('Game_Start'),'ET Date':r0.get('ET Date',''),'Game Time':r0.get('Game Time',''),'Matchup':r0.get('Matchup',''),
-             'PT Meta Home Margin':pd.to_numeric(pd.Series([r0.get('NCAAF_PT_Meta_Margin_Home')]),errors='coerce').iloc[0],
-             'PT Meta vs Market':pd.to_numeric(pd.Series([r0.get('NCAAF_PT_Meta_Edge_Home')]),errors='coerce').iloc[0],
-             'PT Meta Systems':pd.to_numeric(pd.Series([r0.get('NCAAF_PT_Meta_System_Count')]),errors='coerce').iloc[0]}
+        rec={'_game_key':gk,'_game_start':r0.get('Game_Start'),'ET Date':r0.get('ET Date',''),'Game Time':r0.get('Game Time',''),'Matchup':r0.get('Matchup','')}
         production_plays=[]; edge_parts=[]; system_parts=[]; system_count=0
         spread_pathi='—'; spread_miner='—'; spread_support=0; spread_conflict=0
         for m,prefix in [('spreads','Spr'),('h2h','H2H'),('totals','Tot')]:
@@ -48365,7 +48362,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     _prod_contract=_ncaaf_prod_v1_load_contract(GCS_BUCKET)
     st.subheader('NCAAF Production — CORE + Systems + Bet Authority')
     if isinstance(_prod_contract,dict):
-        st.caption('Spread/H2H/Totals remain separate frozen probability models. CORE creates a candidate only after clearing the price-aware 2% edge + 2% EV gate. STAT, Pathi, Big Al and STRONG_VALIDATED Miner families are bounded evidence: they may confirm or oppose CORE, but cannot create a wager, reverse the side, or rewrite model probability. Prediction Tracker META_MARGIN is displayed/researched as an independent zero-authority challenger only. CONFIRMED_SHADOW Miner families remain research/prospective only. H2H remains model-only.')
+        st.caption('Spread/H2H/Totals remain separate frozen probability models. CORE creates a candidate only after clearing the price-aware 2% edge + 2% EV gate. STAT, Pathi, Big Al and STRONG_VALIDATED Miner families are bounded evidence: they may confirm or oppose CORE, but cannot create a wager, reverse the side, or rewrite model probability. Prediction Tracker remains a backend research/shadow brain with zero production authority; PT margin fields are intentionally not displayed on the production board. CONFIRMED_SHADOW Miner families remain research/prospective only. H2H remains model-only.')
         _backs=_prod_contract.get('backbones') or {}
         _spf=len(((_backs.get('spread') or {}).get('feature_cols') or [])); _h2f=len(((_backs.get('h2h') or {}).get('feature_cols') or [])); _ttf=len(((_backs.get('totals') or {}).get('feature_cols') or []))
         st.caption(f'Fast production path: Spread {_spf} fixed features • H2H {_h2f} fixed features • Totals {_ttf} fixed features • cadence FROZEN • AutoFS OFF • multi-head runtime OFF • rich-market model OFF.')
@@ -48404,7 +48401,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
         st.caption(f'Schedule normalization merged {_schedule_conflict_games} matchup(s) that arrived with conflicting kickoff-time variants. The freshest/highest-coverage kickoff is used for the production board and ledger identity.')
 
     view=view.sort_values('_game_start')
-    main=view[['Game Time','Matchup','PT Meta Home Margin','PT Meta vs Market','Spr Action','Spr Pick','Spr Prob','Spr Edge','Spr Support','Spr Conflict','H2H Action','H2H Pick','H2H Prob','H2H Edge','Tot Action','Tot Pick','Tot Prob','Tot Edge','Tot Support','Tot Conflict','Production Plays','Pathi State','Miner State','System Trigger']].copy()
+    main=view[['Game Time','Matchup','Spr Action','Spr Pick','Spr Prob','Spr Edge','Spr Support','Spr Conflict','H2H Action','H2H Pick','H2H Prob','H2H Edge','Tot Action','Tot Pick','Tot Prob','Tot Edge','Tot Support','Tot Conflict','Production Plays','Pathi State','Miner State','System Trigger']].copy()
     main=main.rename(columns={'Spr Edge':'Spr Model Edge','H2H Edge':'H2H Model Edge','Tot Edge':'Tot Model Edge'})
     for c in ['Spr Prob','Spr Model Edge','H2H Prob','H2H Model Edge','Tot Prob','Tot Model Edge']:
         main[c]=pd.to_numeric(main[c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
