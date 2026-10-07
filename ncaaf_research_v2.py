@@ -33,8 +33,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.18-full-pt-index-universe-20261007"
-NCAAF_RESEARCH_V2_VERSION = "2.18.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.18.2-meta-overlap-guard-20261007"
+NCAAF_RESEARCH_V2_VERSION = "2.18.2"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -165,6 +165,18 @@ PT_INDEX_SOURCE_CLUSTERS = {
     "REGRESSION": {"linel2", "linel2hf", "linelog"},
     "PAYNE": {"linepayne", "linepaynep", "linepaynewl"},
 }
+
+# Exact Prediction Tracker indices that are already constituents of the frozen
+# five-system META_MARGIN. They remain available for individual behavior study,
+# but are never counted as independent evidence from META itself.
+PT_META_CONSTITUENT_INDEX_IDS = frozenset({
+    "linedokter",
+    "linepibias",
+    "linekeep",
+    "linefpi",   # lineespn canonicalizes to linefpi
+    "linepig",
+})
+
 
 def _pt_index_canonical_header(x: Any) -> str:
     k=str(x).strip().lower()
@@ -1210,6 +1222,61 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         with np.errstate(divide="ignore",invalid="ignore"):
             idx_cluster_team_frac=np.where(idx_cluster_n>0,_ct/idx_cluster_n,np.nan)
             idx_cluster_opp_frac=np.where(idx_cluster_n>0,_co/idx_cluster_n,np.nan)
+
+        # V2.18.2: consensus independent of the frozen META constituents.
+        # We remove the entire source cluster for every META constituent, not
+        # merely the exact five columns. This prevents Pi Bias in META from being
+        # "independently" confirmed by Pi Mean / Pi Ratings in the broad consensus.
+        _meta_source_clusters={_pt_index_source_cluster(k) for k in PT_META_CONSTITUENT_INDEX_IDS}
+        _exmeta_cols=[
+            j for j,k in enumerate(_idx_keys)
+            if _pt_index_source_cluster(k) not in _meta_source_clusters
+        ]
+        _exmeta_mat=idx_mat[:,_exmeta_cols] if _exmeta_cols else np.empty((len(g),0))
+        _exmeta_edge=_exmeta_mat-market_margin[:,None] if _exmeta_cols else np.empty((len(g),0))
+        exmeta_n=np.isfinite(_exmeta_mat).sum(axis=1).astype(float)
+        exmeta_mean_margin=np.full(len(g),np.nan)
+        exmeta_median_margin=np.full(len(g),np.nan)
+        exmeta_std=np.full(len(g),np.nan)
+        exmeta_iqr=np.full(len(g),np.nan)
+        for _i in range(len(g)):
+            _v=_exmeta_mat[_i,np.isfinite(_exmeta_mat[_i])]
+            if _v.size:
+                exmeta_mean_margin[_i]=float(np.mean(_v))
+                exmeta_median_margin[_i]=float(np.median(_v))
+                if _v.size>=2:
+                    exmeta_std[_i]=float(np.std(_v))
+                    exmeta_iqr[_i]=float(np.percentile(_v,75)-np.percentile(_v,25))
+        exmeta_mean_edge=exmeta_mean_margin-market_margin
+        exmeta_median_edge=exmeta_median_margin-market_margin
+        _ext=np.sum(np.isfinite(_exmeta_edge)&(_exmeta_edge>0),axis=1).astype(float)
+        _exo=np.sum(np.isfinite(_exmeta_edge)&(_exmeta_edge<0),axis=1).astype(float)
+        _exst=np.sum(np.isfinite(_exmeta_edge)&(_exmeta_edge>=2),axis=1).astype(float)
+        _exso=np.sum(np.isfinite(_exmeta_edge)&(_exmeta_edge<=-2),axis=1).astype(float)
+        with np.errstate(divide="ignore",invalid="ignore"):
+            exmeta_team_frac=np.where(exmeta_n>0,_ext/exmeta_n,np.nan)
+            exmeta_opp_frac=np.where(exmeta_n>0,_exo/exmeta_n,np.nan)
+            exmeta_strong_team_frac=np.where(exmeta_n>0,_exst/exmeta_n,np.nan)
+            exmeta_strong_opp_frac=np.where(exmeta_n>0,_exso/exmeta_n,np.nan)
+
+        _exmeta_cluster_cols=[
+            j for j,cn in enumerate(_cluster_names)
+            if cn not in _meta_source_clusters
+        ]
+        _exmeta_cluster_mat=_cluster_mat[:,_exmeta_cluster_cols] if _exmeta_cluster_cols else np.empty((len(g),0))
+        _exmeta_cluster_edge=_exmeta_cluster_mat-market_margin[:,None] if _exmeta_cluster_cols else np.empty((len(g),0))
+        exmeta_cluster_n=np.isfinite(_exmeta_cluster_mat).sum(axis=1).astype(float)
+        exmeta_cluster_median_margin=np.full(len(g),np.nan)
+        for _i in range(len(g)):
+            _v=_exmeta_cluster_mat[_i,np.isfinite(_exmeta_cluster_mat[_i])]
+            if _v.size:
+                exmeta_cluster_median_margin[_i]=float(np.median(_v))
+        exmeta_cluster_median_edge=exmeta_cluster_median_margin-market_margin
+        _exct=np.sum(np.isfinite(_exmeta_cluster_edge)&(_exmeta_cluster_edge>0),axis=1).astype(float)
+        _exco=np.sum(np.isfinite(_exmeta_cluster_edge)&(_exmeta_cluster_edge<0),axis=1).astype(float)
+        with np.errstate(divide="ignore",invalid="ignore"):
+            exmeta_cluster_team_frac=np.where(exmeta_cluster_n>0,_exct/exmeta_cluster_n,np.nan)
+            exmeta_cluster_opp_frac=np.where(exmeta_cluster_n>0,_exco/exmeta_cluster_n,np.nan)
     else:
         idx_mat=np.empty((len(g),0)); idx_edge=np.empty((len(g),0)); idx_n=np.zeros(len(g),dtype=float)
         idx_mean_margin=np.full(len(g),np.nan); idx_median_margin=np.full(len(g),np.nan)
@@ -1221,6 +1288,14 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         idx_cluster_median_edge=np.full(len(g),np.nan)
         idx_cluster_team_frac=np.full(len(g),np.nan); idx_cluster_opp_frac=np.full(len(g),np.nan)
         _cluster_names=[]
+        exmeta_n=np.zeros(len(g),dtype=float)
+        exmeta_mean_edge=np.full(len(g),np.nan); exmeta_median_edge=np.full(len(g),np.nan)
+        exmeta_std=np.full(len(g),np.nan); exmeta_iqr=np.full(len(g),np.nan)
+        exmeta_team_frac=np.full(len(g),np.nan); exmeta_opp_frac=np.full(len(g),np.nan)
+        exmeta_strong_team_frac=np.full(len(g),np.nan); exmeta_strong_opp_frac=np.full(len(g),np.nan)
+        exmeta_cluster_n=np.zeros(len(g),dtype=float)
+        exmeta_cluster_median_edge=np.full(len(g),np.nan)
+        exmeta_cluster_team_frac=np.full(len(g),np.nan); exmeta_cluster_opp_frac=np.full(len(g),np.nan)
 
     for df in (g,m):
         df["_V210_PT_META_MARGIN_TEAM"]=meta
@@ -1253,6 +1328,24 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         df["_V218_PTIDX_CLUSTER_MEDIAN_EDGE_POINTS"]=idx_cluster_median_edge
         df["_V218_PTIDX_CLUSTER_TEAM_AGREE_FRAC"]=idx_cluster_team_frac
         df["_V218_PTIDX_CLUSTER_OPP_AGREE_FRAC"]=idx_cluster_opp_frac
+
+        # META-source-out consensus. These are the cleanest aggregate external
+        # comparators to the frozen five-system META because none of META's
+        # constituent source clusters are included.
+        df["_V2182_PT_EXMETA_AVAILABLE_COUNT"]=exmeta_n
+        df["_V2182_PT_EXMETA_MEAN_EDGE_POINTS"]=exmeta_mean_edge
+        df["_V2182_PT_EXMETA_MEDIAN_EDGE_POINTS"]=exmeta_median_edge
+        df["_V2182_PT_EXMETA_STD"]=exmeta_std
+        df["_V2182_PT_EXMETA_IQR"]=exmeta_iqr
+        df["_V2182_PT_EXMETA_TEAM_AGREE_FRAC"]=exmeta_team_frac
+        df["_V2182_PT_EXMETA_OPP_AGREE_FRAC"]=exmeta_opp_frac
+        df["_V2182_PT_EXMETA_STRONG_TEAM_FRAC"]=exmeta_strong_team_frac
+        df["_V2182_PT_EXMETA_STRONG_OPP_FRAC"]=exmeta_strong_opp_frac
+        df["_V2182_PT_EXMETA_CLUSTER_COUNT"]=exmeta_cluster_n
+        df["_V2182_PT_EXMETA_CLUSTER_MEDIAN_EDGE_POINTS"]=exmeta_cluster_median_edge
+        df["_V2182_PT_EXMETA_CLUSTER_TEAM_AGREE_FRAC"]=exmeta_cluster_team_frac
+        df["_V2182_PT_EXMETA_CLUSTER_OPP_AGREE_FRAC"]=exmeta_cluster_opp_frac
+
         df["_V218_PT_TRACKER_AVG_EDGE_POINTS"]=pavg-market_margin
         df["_V218_PT_TRACKER_MEDIAN_EDGE_POINTS"]=pmed-market_margin
 
@@ -2289,6 +2382,54 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
         if has("_V218_PTIDX_CLUSTER_OPP_AGREE_FRAC"):
             add("PT_CLUSTER_CONSENSUS_OPP_70","EXTERNAL_RATINGS_FAMILY",_cl_enough&_cl_of.ge(.70),desc=">=70% of external source clusters favor opponent",min_n=30)
 
+        # V2.18.2: broad consensus with every frozen META constituent source
+        # removed. Prefer these when asking whether "the rest of Prediction
+        # Tracker" independently agrees with the fixed five-system META.
+        _exn=nfirst("_V2182_PT_EXMETA_AVAILABLE_COUNT")
+        _exmed=nfirst("_V2182_PT_EXMETA_MEDIAN_EDGE_POINTS")
+        _exmean=nfirst("_V2182_PT_EXMETA_MEAN_EDGE_POINTS")
+        _extf=nfirst("_V2182_PT_EXMETA_TEAM_AGREE_FRAC")
+        _exof=nfirst("_V2182_PT_EXMETA_OPP_AGREE_FRAC")
+        _exstf=nfirst("_V2182_PT_EXMETA_STRONG_TEAM_FRAC")
+        _exsof=nfirst("_V2182_PT_EXMETA_STRONG_OPP_FRAC")
+        _exstd=nfirst("_V2182_PT_EXMETA_STD")
+        _exiqr=nfirst("_V2182_PT_EXMETA_IQR")
+        _excln=nfirst("_V2182_PT_EXMETA_CLUSTER_COUNT")
+        _exclmed=nfirst("_V2182_PT_EXMETA_CLUSTER_MEDIAN_EDGE_POINTS")
+        _excltf=nfirst("_V2182_PT_EXMETA_CLUSTER_TEAM_AGREE_FRAC")
+        _exclof=nfirst("_V2182_PT_EXMETA_CLUSTER_OPP_AGREE_FRAC")
+        _ex_enough=_exn.ge(8)
+        _excl_enough=_excln.ge(8)
+
+        if has("_V2182_PT_EXMETA_MEDIAN_EDGE_POINTS"):
+            add("PT_EXMETA_MEDIAN_EDGE_TEAM_2PLUS","EXTERNAL_RATINGS_FAMILY",_ex_enough&_exmed.ge(2),desc="META-source-out median external edge >= +2",min_n=30)
+            add("PT_EXMETA_MEDIAN_EDGE_OPP_2PLUS","EXTERNAL_RATINGS_FAMILY",_ex_enough&_exmed.le(-2),desc="META-source-out median external edge <= -2",min_n=30)
+        if has("_V2182_PT_EXMETA_MEAN_EDGE_POINTS"):
+            add("PT_EXMETA_MEAN_EDGE_TEAM_2PLUS","EXTERNAL_RATINGS_FAMILY",_ex_enough&_exmean.ge(2),desc="META-source-out mean external edge >= +2",min_n=30)
+            add("PT_EXMETA_MEAN_EDGE_OPP_2PLUS","EXTERNAL_RATINGS_FAMILY",_ex_enough&_exmean.le(-2),desc="META-source-out mean external edge <= -2",min_n=30)
+        if has("_V2182_PT_EXMETA_TEAM_AGREE_FRAC"):
+            for _pct,_cut in ((65,.65),(75,.75),(85,.85)):
+                add(f"PT_EXMETA_CONSENSUS_TEAM_{_pct}","EXTERNAL_RATINGS_FAMILY",_ex_enough&_extf.ge(_cut),desc=f">={_pct}% of META-source-out indices favor team",min_n=30)
+        if has("_V2182_PT_EXMETA_OPP_AGREE_FRAC"):
+            for _pct,_cut in ((65,.65),(75,.75),(85,.85)):
+                add(f"PT_EXMETA_CONSENSUS_OPP_{_pct}","EXTERNAL_RATINGS_FAMILY",_ex_enough&_exof.ge(_cut),desc=f">={_pct}% of META-source-out indices favor opponent",min_n=30)
+        if has("_V2182_PT_EXMETA_STRONG_TEAM_FRAC"):
+            add("PT_EXMETA_STRONG_EDGE_TEAM_65","EXTERNAL_RATINGS_FAMILY",_ex_enough&_exstf.ge(.65),desc=">=65% of META-source-out indices have team edge >=2",min_n=30)
+        if has("_V2182_PT_EXMETA_STRONG_OPP_FRAC"):
+            add("PT_EXMETA_STRONG_EDGE_OPP_65","EXTERNAL_RATINGS_FAMILY",_ex_enough&_exsof.ge(.65),desc=">=65% of META-source-out indices have opponent edge >=2",min_n=30)
+        if has("_V2182_PT_EXMETA_STD"):
+            add("PT_EXMETA_LOW_DISPERSION_LE3","EXTERNAL_RATINGS_FAMILY",_ex_enough&_exstd.le(3)&_exstd.notna(),desc="META-source-out prediction dispersion <=3",min_n=30)
+            add("PT_EXMETA_HIGH_DISPERSION_GE6","EXTERNAL_RATINGS_FAMILY",_ex_enough&_exstd.ge(6),desc="META-source-out prediction dispersion >=6",min_n=30)
+        if has("_V2182_PT_EXMETA_IQR"):
+            add("PT_EXMETA_IQR_LE4","EXTERNAL_RATINGS_FAMILY",_ex_enough&_exiqr.le(4)&_exiqr.notna(),desc="META-source-out prediction IQR <=4",min_n=30)
+        if has("_V2182_PT_EXMETA_CLUSTER_MEDIAN_EDGE_POINTS"):
+            add("PT_EXMETA_CLUSTER_MEDIAN_TEAM_2PLUS","EXTERNAL_RATINGS_FAMILY",_excl_enough&_exclmed.ge(2),desc="META-source-out cluster-balanced median edge >= +2",min_n=30)
+            add("PT_EXMETA_CLUSTER_MEDIAN_OPP_2PLUS","EXTERNAL_RATINGS_FAMILY",_excl_enough&_exclmed.le(-2),desc="META-source-out cluster-balanced median edge <= -2",min_n=30)
+        if has("_V2182_PT_EXMETA_CLUSTER_TEAM_AGREE_FRAC"):
+            add("PT_EXMETA_CLUSTER_CONSENSUS_TEAM_70","EXTERNAL_RATINGS_FAMILY",_excl_enough&_excltf.ge(.70),desc=">=70% of META-source-out external clusters favor team",min_n=30)
+        if has("_V2182_PT_EXMETA_CLUSTER_OPP_AGREE_FRAC"):
+            add("PT_EXMETA_CLUSTER_CONSENSUS_OPP_70","EXTERNAL_RATINGS_FAMILY",_excl_enough&_exclof.ge(.70),desc=">=70% of META-source-out external clusters favor opponent",min_n=30)
+
         # Prediction Tracker's own aggregate lineavg/linemedian are retained as
         # separate diagnostics but still part of the same correlated family.
         _ptavg=nfirst("_V218_PT_TRACKER_AVG_EDGE_POINTS")
@@ -2760,19 +2901,172 @@ def _grade_published_ncaaf_systems(g: pd.DataFrame, seasons: np.ndarray) -> dict
             "contract":"DIRECTIONAL_NCAAF_FLAGS_ONLY__RECOMMENDED_SIDE_WL__CONTEXT_FLAGS_EXCLUDED__ZERO_AUTHORITY",
             "selection_influence":0,"production_authority":0}
 
+def _v2181_is_expanded_pt_atom(atom: dict[str,Any]) -> bool:
+    """V2.18-added all-index PT atoms; fixed-five META_PT atoms remain legacy."""
+    if str(atom.get("family") or "") != "EXTERNAL_RATINGS_FAMILY":
+        return False
+    name=str(atom.get("name") or "")
+    return name.startswith(("PTIDX_","PT_ALL_","PT_CLUSTER_","PT_TRACKER_","PT_EXMETA_"))
+
+
+def _v2182_is_meta_constituent_index_atom_name(name: Any) -> bool:
+    n=str(name or "").upper()
+    return any(n.startswith(f"PTIDX_{k.upper()}_") for k in PT_META_CONSTITUENT_INDEX_IDS)
+
+
+def _v2182_meta_overlap_violation(names) -> bool:
+    """Future-proof guard: frozen META and one of its own constituent index atoms
+    may never coexist in a single Miner rule, even if family labels change later.
+    """
+    ns=[str(x or "") for x in (names or [])]
+    has_meta=any(n.startswith("META_PT_") for n in ns)
+    has_constituent=any(_v2182_is_meta_constituent_index_atom_name(n) for n in ns)
+    return bool(has_meta and has_constituent)
+
+
+def _v2181_external_predictor_behavior(g: pd.DataFrame, seasons: np.ndarray, market: str) -> dict[str,Any]:
+    """Learn each external predictor's behavior without allowing it to select on 2026.
+
+    Discovery (<=2023) chooses FOLLOW vs FADE for each predictor when |edge|>=2.
+    2024/2025 are strictly confirmation diagnostics of that frozen behavior. 2026+
+    is never consulted here. This is research metadata only; authority remains zero.
+    """
+    market=str(market).lower()
+    if market!="spreads":
+        return {"status":"NOT_APPLICABLE","market":market,"predictors":[],"selection_influence":0,"production_authority":0}
+    y,valid,_=_market_target(g,market)
+    sy=np.asarray(seasons,dtype=float)
+    disc_scope=np.isfinite(sy)&(sy<=DISCOVERY_MAX_SEASON)
+    conf_scope=np.isfinite(sy)&np.isin(sy,np.asarray(CONFIRMATION_SEASONS,dtype=float))
+    open_spread=_num(g,"Consensus_Open_Spread").to_numpy(dtype=float)
+    actual_margin=_num(g,"Actual_Margin").to_numpy(dtype=float)
+    edge_cols=sorted([
+        c for c in g.columns
+        if str(c).startswith("_V218_PTIDX_") and str(c).endswith("_EDGE_POINTS")
+        and str(c) not in {
+            "_V218_PTIDX_MEAN_EDGE_POINTS","_V218_PTIDX_MEDIAN_EDGE_POINTS","_V218_PTIDX_CLUSTER_MEDIAN_EDGE_POINTS",
+        }
+    ])
+
+    def scoped(mask, follow_obs, preferred, edge_abs, pred_margin, rec_spread):
+        m=np.asarray(mask,dtype=bool)&np.isfinite(follow_obs)
+        n=int(m.sum())
+        follow=float(np.mean(follow_obs[m])) if n else np.nan
+        pref_obs=follow_obs if preferred=="FOLLOW" else 1.0-follow_obs
+        pref=float(np.mean(pref_obs[m])) if n else np.nan
+        out={
+            "n":n,"follow_rate":follow,"preferred_behavior":preferred,"preferred_rate":pref,
+            "mean_abs_edge":float(np.nanmean(edge_abs[m])) if n and np.isfinite(edge_abs[m]).any() else np.nan,
+        }
+        if pred_margin is not None:
+            pm=m&np.isfinite(pred_margin)&np.isfinite(actual_margin)
+            out["projection_n"]=int(pm.sum())
+            out["projection_mae"]=float(np.mean(np.abs(pred_margin[pm]-actual_margin[pm]))) if pm.any() else np.nan
+            out["projection_bias_pred_minus_actual"]=float(np.mean(pred_margin[pm]-actual_margin[pm])) if pm.any() else np.nan
+        else:
+            out.update({"projection_n":0,"projection_mae":np.nan,"projection_bias_pred_minus_actual":np.nan})
+        # Learn whether the frozen predictor behavior differs on recommended favorites/dogs.
+        role_rows=[]
+        for label,rm in (
+            ("RECOMMENDED_FAVORITE",m&np.isfinite(rec_spread)&(rec_spread<0)),
+            ("RECOMMENDED_DOG",m&np.isfinite(rec_spread)&(rec_spread>0)),
+        ):
+            rn=int(rm.sum())
+            role_rows.append({"role":label,"n":rn,"preferred_rate":float(np.mean(pref_obs[rm])) if rn else np.nan})
+        out["recommended_role"]=role_rows
+        edge_rows=[]
+        for label,lo,hi in (("2_TO_LT3",2,3),("3_TO_LT5",3,5),("5_PLUS",5,np.inf)):
+            em=m&np.isfinite(edge_abs)&(edge_abs>=lo)&(edge_abs<hi)
+            en=int(em.sum())
+            edge_rows.append({"edge_band":label,"n":en,"preferred_rate":float(np.mean(pref_obs[em])) if en else np.nan})
+        out["edge_bands"]=edge_rows
+        return out
+
+    rows=[]
+    for ec in edge_cols:
+        slug=str(ec)[len("_V218_PTIDX_"):-len("_EDGE_POINTS")]
+        mc=f"_V218_PTIDX_{slug}_MARGIN_TEAM"
+        edge=pd.to_numeric(g[ec],errors="coerce").to_numpy(dtype=float)
+        pred_margin=pd.to_numeric(g[mc],errors="coerce").to_numpy(dtype=float) if mc in g.columns else None
+        active=valid&np.isfinite(edge)&(np.abs(edge)>=2)
+        follow_obs=np.full(len(g),np.nan,dtype=float)
+        pos=active&(edge>=2); neg=active&(edge<=-2)
+        follow_obs[pos]=y[pos]; follow_obs[neg]=1.0-y[neg]
+        edge_abs=np.abs(edge)
+        rec_spread=np.where(edge>=2,open_spread,np.where(edge<=-2,-open_spread,np.nan))
+        dm=active&disc_scope&np.isfinite(follow_obs)
+        dn=int(dm.sum()); d_follow=float(np.mean(follow_obs[dm])) if dn else np.nan
+        preferred="FOLLOW" if (np.isfinite(d_follow) and d_follow>=.5) else "FADE"
+        discovery=scoped(dm,follow_obs,preferred,edge_abs,pred_margin,rec_spread)
+        confirmation=scoped(active&conf_scope,follow_obs,preferred,edge_abs,pred_margin,rec_spread)
+        by_year=[]
+        pref_obs=follow_obs if preferred=="FOLLOW" else 1.0-follow_obs
+        for yr in CONFIRMATION_SEASONS:
+            ym=active&valid&(sy==yr)&np.isfinite(pref_obs)
+            by_year.append({"season":int(yr),"n":int(ym.sum()),"preferred_rate":float(np.mean(pref_obs[ym])) if ym.any() else np.nan})
+        confirmation["by_year"]=by_year
+        both=bool(len([x for x in by_year if x["n"]>=10])==2 and all(x["preferred_rate"]>=.5 for x in by_year if x["n"]>=10))
+        confirmed=bool(discovery["n"]>=100 and confirmation["n"]>=30 and both and np.isfinite(confirmation["preferred_rate"]) and confirmation["preferred_rate"]>=.50)
+        strong=bool(confirmed and confirmation["n"]>=60 and confirmation["preferred_rate"]>=.54)
+        _canon_slug=str(slug).lower()
+        rows.append({
+            "predictor":slug,"edge_column":ec,"margin_column":mc if mc in g.columns else None,
+            "source_cluster":_pt_index_source_cluster(_canon_slug),
+            "meta_constituent":bool(_canon_slug in PT_META_CONSTITUENT_INDEX_IDS),
+            "behavior_learned_from":"DISCOVERY_2022_2023_ONLY","preferred_behavior":preferred,
+            "discovery":discovery,"confirmation":confirmation,
+            "behavior_state":"STRONG_CONFIRMED" if strong else "CONFIRMED" if confirmed else "DISCOVERY_ONLY",
+            "2026_selection_influence":0,"selection_influence":0,"production_authority":0,
+        })
+    ranked=sorted(rows,key=lambda z:(
+        z.get("behavior_state")=="STRONG_CONFIRMED",
+        z.get("behavior_state")=="CONFIRMED",
+        float((z.get("confirmation") or {}).get("preferred_rate") or -1),
+        int((z.get("confirmation") or {}).get("n") or 0),
+    ),reverse=True)
+    return {
+        "status":"PASS","market":market,"predictor_count":len(rows),"predictors":rows,
+        "strong_confirmed_count":sum(x["behavior_state"]=="STRONG_CONFIRMED" for x in rows),
+        "confirmed_count":sum(x["behavior_state"] in {"STRONG_CONFIRMED","CONFIRMED"} for x in rows),
+        "top_confirmed":[{
+            "predictor":x["predictor"],"behavior":x["preferred_behavior"],"state":x["behavior_state"],
+            "meta_constituent":bool(x.get("meta_constituent",False)),
+            "source_cluster":x.get("source_cluster"),
+            "discovery_n":x["discovery"]["n"],"discovery_rate":x["discovery"]["preferred_rate"],
+            "confirmation_n":x["confirmation"]["n"],"confirmation_rate":x["confirmation"]["preferred_rate"],
+        } for x in ranked[:12]],
+        "contract":"DISCOVERY_LEARNS_FOLLOW_OR_FADE_AND_EDGE_ROLE_BEHAVIOR__META_CONSTITUENTS_TAGGED__2024_2025_CONFIRM__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY",
+        "selection_influence":0,"production_authority":0,
+    }
+
+
 def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, dashboard_module=None,
                         log_func=print, max_depth: int=4) -> dict[str,Any]:
     market=str(market).lower(); y,valid,baseline=_market_target(games,market); atoms=_extended_atoms(games,dashboard_module,market=market)
     _fam_counts={}
     for _a in atoms: _fam_counts[_a.get("family")]=int(_fam_counts.get(_a.get("family"),0))+1
     _bridge_atoms=sum(v for k,v in _fam_counts.items() if str(k).startswith(("EXPERT_","RESEARCH_CORE_STATE","RESEARCH_SPECIALIST_","MARKET_KEY_","EXTERNAL_")))
-    out={"version":"NCAAF-RV2.18-SYSTEM-MINER-V6-FULL-PT-UNIVERSE","market":market,"production_authority":0,"discovery_max_season":DISCOVERY_MAX_SEASON,
-         "confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,"atoms":len(atoms),"atom_family_counts":_fam_counts,"expert_model_bridge_atoms":int(_bridge_atoms),"systems":[],"mechanism_families":[]}
+    behavior=_v2181_external_predictor_behavior(games,seasons,market)
+    out={"version":"NCAAF-RV2.18.2-SYSTEM-MINER-V8-META-OVERLAP-GUARD","market":market,"production_authority":0,"discovery_max_season":DISCOVERY_MAX_SEASON,
+         "confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,"atoms":len(atoms),"atom_family_counts":_fam_counts,"expert_model_bridge_atoms":int(_bridge_atoms),"systems":[],"mechanism_families":[],"external_predictor_behavior":behavior}
     log_func(f"[NCAAF-RV25-ATOM-BRIDGE] market={market} atoms={len(atoms)} bridge_atoms={_bridge_atoms} pathi={_fam_counts.get('EXPERT_PATHI',0)} bigal={_fam_counts.get('EXPERT_BIGAL',0)} core={_fam_counts.get('RESEARCH_CORE_STATE',0)} specialist={sum(v for k,v in _fam_counts.items() if str(k).startswith('RESEARCH_SPECIALIST_'))} external={sum(v for k,v in _fam_counts.items() if str(k).startswith('EXTERNAL_'))} authority=0")
+    if market=="spreads":
+        log_func(f"[NCAAF-RV2182-PREDICTOR-BEHAVIOR] predictors={behavior.get('predictor_count',0)} confirmed={behavior.get('confirmed_count',0)} strong_confirmed={behavior.get('strong_confirmed_count',0)} discovery=2022_2023 confirmation=2024_2025 year_2026_selection=FALSE authority=0")
+        for _pb in (behavior.get("top_confirmed") or [])[:8]:
+            log_func(f"[NCAAF-RV2182-PREDICTOR-TOP] predictor={_pb.get('predictor')} behavior={_pb.get('behavior')} state={_pb.get('state')} discovery={_pb.get('discovery_rate')}/{_pb.get('discovery_n')} confirmation={_pb.get('confirmation_rate')}/{_pb.get('confirmation_n')} meta_constituent={str(bool(_pb.get('meta_constituent',False))).upper()} source_cluster={_pb.get('source_cluster')} authority=0")
     if valid.sum()<500: out["status"]="INSUFFICIENT_HISTORY"; return out
-    tested=[]; beam=[]; seen=set()
-    def ev(mask,names,fams,idx):
-        r=_evaluate_rule(games,mask,y,valid,baseline,seasons,names,fams,market)
+
+    expanded_external=[a for a in atoms if _v2181_is_expanded_pt_atom(a)] if market=="spreads" else []
+    legacy_atoms=[a for a in atoms if not _v2181_is_expanded_pt_atom(a)]
+    if market=="spreads":
+        log_func(f"[NCAAF-RV2182-MINER-LANES] market=spreads total_atoms={len(atoms)} legacy_atoms={len(legacy_atoms)} expanded_external_atoms={len(expanded_external)} legacy_beam=64 external_seed_cap=72 external_support_cap=80 external_depth_cap=3 fdr_scope=SEPARATE authority=0")
+        log_func(f"[NCAAF-RV2182-META-OVERLAP-GUARD] status=PASS meta_constituents={','.join(sorted(PT_META_CONSTITUENT_INDEX_IDS))} meta_source_clusters={','.join(sorted({_pt_index_source_cluster(k) for k in PT_META_CONSTITUENT_INDEX_IDS}))} rule_same_mechanism=BLOCK authority_family_cap=1 conflict_policy=ABSTAIN exmeta_consensus=SOURCE_CLUSTER_OUT authority=0")
+
+    def ev(atom_mask,names,fams,idx):
+        # Explicit guard in addition to same-family search protection.
+        if _v2182_meta_overlap_violation(names):
+            return None
+        r=_evaluate_rule(games,atom_mask,y,valid,baseline,seasons,names,fams,market)
         if r is None: return None
         if market=="h2h":
             hp=r.get("h2h_discovery_price") or {}
@@ -2788,49 +3082,141 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
             r["quality"]=(r["discovery_rate"]-.5)*3 + max(0,r["remove_best_discovery_rate"]-.5) + .03*r["stable_discovery_fraction"]
         r["discovery_pass"]=discovery_pass; r["idx"]=tuple(idx)
         return r
-    for i,a in enumerate(atoms):
-        r=ev(a["mask"],(a["name"],),(a["family"],),(i,))
-        if r: tested.append(r); beam.append(r)
-    beam=sorted(beam,key=lambda z:z["quality"],reverse=True)[:64]
-    for depth in range(2,max_depth+1):
-        nxt=[]
-        for st in beam:
-            used=set(st["families"])
-            for i,a in enumerate(atoms):
-                if i in st["idx"] or a["family"] in used: continue
-                names=tuple(sorted(st["conditions"]+[a["name"]]))
+
+    def legacy_search(lane_atoms):
+        tested=[]; beam=[]; seen=set(); singleton={}
+        for i,a in enumerate(lane_atoms):
+            r=ev(a["mask"],(a["name"],),(a["family"],),(i,))
+            if r:
+                tested.append(r); beam.append(r); singleton[a["name"]]=r
+        beam=sorted(beam,key=lambda z:z["quality"],reverse=True)[:64]
+        for depth in range(2,max_depth+1):
+            nxt=[]
+            for st in beam:
+                used=set(st["families"])
+                for i,a in enumerate(lane_atoms):
+                    if i in st["idx"] or a["family"] in used: continue
+                    names=tuple(sorted(st["conditions"]+[a["name"]]))
+                    if names in seen: continue
+                    seen.add(names); r=ev(st["mask"]&a["mask"],names,tuple(st["families"]+[a["family"]]),st["idx"]+(i,))
+                    if r: tested.append(r); nxt.append(r)
+            beam=sorted(nxt,key=lambda z:z["quality"],reverse=True)[:64]
+            if not beam: break
+        return tested,singleton
+
+    legacy_tested,legacy_single=legacy_search(legacy_atoms)
+    external_tested=[]; selected_external=[]; selected_support=[]
+    if market=="spreads" and expanded_external:
+        external_single=[]
+        for i,a in enumerate(expanded_external):
+            r=ev(a["mask"],(a["name"],),(a["family"],),(i,))
+            if r:
+                external_tested.append(r); external_single.append((a,r,i))
+        # Always preserve aggregate consensus/dispersion atoms, then fill the bounded
+        # external seed set from discovery-only quality. No confirmation data selects seeds.
+        agg=[]; indiv=[]
+        for item in external_single:
+            nm=str(item[0].get("name") or "")
+            (agg if nm.startswith(("PT_EXMETA_","PT_ALL_","PT_CLUSTER_","PT_TRACKER_")) else indiv).append(item)
+        key=lambda item:(bool(item[1].get("discovery_pass")),float(item[1].get("quality",-9)),int(item[1].get("discovery_n",0)))
+        agg=sorted(agg,key=key,reverse=True)
+        indiv=sorted(indiv,key=key,reverse=True)
+        selected_external=(agg+indiv)[:72]
+
+        # External signals may interact with CORE/Pathi/Big Al/specialists and a
+        # bounded number of broader legacy contexts. They never combine with a second
+        # external rating family atom.
+        support_candidates=[]
+        for a in legacy_atoms:
+            if str(a.get("family") or "")=="EXTERNAL_RATINGS_FAMILY": continue
+            r=legacy_single.get(a.get("name"))
+            if r is not None: support_candidates.append((a,r))
+        def support_key(item):
+            fam=str(item[0].get("family") or "")
+            priority=fam.startswith(("EXPERT_PATHI","EXPERT_BIGAL","RESEARCH_CORE_STATE","RESEARCH_SPECIALIST_"))
+            return (priority,bool(item[1].get("discovery_pass")),float(item[1].get("quality",-9)),int(item[1].get("discovery_n",0)))
+        priority=[x for x in support_candidates if str(x[0].get("family") or "").startswith(("EXPERT_PATHI","EXPERT_BIGAL","RESEARCH_CORE_STATE","RESEARCH_SPECIALIST_"))]
+        general=[x for x in support_candidates if not str(x[0].get("family") or "").startswith(("EXPERT_PATHI","EXPERT_BIGAL","RESEARCH_CORE_STATE","RESEARCH_SPECIALIST_"))]
+        priority=sorted(priority,key=support_key,reverse=True)
+        general=sorted(general,key=support_key,reverse=True)
+        selected_support=(priority+general)[:80]
+
+        pair_beam=[]; seen=set()
+        for ea,er,ei in selected_external:
+            for sa,sr in selected_support:
+                if sa["family"]==ea["family"]: continue
+                names=tuple(sorted((ea["name"],sa["name"])))
                 if names in seen: continue
-                seen.add(names); r=ev(st["mask"]&a["mask"],names,tuple(st["families"]+[a["family"]]),st["idx"]+(i,))
-                if r: tested.append(r); nxt.append(r)
-        beam=sorted(nxt,key=lambda z:z["quality"],reverse=True)[:64]
-        if not beam: break
-    if not tested: out.update({"status":"NO_CANDIDATES","tested_hypotheses":0}); return out
-    q=_bh_qvalues([z["nominal_pvalue"] for z in tested])
-    for z,qq in zip(tested,q): z["fdr_qvalue"]=float(qq) if np.isfinite(qq) else np.nan
-    finalists=[]
-    for z in sorted(tested,key=lambda r:(r["discovery_pass"],r["quality"],r["discovery_n"]),reverse=True):
-        if not z["discovery_pass"] or not np.isfinite(z["fdr_qvalue"]) or z["fdr_qvalue"]>.20: continue
-        if market=="h2h":
-            hp=z.get("h2h_confirmation_price") or {}; cy=[x for x in z.get("confirmation",[]) if int(x.get("season",0)) in CONFIRMATION_SEASONS]
-            both_years=bool(len(cy)==2 and all(int(x.get("priced_n",0) or 0)>=15 and np.isfinite(x.get("roi",np.nan)) and x["roi"]>0 and np.isfinite(x.get("market_residual",np.nan)) and x["market_residual"]>=0 for x in cy))
-            conf_ok=bool(
-                (z.get("split_audit") or {}).get("disjoint",False) and
-                z["confirmation_n"]>=30 and both_years and int(hp.get("priced_n",0) or 0)>=30 and
-                np.isfinite(hp.get("roi",np.nan)) and hp["roi"]>0 and bool(hp.get("price_band_robust",False)) and
-                np.isfinite(z["market_residual_confirmation"]) and z["market_residual_confirmation"]>=0 and z["fdr_qvalue"]<=.10
-            )
-        else:
-            conf_ok=bool((z.get("split_audit") or {}).get("disjoint",False) and
-                         z["confirmation_n"]>=30 and np.isfinite(z["confirmation_rate"]) and z["confirmation_rate"]>=.50 and
-                         len([x for x in z["confirmation"] if x["n"]>=10])==2 and all(x["rate"]>=.50 for x in z["confirmation"] if x["n"]>=10))
-        item={k:v for k,v in z.items() if k not in {"mask","idx","quality"}}
-        item.update({"system_id":_stable_id("NCAAF-RV21-"+market.upper()+"-",z["conditions"]),
-                     "authority_state":"CONFIRMED_SHADOW" if conf_ok else "DISCOVERY_FROZEN",
-                     "confirmation_pass":conf_ok,"production_authority":0,
-                     "admission_note":"2024 AND 2025 must confirm frozen discovery; H2H requires observed moneyline ROI/EV and price-band robustness"})
-        item["_mask_internal"]=z["mask"]
-        finalists.append(item)
-        if len(finalists)>=160: break
+                seen.add(names)
+                r=ev(ea["mask"]&sa["mask"],names,(ea["family"],sa["family"]),(ei,))
+                if r:
+                    external_tested.append(r); pair_beam.append(r)
+        pair_beam=sorted(pair_beam,key=lambda z:z["quality"],reverse=True)[:64]
+        # One more support layer is enough to learn conditional predictor behavior
+        # without recreating a giant feature factory.
+        depth_beam=pair_beam
+        for depth in range(3,min(max_depth,3)+1):
+            nxt=[]
+            for st in depth_beam:
+                used=set(st["families"])
+                for sa,sr in selected_support:
+                    if sa["family"] in used: continue
+                    names=tuple(sorted(st["conditions"]+[sa["name"]]))
+                    if names in seen: continue
+                    seen.add(names)
+                    r=ev(st["mask"]&sa["mask"],names,tuple(st["families"]+[sa["family"]]),st["idx"])
+                    if r:
+                        external_tested.append(r); nxt.append(r)
+            depth_beam=sorted(nxt,key=lambda z:z["quality"],reverse=True)[:64]
+            if not depth_beam: break
+
+    def finalize_lane(tested,lane,q_cut,max_finalists):
+        if not tested: return []
+        q=_bh_qvalues([z["nominal_pvalue"] for z in tested])
+        for z,qq in zip(tested,q): z["fdr_qvalue"]=float(qq) if np.isfinite(qq) else np.nan
+        finalists=[]
+        for z in sorted(tested,key=lambda r:(r["discovery_pass"],r["quality"],r["discovery_n"]),reverse=True):
+            if not z["discovery_pass"] or not np.isfinite(z["fdr_qvalue"]) or z["fdr_qvalue"]>q_cut: continue
+            if market=="h2h":
+                hp=z.get("h2h_confirmation_price") or {}; cy=[x for x in z.get("confirmation",[]) if int(x.get("season",0)) in CONFIRMATION_SEASONS]
+                both_years=bool(len(cy)==2 and all(int(x.get("priced_n",0) or 0)>=15 and np.isfinite(x.get("roi",np.nan)) and x["roi"]>0 and np.isfinite(x.get("market_residual",np.nan)) and x["market_residual"]>=0 for x in cy))
+                conf_ok=bool(
+                    (z.get("split_audit") or {}).get("disjoint",False) and
+                    z["confirmation_n"]>=30 and both_years and int(hp.get("priced_n",0) or 0)>=30 and
+                    np.isfinite(hp.get("roi",np.nan)) and hp["roi"]>0 and bool(hp.get("price_band_robust",False)) and
+                    np.isfinite(z["market_residual_confirmation"]) and z["market_residual_confirmation"]>=0 and z["fdr_qvalue"]<=.10
+                )
+            else:
+                conf_ok=bool((z.get("split_audit") or {}).get("disjoint",False) and
+                             z["confirmation_n"]>=30 and np.isfinite(z["confirmation_rate"]) and z["confirmation_rate"]>=.50 and
+                             len([x for x in z["confirmation"] if x["n"]>=10])==2 and all(x["rate"]>=.50 for x in z["confirmation"] if x["n"]>=10))
+            item={k:v for k,v in z.items() if k not in {"mask","idx","quality"}}
+            item.update({"system_id":_stable_id("NCAAF-RV2182-"+market.upper()+"-",z["conditions"]),
+                         "miner_lane":lane,
+                         "authority_state":"CONFIRMED_SHADOW" if conf_ok else "DISCOVERY_FROZEN",
+                         "confirmation_pass":conf_ok,"production_authority":0,
+                         "admission_note":"2024 AND 2025 must confirm frozen discovery; external lane has separate FDR and one correlated external family; H2H requires observed moneyline ROI/EV and price-band robustness"})
+            item["_mask_internal"]=z["mask"]
+            finalists.append(item)
+            if len(finalists)>=max_finalists: break
+        return finalists
+
+    legacy_finalists=finalize_lane(legacy_tested,"LEGACY",.20,160)
+    external_finalists=finalize_lane(external_tested,"EXTERNAL_PREDICTOR_BEHAVIOR",.10,120) if market=="spreads" else []
+    finalists=legacy_finalists+external_finalists
+    out["lanes"]={
+        "legacy":{"atoms":len(legacy_atoms),"tested_hypotheses":len(legacy_tested),"systems":len(legacy_finalists),"fdr_q_cut":.20},
+        "external_predictor_behavior":{"atoms":len(expanded_external),"selected_seed_atoms":len(selected_external),"selected_support_atoms":len(selected_support),"tested_hypotheses":len(external_tested),"systems":len(external_finalists),"fdr_q_cut":.10,"depth_cap":3,"selection_uses_2026":False},
+    }
+    log_func(f"[NCAAF-RV2182-LANE] market={market} lane=LEGACY atoms={len(legacy_atoms)} tested={len(legacy_tested)} systems={len(legacy_finalists)} fdr_q=.20 authority=0")
+    if market=="spreads":
+        log_func(f"[NCAAF-RV2182-LANE] market=spreads lane=EXTERNAL_PREDICTOR_BEHAVIOR atoms={len(expanded_external)} seeds={len(selected_external)} supports={len(selected_support)} tested={len(external_tested)} systems={len(external_finalists)} fdr_q=.10 depth_cap=3 year_2026_selection=FALSE authority=0")
+
+    if not finalists:
+        out.update({"status":"NO_CANDIDATES","tested_hypotheses":len(legacy_tested)+len(external_tested),"published_systems":0});
+        log_func(f"[NCAAF-RV23-MINER] market={market} atoms={len(atoms)} tested={len(legacy_tested)+len(external_tested)} systems=0 mechanisms=0 confirmed_mechanisms=0 authority=0")
+        return out
+
     lineage=_annotate_system_lineage(games,seasons,finalists,market)
     families=[]; used=set()
     for i,a in enumerate(finalists):
@@ -2854,8 +3240,15 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         else:
             rep=max(members,key=lambda z:(z["confirmation_pass"],z["confirmation_rate"] if np.isfinite(z["confirmation_rate"]) else -1,z["discovery_rate"],z["discovery_n"]))
         fid=_stable_id("NCAAF-MECH-",[market,rep["direction"],"+".join(sorted(set(rep["families"])))]+[x["system_id"] for x in members])
+        _uses_external=bool("EXTERNAL_RATINGS_FAMILY" in set(rep.get("families") or []))
+        _rep_conditions=list(rep.get("conditions") or [])
         fam={"mechanism_id":fid,"market":market,"direction":rep["direction"],"representative_system_id":rep["system_id"],
-             "representative_conditions":rep.get("conditions") or [],"member_system_ids":[x["system_id"] for x in members],"member_count":len(members),"families":rep["families"],
+             "representative_conditions":_rep_conditions,"member_system_ids":[x["system_id"] for x in members],"member_count":len(members),"families":rep["families"],
+             "uses_external_ratings_family":_uses_external,
+             "evidence_family_key":"EXTERNAL_RATINGS_FAMILY" if _uses_external else fid,
+             "contains_meta_constituent_index":any(_v2182_is_meta_constituent_index_atom_name(c) for c in _rep_conditions),
+             "meta_constituent_overlap_guard":"PASS" if not _v2182_meta_overlap_violation(_rep_conditions) else "FAIL",
+             "miner_lane":rep.get("miner_lane"),"member_lanes":sorted(set(str(x.get("miner_lane") or "") for x in members)),
              "discovery_rate":rep["discovery_rate"],"discovery_n":rep["discovery_n"],"confirmation_rate":rep["confirmation_rate"],
              "confirmation_n":rep["confirmation_n"],"confirmation_pass":bool(rep["confirmation_pass"]),
              "split_audit":rep.get("split_audit") or {},
@@ -2866,9 +3259,6 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
             int(rep.get("confirmation_n",0) or 0) >= NCAAF_MINER_LIVE_MIN_CONFIRMATION_N and
             float(rep.get("confirmation_rate",0) or 0) >= NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE
         )
-        # Confirmation and live betting authority are deliberately different gates.
-        # CONFIRMED_SHADOW remains valuable research/prospective evidence; only the
-        # stronger validation tier may cast a live Bet Authority vote.
         fam["current_qualified"]=strong_validated
         fam["live_authority_eligible"]=strong_validated
         fam["live_authority_policy"]=NCAAF_MINER_LIVE_AUTHORITY_POLICY
@@ -2884,23 +3274,25 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
             fam["confirmation_market_residual"]=rep.get("market_residual_confirmation")
             fam["price_band_robust_discovery"]=(rep.get("h2h_discovery_price") or {}).get("price_band_robust")
             fam["price_band_robust_confirmation"]=(rep.get("h2h_confirmation_price") or {}).get("price_band_robust")
+        if fam.get("meta_constituent_overlap_guard")!="PASS":
+            continue
         families.append(fam)
     clean=[]
     for z in finalists:
         z=dict(z); z.pop("_mask_internal",None); clean.append(z)
-    out.update({"status":"RESEARCH_COMPLETE","tested_hypotheses":len(tested),"systems":clean,"published_systems":len(clean),
+    out.update({"status":"RESEARCH_COMPLETE","tested_hypotheses":len(legacy_tested)+len(external_tested),"systems":clean,"published_systems":len(clean),
                 "mechanism_families":families,"mechanism_family_count":len(families),
                 "confirmed_mechanism_count":sum(x["confirmation_pass"] for x in families),
                 "lineage":lineage,
-                "admission_contract":"DISCOVERY_2022_2023_ONLY__HORIZON_SYMMETRIC_1_2_3__CONFERENCE_RIVALRY_H2H_ROLE_TEAM_MEMORY__MARKET_RELATIVE_FDR_FOR_H2H__OBSERVED_ML_ROI__PRICE_BAND_ROBUSTNESS__BOTH_2024_AND_2025_CONFIRM__DEPENDENCY_COLLAPSE__PARENT_CHILD_INCREMENTAL_ATTRIBUTION__FULL_PT_INDEX_UNIVERSE_ONE_CORRELATED_FAMILY__SPLIT_OVERLAP_AUDIT__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY"})
-    log_func(f"[NCAAF-RV23-MINER] market={market} atoms={len(atoms)} tested={len(tested)} systems={len(clean)} mechanisms={len(families)} confirmed_mechanisms={out['confirmed_mechanism_count']} authority=0")
+                "admission_contract":"DISCOVERY_2022_2023_ONLY__LEGACY_MINER_LANE_PRESERVED__EXTERNAL_PREDICTOR_BEHAVIOR_LANE_SEPARATE_FDR__EXTERNAL_SEEDS_DISCOVERY_ONLY__ONE_EXTERNAL_FAMILY_PER_RULE__HORIZON_SYMMETRIC_1_2_3__CONFERENCE_RIVALRY_H2H_ROLE_TEAM_MEMORY__MARKET_RELATIVE_FDR_FOR_H2H__OBSERVED_ML_ROI__PRICE_BAND_ROBUSTNESS__BOTH_2024_AND_2025_CONFIRM__DEPENDENCY_COLLAPSE_AFTER_LANE_MERGE__PARENT_CHILD_INCREMENTAL_ATTRIBUTION__FULL_PT_INDEX_UNIVERSE_ONE_CORRELATED_FAMILY__META_CONSTITUENT_OVERLAP_GUARD__META_SOURCE_OUT_CONSENSUS__SPLIT_OVERLAP_AUDIT__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY"})
+    log_func(f"[NCAAF-RV23-MINER] market={market} atoms={len(atoms)} tested={len(legacy_tested)+len(external_tested)} systems={len(clean)} mechanisms={len(families)} confirmed_mechanisms={out['confirmed_mechanism_count']} authority=0")
     for x in families[:20]:
         extra=(f" d_roi={x.get('discovery_price_roi')} c_roi={x.get('confirmation_price_roi')} d_resid={x.get('discovery_market_residual')} c_resid={x.get('confirmation_market_residual')}" if market=="h2h" else "")
-        log_func(f"[NCAAF-RV23-MECHANISM] market={market} id={x['mechanism_id']} status={x['authority_state']} members={x['member_count']} discovery={x['discovery_rate']:.4f}/{x['discovery_n']} confirmation={x['confirmation_rate']:.4f}/{x['confirmation_n']} rule={' AND '.join(x.get('representative_conditions') or [])}{extra}")
+        log_func(f"[NCAAF-RV23-MECHANISM] market={market} id={x['mechanism_id']} lane={x.get('miner_lane')} status={x['authority_state']} members={x['member_count']} discovery={x['discovery_rate']:.4f}/{x['discovery_n']} confirmation={x['confirmation_rate']:.4f}/{x['confirmation_n']} rule={' AND '.join(x.get('representative_conditions') or [])}{extra}")
         _sa=x.get("split_audit") or {}
         if _sa.get("identical_n_rate"):
             log_func(
-                f"[NCAAF-RV218-SPLIT-AUDIT] market={market} id={x['mechanism_id']} identical_n_rate=TRUE "
+                f"[NCAAF-RV2182-SPLIT-AUDIT] market={market} id={x['mechanism_id']} identical_n_rate=TRUE "
                 f"row_overlap_n={_sa.get('row_overlap_n')} disjoint={_sa.get('disjoint')} "
                 f"discovery_years={_sa.get('discovery_years')} confirmation_years={_sa.get('confirmation_years')} authority=0"
             )
@@ -3032,14 +3424,26 @@ def _build_system_results(games: pd.DataFrame, seasons: np.ndarray, miners: dict
             obs=y if direction=="PLAY_ON" else 1-y
             m=mask&scope; n=int(m.sum()); w=int(np.nansum(obs[m])) if n else 0; l=n-w
             rate=float(w/n) if n else np.nan
+            _uses_external=bool("EXTERNAL_RATINGS_FAMILY" in set(mech.get("families") or []))
             mechs.append({"mechanism_id":mech.get("mechanism_id"),"direction":direction,"mask":mask,"obs":obs,"families":list(mech.get("families") or []),
+                          "evidence_family_key":"EXTERNAL_RATINGS_FAMILY" if _uses_external else str(mech.get("mechanism_id")),
+                          "uses_external_ratings_family":_uses_external,
                           "rule":" AND ".join(cond),"n":n,"wins":w,"losses":l,"hit_rate":rate,"roi_at_minus110":_minus110_roi(rate) if market in ("spreads","totals") else np.nan,
                           "wilson95_low":_wilson95_low(w,n),"shrunk_hit_rate_beta15":_beta_shrunk_rate(w,n),"evidence_level":mech.get("evidence_level"),"current_qualified":True})
         best=sorted([{k:v for k,v in z.items() if k not in {"mask","obs"}} for z in mechs],key=lambda z:(z.get("wilson95_low",-9),z.get("n",0)),reverse=True)
+        # Independence count is by evidence family. Every confirmed external
+        # mechanism, regardless of which PT index/consensus atom produced it,
+        # contributes at most ONE independent external-family vote per direction.
         play=np.zeros(len(games),dtype=int); fade=np.zeros(len(games),dtype=int)
+        _independent_masks={}
         for z in mechs:
-            if z["direction"]=="PLAY_ON": play += z["mask"].astype(int)
-            else: fade += z["mask"].astype(int)
+            _k=(z["direction"],str(z.get("evidence_family_key") or z["mechanism_id"]))
+            if _k not in _independent_masks:
+                _independent_masks[_k]=np.zeros(len(games),dtype=bool)
+            _independent_masks[_k] |= np.asarray(z["mask"],dtype=bool)
+        for (_direction,_family_key),_mask in _independent_masks.items():
+            if _direction=="PLAY_ON": play += _mask.astype(int)
+            else: fade += _mask.astype(int)
         agreed=((play>0)^(fade>0))&scope
         multi=(((play>=2)&(fade==0))|((fade>=2)&(play==0)))&scope
         conflict=(play>0)&(fade>0)&scope
@@ -3205,15 +3609,48 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
                 if str(market).lower()=="totals": target="over" if direction=="PLAY_ON" else "under"
                 else: target=home if direction=="PLAY_ON" else away
                 if not target: continue
+                _uses_external=bool("EXTERNAL_RATINGS_FAMILY" in set(mech.get("families") or []))
                 vote={"source_type":"MINER","family_id":str(mech.get("mechanism_id")),"target":target,"market":str(market).lower(),
+                      "evidence_family_key":"EXTERNAL_RATINGS_FAMILY" if _uses_external else str(mech.get("mechanism_id")),
+                      "uses_external_ratings_family":_uses_external,
                       "mechanisms":list(mech.get("families") or [str(mech.get("mechanism_id"))]),"rule":" AND ".join(cond),
                       "confirmation_n":mech.get("confirmation_n"),"confirmation_rate":mech.get("confirmation_rate"),
                       "evidence_level":"STRONG_VALIDATED" if live_eligible else "VALIDATED_SHADOW",
                       "live_authority_eligible":live_eligible,"live_authority_policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY}
                 research_votes_by_game[keys[j]].append(vote)
                 if live_eligible: authority_votes_by_game[keys[j]].append(vote)
-    # Production consumes ONLY authority-qualified votes. The full confirmed set is
-    # preserved separately for research display/prospective tracking.
+    # Production consumes ONLY authority-qualified votes. Collapse by independent
+    # evidence family before Bet Authority sees the votes. In particular, every
+    # Prediction Tracker mechanism shares EXTERNAL_RATINGS_FAMILY and can contribute
+    # at most one vote. If qualified external mechanisms disagree on the target,
+    # that correlated family abstains instead of being double-counted both ways.
+    def _collapse_independent_authority_votes(votes):
+        groups={}
+        for v in votes:
+            _key=(str(v.get("market") or ""),str(v.get("evidence_family_key") or v.get("family_id") or ""))
+            groups.setdefault(_key,[]).append(v)
+        kept=[]
+        for _key,_vv in groups.items():
+            _targets={str(v.get("target") or "") for v in _vv}
+            if len(_targets)!=1:
+                continue
+            def _rank(v):
+                try: _r=float(v.get("confirmation_rate") or 0)
+                except Exception: _r=0.0
+                try: _n=int(v.get("confirmation_n") or 0)
+                except Exception: _n=0
+                return (_r,_n)
+            _best=max(_vv,key=_rank)
+            _best=dict(_best)
+            _best["correlated_family_candidates"]=len(_vv)
+            _best["family_vote_collapsed"]=bool(len(_vv)>1)
+            kept.append(_best)
+        return kept
+
+    for _gid,_votes in list(authority_votes_by_game.items()):
+        authority_votes_by_game[_gid]=_collapse_independent_authority_votes(_votes)
+
+    # The full confirmed set is preserved separately for research display/prospective tracking.
     out["NCAAF_RV22_Miner_Votes"]=[authority_votes_by_game.get(k,[]) for k in out[keycol]]
     out["NCAAF_RV22_Miner_Research_Votes"]=[research_votes_by_game.get(k,[]) for k in out[keycol]]
     out["NCAAF_Miner_Confirmed_Research"]=confirmed_research
@@ -3304,7 +3741,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"system_miner_v3":miners,
                 "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,
                 "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False},
-                "next_step":"KEEP PRODUCTION V1 FROZEN; LET THE EXISTING MINER TEST PATHI + BIG AL + OOF CORE/SPECIALIST + EXTERNAL META_MARGIN INTERACTIONS; CORE/SPECIALIST/EXTERNAL META ATOMS REMAIN RESEARCH-ONLY"}
+                "next_step":"KEEP PRODUCTION V1 FROZEN; PRESERVE LEGACY MINER; LET THE SEPARATE EXTERNAL PREDICTOR BEHAVIOR LANE LEARN FOLLOW/FADE/EDGE/ROLE BEHAVIOR AND TEST ONE-EXTERNAL-FAMILY INTERACTIONS WITH PATHI + BIG AL + OOF CORE/SPECIALISTS; 2026 REMAINS PROSPECTIVE ONLY"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
         bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"external_rating_metamodel":external_ratings,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
         if storage_client is None:
@@ -3317,7 +3754,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
         bio=io.BytesIO(); pickle.dump(bundle,bio,protocol=pickle.HIGHEST_PROTOCOL); bio.seek(0); pdata=bio.read(); b.blob(BUNDLE_CURRENT_BLOB).upload_from_string(pdata,content_type="application/octet-stream")
         report["artifact"]={"current_report":f"gs://{bucket_name}/{REPORT_CURRENT_BLOB}","current_bundle":f"gs://{bucket_name}/{BUNDLE_CURRENT_BLOB}","history_report":f"gs://{bucket_name}/{hist}","sha256":sha}
         _strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if _miner_live_authority_eligible(_m))
-        _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_","META_PT_")) for c in (_m.get("representative_conditions") or [])))
+        _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_","META_PT_","PTIDX_","PT_ALL_","PT_CLUSTER_","PT_TRACKER_")) for c in (_m.get("representative_conditions") or [])))
         log_func(f"[NCAAF-RV25-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
         return report
     except Exception as exc:

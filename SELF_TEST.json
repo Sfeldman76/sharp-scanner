@@ -1,41 +1,12 @@
 {
-  "status": "PASS",
-  "source_tag": "ncaaf-research-v2.17-sparse-pt-manual-gcs-20261007",
-  "families": [
-    "MARKET_MICROSTRUCTURE",
-    "RUN_PASS_MATCHUP"
-  ],
-  "qvalues": [
-    0.03,
-    0.06,
-    0.20000000000000004
-  ],
-  "american_unit_profit_test": [
-    2.0,
-    0.5
-  ],
-  "h2h_price_gate": "OBSERVED_TEAM_AND_OPPONENT_ML_ONLY",
-  "confirmation_gate": "BOTH_2024_AND_2025",
-  "live_authority_policy": "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005",
-  "live_min_confirmation_n": 60,
-  "live_min_confirmation_rate": 0.56,
-  "weak_confirmed_authority": false,
-  "strong_confirmed_authority": true,
-  "pt_name_safe_header_contract": true,
-  "pt_self_test_system_columns": {
-    "DOKTER": "linedokter",
-    "PI_RATE_BIAS": "Pi-Ratings Bias",
-    "KEEPER": "Keeper",
-    "ESPN_FPI": "lineespn",
-    "PIGSKIN_INDEX": "Pigskin Index"
-  },
-  "pt_fuzzy_header_rejected": true,
-  "pt_relay_csv_payload": true,
-  "pt_relay_named_markdown": true,
-  "pt_relay_https_target": true,
-  "pt_challenge_rejected": true,
-  "pt_current_merge_preserves_rematch": true,
-  "pt_sparse_partial_component_preservation": true,
-  "expert_side_bridge": true,
-  "expert_occurrence_reconciliation": true
+  "source_tag_present": true,
+  "preflight_marker_present": true,
+  "meta_constituents_exact": true,
+  "source_out_consensus_present": true,
+  "same_mechanism_guard_present": true,
+  "authority_family_collapse_present": true,
+  "external_conflict_abstain_present": true,
+  "independent_family_confirmation_count_present": true,
+  "2026_selection_seal_present": true,
+  "production_authority_zero_contract": true
 }
