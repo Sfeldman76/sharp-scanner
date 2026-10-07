@@ -1,23 +1,17 @@
 {
-  "cloud_feeder_self_test": {
-    "challenge_rejected": true,
-    "csv_good": true,
-    "live_names": true,
-    "source_tag": "prediction-tracker-cloud-feeder-v1.0-web-unblocker-20261007",
-    "status": "PASS"
-  },
-  "mock_cloud_run_test": {
-    "challenge_rejection": true,
-    "manifest_written": true,
-    "poisoned_cache_replaced": true,
-    "status": "PASS",
-    "valid_history_reused": true
-  },
-  "production_authority": 0,
-  "python_compile": [
-    "ncaaf_research_v2.py",
-    "train_job.py",
-    "prediction_tracker_cloud_feeder.py"
-  ],
-  "status": "PASS"
+  "status": "PASS",
+  "rebuilt_verified_utc": "2026-10-07T12:00:00Z",
+  "package_version": "NCAAF_ENGINE_V2_16_CLOUD_ONLY_PT_UNBLOCKER_REBUILT_VERIFIED",
+  "research_source_tag": "ncaaf-research-v2.16-cloud-unblocker-gcs-first-20261007",
+  "cloud_feeder_source_tag": "prediction-tracker-cloud-feeder-v1.0-web-unblocker-20261007",
+  "checks": {
+    "python_compile": true,
+    "ncaaf_research_self_test": "PASS",
+    "cloud_feeder_self_test": "PASS",
+    "train_job_requires_rv216": true,
+    "train_job_requires_cloud_feeder": true,
+    "weekly_refresh_current_only": true,
+    "heavy_refresh_history_and_current": true,
+    "production_authority": 0
+  }
 }

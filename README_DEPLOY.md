@@ -1,3 +1,7 @@
+# NCAAF V2.16 — VERIFIED REBUILD
+
+This is a clean rebuild of V2.16. The three runtime files were recompiled and self-tested together before packaging. **If the deployed Heavy log does not show `[NCAAF-RV216-DEPLOY-PREFLIGHT] PASS`, Cloud Run is not running this package.**
+
 # NCAAF V2.16 — Cloud-only Prediction Tracker ingestion
 
 This replaces the V2.15 residential-PC feeder. Nothing runs on the operator's computer.
