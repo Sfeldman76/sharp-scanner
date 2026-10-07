@@ -1,12 +1,16 @@
 {
-  "source_tag_present": true,
-  "preflight_marker_present": true,
-  "meta_constituents_exact": true,
-  "source_out_consensus_present": true,
-  "same_mechanism_guard_present": true,
-  "authority_family_collapse_present": true,
-  "external_conflict_abstain_present": true,
-  "independent_family_confirmation_count_present": true,
-  "2026_selection_seal_present": true,
-  "production_authority_zero_contract": true
+  "python_compile_ncaaf_research_v2": "PASS",
+  "python_compile_train_job": "PASS",
+  "python_compile_dashboard_patcher": "PASS",
+  "dashboard_patcher_structural_test": "PASS",
+  "actual_current_csv_rows": 58,
+  "actual_current_fixed_meta_rows": 0,
+  "actual_current_external_consensus_rows": 58,
+  "actual_current_min_external_cluster_count": 29.0,
+  "actual_current_median_external_cluster_count": 31.0,
+  "actual_current_max_external_cluster_count": 32.0,
+  "external_consensus_contract": "META_SOURCE_CLUSTER_OUT_CLUSTER_BALANCED_MEDIAN_MIN8",
+  "external_consensus_min_clusters": 8,
+  "expected_preflight": "[NCAAF-RV2183-DEPLOY-PREFLIGHT] PASS",
+  "production_authority": 0
 }

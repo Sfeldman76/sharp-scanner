@@ -826,19 +826,19 @@ def main():
         f"path={_npv1_path} sha={_npv1_sha[:16]} promotion_requested={_ncaaf_prod_promote}"
     )
     _nrv22_tag = getattr(_nrv22, "NCAAF_RESEARCH_V2_SOURCE_TAG", None)
-    if _nrv22_tag != "ncaaf-research-v2.18.2-meta-overlap-guard-20261007":
+    if _nrv22_tag != "ncaaf-research-v2.18.3-current-external-consensus-ui-20261007":
         raise RuntimeError(
-            f"[NCAAF-RV2182-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv22_tag!r} "
+            f"[NCAAF-RV2183-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv22_tag!r} "
             f"path={str(_nrv22_path)!r} sha={_nrv22_sha[:16]}"
         )
     log_func(
-        f"[NCAAF-RV2182-DEPLOY-PREFLIGHT] PASS source_tag={_nrv22_tag} "
+        f"[NCAAF-RV2183-DEPLOY-PREFLIGHT] PASS source_tag={_nrv22_tag} "
         f"path={_nrv22_path} sha={_nrv22_sha[:16]} production_authority=0"
     )
     log_func(
         "[NCAAF-PT-GCS-MANUAL] mode=GCS_CSV_ONLY live_html_required=FALSE sparse_source=TRUE "
         "missing_game_policy=NO_EXTERNAL_SIGNAL partial_component_policy=PRESERVE_AVAILABLE "
-        "meta_policy=EXACT_5_OF_5_ONLY full_index_policy=ALL_SOURCE_NATIVE_LINE_PREDICTORS_ONE_CORRELATED_FAMILY miner_policy=LEGACY_PLUS_SEPARATE_EXTERNAL_BEHAVIOR_LANE paid_proxy_required=FALSE production_authority=0"
+        "meta_policy=EXACT_5_OF_5_ONLY current_external_consensus=META_SOURCE_CLUSTER_OUT_CLUSTER_BALANCED_MEDIAN_MIN8 full_index_policy=ALL_SOURCE_NATIVE_LINE_PREDICTORS_ONE_CORRELATED_FAMILY miner_policy=LEGACY_PLUS_SEPARATE_EXTERNAL_BEHAVIOR_LANE paid_proxy_required=FALSE production_authority=0"
     )
     _nccv2_tag = getattr(_nccv2, "SOURCE_TAG", None)
     if _nccv2_tag != "ncaaf-core-challenger-v2.4-expert-model-atom-bridge-20261006":
@@ -912,7 +912,16 @@ def main():
                     dashboard_module=None,storage_client=gcs,bucket_name=bucket,
                     include_history=False,include_current=True,force=True,log_func=log_func
                 )
-                log_func(f"[NCAAF-WEEKLY-PT-REFRESH] status={_pt.get('status')} current_rows={((_pt.get('current') or {}).get('rows',0))} archive_rows={((_pt.get('current') or {}).get('archive_rows',0))} live_rows={((_pt.get('current') or {}).get('live_rows',0))} live_full_five={((_pt.get('current') or {}).get('live_full_five_rows',0))} production_mutation=FALSE authority=0")
+                log_func(
+                    f"[NCAAF-WEEKLY-PT-REFRESH] status={_pt.get('status')} "
+                    f"current_rows={((_pt.get('current') or {}).get('rows',0))} "
+                    f"archive_rows={((_pt.get('current') or {}).get('archive_rows',0))} "
+                    f"live_rows={((_pt.get('current') or {}).get('live_rows',0))} "
+                    f"live_full_five={((_pt.get('current') or {}).get('live_full_five_rows',0))} "
+                    f"live_external_consensus_ready={((_pt.get('current') or {}).get('live_external_consensus_ready_rows',0))} "
+                    f"external_consensus_contract={((_pt.get('current') or {}).get('external_consensus_contract',''))} "
+                    "production_mutation=FALSE authority=0"
+                )
             except Exception as _pt_exc:
                 log_func(f"[NCAAF-WEEKLY-PT-REFRESH] status=UNAVAILABLE error={type(_pt_exc).__name__}:{_pt_exc} production_mutation=FALSE authority=0")
             pw.emit("done","NCAAF Weekly Production Update complete ✅",pct=1.0)

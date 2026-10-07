@@ -33,8 +33,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.18.2-meta-overlap-guard-20261007"
-NCAAF_RESEARCH_V2_VERSION = "2.18.2"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.18.3-current-external-consensus-ui-20261007"
+NCAAF_RESEARCH_V2_VERSION = "2.18.3"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -193,6 +193,62 @@ def _pt_index_source_cluster(canon: str) -> str:
     # Every other provider is its own source cluster. This prevents Sagarin/Pi
     # variants from receiving multiple consensus votes while retaining all systems.
     return c.upper()
+
+PT_EXTERNAL_CONSENSUS_MIN_CLUSTERS = 8
+PT_EXTERNAL_CONSENSUS_CONTRACT = "META_SOURCE_CLUSTER_OUT_CLUSTER_BALANCED_MEDIAN_MIN8"
+
+
+def _pt_attach_current_external_consensus_fields(out: pd.DataFrame) -> pd.DataFrame:
+    """Attach a current-board consensus independent of the frozen five-system META."""
+    x=out.copy()
+    idx_cols=[str(c) for c in x.columns if str(c).startswith("ptidx__")]
+    meta_clusters={_pt_index_source_cluster(k) for k in PT_META_CONSTITUENT_INDEX_IDS}
+    eligible=[]
+    cluster_to_cols={}
+    for c in idx_cols:
+        canon=str(c)[len("ptidx__"):]
+        cluster=_pt_index_source_cluster(canon)
+        if cluster in meta_clusters:
+            continue
+        eligible.append(c)
+        cluster_to_cols.setdefault(cluster,[]).append(c)
+
+    n=len(x)
+    raw_index_count=np.zeros(n,dtype=float)
+    if eligible:
+        _raw=np.column_stack([pd.to_numeric(x[c],errors="coerce").to_numpy(float) for c in eligible])
+        raw_index_count=np.isfinite(_raw).sum(axis=1).astype(float)
+
+    cluster_names=sorted(cluster_to_cols)
+    cluster_mat=np.full((n,len(cluster_names)),np.nan,dtype=float)
+    for j,cluster in enumerate(cluster_names):
+        cols=cluster_to_cols[cluster]
+        vals=np.column_stack([pd.to_numeric(x[c],errors="coerce").to_numpy(float) for c in cols])
+        for i in range(n):
+            v=vals[i,np.isfinite(vals[i])]
+            if v.size:
+                cluster_mat[i,j]=float(np.median(v))
+
+    cluster_count=np.isfinite(cluster_mat).sum(axis=1).astype(float) if cluster_mat.size else np.zeros(n,dtype=float)
+    consensus=np.full(n,np.nan,dtype=float)
+    dispersion=np.full(n,np.nan,dtype=float)
+    iqr=np.full(n,np.nan,dtype=float)
+    for i in range(n):
+        v=cluster_mat[i,np.isfinite(cluster_mat[i])] if cluster_mat.size else np.asarray([],dtype=float)
+        if v.size>=PT_EXTERNAL_CONSENSUS_MIN_CLUSTERS:
+            consensus[i]=float(np.median(v))
+            if v.size>=2:
+                dispersion[i]=float(np.std(v))
+                iqr[i]=float(np.percentile(v,75)-np.percentile(v,25))
+
+    x["external_consensus_home_margin"]=consensus
+    x["external_consensus_index_count"]=raw_index_count
+    x["external_consensus_cluster_count"]=cluster_count
+    x["external_consensus_cluster_std"]=dispersion
+    x["external_consensus_cluster_iqr"]=iqr
+    x["external_consensus_status"]=np.where(np.isfinite(consensus),"READY","INSUFFICIENT_CLUSTERS")
+    x["external_consensus_contract"]=PT_EXTERNAL_CONSENSUS_CONTRACT
+    return x
 PT_IDENTITY_HEADER_ALIASES = {
     "HOME": ("Home", "Home Team", "HomeTeam"),
     "AWAY": ("Road", "Away", "Visitor", "Visiting Team", "Visitor Team", "Away Team"),
@@ -796,6 +852,16 @@ def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str]
                     _idx_alias_conflicts[_canon]=int(_bad.sum())
             out[_oc]=_prev.where(_prev.notna(),_new)
 
+    out=_pt_attach_current_external_consensus_fields(out)
+    _ext_ready=int(pd.to_numeric(out.get("external_consensus_home_margin"),errors="coerce").notna().sum())
+    _ext_clusters=pd.to_numeric(out.get("external_consensus_cluster_count"),errors="coerce")
+    log_func(
+        f"[NCAAF-PT-EXTERNAL-CONSENSUS] season={int(season)} source={source_context} "
+        f"ready_rows={_ext_ready}/{len(out)} min_clusters={PT_EXTERNAL_CONSENSUS_MIN_CLUSTERS} "
+        f"median_cluster_count={float(_ext_clusters.median()) if len(_ext_clusters) else 0.0:.1f} "
+        f"contract={PT_EXTERNAL_CONSENSUS_CONTRACT} production_authority=0"
+    )
+
     vals=np.column_stack([pd.to_numeric(out[k],errors="coerce").to_numpy(float) for k in PT_PUBLISHED_WEIGHTS])
     w=np.asarray([PT_PUBLISHED_WEIGHTS[k] for k in PT_PUBLISHED_WEIGHTS],dtype=float)
     full=np.isfinite(vals).all(axis=1) if map_status=="FULL_FIVE_VERIFIED" else np.zeros(len(out),dtype=bool)
@@ -828,6 +894,9 @@ def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str]
         "index_columns":{k:v for k,v in sorted(_idx_sources.items())},
         "index_display_names":{k:_pt_index_display_name(k) for k in sorted(_idx_sources)},
         "index_alias_conflicts":_idx_alias_conflicts,
+        "external_consensus_contract":PT_EXTERNAL_CONSENSUS_CONTRACT,
+        "external_consensus_ready_rows":int(pd.to_numeric(out.get("external_consensus_home_margin"),errors="coerce").notna().sum()),
+        "external_consensus_min_clusters":PT_EXTERNAL_CONSENSUS_MIN_CLUSTERS,
         "raw_headers":cols,"source_context":source_context,
     }
 
@@ -1484,6 +1553,9 @@ def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client
                           "full_five_rows":int((_cc==5).sum()),"live_any_component_rows":int((_lcc>0).sum()) if len(_lcc) else 0,
                           "live_partial_component_rows":int(((_lcc>0)&(_lcc<5)).sum()) if len(_lcc) else 0,
                           "live_full_five_rows":int((_lcc==5).sum()) if len(_lcc) else 0,
+                          "external_consensus_ready_rows":int(pd.to_numeric(current_frame.get("external_consensus_home_margin"),errors="coerce").notna().sum()) if "external_consensus_home_margin" in current_frame.columns else 0,
+                          "live_external_consensus_ready_rows":int(pd.to_numeric(current_live.get("external_consensus_home_margin"),errors="coerce").notna().sum()) if isinstance(current_live,pd.DataFrame) and "external_consensus_home_margin" in current_live.columns else 0,
+                          "external_consensus_contract":PT_EXTERNAL_CONSENSUS_CONTRACT,
                           "source":"Prediction Tracker via manual validated GCS upload","archive_url":PT_ARCHIVE_URL.format(season=PT_CURRENT_SEASON),"live_csv_url":PT_LIVE_CSV_URL,"live_page_url":PT_LIVE_PAGE_URL,"header_manifest_gcs":f"gs://{bucket_name}/{PT_HEADER_MANIFEST_BLOB}","live_page_raw_gcs":f"gs://{bucket_name}/{PT_LIVE_HTML_RAW_BLOB}","relay_prefix":PT_RELAY_PREFIX,"sparse_source":True,"authority":0}
                     storage_client.bucket(bucket_name).blob(PT_CURRENT_META_BLOB).upload_from_string(json.dumps(meta,sort_keys=True).encode(),content_type="application/json")
                 except Exception: pass
@@ -1508,6 +1580,9 @@ def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client
                            "full_five_rows":int((_cc==5).sum()) if len(_cc) else 0,
                            "live_any_component_rows":int((_lcc>0).sum()) if len(_lcc) else 0,"live_partial_component_rows":int(((_lcc>0)&(_lcc<5)).sum()) if len(_lcc) else 0,
                            "live_full_five_rows":int((_lcc==5).sum()) if len(_lcc) else 0,
+                           "external_consensus_ready_rows":int(pd.to_numeric(current_frame.get("external_consensus_home_margin"),errors="coerce").notna().sum()) if "external_consensus_home_margin" in current_frame.columns else 0,
+                           "live_external_consensus_ready_rows":int(pd.to_numeric(current_live.get("external_consensus_home_margin"),errors="coerce").notna().sum()) if isinstance(current_live,pd.DataFrame) and "external_consensus_home_margin" in current_live.columns else 0,
+                           "external_consensus_contract":PT_EXTERNAL_CONSENSUS_CONTRACT,
                            "merge":current_merge,"gcs":f"gs://{bucket_name}/{PT_CURRENT_BLOB}","archive_gcs":f"gs://{bucket_name}/{PT_CURRENT_ARCHIVE_BLOB}","live_gcs":f"gs://{bucket_name}/{PT_CURRENT_LIVE_BLOB}"},
                 "published_weights":dict(PT_PUBLISHED_WEIGHTS),"feeder_manifest":feeder_manifest,"production_authority":0,"bet_authority_vote":False,"automatic_promotion":False,"selection_influence":0}
         if dashboard_module is not None:
@@ -1519,6 +1594,8 @@ def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client
             f"current_rows={result['current']['rows']} archive_rows={result['current'].get('archive_rows',0)} live_rows={result['current'].get('live_rows',0)} "
             f"current_partial={result['current'].get('partial_component_rows',0)} current_full_five={result['current'].get('full_five_rows',0)} "
             f"live_partial={result['current'].get('live_partial_component_rows',0)} live_full_five={result['current'].get('live_full_five_rows',0)} "
+            f"external_consensus_ready={result['current'].get('external_consensus_ready_rows',0)} "
+            f"live_external_consensus_ready={result['current'].get('live_external_consensus_ready_rows',0)} "
             f"matched_rows={match.get('matched_rows',0)} matched_partial={match.get('partial_matched_rows',0)} matched_full_five={match.get('full_five_matched_rows',0)} "
             f"missing_games_expected=TRUE sparse=TRUE production_authority=0 bet_authority_vote=FALSE"
         )
@@ -3047,7 +3124,7 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
     for _a in atoms: _fam_counts[_a.get("family")]=int(_fam_counts.get(_a.get("family"),0))+1
     _bridge_atoms=sum(v for k,v in _fam_counts.items() if str(k).startswith(("EXPERT_","RESEARCH_CORE_STATE","RESEARCH_SPECIALIST_","MARKET_KEY_","EXTERNAL_")))
     behavior=_v2181_external_predictor_behavior(games,seasons,market)
-    out={"version":"NCAAF-RV2.18.2-SYSTEM-MINER-V8-META-OVERLAP-GUARD","market":market,"production_authority":0,"discovery_max_season":DISCOVERY_MAX_SEASON,
+    out={"version":"NCAAF-RV2.18.3-SYSTEM-MINER-V9-CURRENT-EXTERNAL-CONSENSUS","market":market,"production_authority":0,"discovery_max_season":DISCOVERY_MAX_SEASON,
          "confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,"atoms":len(atoms),"atom_family_counts":_fam_counts,"expert_model_bridge_atoms":int(_bridge_atoms),"systems":[],"mechanism_families":[],"external_predictor_behavior":behavior}
     log_func(f"[NCAAF-RV25-ATOM-BRIDGE] market={market} atoms={len(atoms)} bridge_atoms={_bridge_atoms} pathi={_fam_counts.get('EXPERT_PATHI',0)} bigal={_fam_counts.get('EXPERT_BIGAL',0)} core={_fam_counts.get('RESEARCH_CORE_STATE',0)} specialist={sum(v for k,v in _fam_counts.items() if str(k).startswith('RESEARCH_SPECIALIST_'))} external={sum(v for k,v in _fam_counts.items() if str(k).startswith('EXTERNAL_'))} authority=0")
     if market=="spreads":
@@ -3495,6 +3572,8 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
         ex=ex.loc[ex["home_i"].notna()&ex["away_i"].notna()].copy(); ex["pair_key"]=ex["home_i"].astype(str)+"|"+ex["away_i"].astype(str)
         vc=ex["pair_key"].value_counts(); ex=ex.loc[ex["pair_key"].map(vc).eq(1)].set_index("pair_key",drop=False)
         meta=np.full(len(out),np.nan); cnt=np.full(len(out),np.nan); pavg=np.full(len(out),np.nan)
+        ext_consensus=np.full(len(out),np.nan); ext_clusters=np.full(len(out),np.nan); ext_indices=np.full(len(out),np.nan)
+        ext_std=np.full(len(out),np.nan); ext_iqr=np.full(len(out),np.nan)
         listed=np.zeros(len(out),dtype=float); full_five=np.zeros(len(out),dtype=float)
         comp={k:np.full(len(out),np.nan) for k in PT_PUBLISHED_WEIGHTS}
         for i,(h,a) in enumerate(zip(homes,aways)):
@@ -3515,12 +3594,28 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
             if pd.notna(_mv) and component_count==5: meta[i]=float(_mv)
             _pa=pd.to_numeric(pd.Series([r.get("prediction_avg_home",np.nan)]),errors="coerce").iloc[0]
             if pd.notna(_pa): pavg[i]=float(_pa)
+            _ec=pd.to_numeric(pd.Series([r.get("external_consensus_home_margin",np.nan)]),errors="coerce").iloc[0]
+            if pd.notna(_ec): ext_consensus[i]=float(_ec)
+            _en=pd.to_numeric(pd.Series([r.get("external_consensus_index_count",np.nan)]),errors="coerce").iloc[0]
+            if pd.notna(_en): ext_indices[i]=float(_en)
+            _ecn=pd.to_numeric(pd.Series([r.get("external_consensus_cluster_count",np.nan)]),errors="coerce").iloc[0]
+            if pd.notna(_ecn): ext_clusters[i]=float(_ecn)
+            _es=pd.to_numeric(pd.Series([r.get("external_consensus_cluster_std",np.nan)]),errors="coerce").iloc[0]
+            if pd.notna(_es): ext_std[i]=float(_es)
+            _ei=pd.to_numeric(pd.Series([r.get("external_consensus_cluster_iqr",np.nan)]),errors="coerce").iloc[0]
+            if pd.notna(_ei): ext_iqr[i]=float(_ei)
         spread=pd.to_numeric(out.get("Consensus_Open_Spread",out.get("Opening_Spread",pd.Series(np.nan,index=out.index))),errors="coerce").to_numpy(float)
         market=-spread
         out["_V210_PT_META_MARGIN_TEAM"]=meta
         out["_V210_PT_META_EDGE_POINTS"]=meta-market
         out["_V210_PT_META_SYSTEM_COUNT"]=cnt
         out["_V210_PT_PREDICTION_AVG_TEAM"]=pavg
+        out["_V2183_PT_EXTERNAL_CONSENSUS_MARGIN_TEAM"]=ext_consensus
+        out["_V2183_PT_EXTERNAL_CONSENSUS_EDGE_POINTS"]=ext_consensus-market
+        out["_V2183_PT_EXTERNAL_CONSENSUS_CLUSTER_COUNT"]=ext_clusters
+        out["_V2183_PT_EXTERNAL_CONSENSUS_INDEX_COUNT"]=ext_indices
+        out["_V2183_PT_EXTERNAL_CONSENSUS_STD"]=ext_std
+        out["_V2183_PT_EXTERNAL_CONSENSUS_IQR"]=ext_iqr
         _cm=np.column_stack([comp[k] for k in PT_PUBLISHED_WEIGHTS]); _em=np.column_stack([comp[k]-market for k in PT_PUBLISHED_WEIGHTS])
         _cn=np.isfinite(_cm).sum(axis=1); _std=np.full(len(out),np.nan); _ok=_cn>=2
         if _ok.any(): _std[_ok]=np.nanstd(_cm[_ok],axis=1)
@@ -3533,7 +3628,13 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
         for _k in PT_PUBLISHED_WEIGHTS:
             out[f"_V212_PT_{_k}_MARGIN_TEAM"]=comp[_k]
             out[f"_V212_PT_{_k}_EDGE_POINTS"]=comp[_k]-market
-        return out,{"status":"PASS","matched":int(listed.sum()),"any_component":int((_cn>0).sum()),"partial":int(((_cn>0)&(_cn<5)).sum()),"full_five":int((_cn==5).sum()),"rows":int(len(out)),"sparse":True,"authority":0}
+        return out,{
+            "status":"PASS","matched":int(listed.sum()),"any_component":int((_cn>0).sum()),
+            "partial":int(((_cn>0)&(_cn<5)).sum()),"full_five":int((_cn==5).sum()),
+            "external_consensus_ready":int(np.isfinite(ext_consensus).sum()),
+            "external_consensus_contract":PT_EXTERNAL_CONSENSUS_CONTRACT,
+            "rows":int(len(out)),"sparse":True,"authority":0
+        }
     except Exception as exc:
         return out,{"status":"UNAVAILABLE","matched":0,"error":f"{type(exc).__name__}:{exc}","authority":0}
 
@@ -3664,10 +3765,24 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     _pt_meta_by={keys[i]:cdf.iloc[i].get("_V210_PT_META_MARGIN_TEAM",np.nan) for i in range(len(cdf))}
     _pt_edge_by={keys[i]:cdf.iloc[i].get("_V210_PT_META_EDGE_POINTS",np.nan) for i in range(len(cdf))}
     _pt_cnt_by={keys[i]:cdf.iloc[i].get("_V210_PT_META_SYSTEM_COUNT",np.nan) for i in range(len(cdf))}
+    _pt_ext_by={keys[i]:cdf.iloc[i].get("_V2183_PT_EXTERNAL_CONSENSUS_MARGIN_TEAM",np.nan) for i in range(len(cdf))}
+    _pt_ext_edge_by={keys[i]:cdf.iloc[i].get("_V2183_PT_EXTERNAL_CONSENSUS_EDGE_POINTS",np.nan) for i in range(len(cdf))}
+    _pt_ext_cluster_by={keys[i]:cdf.iloc[i].get("_V2183_PT_EXTERNAL_CONSENSUS_CLUSTER_COUNT",np.nan) for i in range(len(cdf))}
+    _pt_ext_index_by={keys[i]:cdf.iloc[i].get("_V2183_PT_EXTERNAL_CONSENSUS_INDEX_COUNT",np.nan) for i in range(len(cdf))}
+    _pt_ext_std_by={keys[i]:cdf.iloc[i].get("_V2183_PT_EXTERNAL_CONSENSUS_STD",np.nan) for i in range(len(cdf))}
+    _pt_ext_iqr_by={keys[i]:cdf.iloc[i].get("_V2183_PT_EXTERNAL_CONSENSUS_IQR",np.nan) for i in range(len(cdf))}
     out["NCAAF_PT_Meta_Margin_Home"]=[_pt_meta_by.get(k,np.nan) for k in out[keycol]]
     out["NCAAF_PT_Meta_Edge_Home"]=[_pt_edge_by.get(k,np.nan) for k in out[keycol]]
     out["NCAAF_PT_Meta_System_Count"]=[_pt_cnt_by.get(k,np.nan) for k in out[keycol]]
     out["NCAAF_PT_Meta_Status"]=_pt_live_diag.get("status","UNAVAILABLE")
+    out["NCAAF_PT_External_Consensus_Margin_Home"]=[_pt_ext_by.get(k,np.nan) for k in out[keycol]]
+    out["NCAAF_PT_External_Consensus_Edge_Home"]=[_pt_ext_edge_by.get(k,np.nan) for k in out[keycol]]
+    out["NCAAF_PT_External_Consensus_Cluster_Count"]=[_pt_ext_cluster_by.get(k,np.nan) for k in out[keycol]]
+    out["NCAAF_PT_External_Consensus_Index_Count"]=[_pt_ext_index_by.get(k,np.nan) for k in out[keycol]]
+    out["NCAAF_PT_External_Consensus_STD"]=[_pt_ext_std_by.get(k,np.nan) for k in out[keycol]]
+    out["NCAAF_PT_External_Consensus_IQR"]=[_pt_ext_iqr_by.get(k,np.nan) for k in out[keycol]]
+    out["NCAAF_PT_External_Consensus_Status"]=_pt_live_diag.get("status","UNAVAILABLE")
+    out["NCAAF_PT_External_Consensus_Contract"]=PT_EXTERNAL_CONSENSUS_CONTRACT
     live_counts=[]; live_summaries=[]; research_counts=[]; research_summaries=[]
     for _,r in out.iterrows():
         m=str(r.get("Market") or "").lower()
