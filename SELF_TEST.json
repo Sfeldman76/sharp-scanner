@@ -1,6 +1,6 @@
 {
   "status": "PASS",
-  "source_tag": "ncaaf-research-v2.14.2-pt-challenge-expert-mask-hotfix-20261006",
+  "source_tag": "ncaaf-research-v2.15-gcs-first-pt-feeder-expert-reconciliation-20261006",
   "families": [
     "MARKET_MICROSTRUCTURE",
     "RUN_PASS_MATCHUP"
@@ -35,5 +35,6 @@
   "pt_relay_https_target": true,
   "pt_challenge_rejected": true,
   "pt_current_merge_preserves_rematch": true,
-  "expert_side_bridge": true
+  "expert_side_bridge": true,
+  "expert_occurrence_reconciliation": true
 }

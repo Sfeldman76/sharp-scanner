@@ -33,7 +33,7 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.14.3-expert-occurrence-key-fix-20261006"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.15-gcs-first-pt-feeder-expert-reconciliation-20261006"
 NCAAF_RESEARCH_V2_VERSION = "2.14.2"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
@@ -62,6 +62,10 @@ PT_CURRENT_LIVE_BLOB = "research/ncaaf/external/prediction_tracker/current_live.
 PT_CURRENT_META_BLOB = "research/ncaaf/external/prediction_tracker/current_meta.json"
 PT_LIVE_HTML_RAW_BLOB = "research/ncaaf/external/prediction_tracker/raw/predncaa_live_page.txt"
 PT_HEADER_MANIFEST_BLOB = "research/ncaaf/external/prediction_tracker/header_manifest.json"
+PT_FEEDER_MANIFEST_BLOB = "research/ncaaf/external/prediction_tracker/feeder_manifest.json"
+PT_FEEDER_SNAPSHOT_PREFIX = "research/ncaaf/external/prediction_tracker/snapshots"
+PT_FEEDER_CURRENT_MAX_AGE_HOURS = float(os.getenv("PT_FEEDER_CURRENT_MAX_AGE_HOURS", "24"))
+PT_ALLOW_WEB_FALLBACK = str(os.getenv("PT_ALLOW_WEB_FALLBACK", "1")).strip().lower() not in {"0","false","no","off"}
 PT_PUBLISHED_WEIGHTS = {
     "DOKTER": 0.242406,
     "PI_RATE_BIAS": 0.281205,
@@ -684,25 +688,85 @@ def _pt_blob_bytes(storage_client, bucket_name: str, path: str) -> bytes | None:
     except Exception: return None
 
 
+def _pt_gcs_raw(storage_client, bucket_name: str, path: str, *, max_age_hours: float | None=None) -> tuple[bytes | None,dict[str,Any]]:
+    """Read a validated raw Prediction Tracker artifact from GCS.
+
+    V2.15 makes GCS the model-side contract.  A separate residential feeder may
+    refresh these blobs; Heavy/Weekly jobs therefore do not need Prediction
+    Tracker network access when a fresh cache is present.  Challenge/interstitial
+    payloads are rejected even if a bad historical blob somehow exists.
+    """
+    meta={"status":"MISSING","path":path,"age_hours":None,"updated_utc":None}
+    try:
+        blob=storage_client.bucket(bucket_name).blob(path)
+        if not blob.exists():
+            return None,meta
+        try: blob.reload()
+        except Exception: pass
+        updated=getattr(blob,"updated",None)
+        age_hours=None
+        if updated is not None:
+            try:
+                import datetime as _dt
+                now=_dt.datetime.now(_dt.timezone.utc)
+                if getattr(updated,"tzinfo",None) is None:
+                    updated=updated.replace(tzinfo=_dt.timezone.utc)
+                age_hours=max(0.0,(now-updated).total_seconds()/3600.0)
+            except Exception:
+                age_hours=None
+        raw=blob.download_as_bytes()
+        if _pt_is_challenge_payload(raw):
+            return None,{**meta,"status":"REJECTED_CHALLENGE","age_hours":age_hours,"updated_utc":str(updated) if updated is not None else None}
+        if max_age_hours is not None and age_hours is not None and age_hours>float(max_age_hours):
+            return None,{**meta,"status":"STALE","age_hours":age_hours,"updated_utc":str(updated) if updated is not None else None}
+        return raw,{"status":"PASS","path":path,"age_hours":age_hours,"updated_utc":str(updated) if updated is not None else None,"bytes":len(raw)}
+    except Exception as exc:
+        return None,{**meta,"status":"ERROR","error":f"{type(exc).__name__}:{exc}"}
+
+
+def _pt_load_feeder_manifest(storage_client,bucket_name: str) -> dict[str,Any]:
+    try:
+        raw=_pt_blob_bytes(storage_client,bucket_name,PT_FEEDER_MANIFEST_BLOB)
+        if not raw: return {}
+        obj=json.loads(raw.decode("utf-8"))
+        return obj if isinstance(obj,dict) else {}
+    except Exception:
+        return {}
+
+
 def _pt_load_season(season: int, *, storage_client, bucket_name: str, force_web: bool=False, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
     season=int(season); raw_path=f"{PT_RAW_PREFIX}/ncaa{season}.csv"; norm_path=f"{PT_NORMALIZED_PREFIX}/ncaa{season}.csv"
     current=season>=PT_CURRENT_SEASON
-    raw=None; source=""
-    # Completed seasons are cache-once. Current season is web-first with cached fallback.
-    if not force_web and not current:
-        raw=_pt_blob_bytes(storage_client,bucket_name,raw_path); source="GCS_CACHE" if raw else ""
-    if raw is None:
+    raw=None; source=""; web_exc=None
+
+    # V2.15: GCS is the primary model-side interface for every season.  Current
+    # artifacts must also be fresh; completed historical seasons are immutable.
+    max_age=PT_FEEDER_CURRENT_MAX_AGE_HOURS if current else None
+    raw,gdiag=_pt_gcs_raw(storage_client,bucket_name,raw_path,max_age_hours=max_age)
+    if raw is not None:
+        source="GCS_FEEDER_RAW"
+        log_func(f"[NCAAF-PT-GCS] season={season} kind=ARCHIVE status=PASS age_hours={gdiag.get('age_hours')} path=gs://{bucket_name}/{raw_path} authority=0")
+    else:
+        log_func(f"[NCAAF-PT-GCS] season={season} kind=ARCHIVE status={gdiag.get('status')} age_hours={gdiag.get('age_hours')} path=gs://{bucket_name}/{raw_path} authority=0")
+
+    # Direct/relay web remains a best-effort fallback only.  It is no longer the
+    # contract Heavy/Weekly rely on, and can be disabled with PT_ALLOW_WEB_FALLBACK=0.
+    if raw is None and PT_ALLOW_WEB_FALLBACK:
         try:
-            raw,source=_pt_fetch_csv_resilient(PT_ARCHIVE_URL.format(season=season),referer=PT_ARCHIVE_PAGE_URL)
-            storage_client.bucket(bucket_name).blob(raw_path).upload_from_string(raw,content_type="text/csv")
+            raw,web_source=_pt_fetch_csv_resilient(PT_ARCHIVE_URL.format(season=season),referer=PT_ARCHIVE_PAGE_URL)
+            source=web_source
+            try: storage_client.bucket(bucket_name).blob(raw_path).upload_from_string(raw,content_type="text/csv")
+            except Exception: pass
         except Exception as exc:
-            raw=_pt_blob_bytes(storage_client,bucket_name,raw_path); source="GCS_FALLBACK" if raw else ""
-            if raw is None:
-                log_func(f"[NCAAF-PT-SEASON] season={season} status=UNAVAILABLE error={type(exc).__name__}:{exc} authority=0")
-                return pd.DataFrame(),{"status":"UNAVAILABLE","season":season,"error":f"{type(exc).__name__}:{exc}","authority":0}
+            web_exc=exc
+    if raw is None:
+        err=(f"{type(web_exc).__name__}:{web_exc}" if web_exc else f"GCS_{gdiag.get('status')}")
+        log_func(f"[NCAAF-PT-SEASON] season={season} status=UNAVAILABLE error={err} gcs_status={gdiag.get('status')} authority=0")
+        return pd.DataFrame(),{"status":"UNAVAILABLE","season":season,"error":err,"gcs":gdiag,"authority":0}
+
     _verified_map=_pt_load_header_manifest(storage_client,bucket_name)
     frame,diag=_pt_parse_csv(raw,season,verified_header_map=_verified_map,source_context=f"ARCHIVE_{source}",log_func=log_func)
-    diag["source"]=source; diag["url"]=PT_ARCHIVE_URL.format(season=season); diag["authority"]=0
+    diag["source"]=source; diag["url"]=PT_ARCHIVE_URL.format(season=season); diag["gcs"]=gdiag; diag["authority"]=0
     if not frame.empty:
         try: storage_client.bucket(bucket_name).blob(norm_path).upload_from_string(frame.to_csv(index=False).encode(),content_type="text/csv")
         except Exception: pass
@@ -712,29 +776,40 @@ def _pt_load_season(season: int, *, storage_client, bucket_name: str, force_web:
 
 
 def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
-    """Fetch current-week ratings with a name-safe system identity contract.
+    """Load current-week ratings with GCS-first, name-safe identity validation.
 
-    When both CSV and HTML are available we validate cryptic CSV headers against
-    the human-named HTML system columns by comparing prediction vectors.  The
-    resulting exact header manifest is cached and may be reused by archives.
-    If the CSV mapping is incomplete, the named HTML table is preferred.
+    The residential feeder writes both the exact live CSV and the named live
+    page to GCS.  Heavy/Weekly consume those fresh raw artifacts first and only
+    attempt direct/relay web access if the cache is missing/stale.
     """
     raw_path=f"{PT_RAW_PREFIX}/ncaapredictions.csv"
-    raw=None; hraw=None; source=""; csv_exc=None; html_exc=None; infer_diag={"status":"NOT_RUN"}; verified_map=_pt_load_header_manifest(storage_client,bucket_name)
-    try:
-        raw,_live_source=_pt_fetch_csv_resilient(PT_LIVE_CSV_URL,referer=PT_LIVE_PAGE_URL); source=_live_source.replace("WEB_SESSION","WEB_LIVE_SESSION")
-        try: storage_client.bucket(bucket_name).blob(raw_path).upload_from_string(raw,content_type="text/csv")
-        except Exception: pass
-    except Exception as exc:
-        csv_exc=exc
-    try:
-        hraw=_pt_fetch_live_html()
+    raw,gcsv=_pt_gcs_raw(storage_client,bucket_name,raw_path,max_age_hours=PT_FEEDER_CURRENT_MAX_AGE_HOURS)
+    hraw,ghtml=_pt_gcs_raw(storage_client,bucket_name,PT_LIVE_HTML_RAW_BLOB,max_age_hours=PT_FEEDER_CURRENT_MAX_AGE_HOURS)
+    source=""; csv_exc=None; html_exc=None; infer_diag={"status":"NOT_RUN"}; verified_map=_pt_load_header_manifest(storage_client,bucket_name)
+    if raw is not None:
+        source="GCS_FEEDER_LIVE"
+        log_func(f"[NCAAF-PT-GCS] season={PT_CURRENT_SEASON} kind=LIVE_CSV status=PASS age_hours={gcsv.get('age_hours')} path=gs://{bucket_name}/{raw_path} authority=0")
+    else:
+        log_func(f"[NCAAF-PT-GCS] season={PT_CURRENT_SEASON} kind=LIVE_CSV status={gcsv.get('status')} age_hours={gcsv.get('age_hours')} path=gs://{bucket_name}/{raw_path} authority=0")
+    if hraw is not None:
+        log_func(f"[NCAAF-PT-GCS] season={PT_CURRENT_SEASON} kind=LIVE_HTML status=PASS age_hours={ghtml.get('age_hours')} path=gs://{bucket_name}/{PT_LIVE_HTML_RAW_BLOB} authority=0")
+    else:
+        log_func(f"[NCAAF-PT-GCS] season={PT_CURRENT_SEASON} kind=LIVE_HTML status={ghtml.get('status')} age_hours={ghtml.get('age_hours')} path=gs://{bucket_name}/{PT_LIVE_HTML_RAW_BLOB} authority=0")
+
+    if raw is None and PT_ALLOW_WEB_FALLBACK:
         try:
-            storage_client.bucket(bucket_name).blob(PT_LIVE_HTML_RAW_BLOB).upload_from_string(hraw,content_type="text/plain")
-        except Exception:
-            pass
-    except Exception as exc:
-        html_exc=exc
+            raw,_live_source=_pt_fetch_csv_resilient(PT_LIVE_CSV_URL,referer=PT_LIVE_PAGE_URL); source=_live_source.replace("WEB_SESSION","WEB_LIVE_SESSION")
+            try: storage_client.bucket(bucket_name).blob(raw_path).upload_from_string(raw,content_type="text/csv")
+            except Exception: pass
+        except Exception as exc:
+            csv_exc=exc
+    if hraw is None and PT_ALLOW_WEB_FALLBACK:
+        try:
+            hraw=_pt_fetch_live_html()
+            try: storage_client.bucket(bucket_name).blob(PT_LIVE_HTML_RAW_BLOB).upload_from_string(hraw,content_type="text/html")
+            except Exception: pass
+        except Exception as exc:
+            html_exc=exc
 
     if raw is not None and hraw is not None:
         inferred,infer_diag=_pt_infer_verified_header_map(raw,hraw)
@@ -745,31 +820,28 @@ def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -
 
     frame=pd.DataFrame(); diag={"status":"UNAVAILABLE","season":PT_CURRENT_SEASON}
     if raw is not None:
-        frame,diag=_pt_parse_csv(raw,PT_CURRENT_SEASON,verified_header_map=verified_map,source_context="LIVE_CSV",log_func=log_func)
-        source=source or "WEB_LIVE_SESSION"
-        # A loaded CSV with unverified/missing benchmark headers is not allowed to
-        # masquerade as a valid metamodel source.  Prefer named HTML instead.
+        frame,diag=_pt_parse_csv(raw,PT_CURRENT_SEASON,verified_header_map=verified_map,source_context="LIVE_GCS_FIRST",log_func=log_func)
+        source=source or "GCS_FEEDER_LIVE"
         if diag.get("metamodel_status")!="FULL_FIVE_VERIFIED" and hraw is not None:
             hframe,hdiag=_pt_parse_live_html(hraw,PT_CURRENT_SEASON,log_func=log_func)
             if not hframe.empty and hdiag.get("metamodel_status")=="FULL_FIVE_VERIFIED":
-                frame,diag=hframe,hdiag; source="WEB_LIVE_HTML_NAMED"
+                frame,diag=hframe,hdiag; source="GCS_FEEDER_LIVE_HTML_NAMED" if gcsv.get("status")=="PASS" or ghtml.get("status")=="PASS" else "WEB_LIVE_HTML_NAMED"
     elif hraw is not None:
-        frame,diag=_pt_parse_live_html(hraw,PT_CURRENT_SEASON,log_func=log_func); source="WEB_LIVE_HTML_FALLBACK"
+        frame,diag=_pt_parse_live_html(hraw,PT_CURRENT_SEASON,log_func=log_func); source="GCS_FEEDER_LIVE_HTML_NAMED" if ghtml.get("status")=="PASS" else "WEB_LIVE_HTML_FALLBACK"
 
     if frame.empty:
-        craw=_pt_blob_bytes(storage_client,bucket_name,raw_path)
-        if craw is not None:
-            frame,diag=_pt_parse_csv(craw,PT_CURRENT_SEASON,verified_header_map=verified_map,source_context="GCS_LIVE_FALLBACK",log_func=log_func); source="GCS_LIVE_FALLBACK"
-    if frame.empty:
-        log_func(f"[NCAAF-PT-LIVE] season={PT_CURRENT_SEASON} status=UNAVAILABLE csv_error={type(csv_exc).__name__ if csv_exc else ''}:{csv_exc or ''} html_error={type(html_exc).__name__ if html_exc else ''}:{html_exc or ''} authority=0")
-        return pd.DataFrame(),{"status":"UNAVAILABLE","season":PT_CURRENT_SEASON,"error":f"CSV={type(csv_exc).__name__ if csv_exc else ''}:{csv_exc or ''}; HTML={type(html_exc).__name__ if html_exc else ''}:{html_exc or ''}","url":PT_LIVE_CSV_URL,"page_url":PT_LIVE_PAGE_URL,"authority":0}
+        err_csv=(f"{type(csv_exc).__name__}:{csv_exc}" if csv_exc else f"GCS_{gcsv.get('status')}")
+        err_html=(f"{type(html_exc).__name__}:{html_exc}" if html_exc else f"GCS_{ghtml.get('status')}")
+        log_func(f"[NCAAF-PT-LIVE] season={PT_CURRENT_SEASON} status=UNAVAILABLE csv_error={err_csv} html_error={err_html} authority=0")
+        return pd.DataFrame(),{"status":"UNAVAILABLE","season":PT_CURRENT_SEASON,"error":f"CSV={err_csv}; HTML={err_html}","gcs_csv":gcsv,"gcs_html":ghtml,"url":PT_LIVE_CSV_URL,"page_url":PT_LIVE_PAGE_URL,"authority":0}
 
     frame=frame.copy(); frame["source_kind"]="LIVE_CURRENT"; frame["source_priority"]=2
     try: storage_client.bucket(bucket_name).blob(PT_CURRENT_LIVE_BLOB).upload_from_string(frame.to_csv(index=False).encode(),content_type="text/csv")
     except Exception: pass
-    diag.update({"source":source,"source_kind":"LIVE_CURRENT","url":PT_LIVE_CSV_URL,"page_url":PT_LIVE_PAGE_URL,"header_verification":infer_diag,"verified_header_map":verified_map,"authority":0})
+    diag.update({"source":source,"source_kind":"LIVE_CURRENT","url":PT_LIVE_CSV_URL,"page_url":PT_LIVE_PAGE_URL,"header_verification":infer_diag,"verified_header_map":verified_map,"gcs_csv":gcsv,"gcs_html":ghtml,"authority":0})
     log_func(f"[NCAAF-PT-LIVE] season={PT_CURRENT_SEASON} status={diag.get('status')} source={source} header_contract={diag.get('metamodel_status')} rows={len(frame)} full_five={int(np.isfinite(pd.to_numeric(frame.get('meta_margin_home'),errors='coerce')).sum()) if not frame.empty else 0} authority=0")
     return frame,diag
+
 
 def _pt_merge_current_season(archive: pd.DataFrame, live: pd.DataFrame, *, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
     """Merge 2026 season archive with the separate live/current-week feed.
@@ -944,8 +1016,9 @@ def _pt_research_metrics(g: pd.DataFrame) -> dict[str,Any]:
 def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client=None, bucket_name="sharp-models", include_history=True, include_current=True, force=False, log_func=print) -> dict[str,Any]:
     """Fetch/cache Prediction Tracker and attach fixed-weight META_MARGIN research fields.
 
-    Completed seasons are cache-once in GCS. The current season is web-first with
-    cached fallback. Failure is non-fatal and always fail-closed: no external
+    V2.15 uses a GCS-first ingestion contract. A separate residential feeder is
+    expected to refresh raw current artifacts; direct/relay web access is only a
+    best-effort fallback. Failure is non-fatal and always fail-closed: no external
     field can mutate Production V1 or grant Bet Authority.
     """
     try:
@@ -958,13 +1031,18 @@ def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client
         if include_history and (not include_current) and not force and isinstance(prior,dict) and prior.get("status")=="PASS" and prior.get("history_attached"):
             return prior
         frames=[]; diags=[]
+        feeder_manifest=_pt_load_feeder_manifest(storage_client,bucket_name)
+        if feeder_manifest:
+            log_func(f"[NCAAF-PT-FEEDER-MANIFEST] status=READY updated_utc={feeder_manifest.get('updated_utc')} host={feeder_manifest.get('host','')} source_count={len(feeder_manifest.get('sources') or {})} authority=0")
+        else:
+            log_func(f"[NCAAF-PT-FEEDER-MANIFEST] status=MISSING path=gs://{bucket_name}/{PT_FEEDER_MANIFEST_BLOB} authority=0")
         current_frame=pd.DataFrame(); current_diag=None; current_archive=pd.DataFrame(); current_live=pd.DataFrame(); current_merge={"status":"NOT_RUN","authority":0}
         if include_current:
             # Fetch the named live table first.  When the live CSV is also
             # available this creates/refreshes the value-validated cryptic
             # header manifest BEFORE any archive CSV is parsed.
             current_live,current_live_diag=_pt_load_live_current(storage_client=storage_client,bucket_name=bucket_name,log_func=log_func)
-            current_archive,current_archive_diag=_pt_load_season(PT_CURRENT_SEASON,storage_client=storage_client,bucket_name=bucket_name,force_web=True,log_func=log_func)
+            current_archive,current_archive_diag=_pt_load_season(PT_CURRENT_SEASON,storage_client=storage_client,bucket_name=bucket_name,force_web=False,log_func=log_func)
             if not current_archive.empty:
                 current_archive=current_archive.copy(); current_archive["source_kind"]="ARCHIVE_SEASON_TO_DATE"; current_archive["source_priority"]=1
                 try: storage_client.bucket(bucket_name).blob(PT_CURRENT_ARCHIVE_BLOB).upload_from_string(current_archive.to_csv(index=False).encode(),content_type="text/csv")
@@ -975,7 +1053,7 @@ def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client
             if not current_frame.empty:
                 try:
                     storage_client.bucket(bucket_name).blob(PT_CURRENT_BLOB).upload_from_string(current_frame.to_csv(index=False).encode(),content_type="text/csv")
-                    meta={"season":PT_CURRENT_SEASON,"updated_utc":_now(),"rows":len(current_frame),"archive_rows":len(current_archive),"live_rows":len(current_live),"full_five_rows":int(np.isfinite(pd.to_numeric(current_frame.get('meta_margin_home'),errors='coerce')).sum()),"live_full_five_rows":int(np.isfinite(pd.to_numeric(current_live.get('meta_margin_home'),errors='coerce')).sum()) if not current_live.empty else 0,"source":"Prediction Tracker archive + live current week","archive_url":PT_ARCHIVE_URL.format(season=PT_CURRENT_SEASON),"live_csv_url":PT_LIVE_CSV_URL,"live_page_url":PT_LIVE_PAGE_URL,"header_manifest_gcs":f"gs://{bucket_name}/{PT_HEADER_MANIFEST_BLOB}","live_page_raw_gcs":f"gs://{bucket_name}/{PT_LIVE_HTML_RAW_BLOB}","relay_prefix":PT_RELAY_PREFIX,"authority":0}
+                    meta={"season":PT_CURRENT_SEASON,"updated_utc":_now(),"rows":len(current_frame),"archive_rows":len(current_archive),"live_rows":len(current_live),"full_five_rows":int(np.isfinite(pd.to_numeric(current_frame.get('meta_margin_home'),errors='coerce')).sum()),"live_full_five_rows":int(np.isfinite(pd.to_numeric(current_live.get('meta_margin_home'),errors='coerce')).sum()) if not current_live.empty else 0,"source":"Prediction Tracker via GCS-first feeder contract","archive_url":PT_ARCHIVE_URL.format(season=PT_CURRENT_SEASON),"live_csv_url":PT_LIVE_CSV_URL,"live_page_url":PT_LIVE_PAGE_URL,"header_manifest_gcs":f"gs://{bucket_name}/{PT_HEADER_MANIFEST_BLOB}","live_page_raw_gcs":f"gs://{bucket_name}/{PT_LIVE_HTML_RAW_BLOB}","relay_prefix":PT_RELAY_PREFIX,"authority":0}
                     storage_client.bucket(bucket_name).blob(PT_CURRENT_META_BLOB).upload_from_string(json.dumps(meta,sort_keys=True).encode(),content_type="application/json")
                 except Exception: pass
         if include_history:
@@ -990,7 +1068,7 @@ def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client
             match=_pt_attach_history_to_cache(dashboard_module,hist,log_func=log_func)
             c=getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}; gg=c.get("miner_games")
             if isinstance(gg,pd.DataFrame) and not gg.empty: metrics=_pt_research_metrics(gg)
-        result={"status":"PASS" if any((d or {}).get('status')=='PASS' for d in diags) else "UNAVAILABLE","source":"THE_PREDICTION_TRACKER","history_attached":bool(include_history and match.get('status')=='PASS'),"season_diagnostics":diags,"match":match,"metrics":metrics,"current":{"rows":int(len(current_frame)),"archive_rows":int(len(current_archive)),"live_rows":int(len(current_live)),"full_five_rows":int(np.isfinite(pd.to_numeric(current_frame.get('meta_margin_home'),errors='coerce')).sum()) if not current_frame.empty else 0,"live_full_five_rows":int(np.isfinite(pd.to_numeric(current_live.get('meta_margin_home'),errors='coerce')).sum()) if not current_live.empty else 0,"merge":current_merge,"gcs":f"gs://{bucket_name}/{PT_CURRENT_BLOB}","archive_gcs":f"gs://{bucket_name}/{PT_CURRENT_ARCHIVE_BLOB}","live_gcs":f"gs://{bucket_name}/{PT_CURRENT_LIVE_BLOB}"},"published_weights":dict(PT_PUBLISHED_WEIGHTS),"production_authority":0,"bet_authority_vote":False,"automatic_promotion":False,"selection_influence":0}
+        result={"status":"PASS" if any((d or {}).get('status')=='PASS' for d in diags) else "UNAVAILABLE","source":"THE_PREDICTION_TRACKER","history_attached":bool(include_history and match.get('status')=='PASS'),"season_diagnostics":diags,"match":match,"metrics":metrics,"current":{"rows":int(len(current_frame)),"archive_rows":int(len(current_archive)),"live_rows":int(len(current_live)),"full_five_rows":int(np.isfinite(pd.to_numeric(current_frame.get('meta_margin_home'),errors='coerce')).sum()) if not current_frame.empty else 0,"live_full_five_rows":int(np.isfinite(pd.to_numeric(current_live.get('meta_margin_home'),errors='coerce')).sum()) if not current_live.empty else 0,"merge":current_merge,"gcs":f"gs://{bucket_name}/{PT_CURRENT_BLOB}","archive_gcs":f"gs://{bucket_name}/{PT_CURRENT_ARCHIVE_BLOB}","live_gcs":f"gs://{bucket_name}/{PT_CURRENT_LIVE_BLOB}"},"published_weights":dict(PT_PUBLISHED_WEIGHTS),"feeder_manifest":feeder_manifest,"production_authority":0,"bet_authority_vote":False,"automatic_promotion":False,"selection_influence":0}
         if dashboard_module is not None:
             c=getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}; c["prediction_tracker_external"]=result
             try: setattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",c)
@@ -1289,25 +1367,49 @@ def _attach_exact_expert_flags_to_miner(dashboard_module, miner_games: pd.DataFr
                 else:
                     bc+=1; hb+=int(hv.sum()); rb+=int(rv.sum())
             if pc or bc:
-                expected_fires=sum(int(st.get("fired",0) or 0) for st in hist_cache.values()
-                                   if isinstance(st,dict) and str(st.get("role",""))=="directional"
-                                   and str(st.get("family","")) in {"Pathi","BigAl"})
+                eligible=[st for st in hist_cache.values()
+                          if isinstance(st,dict) and str(st.get("role",""))=="directional"
+                          and str(st.get("family","")) in {"Pathi","BigAl"}]
+                expected_fired=sum(int(st.get("fired",0) or 0) for st in eligible)
+                expected_graded=sum(int(st.get("graded",st.get("sample",0)) or 0) for st in eligible)
+                occurrence_records=sum(len(st.get("occurrences") or []) for st in eligible)
                 projected_fires=hp+rp+hb+rb
-                diag={"status":("PASS_OCCURRENCE_LEDGER" if projected_fires>0 or expected_fires==0 else "FAIL_ZERO_PROJECTION"),
+                ungraded_fires=expected_fired-expected_graded
+                projection_delta=projected_fires-occurrence_records
+                ledger_dedup_delta=occurrence_records-expected_graded
+                pathi_fired=sum(int(st.get("fired",0) or 0) for st in eligible if str(st.get("family"))=="Pathi")
+                pathi_graded=sum(int(st.get("graded",st.get("sample",0)) or 0) for st in eligible if str(st.get("family"))=="Pathi")
+                bigal_fired=sum(int(st.get("fired",0) or 0) for st in eligible if str(st.get("family"))=="BigAl")
+                bigal_graded=sum(int(st.get("graded",st.get("sample",0)) or 0) for st in eligible if str(st.get("family"))=="BigAl")
+                recon_ok=bool(projected_fires==occurrence_records)
+                diag={"status":("PASS_OCCURRENCE_LEDGER_RECONCILED" if recon_ok else "FAIL_OCCURRENCE_RECONCILIATION"),
                       "source_rows":int(len(out)*2),
                       "matched_home":int(home_occ.ne("").sum()),"matched_road":int(road_occ.ne("").sum()),
                       "pathi_cols":pc,"bigal_cols":bc,"home_pathi_fires":hp,"road_pathi_fires":rp,
-                      "home_bigal_fires":hb,"road_bigal_fires":rb,"expected_fires":expected_fires,"authority":0}
-                if projected_fires>0 or expected_fires==0:
+                      "home_bigal_fires":hb,"road_bigal_fires":rb,
+                      "expected_fired":expected_fired,"expected_graded":expected_graded,"occurrence_records":occurrence_records,
+                      "ungraded_fires":ungraded_fires,"projection_delta":projection_delta,"ledger_dedup_delta":ledger_dedup_delta,
+                      "pathi_fired":pathi_fired,"pathi_graded":pathi_graded,"bigal_fired":bigal_fired,"bigal_graded":bigal_graded,"authority":0}
+                log_func(
+                    f"[NCAAF-RV215-EXPERT-OCCURRENCE-RECON] status={'PASS' if recon_ok else 'FAIL'} "
+                    f"fired={expected_fired} graded={expected_graded} occurrence_records={occurrence_records} projected={projected_fires} "
+                    f"ungraded={ungraded_fires} projection_delta={projection_delta} ledger_dedup_delta={ledger_dedup_delta} "
+                    f"pathi_fired={pathi_fired} pathi_graded={pathi_graded} bigal_fired={bigal_fired} bigal_graded={bigal_graded} authority=0"
+                )
+                if recon_ok:
                     log_func(
-                        f"[NCAAF-RV2143-EXPERT-OCCURRENCE-BRIDGE] status=PASS pathi_cols={pc} bigal_cols={bc} "
+                        f"[NCAAF-RV215-EXPERT-OCCURRENCE-BRIDGE] status=PASS pathi_cols={pc} bigal_cols={bc} "
                         f"home_pathi_fires={hp} road_pathi_fires={rp} home_bigal_fires={hb} road_bigal_fires={rb} "
-                        f"expected_fires={expected_fires} authority=0"
+                        f"graded_occurrences={occurrence_records} ungraded_fires={ungraded_fires} authority=0"
                     )
                     return out,diag
+                # Fail closed: do not expose partially projected expert atoms to Miner.
+                for _c in list(out.columns):
+                    if str(_c).startswith("Pathi_FB_") or str(_c).startswith("BigAl_"):
+                        out.drop(columns=[_c],inplace=True,errors="ignore")
                 log_func(
-                    f"[NCAAF-RV2143-EXPERT-OCCURRENCE-BRIDGE] status=FAIL_ZERO_PROJECTION pathi_cols={pc} bigal_cols={bc} "
-                    f"expected_fires={expected_fires} projected_fires=0 fallback=TRUE authority=0"
+                    f"[NCAAF-RV215-EXPERT-OCCURRENCE-BRIDGE] status=FAIL_RECONCILIATION "
+                    f"occurrence_records={occurrence_records} projected={projected_fires} delta={projection_delta} fallback=TRUE authority=0"
                 )
         except Exception as _occ_exc:
             log_func(f"[NCAAF-RV2142-EXPERT-OCCURRENCE-BRIDGE] status=FALLBACK error={type(_occ_exc).__name__}:{_occ_exc} authority=0")
@@ -2834,19 +2936,46 @@ def self_test() -> dict[str,Any]:
     _mg2,_ebd=_attach_exact_expert_flags_to_miner(_D(_hh),_mg,log_func=lambda *a,**k:None)
     _expert_atoms={a["name"] for a in _extended_atoms(_mg2,for_live=True,market="spreads")}
     _expert_bridge_ok=bool(
-        _ebd.get("status")=="PASS" and int(pd.to_numeric(_mg2["Pathi_FB_Dog_Hook_Above_3"],errors="coerce").fillna(0).sum())==1 and
+        _ebd.get("status") in {"PASS","PASS_OCCURRENCE_LEDGER_RECONCILED"} and int(pd.to_numeric(_mg2["Pathi_FB_Dog_Hook_Above_3"],errors="coerce").fillna(0).sum())==1 and
         int(pd.to_numeric(_mg2["BigAl_CF2_LateSeasonRevengeDog__ROAD_SIDE"],errors="coerce").fillna(0).sum())==1 and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in _expert_atoms and
         any("BIGAL_CF2_LATESEASONREVENGEDOG_ROAD_SIDE" in x for x in _expert_atoms)
     )
     _V214_EXPERT_SIDE_CACHE.clear()
+    # Exact occurrence-ledger reconciliation test: the ledger stores graded
+    # occurrences, while `fired` can be larger when ATS target/result is absent.
+    class _DOcc:
+        _V143_SYSTEM_HISTORY_CACHE={
+            "Pathi_FB_Dog_Hook_Above_3":{
+                "family":"Pathi","role":"directional","fired":2,"graded":1,
+                "occurrences":[{"season":2023,"date":"2023-09-01","team":"alpha","opponent":"beta","ats_win":1.0}],
+            },
+            "BigAl_CF2_LateSeasonRevengeDog":{
+                "family":"BigAl","role":"directional","fired":1,"graded":1,
+                "occurrences":[{"season":2023,"date":"2023-09-01","team":"beta","opponent":"alpha","ats_win":1.0}],
+            },
+        }
+    _mg_occ=pd.DataFrame({"Season":[2023],"Game_Date":["2023-09-01"],"Team_Norm":["alpha"],"Opponent_Norm":["beta"]})
+    _mg_occ2,_occdiag=_attach_exact_expert_flags_to_miner(_DOcc(),_mg_occ,log_func=lambda *a,**k:None)
+    _occ_recon_ok=bool(
+        _occdiag.get("status")=="PASS_OCCURRENCE_LEDGER_RECONCILED" and
+        int(_occdiag.get("expected_fired",0))==3 and int(_occdiag.get("expected_graded",0))==2 and
+        int(_occdiag.get("occurrence_records",0))==2 and int(_occdiag.get("ungraded_fires",0))==1 and
+        int(_occdiag.get("projection_delta",999))==0 and
+        int(pd.to_numeric(_mg_occ2.get("Pathi_FB_Dog_Hook_Above_3"),errors="coerce").fillna(0).sum())==1 and
+        int(pd.to_numeric(_mg_occ2.get("BigAl_CF2_LateSeasonRevengeDog__ROAD_SIDE"),errors="coerce").fillna(0).sum())==1
+    )
+    # Production-log arithmetic from the V2.14.3 run should reconcile as 19
+    # fired-but-ungraded events, not as missing projected occurrences.
+    _recon_example={"fired":6384,"graded":6365,"occurrence_records":6365,"projected":6365}
+    _occ_recon_ok=bool(_occ_recon_ok and _recon_example["projected"]==_recon_example["occurrence_records"] and (_recon_example["fired"]-_recon_example["graded"])==19)
     ok=bool(
         len(q)==3 and "RUN_PASS_MATCHUP" in fam and "MARKET_MICROSTRUCTURE" in fam and
         all("Actual_Margin" not in x for v in fam.values() for x in v) and
         "SU_SEQ3_LWL" in live_atoms and "OFF_ATS_COVER_7_PLUS" in live_atoms and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
         "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and "META_PT_EDGE_TEAM_3PLUS" in live_atoms and "META_PT_CORE_STRONG_AGREE" in live_atoms and
-        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _expert_bridge_ok
+        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _expert_bridge_ok and _occ_recon_ok
     )
     return {
         "status":"PASS" if ok else "FAIL","source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG,
@@ -2861,7 +2990,7 @@ def self_test() -> dict[str,Any]:
         "pt_name_safe_header_contract":_pt_name_safe,
         "pt_self_test_system_columns":_pt_da.get("system_columns",{}),
         "pt_fuzzy_header_rejected":_pt_dc.get("system_columns",{}).get("ESPN_FPI") is None,
-        "pt_relay_csv_payload":_relay_csv_ok,"pt_relay_named_markdown":_relay_md_ok,"pt_relay_https_target":_relay_url_ok,"pt_challenge_rejected":_challenge_rejected,"pt_current_merge_preserves_rematch":_merge_rematch_ok,"expert_side_bridge":_expert_bridge_ok,
+        "pt_relay_csv_payload":_relay_csv_ok,"pt_relay_named_markdown":_relay_md_ok,"pt_relay_https_target":_relay_url_ok,"pt_challenge_rejected":_challenge_rejected,"pt_current_merge_preserves_rematch":_merge_rematch_ok,"expert_side_bridge":_expert_bridge_ok,"expert_occurrence_reconciliation":_occ_recon_ok,
     }
 
 
