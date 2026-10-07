@@ -1,16 +1,24 @@
 {
-  "python_compile_ncaaf_research_v2": "PASS",
-  "python_compile_train_job": "PASS",
-  "python_compile_dashboard_patcher": "PASS",
-  "dashboard_patcher_structural_test": "PASS",
-  "actual_current_csv_rows": 58,
-  "actual_current_fixed_meta_rows": 0,
-  "actual_current_external_consensus_rows": 58,
-  "actual_current_min_external_cluster_count": 29.0,
-  "actual_current_median_external_cluster_count": 31.0,
-  "actual_current_max_external_cluster_count": 32.0,
-  "external_consensus_contract": "META_SOURCE_CLUSTER_OUT_CLUSTER_BALANCED_MEDIAN_MIN8",
-  "external_consensus_min_clusters": 8,
-  "expected_preflight": "[NCAAF-RV2183-DEPLOY-PREFLIGHT] PASS",
-  "production_authority": 0
+  "status": "PASS",
+  "compiled_files": ["nfl_engine.py", "ncaaf_research_v2.py", "train_job.py", "patch_dashboard_pt_margin_vs_market_both.py"],
+  "nfl_engine": {   "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",   "compiled_and_checked": 33,   "components": 33,   "engine_source_tag": "nfl-engine-v3.13.0-pt-incremental-value-20261007",   "failures": [],   "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_V313_PT_EXTERNAL_FAMILY_AND_INCREMENTAL_RESIDUAL_RESEARCH_ONLY",   "missing_critical_symbols": [],   "shared_external_required": [     "utils.py",     "sports_edge_authority_v1.py"   ],   "status": "PASS",   "utils_backend_required": true,   "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER" } ,
+  "nfl_incremental_embedded_synthetic": {
+    "status": "PASS",
+    "spread_path_exercised": true,
+    "totals_path_exercised": true,
+    "false_incremental_guard": "PASS_BASE_CALIBRATION_NO_PT"
+  },
+  "ncaaf_research_self_test": {   "status": "PASS",   "source_tag": "ncaaf-research-v2.19.0-pt-incremental-residual-20261007",   "families": [     "MARKET_MICROSTRUCTURE",     "RUN_PASS_MATCHUP"   ],   "qvalues": [     0.03,     0.06,     0.20000000000000004   ],   "american_unit_profit_test": [     2.0,     0.5   ],   "h2h_price_gate": "OBSERVED_TEAM_AND_OPPONENT_ML_ONLY",   "confirmation_gate": "BOTH_2024_AND_2025",   "live_authority_policy": "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005",   "live_min_confirmation_n": 60,   "live_min_confirmation_rate": 0.56,   "weak_confirmed_authority": false,   "strong_confirmed_authority": true,   "pt_name_safe_header_contract": true,   "pt_self_test_system_columns": {     "DOKTER": "linedokter",     "PI_RATE_BIAS": "Pi-Ratings Bias",     "KEEPER": "Keeper",     "ESPN_FPI": "lineespn",     "PIGSKIN_INDEX": "Pigskin Index"   },   "pt_fuzzy_header_rejected": true,   "pt_relay_csv_payload": true,   "pt_relay_named_markdown": true,   "pt_relay_https_target": true,   "pt_challenge_rejected": true,   "pt_current_merge_preserves_rematch": true,   "pt_sparse_partial_component_preservation": true,   "expert_side_bridge": true,   "expert_occurrence_reconciliation": true } ,
+  "ncaaf_incremental_synthetic": {
+    "status": "PASS",
+    "season_forward_production_v1_backbone": true,
+    "fit_2022_select_2023_validate_2024_2025": true,
+    "false_incremental_guard": "PASS_NO_PT"
+  },
+  "safety_contract": {
+    "production_authority": 0,
+    "automatic_promotion": false,
+    "year_2026_selection": false,
+    "explicit_no_pt_calibration_control": true
+  }
 }

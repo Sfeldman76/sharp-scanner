@@ -1,0 +1,69 @@
+{
+  "version": "PT_INCREMENTAL_VALUE_V2_NO_PT_UI",
+  "date": "2026-10-07",
+  "purpose": "Test whether cluster-balanced Prediction Tracker forecasts contain incremental information beyond frozen Production V1, without granting production authority.",
+  "shared_contract": {
+    "production_v1_mutated": false,
+    "production_authority": 0,
+    "automatic_promotion": false,
+    "year_2026_selection": false,
+    "correlation_policy": "ONE_CLUSTER_BALANCED_EXTERNAL_PT_FAMILY_PER_MARKET",
+    "system_context_policy": "PT plus Pathi/Big Al/Miner interactions remain in the separate PT external Miner; formal residual models exclude standalone system-state predictors so PT cannot receive false incremental credit."
+  },
+  "challengers": [
+    "BASELINE: frozen Production V1",
+    "BASE_CALIBRATION: no-PT Ridge residual recalibration control",
+    "PT_STANDALONE: cluster-balanced PT consensus fair value",
+    "SIMPLE_BLEND: constrained Production/PT convex blend",
+    "PT_RESIDUAL: Ridge residual correction with PT plus base control",
+    "PT_CONDITIONAL_RESIDUAL: Ridge residual correction with PT agreement/disagreement and dispersion interactions"
+  ],
+  "incremental_claim_rule": "A PT challenger must beat frozen Production V1 and the best no-PT calibration control on untouched validation, pass MAE/RMSE and available Brier checks, show season stability, and have positive bootstrap MAE-gain confidence intervals. Otherwise PT remains backend research/shadow only.",
+  "nfl": {
+    "fit": [
+      2021
+    ],
+    "selection": [
+      2022
+    ],
+    "validation": [
+      2023,
+      2024,
+      2025
+    ],
+    "prospective_only": [
+      2026
+    ],
+    "markets": [
+      "SPREADS",
+      "TOTALS"
+    ],
+    "engine": "V3.13.0"
+  },
+  "ncaaf": {
+    "fit": [
+      2022
+    ],
+    "selection": [
+      2023
+    ],
+    "validation": [
+      2024,
+      2025
+    ],
+    "prospective_only": [
+      2026
+    ],
+    "markets": [
+      "SPREADS"
+    ],
+    "totals_status": "NO_NCAAF_PT_TOTAL_FEED",
+    "research": "V2.19.0"
+  },
+  "ui": {
+    "pt_fields_visible": false,
+    "policy": "PT_BACKEND_ONLY",
+    "dashboard_remove_patch_included": true,
+    "backend_research_preserved": true
+  }
+}

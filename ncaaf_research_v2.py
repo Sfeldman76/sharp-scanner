@@ -33,8 +33,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.18.3-current-external-consensus-ui-20261007"
-NCAAF_RESEARCH_V2_VERSION = "2.18.3"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.19.0-pt-incremental-residual-20261007"
+NCAAF_RESEARCH_V2_VERSION = "2.19.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -1503,6 +1503,170 @@ def _pt_research_metrics(g: pd.DataFrame) -> dict[str,Any]:
     if cp.any(): pp.update({"core_n":int(cp.sum()),"core_mae":_mae(actual[cp],core_margin[cp]),"core_rmse":_rmse(actual[cp],core_margin[cp]),"meta_minus_core_mae_gain":_mae(actual[cp],core_margin[cp])-_mae(actual[cp],meta[cp]),"meta_minus_core_rmse_gain":_rmse(actual[cp],core_margin[cp])-_rmse(actual[cp],meta[cp])})
     return {"status":"PASS" if pooled.any() else "NO_MATCHED_ROWS","season_metrics":rows,"pooled":pp,"authority":0,"selection_influence":0}
 
+
+# ---------------------------------------------------------------------------
+# V2.19 Prediction Tracker incremental-information / residual challenger
+# ---------------------------------------------------------------------------
+PT_INCREMENTAL_FIT_SEASON = 2022
+PT_INCREMENTAL_SELECTION_SEASON = 2023
+PT_INCREMENTAL_VALIDATION_SEASONS = (2024, 2025)
+PT_INCREMENTAL_RIDGE_ALPHAS = (1.0, 10.0, 50.0, 100.0)
+PT_INCREMENTAL_BLEND_WEIGHTS = (0.0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.65, 0.80, 1.0)
+
+
+def _ptiv_empirical_prob(edge, residual_pool):
+    e=np.asarray(edge,float); r=np.asarray(residual_pool,float); r=r[np.isfinite(r)]
+    out=np.full(len(e),np.nan)
+    if len(r)<50: return out
+    rs=np.sort(r); ok=np.isfinite(e); ix=np.searchsorted(rs,-e[ok],side="right")
+    out[ok]=(len(rs)-ix)/float(len(rs)); eps=0.5/(len(rs)+1.0); out[ok]=np.clip(out[ok],eps,1-eps)
+    return out
+
+
+def _ptiv_binary_metrics(y,p):
+    y=np.asarray(y,float); p=np.asarray(p,float); m=np.isfinite(y)&np.isfinite(p)
+    if not m.any(): return {"n":0,"brier":None,"logloss":None}
+    yy=y[m]; pp=np.clip(p[m],1e-6,1-1e-6)
+    return {"n":int(len(yy)),"brier":float(np.mean((pp-yy)**2)),"logloss":float(-np.mean(yy*np.log(pp)+(1-yy)*np.log(1-pp)))}
+
+
+def _ptiv_metric_row(actual,pred,market,residual_pool):
+    actual=np.asarray(actual,float); pred=np.asarray(pred,float); market=np.asarray(market,float)
+    ok=np.isfinite(actual)&np.isfinite(pred)&np.isfinite(market)
+    if not ok.any(): return {"n":0,"mae":None,"rmse":None,"brier":None,"logloss":None,"direction_hit":None}
+    edge=pred-market; settle=actual-market; nonpush=ok&~np.isclose(settle,0.0,atol=1e-9)
+    y=np.where(settle>0,1.0,np.where(settle<0,0.0,np.nan)); prob=_ptiv_empirical_prob(edge,residual_pool); bm=_ptiv_binary_metrics(y[nonpush],prob[nonpush])
+    dm=nonpush&~np.isclose(edge,0.0,atol=1e-9); hit=float(np.mean(np.sign(edge[dm])==np.sign(settle[dm]))) if dm.any() else np.nan
+    return {"n":int(ok.sum()),"mae":_mae(actual[ok],pred[ok]),"rmse":_rmse(actual[ok],pred[ok]),"brier":bm.get("brier"),"logloss":bm.get("logloss"),"direction_hit":hit}
+
+
+def _ptiv_bootstrap_gain(y,base,pred,reps=800,seed=20261007):
+    y=np.asarray(y,float); b=np.asarray(base,float); p=np.asarray(pred,float); m=np.isfinite(y)&np.isfinite(b)&np.isfinite(p)
+    diff=np.abs(y[m]-b[m])-np.abs(y[m]-p[m])
+    if len(diff)<30: return {"n":int(len(diff)),"mean_mae_gain":None,"ci95":[None,None]}
+    rng=np.random.default_rng(seed); n=len(diff); vals=np.empty(reps,float)
+    for i in range(reps): vals[i]=float(np.mean(diff[rng.integers(0,n,n)]))
+    return {"n":n,"mean_mae_gain":float(np.mean(diff)),"ci95":[float(np.percentile(vals,2.5)),float(np.percentile(vals,97.5))]}
+
+
+def _ptiv_fit_ridge(Xtr,ytr,Xsc,alpha):
+    from sklearn.impute import SimpleImputer
+    from sklearn.linear_model import Ridge
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+    pipe=Pipeline([("impute",SimpleImputer(strategy="median")),("scale",StandardScaler()),("ridge",Ridge(alpha=float(alpha)))])
+    pipe.fit(Xtr,ytr); return np.asarray(pipe.predict(Xsc),float),pipe
+
+
+def _ptiv_select_alpha(X,resid,seasons,cols):
+    tr=(seasons==PT_INCREMENTAL_FIT_SEASON)&np.isfinite(resid); va=(seasons==PT_INCREMENTAL_SELECTION_SEASON)&np.isfinite(resid)
+    if tr.sum()<80 or va.sum()<40: return 50.0,{"status":"FALLBACK_FIXED_ALPHA","train_n":int(tr.sum()),"selection_n":int(va.sum())}
+    grid=[]
+    for a in PT_INCREMENTAL_RIDGE_ALPHAS:
+        try:
+            q,_=_ptiv_fit_ridge(X.loc[tr,cols],resid[tr],X.loc[va,cols],a); score=float(np.mean(np.abs(resid[va]-q))); grid.append({"alpha":float(a),"selection_residual_mae":score})
+        except Exception as exc: grid.append({"alpha":float(a),"selection_residual_mae":None,"error":f"{type(exc).__name__}:{exc}"})
+    good=[z for z in grid if z.get("selection_residual_mae") is not None]
+    if not good: return 50.0,{"status":"FALLBACK_FIXED_ALPHA","grid":grid}
+    best=min(good,key=lambda z:(z["selection_residual_mae"],z["alpha"])); return float(best["alpha"]),{"status":"DISCOVERY_FORWARD_SELECTED","grid":grid,"selected_alpha":float(best["alpha"])}
+
+
+def _ptiv_production_v1_oof(games,seasons,dashboard_module,production_module,log_func=print):
+    if production_module is None: return np.full(len(games),np.nan),{"status":"PRODUCTION_MODULE_UNAVAILABLE"}
+    sp=list(getattr(production_module,"PROD_SPREAD_FEATURES",()) or ()); tt=list(getattr(production_module,"PROD_TOTAL_FEATURES",()) or ())
+    if not sp or any(c not in games.columns for c in sp): return np.full(len(games),np.nan),{"status":"FIXED_FEATURES_MISSING","missing":[c for c in sp if c not in games.columns]}
+    oof=np.full(len(games),np.nan); by={}; lw=float(getattr(production_module,"PROD_LINEAR_WEIGHT",0.75))
+    for sy in sorted({int(x) for x in seasons[np.isfinite(seasons)] if int(x)<=2025}):
+        tr=np.isfinite(seasons)&(seasons<float(sy)); va=np.isfinite(seasons)&(seasons==float(sy))
+        if tr.sum()<500 or va.sum()<50: continue
+        try:
+            mm,_=dashboard_module._ncaaf_stat_fit_models_for_rows(games,sp,tt,tr,target_mode="MARKET_ERROR_RESIDUAL")
+            edge=dashboard_module._ncaaf_stat_blend_predict(mm,games.loc[va,sp],lw)
+            market=pd.to_numeric(games.loc[va,"Market_Open_Margin"],errors="coerce").to_numpy(float)
+            oof[np.where(va)[0]]=np.where(np.isfinite(market),market+edge,np.nan); by[str(sy)]={"train_n":int(tr.sum()),"score_n":int(va.sum())}
+        except Exception as exc: by[str(sy)]={"status":"ERROR","error":f"{type(exc).__name__}:{exc}"}
+    return oof,{"status":"PASS" if np.isfinite(oof).any() else "NO_OOF","feature_cols":sp,"linear_weight":lw,"by_season":by,"contract":"EXACT_NCAAF_PRODUCTION_V1_FIXED_SPREAD_FEATURES_SEASON_FORWARD"}
+
+
+def run_pt_incremental_value_research(*,games,miner_games,seasons,dashboard_module,production_module=None,log_func=print):
+    """Forecast-encompassing test: does PT add information after frozen Production V1?
+
+    BASE_CALIBRATION is an explicit no-PT residual control. PT is therefore not
+    credited for gains that can be obtained by simply recalibrating Production V1.
+    Pathi/Big Al remain in the separate System Miner for interaction discovery and
+    are used here only for attribution slices, not as residual-model predictors.
+    """
+    if games is None or getattr(games,"empty",True) or miner_games is None or getattr(miner_games,"empty",True):
+        return {"status":"CACHE_UNAVAILABLE","production_authority":0}
+    if len(games)!=len(miner_games) or len(seasons)!=len(games): raise RuntimeError("NCAAF_PT_INCREMENTAL_ALIGNMENT_FAIL")
+    if np.nanmax(seasons)>2025: raise RuntimeError("NCAAF_PT_INCREMENTAL_2026_LEAK")
+    base,base_diag=_ptiv_production_v1_oof(games,seasons,dashboard_module,production_module,log_func=log_func)
+    mg=miner_games.reset_index(drop=True); g=games.reset_index(drop=True)
+    edge_col=next((c for c in ("_V2182_PT_EXMETA_CLUSTER_MEDIAN_EDGE_POINTS","_V218_PTIDX_CLUSTER_MEDIAN_EDGE_POINTS") if c in mg.columns),None)
+    count_col=next((c for c in ("_V2182_PT_EXMETA_CLUSTER_COUNT","_V218_PTIDX_CLUSTER_COUNT") if c in mg.columns),None)
+    disp_col=next((c for c in ("_V2182_PT_EXMETA_STD","_V218_PTIDX_STD") if c in mg.columns),None)
+    agree_col=next((c for c in ("_V2182_PT_EXMETA_CLUSTER_TEAM_AGREE_FRAC","_V218_PTIDX_CLUSTER_TEAM_AGREE_FRAC") if c in mg.columns),None)
+    if not edge_col or not count_col:
+        return {"status":"PT_CONSENSUS_FIELDS_UNAVAILABLE","base_oof":base_diag,"production_authority":0}
+    actual=pd.to_numeric(g.get("Actual_Margin"),errors="coerce").to_numpy(float)
+    market=pd.to_numeric(g.get("Market_Open_Margin"),errors="coerce").to_numpy(float) if "Market_Open_Margin" in g.columns else -pd.to_numeric(g.get("Consensus_Open_Spread"),errors="coerce").to_numpy(float)
+    pt_edge=pd.to_numeric(mg.get(edge_col),errors="coerce").to_numpy(float); pt_fair=market+pt_edge; base_edge=base-market; gap=pt_fair-base
+    count=pd.to_numeric(mg.get(count_col),errors="coerce").to_numpy(float); disp=pd.to_numeric(mg.get(disp_col,pd.Series(np.nan,index=mg.index)),errors="coerce").to_numpy(float); agree=pd.to_numeric(mg.get(agree_col,pd.Series(np.nan,index=mg.index)),errors="coerce").to_numpy(float)
+    same=np.where(np.isfinite(pt_edge)&np.isfinite(base_edge)&(np.abs(pt_edge)>1e-9)&(np.abs(base_edge)>1e-9),(np.sign(pt_edge)==np.sign(base_edge)).astype(float),0.0)
+    # Expert systems are attribution-only here. Their interaction mining remains in
+    # the independent external PT Miner lane, preventing false PT incremental credit.
+    pathi_cols=[c for c in mg.columns if str(c).startswith("Pathi_")]; bigal_cols=[c for c in mg.columns if str(c).startswith("BigAl_")]
+    pathi=np.zeros(len(mg),float); bigal=np.zeros(len(mg),float)
+    if pathi_cols: pathi=np.nansum(np.column_stack([pd.to_numeric(mg[c],errors="coerce").fillna(0).to_numpy(float) for c in pathi_cols]),axis=1)
+    if bigal_cols: bigal=np.nansum(np.column_stack([pd.to_numeric(mg[c],errors="coerce").fillna(0).to_numpy(float) for c in bigal_cols]),axis=1)
+    X=pd.DataFrame({
+        "base_edge":base_edge,"pt_edge":pt_edge,"pt_dispersion":disp,"pt_cluster_count":count,"pt_positive_frac":agree,
+        "abs_pt_edge":np.abs(pt_edge),"abs_base_edge":np.abs(base_edge),"abs_gap":np.abs(gap),"same_side":same,"edge_product":pt_edge*base_edge,
+    })
+    ishome=pd.to_numeric(g.get("Is_Home",pd.Series(np.nan,index=g.index)),errors="coerce").to_numpy(float); physical=(ishome==1) if np.isfinite(ishome).any() else np.ones(len(g),bool)
+    valid=physical&np.isfinite(actual)&np.isfinite(base)&np.isfinite(pt_fair)&(count>=PT_EXTERNAL_CONSENSUS_MIN_CLUSTERS)
+    fit=valid&(seasons==PT_INCREMENTAL_FIT_SEASON); sel=valid&(seasons==PT_INCREMENTAL_SELECTION_SEASON); val=valid&np.isin(seasons,PT_INCREMENTAL_VALIDATION_SEASONS)
+    if fit.sum()<80 or sel.sum()<40 or val.sum()<100:
+        return {"status":"INSUFFICIENT_MATCHED_ROWS","fit_n":int(fit.sum()),"selection_n":int(sel.sum()),"validation_n":int(val.sum()),"base_oof":base_diag,"production_authority":0}
+    resid=actual-base
+    control=["base_edge"]
+    basic=control+["pt_edge","pt_dispersion","pt_cluster_count","pt_positive_frac"]
+    conditional=basic+["abs_pt_edge","abs_base_edge","abs_gap","same_side","edge_product"]
+    a0,a0diag=_ptiv_select_alpha(X,resid,seasons,control); ab,abdiag=_ptiv_select_alpha(X,resid,seasons,basic); ac,acdiag=_ptiv_select_alpha(X,resid,seasons,conditional)
+    blends=[]
+    for w in PT_INCREMENTAL_BLEND_WEIGHTS:
+        p=base+float(w)*(pt_fair-base); blends.append({"weight":float(w),"selection_mae":_mae(actual[sel],p[sel])})
+    bw=float(min(blends,key=lambda z:(z["selection_mae"],z["weight"]))["weight"]); pblend=base+bw*(pt_fair-base)
+    fit_sel=valid&np.isin(seasons,(PT_INCREMENTAL_FIT_SEASON,PT_INCREMENTAL_SELECTION_SEASON)); pctl=base.copy(); pb=base.copy(); pc=base.copy()
+    q0,_=_ptiv_fit_ridge(X.loc[fit_sel,control],resid[fit_sel],X.loc[valid,control],a0); pctl[valid]=base[valid]+q0
+    qb,_=_ptiv_fit_ridge(X.loc[fit_sel,basic],resid[fit_sel],X.loc[valid,basic],ab); pb[valid]=base[valid]+qb
+    qc,_=_ptiv_fit_ridge(X.loc[fit_sel,conditional],resid[fit_sel],X.loc[valid,conditional],ac); pc[valid]=base[valid]+qc
+    def sel_mae(cols,a):
+        q,_=_ptiv_fit_ridge(X.loc[fit,cols],resid[fit],X.loc[sel,cols],a); return _mae(actual[sel],base[sel]+q)
+    scores={"BASELINE":_mae(actual[sel],base[sel]),"BASE_CALIBRATION":sel_mae(control,a0),"SIMPLE_BLEND":_mae(actual[sel],pblend[sel]),"PT_RESIDUAL":sel_mae(basic,ab),"PT_CONDITIONAL_RESIDUAL":sel_mae(conditional,ac)}
+    no_pt_best=min(("BASELINE","BASE_CALIBRATION"),key=lambda k:scores[k]); pt_candidates=["PT_RESIDUAL","PT_CONDITIONAL_RESIDUAL"]
+    if bw>0: pt_candidates.append("SIMPLE_BLEND")
+    pt_best=min(pt_candidates,key=lambda k:scores[k])
+    pt_selected=bool(scores[pt_best]+0.05<scores["BASELINE"] and scores[pt_best]+0.025<scores[no_pt_best])
+    selected=pt_best if pt_selected else ("BASE_CALIBRATION_NO_PT" if no_pt_best=="BASE_CALIBRATION" and scores["BASE_CALIBRATION"]+0.025<scores["BASELINE"] else "BASELINE_NO_PT")
+    preds={"BASELINE":base,"BASE_CALIBRATION":pctl,"PT_STANDALONE":pt_fair,"SIMPLE_BLEND":pblend,"PT_RESIDUAL":pb,"PT_CONDITIONAL_RESIDUAL":pc}; metrics={}; by={}
+    for name,p in preds.items():
+        pool=(actual-p)[fit_sel&np.isfinite(actual)&np.isfinite(p)]; metrics[name]={"selection":_ptiv_metric_row(actual[sel],p[sel],market[sel],pool),"validation_2024_2025":_ptiv_metric_row(actual[val],p[val],market[val],pool)}; by[name]={str(sy):_ptiv_metric_row(actual[valid&(seasons==sy)],p[valid&(seasons==sy)],market[valid&(seasons==sy)],pool) for sy in PT_INCREMENTAL_VALIDATION_SEASONS}
+    selected_key="BASE_CALIBRATION" if selected=="BASE_CALIBRATION_NO_PT" else ("BASELINE" if selected=="BASELINE_NO_PT" else selected); sp=preds[selected_key]
+    control_key=min(("BASELINE","BASE_CALIBRATION"),key=lambda k:metrics[k]["validation_2024_2025"].get("mae") if metrics[k]["validation_2024_2025"].get("mae") is not None else 1e9); cp=preds[control_key]
+    boot_frozen=_ptiv_bootstrap_gain(actual[val],base[val],sp[val]); boot_control=_ptiv_bootstrap_gain(actual[val],cp[val],sp[val])
+    pos_frozen=sum(1 for sy in PT_INCREMENTAL_VALIDATION_SEASONS if by["BASELINE"][str(sy)].get("mae") is not None and by[selected_key][str(sy)].get("mae") is not None and by["BASELINE"][str(sy)]["mae"]-by[selected_key][str(sy)]["mae"]>0)
+    pos_control=sum(1 for sy in PT_INCREMENTAL_VALIDATION_SEASONS if by[control_key][str(sy)].get("mae") is not None and by[selected_key][str(sy)].get("mae") is not None and by[control_key][str(sy)]["mae"]-by[selected_key][str(sy)]["mae"]>0)
+    bm=metrics["BASELINE"]["validation_2024_2025"]; cm=metrics[control_key]["validation_2024_2025"]; sm=metrics[selected_key]["validation_2024_2025"]
+    selected_uses_pt=selected in {"SIMPLE_BLEND","PT_RESIDUAL","PT_CONDITIONAL_RESIDUAL"}
+    strict=bool(selected_uses_pt and bm.get("mae") is not None and cm.get("mae") is not None and sm.get("mae") is not None and bm["mae"]-sm["mae"]>=0.05 and cm["mae"]-sm["mae"]>=0.025 and bm["rmse"]-sm["rmse"]>=0 and cm["rmse"]-sm["rmse"]>=0 and (bm.get("brier") is None or sm.get("brier") is None or sm["brier"]<=bm["brier"]) and (cm.get("brier") is None or sm.get("brier") is None or sm["brier"]<=cm["brier"]) and pos_frozen==len(PT_INCREMENTAL_VALIDATION_SEASONS) and pos_control==len(PT_INCREMENTAL_VALIDATION_SEASONS) and boot_frozen.get("ci95",[None])[0] is not None and boot_frozen["ci95"][0]>0 and boot_control.get("ci95",[None])[0] is not None and boot_control["ci95"][0]>0)
+    disp_cut=float(np.nanmedian(disp[fit_sel])); regimes={"CORE_PT_SAME_SIDE":same>0.5,"CORE_PT_CONFLICT":(same<0.5)&(np.abs(base_edge)>1)&(np.abs(pt_edge)>1),"PT_EDGE_3_PLUS":np.abs(pt_edge)>=3,"CORE_PT_GAP_4_PLUS":np.abs(gap)>=4,"PT_HIGH_DISPERSION":disp>=disp_cut,"PATHI_ACTIVE":pathi>=1,"BIGAL_ACTIVE":bigal>=1}
+    attr={}; rp=pc
+    for name,mask in regimes.items():
+        mm=val&np.asarray(mask,bool); bmae=_mae(actual[mm],base[mm]); c0=_mae(actual[mm],pctl[mm]); cmae=_mae(actual[mm],rp[mm]); attr[name]={"n":int(mm.sum()),"baseline_mae":bmae,"base_calibration_mae":c0,"conditional_pt_mae":cmae,"pt_gain_vs_frozen":(bmae-cmae if np.isfinite(bmae) and np.isfinite(cmae) else None),"pt_gain_vs_calibration":(c0-cmae if np.isfinite(c0) and np.isfinite(cmae) else None)}
+    out={"status":"PASS","benchmark":"NCAAF_PRODUCTION_V1_FIXED_SPREAD_BACKBONE_SEASON_FORWARD","fit_season":PT_INCREMENTAL_FIT_SEASON,"selection_season":PT_INCREMENTAL_SELECTION_SEASON,"validation_seasons":list(PT_INCREMENTAL_VALIDATION_SEASONS),"fit_n":int(fit.sum()),"selection_n":int(sel.sum()),"validation_n":int(val.sum()),"pt_edge_field":edge_col,"pt_cluster_count_field":count_col,"base_oof":base_diag,"forecast_encompassing_control":"BASE_CALIBRATION_NO_PT","blend_selection_grid":blends,"selected_blend_weight":bw,"ridge_control":a0diag,"ridge_basic":abdiag,"ridge_conditional":acdiag,"selection_scores_mae":scores,"selection_best_no_pt":no_pt_best,"selection_best_pt":pt_best,"discovery_selected_challenger":selected,"metrics":metrics,"validation_by_season":by,"selected_validation_mae_bootstrap_gain_vs_frozen":boot_frozen,"selected_validation_mae_bootstrap_gain_vs_no_pt_control":boot_control,"positive_validation_seasons_vs_frozen":int(pos_frozen),"positive_validation_seasons_vs_no_pt_control":int(pos_control),"validation_best_no_pt_control":control_key,"strict_incremental_signal":strict,"conditional_attribution":attr,"feature_contract":{"control":control,"basic":basic,"conditional":conditional,"expert_systems":"ATTRIBUTION_ONLY_HERE__INTERACTIONS_TESTED_IN_SEPARATE_PT_EXTERNAL_MINER"},"totals_status":"NO_NCAAF_PT_TOTAL_FEED","production_authority":0,"automatic_promotion":False,"year_2026_queried":False}
+    log_func("[NCAAF-PT-INCREMENTAL] "+json.dumps({"status":out["status"],"selected":selected,"strict_incremental_signal":strict,"fit_n":out["fit_n"],"selection_n":out["selection_n"],"validation_n":out["validation_n"],"baseline_validation_mae":bm.get("mae"),"no_pt_control":control_key,"no_pt_control_validation_mae":cm.get("mae"),"selected_validation_mae":sm.get("mae"),"mae_gain_vs_frozen":None if bm.get("mae") is None or sm.get("mae") is None else bm["mae"]-sm["mae"],"mae_gain_vs_no_pt_control":None if cm.get("mae") is None or sm.get("mae") is None else cm["mae"]-sm["mae"],"bootstrap_vs_frozen":boot_frozen.get("ci95"),"bootstrap_vs_control":boot_control.get("ci95"),"production_authority":0,"year_2026_queried":False},sort_keys=True,default=str))
+    return out
 
 def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client=None, bucket_name="sharp-models", include_history=True, include_current=True, force=False, log_func=print) -> dict[str,Any]:
     """Read validated Prediction Tracker GCS artifacts and attach research fields.
@@ -3812,7 +3976,7 @@ def _report_without_models(bundle: dict[str,Any]) -> dict[str,Any]:
     return _json_safe({k:v for k,v in bundle.items() if k!="_internal"})
 
 
-def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="sharp-models", storage_client=None,
+def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_module=None, bucket_name="sharp-models", storage_client=None,
                           log_func=print, hard_fail=True) -> dict[str,Any]:
     try:
         # Standalone-safe: ensure the automatic external-rating bridge has had a
@@ -3849,16 +4013,17 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
                                 threshold_neighborhood=miner_threshold_neighborhood,log_func=log_func)
         prospective=_prospective_shadow(miner_games.reset_index(drop=True),seasons,miners,dashboard_module=dashboard_module,log_func=log_func)
         market_audit=_market_rich_audit(g,utils_module)
+        pt_incremental=run_pt_incremental_value_research(games=g,miner_games=mg,seasons=sy,dashboard_module=dashboard_module,production_module=production_module,log_func=log_func)
         intelligence_bridge=(getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}).get("miner_intelligence_bridge") or {"status":"NOT_AVAILABLE","production_authority":0,"selection_influence":0}
         report={"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG,"version":NCAAF_RESEARCH_V2_VERSION,"created_utc":_now(),
                 "status":"NCAAF_RESEARCH_V2_COMPLETE","production_authority":0,"production_contract_mutated":False,
                 "benchmark":"FROZEN_NCAAF_PRODUCTION_V1","discovery_max_season":DISCOVERY_MAX_SEASON,"confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"system_miner_v3":miners,
-                "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,
+                "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,
                 "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False},
-                "next_step":"KEEP PRODUCTION V1 FROZEN; PRESERVE LEGACY MINER; LET THE SEPARATE EXTERNAL PREDICTOR BEHAVIOR LANE LEARN FOLLOW/FADE/EDGE/ROLE BEHAVIOR AND TEST ONE-EXTERNAL-FAMILY INTERACTIONS WITH PATHI + BIG AL + OOF CORE/SPECIALISTS; 2026 REMAINS PROSPECTIVE ONLY"}
+                "next_step":"KEEP PRODUCTION V1 FROZEN; USE PT INCREMENTAL-VALUE LANE TO TEST CONSTRAINED BLEND VS RESIDUAL VS CONDITIONAL RESIDUAL AGAINST THE FIXED PRODUCTION BACKBONE; PRESERVE LEGACY/EXTERNAL MINERS AS EXPLANATORY RESEARCH; 2026 REMAINS PROSPECTIVE ONLY"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
-        bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"external_rating_metamodel":external_ratings,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
+        bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
         if storage_client is None:
             from google.cloud import storage
             storage_client=storage.Client()
@@ -3870,7 +4035,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, bucket_name="s
         report["artifact"]={"current_report":f"gs://{bucket_name}/{REPORT_CURRENT_BLOB}","current_bundle":f"gs://{bucket_name}/{BUNDLE_CURRENT_BLOB}","history_report":f"gs://{bucket_name}/{hist}","sha256":sha}
         _strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if _miner_live_authority_eligible(_m))
         _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_","META_PT_","PTIDX_","PT_ALL_","PT_CLUSTER_","PT_TRACKER_")) for c in (_m.get("representative_conditions") or [])))
-        log_func(f"[NCAAF-RV25-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
+        log_func(f"[NCAAF-RV219-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
         return report
     except Exception as exc:
         log_func(f"[NCAAF-RV2-FAIL] {type(exc).__name__}: {exc}")

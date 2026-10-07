@@ -179,7 +179,7 @@ def main():
     if HEADLESS:
         install_streamlit_shim(log_func)
 
-    # NFL Heavy Research V2.11 / Engine V3.11 — evidence lifecycle retention + immutable provenance hardening.
+    # NFL Heavy Research / Engine V3.13 — V3.12 PT external families + incremental-value residual challenger.
     # Research-only: frozen CORE remains the fair-value anchor. STAT/PBP/context learn
     # residual corrections; SYSTEM/STAT/PBP become selective trust lanes; a partially pooled
     # distribution is a challenger; actual price is required for live EV. 2026 stays sealed.
@@ -196,17 +196,18 @@ def main():
         _ledger3 = _load_nfl_heavy_exact("nfl_prospective_ledger_v3", "nfl-prospective-ledger-v3-v1.9.4-edge-gate-shadow-20261001")
         _research = _load_nfl_heavy_exact("nfl_research_engine_v2", "nfl-research-engine-v1.9.4-edge-gate-manager-20261001")
         _systems = _load_nfl_heavy_exact("nfl_system_lab_v3", "nfl-system-lab-v3.12.0-prediction-tracker-external-family-20261007")
+        _ptinc = _load_nfl_heavy_exact("nfl_pt_incremental_v1", "nfl-pt-incremental-v1.1-encompassing-control-residual-20261007")
         _pbpdiag = _load_nfl_heavy_exact("nfl_pbp_attribution_v1", "nfl-pbp-attribution-v1-research-v2.0.2-frozen-core2-20261001")
         _heavy = _load_nfl_heavy_exact("nfl_heavy_research_v31", "nfl-heavy-research-v2.11.2-source-confluence-attribution-20261004")
 
-        pw.emit("audit", f"[NFL-HEAVY-V312] Start run={run_id}; frozen V29 Spread 0.575 benchmark + selective trust + rules index + Big Al 6 coverage + price-aware EV; production mutation forbidden; 2026 sealed", pct=0.03)
+        pw.emit("audit", f"[NFL-HEAVY-V313] Start run={run_id}; frozen V29 Spread 0.575 benchmark + selective trust + rules index + Big Al 6 coverage + price-aware EV; production mutation forbidden; 2026 sealed", pct=0.03)
         try:
             _bq = bigquery.Client(project="sharplogger")
             _rcontract.assert_contract()
             _syscontract.assert_contract()
             _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
             if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
-                raise RuntimeError("[NFL-HEAVY-V312-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
+                raise RuntimeError("[NFL-HEAVY-V313-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
             _health = _ledger3.ledger_health_check(_bq, service_identity_hint="sharp-train-sa@sharplogger.iam.gserviceaccount.com")
 
             pw.emit("core_stat", "Audit PASS; run protected CORE/STAT/residual challenger research", pct=0.16)
@@ -215,13 +216,26 @@ def main():
                 audit_report=_audit_report, ledger_health=_health, log_func=log_func,
             )
 
-            pw.emit("systems", "CORE/STAT complete; run System Miner V3.11.0 Expert/System Atom Expansion + exact Pathi/Big Al occurrence-ledger bridge, horizon-symmetric 1/2/3-game sequences/magnitude/opponent symmetry/team memory, permanent discovery-evidence lifecycle, mechanism-family collapse, rules index and coverage audit; new expert-bridge mechanisms shadow-only", pct=0.36)
+            pw.emit("systems", "CORE/STAT complete; run System Miner V3.12 legacy + separate Prediction Tracker external-family lanes", pct=0.34)
             _system_report = _systems.run_nfl_system_lab_v3(
                 bq_client=_bq, storage_client=gcs, bucket_name=bucket,
                 audit_report=_audit_report, log_func=log_func,
             )
 
-            pw.emit("pbp", "Systems complete; run frozen PBP attribution/confirmation diagnostic", pct=0.54)
+            # V3.13: formal incremental-information test. This is separate from the
+            # PT System Miner lane: frozen Production V1 is the control; simple blend,
+            # residual, and conditional-residual challengers are selected pre-2023 and
+            # validated on 2023-2025. No 2026 query and no automatic promotion.
+            pw.emit("pt_incremental", "Systems complete; test PT incremental value vs frozen Production V1", pct=0.48)
+            _pt_incremental = _ptinc.run_nfl_pt_incremental_v1(
+                bq_client=_bq, storage_client=gcs, bucket_name=bucket,
+                system_report=_system_report, log_func=log_func,
+            )
+            if not isinstance(_pt_incremental,dict) or int(_pt_incremental.get("production_authority") or 0) != 0 or bool(_pt_incremental.get("year_2026_queried")):
+                raise RuntimeError("[NFL-HEAVY-V313-HOLD] PT_INCREMENTAL_CONTRACT_FAIL")
+            _system_report["pt_incremental_value"]=_pt_incremental
+
+            pw.emit("pbp", "PT incremental test complete; run frozen PBP attribution/confirmation diagnostic", pct=0.58)
             try:
                 _pbp_report = _pbpdiag.run_nfl_pbp_attribution_v1(
                     bq_client=_bq, storage_client=gcs, bucket_name=bucket,
@@ -231,15 +245,15 @@ def main():
                 _pbp_report = {"status":"PBP_ADVANCED_DIAGNOSTIC_UNAVAILABLE","error":f"{type(_pbp_exc).__name__}:{_pbp_exc}","production_authority":0}
                 log_func("[NFL-HEAVY-V211-PBP-HOLD] "+json.dumps(_pbp_report, sort_keys=True, default=str))
 
-            pw.emit("fusion", "Run frozen 0.575 Spread benchmark + selective-trust challengers + partially pooled distribution + price-aware EV + H2H freeze fix", pct=0.68)
+            pw.emit("fusion", "Run frozen 0.575 Spread benchmark + selective-trust challengers + partially pooled distribution + price-aware EV + H2H freeze fix", pct=0.72)
             _result = _heavy.run_nfl_heavy_research(
                 bq_client=_bq, storage_client=gcs, bucket_name=bucket,
                 audit_report=_audit_report, research_report=_research_report,
                 system_report=_system_report, pbp_report=_pbp_report, log_func=log_func,
             )
             if _result.get("production_mutated") is not False or int(_result.get("production_authority") or 0) != 0:
-                raise RuntimeError("[NFL-HEAVY-V312-HOLD] RESEARCH_ROUTE_ATTEMPTED_PRODUCTION_AUTHORITY")
-            log_func("[NFL-HEAVY-V312-OPERATOR-CONTRACT] "+json.dumps({
+                raise RuntimeError("[NFL-HEAVY-V313-HOLD] RESEARCH_ROUTE_ATTEMPTED_PRODUCTION_AUTHORITY")
+            log_func("[NFL-HEAVY-V313-OPERATOR-CONTRACT] "+json.dumps({
                 "status":_result.get("status"),
                 "research_contract_sha256":_result.get("research_contract_sha256"),
                 "production_mutated":False,
@@ -270,14 +284,19 @@ def main():
                 "prediction_tracker_spread_predictors":((_system_report.get("prediction_tracker_external") or {}).get("spread_predictor_count")),
                 "prediction_tracker_total_predictors":((_system_report.get("prediction_tracker_external") or {}).get("total_predictor_count")),
                 "prediction_tracker_external_mechanisms":((_system_report.get("prediction_tracker_external") or {}).get("external_mechanism_count")),
+                "pt_incremental_status":(_pt_incremental or {}).get("status"),
+                "pt_incremental_spread_selected":(((_pt_incremental or {}).get("spread") or {}).get("discovery_selected_challenger")),
+                "pt_incremental_spread_signal":(((_pt_incremental or {}).get("spread") or {}).get("strict_incremental_signal")),
+                "pt_incremental_totals_selected":(((_pt_incremental or {}).get("totals") or {}).get("discovery_selected_challenger")),
+                "pt_incremental_totals_signal":(((_pt_incremental or {}).get("totals") or {}).get("strict_incremental_signal")),
                 "prediction_tracker_production_authority":0,
                 "spread_dormant_historical":len((((_system_report.get("miner") or {}).get("spreads") or {}).get("dormant_historical_rules") or [])),
                 "totals_dormant_historical":len((((_system_report.get("miner") or {}).get("totals") or {}).get("dormant_historical_rules") or [])),
                 "bigal6_present":"BA-NFL6" in (((_system_report.get("bigal") or {}).get("documented_close_reference") or {})),
             }, sort_keys=True, default=str))
-            pw.emit("done", "NFL Heavy Research V3.12 complete: "+str(_result.get("status")), pct=1.0)
+            pw.emit("done", "NFL Heavy Research V3.13 complete: "+str(_result.get("status")), pct=1.0)
         except Exception as exc:
-            pw.emit("error", "NFL Heavy Research V2.10 failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            pw.emit("error", "NFL Heavy Research V3.13 failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
             raise
         return
 
@@ -577,6 +596,8 @@ def main():
     _tarv1, _tarv1_path, _tarv1_sha = _load_exact_local_module("totals_atomic_refinement_v1")
     _rcv1, _rcv1_path, _rcv1_sha = _load_exact_local_module("refit_cadence_test_v1")
     _npv1, _npv1_path, _npv1_sha = _load_exact_local_module("ncaaf_production_v1")
+    _nrv22, _nrv22_path, _nrv22_sha = _load_exact_local_module("ncaaf_research_v2")
+    _nccv2, _nccv2_path, _nccv2_sha = _load_exact_local_module("ncaaf_core_challenger_v2")
 
     train_sharp_model_for_market = _wrapper.train_sharp_model_for_market
     train_timing_model_for_market = _wrapper.train_timing_model_for_market
@@ -586,6 +607,21 @@ def main():
     # then publishes only the frozen NCAAF Production V1 edge contract.  It does
     # NOT revive timing, generic AutoFS, multi-head training, or legacy artifact
     # publication.
+    # NCAAF operator workflows mirror NFL: one weekly production refresh and one
+    # protected heavy research run.  Legacy granular routes remain backend-only
+    # aliases for recovery/testing, but are intentionally hidden from the UI.
+    _ncaaf_weekly_run = bool(
+        str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_production_weekly"
+    )
+    _ncaaf_research_heavy_run = bool(
+        str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_research_heavy"
+    )
+    _ncaaf_rv22_run = bool(
+        str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_research_v2"
+    )
+    _ncaaf_core_challenger_run = bool(
+        str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_core_challenger"
+    )
     _ncaaf_prod_promote = bool(
         str(sport).upper().strip() == "NCAAF" and (
             str(os.getenv("NCAAF_PROMOTE_EDGE_V1", "0")).strip().lower() in {"1","true","yes","on"}
@@ -813,12 +849,229 @@ def main():
         f"[NCAAF-PROD-V1-DEPLOY-PREFLIGHT] PASS source_tag={_npv1_tag} "
         f"path={_npv1_path} sha={_npv1_sha[:16]} promotion_requested={_ncaaf_prod_promote}"
     )
+    _nrv22_tag = getattr(_nrv22, "NCAAF_RESEARCH_V2_SOURCE_TAG", None)
+    if _nrv22_tag != "ncaaf-research-v2.19.0-pt-incremental-residual-20261007":
+        raise RuntimeError(
+            f"[NCAAF-RV219-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv22_tag!r} "
+            f"path={str(_nrv22_path)!r} sha={_nrv22_sha[:16]}"
+        )
+    log_func(
+        f"[NCAAF-RV219-DEPLOY-PREFLIGHT] PASS source_tag={_nrv22_tag} "
+        f"path={_nrv22_path} sha={_nrv22_sha[:16]} production_authority=0"
+    )
+    log_func(
+        "[NCAAF-PT-GCS-MANUAL] mode=GCS_CSV_ONLY live_html_required=FALSE sparse_source=TRUE "
+        "missing_game_policy=NO_EXTERNAL_SIGNAL partial_component_policy=PRESERVE_AVAILABLE "
+        "meta_policy=EXACT_5_OF_5_ONLY current_external_consensus=META_SOURCE_CLUSTER_OUT_CLUSTER_BALANCED_MEDIAN_MIN8 full_index_policy=ALL_SOURCE_NATIVE_LINE_PREDICTORS_ONE_CORRELATED_FAMILY miner_policy=LEGACY_PLUS_SEPARATE_EXTERNAL_BEHAVIOR_LANE paid_proxy_required=FALSE production_authority=0"
+    )
+    _nccv2_tag = getattr(_nccv2, "SOURCE_TAG", None)
+    if _nccv2_tag != "ncaaf-core-challenger-v2.4-expert-model-atom-bridge-20261006":
+        raise RuntimeError(
+            f"[NCAAF-CORE-CHALLENGER-V2-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nccv2_tag!r} "
+            f"path={str(_nccv2_path)!r} sha={_nccv2_sha[:16]}"
+        )
+    log_func(
+        f"[NCAAF-CORE-CHALLENGER-V2-DEPLOY-PREFLIGHT] PASS source_tag={_nccv2_tag} "
+        f"path={_nccv2_path} sha={_nccv2_sha[:16]} production_authority=0 automatic_promotion=FALSE"
+    )
 
     pw.emit("start", f"Training start run_id={run_id} sport={sport} market={market}", pct=0.0)
 
     hb_stop = start_heartbeat(pw, f"[{sport}] market={market}", 45)
 
     try:
+        if _ncaaf_weekly_run:
+            # Normal NCAAF production workflow.  Reuse the explicitly published
+            # frozen Production V1 probability contract; do not refit, research,
+            # republish, retune, or promote anything.  Settle prior immutable
+            # ledger locks, then refresh the current slate from Utils/Move Master
+            # through the exact production scorer and current bounded overlays.
+            from google.cloud import bigquery as _bq
+            _bq_client=_bq.Client(project="sharplogger")
+            _contract=_npv1.load_production_contract(bucket_name=bucket,storage_client=gcs)
+            if not isinstance(_contract,dict) or not _contract.get("_artifact_sha256"):
+                raise RuntimeError(
+                    "[NCAAF-WEEKLY-HOLD] Production V1 contract is missing. "
+                    "Weekly Update cannot create or promote a production contract."
+                )
+            pw.emit("settlement","NCAAF Weekly Update: settle prior immutable production locks",pct=0.20)
+            _settle=_utils.settle_ncaaf_production_v1(client=_bq_client)
+            log_func(
+                f"[NCAAF-WEEKLY-SETTLE] status={_settle.get('status')} "
+                f"settled={int(_settle.get('settled',0) or 0)} artifact={str(_contract.get('_artifact_sha256'))[:16]}"
+            )
+            pw.emit("market","NCAAF Weekly Update: load current pregame market and refresh frozen production scoring",pct=0.50)
+            _moves=_utils.read_recent_sharp_moves(
+                hours=240,table=getattr(_utils,"DEFAULT_MOVES_VIEW","sharp_data.moves_with_features_merged"),
+                pregame_only=True,sport="NCAAF",use_bq_storage=False,
+            )
+            if _moves is None or getattr(_moves,"empty",True):
+                _refresh={"status":"NO_CURRENT_MARKET","attempted":0,"inserted":0,"scored_rows":0,"selected_markets":0}
+            else:
+                _refresh=_utils.score_and_record_ncaaf_production_v1(_moves,client=_bq_client)
+            log_func(
+                f"[NCAAF-WEEKLY-REFRESH] status={_refresh.get('status')} rows={0 if _moves is None else len(_moves)} "
+                f"scored_rows={int(_refresh.get('scored_rows',0) or 0)} selected_markets={int(_refresh.get('selected_markets',0) or 0)} "
+                f"attempted={int(_refresh.get('attempted',0) or 0)} inserted={int(_refresh.get('inserted',0) or 0)} "
+                "probability_refit=FALSE research_run=FALSE production_publish=FALSE automatic_promotion=FALSE"
+            )
+            # Surface registry availability because weekly scoring may use only
+            # already-qualified live Miner definitions; it never changes them.
+            try:
+                _rr=_nrv22.load_current_report(bucket_name=bucket,storage_client=gcs)
+                _miners=(_rr or {}).get("system_miner_v3") or {}
+                _confirmed=sum(int((v or {}).get("confirmed_mechanism_count",0) or 0) for v in _miners.values())
+                log_func(f"[NCAAF-WEEKLY-RESEARCH-REGISTRY] status={'READY' if isinstance(_rr,dict) else 'UNAVAILABLE'} confirmed_mechanisms={_confirmed} mutation=FALSE")
+            except Exception as _reg_exc:
+                log_func(f"[NCAAF-WEEKLY-RESEARCH-REGISTRY] status=UNAVAILABLE error={type(_reg_exc).__name__}:{_reg_exc} mutation=FALSE")
+            # Prediction Tracker is now a validated manual-GCS sparse source. No paid
+            # proxy/unblocker is required. Missing source games remain ordinary NCAAF games
+            # with no external-rating signal.
+            log_func("[NCAAF-PT-GCS-MANUAL] reason=WEEKLY refresh_network=FALSE missing_games_expected=TRUE authority=0")
+
+            # GCS-first model-side Prediction Tracker refresh. This only updates the research
+            # snapshot in GCS; it cannot modify production predictions/authority.
+            try:
+                _pt=_nrv22.refresh_prediction_tracker_external(
+                    dashboard_module=None,storage_client=gcs,bucket_name=bucket,
+                    include_history=False,include_current=True,force=True,log_func=log_func
+                )
+                log_func(
+                    f"[NCAAF-WEEKLY-PT-REFRESH] status={_pt.get('status')} "
+                    f"current_rows={((_pt.get('current') or {}).get('rows',0))} "
+                    f"archive_rows={((_pt.get('current') or {}).get('archive_rows',0))} "
+                    f"live_rows={((_pt.get('current') or {}).get('live_rows',0))} "
+                    f"live_full_five={((_pt.get('current') or {}).get('live_full_five_rows',0))} "
+                    f"live_external_consensus_ready={((_pt.get('current') or {}).get('live_external_consensus_ready_rows',0))} "
+                    f"external_consensus_contract={((_pt.get('current') or {}).get('external_consensus_contract',''))} "
+                    "production_mutation=FALSE authority=0"
+                )
+            except Exception as _pt_exc:
+                log_func(f"[NCAAF-WEEKLY-PT-REFRESH] status=UNAVAILABLE error={type(_pt_exc).__name__}:{_pt_exc} production_mutation=FALSE authority=0")
+            pw.emit("done","NCAAF Weekly Production Update complete ✅",pct=1.0)
+            return
+
+        if _ncaaf_research_heavy_run:
+            # One protected research workflow, analogous to NFL Heavy Research.
+            # Build the leakage-safe historical cache once, then run both the
+            # current STAT/System Miner research and the compact CORE challenger.
+            # 2026 remains sealed from discovery/confirmation and no production
+            # artifact or Bet Authority policy is mutated automatically.
+            log_func("[NCAAF-HEAVY-RUN] phase=HISTORICAL_CACHE start=TRUE production_mutation=FALSE year_2026_selection=FALSE")
+            _t0=__import__('time').perf_counter()
+            pw.emit("cache","NCAAF Heavy Research: build protected historical/OOF cache",pct=0.10)
+            _sld.fit_historical_ncaaf_core_expert("spreads",log_func=log_func)
+            _sld.fit_ncaaf_statistical_brain(log_func=log_func)
+            _cache=getattr(_sld,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}
+            _games=_cache.get("games") if isinstance(_cache,dict) else None
+            _features=_cache.get("candidate_feature_cols") if isinstance(_cache,dict) else None
+            _miner_games=_cache.get("miner_games") if isinstance(_cache,dict) else None
+            if _games is None or getattr(_games,"empty",True) or not _features:
+                raise RuntimeError("[NCAAF-HEAVY-CACHE] historical game frame/candidate features missing")
+            if _miner_games is None or getattr(_miner_games,"empty",True):
+                raise RuntimeError("[NCAAF-HEAVY-CACHE] miner_games cache missing")
+            log_func(f"[NCAAF-HEAVY-CACHE] status=PASS games={len(_games)} miner_games={len(_miner_games)} candidate_features={len(_features)}")
+
+            # V2.11 ordering is intentional: CORE challenger first publishes leakage-safe
+            # season-forward incumbent/specialist state into the research-only Miner frame.
+            # The same existing Miner then tests those states together with Pathi/Big Al.
+            pw.emit("core","NCAAF Heavy Research: build existing-feed coverage + OOF CORE/specialist Miner bridge",pct=0.40)
+            _core=_nccv2.run_ncaaf_core_challenger_v2(
+                dashboard_module=_sld,bucket_name=bucket,storage_client=gcs,log_func=log_func,hard_fail=True
+            )
+            if not isinstance(_core,dict) or _core.get("status")!="NCAAF_CORE_CHALLENGER_V2_COMPLETE":
+                raise RuntimeError(f"[NCAAF-HEAVY-RUN] core challenger failed status={getattr(_core,'get',lambda *_:None)('status')}")
+
+            pw.emit("systems","NCAAF Heavy Research: run same Miner with Pathi + Big Al + OOF CORE/specialist atoms",pct=0.72)
+            # Prediction Tracker is read only from validated GCS uploads. It is intentionally
+            # sparse: absence from PT never removes a game and partial named-system coverage
+            # remains usable as component research while META still requires exact 5-of-5.
+            log_func("[NCAAF-PT-GCS-MANUAL] reason=HEAVY refresh_network=FALSE missing_games_expected=TRUE sparse=TRUE authority=0")
+            _research=_nrv22.run_ncaaf_research_v2(
+                dashboard_module=_sld,utils_module=_utils,bucket_name=bucket,
+                storage_client=gcs,production_module=_npv1,log_func=log_func,hard_fail=True
+            )
+            if not isinstance(_research,dict) or _research.get("status")!="NCAAF_RESEARCH_V2_COMPLETE":
+                raise RuntimeError(f"[NCAAF-HEAVY-RUN] research report failed status={getattr(_research,'get',lambda *_:None)('status')}")
+            _miners=_research.get("system_miner_v3") or {}
+            _confirmed=sum(int((v or {}).get("confirmed_mechanism_count",0) or 0) for v in _miners.values())
+            _best=_core.get("best_challenger") or {}
+            _attr=_core.get("conditional_specialist_attribution") or {}
+            _attr_q=len(_attr.get("qualified_shadow_regimes") or []) if isinstance(_attr,dict) else 0
+            _ptinc_ncaaf=_research.get("pt_incremental_value") or {}
+            _t1=__import__('time').perf_counter()
+            log_func(
+                f"[NCAAF-HEAVY-RUN] status=PASS seconds={_t1-_t0:.1f} confirmed_mechanisms={_confirmed} "
+                f"best_core={_best.get('name')} core_state={_best.get('state')} core_recommendation={_core.get('recommendation')} "
+                f"conditional_specialist_shadow_qualified={_attr_q} "
+                f"pt_incremental_status={_ptinc_ncaaf.get('status')} pt_selected={_ptinc_ncaaf.get('discovery_selected_challenger')} "
+                f"pt_strict_incremental_signal={_ptinc_ncaaf.get('strict_incremental_signal')} "
+                "2026_selection_influence=0 production_mutation=FALSE automatic_promotion=FALSE"
+            )
+            pw.emit("done","NCAAF Heavy Challenger Research complete ✅",pct=1.0)
+            return
+
+        if _ncaaf_core_challenger_run:
+            # Protected NCAAF CORE challenger.  Build the same leakage-safe game frame
+            # used by Production V1, then hand only <=2025 rows to the challenger.
+            # Production V1 is never mutated and 2026 is sealed from selection/confirmation.
+            log_func("[NCAAF-CORE-CHALLENGER-RUN] phase=HISTORICAL_CACHE start=TRUE production_mutation=FALSE year_2026_selection=FALSE")
+            _t0=__import__('time').perf_counter()
+            _sld.fit_historical_ncaaf_core_expert("spreads",log_func=log_func)
+            _sld.fit_ncaaf_statistical_brain(log_func=log_func)
+            _cache=getattr(_sld,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}
+            _games=_cache.get("games") if isinstance(_cache,dict) else None
+            _features=_cache.get("candidate_feature_cols") if isinstance(_cache,dict) else None
+            if _games is None or getattr(_games,"empty",True) or not _features:
+                raise RuntimeError("[NCAAF-CORE-CHALLENGER-CACHE] historical game frame/candidate features missing")
+            log_func(f"[NCAAF-CORE-CHALLENGER-CACHE] status=PASS games={len(_games)} candidate_features={len(_features)}")
+            _report=_nccv2.run_ncaaf_core_challenger_v2(
+                dashboard_module=_sld,bucket_name=bucket,storage_client=gcs,log_func=log_func,hard_fail=True
+            )
+            if not isinstance(_report,dict) or _report.get("status")!="NCAAF_CORE_CHALLENGER_V2_COMPLETE":
+                raise RuntimeError(f"[NCAAF-CORE-CHALLENGER-RUN] report failed status={getattr(_report,'get',lambda *_:None)('status')}")
+            _t1=__import__('time').perf_counter()
+            _best=_report.get("best_challenger") or {}
+            log_func(
+                f"[NCAAF-CORE-CHALLENGER-RUN] status=PASS seconds={_t1-_t0:.1f} best={_best.get('name')} "
+                f"state={_best.get('state')} recommendation={_report.get('recommendation')} "
+                "year_2026_queried=FALSE production_mutation=FALSE automatic_promotion=FALSE"
+            )
+            pw.emit("done","NCAAF CORE Expert/Specialist Challenger Search complete ✅",pct=1.0)
+            return
+
+        if _ncaaf_rv22_run:
+            # Dedicated protected NCAAF Research V2.3 route. Build only the
+            # historical/OOF caches required by the challenger; never publish or
+            # mutate the frozen Production V1 probability/edge artifact.
+            log_func("[NCAAF-RV22-RUN] phase=HISTORICAL_CACHE start=TRUE production_mutation=FALSE")
+            _t0=__import__('time').perf_counter()
+            _sld.fit_historical_ncaaf_core_expert("spreads",log_func=log_func)
+            _sld.fit_ncaaf_statistical_brain(log_func=log_func)
+            _cache=getattr(_sld,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}
+            _games=_cache.get("games") if isinstance(_cache,dict) else None
+            _miner_games=_cache.get("miner_games") if isinstance(_cache,dict) else None
+            if _games is None or getattr(_games,"empty",True):
+                raise RuntimeError("[NCAAF-RV22-CACHE] historical research games cache missing")
+            if _miner_games is None or getattr(_miner_games,"empty",True):
+                raise RuntimeError("[NCAAF-RV22-CACHE] miner_games cache missing")
+            log_func(f"[NCAAF-RV22-CACHE] status=PASS games={len(_games)} miner_games={len(_miner_games)}")
+            _report=_nrv22.run_ncaaf_research_v2(
+                dashboard_module=_sld,utils_module=_utils,bucket_name=bucket,
+                storage_client=gcs,production_module=_npv1,log_func=log_func,hard_fail=True
+            )
+            if not isinstance(_report,dict) or _report.get("status")!="NCAAF_RESEARCH_V2_COMPLETE":
+                raise RuntimeError(f"[NCAAF-RV22-RUN] report failed status={getattr(_report,'get',lambda *_:None)('status')}")
+            _t1=__import__('time').perf_counter()
+            _miners=_report.get("system_miner_v3") or {}
+            _confirmed=sum(int((v or {}).get("confirmed_mechanism_count",0) or 0) for v in _miners.values())
+            log_func(
+                f"[NCAAF-RV22-RUN] status=PASS seconds={_t1-_t0:.1f} confirmed_mechanisms={_confirmed} "
+                "miner=V4_HORIZON_SYMMETRIC live_bridge=PUBLISHED 2026_selection_influence=0 production_mutation=FALSE"
+            )
+            pw.emit("done","NCAAF Research V2.3 complete ✅",pct=1.0)
+            return
+
         if _edge_research_only:
             # FAST RESEARCH MODE: build only the upstream historical caches that
             # the edge-research stack consumes. Do not run timing, H2H/Totals
