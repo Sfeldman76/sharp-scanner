@@ -34,8 +34,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.21.0-pt-team-alias-coverage-hardening-20261007"
-NCAAF_RESEARCH_V2_VERSION = "2.21.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.22.0-pt-final-aliases-residual-match-audit-20261008"
+NCAAF_RESEARCH_V2_VERSION = "2.22.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -1148,6 +1148,74 @@ def _pt_resolve_internal_target(raw_target: Any, valid_internal: set[str]) -> st
     return None
 
 
+def _pt_hard_external_aliases(valid_internal: set[str]) -> tuple[dict[str,str],dict[str,list[str]]]:
+    """Resolve the eight remaining Prediction Tracker historical aliases.
+
+    These are explicit source-name identities observed in the V2.21 coverage audit.
+    Each mapping still has to resolve to exactly one team key present in the current
+    NCAAF research cache; ambiguous or missing targets fail closed.
+    """
+    valid=sorted({_pt_team_key(x) for x in valid_internal if _pt_team_key(x)})
+
+    def pick(*rules):
+        hits=[]
+        for cand in valid:
+            for rule in rules:
+                if rule(cand):
+                    hits.append(cand)
+                    break
+        hits=sorted(set(hits))
+        return hits[0] if len(hits)==1 else None, hits
+
+    specs={
+        "miami ohio": (
+            lambda c: c=="miami oh redhawks",
+            lambda c: c.startswith("miami oh "),
+            lambda c: c.startswith("miami ohio "),
+        ),
+        "miami florida": (
+            lambda c: c=="miami hurricanes",
+            lambda c: c.startswith("miami fl "),
+            lambda c: c.startswith("miami florida "),
+        ),
+        "mississippi": (
+            lambda c: c=="ole mississippi rebels",
+            lambda c: c.startswith("ole miss "),
+            lambda c: c.startswith("ole mississippi "),
+        ),
+        "texas san antonio": (
+            lambda c: c.startswith("utsa "),
+            lambda c: ("texas" in c.split() and "san" in c.split() and "antonio" in c.split()),
+        ),
+        "troy state": (
+            lambda c: c.startswith("troy "),
+        ),
+        "louisiana lafayette": (
+            lambda c: c=="louisiana ragin cajuns",
+            lambda c: c.startswith("louisiana ragin "),
+            lambda c: c.startswith("louisiana lafayette "),
+        ),
+        "central florida": (
+            lambda c: c.startswith("ucf "),
+            lambda c: c.startswith("central florida "),
+        ),
+        "florida intl": (
+            lambda c: c.startswith("fiu "),
+            lambda c: c.startswith("florida international "),
+        ),
+    }
+
+    resolved={}
+    unresolved={}
+    for source,rules in specs.items():
+        target,hits=pick(*rules)
+        if target:
+            resolved[_pt_team_key(source)]=target
+        else:
+            unresolved[_pt_team_key(source)]=hits
+    return resolved,unresolved
+
+
 def _pt_load_canonical_team_aliases(dashboard_module, internal_names: Iterable[str], *, log_func=print) -> dict[str,str]:
     """Reuse canonical NCAAF identity data instead of maintaining a PT-only name map.
 
@@ -1250,6 +1318,18 @@ def _pt_load_canonical_team_aliases(dashboard_module, internal_names: Iterable[s
     for a,t in static.items():
         add(a,t)
 
+    # V2.22: explicit PT source identities discovered by the V2.21 audit.
+    # These are cache-validated exact identities, not fuzzy guesses.
+    hard_resolved,hard_unresolved=_pt_hard_external_aliases(valid)
+    for a,t in hard_resolved.items():
+        if a not in conflicts:
+            alias_map[a]=t
+    log_func(
+        f"[NCAAF-PT-HARD-ALIASES] resolved={len(hard_resolved)}/8 "
+        f"mappings={json.dumps(hard_resolved,sort_keys=True)} "
+        f"unresolved={json.dumps(hard_unresolved,sort_keys=True)} authority=0"
+    )
+
     out={k:v for k,v in alias_map.items() if v and k not in conflicts}
     log_func(
         f"[NCAAF-PT-ALIASES] status=PASS alignment_rows={len(align)} persisted_alias_rows={len(alias_rows)} "
@@ -1325,7 +1405,9 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         pd.concat([ext_source.get("home_key",pd.Series(dtype=str)),ext_source.get("away_key",pd.Series(dtype=str))],ignore_index=True),
         internal_names,alias_hints=alias_hints
     )
-    ex=ext_source.copy(); ex["home_i"]=ex["home_key"].map(emap); ex["away_i"]=ex["away_key"].map(emap)
+    ex=ext_source.copy()
+    ex["_pt_src_row_id"]=np.arange(len(ex),dtype=int)
+    ex["home_i"]=ex["home_key"].map(emap); ex["away_i"]=ex["away_key"].map(emap)
     _alias_ok=ex["home_i"].notna()&ex["away_i"].notna()
     alias_resolved_source_rows=int(_alias_ok.sum())
     source_rows=int(len(ex))
@@ -1369,7 +1451,7 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
     idx_comp={k:np.full(len(g),np.nan) for k in _idx_keys}
 
     matched=0; matched_any_component=0; full_five_matched=0; partial_matched=0
-    matched_any_index=0; matched_by_season={}
+    matched_any_index=0; matched_by_season={}; matched_source_ids=set()
 
     for i,k in enumerate(key.astype(str)):
         if not k: continue
@@ -1381,6 +1463,10 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
 
         listed[i]=1.0
         matched+=1
+        try:
+            matched_source_ids.add(int(r.get("_pt_src_row_id")))
+        except Exception:
+            pass
         _sy=int(season.iloc[i]) if pd.notna(season.iloc[i]) else None
         if _sy is not None:
             matched_by_season[_sy]=matched_by_season.get(_sy,0)+1
@@ -1653,6 +1739,47 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
     except Exception: pass
 
     no_pt=max(0,int(len(g)-matched))
+
+    # V2.22: once team identity is resolved, diagnose every remaining source row
+    # that still did not attach. This separates alias defects from pair/date defects.
+    _internal_pair_keys={str(x) for x in key.astype(str) if str(x)}
+    _internal_date_keys={
+        f"{str(k)}|{str(d)}"
+        for k,d in zip(key.astype(str),gd.astype(str))
+        if str(k) and str(d)
+    }
+    _post_alias_unmatched=ex.loc[~ex["_pt_src_row_id"].isin(matched_source_ids)].copy()
+    _residual_reason_counts={}
+    _residual_detail=[]
+    for _,_r in _post_alias_unmatched.iterrows():
+        _pk=str(_r.get("pair_key") or "")
+        _dt=str(_r.get("game_date") or "")
+        _dk=f"{_pk}|{_dt}" if _pk and _dt else ""
+        if _pk not in _internal_pair_keys:
+            _reason="PAIR_NOT_IN_INTERNAL_CACHE"
+        elif int(counts.get(_pk,0))>1 and not _dt:
+            _reason="REMATCH_MISSING_SOURCE_DATE"
+        elif int(counts.get(_pk,0))>1 and _dk not in _internal_date_keys:
+            _reason="REMATCH_DATE_MISMATCH"
+        elif int(counts.get(_pk,0))>1:
+            _reason="REMATCH_AMBIGUOUS"
+        else:
+            _reason="OTHER_KEY_MISMATCH"
+        _residual_reason_counts[_reason]=_residual_reason_counts.get(_reason,0)+1
+        if len(_residual_detail)<50:
+            _residual_detail.append({
+                "season":int(_r["season"]) if pd.notna(_r.get("season")) else None,
+                "home":str(_r.get("home_i") or _r.get("home_key") or ""),
+                "away":str(_r.get("away_i") or _r.get("away_key") or ""),
+                "date":_dt,
+                "reason":_reason,
+            })
+    log_func(
+        f"[NCAAF-PT-POST-ALIAS-UNMATCHED] rows={len(_post_alias_unmatched)} "
+        f"reasons={json.dumps(_residual_reason_counts,sort_keys=True)} "
+        f"examples={json.dumps(_residual_detail,sort_keys=True)} authority=0"
+    )
+
     _src_seasons=sorted({int(x) for x in pd.to_numeric(ext_source.get("season"),errors="coerce").dropna().tolist()})
     _eligible_internal_mask=season.isin(_src_seasons)
     _eligible_internal=int(_eligible_internal_mask.sum())
@@ -1704,6 +1831,8 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         "alias_resolved_source_rows":alias_resolved_source_rows,
         "alias_resolution_coverage":_alias_resolution_cov,
         "unresolved_source_rows":unresolved_source_rows,
+        "post_alias_unmatched_rows":int(len(_post_alias_unmatched)),
+        "post_alias_unmatched_reasons":_residual_reason_counts,
         "eligible_internal_rows":_eligible_internal,
         "eligible_internal_coverage":_eligible_internal_cov,
         "season_match_diagnostics":_season_diag,
@@ -1719,6 +1848,7 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         f"source_match_coverage={_source_match_cov:.3f} coverage_gate={_coverage_gate} "
         f"target={PT_SOURCE_MATCH_MIN_COVERAGE:.2f} goal={PT_SOURCE_MATCH_GOAL_COVERAGE:.2f} "
         f"alias_resolved={alias_resolved_source_rows}/{source_rows} alias_resolution_coverage={_alias_resolution_cov:.3f} "
+        f"post_alias_unmatched={len(_post_alias_unmatched)} "
         f"eligible_internal={_eligible_internal} eligible_internal_coverage={_eligible_internal_cov:.3f} "
         f"all_cache={len(g)} all_cache_coverage={_all_cache_cov:.3f} any_component={matched_any_component} "
         f"any_index={matched_any_index} indices={len(_idx_keys)} clusters={len(_cluster_names)} "
@@ -4306,7 +4436,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         _strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if _miner_live_authority_eligible(_m))
         _pt_strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_external_ratings_family")) and _miner_live_authority_eligible(_m))
         _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_","META_PT_","PTIDX_","PT_ALL_","PT_CLUSTER_","PT_TRACKER_")) for c in (_m.get("representative_conditions") or [])))
-        log_func(f"[NCAAF-RV221-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} pt_miner_live_authority={_pt_strong} pt_family_vote_cap=1 source_neutral_system_gate=TRUE prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
+        log_func(f"[NCAAF-RV222-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} pt_miner_live_authority={_pt_strong} pt_family_vote_cap=1 source_neutral_system_gate=TRUE prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
         return report
     except Exception as exc:
         log_func(f"[NCAAF-RV2-FAIL] {type(exc).__name__}: {exc}")
@@ -4403,6 +4533,12 @@ def self_test() -> dict[str,Any]:
     _pt_alias_hint_ok=bool(
         _alias_map_test.get("alabama")=="alabama crimson tide" and not _alias_unresolved_test
     )
+    _hard_valid={
+        "miami oh redhawks","miami hurricanes","ole mississippi rebels","utsa roadrunners",
+        "troy trojans","louisiana ragin cajuns","ucf knights","fiu panthers"
+    }
+    _hard_alias_test,_hard_alias_unresolved=_pt_hard_external_aliases(_hard_valid)
+    _pt_final_hard_aliases_ok=bool(len(_hard_alias_test)==8 and not _hard_alias_unresolved)
     _sparse_pt_ok=bool(
         _sp_diag.get("matched_rows")==1 and _sp_diag.get("partial_matched_rows")==1 and
         _sp_diag.get("full_five_matched_rows")==0 and _sp_diag.get("no_pt_rows")==1 and
@@ -4477,7 +4613,7 @@ def self_test() -> dict[str,Any]:
         "SU_SEQ3_LWL" in live_atoms and "OFF_ATS_COVER_7_PLUS" in live_atoms and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
         "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and "META_PT_EDGE_TEAM_3PLUS" in live_atoms and "META_PT_CORE_STRONG_AGREE" in live_atoms and
-        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _sparse_pt_ok and _pt_alias_hint_ok and _expert_bridge_ok and _occ_recon_ok and
+        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _sparse_pt_ok and _pt_alias_hint_ok and _pt_final_hard_aliases_ok and _expert_bridge_ok and _occ_recon_ok and
         _miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["META_PT_EDGE_TEAM_3PLUS"]}) and
         not _miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["CORE_OOF_EDGE_TEAM_2PLUS"]})
     )
@@ -4498,7 +4634,7 @@ def self_test() -> dict[str,Any]:
         "pt_name_safe_header_contract":_pt_name_safe,
         "pt_self_test_system_columns":_pt_da.get("system_columns",{}),
         "pt_fuzzy_header_rejected":_pt_dc.get("system_columns",{}).get("ESPN_FPI") is None,
-        "pt_relay_csv_payload":_relay_csv_ok,"pt_relay_named_markdown":_relay_md_ok,"pt_relay_https_target":_relay_url_ok,"pt_challenge_rejected":_challenge_rejected,"pt_current_merge_preserves_rematch":_merge_rematch_ok,"pt_sparse_partial_component_preservation":_sparse_pt_ok,"pt_canonical_alias_hint":_pt_alias_hint_ok,"expert_side_bridge":_expert_bridge_ok,"expert_occurrence_reconciliation":_occ_recon_ok,
+        "pt_relay_csv_payload":_relay_csv_ok,"pt_relay_named_markdown":_relay_md_ok,"pt_relay_https_target":_relay_url_ok,"pt_challenge_rejected":_challenge_rejected,"pt_current_merge_preserves_rematch":_merge_rematch_ok,"pt_sparse_partial_component_preservation":_sparse_pt_ok,"pt_canonical_alias_hint":_pt_alias_hint_ok,"pt_final_hard_aliases":_pt_final_hard_aliases_ok,"expert_side_bridge":_expert_bridge_ok,"expert_occurrence_reconciliation":_occ_recon_ok,
     }
 
 
