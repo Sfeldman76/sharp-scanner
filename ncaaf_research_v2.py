@@ -34,8 +34,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.20.0-pt-system-source-neutral-authority-20261007"
-NCAAF_RESEARCH_V2_VERSION = "2.20.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.21.0-pt-team-alias-coverage-hardening-20261007"
+NCAAF_RESEARCH_V2_VERSION = "2.21.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -259,6 +259,12 @@ PT_IDENTITY_HEADER_ALIASES = {
 }
 PT_HISTORY_SEASONS = tuple(range(2022, 2026))
 PT_CURRENT_SEASON = 2026
+# PT join-quality contract. The primary target is coverage of games actually
+# published by Prediction Tracker, not all internal NCAA games (the source does
+# not publish every FCS/FBS matchup). Aim for complete source-row matching and
+# treat anything below 90% as a coverage defect requiring review.
+PT_SOURCE_MATCH_MIN_COVERAGE = float(os.getenv("PT_SOURCE_MATCH_MIN_COVERAGE", "0.90"))
+PT_SOURCE_MATCH_GOAL_COVERAGE = float(os.getenv("PT_SOURCE_MATCH_GOAL_COVERAGE", "0.99"))
 # Cloud-hosted runtimes can be denied directly by the source site (HTTP 403).
 # The relay is read-only and only transports the original public source bytes/text;
 # all model identity is still validated against Prediction Tracker headers/values.
@@ -1107,12 +1113,176 @@ def _pt_merge_current_season(archive: pd.DataFrame, live: pd.DataFrame, *, log_f
     log_func(f"[NCAAF-PT-CURRENT-MERGE] status={diag['status']} archive_rows={diag['archive_rows']} live_rows={diag['live_rows']} overlap_replaced={removed} merged_rows={diag['merged_rows']} live_full_five={diag['live_full_five_rows']} authority=0")
     return merged,diag
 
-def _pt_candidate_map(external_names: Iterable[str], internal_names: Iterable[str]) -> tuple[dict[str,str],list[str]]:
+def _pt_query_df(client, sql: str) -> pd.DataFrame:
+    """Best-effort BigQuery -> DataFrame adapter used only for identity metadata."""
+    try:
+        job=client.query(sql)
+        if hasattr(job,"to_dataframe"):
+            return job.to_dataframe()
+        res=job.result() if hasattr(job,"result") else job
+        if hasattr(res,"to_dataframe"):
+            return res.to_dataframe()
+        return pd.DataFrame([dict(r.items()) for r in res])
+    except Exception:
+        return pd.DataFrame()
+
+
+def _pt_resolve_internal_target(raw_target: Any, valid_internal: set[str]) -> str | None:
+    """Resolve an identity-table target to the exact key used by the research cache."""
+    from difflib import SequenceMatcher
+    k=_pt_team_key(raw_target)
+    if not k:
+        return None
+    if k in valid_internal:
+        return k
+    kt=set(k.split())
+    pref=[c for c in valid_internal if c.startswith(k+" ") or k.startswith(c+" ")]
+    if len(pref)==1:
+        return pref[0]
+    subs=[c for c in valid_internal if kt and kt.issubset(set(c.split()))]
+    if len(subs)==1:
+        return subs[0]
+    scored=sorted(((SequenceMatcher(None,k,c).ratio(),c) for c in valid_internal),reverse=True)
+    if scored and scored[0][0]>=0.96 and (len(scored)==1 or scored[0][0]-scored[1][0]>=0.05):
+        return scored[0][1]
+    return None
+
+
+def _pt_load_canonical_team_aliases(dashboard_module, internal_names: Iterable[str], *, log_func=print) -> dict[str,str]:
+    """Reuse canonical NCAAF identity data instead of maintaining a PT-only name map.
+
+    We read season-aware alignment identities, the persisted NCAAF source alias
+    table, and already-validated historical raw source mappings. Only aliases whose
+    destination resolves uniquely to a team in the current research cache are used.
+    Conflicting aliases are discarded rather than guessed.
+    """
+    valid={_pt_team_key(x) for x in internal_names if _pt_team_key(x)}
+    if not valid or dashboard_module is None:
+        return {}
+    client=getattr(dashboard_module,"bq_client",None)
+    if client is None:
+        return {}
+    project=(getattr(dashboard_module,"GCP_PROJECT_ID",None) or getattr(dashboard_module,"PROJECT_ID",None)
+             or os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GCP_PROJECT") or "sharplogger")
+    dataset=(getattr(dashboard_module,"BQ_DATASET",None) or os.getenv("BQ_DATASET") or "sharp_data")
+    alias_map={}
+    conflicts=set()
+
+    def add(source_name: Any, target_name: Any):
+        sk=_pt_team_key(source_name)
+        target=_pt_resolve_internal_target(target_name,valid)
+        if not sk or not target:
+            return
+        if sk not in alias_map:
+            alias_map[sk]=target
+        elif alias_map[sk]!=target:
+            conflicts.add(sk)
+            alias_map[sk]=None
+
+    align=_pt_query_df(client,f"""
+      SELECT Team, Team_Norm, Canonical_Team_Name, Canonical_Team_Norm
+      FROM `{project}.{dataset}.team_sport_alignment_history`
+      WHERE UPPER(Sport)='NCAAF'
+    """)
+    for _,r in align.iterrows():
+        target=None
+        for c in ("Team_Norm","Canonical_Team_Norm","Team","Canonical_Team_Name"):
+            target=_pt_resolve_internal_target(r.get(c),valid)
+            if target:
+                break
+        if not target:
+            continue
+        for c in ("Team","Team_Norm","Canonical_Team_Name","Canonical_Team_Norm"):
+            add(r.get(c),target)
+
+    alias_rows=_pt_query_df(client,f"""
+      SELECT Source_Team_Name, Team_Norm
+      FROM `{project}.{dataset}.ncaaf_source_team_aliases`
+      WHERE Source_Team_Name IS NOT NULL AND Team_Norm IS NOT NULL
+      QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY LOWER(TRIM(Source_Team_Name))
+        ORDER BY Updated_At DESC
+      )=1
+    """)
+    for _,r in alias_rows.iterrows():
+        add(r.get("Source_Team_Name"),r.get("Team_Norm"))
+
+    raw_rows=_pt_query_df(client,f"""
+      SELECT Source_Team_Name, Team_Norm
+      FROM `{project}.{dataset}.ncaaf_historical_game_side_raw`
+      WHERE Source_Team_Name IS NOT NULL AND Team_Norm IS NOT NULL
+      QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY LOWER(TRIM(Source_Team_Name))
+        ORDER BY Season DESC, Game_Date DESC
+      )=1
+    """)
+    for _,r in raw_rows.iterrows():
+        add(r.get("Source_Team_Name"),r.get("Team_Norm"))
+
+    # Common external abbreviations. These still resolve fail-closed to a unique
+    # team in the current cache before being admitted.
+    static={
+        "app state":"appalachian state",
+        "uconn":"connecticut",
+        "umass":"massachusetts",
+        "ole miss":"mississippi",
+        "nc state":"north carolina state",
+        "pitt":"pittsburgh",
+        "fiu":"florida international",
+        "fau":"florida atlantic",
+        "utsa":"texas san antonio",
+        "utep":"texas el paso",
+        "uab":"alabama birmingham",
+        "ucf":"central florida",
+        "usf":"south florida",
+        "smu":"southern methodist",
+        "tcu":"texas christian",
+        "wku":"western kentucky",
+        "mtsu":"middle tennessee",
+        "niu":"northern illinois",
+        "la tech":"louisiana tech",
+        "ul monroe":"louisiana monroe",
+        "ul lafayette":"louisiana lafayette",
+        "miami fl":"miami florida",
+        "miami oh":"miami ohio",
+        "southern miss":"southern mississippi",
+    }
+    for a,t in static.items():
+        add(a,t)
+
+    out={k:v for k,v in alias_map.items() if v and k not in conflicts}
+    log_func(
+        f"[NCAAF-PT-ALIASES] status=PASS alignment_rows={len(align)} persisted_alias_rows={len(alias_rows)} "
+        f"historical_alias_rows={len(raw_rows)} usable_aliases={len(out)} conflicts={len(conflicts)} authority=0"
+    )
+    if conflicts:
+        log_func(
+            f"[NCAAF-PT-ALIAS-CONFLICTS] count={len(conflicts)} "
+            f"names={json.dumps(sorted(conflicts)[:50])} fail_closed=TRUE authority=0"
+        )
+    return out
+
+
+def _pt_candidate_suggestions(unresolved: Iterable[str], internal_names: Iterable[str], limit: int=3) -> dict[str,list[tuple[str,float]]]:
     from difflib import SequenceMatcher
     ints=sorted({_pt_team_key(x) for x in internal_names if _pt_team_key(x)})
+    out={}
+    for raw in unresolved:
+        scored=sorted(((SequenceMatcher(None,str(raw),cand).ratio(),cand) for cand in ints),reverse=True)
+        out[str(raw)]=[(c,float(s)) for s,c in scored[:limit]]
+    return out
+
+
+def _pt_candidate_map(external_names: Iterable[str], internal_names: Iterable[str], alias_hints: dict[str,str] | None=None) -> tuple[dict[str,str],list[str]]:
+    from difflib import SequenceMatcher
+    ints=sorted({_pt_team_key(x) for x in internal_names if _pt_team_key(x)})
+    hints={_pt_team_key(k):_pt_team_key(v) for k,v in (alias_hints or {}).items() if _pt_team_key(k) and _pt_team_key(v)}
     mapping={}; unresolved=[]
     for raw in sorted({_pt_team_key(x) for x in external_names if _pt_team_key(x)}):
         if raw in ints: mapping[raw]=raw; continue
+        hinted=hints.get(raw)
+        if hinted in ints:
+            mapping[raw]=hinted; continue
         rt=set(raw.split()); scored=[]
         for cand in ints:
             ct=set(cand.split())
@@ -1148,9 +1318,36 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
     opp=g.get("Opponent_Norm",g.get("Opponent",pd.Series("",index=g.index))).astype(str).map(_pt_team_key)
     is_home=pd.to_numeric(g.get("Is_Home",pd.Series(np.nan,index=g.index)),errors="coerce")
     internal_names=pd.concat([team,opp],ignore_index=True).dropna().astype(str).tolist()
-    emap,unresolved=_pt_candidate_map(pd.concat([ext.get("home_key",pd.Series(dtype=str)),ext.get("away_key",pd.Series(dtype=str))],ignore_index=True),internal_names)
-    ex=ext.copy(); ex["home_i"]=ex["home_key"].map(emap); ex["away_i"]=ex["away_key"].map(emap)
-    ex=ex.loc[ex["home_i"].notna()&ex["away_i"].notna()].copy()
+    ext_source=ext.copy()
+    ext_source["season"]=pd.to_numeric(ext_source.get("season"),errors="coerce")
+    alias_hints=_pt_load_canonical_team_aliases(dashboard_module,internal_names,log_func=log_func)
+    emap,unresolved=_pt_candidate_map(
+        pd.concat([ext_source.get("home_key",pd.Series(dtype=str)),ext_source.get("away_key",pd.Series(dtype=str))],ignore_index=True),
+        internal_names,alias_hints=alias_hints
+    )
+    ex=ext_source.copy(); ex["home_i"]=ex["home_key"].map(emap); ex["away_i"]=ex["away_key"].map(emap)
+    _alias_ok=ex["home_i"].notna()&ex["away_i"].notna()
+    alias_resolved_source_rows=int(_alias_ok.sum())
+    source_rows=int(len(ex))
+    unresolved_source_rows=int((~_alias_ok).sum())
+    if unresolved:
+        _usage=pd.concat(
+            [ext_source.get("home_key",pd.Series(dtype=str)),ext_source.get("away_key",pd.Series(dtype=str))],
+            ignore_index=True
+        ).map(_pt_team_key).value_counts()
+        _sugg=_pt_candidate_suggestions(unresolved,internal_names,limit=3)
+        _detail=[]
+        for _u in sorted(unresolved,key=lambda x:int(_usage.get(x,0)),reverse=True):
+            _detail.append({
+                "team":_u,
+                "appearances":int(_usage.get(_u,0)),
+                "candidates":[{"team":c,"score":round(s,4)} for c,s in _sugg.get(_u,[])]
+            })
+        log_func(
+            f"[NCAAF-PT-UNRESOLVED] count={len(unresolved)} source_rows_impacted={unresolved_source_rows} "
+            f"details={json.dumps(_detail[:50],sort_keys=True)} authority=0"
+        )
+    ex=ex.loc[_alias_ok].copy()
     ex["pair_key"]=ex["season"].astype(int).astype(str)+"|"+ex["home_i"].astype(str)+"|"+ex["away_i"].astype(str)
     counts=ex["pair_key"].value_counts(); unique=ex.loc[ex["pair_key"].map(counts).eq(1)].copy().set_index("pair_key",drop=False)
     # Duplicate season matchups (e.g., conference-title rematches) are matched only
@@ -1172,7 +1369,7 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
     idx_comp={k:np.full(len(g),np.nan) for k in _idx_keys}
 
     matched=0; matched_any_component=0; full_five_matched=0; partial_matched=0
-    matched_any_index=0
+    matched_any_index=0; matched_by_season={}
 
     for i,k in enumerate(key.astype(str)):
         if not k: continue
@@ -1184,6 +1381,9 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
 
         listed[i]=1.0
         matched+=1
+        _sy=int(season.iloc[i]) if pd.notna(season.iloc[i]) else None
+        if _sy is not None:
+            matched_by_season[_sy]=matched_by_season.get(_sy,0)+1
         orient=1.0 if is_home.iloc[i]==1 else -1.0
 
         component_count=0
@@ -1453,8 +1653,41 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
     except Exception: pass
 
     no_pt=max(0,int(len(g)-matched))
+    _src_seasons=sorted({int(x) for x in pd.to_numeric(ext_source.get("season"),errors="coerce").dropna().tolist()})
+    _eligible_internal_mask=season.isin(_src_seasons)
+    _eligible_internal=int(_eligible_internal_mask.sum())
+    _source_match_cov=float(matched/max(source_rows,1))
+    _eligible_internal_cov=float(matched/max(_eligible_internal,1))
+    _all_cache_cov=float(matched/max(len(g),1))
+    _alias_resolution_cov=float(alias_resolved_source_rows/max(source_rows,1))
+    _coverage_gate="PASS" if _source_match_cov>=PT_SOURCE_MATCH_MIN_COVERAGE else "FAIL"
+    _goal="PASS" if _source_match_cov>=PT_SOURCE_MATCH_GOAL_COVERAGE else "OPEN"
+    _season_diag={}
+    for _yr in _src_seasons:
+        _src_n=int((pd.to_numeric(ext_source.get("season"),errors="coerce")==_yr).sum())
+        _alias_n=int((pd.to_numeric(ex.get("season"),errors="coerce")==_yr).sum())
+        _int_n=int((season==_yr).sum())
+        _mat_n=int(matched_by_season.get(_yr,0))
+        _season_diag[str(_yr)]={
+            "source_rows":_src_n,
+            "alias_resolved_source_rows":_alias_n,
+            "matched_rows":_mat_n,
+            "source_match_coverage":float(_mat_n/max(_src_n,1)),
+            "internal_games":_int_n,
+            "internal_coverage":float(_mat_n/max(_int_n,1)),
+        }
+        log_func(
+            f"[NCAAF-PT-MATCH-SEASON] season={_yr} source_rows={_src_n} alias_resolved={_alias_n} matched={_mat_n} "
+            f"source_match_coverage={_mat_n/max(_src_n,1):.3f} internal_games={_int_n} "
+            f"internal_coverage={_mat_n/max(_int_n,1):.3f} authority=0"
+        )
+
     diag={
         "status":"PASS",
+        "coverage_gate":_coverage_gate,
+        "coverage_goal":_goal,
+        "coverage_target":PT_SOURCE_MATCH_MIN_COVERAGE,
+        "coverage_goal_target":PT_SOURCE_MATCH_GOAL_COVERAGE,
         "matched_rows":int(matched),
         "matched_any_component_rows":int(matched_any_component),
         "matched_any_index_rows":int(matched_any_index),
@@ -1464,20 +1697,47 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         "partial_matched_rows":int(partial_matched),
         "no_pt_rows":int(no_pt),
         "total_rows":int(len(g)),
-        "coverage":float(matched/max(len(g),1)),
+        "coverage":_all_cache_cov,
+        "all_cache_coverage":_all_cache_cov,
+        "source_rows":source_rows,
+        "source_match_coverage":_source_match_cov,
+        "alias_resolved_source_rows":alias_resolved_source_rows,
+        "alias_resolution_coverage":_alias_resolution_cov,
+        "unresolved_source_rows":unresolved_source_rows,
+        "eligible_internal_rows":_eligible_internal,
+        "eligible_internal_coverage":_eligible_internal_cov,
+        "season_match_diagnostics":_season_diag,
         "full_five_coverage":float(full_five_matched/max(len(g),1)),
         "mapped_external_teams":int(len(emap)),
+        "alias_hint_count":int(len(alias_hints)),
         "unresolved_external_teams":unresolved[:50],
         "sparse_policy":"MISSING_PT_IS_NO_EXTERNAL_SIGNAL; PARTIAL_COMPONENTS_PRESERVED; META_REQUIRES_EXACT_5_OF_5",
         "authority":0,
     }
     log_func(
-        f"[NCAAF-PT-MATCH] status=PASS matched_rows={matched}/{len(g)} coverage={diag['coverage']:.3f} "
-        f"any_component={matched_any_component} any_index={matched_any_index} indices={len(_idx_keys)} clusters={len(_cluster_names)} "
-        f"partial={partial_matched} full_five={full_five_matched} "
-        f"no_pt={no_pt} full_five_coverage={diag['full_five_coverage']:.3f} "
-        f"mapped_teams={len(emap)} unresolved_teams={len(unresolved)} sparse=TRUE authority=0"
+        f"[NCAAF-PT-MATCH] status=PASS matched_rows={matched} source_rows={source_rows} "
+        f"source_match_coverage={_source_match_cov:.3f} coverage_gate={_coverage_gate} "
+        f"target={PT_SOURCE_MATCH_MIN_COVERAGE:.2f} goal={PT_SOURCE_MATCH_GOAL_COVERAGE:.2f} "
+        f"alias_resolved={alias_resolved_source_rows}/{source_rows} alias_resolution_coverage={_alias_resolution_cov:.3f} "
+        f"eligible_internal={_eligible_internal} eligible_internal_coverage={_eligible_internal_cov:.3f} "
+        f"all_cache={len(g)} all_cache_coverage={_all_cache_cov:.3f} any_component={matched_any_component} "
+        f"any_index={matched_any_index} indices={len(_idx_keys)} clusters={len(_cluster_names)} "
+        f"partial={partial_matched} full_five={full_five_matched} mapped_teams={len(emap)} "
+        f"unresolved_teams={len(unresolved)} alias_hints={len(alias_hints)} sparse=TRUE authority=0"
     )
+    if _coverage_gate!="PASS":
+        log_func(
+            f"[NCAAF-PT-COVERAGE-GATE] status=FAIL source_match_coverage={_source_match_cov:.3f} "
+            f"required={PT_SOURCE_MATCH_MIN_COVERAGE:.2f} unresolved_teams={len(unresolved)} "
+            f"unresolved_source_rows={unresolved_source_rows} "
+            f"action=FIX_TEAM_ALIASES_OR_MATCH_KEYS_BEFORE_JUDGING_PT_SIGNAL production_authority=0"
+        )
+    else:
+        log_func(
+            f"[NCAAF-PT-COVERAGE-GATE] status=PASS source_match_coverage={_source_match_cov:.3f} "
+            f"required={PT_SOURCE_MATCH_MIN_COVERAGE:.2f} goal={PT_SOURCE_MATCH_GOAL_COVERAGE:.2f} "
+            f"production_authority=0"
+        )
     return diag
 
 def _pt_research_metrics(g: pd.DataFrame) -> dict[str,Any]:
@@ -1742,7 +2002,7 @@ def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client
         _cc=pd.to_numeric(current_frame.get("meta_system_count"),errors="coerce").fillna(0) if isinstance(current_frame,pd.DataFrame) and "meta_system_count" in current_frame.columns else pd.Series(dtype=float)
         _lcc=pd.to_numeric(current_live.get("meta_system_count"),errors="coerce").fillna(0) if isinstance(current_live,pd.DataFrame) and "meta_system_count" in current_live.columns else pd.Series(dtype=float)
         result={"status":"PASS" if any((d or {}).get('status')=='PASS' for d in diags) else "UNAVAILABLE","source":"THE_PREDICTION_TRACKER","history_attached":bool(include_history and match.get('status')=='PASS'),"season_diagnostics":diags,"match":match,"metrics":metrics,
-                "coverage_policy":"SPARSE_OPTIONAL; MISSING_GAME=NO_EXTERNAL_SIGNAL; PARTIAL_COMPONENTS_PRESERVED; META=EXACT_5_OF_5_ONLY",
+                "coverage_policy":"SOURCE_MATCH_TARGET>=90%; GOAL>=99%; SPARSE_SOURCE_MAY_NOT_PUBLISH_ALL_INTERNAL_GAMES; MISSING_GAME=NO_EXTERNAL_SIGNAL; PARTIAL_COMPONENTS_PRESERVED; META=EXACT_5_OF_5_ONLY",
                 "current":{"rows":int(len(current_frame)),"archive_rows":int(len(current_archive)),"live_rows":int(len(current_live)),
                            "any_component_rows":int((_cc>0).sum()) if len(_cc) else 0,"partial_component_rows":int(((_cc>0)&(_cc<5)).sum()) if len(_cc) else 0,
                            "full_five_rows":int((_cc==5).sum()) if len(_cc) else 0,
@@ -1764,7 +2024,9 @@ def refresh_prediction_tracker_external(*, dashboard_module=None, storage_client
             f"live_partial={result['current'].get('live_partial_component_rows',0)} live_full_five={result['current'].get('live_full_five_rows',0)} "
             f"external_consensus_ready={result['current'].get('external_consensus_ready_rows',0)} "
             f"live_external_consensus_ready={result['current'].get('live_external_consensus_ready_rows',0)} "
-            f"matched_rows={match.get('matched_rows',0)} matched_partial={match.get('partial_matched_rows',0)} matched_full_five={match.get('full_five_matched_rows',0)} "
+            f"matched_rows={match.get('matched_rows',0)} source_rows={match.get('source_rows',0)} "
+            f"source_match_coverage={match.get('source_match_coverage',0):.3f} coverage_gate={match.get('coverage_gate','NA')} "
+            f"matched_partial={match.get('partial_matched_rows',0)} matched_full_five={match.get('full_five_matched_rows',0)} "
             f"missing_games_expected=TRUE sparse=TRUE production_authority=0 bet_authority_vote=FALSE"
         )
         return result
@@ -4044,7 +4306,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         _strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if _miner_live_authority_eligible(_m))
         _pt_strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_external_ratings_family")) and _miner_live_authority_eligible(_m))
         _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_","META_PT_","PTIDX_","PT_ALL_","PT_CLUSTER_","PT_TRACKER_")) for c in (_m.get("representative_conditions") or [])))
-        log_func(f"[NCAAF-RV220-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} pt_miner_live_authority={_pt_strong} pt_family_vote_cap=1 source_neutral_system_gate=TRUE prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
+        log_func(f"[NCAAF-RV221-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} pt_miner_live_authority={_pt_strong} pt_family_vote_cap=1 source_neutral_system_gate=TRUE prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
         return report
     except Exception as exc:
         log_func(f"[NCAAF-RV2-FAIL] {type(exc).__name__}: {exc}")
@@ -4135,6 +4397,12 @@ def self_test() -> dict[str,Any]:
     })
     _sp_diag=_pt_attach_history_to_cache(_DSP,_sp_ext,log_func=lambda *a,**k:None)
     _sp_mg=_DSP._V1357_SPREAD_RESEARCH_CACHE["miner_games"]
+    _alias_map_test,_alias_unresolved_test=_pt_candidate_map(
+        ["Alabama"],["alabama crimson tide"],alias_hints={"alabama":"alabama crimson tide"}
+    )
+    _pt_alias_hint_ok=bool(
+        _alias_map_test.get("alabama")=="alabama crimson tide" and not _alias_unresolved_test
+    )
     _sparse_pt_ok=bool(
         _sp_diag.get("matched_rows")==1 and _sp_diag.get("partial_matched_rows")==1 and
         _sp_diag.get("full_five_matched_rows")==0 and _sp_diag.get("no_pt_rows")==1 and
@@ -4209,7 +4477,7 @@ def self_test() -> dict[str,Any]:
         "SU_SEQ3_LWL" in live_atoms and "OFF_ATS_COVER_7_PLUS" in live_atoms and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
         "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and "META_PT_EDGE_TEAM_3PLUS" in live_atoms and "META_PT_CORE_STRONG_AGREE" in live_atoms and
-        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _sparse_pt_ok and _expert_bridge_ok and _occ_recon_ok and
+        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _sparse_pt_ok and _pt_alias_hint_ok and _expert_bridge_ok and _occ_recon_ok and
         _miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["META_PT_EDGE_TEAM_3PLUS"]}) and
         not _miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["CORE_OOF_EDGE_TEAM_2PLUS"]})
     )
@@ -4230,7 +4498,7 @@ def self_test() -> dict[str,Any]:
         "pt_name_safe_header_contract":_pt_name_safe,
         "pt_self_test_system_columns":_pt_da.get("system_columns",{}),
         "pt_fuzzy_header_rejected":_pt_dc.get("system_columns",{}).get("ESPN_FPI") is None,
-        "pt_relay_csv_payload":_relay_csv_ok,"pt_relay_named_markdown":_relay_md_ok,"pt_relay_https_target":_relay_url_ok,"pt_challenge_rejected":_challenge_rejected,"pt_current_merge_preserves_rematch":_merge_rematch_ok,"pt_sparse_partial_component_preservation":_sparse_pt_ok,"expert_side_bridge":_expert_bridge_ok,"expert_occurrence_reconciliation":_occ_recon_ok,
+        "pt_relay_csv_payload":_relay_csv_ok,"pt_relay_named_markdown":_relay_md_ok,"pt_relay_https_target":_relay_url_ok,"pt_challenge_rejected":_challenge_rejected,"pt_current_merge_preserves_rematch":_merge_rematch_ok,"pt_sparse_partial_component_preservation":_sparse_pt_ok,"pt_canonical_alias_hint":_pt_alias_hint_ok,"expert_side_bridge":_expert_bridge_ok,"expert_occurrence_reconciliation":_occ_recon_ok,
     }
 
 
