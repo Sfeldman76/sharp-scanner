@@ -1,0 +1,17 @@
+{
+  "automatic_execution": false,
+  "bet": "1_QUALIFIED_INDEPENDENT_SYSTEM_SUPPORT",
+  "betting_policy_source_tag": "nfl-production-betting-v3.3.1-live-system-atom-parity-20261008",
+  "h2h": "MODEL_ONLY",
+  "live_system_atom_parity_v331": true,
+  "pt_family_vote_cap": 1,
+  "pt_model_weight": 0.0,
+  "single_conflict": "CANDIDATE_NO_WAGER",
+  "source_neutral_system_authority": true,
+  "source_tag": "nfl-model-authority-v2.6.1-utils-market-backend-20261003",
+  "spread": "CORE_0575_PLUS_2PCT_EV_CREATES_CANDIDATE",
+  "status": "PASS",
+  "strong_bet": "2PLUS_QUALIFIED_INDEPENDENT_SYSTEM_SUPPORT",
+  "totals": "MODEL_ONLY",
+  "veto": "2PLUS_NET_QUALIFIED_INDEPENDENT_SYSTEM_CONFLICT"
+}

@@ -1,0 +1,31 @@
+{
+  "evaluable_families": [
+    "NFL_PT_20F69FDDFA",
+    "NFL_PT_3535F64681",
+    "NFL_PT_55200D976E",
+    "NFL_PT_5BECF20764",
+    "NFL_PT_61B82BC65F",
+    "NFL_PT_651951437F"
+  ],
+  "not_evaluable_families": [],
+  "pt_family_vote_cap": 1,
+  "pt_model_weight": 0.0,
+  "qualified_pt_systems_tested": [
+    "NFL_PT_20F69FDDFA",
+    "NFL_PT_3535F64681",
+    "NFL_PT_55200D976E",
+    "NFL_PT_5BECF20764",
+    "NFL_PT_61B82BC65F",
+    "NFL_PT_651951437F"
+  ],
+  "row_not_evaluable": [],
+  "status": "PASS",
+  "triggered_systems": [
+    "NFL_PT_20F69FDDFA",
+    "NFL_PT_3535F64681",
+    "NFL_PT_55200D976E",
+    "NFL_PT_5BECF20764",
+    "NFL_PT_61B82BC65F",
+    "NFL_PT_651951437F"
+  ]
+}
