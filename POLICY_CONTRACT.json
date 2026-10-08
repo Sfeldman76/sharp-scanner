@@ -1,0 +1,29 @@
+{
+  "policy": "SOURCE_NEUTRAL_SYSTEM_AUTHORITY_V1",
+  "core_prediction_authority": "UNCHANGED",
+  "candidate_rule": "CORE_ONLY",
+  "system_sources": ["MINER", "PATHI", "BIG_AL", "PT_DERIVED_MINER"],
+  "system_rule": "EACH_SYSTEM_MUST_EARN_QUALIFICATION_UNDER_ITS_SPORT_EXISTING_HISTORICAL_GATE",
+  "pt_raw_model_weight": 0.0,
+  "pt_can_rewrite_core": false,
+  "pt_can_create_core_candidate": false,
+  "pt_derived_system_can_confirm_or_conflict": true,
+  "pt_correlated_family_vote_cap": 1,
+  "pt_family_conflict_rule": "ABSTAIN_IF_QUALIFIED_PT_VARIANTS_DISAGREE",
+  "nfl": {
+    "system_lab_source_tag": "nfl-system-lab-v3.13.0-source-neutral-pt-system-authority-20261007",
+    "betting_policy_source_tag": "nfl-production-betting-v3.3-source-neutral-system-confirmation-20261007",
+    "spread": "CORE_CANDIDATE_THEN_QUALIFIED_SYSTEM_CONFIRMATION",
+    "totals": "MODEL_ONLY_UNTIL_OWN_PRODUCTION_GATE_EXISTS",
+    "h2h": "MODEL_ONLY_UNTIL_OWN_PRODUCTION_GATE_EXISTS",
+    "selection_uses_2026": false
+  },
+  "ncaaf": {
+    "research_source_tag": "ncaaf-research-v2.20.0-pt-system-source-neutral-authority-20261007",
+    "miner_live_authority_policy": "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007",
+    "minimum_confirmation_n": 60,
+    "minimum_confirmation_rate": 0.56,
+    "confirmation_seasons": [2024, 2025],
+    "selection_uses_2026": false
+  }
+}

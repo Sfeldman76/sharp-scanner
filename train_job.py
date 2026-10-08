@@ -195,7 +195,7 @@ def main():
         _syscontract = _load_nfl_heavy_exact("nfl_research_v2_contract", "nfl-research-v2.0-foundation-expansion-20261001")
         _ledger3 = _load_nfl_heavy_exact("nfl_prospective_ledger_v3", "nfl-prospective-ledger-v3-v1.9.4-edge-gate-shadow-20261001")
         _research = _load_nfl_heavy_exact("nfl_research_engine_v2", "nfl-research-engine-v1.9.4-edge-gate-manager-20261001")
-        _systems = _load_nfl_heavy_exact("nfl_system_lab_v3", "nfl-system-lab-v3.12.0-prediction-tracker-external-family-20261007")
+        _systems = _load_nfl_heavy_exact("nfl_system_lab_v3", "nfl-system-lab-v3.13.0-source-neutral-pt-system-authority-20261007")
         _ptinc = _load_nfl_heavy_exact("nfl_pt_incremental_v1", "nfl-pt-incremental-v1.1-encompassing-control-residual-20261007")
         _pbpdiag = _load_nfl_heavy_exact("nfl_pbp_attribution_v1", "nfl-pbp-attribution-v1-research-v2.0.2-frozen-core2-20261001")
         _heavy = _load_nfl_heavy_exact("nfl_heavy_research_v31", "nfl-heavy-research-v2.11.2-source-confluence-attribution-20261004")
@@ -442,7 +442,7 @@ def main():
         _ledger3 = _load_nfl_prod_replay_exact("nfl_prospective_ledger_v3", "nfl-prospective-ledger-v3-v1.9.4-edge-gate-shadow-20261001")
         _research = _load_nfl_prod_replay_exact("nfl_research_engine_v2", "nfl-research-engine-v1.9.4-edge-gate-manager-20261001")
         _syscontract = _load_nfl_prod_replay_exact("nfl_research_v2_contract", "nfl-research-v2.0-foundation-expansion-20261001")
-        _systems = _load_nfl_prod_replay_exact("nfl_system_lab_v3", "nfl-system-lab-v3.12.0-prediction-tracker-external-family-20261007")
+        _systems = _load_nfl_prod_replay_exact("nfl_system_lab_v3", "nfl-system-lab-v3.13.0-source-neutral-pt-system-authority-20261007")
         _prod = _load_nfl_prod_replay_exact("nfl_production_v1", "nfl-production-v1.1.1-publish-receipt-normalization-20261002")
         _bet = _load_nfl_prod_replay_exact("nfl_betting_engine_v1", "nfl-betting-engine-v1.0-unified-decision-20261002")
         _shared = _load_nfl_prod_replay_exact("sports_edge_authority_v1", "sports-edge-authority-v1.1-dependency-aware-cross-sport-standard-20261002")
@@ -521,7 +521,7 @@ def main():
         )
         _systems = _load_nfl_v2_system_exact(
             "nfl_system_lab_v3",
-            "nfl-system-lab-v3.12.0-prediction-tracker-external-family-20261007",
+            "nfl-system-lab-v3.13.0-source-neutral-pt-system-authority-20261007",
         )
         _audit = _load_nfl_v2_system_exact(
             "nfl_audit_v1",
@@ -850,7 +850,7 @@ def main():
         f"path={_npv1_path} sha={_npv1_sha[:16]} promotion_requested={_ncaaf_prod_promote}"
     )
     _nrv22_tag = getattr(_nrv22, "NCAAF_RESEARCH_V2_SOURCE_TAG", None)
-    if _nrv22_tag != "ncaaf-research-v2.19.0-pt-incremental-residual-20261007":
+    if _nrv22_tag != "ncaaf-research-v2.20.0-pt-system-source-neutral-authority-20261007":
         raise RuntimeError(
             f"[NCAAF-RV219-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv22_tag!r} "
             f"path={str(_nrv22_path)!r} sha={_nrv22_sha[:16]}"

@@ -47855,7 +47855,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     st.caption(
         "Same compact production board as NCAAF: one game per row with Spread, H2H and Totals side by side. "
         "Weekly Update creates/reuses frozen fair values. Production Betting V3.2 is CORE-first: Spread CORE cover probability ≥57.5% and live EV ≥2% creates a CANDIDATE, not a wager. "
-        "One qualified independent Miner/Pathi/Big Al family confirms BET; 2+ independent supporters confirm STRONG BET; mixed/single conflict stays CANDIDATE and 2+ net conflicts can veto to PASS. "
+        "One qualified independent Miner/Pathi/Big Al/PT-derived system family confirms BET; 2+ independent supporters confirm STRONG BET; mixed/single conflict stays CANDIDATE and 2+ net conflicts can veto to PASS. "
         "Systems cannot create a candidate or reverse CORE. H2H and Totals remain model-only. The background scanner refreshes recommendations from current prices without refitting CORE."
     )
     _bg=cur.get("background_refresh") or {}
@@ -47969,8 +47969,8 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
         ]
         st.dataframe(pd.DataFrame(prows),use_container_width=True,hide_index=True)
         st.caption(
-            f"Frozen Bet Authority policy: {policy.get('source_tag','nfl-production-betting-v3.2-live-miner-pathi-confirmation-20261005')}. "
-            "CORE is the only prediction authority. Clearing the CORE/price gates creates a CANDIDATE only. Miner, Pathi and Big Al are normalized to one independent family per vote; one qualified supporter is required for BET and two for STRONG BET. "
+            f"Frozen Bet Authority policy: {policy.get('source_tag','nfl-production-betting-v3.3-source-neutral-system-confirmation-20261007')}. "
+            "CORE is the only prediction authority. Clearing the CORE/price gates creates a CANDIDATE only. Miner, Pathi, Big Al and qualified PT-derived systems are normalized to one independent family per vote; one qualified supporter is required for BET and two for STRONG BET. Raw PT ratings retain zero model weight and all PT-derived variants collapse to one external-ratings family vote. "
             "STAT and MARKET remain bounded diagnostics until their incremental production gate is validated. Heavy Research may publish new evidence but cannot silently change this production policy."
         )
 
@@ -48006,7 +48006,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                 show=show[cols].copy()
                 show=show.rename(columns={"system_id":"System ID","name":"System","source":"Source","pathi_family_label":"Pathi Family","evidence_level":"Evidence Level","normalized_vote_eligible":"Normalized Vote","market":"Market","action":"Action","rule_text":"Rule","discovery":"2017-22 Discovery","validation_2023_2025":"2023-25 Validation","overall_2017_2025":"2017-25 Overall","historical_discovery_status":"Discovery Evidence","current_evidence_state":"Current Evidence","status":"Family Status","prospective_action":"Next Step","live_scoring":"Live Role"})
                 st.dataframe(show,use_container_width=True,hide_index=True)
-                st.caption("Evidence lifecycle: W-L-P and ATS% are shown directly. Qualified Miner/Pathi/Big Al rows may contribute one normalized confirmation/conflict vote in Production Betting V3.2. They cannot create a CORE candidate, reverse CORE, or alter CORE fair values; correlated/mirror variants collapse to one independent family.")
+                st.caption("Evidence lifecycle: W-L-P and ATS% are shown directly. Qualified Miner/Pathi/Big Al/PT-derived rows may contribute one normalized confirmation/conflict vote in Production Betting V3.3. They cannot create a CORE candidate, reverse CORE, or alter CORE fair values; correlated/mirror variants collapse to one independent family.")
             if cov:
                 bigal_missing=cov.get("bigal_missing_ids") or []
                 pf=cov.get("pathi_framework_coverage") or {}
@@ -48026,7 +48026,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     edge_meta=(edge_state.get("meta") or {}) if isinstance(edge_state,dict) else {}
     if edge_meta:
         with st.expander("Research / shadow diagnostics",expanded=False):
-            st.caption("CORE is prediction authority and creates candidates. Qualified Miner/Pathi/Big Al systems confirm or conflict with a CORE candidate; STAT/MARKET/PBP remain diagnostic. No research lane can create a candidate or reverse CORE.")
+            st.caption("CORE is prediction authority and creates candidates. Qualified Miner/Pathi/Big Al/PT-derived systems confirm or conflict with a CORE candidate; STAT/MARKET/PBP remain diagnostic. No research lane can create a candidate or reverse CORE.")
             fam=[]
             for f in edge_meta.get("families") or []:
                 fam.append({
@@ -48362,7 +48362,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     _prod_contract=_ncaaf_prod_v1_load_contract(GCS_BUCKET)
     st.subheader('NCAAF Production — CORE + Systems + Bet Authority')
     if isinstance(_prod_contract,dict):
-        st.caption('Spread/H2H/Totals remain separate frozen probability models. CORE creates a candidate only after clearing the price-aware 2% edge + 2% EV gate. STAT, Pathi, Big Al and STRONG_VALIDATED Miner families are bounded evidence: they may confirm or oppose CORE, but cannot create a wager, reverse the side, or rewrite model probability. Prediction Tracker remains a backend research/shadow brain with zero production authority; PT margin fields are intentionally not displayed on the production board. CONFIRMED_SHADOW Miner families remain research/prospective only. H2H remains model-only.')
+        st.caption('Spread/H2H/Totals remain separate frozen probability models. CORE creates a candidate only after clearing the price-aware 2% edge + 2% EV gate. STAT, Pathi, Big Al and STRONG_VALIDATED Miner families are bounded evidence: they may confirm or oppose CORE, but cannot create a wager, reverse the side, or rewrite model probability. Raw Prediction Tracker ratings retain zero model authority and PT margin fields stay hidden. PT-derived Miner systems are source-neutral: a system that independently clears the same STRONG_VALIDATED gate may contribute one bounded EXTERNAL_RATINGS_FAMILY confirmation/conflict vote. CONFIRMED_SHADOW Miner families remain research/prospective only. H2H remains model-only.')
         _backs=_prod_contract.get('backbones') or {}
         _spf=len(((_backs.get('spread') or {}).get('feature_cols') or [])); _h2f=len(((_backs.get('h2h') or {}).get('feature_cols') or [])); _ttf=len(((_backs.get('totals') or {}).get('feature_cols') or []))
         st.caption(f'Fast production path: Spread {_spf} fixed features • H2H {_h2f} fixed features • Totals {_ttf} fixed features • cadence FROZEN • AutoFS OFF • multi-head runtime OFF • rich-market model OFF.')

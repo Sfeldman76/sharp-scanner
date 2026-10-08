@@ -1,0 +1,16 @@
+{
+  "background_live_refresh": "SCANNER_DRIVEN_MARKET_ONLY_NO_MODEL_REFIT",
+  "compiled_and_checked": 33,
+  "components": 33,
+  "engine_source_tag": "nfl-engine-v3.14.0-source-neutral-system-authority-20261007",
+  "failures": [],
+  "heavy_research": "FROZEN_0575_CORE_BENCHMARK_PLUS_V313_PT_EXTERNAL_FAMILY_AND_INCREMENTAL_RESIDUAL_RESEARCH_ONLY",
+  "missing_critical_symbols": [],
+  "shared_external_required": [
+    "utils.py",
+    "sports_edge_authority_v1.py"
+  ],
+  "status": "PASS",
+  "utils_backend_required": true,
+  "weekly_memory_guard": "SERVER_SIDE_NFL_PLUS_GAME_WINDOW_FILTER"
+}

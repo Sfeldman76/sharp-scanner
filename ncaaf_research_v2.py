@@ -1,7 +1,8 @@
 """NCAAF Research V2.5 — expert/model atom bridge + evidence decomposition + self-auditing logs.
 
 Research-only architecture built around the frozen NCAAF Production V1 benchmark.
-Nothing in this module can grant or mutate production authority.
+This module cannot mutate CORE/model probability. Historically qualified system families may emit bounded
+confirmation/conflict votes for Bet Authority; no research family can create a CORE candidate.
 
 Core contracts
 --------------
@@ -33,9 +34,9 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.19.0-pt-incremental-residual-20261007"
-NCAAF_RESEARCH_V2_VERSION = "2.19.0"
-NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_2_1_STRONG_VALIDATED_ONLY_20261005"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.20.0-pt-system-source-neutral-authority-20261007"
+NCAAF_RESEARCH_V2_VERSION = "2.20.0"
+NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
 DISCOVERY_MAX_SEASON = 2023
@@ -45,9 +46,12 @@ REPORT_CURRENT_BLOB = "research/ncaaf/v2/current_report.json"
 BUNDLE_CURRENT_BLOB = "research/ncaaf/v2/current_bundle.pkl"
 REPORT_HISTORY_PREFIX = "research/ncaaf/v2/history"
 
-# Prediction Tracker external-rating metamodel.  This is research-only and can
-# never grant Production/Bet Authority.  The five fixed weights are the
-# published external benchmark; we do not re-fit them on our NCAAF outcomes.
+# Prediction Tracker external-rating metamodel. PT itself has no blanket model
+# weight and never rewrites CORE. PT-derived Miner systems are source-neutral:
+# each must independently clear the same frozen historical authority gate as
+# other Miner mechanisms, after which all correlated PT variants collapse to
+# one EXTERNAL_RATINGS_FAMILY vote. The five fixed weights remain the published
+# external benchmark; we do not re-fit them on our NCAAF outcomes.
 PT_BASE_URL = "https://www.thepredictiontracker.com"
 PT_ARCHIVE_URL = PT_BASE_URL + "/ncaa{season}.csv"
 PT_ARCHIVE_PAGE_URL = PT_BASE_URL + "/ncaaarchive.html"
@@ -2509,7 +2513,9 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
             add("CORE_OOF_EDGE_ABS_4PLUS","RESEARCH_CORE_STATE",core.abs().ge(4),desc="Incumbent CORE OOF absolute edge >= 4",min_n=30)
 
         # External fixed-weight Prediction Tracker metamodel. These states are
-        # independent research intelligence and always research-only in V2.11.
+        # independent external intelligence. A derived Miner mechanism remains
+        # zero-authority until it independently clears the same frozen system gate
+        # as every other mechanism; source identity alone neither grants nor blocks it.
         meta_edge=nfirst("_V210_PT_META_EDGE_POINTS")
         if has("_V210_PT_META_EDGE_POINTS"):
             add("META_PT_EDGE_TEAM_2PLUS","EXTERNAL_RATINGS_FAMILY",meta_edge.ge(2),desc="Prediction Tracker five-system metamodel edge >= +2",min_n=30)
@@ -3495,11 +3501,9 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
              "split_audit":rep.get("split_audit") or {},
              "authority_state":"CONFIRMED_SHADOW" if rep["confirmation_pass"] else "DISCOVERY_FROZEN","production_authority":0,
              "attribution":_mechanism_attribution(games,seasons,rep,market)}
-        strong_validated=bool(
-            rep["confirmation_pass"] and
-            int(rep.get("confirmation_n",0) or 0) >= NCAAF_MINER_LIVE_MIN_CONFIRMATION_N and
-            float(rep.get("confirmation_rate",0) or 0) >= NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE
-        )
+        # One source-neutral gate for every Miner mechanism. PT-derived systems
+        # do not receive a free pass, but are no longer blanket-disqualified.
+        strong_validated=_miner_live_authority_eligible(rep)
         fam["current_qualified"]=strong_validated
         fam["live_authority_eligible"]=strong_validated
         fam["live_authority_policy"]=NCAAF_MINER_LIVE_AUTHORITY_POLICY
@@ -3577,7 +3581,7 @@ def _prospective_shadow(full_games: pd.DataFrame, full_seasons: np.ndarray, mine
         for mech in (mr or {}).get("mechanism_families",[]):
             if not mech.get("confirmation_pass"): continue
             cond=mech.get("representative_conditions") or []; mask=np.ones(len(full_games),dtype=bool)
-            _research_bridge=any(str(c).startswith("CORE_OOF_") or str(c).startswith("SPEC_") or str(c).startswith("META_PT_") for c in cond)
+            _research_bridge=any(str(c).startswith("CORE_OOF_") or str(c).startswith("SPEC_") for c in cond)
             if _research_bridge:
                 out["mechanisms"].append({"market":market,"mechanism_id":mech.get("mechanism_id"),"rule":" AND ".join(cond),"trigger_n":None,"settled_n":None,
                                           "prospective_evaluable":False,"reason":"OOF_CORE_SPECIALIST_LIVE_BRIDGE_NOT_WIRED","production_authority":0})
@@ -3813,7 +3817,10 @@ def _miner_live_authority_eligible(mech: dict[str,Any] | None) -> bool:
     """
     m=mech or {}
     _conds=[str(x) for x in (m.get("representative_conditions") or m.get("conditions") or [])]
-    if any(x.startswith("CORE_OOF_") or x.startswith("SPEC_") or x.startswith("META_PT_") for x in _conds): return False
+    # CORE OOF / specialist research bridges are not live-authority inputs.
+    # Prediction Tracker is intentionally NOT blocked by source: PT-derived
+    # mechanisms must clear the same confirmation gate as all other Miner rules.
+    if any(x.startswith("CORE_OOF_") or x.startswith("SPEC_") for x in _conds): return False
     if not bool(m.get("confirmation_pass")): return False
     try: n=int(m.get("confirmation_n",0) or 0)
     except Exception: n=0
@@ -3923,9 +3930,10 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     out["NCAAF_Miner_Evaluable"]=authority_evaluable
     out["NCAAF_Miner_Research_Evaluable"]=research_evaluable
     out["NCAAF_Miner_Live_Authority_Policy"]=NCAAF_MINER_LIVE_AUTHORITY_POLICY
-    # Expose current external metamodel as read-only context on every market row.
-    # The canonical context row is home-oriented; no production decision consumes
-    # these fields because all META_PT mechanisms are authority-ineligible.
+    # Expose current external metamodel context on every market row. The raw PT
+    # margin fields themselves have no blanket authority and do not rewrite CORE.
+    # Only a separately validated PT-derived Miner mechanism may contribute the
+    # single collapsed EXTERNAL_RATINGS_FAMILY system vote.
     _pt_meta_by={keys[i]:cdf.iloc[i].get("_V210_PT_META_MARGIN_TEAM",np.nan) for i in range(len(cdf))}
     _pt_edge_by={keys[i]:cdf.iloc[i].get("_V210_PT_META_EDGE_POINTS",np.nan) for i in range(len(cdf))}
     _pt_cnt_by={keys[i]:cdf.iloc[i].get("_V210_PT_META_SYSTEM_COUNT",np.nan) for i in range(len(cdf))}
@@ -4020,8 +4028,8 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "benchmark":"FROZEN_NCAAF_PRODUCTION_V1","discovery_max_season":DISCOVERY_MAX_SEASON,"confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"system_miner_v3":miners,
                 "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,
-                "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False},
-                "next_step":"KEEP PRODUCTION V1 FROZEN; USE PT INCREMENTAL-VALUE LANE TO TEST CONSTRAINED BLEND VS RESIDUAL VS CONDITIONAL RESIDUAL AGAINST THE FIXED PRODUCTION BACKBONE; PRESERVE LEGACY/EXTERNAL MINERS AS EXPLANATORY RESEARCH; 2026 REMAINS PROSPECTIVE ONLY"}
+                "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False,"source_neutral":True,"pt_systems_may_earn_bounded_vote":True,"pt_family_vote_cap":1,"pt_model_weight":0},
+                "next_step":"KEEP PRODUCTION V1 FROZEN; TREAT PT-DERIVED MINER SYSTEMS THE SAME AS OTHER SYSTEMS AT THE QUALIFICATION GATE; COLLAPSE ALL PT VARIANTS TO ONE EXTERNAL_RATINGS_FAMILY VOTE; KEEP RAW PT MODEL WEIGHT AT ZERO; 2026 REMAINS PROSPECTIVE ONLY"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
         bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
         if storage_client is None:
@@ -4034,8 +4042,9 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         bio=io.BytesIO(); pickle.dump(bundle,bio,protocol=pickle.HIGHEST_PROTOCOL); bio.seek(0); pdata=bio.read(); b.blob(BUNDLE_CURRENT_BLOB).upload_from_string(pdata,content_type="application/octet-stream")
         report["artifact"]={"current_report":f"gs://{bucket_name}/{REPORT_CURRENT_BLOB}","current_bundle":f"gs://{bucket_name}/{BUNDLE_CURRENT_BLOB}","history_report":f"gs://{bucket_name}/{hist}","sha256":sha}
         _strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if _miner_live_authority_eligible(_m))
+        _pt_strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_external_ratings_family")) and _miner_live_authority_eligible(_m))
         _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_","META_PT_","PTIDX_","PT_ALL_","PT_CLUSTER_","PT_TRACKER_")) for c in (_m.get("representative_conditions") or [])))
-        log_func(f"[NCAAF-RV219-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
+        log_func(f"[NCAAF-RV220-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} pt_miner_live_authority={_pt_strong} pt_family_vote_cap=1 source_neutral_system_gate=TRUE prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
         return report
     except Exception as exc:
         log_func(f"[NCAAF-RV2-FAIL] {type(exc).__name__}: {exc}")
@@ -4200,7 +4209,9 @@ def self_test() -> dict[str,Any]:
         "SU_SEQ3_LWL" in live_atoms and "OFF_ATS_COVER_7_PLUS" in live_atoms and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
         "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and "META_PT_EDGE_TEAM_3PLUS" in live_atoms and "META_PT_CORE_STRONG_AGREE" in live_atoms and
-        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _sparse_pt_ok and _expert_bridge_ok and _occ_recon_ok
+        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _sparse_pt_ok and _expert_bridge_ok and _occ_recon_ok and
+        _miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["META_PT_EDGE_TEAM_3PLUS"]}) and
+        not _miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["CORE_OOF_EDGE_TEAM_2PLUS"]})
     )
     return {
         "status":"PASS" if ok else "FAIL","source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG,
@@ -4212,6 +4223,10 @@ def self_test() -> dict[str,Any]:
         "live_min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,
         "weak_confirmed_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":109,"confirmation_rate":0.5229}),
         "strong_confirmed_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.6222}),
+        "pt_strong_validated_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["META_PT_EDGE_TEAM_3PLUS"]}),
+        "pt_weak_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.54,"representative_conditions":["META_PT_EDGE_TEAM_3PLUS"]}),
+        "core_oof_bridge_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["CORE_OOF_EDGE_TEAM_2PLUS"]}),
+        "pt_family_vote_cap":1,
         "pt_name_safe_header_contract":_pt_name_safe,
         "pt_self_test_system_columns":_pt_da.get("system_columns",{}),
         "pt_fuzzy_header_rejected":_pt_dc.get("system_columns",{}).get("ESPN_FPI") is None,
