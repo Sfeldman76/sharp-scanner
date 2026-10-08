@@ -34,8 +34,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.24.0-role-transition-bounceback-miner-20261008"
-NCAAF_RESEARCH_V2_VERSION = "2.24.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.25.0-system-library-change-audit-20261008"
+NCAAF_RESEARCH_V2_VERSION = "2.25.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -4008,9 +4008,33 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
     clean=[]
     for z in finalists:
         z=dict(z); z.pop("_mask_internal",None); clean.append(z)
+    _all_tested=list(legacy_tested)+list(external_tested)
+    def _special_family_stats(family_name: str, evidence_key: str) -> dict[str,Any]:
+        tested=[z for z in _all_tested if family_name in set(z.get("families") or [])]
+        final=[z for z in clean if family_name in set(z.get("families") or [])]
+        mechs=[z for z in families if family_name in set(z.get("families") or [])]
+        confirmed=[z for z in mechs if bool(z.get("confirmation_pass"))]
+        live=[z for z in mechs if bool(z.get("live_authority_eligible"))]
+        return {
+            "family":family_name,
+            "evidence_family_key":evidence_key,
+            "tested_hypotheses":len(tested),
+            "finalist_systems":len(final),
+            "mechanism_families":len(mechs),
+            "confirmed_mechanisms":len(confirmed),
+            "live_authority_mechanisms":len(live),
+            "independent_live_family_votes":1 if live else 0,
+            "confirmed_rules":[{"mechanism_id":z.get("mechanism_id"),"market":z.get("market"),"direction":z.get("direction"),"confirmation_n":z.get("confirmation_n"),"confirmation_rate":z.get("confirmation_rate"),"live_authority_eligible":bool(z.get("live_authority_eligible")),"rule":" AND ".join(z.get("representative_conditions") or [])} for z in confirmed],
+        }
+    special_family_audit={
+        "season_record_state":_special_family_stats("SEASON_RECORD_STATE","NCAAF_SEASON_RECORD_STATE_FAMILY"),
+        "role_transition_bounceback":_special_family_stats("ROLE_TRANSITION_BOUNCEBACK","NCAAF_ROLE_TRANSITION_BOUNCEBACK_FAMILY"),
+        "external_ratings":_special_family_stats("EXTERNAL_RATINGS_FAMILY","EXTERNAL_RATINGS_FAMILY"),
+    }
     out.update({"status":"RESEARCH_COMPLETE","tested_hypotheses":len(legacy_tested)+len(external_tested),"systems":clean,"published_systems":len(clean),
                 "mechanism_families":families,"mechanism_family_count":len(families),
                 "confirmed_mechanism_count":sum(x["confirmation_pass"] for x in families),
+                "special_family_audit":special_family_audit,
                 "lineage":lineage,
                 "admission_contract":"DISCOVERY_2022_2023_ONLY__LEGACY_MINER_LANE_PRESERVED__EXTERNAL_PREDICTOR_BEHAVIOR_LANE_SEPARATE_FDR__EXTERNAL_SEEDS_DISCOVERY_ONLY__ONE_EXTERNAL_FAMILY_PER_RULE__HORIZON_SYMMETRIC_1_2_3__CONFERENCE_RIVALRY_H2H_ROLE_TEAM_MEMORY__MARKET_RELATIVE_FDR_FOR_H2H__OBSERVED_ML_ROI__PRICE_BAND_ROBUSTNESS__BOTH_2024_AND_2025_CONFIRM__DEPENDENCY_COLLAPSE_AFTER_LANE_MERGE__PARENT_CHILD_INCREMENTAL_ATTRIBUTION__FULL_PT_INDEX_UNIVERSE_ONE_CORRELATED_FAMILY__META_CONSTITUENT_OVERLAP_GUARD__META_SOURCE_OUT_CONSENSUS__SPLIT_OVERLAP_AUDIT__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY"})
     log_func(f"[NCAAF-RV23-MINER] market={market} atoms={len(atoms)} tested={len(legacy_tested)+len(external_tested)} systems={len(clean)} mechanisms={len(families)} confirmed_mechanisms={out['confirmed_mechanism_count']} authority=0")
@@ -4531,6 +4555,143 @@ def _report_without_models(bundle: dict[str,Any]) -> dict[str,Any]:
     return _json_safe({k:v for k,v in bundle.items() if k!="_internal"})
 
 
+
+def _ncaaf_system_signature(mech: dict[str,Any]) -> str:
+    cond=sorted(str(x) for x in (mech.get("representative_conditions") or []))
+    return "|".join([str(mech.get("market") or ""),str(mech.get("direction") or ""),"&".join(cond)])
+
+
+def _ncaaf_system_tags(mech: dict[str,Any]) -> list[str]:
+    tags=[]
+    fams=set(str(x) for x in (mech.get("families") or []))
+    if bool(mech.get("uses_season_record_state_family")) or "SEASON_RECORD_STATE" in fams: tags.append("SEASON_RECORD_STATE")
+    if bool(mech.get("uses_role_transition_bounceback_family")) or "ROLE_TRANSITION_BOUNCEBACK" in fams: tags.append("ROLE_TRANSITION_BOUNCEBACK")
+    if bool(mech.get("uses_external_ratings_family")) or "EXTERNAL_RATINGS_FAMILY" in fams: tags.append("PT_DERIVED")
+    if not tags: tags.append("STANDARD_MINER")
+    return tags
+
+
+def _ncaaf_system_library_inventory(miners: dict[str,Any]) -> dict[str,Any]:
+    rows=[]
+    for market,mr in (miners or {}).items():
+        for mech in ((mr or {}).get("mechanism_families") or []):
+            live=bool(mech.get("live_authority_eligible")) or _miner_live_authority_eligible(mech)
+            row={
+                "signature":_ncaaf_system_signature(mech),
+                "mechanism_id":mech.get("mechanism_id"),
+                "market":market,
+                "direction":mech.get("direction"),
+                "rule":" AND ".join(mech.get("representative_conditions") or []),
+                "conditions":list(mech.get("representative_conditions") or []),
+                "tags":_ncaaf_system_tags(mech),
+                "evidence_family_key":str(mech.get("evidence_family_key") or mech.get("mechanism_id") or ""),
+                "confirmation_pass":bool(mech.get("confirmation_pass")),
+                "confirmation_n":int(mech.get("confirmation_n",0) or 0),
+                "confirmation_rate":mech.get("confirmation_rate"),
+                "live_authority_eligible":live,
+                "evidence_level":mech.get("evidence_level"),
+            }
+            rows.append(row)
+    confirmed=[x for x in rows if x["confirmation_pass"]]
+    live=[x for x in rows if x["live_authority_eligible"]]
+    independent_live=sorted(set((x["market"],x["evidence_family_key"]) for x in live))
+    tag_names=["SEASON_RECORD_STATE","ROLE_TRANSITION_BOUNCEBACK","PT_DERIVED","STANDARD_MINER"]
+    by_tag={}
+    for tag in tag_names:
+        all_t=[x for x in rows if tag in x["tags"]]
+        conf_t=[x for x in all_t if x["confirmation_pass"]]
+        live_t=[x for x in all_t if x["live_authority_eligible"]]
+        by_tag[tag]={
+            "mechanisms":len(all_t),"confirmed_mechanisms":len(conf_t),"live_authority_mechanisms":len(live_t),
+            "independent_live_family_votes":len(set((x["market"],x["evidence_family_key"]) for x in live_t)),
+            "confirmed_rules":[{k:x.get(k) for k in ("signature","mechanism_id","market","direction","rule","confirmation_n","confirmation_rate","live_authority_eligible","evidence_family_key")} for x in conf_t],
+        }
+    market_counts={}
+    for market in sorted(set(x["market"] for x in rows)):
+        rr=[x for x in rows if x["market"]==market]
+        market_counts[market]={"mechanisms":len(rr),"confirmed_mechanisms":sum(x["confirmation_pass"] for x in rr),"live_authority_mechanisms":sum(x["live_authority_eligible"] for x in rr)}
+    return {
+        "mechanisms":len(rows),
+        "confirmed_mechanisms":len(confirmed),
+        "live_authority_mechanisms":len(live),
+        "independent_live_family_votes":len(independent_live),
+        "by_market":market_counts,
+        "by_tag":by_tag,
+        "records":rows,
+        "family_vote_policy":"ONE_NORMALIZED_INDEPENDENT_FAMILY_ONE_VOTE",
+        "selection_uses_2026":False,
+        "production_authority":0,
+    }
+
+
+def _ncaaf_system_library_delta(current: dict[str,Any], previous_report: dict[str,Any] | None) -> dict[str,Any]:
+    if not previous_report:
+        return {"status":"NO_PRIOR_REPORT","prior_source_tag":None,"added_confirmed":[],"removed_confirmed":[],"added_live":[],"removed_live":[],"net_confirmed":None,"net_live":None,"net_independent_live_families":None}
+    prev_inv=previous_report.get("system_library_inventory")
+    if not isinstance(prev_inv,dict) or "records" not in prev_inv:
+        prev_inv=_ncaaf_system_library_inventory(previous_report.get("system_miner_v3") or {})
+    cur={x["signature"]:x for x in (current.get("records") or [])}
+    prv={x["signature"]:x for x in (prev_inv.get("records") or [])}
+    cc={k for k,v in cur.items() if v.get("confirmation_pass")}; pc={k for k,v in prv.items() if v.get("confirmation_pass")}
+    cl={k for k,v in cur.items() if v.get("live_authority_eligible")}; pl={k for k,v in prv.items() if v.get("live_authority_eligible")}
+    def pack(keys, source):
+        return [{k:source[s].get(k) for k in ("signature","mechanism_id","market","direction","rule","tags","confirmation_n","confirmation_rate","live_authority_eligible","evidence_family_key")} for s in sorted(keys)]
+    return {
+        "status":"COMPARED_TO_PRIOR_CURRENT_REPORT",
+        "prior_source_tag":previous_report.get("source_tag"),
+        "prior_created_utc":previous_report.get("created_utc"),
+        "added_confirmed":pack(cc-pc,cur),"removed_confirmed":pack(pc-cc,prv),
+        "added_live":pack(cl-pl,cur),"removed_live":pack(pl-cl,prv),
+        "net_confirmed":int(current.get("confirmed_mechanisms",0))-int(prev_inv.get("confirmed_mechanisms",0)),
+        "net_live":int(current.get("live_authority_mechanisms",0))-int(prev_inv.get("live_authority_mechanisms",0)),
+        "net_independent_live_families":int(current.get("independent_live_family_votes",0))-int(prev_inv.get("independent_live_family_votes",0)),
+        "prior_counts":{"confirmed_mechanisms":prev_inv.get("confirmed_mechanisms"),"live_authority_mechanisms":prev_inv.get("live_authority_mechanisms"),"independent_live_family_votes":prev_inv.get("independent_live_family_votes")},
+        "current_counts":{"confirmed_mechanisms":current.get("confirmed_mechanisms"),"live_authority_mechanisms":current.get("live_authority_mechanisms"),"independent_live_family_votes":current.get("independent_live_family_votes")},
+        "selection_uses_2026":False,"production_authority":0,
+    }
+
+
+def _log_ncaaf_system_library_audit(*, inventory: dict[str,Any], delta: dict[str,Any], miners: dict[str,Any], log_func=print) -> None:
+    bt=(inventory.get("by_tag") or {}).get("ROLE_TRANSITION_BOUNCEBACK") or {}
+    st=(inventory.get("by_tag") or {}).get("SEASON_RECORD_STATE") or {}
+    pt=(inventory.get("by_tag") or {}).get("PT_DERIVED") or {}
+    log_func(
+        f"[NCAAF-SYSTEM-LIBRARY-SUMMARY] mechanisms={inventory.get('mechanisms')} confirmed={inventory.get('confirmed_mechanisms')} "
+        f"live_authority={inventory.get('live_authority_mechanisms')} independent_live_families={inventory.get('independent_live_family_votes')} "
+        f"state_confirmed={st.get('confirmed_mechanisms',0)} state_live={st.get('live_authority_mechanisms',0)} "
+        f"bounceback_confirmed={bt.get('confirmed_mechanisms',0)} bounceback_live={bt.get('live_authority_mechanisms',0)} "
+        f"pt_confirmed={pt.get('confirmed_mechanisms',0)} pt_live={pt.get('live_authority_mechanisms',0)} family_vote_policy=ONE_NORMALIZED_INDEPENDENT_FAMILY_ONE_VOTE 2026_selection=FALSE authority=0"
+    )
+    for market,mr in (miners or {}).items():
+        sf=(mr or {}).get("special_family_audit") or {}
+        for key,label in (("season_record_state","SEASON_RECORD_STATE"),("role_transition_bounceback","ROLE_TRANSITION_BOUNCEBACK")):
+            a=sf.get(key) or {}
+            log_func(
+                f"[NCAAF-SYSTEM-LIBRARY-CATEGORY] market={market} category={label} tested_hypotheses={a.get('tested_hypotheses',0)} "
+                f"finalist_systems={a.get('finalist_systems',0)} mechanisms={a.get('mechanism_families',0)} confirmed={a.get('confirmed_mechanisms',0)} "
+                f"live_authority={a.get('live_authority_mechanisms',0)} independent_family_votes={a.get('independent_live_family_votes',0)} authority=0"
+            )
+    log_func(
+        f"[NCAAF-SYSTEM-LIBRARY-DELTA] status={delta.get('status')} prior_source={delta.get('prior_source_tag')} "
+        f"confirmed_net={delta.get('net_confirmed')} live_net={delta.get('net_live')} independent_live_family_net={delta.get('net_independent_live_families')} "
+        f"added_confirmed={len(delta.get('added_confirmed') or [])} removed_confirmed={len(delta.get('removed_confirmed') or [])} "
+        f"added_live={len(delta.get('added_live') or [])} removed_live={len(delta.get('removed_live') or [])} 2026_selection=FALSE authority=0"
+    )
+    for state_key in ("added_confirmed","added_live","removed_confirmed","removed_live"):
+        for x in (delta.get(state_key) or [])[:20]:
+            log_func(
+                f"[NCAAF-SYSTEM-LIBRARY-CHANGE] state={state_key.upper()} market={x.get('market')} id={x.get('mechanism_id')} tags={'+'.join(x.get('tags') or [])} "
+                f"confirmation={x.get('confirmation_rate')}/{x.get('confirmation_n')} live={x.get('live_authority_eligible')} family={x.get('evidence_family_key')} rule={x.get('rule')}"
+            )
+    # Always print confirmed special-family rules, even if the previous run already had them,
+    # so a user can see exactly what the new vocabulary contributes today.
+    for tag in ("SEASON_RECORD_STATE","ROLE_TRANSITION_BOUNCEBACK"):
+        for x in (((inventory.get("by_tag") or {}).get(tag) or {}).get("confirmed_rules") or [])[:20]:
+            log_func(
+                f"[NCAAF-SYSTEM-LIBRARY-SPECIAL] category={tag} market={x.get('market')} id={x.get('mechanism_id')} "
+                f"confirmation={x.get('confirmation_rate')}/{x.get('confirmation_n')} live={x.get('live_authority_eligible')} family={x.get('evidence_family_key')} rule={x.get('rule')}"
+            )
+
 def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_module=None, bucket_name="sharp-models", storage_client=None,
                           log_func=print, hard_fail=True) -> dict[str,Any]:
     try:
@@ -4570,19 +4731,30 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         market_audit=_market_rich_audit(g,utils_module)
         pt_incremental=run_pt_incremental_value_research(games=g,miner_games=mg,seasons=sy,dashboard_module=dashboard_module,production_module=production_module,log_func=log_func)
         intelligence_bridge=(getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}).get("miner_intelligence_bridge") or {"status":"NOT_AVAILABLE","production_authority":0,"selection_influence":0}
+        if storage_client is None:
+            from google.cloud import storage
+            storage_client=storage.Client()
+        b=storage_client.bucket(bucket_name)
+        _previous_report=None
+        try:
+            _prev_blob=b.blob(REPORT_CURRENT_BLOB)
+            if _prev_blob.exists():
+                _previous_report=json.loads(_prev_blob.download_as_text())
+        except Exception as _prev_exc:
+            log_func(f"[NCAAF-SYSTEM-LIBRARY-PRIOR] status=UNAVAILABLE error={type(_prev_exc).__name__}:{_prev_exc}")
+        system_library_inventory=_ncaaf_system_library_inventory(miners)
+        system_library_change_audit=_ncaaf_system_library_delta(system_library_inventory,_previous_report)
+        _log_ncaaf_system_library_audit(inventory=system_library_inventory,delta=system_library_change_audit,miners=miners,log_func=log_func)
         report={"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG,"version":NCAAF_RESEARCH_V2_VERSION,"created_utc":_now(),
                 "status":"NCAAF_RESEARCH_V2_COMPLETE","production_authority":0,"production_contract_mutated":False,
                 "benchmark":"FROZEN_NCAAF_PRODUCTION_V1","discovery_max_season":DISCOVERY_MAX_SEASON,"confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"system_miner_v3":miners,
+                "system_library_inventory":system_library_inventory,"system_library_change_audit":system_library_change_audit,
                 "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,
                 "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False,"source_neutral":True,"pt_systems_may_earn_bounded_vote":True,"pt_family_vote_cap":1,"pt_model_weight":0},
                 "next_step":"KEEP PRODUCTION V1 FROZEN; TREAT PT-DERIVED MINER SYSTEMS THE SAME AS OTHER SYSTEMS AT THE QUALIFICATION GATE; COLLAPSE ALL PT VARIANTS TO ONE EXTERNAL_RATINGS_FAMILY VOTE; KEEP RAW PT MODEL WEIGHT AT ZERO; 2026 REMAINS PROSPECTIVE ONLY"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
         bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
-        if storage_client is None:
-            from google.cloud import storage
-            storage_client=storage.Client()
-        b=storage_client.bucket(bucket_name)
         body=json.dumps(_report_without_models(report),sort_keys=True,separators=(",",":"),default=str).encode()
         sha=hashlib.sha256(body).hexdigest(); hist=f"{REPORT_HISTORY_PREFIX}/{sha[:16]}/report.json"
         b.blob(hist).upload_from_string(body,content_type="application/json"); b.blob(REPORT_CURRENT_BLOB).upload_from_string(body,content_type="application/json")
@@ -4591,8 +4763,11 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         _strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if _miner_live_authority_eligible(_m))
         _pt_strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_external_ratings_family")) and _miner_live_authority_eligible(_m))
         _bounce_strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_role_transition_bounceback_family")) and _miner_live_authority_eligible(_m))
+        _state_strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_season_record_state_family")) and _miner_live_authority_eligible(_m))
+        _state_confirmed=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_season_record_state_family")) and bool(_m.get("confirmation_pass")))
+        _bounce_confirmed=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_role_transition_bounceback_family")) and bool(_m.get("confirmation_pass")))
         _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_","META_PT_","PTIDX_","PT_ALL_","PT_CLUSTER_","PT_TRACKER_")) for c in (_m.get("representative_conditions") or [])))
-        log_func(f"[NCAAF-RV224-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} pt_miner_live_authority={_pt_strong} pt_family_vote_cap=1 bounceback_miner_live_authority={_bounce_strong} bounceback_family_vote_cap=1 source_neutral_system_gate=TRUE prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
+        log_func(f"[NCAAF-RV225-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} independent_live_families={system_library_inventory.get('independent_live_family_votes')} pt_miner_live_authority={_pt_strong} pt_family_vote_cap=1 state_confirmed={_state_confirmed} state_miner_live_authority={_state_strong} state_family_vote_cap=1 bounceback_confirmed={_bounce_confirmed} bounceback_miner_live_authority={_bounce_strong} bounceback_family_vote_cap=1 added_confirmed={len(system_library_change_audit.get('added_confirmed') or [])} added_live={len(system_library_change_audit.get('added_live') or [])} source_neutral_system_gate=TRUE prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
         return report
     except Exception as exc:
         log_func(f"[NCAAF-RV2-FAIL] {type(exc).__name__}: {exc}")
