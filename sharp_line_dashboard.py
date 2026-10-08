@@ -47855,7 +47855,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     st.caption(
         "Same compact production board as NCAAF: one game per row with Spread, H2H and Totals side by side. "
         "Weekly Update creates/reuses frozen fair values. Production Betting V3.2 is CORE-first: Spread CORE cover probability ≥57.5% and live EV ≥2% creates a CANDIDATE, not a wager. "
-        "One qualified independent Miner/Pathi/Big Al family confirms BET; 2+ independent supporters confirm STRONG BET; mixed/single conflict stays CANDIDATE and 2+ net conflicts can veto to PASS. "
+        "One qualified independent Miner/Pathi/Big Al/PT-derived family confirms BET; 2+ independent supporters confirm STRONG BET; mixed/single conflict stays CANDIDATE and 2+ net conflicts can veto to PASS. "
         "Systems cannot create a candidate or reverse CORE. H2H and Totals remain model-only. The background scanner refreshes recommendations from current prices without refitting CORE."
     )
     _bg=cur.get("background_refresh") or {}
@@ -47898,151 +47898,157 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     main["Tot Model Edge"]=pd.to_numeric(main["Tot Model Edge"],errors="coerce").map(lambda x:f"{x:.2f} pts" if pd.notna(x) else "—")
     st.dataframe(main,use_container_width=True,hide_index=True)
 
-    # FAST TABLE-ONLY UI: the production board is the terminal render.
-    # Do not execute collapsed results/research/system-index panels on every page load.
-    return
+    # FAST + LAZY DETAILS:
+    # Nothing below is executed until the operator explicitly opens that detail family.
+    _nfl_dc1,_nfl_dc2,_nfl_dc3=st.columns(3)
+    with _nfl_dc1:
+        _show_nfl_systems=st.checkbox("Show System Details",value=False,key="nfl-lazy-system-details")
+    with _nfl_dc2:
+        _show_nfl_model=st.checkbox("Show Model / Bet Authority Details",value=False,key="nfl-lazy-model-details")
+    with _nfl_dc3:
+        _show_nfl_results=st.checkbox("Show Production Results",value=False,key="nfl-lazy-production-results")
 
-    with st.expander("NFL Production Results — CORE + Systems + Bet Authority",expanded=False):
-        _render_nfl_production_results(cur)
-
-    # NCAAF-style secondary diagnostics: hidden by default, never a second legacy board.
-    with st.expander("Production Betting V3.2 — candidate / bet decision details",expanded=False):
-        detail=[]
-        for r in rows:
-            m=str(r.get("market") or "")
-            detail.append({
-                "Matchup":f"{r.get('away_team','')} @ {r.get('home_team','')}",
-                "Market":m,
-                "Action":r.get("action"),
-                "Model Pick":r.get("selected"),
-                "Model Fair":r.get("model_value"),
-                "Current Market":r.get("market_value"),
-                "Model Edge":r.get("raw_model_edge"),
-                "CORE Cover Prob":r.get("core_cover_probability"),
-                "CORE Prob Gate":r.get("core_probability_threshold"),
-                "CORE Live EV":r.get("core_live_ev"),
-                "CORE EV Gate":r.get("core_min_live_ev"),
-                "CORE Qualifies":r.get("core_candidate_qualifies"),
-                "Miner Status":r.get("live_miner_status"),
-                "Miner Qualified":" | ".join(str(x) for x in (r.get("live_miner_qualified_families") or [])),
-                "Miner Evaluable":" | ".join(str(x) for x in (r.get("live_miner_evaluable_families") or [])),
-                "Miner Triggers":" | ".join(str(x) for x in (r.get("live_miner_trigger_families") or [])),
-                "Miner Not Evaluable":" | ".join(str(x) for x in (r.get("live_miner_not_evaluable") or [])),
-                "System Support Count":r.get("qualified_system_support_count"),
-                "System Support Families":" | ".join(str(x) for x in (r.get("qualified_system_support_families") or [])),
-                "System Support Sources":" | ".join(str(x) for x in (r.get("qualified_system_support_sources") or [])),
-                "System Conflict Count":r.get("qualified_system_conflict_count"),
-                "System Conflict Families":" | ".join(str(x) for x in (r.get("qualified_system_conflict_families") or [])),
-                "System Conflict Sources":" | ".join(str(x) for x in (r.get("qualified_system_conflict_sources") or [])),
-                "Confidence":r.get("recommendation_confidence"),
-                "Current Price":r.get("selected_price"),
-                "Execution Book":r.get("selected_book"),
-                "Quote Age Minutes":r.get("quote_age_minutes"),
-                "STAT":r.get("stat_state"),
-                "SYSTEM":r.get("system_state"),
-                "MARKET":r.get("market_state"),
-                "Decision Reason":r.get("decision_reason"),
-            })
-        st.dataframe(pd.DataFrame(detail),use_container_width=True,hide_index=True)
-
-    policy=cur.get("production_betting_policy") or {}
-    with st.expander("NFL Production Betting V3.2 — CORE candidate + system confirmation policy",expanded=False):
-        _sp=policy.get("spread") or {}
-        prows=[
-            {
-                "Market":"SPREADS",
-                "Production Authority":"CORE CANDIDATE → SYSTEM CONFIRMATION",
-                "CORE Gate":f"Cover probability ≥ {100*float(_sp.get('core_probability_threshold') or 0.575):.1f}%",
-                "Execution Gate":f"Live EV ≥ {100*float(_sp.get('min_live_ev') or 0.02):.1f}% creates CANDIDATE",
-                "Overlay Rule":"1 support = BET; 2+ supports = STRONG BET; mixed/single conflict = CANDIDATE; 2+ net conflicts = PASS",
-            },
-            {
-                "Market":"H2H",
-                "Production Authority":"MODEL ONLY",
-                "CORE Gate":"No frozen betting-EV threshold",
-                "Execution Gate":"—",
-                "Overlay Rule":"Systems cannot create a wager",
-            },
-            {
-                "Market":"TOTALS",
-                "Production Authority":"MODEL ONLY",
-                "CORE Gate":"No frozen CORE probability threshold",
-                "Execution Gate":"—",
-                "Overlay Rule":"Systems cannot create a wager",
-            },
-        ]
-        st.dataframe(pd.DataFrame(prows),use_container_width=True,hide_index=True)
-        st.caption(
-            f"Frozen Bet Authority policy: {policy.get('source_tag','nfl-production-betting-v3.2-live-miner-pathi-confirmation-20261005')}. "
-            "CORE is the only prediction authority. Clearing the CORE/price gates creates a CANDIDATE only. Miner, Pathi and Big Al are normalized to one independent family per vote; one qualified supporter is required for BET and two for STRONG BET. "
-            "STAT and MARKET remain bounded diagnostics until their incremental production gate is validated. Heavy Research may publish new evidence but cannot silently change this production policy."
-        )
-
-    with st.expander("NFL System Rules Index — mined + published + Pathi systems",expanded=False):
-        if not isinstance(rules_state,dict) or rules_state.get("status")!="READY":
-            st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.10.4 or later.")
-        else:
-            rr=pd.DataFrame(rules_state.get("rows") or [])
-            cov=rules_state.get("coverage") or {}
-            active_ids=set(pathi_active_ids)
-            for _r in rows:
-                for _fid in ((_r.get("qualified_system_support_families") or [])+(_r.get("qualified_system_conflict_families") or [])):
-                    if str(_fid).strip(): active_ids.add(str(_fid).strip())
-                for _v in (_r.get("system_trigger_votes") or []):
-                    if isinstance(_v,dict):
-                        for _k in ("system_id","family","system_family_id"):
-                            if str(_v.get(_k) or "").strip(): active_ids.add(str(_v.get(_k)).strip())
-            if rr.empty:
-                st.info("Rules Index exists but contains no rows.")
-            else:
-                rr["Active Now"]=rr.get("system_id",pd.Series("",index=rr.index)).astype(str).isin(active_ids)
-                src_opts=sorted(rr.get("source",pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
-                status_opts=sorted(rr.get("status",pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
-                c1,c2=st.columns(2)
-                with c1:
-                    src_sel=st.multiselect("Rule source",src_opts,default=src_opts,key="nfl-system-rules-source")
-                with c2:
-                    status_sel=st.multiselect("Rule status",status_opts,default=status_opts,key="nfl-system-rules-status")
-                show=rr.copy()
-                if src_sel: show=show[show["source"].astype(str).isin(src_sel)]
-                if status_sel: show=show[show["status"].astype(str).isin(status_sel)]
-                cols=[c for c in ["Active Now","system_id","name","source","pathi_family_label","evidence_level","normalized_vote_eligible","market","action","rule_text","discovery","validation_2023_2025","overall_2017_2025","historical_discovery_status","current_evidence_state","status","prospective_action","live_scoring"] if c in show.columns]
-                show=show[cols].copy()
-                show=show.rename(columns={"system_id":"System ID","name":"System","source":"Source","pathi_family_label":"Pathi Family","evidence_level":"Evidence Level","normalized_vote_eligible":"Normalized Vote","market":"Market","action":"Action","rule_text":"Rule","discovery":"2017-22 Discovery","validation_2023_2025":"2023-25 Validation","overall_2017_2025":"2017-25 Overall","historical_discovery_status":"Discovery Evidence","current_evidence_state":"Current Evidence","status":"Family Status","prospective_action":"Next Step","live_scoring":"Live Role"})
-                st.dataframe(show,use_container_width=True,hide_index=True)
-                st.caption("Evidence lifecycle: W-L-P and ATS% are shown directly. Qualified Miner/Pathi/Big Al rows may contribute one normalized confirmation/conflict vote in Production Betting V3.2. They cannot create a CORE candidate, reverse CORE, or alter CORE fair values; correlated/mirror variants collapse to one independent family.")
-            if cov:
-                bigal_missing=cov.get("bigal_missing_ids") or []
-                pf=cov.get("pathi_framework_coverage") or {}
-                exec_cov=cov.get("market_execution_coverage") or {}
-                anatomy=cov.get("miner_anatomy_coverage") or {}
-                st.caption(f"Coverage audit: {cov.get('status','—')} • Big Al missing: {', '.join(bigal_missing) if bigal_missing else 'none'} • mined families indexed: {cov.get('mined_family_count','—')}.")
-                _show_cov=st.checkbox("Show Miner anatomy / Pathi / market-execution coverage audit",value=False,key="nfl-system-rules-coverage-audit")
-                if _show_cov:
-                    audit_rows=[]
-                    for k,v in anatomy.items():
-                        if k!="production_authority": audit_rows.append({"Area":"MINER: "+k,"Status":str(v),"Evidence":"prior-only system-discovery context"})
-                    for k,v in pf.items(): audit_rows.append({"Area":k,"Status":(v or {}).get("status"),"Evidence":" | ".join((v or {}).get("evidence") or [])})
-                    for k,v in exec_cov.items(): audit_rows.append({"Area":"MARKET: "+k,"Status":(v or {}).get("status"),"Evidence":" | ".join((v or {}).get("fields") or [])})
-                    if audit_rows: st.dataframe(pd.DataFrame(audit_rows),use_container_width=True,hide_index=True)
-
-    edge_state=_nfl_edge_authority_v2_state_cached()
-    edge_meta=(edge_state.get("meta") or {}) if isinstance(edge_state,dict) else {}
-    if edge_meta:
-        with st.expander("Research / shadow diagnostics",expanded=False):
-            st.caption("CORE is prediction authority and creates candidates. Qualified Miner/Pathi/Big Al systems confirm or conflict with a CORE candidate; STAT/MARKET/PBP remain diagnostic. No research lane can create a candidate or reverse CORE.")
-            fam=[]
-            for f in edge_meta.get("families") or []:
-                fam.append({
-                    "Market":f.get("market"),"Mechanism":f.get("mechanism_class"),"Family":f.get("mechanism_family_id"),
-                    "Status":f.get("family_status"),
-                    "Production Influence":"BOUNDED OVERLAY" if str(f.get("mechanism_class") or "").upper()=="SYSTEM" else "DIAGNOSTIC",
-                    "Confirm N":(f.get("confirmation") or {}).get("n"),"Confirm Hit":_nfl_be_pct((f.get("confirmation") or {}).get("hit_rate")),
-                    "Confirm ROI":_nfl_be_pct((f.get("confirmation") or {}).get("roi_per_unit")),
+    if _show_nfl_results:
+        with st.expander("NFL Production Results — CORE + Systems + Bet Authority",expanded=False):
+            _render_nfl_production_results(cur)
+    if _show_nfl_model:
+        # NCAAF-style secondary diagnostics: hidden by default, never a second legacy board.
+        with st.expander("Production Betting V3.2 — candidate / bet decision details",expanded=False):
+            detail=[]
+            for r in rows:
+                m=str(r.get("market") or "")
+                detail.append({
+                    "Matchup":f"{r.get('away_team','')} @ {r.get('home_team','')}",
+                    "Market":m,
+                    "Action":r.get("action"),
+                    "Model Pick":r.get("selected"),
+                    "Model Fair":r.get("model_value"),
+                    "Current Market":r.get("market_value"),
+                    "Model Edge":r.get("raw_model_edge"),
+                    "CORE Cover Prob":r.get("core_cover_probability"),
+                    "CORE Prob Gate":r.get("core_probability_threshold"),
+                    "CORE Live EV":r.get("core_live_ev"),
+                    "CORE EV Gate":r.get("core_min_live_ev"),
+                    "CORE Qualifies":r.get("core_candidate_qualifies"),
+                    "Miner Status":r.get("live_miner_status"),
+                    "Miner Qualified":" | ".join(str(x) for x in (r.get("live_miner_qualified_families") or [])),
+                    "Miner Evaluable":" | ".join(str(x) for x in (r.get("live_miner_evaluable_families") or [])),
+                    "Miner Triggers":" | ".join(str(x) for x in (r.get("live_miner_trigger_families") or [])),
+                    "Miner Not Evaluable":" | ".join(str(x) for x in (r.get("live_miner_not_evaluable") or [])),
+                    "System Support Count":r.get("qualified_system_support_count"),
+                    "System Support Families":" | ".join(str(x) for x in (r.get("qualified_system_support_families") or [])),
+                    "System Support Sources":" | ".join(str(x) for x in (r.get("qualified_system_support_sources") or [])),
+                    "System Conflict Count":r.get("qualified_system_conflict_count"),
+                    "System Conflict Families":" | ".join(str(x) for x in (r.get("qualified_system_conflict_families") or [])),
+                    "System Conflict Sources":" | ".join(str(x) for x in (r.get("qualified_system_conflict_sources") or [])),
+                    "Confidence":r.get("recommendation_confidence"),
+                    "Current Price":r.get("selected_price"),
+                    "Execution Book":r.get("selected_book"),
+                    "Quote Age Minutes":r.get("quote_age_minutes"),
+                    "STAT":r.get("stat_state"),
+                    "SYSTEM":r.get("system_state"),
+                    "MARKET":r.get("market_state"),
+                    "Decision Reason":r.get("decision_reason"),
                 })
-            if fam:
-                st.dataframe(pd.DataFrame(fam),use_container_width=True,hide_index=True)
+            st.dataframe(pd.DataFrame(detail),use_container_width=True,hide_index=True)
 
+        policy=cur.get("production_betting_policy") or {}
+        with st.expander("NFL Production Betting V3.2 — CORE candidate + system confirmation policy",expanded=False):
+            _sp=policy.get("spread") or {}
+            prows=[
+                {
+                    "Market":"SPREADS",
+                    "Production Authority":"CORE CANDIDATE → SYSTEM CONFIRMATION",
+                    "CORE Gate":f"Cover probability ≥ {100*float(_sp.get('core_probability_threshold') or 0.575):.1f}%",
+                    "Execution Gate":f"Live EV ≥ {100*float(_sp.get('min_live_ev') or 0.02):.1f}% creates CANDIDATE",
+                    "Overlay Rule":"1 support = BET; 2+ supports = STRONG BET; mixed/single conflict = CANDIDATE; 2+ net conflicts = PASS",
+                },
+                {
+                    "Market":"H2H",
+                    "Production Authority":"MODEL ONLY",
+                    "CORE Gate":"No frozen betting-EV threshold",
+                    "Execution Gate":"—",
+                    "Overlay Rule":"Systems cannot create a wager",
+                },
+                {
+                    "Market":"TOTALS",
+                    "Production Authority":"MODEL ONLY",
+                    "CORE Gate":"No frozen CORE probability threshold",
+                    "Execution Gate":"—",
+                    "Overlay Rule":"Systems cannot create a wager",
+                },
+            ]
+            st.dataframe(pd.DataFrame(prows),use_container_width=True,hide_index=True)
+            st.caption(
+                f"Frozen Bet Authority policy: {policy.get('source_tag','nfl-production-betting-v3.2-live-miner-pathi-confirmation-20261005')}. "
+                "CORE is the only prediction authority. Clearing the CORE/price gates creates a CANDIDATE only. Miner, Pathi, Big Al and qualified PT-derived systems are normalized to one independent family per vote; one qualified supporter is required for BET and two for STRONG BET. "
+                "STAT and MARKET remain bounded diagnostics until their incremental production gate is validated. Heavy Research may publish new evidence but cannot silently change this production policy."
+            )
+    if _show_nfl_systems:
+        with st.expander("NFL System Rules Index — mined + published + Pathi systems",expanded=False):
+            if not isinstance(rules_state,dict) or rules_state.get("status")!="READY":
+                st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.10.4 or later.")
+            else:
+                rr=pd.DataFrame(rules_state.get("rows") or [])
+                cov=rules_state.get("coverage") or {}
+                active_ids=set(pathi_active_ids)
+                for _r in rows:
+                    for _fid in ((_r.get("qualified_system_support_families") or [])+(_r.get("qualified_system_conflict_families") or [])):
+                        if str(_fid).strip(): active_ids.add(str(_fid).strip())
+                    for _v in (_r.get("system_trigger_votes") or []):
+                        if isinstance(_v,dict):
+                            for _k in ("system_id","family","system_family_id"):
+                                if str(_v.get(_k) or "").strip(): active_ids.add(str(_v.get(_k)).strip())
+                if rr.empty:
+                    st.info("Rules Index exists but contains no rows.")
+                else:
+                    rr["Active Now"]=rr.get("system_id",pd.Series("",index=rr.index)).astype(str).isin(active_ids)
+                    src_opts=sorted(rr.get("source",pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+                    status_opts=sorted(rr.get("status",pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+                    c1,c2=st.columns(2)
+                    with c1:
+                        src_sel=st.multiselect("Rule source",src_opts,default=src_opts,key="nfl-system-rules-source")
+                    with c2:
+                        status_sel=st.multiselect("Rule status",status_opts,default=status_opts,key="nfl-system-rules-status")
+                    show=rr.copy()
+                    if src_sel: show=show[show["source"].astype(str).isin(src_sel)]
+                    if status_sel: show=show[show["status"].astype(str).isin(status_sel)]
+                    cols=[c for c in ["Active Now","system_id","name","source","pathi_family_label","evidence_level","normalized_vote_eligible","market","action","rule_text","discovery","validation_2023_2025","overall_2017_2025","historical_discovery_status","current_evidence_state","status","prospective_action","live_scoring"] if c in show.columns]
+                    show=show[cols].copy()
+                    show=show.rename(columns={"system_id":"System ID","name":"System","source":"Source","pathi_family_label":"Pathi Family","evidence_level":"Evidence Level","normalized_vote_eligible":"Normalized Vote","market":"Market","action":"Action","rule_text":"Rule","discovery":"2017-22 Discovery","validation_2023_2025":"2023-25 Validation","overall_2017_2025":"2017-25 Overall","historical_discovery_status":"Discovery Evidence","current_evidence_state":"Current Evidence","status":"Family Status","prospective_action":"Next Step","live_scoring":"Live Role"})
+                    st.dataframe(show,use_container_width=True,hide_index=True)
+                    st.caption("Evidence lifecycle: W-L-P and ATS% are shown directly. Qualified Miner/Pathi/Big Al/PT-derived rows may contribute one normalized confirmation/conflict vote in Production Betting V3.2. They cannot create a CORE candidate, reverse CORE, or alter CORE fair values; correlated/mirror variants collapse to one independent family.")
+                if cov:
+                    bigal_missing=cov.get("bigal_missing_ids") or []
+                    pf=cov.get("pathi_framework_coverage") or {}
+                    exec_cov=cov.get("market_execution_coverage") or {}
+                    anatomy=cov.get("miner_anatomy_coverage") or {}
+                    st.caption(f"Coverage audit: {cov.get('status','—')} • Big Al missing: {', '.join(bigal_missing) if bigal_missing else 'none'} • mined families indexed: {cov.get('mined_family_count','—')}.")
+                    _show_cov=st.checkbox("Show Miner anatomy / Pathi / market-execution coverage audit",value=False,key="nfl-system-rules-coverage-audit")
+                    if _show_cov:
+                        audit_rows=[]
+                        for k,v in anatomy.items():
+                            if k!="production_authority": audit_rows.append({"Area":"MINER: "+k,"Status":str(v),"Evidence":"prior-only system-discovery context"})
+                        for k,v in pf.items(): audit_rows.append({"Area":k,"Status":(v or {}).get("status"),"Evidence":" | ".join((v or {}).get("evidence") or [])})
+                        for k,v in exec_cov.items(): audit_rows.append({"Area":"MARKET: "+k,"Status":(v or {}).get("status"),"Evidence":" | ".join((v or {}).get("fields") or [])})
+                        if audit_rows: st.dataframe(pd.DataFrame(audit_rows),use_container_width=True,hide_index=True)
+
+        edge_state=_nfl_edge_authority_v2_state_cached()
+        edge_meta=(edge_state.get("meta") or {}) if isinstance(edge_state,dict) else {}
+        if edge_meta:
+            with st.expander("Research / shadow diagnostics",expanded=False):
+                st.caption("CORE is prediction authority and creates candidates. Qualified Miner/Pathi/Big Al/PT-derived systems confirm or conflict with a CORE candidate; STAT/MARKET/PBP remain diagnostic. No research lane can create a candidate or reverse CORE.")
+                fam=[]
+                for f in edge_meta.get("families") or []:
+                    fam.append({
+                        "Market":f.get("market"),"Mechanism":f.get("mechanism_class"),"Family":f.get("mechanism_family_id"),
+                        "Status":f.get("family_status"),
+                        "Production Influence":"BOUNDED OVERLAY" if str(f.get("mechanism_class") or "").upper()=="SYSTEM" else "DIAGNOSTIC",
+                        "Confirm N":(f.get("confirmation") or {}).get("n"),"Confirm Hit":_nfl_be_pct((f.get("confirmation") or {}).get("hit_rate")),
+                        "Confirm ROI":_nfl_be_pct((f.get("confirmation") or {}).get("roi_per_unit")),
+                    })
+                if fam:
+                    st.dataframe(pd.DataFrame(fam),use_container_width=True,hide_index=True)
     tot_bets=int(view.get("Tot Action",pd.Series("",index=view.index)).isin(["BET","STRONG BET"]).sum())
     print(f"[NFL-PROD-V1-FAST-UI] games={len(view)} spread_bets={spr_bets} totals_bets={tot_bets} h2h_model_only={h2h_model_only} production_games={prod_n} legacy_board=REMOVED layout=NCAAF_MATCH production_policy=NFL_PRODUCTION_BETTING_V3_2_LIVE_MINER_PATHI")
 
@@ -48365,393 +48371,399 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
 
     _prod_contract=_ncaaf_prod_v1_load_contract(GCS_BUCKET)
     st.subheader('NCAAF Production — CORE + Systems + Bet Authority')
-    if isinstance(_prod_contract,dict):
-        st.caption('Spread/H2H/Totals remain separate frozen probability models. CORE creates a candidate only after clearing the price-aware 2% edge + 2% EV gate. STAT, Pathi, Big Al and STRONG_VALIDATED Miner families are bounded evidence: they may confirm or oppose CORE, but cannot create a wager, reverse the side, or rewrite model probability. Prediction Tracker remains a backend research/shadow brain with zero production authority; PT margin fields are intentionally not displayed on the production board. CONFIRMED_SHADOW Miner families remain research/prospective only. H2H remains model-only.')
-        _backs=_prod_contract.get('backbones') or {}
-        _spf=len(((_backs.get('spread') or {}).get('feature_cols') or [])); _h2f=len(((_backs.get('h2h') or {}).get('feature_cols') or [])); _ttf=len(((_backs.get('totals') or {}).get('feature_cols') or []))
-        st.caption(f'Fast production path: Spread {_spf} fixed features • H2H {_h2f} fixed features • Totals {_ttf} fixed features • cadence FROZEN • AutoFS OFF • multi-head runtime OFF • rich-market model OFF.')
-    else:
-        st.warning('NCAAF Production V1 contract is not published. Weekly Update cannot create a production contract; an explicit approved promotion is required before production scoring can run.')
+    if _show_ncaaf_model:
+        if isinstance(_prod_contract,dict):
+            st.caption('Spread/H2H/Totals remain separate frozen probability models. CORE creates a candidate only after clearing the price-aware 2% edge + 2% EV gate. STAT, Pathi, Big Al and STRONG_VALIDATED Miner families (including qualified PT-derived systems) are bounded evidence: they may confirm or oppose CORE, but cannot create a wager, reverse the side, or rewrite model probability. Prediction Tracker remains a backend research/shadow brain with zero production authority; PT margin fields are intentionally not displayed on the production board. CONFIRMED_SHADOW Miner families remain research/prospective only. H2H remains model-only.')
+            _backs=_prod_contract.get('backbones') or {}
+            _spf=len(((_backs.get('spread') or {}).get('feature_cols') or [])); _h2f=len(((_backs.get('h2h') or {}).get('feature_cols') or [])); _ttf=len(((_backs.get('totals') or {}).get('feature_cols') or []))
+            st.caption(f'Fast production path: Spread {_spf} fixed features • H2H {_h2f} fixed features • Totals {_ttf} fixed features • cadence FROZEN • AutoFS OFF • multi-head runtime OFF • rich-market model OFF.')
+        else:
+            st.warning('NCAAF Production V1 contract is not published. Weekly Update cannot create a production contract; an explicit approved promotion is required before production scoring can run.')
 
-    candidate_n=int(view.get('Spr Action',pd.Series('',index=view.index)).eq('CANDIDATE').sum())+int(view.get('Tot Action',pd.Series('',index=view.index)).eq('CANDIDATE').sum())
-    core_qualified_n=int(pd.Series(view.get('Spr CORE Qualifies',False),index=view.index).fillna(False).astype(bool).sum())+int(pd.Series(view.get('Tot CORE Qualifies',False),index=view.index).fillna(False).astype(bool).sum())
-    bet_n=int(view.get('Spr Action',pd.Series('',index=view.index)).eq('BET').sum())+int(view.get('Tot Action',pd.Series('',index=view.index)).eq('BET').sum())
-    strong_n=int(view.get('Spr Action',pd.Series('',index=view.index)).eq('STRONG BET').sum())
-    h2h_n=int(view.get('H2H Prob',pd.Series(np.nan,index=view.index)).notna().sum())
-    prod_n=int(view.get('Production Plays',pd.Series('—',index=view.index)).ne('—').sum())
-    m1,m2,m3,m4,m5=st.columns(5)
-    m1.metric('Upcoming games',int(len(view))); m2.metric('CORE-qualified markets',core_qualified_n); m3.metric('Confirmed BET',bet_n); m4.metric('STRONG BET',strong_n); m5.metric('H2H model-only',h2h_n)
-    if candidate_n:
-        st.caption(f'{candidate_n} CORE-qualified market(s) are currently CANDIDATE because they do not yet have clean independent confirmation.')
-    if strong_n:
-        st.caption(f'{strong_n} spread game(s) currently have 2+ independent supporting evidence families and are marked STRONG BET.')
+        candidate_n=int(view.get('Spr Action',pd.Series('',index=view.index)).eq('CANDIDATE').sum())+int(view.get('Tot Action',pd.Series('',index=view.index)).eq('CANDIDATE').sum())
+        core_qualified_n=int(pd.Series(view.get('Spr CORE Qualifies',False),index=view.index).fillna(False).astype(bool).sum())+int(pd.Series(view.get('Tot CORE Qualifies',False),index=view.index).fillna(False).astype(bool).sum())
+        bet_n=int(view.get('Spr Action',pd.Series('',index=view.index)).eq('BET').sum())+int(view.get('Tot Action',pd.Series('',index=view.index)).eq('BET').sum())
+        strong_n=int(view.get('Spr Action',pd.Series('',index=view.index)).eq('STRONG BET').sum())
+        h2h_n=int(view.get('H2H Prob',pd.Series(np.nan,index=view.index)).notna().sum())
+        prod_n=int(view.get('Production Plays',pd.Series('—',index=view.index)).ne('—').sum())
+        m1,m2,m3,m4,m5=st.columns(5)
+        m1.metric('Upcoming games',int(len(view))); m2.metric('CORE-qualified markets',core_qualified_n); m3.metric('Confirmed BET',bet_n); m4.metric('STRONG BET',strong_n); m5.metric('H2H model-only',h2h_n)
+        if candidate_n:
+            st.caption(f'{candidate_n} CORE-qualified market(s) are currently CANDIDATE because they do not yet have clean independent confirmation.')
+        if strong_n:
+            st.caption(f'{strong_n} spread game(s) currently have 2+ independent supporting evidence families and are marked STRONG BET.')
 
-    # Live Miner health makes a silent evaluator obvious instead of confusing a
-    # quiet slate with a broken trigger bridge.
-    _miner_confirmed=int(pd.to_numeric(picks.get('NCAAF_Miner_Confirmed_Research',pd.Series(0,index=picks.index)),errors='coerce').fillna(0).max()) if len(picks) else 0
-    _miner_qualified=int(pd.to_numeric(picks.get('NCAAF_Miner_Qualified',pd.Series(0,index=picks.index)),errors='coerce').fillna(0).max()) if len(picks) else 0
-    _miner_evaluable=int(pd.to_numeric(picks.get('NCAAF_Miner_Evaluable',pd.Series(0,index=picks.index)),errors='coerce').fillna(0).max()) if len(picks) else 0
-    _miner_triggers=int(pd.to_numeric(picks.get('NCAAF_Miner_Live_Trigger_Count',pd.Series(0,index=picks.index)),errors='coerce').fillna(0).sum()) if len(picks) else 0
-    _miner_research_triggers=int(pd.to_numeric(picks.get('NCAAF_Miner_Research_Trigger_Count',pd.Series(0,index=picks.index)),errors='coerce').fillna(0).sum()) if len(picks) else 0
-    _miner_support=int(pd.to_numeric(picks.get('_system_support_count',pd.Series(0,index=picks.index)),errors='coerce').fillna(0)[picks.get('_system_support_sources',pd.Series('',index=picks.index)).astype(str).str.contains('MINER',case=False,na=False)].sum()) if len(picks) else 0
-    _miner_conflict=int(pd.to_numeric(picks.get('_system_conflict_count',pd.Series(0,index=picks.index)),errors='coerce').fillna(0)[picks.get('_system_conflict_sources',pd.Series('',index=picks.index)).astype(str).str.contains('MINER',case=False,na=False)].sum()) if len(picks) else 0
-    st.markdown('**LIVE MINER — tightened authority**')
-    _mc=st.columns(6)
-    _mc[0].metric('Confirmed research',_miner_confirmed); _mc[1].metric('Strong/live authority',_miner_qualified); _mc[2].metric('Evaluable live',_miner_evaluable); _mc[3].metric('Authority triggers',_miner_triggers); _mc[4].metric('Supports CORE',_miner_support); _mc[5].metric('Conflicts CORE',_miner_conflict)
-    _shadow_only=max(0,_miner_research_triggers-_miner_triggers)
-    st.caption(f'Miner authority gate: 2024–25 confirmation N ≥ 60 and hit rate ≥ 56%, after the original BOTH-2024-and-2025 confirmation gate. 2026 outcomes do not qualify a family. Current research triggers: {_miner_research_triggers}; shadow-only triggers: {_shadow_only}.')
-    _schedule_conflict_games=(int(picks.loc[picks.get('_prod_schedule_conflict',pd.Series(False,index=picks.index)).fillna(False).astype(bool),'_prod_game_id'].nunique()) if '_prod_game_id' in picks.columns else 0)
-    if _schedule_conflict_games:
-        st.caption(f'Schedule normalization merged {_schedule_conflict_games} matchup(s) that arrived with conflicting kickoff-time variants. The freshest/highest-coverage kickoff is used for the production board and ledger identity.')
+        # Live Miner health makes a silent evaluator obvious instead of confusing a
+        # quiet slate with a broken trigger bridge.
+        _miner_confirmed=int(pd.to_numeric(picks.get('NCAAF_Miner_Confirmed_Research',pd.Series(0,index=picks.index)),errors='coerce').fillna(0).max()) if len(picks) else 0
+        _miner_qualified=int(pd.to_numeric(picks.get('NCAAF_Miner_Qualified',pd.Series(0,index=picks.index)),errors='coerce').fillna(0).max()) if len(picks) else 0
+        _miner_evaluable=int(pd.to_numeric(picks.get('NCAAF_Miner_Evaluable',pd.Series(0,index=picks.index)),errors='coerce').fillna(0).max()) if len(picks) else 0
+        _miner_triggers=int(pd.to_numeric(picks.get('NCAAF_Miner_Live_Trigger_Count',pd.Series(0,index=picks.index)),errors='coerce').fillna(0).sum()) if len(picks) else 0
+        _miner_research_triggers=int(pd.to_numeric(picks.get('NCAAF_Miner_Research_Trigger_Count',pd.Series(0,index=picks.index)),errors='coerce').fillna(0).sum()) if len(picks) else 0
+        _miner_support=int(pd.to_numeric(picks.get('_system_support_count',pd.Series(0,index=picks.index)),errors='coerce').fillna(0)[picks.get('_system_support_sources',pd.Series('',index=picks.index)).astype(str).str.contains('MINER',case=False,na=False)].sum()) if len(picks) else 0
+        _miner_conflict=int(pd.to_numeric(picks.get('_system_conflict_count',pd.Series(0,index=picks.index)),errors='coerce').fillna(0)[picks.get('_system_conflict_sources',pd.Series('',index=picks.index)).astype(str).str.contains('MINER',case=False,na=False)].sum()) if len(picks) else 0
+        st.markdown('**LIVE MINER — tightened authority**')
+        _mc=st.columns(6)
+        _mc[0].metric('Confirmed research',_miner_confirmed); _mc[1].metric('Strong/live authority',_miner_qualified); _mc[2].metric('Evaluable live',_miner_evaluable); _mc[3].metric('Authority triggers',_miner_triggers); _mc[4].metric('Supports CORE',_miner_support); _mc[5].metric('Conflicts CORE',_miner_conflict)
+        _shadow_only=max(0,_miner_research_triggers-_miner_triggers)
+        st.caption(f'Miner authority gate: 2024–25 confirmation N ≥ 60 and hit rate ≥ 56%, after the original BOTH-2024-and-2025 confirmation gate. 2026 outcomes do not qualify a family. Current research triggers: {_miner_research_triggers}; shadow-only triggers: {_shadow_only}.')
+        _schedule_conflict_games=(int(picks.loc[picks.get('_prod_schedule_conflict',pd.Series(False,index=picks.index)).fillna(False).astype(bool),'_prod_game_id'].nunique()) if '_prod_game_id' in picks.columns else 0)
+        if _schedule_conflict_games:
+            st.caption(f'Schedule normalization merged {_schedule_conflict_games} matchup(s) that arrived with conflicting kickoff-time variants. The freshest/highest-coverage kickoff is used for the production board and ledger identity.')
 
-    view=view.sort_values('_game_start')
-    main=view[['Game Time','Matchup','Spr Action','Spr Pick','Spr Prob','Spr Edge','Spr Support','Spr Conflict','H2H Action','H2H Pick','H2H Prob','H2H Edge','Tot Action','Tot Pick','Tot Prob','Tot Edge','Tot Support','Tot Conflict','Production Plays','Pathi State','Miner State','System Trigger']].copy()
-    main=main.rename(columns={'Spr Edge':'Spr Model Edge','H2H Edge':'H2H Model Edge','Tot Edge':'Tot Model Edge'})
-    for c in ['Spr Prob','Spr Model Edge','H2H Prob','H2H Model Edge','Tot Prob','Tot Model Edge']:
-        main[c]=pd.to_numeric(main[c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
-    st.dataframe(main,use_container_width=True,hide_index=True)
+        view=view.sort_values('_game_start')
+        main=view[['Game Time','Matchup','Spr Action','Spr Pick','Spr Prob','Spr Edge','Spr Support','Spr Conflict','H2H Action','H2H Pick','H2H Prob','H2H Edge','Tot Action','Tot Pick','Tot Prob','Tot Edge','Tot Support','Tot Conflict','Production Plays','Pathi State','Miner State','System Trigger']].copy()
+        main=main.rename(columns={'Spr Edge':'Spr Model Edge','H2H Edge':'H2H Model Edge','Tot Edge':'Tot Model Edge'})
+        for c in ['Spr Prob','Spr Model Edge','H2H Prob','H2H Model Edge','Tot Prob','Tot Model Edge']:
+            main[c]=pd.to_numeric(main[c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
+        st.dataframe(main,use_container_width=True,hide_index=True)
 
-    # FAST TABLE-ONLY UI: the production board is the terminal render.
-    # Do not execute collapsed grading/research/evidence panels on every page load.
-    return
+        # FAST + LAZY DETAILS:
+        # Keep initial page load limited to the production board. Each detail family below
+        # is evaluated only after the operator explicitly asks for it.
+        _ncaaf_dc1,_ncaaf_dc2,_ncaaf_dc3=st.columns(3)
+        with _ncaaf_dc1:
+            _show_ncaaf_systems=st.checkbox("Show System Details",value=False,key="ncaaf-lazy-system-details")
+        with _ncaaf_dc2:
+            _show_ncaaf_model=st.checkbox("Show Model / Bet Authority Details",value=False,key="ncaaf-lazy-model-details")
+        with _ncaaf_dc3:
+            _show_ncaaf_results=st.checkbox("Show Production Results",value=False,key="ncaaf-lazy-production-results")
 
-    with st.expander('Why Bet Authority made each decision',expanded=False):
-        _detail=[]
-        for _,_r in picks.iterrows():
-            _detail.append({
-                'Matchup':_r.get('Matchup',''),'Market':str(_r.get('Market','')).upper(),'Action':_r.get('_prod_action'),
-                'CORE Pick':_r.get('Outcome'),'CORE Prob':_r.get('_pred'),'Break-even':_r.get('_be'),'CORE Edge':_r.get('_edge'),'CORE EV':_r.get('_ev'),
-                'CORE Edge Gate':_r.get('_core_edge_gate'),'CORE EV Gate':_r.get('_core_ev_gate'),'CORE Qualifies':_r.get('_core_qualifies'),
-                'Support Count':_r.get('_system_support_count'),'Support Sources':_r.get('_system_support_sources'),'Support Families':_r.get('_system_support_families'),
-                'Conflict Count':_r.get('_system_conflict_count'),'Conflict Sources':_r.get('_system_conflict_sources'),'Conflict Families':_r.get('_system_conflict_families'),
-                'Confidence':_r.get('_bet_authority_confidence'),'Reason':_r.get('_prod_reason'),
-                'Miner Authority Triggers':_ncaaf_authority_source_detail(_r,'MINER','NCAAF_RV2_System_Summary'),
-                'Miner Research Triggers':_ncaaf_clean_diag_text(_r.get('NCAAF_RV2_Research_System_Summary','—')),
-                'Pathi':_ncaaf_authority_source_detail(_r,'PATHI','Pathi_Active_Text'),
-                'Big Al':_ncaaf_authority_source_detail(_r,'BIG_AL','BigAl_Active_Text'),
-                'Book':_r.get('_book'),'Price':_r.get('_odds'),'Quote Age Min':(now-_r.get('_ts')).total_seconds()/60.0 if pd.notna(_r.get('_ts')) else np.nan,
-            })
-        st.dataframe(pd.DataFrame(_detail),use_container_width=True,hide_index=True)
-        st.caption('CORE creates candidates. Only STRONG_VALIDATED Miner families can confirm or oppose a candidate; weaker confirmed families remain visible as research/prospective shadow evidence. Evidence cannot select the opposite side or rewrite model probability. Unknown Miner atoms fail closed.')
+        if _show_ncaaf_model:
+            with st.expander('Why Bet Authority made each decision',expanded=False):
+                _detail=[]
+                for _,_r in picks.iterrows():
+                    _detail.append({
+                        'Matchup':_r.get('Matchup',''),'Market':str(_r.get('Market','')).upper(),'Action':_r.get('_prod_action'),
+                        'CORE Pick':_r.get('Outcome'),'CORE Prob':_r.get('_pred'),'Break-even':_r.get('_be'),'CORE Edge':_r.get('_edge'),'CORE EV':_r.get('_ev'),
+                        'CORE Edge Gate':_r.get('_core_edge_gate'),'CORE EV Gate':_r.get('_core_ev_gate'),'CORE Qualifies':_r.get('_core_qualifies'),
+                        'Support Count':_r.get('_system_support_count'),'Support Sources':_r.get('_system_support_sources'),'Support Families':_r.get('_system_support_families'),
+                        'Conflict Count':_r.get('_system_conflict_count'),'Conflict Sources':_r.get('_system_conflict_sources'),'Conflict Families':_r.get('_system_conflict_families'),
+                        'Confidence':_r.get('_bet_authority_confidence'),'Reason':_r.get('_prod_reason'),
+                        'Miner Authority Triggers':_ncaaf_authority_source_detail(_r,'MINER','NCAAF_RV2_System_Summary'),
+                        'Miner Research Triggers':_ncaaf_clean_diag_text(_r.get('NCAAF_RV2_Research_System_Summary','—')),
+                        'Pathi':_ncaaf_authority_source_detail(_r,'PATHI','Pathi_Active_Text'),
+                        'Big Al':_ncaaf_authority_source_detail(_r,'BIG_AL','BigAl_Active_Text'),
+                        'Book':_r.get('_book'),'Price':_r.get('_odds'),'Quote Age Min':(now-_r.get('_ts')).total_seconds()/60.0 if pd.notna(_r.get('_ts')) else np.nan,
+                    })
+                st.dataframe(pd.DataFrame(_detail),use_container_width=True,hide_index=True)
+                st.caption('CORE creates candidates. Only STRONG_VALIDATED Miner families can confirm or oppose a candidate; weaker confirmed families remain visible as research/prospective shadow evidence. Evidence cannot select the opposite side or rewrite model probability. Unknown Miner atoms fail closed.')
+        if _show_ncaaf_results:
+            # Results are written by the background NCAAF scanner, not when users open
+            # this page. Surface first/T-24/T-6/T-1 historical locks without retraining.
+            with st.expander('Production V1 — prospective pick grading',expanded=False):
+                st.caption('These results use immutable pregame scanner locks, not regenerated postgame predictions. FIRST, T24, T6 and T1 remain separate; V13 history is unchanged.')
+                try:
+                    _grade=_ncaaf_prod_v1_grading_summary_cached()
+                    if _grade.empty:
+                        st.info('No Production V1 pregame locks have been graded yet. Verify the background scanner is deployed with the Production V1 ledger module.')
+                    else:
+                        _grade=_grade.rename(columns={'model_instance_id':'Model instance','market':'Market','lock_type':'Lock','action':'Action','captured':'Captured','decided':'Decided','wins':'Wins','pushes':'Pushes','hit_rate':'Hit rate','play_roi':'Play ROI','brier':'Brier','log_loss':'Log loss','avg_clv_points':'CLV points','last_prediction':'Last prediction'})
+                        st.dataframe(_grade,use_container_width=True,hide_index=True)
+                    _lock=st.selectbox('Inspect recorded pick snapshot',['FIRST','T24','T6','T1'],key='ncaaf-prod-v1-grade-lock')
+                    _details=_ncaaf_prod_v1_grading_details_cached(_lock)
+                    if _details.empty:
+                        st.info(f'No {_lock} snapshots have been recorded yet.')
+                    else:
+                        st.caption('PENDING means no matching final score has been settled. Quoted picks, prices and probabilities are original scanner captures; CLV uses the latest same-book selected rolling quote when available, not necessarily the true sportsbook close.')
+                        st.dataframe(_details,use_container_width=True,hide_index=True)
+                except Exception as _grade_err:
+                    st.warning(f'Production grading ledger unavailable: {type(_grade_err).__name__}. Check BigQuery table permissions and background scanner logs.')
 
-    # Results are written by the background NCAAF scanner, not when users open
-    # this page. Surface first/T-24/T-6/T-1 historical locks without retraining.
-    with st.expander('Production V1 — prospective pick grading',expanded=False):
-        st.caption('These results use immutable pregame scanner locks, not regenerated postgame predictions. FIRST, T24, T6 and T1 remain separate; V13 history is unchanged.')
-        try:
-            _grade=_ncaaf_prod_v1_grading_summary_cached()
-            if _grade.empty:
-                st.info('No Production V1 pregame locks have been graded yet. Verify the background scanner is deployed with the Production V1 ledger module.')
-            else:
-                _grade=_grade.rename(columns={'model_instance_id':'Model instance','market':'Market','lock_type':'Lock','action':'Action','captured':'Captured','decided':'Decided','wins':'Wins','pushes':'Pushes','hit_rate':'Hit rate','play_roi':'Play ROI','brier':'Brier','log_loss':'Log loss','avg_clv_points':'CLV points','last_prediction':'Last prediction'})
-                st.dataframe(_grade,use_container_width=True,hide_index=True)
-            _lock=st.selectbox('Inspect recorded pick snapshot',['FIRST','T24','T6','T1'],key='ncaaf-prod-v1-grade-lock')
-            _details=_ncaaf_prod_v1_grading_details_cached(_lock)
-            if _details.empty:
-                st.info(f'No {_lock} snapshots have been recorded yet.')
-            else:
-                st.caption('PENDING means no matching final score has been settled. Quoted picks, prices and probabilities are original scanner captures; CLV uses the latest same-book selected rolling quote when available, not necessarily the true sportsbook close.')
-                st.dataframe(_details,use_container_width=True,hide_index=True)
-        except Exception as _grade_err:
-            st.warning(f'Production grading ledger unavailable: {type(_grade_err).__name__}. Check BigQuery table permissions and background scanner logs.')
-
-
-    if isinstance(_prod_contract,dict):
-        with st.expander('Production edge evidence',expanded=False):
-            _perf=(_prod_contract.get('performance') or {})
-            _rows=[]
-            for _market,_items in [('Spread',_perf.get('spread') or {}),('Totals',_perf.get('totals') or {})]:
-                for _sample,_met in _items.items():
-                    if not isinstance(_met,dict) or not _met: continue
-                    _rows.append({'Market':_market,'Sample':_sample.replace('_',' '),'N':_met.get('n'),'Hit':_met.get('hit'),'ROI':_met.get('roi'),'Signed Edge':_met.get('signed'),'CLV':_met.get('clv')})
-            _e=pd.DataFrame(_rows)
-            if not _e.empty:
-                for _c in ['Hit','ROI']:
-                    _e[_c]=pd.to_numeric(_e[_c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
-                for _c in ['Signed Edge','CLV']:
-                    _e[_c]=pd.to_numeric(_e[_c],errors='coerce').map(lambda x:f'{x:+.2f}' if pd.notna(x) else '—')
-                st.dataframe(_e,use_container_width=True,hide_index=True)
-            st.caption('CORE must first clear the price-aware candidate gate. For the new Research Miner, only STRONG_VALIDATED families (2024–25 N ≥ 60 and hit rate ≥ 56%, after both-year confirmation) can vote. One independent supporting evidence family can confirm BET; 2+ independent spread families can confirm STRONG BET. Totals family overlap does not receive STRONG BET escalation because that historical boost did not repeat prospectively. H2H remains model-only.')
-
-    # Protected CORE challenger results. This is deliberately separate from the
-    # Miner/System research surface and can never mutate the frozen production artifact.
-    if st.button('CORE Challenger — 2024/25 Confirmation Results ▾',key='ncaaf-core-challenger-load-report'):
-        st.session_state['ncaaf_core_challenger_report_loaded']=True
-    if st.session_state.get('ncaaf_core_challenger_report_loaded',False):
-        try:
-            _cc=_ncaaf_core_challenger_report_cached()
-            if not isinstance(_cc,dict):
-                st.info('No NCAAF CORE Challenger artifact is published yet. Run NCAAF Research — Heavy Challenger Search from Model maintenance.')
-            else:
-                _best=_cc.get('best_challenger') or {}
-                st.markdown('**CORE CHALLENGER V2.4 — coverage + conditional attribution + Miner state bridge**')
-                st.caption('2022 is initial fit; 2023 selects specialist recipes and conditional regimes; 2024 and 2025 are protected confirmation. 2026 is sealed. Team power, strength of schedule, conference strength, rest/home context, structured matchup statistics, trends, program/conference effects and conditional attribution are research-only and cannot change Production V1 or Bet Authority.')
-                _bc1,_bc2,_bc3=st.columns(3)
-                _bc1.metric('Recommendation',str(_cc.get('recommendation') or '—'))
-                _bc2.metric('Best challenger',str(_best.get('name') or '—'))
-                _bc3.metric('State',str(_best.get('state') or '—'))
+        if isinstance(_prod_contract,dict):
+            with st.expander('Production edge evidence',expanded=False):
+                _perf=(_prod_contract.get('performance') or {})
                 _rows=[]
-                _inc=((_cc.get('incumbent') or {}).get('evaluation') or {})
-                _ip=(_inc.get('pooled') or {}).get('point') or {}
-                _rows.append({'Candidate':'INCUMBENT_RECIPE','State':'FROZEN BENCHMARK','Confirm N':_ip.get('n'),'RMSE':_ip.get('rmse'),'MAE':_ip.get('mae'),'RMSE Gain vs Inc':0.0,'MAE Gain vs Inc':0.0,'2024 RMSE Gain':0.0,'2025 RMSE Gain':0.0})
-                for _x in (_cc.get('challengers') or []):
-                    _p=(_x.get('pooled') or {}).get('point') or {}; _v=_x.get('vs_incumbent_pooled') or {}; _ys=_x.get('vs_incumbent_by_season') or {}
-                    _rows.append({'Candidate':_x.get('name'),'State':_x.get('state'),'Confirm N':_p.get('n'),'RMSE':_p.get('rmse'),'MAE':_p.get('mae'),'RMSE Gain vs Inc':_v.get('rmse_gain'),'MAE Gain vs Inc':_v.get('mae_gain'),'2024 RMSE Gain':(_ys.get('2024') or {}).get('rmse_gain'),'2025 RMSE Gain':(_ys.get('2025') or {}).get('rmse_gain')})
-                _cdf=pd.DataFrame(_rows)
-                if not _cdf.empty:
-                    for _c in ['RMSE','MAE','RMSE Gain vs Inc','MAE Gain vs Inc','2024 RMSE Gain','2025 RMSE Gain']:
-                        _cdf[_c]=pd.to_numeric(_cdf[_c],errors='coerce').map(lambda x:f'{x:+.4f}' if pd.notna(x) and 'Gain' in _c else (f'{x:.4f}' if pd.notna(x) else '—'))
-                    st.dataframe(_cdf,use_container_width=True,hide_index=True)
-                _ed=_cc.get('expert_design') or {}
-                _pc=_ed.get('power_features') or []; _sr=(_ed.get('structured_stat_selection') or {}).get('selected') or []; _ix=_ed.get('interaction_features') or []
-                st.caption(f"Expert strength/context inputs: {', '.join(map(str,_pc)) if _pc else '—'}")
-                st.caption(f"Discovery-selected structured football statistics: {', '.join(map(str,_sr)) if _sr else '—'}")
-                st.caption(f"Specialist matchup/trend interactions available: {', '.join(map(str,_ix)) if _ix else '—'}")
-                st.caption(f"Conference coverage: {float(_ed.get('conference_coverage',0) or 0):.1%}; advanced EPA/success/explosiveness/havoc-style named fields detected in the current processed frame: {len(_ed.get('advanced_named_fields_present') or [])}.")
+                for _market,_items in [('Spread',_perf.get('spread') or {}),('Totals',_perf.get('totals') or {})]:
+                    for _sample,_met in _items.items():
+                        if not isinstance(_met,dict) or not _met: continue
+                        _rows.append({'Market':_market,'Sample':_sample.replace('_',' '),'N':_met.get('n'),'Hit':_met.get('hit'),'ROI':_met.get('roi'),'Signed Edge':_met.get('signed'),'CLV':_met.get('clv')})
+                _e=pd.DataFrame(_rows)
+                if not _e.empty:
+                    for _c in ['Hit','ROI']:
+                        _e[_c]=pd.to_numeric(_e[_c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
+                    for _c in ['Signed Edge','CLV']:
+                        _e[_c]=pd.to_numeric(_e[_c],errors='coerce').map(lambda x:f'{x:+.2f}' if pd.notna(x) else '—')
+                    st.dataframe(_e,use_container_width=True,hide_index=True)
+                st.caption('CORE must first clear the price-aware candidate gate. For the new Research Miner, only STRONG_VALIDATED families (2024–25 N ≥ 60 and hit rate ≥ 56%, after both-year confirmation) can vote. One independent supporting evidence family can confirm BET; 2+ independent spread families can confirm STRONG BET. Totals family overlap does not receive STRONG BET escalation because that historical boost did not repeat prospectively. H2H remains model-only.')
 
-                _attr=_cc.get('conditional_specialist_attribution') or {}
-                _sel=_attr.get('selected_regimes') or [] if isinstance(_attr,dict) else []
-                _qual=_attr.get('qualified_shadow_regimes') or [] if isinstance(_attr,dict) else []
-                st.markdown('**Conditional specialist attribution — where a specialist may add value**')
-                st.caption('Regimes are selected from 2023 only, then tested separately in 2024 and 2025. QUALIFIED_PROSPECTIVE_SHADOW remains zero-authority: no Bet Authority vote, no CORE rewrite, and no automatic promotion.')
-                if _sel:
-                    _ar=[]
-                    for _z in _sel:
-                        _cf=_z.get('confirmation') or {}; _p=_z.get('pooled') or {}; _b=_z.get('bootstrap') or {}; _rg=_z.get('regime') or {}
-                        _ar.append({
-                            'Specialist':_z.get('specialist'),'Regime':_rg.get('name'),'Role':_z.get('role'),'State':_z.get('state'),
-                            '2024 N':(_cf.get('2024') or {}).get('n'),'2024 Blend RMSE Gain':(_cf.get('2024') or {}).get('blend_rmse_gain'),
-                            '2025 N':(_cf.get('2025') or {}).get('n'),'2025 Blend RMSE Gain':(_cf.get('2025') or {}).get('blend_rmse_gain'),
-                            'Pooled N':_p.get('n'),'Pooled Blend RMSE Gain':_p.get('blend_rmse_gain'),'Pooled Blend MAE Gain':_p.get('blend_mae_gain'),
-                            'Agreement Rate':_p.get('agreement_rate'),'RMSE Gain CI Low':((_b.get('blend_rmse_gain_ci95') or [None,None])[0]),
-                            'Nearby blends all +':((_z.get('neighborhood') or {}).get('all_nearby_blends_rmse_positive')),
-                        })
-                    _adf=pd.DataFrame(_ar)
-                    for _c in ['2024 Blend RMSE Gain','2025 Blend RMSE Gain','Pooled Blend RMSE Gain','Pooled Blend MAE Gain','RMSE Gain CI Low']:
-                        _adf[_c]=pd.to_numeric(_adf[_c],errors='coerce').map(lambda x:f'{x:+.4f}' if pd.notna(x) else '—')
-                    _adf['Agreement Rate']=pd.to_numeric(_adf['Agreement Rate'],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
-                    st.dataframe(_adf,use_container_width=True,hide_index=True)
-                    _watch=(_attr.get('consistent_rmse_watch_regimes') or [])
-                    st.caption(f"Qualified prospective-shadow regimes: {len(_qual)}; consistent two-year RMSE watch regimes: {len(_watch)}. Both are zero-authority research states; only qualified shadows clear the full bootstrap gate.")
+        # Protected CORE challenger results. This is deliberately separate from the
+        # Miner/System research surface and can never mutate the frozen production artifact.
+        st.session_state['ncaaf_core_challenger_report_loaded']=True
+        if st.session_state.get('ncaaf_core_challenger_report_loaded',False):
+            try:
+                _cc=_ncaaf_core_challenger_report_cached()
+                if not isinstance(_cc,dict):
+                    st.info('No NCAAF CORE Challenger artifact is published yet. Run NCAAF Research — Heavy Challenger Search from Model maintenance.')
                 else:
-                    st.info('No specialist regime cleared the 2023 discovery screen for protected 2024/25 attribution testing.')
+                    _best=_cc.get('best_challenger') or {}
+                    st.markdown('**CORE CHALLENGER V2.4 — coverage + conditional attribution + Miner state bridge**')
+                    st.caption('2022 is initial fit; 2023 selects specialist recipes and conditional regimes; 2024 and 2025 are protected confirmation. 2026 is sealed. Team power, strength of schedule, conference strength, rest/home context, structured matchup statistics, trends, program/conference effects and conditional attribution are research-only and cannot change Production V1 or Bet Authority.')
+                    _bc1,_bc2,_bc3=st.columns(3)
+                    _bc1.metric('Recommendation',str(_cc.get('recommendation') or '—'))
+                    _bc2.metric('Best challenger',str(_best.get('name') or '—'))
+                    _bc3.metric('State',str(_best.get('state') or '—'))
+                    _rows=[]
+                    _inc=((_cc.get('incumbent') or {}).get('evaluation') or {})
+                    _ip=(_inc.get('pooled') or {}).get('point') or {}
+                    _rows.append({'Candidate':'INCUMBENT_RECIPE','State':'FROZEN BENCHMARK','Confirm N':_ip.get('n'),'RMSE':_ip.get('rmse'),'MAE':_ip.get('mae'),'RMSE Gain vs Inc':0.0,'MAE Gain vs Inc':0.0,'2024 RMSE Gain':0.0,'2025 RMSE Gain':0.0})
+                    for _x in (_cc.get('challengers') or []):
+                        _p=(_x.get('pooled') or {}).get('point') or {}; _v=_x.get('vs_incumbent_pooled') or {}; _ys=_x.get('vs_incumbent_by_season') or {}
+                        _rows.append({'Candidate':_x.get('name'),'State':_x.get('state'),'Confirm N':_p.get('n'),'RMSE':_p.get('rmse'),'MAE':_p.get('mae'),'RMSE Gain vs Inc':_v.get('rmse_gain'),'MAE Gain vs Inc':_v.get('mae_gain'),'2024 RMSE Gain':(_ys.get('2024') or {}).get('rmse_gain'),'2025 RMSE Gain':(_ys.get('2025') or {}).get('rmse_gain')})
+                    _cdf=pd.DataFrame(_rows)
+                    if not _cdf.empty:
+                        for _c in ['RMSE','MAE','RMSE Gain vs Inc','MAE Gain vs Inc','2024 RMSE Gain','2025 RMSE Gain']:
+                            _cdf[_c]=pd.to_numeric(_cdf[_c],errors='coerce').map(lambda x:f'{x:+.4f}' if pd.notna(x) and 'Gain' in _c else (f'{x:.4f}' if pd.notna(x) else '—'))
+                        st.dataframe(_cdf,use_container_width=True,hide_index=True)
+                    _ed=_cc.get('expert_design') or {}
+                    _pc=_ed.get('power_features') or []; _sr=(_ed.get('structured_stat_selection') or {}).get('selected') or []; _ix=_ed.get('interaction_features') or []
+                    st.caption(f"Expert strength/context inputs: {', '.join(map(str,_pc)) if _pc else '—'}")
+                    st.caption(f"Discovery-selected structured football statistics: {', '.join(map(str,_sr)) if _sr else '—'}")
+                    st.caption(f"Specialist matchup/trend interactions available: {', '.join(map(str,_ix)) if _ix else '—'}")
+                    st.caption(f"Conference coverage: {float(_ed.get('conference_coverage',0) or 0):.1%}; advanced EPA/success/explosiveness/havoc-style named fields detected in the current processed frame: {len(_ed.get('advanced_named_fields_present') or [])}.")
 
-                _adr=_cc.get('advanced_data_readiness') or {}
-                _af=_adr.get('families') or [] if isinstance(_adr,dict) else []
-                if _af:
-                    st.markdown('**Advanced football-data readiness**')
-                    _afd=pd.DataFrame([{
-                        'Data family':_x.get('family'),'State':_x.get('state'),
-                        'Historical coverage':_x.get('max_historical_coverage'),
-                        'Detected columns':', '.join(map(str,_x.get('columns') or [])) if (_x.get('columns') or []) else '—'
-                    } for _x in _af])
-                    _afd['Historical coverage']=pd.to_numeric(_afd['Historical coverage'],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
-                    st.dataframe(_afd,use_container_width=True,hide_index=True)
-                    st.caption('MISSING means the model will not invent or proxy that source. When historically populated, Heavy Research can test it automatically while preserving the same 2022/2023 discovery and 2024/2025 confirmation contract.')
+                    _attr=_cc.get('conditional_specialist_attribution') or {}
+                    _sel=_attr.get('selected_regimes') or [] if isinstance(_attr,dict) else []
+                    _qual=_attr.get('qualified_shadow_regimes') or [] if isinstance(_attr,dict) else []
+                    st.markdown('**Conditional specialist attribution — where a specialist may add value**')
+                    st.caption('Regimes are selected from 2023 only, then tested separately in 2024 and 2025. QUALIFIED_PROSPECTIVE_SHADOW remains zero-authority: no Bet Authority vote, no CORE rewrite, and no automatic promotion.')
+                    if _sel:
+                        _ar=[]
+                        for _z in _sel:
+                            _cf=_z.get('confirmation') or {}; _p=_z.get('pooled') or {}; _b=_z.get('bootstrap') or {}; _rg=_z.get('regime') or {}
+                            _ar.append({
+                                'Specialist':_z.get('specialist'),'Regime':_rg.get('name'),'Role':_z.get('role'),'State':_z.get('state'),
+                                '2024 N':(_cf.get('2024') or {}).get('n'),'2024 Blend RMSE Gain':(_cf.get('2024') or {}).get('blend_rmse_gain'),
+                                '2025 N':(_cf.get('2025') or {}).get('n'),'2025 Blend RMSE Gain':(_cf.get('2025') or {}).get('blend_rmse_gain'),
+                                'Pooled N':_p.get('n'),'Pooled Blend RMSE Gain':_p.get('blend_rmse_gain'),'Pooled Blend MAE Gain':_p.get('blend_mae_gain'),
+                                'Agreement Rate':_p.get('agreement_rate'),'RMSE Gain CI Low':((_b.get('blend_rmse_gain_ci95') or [None,None])[0]),
+                                'Nearby blends all +':((_z.get('neighborhood') or {}).get('all_nearby_blends_rmse_positive')),
+                            })
+                        _adf=pd.DataFrame(_ar)
+                        for _c in ['2024 Blend RMSE Gain','2025 Blend RMSE Gain','Pooled Blend RMSE Gain','Pooled Blend MAE Gain','RMSE Gain CI Low']:
+                            _adf[_c]=pd.to_numeric(_adf[_c],errors='coerce').map(lambda x:f'{x:+.4f}' if pd.notna(x) else '—')
+                        _adf['Agreement Rate']=pd.to_numeric(_adf['Agreement Rate'],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
+                        st.dataframe(_adf,use_container_width=True,hide_index=True)
+                        _watch=(_attr.get('consistent_rmse_watch_regimes') or [])
+                        st.caption(f"Qualified prospective-shadow regimes: {len(_qual)}; consistent two-year RMSE watch regimes: {len(_watch)}. Both are zero-authority research states; only qualified shadows clear the full bootstrap gate.")
+                    else:
+                        st.info('No specialist regime cleared the 2023 discovery screen for protected 2024/25 attribution testing.')
 
-                _cov=_cc.get('existing_feed_coverage_registry') or {}
-                _feeds=_cov.get('feeds') or [] if isinstance(_cov,dict) else []
-                if _feeds:
-                    st.markdown('**Existing-feed coverage completion — ST / R3 / R5 / OA / matchup / trend**')
-                    _cnt=_cov.get('counts') or {}
-                    _cv1,_cv2,_cv3,_cv4=st.columns(4)
-                    _cv1.metric('Feeds audited',int(_cnt.get('feeds',0) or 0))
-                    _cv2.metric('Complete core',int(_cnt.get('complete_core',0) or 0))
-                    _cv3.metric('Complete R5',int(_cnt.get('complete_r5',0) or 0))
-                    _cv4.metric('Derived safely',int(_cnt.get('derived',0) or 0))
-                    _fdf=pd.DataFrame([{
-                        'Feed':_x.get('feed'),'State':_x.get('status'),'Season':_x.get('season_to_date'),'R3':_x.get('recent3'),'R5':_x.get('recent5'),
-                        'Opp Adj':_x.get('opponent_adjusted'),'OA expected':_x.get('opponent_adjusted_expected'),'Team-v-Opp':_x.get('team_vs_opponent'),
-                        'Matchup':_x.get('matchup_differential'),'Matchup expected':_x.get('matchup_expected'),'Trend':_x.get('recent_vs_season_trend'),
-                        'Coverage':_x.get('max_historical_coverage')
-                    } for _x in _feeds])
-                    _fdf['Coverage']=pd.to_numeric(_fdf['Coverage'],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
-                    st.dataframe(_fdf,use_container_width=True,hide_index=True)
-                    st.caption('Recent-5 is optional and is never fabricated. Opponent adjustment and matchup fields are only completed when the protected pregame source actually supports them.')
+                    _adr=_cc.get('advanced_data_readiness') or {}
+                    _af=_adr.get('families') or [] if isinstance(_adr,dict) else []
+                    if _af:
+                        st.markdown('**Advanced football-data readiness**')
+                        _afd=pd.DataFrame([{
+                            'Data family':_x.get('family'),'State':_x.get('state'),
+                            'Historical coverage':_x.get('max_historical_coverage'),
+                            'Detected columns':', '.join(map(str,_x.get('columns') or [])) if (_x.get('columns') or []) else '—'
+                        } for _x in _af])
+                        _afd['Historical coverage']=pd.to_numeric(_afd['Historical coverage'],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
+                        st.dataframe(_afd,use_container_width=True,hide_index=True)
+                        st.caption('MISSING means the model will not invent or proxy that source. When historically populated, Heavy Research can test it automatically while preserving the same 2022/2023 discovery and 2024/2025 confirmation contract.')
 
-                _inc_cov=(_cc.get('coverage_incremental_attribution') or {}).get('features') or []
-                if _inc_cov:
-                    st.markdown('**Coverage feature incremental value — one at a time vs frozen CORE**')
-                    _ic=[]
-                    for _x in _inc_cov:
-                        _cf=_x.get('confirmation') or {}
-                        _ic.append({'Feature':_x.get('feature'),'2023 RMSE Gain':(_x.get('discovery') or {}).get('rmse_gain'),
-                                    '2024 RMSE Gain':(_cf.get('2024') or {}).get('rmse_gain'),'2025 RMSE Gain':(_cf.get('2025') or {}).get('rmse_gain'),
-                                    'Both years RMSE +':_x.get('both_confirmation_rmse_positive'),'Both years MAE nonnegative':_x.get('both_confirmation_mae_nonnegative')})
-                    _icdf=pd.DataFrame(_ic)
-                    for _c in ['2023 RMSE Gain','2024 RMSE Gain','2025 RMSE Gain']:
-                        _icdf[_c]=pd.to_numeric(_icdf[_c],errors='coerce').map(lambda x:f'{x:+.4f}' if pd.notna(x) else '—')
-                    st.dataframe(_icdf,use_container_width=True,hide_index=True)
+                    _cov=_cc.get('existing_feed_coverage_registry') or {}
+                    _feeds=_cov.get('feeds') or [] if isinstance(_cov,dict) else []
+                    if _feeds:
+                        st.markdown('**Existing-feed coverage completion — ST / R3 / R5 / OA / matchup / trend**')
+                        _cnt=_cov.get('counts') or {}
+                        _cv1,_cv2,_cv3,_cv4=st.columns(4)
+                        _cv1.metric('Feeds audited',int(_cnt.get('feeds',0) or 0))
+                        _cv2.metric('Complete core',int(_cnt.get('complete_core',0) or 0))
+                        _cv3.metric('Complete R5',int(_cnt.get('complete_r5',0) or 0))
+                        _cv4.metric('Derived safely',int(_cnt.get('derived',0) or 0))
+                        _fdf=pd.DataFrame([{
+                            'Feed':_x.get('feed'),'State':_x.get('status'),'Season':_x.get('season_to_date'),'R3':_x.get('recent3'),'R5':_x.get('recent5'),
+                            'Opp Adj':_x.get('opponent_adjusted'),'OA expected':_x.get('opponent_adjusted_expected'),'Team-v-Opp':_x.get('team_vs_opponent'),
+                            'Matchup':_x.get('matchup_differential'),'Matchup expected':_x.get('matchup_expected'),'Trend':_x.get('recent_vs_season_trend'),
+                            'Coverage':_x.get('max_historical_coverage')
+                        } for _x in _feeds])
+                        _fdf['Coverage']=pd.to_numeric(_fdf['Coverage'],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
+                        st.dataframe(_fdf,use_container_width=True,hide_index=True)
+                        st.caption('Recent-5 is optional and is never fabricated. Opponent adjustment and matchup fields are only completed when the protected pregame source actually supports them.')
 
-                _abl=(_cc.get('coverage_feature_ablation') or {}).get('features') or []
-                if _abl:
-                    st.markdown('**Coverage specialist ablation — value lost when feature is removed**')
-                    _abdf=pd.DataFrame([{'Feature':_x.get('feature'),'RMSE loss when removed':_x.get('rmse_loss_when_removed'),'MAE loss when removed':_x.get('mae_loss_when_removed')} for _x in _abl])
-                    for _c in ['RMSE loss when removed','MAE loss when removed']:
-                        _abdf[_c]=pd.to_numeric(_abdf[_c],errors='coerce').map(lambda x:f'{x:+.4f}' if pd.notna(x) else '—')
-                    st.dataframe(_abdf,use_container_width=True,hide_index=True)
+                    _inc_cov=(_cc.get('coverage_incremental_attribution') or {}).get('features') or []
+                    if _inc_cov:
+                        st.markdown('**Coverage feature incremental value — one at a time vs frozen CORE**')
+                        _ic=[]
+                        for _x in _inc_cov:
+                            _cf=_x.get('confirmation') or {}
+                            _ic.append({'Feature':_x.get('feature'),'2023 RMSE Gain':(_x.get('discovery') or {}).get('rmse_gain'),
+                                        '2024 RMSE Gain':(_cf.get('2024') or {}).get('rmse_gain'),'2025 RMSE Gain':(_cf.get('2025') or {}).get('rmse_gain'),
+                                        'Both years RMSE +':_x.get('both_confirmation_rmse_positive'),'Both years MAE nonnegative':_x.get('both_confirmation_mae_nonnegative')})
+                        _icdf=pd.DataFrame(_ic)
+                        for _c in ['2023 RMSE Gain','2024 RMSE Gain','2025 RMSE Gain']:
+                            _icdf[_c]=pd.to_numeric(_icdf[_c],errors='coerce').map(lambda x:f'{x:+.4f}' if pd.notna(x) else '—')
+                        st.dataframe(_icdf,use_container_width=True,hide_index=True)
 
-                if _best:
-                    _ci=(_best.get('vs_incumbent_pooled') or {}).get('rmse_gain_ci95') or []
-                    st.caption(f"Best global challenger paired-bootstrap RMSE-gain 95% CI: {_ci}. Global promotion remains manual; conditional specialist regimes are separately shadow-only.")
-        except Exception as _cc_err:
-            st.warning(f'CORE Challenger report unavailable: {type(_cc_err).__name__}')
+                    _abl=(_cc.get('coverage_feature_ablation') or {}).get('features') or []
+                    if _abl:
+                        st.markdown('**Coverage specialist ablation — value lost when feature is removed**')
+                        _abdf=pd.DataFrame([{'Feature':_x.get('feature'),'RMSE loss when removed':_x.get('rmse_loss_when_removed'),'MAE loss when removed':_x.get('mae_loss_when_removed')} for _x in _abl])
+                        for _c in ['RMSE loss when removed','MAE loss when removed']:
+                            _abdf[_c]=pd.to_numeric(_abdf[_c],errors='coerce').map(lambda x:f'{x:+.4f}' if pd.notna(x) else '—')
+                        st.dataframe(_abdf,use_container_width=True,hide_index=True)
 
-    # One research surface only. Legacy Miner V2/system-library tables are retired
-    # from the operator UI; V2.1 is the current research registry.
-    if st.button('Research V2.5 — Expert/Model Atom Bridge + Miner ▾',key='ncaaf-rv21-load-report'):
+                    if _best:
+                        _ci=(_best.get('vs_incumbent_pooled') or {}).get('rmse_gain_ci95') or []
+                        st.caption(f"Best global challenger paired-bootstrap RMSE-gain 95% CI: {_ci}. Global promotion remains manual; conditional specialist regimes are separately shadow-only.")
+            except Exception as _cc_err:
+                st.warning(f'CORE Challenger report unavailable: {type(_cc_err).__name__}')
+    if _show_ncaaf_systems:
+        # One research surface only. Legacy Miner V2/system-library tables are retired
+        # from the operator UI; V2.1 is the current research registry.
         st.session_state['ncaaf_rv21_report_loaded']=True
-    if st.session_state.get('ncaaf_rv21_report_loaded',False):
-        try:
-            _r2=_ncaaf_research_v2_report_cached()
-            if not isinstance(_r2,dict):
-                st.info('No NCAAF Research V2.5 artifact is published yet. Run NCAAF Research — Heavy Challenger Search from Model maintenance.')
-            else:
-                st.caption('Research qualification is frozen through 2023 discovery with BOTH 2024 and 2025 confirmation; 2026+ remains sealed from selection. V2.5 feeds deterministic Pathi/Big Al hypotheses plus leakage-safe season-forward incumbent CORE/specialist states into the SAME Miner. CORE/specialist bridge atoms are research-only in this version; only live-evaluable STRONG_VALIDATED Miner families may supply bounded support/conflict to Bet Authority. Nothing here alters CORE probability or creates a wager.')
+        if st.session_state.get('ncaaf_rv21_report_loaded',False):
+            try:
+                _r2=_ncaaf_research_v2_report_cached()
+                if not isinstance(_r2,dict):
+                    st.info('No NCAAF Research V2.5 artifact is published yet. Run NCAAF Research — Heavy Challenger Search from Model maintenance.')
+                else:
+                    st.caption('Research qualification is frozen through 2023 discovery with BOTH 2024 and 2025 confirmation; 2026+ remains sealed from selection. V2.5 feeds deterministic Pathi/Big Al hypotheses plus leakage-safe season-forward incumbent CORE/specialist states into the SAME Miner. CORE/specialist bridge atoms are research-only in this version; only live-evaluable STRONG_VALIDATED Miner families may supply bounded support/conflict to Bet Authority. Nothing here alters CORE probability or creates a wager.')
 
-                _ib=_r2.get('intelligence_bridge') or {}
-                _br=[]
-                for _mk,_mr in (_r2.get('system_miner_v3') or {}).items():
-                    _fc=(_mr or {}).get('atom_family_counts') or {}
-                    _br.append({'Market':str(_mk).upper(),'Total atoms':(_mr or {}).get('atoms',0),'Bridge atoms':(_mr or {}).get('expert_model_bridge_atoms',0),
-                                'Pathi atoms':_fc.get('EXPERT_PATHI',0),'Big Al atoms':_fc.get('EXPERT_BIGAL',0),'CORE-state atoms':_fc.get('RESEARCH_CORE_STATE',0),
-                                'Specialist-state atoms':sum(v for k,v in _fc.items() if str(k).startswith('RESEARCH_SPECIALIST_'))})
-                if _br:
-                    st.markdown('**Expert / Model Atom Bridge — same Miner, new hypotheses**')
-                    st.dataframe(pd.DataFrame(_br),use_container_width=True,hide_index=True)
-                    st.caption(f"Bridge status: {_ib.get('status','—')}; historical OOF CORE rows: {_ib.get('historical_rows','—')}. Pathi/Big Al atoms remain deterministic pregame rules. OOF CORE/specialist atoms are research-only until a like-for-like live state bridge is proven, so they cannot earn Bet Authority in this version.")
+                    _ib=_r2.get('intelligence_bridge') or {}
+                    _br=[]
+                    for _mk,_mr in (_r2.get('system_miner_v3') or {}).items():
+                        _fc=(_mr or {}).get('atom_family_counts') or {}
+                        _br.append({'Market':str(_mk).upper(),'Total atoms':(_mr or {}).get('atoms',0),'Bridge atoms':(_mr or {}).get('expert_model_bridge_atoms',0),
+                                    'Pathi atoms':_fc.get('EXPERT_PATHI',0),'Big Al atoms':_fc.get('EXPERT_BIGAL',0),'CORE-state atoms':_fc.get('RESEARCH_CORE_STATE',0),
+                                    'Specialist-state atoms':sum(v for k,v in _fc.items() if str(k).startswith('RESEARCH_SPECIALIST_'))})
+                    if _br:
+                        st.markdown('**Expert / Model Atom Bridge — same Miner, new hypotheses**')
+                        st.dataframe(pd.DataFrame(_br),use_container_width=True,hide_index=True)
+                        st.caption(f"Bridge status: {_ib.get('status','—')}; historical OOF CORE rows: {_ib.get('historical_rows','—')}. Pathi/Big Al atoms remain deterministic pregame rules. OOF CORE/specialist atoms are research-only until a like-for-like live state bridge is proven, so they cannot earn Bet Authority in this version.")
 
-                _pub=(_r2.get('published_system_results') or {}).get('systems') or []
-                _pub_rows=[]
-                for _x in _pub:
-                    _d=_x.get('discovery') or {}; _c=_x.get('confirmation') or {}
-                    _pub_rows.append({'Source':_x.get('source'),'System':_x.get('label') or _x.get('system'),'State':_x.get('status'),
-                                      'Discovery N':_d.get('n'),'Discovery W-L':f"{_d.get('wins',0)}-{_d.get('losses',0)}",'Discovery Hit':_d.get('hit_rate'),'Discovery Shrunk':_d.get('shrunk_hit_rate_beta15'),'Discovery ROI':_d.get('roi_at_minus110'),
-                                      '2024-25 N':_c.get('n'),'2024-25 W-L':f"{_c.get('wins',0)}-{_c.get('losses',0)}",'2024-25 Hit':_c.get('hit_rate'),'2024-25 Shrunk':_c.get('shrunk_hit_rate_beta15'),'2024-25 Wilson Low':_c.get('wilson95_low'),'2024-25 ROI':_c.get('roi_at_minus110'),
-                                      'Assessment':_x.get('source_direction_assessment'),'Parent':_x.get('parent') or '—','Authority':0})
-                if _pub_rows:
-                    st.markdown('**Published Pathi / Big Al directional systems — direct historical W/L**')
-                    _pubdf=pd.DataFrame(_pub_rows)
-                    for _c in ['Discovery Hit','Discovery Shrunk','Discovery ROI','2024-25 Hit','2024-25 Shrunk','2024-25 Wilson Low','2024-25 ROI']:
-                        _pubdf[_c]=pd.to_numeric(_pubdf[_c],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
-                    st.dataframe(_pubdf,use_container_width=True,hide_index=True)
-                    st.caption('Only directional recommended-side flags are graded here. Symmetric Pathi key events and ambiguous screens remain context rather than being assigned artificial W/L records.')
+                    _pub=(_r2.get('published_system_results') or {}).get('systems') or []
+                    _pub_rows=[]
+                    for _x in _pub:
+                        _d=_x.get('discovery') or {}; _c=_x.get('confirmation') or {}
+                        _pub_rows.append({'Source':_x.get('source'),'System':_x.get('label') or _x.get('system'),'State':_x.get('status'),
+                                          'Discovery N':_d.get('n'),'Discovery W-L':f"{_d.get('wins',0)}-{_d.get('losses',0)}",'Discovery Hit':_d.get('hit_rate'),'Discovery Shrunk':_d.get('shrunk_hit_rate_beta15'),'Discovery ROI':_d.get('roi_at_minus110'),
+                                          '2024-25 N':_c.get('n'),'2024-25 W-L':f"{_c.get('wins',0)}-{_c.get('losses',0)}",'2024-25 Hit':_c.get('hit_rate'),'2024-25 Shrunk':_c.get('shrunk_hit_rate_beta15'),'2024-25 Wilson Low':_c.get('wilson95_low'),'2024-25 ROI':_c.get('roi_at_minus110'),
+                                          'Assessment':_x.get('source_direction_assessment'),'Parent':_x.get('parent') or '—','Authority':0})
+                    if _pub_rows:
+                        st.markdown('**Published Pathi / Big Al directional systems — direct historical W/L**')
+                        _pubdf=pd.DataFrame(_pub_rows)
+                        for _c in ['Discovery Hit','Discovery Shrunk','Discovery ROI','2024-25 Hit','2024-25 Shrunk','2024-25 Wilson Low','2024-25 ROI']:
+                            _pubdf[_c]=pd.to_numeric(_pubdf[_c],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
+                        st.dataframe(_pubdf,use_container_width=True,hide_index=True)
+                        st.caption('Only directional recommended-side flags are graded here. Symmetric Pathi key events and ambiguous screens remain context rather than being assigned artificial W/L records.')
 
-                _sr=(_r2.get('system_results') or {}).get('markets') or {}
-                _pool_rows=[]; _best_rows=[]; _conf_rows=[]
-                for _mk,_mr in _sr.items():
-                    for _label,_key in [('Any confirmed Miner','any_confirmed_system'),('2+ independent Miner','two_plus_independent')]:
-                        _z=(_mr or {}).get(_key) or {}
-                        _pool_rows.append({'Market':str(_mk).upper(),'Pool':_label,'N':_z.get('n'),'W-L':f"{_z.get('wins',0)}-{_z.get('losses',0)}",'Hit Rate':_z.get('hit_rate'),'Flat -110 ROI ref':_z.get('roi_at_minus110'),'Wilson 95% low':_z.get('wilson95_low'),'Shrunk Hit':_z.get('shrunk_hit_rate_beta15'),'Conflict rows':(_mr or {}).get('conflict_rows')})
-                    for _z in (_mr or {}).get('best_systems') or []:
-                        _best_rows.append({'Market':str(_mk).upper(),'Mechanism':_z.get('mechanism_id'),'Rule':_z.get('rule'),'N':_z.get('n'),'W-L':f"{_z.get('wins',0)}-{_z.get('losses',0)}",'Hit Rate':_z.get('hit_rate'),'Flat -110 ROI ref':_z.get('roi_at_minus110'),'Wilson 95% low':_z.get('wilson95_low'),'Shrunk Hit':_z.get('shrunk_hit_rate_beta15'),'Evidence':_z.get('evidence_level'),'Live authority eligible':str(_z.get('evidence_level') or '').upper()=='STRONG_VALIDATED'})
-                    for _z in (_mr or {}).get('best_in_confluence') or []:
-                        _conf_rows.append({'Market':str(_mk).upper(),'Mechanism':_z.get('mechanism_id'),'Rule':_z.get('rule'),'Confluence N':_z.get('confluence_n'),'W-L':f"{_z.get('wins',0)}-{_z.get('losses',0)}",'Hit Rate':_z.get('hit_rate'),'Flat -110 ROI ref':_z.get('roi_at_minus110'),'Wilson 95% low':_z.get('wilson95_low')})
-                if _pool_rows:
-                    st.markdown('**SYSTEM RESULTS — confirmed Miner evidence, 2024–25**')
-                    _pdf=pd.DataFrame(_pool_rows)
-                    for _c in ['Hit Rate','Flat -110 ROI ref','Wilson 95% low','Shrunk Hit']:
-                        _pdf[_c]=pd.to_numeric(_pdf[_c],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
-                    st.dataframe(_pdf,use_container_width=True,hide_index=True)
-                    st.caption('Direct confirmation-period grading. Mechanism families are dependency-collapsed before confluence; correlated variants do not become extra votes.')
-                if _best_rows:
-                    st.markdown('**Best independent Miner systems — 2024–25 confirmation**')
-                    _bdf=pd.DataFrame(_best_rows)
-                    for _c in ['Hit Rate','Flat -110 ROI ref','Wilson 95% low','Shrunk Hit']:
-                        _bdf[_c]=pd.to_numeric(_bdf[_c],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
-                    st.dataframe(_bdf,use_container_width=True,hide_index=True)
+                    _sr=(_r2.get('system_results') or {}).get('markets') or {}
+                    _pool_rows=[]; _best_rows=[]; _conf_rows=[]
+                    for _mk,_mr in _sr.items():
+                        for _label,_key in [('Any confirmed Miner','any_confirmed_system'),('2+ independent Miner','two_plus_independent')]:
+                            _z=(_mr or {}).get(_key) or {}
+                            _pool_rows.append({'Market':str(_mk).upper(),'Pool':_label,'N':_z.get('n'),'W-L':f"{_z.get('wins',0)}-{_z.get('losses',0)}",'Hit Rate':_z.get('hit_rate'),'Flat -110 ROI ref':_z.get('roi_at_minus110'),'Wilson 95% low':_z.get('wilson95_low'),'Shrunk Hit':_z.get('shrunk_hit_rate_beta15'),'Conflict rows':(_mr or {}).get('conflict_rows')})
+                        for _z in (_mr or {}).get('best_systems') or []:
+                            _best_rows.append({'Market':str(_mk).upper(),'Mechanism':_z.get('mechanism_id'),'Rule':_z.get('rule'),'N':_z.get('n'),'W-L':f"{_z.get('wins',0)}-{_z.get('losses',0)}",'Hit Rate':_z.get('hit_rate'),'Flat -110 ROI ref':_z.get('roi_at_minus110'),'Wilson 95% low':_z.get('wilson95_low'),'Shrunk Hit':_z.get('shrunk_hit_rate_beta15'),'Evidence':_z.get('evidence_level'),'Live authority eligible':str(_z.get('evidence_level') or '').upper()=='STRONG_VALIDATED'})
+                        for _z in (_mr or {}).get('best_in_confluence') or []:
+                            _conf_rows.append({'Market':str(_mk).upper(),'Mechanism':_z.get('mechanism_id'),'Rule':_z.get('rule'),'Confluence N':_z.get('confluence_n'),'W-L':f"{_z.get('wins',0)}-{_z.get('losses',0)}",'Hit Rate':_z.get('hit_rate'),'Flat -110 ROI ref':_z.get('roi_at_minus110'),'Wilson 95% low':_z.get('wilson95_low')})
+                    if _pool_rows:
+                        st.markdown('**SYSTEM RESULTS — confirmed Miner evidence, 2024–25**')
+                        _pdf=pd.DataFrame(_pool_rows)
+                        for _c in ['Hit Rate','Flat -110 ROI ref','Wilson 95% low','Shrunk Hit']:
+                            _pdf[_c]=pd.to_numeric(_pdf[_c],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
+                        st.dataframe(_pdf,use_container_width=True,hide_index=True)
+                        st.caption('Direct confirmation-period grading. Mechanism families are dependency-collapsed before confluence; correlated variants do not become extra votes.')
+                    if _best_rows:
+                        st.markdown('**Best independent Miner systems — 2024–25 confirmation**')
+                        _bdf=pd.DataFrame(_best_rows)
+                        for _c in ['Hit Rate','Flat -110 ROI ref','Wilson 95% low','Shrunk Hit']:
+                            _bdf[_c]=pd.to_numeric(_bdf[_c],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
+                        st.dataframe(_bdf,use_container_width=True,hide_index=True)
 
-                _lin_rows=[]
-                for _mk,_mr in (_r2.get('system_miner_v3') or {}).items():
-                    for _x in ((_mr or {}).get('lineage') or {}).get('pairs') or []:
-                        _lin_rows.append({'Market':str(_mk).upper(),'Parent':_x.get('parent_system_id'),'Child':_x.get('child_system_id'),
-                                          'Added condition':' + '.join(_x.get('added_conditions') or []),'Nested total variant':_x.get('nested_total_variant'),
-                                          'Disc child-parent-only Δ':_x.get('discovery_rate_delta_vs_parent_only'),
-                                          'Confirm child-parent-only Δ':_x.get('confirmation_rate_delta_vs_parent_only'),
-                                          'Child confirm N':_x.get('confirmation_child_n'),'Parent-only confirm N':_x.get('confirmation_parent_only_n')})
-                if _lin_rows:
-                    st.markdown('**Miner parent / child incremental attribution**')
-                    _ldf=pd.DataFrame(_lin_rows)
-                    for _c in ['Disc child-parent-only Δ','Confirm child-parent-only Δ']:
-                        _ldf[_c]=pd.to_numeric(_ldf[_c],errors='coerce').map(lambda x:f'{100*x:+.1f} pp' if pd.notna(x) else '—')
-                    st.dataframe(_ldf,use_container_width=True,hide_index=True)
-                    st.caption('A child must add value beyond the parent-only cases to justify treating the tighter rule as more than a renamed/nested variant. This table has zero selection or production authority.')
+                    _lin_rows=[]
+                    for _mk,_mr in (_r2.get('system_miner_v3') or {}).items():
+                        for _x in ((_mr or {}).get('lineage') or {}).get('pairs') or []:
+                            _lin_rows.append({'Market':str(_mk).upper(),'Parent':_x.get('parent_system_id'),'Child':_x.get('child_system_id'),
+                                              'Added condition':' + '.join(_x.get('added_conditions') or []),'Nested total variant':_x.get('nested_total_variant'),
+                                              'Disc child-parent-only Δ':_x.get('discovery_rate_delta_vs_parent_only'),
+                                              'Confirm child-parent-only Δ':_x.get('confirmation_rate_delta_vs_parent_only'),
+                                              'Child confirm N':_x.get('confirmation_child_n'),'Parent-only confirm N':_x.get('confirmation_parent_only_n')})
+                    if _lin_rows:
+                        st.markdown('**Miner parent / child incremental attribution**')
+                        _ldf=pd.DataFrame(_lin_rows)
+                        for _c in ['Disc child-parent-only Δ','Confirm child-parent-only Δ']:
+                            _ldf[_c]=pd.to_numeric(_ldf[_c],errors='coerce').map(lambda x:f'{100*x:+.1f} pp' if pd.notna(x) else '—')
+                        st.dataframe(_ldf,use_container_width=True,hide_index=True)
+                        st.caption('A child must add value beyond the parent-only cases to justify treating the tighter rule as more than a renamed/nested variant. This table has zero selection or production authority.')
 
-                if _conf_rows:
-                    st.markdown('**Best Miner systems when part of 2+ independent-family confluence**')
-                    _cdf=pd.DataFrame(_conf_rows)
-                    for _c in ['Hit Rate','Flat -110 ROI ref','Wilson 95% low']:
-                        _cdf[_c]=pd.to_numeric(_cdf[_c],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
-                    st.dataframe(_cdf,use_container_width=True,hide_index=True)
+                    if _conf_rows:
+                        st.markdown('**Best Miner systems when part of 2+ independent-family confluence**')
+                        _cdf=pd.DataFrame(_conf_rows)
+                        for _c in ['Hit Rate','Flat -110 ROI ref','Wilson 95% low']:
+                            _cdf[_c]=pd.to_numeric(_cdf[_c],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
+                        st.dataframe(_cdf,use_container_width=True,hide_index=True)
 
-                _sparse=[]
-                for _x in ((_r2.get('sparse_stat_v21') or {}).get('candidates') or []):
-                    _sparse.append({
-                        'Market':_x.get('market'),'Candidate':_x.get('candidate_name'),'Features':' + '.join(_x.get('features') or []),
-                        'Discovery':_x.get('discovery_pass'),'Confirmation':_x.get('confirmation_pass'),
-                        'Disc MAE Gain':_x.get('discovery_mean_improvement'),'Disc RMSE Gain':_x.get('discovery_mean_rmse_improvement'),
-                        'Conf MAE Gain':_x.get('confirmation_mean_improvement'),'Conf RMSE Gain':_x.get('confirmation_mean_rmse_improvement'),
-                        'State':_x.get('authority_state'),'Production Influence':0,
-                    })
-                _sdf=pd.DataFrame(_sparse)
-                if not _sdf.empty:
-                    st.markdown('**Sparse residual STAT challengers**')
-                    st.dataframe(_sdf,use_container_width=True,hide_index=True)
+                    _sparse=[]
+                    for _x in ((_r2.get('sparse_stat_v21') or {}).get('candidates') or []):
+                        _sparse.append({
+                            'Market':_x.get('market'),'Candidate':_x.get('candidate_name'),'Features':' + '.join(_x.get('features') or []),
+                            'Discovery':_x.get('discovery_pass'),'Confirmation':_x.get('confirmation_pass'),
+                            'Disc MAE Gain':_x.get('discovery_mean_improvement'),'Disc RMSE Gain':_x.get('discovery_mean_rmse_improvement'),
+                            'Conf MAE Gain':_x.get('confirmation_mean_improvement'),'Conf RMSE Gain':_x.get('confirmation_mean_rmse_improvement'),
+                            'State':_x.get('authority_state'),'Production Influence':0,
+                        })
+                    _sdf=pd.DataFrame(_sparse)
+                    if not _sdf.empty:
+                        st.markdown('**Sparse residual STAT challengers**')
+                        st.dataframe(_sdf,use_container_width=True,hide_index=True)
 
-                _hrows=[]
-                for _x in (((_r2.get('system_miner_v3') or {}).get('h2h') or {}).get('mechanism_families') or []):
-                    _hrows.append({
-                        'Mechanism':_x.get('mechanism_id'),'State':_x.get('authority_state'),
-                        'Rule':' AND '.join(_x.get('representative_conditions') or []),'Members':_x.get('member_count'),
-                        'Disc N':_x.get('discovery_n'),'Disc Win Rate':_x.get('discovery_rate'),'Disc ROI':_x.get('discovery_price_roi'),
-                        'Disc Market Edge':_x.get('discovery_market_residual'),'Disc Price Bands':_x.get('price_band_robust_discovery'),
-                        'Confirm N':_x.get('confirmation_n'),'Confirm Win Rate':_x.get('confirmation_rate'),'Confirm ROI':_x.get('confirmation_price_roi'),
-                        'Confirm Market Edge':_x.get('confirmation_market_residual'),'Confirm Price Bands':_x.get('price_band_robust_confirmation'),
-                        'Production Influence':0,
-                    })
-                _hdf=pd.DataFrame(_hrows)
-                if not _hdf.empty:
-                    st.markdown('**Price-aware H2H mechanisms**')
-                    st.caption('Observed historical moneyline prices are required. High win rate alone cannot qualify a moneyline system.')
-                    st.dataframe(_hdf,use_container_width=True,hide_index=True)
+                    _hrows=[]
+                    for _x in (((_r2.get('system_miner_v3') or {}).get('h2h') or {}).get('mechanism_families') or []):
+                        _hrows.append({
+                            'Mechanism':_x.get('mechanism_id'),'State':_x.get('authority_state'),
+                            'Rule':' AND '.join(_x.get('representative_conditions') or []),'Members':_x.get('member_count'),
+                            'Disc N':_x.get('discovery_n'),'Disc Win Rate':_x.get('discovery_rate'),'Disc ROI':_x.get('discovery_price_roi'),
+                            'Disc Market Edge':_x.get('discovery_market_residual'),'Disc Price Bands':_x.get('price_band_robust_discovery'),
+                            'Confirm N':_x.get('confirmation_n'),'Confirm Win Rate':_x.get('confirmation_rate'),'Confirm ROI':_x.get('confirmation_price_roi'),
+                            'Confirm Market Edge':_x.get('confirmation_market_residual'),'Confirm Price Bands':_x.get('price_band_robust_confirmation'),
+                            'Production Influence':0,
+                        })
+                    _hdf=pd.DataFrame(_hrows)
+                    if not _hdf.empty:
+                        st.markdown('**Price-aware H2H mechanisms**')
+                        st.caption('Observed historical moneyline prices are required. High win rate alone cannot qualify a moneyline system.')
+                        st.dataframe(_hdf,use_container_width=True,hide_index=True)
 
-                _trows=[]
-                for _x in (((_r2.get('system_miner_v3') or {}).get('totals') or {}).get('mechanism_families') or []):
-                    _a=_x.get('attribution') or {}; _tc=_a.get('team_concentration') or {}; _cc=_a.get('conference_concentration') or {}
-                    _trows.append({
-                        'Mechanism':_x.get('mechanism_id'),'State':_x.get('authority_state'),
-                        'Rule':_a.get('rule') or ' AND '.join(_x.get('representative_conditions') or []),
-                        'Disc N':_x.get('discovery_n'),'Disc Rate':_x.get('discovery_rate'),'Confirm N':_x.get('confirmation_n'),'Confirm Rate':_x.get('confirmation_rate'),
-                        'Remove Best':_a.get('remove_best_discovery_rate'),'Season Breakdown':json.dumps(_a.get('season_breakdown') or [],default=str),
-                        'Top Team':_tc.get('top'),'Team Share':_tc.get('top_share'),'Top Conference':_cc.get('top'),'Conference Share':_cc.get('top_share'),
-                        'Production Influence':0,
-                    })
-                _tdf=pd.DataFrame(_trows)
-                if not _tdf.empty:
-                    st.markdown('**Totals mechanism attribution**')
-                    st.dataframe(_tdf,use_container_width=True,hide_index=True)
+                    _trows=[]
+                    for _x in (((_r2.get('system_miner_v3') or {}).get('totals') or {}).get('mechanism_families') or []):
+                        _a=_x.get('attribution') or {}; _tc=_a.get('team_concentration') or {}; _cc=_a.get('conference_concentration') or {}
+                        _trows.append({
+                            'Mechanism':_x.get('mechanism_id'),'State':_x.get('authority_state'),
+                            'Rule':_a.get('rule') or ' AND '.join(_x.get('representative_conditions') or []),
+                            'Disc N':_x.get('discovery_n'),'Disc Rate':_x.get('discovery_rate'),'Confirm N':_x.get('confirmation_n'),'Confirm Rate':_x.get('confirmation_rate'),
+                            'Remove Best':_a.get('remove_best_discovery_rate'),'Season Breakdown':json.dumps(_a.get('season_breakdown') or [],default=str),
+                            'Top Team':_tc.get('top'),'Team Share':_tc.get('top_share'),'Top Conference':_cc.get('top'),'Conference Share':_cc.get('top_share'),
+                            'Production Influence':0,
+                        })
+                    _tdf=pd.DataFrame(_trows)
+                    if not _tdf.empty:
+                        st.markdown('**Totals mechanism attribution**')
+                        st.dataframe(_tdf,use_container_width=True,hide_index=True)
 
-                _pro=pd.DataFrame(((_r2.get('prospective_shadow_2026') or {}).get('mechanisms') or []))
-                if not _pro.empty:
-                    st.markdown('**2026 sealed prospective shadow**')
-                    st.dataframe(_pro,use_container_width=True,hide_index=True)
+                    _pro=pd.DataFrame(((_r2.get('prospective_shadow_2026') or {}).get('mechanisms') or []))
+                    if not _pro.empty:
+                        st.markdown('**2026 sealed prospective shadow**')
+                        st.dataframe(_pro,use_container_width=True,hide_index=True)
 
-                _ng=(_r2.get('miner_threshold_neighborhood') or {}).get('grid') or []
-                if _ng:
-                    st.markdown('**Miner authority threshold neighborhood — diagnostic only**')
-                    _ngdf=pd.DataFrame([{'Min confirm N':_x.get('min_confirmation_n'),'Min hit rate':_x.get('min_confirmation_rate'),'Qualified families':_x.get('qualified_count'),
-                                        'Spread':(_x.get('by_market') or {}).get('spreads',0),'H2H':(_x.get('by_market') or {}).get('h2h',0),'Totals':(_x.get('by_market') or {}).get('totals',0),
-                                        'Frozen live gate':_x.get('is_frozen_live_gate')} for _x in _ng])
-                    _ngdf['Min hit rate']=pd.to_numeric(_ngdf['Min hit rate'],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
-                    st.dataframe(_ngdf,use_container_width=True,hide_index=True)
-                    st.caption('This tests whether the live-qualified set is brittle around the frozen 60-game / 56% gate. It cannot retune or move the gate.')
+                    _ng=(_r2.get('miner_threshold_neighborhood') or {}).get('grid') or []
+                    if _ng:
+                        st.markdown('**Miner authority threshold neighborhood — diagnostic only**')
+                        _ngdf=pd.DataFrame([{'Min confirm N':_x.get('min_confirmation_n'),'Min hit rate':_x.get('min_confirmation_rate'),'Qualified families':_x.get('qualified_count'),
+                                            'Spread':(_x.get('by_market') or {}).get('spreads',0),'H2H':(_x.get('by_market') or {}).get('h2h',0),'Totals':(_x.get('by_market') or {}).get('totals',0),
+                                            'Frozen live gate':_x.get('is_frozen_live_gate')} for _x in _ng])
+                        _ngdf['Min hit rate']=pd.to_numeric(_ngdf['Min hit rate'],errors='coerce').map(lambda x:f'{100*x:.1f}%' if pd.notna(x) else '—')
+                        st.dataframe(_ngdf,use_container_width=True,hide_index=True)
+                        st.caption('This tests whether the live-qualified set is brittle around the frozen 60-game / 56% gate. It cannot retune or move the gate.')
 
-                _ma=_r2.get('market_rich') or {}
-                st.caption(f"Utils market-rich historical coverage: {len(_ma.get('historical_fields_present') or [])}/{len(_ma.get('historical_fields_requested') or [])} fields; live backend remains Utils → sharp_moves_master / moves_with_features_merged.")
-        except Exception as _rv2_ui_err:
-            st.warning(f'Research V2.3 report unavailable: {type(_rv2_ui_err).__name__}')
-
-    if st.checkbox('Show market model diagnostics',value=False,key='ncaaf-fast-research'):
+                    _ma=_r2.get('market_rich') or {}
+                    st.caption(f"Utils market-rich historical coverage: {len(_ma.get('historical_fields_present') or [])}/{len(_ma.get('historical_fields_requested') or [])} fields; live backend remains Utils → sharp_moves_master / moves_with_features_merged.")
+            except Exception as _rv2_ui_err:
+                st.warning(f'Research V2.3 report unavailable: {type(_rv2_ui_err).__name__}')
+    if _show_ncaaf_model:
+        st.markdown('**Current market model diagnostics**')
         diag=view[['Game Time','Matchup','Spr Fair','Spr EV','Spr Status','H2H Fair','H2H EV','H2H Status','Tot Fair','Tot EV','Tot Status']].copy()
         diag['Spr Fair']=pd.to_numeric(diag['Spr Fair'],errors='coerce').map(lambda x:f'{x:+.1f}' if pd.notna(x) else '—')
         diag['H2H Fair']=pd.to_numeric(diag['H2H Fair'],errors='coerce').map(lambda x:f'{x:+.0f}' if pd.notna(x) else '—')
