@@ -1,0 +1,72 @@
+{
+  "status": "PASS",
+  "source_tag": "ncaaf-research-v2.23.0-season-record-state-miner-20261008",
+  "families": [
+    "MARKET_MICROSTRUCTURE",
+    "RUN_PASS_MATCHUP"
+  ],
+  "qvalues": [
+    0.03,
+    0.06,
+    0.20000000000000004
+  ],
+  "american_unit_profit_test": [
+    2.0,
+    0.5
+  ],
+  "h2h_price_gate": "OBSERVED_TEAM_AND_OPPONENT_ML_ONLY",
+  "confirmation_gate": "BOTH_2024_AND_2025",
+  "live_authority_policy": "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007",
+  "live_min_confirmation_n": 60,
+  "live_min_confirmation_rate": 0.56,
+  "weak_confirmed_authority": false,
+  "strong_confirmed_authority": true,
+  "pt_strong_validated_authority": true,
+  "pt_weak_authority": false,
+  "core_oof_bridge_authority": false,
+  "pt_family_vote_cap": 1,
+  "season_record_state_family_vote_cap": 1,
+  "season_record_state_atoms": [
+    "ATS_COVERLESS_AFTER_2_PLUS",
+    "ATS_COVERLESS_AFTER_3_PLUS",
+    "ATS_COVERLESS_AFTER_4_PLUS",
+    "ATS_COVERLESS_PRIOR",
+    "DOG_10_PLUS",
+    "DOG_6P5_PLUS",
+    "DOG_7_PLUS",
+    "DOG_8_PLUS",
+    "DOG_9_PLUS",
+    "OPP_HAS_SU_WIN",
+    "SU_AND_ATS_WINLESS_AFTER_2_PLUS",
+    "SU_AND_ATS_WINLESS_AFTER_3_PLUS",
+    "SU_AND_ATS_WINLESS_AFTER_4_PLUS",
+    "SU_AND_ATS_WINLESS_PRIOR",
+    "SU_WINLESS_AFTER_2_PLUS",
+    "SU_WINLESS_AFTER_3_PLUS",
+    "SU_WINLESS_AFTER_4_PLUS",
+    "SU_WINLESS_PRIOR",
+    "TEAM_GAME_3",
+    "TEAM_GAME_4",
+    "TEAM_GAME_5",
+    "TEAM_GAME_6"
+  ],
+  "pt_name_safe_header_contract": true,
+  "pt_self_test_system_columns": {
+    "DOKTER": "linedokter",
+    "PI_RATE_BIAS": "Pi-Ratings Bias",
+    "KEEPER": "Keeper",
+    "ESPN_FPI": "lineespn",
+    "PIGSKIN_INDEX": "Pigskin Index"
+  },
+  "pt_fuzzy_header_rejected": true,
+  "pt_relay_csv_payload": true,
+  "pt_relay_named_markdown": true,
+  "pt_relay_https_target": true,
+  "pt_challenge_rejected": true,
+  "pt_current_merge_preserves_rematch": true,
+  "pt_sparse_partial_component_preservation": true,
+  "pt_canonical_alias_hint": true,
+  "pt_final_hard_aliases": true,
+  "expert_side_bridge": true,
+  "expert_occurrence_reconciliation": true
+}

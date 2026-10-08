@@ -34,8 +34,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.22.0-pt-final-aliases-residual-match-audit-20261008"
-NCAAF_RESEARCH_V2_VERSION = "2.22.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.23.0-season-record-state-miner-20261008"
+NCAAF_RESEARCH_V2_VERSION = "2.23.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -2695,6 +2695,12 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
     for lo,hi in ((0,3),(3,7),(7,10),(10,14),(14,99)):
         add(f"DOG_{lo}_{hi}","MARKET_PRICE",sp.gt(lo)&sp.le(hi),source_ok=has("Consensus_Open_Spread","Opening_Spread"))
         add(f"FAV_{lo}_{hi}","MARKET_PRICE",(-sp).gt(lo)&(-sp).le(hi),source_ok=has("Consensus_Open_Spread","Opening_Spread"))
+    # V2.23 season-record/desperation pricing vocabulary. Spread only.
+    # All thresholds share MARKET_PRICE so correlated cut points cannot stack
+    # inside a single mined rule.
+    if market=="spreads":
+        for cut,label in ((6.5,"6P5"),(7.0,"7"),(8.0,"8"),(9.0,"9"),(10.0,"10")):
+            add(f"DOG_{label}_PLUS","MARKET_PRICE",sp.ge(cut),source_ok=has("Consensus_Open_Spread","Opening_Spread"),min_n=20)
     for lo,hi in ((0,45),(45,52),(52,60),(60,99)):
         add(f"TOTAL_{lo}_{hi}","TOTAL_REGIME",tot.ge(lo)&tot.lt(hi),source_ok=has("Consensus_Open_Total","Opening_Total"))
 
@@ -2704,6 +2710,13 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
     add("LATE_SEASON_WK10_PLUS","SEASON_TIMING",week.ge(10),source_ok=has("Context_Week","Week"))
     add("FIRST_THREE_TEAM_GAMES","SEASON_TIMING",game_no.le(3)&game_no.notna(),source_ok=has("Team_Game_Number_Prior","Game_Number_Prior","Context_Team_Games_Prior"))
     add("GAME_7_PLUS","SEASON_TIMING",game_no.ge(7),source_ok=has("Team_Game_Number_Prior","Game_Number_Prior","Context_Team_Games_Prior"))
+    # Team_Game_Number_Prior is completed games entering this row; +1 is
+    # the current game number. Exact slots share SEASON_TIMING to avoid duplicate
+    # timing votes (for example TEAM_GAME_5 plus MID_SEASON).
+    if market=="spreads":
+        _current_game_no=game_no+1
+        for _n in (3,4,5,6):
+            add(f"TEAM_GAME_{_n}","SEASON_TIMING",_current_game_no.eq(_n),source_ok=has("Team_Game_Number_Prior","Game_Number_Prior","Context_Team_Games_Prior"),min_n=20)
     rest=nfirst("Days_Since_Last_Game_System","Days_Since_Last_Game")
     opprest=nfirst("Opp_Days_Since_Last_Game_System","Opp_Days_Since_Last_Game")
     rest_pair=rest.notna()&opprest.notna()
@@ -2805,6 +2818,27 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
         add(f"{nm}_WINPCT_LE_400",fam,ser.le(.400),source_ok=ok)
         add(f"{nm}_WINPCT_LE_500",fam,ser.le(.500),source_ok=ok)
         add(f"{nm}_WINPCT_GE_600",fam,ser.ge(.600),source_ok=ok)
+
+    # V2.23 SEASON_RECORD_STATE. Every condition is pregame. `game_no` is
+    # completed games prior, `twp` is prior win percentage, and ATS loss streak
+    # is explicitly prior. ATS_COVERLESS means every prior graded ATS result was
+    # a loss; a prior push intentionally fails this exact 0-X ATS definition.
+    if market=="spreads":
+        _prior_games=game_no
+        _record_src=has("Team_Game_Number_Prior","Game_Number_Prior","Context_Team_Games_Prior")
+        _su_src=_record_src and has("Team_WinPct_Prior","Core_Team_WinPct_Prior","WinPct_Prior_System","HC_WinPct_Prior")
+        _ats_loss=nfirst("ATS_Loss_Streak_Prior")
+        _ats_src=_record_src and has("ATS_Loss_Streak_Prior")
+        _su_winless=_prior_games.ge(1)&twp.eq(0)
+        _ats_coverless=_prior_games.ge(1)&_ats_loss.ge(_prior_games)
+        add("SU_WINLESS_PRIOR","SEASON_RECORD_STATE",_su_winless,desc="zero SU wins entering game",source_ok=_su_src,min_n=20)
+        add("ATS_COVERLESS_PRIOR","SEASON_RECORD_STATE",_ats_coverless,desc="zero ATS covers; every prior graded ATS game was a loss",source_ok=_ats_src,min_n=20)
+        add("SU_AND_ATS_WINLESS_PRIOR","SEASON_RECORD_STATE",_su_winless&_ats_coverless,desc="zero SU wins and zero ATS covers entering game",source_ok=_su_src and _ats_src,min_n=20)
+        for _n in (2,3,4):
+            add(f"SU_WINLESS_AFTER_{_n}_PLUS","SEASON_RECORD_STATE",_su_winless&_prior_games.ge(_n),desc=f"SU winless after {_n}+ completed games",source_ok=_su_src,min_n=20)
+            add(f"ATS_COVERLESS_AFTER_{_n}_PLUS","SEASON_RECORD_STATE",_ats_coverless&_prior_games.ge(_n),desc=f"ATS coverless after {_n}+ completed games",source_ok=_ats_src,min_n=20)
+            add(f"SU_AND_ATS_WINLESS_AFTER_{_n}_PLUS","SEASON_RECORD_STATE",_su_winless&_ats_coverless&_prior_games.ge(_n),desc=f"SU and ATS winless after {_n}+ completed games",source_ok=_su_src and _ats_src,min_n=20)
+        add("OPP_HAS_SU_WIN","OPP_STATE",owp.gt(0),desc="opponent has at least one prior SU win",source_ok=has("Opp_WinPct_Prior","Core_Opp_WinPct_Prior","Opp_WinPct_Prior_System","HC_Opp_WinPct_Prior"),min_n=20)
 
     # Role-change / team-price memory.
     prev_dog=nfirst("Prev_Is_ML_Dog")
@@ -3880,11 +3914,13 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
             rep=max(members,key=lambda z:(z["confirmation_pass"],z["confirmation_rate"] if np.isfinite(z["confirmation_rate"]) else -1,z["discovery_rate"],z["discovery_n"]))
         fid=_stable_id("NCAAF-MECH-",[market,rep["direction"],"+".join(sorted(set(rep["families"])))]+[x["system_id"] for x in members])
         _uses_external=bool("EXTERNAL_RATINGS_FAMILY" in set(rep.get("families") or []))
+        _uses_season_record=bool("SEASON_RECORD_STATE" in set(rep.get("families") or []))
         _rep_conditions=list(rep.get("conditions") or [])
         fam={"mechanism_id":fid,"market":market,"direction":rep["direction"],"representative_system_id":rep["system_id"],
              "representative_conditions":_rep_conditions,"member_system_ids":[x["system_id"] for x in members],"member_count":len(members),"families":rep["families"],
              "uses_external_ratings_family":_uses_external,
-             "evidence_family_key":"EXTERNAL_RATINGS_FAMILY" if _uses_external else fid,
+             "uses_season_record_state_family":_uses_season_record,
+             "evidence_family_key":"EXTERNAL_RATINGS_FAMILY" if _uses_external else "NCAAF_SEASON_RECORD_STATE_FAMILY" if _uses_season_record else fid,
              "contains_meta_constituent_index":any(_v2182_is_meta_constituent_index_atom_name(c) for c in _rep_conditions),
              "meta_constituent_overlap_guard":"PASS" if not _v2182_meta_overlap_violation(_rep_conditions) else "FAIL",
              "miner_lane":rep.get("miner_lane"),"member_lanes":sorted(set(str(x.get("miner_lane") or "") for x in members)),
@@ -4274,9 +4310,11 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
                 else: target=home if direction=="PLAY_ON" else away
                 if not target: continue
                 _uses_external=bool("EXTERNAL_RATINGS_FAMILY" in set(mech.get("families") or []))
+                _uses_season_record=bool("SEASON_RECORD_STATE" in set(mech.get("families") or []))
+                _evidence_key=str(mech.get("evidence_family_key") or ("EXTERNAL_RATINGS_FAMILY" if _uses_external else "NCAAF_SEASON_RECORD_STATE_FAMILY" if _uses_season_record else str(mech.get("mechanism_id"))))
                 vote={"source_type":"MINER","family_id":str(mech.get("mechanism_id")),"target":target,"market":str(market).lower(),
-                      "evidence_family_key":"EXTERNAL_RATINGS_FAMILY" if _uses_external else str(mech.get("mechanism_id")),
-                      "uses_external_ratings_family":_uses_external,
+                      "evidence_family_key":_evidence_key,
+                      "uses_external_ratings_family":_uses_external,"uses_season_record_state_family":_uses_season_record,
                       "mechanisms":list(mech.get("families") or [str(mech.get("mechanism_id"))]),"rule":" AND ".join(cond),
                       "confirmation_n":mech.get("confirmation_n"),"confirmation_rate":mech.get("confirmation_rate"),
                       "evidence_level":"STRONG_VALIDATED" if live_eligible else "VALIDATED_SHADOW",
@@ -4436,7 +4474,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         _strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if _miner_live_authority_eligible(_m))
         _pt_strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_external_ratings_family")) and _miner_live_authority_eligible(_m))
         _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_","META_PT_","PTIDX_","PT_ALL_","PT_CLUSTER_","PT_TRACKER_")) for c in (_m.get("representative_conditions") or [])))
-        log_func(f"[NCAAF-RV222-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} pt_miner_live_authority={_pt_strong} pt_family_vote_cap=1 source_neutral_system_gate=TRUE prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
+        log_func(f"[NCAAF-RV223-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} pt_miner_live_authority={_pt_strong} pt_family_vote_cap=1 source_neutral_system_gate=TRUE prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
         return report
     except Exception as exc:
         log_func(f"[NCAAF-RV2-FAIL] {type(exc).__name__}: {exc}")
@@ -4462,7 +4500,8 @@ def match_live_systems(rows: pd.DataFrame, report: dict[str,Any], dashboard_modu
     return attach_live_miner_votes(rows,report,dashboard_module=dashboard_module)
 
 def self_test() -> dict[str,Any]:
-    _tf=pd.DataFrame({"Consensus_Open_Spread":[3.5],"Prev_SU_Margin":[-7.0],"Prev2_SU_Margin":[10.0],"Prev3_SU_Margin":[-3.0],"Prev_ATS_Margin":[8.0],"Prev2_ATS_Margin":[-2.0],"Prev3_ATS_Margin":[5.0],
+    _tf=pd.DataFrame({"Consensus_Open_Spread":[9.0],"Prev_SU_Margin":[-7.0],"Prev2_SU_Margin":[-10.0],"Prev3_SU_Margin":[-3.0],"Prev_ATS_Margin":[-8.0],"Prev2_ATS_Margin":[-2.0],"Prev3_ATS_Margin":[-5.0],
+                      "Team_Game_Number_Prior":[4],"Current_Loss_Streak_Prior":[4],"ATS_Loss_Streak_Prior":[4],"Team_WinPct_Prior":[0.0],"Opp_WinPct_Prior":[0.5],
                       "Pathi_FB_Dog_Hook_Above_3":[1],"BigAl_CF2_LateSeasonRevengeDog":[1],"_V29_CORE_INCUMBENT_EDGE_POINTS":[3.0],
                       "_V29_SPEC_STRUCTURED_STATS_EDGE_POINTS":[2.5],"_V29_SPEC_STRUCTURED_STATS_DIVERGENCE_FROM_CORE":[1.5],"_V29_SPEC_STRUCTURED_STATS_DIVERGENCE_CUT":[1.0],
                       "_V210_PT_META_MARGIN_TEAM":[6.5],"_V210_PT_META_EDGE_POINTS":[3.0],"_V210_PT_META_SYSTEM_COUNT":[5]})
@@ -4610,7 +4649,9 @@ def self_test() -> dict[str,Any]:
     ok=bool(
         len(q)==3 and "RUN_PASS_MATCHUP" in fam and "MARKET_MICROSTRUCTURE" in fam and
         all("Actual_Margin" not in x for v in fam.values() for x in v) and
-        "SU_SEQ3_LWL" in live_atoms and "OFF_ATS_COVER_7_PLUS" in live_atoms and
+        "SU_SEQ3_LLL" in live_atoms and "OFF_ATS_MISS_7_PLUS" in live_atoms and
+        "SU_WINLESS_PRIOR" in live_atoms and "ATS_COVERLESS_PRIOR" in live_atoms and "SU_AND_ATS_WINLESS_AFTER_4_PLUS" in live_atoms and
+        "TEAM_GAME_5" in live_atoms and "DOG_9_PLUS" in live_atoms and "OPP_HAS_SU_WIN" in live_atoms and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
         "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and "META_PT_EDGE_TEAM_3PLUS" in live_atoms and "META_PT_CORE_STRONG_AGREE" in live_atoms and
         np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _sparse_pt_ok and _pt_alias_hint_ok and _pt_final_hard_aliases_ok and _expert_bridge_ok and _occ_recon_ok and
@@ -4631,6 +4672,8 @@ def self_test() -> dict[str,Any]:
         "pt_weak_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.54,"representative_conditions":["META_PT_EDGE_TEAM_3PLUS"]}),
         "core_oof_bridge_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["CORE_OOF_EDGE_TEAM_2PLUS"]}),
         "pt_family_vote_cap":1,
+        "season_record_state_family_vote_cap":1,
+        "season_record_state_atoms":sorted(x for x in live_atoms if x.startswith(("SU_WINLESS","ATS_COVERLESS","SU_AND_ATS_WINLESS","TEAM_GAME_","DOG_6P5_PLUS","DOG_7_PLUS","DOG_8_PLUS","DOG_9_PLUS","DOG_10_PLUS","OPP_HAS_SU_WIN"))),
         "pt_name_safe_header_contract":_pt_name_safe,
         "pt_self_test_system_columns":_pt_da.get("system_columns",{}),
         "pt_fuzzy_header_rejected":_pt_dc.get("system_columns",{}).get("ESPN_FPI") is None,
