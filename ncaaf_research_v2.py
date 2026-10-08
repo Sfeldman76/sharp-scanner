@@ -34,8 +34,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.23.0-season-record-state-miner-20261008"
-NCAAF_RESEARCH_V2_VERSION = "2.23.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.24.0-role-transition-bounceback-miner-20261008"
+NCAAF_RESEARCH_V2_VERSION = "2.24.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -2817,6 +2817,7 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
     for nm,ser,fam,ok in (("TEAM",twp,"TEAM_STATE",has("Team_WinPct_Prior","Core_Team_WinPct_Prior","WinPct_Prior_System","HC_WinPct_Prior")),("OPP",owp,"OPP_STATE",has("Opp_WinPct_Prior","Core_Opp_WinPct_Prior","Opp_WinPct_Prior_System","HC_Opp_WinPct_Prior"))):
         add(f"{nm}_WINPCT_LE_400",fam,ser.le(.400),source_ok=ok)
         add(f"{nm}_WINPCT_LE_500",fam,ser.le(.500),source_ok=ok)
+        if nm=="OPP": add("OPP_WINPCT_GE_500",fam,ser.ge(.500),source_ok=ok,min_n=20)
         add(f"{nm}_WINPCT_GE_600",fam,ser.ge(.600),source_ok=ok)
 
     # V2.23 SEASON_RECORD_STATE. Every condition is pregame. `game_no` is
@@ -2848,6 +2849,58 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
     add("PRIOR_FAVORITE","ROLE_CHANGE",prev_fav.eq(1),source_ok=has("Prev_Is_ML_Favorite","Prev_Is_ML_Dog"))
     add("ROLE_FLIP_FAVORITE_TO_DOG","ROLE_CHANGE",prev_fav.eq(1)&sp.gt(0),source_ok=has("Prev_Is_ML_Favorite","Prev_Is_ML_Dog") and has("Consensus_Open_Spread","Opening_Spread"))
     add("ROLE_FLIP_DOG_TO_FAVORITE","ROLE_CHANGE",prev_dog.eq(1)&sp.lt(0),source_ok=has("Prev_Is_ML_Dog") and has("Consensus_Open_Spread","Opening_Spread"))
+
+
+    # V2.24 ROLE_TRANSITION_BOUNCEBACK. This is the generic pregame state prompted
+    # by the observed high-rated bounceback dog example, not a hard-coded team/pick.
+    # Core idea: a team that was HOME FAVORITE, LOST SU, and is now a ROAD DOG.
+    # Winning-team / both-winning / +5..+7.5 variants are alternatives inside the
+    # SAME family so they can never stack as independent votes.
+    _prev_home=nfirst("Prev_Is_Home","Pregame_Prev_Is_Home","Context_Prev_Is_Home")
+    if (not _prev_home.notna().any()) and (not for_live) and has("Is_Home") and any(c in g.columns for c in ("Team_Norm","Team")):
+        try:
+            _team=tfirst("Team_Norm","Team")
+            _season=nfirst("Season")
+            _date=pd.to_datetime(g.get("Game_Date",g.get("Game_Start",pd.Series(pd.NaT,index=g.index))),errors="coerce",utc=True)
+            _tmp=pd.DataFrame({"idx":np.arange(len(g)),"team":_team,"season":_season,"date":_date,"home":pd.to_numeric(g.get("Is_Home"),errors="coerce")})
+            _tmp=_tmp.sort_values(["team","season","date","idx"],kind="stable")
+            _tmp["prev_home"]=_tmp.groupby(["team","season"],sort=False,dropna=False)["home"].shift(1)
+            _ph=np.full(len(g),np.nan,float); _ph[_tmp["idx"].to_numpy(int)]=pd.to_numeric(_tmp["prev_home"],errors="coerce").to_numpy(float)
+            _prev_home=pd.Series(_ph,index=g.index,dtype=float)
+        except Exception:
+            pass
+    _opp_prev_home=nfirst("Opp_Prev_Is_Home","Opp_Pregame_Prev_Is_Home","Context_Opp_Prev_Is_Home")
+    if (not _opp_prev_home.notna().any()) and (not for_live) and _prev_home.notna().any() and any(c in g.columns for c in ("Opponent_Norm","Opponent")):
+        try:
+            _team=tfirst("Team_Norm","Team"); _opp=tfirst("Opponent_Norm","Opponent"); _season=nfirst("Season")
+            _date=pd.to_datetime(g.get("Game_Date",g.get("Game_Start",pd.Series(pd.NaT,index=g.index))),errors="coerce",utc=True)
+            _lookup={}
+            for _i in range(len(g)):
+                _k=(str(_season.iloc[_i]),str(_date.iloc[_i]),str(_team.iloc[_i]))
+                _v=_prev_home.iloc[_i]
+                if pd.notna(_v): _lookup[_k]=float(_v)
+            _ov=[]
+            for _i in range(len(g)):
+                _ov.append(_lookup.get((str(_season.iloc[_i]),str(_date.iloc[_i]),str(_opp.iloc[_i])),np.nan))
+            _opp_prev_home=pd.Series(_ov,index=g.index,dtype=float)
+        except Exception:
+            pass
+    _opp_prev_fav=nfirst("Opp_Prev_Is_ML_Favorite")
+    _opp_prev_dog=nfirst("Opp_Prev_Is_ML_Dog")
+    if not _opp_prev_fav.notna().any() and _opp_prev_dog.notna().any(): _opp_prev_fav=1-_opp_prev_dog
+    _team_bounce=(is_home.eq(0)&sp.gt(0)&_prev_home.eq(1)&prev_fav.eq(1)&psu.lt(0))
+    # On a home-oriented row, the opponent is the road dog iff the home spread is negative.
+    _opp_bounce=(is_home.eq(1)&sp.lt(0)&_opp_prev_home.eq(1)&_opp_prev_fav.eq(1)&opsu.lt(0))
+    _bh_src=bool((_prev_home.notna().any() or for_live) and has("Prev_Is_ML_Favorite","Prev_Is_ML_Dog") and has("Pregame_Prev_SU_Margin","Prev_SU_Margin","Context_Prev_SU_Margin"))
+    _obh_src=bool((_opp_prev_home.notna().any() or for_live) and has("Opp_Prev_Is_ML_Favorite","Opp_Prev_Is_ML_Dog") and has("Context_Opp_Prev_SU_Margin","Opp_Pregame_Prev_SU_Margin","Opp_Prev_SU_Margin"))
+    add("BOUNCEBACK_HOME_FAV_UPSET_TO_ROAD_DOG","ROLE_TRANSITION_BOUNCEBACK",_team_bounce,desc="road dog after SU upset loss as home favorite",source_ok=_bh_src,min_n=20)
+    add("BOUNCEBACK_WINNING_TEAM","ROLE_TRANSITION_BOUNCEBACK",_team_bounce&twp.ge(.500),desc="winning team road dog after SU upset loss as home favorite",source_ok=_bh_src,min_n=20)
+    add("BOUNCEBACK_BOTH_WINNING_TEAMS","ROLE_TRANSITION_BOUNCEBACK",_team_bounce&twp.ge(.500)&owp.ge(.500),desc="winning road dog vs winning opponent after home-favorite upset loss",source_ok=_bh_src,min_n=20)
+    add("BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5","ROLE_TRANSITION_BOUNCEBACK",_team_bounce&twp.ge(.500)&sp.between(5.0,7.5),desc="winning bounceback road dog from +5 through +7.5",source_ok=_bh_src,min_n=15)
+    add("OPP_BOUNCEBACK_HOME_FAV_UPSET_TO_ROAD_DOG","ROLE_TRANSITION_BOUNCEBACK",_opp_bounce,desc="opponent is road dog after SU upset loss as home favorite",source_ok=_obh_src,min_n=20)
+    add("OPP_BOUNCEBACK_WINNING_TEAM","ROLE_TRANSITION_BOUNCEBACK",_opp_bounce&owp.ge(.500),desc="opponent is winning road dog after home-favorite upset loss",source_ok=_obh_src,min_n=20)
+    add("OPP_BOUNCEBACK_BOTH_WINNING_TEAMS","ROLE_TRANSITION_BOUNCEBACK",_opp_bounce&owp.ge(.500)&twp.ge(.500),desc="opponent winning road dog vs winning team after home-favorite upset loss",source_ok=_obh_src,min_n=20)
+    add("OPP_BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5","ROLE_TRANSITION_BOUNCEBACK",_opp_bounce&owp.ge(.500)&(-sp).between(5.0,7.5),desc="opponent winning bounceback road dog from +5 through +7.5",source_ok=_obh_src,min_n=15)
     for c,name in (("Pathi_FB_Usually_Dog_Now_Favorite","ROLE_FLIP_DOG_TO_FAV_HISTORY"),("Pathi_FB_Usually_Favorite_Now_Dog","ROLE_FLIP_FAV_TO_DOG_HISTORY")):
         add(name,"ROLE_HISTORY",nfirst(c).eq(1),source_ok=has(c))
     role_shift=nfirst("Role_Price_Shift")
@@ -3915,12 +3968,14 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         fid=_stable_id("NCAAF-MECH-",[market,rep["direction"],"+".join(sorted(set(rep["families"])))]+[x["system_id"] for x in members])
         _uses_external=bool("EXTERNAL_RATINGS_FAMILY" in set(rep.get("families") or []))
         _uses_season_record=bool("SEASON_RECORD_STATE" in set(rep.get("families") or []))
+        _uses_bounceback=bool("ROLE_TRANSITION_BOUNCEBACK" in set(rep.get("families") or []))
         _rep_conditions=list(rep.get("conditions") or [])
         fam={"mechanism_id":fid,"market":market,"direction":rep["direction"],"representative_system_id":rep["system_id"],
              "representative_conditions":_rep_conditions,"member_system_ids":[x["system_id"] for x in members],"member_count":len(members),"families":rep["families"],
              "uses_external_ratings_family":_uses_external,
              "uses_season_record_state_family":_uses_season_record,
-             "evidence_family_key":"EXTERNAL_RATINGS_FAMILY" if _uses_external else "NCAAF_SEASON_RECORD_STATE_FAMILY" if _uses_season_record else fid,
+             "uses_role_transition_bounceback_family":_uses_bounceback,
+             "evidence_family_key":"EXTERNAL_RATINGS_FAMILY" if _uses_external else "NCAAF_SEASON_RECORD_STATE_FAMILY" if _uses_season_record else "NCAAF_ROLE_TRANSITION_BOUNCEBACK_FAMILY" if _uses_bounceback else fid,
              "contains_meta_constituent_index":any(_v2182_is_meta_constituent_index_atom_name(c) for c in _rep_conditions),
              "meta_constituent_overlap_guard":"PASS" if not _v2182_meta_overlap_violation(_rep_conditions) else "FAIL",
              "miner_lane":rep.get("miner_lane"),"member_lanes":sorted(set(str(x.get("miner_lane") or "") for x in members)),
@@ -4257,6 +4312,66 @@ def _miner_live_authority_eligible(mech: dict[str,Any] | None) -> bool:
     return bool(n>=NCAAF_MINER_LIVE_MIN_CONFIRMATION_N and np.isfinite(rate) and rate>=NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE)
 
 
+def _attach_role_transition_live_context(cdf: pd.DataFrame, dashboard_module=None, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
+    """Fill prior-home/role/result state for live bounceback evaluation.
+
+    Completed 2026 games are trigger context only. They never enter historical
+    qualification, selection, or promotion. Existing populated fields win.
+    """
+    if cdf is None or cdf.empty: return cdf,{"status":"EMPTY","selection_influence":0}
+    out=cdf.copy()
+    need=("Prev_Is_Home","Opp_Prev_Is_Home")
+    if all(c in out.columns and pd.to_numeric(out[c],errors="coerce").notna().any() for c in need):
+        return out,{"status":"ALREADY_PRESENT","selection_influence":0}
+    bq=getattr(dashboard_module,"bq_client",None) if dashboard_module is not None else None
+    view=getattr(dashboard_module,"HISTORICAL_NCAAF_CORE_VIEW","sharplogger.sharp_data.ncaaf_historical_core_training_vw") if dashboard_module is not None else "sharplogger.sharp_data.ncaaf_historical_core_training_vw"
+    if bq is None: return out,{"status":"NO_BQ_CLIENT","selection_influence":0}
+    try:
+        h=bq.query(f"SELECT * FROM `{view}` WHERE Season=2026 AND Team_Score IS NOT NULL AND Opponent_Score IS NOT NULL").to_dataframe(create_bqstorage_client=False)
+        if h is None or h.empty: return out,{"status":"NO_COMPLETED_2026_HISTORY","selection_influence":0}
+        def _txt(df,*cols):
+            z=pd.Series("",index=df.index,dtype="string")
+            for c in cols:
+                if c in df.columns:
+                    v=df[c].astype("string").fillna("").str.lower().str.strip(); z=z.where(z.ne(""),v)
+            return z
+        def _numc(df,*cols):
+            z=pd.Series(np.nan,index=df.index,dtype=float)
+            for c in cols:
+                if c in df.columns:
+                    v=pd.to_numeric(df[c],errors="coerce"); z=z.where(z.notna(),v)
+            return z
+        h=h.copy(); h["__team"]=_txt(h,"Team_Norm","Team"); h["__opp"]=_txt(h,"Opponent_Norm","Opponent")
+        h["__date"]=pd.to_datetime(h.get("Game_Date",h.get("Game_Start")),errors="coerce",utc=True)
+        h["__home"]=_numc(h,"Is_Home")
+        h["__spread"]=_numc(h,"Opening_Spread","Consensus_Open_Spread")
+        h["__margin"]=_numc(h,"Team_Score","Points_For")-_numc(h,"Opponent_Score","Points_Against")
+        h=h.loc[h["__team"].ne("")&h["__date"].notna()].sort_values(["__team","__date"],kind="stable")
+        states={}
+        for team,g in h.groupby("__team",sort=False):
+            margins=pd.to_numeric(g["__margin"],errors="coerce").dropna()
+            wp=float(((margins>0).sum()+.5*(margins==0).sum())/len(margins)) if len(margins) else np.nan
+            last=g.iloc[-1]; sp=float(last["__spread"]) if pd.notna(last["__spread"]) else np.nan
+            states[str(team)]={"prev_home":float(last["__home"]) if pd.notna(last["__home"]) else np.nan,
+                               "prev_fav":float(sp<0) if np.isfinite(sp) else np.nan,
+                               "prev_margin":float(last["__margin"]) if pd.notna(last["__margin"]) else np.nan,
+                               "winpct":wp}
+        team=_txt(out,"Team_Norm","Team","Home_Team_Norm","Home_Team")
+        opp=_txt(out,"Opponent_Norm","Opponent","Away_Team_Norm","Away_Team")
+        fields={"Prev_Is_Home":("prev_home",team),"Prev_Is_ML_Favorite":("prev_fav",team),"Prev_SU_Margin":("prev_margin",team),"Team_WinPct_Prior":("winpct",team),
+                "Opp_Prev_Is_Home":("prev_home",opp),"Opp_Prev_Is_ML_Favorite":("prev_fav",opp),"Opp_Prev_SU_Margin":("prev_margin",opp),"Opp_WinPct_Prior":("winpct",opp)}
+        for col,(k,who) in fields.items():
+            vals=pd.Series([states.get(str(x),{}).get(k,np.nan) for x in who],index=out.index,dtype=float)
+            if col in out.columns:
+                cur=pd.to_numeric(out[col],errors="coerce"); out[col]=cur.where(cur.notna(),vals)
+            else: out[col]=vals
+        diag={"status":"PASS","history_rows":int(len(h)),"teams":int(len(states)),"selection_influence":0,"year_2026_role":"TRIGGER_CONTEXT_ONLY"}
+        log_func(f"[NCAAF-BOUNCEBACK-LIVE-CONTEXT] status=PASS history_rows={len(h)} teams={len(states)} selection_influence=0")
+        return out,diag
+    except Exception as exc:
+        return out,{"status":"ERROR","error":f"{type(exc).__name__}:{exc}","selection_influence":0}
+
+
 def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard_module=None) -> pd.DataFrame:
     """Evaluate frozen confirmed Miner mechanisms against current pregame context.
 
@@ -4286,6 +4401,7 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
         pick["_rv22_game_id_key"]=gid; ctx.append(pick); keys.append(gid)
     if not ctx: return out
     cdf=pd.DataFrame(ctx).reset_index(drop=True)
+    cdf,_bounce_live_diag=_attach_role_transition_live_context(cdf,dashboard_module=dashboard_module,log_func=lambda *a,**k:None)
     cdf,_pt_live_diag=_pt_attach_current_live_frame(cdf,dashboard_module=dashboard_module)
     registry=report.get("system_miner_v3") or {}
     authority_votes_by_game={k:[] for k in keys}; research_votes_by_game={k:[] for k in keys}
@@ -4311,10 +4427,11 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
                 if not target: continue
                 _uses_external=bool("EXTERNAL_RATINGS_FAMILY" in set(mech.get("families") or []))
                 _uses_season_record=bool("SEASON_RECORD_STATE" in set(mech.get("families") or []))
-                _evidence_key=str(mech.get("evidence_family_key") or ("EXTERNAL_RATINGS_FAMILY" if _uses_external else "NCAAF_SEASON_RECORD_STATE_FAMILY" if _uses_season_record else str(mech.get("mechanism_id"))))
+                _uses_bounceback=bool("ROLE_TRANSITION_BOUNCEBACK" in set(mech.get("families") or []))
+                _evidence_key=str(mech.get("evidence_family_key") or ("EXTERNAL_RATINGS_FAMILY" if _uses_external else "NCAAF_SEASON_RECORD_STATE_FAMILY" if _uses_season_record else "NCAAF_ROLE_TRANSITION_BOUNCEBACK_FAMILY" if _uses_bounceback else str(mech.get("mechanism_id"))))
                 vote={"source_type":"MINER","family_id":str(mech.get("mechanism_id")),"target":target,"market":str(market).lower(),
                       "evidence_family_key":_evidence_key,
-                      "uses_external_ratings_family":_uses_external,"uses_season_record_state_family":_uses_season_record,
+                      "uses_external_ratings_family":_uses_external,"uses_season_record_state_family":_uses_season_record,"uses_role_transition_bounceback_family":_uses_bounceback,
                       "mechanisms":list(mech.get("families") or [str(mech.get("mechanism_id"))]),"rule":" AND ".join(cond),
                       "confirmation_n":mech.get("confirmation_n"),"confirmation_rate":mech.get("confirmation_rate"),
                       "evidence_level":"STRONG_VALIDATED" if live_eligible else "VALIDATED_SHADOW",
@@ -4473,8 +4590,9 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         report["artifact"]={"current_report":f"gs://{bucket_name}/{REPORT_CURRENT_BLOB}","current_bundle":f"gs://{bucket_name}/{BUNDLE_CURRENT_BLOB}","history_report":f"gs://{bucket_name}/{hist}","sha256":sha}
         _strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if _miner_live_authority_eligible(_m))
         _pt_strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_external_ratings_family")) and _miner_live_authority_eligible(_m))
+        _bounce_strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_role_transition_bounceback_family")) and _miner_live_authority_eligible(_m))
         _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_","META_PT_","PTIDX_","PT_ALL_","PT_CLUSTER_","PT_TRACKER_")) for c in (_m.get("representative_conditions") or [])))
-        log_func(f"[NCAAF-RV223-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} pt_miner_live_authority={_pt_strong} pt_family_vote_cap=1 source_neutral_system_gate=TRUE prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
+        log_func(f"[NCAAF-RV224-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} pt_miner_live_authority={_pt_strong} pt_family_vote_cap=1 bounceback_miner_live_authority={_bounce_strong} bounceback_family_vote_cap=1 source_neutral_system_gate=TRUE prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
         return report
     except Exception as exc:
         log_func(f"[NCAAF-RV2-FAIL] {type(exc).__name__}: {exc}")
@@ -4500,8 +4618,9 @@ def match_live_systems(rows: pd.DataFrame, report: dict[str,Any], dashboard_modu
     return attach_live_miner_votes(rows,report,dashboard_module=dashboard_module)
 
 def self_test() -> dict[str,Any]:
-    _tf=pd.DataFrame({"Consensus_Open_Spread":[9.0],"Prev_SU_Margin":[-7.0],"Prev2_SU_Margin":[-10.0],"Prev3_SU_Margin":[-3.0],"Prev_ATS_Margin":[-8.0],"Prev2_ATS_Margin":[-2.0],"Prev3_ATS_Margin":[-5.0],
-                      "Team_Game_Number_Prior":[4],"Current_Loss_Streak_Prior":[4],"ATS_Loss_Streak_Prior":[4],"Team_WinPct_Prior":[0.0],"Opp_WinPct_Prior":[0.5],
+    _tf=pd.DataFrame({"Consensus_Open_Spread":[6.0],"Is_Home":[0],"Prev_Is_Home":[1],"Prev_Is_ML_Favorite":[1],"Opp_Prev_Is_Home":[0],"Opp_Prev_Is_ML_Favorite":[0],
+                      "Prev_SU_Margin":[-7.0],"Opp_Prev_SU_Margin":[7.0],"Prev2_SU_Margin":[-10.0],"Prev3_SU_Margin":[-3.0],"Prev_ATS_Margin":[-8.0],"Prev2_ATS_Margin":[-2.0],"Prev3_ATS_Margin":[-5.0],
+                      "Team_Game_Number_Prior":[4],"Current_Loss_Streak_Prior":[4],"ATS_Loss_Streak_Prior":[4],"Team_WinPct_Prior":[0.75],"Opp_WinPct_Prior":[0.75],
                       "Pathi_FB_Dog_Hook_Above_3":[1],"BigAl_CF2_LateSeasonRevengeDog":[1],"_V29_CORE_INCUMBENT_EDGE_POINTS":[3.0],
                       "_V29_SPEC_STRUCTURED_STATS_EDGE_POINTS":[2.5],"_V29_SPEC_STRUCTURED_STATS_DIVERGENCE_FROM_CORE":[1.5],"_V29_SPEC_STRUCTURED_STATS_DIVERGENCE_CUT":[1.0],
                       "_V210_PT_META_MARGIN_TEAM":[6.5],"_V210_PT_META_EDGE_POINTS":[3.0],"_V210_PT_META_SYSTEM_COUNT":[5]})
@@ -4651,7 +4770,8 @@ def self_test() -> dict[str,Any]:
         all("Actual_Margin" not in x for v in fam.values() for x in v) and
         "SU_SEQ3_LLL" in live_atoms and "OFF_ATS_MISS_7_PLUS" in live_atoms and
         "SU_WINLESS_PRIOR" in live_atoms and "ATS_COVERLESS_PRIOR" in live_atoms and "SU_AND_ATS_WINLESS_AFTER_4_PLUS" in live_atoms and
-        "TEAM_GAME_5" in live_atoms and "DOG_9_PLUS" in live_atoms and "OPP_HAS_SU_WIN" in live_atoms and
+        "TEAM_GAME_5" in live_atoms and "OPP_HAS_SU_WIN" in live_atoms and
+        "BOUNCEBACK_HOME_FAV_UPSET_TO_ROAD_DOG" in live_atoms and "BOUNCEBACK_WINNING_TEAM" in live_atoms and "BOUNCEBACK_BOTH_WINNING_TEAMS" in live_atoms and "BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5" in live_atoms and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
         "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and "META_PT_EDGE_TEAM_3PLUS" in live_atoms and "META_PT_CORE_STRONG_AGREE" in live_atoms and
         np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _sparse_pt_ok and _pt_alias_hint_ok and _pt_final_hard_aliases_ok and _expert_bridge_ok and _occ_recon_ok and
@@ -4673,6 +4793,8 @@ def self_test() -> dict[str,Any]:
         "core_oof_bridge_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["CORE_OOF_EDGE_TEAM_2PLUS"]}),
         "pt_family_vote_cap":1,
         "season_record_state_family_vote_cap":1,
+        "role_transition_bounceback_family_vote_cap":1,
+        "role_transition_bounceback_atoms":sorted(x for x in live_atoms if "BOUNCEBACK" in x),
         "season_record_state_atoms":sorted(x for x in live_atoms if x.startswith(("SU_WINLESS","ATS_COVERLESS","SU_AND_ATS_WINLESS","TEAM_GAME_","DOG_6P5_PLUS","DOG_7_PLUS","DOG_8_PLUS","DOG_9_PLUS","DOG_10_PLUS","OPP_HAS_SU_WIN"))),
         "pt_name_safe_header_contract":_pt_name_safe,
         "pt_self_test_system_columns":_pt_da.get("system_columns",{}),
