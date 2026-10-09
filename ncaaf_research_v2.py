@@ -1,4 +1,4 @@
-"""NCAAF Research V2.26 — rating-aware expert observations + constrained source-neutral Miner research.
+"""NCAAF Research V2.27 — persistent incumbent system library + special-family diagnostics.
 
 Research-only architecture built around the frozen NCAAF Production V1 benchmark.
 This module cannot mutate CORE/model probability. Historically qualified system families may emit bounded
@@ -35,8 +35,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.26.0-bigal-rating-aware-observation-miner-20261009"
-NCAAF_RESEARCH_V2_VERSION = "2.26.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.27.0-persistent-incumbent-system-library-20261009"
+NCAAF_RESEARCH_V2_VERSION = "2.27.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -2827,7 +2827,8 @@ def _attach_exact_expert_flags_to_miner(dashboard_module, miner_games: pd.DataFr
 # ---------------------------------------------------------------------------
 # System Miner V3 — fixed discovery / untouched confirmation / dependence collapse
 # ---------------------------------------------------------------------------
-def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=False, market: str | None=None) -> list[dict[str,Any]]:
+def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=False, market: str | None=None,
+                    enforce_support_floor: bool=True) -> list[dict[str,Any]]:
     """Leak-safe NCAAF System Miner atom catalog.
 
     Historical mode applies support floors so sparse identities cannot flood the
@@ -2915,7 +2916,7 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
     def add(name,family,mask,desc=None,min_n=30,source_ok=True):
         if name in names or not source_ok: return
         mm=pd.Series(mask,index=g.index).fillna(False).astype(bool).to_numpy()
-        if for_live or (min_n<=int(mm.sum())<len(g)):
+        if for_live or (not enforce_support_floor) or (min_n<=int(mm.sum())<len(g)):
             atoms.append({"name":name,"family":family,"mask":mm,"description":desc or name}); names.add(name)
 
     sp=nfirst("Consensus_Open_Spread","Opening_Spread")
@@ -4127,7 +4128,14 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
          "confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,"atoms":len(atoms),"atom_family_counts":_fam_counts,"expert_model_bridge_atoms":int(_bridge_atoms),"systems":[],"mechanism_families":[],"external_predictor_behavior":behavior}
     log_func(f"[NCAAF-RV25-ATOM-BRIDGE] market={market} atoms={len(atoms)} bridge_atoms={_bridge_atoms} pathi={_fam_counts.get('EXPERT_PATHI',0)} bigal={_fam_counts.get('EXPERT_BIGAL',0)} core={_fam_counts.get('RESEARCH_CORE_STATE',0)} specialist={sum(v for k,v in _fam_counts.items() if str(k).startswith('RESEARCH_SPECIALIST_'))} external={sum(v for k,v in _fam_counts.items() if str(k).startswith('EXTERNAL_'))} authority=0")
     if market in {"spreads","totals"}:
-        log_func(f"[NCAAF-RV226-OBS-ATOM-CATALOG] market={market} atoms={len(_obs_atoms)} names={','.join(sorted(a['name'] for a in _obs_atoms))} rating_weight=0 outcomes_2026_used=FALSE authority=0")
+        log_func(f"[NCAAF-RV227-OBS-ATOM-CATALOG] market={market} atoms={len(_obs_atoms)} names={','.join(sorted(a['name'] for a in _obs_atoms))} rating_weight=0 outcomes_2026_used=FALSE authority=0")
+    _special_atom_availability={}
+    if market=="spreads":
+        _special_atom_availability=_special_atom_availability_audit(games,seasons,market,dashboard_module=dashboard_module,admitted_atoms=atoms)
+        for _fam,_diag in _special_atom_availability.items():
+            log_func(f"[NCAAF-SPECIAL-ATOM-AUDIT] market=spreads category={_fam} expected={_diag.get('expected_atoms')} source_available={_diag.get('source_available_atoms')} admitted={_diag.get('admitted_atoms')} evaluator_eligible={_diag.get('evaluator_eligible_atoms')} below_discovery_min={_diag.get('below_evaluator_min_atoms')} source_unavailable={_diag.get('source_unavailable_atoms')} evaluator_min_discovery_n=100 authority=0")
+            for _ar in (_diag.get('atoms') or []):
+                log_func(f"[NCAAF-SPECIAL-ATOM] category={_fam} atom={_ar.get('atom')} source_available={str(bool(_ar.get('source_available'))).upper()} admitted={str(bool(_ar.get('admitted_to_catalog'))).upper()} total_n={_ar.get('total_n')} discovery_n={_ar.get('discovery_n')} y2024_n={_ar.get('confirmation_2024_n')} y2025_n={_ar.get('confirmation_2025_n')} evaluator_eligible={str(bool(_ar.get('evaluator_eligible'))).upper()} authority=0")
     if market=="spreads":
         log_func(f"[NCAAF-RV2182-PREDICTOR-BEHAVIOR] predictors={behavior.get('predictor_count',0)} confirmed={behavior.get('confirmed_count',0)} strong_confirmed={behavior.get('strong_confirmed_count',0)} discovery=2022_2023 confirmation=2024_2025 year_2026_selection=FALSE authority=0")
         for _pb in (behavior.get("top_confirmed") or [])[:8]:
@@ -4459,12 +4467,14 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         "external_ratings":_special_family_stats("EXTERNAL_RATINGS_FAMILY","EXTERNAL_RATINGS_FAMILY"),
         "big_al_observation_hypothesis":_multi_family_stats(BIG_AL_OBSERVATION_ATOM_FAMILIES,"BIG_AL_OBSERVATION_HYPOTHESIS"),
     }
+    if market=="spreads":
+        special_family_audit["atom_availability"]=_special_atom_availability
     out.update({"status":"RESEARCH_COMPLETE","tested_hypotheses":len(legacy_tested)+len(observation_tested)+len(external_tested),"systems":clean,"published_systems":len(clean),
                 "mechanism_families":families,"mechanism_family_count":len(families),
                 "confirmed_mechanism_count":sum(x["confirmation_pass"] for x in families),
                 "special_family_audit":special_family_audit,
                 "lineage":lineage,
-                "admission_contract":"DISCOVERY_2022_2023_ONLY__LEGACY_MINER_LANE_PRESERVED__BIGAL_OBSERVATION_HYPOTHESIS_LANE_SEPARATE_FDR__BIGAL_RATINGS_ZERO_SELECTION_WEIGHT__2026_EXPERT_PICK_OUTCOMES_UNUSED__EXTERNAL_PREDICTOR_BEHAVIOR_LANE_SEPARATE_FDR__EXTERNAL_SEEDS_DISCOVERY_ONLY__ONE_EXTERNAL_FAMILY_PER_RULE__HORIZON_SYMMETRIC_1_2_3__CONFERENCE_RIVALRY_H2H_ROLE_TEAM_MEMORY__MARKET_RELATIVE_FDR_FOR_H2H__OBSERVED_ML_ROI__PRICE_BAND_ROBUSTNESS__BOTH_2024_AND_2025_CONFIRM__DEPENDENCY_COLLAPSE_AFTER_LANE_MERGE__PARENT_CHILD_INCREMENTAL_ATTRIBUTION__FULL_PT_INDEX_UNIVERSE_ONE_CORRELATED_FAMILY__META_CONSTITUENT_OVERLAP_GUARD__META_SOURCE_OUT_CONSENSUS__SPLIT_OVERLAP_AUDIT__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY"})
+                "admission_contract":"DISCOVERY_2022_2023_ONLY__LEGACY_MINER_LANE_PRESERVED__PERSISTENT_INCUMBENT_EXACT_RULE_REVALIDATION__BIGAL_OBSERVATION_HYPOTHESIS_LANE_SEPARATE_FDR__BIGAL_RATINGS_ZERO_SELECTION_WEIGHT__2026_EXPERT_PICK_OUTCOMES_UNUSED__EXTERNAL_PREDICTOR_BEHAVIOR_LANE_SEPARATE_FDR__EXTERNAL_SEEDS_DISCOVERY_ONLY__ONE_EXTERNAL_FAMILY_PER_RULE__HORIZON_SYMMETRIC_1_2_3__CONFERENCE_RIVALRY_H2H_ROLE_TEAM_MEMORY__MARKET_RELATIVE_FDR_FOR_H2H__OBSERVED_ML_ROI__PRICE_BAND_ROBUSTNESS__BOTH_2024_AND_2025_CONFIRM__DEPENDENCY_COLLAPSE_AFTER_LANE_MERGE__PARENT_CHILD_INCREMENTAL_ATTRIBUTION__FULL_PT_INDEX_UNIVERSE_ONE_CORRELATED_FAMILY__META_CONSTITUENT_OVERLAP_GUARD__META_SOURCE_OUT_CONSENSUS__SPLIT_OVERLAP_AUDIT__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY"})
     log_func(f"[NCAAF-RV23-MINER] market={market} atoms={len(atoms)} tested={len(legacy_tested)+len(observation_tested)+len(external_tested)} systems={len(clean)} mechanisms={len(families)} confirmed_mechanisms={out['confirmed_mechanism_count']} authority=0")
     _oa=special_family_audit.get("big_al_observation_hypothesis") or {}
     if market in {"spreads","totals"}:
@@ -4754,6 +4764,10 @@ def _miner_live_authority_eligible(mech: dict[str,Any] | None) -> bool:
     the V2.2 report already published before this runtime patch remains usable.
     """
     m=mech or {}
+    # A previously validated incumbent whose exact historical inputs are
+    # temporarily unavailable remains in the library, but is fail-closed for
+    # live authority until exact-rule revalidation succeeds again.
+    if str(m.get("incumbent_revalidation_status") or "")=="HOLD_NOT_EVALUABLE": return False
     _conds=[str(x) for x in (m.get("representative_conditions") or m.get("conditions") or [])]
     # CORE OOF / specialist research bridges are not live-authority inputs.
     # Prediction Tracker is intentionally NOT blocked by source: PT-derived
@@ -4987,6 +5001,227 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     out["NCAAF_RV2_Research_System_Summary"]=research_summaries
     return out
 
+
+
+def _confirmation_pass_from_exact_rule(rep: dict[str,Any], market: str) -> bool:
+    """Re-apply the frozen confirmation gate to an exact incumbent rule.
+
+    The original multiple-testing/FDR admission is treated as frozen provenance.
+    This helper only asks whether the exact rule still passes the historical
+    discovery/confirmation evidence contract on the current <=2025 cache.
+    """
+    if not isinstance(rep,dict): return False
+    if not bool((rep.get("split_audit") or {}).get("disjoint",False)): return False
+    if str(market).lower()=="h2h":
+        hp=rep.get("h2h_confirmation_price") or {}
+        cy=[x for x in (rep.get("confirmation") or []) if int(x.get("season",0) or 0) in CONFIRMATION_SEASONS]
+        both=bool(len(cy)==2 and all(int(x.get("priced_n",0) or 0)>=15 and np.isfinite(x.get("roi",np.nan)) and float(x.get("roi"))>0 and np.isfinite(x.get("market_residual",np.nan)) and float(x.get("market_residual"))>=0 for x in cy))
+        return bool(int(rep.get("confirmation_n",0) or 0)>=30 and both and int(hp.get("priced_n",0) or 0)>=30 and np.isfinite(hp.get("roi",np.nan)) and float(hp.get("roi"))>0 and bool(hp.get("price_band_robust",False)) and np.isfinite(rep.get("market_residual_confirmation",np.nan)) and float(rep.get("market_residual_confirmation"))>=0)
+    cy=[x for x in (rep.get("confirmation") or []) if int(x.get("season",0) or 0) in CONFIRMATION_SEASONS]
+    graded=[x for x in cy if int(x.get("n",0) or 0)>=10]
+    return bool(int(rep.get("confirmation_n",0) or 0)>=30 and np.isfinite(rep.get("confirmation_rate",np.nan)) and float(rep.get("confirmation_rate"))>=.50 and len(graded)==2 and all(np.isfinite(x.get("rate",np.nan)) and float(x.get("rate"))>=.50 for x in graded))
+
+
+def _discovery_pass_from_exact_rule(rep: dict[str,Any], market: str) -> bool:
+    if not isinstance(rep,dict): return False
+    if str(market).lower()=="h2h":
+        hp=rep.get("h2h_discovery_price") or {}
+        return bool(float(rep.get("stable_discovery_fraction",0) or 0)>=1.0 and np.isfinite(rep.get("market_residual_discovery",np.nan)) and float(rep.get("market_residual_discovery"))>=.01 and int(hp.get("priced_n",0) or 0)>=80 and np.isfinite(hp.get("roi",np.nan)) and float(hp.get("roi"))>.01 and bool(hp.get("price_band_robust",False)) and np.isfinite(rep.get("remove_best_discovery_roi",np.nan)) and float(rep.get("remove_best_discovery_roi"))>=0 and np.isfinite(rep.get("remove_best_market_residual",np.nan)) and float(rep.get("remove_best_market_residual"))>=0)
+    return bool(np.isfinite(rep.get("discovery_rate",np.nan)) and float(rep.get("discovery_rate"))>=.54 and float(rep.get("stable_discovery_fraction",0) or 0)>=1.0 and np.isfinite(rep.get("remove_best_discovery_rate",np.nan)) and float(rep.get("remove_best_discovery_rate"))>=.515)
+
+
+def _minimal_mechanism_from_inventory_record(row: dict[str,Any], *, prior_live_signatures: set[str] | None=None) -> dict[str,Any]:
+    """Reconstruct enough of an older library record to re-test its exact rule."""
+    r=dict(row or {})
+    rule=str(r.get("rule") or "")
+    cond=list(r.get("conditions") or [])
+    if not cond and rule:
+        cond=[x.strip() for x in rule.split(" AND ") if x.strip()]
+    tags=set(str(x) for x in (r.get("tags") or []))
+    sig=str(r.get("signature") or "|".join([str(r.get("market") or ""),str(r.get("direction") or ""),"&".join(sorted(cond))]))
+    prior_live=bool(r.get("live_authority_eligible")) or bool(prior_live_signatures and sig in prior_live_signatures)
+    fams=[]
+    if "SEASON_RECORD_STATE" in tags: fams.append("SEASON_RECORD_STATE")
+    if "ROLE_TRANSITION_BOUNCEBACK" in tags: fams.append("ROLE_TRANSITION_BOUNCEBACK")
+    if "PT_DERIVED" in tags: fams.append("EXTERNAL_RATINGS_FAMILY")
+    return {
+        "mechanism_id":r.get("mechanism_id") or _stable_id("NCAAF-INCUMBENT-",[sig]),
+        "market":str(r.get("market") or "").lower(),"direction":str(r.get("direction") or "PLAY_ON"),
+        "representative_conditions":cond,"families":fams,
+        "uses_external_ratings_family":"PT_DERIVED" in tags,
+        "uses_season_record_state_family":"SEASON_RECORD_STATE" in tags,
+        "uses_role_transition_bounceback_family":"ROLE_TRANSITION_BOUNCEBACK" in tags,
+        "uses_big_al_observation_hypothesis":"BIG_AL_OBSERVATION_HYPOTHESIS" in tags,
+        "evidence_family_key":r.get("evidence_family_key") or r.get("mechanism_id") or _stable_id("NCAAF-INCUMBENT-FAM-",[sig]),
+        "confirmation_pass":bool(r.get("confirmation_pass",True)),"confirmation_n":int(r.get("confirmation_n",0) or 0),
+        "confirmation_rate":r.get("confirmation_rate"),"live_authority_eligible":prior_live,"current_qualified":prior_live,
+        "evidence_level":r.get("evidence_level"),"production_authority":0,
+        "incumbent_recovered_from_inventory":True,
+    }
+
+
+def _collect_prior_confirmed_incumbents(previous_report: dict[str,Any] | None) -> list[dict[str,Any]]:
+    """Collect the current prior library plus one-generation recovery records.
+
+    V2.26 was the first run that exposed beam/search churn in the delta. Its
+    `removed_confirmed` rows contain enough exact rule identity to recover and
+    re-test the V2.24 incumbents instead of permanently losing them.
+    """
+    if not isinstance(previous_report,dict): return []
+    out={}
+    prior_live_sigs=set()
+    d=previous_report.get("system_library_change_audit") or {}
+    for x in (d.get("removed_live") or []):
+        if x.get("signature"): prior_live_sigs.add(str(x.get("signature")))
+    for market,mr in (previous_report.get("system_miner_v3") or {}).items():
+        for mech in ((mr or {}).get("mechanism_families") or []):
+            if not bool(mech.get("confirmation_pass")): continue
+            mm=dict(mech); mm["market"]=str(mm.get("market") or market).lower(); mm["incumbent_source"]="PRIOR_CURRENT_REPORT"
+            out[_ncaaf_system_signature(mm)]=mm
+    inv=previous_report.get("system_library_inventory") or {}
+    for row in (inv.get("records") or []):
+        if not bool(row.get("confirmation_pass")): continue
+        mm=_minimal_mechanism_from_inventory_record(row,prior_live_signatures=prior_live_sigs); mm["incumbent_source"]="PRIOR_INVENTORY"
+        out.setdefault(_ncaaf_system_signature(mm),mm)
+    # Recover rules that V2.26 reported as removed from V2.24. They are re-tested
+    # below; nothing is restored merely because it once existed.
+    for row in (d.get("removed_confirmed") or []):
+        mm=_minimal_mechanism_from_inventory_record(row,prior_live_signatures=prior_live_sigs); mm["incumbent_source"]="RECOVERED_FROM_PRIOR_DELTA"
+        out.setdefault(_ncaaf_system_signature(mm),mm)
+    return list(out.values())
+
+
+def _refresh_special_family_audit_after_incumbents(mr: dict[str,Any]) -> None:
+    fams=list((mr or {}).get("mechanism_families") or [])
+    sf=(mr or {}).setdefault("special_family_audit",{})
+    defs=(
+        ("season_record_state","SEASON_RECORD_STATE","NCAAF_SEASON_RECORD_STATE_FAMILY"),
+        ("role_transition_bounceback","ROLE_TRANSITION_BOUNCEBACK","NCAAF_ROLE_TRANSITION_BOUNCEBACK_FAMILY"),
+        ("external_ratings","EXTERNAL_RATINGS_FAMILY","EXTERNAL_RATINGS_FAMILY"),
+    )
+    for key,family_name,evidence_key in defs:
+        z=sf.setdefault(key,{})
+        mechs=[m for m in fams if family_name in set(m.get("families") or []) or (family_name=="EXTERNAL_RATINGS_FAMILY" and bool(m.get("uses_external_ratings_family")))]
+        conf=[m for m in mechs if bool(m.get("confirmation_pass"))]; live=[m for m in mechs if bool(m.get("live_authority_eligible"))]
+        z.update({"family":family_name,"evidence_family_key":evidence_key,"mechanism_families":len(mechs),"confirmed_mechanisms":len(conf),"live_authority_mechanisms":len(live),"independent_live_family_votes":1 if live and family_name in {"SEASON_RECORD_STATE","ROLE_TRANSITION_BOUNCEBACK","EXTERNAL_RATINGS_FAMILY"} else len(set((str(m.get("market")),str(m.get("evidence_family_key") or m.get("mechanism_id"))) for m in live)),"confirmed_rules":[{"mechanism_id":m.get("mechanism_id"),"market":m.get("market"),"direction":m.get("direction"),"confirmation_n":m.get("confirmation_n"),"confirmation_rate":m.get("confirmation_rate"),"live_authority_eligible":bool(m.get("live_authority_eligible")),"rule":" AND ".join(m.get("representative_conditions") or [])} for m in conf]})
+    z=sf.setdefault("big_al_observation_hypothesis",{})
+    mechs=[m for m in fams if bool(m.get("uses_big_al_observation_hypothesis"))]
+    conf=[m for m in mechs if bool(m.get("confirmation_pass"))]; live=[m for m in mechs if bool(m.get("live_authority_eligible"))]
+    z.update({"label":"BIG_AL_OBSERVATION_HYPOTHESIS","mechanism_families":len(mechs),"confirmed_mechanisms":len(conf),"live_authority_mechanisms":len(live),"independent_live_family_votes":len(set((str(m.get("market")),str(m.get("evidence_family_key") or m.get("mechanism_id"))) for m in live)),"confirmed_rules":[{"mechanism_id":m.get("mechanism_id"),"market":m.get("market"),"direction":m.get("direction"),"confirmation_n":m.get("confirmation_n"),"confirmation_rate":m.get("confirmation_rate"),"live_authority_eligible":bool(m.get("live_authority_eligible")),"rule":" AND ".join(m.get("representative_conditions") or [])} for m in conf]})
+
+
+def _special_atom_availability_audit(games: pd.DataFrame, seasons: np.ndarray, market: str, dashboard_module=None,
+                                     admitted_atoms: list[dict[str,Any]] | None=None) -> dict[str,Any]:
+    """Explain why State/Bounceback produced zero tested hypotheses.
+
+    `source_available` is computed without the atom support floor. The evaluator
+    still keeps its frozen discovery minimum of 100 rows; this function does not
+    loosen any qualification gate.
+    """
+    market=str(market).lower()
+    admitted=list(admitted_atoms) if admitted_atoms is not None else _extended_atoms(games,dashboard_module,for_live=False,market=market,enforce_support_floor=True)
+    raw=_extended_atoms(games,dashboard_module,for_live=False,market=market,enforce_support_floor=False)
+    amap={str(a.get("name")):a for a in admitted}; rmap={str(a.get("name")):a for a in raw}
+    expected={
+        "SEASON_RECORD_STATE":["SU_WINLESS_PRIOR","ATS_COVERLESS_PRIOR","SU_AND_ATS_WINLESS_PRIOR","SU_WINLESS_AFTER_2_PLUS","ATS_COVERLESS_AFTER_2_PLUS","SU_AND_ATS_WINLESS_AFTER_2_PLUS","SU_WINLESS_AFTER_3_PLUS","ATS_COVERLESS_AFTER_3_PLUS","SU_AND_ATS_WINLESS_AFTER_3_PLUS","SU_WINLESS_AFTER_4_PLUS","ATS_COVERLESS_AFTER_4_PLUS","SU_AND_ATS_WINLESS_AFTER_4_PLUS"],
+        "ROLE_TRANSITION_BOUNCEBACK":["BOUNCEBACK_HOME_FAV_UPSET_TO_ROAD_DOG","BOUNCEBACK_WINNING_TEAM","BOUNCEBACK_BOTH_WINNING_TEAMS","BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5","OPP_BOUNCEBACK_HOME_FAV_UPSET_TO_ROAD_DOG","OPP_BOUNCEBACK_WINNING_TEAM","OPP_BOUNCEBACK_BOTH_WINNING_TEAMS","OPP_BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5"],
+    }
+    out={}
+    disc=np.isfinite(seasons)&(seasons<=DISCOVERY_MAX_SEASON)
+    for fam,names in expected.items():
+        rows=[]
+        for nm in names:
+            a=rmap.get(nm); mm=np.asarray(a.get("mask"),dtype=bool) if a is not None else np.zeros(len(games),dtype=bool)
+            dn=int(np.sum(mm&disc)); total_n=int(np.sum(mm)); y24=int(np.sum(mm&(seasons==2024))); y25=int(np.sum(mm&(seasons==2025)))
+            rows.append({"atom":nm,"source_available":a is not None,"admitted_to_catalog":nm in amap,"total_n":total_n,"discovery_n":dn,"confirmation_2024_n":y24,"confirmation_2025_n":y25,"evaluator_min_discovery_n":100,"evaluator_eligible":bool(a is not None and dn>=100)})
+        out[fam]={"expected_atoms":len(names),"source_available_atoms":sum(x["source_available"] for x in rows),"admitted_atoms":sum(x["admitted_to_catalog"] for x in rows),"evaluator_eligible_atoms":sum(x["evaluator_eligible"] for x in rows),"below_evaluator_min_atoms":sum(x["source_available"] and not x["evaluator_eligible"] for x in rows),"source_unavailable_atoms":sum(not x["source_available"] for x in rows),"atoms":rows}
+    return out
+
+
+def _reconcile_incumbent_system_library(games: pd.DataFrame, seasons: np.ndarray, miners: dict[str,Any], previous_report: dict[str,Any] | None, dashboard_module=None, log_func=print) -> tuple[dict[str,Any],dict[str,Any]]:
+    """Re-test prior confirmed exact rules independently of the current search beam.
+
+    New search output is a challenger set. A prior confirmed rule disappears only
+    when its exact historical definition actually fails the frozen evidence gate.
+    If a rule cannot be re-evaluated because its historical source field is
+    temporarily unavailable, it remains in the confirmed library on HOLD but has
+    no live authority until evaluability returns.
+    """
+    if not isinstance(previous_report,dict):
+        return miners,{"status":"NO_PRIOR_REPORT","prior_confirmed":0,"revalidated_retained":0,"carried_hold":0,"demoted":0,"rediscovered":0,"restored_missing":0,"production_authority":0,"selection_uses_2026":False}
+    prior=_collect_prior_confirmed_incumbents(previous_report)
+    _prior_current_count=int(((previous_report.get("system_library_inventory") or {}).get("confirmed_mechanisms") or 0))
+    _recovery_candidates=sum(str(x.get("incumbent_source") or "")=="RECOVERED_FROM_PRIOR_DELTA" for x in prior)
+    _prior_sigs={_ncaaf_system_signature(x) for x in prior}
+    _current_confirmed_sigs={_ncaaf_system_signature(m) for mr in (miners or {}).values() for m in ((mr or {}).get("mechanism_families") or []) if bool(m.get("confirmation_pass"))}
+    audit={"status":"PASS","policy":"PERSISTENT_INCUMBENT_EXACT_RULE_REVALIDATION_V1","prior_confirmed":len(prior),"prior_current_confirmed":_prior_current_count,"recovery_candidates_from_prior_delta":int(_recovery_candidates),"new_challenger_confirmed":len(_current_confirmed_sigs-_prior_sigs),"revalidated_retained":0,"carried_hold":0,"demoted":0,"rediscovered":0,"restored_missing":0,"details":[],"production_authority":0,"selection_uses_2026":False}
+    by_market={}
+    for inc in prior: by_market.setdefault(str(inc.get("market") or "").lower(),[]).append(inc)
+    for market,incumbents in by_market.items():
+        if market not in miners: continue
+        mr=miners[market]
+        cur=list((mr or {}).get("mechanism_families") or [])
+        cur_by_sig={_ncaaf_system_signature(x):x for x in cur}
+        atoms=_extended_atoms(games,dashboard_module,for_live=False,market=market,enforce_support_floor=False)
+        atom_map={str(a.get("name")):a for a in atoms}
+        y,valid,baseline=_market_target(games,market)
+        for old in incumbents:
+            sig=_ncaaf_system_signature(old); cond=list(old.get("representative_conditions") or [])
+            existing=cur_by_sig.get(sig); missing=[c for c in cond if c not in atom_map]
+            if missing:
+                # Preserve the validated library identity, but fail closed for live
+                # authority until the exact historical rule can be re-evaluated.
+                hold=dict(existing or old)
+                hold.update({"market":market,"representative_conditions":cond,"confirmation_pass":True,"current_qualified":False,"live_authority_eligible":False,"library_origin":"INCUMBENT_HOLD_NOT_EVALUABLE","incumbent_revalidation_status":"HOLD_NOT_EVALUABLE","incumbent_missing_atoms":missing,"production_authority":0})
+                if existing is None:
+                    cur.append(hold); cur_by_sig[sig]=hold; audit["restored_missing"]+=1
+                else:
+                    existing.update(hold)
+                audit["carried_hold"]+=1; audit["details"].append({"signature":sig,"market":market,"mechanism_id":hold.get("mechanism_id"),"state":"HOLD_NOT_EVALUABLE","missing_atoms":missing,"prior_live":bool(old.get("live_authority_eligible"))})
+                continue
+            mask=np.ones(len(games),dtype=bool); fams=[]
+            for c in cond:
+                a=atom_map[c]; mask &= np.asarray(a.get("mask"),dtype=bool); fams.append(str(a.get("family") or ""))
+            rep=_evaluate_rule(games,mask,y,valid,baseline,seasons,tuple(cond),tuple(fams),market)
+            if rep is None:
+                audit["demoted"]+=1; audit["details"].append({"signature":sig,"market":market,"mechanism_id":old.get("mechanism_id"),"state":"DEMOTED","reason":"EXACT_RULE_NO_LONGER_MEETS_DISCOVERY_MINIMUM_OR_EVALUATOR_CONTRACT"})
+                if existing is not None:
+                    cur.remove(existing); cur_by_sig.pop(sig,None)
+                continue
+            if str(rep.get("direction"))!=str(old.get("direction")):
+                audit["demoted"]+=1; audit["details"].append({"signature":sig,"market":market,"mechanism_id":old.get("mechanism_id"),"state":"DEMOTED","reason":"DIRECTION_CHANGED","old_direction":old.get("direction"),"new_direction":rep.get("direction")})
+                if existing is not None:
+                    cur.remove(existing); cur_by_sig.pop(sig,None)
+                continue
+            disc_ok=_discovery_pass_from_exact_rule(rep,market); conf_ok=_confirmation_pass_from_exact_rule(rep,market)
+            if not (disc_ok and conf_ok):
+                audit["demoted"]+=1; audit["details"].append({"signature":sig,"market":market,"mechanism_id":old.get("mechanism_id"),"state":"DEMOTED","reason":"EXACT_HISTORICAL_REVALIDATION_FAILED","discovery_pass":disc_ok,"confirmation_pass":conf_ok,"confirmation_n":rep.get("confirmation_n"),"confirmation_rate":rep.get("confirmation_rate")})
+                if existing is not None:
+                    cur.remove(existing); cur_by_sig.pop(sig,None)
+                continue
+            target=existing if existing is not None else dict(old)
+            if existing is not None: audit["rediscovered"]+=1
+            else: audit["restored_missing"]+=1
+            target.update({"market":market,"direction":rep.get("direction"),"representative_conditions":cond,"families":list(dict.fromkeys(fams)),"discovery_rate":rep.get("discovery_rate"),"discovery_n":rep.get("discovery_n"),"confirmation_rate":rep.get("confirmation_rate"),"confirmation_n":rep.get("confirmation_n"),"confirmation_pass":True,"split_audit":rep.get("split_audit") or {},"authority_state":"CONFIRMED_SHADOW","production_authority":0,"library_origin":"INCUMBENT_REVALIDATED","incumbent_revalidation_status":"PASS","original_search_multiple_testing_status":"FROZEN_PRIOR_PASS"})
+            target["uses_external_ratings_family"]=bool(old.get("uses_external_ratings_family")) or "EXTERNAL_RATINGS_FAMILY" in set(fams)
+            target["uses_season_record_state_family"]=bool(old.get("uses_season_record_state_family")) or "SEASON_RECORD_STATE" in set(fams)
+            target["uses_role_transition_bounceback_family"]=bool(old.get("uses_role_transition_bounceback_family")) or "ROLE_TRANSITION_BOUNCEBACK" in set(fams)
+            target["uses_big_al_observation_hypothesis"]=bool(old.get("uses_big_al_observation_hypothesis")) or bool(set(fams)&BIG_AL_OBSERVATION_ATOM_FAMILIES)
+            target["evidence_family_key"]=old.get("evidence_family_key") or target.get("evidence_family_key") or target.get("mechanism_id")
+            target["current_qualified"]=_miner_live_authority_eligible(target); target["live_authority_eligible"]=target["current_qualified"]; target["live_authority_policy"]=NCAAF_MINER_LIVE_AUTHORITY_POLICY; target["evidence_level"]=_evidence_tier(target,market)
+            rep2=dict(rep); rep2["_mask_internal"]=mask
+            try: target["attribution"]=_mechanism_attribution(games,seasons,rep2,market)
+            except Exception: pass
+            if existing is None:
+                cur.append(target); cur_by_sig[sig]=target
+            audit["revalidated_retained"]+=1; audit["details"].append({"signature":sig,"market":market,"mechanism_id":target.get("mechanism_id"),"state":"REVALIDATED_RETAINED","rediscovered":existing is not None,"confirmation_n":target.get("confirmation_n"),"confirmation_rate":target.get("confirmation_rate"),"live":bool(target.get("live_authority_eligible")),"incumbent_source":old.get("incumbent_source")})
+        mr["mechanism_families"]=cur; mr["mechanism_family_count"]=len(cur); mr["confirmed_mechanism_count"]=sum(bool(x.get("confirmation_pass")) for x in cur); mr["incumbent_revalidation_applied"]=True
+        _refresh_special_family_audit_after_incumbents(mr)
+    log_func(f"[NCAAF-INCUMBENT-LIBRARY] status={audit.get('status')} prior_current_confirmed={audit.get('prior_current_confirmed')} recovery_candidates={audit.get('recovery_candidates_from_prior_delta')} incumbent_candidates={audit.get('prior_confirmed')} new_challenger_confirmed={audit.get('new_challenger_confirmed')} revalidated_retained={audit.get('revalidated_retained')} rediscovered={audit.get('rediscovered')} restored_missing={audit.get('restored_missing')} carried_hold={audit.get('carried_hold')} demoted={audit.get('demoted')} 2026_selection=FALSE authority=0")
+    for x in audit.get("details",[]):
+        log_func(f"[NCAAF-INCUMBENT-SYSTEM] state={x.get('state')} market={x.get('market')} id={x.get('mechanism_id')} live={x.get('live')} confirmation={x.get('confirmation_rate')}/{x.get('confirmation_n')} reason={x.get('reason')} missing={','.join(x.get('missing_atoms') or [])}")
+    return miners,audit
+
 def _market_rich_audit(games: pd.DataFrame, utils_module=None) -> dict[str,Any]:
     wanted=["Line_Move_30m","Line_Move_60m","Line_Move_120m","Line_Move_From_Open","Direction_Changes_Count","Sharp_Book_Move_60m",
             "Sharp_Soft_Divergence","Sharp_Consensus_Direction","Current_vs_Best_Line","Current_vs_Worst_Line","Key_Cross_Persistence"]
@@ -5037,6 +5272,9 @@ def _ncaaf_system_library_inventory(miners: dict[str,Any]) -> dict[str,Any]:
                 "confirmation_rate":mech.get("confirmation_rate"),
                 "live_authority_eligible":live,
                 "evidence_level":mech.get("evidence_level"),
+                "library_origin":mech.get("library_origin") or "CURRENT_CHALLENGER_SEARCH",
+                "incumbent_revalidation_status":mech.get("incumbent_revalidation_status"),
+                "incumbent_missing_atoms":list(mech.get("incumbent_missing_atoms") or []),
             }
             rows.append(row)
     confirmed=[x for x in rows if x["confirmation_pass"]]
@@ -5085,13 +5323,15 @@ def _ncaaf_system_library_delta(current: dict[str,Any], previous_report: dict[st
     cc={k for k,v in cur.items() if v.get("confirmation_pass")}; pc={k for k,v in prv.items() if v.get("confirmation_pass")}
     cl={k for k,v in cur.items() if v.get("live_authority_eligible")}; pl={k for k,v in prv.items() if v.get("live_authority_eligible")}
     def pack(keys, source):
-        return [{k:source[s].get(k) for k in ("signature","mechanism_id","market","direction","rule","tags","confirmation_n","confirmation_rate","live_authority_eligible","evidence_family_key")} for s in sorted(keys)]
+        return [{k:source[s].get(k) for k in ("signature","mechanism_id","market","direction","rule","conditions","tags","confirmation_n","confirmation_rate","live_authority_eligible","evidence_family_key","library_origin","incumbent_revalidation_status","incumbent_missing_atoms")} for s in sorted(keys)]
+    held={k for k,v in cur.items() if str(v.get("incumbent_revalidation_status") or "")=="HOLD_NOT_EVALUABLE"}
     return {
         "status":"COMPARED_TO_PRIOR_CURRENT_REPORT",
         "prior_source_tag":previous_report.get("source_tag"),
         "prior_created_utc":previous_report.get("created_utc"),
         "added_confirmed":pack(cc-pc,cur),"removed_confirmed":pack(pc-cc,prv),
-        "added_live":pack(cl-pl,cur),"removed_live":pack(pl-cl,prv),
+        "added_live":pack(cl-pl,cur),"removed_live":pack((pl-cl)-held,prv),
+        "held_live_not_evaluable":pack((pl-cl)&held,cur),
         "net_confirmed":int(current.get("confirmed_mechanisms",0))-int(prev_inv.get("confirmed_mechanisms",0)),
         "net_live":int(current.get("live_authority_mechanisms",0))-int(prev_inv.get("live_authority_mechanisms",0)),
         "net_independent_live_families":int(current.get("independent_live_family_votes",0))-int(prev_inv.get("independent_live_family_votes",0)),
@@ -5127,9 +5367,9 @@ def _log_ncaaf_system_library_audit(*, inventory: dict[str,Any], delta: dict[str
         f"[NCAAF-SYSTEM-LIBRARY-DELTA] status={delta.get('status')} prior_source={delta.get('prior_source_tag')} "
         f"confirmed_net={delta.get('net_confirmed')} live_net={delta.get('net_live')} independent_live_family_net={delta.get('net_independent_live_families')} "
         f"added_confirmed={len(delta.get('added_confirmed') or [])} removed_confirmed={len(delta.get('removed_confirmed') or [])} "
-        f"added_live={len(delta.get('added_live') or [])} removed_live={len(delta.get('removed_live') or [])} 2026_selection=FALSE authority=0"
+        f"added_live={len(delta.get('added_live') or [])} removed_live={len(delta.get('removed_live') or [])} held_live_not_evaluable={len(delta.get('held_live_not_evaluable') or [])} 2026_selection=FALSE authority=0"
     )
-    for state_key in ("added_confirmed","added_live","removed_confirmed","removed_live"):
+    for state_key in ("added_confirmed","added_live","removed_confirmed","removed_live","held_live_not_evaluable"):
         for x in (delta.get(state_key) or [])[:20]:
             log_func(
                 f"[NCAAF-SYSTEM-LIBRARY-CHANGE] state={state_key.upper()} market={x.get('market')} id={x.get('mechanism_id')} tags={'+'.join(x.get('tags') or [])} "
@@ -5174,6 +5414,18 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         stat=run_orthogonal_stat_research(g,sy,om,ot,cols,log_func=log_func)
         sparse_stat=run_sparse_stat_research(g,sy,om,ot,log_func=log_func)
         miners={m:run_system_miner_v3(mg,sy,m,dashboard_module=dashboard_module,log_func=log_func,max_depth=5) for m in ("spreads","h2h","totals")}
+        if storage_client is None:
+            from google.cloud import storage
+            storage_client=storage.Client()
+        b=storage_client.bucket(bucket_name)
+        _previous_report=None
+        try:
+            _prev_blob=b.blob(REPORT_CURRENT_BLOB)
+            if _prev_blob.exists():
+                _previous_report=json.loads(_prev_blob.download_as_text())
+        except Exception as _prev_exc:
+            log_func(f"[NCAAF-SYSTEM-LIBRARY-PRIOR] status=UNAVAILABLE error={type(_prev_exc).__name__}:{_prev_exc}")
+        miners,incumbent_system_library_audit=_reconcile_incumbent_system_library(mg,sy,miners,_previous_report,dashboard_module=dashboard_module,log_func=log_func)
         system_results=_build_system_results(mg,sy,miners,dashboard_module=dashboard_module)
         published_system_results=_grade_published_ncaaf_systems(mg,sy)
         miner_threshold_neighborhood=_miner_authority_threshold_neighborhood(miners)
@@ -5183,10 +5435,6 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         market_audit=_market_rich_audit(g,utils_module)
         pt_incremental=run_pt_incremental_value_research(games=g,miner_games=mg,seasons=sy,dashboard_module=dashboard_module,production_module=production_module,log_func=log_func)
         intelligence_bridge=(getattr(dashboard_module,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}).get("miner_intelligence_bridge") or {"status":"NOT_AVAILABLE","production_authority":0,"selection_influence":0}
-        if storage_client is None:
-            from google.cloud import storage
-            storage_client=storage.Client()
-        b=storage_client.bucket(bucket_name)
 
         # Persist/describe observed Big Al selections. Ratings and 2026 outcomes
         # never enter system qualification; they only tell us which generic
@@ -5196,13 +5444,6 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         big_al_observation_research=_big_al_rating_observation_report(big_al_observations,miner_lane_audit=_obs_lane_audit,context_games=miner_games.reset_index(drop=True),dashboard_module=dashboard_module)
         log_func(f"[NCAAF-BIGAL-RATING-RESEARCH] status={big_al_observation_research.get('status')} observations={big_al_observation_research.get('ncaaf_observations')} rated={big_al_observation_research.get('rated_observations')} ratings={json.dumps(big_al_observation_research.get('rating_counts') or {},sort_keys=True)} pattern_min={BIG_AL_RATING_MIN_FOR_PATTERN_ANALYSIS} rating_qualification_weight=0 rating_authority=0 outcomes_2026_used=FALSE")
 
-        _previous_report=None
-        try:
-            _prev_blob=b.blob(REPORT_CURRENT_BLOB)
-            if _prev_blob.exists():
-                _previous_report=json.loads(_prev_blob.download_as_text())
-        except Exception as _prev_exc:
-            log_func(f"[NCAAF-SYSTEM-LIBRARY-PRIOR] status=UNAVAILABLE error={type(_prev_exc).__name__}:{_prev_exc}")
         system_library_inventory=_ncaaf_system_library_inventory(miners)
         system_library_change_audit=_ncaaf_system_library_delta(system_library_inventory,_previous_report)
         _log_ncaaf_system_library_audit(inventory=system_library_inventory,delta=system_library_change_audit,miners=miners,log_func=log_func)
@@ -5210,13 +5451,13 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "status":"NCAAF_RESEARCH_V2_COMPLETE","production_authority":0,"production_contract_mutated":False,
                 "benchmark":"FROZEN_NCAAF_PRODUCTION_V1","discovery_max_season":DISCOVERY_MAX_SEASON,"confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"system_miner_v3":miners,
-                "system_library_inventory":system_library_inventory,"system_library_change_audit":system_library_change_audit,
+                "system_library_inventory":system_library_inventory,"system_library_change_audit":system_library_change_audit,"incumbent_system_library_audit":incumbent_system_library_audit,
                 "big_al_observation_ledger":big_al_ledger_diag,"big_al_observation_research":big_al_observation_research,
                 "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,
                 "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False,"source_neutral":True,"pt_systems_may_earn_bounded_vote":True,"pt_family_vote_cap":1,"pt_model_weight":0},
-                "next_step":"KEEP PRODUCTION V1 FROZEN; USE BIG AL RATINGS AS DESCRIPTIVE OBSERVATIONS ONLY; LET THE CONSTRAINED OBSERVATION LANE GENERATE GENERIC HISTORICAL HYPOTHESES; QUALIFY ONLY THROUGH 2022-2025 SEALED HISTORY; KEEP SOURCE-NEUTRAL FAMILY AUTHORITY AND 2026 OUTCOMES OUT OF SELECTION"}
+                "next_step":"KEEP PRODUCTION V1 FROZEN; PERSIST AND EXACT-RULE REVALIDATE CONFIRMED INCUMBENTS INDEPENDENTLY OF CHALLENGER SEARCH; USE BIG AL RATINGS AS DESCRIPTIVE OBSERVATIONS ONLY; QUALIFY NEW CHALLENGERS ONLY THROUGH 2022-2025 SEALED HISTORY; KEEP SOURCE-NEUTRAL FAMILY AUTHORITY AND 2026 OUTCOMES OUT OF SELECTION"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
-        bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"big_al_observation_research":big_al_observation_research,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
+        bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"incumbent_system_library_audit":incumbent_system_library_audit,"big_al_observation_research":big_al_observation_research,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
         body=json.dumps(_report_without_models(report),sort_keys=True,separators=(",",":"),default=str).encode()
         sha=hashlib.sha256(body).hexdigest(); hist=f"{REPORT_HISTORY_PREFIX}/{sha[:16]}/report.json"
         b.blob(hist).upload_from_string(body,content_type="application/json"); b.blob(REPORT_CURRENT_BLOB).upload_from_string(body,content_type="application/json")
@@ -5231,7 +5472,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         _obs_strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_big_al_observation_hypothesis")) and _miner_live_authority_eligible(_m))
         _obs_confirmed=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_big_al_observation_hypothesis")) and bool(_m.get("confirmation_pass")))
         _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_","META_PT_","PTIDX_","PT_ALL_","PT_CLUSTER_","PT_TRACKER_")) for c in (_m.get("representative_conditions") or [])))
-        log_func(f"[NCAAF-RV226-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} independent_live_families={system_library_inventory.get('independent_live_family_votes')} pt_miner_live_authority={_pt_strong} pt_family_vote_cap=1 state_confirmed={_state_confirmed} state_miner_live_authority={_state_strong} state_family_vote_cap=1 bounceback_confirmed={_bounce_confirmed} bounceback_miner_live_authority={_bounce_strong} bounceback_family_vote_cap=1 bigal_hypothesis_confirmed={_obs_confirmed} bigal_hypothesis_live={_obs_strong} bigal_rated_observations={big_al_observation_research.get('rated_observations')} rating_weight=0 outcomes_2026_used=FALSE added_confirmed={len(system_library_change_audit.get('added_confirmed') or [])} added_live={len(system_library_change_audit.get('added_live') or [])} source_neutral_system_gate=TRUE prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
+        log_func(f"[NCAAF-RV227-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} independent_live_families={system_library_inventory.get('independent_live_family_votes')} pt_miner_live_authority={_pt_strong} pt_family_vote_cap=1 state_confirmed={_state_confirmed} state_miner_live_authority={_state_strong} state_family_vote_cap=1 bounceback_confirmed={_bounce_confirmed} bounceback_miner_live_authority={_bounce_strong} bounceback_family_vote_cap=1 bigal_hypothesis_confirmed={_obs_confirmed} bigal_hypothesis_live={_obs_strong} bigal_rated_observations={big_al_observation_research.get('rated_observations')} rating_weight=0 outcomes_2026_used=FALSE incumbent_prior={incumbent_system_library_audit.get('prior_confirmed')} incumbent_retained={incumbent_system_library_audit.get('revalidated_retained')} incumbent_hold={incumbent_system_library_audit.get('carried_hold')} incumbent_demoted={incumbent_system_library_audit.get('demoted')} added_confirmed={len(system_library_change_audit.get('added_confirmed') or [])} added_live={len(system_library_change_audit.get('added_live') or [])} source_neutral_system_gate=TRUE prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
         return report
     except Exception as exc:
         log_func(f"[NCAAF-RV2-FAIL] {type(exc).__name__}: {exc}")
@@ -5408,6 +5649,22 @@ def self_test() -> dict[str,Any]:
     # fired-but-ungraded events, not as missing projected occurrences.
     _recon_example={"fired":6384,"graded":6365,"occurrence_records":6365,"projected":6365}
     _occ_recon_ok=bool(_occ_recon_ok and _recon_example["projected"]==_recon_example["occurrence_records"] and (_recon_example["fired"]-_recon_example["graded"])==19)
+
+    # Persistent incumbent regression: a confirmed rule omitted from the current
+    # challenger search must be exact-rule revalidated and restored.
+    _rows=[]
+    for _sy,_n in ((2022,60),(2023,60),(2024,40),(2025,40)):
+        for _i in range(_n):
+            _win=(_i % 5)!=0  # 80% each season
+            _rows.append({"Season":_sy,"Consensus_Open_Spread":3.0,"Consensus_Open_Total":50.0,"Actual_Margin":1.0 if _win else -5.0,"Actual_Total":50.0,"Team_Game_Number_Prior":max(1,_i%10),"Team_WinPct_Prior":.5,"ATS_Loss_Streak_Prior":0})
+    _ig=pd.DataFrame(_rows); _isy=pd.to_numeric(_ig["Season"],errors="coerce").to_numpy(float)
+    _old_mech={"mechanism_id":"NCAAF-MECH-INCUMBENT-TEST","market":"spreads","direction":"PLAY_ON","representative_conditions":["CURRENT_DOG"],"families":["MARKET_ROLE"],"evidence_family_key":"NCAAF-MECH-INCUMBENT-TEST","confirmation_pass":True,"confirmation_n":80,"confirmation_rate":.80,"live_authority_eligible":True,"current_qualified":True,"production_authority":0}
+    _prev={"source_tag":"prior","system_miner_v3":{"spreads":{"mechanism_families":[_old_mech]}},"system_library_inventory":{"records":[]},"system_library_change_audit":{}}
+    _cur={"spreads":{"mechanism_families":[],"special_family_audit":{}},"h2h":{"mechanism_families":[],"special_family_audit":{}},"totals":{"mechanism_families":[],"special_family_audit":{}}}
+    _cur,_ia=_reconcile_incumbent_system_library(_ig,_isy,_cur,_prev,dashboard_module=None,log_func=lambda *a,**k:None)
+    _inc_ok=bool(_ia.get("revalidated_retained")==1 and _ia.get("restored_missing")==1 and len(_cur["spreads"].get("mechanism_families") or [])==1 and bool(_cur["spreads"]["mechanism_families"][0].get("confirmation_pass")))
+    _sad=_special_atom_availability_audit(_tf,np.asarray([2025.0]),"spreads",dashboard_module=None)
+    _special_diag_ok=bool("SEASON_RECORD_STATE" in _sad and "ROLE_TRANSITION_BOUNCEBACK" in _sad and (_sad["SEASON_RECORD_STATE"].get("expected_atoms") or 0)>=12)
     ok=bool(
         len(q)==3 and "RUN_PASS_MATCHUP" in fam and "MARKET_MICROSTRUCTURE" in fam and
         all("Actual_Margin" not in x for v in fam.values() for x in v) and
@@ -5420,12 +5677,13 @@ def self_test() -> dict[str,Any]:
         bool(_obs_norm and _obs_norm.get("rating")==2 and _obs_norm.get("outcome_used_for_selection") is False and "outcome" not in _obs_norm and _obs_report.get("rating_used_for_system_qualification") is False) and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
         "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and "META_PT_EDGE_TEAM_3PLUS" in live_atoms and "META_PT_CORE_STRONG_AGREE" in live_atoms and
-        np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _sparse_pt_ok and _pt_alias_hint_ok and _pt_final_hard_aliases_ok and _expert_bridge_ok and _occ_recon_ok and
+        _inc_ok and _special_diag_ok and np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _sparse_pt_ok and _pt_alias_hint_ok and _pt_final_hard_aliases_ok and _expert_bridge_ok and _occ_recon_ok and
         _miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["META_PT_EDGE_TEAM_3PLUS"]}) and
         not _miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["CORE_OOF_EDGE_TEAM_2PLUS"]})
     )
     return {
         "status":"PASS" if ok else "FAIL","source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG,
+        "incumbent_library_revalidation":_inc_ok,"special_family_diagnostics":_special_diag_ok,
         "families":sorted(fam),"qvalues":q.tolist(),"american_unit_profit_test":ret.tolist(),
         "h2h_price_gate":"OBSERVED_TEAM_AND_OPPONENT_ML_ONLY",
         "confirmation_gate":"BOTH_2024_AND_2025",
