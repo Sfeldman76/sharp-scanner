@@ -850,13 +850,13 @@ def main():
         f"path={_npv1_path} sha={_npv1_sha[:16]} promotion_requested={_ncaaf_prod_promote}"
     )
     _nrv22_tag = getattr(_nrv22, "NCAAF_RESEARCH_V2_SOURCE_TAG", None)
-    if _nrv22_tag != "ncaaf-research-v2.25.0-system-library-change-audit-20261008":
+    if _nrv22_tag != "ncaaf-research-v2.26.0-bigal-rating-aware-observation-miner-20261009":
         raise RuntimeError(
-            f"[NCAAF-RV225-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv22_tag!r} "
+            f"[NCAAF-RV226-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv22_tag!r} "
             f"path={str(_nrv22_path)!r} sha={_nrv22_sha[:16]}"
         )
     log_func(
-        f"[NCAAF-RV225-DEPLOY-PREFLIGHT] PASS source_tag={_nrv22_tag} "
+        f"[NCAAF-RV226-DEPLOY-PREFLIGHT] PASS source_tag={_nrv22_tag} "
         f"path={_nrv22_path} sha={_nrv22_sha[:16]} production_authority=0"
     )
     log_func(
@@ -982,7 +982,7 @@ def main():
             if not isinstance(_core,dict) or _core.get("status")!="NCAAF_CORE_CHALLENGER_V2_COMPLETE":
                 raise RuntimeError(f"[NCAAF-HEAVY-RUN] core challenger failed status={getattr(_core,'get',lambda *_:None)('status')}")
 
-            pw.emit("systems","NCAAF Heavy Research: run same Miner with Pathi + Big Al + OOF CORE/specialist atoms",pct=0.72)
+            pw.emit("systems","NCAAF Heavy Research: run Miner + Big Al observation hypotheses + Pathi + OOF CORE/specialist atoms",pct=0.72)
             # Prediction Tracker is read only from validated GCS uploads. It is intentionally
             # sparse: absence from PT never removes a game and partial named-system coverage
             # remains usable as component research while META still requires exact 5-of-5.

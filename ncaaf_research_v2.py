@@ -1,4 +1,4 @@
-"""NCAAF Research V2.5 — expert/model atom bridge + evidence decomposition + self-auditing logs.
+"""NCAAF Research V2.26 — rating-aware expert observations + constrained source-neutral Miner research.
 
 Research-only architecture built around the frozen NCAAF Production V1 benchmark.
 This module cannot mutate CORE/model probability. Historically qualified system families may emit bounded
@@ -30,12 +30,13 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.25.0-system-library-change-audit-20261008"
-NCAAF_RESEARCH_V2_VERSION = "2.25.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.26.0-bigal-rating-aware-observation-miner-20261009"
+NCAAF_RESEARCH_V2_VERSION = "2.26.0"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -45,6 +46,33 @@ PROSPECTIVE_MIN_SEASON = 2026
 REPORT_CURRENT_BLOB = "research/ncaaf/v2/current_report.json"
 BUNDLE_CURRENT_BLOB = "research/ncaaf/v2/current_bundle.pkl"
 REPORT_HISTORY_PREFIX = "research/ncaaf/v2/history"
+
+# Big Al observation ledger. Observed 2026 selections may seed generic research
+# vocabulary/hypothesis search, but the picks' outcomes and ratings have zero
+# qualification/authority weight. Every candidate must earn its edge entirely
+# from the sealed historical discovery/confirmation framework.
+BIG_AL_OBSERVATION_LEDGER_BLOB = "research/expert_observations/big_al/observations.jsonl"
+BIG_AL_LOCAL_LEDGER_FILENAME = "big_al_observations.jsonl"
+BIG_AL_ALLOWED_RATINGS = {2, 4, 6, 8, 10}
+BIG_AL_RATING_MIN_FOR_PATTERN_ANALYSIS = 15
+BIG_AL_OBSERVATION_ATOM_FAMILIES = {
+    "OBS_PRIOR_SCORING_EXTREME",
+    "OBS_PRIOR_UPSET_STATE",
+    "OBS_ATS_SEASON_STATE",
+    "OBS_SPREAD_MARKET_DIRECTION",
+    "OBS_TOTAL_MARKET_DIRECTION",
+    "OBS_DUAL_PRIOR_RESULT",
+    "OBS_PRIOR_POINTS_FOR",
+    "OBS_PRIOR_POINTS_ALLOWED",
+}
+BIG_AL_OBSERVATION_SUPPORT_FAMILIES = {
+    "VENUE", "MARKET_ROLE", "MARKET_PRICE", "TOTAL_REGIME",
+    "PRIOR_RESULT", "PRIOR_MARGIN_MAGNITUDE", "PRIOR_ATS_MAGNITUDE",
+    "ATS_FORM", "SU_FORM", "ATS_SEQUENCE", "SU_SEQUENCE",
+    "OPP_PRIOR_SU1", "OPP_PRIOR_ATS1", "TEAM_STATE", "OPP_STATE",
+    "SEASON_TIMING", "CONFERENCE_PAIR", "ROLE_CHANGE",
+    "SEASON_RECORD_STATE", "ROLE_TRANSITION_BOUNCEBACK",
+}
 
 # Prediction Tracker external-rating metamodel. PT itself has no blanket model
 # weight and never rewrites CORE. PT-derived Miner systems are source-neutral:
@@ -334,6 +362,215 @@ def _json_safe(x: Any) -> Any:
 def _stable_id(prefix: str, parts: Iterable[str]) -> str:
     payload="|".join(str(x) for x in parts)
     return prefix+hashlib.blake2b(payload.encode("utf-8"),digest_size=5).hexdigest().upper()
+
+
+def _normalize_big_al_observation(raw: dict[str,Any]) -> dict[str,Any] | None:
+    """Normalize one immutable expert observation without outcome fields.
+
+    Ratings are descriptive only. Invalid ratings are retained as None rather than
+    coerced. Outcome/postgame fields are deliberately discarded so the ledger can
+    safely participate in hypothesis generation without contaminating qualification.
+    """
+    if not isinstance(raw,dict): return None
+    sport=str(raw.get("sport") or "").upper().strip()
+    market=str(raw.get("market") or "").lower().strip()
+    if sport not in {"NCAAF","NFL"} or market not in {"spreads","totals","h2h"}: return None
+    rating=raw.get("rating")
+    try: rating=int(rating) if rating is not None and str(rating).strip()!="" else None
+    except Exception: rating=None
+    if rating not in BIG_AL_ALLOWED_RATINGS: rating=None
+    line=raw.get("line")
+    try: line=float(line) if line is not None and str(line).strip()!="" else None
+    except Exception: line=None
+    game_date=str(raw.get("game_date") or "").strip()[:10]
+    sel_team=str(raw.get("selection_team") or "").strip()
+    team_a=str(raw.get("team_a") or "").strip()
+    team_b=str(raw.get("team_b") or "").strip()
+    direction=str(raw.get("selection_direction") or "").upper().strip()
+    oid=str(raw.get("observation_id") or "").strip()
+    if not oid:
+        oid=_stable_id("BIGAL-OBS-",[sport,game_date,market,sel_team,team_a,team_b,direction,line,rating])
+    return {
+        "observation_id":oid,"sport":sport,"game_date":game_date,"market":market,
+        "selection_team":sel_team or None,"team_a":team_a or None,"team_b":team_b or None,
+        "selection_direction":direction or None,"line":line,"rating":rating,
+        "release_label":str(raw.get("release_label") or "").strip() or None,
+        "source":str(raw.get("source") or "USER_OBSERVED_BIG_AL").strip(),
+        "card_complete":bool(raw.get("card_complete",False)),
+        "notes":str(raw.get("notes") or "").strip() or None,
+        "outcome_used_for_selection":False,"production_authority":0,"rating_authority":0,
+    }
+
+
+def _local_big_al_observations() -> list[dict[str,Any]]:
+    path=Path(__file__).resolve().with_name(BIG_AL_LOCAL_LEDGER_FILENAME)
+    if not path.exists(): return []
+    rows=[]
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line=line.strip()
+            if not line: continue
+            try: obj=json.loads(line)
+            except Exception: continue
+            z=_normalize_big_al_observation(obj)
+            if z: rows.append(z)
+    except Exception:
+        return []
+    return rows
+
+
+def _load_big_al_observation_ledger(*, storage_client=None, bucket_name="sharp-models", log_func=print) -> tuple[list[dict[str,Any]],dict[str,Any]]:
+    """Merge bundled observations with the persistent GCS research ledger.
+
+    The merge is append/upsert by immutable observation_id. No outcome fields are
+    accepted. This is a research ledger only and cannot mutate production state.
+    """
+    local=_local_big_al_observations(); remote=[]; b=None; blob=None; sync="LOCAL_ONLY"
+    if storage_client is not None:
+        try:
+            b=storage_client.bucket(bucket_name); blob=b.blob(BIG_AL_OBSERVATION_LEDGER_BLOB)
+            if blob.exists():
+                txt=blob.download_as_text()
+                for line in txt.splitlines():
+                    try: obj=json.loads(line)
+                    except Exception: continue
+                    z=_normalize_big_al_observation(obj)
+                    if z: remote.append(z)
+            sync="REMOTE_READ"
+        except Exception as exc:
+            sync=f"REMOTE_READ_ERROR:{type(exc).__name__}"
+    merged={}
+    for row in remote+local:
+        oid=str(row.get("observation_id") or "")
+        if oid: merged[oid]=row
+    rows=sorted(merged.values(),key=lambda z:(str(z.get("game_date") or ""),str(z.get("sport") or ""),str(z.get("observation_id") or "")))
+    if blob is not None:
+        try:
+            payload="\n".join(json.dumps(_json_safe(z),sort_keys=True,separators=(",",":")) for z in rows)+("\n" if rows else "")
+            remote_ids={str(x.get("observation_id") or "") for x in remote}
+            local_ids={str(x.get("observation_id") or "") for x in local}
+            if local_ids-remote_ids or (not blob.exists() and rows):
+                blob.upload_from_string(payload,content_type="application/x-ndjson")
+                sync="REMOTE_SYNCED"
+        except Exception as exc:
+            sync=f"REMOTE_SYNC_ERROR:{type(exc).__name__}"
+    ratings={}
+    for x in rows:
+        k=str(x.get("rating")) if x.get("rating") is not None else "UNRATED"
+        ratings[k]=ratings.get(k,0)+1
+    diag={"status":"PASS","total_observations":len(rows),"ncaaf_observations":sum(x.get("sport")=="NCAAF" for x in rows),
+          "nfl_observations":sum(x.get("sport")=="NFL" for x in rows),"rating_counts":ratings,"sync":sync,
+          "outcome_fields_allowed":False,"rating_authority":0,"production_authority":0}
+    log_func(f"[BIGAL-OBSERVATION-LEDGER] status=PASS total={len(rows)} ncaaf={diag['ncaaf_observations']} nfl={diag['nfl_observations']} ratings={json.dumps(ratings,sort_keys=True)} sync={sync} outcome_authority=0 rating_authority=0")
+    return rows,diag
+
+
+def _big_al_rating_observation_report(observations: list[dict[str,Any]], *, miner_lane_audit: dict[str,Any] | None=None,
+                                      context_games: pd.DataFrame | None=None, dashboard_module=None) -> dict[str,Any]:
+    """Describe observed ratings and, when possible, fingerprint pregame atoms.
+
+    Fingerprints are descriptive only. We never grade the observed 2026 pick here,
+    never use its result, and never use the rating to qualify a historical system.
+    """
+    ncaaf=[x for x in observations if x.get("sport")=="NCAAF"]
+    rated=[x for x in ncaaf if x.get("rating") in BIG_AL_ALLOWED_RATINGS]
+    by_rating={}; by_market={}
+    for x in ncaaf:
+        rk=str(x.get("rating")) if x.get("rating") is not None else "UNRATED"
+        by_rating[rk]=by_rating.get(rk,0)+1
+        mk=str(x.get("market") or ""); by_market[mk]=by_market.get(mk,0)+1
+
+    obs_rows=[]; atom_counts_by_rating={}; matched_rated=0
+    ctx=context_games.copy() if isinstance(context_games,pd.DataFrame) and not context_games.empty else None
+    atoms_by_market={}
+    if ctx is not None:
+        for mk in ("spreads","totals"):
+            try:
+                aa=_extended_atoms(ctx,dashboard_module=dashboard_module,for_live=False,market=mk)
+                atoms_by_market[mk]=[(a["name"],str(a.get("family") or ""),np.asarray(a["mask"],dtype=bool)) for a in aa
+                                     if str(a.get("family") or "") in (BIG_AL_OBSERVATION_ATOM_FAMILIES|BIG_AL_OBSERVATION_SUPPORT_FAMILIES)
+                                     and str(a.get("family") or "") not in {"OBS_SPREAD_MARKET_DIRECTION","OBS_TOTAL_MARKET_DIRECTION"}]
+            except Exception:
+                atoms_by_market[mk]=[]
+        _dates=pd.to_datetime(ctx.get("Game_Date",ctx.get("Game_Start",pd.Series(pd.NaT,index=ctx.index))),errors="coerce",utc=True).dt.strftime("%Y-%m-%d")
+        _teams=ctx.get("Team_Norm",ctx.get("Team",pd.Series("",index=ctx.index))).astype(str).map(_pt_team_key)
+        _opps=ctx.get("Opponent_Norm",ctx.get("Opponent",pd.Series("",index=ctx.index))).astype(str).map(_pt_team_key)
+        _home=pd.to_numeric(ctx.get("Is_Home",pd.Series(np.nan,index=ctx.index)),errors="coerce")
+    else:
+        _dates=_teams=_opps=_home=None
+
+    for x in ncaaf:
+        rec={k:x.get(k) for k in ("observation_id","game_date","market","selection_team","team_a","team_b","selection_direction","line","rating","release_label")}
+        rec["context_match"]="UNAVAILABLE"; rec["active_atoms"]=[]
+        if ctx is not None and x.get("game_date"):
+            mk=str(x.get("market") or "")
+            cand=np.flatnonzero(_dates.eq(str(x.get("game_date"))).to_numpy())
+            sel=_pt_team_key(x.get("selection_team")) if x.get("selection_team") else ""
+            ta=_pt_team_key(x.get("team_a")) if x.get("team_a") else ""
+            tb=_pt_team_key(x.get("team_b")) if x.get("team_b") else ""
+            chosen=None
+            if mk=="spreads" and sel:
+                for i in cand:
+                    if _teams.iloc[i]==sel: chosen=int(i); break
+            elif mk=="totals" and ta and tb:
+                pair={ta,tb}
+                pair_rows=[int(i) for i in cand if {_teams.iloc[i],_opps.iloc[i]}==pair]
+                home_rows=[i for i in pair_rows if pd.notna(_home.iloc[i]) and float(_home.iloc[i])==1.0]
+                chosen=(home_rows or pair_rows or [None])[0]
+            if chosen is not None:
+                active=[]
+                for nm,fam,mask in atoms_by_market.get(mk,[]):
+                    if chosen<len(mask) and bool(mask[chosen]): active.append(nm)
+                # Market movement in the fingerprint is derived from the OBSERVED
+                # release line versus the historical opener, never from a later close.
+                try: _oline=float(x.get("line"))
+                except Exception: _oline=np.nan
+                if np.isfinite(_oline):
+                    if mk=="spreads":
+                        _open=pd.to_numeric(pd.Series([ctx.iloc[chosen].get("Consensus_Open_Spread",ctx.iloc[chosen].get("Opening_Spread",np.nan))]),errors="coerce").iloc[0]
+                        if pd.notna(_open):
+                            _mv=float(_oline)-float(_open); rec["observed_release_move_from_open"]=_mv
+                            if _mv<=-1: active.append("SPREAD_MOVED_TOWARD_TEAM_1_PLUS")
+                            if _mv<=-2: active.append("SPREAD_MOVED_TOWARD_TEAM_2_PLUS")
+                            if _mv>=1: active.append("SPREAD_MOVED_AWAY_FROM_TEAM_1_PLUS")
+                            if _mv>=2: active.append("SPREAD_MOVED_AWAY_FROM_TEAM_2_PLUS")
+                    elif mk=="totals":
+                        _open=pd.to_numeric(pd.Series([ctx.iloc[chosen].get("Consensus_Open_Total",ctx.iloc[chosen].get("Opening_Total",np.nan))]),errors="coerce").iloc[0]
+                        if pd.notna(_open):
+                            _mv=float(_oline)-float(_open); rec["observed_release_move_from_open"]=_mv
+                            if _mv<=-1: active.append("TOTAL_MOVED_DOWN_1_PLUS")
+                            if _mv<=-2: active.append("TOTAL_MOVED_DOWN_2_PLUS")
+                            if _mv<=-3: active.append("TOTAL_MOVED_DOWN_3_PLUS")
+                            if _mv>=1: active.append("TOTAL_MOVED_UP_1_PLUS")
+                            if _mv>=2: active.append("TOTAL_MOVED_UP_2_PLUS")
+                            if _mv>=3: active.append("TOTAL_MOVED_UP_3_PLUS")
+                rec["context_match"]="MATCHED_PREGAME_FINGERPRINT"; rec["active_atoms"]=sorted(set(active))
+                if x.get("rating") in BIG_AL_ALLOWED_RATINGS:
+                    matched_rated+=1; rk=str(x.get("rating")); atom_counts_by_rating.setdefault(rk,{})
+                    for nm in active: atom_counts_by_rating[rk][nm]=atom_counts_by_rating[rk].get(nm,0)+1
+            else:
+                rec["context_match"]="PENDING_OR_UNMATCHED"
+        obs_rows.append(rec)
+
+    enough=matched_rated>=BIG_AL_RATING_MIN_FOR_PATTERN_ANALYSIS
+    atom_rates={}
+    for rk,counts in atom_counts_by_rating.items():
+        denom=max(1,sum(1 for r in obs_rows if str(r.get("rating"))==rk and r.get("context_match")=="MATCHED_PREGAME_FINGERPRINT"))
+        atom_rates[rk]=[{"atom":nm,"count":cnt,"share":cnt/denom} for nm,cnt in sorted(counts.items(),key=lambda kv:(-kv[1],kv[0]))[:30]]
+    return {
+        "status":"DESCRIPTIVE_READY" if enough else "COLLECTING_OBSERVATIONS",
+        "ncaaf_observations":len(ncaaf),"rated_observations":len(rated),"matched_rated_observations":matched_rated,
+        "rating_counts":by_rating,"market_counts":by_market,
+        "complete_card_observations":sum(bool(x.get("card_complete")) for x in ncaaf),
+        "negative_control_strength":"FULL_CARD_CONTROLS_AVAILABLE" if any(bool(x.get("card_complete")) for x in ncaaf) else "OBSERVED_SELECTIONS_ONLY__UNSELECTED_GAMES_NOT_ASSUMED_REJECTED",
+        "rating_pattern_minimum":BIG_AL_RATING_MIN_FOR_PATTERN_ANALYSIS,"rating_pattern_analysis_enabled":bool(enough),
+        "rating_atom_frequency":atom_rates,
+        "rating_used_for_system_qualification":False,"rating_used_for_authority":False,"outcomes_used_for_hypothesis_generation":False,
+        "observed_2026_picks_may_seed_generic_vocabulary":True,
+        "hypothesis_lane":miner_lane_audit or {},
+        "observations":obs_rows,
+        "production_authority":0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2687,6 +2924,81 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
     game_no=nfirst("Team_Game_Number_Prior","Game_Number_Prior","Context_Team_Games_Prior")
     is_home=nfirst("Is_Home")
 
+    # V2.26 expert-observation context bridge. These are generic pregame states,
+    # not Big Al-specific rules. Historical close/current prices are pre-kickoff
+    # market observations; live uses the current Move Master quote when present.
+    current_sp=nfirst("Spread_Value","Current_Spread")
+    current_tot=nfirst("Current_Total","Total_Value")
+    # Never use closing lines to explain a bet graded at an earlier/opening line.
+    # Prefer explicit leakage-safe as-of movement fields; otherwise derive from
+    # a current snapshot only. If neither exists historically, movement atoms are
+    # unavailable and the Miner correctly cannot qualify them yet.
+    spread_move=nfirst("Line_Move_From_Open","Spread_Move_From_Open")
+    if not spread_move.notna().any() and current_sp.notna().any() and sp.notna().any(): spread_move=current_sp-sp
+    total_move=nfirst("Total_Move_From_Open")
+    if not total_move.notna().any() and current_tot.notna().any() and tot.notna().any(): total_move=current_tot-tot
+
+    prev_pf=nfirst("Prev_Team_Score","Pregame_Prev_Team_Score","Context_Prev_Team_Score","Prev_Points_For")
+    prev_pa=nfirst("Prev_Opponent_Score","Pregame_Prev_Opponent_Score","Context_Prev_Opponent_Score","Prev_Points_Against")
+    opp_prev_pf=nfirst("Opp_Prev_Team_Score","Opp_Pregame_Prev_Team_Score","Context_Opp_Prev_Team_Score","Opp_Prev_Points_For")
+    opp_prev_pa=nfirst("Opp_Prev_Opponent_Score","Opp_Pregame_Prev_Opponent_Score","Context_Opp_Prev_Opponent_Score","Opp_Prev_Points_Against")
+    team_ats_pct_prior=nfirst("ATS_WinPct_Prior","Team_ATS_WinPct_Prior","ATS_CoverPct_Prior")
+    opp_ats_pct_prior=nfirst("Opp_ATS_WinPct_Prior","Opponent_ATS_WinPct_Prior","Opp_ATS_CoverPct_Prior")
+    derived_prev_dog=pd.Series(np.nan,index=g.index,dtype=float)
+    derived_opp_prev_dog=pd.Series(np.nan,index=g.index,dtype=float)
+
+    # If the cache does not already expose prior score/ATS-record fields, derive
+    # them by shifting completed game rows inside team-season chronology. Only
+    # prior games are used; current outcomes never enter the current row's state.
+    if (not for_live) and any(c in g.columns for c in ("Team_Norm","Team")) and "Season" in g.columns:
+        _need_prior=not (prev_pf.notna().any() and prev_pa.notna().any() and team_ats_pct_prior.notna().any())
+        if _need_prior:
+            try:
+                _team=tfirst("Team_Norm","Team")
+                _opp=tfirst("Opponent_Norm","Opponent")
+                _season=nfirst("Season")
+                _date=pd.to_datetime(g.get("Game_Date",g.get("Game_Start",pd.Series(pd.NaT,index=g.index))),errors="coerce",utc=True)
+                _pf=nfirst("Team_Score","Points_For")
+                _pa=nfirst("Opponent_Score","Points_Against")
+                _am=nfirst("Actual_Margin")
+                if not _am.notna().any(): _am=_pf-_pa
+                _ats_margin=_am+sp
+                _tmp=pd.DataFrame({"idx":np.arange(len(g)),"team":_team,"opp":_opp,"season":_season,"date":_date,"pf":_pf,"pa":_pa,"dog":sp.gt(0).astype(float),"ats_margin":_ats_margin})
+                _tmp=_tmp.sort_values(["team","season","date","idx"],kind="stable")
+                _tmp["prev_pf"]=_tmp.groupby(["team","season"],sort=False,dropna=False)["pf"].shift(1)
+                _tmp["prev_pa"]=_tmp.groupby(["team","season"],sort=False,dropna=False)["pa"].shift(1)
+                _tmp["prev_dog"]=_tmp.groupby(["team","season"],sort=False,dropna=False)["dog"].shift(1)
+                _tmp["ats_pct_prior"]=np.nan
+                for (_t,_sy),_gg in _tmp.groupby(["team","season"],sort=False,dropna=False):
+                    wins=0; graded=0
+                    for _ix in _gg.index:
+                        _tmp.at[_ix,"ats_pct_prior"]=(wins/graded) if graded else np.nan
+                        _m=_tmp.at[_ix,"ats_margin"]
+                        if pd.notna(_m) and not np.isclose(float(_m),0.0,atol=1e-9):
+                            graded+=1; wins+=int(float(_m)>0)
+                _byidx=_tmp.set_index("idx")
+                def _restore(col):
+                    return pd.Series([_byidx.at[i,col] if i in _byidx.index else np.nan for i in range(len(g))],index=g.index,dtype=float)
+                if not prev_pf.notna().any(): prev_pf=_restore("prev_pf")
+                if not prev_pa.notna().any(): prev_pa=_restore("prev_pa")
+                if not team_ats_pct_prior.notna().any(): team_ats_pct_prior=_restore("ats_pct_prior")
+                derived_prev_dog=_restore("prev_dog")
+                # Mirror the opponent's prior state from its row in the same physical game.
+                _lookup={}
+                for _i in range(len(g)):
+                    _k=(str(_season.iloc[_i]),str(_date.iloc[_i]),str(_team.iloc[_i]))
+                    _lookup[_k]={"pf":prev_pf.iloc[_i],"pa":prev_pa.iloc[_i],"ats":team_ats_pct_prior.iloc[_i],"dog":derived_prev_dog.iloc[_i]}
+                _opf=[]; _opa=[]; _oats=[]; _odog=[]
+                for _i in range(len(g)):
+                    _v=_lookup.get((str(_season.iloc[_i]),str(_date.iloc[_i]),str(_opp.iloc[_i])),{})
+                    _opf.append(_v.get("pf",np.nan)); _opa.append(_v.get("pa",np.nan)); _oats.append(_v.get("ats",np.nan)); _odog.append(_v.get("dog",np.nan))
+                if not opp_prev_pf.notna().any(): opp_prev_pf=pd.Series(_opf,index=g.index,dtype=float)
+                if not opp_prev_pa.notna().any(): opp_prev_pa=pd.Series(_opa,index=g.index,dtype=float)
+                if not opp_ats_pct_prior.notna().any(): opp_ats_pct_prior=pd.Series(_oats,index=g.index,dtype=float)
+                derived_opp_prev_dog=pd.Series(_odog,index=g.index,dtype=float)
+            except Exception:
+                pass
+
     # Core market role / price regimes.
     add("HOME","VENUE",is_home.eq(1),source_ok=has("Is_Home"))
     add("ROAD","VENUE",is_home.eq(0),source_ok=has("Is_Home"))
@@ -2701,8 +3013,20 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
     if market=="spreads":
         for cut,label in ((6.5,"6P5"),(7.0,"7"),(8.0,"8"),(9.0,"9"),(10.0,"10")):
             add(f"DOG_{label}_PLUS","MARKET_PRICE",sp.ge(cut),source_ok=has("Consensus_Open_Spread","Opening_Spread"),min_n=20)
+        _spread_move_src=bool(spread_move.notna().any())
+        add("SPREAD_MOVED_TOWARD_TEAM_1_PLUS","OBS_SPREAD_MARKET_DIRECTION",spread_move.le(-1.0),desc="current/close spread moved >=1 point toward team from opener",source_ok=_spread_move_src,min_n=20)
+        add("SPREAD_MOVED_TOWARD_TEAM_2_PLUS","OBS_SPREAD_MARKET_DIRECTION",spread_move.le(-2.0),desc="current/close spread moved >=2 points toward team from opener",source_ok=_spread_move_src,min_n=20)
+        add("SPREAD_MOVED_AWAY_FROM_TEAM_1_PLUS","OBS_SPREAD_MARKET_DIRECTION",spread_move.ge(1.0),desc="current/close spread moved >=1 point away from team from opener",source_ok=_spread_move_src,min_n=20)
+        add("SPREAD_MOVED_AWAY_FROM_TEAM_2_PLUS","OBS_SPREAD_MARKET_DIRECTION",spread_move.ge(2.0),desc="current/close spread moved >=2 points away from team from opener",source_ok=_spread_move_src,min_n=20)
     for lo,hi in ((0,45),(45,52),(52,60),(60,99)):
         add(f"TOTAL_{lo}_{hi}","TOTAL_REGIME",tot.ge(lo)&tot.lt(hi),source_ok=has("Consensus_Open_Total","Opening_Total"))
+    if market=="totals":
+        add("TOTAL_55_PLUS","TOTAL_REGIME",tot.ge(55),source_ok=has("Consensus_Open_Total","Opening_Total"),min_n=20)
+        add("TOTAL_58_PLUS","TOTAL_REGIME",tot.ge(58),source_ok=has("Consensus_Open_Total","Opening_Total"),min_n=20)
+        _total_move_src=bool(total_move.notna().any())
+        for _cut,_lbl in ((1.0,"1"),(2.0,"2"),(3.0,"3")):
+            add(f"TOTAL_MOVED_DOWN_{_lbl}_PLUS","OBS_TOTAL_MARKET_DIRECTION",total_move.le(-_cut),desc=f"current/close total moved down >= {_cut:g} from opener",source_ok=_total_move_src,min_n=20)
+            add(f"TOTAL_MOVED_UP_{_lbl}_PLUS","OBS_TOTAL_MARKET_DIRECTION",total_move.ge(_cut),desc=f"current/close total moved up >= {_cut:g} from opener",source_ok=_total_move_src,min_n=20)
 
     # Timing / schedule / rest.
     add("EARLY_SEASON_WK1_4","SEASON_TIMING",week.between(1,4),source_ok=has("Context_Week","Week"))
@@ -2761,10 +3085,11 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
 
     # One-game prior state and magnitude.
     psu=nfirst("Pregame_Prev_SU_Margin","Prev_SU_Margin","Context_Prev_SU_Margin")
+    if not psu.notna().any() and prev_pf.notna().any() and prev_pa.notna().any(): psu=prev_pf-prev_pa
     pats=nfirst("Pregame_Prev_ATS_Margin","Prev_ATS_Margin","Prev_ATS_Cover_Margin","Context_Prev_ATS_Margin")
     add("OFF_SU_WIN","PRIOR_RESULT",psu.gt(0),source_ok=has("Pregame_Prev_SU_Margin","Prev_SU_Margin","Context_Prev_SU_Margin"))
     add("OFF_SU_LOSS","PRIOR_RESULT",psu.lt(0),source_ok=has("Pregame_Prev_SU_Margin","Prev_SU_Margin","Context_Prev_SU_Margin"))
-    for t in (7,14,21):
+    for t in (7,14,21,28):
         add(f"OFF_SU_WIN_{t}_PLUS","PRIOR_MARGIN_MAGNITUDE",psu.ge(t),source_ok=has("Pregame_Prev_SU_Margin","Prev_SU_Margin","Context_Prev_SU_Margin"))
         add(f"OFF_SU_LOSS_{t}_PLUS","PRIOR_MARGIN_MAGNITUDE",psu.le(-t),source_ok=has("Pregame_Prev_SU_Margin","Prev_SU_Margin","Context_Prev_SU_Margin"))
     for t in (7,14):
@@ -2774,6 +3099,19 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
     add("ATS_WIN_STREAK_2","ATS_FORM",nfirst("ATS_Win_Streak_Prior").ge(2),source_ok=has("ATS_Win_Streak_Prior"))
     add("SU_WIN_STREAK_2","SU_FORM",nfirst("Current_Win_Streak_Prior","Core_Win_Streak_Prior").ge(2),source_ok=has("Current_Win_Streak_Prior","Core_Win_Streak_Prior"))
     add("SU_LOSS_STREAK_2","SU_FORM",nfirst("Current_Loss_Streak_Prior","Core_Loss_Streak_Prior").ge(2),source_ok=has("Current_Loss_Streak_Prior","Core_Loss_Streak_Prior"))
+
+    # V2.26 generic expert-observation vocabulary. These features were added
+    # because observed expert cards exposed missing concepts, but the rules are
+    # completely source-neutral and must independently validate historically.
+    _prev_score_src=bool(prev_pf.notna().any() and prev_pa.notna().any())
+    add("OFF_SHUTOUT_LOSS","OBS_PRIOR_SCORING_EXTREME",prev_pf.eq(0)&prev_pa.gt(0),desc="off a straight-up loss while scoring zero",source_ok=_prev_score_src,min_n=15)
+    add("OFF_SCORED_7_OR_LESS","OBS_PRIOR_POINTS_FOR",prev_pf.le(7)&prev_pf.notna(),desc="scored <=7 in previous game",source_ok=prev_pf.notna().any(),min_n=20)
+    add("OFF_SCORED_35_PLUS","OBS_PRIOR_POINTS_FOR",prev_pf.ge(35),desc="scored >=35 in previous game",source_ok=prev_pf.notna().any(),min_n=20)
+    add("OFF_ALLOWED_35_PLUS","OBS_PRIOR_POINTS_ALLOWED",prev_pa.ge(35),desc="allowed >=35 in previous game",source_ok=prev_pa.notna().any(),min_n=20)
+    add("OFF_ALLOWED_42_PLUS","OBS_PRIOR_POINTS_ALLOWED",prev_pa.ge(42),desc="allowed >=42 in previous game",source_ok=prev_pa.notna().any(),min_n=20)
+    if market=="spreads":
+        add("TEAM_ATS_WINPCT_LE_250","OBS_ATS_SEASON_STATE",team_ats_pct_prior.le(.25)&team_ats_pct_prior.notna(),desc="prior-season-to-date ATS cover rate <=25%",source_ok=team_ats_pct_prior.notna().any(),min_n=20)
+        add("TEAM_ATS_WINPCT_LE_400","OBS_ATS_SEASON_STATE",team_ats_pct_prior.le(.40)&team_ats_pct_prior.notna(),desc="prior-season-to-date ATS cover rate <=40%",source_ok=team_ats_pct_prior.notna().any(),min_n=20)
 
     # Horizon-symmetric SU / ATS sequences (oldest -> newest in the atom name).
     def sign_series(kind,lag):
@@ -2807,11 +3145,22 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
 
     # Opponent prior state and quality.
     opsu=nfirst("Context_Opp_Prev_SU_Margin","Opp_Pregame_Prev_SU_Margin","Opp_Prev_SU_Margin")
+    if not opsu.notna().any() and opp_prev_pf.notna().any() and opp_prev_pa.notna().any(): opsu=opp_prev_pf-opp_prev_pa
     opats=nfirst("Context_Opp_Prev_ATS_Margin","Opp_Pregame_Prev_ATS_Margin")
     add("OPP_OFF_SU_WIN","OPP_PRIOR_SU1",opsu.gt(0),source_ok=has("Context_Opp_Prev_SU_Margin","Opp_Pregame_Prev_SU_Margin","Opp_Prev_SU_Margin"))
     add("OPP_OFF_SU_LOSS","OPP_PRIOR_SU1",opsu.lt(0),source_ok=has("Context_Opp_Prev_SU_Margin","Opp_Pregame_Prev_SU_Margin","Opp_Prev_SU_Margin"))
     add("OPP_OFF_ATS_WIN","OPP_PRIOR_ATS1",opats.gt(0),source_ok=has("Context_Opp_Prev_ATS_Margin","Opp_Pregame_Prev_ATS_Margin"))
     add("OPP_OFF_ATS_LOSS","OPP_PRIOR_ATS1",opats.lt(0),source_ok=has("Context_Opp_Prev_ATS_Margin","Opp_Pregame_Prev_ATS_Margin"))
+    _opp_prev_dog=nfirst("Opp_Prev_Is_ML_Dog")
+    _opp_prev_fav=nfirst("Opp_Prev_Is_ML_Favorite")
+    if not _opp_prev_dog.notna().any() and _opp_prev_fav.notna().any(): _opp_prev_dog=1-_opp_prev_fav
+    if not _opp_prev_dog.notna().any() and derived_opp_prev_dog.notna().any(): _opp_prev_dog=derived_opp_prev_dog
+    add("OPP_OFF_UPSET_WIN","OBS_PRIOR_UPSET_STATE",opsu.gt(0)&_opp_prev_dog.eq(1),desc="opponent won previous game straight up as an underdog",source_ok=bool(opsu.notna().any() and _opp_prev_dog.notna().any()),min_n=20)
+    if market=="totals":
+        add("BOTH_OFF_SU_LOSS","OBS_DUAL_PRIOR_RESULT",psu.lt(0)&opsu.lt(0),desc="both teams enter off straight-up losses",source_ok=bool(psu.notna().any() and opsu.notna().any()),min_n=20)
+        add("EITHER_OFF_SCORED_35_PLUS","OBS_PRIOR_POINTS_FOR",prev_pf.ge(35)|opp_prev_pf.ge(35),desc="either team scored >=35 in its prior game",source_ok=bool(prev_pf.notna().any() or opp_prev_pf.notna().any()),min_n=20)
+        add("EITHER_OFF_ALLOWED_35_PLUS","OBS_PRIOR_POINTS_ALLOWED",prev_pa.ge(35)|opp_prev_pa.ge(35),desc="either team allowed >=35 in its prior game",source_ok=bool(prev_pa.notna().any() or opp_prev_pa.notna().any()),min_n=20)
+        add("BOTH_OFF_ALLOWED_28_PLUS","OBS_PRIOR_POINTS_ALLOWED",prev_pa.ge(28)&opp_prev_pa.ge(28),desc="both teams allowed >=28 in prior game",source_ok=bool(prev_pa.notna().any() and opp_prev_pa.notna().any()),min_n=20)
     twp=nfirst("Team_WinPct_Prior","Core_Team_WinPct_Prior","WinPct_Prior_System","HC_WinPct_Prior")
     owp=nfirst("Opp_WinPct_Prior","Core_Opp_WinPct_Prior","Opp_WinPct_Prior_System","HC_Opp_WinPct_Prior")
     for nm,ser,fam,ok in (("TEAM",twp,"TEAM_STATE",has("Team_WinPct_Prior","Core_Team_WinPct_Prior","WinPct_Prior_System","HC_WinPct_Prior")),("OPP",owp,"OPP_STATE",has("Opp_WinPct_Prior","Core_Opp_WinPct_Prior","Opp_WinPct_Prior_System","HC_Opp_WinPct_Prior"))):
@@ -3772,10 +4121,13 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
     _fam_counts={}
     for _a in atoms: _fam_counts[_a.get("family")]=int(_fam_counts.get(_a.get("family"),0))+1
     _bridge_atoms=sum(v for k,v in _fam_counts.items() if str(k).startswith(("EXPERT_","RESEARCH_CORE_STATE","RESEARCH_SPECIALIST_","MARKET_KEY_","EXTERNAL_")))
+    _obs_atoms=[a for a in atoms if str(a.get("family") or "") in BIG_AL_OBSERVATION_ATOM_FAMILIES]
     behavior=_v2181_external_predictor_behavior(games,seasons,market)
     out={"version":"NCAAF-RV2.18.3-SYSTEM-MINER-V9-CURRENT-EXTERNAL-CONSENSUS","market":market,"production_authority":0,"discovery_max_season":DISCOVERY_MAX_SEASON,
          "confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,"atoms":len(atoms),"atom_family_counts":_fam_counts,"expert_model_bridge_atoms":int(_bridge_atoms),"systems":[],"mechanism_families":[],"external_predictor_behavior":behavior}
     log_func(f"[NCAAF-RV25-ATOM-BRIDGE] market={market} atoms={len(atoms)} bridge_atoms={_bridge_atoms} pathi={_fam_counts.get('EXPERT_PATHI',0)} bigal={_fam_counts.get('EXPERT_BIGAL',0)} core={_fam_counts.get('RESEARCH_CORE_STATE',0)} specialist={sum(v for k,v in _fam_counts.items() if str(k).startswith('RESEARCH_SPECIALIST_'))} external={sum(v for k,v in _fam_counts.items() if str(k).startswith('EXTERNAL_'))} authority=0")
+    if market in {"spreads","totals"}:
+        log_func(f"[NCAAF-RV226-OBS-ATOM-CATALOG] market={market} atoms={len(_obs_atoms)} names={','.join(sorted(a['name'] for a in _obs_atoms))} rating_weight=0 outcomes_2026_used=FALSE authority=0")
     if market=="spreads":
         log_func(f"[NCAAF-RV2182-PREDICTOR-BEHAVIOR] predictors={behavior.get('predictor_count',0)} confirmed={behavior.get('confirmed_count',0)} strong_confirmed={behavior.get('strong_confirmed_count',0)} discovery=2022_2023 confirmation=2024_2025 year_2026_selection=FALSE authority=0")
         for _pb in (behavior.get("top_confirmed") or [])[:8]:
@@ -3831,6 +4183,42 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         return tested,singleton
 
     legacy_tested,legacy_single=legacy_search(legacy_atoms)
+
+    # V2.26 constrained expert-observation hypothesis lane. The user-observed
+    # card only determines which GENERIC concepts deserve a focused search.
+    # No 2026 outcome, Big Al rating, team identity, or current pick result enters
+    # discovery/confirmation. The same historical evaluator/FDR/frozen seasons
+    # apply, and any surviving rule is still a source-neutral MINER mechanism.
+    observation_tested=[]; observation_seed_atoms=[]; observation_support_atoms=[]
+    if market in {"spreads","totals"}:
+        _legacy_pos={str(a.get("name")):i for i,a in enumerate(legacy_atoms)}
+        observation_seed_atoms=[a for a in legacy_atoms if str(a.get("family") or "") in BIG_AL_OBSERVATION_ATOM_FAMILIES]
+        observation_support_atoms=[a for a in legacy_atoms if str(a.get("family") or "") in (BIG_AL_OBSERVATION_ATOM_FAMILIES|BIG_AL_OBSERVATION_SUPPORT_FAMILIES)]
+        _obs_seen=set(); _obs_beam=[]
+        for a in observation_seed_atoms:
+            _i=_legacy_pos.get(str(a.get("name")),0)
+            r=ev(a["mask"],(a["name"],),(a["family"],),(_i,))
+            if r:
+                observation_tested.append(r); _obs_beam.append(r); _obs_seen.add(tuple(sorted(r["conditions"])))
+        _obs_beam=sorted(_obs_beam,key=lambda z:z["quality"],reverse=True)[:48]
+        for _depth in range(2,min(max_depth,4)+1):
+            _nxt=[]
+            for st in _obs_beam:
+                _used=set(st["families"]); _names=set(st["conditions"])
+                for a in observation_support_atoms:
+                    if a["family"] in _used or a["name"] in _names: continue
+                    names=tuple(sorted(st["conditions"]+[a["name"]]))
+                    if names in _obs_seen: continue
+                    _obs_seen.add(names)
+                    _i=_legacy_pos.get(str(a.get("name")),0)
+                    r=ev(st["mask"]&a["mask"],names,tuple(st["families"]+[a["family"]]),st["idx"]+(_i,))
+                    if r:
+                        # Seed construction guarantees every rule contains at least
+                        # one observation-vocabulary family.
+                        observation_tested.append(r); _nxt.append(r)
+            _obs_beam=sorted(_nxt,key=lambda z:z["quality"],reverse=True)[:48]
+            if not _obs_beam: break
+
     external_tested=[]; selected_external=[]; selected_support=[]
     if market=="spreads" and expanded_external:
         external_single=[]
@@ -3928,19 +4316,37 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         return finalists
 
     legacy_finalists=finalize_lane(legacy_tested,"LEGACY",.20,160)
+    observation_finalists=finalize_lane(observation_tested,"EXPERT_OBSERVATION_HYPOTHESIS",.10,80) if market in {"spreads","totals"} else []
     external_finalists=finalize_lane(external_tested,"EXTERNAL_PREDICTOR_BEHAVIOR",.10,120) if market=="spreads" else []
-    finalists=legacy_finalists+external_finalists
+
+    # Deduplicate exact rules discovered in more than one lane. A focused lane
+    # can rescue a rule the broad beam misses, but it cannot manufacture a second
+    # vote for the same rule. Lane provenance is retained for audit.
+    _dedup={}
+    for _z in legacy_finalists+observation_finalists+external_finalists:
+        _key=(str(_z.get("direction")),tuple(sorted(_z.get("conditions") or [])))
+        if _key not in _dedup:
+            _z=dict(_z); _z["discovery_lanes"]=[str(_z.get("miner_lane") or "")]; _dedup[_key]=_z
+        else:
+            _old=_dedup[_key]; _lanes=set(_old.get("discovery_lanes") or [str(_old.get("miner_lane") or "")]); _lanes.add(str(_z.get("miner_lane") or "")); _old["discovery_lanes"]=sorted(x for x in _lanes if x)
+            if str(_old.get("miner_lane"))=="EXPERT_OBSERVATION_HYPOTHESIS" and str(_z.get("miner_lane"))=="LEGACY":
+                _z=dict(_z); _z["discovery_lanes"]=_old["discovery_lanes"]; _dedup[_key]=_z
+    finalists=list(_dedup.values())
     out["lanes"]={
         "legacy":{"atoms":len(legacy_atoms),"tested_hypotheses":len(legacy_tested),"systems":len(legacy_finalists),"fdr_q_cut":.20},
+        "expert_observation_hypothesis":{"seed_atoms":len(observation_seed_atoms),"support_atoms":len(observation_support_atoms),"tested_hypotheses":len(observation_tested),"systems":len(observation_finalists),"deduplicated_into_total":sum(1 for z in finalists if "EXPERT_OBSERVATION_HYPOTHESIS" in (z.get("discovery_lanes") or [])),"fdr_q_cut":.10,"depth_cap":4,"ratings_used_for_selection":False,"2026_outcomes_used":False,"source_after_validation":"MINER"},
         "external_predictor_behavior":{"atoms":len(expanded_external),"selected_seed_atoms":len(selected_external),"selected_support_atoms":len(selected_support),"tested_hypotheses":len(external_tested),"systems":len(external_finalists),"fdr_q_cut":.10,"depth_cap":3,"selection_uses_2026":False},
     }
     log_func(f"[NCAAF-RV2182-LANE] market={market} lane=LEGACY atoms={len(legacy_atoms)} tested={len(legacy_tested)} systems={len(legacy_finalists)} fdr_q=.20 authority=0")
+    if market in {"spreads","totals"}:
+        log_func(f"[NCAAF-BIGAL-HYPOTHESIS-LANE] market={market} seed_atoms={len(observation_seed_atoms)} support_atoms={len(observation_support_atoms)} tested={len(observation_tested)} systems={len(observation_finalists)} dedup_total={out['lanes']['expert_observation_hypothesis']['deduplicated_into_total']} fdr_q=.10 ratings_used=FALSE outcomes_2026_used=FALSE source=MINER authority=0")
     if market=="spreads":
         log_func(f"[NCAAF-RV2182-LANE] market=spreads lane=EXTERNAL_PREDICTOR_BEHAVIOR atoms={len(expanded_external)} seeds={len(selected_external)} supports={len(selected_support)} tested={len(external_tested)} systems={len(external_finalists)} fdr_q=.10 depth_cap=3 year_2026_selection=FALSE authority=0")
 
     if not finalists:
-        out.update({"status":"NO_CANDIDATES","tested_hypotheses":len(legacy_tested)+len(external_tested),"published_systems":0});
-        log_func(f"[NCAAF-RV23-MINER] market={market} atoms={len(atoms)} tested={len(legacy_tested)+len(external_tested)} systems=0 mechanisms=0 confirmed_mechanisms=0 authority=0")
+        _tested_total=len(legacy_tested)+len(observation_tested)+len(external_tested)
+        out.update({"status":"NO_CANDIDATES","tested_hypotheses":_tested_total,"published_systems":0});
+        log_func(f"[NCAAF-RV23-MINER] market={market} atoms={len(atoms)} tested={_tested_total} systems=0 mechanisms=0 confirmed_mechanisms=0 authority=0")
         return out
 
     lineage=_annotate_system_lineage(games,seasons,finalists,market)
@@ -3969,12 +4375,18 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         _uses_external=bool("EXTERNAL_RATINGS_FAMILY" in set(rep.get("families") or []))
         _uses_season_record=bool("SEASON_RECORD_STATE" in set(rep.get("families") or []))
         _uses_bounceback=bool("ROLE_TRANSITION_BOUNCEBACK" in set(rep.get("families") or []))
+        _uses_observation_hypothesis=bool(set(rep.get("families") or []) & BIG_AL_OBSERVATION_ATOM_FAMILIES) or any(bool(set(m.get("families") or []) & BIG_AL_OBSERVATION_ATOM_FAMILIES) or "EXPERT_OBSERVATION_HYPOTHESIS" in set(m.get("discovery_lanes") or [m.get("miner_lane")]) for m in members)
         _rep_conditions=list(rep.get("conditions") or [])
         fam={"mechanism_id":fid,"market":market,"direction":rep["direction"],"representative_system_id":rep["system_id"],
              "representative_conditions":_rep_conditions,"member_system_ids":[x["system_id"] for x in members],"member_count":len(members),"families":rep["families"],
              "uses_external_ratings_family":_uses_external,
              "uses_season_record_state_family":_uses_season_record,
              "uses_role_transition_bounceback_family":_uses_bounceback,
+             "uses_big_al_observation_hypothesis":_uses_observation_hypothesis,
+             "hypothesis_origin":"BIG_AL_OBSERVATION_VOCABULARY" if _uses_observation_hypothesis else None,
+             # Observation-inspired rules stay source-neutral. They do NOT collapse
+             # to one Big Al vote; independent historical mechanisms retain their
+             # own evidence key unless an existing correlation cap (PT/state/bounce) applies.
              "evidence_family_key":"EXTERNAL_RATINGS_FAMILY" if _uses_external else "NCAAF_SEASON_RECORD_STATE_FAMILY" if _uses_season_record else "NCAAF_ROLE_TRANSITION_BOUNCEBACK_FAMILY" if _uses_bounceback else fid,
              "contains_meta_constituent_index":any(_v2182_is_meta_constituent_index_atom_name(c) for c in _rep_conditions),
              "meta_constituent_overlap_guard":"PASS" if not _v2182_meta_overlap_violation(_rep_conditions) else "FAIL",
@@ -4008,7 +4420,7 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
     clean=[]
     for z in finalists:
         z=dict(z); z.pop("_mask_internal",None); clean.append(z)
-    _all_tested=list(legacy_tested)+list(external_tested)
+    _all_tested=list(legacy_tested)+list(observation_tested)+list(external_tested)
     def _special_family_stats(family_name: str, evidence_key: str) -> dict[str,Any]:
         tested=[z for z in _all_tested if family_name in set(z.get("families") or [])]
         final=[z for z in clean if family_name in set(z.get("families") or [])]
@@ -4026,18 +4438,37 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
             "independent_live_family_votes":1 if live else 0,
             "confirmed_rules":[{"mechanism_id":z.get("mechanism_id"),"market":z.get("market"),"direction":z.get("direction"),"confirmation_n":z.get("confirmation_n"),"confirmation_rate":z.get("confirmation_rate"),"live_authority_eligible":bool(z.get("live_authority_eligible")),"rule":" AND ".join(z.get("representative_conditions") or [])} for z in confirmed],
         }
+    def _multi_family_stats(family_names: set[str], label: str) -> dict[str,Any]:
+        def _uses(z): return bool(set(z.get("families") or []) & family_names)
+        tested=[z for z in _all_tested if _uses(z)]
+        final=[z for z in clean if _uses(z)]
+        mechs=[z for z in families if _uses(z) or (label=="BIG_AL_OBSERVATION_HYPOTHESIS" and bool(z.get("uses_big_al_observation_hypothesis")))]
+        confirmed=[z for z in mechs if bool(z.get("confirmation_pass"))]
+        live=[z for z in mechs if bool(z.get("live_authority_eligible"))]
+        return {
+            "label":label,"atom_families":sorted(family_names),"tested_hypotheses":len(tested),
+            "finalist_systems":len(final),"mechanism_families":len(mechs),
+            "confirmed_mechanisms":len(confirmed),"live_authority_mechanisms":len(live),
+            "independent_live_family_votes":len(set((str(z.get("market")),str(z.get("evidence_family_key") or z.get("mechanism_id"))) for z in live)),
+            "confirmed_rules":[{"mechanism_id":z.get("mechanism_id"),"market":z.get("market"),"direction":z.get("direction"),"confirmation_n":z.get("confirmation_n"),"confirmation_rate":z.get("confirmation_rate"),"live_authority_eligible":bool(z.get("live_authority_eligible")),"rule":" AND ".join(z.get("representative_conditions") or [])} for z in confirmed],
+            "rating_used_for_qualification":False,"2026_outcomes_used":False,"source_after_validation":"MINER",
+        }
     special_family_audit={
         "season_record_state":_special_family_stats("SEASON_RECORD_STATE","NCAAF_SEASON_RECORD_STATE_FAMILY"),
         "role_transition_bounceback":_special_family_stats("ROLE_TRANSITION_BOUNCEBACK","NCAAF_ROLE_TRANSITION_BOUNCEBACK_FAMILY"),
         "external_ratings":_special_family_stats("EXTERNAL_RATINGS_FAMILY","EXTERNAL_RATINGS_FAMILY"),
+        "big_al_observation_hypothesis":_multi_family_stats(BIG_AL_OBSERVATION_ATOM_FAMILIES,"BIG_AL_OBSERVATION_HYPOTHESIS"),
     }
-    out.update({"status":"RESEARCH_COMPLETE","tested_hypotheses":len(legacy_tested)+len(external_tested),"systems":clean,"published_systems":len(clean),
+    out.update({"status":"RESEARCH_COMPLETE","tested_hypotheses":len(legacy_tested)+len(observation_tested)+len(external_tested),"systems":clean,"published_systems":len(clean),
                 "mechanism_families":families,"mechanism_family_count":len(families),
                 "confirmed_mechanism_count":sum(x["confirmation_pass"] for x in families),
                 "special_family_audit":special_family_audit,
                 "lineage":lineage,
-                "admission_contract":"DISCOVERY_2022_2023_ONLY__LEGACY_MINER_LANE_PRESERVED__EXTERNAL_PREDICTOR_BEHAVIOR_LANE_SEPARATE_FDR__EXTERNAL_SEEDS_DISCOVERY_ONLY__ONE_EXTERNAL_FAMILY_PER_RULE__HORIZON_SYMMETRIC_1_2_3__CONFERENCE_RIVALRY_H2H_ROLE_TEAM_MEMORY__MARKET_RELATIVE_FDR_FOR_H2H__OBSERVED_ML_ROI__PRICE_BAND_ROBUSTNESS__BOTH_2024_AND_2025_CONFIRM__DEPENDENCY_COLLAPSE_AFTER_LANE_MERGE__PARENT_CHILD_INCREMENTAL_ATTRIBUTION__FULL_PT_INDEX_UNIVERSE_ONE_CORRELATED_FAMILY__META_CONSTITUENT_OVERLAP_GUARD__META_SOURCE_OUT_CONSENSUS__SPLIT_OVERLAP_AUDIT__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY"})
-    log_func(f"[NCAAF-RV23-MINER] market={market} atoms={len(atoms)} tested={len(legacy_tested)+len(external_tested)} systems={len(clean)} mechanisms={len(families)} confirmed_mechanisms={out['confirmed_mechanism_count']} authority=0")
+                "admission_contract":"DISCOVERY_2022_2023_ONLY__LEGACY_MINER_LANE_PRESERVED__BIGAL_OBSERVATION_HYPOTHESIS_LANE_SEPARATE_FDR__BIGAL_RATINGS_ZERO_SELECTION_WEIGHT__2026_EXPERT_PICK_OUTCOMES_UNUSED__EXTERNAL_PREDICTOR_BEHAVIOR_LANE_SEPARATE_FDR__EXTERNAL_SEEDS_DISCOVERY_ONLY__ONE_EXTERNAL_FAMILY_PER_RULE__HORIZON_SYMMETRIC_1_2_3__CONFERENCE_RIVALRY_H2H_ROLE_TEAM_MEMORY__MARKET_RELATIVE_FDR_FOR_H2H__OBSERVED_ML_ROI__PRICE_BAND_ROBUSTNESS__BOTH_2024_AND_2025_CONFIRM__DEPENDENCY_COLLAPSE_AFTER_LANE_MERGE__PARENT_CHILD_INCREMENTAL_ATTRIBUTION__FULL_PT_INDEX_UNIVERSE_ONE_CORRELATED_FAMILY__META_CONSTITUENT_OVERLAP_GUARD__META_SOURCE_OUT_CONSENSUS__SPLIT_OVERLAP_AUDIT__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY"})
+    log_func(f"[NCAAF-RV23-MINER] market={market} atoms={len(atoms)} tested={len(legacy_tested)+len(observation_tested)+len(external_tested)} systems={len(clean)} mechanisms={len(families)} confirmed_mechanisms={out['confirmed_mechanism_count']} authority=0")
+    _oa=special_family_audit.get("big_al_observation_hypothesis") or {}
+    if market in {"spreads","totals"}:
+        log_func(f"[NCAAF-BIGAL-HYPOTHESIS-AUDIT] market={market} tested={_oa.get('tested_hypotheses',0)} finalists={_oa.get('finalist_systems',0)} mechanisms={_oa.get('mechanism_families',0)} confirmed={_oa.get('confirmed_mechanisms',0)} live={_oa.get('live_authority_mechanisms',0)} independent_live_families={_oa.get('independent_live_family_votes',0)} rating_weight=0 outcomes_2026_used=FALSE source=MINER")
     for x in families[:20]:
         extra=(f" d_roi={x.get('discovery_price_roi')} c_roi={x.get('confirmation_price_roi')} d_resid={x.get('discovery_market_residual')} c_resid={x.get('confirmation_market_residual')}" if market=="h2h" else "")
         log_func(f"[NCAAF-RV23-MECHANISM] market={market} id={x['mechanism_id']} lane={x.get('miner_lane')} status={x['authority_state']} members={x['member_count']} discovery={x['discovery_rate']:.4f}/{x['discovery_n']} confirmation={x['confirmation_rate']:.4f}/{x['confirmation_n']} rule={' AND '.join(x.get('representative_conditions') or [])}{extra}")
@@ -4344,7 +4775,9 @@ def _attach_role_transition_live_context(cdf: pd.DataFrame, dashboard_module=Non
     """
     if cdf is None or cdf.empty: return cdf,{"status":"EMPTY","selection_influence":0}
     out=cdf.copy()
-    need=("Prev_Is_Home","Opp_Prev_Is_Home")
+    need=("Prev_Is_Home","Opp_Prev_Is_Home","Prev_Team_Score","Prev_Opponent_Score",
+          "Opp_Prev_Team_Score","Opp_Prev_Opponent_Score","ATS_WinPct_Prior","Opp_ATS_WinPct_Prior",
+          "Prev_Is_ML_Dog","Opp_Prev_Is_ML_Dog")
     if all(c in out.columns and pd.to_numeric(out[c],errors="coerce").notna().any() for c in need):
         return out,{"status":"ALREADY_PRESENT","selection_influence":0}
     bq=getattr(dashboard_module,"bq_client",None) if dashboard_module is not None else None
@@ -4369,21 +4802,34 @@ def _attach_role_transition_live_context(cdf: pd.DataFrame, dashboard_module=Non
         h["__date"]=pd.to_datetime(h.get("Game_Date",h.get("Game_Start")),errors="coerce",utc=True)
         h["__home"]=_numc(h,"Is_Home")
         h["__spread"]=_numc(h,"Opening_Spread","Consensus_Open_Spread")
-        h["__margin"]=_numc(h,"Team_Score","Points_For")-_numc(h,"Opponent_Score","Points_Against")
+        h["__pf"]=_numc(h,"Team_Score","Points_For")
+        h["__pa"]=_numc(h,"Opponent_Score","Points_Against")
+        h["__margin"]=h["__pf"]-h["__pa"]
+        h["__ats_margin"]=h["__margin"]+h["__spread"]
         h=h.loc[h["__team"].ne("")&h["__date"].notna()].sort_values(["__team","__date"],kind="stable")
         states={}
         for team,g in h.groupby("__team",sort=False):
             margins=pd.to_numeric(g["__margin"],errors="coerce").dropna()
             wp=float(((margins>0).sum()+.5*(margins==0).sum())/len(margins)) if len(margins) else np.nan
+            ats=pd.to_numeric(g["__ats_margin"],errors="coerce")
+            graded=ats.notna()&~np.isclose(ats,0.0,atol=1e-9)
+            ats_pct=float((ats[graded]>0).mean()) if int(graded.sum()) else np.nan
             last=g.iloc[-1]; sp=float(last["__spread"]) if pd.notna(last["__spread"]) else np.nan
             states[str(team)]={"prev_home":float(last["__home"]) if pd.notna(last["__home"]) else np.nan,
                                "prev_fav":float(sp<0) if np.isfinite(sp) else np.nan,
+                               "prev_dog":float(sp>0) if np.isfinite(sp) else np.nan,
                                "prev_margin":float(last["__margin"]) if pd.notna(last["__margin"]) else np.nan,
-                               "winpct":wp}
+                               "prev_pf":float(last["__pf"]) if pd.notna(last["__pf"]) else np.nan,
+                               "prev_pa":float(last["__pa"]) if pd.notna(last["__pa"]) else np.nan,
+                               "winpct":wp,"ats_pct":ats_pct}
         team=_txt(out,"Team_Norm","Team","Home_Team_Norm","Home_Team")
         opp=_txt(out,"Opponent_Norm","Opponent","Away_Team_Norm","Away_Team")
-        fields={"Prev_Is_Home":("prev_home",team),"Prev_Is_ML_Favorite":("prev_fav",team),"Prev_SU_Margin":("prev_margin",team),"Team_WinPct_Prior":("winpct",team),
-                "Opp_Prev_Is_Home":("prev_home",opp),"Opp_Prev_Is_ML_Favorite":("prev_fav",opp),"Opp_Prev_SU_Margin":("prev_margin",opp),"Opp_WinPct_Prior":("winpct",opp)}
+        fields={"Prev_Is_Home":("prev_home",team),"Prev_Is_ML_Favorite":("prev_fav",team),"Prev_Is_ML_Dog":("prev_dog",team),
+                "Prev_SU_Margin":("prev_margin",team),"Prev_Team_Score":("prev_pf",team),"Prev_Opponent_Score":("prev_pa",team),
+                "Team_WinPct_Prior":("winpct",team),"ATS_WinPct_Prior":("ats_pct",team),
+                "Opp_Prev_Is_Home":("prev_home",opp),"Opp_Prev_Is_ML_Favorite":("prev_fav",opp),"Opp_Prev_Is_ML_Dog":("prev_dog",opp),
+                "Opp_Prev_SU_Margin":("prev_margin",opp),"Opp_Prev_Team_Score":("prev_pf",opp),"Opp_Prev_Opponent_Score":("prev_pa",opp),
+                "Opp_WinPct_Prior":("winpct",opp),"Opp_ATS_WinPct_Prior":("ats_pct",opp)}
         for col,(k,who) in fields.items():
             vals=pd.Series([states.get(str(x),{}).get(k,np.nan) for x in who],index=out.index,dtype=float)
             if col in out.columns:
@@ -4567,6 +5013,7 @@ def _ncaaf_system_tags(mech: dict[str,Any]) -> list[str]:
     if bool(mech.get("uses_season_record_state_family")) or "SEASON_RECORD_STATE" in fams: tags.append("SEASON_RECORD_STATE")
     if bool(mech.get("uses_role_transition_bounceback_family")) or "ROLE_TRANSITION_BOUNCEBACK" in fams: tags.append("ROLE_TRANSITION_BOUNCEBACK")
     if bool(mech.get("uses_external_ratings_family")) or "EXTERNAL_RATINGS_FAMILY" in fams: tags.append("PT_DERIVED")
+    if bool(mech.get("uses_big_al_observation_hypothesis")) or bool(fams & BIG_AL_OBSERVATION_ATOM_FAMILIES): tags.append("BIG_AL_OBSERVATION_HYPOTHESIS")
     if not tags: tags.append("STANDARD_MINER")
     return tags
 
@@ -4595,7 +5042,7 @@ def _ncaaf_system_library_inventory(miners: dict[str,Any]) -> dict[str,Any]:
     confirmed=[x for x in rows if x["confirmation_pass"]]
     live=[x for x in rows if x["live_authority_eligible"]]
     independent_live=sorted(set((x["market"],x["evidence_family_key"]) for x in live))
-    tag_names=["SEASON_RECORD_STATE","ROLE_TRANSITION_BOUNCEBACK","PT_DERIVED","STANDARD_MINER"]
+    tag_names=["SEASON_RECORD_STATE","ROLE_TRANSITION_BOUNCEBACK","BIG_AL_OBSERVATION_HYPOTHESIS","PT_DERIVED","STANDARD_MINER"]
     by_tag={}
     for tag in tag_names:
         all_t=[x for x in rows if tag in x["tags"]]
@@ -4620,6 +5067,9 @@ def _ncaaf_system_library_inventory(miners: dict[str,Any]) -> dict[str,Any]:
         "records":rows,
         "family_vote_policy":"ONE_NORMALIZED_INDEPENDENT_FAMILY_ONE_VOTE",
         "selection_uses_2026":False,
+        "expert_observation_vocabulary_seeded_from_2026":True,
+        "expert_rating_selection_weight":0,
+        "expert_pick_outcome_selection_weight":0,
         "production_authority":0,
     }
 
@@ -4655,16 +5105,18 @@ def _log_ncaaf_system_library_audit(*, inventory: dict[str,Any], delta: dict[str
     bt=(inventory.get("by_tag") or {}).get("ROLE_TRANSITION_BOUNCEBACK") or {}
     st=(inventory.get("by_tag") or {}).get("SEASON_RECORD_STATE") or {}
     pt=(inventory.get("by_tag") or {}).get("PT_DERIVED") or {}
+    obs=(inventory.get("by_tag") or {}).get("BIG_AL_OBSERVATION_HYPOTHESIS") or {}
     log_func(
         f"[NCAAF-SYSTEM-LIBRARY-SUMMARY] mechanisms={inventory.get('mechanisms')} confirmed={inventory.get('confirmed_mechanisms')} "
         f"live_authority={inventory.get('live_authority_mechanisms')} independent_live_families={inventory.get('independent_live_family_votes')} "
         f"state_confirmed={st.get('confirmed_mechanisms',0)} state_live={st.get('live_authority_mechanisms',0)} "
         f"bounceback_confirmed={bt.get('confirmed_mechanisms',0)} bounceback_live={bt.get('live_authority_mechanisms',0)} "
+        f"bigal_hypothesis_confirmed={obs.get('confirmed_mechanisms',0)} bigal_hypothesis_live={obs.get('live_authority_mechanisms',0)} "
         f"pt_confirmed={pt.get('confirmed_mechanisms',0)} pt_live={pt.get('live_authority_mechanisms',0)} family_vote_policy=ONE_NORMALIZED_INDEPENDENT_FAMILY_ONE_VOTE 2026_selection=FALSE authority=0"
     )
     for market,mr in (miners or {}).items():
         sf=(mr or {}).get("special_family_audit") or {}
-        for key,label in (("season_record_state","SEASON_RECORD_STATE"),("role_transition_bounceback","ROLE_TRANSITION_BOUNCEBACK")):
+        for key,label in (("season_record_state","SEASON_RECORD_STATE"),("role_transition_bounceback","ROLE_TRANSITION_BOUNCEBACK"),("big_al_observation_hypothesis","BIG_AL_OBSERVATION_HYPOTHESIS")):
             a=sf.get(key) or {}
             log_func(
                 f"[NCAAF-SYSTEM-LIBRARY-CATEGORY] market={market} category={label} tested_hypotheses={a.get('tested_hypotheses',0)} "
@@ -4685,7 +5137,7 @@ def _log_ncaaf_system_library_audit(*, inventory: dict[str,Any], delta: dict[str
             )
     # Always print confirmed special-family rules, even if the previous run already had them,
     # so a user can see exactly what the new vocabulary contributes today.
-    for tag in ("SEASON_RECORD_STATE","ROLE_TRANSITION_BOUNCEBACK"):
+    for tag in ("SEASON_RECORD_STATE","ROLE_TRANSITION_BOUNCEBACK","BIG_AL_OBSERVATION_HYPOTHESIS"):
         for x in (((inventory.get("by_tag") or {}).get(tag) or {}).get("confirmed_rules") or [])[:20]:
             log_func(
                 f"[NCAAF-SYSTEM-LIBRARY-SPECIAL] category={tag} market={x.get('market')} id={x.get('mechanism_id')} "
@@ -4735,6 +5187,15 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
             from google.cloud import storage
             storage_client=storage.Client()
         b=storage_client.bucket(bucket_name)
+
+        # Persist/describe observed Big Al selections. Ratings and 2026 outcomes
+        # never enter system qualification; they only tell us which generic
+        # vocabulary deserves a constrained historical search lane.
+        big_al_observations,big_al_ledger_diag=_load_big_al_observation_ledger(storage_client=storage_client,bucket_name=bucket_name,log_func=log_func)
+        _obs_lane_audit={m:((mr or {}).get("lanes") or {}).get("expert_observation_hypothesis",{}) for m,mr in miners.items()}
+        big_al_observation_research=_big_al_rating_observation_report(big_al_observations,miner_lane_audit=_obs_lane_audit,context_games=miner_games.reset_index(drop=True),dashboard_module=dashboard_module)
+        log_func(f"[NCAAF-BIGAL-RATING-RESEARCH] status={big_al_observation_research.get('status')} observations={big_al_observation_research.get('ncaaf_observations')} rated={big_al_observation_research.get('rated_observations')} ratings={json.dumps(big_al_observation_research.get('rating_counts') or {},sort_keys=True)} pattern_min={BIG_AL_RATING_MIN_FOR_PATTERN_ANALYSIS} rating_qualification_weight=0 rating_authority=0 outcomes_2026_used=FALSE")
+
         _previous_report=None
         try:
             _prev_blob=b.blob(REPORT_CURRENT_BLOB)
@@ -4750,11 +5211,12 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "benchmark":"FROZEN_NCAAF_PRODUCTION_V1","discovery_max_season":DISCOVERY_MAX_SEASON,"confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"system_miner_v3":miners,
                 "system_library_inventory":system_library_inventory,"system_library_change_audit":system_library_change_audit,
+                "big_al_observation_ledger":big_al_ledger_diag,"big_al_observation_research":big_al_observation_research,
                 "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,
                 "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False,"source_neutral":True,"pt_systems_may_earn_bounded_vote":True,"pt_family_vote_cap":1,"pt_model_weight":0},
-                "next_step":"KEEP PRODUCTION V1 FROZEN; TREAT PT-DERIVED MINER SYSTEMS THE SAME AS OTHER SYSTEMS AT THE QUALIFICATION GATE; COLLAPSE ALL PT VARIANTS TO ONE EXTERNAL_RATINGS_FAMILY VOTE; KEEP RAW PT MODEL WEIGHT AT ZERO; 2026 REMAINS PROSPECTIVE ONLY"}
+                "next_step":"KEEP PRODUCTION V1 FROZEN; USE BIG AL RATINGS AS DESCRIPTIVE OBSERVATIONS ONLY; LET THE CONSTRAINED OBSERVATION LANE GENERATE GENERIC HISTORICAL HYPOTHESES; QUALIFY ONLY THROUGH 2022-2025 SEALED HISTORY; KEEP SOURCE-NEUTRAL FAMILY AUTHORITY AND 2026 OUTCOMES OUT OF SELECTION"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
-        bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
+        bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"big_al_observation_research":big_al_observation_research,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
         body=json.dumps(_report_without_models(report),sort_keys=True,separators=(",",":"),default=str).encode()
         sha=hashlib.sha256(body).hexdigest(); hist=f"{REPORT_HISTORY_PREFIX}/{sha[:16]}/report.json"
         b.blob(hist).upload_from_string(body,content_type="application/json"); b.blob(REPORT_CURRENT_BLOB).upload_from_string(body,content_type="application/json")
@@ -4766,8 +5228,10 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         _state_strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_season_record_state_family")) and _miner_live_authority_eligible(_m))
         _state_confirmed=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_season_record_state_family")) and bool(_m.get("confirmation_pass")))
         _bounce_confirmed=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_role_transition_bounceback_family")) and bool(_m.get("confirmation_pass")))
+        _obs_strong=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_big_al_observation_hypothesis")) and _miner_live_authority_eligible(_m))
+        _obs_confirmed=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_big_al_observation_hypothesis")) and bool(_m.get("confirmation_pass")))
         _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_","META_PT_","PTIDX_","PT_ALL_","PT_CLUSTER_","PT_TRACKER_")) for c in (_m.get("representative_conditions") or [])))
-        log_func(f"[NCAAF-RV225-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} independent_live_families={system_library_inventory.get('independent_live_family_votes')} pt_miner_live_authority={_pt_strong} pt_family_vote_cap=1 state_confirmed={_state_confirmed} state_miner_live_authority={_state_strong} state_family_vote_cap=1 bounceback_confirmed={_bounce_confirmed} bounceback_miner_live_authority={_bounce_strong} bounceback_family_vote_cap=1 added_confirmed={len(system_library_change_audit.get('added_confirmed') or [])} added_live={len(system_library_change_audit.get('added_live') or [])} source_neutral_system_gate=TRUE prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
+        log_func(f"[NCAAF-RV226-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} independent_live_families={system_library_inventory.get('independent_live_family_votes')} pt_miner_live_authority={_pt_strong} pt_family_vote_cap=1 state_confirmed={_state_confirmed} state_miner_live_authority={_state_strong} state_family_vote_cap=1 bounceback_confirmed={_bounce_confirmed} bounceback_miner_live_authority={_bounce_strong} bounceback_family_vote_cap=1 bigal_hypothesis_confirmed={_obs_confirmed} bigal_hypothesis_live={_obs_strong} bigal_rated_observations={big_al_observation_research.get('rated_observations')} rating_weight=0 outcomes_2026_used=FALSE added_confirmed={len(system_library_change_audit.get('added_confirmed') or [])} added_live={len(system_library_change_audit.get('added_live') or [])} source_neutral_system_gate=TRUE prospective_mechanisms={len((prospective or {}).get('mechanisms') or [])} production_authority=0")
         return report
     except Exception as exc:
         log_func(f"[NCAAF-RV2-FAIL] {type(exc).__name__}: {exc}")
@@ -4793,13 +5257,17 @@ def match_live_systems(rows: pd.DataFrame, report: dict[str,Any], dashboard_modu
     return attach_live_miner_votes(rows,report,dashboard_module=dashboard_module)
 
 def self_test() -> dict[str,Any]:
-    _tf=pd.DataFrame({"Consensus_Open_Spread":[6.0],"Is_Home":[0],"Prev_Is_Home":[1],"Prev_Is_ML_Favorite":[1],"Opp_Prev_Is_Home":[0],"Opp_Prev_Is_ML_Favorite":[0],
-                      "Prev_SU_Margin":[-7.0],"Opp_Prev_SU_Margin":[7.0],"Prev2_SU_Margin":[-10.0],"Prev3_SU_Margin":[-3.0],"Prev_ATS_Margin":[-8.0],"Prev2_ATS_Margin":[-2.0],"Prev3_ATS_Margin":[-5.0],
-                      "Team_Game_Number_Prior":[4],"Current_Loss_Streak_Prior":[4],"ATS_Loss_Streak_Prior":[4],"Team_WinPct_Prior":[0.75],"Opp_WinPct_Prior":[0.75],
+    _tf=pd.DataFrame({"Consensus_Open_Spread":[6.0],"Current_Spread":[4.0],"Is_Home":[0],"Prev_Is_Home":[1],"Prev_Is_ML_Favorite":[1],"Prev_Is_ML_Dog":[0],"Opp_Prev_Is_Home":[0],"Opp_Prev_Is_ML_Favorite":[0],"Opp_Prev_Is_ML_Dog":[1],
+                      "Prev_SU_Margin":[-28.0],"Opp_Prev_SU_Margin":[7.0],"Prev_Team_Score":[0.0],"Prev_Opponent_Score":[28.0],"Opp_Prev_Team_Score":[24.0],"Opp_Prev_Opponent_Score":[21.0],"Prev2_SU_Margin":[-10.0],"Prev3_SU_Margin":[-3.0],"Prev_ATS_Margin":[-8.0],"Prev2_ATS_Margin":[-2.0],"Prev3_ATS_Margin":[-5.0],
+                      "Team_Game_Number_Prior":[4],"Current_Loss_Streak_Prior":[4],"ATS_Loss_Streak_Prior":[4],"ATS_WinPct_Prior":[0.20],"Opp_ATS_WinPct_Prior":[0.60],"Team_WinPct_Prior":[0.75],"Opp_WinPct_Prior":[0.75],
                       "Pathi_FB_Dog_Hook_Above_3":[1],"BigAl_CF2_LateSeasonRevengeDog":[1],"_V29_CORE_INCUMBENT_EDGE_POINTS":[3.0],
                       "_V29_SPEC_STRUCTURED_STATS_EDGE_POINTS":[2.5],"_V29_SPEC_STRUCTURED_STATS_DIVERGENCE_FROM_CORE":[1.5],"_V29_SPEC_STRUCTURED_STATS_DIVERGENCE_CUT":[1.0],
                       "_V210_PT_META_MARGIN_TEAM":[6.5],"_V210_PT_META_EDGE_POINTS":[3.0],"_V210_PT_META_SYSTEM_COUNT":[5]})
     live_atoms={a["name"] for a in _extended_atoms(_tf,for_live=True,market="spreads")}
+    _tt=_tf.copy(); _tt["Consensus_Open_Total"]=[60.5]; _tt["Current_Total"]=[58.5]; _tt["Opp_Prev_SU_Margin"]=[-3.0]; _tt["Prev_Team_Score"]=[34.0]; _tt["Prev_Opponent_Score"]=[35.0]; _tt["Opp_Prev_Team_Score"]=[17.0]; _tt["Opp_Prev_Opponent_Score"]=[45.0]
+    total_live_atoms={a["name"] for a in _extended_atoms(_tt,for_live=True,market="totals")}
+    _obs_norm=_normalize_big_al_observation({"sport":"NCAAF","market":"spreads","game_date":"2026-10-09","selection_team":"Wyoming","line":4.5,"rating":2,"outcome":"WIN","final_score":"x"})
+    _obs_report=_big_al_rating_observation_report([_obs_norm] if _obs_norm else [])
     q=_bh_qvalues([.01,.04,.20]); fam=_classify_feature_families(["Rush_EPA","Opp_Rush_EPA","Line_Move_60m","Sharp_Soft_Divergence","Actual_Margin"])
     odds=np.asarray([200.0,-200.0]); won=np.asarray([1.0,1.0]); ret=_american_unit_return(odds,won)
     # Name-safe Prediction Tracker contract: system identity must survive an
@@ -4947,6 +5415,9 @@ def self_test() -> dict[str,Any]:
         "SU_WINLESS_PRIOR" in live_atoms and "ATS_COVERLESS_PRIOR" in live_atoms and "SU_AND_ATS_WINLESS_AFTER_4_PLUS" in live_atoms and
         "TEAM_GAME_5" in live_atoms and "OPP_HAS_SU_WIN" in live_atoms and
         "BOUNCEBACK_HOME_FAV_UPSET_TO_ROAD_DOG" in live_atoms and "BOUNCEBACK_WINNING_TEAM" in live_atoms and "BOUNCEBACK_BOTH_WINNING_TEAMS" in live_atoms and "BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5" in live_atoms and
+        "OFF_SHUTOUT_LOSS" in live_atoms and "TEAM_ATS_WINPCT_LE_250" in live_atoms and "OPP_OFF_UPSET_WIN" in live_atoms and "SPREAD_MOVED_TOWARD_TEAM_2_PLUS" in live_atoms and
+        "BOTH_OFF_SU_LOSS" in total_live_atoms and "TOTAL_MOVED_DOWN_2_PLUS" in total_live_atoms and "TOTAL_58_PLUS" in total_live_atoms and "EITHER_OFF_ALLOWED_35_PLUS" in total_live_atoms and
+        bool(_obs_norm and _obs_norm.get("rating")==2 and _obs_norm.get("outcome_used_for_selection") is False and "outcome" not in _obs_norm and _obs_report.get("rating_used_for_system_qualification") is False) and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
         "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and "META_PT_EDGE_TEAM_3PLUS" in live_atoms and "META_PT_CORE_STRONG_AGREE" in live_atoms and
         np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _sparse_pt_ok and _pt_alias_hint_ok and _pt_final_hard_aliases_ok and _expert_bridge_ok and _occ_recon_ok and
@@ -4971,6 +5442,10 @@ def self_test() -> dict[str,Any]:
         "role_transition_bounceback_family_vote_cap":1,
         "role_transition_bounceback_atoms":sorted(x for x in live_atoms if "BOUNCEBACK" in x),
         "season_record_state_atoms":sorted(x for x in live_atoms if x.startswith(("SU_WINLESS","ATS_COVERLESS","SU_AND_ATS_WINLESS","TEAM_GAME_","DOG_6P5_PLUS","DOG_7_PLUS","DOG_8_PLUS","DOG_9_PLUS","DOG_10_PLUS","OPP_HAS_SU_WIN"))),
+        "big_al_observation_spread_atoms":sorted(x for x in live_atoms if x.startswith(("OFF_SHUTOUT","TEAM_ATS_WINPCT","OPP_OFF_UPSET","SPREAD_MOVED_"))),
+        "big_al_observation_total_atoms":sorted(x for x in total_live_atoms if x.startswith(("BOTH_OFF_SU_LOSS","TOTAL_MOVED_","TOTAL_55_PLUS","TOTAL_58_PLUS","EITHER_OFF_","BOTH_OFF_ALLOWED"))),
+        "big_al_rating_min_for_pattern_analysis":BIG_AL_RATING_MIN_FOR_PATTERN_ANALYSIS,
+        "big_al_rating_authority":0,
         "pt_name_safe_header_contract":_pt_name_safe,
         "pt_self_test_system_columns":_pt_da.get("system_columns",{}),
         "pt_fuzzy_header_rejected":_pt_dc.get("system_columns",{}).get("ESPN_FPI") is None,
