@@ -102,14 +102,52 @@ _NCAAF_RV22_REPORT_CACHE = {"loaded_at":0.0,"report":None}
 
 
 def _ncaaf_prod_v1_contract_cached():
-    """Refresh on a short TTL: artifact republish must not leave stale workers."""
+    """Refresh on a short TTL without negative-caching a failed contract load.
+
+    Production V1's loader intentionally fails closed and returns ``None`` for
+    invalid/unreadable artifacts.  A failed load must therefore be retried on
+    the next scanner pass instead of poisoning every worker for the full TTL.
+    """
     now=time.monotonic()
-    if now-float(_NCAAF_PROD_V1_CONTRACT_CACHE.get("loaded_at",0))<300:
-        return _NCAAF_PROD_V1_CONTRACT_CACHE.get("contract")
-    from ncaaf_production_v1 import load_production_contract
-    contract=load_production_contract(bucket_name=GCS_BUCKET)
-    _NCAAF_PROD_V1_CONTRACT_CACHE.update({"contract":contract,"loaded_at":now})
-    return contract
+    cached=_NCAAF_PROD_V1_CONTRACT_CACHE.get("contract")
+    if isinstance(cached,dict) and cached.get("_artifact_sha256") and now-float(_NCAAF_PROD_V1_CONTRACT_CACHE.get("loaded_at",0))<300:
+        return cached
+    try:
+        import ncaaf_production_v1 as _npv1
+        contract=_npv1.load_production_contract(bucket_name=GCS_BUCKET)
+        if isinstance(contract,dict) and contract.get("_artifact_sha256"):
+            _NCAAF_PROD_V1_CONTRACT_CACHE.update({"contract":contract,"loaded_at":now})
+            logging.info(
+                "[NCAAF-PROD-V1-CONTRACT-LOAD] status=PASS source=UTILS_GCS_CACHE bucket=%s module=%s source_tag=%s artifact=%s",
+                GCS_BUCKET,getattr(_npv1,"__file__",None),getattr(_npv1,"NCAAF_PRODUCTION_V1_SOURCE_TAG",None),str(contract.get("_artifact_sha256"))[:16]
+            )
+            return contract
+
+        # load_production_contract() deliberately swallows its internal exception,
+        # so expose enough non-sensitive artifact/module metadata to distinguish a
+        # missing blob from a stale module/source-tag mismatch.
+        artifact_path=getattr(_npv1,"NCAAF_PRODUCTION_V1_ARTIFACT",None)
+        blob_exists=None; blob_generation=None; blob_size=None
+        try:
+            if artifact_path:
+                _blob=storage.Client(project=GCP_PROJECT_ID).bucket(GCS_BUCKET).blob(str(artifact_path))
+                blob_exists=bool(_blob.exists())
+                if blob_exists:
+                    _blob.reload()
+                    blob_generation=str(getattr(_blob,"generation",None) or "")
+                    blob_size=int(getattr(_blob,"size",0) or 0)
+        except Exception as _diag_exc:
+            logging.warning("[NCAAF-PROD-V1-CONTRACT-LOAD-DIAG] status=ERROR error=%s:%s",type(_diag_exc).__name__,_diag_exc)
+        _NCAAF_PROD_V1_CONTRACT_CACHE.update({"contract":None,"loaded_at":0.0})
+        logging.warning(
+            "[NCAAF-PROD-V1-CONTRACT-LOAD] status=UNAVAILABLE source=UTILS_GCS_CACHE bucket=%s module=%s source_tag=%s artifact_path=%s blob_exists=%s generation=%s size=%s negative_cache=FALSE",
+            GCS_BUCKET,getattr(_npv1,"__file__",None),getattr(_npv1,"NCAAF_PRODUCTION_V1_SOURCE_TAG",None),artifact_path,blob_exists,blob_generation,blob_size
+        )
+        return None
+    except Exception as exc:
+        _NCAAF_PROD_V1_CONTRACT_CACHE.update({"contract":None,"loaded_at":0.0})
+        logging.exception("[NCAAF-PROD-V1-CONTRACT-LOAD] status=ERROR source=UTILS_GCS_CACHE negative_cache=FALSE error=%s:%s",type(exc).__name__,exc)
+        return None
 
 
 def _ncaaf_rv22_report_cached():
@@ -126,20 +164,29 @@ def _ncaaf_rv22_report_cached():
     return report
 
 
-def score_and_record_ncaaf_production_v1(df_scan: pd.DataFrame, client=None) -> dict:
-    """Background scan: the exact frozen production scorer and dashboard selector.
+def score_and_record_ncaaf_production_v1(df_scan: pd.DataFrame, client=None, contract=None) -> dict:
+    """Score/lock Production V1 picks with one validated contract identity.
 
-    This is not a V13 prediction, research replay, or a UI-triggered write.
-    Errors are logged and do not change the legacy odds collection path.
+    Weekly Update passes the contract it already validated and used for settlement,
+    eliminating a second independent import/load path. Background scanner callers
+    may omit ``contract`` and continue to use the short-TTL GCS loader.
+    This remains additive ledger I/O only; it cannot refit or publish production.
     """
     if str(os.getenv("NCAAF_PROD_V1_LEDGER_ENABLED","1")).lower().strip() in ("0","false","no","off"):
         return {"status":"DISABLED","attempted":0,"inserted":0}
     try:
         from ncaaf_production_v1 import prepare_current_market_rows,score_live_rows,choose_current_production_picks
         from ncaaf_production_ledger_v1 import record_predictions
-        contract=_ncaaf_prod_v1_contract_cached()
+        _contract_source="CALLER_VALIDATED" if isinstance(contract,dict) and contract.get("_artifact_sha256") else "UTILS_GCS_CACHE"
+        if _contract_source=="UTILS_GCS_CACHE":
+            contract=_ncaaf_prod_v1_contract_cached()
         if not isinstance(contract,dict) or not contract.get("_artifact_sha256"):
-            return {"status":"CONTRACT_NOT_PUBLISHED","attempted":0,"inserted":0}
+            logging.warning("[NCAAF-PROD-V1-BACKGROUND] status=CONTRACT_UNAVAILABLE contract_source=%s",_contract_source)
+            return {"status":"CONTRACT_NOT_PUBLISHED","contract_source":_contract_source,"attempted":0,"inserted":0,"scored_rows":0,"selected_markets":0}
+        logging.info(
+            "[NCAAF-PROD-V1-CONTRACT-BIND] status=PASS source=%s artifact=%s gcs_uri=%s",
+            _contract_source,str(contract.get("_artifact_sha256"))[:16],contract.get("_artifact_gcs_uri")
+        )
         base=prepare_current_market_rows(df_scan)
         if base.empty: return {"status":"NO_PREGAME_ROWS","attempted":0,"inserted":0}
         scored=score_live_rows(base,contract)
@@ -157,7 +204,7 @@ def score_and_record_ncaaf_production_v1(df_scan: pd.DataFrame, client=None) -> 
         result=record_predictions(picks,contract,client=client,source="BACKGROUND_SCANNER")
         logging.info("[NCAAF-PROD-V1-BACKGROUND] status=%s scored_rows=%d selected_markets=%d attempted=%d inserted=%d artifact=%s",
           result.get("status"),scored_count,len(picks),int(result.get("attempted",0) or 0),int(result.get("inserted",0) or 0),str(contract.get("_artifact_sha256"))[:16])
-        return {**result,"scored_rows":scored_count,"selected_markets":len(picks)}
+        return {**result,"scored_rows":scored_count,"selected_markets":len(picks),"contract_source":_contract_source,"artifact":str(contract.get("_artifact_sha256"))[:16]}
     except Exception as exc:
         logging.exception("[NCAAF-PROD-V1-BACKGROUND] failed")
         return {"status":"ERROR","error":f"{type(exc).__name__}:{exc}","attempted":0,"inserted":0}

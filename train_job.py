@@ -908,11 +908,12 @@ def main():
             if _moves is None or getattr(_moves,"empty",True):
                 _refresh={"status":"NO_CURRENT_MARKET","attempted":0,"inserted":0,"scored_rows":0,"selected_markets":0}
             else:
-                _refresh=_utils.score_and_record_ncaaf_production_v1(_moves,client=_bq_client)
+                _refresh=_utils.score_and_record_ncaaf_production_v1(_moves,client=_bq_client,contract=_contract)
             log_func(
                 f"[NCAAF-WEEKLY-REFRESH] status={_refresh.get('status')} rows={0 if _moves is None else len(_moves)} "
                 f"scored_rows={int(_refresh.get('scored_rows',0) or 0)} selected_markets={int(_refresh.get('selected_markets',0) or 0)} "
                 f"attempted={int(_refresh.get('attempted',0) or 0)} inserted={int(_refresh.get('inserted',0) or 0)} "
+                f"contract_source={_refresh.get('contract_source','NA')} artifact={_refresh.get('artifact',str(_contract.get('_artifact_sha256'))[:16])} "
                 "probability_refit=FALSE research_run=FALSE production_publish=FALSE automatic_promotion=FALSE"
             )
             # Surface registry availability because weekly scoring may use only
