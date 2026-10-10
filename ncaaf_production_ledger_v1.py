@@ -268,27 +268,32 @@ def _bq_type(v):
 
 
 def _ensure_one(client,table_fq,schema,partition,clusters):
-    from google.cloud import bigquery as b
+    """Validate pre-provisioned ledger infrastructure; never mutate schema at runtime.
+
+    Mirrors the NFL ledger contract: tables are infrastructure created once by an
+    administrator. Scanner/training service accounts only read and append data.
+    """
     from google.api_core.exceptions import NotFound
     try:
         t=client.get_table(table_fq)
-        d={x.name:x.field_type for x in t.schema}
-        conflicts=[f.name for f in schema if f.name in d and _bq_type(d[f.name])!=_bq_type(f.field_type)]
-        if conflicts:
-            detail={name:{"existing":d[name],"expected":next(f.field_type for f in schema if f.name==name)} for name in conflicts}
-            raise RuntimeError(f"schema type mismatch {table_fq}: {detail}")
-        aliases=[f.name for f in schema if f.name in d and str(d[f.name]).strip().upper()!=str(f.field_type).strip().upper()]
-        if aliases:
-            logging.info("[NCAAF-PROD-V1-SCHEMA] status=ALIAS_COMPATIBLE table=%s fields=%s",table_fq,",".join(aliases))
-        missing=[f for f in schema if f.name not in d]
-        if missing:
-            t.schema=list(t.schema)+missing
-            client.update_table(t,["schema"])
-    except NotFound:
-        t=b.Table(table_fq,schema=schema)
-        t.time_partitioning=b.TimePartitioning(type_=b.TimePartitioningType.DAY,field=partition)
-        t.clustering_fields=clusters[:4]
-        client.create_table(t)
+    except NotFound as exc:
+        raise RuntimeError(
+            f"LEDGER_TABLE_NOT_PROVISIONED:{table_fq}; create the permanent ledger table once with an admin identity"
+        ) from exc
+    d={x.name:x.field_type for x in t.schema}
+    conflicts=[f.name for f in schema if f.name in d and _bq_type(d[f.name])!=_bq_type(f.field_type)]
+    if conflicts:
+        detail={name:{"existing":d[name],"expected":next(f.field_type for f in schema if f.name==name)} for name in conflicts}
+        raise RuntimeError(f"schema type mismatch {table_fq}: {detail}")
+    aliases=[f.name for f in schema if f.name in d and str(d[f.name]).strip().upper()!=str(f.field_type).strip().upper()]
+    if aliases:
+        logging.info("[NCAAF-PROD-V1-SCHEMA] status=ALIAS_COMPATIBLE table=%s fields=%s",table_fq,",".join(aliases))
+    missing=[f.name for f in schema if f.name not in d]
+    if missing:
+        raise RuntimeError(
+            f"LEDGER_SCHEMA_NOT_PROVISIONED:{table_fq}; missing_fields={','.join(missing)}; runtime_schema_mutation=FALSE"
+        )
+    logging.info("[NCAAF-PROD-V1-SCHEMA] status=READY table=%s runtime_schema_mutation=FALSE",table_fq)
 
 
 def ensure_tables(client=None):
@@ -299,30 +304,95 @@ def ensure_tables(client=None):
     return {"status":"READY","predictions":PRED_TABLE,"results":RESULT_TABLE}
 
 
+def _bq_json_value(v, field_type):
+    """Convert pandas/numpy scalars into BigQuery streaming JSON values."""
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    ftype=str(field_type or "").upper()
+    if ftype=="TIMESTAMP":
+        z=pd.to_datetime(v,errors="coerce",utc=True)
+        return None if pd.isna(z) else z.isoformat()
+    if isinstance(v,np.generic):
+        v=v.item()
+    if isinstance(v,(dt.datetime,dt.date,pd.Timestamp)):
+        z=pd.to_datetime(v,errors="coerce",utc=True)
+        return None if pd.isna(z) else z.isoformat()
+    if isinstance(v,(bool,int,float,str)):
+        return v
+    return str(v)
+
+
 def _append_unique(client,table,frame,key):
-    if frame.empty: return {"status":"NO_ROWS","attempted":0,"inserted":0}
+    """Append immutable rows without runtime CREATE TABLE permission.
+
+    The previous implementation created a temporary staging table for every
+    write, which required bigquery.tables.create even though the permanent
+    ledger tables already existed.  Runtime now queries existing immutable
+    event IDs, filters duplicates, and uses BigQuery streaming inserts with the
+    event ID as insertId for an additional best-effort concurrency guard.
+    """
+    if frame.empty:
+        return {"status":"NO_ROWS","attempted":0,"inserted":0,"skipped_existing":0}
     from google.cloud import bigquery as b
     frame=frame.drop_duplicates(key).copy()
+    attempted=len(frame)
     schema=client.get_table(table).schema
     cols=[f.name for f in schema]
     for c in cols:
-        if c not in frame: frame[c]=None
+        if c not in frame:
+            frame[c]=None
     frame=frame[cols]
-    for f in schema:
-        if f.field_type=="TIMESTAMP": frame[f.name]=pd.to_datetime(frame[f.name],errors="coerce",utc=True)
-    stage=table+"__stage_"+uuid.uuid4().hex[:12]
-    t=b.Table(stage,schema=schema)
-    t.expires=dt.datetime.now(dt.timezone.utc)+dt.timedelta(hours=2)
-    client.create_table(t)
-    try:
-        client.load_table_from_dataframe(frame,stage,job_config=b.LoadJobConfig(schema=schema,write_disposition="WRITE_TRUNCATE")).result()
-        csql=",".join(f"`{v}`" for v in cols)
-        vsql=",".join(f"S.`{v}`" for v in cols)
-        job=client.query(f"MERGE `{table}` T USING `{stage}` S ON T.`{key}`=S.`{key}` WHEN NOT MATCHED THEN INSERT ({csql}) VALUES ({vsql})")
-        job.result()
-        return {"status":"PASS","attempted":len(frame),"inserted":int(getattr(job,"num_dml_affected_rows",0) or 0)}
-    finally:
-        client.delete_table(stage,not_found_ok=True)
+    if key not in frame.columns:
+        raise RuntimeError(f"immutable key missing from frame: {key}")
+    key_values=[str(v) for v in frame[key].tolist() if v is not None and str(v).strip()]
+    if len(key_values)!=len(frame):
+        raise RuntimeError(f"blank immutable key in {table}: {key}")
+
+    existing=set()
+    # BigQuery array parameters have practical size limits; ledger batches are
+    # normally small, but chunk the lookup so the helper remains safe.
+    for start in range(0,len(key_values),1000):
+        chunk=key_values[start:start+1000]
+        cfg=b.QueryJobConfig(query_parameters=[b.ArrayQueryParameter("event_ids","STRING",chunk)])
+        q=(f"SELECT `{key}` AS event_id FROM `{table}` "
+           f"WHERE `{key}` IN UNNEST(@event_ids)")
+        existing.update(str(r.event_id) for r in client.query(q,job_config=cfg).result())
+
+    pending=frame[~frame[key].astype(str).isin(existing)].copy()
+    skipped=attempted-len(pending)
+    if pending.empty:
+        return {"status":"PASS","attempted":attempted,"inserted":0,"skipped_existing":skipped}
+
+    type_map={f.name:f.field_type for f in schema}
+    inserted=0
+    all_errors=[]
+    for start in range(0,len(pending),500):
+        batch=pending.iloc[start:start+500]
+        rows=[]
+        row_ids=[]
+        for _,rec in batch.iterrows():
+            rows.append({c:_bq_json_value(rec.get(c),type_map.get(c)) for c in cols})
+            row_ids.append(str(rec.get(key)))
+        errors=client.insert_rows_json(table,rows,row_ids=row_ids)
+        if errors:
+            bad={int(e.get("index",-1)) for e in errors if isinstance(e,dict)}
+            inserted += max(0,len(rows)-len([i for i in bad if 0<=i<len(rows)]))
+            all_errors.extend(errors)
+        else:
+            inserted += len(rows)
+    if all_errors:
+        logging.error("[NCAAF-PROD-V1-LEDGER-WRITE] status=PARTIAL_ERROR table=%s attempted=%d pending=%d inserted=%d errors=%s",
+                      table,attempted,len(pending),inserted,all_errors[:5])
+        return {"status":"ERROR","attempted":attempted,"inserted":inserted,
+                "skipped_existing":skipped,"write_errors":all_errors[:20]}
+    logging.info("[NCAAF-PROD-V1-LEDGER-WRITE] status=PASS table=%s attempted=%d pending=%d inserted=%d skipped_existing=%d mode=STREAMING_APPEND_NO_STAGE_TABLE",
+                 table,attempted,len(pending),inserted,skipped)
+    return {"status":"PASS","attempted":attempted,"inserted":inserted,"skipped_existing":skipped}
 
 
 def record_predictions(picks,contract,*,client=None,now=None,source="BACKGROUND_SCANNER"):
