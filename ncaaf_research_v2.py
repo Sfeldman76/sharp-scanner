@@ -1,4 +1,4 @@
-"""NCAAF Research V2.31 — deep objective context completion for System Miner.
+"""NCAAF Research V2.31.1 — deep objective context source repair for System Miner.
 
 Research-only architecture built around the frozen NCAAF Production V1 benchmark.
 This module cannot mutate CORE/model probability. Historically qualified system families may emit bounded
@@ -35,8 +35,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.31.0-deep-objective-context-completion-20261010"
-NCAAF_RESEARCH_V2_VERSION = "2.31.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.31.1-deep-context-raw-source-repair-20261010"
+NCAAF_RESEARCH_V2_VERSION = "2.31.1"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -3024,6 +3024,9 @@ def _attach_historical_state_context_to_miner(dashboard_module, miner_games: pd.
 _V231_DEEP_CONTEXT_CACHE: dict[str,Any] = {}
 
 
+NCAAF_HISTORICAL_RAW_TABLE = os.getenv("NCAAF_HISTORICAL_RAW_TABLE", "sharplogger.sharp_data.ncaaf_historical_game_side_raw")
+
+
 def _v231_finite_mean(values) -> float:
     a=pd.to_numeric(pd.Series(list(values),dtype="object"),errors="coerce").to_numpy(dtype=float)
     a=a[np.isfinite(a)]
@@ -3038,11 +3041,43 @@ def _v231_deep_context_source(dashboard_module, *, log_func=print) -> dict[str,A
     if bq is None or not view:
         return {"status":"NO_HISTORICAL_SIDE_SOURCE","lookup":pd.DataFrame(),"latest":pd.DataFrame(),"source_rows":0}
     try:
-        q=bq.query(f"SELECT * FROM `{view}` WHERE Historical_Core_Eligible = 1 AND Season <= 2026")
+        # V2.31.1 source repair: the Historical Core view intentionally exposes
+        # leakage-safe PRE-GAME context, not the full current-game BigDataBall
+        # box score. V2.31 incorrectly tried to reconstruct prior-only deep
+        # context from that view, which left result-quality/recent/matchup raw
+        # metrics empty in Cloud Run even though the raw table contains them.
+        #
+        # Read the raw game-side box score only for rows that are eligible in the
+        # Historical Core view. All outcome/stat fields are shifted/rolled below
+        # before becoming Miner inputs, so no current-game result can enter its
+        # own pregame context.
+        raw_table=NCAAF_HISTORICAL_RAW_TABLE
+        q=bq.query(f"""
+            SELECT r.*
+            FROM `{raw_table}` r
+            WHERE r.Season <= 2026
+              AND EXISTS (
+                SELECT 1
+                FROM `{view}` c
+                WHERE c.Historical_Core_Eligible = 1
+                  AND c.Season = r.Season
+                  AND c.Source_Game_ID = r.Source_Game_ID
+                  AND LOWER(TRIM(c.Team_Norm)) = LOWER(TRIM(r.Team_Norm))
+              )
+        """)
         try: h=q.to_dataframe(create_bqstorage_client=False)
         except TypeError: h=q.to_dataframe()
-        if h is None or h.empty: raise RuntimeError("historical side source returned zero rows")
+        if h is None or h.empty: raise RuntimeError("eligible raw historical side source returned zero rows")
         h=h.copy().reset_index(drop=True); raw_rows=int(len(h))
+        def _ready_count(col):
+            return int(pd.to_numeric(h[col],errors="coerce").notna().sum()) if col in h.columns else 0
+        log_func(
+            f"[NCAAF-DEEP-CONTEXT-V2311-SOURCE] status=PASS source=RAW_JOINED_TO_ELIGIBLE_CORE rows={raw_rows} "
+            f"yards={_ready_count('Postgame_Total_Yards')} plays={_ready_count('Postgame_Total_Plays')} "
+            f"first_downs={_ready_count('Postgame_First_Downs')} turnovers={_ready_count('Postgame_Turnovers')} "
+            f"pass_att={_ready_count('Postgame_Pass_Att')} rush_att={_ready_count('Postgame_Rush_Att')} "
+            f"sacks={_ready_count('Postgame_Sacks')} authority=0"
+        )
 
         def _txt(df,*cols):
             z=pd.Series("",index=df.index,dtype="string")
@@ -3208,7 +3243,7 @@ def _v231_deep_context_source(dashboard_module, *, log_func=print) -> dict[str,A
         _V231_DEEP_CONTEXT_CACHE["deep_source"]=cache
         return cache
     except Exception as exc:
-        log_func(f"[NCAAF-DEEP-CONTEXT-V231-SOURCE] status=UNAVAILABLE error={type(exc).__name__}:{exc} authority=0 fail_closed=TRUE")
+        log_func(f"[NCAAF-DEEP-CONTEXT-V2311-SOURCE] status=UNAVAILABLE error={type(exc).__name__}:{exc} authority=0 fail_closed=TRUE")
         return {"status":"UNAVAILABLE","error":f"{type(exc).__name__}:{exc}","lookup":pd.DataFrame(),"latest":pd.DataFrame(),"source_rows":0}
 
 
@@ -3266,7 +3301,7 @@ def _attach_deep_stat_context_to_miner(dashboard_module, miner_games: pd.DataFra
           "miner_rows":int(len(out)),"historical_rows":hist_n,"exact_home_matches":int((exact_home.to_numpy()&hist).sum()) if hist_n else int(exact_home.sum()),"exact_road_matches":int((exact_road.to_numpy()&hist).sum()) if hist_n else int(exact_road.sum()),
           "result_quality_ready":result_ready,"recent3_ready":recent_ready,"resume_ready":resume_ready,"matchup_ready":matchup_ready,
           "selection_influence":0,"outcomes_2026_selection":False}
-    log_func(f"[NCAAF-DEEP-CONTEXT-V231-BRIDGE] status=PASS mode={diag['mode']} rows={len(out)} historical={hist_n} exact_home={diag['exact_home_matches']}/{hist_n if hist_n else len(out)} exact_road={diag['exact_road_matches']}/{hist_n if hist_n else len(out)} result_quality_ready={result_ready} recent3_ready={recent_ready} resume_ready={resume_ready} matchup_ready={matchup_ready} outcomes_2026_selection=FALSE authority=0")
+    log_func(f"[NCAAF-DEEP-CONTEXT-V2311-BRIDGE] status=PASS mode={diag['mode']} rows={len(out)} historical={hist_n} exact_home={diag['exact_home_matches']}/{hist_n if hist_n else len(out)} exact_road={diag['exact_road_matches']}/{hist_n if hist_n else len(out)} result_quality_ready={result_ready} recent3_ready={recent_ready} resume_ready={resume_ready} matchup_ready={matchup_ready} outcomes_2026_selection=FALSE authority=0")
     return out,diag
 
 
@@ -6344,7 +6379,7 @@ def _apply_v231_context_family_caps(miners: dict[str,Any], *, log_func=print) ->
                 m["uses_matchup_differential_family"]=True; new="NCAAF_MATCHUP_DIFFERENTIAL_FAMILY"; counts["matchup_differential"]+=1
             if new!=old:
                 m["evidence_family_key"]=new; changed+=1
-    log_func(f"[NCAAF-RV231-FAMILY-CAPS] status=PASS normalized={changed} h2h={counts['h2h']} rivalry={counts['rivalry']} travel={counts['travel']} result_quality={counts['result_quality']} schedule_resume={counts['schedule_resume']} recent_vs_season={counts['recent_vs_season']} matchup_differential={counts['matchup_differential']} family_vote_cap=1 qualification_mutation=FALSE authority=0")
+    log_func(f"[NCAAF-RV2311-FAMILY-CAPS] status=PASS normalized={changed} h2h={counts['h2h']} rivalry={counts['rivalry']} travel={counts['travel']} result_quality={counts['result_quality']} schedule_resume={counts['schedule_resume']} recent_vs_season={counts['recent_vs_season']} matchup_differential={counts['matchup_differential']} family_vote_cap=1 qualification_mutation=FALSE authority=0")
     return {"status":"PASS","normalized":changed,**counts,"family_vote_cap":1,"qualification_mutation":False}
 
 
@@ -6568,7 +6603,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         historic=np.isfinite(seasons)&(seasons<=max(CONFIRMATION_SEASONS))
         if historic.sum()<500: raise RuntimeError(f"insufficient <=2025 history n={int(historic.sum())}")
         g=games.loc[historic].reset_index(drop=True); mg=miner_games.loc[historic].reset_index(drop=True); sy=seasons[historic]; om=oof_margin[historic]; ot=oof_total[historic]
-        log_func(f"[NCAAF-RV231-PREFLIGHT] source={NCAAF_RESEARCH_V2_SOURCE_TAG} rows={len(g)} seasons={sorted(set(sy.astype(int)))} discovery<=2023 confirmation=2024,2025 prospective>=2026 production_authority=0")
+        log_func(f"[NCAAF-RV2311-PREFLIGHT] source={NCAAF_RESEARCH_V2_SOURCE_TAG} rows={len(g)} seasons={sorted(set(sy.astype(int)))} discovery<=2023 confirmation=2024,2025 prospective>=2026 production_authority=0")
         stat=run_orthogonal_stat_research(g,sy,om,ot,cols,log_func=log_func)
         sparse_stat=run_sparse_stat_research(g,sy,om,ot,log_func=log_func)
         miners={m:run_system_miner_v3(mg,sy,m,dashboard_module=dashboard_module,log_func=log_func,max_depth=5) for m in ("spreads","h2h","totals")}
@@ -6618,7 +6653,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "big_al_observation_ledger":big_al_ledger_diag,"big_al_observation_research":big_al_observation_research,
                 "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,
                 "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False,"source_neutral":True,"pt_systems_may_earn_bounded_vote":True,"pt_family_vote_cap":1,"h2h_family_vote_cap":1,"rivalry_family_vote_cap":1,"travel_family_vote_cap":1,"result_quality_family_vote_cap":1,"schedule_resume_family_vote_cap":1,"recent_vs_season_family_vote_cap":1,"matchup_differential_family_vote_cap":1,"pt_model_weight":0},
-                "next_step":"KEEP PRODUCTION V1 FROZEN; USE V2.31 OBJECTIVE RESULT-QUALITY/RESUME/RECENT/MATCHUP CONTEXT PLUS V2.30 H2H/RIVALRY/TRAVEL AS SOURCE-NEUTRAL MINER INPUTS; PERSIST AND EXACT-RULE REVALIDATE INCUMBENTS; QUALIFY NEW CHALLENGERS ONLY THROUGH 2022-2025 SEALED HISTORY; KEEP 2026 OUTCOMES OUT OF SELECTION"}
+                "next_step":"KEEP PRODUCTION V1 FROZEN; USE V2.31.1 OBJECTIVE RESULT-QUALITY/RESUME/RECENT/MATCHUP CONTEXT PLUS V2.30 H2H/RIVALRY/TRAVEL AS SOURCE-NEUTRAL MINER INPUTS; PERSIST AND EXACT-RULE REVALIDATE INCUMBENTS; QUALIFY NEW CHALLENGERS ONLY THROUGH 2022-2025 SEALED HISTORY; KEEP 2026 OUTCOMES OUT OF SELECTION"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
         bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"incumbent_system_library_audit":incumbent_system_library_audit,"deep_context_bridge":deep_context_bridge,"big_al_observation_research":big_al_observation_research,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
         body=json.dumps(_report_without_models(report),sort_keys=True,separators=(",",":"),default=str).encode()
@@ -6650,7 +6685,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         _obs_confirmed=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_big_al_observation_hypothesis")) and bool(_m.get("confirmation_pass")))
         _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_","META_PT_","PTIDX_","PT_ALL_","PT_CLUSTER_","PT_TRACKER_")) for c in (_m.get("representative_conditions") or [])))
         log_func(
-            f"[NCAAF-RV231-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} "
+            f"[NCAAF-RV2311-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} "
             f"stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} "
             f"sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} "
             f"bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} independent_live_families={system_library_inventory.get('independent_live_family_votes')} "
