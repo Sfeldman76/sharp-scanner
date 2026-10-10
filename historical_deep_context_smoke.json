@@ -1,0 +1,85 @@
+{
+  "status": "PASS",
+  "source_tag": "ncaaf-research-v2.31.0-deep-objective-context-completion-20261010",
+  "source_side_rows": 7308,
+  "physical_games": 3654,
+  "games_by_season": {
+    "2022": 895,
+    "2023": 906,
+    "2024": 919,
+    "2025": 934
+  },
+  "deep_context_bridge": {
+    "status": "PASS",
+    "mode": "HISTORICAL_PLUS_PROSPECTIVE",
+    "source_rows": 7308,
+    "source_rows_dedup": 7308,
+    "miner_rows": 3654,
+    "historical_rows": 3654,
+    "exact_home_matches": 3654,
+    "exact_road_matches": 3654,
+    "result_quality_ready": 3298,
+    "recent3_ready": 3298,
+    "resume_ready": 2907,
+    "matchup_ready": 3085,
+    "selection_influence": 0,
+    "outcomes_2026_selection": false
+  },
+  "admitted_atom_count_total": 121,
+  "new_family_admitted_atom_counts": {
+    "RESULT_QUALITY_REGRESSION": 11,
+    "SCHEDULE_RESUME_QUALITY": 16,
+    "RECENT_VS_SEASON": 22,
+    "MATCHUP_DIFFERENTIAL": 16
+  },
+  "new_family_availability": {
+    "RESULT_QUALITY_REGRESSION": {
+      "expected_atoms": 12,
+      "source_available_atoms": 12,
+      "admitted_atoms": 6,
+      "evaluator_eligible_atoms": 6,
+      "below_evaluator_min_atoms": 6,
+      "source_unavailable_atoms": 0
+    },
+    "SCHEDULE_RESUME_QUALITY": {
+      "expected_atoms": 8,
+      "source_available_atoms": 8,
+      "admitted_atoms": 8,
+      "evaluator_eligible_atoms": 4,
+      "below_evaluator_min_atoms": 4,
+      "source_unavailable_atoms": 0
+    },
+    "RECENT_VS_SEASON": {
+      "expected_atoms": 8,
+      "source_available_atoms": 8,
+      "admitted_atoms": 8,
+      "evaluator_eligible_atoms": 6,
+      "below_evaluator_min_atoms": 2,
+      "source_unavailable_atoms": 0
+    },
+    "MATCHUP_DIFFERENTIAL": {
+      "expected_atoms": 10,
+      "source_available_atoms": 10,
+      "admitted_atoms": 10,
+      "evaluator_eligible_atoms": 10,
+      "below_evaluator_min_atoms": 0,
+      "source_unavailable_atoms": 0
+    }
+  },
+  "season_opener_rows": 356,
+  "season_opener_leak_nonnull_counts": {
+    "Team_CTX_Season_Off_YPP": 0,
+    "Team_CTX_Recent3_Net_YPP": 0,
+    "Team_RQ_Prev_YPP_Margin": 0
+  },
+  "unmatched_historical_fail_closed": {
+    "Team_CTX_Season_Off_YPP": null,
+    "Team_RQ_Prev_YPP_Margin": null,
+    "Team_CTX_SOS_WinPct": null
+  },
+  "logs": [
+    "[NCAAF-DEEP-CONTEXT-V231-BRIDGE] status=PASS mode=HISTORICAL_PLUS_PROSPECTIVE rows=3654 historical=3654 exact_home=3654/3654 exact_road=3654/3654 result_quality_ready=3298 recent3_ready=3298 resume_ready=2907 matchup_ready=3085 outcomes_2026_selection=FALSE authority=0"
+  ],
+  "selection_uses_2026": false,
+  "production_authority": 0
+}
