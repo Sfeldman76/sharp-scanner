@@ -19,7 +19,6 @@ if "pause_refresh_lock" not in st.session_state:
 
 # ✅ No auto-refresh. No component import. No warnings.
 
-
 st.title("Betting Line Scanner")
 # --- Custom CSS for scrollable DataFrames ---
 st.markdown(
@@ -46989,7 +46988,7 @@ def _nfl_edge_authority_v2_state_cached():
 def _nfl_model_authority_v26_state_cached():
     try:
         import nfl_model_authority_v26 as _ma
-        if getattr(_ma,"SOURCE_TAG","") != "nfl-model-authority-v2.6.1-utils-market-backend-20261003":
+        if getattr(_ma,"SOURCE_TAG","") != "nfl-model-authority-v2.6.2-v316-deep-live-parity-20261011":
             return {"status":"STALE_MODEL_AUTHORITY_V26_MODULE"}
         return _ma.read_dashboard_state(storage_client=storage.Client(),bucket_name=GCS_BUCKET)
     except Exception as e:
@@ -47200,7 +47199,7 @@ def _nfl_bet_authority_results_cached():
     """Read immutable captured BET events and their settled outcomes from GCS."""
     try:
         import nfl_model_authority_v26 as _ma
-        if getattr(_ma,"SOURCE_TAG","")!="nfl-model-authority-v2.6.1-utils-market-backend-20261003":
+        if getattr(_ma,"SOURCE_TAG","")!="nfl-model-authority-v2.6.2-v316-deep-live-parity-20261011":
             return {"status":"STALE_MODEL_AUTHORITY","events":[],"settlements":[]}
         sc=storage.Client(); bucket=sc.bucket(GCS_BUCKET)
         def _load(prefix):
