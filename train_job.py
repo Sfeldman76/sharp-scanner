@@ -179,7 +179,7 @@ def main():
     if HEADLESS:
         install_streamlit_shim(log_func)
 
-    # NFL Heavy Research / Engine V3.16 — deep objective Miner + weekly Big Al observation research + protected PT lanes.
+    # NFL Heavy Research / Engine V3.17 — persistent Miner library + Big Al current-card fingerprint + protected PT lanes.
     # Research-only: frozen CORE remains the fair-value anchor. STAT/PBP/context learn
     # residual corrections; SYSTEM/STAT/PBP become selective trust lanes; a partially pooled
     # distribution is a challenger; actual price is required for live EV. 2026 stays sealed.
@@ -195,19 +195,19 @@ def main():
         _syscontract = _load_nfl_heavy_exact("nfl_research_v2_contract", "nfl-research-v2.0-foundation-expansion-20261001")
         _ledger3 = _load_nfl_heavy_exact("nfl_prospective_ledger_v3", "nfl-prospective-ledger-v3-v1.9.4-edge-gate-shadow-20261001")
         _research = _load_nfl_heavy_exact("nfl_research_engine_v2", "nfl-research-engine-v1.9.4-edge-gate-manager-20261001")
-        _systems = _load_nfl_heavy_exact("nfl_system_lab_v3", "nfl-system-lab-v3.16.0-deep-objective-bigal-market-research-20261011")
+        _systems = _load_nfl_heavy_exact("nfl_system_lab_v3", "nfl-system-lab-v3.17.0-persistent-library-bigal-fingerprint-20261011")
         _ptinc = _load_nfl_heavy_exact("nfl_pt_incremental_v1", "nfl-pt-incremental-v1.1-encompassing-control-residual-20261007")
         _pbpdiag = _load_nfl_heavy_exact("nfl_pbp_attribution_v1", "nfl-pbp-attribution-v1-research-v2.0.2-frozen-core2-20261001")
         _heavy = _load_nfl_heavy_exact("nfl_heavy_research_v31", "nfl-heavy-research-v2.11.2-source-confluence-attribution-20261004")
 
-        pw.emit("audit", f"[NFL-HEAVY-V316] Start run={run_id}; frozen V29 Spread 0.575 benchmark + selective trust + rules index + Big Al 6 coverage + price-aware EV; production mutation forbidden; 2026 sealed", pct=0.03)
+        pw.emit("audit", f"[NFL-HEAVY-V317] Start run={run_id}; frozen V29 Spread 0.575 benchmark + selective trust + rules index + Big Al 6 coverage + price-aware EV; production mutation forbidden; 2026 sealed", pct=0.03)
         try:
             _bq = bigquery.Client(project="sharplogger")
             _rcontract.assert_contract()
             _syscontract.assert_contract()
             _audit_report = _audit.run_nfl_audit_v1(storage_client=gcs, bucket_name=bucket, log_func=log_func)
             if _audit_report.get("status") != "READY_FOR_OFFLINE_CHALLENGER_SANDBOX":
-                raise RuntimeError("[NFL-HEAVY-V316-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
+                raise RuntimeError("[NFL-HEAVY-V317-HOLD] PRECEDING_AUDIT_NOT_GREEN "+str(_audit_report.get("status")))
             _health = _ledger3.ledger_health_check(_bq, service_identity_hint="sharp-train-sa@sharplogger.iam.gserviceaccount.com")
 
             pw.emit("core_stat", "Audit PASS; run protected CORE/STAT/residual challenger research", pct=0.16)
@@ -216,7 +216,7 @@ def main():
                 audit_report=_audit_report, ledger_health=_health, log_func=log_func,
             )
 
-            pw.emit("systems", "CORE/STAT complete; run System Miner V3.12 legacy + separate Prediction Tracker external-family lanes", pct=0.34)
+            pw.emit("systems", "CORE/STAT complete; run System Miner V3.17 with persistent exact-incumbent revalidation + Big Al pregame fingerprint + separate PT external-family lane", pct=0.34)
             _system_report = _systems.run_nfl_system_lab_v3(
                 bq_client=_bq, storage_client=gcs, bucket_name=bucket,
                 audit_report=_audit_report, log_func=log_func,
@@ -232,7 +232,7 @@ def main():
                 system_report=_system_report, log_func=log_func,
             )
             if not isinstance(_pt_incremental,dict) or int(_pt_incremental.get("production_authority") or 0) != 0 or bool(_pt_incremental.get("year_2026_queried")):
-                raise RuntimeError("[NFL-HEAVY-V316-HOLD] PT_INCREMENTAL_CONTRACT_FAIL")
+                raise RuntimeError("[NFL-HEAVY-V317-HOLD] PT_INCREMENTAL_CONTRACT_FAIL")
             _system_report["pt_incremental_value"]=_pt_incremental
 
             pw.emit("pbp", "PT incremental test complete; run frozen PBP attribution/confirmation diagnostic", pct=0.58)
@@ -252,8 +252,8 @@ def main():
                 system_report=_system_report, pbp_report=_pbp_report, log_func=log_func,
             )
             if _result.get("production_mutated") is not False or int(_result.get("production_authority") or 0) != 0:
-                raise RuntimeError("[NFL-HEAVY-V316-HOLD] RESEARCH_ROUTE_ATTEMPTED_PRODUCTION_AUTHORITY")
-            log_func("[NFL-HEAVY-V316-OPERATOR-CONTRACT] "+json.dumps({
+                raise RuntimeError("[NFL-HEAVY-V317-HOLD] RESEARCH_ROUTE_ATTEMPTED_PRODUCTION_AUTHORITY")
+            log_func("[NFL-HEAVY-V317-OPERATOR-CONTRACT] "+json.dumps({
                 "status":_result.get("status"),
                 "research_contract_sha256":_result.get("research_contract_sha256"),
                 "production_mutated":False,
@@ -304,10 +304,23 @@ def main():
                 "bigal_weekly_observations":((_system_report.get("bigal_weekly_observation_ledger_v316") or {}).get("observations")),
                 "bigal_line_tolerance_observations":((_system_report.get("bigal_weekly_observation_ledger_v316") or {}).get("line_tolerance_observations")),
                 "bigal_same_game_multi_release_groups":((_system_report.get("bigal_weekly_observation_ledger_v316") or {}).get("same_game_multi_release_groups")),
+                "persistent_library_status":((_system_report.get("persistent_system_library_v317") or {}).get("status")),
+                "persistent_prior_qualified_families":((_system_report.get("persistent_system_library_v317") or {}).get("prior_qualified_families")),
+                "persistent_recovered_exact_legit":((_system_report.get("persistent_system_library_v317") or {}).get("recovered_exact_legit")),
+                "persistent_demoted_after_exact_revalidation":((_system_report.get("persistent_system_library_v317") or {}).get("demoted_after_exact_revalidation")),
+                "persistent_legacy_contract_holds":((_system_report.get("persistent_system_library_v317") or {}).get("legacy_contract_holds")),
+                "persistent_library_uri":((_system_report.get("persistent_library_persist_v317") or {}).get("uri")),
+                "bigal_fingerprint_status":((_system_report.get("bigal_current_card_fingerprint_v317") or {}).get("status")),
+                "bigal_fingerprinted_observations":((_system_report.get("bigal_current_card_fingerprint_v317") or {}).get("fingerprinted_observations")),
+                "bigal_fingerprint_matched_games":((_system_report.get("bigal_current_card_fingerprint_v317") or {}).get("matched_games")),
+                "bigal_fingerprint_atom_vocabulary_count":((_system_report.get("bigal_current_card_fingerprint_v317") or {}).get("atom_vocabulary_count")),
+                "bigal_fingerprint_uri":((_system_report.get("bigal_current_card_fingerprint_v317") or {}).get("artifact_uri")),
+                "bigal_2026_trigger_context_queried":bool(((_system_report.get("bigal_current_card_fingerprint_v317") or {}).get("year_2026_trigger_context_queried"))),
+                "bigal_2026_qualification_queried":bool(((_system_report.get("bigal_current_card_fingerprint_v317") or {}).get("year_2026_qualification_queried"))),
             }, sort_keys=True, default=str))
-            pw.emit("done", "NFL Heavy Research V3.16 complete: "+str(_result.get("status")), pct=1.0)
+            pw.emit("done", "NFL Heavy Research V3.17 complete: "+str(_result.get("status")), pct=1.0)
         except Exception as exc:
-            pw.emit("error", "NFL Heavy Research V3.16 failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
+            pw.emit("error", "NFL Heavy Research V3.17 failed: "+str(exc)+"\n"+traceback.format_exc(), pct=1.0)
             raise
         return
 
@@ -453,7 +466,7 @@ def main():
         _ledger3 = _load_nfl_prod_replay_exact("nfl_prospective_ledger_v3", "nfl-prospective-ledger-v3-v1.9.4-edge-gate-shadow-20261001")
         _research = _load_nfl_prod_replay_exact("nfl_research_engine_v2", "nfl-research-engine-v1.9.4-edge-gate-manager-20261001")
         _syscontract = _load_nfl_prod_replay_exact("nfl_research_v2_contract", "nfl-research-v2.0-foundation-expansion-20261001")
-        _systems = _load_nfl_prod_replay_exact("nfl_system_lab_v3", "nfl-system-lab-v3.16.0-deep-objective-bigal-market-research-20261011")
+        _systems = _load_nfl_prod_replay_exact("nfl_system_lab_v3", "nfl-system-lab-v3.17.0-persistent-library-bigal-fingerprint-20261011")
         _prod = _load_nfl_prod_replay_exact("nfl_production_v1", "nfl-production-v1.1.1-publish-receipt-normalization-20261002")
         _bet = _load_nfl_prod_replay_exact("nfl_betting_engine_v1", "nfl-betting-engine-v1.0-unified-decision-20261002")
         _shared = _load_nfl_prod_replay_exact("sports_edge_authority_v1", "sports-edge-authority-v1.1-dependency-aware-cross-sport-standard-20261002")
@@ -532,7 +545,7 @@ def main():
         )
         _systems = _load_nfl_v2_system_exact(
             "nfl_system_lab_v3",
-            "nfl-system-lab-v3.16.0-deep-objective-bigal-market-research-20261011",
+            "nfl-system-lab-v3.17.0-persistent-library-bigal-fingerprint-20261011",
         )
         _audit = _load_nfl_v2_system_exact(
             "nfl_audit_v1",
