@@ -46987,11 +46987,33 @@ def _nfl_edge_authority_v2_state_cached():
 
 @st.cache_data(ttl=60,show_spinner=False)
 def _nfl_model_authority_v26_state_cached():
+    """Load NFL production authority from the consolidated nfl_engine bundle.
+
+    The dashboard must validate against the engine's own component manifest,
+    not a historical hard-coded authority SOURCE_TAG. This keeps the UI aligned
+    with the exact authority component deployed in nfl_engine.py while retaining
+    fail-closed behavior for genuine bundle/tag mismatches.
+    """
     try:
-        import nfl_model_authority_v26 as _ma
-        if getattr(_ma,"SOURCE_TAG","") != "nfl-model-authority-v2.6.1-utils-market-backend-20261003":
-            return {"status":"STALE_MODEL_AUTHORITY_V26_MODULE"}
-        return _ma.read_dashboard_state(storage_client=storage.Client(),bucket_name=GCS_BUCKET)
+        import nfl_engine as _ne
+        _ma=_ne.load_component("nfl_model_authority_v26")
+        _manifest=_ne.component_manifest().get("nfl_model_authority_v26") or {}
+        _expected=str(_manifest.get("source_tag") or "")
+        _actual=str(getattr(_ma,"SOURCE_TAG","") or "")
+        if not _expected or _actual != _expected:
+            logging.warning(
+                "[NFL-MODEL-AUTH-V26-UI] stale bundled authority expected=%s actual=%s",
+                _expected,_actual
+            )
+            return {
+                "status":"STALE_MODEL_AUTHORITY_V26_MODULE",
+                "expected_source_tag":_expected,
+                "actual_source_tag":_actual,
+            }
+        _state=_ma.read_dashboard_state(storage_client=storage.Client(),bucket_name=GCS_BUCKET)
+        if not isinstance(_state,dict):
+            return {"status":"UNAVAILABLE","error":"AUTHORITY_STATE_NOT_DICT"}
+        return _state
     except Exception as e:
         logging.warning("[NFL-MODEL-AUTH-V26-UI] state unavailable: %s:%s",type(e).__name__,e)
         return {"status":"UNAVAILABLE","error":f"{type(e).__name__}:{e}"}
