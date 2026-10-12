@@ -198,8 +198,11 @@ def score_and_record_ncaaf_production_v1(df_scan: pd.DataFrame, client=None, con
             _rv22=_ncaaf_rv22_report_cached()
             if isinstance(_rv22,dict):
                 scored=attach_live_miner_votes(scored,_rv22)
+                logging.info("[NCAAF-RV22-LIVE-MINER] status=PASS rows=%d authority=BOUNDED_EVIDENCE_ONLY",len(scored))
+            else:
+                logging.info("[NCAAF-RV22-LIVE-MINER] status=NO_CURRENT_REPORT authority=BOUNDED_EVIDENCE_ONLY")
         except Exception as _miner_exc:
-            logging.warning("[NCAAF-RV22-LIVE-MINER] unavailable: %s:%s",type(_miner_exc).__name__,_miner_exc)
+            logging.warning("[NCAAF-RV22-LIVE-MINER] status=HOLD error=%s:%s authority=BOUNDED_EVIDENCE_ONLY",type(_miner_exc).__name__,_miner_exc)
         picks=choose_current_production_picks(scored,contract,executable_books=REC_BOOKS)
         result=record_predictions(picks,contract,client=client,source="BACKGROUND_SCANNER")
         logging.info("[NCAAF-PROD-V1-BACKGROUND] status=%s scored_rows=%d selected_markets=%d attempted=%d inserted=%d artifact=%s",
@@ -235,9 +238,10 @@ def refresh_nfl_production_live_market(df_scan: pd.DataFrame, client=None) -> di
         import nfl_engine
         from google.cloud import storage as _gcs_storage
         _client=client or bq_client
+        _storage=_gcs_storage.Client()
         result=nfl_engine.run_background_live_market_refresh(
             bq_client=_client,
-            storage_client=_gcs_storage.Client(),
+            storage_client=_storage,
             bucket_name=GCS_BUCKET,
             live_market_rows=df_scan,
             log_func=logging.info,
@@ -247,6 +251,38 @@ def refresh_nfl_production_live_market(df_scan: pd.DataFrame, client=None) -> di
             result.get("status"),result.get("prediction_games"),result.get("live_rows"),result.get("overlay_rows")
         )
         return result
+    except RuntimeError as exc:
+        # A bundled authority-code revision can intentionally invalidate the prior
+        # frozen contract by SOURCE_TAG.  This is an expected fail-closed state,
+        # not a scanner crash.  Do not accept/migrate the stale contract here: the
+        # NFL Weekly Update owns historical replay + authority publication.
+        _msg=str(exc)
+        if "CONTRACT_MISSING_OR_STALE" in _msg:
+            _expected_tag=None; _found_tag=None; _contract_object=None
+            try:
+                _auth=nfl_engine.load_component("nfl_model_authority_v26")
+                _expected_tag=getattr(_auth,"SOURCE_TAG",None)
+                _contract_object=getattr(_auth,"CONTRACT_OBJECT",None)
+                if _contract_object and hasattr(_auth,"_read_json"):
+                    _stale=_auth._read_json(_storage,GCS_BUCKET,_contract_object)
+                    if isinstance(_stale,dict):
+                        _found_tag=_stale.get("source_tag")
+            except Exception:
+                pass
+            logging.warning(
+                "[NFL-BACKGROUND-LIVE-REFRESH-HOOK] status=HOLD reason=CONTRACT_MISSING_OR_STALE expected_tag=%s found_tag=%s contract_object=%s action=RUN_NFL_WEEKLY_UPDATE_ONCE",
+                _expected_tag,_found_tag,_contract_object
+            )
+            return {
+                "status":"CONTRACT_REFRESH_REQUIRED",
+                "reason":"CONTRACT_MISSING_OR_STALE",
+                "expected_source_tag":_expected_tag,
+                "found_source_tag":_found_tag,
+                "contract_object":_contract_object,
+                "action":"RUN_NFL_WEEKLY_UPDATE_ONCE",
+            }
+        logging.exception("[NFL-BACKGROUND-LIVE-REFRESH-HOOK] failed")
+        return {"status":"ERROR","error":f"{type(exc).__name__}:{exc}"}
     except Exception as exc:
         # Odds collection must continue even if the recommendation refresh fails.
         logging.exception("[NFL-BACKGROUND-LIVE-REFRESH-HOOK] failed")
@@ -20900,7 +20936,7 @@ def load_model_from_gcs(
 
     # ✅ Skip General entirely (prevents GCS NotFound spam)
     if sport_l == "general":
-        logging.info(f"Skipping model load for sport='General' (market={market_l}).")
+        logging.debug(f"Skipping model load for sport='General' (market={market_l}).")
         return None
 
     # --- Market aliasing (fixes "h2h" vs "moneyline"/"ml") ---

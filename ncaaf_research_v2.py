@@ -3003,10 +3003,16 @@ def _attach_historical_state_context_to_miner(dashboard_module, miner_games: pd.
     _prospective_cache_rows=int(len(out)-_historical_target_rows)
     matched_home=int((home_key.isin(lookup.index).to_numpy(dtype=bool)&_historical_target).sum()) if len(out) else 0
     matched_road=int((road_key.isin(lookup.index).to_numpy(dtype=bool)&_historical_target).sum()) if len(out) else 0
-    state_ready=int(pd.to_numeric(out.get("Team_Game_Number_Prior"),errors="coerce").notna().sum())
-    opp_state_ready=int(pd.to_numeric(out.get("Opp_Game_Number_Prior"),errors="coerce").notna().sum())
-    bounce_ready=int((pd.to_numeric(out.get("Prev_Is_Home"),errors="coerce").notna() & pd.to_numeric(out.get("Prev_Is_ML_Favorite"),errors="coerce").notna() & pd.to_numeric(out.get("Prev_SU_Margin"),errors="coerce").notna()).sum())
-    opp_bounce_ready=int((pd.to_numeric(out.get("Opp_Prev_Is_Home"),errors="coerce").notna() & pd.to_numeric(out.get("Opp_Prev_Is_ML_Favorite"),errors="coerce").notna() & pd.to_numeric(out.get("Opp_Prev_SU_Margin"),errors="coerce").notna()).sum())
+    # Always coerce diagnostics as index-aligned Series. DataFrame.get() returns
+    # None for a missing column; pd.to_numeric(None) becomes a scalar NaN, and
+    # calling .notna() on that scalar caused the live Miner crash seen in Utils.
+    def _diag_num_series(col):
+        src=out[col] if col in out.columns else pd.Series(np.nan,index=out.index,dtype=float)
+        return pd.to_numeric(src,errors="coerce")
+    state_ready=int(_diag_num_series("Team_Game_Number_Prior").notna().sum())
+    opp_state_ready=int(_diag_num_series("Opp_Game_Number_Prior").notna().sum())
+    bounce_ready=int((_diag_num_series("Prev_Is_Home").notna() & _diag_num_series("Prev_Is_ML_Favorite").notna() & _diag_num_series("Prev_SU_Margin").notna()).sum())
+    opp_bounce_ready=int((_diag_num_series("Opp_Prev_Is_Home").notna() & _diag_num_series("Opp_Prev_Is_ML_Favorite").notna() & _diag_num_series("Opp_Prev_SU_Margin").notna()).sum())
     diag={"status":"PASS","source_rows_raw":int(cache.get("source_rows_raw",0)),"source_rows_dedup":int(cache.get("source_rows_dedup",0)),
           "matched_home":matched_home,"matched_road":matched_road,"historical_target_rows":_historical_target_rows,"all_cache_rows":int(len(out)),"prospective_cache_rows":_prospective_cache_rows,
           "miner_rows":int(len(out)),"state_ready":state_ready,"opp_state_ready":opp_state_ready,
