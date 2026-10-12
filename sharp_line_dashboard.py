@@ -46971,6 +46971,47 @@ def _ncaaf_prod_v1_grading_details_cached(lock_type="FIRST"):
     return read_details(days=60,lock_type=lock_type)
 
 
+@st.cache_data(ttl=180,show_spinner=False)
+def _ncaaf_2026_action_ladder_cached():
+    """First prospective attainment of each CANDIDATE/BET/STRONG BET tier.
+
+    ROLLING records are used because a game-market can legitimately progress
+    through multiple tiers after its immutable FIRST lock.
+    """
+    try:
+        q="""
+        WITH ranked AS (
+          SELECT
+            p.prediction_event_id,p.physical_game_id,p.game_start,p.home_team,p.away_team,
+            p.market,p.side,p.action,p.decision,p.book,p.line,p.odds,
+            p.prediction_timestamp AS captured_at,p.quote_timestamp,p.quote_executable,
+            p.model_probability,p.model_edge,p.model_ev,p.system_support_count,p.system_conflict_count,
+            p.system_support_sources,p.system_conflict_sources,p.bet_authority_confidence,
+            ROW_NUMBER() OVER (
+              PARTITION BY p.physical_game_id,p.market,p.action
+              ORDER BY p.prediction_timestamp ASC,p.quote_timestamp ASC,p.prediction_event_id ASC
+            ) AS rn
+          FROM `sharplogger.sharp_data.ncaaf_production_v1_predictions` p
+          WHERE EXTRACT(YEAR FROM p.game_start)=2026
+            AND p.is_prospective=TRUE
+            AND p.lock_type='ROLLING'
+            AND p.action IN ('CANDIDATE','BET','STRONG BET')
+        )
+        SELECT
+          p.* EXCEPT(rn),
+          IFNULL(r.result,'PENDING') AS result,
+          r.profit_per_unit,r.settled_at
+        FROM ranked p
+        LEFT JOIN `sharplogger.sharp_data.ncaaf_production_v1_results` r
+          USING(prediction_event_id)
+        WHERE p.rn=1
+        ORDER BY p.game_start,p.market,p.action
+        """
+        return bq_client.query(q).to_dataframe(create_bqstorage_client=False)
+    except Exception as e:
+        logging.warning("[NCAAF-2026-ACTION-LADDER] unavailable: %s:%s",type(e).__name__,e)
+        return pd.DataFrame([{"__error":f"{type(e).__name__}:{e}"}])
+
 
 
 @st.cache_data(ttl=60,show_spinner=False)
@@ -47219,12 +47260,16 @@ def _nfl_production_core_results_cached():
 
 @st.cache_data(ttl=300,show_spinner=False)
 def _nfl_bet_authority_results_cached():
-    """Read immutable captured BET events and their settled outcomes from GCS."""
+    """Read immutable NFL wager events plus action-ladder tracking from GCS."""
     try:
-        import nfl_model_authority_v26 as _ma
-        if getattr(_ma,"SOURCE_TAG","")!="nfl-model-authority-v2.6.1-utils-market-backend-20261003":
-            return {"status":"STALE_MODEL_AUTHORITY","events":[],"settlements":[]}
-        sc=storage.Client(); bucket=sc.bucket(GCS_BUCKET)
+        import nfl_engine as _ne
+        _ma=_ne.load_component("nfl_model_authority_v26")
+        _manifest=_ne.component_manifest().get("nfl_model_authority_v26") or {}
+        _expected=str(_manifest.get("source_tag") or "")
+        _actual=str(getattr(_ma,"SOURCE_TAG","") or "")
+        if not _expected or _actual!=_expected:
+            return {"status":"STALE_MODEL_AUTHORITY","events":[],"settlements":[],"tracking_events":[],"tracking_settlements":[]}
+        sc=storage.Client()
         def _load(prefix):
             out=[]
             for b in sc.list_blobs(GCS_BUCKET,prefix=prefix):
@@ -47235,9 +47280,17 @@ def _nfl_bet_authority_results_cached():
             return out
         events=_load(_ma.EVENT_PREFIX)
         settlements=_load(_ma.SETTLEMENT_PREFIX)
-        return {"status":"READY","events":events,"settlements":settlements}
+        tracking_events=_load(getattr(_ma,"ACTION_TRACKING_EVENT_PREFIX",f"{_ma.PREFIX}/action_tracking/events"))
+        tracking_settlements=_load(getattr(_ma,"ACTION_TRACKING_SETTLEMENT_PREFIX",f"{_ma.PREFIX}/action_tracking/settlements"))
+        return {
+            "status":"READY",
+            "events":events,
+            "settlements":settlements,
+            "tracking_events":tracking_events,
+            "tracking_settlements":tracking_settlements,
+        }
     except Exception as e:
-        return {"status":"UNAVAILABLE","error":f"{type(e).__name__}:{e}","events":[],"settlements":[]}
+        return {"status":"UNAVAILABLE","error":f"{type(e).__name__}:{e}","events":[],"settlements":[],"tracking_events":[],"tracking_settlements":[]}
 
 
 @st.cache_data(ttl=300,show_spinner=False)
@@ -47582,12 +47635,130 @@ def _nfl_result_pct(v):
         return "—"
 
 
+def _nfl_2026_action_ladder_frame():
+    """Combine new action tracking with legacy wager events for 2026 reporting."""
+    hist=_nfl_bet_authority_results_cached()
+    if not isinstance(hist,dict) or hist.get("status")!="READY":
+        return pd.DataFrame()
+    rows=[]
+    tracking_set={str(x.get("action_tracking_event_id")):x for x in (hist.get("tracking_settlements") or [])}
+    seen=set()
+    for e in (hist.get("tracking_events") or []):
+        eid=str(e.get("action_tracking_event_id") or "")
+        action=str(e.get("tracked_action") or e.get("action") or "").upper().strip()
+        if action not in {"CANDIDATE","BET","STRONG BET"}:
+            continue
+        z=tracking_set.get(eid) or {}
+        key=(str(e.get("prediction_pair_id") or ""),str(e.get("market") or "").upper(),action)
+        seen.add(key)
+        rows.append({
+            "captured_at":e.get("captured_at"),"game_start":e.get("game_start"),
+            "home_team":e.get("home_team"),"away_team":e.get("away_team"),
+            "market":str(e.get("market") or "").upper(),"action":action,
+            "selected":e.get("selected"),"line":e.get("market_value"),"odds":e.get("selected_price"),
+            "result":z.get("result") or "PENDING","profit_per_unit":z.get("profit_per_unit"),
+            "tracking_source":"ACTION_TRACKING",
+        })
+    # Preserve pre-V3.17.5 prospective BET history. Legacy event action is the
+    # first wager-grade state captured under the prior immutable wager ledger.
+    legacy_set={str(x.get("model_bet_event_id")):x for x in (hist.get("settlements") or [])}
+    for e in (hist.get("events") or []):
+        action=str(e.get("action") or "BET").upper().strip()
+        if action not in {"BET","STRONG BET"}:
+            action="BET"
+        key=(str(e.get("prediction_pair_id") or ""),str(e.get("market") or "").upper(),action)
+        if key in seen:
+            continue
+        z=legacy_set.get(str(e.get("model_bet_event_id") or "")) or {}
+        rows.append({
+            "captured_at":e.get("captured_at"),"game_start":e.get("game_start"),
+            "home_team":e.get("home_team"),"away_team":e.get("away_team"),
+            "market":str(e.get("market") or "").upper(),"action":action,
+            "selected":e.get("selected"),"line":e.get("market_value"),"odds":e.get("selected_price"),
+            "result":z.get("result") or "PENDING","profit_per_unit":z.get("profit_per_unit"),
+            "tracking_source":"LEGACY_WAGER_EVENT",
+        })
+    df=pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["captured_at"]=pd.to_datetime(df["captured_at"],utc=True,errors="coerce")
+    df["game_start"]=pd.to_datetime(df["game_start"],utc=True,errors="coerce")
+    df=df[df["game_start"].dt.year.eq(2026)].copy()
+    return df.sort_values(["captured_at","game_start"],na_position="last")
+
+
+def _render_2026_action_ladder(df, sport_label):
+    """Render first-attainment action tiers and cumulative hypothetical/actual units."""
+    st.markdown(f"**{sport_label} 2026 prospective action ladder**")
+    st.caption(
+        "Each game-market is counted the first time it reaches each tier. A market may therefore appear in "
+        "CANDIDATE, later BET, and later STRONG BET; that progression is intentional. Candidate returns are "
+        "hypothetical 1-unit results at the captured candidate quote. BET/STRONG BET are wager-grade action tiers."
+    )
+    if df is None or df.empty:
+        st.info("No 2026 prospective Candidate / Bet / Strong Bet action history is available yet.")
+        return
+    if "__error" in df.columns:
+        st.warning("2026 action-ladder history could not be read: "+str(df.iloc[0]["__error"]))
+        return
+    x=df.copy()
+    x["action"]=x.get("action",pd.Series("",index=x.index)).astype(str).str.upper().str.strip()
+    x=x[x["action"].isin(["CANDIDATE","BET","STRONG BET"])].copy()
+    if x.empty:
+        st.info("No Candidate / Bet / Strong Bet action tiers have been recorded yet.")
+        return
+    x["result"]=x.get("result",pd.Series("PENDING",index=x.index)).astype(str).str.upper().str.strip()
+    x["profit_per_unit"]=pd.to_numeric(x.get("profit_per_unit"),errors="coerce")
+    x["game_start"]=pd.to_datetime(x.get("game_start"),utc=True,errors="coerce")
+    x["captured_at"]=pd.to_datetime(x.get("captured_at"),utc=True,errors="coerce")
+    x["ET Date"]=x["game_start"].dt.tz_convert("America/New_York").dt.date
+
+    order=["CANDIDATE","BET","STRONG BET"]
+    summary=[]
+    for action in order:
+        g=x[x["action"].eq(action)].copy()
+        settled=g[g["result"].isin(["WIN","LOSS","PUSH"])].copy()
+        w=int(settled["result"].eq("WIN").sum()); l=int(settled["result"].eq("LOSS").sum()); p=int(settled["result"].eq("PUSH").sum())
+        units=float(settled["profit_per_unit"].sum()) if not settled.empty else 0.0
+        roi=float(settled["profit_per_unit"].mean()) if not settled.empty else np.nan
+        summary.append({
+            "Tier":action,"Captured":int(len(g)),"Settled":int(len(settled)),
+            "W-L-P":f"{w}-{l}-{p}",
+            "Hit Rate":(w/(w+l) if w+l else np.nan),
+            "Units":units,"ROI / Bet":roi,
+        })
+    sdf=pd.DataFrame(summary)
+    show=sdf.copy()
+    show["Hit Rate"]=pd.to_numeric(show["Hit Rate"],errors="coerce").map(lambda v:f"{100*v:.1f}%" if pd.notna(v) else "—")
+    show["Units"]=pd.to_numeric(show["Units"],errors="coerce").map(lambda v:f"{v:+.2f}")
+    show["ROI / Bet"]=pd.to_numeric(show["ROI / Bet"],errors="coerce").map(lambda v:f"{100*v:+.1f}%" if pd.notna(v) else "—")
+    st.dataframe(show,use_container_width=True,hide_index=True)
+
+    settled=x[x["result"].isin(["WIN","LOSS","PUSH"]) & x["profit_per_unit"].notna() & x["ET Date"].notna()].copy()
+    if settled.empty:
+        st.caption("No action-tier events have settled yet, so cumulative units will appear after final scores are graded.")
+        return
+    daily=(settled.groupby(["ET Date","action"],as_index=False)["profit_per_unit"].sum())
+    wide=daily.pivot(index="ET Date",columns="action",values="profit_per_unit").fillna(0.0).sort_index()
+    wide=wide.reindex(columns=order,fill_value=0.0).cumsum()
+    wide.columns=["Candidate","Bet","Strong Bet"]
+    st.markdown("**Cumulative units — 2026 prospective first-attainment tiers**")
+    st.line_chart(wide,use_container_width=True)
+    st.caption(
+        "Candidate is diagnostic/hypothetical performance; it is not counted as a wager. "
+        "The Bet and Strong Bet lines show the performance of those wager-grade tiers at the first quote where each tier was attained."
+    )
+
+
 def _render_nfl_production_results(cur):
     """Prospective production scoreboard: CORE prediction quality + actual BET results."""
     st.caption(
         "Two separate scoreboards are shown deliberately: CORE is graded on frozen fair-value prediction quality from the paired ledger; "
         "Bet Authority is graded on actual captured production wagers at the recorded line/price. Historical backtests are not mixed into either result."
     )
+
+    # 2026 first-attainment Candidate -> Bet -> Strong Bet tracking.
+    _render_2026_action_ladder(_nfl_2026_action_ladder_frame(),"NFL")
 
     # 1) Actual production BET authority results. These are captured before kickoff and settled later.
     perf=(cur or {}).get("live_performance") or {}
@@ -48482,6 +48653,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
             with st.expander('Production V1 — prospective pick grading',expanded=False):
                 st.caption('These results use immutable pregame scanner locks, not regenerated postgame predictions. FIRST, T24, T6 and T1 remain separate; V13 history is unchanged.')
                 try:
+                    _render_2026_action_ladder(_ncaaf_2026_action_ladder_cached(),"NCAAF")
                     _grade=_ncaaf_prod_v1_grading_summary_cached()
                     if _grade.empty:
                         st.info('No Production V1 pregame locks have been graded yet. Verify the background scanner is deployed with the Production V1 ledger module.')
