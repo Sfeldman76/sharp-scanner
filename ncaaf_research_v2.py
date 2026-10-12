@@ -1112,7 +1112,7 @@ def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str]
             out[_oc]=_prev.where(_prev.notna(),_new)
 
     out=_pt_attach_current_external_consensus_fields(out)
-    _ext_ready=int(pd.to_numeric(out.get("external_consensus_home_margin"),errors="coerce").notna().sum())
+    _ext_ready=int(pd.to_numeric(out["external_consensus_home_margin"] if "external_consensus_home_margin" in out.columns else pd.Series(np.nan,index=out.index,dtype=float),errors="coerce").notna().sum())
     _ext_clusters=pd.to_numeric(out.get("external_consensus_cluster_count"),errors="coerce")
     log_func(
         f"[NCAAF-PT-EXTERNAL-CONSENSUS] season={int(season)} source={source_context} "
@@ -1154,7 +1154,7 @@ def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str]
         "index_display_names":{k:_pt_index_display_name(k) for k in sorted(_idx_sources)},
         "index_alias_conflicts":_idx_alias_conflicts,
         "external_consensus_contract":PT_EXTERNAL_CONSENSUS_CONTRACT,
-        "external_consensus_ready_rows":int(pd.to_numeric(out.get("external_consensus_home_margin"),errors="coerce").notna().sum()),
+        "external_consensus_ready_rows":int(pd.to_numeric(out["external_consensus_home_margin"] if "external_consensus_home_margin" in out.columns else pd.Series(np.nan,index=out.index,dtype=float),errors="coerce").notna().sum()),
         "external_consensus_min_clusters":PT_EXTERNAL_CONSENSUS_MIN_CLUSTERS,
         "raw_headers":cols,"source_context":source_context,
     }
@@ -3003,16 +3003,21 @@ def _attach_historical_state_context_to_miner(dashboard_module, miner_games: pd.
     _prospective_cache_rows=int(len(out)-_historical_target_rows)
     matched_home=int((home_key.isin(lookup.index).to_numpy(dtype=bool)&_historical_target).sum()) if len(out) else 0
     matched_road=int((road_key.isin(lookup.index).to_numpy(dtype=bool)&_historical_target).sum()) if len(out) else 0
-    # Always coerce diagnostics as index-aligned Series. DataFrame.get() returns
-    # None for a missing column; pd.to_numeric(None) becomes a scalar NaN, and
-    # calling .notna() on that scalar caused the live Miner crash seen in Utils.
+    # Sparse live/prospective frames do not always contain every reconstructed
+    # state column. DataFrame.get(missing) returns None; pd.to_numeric(None)
+    # becomes scalar NaN, so .notna() would raise AttributeError. Normalize
+    # missing diagnostic columns to index-aligned Series before null checks.
     def _diag_num_series(col):
         src=out[col] if col in out.columns else pd.Series(np.nan,index=out.index,dtype=float)
         return pd.to_numeric(src,errors="coerce")
     state_ready=int(_diag_num_series("Team_Game_Number_Prior").notna().sum())
     opp_state_ready=int(_diag_num_series("Opp_Game_Number_Prior").notna().sum())
-    bounce_ready=int((_diag_num_series("Prev_Is_Home").notna() & _diag_num_series("Prev_Is_ML_Favorite").notna() & _diag_num_series("Prev_SU_Margin").notna()).sum())
-    opp_bounce_ready=int((_diag_num_series("Opp_Prev_Is_Home").notna() & _diag_num_series("Opp_Prev_Is_ML_Favorite").notna() & _diag_num_series("Opp_Prev_SU_Margin").notna()).sum())
+    bounce_ready=int((_diag_num_series("Prev_Is_Home").notna()
+                      & _diag_num_series("Prev_Is_ML_Favorite").notna()
+                      & _diag_num_series("Prev_SU_Margin").notna()).sum())
+    opp_bounce_ready=int((_diag_num_series("Opp_Prev_Is_Home").notna()
+                          & _diag_num_series("Opp_Prev_Is_ML_Favorite").notna()
+                          & _diag_num_series("Opp_Prev_SU_Margin").notna()).sum())
     diag={"status":"PASS","source_rows_raw":int(cache.get("source_rows_raw",0)),"source_rows_dedup":int(cache.get("source_rows_dedup",0)),
           "matched_home":matched_home,"matched_road":matched_road,"historical_target_rows":_historical_target_rows,"all_cache_rows":int(len(out)),"prospective_cache_rows":_prospective_cache_rows,
           "miner_rows":int(len(out)),"state_ready":state_ready,"opp_state_ready":opp_state_ready,
@@ -3556,8 +3561,8 @@ def _attach_h2h_rivalry_travel_context(dashboard_module, miner_games: pd.DataFra
     h2h_ready=int(pd.to_numeric(enriched.get("H2H2_Prior_Meetings"),errors="coerce").gt(0).sum())
     revenge_ready=int(pd.to_numeric(enriched.get("Revenge_Flag"),errors="coerce").eq(1).sum())+int(pd.to_numeric(enriched.get("Opp_Revenge_Flag"),errors="coerce").eq(1).sum())
     rivalry_ready=int(pd.to_numeric(enriched.get("Rivalry_Flag"),errors="coerce").eq(1).sum())
-    rest_ready=int(pd.to_numeric(enriched.get("Days_Since_Last_Game"),errors="coerce").notna().sum())
-    travel_ready=int(pd.to_numeric(enriched.get("Opp_Travel_Miles"),errors="coerce").notna().sum())
+    rest_ready=int(pd.to_numeric(enriched["Days_Since_Last_Game"] if "Days_Since_Last_Game" in enriched.columns else pd.Series(np.nan,index=enriched.index,dtype=float),errors="coerce").notna().sum())
+    travel_ready=int(pd.to_numeric(enriched["Opp_Travel_Miles"] if "Opp_Travel_Miles" in enriched.columns else pd.Series(np.nan,index=enriched.index,dtype=float),errors="coerce").notna().sum())
     diag={"status":"PASS","mode":"LIVE_TRIGGER" if for_live else "HISTORICAL_PLUS_PROSPECTIVE","rows":int(len(enriched)),"history_rows":history_rows,
           "h2h_prior_ready":h2h_ready,"revenge_flags":revenge_ready,"rivalry_rows":rivalry_ready,"rest_ready":rest_ready,"travel_ready":travel_ready,
           "travel_reference":travel_diag,"selection_influence":0,"outcomes_2026_selection":False}
