@@ -874,7 +874,7 @@ def main():
         f"path={_npv1_path} sha={_npv1_sha[:16]} promotion_requested={_ncaaf_prod_promote}"
     )
     _nrv22_tag = getattr(_nrv22, "NCAAF_RESEARCH_V2_SOURCE_TAG", None)
-    if _nrv22_tag != "ncaaf-research-v2.31.1-deep-context-raw-source-repair-20261010":
+    if _nrv22_tag != "ncaaf-research-v2.31.2-stable-five-research-shadow-20261013":
         raise RuntimeError(
             f"[NCAAF-RV2311-DEPLOY-PREFLIGHT] STALE_OR_MISSING source_tag={_nrv22_tag!r} "
             f"path={str(_nrv22_path)!r} sha={_nrv22_sha[:16]}"
