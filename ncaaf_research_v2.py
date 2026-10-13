@@ -35,8 +35,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.31.1-deep-context-raw-source-repair-20261010"
-NCAAF_RESEARCH_V2_VERSION = "2.31.1"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.31.2-stable-five-research-shadow-20261013"
+NCAAF_RESEARCH_V2_VERSION = "2.31.2"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -112,6 +112,20 @@ PT_PUBLISHED_WEIGHTS = {
 # position and NEVER by substring/fuzzy matching. Prediction Tracker's own CSV
 # exports use stable source-native header IDs; those exact IDs are explicitly
 # whitelisted here. No live HTML page is required for the normal contract.
+# V2.31.2: Five-source *challenger*, distinct from the published five-source
+# benchmark. Equal source weights were specified in advance (no 2026 outcomes,
+# no training or automatic authority). The two alternatives are Massey and
+# Sagarin Predictor; missing weekly ratings are permitted but clearly labelled.
+PT_STABLE_FIVE_SHADOW_SOURCES = {
+    "PI_RATE_BIAS": "PI_RATE_BIAS",
+    "KEEPER": "KEEPER",
+    "ESPN_FPI": "ESPN_FPI",
+    "MASSEY": "ptidx__linemassey",
+    "SAGARIN_PREDICTOR": "ptidx__linesagpred",
+}
+PT_STABLE_FIVE_MIN_AVAILABLE = 3
+PT_STABLE_FIVE_SHADOW_CONTRACT = "FIVE_SOURCE_EQUAL_WEIGHT_SHADOW_MIN3_SOURCE_20261013"
+
 PT_SYSTEM_HEADER_ALIASES = {
     "DOKTER": ("Dokter", "Dokter Entropy", "linedokter"),
     "PI_RATE_BIAS": ("Pi-Ratings Bias", "Pi Ratings Bias", "Pi-Rating Bias", "Pi Rate Bias", "linepibias"),
@@ -1121,6 +1135,39 @@ def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str]
         f"contract={PT_EXTERNAL_CONSENSUS_CONTRACT} production_authority=0"
     )
 
+    # Research-only prospective five-source challenger. Historical five-source
+    # META and its fixed weights remain unchanged, with full-five fail closed.
+    # Identity is source-native; old "linemass" and "lineespn" renames have
+    # already been canonically merged into ptidx__linemassey / ESPN_FPI.
+    shadow_values=np.column_stack([
+        pd.to_numeric(out[src_col],errors="coerce").to_numpy(float)
+        if src_col in out.columns else np.full(len(out),np.nan,dtype=float)
+        for src_col in PT_STABLE_FIVE_SHADOW_SOURCES.values()
+    ])
+    shadow_available=np.isfinite(shadow_values)
+    shadow_count=shadow_available.sum(axis=1)
+    shadow_margin=np.full(len(out),np.nan,dtype=float)
+    shadow_ok=shadow_count>=PT_STABLE_FIVE_MIN_AVAILABLE
+    if shadow_ok.any():
+        shadow_margin[shadow_ok]=np.nanmean(shadow_values[shadow_ok],axis=1)
+    out["pt_stable5_shadow_margin_home"]=shadow_margin
+    out["pt_stable5_shadow_source_count"]=shadow_count.astype(int)
+    out["pt_stable5_shadow_full_five"]=(shadow_count==5).astype(int)
+    out["pt_stable5_shadow_min3"]=(shadow_count>=3).astype(int)
+    out["pt_stable5_shadow_status"]=np.where(shadow_count==5,"FULL_FIVE",
+        np.where(shadow_ok,"PARTIAL_3_OR_4","INSUFFICIENT_LT3"))
+    shadow_source_coverage={
+        k:int(shadow_available[:,i].sum()) for i,k in enumerate(PT_STABLE_FIVE_SHADOW_SOURCES)
+    }
+    log_func("[NCAAF-PT-STABLE5-SHADOW] "+json.dumps({
+        "season":int(season),"source":source_context,"contract":PT_STABLE_FIVE_SHADOW_CONTRACT,
+        "source_rows":int(len(out)),"source_coverage":shadow_source_coverage,
+        "full_five_rows":int((shadow_count==5).sum()),
+        "partial_3_or_4_rows":int(((shadow_count>=3)&(shadow_count<5)).sum()),
+        "insufficient_rows":int((shadow_count<3).sum()),
+        "production_authority":0,"automatic_promotion":False,
+    },sort_keys=True))
+
     vals=np.column_stack([pd.to_numeric(out[k],errors="coerce").to_numpy(float) for k in PT_PUBLISHED_WEIGHTS])
     w=np.asarray([PT_PUBLISHED_WEIGHTS[k] for k in PT_PUBLISHED_WEIGHTS],dtype=float)
     full=np.isfinite(vals).all(axis=1) if map_status=="FULL_FIVE_VERIFIED" else np.zeros(len(out),dtype=bool)
@@ -1150,6 +1197,14 @@ def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str]
         "home_column":home,"away_column":away,"date_column":date_col,"line_column":line_col,"open_line_column":open_col,
         "prediction_avg_column":avg_col,"prediction_median_column":med_col,"prediction_std_column":std_col,
         "weights":dict(PT_PUBLISHED_WEIGHTS),"weight_sum":float(sum(PT_PUBLISHED_WEIGHTS.values())),
+        "stable5_challenger":{"contract":PT_STABLE_FIVE_SHADOW_CONTRACT,
+            "sources":list(PT_STABLE_FIVE_SHADOW_SOURCES),
+            "source_coverage":shadow_source_coverage,
+            "min_sources":PT_STABLE_FIVE_MIN_AVAILABLE,
+            "full_five_rows":int((shadow_count==5).sum()),
+            "partial_rows":int(((shadow_count>=3)&(shadow_count<5)).sum()),
+            "source_weighting":"EQUAL_AVAILABLE_SOURCES",
+            "production_authority":0,"automatic_promotion":False},
         "index_columns":{k:v for k,v in sorted(_idx_sources.items())},
         "index_display_names":{k:_pt_index_display_name(k) for k in sorted(_idx_sources)},
         "index_alias_conflicts":_idx_alias_conflicts,
@@ -1690,6 +1745,7 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
     gd=pd.to_datetime(g.get("Game_Date",pd.Series(pd.NaT,index=g.index)),errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
 
     meta=np.full(len(g),np.nan); cnt=np.full(len(g),np.nan); pavg=np.full(len(g),np.nan); pmed=np.full(len(g),np.nan); pstd=np.full(len(g),np.nan); extline=np.full(len(g),np.nan)
+    stable5_shadow=np.full(len(g),np.nan); stable5_shadow_count=np.zeros(len(g),dtype=int)
     listed=np.zeros(len(g),dtype=float); full_five=np.zeros(len(g),dtype=float)
     comp={k:np.full(len(g),np.nan) for k in PT_PUBLISHED_WEIGHTS}
 
@@ -1745,6 +1801,14 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
             full_five_matched+=1
         elif component_count>0:
             partial_matched+=1
+
+        # The alternative five-source challenger is scored only for historical
+        # diagnostics. It does not become a Miner atom or production feature.
+        _s5=pd.to_numeric(pd.Series([r.get("pt_stable5_shadow_margin_home")]),errors="coerce").iloc[0]
+        _s5n=pd.to_numeric(pd.Series([r.get("pt_stable5_shadow_source_count")]),errors="coerce").iloc[0]
+        if pd.notna(_s5) and pd.notna(_s5n) and float(_s5n)>=3:
+            stable5_shadow[i]=orient*float(_s5)
+            stable5_shadow_count[i]=int(_s5n)
 
         # Preserve the published META contract: no reweighting, imputation, or
         # renormalization when fewer than five exact systems are available.
@@ -1905,6 +1969,33 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         exmeta_cluster_median_edge=np.full(len(g),np.nan)
         exmeta_cluster_team_frac=np.full(len(g),np.nan); exmeta_cluster_opp_frac=np.full(len(g),np.nan)
 
+    # Prespecified chronological diagnostics; no 2026 results used and no
+    # winner is selected from the holdout. Compare on identical paired rows.
+    _hist_seasons=pd.to_numeric(g.get("Season",pd.Series(np.nan,index=g.index)),errors="coerce").to_numpy(float)
+    _hist_actual=pd.to_numeric(g.get("Actual_Margin",pd.Series(np.nan,index=g.index)),errors="coerce").to_numpy(float)
+    _hist_pt_median=pmed
+    _research_periods={"development_2022_2023":(2022,2023),"holdout_2024_2025":(2024,2025)}
+    _comparisons={}
+    for _name,_period in _research_periods.items():
+        _base=np.isin(_hist_seasons,_period)&np.isfinite(_hist_actual)
+        _rows={}
+        for _label,_pred in (("stable_five_shadow",stable5_shadow),
+                             ("published_five",meta),("tracker_median",_hist_pt_median)):
+            _mask=_base&np.isfinite(_pred)
+            _rows[_label]={"n":int(_mask.sum()),
+                "mae":float(np.mean(np.abs(_hist_actual[_mask]-_pred[_mask]))) if _mask.any() else None}
+        _paired=_base&np.isfinite(stable5_shadow)&np.isfinite(meta)
+        _rows["paired_shadow_vs_published"]={
+            "n":int(_paired.sum()),
+            "stable_five_mae":float(np.mean(np.abs(_hist_actual[_paired]-stable5_shadow[_paired]))) if _paired.any() else None,
+            "published_five_mae":float(np.mean(np.abs(_hist_actual[_paired]-meta[_paired]))) if _paired.any() else None}
+        _comparisons[_name]=_rows
+    stable5_shadow_audit={"status":"HISTORICAL_DIAGNOSTIC_ONLY",
+        "contract":PT_STABLE_FIVE_SHADOW_CONTRACT,"periods":_comparisons,
+        "historical_matched_rows_min3":int(np.isfinite(stable5_shadow).sum()),
+        "year_2026_used_for_selection":False,"automatic_promotion":False,"production_authority":0}
+    log_func("[NCAAF-PT-STABLE5-HISTORICAL] "+json.dumps(stable5_shadow_audit,sort_keys=True,default=str))
+
     for df in (g,m):
         df["_V210_PT_META_MARGIN_TEAM"]=meta
         df["_V210_PT_META_EDGE_POINTS"]=meta_edge
@@ -1979,6 +2070,7 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         m["_V210_PT_META_MINUS_CORE_EDGE"]=meta_edge-ce
 
     cache["games"]=g; cache["miner_games"]=m
+    cache["pt_stable5_shadow_audit"]=stable5_shadow_audit
     cache["pt_index_catalog"]=[
         {"id":_k,"name":_pt_index_display_name(_k),"cluster":_pt_index_source_cluster(_k),
          "matched_nonnull":int(np.isfinite(idx_comp[_k]).sum())}
