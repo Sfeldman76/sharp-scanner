@@ -47635,23 +47635,33 @@ def _nfl_result_pct(v):
         return "—"
 
 
+def _nfl_2026_event_identity(e):
+    """Physical game/market key independent of refit contract hashes."""
+    market=str(e.get("market") or "").upper().strip()
+    ts=pd.to_datetime(e.get("game_start"),utc=True,errors="coerce")
+    home=str(e.get("home_team") or "").upper().strip()
+    away=str(e.get("away_team") or "").upper().strip()
+    if pd.notna(ts) and home and away:
+        return f"{ts.isoformat()}|{home}|{away}|{market}"
+    pid=str(e.get("prediction_pair_id") or "").strip()
+    return f"PAIR:{pid}|{market}" if pid else ""
+
+
 def _nfl_2026_action_ladder_frame():
-    """Combine new action tracking with legacy wager events for 2026 reporting."""
+    """Deduplicated, first-quote-first 2026 tier history, not a current scan count."""
     hist=_nfl_bet_authority_results_cached()
     if not isinstance(hist,dict) or hist.get("status")!="READY":
-        return pd.DataFrame()
+        return pd.DataFrame([{"__error":"NFL 2026 GCS wager history is unavailable: "+str((hist or {}).get("status") or "UNKNOWN")}])
     rows=[]
     tracking_set={str(x.get("action_tracking_event_id")):x for x in (hist.get("tracking_settlements") or [])}
-    seen=set()
     for e in (hist.get("tracking_events") or []):
         eid=str(e.get("action_tracking_event_id") or "")
         action=str(e.get("tracked_action") or e.get("action") or "").upper().strip()
         if action not in {"CANDIDATE","BET","STRONG BET"}:
             continue
         z=tracking_set.get(eid) or {}
-        key=(str(e.get("prediction_pair_id") or ""),str(e.get("market") or "").upper(),action)
-        seen.add(key)
         rows.append({
+            "event_id":eid,"prediction_pair_id":e.get("prediction_pair_id"),
             "captured_at":e.get("captured_at"),"game_start":e.get("game_start"),
             "home_team":e.get("home_team"),"away_team":e.get("away_team"),
             "market":str(e.get("market") or "").upper(),"action":action,
@@ -47659,18 +47669,18 @@ def _nfl_2026_action_ladder_frame():
             "result":z.get("result") or "PENDING","profit_per_unit":z.get("profit_per_unit"),
             "tracking_source":"ACTION_TRACKING",
         })
-    # Preserve pre-V3.17.5 prospective BET history. Legacy event action is the
-    # first wager-grade state captured under the prior immutable wager ledger.
+    # Older immutable wager events preserve bets before CANDIDATE-tier
+    # recording was introduced. An event may not be counted twice because
+    # of policy/contract rotations or because both ledgers report that game.
     legacy_set={str(x.get("model_bet_event_id")):x for x in (hist.get("settlements") or [])}
     for e in (hist.get("events") or []):
         action=str(e.get("action") or "BET").upper().strip()
         if action not in {"BET","STRONG BET"}:
             action="BET"
-        key=(str(e.get("prediction_pair_id") or ""),str(e.get("market") or "").upper(),action)
-        if key in seen:
-            continue
-        z=legacy_set.get(str(e.get("model_bet_event_id") or "")) or {}
+        eid=str(e.get("model_bet_event_id") or "")
+        z=legacy_set.get(eid) or {}
         rows.append({
+            "event_id":eid,"prediction_pair_id":e.get("prediction_pair_id"),
             "captured_at":e.get("captured_at"),"game_start":e.get("game_start"),
             "home_team":e.get("home_team"),"away_team":e.get("away_team"),
             "market":str(e.get("market") or "").upper(),"action":action,
@@ -47684,7 +47694,46 @@ def _nfl_2026_action_ladder_frame():
     df["captured_at"]=pd.to_datetime(df["captured_at"],utc=True,errors="coerce")
     df["game_start"]=pd.to_datetime(df["game_start"],utc=True,errors="coerce")
     df=df[df["game_start"].dt.year.eq(2026)].copy()
-    return df.sort_values(["captured_at","game_start"],na_position="last")
+    if df.empty:return df
+    df["game_market_id"]=df.apply(_nfl_2026_event_identity,axis=1)
+    # A capture after scheduled kickoff is not prospective. Keep it visible
+    # in a separate audit, but never silently credit its win/loss as a bet.
+    df["pregame_valid"]=df["captured_at"].notna() & df["game_start"].notna() & df["captured_at"].lt(df["game_start"])
+    df=df.sort_values(["captured_at","event_id"],na_position="last",kind="stable")
+    df=df.drop_duplicates(subset=["game_market_id","action"],keep="first")
+    return df.reset_index(drop=True)
+
+
+def _nfl_2026_production_ledger_frame():
+    """Actual wager-authority event ledger, one first captured entry per game/market."""
+    hist=_nfl_bet_authority_results_cached()
+    if not isinstance(hist,dict) or hist.get("status")!="READY":return pd.DataFrame()
+    settled={str(x.get("model_bet_event_id")):x for x in (hist.get("settlements") or [])}
+    rows=[]
+    for e in (hist.get("events") or []):
+        action=str(e.get("action") or "BET").upper().strip()
+        if action not in {"BET","STRONG BET"}:continue
+        event_id=str(e.get("model_bet_event_id") or "")
+        z=settled.get(event_id) or {}
+        rows.append({
+            "event_id":event_id,"prediction_pair_id":e.get("prediction_pair_id"),
+            "captured_at":e.get("captured_at"),"game_start":e.get("game_start"),
+            "home_team":e.get("home_team"),"away_team":e.get("away_team"),
+            "market":str(e.get("market") or "").upper(),"action":action,
+            "selected":e.get("selected"),"line":e.get("market_value"),"odds":e.get("selected_price"),
+            "result":z.get("result") or "PENDING","profit_per_unit":z.get("profit_per_unit"),
+            "policy":e.get("betting_policy_source_tag") or e.get("production_betting_policy"),
+        })
+    df=pd.DataFrame(rows)
+    if df.empty:return df
+    df["captured_at"]=pd.to_datetime(df["captured_at"],utc=True,errors="coerce")
+    df["game_start"]=pd.to_datetime(df["game_start"],utc=True,errors="coerce")
+    df=df[df["game_start"].dt.year.eq(2026)].copy()
+    if df.empty:return df
+    df["game_market_id"]=df.apply(_nfl_2026_event_identity,axis=1)
+    df["pregame_valid"]=df["captured_at"].notna() & df["game_start"].notna() & df["captured_at"].lt(df["game_start"])
+    df=df.sort_values(["captured_at","event_id"],na_position="last",kind="stable")
+    return df.drop_duplicates(subset=["game_market_id"],keep="first").reset_index(drop=True)
 
 
 def _render_2026_action_ladder(df, sport_label):
@@ -47704,6 +47753,14 @@ def _render_2026_action_ladder(df, sport_label):
     x=df.copy()
     x["action"]=x.get("action",pd.Series("",index=x.index)).astype(str).str.upper().str.strip()
     x=x[x["action"].isin(["CANDIDATE","BET","STRONG BET"])].copy()
+    if "pregame_valid" not in x.columns:
+        # NCAAF ledger already labels prospective rows; still validate timestamps.
+        x["pregame_valid"]=(pd.to_datetime(x["captured_at"],utc=True,errors="coerce")
+                            < pd.to_datetime(x["game_start"],utc=True,errors="coerce"))
+    excluded=x[~x["pregame_valid"].fillna(False)].copy()
+    if not excluded.empty:
+        st.warning(f"{len(excluded)} 2026 action-tier entries lack a verified pre-kickoff capture and are excluded from prospective ROI.")
+    x=x[x["pregame_valid"].fillna(False)].copy()
     if x.empty:
         st.info("No Candidate / Bet / Strong Bet action tiers have been recorded yet.")
         return
@@ -47733,6 +47790,34 @@ def _render_2026_action_ladder(df, sport_label):
     show["Units"]=pd.to_numeric(show["Units"],errors="coerce").map(lambda v:f"{v:+.2f}")
     show["ROI / Bet"]=pd.to_numeric(show["ROI / Bet"],errors="coerce").map(lambda v:f"{100*v:+.1f}%" if pd.notna(v) else "—")
     st.dataframe(show,use_container_width=True,hide_index=True)
+    if st.checkbox(f"Show {sport_label} 2026 action-tier audit",value=False,key=f"{sport_label.lower()}-2026-action-tier-audit"):
+        audit=x.copy()
+        audit["Matchup"]=audit["away_team"].astype(str)+" @ "+audit["home_team"].astype(str)
+        audit["Status"]=audit["result"].where(audit["result"].isin(["WIN","LOSS","PUSH"]),"AWAITING_RESULT")
+        past_start=audit["game_start"]+pd.Timedelta(hours=5)<pd.Timestamp.now(tz="UTC")
+        audit.loc[past_start & ~audit["result"].isin(["WIN","LOSS","PUSH"]),"Status"]="PAST_KICKOFF_NOT_GRADED"
+        if "selected" not in audit.columns:
+            audit["selected"]=audit.get("side",pd.Series("",index=audit.index))
+        if "tracking_source" not in audit.columns:
+            audit["tracking_source"]="NCAAF_ROLLING"
+        if "event_id" not in audit.columns:
+            audit["event_id"]=audit.get("prediction_event_id",pd.Series("",index=audit.index))
+        audit=audit.rename(columns={"captured_at":"Captured UTC","action":"Tier","market":"Market","selected":"Pick","line":"Line","odds":"Odds","tracking_source":"Ledger"})
+        cols=["ET Date","Matchup","Tier","Market","Pick","Line","Odds","Status","profit_per_unit","Captured UTC","Ledger","event_id"]
+        st.dataframe(audit[cols].sort_values("ET Date",ascending=False),use_container_width=True,hide_index=True)
+
+    # Weekly breakout makes last week's BET and STRONG BET visible separately
+    # without mistaking tier transitions for multiple independent wagers.
+    x["Week of (ET)"]=x["ET Date"].map(lambda d:d-pd.Timedelta(days=d.weekday()) if pd.notna(d) else pd.NaT)
+    weekly=x.groupby(["Week of (ET)","action"],dropna=False).agg(
+        Captured=("result","size"),
+        Settled=("result",lambda a:int(a.isin(["WIN","LOSS","PUSH"]).sum())),
+        Wins=("result",lambda a:int(a.eq("WIN").sum())),
+        Losses=("result",lambda a:int(a.eq("LOSS").sum())),
+        Pushes=("result",lambda a:int(a.eq("PUSH").sum())),
+    ).reset_index().rename(columns={"action":"Tier"})
+    st.markdown("**2026 weekly action history (Eastern Time)**")
+    st.dataframe(weekly.sort_values(["Week of (ET)","Tier"],ascending=[False,True]),use_container_width=True,hide_index=True)
 
     settled=x[x["result"].isin(["WIN","LOSS","PUSH"]) & x["profit_per_unit"].notna() & x["ET Date"].notna()].copy()
     if settled.empty:
@@ -47760,20 +47845,49 @@ def _render_nfl_production_results(cur):
     # 2026 first-attainment Candidate -> Bet -> Strong Bet tracking.
     _render_2026_action_ladder(_nfl_2026_action_ladder_frame(),"NFL")
 
-    # 1) Actual production BET authority results. These are captured before kickoff and settled later.
-    perf=(cur or {}).get("live_performance") or {}
-    allp=perf.get("ALL") or {}
-    c1,c2,c3,c4,c5=st.columns(5)
-    c1.metric("Settled production bets",int(allp.get("n") or 0))
-    c2.metric("W-L-P",f"{int(allp.get('wins') or 0)}-{int(allp.get('losses') or 0)}-{int(allp.get('pushes') or 0)}")
-    c3.metric("Bet hit rate",_nfl_result_pct(allp.get("hit_rate")))
-    c4.metric("ROI / unit",_nfl_result_pct(allp.get("roi_per_unit")))
-    c5.metric("Result source","Prospective")
-
+    # 1) 2026 production ledger is the source of truth; the live snapshot's
+    # live_performance can be stale on market-only background updates, and is
+    # policy-version-scoped rather than a complete 2026 wager history.
+    prod=_nfl_2026_production_ledger_frame()
+    valid=prod[prod["pregame_valid"]].copy() if not prod.empty else pd.DataFrame()
+    graded=valid[valid["result"].astype(str).str.upper().isin(["WIN","LOSS","PUSH"])].copy() if not valid.empty else pd.DataFrame()
+    pw=int(graded["result"].eq("WIN").sum()) if not graded.empty else 0
+    pl=int(graded["result"].eq("LOSS").sum()) if not graded.empty else 0
+    pp=int(graded["result"].eq("PUSH").sum()) if not graded.empty else 0
+    profits=pd.to_numeric(graded["profit_per_unit"],errors="coerce") if not graded.empty else pd.Series(dtype=float)
+    c1,c2,c3,c4,c5,c6=st.columns(6)
+    c1.metric("Captured wagers",int(len(valid)))
+    c2.metric("Settled production bets",int(len(graded)))
+    c3.metric("W-L-P",f"{pw}-{pl}-{pp}")
+    c4.metric("Bet hit rate",_nfl_result_pct(pw/(pw+pl) if pw+pl else None))
+    c5.metric("ROI / unit",_nfl_result_pct(profits.mean() if profits.notna().any() else None))
+    c6.metric("Result source","2026 Ledger")
+    if not prod.empty and int((~prod["pregame_valid"]).sum()):
+        st.warning(f"{int((~prod['pregame_valid']).sum())} production ledger entries were not verified pregame and were excluded.")
+    ladder=_nfl_2026_action_ladder_frame()
+    if not ladder.empty and "__error" not in ladder.columns:
+        tier_wins=int(ladder["result"].astype(str).str.upper().isin(["WIN","LOSS","PUSH"]).sum())
+        if tier_wins>len(graded):
+            st.info("The action ladder has graded tier entries that the distinct production wager ledger has not matched. Expand the two audits to find the missing game/market/settlement; no tier events are silently treated as extra wagers.")
+    if st.checkbox("Show NFL 2026 production wager reconciliation",value=False,key="nfl-2026-prod-ledger-audit"):
+        if prod.empty:
+            st.caption("No immutable 2026 production wager events were found.")
+        else:
+            audit=prod.copy()
+            audit["Game (ET)"]=audit["game_start"].dt.tz_convert("America/New_York").dt.strftime("%Y-%m-%d")
+            audit["Matchup"]=audit["away_team"].astype(str)+" @ "+audit["home_team"].astype(str)
+            audit["Status"]=audit["result"].where(audit["result"].isin(["WIN","LOSS","PUSH"]),"AWAITING_PAIRED_SETTLEMENT")
+            audit.loc[~audit["pregame_valid"],"Status"]="INVALID_POSTKICKOFF_CAPTURE"
+            showcols=["Game (ET)","Matchup","market","action","selected","line","odds","captured_at","Status","profit_per_unit","policy","prediction_pair_id","event_id"]
+            st.dataframe(audit[showcols].sort_values("Game (ET)",ascending=False),use_container_width=True,hide_index=True)
     by_market=[]
     for m in ("SPREADS","H2H","TOTALS"):
-        x=perf.get(m) or {}
-        by_market.append({"Market":m,"Bets":int(x.get("n") or 0),"W":int(x.get("wins") or 0),"L":int(x.get("losses") or 0),"P":int(x.get("pushes") or 0),"Hit Rate":_nfl_result_pct(x.get("hit_rate")),"ROI / Unit":_nfl_result_pct(x.get("roi_per_unit"))})
+        g=graded[graded["market"].eq(m)] if not graded.empty else pd.DataFrame()
+        w=int(g["result"].eq("WIN").sum()) if not g.empty else 0
+        l=int(g["result"].eq("LOSS").sum()) if not g.empty else 0
+        p=int(g["result"].eq("PUSH").sum()) if not g.empty else 0
+        ppu=pd.to_numeric(g["profit_per_unit"],errors="coerce") if not g.empty else pd.Series(dtype=float)
+        by_market.append({"Market":m,"Bets":len(g),"W":w,"L":l,"P":p,"Hit Rate":_nfl_result_pct(w/(w+l) if w+l else None),"ROI / Unit":_nfl_result_pct(ppu.mean() if ppu.notna().any() else None)})
     st.dataframe(pd.DataFrame(by_market),use_container_width=True,hide_index=True)
 
     # 2) Frozen CORE fair-value scoreboard from paired predictions/settlements.

@@ -1,4 +1,4 @@
-# NFL Engine V3.17.5 — Prospective Action-Ladder Tracking
+# NFL Engine V3.17.6 — Prospective Action-Ladder Tracking
 # Generated 2026-10-11 from V3.17.0.
 #
 # Logging-only patch: preserves the V3.17 persistent validated-system library,
@@ -18,8 +18,8 @@ from pathlib import Path
 import sys
 import zlib
 
-SOURCE_TAG = "nfl-engine-v3.17.5-prospective-action-ladder-tracking-20261012"
-ENGINE_VERSION = "3.17.5"
+SOURCE_TAG = "nfl-engine-v3.17.6-prospective-reconciliation-20261012"
+ENGINE_VERSION = "3.17.6"
 BUNDLED_COMPONENT_COUNT = 33
 
 _COMPONENT_MANIFEST = {'nfl_advanced_stat_research_v24': {'lines': 509, 'sha256': '8e03588b2a356cf50f1785bacaebe9df39b462cb46335661675d459395753f84', 'source_tag': 'nfl-advanced-stat-v2.4-orthogonal-hidden-signal-research-20261003'}, 'nfl_audit_v1': {'lines': 463, 'sha256': '2ffb2cfd990a156d800683e41d70e617c1949710dc7df2b78333524ed1be2f5c', 'source_tag': 'nfl-audit-v1.3-prior-feature-provenance-20260930'}, 'nfl_betting_engine_v1': {'lines': 844, 'sha256': '4ef6bfea7e3b27c1af98e61ed599db9301428149e3b70d1e42d2f87dd8fa27e7', 'source_tag': 'nfl-betting-engine-v1.0-unified-decision-20261002'}, 'nfl_challenger_v1': {'lines': 348, 'sha256': 'a30527b93c6b0675572d738254c1a2b9aa28d6dac73d8b6e44e1911182eb8779', 'source_tag': 'nfl-challenger-v1.4.1-production-contract-no-unverified-live-context-20261001'}, 'nfl_edge_authority_v2': {'lines': 914, 'sha256': '496d9460e9af3b8692c924869af44c2c8c845f63e05c51e9ac5ad3ea74690ca0', 'source_tag': 'nfl-edge-authority-v2.5-four-lane-multidimensional-research-20261003'}, 'nfl_edge_gate_v1': {'lines': 453, 'sha256': '776ad1c1be1ebab611192f2a3aed4aa6c2cb06ed1c96dd5dbd9322d32b403e07', 'source_tag': 'nfl-edge-gate-v1.9.4-season-forward-dual-scorecard-20261001'}, 'nfl_feature_audit_v1': {'lines': 339, 'sha256': '515f55395ecc9ed4236062abdf36a228221f42a02504641ea67b0be098dbcfb3', 'source_tag': 'nfl-feature-audit-v1.3-prior-only-20260930'}, 'nfl_heavy_research_v31': {'lines': 990, 'sha256': '0798340b58af3fdab3b2c26e44a1ab986adf58cf1ab4e99f535789a82fa2f4f9', 'source_tag': 'nfl-heavy-research-v2.11.2-source-confluence-attribution-20261004'}, 'nfl_intelligence_v1': {'lines': 992, 'sha256': '21b849846b874ca963e07b88d6d3f0486ac193ce37624a9556501bd152c013c1', 'source_tag': 'nfl-intelligence-v1.10-pathi-scored-system-overlay-20261004'}, 'nfl_live_feature_parity_v1': {'lines': 688, 'sha256': 'e5f6c238c0c8c1f0bf136f79b1010eff2733c56ba49dd75c631df560ef249c1c', 'source_tag': 'nfl-production-v1-live-feature-parity-v1.0.5-frozen-local-feature-contract-20261002'}, 'nfl_market_backend_v261': {'lines': 407, 'sha256': '14d58ca354bcd2dd77860ad8df2cc3abfc90d00fd440dd849841766592399a79', 'source_tag': 'nfl-market-backend-v2.6.1-utils-canonical-20261003'}, 'nfl_model_authority_v26': {'lines': 1905, 'sha256': '6add64176abaf1bec610c9232b894df10ec477342b0bb5842c1147495c083f5d', 'source_tag': 'nfl-model-authority-v2.6.2-v316-deep-live-parity-20261011'}, 'nfl_multidimensional_edge_v25': {'lines': 357, 'sha256': 'dfe0557fd81882904f13615428aa9d7387531c040bba887f5052125f5da82a7b', 'source_tag': 'nfl-multidimensional-edge-v2.5-four-lane-research-20261003'}, 'nfl_pbp_attribution_v1': {'lines': 877, 'sha256': '7b56e26b2dbb0ef8cab0d3df84e529694ce0edef1cdc11129ef9c3e9c68eba2c', 'source_tag': 'nfl-pbp-attribution-v1-research-v2.0.2-frozen-core2-20261001'}, 'nfl_pbp_foundation_v1': {'lines': 576, 'sha256': '46a90b686467dad388055784b583de0dc537e533f8e990a0055000d49aad8e63', 'source_tag': 'nfl-pbp-foundation-v1-research-v2.0-20261001'}, 'nfl_production_live_v1': {'lines': 716, 'sha256': 'f73d255a88195d7d0d1b449f0a15f1bcdc6771df090d69c4d3e49de993b0eaae', 'source_tag': 'nfl-production-v2.6.1-utils-market-backend-20261003'}, 'nfl_production_replay_v1': {'lines': 574, 'sha256': '8400ba4f26fa1a013ae49dcae8d5d7288850572a0ef14bfe007401dba8b61da7', 'source_tag': 'nfl-production-v2.6.1-historical-model-authority-freeze-20261003'}, 'nfl_production_v1': {'lines': 741, 'sha256': '458f547ae7f4708fc1d87f2a7a2598aae26346fb87079a3b3f936874a0aa280c', 'source_tag': 'nfl-production-v1.1.1-publish-receipt-normalization-20261002'}, 'nfl_prospective_ledger_v1': {'lines': 467, 'sha256': '787d89f034975cae1cf0c4c8975fb25846c110186a5642bad522c33df8a85211', 'source_tag': 'nfl-prospective-ledger-v1.9.2-sharp-research-20261001'}, 'nfl_prospective_ledger_v2': {'lines': 88, 'sha256': '0ab675bb6eaf549073a395092c17db38f4502c6275a7c8c88c4e23385420d4ba', 'source_tag': 'nfl-prospective-ledger-v2-v1.9.3-enhanced-shadow-20261001'}, 'nfl_prospective_ledger_v3': {'lines': 86, 'sha256': '50edf90e02855f393f280c60537b0324f69904ffa4d757c3115a08b38977c329', 'source_tag': 'nfl-prospective-ledger-v3-v1.9.4-edge-gate-shadow-20261001'}, 'nfl_pt_incremental_v1': {'lines': 334, 'sha256': 'dca569a7bda557cbc853b9871b542a53154ad062d87466adf800113cc60e00be', 'source_tag': 'nfl-pt-incremental-v1.1-encompassing-control-residual-20261007'}, 'nfl_research_contract_v1': {'lines': 180, 'sha256': 'f8472ee87d04dd65aed8324d97be57022d4af1be03ac27dea64c829e805be284', 'source_tag': 'nfl-research-contract-v1.9.2-protected-architecture-20261001'}, 'nfl_research_engine_v2': {'lines': 214, 'sha256': '33b608664c7c9665aed1dfe827615792befc93bfbc43751ea98db3eaf5a27314', 'source_tag': 'nfl-research-engine-v1.9.4-edge-gate-manager-20261001'}, 'nfl_research_v2_contract': {'lines': 103, 'sha256': '6458ab4f2529f26c95254e9f4d182fc39985125d90938f629fd4f0f0b289189d', 'source_tag': 'nfl-research-v2.0-foundation-expansion-20261001'}, 'nfl_residual_miner_v2': {'lines': 257, 'sha256': 'd7e20ca94b3b692441fd4a54597e4bd658962293b596c4d40c3becd0f2a27aa6', 'source_tag': 'nfl-residual-miner-v2.0-market-error-fdr-20261001'}, 'nfl_score_engine_v1': {'lines': 388, 'sha256': 'd1a9928903bee5a76ee0e5c8cc46adaefa77d31323be9969474a12db3c226dbc', 'source_tag': 'nfl-score-engine-v1.6-team-offense-defense-20260930'}, 'nfl_specialized_v1': {'lines': 312, 'sha256': 'c0b38ddd872c50a64cf63357a2f87bad26560534c42c4c9f4db3a39f6fb47dcc', 'source_tag': 'nfl-specialized-v1.5-score-domain-h2h-stack-20260930'}, 'nfl_stat_selector_v23': {'lines': 633, 'sha256': '1d06d3957c98a3ea628089d02fed6e9ad1f9fb8579822e3e8999872dc0b8a3b6', 'source_tag': 'nfl-stat-selector-v2.3-ncaaf-style-market-reliability-20261002'}, 'nfl_stats_context_v1': {'lines': 489, 'sha256': 'e8681086b305736734a8b3548364d61c9c4a0fba383dd04676153aaa685d852f', 'source_tag': 'nfl-stats-context-v1.9.1-existing-dataset-only-20261001'}, 'nfl_structured_research_v2': {'lines': 453, 'sha256': '1b4e8d30e5d364048a0751c397c957315c171fbe5860fffded20cb1daa2194af', 'source_tag': 'nfl-structured-research-v1.9.4-null-safe-season-forward-20261001'}, 'nfl_system_lab_v1': {'lines': 505, 'sha256': 'e459ebcb3ca7c98105bea3576977d6ecfd958e2fedb26fb5cd96c22f63058bc4', 'source_tag': 'nfl-system-lab-v1-research-v2.0-ncaaf-miner-v3-methodology-20261001'}, 'nfl_system_lab_v3': {'lines': 3594, 'sha256': '8f5a53c718c24de485988fc3e9a24b83b91f0e579de90718fa9a88ec3a0fee5e', 'source_tag': 'nfl-system-lab-v3.17.1-bigal-fingerprint-detail-logging-20261011'}}
@@ -186,7 +186,7 @@ def preflight() -> dict:
 # intentionally much lighter: it reuses the already-stored frozen champion fair
 # values, overlays the newest scanner quotes, reapplies the frozen model-authority
 # price/edge policy, and publishes only the current dashboard state.
-NFL_BACKGROUND_LIVE_REFRESH_TAG = "nfl-engine-v3.10.8-live-miner-background-refresh-20261005"
+NFL_BACKGROUND_LIVE_REFRESH_TAG = "nfl-engine-v3.17.6-background-wager-settlement-20261012"
 NFL_BACKGROUND_LIVE_LOOKAHEAD_DAYS = 8
 
 
@@ -426,7 +426,12 @@ def run_background_live_market_refresh(*, bq_client, storage_client, bucket_name
     # the first qualifying line/price without executing a wager or refitting CORE.
     capture=auth._capture(storage_client,bucket_name,rows,now,contract.get("contract_sha256"))
     action_tracking_capture=auth._capture_action_tracking(storage_client,bucket_name,rows,now,contract.get("contract_sha256"))
+    # Market-only refreshes must also catch up *production wager* settlements.
+    # Otherwise action-tracking advances while production performance is frozen
+    # at whichever snapshot the last weekly refit happened to publish.
+    settlement=auth._settle(bq_client,storage_client,bucket_name,now)
     action_tracking_settlement=auth._settle_action_tracking(bq_client,storage_client,bucket_name,now)
+    perf=auth._performance(storage_client,bucket_name)
     actions=("STRONG BET","BET","CANDIDATE","PASS","MODEL ONLY","EDGE — NO EXEC QUOTE","NO MARKET")
     counts={a:sum(1 for r in rows if r.get("action")==a) for a in actions}
     state={
@@ -439,8 +444,8 @@ def run_background_live_market_refresh(*, bq_client, storage_client, bucket_name
         "live_rows":rows,
         "action_counts":counts,
         "capture":capture,
-        "settlement":prior_cur.get("settlement") or {},
-        "live_performance":prior_cur.get("live_performance") or {},
+        "settlement":settlement,
+        "live_performance":perf,
         "action_tracking":{"capture":action_tracking_capture,"settlement":action_tracking_settlement},
         "betting_authority":"NFL_PRODUCTION_BETTING_V3_3_SOURCE_NEUTRAL_SYSTEM_CONFIRMED",
         "shadow_evidence_role":"CORE_CREATES_CANDIDATE__QUALIFIED_SYSTEMS_CONFIRM_OR_CONFLICT__OTHER_DIAGNOSTICS_STATIC",
@@ -460,6 +465,7 @@ def run_background_live_market_refresh(*, bq_client, storage_client, bucket_name
         "status":"NFL_BACKGROUND_LIVE_REFRESH_PASS","source_tag":NFL_BACKGROUND_LIVE_REFRESH_TAG,
         "prediction_games":len(preds),"live_rows":len(rows),"action_counts":counts,"capture":capture,
         "action_tracking":{"capture":action_tracking_capture,"settlement":action_tracking_settlement},
+        "production_settlement":settlement,"production_live_performance":perf,
         "overlay_rows":overlay_rows,"current_uri":state["current_uri"],
         "automatic_promotion":False,"model_refit":False,"challenger_refresh":False,
         "betting_policy_source_tag":getattr(auth,"BETTING_POLICY_SOURCE_TAG",None),
