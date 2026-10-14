@@ -20,6 +20,7 @@ absolute scaled market-error threshold 0.75.
 from __future__ import annotations
 
 import gzip
+import logging
 import hashlib
 import os
 import json
@@ -49,18 +50,23 @@ NCAAF_CORE_MIN_EV = 0.02
 # and independently loadable by the scanner/UI. It does not modify CORE artifacts.
 _NCAAF_VERIFIED_LIVE_MINER_REPORT = None
 _NCAAF_LIVE_REPORT_CHECKED = False
+_NCAAF_LIVE_REPORT_CONTEXT = {"storage_client": None, "bq_client": None, "bucket_name": None}
 
 
-def set_current_live_research_report(report):
-    """Register an already-validated immutable research report for THIS process.
+def set_current_live_research_report(report, *, storage_client=None, bq_client=None, bucket_name=None):
+    """Bind one verified read-only research registry and its live input clients.
 
-    Never supplies research evidence when a registry was not validated. A caller
-    may clear the cache with None at the start of each weekly scoring execution.
+    Each invocation can clear the previous report; this never changes the frozen
+    probability contract or authorizes unqualified research mechanisms.
     """
     global _NCAAF_VERIFIED_LIVE_MINER_REPORT, _NCAAF_LIVE_REPORT_CHECKED
     _NCAAF_VERIFIED_LIVE_MINER_REPORT = report if isinstance(report, dict) else None
-    _NCAAF_LIVE_REPORT_CHECKED = bool(report)
-    return bool(_NCAAF_VERIFIED_LIVE_MINER_REPORT)
+    _NCAAF_LIVE_REPORT_CHECKED = isinstance(report, dict)
+    _NCAAF_LIVE_REPORT_CONTEXT.update({
+        "storage_client": storage_client, "bq_client": bq_client,
+        "bucket_name": bucket_name,
+    })
+    return _NCAAF_LIVE_REPORT_CHECKED
 
 
 def _attach_live_research_if_missing(rows, *, storage_client=None, bucket_name=None):
@@ -68,16 +74,17 @@ def _attach_live_research_if_missing(rows, *, storage_client=None, bucket_name=N
     import logging
     import types
     if rows is None or rows.empty: return rows
-    if ('NCAAF_RV22_Miner_Votes' in rows.columns and
-            'NCAAF_Miner_Qualified' in rows.columns and
-            pd.to_numeric(rows['NCAAF_Miner_Qualified'],errors='coerce').fillna(0).gt(0).any()):
+    # Explicit per-pass marker avoids reattaching when a valid registry yields
+    # no triggers. Never trust stale Miner columns from the upstream raw feed.
+    if ('_ncaaf_live_research_attached_verified' in rows.columns and
+            rows['_ncaaf_live_research_attached_verified'].fillna(False).eq(True).all()):
         logging.info('[NCAAF-RV22-LIVE-MINER] status=ALREADY_ATTACHED rows=%d',len(rows))
         return rows
     global _NCAAF_VERIFIED_LIVE_MINER_REPORT, _NCAAF_LIVE_REPORT_CHECKED
     try:
         import ncaaf_research_v2 as research
-        bucket=str(bucket_name or os.getenv('MODEL_BUCKET','sharp-models'))
-        client=storage_client
+        bucket=str(bucket_name or _NCAAF_LIVE_REPORT_CONTEXT.get("bucket_name") or os.getenv('MODEL_BUCKET','sharp-models'))
+        client=storage_client or _NCAAF_LIVE_REPORT_CONTEXT.get("storage_client")
         if client is None: client=storage.Client()
         report=_NCAAF_VERIFIED_LIVE_MINER_REPORT
         if not isinstance(report,dict):
@@ -88,16 +95,29 @@ def _attach_live_research_if_missing(rows, *, storage_client=None, bucket_name=N
                     json.dumps(diagnosis,sort_keys=True,default=str))
                 return rows
             _NCAAF_VERIFIED_LIVE_MINER_REPORT=report
-        ctx=types.SimpleNamespace(GCS_BUCKET=bucket,gcs_client=client)
+        ctx=types.SimpleNamespace(
+            GCS_BUCKET=bucket, gcs_client=client,
+            bq_client=_NCAAF_LIVE_REPORT_CONTEXT.get("bq_client"),
+            HISTORICAL_NCAAF_CORE_VIEW=os.getenv("NCAAF_HISTORICAL_CORE_VIEW",
+                "sharplogger.sharp_data.ncaaf_historical_core_training_vw"),
+        )
         decorated=research.attach_live_miner_votes(rows,report,dashboard_module=ctx)
         if not isinstance(decorated,pd.DataFrame) or len(decorated)!=len(rows):
             raise RuntimeError('LIVE_MINER_ROW_COUNT_CHANGED')
         if 'NCAAF_RV22_Miner_Votes' not in decorated.columns:
             raise RuntimeError('LIVE_MINER_VOTES_FIELD_MISSING')
+        decorated=decorated.copy()
+        decorated['_ncaaf_live_research_attached_verified']=True
         triggered=sum(len(v) for v in decorated['NCAAF_RV22_Miner_Votes'] if isinstance(v,list))
         pt_rows=int(pd.to_numeric(decorated.get('NCAAF_PT_Five_Source_Count',pd.Series(0,index=decorated.index)),errors='coerce').ge(3).sum())
-        logging.info('[NCAAF-RV22-LIVE-MINER] status=ATTACHED rows=%d triggered_row_votes=%d pt_min3_rows=%d core_frozen=TRUE',
-                     len(decorated),triggered,pt_rows)
+        def _one_int(field):
+            v=pd.to_numeric(decorated.get(field,pd.Series(0,index=decorated.index)),errors='coerce')
+            return int(v.fillna(0).max()) if len(v) else 0
+        logging.info('[NCAAF-RV22-LIVE-MINER] status=ATTACHED rows=%d triggered_row_votes=%d confirmed=%d live_qualified=%d live_evaluable=%d research_evaluable=%d pt_min3_rows=%d bq_context=%s pt_feed=%s core_frozen=TRUE',
+                     len(decorated),triggered,_one_int('NCAAF_Miner_Confirmed_Research'),
+                     _one_int('NCAAF_Miner_Qualified'),_one_int('NCAAF_Miner_Evaluable'),
+                     _one_int('NCAAF_Miner_Research_Evaluable'),pt_rows,bool(ctx.bq_client),
+                     str(decorated.get('NCAAF_PT_Meta_Status',pd.Series(['UNKNOWN'])).iloc[0]))
         return decorated
     except Exception as exc:
         logging.exception('[NCAAF-RV22-LIVE-MINER] status=ERROR type=%s detail=%s core_frozen=TRUE',type(exc).__name__,exc)
@@ -1433,31 +1453,19 @@ def choose_current_production_picks(scored: pd.DataFrame,contract: dict,*,execut
         _canon = pd.to_datetime(picks["_prod_game_start"], errors="coerce", utc=True)
         _orig = pd.to_datetime(picks.get("Game_Start"), errors="coerce", utc=True)
         picks["Game_Start"] = _canon.where(_canon.notna(), _orig)
-    # Research-only first-pre-game capture after the frozen CORE candidate gate.
-    # All caller paths (scanner/UI) converge here, so future promotion cannot
-    # be based on hindsight or cherry-picked historical candidate slices.
+    # Research-only first-pregame PT capture from these SAME canonical, selected
+    # spread-market decisions; no duplicate rescore, no independent quote selector.
+    # Fail-closed if either historical PT margin is unavailable. Never authorizes
+    # an unpromoted PT model or changes CORE action/probability.
     try:
-        import pt_promotion_v1 as _ptgov
-        _ptpros=[]
-        for _,r in picks.iterrows():
-            if str(r.get("Market") or "").lower()!="spreads": continue
-            home=_norm_team(r.get("Home_Team_Norm",r.get("Home_Team","")))
-            target=_norm_team(r.get("_prod_target",r.get("Outcome_Norm",r.get("Outcome",""))))
-            if not home or not target: continue
-            _ptpros.append({"game_id":r.get("_prod_game_id"),"game_start":r.get("Game_Start"),
-                 "core_candidate":bool(r.get("_core_qualifies",False)),
-                 "core_home_direction":1 if target==home else -1,
-                 "home_spread":(r.get("_line") if target==home else -float(r.get("_line"))) if pd.notna(r.get("_line")) else np.nan,
-                 "incumbent_margin_home":r.get("NCAAF_PT_Meta_Margin_Home"),
-                 "challenger_margin_home":r.get("NCAAF_PT_Five_Source_Margin_Home"),
-                 "source_count":r.get("NCAAF_PT_Five_Source_Count"),
-                 "selection_sha256":r.get("NCAAF_PT_Five_Source_Selection_SHA"),
-                 "prediction_contract":"NCAAF_PRODUCTION_V1_FROZEN"})
-        if _ptpros:
-            _ptgov.capture(storage.Client(),os.getenv("MODEL_BUCKET","sharp-models"),"NCAAF","SPREADS",_ptpros)
+        import ncaaf_research_v2 as _live_pt
+        _ctx=_NCAAF_LIVE_REPORT_CONTEXT
+        _sc=_ctx.get("storage_client")
+        _bucket=str(_ctx.get("bucket_name") or os.getenv("MODEL_BUCKET","sharp-models"))
+        _live_pt.pt_promotion_capture_after_core(
+            picks,storage_client=_sc,bucket_name=_bucket,log_func=logging.info)
     except Exception:
-        # PT promotion collection is optional research infrastructure: cannot
-        # interrupt existing frozen model predictions or bet selection.
         import logging as _ptlogging
-        _ptlogging.exception("[NCAAF-PT-PROMOTION-CAPTURE] HOLD")
+        _ptlogging.exception("[NCAAF-PT-PROMOTION-CAPTURE] status=HOLD core_frozen=TRUE")
+
     return picks

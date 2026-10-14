@@ -924,11 +924,24 @@ def main():
                 f"[NCAAF-WEEKLY-SETTLE] status={_settle.get('status')} "
                 f"settled={int(_settle.get('settled',0) or 0)} artifact={str(_contract.get('_artifact_sha256'))[:16]}"
             )
+            # Refresh the current validated manual GCS PT snapshot BEFORE the
+            # betting vote pass. This remains read-only historical research context;
+            # no source is scraped here and no CORE probability is modified.
+            try:
+                _pt=_nrv22.refresh_prediction_tracker_external(
+                    dashboard_module=None,storage_client=gcs,bucket_name=bucket,
+                    include_history=False,include_current=True,force=True,log_func=log_func)
+                log_func("[NCAAF-WEEKLY-PT-REFRESH-PRE-SCORE] "+json.dumps({
+                    "status":_pt.get("status"),"current":_pt.get("current"),
+                    "production_mutation":False,"authority":0},default=str,sort_keys=True))
+            except Exception as _pt_pre_exc:
+                log_func(f"[NCAAF-WEEKLY-PT-REFRESH-PRE-SCORE] status=UNAVAILABLE error={type(_pt_pre_exc).__name__}:{_pt_pre_exc} authority=0")
             pw.emit("market","NCAAF Weekly Update: load current pregame market and refresh frozen production scoring",pct=0.50)
             _moves=_utils.read_recent_sharp_moves(
                 hours=240,table=getattr(_utils,"DEFAULT_MOVES_VIEW","sharp_data.moves_with_features_merged"),
                 pregame_only=True,sport="NCAAF",use_bq_storage=False,
             )
+            _report=None
             # Load/read-only research evidence BEFORE Utils/Move Master scores
             # the slate; the production module consumes this exact report
             # through its shared decision function. Frozen CORE is not refit.
@@ -936,17 +949,22 @@ def main():
                 import json as _ncaaf_live_json
                 _report,_report_diag=_nrv22.load_current_report_diagnostic(
                     bucket_name=bucket,storage_client=gcs)
-                _registered=_npv1.set_current_live_research_report(_report)
+                _registered=_npv1.set_current_live_research_report(
+                    _report,storage_client=gcs,bq_client=_bq_client,bucket_name=bucket)
                 log_func("[NCAAF-WEEKLY-LIVE-REGISTRY-PRE-SCORE] "+_ncaaf_live_json.dumps({
                     **_report_diag,"installed":_registered,"production_mutation":False,
                     "core_frozen":True},sort_keys=True,default=str))
             except Exception as _ncaaf_live_err:
-                _npv1.set_current_live_research_report(None)
+                _npv1.set_current_live_research_report(
+                    None,storage_client=gcs,bq_client=_bq_client,bucket_name=bucket)
                 log_func(f"[NCAAF-WEEKLY-LIVE-REGISTRY-PRE-SCORE] status=ERROR type={type(_ncaaf_live_err).__name__} detail={_ncaaf_live_err} core_frozen=TRUE")
             if _moves is None or getattr(_moves,"empty",True):
                 _refresh={"status":"NO_CURRENT_MARKET","attempted":0,"inserted":0,"scored_rows":0,"selected_markets":0}
             else:
-                _refresh=_utils.score_and_record_ncaaf_production_v1(_moves,client=_bq_client,contract=_contract)
+                _refresh=_utils.score_and_record_ncaaf_production_v1(
+                    _moves,client=_bq_client,contract=_contract,
+                    research_report=_report if isinstance(_report,dict) else None,
+                    storage_client=gcs,return_picks=True)
             log_func(
                 f"[NCAAF-WEEKLY-REFRESH] status={_refresh.get('status')} rows={0 if _moves is None else len(_moves)} "
                 f"scored_rows={int(_refresh.get('scored_rows',0) or 0)} selected_markets={int(_refresh.get('selected_markets',0) or 0)} "
@@ -954,21 +972,22 @@ def main():
                 f"contract_source={_refresh.get('contract_source','NA')} artifact={_refresh.get('artifact',str(_contract.get('_artifact_sha256'))[:16])} "
                 "probability_refit=FALSE research_run=FALSE production_publish=FALSE automatic_promotion=FALSE"
             )
-            # Research-only first-pregame PT challenger capture AFTER canonical
-            # frozen CORE candidates exist. This cannot create or execute bets.
+            # The canonical selector already captured PT observations from the
+            # exact selected spread rows. Here we verify coverage and settle, but
+            # DO NOT run a second score_live_rows() or quote selection.
             try:
-                if _moves is not None and not getattr(_moves,"empty",True):
-                    from types import SimpleNamespace as _pt_NS
-                    _pt_context=_pt_NS(GCS_BUCKET=bucket,gcs_client=gcs)
-                    _pt_scored=_npv1.score_live_rows(_moves,_contract)
-                    _pt_picks=_npv1.choose_current_production_picks(_pt_scored,_contract)
-                    if _pt_picks is not None and not getattr(_pt_picks,"empty",True):
-                        _pt_picks,_pt_feed_diag=_nrv22._pt_attach_current_live_frame(
-                            _pt_picks,dashboard_module=_pt_context)
-                        _pt_capture=_nrv22.pt_promotion_capture_after_core(
-                            _pt_picks,storage_client=gcs,bucket_name=bucket,log_func=log_func)
-                        log_func("[NCAAF-PT-CANDIDATE-FORWARD-CAPTURE] "+json.dumps({
-                            "capture":_pt_capture,"feed":_pt_feed_diag},default=str,sort_keys=True))
+                _canonical=_refresh.pop("picks_frame",None)
+                if _canonical is not None and not getattr(_canonical,"empty",True):
+                    _sp=_canonical.loc[_canonical.get("Market").astype(str).str.lower().eq("spreads")]
+                    log_func("[NCAAF-PT-CANONICAL-SELECTION] "+json.dumps({
+                        "status":"PASS","all_market_rows":len(_canonical),
+                        "spread_rows":len(_sp),
+                        "core_spread_candidates":int(_sp.get("_core_qualifies").fillna(False).astype(bool).sum()) if "_core_qualifies" in _sp else 0,
+                        "matches_ledger_selector":True,"duplicate_scoring":False,
+                        "capture_occurs_in_shared_selector":True,
+                    },sort_keys=True))
+                else:
+                    log_func("[NCAAF-PT-CANONICAL-SELECTION] status=NO_PICKS duplicate_scoring=FALSE")
                 _pt_review=_nrv22.pt_promotion_settle_and_review(
                     storage_client=gcs,bucket_name=bucket,log_func=log_func)
                 log_func("[NCAAF-PT-CANDIDATE-FORWARD-REVIEW] "+json.dumps(_pt_review,default=str,sort_keys=True))
@@ -989,25 +1008,6 @@ def main():
             # with no external-rating signal.
             log_func("[NCAAF-PT-GCS-MANUAL] reason=WEEKLY refresh_network=FALSE missing_games_expected=TRUE authority=0")
 
-            # GCS-first model-side Prediction Tracker refresh. This only updates the research
-            # snapshot in GCS; it cannot modify production predictions/authority.
-            try:
-                _pt=_nrv22.refresh_prediction_tracker_external(
-                    dashboard_module=None,storage_client=gcs,bucket_name=bucket,
-                    include_history=False,include_current=True,force=True,log_func=log_func
-                )
-                log_func(
-                    f"[NCAAF-WEEKLY-PT-REFRESH] status={_pt.get('status')} "
-                    f"current_rows={((_pt.get('current') or {}).get('rows',0))} "
-                    f"archive_rows={((_pt.get('current') or {}).get('archive_rows',0))} "
-                    f"live_rows={((_pt.get('current') or {}).get('live_rows',0))} "
-                    f"live_full_five={((_pt.get('current') or {}).get('live_full_five_rows',0))} "
-                    f"live_external_consensus_ready={((_pt.get('current') or {}).get('live_external_consensus_ready_rows',0))} "
-                    f"external_consensus_contract={((_pt.get('current') or {}).get('external_consensus_contract',''))} "
-                    "production_mutation=FALSE authority=0"
-                )
-            except Exception as _pt_exc:
-                log_func(f"[NCAAF-WEEKLY-PT-REFRESH] status=UNAVAILABLE error={type(_pt_exc).__name__}:{_pt_exc} production_mutation=FALSE authority=0")
             pw.emit("done","NCAAF Weekly Production Update complete ✅",pct=1.0)
             return
 

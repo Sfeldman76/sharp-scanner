@@ -377,22 +377,28 @@ def _bg_authoritative_rows_from_snapshot(prediction_rows, snapshot: dict, now):
 def _bg_reuse_prior_shadow(rows, prior_rows):
     """Carry forward only diagnostics that do not control MODEL -> ACTION."""
     prior={(str(r.get("prediction_pair_id") or ""),str(r.get("market") or "").upper()):r for r in (prior_rows or [])}
-    copy_fields=(
-        "edge_sources","edge_votes","system_labels","system_trigger_votes","stat_selector_support","stat_selector_live_status",
-        "independent_mechanisms","independence_keys","edge_contract_sha256","shadow_edge_action",
-        "shadow_edge_decision","shadow_evidence_status",
-        # Five-source ratings are immutable research context from Weekly/Heavy;
-        # market-only background scans update executable quotes, not the PT feed.
-        "pt_auto_challenger_margin_home","pt_auto_incumbent_margin_home",
-        "pt_auto_source_count","pt_auto_selection_sha256",
-    )
+    # STRICTLY NON-VOTING, NON-PRICED DIAGNOSTICS ONLY. System definitions remain
+    # frozen in GCS, while live triggers are reevaluated from current quotes.
+    # Prior edge_votes/system_trigger_votes/stat_selector_support can independently
+    # upgrade a CORE candidate; copying them across a line move is unsafe.
+    copy_fields=("edge_contract_sha256","shadow_edge_action",
+                 "shadow_edge_decision")
     out=[]
     for src in rows or []:
         r=dict(src); old=prior.get((str(r.get("prediction_pair_id") or ""),str(r.get("market") or "").upper()))
         if old:
             for k in copy_fields:
                 if k in old: r[k]=old.get(k)
-            r["shadow_evidence_status"]="REUSED_FROM_LAST_WEEKLY_OR_RESEARCH_REFRESH"
+            r["shadow_evidence_status"]="PRIOR_NONVOTING_DIAGNOSTICS_ONLY"
+            r["system_trigger_votes"]=[]
+            r["edge_votes"]=[]
+            r["edge_sources"]=[]
+            r["system_labels"]=[]
+            r["stat_selector_support"]=[]
+            r["stat_selector_live_status"]="NOT_CURRENTLY_REEVALUATED"
+            r["independent_mechanisms"]=0
+            r["independence_keys"]=[]
+            r["prior_live_votes_discarded"]=True
         out.append(r)
     return out
 
@@ -422,6 +428,13 @@ def run_background_live_market_refresh(*, bq_client, storage_client, bucket_name
     snapshot,overlay_rows=_bg_overlay_current_quotes(snapshot,live_market_rows,now)
     rows=_bg_authoritative_rows_from_snapshot(preds,snapshot,now)
     rows=_bg_reuse_prior_shadow(rows,prior_cur.get("live_rows") or [])
+    _prior_votes=sum(len(r.get("system_trigger_votes") or [])+len(r.get("edge_votes") or [])
+        for r in (prior_cur.get("live_rows") or []))
+    log_func("[NFL-BACKGROUND-VOTE-REFRESH] "+json.dumps({
+        "status":"PRIOR_EXECUTABLE_VOTES_DISCARDED","prior_vote_items":_prior_votes,
+        "current_rows":len(rows),"current_quote_triggers_to_be_reevaluated":True,
+        "legacy_stat_support":"NO_LIVE_REVALIDATION__ABSTAIN",
+        "core_frozen":True},sort_keys=True))
     contract=auth.load_contract(storage_client=storage_client,bucket_name=bucket_name)
     overlay_registry=auth._load_overlay_registry(storage_client,bucket_name)
     rows,miner_diag=auth.augment_live_miner_votes(rows,bq_client=bq_client,storage_client=storage_client,bucket_name=bucket_name,overlay_registry=overlay_registry,log_func=log_func)
@@ -433,6 +446,12 @@ def run_background_live_market_refresh(*, bq_client, storage_client, bucket_name
     except Exception as promo_exc:
         log_func(f"[NFL-PT-PROMOTION-BG] status=HOLD error={type(promo_exc).__name__}:{promo_exc}")
     rows=auth.apply_model_authority_rows(rows,contract,storage_client=storage_client,bucket_name=bucket_name,overlay_registry=overlay_registry)
+    log_func("[NFL-BACKGROUND-VOTE-REFRESH-RESULT] "+json.dumps({
+        "status":"RECOMPUTED_CURRENT_LINE","rows":len(rows),
+        "live_miner_trigger_rows":sum(bool(r.get("live_miner_trigger_count")) for r in rows),
+        "live_pathi_trigger_rows":sum(bool(r.get("live_pathi_trigger_count")) for r in rows),
+        "current_system_votes":sum(len(r.get("system_trigger_votes") or []) for r in rows),
+        "core_frozen":True},sort_keys=True))
     # The background scanner owns the current executable quote, so capture a newly
     # qualified recommendation here as an immutable prospective event. This records
     # the first qualifying line/price without executing a wager or refitting CORE.

@@ -164,7 +164,9 @@ def _ncaaf_rv22_report_cached():
     return report
 
 
-def score_and_record_ncaaf_production_v1(df_scan: pd.DataFrame, client=None, contract=None) -> dict:
+def score_and_record_ncaaf_production_v1(df_scan: pd.DataFrame, client=None, contract=None,
+                                          *, research_report=None, storage_client=None,
+                                          return_picks=False) -> dict:
     """Score/lock Production V1 picks with one validated contract identity.
 
     Weekly Update passes the contract it already validated and used for settlement,
@@ -175,8 +177,15 @@ def score_and_record_ncaaf_production_v1(df_scan: pd.DataFrame, client=None, con
     if str(os.getenv("NCAAF_PROD_V1_LEDGER_ENABLED","1")).lower().strip() in ("0","false","no","off"):
         return {"status":"DISABLED","attempted":0,"inserted":0}
     try:
+        import ncaaf_production_v1 as _npv1
         from ncaaf_production_v1 import prepare_current_market_rows,score_live_rows,choose_current_production_picks
         from ncaaf_production_ledger_v1 import record_predictions
+        # Rebind for EVERY pass, including scanner/background: never silently
+        # retain a prior weekly registry or closed BigQuery client across scans.
+        _npv1.set_current_live_research_report(
+            research_report, storage_client=storage_client,
+            bq_client=client if client is not None else bq_client,
+            bucket_name=GCS_BUCKET)
         _contract_source="CALLER_VALIDATED" if isinstance(contract,dict) and contract.get("_artifact_sha256") else "UTILS_GCS_CACHE"
         if _contract_source=="UTILS_GCS_CACHE":
             contract=_ncaaf_prod_v1_contract_cached()
@@ -191,23 +200,20 @@ def score_and_record_ncaaf_production_v1(df_scan: pd.DataFrame, client=None, con
         if base.empty: return {"status":"NO_PREGAME_ROWS","attempted":0,"inserted":0}
         scored=score_live_rows(base,contract)
         scored_count=int(pd.to_numeric(scored.get("_model_prob"),errors="coerce").notna().sum())
-        # V2.2 live Miner is bounded evidence only: qualification came from the
-        # sealed <=2025 research artifact. Current rows merely evaluate triggers.
-        try:
-            from ncaaf_research_v2 import attach_live_miner_votes
-            _rv22=_ncaaf_rv22_report_cached()
-            if isinstance(_rv22,dict):
-                scored=attach_live_miner_votes(scored,_rv22)
-                logging.info("[NCAAF-RV22-LIVE-MINER] status=PASS rows=%d authority=BOUNDED_EVIDENCE_ONLY",len(scored))
-            else:
-                logging.info("[NCAAF-RV22-LIVE-MINER] status=NO_CURRENT_REPORT authority=BOUNDED_EVIDENCE_ONLY")
-        except Exception as _miner_exc:
-            logging.warning("[NCAAF-RV22-LIVE-MINER] status=HOLD error=%s:%s authority=BOUNDED_EVIDENCE_ONLY",type(_miner_exc).__name__,_miner_exc)
+        # Production's shared selector attaches exactly one verified Miner/PT
+        # overlay using the same BigQuery/GCS context as weekly scoring. The
+        # previous independent Utils report loader caused NO_CURRENT_REPORT and
+        # duplicate research attachment, particularly for no-trigger slates.
         picks=choose_current_production_picks(scored,contract,executable_books=REC_BOOKS)
         result=record_predictions(picks,contract,client=client,source="BACKGROUND_SCANNER")
         logging.info("[NCAAF-PROD-V1-BACKGROUND] status=%s scored_rows=%d selected_markets=%d attempted=%d inserted=%d artifact=%s",
           result.get("status"),scored_count,len(picks),int(result.get("attempted",0) or 0),int(result.get("inserted",0) or 0),str(contract.get("_artifact_sha256"))[:16])
-        return {**result,"scored_rows":scored_count,"selected_markets":len(picks),"contract_source":_contract_source,"artifact":str(contract.get("_artifact_sha256"))[:16]}
+        response={**result,"scored_rows":scored_count,"selected_markets":len(picks),"contract_source":_contract_source,"artifact":str(contract.get("_artifact_sha256"))[:16]}
+        # In-process only. Do not write a DataFrame into GCS/JSON/logs. The
+        # weekly PT audit consumes the exact frame already sent to the ledger.
+        if return_picks:
+            response["picks_frame"]=picks
+        return response
     except Exception as exc:
         logging.exception("[NCAAF-PROD-V1-BACKGROUND] failed")
         return {"status":"ERROR","error":f"{type(exc).__name__}:{exc}","attempted":0,"inserted":0}
