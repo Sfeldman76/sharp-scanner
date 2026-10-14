@@ -6212,11 +6212,15 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
                     _r.get("_PT_PROMO_SELECTION_SHA"))
                 def _nonpt(_v):
                     return str(_v.get("evidence_family_key") or "")!="EXTERNAL_RATINGS_FAMILY" and not bool(_v.get("uses_external_ratings_family"))
-                authority_votes_by_game[_gid]=[v for v in authority_votes_by_game[_gid] if _nonpt(v)]
-                research_votes_by_game[_gid]=[v for v in research_votes_by_game[_gid] if _nonpt(v)]
+                # A promoted PT candidate replaces legacy PT only when it has
+                # a valid, available pregame signal FOR THIS GAME. If it abstains
+                # (missing rating, insufficient sources, or neutral edge), retain
+                # independently confirmed old PT Miners; never stack both.
                 if _direction and str(_r.get("Market") or "spreads").lower() in {"spreads","spread",""}:
+                    authority_votes_by_game[_gid]=[v for v in authority_votes_by_game[_gid] if _nonpt(v)]
+                    research_votes_by_game[_gid]=[v for v in research_votes_by_game[_gid] if _nonpt(v)]
                     _target=_norm_team_live(_r.get("Home_Team_Norm",_r.get("Home_Team",""))) if _direction>0 else _norm_team_live(_r.get("Away_Team_Norm",_r.get("Away_Team","")))
-                    _vote={"source_type":"MINER","family_id":"NCAAF_PT_AUTO_FIVE_SOURCE",
+                    _vote={"source_type":"PT","family_id":"NCAAF_PT_AUTO_FIVE_SOURCE",
                         "evidence_family_key":"EXTERNAL_RATINGS_FAMILY","uses_external_ratings_family":True,
                         "target":_target,"market":"spreads","rule":"PROMOTED_FIVE_SOURCE_FAIR_EDGE_2PLUS",
                         "mechanisms":["PT_AUTO_FIVE_SOURCE"],"live_authority_eligible":True,
@@ -7096,17 +7100,41 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         return {"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG,"status":"FAILED","error":f"{type(exc).__name__}:{exc}","production_authority":0}
 
 
-def load_current_report(bucket_name="sharp-models", storage_client=None) -> dict[str,Any] | None:
+def load_current_report_diagnostic(bucket_name="sharp-models", storage_client=None):
+    """Return (validated report, status) without hiding mismatches or GCS failures.
+
+    The source tag remains immutable: a stale/mixed report cannot gain votes.
+    """
+    detail={"bucket":str(bucket_name),"blob":REPORT_CURRENT_BLOB,
+            "expected_source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
     try:
         if storage_client is None:
             from google.cloud import storage
             storage_client=storage.Client()
         blob=storage_client.bucket(bucket_name).blob(REPORT_CURRENT_BLOB)
-        if not blob.exists(): return None
+        if not blob.exists():
+            return None,{**detail,"status":"MISSING_OBJECT"}
         obj=json.loads(blob.download_as_text())
-        return obj if obj.get("source_tag")==NCAAF_RESEARCH_V2_SOURCE_TAG else None
-    except Exception:
-        return None
+        if not isinstance(obj,dict):
+            return None,{**detail,"status":"INVALID_JSON_SHAPE"}
+        detail["actual_source_tag"]=str(obj.get('source_tag') or '')
+        if obj.get('source_tag')!=NCAAF_RESEARCH_V2_SOURCE_TAG:
+            return None,{**detail,"status":"SOURCE_TAG_MISMATCH"}
+        mr=obj.get('system_miner_v3')
+        if not isinstance(mr,dict) or not mr:
+            return None,{**detail,"status":"MISSING_OR_EMPTY_SYSTEM_MINER_REGISTRY"}
+        detail.update(status="READY",markets=sorted(mr.keys()),
+                      confirmed_mechanisms=sum(int((v or {}).get('confirmed_mechanism_count',0) or 0)
+                          for v in mr.values()))
+        return obj,detail
+    except Exception as exc:
+        return None,{**detail,"status":"READ_ERROR",
+                     "error":f"{type(exc).__name__}:{exc}"}
+
+
+def load_current_report(bucket_name="sharp-models", storage_client=None) -> dict[str,Any] | None:
+    report,_=load_current_report_diagnostic(bucket_name=bucket_name,storage_client=storage_client)
+    return report
 
 
 def pt_promotion_capture_after_core(picks: pd.DataFrame, *, dashboard_module=None, storage_client=None, bucket_name="sharp-models", log_func=print):
@@ -7127,7 +7155,7 @@ def pt_promotion_capture_after_core(picks: pd.DataFrame, *, dashboard_module=Non
     for _,r in picks.iterrows():
         if str(r.get("Market") or "").lower()!="spreads":continue
         home=_norm_team_live(r.get("Home_Team_Norm",r.get("Home_Team","")))
-        selected=_norm_team_live(r.get("Outcome_Norm",r.get("Outcome","")))
+        selected=_norm_team_live(r.get("_prod_target",r.get("Outcome_Norm",r.get("Outcome",""))))
         side=1 if selected==home and home else -1
         rows.append({"game_id":r.get("_prod_game_id"),"game_start":r.get("Game_Start"),
             "core_candidate":bool(r.get("_core_qualifies",False)),
@@ -7137,6 +7165,35 @@ def pt_promotion_capture_after_core(picks: pd.DataFrame, *, dashboard_module=Non
             "source_count":r.get("NCAAF_PT_Five_Source_Count"),
             "selection_sha256":r.get("NCAAF_PT_Five_Source_Selection_SHA"),
             "prediction_contract":"NCAAF_PRODUCTION_V1_FROZEN"})
+    locked=gov.read_selection(storage_client,b,"NCAAF","SPREADS")
+    reasons={}
+    from datetime import datetime as _dt,timezone as _tz
+    _now=_dt.now(_tz.utc)
+    for _r in rows:
+        _missing=[]
+        if not _r.get('core_candidate'):_missing.append('NOT_CORE_CANDIDATE')
+        if not _r.get('game_id'):_missing.append('MISSING_GAME_ID')
+        try:
+            _kickoff=pd.to_datetime(_r.get('game_start'),errors='raise',utc=True)
+            if _kickoff.to_pydatetime()<=_now:_missing.append('NOT_PREGAME')
+        except Exception:_missing.append('INVALID_KICKOFF')
+        if not locked or str(_r.get('selection_sha256') or '')!=str((locked or {}).get('selection_sha256') or ''):
+            _missing.append('SELECTION_SHA_MISSING_OR_MISMATCHED')
+        for _key,_code in (('incumbent_margin_home','NO_LEGACY_INCUMBENT_MARGIN'),
+                           ('challenger_margin_home','NO_CHALLENGER_MARGIN'),
+                           ('home_spread','NO_PRE_GAME_SPREAD')):
+            try:_finite=np.isfinite(float(_r.get(_key)))
+            except Exception:_finite=False
+            if not _finite:_missing.append(_code)
+        if float(_r.get('source_count') or 0)<3:_missing.append('CHALLENGER_SOURCE_COUNT_BELOW3')
+        if not _missing:_missing=['ELIGIBLE']
+        for _code in _missing:reasons[_code]=reasons.get(_code,0)+1
+    log_func('[NCAAF-PT-CAPTURE-ELIGIBILITY] '+json.dumps({
+        'spread_rows':len(rows),'reason_counts':reasons,
+        'core_candidates':sum(bool(r.get('core_candidate')) for r in rows),
+        'legacy_full_five_required_for_incumbent':True,
+        'absence_of_pigskin_does_not_block_other_pt_systems':True,
+        'selection_mutated':False,'core_frozen':True},sort_keys=True))
     result=gov.capture(storage_client,b,"NCAAF","SPREADS",rows)
     log_func("[NCAAF-PT-PROMOTION-CAPTURE] "+json.dumps(result,sort_keys=True))
     return result

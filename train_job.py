@@ -929,6 +929,20 @@ def main():
                 hours=240,table=getattr(_utils,"DEFAULT_MOVES_VIEW","sharp_data.moves_with_features_merged"),
                 pregame_only=True,sport="NCAAF",use_bq_storage=False,
             )
+            # Load/read-only research evidence BEFORE Utils/Move Master scores
+            # the slate; the production module consumes this exact report
+            # through its shared decision function. Frozen CORE is not refit.
+            try:
+                import json as _ncaaf_live_json
+                _report,_report_diag=_nrv22.load_current_report_diagnostic(
+                    bucket_name=bucket,storage_client=gcs)
+                _registered=_npv1.set_current_live_research_report(_report)
+                log_func("[NCAAF-WEEKLY-LIVE-REGISTRY-PRE-SCORE] "+_ncaaf_live_json.dumps({
+                    **_report_diag,"installed":_registered,"production_mutation":False,
+                    "core_frozen":True},sort_keys=True,default=str))
+            except Exception as _ncaaf_live_err:
+                _npv1.set_current_live_research_report(None)
+                log_func(f"[NCAAF-WEEKLY-LIVE-REGISTRY-PRE-SCORE] status=ERROR type={type(_ncaaf_live_err).__name__} detail={_ncaaf_live_err} core_frozen=TRUE")
             if _moves is None or getattr(_moves,"empty",True):
                 _refresh={"status":"NO_CURRENT_MARKET","attempted":0,"inserted":0,"scored_rows":0,"selected_markets":0}
             else:

@@ -45,6 +45,65 @@ NCAAF_RESEARCH_MINER_MIN_CONFIRMATION_RATE = 0.56
 NCAAF_CORE_MIN_EDGE = 0.02
 NCAAF_CORE_MIN_EV = 0.02
 
+# Optional read-only research overlay: injected before weekly scoring by train_job
+# and independently loadable by the scanner/UI. It does not modify CORE artifacts.
+_NCAAF_VERIFIED_LIVE_MINER_REPORT = None
+_NCAAF_LIVE_REPORT_CHECKED = False
+
+
+def set_current_live_research_report(report):
+    """Register an already-validated immutable research report for THIS process.
+
+    Never supplies research evidence when a registry was not validated. A caller
+    may clear the cache with None at the start of each weekly scoring execution.
+    """
+    global _NCAAF_VERIFIED_LIVE_MINER_REPORT, _NCAAF_LIVE_REPORT_CHECKED
+    _NCAAF_VERIFIED_LIVE_MINER_REPORT = report if isinstance(report, dict) else None
+    _NCAAF_LIVE_REPORT_CHECKED = bool(report)
+    return bool(_NCAAF_VERIFIED_LIVE_MINER_REPORT)
+
+
+def _attach_live_research_if_missing(rows, *, storage_client=None, bucket_name=None):
+    """One read-only overlay before authority; already decorated rows are unchanged."""
+    import logging
+    import types
+    if rows is None or rows.empty: return rows
+    if ('NCAAF_RV22_Miner_Votes' in rows.columns and
+            'NCAAF_Miner_Qualified' in rows.columns and
+            pd.to_numeric(rows['NCAAF_Miner_Qualified'],errors='coerce').fillna(0).gt(0).any()):
+        logging.info('[NCAAF-RV22-LIVE-MINER] status=ALREADY_ATTACHED rows=%d',len(rows))
+        return rows
+    global _NCAAF_VERIFIED_LIVE_MINER_REPORT, _NCAAF_LIVE_REPORT_CHECKED
+    try:
+        import ncaaf_research_v2 as research
+        bucket=str(bucket_name or os.getenv('MODEL_BUCKET','sharp-models'))
+        client=storage_client
+        if client is None: client=storage.Client()
+        report=_NCAAF_VERIFIED_LIVE_MINER_REPORT
+        if not isinstance(report,dict):
+            report,diagnosis=research.load_current_report_diagnostic(
+                bucket_name=bucket,storage_client=client)
+            if not isinstance(report,dict):
+                logging.warning('[NCAAF-RV22-LIVE-MINER] status=NO_CURRENT_REPORT details=%s',
+                    json.dumps(diagnosis,sort_keys=True,default=str))
+                return rows
+            _NCAAF_VERIFIED_LIVE_MINER_REPORT=report
+        ctx=types.SimpleNamespace(GCS_BUCKET=bucket,gcs_client=client)
+        decorated=research.attach_live_miner_votes(rows,report,dashboard_module=ctx)
+        if not isinstance(decorated,pd.DataFrame) or len(decorated)!=len(rows):
+            raise RuntimeError('LIVE_MINER_ROW_COUNT_CHANGED')
+        if 'NCAAF_RV22_Miner_Votes' not in decorated.columns:
+            raise RuntimeError('LIVE_MINER_VOTES_FIELD_MISSING')
+        triggered=sum(len(v) for v in decorated['NCAAF_RV22_Miner_Votes'] if isinstance(v,list))
+        pt_rows=int(pd.to_numeric(decorated.get('NCAAF_PT_Five_Source_Count',pd.Series(0,index=decorated.index)),errors='coerce').ge(3).sum())
+        logging.info('[NCAAF-RV22-LIVE-MINER] status=ATTACHED rows=%d triggered_row_votes=%d pt_min3_rows=%d core_frozen=TRUE',
+                     len(decorated),triggered,pt_rows)
+        return decorated
+    except Exception as exc:
+        logging.exception('[NCAAF-RV22-LIVE-MINER] status=ERROR type=%s detail=%s core_frozen=TRUE',type(exc).__name__,exc)
+        return rows
+
+
 EXPECTED_STAT_COMBO = ("rushing",)
 EXPECTED_STAT_THRESHOLD = 0.75
 EXPECTED_TOTAL_REPRESENTATIVES = {
@@ -1010,23 +1069,18 @@ def _research_miner_votes(group: pd.DataFrame, market: str) -> List[dict]:
             try: _cr=float(v.get("confirmation_rate",0) or 0)
             except Exception: _cr=0.0
             _historical=bool(str(v.get("evidence_level") or "").upper()=="STRONG_VALIDATED" and _cn>=NCAAF_RESEARCH_MINER_MIN_CONFIRMATION_N and np.isfinite(_cr) and _cr>=NCAAF_RESEARCH_MINER_MIN_CONFIRMATION_RATE)
-            # The locked, historically qualified PT champion is a separately
-            # qualified external family. Verify its signed holdout gate rather
-            # than fabricating a Miner confirmation-rate or future-game count.
-            try:
-                _pt_ci=float(v.get("historical_ci95_lower"))
-                _pt_gain=float(v.get("historical_gain_points"))
-            except (ValueError, TypeError):
-                _pt_ci=np.nan; _pt_gain=np.nan
+            # A forward-validated PT champion is a separately qualified external
+            # system. Do not counterfeit old Miner confirmation-rate evidence.
+            # The research adapter must have read the immutable promotion state.
             _pt_promoted=bool(str(v.get("evidence_level") or "").upper()=="HISTORICAL_PROMOTED"
                  and v.get("promotion_authority") is True
                  and v.get("promotion_source_tag")=="pt-promotion-v1.1-historical-qualification-20261013"
                  and bool(v.get("promotion_evidence_hash"))
                  and v.get("historical_gate_pass") is True
-                 and np.isfinite(_pt_ci) and _pt_ci>0
-                 and np.isfinite(_pt_gain) and _pt_gain>=.10
+                 and _f(v.get("historical_ci95_lower"),float('-inf'))>0.0
+                 and _cn>=300
                  and str(v.get("evidence_family_key"))=="EXTERNAL_RATINGS_FAMILY"
-                 and fid=="NCAAF_PT_AUTO_FIVE_SOURCE" and _cn>=300)
+                 and fid=="NCAAF_PT_AUTO_FIVE_SOURCE")
             _eligible=_historical or _pt_promoted
             if not fid or not target or not _eligible: continue
             key=(fid,target)
@@ -1276,6 +1330,9 @@ def choose_current_production_picks(scored: pd.DataFrame,contract: dict,*,execut
     # outcome-specific _prod_game_id. Never use the legacy side-specific Game_Key.
     d=_attach_production_game_identity(scored)
     if d.empty: return d
+    # The shared Utils scorer, UI and scanner all converge here. Attach only
+    # historically qualified bounded research evidence BEFORE Bet Authority.
+    d=_attach_live_research_if_missing(d)
     d["_pred"]=pd.to_numeric(d.get("_model_prob"),errors="coerce")
     d=d[d["_pred"].between(0.0,1.0)].copy()
     if d.empty: return d
@@ -1335,6 +1392,43 @@ def choose_current_production_picks(scored: pd.DataFrame,contract: dict,*,execut
                 picks.at[ix,"_prod_authority"]=0
     if picks.duplicated(["_prod_game_id","Market"]).any():
         raise RuntimeError("NCAAF PRODUCTION GAME IDENTITY FAIL: multiple selected outcomes in one market")
+    # Read-only betting authority audit; one entry for every eligible CORE game.
+    # Includes named and mined sources, collapsed independent counts and final action.
+    try:
+        import logging as _betlog
+        _core_rows=picks[picks.get('_core_qualifies',pd.Series(False,index=picks.index)).eq(True)]
+        _source_count={}
+        for _,_r in _core_rows.iterrows():
+            for _src in str(_r.get('_system_support_sources','')).split(' | '):
+                if _src: _source_count[_src]=_source_count.get(_src,0)+1
+            for _src in str(_r.get('_system_conflict_sources','')).split(' | '):
+                if _src: _source_count['CONFLICT_'+_src]=_source_count.get('CONFLICT_'+_src,0)+1
+            _betlog.info('[NCAAF-BET-VOTE-ROW] %s',json.dumps({
+                'game_id':str(_r.get('_prod_game_id','')),
+                'market':str(_r.get('Market','')),
+                'core_qualifies':True,
+                'core_target':str(_r.get('_prod_target','')),
+                'decision':str(_r.get('_prod_decision','')),
+                'action':str(_r.get('_prod_action','')),
+                'reason':str(_r.get('_prod_reason','')),
+                'support_independent':int(_f(_r.get('_system_support_count'),0)),
+                'conflict_independent':int(_f(_r.get('_system_conflict_count'),0)),
+                'support_sources':str(_r.get('_system_support_sources','')),
+                'conflict_sources':str(_r.get('_system_conflict_sources','')),
+                'support_families':str(_r.get('_system_support_families','')),
+                'conflict_families':str(_r.get('_system_conflict_families','')),
+                'miner_live_trigger_count':int(_f(_r.get('NCAAF_Miner_Live_Trigger_Count'),0)),
+                'pt_min3':bool(_f(_r.get('NCAAF_PT_Five_Source_Count'),0)>=3),
+            },default=str,sort_keys=True))
+        _betlog.info('[NCAAF-BET-VOTE-AUDIT] %s',json.dumps({
+            'status':'PASS','core_candidate_games':len(_core_rows),
+            'scored_market_games':len(picks),
+            'source_attribution':_source_count,
+            'core_frozen':True,
+        },sort_keys=True))
+    except Exception:
+        import logging as _betlog
+        _betlog.exception('[NCAAF-BET-VOTE-AUDIT] status=ERROR')
     if "_prod_game_start" in picks.columns:
         _canon = pd.to_datetime(picks["_prod_game_start"], errors="coerce", utc=True)
         _orig = pd.to_datetime(picks.get("Game_Start"), errors="coerce", utc=True)
