@@ -6090,8 +6090,8 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
                       "live_authority_eligible":live_eligible,"live_authority_policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY}
                 research_votes_by_game[keys[j]].append(vote)
                 if live_eligible: authority_votes_by_game[keys[j]].append(vote)
-    # PT promotion is separately earned from locked CORE-candidate prospective
-    # evidence. Until then, do not change the existing qualified PT Miner votes.
+    # PT source preference is qualified by independently held-out historical
+    # forecasts, not by waiting for future games. Preserve one PT family vote.
     _pt_promo_state={"status":"INCUMBENT"};_pt_promo_status="NO_STATE"
     try:
         import pt_promotion_v1 as _ptgov
@@ -6122,10 +6122,13 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
                         "evidence_family_key":"EXTERNAL_RATINGS_FAMILY","uses_external_ratings_family":True,
                         "target":_target,"market":"spreads","rule":"PROMOTED_FIVE_SOURCE_FAIR_EDGE_2PLUS",
                         "mechanisms":["PT_AUTO_FIVE_SOURCE"],"live_authority_eligible":True,
-                        "evidence_level":"PROSPECTIVE_PROMOTED","promotion_authority":True,
+                        "evidence_level":"HISTORICAL_PROMOTED","promotion_authority":True,
                         "promotion_source_tag":_pt_promo_state.get("source_tag"),
                         "promotion_evidence_hash":_pt_promo_state.get("historical_evidence_sha256"),
-                        "confirmation_n":_pt_promo_state.get("prospective",{}).get("paired_n")}
+                        "historical_gate_pass":_pt_promo_state.get("historical",{}).get("pass") is True,
+                        "historical_ci95_lower":_pt_promo_state.get("historical",{}).get("ci95_lower"),
+                        "historical_gain_points":_pt_promo_state.get("historical",{}).get("mae_gain_points"),
+                        "confirmation_n":_pt_promo_state.get("historical",{}).get("n")}
                     authority_votes_by_game[_gid].append(_vote)
                     research_votes_by_game[_gid].append(_vote)
     except Exception as _promo_error:

@@ -1009,7 +1009,25 @@ def _research_miner_votes(group: pd.DataFrame, market: str) -> List[dict]:
             except Exception: _cn=0
             try: _cr=float(v.get("confirmation_rate",0) or 0)
             except Exception: _cr=0.0
-            _eligible=bool(str(v.get("evidence_level") or "").upper()=="STRONG_VALIDATED" and _cn>=NCAAF_RESEARCH_MINER_MIN_CONFIRMATION_N and np.isfinite(_cr) and _cr>=NCAAF_RESEARCH_MINER_MIN_CONFIRMATION_RATE)
+            _historical=bool(str(v.get("evidence_level") or "").upper()=="STRONG_VALIDATED" and _cn>=NCAAF_RESEARCH_MINER_MIN_CONFIRMATION_N and np.isfinite(_cr) and _cr>=NCAAF_RESEARCH_MINER_MIN_CONFIRMATION_RATE)
+            # The locked, historically qualified PT champion is a separately
+            # qualified external family. Verify its signed holdout gate rather
+            # than fabricating a Miner confirmation-rate or future-game count.
+            try:
+                _pt_ci=float(v.get("historical_ci95_lower"))
+                _pt_gain=float(v.get("historical_gain_points"))
+            except (ValueError, TypeError):
+                _pt_ci=np.nan; _pt_gain=np.nan
+            _pt_promoted=bool(str(v.get("evidence_level") or "").upper()=="HISTORICAL_PROMOTED"
+                 and v.get("promotion_authority") is True
+                 and v.get("promotion_source_tag")=="pt-promotion-v1.1-historical-qualification-20261013"
+                 and bool(v.get("promotion_evidence_hash"))
+                 and v.get("historical_gate_pass") is True
+                 and np.isfinite(_pt_ci) and _pt_ci>0
+                 and np.isfinite(_pt_gain) and _pt_gain>=.10
+                 and str(v.get("evidence_family_key"))=="EXTERNAL_RATINGS_FAMILY"
+                 and fid=="NCAAF_PT_AUTO_FIVE_SOURCE" and _cn>=300)
+            _eligible=_historical or _pt_promoted
             if not fid or not target or not _eligible: continue
             key=(fid,target)
             if key in seen: continue
@@ -1017,7 +1035,7 @@ def _research_miner_votes(group: pd.DataFrame, market: str) -> List[dict]:
             mechs=list(v.get("mechanisms") or [fid])
             out.append({
                 "family_id":fid,"target":target,"mechanisms":mechs,
-                "source":f"MINER {fid}","source_type":"MINER",
+                "source":f"{'PT' if _pt_promoted else 'MINER'} {fid}","source_type":"PT" if _pt_promoted else "MINER",
                 "rule":str(v.get("rule") or ""),"evidence_level":v.get("evidence_level"),
                 "confirmation_n":v.get("confirmation_n"),"confirmation_rate":v.get("confirmation_rate"),
             })
@@ -1321,4 +1339,31 @@ def choose_current_production_picks(scored: pd.DataFrame,contract: dict,*,execut
         _canon = pd.to_datetime(picks["_prod_game_start"], errors="coerce", utc=True)
         _orig = pd.to_datetime(picks.get("Game_Start"), errors="coerce", utc=True)
         picks["Game_Start"] = _canon.where(_canon.notna(), _orig)
+    # Research-only first-pre-game capture after the frozen CORE candidate gate.
+    # All caller paths (scanner/UI) converge here, so future promotion cannot
+    # be based on hindsight or cherry-picked historical candidate slices.
+    try:
+        import pt_promotion_v1 as _ptgov
+        _ptpros=[]
+        for _,r in picks.iterrows():
+            if str(r.get("Market") or "").lower()!="spreads": continue
+            home=_norm_team(r.get("Home_Team_Norm",r.get("Home_Team","")))
+            target=_norm_team(r.get("_prod_target",r.get("Outcome_Norm",r.get("Outcome",""))))
+            if not home or not target: continue
+            _ptpros.append({"game_id":r.get("_prod_game_id"),"game_start":r.get("Game_Start"),
+                 "core_candidate":bool(r.get("_core_qualifies",False)),
+                 "core_home_direction":1 if target==home else -1,
+                 "home_spread":(r.get("_line") if target==home else -float(r.get("_line"))) if pd.notna(r.get("_line")) else np.nan,
+                 "incumbent_margin_home":r.get("NCAAF_PT_Meta_Margin_Home"),
+                 "challenger_margin_home":r.get("NCAAF_PT_Five_Source_Margin_Home"),
+                 "source_count":r.get("NCAAF_PT_Five_Source_Count"),
+                 "selection_sha256":r.get("NCAAF_PT_Five_Source_Selection_SHA"),
+                 "prediction_contract":"NCAAF_PRODUCTION_V1_FROZEN"})
+        if _ptpros:
+            _ptgov.capture(storage.Client(),os.getenv("MODEL_BUCKET","sharp-models"),"NCAAF","SPREADS",_ptpros)
+    except Exception:
+        # PT promotion collection is optional research infrastructure: cannot
+        # interrupt existing frozen model predictions or bet selection.
+        import logging as _ptlogging
+        _ptlogging.exception("[NCAAF-PT-PROMOTION-CAPTURE] HOLD")
     return picks

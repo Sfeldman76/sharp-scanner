@@ -1,10 +1,10 @@
-"""Shared, fail-closed Prediction Tracker champion/challenger promotion contract.
+"""Shared, fail-closed Prediction Tracker historical champion/challenger governance.
 
-GCS is the source of truth. Neither historical MAE alone nor current-week
-forecasts grant a betting vote. Each candidate must pass a prespecified paired
-historical gate AND a forward-locked, CORE-candidate-specific prospective gate.
-The old PT family remains authoritative until promotion is recorded. Never
-changes CORE, markets, execution or the one-independent-family vote limit.
+The five sources are selected in development years and locked by a content hash.
+Promotion requires a sufficiently large, paired, chronological, untouched
+2024–25 holdout showing robust MAE improvement in both seasons. Future-game
+tracking remains diagnostic, not a prerequisite for forecast promotion.
+Production CORE, execution, and the one-independent-PT-family vote remain frozen.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import json
 import math
 from collections import defaultdict
 
-TAG = 'pt-promotion-v1.0-candidate-forward-evidence-20261013'
+TAG = 'pt-promotion-v1.1-historical-qualification-20261013'
 PREFIX = 'research/pt_promotion_v1'
 MIN_HOLDOUT_GAMES = 300
 MIN_HIST_GAIN_POINTS = .10
@@ -277,38 +277,47 @@ def prospective_gate(settled_rows, selection_sha256=None):
 
 
 def review(sc,bucket,sport,market,now=None):
-    """Automated, idempotent promotion. No automatic demotion or CORE changes."""
+    """Promote based on locked historical holdout. No future-game minimum.
+
+    Historical evidence is retrieved from GCS and independently regraded by
+    historical_gate on EVERY review; a passed status string alone is insufficient.
+    Current champion state is written once with generation-match=0. Prospective
+    captures can continue for monitoring but have no selection authority.
+    """
     root=_root(sport,market)
     active=read_state(sc,bucket,sport,market)
-    if active.get('status')=='PROMOTED':return {'status':'ALREADY_PROMOTED','champion':'FIVE_SOURCE'}
+    if active.get('status')=='PROMOTED':
+        return {'status':'ALREADY_PROMOTED','champion':'FIVE_SOURCE',
+                'qualification_basis':active.get('qualification_basis')}
     historic=_json(sc,bucket,f'{root}/current_historical.json') or {}
     locked=read_selection(sc,bucket,sport,market)
-    if not locked or (historic.get('historical') or {}).get('selection_sha256')!=locked.get('selection_sha256'):
+    evidence=historic.get('historical') or {}
+    if not locked or not evidence or evidence.get('selection_sha256')!=locked.get('selection_sha256'):
         return {'status':'KEEP_INCUMBENT','reason':'UNLOCKED_OR_CHANGED_CANDIDATE'}
-    h=historical_gate(historic.get('historical'))
+    # Independent, immutable identifiers ensure the holdout belongs to the
+    # exact five-source lineup that will run on live predictions.
+    if not historic.get('evidence_sha256') or _sha(evidence)!=historic['evidence_sha256']:
+        return {'status':'KEEP_INCUMBENT','reason':'HISTORICAL_EVIDENCE_HASH_MISMATCH'}
+    h=historical_gate(evidence)
     if not h['pass']:
-        return {'status':'KEEP_INCUMBENT','historical':h,'prospective':None}
-    rows=[]
-    for blob in sc.bucket(bucket).list_blobs(prefix=f'{root}/settled/'):
-        try: rows.append(json.loads(blob.download_as_bytes()))
-        except Exception: continue
-    p=prospective_gate(rows,locked["selection_sha256"])
-    if not p['pass']:
-        return {'status':'KEEP_INCUMBENT','historical':h,'prospective':p}
+        return {'status':'KEEP_INCUMBENT','historical':h,'qualification_basis':'HISTORICAL_HOLDOUT'}
     when=now or dt.datetime.now(dt.timezone.utc)
     if isinstance(when,dt.datetime):when=when.isoformat()
     state={'source_tag':TAG,'status':'PROMOTED','champion':'FIVE_SOURCE',
            'sport':str(sport).upper(),'market':str(market).upper(),
-           'promoted_at':when,'historical':h,'prospective':p,
-           'historical_evidence_sha256':historic.get('evidence_sha256'),
+           'promoted_at':when,'qualification_basis':'PAIRED_CHRONOLOGICAL_HISTORICAL',
+           'historical':h,'prospective':{'status':'MONITOR_ONLY_NOT_A_REQUIREMENT'},
+           'historical_evidence_sha256':historic['evidence_sha256'],
            'selection_sha256':locked['selection_sha256'],'selected_sources':locked['sources'],
            'core_model_unchanged':True,'pt_family_vote_cap':1,'automatic_execution':False,
            'vote_rule':'PREGAME_FAIR_MINUS_MARKET_SIGNED_EDGE_MIN2_AND_SOURCE_COUNT_MIN3'}
     created=_atomic(sc,bucket,f'{root}/current_champion.json',state)
     if created:
         _atomic(sc,bucket,f'{root}/promotions/{_sha(state)}.json',state)
-        return {'status':'PROMOTED','champion':'FIVE_SOURCE','historical':h,'prospective':p}
-    return {'status':'CONCURRENT_REVIEW_OR_ALREADY_PROMOTED','champion':read_state(sc,bucket,sport,market).get('champion')}
+        return {'status':'PROMOTED','champion':'FIVE_SOURCE','historical':h,
+                'qualification_basis':state['qualification_basis']}
+    return {'status':'CONCURRENT_REVIEW_OR_ALREADY_PROMOTED',
+            'champion':read_state(sc,bucket,sport,market).get('champion')}
 
 
 def promoted_vote(state, fair_margin_home, home_spread, source_count, selection_sha256=None):
@@ -327,7 +336,7 @@ def _self_test():
     assert promoted_vote({'status':'PROMOTED','selection_sha256':'a'},5.0,-2,5,'a')==1
     assert promoted_vote({'status':'PROMOTED','selection_sha256':'a'},-5.0,-2,5,'a')==-1
     assert promoted_vote({'status':'INCUMBENT'},5.0,-2,5,'a')==0
-    # One-sided excellent backtest cannot promote without prospective proof.
+    # Strong independent holdout is sufficient; prospective remains a monitor.
     assert historical_gate({'periods_disjoint':True,'asof_max_year':2025,'holdout':{'n':1000,
         'incumbent_mae':10,'challenger_mae':9},'holdout_by_year':{'2024':{'n':500,'gain_points':1},
         '2025':{'n':500,'gain_points':1}},'paired_bootstrap_ci95':[.5,1.5]})['pass'] is True
