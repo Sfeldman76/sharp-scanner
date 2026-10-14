@@ -37,6 +37,7 @@ import pandas as pd
 
 NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.31.3-pt-auto-promotion-locked-evidence-20261013"
 NCAAF_RESEARCH_V2_VERSION = "2.31.3"
+NCAAF_RESEARCH_REPAIR_PATCH = "ptiv-2023fit-2024select-2025holdout-live-availability-20261014"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -2315,9 +2316,13 @@ def _pt_research_metrics(g: pd.DataFrame) -> dict[str,Any]:
 # ---------------------------------------------------------------------------
 # V2.19 Prediction Tracker incremental-information / residual challenger
 # ---------------------------------------------------------------------------
-PT_INCREMENTAL_FIT_SEASON = 2022
-PT_INCREMENTAL_SELECTION_SEASON = 2023
-PT_INCREMENTAL_VALIDATION_SEASONS = (2024, 2025)
+# The fixed CORE requires at least one earlier season to generate honest OOF.
+# 2022 has no pre-2022 training history; never invent a 2022 CORE forecast.
+# 2023 fit -> 2024 model/hyperparameter selection -> sealed 2025 validation.
+PT_INCREMENTAL_FIT_SEASON = 2023
+PT_INCREMENTAL_SELECTION_SEASON = 2024
+PT_INCREMENTAL_VALIDATION_SEASONS = (2025,)
+PT_INCREMENTAL_VALIDATION_KEY = "validation_2025"
 PT_INCREMENTAL_RIDGE_ALPHAS = (1.0, 10.0, 50.0, 100.0)
 PT_INCREMENTAL_BLEND_WEIGHTS = (0.0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.65, 0.80, 1.0)
 
@@ -2448,6 +2453,9 @@ def run_pt_incremental_value_research(*,games,miner_games,seasons,dashboard_modu
         "pt_min_independent_clusters":np.asarray(physical&np.isfinite(actual)&np.isfinite(base)&np.isfinite(market)&np.isfinite(pt_edge)&(count>=PT_EXTERNAL_CONSENSUS_MIN_CLUSTERS),dtype=bool),
     }
     diag={"status":"AUDIT","minimum_cluster_count":int(PT_EXTERNAL_CONSENSUS_MIN_CLUSTERS),
+        "chronological_split":{"fit":PT_INCREMENTAL_FIT_SEASON,"select":PT_INCREMENTAL_SELECTION_SEASON,
+            "sealed_validate":list(PT_INCREMENTAL_VALIDATION_SEASONS),
+            "year_2022":"EXCLUDED_NO_VALID_FROZEN_CORE_OOF"},
         "edge_field":edge_col,"count_field":count_col,
         "sequential_row_counts":{k:int(np.sum(v)) for k,v in masks.items()},
         "base_oof_status":base_diag.get("status"),
@@ -2475,34 +2483,52 @@ def run_pt_incremental_value_research(*,games,miner_games,seasons,dashboard_modu
     for w in PT_INCREMENTAL_BLEND_WEIGHTS:
         p=base+float(w)*(pt_fair-base); blends.append({"weight":float(w),"selection_mae":_mae(actual[sel],p[sel])})
     bw=float(min(blends,key=lambda z:(z["selection_mae"],z["weight"]))["weight"]); pblend=base+bw*(pt_fair-base)
-    fit_sel=valid&np.isin(seasons,(PT_INCREMENTAL_FIT_SEASON,PT_INCREMENTAL_SELECTION_SEASON)); pctl=base.copy(); pb=base.copy(); pc=base.copy()
+    fit_sel=valid&np.isin(seasons,(PT_INCREMENTAL_FIT_SEASON,PT_INCREMENTAL_SELECTION_SEASON))
+    pctl=base.copy(); pb=base.copy(); pc=base.copy()
+    # Selection forecasts MUST be produced by fit-year-only models.
+    # Scoring the selection year using models refit on that same year leaks labels.
+    selection_forecasts={"BASELINE":base[sel],"SIMPLE_BLEND":pblend[sel]}
+    for key,cols,a in (("BASE_CALIBRATION",control,a0),("PT_RESIDUAL",basic,ab),
+                       ("PT_CONDITIONAL_RESIDUAL",conditional,ac)):
+        q,_=_ptiv_fit_ridge(X.loc[fit,cols],resid[fit],X.loc[sel,cols],a)
+        selection_forecasts[key]=base[sel]+q
+    scores={key:_mae(actual[sel],pred) for key,pred in selection_forecasts.items()}
+    # Refit on 2023+2024 only AFTER selecting a specification using 2024.
+    # The sealed 2025 results never enter fitting, tuning, or source selection.
     q0,_=_ptiv_fit_ridge(X.loc[fit_sel,control],resid[fit_sel],X.loc[valid,control],a0); pctl[valid]=base[valid]+q0
     qb,_=_ptiv_fit_ridge(X.loc[fit_sel,basic],resid[fit_sel],X.loc[valid,basic],ab); pb[valid]=base[valid]+qb
     qc,_=_ptiv_fit_ridge(X.loc[fit_sel,conditional],resid[fit_sel],X.loc[valid,conditional],ac); pc[valid]=base[valid]+qc
-    def sel_mae(cols,a):
-        q,_=_ptiv_fit_ridge(X.loc[fit,cols],resid[fit],X.loc[sel,cols],a); return _mae(actual[sel],base[sel]+q)
-    scores={"BASELINE":_mae(actual[sel],base[sel]),"BASE_CALIBRATION":sel_mae(control,a0),"SIMPLE_BLEND":_mae(actual[sel],pblend[sel]),"PT_RESIDUAL":sel_mae(basic,ab),"PT_CONDITIONAL_RESIDUAL":sel_mae(conditional,ac)}
     no_pt_best=min(("BASELINE","BASE_CALIBRATION"),key=lambda k:scores[k]); pt_candidates=["PT_RESIDUAL","PT_CONDITIONAL_RESIDUAL"]
     if bw>0: pt_candidates.append("SIMPLE_BLEND")
     pt_best=min(pt_candidates,key=lambda k:scores[k])
     pt_selected=bool(scores[pt_best]+0.05<scores["BASELINE"] and scores[pt_best]+0.025<scores[no_pt_best])
     selected=pt_best if pt_selected else ("BASE_CALIBRATION_NO_PT" if no_pt_best=="BASE_CALIBRATION" and scores["BASE_CALIBRATION"]+0.025<scores["BASELINE"] else "BASELINE_NO_PT")
     preds={"BASELINE":base,"BASE_CALIBRATION":pctl,"PT_STANDALONE":pt_fair,"SIMPLE_BLEND":pblend,"PT_RESIDUAL":pb,"PT_CONDITIONAL_RESIDUAL":pc}; metrics={}; by={}
+    selection_forecasts["PT_STANDALONE"]=pt_fair[sel]
     for name,p in preds.items():
-        pool=(actual-p)[fit_sel&np.isfinite(actual)&np.isfinite(p)]; metrics[name]={"selection":_ptiv_metric_row(actual[sel],p[sel],market[sel],pool),"validation_2024_2025":_ptiv_metric_row(actual[val],p[val],market[val],pool)}; by[name]={str(sy):_ptiv_metric_row(actual[valid&(seasons==sy)],p[valid&(seasons==sy)],market[valid&(seasons==sy)],pool) for sy in PT_INCREMENTAL_VALIDATION_SEASONS}
+        validation_pool=(actual-p)[fit_sel&np.isfinite(actual)&np.isfinite(p)]
+        # For selection metrics, use a fit-year-only empirical residual pool:
+        # 2024 labels cannot enter the reference distribution before scoring 2024.
+        selection_pool=(actual-base)[fit&np.isfinite(actual)&np.isfinite(base)]
+        spred=selection_forecasts.get(name)
+        metrics[name]={"selection":_ptiv_metric_row(actual[sel],spred,market[sel],selection_pool) if spred is not None else {"n":0},
+            PT_INCREMENTAL_VALIDATION_KEY:_ptiv_metric_row(actual[val],p[val],market[val],validation_pool)}
+        by[name]={str(sy):_ptiv_metric_row(actual[valid&(seasons==sy)],p[valid&(seasons==sy)],market[valid&(seasons==sy)],validation_pool) for sy in PT_INCREMENTAL_VALIDATION_SEASONS}
     selected_key="BASE_CALIBRATION" if selected=="BASE_CALIBRATION_NO_PT" else ("BASELINE" if selected=="BASELINE_NO_PT" else selected); sp=preds[selected_key]
-    control_key=min(("BASELINE","BASE_CALIBRATION"),key=lambda k:metrics[k]["validation_2024_2025"].get("mae") if metrics[k]["validation_2024_2025"].get("mae") is not None else 1e9); cp=preds[control_key]
+    # Critical holdout protection: freeze the no-PT control on 2024 selection.
+    # Never choose the easier comparator using the 2025 validation labels.
+    control_key=no_pt_best; cp=preds[control_key]
     boot_frozen=_ptiv_bootstrap_gain(actual[val],base[val],sp[val]); boot_control=_ptiv_bootstrap_gain(actual[val],cp[val],sp[val])
     pos_frozen=sum(1 for sy in PT_INCREMENTAL_VALIDATION_SEASONS if by["BASELINE"][str(sy)].get("mae") is not None and by[selected_key][str(sy)].get("mae") is not None and by["BASELINE"][str(sy)]["mae"]-by[selected_key][str(sy)]["mae"]>0)
     pos_control=sum(1 for sy in PT_INCREMENTAL_VALIDATION_SEASONS if by[control_key][str(sy)].get("mae") is not None and by[selected_key][str(sy)].get("mae") is not None and by[control_key][str(sy)]["mae"]-by[selected_key][str(sy)]["mae"]>0)
-    bm=metrics["BASELINE"]["validation_2024_2025"]; cm=metrics[control_key]["validation_2024_2025"]; sm=metrics[selected_key]["validation_2024_2025"]
+    bm=metrics["BASELINE"][PT_INCREMENTAL_VALIDATION_KEY]; cm=metrics[control_key][PT_INCREMENTAL_VALIDATION_KEY]; sm=metrics[selected_key][PT_INCREMENTAL_VALIDATION_KEY]
     selected_uses_pt=selected in {"SIMPLE_BLEND","PT_RESIDUAL","PT_CONDITIONAL_RESIDUAL"}
     strict=bool(selected_uses_pt and bm.get("mae") is not None and cm.get("mae") is not None and sm.get("mae") is not None and bm["mae"]-sm["mae"]>=0.05 and cm["mae"]-sm["mae"]>=0.025 and bm["rmse"]-sm["rmse"]>=0 and cm["rmse"]-sm["rmse"]>=0 and (bm.get("brier") is None or sm.get("brier") is None or sm["brier"]<=bm["brier"]) and (cm.get("brier") is None or sm.get("brier") is None or sm["brier"]<=cm["brier"]) and pos_frozen==len(PT_INCREMENTAL_VALIDATION_SEASONS) and pos_control==len(PT_INCREMENTAL_VALIDATION_SEASONS) and boot_frozen.get("ci95",[None])[0] is not None and boot_frozen["ci95"][0]>0 and boot_control.get("ci95",[None])[0] is not None and boot_control["ci95"][0]>0)
     disp_cut=float(np.nanmedian(disp[fit_sel])); regimes={"CORE_PT_SAME_SIDE":same>0.5,"CORE_PT_CONFLICT":(same<0.5)&(np.abs(base_edge)>1)&(np.abs(pt_edge)>1),"PT_EDGE_3_PLUS":np.abs(pt_edge)>=3,"CORE_PT_GAP_4_PLUS":np.abs(gap)>=4,"PT_HIGH_DISPERSION":disp>=disp_cut,"PATHI_ACTIVE":pathi>=1,"BIGAL_ACTIVE":bigal>=1}
     attr={}; rp=pc
     for name,mask in regimes.items():
         mm=val&np.asarray(mask,bool); bmae=_mae(actual[mm],base[mm]); c0=_mae(actual[mm],pctl[mm]); cmae=_mae(actual[mm],rp[mm]); attr[name]={"n":int(mm.sum()),"baseline_mae":bmae,"base_calibration_mae":c0,"conditional_pt_mae":cmae,"pt_gain_vs_frozen":(bmae-cmae if np.isfinite(bmae) and np.isfinite(cmae) else None),"pt_gain_vs_calibration":(c0-cmae if np.isfinite(c0) and np.isfinite(cmae) else None)}
-    out={"status":"PASS","benchmark":"NCAAF_PRODUCTION_V1_FIXED_SPREAD_BACKBONE_SEASON_FORWARD","fit_season":PT_INCREMENTAL_FIT_SEASON,"selection_season":PT_INCREMENTAL_SELECTION_SEASON,"validation_seasons":list(PT_INCREMENTAL_VALIDATION_SEASONS),"fit_n":int(fit.sum()),"selection_n":int(sel.sum()),"validation_n":int(val.sum()),"pt_edge_field":edge_col,"pt_cluster_count_field":count_col,"base_oof":base_diag,"forecast_encompassing_control":"BASE_CALIBRATION_NO_PT","blend_selection_grid":blends,"selected_blend_weight":bw,"ridge_control":a0diag,"ridge_basic":abdiag,"ridge_conditional":acdiag,"selection_scores_mae":scores,"selection_best_no_pt":no_pt_best,"selection_best_pt":pt_best,"discovery_selected_challenger":selected,"metrics":metrics,"validation_by_season":by,"selected_validation_mae_bootstrap_gain_vs_frozen":boot_frozen,"selected_validation_mae_bootstrap_gain_vs_no_pt_control":boot_control,"positive_validation_seasons_vs_frozen":int(pos_frozen),"positive_validation_seasons_vs_no_pt_control":int(pos_control),"validation_best_no_pt_control":control_key,"strict_incremental_signal":strict,"conditional_attribution":attr,"feature_contract":{"control":control,"basic":basic,"conditional":conditional,"expert_systems":"ATTRIBUTION_ONLY_HERE__INTERACTIONS_TESTED_IN_SEPARATE_PT_EXTERNAL_MINER"},"totals_status":"NO_NCAAF_PT_TOTAL_FEED","production_authority":0,"automatic_promotion":False,"year_2026_queried":False}
+    out={"status":"PASS","benchmark":"NCAAF_PRODUCTION_V1_FIXED_SPREAD_BACKBONE_SEASON_FORWARD","fit_season":PT_INCREMENTAL_FIT_SEASON,"selection_season":PT_INCREMENTAL_SELECTION_SEASON,"validation_seasons":list(PT_INCREMENTAL_VALIDATION_SEASONS),"fit_n":int(fit.sum()),"selection_n":int(sel.sum()),"validation_n":int(val.sum()),"pt_edge_field":edge_col,"pt_cluster_count_field":count_col,"base_oof":base_diag,"forecast_encompassing_control":"BASE_CALIBRATION_NO_PT","blend_selection_grid":blends,"selected_blend_weight":bw,"ridge_control":a0diag,"ridge_basic":abdiag,"ridge_conditional":acdiag,"selection_scores_mae":scores,"selection_best_no_pt":no_pt_best,"selection_best_pt":pt_best,"discovery_selected_challenger":selected,"metrics":metrics,"validation_by_season":by,"selected_validation_mae_bootstrap_gain_vs_frozen":boot_frozen,"selected_validation_mae_bootstrap_gain_vs_no_pt_control":boot_control,"positive_validation_seasons_vs_frozen":int(pos_frozen),"positive_validation_seasons_vs_no_pt_control":int(pos_control),"selection_chosen_no_pt_control":control_key,"validation_protocol":"2023_FIT_2024_SELECTION_2025_SEALED","strict_incremental_signal":strict,"conditional_attribution":attr,"feature_contract":{"control":control,"basic":basic,"conditional":conditional,"expert_systems":"ATTRIBUTION_ONLY_HERE__INTERACTIONS_TESTED_IN_SEPARATE_PT_EXTERNAL_MINER"},"totals_status":"NO_NCAAF_PT_TOTAL_FEED","production_authority":0,"automatic_promotion":False,"year_2026_queried":False}
     log_func("[NCAAF-PT-INCREMENTAL] "+json.dumps({"status":out["status"],"selected":selected,"strict_incremental_signal":strict,"fit_n":out["fit_n"],"selection_n":out["selection_n"],"validation_n":out["validation_n"],"baseline_validation_mae":bm.get("mae"),"no_pt_control":control_key,"no_pt_control_validation_mae":cm.get("mae"),"selected_validation_mae":sm.get("mae"),"mae_gain_vs_frozen":None if bm.get("mae") is None or sm.get("mae") is None else bm["mae"]-sm["mae"],"mae_gain_vs_no_pt_control":None if cm.get("mae") is None or sm.get("mae") is None else cm["mae"]-sm["mae"],"bootstrap_vs_frozen":boot_frozen.get("ci95"),"bootstrap_vs_control":boot_control.get("ci95"),"production_authority":0,"year_2026_queried":False},sort_keys=True,default=str))
     return out
 
@@ -5809,6 +5835,46 @@ def _norm_team_live(v: Any) -> str:
     return " ".join(str(v or "").strip().lower().split())
 
 
+def _pt_live_availability_from_frame(frame: pd.DataFrame, sources, *, minimum_sources=3,
+                                      minimum_games=10, minimum_fraction=.75) -> dict[str,Any]:
+    """Availability-only gate; no 2026 scores, market outcomes or source re-selection.
+
+    Uses the current LIVE-week artifact, not a merged season-to-date archive.
+    A locked challenger that cannot reach three providers on most games stays
+    in research.  Unavailable sources do not change its immutable five IDs.
+    """
+    ids=list(sources or [])
+    if len(ids)!=5 or len(set(ids))!=5:
+        return {"status":"UNAVAILABLE","reason":"FIVE_LOCKED_SOURCES_REQUIRED","pass":False}
+    if frame is None or frame.empty:
+        return {"status":"UNAVAILABLE","reason":"NO_CURRENT_LIVE_ROWS","pass":False,
+                "sources":ids,"games":0}
+    missing=[x for x in ids if "ptidx__"+x not in frame.columns]
+    data=np.column_stack([pd.to_numeric(frame.get("ptidx__"+s,pd.Series(np.nan,index=frame.index)),
+                    errors="coerce").to_numpy(dtype=float) for s in ids])
+    counts=np.isfinite(data).sum(axis=1)
+    qualifying=int(np.sum(counts>=minimum_sources)); n=len(frame)
+    coverage=qualifying/float(n)
+    enough=bool(n>=minimum_games and coverage>=minimum_fraction)
+    return {"status":"PASS" if enough else "INSUFFICIENT_LIVE_SOURCE_COVERAGE",
+        "pass":enough,"sources":ids,"missing_headers":missing,"games":int(n),
+        "games_min3":qualifying,"game_coverage_min3":round(coverage,5),
+        "per_source_games":{s:int(np.isfinite(data[:,i]).sum()) for i,s in enumerate(ids)},
+        "minimum_games":minimum_games,"minimum_fraction":minimum_fraction,
+        "season_2026_outcomes_used":False,"selection_mutated":False}
+
+
+def _pt_live_selection_availability(sc,bucket_name,selection):
+    sources=(selection or {}).get("sources") or []
+    try:
+        raw=sc.bucket(bucket_name).blob(PT_CURRENT_LIVE_BLOB).download_as_bytes()
+        return _pt_live_availability_from_frame(pd.read_csv(io.BytesIO(raw)),sources)
+    except Exception as exc:
+        return {"status":"UNAVAILABLE","reason":"CURRENT_LIVE_FEED_READ_FAILED",
+            "error":f"{type(exc).__name__}:{exc}","pass":False,"sources":list(sources),
+            "season_2026_outcomes_used":False,"selection_mutated":False}
+
+
 def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> tuple[pd.DataFrame,dict[str,Any]]:
     """Attach the latest GCS-cached Prediction Tracker META_MARGIN to live home rows.
 
@@ -6921,12 +6987,16 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         log_func(f"[NCAAF-BIGAL-RATING-RESEARCH] status={big_al_observation_research.get('status')} observations={big_al_observation_research.get('ncaaf_observations')} rated={big_al_observation_research.get('rated_observations')} ratings={json.dumps(big_al_observation_research.get('rating_counts') or {},sort_keys=True)} pattern_min={BIG_AL_RATING_MIN_FOR_PATTERN_ANALYSIS} rating_qualification_weight=0 rating_authority=0 outcomes_2026_used=FALSE")
 
         pt_promotion_review={"status":"SHARED_CONTROLLER_NOT_AVAILABLE"}
+        _selector=(cache.get("pt_stable5_selection") or {})
+        _pt_live_availability=_pt_live_selection_availability(storage_client,bucket_name,_selector)
+        log_func("[NCAAF-PT-LIVE-SOURCE-AVAILABILITY] "+json.dumps(_pt_live_availability,sort_keys=True,default=str))
         try:
             import pt_promotion_v1 as _ptgov
             _pt_evidence=(cache.get("pt_stable5_shadow_audit") or {}).get("promotion_evidence")
             if _pt_evidence:
                 _pt_hist_gate=_ptgov.record_historical(storage_client,bucket_name,"NCAAF","SPREADS",_pt_evidence)
-                _pt_settle_status=pt_promotion_settle_and_review(dashboard_module=dashboard_module,storage_client=storage_client,bucket_name=bucket_name,log_func=log_func)
+                _pt_settle_status=pt_promotion_settle_and_review(dashboard_module=dashboard_module,storage_client=storage_client,bucket_name=bucket_name,log_func=log_func,
+                    allow_promotion=bool(_pt_live_availability.get("pass")),availability_audit=_pt_live_availability)
                 pt_promotion_review=_pt_settle_status.get("review") or {"status":"HOLD"}
                 log_func("[NCAAF-PT-PROMOTION] "+json.dumps({"historical":_pt_hist_gate,"review":pt_promotion_review},sort_keys=True,default=str))
         except Exception as _pt_promo_exc:
@@ -6934,7 +7004,6 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
             log_func("[NCAAF-PT-PROMOTION] "+json.dumps(pt_promotion_review))
         # Research health is independent from Cloud Run exit-code success.
         # This must never affect frozen CORE or award PT authority.
-        _selector=(cache.get("pt_stable5_selection") or {})
         _health_parts={
             "pt_five_source_selection":{"status":"PASS" if len(_selector.get("sources") or [])==5 and _selector.get("selection_sha256") else "DEGRADED",
                 "reason":_selector.get("status"),"error":_selector.get("error")},
@@ -6943,15 +7012,23 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "selection_n":pt_incremental.get("selection_n"),"validation_n":pt_incremental.get("validation_n")},
             "pt_promotion":{"status":"PASS" if pt_promotion_review.get("status") in ("PROMOTED","ALREADY_PROMOTED","KEEP_INCUMBENT") else "DEGRADED",
                 "reason":pt_promotion_review.get("reason") or pt_promotion_review.get("status")},
+            "pt_current_source_availability":{"status":"PASS" if _pt_live_availability.get("pass") else "LIMITED",
+                "reason":_pt_live_availability.get("status"),"games":_pt_live_availability.get("games"),
+                "games_min3":_pt_live_availability.get("games_min3")},
         }
-        _research_health={"status":"DEGRADED" if any(x["status"]=="DEGRADED" for x in _health_parts.values()) else "PASS",
-            "components":_health_parts,"core_frozen":True,"automatic_core_mutation":False}
+        _health_status=("DEGRADED" if any(x["status"]=="DEGRADED" for x in _health_parts.values()) else
+                        "LIMITED" if any(x["status"]=="LIMITED" for x in _health_parts.values()) else "PASS")
+        _research_health={"status":_health_status,"components":_health_parts,
+            "core_frozen":True,"automatic_core_mutation":False}
         log_func("[NCAAF-RESEARCH-HEALTH] "+json.dumps(_research_health,sort_keys=True,default=str))
+        log_func(f"[NCAAF-HEAVY-OVERALL-HEALTH] status={_health_status} core_frozen=TRUE execution_status=COMPLETE")
         system_library_inventory=_ncaaf_system_library_inventory(miners)
         system_library_change_audit=_ncaaf_system_library_delta(system_library_inventory,_previous_report)
         _log_ncaaf_system_library_audit(inventory=system_library_inventory,delta=system_library_change_audit,miners=miners,log_func=log_func)
         report={"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG,"version":NCAAF_RESEARCH_V2_VERSION,"created_utc":_now(),
-                "status":"NCAAF_RESEARCH_V2_COMPLETE","production_authority":0,"production_contract_mutated":False,
+                "status":"NCAAF_RESEARCH_V2_COMPLETE","research_status":_research_health["status"],
+                "pt_live_availability":_pt_live_availability,
+                "production_authority":0,"production_contract_mutated":False,
                 "benchmark":"FROZEN_NCAAF_PRODUCTION_V1","discovery_max_season":DISCOVERY_MAX_SEASON,"confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"system_miner_v3":miners,
                 "system_library_inventory":system_library_inventory,"system_library_change_audit":system_library_change_audit,"incumbent_system_library_audit":incumbent_system_library_audit,
@@ -7065,7 +7142,8 @@ def pt_promotion_capture_after_core(picks: pd.DataFrame, *, dashboard_module=Non
     return result
 
 
-def pt_promotion_settle_and_review(*, dashboard_module=None, storage_client=None, bucket_name="sharp-models", log_func=print):
+def pt_promotion_settle_and_review(*, dashboard_module=None, storage_client=None, bucket_name="sharp-models", log_func=print,
+                                  allow_promotion=None, availability_audit=None):
     """Grade only exact immutable game IDs against the settled NCAAF ledger."""
     import pt_promotion_v1 as gov
     if storage_client is None: storage_client=getattr(dashboard_module,"gcs_client",None)
@@ -7092,8 +7170,23 @@ def pt_promotion_settle_and_review(*, dashboard_module=None, storage_client=None
         matched=bc.query(sql,job_config=cfg).to_dataframe(create_bqstorage_client=False)
         finals=[{"game_id":str(r.physical_game_id),"actual_home_margin":float(r.margin)} for _,r in matched.iterrows()]
     settled=gov.settle(storage_client,b,"NCAAF","SPREADS",finals)
-    reviewed=gov.review(storage_client,b,"NCAAF","SPREADS")
-    out={"pending":len(ids),"settled":settled,"review":reviewed}
+    # A caller outside Heavy Research must not bypass source eligibility.
+    if allow_promotion is None:
+        locked=gov.read_selection(storage_client,b,"NCAAF","SPREADS")
+        availability_audit=_pt_live_selection_availability(storage_client,b,locked)
+        allow_promotion=bool(availability_audit.get("pass"))
+    if allow_promotion:
+        reviewed=gov.review(storage_client,b,"NCAAF","SPREADS")
+    else:
+        # Historical result can still be stored and pregame evidence settled,
+        # but cannot create a NEW champion from an unavailable live feed.
+        current=gov.read_state(storage_client,b,"NCAAF","SPREADS")
+        reviewed=({"status":"ALREADY_PROMOTED","champion":"FIVE_SOURCE",
+                   "reason":"EXISTING_IMMUTABLE_CHAMPION_WITH_PER_GAME_MIN3_FALLBACK"}
+                  if current.get("status")=="PROMOTED" else
+                  {"status":"KEEP_INCUMBENT","reason":"LIVE_SOURCE_COVERAGE_NOT_VERIFIED"})
+    out={"pending":len(ids),"settled":settled,"review":reviewed,
+         "live_availability":availability_audit}
     log_func("[NCAAF-PT-PROMOTION-LIVE] "+json.dumps(out,sort_keys=True,default=str))
     return out
 
