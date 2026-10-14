@@ -35,8 +35,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.31.2-stable-five-research-shadow-20261013"
-NCAAF_RESEARCH_V2_VERSION = "2.31.2"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.31.3-pt-auto-promotion-locked-evidence-20261013"
+NCAAF_RESEARCH_V2_VERSION = "2.31.3"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -1969,6 +1969,54 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         exmeta_cluster_median_edge=np.full(len(g),np.nan)
         exmeta_cluster_team_frac=np.full(len(g),np.nan); exmeta_cluster_opp_frac=np.full(len(g),np.nan)
 
+    # Choose five source-diverse ratings from the COMPLETE historical PT
+    # predictor universe, based ONLY on the 2022–2023 development seasons.
+    # Holdout 2024/2025 must not participate in selection (or source ranking).
+    _pt_selection={"status":"NOT_EVALUATED","sources":[],"production_authority":0}
+    try:
+        from pt_five_selection_v1 import select_five as _pt_select_five
+        _pt_sel_frame=pd.DataFrame({
+            "Season":pd.to_numeric(g.get("Season",pd.Series(np.nan,index=g.index)),errors="coerce"),
+            "__PT_SELECT_ACTUAL__":pd.to_numeric(g.get("Actual_Margin",pd.Series(np.nan,index=g.index)),errors="coerce")
+        })
+        for _pt_key in _idx_keys:
+            _pt_sel_frame["__PRED__"+_pt_key]=idx_comp[_pt_key]
+        _pt_selection=_pt_select_five(_pt_sel_frame,
+            source_cols={_key:"__PRED__"+_key for _key in _idx_keys},
+            group_by_source={_key:_pt_index_source_cluster(_key) for _key in _idx_keys},
+            actual_col="__PT_SELECT_ACTUAL__",development_years=(2022,2023),
+            max_candidates=25,min_full_coverage=.55)
+        if len(_pt_selection.get("sources") or [])==5:
+            # Persist one candidate lineup for this prospective campaign; a
+            # rerun may NOT reselect the five using new information.
+            import pt_promotion_v1 as _ptgov_lock
+            _sc=getattr(dashboard_module,"gcs_client",None)
+            if _sc is None:
+                from google.cloud import storage as _pt_gcs_storage
+                _sc=_pt_gcs_storage.Client()
+            _bucket=str(getattr(dashboard_module,"GCS_BUCKET","sharp-models") or "sharp-models")
+            _locked=_ptgov_lock.lock_selection(_sc,_bucket,"NCAAF","SPREADS",_pt_selection)
+            if len(_locked.get("sources") or [])!=5:
+                raise RuntimeError("PT_FIVE_SELECTION_NOT_LOCKED")
+            _pt_selection={**_pt_selection,"sources":_locked["sources"],
+                "selection_sha256":_locked["selection_sha256"],
+                "source_providers":_locked.get("source_providers") or {},
+                "lock_status":_locked.get("lock_status"),"status":"FIVE_SELECTED_LOCKED"}
+            _pvals=np.column_stack([idx_comp[z] for z in _pt_selection["sources"]])
+            _pc=np.isfinite(_pvals).sum(axis=1)
+            stable5_shadow_count=_pc.astype(int)
+            stable5_shadow=np.full(len(g),np.nan)
+            _valid=_pc>=3
+            if _valid.any():stable5_shadow[_valid]=np.nansum(_pvals[_valid],axis=1)/_pc[_valid]
+        log_func("[NCAAF-PT-FIVE-SELECT] "+json.dumps({k:v for k,v in _pt_selection.items() if k!="ranking_audit"},sort_keys=True,default=str))
+    except Exception as _select_exc:
+        _pt_selection={"status":"SELECTION_FAIL_CLOSED","sources":[],
+            "error":f"{type(_select_exc).__name__}:{_select_exc}","production_authority":0}
+        # Fail closed; do not treat the fallback predetermined five as an
+        # empirically selected challenger or grant it betting authority.
+        stable5_shadow[:]=np.nan;stable5_shadow_count[:]=0
+        log_func("[NCAAF-PT-FIVE-SELECT] "+json.dumps(_pt_selection))
+
     # Prespecified chronological diagnostics; no 2026 results used and no
     # winner is selected from the holdout. Compare on identical paired rows.
     _hist_seasons=pd.to_numeric(g.get("Season",pd.Series(np.nan,index=g.index)),errors="coerce").to_numpy(float)
@@ -1990,10 +2038,32 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
             "stable_five_mae":float(np.mean(np.abs(_hist_actual[_paired]-stable5_shadow[_paired]))) if _paired.any() else None,
             "published_five_mae":float(np.mean(np.abs(_hist_actual[_paired]-meta[_paired]))) if _paired.any() else None}
         _comparisons[_name]=_rows
-    stable5_shadow_audit={"status":"HISTORICAL_DIAGNOSTIC_ONLY",
+    # Shared promotion contract. Evidence is PAIRWISE, pre-2026, and signed:
+    # positive gain = incumbent MAE minus challenger MAE. The challenger must
+    # beat each 2024/2025 year with a positive bootstrap lower confidence limit.
+    _paired_val=np.isin(_hist_seasons,(2024,2025))&np.isfinite(_hist_actual)&np.isfinite(meta)&np.isfinite(stable5_shadow)
+    _paired_gain=np.abs(_hist_actual[_paired_val]-meta[_paired_val])-np.abs(_hist_actual[_paired_val]-stable5_shadow[_paired_val])
+    _rng=np.random.default_rng(20261013)
+    _boot=np.asarray([float(np.mean(_paired_gain[_rng.integers(0,len(_paired_gain),len(_paired_gain))]))
+                      for _ in range(500)],dtype=float) if len(_paired_gain)>=2 else np.asarray([],float)
+    _byyear={}
+    for _yr in (2024,2025):
+        _sel=_paired_val&(_hist_seasons==_yr)
+        _delta=np.abs(_hist_actual[_sel]-meta[_sel])-np.abs(_hist_actual[_sel]-stable5_shadow[_sel])
+        _byyear[str(_yr)]={"n":int(_sel.sum()),"gain_points":float(np.mean(_delta)) if len(_delta) else None}
+    _pt_promotion_evidence={"periods_disjoint":True,"asof_max_year":2025,
+        "holdout_years":[2024,2025],"holdout":{"n":int(_paired_val.sum()),
+            "incumbent_mae":float(np.mean(np.abs(_hist_actual[_paired_val]-meta[_paired_val]))) if _paired_val.any() else None,
+            "challenger_mae":float(np.mean(np.abs(_hist_actual[_paired_val]-stable5_shadow[_paired_val]))) if _paired_val.any() else None},
+        "holdout_by_year":_byyear,
+        "paired_bootstrap_ci95":np.quantile(_boot,[.025,.975]).tolist() if len(_boot) else None,
+        "identity":"NCAAF_PUBLISHED_FIVE_VS_FIVE_SOURCE_EQUAL_AVERAGE","new_min_source_count":3,
+        "selection_sha256":_pt_selection.get("selection_sha256"),
+        "selected_sources":_pt_selection.get("sources") or []}
+    stable5_shadow_audit={"status":"HISTORICAL_DIAGNOSTIC_ONLY","selection":_pt_selection,
         "contract":PT_STABLE_FIVE_SHADOW_CONTRACT,"periods":_comparisons,
         "historical_matched_rows_min3":int(np.isfinite(stable5_shadow).sum()),
-        "year_2026_used_for_selection":False,"automatic_promotion":False,"production_authority":0}
+        "year_2026_used_for_selection":False,"promotion_evidence":_pt_promotion_evidence,"automatic_promotion":False,"production_authority":0}
     log_func("[NCAAF-PT-STABLE5-HISTORICAL] "+json.dumps(stable5_shadow_audit,sort_keys=True,default=str))
 
     for df in (g,m):
@@ -2070,6 +2140,7 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         m["_V210_PT_META_MINUS_CORE_EDGE"]=meta_edge-ce
 
     cache["games"]=g; cache["miner_games"]=m
+    cache["pt_stable5_selection"]=_pt_selection
     cache["pt_stable5_shadow_audit"]=stable5_shadow_audit
     cache["pt_index_catalog"]=[
         {"id":_k,"name":_pt_index_display_name(_k),"cluster":_pt_index_source_cluster(_k),
@@ -5731,16 +5802,35 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
         ex=ex.loc[ex["home_i"].notna()&ex["away_i"].notna()].copy(); ex["pair_key"]=ex["home_i"].astype(str)+"|"+ex["away_i"].astype(str)
         vc=ex["pair_key"].value_counts(); ex=ex.loc[ex["pair_key"].map(vc).eq(1)].set_index("pair_key",drop=False)
         meta=np.full(len(out),np.nan); cnt=np.full(len(out),np.nan); pavg=np.full(len(out),np.nan)
+        _promo_fair=np.full(len(out),np.nan); _promo_n=np.zeros(len(out),dtype=int)
         ext_consensus=np.full(len(out),np.nan); ext_clusters=np.full(len(out),np.nan); ext_indices=np.full(len(out),np.nan)
         ext_std=np.full(len(out),np.nan); ext_iqr=np.full(len(out),np.nan)
         listed=np.zeros(len(out),dtype=float); full_five=np.zeros(len(out),dtype=float)
         comp={k:np.full(len(out),np.nan) for k in PT_PUBLISHED_WEIGHTS}
+        _pt_live_selection=None
+        try:
+            import pt_promotion_v1 as _ptgov_selection
+            _pt_live_selection=_ptgov_selection.read_selection(sc,bucket_name,"NCAAF","SPREADS")
+        except Exception:
+            _pt_live_selection=None
+        _pt_live_selected=(_pt_live_selection or {}).get("sources") or []
+        _pt_live_sha=(_pt_live_selection or {}).get("selection_sha256")
         for i,(h,a) in enumerate(zip(homes,aways)):
             k=f"{h}|{a}"
             if k not in ex.index: continue
             r=ex.loc[k]
             if isinstance(r,pd.DataFrame): continue
             listed[i]=1.0
+            # Research-only five-source champion challenger, chosen and locked
+            # in development. Never substitute the hardcoded earlier five.
+            _available=[]
+            for _src in _pt_live_selected:
+                _col="ptidx__"+_src
+                _v=pd.to_numeric(pd.Series([r.get(_col,np.nan)]),errors="coerce").iloc[0]
+                if pd.notna(_v):_available.append(float(_v))
+            if len(_pt_live_selected)==5 and len(_available)>=3:
+                _promo_fair[i]=float(np.mean(_available))
+                _promo_n[i]=len(_available)
             component_count=0
             for _k in PT_PUBLISHED_WEIGHTS:
                 _v=pd.to_numeric(pd.Series([r.get(_k,np.nan)]),errors="coerce").iloc[0]
@@ -5765,6 +5855,9 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
             if pd.notna(_ei): ext_iqr[i]=float(_ei)
         spread=pd.to_numeric(out.get("Consensus_Open_Spread",out.get("Opening_Spread",pd.Series(np.nan,index=out.index))),errors="coerce").to_numpy(float)
         market=-spread
+        out["_PT_PROMO_FIVE_MARGIN_HOME"]=_promo_fair
+        out["_PT_PROMO_FIVE_COUNT"]=_promo_n
+        out["_PT_PROMO_SELECTION_SHA"]=_pt_live_sha
         out["_V210_PT_META_MARGIN_TEAM"]=meta
         out["_V210_PT_META_EDGE_POINTS"]=meta-market
         out["_V210_PT_META_SYSTEM_COUNT"]=cnt
@@ -5997,6 +6090,47 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
                       "live_authority_eligible":live_eligible,"live_authority_policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY}
                 research_votes_by_game[keys[j]].append(vote)
                 if live_eligible: authority_votes_by_game[keys[j]].append(vote)
+    # PT promotion is separately earned from locked CORE-candidate prospective
+    # evidence. Until then, do not change the existing qualified PT Miner votes.
+    _pt_promo_state={"status":"INCUMBENT"};_pt_promo_status="NO_STATE"
+    try:
+        import pt_promotion_v1 as _ptgov
+        _psc=getattr(dashboard_module,"gcs_client",None)
+        if _psc is None:
+            from google.cloud import storage as _pt_storage
+            _psc=_pt_storage.Client()
+        _bucket=str(getattr(dashboard_module,"GCS_BUCKET","sharp-models") or "sharp-models")
+        _pt_promo_state=_ptgov.read_state(_psc,_bucket,"NCAAF","SPREADS")
+        _pt_promo_status=_pt_promo_state.get("status","INCUMBENT")
+        if _pt_promo_status=="PROMOTED":
+            # Replaces ONLY the PT family vote: never stacks with legacy PT
+            # miners, and does not change Big Al, Pathi or other Miner families.
+            for _j,_gid in enumerate(keys):
+                _r=cdf.iloc[_j]
+                _cnt=_r.get("_PT_PROMO_FIVE_COUNT",0)
+                _fair=_r.get("_PT_PROMO_FIVE_MARGIN_HOME",np.nan)
+                _line=_r.get("Consensus_Open_Spread",_r.get("Opening_Spread",np.nan))
+                _direction=_ptgov.promoted_vote(_pt_promo_state,_fair,_line,_cnt,
+                    _r.get("_PT_PROMO_SELECTION_SHA"))
+                def _nonpt(_v):
+                    return str(_v.get("evidence_family_key") or "")!="EXTERNAL_RATINGS_FAMILY" and not bool(_v.get("uses_external_ratings_family"))
+                authority_votes_by_game[_gid]=[v for v in authority_votes_by_game[_gid] if _nonpt(v)]
+                research_votes_by_game[_gid]=[v for v in research_votes_by_game[_gid] if _nonpt(v)]
+                if _direction and str(_r.get("Market") or "spreads").lower() in {"spreads","spread",""}:
+                    _target=_norm_team_live(_r.get("Home_Team_Norm",_r.get("Home_Team",""))) if _direction>0 else _norm_team_live(_r.get("Away_Team_Norm",_r.get("Away_Team","")))
+                    _vote={"source_type":"MINER","family_id":"NCAAF_PT_AUTO_FIVE_SOURCE",
+                        "evidence_family_key":"EXTERNAL_RATINGS_FAMILY","uses_external_ratings_family":True,
+                        "target":_target,"market":"spreads","rule":"PROMOTED_FIVE_SOURCE_FAIR_EDGE_2PLUS",
+                        "mechanisms":["PT_AUTO_FIVE_SOURCE"],"live_authority_eligible":True,
+                        "evidence_level":"PROSPECTIVE_PROMOTED","promotion_authority":True,
+                        "promotion_source_tag":_pt_promo_state.get("source_tag"),
+                        "promotion_evidence_hash":_pt_promo_state.get("historical_evidence_sha256"),
+                        "confirmation_n":_pt_promo_state.get("prospective",{}).get("paired_n")}
+                    authority_votes_by_game[_gid].append(_vote)
+                    research_votes_by_game[_gid].append(_vote)
+    except Exception as _promo_error:
+        _pt_promo_status=f"HOLD_READ_ERROR:{type(_promo_error).__name__}"
+        # A registry read error fails closed: no promoted vote is asserted.
     # Production consumes ONLY authority-qualified votes. Collapse by independent
     # evidence family before Bet Authority sees the votes. In particular, every
     # Prediction Tracker mechanism shares EXTERNAL_RATINGS_FAMILY and can contribute
@@ -6049,6 +6183,14 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     _pt_ext_index_by={keys[i]:cdf.iloc[i].get("_V2183_PT_EXTERNAL_CONSENSUS_INDEX_COUNT",np.nan) for i in range(len(cdf))}
     _pt_ext_std_by={keys[i]:cdf.iloc[i].get("_V2183_PT_EXTERNAL_CONSENSUS_STD",np.nan) for i in range(len(cdf))}
     _pt_ext_iqr_by={keys[i]:cdf.iloc[i].get("_V2183_PT_EXTERNAL_CONSENSUS_IQR",np.nan) for i in range(len(cdf))}
+    out["NCAAF_PT_Promotion_Champion"]=_pt_promo_state.get("champion","LEGACY")
+    out["NCAAF_PT_Promotion_Status"]=_pt_promo_status
+    _pt_five_by={keys[i]:cdf.iloc[i].get("_PT_PROMO_FIVE_MARGIN_HOME",np.nan) for i in range(len(cdf))}
+    _pt_five_count_by={keys[i]:cdf.iloc[i].get("_PT_PROMO_FIVE_COUNT",0) for i in range(len(cdf))}
+    _pt_five_sha_by={keys[i]:cdf.iloc[i].get("_PT_PROMO_SELECTION_SHA") for i in range(len(cdf))}
+    out["NCAAF_PT_Five_Source_Margin_Home"]=[_pt_five_by.get(k,np.nan) for k in out[keycol]]
+    out["NCAAF_PT_Five_Source_Count"]=[_pt_five_count_by.get(k,0) for k in out[keycol]]
+    out["NCAAF_PT_Five_Source_Selection_SHA"]=[_pt_five_sha_by.get(k) for k in out[keycol]]
     out["NCAAF_PT_Meta_Margin_Home"]=[_pt_meta_by.get(k,np.nan) for k in out[keycol]]
     out["NCAAF_PT_Meta_Edge_Home"]=[_pt_edge_by.get(k,np.nan) for k in out[keycol]]
     out["NCAAF_PT_Meta_System_Count"]=[_pt_cnt_by.get(k,np.nan) for k in out[keycol]]
@@ -6741,6 +6883,18 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         big_al_observation_research=_big_al_rating_observation_report(big_al_observations,miner_lane_audit=_obs_lane_audit,context_games=miner_games.reset_index(drop=True),dashboard_module=dashboard_module)
         log_func(f"[NCAAF-BIGAL-RATING-RESEARCH] status={big_al_observation_research.get('status')} observations={big_al_observation_research.get('ncaaf_observations')} rated={big_al_observation_research.get('rated_observations')} ratings={json.dumps(big_al_observation_research.get('rating_counts') or {},sort_keys=True)} pattern_min={BIG_AL_RATING_MIN_FOR_PATTERN_ANALYSIS} rating_qualification_weight=0 rating_authority=0 outcomes_2026_used=FALSE")
 
+        pt_promotion_review={"status":"SHARED_CONTROLLER_NOT_AVAILABLE"}
+        try:
+            import pt_promotion_v1 as _ptgov
+            _pt_evidence=(cache.get("pt_stable5_shadow_audit") or {}).get("promotion_evidence")
+            if _pt_evidence:
+                _pt_hist_gate=_ptgov.record_historical(storage_client,bucket_name,"NCAAF","SPREADS",_pt_evidence)
+                _pt_settle_status=pt_promotion_settle_and_review(dashboard_module=dashboard_module,storage_client=storage_client,bucket_name=bucket_name,log_func=log_func)
+                pt_promotion_review=_pt_settle_status.get("review") or {"status":"HOLD"}
+                log_func("[NCAAF-PT-PROMOTION] "+json.dumps({"historical":_pt_hist_gate,"review":pt_promotion_review},sort_keys=True,default=str))
+        except Exception as _pt_promo_exc:
+            pt_promotion_review={"status":"HOLD_ERROR","error":f"{type(_pt_promo_exc).__name__}:{_pt_promo_exc}"}
+            log_func("[NCAAF-PT-PROMOTION] "+json.dumps(pt_promotion_review))
         system_library_inventory=_ncaaf_system_library_inventory(miners)
         system_library_change_audit=_ncaaf_system_library_delta(system_library_inventory,_previous_report)
         _log_ncaaf_system_library_audit(inventory=system_library_inventory,delta=system_library_change_audit,miners=miners,log_func=log_func)
@@ -6754,7 +6908,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "deep_context_bridge":deep_context_bridge,
                 "situational_context_bridge":situational_context_bridge,
                 "big_al_observation_ledger":big_al_ledger_diag,"big_al_observation_research":big_al_observation_research,
-                "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,
+                "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"pt_promotion_review":pt_promotion_review,
                 "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False,"source_neutral":True,"pt_systems_may_earn_bounded_vote":True,"pt_family_vote_cap":1,"h2h_family_vote_cap":1,"rivalry_family_vote_cap":1,"travel_family_vote_cap":1,"result_quality_family_vote_cap":1,"schedule_resume_family_vote_cap":1,"recent_vs_season_family_vote_cap":1,"matchup_differential_family_vote_cap":1,"pt_model_weight":0},
                 "next_step":"KEEP PRODUCTION V1 FROZEN; USE V2.31.1 OBJECTIVE RESULT-QUALITY/RESUME/RECENT/MATCHUP CONTEXT PLUS V2.30 H2H/RIVALRY/TRAVEL AS SOURCE-NEUTRAL MINER INPUTS; PERSIST AND EXACT-RULE REVALIDATE INCUMBENTS; QUALIFY NEW CHALLENGERS ONLY THROUGH 2022-2025 SEALED HISTORY; KEEP 2026 OUTCOMES OUT OF SELECTION"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
@@ -6824,6 +6978,72 @@ def load_current_report(bucket_name="sharp-models", storage_client=None) -> dict
         return obj if obj.get("source_tag")==NCAAF_RESEARCH_V2_SOURCE_TAG else None
     except Exception:
         return None
+
+
+def pt_promotion_capture_after_core(picks: pd.DataFrame, *, dashboard_module=None, storage_client=None, bucket_name="sharp-models", log_func=print):
+    """Capture genuinely qualified CORE spread candidates AFTER Bet Authority.
+
+    Never creates a bet, never writes over first pregame prediction, never
+    uses 2026 outcomes to fit PT. Dashboard and backend may call identically.
+    """
+    if picks is None or picks.empty:return {"status":"NO_PICKS"}
+    import pt_promotion_v1 as gov
+    if storage_client is None:
+        storage_client=getattr(dashboard_module,"gcs_client",None)
+    if storage_client is None:
+        from google.cloud import storage
+        storage_client=storage.Client()
+    b=str(getattr(dashboard_module,"GCS_BUCKET",bucket_name) or bucket_name)
+    rows=[]
+    for _,r in picks.iterrows():
+        if str(r.get("Market") or "").lower()!="spreads":continue
+        home=_norm_team_live(r.get("Home_Team_Norm",r.get("Home_Team","")))
+        selected=_norm_team_live(r.get("Outcome_Norm",r.get("Outcome","")))
+        side=1 if selected==home and home else -1
+        rows.append({"game_id":r.get("_prod_game_id"),"game_start":r.get("Game_Start"),
+            "core_candidate":bool(r.get("_core_qualifies",False)),
+            "core_home_direction":side,"home_spread":(r.get("_line") if side==1 else -float(r.get("_line"))) if pd.notna(r.get("_line")) else np.nan,
+            "incumbent_margin_home":r.get("NCAAF_PT_Meta_Margin_Home"),
+            "challenger_margin_home":r.get("NCAAF_PT_Five_Source_Margin_Home"),
+            "source_count":r.get("NCAAF_PT_Five_Source_Count"),
+            "selection_sha256":r.get("NCAAF_PT_Five_Source_Selection_SHA"),
+            "prediction_contract":"NCAAF_PRODUCTION_V1_FROZEN"})
+    result=gov.capture(storage_client,b,"NCAAF","SPREADS",rows)
+    log_func("[NCAAF-PT-PROMOTION-CAPTURE] "+json.dumps(result,sort_keys=True))
+    return result
+
+
+def pt_promotion_settle_and_review(*, dashboard_module=None, storage_client=None, bucket_name="sharp-models", log_func=print):
+    """Grade only exact immutable game IDs against the settled NCAAF ledger."""
+    import pt_promotion_v1 as gov
+    if storage_client is None: storage_client=getattr(dashboard_module,"gcs_client",None)
+    if storage_client is None:
+        from google.cloud import storage
+        storage_client=storage.Client()
+    b=str(getattr(dashboard_module,"GCS_BUCKET",bucket_name) or bucket_name)
+    ids=gov.pending_game_ids(storage_client,b,"NCAAF","SPREADS")
+    finals=[]
+    if ids:
+        bc=getattr(dashboard_module,"bq_client",None)
+        if bc is None:
+            from google.cloud import bigquery
+            bc=bigquery.Client()
+        from google.cloud import bigquery as _bq
+        cfg=_bq.QueryJobConfig(query_parameters=[_bq.ArrayQueryParameter("ids","STRING",ids)])
+        sql="""SELECT physical_game_id,
+                   ANY_VALUE(home_score) - ANY_VALUE(away_score) AS margin
+          FROM `sharplogger.sharp_data.ncaaf_production_v1_results`
+          WHERE physical_game_id IN UNNEST(@ids) AND home_score IS NOT NULL
+            AND away_score IS NOT NULL AND LOWER(market)='spreads'
+          GROUP BY physical_game_id
+          HAVING COUNT(DISTINCT CONCAT(CAST(home_score AS STRING),'|',CAST(away_score AS STRING)))=1"""
+        matched=bc.query(sql,job_config=cfg).to_dataframe(create_bqstorage_client=False)
+        finals=[{"game_id":str(r.physical_game_id),"actual_home_margin":float(r.margin)} for _,r in matched.iterrows()]
+    settled=gov.settle(storage_client,b,"NCAAF","SPREADS",finals)
+    reviewed=gov.review(storage_client,b,"NCAAF","SPREADS")
+    out={"pending":len(ids),"settled":settled,"review":reviewed}
+    log_func("[NCAAF-PT-PROMOTION-LIVE] "+json.dumps(out,sort_keys=True,default=str))
+    return out
 
 
 def match_live_systems(rows: pd.DataFrame, report: dict[str,Any], dashboard_module=None) -> pd.DataFrame:
