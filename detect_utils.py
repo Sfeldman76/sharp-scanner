@@ -210,16 +210,40 @@ def detect_and_save_all_sports():
             lease.release()
 
 
+# WNBA/CFL are intentionally retired from the live scanner, not from the
+# historical datasets or separate training jobs. Order prioritizes the two
+# football production refreshes; no model inference/voting logic is altered.
+SCANNER_ENABLED_SPORTS = ("NFL", "NCAAF", "MLB", "NBA", "NCAAB")
+
+
+def _scanner_active_sports():
+    """Optional subset of five approved sports; never revive WNBA or CFL."""
+    raw = str(os.getenv("SCANNER_ACTIVE_SPORTS", "") or "").strip()
+    if not raw:
+        return list(SCANNER_ENABLED_SPORTS)
+    requested = [s.strip().upper() for s in raw.split(",") if s.strip()]
+    unsupported = sorted(set(requested) - set(SCANNER_ENABLED_SPORTS))
+    if unsupported or not requested:
+        raise ValueError("SCANNER_ACTIVE_SPORTS_INVALID: unsupported=%s" % unsupported)
+    # Deterministic order, no duplicate sport scans.
+    chosen = set(requested)
+    return [s for s in SCANNER_ENABLED_SPORTS if s in chosen]
+
+
 def _detect_and_save_all_sports_locked(lease: ScannerGCSLease):
-    """Original per-sport detection, protected by a renewed distributed lease."""
+    """Active-sport detection, protected by a renewed distributed lease."""
     ratings_need_update = False
+    scan_started = pd.Timestamp.now(tz="UTC")
     lease.assert_valid()
+    sports_order = _scanner_active_sports()
+    logging.info("[SCANNER-ACTIVE-SPORTS] status=READY included=%s disabled=%s",
+                 sports_order, ["WNBA", "CFL"])
 
     # ---- 0.1) Pre-run ratings update (moved to the beginning)
     try:
         logging.info("🟢 Pre-pass: updating power ratings BEFORE detection …")
         bq = bigquery.Client()
-        pre_summary = update_power_ratings(bq)   # should be NaT-safe / idempotent
+        pre_summary = update_power_ratings(bq, sports_allowlist=sports_order)
         logging.info(f"📈 Pre-pass ratings summary: {pre_summary}")
     except Exception as e:
         logging.error(f"❌ Pre-pass ratings update failed (continuing with best-known ratings): {e}", exc_info=True)
@@ -227,9 +251,8 @@ def _detect_and_save_all_sports_locked(lease: ScannerGCSLease):
     # ---- 1) Cache shared resources
    
 
-    sports_order = ["MLB", "NFL", "NCAAF","NBA", "NCAAB", "WNBA", "CFL" ]
-
     for sport_label in sports_order:
+        sport_started = pd.Timestamp.now(tz="UTC")
         lease.assert_valid()
         try:
             sport_key = SPORTS[sport_label]  # e.g. "basketball_nba"
@@ -367,11 +390,14 @@ def _detect_and_save_all_sports_locked(lease: ScannerGCSLease):
             raise
         except Exception as e:
             logging.error(f"❌ Unhandled error during {sport_label} detection: {e}", exc_info=True)
+        finally:
+            elapsed = (pd.Timestamp.now(tz="UTC") - sport_started).total_seconds()
+            logging.info("[SCANNER-SPORT-TIMING] sport=%s elapsed_seconds=%.1f", sport_label, elapsed)
     if ratings_need_update:
         lease.assert_valid()
         try:
             logging.info("[RATINGS-POSTPASS] status=START reason=NEW_FINALS_WRITTEN")
-            summary = update_power_ratings(bigquery.Client())
+            summary = update_power_ratings(bigquery.Client(), sports_allowlist=sports_order)
             logging.info("[RATINGS-POSTPASS] status=PASS rows=%d",len(summary) if summary is not None else 0)
         except ScannerLeaseLost:
             raise
@@ -379,4 +405,6 @@ def _detect_and_save_all_sports_locked(lease: ScannerGCSLease):
             logging.error("[RATINGS-POSTPASS] status=ERROR error=%s:%s",type(exc).__name__,exc,exc_info=True)
     else:
         logging.info("[RATINGS-POSTPASS] status=SKIPPED reason=NO_NEW_FINALS")
+    logging.info("[SCANNER-CYCLE-TIMING] status=COMPLETED sports=%s elapsed_seconds=%.1f",
+                 sports_order, (pd.Timestamp.now(tz="UTC") - scan_started).total_seconds())
 

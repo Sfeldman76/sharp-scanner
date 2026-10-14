@@ -274,9 +274,7 @@ REDIRECT_URI = "https://sharp-scanner-723770381669.us-east4.run.app/"  # no long
 
 SPORTS = {
     "NBA": "basketball_nba",
-    "WNBA": "basketball_wnba",
     "MLB": "baseball_mlb",
-    "CFL": "americanfootball_cfl",
     "NFL": "americanfootball_nfl",
     "NCAAF": "americanfootball_ncaaf",
     "NCAAB": "basketball_ncaab",
@@ -284,9 +282,7 @@ SPORTS = {
 }
 SPORT_ALIAS_MAP = {
     "NBA": "basketball_nba",
-    "WNBA": "basketball_wnba",
     "MLB": "baseball_mlb",
-    "CFL": "americanfootball_cfl",
     "NFL": "americanfootball_nfl",
     "NCAAF": "americanfootball_ncaaf",
     "NCAAB": "basketball_ncaab",
@@ -51234,9 +51230,18 @@ if not HEADLESS:
     PROGRESS_BUCKET = "sharp-models"
     MODEL_BUCKET = "sharp-models"
 
+    # Keep the dashboard aligned with the five-sport production scanner.
+    # Existing browser sessions can retain a previously selected retired sport.
+    _dashboard_leagues = ["General", "NFL", "NCAAF", "MLB", "NBA", "NCAAB"]
+    if st.session_state.get("sport_radio") not in _dashboard_leagues:
+        st.session_state["sport_radio"] = "General"
+    # Retired controls must not silently count as active conflicting scanners.
+    for _retired_scanner_key in ("run_cfl_scanner", "run_wnba_scanner"):
+        st.session_state.pop(_retired_scanner_key, None)
+
     sport = st.sidebar.radio(
         "Select a League",
-        ["General", "NFL", "NCAAF", "NBA", "MLB", "CFL", "WNBA", "NCAAB"],
+        _dashboard_leagues,
         key="sport_radio",
     )
 
@@ -51259,8 +51264,6 @@ if not HEADLESS:
         "NCAAF": "run_ncaaf_scanner",
         "NBA": "run_nba_scanner",
         "MLB": "run_mlb_scanner",
-        "CFL": "run_cfl_scanner",
-        "WNBA": "run_wnba_scanner",
         "NCAAB": "run_ncaab_scanner",
     }
     scanner_widget_keys = {k: f"{v}" for k, v in scanner_flags.items()}

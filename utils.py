@@ -1089,6 +1089,7 @@ def update_power_ratings(
     table_current: str = "sharplogger.sharp_data.ratings_current",
     default_sport: str = "MLB",
     project_table_market: str | None = "sharplogger.sharp_data.moves_with_features_merged",
+    sports_allowlist: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     """
     Streamed, low-memory update of team power ratings per sport.
@@ -2964,7 +2965,14 @@ def update_power_ratings(
     
     # ---------------- MAIN ----------------
     sports_available = fetch_sports_present()
-    sports = [s for s in sports_available if s.upper() in SPORT_CFG]
+    # The scanner may limit its power-ratings work to only its active sports.
+    # Default None preserves the original behavior for all other callers.
+    allowed = None if sports_allowlist is None else {str(s).strip().upper() for s in sports_allowlist}
+    sports = [s for s in sports_available if s.upper() in SPORT_CFG
+              and (allowed is None or s.upper() in allowed)]
+    logging.info("[RATINGS-SPORT-FILTER] status=READY allowed=%s selected=%s excluded=%s",
+                 "ALL" if allowed is None else sorted(allowed), sports,
+                 sorted(set(sports_available) - set(sports)))
     if not sports:
         return pd.DataFrame(columns=["Sport", "Team", "Method", "Rating", "Updated_At"])
 
@@ -3113,7 +3121,9 @@ def update_power_ratings(
                 updated_sports.append(sport)  
 
     upsert_current(current_rows_all)
-    fill_missing_current_from_history(None)
+    # Do not query or restore WNBA/CFL history when the scanner explicitly
+    # excludes those sports. A default (None) caller keeps prior behavior.
+    fill_missing_current_from_history(sports if allowed is not None else None)
 
     if not updated_sports:
         return pd.DataFrame(columns=["Sport", "Team", "Method", "Rating", "Updated_At"])
