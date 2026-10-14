@@ -2015,6 +2015,8 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         # Fail closed; do not treat the fallback predetermined five as an
         # empirically selected challenger or grant it betting authority.
         stable5_shadow[:]=np.nan;stable5_shadow_count[:]=0
+        import traceback as _pt_selector_traceback
+        log_func("[NCAAF-PT-FIVE-SELECT-TRACEBACK] "+_pt_selector_traceback.format_exc())
         log_func("[NCAAF-PT-FIVE-SELECT] "+json.dumps(_pt_selection))
 
     # Prespecified chronological diagnostics; no 2026 results used and no
@@ -2413,7 +2415,11 @@ def run_pt_incremental_value_research(*,games,miner_games,seasons,dashboard_modu
     disp_col=next((c for c in ("_V2182_PT_EXMETA_STD","_V218_PTIDX_STD") if c in mg.columns),None)
     agree_col=next((c for c in ("_V2182_PT_EXMETA_CLUSTER_TEAM_AGREE_FRAC","_V218_PTIDX_CLUSTER_TEAM_AGREE_FRAC") if c in mg.columns),None)
     if not edge_col or not count_col:
-        return {"status":"PT_CONSENSUS_FIELDS_UNAVAILABLE","base_oof":base_diag,"production_authority":0}
+        _missing={"status":"PT_CONSENSUS_FIELDS_UNAVAILABLE","base_oof":base_diag,
+          "diagnostics":{"candidate_columns":[c for c in mg.columns if "PT_" in str(c) and ("EDGE" in str(c) or "COUNT" in str(c))][:80],
+          "edge_field":edge_col,"count_field":count_col,"rows":len(mg)},"production_authority":0}
+        log_func("[NCAAF-PT-INCREMENTAL-HOLD] "+json.dumps(_missing,sort_keys=True,default=str))
+        return _missing
     actual=pd.to_numeric(g.get("Actual_Margin"),errors="coerce").to_numpy(float)
     market=pd.to_numeric(g.get("Market_Open_Margin"),errors="coerce").to_numpy(float) if "Market_Open_Margin" in g.columns else -pd.to_numeric(g.get("Consensus_Open_Spread"),errors="coerce").to_numpy(float)
     pt_edge=pd.to_numeric(mg.get(edge_col),errors="coerce").to_numpy(float); pt_fair=market+pt_edge; base_edge=base-market; gap=pt_fair-base
@@ -2430,10 +2436,36 @@ def run_pt_incremental_value_research(*,games,miner_games,seasons,dashboard_modu
         "abs_pt_edge":np.abs(pt_edge),"abs_base_edge":np.abs(base_edge),"abs_gap":np.abs(gap),"same_side":same,"edge_product":pt_edge*base_edge,
     })
     ishome=pd.to_numeric(g.get("Is_Home",pd.Series(np.nan,index=g.index)),errors="coerce").to_numpy(float); physical=(ishome==1) if np.isfinite(ishome).any() else np.ones(len(g),bool)
+    # Sequential eligibility waterfall diagnoses zero PT/CORE overlap without
+    # changing any scoring threshold or backfilling unavailable forecasts.
+    masks={
+        "all_history":np.ones(len(g),dtype=bool),
+        "one_physical_game":np.asarray(physical,dtype=bool),
+        "has_final_margin":np.asarray(physical&np.isfinite(actual),dtype=bool),
+        "has_frozen_core_oof":np.asarray(physical&np.isfinite(actual)&np.isfinite(base),dtype=bool),
+        "has_market_open":np.asarray(physical&np.isfinite(actual)&np.isfinite(base)&np.isfinite(market),dtype=bool),
+        "has_pt_edge":np.asarray(physical&np.isfinite(actual)&np.isfinite(base)&np.isfinite(market)&np.isfinite(pt_edge),dtype=bool),
+        "pt_min_independent_clusters":np.asarray(physical&np.isfinite(actual)&np.isfinite(base)&np.isfinite(market)&np.isfinite(pt_edge)&(count>=PT_EXTERNAL_CONSENSUS_MIN_CLUSTERS),dtype=bool),
+    }
+    diag={"status":"AUDIT","minimum_cluster_count":int(PT_EXTERNAL_CONSENSUS_MIN_CLUSTERS),
+        "edge_field":edge_col,"count_field":count_col,
+        "sequential_row_counts":{k:int(np.sum(v)) for k,v in masks.items()},
+        "base_oof_status":base_diag.get("status"),
+        "base_oof_folds":base_diag.get("by_season",{}),
+        "pt_edge_finite_all":int(np.isfinite(pt_edge).sum()),
+        "pt_cluster_count_ge_min_all":int(np.sum(count>=PT_EXTERNAL_CONSENSUS_MIN_CLUSTERS)),
+        "by_season":{str(int(year)):{"total_rows":int(np.sum(seasons==year)),
+          "core_oof":int(np.sum((seasons==year)&np.isfinite(base))),
+          "pt_edge":int(np.sum((seasons==year)&np.isfinite(pt_edge))),
+          "paired_eligible":int(np.sum((seasons==year)&masks["pt_min_independent_clusters"]))}
+          for year in sorted(set(int(year) for year in seasons[np.isfinite(seasons)]))}}
+    log_func("[NCAAF-PT-INCREMENTAL-WATERFALL] "+json.dumps(diag,sort_keys=True,default=str))
     valid=physical&np.isfinite(actual)&np.isfinite(base)&np.isfinite(pt_fair)&(count>=PT_EXTERNAL_CONSENSUS_MIN_CLUSTERS)
     fit=valid&(seasons==PT_INCREMENTAL_FIT_SEASON); sel=valid&(seasons==PT_INCREMENTAL_SELECTION_SEASON); val=valid&np.isin(seasons,PT_INCREMENTAL_VALIDATION_SEASONS)
     if fit.sum()<80 or sel.sum()<40 or val.sum()<100:
-        return {"status":"INSUFFICIENT_MATCHED_ROWS","fit_n":int(fit.sum()),"selection_n":int(sel.sum()),"validation_n":int(val.sum()),"base_oof":base_diag,"production_authority":0}
+        out={"status":"INSUFFICIENT_MATCHED_ROWS","fit_n":int(fit.sum()),"selection_n":int(sel.sum()),"validation_n":int(val.sum()),"base_oof":base_diag,"diagnostics":diag,"production_authority":0}
+        log_func("[NCAAF-PT-INCREMENTAL-HOLD] "+json.dumps({k:v for k,v in out.items() if k!="base_oof"},sort_keys=True,default=str))
+        return out
     resid=actual-base
     control=["base_edge"]
     basic=control+["pt_edge","pt_dispersion","pt_cluster_count","pt_positive_frac"]
@@ -6822,6 +6854,8 @@ def _log_ncaaf_system_library_audit(*, inventory: dict[str,Any], delta: dict[str
                 f"confirmation={x.get('confirmation_rate')}/{x.get('confirmation_n')} live={x.get('live_authority_eligible')} family={x.get('evidence_family_key')} rule={x.get('rule')}"
             )
 
+NCAAF_PT_DIAGNOSTICS_PATCH = 'pt-selection-index-safe-waterfall-health-20261014'
+
 def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_module=None, bucket_name="sharp-models", storage_client=None,
                           log_func=print, hard_fail=True) -> dict[str,Any]:
     try:
@@ -6898,6 +6932,21 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         except Exception as _pt_promo_exc:
             pt_promotion_review={"status":"HOLD_ERROR","error":f"{type(_pt_promo_exc).__name__}:{_pt_promo_exc}"}
             log_func("[NCAAF-PT-PROMOTION] "+json.dumps(pt_promotion_review))
+        # Research health is independent from Cloud Run exit-code success.
+        # This must never affect frozen CORE or award PT authority.
+        _selector=(cache.get("pt_stable5_selection") or {})
+        _health_parts={
+            "pt_five_source_selection":{"status":"PASS" if len(_selector.get("sources") or [])==5 and _selector.get("selection_sha256") else "DEGRADED",
+                "reason":_selector.get("status"),"error":_selector.get("error")},
+            "pt_incremental_pairing":{"status":"PASS" if pt_incremental.get("status")=="PASS" else "DEGRADED",
+                "reason":pt_incremental.get("status"),"fit_n":pt_incremental.get("fit_n"),
+                "selection_n":pt_incremental.get("selection_n"),"validation_n":pt_incremental.get("validation_n")},
+            "pt_promotion":{"status":"PASS" if pt_promotion_review.get("status") in ("PROMOTED","ALREADY_PROMOTED","KEEP_INCUMBENT") else "DEGRADED",
+                "reason":pt_promotion_review.get("reason") or pt_promotion_review.get("status")},
+        }
+        _research_health={"status":"DEGRADED" if any(x["status"]=="DEGRADED" for x in _health_parts.values()) else "PASS",
+            "components":_health_parts,"core_frozen":True,"automatic_core_mutation":False}
+        log_func("[NCAAF-RESEARCH-HEALTH] "+json.dumps(_research_health,sort_keys=True,default=str))
         system_library_inventory=_ncaaf_system_library_inventory(miners)
         system_library_change_audit=_ncaaf_system_library_delta(system_library_inventory,_previous_report)
         _log_ncaaf_system_library_audit(inventory=system_library_inventory,delta=system_library_change_audit,miners=miners,log_func=log_func)
@@ -6911,7 +6960,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "deep_context_bridge":deep_context_bridge,
                 "situational_context_bridge":situational_context_bridge,
                 "big_al_observation_ledger":big_al_ledger_diag,"big_al_observation_research":big_al_observation_research,
-                "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"pt_promotion_review":pt_promotion_review,
+                "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"pt_promotion_review":pt_promotion_review,"research_health":_research_health,
                 "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False,"source_neutral":True,"pt_systems_may_earn_bounded_vote":True,"pt_family_vote_cap":1,"h2h_family_vote_cap":1,"rivalry_family_vote_cap":1,"travel_family_vote_cap":1,"result_quality_family_vote_cap":1,"schedule_resume_family_vote_cap":1,"recent_vs_season_family_vote_cap":1,"matchup_differential_family_vote_cap":1,"pt_model_weight":0},
                 "next_step":"KEEP PRODUCTION V1 FROZEN; USE V2.31.1 OBJECTIVE RESULT-QUALITY/RESUME/RECENT/MATCHUP CONTEXT PLUS V2.30 H2H/RIVALRY/TRAVEL AS SOURCE-NEUTRAL MINER INPUTS; PERSIST AND EXACT-RULE REVALIDATE INCUMBENTS; QUALIFY NEW CHALLENGERS ONLY THROUGH 2022-2025 SEALED HISTORY; KEEP 2026 OUTCOMES OUT OF SELECTION"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
@@ -6945,7 +6994,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         _obs_confirmed=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_big_al_observation_hypothesis")) and bool(_m.get("confirmation_pass")))
         _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_","META_PT_","PTIDX_","PT_ALL_","PT_CLUSTER_","PT_TRACKER_")) for c in (_m.get("representative_conditions") or [])))
         log_func(
-            f"[NCAAF-RV2311-CONTRACT] status=PASS report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} "
+            f"[NCAAF-RV2311-CONTRACT] status={_research_health['status']} report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} "
             f"stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} "
             f"sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} "
             f"bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} independent_live_families={system_library_inventory.get('independent_live_family_votes')} "

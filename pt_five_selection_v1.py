@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 SOURCE_TAG = 'pt-five-selection-v1.0-frozen-development-only-20261013'
+DIAGNOSTIC_PATCH = 'pt-selector-index-safe-20261014'
 
 
 def select_five(frame, *, source_cols, group_by_source, actual_col, season_col='Season',
@@ -24,14 +25,18 @@ def select_five(frame, *, source_cols, group_by_source, actual_col, season_col='
     from the caller's existing canonicalization. Future-year outcomes NEVER
     influence selection, source eligibility, weights or tie-breaks.
     """
-    d=frame.copy()
+    # All masks and row positions are explicit NumPy integer arrays.  Never
+    # forward an index derived from a pandas nullable/extension type to NumPy.
+    d=frame.reset_index(drop=True).copy()
     years=pd.to_numeric(d[season_col],errors='coerce')
-    y=pd.to_numeric(d[actual_col],errors='coerce').to_numpy(float)
-    discovery=years.isin(tuple(development_years)).to_numpy()&np.isfinite(y)
+    years_numpy=np.asarray(years.to_numpy(dtype='float64', na_value=np.nan),dtype=np.float64)
+    y=np.asarray(pd.to_numeric(d[actual_col],errors='coerce').to_numpy(dtype='float64',na_value=np.nan),dtype=np.float64)
+    discovery=np.asarray(np.isin(years_numpy,development_years)&np.isfinite(y),dtype=np.bool_)
+    development_positions=np.flatnonzero(discovery).astype(np.intp,copy=False)
     if not discovery.any() or int(discovery.sum())<160:
         return {'status':'INSUFFICIENT_DEVELOPMENT_GAMES','sources':[], 'n':int(discovery.sum()), 'production_authority':0}
-    yr=years.to_numpy(float)[discovery]
-    target=y[discovery]
+    yr=years_numpy[development_positions]
+    target=y[development_positions]
     unique_years=tuple(sorted(set(int(t) for t in yr)))
     if len(unique_years)<2 or max(unique_years)>=2024:
         return {'status':'INVALID_OR_LEAKING_DISCOVERY_SPLIT','sources':[], 'production_authority':0}
@@ -40,7 +45,7 @@ def select_five(frame, *, source_cols, group_by_source, actual_col, season_col='
         if col not in d.columns:continue
         group=str(group_by_source.get(name) or '').strip()
         if not group:continue
-        raw=pd.to_numeric(d[col],errors='coerce').to_numpy(float)[discovery]
+        raw=np.asarray(pd.to_numeric(d[col],errors='coerce').to_numpy(dtype='float64',na_value=np.nan),dtype=np.float64)[development_positions]
         valid=np.isfinite(raw)
         if valid.sum()<80 or np.nanstd(raw)<.5:continue
         coverage=float(valid.mean())
@@ -69,15 +74,17 @@ def select_five(frame, *, source_cols, group_by_source, actual_col, season_col='
         usable=count>=n_req
         coverage=float(np.mean(usable))
         if coverage<min_full_coverage:return float('inf'),{'coverage':coverage}
-        v=vals[usable]
-        pred=np.nansum(v,axis=1)/count[usable]
-        err=np.abs(pred-target[usable]);mae=float(np.mean(err))
+        positions=np.flatnonzero(np.asarray(usable,dtype=np.bool_)).astype(np.intp,copy=False)
+        v=vals[positions]
+        pred=np.nansum(v,axis=1)/count[positions]
+        err=np.abs(pred-target[positions]);mae=float(np.mean(err))
         by_year=[]
         for year in unique_years:
             xx=usable&(yr==year)
             if xx.sum()<35:return float('inf'),{'coverage':coverage}
-            v2=vals[xx];cnt2=count[xx]
-            annual_err=float(np.mean(np.abs(np.nansum(v2,axis=1)/cnt2-target[xx])))
+            pos=np.flatnonzero(np.asarray(xx,dtype=np.bool_)).astype(np.intp,copy=False)
+            v2=vals[pos];cnt2=count[pos]
+            annual_err=float(np.mean(np.abs(np.nansum(v2,axis=1)/cnt2-target[pos])))
             by_year.append(annual_err)
         # penalize missing games, annual instability and duplicate predictions;
         # only proven distinct providers are eligible for the final five.
@@ -87,7 +94,8 @@ def select_five(frame, *, source_cols, group_by_source, actual_col, season_col='
                 a,b=m[names[i]],m[names[j]]
                 pair=np.isfinite(a)&np.isfinite(b)
                 if pair.sum()>60:
-                    c=float(np.corrcoef(a[pair],b[pair])[0,1])
+                    pair_positions=np.flatnonzero(np.asarray(pair,dtype=np.bool_)).astype(np.intp,copy=False)
+                    c=float(np.corrcoef(a[pair_positions],b[pair_positions])[0,1])
                     if np.isfinite(c):corr_penalty+=max(0.0,c-.94)*.30
         value=mae+1.5*(1-coverage)+.10*np.std(by_year)+corr_penalty
         return float(value),{'development_mae':mae,'coverage':coverage,'year_maes':dict(zip(map(str,unique_years),by_year)),
@@ -140,6 +148,12 @@ def _selftest():
     b=select_five(e,source_cols=cols,group_by_source=groups,actual_col='actual')
     assert a['selection_sha256']==b['selection_sha256']
     assert all(y<2024 for y in a['development_years'])
+    # Non-range pandas indexes and nullable season values must not generate
+    # NumPy float-position indexing errors or change the source lock.
+    nullable=e.copy().set_index(pd.Index(range(10000,10000+len(e))))
+    nullable['Season']=nullable['Season'].astype('Int64')
+    c=select_five(nullable,source_cols=cols,group_by_source=groups,actual_col='actual')
+    assert c['status']=='FIVE_SELECTED_DEVELOPMENT_ONLY' and c['selection_sha256']==a['selection_sha256']
     return True
 
 if __name__=='__main__':
