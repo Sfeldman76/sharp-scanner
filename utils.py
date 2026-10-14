@@ -1,6 +1,6 @@
 # V11.2: Expert Active/Direction/Intensity layer aligned with training
 # --- Core Python ---
-import os, sys, gc, time, json, math, hashlib, logging, pickle, warnings, traceback, re
+import os, sys, gc, time, json, math, hashlib, logging, pickle, warnings, traceback, re, uuid
 
 # Suppress UI-only chatter before Streamlit/matplotlib can initialize.
 logging.getLogger("streamlit").setLevel(logging.ERROR)
@@ -1261,112 +1261,138 @@ def update_power_ratings(
     # ✅ HISTORY UPSERT (MERGE) — prevents duplicates forever
     # ------------------------------------------------------------------
     def upsert_history_rows(df_hist: pd.DataFrame):
+        """History upsert with one isolated staging table for this invocation."""
         if df_hist is None or df_hist.empty:
             return
 
-   
-        need = {"Sport", "Team", "Rating", "Method", "Updated_At", "Game_Key"}
-        missing = [c for c in need if c not in df_hist.columns]
+        required = {"Sport", "Team", "Rating", "Method", "Updated_At", "Game_Key"}
+        missing = sorted(required - set(df_hist.columns))
         if missing:
             raise ValueError(f"upsert_history_rows missing cols: {missing}")
-        
+
         dfh = df_hist.copy()
-        dfh["Sport"] = dfh["Sport"].astype(str).str.upper()
+        dfh["Sport"] = dfh["Sport"].astype(str).str.upper().str.strip()
         dfh["Team"] = dfh["Team"].astype(str).str.lower().str.strip()
         dfh["Method"] = dfh["Method"].astype(str).str.lower().str.strip()
         dfh["Game_Key"] = dfh["Game_Key"].astype(str).str.lower().str.strip()
         dfh["Updated_At"] = pd.to_datetime(dfh["Updated_At"], utc=True, errors="coerce")
         dfh["Rating"] = pd.to_numeric(dfh["Rating"], errors="coerce")
-        
         if "Source" not in dfh.columns:
             dfh["Source"] = None
-        
-        dfh = dfh.dropna(subset=["Sport", "Team", "Method", "Game_Key", "Updated_At", "Rating"])
-        
-        dfh = (
-            dfh.sort_values("Updated_At")
-               .groupby(["Sport", "Team", "Method", "Game_Key", "Updated_At"], as_index=False)
-               .last()
-        )
-        
+        dfh = dfh.dropna(subset=list(required))
+        for c in ("Sport", "Team", "Method", "Game_Key"):
+            dfh = dfh.loc[dfh[c].ne("") & ~dfh[c].isin(("nan", "none"))]
+        dfh = dfh.loc[np.isfinite(dfh["Rating"])]
+        dfh = (dfh.sort_values("Updated_At", kind="stable")
+                   .drop_duplicates(["Sport", "Team", "Method", "Game_Key", "Updated_At"], keep="last"))
         if dfh.empty:
             return
-        
-      
-        stage = table_history.rsplit(".", 1)[0] + "._ratings_history_stage"
-        
-        # drop stale stage so schema changes like Game_Key do not fail
-        bq.query(f"DROP TABLE IF EXISTS `{stage}`").result()
-        
-        job_config = bigquery.LoadJobConfig(
-            write_disposition="WRITE_TRUNCATE",
-        )
-        
-        bq.load_table_from_dataframe(dfh, stage, job_config=job_config).result()
-        
-        bq.query(f"""
-        MERGE `{table_history}` T
-        USING (
-          SELECT Sport, Team, Rating, Method, Game_Key, Updated_At, Source
-          FROM (
-            SELECT *,
-                   ROW_NUMBER() OVER (
-                     PARTITION BY
-                       UPPER(Sport),
-                       LOWER(Team),
-                       LOWER(Method),
-                       LOWER(Game_Key),
-                       TIMESTAMP(Updated_At)
-                     ORDER BY Updated_At DESC
-                   ) AS rn
-            FROM `{stage}`
-          )
-          WHERE rn = 1
-        ) S
-        ON  UPPER(T.Sport) = UPPER(S.Sport)
-        AND LOWER(T.Team) = LOWER(S.Team)
-        AND LOWER(T.Method) = LOWER(S.Method)
-        AND LOWER(T.Game_Key) = LOWER(S.Game_Key)
-        AND TIMESTAMP(T.Updated_At) = TIMESTAMP(S.Updated_At)
-        WHEN MATCHED THEN UPDATE SET
-          T.Rating = S.Rating,
-          T.Source = S.Source
-        WHEN NOT MATCHED THEN
-          INSERT (Sport, Team, Rating, Method, Game_Key, Updated_At, Source)
-          VALUES (S.Sport, S.Team, S.Rating, S.Method, S.Game_Key, S.Updated_At, S.Source)
-        """).result()
-        
-        bq.query(f"DROP TABLE `{stage}`").result()
+
+        # No DROP of another scanner's staging table. Each invocation owns its
+        # stage, and cleanup occurs even if loading or MERGE raises.
+        stage = table_history.rsplit(".", 1)[0] + "._ratings_history_stage_" + uuid.uuid4().hex[:16]
+        try:
+            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+            bq.load_table_from_dataframe(dfh, stage, job_config=job_config).result()
+            bq.query(f"""
+            MERGE `{table_history}` T
+            USING (
+              SELECT Sport, Team, Rating, Method, Game_Key, Updated_At, Source
+              FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                  PARTITION BY UPPER(TRIM(Sport)), LOWER(TRIM(Team)),
+                    LOWER(TRIM(Method)), LOWER(TRIM(Game_Key)), TIMESTAMP(Updated_At)
+                  ORDER BY Updated_At DESC, Rating DESC
+                ) AS rn
+                FROM `{stage}`
+              ) WHERE rn = 1
+            ) S
+            ON  UPPER(TRIM(T.Sport)) = UPPER(TRIM(S.Sport))
+            AND LOWER(TRIM(T.Team)) = LOWER(TRIM(S.Team))
+            AND LOWER(TRIM(T.Method)) = LOWER(TRIM(S.Method))
+            AND LOWER(TRIM(T.Game_Key)) = LOWER(TRIM(S.Game_Key))
+            AND TIMESTAMP(T.Updated_At) = TIMESTAMP(S.Updated_At)
+            WHEN MATCHED THEN UPDATE SET
+              T.Rating = S.Rating,
+              T.Source = S.Source
+            WHEN NOT MATCHED THEN
+              INSERT (Sport, Team, Rating, Method, Game_Key, Updated_At, Source)
+              VALUES (S.Sport, S.Team, S.Rating, S.Method, S.Game_Key, S.Updated_At, S.Source)
+            """).result()
+            logging.info("[RATINGS-HISTORY-UPSERT] status=PASS staged_rows=%d stage=%s", len(dfh), stage)
+        finally:
+            try:
+                bq.delete_table(stage, not_found_ok=True)
+            except Exception as cleanup_exc:
+                logging.warning("[RATINGS-HISTORY-STAGE-CLEANUP] status=ERROR stage=%s error=%s", stage, cleanup_exc)
+
     # ------------------------------------------------------------------
-    # ✅ CURRENT UPSERT: MERGE ON (Sport, Team, Method)
+    # CURRENT UPSERT: enforce one source row per (Sport, Team, Method).
     # ------------------------------------------------------------------
     def upsert_current(rows: list[dict]):
         if not rows:
             return
         df_cur = pd.DataFrame(rows)
-        if "Sport" in df_cur.columns:
-            df_cur["Sport"] = df_cur["Sport"].astype(str).str.upper()
-        if "Team" in df_cur.columns:
-            df_cur["Team"] = df_cur["Team"].astype(str).str.lower().str.strip()
-        if "Method" in df_cur.columns:
-            df_cur["Method"] = df_cur["Method"].astype(str).str.lower().str.strip()
+        required = {"Sport", "Team", "Rating", "Method", "Updated_At"}
+        missing = sorted(required - set(df_cur.columns))
+        if missing:
+            raise ValueError(f"upsert_current missing cols: {missing}")
 
-        stage = table_current.rsplit(".", 1)[0] + "._ratings_current_stage"
-        bq.load_table_from_dataframe(df_cur, stage).result()
+        df_cur = df_cur[list(("Sport", "Team", "Rating", "Method", "Updated_At"))].copy()
+        df_cur["Sport"] = df_cur["Sport"].astype(str).str.upper().str.strip()
+        df_cur["Team"] = df_cur["Team"].astype(str).str.lower().str.strip()
+        df_cur["Method"] = df_cur["Method"].astype(str).str.lower().str.strip()
+        df_cur["Rating"] = pd.to_numeric(df_cur["Rating"], errors="coerce")
+        df_cur["Updated_At"] = pd.to_datetime(df_cur["Updated_At"], utc=True, errors="coerce")
+        df_cur = df_cur.dropna(subset=["Sport", "Team", "Rating", "Method", "Updated_At"])
+        for c in ("Sport", "Team", "Method"):
+            df_cur = df_cur.loc[df_cur[c].ne("") & ~df_cur[c].isin(("nan", "none"))]
+        df_cur = df_cur.loc[np.isfinite(df_cur["Rating"])]
+        if df_cur.empty:
+            logging.warning("[RATINGS-CURRENT-UPSERT] status=NO_VALID_ROWS input_rows=%d", len(rows))
+            return
 
-        bq.query(f"""
-        MERGE `{table_current}` T
-        USING `{stage}` S
-        ON T.Sport = S.Sport AND T.Team = S.Team AND T.Method = S.Method
-        WHEN MATCHED THEN UPDATE SET
-          T.Rating     = S.Rating,
-          T.Updated_At = S.Updated_At
-        WHEN NOT MATCHED THEN
-          INSERT (Sport, Team, Rating, Method, Updated_At)
-          VALUES (S.Sport, S.Team, S.Rating, S.Method, S.Updated_At)
-        """).result()
-
-        bq.query(f"DROP TABLE `{stage}`").result()
+        input_valid = len(df_cur)
+        key_cols = ["Sport", "Team", "Method"]
+        # Stable tie resolution retains the last computed rating at equal timestamp.
+        df_cur = (df_cur.sort_values("Updated_At", kind="stable")
+                        .drop_duplicates(subset=key_cols, keep="last"))
+        duplicates_removed = input_valid - len(df_cur)
+        stage = table_current.rsplit(".", 1)[0] + "._ratings_current_stage_" + uuid.uuid4().hex[:16]
+        try:
+            cfg = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+            bq.load_table_from_dataframe(df_cur, stage, job_config=cfg).result()
+            # Defensive SQL-side dedup ensures a single source match even if an
+            # upstream loader sends duplicated rows to staging in future revisions.
+            bq.query(f"""
+            MERGE `{table_current}` T
+            USING (
+              SELECT Sport, Team, Rating, Method, Updated_At
+              FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                  PARTITION BY UPPER(TRIM(Sport)), LOWER(TRIM(Team)), LOWER(TRIM(Method))
+                  ORDER BY Updated_At DESC, Rating DESC
+                ) AS rn
+                FROM `{stage}`
+              ) WHERE rn = 1
+            ) S
+            ON UPPER(TRIM(T.Sport)) = UPPER(TRIM(S.Sport))
+            AND LOWER(TRIM(T.Team)) = LOWER(TRIM(S.Team))
+            AND LOWER(TRIM(T.Method)) = LOWER(TRIM(S.Method))
+            WHEN MATCHED AND (T.Updated_At IS NULL OR S.Updated_At >= T.Updated_At) THEN
+              UPDATE SET T.Rating = S.Rating, T.Updated_At = S.Updated_At
+            WHEN NOT MATCHED THEN
+              INSERT (Sport, Team, Rating, Method, Updated_At)
+              VALUES (S.Sport, S.Team, S.Rating, S.Method, S.Updated_At)
+            """).result()
+            logging.info(
+                "[RATINGS-CURRENT-UPSERT] status=PASS input_rows=%d staged_rows=%d duplicate_keys_removed=%d stage=%s",
+                len(rows), len(df_cur), duplicates_removed, stage)
+        finally:
+            try:
+                bq.delete_table(stage, not_found_ok=True)
+            except Exception as cleanup_exc:
+                logging.warning("[RATINGS-CURRENT-STAGE-CLEANUP] status=ERROR stage=%s error=%s", stage, cleanup_exc)
 
     # ---------------- seed + state helpers ----------------
     def load_seed_ratings(sport: str, asof_ts: dt.datetime | pd.Timestamp | None, *, method: str | None = None) -> dict[str, float]:

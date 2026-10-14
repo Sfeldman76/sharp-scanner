@@ -1,9 +1,12 @@
 import logging
+import threading
+import uuid
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import json
 import psutil
 import os
-from google.cloud import bigquery 
+from google.cloud import bigquery, storage 
 from datetime import datetime
 from config import SPORTS, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, API_KEY
 from utils import (
@@ -51,26 +54,166 @@ from utils import (
     enrich_power_from_current_inplace
 )
 
-def detect_and_save_all_sports():
-    """
-    Orchestrates sharp detection per sport with:
-      - pre-run power ratings update (fresh inputs),
-      - single load of market weights (cached),
-      - per-sport optional model loading (non-fatal if missing),
-      - in-batch + cross-batch dedup handled by writer,
-      - lease guard to avoid duplicate runs on restarts,
-      - backtest write + conditional power-rating update (post-pass).
-    """
-    ratings_need_update = False
-    run_started_utc = pd.Timestamp.utcnow().floor('min')
+class ScannerLeaseLost(RuntimeError):
+    """Another scanner may own the lease; no further writes are permitted."""
 
-    # ---- 0) Global lease: if something restarted seconds later, bail quickly
+
+class ScannerGCSLease:
+    """Cross-container lease with GCS generation preconditions and heartbeat.
+
+    Uses a single GCS object in MODEL_BUCKET; conditional create (generation=0)
+    guarantees two scanners cannot both acquire. Renewal/deletion also require
+    the previously held generation to avoid deleting a successor's lock.
+    """
+
+    def __init__(self, resource="detect_all_sports", *, storage_client=None,
+                 bucket_name=None, ttl_seconds=None, heartbeat_seconds=None):
+        self.resource = resource
+        self.owner = uuid.uuid4().hex
+        self.bucket_name = bucket_name or os.getenv("MODEL_BUCKET", "sharp-models")
+        self.ttl_seconds = max(120, int(ttl_seconds or os.getenv("SCANNER_LEASE_TTL_SECONDS", "900")))
+        self.heartbeat_seconds = max(10, int(heartbeat_seconds or os.getenv("SCANNER_LEASE_HEARTBEAT_SECONDS", "45")))
+        if self.heartbeat_seconds >= self.ttl_seconds / 3:
+            raise ValueError("SCANNER_LEASE_HEARTBEAT_SECONDS must be less than one-third TTL")
+        self.client = storage_client or storage.Client()
+        self.path = f"scanner-leases/{resource}.json"
+        self.blob = self.client.bucket(self.bucket_name).blob(self.path)
+        self.generation = None
+        self.lost = False
+        self._stop = threading.Event()
+        self._mutex = threading.Lock()
+        self._heartbeat_thread = None
+
+    def _payload(self):
+        now = datetime.now(timezone.utc)
+        return json.dumps({
+            "resource": self.resource, "owner": self.owner,
+            "heartbeat_at": now.isoformat(),
+            "expires_at": (now + timedelta(seconds=self.ttl_seconds)).isoformat(),
+            "ttl_seconds": self.ttl_seconds,
+        }, sort_keys=True)
+
+    def acquire(self):
+        from google.api_core.exceptions import NotFound, PreconditionFailed, Conflict
+        for _attempt in range(5):
+            try:
+                self.blob.upload_from_string(
+                    self._payload(), content_type="application/json", if_generation_match=0)
+                self.generation = int(self.blob.generation)
+                if self.generation <= 0:
+                    raise RuntimeError("SCANNER_LEASE_NO_GCS_GENERATION")
+                logging.info("[SCANNER-LEASE] status=ACQUIRED bucket=%s path=%s owner=%s generation=%s ttl_seconds=%d",
+                             self.bucket_name,self.path,self.owner[:12],self.generation,self.ttl_seconds)
+                self._start_heartbeat()
+                return True
+            except (PreconditionFailed, Conflict):
+                # A currently existing lock is normal; only reclaim one whose
+                # expiry is authenticated by the actual GCS object generation.
+                incumbent = self.client.bucket(self.bucket_name).get_blob(self.path)
+                if incumbent is None:
+                    continue
+                generation = int(incumbent.generation)
+                try:
+                    data = json.loads(incumbent.download_as_bytes(if_generation_match=generation))
+                    if not isinstance(data, dict) or not data.get("expires_at") or not data.get("owner"):
+                        raise ValueError("INVALID_SCANNER_LEASE_PAYLOAD")
+                    expires = datetime.fromisoformat(str(data["expires_at"]).replace("Z", "+00:00"))
+                    if expires.tzinfo is None:
+                        raise ValueError("NAIVE_SCANNER_LEASE_EXPIRY")
+                except (NotFound, PreconditionFailed):
+                    continue
+                # Bad/inaccessible content blocks the scanner instead of guessing
+                # that the existing owner is dead.
+                if datetime.now(timezone.utc) < expires:
+                    logging.info("[SCANNER-LEASE] status=BUSY owner=%s until=%s generation=%s",
+                                 str(data.get("owner"))[:12],expires.isoformat(),generation)
+                    return False
+                try:
+                    incumbent.delete(if_generation_match=generation)
+                    logging.warning("[SCANNER-LEASE] status=EXPIRED_RECLAIM previous_owner=%s generation=%s",
+                                    str(data.get("owner"))[:12],generation)
+                except (NotFound,PreconditionFailed,Conflict):
+                    continue
+        raise RuntimeError("SCANNER_LEASE_ACQUISITION_CONTENTION")
+
+    def _start_heartbeat(self):
+        def heartbeat_loop():
+            while not self._stop.wait(self.heartbeat_seconds):
+                try:
+                    self.renew()
+                except Exception as exc:
+                    logging.error("[SCANNER-LEASE] status=LOST reason=%s:%s",type(exc).__name__,exc,exc_info=True)
+                    with self._mutex:
+                        self.lost=True
+                    self._stop.set()
+                    return
+        self._heartbeat_thread = threading.Thread(target=heartbeat_loop, daemon=True,
+                                                 name="scanner-gcs-lease-heartbeat")
+        self._heartbeat_thread.start()
+
+    def renew(self):
+        with self._mutex:
+            if self.lost or self.generation is None:
+                raise ScannerLeaseLost("SCANNER_LEASE_NOT_HELD")
+            self.blob.upload_from_string(
+                self._payload(), content_type="application/json",
+                if_generation_match=self.generation)
+            new_generation = int(self.blob.generation)
+            if new_generation <= self.generation:
+                self.lost=True
+                raise ScannerLeaseLost("SCANNER_LEASE_INVALID_RENEWAL_GENERATION")
+            self.generation = new_generation
+            logging.info("[SCANNER-LEASE] status=RENEWED owner=%s generation=%s",self.owner[:12],self.generation)
+
+    def assert_valid(self):
+        with self._mutex:
+            if self.lost or self.generation is None:
+                raise ScannerLeaseLost("SCANNER_LEASE_LOST_BLOCK_FURTHER_WRITES")
+
+    def release(self):
+        from google.api_core.exceptions import NotFound, PreconditionFailed, Conflict
+        self._stop.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=10)
+        with self._mutex:
+            if self.generation is None:
+                return
+            try:
+                self.blob.delete(if_generation_match=self.generation)
+                logging.info("[SCANNER-LEASE] status=RELEASED owner=%s generation=%s", self.owner[:12],self.generation)
+            except (NotFound,PreconditionFailed,Conflict):
+                logging.warning("[SCANNER-LEASE] status=RELEASE_SKIPPED reason=NOT_OWNER_OR_GONE owner=%s",self.owner[:12])
+            except Exception as exc:
+                logging.warning("[SCANNER-LEASE] status=RELEASE_ERROR owner=%s error=%s",self.owner[:12],exc)
+            finally:
+                self.generation=None
+
+
+def detect_and_save_all_sports():
+    """Single-entry scanner orchestration; never runs when GCS lease unavailable."""
+    lease = None
     try:
-        if not take_run_lease(resource="detect_all_sports", lease_ts=run_started_utc, ttl_minutes=5):
-            logging.info("🔒 Another run is active (lease). Exiting.")
+        lease = ScannerGCSLease(resource="detect_all_sports")
+        if not lease.acquire():
+            logging.info("[SCANNER-LEASE] status=SKIPPED reason=ANOTHER_SCAN_RUNNING")
             return
-    except Exception as e:
-        logging.warning(f"⚠️ Lease check failed (continuing defensively): {e}")
+        return _detect_and_save_all_sports_locked(lease)
+    except ScannerLeaseLost as exc:
+        logging.error("[SCANNER-LEASE] status=ABORTED reason=%s",exc)
+        return
+    except Exception:
+        # Fail CLOSED: if IAM/GCS breaks, running two writers is not safe.
+        logging.exception("[SCANNER-LEASE] status=UNAVAILABLE reason=ACQUIRE_OR_SCAN_ERROR action=ABORT_SCAN")
+        return
+    finally:
+        if lease is not None:
+            lease.release()
+
+
+def _detect_and_save_all_sports_locked(lease: ScannerGCSLease):
+    """Original per-sport detection, protected by a renewed distributed lease."""
+    ratings_need_update = False
+    lease.assert_valid()
 
     # ---- 0.1) Pre-run ratings update (moved to the beginning)
     try:
@@ -87,6 +230,7 @@ def detect_and_save_all_sports():
     sports_order = ["MLB", "NFL", "NCAAF","NBA", "NCAAB", "WNBA", "CFL" ]
 
     for sport_label in sports_order:
+        lease.assert_valid()
         try:
             sport_key = SPORTS[sport_label]  # e.g. "basketball_nba"
         except KeyError:
@@ -186,9 +330,12 @@ def detect_and_save_all_sports():
                         df_moves = df_moves.drop_duplicates(subset=['Line_Hash'], keep='last')
                         if len(df_moves) < before:
                             logging.info(f"🧽 In-batch dedup: removed {before - len(df_moves)} dupe rows for {sport_label}")
+                        lease.assert_valid()
                         write_sharp_moves_to_master(df_moves, table='sharp_data.sharp_moves_master')
                 else:
                     logging.info(f"ℹ️ No sharp moves produced for {sport_label}.")
+            except ScannerLeaseLost:
+                raise
             except Exception as e:
                 logging.error(f"❌ Failed writing sharp moves for {sport_label}: {e}", exc_info=True)
 
@@ -206,15 +353,30 @@ def detect_and_save_all_sports():
                     df_backtest = df_backtest[0]
 
                 if df_backtest is not None and not df_backtest.empty:
+                    lease.assert_valid()
                     write_to_bigquery(df_backtest, table="sharp_data.sharp_scores_full")
                     ratings_need_update = True
                 else:
                     logging.warning(f"⚠️ No backtest rows for {sport_label} — skip write.")
+            except ScannerLeaseLost:
+                raise
             except Exception as e:
                 logging.error(f"❌ Backtest failed for {sport_label}: {e}", exc_info=True)
 
+        except ScannerLeaseLost:
+            raise
         except Exception as e:
             logging.error(f"❌ Unhandled error during {sport_label} detection: {e}", exc_info=True)
+    if ratings_need_update:
+        lease.assert_valid()
+        try:
+            logging.info("[RATINGS-POSTPASS] status=START reason=NEW_FINALS_WRITTEN")
+            summary = update_power_ratings(bigquery.Client())
+            logging.info("[RATINGS-POSTPASS] status=PASS rows=%d",len(summary) if summary is not None else 0)
+        except ScannerLeaseLost:
+            raise
+        except Exception as exc:
+            logging.error("[RATINGS-POSTPASS] status=ERROR error=%s:%s",type(exc).__name__,exc,exc_info=True)
     else:
-        logging.info("ℹ️ No new finals written; skipping post-pass ratings update.")
+        logging.info("[RATINGS-POSTPASS] status=SKIPPED reason=NO_NEW_FINALS")
 
