@@ -38,6 +38,7 @@ import pandas as pd
 NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.31.3-pt-auto-promotion-locked-evidence-20261013"
 NCAAF_RESEARCH_V2_VERSION = "2.31.3"
 NCAAF_RESEARCH_REPAIR_PATCH = "ptiv-2023fit-2024select-2025holdout-live-availability-20261014"
+NCAAF_LIVE_CALENDAR_PATCH = "miner-season-game-date-safe-fallback-20261014"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
@@ -2829,11 +2830,51 @@ def run_sparse_stat_research(games: pd.DataFrame, seasons: np.ndarray, oof_margi
 _V214_EXPERT_SIDE_CACHE: dict[str,Any] = {}
 
 
+def _v231_live_calendar_context(frame: pd.DataFrame) -> tuple[pd.DataFrame,dict[str,Any]]:
+    """Fill missing LIVE date/season from the known scheduled kickoff only.
+
+    The scanner's market rows have Game_Start but may not carry the historical
+    training-frame columns Season and Game_Date. Historical values remain
+    untouched; a January/February postseason game belongs to the prior season.
+    No game outcomes, results, or future team information are used here.
+    """
+    out=frame.copy()
+    if out.empty:
+        return out,{"status":"EMPTY","season_derived":0,"game_dates_derived":0}
+    empty_dates=pd.Series(pd.NaT,index=out.index,dtype="datetime64[ns, UTC]")
+    scheduled=empty_dates.copy()
+    for field in ("_prod_game_start","Game_Start"):
+        if field in out.columns:
+            parsed=pd.to_datetime(out[field],errors="coerce",utc=True)
+            scheduled=scheduled.combine_first(parsed)
+    original=empty_dates.copy()
+    if "Game_Date" in out.columns:
+        original=pd.to_datetime(out["Game_Date"],errors="coerce",utc=True)
+    game_date=original.combine_first(scheduled)
+    derived_dates=int((original.isna() & game_date.notna()).sum())
+    out["Game_Date"]=game_date
+
+    # Always supply a Series: pd.to_numeric(None) yields a NumPy scalar whose
+    # .astype('Int64') raises TypeError, as occurred on the live Cloud Run job.
+    if "Season" in out.columns:
+        season=pd.to_numeric(out["Season"],errors="coerce")
+    else:
+        season=pd.Series(np.nan,index=out.index,dtype=float)
+    inferred=pd.to_numeric(game_date.dt.year,errors="coerce").astype(float)
+    inferred=inferred.where(~game_date.dt.month.isin((1,2)),inferred-1)
+    derived=int((season.isna() & inferred.notna()).sum())
+    out["Season"]=season.where(season.notna(),inferred).astype("Int64")
+    return out,{"status":"PASS","rows":int(len(out)),"season_derived":derived,
+                "game_dates_derived":derived_dates,
+                "season_unresolved":int(out["Season"].isna().sum()),
+                "calendar_source":"KNOWN_PREGAME_KICKOFF_ONLY"}
+
+
 def _v214_side_key(df: pd.DataFrame, team_col: str, opp_col: str | None=None) -> pd.Series:
-    sy=pd.to_numeric(df.get("Season"),errors="coerce").round().astype("Int64").astype(str)
+    sy=pd.to_numeric(df.get("Season",pd.Series(np.nan,index=df.index)),errors="coerce").round().astype("Int64").astype(str)
     gid=df.get("Source_Game_ID",pd.Series("",index=df.index)).astype(str).str.strip()
     gid=gid.mask(gid.str.lower().isin({"","nan","none","<na>"}),"")
-    date=pd.to_datetime(df.get("Game_Date",pd.Series(pd.NaT,index=df.index)),errors="coerce",utc=True).dt.strftime("%Y-%m-%d").fillna("")
+    date=pd.to_datetime(df.get("Game_Date",df.get("Game_Start",pd.Series(pd.NaT,index=df.index))),errors="coerce",utc=True).dt.strftime("%Y-%m-%d").fillna("")
     team=df.get(team_col,pd.Series("",index=df.index)).map(_pt_team_key)
     opp=df.get(opp_col,pd.Series("",index=df.index)).map(_pt_team_key) if opp_col else pd.Series("",index=df.index)
     # Prefer the stable source game id.  If it is absent, use date+oriented pair;
@@ -2856,7 +2897,7 @@ def _v214_occurrence_key(df: pd.DataFrame, team_col: str, opp_col: str) -> pd.Se
     its space-preserving/abbreviation-expanding semantics produce non-matching
     keys even when the same physical game is present.
     """
-    season=pd.to_numeric(df.get("Season"),errors="coerce")
+    season=pd.to_numeric(df.get("Season",pd.Series(np.nan,index=df.index)),errors="coerce")
     date=pd.to_datetime(df.get("Game_Date",df.get("Game_Start",pd.Series(pd.NaT,index=df.index))),errors="coerce",utc=True)
     team=df.get(team_col,pd.Series("",index=df.index)).map(_v214_occurrence_token)
     opp=df.get(opp_col,pd.Series("",index=df.index)).map(_v214_occurrence_token)
@@ -6140,6 +6181,12 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
         pick["_rv22_game_id_key"]=gid; ctx.append(pick); keys.append(gid)
     if not ctx: return out
     cdf=pd.DataFrame(ctx).reset_index(drop=True)
+    cdf,_calendar_diag=_v231_live_calendar_context(cdf)
+    import logging as _live_logging
+    _live_logging.info("[NCAAF-RV22-LIVE-CALENDAR] status=%s rows=%s season_derived=%s game_dates_derived=%s season_unresolved=%s source=%s",
+        _calendar_diag.get("status"),_calendar_diag.get("rows"),_calendar_diag.get("season_derived"),
+        _calendar_diag.get("game_dates_derived"),_calendar_diag.get("season_unresolved"),
+        _calendar_diag.get("calendar_source"))
     cdf,_bounce_live_diag=_attach_role_transition_live_context(cdf,dashboard_module=dashboard_module,log_func=lambda *a,**k:None)
     cdf,_deep_live_diag=_attach_deep_stat_context_to_miner(dashboard_module,cdf,log_func=lambda *a,**k:None,for_live=True)
     cdf,_situational_live_diag=_attach_h2h_rivalry_travel_context(dashboard_module,cdf,log_func=lambda *a,**k:None,for_live=True)
