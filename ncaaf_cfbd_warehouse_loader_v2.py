@@ -72,7 +72,7 @@ import requests
 BASE_URL = "https://api.collegefootballdata.com"
 DEFAULT_PROJECT = os.getenv("BQ_PROJECT", "sharplogger")
 DEFAULT_DATASET = os.getenv("BQ_DATASET", "sharp_data")
-SOURCE_TAG = "ncaaf-cfbd-warehouse-v2.0.1-bq-ddl-prehistory-identity-20261015"
+SOURCE_TAG = "ncaaf-cfbd-warehouse-v2.0.3-historical-boxscore-core-inputs-20261015"
 
 # Existing canonical warehouse objects — deliberately reused.
 CANONICAL_RAW_TABLE = os.getenv("NCAAF_HISTORICAL_RAW_TABLE", "ncaaf_historical_game_side_raw")
@@ -275,6 +275,27 @@ def pull_games(c: CFBDClient, year: int) -> pd.DataFrame:
 def pull_lines(c: CFBDClient, year: int) -> pd.DataFrame:
     """Historical betting lines. Retain every provider in the API archive; normalize a consensus later."""
     return _json_frame(c.get("/lines", {"year": year, "seasonType": "both"}, optional=True))
+
+
+def pull_team_game_box(c: CFBDClient, year: int, weeks: Iterable[int]) -> pd.DataFrame:
+    """Pull CFBD team box-score stats for a season, one week at a time.
+
+    The current CFBD /games/teams contract requires year plus at least one of
+    week, team, or conference. Week iteration gives full-season coverage while
+    retaining each request in the immutable API archive. seasonType=both keeps
+    regular-season and postseason games.
+    """
+    rows: list[dict[str, Any]] = []
+    valid_weeks = sorted({int(w) for w in weeks if pd.notna(w) and int(w) >= 1})
+    for week in valid_weeks:
+        part = c.get("/games/teams", {
+            "year": int(year),
+            "week": int(week),
+            "seasonType": "both",
+            "classification": "fbs",
+        })
+        rows.extend(part)
+    return _json_frame(rows)
 
 
 def pull_advanced(c: CFBDClient, year: int) -> pd.DataFrame:
@@ -1344,6 +1365,136 @@ def _alignment_map(client, project: str, dataset: str, season: int) -> dict[str,
     return out
 
 
+def _cfbd_game_id_key(value: Any) -> str:
+    """Stable textual game-id key shared by games, lines, and team box scores."""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    s=str(value).strip()
+    try:
+        f=float(s)
+        if math.isfinite(f) and abs(f-round(f)) < 1e-9:
+            return str(int(round(f)))
+    except Exception:
+        pass
+    return s
+
+
+def _cfbd_stat_category(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _cfbd_stat_number(value: Any) -> float:
+    if value is None:
+        return np.nan
+    s=str(value).strip().replace(",", "")
+    if not s or s.lower() in {"nan","none","null","--","-"}:
+        return np.nan
+    try:
+        return float(s)
+    except Exception:
+        m=re.search(r"[-+]?\d+(?:\.\d+)?", s)
+        return float(m.group(0)) if m else np.nan
+
+
+def _cfbd_int_stat(value: Any) -> float:
+    x=_cfbd_stat_number(value)
+    if not np.isfinite(x):
+        return np.nan
+    r=round(float(x))
+    return float(r) if abs(float(x)-r) < 1e-9 else np.nan
+
+
+def _cfbd_pair_stat(value: Any) -> tuple[float,float]:
+    """Parse CFBD compound values such as 25-46 or 25/46."""
+    if value is None:
+        return np.nan,np.nan
+    s=str(value).strip().replace(" ", "")
+    parts=re.split(r"[-/]", s)
+    if len(parts) < 2:
+        return np.nan,np.nan
+    return _cfbd_int_stat(parts[0]), _cfbd_int_stat(parts[1])
+
+
+def _extract_team_box_records(box_raw: pd.DataFrame) -> dict[tuple[str,str],dict[str,Any]]:
+    """Flatten CFBD /games/teams into canonical raw Postgame_* fields."""
+    out: dict[tuple[str,str],dict[str,Any]] = {}
+    if box_raw is None or box_raw.empty:
+        return out
+
+    scalar_map={
+        "totalyards":"Postgame_Total_Yards",
+        "totalplays":"Postgame_Total_Plays",
+        "rushingattempts":"Postgame_Rush_Att",
+        "rushingyards":"Postgame_Rush_Yards",
+        "netpassingyards":"Postgame_Pass_Yards",
+        "passingyards":"Postgame_Pass_Yards",
+        "passingtds":"Postgame_Pass_TD",
+        "passingtouchdowns":"Postgame_Pass_TD",
+        "rushtds":"Postgame_Rush_TD",
+        "rushingtds":"Postgame_Rush_TD",
+        "rushingtouchdowns":"Postgame_Rush_TD",
+        "interceptions":"Postgame_Pass_INT",
+        "passesdeflected":"Postgame_Pass_Defended",
+        "interceptionyards":"Postgame_Def_INT_Yards",
+        "fumblereturnyards":"Postgame_Fumble_Return_Yards",
+        "kickreturnyards":"Postgame_Kick_Return_Yards",
+        "puntreturnyards":"Postgame_Punt_Return_Yards",
+        "puntyards":"Postgame_Punt_Yards",
+        "firstdowns":"Postgame_First_Downs",
+        "turnovers":"Postgame_Turnovers",
+    }
+
+    for _,game in box_raw.iterrows():
+        gid=_cfbd_game_id_key(game.get("id",game.get("gameId")))
+        teams=game.get("teams",[])
+        if not gid or not isinstance(teams,(list,tuple)):
+            continue
+        for team_obj in teams:
+            if not isinstance(team_obj,dict):
+                continue
+            team=str(team_obj.get("team") or "").strip()
+            tkey=_team_key(team)
+            if not tkey:
+                continue
+            rec: dict[str,Any] = {}
+            stats=team_obj.get("stats",[])
+            if not isinstance(stats,(list,tuple)):
+                stats=[]
+            for stat_obj in stats:
+                if not isinstance(stat_obj,dict):
+                    continue
+                cat=_cfbd_stat_category(stat_obj.get("category"))
+                val=stat_obj.get("stat")
+                if cat=="completionattempts":
+                    comp,att=_cfbd_pair_stat(val)
+                    if np.isfinite(comp): rec["Postgame_Pass_Comp"]=comp
+                    if np.isfinite(att): rec["Postgame_Pass_Att"]=att
+                elif cat=="totalpenaltiesyards":
+                    _pen,yds=_cfbd_pair_stat(val)
+                    if np.isfinite(yds): rec["Postgame_Penalty_Yards"]=yds
+                elif cat in scalar_map:
+                    z=_cfbd_int_stat(val)
+                    if np.isfinite(z): rec[scalar_map[cat]]=z
+
+            if not np.isfinite(_cfbd_stat_number(rec.get("Postgame_Total_Plays"))):
+                rush=_cfbd_stat_number(rec.get("Postgame_Rush_Att"))
+                patt=_cfbd_stat_number(rec.get("Postgame_Pass_Att"))
+                if np.isfinite(rush) and np.isfinite(patt):
+                    rec["Postgame_Total_Plays"]=float(rush+patt)
+
+            if not np.isfinite(_cfbd_stat_number(rec.get("Postgame_Total_Yards"))):
+                rush_y=_cfbd_stat_number(rec.get("Postgame_Rush_Yards"))
+                pass_y=_cfbd_stat_number(rec.get("Postgame_Pass_Yards"))
+                if np.isfinite(rush_y) and np.isfinite(pass_y):
+                    rec["Postgame_Total_Yards"]=float(rush_y+pass_y)
+
+            out[(gid,tkey)]=rec
+    return out
+
+
 def _result_label(a,b,spread=None,total=None,kind="su"):
     try: a=float(a); b=float(b)
     except Exception: return None
@@ -1359,7 +1510,7 @@ def _result_label(a,b,spread=None,total=None,kind="su"):
     return None
 
 
-def build_canonical_history_rows(games_raw: pd.DataFrame, lines_raw: pd.DataFrame, season: int, alignment: dict[str,dict[str,Any]]) -> pd.DataFrame:
+def build_canonical_history_rows(games_raw: pd.DataFrame, lines_raw: pd.DataFrame, season: int, alignment: dict[str,dict[str,Any]], box_raw: pd.DataFrame | None = None) -> pd.DataFrame:
     """Map CFBD game/results/lines into the existing fixed raw-table schema conceptually.
 
     The actual target schema is read from BigQuery at load time, so this function
@@ -1367,6 +1518,7 @@ def build_canonical_history_rows(games_raw: pd.DataFrame, lines_raw: pd.DataFram
     """
     if games_raw is None or games_raw.empty: return pd.DataFrame()
     lm=_extract_line_records(lines_raw)
+    bm=_extract_team_box_records(box_raw if box_raw is not None else pd.DataFrame())
     rows=[]
     for _,g in games_raw.iterrows():
         gid=g.get("id",g.get("gameId")); start=pd.to_datetime(g.get("startDate",g.get("startTime")),errors="coerce",utc=True)
@@ -1376,7 +1528,8 @@ def build_canonical_history_rows(games_raw: pd.DataFrame, lines_raw: pd.DataFram
         if hm is None or am is None: continue  # fail closed: never invent canonical identities
         hs=pd.to_numeric(pd.Series([g.get("homePoints",g.get("homeScore"))]),errors="coerce").iloc[0]
         aas=pd.to_numeric(pd.Series([g.get("awayPoints",g.get("awayScore"))]),errors="coerce").iloc[0]
-        line=lm.get(str(int(float(gid))) if str(gid).replace('.0','').isdigit() else str(gid),{})
+        gid_key=_cfbd_game_id_key(gid)
+        line=lm.get(gid_key,{})
         hsp=line.get("spread",np.nan); hop=line.get("spread_open",np.nan); tot=line.get("total",np.nan); top=line.get("total_open",np.nan)
         hml=line.get("home_ml",np.nan); aml=line.get("away_ml",np.nan); raw=json.dumps(line.get("providers",[]),sort_keys=True,default=str)
         neutral=bool(g.get("neutralSite") is True or str(g.get("neutralSite")).lower()=="true")
@@ -1386,7 +1539,7 @@ def build_canonical_history_rows(games_raw: pd.DataFrame, lines_raw: pd.DataFram
         ]:
             close_sp=float(sp) if pd.notna(sp) else np.nan; open_sp=float(osp) if pd.notna(osp) else np.nan
             row={
-              "Sport":"NCAAF","Season":int(season),"Source_Name":"CollegeFootballData","Source_Grain":"GAME_SIDE_CONSENSUS","Source_Game_ID":str(int(float(gid))) if str(gid).replace('.0','').isdigit() else str(gid),
+              "Sport":"NCAAF","Season":int(season),"Source_Name":"CollegeFootballData","Source_Grain":"GAME_SIDE_CONSENSUS","Source_Game_ID":gid_key,
               "Game_Date":start.date().isoformat(),"Week":g.get("week"),"Start_Time_ET":st_et.strftime("%Y-%m-%d %H:%M:%S%z"),
               "Source_Team_Name":team,"Source_Opponent_Name":opp,"Team":tm.get("Team") or team,"Team_Norm":str(tm.get("Team_Norm") or _team_key(team)).strip().lower(),
               "Canonical_Team_Name":tm.get("Canonical_Team_Name") or tm.get("Team") or team,"Canonical_Team_Norm":str(tm.get("Canonical_Team_Norm") or tm.get("Team_Norm") or _team_key(team)).strip().lower(),
@@ -1402,6 +1555,13 @@ def build_canonical_history_rows(games_raw: pd.DataFrame, lines_raw: pd.DataFram
               "Total_Result_Close":_result_label(ts,os_,total=tot,kind="total") if pd.notna(tot) else None,"Is_Favorite_Close":int(pd.notna(close_sp) and close_sp<0),"Is_Underdog_Close":int(pd.notna(close_sp) and close_sp>0),"Is_Pickem_Close":int(pd.notna(close_sp) and abs(close_sp)<1e-12),
               "Source_Opening_Odds_Raw":raw,"Source_Closing_Odds_Raw":raw,"Dataset":f"CFBD {season}",
             }
+            _ls=g.get("homeLineScores") if is_home else g.get("awayLineScores")
+            if isinstance(_ls,(list,tuple)):
+                for _q,_col in enumerate(("Q1_Points","Q2_Points","Q3_Points")):
+                    if len(_ls)>_q:
+                        _v=_cfbd_int_stat(_ls[_q])
+                        if np.isfinite(_v): row[_col]=_v
+            row.update(bm.get((gid_key,_team_key(team)),{}))
             rows.append(row)
     return pd.DataFrame(rows)
 
@@ -1412,6 +1572,22 @@ def merge_canonical_history(client, project: str, dataset: str, rows: pd.DataFra
     raw=_qualified(project,dataset,CANONICAL_RAW_TABLE); stage=_qualified(project,dataset,CFBD_HISTORY_STAGING_TABLE)
     table=client.get_table(raw); raw_cols=[f.name for f in table.schema]
     d=rows.reindex(columns=raw_cols).copy()
+
+    # Coerce staging values to the exact existing BigQuery schema before CSV.
+    for f in table.schema:
+        if f.name not in d.columns:
+            continue
+        ft=str(f.field_type or "").upper()
+        if ft in {"INTEGER","INT64"}:
+            x=pd.to_numeric(d[f.name],errors="coerce")
+            non_integral=x.notna() & ((x-x.round()).abs()>1e-9)
+            if bool(non_integral.any()):
+                bad=d.loc[non_integral,f.name].head(10).tolist()
+                raise RuntimeError(f"Non-integral values for INT64 column {f.name}: {bad}")
+            d[f.name]=x.round().astype("Int64")
+        elif ft in {"FLOAT","FLOAT64","NUMERIC","BIGNUMERIC"}:
+            d[f.name]=pd.to_numeric(d[f.name],errors="coerce")
+
     # Load with the target schema exactly; adding CFBD cannot break weekly uploader's schema check.
     client.query(f"CREATE OR REPLACE TABLE `{stage}` AS SELECT * FROM `{raw}` WHERE FALSE").result()
     buf=io.StringIO(); d.to_csv(buf,index=False,na_rep=""); payload=io.BytesIO(buf.getvalue().encode("utf-8"))
@@ -1565,15 +1741,23 @@ def run(
                 if games is None:
                     games=pull_games(client,year); game_cache[year]=games
                 lines=pull_lines(client,year)
+                hist_weeks=sorted(_num(_first_col(games,"week")).dropna().astype(int).unique().tolist()) if not games.empty else []
+                box=pull_team_game_box(client,year,hist_weeks)
                 amap=_alignment_map(bq,project,dataset,year)
                 if not amap:
                     print(f"[CFBD-HISTORY] year={year} status=SKIP_NO_ALIGNMENT")
                     continue
                 print(f"[CFBD-HISTORY-ALIGNMENT] year={year} map_keys={len(amap)} cfbd_aliases_enabled=TRUE future_conference_leakage=FALSE")
-                rows=build_canonical_history_rows(games,lines,year,amap)
+                rows=build_canonical_history_rows(games,lines,year,amap,box)
                 if rows.empty:
                     print(f"[CFBD-HISTORY] year={year} status=NO_CANONICAL_ROWS")
                     continue
+                _ypp_ok=(pd.to_numeric(rows.get("Postgame_Total_Yards"),errors="coerce").notna() & pd.to_numeric(rows.get("Postgame_Total_Plays"),errors="coerce").notna())
+                _rush_ok=(pd.to_numeric(rows.get("Postgame_Rush_Yards"),errors="coerce").notna() & pd.to_numeric(rows.get("Postgame_Rush_Att"),errors="coerce").notna())
+                _pass_ok=(pd.to_numeric(rows.get("Postgame_Pass_Yards"),errors="coerce").notna() & pd.to_numeric(rows.get("Postgame_Pass_Att"),errors="coerce").notna())
+                print(f"[CFBD-HISTORY-BOX] year={year} api_games={len(box)} canonical_sides={len(rows)} ypp_n={int(_ypp_ok.sum())} ypp_pct={float(_ypp_ok.mean()):.4f} rush_n={int(_rush_ok.sum())} rush_pct={float(_rush_ok.mean()):.4f} pass_n={int(_pass_ok.sum())} pass_pct={float(_pass_ok.mean()):.4f}")
+                if int(_ypp_ok.sum())==0 or int(_rush_ok.sum())==0:
+                    raise RuntimeError(f"CFBD historical box-score mapping produced zero CORE inputs for season {year}; refusing to overwrite history silently")
                 res=merge_canonical_history(bq,project,dataset,rows); history_results.append({"season":year,**res})
                 print(f"[CFBD-HISTORY] year={year} status={res.get('status')} rows={len(rows)} calls={client.call_count}")
 
@@ -1632,17 +1816,52 @@ def _self_test() -> None:
     assert float(a.iloc[0]["CFBD_Elo_Prior"]) == 1500.0
 
     # Existing-raw-table mapping: home/away market orientation and grading.
-    hg=pd.DataFrame([{"id":99,"season":2020,"week":1,"startDate":"2020-09-01T00:00:00Z","homeTeam":"Alpha","awayTeam":"Beta","homePoints":28,"awayPoints":21,"homeConference":"X","awayConference":"Y","neutralSite":False}])
+    hg=pd.DataFrame([{"id":99,"season":2020,"week":1,"startDate":"2020-09-01T00:00:00Z","homeTeam":"Alpha","awayTeam":"Beta","homePoints":28,"awayPoints":21,"homeConference":"X","awayConference":"Y","neutralSite":False,"homeLineScores":[7,7,7,7],"awayLineScores":[7,0,7,7]}])
     hl=pd.DataFrame([{"id":99,"lines":[{"provider":"Consensus","spread":-3.5,"spreadOpen":-3.0,"overUnder":49.5,"overUnderOpen":48.5,"homeMoneyline":-160,"awayMoneyline":140}]}])
     amap={"alpha":{"Team":"Alpha","Team_Norm":"alpha","Canonical_Team_Name":"Alpha","Canonical_Team_Norm":"alpha","Conference":"X","Subdivision":"FBS"},"beta":{"Team":"Beta","Team_Norm":"beta","Canonical_Team_Name":"Beta","Canonical_Team_Norm":"beta","Conference":"Y","Subdivision":"FBS"}}
-    hr=build_canonical_history_rows(hg,hl,2020,amap)
+    hb=pd.DataFrame([{
+        "id":99,
+        "teams":[
+            {"team":"Alpha","stats":[
+                {"category":"totalYards","stat":"500"},
+                {"category":"rushingAttempts","stat":"40"},
+                {"category":"rushingYards","stat":"180"},
+                {"category":"completionAttempts","stat":"25-35"},
+                {"category":"netPassingYards","stat":"320"},
+                {"category":"passingTDs","stat":"3"},
+                {"category":"rushingTDs","stat":"2"},
+                {"category":"interceptions","stat":"1"},
+                {"category":"totalPenaltiesYards","stat":"6-55"},
+                {"category":"firstDowns","stat":"24"},
+                {"category":"turnovers","stat":"2"}
+            ]},
+            {"team":"Beta","stats":[
+                {"category":"totalYards","stat":"350"},
+                {"category":"rushingAttempts","stat":"30"},
+                {"category":"rushingYards","stat":"120"},
+                {"category":"completionAttempts","stat":"18/32"},
+                {"category":"netPassingYards","stat":"230"}
+            ]}
+        ]
+    }])
+    hr=build_canonical_history_rows(hg,hl,2020,amap,hb)
     assert len(hr)==2 and float(hr.loc[hr["Is_Home"].eq(1),"Consensus_Close_Spread"].iloc[0])==-3.5 and float(hr.loc[hr["Is_Home"].eq(0),"Consensus_Close_Spread"].iloc[0])==3.5
     assert hr.loc[hr["Is_Home"].eq(1),"ATS_Result_Close"].iloc[0]=="WIN" and hr.loc[hr["Is_Home"].eq(0),"ATS_Result_Close"].iloc[0]=="LOSS"
+    _alpha=hr.loc[hr["Is_Home"].eq(1)].iloc[0]
+    _beta=hr.loc[hr["Is_Home"].eq(0)].iloc[0]
+    assert float(_alpha["Postgame_Total_Yards"])==500.0
+    assert float(_alpha["Postgame_Total_Plays"])==75.0
+    assert float(_alpha["Postgame_Rush_Yards"])==180.0 and float(_alpha["Postgame_Rush_Att"])==40.0
+    assert float(_alpha["Postgame_Pass_Yards"])==320.0 and float(_alpha["Postgame_Pass_Att"])==35.0 and float(_alpha["Postgame_Pass_Comp"])==25.0
+    assert float(_alpha["Postgame_Penalty_Yards"])==55.0 and float(_alpha["Postgame_Pass_INT"])==1.0
+    assert float(_alpha["Postgame_First_Downs"])==24.0 and float(_alpha["Postgame_Turnovers"])==2.0
+    assert float(_alpha["Q1_Points"])==7.0 and float(_alpha["Q3_Points"])==7.0
+    assert float(_beta["Postgame_Total_Plays"])==62.0 and float(_beta["Postgame_Pass_Att"])==32.0
 
     pf=pd.DataFrame([{"Season":2025,"Team":"A","Team_Key":"a","CFBD_Returning_Pct_PPA":.70,"CFBD_Talent":800.0,"CFBD_Season_Net_PPA_Prior":.10}])
     ps=build_personnel_sidecar(pf)
     assert "CFBD_Returning_Pct_PPA" in ps.columns and "CFBD_Season_Net_PPA_Prior" not in ps.columns
-    print("[CFBD-SELF-TEST] status=PASS leakage_shift1=TRUE completed_game_windows=TRUE schedule_base=TRUE pregame_elo=TRUE raw_history_orientation=TRUE personnel_sidecar=TRUE")
+    print("[CFBD-SELF-TEST] status=PASS leakage_shift1=TRUE completed_game_windows=TRUE schedule_base=TRUE pregame_elo=TRUE raw_history_orientation=TRUE raw_history_boxscore=TRUE personnel_sidecar=TRUE")
 
 
 def main() -> None:
