@@ -52,7 +52,7 @@ import pandas as pd
 import requests
 
 BASE_URL = "https://api.collegefootballdata.com"
-SOURCE_TAG = "ncaaf-alignment-history-cfbd-v2-id-first-20261015"
+SOURCE_TAG = "ncaaf-alignment-history-cfbd-v2.1-id-first-state-clean-20261015"
 
 
 def _team_key(x: Any) -> str:
@@ -210,6 +210,18 @@ def _mode_or_conflict(values: list[str | None]) -> tuple[str | None, bool]:
     return None, True
 
 
+CFBD_EXPLICIT_CANONICAL_BRIDGES = {
+    # Exact CFBD school labels that do not text-match the warehouse mascot-bearing canonical name.
+    # These targets are existing NCAAF Team_Norm values, not newly invented identities.
+    "hawai i": "hawaii rainbow warriors",
+    "massachusetts": "umass minutemen",
+    "southern miss": "southern mississippi golden eagles",
+    "texas aandm": "texas aandm aggies",
+    "app state": "appalachian state mountaineers",
+    "sam houston": "sam houston state bearkats",
+}
+
+
 def _candidate_identity_keys(team_row: pd.Series) -> list[str]:
     """CFBD-owned name forms, ordered from most canonical to least."""
     school = _clean_str(team_row.get("school")) or _clean_str(team_row.get("team"))
@@ -260,6 +272,14 @@ def _build_cfbd_id_map(
             hits: list[Identity] = []
             for k in _candidate_identity_keys(r):
                 ident = identities.get(k)
+                if ident is not None:
+                    hits.append(ident)
+            # A small audited bridge for CFBD-owned school labels whose common
+            # source spelling differs materially from the warehouse Team_Norm.
+            # Numeric CFBD team ID remains the external identity anchor.
+            explicit_target = CFBD_EXPLICIT_CANONICAL_BRIDGES.get(_team_key(school))
+            if explicit_target:
+                ident = identities.get(_team_key(explicit_target))
                 if ident is not None:
                     hits.append(ident)
             uniq = {h.canonical_team_norm: h for h in hits}
@@ -372,7 +392,10 @@ def _compress_change_points(season_rows: pd.DataFrame) -> pd.DataFrame:
         prev_state = None
         for _, r in g.iterrows():
             season = int(r["Season"])
-            state = (_clean_str(r.get("Conference")), _clean_str(r.get("Subdivision")), _clean_str(r.get("Division")))
+            # Alignment state is conference + subdivision only. CFBD's
+            # `division` field is not stable enough historically to define a
+            # conference realignment and previously created false change-points.
+            state = (_clean_str(r.get("Conference")), _clean_str(r.get("Subdivision")))
             if prev_state is None or state != prev_state:
                 q = dict(r)
                 q["Effective_Season_From"] = season
