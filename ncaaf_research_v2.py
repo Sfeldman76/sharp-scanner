@@ -35,8 +35,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.31.3-pt-auto-promotion-locked-evidence-20261013"
-NCAAF_RESEARCH_V2_VERSION = "2.31.3"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.32.0-cfbd-miner-context-20261015"
+NCAAF_RESEARCH_V2_VERSION = "2.32.0"
 NCAAF_RESEARCH_REPAIR_PATCH = "ptiv-2023fit-2024select-2025holdout-live-availability-20261014"
 NCAAF_LIVE_CALENDAR_PATCH = "miner-season-game-date-safe-fallback-20261014"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
@@ -45,6 +45,11 @@ NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
 DISCOVERY_MAX_SEASON = 2023
 CONFIRMATION_SEASONS = (2024, 2025)
 PROSPECTIVE_MIN_SEASON = 2026
+# V2.32 optional CFBD research feature bridge. The table is produced by
+# ncaaf_cfbd_miner_loader_v1.py. Missing/unavailable data always fail closed.
+NCAAF_CFBD_MINER_FEATURE_TABLE = os.getenv("NCAAF_CFBD_MINER_FEATURE_TABLE", "sharplogger.sharp_data.ncaaf_cfbd_miner_features_v1")
+NCAAF_CFBD_MINER_PATCH = "CFBD_GAME_SHIFT1_STATIC_PRESEASON_ALTITUDE_WEATHER_SHADOW_20261015"
+_CFBD_MINER_CONTEXT_CACHE: dict[str,Any] = {}
 REPORT_CURRENT_BLOB = "research/ncaaf/v2/current_report.json"
 BUNDLE_CURRENT_BLOB = "research/ncaaf/v2/current_bundle.pkl"
 REPORT_HISTORY_PREFIX = "research/ncaaf/v2/history"
@@ -3578,6 +3583,80 @@ def _attach_deep_stat_context_to_miner(dashboard_module, miner_games: pd.DataFra
     return out,diag
 
 
+
+def _attach_cfbd_context_to_miner(dashboard_module, miner_games: pd.DataFrame, *, log_func=print, for_live: bool=False) -> tuple[pd.DataFrame,dict[str,Any]]:
+    """Join leakage-safe CFBD features produced by the standalone loader.
+
+    Historical game-derived fields in the source table are already shift(1)
+    priors. Team-season personnel/talent fields are preseason/static. Weather is
+    retained as observed/forecast context but any rule using a CFBD weather atom
+    is blocked from live Bet Authority until prospective forecast validation.
+    """
+    if miner_games is None or miner_games.empty:
+        return miner_games,{"status":"EMPTY","selection_influence":0}
+    out=miner_games.copy()
+    bq=getattr(dashboard_module,"bq_client",None) if dashboard_module is not None else None
+    if bq is None:
+        return out,{"status":"NO_BQ_CLIENT","table":NCAAF_CFBD_MINER_FEATURE_TABLE,"selection_influence":0}
+    sy=pd.to_numeric(out.get("Season"),errors="coerce")
+    finite=sy.dropna()
+    if finite.empty:
+        return out,{"status":"NO_SEASON","table":NCAAF_CFBD_MINER_FEATURE_TABLE,"selection_influence":0}
+    lo=int(finite.min()); hi=int(finite.max()); ck=f"{lo}:{hi}"
+    cf=_CFBD_MINER_CONTEXT_CACHE.get(ck)
+    if not isinstance(cf,pd.DataFrame):
+        try:
+            q=bq.query(f"SELECT * FROM `{NCAAF_CFBD_MINER_FEATURE_TABLE}` WHERE Season BETWEEN {lo} AND {hi}")
+            try: cf=q.to_dataframe(create_bqstorage_client=False)
+            except TypeError: cf=q.to_dataframe()
+            if cf is None: cf=pd.DataFrame()
+            _CFBD_MINER_CONTEXT_CACHE[ck]=cf.copy()
+        except Exception as exc:
+            log_func(f"[NCAAF-CFBD-BRIDGE] status=UNAVAILABLE table={NCAAF_CFBD_MINER_FEATURE_TABLE} error={type(exc).__name__}:{exc} fail_closed=TRUE authority=0")
+            return out,{"status":"UNAVAILABLE","table":NCAAF_CFBD_MINER_FEATURE_TABLE,"error":f"{type(exc).__name__}:{exc}","selection_influence":0}
+    if cf.empty:
+        return out,{"status":"EMPTY_SOURCE","table":NCAAF_CFBD_MINER_FEATURE_TABLE,"selection_influence":0}
+
+    right=cf.copy()
+    right["__cfbd_season"]=pd.to_numeric(right.get("Season"),errors="coerce").astype("Int64")
+    right["__cfbd_date"]=pd.to_datetime(right.get("Game_Date"),errors="coerce",utc=True).dt.normalize()
+    _rt=right.get("Team",right.get("Team_Key",pd.Series("",index=right.index))).astype(str).map(_pt_team_key)
+    _ro=right.get("Opponent",right.get("Opponent_Key",pd.Series("",index=right.index))).astype(str).map(_pt_team_key)
+    right["__cfbd_team"]=_rt; right["__cfbd_opp"]=_ro
+    feature_cols=[c for c in right.columns if str(c).startswith("CFBD_")]
+    key=["__cfbd_season","__cfbd_date","__cfbd_team","__cfbd_opp"]
+    right=right.loc[right["__cfbd_date"].notna() & right["__cfbd_team"].ne("")].sort_values(key,kind="stable").drop_duplicates(key,keep="last")
+
+    work=out.copy(); work["__cfbd_ord"]=np.arange(len(work),dtype=int)
+    work["__cfbd_season"]=pd.to_numeric(work.get("Season"),errors="coerce").astype("Int64")
+    work["__cfbd_date"]=pd.to_datetime(work.get("Game_Date",work.get("Game_Start",pd.Series(pd.NaT,index=work.index))),errors="coerce",utc=True).dt.normalize()
+    work["__cfbd_team"]=work.get("Team_Norm",work.get("Team",work.get("Home_Team_Norm",work.get("Home_Team",pd.Series("",index=work.index))))).astype(str).map(_pt_team_key)
+    work["__cfbd_opp"]=work.get("Opponent_Norm",work.get("Opponent",work.get("Away_Team_Norm",work.get("Away_Team",pd.Series("",index=work.index))))).astype(str).map(_pt_team_key)
+    existing=[c for c in feature_cols if c in work.columns]
+    merge_cols=key+[c for c in feature_cols if c not in existing]
+    merged=work.merge(right[merge_cols],on=key,how="left",sort=False)
+    # If a CFBD column was already supplied upstream, preserve it. The standalone
+    # table only fills missing columns; it never overrides a fresher explicit value.
+    merged=merged.sort_values("__cfbd_ord",kind="stable").drop(columns=key+["__cfbd_ord"],errors="ignore").reset_index(drop=True)
+
+    matched=np.zeros(len(merged),dtype=bool)
+    probes=["CFBD_Source_Tag","CFBD_Returning_Pct_PPA","CFBD_Season_Net_PPA_Prior","CFBD_Venue_Elevation"]
+    for c in probes:
+        if c in merged.columns: matched |= merged[c].notna().to_numpy()
+    hist=pd.to_numeric(merged.get("Season"),errors="coerce").le(max(CONFIRMATION_SEASONS)).fillna(False).to_numpy()
+    def _ready(c):
+        return int((merged[c].notna().to_numpy() & hist).sum()) if c in merged.columns else 0
+    diag={"status":"PASS","mode":"LIVE_TRIGGER" if for_live else "HISTORICAL_PLUS_PROSPECTIVE","table":NCAAF_CFBD_MINER_FEATURE_TABLE,
+          "source_rows":int(len(cf)),"miner_rows":int(len(merged)),"matched_rows":int(matched.sum()),"historical_rows":int(hist.sum()),
+          "advanced_ready":_ready("CFBD_Season_Net_PPA_Prior"),"returning_ready":_ready("CFBD_Returning_Pct_PPA"),
+          "roster_ready":_ready("CFBD_Roster_ALL_Retention"),"talent_ready":_ready("CFBD_Talent_Rank"),
+          "portal_ready":_ready("CFBD_Portal_In_Count"),"elo_ready":_ready("CFBD_Elo_Prior"),
+          "altitude_ready":_ready("CFBD_Altitude_Gain"),"weather_ready":_ready("CFBD_WindSpeed"),
+          "weather_historical_contract":"OBSERVED_NOT_ARCHIVED_FORECAST__SHADOW_ONLY", "selection_influence":0,"outcomes_2026_selection":False}
+    log_func(f"[NCAAF-CFBD-BRIDGE] status=PASS mode={diag['mode']} table={NCAAF_CFBD_MINER_FEATURE_TABLE} rows={len(merged)} matched={diag['matched_rows']} historical={diag['historical_rows']} advanced={diag['advanced_ready']} returning={diag['returning_ready']} roster={diag['roster_ready']} portal={diag['portal_ready']} talent={diag['talent_ready']} elo={diag['elo_ready']} altitude={diag['altitude_ready']} weather={diag['weather_ready']} weather_authority=SHADOW_ONLY outcomes_2026_selection=FALSE authority=0")
+    return merged,diag
+
+
 # V2.30 deterministic context bridge. Revenge/H2H, rivalry and schedule sequence
 # are reconstructed from chronology. Travel is joined from a season/game reference
 # table created by bootstrap_ncaaf_travel_reference.py. These fields are pregame
@@ -4041,6 +4120,22 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
             add(f"TOTAL_MOVED_DOWN_{_lbl}_PLUS","OBS_TOTAL_MARKET_DIRECTION",total_move.le(-_cut),desc=f"current/close total moved down >= {_cut:g} from opener",source_ok=_total_move_src,min_n=20)
             add(f"TOTAL_MOVED_UP_{_lbl}_PLUS","OBS_TOTAL_MARKET_DIRECTION",total_move.ge(_cut),desc=f"current/close total moved up >= {_cut:g} from opener",source_ok=_total_move_src,min_n=20)
 
+    # V2.32 cross-market structure. The spread uses the standard team-side
+    # convention (negative=favorite), so implied team points=(total-spread)/2.
+    # This directly tests spread/total consistency and the published low-implied-
+    # score/censoring hypothesis without forcing a direction in advance.
+    if market in {"spreads","totals"}:
+        _xm_ok=sp.notna()&tot.notna()&tot.gt(0)
+        _imp_team=(tot-sp)/2.0; _imp_opp=(tot+sp)/2.0; _ratio=sp.abs()/tot.replace(0,np.nan)
+        for _cut in (7,10,14):
+            add(f"IMPLIED_TEAM_SCORE_LE_{_cut}","CROSS_MARKET_STRUCTURE",_xm_ok&_imp_team.le(_cut),source_ok=bool(_xm_ok.any()),min_n=20)
+            add(f"IMPLIED_OPP_SCORE_LE_{_cut}","CROSS_MARKET_STRUCTURE",_xm_ok&_imp_opp.le(_cut),source_ok=bool(_xm_ok.any()),min_n=20)
+        add("SPREAD_TOTAL_RATIO_25P_PLUS","CROSS_MARKET_STRUCTURE",_xm_ok&_ratio.ge(.25),source_ok=bool(_xm_ok.any()),min_n=20)
+        add("SPREAD_TOTAL_RATIO_35P_PLUS","CROSS_MARKET_STRUCTURE",_xm_ok&_ratio.ge(.35),source_ok=bool(_xm_ok.any()),min_n=20)
+        add("BIG_FAVORITE_LOW_TOTAL","CROSS_MARKET_STRUCTURE",_xm_ok&sp.le(-14)&tot.le(48),source_ok=bool(_xm_ok.any()),min_n=20)
+        add("BIG_DOG_LOW_IMPLIED_SCORE","CROSS_MARKET_STRUCTURE",_xm_ok&sp.ge(14)&_imp_team.le(14),source_ok=bool(_xm_ok.any()),min_n=20)
+        add("BIG_FAVORITE_LOW_IMPLIED_OPP","CROSS_MARKET_STRUCTURE",_xm_ok&sp.le(-14)&_imp_opp.le(14),source_ok=bool(_xm_ok.any()),min_n=20)
+
     # Timing / schedule / rest.
     add("EARLY_SEASON_WK1_4","SEASON_TIMING",week.between(1,4),source_ok=has("Context_Week","Week"))
     add("MID_SEASON_WK5_9","SEASON_TIMING",week.between(5,9),source_ok=has("Context_Week","Week"))
@@ -4089,11 +4184,127 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
     add("TEAM_THIRD_ROAD_IN4","ROAD_SEQUENCE",nfirst("Team_Third_Road_In4").eq(1),source_ok=has("Team_Third_Road_In4"),min_n=20)
     add("OPP_THIRD_ROAD_IN4","ROAD_SEQUENCE",nfirst("Opp_Third_Road_In4").eq(1),source_ok=has("Opp_Third_Road_In4"),min_n=20)
 
+    # V2.32 CFBD personnel, advanced-efficiency, altitude and weather context.
+    # All game-derived CFBD fields are shift(1) priors created by the standalone
+    # loader. Personnel/talent are preseason team-season values. Unknown fields
+    # simply do not generate atoms (fail closed).
+    _cf_games=nfirst("CFBD_Games_Prior")
+    _ret=nfirst("CFBD_Returning_Pct_PPA"); _rost=nfirst("CFBD_Roster_ALL_Retention")
+    add("CFBD_RETURNING_PPA_HIGH_70","CFBD_ROSTER_CONTINUITY",_ret.ge(.70),source_ok=_ret.notna().any(),min_n=20)
+    add("CFBD_RETURNING_PPA_LOW_45","CFBD_ROSTER_CONTINUITY",_ret.le(.45)&_ret.notna(),source_ok=_ret.notna().any(),min_n=20)
+    add("CFBD_ROSTER_RETENTION_HIGH_70","CFBD_ROSTER_CONTINUITY",_rost.ge(.70),source_ok=_rost.notna().any(),min_n=20)
+    add("CFBD_ROSTER_RETENTION_LOW_50","CFBD_ROSTER_CONTINUITY",_rost.le(.50)&_rost.notna(),source_ok=_rost.notna().any(),min_n=20)
+    for _unit,_hi,_lo in (("OL",.70,.50),("SKILL",.70,.50),("FRONT7",.70,.50),("SECONDARY",.70,.50)):
+        _rv=nfirst(f"CFBD_Roster_{_unit}_Retention")
+        add(f"CFBD_{_unit}_CONTINUITY_HIGH","CFBD_ROSTER_CONTINUITY",_rv.ge(_hi),source_ok=_rv.notna().any(),min_n=20)
+        add(f"CFBD_{_unit}_CONTINUITY_LOW","CFBD_ROSTER_CONTINUITY",_rv.le(_lo)&_rv.notna(),source_ok=_rv.notna().any(),min_n=20)
+
+    _qbr=nfirst("CFBD_QB_Returning_Flag"); _qbp=nfirst("CFBD_QB_Game_PPA_SeasonPrior"); _oqbp=nfirst("CFBD_Opp_QB_Game_PPA_SeasonPrior")
+    add("CFBD_QB_RETURNING","CFBD_QB_CONTEXT",_qbr.eq(1),source_ok=_qbr.notna().any(),min_n=20)
+    add("CFBD_QB_NOT_RETURNING","CFBD_QB_CONTEXT",_qbr.eq(0)&_qbr.notna(),source_ok=_qbr.notna().any(),min_n=20)
+    add("CFBD_QB_PPA_STRONG_015","CFBD_QB_CONTEXT",_cf_games.ge(2)&_qbp.ge(.15),source_ok=_qbp.notna().any(),min_n=20)
+    add("CFBD_QB_PPA_NONPOSITIVE","CFBD_QB_CONTEXT",_cf_games.ge(2)&_qbp.le(0)&_qbp.notna(),source_ok=_qbp.notna().any(),min_n=20)
+    add("CFBD_QB_PPA_ADV_010","CFBD_QB_CONTEXT",_cf_games.ge(2)&(_qbp-_oqbp).ge(.10),source_ok=_qbp.notna().any() and _oqbp.notna().any(),min_n=20)
+    add("CFBD_PORTAL_IN_QB","CFBD_QB_CONTEXT",nfirst("CFBD_Portal_In_QB_Count").ge(1),source_ok=has("CFBD_Portal_In_QB_Count"),min_n=20)
+    add("CFBD_PORTAL_OUT_QB","CFBD_QB_CONTEXT",nfirst("CFBD_Portal_Out_QB_Count").ge(1),source_ok=has("CFBD_Portal_Out_QB_Count"),min_n=20)
+
+    _pin=nfirst("CFBD_Portal_In_Count"); _pout=nfirst("CFBD_Portal_Out_Count"); _pnet=nfirst("CFBD_Portal_Net_Count")
+    add("CFBD_PORTAL_IN_8PLUS","CFBD_PORTAL_CONTEXT",_pin.ge(8),source_ok=_pin.notna().any(),min_n=20)
+    add("CFBD_PORTAL_OUT_8PLUS","CFBD_PORTAL_CONTEXT",_pout.ge(8),source_ok=_pout.notna().any(),min_n=20)
+    add("CFBD_PORTAL_NET_IN_3PLUS","CFBD_PORTAL_CONTEXT",_pnet.ge(3),source_ok=_pnet.notna().any(),min_n=20)
+    add("CFBD_PORTAL_NET_OUT_3PLUS","CFBD_PORTAL_CONTEXT",_pnet.le(-3),source_ok=_pnet.notna().any(),min_n=20)
+    _p4=nfirst("CFBD_Portal_In_4StarPlus")-nfirst("CFBD_Portal_Out_4StarPlus")
+    add("CFBD_PORTAL_BLUECHIP_NET_POS","CFBD_PORTAL_CONTEXT",_p4.ge(1),source_ok=has("CFBD_Portal_In_4StarPlus") and has("CFBD_Portal_Out_4StarPlus"),min_n=20)
+    add("CFBD_PORTAL_BLUECHIP_NET_NEG","CFBD_PORTAL_CONTEXT",_p4.le(-1),source_ok=has("CFBD_Portal_In_4StarPlus") and has("CFBD_Portal_Out_4StarPlus"),min_n=20)
+    # Portal quantity is different from portal quality.  Prior-season player PPA
+    # and usage are matched to the player's origin team, then ranked within the
+    # transfer season to avoid brittle raw-scale thresholds.
+    _pppct=nfirst("CFBD_Portal_Net_PriorPPA_Pct"); _pupct=nfirst("CFBD_Portal_Net_PriorUsage_Pct")
+    add("CFBD_PORTAL_PRIOR_PPA_TOP25","CFBD_PORTAL_CONTEXT",_pppct.ge(.75),source_ok=_pppct.notna().any(),min_n=20)
+    add("CFBD_PORTAL_PRIOR_PPA_BOTTOM25","CFBD_PORTAL_CONTEXT",_pppct.le(.25)&_pppct.notna(),source_ok=_pppct.notna().any(),min_n=20)
+    add("CFBD_PORTAL_PRIOR_USAGE_TOP25","CFBD_PORTAL_CONTEXT",_pupct.ge(.75),source_ok=_pupct.notna().any(),min_n=20)
+    add("CFBD_PORTAL_PRIOR_USAGE_BOTTOM25","CFBD_PORTAL_CONTEXT",_pupct.le(.25)&_pupct.notna(),source_ok=_pupct.notna().any(),min_n=20)
+    _qinppa=nfirst("CFBD_Portal_In_QB_Prior_TotalPPA")
+    add("CFBD_PORTAL_IN_QB_PRIOR_PPA_POS","CFBD_QB_CONTEXT",_qinppa.gt(0),source_ok=_qinppa.notna().any(),min_n=20)
+
+    _trank=nfirst("CFBD_Talent_Rank"); _tadv=nfirst("CFBD_Matchup_Talent_Rank_Adv"); _radv=nfirst("CFBD_Matchup_Recruit_Rank_Adv")
+    add("CFBD_TALENT_TOP25","CFBD_TALENT_RECRUITING",_trank.le(25)&_trank.notna(),source_ok=_trank.notna().any(),min_n=20)
+    add("CFBD_TALENT_RANK_ADV_20PLUS","CFBD_TALENT_RECRUITING",_tadv.ge(20),source_ok=_tadv.notna().any(),min_n=20)
+    add("CFBD_TALENT_RANK_DISADV_20PLUS","CFBD_TALENT_RECRUITING",_tadv.le(-20),source_ok=_tadv.notna().any(),min_n=20)
+    add("CFBD_RECRUIT_RANK_ADV_20PLUS","CFBD_TALENT_RECRUITING",_radv.ge(20),source_ok=_radv.notna().any(),min_n=20)
+    add("CFBD_RECRUIT_RANK_DISADV_20PLUS","CFBD_TALENT_RECRUITING",_radv.le(-20),source_ok=_radv.notna().any(),min_n=20)
+
+    _nppa=nfirst("CFBD_Season_Net_PPA_Prior"); _nppad=nfirst("CFBD_Matchup_Net_PPA_Adv")
+    _nsucc=nfirst("CFBD_Matchup_Net_Success_Adv"); _nexpl=nfirst("CFBD_Matchup_Net_Explosiveness_Adv")
+    add("CFBD_NET_PPA_POS_010","CFBD_ADVANCED_EFFICIENCY",_cf_games.ge(3)&_nppa.ge(.10),source_ok=_nppa.notna().any(),min_n=20)
+    add("CFBD_NET_PPA_NEG_010","CFBD_ADVANCED_EFFICIENCY",_cf_games.ge(3)&_nppa.le(-.10),source_ok=_nppa.notna().any(),min_n=20)
+    add("CFBD_NET_PPA_ADV_010","CFBD_ADVANCED_EFFICIENCY",_cf_games.ge(3)&_nppad.ge(.10),source_ok=_nppad.notna().any(),min_n=20)
+    add("CFBD_NET_PPA_DISADV_010","CFBD_ADVANCED_EFFICIENCY",_cf_games.ge(3)&_nppad.le(-.10),source_ok=_nppad.notna().any(),min_n=20)
+    add("CFBD_NET_SUCCESS_ADV_05","CFBD_ADVANCED_EFFICIENCY",_cf_games.ge(3)&_nsucc.ge(.05),source_ok=_nsucc.notna().any(),min_n=20)
+    add("CFBD_NET_SUCCESS_DISADV_05","CFBD_ADVANCED_EFFICIENCY",_cf_games.ge(3)&_nsucc.le(-.05),source_ok=_nsucc.notna().any(),min_n=20)
+    add("CFBD_NET_EXPLOSIVENESS_ADV_010","CFBD_ADVANCED_EFFICIENCY",_cf_games.ge(3)&_nexpl.ge(.10),source_ok=_nexpl.notna().any(),min_n=20)
+
+    _r3=nfirst("CFBD_Recent3_Net_PPA_Prior")
+    add("CFBD_RECENT3_NET_PPA_UP_08","CFBD_ADVANCED_TREND",_cf_games.ge(3)&(_r3-_nppa).ge(.08),source_ok=_r3.notna().any() and _nppa.notna().any(),min_n=20)
+    add("CFBD_RECENT3_NET_PPA_DOWN_08","CFBD_ADVANCED_TREND",_cf_games.ge(3)&(_r3-_nppa).le(-.08),source_ok=_r3.notna().any() and _nppa.notna().any(),min_n=20)
+
+    _opass=nfirst("CFBD_Season_Off_Pass_PPA_Prior"); _odpass=nfirst("CFBD_Opp_Season_Def_Pass_PPA_Prior")
+    _orush=nfirst("CFBD_Season_Off_Rush_PPA_Prior"); _odrush=nfirst("CFBD_Opp_Season_Def_Rush_PPA_Prior")
+    add("CFBD_PASS_PPA_MATCHUP_EDGE_010","CFBD_ADVANCED_MATCHUP",_cf_games.ge(3)&(_opass-_odpass).ge(.10),source_ok=_opass.notna().any() and _odpass.notna().any(),min_n=20)
+    add("CFBD_RUSH_PPA_MATCHUP_EDGE_010","CFBD_ADVANCED_MATCHUP",_cf_games.ge(3)&(_orush-_odrush).ge(.10),source_ok=_orush.notna().any() and _odrush.notna().any(),min_n=20)
+    _dh=nfirst("CFBD_Season_CFBD_Game_Def_Havoc_Prior"); _ohoa=nfirst("CFBD_Opp_Season_CFBD_Game_Off_Havoc_Allowed_Prior")
+    add("CFBD_HAVOC_MATCHUP_STRESS","CFBD_ADVANCED_MATCHUP",_cf_games.ge(3)&_dh.ge(.15)&_ohoa.ge(.15),source_ok=_dh.notna().any() and _ohoa.notna().any(),min_n=20)
+
+    # Deeper CFBD situational efficiency.  These remain curated football states,
+    # not a dump of every raw metric into the combinatorial search.
+    _qbs=nfirst("CFBD_QB_Game_Pass_Success_SeasonPrior"); _oqbs=nfirst("CFBD_Opp_QB_Game_Pass_Success_SeasonPrior")
+    add("CFBD_QB_PASS_SUCCESS_50PLUS","CFBD_QB_CONTEXT",_cf_games.ge(2)&_qbs.ge(.50),source_ok=_qbs.notna().any(),min_n=20)
+    add("CFBD_QB_PASS_SUCCESS_ADV_05","CFBD_QB_CONTEXT",_cf_games.ge(2)&(_qbs-_oqbs).ge(.05),source_ok=_qbs.notna().any() and _oqbs.notna().any(),min_n=20)
+
+    _osd=nfirst("CFBD_Season_Off_StandardDown_Success_Prior"); _odsd=nfirst("CFBD_Opp_Season_Def_StandardDown_Success_Prior")
+    _opd=nfirst("CFBD_Season_Off_PassingDown_Success_Prior"); _odpd=nfirst("CFBD_Opp_Season_Def_PassingDown_Success_Prior")
+    _opow=nfirst("CFBD_Season_Off_PowerSuccess_Prior"); _odpow=nfirst("CFBD_Opp_Season_Def_PowerSuccess_Prior")
+    add("CFBD_STANDARD_DOWN_SUCCESS_EDGE_05","CFBD_ADVANCED_MATCHUP",_cf_games.ge(3)&(_osd-_odsd).ge(.05),source_ok=_osd.notna().any() and _odsd.notna().any(),min_n=20)
+    add("CFBD_PASSING_DOWN_SUCCESS_EDGE_05","CFBD_ADVANCED_MATCHUP",_cf_games.ge(3)&(_opd-_odpd).ge(.05),source_ok=_opd.notna().any() and _odpd.notna().any(),min_n=20)
+    add("CFBD_POWER_SUCCESS_EDGE_10","CFBD_ADVANCED_MATCHUP",_cf_games.ge(3)&(_opow-_odpow).ge(.10),source_ok=_opow.notna().any() and _odpow.notna().any(),min_n=20)
+
+    _tplays=nfirst("CFBD_Season_Off_Plays_Prior"); _oplays=nfirst("CFBD_Opp_Season_Off_Plays_Prior")
+    add("CFBD_TEAM_PACE_70PLUS","CFBD_PACE_CONTEXT",_cf_games.ge(3)&_tplays.ge(70),source_ok=_tplays.notna().any(),min_n=20)
+    add("CFBD_BOTH_PACE_65PLUS","CFBD_PACE_CONTEXT",_cf_games.ge(3)&_tplays.ge(65)&_oplays.ge(65),source_ok=_tplays.notna().any() and _oplays.notna().any(),min_n=20)
+    add("CFBD_BOTH_PACE_70PLUS","CFBD_PACE_CONTEXT",_cf_games.ge(3)&_tplays.ge(70)&_oplays.ge(70),source_ok=_tplays.notna().any() and _oplays.notna().any(),min_n=20)
+
+    _elo=nfirst("CFBD_Matchup_Elo_Adv")
+    add("CFBD_ELO_ADV_75","EXTERNAL_RATINGS_FAMILY",_elo.ge(75),source_ok=_elo.notna().any(),min_n=30)
+    add("CFBD_ELO_ADV_125","EXTERNAL_RATINGS_FAMILY",_elo.ge(125),source_ok=_elo.notna().any(),min_n=30)
+    add("CFBD_ELO_DISADV_75","EXTERNAL_RATINGS_FAMILY",_elo.le(-75),source_ok=_elo.notna().any(),min_n=30)
+
+    _alt=nfirst("CFBD_Altitude_Gain"); _ve=nfirst("CFBD_Venue_Elevation")
+    add("CFBD_ALTITUDE_GAIN_1500_PLUS","CFBD_ALTITUDE_CONTEXT",_alt.ge(1500),source_ok=_alt.notna().any(),min_n=20)
+    add("CFBD_ALTITUDE_GAIN_3000_PLUS","CFBD_ALTITUDE_CONTEXT",_alt.ge(3000),source_ok=_alt.notna().any(),min_n=20)
+    add("CFBD_HIGH_ALTITUDE_VENUE_4000_PLUS","CFBD_ALTITUDE_CONTEXT",_ve.ge(4000),source_ok=_ve.notna().any(),min_n=20)
+
+    # Historical CFBD weather is observed weather, not an immutable archived
+    # pregame forecast. These atoms may be researched/shadowed but are explicitly
+    # blocked from live authority below until prospective forecast validation exists.
+    _wind=nfirst("CFBD_WindSpeed"); _temp=nfirst("CFBD_Temperature"); _prec=nfirst("CFBD_Precipitation"); _snow=nfirst("CFBD_Snowfall"); _indoors=nfirst("CFBD_Game_Indoors","CFBD_Venue_Dome")
+    add("CFBD_WEATHER_WIND_15PLUS","CFBD_WEATHER_OBSERVED",_wind.ge(15),source_ok=_wind.notna().any(),min_n=20)
+    add("CFBD_WEATHER_WIND_20PLUS","CFBD_WEATHER_OBSERVED",_wind.ge(20),source_ok=_wind.notna().any(),min_n=20)
+    add("CFBD_WEATHER_COLD_35MINUS","CFBD_WEATHER_OBSERVED",_temp.le(35)&_temp.notna(),source_ok=_temp.notna().any(),min_n=20)
+    add("CFBD_WEATHER_HOT_90PLUS","CFBD_WEATHER_OBSERVED",_temp.ge(90),source_ok=_temp.notna().any(),min_n=20)
+    add("CFBD_WEATHER_PRECIP","CFBD_WEATHER_OBSERVED",_prec.gt(0),source_ok=_prec.notna().any(),min_n=20)
+    add("CFBD_WEATHER_SNOW","CFBD_WEATHER_OBSERVED",_snow.gt(0),source_ok=_snow.notna().any(),min_n=10)
+    add("CFBD_WEATHER_OUTDOOR_WIND_15PLUS","CFBD_WEATHER_OBSERVED",_wind.ge(15)&~_indoors.eq(1),source_ok=_wind.notna().any(),min_n=20)
+
     # Rivalry / matchup history / revenge.
     riv=tfirst("Rivalry_Flag","Is_Rivalry","Context_Rivalry_Flag")
     if has("Rivalry_Flag","Is_Rivalry","Context_Rivalry_Flag"):
         rv=nfirst("Rivalry_Flag","Is_Rivalry","Context_Rivalry_Flag")
         add("RIVALRY","RIVALRY",rv.eq(1),source_ok=True,min_n=20)
+        add("RIVALRY_FAVORITE","RIVALRY",rv.eq(1)&sp.lt(0),source_ok=True,min_n=20)
+        add("RIVALRY_DOG","RIVALRY",rv.eq(1)&sp.gt(0),source_ok=True,min_n=20)
+        add("RIVALRY_HOME_FAVORITE","RIVALRY",rv.eq(1)&is_home.eq(1)&sp.lt(0),source_ok=True,min_n=20)
+        _h2hw=nfirst("H2H_Consecutive_Wins_Prior","H2H_Consecutive_Wins_Prior_Research")
+        add("RIVALRY_H2H_WIN_STREAK_3PLUS","RIVALRY",rv.eq(1)&_h2hw.ge(3),source_ok=_h2hw.notna().any(),min_n=20)
     rev=nfirst("Revenge_Flag","Opp_Revenge_Flag_CurrentOrPriorSeason")
     add("REVENGE","MATCHUP_HISTORY",rev.eq(1),source_ok=has("Revenge_Flag","Opp_Revenge_Flag_CurrentOrPriorSeason"),min_n=20)
     h2hd=nfirst("Days_Since_Last_Matchup","Days_Since_Last_Matchup_System","H2H2_Days_Since")
@@ -5585,6 +5796,11 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         _uses_resume=bool("SCHEDULE_RESUME_QUALITY" in _family_set)
         _uses_recent=bool("RECENT_VS_SEASON" in _family_set)
         _uses_matchup=bool("MATCHUP_DIFFERENTIAL" in _family_set)
+        _uses_cfbd_personnel=bool(_family_set & {"CFBD_ROSTER_CONTINUITY","CFBD_QB_CONTEXT","CFBD_PORTAL_CONTEXT","CFBD_TALENT_RECRUITING"})
+        _uses_cfbd_advanced=bool(_family_set & {"CFBD_ADVANCED_EFFICIENCY","CFBD_ADVANCED_TREND","CFBD_ADVANCED_MATCHUP","CFBD_PACE_CONTEXT"})
+        _uses_cfbd_altitude=bool("CFBD_ALTITUDE_CONTEXT" in _family_set)
+        _uses_cfbd_weather=bool("CFBD_WEATHER_OBSERVED" in _family_set)
+        _uses_cross_market=bool("CROSS_MARKET_STRUCTURE" in _family_set)
         _uses_observation_hypothesis=bool(_family_set & BIG_AL_OBSERVATION_ATOM_FAMILIES) or any(bool(set(m.get("families") or []) & BIG_AL_OBSERVATION_ATOM_FAMILIES) or "EXPERT_OBSERVATION_HYPOTHESIS" in set(m.get("discovery_lanes") or [m.get("miner_lane")]) for m in members)
         _rep_conditions=list(rep.get("conditions") or [])
         fam={"mechanism_id":fid,"market":market,"direction":rep["direction"],"representative_system_id":rep["system_id"],
@@ -5599,12 +5815,17 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
              "uses_schedule_resume_family":_uses_resume,
              "uses_recent_vs_season_family":_uses_recent,
              "uses_matchup_differential_family":_uses_matchup,
+             "uses_cfbd_personnel_family":_uses_cfbd_personnel,
+             "uses_cfbd_advanced_family":_uses_cfbd_advanced,
+             "uses_cfbd_altitude_family":_uses_cfbd_altitude,
+             "uses_cfbd_weather_family":_uses_cfbd_weather,
+             "uses_cross_market_family":_uses_cross_market,
              "uses_big_al_observation_hypothesis":_uses_observation_hypothesis,
              "hypothesis_origin":"BIG_AL_OBSERVATION_VOCABULARY" if _uses_observation_hypothesis else None,
              # Observation-inspired rules stay source-neutral. They do NOT collapse
              # to one Big Al vote; independent historical mechanisms retain their
              # own evidence key unless an existing correlation cap (PT/state/bounce) applies.
-             "evidence_family_key":"EXTERNAL_RATINGS_FAMILY" if _uses_external else "NCAAF_SEASON_RECORD_STATE_FAMILY" if _uses_season_record else "NCAAF_ROLE_TRANSITION_BOUNCEBACK_FAMILY" if _uses_bounceback else "NCAAF_H2H_CONTEXT_FAMILY" if _uses_h2h else "NCAAF_RIVALRY_CONTEXT_FAMILY" if _uses_rivalry else "NCAAF_TRAVEL_CONTEXT_FAMILY" if _uses_travel else "NCAAF_RESULT_QUALITY_FAMILY" if _uses_result_quality else "NCAAF_SCHEDULE_RESUME_FAMILY" if _uses_resume else "NCAAF_RECENT_VS_SEASON_FAMILY" if _uses_recent else "NCAAF_MATCHUP_DIFFERENTIAL_FAMILY" if _uses_matchup else fid,
+             "evidence_family_key":"EXTERNAL_RATINGS_FAMILY" if _uses_external else "NCAAF_SEASON_RECORD_STATE_FAMILY" if _uses_season_record else "NCAAF_ROLE_TRANSITION_BOUNCEBACK_FAMILY" if _uses_bounceback else "NCAAF_H2H_CONTEXT_FAMILY" if _uses_h2h else "NCAAF_RIVALRY_CONTEXT_FAMILY" if _uses_rivalry else "NCAAF_TRAVEL_CONTEXT_FAMILY" if (_uses_travel or _uses_cfbd_altitude) else "NCAAF_RESULT_QUALITY_FAMILY" if _uses_result_quality else "NCAAF_SCHEDULE_RESUME_FAMILY" if _uses_resume else "NCAAF_RECENT_VS_SEASON_FAMILY" if _uses_recent else "NCAAF_MATCHUP_DIFFERENTIAL_FAMILY" if _uses_matchup else "NCAAF_CFBD_PERSONNEL_FAMILY" if _uses_cfbd_personnel else "NCAAF_CFBD_ADVANCED_FAMILY" if _uses_cfbd_advanced else "NCAAF_CFBD_WEATHER_FAMILY" if _uses_cfbd_weather else "NCAAF_CROSS_MARKET_FAMILY" if _uses_cross_market else fid,
              "contains_meta_constituent_index":any(_v2182_is_meta_constituent_index_atom_name(c) for c in _rep_conditions),
              "meta_constituent_overlap_guard":"PASS" if not _v2182_meta_overlap_violation(_rep_conditions) else "FAIL",
              "miner_lane":rep.get("miner_lane"),"member_lanes":sorted(set(str(x.get("miner_lane") or "") for x in members)),
@@ -5678,6 +5899,11 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         "schedule_resume_quality":_special_family_stats("SCHEDULE_RESUME_QUALITY","NCAAF_SCHEDULE_RESUME_FAMILY"),
         "recent_vs_season":_special_family_stats("RECENT_VS_SEASON","NCAAF_RECENT_VS_SEASON_FAMILY"),
         "matchup_differential":_special_family_stats("MATCHUP_DIFFERENTIAL","NCAAF_MATCHUP_DIFFERENTIAL_FAMILY"),
+        "cfbd_personnel":_multi_family_stats({"CFBD_ROSTER_CONTINUITY","CFBD_QB_CONTEXT","CFBD_PORTAL_CONTEXT","CFBD_TALENT_RECRUITING"},"NCAAF_CFBD_PERSONNEL_FAMILY"),
+        "cfbd_advanced":_multi_family_stats({"CFBD_ADVANCED_EFFICIENCY","CFBD_ADVANCED_TREND","CFBD_ADVANCED_MATCHUP","CFBD_PACE_CONTEXT"},"NCAAF_CFBD_ADVANCED_FAMILY"),
+        "cfbd_altitude":_special_family_stats("CFBD_ALTITUDE_CONTEXT","NCAAF_TRAVEL_CONTEXT_FAMILY"),
+        "cfbd_weather_shadow":_special_family_stats("CFBD_WEATHER_OBSERVED","NCAAF_CFBD_WEATHER_FAMILY"),
+        "cross_market":_special_family_stats("CROSS_MARKET_STRUCTURE","NCAAF_CROSS_MARKET_FAMILY"),
         "big_al_observation_hypothesis":_multi_family_stats(BIG_AL_OBSERVATION_ATOM_FAMILIES,"BIG_AL_OBSERVATION_HYPOTHESIS"),
     }
     if market=="spreads":
@@ -5687,7 +5913,7 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
                 "confirmed_mechanism_count":sum(x["confirmation_pass"] for x in families),
                 "special_family_audit":special_family_audit,
                 "lineage":lineage,
-                "admission_contract":"DISCOVERY_2022_2023_ONLY__LEGACY_MINER_LANE_PRESERVED__PERSISTENT_INCUMBENT_EXACT_RULE_REVALIDATION__BIGAL_OBSERVATION_HYPOTHESIS_LANE_SEPARATE_FDR__BIGAL_RATINGS_ZERO_SELECTION_WEIGHT__2026_EXPERT_PICK_OUTCOMES_UNUSED__EXTERNAL_PREDICTOR_BEHAVIOR_LANE_SEPARATE_FDR__EXTERNAL_SEEDS_DISCOVERY_ONLY__ONE_EXTERNAL_FAMILY_PER_RULE__HORIZON_SYMMETRIC_1_2_3__CONFERENCE_RIVALRY_H2H_ROLE_TEAM_MEMORY__MARKET_RELATIVE_FDR_FOR_H2H__OBSERVED_ML_ROI__PRICE_BAND_ROBUSTNESS__BOTH_2024_AND_2025_CONFIRM__DEPENDENCY_COLLAPSE_AFTER_LANE_MERGE__PARENT_CHILD_INCREMENTAL_ATTRIBUTION__FULL_PT_INDEX_UNIVERSE_ONE_CORRELATED_FAMILY__META_CONSTITUENT_OVERLAP_GUARD__META_SOURCE_OUT_CONSENSUS__SPLIT_OVERLAP_AUDIT__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY"})
+                "admission_contract":"DISCOVERY_2022_2023_ONLY__LEGACY_MINER_LANE_PRESERVED__PERSISTENT_INCUMBENT_EXACT_RULE_REVALIDATION__BIGAL_OBSERVATION_HYPOTHESIS_LANE_SEPARATE_FDR__BIGAL_RATINGS_ZERO_SELECTION_WEIGHT__2026_EXPERT_PICK_OUTCOMES_UNUSED__EXTERNAL_PREDICTOR_BEHAVIOR_LANE_SEPARATE_FDR__EXTERNAL_SEEDS_DISCOVERY_ONLY__ONE_EXTERNAL_FAMILY_PER_RULE__HORIZON_SYMMETRIC_1_2_3__CONFERENCE_RIVALRY_H2H_ROLE_TEAM_MEMORY__MARKET_RELATIVE_FDR_FOR_H2H__OBSERVED_ML_ROI__PRICE_BAND_ROBUSTNESS__BOTH_2024_AND_2025_CONFIRM__DEPENDENCY_COLLAPSE_AFTER_LANE_MERGE__PARENT_CHILD_INCREMENTAL_ATTRIBUTION__FULL_PT_INDEX_UNIVERSE_ONE_CORRELATED_FAMILY__META_CONSTITUENT_OVERLAP_GUARD__META_SOURCE_OUT_CONSENSUS__SPLIT_OVERLAP_AUDIT__CFBD_SHIFT1_PERSONNEL_ADVANCED_ALTITUDE__CFBD_WEATHER_SHADOW_ONLY__CROSS_MARKET_STRUCTURE__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY"})
     log_func(f"[NCAAF-RV23-MINER] market={market} atoms={len(atoms)} tested={len(legacy_tested)+len(observation_tested)+len(external_tested)} systems={len(clean)} mechanisms={len(families)} confirmed_mechanisms={out['confirmed_mechanism_count']} authority=0")
     _oa=special_family_audit.get("big_al_observation_hypothesis") or {}
     if market in {"spreads","totals"}:
@@ -6051,6 +6277,10 @@ def _miner_live_authority_eligible(mech: dict[str,Any] | None) -> bool:
     # Prediction Tracker is intentionally NOT blocked by source: PT-derived
     # mechanisms must clear the same confirmation gate as all other Miner rules.
     if any(x.startswith("CORE_OOF_") or x.startswith("SPEC_") for x in _conds): return False
+    # Historical CFBD weather is observed weather rather than an archived pregame
+    # forecast snapshot. It may discover/shadow hypotheses but cannot influence
+    # live Bet Authority until a prospective forecast archive validates the rule.
+    if any(x.startswith("CFBD_WEATHER_") for x in _conds): return False
     if not bool(m.get("confirmation_pass")): return False
     try: n=int(m.get("confirmation_n",0) or 0)
     except Exception: n=0
@@ -6189,6 +6419,7 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
         _calendar_diag.get("calendar_source"))
     cdf,_bounce_live_diag=_attach_role_transition_live_context(cdf,dashboard_module=dashboard_module,log_func=lambda *a,**k:None)
     cdf,_deep_live_diag=_attach_deep_stat_context_to_miner(dashboard_module,cdf,log_func=lambda *a,**k:None,for_live=True)
+    cdf,_cfbd_live_diag=_attach_cfbd_context_to_miner(dashboard_module,cdf,log_func=lambda *a,**k:None,for_live=True)
     cdf,_situational_live_diag=_attach_h2h_rivalry_travel_context(dashboard_module,cdf,log_func=lambda *a,**k:None,for_live=True)
     cdf,_pt_live_diag=_pt_attach_current_live_frame(cdf,dashboard_module=dashboard_module)
     registry=report.get("system_miner_v3") or {}
@@ -6547,6 +6778,11 @@ def _refresh_special_family_audit_after_incumbents(mr: dict[str,Any]) -> None:
         ("schedule_resume_quality","SCHEDULE_RESUME_QUALITY","NCAAF_SCHEDULE_RESUME_FAMILY"),
         ("recent_vs_season","RECENT_VS_SEASON","NCAAF_RECENT_VS_SEASON_FAMILY"),
         ("matchup_differential","MATCHUP_DIFFERENTIAL","NCAAF_MATCHUP_DIFFERENTIAL_FAMILY"),
+        ("cfbd_personnel","CFBD_ROSTER_CONTINUITY","NCAAF_CFBD_PERSONNEL_FAMILY"),
+        ("cfbd_advanced","CFBD_ADVANCED_EFFICIENCY","NCAAF_CFBD_ADVANCED_FAMILY"),
+        ("cfbd_altitude","CFBD_ALTITUDE_CONTEXT","NCAAF_TRAVEL_CONTEXT_FAMILY"),
+        ("cfbd_weather_shadow","CFBD_WEATHER_OBSERVED","NCAAF_CFBD_WEATHER_FAMILY"),
+        ("cross_market","CROSS_MARKET_STRUCTURE","NCAAF_CROSS_MARKET_FAMILY"),
         ("external_ratings","EXTERNAL_RATINGS_FAMILY","EXTERNAL_RATINGS_FAMILY"),
     )
     for key,family_name,evidence_key in defs:
@@ -6748,7 +6984,7 @@ def _apply_v231_context_family_caps(miners: dict[str,Any], *, log_func=print) ->
     evidence-family key is normalized so variants of the same objective concept
     cannot manufacture multiple independent confirmations.
     """
-    changed=0; counts={"h2h":0,"rivalry":0,"travel":0,"result_quality":0,"schedule_resume":0,"recent_vs_season":0,"matchup_differential":0}
+    changed=0; counts={"h2h":0,"rivalry":0,"travel":0,"result_quality":0,"schedule_resume":0,"recent_vs_season":0,"matchup_differential":0,"cfbd_personnel":0,"cfbd_advanced":0,"cfbd_weather":0,"cross_market":0}
     for _market,_mr in (miners or {}).items():
         for m in ((_mr or {}).get("mechanism_families") or []):
             fams=set(str(x) for x in (m.get("families") or []))
@@ -6774,9 +7010,19 @@ def _apply_v231_context_family_caps(miners: dict[str,Any], *, log_func=print) ->
                 m["uses_recent_vs_season_family"]=True; new="NCAAF_RECENT_VS_SEASON_FAMILY"; counts["recent_vs_season"]+=1
             elif "MATCHUP_DIFFERENTIAL" in fams:
                 m["uses_matchup_differential_family"]=True; new="NCAAF_MATCHUP_DIFFERENTIAL_FAMILY"; counts["matchup_differential"]+=1
+            elif "CFBD_ALTITUDE_CONTEXT" in fams:
+                m["uses_cfbd_altitude_family"]=True; m["uses_travel_context_family"]=True; new="NCAAF_TRAVEL_CONTEXT_FAMILY"; counts["travel"]+=1
+            elif fams & {"CFBD_ROSTER_CONTINUITY","CFBD_QB_CONTEXT","CFBD_PORTAL_CONTEXT","CFBD_TALENT_RECRUITING"}:
+                m["uses_cfbd_personnel_family"]=True; new="NCAAF_CFBD_PERSONNEL_FAMILY"; counts["cfbd_personnel"]+=1
+            elif fams & {"CFBD_ADVANCED_EFFICIENCY","CFBD_ADVANCED_TREND","CFBD_ADVANCED_MATCHUP","CFBD_PACE_CONTEXT"}:
+                m["uses_cfbd_advanced_family"]=True; new="NCAAF_CFBD_ADVANCED_FAMILY"; counts["cfbd_advanced"]+=1
+            elif "CFBD_WEATHER_OBSERVED" in fams:
+                m["uses_cfbd_weather_family"]=True; new="NCAAF_CFBD_WEATHER_FAMILY"; counts["cfbd_weather"]+=1
+            elif "CROSS_MARKET_STRUCTURE" in fams:
+                m["uses_cross_market_family"]=True; new="NCAAF_CROSS_MARKET_FAMILY"; counts["cross_market"]+=1
             if new!=old:
                 m["evidence_family_key"]=new; changed+=1
-    log_func(f"[NCAAF-RV2311-FAMILY-CAPS] status=PASS normalized={changed} h2h={counts['h2h']} rivalry={counts['rivalry']} travel={counts['travel']} result_quality={counts['result_quality']} schedule_resume={counts['schedule_resume']} recent_vs_season={counts['recent_vs_season']} matchup_differential={counts['matchup_differential']} family_vote_cap=1 qualification_mutation=FALSE authority=0")
+    log_func(f"[NCAAF-RV232-FAMILY-CAPS] status=PASS normalized={changed} h2h={counts['h2h']} rivalry={counts['rivalry']} travel={counts['travel']} result_quality={counts['result_quality']} schedule_resume={counts['schedule_resume']} recent_vs_season={counts['recent_vs_season']} matchup_differential={counts['matchup_differential']} cfbd_personnel={counts['cfbd_personnel']} cfbd_advanced={counts['cfbd_advanced']} cfbd_weather={counts['cfbd_weather']} cross_market={counts['cross_market']} family_vote_cap=1 qualification_mutation=FALSE authority=0")
     return {"status":"PASS","normalized":changed,**counts,"family_vote_cap":1,"qualification_mutation":False}
 
 
@@ -6798,6 +7044,11 @@ def _ncaaf_system_tags(mech: dict[str,Any]) -> list[str]:
     if bool(mech.get("uses_schedule_resume_family")) or "SCHEDULE_RESUME_QUALITY" in fams: tags.append("SCHEDULE_RESUME_QUALITY")
     if bool(mech.get("uses_recent_vs_season_family")) or "RECENT_VS_SEASON" in fams: tags.append("RECENT_VS_SEASON")
     if bool(mech.get("uses_matchup_differential_family")) or "MATCHUP_DIFFERENTIAL" in fams: tags.append("MATCHUP_DIFFERENTIAL")
+    if bool(mech.get("uses_cfbd_personnel_family")) or bool(fams & {"CFBD_ROSTER_CONTINUITY","CFBD_QB_CONTEXT","CFBD_PORTAL_CONTEXT","CFBD_TALENT_RECRUITING"}): tags.append("CFBD_PERSONNEL")
+    if bool(mech.get("uses_cfbd_advanced_family")) or bool(fams & {"CFBD_ADVANCED_EFFICIENCY","CFBD_ADVANCED_TREND","CFBD_ADVANCED_MATCHUP","CFBD_PACE_CONTEXT"}): tags.append("CFBD_ADVANCED")
+    if bool(mech.get("uses_cfbd_altitude_family")) or "CFBD_ALTITUDE_CONTEXT" in fams: tags.append("CFBD_ALTITUDE")
+    if bool(mech.get("uses_cfbd_weather_family")) or "CFBD_WEATHER_OBSERVED" in fams: tags.append("CFBD_WEATHER_SHADOW")
+    if bool(mech.get("uses_cross_market_family")) or "CROSS_MARKET_STRUCTURE" in fams: tags.append("CROSS_MARKET_STRUCTURE")
     if bool(mech.get("uses_big_al_observation_hypothesis")) or bool(fams & BIG_AL_OBSERVATION_ATOM_FAMILIES): tags.append("BIG_AL_OBSERVATION_HYPOTHESIS")
     if not tags: tags.append("STANDARD_MINER")
     return tags
@@ -6830,7 +7081,7 @@ def _ncaaf_system_library_inventory(miners: dict[str,Any]) -> dict[str,Any]:
     confirmed=[x for x in rows if x["confirmation_pass"]]
     live=[x for x in rows if x["live_authority_eligible"]]
     independent_live=sorted(set((x["market"],x["evidence_family_key"]) for x in live))
-    tag_names=["SEASON_RECORD_STATE","ROLE_TRANSITION_BOUNCEBACK","H2H_CONTEXT","RIVALRY_CONTEXT","TRAVEL_CONTEXT","RESULT_QUALITY_REGRESSION","SCHEDULE_RESUME_QUALITY","RECENT_VS_SEASON","MATCHUP_DIFFERENTIAL","BIG_AL_OBSERVATION_HYPOTHESIS","PT_DERIVED","STANDARD_MINER"]
+    tag_names=["SEASON_RECORD_STATE","ROLE_TRANSITION_BOUNCEBACK","H2H_CONTEXT","RIVALRY_CONTEXT","TRAVEL_CONTEXT","RESULT_QUALITY_REGRESSION","SCHEDULE_RESUME_QUALITY","RECENT_VS_SEASON","MATCHUP_DIFFERENTIAL","CFBD_PERSONNEL","CFBD_ADVANCED","CFBD_ALTITUDE","CFBD_WEATHER_SHADOW","CROSS_MARKET_STRUCTURE","BIG_AL_OBSERVATION_HYPOTHESIS","PT_DERIVED","STANDARD_MINER"]
     by_tag={}
     for tag in tag_names:
         all_t=[x for x in rows if tag in x["tags"]]
@@ -6991,6 +7242,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         miner_games,expert_side_bridge=_attach_exact_expert_flags_to_miner(dashboard_module,miner_games,log_func=log_func)
         miner_games,historical_state_context_bridge=_attach_historical_state_context_to_miner(dashboard_module,miner_games,log_func=log_func)
         miner_games,deep_context_bridge=_attach_deep_stat_context_to_miner(dashboard_module,miner_games,log_func=log_func,for_live=False)
+        miner_games,cfbd_context_bridge=_attach_cfbd_context_to_miner(dashboard_module,miner_games,log_func=log_func,for_live=False)
         miner_games,situational_context_bridge=_attach_h2h_rivalry_travel_context(dashboard_module,miner_games,log_func=log_func,for_live=False)
         # Persist the enriched frame for prospective/live adapters in this process.
         try:
@@ -7002,7 +7254,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         historic=np.isfinite(seasons)&(seasons<=max(CONFIRMATION_SEASONS))
         if historic.sum()<500: raise RuntimeError(f"insufficient <=2025 history n={int(historic.sum())}")
         g=games.loc[historic].reset_index(drop=True); mg=miner_games.loc[historic].reset_index(drop=True); sy=seasons[historic]; om=oof_margin[historic]; ot=oof_total[historic]
-        log_func(f"[NCAAF-RV2311-PREFLIGHT] source={NCAAF_RESEARCH_V2_SOURCE_TAG} rows={len(g)} seasons={sorted(set(sy.astype(int)))} discovery<=2023 confirmation=2024,2025 prospective>=2026 production_authority=0")
+        log_func(f"[NCAAF-RV232-PREFLIGHT] source={NCAAF_RESEARCH_V2_SOURCE_TAG} rows={len(g)} seasons={sorted(set(sy.astype(int)))} discovery<=2023 confirmation=2024,2025 prospective>=2026 production_authority=0")
         stat=run_orthogonal_stat_research(g,sy,om,ot,cols,log_func=log_func)
         sparse_stat=run_sparse_stat_research(g,sy,om,ot,log_func=log_func)
         miners={m:run_system_miner_v3(mg,sy,m,dashboard_module=dashboard_module,log_func=log_func,max_depth=5) for m in ("spreads","h2h","totals")}
@@ -7086,13 +7338,14 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "context_family_cap_audit":context_family_cap_audit,
                 "historical_state_context_bridge":historical_state_context_bridge,
                 "deep_context_bridge":deep_context_bridge,
+                "cfbd_context_bridge":cfbd_context_bridge,
                 "situational_context_bridge":situational_context_bridge,
                 "big_al_observation_ledger":big_al_ledger_diag,"big_al_observation_research":big_al_observation_research,
                 "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"pt_promotion_review":pt_promotion_review,"research_health":_research_health,
-                "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False,"source_neutral":True,"pt_systems_may_earn_bounded_vote":True,"pt_family_vote_cap":1,"h2h_family_vote_cap":1,"rivalry_family_vote_cap":1,"travel_family_vote_cap":1,"result_quality_family_vote_cap":1,"schedule_resume_family_vote_cap":1,"recent_vs_season_family_vote_cap":1,"matchup_differential_family_vote_cap":1,"pt_model_weight":0},
-                "next_step":"KEEP PRODUCTION V1 FROZEN; USE V2.31.1 OBJECTIVE RESULT-QUALITY/RESUME/RECENT/MATCHUP CONTEXT PLUS V2.30 H2H/RIVALRY/TRAVEL AS SOURCE-NEUTRAL MINER INPUTS; PERSIST AND EXACT-RULE REVALIDATE INCUMBENTS; QUALIFY NEW CHALLENGERS ONLY THROUGH 2022-2025 SEALED HISTORY; KEEP 2026 OUTCOMES OUT OF SELECTION"}
+                "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False,"source_neutral":True,"pt_systems_may_earn_bounded_vote":True,"pt_family_vote_cap":1,"h2h_family_vote_cap":1,"rivalry_family_vote_cap":1,"travel_family_vote_cap":1,"result_quality_family_vote_cap":1,"schedule_resume_family_vote_cap":1,"recent_vs_season_family_vote_cap":1,"matchup_differential_family_vote_cap":1,"cfbd_personnel_family_vote_cap":1,"cfbd_advanced_family_vote_cap":1,"cfbd_altitude_collapses_to_travel":True,"cfbd_weather_authority":"SHADOW_ONLY","cross_market_family_vote_cap":1,"pt_model_weight":0},
+                "next_step":"KEEP PRODUCTION V1 FROZEN; ADD LEAKAGE-SAFE CFBD PERSONNEL/ADVANCED/ALTITUDE AND CROSS-MARKET STRUCTURE TO THE SOURCE-NEUTRAL MINER; WEATHER REMAINS SHADOW-ONLY UNTIL PROSPECTIVE FORECAST VALIDATION; QUALIFY NEW CHALLENGERS ONLY THROUGH SEALED HISTORY; KEEP 2026 OUTCOMES OUT OF SELECTION"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
-        bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"incumbent_system_library_audit":incumbent_system_library_audit,"deep_context_bridge":deep_context_bridge,"big_al_observation_research":big_al_observation_research,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
+        bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"incumbent_system_library_audit":incumbent_system_library_audit,"deep_context_bridge":deep_context_bridge,"cfbd_context_bridge":cfbd_context_bridge,"big_al_observation_research":big_al_observation_research,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
         body=json.dumps(_report_without_models(report),sort_keys=True,separators=(",",":"),default=str).encode()
         sha=hashlib.sha256(body).hexdigest(); hist=f"{REPORT_HISTORY_PREFIX}/{sha[:16]}/report.json"
         b.blob(hist).upload_from_string(body,content_type="application/json"); b.blob(REPORT_CURRENT_BLOB).upload_from_string(body,content_type="application/json")
@@ -7122,7 +7375,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         _obs_confirmed=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if bool(_m.get("uses_big_al_observation_hypothesis")) and bool(_m.get("confirmation_pass")))
         _bridge_mechs=sum(1 for _mr in miners.values() for _m in (_mr.get("mechanism_families") or []) if any(str(c).startswith(("EXPERT_PATHI_","EXPERT_BIGAL_","CORE_OOF_","SPEC_","META_PT_","PTIDX_","PT_ALL_","PT_CLUSTER_","PT_TRACKER_")) for c in (_m.get("representative_conditions") or [])))
         log_func(
-            f"[NCAAF-RV2311-CONTRACT] status={_research_health['status']} report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} "
+            f"[NCAAF-RV232-CONTRACT] status={_research_health['status']} report=gs://{bucket_name}/{REPORT_CURRENT_BLOB} sha={sha[:16]} "
             f"stat_spread_confirmed={len(stat['confirmed_spread_families'])} stat_totals_confirmed={len(stat['confirmed_totals_families'])} "
             f"sparse_confirmed={len(sparse_stat.get('confirmed_candidates') or [])} miner_confirmed={sum(v.get('confirmed_mechanism_count',0) for v in miners.values())} "
             f"bridge_mechanisms={_bridge_mechs} miner_live_authority={_strong} independent_live_families={system_library_inventory.get('independent_live_family_votes')} "
@@ -7130,7 +7383,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
             f"h2h_confirmed={_h2h_confirmed} h2h_live={_h2h_strong} h2h_family_vote_cap=1 rivalry_confirmed={_rivalry_confirmed} rivalry_live={_rivalry_strong} rivalry_family_vote_cap=1 "
             f"travel_confirmed={_travel_confirmed} travel_live={_travel_strong} travel_family_vote_cap=1 travel_bridge={situational_context_bridge.get('travel_reference',{}).get('status')} "
             f"result_quality_confirmed={_rq_confirmed} result_quality_live={_rq_strong} schedule_resume_confirmed={_sr_confirmed} schedule_resume_live={_sr_strong} "
-            f"recent_vs_season_confirmed={_rvs_confirmed} recent_vs_season_live={_rvs_strong} matchup_diff_confirmed={_md_confirmed} matchup_diff_live={_md_strong} deep_context_bridge={deep_context_bridge.get('status')} "
+            f"recent_vs_season_confirmed={_rvs_confirmed} recent_vs_season_live={_rvs_strong} matchup_diff_confirmed={_md_confirmed} matchup_diff_live={_md_strong} deep_context_bridge={deep_context_bridge.get('status')} cfbd_bridge={cfbd_context_bridge.get('status')} cfbd_advanced_ready={cfbd_context_bridge.get('advanced_ready')} cfbd_roster_ready={cfbd_context_bridge.get('roster_ready')} cfbd_altitude_ready={cfbd_context_bridge.get('altitude_ready')} "
             f"deep_result_ready={deep_context_bridge.get('result_quality_ready')} deep_resume_ready={deep_context_bridge.get('resume_ready')} deep_recent_ready={deep_context_bridge.get('recent3_ready')} deep_matchup_ready={deep_context_bridge.get('matchup_ready')} "
             f"travel_ready={situational_context_bridge.get('travel_ready')} h2h_ready={situational_context_bridge.get('h2h_prior_ready')} rivalry_rows={situational_context_bridge.get('rivalry_rows')} "
             f"bigal_hypothesis_confirmed={_obs_confirmed} bigal_hypothesis_live={_obs_strong} bigal_rated_observations={big_al_observation_research.get('rated_observations')} rating_weight=0 "
