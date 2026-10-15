@@ -1649,7 +1649,7 @@ def _pt_load_canonical_team_aliases(dashboard_module, internal_names: Iterable[s
     # team in the current cache before being admitted.
     static={
         "app state":"appalachian state",
-        "uconn":"connecticut",
+        "uconn":"uconn",
         "umass":"massachusetts",
         "ole miss":"mississippi",
         "nc state":"north carolina state",
@@ -1675,6 +1675,15 @@ def _pt_load_canonical_team_aliases(dashboard_module, internal_names: Iterable[s
     }
     for a,t in static.items():
         add(a,t)
+
+    # V2.33.1: if an external alias itself resolves uniquely to a current cache
+    # identity, that exact cache identity wins over stale cross-table naming.
+    # This clears the historical UConn/Connecticut conflict without guessing.
+    for _src in ("uconn",):
+        _target=_pt_resolve_internal_target(_src,valid)
+        if _target:
+            alias_map[_pt_team_key(_src)]=_target
+            conflicts.discard(_pt_team_key(_src))
 
     # V2.22: explicit PT source identities discovered by the V2.21 audit.
     # These are cache-validated exact identities, not fuzzy guesses.
@@ -1794,9 +1803,29 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
     # when both sources expose the same calendar date; otherwise they fail closed.
     ex_date=ex.copy(); ex_date["date_key"]=ex_date["pair_key"].astype(str)+"|"+ex_date.get("game_date",pd.Series("",index=ex_date.index)).fillna("").astype(str)
     dvc=ex_date["date_key"].value_counts(); ex_date=ex_date.loc[ex_date["date_key"].str.len().gt(ex_date["pair_key"].str.len()+1)&ex_date["date_key"].map(dvc).eq(1)].set_index("date_key",drop=False)
+
+    # Safe neutral/postseason recovery: Prediction Tracker can label the two sides
+    # home/road differently from the canonical historical source. Match an unordered
+    # team pair only when there is exactly one PT occurrence for that season.
+    def _unordered_pair(season_value,a,b):
+        if pd.isna(season_value) or not a or not b: return ""
+        x,y=sorted((str(a),str(b)))
+        return f"{int(season_value)}|{x}|{y}"
+
+    ex["unordered_pair_key"]=[_unordered_pair(sy,h,a) for sy,h,a in zip(ex["season"],ex["home_i"],ex["away_i"])]
+    _uc=ex["unordered_pair_key"].value_counts()
+    ex_unordered=ex.loc[ex["unordered_pair_key"].ne("") & ex["unordered_pair_key"].map(_uc).eq(1)].set_index("unordered_pair_key",drop=False)
+
+    ex_udate=ex.copy()
+    ex_udate["unordered_date_key"]=ex_udate["unordered_pair_key"].astype(str)+"|"+ex_udate.get("game_date",pd.Series("",index=ex_udate.index)).fillna("").astype(str)
+    _udc=ex_udate["unordered_date_key"].value_counts()
+    ex_udate=ex_udate.loc[ex_udate["unordered_date_key"].str.len().gt(ex_udate["unordered_pair_key"].str.len()+1) & ex_udate["unordered_date_key"].map(_udc).eq(1)].set_index("unordered_date_key",drop=False)
+
     home=np.where(is_home.eq(1),team,np.where(is_home.eq(0),opp,"")); away=np.where(is_home.eq(1),opp,np.where(is_home.eq(0),team,""))
     key=pd.Series([f"{int(s)}|{h}|{a}" if np.isfinite(s) and h and a else "" for s,h,a in zip(season.to_numpy(float),home,away)],index=g.index)
     gd=pd.to_datetime(g.get("Game_Date",pd.Series(pd.NaT,index=g.index)),errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+    unordered_key=pd.Series([_unordered_pair(s,h,a) for s,h,a in zip(season,home,away)],index=g.index)
+    _internal_unordered_counts=unordered_key[unordered_key.ne("")].value_counts()
 
     meta=np.full(len(g),np.nan); cnt=np.full(len(g),np.nan); pavg=np.full(len(g),np.nan); pmed=np.full(len(g),np.nan); pstd=np.full(len(g),np.nan); extline=np.full(len(g),np.nan)
     stable5_shadow=np.full(len(g),np.nan); stable5_shadow_count=np.zeros(len(g),dtype=int)
@@ -1811,13 +1840,27 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
 
     matched=0; matched_any_component=0; full_five_matched=0; partial_matched=0
     matched_any_index=0; matched_by_season={}; matched_source_ids=set()
+    recovered_unordered=0; recovered_unordered_date=0
 
     for i,k in enumerate(key.astype(str)):
         if not k: continue
         dk=f"{k}|{gd.iloc[i]}" if gd.iloc[i] else ""
-        if dk and dk in ex_date.index: r=ex_date.loc[dk]
-        elif k in unique.index: r=unique.loc[k]
-        else: continue
+        _match_mode=""
+        if dk and dk in ex_date.index:
+            r=ex_date.loc[dk]; _match_mode="EXACT_DATE"
+        elif k in unique.index:
+            r=unique.loc[k]; _match_mode="EXACT_PAIR"
+        else:
+            uk=str(unordered_key.iloc[i] or "")
+            udk=f"{uk}|{gd.iloc[i]}" if uk and gd.iloc[i] else ""
+            if udk and udk in ex_udate.index:
+                r=ex_udate.loc[udk]; _match_mode="UNORDERED_DATE"
+                recovered_unordered_date+=1
+            elif uk and int(_internal_unordered_counts.get(uk,0))==1 and uk in ex_unordered.index:
+                r=ex_unordered.loc[uk]; _match_mode="UNORDERED_UNIQUE"
+                recovered_unordered+=1
+            else:
+                continue
         if isinstance(r,pd.DataFrame): continue
 
         listed[i]=1.0
@@ -1829,7 +1872,18 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         _sy=int(season.iloc[i]) if pd.notna(season.iloc[i]) else None
         if _sy is not None:
             matched_by_season[_sy]=matched_by_season.get(_sy,0)+1
-        orient=1.0 if is_home.iloc[i]==1 else -1.0
+        # Orient every PT number to the cache's Team_Norm side, not to the
+        # historical source's home/away label. This is essential for recovered
+        # neutral/postseason games where PT's home/road labels are reversed.
+        _team_i=str(team.iloc[i])
+        _rh=str(r.get("home_i") or "")
+        _ra=str(r.get("away_i") or "")
+        if _team_i==_rh:
+            orient=1.0
+        elif _team_i==_ra:
+            orient=-1.0
+        else:
+            continue
 
         component_count=0
         for _k in PT_PUBLISHED_WEIGHTS:
@@ -2247,6 +2301,11 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         f"reasons={json.dumps(_residual_reason_counts,sort_keys=True)} "
         f"examples={json.dumps(_residual_detail,sort_keys=True)} authority=0"
     )
+    log_func(
+        f"[NCAAF-PT-SAFE-MATCH-RECOVERY] unordered_unique={recovered_unordered} "
+        f"unordered_date={recovered_unordered_date} ambiguous_rematches_forced=0 "
+        "policy=UNIQUE_UNORDERED_PAIR_OR_EXACT_DATE_ONLY authority=0"
+    )
 
     _src_seasons=sorted({int(x) for x in pd.to_numeric(ext_source.get("season"),errors="coerce").dropna().tolist()})
     _eligible_internal_mask=season.isin(_src_seasons)
@@ -2299,6 +2358,8 @@ def _pt_attach_history_to_cache(dashboard_module, ext: pd.DataFrame, *, log_func
         "alias_resolved_source_rows":alias_resolved_source_rows,
         "alias_resolution_coverage":_alias_resolution_cov,
         "unresolved_source_rows":unresolved_source_rows,
+        "safe_unordered_unique_recovered":int(recovered_unordered),
+        "safe_unordered_date_recovered":int(recovered_unordered_date),
         "post_alias_unmatched_rows":int(len(_post_alias_unmatched)),
         "post_alias_unmatched_reasons":_residual_reason_counts,
         "eligible_internal_rows":_eligible_internal,
@@ -3764,7 +3825,7 @@ def _attach_cfbd_context_to_miner(dashboard_module, miner_games: pd.DataFrame, *
           "portal_ready":_ready("CFBD_Portal_In_Count"),"elo_ready":_ready("CFBD_Elo_Prior"),
           "altitude_ready":_ready("CFBD_Altitude_Gain"),"weather_ready":_ready("CFBD_WindSpeed"),
           "weather_historical_contract":"OBSERVED_NOT_ARCHIVED_FORECAST__SHADOW_ONLY", "selection_influence":0,"outcomes_2026_selection":False}
-    log_func(f"[NCAAF-CFBD-BRIDGE] status=PASS mode={diag['mode']} table={NCAAF_CFBD_MINER_FEATURE_TABLE} rows={len(merged)} matched={diag['matched_rows']} historical={diag['historical_rows']} advanced={diag['advanced_ready']} returning={diag['returning_ready']} roster={diag['roster_ready']} portal={diag['portal_ready']} talent={diag['talent_ready']} elo={diag['elo_ready']} altitude={diag['altitude_ready']} weather={diag['weather_ready']} fill_gid={_filled_gid} fill_pair={_filled_pair} fill_side={_filled_side} weather_authority=SHADOW_ONLY outcomes_2026_selection=FALSE authority=0")
+    log_func(f"[NCAAF-CFBD-BRIDGE] status=PASS mode={diag['mode']} table={NCAAF_CFBD_MINER_FEATURE_TABLE} rows={len(merged)} matched={diag['matched_rows']} historical={diag['historical_rows']} advanced={diag['advanced_ready']} returning={diag['returning_ready']} roster={diag['roster_ready']} portal={diag['portal_ready']} talent={diag['talent_ready']} elo={diag['elo_ready']} altitude={diag['altitude_ready']} weather={diag['weather_ready']} cells_filled_gid={_filled_gid} cells_filled_pair={_filled_pair} cells_filled_side={_filled_side} weather_authority=SHADOW_ONLY outcomes_2026_selection=FALSE authority=0")
     return merged,diag
 
 

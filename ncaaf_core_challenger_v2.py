@@ -50,6 +50,8 @@ import io
 import json
 import pickle
 import re
+import os
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any
 
@@ -57,7 +59,7 @@ import numpy as np
 import pandas as pd
 
 SOURCE_TAG = "ncaaf-core-challenger-v2.4-expert-model-atom-bridge-20261006"
-VERSION = "2.4.0"
+VERSION = "2.4.1"
 REPORT_CURRENT_BLOB = "research/ncaaf/core_challenger/v2/current_report.json"
 REPORT_HISTORY_PREFIX = "research/ncaaf/core_challenger/v2/history"
 BUNDLE_CURRENT_BLOB = "research/ncaaf/core_challenger/v2/current_bundle.pkl"
@@ -107,14 +109,15 @@ _BLOCKED_FEATURE_TOKENS = (
 )
 
 _ADVANCED_TOKENS = (
-    "epa", "success", "explos", "havoc", "line_yards", "stuff_rate",
+    "epa", "ppa", "success", "explos", "havoc", "line_yards", "stuff_rate",
     "power_success", "field_position", "points_per_opportunity", "drive_",
     "pressure_rate", "sack_rate", "early_down", "passing_down", "qb_",
-    "returning_production", "roster_continuity", "recruit", "talent",
+    "returning_production", "returning_", "roster_continuity", "roster_",
+    "portal_", "recruit", "talent", "elo_",
 )
 
 _ADVANCED_DATA_FAMILIES = {
-    "EPA/play": ("epa", "expected_points_added"),
+    "EPA/PPA play efficiency": ("epa", "ppa", "expected_points_added"),
     "Success rate": ("success_rate", "success"),
     "Explosiveness": ("explosiveness", "explosive", "explos"),
     "Havoc": ("havoc",),
@@ -126,10 +129,18 @@ _ADVANCED_DATA_FAMILIES = {
     "Sack / pressure rate": ("sack_rate", "pressure_rate", "pressure_pct"),
     "Early-down efficiency": ("early_down",),
     "Passing-down efficiency": ("passing_down",),
-    "QB efficiency": ("qb_epa", "qb_success", "qb_eff", "quarterback"),
-    "Returning production / roster continuity": ("returning_production", "roster_continuity", "returning_starters"),
+    "QB efficiency": ("qb_epa", "qb_ppa", "qb_success", "qb_eff", "quarterback"),
+    "Returning production / roster continuity": ("returning_production", "returning_", "roster_continuity", "roster_", "returning_starters"),
+    "Transfer portal": ("portal_",),
     "Recruiting / talent": ("recruit", "talent", "blue_chip"),
+    "Pregame Elo": ("elo_prior", "matchup_elo"),
 }
+
+NCAAF_CFBD_MINER_FEATURE_TABLE = os.getenv(
+    "NCAAF_CFBD_MINER_FEATURE_TABLE",
+    "sharplogger.sharp_data.ncaaf_cfbd_miner_features_v1",
+)
+_CFBD_CORE_CONTEXT_CACHE: dict[str,pd.DataFrame] = {}
 
 
 def _now() -> str:
@@ -673,6 +684,153 @@ def _rank_subset_features(g: pd.DataFrame, pool: list[str], *, max_features: int
     return {"selected":selected,"top_ranked":rows[:40],"baseline_rmse":br,"baseline_mae":bm}
 
 
+def _cfbd_core_team_key(x: Any) -> str:
+    """Match the standalone CFBD loader's conservative school-name key."""
+    z="" if x is None else str(x)
+    z=unicodedata.normalize("NFKD",z).encode("ascii","ignore").decode("ascii")
+    z=z.lower().replace("&"," and ")
+    z=re.sub(r"[^a-z0-9]+"," ",z).strip()
+    repl={
+        "st":"state","mich":"michigan","fla":"florida","ill":"illinois",
+        "ind":"indiana","mass":"massachusetts","miss":"mississippi",
+        "mo":"missouri","tenn":"tennessee","tex":"texas","va":"virginia",
+        "wash":"washington","wis":"wisconsin","conn":"connecticut",
+        "colo":"colorado","ark":"arkansas","cal":"california","neb":"nebraska",
+    }
+    z=" ".join(repl.get(t,t) for t in z.split())
+    aliases={
+        "nc state":"north carolina state","n c state":"north carolina state",
+        "sc state":"south carolina state","s c state":"south carolina state",
+        "e michigan":"eastern michigan","w michigan":"western michigan",
+        "c michigan":"central michigan","n illinois":"northern illinois",
+        "s mississippi":"southern mississippi","southern miss":"southern mississippi",
+    }
+    return aliases.get(z,z)
+
+
+def _attach_cfbd_core_context(dashboard_module, g: pd.DataFrame, *, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
+    """Attach pregame-safe CFBD features before Core Challenger screening.
+
+    The source table is the same leakage-safe feature table consumed by the Miner:
+    game-derived fields are prior/shifted and personnel/talent fields are preseason
+    or otherwise pregame. 2026 is never queried here.
+    """
+    if g is None or g.empty:
+        return g,{"status":"EMPTY","matched_rows":0}
+    bq=getattr(dashboard_module,"bq_client",None) if dashboard_module is not None else None
+    if bq is None:
+        return g,{"status":"NO_BQ_CLIENT","matched_rows":0,"table":NCAAF_CFBD_MINER_FEATURE_TABLE}
+
+    out=g.copy()
+    sy=pd.to_numeric(out.get("Season"),errors="coerce")
+    finite=sy.dropna()
+    if finite.empty:
+        return out,{"status":"NO_SEASON","matched_rows":0,"table":NCAAF_CFBD_MINER_FEATURE_TABLE}
+    lo=max(2022,int(finite.min())); hi=min(max(CONFIRMATION_SEASONS),int(finite.max()))
+    if lo>hi:
+        return out,{"status":"NO_ELIGIBLE_SEASON","matched_rows":0,"table":NCAAF_CFBD_MINER_FEATURE_TABLE}
+    ck=f"{lo}:{hi}"
+    cf=_CFBD_CORE_CONTEXT_CACHE.get(ck)
+    if not isinstance(cf,pd.DataFrame):
+        try:
+            q=bq.query(f"SELECT * FROM `{NCAAF_CFBD_MINER_FEATURE_TABLE}` WHERE Season BETWEEN {lo} AND {hi}")
+            try: cf=q.to_dataframe(create_bqstorage_client=False)
+            except TypeError: cf=q.to_dataframe()
+            if cf is None: cf=pd.DataFrame()
+            _CFBD_CORE_CONTEXT_CACHE[ck]=cf.copy()
+        except Exception as exc:
+            log_func(f"[NCAAF-CORE-CFBD-BRIDGE] status=UNAVAILABLE table={NCAAF_CFBD_MINER_FEATURE_TABLE} error={type(exc).__name__}:{exc} fail_closed=TRUE production_authority=0")
+            return out,{"status":"UNAVAILABLE","matched_rows":0,"table":NCAAF_CFBD_MINER_FEATURE_TABLE,"error":f"{type(exc).__name__}:{exc}"}
+    if cf.empty:
+        return out,{"status":"EMPTY_SOURCE","matched_rows":0,"table":NCAAF_CFBD_MINER_FEATURE_TABLE}
+
+    def first_key(df,candidates):
+        z=pd.Series("",index=df.index,dtype="string")
+        for c in candidates:
+            if c not in df.columns: continue
+            v=df[c].astype("string").fillna("").map(_cfbd_core_team_key)
+            z=z.where(z.ne(""),v)
+        return z.fillna("").astype(str)
+
+    def gid_key(series):
+        z=series.astype("string").fillna("").str.strip().str.replace(r"\.0$","",regex=True)
+        return z.mask(z.str.lower().isin({"","nan","none","<na>"}),"").astype(str)
+
+    right=cf.copy()
+    right["__cfbd_season"]=pd.to_numeric(right.get("Season"),errors="coerce").astype("Int64")
+    right["__cfbd_date"]=pd.to_datetime(right.get("Game_Date"),errors="coerce",utc=True).dt.normalize()
+    right["__cfbd_team"]=first_key(right,("Team_Key","Team"))
+    right["__cfbd_opp"]=first_key(right,("Opponent_Key","Opponent"))
+    right["__cfbd_gid"]=gid_key(right.get("Game_ID",pd.Series("",index=right.index)))
+    right["__cfbd_home"]=pd.to_numeric(right.get("Is_Home",pd.Series(np.nan,index=right.index)),errors="coerce").round().astype("Int64")
+    feature_cols=[c for c in right.columns if str(c).startswith("CFBD_")]
+
+    work=out.copy(); work["__cfbd_ord"]=np.arange(len(work),dtype=int)
+    work["__cfbd_season"]=pd.to_numeric(work.get("Season"),errors="coerce").astype("Int64")
+    work["__cfbd_date"]=pd.to_datetime(work.get("Game_Date",work.get("Game_Start",pd.Series(pd.NaT,index=work.index))),errors="coerce",utc=True).dt.normalize()
+    work["__cfbd_team"]=first_key(work,("Source_Team_Name","Team_Source_Name","Team","Team_Norm","Home_Team","Home_Team_Norm"))
+    work["__cfbd_opp"]=first_key(work,("Source_Opponent_Name","Opponent_Source_Name","Opponent","Opponent_Norm","Away_Team","Away_Team_Norm"))
+    work["__cfbd_gid"]=gid_key(work.get("Source_Game_ID",work.get("Game_ID",pd.Series("",index=work.index))))
+    work["__cfbd_home"]=pd.to_numeric(work.get("Is_Home",pd.Series(np.nan,index=work.index)),errors="coerce").round().astype("Int64")
+    merged=work.copy()
+
+    def fill_from(join_keys,right_filter=None):
+        nonlocal merged
+        rr=right.copy()
+        if right_filter is not None: rr=rr.loc[right_filter(rr)].copy()
+        rr=rr.loc[rr[join_keys].notna().all(axis=1)].copy()
+        for k in join_keys:
+            if rr[k].dtype==object or str(rr[k].dtype).startswith("string"):
+                rr=rr.loc[rr[k].astype(str).ne("")]
+        if rr.empty: return 0
+        rr=(rr[join_keys+feature_cols].sort_values(join_keys,kind="stable").drop_duplicates(join_keys,keep="last"))
+        ren={c:f"__cfbd_src__{c}" for c in feature_cols}; rr=rr.rename(columns=ren)
+        merged=merged.merge(rr,on=join_keys,how="left",sort=False)
+        filled=0
+        for c in feature_cols:
+            sc=f"__cfbd_src__{c}"
+            if sc not in merged.columns: continue
+            src=merged[sc]
+            if c in merged.columns:
+                before=merged[c].notna(); merged[c]=merged[c].where(before,src)
+                filled+=int((~before & merged[c].notna()).sum())
+            else:
+                merged[c]=src; filled+=int(src.notna().sum())
+            merged=merged.drop(columns=[sc])
+        return filled
+
+    cells_gid=fill_from(["__cfbd_season","__cfbd_gid","__cfbd_team"],lambda x:x["__cfbd_gid"].astype(str).ne("") & x["__cfbd_team"].astype(str).ne(""))
+    cells_pair=fill_from(["__cfbd_season","__cfbd_date","__cfbd_team","__cfbd_opp"],lambda x:x["__cfbd_date"].notna() & x["__cfbd_team"].astype(str).ne("") & x["__cfbd_opp"].astype(str).ne(""))
+    cells_side=fill_from(["__cfbd_season","__cfbd_gid","__cfbd_home"],lambda x:x["__cfbd_gid"].astype(str).ne("") & x["__cfbd_home"].notna())
+    merged=(merged.sort_values("__cfbd_ord",kind="stable").drop(columns=["__cfbd_season","__cfbd_date","__cfbd_team","__cfbd_opp","__cfbd_gid","__cfbd_home","__cfbd_ord"],errors="ignore").reset_index(drop=True))
+
+    probes=["CFBD_Source_Tag","CFBD_Season_Net_PPA_Prior","CFBD_Returning_Pct_PPA","CFBD_Talent"]
+    matched=np.zeros(len(merged),dtype=bool)
+    for c in probes:
+        if c in merged.columns: matched|=merged[c].notna().to_numpy()
+    hist=pd.to_numeric(merged.get("Season"),errors="coerce").le(max(CONFIRMATION_SEASONS)).fillna(False).to_numpy()
+    def ready(c): return int((merged[c].notna().to_numpy() & hist).sum()) if c in merged.columns else 0
+    diag={
+        "status":"PASS","table":NCAAF_CFBD_MINER_FEATURE_TABLE,"source_rows":int(len(cf)),
+        "rows":int(len(merged)),"matched_rows":int(matched.sum()),
+        "advanced_ready":ready("CFBD_Season_Net_PPA_Prior"),
+        "returning_ready":ready("CFBD_Returning_Pct_PPA"),
+        "roster_ready":ready("CFBD_Roster_ALL_Retention"),
+        "portal_ready":ready("CFBD_Portal_In_Count"),
+        "talent_ready":ready("CFBD_Talent"),"elo_ready":ready("CFBD_Elo_Prior"),
+        "cells_filled_gid":cells_gid,"cells_filled_pair":cells_pair,"cells_filled_side":cells_side,
+        "year_2026_queried":False,"production_authority":0,
+    }
+    log_func(
+        f"[NCAAF-CORE-CFBD-BRIDGE] status=PASS rows={diag['rows']} matched={diag['matched_rows']} "
+        f"advanced={diag['advanced_ready']} returning={diag['returning_ready']} roster={diag['roster_ready']} "
+        f"portal={diag['portal_ready']} talent={diag['talent_ready']} elo={diag['elo_ready']} "
+        f"cells_filled_gid={cells_gid} cells_filled_pair={cells_pair} cells_filled_side={cells_side} "
+        "year_2026_queried=FALSE production_authority=0"
+    )
+    return merged,diag
+
+
 def _advanced_data_readiness(g: pd.DataFrame) -> dict[str,Any]:
     """Inventory whether genuinely new advanced inputs are present historically.
 
@@ -1046,6 +1204,10 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
         if missing: raise RuntimeError(f"incumbent features missing {missing}")
         log_func(f"[NCAAF-CORE-V22-PREFLIGHT] status=PASS source={SOURCE_TAG} rows={len(g)} seasons={seasons} discovery_train=2022 discovery_validate=2023 confirmation=2024,2025 year_2026_queried=FALSE production_authority=0")
 
+        # V2.4.1: attach the same pregame-safe CFBD feature table used by the Miner
+        # before advanced specialist discovery. Production V1 remains untouched.
+        g,cfbd_core_bridge=_attach_cfbd_core_context(dashboard_module,g,log_func=log_func)
+
         g,strength_cols,strength_audit=_add_strength_context(g); g,interaction_cols=_add_trend_interactions(g)
         g,coverage_registry=_complete_feed_coverage(g,base_candidates+interaction_cols)
         coverage_candidates=list(coverage_registry.get("candidate_columns") or [])
@@ -1138,6 +1300,7 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
                 "principles":["prior-only sequential team power","strength of schedule","conference member strength","cross-conference residual strength","rest/home/maturity","structured matchup statistics","standalone matchup specialist","existing-feed coverage completion","season/recent3/recent5 when available","opponent-adjusted where source-supported","team-v-opponent and matchup differentials","recent-vs-season trends","regularized program/conference hierarchy","discovery-only blend selection","conditional specialist attribution","expert/model atom bridge into Miner","nearby-threshold diagnostics without retuning"],
             },
             "advanced_data_readiness":advanced_readiness,
+            "cfbd_core_bridge":cfbd_core_bridge,
             "existing_feed_coverage_registry":coverage_registry,
             "coverage_incremental_attribution":coverage_incremental,
             "coverage_feature_ablation":coverage_ablation,
