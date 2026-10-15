@@ -72,7 +72,7 @@ import requests
 BASE_URL = "https://api.collegefootballdata.com"
 DEFAULT_PROJECT = os.getenv("BQ_PROJECT", "sharplogger")
 DEFAULT_DATASET = os.getenv("BQ_DATASET", "sharp_data")
-SOURCE_TAG = "ncaaf-cfbd-warehouse-v2.0-20261015"
+SOURCE_TAG = "ncaaf-cfbd-warehouse-v2.0.1-bq-ddl-prehistory-identity-20261015"
 
 # Existing canonical warehouse objects — deliberately reused.
 CANONICAL_RAW_TABLE = os.getenv("NCAAF_HISTORICAL_RAW_TABLE", "ncaaf_historical_game_side_raw")
@@ -1070,6 +1070,30 @@ def _clean_bq_frame(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _bq_ddl_type(field_type: str) -> str:
+    """Map BigQuery client schema aliases to valid GoogleSQL DDL type names.
+
+    SchemaField.field_type can return legacy aliases such as FLOAT, INTEGER, and
+    BOOLEAN. ALTER TABLE ADD COLUMN expects the GoogleSQL names FLOAT64, INT64,
+    and BOOL. Keep the mapping explicit so schema evolution cannot emit invalid
+    DDL.
+    """
+    t=str(field_type or "").upper().strip()
+    aliases={
+        "FLOAT":"FLOAT64", "FLOAT64":"FLOAT64",
+        "INTEGER":"INT64", "INT64":"INT64",
+        "BOOLEAN":"BOOL", "BOOL":"BOOL",
+        "STRING":"STRING", "BYTES":"BYTES",
+        "TIMESTAMP":"TIMESTAMP", "DATE":"DATE",
+        "DATETIME":"DATETIME", "TIME":"TIME",
+        "NUMERIC":"NUMERIC", "BIGNUMERIC":"BIGNUMERIC",
+        "GEOGRAPHY":"GEOGRAPHY", "JSON":"JSON",
+    }
+    if t not in aliases:
+        raise RuntimeError(f"Unsupported BigQuery DDL field type: {field_type!r}")
+    return aliases[t]
+
+
 def _merge_dataframe(client, table_id: str, df: pd.DataFrame, keys: list[str], *, partition_field: str | None=None) -> dict[str,Any]:
     """Generic schema-evolving BigQuery MERGE for sidecar tables."""
     from google.cloud import bigquery
@@ -1093,7 +1117,7 @@ def _merge_dataframe(client, table_id: str, df: pd.DataFrame, keys: list[str], *
     inferred=client.get_table(tmp).schema
     for f in inferred:
         if f.name not in existing:
-            client.query(f"ALTER TABLE `{table_id}` ADD COLUMN IF NOT EXISTS `{f.name}` {f.field_type}").result()
+            client.query(f"ALTER TABLE `{table_id}` ADD COLUMN IF NOT EXISTS `{f.name}` {_bq_ddl_type(f.field_type)}").result()
     cols=list(d.columns)
     on=" AND ".join([f"T.`{k}` IS NOT DISTINCT FROM S.`{k}`" for k in keys])
     updates=[c for c in cols if c not in keys]
@@ -1209,7 +1233,7 @@ def merge_environment_into_travel(client, project: str, dataset: str, features: 
     target=client.get_table(tid); existing={f.name:f for f in target.schema}
     for f in client.get_table(tmp).schema:
         if f.name not in existing:
-            client.query(f"ALTER TABLE `{tid}` ADD COLUMN IF NOT EXISTS `{f.name}` {f.field_type}").result()
+            client.query(f"ALTER TABLE `{tid}` ADD COLUMN IF NOT EXISTS `{f.name}` {_bq_ddl_type(f.field_type)}").result()
     updates=[c for c in env.columns if c not in {"Season","Game_ID"}]
     us=",\n      ".join([f"`{c}`=S.`{c}`" for c in updates])
     client.query(f"""
@@ -1264,12 +1288,20 @@ def _extract_line_records(lines_raw: pd.DataFrame) -> dict[str,dict[str,Any]]:
 
 
 def _alignment_map(client, project: str, dataset: str, season: int) -> dict[str,dict[str,Any]]:
-    """Season-aware canonical team mapping from the warehouse's existing alignment history."""
+    """Season-aware canonical identity map with a leakage-safe prehistory fallback.
+
+    Preferred rows are alignment records effective on or before the requested
+    season. For seasons older than the alignment table itself, later records may
+    be used only to resolve stable canonical team identity/aliases. Their
+    conference/subdivision fields are deliberately blanked so historical context
+    continues to come from CFBD's game-season fields rather than borrowing a
+    future conference assignment.
+    """
     table=f"{project}.{dataset}.team_sport_alignment_history"
+    from google.cloud import bigquery
+    cfg=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("season","INT64",int(season))])
     try:
-        from google.cloud import bigquery
-        cfg=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("season","INT64",int(season))])
-        d=client.query(f"""
+        eligible=client.query(f"""
           SELECT Team, Team_Norm, Canonical_Team_Name, Canonical_Team_Norm, Conference, Subdivision,
                  ROW_NUMBER() OVER(PARTITION BY LOWER(TRIM(Team_Norm)) ORDER BY Effective_Season_From DESC) rn
           FROM `{table}`
@@ -1277,11 +1309,35 @@ def _alignment_map(client, project: str, dataset: str, season: int) -> dict[str,
         """,job_config=cfg).to_dataframe(create_bqstorage_client=False)
     except Exception:
         return {}
-    d=d.loc[d["rn"].eq(1)].copy(); out={}
-    for _,r in d.iterrows():
-        for v in [r.get("Team"),r.get("Team_Norm"),r.get("Canonical_Team_Name"),r.get("Canonical_Team_Norm")]:
-            k=_team_key(v)
-            if k: out[k]=dict(r)
+
+    out={}
+    if not eligible.empty:
+        eligible=eligible.loc[eligible["rn"].eq(1)].copy()
+        for _,r in eligible.iterrows():
+            rec=dict(r); rec["_identity_fallback"]=False
+            for v in [r.get("Team"),r.get("Team_Norm"),r.get("Canonical_Team_Name"),r.get("Canonical_Team_Norm")]:
+                k=_team_key(v)
+                if k: out[k]=rec
+
+    # Identity-only fallback for seasons before/without alignment coverage.
+    # Never carry future conference/subdivision backward in time.
+    try:
+        ident=client.query(f"""
+          SELECT Team, Team_Norm, Canonical_Team_Name, Canonical_Team_Norm,
+                 CAST(NULL AS STRING) AS Conference, CAST(NULL AS STRING) AS Subdivision,
+                 ROW_NUMBER() OVER(PARTITION BY LOWER(TRIM(Team_Norm)) ORDER BY Effective_Season_From DESC) rn
+          FROM `{table}`
+          WHERE UPPER(TRIM(Sport))='NCAAF' AND COALESCE(Use_For_Context,TRUE)
+        """).to_dataframe(create_bqstorage_client=False)
+    except Exception:
+        ident=pd.DataFrame()
+    if not ident.empty:
+        ident=ident.loc[ident["rn"].eq(1)].copy()
+        for _,r in ident.iterrows():
+            rec=dict(r); rec["_identity_fallback"]=True
+            for v in [r.get("Team"),r.get("Team_Norm"),r.get("Canonical_Team_Name"),r.get("Canonical_Team_Norm")]:
+                k=_team_key(v)
+                if k and k not in out: out[k]=rec
     return out
 
 
@@ -1510,6 +1566,8 @@ def run(
                 if not amap:
                     print(f"[CFBD-HISTORY] year={year} status=SKIP_NO_ALIGNMENT")
                     continue
+                fallback_programs=len({str(v.get("Canonical_Team_Norm") or v.get("Team_Norm") or "") for v in amap.values() if v.get("_identity_fallback")})
+                print(f"[CFBD-HISTORY-ALIGNMENT] year={year} map_keys={len(amap)} identity_fallback_programs={fallback_programs} future_conference_leakage=FALSE")
                 rows=build_canonical_history_rows(games,lines,year,amap)
                 if rows.empty:
                     print(f"[CFBD-HISTORY] year={year} status=NO_CANONICAL_ROWS")
