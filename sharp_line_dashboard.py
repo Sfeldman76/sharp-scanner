@@ -5643,6 +5643,75 @@ def read_live_production_moves_cached(
     return job.to_dataframe(create_bqstorage_client=False)
 
 
+@st.cache_data(ttl=60,show_spinner=False)
+def read_ncaaf_current_quote_heads_cached(hours: int = 24):
+    """NCAAF-only: fetch precisely the latest quote per production input key.
+
+    This is the same latest-by-Game_Key/market/side/book selection performed
+    by prepare_current_market_rows, pushed into BigQuery *before* materializing
+    the large sharp_moves_master history in the Streamlit process. No market
+    bookmaker, side, or game is limited/arbitrarily sampled; opening anchors
+    already stored on the selected row are retained via SELECT *.
+    NFL continues using the original production market reader.
+    """
+    tbl=_validate_table("sharplogger.sharp_data.sharp_moves_master")
+    query=f"""
+        SELECT *
+        FROM {tbl}
+        WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
+          AND Game_Start IS NOT NULL
+          AND Game_Start > CURRENT_TIMESTAMP()
+          AND UPPER(TRIM(CAST(Sport AS STRING))) = 'NCAAF'
+        QUALIFY ROW_NUMBER() OVER (
+          PARTITION BY
+            COALESCE(NULLIF(TRIM(CAST(Game_Key AS STRING)), ''),
+              CONCAT(COALESCE(CAST(Game AS STRING),''),'|',CAST(Game_Start AS STRING),
+                     '|',COALESCE(CAST(Market AS STRING),''),'|',COALESCE(CAST(Outcome AS STRING),''))),
+            LOWER(TRIM(CAST(Market AS STRING))),
+            LOWER(TRIM(CAST(Outcome AS STRING))),
+            LOWER(TRIM(CAST(Bookmaker AS STRING)))
+          ORDER BY Snapshot_Timestamp DESC
+        ) = 1
+        ORDER BY Snapshot_Timestamp DESC
+    """
+    cfg=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter('hours','INT64',int(hours))])
+    return bq_client.query(query,job_config=cfg).to_dataframe(create_bqstorage_client=False)
+
+
+@st.cache_data(ttl=60,show_spinner=False)
+def read_nfl_current_quote_heads_cached(hours: int = 24):
+    """Latest current NFL quote per physical game / market / side / bookmaker.
+
+    Used only when the operator opens the detailed Pathi system audit. The
+    main NFL betting board is read from the already-authorized weekly/background
+    snapshot and deliberately performs no live market-history BigQuery query.
+    """
+    tbl=_validate_table("sharplogger.sharp_data.sharp_moves_master")
+    query=f"""
+        SELECT *
+        FROM {tbl}
+        WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
+          AND Game_Start IS NOT NULL
+          AND Game_Start > CURRENT_TIMESTAMP()
+          AND UPPER(TRIM(CAST(Sport AS STRING))) = 'NFL'
+        QUALIFY ROW_NUMBER() OVER (
+          PARTITION BY
+            COALESCE(NULLIF(TRIM(CAST(Game_Key AS STRING)), ''),
+              CONCAT(COALESCE(CAST(Game AS STRING),''),'|',CAST(Game_Start AS STRING),
+                     '|',COALESCE(CAST(Market AS STRING),''),'|',COALESCE(CAST(Outcome AS STRING),''))),
+            LOWER(TRIM(CAST(Market AS STRING))),
+            LOWER(TRIM(CAST(Outcome AS STRING))),
+            LOWER(TRIM(CAST(Bookmaker AS STRING)))
+          ORDER BY Snapshot_Timestamp DESC
+        ) = 1
+        ORDER BY Snapshot_Timestamp DESC
+    """
+    cfg=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter('hours','INT64',int(hours))])
+    return bq_client.query(query,job_config=cfg).to_dataframe(create_bqstorage_client=False)
+
+
 @st.cache_data(ttl=600)
 def get_recent_history(hours: int = 24, sport: str | None = None):
     st.write("📦 Using cached sharp history (get_recent_history)")
@@ -47985,17 +48054,195 @@ def _render_nfl_production_results(cur):
     )
 
 
-def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
-    """Lean one-table NFL Production V1 view matching the NCAAF board layout.
+@st.cache_data(ttl=60,show_spinner=False)
+def _nfl_betting_board_first_cached():
+    """NFL first paint: cached authoritative GCS snapshot -> betting board.
 
-    The table is one physical game per row with Spread / H2H / Totals side by side.
-    Frozen fair values remain the prediction champion. Production Betting V3.1 is
-    CORE-first: Spread CORE must clear the frozen 57.5% cover-probability gate and
-    +2% executable-price EV gate. Qualified normalized systems are bounded overlays
-    that may strengthen or strongly veto; they cannot create or reverse the CORE bet.
-    H2H and Totals remain model-only until they earn frozen betting gates.
+    Never re-score the frozen CORE heads, re-vote Miner/PT/Pathi, or fetch
+    historical scanner quotes. Those decisions are authored only by the NFL
+    weekly/background engine; presentation consumes its published live_rows.
     """
-    state=_nfl_model_authority_v26_state_cached()
+    started=time.monotonic()
+    info={'status':'UNAVAILABLE','source':'NFL_PRODUCTION_PUBLISHED_AUTHORITY',
+          'cache_ttl_seconds':60,'market_history_queries':0,
+          'research_index_queries':0,'frozen_model_refits':0}
+    state={}
+    try:
+        t_state=time.monotonic()
+        state=_nfl_model_authority_v26_state_cached()
+        info['authority_seconds']=round(time.monotonic()-t_state,3)
+        if not isinstance(state,dict) or state.get('status') in ('UNAVAILABLE','STALE_MODEL_AUTHORITY_V26_MODULE'):
+            info['status']='AUTHORITY_UNAVAILABLE'
+            return state,pd.DataFrame(),info
+        cur=state.get('current') or {}
+        rows=cur.get('live_rows') or []
+        info['live_market_rows']=len(rows)
+        if not rows:
+            info['status']='NO_CURRENT_AUTHORITY_ROWS'
+            return state,pd.DataFrame(),info
+        t_board=time.monotonic()
+        def _nfl_action_display(v):
+            # Keep NFL decision semantics intact while using the NCAAF board shape.
+            return str(v or "MODEL ONLY")
+
+        def _nfl_pick_label(r,market):
+            pick=str(r.get("selected") or "—")
+            price=pd.to_numeric(pd.Series([r.get("selected_price")]),errors="coerce").iloc[0]
+            mv=pd.to_numeric(pd.Series([r.get("market_value")]),errors="coerce").iloc[0]
+            if market=="SPREADS":
+                label=pick
+                if pd.notna(mv): label+=f" {float(mv):+.1f}"
+                if pd.notna(price): label+=f" ({float(price):+.0f})"
+                return label
+            if market=="H2H":
+                return pick + (f" {float(price):+.0f}" if pd.notna(price) else "")
+            if market=="TOTALS":
+                label=(pick.upper() if pick.lower() in ("over","under") else pick)
+                if pd.notna(mv): label+=f" {float(mv):.1f}"
+                if pd.notna(price): label+=f" ({float(price):+.0f})"
+                return label
+            return pick
+
+        # Pathi is an independent normalized evidence overlay above CORE. The Rules Index carries
+        # historical W/L plus family/evidence metadata; mirrors/subsets collapse before the lane vote.
+        # Published production votes already encode qualified Pathi support/conflict.
+        # A second research rules-index/odds-table pass is display-only, and runs
+        # exclusively when System Details is opened; it must not block the board.
+        pathi_live={}
+
+        # One physical game per row, exactly like the NCAAF production board.
+        records=[]
+        grouped={}
+        for r in rows:
+            gs=pd.to_datetime(r.get("game_start"),utc=True,errors="coerce")
+            key=str(r.get("prediction_pair_id") or "")
+            if not key:
+                key=f"{gs.isoformat() if pd.notna(gs) else ''}|{r.get('away_team','')}|{r.get('home_team','')}"
+            grouped.setdefault(key,[]).append(r)
+
+        for gk,grows in grouped.items():
+            r0=grows[0]
+            gs=pd.to_datetime(r0.get("game_start"),utc=True,errors="coerce")
+            rec={
+                "_game_key":gk,
+                "_game_start":gs,
+                "ET Date":gs.tz_convert("US/Eastern").strftime("%Y-%m-%d") if pd.notna(gs) else "",
+                "Game Time":gs.tz_convert("US/Eastern").strftime("%a %I:%M %p") if pd.notna(gs) else "—",
+                "Matchup":f"{r0.get('away_team','')} @ {r0.get('home_team','')}",
+            }
+            production_plays=[]; edge_parts=[]; system_parts=[]; pathi_parts=[]; pathi_states=[]
+            _pathi_key=_nfl_physical_hour_key(r0.get("home_team"),r0.get("away_team"),gs)
+            bym={str(r.get("market") or "").upper():r for r in grows}
+            for market,prefix in (("SPREADS","Spr"),("H2H","H2H"),("TOTALS","Tot")):
+                r=bym.get(market)
+                if r is None:
+                    rec.update({
+                        f"{prefix} Action":"NO PREDICTION",f"{prefix} Pick":"—",f"{prefix} Prob":np.nan,
+                        f"{prefix} Edge":np.nan,f"{prefix} Fair":np.nan,f"{prefix} Status":"NO PREDICTION",
+                        f"{prefix} Source":"—",
+                    })
+                    continue
+                action=_nfl_action_display(r.get("action"))
+                model_value=pd.to_numeric(pd.Series([r.get("model_value")]),errors="coerce").iloc[0]
+                edge=pd.to_numeric(pd.Series([r.get("raw_model_edge")]),errors="coerce").iloc[0]
+                # V3 publishes the frozen empirical selected-side cover probability for Spread.
+                # H2H still displays its direct model probability; Totals has no frozen betting probability gate.
+                if market=="SPREADS":
+                    _cp=pd.to_numeric(pd.Series([r.get("core_cover_probability")]),errors="coerce").iloc[0]
+                    prob=float(_cp) if pd.notna(_cp) else np.nan
+                elif market=="H2H":
+                    prob=float(model_value) if pd.notna(model_value) else np.nan
+                else:
+                    prob=np.nan
+                fair=(float(model_value) if pd.notna(model_value) else np.nan)
+                label=_nfl_pick_label(r,market)
+                sources=[str(x) for x in (r.get("edge_sources") or []) if str(x).strip()]
+                systems=[str(x) for x in (r.get("system_labels") or []) if str(x).strip()]
+                for _fid in (r.get("production_edge_families") or []):
+                    _fid=str(_fid or "").strip()
+                    if _fid and _fid not in systems: systems.append(_fid)
+                for _v in (r.get("edge_votes") or []):
+                    _fid=str((_v or {}).get("mechanism_family_id") or "").strip() if isinstance(_v,dict) else ""
+                    if _fid and _fid not in systems: systems.append(_fid)
+                source=" | ".join(sources) if sources else "—"
+                rec.update({
+                    f"{prefix} Action":action,f"{prefix} Pick":label,f"{prefix} Prob":prob,
+                    f"{prefix} Edge":edge,f"{prefix} Fair":fair,f"{prefix} Status":r.get("decision_reason") or "—",
+                    f"{prefix} Source":source,
+                })
+                if action in {"BET","STRONG BET"}: production_plays.append(f"{prefix}: {label}")
+                if source!="—": edge_parts.append(f"{prefix}: {source}")
+                for s in systems:
+                    entry=f"{prefix}: {s}"
+                    if entry not in system_parts: system_parts.append(entry)
+                if market=="SPREADS":
+                    _model_team=str(r.get("selected") or "").lower().strip()
+                    _prod_pathi_support="PATHI" in {str(x).upper() for x in (r.get("qualified_system_support_sources") or [])}
+                    _prod_pathi_conflict="PATHI" in {str(x).upper() for x in (r.get("qualified_system_conflict_sources") or [])}
+                    _prod_pathi_fams=[str(x) for x in ((r.get("qualified_system_support_families") or [])+(r.get("qualified_system_conflict_families") or [])) if str(x).startswith("PATHI_")]
+                    if (_prod_pathi_support or _prod_pathi_conflict) and not pathi_live.get(_pathi_key,[]):
+                        _state="SUPPORT" if _prod_pathi_support and not _prod_pathi_conflict else "CONFLICT" if _prod_pathi_conflict and not _prod_pathi_support else "MIXED"
+                        _txt=f"{_state}: production-qualified live Pathi · {' | '.join(_prod_pathi_fams) or 'PATHI'}"
+                        pathi_parts.append(_txt); pathi_states.append((_state,99))
+                    for _p in pathi_live.get(_pathi_key,[]):
+                        _pt=str(_p.get("team") or "").lower().strip()
+                        _rank=int(_p.get("evidence_rank") or 0)
+                        if _p.get("support"):
+                            _state="SUPPORT" if _pt and _pt==_model_team else "CONFLICT"
+                        else:
+                            _state="TRACK"
+                        _level=str(_p.get("evidence_level") or "TRACK")
+                        _family=str(_p.get("family_label") or _p.get("family_id") or _p.get("name") or "Pathi")
+                        _txt=f"{_state}: {_p.get('team') or 'qualifier'} · {_family} · {_level} · 2023-25 {_p.get('validation')}"
+                        pathi_parts.append(_txt); pathi_states.append((_state,_rank))
+                        _entry=f"Spr: PATHI {_txt}"
+                        if _entry not in system_parts: system_parts.append(_entry)
+            rec["Production Plays"]=" | ".join(production_plays) if production_plays else "—"
+            rec["Edge Sources"]=" | ".join(edge_parts) if edge_parts else "—"
+            rec["Pathi Overlay"]=" | ".join(pathi_parts) if pathi_parts else "—"
+            # One Pathi lane vote per game.  If several normalized families fire, the
+            # strongest eligible evidence tier governs; equal-strength opposite sides
+            # produce MIXED rather than multiple independent votes.
+            _eligible=[x for x in pathi_states if x[0] in {"SUPPORT","CONFLICT"}]
+            if _eligible:
+                _mx=max(x[1] for x in _eligible)
+                _top={x[0] for x in _eligible if x[1]==_mx}
+                rec["Pathi State"]=("MIXED" if len(_top)>1 else next(iter(_top)))
+            elif pathi_states:
+                rec["Pathi State"]="TRACK"
+            else:
+                rec["Pathi State"]="—"
+            rec["System Trigger"]=" | ".join(system_parts) if system_parts else "—"
+            records.append(rec)
+
+        view=pd.DataFrame(records)
+        info['view_seconds']=round(time.monotonic()-t_board,3)
+        info['games']=len(view)
+        info['status']='PASS' if not view.empty and not view['_game_key'].duplicated().any() else 'DUPLICATE_OR_EMPTY_BOARD'
+        return state,view,info
+    except Exception as exc:
+        logging.exception('[NFL-UI-FAST-BOARD] status=ERROR')
+        info['status']='ERROR'
+        info['error']=f'{type(exc).__name__}:{exc}'
+        return state,pd.DataFrame(),info
+    finally:
+        info['total_seconds']=round(time.monotonic()-started,3)
+        logging.info('[NFL-UI-FAST-BOARD] status=%s games=%s live_rows=%s '
+                     'authority_seconds=%s view_seconds=%s total_seconds=%s '
+                     'market_history_queries=0 research_index_queries=0 '
+                     'vote_recomputation=0 model_refit=0 cache_ttl=60',
+                     info.get('status'),info.get('games'),info.get('live_market_rows'),
+                     info.get('authority_seconds'),info.get('view_seconds'),info.get('total_seconds'))
+
+
+def _render_nfl_betting_engine_v1_ui(df_moves_raw=None,label="NFL",*,board_state=None,board_view=None,board_meta=None):
+    """Present the 60-second cached NFL production board; details load on demand.
+
+    This function never recalculates production voting or frozen probabilities.
+    """
+    if board_state is None or board_view is None:
+        board_state,board_view,board_meta=_nfl_betting_board_first_cached()
+    state=board_state
     if not isinstance(state,dict) or state.get("status") in ("UNAVAILABLE","STALE_MODEL_AUTHORITY_V26_MODULE"):
         st.info("NFL production authority is not available. This requires a maintenance revalidation; it is intentionally not a normal operator dropdown run.")
         return
@@ -48003,145 +48250,14 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     if not meta:
         st.info("NFL production authority has not been frozen. This requires a maintenance revalidation; it is intentionally not a normal operator dropdown run.")
         return
-
     rows=cur.get("live_rows") or []
     if not rows:
         st.info("No current model-authority snapshot yet. Run NFL Production — Weekly Update once to create fair values for the current slate; subsequent line changes refresh through the background scanner.")
         return
-
-    def _nfl_action_display(v):
-        # Keep NFL decision semantics intact while using the NCAAF board shape.
-        return str(v or "MODEL ONLY")
-
-    def _nfl_pick_label(r,market):
-        pick=str(r.get("selected") or "—")
-        price=pd.to_numeric(pd.Series([r.get("selected_price")]),errors="coerce").iloc[0]
-        mv=pd.to_numeric(pd.Series([r.get("market_value")]),errors="coerce").iloc[0]
-        if market=="SPREADS":
-            label=pick
-            if pd.notna(mv): label+=f" {float(mv):+.1f}"
-            if pd.notna(price): label+=f" ({float(price):+.0f})"
-            return label
-        if market=="H2H":
-            return pick + (f" {float(price):+.0f}" if pd.notna(price) else "")
-        if market=="TOTALS":
-            label=(pick.upper() if pick.lower() in ("over","under") else pick)
-            if pd.notna(mv): label+=f" {float(mv):.1f}"
-            if pd.notna(price): label+=f" ({float(price):+.0f})"
-            return label
-        return pick
-
-    # Pathi is an independent normalized evidence overlay above CORE. The Rules Index carries
-    # historical W/L plus family/evidence metadata; mirrors/subsets collapse before the lane vote.
-    rules_state=_nfl_system_rules_index_cached()
-    pathi_live,pathi_active_ids=_nfl_pathi_live_overlay(df_moves_raw,rules_state)
-
-    # One physical game per row, exactly like the NCAAF production board.
-    records=[]
-    grouped={}
-    for r in rows:
-        gs=pd.to_datetime(r.get("game_start"),utc=True,errors="coerce")
-        key=str(r.get("prediction_pair_id") or "")
-        if not key:
-            key=f"{gs.isoformat() if pd.notna(gs) else ''}|{r.get('away_team','')}|{r.get('home_team','')}"
-        grouped.setdefault(key,[]).append(r)
-
-    for gk,grows in grouped.items():
-        r0=grows[0]
-        gs=pd.to_datetime(r0.get("game_start"),utc=True,errors="coerce")
-        rec={
-            "_game_key":gk,
-            "_game_start":gs,
-            "ET Date":gs.tz_convert("US/Eastern").strftime("%Y-%m-%d") if pd.notna(gs) else "",
-            "Game Time":gs.tz_convert("US/Eastern").strftime("%a %I:%M %p") if pd.notna(gs) else "—",
-            "Matchup":f"{r0.get('away_team','')} @ {r0.get('home_team','')}",
-        }
-        production_plays=[]; edge_parts=[]; system_parts=[]; pathi_parts=[]; pathi_states=[]
-        _pathi_key=_nfl_physical_hour_key(r0.get("home_team"),r0.get("away_team"),gs)
-        bym={str(r.get("market") or "").upper():r for r in grows}
-        for market,prefix in (("SPREADS","Spr"),("H2H","H2H"),("TOTALS","Tot")):
-            r=bym.get(market)
-            if r is None:
-                rec.update({
-                    f"{prefix} Action":"NO PREDICTION",f"{prefix} Pick":"—",f"{prefix} Prob":np.nan,
-                    f"{prefix} Edge":np.nan,f"{prefix} Fair":np.nan,f"{prefix} Status":"NO PREDICTION",
-                    f"{prefix} Source":"—",
-                })
-                continue
-            action=_nfl_action_display(r.get("action"))
-            model_value=pd.to_numeric(pd.Series([r.get("model_value")]),errors="coerce").iloc[0]
-            edge=pd.to_numeric(pd.Series([r.get("raw_model_edge")]),errors="coerce").iloc[0]
-            # V3 publishes the frozen empirical selected-side cover probability for Spread.
-            # H2H still displays its direct model probability; Totals has no frozen betting probability gate.
-            if market=="SPREADS":
-                _cp=pd.to_numeric(pd.Series([r.get("core_cover_probability")]),errors="coerce").iloc[0]
-                prob=float(_cp) if pd.notna(_cp) else np.nan
-            elif market=="H2H":
-                prob=float(model_value) if pd.notna(model_value) else np.nan
-            else:
-                prob=np.nan
-            fair=(float(model_value) if pd.notna(model_value) else np.nan)
-            label=_nfl_pick_label(r,market)
-            sources=[str(x) for x in (r.get("edge_sources") or []) if str(x).strip()]
-            systems=[str(x) for x in (r.get("system_labels") or []) if str(x).strip()]
-            for _fid in (r.get("production_edge_families") or []):
-                _fid=str(_fid or "").strip()
-                if _fid and _fid not in systems: systems.append(_fid)
-            for _v in (r.get("edge_votes") or []):
-                _fid=str((_v or {}).get("mechanism_family_id") or "").strip() if isinstance(_v,dict) else ""
-                if _fid and _fid not in systems: systems.append(_fid)
-            source=" | ".join(sources) if sources else "—"
-            rec.update({
-                f"{prefix} Action":action,f"{prefix} Pick":label,f"{prefix} Prob":prob,
-                f"{prefix} Edge":edge,f"{prefix} Fair":fair,f"{prefix} Status":r.get("decision_reason") or "—",
-                f"{prefix} Source":source,
-            })
-            if action in {"BET","STRONG BET"}: production_plays.append(f"{prefix}: {label}")
-            if source!="—": edge_parts.append(f"{prefix}: {source}")
-            for s in systems:
-                entry=f"{prefix}: {s}"
-                if entry not in system_parts: system_parts.append(entry)
-            if market=="SPREADS":
-                _model_team=str(r.get("selected") or "").lower().strip()
-                _prod_pathi_support="PATHI" in {str(x).upper() for x in (r.get("qualified_system_support_sources") or [])}
-                _prod_pathi_conflict="PATHI" in {str(x).upper() for x in (r.get("qualified_system_conflict_sources") or [])}
-                _prod_pathi_fams=[str(x) for x in ((r.get("qualified_system_support_families") or [])+(r.get("qualified_system_conflict_families") or [])) if str(x).startswith("PATHI_")]
-                if (_prod_pathi_support or _prod_pathi_conflict) and not pathi_live.get(_pathi_key,[]):
-                    _state="SUPPORT" if _prod_pathi_support and not _prod_pathi_conflict else "CONFLICT" if _prod_pathi_conflict and not _prod_pathi_support else "MIXED"
-                    _txt=f"{_state}: production-qualified live Pathi · {' | '.join(_prod_pathi_fams) or 'PATHI'}"
-                    pathi_parts.append(_txt); pathi_states.append((_state,99))
-                for _p in pathi_live.get(_pathi_key,[]):
-                    _pt=str(_p.get("team") or "").lower().strip()
-                    _rank=int(_p.get("evidence_rank") or 0)
-                    if _p.get("support"):
-                        _state="SUPPORT" if _pt and _pt==_model_team else "CONFLICT"
-                    else:
-                        _state="TRACK"
-                    _level=str(_p.get("evidence_level") or "TRACK")
-                    _family=str(_p.get("family_label") or _p.get("family_id") or _p.get("name") or "Pathi")
-                    _txt=f"{_state}: {_p.get('team') or 'qualifier'} · {_family} · {_level} · 2023-25 {_p.get('validation')}"
-                    pathi_parts.append(_txt); pathi_states.append((_state,_rank))
-                    _entry=f"Spr: PATHI {_txt}"
-                    if _entry not in system_parts: system_parts.append(_entry)
-        rec["Production Plays"]=" | ".join(production_plays) if production_plays else "—"
-        rec["Edge Sources"]=" | ".join(edge_parts) if edge_parts else "—"
-        rec["Pathi Overlay"]=" | ".join(pathi_parts) if pathi_parts else "—"
-        # One Pathi lane vote per game.  If several normalized families fire, the
-        # strongest eligible evidence tier governs; equal-strength opposite sides
-        # produce MIXED rather than multiple independent votes.
-        _eligible=[x for x in pathi_states if x[0] in {"SUPPORT","CONFLICT"}]
-        if _eligible:
-            _mx=max(x[1] for x in _eligible)
-            _top={x[0] for x in _eligible if x[1]==_mx}
-            rec["Pathi State"]=("MIXED" if len(_top)>1 else next(iter(_top)))
-        elif pathi_states:
-            rec["Pathi State"]="TRACK"
-        else:
-            rec["Pathi State"]="—"
-        rec["System Trigger"]=" | ".join(system_parts) if system_parts else "—"
-        records.append(rec)
-
-    view=pd.DataFrame(records)
+    view=board_view.copy() if isinstance(board_view,pd.DataFrame) else pd.DataFrame()
+    if isinstance(board_meta,dict) and board_meta.get('status')=='ERROR':
+        st.error('NFL board load failed: '+str(board_meta.get('error','UNKNOWN')))
+        return
     if view.empty:
         st.warning("No upcoming three-market NFL predictions are available.")
         return
@@ -48161,6 +48277,7 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
         "One qualified independent Miner/Pathi/Big Al/PT-derived family confirms BET; 2+ independent supporters confirm STRONG BET; mixed/single conflict stays CANDIDATE and 2+ net conflicts can veto to PASS. "
         "Systems cannot create a candidate or reverse CORE. H2H and Totals remain model-only. The background scanner refreshes recommendations from current prices without refitting CORE."
     )
+    st.caption('Fast first load: published NFL betting authority, 60-second cached game board. Market-history and detailed research reads are click-to-load.')
     _bg=cur.get("background_refresh") or {}
     if _bg:
         st.caption(f"Live recommendation refresh: background market-only • generated {cur.get('generated_at_utc','—')} • weekly model refit: no")
@@ -48207,15 +48324,17 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
     main["Tot Model Edge"]=pd.to_numeric(main["Tot Model Edge"],errors="coerce").map(lambda x:f"{x:.2f} pts" if pd.notna(x) else "—")
     st.dataframe(main,use_container_width=True,hide_index=True)
 
-    # FAST + LAZY DETAILS:
-    # Nothing below is executed until the operator explicitly opens that detail family.
-    _nfl_dc1,_nfl_dc2,_nfl_dc3=st.columns(3)
-    with _nfl_dc1:
-        _show_nfl_systems=st.checkbox("Show System Details",value=False,key="nfl-lazy-system-details")
-    with _nfl_dc2:
-        _show_nfl_model=st.checkbox("Show Model / Bet Authority Details",value=False,key="nfl-lazy-model-details")
-    with _nfl_dc3:
-        _show_nfl_results=st.checkbox("Show Production Results",value=False,key="nfl-lazy-production-results")
+    # EXCLUSIVE lazy detail selector: only the betting board renders on first paint.
+    _nfl_extra_section=st.selectbox(
+        'Additional NFL tables — load only when selected',
+        ['Betting Board only','System Details','Model / Bet Authority Details','Production Results'],
+        index=0,key='nfl-extra-section-on-demand',
+    )
+    _show_nfl_systems=(_nfl_extra_section=='System Details')
+    _show_nfl_model=(_nfl_extra_section=='Model / Bet Authority Details')
+    _show_nfl_results=(_nfl_extra_section=='Production Results')
+    if _nfl_extra_section!='Betting Board only':
+        st.caption('Only the selected additional section is loaded; the NFL betting board stays visible.')
 
     if _show_nfl_results:
         with st.expander("NFL Production Results — CORE + Systems + Bet Authority",expanded=False):
@@ -48294,7 +48413,31 @@ def _render_nfl_betting_engine_v1_ui(df_moves_raw,label):
                 "STAT and MARKET remain bounded diagnostics until their incremental production gate is validated. Heavy Research may publish new evidence but cannot silently change this production policy."
             )
     if _show_nfl_systems:
-        with st.expander("NFL System Rules Index — mined + published + Pathi systems",expanded=False):
+        rules_state=_nfl_system_rules_index_cached()
+        pathi_live={}; pathi_active_ids=set()
+        if isinstance(rules_state,dict) and rules_state.get('status')=='READY':
+            with st.spinner('Loading NFL detailed Pathi evidence on demand...'):
+                _nfl_detail_quotes=read_nfl_current_quote_heads_cached(hours=24)
+                pathi_live,pathi_active_ids=_nfl_pathi_live_overlay(_nfl_detail_quotes,rules_state)
+        with st.expander('Current-line Pathi systems — full display audit',expanded=True):
+            _pathi_detail_rows=[]
+            for _game_key,_systems in pathi_live.items():
+                for _system in _systems:
+                    _pathi_detail_rows.append({
+                        'Game Key':_game_key,
+                        'System':_system.get('name'),
+                        'Family':_system.get('family_label'),
+                        'Team':_system.get('team'),
+                        'Validation':_system.get('validation'),
+                        'Evidence':_system.get('evidence_level'),
+                        'Eligible Vote':bool(_system.get('vote_eligible')),
+                        'Correlation Cap':_system.get('correlation_policy'),
+                    })
+            if _pathi_detail_rows:
+                st.dataframe(pd.DataFrame(_pathi_detail_rows),use_container_width=True,hide_index=True)
+            else:
+                st.caption('No detailed Pathi system triggers were available on the current quotes. The main board still displays the published qualified production votes.')
+        with st.expander("NFL System Rules Index — mined + published + Pathi systems",expanded=True):
             if not isinstance(rules_state,dict) or rules_state.get("status")!="READY":
                 st.info("System Rules Index is not available yet. Run NFL Research — Heavy Challenger Search once with Engine V3.10.4 or later.")
             else:
@@ -48443,6 +48586,94 @@ def _v1350_prepare_live_three_market_shadow_rows(df_moves_raw, label):
         return d, {'status':'SCORING_ERROR','error':f'{type(e).__name__}:{e}'}
 
 
+
+@st.cache_data(ttl=60,show_spinner=False)
+def _ncaaf_betting_board_first_cached(hours: int = 24):
+    """One 60-second snapshot: BQ quotes -> frozen heads -> single live Miner -> authority.
+
+    Streamlit reruns triggered by selecting a detail panel reuse the *selected*
+    betting frame, rather than redoing live historical-context SQL/Miner, GCS
+    research loading, model scoring and bet authority. No background writes.
+    """
+    started=time.monotonic()
+    info={'status':'UNAVAILABLE','source':'LATEST_QUOTE_PER_BOOK',
+          'ttl_seconds':60,'miner_attachments':0}
+    try:
+        t_quotes=time.monotonic()
+        raw=read_ncaaf_current_quote_heads_cached(hours=hours)
+        info['quotes_seconds']=round(time.monotonic()-t_quotes,3)
+        info['market_rows_loaded']=int(len(raw)) if isinstance(raw,pd.DataFrame) else 0
+        if raw is None or raw.empty:
+            info['status']='NO_PREGAME_ROWS'
+            return pd.DataFrame(),info
+        if not {'Game','Game_Start','Market','Outcome'}.issubset(raw.columns):
+            info['status']='MISSING_REQUIRED_MARKET_COLUMNS'
+            return pd.DataFrame(),info
+        raw=raw.copy()
+        raw['Sport_Norm']=raw['Sport'].astype(str).str.upper().str.strip()
+        raw=raw.loc[raw['Sport_Norm'].eq('NCAAF')].copy()
+        if 'Snapshot_Timestamp' in raw:
+            keys=[c for c in ('Home_Team_Norm','Away_Team_Norm','Game_Start',
+                              'Market','Outcome','Bookmaker','Value','Odds_Price','Limit') if c in raw]
+            raw=raw.sort_values('Snapshot_Timestamp',ascending=False)
+            if keys: raw=raw.drop_duplicates(subset=keys,keep='first')
+        raw=build_game_key(raw)
+        raw['Game_Start']=pd.to_datetime(raw['Game_Start'],errors='coerce',utc=True)
+        raw=raw.loc[raw['Game_Start'].gt(pd.Timestamp.now(tz='UTC'))].copy()
+        info['input_rows']=int(len(raw))
+        if raw.empty:
+            info['status']='NO_PREGAME_ROWS'
+            return pd.DataFrame(),info
+
+        # EXACT original 3 frozen heads. Do not refit, blend or promote any models.
+        t_score=time.monotonic()
+        scored,score_info=_v1350_prepare_live_three_market_shadow_rows(raw,'NCAAF')
+        info['score_seconds']=round(time.monotonic()-t_score,3)
+        info.update(score_info)
+        if scored is None or scored.empty or score_info.get('status')!='NCAAF_PRODUCTION_V1_SCORED':
+            return pd.DataFrame(),info
+        import ncaaf_production_v1 as _npv1
+        contract=_ncaaf_prod_v1_load_contract(GCS_BUCKET)
+        _backs=(contract.get('backbones') or {}) if isinstance(contract,dict) else {}
+        info['spread_features']=len(((_backs.get('spread') or {}).get('feature_cols') or []))
+        info['h2h_features']=len(((_backs.get('h2h') or {}).get('feature_cols') or []))
+        info['totals_features']=len(((_backs.get('totals') or {}).get('feature_cols') or []))
+        t_report=time.monotonic()
+        report=_ncaaf_research_v2_report_cached()
+        info['registry_seconds']=round(time.monotonic()-t_report,3)
+        # Previously this UI called attach_live_miner_votes() itself, then the
+        # shared production selector attached it AGAIN. Bind the verified report
+        # and BQ/GCS context to the shared selector, which attaches exactly once.
+        # A missing registry remains fail-closed; never fake positive evidence.
+        _npv1.set_current_live_research_report(
+            report if isinstance(report,dict) else None,
+            bq_client=bq_client,
+            storage_client=storage.Client(),
+            bucket_name=GCS_BUCKET)
+        t_select=time.monotonic()
+        picks=_npv1.choose_current_production_picks(
+            scored,contract,executable_books=REC_BOOKS)
+        info['miner_select_seconds']=round(time.monotonic()-t_select,3)
+        info['miner_attachments']=1 if isinstance(report,dict) else 0
+        info['status']='PASS' if isinstance(picks,pd.DataFrame) and not picks.empty else 'NO_SELECTION'
+        info['selected_markets']=int(len(picks)) if isinstance(picks,pd.DataFrame) else 0
+        return (picks if isinstance(picks,pd.DataFrame) else pd.DataFrame()),info
+    except Exception as exc:
+        logging.exception('[NCAAF-UI-FAST-BOARD] status=ERROR')
+        info['status']='ERROR'
+        info['error']=f'{type(exc).__name__}:{exc}'
+        return pd.DataFrame(),info
+    finally:
+        info['build_seconds']=round(time.monotonic()-started,3)
+        logging.info('[NCAAF-UI-FAST-BOARD] status=%s input_rows=%s selected=%s '
+                     'miner_passes=%s quotes_seconds=%s score_seconds=%s '
+                     'registry_seconds=%s miner_select_seconds=%s build_seconds=%s cache_ttl=60',
+                     info.get('status'),info.get('input_rows',0),
+                     info.get('selected_markets',0),info.get('miner_attachments',0),
+                     info.get('quotes_seconds'),info.get('score_seconds'),
+                     info.get('registry_seconds'),info.get('miner_select_seconds'),
+                     info.get('build_seconds'))
+
 def _ncaaf_clean_diag_text(v):
     """Normalize dashboard diagnostic text without converting real zeroes to blanks."""
     if v is None:
@@ -48503,36 +48734,18 @@ def _ncaaf_authority_source_detail(row, source_type, raw_col=None):
     return " | ".join(dict.fromkeys(parts)) if parts else "—"
 
 
-def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
-    """Lean one-table NCAAF view for independent Spread / H2H / Total models."""
-    if df_moves_raw is None or df_moves_raw.empty:
-        st.warning('No upcoming NCAAF prediction rows are available yet.')
-        return
-
-    d,live_info=_v1350_prepare_live_three_market_shadow_rows(df_moves_raw,label)
+def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None, cached_live_info=None):
+    """Lean NCAAF board; selected picks are computed once per minute outside UI."""
     now=pd.Timestamp.now(tz='UTC')
-    if d is None or d.empty:
-        st.warning('No upcoming NCAAF spread, H2H or total markets are available yet.')
-        return
-    # Identical quote/edge selection in UI and utils scanner. The UI is read-only
-    # with respect to the immutable pregame prediction ledger.
-    try:
-        import ncaaf_production_v1 as _npv1
-        _prod_contract=_ncaaf_prod_v1_load_contract(GCS_BUCKET)
-        # Research V2.2 supplies bounded, frozen-qualified live Miner votes BEFORE
-        # Bet Authority runs. It never rewrites CORE probability or qualifies a
-        # new family from 2026 outcomes.
-        try:
-            import ncaaf_research_v2 as _rv2
-            _rv2_report=_ncaaf_research_v2_report_cached()
-            if isinstance(_rv2_report,dict):
-                d=_rv2.attach_live_miner_votes(d,_rv2_report,dashboard_module=sys.modules[__name__])
-        except Exception as _rv2_live_err:
-            logging.warning('[NCAAF-RV22-LIVE-MINER] unavailable: %s:%s',type(_rv2_live_err).__name__,_rv2_live_err)
-        picks=_npv1.choose_current_production_picks(d,_prod_contract,executable_books=REC_BOOKS)
-    except Exception as _prod_err:
-        logging.exception('[NCAAF-PROD-V2-LIVE-AUTHORITY] failed')
-        picks=pd.DataFrame()
+    if selected_picks is not None:
+        picks=selected_picks.copy()
+        live_info=cached_live_info if isinstance(cached_live_info,dict) else {}
+        _prod_contract=None   # Edge contract details load only when opened.
+    else:
+        # Compatibility with older direct callers: use the same cached board,
+        # never independently score, reattach Miner, or query research twice.
+        picks,live_info=_ncaaf_betting_board_first_cached(hours=24)
+        _prod_contract=None
     if picks.empty and live_info.get('status')!='NCAAF_PRODUCTION_V1_SCORED':
         st.warning(f"NCAAF production model did not score the current rows: {live_info.get('status','UNKNOWN')}.")
         return
@@ -48678,12 +48891,10 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     if selected_date!='All':
         view=view[view['ET Date']==selected_date].copy()
 
-    _prod_contract=_ncaaf_prod_v1_load_contract(GCS_BUCKET)
     st.subheader('NCAAF Production — CORE + Systems + Bet Authority')
-    if isinstance(_prod_contract,dict):
+    if live_info.get('production_contract')=='ACTIVE':
         st.caption('Spread/H2H/Totals remain separate frozen probability models. CORE creates a candidate only after clearing the price-aware 2% edge + 2% EV gate. STAT, Pathi, Big Al and STRONG_VALIDATED Miner families (including qualified PT-derived systems) are bounded evidence: they may confirm or oppose CORE, but cannot create a wager, reverse the side, or rewrite model probability. Prediction Tracker remains a backend research/shadow brain with zero production authority; PT margin fields are intentionally not displayed on the production board. CONFIRMED_SHADOW Miner families remain research/prospective only. H2H remains model-only.')
-        _backs=_prod_contract.get('backbones') or {}
-        _spf=len(((_backs.get('spread') or {}).get('feature_cols') or [])); _h2f=len(((_backs.get('h2h') or {}).get('feature_cols') or [])); _ttf=len(((_backs.get('totals') or {}).get('feature_cols') or []))
+        _spf=live_info.get('spread_features','—'); _h2f=live_info.get('h2h_features','—'); _ttf=live_info.get('totals_features','—')
         st.caption(f'Fast production path: Spread {_spf} fixed features • H2H {_h2f} fixed features • Totals {_ttf} fixed features • cadence FROZEN • AutoFS OFF • multi-head runtime OFF • rich-market model OFF.')
     else:
         st.warning('NCAAF Production V1 contract is not published. Weekly Update cannot create a production contract; an explicit approved promotion is required before production scoring can run.')
@@ -48789,6 +49000,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
                 st.warning(f'Production grading ledger unavailable: {type(_grade_err).__name__}. Check BigQuery table permissions and background scanner logs.')
 
     if _show_ncaaf_edge:
+        _prod_contract=_ncaaf_prod_v1_load_contract(GCS_BUCKET)
         if isinstance(_prod_contract,dict):
             st.markdown('**Production edge evidence**')
             _perf=(_prod_contract.get('performance') or {})
@@ -49090,7 +49302,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
             diag[c]=pd.to_numeric(diag[c],errors='coerce').map(lambda x:f'{x:+.3f}' if pd.notna(x) else '—')
         st.dataframe(diag,use_container_width=True,hide_index=True)
 
-    print(f"[NCAAF-PROD-V2-FAST-UI] games={len(view)} spread_predictions={int(view['Spr Prob'].notna().sum())} h2h_predictions={int(view['H2H Prob'].notna().sum())} total_predictions={int(view['Tot Prob'].notna().sum())} candidates={candidate_n} bets={bet_n} strong_bets={strong_n} h2h_model_only={h2h_n} production_games={prod_n} miner_qualified={_miner_qualified} miner_evaluable={_miner_evaluable} miner_triggers={_miner_triggers} production_contract={'ACTIVE' if isinstance(_prod_contract,dict) else 'MISSING'} policy=NCAAF_PRODUCTION_BETTING_V2_1_STRONG_VALIDATED_MINER_ONLY generic_autofs=RETIRED multi_head_runtime=RETIRED rich_market_render=FALSE probability_blend=NONE spread_model=FROZEN_SEPARATE h2h_model=FROZEN_SEPARATE totals_model=FROZEN_SEPARATE")
+    print(f"[NCAAF-PROD-V2-FAST-UI] games={len(view)} spread_predictions={int(view['Spr Prob'].notna().sum())} h2h_predictions={int(view['H2H Prob'].notna().sum())} total_predictions={int(view['Tot Prob'].notna().sum())} candidates={candidate_n} bets={bet_n} strong_bets={strong_n} h2h_model_only={h2h_n} production_games={prod_n} miner_qualified={_miner_qualified} miner_evaluable={_miner_evaluable} miner_triggers={_miner_triggers} production_contract={live_info.get('production_contract','MISSING')} policy=NCAAF_PRODUCTION_BETTING_V2_1_STRONG_VALIDATED_MINER_ONLY generic_autofs=RETIRED multi_head_runtime=RETIRED rich_market_render=FALSE probability_blend=NONE spread_model=FROZEN_SEPARATE h2h_model=FROZEN_SEPARATE totals_model=FROZEN_SEPARATE")
 
 def render_scanner_tab(label, sport_key, container, force_reload=False):
 
@@ -49138,6 +49350,37 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         })();
         </script>
         """, unsafe_allow_html=True)
+        # NCAAF must exit BEFORE generic scanner materialization, per-row
+        # dedup/key building, or hidden report work. The one cached board query
+        # performs exactly those essential transforms once for the selected
+        # current quotes and retains all frozen evidence/authority gates.
+        if _ncaaf_fast_ui:
+            if force_reload:
+                _ncaaf_betting_board_first_cached.clear()
+                read_ncaaf_current_quote_heads_cached.clear()
+                _ncaaf_research_v2_report_cached.clear()
+            with st.spinner('Loading NCAAF betting board (60-second cached snapshot)...'):
+                _selected,_board_meta=_ncaaf_betting_board_first_cached(hours=24)
+            if _board_meta.get('status')=='ERROR':
+                st.error('NCAAF board refresh failed: '+str(_board_meta.get('error','UNKNOWN')))
+                return
+            st.caption('NCAAF betting board: latest per-book quotes; frozen CORE and qualified system votes; 60-second shared cache.')
+            _render_ncaaf_fast_prediction_ui(None,label,selected_picks=_selected,cached_live_info=_board_meta)
+            return
+
+        # NFL first paint is the already-published, current-line authority snapshot.
+        # Do not read 24-hour scanner history, rebuild game keys, or load the
+        # live Pathi/Rules research tables before showing the betting board.
+        if _nfl_prod_ui:
+            if force_reload:
+                _nfl_betting_board_first_cached.clear()
+                _nfl_model_authority_v26_state_cached.clear()
+            with st.spinner('Loading NFL betting board (60-second cached snapshot)...'):
+                _nfl_state,_nfl_view,_nfl_board_meta=_nfl_betting_board_first_cached()
+            _render_nfl_betting_engine_v1_ui(None,label,board_state=_nfl_state,
+                                             board_view=_nfl_view,board_meta=_nfl_board_meta)
+            return
+
         # === 0) History (used later for trends)
         # --- Build a visible title + safe key EARLY so it's always defined ---
         _summary_title_text = f"📊 Sharp vs Rec Book Summary Table – {label}"  # emoji OK in visible text
