@@ -34044,8 +34044,45 @@ def fit_ncaaf_statistical_brain(log_func=print):
     for val_season in seasons[1:]:
         tr=np.isfinite(season_arr) & (season_arr < float(val_season))
         va=np.isfinite(season_arr) & (season_arr == float(val_season))
-        if tr.sum()<500 or va.sum()<100: continue
-        mm,tm=_ncaaf_stat_fit_models_for_rows(games,margin_feature_cols,total_feature_cols,tr,target_mode=target_mode)
+        if tr.sum()<500 or va.sum()<100:
+            continue
+
+        # Long-history guard: row count alone is not sufficient for the
+        # market-residual Stat Brain. Earlier seasons may contain many game
+        # rows but no usable market-error targets. Skip those OOF folds rather
+        # than handing an empty training frame to sklearn/SimpleImputer.
+        if target_mode=="MARKET_ERROR_RESIDUAL":
+            _margin_target=pd.to_numeric(
+                games.loc[tr,"Market_Error_Margin"],errors="coerce"
+            )
+            _total_target=pd.to_numeric(
+                games.loc[tr,"Market_Error_Total"],errors="coerce"
+            )
+        else:
+            _margin_target=pd.to_numeric(
+                games.loc[tr,"Actual_Margin"],errors="coerce"
+            )
+            _total_target=pd.to_numeric(
+                games.loc[tr,"Actual_Total"],errors="coerce"
+            )
+
+        _margin_target_n=int(_margin_target.notna().sum())
+        _total_target_n=int(_total_target.notna().sum())
+
+        if _margin_target_n<100 or _total_target_n<100:
+            log_func(
+                f"[NCAAF-STAT-OOF-SKIP] val_season={val_season} "
+                f"train_rows={int(tr.sum())} val_rows={int(va.sum())} "
+                f"margin_targets={_margin_target_n} "
+                f"total_targets={_total_target_n} "
+                f"reason=INSUFFICIENT_USABLE_TARGETS"
+            )
+            continue
+
+        mm,tm=_ncaaf_stat_fit_models_for_rows(
+            games,margin_feature_cols,total_feature_cols,tr,
+            target_mode=target_mode
+        )
         edge_m=_ncaaf_stat_blend_predict(mm,games.loc[va,margin_feature_cols],linear_weight)
         edge_t=_ncaaf_stat_blend_predict(tm,games.loc[va,total_feature_cols],linear_weight)
         market_m=pd.to_numeric(games.loc[va,"Market_Open_Margin"],errors="coerce").to_numpy(dtype=float)
