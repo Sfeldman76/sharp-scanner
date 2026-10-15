@@ -1,4 +1,4 @@
-"""NCAAF Research V2.31.1 — deep objective context source repair for System Miner.
+"""NCAAF Research V2.33.0 — feature-aware maximum-history System Miner validation.
 
 Research-only architecture built around the frozen NCAAF Production V1 benchmark.
 This module cannot mutate CORE/model probability. Historically qualified system families may emit bounded
@@ -7,7 +7,7 @@ confirmation/conflict votes for Bet Authority; no research family can create a C
 Core contracts
 --------------
 * Production V1 remains frozen and separate.
-* Discovery is capped at 2023; 2024-2025 are untouched confirmation seasons.
+* System Miner uses the maximum eligible pre-2024 history for each exact rule, with chronological internal validation when enough seasons exist; 2024-2025 remain untouched final confirmation seasons.
 * 2026+ is prospective only and never participates in search, threshold choice,
   family selection, direction choice, or confirmation.
 * STAT research predicts residual error of the incumbent OOF fair-value backbones.
@@ -35,16 +35,26 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.32.0-cfbd-miner-context-20261015"
-NCAAF_RESEARCH_V2_VERSION = "2.32.0"
+NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.33.0-feature-aware-max-history-miner-20261015"
+NCAAF_RESEARCH_V2_VERSION = "2.33.0"
 NCAAF_RESEARCH_REPAIR_PATCH = "ptiv-2023fit-2024select-2025holdout-live-availability-20261014"
 NCAAF_LIVE_CALENDAR_PATCH = "miner-season-game-date-safe-fallback-20261014"
 NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
-DISCOVERY_MAX_SEASON = 2023
+DISCOVERY_MAX_SEASON = 2023  # retained for non-Miner research lanes / backward compatibility
 CONFIRMATION_SEASONS = (2024, 2025)
 PROSPECTIVE_MIN_SEASON = 2026
+# V2.33 System Miner history contract. Candidate rules use every qualifying
+# pre-2024 occurrence available for their exact inputs, but when >=3 distinct
+# pre-confirmation seasons exist the most recent 1-2 seasons are reserved as an
+# internal chronological validation holdout. 2024/2025 remain the untouched final
+# confirmation gate and 2026+ remains prospective only.
+NCAAF_MINER_PRECONF_MAX_SEASON = 2023
+NCAAF_MINER_INTERNAL_VALIDATION_MAX_YEARS = 2
+NCAAF_MINER_INTERNAL_VALIDATION_MIN_N = 20
+NCAAF_MINER_INTERNAL_VALIDATION_MIN_RATE = 0.50
+NCAAF_MINER_HISTORY_CONTRACT = "FEATURE_AWARE_MAX_HISTORY__CHRONO_INTERNAL_VALIDATION__2024_2025_FINAL__2026_PROSPECTIVE"
 # V2.32 optional CFBD research feature bridge. The table is produced by
 # ncaaf_cfbd_miner_loader_v1.py. Missing/unavailable data always fail closed.
 NCAAF_CFBD_MINER_FEATURE_TABLE = os.getenv("NCAAF_CFBD_MINER_FEATURE_TABLE", "sharplogger.sharp_data.ncaaf_cfbd_miner_features_v1")
@@ -5067,22 +5077,73 @@ def _h2h_price_metrics(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, baselin
     }
 
 
+def _miner_rule_history_split(mask: np.ndarray, valid: np.ndarray, seasons: np.ndarray) -> dict[str,Any]:
+    """Return the chronological pre-confirmation split for one exact rule.
+
+    The rule itself determines its usable history: seasons with no qualifying
+    occurrences do not penalize a newer feature family. For long-history rules,
+    reserve the last two pre-2024 seasons as internal OOS validation. With three
+    usable seasons reserve only the latest one. With <=2 seasons, preserve all
+    available pre-2024 observations for discovery and mark SHORT_HISTORY; the
+    untouched 2024+2025 confirmation gate remains mandatory for authority.
+    """
+    sy=np.asarray(seasons,dtype=float)
+    base=np.asarray(mask,dtype=bool)&np.asarray(valid,dtype=bool)&np.isfinite(sy)&(sy<=NCAAF_MINER_PRECONF_MAX_SEASON)
+    years=sorted({int(x) for x in sy[base]})
+    if len(years)>=4:
+        val_years=years[-NCAAF_MINER_INTERNAL_VALIDATION_MAX_YEARS:]
+    elif len(years)==3:
+        val_years=years[-1:]
+    else:
+        val_years=[]
+    disc_years=[x for x in years if x not in set(val_years)]
+    disc=base&np.isin(sy,np.asarray(disc_years,dtype=float)) if disc_years else np.zeros(len(sy),dtype=bool)
+    val=base&np.isin(sy,np.asarray(val_years,dtype=float)) if val_years else np.zeros(len(sy),dtype=bool)
+    return {
+        "all_preconfirmation_mask":base,
+        "all_preconfirmation_years":years,
+        "discovery_mask":disc,
+        "discovery_years":disc_years,
+        "internal_validation_mask":val,
+        "internal_validation_years":val_years,
+        "history_start_season":years[0] if years else None,
+        "history_end_season":years[-1] if years else None,
+        "history_mode":"CHRONO_HOLDOUT" if val_years else "SHORT_HISTORY",
+    }
+
+
+def _miner_required_stable_fraction(discovery_season_count: int) -> float:
+    """History-depth-aware season robustness floor.
+
+    Two-season discovery retains the legacy requirement that both seasons be
+    positive. Longer histories tolerate an occasional losing/noisy year while
+    still requiring broad persistence across eras.
+    """
+    n=int(discovery_season_count or 0)
+    if n<=3: return 1.0
+    if n<=5: return 0.80
+    return 0.70
+
+
 def _evaluate_rule(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, valid: np.ndarray, baseline: np.ndarray, seasons: np.ndarray,
                    names: tuple[str,...], families: tuple[str,...], market: str, *,
                    min_discovery_n_override: int | None=None,
                    min_discovery_years_override: int=2,
                    min_discovery_year_n_override: int=15) -> dict[str,Any] | None:
-    disc=mask&valid&np.isfinite(seasons)&(seasons<=DISCOVERY_MAX_SEASON)
+    split=_miner_rule_history_split(mask,valid,seasons)
+    disc=np.asarray(split["discovery_mask"],dtype=bool)
+    internal_val=np.asarray(split["internal_validation_mask"],dtype=bool)
     ix=np.flatnonzero(disc)
     team_specific="TEAM_SPECIFIC" in families
     min_n=int(min_discovery_n_override) if min_discovery_n_override is not None else (60 if team_specific else 100)
     if len(ix)<min_n: return None
 
+    discovery_years=list(split.get("discovery_years") or [])
     h2h_price={}
     if market=="h2h":
         candidates=[]
         for d in ("PLAY_ON","FADE"):
-            pm=_h2h_price_metrics(g,mask&valid,y,baseline,seasons,d,[x for x in sorted(set(seasons[np.isfinite(seasons)].astype(int))) if x<=DISCOVERY_MAX_SEASON])
+            pm=_h2h_price_metrics(g,mask&valid,y,baseline,seasons,d,discovery_years)
             score=(pm["roi"] if np.isfinite(pm["roi"]) else -9.0)+2.0*(pm["market_residual"] if np.isfinite(pm["market_residual"]) else -9.0)
             candidates.append((score,d,pm))
         _,direction,h2h_price=max(candidates,key=lambda x:x[0])
@@ -5092,15 +5153,16 @@ def _evaluate_rule(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, valid: np.n
     rate=float(np.mean(obs[ix]))
 
     dyears=[]
-    for sy in sorted({int(x) for x in seasons[ix]}):
-        jj=disc&(seasons==sy)
+    for sy0 in discovery_years:
+        jj=disc&(seasons==sy0)
         if jj.sum()>=int(min_discovery_year_n_override):
-            row={"season":sy,"n":int(jj.sum()),"rate":float(np.mean(obs[jj]))}
+            row={"season":sy0,"n":int(jj.sum()),"rate":float(np.mean(obs[jj]))}
             if market=="h2h":
-                pm=_h2h_price_metrics(g,jj,y,baseline,seasons,direction,[sy]); row.update({"priced_n":pm["priced_n"],"roi":pm["roi"],"market_residual":pm["market_residual"]})
+                pm=_h2h_price_metrics(g,jj,y,baseline,seasons,direction,[sy0]); row.update({"priced_n":pm["priced_n"],"roi":pm["roi"],"market_residual":pm["market_residual"]})
             dyears.append(row)
     if len(dyears)<int(min_discovery_years_override): return None
     stable=float(np.mean([(x.get("roi",0)>=0 and x.get("market_residual",0)>0) if market=="h2h" else x["rate"]>.5 for x in dyears]))
+    required_stable=_miner_required_stable_fraction(len(dyears))
     best=max(dyears,key=lambda x:(x.get("roi",x["rate"]) if np.isfinite(x.get("roi",np.nan)) else x["rate"]))["season"]
     rem=disc&(seasons!=best)
     remove_best=float(np.mean(obs[rem])) if rem.sum()>=25 else np.nan
@@ -5109,22 +5171,51 @@ def _evaluate_rule(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, valid: np.n
         rpm=_h2h_price_metrics(g,rem,y,baseline,seasons,direction,[int(x) for x in set(seasons[rem].astype(int))])
         remove_best_roi=rpm["roi"]; remove_best_resid=rpm["market_residual"]
 
-    conf=[]
-    for sy in CONFIRMATION_SEASONS:
-        jj=mask&valid&np.isfinite(seasons)&(seasons==sy)
+    # Chronological internal holdout. Direction is frozen from discovery above.
+    ival=[]
+    for sy0 in (split.get("internal_validation_years") or []):
+        jj=internal_val&(seasons==sy0)
         if jj.sum():
-            row={"season":sy,"n":int(jj.sum()),"rate":float(np.mean(obs[jj]))}
+            row={"season":sy0,"n":int(jj.sum()),"rate":float(np.mean(obs[jj]))}
             if market=="h2h":
-                pm=_h2h_price_metrics(g,jj,y,baseline,seasons,direction,[sy]); row.update({"priced_n":pm["priced_n"],"roi":pm["roi"],"market_residual":pm["market_residual"]})
+                pm=_h2h_price_metrics(g,jj,y,baseline,seasons,direction,[sy0]); row.update({"priced_n":pm["priced_n"],"roi":pm["roi"],"market_residual":pm["market_residual"]})
+            ival.append(row)
+    ival_n=sum(x["n"] for x in ival)
+    ival_rate=float(np.average([x["rate"] for x in ival],weights=[x["n"] for x in ival])) if ival_n else np.nan
+    _ivpx={}
+    if ival:
+        if market=="h2h":
+            _ivpx=_h2h_price_metrics(g,internal_val,y,baseline,seasons,direction,split.get("internal_validation_years") or [])
+            ival_pass=bool(
+                int(_ivpx.get("priced_n",0) or 0)>=NCAAF_MINER_INTERNAL_VALIDATION_MIN_N and
+                np.isfinite(_ivpx.get("roi",np.nan)) and float(_ivpx.get("roi"))>=0 and
+                np.isfinite(_ivpx.get("market_residual",np.nan)) and float(_ivpx.get("market_residual"))>=0 and
+                all((int(x.get("priced_n",0) or 0)<10) or (np.isfinite(x.get("roi",np.nan)) and float(x.get("roi"))>=0) for x in ival)
+            )
+        else:
+            ival_pass=bool(
+                ival_n>=NCAAF_MINER_INTERNAL_VALIDATION_MIN_N and np.isfinite(ival_rate) and ival_rate>=NCAAF_MINER_INTERNAL_VALIDATION_MIN_RATE and
+                all((int(x.get("n",0) or 0)<10) or (np.isfinite(x.get("rate",np.nan)) and float(x.get("rate"))>=NCAAF_MINER_INTERNAL_VALIDATION_MIN_RATE) for x in ival)
+            )
+    else:
+        _ivpx={}
+        ival_pass=True  # short-history candidates must still pass untouched 2024 AND 2025 below
+
+    conf=[]
+    for sy0 in CONFIRMATION_SEASONS:
+        jj=mask&valid&np.isfinite(seasons)&(seasons==sy0)
+        if jj.sum():
+            row={"season":sy0,"n":int(jj.sum()),"rate":float(np.mean(obs[jj]))}
+            if market=="h2h":
+                pm=_h2h_price_metrics(g,jj,y,baseline,seasons,direction,[sy0]); row.update({"priced_n":pm["priced_n"],"roi":pm["roi"],"market_residual":pm["market_residual"]})
             conf.append(row)
     conf_n=sum(x["n"] for x in conf); conf_rate=float(np.average([x["rate"] for x in conf],weights=[x["n"] for x in conf])) if conf_n else np.nan
 
-    # V2.18 explicit discovery/confirmation split audit. Identical N/rate can occur
-    # by coincidence, but the same row must never appear in both periods.
     _conf_mask=mask&valid&np.isfinite(seasons)&np.isin(seasons,np.asarray(CONFIRMATION_SEASONS,dtype=float))
-    _split_overlap_n=int(np.sum(disc&_conf_mask))
+    _split_overlap_n=int(np.sum(disc&_conf_mask)+np.sum(internal_val&_conf_mask)+np.sum(disc&internal_val))
     _split_disjoint=bool(_split_overlap_n==0)
     _disc_years=sorted(set(int(x) for x in seasons[disc&np.isfinite(seasons)]))
+    _ival_years=sorted(set(int(x) for x in seasons[internal_val&np.isfinite(seasons)]))
     _conf_years=sorted(set(int(x) for x in seasons[_conf_mask&np.isfinite(seasons)]))
 
     market_resid_disc=market_resid_conf=np.nan; h2h_conf_price={}
@@ -5137,13 +5228,20 @@ def _evaluate_rule(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, valid: np.n
         nominal=_market_residual_p(obs,exp,disc)
     return {
         "conditions":list(names),"families":list(families),"direction":direction,"discovery_n":len(ix),"discovery_rate":rate,
-        "discovery_seasons":dyears,"stable_discovery_fraction":stable,"remove_best_discovery_rate":remove_best,
+        "discovery_seasons":dyears,"stable_discovery_fraction":stable,"required_stable_discovery_fraction":required_stable,"remove_best_discovery_rate":remove_best,
         "remove_best_discovery_roi":remove_best_roi,"remove_best_market_residual":remove_best_resid,
+        "internal_validation":ival,"internal_validation_n":ival_n,"internal_validation_rate":ival_rate,
+        "internal_validation_pass":ival_pass,"internal_validation_price":_ivpx,
+        "history_start_season":split.get("history_start_season"),"history_end_season":split.get("history_end_season"),
+        "history_mode":split.get("history_mode"),"all_preconfirmation_years":split.get("all_preconfirmation_years") or [],
         "nominal_pvalue":nominal,"confirmation":conf,"confirmation_n":conf_n,"confirmation_rate":conf_rate,
         "market_residual_discovery":market_resid_disc,"market_residual_confirmation":market_resid_conf,
         "h2h_discovery_price":h2h_price,"h2h_confirmation_price":h2h_conf_price,
         "split_audit":{
+            "history_contract":NCAAF_MINER_HISTORY_CONTRACT,
+            "all_preconfirmation_years":split.get("all_preconfirmation_years") or [],
             "discovery_years":_disc_years,
+            "internal_validation_years":_ival_years,
             "confirmation_years":_conf_years,
             "row_overlap_n":_split_overlap_n,
             "disjoint":_split_disjoint,
@@ -5151,7 +5249,6 @@ def _evaluate_rule(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, valid: np.n
         },
         "mask":mask,
     }
-
 
 def _concentration(g: pd.DataFrame, mask: np.ndarray, candidates: Iterable[str]) -> dict[str,Any]:
     for c in candidates:
@@ -5188,7 +5285,9 @@ def _mechanism_attribution(g: pd.DataFrame, seasons: np.ndarray, rep: dict[str,A
         else:
             raw=_num(g,"Actual_Total").to_numpy(dtype=float)-_num(g,"Consensus_Open_Total").to_numpy(dtype=float)
         dres=raw if rep.get("direction")=="PLAY_ON" else -raw
-        for scope_name,scope_years in (("discovery",[x for x in sorted(set(seasons[np.isfinite(seasons)].astype(int))) if x<=DISCOVERY_MAX_SEASON]),("confirmation",CONFIRMATION_SEASONS)):
+        _rep_disc_years=[int(x.get("season")) for x in (rep.get("discovery_seasons") or []) if x.get("season") is not None]
+        _rep_ival_years=[int(x.get("season")) for x in (rep.get("internal_validation") or []) if x.get("season") is not None]
+        for scope_name,scope_years in (("discovery",_rep_disc_years),("internal_validation",_rep_ival_years),("confirmation",CONFIRMATION_SEASONS)):
             mm=mask&np.isfinite(dres)&np.isin(seasons,np.asarray(scope_years,dtype=float))
             attr[f"{scope_name}_directional_market_residual"]={
                 "n":int(mm.sum()),
@@ -5529,7 +5628,7 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
     _bridge_atoms=sum(v for k,v in _fam_counts.items() if str(k).startswith(("EXPERT_","RESEARCH_CORE_STATE","RESEARCH_SPECIALIST_","MARKET_KEY_","EXTERNAL_")))
     _obs_atoms=[a for a in atoms if str(a.get("family") or "") in BIG_AL_OBSERVATION_ATOM_FAMILIES]
     behavior=_v2181_external_predictor_behavior(games,seasons,market)
-    out={"version":"NCAAF-RV2.18.3-SYSTEM-MINER-V9-CURRENT-EXTERNAL-CONSENSUS","market":market,"production_authority":0,"discovery_max_season":DISCOVERY_MAX_SEASON,
+    out={"version":"NCAAF-RV2.33-SYSTEM-MINER-V10-FEATURE-AWARE-HISTORY","market":market,"production_authority":0,"discovery_max_season":NCAAF_MINER_PRECONF_MAX_SEASON,"history_contract":NCAAF_MINER_HISTORY_CONTRACT,
          "confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,"atoms":len(atoms),"atom_family_counts":_fam_counts,"expert_model_bridge_atoms":int(_bridge_atoms),"systems":[],"mechanism_families":[],"external_predictor_behavior":behavior}
     log_func(f"[NCAAF-RV25-ATOM-BRIDGE] market={market} atoms={len(atoms)} bridge_atoms={_bridge_atoms} pathi={_fam_counts.get('EXPERT_PATHI',0)} bigal={_fam_counts.get('EXPERT_BIGAL',0)} core={_fam_counts.get('RESEARCH_CORE_STATE',0)} specialist={sum(v for k,v in _fam_counts.items() if str(k).startswith('RESEARCH_SPECIALIST_'))} external={sum(v for k,v in _fam_counts.items() if str(k).startswith('EXTERNAL_'))} authority=0")
     if market in {"spreads","totals"}:
@@ -5562,15 +5661,17 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         if market=="h2h":
             hp=r.get("h2h_discovery_price") or {}
             discovery_pass=bool(
-                r["stable_discovery_fraction"]>=1.0 and np.isfinite(r["market_residual_discovery"]) and r["market_residual_discovery"]>=.01 and
+                bool(r.get("internal_validation_pass",False)) and
+                r["stable_discovery_fraction"]>=float(r.get("required_stable_discovery_fraction",1.0)) and np.isfinite(r["market_residual_discovery"]) and r["market_residual_discovery"]>=.01 and
                 int(hp.get("priced_n",0) or 0)>=80 and np.isfinite(hp.get("roi",np.nan)) and hp["roi"]>.01 and
                 bool(hp.get("price_band_robust",False)) and np.isfinite(r["remove_best_discovery_roi"]) and r["remove_best_discovery_roi"]>=0 and
                 np.isfinite(r["remove_best_market_residual"]) and r["remove_best_market_residual"]>=0
             )
             r["quality"]=4*max(0,r["market_residual_discovery"])+2*max(0,hp.get("roi",0))+0.05*float(hp.get("positive_price_band_fraction",0) or 0)
         else:
-            discovery_pass=bool(r["discovery_rate"]>=.54 and r["stable_discovery_fraction"]>=1.0 and np.isfinite(r["remove_best_discovery_rate"]) and r["remove_best_discovery_rate"]>=.515)
-            r["quality"]=(r["discovery_rate"]-.5)*3 + max(0,r["remove_best_discovery_rate"]-.5) + .03*r["stable_discovery_fraction"]
+            discovery_pass=bool(bool(r.get("internal_validation_pass",False)) and r["discovery_rate"]>=.54 and r["stable_discovery_fraction"]>=float(r.get("required_stable_discovery_fraction",1.0)) and np.isfinite(r["remove_best_discovery_rate"]) and r["remove_best_discovery_rate"]>=.515)
+            _iv_bonus=max(0.0,float(r.get("internal_validation_rate",.5) or .5)-.5) if np.isfinite(r.get("internal_validation_rate",np.nan)) else 0.0
+            r["quality"]=(r["discovery_rate"]-.5)*3 + max(0,r["remove_best_discovery_rate"]-.5) + .03*r["stable_discovery_fraction"] + .20*_iv_bonus
         r["discovery_pass"]=discovery_pass; r["idx"]=tuple(idx)
         return r
 
@@ -5722,7 +5823,7 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
                          "miner_lane":lane,
                          "authority_state":"CONFIRMED_SHADOW" if conf_ok else "DISCOVERY_FROZEN",
                          "confirmation_pass":conf_ok,"production_authority":0,
-                         "admission_note":"2024 AND 2025 must confirm frozen discovery; external lane has separate FDR and one correlated external family; H2H requires observed moneyline ROI/EV and price-band robustness"})
+                         "admission_note":"Each exact rule uses maximum eligible pre-2024 history with chronological internal validation when available; 2024 AND 2025 remain untouched final confirmation; 2026+ prospective only; external lane has separate FDR and one correlated external family; H2H requires observed moneyline ROI/EV and price-band robustness"})
             item["_mask_internal"]=z["mask"]
             finalists.append(item)
             if len(finalists)>=max_finalists: break
@@ -5913,7 +6014,7 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
                 "confirmed_mechanism_count":sum(x["confirmation_pass"] for x in families),
                 "special_family_audit":special_family_audit,
                 "lineage":lineage,
-                "admission_contract":"DISCOVERY_2022_2023_ONLY__LEGACY_MINER_LANE_PRESERVED__PERSISTENT_INCUMBENT_EXACT_RULE_REVALIDATION__BIGAL_OBSERVATION_HYPOTHESIS_LANE_SEPARATE_FDR__BIGAL_RATINGS_ZERO_SELECTION_WEIGHT__2026_EXPERT_PICK_OUTCOMES_UNUSED__EXTERNAL_PREDICTOR_BEHAVIOR_LANE_SEPARATE_FDR__EXTERNAL_SEEDS_DISCOVERY_ONLY__ONE_EXTERNAL_FAMILY_PER_RULE__HORIZON_SYMMETRIC_1_2_3__CONFERENCE_RIVALRY_H2H_ROLE_TEAM_MEMORY__MARKET_RELATIVE_FDR_FOR_H2H__OBSERVED_ML_ROI__PRICE_BAND_ROBUSTNESS__BOTH_2024_AND_2025_CONFIRM__DEPENDENCY_COLLAPSE_AFTER_LANE_MERGE__PARENT_CHILD_INCREMENTAL_ATTRIBUTION__FULL_PT_INDEX_UNIVERSE_ONE_CORRELATED_FAMILY__META_CONSTITUENT_OVERLAP_GUARD__META_SOURCE_OUT_CONSENSUS__SPLIT_OVERLAP_AUDIT__CFBD_SHIFT1_PERSONNEL_ADVANCED_ALTITUDE__CFBD_WEATHER_SHADOW_ONLY__CROSS_MARKET_STRUCTURE__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY"})
+                "admission_contract":"FEATURE_AWARE_MAX_PRE2024_HISTORY__CHRONO_INTERNAL_VALIDATION__LEGACY_MINER_LANE_PRESERVED__PERSISTENT_INCUMBENT_EXACT_RULE_REVALIDATION__BIGAL_OBSERVATION_HYPOTHESIS_LANE_SEPARATE_FDR__BIGAL_RATINGS_ZERO_SELECTION_WEIGHT__2026_EXPERT_PICK_OUTCOMES_UNUSED__EXTERNAL_PREDICTOR_BEHAVIOR_LANE_SEPARATE_FDR__EXTERNAL_SEEDS_DISCOVERY_ONLY__ONE_EXTERNAL_FAMILY_PER_RULE__HORIZON_SYMMETRIC_1_2_3__CONFERENCE_RIVALRY_H2H_ROLE_TEAM_MEMORY__MARKET_RELATIVE_FDR_FOR_H2H__OBSERVED_ML_ROI__PRICE_BAND_ROBUSTNESS__BOTH_2024_AND_2025_CONFIRM__DEPENDENCY_COLLAPSE_AFTER_LANE_MERGE__PARENT_CHILD_INCREMENTAL_ATTRIBUTION__FULL_PT_INDEX_UNIVERSE_ONE_CORRELATED_FAMILY__META_CONSTITUENT_OVERLAP_GUARD__META_SOURCE_OUT_CONSENSUS__SPLIT_OVERLAP_AUDIT__CFBD_SHIFT1_PERSONNEL_ADVANCED_ALTITUDE__CFBD_WEATHER_SHADOW_ONLY__CROSS_MARKET_STRUCTURE__2026_PROSPECTIVE_ONLY__ZERO_AUTHORITY"})
     log_func(f"[NCAAF-RV23-MINER] market={market} atoms={len(atoms)} tested={len(legacy_tested)+len(observation_tested)+len(external_tested)} systems={len(clean)} mechanisms={len(families)} confirmed_mechanisms={out['confirmed_mechanism_count']} authority=0")
     _oa=special_family_audit.get("big_al_observation_hypothesis") or {}
     if market in {"spreads","totals"}:
@@ -6626,8 +6727,8 @@ def _discovery_pass_from_exact_rule(rep: dict[str,Any], market: str) -> bool:
     if not isinstance(rep,dict): return False
     if str(market).lower()=="h2h":
         hp=rep.get("h2h_discovery_price") or {}
-        return bool(float(rep.get("stable_discovery_fraction",0) or 0)>=1.0 and np.isfinite(rep.get("market_residual_discovery",np.nan)) and float(rep.get("market_residual_discovery"))>=.01 and int(hp.get("priced_n",0) or 0)>=80 and np.isfinite(hp.get("roi",np.nan)) and float(hp.get("roi"))>.01 and bool(hp.get("price_band_robust",False)) and np.isfinite(rep.get("remove_best_discovery_roi",np.nan)) and float(rep.get("remove_best_discovery_roi"))>=0 and np.isfinite(rep.get("remove_best_market_residual",np.nan)) and float(rep.get("remove_best_market_residual"))>=0)
-    return bool(np.isfinite(rep.get("discovery_rate",np.nan)) and float(rep.get("discovery_rate"))>=.54 and float(rep.get("stable_discovery_fraction",0) or 0)>=1.0 and np.isfinite(rep.get("remove_best_discovery_rate",np.nan)) and float(rep.get("remove_best_discovery_rate"))>=.515)
+        return bool(bool(rep.get("internal_validation_pass",False)) and float(rep.get("stable_discovery_fraction",0) or 0)>=float(rep.get("required_stable_discovery_fraction",1.0) or 1.0) and np.isfinite(rep.get("market_residual_discovery",np.nan)) and float(rep.get("market_residual_discovery"))>=.01 and int(hp.get("priced_n",0) or 0)>=80 and np.isfinite(hp.get("roi",np.nan)) and float(hp.get("roi"))>.01 and bool(hp.get("price_band_robust",False)) and np.isfinite(rep.get("remove_best_discovery_roi",np.nan)) and float(rep.get("remove_best_discovery_roi"))>=0 and np.isfinite(rep.get("remove_best_market_residual",np.nan)) and float(rep.get("remove_best_market_residual"))>=0)
+    return bool(bool(rep.get("internal_validation_pass",False)) and np.isfinite(rep.get("discovery_rate",np.nan)) and float(rep.get("discovery_rate"))>=.54 and float(rep.get("stable_discovery_fraction",0) or 0)>=float(rep.get("required_stable_discovery_fraction",1.0) or 1.0) and np.isfinite(rep.get("remove_best_discovery_rate",np.nan)) and float(rep.get("remove_best_discovery_rate"))>=.515)
 
 
 def _legacy_contract_evidence_diagnostic(games: pd.DataFrame, seasons: np.ndarray, mask: np.ndarray,
@@ -7332,7 +7433,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "status":"NCAAF_RESEARCH_V2_COMPLETE","research_status":_research_health["status"],
                 "pt_live_availability":_pt_live_availability,
                 "production_authority":0,"production_contract_mutated":False,
-                "benchmark":"FROZEN_NCAAF_PRODUCTION_V1","discovery_max_season":DISCOVERY_MAX_SEASON,"confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,
+                "benchmark":"FROZEN_NCAAF_PRODUCTION_V1","discovery_max_season":NCAAF_MINER_PRECONF_MAX_SEASON,"miner_history_contract":NCAAF_MINER_HISTORY_CONTRACT,"confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"system_miner_v3":miners,
                 "system_library_inventory":system_library_inventory,"system_library_change_audit":system_library_change_audit,"incumbent_system_library_audit":incumbent_system_library_audit,
                 "context_family_cap_audit":context_family_cap_audit,
