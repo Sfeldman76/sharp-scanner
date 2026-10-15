@@ -1090,12 +1090,15 @@ def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str]
                 syscols[canon]=None; resolution[canon]="DUPLICATE_SOURCE_COLUMN"; ambiguity[canon]=[c]
 
     missing=[k for k,v in syscols.items() if v is None]
-    map_status="FULL_FIVE_VERIFIED" if not missing and not ambiguity else "INCOMPLETE_FAIL_CLOSED"
+    legacy_map_status="FULL_FIVE_VERIFIED" if not missing and not ambiguity else "INCOMPLETE_LEGACY_BENCHMARK"
+    map_status=legacy_map_status if int(season)<int(PT_CURRENT_SEASON) else "CURRENT_FIVE_PENDING_INDEX"
     log_func(
         f"[NCAAF-PT-COLUMN-MAP] season={int(season)} source={source_context} status={map_status} "
         f"DOKTER={syscols.get('DOKTER')} PI_RATE_BIAS={syscols.get('PI_RATE_BIAS')} KEEPER={syscols.get('KEEPER')} "
         f"ESPN_FPI={syscols.get('ESPN_FPI')} PIGSKIN_INDEX={syscols.get('PIGSKIN_INDEX')} "
-        f"missing={missing} ambiguous={ambiguity} resolution={resolution} authority=0"
+        f"legacy_optional_missing={missing if int(season)>=int(PT_CURRENT_SEASON) else []} "
+        f"legacy_missing={missing if int(season)<int(PT_CURRENT_SEASON) else []} "
+        f"ambiguous={ambiguity} resolution={resolution} authority=0"
     )
 
     line_col=_pt_find_col(cols,["line","updated line","current line","spread"])
@@ -1187,11 +1190,42 @@ def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str]
 
     vals=np.column_stack([pd.to_numeric(out[k],errors="coerce").to_numpy(float) for k in PT_PUBLISHED_WEIGHTS])
     w=np.asarray([PT_PUBLISHED_WEIGHTS[k] for k in PT_PUBLISHED_WEIGHTS],dtype=float)
-    full=np.isfinite(vals).all(axis=1) if map_status=="FULL_FIVE_VERIFIED" else np.zeros(len(out),dtype=bool)
-    meta=np.full(len(out),np.nan,dtype=float)
-    if full.any(): meta[full]=vals[full]@w
+    legacy_full=np.isfinite(vals).all(axis=1) if legacy_map_status=="FULL_FIVE_VERIFIED" else np.zeros(len(out),dtype=bool)
+    legacy_meta=np.full(len(out),np.nan,dtype=float)
+    if legacy_full.any(): legacy_meta[legacy_full]=vals[legacy_full]@w
+
+    current_cols=dict(PT_STABLE_FIVE_SHADOW_SOURCES)
+    current_missing_headers=[k for k,c in current_cols.items() if c not in out.columns]
+    current_contract="CURRENT_FIVE_VERIFIED" if not current_missing_headers else "CURRENT_FIVE_INCOMPLETE"
+    current_full=(shadow_count==5) if current_contract=="CURRENT_FIVE_VERIFIED" else np.zeros(len(out),dtype=bool)
+    current_meta=np.full(len(out),np.nan,dtype=float)
+    if np.any(current_full): current_meta[current_full]=shadow_margin[current_full]
+
+    if int(season)>=int(PT_CURRENT_SEASON):
+        meta=current_meta
+        component_count=shadow_count.astype(int)
+        map_status=current_contract
+        active_weights={k:0.2 for k in current_cols}
+        active_sources=current_cols
+        log_func("[NCAAF-PT-CURRENT-CONTRACT] "+json.dumps({
+            "season":int(season),"source":source_context,"status":current_contract,
+            "sources":list(current_cols),"source_columns":current_cols,
+            "missing_headers":current_missing_headers,
+            "full_five_rows":int(np.sum(current_full)),
+            "partial_3_or_4_rows":int(np.sum((shadow_count>=3)&(shadow_count<5))),
+            "pigskin_required":False,
+            "legacy_pigskin_available":bool(syscols.get("PIGSKIN_INDEX")),
+            "production_authority":0,"automatic_promotion":False,
+        },sort_keys=True))
+    else:
+        meta=legacy_meta
+        component_count=np.isfinite(vals).sum(axis=1).astype(int)
+        map_status=legacy_map_status
+        active_weights=dict(PT_PUBLISHED_WEIGHTS)
+        active_sources={k:syscols.get(k) for k in PT_PUBLISHED_WEIGHTS}
+
     out["meta_margin_home"]=meta
-    out["meta_system_count"]=np.isfinite(vals).sum(axis=1).astype(int)
+    out["meta_system_count"]=component_count
     out["pt_header_contract"]=map_status
     bad=out["home_key"].isin({"","home","home team"})|out["away_key"].isin({"","road","away","visitor","visitor team"})
     out=out.loc[~bad].reset_index(drop=True)
@@ -1210,10 +1244,13 @@ def _pt_parse_csv(raw: bytes, season: int, *, verified_header_map: dict[str,str]
         "any_component_rows":int((_component_counts>0).sum()),
         "partial_component_rows":int(((_component_counts>0)&(_component_counts<5)).sum()),
         "full_five_rows":int(np.isfinite(out["meta_margin_home"]).sum()),
-        "metamodel_status":map_status,"system_columns":syscols,"system_column_resolution":resolution,"missing_systems":missing,"ambiguous_systems":ambiguity,
+        "metamodel_status":map_status,"system_columns":syscols,"system_column_resolution":resolution,
+        "missing_systems":current_missing_headers if int(season)>=int(PT_CURRENT_SEASON) else missing,
+        "ambiguous_systems":ambiguity,"legacy_metamodel_status":legacy_map_status,"legacy_missing_systems":missing,
+        "current_system_columns":current_cols,"current_missing_systems":current_missing_headers,"pigskin_required_current":False,
         "home_column":home,"away_column":away,"date_column":date_col,"line_column":line_col,"open_line_column":open_col,
         "prediction_avg_column":avg_col,"prediction_median_column":med_col,"prediction_std_column":std_col,
-        "weights":dict(PT_PUBLISHED_WEIGHTS),"weight_sum":float(sum(PT_PUBLISHED_WEIGHTS.values())),
+        "weights":active_weights,"weight_sum":float(sum(active_weights.values())),"active_sources":active_sources,
         "stable5_challenger":{"contract":PT_STABLE_FIVE_SHADOW_CONTRACT,
             "sources":list(PT_STABLE_FIVE_SHADOW_SOURCES),
             "source_coverage":shadow_source_coverage,
@@ -1369,9 +1406,9 @@ def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -
     if raw is not None:
         frame,diag=_pt_parse_csv(raw,PT_CURRENT_SEASON,verified_header_map=verified_map,source_context="LIVE_GCS_FIRST",log_func=log_func)
         source=source or "GCS_FEEDER_LIVE"
-        if diag.get("metamodel_status")!="FULL_FIVE_VERIFIED" and hraw is not None:
+        if diag.get("metamodel_status") not in {"FULL_FIVE_VERIFIED","CURRENT_FIVE_VERIFIED"} and hraw is not None:
             hframe,hdiag=_pt_parse_live_html(hraw,PT_CURRENT_SEASON,log_func=log_func)
-            if not hframe.empty and hdiag.get("metamodel_status")=="FULL_FIVE_VERIFIED":
+            if not hframe.empty and hdiag.get("metamodel_status") in {"FULL_FIVE_VERIFIED","CURRENT_FIVE_VERIFIED"}:
                 frame,diag=hframe,hdiag; source="GCS_FEEDER_LIVE_HTML_NAMED" if gcsv.get("status")=="PASS" or ghtml.get("status")=="PASS" else "WEB_LIVE_HTML_NAMED"
     elif hraw is not None:
         frame,diag=_pt_parse_live_html(hraw,PT_CURRENT_SEASON,log_func=log_func); source="GCS_FEEDER_LIVE_HTML_NAMED" if ghtml.get("status")=="PASS" else "WEB_LIVE_HTML_FALLBACK"
@@ -2405,15 +2442,26 @@ def _ptiv_production_v1_oof(games,seasons,dashboard_module,production_module,log
     sp=list(getattr(production_module,"PROD_SPREAD_FEATURES",()) or ()); tt=list(getattr(production_module,"PROD_TOTAL_FEATURES",()) or ())
     if not sp or any(c not in games.columns for c in sp): return np.full(len(games),np.nan),{"status":"FIXED_FEATURES_MISSING","missing":[c for c in sp if c not in games.columns]}
     oof=np.full(len(games),np.nan); by={}; lw=float(getattr(production_module,"PROD_LINEAR_WEIGHT",0.75))
+    margin_target=pd.to_numeric(games.get("Market_Error_Margin",pd.Series(np.nan,index=games.index)),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    total_target=pd.to_numeric(games.get("Market_Error_Total",pd.Series(np.nan,index=games.index)),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+    market_all=pd.to_numeric(games.get("Market_Open_Margin",pd.Series(np.nan,index=games.index)),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
     for sy in sorted({int(x) for x in seasons[np.isfinite(seasons)] if int(x)<=2025}):
         tr=np.isfinite(seasons)&(seasons<float(sy)); va=np.isfinite(seasons)&(seasons==float(sy))
         if tr.sum()<500 or va.sum()<50: continue
+        usable_margin=int(np.sum(tr&np.isfinite(margin_target)))
+        usable_total=int(np.sum(tr&np.isfinite(total_target)))
+        score_n=int(np.sum(va&np.isfinite(market_all)))
+        if usable_margin<100 or usable_total<100 or score_n<50:
+            by[str(sy)]={"status":"SKIP_INSUFFICIENT_USABLE_TARGETS","train_n":int(tr.sum()),"score_rows":int(va.sum()),"usable_margin_targets":usable_margin,"usable_total_targets":usable_total,"usable_score_market":score_n}
+            continue
         try:
             mm,_=dashboard_module._ncaaf_stat_fit_models_for_rows(games,sp,tt,tr,target_mode="MARKET_ERROR_RESIDUAL")
             edge=dashboard_module._ncaaf_stat_blend_predict(mm,games.loc[va,sp],lw)
-            market=pd.to_numeric(games.loc[va,"Market_Open_Margin"],errors="coerce").to_numpy(float)
-            oof[np.where(va)[0]]=np.where(np.isfinite(market),market+edge,np.nan); by[str(sy)]={"train_n":int(tr.sum()),"score_n":int(va.sum())}
-        except Exception as exc: by[str(sy)]={"status":"ERROR","error":f"{type(exc).__name__}:{exc}"}
+            market=market_all[va]
+            oof[np.where(va)[0]]=np.where(np.isfinite(market),market+edge,np.nan)
+            by[str(sy)]={"train_n":int(tr.sum()),"score_n":int(np.isfinite(market).sum()),"usable_margin_targets":usable_margin,"usable_total_targets":usable_total}
+        except Exception as exc:
+            by[str(sy)]={"status":"ERROR","error":f"{type(exc).__name__}:{exc}","usable_margin_targets":usable_margin,"usable_total_targets":usable_total,"usable_score_market":score_n}
     return oof,{"status":"PASS" if np.isfinite(oof).any() else "NO_OOF","feature_cols":sp,"linear_weight":lw,"by_season":by,"contract":"EXACT_NCAAF_PRODUCTION_V1_FIXED_SPREAD_FEATURES_SEASON_FORWARD"}
 
 
@@ -3436,11 +3484,15 @@ def _v231_deep_context_source(dashboard_module, *, log_func=print) -> dict[str,A
         h["__sacks_allowed"]=h["__opp_def_sacks"]
         h["__off_sack_rate"]=_ratio(h["__sacks_allowed"],h["__pass_att"]+h["__sacks_allowed"])
         h["__def_sack_rate"]=_ratio(h["__def_sacks"],h["__opp_pass_att"]+h["__def_sacks"])
-        h["__su_value"]=np.where(h["__margin"].gt(0),1.0,np.where(h["__margin"].lt(0),0.0,np.where(h["__margin"].eq(0),0.5,np.nan)))
+        _margin_arr=pd.to_numeric(h["__margin"],errors="coerce").to_numpy(dtype=float,na_value=np.nan)
+        _margin=pd.Series(_margin_arr,index=h.index,dtype=float)
+        _win=_margin.gt(0).fillna(False)
+        _loss=_margin.lt(0).fillna(False)
+        _push=_margin.eq(0).fillna(False)
+        h["__su_value"]=np.select([_win.to_numpy(bool),_loss.to_numpy(bool),_push.to_numpy(bool)],[1.0,0.0,0.5],default=np.nan)
 
         h["__deceptive_win_score"]=0.0; h["__deceptive_loss_score"]=0.0
         h["__win_assist_score"]=0.0; h["__loss_adversity_score"]=0.0
-        _win=h["__margin"].gt(0); _loss=h["__margin"].lt(0)
         for c in ("__yard_margin","__ypp_margin","__fd_margin"):
             h.loc[_win&h[c].lt(0),"__deceptive_win_score"] += 1.0
             h.loc[_loss&h[c].gt(0),"__deceptive_loss_score"] += 1.0
@@ -3630,24 +3682,73 @@ def _attach_cfbd_context_to_miner(dashboard_module, miner_games: pd.DataFrame, *
     right=cf.copy()
     right["__cfbd_season"]=pd.to_numeric(right.get("Season"),errors="coerce").astype("Int64")
     right["__cfbd_date"]=pd.to_datetime(right.get("Game_Date"),errors="coerce",utc=True).dt.normalize()
-    _rt=right.get("Team",right.get("Team_Key",pd.Series("",index=right.index))).astype(str).map(_pt_team_key)
-    _ro=right.get("Opponent",right.get("Opponent_Key",pd.Series("",index=right.index))).astype(str).map(_pt_team_key)
-    right["__cfbd_team"]=_rt; right["__cfbd_opp"]=_ro
+
+    def _cfbd_first_team_key(df,candidates):
+        z=pd.Series("",index=df.index,dtype="string")
+        for c in candidates:
+            if c not in df.columns:
+                continue
+            v=df[c].astype("string").fillna("").map(_pt_team_key)
+            z=z.where(z.ne(""),v)
+        return z.fillna("").astype(str)
+
+    def _cfbd_gid_key(series):
+        z=series.astype("string").fillna("").str.strip().str.replace(r"\.0$","",regex=True)
+        return z.mask(z.str.lower().isin({"","nan","none","<na>"}),"").astype(str)
+
+    right["__cfbd_team"]=_cfbd_first_team_key(right,("Team_Key","Team"))
+    right["__cfbd_opp"]=_cfbd_first_team_key(right,("Opponent_Key","Opponent"))
+    right["__cfbd_gid"]=_cfbd_gid_key(right.get("Game_ID",pd.Series("",index=right.index)))
+    right["__cfbd_home"]=pd.to_numeric(right.get("Is_Home",pd.Series(np.nan,index=right.index)),errors="coerce").round().astype("Int64")
+
     feature_cols=[c for c in right.columns if str(c).startswith("CFBD_")]
-    key=["__cfbd_season","__cfbd_date","__cfbd_team","__cfbd_opp"]
-    right=right.loc[right["__cfbd_date"].notna() & right["__cfbd_team"].ne("")].sort_values(key,kind="stable").drop_duplicates(key,keep="last")
 
     work=out.copy(); work["__cfbd_ord"]=np.arange(len(work),dtype=int)
     work["__cfbd_season"]=pd.to_numeric(work.get("Season"),errors="coerce").astype("Int64")
     work["__cfbd_date"]=pd.to_datetime(work.get("Game_Date",work.get("Game_Start",pd.Series(pd.NaT,index=work.index))),errors="coerce",utc=True).dt.normalize()
-    work["__cfbd_team"]=work.get("Team_Norm",work.get("Team",work.get("Home_Team_Norm",work.get("Home_Team",pd.Series("",index=work.index))))).astype(str).map(_pt_team_key)
-    work["__cfbd_opp"]=work.get("Opponent_Norm",work.get("Opponent",work.get("Away_Team_Norm",work.get("Away_Team",pd.Series("",index=work.index))))).astype(str).map(_pt_team_key)
-    existing=[c for c in feature_cols if c in work.columns]
-    merge_cols=key+[c for c in feature_cols if c not in existing]
-    merged=work.merge(right[merge_cols],on=key,how="left",sort=False)
-    # If a CFBD column was already supplied upstream, preserve it. The standalone
-    # table only fills missing columns; it never overrides a fresher explicit value.
-    merged=merged.sort_values("__cfbd_ord",kind="stable").drop(columns=key+["__cfbd_ord"],errors="ignore").reset_index(drop=True)
+    work["__cfbd_team"]=_cfbd_first_team_key(work,("Source_Team_Name","Team_Source_Name","Team","Team_Norm","Home_Team","Home_Team_Norm"))
+    work["__cfbd_opp"]=_cfbd_first_team_key(work,("Source_Opponent_Name","Opponent_Source_Name","Opponent","Opponent_Norm","Away_Team","Away_Team_Norm"))
+    work["__cfbd_gid"]=_cfbd_gid_key(work.get("Source_Game_ID",work.get("Game_ID",pd.Series("",index=work.index))))
+    work["__cfbd_home"]=pd.to_numeric(work.get("Is_Home",pd.Series(np.nan,index=work.index)),errors="coerce").round().astype("Int64")
+
+    merged=work.copy()
+
+    def _cfbd_fill_from(join_keys,right_filter=None):
+        nonlocal merged
+        rr=right.copy()
+        if right_filter is not None:
+            rr=rr.loc[right_filter(rr)].copy()
+        rr=rr.loc[rr[join_keys].notna().all(axis=1)].copy()
+        for k in join_keys:
+            if rr[k].dtype==object or str(rr[k].dtype).startswith("string"):
+                rr=rr.loc[rr[k].astype(str).ne("")]
+        if rr.empty:
+            return 0
+        rr=(rr[join_keys+feature_cols].sort_values(join_keys,kind="stable").drop_duplicates(join_keys,keep="last"))
+        rename={c:f"__cfbd_src__{c}" for c in feature_cols}
+        rr=rr.rename(columns=rename)
+        merged=merged.merge(rr,on=join_keys,how="left",sort=False)
+        filled=0
+        for c in feature_cols:
+            sc=f"__cfbd_src__{c}"
+            if sc not in merged.columns:
+                continue
+            src=merged[sc]
+            if c in merged.columns:
+                before=merged[c].notna()
+                merged[c]=merged[c].where(before,src)
+                filled += int((~before & merged[c].notna()).sum())
+            else:
+                merged[c]=src
+                filled += int(src.notna().sum())
+            merged=merged.drop(columns=[sc])
+        return filled
+
+    _filled_gid=_cfbd_fill_from(["__cfbd_season","__cfbd_gid","__cfbd_team"],right_filter=lambda x:x["__cfbd_gid"].astype(str).ne("") & x["__cfbd_team"].astype(str).ne(""))
+    _filled_pair=_cfbd_fill_from(["__cfbd_season","__cfbd_date","__cfbd_team","__cfbd_opp"],right_filter=lambda x:x["__cfbd_date"].notna() & x["__cfbd_team"].astype(str).ne("") & x["__cfbd_opp"].astype(str).ne(""))
+    _filled_side=_cfbd_fill_from(["__cfbd_season","__cfbd_gid","__cfbd_home"],right_filter=lambda x:x["__cfbd_gid"].astype(str).ne("") & x["__cfbd_home"].notna())
+
+    merged=(merged.sort_values("__cfbd_ord",kind="stable").drop(columns=["__cfbd_season","__cfbd_date","__cfbd_team","__cfbd_opp","__cfbd_gid","__cfbd_home","__cfbd_ord"],errors="ignore").reset_index(drop=True))
 
     matched=np.zeros(len(merged),dtype=bool)
     probes=["CFBD_Source_Tag","CFBD_Returning_Pct_PPA","CFBD_Season_Net_PPA_Prior","CFBD_Venue_Elevation"]
@@ -3663,7 +3764,7 @@ def _attach_cfbd_context_to_miner(dashboard_module, miner_games: pd.DataFrame, *
           "portal_ready":_ready("CFBD_Portal_In_Count"),"elo_ready":_ready("CFBD_Elo_Prior"),
           "altitude_ready":_ready("CFBD_Altitude_Gain"),"weather_ready":_ready("CFBD_WindSpeed"),
           "weather_historical_contract":"OBSERVED_NOT_ARCHIVED_FORECAST__SHADOW_ONLY", "selection_influence":0,"outcomes_2026_selection":False}
-    log_func(f"[NCAAF-CFBD-BRIDGE] status=PASS mode={diag['mode']} table={NCAAF_CFBD_MINER_FEATURE_TABLE} rows={len(merged)} matched={diag['matched_rows']} historical={diag['historical_rows']} advanced={diag['advanced_ready']} returning={diag['returning_ready']} roster={diag['roster_ready']} portal={diag['portal_ready']} talent={diag['talent_ready']} elo={diag['elo_ready']} altitude={diag['altitude_ready']} weather={diag['weather_ready']} weather_authority=SHADOW_ONLY outcomes_2026_selection=FALSE authority=0")
+    log_func(f"[NCAAF-CFBD-BRIDGE] status=PASS mode={diag['mode']} table={NCAAF_CFBD_MINER_FEATURE_TABLE} rows={len(merged)} matched={diag['matched_rows']} historical={diag['historical_rows']} advanced={diag['advanced_ready']} returning={diag['returning_ready']} roster={diag['roster_ready']} portal={diag['portal_ready']} talent={diag['talent_ready']} elo={diag['elo_ready']} altitude={diag['altitude_ready']} weather={diag['weather_ready']} fill_gid={_filled_gid} fill_pair={_filled_pair} fill_side={_filled_side} weather_authority=SHADOW_ONLY outcomes_2026_selection=FALSE authority=0")
     return merged,diag
 
 
@@ -7682,7 +7783,16 @@ def self_test() -> dict[str,Any]:
         _pt_da.get("metamodel_status")=="FULL_FIVE_VERIFIED" and _pt_db.get("metamodel_status")=="FULL_FIVE_VERIFIED" and
         np.allclose(pd.to_numeric(_pt_a["meta_margin_home"],errors="coerce"),pd.to_numeric(_pt_b["meta_margin_home"],errors="coerce"),equal_nan=True) and
         _pt_da.get("system_columns",{}).get("ESPN_FPI")=="lineespn" and _pt_da.get("system_columns",{}).get("DOKTER")=="linedokter" and
-        _pt_dc.get("metamodel_status")=="INCOMPLETE_FAIL_CLOSED" and _pt_dc.get("system_columns",{}).get("ESPN_FPI") is None
+        _pt_dc.get("metamodel_status")=="INCOMPLETE_LEGACY_BENCHMARK" and _pt_dc.get("system_columns",{}).get("ESPN_FPI") is None
+    )
+    _pt_2026=pd.DataFrame({"Home":["Alpha"],"Road":["Beta"],"line":[-3.0],"lineespn":[-2.5],"Pi-Ratings Bias":[-3.5],"Keeper":[-3.0],"linemass":[-2.0],"linesagpred":[-4.0]})
+    _pt_26,_pt_d26=_pt_parse_csv(_pt_2026.to_csv(index=False).encode(),PT_CURRENT_SEASON,source_context="SELF_TEST_CURRENT5",log_func=lambda *a,**k:None)
+    _pt_current5_ok=bool(
+        _pt_d26.get("metamodel_status")=="CURRENT_FIVE_VERIFIED" and
+        _pt_d26.get("pigskin_required_current") is False and
+        _pt_d26.get("current_missing_systems")==[] and
+        int(_pt_d26.get("full_five_rows",0))==1 and
+        pd.notna(pd.to_numeric(_pt_26.get("meta_margin_home"),errors="coerce").iloc[0])
     )
     # Relay payload cleanup must preserve the source header exactly and ignore
     # reader metadata/fences.  Named markdown parsing is separately validated.
@@ -7993,7 +8103,7 @@ def self_test() -> dict[str,Any]:
         bool(_obs_norm and _obs_norm.get("rating")==2 and _obs_norm.get("outcome_used_for_selection") is False and "outcome" not in _obs_norm and _obs_report.get("rating_used_for_system_qualification") is False) and
         "EXPERT_PATHI_FB_DOG_HOOK_ABOVE_3" in live_atoms and "EXPERT_BIGAL_CF2_LATESEASONREVENGEDOG" in live_atoms and
         "CORE_OOF_EDGE_TEAM_2PLUS" in live_atoms and "SPEC_STRUCTURED_STATS_CORE_DIVERGENCE" in live_atoms and "META_PT_EDGE_TEAM_3PLUS" in live_atoms and "META_PT_CORE_STRONG_AGREE" in live_atoms and
-        _inc_ok and _contract_hold_ok and _actual_failure_ok and _reconciliation_ok and _special_diag_ok and _v230_h2h_ok and _v230_atom_ok and _v230_caps_ok and _v231_deep_atoms_ok and np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _sparse_pt_ok and _pt_alias_hint_ok and _pt_final_hard_aliases_ok and _expert_bridge_ok and _hist_state_bridge_ok and _occ_recon_ok and
+        _inc_ok and _contract_hold_ok and _actual_failure_ok and _reconciliation_ok and _special_diag_ok and _v230_h2h_ok and _v230_atom_ok and _v230_caps_ok and _v231_deep_atoms_ok and np.allclose(ret,np.asarray([2.0,.5]),equal_nan=False) and _pt_name_safe and _pt_current5_ok and _relay_csv_ok and _relay_md_ok and _relay_url_ok and _challenge_rejected and _merge_rematch_ok and _sparse_pt_ok and _pt_alias_hint_ok and _pt_final_hard_aliases_ok and _expert_bridge_ok and _hist_state_bridge_ok and _occ_recon_ok and
         _miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["META_PT_EDGE_TEAM_3PLUS"]}) and
         not _miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["CORE_OOF_EDGE_TEAM_2PLUS"]})
     )
@@ -8023,7 +8133,7 @@ def self_test() -> dict[str,Any]:
         "big_al_observation_total_atoms":sorted(x for x in total_live_atoms if x.startswith(("BOTH_OFF_SU_LOSS","TOTAL_MOVED_","TOTAL_55_PLUS","TOTAL_58_PLUS","EITHER_OFF_","BOTH_OFF_ALLOWED"))),
         "big_al_rating_min_for_pattern_analysis":BIG_AL_RATING_MIN_FOR_PATTERN_ANALYSIS,
         "big_al_rating_authority":0,
-        "pt_name_safe_header_contract":_pt_name_safe,
+        "pt_name_safe_header_contract":_pt_name_safe,"pt_current_five_without_pigskin":_pt_current5_ok,
         "pt_self_test_system_columns":_pt_da.get("system_columns",{}),
         "pt_fuzzy_header_rejected":_pt_dc.get("system_columns",{}).get("ESPN_FPI") is None,
         "pt_relay_csv_payload":_relay_csv_ok,"pt_relay_named_markdown":_relay_md_ok,"pt_relay_https_target":_relay_url_ok,"pt_challenge_rejected":_challenge_rejected,"pt_current_merge_preserves_rematch":_merge_rematch_ok,"pt_sparse_partial_component_preservation":_sparse_pt_ok,"pt_canonical_alias_hint":_pt_alias_hint_ok,"pt_final_hard_aliases":_pt_final_hard_aliases_ok,"expert_side_bridge":_expert_bridge_ok,"historical_state_context_bridge":_hist_state_bridge_ok,"expert_occurrence_reconciliation":_occ_recon_ok,
