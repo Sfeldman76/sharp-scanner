@@ -11,14 +11,17 @@ alignment/alias tables.
 
 Design
 ------
-* CFBD /games is the historical source for season-specific conference and
-  classification metadata.
-* Existing alignment rows are used only for stable canonical identity.
-* Historical conference/subdivision is taken from the historical CFBD season,
-  never borrowed backward from a future alignment row.
-* A new row is emitted for the first observed season for a program, whenever its
-  conference/subdivision changes, or after a gap in observed seasons.
-* Ambiguous identity or conflicting season metadata fails closed and is skipped.
+* CFBD numeric team IDs are the primary external identity key.
+* CFBD /teams/fbs supplies season-specific school/mascot metadata used to bind
+  a CFBD team ID to the warehouse canonical Team_Norm.
+* CFBD /records supplies season-specific conference/classification/division.
+* Existing alignment/alias rows are used only to bind stable canonical identity.
+* Historical conference/subdivision is taken from CFBD for that season, never
+  borrowed backward from a future alignment row.
+* A new alignment row is emitted only for the first observed season or a true
+  conference/subdivision change; gaps do not create fake change points.
+* Resolved CFBD school names are also stored as CollegeFootballData source aliases.
+* Ambiguous identity fails closed and is skipped.
 * Existing (Sport, Team_Norm, Effective_Season_From) rows are never overwritten.
 
 Typical usage
@@ -49,7 +52,7 @@ import pandas as pd
 import requests
 
 BASE_URL = "https://api.collegefootballdata.com"
-SOURCE_TAG = "ncaaf-alignment-history-cfbd-v1-20261015"
+SOURCE_TAG = "ncaaf-alignment-history-cfbd-v2-id-first-20261015"
 
 
 def _team_key(x: Any) -> str:
@@ -90,17 +93,24 @@ class CFBD:
         self.s.headers.update({"Authorization": f"Bearer {key}", "Accept": "application/json"})
         self.calls = 0
 
-    def games(self, year: int) -> pd.DataFrame:
-        url = BASE_URL + "/games"
-        params = {"year": int(year), "seasonType": "both", "classification": "fbs"}
-        r = self.s.get(url, params=params, timeout=90)
+    def _get(self, path: str, params: dict[str, Any] | None = None) -> pd.DataFrame:
+        r = self.s.get(BASE_URL + path, params=params or {}, timeout=90)
         self.calls += 1
         if r.status_code >= 400:
-            raise RuntimeError(f"CFBD /games {year} failed HTTP {r.status_code}: {r.text[:500]}")
+            raise RuntimeError(f"CFBD {path} failed HTTP {r.status_code}: {r.text[:500]}")
         data = r.json()
         if not isinstance(data, list):
-            raise RuntimeError(f"CFBD /games {year} returned unexpected payload type {type(data).__name__}")
+            raise RuntimeError(f"CFBD {path} returned unexpected payload type {type(data).__name__}")
         return pd.json_normalize(data)
+
+    def games(self, year: int) -> pd.DataFrame:
+        return self._get("/games", {"year": int(year), "seasonType": "both", "classification": "fbs"})
+
+    def fbs_teams(self, year: int) -> pd.DataFrame:
+        return self._get("/teams/fbs", {"year": int(year)})
+
+    def records(self, year: int) -> pd.DataFrame:
+        return self._get("/records", {"year": int(year)})
 
 
 @dataclass(frozen=True)
@@ -193,50 +203,138 @@ def _mode_or_conflict(values: list[str | None]) -> tuple[str | None, bool]:
     counts = collections.Counter(vals)
     if len(counts) == 1:
         return vals[0], False
-    top = counts.most_common()
-    # Conference should be stable within a season. If multiple values occur,
-    # fail closed unless one value overwhelmingly dominates stray bad records.
-    winner, n = top[0]
+    winner, n = counts.most_common(1)[0]
     total = sum(counts.values())
     if n / total >= 0.90:
         return winner, True
     return None, True
 
 
-def _extract_team_seasons(games: pd.DataFrame, season: int, identities: dict[str, Identity]) -> tuple[pd.DataFrame, dict[str, Any]]:
-    buckets: dict[str, dict[str, Any]] = {}
+def _candidate_identity_keys(team_row: pd.Series) -> list[str]:
+    """CFBD-owned name forms, ordered from most canonical to least."""
+    school = _clean_str(team_row.get("school")) or _clean_str(team_row.get("team"))
+    mascot = _clean_str(team_row.get("mascot"))
+    abbr = _clean_str(team_row.get("abbreviation")) or _clean_str(team_row.get("abbrev"))
+    out: list[str] = []
+    if school and mascot:
+        out.append(_team_key(f"{school} {mascot}"))
+    if school:
+        out.append(_team_key(school))
+    if abbr:
+        out.append(_team_key(abbr))
+    # unique, preserve priority
+    return list(dict.fromkeys(k for k in out if k))
+
+
+def _cfbd_team_id_value(x: Any) -> int | None:
+    try:
+        if pd.isna(x):
+            return None
+        return int(float(x))
+    except Exception:
+        return None
+
+
+def _build_cfbd_id_map(
+    team_frames: dict[int, pd.DataFrame], identities: dict[str, Identity]
+) -> tuple[dict[int, Identity], dict[int, set[str]], dict[str, Any]]:
+    """Bind stable CFBD team IDs to canonical warehouse identities.
+
+    Exact CFBD school+mascot is preferred because the warehouse canonical names
+    commonly include the mascot while /games uses the school name only.
+    """
+    id_to_ident: dict[int, Identity] = {}
+    id_to_names: dict[int, set[str]] = collections.defaultdict(set)
+    conflicts: dict[int, set[str]] = collections.defaultdict(set)
     unresolved: collections.Counter[str] = collections.Counter()
 
-    def add(team: Any, conf: Any, cls: Any) -> None:
-        name = _clean_str(team)
-        if not name:
-            return
-        ident = identities.get(_team_key(name))
+    for year, d in sorted(team_frames.items()):
+        if d is None or d.empty:
+            continue
+        for _, r in d.iterrows():
+            tid = _cfbd_team_id_value(r.get("id", r.get("teamId")))
+            school = _clean_str(r.get("school")) or _clean_str(r.get("team"))
+            if tid is None or not school:
+                continue
+            id_to_names[tid].add(school)
+            hits: list[Identity] = []
+            for k in _candidate_identity_keys(r):
+                ident = identities.get(k)
+                if ident is not None:
+                    hits.append(ident)
+            uniq = {h.canonical_team_norm: h for h in hits}
+            if len(uniq) == 1:
+                ident = next(iter(uniq.values()))
+                prior = id_to_ident.get(tid)
+                if prior is not None and prior.canonical_team_norm != ident.canonical_team_norm:
+                    conflicts[tid].update([prior.canonical_team_norm, ident.canonical_team_norm])
+                    id_to_ident.pop(tid, None)
+                elif tid not in conflicts:
+                    id_to_ident[tid] = ident
+            elif len(uniq) > 1:
+                conflicts[tid].update(uniq)
+                id_to_ident.pop(tid, None)
+            else:
+                unresolved[school] += 1
+
+    for tid in conflicts:
+        id_to_ident.pop(tid, None)
+
+    return id_to_ident, id_to_names, {
+        "resolved_ids": len(id_to_ident),
+        "conflicting_ids": len(conflicts),
+        "unresolved_school_names": len(unresolved),
+        "unresolved_examples": unresolved.most_common(20),
+        "conflict_examples": [(k, sorted(v)) for k, v in list(conflicts.items())[:20]],
+    }
+
+
+def _extract_team_seasons_from_records(
+    records: pd.DataFrame,
+    season: int,
+    id_map: dict[int, Identity],
+    id_names: dict[int, set[str]],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    rows = []
+    unresolved: collections.Counter[str] = collections.Counter()
+    duplicate_states: list[dict[str, Any]] = []
+    buckets: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
+
+    if records is None:
+        records = pd.DataFrame()
+    for _, r in records.iterrows():
+        tid = _cfbd_team_id_value(r.get("teamId", r.get("id")))
+        name = _clean_str(r.get("team")) or _clean_str(r.get("school")) or f"id={tid}"
+        ident = id_map.get(tid) if tid is not None else None
         if ident is None:
             unresolved[name] += 1
-            return
-        k = ident.canonical_team_norm
-        b = buckets.setdefault(k, {"identity": ident, "conference": [], "subdivision": [], "source_names": set()})
-        b["conference"].append(_clean_str(conf))
-        b["subdivision"].append(_classification_to_subdivision(cls))
-        b["source_names"].add(name)
-
-    for _, g in games.iterrows():
-        add(g.get("homeTeam"), g.get("homeConference"), g.get("homeClassification"))
-        add(g.get("awayTeam"), g.get("awayConference"), g.get("awayClassification"))
-
-    rows = []
-    conflicts = []
-    for canon, b in buckets.items():
-        conf, conf_conflict = _mode_or_conflict(b["conference"])
-        subdiv, subdiv_conflict = _mode_or_conflict(b["subdivision"])
-        if conf_conflict and conf is None:
-            conflicts.append({"team": canon, "field": "Conference", "values": sorted(set(x for x in b["conference"] if x))})
             continue
-        if subdiv_conflict and subdiv is None:
-            conflicts.append({"team": canon, "field": "Subdivision", "values": sorted(set(x for x in b["subdivision"] if x))})
+        cls = _classification_to_subdivision(r.get("classification"))
+        # Historical miner backfill is FBS-centric. Keep resolved FCS rows only
+        # if the warehouse already has that canonical identity; otherwise they
+        # remain fail-closed through the ID map.
+        buckets[ident.canonical_team_norm].append({
+            "identity": ident,
+            "conference": _clean_str(r.get("conference")),
+            "subdivision": cls,
+            "division": _clean_str(r.get("division")),
+            "source_name": name,
+            "cfbd_team_id": tid,
+        })
+
+    for canon, vals in buckets.items():
+        conf, conf_minor = _mode_or_conflict([v["conference"] for v in vals])
+        sub, sub_minor = _mode_or_conflict([v["subdivision"] for v in vals])
+        div, div_minor = _mode_or_conflict([v["division"] for v in vals])
+        if conf is None and any(v["conference"] for v in vals):
+            duplicate_states.append({"team": canon, "field": "Conference", "values": sorted({v["conference"] for v in vals if v["conference"]})})
             continue
-        ident: Identity = b["identity"]
+        if sub is None and any(v["subdivision"] for v in vals):
+            duplicate_states.append({"team": canon, "field": "Subdivision", "values": sorted({v["subdivision"] for v in vals if v["subdivision"]})})
+            continue
+        ident = vals[0]["identity"]
+        tids = sorted({v["cfbd_team_id"] for v in vals if v["cfbd_team_id"] is not None})
+        names = sorted(set().union(*(id_names.get(t, set()) for t in tids)) | {v["source_name"] for v in vals if v["source_name"]})
         rows.append({
             "Season": int(season),
             "Team": ident.team,
@@ -244,24 +342,26 @@ def _extract_team_seasons(games: pd.DataFrame, season: int, identities: dict[str
             "Canonical_Team_Name": ident.canonical_team_name,
             "Canonical_Team_Norm": ident.canonical_team_norm,
             "Conference": conf,
-            "Subdivision": subdiv,
+            "Division": div,
+            "Subdivision": sub,
             "Entity_Type": ident.entity_type or "Team",
             "League_Group": ident.league_group,
-            "Source_Names": " | ".join(sorted(b["source_names"])),
-            "Conference_Had_Minor_Conflict": bool(conf_conflict and conf is not None),
-            "Subdivision_Had_Minor_Conflict": bool(subdiv_conflict and subdiv is not None),
+            "Source_Names": " | ".join(names),
+            "CFBD_Team_ID": tids[0] if len(tids) == 1 else None,
+            "Conference_Had_Minor_Conflict": bool(conf_minor and conf is not None),
+            "Subdivision_Had_Minor_Conflict": bool(sub_minor and sub is not None),
+            "Division_Had_Minor_Conflict": bool(div_minor and div is not None),
         })
 
-    diag = {
+    return pd.DataFrame(rows), {
         "season": int(season),
         "resolved_teams": len(rows),
         "unresolved_team_names": len(unresolved),
-        "unresolved_game_mentions": int(sum(unresolved.values())),
-        "conflicting_team_seasons": len(conflicts),
-        "unresolved_examples": unresolved.most_common(12),
-        "conflict_examples": conflicts[:12],
+        "unresolved_mentions": int(sum(unresolved.values())),
+        "conflicting_team_seasons": len(duplicate_states),
+        "unresolved_examples": unresolved.most_common(15),
+        "conflict_examples": duplicate_states[:15],
     }
-    return pd.DataFrame(rows), diag
 
 
 def _compress_change_points(season_rows: pd.DataFrame) -> pd.DataFrame:
@@ -270,19 +370,64 @@ def _compress_change_points(season_rows: pd.DataFrame) -> pd.DataFrame:
     out = []
     for team_norm, g in season_rows.sort_values(["Team_Norm", "Season"]).groupby("Team_Norm", sort=False):
         prev_state = None
-        prev_season = None
         for _, r in g.iterrows():
             season = int(r["Season"])
-            state = (_clean_str(r.get("Conference")), _clean_str(r.get("Subdivision")))
-            gap = prev_season is not None and season > prev_season + 1
-            if prev_state is None or state != prev_state or gap:
+            state = (_clean_str(r.get("Conference")), _clean_str(r.get("Subdivision")), _clean_str(r.get("Division")))
+            if prev_state is None or state != prev_state:
                 q = dict(r)
                 q["Effective_Season_From"] = season
-                q["Change_Reason"] = "FIRST_HISTORICAL_OBSERVATION" if prev_state is None else ("RETURN_AFTER_GAP" if gap and state == prev_state else "ALIGNMENT_CHANGE")
+                q["Change_Reason"] = "FIRST_HISTORICAL_OBSERVATION" if prev_state is None else "ALIGNMENT_CHANGE"
                 out.append(q)
             prev_state = state
-            prev_season = season
     return pd.DataFrame(out)
+
+
+def _prepare_alias_rows(all_rows: pd.DataFrame) -> pd.DataFrame:
+    if all_rows is None or all_rows.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, r in all_rows.iterrows():
+        team_norm = _clean_str(r.get("Team_Norm"))
+        if not team_norm:
+            continue
+        for name in str(r.get("Source_Names") or "").split("|"):
+            name = name.strip()
+            if not name:
+                continue
+            rows.append({
+                "Source_Name": "CollegeFootballData",
+                "Source_Team_Name": name,
+                "Source_Team_Name_Norm": _team_key(name),
+                "Team_Norm": team_norm.lower(),
+                "Notes": f"{SOURCE_TAG}; CFBD_TEAM_ID={r.get('CFBD_Team_ID')}",
+            })
+    return pd.DataFrame(rows).drop_duplicates(["Source_Name","Source_Team_Name_Norm","Team_Norm"], keep="last") if rows else pd.DataFrame()
+
+
+def _merge_alias_rows(client, project: str, dataset: str, rows: pd.DataFrame) -> dict[str, Any]:
+    if rows is None or rows.empty:
+        return {"status":"NO_ALIAS_ROWS","candidate_rows":0}
+    from google.cloud import bigquery
+    tid=f"{project}.{dataset}.ncaaf_source_team_aliases"
+    client.query(f"""
+      CREATE TABLE IF NOT EXISTS `{tid}` (
+        Source_Name STRING, Source_Team_Name STRING, Source_Team_Name_Norm STRING,
+        Team_Norm STRING, Notes STRING, Updated_At TIMESTAMP
+      ) CLUSTER BY Source_Name, Source_Team_Name_Norm
+    """).result()
+    tmp=f"{project}.{dataset}._ncaaf_cfbd_alias_stage_{int(time.time())}"
+    d=rows.copy(); d["Updated_At"]=pd.Timestamp.now(tz="UTC")
+    client.load_table_from_dataframe(d,tmp,job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
+    client.query(f"""
+      MERGE `{tid}` T USING `{tmp}` S
+      ON T.Source_Name=S.Source_Name AND T.Source_Team_Name_Norm=S.Source_Team_Name_Norm
+      WHEN MATCHED THEN UPDATE SET Source_Team_Name=S.Source_Team_Name, Team_Norm=S.Team_Norm,
+        Notes=S.Notes, Updated_At=S.Updated_At
+      WHEN NOT MATCHED THEN INSERT (Source_Name,Source_Team_Name,Source_Team_Name_Norm,Team_Norm,Notes,Updated_At)
+        VALUES (S.Source_Name,S.Source_Team_Name,S.Source_Team_Name_Norm,S.Team_Norm,S.Notes,S.Updated_At)
+    """).result()
+    client.delete_table(tmp,not_found_ok=True)
+    return {"status":"PASS","candidate_rows":len(d)}
 
 
 def _existing_keys(client, project: str, dataset: str) -> set[tuple[str, int]]:
@@ -311,7 +456,7 @@ def _prepare_insert_rows(changes: pd.DataFrame, existing: set[tuple[str, int]]) 
             "Canonical_Team_Norm": str(r.get("Canonical_Team_Norm") or "").strip().lower(),
             "Effective_Season_From": int(r["Effective_Season_From"]),
             "Conference": _clean_str(r.get("Conference")),
-            "Division": None,
+            "Division": _clean_str(r.get("Division")),
             "Subdivision": _clean_str(r.get("Subdivision")),
             # Do not project a modern League_Group backward; leave historical
             # league grouping null unless separately sourced historically.
@@ -319,7 +464,7 @@ def _prepare_insert_rows(changes: pd.DataFrame, existing: set[tuple[str, int]]) 
             "Entity_Type": _clean_str(r.get("Entity_Type")) or "Team",
             "Active": True,
             "Use_For_Context": True,
-            "Source_URL": "CollegeFootballData /games historical season metadata",
+            "Source_URL": "CollegeFootballData /records + /teams/fbs historical season metadata",
             "Notes": f"{SOURCE_TAG}; {r.get('Change_Reason')}; source_names={r.get('Source_Names')}",
         })
     return pd.DataFrame(rows)
@@ -395,17 +540,30 @@ def main() -> None:
     identities, conflicts = _load_identity_maps(bq, args.project, args.dataset)
     print(f"[ALIGNMENT-BACKFILL] identity_keys={len(identities)} identity_conflicts={len(conflicts)} source={SOURCE_TAG}")
 
+    # Pull CFBD's own team directory for the entire historical window plus the
+    # modern overlap. school+mascot binds CFBD numeric IDs to canonical names.
+    directory_years = sorted(set(range(args.start_season, args.end_season + 1)) | set(range(2022, 2027)))
+    team_frames: dict[int, pd.DataFrame] = {}
+    for year in directory_years:
+        d = cfbd.fbs_teams(year)
+        team_frames[year] = d
+        print(f"[CFBD-TEAM-DIRECTORY] year={year} rows={len(d)} calls={cfbd.calls}")
+    id_map, id_names, id_diag = _build_cfbd_id_map(team_frames, identities)
+    print(f"[CFBD-ID-MAP] resolved_ids={id_diag['resolved_ids']} conflicting_ids={id_diag['conflicting_ids']} unresolved_names={id_diag['unresolved_school_names']}")
+    if id_diag["unresolved_examples"]:
+        print(f"[CFBD-ID-UNRESOLVED] examples={json.dumps(id_diag['unresolved_examples'])}")
+    if id_diag["conflict_examples"]:
+        print(f"[CFBD-ID-CONFLICT] examples={json.dumps(id_diag['conflict_examples'])}")
+
     season_frames = []
-    diagnostics = []
     for year in range(args.start_season, args.end_season + 1):
         print(f"[ALIGNMENT-SEASON] year={year} status=START calls={cfbd.calls}")
-        games = cfbd.games(year)
-        frame, diag = _extract_team_seasons(games, year, identities)
-        diagnostics.append(diag)
+        records = cfbd.records(year)
+        frame, diag = _extract_team_seasons_from_records(records, year, id_map, id_names)
         if not frame.empty:
             season_frames.append(frame)
         print(
-            f"[ALIGNMENT-SEASON] year={year} status=PASS games={len(games)} "
+            f"[ALIGNMENT-SEASON] year={year} status=PASS records={len(records)} "
             f"resolved_teams={diag['resolved_teams']} unresolved_names={diag['unresolved_team_names']} "
             f"conflicts={diag['conflicting_team_seasons']} calls={cfbd.calls}"
         )
@@ -415,13 +573,14 @@ def main() -> None:
             print(f"[ALIGNMENT-CONFLICT] year={year} examples={json.dumps(diag['conflict_examples'])}")
 
     all_rows = pd.concat(season_frames, ignore_index=True) if season_frames else pd.DataFrame()
+    aliases = _prepare_alias_rows(all_rows)
     changes = _compress_change_points(all_rows)
     existing = _existing_keys(bq, args.project, args.dataset)
     inserts = _prepare_insert_rows(changes, existing)
 
     print(
         f"[ALIGNMENT-CHANGEPOINTS] team_seasons={len(all_rows)} change_points={len(changes)} "
-        f"new_rows={len(inserts)} existing_keys={len(existing)}"
+        f"new_rows={len(inserts)} existing_keys={len(existing)} aliases={len(aliases)}"
     )
     if not inserts.empty:
         preview = inserts[["Team_Norm","Effective_Season_From","Conference","Subdivision","Notes"]].sort_values(["Team_Norm","Effective_Season_From"])
@@ -430,6 +589,8 @@ def main() -> None:
     if args.apply:
         res = _append_rows(bq, args.project, args.dataset, inserts)
         print(f"[ALIGNMENT-APPLY] {res}")
+        ares = _merge_alias_rows(bq, args.project, args.dataset, aliases)
+        print(f"[ALIGNMENT-ALIASES] {ares}")
         print(f"[ALIGNMENT-VALIDATION] {_validate(bq,args.project,args.dataset,args.start_season,args.end_season)}")
     else:
         print("[ALIGNMENT-DRY-RUN] status=PASS no_bigquery_mutation=TRUE rerun_with=--apply")

@@ -1288,16 +1288,15 @@ def _extract_line_records(lines_raw: pd.DataFrame) -> dict[str,dict[str,Any]]:
 
 
 def _alignment_map(client, project: str, dataset: str, season: int) -> dict[str,dict[str,Any]]:
-    """Season-aware canonical identity map with a leakage-safe prehistory fallback.
+    """Season-aware canonical alignment plus CFBD source aliases.
 
-    Preferred rows are alignment records effective on or before the requested
-    season. For seasons older than the alignment table itself, later records may
-    be used only to resolve stable canonical team identity/aliases. Their
-    conference/subdivision fields are deliberately blanked so historical context
-    continues to come from CFBD's game-season fields rather than borrowing a
-    future conference assignment.
+    Historical conference/subdivision must come from a row effective on or
+    before the requested season. No future alignment is borrowed backward.
+    CollegeFootballData display names (e.g. Alabama, Ohio State) are resolved
+    through ncaaf_source_team_aliases after the ID-first alignment backfill.
     """
     table=f"{project}.{dataset}.team_sport_alignment_history"
+    alias_table=f"{project}.{dataset}.ncaaf_source_team_aliases"
     from google.cloud import bigquery
     cfg=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("season","INT64",int(season))])
     try:
@@ -1311,33 +1310,37 @@ def _alignment_map(client, project: str, dataset: str, season: int) -> dict[str,
         return {}
 
     out={}
+    by_norm={}
     if not eligible.empty:
         eligible=eligible.loc[eligible["rn"].eq(1)].copy()
         for _,r in eligible.iterrows():
             rec=dict(r); rec["_identity_fallback"]=False
+            norm=str(r.get("Team_Norm") or "").strip().lower()
+            if norm: by_norm[norm]=rec
             for v in [r.get("Team"),r.get("Team_Norm"),r.get("Canonical_Team_Name"),r.get("Canonical_Team_Norm")]:
                 k=_team_key(v)
                 if k: out[k]=rec
 
-    # Identity-only fallback for seasons before/without alignment coverage.
-    # Never carry future conference/subdivision backward in time.
+    # Add CFBD-owned source spellings only when their canonical target has a
+    # valid alignment row for this exact historical season.
     try:
-        ident=client.query(f"""
-          SELECT Team, Team_Norm, Canonical_Team_Name, Canonical_Team_Norm,
-                 CAST(NULL AS STRING) AS Conference, CAST(NULL AS STRING) AS Subdivision,
-                 ROW_NUMBER() OVER(PARTITION BY LOWER(TRIM(Team_Norm)) ORDER BY Effective_Season_From DESC) rn
-          FROM `{table}`
-          WHERE UPPER(TRIM(Sport))='NCAAF' AND COALESCE(Use_For_Context,TRUE)
+        aliases=client.query(f"""
+          SELECT Source_Team_Name, Team_Norm
+          FROM `{alias_table}`
+          WHERE Source_Name='CollegeFootballData'
+            AND Source_Team_Name IS NOT NULL AND Team_Norm IS NOT NULL
+          QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY Source_Team_Name_Norm ORDER BY Updated_At DESC
+          )=1
         """).to_dataframe(create_bqstorage_client=False)
     except Exception:
-        ident=pd.DataFrame()
-    if not ident.empty:
-        ident=ident.loc[ident["rn"].eq(1)].copy()
-        for _,r in ident.iterrows():
-            rec=dict(r); rec["_identity_fallback"]=True
-            for v in [r.get("Team"),r.get("Team_Norm"),r.get("Canonical_Team_Name"),r.get("Canonical_Team_Norm")]:
-                k=_team_key(v)
-                if k and k not in out: out[k]=rec
+        aliases=pd.DataFrame()
+    if not aliases.empty:
+        for _,r in aliases.iterrows():
+            rec=by_norm.get(str(r.get("Team_Norm") or "").strip().lower())
+            k=_team_key(r.get("Source_Team_Name"))
+            if rec is not None and k:
+                out[k]=rec
     return out
 
 
@@ -1566,8 +1569,7 @@ def run(
                 if not amap:
                     print(f"[CFBD-HISTORY] year={year} status=SKIP_NO_ALIGNMENT")
                     continue
-                fallback_programs=len({str(v.get("Canonical_Team_Norm") or v.get("Team_Norm") or "") for v in amap.values() if v.get("_identity_fallback")})
-                print(f"[CFBD-HISTORY-ALIGNMENT] year={year} map_keys={len(amap)} identity_fallback_programs={fallback_programs} future_conference_leakage=FALSE")
+                print(f"[CFBD-HISTORY-ALIGNMENT] year={year} map_keys={len(amap)} cfbd_aliases_enabled=TRUE future_conference_leakage=FALSE")
                 rows=build_canonical_history_rows(games,lines,year,amap)
                 if rows.empty:
                     print(f"[CFBD-HISTORY] year={year} status=NO_CANONICAL_ROWS")
