@@ -48726,19 +48726,28 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
         main[c]=pd.to_numeric(main[c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
     st.dataframe(main,use_container_width=True,hide_index=True)
 
-    # FAST + LAZY DETAILS:
-    # Keep initial page load limited to the production board. Each detail family below
-    # is evaluated only after the operator explicitly asks for it.
-    _ncaaf_dc1,_ncaaf_dc2,_ncaaf_dc3=st.columns(3)
-    with _ncaaf_dc1:
-        _show_ncaaf_systems=st.checkbox("Show System Details",value=False,key="ncaaf-lazy-system-details")
-    with _ncaaf_dc2:
-        _show_ncaaf_model=st.checkbox("Show Model / Bet Authority Details",value=False,key="ncaaf-lazy-model-details")
-    with _ncaaf_dc3:
-        _show_ncaaf_results=st.checkbox("Show Production Results",value=False,key="ncaaf-lazy-production-results")
+    # TRUE ON-DEMAND NCAAF DETAILS (2026-10-14): Streamlit executes closed
+    # expander bodies and every st.tabs() body during a script rerun. Previously
+    # the CORE challenger was *unconditionally* loaded and several research
+    # tables rendered even with all three detail checkboxes left unchecked.
+    # A single exclusive selector ensures only the board renders at first load.
+    # Each heavy report/BigQuery query runs only after explicit section selection.
+    _ncaaf_extra_section=st.selectbox(
+        'Additional NCAAF tables — load only when selected',
+        ['Betting Board only', 'System Details', 'Model / Bet Authority Details',
+         'Production Results', 'CORE Challenger Research', 'Production Edge Evidence'],
+        index=0, key='ncaaf-extra-section-on-demand',
+    )
+    _show_ncaaf_systems=(_ncaaf_extra_section=='System Details')
+    _show_ncaaf_model=(_ncaaf_extra_section=='Model / Bet Authority Details')
+    _show_ncaaf_results=(_ncaaf_extra_section=='Production Results')
+    _show_ncaaf_challenger=(_ncaaf_extra_section=='CORE Challenger Research')
+    _show_ncaaf_edge=(_ncaaf_extra_section=='Production Edge Evidence')
+    if _ncaaf_extra_section!='Betting Board only':
+        st.caption('Only the selected additional section is loaded; the main betting board stays visible.')
 
     if _show_ncaaf_model:
-        with st.expander('Why Bet Authority made each decision',expanded=False):
+        with st.expander('Why Bet Authority made each decision',expanded=True):
             _detail=[]
             for _,_r in picks.iterrows():
                 _detail.append({
@@ -48759,7 +48768,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
     if _show_ncaaf_results:
         # Results are written by the background NCAAF scanner, not when users open
         # this page. Surface first/T-24/T-6/T-1 historical locks without retraining.
-        with st.expander('Production V1 — prospective pick grading',expanded=False):
+        with st.expander('Production V1 — prospective pick grading',expanded=True):
             st.caption('These results use immutable pregame scanner locks, not regenerated postgame predictions. FIRST, T24, T6 and T1 remain separate; V13 history is unchanged.')
             try:
                 _render_2026_action_ladder(_ncaaf_2026_action_ladder_cached(),"NCAAF")
@@ -48779,8 +48788,9 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
             except Exception as _grade_err:
                 st.warning(f'Production grading ledger unavailable: {type(_grade_err).__name__}. Check BigQuery table permissions and background scanner logs.')
 
-    if isinstance(_prod_contract,dict):
-        with st.expander('Production edge evidence',expanded=False):
+    if _show_ncaaf_edge:
+        if isinstance(_prod_contract,dict):
+            st.markdown('**Production edge evidence**')
             _perf=(_prod_contract.get('performance') or {})
             _rows=[]
             for _market,_items in [('Spread',_perf.get('spread') or {}),('Totals',_perf.get('totals') or {})]:
@@ -48798,8 +48808,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label):
 
     # Protected CORE challenger results. This is deliberately separate from the
     # Miner/System research surface and can never mutate the frozen production artifact.
-    st.session_state['ncaaf_core_challenger_report_loaded']=True
-    if st.session_state.get('ncaaf_core_challenger_report_loaded',False):
+    if _show_ncaaf_challenger:
         try:
             _cc=_ncaaf_core_challenger_report_cached()
             if not isinstance(_cc,dict):
