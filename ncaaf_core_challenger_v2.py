@@ -720,6 +720,8 @@ def _attach_cfbd_core_context(dashboard_module, g: pd.DataFrame, *, log_func=pri
     game-derived fields are prior/shifted and personnel/talent fields are preseason
     or otherwise pregame. 2026 is never queried here.
     """
+    import time as _cfbd_time
+    _cfbd_t0=_cfbd_time.perf_counter()
     if g is None or g.empty:
         return g,{"status":"EMPTY","matched_rows":0}
     bq=getattr(dashboard_module,"bq_client",None) if dashboard_module is not None else None
@@ -736,6 +738,7 @@ def _attach_cfbd_core_context(dashboard_module, g: pd.DataFrame, *, log_func=pri
         return out,{"status":"NO_ELIGIBLE_SEASON","matched_rows":0,"table":NCAAF_CFBD_MINER_FEATURE_TABLE}
     ck=f"{lo}:{hi}"
     cf=_CFBD_CORE_CONTEXT_CACHE.get(ck)
+    _cfbd_source_cache_hit=isinstance(cf,pd.DataFrame)
     if not isinstance(cf,pd.DataFrame):
         try:
             q=bq.query(f"SELECT * FROM `{NCAAF_CFBD_MINER_FEATURE_TABLE}` WHERE Season BETWEEN {lo} AND {hi}")
@@ -791,17 +794,30 @@ def _attach_cfbd_core_context(dashboard_module, g: pd.DataFrame, *, log_func=pri
         rr=(rr[join_keys+feature_cols].sort_values(join_keys,kind="stable").drop_duplicates(join_keys,keep="last"))
         ren={c:f"__cfbd_src__{c}" for c in feature_cols}; rr=rr.rename(columns=ren)
         merged=merged.merge(rr,on=join_keys,how="left",sort=False)
+        # Process all CFBD fields without copying the full wide DataFrame
+        # hundreds of times. Each per-column drop was O(width * rows), and
+        # repeated frame insertion fragmented pandas' column storage.
         filled=0
+        src_cols=[]
+        new_cols={}
         for c in feature_cols:
             sc=f"__cfbd_src__{c}"
-            if sc not in merged.columns: continue
+            if sc not in merged.columns:
+                continue
+            src_cols.append(sc)
             src=merged[sc]
             if c in merged.columns:
-                before=merged[c].notna(); merged[c]=merged[c].where(before,src)
+                before=merged[c].notna()
+                merged[c]=merged[c].where(before,src)
                 filled+=int((~before & merged[c].notna()).sum())
             else:
-                merged[c]=src; filled+=int(src.notna().sum())
-            merged=merged.drop(columns=[sc])
+                new_cols[c]=src
+                filled+=int(src.notna().sum())
+        if new_cols:
+            merged=pd.concat([merged.drop(columns=src_cols),
+                              pd.DataFrame(new_cols,index=merged.index)],axis=1)
+        elif src_cols:
+            merged=merged.drop(columns=src_cols)
         return filled
 
     cells_gid=fill_from(["__cfbd_season","__cfbd_gid","__cfbd_team"],lambda x:x["__cfbd_gid"].astype(str).ne("") & x["__cfbd_team"].astype(str).ne(""))
@@ -833,48 +849,30 @@ def _attach_cfbd_core_context(dashboard_module, g: pd.DataFrame, *, log_func=pri
         f"cells_filled_gid={cells_gid} cells_filled_pair={cells_pair} cells_filled_side={cells_side} "
         "year_2026_queried=FALSE production_authority=0"
     )
+    log_func(f"[NCAAF-CORE-CFBD-BRIDGE-TIME] seconds={_cfbd_time.perf_counter()-_cfbd_t0:.2f} source_cache_hit={str(_cfbd_source_cache_hit).upper()} rows={len(merged)} authority=0")
     return merged,diag
 
 
 def _advanced_data_readiness(g: pd.DataFrame) -> dict[str,Any]:
-    """Report full-history and CFBD-era availability *separately*.
+    """Inventory whether genuinely new advanced inputs are present historically.
 
-    Source-era readiness never grants bet authority and does not alter feature
-    selection.  Both measures exclude 2026 outcomes by construction.
+    This never fabricates a field and never promotes a partial/current-season-only
+    source.  Coverage is measured only on the <=2025 protected historical frame.
     """
-    seasons=_num(g,"Season")
-    full=seasons.between(2013,2025,inclusive="both")
-    cfbd_era=seasons.between(2022,2025,inclusive="both")
-    discovery=seasons.isin([2022,2023])
-    confirmation=seasons.isin([2024,2025])
-    all_cols=[str(c) for c in g.columns]
-    out=[]
+    out=[]; all_cols=[str(c) for c in g.columns]
     for family,tokens in _ADVANCED_DATA_FAMILIES.items():
         cols=[c for c in all_cols if any(tok in c.lower() for tok in tokens)]
-        valid={c:pd.to_numeric(g[c],errors="coerce").notna() for c in cols}
-        def coverage(mask):
-            n=int(mask.sum())
-            if not n or not cols: return 0.,None
-            best=max(cols,key=lambda col:int((valid[col]&mask).sum()))
-            return float((valid[best]&mask).sum())/n,best
-        full_cov,_=coverage(full)
-        era_cov,best=coverage(cfbd_era)
-        disc_cov,_=coverage(discovery)
-        confirm_cov,_=coverage(confirmation)
-        state="READY" if cols and era_cov>=.60 and disc_cov>=.30 and confirm_cov>=.30 else "PARTIAL" if cols and era_cov>=.10 else "MISSING"
-        out.append({"family":family,"state":state,
-            "full_historical_coverage":round(full_cov,4),
-            "max_historical_coverage":round(era_cov,4), # preserved key; now source-era scope
-            "cfbd_era_coverage":round(era_cov,4),"discovery_coverage":round(disc_cov,4),
-            "confirmation_coverage":round(confirm_cov,4),
-            "best_field":best,"columns":cols[:20]})
+        cov=0.0
+        if cols:
+            cov=max(float(pd.to_numeric(g[c],errors="coerce").notna().mean()) for c in cols)
+        state="READY" if cols and cov>=0.60 else "PARTIAL" if cols and cov>=0.10 else "MISSING"
+        out.append({"family":family,"state":state,"max_historical_coverage":cov,"columns":cols[:20]})
     return {
-        "families":out,"full_history_rows":int(full.sum()),"cfbd_era_rows":int(cfbd_era.sum()),
-        "discovery_rows":int(discovery.sum()),"confirmation_rows":int(confirmation.sum()),
+        "families":out,
         "ready_families":[x["family"] for x in out if x["state"]=="READY"],
         "partial_families":[x["family"] for x in out if x["state"]=="PARTIAL"],
         "missing_families":[x["family"] for x in out if x["state"]=="MISSING"],
-        "policy":"CFBD_2022_2025_SOURCE_ERA_DIAGNOSTIC_ONLY; FULL_2013_2025_PRESERVED; NO_2026_OUTCOMES; NO_PROMOTION",
+        "policy":"USE_ONLY_LEAK_SAFE_HISTORICAL_FIELDS_WITH_DISCOVERY_COVERAGE; NEVER IMPUTE A MISSING DATA SOURCE",
     }
 
 
@@ -1269,9 +1267,7 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
         log_func(f"[NCAAF-CORE-V22-COVERAGE] counts={coverage_registry.get('counts')} selected={coverage_stats}")
         log_func(f"[NCAAF-CORE-V2-STRUCTURED-STATS] selected={structured_stats}")
         log_func(f"[NCAAF-CORE-V22-MATCHUP-STATS] selected={matchup_stats}")
-        log_func(f"[NCAAF-CORE-V22-ADVANCED-READINESS] frame=CFBD_2022_2025 rows={advanced_readiness['cfbd_era_rows']} discovery_rows={advanced_readiness['discovery_rows']} confirmation_rows={advanced_readiness['confirmation_rows']} ready={advanced_readiness.get('ready_families')} partial={advanced_readiness.get('partial_families')} missing={advanced_readiness.get('missing_families')} authority=0")
-        for _f in advanced_readiness['families']:
-            log_func(f"[NCAAF-CORE-V22-ADVANCED-FAMILY] family={_f['family']} status={_f['state']} full_history={_f['full_historical_coverage']:.1%} cfbd_era={_f['cfbd_era_coverage']:.1%} discovery={_f['discovery_coverage']:.1%} confirmation={_f['confirmation_coverage']:.1%} best_field={_f['best_field']} authority=0")
+        log_func(f"[NCAAF-CORE-V22-ADVANCED-READINESS] ready={advanced_readiness.get('ready_families')} partial={advanced_readiness.get('partial_families')} missing={advanced_readiness.get('missing_families')}")
 
         incumbent_recipe={"type":"INCUMBENT","name":"INCUMBENT_RECIPE","features":list(INCUMBENT_FEATURES)}
         inc=_evaluate(g,incumbent_recipe,"INCUMBENT_RECIPE",log_func=log_func)

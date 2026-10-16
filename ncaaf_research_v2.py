@@ -2498,40 +2498,11 @@ def _ptiv_select_alpha(X,resid,seasons,cols):
     best=min(good,key=lambda z:(z["selection_residual_mae"],z["alpha"])); return float(best["alpha"]),{"status":"DISCOVERY_FORWARD_SELECTED","grid":grid,"selected_alpha":float(best["alpha"])}
 
 
-def _ptiv_market_target_audit(games: pd.DataFrame, seasons: np.ndarray, log_func=print) -> dict[str, Any]:
-    """Season-by-season raw-market / score / target audit, without filling prices."""
-    f={}
-    for col in ("Market_Error_Margin","Market_Error_Total","Market_Open_Margin",
-                "Actual_Margin","Consensus_Open_Spread","Consensus_Open_Total",
-                "Actual_Total","Team_Score","Opponent_Score"):
-        f[col]=pd.to_numeric(games[col],errors="coerce").to_numpy(float) if col in games else np.full(len(games),np.nan)
-    annual={}
-    for year in sorted({int(x) for x in seasons[np.isfinite(seasons)] if int(x)<=2025}):
-        m=seasons==year
-        counts={k:int(np.sum(m&np.isfinite(v))) for k,v in f.items()}
-        possible_margin=int(np.sum(m&np.isfinite(f["Actual_Margin"])&np.isfinite(f["Market_Open_Margin"])))
-        # This is a presence check only, not an authorization to reconstruct a
-        # target with an unverified spread orientation or unknown point in time.
-        if counts["Market_Error_Margin"]==0 and counts["Market_Open_Margin"]==0:
-            reason="MARKET_MARGIN_NOT_LOADED"
-        elif counts["Market_Error_Margin"]==0 and possible_margin:
-            reason="MARGIN_TARGET_MISSING_DESPITE_RAW_COMPONENTS"
-        elif counts["Market_Error_Margin"]==0:
-            reason="MARKET_MARGIN_OR_RESULT_INCOMPLETE"
-        elif counts["Market_Error_Total"]==0:
-            reason="TOTAL_TARGET_MISSING"
-        else: reason="TARGETS_PRESENT"
-        annual[str(year)]={"rows":int(m.sum()),"source_counts":counts,"possible_margin_components":possible_margin,"reason":reason}
-        log_func(f"[NCAAF-STAT-MARKET-TARGET-AUDIT] season={year} rows={int(m.sum())} margin_target={counts['Market_Error_Margin']} total_target={counts['Market_Error_Total']} open_margin={counts['Market_Open_Margin']} open_spread={counts['Consensus_Open_Spread']} open_total={counts['Consensus_Open_Total']} actual_margin={counts['Actual_Margin']} possible_margin_components={possible_margin} cause={reason} action=VERIFY_CANONICAL_MARKET_SOURCE_NO_SYNTHETIC_LINES authority=0")
-    return {"by_season":annual,"policy":"DIAGNOSTICS_ONLY__NO_UNVERIFIED_TARGET_RECONSTRUCTION__2026_EXCLUDED","authority":0}
-
-
 def _ptiv_production_v1_oof(games,seasons,dashboard_module,production_module,log_func=print):
     if production_module is None: return np.full(len(games),np.nan),{"status":"PRODUCTION_MODULE_UNAVAILABLE"}
     sp=list(getattr(production_module,"PROD_SPREAD_FEATURES",()) or ()); tt=list(getattr(production_module,"PROD_TOTAL_FEATURES",()) or ())
     if not sp or any(c not in games.columns for c in sp): return np.full(len(games),np.nan),{"status":"FIXED_FEATURES_MISSING","missing":[c for c in sp if c not in games.columns]}
     oof=np.full(len(games),np.nan); by={}; lw=float(getattr(production_module,"PROD_LINEAR_WEIGHT",0.75))
-    target_source_audit=_ptiv_market_target_audit(games,np.asarray(seasons,dtype=float),log_func=log_func)
     margin_target=pd.to_numeric(games.get("Market_Error_Margin",pd.Series(np.nan,index=games.index)),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
     total_target=pd.to_numeric(games.get("Market_Error_Total",pd.Series(np.nan,index=games.index)),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
     market_all=pd.to_numeric(games.get("Market_Open_Margin",pd.Series(np.nan,index=games.index)),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
@@ -2552,7 +2523,7 @@ def _ptiv_production_v1_oof(games,seasons,dashboard_module,production_module,log
             by[str(sy)]={"train_n":int(tr.sum()),"score_n":int(np.isfinite(market).sum()),"usable_margin_targets":usable_margin,"usable_total_targets":usable_total}
         except Exception as exc:
             by[str(sy)]={"status":"ERROR","error":f"{type(exc).__name__}:{exc}","usable_margin_targets":usable_margin,"usable_total_targets":usable_total,"usable_score_market":score_n}
-    return oof,{"status":"PASS" if np.isfinite(oof).any() else "NO_OOF","feature_cols":sp,"linear_weight":lw,"by_season":by,"market_target_audit":target_source_audit,"contract":"EXACT_NCAAF_PRODUCTION_V1_FIXED_SPREAD_FEATURES_SEASON_FORWARD"}
+    return oof,{"status":"PASS" if np.isfinite(oof).any() else "NO_OOF","feature_cols":sp,"linear_weight":lw,"by_season":by,"contract":"EXACT_NCAAF_PRODUCTION_V1_FIXED_SPREAD_FEATURES_SEASON_FORWARD"}
 
 
 def run_pt_incremental_value_research(*,games,miner_games,seasons,dashboard_module,production_module=None,log_func=print):
@@ -3744,6 +3715,8 @@ def _attach_cfbd_context_to_miner(dashboard_module, miner_games: pd.DataFrame, *
     retained as observed/forecast context but any rule using a CFBD weather atom
     is blocked from live Bet Authority until prospective forecast validation.
     """
+    import time as _cfbd_time
+    _cfbd_t0=_cfbd_time.perf_counter()
     if miner_games is None or miner_games.empty:
         return miner_games,{"status":"EMPTY","selection_influence":0}
     out=miner_games.copy()
@@ -3756,6 +3729,7 @@ def _attach_cfbd_context_to_miner(dashboard_module, miner_games: pd.DataFrame, *
         return out,{"status":"NO_SEASON","table":NCAAF_CFBD_MINER_FEATURE_TABLE,"selection_influence":0}
     lo=int(finite.min()); hi=int(finite.max()); ck=f"{lo}:{hi}"
     cf=_CFBD_MINER_CONTEXT_CACHE.get(ck)
+    _cfbd_source_cache_hit=isinstance(cf,pd.DataFrame)
     if not isinstance(cf,pd.DataFrame):
         try:
             q=bq.query(f"SELECT * FROM `{NCAAF_CFBD_MINER_FEATURE_TABLE}` WHERE Season BETWEEN {lo} AND {hi}")
@@ -3818,20 +3792,30 @@ def _attach_cfbd_context_to_miner(dashboard_module, miner_games: pd.DataFrame, *
         rename={c:f"__cfbd_src__{c}" for c in feature_cols}
         rr=rr.rename(columns=rename)
         merged=merged.merge(rr,on=join_keys,how="left",sort=False)
+        # Process all CFBD fields without copying the full wide DataFrame
+        # hundreds of times. Each per-column drop was O(width * rows), and
+        # repeated frame insertion fragmented pandas' column storage.
         filled=0
+        src_cols=[]
+        new_cols={}
         for c in feature_cols:
             sc=f"__cfbd_src__{c}"
             if sc not in merged.columns:
                 continue
+            src_cols.append(sc)
             src=merged[sc]
             if c in merged.columns:
                 before=merged[c].notna()
                 merged[c]=merged[c].where(before,src)
-                filled += int((~before & merged[c].notna()).sum())
+                filled+=int((~before & merged[c].notna()).sum())
             else:
-                merged[c]=src
-                filled += int(src.notna().sum())
-            merged=merged.drop(columns=[sc])
+                new_cols[c]=src
+                filled+=int(src.notna().sum())
+        if new_cols:
+            merged=pd.concat([merged.drop(columns=src_cols),
+                              pd.DataFrame(new_cols,index=merged.index)],axis=1)
+        elif src_cols:
+            merged=merged.drop(columns=src_cols)
         return filled
 
     _filled_gid=_cfbd_fill_from(["__cfbd_season","__cfbd_gid","__cfbd_team"],right_filter=lambda x:x["__cfbd_gid"].astype(str).ne("") & x["__cfbd_team"].astype(str).ne(""))
@@ -3855,6 +3839,7 @@ def _attach_cfbd_context_to_miner(dashboard_module, miner_games: pd.DataFrame, *
           "altitude_ready":_ready("CFBD_Altitude_Gain"),"weather_ready":_ready("CFBD_WindSpeed"),
           "weather_historical_contract":"OBSERVED_NOT_ARCHIVED_FORECAST__SHADOW_ONLY", "selection_influence":0,"outcomes_2026_selection":False}
     log_func(f"[NCAAF-CFBD-BRIDGE] status=PASS mode={diag['mode']} table={NCAAF_CFBD_MINER_FEATURE_TABLE} rows={len(merged)} matched={diag['matched_rows']} historical={diag['historical_rows']} advanced={diag['advanced_ready']} returning={diag['returning_ready']} roster={diag['roster_ready']} portal={diag['portal_ready']} talent={diag['talent_ready']} elo={diag['elo_ready']} altitude={diag['altitude_ready']} weather={diag['weather_ready']} cells_filled_gid={_filled_gid} cells_filled_pair={_filled_pair} cells_filled_side={_filled_side} weather_authority=SHADOW_ONLY outcomes_2026_selection=FALSE authority=0")
+    log_func(f"[NCAAF-CFBD-BRIDGE-TIME] seconds={_cfbd_time.perf_counter()-_cfbd_t0:.2f} source_cache_hit={str(_cfbd_source_cache_hit).upper()} rows={len(merged)} authority=0")
     return merged,diag
 
 
@@ -4928,31 +4913,6 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
     add("OPP_BOUNCEBACK_WINNING_TEAM","ROLE_TRANSITION_BOUNCEBACK",_opp_bounce&owp.ge(.500),desc="opponent is winning road dog after home-favorite upset loss",source_ok=_obh_src,min_n=20)
     add("OPP_BOUNCEBACK_BOTH_WINNING_TEAMS","ROLE_TRANSITION_BOUNCEBACK",_opp_bounce&owp.ge(.500)&twp.ge(.500),desc="opponent winning road dog vs winning team after home-favorite upset loss",source_ok=_obh_src,min_n=20)
     add("OPP_BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5","ROLE_TRANSITION_BOUNCEBACK",_opp_bounce&owp.ge(.500)&(-sp).between(5.0,7.5),desc="opponent winning bounceback road dog from +5 through +7.5",source_ok=_obh_src,min_n=15)
-
-    # Predeclared wider role transitions for diagnostics: do not loosen discovery
-    # thresholds or automatically qualify the exact small-sample bounce-back.
-    # All inputs are pregame prior-state fields. These are inside the *same*
-    # evidence family and remain subject to the existing historical/OOF gates.
-    _team_fav_loss=prev_fav.eq(1)&psu.lt(0)
-    _opp_fav_loss=_opp_prev_fav.eq(1)&opsu.lt(0)
-    _team_is_dog=sp.gt(0)
-    _opp_is_dog=sp.lt(0)
-    add("BOUNCEBACK_PRIOR_FAV_LOSS_TO_ROAD_DOG","ROLE_TRANSITION_BOUNCEBACK",
-        _team_fav_loss&_team_is_dog&is_home.eq(0),
-        desc="previous-game favorite lost SU; current-game road dog",
-        source_ok=has("Prev_Is_ML_Favorite","Prev_Is_ML_Dog") and has("Pregame_Prev_SU_Margin","Prev_SU_Margin","Context_Prev_SU_Margin"),min_n=20)
-    add("BOUNCEBACK_PRIOR_FAV_LOSS_TO_ANY_DOG","ROLE_TRANSITION_BOUNCEBACK",
-        _team_fav_loss&_team_is_dog,
-        desc="previous-game favorite lost SU; current-game underdog regardless of site",
-        source_ok=has("Prev_Is_ML_Favorite","Prev_Is_ML_Dog") and has("Pregame_Prev_SU_Margin","Prev_SU_Margin","Context_Prev_SU_Margin"),min_n=20)
-    add("OPP_BOUNCEBACK_PRIOR_FAV_LOSS_TO_ROAD_DOG","ROLE_TRANSITION_BOUNCEBACK",
-        _opp_fav_loss&_opp_is_dog&is_home.eq(1),
-        desc="road opponent lost last game as favorite; now a road dog",
-        source_ok=has("Opp_Prev_Is_ML_Favorite","Opp_Prev_Is_ML_Dog") and has("Context_Opp_Prev_SU_Margin","Opp_Pregame_Prev_SU_Margin","Opp_Prev_SU_Margin"),min_n=20)
-    add("OPP_BOUNCEBACK_PRIOR_FAV_LOSS_TO_ANY_DOG","ROLE_TRANSITION_BOUNCEBACK",
-        _opp_fav_loss&_opp_is_dog,
-        desc="opponent lost last game as favorite and is now a dog",
-        source_ok=has("Opp_Prev_Is_ML_Favorite","Opp_Prev_Is_ML_Dog") and has("Context_Opp_Prev_SU_Margin","Opp_Pregame_Prev_SU_Margin","Opp_Prev_SU_Margin"),min_n=20)
     for c,name in (("Pathi_FB_Usually_Dog_Now_Favorite","ROLE_FLIP_DOG_TO_FAV_HISTORY"),("Pathi_FB_Usually_Favorite_Now_Dog","ROLE_FLIP_FAV_TO_DOG_HISTORY")):
         add(name,"ROLE_HISTORY",nfirst(c).eq(1),source_ok=has(c))
     role_shift=nfirst("Role_Price_Shift")
@@ -5326,15 +5286,43 @@ def _market_residual_p(obs: np.ndarray, exp: np.ndarray, mask: np.ndarray) -> fl
     return .5*(1-math.erf(z/math.sqrt(2)))
 
 
-def _h2h_price_metrics(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, baseline: np.ndarray,
-                       seasons: np.ndarray, direction: str, season_scope: Iterable[int]) -> dict[str,Any]:
+def _prepare_h2h_price_context(g: pd.DataFrame, y: np.ndarray, baseline: np.ndarray) -> dict[str,dict[str,np.ndarray]]:
+    """Precompute immutable game/price arrays once per H2H mining pass.
+
+    These inputs do not depend on the candidate rule. Previously every rule,
+    split, direction and price-band check converted the same Pandas columns and
+    reclassified every price across the full history. That dominated H2H Heavy.
+    Do not cache across runs or across modified input frames.
+    """
     team_odds=_first_num_array(g,["Consensus_Open_Moneyline","Opening_ML_Odds","Opening_Moneyline","First_Odds_Price","First_Odds","Open_Odds_Price","Open_Odds"])
     opp_odds=_first_num_array(g,["Opp_Consensus_Open_Moneyline","Opponent_Consensus_Open_Moneyline","Opp_Opening_ML_Odds","Opponent_Opening_ML_Odds"])
-    obs=y if direction=="PLAY_ON" else 1-y
-    exp=baseline if direction=="PLAY_ON" else 1-baseline
-    odds=team_odds if direction=="PLAY_ON" else opp_odds
+    out={}
+    for direction,odds in (("PLAY_ON",team_odds),("FADE",opp_odds)):
+        obs=y if direction=="PLAY_ON" else 1-y
+        exp=baseline if direction=="PLAY_ON" else 1-baseline
+        out[direction]={"odds":odds,"obs":obs,"exp":exp,
+                        "ret":_american_unit_return(odds,obs),
+                        "bands":np.asarray([_price_band(v) for v in odds],dtype=object)}
+    return out
+
+
+def _h2h_price_metrics(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, baseline: np.ndarray,
+                       seasons: np.ndarray, direction: str, season_scope: Iterable[int], *,
+                       prepared: dict[str,dict[str,np.ndarray]] | None=None) -> dict[str,Any]:
+    if prepared is None:
+        # Retain this original path for non-miner callers, testing and audit.
+        team_odds=_first_num_array(g,["Consensus_Open_Moneyline","Opening_ML_Odds","Opening_Moneyline","First_Odds_Price","First_Odds","Open_Odds_Price","Open_Odds"])
+        opp_odds=_first_num_array(g,["Opp_Consensus_Open_Moneyline","Opponent_Consensus_Open_Moneyline","Opp_Opening_ML_Odds","Opponent_Opening_ML_Odds"])
+        obs=y if direction=="PLAY_ON" else 1-y
+        exp=baseline if direction=="PLAY_ON" else 1-baseline
+        odds=team_odds if direction=="PLAY_ON" else opp_odds
+        ret=_american_unit_return(odds,obs)
+    else:
+        ctx=prepared[direction]
+        obs,exp,odds,ret=ctx["obs"],ctx["exp"],ctx["odds"],ctx["ret"]
+        if len(ret)!=len(g) or len(obs)!=len(g):
+            raise ValueError("H2H price context is not aligned with historical frame")
     scope=np.asarray(mask,dtype=bool)&np.isin(seasons,np.asarray(list(season_scope),dtype=float))
-    ret=_american_unit_return(odds,obs)
     good=scope&np.isfinite(ret)&np.isfinite(exp)&np.isfinite(obs)
     resid_good=scope&np.isfinite(exp)&np.isfinite(obs)
     years=[]
@@ -5348,7 +5336,7 @@ def _h2h_price_metrics(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, baselin
         })
     band_rows=[]
     if good.any():
-        bands=np.asarray([_price_band(v) for v in odds],dtype=object)
+        bands=prepared[direction]["bands"] if prepared is not None else np.asarray([_price_band(v) for v in odds],dtype=object)
         for b in sorted(set(bands[good])):
             jj=good&(bands==b)
             if jj.sum(): band_rows.append({"band":b,"n":int(jj.sum()),"roi":float(np.mean(ret[jj])),"rate":float(np.mean(obs[jj]))})
@@ -5420,7 +5408,8 @@ def _evaluate_rule(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, valid: np.n
                    names: tuple[str,...], families: tuple[str,...], market: str, *,
                    min_discovery_n_override: int | None=None,
                    min_discovery_years_override: int=2,
-                   min_discovery_year_n_override: int=15) -> dict[str,Any] | None:
+                   min_discovery_year_n_override: int=15,
+                   _h2h_prepared: dict[str,dict[str,np.ndarray]] | None=None) -> dict[str,Any] | None:
     split=_miner_rule_history_split(mask,valid,seasons)
     disc=np.asarray(split["discovery_mask"],dtype=bool)
     internal_val=np.asarray(split["internal_validation_mask"],dtype=bool)
@@ -5430,11 +5419,17 @@ def _evaluate_rule(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, valid: np.n
     if len(ix)<min_n: return None
 
     discovery_years=list(split.get("discovery_years") or [])
+    # The original evaluator rejects insufficient per-year support after price
+    # scoring; do the logically identical count-only rejection first. This
+    # avoids expensive H2H ROI work for combinations that cannot qualify.
+    if sum(int(np.sum(disc & (seasons==sy0)))>=int(min_discovery_year_n_override)
+           for sy0 in discovery_years)<int(min_discovery_years_override):
+        return None
     h2h_price={}
     if market=="h2h":
         candidates=[]
         for d in ("PLAY_ON","FADE"):
-            pm=_h2h_price_metrics(g,mask&valid,y,baseline,seasons,d,discovery_years)
+            pm=_h2h_price_metrics(g,mask&valid,y,baseline,seasons,d,discovery_years,prepared=_h2h_prepared)
             score=(pm["roi"] if np.isfinite(pm["roi"]) else -9.0)+2.0*(pm["market_residual"] if np.isfinite(pm["market_residual"]) else -9.0)
             candidates.append((score,d,pm))
         _,direction,h2h_price=max(candidates,key=lambda x:x[0])
@@ -5449,7 +5444,7 @@ def _evaluate_rule(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, valid: np.n
         if jj.sum()>=int(min_discovery_year_n_override):
             row={"season":sy0,"n":int(jj.sum()),"rate":float(np.mean(obs[jj]))}
             if market=="h2h":
-                pm=_h2h_price_metrics(g,jj,y,baseline,seasons,direction,[sy0]); row.update({"priced_n":pm["priced_n"],"roi":pm["roi"],"market_residual":pm["market_residual"]})
+                pm=_h2h_price_metrics(g,jj,y,baseline,seasons,direction,[sy0],prepared=_h2h_prepared); row.update({"priced_n":pm["priced_n"],"roi":pm["roi"],"market_residual":pm["market_residual"]})
             dyears.append(row)
     if len(dyears)<int(min_discovery_years_override): return None
     stable=float(np.mean([(x.get("roi",0)>=0 and x.get("market_residual",0)>0) if market=="h2h" else x["rate"]>.5 for x in dyears]))
@@ -5459,7 +5454,7 @@ def _evaluate_rule(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, valid: np.n
     remove_best=float(np.mean(obs[rem])) if rem.sum()>=25 else np.nan
     remove_best_roi=remove_best_resid=np.nan
     if market=="h2h" and rem.sum()>=25:
-        rpm=_h2h_price_metrics(g,rem,y,baseline,seasons,direction,[int(x) for x in set(seasons[rem].astype(int))])
+        rpm=_h2h_price_metrics(g,rem,y,baseline,seasons,direction,[int(x) for x in set(seasons[rem].astype(int))],prepared=_h2h_prepared)
         remove_best_roi=rpm["roi"]; remove_best_resid=rpm["market_residual"]
 
     # Chronological internal holdout. Direction is frozen from discovery above.
@@ -5469,14 +5464,14 @@ def _evaluate_rule(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, valid: np.n
         if jj.sum():
             row={"season":sy0,"n":int(jj.sum()),"rate":float(np.mean(obs[jj]))}
             if market=="h2h":
-                pm=_h2h_price_metrics(g,jj,y,baseline,seasons,direction,[sy0]); row.update({"priced_n":pm["priced_n"],"roi":pm["roi"],"market_residual":pm["market_residual"]})
+                pm=_h2h_price_metrics(g,jj,y,baseline,seasons,direction,[sy0],prepared=_h2h_prepared); row.update({"priced_n":pm["priced_n"],"roi":pm["roi"],"market_residual":pm["market_residual"]})
             ival.append(row)
     ival_n=sum(x["n"] for x in ival)
     ival_rate=float(np.average([x["rate"] for x in ival],weights=[x["n"] for x in ival])) if ival_n else np.nan
     _ivpx={}
     if ival:
         if market=="h2h":
-            _ivpx=_h2h_price_metrics(g,internal_val,y,baseline,seasons,direction,split.get("internal_validation_years") or [])
+            _ivpx=_h2h_price_metrics(g,internal_val,y,baseline,seasons,direction,split.get("internal_validation_years") or [],prepared=_h2h_prepared)
             ival_pass=bool(
                 int(_ivpx.get("priced_n",0) or 0)>=NCAAF_MINER_INTERNAL_VALIDATION_MIN_N and
                 np.isfinite(_ivpx.get("roi",np.nan)) and float(_ivpx.get("roi"))>=0 and
@@ -5498,7 +5493,7 @@ def _evaluate_rule(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, valid: np.n
         if jj.sum():
             row={"season":sy0,"n":int(jj.sum()),"rate":float(np.mean(obs[jj]))}
             if market=="h2h":
-                pm=_h2h_price_metrics(g,jj,y,baseline,seasons,direction,[sy0]); row.update({"priced_n":pm["priced_n"],"roi":pm["roi"],"market_residual":pm["market_residual"]})
+                pm=_h2h_price_metrics(g,jj,y,baseline,seasons,direction,[sy0],prepared=_h2h_prepared); row.update({"priced_n":pm["priced_n"],"roi":pm["roi"],"market_residual":pm["market_residual"]})
             conf.append(row)
     conf_n=sum(x["n"] for x in conf); conf_rate=float(np.average([x["rate"] for x in conf],weights=[x["n"] for x in conf])) if conf_n else np.nan
 
@@ -5513,7 +5508,7 @@ def _evaluate_rule(g: pd.DataFrame, mask: np.ndarray, y: np.ndarray, valid: np.n
     nominal=_one_sided_p(rate,len(ix))
     if market=="h2h":
         market_resid_disc=h2h_price.get("market_residual",np.nan)
-        h2h_conf_price=_h2h_price_metrics(g,mask&valid,y,baseline,seasons,direction,CONFIRMATION_SEASONS)
+        h2h_conf_price=_h2h_price_metrics(g,mask&valid,y,baseline,seasons,direction,CONFIRMATION_SEASONS,prepared=_h2h_prepared)
         market_resid_conf=h2h_conf_price.get("market_residual",np.nan)
         exp=baseline if direction=="PLAY_ON" else 1-baseline
         nominal=_market_residual_p(obs,exp,disc)
@@ -5937,6 +5932,11 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
             log_func(f"[NCAAF-RV2182-PREDICTOR-TOP] predictor={_pb.get('predictor')} behavior={_pb.get('behavior')} state={_pb.get('state')} discovery={_pb.get('discovery_rate')}/{_pb.get('discovery_n')} confirmation={_pb.get('confirmation_rate')}/{_pb.get('confirmation_n')} meta_constituent={str(bool(_pb.get('meta_constituent',False))).upper()} source_cluster={_pb.get('source_cluster')} authority=0")
     if valid.sum()<500: out["status"]="INSUFFICIENT_HISTORY"; return out
 
+    # Entire candidate universe shares these prices. Only H2H needs the cache;
+    # keep it scoped to this invocation so 2026 or live frame changes cannot
+    # accidentally reuse stale market prices.
+    _h2h_prepared=_prepare_h2h_price_context(games,y,baseline) if market=="h2h" else None
+
     expanded_external=[a for a in atoms if _v2181_is_expanded_pt_atom(a)] if market=="spreads" else []
     legacy_atoms=[a for a in atoms if not _v2181_is_expanded_pt_atom(a)]
     if market=="spreads":
@@ -5947,7 +5947,8 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         # Explicit guard in addition to same-family search protection.
         if _v2182_meta_overlap_violation(names):
             return None
-        r=_evaluate_rule(games,atom_mask,y,valid,baseline,seasons,names,fams,market)
+        r=_evaluate_rule(games,atom_mask,y,valid,baseline,seasons,names,fams,market,
+                         _h2h_prepared=_h2h_prepared)
         if r is None: return None
         if market=="h2h":
             hp=r.get("h2h_discovery_price") or {}
@@ -5987,7 +5988,10 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
             if not beam: break
         return tested,singleton
 
+    import time as _miner_time
+    _legacy_start=_miner_time.perf_counter()
     legacy_tested,legacy_single=legacy_search(legacy_atoms)
+    log_func(f"[NCAAF-MINER-SPEED] market={market} stage=LEGACY_SEARCH seconds={_miner_time.perf_counter()-_legacy_start:.2f} tested={len(legacy_tested)} cached_h2h_prices={str(_h2h_prepared is not None).upper()} authority=0")
 
     # V2.34 focused CFBD/rivalry lanes. The broad beam can bury useful football
     # context under hundreds of legacy atoms, so these lanes guarantee that CFBD
@@ -7245,7 +7249,7 @@ def _special_atom_availability_audit(games: pd.DataFrame, seasons: np.ndarray, m
     amap={str(a.get("name")):a for a in admitted}; rmap={str(a.get("name")):a for a in raw}
     expected={
         "SEASON_RECORD_STATE":["SU_WINLESS_PRIOR","ATS_COVERLESS_PRIOR","SU_AND_ATS_WINLESS_PRIOR","SU_WINLESS_AFTER_2_PLUS","ATS_COVERLESS_AFTER_2_PLUS","SU_AND_ATS_WINLESS_AFTER_2_PLUS","SU_WINLESS_AFTER_3_PLUS","ATS_COVERLESS_AFTER_3_PLUS","SU_AND_ATS_WINLESS_AFTER_3_PLUS","SU_WINLESS_AFTER_4_PLUS","ATS_COVERLESS_AFTER_4_PLUS","SU_AND_ATS_WINLESS_AFTER_4_PLUS","OPP_SU_WINLESS_PRIOR","OPP_ATS_COVERLESS_PRIOR","OPP_SU_AND_ATS_WINLESS_PRIOR","OPP_SU_WINLESS_AFTER_2_PLUS","OPP_ATS_COVERLESS_AFTER_2_PLUS","OPP_SU_AND_ATS_WINLESS_AFTER_2_PLUS","OPP_SU_WINLESS_AFTER_3_PLUS","OPP_ATS_COVERLESS_AFTER_3_PLUS","OPP_SU_AND_ATS_WINLESS_AFTER_3_PLUS","OPP_SU_WINLESS_AFTER_4_PLUS","OPP_ATS_COVERLESS_AFTER_4_PLUS","OPP_SU_AND_ATS_WINLESS_AFTER_4_PLUS"],
-        "ROLE_TRANSITION_BOUNCEBACK":["BOUNCEBACK_HOME_FAV_UPSET_TO_ROAD_DOG","BOUNCEBACK_WINNING_TEAM","BOUNCEBACK_BOTH_WINNING_TEAMS","BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5","OPP_BOUNCEBACK_HOME_FAV_UPSET_TO_ROAD_DOG","OPP_BOUNCEBACK_WINNING_TEAM","OPP_BOUNCEBACK_BOTH_WINNING_TEAMS","OPP_BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5","BOUNCEBACK_PRIOR_FAV_LOSS_TO_ROAD_DOG","BOUNCEBACK_PRIOR_FAV_LOSS_TO_ANY_DOG","OPP_BOUNCEBACK_PRIOR_FAV_LOSS_TO_ROAD_DOG","OPP_BOUNCEBACK_PRIOR_FAV_LOSS_TO_ANY_DOG"],
+        "ROLE_TRANSITION_BOUNCEBACK":["BOUNCEBACK_HOME_FAV_UPSET_TO_ROAD_DOG","BOUNCEBACK_WINNING_TEAM","BOUNCEBACK_BOTH_WINNING_TEAMS","BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5","OPP_BOUNCEBACK_HOME_FAV_UPSET_TO_ROAD_DOG","OPP_BOUNCEBACK_WINNING_TEAM","OPP_BOUNCEBACK_BOTH_WINNING_TEAMS","OPP_BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5"],
         "RESULT_QUALITY_REGRESSION":["TEAM_OFF_WIN_NEG_YARDS","TEAM_OFF_WIN_NEG_YPP","TEAM_OFF_DECEPTIVE_WIN_2PLUS","TEAM_OFF_RESULT_OVERPERFORMANCE","TEAM_OFF_LOSS_POS_YPP","TEAM_OFF_RESULT_UNDERPERFORMANCE","OPP_OFF_WIN_NEG_YARDS","OPP_OFF_WIN_NEG_YPP","OPP_OFF_DECEPTIVE_WIN_2PLUS","OPP_OFF_RESULT_OVERPERFORMANCE","OPP_OFF_LOSS_POS_YPP","OPP_OFF_RESULT_UNDERPERFORMANCE"],
         "SCHEDULE_RESUME_QUALITY":["TEAM_SOS_ADV_10P","OPP_SOS_ADV_10P","TEAM_STRONG_RECORD_WEAK_SOS","OPP_STRONG_RECORD_WEAK_SOS","TEAM_STRONG_RECORD_WEAK_UNDERLYING","OPP_STRONG_RECORD_WEAK_UNDERLYING","TEAM_OPPADJ_NETYPP_ADV_075","OPP_OPPADJ_NETYPP_ADV_075"],
         "RECENT_VS_SEASON":["TEAM_RECENT3_OFF_YPP_UP_050","TEAM_RECENT3_NET_YPP_UP_075","TEAM_RECENT3_DEF_YPP_IMPROVED_050","TEAM_RECENT3_AND5_NET_YPP_UP","OPP_RECENT3_OFF_YPP_UP_050","OPP_RECENT3_NET_YPP_UP_075","OPP_RECENT3_DEF_YPP_IMPROVED_050","OPP_RECENT3_AND5_NET_YPP_UP"],
