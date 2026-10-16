@@ -837,25 +837,44 @@ def _attach_cfbd_core_context(dashboard_module, g: pd.DataFrame, *, log_func=pri
 
 
 def _advanced_data_readiness(g: pd.DataFrame) -> dict[str,Any]:
-    """Inventory whether genuinely new advanced inputs are present historically.
+    """Report full-history and CFBD-era availability *separately*.
 
-    This never fabricates a field and never promotes a partial/current-season-only
-    source.  Coverage is measured only on the <=2025 protected historical frame.
+    Source-era readiness never grants bet authority and does not alter feature
+    selection.  Both measures exclude 2026 outcomes by construction.
     """
-    out=[]; all_cols=[str(c) for c in g.columns]
+    seasons=_num(g,"Season")
+    full=seasons.between(2013,2025,inclusive="both")
+    cfbd_era=seasons.between(2022,2025,inclusive="both")
+    discovery=seasons.isin([2022,2023])
+    confirmation=seasons.isin([2024,2025])
+    all_cols=[str(c) for c in g.columns]
+    out=[]
     for family,tokens in _ADVANCED_DATA_FAMILIES.items():
         cols=[c for c in all_cols if any(tok in c.lower() for tok in tokens)]
-        cov=0.0
-        if cols:
-            cov=max(float(pd.to_numeric(g[c],errors="coerce").notna().mean()) for c in cols)
-        state="READY" if cols and cov>=0.60 else "PARTIAL" if cols and cov>=0.10 else "MISSING"
-        out.append({"family":family,"state":state,"max_historical_coverage":cov,"columns":cols[:20]})
+        valid={c:pd.to_numeric(g[c],errors="coerce").notna() for c in cols}
+        def coverage(mask):
+            n=int(mask.sum())
+            if not n or not cols: return 0.,None
+            best=max(cols,key=lambda col:int((valid[col]&mask).sum()))
+            return float((valid[best]&mask).sum())/n,best
+        full_cov,_=coverage(full)
+        era_cov,best=coverage(cfbd_era)
+        disc_cov,_=coverage(discovery)
+        confirm_cov,_=coverage(confirmation)
+        state="READY" if cols and era_cov>=.60 and disc_cov>=.30 and confirm_cov>=.30 else "PARTIAL" if cols and era_cov>=.10 else "MISSING"
+        out.append({"family":family,"state":state,
+            "full_historical_coverage":round(full_cov,4),
+            "max_historical_coverage":round(era_cov,4), # preserved key; now source-era scope
+            "cfbd_era_coverage":round(era_cov,4),"discovery_coverage":round(disc_cov,4),
+            "confirmation_coverage":round(confirm_cov,4),
+            "best_field":best,"columns":cols[:20]})
     return {
-        "families":out,
+        "families":out,"full_history_rows":int(full.sum()),"cfbd_era_rows":int(cfbd_era.sum()),
+        "discovery_rows":int(discovery.sum()),"confirmation_rows":int(confirmation.sum()),
         "ready_families":[x["family"] for x in out if x["state"]=="READY"],
         "partial_families":[x["family"] for x in out if x["state"]=="PARTIAL"],
         "missing_families":[x["family"] for x in out if x["state"]=="MISSING"],
-        "policy":"USE_ONLY_LEAK_SAFE_HISTORICAL_FIELDS_WITH_DISCOVERY_COVERAGE; NEVER IMPUTE A MISSING DATA SOURCE",
+        "policy":"CFBD_2022_2025_SOURCE_ERA_DIAGNOSTIC_ONLY; FULL_2013_2025_PRESERVED; NO_2026_OUTCOMES; NO_PROMOTION",
     }
 
 
@@ -1250,7 +1269,9 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
         log_func(f"[NCAAF-CORE-V22-COVERAGE] counts={coverage_registry.get('counts')} selected={coverage_stats}")
         log_func(f"[NCAAF-CORE-V2-STRUCTURED-STATS] selected={structured_stats}")
         log_func(f"[NCAAF-CORE-V22-MATCHUP-STATS] selected={matchup_stats}")
-        log_func(f"[NCAAF-CORE-V22-ADVANCED-READINESS] ready={advanced_readiness.get('ready_families')} partial={advanced_readiness.get('partial_families')} missing={advanced_readiness.get('missing_families')}")
+        log_func(f"[NCAAF-CORE-V22-ADVANCED-READINESS] frame=CFBD_2022_2025 rows={advanced_readiness['cfbd_era_rows']} discovery_rows={advanced_readiness['discovery_rows']} confirmation_rows={advanced_readiness['confirmation_rows']} ready={advanced_readiness.get('ready_families')} partial={advanced_readiness.get('partial_families')} missing={advanced_readiness.get('missing_families')} authority=0")
+        for _f in advanced_readiness['families']:
+            log_func(f"[NCAAF-CORE-V22-ADVANCED-FAMILY] family={_f['family']} status={_f['state']} full_history={_f['full_historical_coverage']:.1%} cfbd_era={_f['cfbd_era_coverage']:.1%} discovery={_f['discovery_coverage']:.1%} confirmation={_f['confirmation_coverage']:.1%} best_field={_f['best_field']} authority=0")
 
         incumbent_recipe={"type":"INCUMBENT","name":"INCUMBENT_RECIPE","features":list(INCUMBENT_FEATURES)}
         inc=_evaluate(g,incumbent_recipe,"INCUMBENT_RECIPE",log_func=log_func)

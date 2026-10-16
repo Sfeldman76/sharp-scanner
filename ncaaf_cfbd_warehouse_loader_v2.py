@@ -208,41 +208,68 @@ class CFBDClient:
         })
         self.call_count = 0
         self.archive_rows: list[dict[str, Any]] = []
+        self.request_health: dict[tuple[str, int | None], dict[str, Any]] = {}
+        self.api_failures: list[dict[str, Any]] = []
+
+    def _track_request(self, path: str, params: dict[str, Any], status: str, count: int = 0, http_status: int | None = None):
+        year = params.get("year")
+        try: year = int(year) if year is not None else None
+        except (TypeError, ValueError): year = None
+        key=(path,year)
+        stat=self.request_health.setdefault(key,{"path":path,"season":year,"requests":0,"rows":0,"failures":0,"statuses":{}})
+        stat["requests"]+=1
+        stat["rows"]+=int(count)
+        stat["statuses"][status]=int(stat["statuses"].get(status,0))+1
+        if status!="PASS":
+            stat["failures"]+=1
+            self.api_failures.append({"path":path,"season":year,"status":status,"http_status":http_status})
 
     def get(self, path: str, params: dict[str, Any] | None = None, *, optional: bool = False) -> list[dict[str, Any]]:
+        """Fetch and classify each endpoint/season; absent data != failed API call."""
         url = BASE_URL + path
         params = {k: v for k, v in (params or {}).items() if v is not None}
         last: Exception | None = None
+        http_status: int | None = None
         for attempt in range(self.max_attempts):
             try:
                 self.call_count += 1
-                r = self.session.get(url, params=params, timeout=self.timeout)
-                if r.status_code == 429:
-                    time.sleep(min(30, 2 ** attempt))
+                response = self.session.get(url, params=params, timeout=self.timeout)
+                http_status = response.status_code
+                # Auth/plan access and invalid endpoint are not transient. Do not
+                # spend the Tier 2 request budget retrying them five times.
+                if http_status in (400, 401, 403, 404, 422):
+                    last = RuntimeError(f"CFBD_HTTP_{http_status}")
+                    break
+                if http_status == 429:
+                    last = RuntimeError("CFBD_HTTP_429_RATE_LIMIT")
+                    if attempt+1 < self.max_attempts:
+                        retry_after = response.headers.get("Retry-After", "")
+                        try: delay = min(60., max(0., float(retry_after)))
+                        except (TypeError, ValueError): delay = min(30., float(2**attempt))
+                        time.sleep(delay)
                     continue
-                if 500 <= r.status_code < 600:
-                    time.sleep(min(15, 1.5 ** attempt))
+                if 500 <= http_status < 600:
+                    last = RuntimeError(f"CFBD_HTTP_{http_status}")
+                    if attempt+1 < self.max_attempts: time.sleep(min(15, 1.5**attempt))
                     continue
-                r.raise_for_status()
-                payload = r.json()
-                if isinstance(payload, list):
-                    rows = payload
-                elif isinstance(payload, dict) and isinstance(payload.get("data"), list):
-                    rows = payload["data"]
-                elif isinstance(payload, dict):
-                    rows = [payload]
-                else:
-                    rows = []
-                self._archive_success(path, params, rows)
+                response.raise_for_status()
+                payload = response.json()
+                if isinstance(payload, list): rows=payload
+                elif isinstance(payload, dict) and isinstance(payload.get("data"), list): rows=payload["data"]
+                elif isinstance(payload, dict): rows=[payload]
+                else: rows=[]
+                self._archive_success(path,params,rows)
+                self._track_request(path,params,"PASS",len(rows),http_status)
                 return rows
             except Exception as exc:
-                last = exc
-                if attempt + 1 < self.max_attempts:
-                    time.sleep(min(15, 1.5 ** attempt))
+                last=exc
+                if attempt+1 < self.max_attempts: time.sleep(min(15, 1.5**attempt))
+        status=(f"HTTP_{http_status}" if http_status else type(last).__name__)
+        self._track_request(path,params,status,0,http_status)
         if optional:
-            print(f"[CFBD-OPTIONAL] path={path} params={params} status=UNAVAILABLE error={type(last).__name__}:{last}")
+            print(f"[CFBD-SOURCE-STATUS] path={path} year={params.get('year')} status=UNAVAILABLE category={status} optional=TRUE data_not_verified=TRUE")
             return []
-        raise RuntimeError(f"CFBD request failed path={path} params={params}: {type(last).__name__}:{last}")
+        raise RuntimeError(f"CFBD_REQUIRED_SOURCE_FAILED path={path} year={params.get('year')} category={status}: {last}")
 
     def _archive_success(self, path: str, params: dict[str, Any], rows: list[dict[str, Any]]) -> None:
         """Retain immutable row-level API snapshots without persisting credentials."""
@@ -1270,15 +1297,41 @@ def write_bigquery(df: pd.DataFrame, project: str, dataset: str, table: str, sea
     client = bigquery.Client(project=project)
     table_id = f"{project}.{dataset}.{table}"
     final = df.copy()
-    # Preserve seasons not included in this refresh.
+    # Fail closed if an existing warehouse is unreadable: silently truncating
+    # all years on a permissions/query error would destroy years of history.
+    from google.api_core.exceptions import NotFound
     try:
-        existing = client.query(f"SELECT * FROM `{table_id}` WHERE Season NOT IN UNNEST(@seasons)", job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ArrayQueryParameter("seasons", "INT64", [int(s) for s in seasons])]
-        )).to_dataframe(create_bqstorage_client=False)
-        if existing is not None and not existing.empty:
-            final = pd.concat([existing, final], ignore_index=True, sort=False)
-    except Exception:
-        pass
+        client.get_table(table_id)
+    except NotFound:
+        existing = pd.DataFrame()
+    else:
+        existing = client.query(f"SELECT * FROM `{table_id}`").to_dataframe(create_bqstorage_client=False)
+    if not existing.empty:
+        keys=[k for k in ("Season","Game_ID","Team_Key") if k in final.columns and k in existing.columns]
+        if len(keys)!=3:
+            raise RuntimeError(f"CFBD_FEATURE_REFRESH_KEYS_MISSING keys={keys}; refusing destructive replacement")
+        if final.duplicated(keys).any() or existing.duplicated(keys).any():
+            raise RuntimeError("CFBD_FEATURE_DUPLICATE_KEYS; refusing destructive replacement")
+        old_current=existing.loc[pd.to_numeric(existing["Season"],errors="coerce").isin(seasons)].copy()
+        if not old_current.empty:
+            new=final.set_index(keys); old=old_current.set_index(keys)
+            # Only retain past values for missing current cells. Such retained
+            # cells are explicitly logged; they must NOT count as a fresh pull.
+            old=old.reindex(new.index)
+            retained={}
+            for col in old.columns:
+                if col not in new.columns: new[col]=np.nan
+                if col.startswith("CFBD_") and col not in {"CFBD_Source_Tag"}:
+                    gap=new[col].isna() & old[col].notna()
+                    if gap.any():
+                        new.loc[gap,col]=old.loc[gap,col]
+                        retained[col]=int(gap.sum())
+            final=new.reset_index()
+            if retained:
+                print(f"[CFBD-PRIOR-VALUE-RETAINED] status=STALE_NOT_FRESH fields={len(retained)} cells={sum(retained.values())} examples={dict(list(retained.items())[:12])}")
+        not_refreshed=existing.loc[~pd.to_numeric(existing["Season"],errors="coerce").isin(seasons)]
+        if not not_refreshed.empty:
+            final=pd.concat([not_refreshed,final],ignore_index=True,sort=False)
     # BigQuery is happier with timezone-aware UTC datetimes and plain strings.
     if "Game_Date" in final.columns:
         final["Game_Date"] = pd.to_datetime(final["Game_Date"], errors="coerce", utc=True)
@@ -1665,6 +1718,70 @@ def warehouse_health(client, project: str, dataset: str) -> dict[str,Any]:
     return out
 
 
+def warehouse_season_verification(client, project: str, dataset: str, table: str,
+                                  expected: pd.DataFrame | None, feature_seasons: list[int],
+                                  history_seasons: list[int]) -> dict[str,Any]:
+    """Read back persisted seasons; never interpret an absent endpoint as success."""
+    from google.cloud import bigquery
+    tid=_qualified(project,dataset,table)
+    report={"status":"PASS","feature_seasons":{},"history_seasons":{},"feature_table":tid}
+    if feature_seasons:
+        schema={f.name for f in client.get_table(tid).schema}
+        probes=(
+            "CFBD_Season_Net_PPA_Prior", "CFBD_Season_CFBD_Game_Off_EarlyDown_PPA_Prior",
+            "CFBD_Season_CFBD_Game_Off_Field_Position_Prior", "CFBD_Season_CFBD_Game_Off_Sack_Rate_Prior",
+            "CFBD_Returning_Pct_PPA", "CFBD_Roster_ALL_Retention", "CFBD_Prior_PPA_Return_Pct",
+            "CFBD_QB_Game_Pass_Success_SeasonPrior", "CFBD_Portal_In_Count",
+            "CFBD_Matchup_Elo_Adv", "CFBD_Matchup_PriorYear_SP_Adv")
+        fields=[x for x in probes if x in schema]
+        absent=[x for x in probes if x not in schema]
+        if absent: print(f"[CFBD-WAREHOUSE-SCHEMA-GAP] missing_columns={absent} interpretation=VERIFY_ENDPOINT_AND_SEASON_AVAILABILITY")
+        selects=["Season","COUNT(*) AS side_rows","COUNT(DISTINCT CAST(Game_ID AS STRING)) AS games"]
+        selects += [f"COUNTIF(`{f}` IS NOT NULL) AS n_{i}" for i,f in enumerate(fields)]
+        q=f"SELECT {', '.join(selects)} FROM `{tid}` WHERE Season IN UNNEST(@years) GROUP BY Season ORDER BY Season"
+        cfg=bigquery.QueryJobConfig(query_parameters=[bigquery.ArrayQueryParameter("years","INT64",list(map(int,feature_seasons)))])
+        got=client.query(q,job_config=cfg).to_dataframe(create_bqstorage_client=False)
+        for yr in feature_seasons:
+            d=got.loc[got["Season"].eq(yr)]
+            observed=int(d.iloc[0]["side_rows"]) if len(d) else 0
+            expected_rows=(int(pd.to_numeric(expected.get("Season",pd.Series(dtype=float)),errors="coerce").eq(yr).sum())
+                           if expected is not None else None)
+            coverage={f:{"n":int(d.iloc[0][f"n_{i}"]) if len(d) else 0,
+                          "pct":round(float(d.iloc[0][f"n_{i}"])/observed,4) if observed else 0.,"status":"PRESENT"}
+                      for i,f in enumerate(fields)}
+            coverage.update({f:{"n":0,"pct":0.0,"status":"MISSING_COLUMN"} for f in absent})
+            if expected_rows is None:
+                status="PRESENT_UNVERIFIED_COUNT" if observed else "FAIL_MISSING_ROWS"
+            else:
+                status="PASS" if expected_rows>0 and observed>=expected_rows else "FAIL_MISSING_ROWS"
+            if status=="FAIL_MISSING_ROWS": report["status"]="FAIL"
+            elif observed and (absent or any(v['n']==0 for v in coverage.values())) and report["status"]=="PASS":
+                report["status"]="PARTIAL"
+            report["feature_seasons"][str(yr)]={"status":status,"expected_rows":expected_rows,
+                "warehouse_rows":observed,"games":int(d.iloc[0]["games"]) if len(d) else 0,"field_coverage":coverage}
+            print(f"[CFBD-WAREHOUSE-VERIFY-SEASON] year={yr} status={status} expected_rows={expected_rows} stored_rows={observed} fields={coverage}")
+    if history_seasons:
+        raw=_qualified(project,dataset,CANONICAL_RAW_TABLE)
+        sql=f"""SELECT Season,COUNT(*) AS side_rows,
+          COUNTIF(Consensus_Open_Spread IS NOT NULL) AS spread_rows,
+          COUNTIF(Consensus_Open_Total IS NOT NULL) AS total_rows,
+          COUNTIF(Source_Name='CollegeFootballData') AS cfbd_rows
+          FROM `{raw}` WHERE Season IN UNNEST(@years) GROUP BY Season"""
+        cfg=bigquery.QueryJobConfig(query_parameters=[bigquery.ArrayQueryParameter("years","INT64",list(map(int,history_seasons)))])
+        got=client.query(sql,job_config=cfg).to_dataframe(create_bqstorage_client=False)
+        for yr in history_seasons:
+            d=got.loc[got["Season"].eq(yr)]
+            if d.empty: stats={"status":"MISSING","side_rows":0,"spread_rows":0,"total_rows":0,"cfbd_rows":0}
+            else:
+                r=d.iloc[0]
+                stats={"status":"PASS" if int(r["spread_rows"])>0 and int(r["total_rows"])>0 else "MARKET_TARGET_GAP",
+                       **{k:int(r[k]) for k in ("side_rows","spread_rows","total_rows","cfbd_rows")}}
+            report["history_seasons"][str(yr)]=stats
+            if stats["status"]!="PASS" and report["status"]=="PASS": report["status"]="PARTIAL"
+            print(f"[CFBD-HISTORY-MARKET-VERIFY] year={yr} {stats}")
+    return report
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1735,6 +1852,8 @@ def run(
             )
             all_features.append(feat)
             players.append(build_player_history_sidecar(year, roster_cache.get(year,pd.DataFrame()), player_ppa_cache.get(year,pd.DataFrame()), player_usage_cache.get(year,pd.DataFrame())))
+            if feat.empty:
+                raise RuntimeError(f"CFBD_REQUIRED_SEASON_EMPTY year={year}; refusing a destructive warehouse refresh")
             print(f"[CFBD-SEASON] year={year} status=PASS feature_rows={len(feat)} calls={client.call_count}")
 
     out = pd.concat(all_features, ignore_index=True, sort=False) if all_features else pd.DataFrame()
@@ -1772,6 +1891,10 @@ def run(
                     print(f"[CFBD-HISTORY] year={year} status=SKIP_NO_ALIGNMENT")
                     continue
                 rows=build_canonical_history_rows(games,lines,year,amap)
+                if not rows.empty:
+                    n_open=int(rows["Consensus_Open_Spread"].notna().sum())
+                    n_total=int(rows["Consensus_Open_Total"].notna().sum())
+                    print(f"[CFBD-HISTORY-OPENING-AVAILABILITY] year={year} mapped_rows={len(rows)} spread_open_rows={n_open} total_open_rows={n_total} status={'MARKET_TARGET_GAP' if not n_open or not n_total else 'PASS'} close_lines_not_substituted=TRUE")
                 if rows.empty:
                     print(f"[CFBD-HISTORY] year={year} status=NO_CANONICAL_ROWS")
                     continue
@@ -1799,6 +1922,14 @@ def run(
         print(f"[CFBD-WAREHOUSE-HEALTH] {warehouse_health(bq,project,dataset)}")
     else:
         print(f"[CFBD-NO-BQ] archive_rows_buffered={len(client.archive_rows)} calls={client.call_count}")
+    for (_,yr),stat in sorted(client.request_health.items(),key=lambda x:(str(x[0][1]),x[0][0])):
+        print(f"[CFBD-SOURCE-COVERAGE] year={yr} path={stat['path']} status={'PARTIAL' if stat['failures'] else 'PASS'} requests={stat['requests']} rows={stat['rows']} failures={stat['failures']} status_codes={stat['statuses']}")
+    print(f"[CFBD-API-SUMMARY] calls={client.call_count} failed_endpoint_batches={len(client.api_failures)} status={'PARTIAL' if client.api_failures else 'PASS'} tier2_access_verification={'INCOMPLETE' if client.api_failures else 'PASS'}")
+    if bq is not None:
+        verification=warehouse_season_verification(bq,project,dataset,table,out,seasons,history_seasons)
+        print(f"[CFBD-WAREHOUSE-VERIFY] status={verification['status']} feature_years={len(verification['feature_seasons'])} history_years={len(verification['history_seasons'])}")
+        if verification['status']=="FAIL":
+            raise RuntimeError("CFBD_WAREHOUSE_VERIFICATION_FAILED: see CFBD-WAREHOUSE-VERIFY-SEASON")
     return out
 
 
@@ -1867,6 +1998,7 @@ def main() -> None:
     p.add_argument("--skip-travel-update", action="store_true")
     p.add_argument("--no-bq", action="store_true")
     p.add_argument("--self-test", action="store_true")
+    p.add_argument("--verify-only", action="store_true",help="BQ warehouse and historical opening-market audit only; no CFBD API calls/writes/token needed")
     args = p.parse_args()
     if args.self_test:
         _self_test(); return
@@ -1874,6 +2006,15 @@ def main() -> None:
     history = _parse_seasons(args.history_seasons)
     if not seasons and not history:
         raise SystemExit("No seasons selected")
+    if args.verify_only:
+        if args.no_bq: raise SystemExit("--verify-only requires BigQuery (remove --no-bq)")
+        from google.cloud import bigquery
+        bq=bigquery.Client(project=args.project)
+        print(f"[CFBD-WAREHOUSE-HEALTH] {warehouse_health(bq,args.project,args.dataset)}")
+        result=warehouse_season_verification(bq,args.project,args.dataset,args.table,None,seasons,history)
+        print(f"[CFBD-WAREHOUSE-VERIFY] status={result['status']} mode=READ_ONLY tier2_api_calls=0")
+        if result['status']=="FAIL": raise SystemExit(2)
+        return
     run(
         seasons,args.project,args.dataset,args.table,args.local_output,args.no_bq,
         history_seasons=history,context_rebuild_sql=args.context_rebuild_sql,

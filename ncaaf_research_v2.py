@@ -2498,11 +2498,40 @@ def _ptiv_select_alpha(X,resid,seasons,cols):
     best=min(good,key=lambda z:(z["selection_residual_mae"],z["alpha"])); return float(best["alpha"]),{"status":"DISCOVERY_FORWARD_SELECTED","grid":grid,"selected_alpha":float(best["alpha"])}
 
 
+def _ptiv_market_target_audit(games: pd.DataFrame, seasons: np.ndarray, log_func=print) -> dict[str, Any]:
+    """Season-by-season raw-market / score / target audit, without filling prices."""
+    f={}
+    for col in ("Market_Error_Margin","Market_Error_Total","Market_Open_Margin",
+                "Actual_Margin","Consensus_Open_Spread","Consensus_Open_Total",
+                "Actual_Total","Team_Score","Opponent_Score"):
+        f[col]=pd.to_numeric(games[col],errors="coerce").to_numpy(float) if col in games else np.full(len(games),np.nan)
+    annual={}
+    for year in sorted({int(x) for x in seasons[np.isfinite(seasons)] if int(x)<=2025}):
+        m=seasons==year
+        counts={k:int(np.sum(m&np.isfinite(v))) for k,v in f.items()}
+        possible_margin=int(np.sum(m&np.isfinite(f["Actual_Margin"])&np.isfinite(f["Market_Open_Margin"])))
+        # This is a presence check only, not an authorization to reconstruct a
+        # target with an unverified spread orientation or unknown point in time.
+        if counts["Market_Error_Margin"]==0 and counts["Market_Open_Margin"]==0:
+            reason="MARKET_MARGIN_NOT_LOADED"
+        elif counts["Market_Error_Margin"]==0 and possible_margin:
+            reason="MARGIN_TARGET_MISSING_DESPITE_RAW_COMPONENTS"
+        elif counts["Market_Error_Margin"]==0:
+            reason="MARKET_MARGIN_OR_RESULT_INCOMPLETE"
+        elif counts["Market_Error_Total"]==0:
+            reason="TOTAL_TARGET_MISSING"
+        else: reason="TARGETS_PRESENT"
+        annual[str(year)]={"rows":int(m.sum()),"source_counts":counts,"possible_margin_components":possible_margin,"reason":reason}
+        log_func(f"[NCAAF-STAT-MARKET-TARGET-AUDIT] season={year} rows={int(m.sum())} margin_target={counts['Market_Error_Margin']} total_target={counts['Market_Error_Total']} open_margin={counts['Market_Open_Margin']} open_spread={counts['Consensus_Open_Spread']} open_total={counts['Consensus_Open_Total']} actual_margin={counts['Actual_Margin']} possible_margin_components={possible_margin} cause={reason} action=VERIFY_CANONICAL_MARKET_SOURCE_NO_SYNTHETIC_LINES authority=0")
+    return {"by_season":annual,"policy":"DIAGNOSTICS_ONLY__NO_UNVERIFIED_TARGET_RECONSTRUCTION__2026_EXCLUDED","authority":0}
+
+
 def _ptiv_production_v1_oof(games,seasons,dashboard_module,production_module,log_func=print):
     if production_module is None: return np.full(len(games),np.nan),{"status":"PRODUCTION_MODULE_UNAVAILABLE"}
     sp=list(getattr(production_module,"PROD_SPREAD_FEATURES",()) or ()); tt=list(getattr(production_module,"PROD_TOTAL_FEATURES",()) or ())
     if not sp or any(c not in games.columns for c in sp): return np.full(len(games),np.nan),{"status":"FIXED_FEATURES_MISSING","missing":[c for c in sp if c not in games.columns]}
     oof=np.full(len(games),np.nan); by={}; lw=float(getattr(production_module,"PROD_LINEAR_WEIGHT",0.75))
+    target_source_audit=_ptiv_market_target_audit(games,np.asarray(seasons,dtype=float),log_func=log_func)
     margin_target=pd.to_numeric(games.get("Market_Error_Margin",pd.Series(np.nan,index=games.index)),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
     total_target=pd.to_numeric(games.get("Market_Error_Total",pd.Series(np.nan,index=games.index)),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
     market_all=pd.to_numeric(games.get("Market_Open_Margin",pd.Series(np.nan,index=games.index)),errors="coerce").to_numpy(dtype=float,na_value=np.nan)
@@ -2523,7 +2552,7 @@ def _ptiv_production_v1_oof(games,seasons,dashboard_module,production_module,log
             by[str(sy)]={"train_n":int(tr.sum()),"score_n":int(np.isfinite(market).sum()),"usable_margin_targets":usable_margin,"usable_total_targets":usable_total}
         except Exception as exc:
             by[str(sy)]={"status":"ERROR","error":f"{type(exc).__name__}:{exc}","usable_margin_targets":usable_margin,"usable_total_targets":usable_total,"usable_score_market":score_n}
-    return oof,{"status":"PASS" if np.isfinite(oof).any() else "NO_OOF","feature_cols":sp,"linear_weight":lw,"by_season":by,"contract":"EXACT_NCAAF_PRODUCTION_V1_FIXED_SPREAD_FEATURES_SEASON_FORWARD"}
+    return oof,{"status":"PASS" if np.isfinite(oof).any() else "NO_OOF","feature_cols":sp,"linear_weight":lw,"by_season":by,"market_target_audit":target_source_audit,"contract":"EXACT_NCAAF_PRODUCTION_V1_FIXED_SPREAD_FEATURES_SEASON_FORWARD"}
 
 
 def run_pt_incremental_value_research(*,games,miner_games,seasons,dashboard_module,production_module=None,log_func=print):
@@ -4899,6 +4928,31 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
     add("OPP_BOUNCEBACK_WINNING_TEAM","ROLE_TRANSITION_BOUNCEBACK",_opp_bounce&owp.ge(.500),desc="opponent is winning road dog after home-favorite upset loss",source_ok=_obh_src,min_n=20)
     add("OPP_BOUNCEBACK_BOTH_WINNING_TEAMS","ROLE_TRANSITION_BOUNCEBACK",_opp_bounce&owp.ge(.500)&twp.ge(.500),desc="opponent winning road dog vs winning team after home-favorite upset loss",source_ok=_obh_src,min_n=20)
     add("OPP_BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5","ROLE_TRANSITION_BOUNCEBACK",_opp_bounce&owp.ge(.500)&(-sp).between(5.0,7.5),desc="opponent winning bounceback road dog from +5 through +7.5",source_ok=_obh_src,min_n=15)
+
+    # Predeclared wider role transitions for diagnostics: do not loosen discovery
+    # thresholds or automatically qualify the exact small-sample bounce-back.
+    # All inputs are pregame prior-state fields. These are inside the *same*
+    # evidence family and remain subject to the existing historical/OOF gates.
+    _team_fav_loss=prev_fav.eq(1)&psu.lt(0)
+    _opp_fav_loss=_opp_prev_fav.eq(1)&opsu.lt(0)
+    _team_is_dog=sp.gt(0)
+    _opp_is_dog=sp.lt(0)
+    add("BOUNCEBACK_PRIOR_FAV_LOSS_TO_ROAD_DOG","ROLE_TRANSITION_BOUNCEBACK",
+        _team_fav_loss&_team_is_dog&is_home.eq(0),
+        desc="previous-game favorite lost SU; current-game road dog",
+        source_ok=has("Prev_Is_ML_Favorite","Prev_Is_ML_Dog") and has("Pregame_Prev_SU_Margin","Prev_SU_Margin","Context_Prev_SU_Margin"),min_n=20)
+    add("BOUNCEBACK_PRIOR_FAV_LOSS_TO_ANY_DOG","ROLE_TRANSITION_BOUNCEBACK",
+        _team_fav_loss&_team_is_dog,
+        desc="previous-game favorite lost SU; current-game underdog regardless of site",
+        source_ok=has("Prev_Is_ML_Favorite","Prev_Is_ML_Dog") and has("Pregame_Prev_SU_Margin","Prev_SU_Margin","Context_Prev_SU_Margin"),min_n=20)
+    add("OPP_BOUNCEBACK_PRIOR_FAV_LOSS_TO_ROAD_DOG","ROLE_TRANSITION_BOUNCEBACK",
+        _opp_fav_loss&_opp_is_dog&is_home.eq(1),
+        desc="road opponent lost last game as favorite; now a road dog",
+        source_ok=has("Opp_Prev_Is_ML_Favorite","Opp_Prev_Is_ML_Dog") and has("Context_Opp_Prev_SU_Margin","Opp_Pregame_Prev_SU_Margin","Opp_Prev_SU_Margin"),min_n=20)
+    add("OPP_BOUNCEBACK_PRIOR_FAV_LOSS_TO_ANY_DOG","ROLE_TRANSITION_BOUNCEBACK",
+        _opp_fav_loss&_opp_is_dog,
+        desc="opponent lost last game as favorite and is now a dog",
+        source_ok=has("Opp_Prev_Is_ML_Favorite","Opp_Prev_Is_ML_Dog") and has("Context_Opp_Prev_SU_Margin","Opp_Pregame_Prev_SU_Margin","Opp_Prev_SU_Margin"),min_n=20)
     for c,name in (("Pathi_FB_Usually_Dog_Now_Favorite","ROLE_FLIP_DOG_TO_FAV_HISTORY"),("Pathi_FB_Usually_Favorite_Now_Dog","ROLE_FLIP_FAV_TO_DOG_HISTORY")):
         add(name,"ROLE_HISTORY",nfirst(c).eq(1),source_ok=has(c))
     role_shift=nfirst("Role_Price_Shift")
@@ -7191,7 +7245,7 @@ def _special_atom_availability_audit(games: pd.DataFrame, seasons: np.ndarray, m
     amap={str(a.get("name")):a for a in admitted}; rmap={str(a.get("name")):a for a in raw}
     expected={
         "SEASON_RECORD_STATE":["SU_WINLESS_PRIOR","ATS_COVERLESS_PRIOR","SU_AND_ATS_WINLESS_PRIOR","SU_WINLESS_AFTER_2_PLUS","ATS_COVERLESS_AFTER_2_PLUS","SU_AND_ATS_WINLESS_AFTER_2_PLUS","SU_WINLESS_AFTER_3_PLUS","ATS_COVERLESS_AFTER_3_PLUS","SU_AND_ATS_WINLESS_AFTER_3_PLUS","SU_WINLESS_AFTER_4_PLUS","ATS_COVERLESS_AFTER_4_PLUS","SU_AND_ATS_WINLESS_AFTER_4_PLUS","OPP_SU_WINLESS_PRIOR","OPP_ATS_COVERLESS_PRIOR","OPP_SU_AND_ATS_WINLESS_PRIOR","OPP_SU_WINLESS_AFTER_2_PLUS","OPP_ATS_COVERLESS_AFTER_2_PLUS","OPP_SU_AND_ATS_WINLESS_AFTER_2_PLUS","OPP_SU_WINLESS_AFTER_3_PLUS","OPP_ATS_COVERLESS_AFTER_3_PLUS","OPP_SU_AND_ATS_WINLESS_AFTER_3_PLUS","OPP_SU_WINLESS_AFTER_4_PLUS","OPP_ATS_COVERLESS_AFTER_4_PLUS","OPP_SU_AND_ATS_WINLESS_AFTER_4_PLUS"],
-        "ROLE_TRANSITION_BOUNCEBACK":["BOUNCEBACK_HOME_FAV_UPSET_TO_ROAD_DOG","BOUNCEBACK_WINNING_TEAM","BOUNCEBACK_BOTH_WINNING_TEAMS","BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5","OPP_BOUNCEBACK_HOME_FAV_UPSET_TO_ROAD_DOG","OPP_BOUNCEBACK_WINNING_TEAM","OPP_BOUNCEBACK_BOTH_WINNING_TEAMS","OPP_BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5"],
+        "ROLE_TRANSITION_BOUNCEBACK":["BOUNCEBACK_HOME_FAV_UPSET_TO_ROAD_DOG","BOUNCEBACK_WINNING_TEAM","BOUNCEBACK_BOTH_WINNING_TEAMS","BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5","OPP_BOUNCEBACK_HOME_FAV_UPSET_TO_ROAD_DOG","OPP_BOUNCEBACK_WINNING_TEAM","OPP_BOUNCEBACK_BOTH_WINNING_TEAMS","OPP_BOUNCEBACK_WINNING_TEAM_DOG_5_TO_7P5","BOUNCEBACK_PRIOR_FAV_LOSS_TO_ROAD_DOG","BOUNCEBACK_PRIOR_FAV_LOSS_TO_ANY_DOG","OPP_BOUNCEBACK_PRIOR_FAV_LOSS_TO_ROAD_DOG","OPP_BOUNCEBACK_PRIOR_FAV_LOSS_TO_ANY_DOG"],
         "RESULT_QUALITY_REGRESSION":["TEAM_OFF_WIN_NEG_YARDS","TEAM_OFF_WIN_NEG_YPP","TEAM_OFF_DECEPTIVE_WIN_2PLUS","TEAM_OFF_RESULT_OVERPERFORMANCE","TEAM_OFF_LOSS_POS_YPP","TEAM_OFF_RESULT_UNDERPERFORMANCE","OPP_OFF_WIN_NEG_YARDS","OPP_OFF_WIN_NEG_YPP","OPP_OFF_DECEPTIVE_WIN_2PLUS","OPP_OFF_RESULT_OVERPERFORMANCE","OPP_OFF_LOSS_POS_YPP","OPP_OFF_RESULT_UNDERPERFORMANCE"],
         "SCHEDULE_RESUME_QUALITY":["TEAM_SOS_ADV_10P","OPP_SOS_ADV_10P","TEAM_STRONG_RECORD_WEAK_SOS","OPP_STRONG_RECORD_WEAK_SOS","TEAM_STRONG_RECORD_WEAK_UNDERLYING","OPP_STRONG_RECORD_WEAK_UNDERLYING","TEAM_OPPADJ_NETYPP_ADV_075","OPP_OPPADJ_NETYPP_ADV_075"],
         "RECENT_VS_SEASON":["TEAM_RECENT3_OFF_YPP_UP_050","TEAM_RECENT3_NET_YPP_UP_075","TEAM_RECENT3_DEF_YPP_IMPROVED_050","TEAM_RECENT3_AND5_NET_YPP_UP","OPP_RECENT3_OFF_YPP_UP_050","OPP_RECENT3_NET_YPP_UP_075","OPP_RECENT3_DEF_YPP_IMPROVED_050","OPP_RECENT3_AND5_NET_YPP_UP"],
