@@ -64,6 +64,7 @@ import os
 import re
 import time
 import unicodedata
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -263,6 +264,8 @@ class CFBDClient:
                 return rows
             except Exception as exc:
                 last=exc
+                # An HTTP terminal status already classified above must not be
+                # retried or put through a second backoff path.
                 if attempt+1 < self.max_attempts: time.sleep(min(15, 1.5**attempt))
         status=(f"HTTP_{http_status}" if http_status else type(last).__name__)
         self._track_request(path,params,status,0,http_status)
@@ -1306,6 +1309,12 @@ def write_bigquery(df: pd.DataFrame, project: str, dataset: str, table: str, sea
         existing = pd.DataFrame()
     else:
         existing = client.query(f"SELECT * FROM `{table_id}`").to_dataframe(create_bqstorage_client=False)
+    if final.duplicated(["Season","Game_ID","Team_Key"]).any():
+        raise RuntimeError("CFBD_FEATURE_REFRESH_DUPLICATE_KEYS; refusing destructive replacement")
+    side_counts=final.groupby(["Season","Game_ID"],dropna=False)["Team_Key"].nunique(dropna=True)
+    if (side_counts != 2).any():
+        examples=side_counts[side_counts != 2].head(8).to_dict()
+        raise RuntimeError(f"CFBD_FEATURE_SIDE_PARITY_FAILED games={examples}; refusing write")
     if not existing.empty:
         keys=[k for k in ("Season","Game_ID","Team_Key") if k in final.columns and k in existing.columns]
         if len(keys)!=3:
@@ -1314,6 +1323,11 @@ def write_bigquery(df: pd.DataFrame, project: str, dataset: str, table: str, sea
             raise RuntimeError("CFBD_FEATURE_DUPLICATE_KEYS; refusing destructive replacement")
         old_current=existing.loc[pd.to_numeric(existing["Season"],errors="coerce").isin(seasons)].copy()
         if not old_current.empty:
+            for yr in seasons:
+                old_n=int(pd.to_numeric(old_current["Season"],errors="coerce").eq(yr).sum())
+                fresh_n=int(pd.to_numeric(final["Season"],errors="coerce").eq(yr).sum())
+                if fresh_n < old_n:
+                    raise RuntimeError(f"CFBD_FEATURE_ROW_REGRESSION season={yr} old={old_n} new={fresh_n}; refusing destructive refresh")
             new=final.set_index(keys); old=old_current.set_index(keys)
             # Only retain past values for missing current cells. Such retained
             # cells are explicitly logged; they must NOT count as a fresh pull.
@@ -1358,6 +1372,26 @@ def _qualified(project: str, dataset: str, table: str) -> str:
     return table if table.count(".") == 2 else f"{project}.{dataset}.{table}"
 
 
+def _bq_ddl_type(field) -> str:
+    """Convert BigQuery SchemaField API types to valid GoogleSQL DDL types.
+
+    The BigQuery Python schema API uses FLOAT/INTEGER/BOOLEAN/RECORD, but
+    GoogleSQL ALTER TABLE expects FLOAT64/INT64/BOOL/STRUCT<...>.
+    """
+    name=str(field.field_type).upper()
+    aliases={"FLOAT": "FLOAT64", "INTEGER": "INT64", "BOOLEAN": "BOOL"}
+    if name in {"RECORD", "STRUCT"}:
+        children=list(getattr(field,"fields",()) or ())
+        if not children:
+            raise ValueError(f"Cannot safely add a record field without nested schema: {field.name}")
+        sql_type="STRUCT<"+", ".join(f"`{child.name}` {_bq_ddl_type(child)}" for child in children)+">"
+    else:
+        sql_type=aliases.get(name,name)
+    if str(getattr(field,"mode","NULLABLE")).upper()=="REPEATED":
+        return f"ARRAY<{sql_type}>"
+    return sql_type
+
+
 def _utc_now() -> pd.Timestamp:
     return pd.Timestamp.now(tz="UTC")
 
@@ -1377,67 +1411,200 @@ def _merge_dataframe(client, table_id: str, df: pd.DataFrame, keys: list[str], *
     if df is None or df.empty:
         return {"status":"EMPTY","table":table_id,"rows":0}
     d=_clean_bq_frame(df).copy()
-    tmp=f"{table_id}__stage_{int(time.time()*1000)}"
-    # Create target from the dataframe on first use. Subsequent calls add new columns.
+    tmp=f"{table_id}__stage_{uuid.uuid4().hex[:12]}"
+    # Only an actual NotFound means the target may be created. Permission and
+    # query errors are never interpreted as an empty warehouse.
+    from google.api_core.exceptions import NotFound
     try:
-        client.get_table(table_id)
-    except Exception:
-        cfg=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+        target=client.get_table(table_id)
+    except NotFound:
+        cfg=bigquery.LoadJobConfig(write_disposition="WRITE_EMPTY")
         if partition_field and partition_field in d.columns:
             cfg.time_partitioning=bigquery.TimePartitioning(field=partition_field)
         client.load_table_from_dataframe(d,table_id,job_config=cfg).result()
         return {"status":"CREATED","table":table_id,"rows":len(d)}
-    target=client.get_table(table_id)
+    if d.duplicated(keys).any():
+        raise RuntimeError(f"CFBD_SIDECAR_DUPLICATE_KEYS table={table_id} keys={keys}")
     existing={f.name:f for f in target.schema}
-    # Load the actual batch into a temp table so BigQuery can infer nullable field types.
-    client.load_table_from_dataframe(d,tmp,job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
-    inferred=client.get_table(tmp).schema
-    for f in inferred:
-        if f.name not in existing:
-            client.query(f"ALTER TABLE `{table_id}` ADD COLUMN IF NOT EXISTS `{f.name}` {f.field_type}").result()
-    cols=list(d.columns)
-    on=" AND ".join([f"T.`{k}` IS NOT DISTINCT FROM S.`{k}`" for k in keys])
-    updates=[c for c in cols if c not in keys]
-    update_sql=",\n      ".join([f"`{c}`=S.`{c}`" for c in updates]) or f"`{keys[0]}`=S.`{keys[0]}`"
-    insert_cols=", ".join([f"`{c}`" for c in cols]); insert_vals=", ".join([f"S.`{c}`" for c in cols])
-    sql=f"""
-    MERGE `{table_id}` T
-    USING `{tmp}` S
-      ON {on}
-    WHEN MATCHED THEN UPDATE SET
-      {update_sql}
-    WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})
-    """
-    client.query(sql).result(); client.delete_table(tmp,not_found_ok=True)
-    return {"status":"PASS","table":table_id,"rows":len(d)}
+    try:
+        # Stage inferred columns, and remove staging even on ALTER/MERGE error.
+        client.load_table_from_dataframe(d,tmp,job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
+        for f in client.get_table(tmp).schema:
+            if f.name not in existing:
+                client.query(f"ALTER TABLE `{table_id}` ADD COLUMN IF NOT EXISTS `{f.name}` {_bq_ddl_type(f)}").result()
+        cols=list(d.columns)
+        on=" AND ".join([f"T.`{k}` IS NOT DISTINCT FROM S.`{k}`" for k in keys])
+        updates=[c for c in cols if c not in keys]
+        update_sql=",\n      ".join([f"`{c}`=COALESCE(S.`{c}`, T.`{c}`)" if c.startswith("CFBD_") else f"`{c}`=S.`{c}`" for c in updates]) or f"`{keys[0]}`=S.`{keys[0]}`"
+        insert_cols=", ".join([f"`{c}`" for c in cols]); insert_vals=", ".join([f"S.`{c}`" for c in cols])
+        client.query(f"""
+          MERGE `{table_id}` T USING `{tmp}` S ON {on}
+          WHEN MATCHED THEN UPDATE SET {update_sql}
+          WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})
+        """).result()
+        return {"status":"PASS","table":table_id,"rows":len(d)}
+    finally:
+        client.delete_table(tmp,not_found_ok=True)
+
+
+# Immutable API-archive schema contract. Season may be absent on endpoints that
+# are not season-scoped; use nullable INT64, never pandas float inference.
+_ARCHIVE_COLUMN_TYPES = {
+    "Archive_Row_ID": "STRING",
+    "Archive_Batch_ID": "STRING",
+    "Endpoint": "STRING",
+    "Params_JSON": "STRING",
+    "Season": "INT64",
+    "Retrieved_At": "TIMESTAMP",
+    "Row_Index": "INT64",
+    "Payload_JSON": "STRING",
+    "Source_Tag": "STRING",
+}
+
+
+def _archive_prepare_frame(archive_rows: list[dict[str, Any]]) -> pd.DataFrame:
+    d = pd.DataFrame(archive_rows)
+    missing = set(_ARCHIVE_COLUMN_TYPES) - set(d.columns)
+    if missing:
+        raise RuntimeError(f"CFBD_ARCHIVE_SCHEMA_MISSING columns={sorted(missing)}")
+    d = d[list(_ARCHIVE_COLUMN_TYPES)].drop_duplicates("Archive_Row_ID", keep="first").copy()
+    if d["Archive_Row_ID"].isna().any():
+        raise RuntimeError("CFBD_ARCHIVE_NULL_KEY")
+    for name in ("Season", "Row_Index"):
+        numeric = pd.to_numeric(d[name], errors="coerce")
+        bad = d[name].notna() & (numeric.isna() | (numeric % 1 != 0))
+        if bad.any():
+            raise RuntimeError(f"CFBD_ARCHIVE_INVALID_INTEGER column={name} rows={int(bad.sum())}")
+        d[name] = numeric.astype("Int64")
+    return _clean_bq_frame(d)
+
+
+def _archive_explicit_schema():
+    from google.cloud import bigquery
+    return [bigquery.SchemaField(name, field_type, mode="NULLABLE")
+            for name, field_type in _ARCHIVE_COLUMN_TYPES.items()]
+
+
+def _archive_assert_stage(client, stage_id: str) -> int:
+    """Never silently null invalid seasons or MERGE duplicate archive IDs."""
+    actual={f.name for f in client.get_table(stage_id).schema}
+    missing=set(_ARCHIVE_COLUMN_TYPES)-actual
+    if missing:
+        raise RuntimeError(f"CFBD_ARCHIVE_STAGE_MISSING_COLUMNS stage={stage_id} columns={sorted(missing)}")
+    result=list(client.query(f"""
+        SELECT COUNT(*) AS n, COUNT(DISTINCT Archive_Row_ID) AS unique_keys,
+          COUNTIF(Archive_Row_ID IS NULL) AS null_keys,
+          COUNTIF(Season IS NOT NULL AND (
+            SAFE_CAST(Season AS INT64) IS NULL
+            OR SAFE_CAST(Season AS FLOAT64) != SAFE_CAST(SAFE_CAST(Season AS INT64) AS FLOAT64)
+          )) AS bad_seasons
+        FROM `{stage_id}`
+    """).result())[0]
+    n=int(result.n)
+    if n == 0 or int(result.unique_keys) != n or int(result.null_keys) or int(result.bad_seasons):
+        raise RuntimeError(f"CFBD_ARCHIVE_INVALID_STAGE stage={stage_id} rows={n} unique={result.unique_keys} null={result.null_keys} invalid_seasons={result.bad_seasons}")
+    return n
+
+
+def _archive_upsert_stage(client, target_id: str, stage_id: str) -> dict[str, Any]:
+    """Explicit, name-matched INSERT; CAST fixes legacy FLOAT64 staging Season."""
+    target_schema={f.name: str(f.field_type).upper() for f in client.get_table(target_id).schema}
+    missing=set(_ARCHIVE_COLUMN_TYPES)-set(target_schema)
+    if missing:
+        raise RuntimeError(f"CFBD_ARCHIVE_TARGET_SCHEMA_MISSING columns={sorted(missing)}")
+    type_aliases={"INTEGER":"INT64", "FLOAT":"FLOAT64", "BOOLEAN":"BOOL"}
+    wrong={name:{"actual":target_schema[name],"expected":type_name}
+           for name,type_name in _ARCHIVE_COLUMN_TYPES.items()
+           if type_aliases.get(target_schema[name],target_schema[name]) != type_name}
+    if wrong:
+        raise RuntimeError(f"CFBD_ARCHIVE_TARGET_WRONG_TYPES {wrong}")
+    n=_archive_assert_stage(client,stage_id)
+    cols=list(_ARCHIVE_COLUMN_TYPES)
+    names=", ".join(f"`{x}`" for x in cols)
+    values=", ".join(
+        f"CAST(S.`{x}` AS INT64)" if x in {"Season", "Row_Index"}
+        else f"S.`{x}`" for x in cols
+    )
+    # Archive is immutable: existing hashes are never updated; retry is idempotent.
+    client.query(f"""
+        MERGE `{target_id}` T USING `{stage_id}` S
+        ON T.Archive_Row_ID=S.Archive_Row_ID
+        WHEN NOT MATCHED THEN INSERT ({names}) VALUES ({values})
+    """).result()
+    counts=list(client.query(f"""
+        SELECT COUNT(*) AS present
+        FROM `{stage_id}` S
+        JOIN `{target_id}` T ON T.Archive_Row_ID=S.Archive_Row_ID
+    """).result())[0]
+    present=int(counts.present)
+    if present != n:
+        raise RuntimeError(f"CFBD_ARCHIVE_READBACK_FAILED stage={stage_id} expected={n} found={present}")
+    return {"status":"PASS", "target":target_id, "stage":stage_id, "stage_rows":n,
+            "verified_rows":present, "api_calls":0}
 
 
 def write_api_archive(client, project: str, dataset: str, archive_rows: list[dict[str,Any]]) -> dict[str,Any]:
-    """Immutable content-addressed archive of every successful CFBD response row."""
+    """Append content-addressed API snapshots; explicit schema and readback."""
     if not archive_rows:
         return {"status":"EMPTY","rows":0}
-    d=pd.DataFrame(archive_rows).drop_duplicates("Archive_Row_ID",keep="last")
-    table_id=_qualified(project,dataset,API_ARCHIVE_TABLE)
-    # Archive rows are immutable. Generic MERGE would rewrite Retrieved_At, so use
-    # a content-hash key and preserve the first observation already stored.
+    from google.api_core.exceptions import NotFound
     from google.cloud import bigquery
+    d=_archive_prepare_frame(archive_rows)
+    tid=_qualified(project,dataset,API_ARCHIVE_TABLE)
+    schema=_archive_explicit_schema()
     try:
-        client.get_table(table_id)
-    except Exception:
-        cfg=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+        client.get_table(tid)
+    except NotFound:
+        cfg=bigquery.LoadJobConfig(write_disposition="WRITE_EMPTY", schema=schema)
         cfg.time_partitioning=bigquery.TimePartitioning(field="Retrieved_At")
-        client.load_table_from_dataframe(_clean_bq_frame(d),table_id,job_config=cfg).result()
-        return {"status":"CREATED","table":table_id,"rows":len(d)}
-    tmp=f"{table_id}__stage_{int(time.time()*1000)}"
-    client.load_table_from_dataframe(_clean_bq_frame(d),tmp,job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
-    cols=list(d.columns); ic=", ".join(f"`{c}`" for c in cols); iv=", ".join(f"S.`{c}`" for c in cols)
-    client.query(f"""
-      MERGE `{table_id}` T USING `{tmp}` S
-      ON T.Archive_Row_ID=S.Archive_Row_ID
-      WHEN NOT MATCHED THEN INSERT ({ic}) VALUES ({iv})
-    """).result()
-    client.delete_table(tmp,not_found_ok=True)
-    return {"status":"PASS","table":table_id,"rows":len(d)}
+        client.load_table_from_dataframe(d,tid,job_config=cfg).result()
+        return {"status":"CREATED","table":tid,"rows":len(d)}
+    # Unique staging IDs are left in place on failure so --repair-archive
+    # can recover a partially completed run without another API request.
+    stage=f"{tid}__stage_{uuid.uuid4().hex[:12]}"
+    cfg=bigquery.LoadJobConfig(write_disposition="WRITE_EMPTY", schema=schema)
+    client.load_table_from_dataframe(d,stage,job_config=cfg).result()
+    print(f"[CFBD-ARCHIVE-STAGED] table={stage} rows={len(d)}")
+    res=_archive_upsert_stage(client,tid,stage)
+    client.delete_table(stage,not_found_ok=True)
+    print(f"[CFBD-ARCHIVE-READBACK] stage_rows={res['stage_rows']} verified={res['verified_rows']}")
+    return {"status":"PASS","table":tid,"rows":len(d),"verified_rows":res['verified_rows']}
+
+
+def _archive_leftover_stage_tables(client, project: str, dataset: str) -> list[str]:
+    """Discover only our content-addressed archive's *explicitly named* stages."""
+    prefix=f"{API_ARCHIVE_TABLE}__stage_"
+    stages=[]
+    for item in client.list_tables(f"{project}.{dataset}"):
+        name=item.table_id
+        if name.startswith(prefix) and re.fullmatch(r"[a-zA-Z0-9_]+",name):
+            stages.append(_qualified(project,dataset,name))
+    return sorted(stages)
+
+
+def repair_api_archive_from_stages(client, project: str, dataset: str) -> dict[str,Any]:
+    """Recover *original* successful API responses from leftover BigQuery stage tables.
+
+    Reads only explicitly named ncaaf_cfbd_api_archive__stage_* tables. This
+    never creates synthetic snapshots or calls CollegeFootballData.
+    """
+    tid=_qualified(project,dataset,API_ARCHIVE_TABLE)
+    stages=_archive_leftover_stage_tables(client,project,dataset)
+    print(f"[CFBD-ARCHIVE-RECOVERY-PLAN] stage_tables={len(stages)} cfbd_api_calls=0")
+    if not stages:
+        return {"status":"NO_STAGES_FOUND","recovered":0,"cfbd_api_calls":0,
+                "note":"Previous staging tables may have been deleted; cannot recreate unsaved API responses."}
+    # Validate all candidates before ANY writes or deletes.
+    counts={stage:_archive_assert_stage(client,stage) for stage in stages}
+    recovered=0
+    for stage in stages:
+        res=_archive_upsert_stage(client,tid,stage)
+        recovered+=res["verified_rows"]
+        print(f"[CFBD-ARCHIVE-RECOVERED] stage={stage} verified={res['verified_rows']} api_calls=0")
+        # Successful stages can be safely cleaned up only after readback.
+        client.delete_table(stage,not_found_ok=True)
+    print(f"[CFBD-ARCHIVE-RECOVERY] status=PASS stages={len(stages)} verified_rows={recovered} cfbd_api_calls=0")
+    return {"status":"PASS","stages":len(stages),"verified_rows":recovered,"cfbd_api_calls":0}
 
 
 def build_personnel_sidecar(features: pd.DataFrame) -> pd.DataFrame:
@@ -1505,23 +1672,28 @@ def merge_environment_into_travel(client, project: str, dataset: str, features: 
     env["CFBD_Environment_Updated_At"]=_utc_now(); env["CFBD_Environment_Source_Tag"]=SOURCE_TAG
     # Add columns using inferred schema then MERGE onto existing travel rows only.
     from google.cloud import bigquery
-    tmp=f"{tid}__cfbd_stage_{int(time.time()*1000)}"
-    client.load_table_from_dataframe(_clean_bq_frame(env),tmp,job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
-    target=client.get_table(tid); existing={f.name:f for f in target.schema}
-    for f in client.get_table(tmp).schema:
-        if f.name not in existing:
-            client.query(f"ALTER TABLE `{tid}` ADD COLUMN IF NOT EXISTS `{f.name}` {f.field_type}").result()
-    updates=[c for c in env.columns if c not in {"Season","Game_ID"}]
-    us=",\n      ".join([f"`{c}`=S.`{c}`" for c in updates])
-    client.query(f"""
-      MERGE `{tid}` T USING `{tmp}` S
-      ON T.Season=S.Season AND CAST(T.Game_ID AS STRING)=CAST(S.Game_ID AS STRING)
-      WHEN MATCHED THEN UPDATE SET {us}
-    """).result()
-    mdf=client.query(f"SELECT COUNT(*) n FROM `{tid}` WHERE CFBD_Environment_Source_Tag=@tag",job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("tag","STRING",SOURCE_TAG)])).to_dataframe(create_bqstorage_client=False)
-    n=int(mdf.iloc[0]["n"]) if len(mdf) else 0
-    client.delete_table(tmp,not_found_ok=True)
-    return {"status":"PASS","table":tid,"source_rows":len(env),"updated_rows":n}
+    tmp=f"{tid}__cfbd_stage_{uuid.uuid4().hex[:12]}"
+    try:
+        client.load_table_from_dataframe(_clean_bq_frame(env),tmp,job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
+        target=client.get_table(tid); existing={f.name:f for f in target.schema}
+        for f in client.get_table(tmp).schema:
+            if f.name not in existing:
+                client.query(f"ALTER TABLE `{tid}` ADD COLUMN IF NOT EXISTS `{f.name}` {_bq_ddl_type(f)}").result()
+        updates=[c for c in env.columns if c not in {"Season","Game_ID"}]
+        us=",\n      ".join([f"`{c}`=COALESCE(S.`{c}`, T.`{c}`)" if c.startswith("CFBD_") else f"`{c}`=S.`{c}`" for c in updates])
+        client.query(f"""
+          MERGE `{tid}` T USING `{tmp}` S
+          ON T.Season=S.Season AND CAST(T.Game_ID AS STRING)=CAST(S.Game_ID AS STRING)
+          WHEN MATCHED THEN UPDATE SET {us}
+        """).result()
+        yr=sorted({int(y) for y in pd.to_numeric(env["Season"],errors="coerce").dropna().tolist()})
+        mdf=client.query(f"SELECT COUNT(*) n FROM `{tid}` WHERE CFBD_Environment_Source_Tag=@tag AND Season IN UNNEST(@years)",job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("tag","STRING",SOURCE_TAG),bigquery.ArrayQueryParameter("years","INT64",yr)])).to_dataframe(create_bqstorage_client=False)
+        n=int(mdf.iloc[0]["n"]) if len(mdf) else 0
+        if n == 0:
+            raise RuntimeError(f"CFBD_TRAVEL_NO_MATCHING_ROWS seasons={yr}; check travel.Game_ID mapping")
+        return {"status":"PASS","table":tid,"source_rows":len(env),"updated_rows":n}
+    finally:
+        client.delete_table(tmp,not_found_ok=True)
 
 
 def _median(values) -> float:
@@ -1783,6 +1955,93 @@ def warehouse_season_verification(client, project: str, dataset: str, table: str
 
 
 # ---------------------------------------------------------------------------
+# Operation mode: metadata preflight and warehouse-only repair
+# ---------------------------------------------------------------------------
+
+def warehouse_preflight(client, project: str, dataset: str, table: str,
+                        require_features: bool = False, require_travel: bool = True,
+                        require_archive_clear: bool = False) -> dict[str, Any]:
+    """Validate destinations and key columns before API spending/writes.
+
+    This does not consume the CFBD allowance. Missing feature staging is okay
+    for a first backfill but forbidden for a warehouse-only repair.
+    """
+    from google.api_core.exceptions import NotFound
+    specs={
+        'features': (table, {'Season','Game_ID','Team_Key'},require_features),
+        'travel': (TRAVEL_TABLE, {'Season','Game_ID'},require_travel),
+        'raw': (CANONICAL_RAW_TABLE, {'Season','Source_Name'},False),
+        'archive': (API_ARCHIVE_TABLE, set(_ARCHIVE_COLUMN_TYPES), False),
+    }
+    result={'status':'PASS','tables':{}}
+    for name,(short,required,mandatory) in specs.items():
+        tid=_qualified(project,dataset,short)
+        try: obj=client.get_table(tid)
+        except NotFound:
+            state='MISSING_REQUIRED' if mandatory else 'NOT_CREATED'
+        else:
+            absent=sorted(required-{f.name for f in obj.schema})
+            types={f.name:str(f.field_type).upper() for f in obj.schema}
+            state='BAD_SCHEMA' if absent else 'PASS'
+            if name=='archive' and not absent:
+                aliases={"INTEGER":"INT64", "FLOAT":"FLOAT64", "BOOLEAN":"BOOL"}
+                bad=[k for k,t in _ARCHIVE_COLUMN_TYPES.items() if aliases.get(types[k],types[k])!=t]
+                if bad: state='BAD_ARCHIVE_TYPES'
+        result['tables'][name]={'table':tid,'status':state}
+        if state not in {'PASS','NOT_CREATED'} or (state=='NOT_CREATED' and mandatory):
+            result['status']='FAIL'
+        print(f"[CFBD-PREFLIGHT-TABLE] name={name} table={tid} status={state}")
+    if require_archive_clear:
+        # No repeat API expenditure if an earlier run left recoverable archive
+        # snapshots behind. Repair them first, then proceed with new seasons.
+        stages=_archive_leftover_stage_tables(client,project,dataset)
+        result['pending_archive_stages']=len(stages)
+        if stages:
+            result['status']='FAIL'
+            print(f"[CFBD-PREFLIGHT-ARCHIVE-PENDING] stages={len(stages)} action=RUN_--repair-archive no_api_calls=TRUE")
+    print(f"[CFBD-PREFLIGHT] status={result['status']} cfbd_api_calls=0")
+    return result
+
+
+def repair_warehouse_from_stored_features(client,project: str,dataset: str,table: str,
+                                          seasons: list[int],
+                                          *,repair_personnel: bool = False) -> dict[str,Any]:
+    """Restart post-load warehouse work without a token or another CFBD pull.
+
+    Does not recreate raw API snapshots or player-level rows. Those are only
+    correct when sourced from original endpoint responses; never synthesize them.
+    """
+    from google.cloud import bigquery
+    if not seasons: raise RuntimeError('CFBD_REPAIR_REQUIRES_SEASONS')
+    check=warehouse_preflight(client,project,dataset,table,require_features=True)
+    if check['status']!='PASS': raise RuntimeError('CFBD_REPAIR_PREFLIGHT_FAILED')
+    tid=_qualified(project,dataset,table)
+    cfg=bigquery.QueryJobConfig(query_parameters=[bigquery.ArrayQueryParameter('years','INT64',list(map(int,seasons)))])
+    d=client.query(f"SELECT * FROM `{tid}` WHERE Season IN UNNEST(@years)",job_config=cfg).to_dataframe(create_bqstorage_client=False)
+    if d.empty: raise RuntimeError(f'CFBD_REPAIR_FEATURE_SEASONS_NOT_STORED seasons={seasons}')
+    for yr in seasons:
+        if not pd.to_numeric(d['Season'],errors='coerce').eq(yr).any():
+            raise RuntimeError(f'CFBD_REPAIR_SEASON_MISSING season={yr}')
+    keys=['Season','Game_ID','Team_Key']
+    if not set(keys).issubset(d.columns) or d.duplicated(keys).any():
+        raise RuntimeError('CFBD_REPAIR_DUPLICATE_OR_MISSING_FEATURE_KEYS')
+    result={'status':'PASS','feature_rows':len(d),'seasons':seasons,'cfbd_api_calls':0}
+    if repair_personnel:
+        p=build_personnel_sidecar(d)
+        result['personnel']=_merge_dataframe(client,_qualified(project,dataset,PERSONNEL_TABLE),p,['Season','Team_Key'])
+        print(f"[CFBD-REPAIR-PERSONNEL] {result['personnel']}")
+    travel=merge_environment_into_travel(client,project,dataset,d)
+    print(f'[CFBD-REPAIR-TRAVEL] {travel}')
+    if travel.get('status')!='PASS': raise RuntimeError(f'CFBD_REPAIR_TRAVEL_FAILED {travel}')
+    result['travel']=travel
+    v=warehouse_season_verification(client,project,dataset,table,d,seasons,[])
+    result['feature_verification']=v['status']
+    if v['status']=='FAIL': raise RuntimeError('CFBD_REPAIR_READBACK_FAILED')
+    print(f"[CFBD-REPAIR-COMPLETE] status=PASS rows={len(d)} seasons={seasons} api_calls=0 archive=UNCHANGED player_sidecar=UNCHANGED feature_verify={v['status']}")
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1799,6 +2058,7 @@ def run(
     seasons=sorted(set(seasons or []))
     if not seasons and not history_seasons:
         raise RuntimeError("No feature or history seasons selected")
+    print(f"[CFBD-RUN-PLAN] features={seasons} history={history_seasons} project={project} dataset={dataset} mode=API_REFRESH")
     client = CFBDClient()
     bq=None
     if not no_bq:
@@ -1913,10 +2173,15 @@ def run(
             if not player_df.empty:
                 plres=_merge_dataframe(bq,_qualified(project,dataset,PLAYER_HISTORY_TABLE),player_df,["Season","Team_Key","Player_Key"])
                 print(f"[CFBD-PLAYERS] {plres}")
-        if not skip_travel_update and not out.empty:
-            tres=merge_environment_into_travel(bq,project,dataset,out); print(f"[CFBD-TRAVEL-ENV] {tres}")
+        # Archive all successful API responses before lower-priority derived
+        # travel maintenance. An interrupted travel MERGE must not lose the
+        # original fetched responses or force 71+ repeat API calls.
         if not skip_archive:
             ares=write_api_archive(bq,project,dataset,client.archive_rows); print(f"[CFBD-ARCHIVE] {ares}")
+        if not skip_travel_update and not out.empty:
+            tres=merge_environment_into_travel(bq,project,dataset,out); print(f"[CFBD-TRAVEL-ENV] {tres}")
+            if tres.get("status") != "PASS":
+                raise RuntimeError(f"CFBD_TRAVEL_STEP_FAILED {tres}")
         if history_results:
             cres=rebuild_context_if_available(bq,context_rebuild_sql); print(f"[CFBD-CONTEXT-REBUILD] {cres}")
         print(f"[CFBD-WAREHOUSE-HEALTH] {warehouse_health(bq,project,dataset)}")
@@ -1999,6 +2264,11 @@ def main() -> None:
     p.add_argument("--no-bq", action="store_true")
     p.add_argument("--self-test", action="store_true")
     p.add_argument("--verify-only", action="store_true",help="BQ warehouse and historical opening-market audit only; no CFBD API calls/writes/token needed")
+    p.add_argument("--preflight", action="store_true",help="Check destination schemas and credentials before a live run; no API calls or writes")
+    p.add_argument("--repair-warehouse", action="store_true",help="Resume the travel/derived warehouse step using persisted features; zero CFBD API calls")
+    p.add_argument("--repair-personnel", action="store_true",help="With --repair-warehouse, also re-merge personnel sidecar")
+    p.add_argument("--repair-archive", action="store_true",help="Recover failed prior API archive from leftover BigQuery stage; no CFBD key/calls")
+    p.add_argument("--fail-on-partial", action="store_true",help="Make read-only verification return nonzero for PARTIAL coverage")
     args = p.parse_args()
     if args.self_test:
         _self_test(); return
@@ -2006,15 +2276,45 @@ def main() -> None:
     history = _parse_seasons(args.history_seasons)
     if not seasons and not history:
         raise SystemExit("No seasons selected")
-    if args.verify_only:
-        if args.no_bq: raise SystemExit("--verify-only requires BigQuery (remove --no-bq)")
+    if args.verify_only or args.preflight or args.repair_warehouse or args.repair_archive:
+        if args.no_bq: raise SystemExit("This operation requires BigQuery (remove --no-bq)")
         from google.cloud import bigquery
         bq=bigquery.Client(project=args.project)
+        if args.repair_archive:
+            recovery=repair_api_archive_from_stages(bq,args.project,args.dataset)
+            if recovery['status']!='PASS':
+                print(f"[CFBD-ARCHIVE-RECOVERY] status={recovery['status']} cfbd_api_calls=0")
+                raise SystemExit(2)
+            # Run warehouse verification immediately as part of recovery; no
+            # separate command or CFBD key is needed. Historical odds gaps
+            # report PARTIAL rather than being silently synthesized.
+            audit=warehouse_season_verification(bq,args.project,args.dataset,args.table,None,seasons,history)
+            print(f"[CFBD-RECOVERY-FINAL] archive=PASS feature_audit={audit['status']} cfbd_api_calls=0")
+            if audit['status']=='FAIL' or (args.fail_on_partial and audit['status']!='PASS'):
+                raise SystemExit(2)
+            return
+        if args.preflight:
+            ck=warehouse_preflight(bq,args.project,args.dataset,args.table,require_features=False,
+                                  require_travel=not args.skip_travel_update,
+                                  require_archive_clear=True)
+            print(f"[CFBD-PREFLIGHT-KEY] configured={bool(os.getenv('CFBD_API_KEY'))} (not printed)")
+            if ck['status']!='PASS': raise SystemExit(2)
+            return
+        if args.repair_warehouse:
+            repair_warehouse_from_stored_features(bq,args.project,args.dataset,args.table,seasons,
+                                                  repair_personnel=args.repair_personnel)
+            return
         print(f"[CFBD-WAREHOUSE-HEALTH] {warehouse_health(bq,args.project,args.dataset)}")
         result=warehouse_season_verification(bq,args.project,args.dataset,args.table,None,seasons,history)
         print(f"[CFBD-WAREHOUSE-VERIFY] status={result['status']} mode=READ_ONLY tier2_api_calls=0")
-        if result['status']=="FAIL": raise SystemExit(2)
+        if result['status']=="FAIL" or (args.fail_on_partial and result['status']!='PASS'): raise SystemExit(2)
         return
+    if not args.no_bq:
+        from google.cloud import bigquery
+        ck=warehouse_preflight(bigquery.Client(project=args.project),args.project,args.dataset,args.table,
+                               require_features=False,require_travel=not args.skip_travel_update,
+                               require_archive_clear=True)
+        if ck['status']!='PASS': raise SystemExit('CFBD_PREFLIGHT_FAILED: no CFBD requests were made')
     run(
         seasons,args.project,args.dataset,args.table,args.local_output,args.no_bq,
         history_seasons=history,context_rebuild_sql=args.context_rebuild_sql,
