@@ -110,10 +110,12 @@ _BLOCKED_FEATURE_TOKENS = (
 
 _ADVANCED_TOKENS = (
     "epa", "ppa", "success", "explos", "havoc", "line_yards", "stuff_rate",
-    "power_success", "field_position", "points_per_opportunity", "drive_",
-    "pressure_rate", "sack_rate", "early_down", "passing_down", "qb_",
-    "returning_production", "returning_", "roster_continuity", "roster_",
-    "portal_", "recruit", "talent", "elo_",
+    "power_success", "powersuccess", "field_position", "starting_field", "scoring_opportunity",
+    "ppa_per_drive", "yards_per_drive", "plays_per_drive", "drive_",
+    "pressure_rate", "sack_rate", "sackrate", "early_down", "earlydown", "passing_down", "passingdown",
+    "qb_", "qb_game_ppa", "qb_game_pass_success",
+    "returning_production", "returning_", "roster_continuity", "roster_", "prior_player", "prior_ppa_return", "prior_usage_return",
+    "portal_", "recruit", "talent", "elo_", "prioryear_sp", "prioryear_srs", "prioryear_fpi", "prioryear_core",
 )
 
 _ADVANCED_DATA_FAMILIES = {
@@ -125,15 +127,18 @@ _ADVANCED_DATA_FAMILIES = {
     "Stuff rate": ("stuff_rate", "stuffrate"),
     "Power success": ("power_success", "powersuccess"),
     "Field position": ("field_position", "starting_field"),
-    "Drive efficiency": ("drive_efficiency", "drive_points", "points_per_drive", "points_per_opportunity"),
-    "Sack / pressure rate": ("sack_rate", "pressure_rate", "pressure_pct"),
-    "Early-down efficiency": ("early_down",),
-    "Passing-down efficiency": ("passing_down",),
-    "QB efficiency": ("qb_epa", "qb_ppa", "qb_success", "qb_eff", "quarterback"),
-    "Returning production / roster continuity": ("returning_production", "returning_", "roster_continuity", "roster_", "returning_starters"),
+    "Drive efficiency": ("drive_efficiency", "drive_points", "points_per_drive", "points_per_opportunity", "ppa_per_drive", "yards_per_drive", "scoring_opportunity"),
+    "Sack / pressure rate": ("sack_rate", "sackrate", "pressure_rate", "pressure_pct"),
+    "Early-down efficiency": ("early_down", "earlydown"),
+    "Passing-down efficiency": ("passing_down", "passingdown"),
+    "QB efficiency": ("qb_epa", "qb_ppa", "qb_success", "qb_eff", "qb_game_ppa", "qb_game_pass_success", "quarterback"),
+    "Returning production / roster continuity": ("returning_production", "returning_", "roster_continuity", "roster_", "returning_starters", "prior_ppa_return", "prior_usage_return"),
+    "Player production continuity": ("prior_player", "topppa_returned", "topusage_returned", "highusage_lost", "top3_usage_share"),
     "Transfer portal": ("portal_",),
     "Recruiting / talent": ("recruit", "talent", "blue_chip"),
     "Pregame Elo": ("elo_prior", "matchup_elo"),
+    "Prior-season public ratings": ("prioryear_sp", "prioryear_srs", "prioryear_fpi", "prioryear_core"),
+    "Conference familiarity": ("same_conference", "conference_games_prior", "conference_game_streak"),
 }
 
 NCAAF_CFBD_MINER_FEATURE_TABLE = os.getenv(

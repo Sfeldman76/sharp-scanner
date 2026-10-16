@@ -4406,6 +4406,46 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
     add("CFBD_RECRUIT_RANK_ADV_20PLUS","CFBD_TALENT_RECRUITING",_radv.ge(20),source_ok=_radv.notna().any(),min_n=20)
     add("CFBD_RECRUIT_RANK_DISADV_20PLUS","CFBD_TALENT_RECRUITING",_radv.le(-20),source_ok=_radv.notna().any(),min_n=20)
 
+    # V2.34 broader CFBD-only personnel/talent context. These are season-static
+    # or prior-season fields from CollegeFootballData and therefore remain
+    # available before the target season/game.
+    _rpass=nfirst("CFBD_Returning_Pct_Pass_PPA"); _rrush=nfirst("CFBD_Returning_Pct_Rush_PPA"); _rrecv=nfirst("CFBD_Returning_Pct_Receive_PPA")
+    add("CFBD_RETURNING_PASS_PPA_HIGH_70","CFBD_ROSTER_CONTINUITY",_rpass.ge(.70),source_ok=_rpass.notna().any(),min_n=20)
+    add("CFBD_RETURNING_PASS_PPA_LOW_45","CFBD_ROSTER_CONTINUITY",_rpass.le(.45)&_rpass.notna(),source_ok=_rpass.notna().any(),min_n=20)
+    add("CFBD_RETURNING_RUSH_PPA_HIGH_70","CFBD_ROSTER_CONTINUITY",_rrush.ge(.70),source_ok=_rrush.notna().any(),min_n=20)
+    add("CFBD_RETURNING_RECEIVE_PPA_HIGH_70","CFBD_ROSTER_CONTINUITY",_rrecv.ge(.70),source_ok=_rrecv.notna().any(),min_n=20)
+    _retppa=nfirst("CFBD_Prior_PPA_Return_Pct"); _retuse=nfirst("CFBD_Prior_Usage_Return_Pct")
+    add("CFBD_PRIOR_PPA_RETURN_70PLUS","CFBD_PLAYER_CONTINUITY",_retppa.ge(.70),source_ok=_retppa.notna().any(),min_n=20)
+    add("CFBD_PRIOR_PPA_RETURN_45MINUS","CFBD_PLAYER_CONTINUITY",_retppa.le(.45)&_retppa.notna(),source_ok=_retppa.notna().any(),min_n=20)
+    add("CFBD_PRIOR_USAGE_RETURN_70PLUS","CFBD_PLAYER_CONTINUITY",_retuse.ge(.70),source_ok=_retuse.notna().any(),min_n=20)
+    add("CFBD_PRIOR_USAGE_RETURN_45MINUS","CFBD_PLAYER_CONTINUITY",_retuse.le(.45)&_retuse.notna(),source_ok=_retuse.notna().any(),min_n=20)
+    _topppa=nfirst("CFBD_Prior_TopPPA_Returned"); _topuse=nfirst("CFBD_Prior_TopUsage_Returned"); _hilost=nfirst("CFBD_Prior_HighUsage_Lost_Count")
+    add("CFBD_TOP_PPA_PLAYER_RETURNED","CFBD_PLAYER_CONTINUITY",_topppa.eq(1),source_ok=_topppa.notna().any(),min_n=20)
+    add("CFBD_TOP_PPA_PLAYER_LOST","CFBD_PLAYER_CONTINUITY",_topppa.eq(0)&_topppa.notna(),source_ok=_topppa.notna().any(),min_n=20)
+    add("CFBD_TOP_USAGE_PLAYER_LOST","CFBD_PLAYER_CONTINUITY",_topuse.eq(0)&_topuse.notna(),source_ok=_topuse.notna().any(),min_n=20)
+    add("CFBD_HIGH_USAGE_LOSSES_2PLUS","CFBD_PLAYER_CONTINUITY",_hilost.ge(2),source_ok=_hilost.notna().any(),min_n=20)
+    _conc=nfirst("CFBD_Prior_Top3_Usage_Share")
+    add("CFBD_PRIOR_USAGE_CONCENTRATED_TOP3_60PLUS","CFBD_PLAYER_CONTINUITY",_conc.ge(.60),source_ok=_conc.notna().any(),min_n=20)
+
+    _prating=nfirst("CFBD_Portal_Net_Rating"); _pnetppa=nfirst("CFBD_Portal_Net_Prior_TotalPPA"); _pnetuse=nfirst("CFBD_Portal_Net_Prior_Usage")
+    add("CFBD_PORTAL_NET_RATING_POS","CFBD_PORTAL_CONTEXT",_prating.gt(0),source_ok=_prating.notna().any(),min_n=20)
+    add("CFBD_PORTAL_NET_RATING_NEG","CFBD_PORTAL_CONTEXT",_prating.lt(0),source_ok=_prating.notna().any(),min_n=20)
+    add("CFBD_PORTAL_NET_PRIOR_PPA_POS","CFBD_PORTAL_CONTEXT",_pnetppa.gt(0),source_ok=_pnetppa.notna().any(),min_n=20)
+    add("CFBD_PORTAL_NET_PRIOR_PPA_NEG","CFBD_PORTAL_CONTEXT",_pnetppa.lt(0),source_ok=_pnetppa.notna().any(),min_n=20)
+    add("CFBD_PORTAL_NET_PRIOR_USAGE_POS","CFBD_PORTAL_CONTEXT",_pnetuse.gt(0),source_ok=_pnetuse.notna().any(),min_n=20)
+
+    _taladv=nfirst("CFBD_Matchup_Talent_Adv"); _recadv=nfirst("CFBD_Matchup_Recruit_Adv")
+    add("CFBD_TALENT_POINTS_ADV_100PLUS","CFBD_TALENT_RECRUITING",_taladv.ge(100),source_ok=_taladv.notna().any(),min_n=20)
+    add("CFBD_TALENT_POINTS_DISADV_100PLUS","CFBD_TALENT_RECRUITING",_taladv.le(-100),source_ok=_taladv.notna().any(),min_n=20)
+    add("CFBD_RECRUIT_POINTS_ADV_40PLUS","CFBD_TALENT_RECRUITING",_recadv.ge(40),source_ok=_recadv.notna().any(),min_n=20)
+
+    # Prior-season public rating context only. Same-season retrospective SP/FPI/
+    # SRS/CORE values are never exposed by the loader for historical selection.
+    for _nm,_col,_cut in (("SP","CFBD_Matchup_PriorYear_SP_Adv",5.0),("SRS","CFBD_Matchup_PriorYear_SRS_Adv",5.0),("FPI","CFBD_Matchup_PriorYear_FPI_Adv",5.0),("CORE","CFBD_Matchup_PriorYear_CORE_Adv",5.0)):
+        _rv=nfirst(_col)
+        add(f"CFBD_PRIORYEAR_{_nm}_ADV_5PLUS","CFBD_RATINGS_CONTEXT",_rv.ge(_cut),source_ok=_rv.notna().any(),min_n=20)
+        add(f"CFBD_PRIORYEAR_{_nm}_DISADV_5PLUS","CFBD_RATINGS_CONTEXT",_rv.le(-_cut),source_ok=_rv.notna().any(),min_n=20)
+
     _nppa=nfirst("CFBD_Season_Net_PPA_Prior"); _nppad=nfirst("CFBD_Matchup_Net_PPA_Adv")
     _nsucc=nfirst("CFBD_Matchup_Net_Success_Adv"); _nexpl=nfirst("CFBD_Matchup_Net_Explosiveness_Adv")
     add("CFBD_NET_PPA_POS_010","CFBD_ADVANCED_EFFICIENCY",_cf_games.ge(3)&_nppa.ge(.10),source_ok=_nppa.notna().any(),min_n=20)
@@ -4440,6 +4480,24 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
     add("CFBD_PASSING_DOWN_SUCCESS_EDGE_05","CFBD_ADVANCED_MATCHUP",_cf_games.ge(3)&(_opd-_odpd).ge(.05),source_ok=_opd.notna().any() and _odpd.notna().any(),min_n=20)
     add("CFBD_POWER_SUCCESS_EDGE_10","CFBD_ADVANCED_MATCHUP",_cf_games.ge(3)&(_opow-_odpow).ge(.10),source_ok=_opow.notna().any() and _odpow.notna().any(),min_n=20)
 
+    # PBP-derived, shifted pregame context: field position, drive efficiency,
+    # early/passing downs, sacks/dropbacks, explosive plays and scoring chances.
+    _ed=nfirst("CFBD_Matchup_EarlyDown_PPA_Adv"); _drv=nfirst("CFBD_Matchup_PPA_Per_Drive_Adv"); _sco=nfirst("CFBD_Matchup_Scoring_Opp_Rate_Adv")
+    add("CFBD_EARLY_DOWN_PPA_ADV_08","CFBD_ADVANCED_MATCHUP",_cf_games.ge(3)&_ed.ge(.08),source_ok=_ed.notna().any(),min_n=20)
+    add("CFBD_EARLY_DOWN_PPA_DISADV_08","CFBD_ADVANCED_MATCHUP",_cf_games.ge(3)&_ed.le(-.08),source_ok=_ed.notna().any(),min_n=20)
+    add("CFBD_PPA_PER_DRIVE_ADV_025","CFBD_ADVANCED_MATCHUP",_cf_games.ge(3)&_drv.ge(.25),source_ok=_drv.notna().any(),min_n=20)
+    add("CFBD_SCORING_OPP_RATE_ADV_08","CFBD_ADVANCED_MATCHUP",_cf_games.ge(3)&_sco.ge(.08),source_ok=_sco.notna().any(),min_n=20)
+    _fp=nfirst("CFBD_Season_CFBD_Game_Off_Field_Position_Prior"); _ofp=nfirst("CFBD_Opp_Season_CFBD_Game_Off_Field_Position_Prior")
+    add("CFBD_FIELD_POSITION_ADV_5YDS","CFBD_ADVANCED_EFFICIENCY",_cf_games.ge(3)&(_fp-_ofp).ge(5),source_ok=_fp.notna().any() and _ofp.notna().any(),min_n=20)
+    _sr=nfirst("CFBD_Season_CFBD_Game_Off_Sack_Rate_Prior"); _osr=nfirst("CFBD_Opp_Season_CFBD_Game_Off_Sack_Rate_Prior")
+    add("CFBD_SACK_RATE_LOW_04","CFBD_ADVANCED_EFFICIENCY",_cf_games.ge(3)&_sr.le(.04)&_sr.notna(),source_ok=_sr.notna().any(),min_n=20)
+    add("CFBD_SACK_RATE_ADV_03","CFBD_ADVANCED_MATCHUP",_cf_games.ge(3)&(_osr-_sr).ge(.03),source_ok=_sr.notna().any() and _osr.notna().any(),min_n=20)
+    _x20=nfirst("CFBD_Season_CFBD_Game_Off_Explosive20_Rate_Prior"); _ox20=nfirst("CFBD_Opp_Season_CFBD_Game_Off_Explosive20_Rate_Prior")
+    add("CFBD_EXPLOSIVE20_ADV_04","CFBD_ADVANCED_MATCHUP",_cf_games.ge(3)&(_x20-_ox20).ge(.04),source_ok=_x20.notna().any() and _ox20.notna().any(),min_n=20)
+    _edr3=nfirst("CFBD_Recent3_CFBD_Game_Off_EarlyDown_PPA_Prior"); _edsea=nfirst("CFBD_Season_CFBD_Game_Off_EarlyDown_PPA_Prior")
+    add("CFBD_RECENT3_EARLY_DOWN_UP_08","CFBD_ADVANCED_TREND",_cf_games.ge(3)&(_edr3-_edsea).ge(.08),source_ok=_edr3.notna().any() and _edsea.notna().any(),min_n=20)
+    add("CFBD_RECENT3_EARLY_DOWN_DOWN_08","CFBD_ADVANCED_TREND",_cf_games.ge(3)&(_edr3-_edsea).le(-.08),source_ok=_edr3.notna().any() and _edsea.notna().any(),min_n=20)
+
     _tplays=nfirst("CFBD_Season_Off_Plays_Prior"); _oplays=nfirst("CFBD_Opp_Season_Off_Plays_Prior")
     add("CFBD_TEAM_PACE_70PLUS","CFBD_PACE_CONTEXT",_cf_games.ge(3)&_tplays.ge(70),source_ok=_tplays.notna().any(),min_n=20)
     add("CFBD_BOTH_PACE_65PLUS","CFBD_PACE_CONTEXT",_cf_games.ge(3)&_tplays.ge(65)&_oplays.ge(65),source_ok=_tplays.notna().any() and _oplays.notna().any(),min_n=20)
@@ -4466,6 +4524,23 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
     add("CFBD_WEATHER_PRECIP","CFBD_WEATHER_OBSERVED",_prec.gt(0),source_ok=_prec.notna().any(),min_n=20)
     add("CFBD_WEATHER_SNOW","CFBD_WEATHER_OBSERVED",_snow.gt(0),source_ok=_snow.notna().any(),min_n=10)
     add("CFBD_WEATHER_OUTDOOR_WIND_15PLUS","CFBD_WEATHER_OBSERVED",_wind.ge(15)&~_indoors.eq(1),source_ok=_wind.notna().any(),min_n=20)
+
+    # CFBD schedule/conference structure. This is distinct from the generic
+    # SAME_CONFERENCE atom so the focused CFBD lane can test familiarity/streak.
+    _cf_same=nfirst("CFBD_Same_Conference")
+    _cf_prior=nfirst("CFBD_Conference_Games_Prior"); _cf_streak=nfirst("CFBD_Conference_Game_Streak_Prior")
+    add("CFBD_SAME_CONFERENCE","CFBD_CONFERENCE_CONTEXT",_cf_same.eq(1),source_ok=_cf_same.notna().any(),min_n=20)
+    add("CFBD_FIRST_CONFERENCE_GAME","CFBD_CONFERENCE_CONTEXT",_cf_same.eq(1)&_cf_prior.eq(0),source_ok=_cf_prior.notna().any(),min_n=20)
+    add("CFBD_CONFERENCE_GAME_4PLUS","CFBD_CONFERENCE_CONTEXT",_cf_same.eq(1)&_cf_prior.ge(3),source_ok=_cf_prior.notna().any(),min_n=20)
+    add("CFBD_CONFERENCE_STREAK_2PLUS","CFBD_CONFERENCE_CONTEXT",_cf_same.eq(1)&_cf_streak.ge(2),source_ok=_cf_streak.notna().any(),min_n=20)
+
+    # CFBD-only rivalry proxy: repeated recent H2H plus conference familiarity.
+    # This supplements (never replaces) any explicit Rivalry_Flag source.
+    _h2hn=nfirst("H2H2_Prior_Meetings","H2H_Prior_Meetings_Research","H2H_Meetings_Prior","H2H_Meetings_Prior_Research")
+    _h2hd=nfirst("Days_Since_Last_Matchup","Days_Since_Last_Matchup_System","H2H2_Days_Since","Days_Since_Last_H2H","H2H_Days_Since_Last")
+    _cf_rival_proxy=_h2hn.ge(3)&_h2hd.le(450)&_h2hd.notna()
+    add("CFBD_RIVALRY_PROXY_RECURRING","RIVALRY",_cf_rival_proxy,source_ok=_h2hn.notna().any() and _h2hd.notna().any(),min_n=20)
+    add("CFBD_RIVALRY_PROXY_SAME_CONF","RIVALRY",_cf_rival_proxy&_cf_same.eq(1),source_ok=_h2hn.notna().any() and _h2hd.notna().any() and _cf_same.notna().any(),min_n=20)
 
     # Rivalry / matchup history / revenge.
     riv=tfirst("Rivalry_Flag","Is_Rivalry","Context_Rivalry_Flag")
@@ -5860,6 +5935,43 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
 
     legacy_tested,legacy_single=legacy_search(legacy_atoms)
 
+    # V2.34 focused CFBD/rivalry lanes. The broad beam can bury useful football
+    # context under hundreds of legacy atoms, so these lanes guarantee that CFBD
+    # personnel/efficiency/conference and rivalry seeds are actually evaluated.
+    # They use the same frozen discovery/confirmation evaluator and separate FDR;
+    # exact rules are deduplicated below, so a focused lane never creates a second vote.
+    def _focused_context_search(seed_families, support_families, beam_cap=56, depth_cap=4):
+        pos={str(a.get("name")):i for i,a in enumerate(legacy_atoms)}
+        seeds=[a for a in legacy_atoms if str(a.get("family") or "") in seed_families]
+        supports=[a for a in legacy_atoms if str(a.get("family") or "") in support_families and a.get("name") in legacy_single]
+        supports=sorted(supports,key=lambda a:(bool(legacy_single[a["name"]].get("discovery_pass")),float(legacy_single[a["name"]].get("quality",-9)),int(legacy_single[a["name"]].get("discovery_n",0))),reverse=True)[:56]
+        tested=[]; seen=set(); beam=[]
+        for a in seeds:
+            i=pos.get(str(a.get("name")),0); r=ev(a["mask"],(a["name"],),(a["family"],),(i,))
+            if r: tested.append(r); beam.append(r); seen.add(tuple(sorted(r["conditions"])))
+        beam=sorted(beam,key=lambda z:z["quality"],reverse=True)[:beam_cap]
+        for _depth in range(2,min(max_depth,depth_cap)+1):
+            nxt=[]
+            for st in beam:
+                used=set(st["families"]); names0=set(st["conditions"])
+                for a in supports:
+                    if a["family"] in used or a["name"] in names0: continue
+                    names=tuple(sorted(st["conditions"]+[a["name"]]))
+                    if names in seen: continue
+                    seen.add(names); i=pos.get(str(a.get("name")),0)
+                    r=ev(st["mask"]&a["mask"],names,tuple(st["families"]+[a["family"]]),st["idx"]+(i,))
+                    if r: tested.append(r); nxt.append(r)
+            beam=sorted(nxt,key=lambda z:z["quality"],reverse=True)[:beam_cap]
+            if not beam: break
+        return tested,seeds,supports
+
+    _cfbd_seed_fams={"CFBD_ROSTER_CONTINUITY","CFBD_PLAYER_CONTINUITY","CFBD_QB_CONTEXT","CFBD_PORTAL_CONTEXT","CFBD_TALENT_RECRUITING","CFBD_ADVANCED_EFFICIENCY","CFBD_ADVANCED_TREND","CFBD_ADVANCED_MATCHUP","CFBD_PACE_CONTEXT","CFBD_RATINGS_CONTEXT","CFBD_CONFERENCE_CONTEXT"}
+    _cfbd_support_fams=_cfbd_seed_fams|{"MATCHUP_HISTORY","RIVALRY","SEASON_RECORD_STATE","ROLE_TRANSITION_BOUNCEBACK","SCHEDULE_RESUME_QUALITY","MATCHUP_DIFFERENTIAL","TRAVEL_CONTEXT","ROAD_SEQUENCE","EXPERT_PATHI_FB","EXPERT_PATHI_BB"}
+    cfbd_tested,cfbd_seed_atoms,cfbd_support_atoms=_focused_context_search(_cfbd_seed_fams,_cfbd_support_fams,40,3)
+    _rival_seed_fams={"RIVALRY"}
+    _rival_support_fams={"RIVALRY","MATCHUP_HISTORY","CFBD_CONFERENCE_CONTEXT","CFBD_QB_CONTEXT","CFBD_ROSTER_CONTINUITY","CFBD_PLAYER_CONTINUITY","CFBD_TALENT_RECRUITING","CFBD_ADVANCED_MATCHUP","CFBD_ADVANCED_EFFICIENCY","SEASON_RECORD_STATE","ROLE_TRANSITION_BOUNCEBACK","TRAVEL_CONTEXT","ROAD_SEQUENCE"}
+    rivalry_tested,rivalry_seed_atoms,rivalry_support_atoms=_focused_context_search(_rival_seed_fams,_rival_support_fams,32,3)
+
     # V2.26 constrained expert-observation hypothesis lane. The user-observed
     # card only determines which GENERIC concepts deserve a focused search.
     # No 2026 outcome, Big Al rating, team identity, or current pick result enters
@@ -5992,6 +6104,8 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         return finalists
 
     legacy_finalists=finalize_lane(legacy_tested,"LEGACY",.20,160)
+    cfbd_finalists=finalize_lane(cfbd_tested,"CFBD_CONTEXT_HYPOTHESIS",.10,120)
+    rivalry_finalists=finalize_lane(rivalry_tested,"RIVALRY_CONTEXT_HYPOTHESIS",.10,80)
     observation_finalists=finalize_lane(observation_tested,"EXPERT_OBSERVATION_HYPOTHESIS",.10,80) if market in {"spreads","totals"} else []
     external_finalists=finalize_lane(external_tested,"EXTERNAL_PREDICTOR_BEHAVIOR",.10,120) if market=="spreads" else []
 
@@ -5999,7 +6113,7 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
     # can rescue a rule the broad beam misses, but it cannot manufacture a second
     # vote for the same rule. Lane provenance is retained for audit.
     _dedup={}
-    for _z in legacy_finalists+observation_finalists+external_finalists:
+    for _z in legacy_finalists+cfbd_finalists+rivalry_finalists+observation_finalists+external_finalists:
         _key=(str(_z.get("direction")),tuple(sorted(_z.get("conditions") or [])))
         if _key not in _dedup:
             _z=dict(_z); _z["discovery_lanes"]=[str(_z.get("miner_lane") or "")]; _dedup[_key]=_z
@@ -6010,17 +6124,21 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
     finalists=list(_dedup.values())
     out["lanes"]={
         "legacy":{"atoms":len(legacy_atoms),"tested_hypotheses":len(legacy_tested),"systems":len(legacy_finalists),"fdr_q_cut":.20},
+        "cfbd_context_hypothesis":{"seed_atoms":len(cfbd_seed_atoms),"support_atoms":len(cfbd_support_atoms),"tested_hypotheses":len(cfbd_tested),"systems":len(cfbd_finalists),"fdr_q_cut":.10,"depth_cap":3,"selection_uses_2026":False},
+        "rivalry_context_hypothesis":{"seed_atoms":len(rivalry_seed_atoms),"support_atoms":len(rivalry_support_atoms),"tested_hypotheses":len(rivalry_tested),"systems":len(rivalry_finalists),"fdr_q_cut":.10,"depth_cap":3,"selection_uses_2026":False},
         "expert_observation_hypothesis":{"seed_atoms":len(observation_seed_atoms),"support_atoms":len(observation_support_atoms),"tested_hypotheses":len(observation_tested),"systems":len(observation_finalists),"deduplicated_into_total":sum(1 for z in finalists if "EXPERT_OBSERVATION_HYPOTHESIS" in (z.get("discovery_lanes") or [])),"fdr_q_cut":.10,"depth_cap":4,"ratings_used_for_selection":False,"2026_outcomes_used":False,"source_after_validation":"MINER"},
         "external_predictor_behavior":{"atoms":len(expanded_external),"selected_seed_atoms":len(selected_external),"selected_support_atoms":len(selected_support),"tested_hypotheses":len(external_tested),"systems":len(external_finalists),"fdr_q_cut":.10,"depth_cap":3,"selection_uses_2026":False},
     }
     log_func(f"[NCAAF-RV2182-LANE] market={market} lane=LEGACY atoms={len(legacy_atoms)} tested={len(legacy_tested)} systems={len(legacy_finalists)} fdr_q=.20 authority=0")
+    log_func(f"[NCAAF-CFBD-HYPOTHESIS-LANE] market={market} seeds={len(cfbd_seed_atoms)} supports={len(cfbd_support_atoms)} tested={len(cfbd_tested)} systems={len(cfbd_finalists)} fdr_q=.10 depth_cap=3 outcomes_2026_used=FALSE authority=0")
+    log_func(f"[NCAAF-RIVALRY-HYPOTHESIS-LANE] market={market} seeds={len(rivalry_seed_atoms)} supports={len(rivalry_support_atoms)} tested={len(rivalry_tested)} systems={len(rivalry_finalists)} fdr_q=.10 depth_cap=3 outcomes_2026_used=FALSE authority=0")
     if market in {"spreads","totals"}:
         log_func(f"[NCAAF-BIGAL-HYPOTHESIS-LANE] market={market} seed_atoms={len(observation_seed_atoms)} support_atoms={len(observation_support_atoms)} tested={len(observation_tested)} systems={len(observation_finalists)} dedup_total={out['lanes']['expert_observation_hypothesis']['deduplicated_into_total']} fdr_q=.10 ratings_used=FALSE outcomes_2026_used=FALSE source=MINER authority=0")
     if market=="spreads":
         log_func(f"[NCAAF-RV2182-LANE] market=spreads lane=EXTERNAL_PREDICTOR_BEHAVIOR atoms={len(expanded_external)} seeds={len(selected_external)} supports={len(selected_support)} tested={len(external_tested)} systems={len(external_finalists)} fdr_q=.10 depth_cap=3 year_2026_selection=FALSE authority=0")
 
     if not finalists:
-        _tested_total=len(legacy_tested)+len(observation_tested)+len(external_tested)
+        _tested_total=len(legacy_tested)+len(cfbd_tested)+len(rivalry_tested)+len(observation_tested)+len(external_tested)
         out.update({"status":"NO_CANDIDATES","tested_hypotheses":_tested_total,"published_systems":0});
         log_func(f"[NCAAF-RV23-MINER] market={market} atoms={len(atoms)} tested={_tested_total} systems=0 mechanisms=0 confirmed_mechanisms=0 authority=0")
         return out
@@ -6059,8 +6177,8 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         _uses_resume=bool("SCHEDULE_RESUME_QUALITY" in _family_set)
         _uses_recent=bool("RECENT_VS_SEASON" in _family_set)
         _uses_matchup=bool("MATCHUP_DIFFERENTIAL" in _family_set)
-        _uses_cfbd_personnel=bool(_family_set & {"CFBD_ROSTER_CONTINUITY","CFBD_QB_CONTEXT","CFBD_PORTAL_CONTEXT","CFBD_TALENT_RECRUITING"})
-        _uses_cfbd_advanced=bool(_family_set & {"CFBD_ADVANCED_EFFICIENCY","CFBD_ADVANCED_TREND","CFBD_ADVANCED_MATCHUP","CFBD_PACE_CONTEXT"})
+        _uses_cfbd_personnel=bool(_family_set & {"CFBD_ROSTER_CONTINUITY","CFBD_PLAYER_CONTINUITY","CFBD_QB_CONTEXT","CFBD_PORTAL_CONTEXT","CFBD_TALENT_RECRUITING"})
+        _uses_cfbd_advanced=bool(_family_set & {"CFBD_ADVANCED_EFFICIENCY","CFBD_ADVANCED_TREND","CFBD_ADVANCED_MATCHUP","CFBD_PACE_CONTEXT","CFBD_RATINGS_CONTEXT","CFBD_CONFERENCE_CONTEXT"})
         _uses_cfbd_altitude=bool("CFBD_ALTITUDE_CONTEXT" in _family_set)
         _uses_cfbd_weather=bool("CFBD_WEATHER_OBSERVED" in _family_set)
         _uses_cross_market=bool("CROSS_MARKET_STRUCTURE" in _family_set)
@@ -6162,8 +6280,8 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         "schedule_resume_quality":_special_family_stats("SCHEDULE_RESUME_QUALITY","NCAAF_SCHEDULE_RESUME_FAMILY"),
         "recent_vs_season":_special_family_stats("RECENT_VS_SEASON","NCAAF_RECENT_VS_SEASON_FAMILY"),
         "matchup_differential":_special_family_stats("MATCHUP_DIFFERENTIAL","NCAAF_MATCHUP_DIFFERENTIAL_FAMILY"),
-        "cfbd_personnel":_multi_family_stats({"CFBD_ROSTER_CONTINUITY","CFBD_QB_CONTEXT","CFBD_PORTAL_CONTEXT","CFBD_TALENT_RECRUITING"},"NCAAF_CFBD_PERSONNEL_FAMILY"),
-        "cfbd_advanced":_multi_family_stats({"CFBD_ADVANCED_EFFICIENCY","CFBD_ADVANCED_TREND","CFBD_ADVANCED_MATCHUP","CFBD_PACE_CONTEXT"},"NCAAF_CFBD_ADVANCED_FAMILY"),
+        "cfbd_personnel":_multi_family_stats({"CFBD_ROSTER_CONTINUITY","CFBD_PLAYER_CONTINUITY","CFBD_QB_CONTEXT","CFBD_PORTAL_CONTEXT","CFBD_TALENT_RECRUITING"},"NCAAF_CFBD_PERSONNEL_FAMILY"),
+        "cfbd_advanced":_multi_family_stats({"CFBD_ADVANCED_EFFICIENCY","CFBD_ADVANCED_TREND","CFBD_ADVANCED_MATCHUP","CFBD_PACE_CONTEXT","CFBD_RATINGS_CONTEXT","CFBD_CONFERENCE_CONTEXT"},"NCAAF_CFBD_ADVANCED_FAMILY"),
         "cfbd_altitude":_special_family_stats("CFBD_ALTITUDE_CONTEXT","NCAAF_TRAVEL_CONTEXT_FAMILY"),
         "cfbd_weather_shadow":_special_family_stats("CFBD_WEATHER_OBSERVED","NCAAF_CFBD_WEATHER_FAMILY"),
         "cross_market":_special_family_stats("CROSS_MARKET_STRUCTURE","NCAAF_CROSS_MARKET_FAMILY"),
@@ -7275,9 +7393,9 @@ def _apply_v231_context_family_caps(miners: dict[str,Any], *, log_func=print) ->
                 m["uses_matchup_differential_family"]=True; new="NCAAF_MATCHUP_DIFFERENTIAL_FAMILY"; counts["matchup_differential"]+=1
             elif "CFBD_ALTITUDE_CONTEXT" in fams:
                 m["uses_cfbd_altitude_family"]=True; m["uses_travel_context_family"]=True; new="NCAAF_TRAVEL_CONTEXT_FAMILY"; counts["travel"]+=1
-            elif fams & {"CFBD_ROSTER_CONTINUITY","CFBD_QB_CONTEXT","CFBD_PORTAL_CONTEXT","CFBD_TALENT_RECRUITING"}:
+            elif fams & {"CFBD_ROSTER_CONTINUITY","CFBD_PLAYER_CONTINUITY","CFBD_QB_CONTEXT","CFBD_PORTAL_CONTEXT","CFBD_TALENT_RECRUITING"}:
                 m["uses_cfbd_personnel_family"]=True; new="NCAAF_CFBD_PERSONNEL_FAMILY"; counts["cfbd_personnel"]+=1
-            elif fams & {"CFBD_ADVANCED_EFFICIENCY","CFBD_ADVANCED_TREND","CFBD_ADVANCED_MATCHUP","CFBD_PACE_CONTEXT"}:
+            elif fams & {"CFBD_ADVANCED_EFFICIENCY","CFBD_ADVANCED_TREND","CFBD_ADVANCED_MATCHUP","CFBD_PACE_CONTEXT","CFBD_RATINGS_CONTEXT","CFBD_CONFERENCE_CONTEXT"}:
                 m["uses_cfbd_advanced_family"]=True; new="NCAAF_CFBD_ADVANCED_FAMILY"; counts["cfbd_advanced"]+=1
             elif "CFBD_WEATHER_OBSERVED" in fams:
                 m["uses_cfbd_weather_family"]=True; new="NCAAF_CFBD_WEATHER_FAMILY"; counts["cfbd_weather"]+=1
@@ -7307,8 +7425,8 @@ def _ncaaf_system_tags(mech: dict[str,Any]) -> list[str]:
     if bool(mech.get("uses_schedule_resume_family")) or "SCHEDULE_RESUME_QUALITY" in fams: tags.append("SCHEDULE_RESUME_QUALITY")
     if bool(mech.get("uses_recent_vs_season_family")) or "RECENT_VS_SEASON" in fams: tags.append("RECENT_VS_SEASON")
     if bool(mech.get("uses_matchup_differential_family")) or "MATCHUP_DIFFERENTIAL" in fams: tags.append("MATCHUP_DIFFERENTIAL")
-    if bool(mech.get("uses_cfbd_personnel_family")) or bool(fams & {"CFBD_ROSTER_CONTINUITY","CFBD_QB_CONTEXT","CFBD_PORTAL_CONTEXT","CFBD_TALENT_RECRUITING"}): tags.append("CFBD_PERSONNEL")
-    if bool(mech.get("uses_cfbd_advanced_family")) or bool(fams & {"CFBD_ADVANCED_EFFICIENCY","CFBD_ADVANCED_TREND","CFBD_ADVANCED_MATCHUP","CFBD_PACE_CONTEXT"}): tags.append("CFBD_ADVANCED")
+    if bool(mech.get("uses_cfbd_personnel_family")) or bool(fams & {"CFBD_ROSTER_CONTINUITY","CFBD_PLAYER_CONTINUITY","CFBD_QB_CONTEXT","CFBD_PORTAL_CONTEXT","CFBD_TALENT_RECRUITING"}): tags.append("CFBD_PERSONNEL")
+    if bool(mech.get("uses_cfbd_advanced_family")) or bool(fams & {"CFBD_ADVANCED_EFFICIENCY","CFBD_ADVANCED_TREND","CFBD_ADVANCED_MATCHUP","CFBD_PACE_CONTEXT","CFBD_RATINGS_CONTEXT","CFBD_CONFERENCE_CONTEXT"}): tags.append("CFBD_ADVANCED")
     if bool(mech.get("uses_cfbd_altitude_family")) or "CFBD_ALTITUDE_CONTEXT" in fams: tags.append("CFBD_ALTITUDE")
     if bool(mech.get("uses_cfbd_weather_family")) or "CFBD_WEATHER_OBSERVED" in fams: tags.append("CFBD_WEATHER_SHADOW")
     if bool(mech.get("uses_cross_market_family")) or "CROSS_MARKET_STRUCTURE" in fams: tags.append("CROSS_MARKET_STRUCTURE")

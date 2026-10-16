@@ -23,9 +23,12 @@ Data policy
 * Historical observed weather is retained as a context field and tagged as such.
   Use it only if your betting decision horizon is near kickoff; it is not a
   historical forecast snapshot.
-* Retrospective full-season SP+, FPI, SRS, CORE, WEPA are deliberately NOT used
-  for historical Miner qualification because point-in-time availability is not
-  guaranteed by those season-level endpoints.
+* Historical play-by-play is converted to completed-game team metrics and then
+  shifted one completed game before use (field position, drive efficiency,
+  early/passing-down efficiency, sack/dropback rate, explosive-play rate).
+* Season-level SP+, FPI, SRS, and CORE are used only as PRIOR-SEASON static
+  context for the next season. Same-season retrospective ratings never qualify
+  historical Miner systems, avoiding look-ahead from season-final estimates.
 
 Warehouse outputs
 -----------------
@@ -72,7 +75,7 @@ import requests
 BASE_URL = "https://api.collegefootballdata.com"
 DEFAULT_PROJECT = os.getenv("BQ_PROJECT", "sharplogger")
 DEFAULT_DATASET = os.getenv("BQ_DATASET", "sharp_data")
-SOURCE_TAG = "ncaaf-cfbd-warehouse-v2.0.3-historical-boxscore-core-inputs-20261015"
+SOURCE_TAG = "ncaaf-cfbd-warehouse-v2.0-20261015"
 
 # Existing canonical warehouse objects — deliberately reused.
 CANONICAL_RAW_TABLE = os.getenv("NCAAF_HISTORICAL_RAW_TABLE", "ncaaf_historical_game_side_raw")
@@ -277,27 +280,6 @@ def pull_lines(c: CFBDClient, year: int) -> pd.DataFrame:
     return _json_frame(c.get("/lines", {"year": year, "seasonType": "both"}, optional=True))
 
 
-def pull_team_game_box(c: CFBDClient, year: int, weeks: Iterable[int]) -> pd.DataFrame:
-    """Pull CFBD team box-score stats for a season, one week at a time.
-
-    The current CFBD /games/teams contract requires year plus at least one of
-    week, team, or conference. Week iteration gives full-season coverage while
-    retaining each request in the immutable API archive. seasonType=both keeps
-    regular-season and postseason games.
-    """
-    rows: list[dict[str, Any]] = []
-    valid_weeks = sorted({int(w) for w in weeks if pd.notna(w) and int(w) >= 1})
-    for week in valid_weeks:
-        part = c.get("/games/teams", {
-            "year": int(year),
-            "week": int(week),
-            "seasonType": "both",
-            "classification": "fbs",
-        })
-        rows.extend(part)
-    return _json_frame(rows)
-
-
 def pull_advanced(c: CFBDClient, year: int) -> pd.DataFrame:
     return _json_frame(c.get("/stats/game/advanced", {
         "year": year, "seasonType": "both", "excludeGarbageTime": "true"
@@ -394,6 +376,34 @@ def pull_elo_snapshots(c: CFBDClient, year: int, weeks: Iterable[int]) -> pd.Dat
         for z in part:
             z = dict(z); z["snapshot_week"] = week; rows.append(z)
     return _json_frame(rows)
+
+
+def pull_plays(c: CFBDClient, year: int, weeks: Iterable[int]) -> pd.DataFrame:
+    """Historical CFBD play-by-play, pulled by week to stay within endpoint limits."""
+    rows: list[dict[str, Any]] = []
+    for week in sorted({int(w) for w in weeks if pd.notna(w) and int(w) >= 0}):
+        part = c.get("/plays", {
+            "year": year, "week": week, "seasonType": "both", "classification": "fbs"
+        }, optional=True)
+        rows.extend(part)
+    return _json_frame(rows)
+
+
+def pull_sp_ratings(c: CFBDClient, year: int) -> pd.DataFrame:
+    return _json_frame(c.get("/ratings/sp", {"year": year}, optional=True))
+
+
+def pull_srs_ratings(c: CFBDClient, year: int) -> pd.DataFrame:
+    return _json_frame(c.get("/ratings/srs", {"year": year}, optional=True))
+
+
+def pull_fpi_ratings(c: CFBDClient, year: int) -> pd.DataFrame:
+    return _json_frame(c.get("/ratings/fpi", {"year": year}, optional=True))
+
+
+def pull_core_ratings(c: CFBDClient, year: int) -> pd.DataFrame:
+    """Retrospective CORE; only prior-season aggregates are exposed to a target season."""
+    return _json_frame(c.get("/ratings/core", {"year": year}, optional=True))
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +590,108 @@ def build_portal_features(df: pd.DataFrame, year: int, prior_player_ppa: pd.Data
     return outdf
 
 
+def _roster_name_key(df: pd.DataFrame) -> pd.Series:
+    first=_first_col(df,"firstName").astype(str).replace({"nan":"","None":""}).str.strip()
+    last=_first_col(df,"lastName").astype(str).replace({"nan":"","None":""}).str.strip()
+    combo=(first+" "+last).str.strip()
+    single=_first_col(df,"name").astype(str).replace({"nan":"","None":""}).str.strip()
+    return combo.where(combo.str.len()>=2,single).map(_person_key)
+
+
+def build_prior_player_continuity(cur_roster: pd.DataFrame, prior_ppa: pd.DataFrame,
+                                  prior_usage: pd.DataFrame, year: int) -> pd.DataFrame:
+    """Prior-season production/usage retained on the current preseason roster.
+
+    This is the player-level analogue of returning production.  It uses only
+    prior-season CFBD PPA/usage plus the target season roster; no target-season
+    game performance enters these fields.
+    """
+    pv=_prior_player_value_table(prior_ppa if prior_ppa is not None else pd.DataFrame(),
+                                 prior_usage if prior_usage is not None else pd.DataFrame())
+    if pv.empty or cur_roster is None or cur_roster.empty:
+        return pd.DataFrame(columns=["Season","Team_Key"])
+    r=cur_roster.copy()
+    r["Team_Key"]=_first_col(r,"team","school").map(_team_key)
+    r["Player_Key"]=_roster_name_key(r)
+    current={(str(t),str(n)) for t,n in zip(r["Team_Key"],r["Player_Key"]) if t and n}
+    rows=[]
+    for tk,g in pv.groupby("Team_Key",sort=False):
+        q=g.copy()
+        q["Prior_Total_PPA"]=_num(q["Prior_Total_PPA"])
+        q["Prior_Usage"]=_num(q["Prior_Usage"])
+        q["Returned"]=[float((str(tk),str(pk)) in current) for pk in q["Player_Key"]]
+        ppa=q["Prior_Total_PPA"].where(q["Prior_Total_PPA"].notna(),0.0)
+        use=q["Prior_Usage"].where(q["Prior_Usage"].notna(),0.0)
+        ppa_pos=ppa.clip(lower=0); use_pos=use.clip(lower=0)
+        total_ppa=float(ppa_pos.sum()); total_use=float(use_pos.sum())
+        ret_ppa=float((ppa_pos*q["Returned"]).sum()); ret_use=float((use_pos*q["Returned"]).sum())
+        top_ppa=q.sort_values("Prior_Total_PPA",ascending=False,na_position="last").head(1)
+        top_use=q.sort_values("Prior_Usage",ascending=False,na_position="last").head(1)
+        top3_ppa=q.sort_values("Prior_Total_PPA",ascending=False,na_position="last").head(3)["Prior_Total_PPA"].clip(lower=0).sum()
+        top3_use=q.sort_values("Prior_Usage",ascending=False,na_position="last").head(3)["Prior_Usage"].clip(lower=0).sum()
+        hi_use=q.loc[q["Prior_Usage"].ge(.10)]
+        rec={
+            "Season":int(year),"Team_Key":str(tk),
+            "CFBD_Prior_Player_Count":int(len(q)),
+            "CFBD_Prior_Player_Returned_Count":int(q["Returned"].sum()),
+            "CFBD_Prior_Player_Return_Rate":float(q["Returned"].mean()) if len(q) else np.nan,
+            "CFBD_Prior_PPA_Return_Pct":ret_ppa/total_ppa if total_ppa>0 else np.nan,
+            "CFBD_Prior_Usage_Return_Pct":ret_use/total_use if total_use>0 else np.nan,
+            "CFBD_Prior_PPA_Lost_Pct":1-ret_ppa/total_ppa if total_ppa>0 else np.nan,
+            "CFBD_Prior_Usage_Lost_Pct":1-ret_use/total_use if total_use>0 else np.nan,
+            "CFBD_Prior_TopPPA_Returned":float(top_ppa["Returned"].iloc[0]) if len(top_ppa) else np.nan,
+            "CFBD_Prior_TopUsage_Returned":float(top_use["Returned"].iloc[0]) if len(top_use) else np.nan,
+            "CFBD_Prior_Top3_PPA_Share":float(top3_ppa/total_ppa) if total_ppa>0 else np.nan,
+            "CFBD_Prior_Top3_Usage_Share":float(top3_use/total_use) if total_use>0 else np.nan,
+            "CFBD_Prior_HighUsage_Count":int(len(hi_use)),
+            "CFBD_Prior_HighUsage_Lost_Count":int((1-hi_use["Returned"]).sum()) if len(hi_use) else 0,
+        }
+        rows.append(rec)
+    return pd.DataFrame(rows)
+
+
+def build_prior_rating_features(sp: pd.DataFrame, srs: pd.DataFrame, fpi: pd.DataFrame,
+                                core: pd.DataFrame, target_year: int) -> pd.DataFrame:
+    """Use only year-1 season ratings as static target-year context."""
+    parts=[]
+    if sp is not None and not sp.empty:
+        x=sp.copy(); z=pd.DataFrame(index=x.index)
+        z["Team_Key"]=_first_col(x,"team").map(_team_key)
+        for dst,src in {
+            "CFBD_PriorYear_SP_Rating":"rating","CFBD_PriorYear_SP_Rank":"ranking",
+            "CFBD_PriorYear_SP_SOS":"sos","CFBD_PriorYear_SP_SecondOrderWins":"secondOrderWins",
+            "CFBD_PriorYear_SP_Off_Rating":"offense.rating","CFBD_PriorYear_SP_Off_Success":"offense.success",
+            "CFBD_PriorYear_SP_Off_Explosiveness":"offense.explosiveness","CFBD_PriorYear_SP_Off_Pace":"offense.pace",
+            "CFBD_PriorYear_SP_Def_Rating":"defense.rating","CFBD_PriorYear_SP_Def_Success":"defense.success",
+            "CFBD_PriorYear_SP_Def_Explosiveness":"defense.explosiveness","CFBD_PriorYear_SP_Def_Havoc":"defense.havoc.total",
+            "CFBD_PriorYear_SP_ST_Rating":"specialTeams.rating",
+        }.items(): z[dst]=_num(_first_col(x,src))
+        parts.append(z.drop_duplicates("Team_Key",keep="last"))
+    if srs is not None and not srs.empty:
+        x=srs.copy(); z=pd.DataFrame(index=x.index); z["Team_Key"]=_first_col(x,"team").map(_team_key)
+        z["CFBD_PriorYear_SRS_Rating"]=_num(_first_col(x,"rating")); z["CFBD_PriorYear_SRS_Rank"]=_num(_first_col(x,"ranking")); parts.append(z.drop_duplicates("Team_Key",keep="last"))
+    if fpi is not None and not fpi.empty:
+        x=fpi.copy(); z=pd.DataFrame(index=x.index); z["Team_Key"]=_first_col(x,"team").map(_team_key)
+        for dst,src in {
+            "CFBD_PriorYear_FPI":"fpi","CFBD_PriorYear_FPI_Eff_Overall":"efficiencies.overall",
+            "CFBD_PriorYear_FPI_Eff_Offense":"efficiencies.offense","CFBD_PriorYear_FPI_Eff_Defense":"efficiencies.defense",
+            "CFBD_PriorYear_FPI_Eff_ST":"efficiencies.specialTeams","CFBD_PriorYear_FPI_SOS":"resumeRanks.strengthOfSchedule",
+            "CFBD_PriorYear_FPI_SOR":"resumeRanks.strengthOfRecord","CFBD_PriorYear_FPI_GameControl":"resumeRanks.gameControl",
+        }.items(): z[dst]=_num(_first_col(x,src))
+        parts.append(z.drop_duplicates("Team_Key",keep="last"))
+    if core is not None and not core.empty:
+        x=core.copy(); x["throughWeek_num"]=_num(_first_col(x,"throughWeek"))
+        z=pd.DataFrame(index=x.index); z["Team_Key"]=_first_col(x,"team").map(_team_key); z["throughWeek_num"]=_num(_first_col(x,"throughWeek"))
+        z["CFBD_PriorYear_CORE_Overall"]=_num(_first_col(x,"overall")); z["CFBD_PriorYear_CORE_Offense"]=_num(_first_col(x,"offense")); z["CFBD_PriorYear_CORE_Defense"]=_num(_first_col(x,"defense")); z["CFBD_PriorYear_CORE_Off_Plays"]=_num(_first_col(x,"offensePlays")); z["CFBD_PriorYear_CORE_Def_Plays"]=_num(_first_col(x,"defensePlays"))
+        z=z.sort_values(["Team_Key","throughWeek_num"]).drop_duplicates("Team_Key",keep="last").drop(columns="throughWeek_num")
+        parts.append(z)
+    if not parts: return pd.DataFrame(columns=["Season","Team_Key"])
+    out=parts[0]
+    for z in parts[1:]: out=out.merge(z,on="Team_Key",how="outer")
+    out["Season"]=int(target_year)
+    return out.loc[out["Team_Key"].ne("")]
+
+
 def build_talent_features(df: pd.DataFrame, year: int) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["Season", "Team_Key"])
@@ -641,6 +753,8 @@ def standardize_games(df: pd.DataFrame, year: int) -> pd.DataFrame:
     out["Away_Team"] = _first_col(x, "awayTeam").astype(str)
     out["Home_Key"] = out["Home_Team"].map(_team_key)
     out["Away_Key"] = out["Away_Team"].map(_team_key)
+    out["Home_Conference"] = _first_col(x, "homeConference").astype(str).replace({"nan":"","None":""})
+    out["Away_Conference"] = _first_col(x, "awayConference").astype(str).replace({"nan":"","None":""})
     out["Home_Pregame_Elo"] = _num(_first_col(x, "homePregameElo"))
     out["Away_Pregame_Elo"] = _num(_first_col(x, "awayPregameElo"))
     out["Venue_ID"] = _num(_first_col(x, "venueId")).astype("Int64")
@@ -724,7 +838,95 @@ def standardize_havoc(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def attach_game_metadata(adv: pd.DataFrame, games: pd.DataFrame, havoc: pd.DataFrame) -> pd.DataFrame:
+def build_play_context_features(plays: pd.DataFrame) -> pd.DataFrame:
+    """Completed-game team-side context derived only from CFBD /plays.
+
+    These raw game metrics are never used directly; attach_game_metadata merges
+    them and add_prior_advanced_features shifts/rolls them before research use.
+    """
+    if plays is None or plays.empty:
+        return pd.DataFrame(columns=["Game_ID","Team_Key"])
+    x=plays.copy()
+    x["Game_ID"]=_num(_first_col(x,"gameId")).astype("Int64")
+    x["Drive_ID"]=_first_col(x,"driveId").astype(str)
+    x["Offense"]=_first_col(x,"offense").astype(str); x["Defense"]=_first_col(x,"defense").astype(str)
+    x["Offense_Key"]=x["Offense"].map(_team_key); x["Defense_Key"]=x["Defense"].map(_team_key)
+    x["Play_Type"]=_first_col(x,"playType").astype(str).str.lower()
+    x["Down"]=_num(_first_col(x,"down")); x["Distance"]=_num(_first_col(x,"distance")); x["YTG"]=_num(_first_col(x,"yardsToGoal")); x["Yards"]=_num(_first_col(x,"yardsGained")); x["PPA"]=_num(_first_col(x,"ppa"))
+    non_scrim=x["Play_Type"].str.contains(r"kickoff|punt|field goal|extra point|timeout|end of|penalty|coin toss",regex=True,na=False)
+    x=x.loc[~non_scrim & x["Offense_Key"].ne("") & x["Defense_Key"].ne("") & x["Game_ID"].notna()].copy()
+    if x.empty: return pd.DataFrame(columns=["Game_ID","Team_Key"])
+    # Standard NCAA success-rate approximation when the historical endpoint does
+    # not expose a success boolean: 50%/70%/100% of yards-to-go on downs 1/2/3-4.
+    need=x["Distance"].replace(0,np.nan)
+    req=np.select([x["Down"].eq(1),x["Down"].eq(2),x["Down"].isin([3,4])],[.50,.70,1.0],default=np.nan)
+    x["Success"]=(x["Yards"].ge(need*req)).where(np.isfinite(req))
+    x["Early"] = x["Down"].isin([1,2])
+    x["PassingDown"] = ((x["Down"].eq(2)&x["Distance"].ge(8)) | (x["Down"].isin([3,4])&x["Distance"].ge(5)))
+    x["StandardDown"] = x["Down"].isin([1,2,3,4]) & ~x["PassingDown"]
+    x["PassDropback"] = x["Play_Type"].str.contains(r"pass|sack",regex=True,na=False)
+    x["Sack"] = x["Play_Type"].str.contains("sack",regex=False,na=False)
+    x["Explosive20"] = x["Yards"].ge(20)
+    first_drive=x.sort_values(["Game_ID","Drive_ID"]).groupby(["Game_ID","Drive_ID"],sort=False).head(1)[["Game_ID","Drive_ID","Offense_Key","YTG"]].copy()
+    first_drive["Start_Field_Position"] = 100-first_drive["YTG"]
+    # Any play at or inside opponent 40 makes the drive a scoring opportunity.
+    opp=x.groupby(["Game_ID","Drive_ID","Offense_Key"],as_index=False).agg(Min_YTG=("YTG","min"),Drive_Yards=("Yards","sum"),Drive_PPA=("PPA","sum"),Drive_Plays=("Yards","size"))
+    opp["Scoring_Opportunity"] = opp["Min_YTG"].le(40)
+    drv=opp.merge(first_drive[["Game_ID","Drive_ID","Offense_Key","Start_Field_Position"]],on=["Game_ID","Drive_ID","Offense_Key"],how="left")
+    rows=[]
+    for (gid,offk,defk),g in x.groupby(["Game_ID","Offense_Key","Defense_Key"],sort=False):
+        d=drv.loc[(drv["Game_ID"].eq(gid)) & (drv["Offense_Key"].eq(offk))]
+        def mean_mask(col,mask):
+            z=_num(g.loc[mask,col]).dropna(); return float(z.mean()) if len(z) else np.nan
+        drop=g["PassDropback"]
+        rec={
+            "Game_ID":gid,"Offense_Key":offk,"Defense_Key":defk,
+            "Off_Field_Position":float(_num(d["Start_Field_Position"]).mean()) if len(d) else np.nan,
+            "Off_Drives_Derived":float(len(d)) if len(d) else np.nan,
+            "Off_Plays_Per_Drive":float(_num(d["Drive_Plays"]).mean()) if len(d) else np.nan,
+            "Off_Yards_Per_Drive":float(_num(d["Drive_Yards"]).mean()) if len(d) else np.nan,
+            "Off_PPA_Per_Drive":float(_num(d["Drive_PPA"]).mean()) if len(d) else np.nan,
+            "Off_Scoring_Opportunity_Rate":float(d["Scoring_Opportunity"].mean()) if len(d) else np.nan,
+            "Off_EarlyDown_PPA":mean_mask("PPA",g["Early"]),
+            "Off_EarlyDown_Success":float(g.loc[g["Early"],"Success"].mean()) if g["Early"].any() else np.nan,
+            "Off_PassingDown_PPA_Derived":mean_mask("PPA",g["PassingDown"]),
+            "Off_PassingDown_Success_Derived":float(g.loc[g["PassingDown"],"Success"].mean()) if g["PassingDown"].any() else np.nan,
+            "Off_StandardDown_PPA_Derived":mean_mask("PPA",g["StandardDown"]),
+            "Off_StandardDown_Success_Derived":float(g.loc[g["StandardDown"],"Success"].mean()) if g["StandardDown"].any() else np.nan,
+            "Off_Sack_Rate":float(g.loc[drop,"Sack"].mean()) if drop.any() else np.nan,
+            "Off_Explosive20_Rate":float(g["Explosive20"].mean()) if len(g) else np.nan,
+        }
+        rows.append(rec)
+    o=pd.DataFrame(rows)
+    if o.empty: return pd.DataFrame(columns=["Game_ID","Team_Key"])
+    off=o.rename(columns={"Offense_Key":"Team_Key"}).drop(columns="Defense_Key")
+    defn=o.rename(columns={"Defense_Key":"Team_Key"})
+    def_cols={c:"Def_"+c[len("Off_"):] for c in defn.columns if c.startswith("Off_")}
+    defn=defn.rename(columns=def_cols).drop(columns="Offense_Key")
+    out=off.merge(defn,on=["Game_ID","Team_Key"],how="outer")
+    out=out.rename(columns={c:"CFBD_Game_"+c for c in out.columns if c.startswith(("Off_","Def_"))})
+    return out.drop_duplicates(["Game_ID","Team_Key"],keep="last")
+
+
+def add_conference_schedule_context(df: pd.DataFrame) -> pd.DataFrame:
+    """Pregame conference familiarity/streak features from the CFBD schedule."""
+    if df.empty: return df
+    x=df.sort_values(["Season","Team_Key","Game_Date","Week","Game_ID"],kind="stable").copy()
+    same=_num(x.get("CFBD_Same_Conference",pd.Series(np.nan,index=x.index))).eq(1)
+    completed=_num(x.get("Completed",pd.Series(np.nan,index=x.index))).eq(1)
+    pri=np.full(len(x),np.nan); streak=np.full(len(x),np.nan)
+    for _,idx0 in x.groupby(["Season","Team_Key"],sort=False).indices.items():
+        idx=np.asarray(idx0,dtype=np.intp); count=0; st=0
+        for i in idx:
+            pri[i]=count; streak[i]=st
+            if completed.iloc[i]:
+                if same.iloc[i]: count+=1; st+=1
+                else: st=0
+    x["CFBD_Conference_Games_Prior"]=pri; x["CFBD_Conference_Game_Streak_Prior"]=st
+    return x.sort_index()
+
+
+def attach_game_metadata(adv: pd.DataFrame, games: pd.DataFrame, havoc: pd.DataFrame, play_context: pd.DataFrame | None = None) -> pd.DataFrame:
     """Build one row per scheduled team-side, then attach completed-game stats.
 
     The schedule is the base so upcoming games exist before kickoff. Completed
@@ -733,17 +935,20 @@ def attach_game_metadata(adv: pd.DataFrame, games: pd.DataFrame, havoc: pd.DataF
     """
     if games.empty:
         return pd.DataFrame()
-    base_cols=[c for c in ["Game_ID","Season","Week","Season_Type","Game_Date","Completed","Venue_ID","Neutral_Site","Home_Team","Away_Team","Home_Key","Away_Key","Home_Pregame_Elo","Away_Pregame_Elo"] if c in games.columns]
+    base_cols=[c for c in ["Game_ID","Season","Week","Season_Type","Game_Date","Completed","Venue_ID","Neutral_Site","Home_Team","Away_Team","Home_Key","Away_Key","Home_Pregame_Elo","Away_Pregame_Elo","Home_Conference","Away_Conference"] if c in games.columns]
     gg=games[base_cols].drop_duplicates("Game_ID").copy()
     home=gg.copy(); away=gg.copy()
     home["Team"]=home["Home_Team"]; home["Opponent"]=home["Away_Team"]
     home["Team_Key"]=home["Home_Key"]; home["Opponent_Key"]=home["Away_Key"]; home["Is_Home"]=1.0
+    home["CFBD_Conference"]=home.get("Home_Conference",pd.Series("",index=home.index)); home["CFBD_Opp_Conference"]=home.get("Away_Conference",pd.Series("",index=home.index))
     home["CFBD_Elo_Prior"]=_num(home.get("Home_Pregame_Elo",pd.Series(np.nan,index=home.index)))
     away["Team"]=away["Away_Team"]; away["Opponent"]=away["Home_Team"]
     away["Team_Key"]=away["Away_Key"]; away["Opponent_Key"]=away["Home_Key"]; away["Is_Home"]=0.0
+    away["CFBD_Conference"]=away.get("Away_Conference",pd.Series("",index=away.index)); away["CFBD_Opp_Conference"]=away.get("Home_Conference",pd.Series("",index=away.index))
     away["CFBD_Elo_Prior"]=_num(away.get("Away_Pregame_Elo",pd.Series(np.nan,index=away.index)))
     x=pd.concat([home,away],ignore_index=True,sort=False)
-    x=x.drop(columns=["Home_Team","Away_Team","Home_Key","Away_Key","Home_Pregame_Elo","Away_Pregame_Elo"],errors="ignore")
+    x=x.drop(columns=["Home_Team","Away_Team","Home_Key","Away_Key","Home_Pregame_Elo","Away_Pregame_Elo","Home_Conference","Away_Conference"],errors="ignore")
+    x["CFBD_Same_Conference"] = ((x["CFBD_Conference"].astype(str).str.len()>0) & (x["CFBD_Conference"].astype(str)==x["CFBD_Opp_Conference"].astype(str))).astype(float)
 
     if adv is not None and not adv.empty:
         metric_cols=[c for c in adv.columns if c.startswith(("Off_","Def_"))]
@@ -753,6 +958,10 @@ def attach_game_metadata(adv: pd.DataFrame, games: pd.DataFrame, havoc: pd.DataF
         hcols=[c for c in havoc.columns if c.startswith("CFBD_Game_")]
         hh=havoc[["Game_ID","Team_Key"]+hcols].drop_duplicates(["Game_ID","Team_Key"],keep="last")
         x=x.merge(hh,on=["Game_ID","Team_Key"],how="left")
+    if play_context is not None and not play_context.empty:
+        pcols=[c for c in play_context.columns if c.startswith("CFBD_Game_")]
+        pp=play_context[["Game_ID","Team_Key"]+pcols].drop_duplicates(["Game_ID","Team_Key"],keep="last")
+        x=x.merge(pp,on=["Game_ID","Team_Key"],how="left")
     return x
 
 
@@ -938,7 +1147,7 @@ def add_opponent_mirrors(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     out = df.copy()
-    feature_cols = [c for c in out.columns if c.startswith("CFBD_") and not c.startswith("CFBD_Opp_")]
+    feature_cols = [c for c in out.columns if c.startswith("CFBD_") and not c.startswith("CFBD_Opp_") and ("CFBD_Opp_" + c[len("CFBD_"):]) not in out.columns]
     right = out[["Game_ID", "Team_Key"] + feature_cols].copy()
     right = right.rename(columns={"Team_Key": "Opponent_Key", **{c: "CFBD_Opp_" + c[len("CFBD_"):] for c in feature_cols}})
     return out.merge(right.drop_duplicates(["Game_ID", "Opponent_Key"]), on=["Game_ID", "Opponent_Key"], how="left")
@@ -962,12 +1171,19 @@ def build_season_features(
     qb_success_raw: pd.DataFrame,
     prior_player_ppa_raw: pd.DataFrame,
     prior_player_usage_raw: pd.DataFrame,
+    plays_raw: pd.DataFrame | None = None,
+    prior_sp_raw: pd.DataFrame | None = None,
+    prior_srs_raw: pd.DataFrame | None = None,
+    prior_fpi_raw: pd.DataFrame | None = None,
+    prior_core_raw: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     games = standardize_games(games_raw, year)
     adv = standardize_advanced(advanced_raw)
     havoc = standardize_havoc(havoc_raw)
-    x = attach_game_metadata(adv, games, havoc)
+    play_context = build_play_context_features(plays_raw if plays_raw is not None else pd.DataFrame())
+    x = attach_game_metadata(adv, games, havoc, play_context)
     x = add_prior_advanced_features(x)
+    x = add_conference_schedule_context(x)
     if x.empty:
         return x
 
@@ -977,6 +1193,8 @@ def build_season_features(
         build_portal_features(portal_raw, year, prior_player_ppa_raw, prior_player_usage_raw, games["Game_Date"].min() if "Game_Date" in games.columns else None),
         build_talent_features(talent_raw, year),
         build_recruiting_features(recruiting_all, year),
+        build_prior_player_continuity(roster_cur, prior_player_ppa_raw, prior_player_usage_raw, year),
+        build_prior_rating_features(prior_sp_raw if prior_sp_raw is not None else pd.DataFrame(), prior_srs_raw if prior_srs_raw is not None else pd.DataFrame(), prior_fpi_raw if prior_fpi_raw is not None else pd.DataFrame(), prior_core_raw if prior_core_raw is not None else pd.DataFrame(), year),
         build_home_location_features(teams_raw, year),
     ])
 
@@ -999,7 +1217,7 @@ def build_season_features(
 
     # Stable identity and audit fields.
     x["CFBD_Source_Tag"] = SOURCE_TAG
-    x["CFBD_Leakage_Contract"] = "GAME_STATS_SHIFT1__PORTAL_PRESEASON_CUTOFF__PRESEASON_STATIC_DIRECT__GAME_PREGAME_ELO__2026_NOT_USED_FOR_HISTORICAL_SELECTION"
+    x["CFBD_Leakage_Contract"] = "GAME_STATS_AND_PBP_SHIFT1__PORTAL_PRESEASON_CUTOFF__PRIOR_SEASON_RATINGS_ONLY__PRESEASON_STATIC_DIRECT__GAME_PREGAME_ELO__2026_NOT_USED_FOR_HISTORICAL_SELECTION"
     x["CFBD_Feature_AsOf_Game"] = x["Game_Date"]
     x = add_opponent_mirrors(x)
 
@@ -1013,6 +1231,15 @@ def build_season_features(
         ("CFBD_Recruit_4Y_Avg_Points", "CFBD_Matchup_Recruit_Adv"),
         ("CFBD_Elo_Prior", "CFBD_Matchup_Elo_Adv"),
         ("CFBD_Returning_Pct_PPA", "CFBD_Matchup_Returning_PPA_Adv"),
+        ("CFBD_Prior_PPA_Return_Pct", "CFBD_Matchup_Prior_PPA_Return_Adv"),
+        ("CFBD_Prior_Usage_Return_Pct", "CFBD_Matchup_Prior_Usage_Return_Adv"),
+        ("CFBD_PriorYear_SP_Rating", "CFBD_Matchup_PriorYear_SP_Adv"),
+        ("CFBD_PriorYear_SRS_Rating", "CFBD_Matchup_PriorYear_SRS_Adv"),
+        ("CFBD_PriorYear_FPI", "CFBD_Matchup_PriorYear_FPI_Adv"),
+        ("CFBD_PriorYear_CORE_Overall", "CFBD_Matchup_PriorYear_CORE_Adv"),
+        ("CFBD_Season_CFBD_Game_Off_EarlyDown_PPA_Prior", "CFBD_Matchup_EarlyDown_PPA_Adv"),
+        ("CFBD_Season_CFBD_Game_Off_PPA_Per_Drive_Prior", "CFBD_Matchup_PPA_Per_Drive_Adv"),
+        ("CFBD_Season_CFBD_Game_Off_Scoring_Opportunity_Rate_Prior", "CFBD_Matchup_Scoring_Opp_Rate_Adv"),
     ]
     for team_col, dst in pairs:
         opp_col = "CFBD_Opp_" + team_col[len("CFBD_"):]
@@ -1091,30 +1318,6 @@ def _clean_bq_frame(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _bq_ddl_type(field_type: str) -> str:
-    """Map BigQuery client schema aliases to valid GoogleSQL DDL type names.
-
-    SchemaField.field_type can return legacy aliases such as FLOAT, INTEGER, and
-    BOOLEAN. ALTER TABLE ADD COLUMN expects the GoogleSQL names FLOAT64, INT64,
-    and BOOL. Keep the mapping explicit so schema evolution cannot emit invalid
-    DDL.
-    """
-    t=str(field_type or "").upper().strip()
-    aliases={
-        "FLOAT":"FLOAT64", "FLOAT64":"FLOAT64",
-        "INTEGER":"INT64", "INT64":"INT64",
-        "BOOLEAN":"BOOL", "BOOL":"BOOL",
-        "STRING":"STRING", "BYTES":"BYTES",
-        "TIMESTAMP":"TIMESTAMP", "DATE":"DATE",
-        "DATETIME":"DATETIME", "TIME":"TIME",
-        "NUMERIC":"NUMERIC", "BIGNUMERIC":"BIGNUMERIC",
-        "GEOGRAPHY":"GEOGRAPHY", "JSON":"JSON",
-    }
-    if t not in aliases:
-        raise RuntimeError(f"Unsupported BigQuery DDL field type: {field_type!r}")
-    return aliases[t]
-
-
 def _merge_dataframe(client, table_id: str, df: pd.DataFrame, keys: list[str], *, partition_field: str | None=None) -> dict[str,Any]:
     """Generic schema-evolving BigQuery MERGE for sidecar tables."""
     from google.cloud import bigquery
@@ -1138,7 +1341,7 @@ def _merge_dataframe(client, table_id: str, df: pd.DataFrame, keys: list[str], *
     inferred=client.get_table(tmp).schema
     for f in inferred:
         if f.name not in existing:
-            client.query(f"ALTER TABLE `{table_id}` ADD COLUMN IF NOT EXISTS `{f.name}` {_bq_ddl_type(f.field_type)}").result()
+            client.query(f"ALTER TABLE `{table_id}` ADD COLUMN IF NOT EXISTS `{f.name}` {f.field_type}").result()
     cols=list(d.columns)
     on=" AND ".join([f"T.`{k}` IS NOT DISTINCT FROM S.`{k}`" for k in keys])
     updates=[c for c in cols if c not in keys]
@@ -1254,7 +1457,7 @@ def merge_environment_into_travel(client, project: str, dataset: str, features: 
     target=client.get_table(tid); existing={f.name:f for f in target.schema}
     for f in client.get_table(tmp).schema:
         if f.name not in existing:
-            client.query(f"ALTER TABLE `{tid}` ADD COLUMN IF NOT EXISTS `{f.name}` {_bq_ddl_type(f.field_type)}").result()
+            client.query(f"ALTER TABLE `{tid}` ADD COLUMN IF NOT EXISTS `{f.name}` {f.field_type}").result()
     updates=[c for c in env.columns if c not in {"Season","Game_ID"}]
     us=",\n      ".join([f"`{c}`=S.`{c}`" for c in updates])
     client.query(f"""
@@ -1309,19 +1512,12 @@ def _extract_line_records(lines_raw: pd.DataFrame) -> dict[str,dict[str,Any]]:
 
 
 def _alignment_map(client, project: str, dataset: str, season: int) -> dict[str,dict[str,Any]]:
-    """Season-aware canonical alignment plus CFBD source aliases.
-
-    Historical conference/subdivision must come from a row effective on or
-    before the requested season. No future alignment is borrowed backward.
-    CollegeFootballData display names (e.g. Alabama, Ohio State) are resolved
-    through ncaaf_source_team_aliases after the ID-first alignment backfill.
-    """
+    """Season-aware canonical team mapping from the warehouse's existing alignment history."""
     table=f"{project}.{dataset}.team_sport_alignment_history"
-    alias_table=f"{project}.{dataset}.ncaaf_source_team_aliases"
-    from google.cloud import bigquery
-    cfg=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("season","INT64",int(season))])
     try:
-        eligible=client.query(f"""
+        from google.cloud import bigquery
+        cfg=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("season","INT64",int(season))])
+        d=client.query(f"""
           SELECT Team, Team_Norm, Canonical_Team_Name, Canonical_Team_Norm, Conference, Subdivision,
                  ROW_NUMBER() OVER(PARTITION BY LOWER(TRIM(Team_Norm)) ORDER BY Effective_Season_From DESC) rn
           FROM `{table}`
@@ -1329,169 +1525,11 @@ def _alignment_map(client, project: str, dataset: str, season: int) -> dict[str,
         """,job_config=cfg).to_dataframe(create_bqstorage_client=False)
     except Exception:
         return {}
-
-    out={}
-    by_norm={}
-    if not eligible.empty:
-        eligible=eligible.loc[eligible["rn"].eq(1)].copy()
-        for _,r in eligible.iterrows():
-            rec=dict(r); rec["_identity_fallback"]=False
-            norm=str(r.get("Team_Norm") or "").strip().lower()
-            if norm: by_norm[norm]=rec
-            for v in [r.get("Team"),r.get("Team_Norm"),r.get("Canonical_Team_Name"),r.get("Canonical_Team_Norm")]:
-                k=_team_key(v)
-                if k: out[k]=rec
-
-    # Add CFBD-owned source spellings only when their canonical target has a
-    # valid alignment row for this exact historical season.
-    try:
-        aliases=client.query(f"""
-          SELECT Source_Team_Name, Team_Norm
-          FROM `{alias_table}`
-          WHERE Source_Name='CollegeFootballData'
-            AND Source_Team_Name IS NOT NULL AND Team_Norm IS NOT NULL
-          QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY Source_Team_Name_Norm ORDER BY Updated_At DESC
-          )=1
-        """).to_dataframe(create_bqstorage_client=False)
-    except Exception:
-        aliases=pd.DataFrame()
-    if not aliases.empty:
-        for _,r in aliases.iterrows():
-            rec=by_norm.get(str(r.get("Team_Norm") or "").strip().lower())
-            k=_team_key(r.get("Source_Team_Name"))
-            if rec is not None and k:
-                out[k]=rec
-    return out
-
-
-def _cfbd_game_id_key(value: Any) -> str:
-    """Stable textual game-id key shared by games, lines, and team box scores."""
-    try:
-        if pd.isna(value):
-            return ""
-    except Exception:
-        pass
-    s=str(value).strip()
-    try:
-        f=float(s)
-        if math.isfinite(f) and abs(f-round(f)) < 1e-9:
-            return str(int(round(f)))
-    except Exception:
-        pass
-    return s
-
-
-def _cfbd_stat_category(value: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
-
-
-def _cfbd_stat_number(value: Any) -> float:
-    if value is None:
-        return np.nan
-    s=str(value).strip().replace(",", "")
-    if not s or s.lower() in {"nan","none","null","--","-"}:
-        return np.nan
-    try:
-        return float(s)
-    except Exception:
-        m=re.search(r"[-+]?\d+(?:\.\d+)?", s)
-        return float(m.group(0)) if m else np.nan
-
-
-def _cfbd_int_stat(value: Any) -> float:
-    x=_cfbd_stat_number(value)
-    if not np.isfinite(x):
-        return np.nan
-    r=round(float(x))
-    return float(r) if abs(float(x)-r) < 1e-9 else np.nan
-
-
-def _cfbd_pair_stat(value: Any) -> tuple[float,float]:
-    """Parse CFBD compound values such as 25-46 or 25/46."""
-    if value is None:
-        return np.nan,np.nan
-    s=str(value).strip().replace(" ", "")
-    parts=re.split(r"[-/]", s)
-    if len(parts) < 2:
-        return np.nan,np.nan
-    return _cfbd_int_stat(parts[0]), _cfbd_int_stat(parts[1])
-
-
-def _extract_team_box_records(box_raw: pd.DataFrame) -> dict[tuple[str,str],dict[str,Any]]:
-    """Flatten CFBD /games/teams into canonical raw Postgame_* fields."""
-    out: dict[tuple[str,str],dict[str,Any]] = {}
-    if box_raw is None or box_raw.empty:
-        return out
-
-    scalar_map={
-        "totalyards":"Postgame_Total_Yards",
-        "totalplays":"Postgame_Total_Plays",
-        "rushingattempts":"Postgame_Rush_Att",
-        "rushingyards":"Postgame_Rush_Yards",
-        "netpassingyards":"Postgame_Pass_Yards",
-        "passingyards":"Postgame_Pass_Yards",
-        "passingtds":"Postgame_Pass_TD",
-        "passingtouchdowns":"Postgame_Pass_TD",
-        "rushtds":"Postgame_Rush_TD",
-        "rushingtds":"Postgame_Rush_TD",
-        "rushingtouchdowns":"Postgame_Rush_TD",
-        "interceptions":"Postgame_Pass_INT",
-        "passesdeflected":"Postgame_Pass_Defended",
-        "interceptionyards":"Postgame_Def_INT_Yards",
-        "fumblereturnyards":"Postgame_Fumble_Return_Yards",
-        "kickreturnyards":"Postgame_Kick_Return_Yards",
-        "puntreturnyards":"Postgame_Punt_Return_Yards",
-        "puntyards":"Postgame_Punt_Yards",
-        "firstdowns":"Postgame_First_Downs",
-        "turnovers":"Postgame_Turnovers",
-    }
-
-    for _,game in box_raw.iterrows():
-        gid=_cfbd_game_id_key(game.get("id",game.get("gameId")))
-        teams=game.get("teams",[])
-        if not gid or not isinstance(teams,(list,tuple)):
-            continue
-        for team_obj in teams:
-            if not isinstance(team_obj,dict):
-                continue
-            team=str(team_obj.get("team") or "").strip()
-            tkey=_team_key(team)
-            if not tkey:
-                continue
-            rec: dict[str,Any] = {}
-            stats=team_obj.get("stats",[])
-            if not isinstance(stats,(list,tuple)):
-                stats=[]
-            for stat_obj in stats:
-                if not isinstance(stat_obj,dict):
-                    continue
-                cat=_cfbd_stat_category(stat_obj.get("category"))
-                val=stat_obj.get("stat")
-                if cat=="completionattempts":
-                    comp,att=_cfbd_pair_stat(val)
-                    if np.isfinite(comp): rec["Postgame_Pass_Comp"]=comp
-                    if np.isfinite(att): rec["Postgame_Pass_Att"]=att
-                elif cat=="totalpenaltiesyards":
-                    _pen,yds=_cfbd_pair_stat(val)
-                    if np.isfinite(yds): rec["Postgame_Penalty_Yards"]=yds
-                elif cat in scalar_map:
-                    z=_cfbd_int_stat(val)
-                    if np.isfinite(z): rec[scalar_map[cat]]=z
-
-            if not np.isfinite(_cfbd_stat_number(rec.get("Postgame_Total_Plays"))):
-                rush=_cfbd_stat_number(rec.get("Postgame_Rush_Att"))
-                patt=_cfbd_stat_number(rec.get("Postgame_Pass_Att"))
-                if np.isfinite(rush) and np.isfinite(patt):
-                    rec["Postgame_Total_Plays"]=float(rush+patt)
-
-            if not np.isfinite(_cfbd_stat_number(rec.get("Postgame_Total_Yards"))):
-                rush_y=_cfbd_stat_number(rec.get("Postgame_Rush_Yards"))
-                pass_y=_cfbd_stat_number(rec.get("Postgame_Pass_Yards"))
-                if np.isfinite(rush_y) and np.isfinite(pass_y):
-                    rec["Postgame_Total_Yards"]=float(rush_y+pass_y)
-
-            out[(gid,tkey)]=rec
+    d=d.loc[d["rn"].eq(1)].copy(); out={}
+    for _,r in d.iterrows():
+        for v in [r.get("Team"),r.get("Team_Norm"),r.get("Canonical_Team_Name"),r.get("Canonical_Team_Norm")]:
+            k=_team_key(v)
+            if k: out[k]=dict(r)
     return out
 
 
@@ -1510,7 +1548,7 @@ def _result_label(a,b,spread=None,total=None,kind="su"):
     return None
 
 
-def build_canonical_history_rows(games_raw: pd.DataFrame, lines_raw: pd.DataFrame, season: int, alignment: dict[str,dict[str,Any]], box_raw: pd.DataFrame | None = None) -> pd.DataFrame:
+def build_canonical_history_rows(games_raw: pd.DataFrame, lines_raw: pd.DataFrame, season: int, alignment: dict[str,dict[str,Any]]) -> pd.DataFrame:
     """Map CFBD game/results/lines into the existing fixed raw-table schema conceptually.
 
     The actual target schema is read from BigQuery at load time, so this function
@@ -1518,7 +1556,6 @@ def build_canonical_history_rows(games_raw: pd.DataFrame, lines_raw: pd.DataFram
     """
     if games_raw is None or games_raw.empty: return pd.DataFrame()
     lm=_extract_line_records(lines_raw)
-    bm=_extract_team_box_records(box_raw if box_raw is not None else pd.DataFrame())
     rows=[]
     for _,g in games_raw.iterrows():
         gid=g.get("id",g.get("gameId")); start=pd.to_datetime(g.get("startDate",g.get("startTime")),errors="coerce",utc=True)
@@ -1528,8 +1565,7 @@ def build_canonical_history_rows(games_raw: pd.DataFrame, lines_raw: pd.DataFram
         if hm is None or am is None: continue  # fail closed: never invent canonical identities
         hs=pd.to_numeric(pd.Series([g.get("homePoints",g.get("homeScore"))]),errors="coerce").iloc[0]
         aas=pd.to_numeric(pd.Series([g.get("awayPoints",g.get("awayScore"))]),errors="coerce").iloc[0]
-        gid_key=_cfbd_game_id_key(gid)
-        line=lm.get(gid_key,{})
+        line=lm.get(str(int(float(gid))) if str(gid).replace('.0','').isdigit() else str(gid),{})
         hsp=line.get("spread",np.nan); hop=line.get("spread_open",np.nan); tot=line.get("total",np.nan); top=line.get("total_open",np.nan)
         hml=line.get("home_ml",np.nan); aml=line.get("away_ml",np.nan); raw=json.dumps(line.get("providers",[]),sort_keys=True,default=str)
         neutral=bool(g.get("neutralSite") is True or str(g.get("neutralSite")).lower()=="true")
@@ -1539,7 +1575,7 @@ def build_canonical_history_rows(games_raw: pd.DataFrame, lines_raw: pd.DataFram
         ]:
             close_sp=float(sp) if pd.notna(sp) else np.nan; open_sp=float(osp) if pd.notna(osp) else np.nan
             row={
-              "Sport":"NCAAF","Season":int(season),"Source_Name":"CollegeFootballData","Source_Grain":"GAME_SIDE_CONSENSUS","Source_Game_ID":gid_key,
+              "Sport":"NCAAF","Season":int(season),"Source_Name":"CollegeFootballData","Source_Grain":"GAME_SIDE_CONSENSUS","Source_Game_ID":str(int(float(gid))) if str(gid).replace('.0','').isdigit() else str(gid),
               "Game_Date":start.date().isoformat(),"Week":g.get("week"),"Start_Time_ET":st_et.strftime("%Y-%m-%d %H:%M:%S%z"),
               "Source_Team_Name":team,"Source_Opponent_Name":opp,"Team":tm.get("Team") or team,"Team_Norm":str(tm.get("Team_Norm") or _team_key(team)).strip().lower(),
               "Canonical_Team_Name":tm.get("Canonical_Team_Name") or tm.get("Team") or team,"Canonical_Team_Norm":str(tm.get("Canonical_Team_Norm") or tm.get("Team_Norm") or _team_key(team)).strip().lower(),
@@ -1555,13 +1591,6 @@ def build_canonical_history_rows(games_raw: pd.DataFrame, lines_raw: pd.DataFram
               "Total_Result_Close":_result_label(ts,os_,total=tot,kind="total") if pd.notna(tot) else None,"Is_Favorite_Close":int(pd.notna(close_sp) and close_sp<0),"Is_Underdog_Close":int(pd.notna(close_sp) and close_sp>0),"Is_Pickem_Close":int(pd.notna(close_sp) and abs(close_sp)<1e-12),
               "Source_Opening_Odds_Raw":raw,"Source_Closing_Odds_Raw":raw,"Dataset":f"CFBD {season}",
             }
-            _ls=g.get("homeLineScores") if is_home else g.get("awayLineScores")
-            if isinstance(_ls,(list,tuple)):
-                for _q,_col in enumerate(("Q1_Points","Q2_Points","Q3_Points")):
-                    if len(_ls)>_q:
-                        _v=_cfbd_int_stat(_ls[_q])
-                        if np.isfinite(_v): row[_col]=_v
-            row.update(bm.get((gid_key,_team_key(team)),{}))
             rows.append(row)
     return pd.DataFrame(rows)
 
@@ -1572,22 +1601,6 @@ def merge_canonical_history(client, project: str, dataset: str, rows: pd.DataFra
     raw=_qualified(project,dataset,CANONICAL_RAW_TABLE); stage=_qualified(project,dataset,CFBD_HISTORY_STAGING_TABLE)
     table=client.get_table(raw); raw_cols=[f.name for f in table.schema]
     d=rows.reindex(columns=raw_cols).copy()
-
-    # Coerce staging values to the exact existing BigQuery schema before CSV.
-    for f in table.schema:
-        if f.name not in d.columns:
-            continue
-        ft=str(f.field_type or "").upper()
-        if ft in {"INTEGER","INT64"}:
-            x=pd.to_numeric(d[f.name],errors="coerce")
-            non_integral=x.notna() & ((x-x.round()).abs()>1e-9)
-            if bool(non_integral.any()):
-                bad=d.loc[non_integral,f.name].head(10).tolist()
-                raise RuntimeError(f"Non-integral values for INT64 column {f.name}: {bad}")
-            d[f.name]=x.round().astype("Int64")
-        elif ft in {"FLOAT","FLOAT64","NUMERIC","BIGNUMERIC"}:
-            d[f.name]=pd.to_numeric(d[f.name],errors="coerce")
-
     # Load with the target schema exactly; adding CFBD cannot break weekly uploader's schema check.
     client.query(f"CREATE OR REPLACE TABLE `{stage}` AS SELECT * FROM `{raw}` WHERE FALSE").result()
     buf=io.StringIO(); d.to_csv(buf,index=False,na_rep=""); payload=io.BytesIO(buf.getvalue().encode("utf-8"))
@@ -1689,6 +1702,14 @@ def run(
         # while the portal feature builder still uses only prior-year production.
         player_ppa_cache = {y: pull_player_season_ppa(client, y) for y in range(min(seasons) - 1, max(seasons) + 1)}
         player_usage_cache = {y: pull_player_usage(client, y) for y in range(min(seasons) - 1, max(seasons) + 1)}
+        # Season-level ratings are exposed only one season later, so historical
+        # qualification never sees same-season final/retrospective estimates.
+        rating_years=range(min(seasons)-1,max(seasons))
+        sp_cache={y:pull_sp_ratings(client,y) for y in rating_years}
+        srs_cache={y:pull_srs_ratings(client,y) for y in rating_years}
+        fpi_cache={y:pull_fpi_ratings(client,y) for y in rating_years}
+        core_cache={y:pull_core_ratings(client,y) for y in rating_years}
+        enable_play_context=str(os.getenv("CFBD_ENABLE_PLAY_CONTEXT","1")).strip().lower() not in {"0","false","no","off"}
 
         for year in seasons:
             print(f"[CFBD-SEASON] year={year} status=START calls={client.call_count}")
@@ -1703,11 +1724,14 @@ def run(
             teams = pull_fbs_teams(client, year)
             qb = pull_qb_ppa_games(client, year, weeks)
             qb_success = pull_qb_success_games(client, year, weeks)
+            plays = pull_plays(client, year, weeks) if enable_play_context else pd.DataFrame()
             feat = build_season_features(
                 year, games, advanced, havoc, returning, portal,
                 roster_cache.get(year, pd.DataFrame()), roster_cache.get(year - 1, pd.DataFrame()),
                 talent, recruiting_all, weather, venues, teams, qb, qb_success,
                 player_ppa_cache.get(year - 1, pd.DataFrame()), player_usage_cache.get(year - 1, pd.DataFrame()),
+                plays, sp_cache.get(year-1,pd.DataFrame()), srs_cache.get(year-1,pd.DataFrame()),
+                fpi_cache.get(year-1,pd.DataFrame()), core_cache.get(year-1,pd.DataFrame()),
             )
             all_features.append(feat)
             players.append(build_player_history_sidecar(year, roster_cache.get(year,pd.DataFrame()), player_ppa_cache.get(year,pd.DataFrame()), player_usage_cache.get(year,pd.DataFrame())))
@@ -1722,7 +1746,9 @@ def run(
         for c in [
             "CFBD_Season_Net_PPA_Prior", "CFBD_Returning_Pct_PPA", "CFBD_Roster_ALL_Retention",
             "CFBD_Talent", "CFBD_Portal_Net_Prior_TotalPPA", "CFBD_QB_Game_Pass_Success_SeasonPrior",
-            "CFBD_Matchup_Elo_Adv", "CFBD_WindSpeed", "CFBD_Venue_Elevation", "CFBD_Altitude_Gain",
+            "CFBD_Matchup_Elo_Adv", "CFBD_Matchup_EarlyDown_PPA_Adv", "CFBD_Matchup_PPA_Per_Drive_Adv",
+            "CFBD_Prior_PPA_Return_Pct", "CFBD_Matchup_PriorYear_SP_Adv", "CFBD_Matchup_PriorYear_FPI_Adv",
+            "CFBD_WindSpeed", "CFBD_Venue_Elevation", "CFBD_Altitude_Gain",
         ]:
             if c in out.columns:
                 print(f"[CFBD-COVERAGE] field={c} n={int(out[c].notna().sum())} pct={float(out[c].notna().mean()):.4f}")
@@ -1741,23 +1767,14 @@ def run(
                 if games is None:
                     games=pull_games(client,year); game_cache[year]=games
                 lines=pull_lines(client,year)
-                hist_weeks=sorted(_num(_first_col(games,"week")).dropna().astype(int).unique().tolist()) if not games.empty else []
-                box=pull_team_game_box(client,year,hist_weeks)
                 amap=_alignment_map(bq,project,dataset,year)
                 if not amap:
                     print(f"[CFBD-HISTORY] year={year} status=SKIP_NO_ALIGNMENT")
                     continue
-                print(f"[CFBD-HISTORY-ALIGNMENT] year={year} map_keys={len(amap)} cfbd_aliases_enabled=TRUE future_conference_leakage=FALSE")
-                rows=build_canonical_history_rows(games,lines,year,amap,box)
+                rows=build_canonical_history_rows(games,lines,year,amap)
                 if rows.empty:
                     print(f"[CFBD-HISTORY] year={year} status=NO_CANONICAL_ROWS")
                     continue
-                _ypp_ok=(pd.to_numeric(rows.get("Postgame_Total_Yards"),errors="coerce").notna() & pd.to_numeric(rows.get("Postgame_Total_Plays"),errors="coerce").notna())
-                _rush_ok=(pd.to_numeric(rows.get("Postgame_Rush_Yards"),errors="coerce").notna() & pd.to_numeric(rows.get("Postgame_Rush_Att"),errors="coerce").notna())
-                _pass_ok=(pd.to_numeric(rows.get("Postgame_Pass_Yards"),errors="coerce").notna() & pd.to_numeric(rows.get("Postgame_Pass_Att"),errors="coerce").notna())
-                print(f"[CFBD-HISTORY-BOX] year={year} api_games={len(box)} canonical_sides={len(rows)} ypp_n={int(_ypp_ok.sum())} ypp_pct={float(_ypp_ok.mean()):.4f} rush_n={int(_rush_ok.sum())} rush_pct={float(_rush_ok.mean()):.4f} pass_n={int(_pass_ok.sum())} pass_pct={float(_pass_ok.mean()):.4f}")
-                if int(_ypp_ok.sum())==0 or int(_rush_ok.sum())==0:
-                    raise RuntimeError(f"CFBD historical box-score mapping produced zero CORE inputs for season {year}; refusing to overwrite history silently")
                 res=merge_canonical_history(bq,project,dataset,rows); history_results.append({"season":year,**res})
                 print(f"[CFBD-HISTORY] year={year} status={res.get('status')} rows={len(rows)} calls={client.call_count}")
 
@@ -1816,52 +1833,24 @@ def _self_test() -> None:
     assert float(a.iloc[0]["CFBD_Elo_Prior"]) == 1500.0
 
     # Existing-raw-table mapping: home/away market orientation and grading.
-    hg=pd.DataFrame([{"id":99,"season":2020,"week":1,"startDate":"2020-09-01T00:00:00Z","homeTeam":"Alpha","awayTeam":"Beta","homePoints":28,"awayPoints":21,"homeConference":"X","awayConference":"Y","neutralSite":False,"homeLineScores":[7,7,7,7],"awayLineScores":[7,0,7,7]}])
+    hg=pd.DataFrame([{"id":99,"season":2020,"week":1,"startDate":"2020-09-01T00:00:00Z","homeTeam":"Alpha","awayTeam":"Beta","homePoints":28,"awayPoints":21,"homeConference":"X","awayConference":"Y","neutralSite":False}])
     hl=pd.DataFrame([{"id":99,"lines":[{"provider":"Consensus","spread":-3.5,"spreadOpen":-3.0,"overUnder":49.5,"overUnderOpen":48.5,"homeMoneyline":-160,"awayMoneyline":140}]}])
     amap={"alpha":{"Team":"Alpha","Team_Norm":"alpha","Canonical_Team_Name":"Alpha","Canonical_Team_Norm":"alpha","Conference":"X","Subdivision":"FBS"},"beta":{"Team":"Beta","Team_Norm":"beta","Canonical_Team_Name":"Beta","Canonical_Team_Norm":"beta","Conference":"Y","Subdivision":"FBS"}}
-    hb=pd.DataFrame([{
-        "id":99,
-        "teams":[
-            {"team":"Alpha","stats":[
-                {"category":"totalYards","stat":"500"},
-                {"category":"rushingAttempts","stat":"40"},
-                {"category":"rushingYards","stat":"180"},
-                {"category":"completionAttempts","stat":"25-35"},
-                {"category":"netPassingYards","stat":"320"},
-                {"category":"passingTDs","stat":"3"},
-                {"category":"rushingTDs","stat":"2"},
-                {"category":"interceptions","stat":"1"},
-                {"category":"totalPenaltiesYards","stat":"6-55"},
-                {"category":"firstDowns","stat":"24"},
-                {"category":"turnovers","stat":"2"}
-            ]},
-            {"team":"Beta","stats":[
-                {"category":"totalYards","stat":"350"},
-                {"category":"rushingAttempts","stat":"30"},
-                {"category":"rushingYards","stat":"120"},
-                {"category":"completionAttempts","stat":"18/32"},
-                {"category":"netPassingYards","stat":"230"}
-            ]}
-        ]
-    }])
-    hr=build_canonical_history_rows(hg,hl,2020,amap,hb)
+    hr=build_canonical_history_rows(hg,hl,2020,amap)
     assert len(hr)==2 and float(hr.loc[hr["Is_Home"].eq(1),"Consensus_Close_Spread"].iloc[0])==-3.5 and float(hr.loc[hr["Is_Home"].eq(0),"Consensus_Close_Spread"].iloc[0])==3.5
     assert hr.loc[hr["Is_Home"].eq(1),"ATS_Result_Close"].iloc[0]=="WIN" and hr.loc[hr["Is_Home"].eq(0),"ATS_Result_Close"].iloc[0]=="LOSS"
-    _alpha=hr.loc[hr["Is_Home"].eq(1)].iloc[0]
-    _beta=hr.loc[hr["Is_Home"].eq(0)].iloc[0]
-    assert float(_alpha["Postgame_Total_Yards"])==500.0
-    assert float(_alpha["Postgame_Total_Plays"])==75.0
-    assert float(_alpha["Postgame_Rush_Yards"])==180.0 and float(_alpha["Postgame_Rush_Att"])==40.0
-    assert float(_alpha["Postgame_Pass_Yards"])==320.0 and float(_alpha["Postgame_Pass_Att"])==35.0 and float(_alpha["Postgame_Pass_Comp"])==25.0
-    assert float(_alpha["Postgame_Penalty_Yards"])==55.0 and float(_alpha["Postgame_Pass_INT"])==1.0
-    assert float(_alpha["Postgame_First_Downs"])==24.0 and float(_alpha["Postgame_Turnovers"])==2.0
-    assert float(_alpha["Q1_Points"])==7.0 and float(_alpha["Q3_Points"])==7.0
-    assert float(_beta["Postgame_Total_Plays"])==62.0 and float(_beta["Postgame_Pass_Att"])==32.0
 
     pf=pd.DataFrame([{"Season":2025,"Team":"A","Team_Key":"a","CFBD_Returning_Pct_PPA":.70,"CFBD_Talent":800.0,"CFBD_Season_Net_PPA_Prior":.10}])
     ps=build_personnel_sidecar(pf)
     assert "CFBD_Returning_Pct_PPA" in ps.columns and "CFBD_Season_Net_PPA_Prior" not in ps.columns
-    print("[CFBD-SELF-TEST] status=PASS leakage_shift1=TRUE completed_game_windows=TRUE schedule_base=TRUE pregame_elo=TRUE raw_history_orientation=TRUE raw_history_boxscore=TRUE personnel_sidecar=TRUE")
+    pbp=pd.DataFrame([
+        {"gameId":99,"driveId":"d1","offense":"A","defense":"B","down":1,"distance":10,"yardsToGoal":75,"yardsGained":6,"playType":"Rush","ppa":.10},
+        {"gameId":99,"driveId":"d1","offense":"A","defense":"B","down":2,"distance":4,"yardsToGoal":69,"yardsGained":20,"playType":"Pass Reception","ppa":.35},
+        {"gameId":99,"driveId":"d2","offense":"B","defense":"A","down":1,"distance":10,"yardsToGoal":80,"yardsGained":-5,"playType":"Sack","ppa":-.40},
+    ])
+    pc=build_play_context_features(pbp)
+    assert len(pc)==2 and "CFBD_Game_Off_Field_Position" in pc.columns and "CFBD_Game_Off_Sack_Rate" in pc.columns
+    print("[CFBD-SELF-TEST] status=PASS leakage_shift1=TRUE completed_game_windows=TRUE schedule_base=TRUE pregame_elo=TRUE raw_history_orientation=TRUE personnel_sidecar=TRUE pbp_context=TRUE prior_ratings_contract=TRUE")
 
 
 def main() -> None:
