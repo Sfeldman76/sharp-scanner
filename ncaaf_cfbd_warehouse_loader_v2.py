@@ -1447,6 +1447,172 @@ def _merge_dataframe(client, table_id: str, df: pd.DataFrame, keys: list[str], *
         client.delete_table(tmp,not_found_ok=True)
 
 
+def replace_player_history_seasons(client, table_id: str, df: pd.DataFrame, *, min_retention: float = 0.80) -> dict[str, Any]:
+    """Atomically replace complete player-season snapshots WITHOUT a 3-key MERGE join.
+
+    BigQuery on-demand rejects the prior equality-join MERGE (8,175 slot CPU
+    seconds against only 26 MB scanned). An ON FALSE MERGE is a documented
+    constant-false partition replacement; it avoids a target/source join.
+    Only seasons fully represented in the incoming snapshot can be replaced.
+    """
+    from google.cloud import bigquery
+    from google.api_core.exceptions import NotFound
+    keys = ["Season", "Team_Key", "Player_Key"]
+    if df is None or df.empty:
+        return {"status": "EMPTY", "rows": 0, "table": table_id}
+    d = _clean_bq_frame(df).copy()
+    if not set(keys).issubset(d.columns):
+        raise RuntimeError(f"CFBD_PLAYER_KEYS_MISSING {sorted(set(keys)-set(d.columns))}")
+    d["Season"] = pd.to_numeric(d["Season"], errors="raise").astype("Int64")
+    if d[keys].isna().any().any() or d.duplicated(keys).any():
+        raise RuntimeError("CFBD_PLAYER_NULL_OR_DUPLICATE_KEYS: no writes made")
+    for key in ["Team_Key", "Player_Key"]:
+        if not d[key].astype(str).str.strip().ne("").all():
+            raise RuntimeError(f"CFBD_PLAYER_BLANK_KEY {key}: no writes made")
+    season_counts = {int(k):int(v) for k,v in d.groupby("Season").size().items()}
+    if any(v < 100 for v in season_counts.values()):
+        raise RuntimeError(f"CFBD_PLAYER_SNAPSHOT_TOO_SMALL {season_counts}: no writes made")
+    try:
+        target = client.get_table(table_id)
+    except NotFound:
+        client.load_table_from_dataframe(d, table_id, job_config=bigquery.LoadJobConfig(write_disposition="WRITE_EMPTY")).result()
+        return {"status":"CREATED","rows":len(d),"seasons":season_counts,"table":table_id}
+
+    columns = list(d.columns)
+    extra_cols = sorted(f.name for f in target.schema if f.name not in columns)
+    # An unrelated job may have enriched the target. Do not erase those fields.
+    if extra_cols:
+        raise RuntimeError(f"CFBD_PLAYER_TARGET_HAS_EXTRA_COLUMNS {extra_cols}; refusing season replacement")
+    stage = f"{table_id}__player_stage_{uuid.uuid4().hex[:12]}"
+    # Retain staging on any failure so a live failure does not discard the work.
+    client.load_table_from_dataframe(d, stage, job_config=bigquery.LoadJobConfig(write_disposition="WRITE_EMPTY")).result()
+    print(f"[CFBD-PLAYER-STAGED] stage={stage} rows={len(d)} seasons={season_counts}")
+    try:
+        stage_schema = {f.name: f for f in client.get_table(stage).schema}
+        target_schema = {f.name: f for f in target.schema}
+        for col in columns:
+            if col not in target_schema:
+                client.query(f"ALTER TABLE `{table_id}` ADD COLUMN IF NOT EXISTS `{col}` {_bq_ddl_type(stage_schema[col])}").result()
+        from google.cloud import bigquery as bq
+        years = sorted(season_counts)
+        cfg = bq.QueryJobConfig(query_parameters=[bq.ArrayQueryParameter("years", "INT64", years)])
+        before = client.query(f"SELECT Season, COUNT(*) n FROM `{table_id}` WHERE Season IN UNNEST(@years) GROUP BY Season",job_config=cfg).result()
+        existing_counts={int(r.Season):int(r.n) for r in before}
+        decreases={year:{"previous":existing_counts[year],"incoming":size}
+                   for year,size in season_counts.items()
+                   if year in existing_counts and size < existing_counts[year]*min_retention}
+        if decreases:
+            raise RuntimeError(f"CFBD_PLAYER_SNAPSHOT_SHRINK_GUARD {decreases}: stage retained for inspection")
+        names=", ".join(f"`{c}`" for c in columns)
+        values=", ".join(f"S.`{c}`" for c in columns)
+        # ON FALSE means there is NO expensive three-key equality join. One
+        # atomic DML removes only requested seasons and inserts their snapshot.
+        sql=f"""MERGE `{table_id}` AS T USING `{stage}` AS S ON FALSE
+          WHEN NOT MATCHED BY SOURCE AND T.Season IN UNNEST(@years) THEN DELETE
+          WHEN NOT MATCHED THEN INSERT ({names}) VALUES ({values})"""
+        client.query(sql,job_config=cfg).result()
+        after = client.query(f"SELECT Season, COUNT(*) n FROM `{table_id}` WHERE Season IN UNNEST(@years) GROUP BY Season",job_config=cfg).result()
+        observed={int(r.Season):int(r.n) for r in after}
+        if observed != season_counts:
+            raise RuntimeError(f"CFBD_PLAYER_READBACK_MISMATCH expected={season_counts} observed={observed}; stage retained")
+        client.delete_table(stage,not_found_ok=True)
+        print(f"[CFBD-PLAYER-READBACK] status=PASS seasons={season_counts}")
+        return {"status":"PASS","table":table_id,"rows":len(d),"seasons":season_counts,
+                "strategy":"JOIN_FREE_ATOMIC_SEASON_REPLACE","readback":"PASS"}
+    except Exception:
+        print(f"[CFBD-PLAYER-RECOVERY-STAGE] preserved={stage} retry_without_CFBD=TRUE")
+        raise
+
+
+def audit_player_history(client, project: str, dataset: str, seasons: list[int]) -> dict[str,Any]:
+    """Read-only sidecar coverage; never confuse stored rows with source freshness."""
+    from google.api_core.exceptions import NotFound
+    from google.cloud import bigquery
+    tid=_qualified(project,dataset,PLAYER_HISTORY_TABLE)
+    try: t=client.get_table(tid)
+    except NotFound:
+        print(f"[CFBD-PLAYER-AUDIT] status=MISSING_TABLE table={tid} api_calls=0")
+        return {"status":"MISSING_TABLE","table":tid}
+    colnames={f.name for f in t.schema}
+    if not {"Season","Team_Key","Player_Key"}.issubset(colnames):
+        raise RuntimeError(f"CFBD_PLAYER_AUDIT_MISSING_KEYS table={tid}")
+    expressions=["COUNT(*) AS n", "COUNT(DISTINCT CONCAT(CAST(Team_Key AS STRING), '|', CAST(Player_Key AS STRING))) AS unique_players"]
+    for col in ["PPA_Total","Usage_Overall","Player_ID","Player_Name"]:
+        if col in colnames: expressions.append(f"COUNTIF(`{col}` IS NOT NULL) AS `{col}_non_null`")
+    if "Ingested_At" in colnames: expressions.append("MAX(Ingested_At) AS latest_ingested_at")
+    cfg=bigquery.QueryJobConfig(query_parameters=[bigquery.ArrayQueryParameter("years","INT64",seasons)])
+    query=f"SELECT Season, {', '.join(expressions)} FROM `{tid}` WHERE Season IN UNNEST(@years) GROUP BY Season ORDER BY Season"
+    results=list(client.query(query,job_config=cfg).result())
+    by_year={int(r.Season):int(r.n) for r in results}
+    for year in seasons:
+        matches=[r for r in results if int(r.Season)==year]
+        if matches:
+            row=dict(matches[0].items()); row.pop("Season",None)
+            print(f"[CFBD-PLAYER-AUDIT-SEASON] year={year} status=PRESENT_UNVERIFIED_FRESHNESS {row}")
+        else:
+            print(f"[CFBD-PLAYER-AUDIT-SEASON] year={year} status=MISSING rows=0")
+    status="PRESENT_UNVERIFIED_FRESHNESS" if len(by_year)==len(seasons) and all(n>=100 for n in by_year.values()) else "PARTIAL"
+    print(f"[CFBD-PLAYER-AUDIT] status={status} seasons={seasons} cfbd_api_calls=0")
+    return {"status":status,"counts":by_year,"table":tid,"api_calls":0}
+
+
+def repair_player_history_from_stages(client, project: str, dataset: str) -> dict[str,Any]:
+    """Resume a prior failed player write using its BigQuery staging table; no API."""
+    table_id=_qualified(project,dataset,PLAYER_HISTORY_TABLE)
+    prefix=f"{PLAYER_HISTORY_TABLE}__player_stage_"
+    stages=[_qualified(project,dataset,x.table_id) for x in client.list_tables(f"{project}.{dataset}")
+            if x.table_id.startswith(prefix) and re.fullmatch(r"[a-zA-Z0-9_]+",x.table_id)]
+    print(f"[CFBD-PLAYER-STAGE-PLAN] stages={len(stages)} cfbd_api_calls=0")
+    if not stages:
+        return {"status":"NO_STAGES_FOUND","cfbd_api_calls":0}
+    repaired=[]
+    for stage in sorted(stages):
+        d=client.query(f"SELECT * FROM `{stage}`").to_dataframe(create_bqstorage_client=False)
+        if d.empty: raise RuntimeError(f"CFBD_PLAYER_EMPTY_RECOVERY_STAGE {stage}")
+        result=replace_player_history_seasons(client,table_id,d)
+        if result['status']!='PASS': raise RuntimeError(f"CFBD_PLAYER_STAGE_REPAIR_FAILED {result}")
+        client.delete_table(stage,not_found_ok=True)
+        repaired.append({"stage":stage,"rows":result['rows']})
+        print(f"[CFBD-PLAYER-STAGE-RECOVERED] stage={stage} rows={result['rows']} api_calls=0")
+    return {"status":"PASS","repaired":repaired,"cfbd_api_calls":0}
+
+
+def repair_player_history_with_minimal_cfbd(client, project: str, dataset: str, seasons: list[int]) -> dict[str,Any]:
+    """Refresh only roster/player-PPA/usage endpoints; never rerun full CFBD backfill.
+
+    Archive each season immediately before attempting any later API request or
+    player DML. A failed season cannot erase earlier downloaded responses.
+    """
+    if not seasons: raise RuntimeError("CFBD_PLAYER_REPAIR_REQUIRES_SEASONS")
+    c=CFBDClient()
+    frames=[]; missing=[]; archive_offset=0
+    for year in seasons:
+        roster=pull_roster(c,year)
+        ppa=pull_player_season_ppa(c,year)
+        usage=pull_player_usage(c,year)
+        sizes={"roster":len(roster),"ppa":len(ppa),"usage":len(usage)}
+        print(f"[CFBD-PLAYER-REPAIR-SOURCE] year={year} counts={sizes} api_calls={c.call_count}")
+        # Persist everything fetched for this year before fetching another year.
+        new_archive=c.archive_rows[archive_offset:]
+        if new_archive:
+            ares=write_api_archive(client,project,dataset,new_archive)
+            archive_offset=len(c.archive_rows)
+            print(f"[CFBD-PLAYER-REPAIR-ARCHIVE] year={year} status={ares['status']} rows={ares.get('rows')} api_calls={c.call_count}")
+        if not all(sizes.values()):
+            missing.append(year)
+            print(f"[CFBD-PLAYER-REPAIR-SKIP] year={year} reason=PARTIAL_SOURCE existing_rows_preserved=TRUE")
+            continue
+        frames.append(build_player_history_sidecar(year,roster,ppa,usage))
+    if not frames:
+        raise RuntimeError(f"CFBD_PLAYER_REPAIR_NO_COMPLETE_SEASONS seasons={seasons}; existing rows preserved")
+    out=pd.concat(frames,ignore_index=True,sort=False)
+    res=replace_player_history_seasons(client,_qualified(project,dataset,PLAYER_HISTORY_TABLE),out)
+    print(f"[CFBD-PLAYER-REPAIR-COMPLETE] status={'PARTIAL' if missing else res['status']} seasons={seasons} missing={missing} rows={len(out)} api_calls={c.call_count}")
+    if missing:
+        raise RuntimeError(f"CFBD_PLAYER_REPAIR_PARTIAL_SOURCE seasons={missing}; good seasons committed, missing seasons retained")
+    return res
+
+
 # Immutable API-archive schema contract. Season may be absent on endpoints that
 # are not season-scoped; use nullable INT64, never pandas float inference.
 _ARCHIVE_COLUMN_TYPES = {
@@ -1999,6 +2165,15 @@ def warehouse_preflight(client, project: str, dataset: str, table: str,
         if stages:
             result['status']='FAIL'
             print(f"[CFBD-PREFLIGHT-ARCHIVE-PENDING] stages={len(stages)} action=RUN_--repair-archive no_api_calls=TRUE")
+        # Never run another costly CFBD backfill while a prior player snapshot
+        # can be resumed from BigQuery staging without contacting the API.
+        player_prefix=f"{PLAYER_HISTORY_TABLE}__player_stage_"
+        player_stages=[x.table_id for x in client.list_tables(f"{project}.{dataset}")
+                       if x.table_id.startswith(player_prefix)]
+        result['pending_player_stages']=len(player_stages)
+        if player_stages:
+            result['status']='FAIL'
+            print(f"[CFBD-PREFLIGHT-PLAYER-PENDING] stages={len(player_stages)} action=RUN_--repair-player-stages no_api_calls=TRUE")
     print(f"[CFBD-PREFLIGHT] status={result['status']} cfbd_api_calls=0")
     return result
 
@@ -2111,7 +2286,12 @@ def run(
                 fpi_cache.get(year-1,pd.DataFrame()), core_cache.get(year-1,pd.DataFrame()),
             )
             all_features.append(feat)
-            players.append(build_player_history_sidecar(year, roster_cache.get(year,pd.DataFrame()), player_ppa_cache.get(year,pd.DataFrame()), player_usage_cache.get(year,pd.DataFrame())))
+            # Never replace stored player seasons from a partial optional-source response.
+            player_sources=(roster_cache.get(year,pd.DataFrame()),player_ppa_cache.get(year,pd.DataFrame()),player_usage_cache.get(year,pd.DataFrame()))
+            if all(frame is not None and not frame.empty for frame in player_sources):
+                players.append(build_player_history_sidecar(year,*player_sources))
+            else:
+                print(f"[CFBD-PLAYER-SNAPSHOT-SKIPPED] year={year} reason=INCOMPLETE_ROSTER_PPA_OR_USAGE existing_data_preserved=TRUE")
             if feat.empty:
                 raise RuntimeError(f"CFBD_REQUIRED_SEASON_EMPTY year={year}; refusing a destructive warehouse refresh")
             print(f"[CFBD-SEASON] year={year} status=PASS feature_rows={len(feat)} calls={client.call_count}")
@@ -2165,19 +2345,18 @@ def run(
         if not out.empty:
             # Build/staging table for Research V2's fail-closed CFBD bridge.
             write_bigquery(out, project, dataset, table, seasons)
+        # Archive source payloads BEFORE optional sidecars. If a sidecar DML
+        # fails, archive recovery can replay the original CFBD responses.
+        if not skip_archive:
+            ares=write_api_archive(bq,project,dataset,client.archive_rows); print(f"[CFBD-ARCHIVE] {ares}")
         if not skip_sidecars:
             if not personnel.empty:
                 pres=_merge_dataframe(bq,_qualified(project,dataset,PERSONNEL_TABLE),personnel,["Season","Team_Key"])
                 print(f"[CFBD-PERSONNEL] {pres}")
             player_df=pd.concat([x for x in players if x is not None and not x.empty],ignore_index=True,sort=False) if any(x is not None and not x.empty for x in players) else pd.DataFrame()
             if not player_df.empty:
-                plres=_merge_dataframe(bq,_qualified(project,dataset,PLAYER_HISTORY_TABLE),player_df,["Season","Team_Key","Player_Key"])
+                plres=replace_player_history_seasons(bq,_qualified(project,dataset,PLAYER_HISTORY_TABLE),player_df)
                 print(f"[CFBD-PLAYERS] {plres}")
-        # Archive all successful API responses before lower-priority derived
-        # travel maintenance. An interrupted travel MERGE must not lose the
-        # original fetched responses or force 71+ repeat API calls.
-        if not skip_archive:
-            ares=write_api_archive(bq,project,dataset,client.archive_rows); print(f"[CFBD-ARCHIVE] {ares}")
         if not skip_travel_update and not out.empty:
             tres=merge_environment_into_travel(bq,project,dataset,out); print(f"[CFBD-TRAVEL-ENV] {tres}")
             if tres.get("status") != "PASS":
@@ -2268,6 +2447,9 @@ def main() -> None:
     p.add_argument("--repair-warehouse", action="store_true",help="Resume the travel/derived warehouse step using persisted features; zero CFBD API calls")
     p.add_argument("--repair-personnel", action="store_true",help="With --repair-warehouse, also re-merge personnel sidecar")
     p.add_argument("--repair-archive", action="store_true",help="Recover failed prior API archive from leftover BigQuery stage; no CFBD key/calls")
+    p.add_argument("--audit-players", action="store_true",help="Read-only player-history coverage/freshness audit; zero CFBD calls")
+    p.add_argument("--repair-players", action="store_true",help="Refresh ONLY player roster/PPA/usage endpoints and archive first; avoid full CFBD reload")
+    p.add_argument("--repair-player-stages", action="store_true",help="Resume retained failed player snapshots from BigQuery stage; no CFBD calls")
     p.add_argument("--fail-on-partial", action="store_true",help="Make read-only verification return nonzero for PARTIAL coverage")
     args = p.parse_args()
     if args.self_test:
@@ -2276,10 +2458,28 @@ def main() -> None:
     history = _parse_seasons(args.history_seasons)
     if not seasons and not history:
         raise SystemExit("No seasons selected")
-    if args.verify_only or args.preflight or args.repair_warehouse or args.repair_archive:
+    if args.verify_only or args.preflight or args.repair_warehouse or args.repair_archive or args.audit_players or args.repair_players or args.repair_player_stages:
         if args.no_bq: raise SystemExit("This operation requires BigQuery (remove --no-bq)")
         from google.cloud import bigquery
         bq=bigquery.Client(project=args.project)
+        if args.audit_players:
+            audit_player_history(bq,args.project,args.dataset,seasons)
+            return
+        if args.repair_player_stages:
+            res=repair_player_history_from_stages(bq,args.project,args.dataset)
+            if res['status']!='PASS': raise SystemExit('CFBD_PLAYER_NO_RECOVERABLE_STAGE')
+            return
+        if args.repair_players:
+            ck=warehouse_preflight(bq,args.project,args.dataset,args.table,require_archive_clear=True)
+            if ck['status']!='PASS': raise SystemExit('CFBD_PLAYER_REPAIR_PREFLIGHT_FAILED')
+            audit_player_history(bq,args.project,args.dataset,seasons)
+            repair_player_history_with_minimal_cfbd(bq,args.project,args.dataset,seasons)
+            audit_player_history(bq,args.project,args.dataset,seasons)
+            # Main 4-season run stopped before travel update. Resume travel
+            # and feature readback from stored warehouse, with zero more calls.
+            repair_warehouse_from_stored_features(bq,args.project,args.dataset,args.table,seasons)
+            print(f"[CFBD-PLAYER-AND-TRAVEL-COMPLETE] status=PASS seasons={seasons}")
+            return
         if args.repair_archive:
             recovery=repair_api_archive_from_stages(bq,args.project,args.dataset)
             if recovery['status']!='PASS':
