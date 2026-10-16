@@ -1247,6 +1247,23 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
         coverage_rank=_rank_subset_features(g,coverage_pool,max_features=MAX_COVERAGE_STATS) if coverage_pool else {"selected":[],"top_ranked":[]}
         coverage_stats=list(coverage_rank.get("selected") or [])
         coverage_incremental=_coverage_incremental_report(g,coverage_stats)
+        # Independent score-based CORE foundation: EVERY eligible historical
+        # season, regardless of opening-line availability. Existing 2022+
+        # market-residual recipes and confirmation policy remain untouched.
+        from ncaaf_full_history_foundation import run_full_history_foundation
+        full_history_foundation=run_full_history_foundation(
+            g,base_candidates+strength_cols+interaction_cols+coverage_candidates+advanced_candidates,
+            log_func=log_func,
+        )
+        if full_history_foundation.get("status")!="PASS":
+            raise RuntimeError("NCAAF full-history score foundation failed: "+str(full_history_foundation.get("status")))
+        try:
+            dashboard_module._NCAAF_FULL_HISTORY_FOUNDATION=full_history_foundation
+        except Exception:
+            pass
+        log_func(f"[NCAAF-CORE-FULL-HISTORY] status=PASS source_years={full_history_foundation['source_years']} "
+                 f"score_games={full_history_foundation['game_rows']} open_price_required=FALSE "
+                 f"market_residual_discovery=2022_2023_UNCHANGED authority=0")
         power_cols=[c for c in strength_cols if c in g.columns and float(_num(g,c).notna().mean())>=0.20]
         # Do not let market magnitude dominate the power-only branch; disagreement with the market is allowed.
         power_core=[c for c in power_cols if c not in {"Expert_OpenMargin","Expert_FavoriteRole"}]
@@ -1323,6 +1340,7 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
             },
             "advanced_data_readiness":advanced_readiness,
             "cfbd_core_bridge":cfbd_core_bridge,
+            "full_history_score_foundation":full_history_foundation,
             "existing_feed_coverage_registry":coverage_registry,
             "coverage_incremental_attribution":coverage_incremental,
             "coverage_feature_ablation":coverage_ablation,

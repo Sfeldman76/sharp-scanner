@@ -7694,6 +7694,18 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         if historic.sum()<500: raise RuntimeError(f"insufficient <=2025 history n={int(historic.sum())}")
         g=games.loc[historic].reset_index(drop=True); mg=miner_games.loc[historic].reset_index(drop=True); sy=seasons[historic]; om=oof_margin[historic]; ot=oof_total[historic]
         log_func(f"[NCAAF-RV232-PREFLIGHT] source={NCAAF_RESEARCH_V2_SOURCE_TAG} rows={len(g)} seasons={sorted(set(sy.astype(int)))} discovery<=2023 confirmation=2024,2025 prospective>=2026 production_authority=0")
+        # Complement the existing market-error STAT research with a separate,
+        # chronological all-season score foundation. The original market-only
+        # lane intentionally still needs authentic opening prices.
+        from ncaaf_full_history_foundation import run_full_history_foundation, frame_fingerprint
+        score_foundation=getattr(dashboard_module,"_NCAAF_FULL_HISTORY_FOUNDATION",None)
+        if (not isinstance(score_foundation,dict) or score_foundation.get("fingerprint")!=frame_fingerprint(g)):
+            score_foundation=run_full_history_foundation(g,cols,log_func=log_func)
+            log_func("[NCAAF-RV2-SCORE-HISTORY] source=STANDALONE research_only=TRUE")
+        else:
+            log_func("[NCAAF-RV2-SCORE-HISTORY] source=CORE_CACHE_REUSED research_only=TRUE")
+        if score_foundation.get("status")!="PASS":
+            raise RuntimeError("NCAAF full-history score research failed: "+str(score_foundation.get("status")))
         stat=run_orthogonal_stat_research(g,sy,om,ot,cols,log_func=log_func)
         sparse_stat=run_sparse_stat_research(g,sy,om,ot,log_func=log_func)
         miners={m:run_system_miner_v3(mg,sy,m,dashboard_module=dashboard_module,log_func=log_func,max_depth=5) for m in ("spreads","h2h","totals")}
@@ -7772,7 +7784,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "pt_live_availability":_pt_live_availability,
                 "production_authority":0,"production_contract_mutated":False,
                 "benchmark":"FROZEN_NCAAF_PRODUCTION_V1","discovery_max_season":NCAAF_MINER_PRECONF_MAX_SEASON,"miner_history_contract":NCAAF_MINER_HISTORY_CONTRACT,"confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,
-                "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"system_miner_v3":miners,
+                "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"full_history_score_foundation":score_foundation,"system_miner_v3":miners,
                 "system_library_inventory":system_library_inventory,"system_library_change_audit":system_library_change_audit,"incumbent_system_library_audit":incumbent_system_library_audit,
                 "context_family_cap_audit":context_family_cap_audit,
                 "historical_state_context_bridge":historical_state_context_bridge,
