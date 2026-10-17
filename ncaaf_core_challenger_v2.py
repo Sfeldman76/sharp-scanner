@@ -555,6 +555,15 @@ def _feature_family(c: str, dashboard_module=None) -> str:
     return "other"
 
 
+# NCAAF_CFBD_STRICT_PREGAME_REBUILD_20261017
+# Rebuild the game-level CFBD history into strictly prior-game research features.
+from ncaaf_pregame_cfbd import (
+    forbidden_raw_cfbd as _core_raw_cfbd,
+    build_strict_pregame_cfbd as _core_build_pregame_cfbd,
+    replace_or_attach_pregame as _core_attach_strict_prior,
+    select_safe_cfbd_source_columns as _core_safe_cfbd_columns,
+)
+
 def _safe_pool(g: pd.DataFrame, candidate_cols: list[str]) -> list[str]:
     disc=g[_num(g,"Season").isin([2022,2023])]
     out=[]
@@ -562,6 +571,7 @@ def _safe_pool(g: pd.DataFrame, candidate_cols: list[str]) -> list[str]:
         if c=="Context_Intercept" or c not in g.columns: continue
         lc=str(c).lower()
         if any(t in lc for t in _BLOCKED_FEATURE_TOKENS): continue
+        if _core_raw_cfbd(c): continue
         s=pd.to_numeric(disc[c],errors="coerce")
         if int(s.notna().sum())<500 or s.nunique(dropna=True)<2: continue
         out.append(c)
@@ -728,7 +738,7 @@ def _attach_cfbd_core_context(dashboard_module, g: pd.DataFrame, *, log_func=pri
     if bq is None:
         return g,{"status":"NO_BQ_CLIENT","matched_rows":0,"table":NCAAF_CFBD_MINER_FEATURE_TABLE}
 
-    out=g.copy()
+    out=g.drop(columns=[c for c in g.columns if _core_raw_cfbd(c)],errors='ignore').copy()
     sy=pd.to_numeric(out.get("Season"),errors="coerce")
     finite=sy.dropna()
     if finite.empty:
@@ -764,14 +774,25 @@ def _attach_cfbd_core_context(dashboard_module, g: pd.DataFrame, *, log_func=pri
         z=series.astype("string").fillna("").str.strip().str.replace(r"\.0$","",regex=True)
         return z.mask(z.str.lower().isin({"","nan","none","<na>"}),"").astype(str)
 
-    right=cf.copy()
+    # Do not trust a field just because it contains 'Prior' in its name.
+    # Reconstruct directly from chronologically earlier completed CFBD games.
+    _rebuilt,_pregame_audit=_core_build_pregame_cfbd(cf,max_season=hi)
+    # Discard any cached prior columns with the same names so a stale value
+    # can never take precedence over our freshly computed as-of-game values.
+    _rebuilt_features=[c for c in _rebuilt.columns if str(c).startswith('CFBD_')]
+    out=out.drop(columns=_rebuilt_features,errors='ignore')
+    right=_core_attach_strict_prior(cf,_rebuilt)
+    log_func('[NCAAF-CORE-PREGAME-REBUILT] '+json.dumps(_pregame_audit,sort_keys=True,default=str))
     right["__cfbd_season"]=pd.to_numeric(right.get("Season"),errors="coerce").astype("Int64")
     right["__cfbd_date"]=pd.to_datetime(right.get("Game_Date"),errors="coerce",utc=True).dt.normalize()
     right["__cfbd_team"]=first_key(right,("Team_Key","Team"))
     right["__cfbd_opp"]=first_key(right,("Opponent_Key","Opponent"))
     right["__cfbd_gid"]=gid_key(right.get("Game_ID",pd.Series("",index=right.index)))
     right["__cfbd_home"]=pd.to_numeric(right.get("Is_Home",pd.Series(np.nan,index=right.index)),errors="coerce").round().astype("Int64")
-    feature_cols=[c for c in right.columns if str(c).startswith("CFBD_")]
+    # Never merge contemporaneous boxscore or weather observations.
+    feature_cols=_core_safe_cfbd_columns(list(right.columns))
+    if not any(c.startswith('CFBD_Season_CFBD_Game_') for c in feature_cols):
+        raise RuntimeError('NCAAF_CORE_PREGAME_NO_REBUILT_SEASON_FEATURES')
 
     work=out.copy(); work["__cfbd_ord"]=np.arange(len(work),dtype=int)
     work["__cfbd_season"]=pd.to_numeric(work.get("Season"),errors="coerce").astype("Int64")
@@ -791,7 +812,12 @@ def _attach_cfbd_core_context(dashboard_module, g: pd.DataFrame, *, log_func=pri
             if rr[k].dtype==object or str(rr[k].dtype).startswith("string"):
                 rr=rr.loc[rr[k].astype(str).ne("")]
         if rr.empty: return 0
-        rr=(rr[join_keys+feature_cols].sort_values(join_keys,kind="stable").drop_duplicates(join_keys,keep="last"))
+        # Ambiguous neutral-site home flags and other duplicate side keys
+        # must not be arbitrarily assigned to either team's pregame row.
+        rr=rr[join_keys+feature_cols]
+        rr=rr.loc[~rr.duplicated(join_keys,keep=False)].copy()
+        if rr.empty:return 0
+        rr=rr.sort_values(join_keys,kind="stable")
         ren={c:f"__cfbd_src__{c}" for c in feature_cols}; rr=rr.rename(columns=ren)
         merged=merged.merge(rr,on=join_keys,how="left",sort=False)
         # Process all CFBD fields without copying the full wide DataFrame
@@ -825,7 +851,7 @@ def _attach_cfbd_core_context(dashboard_module, g: pd.DataFrame, *, log_func=pri
     cells_side=fill_from(["__cfbd_season","__cfbd_gid","__cfbd_home"],lambda x:x["__cfbd_gid"].astype(str).ne("") & x["__cfbd_home"].notna())
     merged=(merged.sort_values("__cfbd_ord",kind="stable").drop(columns=["__cfbd_season","__cfbd_date","__cfbd_team","__cfbd_opp","__cfbd_gid","__cfbd_home","__cfbd_ord"],errors="ignore").reset_index(drop=True))
 
-    probes=["CFBD_Source_Tag","CFBD_Season_Net_PPA_Prior","CFBD_Returning_Pct_PPA","CFBD_Talent"]
+    probes=["CFBD_Rebuilt_Games_Prior", "CFBD_Source_Tag", "CFBD_Season_Net_PPA_Prior", "CFBD_Returning_Pct_PPA", "CFBD_Talent"]
     matched=np.zeros(len(merged),dtype=bool)
     for c in probes:
         if c in merged.columns: matched|=merged[c].notna().to_numpy()
@@ -833,6 +859,8 @@ def _attach_cfbd_core_context(dashboard_module, g: pd.DataFrame, *, log_func=pri
     def ready(c): return int((merged[c].notna().to_numpy() & hist).sum()) if c in merged.columns else 0
     diag={
         "status":"PASS","table":NCAAF_CFBD_MINER_FEATURE_TABLE,"source_rows":int(len(cf)),
+        "strict_pregame_rebuild":_pregame_audit,
+        "rebuilt_prior_matched_rows":int(pd.to_numeric(merged.get('CFBD_Rebuilt_Games_Prior'),errors='coerce').gt(0).sum()) if 'CFBD_Rebuilt_Games_Prior' in merged.columns else 0,
         "rows":int(len(merged)),"matched_rows":int(matched.sum()),
         "advanced_ready":ready("CFBD_Season_Net_PPA_Prior"),
         "returning_ready":ready("CFBD_Returning_Pct_PPA"),
@@ -1228,7 +1256,25 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
 
         # V2.4.1: attach the same pregame-safe CFBD feature table used by the Miner
         # before advanced specialist discovery. Production V1 remains untouched.
+        # Same-game boxscore fields are never model predictors, including any
+        # previously materialized CFBD_Opp_Game_* mirrors.
+        g=g.drop(columns=[c for c in g.columns if _core_raw_cfbd(c)],errors='ignore')
         g,cfbd_core_bridge=_attach_cfbd_core_context(dashboard_module,g,log_func=log_func)
+        # Do not silently treat a missing BQ feed or failed entity join as
+        # successful pregame reconstruction. Prior-year CFBD coverage is
+        # optional by season; availability for 2022-25 must be demonstrable.
+        if (cfbd_core_bridge or {}).get('status') != 'PASS':
+            raise RuntimeError('NCAAF_CORE_PREGAME_SOURCE_UNAVAILABLE '+str((cfbd_core_bridge or {}).get('status')))
+        if int((cfbd_core_bridge or {}).get('rebuilt_prior_matched_rows',0)) < 1:
+            raise RuntimeError('NCAAF_CORE_PREGAME_NO_MATCHED_PRIOR_HISTORY')
+        if (cfbd_core_bridge.get('strict_pregame_rebuild') or {}).get('status') != 'PASS':
+            raise RuntimeError('NCAAF_CORE_PREGAME_RECONSTRUCTION_NOT_VERIFIED')
+        _raw_gate=[c for c in g.columns if _core_raw_cfbd(c)]
+        if _raw_gate:
+            raise RuntimeError('NCAAF_CORE_PREGAME_POSTGAME_LEAK '+str(_raw_gate[:10]))
+        log_func('[NCAAF-CORE-PREGAME-FEATURE-GATE] status=PASS same_game_predictors=0 '
+                 'season_recent3_recent5=REBUILT opponent_prior=REBUILT '
+                 'source_rows='+str((cfbd_core_bridge or {}).get('source_rows',0))+' authority=0')
 
         g,strength_cols,strength_audit=_add_strength_context(g); g,interaction_cols=_add_trend_interactions(g)
         g,coverage_registry=_complete_feed_coverage(g,base_candidates+interaction_cols)
