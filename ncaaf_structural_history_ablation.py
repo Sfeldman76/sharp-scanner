@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-VERSION = "NCAAF_STRUCTURE_HISTORY_WINDOW_AUDIT_20261018_V1"
+VERSION = "NCAAF_STRUCTURE_HISTORY_WINDOW_AUDIT_20261018_V1_1_NULLABLE_AUDIT_FIX"
 FIRST = 2013
 LAST = 2025
 WINDOWS = (2, 5, None)
@@ -43,17 +43,23 @@ def _audit_source(frame):
     home = _get_identity(frame, ("Team_Norm", "Team", "Source_Team_Name", "Home_Team_Norm"))
     away = _get_identity(frame, ("Opponent_Norm", "Opponent", "Opp_Norm", "Away_Team_Norm"))
     goodids = home.ne("") & away.ne("") & home.ne(away)
+    # BigQuery/pandas nullable Season columns can produce an object array
+    # [True, False, <NA>] from Series.eq().to_numpy(). NumPy rejects that
+    # as a boolean index. Missing seasons are AUDITABLE, not valid years.
+    date_available = date.notna().to_numpy(dtype=bool, na_value=False)
+    valid_team_pairs = goodids.fillna(False).to_numpy(dtype=bool, na_value=False)
     records = []
     for y in sorted(set(year.dropna().astype(int))):
-        idx = year.eq(y).to_numpy()
-        records.append({"year": y, "games": int(idx.sum()), "scores_finite": int(legal[idx].sum()),
-                        "date_available": int(date.notna().to_numpy()[idx].sum()),
-                        "valid_team_pairs": int(goodids.to_numpy()[idx].sum()),
+        idx = year.eq(y).fillna(False).to_numpy(dtype=bool, na_value=False)
+        records.append({"year": int(y), "games": int(idx.sum()),
+                        "scores_finite": int(legal[idx].sum()),
+                        "date_available": int(date_available[idx].sum()),
+                        "valid_team_pairs": int(valid_team_pairs[idx].sum()),
                         "impossible_score_geometry": int(impossible[idx].sum())})
     feature_leak_candidates = [x for x in frame.columns if any(s in str(x).lower() for s in
                               ("postgame", "current_game", "final_score"))]
     return {"status": "PASS" if not impossible.any() else "SCORE_CONSISTENCY_WARNING",
-            "rows": int(len(frame)), "by_year": records,
+            "rows": int(len(frame)), "missing_season_rows": int(year.isna().sum()), "by_year": records,
             "impossible_total_lt_abs_margin": int(impossible.sum()),
             "feature_names_with_postgame_tokens_present_but_not_used": feature_leak_candidates[:40],
             "current_game_outcome_as_predictor": False,
