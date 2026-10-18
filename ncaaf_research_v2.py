@@ -472,18 +472,53 @@ def _load_big_al_observation_ledger(*, storage_client=None, bucket_name="sharp-m
             sync="REMOTE_READ"
         except Exception as exc:
             sync=f"REMOTE_READ_ERROR:{type(exc).__name__}"
-    merged={}
+    # De-duplicate by both immutable observation ID AND exact selection
+    # signature. Some previously-entered observations have different IDs for
+    # the same bet. Prefer the earlier persistent observation to avoid loss.
+    def semantic_key(z):
+        sport=str(z.get('sport') or '').upper()
+        game_date=str(z.get('game_date') or '')
+        market=str(z.get('market') or '')
+        price=z.get('line')
+        try: price=round(float(price),3)
+        except (TypeError,ValueError): price=None
+        rating=z.get('rating')
+        def norm(t): return re.sub(r'[^a-z0-9]+','',str(t or '').lower())
+        if market=='spreads' and z.get('selection_team'):
+            return (sport,game_date,market,norm(z.get('selection_team')),price,rating)
+        if market=='totals' and z.get('team_a') and z.get('team_b'):
+            return (sport,game_date,market,tuple(sorted([norm(z['team_a']),norm(z['team_b'])])),
+                    str(z.get('selection_direction') or '').upper(),price,rating)
+        return (str(z.get('observation_id') or ''),)
+    merged={}; seen_semantic={}; semantic_duplicates=0
     for row in remote+local:
-        oid=str(row.get("observation_id") or "")
-        if oid: merged[oid]=row
+        oid=str(row.get('observation_id') or '')
+        if not oid:continue
+        key=semantic_key(row)
+        if key in seen_semantic and seen_semantic[key]!=oid:
+            semantic_duplicates+=1
+            continue
+        seen_semantic[key]=oid
+        # Only the same immutable ID is updated with a newer local copy.
+        merged[oid]=row
     rows=sorted(merged.values(),key=lambda z:(str(z.get("game_date") or ""),str(z.get("sport") or ""),str(z.get("observation_id") or "")))
     if blob is not None:
         try:
             payload="\n".join(json.dumps(_json_safe(z),sort_keys=True,separators=(",",":")) for z in rows)+("\n" if rows else "")
             remote_ids={str(x.get("observation_id") or "") for x in remote}
-            local_ids={str(x.get("observation_id") or "") for x in local}
-            if local_ids-remote_ids or (not blob.exists() and rows):
-                blob.upload_from_string(payload,content_type="application/x-ndjson")
+            new_ids=set(merged)-remote_ids
+            if new_ids or (not blob.exists() and rows):
+                # If the destination changed since our read, do not overwrite
+                # somebody else's appended observations; fail closed and retry.
+                if blob.exists():
+                    blob.reload()
+                    prior_generation=getattr(blob,'generation',None)
+                else:
+                    prior_generation=0
+                if prior_generation is None:
+                    raise RuntimeError('LEDGER_GENERATION_UNAVAILABLE_REFUSE_UNSAFE_OVERWRITE')
+                blob.upload_from_string(payload,content_type="application/x-ndjson",
+                                        if_generation_match=prior_generation)
                 sync="REMOTE_SYNCED"
         except Exception as exc:
             sync=f"REMOTE_SYNC_ERROR:{type(exc).__name__}"
@@ -491,10 +526,14 @@ def _load_big_al_observation_ledger(*, storage_client=None, bucket_name="sharp-m
     for x in rows:
         k=str(x.get("rating")) if x.get("rating") is not None else "UNRATED"
         ratings[k]=ratings.get(k,0)+1
-    diag={"status":"PASS","total_observations":len(rows),"ncaaf_observations":sum(x.get("sport")=="NCAAF" for x in rows),
+    diag={"status":"PASS","total_observations":len(rows),
+          "local_card_rows":len(local),"remote_rows_before_merge":len(remote),
+          "duplicate_semantic_rows_skipped":semantic_duplicates,
+          "ncaaf_observations":sum(x.get("sport")=="NCAAF" for x in rows),
           "nfl_observations":sum(x.get("sport")=="NFL" for x in rows),"rating_counts":ratings,"sync":sync,
           "outcome_fields_allowed":False,"rating_authority":0,"production_authority":0}
     log_func(f"[BIGAL-OBSERVATION-LEDGER] status=PASS total={len(rows)} ncaaf={diag['ncaaf_observations']} nfl={diag['nfl_observations']} ratings={json.dumps(ratings,sort_keys=True)} sync={sync} outcome_authority=0 rating_authority=0")
+    log_func(f"[BIGAL-CARD-MERGE] local_rows={len(local)} previous_remote_rows={len(remote)} deduplicated_logical={semantic_duplicates} new_ids={len(set(merged)-{str(x.get('observation_id') or '') for x in remote})} sync={sync} authority=0")
     return rows,diag
 
 
@@ -600,7 +639,7 @@ def _big_al_rating_observation_report(observations: list[dict[str,Any]], *, mine
     for rk,counts in atom_counts_by_rating.items():
         denom=max(1,sum(1 for r in obs_rows if str(r.get("rating"))==rk and r.get("context_match")=="MATCHED_PREGAME_FINGERPRINT"))
         atom_rates[rk]=[{"atom":nm,"count":cnt,"share":cnt/denom} for nm,cnt in sorted(counts.items(),key=lambda kv:(-kv[1],kv[0]))[:30]]
-    return {
+    report={
         "status":"DESCRIPTIVE_READY" if enough else "COLLECTING_OBSERVATIONS",
         "ncaaf_observations":len(ncaaf),"rated_observations":len(rated),"matched_rated_observations":matched_rated,
         "rating_counts":by_rating,"market_counts":by_market,
@@ -614,6 +653,9 @@ def _big_al_rating_observation_report(observations: list[dict[str,Any]], *, mine
         "observations":obs_rows,
         "production_authority":0,
     }
+    from big_al_multilayer_attribution import analyze_observed_ratings
+    report['multilayer_observation_attribution']=analyze_observed_ratings(observations,obs_rows)
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -7738,6 +7780,8 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         big_al_observations,big_al_ledger_diag=_load_big_al_observation_ledger(storage_client=storage_client,bucket_name=bucket_name,log_func=log_func)
         _obs_lane_audit={m:((mr or {}).get("lanes") or {}).get("expert_observation_hypothesis",{}) for m,mr in miners.items()}
         big_al_observation_research=_big_al_rating_observation_report(big_al_observations,miner_lane_audit=_obs_lane_audit,context_games=miner_games.reset_index(drop=True),dashboard_module=dashboard_module)
+        _layers=big_al_observation_research.get('multilayer_observation_attribution') or {}
+        log_func(f"[BIGAL-MULTILAYER-RESEARCH] status={_layers.get('status')} rated_total={_layers.get('rated_observations')} matched_fingerprints={_layers.get('fingerprints_matched')} matched_comparisons={len(_layers.get('matched_rating_comparisons') or [])} NFL_and_NCAAF=TRUE rating_weight=0 production_authority=0")
         log_func(f"[NCAAF-BIGAL-RATING-RESEARCH] status={big_al_observation_research.get('status')} observations={big_al_observation_research.get('ncaaf_observations')} rated={big_al_observation_research.get('rated_observations')} ratings={json.dumps(big_al_observation_research.get('rating_counts') or {},sort_keys=True)} pattern_min={BIG_AL_RATING_MIN_FOR_PATTERN_ANALYSIS} rating_qualification_weight=0 rating_authority=0 outcomes_2026_used=FALSE")
 
         pt_promotion_review={"status":"SHARED_CONTROLLER_NOT_AVAILABLE"}

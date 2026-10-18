@@ -233,8 +233,13 @@ def run_full_history_foundation(games: pd.DataFrame, candidates: list[str] | tup
     signal_discovery=run_historical_signal_discovery(
         frame, prediction, features, log_func=log_func,
     )
+    from ncaaf_combined_signal_challenger import run_combined_historical_ablation
+    combined_signal=run_combined_historical_ablation(
+        frame, prediction, signal_discovery, log_func=log_func,
+    )
     report={
         "historical_signal_discovery":signal_discovery,
+        "combined_historical_signal_attribution":combined_signal,
         "status":"PASS" if any(x.get("status")=="PASS" for x in folds) else "NO_SCORE_OOF",
         "contract":CONTRACT,"production_authority":0,"automatic_promotion":False,
         "source_years":historical_years,"game_rows":int(len(frame)),

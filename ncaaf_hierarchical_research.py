@@ -435,6 +435,17 @@ def run_hierarchical_dynamic_research(frame, base_features, baseline_predictions
     modern_report=_modern_incremental(df,season,margin,total,chosen_preds,modern)
     parity=audit_core_parity(df,list(dict.fromkeys(sum(features_by_fold.values(),[]))),features_by_fold,
                              source_file=frozen_source)
+    # Read-only observed population audit, never a synthetic fill or assumed
+    # equivalence to the frozen production training frame.
+    populated={name:{"historic_2013_2021":v.get("historic_2013_2021_coverage"),
+                     "modern_2022_2025":v.get("modern_2022_2025_coverage"),
+                     "folds_used":len(v.get("folds_using_feature",[])),
+                     "observed_rows":sum(x.get("observed",0) for x in v.get("by_season",[]))}
+               for name,v in parity["fields"].items()}
+    log_func("[NCAAF-FROZEN-FEATURE-COVERAGE] "+str({"source_contract":parity["production_contract"]["status"],
+              "scope":parity["comparison_scope"],"features":populated,
+              "production_population_comparison":"NOT_VERIFIED_NO_EXPORTED_PRODUCTION_FRAME",
+              "production_authority":0}))
     selected_report={h:{"policy":chosen[h],"aggregate":_metric(margin if h!="total" else total,chosen_preds[h],h)} for h in HEADS}
     paired={h:_paired_holdout(df,margin if h!="total" else total,
                              baseline_predictions[h],chosen_preds[h],h) for h in HEADS}

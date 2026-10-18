@@ -332,8 +332,15 @@ def run_historical_signal_discovery(frame:pd.DataFrame, foundation_predictions:d
             out=np.full(len(frame),np.nan,float)
             fold_records=[]
             for yr in (*SELECT_YEARS,*CONFIRM_YEARS):
-                tr=(season<yr)&(season>=2014)&np.isfinite(base)
+                # A 2022-only source must qualify using its actually available
+                # historical era. Earlier missing CFBD values are NOT zeros.
+                # All-year foundation predictions remain unchanged.
+                start_year=2022 if lane==MODERN_FAMILY else 2014
+                if lane==MODERN_FAMILY and yr<2023:
+                    continue
+                tr=(season<yr)&(season>=start_year)&np.isfinite(base)
                 va=season==yr
+                # Do not add 2024/25 outcomes to the 2023 selection fold.
                 correction=_fit_residual(X,y,base,tr,va,h)
                 if correction is None:
                     fold_records.append({'year':yr,'status':'INSUFFICIENT_PRIOR_OOF_OR_FEATURES'});continue
@@ -347,10 +354,16 @@ def run_historical_signal_discovery(frame:pd.DataFrame, foundation_predictions:d
             select_score=_score(y,base,out,h,selection)
             conf_score=_score(y,base,out,h,confirmation)
             valid_folds=[x for x in fold_records if x['year'] in SELECT_YEARS and x.get('status')=='SCORED']
+            modern_counts=(
+                {'selection_train_years':[2022],'selection_validation_years':[2023],
+                 '2022_observed_rows':int(np.isfinite(X[season==2022]).any(axis=1).sum()),
+                 '2023_observed_rows':int(np.isfinite(X[season==2023]).any(axis=1).sum())}
+                if lane==MODERN_FAMILY else {})
             positive_years=sum(x.get('gain',0)>0 for x in valid_folds)
             p=_sign_flip_pvalue(y,base,out,h,selection,dates,seed=101+len(cols))
             rec={'family':family,'lane':lane,'head':h,'features':cols,
                  'selection_years':list(SELECT_YEARS if lane=='historical' else [2023]),
+                 'era_training_audit':modern_counts,
                  'selection':select_score,'positive_years':positive_years,
                  'eligible_selection_years':len(valid_folds),
                  'p_one_sided':round(p,5) if p is not None else None,
@@ -387,6 +400,7 @@ def run_historical_signal_discovery(frame:pd.DataFrame, foundation_predictions:d
                 'selection_n':sc['n'],'selection_gain':sc.get('gain'),
                 'holm_p':rec['holm_adjusted_p'],
                 'confirm_n':conf['n'],'confirm_gain':conf.get('gain'),
+                'modern_selection_train_years':rec.get('era_training_audit',{}).get('selection_train_years'),
                 'decision':rec['decision']}))
     report={'status':'RESEARCH_COMPLETE_NO_PROMOTION','version':VERSION,'years':sorted({int(y) for y in season[np.isfinite(season)]}),
             'opening_lines_required':False,'production_mutation':False,
