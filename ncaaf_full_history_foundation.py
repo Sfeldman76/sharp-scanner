@@ -219,7 +219,22 @@ def run_full_history_foundation(games: pd.DataFrame, candidates: list[str] | tup
                  f"val_rows={int(va.sum())} margin_oof={result['margin']['n']} "
                  f"total_oof={result['total']['n']} h2h_oof={result['h2h']['n']} "
                  f"opening_required=FALSE features={len(feat)} authority=0")
+    # A separate hierarchical, dynamic challenger; the established score
+    # foundation and all market-dependent lanes remain unchanged. It never
+    # selects on the 2024/2025 confirmation outcomes or touches production.
+    from ncaaf_hierarchical_research import run_hierarchical_dynamic_research
+    hierarchical=run_hierarchical_dynamic_research(
+        frame, features, prediction, log_func=log_func,
+    )
+    # Independent historical-family discovery uses only the *year-forward OOF*
+    # score foundation as a benchmark. Outcomes from the validation year may
+    # grade a candidate, but never enter its training fit.
+    from ncaaf_historical_signal_discovery import run_historical_signal_discovery
+    signal_discovery=run_historical_signal_discovery(
+        frame, prediction, features, log_func=log_func,
+    )
     report={
+        "historical_signal_discovery":signal_discovery,
         "status":"PASS" if any(x.get("status")=="PASS" for x in folds) else "NO_SCORE_OOF",
         "contract":CONTRACT,"production_authority":0,"automatic_promotion":False,
         "source_years":historical_years,"game_rows":int(len(frame)),
@@ -232,6 +247,7 @@ def run_full_history_foundation(games: pd.DataFrame, candidates: list[str] | tup
                      "total":_metric_reg(total,prediction["total"]),
                      "h2h":_metric_h2h(margin,prediction["h2h"])},
         "closing_line_evaluation":_closing_grade(frame,margin,total,prediction),
+        "hierarchical_dynamic_challenger":hierarchical,
         "confirmation_years":[2024,2025],
         "opening_dependent_lanes": "UNCHANGED__KEEP_ONLY_GENUINE_OPENING_MARKET_ELIGIBILITY",
         "leakage_contract":"PRE_GAME_INPUTS_ONLY__YEAR_FORWARD_FIT__CURRENT_RESULTS_TARGET_ONLY__2026_SEALED",
