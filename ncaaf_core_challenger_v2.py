@@ -1297,9 +1297,11 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
         # season, regardless of opening-line availability. Existing 2022+
         # market-residual recipes and confirmation policy remain untouched.
         from ncaaf_full_history_foundation import run_full_history_foundation
+        _historical_score_oof_sink={}
         full_history_foundation=run_full_history_foundation(
             g,base_candidates+strength_cols+interaction_cols+coverage_candidates+advanced_candidates,
             log_func=log_func,
+            oof_sink=_historical_score_oof_sink,
         )
         if full_history_foundation.get("status")!="PASS":
             raise RuntimeError("NCAAF full-history score foundation failed: "+str(full_history_foundation.get("status")))
@@ -1334,6 +1336,22 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
 
         incumbent_recipe={"type":"INCUMBENT","name":"INCUMBENT_RECIPE","features":list(INCUMBENT_FEATURES)}
         inc=_evaluate(g,incumbent_recipe,"INCUMBENT_RECIPE",log_func=log_func)
+        # Add a strictly year-forward, research-only bridge between the
+        # market-free 2013-2025 fair margin and genuine opening-market residuals.
+        # No candidate from this branch enters candidates/ranked/Bet Authority.
+        from ncaaf_historical_core_bridge import run_historical_to_core_bridge
+        historical_to_core_bridge=run_historical_to_core_bridge(
+            g,_historical_score_oof_sink,
+            full_history_foundation.get("historical_signal_discovery"),
+            _incumbent_predict,log_func=log_func)
+
+        # V2.4.x: all-history OOF football forecasts versus authentic opening
+        # quotes for Margin, Totals and H2H. Shadow report only; never enters
+        # Core ranked candidates, consensus, the live UI or Bet Authority.
+        from ncaaf_historical_multitarget_core import run_multihead_historical_market_research
+        multihead_historical_market = run_multihead_historical_market_research(
+            g, _historical_score_oof_sink, log_func=log_func,
+        )
 
         tuned=[]
         if len(power_features)>1: tuned.append(_tune_numeric(g,power_features,"POWER_SOS_CONTEXT",log_func=log_func))
@@ -1387,6 +1405,8 @@ def run_ncaaf_core_challenger_v2(*, dashboard_module, bucket_name="sharp-models"
             "advanced_data_readiness":advanced_readiness,
             "cfbd_core_bridge":cfbd_core_bridge,
             "full_history_score_foundation":full_history_foundation,
+            "historical_to_core_bridge":historical_to_core_bridge,
+            "multihead_historical_market_research":multihead_historical_market,
             "existing_feed_coverage_registry":coverage_registry,
             "coverage_incremental_attribution":coverage_incremental,
             "coverage_feature_ablation":coverage_ablation,

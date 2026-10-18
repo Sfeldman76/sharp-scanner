@@ -170,7 +170,8 @@ def frame_fingerprint(frame: pd.DataFrame) -> str:
 
 def run_full_history_foundation(games: pd.DataFrame, candidates: list[str] | tuple[str, ...], *, log_func=print,
                                 min_train_rows: int=MIN_TRAIN_ROWS,
-                                min_valid_rows: int=MIN_VALID_ROWS) -> dict[str,Any]:
+                                min_valid_rows: int=MIN_VALID_ROWS,
+                                oof_sink: dict[str,Any] | None=None) -> dict[str,Any]:
     if games is None or games.empty:
         raise ValueError("historical games are empty")
     frame=games.loc[_num(games,"Season").between(2013,LAST_RESEARCH_YEAR)].copy().reset_index(drop=True)
@@ -237,6 +238,15 @@ def run_full_history_foundation(games: pd.DataFrame, candidates: list[str] | tup
     combined_signal=run_combined_historical_ablation(
         frame, prediction, signal_discovery, log_func=log_func,
     )
+    # Ephemeral point-in-time predictions for the historical-to-Core bridge.
+    # They are never serialized in GCS JSON or handed to live betting authority.
+    if oof_sink is not None:
+        oof_sink.clear()
+        oof_sink.update({"margin":prediction["margin"].copy(),
+                         "total":prediction["total"].copy(),
+                         "h2h":prediction["h2h"].copy(),
+                         "fingerprint":frame_fingerprint(frame),
+                         "market_predictor_used":False})
     report={
         "historical_signal_discovery":signal_discovery,
         "combined_historical_signal_attribution":combined_signal,
