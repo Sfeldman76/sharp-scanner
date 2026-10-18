@@ -363,7 +363,7 @@ def _modern_incremental(frame,season,margin,total,base_pred,modern_cols):
 
 
 def run_hierarchical_dynamic_research(frame, base_features, baseline_predictions,
-                                     *, frozen_source=None, log_func=print):
+                                     *, frozen_source=None, log_func=print, prediction_sink=None):
     """Research-only; never imports or modifies production code."""
     from ncaaf_core_feature_parity import audit_core_parity, required_research_features
     df=frame.copy().reset_index(drop=True)
@@ -432,6 +432,39 @@ def run_hierarchical_dynamic_research(frame, base_features, baseline_predictions
     # Evaluate modern residual specialists strictly on pregame source fields.
     modern=_modern_fields(df,season)
     chosen_preds={h:predictions[chosen[h]][h] for h in HEADS}
+    # Research bridge must NEVER consume an oracle recipe chosen using the
+    # validation season's outcomes. Every year's policy is selected from PRIOR
+    # year-forward OOF predictions only. Lock recipe selection after 2023.
+    asof_pred={h:np.full(len(df),np.nan) for h in HEADS}
+    asof_policy={h:{} for h in HEADS}
+    for head in HEADS:
+        label=margin if head!="total" else total
+        for validation_year in sorted({int(x) for x in season[np.isfinite(season)]}):
+            eligible=(season>=2016)&(season<min(validation_year,2024))
+            options=[]
+            if eligible.sum()>=50:
+                for key in RECENCY_YEARS:
+                    m=_metric(label[eligible], predictions[key][head][eligible],head)
+                    v=_objective(m,head)
+                    if v is not None and m.get("n",0)>=50:
+                        options.append((v,list(RECENCY_YEARS).index(key),key))
+            policy=min(options)[2] if options else "full"
+            ix=(season==validation_year)
+            asof_pred[head][ix]=predictions[policy][head][ix]
+            asof_policy[head][str(validation_year)]=policy
+    if prediction_sink is not None:
+        prediction_sink.clear()
+        prediction_sink.update({**{h:asof_pred[h].copy() for h in HEADS},
+            "asof_policy_by_year":asof_policy,"market_predictor_used":False,
+            "source":"HIERARCHICAL_DYNAMIC_ASOF_SELECTED_NOT_RIDGE",
+            "2024_2025_selection_influence":False})
+    for yr in (2022,2023,2024,2025):
+        ix=season==yr
+        log_func(f"[NCAAF-HIERARCHICAL-BRIDGE-OOF] year={yr} "
+                 f"policies={ {h:asof_policy[h].get(str(yr)) for h in HEADS} } "
+                 f"margin={_metric(margin[ix],asof_pred['margin'][ix],'margin')} "
+                 f"total={_metric(total[ix],asof_pred['total'][ix],'total')} "
+                 f"h2h={_metric(margin[ix],asof_pred['h2h'][ix],'h2h')} authority=0")
     modern_report=_modern_incremental(df,season,margin,total,chosen_preds,modern)
     parity=audit_core_parity(df,list(dict.fromkeys(sum(features_by_fold.values(),[]))),features_by_fold,
                              source_file=frozen_source)
@@ -455,7 +488,10 @@ def run_hierarchical_dynamic_research(frame, base_features, baseline_predictions
             "dynamic_source":audit,"core_feature_parity":parity,
             "folds":folds,"history_policy_selection":{"search_years":[2018,2019,2020,2021,2022,2023],
                                                    "policies":pre_scores,"selected":chosen},
-            "selected_heads":selected_report,"holdout_2024_2025":confirm,
+            "selected_heads":selected_report,"bridge_asof_policy_by_year":asof_policy,
+            "bridge_asof_2024_2025":{"year_2024":{h:_metric((margin if h!="total" else total)[season==2024],asof_pred[h][season==2024],h) for h in HEADS},
+                                   "year_2025":{h:_metric((margin if h!="total" else total)[season==2025],asof_pred[h][season==2025],h) for h in HEADS}},
+            "holdout_2024_2025":confirm,
             "paired_vs_existing_score_foundation_2024_2025":paired,
             "modern_specialist":modern_report,"source_seal":"2026+ EXCLUDED; NO MARKET OPEN/CLOSE AS PREDICTORS",
             "rule":"NO_AUTO_PROMOTION__PROSPECTIVE_SHADOW_REQUIRED__FROZEN_PRODUCTION_V1"}

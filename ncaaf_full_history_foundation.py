@@ -224,9 +224,19 @@ def run_full_history_foundation(games: pd.DataFrame, candidates: list[str] | tup
     # foundation and all market-dependent lanes remain unchanged. It never
     # selects on the 2024/2025 confirmation outcomes or touches production.
     from ncaaf_hierarchical_research import run_hierarchical_dynamic_research
+    hierarchical_sink={}
     hierarchical=run_hierarchical_dynamic_research(
         frame, features, prediction, log_func=log_func,
+        prediction_sink=hierarchical_sink,
     )
+    # Fail closed rather than silently presenting Ridge OOF as the advanced
+    # hierarchical model. Only genuine, selected hierarchical OOF enters the
+    # existing market/Core shadow bridges. The original Ridge OOF is retained
+    # for transparent, same-game diagnostics and historical signal discovery.
+    if not all(len(hierarchical_sink.get(h,()))==len(frame) for h in ("margin","total","h2h")):
+        raise RuntimeError("NCAAF_HIERARCHICAL_BRIDGE_NOT_CONNECTED")
+    from ncaaf_structural_history_ablation import run_structural_history_ablation
+    structural_history=run_structural_history_ablation(frame,candidates,log_func=log_func)
     # Independent historical-family discovery uses only the *year-forward OOF*
     # score foundation as a benchmark. Outcomes from the validation year may
     # grade a candidate, but never enter its training fit.
@@ -238,15 +248,41 @@ def run_full_history_foundation(games: pd.DataFrame, candidates: list[str] | tup
     combined_signal=run_combined_historical_ablation(
         frame, prediction, signal_discovery, log_func=log_func,
     )
+    # Audit whether the hierarchical branch covers the SAME games as the
+    # simple score-based benchmark. Never claim a gain from changed samples.
+    bridge_pairing={}
+    for validation_year in (2022,2023,2024,2025):
+        ix=(season==validation_year)
+        bridge_pairing[str(validation_year)]={}
+        for head in ("margin","total","h2h"):
+            target=total if head=="total" else margin
+            old=prediction[head];new=np.asarray(hierarchical_sink[head],float)
+            common=ix&np.isfinite(target)&np.isfinite(old)&np.isfinite(new)
+            if head=="h2h":common &= ~np.isclose(target,0.)
+            metric=_metric_h2h if head=="h2h" else _metric_reg
+            bridge_pairing[str(validation_year)][head]={
+                "year_games":int(ix.sum()),"matched_games":int(common.sum()),
+                "ridge":metric(target[common],old[common]),
+                "hierarchical":metric(target[common],new[common]),
+                "coverage":round(float(common.sum()/ix.sum()),4) if ix.any() else 0.0}
+        log_func(f"[NCAAF-HIERARCHICAL-VS-RIDGE-MATCHED] year={validation_year} "
+                 f"scores={bridge_pairing[str(validation_year)]} authority=0")
     # Ephemeral point-in-time predictions for the historical-to-Core bridge.
     # They are never serialized in GCS JSON or handed to live betting authority.
     if oof_sink is not None:
         oof_sink.clear()
-        oof_sink.update({"margin":prediction["margin"].copy(),
-                         "total":prediction["total"].copy(),
-                         "h2h":prediction["h2h"].copy(),
+        oof_sink.update({**{h:np.asarray(hierarchical_sink[h],dtype=float).copy()
+                              for h in ("margin","total","h2h")},
+                         "ridge_baseline":{h:prediction[h].copy() for h in ("margin","total","h2h")},
+                         "hierarchical_asof_policy_by_year":hierarchical_sink["asof_policy_by_year"],
+                         "forecast_source":"HIERARCHICAL_DYNAMIC_ASOF_SELECTED_NOT_RIDGE",
                          "fingerprint":frame_fingerprint(frame),
                          "market_predictor_used":False})
+        log_func(f"[NCAAF-HIERARCHICAL-MARKET-BRIDGE] status=CONNECTED "
+                 f"model={oof_sink['forecast_source']} "
+                 f"ridge_rmse_2025={_metric_reg(margin[season==2025],prediction['margin'][season==2025])['rmse']} "
+                 f"hier_rmse_2025={_metric_reg(margin[season==2025],oof_sink['margin'][season==2025])['rmse']} "
+                 "authority=0")
     report={
         "historical_signal_discovery":signal_discovery,
         "combined_historical_signal_attribution":combined_signal,
@@ -263,6 +299,9 @@ def run_full_history_foundation(games: pd.DataFrame, candidates: list[str] | tup
                      "h2h":_metric_h2h(margin,prediction["h2h"])},
         "closing_line_evaluation":_closing_grade(frame,margin,total,prediction),
         "hierarchical_dynamic_challenger":hierarchical,
+        "structural_history_ablation":structural_history,
+        "hierarchical_vs_ridge_matched_oof":bridge_pairing,
+        "market_bridge_forecast_source":"HIERARCHICAL_DYNAMIC_ASOF_SELECTED_NOT_RIDGE",
         "confirmation_years":[2024,2025],
         "opening_dependent_lanes": "UNCHANGED__KEEP_ONLY_GENUINE_OPENING_MARKET_ELIGIBILITY",
         "leakage_contract":"PRE_GAME_INPUTS_ONLY__YEAR_FORWARD_FIT__CURRENT_RESULTS_TARGET_ONLY__2026_SEALED",
