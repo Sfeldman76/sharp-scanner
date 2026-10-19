@@ -1,0 +1,13 @@
+{
+  "status": "PASS",
+  "source_tag": "ncaaf-research-v2-orthogonal-stat-miner-v3-20261003",
+  "families": [
+    "MARKET_MICROSTRUCTURE",
+    "RUN_PASS_MATCHUP"
+  ],
+  "qvalues": [
+    0.03,
+    0.06,
+    0.20000000000000004
+  ]
+}
