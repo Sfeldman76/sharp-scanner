@@ -53,8 +53,13 @@ def validate_year(df, year: int, quality: dict) -> dict:
         raise RuntimeError(f'{year}: unrecognized source quality status')
     if quality.get('rows')!=len(df):
         raise RuntimeError(f'{year}: CSV and report disagree on row counts')
+    advanced=int(df['CFBD_Season_Net_PPA_Prior'].notna().sum())
+    if year<=2025 and not advanced:
+        raise RuntimeError(f'{year}: no prior-game advanced CFBD observations; research coverage not verified')
+    family_quality=(quality.get('season_quality') or [{}])[0]
     return {'season':year, 'games':int(len(side_count)), 'rows':int(len(df)),
-            'advanced_prior':int(df['CFBD_Season_Net_PPA_Prior'].notna().sum()),
+            'advanced_prior':advanced,
+            'missing_completed_fbs_family':family_quality.get('missing_completed_fbs_family',{}),
             'current_game_observations_are_NOT_model_features':True,
             'source_vintage_certified':False}
 
@@ -64,7 +69,7 @@ def build_previews(args, outdir: Path, loader: Path, archive: Path):
     manifest=archive/'manifest.jsonl'
     if not manifest.is_file():
         raise RuntimeError(f'Archive manifest missing: {manifest}')
-    fingerprint = file_sha(loader) + ':' + file_sha(manifest)
+    fingerprint = file_sha(loader) + ':' + file_sha(Path(__file__)) + ':' + file_sha(manifest)
     reports=[]
     for year in range(args.start, args.end+1):
         csv=outdir/f'cfbd_{year}_archive_research.csv'
@@ -99,36 +104,124 @@ def build_previews(args, outdir: Path, loader: Path, archive: Path):
         'warnings':['Current-game CFBD_Game_* fields exist ONLY as postgame source observations for strict pregame reconstruction.',
                     'Static roster/talent/returning release timestamps are not certified and should not enter model selection.',
                     '2026 is prospective/shadow only; no 2026 outcomes may be used for historical discovery or selection.',
-                    'Historical opening-spread coverage begins in 2021; no earlier market lines are synthesized.']
+                    'Historical opening-spread coverage begins in 2021; no earlier market lines are synthesized.',
+                    'New research views contain only pregame-safe columns; raw observation build retains postgame data for audit.']
     },indent=2)+'\n')
     return reports
+
+
+def _archive_safe_pregame_feature(c):
+    """Same conservative contract enforced in patched CORE and Miner readers."""
+    if not str(c).startswith("CFBD_"):
+        return False
+    x=str(c)[5:]
+    if x.startswith("Opp_"):
+        x=x[4:]
+    if x in ("Games_Prior", "Conference_Games_Prior", "Conference_Game_Streak_Prior"):
+        return True
+    if x in (
+        "Matchup_Net_PPA_Adv", "Matchup_Net_Success_Adv", "Matchup_Net_Explosiveness_Adv",
+        "Matchup_EarlyDown_PPA_Adv", "Matchup_PPA_Per_Drive_Adv", "Matchup_Scoring_Opp_Rate_Adv"):
+        return True
+    if not x.endswith("_Prior"):
+        return False
+    if x.startswith(("Season_CFBD_Game_", "Recent3_CFBD_Game_", "Recent5_CFBD_Game_", "PrevSeason_CFBD_Game_")):
+        return True
+    if x.startswith(("Season_Off_", "Season_Def_", "Recent3_Off_", "Recent3_Def_",
+                     "Recent5_Off_", "Recent5_Def_", "PrevSeason_Off_", "PrevSeason_Def_")):
+        return True
+    return x.startswith(("Season_Net_", "Recent3_Net_", "Recent5_Net_"))
+
+
+def infer_archive_schema(outdir, reports, reference_schema, bigquery):
+    """Preserve ALL archive columns; never silently truncate to old warehouse schema.
+
+    Use old schema only for columns with unchanged names, not for field coverage.
+    The preview CSVs themselves supply the independent feature universe.
+    """
+    import pandas as pd
+    legacy={f.name:f for f in reference_schema}
+    columns=[]
+    for rec in reports:
+        csv=outdir/f"cfbd_{rec['season']}_archive_research.csv"
+        hdr=pd.read_csv(csv,nrows=0).columns.tolist()
+        if len(hdr)!=len(set(hdr)):
+            raise RuntimeError(f"Duplicate preview CSV columns: {csv}")
+        for col in hdr:
+            if col not in columns:
+                columns.append(col)
+    safe_cols=[c for c in columns if _archive_safe_pregame_feature(c)]
+    if len(safe_cols)<10 or "CFBD_Season_Net_PPA_Prior" not in safe_cols:
+        raise RuntimeError(f"Archive pregame gate unexpectedly sparse safe_count={len(safe_cols)}")
+    extras=[c for c in columns if c not in legacy]
+    # All years participate in inference. Restrict to a modest bounded sample
+    # per season; conversion subsequently validates every non-null value.
+    evidence={c:set() for c in extras}
+    for rec in reports:
+        csv=outdir/f"cfbd_{rec['season']}_archive_research.csv"
+        sample=pd.read_csv(csv,nrows=3000,dtype=str,keep_default_na=False)
+        for c in extras:
+            if c not in sample: continue
+            vals=sample[c].astype(str).str.strip()
+            vals=vals.loc[~vals.str.lower().isin(("","nan","none","null","<na>"))]
+            if vals.empty:continue
+            if vals.str.lower().isin(("true","false")).all():
+                evidence[c].add("bool")
+            elif pd.to_numeric(vals,errors="coerce").notna().all():
+                evidence[c].add("numeric")
+            else:
+                evidence[c].add("string")
+    schema=[]
+    for c in columns:
+        if c in legacy:
+            src=legacy[c]
+            schema.append(bigquery.SchemaField(c,src.field_type,mode="NULLABLE"))
+        else:
+            e=evidence[c]
+            if "string" in e or len(e)>1:
+                typ="STRING"
+            elif e=={"bool"}:
+                typ="BOOLEAN"
+            else:
+                typ="FLOAT64" if c.startswith("CFBD_") else "STRING"
+            schema.append(bigquery.SchemaField(c,typ,mode="NULLABLE"))
+    return schema,safe_cols
 
 
 def convert_columns(df, schema):
     import pandas as pd
     wanted=[f.name for f in schema]
     missing=set(wanted)-set(df.columns)
-    # The new archive may not reconstruct all old optional CFBD sources.
-    # Represent those gaps as NULL, never fill with the legacy warehouse.
     if missing:
-        for c in missing:df[c]=None
+        for c in missing: df[c]=None  # A family unavailable in a specific season is NULL.
     out=df[wanted].copy()
     for field in schema:
         name=field.name;kind=field.field_type.upper()
-        if kind in ('INTEGER','INT64'):
-            out[name]=pd.to_numeric(out[name],errors='coerce').astype('Int64')
-        elif kind in ('FLOAT','FLOAT64','NUMERIC','BIGNUMERIC'):
-            out[name]=pd.to_numeric(out[name],errors='coerce').astype('float64')
+        if kind in ('INTEGER','INT64','FLOAT','FLOAT64','NUMERIC','BIGNUMERIC'):
+            source=out[name]
+            numeric=pd.to_numeric(source,errors='coerce')
+            bad=source.notna() & numeric.isna()
+            if bad.any():
+                raise RuntimeError(f"Archive numeric column {name}: {int(bad.sum())} unexpected nonnumeric values")
+            if kind in ('INTEGER','INT64'):
+                out[name]=numeric.astype('Int64')
+            else:
+                out[name]=numeric.astype('float64')
         elif kind=='TIMESTAMP':
-            out[name]=pd.to_datetime(out[name],errors='coerce',utc=True)
+            out[name]=pd.to_datetime(out[name],errors='raise',utc=True)
+        elif kind=='DATETIME':
+            out[name]=pd.to_datetime(out[name],errors='raise').dt.tz_localize(None)
         elif kind=='DATE':
-            out[name]=pd.to_datetime(out[name],errors='coerce').dt.date
+            out[name]=pd.to_datetime(out[name],errors='raise').dt.date
         elif kind=='BOOLEAN':
-            out[name]=out[name].astype('boolean')
+            z=out[name].astype('string').str.strip().str.lower()
+            bad=z.notna() & ~z.isin(('true','false','1','0'))
+            if bad.any():raise RuntimeError(f"Unexpected BOOLEAN values in {name}")
+            out[name]=z.map({'true':True,'false':False,'1':True,'0':False}).astype('boolean')
         elif kind=='STRING':
             out[name]=out[name].astype('string')
         else:
-            raise RuntimeError(f'Unsupported legacy schema field: {name} ({kind})')
+            raise RuntimeError(f'Unsupported schema field: {name} ({kind})')
     return out
 
 
@@ -137,25 +230,30 @@ def publish(args, outdir, reports):
     from google.api_core.exceptions import NotFound
     import pandas as pd
     client=bigquery.Client(project=PROJECT)
-    live=client.get_table(LEGACY)
-    schema=live.schema  # Schema reference ONLY; no old live feature values used.
+    live=client.get_table(LEGACY) # Reference field TYPES, never reference feature VALUES.
+    schema,safe_cols=infer_archive_schema(outdir,reports,live.schema,bigquery)
+    cols=[f.name for f in schema]
+    key_cols=[k for k in ('Season','Game_ID','Game_Date','Week','Team','Opponent','Team_Key','Opponent_Key','Is_Home') if k in cols]
+    for required in ('Season','Game_ID','Team_Key','Opponent_Key','Is_Home'):
+        if required not in key_cols:
+            raise RuntimeError(f"Missing essential research key: {required}")
+    view_cols=list(dict.fromkeys(key_cols+safe_cols))
+    # Do not expose final-score, same-game CFBD_Game_* or uncertified release-time
+    # personnel/talent columns through either view. They remain available ONLY in
+    # the immutable raw-observation build, for explicit audited research.
+    if any(c.startswith(('CFBD_Game_','CFBD_Opp_Game_')) for c in view_cols):
+        raise RuntimeError('Unsafe game-outcome field in pregame view')
     build_id=args.build_id or datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
     if not re.fullmatch(r'[A-Za-z0-9_]{6,50}',build_id):
         raise RuntimeError('Bad build-id (letters/digits/underscores only)')
     dest=f'{PROJECT}.{DATASET}.ncaaf_cfbd_archive_research_build_{build_id}'
-    try:
-        client.get_table(dest)
-    except NotFound:
-        pass
-    else:
-        raise RuntimeError(f'Immutable target already exists: {dest}')
-    # Refuse to hijack an existing research view automatically.
-    for view in (RESEARCH_VIEW, SHADOW_VIEW):
+    # All preflight checks happen before creating the first BigQuery asset.
+    for name in (dest, RESEARCH_VIEW, SHADOW_VIEW):
         try:
-            client.get_table(view)
+            client.get_table(name)
         except NotFound:
             continue
-        raise RuntimeError(f'Existing view/table {view}; refusing to replace automatically')
+        raise RuntimeError(f'Existing destination {name}; refusing to replace')
     from google.cloud.bigquery import LoadJobConfig
     total=0
     for i,rec in enumerate(reports):
@@ -167,40 +265,39 @@ def publish(args, outdir, reports):
         conf=LoadJobConfig(schema=schema,
             write_disposition='WRITE_EMPTY' if i==0 else 'WRITE_APPEND',
             create_disposition='CREATE_IF_NEEDED')
-        print(f'[CFBD-ARCHIVE-PUBLISH] year={year} rows={len(frame)} immutable_table={dest}',flush=True)
+        print(f'[CFBD-ARCHIVE-PUBLISH] year={year} rows={len(frame)} cols={len(schema)} immutable_table={dest}',flush=True)
         client.load_table_from_dataframe(frame,dest,job_config=conf).result()
         total+=len(frame)
         del data,frame
     table=client.get_table(dest)
     if table.num_rows!=total:
         raise RuntimeError(f'Readback row-count mismatch expected={total}, actual={table.num_rows}; views NOT created')
-    check=client.query(f'''SELECT Season, COUNT(*) AS n, COUNT(DISTINCT Game_ID) AS games
-        FROM `{dest}` GROUP BY Season ORDER BY Season''').result()
+    check=client.query(f"SELECT Season, COUNT(*) AS n, COUNT(DISTINCT Game_ID) AS games FROM `{dest}` GROUP BY Season ORDER BY Season").result()
     actual={int(r.Season):(int(r.n),int(r.games)) for r in check}
     for rec in reports:
         if actual.get(rec['season']) != (rec['rows'],rec['games']):
             raise RuntimeError(f"Season {rec['season']} readback mismatch; views NOT created")
-    table.description=('Uncertified CFBD archive-v2 rebuild, immutable research source. '
-                       'Raw contemporaneous CFBD_Game_* are POSTGAME observations, not predictor fields. '
-                       '2013–2025 research only; 2026 shadow only. Static vintage not certified.')
+    table.description=('Full archive-v2 preview, immutable research observation source. '
+                       'Raw contemporaneous CFBD_Game_* are POSTGAME observations, not pregame predictors. '
+                       'Public historical research views expose strict prior-only features. Static vintage NOT certified.')
     table.labels={'research_only':'true','certified':'false','source':'archive_v2'}
     client.update_table(table,['description','labels'])
     if args.start!=2013 or args.end!=2026:
         print(f'[CFBD-ARCHIVE-PUBLISH] TABLE_ONLY: expected full 2013-2026 for stable views, got {args.start}-{args.end}')
         return dest
+    columns_sql=', '.join('`'+c+'`' for c in view_cols)
     for name, query, desc in [
-        (RESEARCH_VIEW, f'SELECT * FROM `{dest}` WHERE Season BETWEEN 2013 AND 2025',
-         'Research-only historical archive 2013-2025; NOT production-certified; 2026 excluded.'),
-        (SHADOW_VIEW, f'SELECT * FROM `{dest}` WHERE Season = 2026',
-         '2026 prospective/shadow only: NO selection, promotion or production authority.')]:
+        (RESEARCH_VIEW,f'SELECT {columns_sql} FROM `{dest}` WHERE Season BETWEEN 2013 AND 2025',
+         '2013-2025 research; strictly prior-game-derived features only; not production-certified.'),
+        (SHADOW_VIEW,f'SELECT {columns_sql} FROM `{dest}` WHERE Season = 2026',
+         '2026 shadow; strictly pregame features only; no outcomes or production authority.')]:
         v=bigquery.Table(name)
         v.view_query=query;v.description=desc
         v.labels={'research_only':'true','certified':'false','source':'archive_v2'}
         client.create_table(v)
-        print(f'[CFBD-ARCHIVE-VIEW] {name}',flush=True)
-    print(f'[CFBD-ARCHIVE-DONE] rows={total} immutable_table={dest} legacy_unchanged=TRUE',flush=True)
+        print(f'[CFBD-ARCHIVE-VIEW] {name} exposed_pregame_features={len(safe_cols)}',flush=True)
+    print(f'[CFBD-ARCHIVE-DONE] rows={total} all_archive_columns={len(schema)} safe_view_features={len(safe_cols)} immutable_table={dest} legacy_unchanged=TRUE',flush=True)
     return dest
-
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)

@@ -61,6 +61,7 @@ import io
 import json
 import math
 import os
+from pathlib import Path
 import re
 import time
 import unicodedata
@@ -1292,6 +1293,177 @@ def build_season_features(
 
 
 # ---------------------------------------------------------------------------
+# Offline CFBD archive-v2 adapter. RESEARCH PREVIEW ONLY; never writes BigQuery.
+# ---------------------------------------------------------------------------
+
+class CFBDArchiveV2Reader:
+    """Verify content-addressed archive.py manifests and load family/year payloads.
+
+    Do not assert that archive variants equal API loader endpoints: in particular,
+    advanced_game was retrieved by week without `excludeGarbageTime=true`, and
+    several QB, recruiting-team, havoc, weather and player-PPA endpoints were NOT
+    downloaded by archive.py. Those fields remain absent in this preview.
+    """
+    def __init__(self, root: str | Path, years: Iterable[int]):
+        self.root = Path(root).expanduser().resolve()
+        manifest = self.root / "manifest.jsonl"
+        if not manifest.is_file():
+            raise RuntimeError(f"CFBD_ARCHIVE_MANIFEST_MISSING path={manifest}")
+        self.years = set(int(y) for y in years)
+        self.requests: dict[tuple[str,int,str], dict] = {}
+        self.counts: dict[str,int] = {}
+        self.cache: dict[tuple[str,int],list[dict]] = {}
+        self.errors: list[str] = []
+        with manifest.open(encoding="utf-8") as stream:
+            for lineno, line in enumerate(stream,1):
+                try:
+                    row = json.loads(line)
+                    family = str(row["family"])
+                    params = row["params"]
+                    year = int(params["year"])
+                except (ValueError, TypeError, KeyError) as exc:
+                    self.errors.append(f"MALFORMED_MANIFEST_ROW:{lineno}:{exc}")
+                    continue
+                if year not in self.years:
+                    continue
+                key = (family, year, json.dumps(params,sort_keys=True))
+                # An interrupted retry must not invalidate an earlier verified
+                # successful response. Keep last success for the exact request.
+                if row.get("success"):
+                    self.requests[key] = row
+                elif key not in self.requests:
+                    self.requests[key] = row
+        if self.errors:
+            raise RuntimeError("CFBD_ARCHIVE_MANIFEST_ERRORS " + ";".join(self.errors[:5]))
+
+    def read(self, family: str, year: int, *, required: bool=False) -> list[dict]:
+        key = (family, int(year))
+        if key in self.cache:
+            return self.cache[key]
+        batches = [(k,r) for k,r in self.requests.items() if k[0]==family and k[1]==int(year)]
+        if not batches:
+            if required:
+                raise RuntimeError(f"CFBD_ARCHIVE_REQUIRED_FAMILY_MISSING year={year} family={family}")
+            self.cache[key] = []
+            return []
+        result=[]
+        for (_,_,pjson), record in sorted(batches):
+            if not record.get("success") or not record.get("object_path"):
+                raise RuntimeError(f"CFBD_ARCHIVE_FAILED_REQUEST family={family} year={year} params={pjson}")
+            objfile = (self.root / str(record["object_path"])).resolve()
+            if not objfile.is_relative_to(self.root) or not objfile.is_file():
+                raise RuntimeError(f"CFBD_ARCHIVE_OBJECT_MISSING_OR_UNSAFE family={family} path={objfile}")
+            data = json.loads(objfile.read_text(encoding="utf-8"))
+            if not isinstance(data,list):
+                raise RuntimeError(f"CFBD_ARCHIVE_INVALID_PAYLOAD family={family} year={year}")
+            digest = hashlib.sha256(json.dumps(data,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode("utf-8")).hexdigest()
+            if digest != record.get("sha256") or len(data)!=int(record.get("row_count",-1)):
+                raise RuntimeError(f"CFBD_ARCHIVE_CHECKSUM_OR_COUNT_MISMATCH family={family} year={year} params={pjson}")
+            result.extend(data)
+        if required and not result:
+            raise RuntimeError(f"CFBD_ARCHIVE_REQUIRED_FAMILY_EMPTY family={family} year={year}")
+        self.counts[f"{year}.{family}"] = len(result)
+        self.cache[key] = result
+        return result
+
+
+def run_archive_research_preview(root: str, seasons: list[int], output_path: str) -> dict[str, Any]:
+    """Offline study, reusing this file's SAME build_season_features().
+
+    This deliberately does NOT publish to ncaaf_cfbd_miner_features_v1; the raw
+    collector's source parameter set is not parity-equivalent to API_REFRESH.
+    """
+    years=sorted(set(int(y) for y in seasons))
+    if not years or min(years)<2013 or max(years)>2026:  # CFBD_ARCHIVE_RESEARCH_V2_OPT_IN_20261019
+        raise RuntimeError("CFBD_ARCHIVE_PREVIEW_SEASONS_MUST_BE_2013_TO_2026")
+    outpath=Path(output_path).expanduser().resolve()
+    if outpath.suffix.lower()!=".csv":
+        raise RuntimeError("CFBD_ARCHIVE_PREVIEW_OUTPUT_MUST_BE_CSV")
+    reader=CFBDArchiveV2Reader(root,set(years)|{y-1 for y in years})
+    frames=[];season_quality=[]
+    for year in years:
+        print(f"[CFBD-ARCHIVE-PREVIEW] season={year} begin mode=OFFLINE_ONLY",flush=True)
+        all_games=reader.read("games",year,required=True)
+        fbs_games=[g for g in all_games if "fbs" in
+                   (str(g.get("homeClassification","")).lower(),
+                    str(g.get("awayClassification","")).lower())]
+        if not fbs_games:
+            raise RuntimeError(f"CFBD_ARCHIVE_NO_FBS_GAMES season={year}")
+        ids=[str(g.get("id")) for g in fbs_games]
+        if len(ids)!=len(set(ids)):
+            raise RuntimeError(f"CFBD_ARCHIVE_DUPLICATE_GAME_IDS season={year}")
+        adv=reader.read("advanced_game",year,required=True)
+        plays=reader.read("plays",year,required=True)
+        done={str(g.get("id")) for g in fbs_games if g.get("completed") is True
+              and g.get("homePoints") is not None and g.get("awayPoints") is not None}
+        def covered(records,key):
+            return {str(z.get(key)) for z in records if isinstance(z,dict) and z.get(key) is not None}
+        coverage={"advanced_game":len(done-covered(adv,"gameId")),
+                  "plays":len(done-covered(plays,"gameId"))}
+        # Not strictly needed by this loader's builder; record its availability
+        # so downstream research can distinguish unused drive evidence.
+        drives=reader.read("drives",year)
+        coverage["drives"]=len(done-covered(drives,"gameId")) if drives else len(done)
+        if any(coverage[x]>0 for x in ("advanced_game","plays")):
+            print(f"[CFBD-ARCHIVE-PREVIEW-COVERAGE] season={year} missing_completed_fbs={coverage}",flush=True)
+        games_df=_json_frame(fbs_games)
+        advanced_df=_json_frame(adv)
+        plays_df=_json_frame(plays)
+        returning_df=_json_frame(reader.read("returning",year))
+        portal_df=_json_frame(reader.read("transfers",year))
+        roster_cur=_json_frame(reader.read("roster",year))
+        roster_prev=_json_frame(reader.read("roster",year-1))
+        talent_df=_json_frame(reader.read("talent",year))
+        prior_sp=_json_frame(reader.read("ratings_sp",year-1))
+        prior_fpi=_json_frame(reader.read("ratings_fpi",year-1))
+        # These API endpoints are NOT in the raw archive: no fake substitute.
+        empty=pd.DataFrame()
+        features=build_season_features(year,games_df,advanced_df,empty,
+            returning_df,portal_df,roster_cur,roster_prev,talent_df,{},empty,
+            empty,empty,empty,empty,empty,empty,plays_df,prior_sp,empty,prior_fpi,empty)
+        if features.empty:
+            raise RuntimeError(f"CFBD_ARCHIVE_PREVIEW_EMPTY_FEATURES season={year}")
+        if features.duplicated(["Season","Game_ID","Team_Key"]).any():
+            raise RuntimeError(f"CFBD_ARCHIVE_PREVIEW_DUPLICATE_KEYS season={year}")
+        sides=features.groupby(["Season","Game_ID"])["Team_Key"].nunique()
+        if (sides!=2).any():
+            raise RuntimeError(f"CFBD_ARCHIVE_PREVIEW_SIDE_PARITY_FAIL season={year}")
+        features["CFBD_Source_Tag"]="ARCHIVE_V2_PARTIAL_RESEARCH_ONLY"
+        features["CFBD_Leakage_Contract"]="SHIFT1_COMPLETED_GAME_STATS__UNVERIFIED_VINTAGE_STATIC_CONTEXT__OFFLINE_RESEARCH_ONLY"
+        signals={c:int(features[c].notna().sum()) for c in (
+            "CFBD_Season_Net_PPA_Prior","CFBD_Recent3_Off_PPA_Prior",
+            "CFBD_Returning_Pct_PPA","CFBD_Talent") if c in features}
+        report={"season":year,"schedule_fbs_games":len(fbs_games),
+                "completed_scored_fbs_games":len(done),"feature_games":int(sides.size),
+                "team_side_rows":len(features),"missing_completed_fbs_family":coverage,
+                "non_null_research_signals":signals}
+        season_quality.append(report)
+        print(f"[CFBD-ARCHIVE-PREVIEW] season={year} status=PASS games={sides.size} rows={len(features)} advanced_prior={signals.get('CFBD_Season_Net_PPA_Prior',0)}",flush=True)
+        frames.append(features)
+        # Drop large raw payloads promptly; no cross-season live state is reused.
+        for cached in list(reader.cache):
+            if cached[1] < year-1 or cached[1] == year and cached[0] in ("plays","advanced_game","drives","games"):
+                reader.cache.pop(cached,None)
+    combined=pd.concat(frames,ignore_index=True,sort=False)
+    outpath.parent.mkdir(parents=True,exist_ok=True)
+    combined.to_csv(outpath,index=False)
+    quality={"status":"OFFLINE_PREVIEW_ONLY_NOT_CERTIFIED_FOR_BQ_PROMOTION",
+             "seasons":years,"rows":len(combined),"season_quality":season_quality,
+             "archive_root":str(Path(root).expanduser().resolve()),
+             "warnings":[
+               "Source /stats/game/advanced is weekly archive variant; API loader requests excludeGarbageTime=true. Numerical parity NOT certified.",
+               "Unavailable sources remain missing: game havoc, team recruiting ranks, player PPA/usage, QB game PPA, weather, venue and team-location reference, SRS and CORE ratings.",
+               "Season roster/talent/returning release timestamps not certified; exclude uncertified static features from sealed pregame selection until vintage audit.",
+               "Archive drives recorded for coverage, but this loader derives drive-level aggregates from plays; drives payload not yet used as direct model input.",
+               "No BigQuery write, no CFBD API request, no production/model promotion."],
+             "output_csv":str(outpath)}
+    reportpath=outpath.with_suffix(".quality.json")
+    reportpath.write_text(json.dumps(quality,indent=2,default=str)+"\n",encoding="utf-8")
+    print(f"[CFBD-ARCHIVE-PREVIEW] status=OFFLINE_PREVIEW_ONLY csv={outpath} report={reportpath} rows={len(combined)}",flush=True)
+    return quality
+
+
+# ---------------------------------------------------------------------------
 # BigQuery I/O
 # ---------------------------------------------------------------------------
 
@@ -2436,6 +2608,8 @@ def main() -> None:
     p.add_argument("--dataset", default=DEFAULT_DATASET)
     p.add_argument("--table", default=DEFAULT_TABLE, help="Build/staging CFBD feature table")
     p.add_argument("--local-output", default=None)
+    p.add_argument("--archive-preview", action="store_true", help="Build offline research-only CSV from archive_v2 objects; NEVER invokes CFBD API or BigQuery")
+    p.add_argument("--archive-root", default=None, help="Directory containing archive_v2 manifest.jsonl and objects/")
     p.add_argument("--context-rebuild-sql", default=os.getenv("NCAAF_CONTEXT_REBUILD_SQL","ncaaf_context_rebuild.sql"))
     p.add_argument("--skip-archive", action="store_true")
     p.add_argument("--skip-sidecars", action="store_true")
@@ -2456,6 +2630,16 @@ def main() -> None:
         _self_test(); return
     seasons = _parse_seasons(args.seasons)
     history = _parse_seasons(args.history_seasons)
+    if args.archive_preview:
+        if not args.archive_root or not args.local_output:
+            p.error("--archive-preview requires --archive-root and --local-output")
+        if any((args.verify_only,args.preflight,args.repair_warehouse,args.repair_archive,
+                args.repair_personnel,args.repair_players,args.repair_player_stages,
+                args.audit_players)):
+            p.error("--archive-preview cannot be combined with BigQuery/repair modes")
+        # Nothing below this line runs for archive previews: NO BQ/CFBD API writes.
+        run_archive_research_preview(args.archive_root,seasons,args.local_output)
+        return
     if not seasons and not history:
         raise SystemExit("No seasons selected")
     if args.verify_only or args.preflight or args.repair_warehouse or args.repair_archive or args.audit_players or args.repair_players or args.repair_player_stages:

@@ -1,0 +1,18 @@
+{
+  "ncaaf_core_challenger_v2.py": {
+    "expected_before_sha256": "861f356c7dcc3eb70314bb11aec704e42ab871df19ca352fcf3b88101da802a8",
+    "patched_sha256": "154170e524b61fdac06d84ce1ca8fea5fd1a9691b79539127198be17de6057ed"
+  },
+  "ncaaf_research_v2.py": {
+    "expected_before_sha256": "bcaa218ac3af56deff6e56aa8552a1e5ad835d0e524bb3a08d68076d87a3149f",
+    "patched_sha256": "c70848277eda629793a16e31f2b8de743b16b566616f1b4439b81479572a0a59"
+  },
+  "ncaaf_cfbd_warehouse_loader_v2.py": {
+    "expected_before_sha256": "da41be669bc7f681244bd43dfac24c901669886ab9f9e2edae405fca31e7abe3",
+    "patched_sha256": "353aacc5e52677792c575eabdfcb6169291e6dd7af770dd87c640c6ba64f3ab9"
+  },
+  "ncaaf_cfbd_archive_research_build_v1.py": {
+    "expected_before_sha256": null,
+    "patched_sha256": "e52b1463be1b9b590f59848596e120eb57ff3c1c09d326d3e086fb8591fbc03b"
+  }
+}
