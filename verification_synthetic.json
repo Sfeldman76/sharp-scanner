@@ -1,0 +1,17 @@
+{
+  "status": "PASS",
+  "offline_generated_games": 390,
+  "years": "2013-2018",
+  "source_families": [
+    "games",
+    "team_box",
+    "drives",
+    "plays",
+    "advanced"
+  ],
+  "folds_passed": 135,
+  "oof_prediction_rows": 8685,
+  "source": "SYNTHETIC_NOT_LIVE_CFBD",
+  "inference": "PIPELINE_INTEGRATION_ONLY",
+  "production_authority": 0
+}

@@ -1,0 +1,27 @@
+endpoint,source_grain,CFBD_documented_start_year,inspected_loader_status,data_content,pregame_policy
+/games,game,1869,YES for requested feature and history seasons,"game schedule, home/away IDs, scores, venue, pregame Elo",outcomes must be restricted to target only or earlier completed games
+/games/teams,game x team x category,2004,NO in inspected loader,"team box score (passing, rushing, total, turnovers, special teams)",ingest source-grain game/team/stat with numeric parsing and per-game completeness
+/games/players,game x team x player x category,2004,NO in inspected loader,player box scores per completed game,as-of rollups and player identity reconciliation
+/game/box/advanced,game (nested teams+players),2001,NO in inspected loader,advanced box score structure,do not treat same-game advanced values as pregame
+/drives,game x drive,2001,NO in inspected loader,"drive starting field position, plays, yards, result, score states",use actual drive order; freeze pregame aggregate after completion
+/plays,game x play,2001,YES for requested feature seasons if enabled,"play IDs, drive IDs, play numbers, downs, distance, PPA, result",parse play type and assign robust possession/clock ordering; aggregate previous games only
+/plays/stats,game x play x player/stat,2012,NO in inspected loader,play-level player participation/events,do not backfill where unavailable; player identity must be stable
+/stats/game/advanced,game x team,2001,YES for requested feature seasons,"PPA, success, explosiveness, line yards, passing/rushing splits",pregame rolling aggregation or Bayesian latent offense/defense strengths
+/stats/game/havoc,game x team,2004,YES optional for feature seasons,defensive havoc,requires source field coverage and same-game to lag enforcement
+/stats/season/advanced,season x team,2001,NO in inspected loader,season advanced totals,do not ingest completed-season stat as midseason pregame feature
+/ppa/teams,season x team,2001,NO in inspected loader,PPA team aggregate,prefer per-game historical state over post-season static
+/ppa/games,game x team,2001,NO in inspected loader,per-game team PPA,pregame shift and opponent adjustment
+/player/usage,season x team x player,2013,YES for feature and prior seasons,player usage percent/volume,prior-season or timestamped pregame only
+/player/returning,season x team,2014,YES optional for feature seasons,preseason returning production,verify named-season timing and publication snapshot
+/roster,season x team x player,2004,YES for feature seasons and prior,"personnel, positions, roster",current-season roster can be revised retrospectively
+/player/portal,movement event,2021,YES optional for feature seasons,transfer movements,use dated events only available before kickoff
+/talent,season x team,2015,YES for feature seasons,team talent aggregate,preseason publication cutoff required
+/recruiting/teams,recruiting year x team,2000,YES for feature seasons and 3 prior classes,recruiting ratings,align class year to season and exclude later changes
+/ratings/sp,season x team,1970,YES but prior season only,SP+ style power efficiency ratings,previous-year only unless timestamped historic week snapshot
+/ratings/srs,season x team,1897,YES but prior season only,SRS power rating,previous year only
+/ratings/fpi,season x team,2005,YES but prior season only,FPI published rating,previous-year only
+/ratings/core,season x team,2016,YES but prior season only,CFBD CORE retrospective,previous-year only
+/ratings/elo,week x team,1890,YES preseason/week snapshots,Elo strength,confirm week N snapshot after week N finishes
+/lines,game x sportsbook/provider,2013,YES for requested history seasons,"spread open/current, totals open/current, moneyline",provider-level and as-of timestamp needed; raw 2026 retrieval != historical quote timestamp
+/games/weather,game,2001,YES optional for feature seasons,weather,observed game weather NOT safe before kickoff; require forecast provenance
+/teams/fbs,season x team,1869,YES for feature seasons,historical team home locations/affiliation,season-aware team normalization
