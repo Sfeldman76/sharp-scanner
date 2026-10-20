@@ -51595,11 +51595,13 @@ if not HEADLESS:
             "ncaaf_production_weekly",
             "ncaaf_research_heavy",
             "ncaaf_full_history_v3",
+            "ncaaf_margin_tournament_v4",
         ]
         _train_market_labels = {
             "ncaaf_production_weekly": "NCAAF Production — Weekly Update",
             "ncaaf_research_heavy": "NCAAF Research — Heavy Challenger Search",
             "ncaaf_full_history_v3": "NCAAF Research — Full-History V3 (CFBD, No Betting-Line Inputs)",
+            "ncaaf_margin_tournament_v4": "NCAAF Research — V4 Football Modeling Tournament (No Opening-Line Dependency)",
         }
         _workflow_title = "NCAAF model maintenance"
     elif str(sport).upper().strip() == "NFL":
@@ -51625,6 +51627,10 @@ if not HEADLESS:
     elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_research_heavy":
         st.sidebar.caption(
             "WHEN: after meaningful research/data changes and periodically during the season. Runs the protected NCAAF STAT/System Miner V4 research plus the expert/specialist Spread CORE search in one job: sequential team power, strength of schedule, conference strength, rest/home/maturity context, structured matchup statistics, recent-vs-season trends, nonlinear residuals and regularized program/conference effects. Discovery/confirmation stay historical, 2026 remains sealed prospective evidence, and no challenger can mutate Production V1 or Bet Authority automatically."
+        )
+    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_margin_tournament_v4":
+        st.sidebar.caption(
+            "INDEPENDENT V4 RESEARCH: uses the 2013–2025 CFBD archive, as-of-game opponent-adjusted dynamic team strength, separate offense/defense scoring predictions, boosted nonlinear challengers, and V3 Program Strength Ridge as a benchmark. Discovery 2017–2023; 2024–2025 retrospective, not pristine. No opening-line predictors or Production V1 changes. Drive-level models remain provenance-gated. Requires V4-enabled train-job image."
         )
     elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_full_history_v3":
         st.sidebar.caption(
@@ -51774,6 +51780,8 @@ if not HEADLESS:
         _train_button_label = "Run NCAAF Heavy Research"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_full_history_v3":
         _train_button_label = "Run NCAAF Full-History V3 Research"
+    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_margin_tournament_v4":
+        _train_button_label = "Run NCAAF V4 Football Modeling Tournament"
     elif str(market_choice).lower().strip() == "edge_research":
         _train_button_label = f"🧪 Run {sport} Edge Research"
     else:
@@ -51843,7 +51851,7 @@ if not HEADLESS:
                 "MODEL_BUCKET": MODEL_BUCKET,
                 "HEADLESS": "1",
             }
-            if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_full_history_v3":
+            if str(sport).upper().strip() == "NCAAF" and market_choice in {"ncaaf_full_history_v3", "ncaaf_margin_tournament_v4"}:
                 # Scoped to this execution override only. Never enable the
                 # archive-research feature flag for weekly or heavy workflows.
                 env["NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED"] = "1"

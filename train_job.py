@@ -199,6 +199,25 @@ def main():
         pw.emit("done", "NCAAF Full-History V3 complete (research only)", pct=1.0)
         return
 
+    # NCAAF_V4_FOOTBALL_TOURNAMENT_20261020 — research-only, no production route.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_margin_tournament_v4":
+        if str(os.getenv("NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED", "0")).strip().lower() not in {"1","true","yes","on"}:
+            raise RuntimeError("[NCAAF-V4] explicit archive research opt-in required")
+        import sharp_line_dashboard as _v4_dashboard
+        import ncaaf_margin_tournament_v4 as _v4
+        log_func("[NCAAF-V4] phase=CACHE_PREP legacy_dashboard_cache_only=TRUE authority=0")
+        pw.emit("cache", "NCAAF V4: preparing historical game + CFBD archive context", pct=0.12)
+        _v4_dashboard.fit_historical_ncaaf_core_expert("spreads", log_func=log_func)
+        _v4_dashboard.fit_ncaaf_statistical_brain(log_func=log_func)
+        pw.emit("research", "NCAAF V4: chronological football-model tournament", pct=0.50)
+        _v4_result = _v4.run_cloud_research(
+            dashboard_module=_v4_dashboard, storage_client=gcs,
+            bucket_name=bucket, log_func=log_func)
+        if _v4_result.get("status") != "RESEARCH_COMPLETE_NO_PROMOTION":
+            raise RuntimeError("[NCAAF-V4] incomplete: " + str(_v4_result.get("status")))
+        pw.emit("done", "NCAAF V4 football tournament complete (research-only)", pct=1.0)
+        return
+
     # NFL Heavy Research / Engine V3.17 — persistent Miner library + Big Al current-card fingerprint + protected PT lanes.
     # Research-only: frozen CORE remains the fair-value anchor. STAT/PBP/context learn
     # residual corrections; SYSTEM/STAT/PBP become selective trust lanes; a partially pooled
