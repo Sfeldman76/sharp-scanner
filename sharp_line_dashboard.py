@@ -51588,25 +51588,22 @@ if not HEADLESS:
     _train_market_labels = {}
     _workflow_title = "Train which market?"
     if str(sport).upper().strip() == "NCAAF":
-        # Keep frozen weekly production, legacy heavy research, and independent
-        # full-history V3 as distinct operator choices. V3 uses a separate
-        # backend MARKET route (not the heavy workflow); no automatic promotion.
+        # Current operator choices only. Older V3/V4/V4.1/V4.2 routes and
+        # artifacts remain preserved for reproducibility but are hidden here.
         _train_market_options = [
             "ncaaf_production_weekly",
             "ncaaf_research_heavy",
-            "ncaaf_full_history_v3",
-            "ncaaf_margin_tournament_v4",
-            "ncaaf_v41_integrity",
-            "ncaaf_conditional_features_v42",
+            "ncaaf_v43_focused_validation",
         ]
         _train_market_labels = {
             "ncaaf_production_weekly": "NCAAF Production — Weekly Update",
             "ncaaf_research_heavy": "NCAAF Research — Heavy Challenger Search",
-            "ncaaf_full_history_v3": "NCAAF Research — Full-History V3 (CFBD, No Betting-Line Inputs)",
-            "ncaaf_margin_tournament_v4": "NCAAF Research — V4 Football Modeling Tournament (No Opening-Line Dependency)",
-            "ncaaf_v41_integrity": "NCAAF Research — V4.1 Model Integrity and Error Audit",
-            "ncaaf_conditional_features_v42": "NCAAF Research — V4.2 Five-Family Conditional Feature Tournament",
+            "ncaaf_v43_focused_validation": "NCAAF Research — Current V4.3 Validation + Production Robustness",
         }
+        # Streamlit may remember a retired option; sanitize before selectbox.
+        _ncaaf_workflow_key = f"train_market_choice_{sport}"
+        if st.session_state.get(_ncaaf_workflow_key) not in (None, *_train_market_options):
+            st.session_state[_ncaaf_workflow_key] = "ncaaf_v43_focused_validation"
         _workflow_title = "NCAAF model maintenance"
     elif str(sport).upper().strip() == "NFL":
         # Operator surface only: weekly production + full protected research.
@@ -51632,21 +51629,13 @@ if not HEADLESS:
         st.sidebar.caption(
             "WHEN: after meaningful research/data changes and periodically during the season. Runs the protected NCAAF STAT/System Miner V4 research plus the expert/specialist Spread CORE search in one job: sequential team power, strength of schedule, conference strength, rest/home/maturity context, structured matchup statistics, recent-vs-season trends, nonlinear residuals and regularized program/conference effects. Discovery/confirmation stay historical, 2026 remains sealed prospective evidence, and no challenger can mutate Production V1 or Bet Authority automatically."
         )
-    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_conditional_features_v42":
+    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v43_focused_validation":
         st.sidebar.caption(
-            "V4.2 RESEARCH ONLY: runs all five pre-declared CFBD feature families and football-motivated combinations against the EXACT frozen 12-feature V4 baseline on identical chronological folds. Uses 2013–2025 only; no betting-line model inputs or 2026 outcomes. Requires prior V4 report for fail-closed baseline parity. Source-vintage gate remains on HOLD. No Production V1 promotion or betting authority."
-        )
-    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v41_integrity":
-        st.sidebar.caption(
-            "V4.1 RESEARCH AUDIT: reads the completed V4 report and game-level predictions without refitting models or running CORE/Miner caches. Checks historical fold parity, date-cluster uncertainty, residual bias by season and forecast strength, and opening-market comparison on matched games only. Source-level CFBD vintage remains a HARD HOLD; does not generate 2026 predictions, change Production V1, or promote models."
-        )
-    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_margin_tournament_v4":
-        st.sidebar.caption(
-            "INDEPENDENT V4 RESEARCH: uses the 2013–2025 CFBD archive, as-of-game opponent-adjusted dynamic team strength, separate offense/defense scoring predictions, boosted nonlinear challengers, and V3 Program Strength Ridge as a benchmark. Discovery 2017–2023; 2024–2025 retrospective, not pristine. No opening-line predictors or Production V1 changes. Drive-level models remain provenance-gated. Requires V4-enabled train-job image."
-        )
-    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_full_history_v3":
-        st.sidebar.caption(
-            "INDEPENDENT RESEARCH: compares football-only CFBD margin models using 2013–2023 rolling-origin discovery and 2024–2025 retrospective evaluation. Uses the published archive research view; 2026 is excluded. Betting lines, Big Al/Pathi votes and legacy CORE predictions are not training inputs. No Production V1 changes or bet authority. Requires the V3-enabled train-job container image to be deployed first."
+            "READ-ONLY V4.3: compares V4's 12-feature benchmark to A (efficiency), "
+            "AB (efficiency + passing), and AC (efficiency + drives), using saved "
+            "V4.2 pregame-style historical predictions; no refit. Includes a separate "
+            "review of genuine prospectively locked Production V1 bets. "
+            "Source-vintage certification and promotion remain on HOLD."
         )
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
         st.sidebar.caption(
@@ -51790,14 +51779,8 @@ if not HEADLESS:
         _train_button_label = "Run NCAAF Weekly Production Update"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_research_heavy":
         _train_button_label = "Run NCAAF Heavy Research"
-    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_full_history_v3":
-        _train_button_label = "Run NCAAF Full-History V3 Research"
-    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_margin_tournament_v4":
-        _train_button_label = "Run NCAAF V4 Football Modeling Tournament"
-    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v41_integrity":
-        _train_button_label = "Run NCAAF V4.1 Integrity and Error Audit"
-    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_conditional_features_v42":
-        _train_button_label = "Run NCAAF V4.2 Five-Family Feature Tournament"
+    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v43_focused_validation":
+        _train_button_label = "Run NCAAF V4.3 Validation and Production Robustness Audit"
     elif str(market_choice).lower().strip() == "edge_research":
         _train_button_label = f"🧪 Run {sport} Edge Research"
     else:

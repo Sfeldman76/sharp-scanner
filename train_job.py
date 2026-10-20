@@ -251,6 +251,21 @@ def main():
         pw.emit("done", "V4.1 audit complete; source-vintage certification remains gated", pct=1.0)
         return
 
+    # NCAAF V4.3: read-only focused research validation and production robustness.
+    # This route does NOT import dashboard history trainers, refit challengers,
+    # touch the frozen production model, or give any betting authority.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v43_focused_validation":
+        import ncaaf_v43_validation as _v43
+        import ncaaf_prod_v1_robustness as _prod_audit
+        pw.emit("validation", "V4.3: comparing frozen V4 with A, AB, AC on immutable V4.2 predictions", pct=0.20)
+        result = _v43.run_cloud_audit(storage_client=gcs,bucket_name=bucket,log_func=log_func)
+        if result.get("status") != "EXPLORATORY_FOCUSED_VALIDATION__SOURCE_VINTAGE_HOLD":
+            raise RuntimeError("[NCAAF-V43] unexpected status: " + str(result.get("status")))
+        pw.emit("robustness", "V4.3: auditing prospective Production V1 ledger read-only", pct=0.70)
+        _prod_audit.run_cloud_audit(storage_client=gcs,bucket_name=bucket,log_func=log_func)
+        pw.emit("done", "V4.3 validation + Production V1 robustness audit complete, research only", pct=1.0)
+        return
+
     # NFL Heavy Research / Engine V3.17 — persistent Miner library + Big Al current-card fingerprint + protected PT lanes.
     # Research-only: frozen CORE remains the fair-value anchor. STAT/PBP/context learn
     # residual corrections; SYSTEM/STAT/PBP become selective trust lanes; a partially pooled
