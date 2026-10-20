@@ -51596,12 +51596,14 @@ if not HEADLESS:
             "ncaaf_research_heavy",
             "ncaaf_full_history_v3",
             "ncaaf_margin_tournament_v4",
+            "ncaaf_v41_integrity",
         ]
         _train_market_labels = {
             "ncaaf_production_weekly": "NCAAF Production — Weekly Update",
             "ncaaf_research_heavy": "NCAAF Research — Heavy Challenger Search",
             "ncaaf_full_history_v3": "NCAAF Research — Full-History V3 (CFBD, No Betting-Line Inputs)",
             "ncaaf_margin_tournament_v4": "NCAAF Research — V4 Football Modeling Tournament (No Opening-Line Dependency)",
+            "ncaaf_v41_integrity": "NCAAF Research — V4.1 Model Integrity and Error Audit",
         }
         _workflow_title = "NCAAF model maintenance"
     elif str(sport).upper().strip() == "NFL":
@@ -51627,6 +51629,10 @@ if not HEADLESS:
     elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_research_heavy":
         st.sidebar.caption(
             "WHEN: after meaningful research/data changes and periodically during the season. Runs the protected NCAAF STAT/System Miner V4 research plus the expert/specialist Spread CORE search in one job: sequential team power, strength of schedule, conference strength, rest/home/maturity context, structured matchup statistics, recent-vs-season trends, nonlinear residuals and regularized program/conference effects. Discovery/confirmation stay historical, 2026 remains sealed prospective evidence, and no challenger can mutate Production V1 or Bet Authority automatically."
+        )
+    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v41_integrity":
+        st.sidebar.caption(
+            "V4.1 RESEARCH AUDIT: reads the completed V4 report and game-level predictions without refitting models or running CORE/Miner caches. Checks historical fold parity, date-cluster uncertainty, residual bias by season and forecast strength, and opening-market comparison on matched games only. Source-level CFBD vintage remains a HARD HOLD; does not generate 2026 predictions, change Production V1, or promote models."
         )
     elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_margin_tournament_v4":
         st.sidebar.caption(
@@ -51782,6 +51788,8 @@ if not HEADLESS:
         _train_button_label = "Run NCAAF Full-History V3 Research"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_margin_tournament_v4":
         _train_button_label = "Run NCAAF V4 Football Modeling Tournament"
+    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v41_integrity":
+        _train_button_label = "Run NCAAF V4.1 Integrity and Error Audit"
     elif str(market_choice).lower().strip() == "edge_research":
         _train_button_label = f"🧪 Run {sport} Edge Research"
     else:

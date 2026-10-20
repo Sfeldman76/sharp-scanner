@@ -218,6 +218,19 @@ def main():
         pw.emit("done", "NCAAF V4 football tournament complete (research-only)", pct=1.0)
         return
 
+    # NCAAF V4.1 retrospective artifact audit, zero historical cache or model refit.
+    # Input is the existing V4 published report + game predictions in research GCS.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v41_integrity":
+        import ncaaf_v41_integrity as _v41
+        log_func("[NCAAF-V41] phase=READ_PRIOR_V4_ARTIFACTS legacy_cache=SKIPPED bq_queries=NONE authority=0")
+        pw.emit("audit", "V4.1: checking published V4 per-game forecasts and pregame integrity", pct=0.15)
+        _v41_result = _v41.run_cloud_audit(
+            storage_client=gcs, bucket_name=bucket, log_func=log_func)
+        if _v41_result.get("status") != "RETROSPECTIVE_AUDITED__SOURCE_VINTAGE_HOLD":
+            raise RuntimeError("[NCAAF-V41] unexpected audit status " + str(_v41_result.get("status")))
+        pw.emit("done", "V4.1 audit complete; source-vintage certification remains gated", pct=1.0)
+        return
+
     # NFL Heavy Research / Engine V3.17 — persistent Miner library + Big Al current-card fingerprint + protected PT lanes.
     # Research-only: frozen CORE remains the fair-value anchor. STAT/PBP/context learn
     # residual corrections; SYSTEM/STAT/PBP become selective trust lanes; a partially pooled
