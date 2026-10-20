@@ -407,6 +407,17 @@ def run_full(*,storage_client,bucket_name=BUCKET,log_func=print,modules=None,bq_
     audit=Audit(log_func);bucket=storage_client.bucket(bucket_name)
     manifest={};results={};outputs={}
     try:
+        # Full V4/V4.2 archive research is an explicitly selected V5.3 workflow.
+        # Check the original V4 safeguard BEFORE expensive legacy history/cache fits.
+        def _require_v4_archive_opt_in():
+            import os
+            value = str(os.getenv('NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED', '0')).strip().lower()
+            if value not in ('1', 'true', 'yes', 'on'):
+                raise RuntimeError(
+                    'V53_ARCHIVE_OPT_IN_MISSING__SET_NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED=1__'
+                    'DASHBOARD_V53_ENV_MAPPING_MAY_BE_OUTDATED')
+            return {'archive_research_enabled': True, 'scope': 'V53_FULL_RESEARCH_ONLY'}
+        audit.step('V4_ARCHIVE_RESEARCH_OPT_IN_PREFLIGHT', _require_v4_archive_opt_in)
         if modules is None:
             modules={n:importlib.import_module(n) for n in REQUIRED_LEGACY}
         contract=audit.step('LEGACY_MODULE_CONTRACT',lambda:module_contract(modules))

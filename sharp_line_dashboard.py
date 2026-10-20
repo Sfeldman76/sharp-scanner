@@ -51850,7 +51850,7 @@ if not HEADLESS:
                 "MODEL_BUCKET": MODEL_BUCKET,
                 "HEADLESS": "1",
             }
-            if str(sport).upper().strip() == "NCAAF" and market_choice in {"ncaaf_full_history_v3", "ncaaf_margin_tournament_v4", "ncaaf_conditional_features_v42"}:
+            if str(sport).upper().strip() == "NCAAF" and market_choice in {"ncaaf_full_history_v3", "ncaaf_margin_tournament_v4", "ncaaf_conditional_features_v42", "ncaaf_v53_full_research"}:
                 # Scoped to this execution override only. Never enable the
                 # archive-research feature flag for weekly or heavy workflows.
                 env["NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED"] = "1"
