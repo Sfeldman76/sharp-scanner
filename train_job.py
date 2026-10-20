@@ -179,6 +179,26 @@ def main():
     if HEADLESS:
         install_streamlit_shim(log_func)
 
+    # NCAAF_FULL_HISTORY_V3_ISOLATED_ROUTE_20261019 — separate research job mode.
+    # No Production V1 or shared heavy-research path is executed by this branch.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_full_history_v3":
+        if str(os.getenv("NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED", "0")).strip().lower() not in {"1","true","yes","on"}:
+            raise RuntimeError("[NCAAF-FULL-HISTORY-V3] archive opt-in required; set NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED=1")
+        import sharp_line_dashboard as _v3_dashboard
+        import ncaaf_full_history_challenger_v3 as _v3
+        log_func("[NCAAF-FULL-HISTORY-V3] phase=HISTORICAL_CACHE source=ARCHIVE_2013_2025 year_2026_queried=FALSE production_mutation=FALSE")
+        pw.emit("cache", "NCAAF Full-History V3: prepare historical game cache", pct=0.15)
+        _v3_dashboard.fit_historical_ncaaf_core_expert("spreads", log_func=log_func)
+        _v3_dashboard.fit_ncaaf_statistical_brain(log_func=log_func)
+        pw.emit("v3", "NCAAF Full-History V3: fit expanding-origin football models", pct=0.55)
+        _v3_result=_v3.run_full_history_challenger_v3(
+            dashboard_module=_v3_dashboard,storage_client=gcs,
+            bucket_name=bucket,log_func=log_func)
+        if _v3_result.get("status") != "RESEARCH_COMPLETE_NO_PROMOTION":
+            raise RuntimeError("[NCAAF-FULL-HISTORY-V3] discovery incomplete: "+str(_v3_result.get("status")))
+        pw.emit("done", "NCAAF Full-History V3 complete (research only)", pct=1.0)
+        return
+
     # NFL Heavy Research / Engine V3.17 — persistent Miner library + Big Al current-card fingerprint + protected PT lanes.
     # Research-only: frozen CORE remains the fair-value anchor. STAT/PBP/context learn
     # residual corrections; SYSTEM/STAT/PBP become selective trust lanes; a partially pooled
