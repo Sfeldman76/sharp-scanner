@@ -251,6 +251,22 @@ def main():
         pw.emit("done", "V4.1 audit complete; source-vintage certification remains gated", pct=1.0)
         return
 
+    # NCAAF Production V1 historical fixed-backbone replay (RESEARCH ONLY).
+    # This is not a re-scoring of the fitted 2026 artifact, which was trained
+    # through 2025. Each validation year fits the original fixed head recipes
+    # using strictly earlier seasons. There are no historical bet-ROI claims.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_prod_v1_historical_replay":
+        import sharp_line_dashboard as _v1hist_dashboard
+        import ncaaf_prod_v1_historical_replay as _v1hist
+        pw.emit("audit", "NCAAF Production V1: expanding-season replay of frozen head recipes (research only)", pct=0.10)
+        result = _v1hist.run_cloud_research(
+            dashboard_module=_v1hist_dashboard, storage_client=gcs,
+            bucket_name=bucket, log_func=log_func)
+        if result.get("status") != "RESEARCH_FIXED_BACKBONE_REPLAY__HISTORICAL_SELECTION_AND_SOURCE_VINTAGE_HOLD":
+            raise RuntimeError("[NCAAF-PROD-V1-BACKTEST] unexpected status="+str(result.get("status")))
+        pw.emit("done", "NCAAF Production V1 historical model replay complete; original bet ROI unverified", pct=1.0)
+        return
+
     # NCAAF V4.3: read-only focused research validation and production robustness.
     # This route does NOT import dashboard history trainers, refit challengers,
     # touch the frozen production model, or give any betting authority.
