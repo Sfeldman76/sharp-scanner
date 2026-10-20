@@ -267,6 +267,21 @@ def main():
         pw.emit("done", "NCAAF Production V1 historical model replay complete; original bet ROI unverified", pct=1.0)
         return
 
+    # NCAAF V5 — Independent football margins -> market-value research.
+    # Consumes immutable historical OOF research artifacts only. The optional
+    # BIG_AL/PATHI/PT/MINER/STATE snapshot bridge is timestamp-vintage gated.
+    # No Production V1 files, weekly retraining, dashboards or bet votes run.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v5_market_value":
+        import ncaaf_v5_betting_research as _v5
+        pw.emit("research", "V5: verify V4/A forecasts, calibrate ATS margin probabilities and audit independent brains", pct=0.18)
+        _result = _v5.cloud_run(storage_client=gcs, bucket_name=bucket, log_func=log_func)
+        if _result.get("status") not in {
+                "HISTORICAL_DIRECTIONAL_RESEARCH__SOURCE_VINTAGE_HOLD",
+                "NO_VERIFIED_HISTORICAL_OPEN_MARKET_GAMES__RESEARCH_BLOCKED"}:
+            raise RuntimeError("[NCAAF-V5] unexpected status: " + str(_result.get("status")))
+        pw.emit("done", "V5 research report published; betting authority remains zero", pct=1.0)
+        return
+
     # NCAAF V4.3: read-only focused research validation and production robustness.
     # This route does NOT import dashboard history trainers, refit challengers,
     # touch the frozen production model, or give any betting authority.
