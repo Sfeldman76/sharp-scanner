@@ -267,6 +267,18 @@ def main():
         pw.emit("done", "NCAAF Production V1 historical model replay complete; original bet ROI unverified", pct=1.0)
         return
 
+    # NCAAF V5.3 — one comprehensive football + legacy-brain research run.
+    # Logs every source, stage, integrity gate and partial failure. No V1 refit,
+    # no silent fallbacks or promotion of previously inspected historical results.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v53_full_research":
+        import ncaaf_v53_full_research as _v53
+        pw.emit("research", "V5 full research: V4 football, V4.2, legacy Big Al/Pathi/PT/Miner, V5 point edges and shadow authority", pct=0.05)
+        _result=_v53.run_full(storage_client=gcs,bucket_name=bucket,log_func=log_func)
+        if _result.get("status")!="COMPLETE_FULL_RESEARCH__SHADOW_AUTHORITY__VINTAGE_HOLD" or _result.get("bet_authority")!=0:
+            raise RuntimeError("[NCAAF-V53] incomplete or unsafe authority contract: "+str(_result.get("status")))
+        pw.emit("done", "NCAAF V5 full research finished; see detailed audited phases and candidate policy", pct=1.0)
+        return
+
     # NCAAF V5.2: source discovery and independently verified brain attribution.
     # No V4 refit, production changes, inferred odds or unverified historical votes.
     if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v52_brain_attribution":
