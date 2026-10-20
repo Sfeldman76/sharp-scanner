@@ -51588,13 +51588,18 @@ if not HEADLESS:
     _train_market_labels = {}
     _workflow_title = "Train which market?"
     if str(sport).upper().strip() == "NCAAF":
-        # Mirror the NFL operator surface: one normal weekly production refresh
-        # and one protected heavy research workflow.  Explicit contract promotion
-        # remains backend-only and is never a routine operator action.
-        _train_market_options = ["ncaaf_production_weekly", "ncaaf_research_heavy"]
+        # Keep frozen weekly production, legacy heavy research, and independent
+        # full-history V3 as distinct operator choices. V3 uses a separate
+        # backend MARKET route (not the heavy workflow); no automatic promotion.
+        _train_market_options = [
+            "ncaaf_production_weekly",
+            "ncaaf_research_heavy",
+            "ncaaf_full_history_v3",
+        ]
         _train_market_labels = {
             "ncaaf_production_weekly": "NCAAF Production — Weekly Update",
             "ncaaf_research_heavy": "NCAAF Research — Heavy Challenger Search",
+            "ncaaf_full_history_v3": "NCAAF Research — Full-History V3 (CFBD, No Betting-Line Inputs)",
         }
         _workflow_title = "NCAAF model maintenance"
     elif str(sport).upper().strip() == "NFL":
@@ -51620,6 +51625,10 @@ if not HEADLESS:
     elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_research_heavy":
         st.sidebar.caption(
             "WHEN: after meaningful research/data changes and periodically during the season. Runs the protected NCAAF STAT/System Miner V4 research plus the expert/specialist Spread CORE search in one job: sequential team power, strength of schedule, conference strength, rest/home/maturity context, structured matchup statistics, recent-vs-season trends, nonlinear residuals and regularized program/conference effects. Discovery/confirmation stay historical, 2026 remains sealed prospective evidence, and no challenger can mutate Production V1 or Bet Authority automatically."
+        )
+    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_full_history_v3":
+        st.sidebar.caption(
+            "INDEPENDENT RESEARCH: compares football-only CFBD margin models using 2013–2023 rolling-origin discovery and 2024–2025 retrospective evaluation. Uses the published archive research view; 2026 is excluded. Betting lines, Big Al/Pathi votes and legacy CORE predictions are not training inputs. No Production V1 changes or bet authority. Requires the V3-enabled train-job container image to be deployed first."
         )
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
         st.sidebar.caption(
@@ -51763,6 +51772,8 @@ if not HEADLESS:
         _train_button_label = "Run NCAAF Weekly Production Update"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_research_heavy":
         _train_button_label = "Run NCAAF Heavy Research"
+    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_full_history_v3":
+        _train_button_label = "Run NCAAF Full-History V3 Research"
     elif str(market_choice).lower().strip() == "edge_research":
         _train_button_label = f"🧪 Run {sport} Edge Research"
     else:
@@ -51832,7 +51843,11 @@ if not HEADLESS:
                 "MODEL_BUCKET": MODEL_BUCKET,
                 "HEADLESS": "1",
             }
-    
+            if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_full_history_v3":
+                # Scoped to this execution override only. Never enable the
+                # archive-research feature flag for weekly or heavy workflows.
+                env["NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED"] = "1"
+
             run_resp = start_job_with_rest(
                 job_name=JOB_NAME,
                 region=REGION,
