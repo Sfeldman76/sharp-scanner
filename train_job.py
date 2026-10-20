@@ -267,6 +267,16 @@ def main():
         pw.emit("done", "NCAAF Production V1 historical model replay complete; original bet ROI unverified", pct=1.0)
         return
 
+    # NCAAF V5.1 — Read-only point-edge research: NO refit, no live bet votes.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v51_edge_research":
+        import ncaaf_v51_edge_research as _v51
+        pw.emit("research", "V5.1: deduplicate V5 signals, verify frozen V4 outcome/orientation, score conditional point edges and source-vintage gated brains", pct=0.20)
+        _result = _v51.cloud_run(storage_client=gcs, bucket_name=bucket, log_func=log_func)
+        if _result.get("status") != "HISTORICAL_EDGE_ATTRIBUTION__SOURCE_VINTAGE_HOLD":
+            raise RuntimeError("[NCAAF-V51] unexpected status: " + str(_result.get("status")))
+        pw.emit("done", "V5.1 point-edge attribution published; no bet authority, no historical ROI", pct=1.0)
+        return
+
     # NCAAF V5 — Independent football margins -> market-value research.
     # Consumes immutable historical OOF research artifacts only. The optional
     # BIG_AL/PATHI/PT/MINER/STATE snapshot bridge is timestamp-vintage gated.
