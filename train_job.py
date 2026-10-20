@@ -267,6 +267,17 @@ def main():
         pw.emit("done", "NCAAF Production V1 historical model replay complete; original bet ROI unverified", pct=1.0)
         return
 
+    # NCAAF V5.2: source discovery and independently verified brain attribution.
+    # No V4 refit, production changes, inferred odds or unverified historical votes.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v52_brain_attribution":
+        import ncaaf_v52_brain_research as _v52
+        pw.emit("research", "V5.2: inventory historical Big Al/Pathi/PT/Miner sources and gate original pregame brain evidence", pct=0.20)
+        _result = _v52.cloud_run(storage_client=gcs, bucket_name=bucket, log_func=log_func)
+        if _result.get("bet_authority") != 0 or _result.get("production_modified") is not False:
+            raise RuntimeError("[NCAAF-V52] unexpected authority contract")
+        pw.emit("done", f"V5.2 completed with status={_result['status']}; source inventory and evidence gates published", pct=1.0)
+        return
+
     # NCAAF V5.1 — Read-only point-edge research: NO refit, no live bet votes.
     if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v51_edge_research":
         import ncaaf_v51_edge_research as _v51

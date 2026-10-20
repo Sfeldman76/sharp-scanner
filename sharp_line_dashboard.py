@@ -51591,17 +51591,17 @@ if not HEADLESS:
         # Current operator choices only. Older V3/V4/V4.1/V4.2 routes and
         # artifacts remain preserved for reproducibility but are hidden here.
         _train_market_options = [
-            "ncaaf_v51_edge_research",
+            "ncaaf_v52_brain_attribution",
             "ncaaf_research_heavy",
         ]
         _train_market_labels = {
-            "ncaaf_v51_edge_research": "NCAAF Research — V5.1 Point Edge + Brain Attribution",
+            "ncaaf_v52_brain_attribution": "NCAAF Research — V5.2 Historical Brain Integration",
             "ncaaf_research_heavy": "NCAAF Research — Heavy Challenger Search",
         }
         # Streamlit may remember a retired option; sanitize before selectbox.
         _ncaaf_workflow_key = f"train_market_choice_{sport}"
         if st.session_state.get(_ncaaf_workflow_key) not in (None, *_train_market_options):
-            st.session_state[_ncaaf_workflow_key] = "ncaaf_v51_edge_research"
+            st.session_state[_ncaaf_workflow_key] = "ncaaf_v52_brain_attribution"
         _workflow_title = "NCAAF model maintenance"
     elif str(sport).upper().strip() == "NFL":
         # Operator surface only: weekly production + full protected research.
@@ -51627,13 +51627,13 @@ if not HEADLESS:
         st.sidebar.caption(
             "WHEN: after meaningful research/data changes and periodically during the season. Runs the protected NCAAF STAT/System Miner V4 research plus the expert/specialist Spread CORE search in one job: sequential team power, strength of schedule, conference strength, rest/home/maturity context, structured matchup statistics, recent-vs-season trends, nonlinear residuals and regularized program/conference effects. Discovery/confirmation stay historical, 2026 remains sealed prospective evidence, and no challenger can mutate Production V1 or Bet Authority automatically."
         )
-    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v51_edge_research":
+    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v52_brain_attribution":
         st.sidebar.caption(
-            "RESEARCH-ONLY V5.1: verified V4 and Efficiency point edges, exclusive edge "
-            "bands, favorite/dog and spread-size attribution, and optional pregame Big Al, "
-            "Pathi, Prediction Tracker, Miner, and State snapshots. Uses saved forecasts, "
-            "does not refit V4, hides unearned probabilities, and never authorizes bets. "
-            "Historical source-publication timestamps and original brain archives remain on hold."
+            "RESEARCH-ONLY V5.2: discovers available Big Al, Pathi, Prediction Tracker, "
+            "Miner and State source schemas, then maps explicitly configured historical "
+            "signals to V4 point edges. Reconstructed context is separate from independently "
+            "verified pregame archives. The first run may report missing source mappings; "
+            "no probability-driven bet authority, odds ROI, or Production V1 changes."
         )
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
         st.sidebar.caption(
@@ -51777,8 +51777,8 @@ if not HEADLESS:
         _train_button_label = "Run NCAAF Weekly Production Update"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_research_heavy":
         _train_button_label = "Run NCAAF Heavy Research"
-    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v51_edge_research":
-        _train_button_label = "Run NCAAF V5.1 Point-Edge Research"
+    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v52_brain_attribution":
+        _train_button_label = "Run NCAAF V5.2 Brain Source Audit"
     elif str(market_choice).lower().strip() == "edge_research":
         _train_button_label = f"🧪 Run {sport} Edge Research"
     else:

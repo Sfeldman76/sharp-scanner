@@ -1,0 +1,23 @@
+{
+  "README": "EXAMPLE ONLY. These columns/table names are illustrative. Do not upload this as the active map without inspecting V5.2 source_inventory.json and replacing with actual validated schemas.",
+  "sources": [
+    {
+      "table": "sharplogger.sharp_data.EXAMPLE_PRE_GAME_SYSTEM_SNAPSHOTS",
+      "format": "long",
+      "side_orientation": "V4_CANONICAL",
+      "mapping": {
+        "season": "Season",
+        "game_id": "Game_ID",
+        "family": "Family",
+        "system_id": "System_ID",
+        "side_team": "Selected_Team",
+        "snapshot_utc": "Snapshot_UTC",
+        "kickoff_utc": "Kickoff_UTC",
+        "rule_declared_utc": "Rule_Declared_UTC",
+        "source_gcs_uri": "Source_GCS_URI",
+        "source_artifact_sha256": "Source_Artifact_SHA256"
+      },
+      "max_rows": 150000
+    }
+  ]
+}
