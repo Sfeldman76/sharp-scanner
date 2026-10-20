@@ -218,6 +218,26 @@ def main():
         pw.emit("done", "NCAAF V4 football tournament complete (research-only)", pct=1.0)
         return
 
+    # NCAAF V4.2 conditional football feature research; ALL FIVE families in one
+    # isolated, no-market, no-promotion historical tournament.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_conditional_features_v42":
+        if str(os.getenv("NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED", "0")).strip().lower() not in {"1","true","yes","on"}:
+            raise RuntimeError("[NCAAF-V42] explicit archive research opt-in required")
+        import sharp_line_dashboard as _v42_dashboard
+        import ncaaf_v42_conditional_features as _v42
+        log_func("[NCAAF-V42] phase=HISTORICAL_CACHE_PREP source=2013_2025 legacy_cache_only=TRUE production_authority=0")
+        pw.emit("cache", "V4.2: preparing verified historical game and CFBD archive join", pct=0.10)
+        _v42_dashboard.fit_historical_ncaaf_core_expert("spreads", log_func=log_func)
+        _v42_dashboard.fit_ncaaf_statistical_brain(log_func=log_func)
+        pw.emit("research", "V4.2: five conditional feature families plus predeclared combinations", pct=0.50)
+        result = _v42.run_cloud_research(
+            dashboard_module=_v42_dashboard,storage_client=gcs,
+            bucket_name=bucket,log_func=log_func)
+        if result.get("status") != "EXPLORATORY_RESEARCH__SOURCE_VINTAGE_HOLD":
+            raise RuntimeError("[NCAAF-V42] unexpected status: " + str(result.get("status")))
+        pw.emit("done", "V4.2 football feature tournament complete: research only", pct=1.0)
+        return
+
     # NCAAF V4.1 retrospective artifact audit, zero historical cache or model refit.
     # Input is the existing V4 published report + game predictions in research GCS.
     if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v41_integrity":
