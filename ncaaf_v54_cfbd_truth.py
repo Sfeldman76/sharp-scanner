@@ -15,7 +15,7 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
-VERSION = 'NCAAF_V546_CFBD_RULE_GAME_KEY_ADAPTER_20261021'
+VERSION = 'NCAAF_V547_CFBD_IDENTITY_DTYPE_PARITY_20261021'
 CFBD_FEATURE_VIEW = 'sharplogger.sharp_data.ncaaf_cfbd_archive_research_v1'
 CFBD_GAME_ARCHIVE = 'sharplogger.sharp_data.ncaaf_cfbd_api_archive'
 MARKET_SIDE_TABLE = 'sharplogger.sharp_data.ncaaf_historical_game_side_raw'
@@ -634,6 +634,43 @@ def prepare_cfbd_expert_rule_frame(sides):
     return d
 
 
+def _verify_and_restore_cfbd_rule_identity(out, original, required, *, error_code):
+    """Require unchanged physical identity even when utils normalizes numeric dtypes.
+
+    The unchanged utility converts pandas nullable Int64/Float64 columns into
+    ordinary float64. A Season like Int64(2024) consequently becomes 2024.0:
+    exact DataFrame.equals() reports false although it is the same CFBD game.
+    Treat only exact numeric equivalence of Season as benign; all other source
+    identifiers must match row-for-row and the original dtypes are restored.
+    Never repair or realign mismatched rows, keys, teams, or seasons.
+    """
+    if (len(out) != len(original) or not out.index.equals(original.index)
+        or any(c not in out or c not in original for c in required)
+        or not out.columns.is_unique or not original.columns.is_unique):
+        raise RuntimeError(error_code + ' reason=ROW_ALIGNMENT_OR_REQUIRED_COLUMNS')
+    for c in required:
+        a=original[c];b=out[c]
+        if c=='Season':
+            left=pd.to_numeric(a, errors='coerce').to_numpy(dtype=np.float64, na_value=np.nan)
+            right=pd.to_numeric(b, errors='coerce').to_numpy(dtype=np.float64, na_value=np.nan)
+            match=(np.isfinite(left).all() and np.isfinite(right).all()
+                   and np.equal(left,np.floor(left)).all()
+                   and np.equal(right,np.floor(right)).all()
+                   and np.array_equal(left,right))
+        else:
+            # Exact text/key content, independent of object/string/category dtype.
+            left=a.astype('string');right=b.astype('string')
+            match=bool((left.isna().eq(right.isna()) &
+                         left.eq(right).fillna(True)).all())
+        if not match:
+            raise RuntimeError(error_code + ' column=' + c + ' reason=VALUE_CHANGED')
+    # Restore the immutable CFBD columns (and original nullable dtypes) only
+    # after the audit has proved there was no substantive value/row change.
+    for c in required:
+        out[c]=original[c].copy()
+    return out
+
+
 def replay_cfbd_expert_rules_without_leaking_current_results(frame, utils_module):
     """Run original expert rules without exposing current-game labels to rules.
 
@@ -650,10 +687,9 @@ def replay_cfbd_expert_rules_without_leaking_current_results(frame, utils_module
         d[c]=pd.Series(np.nan,index=d.index,dtype='float64')
     required=['Game_Key','Season','Game_ID','Sport','Market','Team','Opponent',
               'Historical_Football_Source']
-    keyframe=d[required].copy()
     flagged=utils_module.add_pathi_bigal_rule_flags(d)
-    if len(flagged)!=len(d) or not flagged.index.equals(d.index) or not flagged[required].equals(keyframe):
-        raise RuntimeError('CFBD_EXPERT_RULES_MODIFIED_SOURCE_ROW_IDENTITY')
+    flagged=_verify_and_restore_cfbd_rule_identity(
+        flagged,d,required,error_code='CFBD_EXPERT_RULES_MODIFIED_SOURCE_ROW_IDENTITY')
     for c,old in labels.items():flagged[c]=old
     reliability=[c for c in flagged if str(c).startswith('System_Reliability_')]
     flagged=flagged.drop(columns=reliability)
@@ -692,8 +728,8 @@ def add_cfbd_market_only_pathi_context(flagged, utils_module):
     context=utils_module.add_pathi_football_key_features(d)
     if len(context)!=len(d) or not context.index.equals(d.index):
         raise RuntimeError('CFBD_PATHI_ADAPTER_ROW_ALIGNMENT_CHANGED')
-    if not context[list(before)].equals(before):
-        raise RuntimeError('CFBD_PATHI_ADAPTER_FOOTBALL_IDENTITY_MODIFIED')
+    context=_verify_and_restore_cfbd_rule_identity(
+        context,before,list(before),error_code='CFBD_PATHI_ADAPTER_FOOTBALL_IDENTITY_MODIFIED')
     # The original helper's Key_DataReady means 'opening/current fields exist'.
     # If only opening exists, current was a fallback and no move was observed.
     # Tighten that meaning for historical open/close research explicitly.

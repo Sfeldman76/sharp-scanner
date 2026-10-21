@@ -493,6 +493,12 @@ def run_full(*,storage_client,bucket_name=BUCKET,log_func=print,modules=None,bq_
                        source_vintage_certified=False,bookmaker_team_identity_used=False)
             flagged=audit.step('CFBD_ONLY_PATHI_BIGAL_RULE_REPLAY',
                                lambda:truth.replay_cfbd_expert_rules_without_leaking_current_results(d,ut))
+            audit.emit('CFBD_EXPERT_SOURCE_IDENTITY_PARITY','PASS',
+                       team_sides=len(flagged),cfbd_game_keys=flagged.Game_Key.nunique(),
+                       season_dtype=str(flagged.Season.dtype),
+                       check='ROW_ORDER_AND_SEASON_NUMERIC_VALUE_AND_ALL_EXACT_TEXT_IDS',
+                       original_cfbd_identity_restored=True,
+                       current_game_outcomes_not_used_for_rule_scoring=True)
             audit.emit('CFBD_EXPERT_RULE_VINTAGE_GUARD','PASS',
                        current_game_labels_suppressed_during_rule_replay=True,
                        prior_system_reliability_recomputed=False,
@@ -500,6 +506,11 @@ def run_full(*,storage_client,bucket_name=BUCKET,log_func=print,modules=None,bq_
             flagged,pathi_quote_audit=audit.step('CFBD_ONLY_PATHI_MARKET_KEY_CONTEXT',
                          lambda:truth.add_cfbd_market_only_pathi_context(flagged,ut))
             audit.emit('CFBD_PATHI_MARKET_KEY_COVERAGE','PASS',**pathi_quote_audit)
+            audit.emit('CFBD_PATHI_SOURCE_IDENTITY_PARITY','PASS',
+                       team_sides=len(flagged),cfbd_game_keys=flagged.Game_Key.nunique(),
+                       season_dtype=str(flagged.Season.dtype),
+                       original_cfbd_identity_restored=True,
+                       market_quote_fields_only=True)
             expert_occ,expert_audit=audit.step('CFBD_ONLY_EXPERT_DIRECTIONAL_OCCURRENCES',lambda:truth.generate_cfbd_expert_occurrences(cfbd_sides,flagged,ut))
             audit.emit('CFBD_EXPERT_SYSTEM_COUNTS','PASS',**expert_audit)
             # Miner must consume the SAME CFBD-only historical frame, not
