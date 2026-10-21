@@ -51854,6 +51854,10 @@ if not HEADLESS:
                 # Scoped to this execution override only. Never enable the
                 # archive-research feature flag for weekly or heavy workflows.
                 env["NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED"] = "1"
+            if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v54_full_research":
+                # Scoped archival data repair: only original CFBD /games for
+                # missing 2022 game IDs. No model/prod/market edits.
+                env["NCAAF_CFBD_ARCHIVE_AUTOREPAIR"] = "1"
 
             run_resp = start_job_with_rest(
                 job_name=JOB_NAME,

@@ -15,7 +15,7 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
-VERSION = 'NCAAF_V541_CFBD_ANCHORED_TEAM_IDENTITY_20261021'
+VERSION = 'NCAAF_V542_CFBD_2022_API_GAP_RECOVERY_20261021'
 CFBD_FEATURE_VIEW = 'sharplogger.sharp_data.ncaaf_cfbd_archive_research_v1'
 CFBD_GAME_ARCHIVE = 'sharplogger.sharp_data.ncaaf_cfbd_api_archive'
 MARKET_SIDE_TABLE = 'sharplogger.sharp_data.ncaaf_historical_game_side_raw'
@@ -84,7 +84,11 @@ def parse_cfbd_archive_rows(records):
             hs=float(obj['homePoints']);aw=float(obj['awayPoints'])
             if not np.isfinite(hs) or not np.isfinite(aw):continue
             yr=r.get('Season')
-            if yr is None or pd.isna(yr):yr=json.loads(pjson).get('year')
+            requested_year=json.loads(pjson).get('year')
+            if yr is not None and not pd.isna(yr) and requested_year is not None:
+                if int(yr)!=int(requested_year):
+                    raise RuntimeError('CFBD_ARCHIVE_SEASON_METADATA_REQUEST_CONFLICT')
+            if yr is None or pd.isna(yr):yr=requested_year
             if yr is None:raise ValueError('missing season')
             date=pd.to_datetime(obj.get('startDate') or obj.get('startTime'),utc=True,errors='coerce')
             if pd.isna(date):raise ValueError('missing kickoff')
@@ -291,6 +295,11 @@ def build_cfbd_canonical_features(features, scores, *, enforce_full_history=True
        'team_identity':identity_audit,
        'score_coverage_by_year':{str(int(y)):{'side_rows':len(g),'scored':int(g.CFBD_History_Eligible.sum())}
             for y,g in canonical.groupby('Season')}}
+    log_func('[NCAAF-V542-CFBD-SCORE-COVERAGE] '+json.dumps({
+        'overall':info['score_match_rate'],'by_season':info['score_coverage_by_year'],
+        'unmatched_games':int(m.loc[~valid,['Season','Game_ID']].drop_duplicates().shape[0]),
+        'unmatched_examples':m.loc[~valid,['Season','Game_ID','Team']].head(12).to_dict('records'),
+        'score_source':'CFBD_ONLY'},default=str,sort_keys=True))
     if enforce_full_history and not 0.95<=info['score_match_rate']<=1.0:
         raise RuntimeError('CFBD_HISTORICAL_SCORE_COVERAGE_INSUFFICIENT '+str(info['score_match_rate']))
     if enforce_full_history:
@@ -504,7 +513,9 @@ def load_from_bigquery(bq_client, *, log_func=print):
        f'SELECT * FROM `{CFBD_FEATURE_VIEW}` WHERE Season BETWEEN 2013 AND 2025'),
       ('CFBD_IMMUTABLE_GAME_RESULTS',CFBD_GAME_ARCHIVE,
        f'''SELECT Archive_Row_ID, Endpoint, Params_JSON, Season, Retrieved_At, Payload_JSON
-        FROM `{CFBD_GAME_ARCHIVE}` WHERE Season BETWEEN 2013 AND 2025
+        FROM `{CFBD_GAME_ARCHIVE}` WHERE
+        (Season BETWEEN 2013 AND 2025 OR
+         SAFE_CAST(JSON_VALUE(Params_JSON, '$.year') AS INT64) BETWEEN 2013 AND 2025)
         AND REGEXP_CONTAINS(LOWER(Endpoint),r'/games/?$')'''),
       ('BOOKMAKER_PRICES_ONLY',MARKET_SIDE_TABLE,
        f'''SELECT Source_Name, Season, Source_Game_ID, Source_Team_Name, Is_Home,
@@ -513,6 +524,12 @@ def load_from_bigquery(bq_client, *, log_func=print):
         FROM `{MARKET_SIDE_TABLE}` WHERE Source_Name = 'CollegeFootballData'
         AND Season BETWEEN 2013 AND 2025'''),
     ]
+    # Audit the historical API archive before paying to materialize 22k feature
+    # sides. Only an explicit dashboard opt-in allows narrow CFBD-only repair.
+    import os
+    from ncaaf_v542_cfbd_archive_gap import repair_if_needed
+    repair_if_needed(bq_client,log_func=log_func,
+       enabled=os.getenv('NCAAF_CFBD_ARCHIVE_AUTOREPAIR','0')=='1')
     data=[]
     for name,src,sql in queries:
         log_func(f'[NCAAF-V54-SOURCE] source={name} table={src} status=START football_provenance={name!="BOOKMAKER_PRICES_ONLY"}')
