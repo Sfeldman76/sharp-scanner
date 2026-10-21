@@ -293,6 +293,22 @@ def main():
         pw.emit("done", "NCAAF V5.5 combined-brain research completed; see immutable GCS result directory", pct=1.0)
         return
 
+    # V5.5.4 targeted 2026 CFBD /games backfill — independent maintenance.
+    # Preserves all existing market, features, research, production and model data.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v55_cfbd_2026_games_repair":
+        import ncaaf_v554_cfbd_games_backfill as _v554
+        from google.cloud import bigquery as _v554_bq
+        pw.emit("audit", "V5.5: audit 2026 CFBD game archive and backfill /games ONLY", pct=0.10)
+        _v554_result=_v554.run_backfill(
+            bq_client=_v554_bq.Client(project="sharplogger"),
+            storage_client=gcs,bucket_name=bucket,log_func=log_func)
+        if (_v554_result.get("status") not in ("PASS", "PASS_ALREADY_COMPLETE")
+            or _v554_result.get("production_modified") is not False
+            or _v554_result.get("bet_authority") != 0):
+            raise RuntimeError("[NCAAF-V554] CFBD 2026 games archive repair is not verified")
+        pw.emit("done", "2026 CFBD /games archive verified; next run V5.5 Weekly CORE", pct=1.0)
+        return
+
     # V5.5 WEEKLY: own CFBD NONLINEAR_HGB forecast, independently priced
     # current-game slate and research brains. The frozen Production V1 scorer,
     # pick selector, contract, and bet ledgers are NOT used or modified.

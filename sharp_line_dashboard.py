@@ -51664,6 +51664,7 @@ if not HEADLESS:
         _train_market_options = [
             "ncaaf_production_weekly",
             "ncaaf_v54_full_research",
+            "ncaaf_v55_cfbd_2026_games_repair",
             "ncaaf_v55_weekly",
             "ncaaf_v55_market_refresh",
             "ncaaf_v55_combined_brain",
@@ -51671,6 +51672,7 @@ if not HEADLESS:
         ]
         _train_market_labels = {
             "ncaaf_production_weekly": "NCAAF — Weekly Update (existing frozen Production V1)",
+            "ncaaf_v55_cfbd_2026_games_repair": "NCAAF V5.5 — Repair 2026 CFBD Games Archive (one-time)",
             "ncaaf_v55_weekly": "NCAAF V5.5 — Weekly CORE + Combined Brains + Market Rich",
             "ncaaf_v55_market_refresh": "NCAAF V5.5 — Market-only Price Refresh (no CORE refit)",
             "ncaaf_v55_combined_brain": "NCAAF V5.5 — Combined Brains + Market Rich (fast)",
@@ -51701,6 +51703,14 @@ if not HEADLESS:
     if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_production_weekly":
         st.sidebar.caption(
             "WHEN: once each week after prior games settle / the new slate is ready. Reuses the frozen Production V1 CORE models, settles immutable prospective locks, refreshes the current slate and live qualified system triggers, and applies the current CORE-first Bet Authority. It does NOT refit CORE, rerun research, republish the production contract, or promote anything. Market moves continue to refresh through the background scanner after this run."
+        )
+    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_cfbd_2026_games_repair":
+        st.sidebar.caption(
+            "Targeted source-data repair: retrieves ONLY the original 2026 CFBD /games API "
+            "responses, writes immutable hashed snapshots into the EXISTING CFBD API archive, "
+            "and verifies coverage against the 2026 two-sided CFBD schedule. Requires "
+            "CFBD_API_KEY on the training job. No feature warehouse rebuild, CORE refit, "
+            "bet promotion, or utils/production changes. After PASS, run V5.5 Weekly CORE."
         )
     elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_weekly":
         st.sidebar.caption(
@@ -51918,6 +51928,8 @@ if not HEADLESS:
         _train_button_label = "Run NCAAF Weekly Update (frozen V1)"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_research_heavy":
         _train_button_label = "Run NCAAF Heavy Research"
+    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v55_cfbd_2026_games_repair":
+        _train_button_label = "Repair NCAAF 2026 CFBD Games Archive"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v55_weekly":
         _train_button_label = "Run NCAAF V5.5 Weekly Model Update"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v55_market_refresh":
