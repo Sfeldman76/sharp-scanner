@@ -15,7 +15,7 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
-VERSION = 'NCAAF_V542_CFBD_2022_API_GAP_RECOVERY_20261021'
+VERSION = 'NCAAF_V544_NULLABLE_MARKET_BOUNDARY_20261021'
 CFBD_FEATURE_VIEW = 'sharplogger.sharp_data.ncaaf_cfbd_archive_research_v1'
 CFBD_GAME_ARCHIVE = 'sharplogger.sharp_data.ncaaf_cfbd_api_archive'
 MARKET_SIDE_TABLE = 'sharplogger.sharp_data.ncaaf_historical_game_side_raw'
@@ -379,24 +379,49 @@ def attach_market_only(cfbd, market):
     opposing=(j[['Season','Game_ID','Team','Consensus_Open_Moneyline']]
        .rename(columns={'Team':'Opponent','Consensus_Open_Moneyline':'Opp_Consensus_Open_Moneyline'}))
     j=j.merge(opposing,on=['Season','Game_ID','Opponent'],how='left',validate='one_to_one')
+    def _float_with_missing(x):
+        # Pandas nullable Float64/Int64 use pd.NA, which cannot be evaluated
+        # as a boolean by np.where. Convert once to plain floats with NaN.
+        return pd.to_numeric(x,errors='coerce').to_numpy(dtype=np.float64,na_value=np.nan)
+
     def _implied(x):
-        z=pd.to_numeric(x,errors='coerce')
-        return np.where(z<=-100,-z/(-z+100),np.where(z>=100,100/(z+100),np.nan))
+        z=_float_with_missing(x)
+        probabilities=np.full(len(z),np.nan,dtype=np.float64)
+        negatives=np.isfinite(z)&(z<=-100)
+        positives=np.isfinite(z)&(z>=100)
+        probabilities[negatives]=-z[negatives]/(100-z[negatives])
+        probabilities[positives]=100/(100+z[positives])
+        # 0, +/-1..99 and missing prices have no valid US-odds meaning.
+        return probabilities
+
     own=_implied(j.Consensus_Open_Moneyline)
     opp=_implied(j.Opp_Consensus_Open_Moneyline)
     denom=own+opp
-    j['Market_Open_H2H_Fair']=np.where(np.isfinite(denom)&(denom>0),own/denom,np.nan)
+    fair=np.full(len(j),np.nan,dtype=np.float64)
+    valid_pair=np.isfinite(own)&np.isfinite(opp)&np.isfinite(denom)&(denom>0)
+    fair[valid_pair]=own[valid_pair]/denom[valid_pair]
+    j['Market_Open_H2H_Fair']=fair
     j['Market_Open_H2H_Fair_Source']='TWO_SIDED_CFBD_LINKED_MARKET_OPEN_MONEYLINES_NO_VINTAGE_CERT'
-    j['ATS_Win']=np.where(j.Actual_Margin.notna() & j.Consensus_Open_Spread.notna(),
-                           np.where(j.Actual_Margin+j.Consensus_Open_Spread>0,1.,
-                                    np.where(j.Actual_Margin+j.Consensus_Open_Spread<0,0.,np.nan)),np.nan)
+    # Also avoid nullable boolean comparisons for the ATS label. A missing
+    # spread/result is unknown; a zero margin against the line is a push.
+    actual=_float_with_missing(j.Actual_Margin)
+    spread=_float_with_missing(j.Consensus_Open_Spread)
+    margin_vs_line=actual+spread
+    ats=np.full(len(j),np.nan,dtype=np.float64)
+    ats[np.isfinite(margin_vs_line)&(margin_vs_line>0)]=1.
+    ats[np.isfinite(margin_vs_line)&(margin_vs_line<0)]=0.
+    j['ATS_Win']=ats
     aud={'football_source':'CFBD_ONLY','market_source':MARKET_SIDE_TABLE,
          'market_fields_imported':cols,
          'no_market_football_fact_overwrite':True,
          'exact_market_open_sides':exact,
          'market_open_sides':int(j.Consensus_Open_Spread.notna().sum()),
          'side_orientation_rescued':int(j.Consensus_Open_Spread.notna().sum())-exact,
-         'verified_two_sided_open_moneyline_fair':int(j.Market_Open_H2H_Fair.notna().sum())}
+         'verified_two_sided_open_moneyline_fair':int(j.Market_Open_H2H_Fair.notna().sum()),
+         'missing_or_invalid_open_moneyline_sides':int((~np.isfinite(own)).sum()),
+         'valid_two_sided_open_moneyline_sides':int(valid_pair.sum()),
+         'missing_open_spread_sides':int((~np.isfinite(spread)).sum()),
+         'ats_scored_sides':int(np.isfinite(ats).sum())}
     return j,aud
 
 
@@ -491,6 +516,7 @@ def build_cfbd_research_inputs(archive_features, raw_api_games, rich_market, *, 
     scores,api_audit=parse_cfbd_archive_rows(raw_api_games)
     sides,score_audit=build_cfbd_canonical_features(archive_features,scores,log_func=log_func)
     joint,market_audit=attach_market_only(sides,rich_market)
+    log_func('[NCAAF-V544-MARKET-NULL-SAFETY] '+json.dumps({**market_audit,'status':'PASS'},default=str,sort_keys=True))
     # Never let partial CFBD archive gaps be silently repaired by market scores.
     # The archive coverage audit above still documents the missing games.
     joint=joint.loc[joint.CFBD_History_Eligible.eq(1)].copy()
