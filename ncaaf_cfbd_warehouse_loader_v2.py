@@ -1737,6 +1737,123 @@ def write_api_archive(client, project: str, dataset: str, archive_rows: list[dic
     return {"status":"PASS","table":tid,"rows":len(d),"verified_rows":res['verified_rows']}
 
 
+
+def append_existing_api_archive_without_staging(
+    client, project: str, dataset: str, archive_rows: list[dict[str, Any]],
+    *, log_func=print, chunk_size: int = 100,
+) -> dict[str, Any]:
+    """Idempotent CFBD archive MERGE into an EXISTING table; creates no tables.
+
+    Intended for narrowly-scoped API result repairs when the Cloud Run service
+    account can update archive rows but cannot create staging tables. This path
+    preserves the original content-addressed row schema, validates input hashes,
+    never overwrites an existing hash, and verifies the exact original bytes on
+    readback. BQ jobs.create + tables.get + tables.getData + tables.updateData
+    are required; tables.create is NOT required.
+    """
+    from google.api_core.exceptions import Forbidden, NotFound
+    from google.cloud import bigquery
+
+    if not archive_rows:
+        return {"status": "EMPTY", "rows": 0, "writes": 0}
+    if not isinstance(chunk_size, int) or not 1 <= chunk_size <= 200:
+        raise ValueError('CFBD_ARCHIVE_INVALID_CHUNK_SIZE')
+    d = _archive_prepare_frame(archive_rows)
+    tid = _qualified(project, dataset, API_ARCHIVE_TABLE)
+    try:
+        table = client.get_table(tid)
+    except NotFound as exc:
+        raise RuntimeError('CFBD_ARCHIVE_EXISTING_TABLE_REQUIRED__NO_TABLE_CREATION '+tid) from exc
+    schema = {f.name: str(f.field_type).upper() for f in table.schema}
+    aliases = {'INTEGER':'INT64', 'FLOAT':'FLOAT64', 'BOOLEAN':'BOOL'}
+    bad = {k:{'actual': schema.get(k), 'required': t}
+           for k,t in _ARCHIVE_COLUMN_TYPES.items()
+           if aliases.get(schema.get(k), schema.get(k)) != t}
+    if bad:
+        raise RuntimeError('CFBD_ARCHIVE_EXISTING_TABLE_SCHEMA_MISMATCH '+str(bad))
+
+    # These must be original API payload bytes, not a synthetic scoreboard.
+    for row in d.to_dict('records'):
+        digest = hashlib.sha256((str(row['Endpoint']) + '|' +
+               str(row['Params_JSON']) + '|' + str(row['Payload_JSON'])).encode('utf-8')).hexdigest()
+        if digest != str(row['Archive_Row_ID']):
+            raise RuntimeError('CFBD_ARCHIVE_CONTENT_HASH_MISMATCH archive_row_id='+str(row['Archive_Row_ID']))
+
+    def to_text(row):
+        converted={}
+        for key in _ARCHIVE_COLUMN_TYPES:
+            v=row[key]
+            if v is None or (not isinstance(v,(list,dict)) and pd.isna(v)):
+                converted[key]=None
+            elif key=='Retrieved_At':
+                converted[key]=pd.Timestamp(v).isoformat()
+            elif key in ('Season','Row_Index'):
+                converted[key]=int(v)
+            else:
+                converted[key]=str(v)
+        return json.dumps(converted,sort_keys=True,separators=(',',':'),ensure_ascii=False)
+
+    # Use BQ query parameters: avoid SQL injection, query-length limits and
+    # staging table creation. Each MERGE is atomic and retries are idempotent.
+    cols=list(_ARCHIVE_COLUMN_TYPES)
+    select=', '.join(
+        ("CAST(JSON_VALUE(raw, '$."+name+"') AS INT64) AS `"+name+"`" if name in ('Season','Row_Index')
+         else "TIMESTAMP(JSON_VALUE(raw, '$."+name+"')) AS `"+name+"`" if name=='Retrieved_At'
+         else "JSON_VALUE(raw, '$."+name+"') AS `"+name+"`")
+        for name in cols)
+    names=', '.join('`'+c+'`' for c in cols)
+    values=', '.join('S.`'+c+'`' for c in cols)
+    sql=f"""MERGE `{tid}` AS T
+        USING (SELECT {select} FROM UNNEST(@rows) AS raw) AS S
+        ON T.Archive_Row_ID = S.Archive_Row_ID
+        WHEN NOT MATCHED THEN INSERT ({names}) VALUES ({values})"""
+    total=0
+    for start in range(0,len(d),chunk_size):
+        block=d.iloc[start:start+chunk_size].to_dict('records')
+        raw=[to_text(x) for x in block]
+        keys=[str(x['Archive_Row_ID']) for x in block]
+        log_func('[NCAAF-V543-ARCHIVE-DML] '+json.dumps({
+            'stage':'MERGE_EXISTING_CFBD_API_ARCHIVE','status':'START',
+            'chunk':start//chunk_size+1,'rows':len(block),'table':tid,
+            'temporary_tables_created':0},sort_keys=True))
+        config=bigquery.QueryJobConfig(query_parameters=[bigquery.ArrayQueryParameter('rows','STRING',raw)])
+        try:
+            client.query(sql,job_config=config).result()
+            # Verify the original hashed contents for every incoming key, not
+            # just the count, before claiming success.
+            verify_sql=f"""SELECT Archive_Row_ID, Endpoint, Params_JSON, Payload_JSON
+               FROM `{tid}` WHERE Archive_Row_ID IN UNNEST(@keys)"""
+            read_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ArrayQueryParameter('keys','STRING',keys)])
+            fetched=list(client.query(verify_sql,job_config=read_config).result())
+        except Forbidden as exc:
+            raise RuntimeError('CFBD_ARCHIVE_EXISTING_TABLE_DML_PERMISSION_DENIED '
+                'service_account_requires_bigquery.tables.updateData '
+                'on='+tid+' (and bigquery.jobs.create in project); '
+                'bigquery.tables.create is NOT needed') from exc
+        expected={str(x['Archive_Row_ID']):x for x in block}
+        seen={}
+        for entry in fetched:
+            row={k:(entry[k] if hasattr(entry,'__getitem__') else getattr(entry,k))
+                 for k in ('Archive_Row_ID','Endpoint','Params_JSON','Payload_JSON')}
+            key=str(row['Archive_Row_ID'])
+            if key in seen:
+                raise RuntimeError('CFBD_ARCHIVE_DUPLICATE_HASH_IN_TARGET '+key)
+            seen[key]=row
+        if set(seen)!=set(expected):
+            raise RuntimeError('CFBD_ARCHIVE_DML_READBACK_MISSING_KEYS expected='+str(len(expected))+
+                               ' found='+str(len(seen)))
+        for key,source in expected.items():
+            for field in ('Endpoint','Params_JSON','Payload_JSON'):
+                if str(seen[key][field]) != str(source[field]):
+                    raise RuntimeError('CFBD_ARCHIVE_DML_READBACK_CONTENT_CONFLICT '+key+' '+field)
+        total+=len(block)
+        log_func('[NCAAF-V543-ARCHIVE-DML] '+json.dumps({
+            'stage':'MERGE_EXISTING_CFBD_API_ARCHIVE','status':'PASS',
+            'chunk':start//chunk_size+1,'rows_verified':len(block),
+            'temporary_tables_created':0},sort_keys=True))
+    return {'status':'PASS', 'table':tid, 'rows':len(d), 'verified_rows':total,
+            'temporary_tables_created':0, 'permission_bigquery_tables_create_required':False}
+
 def _archive_leftover_stage_tables(client, project: str, dataset: str) -> list[str]:
     """Discover only our content-addressed archive's *explicitly named* stages."""
     prefix=f"{API_ARCHIVE_TABLE}__stage_"

@@ -122,9 +122,14 @@ def repair_if_needed(bq, *, log_func=print, enabled=False,
     log_func('[NCAAF-V542-ARCHIVE-GAP] '+json.dumps({'stage':'APPEND_IMMUTABLE_CFBD_2022_GAMES',
              'status':'START','original_api_rows':len(incoming),'new_game_rows':len(needed),
              'overlap_verified_games':len(overlap),'preflight_coverage':after_dry['coverage']}))
-    # Uses the existing warehouse V2 SHA-256 content-addressed, staged, readback
-    # writer. This writes only ncaaf_cfbd_api_archive, not training/features.
-    archive_result=loader.write_api_archive(bq,'sharplogger','sharp_data',needed)
+    # The existing archive table is already present. MERGE original hashed CFBD
+    # rows directly, without temporary staging tables or tables.create IAM.
+    # The old staging writer is explicitly forbidden here; don't silently
+    # switch to the failing code path when images become mismatched.
+    writer=getattr(loader,'append_existing_api_archive_without_staging',None)
+    if not callable(writer):
+        raise RuntimeError('CFBD_2022_NO_STAGING_ARCHIVE_WRITER_REQUIRED__DEPLOY_MATCHED_WAREHOUSE_LOADER')
+    archive_result=writer(bq,'sharplogger','sharp_data',needed,log_func=log_func)
     if archive_result.get('status') not in ('PASS','CREATED'):
         raise RuntimeError('CFBD_2022_ARCHIVE_WRITE_INCOMPLETE '+str(archive_result))
     _, verify_raw=query_2022(bq)
