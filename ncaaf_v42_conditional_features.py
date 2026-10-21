@@ -343,6 +343,8 @@ def run_cloud_research(*,dashboard_module,storage_client,bucket_name='sharp-mode
         enriched=history
         log_func('[NCAAF-V54-CFBD-V42] direct=TRUE legacy_attach=DISABLED football_source=CFBD_ONLY')
     else:
+        if getattr(dashboard_module,'_V54_CFBD_ONLY_ACTIVE',False):
+            raise RuntimeError('V54_CFBD_SOURCE_MARKER_MISSING__LEGACY_FOOTBALL_FALLBACK_FORBIDDEN')
         enriched,diag=core._attach_cfbd_core_context(dashboard_module,history,log_func=log_func)
     bucket=storage_client.bucket(bucket_name)
     ref_blob=bucket.blob('research/ncaaf/margin_tournament_v4/current_report.json')

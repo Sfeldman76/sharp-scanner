@@ -10,11 +10,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from collections import defaultdict
 import numpy as np
 import pandas as pd
 
-VERSION = 'NCAAF_V54_CFBD_AUTHORITATIVE_HISTORICAL_SOURCE_20261020'
+VERSION = 'NCAAF_V541_CFBD_ANCHORED_TEAM_IDENTITY_20261021'
 CFBD_FEATURE_VIEW = 'sharplogger.sharp_data.ncaaf_cfbd_archive_research_v1'
 CFBD_GAME_ARCHIVE = 'sharplogger.sharp_data.ncaaf_cfbd_api_archive'
 MARKET_SIDE_TABLE = 'sharplogger.sharp_data.ncaaf_historical_game_side_raw'
@@ -23,6 +24,30 @@ FIRST_YEAR, LAST_HISTORICAL = 2013, 2025
 
 def ident(v):
     return re.sub(r'[^a-z0-9]', '', str(v or '').lower())
+
+
+def cfbd_school_key(v):
+    """The canonical team-key transform from the existing CFBD warehouse loader V2.
+
+    Both the feature view and the independently verified /games archive must
+    be normalized by the SAME football identity rules, not by UI/market aliases.
+    """
+    s='' if v is None else str(v)
+    s=unicodedata.normalize('NFKD',s).encode('ascii','ignore').decode('ascii')
+    s=s.lower().replace('&',' and ')
+    s=re.sub(r'[^a-z0-9]+',' ',s).strip()
+    replacements={'st':'state','mich':'michigan','fla':'florida','ill':'illinois',
+                  'ind':'indiana','mass':'massachusetts','miss':'mississippi',
+                  'mo':'missouri','tenn':'tennessee','tex':'texas','va':'virginia',
+                  'wash':'washington','wis':'wisconsin','conn':'connecticut',
+                  'colo':'colorado','ark':'arkansas','cal':'california','neb':'nebraska'}
+    s=' '.join(replacements.get(t,t) for t in s.split())
+    aliases={'nc state':'north carolina state','n c state':'north carolina state',
+             'sc state':'south carolina state','s c state':'south carolina state',
+             'e michigan':'eastern michigan','w michigan':'western michigan',
+             'c michigan':'central michigan','n illinois':'northern illinois',
+             's mississippi':'southern mississippi','southern miss':'southern mississippi'}
+    return ident(aliases.get(s,s))
 
 
 def gid(v):
@@ -108,7 +133,7 @@ def _prepare_archive_features(raw):
     a=raw.copy();a['Season']=pd.to_numeric(a.Season,errors='coerce')
     a=a[a.Season.between(FIRST_YEAR,LAST_HISTORICAL)].copy()
     a['Game_ID']=a.Game_ID.map(gid)
-    a['__t']=a.get('Team_Key',a.Team).map(ident);a['__o']=a.get('Opponent_Key',a.Opponent).map(ident)
+    a['__t']=a.get('Team_Key',a.Team).map(cfbd_school_key);a['__o']=a.get('Opponent_Key',a.Opponent).map(cfbd_school_key)
     a['__date']=pd.to_datetime(a.Game_Date,errors='coerce',utc=True)
     if a['__date'].isna().any():raise RuntimeError('CFBD_RESEARCH_ARCHIVE_INVALID_GAME_DATES')
     if a[['Season','Game_ID','__t']].duplicated().any():raise RuntimeError('CFBD_RESEARCH_ARCHIVE_DUPLICATE_TEAM_GAME')
@@ -119,23 +144,127 @@ def _prepare_archive_features(raw):
     return a
 
 
-def build_cfbd_canonical_features(features, scores, *, enforce_full_history=True):
+def _resolve_cfbd_orientation(m, *, log_func=print):
+    """Resolve naming aliases strictly inside a CFBD physical game.
+
+    A single direct team identity anchors the opposite reciprocal side. Both
+    unmatched identities require an independently learned, unambiguous crosswalk
+    from other CFBD games; home flags on their own are never proof of identity.
+    No market records, scores or dashboard aliases are used.
+    """
+    z=m.copy()
+    matched=z['_merge'].eq('both')
+    direct_home=matched & z['__t'].eq(z['__home'])
+    direct_away=matched & z['__t'].eq(z['__away'])
+    if (direct_home & direct_away).any():
+        raise RuntimeError('CFBD_API_HOME_AWAY_SAME_IDENTITY')
+    orient=pd.Series(np.select([direct_home,direct_away],[1,0],default=-1),index=z.index,dtype='int64')
+    method=pd.Series(np.where(orient.ge(0),'DIRECT_CFBD_TEAM_NAME','UNRESOLVED'),index=z.index,dtype='object')
+    has_flag='Is_Home' in z.columns
+    if has_flag:
+        flag=pd.to_numeric(z['Is_Home'],errors='coerce')
+        bad_flag=matched & orient.ge(0) & flag.notna() & flag.ne(orient)
+        if bad_flag.any():
+            sample=z.loc[bad_flag,['Season','Game_ID','Team','CFBD_Home','CFBD_Away','Is_Home']].head(6).to_dict('records')
+            raise RuntimeError('CFBD_FEATURE_HOME_FLAG_CONTRADICTS_API n='+str(int(bad_flag.sum()))+' examples='+json.dumps(sample,default=str))
+    else:
+        flag=pd.Series(np.nan,index=z.index,dtype='float64')
+    if matched.any():
+        work=z.loc[matched,['Season','Game_ID','__t','__o','__home','__away','Team','Opponent','CFBD_Home','CFBD_Away']].copy()
+        work['_i']=work.index
+        work['_direct']=orient.loc[work.index].to_numpy()
+        work['_flag']=flag.loc[work.index].to_numpy()
+        group=['Season','Game_ID']
+        work['_anchors']=work.groupby(group)['_direct'].transform(lambda x: int(x.ge(0).sum()))
+        one=(work['_anchors'].eq(1)) & work['_direct'].eq(-1)
+        # One direct CFBD name plus the reciprocal two-sided feature rows
+        # uniquely identifies the remaining team's orientation.
+        if one.any():
+            anchored=work.groupby(group)['_direct'].transform('max')
+            inferred=1-anchored.loc[one]
+            inconsistent=work.loc[one,'_flag'].notna() & work.loc[one,'_flag'].ne(inferred)
+            if inconsistent.any():
+                ix=work.loc[one].loc[inconsistent,'_i']
+                raise RuntimeError('CFBD_RECIPROCAL_SIDE_HOME_FLAG_CONFLICT n='+str(len(ix)))
+            orient.loc[work.loc[one,'_i']]=inferred.to_numpy()
+            method.loc[work.loc[one,'_i']]='ONE_SIDE_CFBD_ANCHORED_ALIAS'
+        # Learn alias labels using only the opposite side that was directly
+        # identified on the SAME CFBD game, then require a one-to-one mapping.
+        named=work.loc[one].copy()
+        if not named.empty:
+            named['_api_expected']=np.where(orient.loc[named['_i']].to_numpy()==1,named['__home'],named['__away'])
+            mapping=named.groupby('__t')['_api_expected'].agg(lambda x:set(x))
+            ambiguous=mapping[mapping.map(len).gt(1)]
+            if not ambiguous.empty:
+                raise RuntimeError('CFBD_TEAM_ALIAS_CROSSWALK_CONFLICT n='+str(len(ambiguous))+' labels='+str(list(ambiguous.index[:8])))
+            alias={k:next(iter(v)) for k,v in mapping.items()}
+            reverse={}
+            for k,v in alias.items():reverse.setdefault(v,set()).add(k)
+            # Ambiguous many-to-one identities can still represent alternate
+            # spelling, but do not use such a mapping for no-anchor games.
+            unique_alias={k:v for k,v in alias.items() if len(reverse[v])==1}
+        else: unique_alias={}
+        no_anchor=work['_anchors'].eq(0)
+        if no_anchor.any() and unique_alias:
+            t=work.loc[no_anchor,'__t'].map(unique_alias)
+            mapped_home=t.eq(work.loc[no_anchor,'__home'])
+            mapped_away=t.eq(work.loc[no_anchor,'__away'])
+            resolved=t.notna() & (mapped_home | mapped_away)
+            # Both sides need valid unique aliases, opposite home values, and
+            # existing feature flags (if present) must not contradict them.
+            inferred=pd.Series(np.where(mapped_home,1,np.where(mapped_away,0,-1)),index=t.index)
+            rows=work.loc[no_anchor].copy();rows['_alias_resolved']=resolved
+            rows['_alias_orient']=inferred
+            valid_pair=rows.groupby(group)['_alias_resolved'].transform('all') & rows.groupby(group)['_alias_orient'].transform('nunique').eq(2)
+            eligible=valid_pair & rows['_alias_resolved']
+            if has_flag:
+                flag_conflict=eligible & rows['_flag'].notna() & rows['_flag'].ne(rows['_alias_orient'])
+                if flag_conflict.any():
+                    raise RuntimeError('CFBD_CROSSWALK_HOME_FLAG_CONFLICT n='+str(int(flag_conflict.sum())))
+            chosen=rows.loc[eligible]
+            orient.loc[chosen['_i']]=chosen['_alias_orient'].to_numpy()
+            method.loc[chosen['_i']]='CROSS_GAME_CFBD_VERIFIED_ALIAS'
+    conflict=matched & orient.lt(0)
+    counts={k:int(v) for k,v in method[matched].value_counts().items()}
+    audited=z.loc[matched,['Season','Game_ID','Team','CFBD_Home','CFBD_Away']].copy()
+    audited['Identity_Method']=method.loc[audited.index]
+    by_year={str(int(yr)):{str(k):int(v) for k,v in g['Identity_Method'].value_counts().items()}
+        for yr,g in audited.groupby('Season')}
+    rescued_sample=audited[audited['Identity_Method'].isin(
+        ('ONE_SIDE_CFBD_ANCHORED_ALIAS','CROSS_GAME_CFBD_VERIFIED_ALIAS'))].head(12).to_dict('records')
+    audit={'source':'CFBD_API_GAMES_AND_CFBD_ARCHIVE_FEATURES_ONLY',
+           'by_season':by_year,'rescued_alias_examples':rescued_sample,
+           'direct_sides':int((method.eq('DIRECT_CFBD_TEAM_NAME') & matched).sum()),
+           'single_side_anchored_aliases':int((method.eq('ONE_SIDE_CFBD_ANCHORED_ALIAS') & matched).sum()),
+           'cross_game_verified_aliases':int((method.eq('CROSS_GAME_CFBD_VERIFIED_ALIAS') & matched).sum()),
+           'unresolved_sides':int(conflict.sum()),'unresolved_games':int(z.loc[conflict,['Season','Game_ID']].drop_duplicates().shape[0]),
+           'methods':counts}
+    # Log distribution before failing rather than losing the actual cause.
+    log_func('[NCAAF-V541-CFBD-ORIENTATION] '+json.dumps(audit,sort_keys=True))
+    if conflict.any():
+        sample_cols=['Season','Game_ID','Team','Opponent','CFBD_Home','CFBD_Away']
+        if has_flag:sample_cols+=['Is_Home']
+        sample=z.loc[conflict,sample_cols].head(12).to_dict('records')
+        log_func('[NCAAF-V541-CFBD-UNRESOLVED] '+json.dumps({'examples':sample},default=str))
+        raise RuntimeError('CFBD_ARCHIVE_SCORES_TEAM_ORIENTATION_UNRESOLVED n='+str(int(conflict.sum()))+' games='+str(audit['unresolved_games'])+' examples='+json.dumps(sample[:4],default=str))
+    return orient,method,audit
+
+
+def build_cfbd_canonical_features(features, scores, *, enforce_full_history=True, log_func=print):
     """Scores/identity always from CFBD; never borrow them from market records."""
     a=_prepare_archive_features(features)
     s=scores.copy();s['Season']=pd.to_numeric(s.Season,errors='coerce')
     s['Game_ID']=s.Game_ID.map(gid)
     if s.duplicated(['Season','Game_ID']).any():raise RuntimeError('CFBD_DUPLICATE_FINAL_GAMES')
     m=a.merge(s,on=['Season','Game_ID'],how='left',validate='many_to_one',indicator=True)
-    m['__home']=m.CFBD_Home.map(ident);m['__away']=m.CFBD_Away.map(ident)
-    orientation=np.select([m.__t.eq(m.__home),m.__t.eq(m.__away)],[1,0],default=-1)
-    wrong=(m._merge.eq('both')) & (orientation<0)
-    if wrong.any():raise RuntimeError('CFBD_ARCHIVE_SCORES_TEAM_ORIENTATION_CONFLICT n='+str(int(wrong.sum())))
-    valid=m._merge.eq('both') & (orientation>=0)
+    m['__home']=m.CFBD_Home.map(cfbd_school_key);m['__away']=m.CFBD_Away.map(cfbd_school_key)
+    orientation,identity_method,identity_audit=_resolve_cfbd_orientation(m,log_func=log_func)
+    valid=m._merge.eq('both') & orientation.ge(0)
     m['Is_Home']=np.where(valid,orientation,np.nan)
-    m['Team_Score']=np.where(orientation==1,m.CFBD_Home_Points,m.CFBD_Away_Points)
-    m['Opponent_Score']=np.where(orientation==1,m.CFBD_Away_Points,m.CFBD_Home_Points)
+    m['Team_Score']=np.where(orientation.eq(1),m.CFBD_Home_Points,m.CFBD_Away_Points)
+    m['Opponent_Score']=np.where(orientation.eq(1),m.CFBD_Away_Points,m.CFBD_Home_Points)
     m.loc[~valid,['Team_Score','Opponent_Score']]=np.nan
-    # Time zones can place the calendar date on either adjacent day; >1 day fails.
+    # CFBD chronological game date can differ by one UTC day after timezone normalization.
     date_gap=(m.loc[valid,'__date'].dt.normalize()-m.loc[valid,'Game_Date_CFBD'].dt.normalize()).abs().dt.days
     if date_gap.gt(1).any():raise RuntimeError('CFBD_ARCHIVE_GAME_DATE_DISAGREEMENT')
     m['Source_Game_ID']=m.Game_ID
@@ -143,9 +272,12 @@ def build_cfbd_canonical_features(features, scores, *, enforce_full_history=True
     m['Opponent_Norm']=m.Opponent.astype(str).str.lower().str.strip()
     m['Actual_Margin']=m.Team_Score-m.Opponent_Score
     m['Actual_Total']=m.Team_Score+m.Opponent_Score
+    m['CFBD_Team_Identity_Method']=identity_method
+    m['CFBD_API_Source_Row_SHA256']=m['Source_Row_SHA256']
     keep_base=['Season','Game_ID','Source_Game_ID','Game_Date','Team','Opponent','Team_Norm',
          'Opponent_Norm','Team_Score','Opponent_Score','Is_Home','Actual_Margin','Actual_Total',
-         'Week','Season_Type','CFBD_Conference','CFBD_Opp_Conference']
+         'Week','Season_Type','CFBD_Conference','CFBD_Opp_Conference',
+         'CFBD_Team_Identity_Method','CFBD_API_Source_Row_SHA256']
     keep_base=[c for c in keep_base if c in m]
     safe=safe_historical_cfbd_columns(features.columns)
     canonical=m[keep_base+safe].copy()
@@ -156,16 +288,16 @@ def build_cfbd_canonical_features(features, scores, *, enforce_full_history=True
        'score_match_rate':float(valid.mean()),'safe_pregame_feature_fields':len(safe),
        'excluded_cfbd_fields':len([c for c in features if str(c).startswith('CFBD_')])-len(safe),
        'scores_cfbd_only':True,'market_joined_to_football_fields':False,
+       'team_identity':identity_audit,
        'score_coverage_by_year':{str(int(y)):{'side_rows':len(g),'scored':int(g.CFBD_History_Eligible.sum())}
             for y,g in canonical.groupby('Season')}}
-    if enforce_full_history and not 0.8<=info['score_match_rate']<=1.0:
+    if enforce_full_history and not 0.95<=info['score_match_rate']<=1.0:
         raise RuntimeError('CFBD_HISTORICAL_SCORE_COVERAGE_INSUFFICIENT '+str(info['score_match_rate']))
-    # No silently restricting to 2022+: full-history core requires 2013 onward.
     if enforce_full_history:
         for y in range(FIRST_YEAR,LAST_HISTORICAL+1):
             d=info['score_coverage_by_year'].get(str(y),{})
             if (not d or d.get('side_rows',0)<500 or
-                    d.get('scored',0)<int(.8*d.get('side_rows',0))):
+                    d.get('scored',0)<int(.95*d.get('side_rows',0))):
                 raise RuntimeError(f'CFBD_HISTORICAL_SEASON_INCOMPLETE year={y} '+str(d))
     return canonical,info
 
@@ -233,6 +365,19 @@ def attach_market_only(cfbd, market):
     if len(j)!=len(cfbd):raise RuntimeError('MARKET_JOIN_CHANGED_CFBD_ROW_COUNT')
     j['Market_Open_Margin']=-pd.to_numeric(j.Consensus_Open_Spread,errors='coerce')
     j['Opening_Spread']=j['Consensus_Open_Spread']
+    # Vig-free fair H2H probability requires BOTH independently matched opening
+    # prices on the same CFBD physical game, never a made-up -110 / synthetic line.
+    opposing=(j[['Season','Game_ID','Team','Consensus_Open_Moneyline']]
+       .rename(columns={'Team':'Opponent','Consensus_Open_Moneyline':'Opp_Consensus_Open_Moneyline'}))
+    j=j.merge(opposing,on=['Season','Game_ID','Opponent'],how='left',validate='one_to_one')
+    def _implied(x):
+        z=pd.to_numeric(x,errors='coerce')
+        return np.where(z<=-100,-z/(-z+100),np.where(z>=100,100/(z+100),np.nan))
+    own=_implied(j.Consensus_Open_Moneyline)
+    opp=_implied(j.Opp_Consensus_Open_Moneyline)
+    denom=own+opp
+    j['Market_Open_H2H_Fair']=np.where(np.isfinite(denom)&(denom>0),own/denom,np.nan)
+    j['Market_Open_H2H_Fair_Source']='TWO_SIDED_CFBD_LINKED_MARKET_OPEN_MONEYLINES_NO_VINTAGE_CERT'
     j['ATS_Win']=np.where(j.Actual_Margin.notna() & j.Consensus_Open_Spread.notna(),
                            np.where(j.Actual_Margin+j.Consensus_Open_Spread>0,1.,
                                     np.where(j.Actual_Margin+j.Consensus_Open_Spread<0,0.,np.nan)),np.nan)
@@ -241,7 +386,8 @@ def attach_market_only(cfbd, market):
          'no_market_football_fact_overwrite':True,
          'exact_market_open_sides':exact,
          'market_open_sides':int(j.Consensus_Open_Spread.notna().sum()),
-         'side_orientation_rescued':int(j.Consensus_Open_Spread.notna().sum())-exact}
+         'side_orientation_rescued':int(j.Consensus_Open_Spread.notna().sum())-exact,
+         'verified_two_sided_open_moneyline_fair':int(j.Market_Open_H2H_Fair.notna().sum())}
     return j,aud
 
 
@@ -295,13 +441,21 @@ def derived_pregame_states(sides):
         earlier=[e for e in hist if e['date']<row['__dt']]
         prior=len(earlier);wins=sum(x['win']==1 for x in earlier)
         ats=[x['ats'] for x in earlier if np.isfinite(x['ats'])]
+        ats_wins=sum(x==1 for x in ats)
+        su_losses=0
+        for x in reversed(earlier):
+            if x['win']==0:su_losses+=1
+            else:break
         a_losses=0
         for x in reversed(ats):
             if x==0:a_losses+=1
             else:break
         for k,v in [('Game_Number_Prior',prior),('WinPct_Prior',wins/prior if prior else np.nan),
                     ('ATS_Loss_Streak_Prior',a_losses if ats else np.nan),
+                    ('ATS_WinPct_Prior',ats_wins/len(ats) if ats else np.nan),
+                    ('SU_Loss_Streak_Prior',su_losses if earlier else np.nan),
                     ('Prev_Points_For',earlier[-1]['for'] if earlier else np.nan),
+                    ('Prev_Points_Against',earlier[-1]['against'] if earlier else np.nan),
                     ('Prev_SU_Win',earlier[-1]['win'] if earlier else np.nan),
                     ('Prev_Is_Home',earlier[-1]['home'] if earlier else np.nan),
                     ('Prev_Is_ML_Dog',earlier[-1]['dog'] if earlier else np.nan),
@@ -311,7 +465,7 @@ def derived_pregame_states(sides):
         line=float(row['Consensus_Open_Spread']) if pd.notna(row.get('Consensus_Open_Spread')) else np.nan
         obs={'date':row['__dt'],'win':float(margin>0) if np.isfinite(margin) else np.nan,
              'ats':float(margin+line>0) if np.isfinite(margin) and np.isfinite(line) and margin+line!=0 else np.nan,
-             'for':row.get('Team_Score'), 'home':row.get('Is_Home'),
+             'for':row.get('Team_Score'), 'against':row.get('Opponent_Score'),'home':row.get('Is_Home'),
              'dog':float(line>0) if np.isfinite(line) else np.nan,
              'favorite':float(line<0) if np.isfinite(line) else np.nan}
         hist.append(obs)
@@ -324,9 +478,9 @@ def derived_pregame_states(sides):
     return d.drop(columns=['__dt','__tm','__g'])
 
 
-def build_cfbd_research_inputs(archive_features, raw_api_games, rich_market):
+def build_cfbd_research_inputs(archive_features, raw_api_games, rich_market, *, log_func=print):
     scores,api_audit=parse_cfbd_archive_rows(raw_api_games)
-    sides,score_audit=build_cfbd_canonical_features(archive_features,scores)
+    sides,score_audit=build_cfbd_canonical_features(archive_features,scores,log_func=log_func)
     joint,market_audit=attach_market_only(sides,rich_market)
     # Never let partial CFBD archive gaps be silently repaired by market scores.
     # The archive coverage audit above still documents the missing games.
@@ -342,20 +496,37 @@ def build_cfbd_research_inputs(archive_features, raw_api_games, rich_market):
     return home,joint,audit
 
 
-def load_from_bigquery(bq_client):
-    """No BigQuery mutations; retrieve the three strictly separated inputs."""
-    features=get_df(bq_client,f'SELECT * FROM `{CFBD_FEATURE_VIEW}` WHERE Season BETWEEN 2013 AND 2025')
-    api=get_df(bq_client,f'''SELECT Archive_Row_ID, Endpoint, Params_JSON, Season, Retrieved_At, Payload_JSON
+def load_from_bigquery(bq_client, *, log_func=print):
+    """Read-only, independently audited canonical CFBD and separate market queries."""
+    from time import perf_counter
+    queries=[
+      ('CFBD_FEATURES',CFBD_FEATURE_VIEW,
+       f'SELECT * FROM `{CFBD_FEATURE_VIEW}` WHERE Season BETWEEN 2013 AND 2025'),
+      ('CFBD_IMMUTABLE_GAME_RESULTS',CFBD_GAME_ARCHIVE,
+       f'''SELECT Archive_Row_ID, Endpoint, Params_JSON, Season, Retrieved_At, Payload_JSON
         FROM `{CFBD_GAME_ARCHIVE}` WHERE Season BETWEEN 2013 AND 2025
-        AND REGEXP_CONTAINS(LOWER(Endpoint),r'/games/?$')''')
-    # Market-only SQL projection: it cannot leak football outcomes, scores or
-    # postgame statistics because those fields are never queried.
-    mk=get_df(bq_client,f'''SELECT Source_Name, Season, Source_Game_ID, Source_Team_Name, Is_Home,
+        AND REGEXP_CONTAINS(LOWER(Endpoint),r'/games/?$')'''),
+      ('BOOKMAKER_PRICES_ONLY',MARKET_SIDE_TABLE,
+       f'''SELECT Source_Name, Season, Source_Game_ID, Source_Team_Name, Is_Home,
         Consensus_Open_Spread, Consensus_Open_Total, Consensus_Open_Moneyline,
         Consensus_Close_Spread, Consensus_Close_Total, Consensus_Close_Moneyline
         FROM `{MARKET_SIDE_TABLE}` WHERE Source_Name = 'CollegeFootballData'
-        AND Season BETWEEN 2013 AND 2025''')
-    home,sides,audit=build_cfbd_research_inputs(features,api,mk)
+        AND Season BETWEEN 2013 AND 2025'''),
+    ]
+    data=[]
+    for name,src,sql in queries:
+        log_func(f'[NCAAF-V54-SOURCE] source={name} table={src} status=START football_provenance={name!="BOOKMAKER_PRICES_ONLY"}')
+        t=perf_counter()
+        try: d=get_df(bq_client,sql)
+        except Exception as exc:
+            log_func(f'[NCAAF-V54-SOURCE] source={name} table={src} status=FAIL error={type(exc).__name__}:{exc}')
+            raise
+        log_func(f'[NCAAF-V54-SOURCE] source={name} table={src} status=PASS rows={len(d)} columns={len(d.columns)} seconds={round(perf_counter()-t,2)}')
+        data.append(d)
+    features,api,mk=data
+    log_func(f'[NCAAF-V54-SOURCE] stage=CFBD_HASH_FINAL_SCORE_AND_TEAM_JOIN status=START cfbd_api_rows={len(api)} cfbd_feature_sides={len(features)}')
+    home,sides,audit=build_cfbd_research_inputs(features,api,mk,log_func=log_func)
+    log_func(f'[NCAAF-V54-SOURCE] stage=CFBD_HASH_FINAL_SCORE_AND_TEAM_JOIN status=PASS games={len(home)} sides={len(sides)} historical_facts_from_market=FALSE market_open_side_quotes={audit["market"]["market_open_sides"]} source_vintage_certified=FALSE')
     return home,sides,audit
 
 

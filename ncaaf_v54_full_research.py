@@ -436,7 +436,7 @@ def run_full(*,storage_client,bucket_name=BUCKET,log_func=print,modules=None,bq_
                'run_ncaaf_core_challenger_v2','run_ncaaf_research_v2'],
             purpose='no historical football facts or retrofitted scores from legacy market/dashboard tables')
         import ncaaf_v54_cfbd_truth as truth
-        cfbd_home,cfbd_sides,cfbd_audit=audit.step('CFBD_CANONICAL_HISTORY_AND_SCORE_PROVENANCE',lambda:truth.load_from_bigquery(bq_client))
+        cfbd_home,cfbd_sides,cfbd_audit=audit.step('CFBD_CANONICAL_HISTORY_AND_SCORE_PROVENANCE',lambda:truth.load_from_bigquery(bq_client,log_func=log_func))
         audit.step('CFBD_SOURCE_FIREWALL_CORE',lambda:truth.verify_cfbd_frame(cfbd_home,require_unique_home=True))
         audit.emit('CFBD_HISTORICAL_COVERAGE','PASS',unique_home_games=len(cfbd_home),team_sides=len(cfbd_sides),
                    cfbd_seasons=cfbd_audit.get('source_match',{}).get('score_coverage_by_year'),
@@ -444,13 +444,23 @@ def run_full(*,storage_client,bucket_name=BUCKET,log_func=print,modules=None,bq_
                    football_source=truth.CFBD_GAME_ARCHIVE,
                    cfbd_feature_source=truth.CFBD_FEATURE_VIEW,
                    market_price_only=truth.MARKET_SIDE_TABLE)
+        audit.emit('CFBD_MINER_PREGAME_FIELD_COVERAGE','PASS',
+                   prior_cfbd_features=len(truth.safe_historical_cfbd_columns(cfbd_sides.columns)),
+                   available_history_state_fields=[c for c in ('Prev_Points_For','Prev_Points_Against',
+                     'ATS_WinPct_Prior','SU_Loss_Streak_Prior','ATS_Loss_Streak_Prior','Game_Number_Prior',
+                     'Opp_ATS_WinPct_Prior','Opp_Prev_Points_For','Opp_Prev_Points_Against') if c in cfbd_sides],
+                   unavailable_optional_context=[c for c in ('Rivalry_Flag','Revenge_Flag',
+                     'Away_Travel_Miles','Away_Time_Zones_Crossed','PT_Meta_Home_Margin') if c not in cfbd_sides],
+                   postgame_feature_columns_admitted=0,market_fields_are_price_only=True)
         outputs['cfbd_source_audit.json']=(json.dumps(cfbd_audit,indent=2,default=str,allow_nan=False),'application/json')
         dash=modules['sharp_line_dashboard']; core=modules['ncaaf_core_challenger_v2']
         rv2=modules['ncaaf_research_v2'];ut=modules['utils']
         old_cache=getattr(dash,'_V1357_SPREAD_RESEARCH_CACHE',None)
+        old_cfbd_guard=getattr(dash,'_V54_CFBD_ONLY_ACTIVE',None)
         old_cfbd_source=getattr(core,'NCAAF_CFBD_MINER_FEATURE_TABLE',None)
         try:
             # Explicitly give V4/V4.2 the canonical CFBD-only dataframe.
+            dash._V54_CFBD_ONLY_ACTIVE=True
             dash._V1357_SPREAD_RESEARCH_CACHE={
                'games':cfbd_home.copy(),'miner_games':cfbd_home.copy(),
                'historical_source':'CFBD_AUTHORITATIVE',
@@ -498,17 +508,23 @@ def run_full(*,storage_client,bucket_name=BUCKET,log_func=print,modules=None,bq_
                     audit.emit('CFBD_ONLY_MINER_MARKET','PASS',market=market,status_code=status,
                         mechanisms=len(result.get('mechanism_families') or []),
                         confirmed=sum(bool(m.get('confirmation_pass')) for m in result.get('mechanism_families',[])))
+                    if market=='spreads' and status=='INSUFFICIENT_HISTORY':
+                        raise RuntimeError('V54_CFBD_SPREAD_MINER_INSUFFICIENT_PRICED_HISTORY__NO_OLD_SOURCE_FALLBACK')
                     miners[market]=result
                 return miners
             audit.step('FULL_SYSTEM_MINER_ALL_MARKETS_CFBD_ONLY',_run_all_miners)
             results['cfbd_only_miner']={k:{'status':v.get('status'),
                 'mechanisms':len(v.get('mechanism_families') or []),
                 'confirmed':sum(bool(m.get('confirmation_pass')) for m in v.get('mechanism_families',[])),
+                'atoms':v.get('atoms'),'atom_family_counts':v.get('atom_family_counts',{}),
                 'football_source':'CFBD'} for k,v in miners.items()}
         finally:
             if old_cache is None:
                 if hasattr(dash,'_V1357_SPREAD_RESEARCH_CACHE'):delattr(dash,'_V1357_SPREAD_RESEARCH_CACHE')
             else:dash._V1357_SPREAD_RESEARCH_CACHE=old_cache
+            if old_cfbd_guard is None:
+                if hasattr(dash,'_V54_CFBD_ONLY_ACTIVE'):delattr(dash,'_V54_CFBD_ONLY_ACTIVE')
+            else:dash._V54_CFBD_ONLY_ACTIVE=old_cfbd_guard
             if old_cfbd_source is not None:core.NCAAF_CFBD_MINER_FEATURE_TABLE=old_cfbd_source
             elif hasattr(core,'NCAAF_CFBD_MINER_FEATURE_TABLE'):delattr(core,'NCAAF_CFBD_MINER_FEATURE_TABLE')
             if isinstance(getattr(core,'_CFBD_CORE_CONTEXT_CACHE',None),dict):core._CFBD_CORE_CONTEXT_CACHE.clear()

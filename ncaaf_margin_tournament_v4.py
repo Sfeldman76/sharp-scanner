@@ -416,7 +416,7 @@ def _run(frame,archive_diag,log_func):
       'current_2026_outcomes_queried':False,'automatic_promotion':False,
       'bet_authority_vote':False,'production_mutated':False,'production_authority':0,
       'limits':['time-vintage of archived pregame columns still requires source-level certification',
-                'same dashboard historical-cache preparation as V3 is currently used',
+                'legacy cache may be used outside V5.4; V5.4 explicitly passes CFBD canonical historical inputs',
                 'no true drive-level generative model until raw drive provenance audited',
                 '2024-2025 are not pristine holdouts']}
     log_func(f'[NCAAF-V4-DONE] selected={selected} 2026=SEALED production=UNCHANGED status={report["status"]}')
@@ -441,6 +441,8 @@ def run_cloud_research(*,dashboard_module,storage_client,bucket_name='sharp-mode
         enriched=history
         log_func('[NCAAF-V54-CFBD-CORE] direct=TRUE legacy_attach=DISABLED football_source=CFBD_ONLY')
     else:
+        if getattr(dashboard_module,'_V54_CFBD_ONLY_ACTIVE',False):
+            raise RuntimeError('V54_CFBD_SOURCE_MARKER_MISSING__LEGACY_FOOTBALL_FALLBACK_FORBIDDEN')
         enriched,diag=core._attach_cfbd_core_context(dashboard_module,history,log_func=log_func)
     report,ledger=run_on_frame(enriched,diag,log_func=log_func)
     if report['status']!='RESEARCH_COMPLETE_NO_PROMOTION':raise RuntimeError('V4_DISCOVERY_INCOMPLETE')
