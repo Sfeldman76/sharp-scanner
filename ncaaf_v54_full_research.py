@@ -299,11 +299,68 @@ def export_legacy_miner_mechanisms(edges, miner_games, miner_report, rv2, dashbo
     return result[cols],diag
 
 
+def _canonical_cfbd_research_join_keys(frame, *, source):
+    """Copy and canonicalize CFBD's season/game keys for cross-pipeline joins.
+
+    Cloud Run's real CFBD rule replay yields string game identifiers; the
+    V5.1 CSV reader can infer int64 for the very same verified IDs. Never
+    coerce IDs via float or alter identity to force a join. Any malformed
+    key fails closed, leaving the immutable source and production untouched.
+    """
+    if not isinstance(frame, pd.DataFrame):
+        raise RuntimeError('V548_EXPECTED_DATAFRAME source='+str(source))
+    missing={'Season','Game_ID'}-set(frame.columns)
+    if missing:
+        raise RuntimeError('V548_REQUIRED_CFBD_JOIN_KEYS_MISSING source='+str(source)+' keys='+str(sorted(missing)))
+    out=frame.copy()
+    if out.empty:
+        out['Season']=pd.Series(index=out.index,dtype='int64')
+        out['Game_ID']=pd.Series(index=out.index,dtype='str')
+        return out
+    # Numeric season values must be an integer year, not an approximate
+    # conversion. A nullable float is acceptable only when finite/integral.
+    seasons=[]
+    for v in out['Season'].tolist():
+        if pd.isna(v) or isinstance(v,(bool,np.bool_)):
+            raise RuntimeError('V548_INVALID_CFBD_SEASON source='+str(source))
+        if isinstance(v,(int,np.integer)):
+            yr=int(v)
+        elif isinstance(v,(float,np.floating)):
+            if not np.isfinite(v) or not float(v).is_integer():
+                raise RuntimeError('V548_INVALID_CFBD_SEASON source='+str(source))
+            yr=int(v)
+        elif isinstance(v,str) and re.fullmatch(r'[0-9]{4}',v):
+            yr=int(v)
+        else:
+            raise RuntimeError('V548_INVALID_CFBD_SEASON source='+str(source))
+        if not (1900<=yr<=2100):
+            raise RuntimeError('V548_INVALID_CFBD_SEASON source='+str(source))
+        seasons.append(yr)
+    ids=[]
+    for v in out['Game_ID'].tolist():
+        if pd.isna(v) or isinstance(v,(bool,np.bool_)):
+            raise RuntimeError('V548_INVALID_CFBD_GAME_ID source='+str(source))
+        if isinstance(v,(int,np.integer)):
+            if int(v)<0:raise RuntimeError('V548_INVALID_CFBD_GAME_ID source='+str(source))
+            game_id=str(int(v))
+        elif isinstance(v,str) and re.fullmatch(r'[0-9]+',v):
+            game_id=v
+        else:
+            # In particular, floats cannot certify identifier precision.
+            raise RuntimeError('V548_INVALID_CFBD_GAME_ID source='+str(source))
+        ids.append(game_id)
+    out['Season']=pd.Series(seasons,index=out.index,dtype='int64')
+    out['Game_ID']=pd.Series(ids,index=out.index,dtype='str')
+    if out[['Season','Game_ID']].isna().any().any():
+        raise RuntimeError('V548_CANONICAL_CFBD_JOIN_HAS_NULL source='+str(source))
+    return out
+
+
 def exploratory_attribution(edges,legacy):
     """Matched conditional comparisons, never historically confirmed bets."""
-    base=edges.copy()
+    base=_canonical_cfbd_research_join_keys(edges,source='V51_CORE_EDGE_LEDGER')
     assert not base.duplicated(['Season','Game_ID','Model']).any(), 'V53_DUPLICATE_MODEL_GAME'
-    work=legacy.copy()
+    work=_canonical_cfbd_research_join_keys(legacy,source='CFBD_RECONSTRUCTED_SYSTEM_OCCURRENCES')
     if len(work):
         work=work.merge(base[['Season','Game_ID','Model','Side','Result','Abs_Edge','Selection_Type','Period']],
                         on=['Season','Game_ID'],validate='many_to_many',suffixes=('_System','_Core'))
@@ -333,9 +390,11 @@ def exploratory_attribution(edges,legacy):
 
 def policy_shadow(edges,legacy,verified_count=0,source_vintage_certified=False):
     """V4 point-edge candidates plus descriptive confluence; never auto BET/STRONG."""
-    out=edges[['Season','Game_ID','Game_Date','Team','Opponent','Model','Side','Result','Abs_Edge','Edge_Bin','Selection_Type','Period']].copy()
-    if not legacy.empty:
-        z=legacy.groupby(['Season','Game_ID','Family']).Side.agg(
+    base=_canonical_cfbd_research_join_keys(edges,source='V51_CORE_EDGE_LEDGER')
+    expert=_canonical_cfbd_research_join_keys(legacy,source='CFBD_RECONSTRUCTED_SYSTEM_OCCURRENCES')
+    out=base[['Season','Game_ID','Game_Date','Team','Opponent','Model','Side','Result','Abs_Edge','Edge_Bin','Selection_Type','Period']].copy()
+    if not expert.empty:
+        z=expert.groupby(['Season','Game_ID','Family']).Side.agg(
             lambda a: a.iloc[0] if a.nunique()==1 else 'CONFLICT').reset_index()
         o=out[['Season','Game_ID','Model','Side']].merge(z,on=['Season','Game_ID'],suffixes=('_Core','_Signal'),how='left')
         o['Relation']=np.where(o.Side_Signal.isna(),'MISSING',np.where(o.Side_Signal=='CONFLICT','CONFLICT',
@@ -592,9 +651,24 @@ def run_full(*,storage_client,bucket_name=BUCKET,log_func=print,modules=None,bq_
         join_audit={**expert_audit,'cfbd_miner_occurrences':len(miner_occ),
                     'total_cfbd_reconstructed_occurrences':len(occ),'status':'CFBD_ONLY_RETROSPECTIVE'}
         audit.emit('CFBD_LEGACY_BRAIN_MATCH','PASS',**{k:v for k,v in join_audit.items() if k!='status'})
-        sys_score,fam_score=audit.step('FULL_CFBD_SYSTEM_INCREMENTAL_ATTRIBUTION',lambda:exploratory_attribution(edges,occ))
+        canon_edges=audit.step('V548_CANONICAL_CFBD_V51_GAME_IDS',lambda:_canonical_cfbd_research_join_keys(
+            edges,source='V51_CORE_EDGE_LEDGER'))
+        canon_occ=audit.step('V548_CANONICAL_CFBD_BRAIN_GAME_IDS',lambda:_canonical_cfbd_research_join_keys(
+            occ,source='CFBD_RECONSTRUCTED_SYSTEM_OCCURRENCES'))
+        audit.emit('V548_CFBD_GAME_ID_JOIN_PARITY','PASS',
+                   core_game_id_dtype=str(canon_edges.Game_ID.dtype),
+                   expert_game_id_dtype=str(canon_occ.Game_ID.dtype),
+                   core_season_dtype=str(canon_edges.Season.dtype),
+                   expert_season_dtype=str(canon_occ.Season.dtype),
+                   core_model_game_rows=len(canon_edges),
+                   brain_system_occurrences=len(canon_occ),
+                   common_physical_games=len(set(zip(canon_edges.Season,canon_edges.Game_ID)) &
+                                             set(zip(canon_occ.Season,canon_occ.Game_ID))),
+                   source_keys_unchanged=True,bet_authority=0)
+        sys_score,fam_score=audit.step('FULL_CFBD_SYSTEM_INCREMENTAL_ATTRIBUTION',
+                                      lambda:exploratory_attribution(canon_edges,canon_occ))
         shadow,shadow_policy=audit.step('V5_CFBD_EDGE_SHADOW_AUTHORITY',lambda:policy_shadow(
-            edges,occ,verified_count=0,source_vintage_certified=False))
+            canon_edges,canon_occ,verified_count=0,source_vintage_certified=False))
         v52=audit.step('V52_GENUINE_ARCHIVED_SIGNALS_SEPARATE_PROVENANCE',lambda:modules['ncaaf_v52_brain_research'].cloud_run(
             storage_client=storage_client,bucket_name=bucket_name,log_func=log_func),fatal=False)
         results['v52_archive_bridge']={'status':v52.get('status') if v52 else 'UNAVAILABLE',
