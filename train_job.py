@@ -279,6 +279,17 @@ def main():
         pw.emit("done", "NCAAF V5 full research finished; see detailed audited phases and candidate policy", pct=1.0)
         return
 
+    # NCAAF V5.4: CFBD authoritative historical CORE and system mining.
+    # Original weekly Production V1 and legacy research remain untouched.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v54_full_research":
+        import ncaaf_v54_full_research as _v54
+        pw.emit("research", "V5 full research with CFBD-only historical football facts, separate rich market and original expert rules", pct=0.05)
+        _result=_v54.run_full(storage_client=gcs,bucket_name=bucket,log_func=log_func)
+        if _result.get("status")!="COMPLETE_FULL_RESEARCH__SHADOW_AUTHORITY__VINTAGE_HOLD" or _result.get("bet_authority")!=0:
+            raise RuntimeError("[NCAAF-V54] incomplete or unsafe authority contract: "+str(_result.get("status")))
+        pw.emit("done", "NCAAF V5.4 CFBD-authoritative research finished; inspect source and full-stage audits", pct=1.0)
+        return
+
     # NCAAF V5.2: source discovery and independently verified brain attribution.
     # No V4 refit, production changes, inferred odds or unverified historical votes.
     if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v52_brain_attribution":

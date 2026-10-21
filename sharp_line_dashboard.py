@@ -51592,18 +51592,18 @@ if not HEADLESS:
         # artifacts remain preserved for reproducibility but are hidden here.
         _train_market_options = [
             "ncaaf_production_weekly",
-            "ncaaf_v53_full_research",
+            "ncaaf_v54_full_research",
             "ncaaf_research_heavy",
         ]
         _train_market_labels = {
             "ncaaf_production_weekly": "NCAAF — Weekly Update (existing frozen Production V1)",
-            "ncaaf_v53_full_research": "NCAAF V5 — FULL Research + All Legacy Brains (audited)",
+            "ncaaf_v54_full_research": "NCAAF V5 — Full Research (CFBD History + Brains)",
             "ncaaf_research_heavy": "NCAAF Legacy — Heavy Challenger Search",
         }
         # Streamlit may remember a retired option; sanitize before selectbox.
         _ncaaf_workflow_key = f"train_market_choice_{sport}"
         if st.session_state.get(_ncaaf_workflow_key) not in (None, *_train_market_options):
-            st.session_state[_ncaaf_workflow_key] = "ncaaf_v53_full_research"
+            st.session_state[_ncaaf_workflow_key] = "ncaaf_v54_full_research"
         _workflow_title = "NCAAF model maintenance"
     elif str(sport).upper().strip() == "NFL":
         # Operator surface only: weekly production + full protected research.
@@ -51629,13 +51629,13 @@ if not HEADLESS:
         st.sidebar.caption(
             "WHEN: after meaningful research/data changes and periodically during the season. Runs the protected NCAAF STAT/System Miner V4 research plus the expert/specialist Spread CORE search in one job: sequential team power, strength of schedule, conference strength, rest/home/maturity context, structured matchup statistics, recent-vs-season trends, nonlinear residuals and regularized program/conference effects. Discovery/confirmation stay historical, 2026 remains sealed prospective evidence, and no challenger can mutate Production V1 or Bet Authority automatically."
         )
-    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v53_full_research":
+    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v54_full_research":
         st.sidebar.caption(
-            "FULL V5 RESEARCH (heavy): refits football-only V4/V4.2 research; reruns existing "
-            "Big Al, Pathi, Prediction Tracker, System Miner, State, CORE specialist and "
-            "point-edge evaluation. The Cloud Run log audits exact sources, joins, coverage, "
-            "failures and authority holds. Results are research-only until prospective "
-            "V4 live inputs and pregame-vintage evidence are verified; no automatic bet promotion."
+            "FULL V5 RESEARCH (CFBD historical source of truth): re-fits V4/V4.2 on verified "
+            "CFBD games and football features, mines CFBD-derived historical state, reuses "
+            "Big Al/Pathi rule definitions, evaluates separate Prediction Tracker feeds and "
+            "rich market prices. Detailed logs expose coverage and quarantined legacy sources. "
+            "Missing CFBD history stops the run; there is no automatic bet promotion."
         )
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
         st.sidebar.caption(
@@ -51779,7 +51779,7 @@ if not HEADLESS:
         _train_button_label = "Run NCAAF Weekly Update (frozen V1)"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_research_heavy":
         _train_button_label = "Run NCAAF Heavy Research"
-    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v53_full_research":
+    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v54_full_research":
         _train_button_label = "Run NCAAF V5 FULL Research + Audited Brains"
     elif str(market_choice).lower().strip() == "edge_research":
         _train_button_label = f"🧪 Run {sport} Edge Research"
@@ -51850,7 +51850,7 @@ if not HEADLESS:
                 "MODEL_BUCKET": MODEL_BUCKET,
                 "HEADLESS": "1",
             }
-            if str(sport).upper().strip() == "NCAAF" and market_choice in {"ncaaf_full_history_v3", "ncaaf_margin_tournament_v4", "ncaaf_conditional_features_v42", "ncaaf_v53_full_research"}:
+            if str(sport).upper().strip() == "NCAAF" and market_choice in {"ncaaf_full_history_v3", "ncaaf_margin_tournament_v4", "ncaaf_conditional_features_v42", "ncaaf_v53_full_research", "ncaaf_v54_full_research"}:
                 # Scoped to this execution override only. Never enable the
                 # archive-research feature flag for weekly or heavy workflows.
                 env["NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED"] = "1"

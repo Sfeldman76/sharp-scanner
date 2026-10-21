@@ -335,7 +335,15 @@ def run_cloud_research(*,dashboard_module,storage_client,bucket_name='sharp-mode
     games=cache.get('games')
     if games is None or games.empty:raise RuntimeError('V42_HISTORICAL_GAME_CACHE_MISSING')
     history=games.loc[v4.nums(games,'Season')<=2025].copy().reset_index(drop=True)
-    enriched,diag=core._attach_cfbd_core_context(dashboard_module,history,log_func=log_func)
+    if 'Historical_Football_Source' in history:
+        import ncaaf_v54_cfbd_truth as truth
+        truth.verify_cfbd_frame(history, require_unique_home=True)
+        diag={'table':SOURCE,'status':'CFBD_AUTHORITATIVE_DIRECT','cfbd_source':truth.CFBD_FEATURE_VIEW,
+              'legacy_bridge_invoked':False,'source_vintage_certified':False}
+        enriched=history
+        log_func('[NCAAF-V54-CFBD-V42] direct=TRUE legacy_attach=DISABLED football_source=CFBD_ONLY')
+    else:
+        enriched,diag=core._attach_cfbd_core_context(dashboard_module,history,log_func=log_func)
     bucket=storage_client.bucket(bucket_name)
     ref_blob=bucket.blob('research/ncaaf/margin_tournament_v4/current_report.json')
     try:reference=json.loads(ref_blob.download_as_text())

@@ -159,6 +159,7 @@ def test_full_job_mocked_one_shot_with_audited_outputs(monkeypatch):
       'ncaaf_v52_brain_research':wrap(cloud_run=lambda **kw:{'status':'SOURCE_DISCOVERY_REQUIRED__NO_CONFIGURED_BRAIN_SOURCES',
             'verified_system_game_records':0}),
     }
+    monkeypatch.setenv('NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED','1')
     messages=[]
     report=mod.run_full(storage_client=st,bq_client=object(),modules=modules,log_func=messages.append)
     assert report['status']=='COMPLETE_FULL_RESEARCH__SHADOW_AUTHORITY__VINTAGE_HOLD'
@@ -182,6 +183,7 @@ def test_full_job_failure_persists_audit_and_raises(monkeypatch):
     modules['sharp_line_dashboard']=dash
     modules['utils']=SimpleNamespace(V133_DEPLOY_BUILD_ID='same')
     modules['ncaaf_margin_tournament_v4']=SimpleNamespace(run_cloud_research=lambda **kw: (_ for _ in ()).throw(RuntimeError('EXACT_V4_FAILURE')))
+    monkeypatch.setenv('NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED','1')
     with pytest.raises(RuntimeError,match='V53_FULL_RESEARCH_FAILED'):
         mod.run_full(storage_client=st,bq_client=object(),modules=modules,log_func=lambda s:None)
     latest=__import__('json').loads(st.data['research/ncaaf/v53_full_research/latest_report.json'])
@@ -217,8 +219,8 @@ def test_dashboard_restores_weekly_and_full_v5_and_train_routes():
     w=Path(__file__).parent
     ui=(w/'sharp_line_dashboard.py').read_text()
     job=(w/'train_job.py').read_text()
-    assert '"ncaaf_production_weekly",\n            "ncaaf_v53_full_research"' in ui
-    assert '"ncaaf_v53_full_research": "NCAAF V5 — FULL Research' in ui
+    assert '"ncaaf_production_weekly",\n            "ncaaf_v54_full_research"' in ui
+    assert '"ncaaf_v54_full_research": "NCAAF V5 — Full Research' in ui
     assert 'market).lower().strip() == "ncaaf_v53_full_research"' in job
     assert 'if _ncaaf_weekly_run:' in job
     assert '"ncaaf_v52_brain_attribution",\n            "ncaaf_research_heavy"' not in ui
@@ -231,3 +233,21 @@ def test_full_job_never_claims_live_v5_production():
     assert pol['decision_contract'].startswith('MODEL_POINT_EDGE')
     assert (shadow.V5_Bet_Authority==0).all()
     assert 'P_Cover_Empirical' not in shadow.columns
+
+
+def test_v53_dashboard_full_research_sets_scoped_archive_flag():
+    ui=(Path(__file__).parent/'sharp_line_dashboard.py').read_text()
+    assert '"ncaaf_v53_full_research", "ncaaf_v54_full_research"}' in ui
+    assert 'env["NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED"] = "1"' in ui
+
+def test_v53_opt_in_preflight_fails_before_any_expensive_history(monkeypatch):
+    import ncaaf_v53_full_research as mod
+    monkeypatch.delenv('NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED',raising=False)
+    st=_FakeStorage();calls=[]
+    with pytest.raises(RuntimeError,match='V53_FULL_RESEARCH_FAILED__SEE_AUDIT_REPORT'):
+        mod.run_full(storage_client=st, modules={}, bq_client=object(), log_func=calls.append)
+    r=__import__('json').loads(st.data['research/ncaaf/v53_full_research/latest_report.json'])
+    assert r['stages'][0]['stage']=='V4_ARCHIVE_RESEARCH_OPT_IN_PREFLIGHT'
+    assert r['stages'][1]['status']=='FAIL'
+    assert 'V53_ARCHIVE_OPT_IN_MISSING' in r['stages'][1]['error']
+    assert 'BUILD_STAT_CACHE' not in str(r['stages'])

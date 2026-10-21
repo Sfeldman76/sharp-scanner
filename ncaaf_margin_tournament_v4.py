@@ -431,7 +431,17 @@ def run_cloud_research(*,dashboard_module,storage_client,bucket_name='sharp-mode
     if games is None or games.empty:raise RuntimeError('V4_HISTORICAL_GAME_CACHE_MISSING')
     # Deliberately remove 2026 BEFORE retrieving supplementary archive data.
     history=games.loc[nums(games,'Season')<=2025].copy().reset_index(drop=True)
-    enriched,diag=core._attach_cfbd_core_context(dashboard_module,history,log_func=log_func)
+    if 'Historical_Football_Source' in history:
+        # V5.4 source firewall: direct canonical CFBD source, without a second
+        # dashboard/raw/legacy-game join that could overwrite historical facts.
+        import ncaaf_v54_cfbd_truth as truth
+        truth.verify_cfbd_frame(history, require_unique_home=True)
+        diag={'table':SOURCE,'status':'CFBD_AUTHORITATIVE_DIRECT','cfbd_source':truth.CFBD_FEATURE_VIEW,
+              'legacy_bridge_invoked':False,'source_vintage_certified':False}
+        enriched=history
+        log_func('[NCAAF-V54-CFBD-CORE] direct=TRUE legacy_attach=DISABLED football_source=CFBD_ONLY')
+    else:
+        enriched,diag=core._attach_cfbd_core_context(dashboard_module,history,log_func=log_func)
     report,ledger=run_on_frame(enriched,diag,log_func=log_func)
     if report['status']!='RESEARCH_COMPLETE_NO_PROMOTION':raise RuntimeError('V4_DISCOVERY_INCOMPLETE')
     base='research/ncaaf/margin_tournament_v4'
