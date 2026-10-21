@@ -484,18 +484,22 @@ def run_full(*,storage_client,bucket_name=BUCKET,log_func=print,modules=None,bq_
                             'football_source':'CFBD','selected_v4_research_winner':result_v42.get('frozen_champion'),
                             'v4_ledger_exact_game_parity':result_v42.get('v4_ledger_exact_game_parity')}
             # No old expert historical results or future labels; only CFBD reconstructed inputs.
-            d=cfbd_sides.copy()
-            d['Sport']='NCAAF';d['Market']='spreads'
-            d['Week_Number']=pd.to_numeric(d.get('Week',pd.Series(np.nan,index=d.index)),errors='coerce')
-            d['Team_Game_Number']=pd.to_numeric(d['Game_Number_Prior'],errors='coerce')+1
-            d['Spread_Value']=d.get('Consensus_Open_Spread',pd.Series(np.nan,index=d.index))
-            d['Value']=d['Spread_Value']
-            st=d.get('Season_Type',pd.Series('regular',index=d.index)).astype(str).str.lower()
-            d['Is_Regular_Season']=st.isin(('regular','regular season')).astype(int)
-            d['Is_Conference_Game']=np.where(
-                d.get('CFBD_Conference',pd.Series('',index=d.index)).astype(str).eq(
-                d.get('CFBD_Opp_Conference',pd.Series('',index=d.index)).astype(str)),1,0)
-            flagged=audit.step('CFBD_ONLY_PATHI_BIGAL_RULE_REPLAY',lambda:ut.add_pathi_bigal_rule_flags(d))
+            d=audit.step('CFBD_ONLY_EXPERT_GAME_KEY_ADAPTER',
+                         lambda:truth.prepare_cfbd_expert_rule_frame(cfbd_sides))
+            audit.emit('CFBD_EXPERT_ADAPTER_COVERAGE','PASS',
+                       cfbd_game_keys=d.Game_Key.nunique(),team_sides=len(d),
+                       game_key_source='CFBD_SEASON_PLUS_CFBD_GAME_ID',
+                       game_start_source='CFBD_GAME_DATE',
+                       source_vintage_certified=False,bookmaker_team_identity_used=False)
+            flagged=audit.step('CFBD_ONLY_PATHI_BIGAL_RULE_REPLAY',
+                               lambda:truth.replay_cfbd_expert_rules_without_leaking_current_results(d,ut))
+            audit.emit('CFBD_EXPERT_RULE_VINTAGE_GUARD','PASS',
+                       current_game_labels_suppressed_during_rule_replay=True,
+                       prior_system_reliability_recomputed=False,
+                       historical_cfbd_outcome_labels_restored_for_retrospective_grade=True)
+            flagged,pathi_quote_audit=audit.step('CFBD_ONLY_PATHI_MARKET_KEY_CONTEXT',
+                         lambda:truth.add_cfbd_market_only_pathi_context(flagged,ut))
+            audit.emit('CFBD_PATHI_MARKET_KEY_COVERAGE','PASS',**pathi_quote_audit)
             expert_occ,expert_audit=audit.step('CFBD_ONLY_EXPERT_DIRECTIONAL_OCCURRENCES',lambda:truth.generate_cfbd_expert_occurrences(cfbd_sides,flagged,ut))
             audit.emit('CFBD_EXPERT_SYSTEM_COUNTS','PASS',**expert_audit)
             # Miner must consume the SAME CFBD-only historical frame, not

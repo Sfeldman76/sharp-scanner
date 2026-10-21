@@ -15,7 +15,7 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
-VERSION = 'NCAAF_V544_NULLABLE_MARKET_BOUNDARY_20261021'
+VERSION = 'NCAAF_V546_CFBD_RULE_GAME_KEY_ADAPTER_20261021'
 CFBD_FEATURE_VIEW = 'sharplogger.sharp_data.ncaaf_cfbd_archive_research_v1'
 CFBD_GAME_ARCHIVE = 'sharplogger.sharp_data.ncaaf_cfbd_api_archive'
 MARKET_SIDE_TABLE = 'sharplogger.sharp_data.ncaaf_historical_game_side_raw'
@@ -491,6 +491,8 @@ def derived_pregame_states(sides):
                     ('Prev_Points_For',earlier[-1]['for'] if earlier else np.nan),
                     ('Prev_Points_Against',earlier[-1]['against'] if earlier else np.nan),
                     ('Prev_SU_Win',earlier[-1]['win'] if earlier else np.nan),
+                    ('Prev_SU_Loss',float(earlier[-1]['win']==0) if earlier and np.isfinite(earlier[-1]['win']) else np.nan),
+                    ('Prev_Spread_Value',earlier[-1]['line'] if earlier else np.nan),
                     ('Prev_Is_Home',earlier[-1]['home'] if earlier else np.nan),
                     ('Prev_Is_ML_Dog',earlier[-1]['dog'] if earlier else np.nan),
                     ('Prev_Is_ML_Favorite',earlier[-1]['favorite'] if earlier else np.nan)]:
@@ -499,7 +501,7 @@ def derived_pregame_states(sides):
         line=float(row['Consensus_Open_Spread']) if pd.notna(row.get('Consensus_Open_Spread')) else np.nan
         obs={'date':row['__dt'],'win':float(margin>0) if np.isfinite(margin) else np.nan,
              'ats':float(margin+line>0) if np.isfinite(margin) and np.isfinite(line) and margin+line!=0 else np.nan,
-             'for':row.get('Team_Score'), 'against':row.get('Opponent_Score'),'home':row.get('Is_Home'),
+             'line':line, 'for':row.get('Team_Score'), 'against':row.get('Opponent_Score'),'home':row.get('Is_Home'),
              'dog':float(line>0) if np.isfinite(line) else np.nan,
              'favorite':float(line<0) if np.isfinite(line) else np.nan}
         hist.append(obs)
@@ -571,6 +573,153 @@ def load_from_bigquery(bq_client, *, log_func=print):
     home,sides,audit=build_cfbd_research_inputs(features,api,mk,log_func=log_func)
     log_func(f'[NCAAF-V54-SOURCE] stage=CFBD_HASH_FINAL_SCORE_AND_TEAM_JOIN status=PASS games={len(home)} sides={len(sides)} historical_facts_from_market=FALSE market_open_side_quotes={audit["market"]["market_open_sides"]} source_vintage_certified=FALSE')
     return home,sides,audit
+
+
+def prepare_cfbd_expert_rule_frame(sides):
+    """Adapt verified CFBD team-sides to the existing utils rule-engine schema.
+
+    The rule-engine Game_Key is a *group key*, not a bookmaker/UI identifier.
+    It is deterministically constructed from the immutable CFBD season and
+    physical game ID, with no team alias, market score, or postgame input.
+    Preserve the original CFBD Game_ID for all downstream archival joins.
+    """
+    required={'Season','Game_ID','Team','Opponent','Game_Date','Is_Home',
+              'Historical_Football_Source'}
+    if not required.issubset(sides.columns):
+        raise RuntimeError('CFBD_EXPERT_ADAPTER_MISSING_SOURCE_FIELDS '+str(sorted(required-set(sides.columns))))
+    d=sides.copy()
+    if d.empty:raise RuntimeError('CFBD_EXPERT_ADAPTER_EMPTY_HISTORY')
+    if not d['Historical_Football_Source'].eq('CFBD_API_ARCHIVE_GAMES_PLUS_CFBD_RESEARCH_FEATURES').all():
+        raise RuntimeError('CFBD_EXPERT_ADAPTER_NON_CFBD_FOOTBALL_SOURCE')
+    season=pd.to_numeric(d['Season'],errors='coerce')
+    ids=d['Game_ID'].map(gid)
+    if season.isna().any() or (~season.between(FIRST_YEAR,LAST_HISTORICAL)).any() or ids.eq('').any():
+        raise RuntimeError('CFBD_EXPERT_ADAPTER_INVALID_GAME_KEYS')
+    if ((season % 1)!=0).any():raise RuntimeError('CFBD_EXPERT_ADAPTER_NONINTEGER_SEASON')
+    d['Game_Key']=('ncaaf:cfbd:'+season.astype(int).astype(str)+':'+ids).astype(str)
+    if d['Game_Key'].isna().any() or d.duplicated(['Game_Key','Team']).any():
+        raise RuntimeError('CFBD_EXPERT_ADAPTER_DUPLICATE_SIDE')
+    # Do not infer opponents from a market provider. CFBD archive has exactly
+    # two reciprocal teams, one home and one away, for every eligible game.
+    for key,g in d.groupby('Game_Key',sort=False):
+        if (len(g)!=2 or g['Team'].isna().any() or g['Opponent'].isna().any()
+            or set(g['Team'].astype(str))!=set(g['Opponent'].astype(str))
+            or g['Team'].astype(str).nunique()!=2
+            or set(pd.to_numeric(g['Is_Home'],errors='coerce'))!={0.,1.}):
+            raise RuntimeError('CFBD_EXPERT_ADAPTER_NONRECIPROCAL_GAME '+key)
+    when=pd.to_datetime(d['Game_Date'],errors='coerce',utc=True)
+    if when.isna().any():raise RuntimeError('CFBD_EXPERT_ADAPTER_INVALID_KICKOFF_TIME')
+    # Game_Start is needed by the original utils prior-only reliability layer.
+    # Its source is the same CFBD Game_Date used by the canonical history.
+    d['Game_Start']=when
+    # A given physical game must have exactly one date across its two sides.
+    if d.groupby('Game_Key')['Game_Start'].nunique(dropna=False).ne(1).any():
+        raise RuntimeError('CFBD_EXPERT_ADAPTER_GAME_DATE_DISAGREEMENT')
+    d['Sport']='NCAAF'
+    d['Market']='spreads'
+    d['Week_Number']=pd.to_numeric(d.get('Week',pd.Series(np.nan,index=d.index)),errors='coerce')
+    d['Team_Game_Number']=pd.to_numeric(d['Game_Number_Prior'],errors='coerce')+1 if 'Game_Number_Prior' in d else np.nan
+    d['Spread_Value']=pd.to_numeric(d.get('Consensus_Open_Spread',pd.Series(np.nan,index=d.index)),errors='coerce')
+    d['Value']=d['Spread_Value']
+    st=d.get('Season_Type',pd.Series('regular',index=d.index)).astype(str).str.lower()
+    d['Is_Regular_Season']=st.isin(('regular','regular season')).astype(int)
+    con=d.get('CFBD_Conference',pd.Series(np.nan,index=d.index))
+    opp=d.get('CFBD_Opp_Conference',pd.Series(np.nan,index=d.index))
+    # Unknown conferences are not automatically nonconference games.
+    d['Is_Conference_Game']=(con.notna() & opp.notna() & con.astype(str).eq(opp.astype(str))).astype(float)
+    d.loc[con.isna()|opp.isna(),'Is_Conference_Game']=np.nan
+    # Explicitly fail if key transformations somehow disturb source row alignment.
+    if len(d)!=len(sides) or not d.index.equals(sides.index):
+        raise RuntimeError('CFBD_EXPERT_ADAPTER_ROW_ALIGNMENT_BROKEN')
+    return d
+
+
+def replay_cfbd_expert_rules_without_leaking_current_results(frame, utils_module):
+    """Run original expert rules without exposing current-game labels to rules.
+
+    Original utils contains an optional within-call reliability calculator that
+    reads SU_Win/ATS_Win and can mistakenly count the opposite side of the SAME
+    game as historical evidence. Since this is a retrospective replay rather
+    than a live-vintage bet ledger, we suppress outcomes during rule evaluation,
+    restore CFBD labels strictly after, and leave reliability uncalculated.
+    A separate grouped chronological OOF calculation must earn future authority.
+    """
+    d=frame.copy()
+    labels={c:frame[c].copy() for c in ('SU_Win','ATS_Win') if c in frame}
+    for c in ('SU_Win','ATS_Win'):
+        d[c]=pd.Series(np.nan,index=d.index,dtype='float64')
+    required=['Game_Key','Season','Game_ID','Sport','Market','Team','Opponent',
+              'Historical_Football_Source']
+    keyframe=d[required].copy()
+    flagged=utils_module.add_pathi_bigal_rule_flags(d)
+    if len(flagged)!=len(d) or not flagged.index.equals(d.index) or not flagged[required].equals(keyframe):
+        raise RuntimeError('CFBD_EXPERT_RULES_MODIFIED_SOURCE_ROW_IDENTITY')
+    for c,old in labels.items():flagged[c]=old
+    reliability=[c for c in flagged if str(c).startswith('System_Reliability_')]
+    flagged=flagged.drop(columns=reliability)
+    return flagged
+
+
+def add_cfbd_market_only_pathi_context(flagged, utils_module):
+    """Calculate historical Pathi key screens solely from verified market quotes.
+
+    CFBD football identity and facts remain untouched. Opening-vs-closing
+    movement requires BOTH prices, never a synthetic open/close, and these
+    retrospective screens do not certify actual pregame quote vintages.
+    """
+    needed={'Game_Key','Sport','Market','Team','Opponent','Game_ID','Season',
+            'Consensus_Open_Spread','Consensus_Close_Spread',
+            'Historical_Football_Source'}
+    if not needed.issubset(flagged):
+        raise RuntimeError('CFBD_PATHI_ADAPTER_MISSING_REQUIRED '+str(sorted(needed-set(flagged))))
+    if not flagged.Historical_Football_Source.eq('CFBD_API_ARCHIVE_GAMES_PLUS_CFBD_RESEARCH_FEATURES').all():
+        raise RuntimeError('CFBD_PATHI_ADAPTER_NON_CFBD_SOURCE')
+    before=flagged[['Game_Key','Sport','Market','Team','Opponent','Game_ID','Season']].copy()
+    d=flagged.copy()
+    def n(col):
+        raw=pd.to_numeric(d.get(col,pd.Series(np.nan,index=d.index)),errors='coerce')
+        vals=raw.to_numpy(dtype=np.float64,na_value=np.nan)
+        return pd.Series(np.where(np.isfinite(vals),vals,np.nan),index=d.index,dtype='float64')
+    opening=n('Consensus_Open_Spread');closing=n('Consensus_Close_Spread')
+    paired=opening.notna() & closing.notna()
+    # Only a known closing spread may be treated as a line-move observation.
+    d['Opening_Spread']=opening
+    d['Value']=closing.combine_first(opening)
+    open_total=n('Consensus_Open_Total'); close_total=n('Consensus_Close_Total')
+    d['Opening_Total']=open_total
+    d['Current_Total']=close_total.where(closing.notna())
+    keys=list(getattr(utils_module,'PATHI_KEY_EVENT_COLS',()))
+    context=utils_module.add_pathi_football_key_features(d)
+    if len(context)!=len(d) or not context.index.equals(d.index):
+        raise RuntimeError('CFBD_PATHI_ADAPTER_ROW_ALIGNMENT_CHANGED')
+    if not context[list(before)].equals(before):
+        raise RuntimeError('CFBD_PATHI_ADAPTER_FOOTBALL_IDENTITY_MODIFIED')
+    # The original helper's Key_DataReady means 'opening/current fields exist'.
+    # If only opening exists, current was a fallback and no move was observed.
+    # Tighten that meaning for historical open/close research explicitly.
+    if 'Pathi_FB_Key_DataReady' in context:
+        context['Pathi_FB_Key_DataReady']=paired.astype('int8')
+    for change_col in ('Pathi_FB_Key_Value_Change','Pathi_FB_Key_Value_Lost_From_Open'):
+        if change_col in context:context.loc[~paired,change_col]=np.nan
+    for col in keys:
+        if col not in context:
+            raise RuntimeError('CFBD_PATHI_KEY_EVENT_MISSING_FROM_ORIGINAL_UTILS '+col)
+        # Source-specific named event coverage. Boolean 0 here means not
+        # evaluable, never proof of a losing/winning historical system.
+        context[col+'_DataReady']=paired.astype('int8')
+        # Utility is designed to emit 0 on missing values; enforce it instead
+        # of treating a one-sided quote as retrospective line movement.
+        context.loc[~paired,col]=0
+    # Preserve opening-spread input for any downstream Big Al/Market inference.
+    context['Value']=opening
+    if 'Spread_Value' in flagged:
+        context['Spread_Value']=flagged['Spread_Value']
+    return context,{'market_only':True,'open_close_paired_sides':int(paired.sum()),
+                    'missing_open_close_pair_sides':int((~paired).sum()),
+                    'pathi_key_events_evaluable':{c:int(paired.sum()) for c in keys},
+                    'pathi_key_events_fired':{c:int(pd.to_numeric(context[c],errors='coerce').fillna(0).eq(1).sum()) for c in keys},
+                    'prematch_quote_vintage_certified':False,
+                    'source':'CFBD_GAME_IDS_PLUS_ORIGINAL_BOOKMAKER_SPREAD_QUOTES_ONLY'}
 
 
 def generate_cfbd_expert_occurrences(all_sides, flagged, utils_module):
