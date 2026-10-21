@@ -279,6 +279,50 @@ def main():
         pw.emit("done", "NCAAF V5 full research finished; see detailed audited phases and candidate policy", pct=1.0)
         return
 
+    # NCAAF V5.5: fast COMBINED brain/market-rich research from a completed
+    # immutable CFBD V5.4.9 archive. No CORE re-fit or production file writes.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v55_combined_brain":
+        import ncaaf_v55_combined_brain as _v55
+        from google.cloud import bigquery as _v55_bq
+        pw.emit("research", "V5.5: selected V4 CORE + STAT availability + Big Al/Pathi/Miner + price-only historical Market Rich", pct=0.10)
+        _result=_v55.run_cloud(storage_client=gcs,bucket_name=bucket,
+            bq_client=_v55_bq.Client(project="sharplogger"), log_func=log_func)
+        if (_result.get("status")!="COMPLETE_COMBINED_BRAIN_RESEARCH__PROVISIONAL_ONLY"
+                or _result.get("bet_authority")!=0 or _result.get("production_modified") is not False):
+            raise RuntimeError("[NCAAF-V55] incomplete or unsafe production authority contract")
+        pw.emit("done", "NCAAF V5.5 combined-brain research completed; see immutable GCS result directory", pct=1.0)
+        return
+
+    # V5.5 WEEKLY: own CFBD NONLINEAR_HGB forecast, independently priced
+    # current-game slate and research brains. The frozen Production V1 scorer,
+    # pick selector, contract, and bet ledgers are NOT used or modified.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v55_weekly":
+        import ncaaf_v552_live as _v552
+        from google.cloud import bigquery as _v552_bq
+        pw.emit("model", "V5.5: CFBD-only 2013-25 champion training + 2026 pregame scoring; independent selection", pct=0.10)
+        _v552_result=_v552.run_weekly(storage_client=gcs,bucket_name=bucket,
+            bq_client=_v552_bq.Client(project="sharplogger"),log_func=log_func)
+        if (_v552_result.get("status")!="COMPLETE_V55_INDEPENDENT_WEEKLY_SHADOW"
+            or _v552_result.get("production_mutation") is not False
+            or _v552_result.get("production_v1_probabilities_used") is not False
+            or _v552_result.get("v55_bet_authority")!=0):
+            raise RuntimeError("[NCAAF-V552] independent weekly model did not publish safely")
+        pw.emit("done", "NCAAF V5.5 independent weekly CORE and brains published", pct=1.0)
+        return
+
+    # V5.5 market-only repricing: reuse the LAST VERIFIED V5.5 weekly CFBD
+    # forecast; no model fit or Production V1 probabilities may be substituted.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v55_market_refresh":
+        import ncaaf_v552_live as _v552
+        pw.emit("market", "V5.5 market-only quote update against the latest V5.5 CORE projections", pct=0.30)
+        _result=_v552.refresh_market_only(storage_client=gcs,bucket_name=bucket,log_func=log_func)
+        if (_result.get("status")!="COMPLETE_V55_INDEPENDENT_WEEKLY_SHADOW"
+                or _result.get("production_v1_probabilities_used") is not False
+                or _result.get("core_refit") is not False):
+            raise RuntimeError("[NCAAF-V552] unsafe market-only refresh")
+        pw.emit("done", "V5.5 CORE retained; market-price snapshot refreshed", pct=1.0)
+        return
+
     # NCAAF V5.4: CFBD authoritative historical CORE and system mining.
     # Original weekly Production V1 and legacy research remain untouched.
     if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v54_full_research":
@@ -1134,6 +1178,11 @@ def main():
                 f"contract_source={_refresh.get('contract_source','NA')} artifact={_refresh.get('artifact',str(_contract.get('_artifact_sha256'))[:16])} "
                 "probability_refit=FALSE research_run=FALSE production_publish=FALSE automatic_promotion=FALSE"
             )
+            # Never mirror V1's already-selected picks into the V5.5 main
+            # weekly artifact. That would overwrite V5.5's own CORE forecast.
+            log_func('[NCAAF-V552-PRODUCTION-ISOLATION] frozen_v1_weekly=UNCHANGED '
+                     'v55_board_not_overwritten=TRUE separate_models=TRUE')
+
             # The canonical selector already captured PT observations from the
             # exact selected spread rows. Here we verify coverage and settle, but
             # DO NOT run a second score_live_rows() or quote selection.

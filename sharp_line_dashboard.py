@@ -48771,6 +48771,62 @@ def _ncaaf_authority_source_detail(row, source_type, raw_col=None):
     return " | ".join(dict.fromkeys(parts)) if parts else "—"
 
 
+@st.cache_data(ttl=90,show_spinner=False)
+def _ncaaf_v551_weekly_snapshot_cached():
+    """Only V5.5 independent forecasts; never load the frozen V1 selector."""
+    import ncaaf_v552_live as _v552
+    return _v552.read_weekly_latest(storage.Client(),bucket_name=MODEL_BUCKET)
+
+
+def _render_ncaaf_v551_weekly_board():
+    st.subheader('V5.5 — Primary Betting Board')
+    st.caption('V5.5 NONLINEAR_HGB independent CFBD CORE + current sportsbook quotes + STAT, Big Al, Pathi, '
+               'Miner, Prediction Tracker and Market Rich. Research candidate grades are provisional; '
+               'Production V1 is NOT the V5.5 probability source. Spread market only until separate '
+               'V5.5 H2H and totals models are deployed.')
+    try:
+        _weekly,_audit=_ncaaf_v551_weekly_snapshot_cached()
+        if _audit.get('status')!='COMPLETE_V55_INDEPENDENT_WEEKLY_SHADOW' or _audit.get('production_v1_probabilities_used') is not False:
+            raise RuntimeError('V5.5 independent CORE not published')
+    except Exception as _exc:
+        st.warning('V5.5 independent weekly CORE is not yet available. Run NCAAF V5.5 — Weekly Model Update '
+                   'after the CFBD 2026 features and current bookmaker slate are loaded. '
+                   'A Production V1 forecast will not be substituted.')
+        logging.warning('[NCAAF-V552-UI-HOLD] %s:%s',type(_exc).__name__,str(_exc)[:250])
+        return
+    _age=pd.Timestamp.now(tz='UTC')-pd.to_datetime(_audit.get('snapshot_utc'),utc=True,errors='coerce')
+    st.caption(f"Last V5.5 CORE fit and snapshot: {_audit.get('snapshot_utc','—')} | "
+               f"Model: {_audit.get('core_model','NONLINEAR_HGB')} | "
+               f"Live scored games: {_audit.get('core_forecast_games',0)} | "
+               'Frozen V1: separate comparison only')
+    if pd.notna(_age) and _age.total_seconds()>7*24*3600:
+        st.warning('V5.5 weekly forecast is over seven days old. Refresh V5.5 before acting on current games.')
+    a,b,c,d=st.columns(4)
+    a.metric('V5.5 CORE games',int(_audit.get('core_forecast_games',0)))
+    b.metric('Verified quotes',int(_audit.get('priced_games',0)))
+    c.metric('Multiple brain confirmations',int(_audit.get('multi_family',0)))
+    d.metric('Unmatched market games',int(_audit.get('no_market_match',0)))
+    if _weekly.empty:
+        st.info('No upcoming CFBD 2026 games scored. Refresh warehouse schedule then run V5.5 weekly.')
+        return
+    shown=_weekly.copy()
+    for col in ('CORE_Cover_Probability','CORE_Edge','CORE_EV'):
+        shown[col]=pd.to_numeric(shown[col],errors='coerce').map(lambda x:f'{x:.1%}' if pd.notna(x) else '—')
+    for col in ('CORE_Projected_Home_Margin','Current_Spread','CORE_Project_Cover_Points'):
+        shown[col]=pd.to_numeric(shown[col],errors='coerce').map(lambda x:f'{x:+.1f}' if pd.notna(x) else '—')
+    columns=['Game_Start_UTC','Matchup','Selected_Team','CORE_Model','CORE_Projected_Home_Margin',
+        'Current_Spread','Odds_American','CORE_Cover_Probability','CORE_Edge','CORE_EV',
+        'STAT','BIG_AL','PATHI','SYSTEM_MINER','PREDICTION_TRACKER',
+        'Confirm_Count','Oppose_Count','Market_Rich_Sharp_Move','Market_Rich_Limit',
+        'Market_Rich_Book_Count','V55_Research_Priority','V55_Bet_Decision','Quote_State']
+    st.dataframe(shown[[x for x in columns if x in shown]],use_container_width=True,hide_index=True)
+    st.caption('2026 live projections come from the V4-selected nonlinear CORE recipe refit on CFBD 2013–25. '
+               'Cover probabilities use retrospectively estimated residual variance and are NOT independently '
+               'calibrated. Big Al/Pathi/Miner/STAT are trigger-only unless an actual timestamped, directionally '
+               'verified V5.5 source exists. Quotes are weekly snapshots; retrospective Market Rich feature '
+               'publication timing remains unverified. BET authority remains 0 until prospective approval.')
+
+
 def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None, cached_live_info=None):
     """Lean NCAAF board; selected picks are computed once per minute outside UI."""
     now=pd.Timestamp.now(tz='UTC')
@@ -48983,7 +49039,8 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None
     _ncaaf_extra_section=st.selectbox(
         'Additional NCAAF tables — load only when selected',
         ['Betting Board only', 'System Details', 'Model / Bet Authority Details',
-         'Production Results', 'CORE Challenger Research', 'Production Edge Evidence'],
+         'Production Results', 'CORE Challenger Research', 'Production Edge Evidence',
+         'V5.5 Weekly Model Board'],
         index=0, key='ncaaf-extra-section-on-demand',
     )
     _show_ncaaf_systems=(_ncaaf_extra_section=='System Details')
@@ -48991,8 +49048,12 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None
     _show_ncaaf_results=(_ncaaf_extra_section=='Production Results')
     _show_ncaaf_challenger=(_ncaaf_extra_section=='CORE Challenger Research')
     _show_ncaaf_edge=(_ncaaf_extra_section=='Production Edge Evidence')
+    _show_ncaaf_v551=(_ncaaf_extra_section=='V5.5 Weekly Model Board')
     if _ncaaf_extra_section!='Betting Board only':
         st.caption('Only the selected additional section is loaded; the main betting board stays visible.')
+
+    if _show_ncaaf_v551:
+        _render_ncaaf_v551_weekly_board()
 
     if _show_ncaaf_model:
         with st.expander('Why Bet Authority made each decision',expanded=True):
@@ -49392,16 +49453,26 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # performs exactly those essential transforms once for the selected
         # current quotes and retains all frozen evidence/authority gates.
         if _ncaaf_fast_ui:
+            _ncaaf_display_mode=st.radio('NCAAF model board',
+                ['V5.5 — Primary Betting Board','Production V1 comparison'],
+                horizontal=True,key='ncaaf-active-model-view')
+            if _ncaaf_display_mode=='V5.5 — Primary Betting Board':
+                if force_reload:
+                    _ncaaf_v551_weekly_snapshot_cached.clear()
+                _render_ncaaf_v551_weekly_board()
+                return
+            # Explicit fallback/benchmark only. Opening the main 5.5 board
+            # does not load or score the older V1 models at all.
             if force_reload:
                 _ncaaf_betting_board_first_cached.clear()
                 read_ncaaf_current_quote_heads_cached.clear()
                 _ncaaf_research_v2_report_cached.clear()
-            with st.spinner('Loading NCAAF betting board (60-second cached snapshot)...'):
+            with st.spinner('Loading optional NCAAF Production V1 comparison...'):
                 _selected,_board_meta=_ncaaf_betting_board_first_cached(hours=24)
             if _board_meta.get('status')=='ERROR':
-                st.error('NCAAF board refresh failed: '+str(_board_meta.get('error','UNKNOWN')))
+                st.error('Production V1 comparison unavailable: '+str(_board_meta.get('error','UNKNOWN')))
                 return
-            st.caption('NCAAF betting board: latest per-book quotes; frozen CORE and qualified system votes; 60-second shared cache.')
+            st.caption('Production V1 comparison / existing H2H and totals only, not V5.5 probabilities.')
             _render_ncaaf_fast_prediction_ui(None,label,selected_picks=_selected,cached_live_info=_board_meta)
             return
 
@@ -51593,10 +51664,16 @@ if not HEADLESS:
         _train_market_options = [
             "ncaaf_production_weekly",
             "ncaaf_v54_full_research",
+            "ncaaf_v55_weekly",
+            "ncaaf_v55_market_refresh",
+            "ncaaf_v55_combined_brain",
             "ncaaf_research_heavy",
         ]
         _train_market_labels = {
             "ncaaf_production_weekly": "NCAAF — Weekly Update (existing frozen Production V1)",
+            "ncaaf_v55_weekly": "NCAAF V5.5 — Weekly CORE + Combined Brains + Market Rich",
+            "ncaaf_v55_market_refresh": "NCAAF V5.5 — Market-only Price Refresh (no CORE refit)",
+            "ncaaf_v55_combined_brain": "NCAAF V5.5 — Combined Brains + Market Rich (fast)",
             "ncaaf_v54_full_research": "NCAAF V5 — Full Research (CFBD History + Brains)",
             "ncaaf_research_heavy": "NCAAF Legacy — Heavy Challenger Search",
         }
@@ -51625,9 +51702,33 @@ if not HEADLESS:
         st.sidebar.caption(
             "WHEN: once each week after prior games settle / the new slate is ready. Reuses the frozen Production V1 CORE models, settles immutable prospective locks, refreshes the current slate and live qualified system triggers, and applies the current CORE-first Bet Authority. It does NOT refit CORE, rerun research, republish the production contract, or promote anything. Market moves continue to refresh through the background scanner after this run."
         )
+    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_weekly":
+        st.sidebar.caption(
+            "V5.5 WEEKLY: independently fits the selected NONLINEAR_HGB CORE recipe on verified "
+            "2013–2025 CFBD football history; scores actual upcoming 2026 CFBD pregame features, "
+            "then prices BOTH spread sides from current Utils/Move Master quotes. Includes available "
+            "STAT, Big Al, Pathi, Miner and Market Rich evidence. Missing features or identity fail "
+            "closed without Production V1 substitution. Provisional shadow authority until audited. "
+            "Existing frozen Production V1 remains an optional comparison."
+        )
+    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_market_refresh":
+        st.sidebar.caption(
+            "Reprices the most recent V5.5 independently scored 2026 CFBD CORE forecasts "
+            "using the latest sportsbook/Move Master prices. No refitting or Production V1 "
+            "scoring. Requires an already completed V5.5 weekly model update."
+        )
     elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_research_heavy":
         st.sidebar.caption(
             "WHEN: after meaningful research/data changes and periodically during the season. Runs the protected NCAAF STAT/System Miner V4 research plus the expert/specialist Spread CORE search in one job: sequential team power, strength of schedule, conference strength, rest/home/maturity context, structured matchup statistics, recent-vs-season trends, nonlinear residuals and regularized program/conference effects. Discovery/confirmation stay historical, 2026 remains sealed prospective evidence, and no challenger can mutate Production V1 or Bet Authority automatically."
+        )
+    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_combined_brain":
+        st.sidebar.caption(
+            "V5.5 FAST RESEARCH: scores the actually selected V4 NONLINEAR_HGB CORE "
+            "against independently identified Big Al, Pathi and Miner mechanisms; "
+            "tracks STAT/PT as unavailable unless independently sourced. "
+            "Audits bookmaker opening/closing line context as Market Rich, with "
+            "missing pregame quote timestamps explicitly held. Publishes confluence "
+            "and per-system comparisons; does not refit Production V1 or issue bets."
         )
     elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v54_full_research":
         st.sidebar.caption(
@@ -51647,6 +51748,44 @@ if not HEADLESS:
         )
 
     
+    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_weekly":
+        with st.expander("V5.5 — Weekly model board (click to load)",expanded=False):
+            if st.button("Load V5.5 weekly model board",key="v551_load_weekly_on_demand"):
+                _render_ncaaf_v551_weekly_board()
+
+    # V5.5 optional research viewer. NEVER load historical tables on the first
+    # NCAAF page render. Research artifacts cannot cast Production V1 votes.
+    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_combined_brain":
+        with st.expander("V5.5 Combined Brains — latest research results (click to load)", expanded=False):
+            if st.button("Load latest V5.5 research comparison", key="v55_load_research_on_demand"):
+                try:
+                    from io import StringIO as _v55_StringIO
+                    _v55_bucket = storage.Client().bucket(MODEL_BUCKET)
+                    _v55_latest = json.loads(_v55_bucket.blob(
+                        "research/ncaaf/v55_combined_brain/latest_report.json").download_as_text())
+                    _v55_prefix = _v55_latest["run_prefix"]
+                    if not _v55_prefix.startswith("research/ncaaf/v55_combined_brain/runs/"):
+                        raise RuntimeError("V5.5 unrecognized research result location")
+                    _v55_report = json.loads(_v55_bucket.blob(_v55_prefix + "/report.json").download_as_text())
+                    if _v55_report.get("bet_authority") != 0:
+                        raise RuntimeError("Research report authority mismatch")
+                    st.caption("Research only — cannot modify Production V1 bets. "
+                               "Historical 2024–25 has already been inspected; market quote vintage not certified.")
+                    st.write({"Selected CORE":_v55_report.get("core_model"),
+                              "Historical priced games":_v55_report.get("priced_champion_games"),
+                              "Systems available":_v55_report.get("fired_families"),
+                              "Market Rich status":_v55_report.get("market_query",{}).get("status")})
+                    for _v55_name,_v55_label in (
+                        ("v55_confluence_performance.csv","CORE + brain confluence"),
+                        ("v55_mechanism_rankings.csv","Per-system research rankings"),
+                        ("v55_market_rich_conditionals.csv","Market Rich price-context splits")):
+                        _v55_df=pd.read_csv(_v55_StringIO(_v55_bucket.blob(
+                            _v55_prefix + "/" + _v55_name).download_as_text()),low_memory=False)
+                        st.markdown("**"+_v55_label+"**")
+                        st.dataframe(_v55_df,hide_index=True,use_container_width=True)
+                except Exception as _v55_exc:
+                    st.warning("V5.5 research results unavailable: "+str(_v55_exc)[:300])
+
     # -----------------------------
     # --- If training, pause scanner + stop page from doing anything expensive ---
     # -----------------------------
@@ -51779,6 +51918,12 @@ if not HEADLESS:
         _train_button_label = "Run NCAAF Weekly Update (frozen V1)"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_research_heavy":
         _train_button_label = "Run NCAAF Heavy Research"
+    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v55_weekly":
+        _train_button_label = "Run NCAAF V5.5 Weekly Model Update"
+    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v55_market_refresh":
+        _train_button_label = "Refresh V5.5 Market Prices (no CORE refit)"
+    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v55_combined_brain":
+        _train_button_label = "Run NCAAF V5.5 Combined Brains + Market Rich"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v54_full_research":
         _train_button_label = "Run NCAAF V5 FULL Research + Audited Brains"
     elif str(market_choice).lower().strip() == "edge_research":
