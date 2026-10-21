@@ -240,8 +240,14 @@ def export_legacy_miner_mechanisms(edges, miner_games, miner_report, rv2, dashbo
                                 errors='coerce',utc=True).dt.strftime('%Y-%m-%d')
     mg['__home']=mg.Team_Norm.map(lambda x:_canonical_token(x,aliases));mg['__away']=mg.Opponent_Norm.map(lambda x:_canonical_token(x,aliases))
     mg['__pair']=mg.apply(lambda r: ':'.join(sorted((r['__home'],r['__away']))),axis=1)
-    e=edges.drop_duplicates(['Season','Game_ID']).copy()
-    e['Season']=pd.to_numeric(e.Season,errors='raise').astype(int)
+    # The left join below includes unmatched miner games. If Game_ID on the
+    # right is int64, pandas can upcast the result to float64 to represent
+    # missing matches. Subsequent str() then produces '401403853.0' (and can
+    # destroy larger IDs). Canonicalize the authoritative CFBD identifiers
+    # BEFORE the join so unmatched games use NA, never float IDs.
+    e=_canonical_cfbd_research_join_keys(
+        edges,source='V51_CFBD_MINER_AUTHORITATIVE_JOIN').drop_duplicates(
+            ['Season','Game_ID']).copy()
     e['__date']=pd.to_datetime(e.Game_Date,utc=True,errors='coerce').dt.strftime('%Y-%m-%d')
     e['__home']=e.Team.map(lambda x:_canonical_token(x,aliases));e['__away']=e.Opponent.map(lambda x:_canonical_token(x,aliases))
     e['__pair']=e.apply(lambda r: ':'.join(sorted((r['__home'],r['__away']))),axis=1)
@@ -258,6 +264,17 @@ def export_legacy_miner_mechanisms(edges, miner_games, miner_report, rv2, dashbo
     diag['pair_collisions_v4']=int(collision.sum())
     atoms=rv2._extended_atoms(mg,dashboard_module,for_live=False,market='spreads')
     atom_map={str(a['name']):np.asarray(a['mask'],dtype=bool) for a in atoms}
+    # Pre-validate the exact physical-game universe before exporting any
+    # directional system signal. No mismatched, synthetic or lossy IDs can
+    # enter the final CFBD attribution ledger.
+    authorized_game_keys=set(zip(e['Season'].tolist(),e['Game_ID'].tolist()))
+    if valid.any():
+        valid_keys=set(zip(j.loc[valid,'Season'].astype(int).tolist(),
+                           j.loc[valid,'Game_ID'].tolist()))
+        if not valid_keys.issubset(authorized_game_keys):
+            raise RuntimeError('V549_MINER_MATCH_NOT_IN_CFBD_AUTHORITATIVE_UNIVERSE')
+    diag['cfbd_game_id_string_preserved_prejoin']=True
+    diag['matched_game_id_dtype']=str(j['Game_ID'].dtype)
     records=[]
     for mech in mechanisms:
         diag['mechanisms_considered']+=1
@@ -281,11 +298,18 @@ def export_legacy_miner_mechanisms(edges, miner_games, miner_report, rv2, dashbo
             # have swapped orientation, so translate back into V4 canonical side.
             pick_miner_team=(direction=='PLAY_ON')
             v4_team= (pick_miner_team if bool(normal.iloc[i]) else not pick_miner_team)
-            records.append({'Season':int(j.Season.iloc[i]),'Game_ID':str(j.Game_ID.iloc[i]),
+            season=int(j.Season.iloc[i])
+            game_id=j.Game_ID.iloc[i]
+            if not isinstance(game_id,str) or not re.fullmatch(r'[0-9]+',game_id):
+                raise RuntimeError('V549_MINER_MATCH_GAME_ID_NOT_EXACT_TEXT')
+            if (season,game_id) not in authorized_game_keys:
+                raise RuntimeError('V549_MINER_MATCH_NOT_IN_CFBD_AUTHORITATIVE_UNIVERSE')
+            records.append({'Season':season,'Game_ID':game_id,
                 'Family':family,'System_ID':sid,'Side':'TEAM' if v4_team else 'OPPONENT',
                 'Evidence_Class':'CHRONOLOGICAL_MINER_RETROSPECTIVE__INSPECTED_CONFIRMATION'})
     if not records:return pd.DataFrame(columns=cols),{**diag,'status':'ZERO_MATCHED_MECHANISM_FIRES'}
     result=pd.DataFrame(records).drop_duplicates(cols[:5])
+    result=_canonical_cfbd_research_join_keys(result,source='V549_MATCHED_MINER_SIGNALS')
     collisions=result.groupby(['Season','Game_ID','Family','System_ID']).Side.nunique()
     bad=collisions[collisions>1].index
     if len(bad):
@@ -646,6 +670,13 @@ def run_full(*,storage_client,bucket_name=BUCKET,log_func=print,modules=None,bq_
         # All expertise reconstructed only on CFBD derived records.
         miner_occ,miner_join=audit.step('CFBD_MINER_MECHANISM_MATCH_TO_V4',lambda:export_legacy_miner_mechanisms(
             edges,miner_sides,miners,rv2,None,aliases=aliases))
+        audit.emit('V549_MINER_CFBD_SOURCE_GAME_ID_PARITY','PASS',
+                   miner_occurrences=len(miner_occ),
+                   miner_game_id_dtype=str(miner_occ.Game_ID.dtype),
+                   prejoin_exact_string_preserved=miner_join.get('cfbd_game_id_string_preserved_prejoin'),
+                   join_game_id_dtype=miner_join.get('matched_game_id_dtype'),
+                   authoritative_source='V51_CFBD_VALIDATED_GAME_IDS',
+                   production_authority=0)
         occ=pd.concat([expert_occ,miner_occ],ignore_index=True).drop_duplicates(
                    ['Season','Game_ID','Family','System_ID','Side'])
         join_audit={**expert_audit,'cfbd_miner_occurrences':len(miner_occ),
