@@ -80,6 +80,11 @@ def validate(report, raw_ledger, *, boot=BOOT):
     if any(report.get('parity_to_published_v4',{}).get(str(y)) != 'EXACT_REPRODUCTION'
            for y in DISCOVERY + RETROSPECTIVE):
         raise RuntimeError('V43_NOT_ALL_NINE_V4_FOLDS_HAVE_PARITY')
+    if any(report.get('parity_to_selected_v4_champion',{}).get(str(y)) != 'EXACT_REPRODUCTION'
+           for y in DISCOVERY + RETROSPECTIVE):
+        raise RuntimeError('V43_SELECTED_V4_CHAMPION_NOT_REPRODUCED')
+    if report.get('frozen_champion') not in ('NONLINEAR_STATE_HGB','NONLINEAR_HGB'):
+        raise RuntimeError('V43_V4_SELECTED_CHAMPION_UNSUPPORTED')
     ledger = raw_ledger.copy()
     missing = [c for c in REQUIRED if c not in ledger]
     if missing: raise RuntimeError('V43_MISSING_LEDGER_COLS:'+','.join(missing))

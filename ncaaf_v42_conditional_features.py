@@ -4,9 +4,11 @@ NO market predictors. NO 2026 outcomes. NO frozen Production V1 changes.
 All features use the verified archive *column names* ending _Prior; original
 publication-time provenance remains UNVERIFIED and results cannot be promoted.
 
-The baseline reproduces V4 NONLINEAR_STATE_HGB exactly (fixed 12 features,
-fixed HGB parameters). Five small, preregistered football hypotheses are added
-separately and in six football-motivated combinations. Supervised fits are
+The fixed-state baseline reproduces V4 NONLINEAR_STATE_HGB exactly (12
+features, fixed HGB parameters). It is NOT necessarily the V4 winner. The
+actual winner is independently reconstructed and reconciled by fold before
+research claims about incremental features are published. Five small,
+preregistered football hypotheses are tested separately and in six combos. Supervised fits are
 expanding-year; candidate ranking uses pre-2024 folds only, but is EXPLORATORY.
 """
 from __future__ import annotations
@@ -26,6 +28,8 @@ SCREEN = (2017, 2018, 2019, 2020)
 INTERNAL_CONFIRM = (2021, 2022, 2023)
 RETROSPECTIVE = (2024, 2025)
 BASE = 'NONLINEAR_STATE_HGB'
+CHAMPION_COL = 'V4_SELECTED_CHAMPION'
+SUPPORTED_V4_WINNERS = frozenset(('NONLINEAR_STATE_HGB','NONLINEAR_HGB'))
 MIN_TRAIN_COVERAGE = .45
 MIN_VALID_COVERAGE = .45
 MIN_FEATURES = 2
@@ -203,7 +207,7 @@ def _coverage(xtr,xva, family):
         if ok:passable.append(c)
     return passable,details
 
-def _fold(enriched, state_frame, feature_data, year, *, log_func=print):
+def _fold(enriched, state_frame, feature_data, year, *, champion_model=None, log_func=print):
     y=v4.nums(enriched,'Actual_Margin');tot=v4.nums(enriched,'Actual_Total');years=v4.nums(enriched,'Season')
     tr=(years<year)&np.isfinite(y)&np.isfinite(tot)
     va=(years==year)&np.isfinite(y)&np.isfinite(tot)
@@ -218,6 +222,23 @@ def _fold(enriched, state_frame, feature_data, year, *, log_func=print):
     if v4.metric(actual,benchmark)['n']!=int(va.sum()):
         raise RuntimeError('V42_BASELINE_MISSING_PREDICTIONS')
     pred={BASE:benchmark};status={};coverage={};chosen={}
+    if champion_model is not None:
+        if champion_model not in SUPPORTED_V4_WINNERS:
+            raise RuntimeError('V42_UNSUPPORTED_V4_CHAMPION_MODEL:'+str(champion_model))
+        if champion_model == BASE:
+            winner=benchmark.copy()
+            cfbd_cols=[]
+        else:
+            # Exactly mirrors V4 _fold(): moderate state plus first 65
+            # training-fold-admitted historical CFBD features, not V4.2's
+            # invented feature families or contemporaneous market data.
+            cfbd_cols=v4._cfbd_cols(train,train)[:65]
+            winner=v4._matrix_fit_predict(train,valid,STATE+cfbd_cols,
+                v4.nums(train,'Actual_Margin'),kind='hgb')
+        if v4.metric(actual,winner)['n']!=int(va.sum()):
+            raise RuntimeError('V42_V4_WINNER_MISSING_PREDICTIONS_'+str(year))
+        pred[CHAMPION_COL]=winner
+
     for family in FAMILIES:
         chosen[family],coverage[family]=_coverage(train,valid,family)
     for name,families in EXPERIMENTS.items():
@@ -230,9 +251,15 @@ def _fold(enriched, state_frame, feature_data, year, *, log_func=print):
         pred[name]=v4._matrix_fit_predict(train,valid,cols,v4.nums(train,'Actual_Margin'),kind='hgb')
         status[name]='PASS' if np.isfinite(pred[name]).all() else 'MODEL_INCOMPLETE'
     models={name:v4.metric(actual,p) for name,p in pred.items()}
-    delta={name:v4.paired(actual,benchmark,p) for name,p in pred.items() if name!=BASE}
+    delta={name:v4.paired(actual,benchmark,p) for name,p in pred.items() if name not in (BASE,CHAMPION_COL)}
+    against_winner={name:v4.paired(actual,pred[CHAMPION_COL],p)
+                    for name,p in pred.items() if name not in (BASE,CHAMPION_COL)} if champion_model else {}
+
     records={'status':'PASS','train':int(tr.sum()),'valid':int(va.sum()),'train_end_year':year-1,
-             'models':models,'paired_to_frozen_v4':delta,'experiments':status,
+             'models':models,'paired_to_fixed_state_reference':delta,
+             'paired_to_actual_v4_winner':against_winner,
+             'v4_winner_model':champion_model,'v4_winner_feature_count':len(cfbd_cols) if champion_model else None,
+             'experiments':status,
              'coverage':coverage,'source_feature_counts':{k:len(chosen[k]) for k in FAMILIES},
              'frozen_base_cols':STATE,'market_inputs_used':False}
     ledger=pd.DataFrame({'Season':int(year),'Game_Date':valid['Game_Date'].astype(str).to_numpy(),
@@ -265,34 +292,55 @@ def run_on_frame(frame,archive_diag,*,v4_reference=None,log_func=print,years=Non
     raw=frame.reset_index(drop=True).copy()
     input_audit=v4.input_audit(raw,archive_diag) # enforce 2013–2025 and 2026 seal
     # Real source-vintage still pending; no success status implies a certified source.
+    winner=None
+    if v4_reference is not None:
+        winner=v4_reference.get('selected_pre2024')
+        if winner not in SUPPORTED_V4_WINNERS:
+            raise RuntimeError('V42_UNSUPPORTED_V4_CHAMPION_MODEL:'+str(winner))
+        log_func('[NCAAF-V545-V4-REFERENCE] selected_v4={} fixed_state={} independent_benchmarks=TRUE'.format(winner,BASE))
     state=v4.dynamic_features(raw,gain=.13,retain=.65)
     engineered,provenance=feature_frame(raw)
     years=tuple(years) if years is not None else DISCOVERY+RETROSPECTIVE
     folds={};ledgers=[]
     for year in years:
-        fold,ledger=_fold(raw,state,engineered,year,log_func=log_func)
+        fold,ledger=_fold(raw,state,engineered,year,champion_model=winner,log_func=log_func)
         folds[str(year)]=fold
         if len(ledger):ledgers.append(ledger)
     if not ledgers:raise RuntimeError('V42_NO_VALID_YEAR_FOLDS')
     all_ledger=pd.concat(ledgers,ignore_index=True)
-    # Validate numerical identity of the V4 champion on all published folds.
-    parity={}
+    # Validate both the fixed-state model AND the actual winner. Never
+    # pretend the weaker state-only baseline was selected by V4.
+    parity={}; winner_parity={}
     if v4_reference is not None:
-        if v4_reference.get('selected_pre2024')!=BASE:
-            raise RuntimeError('V42_EXPECTED_V4_CHAMPION_MISMATCH')
         for year in years:
             old=v4_reference.get('folds',{}).get(str(year),{})
-            if old.get('status')!='PASS':continue
-            lhs=folds[str(year)]['models'][BASE];rhs=old['models'][BASE]
-            if lhs['n']!=rhs['n'] or abs(lhs['rmse']-rhs['rmse'])>1e-5 or abs(lhs['mae']-rhs['mae'])>1e-5:
-                raise RuntimeError(f'V42_V4_BASELINE_PARITY_FAILED_{year}:new={lhs},old={rhs}')
+            if old.get('status')!='PASS':
+                raise RuntimeError(f'V42_V4_REFERENCE_FOLD_NOT_PASS_{year}')
+            if folds[str(year)]['status']!='PASS':
+                raise RuntimeError(f'V42_FOLD_NOT_PASS_{year}')
+            for local,original,label in ((BASE,BASE,'FIXED_STATE'),(CHAMPION_COL,winner,'SELECTED_CHAMPION')):
+                lhs=folds[str(year)]['models'].get(local,{});rhs=old.get('models',{}).get(original,{})
+                if (not lhs or not rhs or lhs.get('n')!=rhs.get('n') or
+                    lhs.get('rmse') is None or rhs.get('rmse') is None or
+                    lhs.get('mae') is None or rhs.get('mae') is None or
+                    abs(lhs['rmse']-rhs['rmse'])>1e-5 or
+                    abs(lhs['mae']-rhs['mae'])>1e-5):
+                    raise RuntimeError(f'V42_V4_{label}_PARITY_FAILED_{year}:new={lhs},old={rhs}')
             parity[str(year)]='EXACT_REPRODUCTION'
+            winner_parity[str(year)]='EXACT_REPRODUCTION'
+        log_func('[NCAAF-V545-V4-PARITY] status=PASS fixed_state_folds={} selected_champion_folds={} winner={}'.format(len(parity),len(winner_parity),winner))
     ranks={
       'screen_2017_2020':_rank(folds,[BASE]+list(EXPERIMENTS),[x for x in SCREEN if x in years]),
       'internal_confirmation_2021_2023':_rank(folds,[BASE]+list(EXPERIMENTS),[x for x in INTERNAL_CONFIRM if x in years]),
       'all_discovery_2017_2023':_rank(folds,[BASE]+list(EXPERIMENTS),[x for x in DISCOVERY if x in years]),
     }
-    retrospect=_pool(all_ledger,[BASE]+list(EXPERIMENTS),RETROSPECTIVE)
+    retrospect=_pool(all_ledger,[BASE]+([CHAMPION_COL] if winner else [])+list(EXPERIMENTS),RETROSPECTIVE)
+    winning_model_delta={}
+    if winner and set(RETROSPECTIVE).issubset(set(years)):
+        # This is descriptive retrospective research, never prospective edge.
+        for name in EXPERIMENTS:
+            winning_model_delta[name]=v4._paired_cluster_boot(all_ledger,name,CHAMPION_COL,boot=350)
+
     paired_boot={}
     if set(RETROSPECTIVE).issubset(set(years)):
         for name in EXPERIMENTS:
@@ -305,29 +353,82 @@ def run_on_frame(frame,archive_diag,*,v4_reference=None,log_func=print,years=Non
     report={'version':VERSION,'status':'EXPLORATORY_RESEARCH__SOURCE_VINTAGE_HOLD',
       'experiment_spec_sha256':spec_sha256,'parent_v4_version':v4.VERSION,
       'generated_utc':datetime.now(timezone.utc).isoformat(),
-      'source':SOURCE,'audit':input_audit,'frozen_champion':BASE,
+      'source':SOURCE,'audit':input_audit,'fixed_state_comparator':BASE,
+      'frozen_champion':winner if winner else None,
+      'v4_champion_prediction_column':CHAMPION_COL if winner else None,
       'folds':folds,'ranking':ranks,'retrospective_pooled':retrospect,
       'retrospective_paired_bootstrap':paired_boot,
+      'actual_v4_winner_paired_bootstrap':winning_model_delta,
       'source_columns':{**provenance,'a_ppa_state_residual':{'family':'A_EFFICIENCY','status':'TRAIN_ONLY_X_ON_X_RESIDUALIZATION','parents':['a_net_ppa_diff']+STATE}},'feature_families':FAMILY_OUTPUTS,
       'combinations':{k:list(v) for k,v in COMBOS.items()},
-      'parity_to_published_v4':parity,'baseline_feature_count':len(STATE),
+      'parity_to_published_v4':parity,'parity_to_selected_v4_champion':winner_parity,
+      'baseline_feature_count':len(STATE),
       'supplemental_features_requested':len(provenance),
       'market_data_used_for_training':False,'year_2026_archive_queried':False,
       'year_2026_outcomes_used_for_training':False,
       'historical_dashboard_cache_may_include_2026_before_filter':True,
       'source_vintage_certified':False,'point_in_time_certification':'HOLD_PENDING_RAW_PUBLICATION_TIMESTAMPS',
       'candidate_status':'NO_AUTOMATIC_ADMISSION','selected_new_champion':None,
+      'fixed_state_is_not_necessarily_v4_winner':True,
       'not_a_fresh_holdout':True,'production_mutated':False,'bet_authority':0,
       'limitations':['2017-2025 outcomes have been previously inspected; findings exploratory',
         'Pregame-named columns not independently certified from raw publication timestamps',
         'Matchup contrasts are not fully opponent-adjusted season statistics',
         'Simultaneous family comparisons can create multiple-testing selection bias',
+        'Fixed state-only benchmark is not necessarily the V4 champion; true winner is separately scored',
         'No promotion or inference model included; frozen production untouched']}
     log_func('[NCAAF-V42-DONE] folds={} experimental_families={} combos={} '
              'status={} authority=0'.format(len(folds),len(FAMILIES),len(COMBOS),report['status']))
     return report,all_ledger
 
-def run_cloud_research(*,dashboard_module,storage_client,bucket_name='sharp-models',log_func=print):
+def verify_v4_per_game_predictions(v4_raw, v42_raw, winner):
+    """Strict physical-game V4 parity; pooled RMSE alone is not identity.
+
+    Both ledgers must represent exactly the same game set, orientation, date,
+    outcomes and two model outputs. No fill-ins, game swaps or tolerance for
+    missing selected-champion predictions are permitted.
+    """
+    if winner not in SUPPORTED_V4_WINNERS:
+        raise RuntimeError('V545_PARITY_UNSUPPORTED_WINNER')
+    keys=['Season','Game_ID']
+    identity=['Game_Date','Team','Opponent','Actual_Margin']
+    va=[BASE,winner]
+    rb=[BASE,CHAMPION_COL]
+    for label,src,required in [('V4',v4_raw,keys+identity+va),('V42',v42_raw,keys+identity+rb)]:
+        missing=[col for col in required if col not in src.columns]
+        if missing:raise RuntimeError('V545_'+label+'_PARITY_COLUMNS_MISSING:'+','.join(missing))
+        if src.duplicated(keys).any():raise RuntimeError('V545_'+label+'_PARITY_DUPLICATE_GAME_KEY')
+    a=v4_raw[keys+identity+list(dict.fromkeys(va))].copy()
+    b=v42_raw[keys+identity+list(dict.fromkeys(rb))].copy()
+    for d in (a,b):
+        d['Season']=pd.to_numeric(d.Season,errors='coerce')
+        d['Game_ID']=d.Game_ID.astype('string').str.strip()
+        if d['Season'].isna().any() or d['Game_ID'].isna().any():
+            raise RuntimeError('V545_PARITY_INVALID_GAME_ID')
+        if (d.Season>=2026).any():raise RuntimeError('V545_PARITY_2026_SEAL_BROKEN')
+    if a.duplicated(keys).any() or b.duplicated(keys).any():
+        raise RuntimeError('V545_PARITY_DUPLICATE_GAME_KEY')
+    joined=a.merge(b,on=keys,how='inner',validate='one_to_one',suffixes=('_v4','_v42'))
+    if len(joined)!=len(a) or len(joined)!=len(b):
+        raise RuntimeError('V545_V4_V42_PER_GAME_SET_MISMATCH')
+    for col in ('Game_Date','Team','Opponent'):
+        if not (joined[col+'_v4'].astype(str)==joined[col+'_v42'].astype(str)).all():
+            raise RuntimeError('V545_V4_V42_'+col.upper()+'_MISMATCH')
+    for left,right,what in [('Actual_Margin_v4','Actual_Margin_v42','ACTUAL_MARGIN'),
+                            (BASE+'_v4',BASE+'_v42','FIXED_STATE'),
+                            ((winner+'_v4') if winner==BASE else winner,CHAMPION_COL,'SELECTED_CHAMPION')]:
+        if left not in joined or right not in joined:
+            raise RuntimeError('V545_PARITY_MODEL_COLUMNS_MISSING:'+left+'/'+right)
+        x=v4.nums(joined,left);y=v4.nums(joined,right)
+        if not (np.isfinite(x).all() and np.isfinite(y).all() and
+                np.allclose(x,y,rtol=0,atol=1e-6)):
+            raise RuntimeError('V545_V4_V42_PER_GAME_'+what+'_PARITY_FAILED')
+    return {'status':'EXACT_PER_GAME','physical_games':len(joined),
+            'selected_v4_model':winner,'fixed_state_baseline':BASE,
+            'tolerance_points':1e-6,'market_data_used_for_training':False}
+
+
+def run_cloud_research(*,dashboard_module,storage_client,bucket_name='sharp-models',log_func=print,v4_reference=None):
     if str(os.getenv('NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED','0')).lower() not in ('1','true','yes','on'):
         raise RuntimeError('V42_REQUIRES_EXPLICIT_ARCHIVE_RESEARCH_OPT_IN')
     import ncaaf_core_challenger_v2 as core
@@ -347,12 +448,28 @@ def run_cloud_research(*,dashboard_module,storage_client,bucket_name='sharp-mode
             raise RuntimeError('V54_CFBD_SOURCE_MARKER_MISSING__LEGACY_FOOTBALL_FALLBACK_FORBIDDEN')
         enriched,diag=core._attach_cfbd_core_context(dashboard_module,history,log_func=log_func)
     bucket=storage_client.bucket(bucket_name)
-    ref_blob=bucket.blob('research/ncaaf/margin_tournament_v4/current_report.json')
-    try:reference=json.loads(ref_blob.download_as_text())
-    except Exception as exc:raise RuntimeError('V42_MISSING_V4_REFERENCE_REPORT') from exc
+    if v4_reference is not None:
+        reference=v4_reference
+        log_func('[NCAAF-V545-V4-REFERENCE] source=THIS_RUN_OBJECT avoiding_mutable_report_pointer')
+    else:
+        ref_blob=bucket.blob('research/ncaaf/margin_tournament_v4/current_report.json')
+        try:reference=json.loads(ref_blob.download_as_text())
+        except Exception as exc:raise RuntimeError('V42_MISSING_V4_REFERENCE_REPORT') from exc
+        log_func('[NCAAF-V545-V4-REFERENCE] source=GCS_CURRENT_REPORT standalone_mode')
     report,ledger=run_on_frame(enriched,diag,v4_reference=reference,log_func=log_func)
+    from io import StringIO
+    try:
+        v4ledger=pd.read_csv(StringIO(bucket.blob('research/ncaaf/margin_tournament_v4/game_level_predictions.csv').download_as_text()),low_memory=False)
+    except Exception as exc:
+        raise RuntimeError('V545_V4_GAME_LEVEL_LEDGER_UNAVAILABLE') from exc
+    checked=verify_v4_per_game_predictions(v4ledger,ledger,report['frozen_champion'])
+    report['v4_ledger_exact_game_parity']=checked
+    log_func('[NCAAF-V545-V4-PER-GAME-PARITY] status=PASS physical_games={} selected_winner={} state_baseline={}'.format(
+        checked['physical_games'],checked['selected_v4_model'],checked['fixed_state_baseline']))
     for y in DISCOVERY+RETROSPECTIVE:
-        if report['folds'][str(y)]['status']!='PASS' or str(y) not in report['parity_to_published_v4']:
+        if (report['folds'][str(y)]['status']!='PASS' or
+            report['parity_to_published_v4'].get(str(y))!='EXACT_REPRODUCTION' or
+            report['parity_to_selected_v4_champion'].get(str(y))!='EXACT_REPRODUCTION'):
             raise RuntimeError(f'V42_INCOMPLETE_OR_UNMATCHED_FOLD_{y}')
     runid=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     base=f'research/ncaaf/conditional_features_v42/runs/{runid}'

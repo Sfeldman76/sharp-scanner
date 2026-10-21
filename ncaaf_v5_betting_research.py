@@ -337,6 +337,13 @@ def cloud_run(*, storage_client, bucket_name='sharp-models', log_func=print):
     if any(src_report.get('parity_to_published_v4',{}).get(str(y))!='EXACT_REPRODUCTION'
            for y in range(2017,2026)):
         raise RuntimeError('V5_V42_PUBLISHED_V4_PARITY_NOT_PROVEN')
+    if any(src_report.get('parity_to_selected_v4_champion',{}).get(str(y))!='EXACT_REPRODUCTION'
+           for y in range(2017,2026)):
+        raise RuntimeError('V5_V42_SELECTED_V4_CHAMPION_PARITY_NOT_PROVEN')
+    if src_report.get('frozen_champion') not in ('NONLINEAR_STATE_HGB','NONLINEAR_HGB'):
+        raise RuntimeError('V5_V4_CHAMPION_UNRECOGNIZED')
+    if src_report.get('v4_ledger_exact_game_parity',{}).get('status')!='EXACT_PER_GAME':
+        raise RuntimeError('V5_V42_EXACT_V4_GAME_LEVEL_PARITY_NOT_PROVEN')
     v4=pd.read_csv(StringIO(bucket.blob('research/ncaaf/margin_tournament_v4/game_level_predictions.csv').download_as_text()),low_memory=False)
     brains=None
     brain_path=os.getenv('NCAAF_V5_HISTORICAL_BRAINS_GCS_OBJECT','').strip()
@@ -348,6 +355,16 @@ def cloud_run(*, storage_client, bucket_name='sharp-models', log_func=print):
         'v4_predictions_gcs':'research/ncaaf/margin_tournament_v4/game_level_predictions.csv',
         'optional_brain_gcs':brain_path or None}
     report,ledger,calibration=run_historical(v4,v42,brain_raw=brains,source_info=source)
+    # These V5 candidates are tested against the fixed-state V4 reference.
+    # The winner comparison is preserved in the V4.2 audit, but this engine
+    # must not falsely describe STATE vs A as a champion-vs-challenger test.
+    winner=src_report['frozen_champion']
+    report['actual_v4_research_winner']=winner
+    report['v42_actual_v4_winner_parity']='EXACT_ALL_NINE_FOLDS'
+    report['v5_candidates_include_actual_v4_winner']=bool(winner in MODELS)
+    report['v5_candidate_comparison_benchmark']=BASE
+    report['v5_research_selection_scope']='FIXED_STATE_VS_ENGINEERED_CANDIDATES__ACTUAL_V4_WINNER_AUDITED_SEPARATELY'
+    report['limits'].append('This V5 candidate ledger does not automatically establish improvement over the actual V4 research winner.')
     runid=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     base=f'research/ncaaf/v5_market_value/runs/{runid}'
     artifacts={f'{base}/report.json':(json.dumps(report,indent=2,allow_nan=False), 'application/json'),

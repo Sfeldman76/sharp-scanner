@@ -473,9 +473,16 @@ def run_full(*,storage_client,bucket_name=BUCKET,log_func=print,modules=None,bq_
             if result_v4.get('status')!='RESEARCH_COMPLETE_NO_PROMOTION':raise RuntimeError('V54_V4_RESEARCH_NOT_COMPLETE')
             results['v4']={'status':result_v4['status'],'report_uri':result_v4.get('report_uri'),'football_source':'CFBD'}
             result_v42=audit.step('FULL_V42_ALL_FIVE_CFBD_FEATURE_FAMILIES',lambda:modules['ncaaf_v42_conditional_features'].run_cloud_research(
-                dashboard_module=dash,storage_client=storage_client,bucket_name=bucket_name,log_func=log_func))
+                dashboard_module=dash,storage_client=storage_client,bucket_name=bucket_name,log_func=log_func,
+                v4_reference=result_v4))
             if not result_v42.get('predictions_uri'):raise RuntimeError('V54_V42_LEDGER_NOT_PUBLISHED')
-            results['v42']={'status':result_v42.get('status'),'report_uri':result_v42.get('report_uri'),'football_source':'CFBD'}
+            if result_v42.get('v4_ledger_exact_game_parity',{}).get('status')!='EXACT_PER_GAME':
+                raise RuntimeError('V545_V42_SELECTED_CHAMPION_GAME_PARITY_NOT_PROVEN')
+            if result_v42.get('frozen_champion')!=result_v4.get('selected_pre2024'):
+                raise RuntimeError('V545_V42_REFERENCE_CHAMPION_CHANGED')
+            results['v42']={'status':result_v42.get('status'),'report_uri':result_v42.get('report_uri'),
+                            'football_source':'CFBD','selected_v4_research_winner':result_v42.get('frozen_champion'),
+                            'v4_ledger_exact_game_parity':result_v42.get('v4_ledger_exact_game_parity')}
             # No old expert historical results or future labels; only CFBD reconstructed inputs.
             d=cfbd_sides.copy()
             d['Sport']='NCAAF';d['Market']='spreads'
