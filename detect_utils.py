@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 import json
+import math
 import psutil
 import os
 from google.cloud import bigquery, storage 
@@ -189,6 +190,77 @@ class ScannerGCSLease:
                 self.generation=None
 
 
+def _audit_ncaaf_raw_feed(current, *, now=None, horizon_days=14):
+    """Read-only inventory of odds API pricing before legacy scanner filters.
+
+    No inference, outcome scores, betting decisions or persisted records here.
+    Distinguishes absent vendor odds from odds discarded by normalization.
+    """
+    stamp=pd.Timestamp.now(tz="UTC") if now is None else pd.to_datetime(now,utc=True)
+    cutoff=stamp+pd.Timedelta(days=int(horizon_days))
+    counts={"source":"ODDS_API_RAW","authority":"OBSERVABILITY_ONLY",
+            "horizon_days":int(horizon_days),"games":0,"upcoming_games":0,
+            "upcoming_spread_games":0,"spread_quote_rows":0,
+            "valid_spread_quote_rows":0,"allowed_book_quote_rows":0,
+            "valid_allowed_book_quote_rows":0,"invalid_price_rows":0,
+            "invalid_line_rows":0,"status":"NO_GAMES"}
+    if not isinstance(current,list):
+        counts["status"]="UNEXPECTED_PAYLOAD_TYPE"
+        return counts
+    allowed={normalize_book_name(str(b).strip().lower(),str(b).strip().lower())
+             for b in list(SHARP_BOOKS or [])+list(REC_BOOKS or []) if str(b).strip()}
+    for game in current:
+        if not isinstance(game,dict):
+            continue
+        counts["games"]+=1
+        start=pd.to_datetime(game.get("commence_time"),errors="coerce",utc=True)
+        if pd.isna(start) or not (stamp<start<=cutoff):
+            continue
+        counts["upcoming_games"]+=1
+        has_spreads=False
+        for book in game.get("bookmakers") or []:
+            bk=str(book.get("key") or "").strip().lower()
+            normalized=normalize_book_name(bk,bk)
+            approved=not allowed or normalized in allowed
+            for market in book.get("markets") or []:
+                if str(market.get("key") or "").lower().strip()!="spreads":
+                    continue
+                has_spreads=True
+                for outcome in market.get("outcomes") or []:
+                    counts["spread_quote_rows"]+=1
+                    try:
+                        point=float(outcome.get("point"))
+                        good_line=(-100<=point<=100) and point==point
+                    except (TypeError,ValueError,OverflowError):
+                        good_line=False
+                    try:
+                        price=float(outcome.get("price"))
+                        good_price=math.isfinite(price) and (price<=-100 or price>=100)
+                    except (TypeError,ValueError,OverflowError):
+                        good_price=False
+                    if not good_line: counts["invalid_line_rows"]+=1
+                    if not good_price: counts["invalid_price_rows"]+=1
+                    if good_line and good_price:
+                        counts["valid_spread_quote_rows"]+=1
+                    if approved:
+                        counts["allowed_book_quote_rows"]+=1
+                        if good_line and good_price:
+                            counts["valid_allowed_book_quote_rows"]+=1
+        if has_spreads:
+            counts["upcoming_spread_games"]+=1
+    if not counts["upcoming_games"]:
+        counts["status"]="NO_UPCOMING_GAMES_IN_WINDOW"
+    elif not counts["upcoming_spread_games"]:
+        counts["status"]="NO_RAW_SPREAD_MARKETS"
+    elif not counts["valid_spread_quote_rows"]:
+        counts["status"]="NO_VALID_RAW_SPREAD_QUOTES"
+    elif not counts["valid_allowed_book_quote_rows"]:
+        counts["status"]="NO_VALID_QUOTE_AT_ALLOWED_BOOKS"
+    else:
+        counts["status"]="PASS"
+    return counts
+
+
 def detect_and_save_all_sports():
     """Single-entry scanner orchestration; never runs when GCS lease unavailable."""
     lease = None
@@ -273,6 +345,12 @@ def _detect_and_save_all_sports_locked(lease: ScannerGCSLease):
 
             n_games = len(current) if hasattr(current, "__len__") else (current.shape[0] if hasattr(current, "shape") else 0)
             logging.info(f"📥 Odds pulled: {n_games} games")
+            if sport_label == "NCAAF":
+                try:
+                    logging.info("[NCAAF-V55-RAW-ODDS-AUDIT] %s",
+                                 json.dumps(_audit_ncaaf_raw_feed(current),sort_keys=True))
+                except Exception:
+                    logging.exception("[NCAAF-V55-RAW-ODDS-AUDIT] status=ERROR")
             if not current or n_games == 0:
                 logging.warning(f"⚠️ No odds for {sport_label}, skipping…")
                 continue

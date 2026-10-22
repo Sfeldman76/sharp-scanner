@@ -199,7 +199,23 @@ def score_and_record_ncaaf_production_v1(df_scan: pd.DataFrame, client=None, con
         base=prepare_current_market_rows(df_scan)
         if base.empty: return {"status":"NO_PREGAME_ROWS","attempted":0,"inserted":0}
         scored=score_live_rows(base,contract)
-        scored_count=int(pd.to_numeric(scored.get("_model_prob"),errors="coerce").notna().sum())
+        if not isinstance(scored,pd.DataFrame) or scored.empty or "_model_prob" not in scored.columns:
+            logging.warning("[NCAAF-PROD-V1-BACKGROUND] status=NO_MODEL_PROBABILITIES raw_market_rows=%d scored_rows=%d",
+                            len(base),len(scored) if isinstance(scored,pd.DataFrame) else 0)
+            return {"status":"NO_MODEL_PROBABILITIES","attempted":0,"inserted":0,
+                    "scored_rows":0,"selected_markets":0,"contract_source":_contract_source}
+        _probabilities=pd.to_numeric(scored["_model_prob"],errors="coerce")
+        _valid_probabilities=_probabilities.notna()&np.isfinite(_probabilities)&_probabilities.gt(0)&_probabilities.lt(1)
+        scored_count=int(_valid_probabilities.sum())
+        if scored_count!=len(scored):
+            logging.warning("[NCAAF-PROD-V1-BACKGROUND] status=INVALID_PROBABILITY_ROWS invalid=%d total=%d",
+                            len(scored)-scored_count,len(scored))
+            scored=scored.copy()
+            scored.loc[~_valid_probabilities,"_model_prob"]=np.nan
+        if not scored_count:
+            logging.warning("[NCAAF-PROD-V1-BACKGROUND] status=NO_VALID_MODEL_PROBABILITIES scored_rows=%d",len(scored))
+            return {"status":"NO_VALID_MODEL_PROBABILITIES","attempted":0,"inserted":0,
+                    "scored_rows":0,"selected_markets":0,"contract_source":_contract_source}
         # Production's shared selector attaches exactly one verified Miner/PT
         # overlay using the same BigQuery/GCS context as weekly scoring. The
         # previous independent Utils report loader caused NO_CURRENT_REPORT and
@@ -19805,6 +19821,69 @@ def _ensure_optional_bq_columns(df: pd.DataFrame, table: str, optional_cols: lis
 # ============================================================================
 
 
+def audit_ncaaf_live_market_prices(rows: pd.DataFrame, *, now=None, horizon_days: int = 14) -> dict:
+    """Observe market coverage; NEVER compute/alter a prediction or bet.
+
+    Counts PHYSICAL games, not bookmaker/outcome rows. This live-scanner audit
+    cannot establish V5.5 weekly joins or its historical 'priced_games' count;
+    both sides of that join must be inspected in the weekly training module.
+    """
+    diag={"source":"SCANNER_NORMALIZED_ODDS","authority":"OBSERVABILITY_ONLY",
+          "horizon_days":int(horizon_days),"raw_rows":0,"upcoming_games":0,
+          "upcoming_spread_games":0,"priced_upcoming_spread_games":0,
+          "unpriced_upcoming_spread_games":0,"upcoming_spread_rows":0,
+          "valid_quote_rows":0,"invalid_line_rows":0,"invalid_price_rows":0,
+          "status":"NO_ROWS"}
+    if not isinstance(rows,pd.DataFrame) or rows.empty:
+        return diag
+    diag["raw_rows"]=len(rows)
+    required={"Game_Start","Market","Value","Odds_Price","Home_Team_Norm","Away_Team_Norm"}
+    absent=sorted(required-set(rows.columns))
+    if absent:
+        diag.update(status="MISSING_REQUIRED_COLUMNS",missing_columns=absent)
+        return diag
+    now=pd.Timestamp.now(tz="UTC") if now is None else pd.to_datetime(now,utc=True)
+    kickoff=pd.to_datetime(rows["Game_Start"],errors="coerce",utc=True)
+    future=(kickoff>now)&(kickoff<=now+pd.Timedelta(days=int(horizon_days)))
+    if not future.any():
+        diag["status"]="NO_UPCOMING_GAMES_IN_WINDOW"
+        return diag
+    candidates=rows.loc[future].copy()
+    dates=kickoff.loc[future]
+    h=candidates["Home_Team_Norm"].astype("string").str.lower().str.strip()
+    a=candidates["Away_Team_Norm"].astype("string").str.lower().str.strip()
+    known=h.notna()&a.notna()&h.ne("")&a.ne("")
+    candidates=candidates.loc[known].copy()
+    dates=dates.loc[known]
+    h=h.loc[known]
+    a=a.loc[known]
+    if candidates.empty:
+        diag["status"]="NO_IDENTIFIABLE_UPCOMING_GAMES"
+        return diag
+    candidates["__aud_game"]=h+"|"+a+"|"+dates.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    diag["upcoming_games"]=int(candidates["__aud_game"].nunique())
+    diag["first_kickoff_utc"]=dates.min().isoformat()
+    diag["last_kickoff_utc"]=dates.max().isoformat()
+    spreads=candidates.loc[candidates["Market"].astype("string").str.lower().str.strip().eq("spreads")].copy()
+    diag["upcoming_spread_rows"]=len(spreads)
+    diag["upcoming_spread_games"]=int(spreads["__aud_game"].nunique())
+    if spreads.empty:
+        diag["status"]="NO_UPCOMING_SPREAD_MARKET"
+        return diag
+    line=pd.to_numeric(spreads["Value"],errors="coerce")
+    odds=pd.to_numeric(spreads["Odds_Price"],errors="coerce")
+    valid_line=line.notna()&np.isfinite(line)&line.abs().le(100)
+    valid_odds=odds.notna()&np.isfinite(odds)&((odds<=-100)|(odds>=100))
+    diag["invalid_line_rows"]=int((~valid_line).sum())
+    diag["invalid_price_rows"]=int((~valid_odds).sum())
+    valid=valid_line&valid_odds
+    diag["valid_quote_rows"]=int(valid.sum())
+    diag["priced_upcoming_spread_games"]=int(spreads.loc[valid,"__aud_game"].nunique())
+    diag["unpriced_upcoming_spread_games"]=diag["upcoming_spread_games"]-diag["priced_upcoming_spread_games"]
+    diag["status"]="PASS" if diag["priced_upcoming_spread_games"] else "NO_VALID_CURRENT_SPREAD_QUOTES"
+    return diag
+
+
 def detect_sharp_moves(
     current,
     previous=None,                    # optional/ignored
@@ -19922,7 +20001,10 @@ def detect_sharp_moves(
 
     # ---------- 3) Flatten CURRENT into rows ----------
     rows = []
-    SHARP_REC_SET = set((SHARP_BOOKS or []) + (REC_BOOKS or []))  # assume lowercase
+    SHARP_REC_SET = {
+        normalize_book_name(str(b).strip().lower(), str(b).strip().lower())
+        for b in list(SHARP_BOOKS or []) + list(REC_BOOKS or []) if str(b).strip()
+    }
     for game in current:
         home_team = (game.get('home_team', '') or '').strip().lower()
         away_team = (game.get('away_team', '') or '').strip().lower()
@@ -20282,8 +20364,8 @@ def detect_sharp_moves(
         )
         weights = {m: 1.0 for m in markets_present}
         logging.info(
-            f"✅ Using uniform weights=1.0 for {len(market_weights)} markets "
-            f"({sport_label}): {sorted(market_weights)}"
+            f"✅ Using uniform weights=1.0 for {len(weights)} markets "
+            f"({sport_label}): {sorted(weights)}"
         )
    
     now = pd.Timestamp.utcnow()
@@ -20302,18 +20384,32 @@ def detect_sharp_moves(
 
     # Compute hash before scoring
     df['Line_Hash'] = df.apply(compute_line_hash, axis=1)
-    
-    # If apply_blended_sharp_score mutates, let it copy internally; otherwise pass df directly.
-    
-    _phase_t0 = time.perf_counter()
-    df_scored = apply_blended_sharp_score(
-        df, trained_models, snaps, weights,  # current-game snapshot paths only
-        sport=canon_sport                               # ← keyword-only (after the *)
-    )
-    logging.info("⏱ detect model scoring %s: %.2fs", _sport_label or _sport_key, time.perf_counter() - _phase_t0)
 
+    # Observe the raw normalized odds before any legacy model's transformations.
+    # If a downstream step loses prices, the two diagnostics identify the loss.
+    _ncaaf_raw_audit=None
+    if _is_ncaaf:
+        _ncaaf_raw_audit=audit_ncaaf_live_market_prices(df)
+        logging.info("[NCAAF-V55-NORMALIZED-PRE-SCORER-MARKET-AUDIT] %s",
+                     json.dumps(_ncaaf_raw_audit,sort_keys=True,default=str))
 
-    
+    # The V13/legacy scorer is separate from the frozen production contract.
+    # Its failure must not prevent a fresh Production V1 or NFL live market pass.
+    _phase_t0=time.perf_counter()
+    try:
+        df_scored=apply_blended_sharp_score(
+            df,trained_models,snaps,weights,sport=canon_sport
+        )
+        if not isinstance(df_scored,pd.DataFrame):
+            logging.error("[LEGACY-SCANNER-SCORER] status=INVALID_FRAME sport=%s output_type=%s",
+                          _sport_label or _sport_key,type(df_scored).__name__)
+            df_scored=pd.DataFrame()
+    except Exception:
+        logging.exception("[LEGACY-SCANNER-SCORER] status=ERROR sport=%s independent_production_refresh=CONTINUE",
+                          _sport_label or _sport_key)
+        df_scored=pd.DataFrame()
+    logging.info("⏱ detect model scoring %s: %.2fs",_sport_label or _sport_key,time.perf_counter()-_phase_t0)
+
     if not df_scored.empty:
         df_scored['Pre_Game']  = df_scored['Game_Start'] > now
         df_scored['Post_Game'] = ~df_scored['Pre_Game']
@@ -20324,7 +20420,7 @@ def detect_sharp_moves(
         _ledger={"status":"NOT_APPLICABLE","attempted":0,"inserted":0}
         _settle={"status":"NOT_APPLICABLE"}
         try:
-            if str(canon_sport or _sport_label or _sport_key).upper().strip()=="NCAAF":
+            if _is_ncaaf:
                 _ledger=record_ncaaf_v13_forward_shadow_predictions(df_scored)
                 _settle=settle_ncaaf_v13_forward_shadow_results()
         except Exception as _le:
@@ -20334,17 +20430,38 @@ def detect_sharp_moves(
         df_scored['V13_Ledger_Events_Attempted']=int(_ledger.get('attempted',0) or 0)
         df_scored['V13_Ledger_Events_Inserted']=int(_ledger.get('inserted',0) or 0)
         df_scored['V13_Settlement_Status']=str(_settle.get('status','UNKNOWN'))
-        if _is_ncaaf:
-            _p1=score_and_record_ncaaf_production_v1(df_scored)
-            df_scored['NCAAF_Prod_V1_Ledger_Status']=str(_p1.get('status','UNKNOWN'))
-            df_scored['NCAAF_Prod_V1_Locks_Attempted']=int(_p1.get('attempted',0) or 0)
-            df_scored['NCAAF_Prod_V1_Locks_Inserted']=int(_p1.get('inserted',0) or 0)
         summary_df = summarize_consensus(df_scored, SHARP_BOOKS, REC_BOOKS)
     else:
         logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
         df_scored = pd.DataFrame()
         summary_df = pd.DataFrame()
-    
+
+    # Production V1 has a separate, contract-bound inference path. It must not
+    # disappear just because the old scanner model produced zero rows. Keep
+    # V5.5 research out of the frozen Production V1 probability / bet selector.
+    if _is_ncaaf:
+        _ncaaf_scored_audit=audit_ncaaf_live_market_prices(df_scored)
+        logging.info("[NCAAF-V55-NORMALIZED-POST-SCORER-MARKET-AUDIT] %s",
+                     json.dumps(_ncaaf_scored_audit,sort_keys=True,default=str))
+        # Prefer the enriched scorer frame, except when legacy scoring removed
+        # mandatory live odds or produced no usable spread quotes. The raw
+        # normalized frame contains the same snapshot + system enrichment.
+        _raw_priced=int((_ncaaf_raw_audit or {}).get('priced_upcoming_spread_games',0) or 0)
+        _scored_priced=int(_ncaaf_scored_audit.get('priced_upcoming_spread_games',0) or 0)
+        _scored_columns_ok=all(c in df_scored.columns for c in
+            ('Game_Start','Market','Value','Odds_Price','Home_Team_Norm','Away_Team_Norm'))
+        _use_raw_ncaaf=bool(df_scored.empty or not _scored_columns_ok or (_raw_priced and not _scored_priced))
+        _ncaaf_live_input=df if _use_raw_ncaaf else df_scored
+        logging.info("[NCAAF-PROD-V1-MARKET-FRAME] source=%s raw_priced_games=%d scored_priced_games=%d",
+                     'NORMALIZED_FALLBACK' if _use_raw_ncaaf else 'LEGACY_ENRICHED',_raw_priced,_scored_priced)
+        _p1=score_and_record_ncaaf_production_v1(_ncaaf_live_input)
+        logging.info("[NCAAF-PROD-V1-BACKGROUND-REFRESH] status=%s scored_rows=%s selected_markets=%s",
+                     _p1.get('status'),_p1.get('scored_rows'),_p1.get('selected_markets'))
+        if not df_scored.empty:
+            df_scored['NCAAF_Prod_V1_Ledger_Status']=str(_p1.get('status','UNKNOWN'))
+            df_scored['NCAAF_Prod_V1_Locks_Attempted']=int(_p1.get('attempted',0) or 0)
+            df_scored['NCAAF_Prod_V1_Locks_Inserted']=int(_p1.get('inserted',0) or 0)
+
     # NFL V3.1: refresh MODEL -> ACTION on every normal odds scan.  Use the
     # scored frame when available, otherwise the normalized current market frame;
     # recommendation freshness must not depend on a legacy scoring model.
