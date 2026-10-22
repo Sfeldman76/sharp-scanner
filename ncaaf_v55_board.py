@@ -427,6 +427,20 @@ SCHOOL_EQUIVALENTS = {
     "hawai i": "hawaii",
     "army west point": "army",
     "navy midshipmen": "navy",
+    "ohio university": "ohio",
+    "ohio u": "ohio",
+    "texas a m": "texas a and m",
+    "texas a and m": "texas a and m",
+    "texas a and m university": "texas a and m",
+    "texas a m university": "texas a and m",
+    "cal": "california",
+    "cal berkeley": "california",
+    "pitt": "pittsburgh",
+    "pittsburgh university": "pittsburgh",
+    "western michigan university": "western michigan",
+    "ucla": "ucla",
+    "university of connecticut": "connecticut",
+    "army west point black knights": "army",
 }
 
 # Mascots are suffixes, never entire-school substrings. Longer first protects
@@ -450,6 +464,16 @@ NCAAF_MASCOTS = tuple(sorted({m.strip() for m in """
     orange, wolfpack, wolf pack, wolfpack, bluejays, midshipmen, nittany lions,
     49ers, miners, golden bears, fighting saints, green knights, golden knights,
     fighting broncos, aztecs, rainbow warriors, golden panthers,
+    cardinal, hawkeyes, ducks, utes, cyclones, sooners, cornhuskers,
+    hokies, bearcats, gophers, jackrabbits, bison, spiders, blazers,
+    huskers, chippewas, broncs, bobcats, owls, red hawks, blue raiders,
+    lumberjacks, terriers, penguins, penguins, purple aces, leathernecks,
+    skyhawks, sycamores, salukis, mocs, governors, colonels, racers,
+    paladins, buccaneers, seahawks, grizzlies, grizz, red foxes,
+    nittany lions, minutewomen, privateers, ragin cajuns, rainbow wahine,
+    bulls, blue hose, horned frogs, crusaders, bantams, pioneers,
+    vandals, grizzlies, demon deacons, blazers, lancers, terrapins,
+    greyhounds, matadors, seawolves, red storm, big green, samurai,
 """.split(",") if m.strip()}, key=len, reverse=True))
 
 
@@ -473,6 +497,35 @@ def _norm_team(value):
             school = school[:-len(suffix)].strip()
             break
     return SCHOOL_EQUIVALENTS.get(school, school)
+
+
+def _cfbd_midnight_placeholder(kickoff):
+    """Detect the CFBD unknown-time midnight ET sentinel, not arbitrary mismatches."""
+    import pandas as pd
+    k=pd.to_datetime(kickoff, utc=True, errors='coerce')
+    return bool(pd.notna(k) and k.tz_convert('America/New_York').hour == 0
+                and k.tz_convert('America/New_York').minute == 0)
+
+
+def _verified_market_placeholder_repair(candidates, forecast_kick, home, away):
+    """Use sportsbook kickoff only for an unequivocal, future, two-sided matchup.
+
+    The CFBD midnight placeholder must never be used to price an unrelated
+    same-date game. Require the exact oriented teams and a unique market kickoff.
+    """
+    import pandas as pd
+    if not _cfbd_midnight_placeholder(forecast_kick) or candidates.empty:
+        return None
+    near=candidates.loc[(candidates['_kick']-forecast_kick).abs().le(pd.Timedelta(hours=26))
+                       &candidates['_home'].eq(home)&candidates['_away'].eq(away)]
+    market_kicks=near['_kick'].dropna().drop_duplicates()
+    if len(market_kicks) != 1:
+        return None
+    market_kick=market_kicks.iloc[0]
+    same_event=near.loc[near['_kick'].eq(market_kick)]
+    if _paired_spread(same_event,home,away) is None:
+        return None
+    return market_kick
 
 
 def _matchup_teams(row):
@@ -598,6 +651,8 @@ def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minut
         "no_selected_side_quote":0,"no_two_sided_spread":0,
         "stale_or_invalid_quote_rows":0,"unmatched_examples":[],
         "identity_examples":[], "status":"NO_UPCOMING_FORECASTS",
+        "unique_available_market_games":0,"no_market_participant_pairs":0,
+        "partial_team_identity_matches":0,"no_valid_kickoff_match":0,
     }
     if out.empty:
         return out,report
@@ -615,6 +670,8 @@ def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minut
         "V55_Trigger_Context","V55_Trigger_Context_Authority",
     ):
         out[col]=None
+    out['V55_Original_CFBD_Kickoff_UTC']=None
+    out['V55_Kickoff_Verification']='UNCHANGED_CFBD_KICKOFF'
     out["Quote_State"]="NO_VERIFIED_BACKEND_QUOTE"
     out["V55_Bet_Decision"]="RESEARCH_ONLY_NO_AUTHORITY"
     out["V55_Bet_Authority"]=0
@@ -625,7 +682,16 @@ def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minut
         report["status"]="V55_MISSING_KICKOFF_FIELD"
         return out,report
     kickoff=pd.to_datetime(out["Game_Start_UTC"],errors="coerce",utc=True)
-    upcoming=kickoff.gt(now) & kickoff.le(now+pd.Timedelta(days=14))
+    # A default CFBD midnight kickoff is not necessarily a real kickoff.
+    # Keep its forecast eligible briefly after midnight; ONLY a future paired
+    # sportsbook market can replace the placeholder with the actual event time.
+    placeholders=kickoff.map(_cfbd_midnight_placeholder)
+    upcoming=((kickoff.gt(now) & kickoff.le(now+pd.Timedelta(days=14))) |
+              (placeholders & kickoff.ge(now-pd.Timedelta(hours=26))
+               &kickoff.le(now+pd.Timedelta(days=14))))
+    report['cfbd_midnight_placeholder_games']=int((upcoming & placeholders).sum())
+    report['verified_market_kickoff_repairs']=0
+    report['alias_normalization_version']='V55_EXPLICIT_SCHOOL_MASCOT_20261022'
     report["upcoming_forecast_rows"]=int(upcoming.sum())
     if not upcoming.any():
         return out,report
@@ -667,6 +733,7 @@ def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minut
     q=(q.sort_values("_snap",ascending=False)
        .drop_duplicates(["_home","_away","_kick","_book","_selected","_line"],keep="first"))
     q["_team_pair"]=q.apply(lambda r:tuple(sorted((r["_home"],r["_away"]))),axis=1)
+    report['unique_available_market_games']=len(q[['_home','_away','_kick']].drop_duplicates())
     counted=set()
     def note(idx,reason):
         if len(report["unmatched_examples"])<10:
@@ -687,12 +754,31 @@ def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minut
         cand=q.loc[q["_team_pair"].map(lambda p:p==tuple(sorted((home,away))))]
         if cand.empty:
             report["no_matching_game"]+=1
-            note(idx,"NO_MATCHING_PARTICIPANTS")
+            report['no_market_participant_pairs']+=1
+            near_home=(q['_home'].eq(home) | q['_away'].eq(home)).any()
+            near_away=(q['_home'].eq(away) | q['_away'].eq(away)).any()
+            if near_home or near_away:
+                report['partial_team_identity_matches']+=1
+                out.at[idx,'Quote_State']='NO_EXACT_TWO_TEAM_MARKET_PAIR__CHECK_ALIAS_OR_FIXTURE'
+                note(idx,'PARTIAL_NAME_MATCH__VERIFY_ALIAS_OR_MARKET_FIXTURE')
+            else:
+                out.at[idx,'Quote_State']='NO_CURRENT_MARKET_FOR_THIS_TEAM_PAIR'
+                note(idx,'NO_MARKET_TEAM_PAIR_IN_CURRENT_SPORTSBOOK_FEED')
             continue
-        cand=cand.loc[(cand["_kick"]-kickoff.loc[idx]).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))]
+        exact=cand.loc[(cand["_kick"]-kickoff.loc[idx]).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))]
+        kickoff_repaired=False
+        if exact.empty and oriented:
+            repaired=_verified_market_placeholder_repair(cand,kickoff.loc[idx],home,away)
+            if repaired is not None and pd.notna(repaired) and repaired>now:
+                exact=cand.loc[cand['_kick'].eq(repaired)]
+                kickoff_repaired=True
+        cand=exact
         if cand.empty:
             report["no_matching_game"]+=1
-            note(idx,"KICKOFF_OUTSIDE_TOLERANCE")
+            report['no_valid_kickoff_match']+=1
+            out.at[idx,'Quote_State']='NO_VERIFIED_KICKOFF_MATCH__CFBD_TIME_OR_DIFFERENT_MARKET_EVENT'
+            note(idx,"KICKOFF_OUTSIDE_TOLERANCE" if not _cfbd_midnight_placeholder(kickoff.loc[idx])
+                 else "CFBD_PLACEHOLDER_WITHOUT_UNIQUE_PAIRED_FUTURE_MARKET")
             continue
         if oriented:
             cand=cand.loc[cand["_home"].eq(home)&cand["_away"].eq(away)]
@@ -710,6 +796,13 @@ def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minut
         actual_home=str(unique_games.iloc[0]["_home"])
         actual_away=str(unique_games.iloc[0]["_away"])
         pair=_paired_spread(cand,actual_home,actual_away)
+        if kickoff_repaired:
+            # Source correction is observable and used by subsequent raw-overlay,
+            # policy and game-side identity matching. The original is preserved.
+            out.at[idx,'V55_Original_CFBD_Kickoff_UTC']=kickoff.loc[idx].isoformat()
+            out.at[idx,'Game_Start_UTC']=unique_games.iloc[0]['_kick'].isoformat()
+            out.at[idx,'V55_Kickoff_Verification']='VERIFIED_TWO_SIDED_SPORTSBOOK_REPLACED_CFBD_MIDNIGHT_PLACEHOLDER'
+            report['verified_market_kickoff_repairs']+=1
         # Unselected CORE forecast: matching paired game prices is possible and
         # desirable, but a model betting side must NOT be guessed or invented.
         if not selected:
@@ -905,11 +998,14 @@ def _v55_read_enriched_pregame_overlays(bq_client, *, horizon_days=14, lookback_
     # Select the 12 most recent observations PER game/side/book. This avoids
     # starving smaller games when a few popular matchups produce 20,000 rows.
     # Preserve multiple observations for strict as-of joins to quoted prices.
-    book_expr = ('COALESCE(NULLIF(TRIM(CAST(Bookmaker AS STRING)),''), '
-                 'NULLIF(TRIM(CAST(Book AS STRING)),''), '')'
-                 if 'Bookmaker' in schema and 'Book' in schema else
-                 'COALESCE(CAST(Bookmaker AS STRING),'')' if 'Bookmaker' in schema else
-                 'COALESCE(CAST(Book AS STRING),'')' if 'Book' in schema else "''")
+    if 'Bookmaker' in schema and 'Book' in schema:
+        book_expr = "COALESCE(NULLIF(TRIM(CAST(Bookmaker AS STRING)), ''), NULLIF(TRIM(CAST(Book AS STRING)), ''), '')"
+    elif 'Bookmaker' in schema:
+        book_expr = "COALESCE(CAST(Bookmaker AS STRING), '')"
+    elif 'Book' in schema:
+        book_expr = "COALESCE(CAST(Book AS STRING), '')"
+    else:
+        book_expr = "''"
     sql = f"""SELECT {','.join('`'+x+'`' for x in fields)}
       FROM `{V55_RAW_OVERLAY_TABLE}`
       WHERE UPPER(TRIM(CAST(Sport AS STRING)))='NCAAF'
@@ -934,7 +1030,8 @@ def _v55_read_enriched_pregame_overlays(bq_client, *, horizon_days=14, lookback_
         if len(frame)>=25000:status+='__TRUNCATED_25000_ROWS'
         return frame,status
     except Exception as exc:
-        return pd.DataFrame(), 'SOURCE_QUERY_FAILED:'+type(exc).__name__
+        logging.warning('[NCAAF-V55-RAW-OVERLAY-QUERY-ERROR] %s: %s', type(exc).__name__, str(exc)[:350])
+        return pd.DataFrame(), 'SOURCE_QUERY_FAILED:'+type(exc).__name__+':'+str(exc)[:160]
 
 
 def attach_v55_raw_pregame_overlays(board, enrich, *, source_status='PASS', now=None):
@@ -1014,8 +1111,16 @@ def attach_v55_raw_pregame_overlays(board, enrich, *, source_status='PASS', now=
         (home,away),oriented=_matchup_teams(r)
         selected=_norm_team(r.get('V55_Research_Lean_Team') or r.get('Selected_Team'))
         if not oriented or selected not in (home,away):continue
-        v=e.loc[e['_home'].eq(home)&e['_away'].eq(away)
-             &(e['_kick']-kick).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))]
+        exact_market_kick=(e['_kick']-kick).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))
+        # Miner research snapshots can still contain the original CFBD midnight
+        # sentinel. Permit this ONLY for display context, NEVER qualified votes.
+        original_kick=_timestamp(r.get('V55_Original_CFBD_Kickoff_UTC'))
+        if pd.notna(original_kick) and 'V55_Source_Type' in e.columns:
+            original_snapshot=(e['V55_Source_Type'].fillna('').astype(str)
+                .eq('HEADLESS_MINER_SNAPSHOT_DISPLAY_ONLY'))
+            exact_market_kick |= (original_snapshot &
+                (e['_kick']-original_kick).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES)))
+        v=e.loc[e['_home'].eq(home)&e['_away'].eq(away)&exact_market_kick]
         if v.empty:report['no_game_context']+=1;continue
         report['matched_game_context']+=1
         # A priced bet can only display information known AT THAT PRICE.
