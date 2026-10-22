@@ -48781,6 +48781,40 @@ def _ncaaf_v551_weekly_snapshot_cached():
     return read_published_latest(bq_client=bq_client)
 
 
+def _ncaaf_v55_quote_coverage(frame, audit):
+    """Presentation-only reconciliation of published V5.5 quote coverage.
+
+    Does not score, select sides, calculate odds/edges, or change bet authority.
+    The backend audit counts are publication-scoped, not all-season forecasts.
+    Derive from immutable published Quote_State to defend against older audit
+    fields where no_market_match was incorrectly the entire forecast count.
+    """
+    import pandas as pd
+    states = frame.get('Quote_State',pd.Series('',index=frame.index)).fillna('').astype(str)
+    verified = states.isin((
+        'FRESH_TWO_SIDED_BACKEND_PRICE_NO_SELECTED_TEAM',
+        'FRESH_VERIFIED_SELECTED_SIDE_BACKEND_SPREAD'))
+    eligible = audit.get('upcoming_forecast_rows')
+    if eligible is None:
+        # Older market bridge audit: scope window to the publication timestamp.
+        published = pd.to_datetime(audit.get('published_at_utc'),utc=True,errors='coerce')
+        if pd.isna(published):
+            return {'eligible':None,'priced':int(verified.sum()),'unmatched':None,
+                    'outside':None,'uncertain':True}
+        kick = pd.to_datetime(frame.get('Game_Start_UTC',pd.Series(index=frame.index,dtype='object')),
+                              utc=True,errors='coerce')
+        eligible = int((kick.gt(published) & kick.le(published+pd.Timedelta(days=14))).sum())
+    eligible = max(0,int(eligible))
+    # Backend snapshot records may include other quote states in later versions.
+    priced = int(audit.get('priced_games',int(verified.sum())) or 0)
+    if int(verified.sum()) != priced:
+        priced = int(verified.sum())
+    unmatched = max(0,eligible-priced)
+    outside = max(0,len(frame)-eligible)
+    return {'eligible':eligible,'priced':priced,'unmatched':unmatched,
+            'outside':outside,'uncertain':False}
+
+
 def _render_ncaaf_v551_weekly_board():
     st.subheader('V5.5 — Backend Published Board')
     st.caption('V5.5 NONLINEAR_HGB independent CFBD CORE + current sportsbook quotes + STAT, Big Al, Pathi, '
@@ -48807,11 +48841,25 @@ def _render_ncaaf_v551_weekly_board():
         st.error('Backend sportsbook quotes are stale. Price/EV/action fields have been withheld until the scanner refreshes.')
     if int(_audit.get('priced_games',0) or 0)==0:
         st.warning('V5.5 model projections exist, but the model-to-market join reports zero priced games. No executable betting recommendations are available.')
+    _coverage=_ncaaf_v55_quote_coverage(_weekly,_audit)
     a,b,c,d=st.columns(4)
-    a.metric('V5.5 CORE games',int(_audit.get('core_forecast_games',0)))
-    b.metric('Verified quotes',int(_audit.get('priced_games',0)))
+    a.metric('V5.5 CORE games',int(_audit.get('core_forecast_games',len(_weekly))))
+    b.metric('Verified priced games',_coverage['priced'])
     c.metric('Multiple brain confirmations',int(_audit.get('multi_family',0)))
-    d.metric('Unmatched market games',int(_audit.get('no_market_match',0)))
+    d.metric('Unmatched eligible games',_coverage['unmatched'] if _coverage['unmatched'] is not None else '—')
+    if _coverage['eligible'] is not None:
+        st.caption(f"At backend publication: {_coverage['eligible']} games within the 14-day pricing window; "
+                   f"{_coverage['outside']} outside the window. Unmatched counts exclude future games "
+                   "without a current sportsbook market.")
+    else:
+        st.caption('Quote coverage is partially unavailable in this publication; unavailable counts are not assumed to be zero.')
+    _brains=('STAT','BIG_AL','PATHI','SYSTEM_MINER','PREDICTION_TRACKER')
+    if not _weekly.empty and all(c in _weekly.columns and _weekly[c].fillna('NOT_EVALUABLE').astype(str).eq('NOT_EVALUABLE').all() for c in _brains):
+        st.info('Independent brain evidence is NOT_EVALUABLE for all published forecasts. '
+                'Zero confirmations means no evaluated confirmations, not zero potentially relevant signals.')
+    if _coverage['priced'] and 'Selected_Team' in _weekly and _weekly['Selected_Team'].isna().all():
+        st.info('Backend games have matched home/away sportsbook prices, but V5.5 has selected no betting sides. '
+                'The separate side/cover-probability/EV fields remain blank; no bets are authorized.')
     if _weekly.empty:
         st.info('No upcoming V5.5 projections in the published backend snapshot.')
         return
@@ -48834,7 +48882,19 @@ def _render_ncaaf_v551_weekly_board():
     for col in ('CORE_Projected_Home_Margin','Current_Spread','CORE_Project_Cover_Points'):
         if col not in shown.columns: shown[col]=None
         shown[col]=pd.to_numeric(shown[col],errors='coerce').map(lambda x:f'{x:+.1f}' if pd.notna(x) else '—')
+    # Prices are two-sided when no V5.5 selection exists. They are context,
+    # never a substitute for selected-side odds or an authorized betting edge.
+    for col in ('Backend_Home_Spread','Backend_Away_Spread'):
+        if col in shown.columns:
+            shown[col]=pd.to_numeric(shown[col],errors='coerce').map(
+                lambda x:f'{x:+.1f}' if pd.notna(x) else '—')
+    for col in ('Backend_Home_Odds_American','Backend_Away_Odds_American'):
+        if col in shown.columns:
+            shown[col]=pd.to_numeric(shown[col],errors='coerce').map(
+                lambda x:f'{x:+.0f}' if pd.notna(x) else '—')
     columns=['Game_Start_UTC','Matchup','Selected_Team','CORE_Model','CORE_Projected_Home_Margin',
+        'Backend_Home_Spread','Backend_Home_Odds_American','Backend_Away_Spread',
+        'Backend_Away_Odds_American','Backend_Quote_Book','Backend_Quote_Timestamp',
         'Current_Spread','Odds_American','CORE_Cover_Probability','CORE_Edge','CORE_EV',
         'STAT','BIG_AL','PATHI','SYSTEM_MINER','PREDICTION_TRACKER',
         'Confirm_Count','Oppose_Count','Market_Rich_Sharp_Move','Market_Rich_Limit',

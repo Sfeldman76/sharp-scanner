@@ -600,6 +600,10 @@ def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minut
             out.at[idx,"Backend_Quote_Timestamp"]=max(h["_snap"],a["_snap"]).isoformat()
             out.at[idx,"Backend_Quote_Game_Key"]=str(h.get("Game_Key") or "")
             out.at[idx,"Quote_State"]="FRESH_TWO_SIDED_BACKEND_PRICE_NO_SELECTED_TEAM"
+            # Quotes are available; V5.5 has not selected a betting side or
+            # calculated approved probabilities/EV. Never label this NO_QUOTE.
+            if "V55_Research_Priority" in out.columns:
+                out.at[idx,"V55_Research_Priority"]="VERIFIED_PAIRED_QUOTE__NO_BET_AUTHORITY"
             report["paired_two_sided_games"]+=1
             margin=_price(row.get("CORE_Projected_Home_Margin"))
             if oriented and margin is not None:
@@ -627,6 +631,8 @@ def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minut
             out.at[idx,"Backend_Quote_Timestamp"]=chosen["_snap"].isoformat()
             out.at[idx,"Backend_Quote_Game_Key"]=str(chosen.get("Game_Key") or "")
             out.at[idx,"Quote_State"]="FRESH_VERIFIED_SELECTED_SIDE_BACKEND_SPREAD"
+            if "V55_Research_Priority" in out.columns:
+                out.at[idx,"V55_Research_Priority"]="VERIFIED_SELECTED_SIDE_QUOTE__NO_BET_AUTHORITY"
             margin=_price(row.get("CORE_Projected_Home_Margin"))
             if oriented and margin is not None:
                 points=(margin if selected==home else -margin)+float(chosen["_line"])
@@ -668,6 +674,11 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None):
     # replacing audit['status'] with PASS would block publication entirely.
     updated.update({k: v for k, v in diag.items() if k != "status"})
     updated["market_price_join_status"] = diag["status"]
+    # Legacy model audit no_market_match was computed before the verified
+    # backend bridge. Publish a consistent, horizon-scoped market coverage count.
+    updated["no_market_match"] = int(diag["unmatched_forecast_rows"])
+    updated["outside_pricing_window_forecast_rows"] = max(
+        0,int(diag["core_forecast_rows"])-int(diag["upcoming_forecast_rows"]))
     updated["status"] = audit.get("status")
     updated["v55_bet_authority"] = 0
     updated["price_authority"] = "SHARP_SCANNER_BIGQUERY_ONLY"
