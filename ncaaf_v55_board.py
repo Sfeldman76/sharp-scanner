@@ -18,6 +18,16 @@ from datetime import datetime, timezone
 
 TABLE = os.getenv("NCAAF_V55_BOARD_TABLE", "sharplogger.sharp_data.ncaaf_v55_live_board")
 SOURCE_STATUS = "COMPLETE_V55_INDEPENDENT_WEEKLY_SHADOW"
+# Explicit project-owner decision: V5.5 replaces V1 as the *betting selection*
+# authority. This is intentionally not represented as independently calibrated.
+V55_POLICY_ID = "V55-OWNER-DIRECTED-SPREAD-PROVISIONAL-20261022-R1"
+V55_POLICY_STATUS = "USER_DIRECTED_UNCALIBRATED_ACTIVE"
+V55_POLICY_MAX_BETS = 3
+V55_POLICY_MIN_EV = 0.18
+V55_POLICY_MIN_MARGIN_POINTS = 5.0
+V55_POLICY_MIN_CONDITIONAL_PROB = 0.60
+V55_POLICY_MAX_QUOTE_AGE_MINUTES = 90
+
 
 
 def _utcnow():
@@ -46,8 +56,16 @@ def _verify_audit(audit):
         raise RuntimeError("V55_WEEKLY_NOT_VERIFIED:" + str(audit.get("status")))
     if audit.get("production_v1_probabilities_used") is not False:
         raise RuntimeError("V55_PROBABILITY_PROVENANCE_UNVERIFIED")
-    if audit.get("v55_bet_authority", 0) != 0:
-        raise RuntimeError("V55_UNREVIEWED_BET_AUTHORITY_NONZERO")
+    authority = audit.get("v55_bet_authority", 0)
+    if authority not in (0, 1):
+        raise RuntimeError("V55_AUTHORITY_INVALID_VALUE")
+    if authority == 1:
+        if (audit.get("v55_authority_policy_id") != V55_POLICY_ID
+                or audit.get("v55_authority_policy_status") != V55_POLICY_STATUS
+                or audit.get("v55_authority_probability_basis") != "UNVALIDATED_CFBD_V55_NORMAL_MARGIN"
+                or int(audit.get("v55_authorized_bet_rows") or 0) < 1
+                or int(audit.get("v55_authorized_bet_rows") or 0) > V55_POLICY_MAX_BETS):
+            raise RuntimeError("V55_UNREVIEWED_BET_AUTHORITY_NONZERO")
     return True
 
 
@@ -90,6 +108,31 @@ def publish_dataframe(weekly, audit, *, bq_client=None, publication_type="WEEKLY
         raise RuntimeError("V55_FORECAST_NOT_DATAFRAME")
     if len(weekly) > 10000:
         raise RuntimeError("V55_BOARD_UNEXPECTED_ROW_VOLUME")
+    # The publication itself is the authority journal. Check agreement between
+    # row-level actionable decisions and the audit before atomic publication.
+    if "V55_Bet_Authority" in weekly.columns:
+        bet_rows = weekly.loc[weekly["V55_Bet_Authority"].eq(1)]
+        if len(bet_rows) != int(audit.get("v55_authorized_bet_rows", 0) or 0):
+            raise RuntimeError("V55_AUTHORIZED_ROW_COUNT_DISAGREEMENT")
+        if bool(len(bet_rows)) != bool(audit.get("v55_bet_authority",0)):
+            raise RuntimeError("V55_AUTHORITY_AUDIT_FLAG_DISAGREEMENT")
+        if len(bet_rows) > V55_POLICY_MAX_BETS:
+            raise RuntimeError("V55_AUTHORIZED_ROW_CAP_EXCEEDED")
+        if len(bet_rows) and bet_rows["V55_Bet_Key"].nunique()!=len(bet_rows):
+            raise RuntimeError("V55_DUPLICATED_AUTHORIZED_GAME_SIDE")
+        for _, bet in bet_rows.iterrows():
+            if (str(bet.get("V55_Bet_Decision")) not in ("BET", "STRONG BET")
+                    or bet.get("V55_Authority_Policy_Id") != V55_POLICY_ID
+                    or bet.get("V55_Authority_State") != V55_POLICY_STATUS
+                    or not str(bet.get("Quote_State") or "").startswith("FRESH_")
+                    or _price(bet.get("V55_Policy_EV")) is None
+                    or _price(bet.get("V55_Policy_EV")) < V55_POLICY_MIN_EV
+                    or _price(bet.get("Current_Spread")) is None
+                    or not _valid_american(bet.get("Odds_American"))
+                    or not str(bet.get("Selected_Team") or "").strip()):
+                raise RuntimeError("V55_AUTHORIZED_BET_ROW_INVALID")
+    elif int(audit.get("v55_bet_authority") or 0):
+        raise RuntimeError("V55_MISSING_AUTHORIZED_ROW_SCHEMA")
     publication_type = str(publication_type).upper()
     if publication_type not in ("WEEKLY", "MARKET_REFRESH"):
         raise ValueError("V55_INVALID_PUBLICATION_TYPE")
@@ -155,7 +198,8 @@ def publish_dataframe(weekly, audit, *, bq_client=None, publication_type="WEEKLY
         raise RuntimeError("V55_BQ_COMMIT_FAILED:" + str(errors)[:600])
     result={"status":"PASS","snapshot_id":snapshot_id,"rows":int(len(weekly)),
             "priced_games":int(audit.get("priced_games",0) or 0),"type":publication_type,
-            "published_at":now,"v55_bet_authority":0}
+            "published_at":now,"v55_bet_authority":int(audit.get("v55_bet_authority",0) or 0),
+            "authorized_bets":int(audit.get("v55_authorized_bet_rows",0) or 0)}
     logging.info("[NCAAF-V55-BOARD-PUBLISH] %s",json.dumps(result,sort_keys=True))
     return result
 
@@ -234,6 +278,10 @@ def read_published_latest(*, bq_client=None, max_market_age_minutes=180):
              "V55_Raw_Cover_Prob","V55_Raw_EV","V55_Raw_Edge",
              "V55_Research_Selected_Team","V55_Research_Lean_Team",
              "V55_Research_Decision","V55_Probability_State",
+            "V55_Authority_State","V55_Bet_Key","V55_Policy_EV",
+            "V55_Policy_Win_Prob","V55_Policy_Push_Prob",
+            "V55_Policy_Lose_Prob","V55_Policy_Edge","V55_Policy_Stake_Units",
+            "V55_Authority_Policy_Id",
              "V55_Research_Selected_Side","V55_Home_Raw_Prob",
              "V55_Away_Raw_Prob","V55_Home_Raw_EV","V55_Away_Raw_EV",
              "V55_Trigger_Context","V55_Trigger_Context_Authority",
@@ -243,14 +291,42 @@ def read_published_latest(*, bq_client=None, max_market_age_minutes=180):
         for col in price_fields.intersection(frame.columns):
             frame[col]=None
         frame["Quote_State"]="STALE_BACKEND_SNAPSHOT"
+        # Never label a prior publication's time-dependent raw overlays as live.
+        for raw_col in V55_RAW_OVERLAY_COLUMNS:
+            if raw_col in frame.columns:
+                frame[raw_col]=None
+        frame["V55_Raw_Overlay_State"]="STALE_BACKEND_SNAPSHOT"
         frame["V55_Probability_State"]="STALE_BACKEND_SNAPSHOT"
         frame["V55_Research_Decision"]="NO_CURRENT_QUOTE__STALE"
         frame["V55_Bet_Decision"]="NO CURRENT QUOTE — STALE"
+        frame["V55_Bet_Authority"]=0
+    # The board may still be fresh (<180m) after an individual bet quote has
+    # expired (our tighter 90m policy). Redact authority on READ in the backend;
+    # never make the dashboard itself infer bet permission from time fields.
+    if not stale and "V55_Bet_Authority" in frame.columns:
+        quoted=pd.to_datetime(frame.get("Backend_Quote_Timestamp",
+                    pd.Series(index=frame.index,dtype="object")),utc=True,errors="coerce")
+        kicks=pd.to_datetime(frame.get("Game_Start_UTC",
+                    pd.Series(index=frame.index,dtype="object")),utc=True,errors="coerce")
+        current=pd.Timestamp(_utcnow())
+        expired=frame["V55_Bet_Authority"].eq(1) & (
+            quoted.isna() | kicks.isna() | (quoted>current) |
+            (current-quoted>pd.Timedelta(minutes=V55_POLICY_MAX_QUOTE_AGE_MINUTES)) |
+            (kicks<=current))
+        if expired.any():
+            frame.loc[expired,"V55_Bet_Authority"]=0
+            frame.loc[expired,"V55_Bet_Decision"]="BET_EXPIRED_RECHECK_QUOTE"
+            frame.loc[expired,"V55_Authority_State"]="EXPIRED_MARKET_AUTHORITY"
+            frame.loc[expired,"V55_Policy_Stake_Units"]=None
+    active_count=int(frame["V55_Bet_Authority"].eq(1).sum()) if "V55_Bet_Authority" in frame else 0
+    strong_count=int((frame.get("V55_Bet_Decision",pd.Series(dtype="object"))=="STRONG BET").sum()) if active_count else 0
     meta={**audit,"publication_status":"STALE_MARKET" if stale else "PASS",
           "publication_type":str(commit.publication_type),
           "published_at_utc":published.isoformat(),"published_age_minutes":round(age,1),
           "published_rows":len(frame),"snapshot_id":str(commit.snapshot_id),
-          "v55_bet_authority":0}
+          "v55_bet_authority":1 if active_count else 0,
+          "v55_authorized_bet_rows":active_count,
+          "v55_strong_bet_rows":strong_count}
     return frame,meta
 
 
@@ -691,6 +767,252 @@ def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minut
     return out,report
 
 
+# V5.5 raw pregame evidence is DISPLAY CONTEXT, not qualified evidence or betting authority.
+# Its source is the existing scanner-enriched BigQuery market view, never V1
+# probabilities, an independent odds API, or a dashboard computation.
+V55_RAW_OVERLAY_TABLE = 'sharplogger.sharp_data.moves_with_features_merged'
+V55_RAW_OVERLAY_FIELDS = (
+    'BigAl_Active_Text', 'BigAl_Side_Support_Count', 'BigAl_Side_Conflict_Count',
+    'Pathi_Active_Text', 'Pathi_System_Count', 'System_Signals_Text',
+    'NCAAF_RV2_System_Summary', 'Miner_System_Summary', 'Miner_System_Count',
+    'System_Side_Consensus_Count', 'System_Side_Conflict_Count',
+    'NCAAF_Stat_Active', 'NCAAF_Stat_Trust',
+    'PT_Consensus_Side', 'PT_Consensus', 'Prediction_Tracker_Consensus',
+    'Open_Value', 'Line_Move_From_Open', 'Line_Move_30m', 'Line_Move_60m',
+    'Sharp_Book_Move_60m', 'Sharp_Soft_Divergence',
+    'Sharp_Consensus_Direction', 'Crossed_Key_3_Last60m',
+    'Crossed_Key_7_Last60m', 'Crossed_Key_10_Last60m',
+    'Crossed_Key_14_Last60m', 'Key_Cross_Confirmed_By_Sharp_Books',
+    'Opening_Limit', 'Current_vs_Best_Line',
+)
+V55_RAW_OVERLAY_COLUMNS = (
+    'V55_Raw_BigAl', 'V55_Raw_Pathi', 'V55_Raw_Miner',
+    'V55_Raw_STAT', 'V55_Raw_PT', 'V55_Raw_Market_Rich',
+    'V55_Raw_Overlay_State', 'V55_Raw_Overlay_Source',
+    'V55_Raw_Overlay_AsOf_UTC', 'V55_Raw_Overlay_Detail_JSON',
+)
+
+
+def _v55_raw_clean(value):
+    """Serialize pregame evidence safely without turning NaN into signals."""
+    if value is None:
+        return None
+    try:
+        import pandas as pd
+        if not isinstance(value, (list, dict)) and bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, default=_json_default, ensure_ascii=False)[:1200]
+    s = str(value).strip()
+    return s[:1200] if s and s.lower() not in ('nan', 'none', 'null', '—', '-') else None
+
+
+def _v55_raw_named(row, field, count_field=None):
+    if field in row.index:
+        name = _v55_raw_clean(row.get(field))
+        if name:
+            return name[:240]
+        count = _price(row.get(count_field)) if count_field in row.index else None
+        return (f'{int(count)} unnamed triggers' if count and count > 0 else
+                'NONE_REPORTED' if count is not None else 'NONE_REPORTED')
+    count = _price(row.get(count_field)) if count_field in row.index else None
+    if count is not None:
+        return f'{int(count)} unnamed triggers' if count > 0 else '0 (no names in feed)'
+    return 'NOT_PUBLISHED'
+
+
+def _v55_raw_rich(row):
+    names = (
+        ('Line_Move_From_Open', 'Open→Now'), ('Line_Move_30m', '30m'),
+        ('Line_Move_60m', '60m'), ('Sharp_Book_Move_60m', 'Sharp60'),
+        ('Sharp_Soft_Divergence', 'Sharp/Soft'),
+    )
+    vals = []
+    for col, label in names:
+        if col in row.index:
+            v = _price(row.get(col))
+            if v is not None:
+                vals.append(f'{label} {v:+.1f}')
+    for col, label in (
+        ('Crossed_Key_3_Last60m', 'Crossed 3'),
+        ('Crossed_Key_7_Last60m', 'Crossed 7'),
+        ('Crossed_Key_10_Last60m', 'Crossed 10'),
+        ('Crossed_Key_14_Last60m', 'Crossed 14'),
+    ):
+        if col in row.index and (_price(row.get(col)) or 0) > 0:
+            vals.append(label)
+    return ' | '.join(vals[:6]) if vals else 'NOT_PUBLISHED'
+
+
+def _v55_read_enriched_pregame_overlays(bq_client, *, horizon_days=14, lookback_minutes=240):
+    """Small, bounded, optional BQ enrichment; NEVER changes V5.5 votes.
+
+    Returns (DataFrame, source_status). Read failures are explicit rather than
+    pretending there are no Big Al/Pathi/Miner triggers.
+    """
+    import pandas as pd
+    required = {'Game_Start', 'Home_Team_Norm', 'Away_Team_Norm',
+                'Outcome', 'Snapshot_Timestamp', 'Sport', 'Market'}
+    try:
+        schema = {f.name for f in bq_client.get_table(V55_RAW_OVERLAY_TABLE).schema}
+    except Exception as exc:
+        return pd.DataFrame(), 'SOURCE_SCHEMA_UNAVAILABLE:'+type(exc).__name__
+    missing = required - schema
+    if missing:
+        return pd.DataFrame(), 'MISSING_SOURCE_KEYS:'+','.join(sorted(missing))
+    optional = [x for x in (*V55_RAW_OVERLAY_FIELDS, 'Bookmaker', 'Book') if x in schema]
+    if not optional:
+        return pd.DataFrame(), 'NO_RAW_OVERLAY_COLUMNS_IN_SOURCE'
+    fields = list(sorted(required)) + optional
+    sql = f"""SELECT {','.join('`'+x+'`' for x in fields)}
+      FROM `{V55_RAW_OVERLAY_TABLE}`
+      WHERE UPPER(TRIM(CAST(Sport AS STRING)))='NCAAF'
+        AND LOWER(TRIM(CAST(Market AS STRING)))='spreads'
+        AND Game_Start > CURRENT_TIMESTAMP()
+        AND Game_Start <= TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL {int(horizon_days)} DAY)
+        AND Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {int(lookback_minutes)} MINUTE)
+        AND Snapshot_Timestamp <= CURRENT_TIMESTAMP()
+        AND Snapshot_Timestamp < Game_Start
+      ORDER BY Snapshot_Timestamp DESC LIMIT 20000"""
+    try:
+        frame = bq_client.query(sql).to_dataframe(create_bqstorage_client=False)
+        return frame, 'PASS' if len(frame) < 20000 else 'TRUNCATED_20000_ROWS'
+    except Exception as exc:
+        return pd.DataFrame(), 'SOURCE_QUERY_FAILED:'+type(exc).__name__
+
+
+def attach_v55_raw_pregame_overlays(board, enrich, *, source_status='PASS'):
+    """Attach unqualified, timestamped *display-only* raw overlays.
+
+    Exact two-team/home-away/side identity and as-of<=quoted time required.
+    These columns must never mutate qualified votes, CORE, policy, or authority.
+    """
+    import pandas as pd
+    out = board.copy()
+    for col in V55_RAW_OVERLAY_COLUMNS:
+        out[col] = None
+    out['V55_Raw_Overlay_State'] = 'NO_VERIFIED_QUOTED_SIDE'
+    report = {'status':source_status, 'priced_sides':0, 'matched_raw_overlays':0,
+              'quote_count_context_rows':0, 'named_big_al_rows':0,
+              'named_pathi_rows':0, 'named_miner_rows':0, 'rich_rows':0}
+    if out.empty:
+        return out, report
+    has_source = isinstance(enrich, pd.DataFrame) and not enrich.empty
+    if has_source:
+        required={'Game_Start', 'Home_Team_Norm','Away_Team_Norm','Outcome','Snapshot_Timestamp'}
+        if not required.issubset(enrich.columns):
+            has_source = False
+            report['status'] = 'SOURCE_REQUIRED_IDENTITY_MISSING'
+        else:
+            e=enrich.copy()
+            e['_kick'] = pd.to_datetime(e['Game_Start'],utc=True,errors='coerce')
+            e['_snap'] = pd.to_datetime(e['Snapshot_Timestamp'],utc=True,errors='coerce')
+            e['_home'] = e['Home_Team_Norm'].map(_norm_team)
+            e['_away'] = e['Away_Team_Norm'].map(_norm_team)
+            e['_side'] = e['Outcome'].map(_norm_team)
+            e = e.loc[e['_home'].ne('') & e['_away'].ne('') & e['_side'].ne('')
+                      & e['_snap'].notna() & e['_kick'].notna()].copy()
+    for idx, r in out.iterrows():
+        quoted = _timestamp(r.get('Backend_Quote_Timestamp'))
+        kickoff = _timestamp(r.get('Game_Start_UTC'))
+        if pd.isna(quoted) or pd.isna(kickoff):
+            continue
+        report['priced_sides'] += 1
+        # Preserve the existing home-side quote context as *unnamed*, even if
+        # its direction is not the selected V5.5 research side.
+        prior = r.get('V55_Trigger_Context')
+        context = {}
+        if _v55_raw_clean(prior):
+            try: context=json.loads(prior)
+            except (TypeError, ValueError): context={}
+        if context:
+            report['quote_count_context_rows'] += 1
+            bigals = [context.get('BigAl_Side_Support_Count'),context.get('BigAl_Side_Conflict_Count')]
+            if any(_price(x) is not None for x in bigals):
+                out.at[idx,'V55_Raw_BigAl'] = ('HOME quote counts: support '+str(bigals[0] or '0')+
+                                             ', opposition '+str(bigals[1] or '0')+' (unnamed)')
+            pathi=context.get('Pathi_System_Count')
+            if _price(pathi) is not None:
+                out.at[idx,'V55_Raw_Pathi'] = 'HOME quote systems: '+str(pathi)+' (unnamed)'
+            sys1=context.get('System_Side_Consensus_Count')
+            sys2=context.get('System_Side_Conflict_Count')
+            if _price(sys1) is not None or _price(sys2) is not None:
+                out.at[idx,'V55_Raw_Miner'] = ('HOME quote system counts: support '+str(sys1 or '0')+
+                                             ', opposition '+str(sys2 or '0')+' (not Miner IDs)')
+            out.at[idx,'V55_Raw_Overlay_State'] = 'QUOTE_HOME_SIDE_COUNTS_ONLY'
+            out.at[idx,'V55_Raw_Overlay_Source'] = MARKET_TABLE
+        if not has_source:
+            continue
+        (home, away), oriented = _matchup_teams(r)
+        selected = _norm_team(r.get('V55_Research_Lean_Team') or r.get('Selected_Team'))
+        if not oriented or selected not in (home, away):
+            continue
+        valid = e.loc[e['_home'].eq(home) & e['_away'].eq(away) & e['_side'].eq(selected)
+                      & (e['_kick']-kickoff).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))
+                      & e['_snap'].le(quoted) & e['_snap'].lt(kickoff)
+                      & (quoted-e['_snap']).le(pd.Timedelta(minutes=240))]
+        # Market Rich is sportsbook-specific; never graft another book's
+        # movement/line onto the verified execution quote. Where a book
+        # identifier is published in the enriched source it MUST agree.
+        book = str(r.get('Backend_Quote_Book') or '').lower().strip()
+        if book and ('Bookmaker' in valid.columns or 'Book' in valid.columns):
+            v1 = valid['Bookmaker'] if 'Bookmaker' in valid.columns else pd.Series('',index=valid.index)
+            v2 = valid['Book'] if 'Book' in valid.columns else pd.Series('',index=valid.index)
+            source_books=v1.fillna('').astype(str).str.lower().str.strip()
+            source_books=source_books.mask(source_books.isin(('', 'nan','none')),
+                                            v2.fillna('').astype(str).str.lower().str.strip())
+            valid=valid.loc[source_books.eq(book)]
+        if valid.empty:
+            continue
+        picked=valid.sort_values('_snap',ascending=False).iloc[0]
+        def present(k):return k in picked.index
+        out.at[idx,'V55_Raw_BigAl'] = _v55_raw_named(picked,'BigAl_Active_Text','BigAl_Side_Support_Count')
+        out.at[idx,'V55_Raw_Pathi'] = _v55_raw_named(picked,'Pathi_Active_Text','Pathi_System_Count')
+        # The existing scanner sometimes publishes named systems as one
+        # combined human-readable field; separate only explicitly labeled
+        # families. Never infer a named rule from a numerical count.
+        combined=_v55_raw_clean(picked.get('System_Signals_Text'))
+        if combined:
+            labels=[v.strip() for v in combined.split('|') if v.strip()]
+            for col, prefix in (('V55_Raw_BigAl','BIG AL'),('V55_Raw_Pathi','PATHI')):
+                current=str(out.at[idx,col] or '')
+                if current in ('NOT_PUBLISHED','NONE_REPORTED') or 'unnamed triggers' in current:
+                    named=[x for x in labels if x.upper().startswith(prefix+' ')]
+                    if named:
+                        out.at[idx,col]=' | '.join(named)[:240]
+        if present('NCAAF_RV2_System_Summary'):
+            out.at[idx,'V55_Raw_Miner'] = _v55_raw_named(picked,'NCAAF_RV2_System_Summary','Miner_System_Count')
+        else:
+            out.at[idx,'V55_Raw_Miner'] = _v55_raw_named(picked,'Miner_System_Summary','Miner_System_Count')
+        if present('NCAAF_Stat_Active'):
+            active = _price(picked.get('NCAAF_Stat_Active'))
+            trust = _price(picked.get('NCAAF_Stat_Trust'))
+            out.at[idx,'V55_Raw_STAT'] = ('ACTIVE'+(f' trust={trust:.2f}' if trust is not None else '')
+                                              if active and active > 0 else 'NOT_ACTIVE' if active is not None else 'NOT_PUBLISHED')
+        for pt_col in ('PT_Consensus_Side','PT_Consensus','Prediction_Tracker_Consensus'):
+            if present(pt_col) and _v55_raw_clean(picked.get(pt_col)):
+                out.at[idx,'V55_Raw_PT'] = _v55_raw_clean(picked[pt_col])[:240]
+                break
+        out.at[idx,'V55_Raw_Market_Rich'] = _v55_raw_rich(picked)
+        # The detailed original data accompanies the compact UI indicator;
+        # source timestamp and exact side identity are persisted for audit.
+        raw = {k:_v55_raw_clean(picked.get(k)) for k in V55_RAW_OVERLAY_FIELDS if present(k)}
+        raw = {k:v for k,v in raw.items() if v is not None}
+        out.at[idx,'V55_Raw_Overlay_Detail_JSON'] = json.dumps(raw,ensure_ascii=False,sort_keys=True)
+        out.at[idx,'V55_Raw_Overlay_AsOf_UTC'] = picked['_snap'].isoformat()
+        out.at[idx,'V55_Raw_Overlay_Source'] = V55_RAW_OVERLAY_TABLE
+        out.at[idx,'V55_Raw_Overlay_State'] = 'MATCHED_PRE_GAME_ENRICHED_SIDE__UNQUALIFIED'
+        report['matched_raw_overlays'] += 1
+        for col, key in [('V55_Raw_BigAl','named_big_al_rows'),('V55_Raw_Pathi','named_pathi_rows'),
+                         ('V55_Raw_Miner','named_miner_rows'),('V55_Raw_Market_Rich','rich_rows')]:
+            value=str(out.at[idx,col] or '')
+            if value and value not in ('NOT_PUBLISHED','NONE_REPORTED') and 'unnamed' not in value and not value.startswith('0 ('):
+                report[key] += 1
+    return out,report
+
+
 def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None):
     """Enforce one backend price authority for both weekly and market refresh."""
     import json
@@ -733,6 +1055,12 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None):
         research["calibration_unavailable_reason"] = cal_problem
     evidence, evidence_problem = read_v55_qualified_evidence(bq_client)
     out, brain = attach_v55_qualified_evidence(out,evidence)
+    # Attach named, time-verified RAW context strictly for display. This is
+    # independent of qualified evidence/votes and never upgrades a bet.
+    overlay_frame, overlay_source_status = _v55_read_enriched_pregame_overlays(bq_client)
+    out, raw_overlays = attach_v55_raw_pregame_overlays(
+        out,overlay_frame,source_status=overlay_source_status)
+    updated["v55_raw_overlay_audit"] = raw_overlays
     if evidence_problem:
         brain["evidence_unavailable_reason"] = evidence_problem
     updated.update({k:v for k,v in research.items() if k!="status"})
@@ -740,12 +1068,17 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None):
     updated.update(brain)
     # The original model source audit is immutable: price/research statuses
     # must never replace it with a generic PASS marker.
+    # Governance handoff is independent of the model's immutable, shadow-only
+    # training audit. Only the published V5.5 decision policy can grant bets.
+    out, policy = apply_v55_owner_betting_policy(out)
+    updated.update(policy)
     updated["status"]=audit["status"]
-    updated["v55_bet_authority"] = 0
-    updated["price_join_semantics"] = "FRESH_QUOTES_INDEPENDENT_RESEARCH_ONLY"
+    updated["price_join_semantics"] = "FRESH_QUOTES_V55_OWNER_DIRECTED_DECISION"
     log("[NCAAF-V55-BACKEND-PRICE-BRIDGE] " + json.dumps(diag,sort_keys=True))
     log("[NCAAF-V55-RESEARCH-SIDE-EV] " + json.dumps(research,sort_keys=True))
     log("[NCAAF-V55-INDEPENDENT-BRAIN-EVIDENCE] " + json.dumps(brain,sort_keys=True))
+    log("[NCAAF-V55-RAW-OVERLAYS] " + json.dumps(raw_overlays,sort_keys=True))
+    log("[NCAAF-V55-OWNER-AUTHORITY] " + json.dumps(policy,sort_keys=True))
     return out, updated
 
 
@@ -1052,3 +1385,174 @@ def attach_v55_qualified_evidence(frame,events):
     out["V55_Bet_Authority"]=0
     out["V55_Bet_Decision"]="RESEARCH_ONLY_NO_AUTHORITY"
     return out,report
+
+
+# ----- Explicit V5.5 betting-selection promotion: owner-directed, provisional -----
+
+def _v55_integer_margin_win_push_loss(mu, sigma, line):
+    """Continuity-corrected discrete football margin approximation.
+
+    Computes probability of winning, pushing and losing the selected spread.
+    Retrospective residual scale is not a calibrated probability distribution.
+    Integer-margin push mass is modeled explicitly rather than treated as loss.
+    """
+    if not all(math.isfinite(float(v)) for v in (mu,sigma,line)) or sigma<=0:
+        raise ValueError("invalid projected margin distribution")
+    # Only integer and half-point US football spreads are supported.
+    if abs(2*line-round(2*line))>1e-7:
+        raise ValueError("unsupported fractional point spread")
+    target=-float(line)
+    if abs(target-round(target))<1e-8:
+        high=target+0.5
+        low=target-0.5
+        p_win=1-_normal_cdf((high-mu)/sigma)
+        p_lose=_normal_cdf((low-mu)/sigma)
+        p_push=max(0.0,1-p_win-p_lose)
+    else:
+        boundary=math.ceil(target)-0.5
+        p_win=1-_normal_cdf((boundary-mu)/sigma)
+        p_push=0.0
+        p_lose=1-p_win
+    return p_win,p_push,p_lose
+
+
+def _v55_bet_key(row):
+    """Stable across 30m repricing: same game, market and bet side."""
+    key="|".join(("NCAAF","V55","SPREADS",
+        str(row.get("Game_ID") or "").strip(),
+        str(row.get("Game_Start_UTC") or "").strip(),
+        _norm_team(row.get("Selected_Team"))))
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:28]
+
+
+def apply_v55_owner_betting_policy(frame, *, now=None, enabled=None):
+    """V5.5-only provisional *recommendation* authority, never stake execution.
+
+    The user explicitly replaced frozen V1 as betting selector. No uncalibrated
+    probability is described as qualified OOS. No qualified opposing evidence may
+    be overruled; missing/unevaluable brains abstain. Up to three model-only bets
+    are published for the next cycle, with an idempotent stable game-side key.
+    Set NCAAF_V55_BET_AUTHORITY_MODE=OFF as an immediate kill switch.
+    """
+    import pandas as pd
+    out=frame.copy()
+    # Explicit default follows the current owner's instruction; scheduler runs
+    # the policy at the next market refresh, with no new dropdown/job.
+    mode=str(os.getenv("NCAAF_V55_BET_AUTHORITY_MODE","USER_DIRECTED_PROVISIONAL")).upper().strip()
+    active=(mode=="USER_DIRECTED_PROVISIONAL") if enabled is None else bool(enabled)
+    now=_timestamp(now if now is not None else datetime.now(timezone.utc))
+    if pd.isna(now): raise ValueError("INVALID_POLICY_TIME")
+    new_fields=("V55_Authority_State","V55_Authority_Policy_Id","V55_Bet_Key",
+        "V55_Policy_Win_Prob","V55_Policy_Push_Prob","V55_Policy_Lose_Prob",
+        "V55_Policy_EV","V55_Policy_Edge","V55_Policy_Model_Edge_Points",
+        "V55_Policy_Stake_Units","V55_Policy_Quote_Age_Min","V55_Authority_Hold_Reason")
+    for k in new_fields: out[k]=None
+    out["V55_Bet_Decision"]="PASS"
+    out["V55_Bet_Authority"]=0
+    status={"v55_authority_policy_id":V55_POLICY_ID,
+        "v55_authority_policy_status":V55_POLICY_STATUS if active else "DISABLED_BY_OPERATOR",
+        "v55_authority_probability_basis":"UNVALIDATED_CFBD_V55_NORMAL_MARGIN",
+        "v55_authorized_bet_rows":0,"v55_strong_bet_rows":0,
+        "v55_candidate_rows":0,"v55_authority_evaluable":0,"v55_bet_authority":0,
+        "v55_max_bets_per_snapshot":V55_POLICY_MAX_BETS,
+        "v55_policy_min_ev":V55_POLICY_MIN_EV,
+        "v55_policy_min_margin_points":V55_POLICY_MIN_MARGIN_POINTS,
+        "v55_automatic_wager_execution":False,"v55_v1_selector_used":False,
+        "v55_policy_status":"NO_AUTHORIZED_BETS"}
+    if not active:
+        out["V55_Bet_Decision"]="AUTHORITY_DISABLED"
+        return out,status
+    candidates=[]
+    for i,r in out.iterrows():
+        if not str(r.get("Quote_State") or "").startswith("FRESH_TWO_SIDED_"):
+            out.at[i,"V55_Authority_Hold_Reason"]="NO_VERIFIED_TWO_SIDED_QUOTE"
+            out.at[i,"V55_Bet_Decision"]="RESEARCH_ONLY_NO_AUTHORITY"
+            continue
+        if str(r.get("CORE_Model"))!="NONLINEAR_HGB":
+            out.at[i,"V55_Authority_Hold_Reason"]="UNVERIFIED_MODEL"
+            continue
+        if str(r.get("V55_Research_Selected_Side") or "") not in ("HOME","AWAY"):
+            out.at[i,"V55_Authority_Hold_Reason"]="NO_PROVISIONAL_RESEARCH_SIDE"
+            continue
+        kick=_timestamp(r.get("Game_Start_UTC"))
+        qt=_timestamp(r.get("Backend_Quote_Timestamp"))
+        if pd.isna(kick) or pd.isna(qt) or not now<kick<=now+pd.Timedelta(days=7) or not qt<=now or qt>=kick:
+            out.at[i,"V55_Authority_Hold_Reason"]="INVALID_OR_OUT_OF_HORIZON_KICKOFF_QUOTE"
+            continue
+        quote_age=(now-qt).total_seconds()/60.0
+        if quote_age>V55_POLICY_MAX_QUOTE_AGE_MINUTES:
+            out.at[i,"V55_Authority_Hold_Reason"]="QUOTE_OLDER_THAN_POLICY_LIMIT"
+            continue
+        if _price(r.get("CORE_Feature_Coverage")) is None or _price(r.get("CORE_Feature_Coverage"))<0.95:
+            out.at[i,"V55_Authority_Hold_Reason"]="INSUFFICIENT_CORE_FEATURE_COVERAGE"
+            continue
+        if _price(r.get("Oppose_Count")) is not None and _price(r.get("Oppose_Count"))>0:
+            out.at[i,"V55_Authority_Hold_Reason"]="VERIFIED_INDEPENDENT_CONFLICT_VETO"
+            out.at[i,"V55_Bet_Decision"]="VETO"
+            continue
+        if (not str(r.get("Game_ID") or "").strip()
+                or not str(r.get("Selected_Team") or "").strip()
+                or not str(r.get("Backend_Quote_Book") or "").strip()):
+            out.at[i,"V55_Authority_Hold_Reason"]="UNPRICED_OR_UNIDENTIFIED_SIDE"
+            continue
+        spread=_price(r.get("Current_Spread"))
+        american=_price(r.get("Odds_American"))
+        mu=_price(r.get("CORE_Projected_Home_Margin"))
+        sigma=_price(r.get("CORE_Residual_SD"))
+        if any(v is None for v in (spread,american,mu,sigma)) or not 8<=sigma<=30 or not _valid_american(american):
+            out.at[i,"V55_Authority_Hold_Reason"]="INVALID_DISTRIBUTION_OR_EXECUTABLE_PRICE"
+            continue
+        if not -125<=american<=130:
+            out.at[i,"V55_Authority_Hold_Reason"]="PRICE_OUTSIDE_POLICY_BAND"
+            continue
+        side=str(r.get("V55_Research_Selected_Side"))
+        side_mu=mu if side=="HOME" else -mu
+        model_points=side_mu+spread
+        try: pw,pp,pl=_v55_integer_margin_win_push_loss(side_mu,sigma,spread)
+        except (ValueError,OverflowError):
+            out.at[i,"V55_Authority_Hold_Reason"]="UNSUPPORTED_SPREAD_TICK"
+            continue
+        net=_american_net(american)
+        if net is None: continue
+        ev=pw*net-pl
+        conditional=pw/(pw+pl) if pw+pl>0 else 0
+        edge=conditional-1/(1+net)
+        out.at[i,"V55_Policy_Win_Prob"]=pw
+        out.at[i,"V55_Policy_Push_Prob"]=pp
+        out.at[i,"V55_Policy_Lose_Prob"]=pl
+        out.at[i,"V55_Policy_EV"]=ev
+        out.at[i,"V55_Policy_Edge"]=edge
+        out.at[i,"V55_Policy_Model_Edge_Points"]=model_points
+        out.at[i,"V55_Policy_Quote_Age_Min"]=round(quote_age,1)
+        status["v55_authority_evaluable"]+=1
+        if (ev<V55_POLICY_MIN_EV or model_points<V55_POLICY_MIN_MARGIN_POINTS
+                or conditional<V55_POLICY_MIN_CONDITIONAL_PROB):
+            out.at[i,"V55_Authority_Hold_Reason"]="BELOW_CONSERVATIVE_PROVISIONAL_BET_THRESHOLDS"
+            out.at[i,"V55_Bet_Decision"]="CANDIDATE" if ev>0.08 and model_points>=3 else "PASS"
+            if out.at[i,"V55_Bet_Decision"]=="CANDIDATE":status["v55_candidate_rows"]+=1
+            continue
+        # Eligible rows are ranked before applying a deterministic cap. Never
+        # turn a stale or non-verifiable quote into a formal recommendation.
+        candidates.append((float(ev),float(model_points),str(r.get("Game_ID")),i))
+    candidates.sort(key=lambda x:(-x[0],-x[1],x[2]))
+    for rank,(_,_,_,i) in enumerate(candidates):
+        if rank>=V55_POLICY_MAX_BETS:
+            out.at[i,"V55_Bet_Decision"]="CANDIDATE"
+            out.at[i,"V55_Authority_Hold_Reason"]="MAX_THREE_MODEL_BETS_PER_SNAPSHOT"
+            status["v55_candidate_rows"]+=1
+            continue
+        r=out.loc[i]
+        qualified=int(_price(r.get("Confirm_Count")) or 0)
+        decision="STRONG BET" if qualified>=2 else "BET"
+        out.at[i,"V55_Bet_Decision"]=decision
+        out.at[i,"V55_Bet_Authority"]=1
+        out.at[i,"V55_Authority_State"]=V55_POLICY_STATUS
+        out.at[i,"V55_Authority_Policy_Id"]=V55_POLICY_ID
+        out.at[i,"V55_Bet_Key"]=_v55_bet_key(r)
+        out.at[i,"V55_Policy_Stake_Units"]=0.5 if qualified>=2 else 0.25
+        out.at[i,"V55_Authority_Hold_Reason"]=None
+        status["v55_authorized_bet_rows"]+=1
+        if qualified>=2: status["v55_strong_bet_rows"]+=1
+    status["v55_bet_authority"]=1 if status["v55_authorized_bet_rows"] else 0
+    status["v55_policy_status"]="USER_DIRECTED_PROVISIONAL_BETS_PUBLISHED" if status["v55_authorized_bet_rows"] else "NO_BETS_PASSED_POLICY"
+    return out,status

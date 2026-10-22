@@ -48819,7 +48819,7 @@ def _ncaaf_v55_quote_coverage(frame, audit):
 def _render_ncaaf_v551_weekly_board():
     st.subheader('V5.5 — Backend Published Board')
     st.caption('V5.5 NONLINEAR_HGB independent CFBD CORE + current sportsbook quotes + STAT, Big Al, Pathi, '
-               'Miner, Prediction Tracker and Market Rich. Research candidate grades are provisional; '
+               'Miner, Prediction Tracker and Market Rich. Owner-directed V5.5 spread betting authority is provisional and risk-capped; '
                'No V1 scoring or UI model inference. Spread market only until separate '
                'V5.5 H2H and totals models are deployed.')
     try:
@@ -48848,6 +48848,19 @@ def _render_ncaaf_v551_weekly_board():
     b.metric('Verified priced games',_coverage['priced'])
     c.metric('Multiple brain confirmations',int(_audit.get('multi_family',0)))
     d.metric('Unmatched eligible games',_coverage['unmatched'] if _coverage['unmatched'] is not None else '—')
+    _authorized=int(_audit.get('v55_authorized_bet_rows',0) or 0)
+    _strong=int(_audit.get('v55_strong_bet_rows',0) or 0)
+    _candidates=int(_audit.get('v55_candidate_rows',0) or 0)
+    aa,bb,cc=st.columns(3)
+    aa.metric('V5.5 Authorized Bets',_authorized)
+    bb.metric('Strong Bets',_strong)
+    cc.metric('V5.5 Candidates',_candidates)
+    if _authorized:
+        st.warning('V5.5 owner-directed provisional betting policy is ACTIVE. Raw model probabilities '
+                   'have NOT passed independent chronological OOS calibration; bookmaker prices and lines '
+                   'must be rechecked before a wager. The board does not place wagers.')
+    elif _audit.get('v55_authority_policy_status')=='DISABLED_BY_OPERATOR':
+        st.info('V5.5 betting authority is disabled by the backend operator.')
     if _coverage['eligible'] is not None:
         st.caption(f"At backend publication: {_coverage['eligible']} games within the 14-day pricing window; "
                    f"{_coverage['outside']} outside the window. Unmatched counts exclude future games "
@@ -48864,11 +48877,14 @@ def _render_ncaaf_v551_weekly_board():
         st.caption(f"Independent V5.5 research: {_research_n} provisional positive-normal-EV side leans; "
                    f"{_calibrated_n} with qualified chronological OOS calibration. "
                    "Raw probabilities and expected value are UNCALIBRATED when no OOS artifact is qualified; "
-                   "none are authorized bets.")
+                   f"{_authorized} provisional bets authorized under owner-directed policy.")
     if _weekly.empty:
         st.info('No upcoming V5.5 projections in the published backend snapshot.')
         return
     shown=_weekly.copy()
+    if 'V55_Bet_Authority' in shown.columns:
+        # UI sorting only: all authority/EV decisions were already made backend.
+        shown=shown.sort_values(by=['V55_Bet_Authority'],ascending=False,kind='stable')
     if 'Game_Start_UTC' in shown.columns:
         _start=pd.to_datetime(shown['Game_Start_UTC'],errors='coerce',utc=True)
         shown=shown.loc[_start.gt(pd.Timestamp.now(tz='UTC'))].copy()
@@ -48882,7 +48898,8 @@ def _render_ncaaf_v551_weekly_board():
                 shown[_price_col]=None
         shown['V55_Bet_Decision']='NO VERIFIED PRICE'
     for col in ('CORE_Cover_Probability','CORE_Edge','CORE_EV',
-                'V55_Raw_Cover_Prob','V55_Raw_Edge','V55_Raw_EV'):
+                'V55_Raw_Cover_Prob','V55_Raw_Edge','V55_Raw_EV',
+                'V55_Policy_Win_Prob','V55_Policy_Push_Prob','V55_Policy_EV','V55_Policy_Edge'):
         if col not in shown.columns: shown[col]=None
         shown[col]=pd.to_numeric(shown[col],errors='coerce').map(lambda x:f'{x:.1%}' if pd.notna(x) else '—')
     for col in ('CORE_Projected_Home_Margin','Current_Spread','CORE_Project_Cover_Points'):
@@ -48903,18 +48920,56 @@ def _render_ncaaf_v551_weekly_board():
         'Backend_Away_Odds_American','Backend_Quote_Book','Backend_Quote_Timestamp',
         'Current_Spread','Odds_American','V55_Research_Lean_Team',
         'V55_Raw_Cover_Prob','V55_Raw_Edge','V55_Raw_EV','V55_Probability_State',
+        'V55_Policy_Win_Prob','V55_Policy_Push_Prob','V55_Policy_EV','V55_Policy_Edge',
+        'V55_Authority_State','V55_Authority_Hold_Reason','V55_Bet_Key','V55_Policy_Stake_Units',
         'CORE_Cover_Probability','CORE_Edge','CORE_EV',
-        'V55_Research_Decision','V55_Trigger_Context_Authority','V55_Trigger_Context',
+        'V55_Research_Decision',
+        # RAW source-preserving pregame overlays; qualified votes remain separate.
+        'V55_Raw_BigAl','V55_Raw_Pathi','V55_Raw_Miner','V55_Raw_STAT',
+        'V55_Raw_PT','V55_Raw_Market_Rich','V55_Raw_Overlay_State',
+        'V55_Trigger_Context_Authority','V55_Trigger_Context',
         'STAT','BIG_AL','PATHI','SYSTEM_MINER','PREDICTION_TRACKER',
         'Confirm_Count','Oppose_Count','Market_Rich_Sharp_Move','Market_Rich_Limit',
-        'Market_Rich_Book_Count','V55_Research_Priority','V55_Bet_Decision','Quote_State']
-    st.dataframe(shown[[x for x in columns if x in shown]].rename(columns={'V55_Bet_Decision':'Research Decision (Not Authorized)'}),use_container_width=True,hide_index=True)
+        'Market_Rich_Book_Count','V55_Research_Priority','V55_Bet_Authority','V55_Bet_Decision','Quote_State']
+    _overlay_names={
+        'V55_Bet_Decision':'V5.5 Backend Decision',
+        'V55_Raw_BigAl':'Big Al (raw)',
+        'V55_Raw_Pathi':'Pathi (raw)',
+        'V55_Raw_Miner':'Miner (raw)',
+        'V55_Raw_STAT':'STAT (raw)',
+        'V55_Raw_PT':'PT (raw)',
+        'V55_Raw_Market_Rich':'Market Rich (raw)',
+        'V55_Raw_Overlay_State':'Raw Overlay Source Status',
+        'STAT':'Qualified STAT','BIG_AL':'Qualified Big Al',
+        'PATHI':'Qualified Pathi','SYSTEM_MINER':'Qualified Miner',
+        'PREDICTION_TRACKER':'Qualified PT',
+    }
+    _overlay_fields=('V55_Raw_BigAl','V55_Raw_Pathi','V55_Raw_Miner',
+                     'V55_Raw_STAT','V55_Raw_PT','V55_Raw_Market_Rich')
+    for _field in _overlay_fields:
+        if _field in shown.columns:
+            shown[_field]=shown[_field].fillna('NOT_PUBLISHED').replace('', 'NOT_PUBLISHED')
+    st.dataframe(shown[[x for x in columns if x in shown]].rename(columns=_overlay_names),use_container_width=True,hide_index=True)
+    _raw_matched=int(shown.get('V55_Raw_Overlay_State',pd.Series(index=shown.index,dtype='object')).eq(
+                     'MATCHED_PRE_GAME_ENRICHED_SIDE__UNQUALIFIED').sum())
+    _raw_count_only=int(shown.get('V55_Raw_Overlay_State',pd.Series(index=shown.index,dtype='object')).eq(
+                     'QUOTE_HOME_SIDE_COUNTS_ONLY').sum())
+    st.caption(f'Raw system/market overlays: {_raw_matched} side-matched enriched records; '
+               f'{_raw_count_only} additional home-side count-only records. '
+               'Raw signals are observation context, NOT V5.5 qualified support votes. '
+               'NOT_PUBLISHED means the underlying source did not supply the field.')
+    with st.expander('Source and timestamp details for V5.5 raw overlays', expanded=False):
+        _details=['Game_Start_UTC','Matchup','V55_Research_Lean_Team',
+                  'V55_Raw_Overlay_State','V55_Raw_Overlay_Source',
+                  'V55_Raw_Overlay_AsOf_UTC','V55_Raw_Overlay_Detail_JSON',
+                  'V55_Trigger_Context']
+        st.dataframe(shown[[x for x in _details if x in shown]],use_container_width=True,hide_index=True)
     st.caption('2026 live projections come from the V4-selected nonlinear CORE recipe refit on CFBD 2013–25. '
                'Provisional V5.5 normal-residual probabilities use retrospectively estimated dispersion; '
                'they are not prospectively validated. OOS-calibrated fields remain blank unless a separate '
                'chronological validation bundle passes backend checks. Big Al/Pathi/Miner/STAT are trigger-only '
                'unless an actual timestamped, directionally '               'verified V5.5 source exists. Quotes are backend scanner snapshots updated on the approximately 30-minute cycle; retrospective Market Rich feature '
-               'publication timing remains unverified. BET authority remains 0 until prospective approval.')
+               'publication timing remains unverified. BET authority is owner-directed, provisional, capped and price-dependent; independent OOS validation remains outstanding.')
 
 
 def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None, cached_live_info=None):
