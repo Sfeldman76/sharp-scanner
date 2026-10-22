@@ -48856,7 +48856,7 @@ def _render_ncaaf_v551_weekly_board():
     bb.metric('Strong Bets',_strong)
     cc.metric('V5.5 Candidates',_candidates)
     if _authorized:
-        st.warning('V5.5 owner-directed provisional betting policy is ACTIVE. Raw model probabilities '
+        st.warning('V5.5 historically qualified confirmation policy is ACTIVE. Raw model probabilities '
                    'have NOT passed independent chronological OOS calibration; bookmaker prices and lines '
                    'must be rechecked before a wager. The board does not place wagers.')
     elif _audit.get('v55_authority_policy_status')=='DISABLED_BY_OPERATOR':
@@ -48868,6 +48868,15 @@ def _render_ncaaf_v551_weekly_board():
     else:
         st.caption('Quote coverage is partially unavailable in this publication; unavailable counts are not assumed to be zero.')
     _brains=('STAT','BIG_AL','PATHI','SYSTEM_MINER','PREDICTION_TRACKER')
+    _other_brain_diag=_audit.get('long_history_other_brain_bridge') or {}
+    _miner_diag=_audit.get('miner_live_bridge') or {}
+    st.caption('2013–2025 independent research; 2024/2025 frozen confirmation; 2026 results sealed. '
+               'Decision ladder: qualified CORE edge → CANDIDATE; one distinct qualified brain → BET; '
+               'two independent evidence families → STRONG BET; qualified conflict → VETO. '
+               'Names/counts alone cannot grant votes.')
+    st.caption('Verified evidence: Miner '+str(_miner_diag.get('status','NOT_RUN'))+
+               ' · Big Al/Pathi/STAT/PT '+str(_other_brain_diag.get('status','NOT_RUN'))+
+               ' · historical registry '+str(_audit.get('other_brain_registry_status','NOT_RUN')))
     if not _weekly.empty and all(c in _weekly.columns and _weekly[c].fillna('NOT_EVALUABLE').astype(str).eq('NOT_EVALUABLE').all() for c in _brains):
         st.info('Independent brain evidence is NOT_EVALUABLE for all published forecasts. '
                 'Zero confirmations means no evaluated confirmations, not zero potentially relevant signals.')
@@ -48927,12 +48936,18 @@ def _render_ncaaf_v551_weekly_board():
         # RAW source-preserving pregame overlays; qualified votes remain separate.
         'V55_Raw_BigAl','V55_Raw_Pathi','V55_Raw_Miner','V55_Raw_STAT',
         'V55_Raw_PT','V55_Raw_Market_Rich','V55_Raw_Overlay_State',
+        'V55_Active_System_Names','V55_Independent_Support_Keys',
+        'V55_Independent_Conflict_Keys',
         'V55_Trigger_Context_Authority','V55_Trigger_Context',
         'STAT','BIG_AL','PATHI','SYSTEM_MINER','PREDICTION_TRACKER',
-        'Confirm_Count','Oppose_Count','Market_Rich_Sharp_Move','Market_Rich_Limit',
+        'Confirm_Count','Oppose_Count','Confirm_Families','Oppose_Families','Market_Rich_Sharp_Move','Market_Rich_Limit',
         'Market_Rich_Book_Count','V55_Research_Priority','V55_Bet_Authority','V55_Bet_Decision','Quote_State']
     _overlay_names={
         'V55_Bet_Decision':'V5.5 Backend Decision',
+        'V55_Active_System_Names':'Qualified Active Systems',
+        'V55_Independent_Support_Keys':'Independent Support Sources',
+        'V55_Independent_Conflict_Keys':'Qualified Conflicting Sources',
+        'Confirm_Count':'Support','Oppose_Count':'Conflicts',
         'V55_Raw_BigAl':'Big Al (raw)',
         'V55_Raw_Pathi':'Pathi (raw)',
         'V55_Raw_Miner':'Miner (raw)',
@@ -48949,7 +48964,15 @@ def _render_ncaaf_v551_weekly_board():
     for _field in _overlay_fields:
         if _field in shown.columns:
             shown[_field]=shown[_field].fillna('NOT_PUBLISHED').replace('', 'NOT_PUBLISHED')
-    st.dataframe(shown[[x for x in columns if x in shown]].rename(columns=_overlay_names),use_container_width=True,hide_index=True)
+    # Retain the old production's first-load layout: primary decisions and
+    # independent systems only. Technical odds/forecast columns are lazy below.
+    summary=['Game_Start_UTC','Matchup','Selected_Team','Current_Spread',
+             'V55_Policy_EV','V55_Bet_Decision','Confirm_Count','Oppose_Count',
+             'Confirm_Families','Oppose_Families','V55_Active_System_Names',
+             'V55_Raw_BigAl','V55_Raw_Pathi','V55_Raw_Miner','V55_Raw_STAT',
+             'V55_Raw_PT','V55_Raw_Market_Rich','Quote_State']
+    st.dataframe(shown[[x for x in summary if x in shown]].rename(
+        columns=_overlay_names),use_container_width=True,hide_index=True)
     _raw_matched=int(shown.get('V55_Raw_Overlay_State',pd.Series(index=shown.index,dtype='object')).eq(
                      'MATCHED_PRE_GAME_ENRICHED_SIDE__UNQUALIFIED').sum())
     _raw_count_only=int(shown.get('V55_Raw_Overlay_State',pd.Series(index=shown.index,dtype='object')).eq(
@@ -48958,18 +48981,27 @@ def _render_ncaaf_v551_weekly_board():
                f'{_raw_count_only} additional home-side count-only records. '
                'Raw signals are observation context, NOT V5.5 qualified support votes. '
                'NOT_PUBLISHED means the underlying source did not supply the field.')
-    with st.expander('Source and timestamp details for V5.5 raw overlays', expanded=False):
+    _extra_v55=st.selectbox('Additional V5.5 tables — load only when selected',
+        ('Main board only','Full technical/model/price table','Evidence source and timestamp audit'),
+        index=0,key='ncaaf-v55-lazy-detail-tables')
+    if _extra_v55=='Full technical/model/price table':
+        st.dataframe(shown[[x for x in columns if x in shown]].rename(
+            columns=_overlay_names),use_container_width=True,hide_index=True)
+    elif _extra_v55=='Evidence source and timestamp audit':
         _details=['Game_Start_UTC','Matchup','V55_Research_Lean_Team',
                   'V55_Raw_Overlay_State','V55_Raw_Overlay_Source',
                   'V55_Raw_Overlay_AsOf_UTC','V55_Raw_Overlay_Detail_JSON',
-                  'V55_Trigger_Context']
+                  'V55_Trigger_Context','V55_Qualified_Evidence_Detail_JSON',
+                  'Confirm_Families','Oppose_Families',
+                  'V55_Independent_Support_Keys','V55_Independent_Conflict_Keys',
+                  'V55_Active_System_Names']
         st.dataframe(shown[[x for x in _details if x in shown]],use_container_width=True,hide_index=True)
     st.caption('2026 live projections come from the V4-selected nonlinear CORE recipe refit on CFBD 2013–25. '
                'Provisional V5.5 normal-residual probabilities use retrospectively estimated dispersion; '
                'they are not prospectively validated. OOS-calibrated fields remain blank unless a separate '
                'chronological validation bundle passes backend checks. Big Al/Pathi/Miner/STAT are trigger-only '
                'unless an actual timestamped, directionally '               'verified V5.5 source exists. Quotes are backend scanner snapshots updated on the approximately 30-minute cycle; retrospective Market Rich feature '
-               'publication timing remains unverified. BET authority is owner-directed, provisional, capped and price-dependent; independent OOS validation remains outstanding.')
+               'publication timing remains unverified. CORE-only selections are CANDIDATE; BET and STRONG BET require qualified independent historical confirmations and current pregame signals. Stake sizing is provisional; model-probability OOS validation remains outstanding.')
 
 
 def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None, cached_live_info=None):

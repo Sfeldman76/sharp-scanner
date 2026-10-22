@@ -20,8 +20,8 @@ TABLE = os.getenv("NCAAF_V55_BOARD_TABLE", "sharplogger.sharp_data.ncaaf_v55_liv
 SOURCE_STATUS = "COMPLETE_V55_INDEPENDENT_WEEKLY_SHADOW"
 # Explicit project-owner decision: V5.5 replaces V1 as the *betting selection*
 # authority. This is intentionally not represented as independently calibrated.
-V55_POLICY_ID = "V55-OWNER-DIRECTED-SPREAD-PROVISIONAL-20261022-R1"
-V55_POLICY_STATUS = "USER_DIRECTED_UNCALIBRATED_ACTIVE"
+V55_POLICY_ID = "V55-CORE-PLUS-INDEPENDENT-CONFIRMATION-20261022-R2"
+V55_POLICY_STATUS = "QUALIFIED_CONFIRMATION_REQUIRED_PROVISIONAL"
 V55_POLICY_MAX_BETS = 3
 V55_POLICY_MIN_EV = 0.18
 V55_POLICY_MIN_MARGIN_POINTS = 5.0
@@ -131,6 +131,13 @@ def publish_dataframe(weekly, audit, *, bq_client=None, publication_type="WEEKLY
                     or not _valid_american(bet.get("Odds_American"))
                     or not str(bet.get("Selected_Team") or "").strip()):
                 raise RuntimeError("V55_AUTHORIZED_BET_ROW_INVALID")
+            confirmed=int(_price(bet.get('Confirm_Count')) or 0)
+            opposed=int(_price(bet.get('Oppose_Count')) or 0)
+            if (confirmed < (2 if bet.get('V55_Bet_Decision')=='STRONG BET' else 1)
+                    or opposed>0
+                    or not str(bet.get('V55_Qualified_Evidence_Detail_JSON') or '').startswith('[')
+                    or not str(bet.get('V55_Independent_Support_Keys') or '').strip()):
+                raise RuntimeError('V55_BET_WITHOUT_AUDITABLE_INDEPENDENT_CONFIRMATION')
     elif int(audit.get("v55_bet_authority") or 0):
         raise RuntimeError("V55_MISSING_AUTHORIZED_ROW_SCHEMA")
     publication_type = str(publication_type).upper()
@@ -215,7 +222,7 @@ def publish_weekly_latest(*, storage_client=None, bq_client=None, bucket_name=No
     client = bq_client or bigquery.Client(project="sharplogger")
     # Always reattach the current stored sportsbook quotes on the backend;
     # weekly and market-only workflows share exactly the same price authority.
-    weekly, audit = bridge_weekly_prices(weekly,audit,bq_client=client)
+    weekly, audit = bridge_weekly_prices(weekly,audit,bq_client=client,storage_client=gcs,bucket_name=bucket_name or os.getenv('MODEL_BUCKET','sharp-models'))
     return publish_dataframe(weekly,audit,bq_client=client,publication_type=publication_type)
 
 
@@ -285,6 +292,9 @@ def read_published_latest(*, bq_client=None, max_market_age_minutes=180):
              "V55_Research_Selected_Side","V55_Home_Raw_Prob",
              "V55_Away_Raw_Prob","V55_Home_Raw_EV","V55_Away_Raw_EV",
              "V55_Trigger_Context","V55_Trigger_Context_Authority",
+             "V55_Qualified_Evidence_Detail_JSON",
+             "V55_Active_System_Names","V55_Independent_Support_Keys",
+             "V55_Independent_Conflict_Keys",
              "Backend_Model_Lean_Side","Backend_Model_Lean_Points",
              "Backend_Projected_Home_Cover_Points","Backend_Projected_Away_Cover_Points",
              "CORE_EV","CORE_Edge","CORE_Cover_Probability","Book"}
@@ -300,6 +310,13 @@ def read_published_latest(*, bq_client=None, max_market_age_minutes=180):
         frame["V55_Research_Decision"]="NO_CURRENT_QUOTE__STALE"
         frame["V55_Bet_Decision"]="NO CURRENT QUOTE — STALE"
         frame["V55_Bet_Authority"]=0
+        # Expired publications cannot retain seemingly active qualified votes.
+        for col in ("Confirm_Count","Oppose_Count"):
+            if col in frame.columns: frame[col]=0
+        for col in ("Confirm_Families","Oppose_Families"):
+            if col in frame.columns: frame[col]=None
+        for col in VALID_BRAIN_FAMILIES:
+            if col in frame.columns: frame[col]="STALE_BACKEND_SNAPSHOT"
     # The board may still be fresh (<180m) after an individual bet quote has
     # expired (our tighter 90m policy). Redact authority on READ in the backend;
     # never make the dashboard itself infer bet permission from time fields.
@@ -318,6 +335,12 @@ def read_published_latest(*, bq_client=None, max_market_age_minutes=180):
             frame.loc[expired,"V55_Bet_Decision"]="BET_EXPIRED_RECHECK_QUOTE"
             frame.loc[expired,"V55_Authority_State"]="EXPIRED_MARKET_AUTHORITY"
             frame.loc[expired,"V55_Policy_Stake_Units"]=None
+            for col in ('V55_Qualified_Evidence_Detail_JSON','V55_Active_System_Names',
+                        'V55_Independent_Support_Keys','V55_Independent_Conflict_Keys',
+                        'Confirm_Families','Oppose_Families'):
+                if col in frame.columns:frame.loc[expired,col]=None
+            for col in VALID_BRAIN_FAMILIES:
+                if col in frame.columns:frame.loc[expired,col]='QUOTE_EXPIRED_REEVALUATE'
     active_count=int(frame["V55_Bet_Authority"].eq(1).sum()) if "V55_Bet_Authority" in frame else 0
     strong_count=int((frame.get("V55_Bet_Decision",pd.Series(dtype="object"))=="STRONG BET").sum()) if active_count else 0
     meta={**audit,"publication_status":"STALE_MARKET" if stale else "PASS",
@@ -784,6 +807,9 @@ V55_RAW_OVERLAY_FIELDS = (
     'Crossed_Key_7_Last60m', 'Crossed_Key_10_Last60m',
     'Crossed_Key_14_Last60m', 'Key_Cross_Confirmed_By_Sharp_Books',
     'Opening_Limit', 'Current_vs_Best_Line',
+    # Structured directional, historically qualified Miner votes, if published.
+    'NCAAF_RV22_Miner_Votes', 'NCAAF_Miner_Live_Authority_Policy',
+    'Value', 'Odds_Price',
 )
 V55_RAW_OVERLAY_COLUMNS = (
     'V55_Raw_BigAl', 'V55_Raw_Pathi', 'V55_Raw_Miner',
@@ -846,7 +872,8 @@ def _v55_raw_rich(row):
     return ' | '.join(vals[:6]) if vals else 'NOT_PUBLISHED'
 
 
-def _v55_read_enriched_pregame_overlays(bq_client, *, horizon_days=14, lookback_minutes=240):
+def _v55_read_enriched_pregame_overlays(bq_client, *, horizon_days=14, lookback_minutes=240,
+                                          qualified_brain_registry=None):
     """Small, bounded, optional BQ enrichment; NEVER changes V5.5 votes.
 
     Returns (DataFrame, source_status). Read failures are explicit rather than
@@ -862,7 +889,13 @@ def _v55_read_enriched_pregame_overlays(bq_client, *, horizon_days=14, lookback_
     missing = required - schema
     if missing:
         return pd.DataFrame(), 'MISSING_SOURCE_KEYS:'+','.join(sorted(missing))
-    optional = [x for x in (*V55_RAW_OVERLAY_FIELDS, 'Bookmaker', 'Book') if x in schema]
+    qualified_fields=set()
+    if isinstance(qualified_brain_registry,dict):
+        for rule in (qualified_brain_registry.get('rules') or {}).values():
+            qualified_fields.add(rule['signal'])
+            if rule.get('ready_field'):qualified_fields.add(rule['ready_field'])
+    optional = [x for x in (*V55_RAW_OVERLAY_FIELDS, 'Bookmaker', 'Book',
+                           *sorted(qualified_fields)) if x in schema]
     if not optional:
         return pd.DataFrame(), 'NO_RAW_OVERLAY_COLUMNS_IN_SOURCE'
     fields = list(sorted(required)) + optional
@@ -1013,7 +1046,7 @@ def attach_v55_raw_pregame_overlays(board, enrich, *, source_status='PASS'):
     return out,report
 
 
-def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None):
+def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_client=None, bucket_name=None):
     """Enforce one backend price authority for both weekly and market refresh."""
     import json
     import pandas as pd
@@ -1053,16 +1086,38 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None):
     out, research = evaluate_v55_spread_research(out,calibration=calibration)
     if cal_problem:
         research["calibration_unavailable_reason"] = cal_problem
-    evidence, evidence_problem = read_v55_qualified_evidence(bq_client)
-    out, brain = attach_v55_qualified_evidence(out,evidence)
-    # Attach named, time-verified RAW context strictly for display. This is
-    # independent of qualified evidence/votes and never upgrades a bet.
-    overlay_frame, overlay_source_status = _v55_read_enriched_pregame_overlays(bq_client)
+    # Shared enriched feed: raw overlays are display-only; ONLY a separately
+    # authenticated, research-registry-matched directional vote can count.
+    other_registry, other_registry_problem = read_v55_long_history_brain_registry(
+        storage_client=storage_client,bucket_name=bucket_name)
+    overlay_frame, overlay_source_status = _v55_read_enriched_pregame_overlays(
+        bq_client,qualified_brain_registry=other_registry)
     out, raw_overlays = attach_v55_raw_pregame_overlays(
         out,overlay_frame,source_status=overlay_source_status)
     updated["v55_raw_overlay_audit"] = raw_overlays
+    explicit_events, evidence_problem = read_v55_qualified_evidence(bq_client)
+    registry, registry_problem = read_v55_research_miner_registry(
+        storage_client=storage_client,bucket_name=bucket_name)
+    miner_events, miner_audit = derive_v55_miner_qualified_events(
+        out,overlay_frame,registry)
+    other_events, other_audit = derive_v55_other_qualified_events(
+        out,overlay_frame,other_registry)
+    # Externally ingested evidence rows are admissible only if backed by a
+    # matching frozen rule. String statuses in a live table are not a certificate.
+    vetted_explicit, explicit_gate = validate_v55_external_qualified_events(
+        explicit_events,other_registry)
+    event_frames=[x for x in (vetted_explicit,miner_events,other_events)
+                  if isinstance(x,pd.DataFrame) and not x.empty]
+    combined_events=pd.concat(event_frames,ignore_index=True) if event_frames else None
+    out, brain = attach_v55_qualified_evidence(out,combined_events)
+    brain['miner_registry_status']=registry_problem or 'PASS'
+    brain['miner_live_bridge']=miner_audit
+    brain['other_brain_registry_status']=other_registry_problem or 'PASS'
+    brain['long_history_other_brain_bridge']=other_audit
+    brain['external_evidence_gate']=explicit_gate
+    brain['long_history_reference']='2013-2025; pre-2026 independent evidence only'
     if evidence_problem:
-        brain["evidence_unavailable_reason"] = evidence_problem
+        brain["additional_evidence_table_status"] = evidence_problem
     updated.update({k:v for k,v in research.items() if k!="status"})
     updated["research_decision_status"]=research["status"]
     updated.update(brain)
@@ -1278,6 +1333,406 @@ def evaluate_v55_spread_research(frame, *, calibration=None):
     return out,stats
 
 
+
+# ----- Historical frozen-system -> timestamped V5.5 game-side evidence bridge -----
+V55_RESEARCH_MINER_REPORT_BLOB = "research/ncaaf/v2/current_report.json"
+V55_RESEARCH_MINER_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
+
+
+def read_v55_research_miner_registry(*, storage_client=None, bucket_name=None):
+    """Read the immutable pre-2026 qualification *criteria* from the research report.
+
+    The report may have been published in 2026; its discovery/confirmation
+    seasons must be <=2025. No 2026 ATS/game outcome is permitted to qualify a
+    system. This bridge never executes researcher pickle payloads.
+    """
+    try:
+        if storage_client is None:
+            from google.cloud import storage
+            storage_client=storage.Client()
+        client=storage_client
+        bucket=bucket_name or os.getenv('MODEL_BUCKET','sharp-models')
+        blob=client.bucket(bucket).blob(V55_RESEARCH_MINER_REPORT_BLOB)
+        raw=blob.download_as_bytes()
+        report=json.loads(raw)
+        if not isinstance(report,dict):return None,'RESEARCH_REPORT_NOT_OBJECT'
+        if report.get('status')!='NCAAF_RESEARCH_V2_COMPLETE':return None,'RESEARCH_REPORT_NOT_COMPLETE'
+        if not str(report.get('source_tag') or '').startswith('ncaaf-research-v2.'):
+            return None,'RESEARCH_REPORT_PROVENANCE_UNVERIFIED'
+        if int(report.get('discovery_max_season',9999))>2023:return None,'DISCOVERY_NOT_FROZEN'
+        if sorted(int(x) for x in report.get('confirmation_seasons',[]))!=[2024,2025]:return None,'CONFIRMATION_YEARS_NOT_FROZEN'
+        if (report.get('miner_live_authority_policy') or {}).get('policy')!=V55_RESEARCH_MINER_POLICY:return None,'RESEARCH_POLICY_MISMATCH'
+        if (report.get('miner_live_authority_policy') or {}).get('uses_2026_selection') is not False:return None,'2026_SELECTION_UNVERIFIED'
+        created=_timestamp(report.get('created_utc'))
+        if created is None or str(created)=='NaT':return None,'RESEARCH_REPORT_TIMESTAMP_MISSING'
+        mechanisms={}
+        for rec in (report.get('system_miner_v3') or {}).get('spreads',{}).get('mechanism_families',[]):
+            mid=str(rec.get('mechanism_id') or '')
+            cond=[str(c) for c in rec.get('representative_conditions') or []]
+            if not mid or not cond or mid in mechanisms:continue
+            if any(x.startswith(('CORE_OOF_','SPEC_','CFBD_WEATHER_')) for x in cond):continue
+            if rec.get('incumbent_revalidation_status') in ('HOLD_NOT_EVALUABLE','LEGACY_CONTRACT_HOLD'):continue
+            if rec.get('confirmation_pass') is not True or rec.get('live_authority_eligible') is not True:continue
+            if rec.get('split_audit',{}).get('disjoint') is not True:continue
+            if int(rec.get('confirmation_n') or 0)<60 or float(rec.get('confirmation_rate') or 0)<0.56:continue
+            if rec.get('meta_constituent_overlap_guard','PASS')!='PASS':continue
+            if rec.get('market')!='spreads':continue
+            mechanisms[mid]={
+                'target':rec.get('direction'),
+                'evidence_family_key':str(rec.get('evidence_family_key') or mid),
+                'rule':' AND '.join(cond),
+                'n':int(rec.get('confirmation_n')),
+                'rate':float(rec.get('confirmation_rate')),
+            }
+        return {'mechanisms':mechanisms,'created_utc':created,
+                'report_sha256':hashlib.sha256(raw).hexdigest(),
+                'uri':f'gs://{bucket}/{V55_RESEARCH_MINER_REPORT_BLOB}'},None
+    except Exception as exc:
+        return None,'RESEARCH_REGISTRY_READ_FAILED:'+type(exc).__name__
+
+
+def _v55_parse_structured_votes(value):
+    """Parse JSON/repeated-record vote fields without inferring votes from counts."""
+    if isinstance(value,str):
+        try:value=json.loads(value)
+        except (TypeError,ValueError):return []
+    if isinstance(value,tuple):value=list(value)
+    if not isinstance(value,list) and hasattr(value,'tolist'):
+        value=value.tolist()
+    if not isinstance(value,list):return []
+    cleaned=[]
+    for v in value:
+        if isinstance(v,dict):cleaned.append(v)
+        elif hasattr(v,'as_py') and isinstance(v.as_py(),dict):cleaned.append(v.as_py())
+    return cleaned
+
+
+def derive_v55_miner_qualified_events(board, live_rows, registry, *, now=None):
+    """Join frozen system IDs to live *directional* pregame triggers.
+
+    The upstream live Miner must publish NCAAF_RV22_Miner_Votes. Never create
+    confirmations from raw named text, Big Al ratings, counts, or historical
+    system inventory alone. A trigger and its certified historical rule must
+    both exist, and the report must predate the observed pregame signal.
+    """
+    import pandas as pd
+    cols=('Game_ID','Game_Start_UTC','Source_Family','Signal_Family',
+          'Evidence_Family_Key','Signal_Side','Observed_At_UTC',
+          'Qualified_At_UTC','Qualification_Status','OOS_Status',
+          'Direction_Verified','Provenance_Status')
+    audit={'status':'NO_MINER_EVENTS','report_mechanisms':0,'live_source_rows':0,
+           'structured_vote_rows':0,'matched_game_sides':0,'qualified_events':0,
+           'source':'sharplogger.sharp_data.moves_with_features_merged',
+           'distinct_games':0,'distinct_mechanisms':0}
+    empty=pd.DataFrame(columns=cols)
+    if not isinstance(registry,dict):
+        audit['status']='RESEARCH_REGISTRY_UNAVAILABLE_FAIL_CLOSED';return empty,audit
+    rules=registry.get('mechanisms') or {}
+    audit['report_mechanisms']=len(rules)
+    audit['research_registry_sha256']=registry.get('report_sha256')
+    audit['research_registry_uri']=registry.get('uri')
+    if not rules:
+        audit['status']='NO_HISTORICALLY_QUALIFIED_SPREAD_MECHANISMS';return empty,audit
+    if not isinstance(live_rows,pd.DataFrame) or live_rows.empty:
+        audit['status']='NO_LIVE_SOURCE_ROWS';return empty,audit
+    needed={'NCAAF_RV22_Miner_Votes','Game_Start','Home_Team_Norm',
+            'Away_Team_Norm','Snapshot_Timestamp','Outcome','Value'}
+    if 'NCAAF_RV22_Miner_Votes' not in live_rows.columns:
+        audit['status']='STRUCTURED_LIVE_MINER_VOTES_NOT_PUBLISHED';return empty,audit
+    if not needed.issubset(live_rows.columns):
+        audit['status']='LIVE_MARKET_IDENTITY_OR_SPREAD_UNAVAILABLE';return empty,audit
+    audit['live_source_rows']=len(live_rows)
+    live=live_rows.copy()
+    live['_kick']=pd.to_datetime(live['Game_Start'],utc=True,errors='coerce')
+    live['_obs']=pd.to_datetime(live['Snapshot_Timestamp'],utc=True,errors='coerce')
+    live['_home']=live['Home_Team_Norm'].map(_norm_team)
+    live['_away']=live['Away_Team_Norm'].map(_norm_team)
+    live['_side']=live['Outcome'].map(_norm_team)
+    emit=[]
+    report_time=_timestamp(registry['created_utc'])
+    now=_timestamp(now or datetime.now(timezone.utc))
+    if pd.isna(report_time) or report_time>now:
+        audit['status']='REGISTRY_TIME_INVALID_OR_FUTURE';return empty,audit
+    # One event per (game, mechanism, direction), retaining latest valid sighting.
+    dedup={}
+    for _,r in board.iterrows():
+        selected=_norm_team(r.get('Selected_Team'))
+        if not selected:continue
+        (home,away),oriented=_matchup_teams(r)
+        if not oriented or selected not in (home,away):continue
+        quote=_timestamp(r.get('Backend_Quote_Timestamp'))
+        kick=_timestamp(r.get('Game_Start_UTC'))
+        if pd.isna(quote) or pd.isna(kick) or not quote<kick or not quote<=now:continue
+        gid=str(r.get('Game_ID') or '')
+        selected_spread=_price(r.get('Current_Spread'))
+        if not gid or selected_spread is None:continue
+        hits=live.loc[(live['_home']==home)&(live['_away']==away)
+              &(live['_side']==selected)
+              &(live['_kick']-kick).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))
+              &live['_obs'].le(quote)&live['_obs'].le(now)
+              &live['_obs'].lt(kick)&live['_obs'].ge(report_time)
+              &(quote-live['_obs']).le(pd.Timedelta(minutes=90))]
+        # A researched role/line trigger must apply at the *execution* spread.
+        hits=hits.loc[pd.to_numeric(hits['Value'],errors='coerce').sub(selected_spread).abs().le(.001)]
+        # The derived Miner rule may depend on market spread or role. Use the
+        # EXACT sportsbook attached to the V5.5 selection, not another book.
+        book=str(r.get('Backend_Quote_Book') or '').lower().strip()
+        if book and ('Bookmaker' in hits or 'Book' in hits):
+            b1=hits['Bookmaker'] if 'Bookmaker' in hits else pd.Series('',index=hits.index)
+            b2=hits['Book'] if 'Book' in hits else pd.Series('',index=hits.index)
+            hb=b1.fillna('').astype(str).str.lower().str.strip()
+            hb=hb.mask(hb.isin(('','nan','none')),b2.fillna('').astype(str).str.lower().str.strip())
+            hits=hits.loc[hb.eq(book)]
+        if hits.empty:continue
+        audit['matched_game_sides']+=1
+        for _,x in hits.iterrows():
+            votes=_v55_parse_structured_votes(x['NCAAF_RV22_Miner_Votes'])
+            audit['structured_vote_rows']+=len(votes)
+            for v in votes:
+                mid=str(v.get('family_id') or '')
+                rule=rules.get(mid)
+                if rule is None:continue
+                if str(v.get('source_type') or '').upper()!='MINER':continue
+                if str(v.get('market') or '').lower()!='spreads':continue
+                if v.get('live_authority_eligible') is not True:continue
+                if v.get('live_authority_policy')!=V55_RESEARCH_MINER_POLICY:continue
+                if v.get('evidence_level')!='STRONG_VALIDATED':continue
+                if str(v.get('evidence_family_key') or '')!=rule['evidence_family_key']:continue
+                if str(v.get('rule') or '')!=rule['rule']:continue
+                try:
+                    vote_n=int(v.get('confirmation_n') or 0)
+                    vote_rate=float(v.get('confirmation_rate') or 0)
+                except (TypeError,ValueError,OverflowError):continue
+                if vote_n!=rule['n']:continue
+                if not math.isfinite(vote_rate) or abs(vote_rate-rule['rate'])>1e-8:continue
+                target=_norm_team(v.get('target'))
+                if target not in (home,away):continue
+                expected_target=home if rule['target']=='PLAY_ON' else away if rule['target']=='FADE' else None
+                if expected_target is None or target!=expected_target:continue
+                obs=x['_obs'];key=(gid,mid,target)
+                source_family=('PREDICTION_TRACKER' if v.get('uses_external_ratings_family') is True
+                               else 'SYSTEM_MINER')
+                payload=dict(zip(cols,(gid,kick.isoformat(),source_family,mid,
+                    rule['evidence_family_key'],target,obs.isoformat(),
+                    report_time.isoformat(),'QUALIFIED_OOS','PASS',
+                    True,'PRE_GAME_VERIFIED')))
+                if key not in dedup or obs>_timestamp(dedup[key]['Observed_At_UTC']):dedup[key]=payload
+    emit=list(dedup.values())
+    audit['qualified_events']=len(emit)
+    audit['distinct_games']=len({x['Game_ID'] for x in emit})
+    audit['distinct_mechanisms']=len({x['Signal_Family'] for x in emit})
+    audit['status']='PASS' if emit else ('MATCHED_LIVE_ROWS_NO_QUALIFIED_TRIGGER' if audit['matched_game_sides'] else 'NO_VERIFIED_SAME_SIDE_ASOF_LIVE_ROWS')
+    return pd.DataFrame(emit,columns=cols),audit
+
+
+
+# Historical independent brain governance: 2013-2023 discovery, 2024-2025
+# confirmation, 2026 sealed for prospective monitoring. The historical model
+# does NOT create events: a PRE-GAME, book/line-aligned, named live trigger must
+# also be observed. These rules must be exported by audited Heavy Research,
+# not invented from non-directional overlay counts.
+V55_LONG_HISTORY_BRAIN_BLOB = 'research/ncaaf/v55/qualified_independent_brains_2013_2025.json'
+V55_LONG_HISTORY_POLICY = 'V55-FROZEN-INDEPENDENT-BRAINS-2013-2025-R1'
+V55_NONMINER_FAMILIES = ('BIG_AL','PATHI','STAT','PREDICTION_TRACKER')
+
+
+def _v55_validate_long_history_brain_registry(doc, *, raw_sha='', now=None):
+    """Validate a research-generated frozen independent system qualification.
+
+    Each entry needs an auditable 2024/2025 out-of-sample result and the
+    exact pregame flag/column contract. In particular, descriptive Pathi/BigAl
+    trust scores and the 2026 season are NOT qualification certificates.
+    """
+    if not isinstance(doc,dict) or doc.get('status')!='FROZEN_OOS_QUALIFIED':
+        return None,'BRAIN_REGISTRY_NOT_FROZEN_OOS'
+    if doc.get('policy')!=V55_LONG_HISTORY_POLICY or doc.get('operator_approved') is not True:
+        return None,'BRAIN_REGISTRY_POLICY_OR_APPROVAL_MISSING'
+    try:
+        first=int(doc['history_first_season']);last=int(doc['discovery_last_season'])
+        confirmations=sorted(int(v) for v in doc['confirmation_seasons'])
+    except (TypeError,KeyError,ValueError):
+        return None,'BRAIN_REGISTRY_SEASONS_MISSING'
+    if first>2013 or last>2023 or confirmations!=[2024,2025] or doc.get('uses_2026_outcomes') is not False:
+        return None,'BRAIN_REGISTRY_LEAKAGE_OR_HISTORY_GAP'
+    try:
+        observed=sorted(int(v) for v in (doc.get('source_audit') or {})['observed_seasons'])
+    except (KeyError,TypeError,ValueError):
+        return None,'BRAIN_REGISTRY_HISTORICAL_SEASON_COVERAGE_MISSING'
+    if observed!=list(range(2013,2026)):
+        return None,'BRAIN_REGISTRY_2013_2025_SEASON_COVERAGE_INCOMPLETE'
+    created=_timestamp(doc.get('created_utc'))
+    at=_timestamp(now or datetime.now(timezone.utc))
+    if created is None or str(created)=='NaT' or created>at:
+        return None,'BRAIN_REGISTRY_FUTURE_OR_MISSING_DATE'
+    rules={};rejects={}
+    for entry in doc.get('systems',[]):
+        if not isinstance(entry,dict):continue
+        fam=str(entry.get('family') or '').upper()
+        sid=str(entry.get('system_id') or '')
+        key=(fam,sid)
+        if not sid or fam not in V55_NONMINER_FAMILIES or key in rules:continue
+        try:
+            n=int(entry.get('confirmation_n') or 0)
+            rate=float(entry.get('confirmation_rate') or 0)
+        except (TypeError,ValueError,OverflowError):continue
+        oos=entry.get('by_season') or {}
+        try:
+            y2024=oos.get('2024') or {};y2025=oos.get('2025') or {}
+            y1=int(y2024['n']); y2=int(y2025['n'])
+            rate1=float(y2024['rate']);rate2=float(y2025['rate'])
+        except (KeyError,TypeError,ValueError):continue
+        # Independent holdout certification AND source/vintage audit.
+        if not (entry.get('oos_pass') is True and entry.get('split_disjoint') is True
+                and entry.get('pregame_feature_vintage_pass') is True
+                and entry.get('source_neutral') is True
+                and entry.get('role')=='directional'
+                and entry.get('uses_2026_outcomes') is False
+                and entry.get('overlap_audit')=='PASS'
+                and entry.get('multiple_testing_audit')=='PASS'
+                and n==y1+y2 and n>=60 and rate>=0.56
+                and y1>=15 and y2>=15
+                and 0<=rate1<=1 and 0<=rate2<=1
+                and abs((rate1*y1+rate2*y2)/n-rate)<0.001):
+            rejects[fam]=rejects.get(fam,0)+1
+            continue
+        field=str(entry.get('live_signal_field') or '')
+        typ=str(entry.get('live_signal_type') or 'FLAG').upper()
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}',field) or typ not in ('FLAG','SIDE'):
+            continue
+        if typ=='FLAG' and not field.startswith(('BigAl_','Pathi_','NCAAF_Stat_')):
+            continue
+        ready=str(entry.get('data_ready_field') or '')
+        if ready and not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}',ready):
+            continue
+        if fam=='BIG_AL' and not field.startswith('BigAl_'):continue
+        if fam=='PATHI' and not field.startswith('Pathi_'):continue
+        if fam=='STAT' and not field.startswith('NCAAF_Stat_'):continue
+        if fam=='PREDICTION_TRACKER' and typ!='SIDE':continue
+        if str(entry.get('direction')) not in ('PLAY_ON','FADE'):continue
+        rules[key]={'family':fam,'id':sid,'signal':field,'signal_type':typ,
+                    'direction':entry['direction'], 'n':n,'rate':rate,
+                    'key':str(entry.get('evidence_family_key') or fam),
+                    'ready_field':ready,
+                    'qualified_at':created, 'report_sha256':raw_sha}
+    return {'rules':rules,'created_utc':created,'report_sha256':raw_sha,
+            'source_seasons':'2013-2025','rejected_by_family':rejects},None
+
+
+def read_v55_long_history_brain_registry(*, storage_client=None,bucket_name=None):
+    try:
+        if storage_client is None:
+            from google.cloud import storage
+            storage_client=storage.Client()
+        bucket=bucket_name or os.getenv('MODEL_BUCKET','sharp-models')
+        raw=storage_client.bucket(bucket).blob(V55_LONG_HISTORY_BRAIN_BLOB).download_as_bytes()
+        obj=json.loads(raw)
+        result,problem=_v55_validate_long_history_brain_registry(
+            obj,raw_sha=hashlib.sha256(raw).hexdigest())
+        if result:result['uri']=f'gs://{bucket}/{V55_LONG_HISTORY_BRAIN_BLOB}'
+        return result,problem
+    except Exception as exc:
+        return None,'BRAIN_REGISTRY_UNAVAILABLE:'+type(exc).__name__
+
+
+def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None):
+    """Re-evaluate Big Al, Pathi, STAT, PT on the CURRENT booked spread.
+
+    No V1 model probabilities, historical 2026 outcomes, raw unnamed counts, or
+    context-only rules can create a confirmation. Missing named source columns
+    or historical OOS registry => zero events and explicit audit status.
+    """
+    import pandas as pd
+    columns=('Game_ID','Game_Start_UTC','Source_Family','Signal_Family',
+       'Evidence_Family_Key','Signal_Side','Observed_At_UTC','Qualified_At_UTC',
+       'Qualification_Status','OOS_Status','Direction_Verified',
+       'Provenance_Status','Observed_Book','Observed_Spread','Registry_SHA256')
+    empty=pd.DataFrame(columns=columns)
+    report={'status':'NO_QUALIFIED_NONMINER_EVENTS','registry_systems':0,
+        'live_signal_columns':0,'matched_games':0,'qualified_events':0,
+        'qualified_by_brain':{},'source_seasons':'2013-2025',
+        'raw_display_does_not_grant_authority':True}
+    if not isinstance(registry,dict):
+        report['status']='HISTORICAL_BRAIN_REGISTRY_UNAVAILABLE';return empty,report
+    rules=registry.get('rules') or {}
+    report['registry_systems']=len(rules)
+    if not rules:
+        report['status']='NO_FROZEN_OOS_BRAIN_SYSTEMS';return empty,report
+    if not isinstance(live_rows,pd.DataFrame) or live_rows.empty:
+        report['status']='NO_LIVE_GAME_SIDE_SIGNAL_SOURCE';return empty,report
+    needed={'Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome',
+            'Snapshot_Timestamp','Value'}
+    if not needed.issubset(live_rows.columns) or not {'Bookmaker','Book'}.intersection(live_rows.columns):
+        report['status']='MISSING_LIVE_IDENTITY_BOOK_OR_SPREAD';return empty,report
+    fields={v['signal'] for v in rules.values()}
+    report['live_signal_columns']=len(fields & set(live_rows.columns))
+    if not fields.intersection(live_rows.columns):
+        report['status']='QUALIFIED_RULE_FIELDS_NOT_PUBLISHED';return empty,report
+    live=live_rows.copy()
+    if 'Sport' in live.columns:
+        live=live.loc[live['Sport'].astype(str).str.upper().eq('NCAAF')]
+    if 'Market' in live.columns:
+        live=live.loc[live['Market'].astype(str).str.lower().eq('spreads')]
+    if live.empty:
+        report['status']='NO_NCAAF_SPREAD_SOURCE_ROWS';return empty,report
+    live['_kick']=pd.to_datetime(live['Game_Start'],utc=True,errors='coerce')
+    live['_obs']=pd.to_datetime(live['Snapshot_Timestamp'],utc=True,errors='coerce')
+    live['_home']=live['Home_Team_Norm'].map(_norm_team)
+    live['_away']=live['Away_Team_Norm'].map(_norm_team)
+    live['_side']=live['Outcome'].map(_norm_team)
+    if 'Bookmaker' not in live.columns:
+        live['Bookmaker']=live['Book']
+    live['_book']=live['Bookmaker'].astype(str).str.lower().str.strip()
+    live['_spread']=pd.to_numeric(live['Value'],errors='coerce')
+    at=_timestamp(now or datetime.now(timezone.utc))
+    dedup={}
+    for _,r in board.iterrows():
+        selected=_norm_team(r.get('Selected_Team'))
+        (home,away),oriented=_matchup_teams(r)
+        qt=_timestamp(r.get('Backend_Quote_Timestamp'))
+        kick=_timestamp(r.get('Game_Start_UTC'))
+        chosen_spread=_price(r.get('Current_Spread'))
+        book=str(r.get('Backend_Quote_Book') or '').lower().strip()
+        gid=str(r.get('Game_ID') or '')
+        if not (oriented and selected in (home,away) and gid and book and chosen_spread is not None):continue
+        if pd.isna(qt) or pd.isna(kick) or pd.isna(at) or not qt<=at<kick:continue
+        hits=live.loc[(live['_home']==home)&(live['_away']==away)
+          &(live['_kick']-kick).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))
+          &live['_book'].eq(book)&live['_obs'].le(qt)&live['_obs'].lt(kick)
+          &(qt-live['_obs']).le(pd.Timedelta(minutes=90))]
+        if hits.empty:continue
+        report['matched_games']+=1
+        for rule in rules.values():
+            field=rule['signal']
+            if field not in hits.columns:continue
+            src=hits.loc[hits['_obs'].ge(rule['qualified_at'])]
+            if src.empty:continue
+            if rule['ready_field']:
+                if rule['ready_field'] not in src.columns:continue
+                src=src.loc[pd.to_numeric(src[rule['ready_field']],errors='coerce').eq(1)]
+            if rule['signal_type']=='FLAG':
+                src=src.loc[pd.to_numeric(src[field],errors='coerce').eq(1)]
+            elif rule['signal_type']=='SIDE':
+                src=src.loc[src[field].map(_norm_team).eq(src['_side'])]
+            if src.empty:continue
+            for _,hit in src.iterrows():
+                side=hit['_side'];direction=side if rule['direction']=='PLAY_ON' else (away if side==home else home)
+                needed_spread=chosen_spread if side==selected else -chosen_spread
+                if side not in (home,away) or abs(hit['_spread']-needed_spread)>0.001:continue
+                if direction not in (home,away):continue
+                key=(gid,rule['family'],rule['id'],direction)
+                record=dict(zip(columns,(gid,kick.isoformat(),rule['family'],rule['id'],
+                    rule['key'],direction,hit['_obs'].isoformat(),rule['qualified_at'].isoformat(),
+                    'QUALIFIED_OOS','PASS',True,'PRE_GAME_VERIFIED',book,
+                    float(hit['_spread']),rule['report_sha256'])))
+                if key not in dedup or hit['_obs']>_timestamp(dedup[key]['Observed_At_UTC']):dedup[key]=record
+    emit=list(dedup.values())
+    report['qualified_events']=len(emit)
+    for x in emit:
+        fam=x['Source_Family'];report['qualified_by_brain'][fam]=report['qualified_by_brain'].get(fam,0)+1
+    report['status']='PASS' if emit else 'NO_MATCHING_QUALIFIED_PREGAME_RULE_FIRINGS'
+    return pd.DataFrame(emit,columns=columns),report
+
+
 def read_v55_qualified_evidence(bq_client):
     """Optional V5.5-specific, pregame/OOS-vetted events. No V1 vote reuse.
 
@@ -1296,11 +1751,43 @@ def read_v55_qualified_evidence(bq_client):
         return None,"EVIDENCE_READ_ERROR:"+type(exc).__name__
 
 
+def validate_v55_external_qualified_events(events,registry):
+    """Prevent an arbitrary BigQuery row from self-authorizing a named system."""
+    import pandas as pd
+    audit={'status':'NONE','read':len(events) if isinstance(events,pd.DataFrame) else 0,'verified':0}
+    if not isinstance(events,pd.DataFrame) or events.empty:
+        return None,audit
+    if not isinstance(registry,dict):
+        audit['status']='NO_FROZEN_BRAIN_REGISTRY';return None,audit
+    required={'Source_Family','Signal_Family','Evidence_Family_Key',
+              'Registry_SHA256','Observed_Book','Observed_Spread',
+              'Game_ID','Game_Start_UTC','Signal_Side','Observed_At_UTC',
+              'Qualified_At_UTC','Qualification_Status','OOS_Status',
+              'Direction_Verified','Provenance_Status'}
+    if not required.issubset(events.columns):
+        audit['status']='EVENT_CONTRACT_MISSING';return None,audit
+    rules=registry.get('rules') or {}
+    rows=[]
+    for _,row in events.iterrows():
+        fam=str(row.get('Source_Family') or '').upper()
+        sid=str(row.get('Signal_Family') or '')
+        rule=rules.get((fam,sid))
+        if not rule:continue
+        qt=_timestamp(row.get('Qualified_At_UTC'))
+        if (str(row.get('Evidence_Family_Key'))!=rule['key']
+          or str(row.get('Registry_SHA256'))!=rule['report_sha256']
+          or pd.isna(qt) or qt!=rule['qualified_at']):continue
+        rows.append(row.to_dict())
+    audit['verified']=len(rows)
+    audit['status']='PASS' if rows else 'NO_FROZEN_REGISTRY_MATCH'
+    return pd.DataFrame(rows) if rows else None,audit
+
+
 def attach_v55_qualified_evidence(frame,events):
     """Only independently qualified sources may confirm or oppose V5.5 CORE.
 
-    Exact CFBD game ID, kickoff, directional team, historical qualification
-    prior to 2026, independently timestamped observation <= quote time,
+    Exact CFBD game ID, kickoff, directional team, qualification using
+    historically frozen 2013–2025 evidence, observation <= quote time,
     verified pregame provenance, and unique source family are mandatory.
     """
     import pandas as pd
@@ -1313,6 +1800,9 @@ def attach_v55_qualified_evidence(frame,events):
         out[key]=None
     for family in VALID_BRAIN_FAMILIES:
         out[family]="NOT_EVALUABLE"
+    out['V55_Independent_Support_Keys']=None
+    out['V55_Independent_Conflict_Keys']=None
+    out['V55_Active_System_Names']=None
     report={"evidence_state":"NOT_EVALUABLE_NO_VERIFIED_EVENTS",
             "rows_read":len(events) if isinstance(events,pd.DataFrame) else 0,
             "qualified_events_used":0,"multi_family":0,"conflict_games":0,
@@ -1334,7 +1824,7 @@ def attach_v55_qualified_evidence(frame,events):
            &ev["OOS_Status"].eq("PASS")
            &ev["Provenance_Status"].eq("PRE_GAME_VERIFIED")
            &ev["Direction_Verified"].map(check)
-           &ev["_qualified"].lt(pd.Timestamp("2026-01-01T00:00:00Z"))
+           &ev["_qualified"].lt(ev["_kick"])
            &ev["_obs"].lt(ev["_kick"])
            &ev["_obs"].ge(ev["_qualified"]))
     ev=ev.loc[valid]
@@ -1342,6 +1832,8 @@ def attach_v55_qualified_evidence(frame,events):
         report["evidence_state"]="NO_VALID_V55_OOS_EVENTS"
         return out,report
     report["evidence_state"]="EVALUATED_V55_OOS_EVENTS"
+    out["V55_Qualified_Evidence_Detail_JSON"]=None
+    report["qualified_event_rows_validated"]=int(len(ev))
     for i,r in out.iterrows():
         selected=_norm_team(r.get("Selected_Team"))
         gid=str(r.get("Game_ID") or "")
@@ -1350,36 +1842,95 @@ def attach_v55_qualified_evidence(frame,events):
         (home,away),_= _matchup_teams(r)
         if not selected or not gid or pd.isna(quote_time) or pd.isna(kick):
             continue
-        relevant=ev.loc[(ev["_game_id"]==gid)&ev["_kick"].eq(kick)&ev["_obs"].le(quote_time)]
+        relevant=ev.loc[(ev["_game_id"]==gid)&ev["_kick"].eq(kick)&ev["_obs"].le(quote_time)].copy()
+        # Explicit Big Al/Pathi/STAT/PT event must be sourced to the same
+        # sportsbook and spread; the legacy Miner producer performs these
+        # checks before emission. A quoted event cannot self-verify.
+        if not relevant.empty:
+            source_book=str(r.get('Backend_Quote_Book') or '').lower().strip()
+            value=_price(r.get('Current_Spread'))
+            keep=[]
+            for _,evrow in relevant.iterrows():
+                family=str(evrow.get('_family') or '')
+                if family=='SYSTEM_MINER':
+                    keep.append(True);continue
+                book=str(evrow.get('Observed_Book') or '').lower().strip()
+                spread=_price(evrow.get('Observed_Spread'))
+                # The source market row is allowed to be the opposite team for
+                # a FADE system; explicit evidence must be on the chosen side.
+                keep.append(bool(source_book and book==source_book and
+                                 spread is not None and value is not None and
+                                 abs(abs(spread)-abs(value))<=0.001))
+            relevant=relevant.loc[keep]
         if relevant.empty:
             continue
-        # Only one vote per independent source. If independent signals from
-        # the same source oppose each other, that source ABSTAINS.
-        support=set(); opposition=set()
-        for family,g in relevant.groupby("_family"):
-            dirs=set(_norm_team(v) for v in g["Signal_Side"].tolist())
-            dirs.discard("")
-            if len(dirs)!=1:
-                continue
-            direction=next(iter(dirs))
-            if direction not in (home,away):
-                continue
-            if direction==selected: support.add(family)
-            else: opposition.add(family)
+        # Independent-voter components: connect events that share a source brain
+        # OR an underlying evidence family. This prevents duplicate Miner votes,
+        # PT/Miner external ratings double counting, and mixed-direction signals
+        # from a single brain being treated as independent confirmations.
+        relevant['_dependency']=relevant.apply(
+            lambda z:str(z.get('Evidence_Family_Key') or z.get('_family') or '').strip().upper(),axis=1)
+        records=relevant.to_dict('records')
+        parents=list(range(len(records)))
+        def root(i):
+            while parents[i]!=i:
+                parents[i]=parents[parents[i]];i=parents[i]
+            return i
+        def union(i,j):
+            a=root(i);b=root(j)
+            if a!=b:parents[b]=a
+        seen_source={};seen_dep={}
+        for ix,evr in enumerate(records):
+            f=evr['_family'];d=evr['_dependency']
+            if f in seen_source:union(ix,seen_source[f])
+            if d in seen_dep:union(ix,seen_dep[d])
+            seen_source[f]=ix;seen_dep[d]=ix
+        components={}
+        for ix,evr in enumerate(records):components.setdefault(root(ix),[]).append(evr)
+        support=set();opposition=set();conflicts=set()
+        independent_support=set();independent_oppose=set()
+        for component in components.values():
+            dirs={_norm_team(v['Signal_Side']) for v in component}
+            dirs.discard('')
+            if not dirs or not dirs.issubset({home,away}):continue
+            brains={v['_family'] for v in component}
+            label='+'.join(sorted(brains))
+            if len(dirs)>1:
+                independent_oppose.add(label)
+                opposition.update(brains);conflicts.update(brains)
+            elif next(iter(dirs))==selected:
+                independent_support.add(label);support.update(brains)
+            else:
+                independent_oppose.add(label);opposition.update(brains)
+        support.difference_update(conflicts)
+        # Source-specific provenance, signal ID and timing remain inspectable.
+        evidence_details=[]
+        for _,ee in relevant.iterrows():
+            evidence_details.append({"source":str(ee.get("Source_Family")),
+                "system_id":str(ee.get("Signal_Family")),
+                "direction":str(ee.get("Signal_Side")),
+                "observed_utc":str(ee.get("Observed_At_UTC")),
+                "qualified_utc":str(ee.get("Qualified_At_UTC")),
+                "evidence_family_key":str(ee.get("Evidence_Family_Key") or "") if pd.notna(ee.get("Evidence_Family_Key")) else ""})
+        out.at[i,"V55_Qualified_Evidence_Detail_JSON"]=json.dumps(evidence_details[:20],sort_keys=True)
         for family in VALID_BRAIN_FAMILIES:
             if family in support:
                 out.at[i,family]="QUALIFIED_SUPPORT"
             elif family in opposition:
-                out.at[i,family]="QUALIFIED_OPPOSE"
-        report["qualified_events_used"]+=len(support)+len(opposition)
-        out.at[i,"Confirm_Count"]=len(support)
-        out.at[i,"Oppose_Count"]=len(opposition)
+                out.at[i,family]="QUALIFIED_INTERNAL_CONFLICT_VETO" if family in conflicts else "QUALIFIED_OPPOSE"
+        report["qualified_events_used"]+=len(independent_support)+len(independent_oppose)
+        out.at[i,"Confirm_Count"]=len(independent_support-independent_oppose)
+        out.at[i,"Oppose_Count"]=len(independent_oppose)
+        out.at[i,"V55_Independent_Support_Keys"]='|'.join(sorted(independent_support-independent_oppose))
+        out.at[i,"V55_Independent_Conflict_Keys"]='|'.join(sorted(independent_oppose))
+        out.at[i,"V55_Active_System_Names"]=' | '.join(sorted({
+            str(v) for v in relevant['Signal_Family'].tolist() if str(v).strip()}))[:700]
         out.at[i,"Confirm_Families"]="|".join(sorted(support)) if support else None
         out.at[i,"Oppose_Families"]="|".join(sorted(opposition)) if opposition else None
-        if opposition:
+        if independent_oppose:
             report["conflict_games"]+=1
             out.at[i,"V55_Research_Decision"]="RESEARCH_CONFLICT__VETO"
-        elif len(support)>=2:
+        elif len(independent_support)>=2:
             report["multi_family"]+=1
             out.at[i,"V55_Research_Decision"]="MULTI_FAMILY_RESEARCH_SUPPORT__NO_BET_AUTHORITY"
     out["V55_Bet_Authority"]=0
@@ -1426,12 +1977,11 @@ def _v55_bet_key(row):
 
 
 def apply_v55_owner_betting_policy(frame, *, now=None, enabled=None):
-    """V5.5-only provisional *recommendation* authority, never stake execution.
+    """V5.5 CORE + independently qualified systems, prior NCAAF decision ladder.
 
-    The user explicitly replaced frozen V1 as betting selector. No uncalibrated
-    probability is described as qualified OOS. No qualified opposing evidence may
-    be overruled; missing/unevaluable brains abstain. Up to three model-only bets
-    are published for the next cycle, with an idempotent stable game-side key.
+    CORE-only edges become CANDIDATE, one qualified independent supporter BET,
+    two different supporting evidence families STRONG BET. Every verified
+    opposition vetoes. Never describe uncalibrated probabilities as OOS.
     Set NCAAF_V55_BET_AUTHORITY_MODE=OFF as an immediate kill switch.
     """
     import pandas as pd
@@ -1458,7 +2008,9 @@ def apply_v55_owner_betting_policy(frame, *, now=None, enabled=None):
         "v55_policy_min_ev":V55_POLICY_MIN_EV,
         "v55_policy_min_margin_points":V55_POLICY_MIN_MARGIN_POINTS,
         "v55_automatic_wager_execution":False,"v55_v1_selector_used":False,
-        "v55_policy_status":"NO_AUTHORIZED_BETS"}
+        "v55_policy_status":"NO_AUTHORIZED_BETS",
+        "v55_decision_ladder":"CORE_CANDIDATE__ONE_SUPPORT_BET__TWO_SUPPORT_STRONG",
+        "v55_research_historical_seasons":"2013-2025_PRE_2026_ONLY"}
     if not active:
         out["V55_Bet_Decision"]="AUTHORITY_DISABLED"
         return out,status
@@ -1530,6 +2082,15 @@ def apply_v55_owner_betting_policy(frame, *, now=None, enabled=None):
             out.at[i,"V55_Authority_Hold_Reason"]="BELOW_CONSERVATIVE_PROVISIONAL_BET_THRESHOLDS"
             out.at[i,"V55_Bet_Decision"]="CANDIDATE" if ev>0.08 and model_points>=3 else "PASS"
             if out.at[i,"V55_Bet_Decision"]=="CANDIDATE":status["v55_candidate_rows"]+=1
+            continue
+        # Original NCAAF ladder: CORE candidate is NOT automatically a BET.
+        # One genuinely independent historically qualified supporter is needed
+        # for BET, and two independent supporting evidence families for STRONG.
+        verified=int(_price(r.get('Confirm_Count')) or 0)
+        if verified<1:
+            out.at[i,'V55_Bet_Decision']='CANDIDATE'
+            out.at[i,'V55_Authority_Hold_Reason']='CORE_ONLY__NEEDS_QUALIFIED_INDEPENDENT_CONFIRMATION'
+            status['v55_candidate_rows']+=1
             continue
         # Eligible rows are ranked before applying a deterministic cap. Never
         # turn a stale or non-verifiable quote into a formal recommendation.
