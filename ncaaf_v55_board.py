@@ -1114,7 +1114,12 @@ def attach_v55_raw_pregame_overlays(board, enrich, *, source_status='PASS', now=
         if not has_source:continue
         (home,away),oriented=_matchup_teams(r)
         selected=_norm_team(r.get('V55_Research_Lean_Team') or r.get('Selected_Team'))
-        if not oriented or selected not in (home,away):continue
+        # Pure CORE-only, two-sided priced games may not have a selected lean.
+        # Show a canonical HOME-side system evaluation for completeness only;
+        # no recommendation or qualifying vote is inferred from this fallback.
+        no_core_side=selected not in (home,away)
+        if not oriented:continue
+        if no_core_side:selected=home
         exact_market_kick=(e['_kick']-kick).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))
         # Miner research snapshots can still contain the original CFBD midnight
         # sentinel. Permit this ONLY for display context, NEVER qualified votes.
@@ -1129,8 +1134,11 @@ def attach_v55_raw_pregame_overlays(board, enrich, *, source_status='PASS', now=
         report['matched_game_context']+=1
         # A priced bet can only display information known AT THAT PRICE.
         anchor=quote if priced else now
-        v=v.loc[v['_snap'].le(anchor)
-            &(anchor-v['_snap']).le(pd.Timedelta(minutes=720 if not priced else 240))]
+        direct=(v.get('V55_Live_Computed_On_Current_Quote',pd.Series(False,index=v.index)).fillna(False).eq(True)
+                &v['_snap'].ge(anchor)&v['_snap'].le(now)
+                &(now-v['_snap']).le(pd.Timedelta(minutes=5)))
+        v=v.loc[(v['_snap'].le(anchor)
+            &(anchor-v['_snap']).le(pd.Timedelta(minutes=720 if not priced else 240))) | direct]
         if v.empty:report['no_usable_context_at_quote']+=1;continue
         book=str(r.get('Backend_Quote_Book') or '').lower().strip()
         same_side=v.loc[v['_side'].eq(selected)]
@@ -1143,8 +1151,12 @@ def attach_v55_raw_pregame_overlays(board, enrich, *, source_status='PASS', now=
             chosen=v.loc[v['_side'].eq(home)]
             if chosen.empty:continue
             status='HOME_SIDE_CONTEXT_NOT_SELECTED_BET_SIDE';report['home_side_display_only']+=1
+        if no_core_side:
+            status='MODEL_ONLY_HOME_CONTEXT_NO_SELECTED_BET_SIDE'
         if not priced:
             status='UNPRICED_GAME_SYSTEM_CONTEXT_DISPLAY_ONLY';report['unpriced_display_only']+=1
+        elif not no_core_side and bool(chosen.get('V55_Live_Computed_On_Current_Quote',pd.Series(False,index=chosen.index)).fillna(False).eq(True).any()):
+            status='LIVE_SYSTEM_RECOMPUTED_AT_REFRESH__QUOTE_EXECUTION_RECHECK_REQUIRED'
         # Prefer the most recent available named observation, rather than the
         # most recent EMPTY odds refresh that wiped the research fields.
         def richness(rec):
@@ -1158,9 +1170,10 @@ def attach_v55_raw_pregame_overlays(board, enrich, *, source_status='PASS', now=
             return present
         candidates=chosen.copy()
         candidates['_richness']=candidates.apply(richness,axis=1)
+        candidates['_live_engine']=candidates.get('V55_Live_Computed_On_Current_Quote',pd.Series(False,index=candidates.index)).fillna(False).eq(True).astype(int)
         # Named context up to 240m old is preferable to fresh empty rows,
         # but NEVER preferable to quote-exact qualified event matching.
-        picked=candidates.sort_values(['_richness','_snap'],ascending=False).iloc[0]
+        picked=candidates.sort_values(['_live_engine','_richness','_snap'],ascending=False).iloc[0]
         out.at[idx,'V55_Raw_BigAl']=_v55_raw_named(picked,'BigAl_Active_Text','BigAl_Side_Support_Count')
         out.at[idx,'V55_Raw_Pathi']=_v55_raw_named(picked,'Pathi_Active_Text','Pathi_System_Count')
         summary=_v55_raw_clean(picked.get('NCAAF_RV2_System_Summary'))
@@ -1301,6 +1314,207 @@ def _v55_read_headless_miner_system_snapshot(*,storage_client=None,bucket_name=N
         return pd.DataFrame(),'MINER_SNAPSHOT_UNAVAILABLE:'+type(exc).__name__
 
 
+
+# V55 DIRECT LIVE BRAINS — run the legacy *feature evaluators*, not legacy V1
+# scoring. The earlier V5.5 bridge only queried saved features from market
+# views; those views are not populated by the independent CORE execution path.
+def _v55_direct_current_quote_rows(board, market, *, now=None):
+    """Select ONLY this board's verified sportsbook/book/side/line quote pairs.
+
+    Do not evaluate unrelated stale book quotes, synthesize prices, or use a
+    hypothetical CFBD scheduled kickoff in place of the verified market event.
+    """
+    import pandas as pd
+    at = _timestamp(now or _utcnow())
+    if not isinstance(board,pd.DataFrame) or not isinstance(market,pd.DataFrame) or market.empty:
+        return pd.DataFrame(), {'status':'NO_VERIFIED_MARKET_FRAME','games':0,'rows':0}
+    req={'Home_Team_Norm','Away_Team_Norm','Game_Start','Outcome','Value','Snapshot_Timestamp'}
+    if not req.issubset(market.columns):
+        return pd.DataFrame(),{'status':'MISSING_QUOTE_COLUMNS','missing':sorted(req-set(market.columns)),'games':0,'rows':0}
+    q=market.copy()
+    q['_home']=q['Home_Team_Norm'].map(_norm_team)
+    q['_away']=q['Away_Team_Norm'].map(_norm_team)
+    q['_side']=q['Outcome'].map(_norm_team)
+    q['_kick']=pd.to_datetime(q['Game_Start'],utc=True,errors='coerce')
+    q['_obs']=pd.to_datetime(q['Snapshot_Timestamp'],utc=True,errors='coerce')
+    bk=q.get('Bookmaker',pd.Series('',index=q.index)).fillna('').astype(str).str.lower().str.strip()
+    alt=q.get('Book',pd.Series('',index=q.index)).fillna('').astype(str).str.lower().str.strip()
+    q['_book']=bk.mask(bk.isin(('','nan','none')),alt)
+    q['_spread']=pd.to_numeric(q['Value'],errors='coerce')
+    found=[]; games=0
+    for _,r in board.iterrows():
+        if not str(r.get('Quote_State') or '').startswith('FRESH_'):
+            continue
+        (home,away),oriented=_matchup_teams(r)
+        if not oriented:continue
+        kick=_timestamp(r.get('Game_Start_UTC'))
+        anchor=_timestamp(r.get('Backend_Quote_Timestamp'))
+        book=str(r.get('Backend_Quote_Book') or '').lower().strip()
+        hv=_price(r.get('Backend_Home_Spread'))
+        av=_price(r.get('Backend_Away_Spread'))
+        if not (book and pd.notna(kick) and pd.notna(anchor) and anchor<=at<kick
+                and hv is not None and av is not None and abs(hv+av)<.01):
+            continue
+        parts=q.loc[q['_home'].eq(home)&q['_away'].eq(away)&q['_book'].eq(book)
+            &(q['_kick']-kick).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))
+            &q['_obs'].le(anchor)&(anchor-q['_obs']).le(pd.Timedelta(minutes=15))]
+        if parts.empty:continue
+        chosen=[]
+        for side,spread in ((home,hv),(away,av)):
+            opt=parts.loc[parts['_side'].eq(side)&parts['_spread'].sub(spread).abs().le(.001)].sort_values('_obs',ascending=False)
+            if opt.empty:chosen=[];break
+            chosen.append(opt.iloc[0].copy())
+        if len(chosen)!=2:continue
+        if abs((chosen[0]['_obs']-chosen[1]['_obs']).total_seconds())>900:continue
+        games+=1
+        found.extend(chosen)
+    if not found:return pd.DataFrame(),{'status':'NO_EXACT_BOOK_TWO_SIDED_PAIRS','games':0,'rows':0}
+    rows=pd.DataFrame(found).drop_duplicates(subset=['_home','_away','_kick','_side','_book','_spread'],keep='last')
+    # These are original odds, not model/V1 features. The live evaluation runs
+    # against completed-game history and cannot infer any current-game result.
+    rows['Sport']='NCAAF';rows['Market']='spreads'
+    rows['Game']=rows['Away_Team_Norm'].astype(str)+' @ '+rows['Home_Team_Norm'].astype(str)
+    rows['V55_Original_Quote_Timestamp']=rows['Snapshot_Timestamp']
+    rows['V55_Original_Quote_Provenance_Verified']=True
+    rows['V55_Source_Type']='LIVE_ENGINE_RECALCULATED'
+    return rows.drop(columns=[c for c in rows.columns if c.startswith('_')],errors='ignore'),{
+        'status':'PASS','games':games,'rows':len(rows),'source':'ORIGINAL_VERIFIED_SCANNER_BOOK_QUOTES'}
+
+
+def _v55_evaluate_existing_live_systems(board, market, *, bq_client,
+                                         storage_client=None, bucket_name=None, now=None,
+                                         utils_module=None, miner_module=None):
+    """Restore former NCAAF/NFL-style live system evaluation on V5.5 quotes.
+
+    Models are not loaded/refit here. Big Al/Pathi and Miner are evaluated by
+    their existing implementations against CURRENT verified sportsbook sides;
+    final qualification happens later via independent frozen research registries.
+    """
+    import pandas as pd
+    from types import SimpleNamespace
+    import time
+    t0=time.monotonic()
+    quote_rows,audit=_v55_direct_current_quote_rows(board,market,now=now)
+    audit.update({'big_al_pathi':'NOT_RUN','miner':'NOT_RUN','named_big_al_rows':0,
+                  'named_pathi_rows':0,'named_miner_rows':0,'miner_vote_rows':0,
+                  'miner_report_status':'NOT_LOADED'})
+    if quote_rows.empty:return quote_rows,audit
+    try:
+        if utils_module is None:import utils as utils_module
+        # Two prior seasons are enough to derive live form/role/revenge inputs.
+        # The frozen historical qualification still uses the FULL 2013-25 set.
+        updated=utils_module.attach_pathi_bigal_backend_features(quote_rows,'NCAAF',days_back=730)
+        if not isinstance(updated,pd.DataFrame) or len(updated)!=len(quote_rows):
+            raise RuntimeError('LEGACY_LIVE_ENRICHMENT_ROW_COUNT_CHANGED')
+        quote_rows=updated
+        audit['big_al_pathi']='PASS' if any(c in quote_rows for c in ('BigAl_Active_Text','Pathi_Active_Text','System_Signals_Text')) else 'NO_SYSTEM_FIELDS_PRODUCED'
+        # Football key-number concepts existed in the older Pathi feature
+        # engine but did not appear in Pathi_Active_Text. Show real computed
+        # flags separately; these are descriptive context, NOT qualified votes.
+        fb_flags=tuple(c for c in ('Pathi_FB_Dog_Below_Key_3','Pathi_FB_Dog_Below_Key_7',
+            'Pathi_FB_Dog_10_Plus','Pathi_FB_Dog_Above_7','Pathi_FB_Dog_Hook_Above_3',
+            'Pathi_FB_Dog_Hook_Above_7','Pathi_FB_Dog_Hook_Above_10',
+            'Pathi_FB_Favorite_Below_Key_3','Pathi_FB_Favorite_Below_Key_7',
+            'Pathi_FB_Favorite_Below_Key_10','Pathi_FB_Moved_Through_Key') if c in quote_rows)
+        audit['pathi_football_flag_columns']=len(fb_flags)
+        audit['pathi_football_context_rows']=0
+        if fb_flags:
+            for _ix,_r in quote_rows.iterrows():
+                _flags=[c.removeprefix('Pathi_FB_').replace('_',' ') for c in fb_flags
+                    if _price(_r.get(c))==1]
+                if not _flags:continue
+                audit['pathi_football_context_rows']+=1
+                _old=str(_r.get('Pathi_Active_Text') or '—').strip()
+                if _old in ('—','','nan','None'):
+                    quote_rows.at[_ix,'Pathi_Active_Text']='[FOOTBALL RESEARCH CONTEXT ONLY] '+ ' | '.join(_flags[:5])
+        exact=quote_rows.get('System_Signals_Text',pd.Series('',index=quote_rows.index)).fillna('').astype(str)
+        audit['big_al_exact_firings']=int(exact.str.contains('BIG AL ',regex=False).sum())
+        audit['pathi_exact_firings']=int(exact.str.contains('PATHI ',regex=False).sum())
+    except Exception as exc:
+        audit['big_al_pathi']='ERROR:'+type(exc).__name__+':'+str(exc)[:130]
+        logging.exception('[NCAAF-V55-LIVE-BRAIN-CALC] stage=BIGAL_PATHI')
+    # Try original confirmed Miner evaluator directly — no separate headless
+    # job needs to publish an orphaned snapshot for V5.5 to see its triggers.
+    try:
+        if miner_module is None:import ncaaf_research_v2 as miner_module
+        report, rep_status = miner_module.load_current_report_diagnostic(
+            storage_client=storage_client,
+            bucket_name=bucket_name or os.getenv('MODEL_BUCKET','sharp-models'))
+        audit['miner_report_status']=str(rep_status.get('status') or 'UNKNOWN')
+        cross_version_shadow=False
+        if report is None and audit['miner_report_status']=='SOURCE_TAG_MISMATCH':
+            # A valid prior V2.x library may still evaluate original named
+            # RESEARCH triggers. Do not pretend its version is the current
+            # frozen authority: zero all qualified vote fields after scoring.
+            try:
+                from google.cloud import storage as _storage
+                _sc=storage_client or _storage.Client()
+                _bucket=bucket_name or os.getenv('MODEL_BUCKET','sharp-models')
+                _raw=_sc.bucket(_bucket).blob(miner_module.REPORT_CURRENT_BLOB).download_as_bytes()
+                _old=json.loads(_raw)
+                _created=_timestamp(_old.get('created_utc'))
+                if (isinstance(_old,dict)
+                        and str(_old.get('source_tag') or '').startswith('ncaaf-research-v2.')
+                        and isinstance(_old.get('system_miner_v3'),dict)
+                        and pd.notna(_created) and _created<=_timestamp(now or _utcnow())):
+                    report=_old
+                    cross_version_shadow=True
+                    audit['miner_report_status']='OLD_V2_VERSION_RESEARCH_DISPLAY_ONLY'
+            except Exception as exc:
+                audit['cross_version_read_error']=type(exc).__name__
+        if isinstance(report,dict):
+            ctx=SimpleNamespace(bq_client=bq_client,
+                HISTORICAL_NCAAF_CORE_VIEW='sharplogger.sharp_data.ncaaf_historical_core_training_vw',
+                gcs_client=storage_client,GCS_BUCKET=bucket_name or os.getenv('MODEL_BUCKET','sharp-models'))
+            evaluated=miner_module.attach_live_miner_votes(quote_rows,report,dashboard_module=ctx)
+            if not isinstance(evaluated,pd.DataFrame) or len(evaluated)!=len(quote_rows):
+                raise RuntimeError('LIVE_MINER_EVALUATOR_CHANGED_ROW_COUNT')
+            quote_rows=evaluated
+            if cross_version_shadow:
+                quote_rows['NCAAF_RV22_Miner_Votes']=[[] for _ in range(len(quote_rows))]
+                quote_rows['NCAAF_RV2_System_Count']=0
+                quote_rows['NCAAF_RV2_System_Summary']='—'
+            audit['miner']='PASS_SHADOW_CROSS_VERSION' if cross_version_shadow else 'PASS'
+        else:audit['miner']='REPORT_NOT_READY:'+audit['miner_report_status']
+    except Exception as exc:
+        audit['miner']='ERROR:'+type(exc).__name__+':'+str(exc)[:130]
+        logging.exception('[NCAAF-V55-LIVE-BRAIN-CALC] stage=MINER')
+    # We KNOW the time when these signals were evaluated. Do not backdate their
+    # observation to the bookmaker's earlier quote timestamp.
+    evaluated_at=_timestamp(now or _utcnow())
+    quote_rows['Snapshot_Timestamp']=evaluated_at
+    quote_rows['V55_Live_Computed_On_Current_Quote']=True
+    for c,k in (('BigAl_Active_Text','named_big_al_rows'),
+                ('Pathi_Active_Text','named_pathi_rows'),
+                ('NCAAF_RV2_Research_System_Summary','named_miner_rows')):
+        if c in quote_rows:
+            v=quote_rows[c].fillna('').astype(str).str.strip()
+            audit[k]=int((~v.isin(('', '—','nan','None','NOT_PUBLISHED'))).sum())
+    if 'NCAAF_RV22_Miner_Votes' in quote_rows:
+        audit['miner_vote_rows']=sum(len(_v55_parse_structured_votes(v)) for v in quote_rows['NCAAF_RV22_Miner_Votes'])
+    if 'NCAAF_RV22_Miner_Research_Votes' in quote_rows:
+        audit['miner_shadow_vote_rows']=sum(len(_v55_parse_structured_votes(v)) for v in quote_rows['NCAAF_RV22_Miner_Research_Votes'])
+    audit['elapsed_seconds']=round(time.monotonic()-t0,2)
+    audit['status']='PASS_LIVE_SYSTEM_EVALUATION' if audit['big_al_pathi']=='PASS' or audit['miner'].startswith('PASS') else 'NO_EVALUATOR_COMPLETED'
+    return quote_rows,audit
+
+
+def _v55_live_quote_time_eligible(live_rows, quote_time, now):
+    """Allow post-quote live evaluation ONLY if its original price is recent.
+
+    Original pre-quote archived signals continue under the legacy as-of rule.
+    This guard prevents re-timestamping an old quote to invent betting authority.
+    """
+    import pandas as pd
+    obs=pd.to_datetime(live_rows['Snapshot_Timestamp'],utc=True,errors='coerce')
+    original=pd.to_datetime(live_rows.get('V55_Original_Quote_Timestamp',pd.Series(index=live_rows.index,dtype='object')),utc=True,errors='coerce')
+    marked=live_rows.get('V55_Live_Computed_On_Current_Quote',pd.Series(False,index=live_rows.index)).fillna(False).eq(True)
+    return (marked & original.notna() & original.le(quote_time)
+            &(quote_time-original).le(pd.Timedelta(minutes=15))
+            &((now-quote_time)<=pd.Timedelta(minutes=15))
+            &obs.ge(quote_time)&obs.le(now)
+            &(now-obs).le(pd.Timedelta(minutes=5)))
+
 def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_client=None, bucket_name=None):
     """Enforce one backend price authority for both weekly and market refresh."""
     import json
@@ -1341,6 +1555,10 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     out, research = evaluate_v55_spread_research(out,calibration=calibration)
     if cal_problem:
         research["calibration_unavailable_reason"] = cal_problem
+    live_system_rows,live_system_audit=_v55_evaluate_existing_live_systems(
+        out,market,bq_client=bq_client,storage_client=storage_client,
+        bucket_name=bucket_name)
+    updated['v55_live_system_evaluation']=live_system_audit
     # Shared enriched feed: raw overlays are display-only; ONLY a separately
     # authenticated, research-registry-matched directional vote can count.
     other_registry, other_registry_problem = read_v55_long_history_brain_registry(
@@ -1352,7 +1570,7 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     # to require real quote/price/provenance and the frozen research registry.
     miner_display_frame, miner_display_status = _v55_read_headless_miner_system_snapshot(
         storage_client=storage_client,bucket_name=bucket_name)
-    display_frames=[x for x in (overlay_frame,miner_display_frame)
+    display_frames=[x for x in (live_system_rows,overlay_frame,miner_display_frame)
                     if isinstance(x,pd.DataFrame) and not x.empty]
     raw_display_frame=(pd.concat(display_frames,ignore_index=True,sort=False)
                        if display_frames else pd.DataFrame())
@@ -1367,18 +1585,22 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     # Original legacy Miner evaluator already produces the correct validated
     # mechanism IDs. Its GCS handoff is admitted only when ORIGINAL book, line,
     # observation timestamp, and pregame provenance are intact.
-    miner_authority_rows=overlay_frame
+    miner_authority_rows=(pd.concat([overlay_frame,live_system_rows],ignore_index=True,sort=False)
+        if not live_system_rows.empty else overlay_frame)
     if isinstance(miner_display_frame,pd.DataFrame) and not miner_display_frame.empty:
         checked=miner_display_frame.loc[
             miner_display_frame.get('V55_Original_Quote_Provenance_Verified',
                 pd.Series(False,index=miner_display_frame.index)).eq(True)]
         if not checked.empty:
-            miner_authority_rows=pd.concat([overlay_frame,checked],ignore_index=True,sort=False)
+            miner_authority_rows=pd.concat([miner_authority_rows,checked],ignore_index=True,sort=False)
     miner_events, miner_audit = derive_v55_miner_qualified_events(
         out,miner_authority_rows,registry)
-    miner_audit['original_snapshot_provenance_rows']=len(miner_authority_rows)-len(overlay_frame)
+    miner_audit['direct_runtime_rows']=len(live_system_rows)
+    miner_audit['original_snapshot_provenance_rows']=max(0,len(miner_authority_rows)-len(overlay_frame)-len(live_system_rows))
+    other_authority_rows=(pd.concat([overlay_frame,live_system_rows],ignore_index=True,sort=False)
+        if not live_system_rows.empty else overlay_frame)
     other_events, other_audit = derive_v55_other_qualified_events(
-        out,overlay_frame,other_registry)
+        out,other_authority_rows,other_registry)
     # Externally ingested evidence rows are admissible only if backed by a
     # matching frozen rule. String statuses in a live table are not a certificate.
     vetted_explicit, explicit_gate = validate_v55_external_qualified_events(
@@ -1406,6 +1628,7 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     updated.update(policy)
     updated["status"]=audit["status"]
     updated["price_join_semantics"] = "FRESH_QUOTES_V55_OWNER_DIRECTED_DECISION"
+    log("[NCAAF-V55-LIVE-SYSTEM-EVALUATION] " + json.dumps(live_system_audit,sort_keys=True))
     log("[NCAAF-V55-BACKEND-PRICE-BRIDGE] " + json.dumps(diag,sort_keys=True))
     log("[NCAAF-V55-RESEARCH-SIDE-EV] " + json.dumps(research,sort_keys=True))
     log("[NCAAF-V55-INDEPENDENT-BRAIN-EVIDENCE] " + json.dumps(brain,sort_keys=True))
@@ -1746,9 +1969,9 @@ def derive_v55_miner_qualified_events(board, live_rows, registry, *, now=None):
         hits=live.loc[(live['_home']==home)&(live['_away']==away)
               &(live['_side']==selected)
               &(live['_kick']-kick).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))
-              &live['_obs'].le(quote)&live['_obs'].le(now)
-              &live['_obs'].lt(kick)&live['_obs'].ge(report_time)
-              &(quote-live['_obs']).le(pd.Timedelta(minutes=90))]
+              &live['_obs'].le(now)&live['_obs'].lt(kick)&live['_obs'].ge(report_time)
+              &((live['_obs'].le(quote)&(quote-live['_obs']).le(pd.Timedelta(minutes=90)))
+                |_v55_live_quote_time_eligible(live,quote,now))]
         # A researched role/line trigger must apply at the *execution* spread.
         hits=hits.loc[pd.to_numeric(hits['Value'],errors='coerce').sub(selected_spread).abs().le(.001)]
         # The derived Miner rule may depend on market spread or role. Use the
@@ -1789,17 +2012,20 @@ def derive_v55_miner_qualified_events(board, live_rows, registry, *, now=None):
                 obs=x['_obs'];key=(gid,mid,target)
                 source_family=('PREDICTION_TRACKER' if v.get('uses_external_ratings_family') is True
                                else 'SYSTEM_MINER')
+                direct=x.get('V55_Live_Computed_On_Current_Quote') is True
+                source_status='PRE_GAME_VERIFIED_LIVE_RECALCULATED' if direct else 'PRE_GAME_VERIFIED'
                 payload=dict(zip(cols,(gid,kick.isoformat(),source_family,mid,
                     rule['evidence_family_key'],target,obs.isoformat(),
                     report_time.isoformat(),'QUALIFIED_OOS','PASS',
-                    True,'PRE_GAME_VERIFIED')))
+                    True,source_status)))
+                if direct:payload['Observed_Quote_UTC']=str(x.get('V55_Original_Quote_Timestamp'))
                 if key not in dedup or obs>_timestamp(dedup[key]['Observed_At_UTC']):dedup[key]=payload
     emit=list(dedup.values())
     audit['qualified_events']=len(emit)
     audit['distinct_games']=len({x['Game_ID'] for x in emit})
     audit['distinct_mechanisms']=len({x['Signal_Family'] for x in emit})
     audit['status']='PASS' if emit else ('MATCHED_LIVE_ROWS_NO_QUALIFIED_TRIGGER' if audit['matched_game_sides'] else 'NO_VERIFIED_SAME_SIDE_ASOF_LIVE_ROWS')
-    return pd.DataFrame(emit,columns=cols),audit
+    return pd.DataFrame(emit).reindex(columns=list(cols)+['Observed_Quote_UTC'] if any('Observed_Quote_UTC' in r for r in emit) else list(cols)),audit
 
 
 
@@ -1977,8 +2203,9 @@ def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None):
         if pd.isna(qt) or pd.isna(kick) or pd.isna(at) or not qt<=at<kick:continue
         hits=live.loc[(live['_home']==home)&(live['_away']==away)
           &(live['_kick']-kick).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))
-          &live['_book'].eq(book)&live['_obs'].le(qt)&live['_obs'].lt(kick)
-          &(qt-live['_obs']).le(pd.Timedelta(minutes=90))]
+          &live['_book'].eq(book)&live['_obs'].lt(kick)
+          &((live['_obs'].le(qt)&(qt-live['_obs']).le(pd.Timedelta(minutes=90)))
+            |_v55_live_quote_time_eligible(live,qt,at))]
         if hits.empty:continue
         report['matched_games']+=1
         for rule in rules.values():
@@ -2000,17 +2227,20 @@ def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None):
                 if side not in (home,away) or abs(hit['_spread']-needed_spread)>0.001:continue
                 if direction not in (home,away):continue
                 key=(gid,rule['family'],rule['id'],direction)
+                direct=hit.get('V55_Live_Computed_On_Current_Quote') is True
+                source_status='PRE_GAME_VERIFIED_LIVE_RECALCULATED' if direct else 'PRE_GAME_VERIFIED'
                 record=dict(zip(columns,(gid,kick.isoformat(),rule['family'],rule['id'],
                     rule['key'],direction,hit['_obs'].isoformat(),rule['qualified_at'].isoformat(),
-                    'QUALIFIED_OOS','PASS',True,'PRE_GAME_VERIFIED',book,
+                    'QUALIFIED_OOS','PASS',True,source_status,book,
                     float(hit['_spread']),rule['report_sha256'])))
+                if direct:record['Observed_Quote_UTC']=str(hit.get('V55_Original_Quote_Timestamp'))
                 if key not in dedup or hit['_obs']>_timestamp(dedup[key]['Observed_At_UTC']):dedup[key]=record
     emit=list(dedup.values())
     report['qualified_events']=len(emit)
     for x in emit:
         fam=x['Source_Family'];report['qualified_by_brain'][fam]=report['qualified_by_brain'].get(fam,0)+1
     report['status']='PASS' if emit else 'NO_MATCHING_QUALIFIED_PREGAME_RULE_FIRINGS'
-    return pd.DataFrame(emit,columns=columns),report
+    return pd.DataFrame(emit).reindex(columns=list(columns)+['Observed_Quote_UTC'] if any('Observed_Quote_UTC' in r for r in emit) else list(columns)),report
 
 
 def read_v55_qualified_evidence(bq_client):
@@ -2063,7 +2293,7 @@ def validate_v55_external_qualified_events(events,registry):
     return pd.DataFrame(rows) if rows else None,audit
 
 
-def attach_v55_qualified_evidence(frame,events):
+def attach_v55_qualified_evidence(frame,events, *, now=None):
     """Only independently qualified sources may confirm or oppose V5.5 CORE.
 
     Exact CFBD game ID, kickoff, directional team, qualification using
@@ -2098,11 +2328,13 @@ def attach_v55_qualified_evidence(frame,events):
     ev["_kick"]=pd.to_datetime(ev["Game_Start_UTC"],utc=True,errors="coerce")
     ev["_family"]=ev["Source_Family"].astype(str).str.upper().str.strip()
     ev["_game_id"]=ev["Game_ID"].astype(str)
+    ev['_original_quote']=pd.to_datetime(ev.get('Observed_Quote_UTC',pd.Series(index=ev.index,dtype='object')),utc=True,errors='coerce')
+    observed_now=_timestamp(now or _utcnow())
     def check(v): return v is True or str(v).lower() in ("true","1")
     valid=(ev["_family"].isin(VALID_BRAIN_FAMILIES)
            &ev["Qualification_Status"].eq("QUALIFIED_OOS")
            &ev["OOS_Status"].eq("PASS")
-           &ev["Provenance_Status"].eq("PRE_GAME_VERIFIED")
+           &ev["Provenance_Status"].isin(("PRE_GAME_VERIFIED","PRE_GAME_VERIFIED_LIVE_RECALCULATED"))
            &ev["Direction_Verified"].map(check)
            &ev["_qualified"].lt(ev["_kick"])
            &ev["_obs"].lt(ev["_kick"])
@@ -2122,7 +2354,20 @@ def attach_v55_qualified_evidence(frame,events):
         (home,away),_= _matchup_teams(r)
         if not selected or not gid or pd.isna(quote_time) or pd.isna(kick):
             continue
-        relevant=ev.loc[(ev["_game_id"]==gid)&ev["_kick"].eq(kick)&ev["_obs"].le(quote_time)].copy()
+        archived=(ev['Provenance_Status'].eq('PRE_GAME_VERIFIED')&ev['_obs'].le(quote_time))
+        # A live evaluator cannot backdate itself to the quote snapshot.
+        # Admit it only with an unchanged recent sportsbook quote and a recent
+        # 2026 PREGAME evaluation, then maintain exact family/line constraints.
+        live=(ev['Provenance_Status'].eq('PRE_GAME_VERIFIED_LIVE_RECALCULATED')
+              &ev['_original_quote'].notna()
+              &ev['_original_quote'].le(quote_time)
+              &(quote_time-ev['_original_quote']).le(pd.Timedelta(minutes=15))
+              &ev['_obs'].ge(quote_time)
+              &(ev['_obs']-quote_time).le(pd.Timedelta(minutes=15))
+              &ev['_obs'].le(observed_now)
+              &(observed_now-ev['_obs']).le(pd.Timedelta(minutes=5))
+              &((observed_now-quote_time)<=pd.Timedelta(minutes=15)))
+        relevant=ev.loc[(ev["_game_id"]==gid)&ev["_kick"].eq(kick)&(archived|live)].copy()
         # Explicit Big Al/Pathi/STAT/PT event must be sourced to the same
         # sportsbook and spread; the legacy Miner producer performs these
         # checks before emission. A quoted event cannot self-verify.
