@@ -21287,6 +21287,84 @@ def load_model_from_gcs(
 
 DEFAULT_MOVES_VIEW = "sharp_data.moves_with_features_merged"
 
+def read_nfl_compact_market_quotes(
+    *, table: str = "sharp_data.sharp_moves_master", hours: int = 336,
+    game_start_after=None, game_start_before=None, use_bq_storage: bool = False,
+) -> pd.DataFrame:
+    """NFL background ONLY: first+last observed pregame sportsbook quotes.
+
+    BQ does the grouping/windowing; do not download 100k+ wide raw rows
+    each half-hour.  Retains first and last per GAME+MARKET+SIDE+BOOK,
+    so price/line opening-versus-current semantics are unchanged. The
+    full enriched history remains separately available for Market Rich.
+    Production weekly historical/replay readers are not changed.
+    """
+    if game_start_after is None or game_start_before is None:
+        raise ValueError("NFL_COMPACT_QUOTES_REQUIRES_BOUNDED_GAME_WINDOW")
+    # SQL table identifiers cannot be query parameters: restrict strictly to
+    # the fixed Utils-owned raw table (with/without project prefix).
+    authorized = {"sharp_data.sharp_moves_master",
+                  f"{GCP_PROJECT_ID}.sharp_data.sharp_moves_master"}
+    if str(table).strip("`") not in authorized:
+        raise ValueError("NFL_COMPACT_QUOTES_UNAUTHORIZED_TABLE")
+    start = pd.to_datetime(game_start_after, utc=True, errors="coerce")
+    end = pd.to_datetime(game_start_before, utc=True, errors="coerce")
+    if pd.isna(start) or pd.isna(end) or end <= start or end > start + pd.Timedelta(days=10):
+        raise ValueError("NFL_COMPACT_QUOTES_INVALID_GAME_WINDOW")
+    if not 1 <= int(hours) <= 336:
+        raise ValueError("NFL_COMPACT_QUOTES_INVALID_LOOKBACK")
+    from google.cloud import bigquery as _nfl_bq
+    # Server-side participant/market/book grain. Use the raw strings from the
+    # odds table (not latest row alone); all books/outcomes remain represented.
+    sql = f"""
+    WITH eligible AS (
+      SELECT
+        Sport, Market, Outcome, Value, Odds_Price, Bookmaker,
+        Game_Start, Snapshot_Timestamp, Home_Team_Norm, Away_Team_Norm,
+        Game_Key, Time,
+        ROW_NUMBER() OVER (
+          PARTITION BY Game_Start, LOWER(TRIM(Home_Team_Norm)),
+            LOWER(TRIM(Away_Team_Norm)), LOWER(TRIM(Market)),
+            LOWER(TRIM(Outcome)), LOWER(TRIM(Bookmaker))
+          ORDER BY Snapshot_Timestamp ASC, Time ASC, Game_Key ASC
+        ) AS first_quote_rank,
+        ROW_NUMBER() OVER (
+          PARTITION BY Game_Start, LOWER(TRIM(Home_Team_Norm)),
+            LOWER(TRIM(Away_Team_Norm)), LOWER(TRIM(Market)),
+            LOWER(TRIM(Outcome)), LOWER(TRIM(Bookmaker))
+          ORDER BY Snapshot_Timestamp DESC, Time DESC, Game_Key DESC
+        ) AS last_quote_rank
+      FROM `{str(table).strip('`')}`
+      WHERE UPPER(TRIM(CAST(Sport AS STRING))) = 'NFL'
+        AND Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
+        AND Game_Start > @game_start_after
+        AND Game_Start <= @game_start_before
+        AND Game_Start IS NOT NULL AND Time IS NOT NULL
+        AND TIMESTAMP_DIFF(Game_Start, Time, SECOND) >= 0
+        AND COALESCE(Pre_Game, TRUE)
+    )
+    SELECT * EXCEPT(first_quote_rank, last_quote_rank)
+    FROM eligible
+    WHERE first_quote_rank = 1 OR last_quote_rank = 1
+    """
+    cfg = _nfl_bq.QueryJobConfig(query_parameters=[
+        _nfl_bq.ScalarQueryParameter("hours", "INT64", int(hours)),
+        _nfl_bq.ScalarQueryParameter("game_start_after", "TIMESTAMP", start.to_pydatetime()),
+        _nfl_bq.ScalarQueryParameter("game_start_before", "TIMESTAMP", end.to_pydatetime()),
+    ])
+    # Fail CLOSED rather than falling back to an unbounded historical dump.
+    frame = bq_client.query(sql, job_config=cfg).to_dataframe(
+        create_bqstorage_client=bool(use_bq_storage))
+    if frame is None:
+        raise RuntimeError("NFL_COMPACT_QUOTES_QUERY_RETURNED_NONE")
+    for col in ("Game_Start", "Snapshot_Timestamp", "Time"):
+        if col in frame:
+            frame[col] = pd.to_datetime(frame[col], utc=True, errors="coerce")
+    logging.info("[NFL-BG-COMPACT-QUOTES] status=PASS rows=%s horizon_days=8 lookback_hours=%s",
+                 len(frame), hours)
+    return frame
+
+
 def read_recent_sharp_moves(
     hours: int = 120,
     table: str = DEFAULT_MOVES_VIEW,
