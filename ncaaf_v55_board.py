@@ -250,24 +250,123 @@ QUOTE_MAX_AGE_MINUTES = 180
 KICKOFF_TOLERANCE_MINUTES = 60
 
 
-def _norm_team(value):
+# Explicit equivalents and generic mascot stripping are intentionally separate.
+# No fuzzy matching: a verified matchup needs BOTH teams, home/away orientation,
+# an unambiguous sportsbook identity and compatible kickoff time.
+SCHOOL_EQUIVALENTS = {
+    "app state": "appalachian state",
+    "appalachian st": "appalachian state",
+    "uconn": "connecticut",
+    "umass": "massachusetts",
+    "massachusetts amherst": "massachusetts",
+    "nc state": "north carolina state",
+    "n c state": "north carolina state",
+    "north carolina st": "north carolina state",
+    "ole miss": "mississippi",
+    "southern miss": "southern mississippi",
+    "usm": "southern mississippi",
+    "miami oh": "miami ohio",
+    "miami of ohio": "miami ohio",
+    "miami florida": "miami",
+    "miami fl": "miami",
+    "usc": "southern california",
+    "south carolina": "south carolina",
+    "smu": "southern methodist",
+    "tcu": "texas christian",
+    "ucf": "central florida",
+    "fau": "florida atlantic",
+    "fiu": "florida international",
+    "utsa": "texas san antonio",
+    "utep": "texas el paso",
+    "unlv": "nevada las vegas",
+    "byu": "brigham young",
+    "lsu": "louisiana state",
+    "ul monroe": "louisiana monroe",
+    "ulm": "louisiana monroe",
+    "louisiana lafayette": "louisiana",
+    "ul lafayette": "louisiana",
+    "ul louisiana": "louisiana",
+    "middle tennessee state": "middle tennessee",
+    "mtsu": "middle tennessee",
+    "western kentucky": "western kentucky",
+    "wku": "western kentucky",
+    "boise st": "boise state",
+    "san jose st": "san jose state",
+    "fresno st": "fresno state",
+    "florida st": "florida state",
+    "penn st": "penn state",
+    "iowa st": "iowa state",
+    "kansas st": "kansas state",
+    "michigan st": "michigan state",
+    "mississippi st": "mississippi state",
+    "ohio st": "ohio state",
+    "oklahoma st": "oklahoma state",
+    "oregon st": "oregon state",
+    "washington st": "washington state",
+    "utah st": "utah state",
+    "texas st": "texas state",
+    "texas am": "texas a and m",
+    "texas a m": "texas a and m",
+    "texas a and m": "texas a and m",
+    "hawaii": "hawaii",
+    "hawai i": "hawaii",
+    "army west point": "army",
+    "navy midshipmen": "navy",
+}
+
+# Mascots are suffixes, never entire-school substrings. Longer first protects
+# "golden eagles" from the shorter "eagles" suffix, etc.
+NCAAF_MASCOTS = tuple(sorted({m.strip() for m in """
+    black knights, blue devils, golden hurricane, fighting irish, fighting illini,
+    fighting hawks, rainbow warriors, golden eagles, golden flashes, golden gophers,
+    green wave, red wolves, red raiders, redhawks, mean green, blue raiders,
+    blue hens, blue jays, scarlet knights, crimson tide, fighting camels,
+    raging cajuns, ragin cajuns, horned frogs, fighting hawks, fighting scots,
+    mountaineers, minutemen, monarchs, bulldogs, wildcats, tigers, lions, cougars,
+    spartans, buckeyes, wolverines, broncos, mustangs, knights, owls, pirates,
+    flames, dukes, huskies, cavaliers, cardinals, eagles, falcons, bears,
+    bruins, boilermakers, panthers, terrapins, hoosiers, badgers, gators,
+    seminoles, volunteers, hurricanes, cowboys, cowgirls, roadrunners, aggies,
+    hornets, bobcats, beavers, buffaloes, bulls, lobos, warriors, ramblers,
+    rams, tar heels, hilltoppers, razorbacks, rebels, commodores, trojans,
+    gamecocks, yellow jackets, demons, demon deacons, jayhawks, longhorns,
+    redbirds, bulldogs, redhawks, thundering herd, sun devils, greenies,
+    vandals, chanticleers, rockets, zips, retrievers, warhawks, shockers,
+    orange, wolfpack, wolf pack, wolfpack, bluejays, midshipmen, nittany lions,
+    49ers, miners, golden bears, fighting saints, green knights, golden knights,
+    fighting broncos, aztecs, rainbow warriors, golden panthers,
+""".split(",") if m.strip()}, key=len, reverse=True))
+
+
+def _basic_team(value):
     if value is None:
         return ""
     val = unicodedata.normalize("NFKD", str(value)).encode("ascii", "ignore").decode("ascii")
-    val = val.lower().replace("&", "and")
+    val = val.lower().replace("&", " and ")
     val = re.sub(r"[^a-z0-9]+", " ", val)
     return " ".join(val.split())
 
 
+def _norm_team(value):
+    school = _basic_team(value)
+    if not school or school in ("none", "nan", "null"):
+        return ""
+    school = SCHOOL_EQUIVALENTS.get(school, school)
+    for mascot in NCAAF_MASCOTS:
+        suffix = " " + mascot.strip()
+        if school.endswith(suffix):
+            school = school[:-len(suffix)].strip()
+            break
+    return SCHOOL_EQUIVALENTS.get(school, school)
+
+
 def _matchup_teams(row):
-    """Return (home,away), orientation_known. Reject ambiguous string formats."""
-    home = _norm_team(row.get("Home_Team") or row.get("Home_Team_Norm"))
-    away = _norm_team(row.get("Away_Team") or row.get("Away_Team_Norm"))
+    """Return (home, away), orientation_known. Prefer CFBD Home/Away fields."""
+    home = _norm_team(row.get("Home") or row.get("Home_Team") or row.get("Home_Team_Norm"))
+    away = _norm_team(row.get("Away") or row.get("Away_Team") or row.get("Away_Team_Norm"))
     if home and away and home != away:
         return (home, away), True
     value = str(row.get("Matchup") or "").strip()
-    # 'away @ home'/'away at home' are unambiguous.  'vs' may differ by source;
-    # do not assume a home side for point-edge calculations based on it.
     m = re.match(r"^(.+?)\s+(?:@|at)\s+(.+)$", value, flags=re.I)
     if m:
         return (_norm_team(m.group(2)), _norm_team(m.group(1))), True
@@ -296,7 +395,7 @@ def _valid_american(value):
 
 
 def read_scanner_quotes(bq_client, *, minutes=QUOTE_MAX_AGE_MINUTES, horizon_days=14):
-    """Fetch ONLY stored scanner odds. An API call must never happen here."""
+    """Read the existing BigQuery sportsbook feed, never an independent API."""
     from google.cloud import bigquery
     if not 5 <= minutes <= 1440:
         raise ValueError("quote window must be 5..1440 minutes")
@@ -321,11 +420,42 @@ def read_scanner_quotes(bq_client, *, minutes=QUOTE_MAX_AGE_MINUTES, horizon_day
     return bq_client.query(query, job_config=cfg).to_dataframe(create_bqstorage_client=False)
 
 
-def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minutes=QUOTE_MAX_AGE_MINUTES):
-    """Return V5.5 forecast with backend quotes and detailed provenance diagnostics.
+def _paired_spread(book_quotes, home, away):
+    """Best fresh *paired* market per bookmaker and kickoff, not mixed books.
 
-    Joins on physical game participants + near-identical kickoff + actual outcome.
-    Multiple ambiguous matches fail closed. Does NOT calculate bet recommendations.
+    Treat unmatched/mismatched 2-sided markets as not executable. Ensure the
+    home and away spread signs are consistent and timestamps are near each other.
+    """
+    import pandas as pd
+    choices=[]
+    for (book,kick), grp in book_quotes.groupby(["_book", "_kick"], dropna=True):
+        homes = grp.loc[grp["_selected"].eq(home)].sort_values("_snap",ascending=False)
+        aways = grp.loc[grp["_selected"].eq(away)].sort_values("_snap",ascending=False)
+        if homes.empty or aways.empty:
+            continue
+        # Select the freshest consistent pair, not a mixture of different
+        # alternate lines or timestamps from a different round of quoting.
+        for _, h in homes.head(4).iterrows():
+            valid_away = aways[(aways["_line"].add(float(h["_line"]))).abs().le(0.01)]
+            valid_away = valid_away[(valid_away["_snap"]-h["_snap"]).abs().le(pd.Timedelta(minutes=15))]
+            if valid_away.empty:
+                continue
+            a=valid_away.iloc[0]
+            newest=max(h["_snap"],a["_snap"])
+            choices.append((newest,str(book),h,a))
+            break
+    if not choices:
+        return None
+    choices.sort(key=lambda p:(p[0],p[1]),reverse=True)
+    return choices[0][2], choices[0][3]
+
+
+def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minutes=QUOTE_MAX_AGE_MINUTES):
+    """Attach backend market evidence without inventing a V5.5 betting pick.
+
+    Missing Selected_Team is normal for the independent CORE-only forecast. A
+    two-sided sportsbook matchup can be identified and priced independently.
+    This stage does not authorize bets or synthesize probability/EV estimates.
     """
     import pandas as pd
     if not isinstance(forecasts, pd.DataFrame):
@@ -333,144 +463,187 @@ def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minut
     out = forecasts.copy()
     report = {
         "backend_price_source": MARKET_TABLE,
-        "backend_quotes_read": len(quotes) if isinstance(quotes, pd.DataFrame) else 0,
-        "core_forecast_rows": len(out), "upcoming_forecast_rows": 0,
-        "matched_quote_rows": 0, "priced_games": 0,
-        "unmatched_forecast_rows": 0, "ambiguous_quote_rows": 0,
-        "unresolved_forecast_identity": 0, "no_matching_game": 0,
-        "no_selected_side_quote": 0, "stale_or_invalid_quote_rows": 0,
-        "unmatched_examples": [], "status": "NO_UPCOMING_FORECASTS",
+        "backend_quotes_read": len(quotes) if isinstance(quotes,pd.DataFrame) else 0,
+        "core_forecast_rows":len(out), "upcoming_forecast_rows":0,
+        "matched_quote_rows":0, "priced_games":0, "paired_two_sided_games":0,
+        "unmatched_forecast_rows":0,"ambiguous_quote_rows":0,
+        "unresolved_forecast_identity":0,"no_matching_game":0,
+        "no_selected_side_quote":0,"no_two_sided_spread":0,
+        "stale_or_invalid_quote_rows":0,"unmatched_examples":[],
+        "identity_examples":[], "status":"NO_UPCOMING_FORECASTS",
     }
     if out.empty:
-        return out, report
-    # Existing V5.5 model-derived pricing is not reliable if the backend prices
-    # against which it was calculated differ. The bridge invalidates derived
-    # probabilities/EV and never repurposes a legacy V1 recommendation.
-    for col in ("Current_Spread", "Odds_American", "CORE_Cover_Probability", "CORE_Edge",
-                "CORE_EV", "CORE_Project_Cover_Points", "Backend_Quote_Book",
-                "Backend_Quote_Timestamp", "Backend_Quote_Game_Key"):
-        out[col] = None
-    out["Quote_State"] = "NO_VERIFIED_BACKEND_QUOTE"
-    out["V55_Bet_Decision"] = "RESEARCH_ONLY_NO_AUTHORITY"
-
-    now = _timestamp(now if now is not None else datetime.now(timezone.utc))
+        return out,report
+    # Any previous model price or unverified EV must not survive a backend
+    # refresh. Keep model-only home-margin and standard deviation unchanged.
+    for col in (
+        "Current_Spread","Odds_American","CORE_Cover_Probability","CORE_Edge",
+        "CORE_EV","CORE_Project_Cover_Points","Backend_Quote_Book",
+        "Backend_Quote_Timestamp","Backend_Quote_Game_Key",
+        "Backend_Home_Spread","Backend_Away_Spread","Backend_Home_Odds_American",
+        "Backend_Away_Odds_American","Backend_Home_Book","Backend_Away_Book",
+        "Backend_Home_Quote_UTC","Backend_Away_Quote_UTC",
+        "Backend_Projected_Home_Cover_Points","Backend_Projected_Away_Cover_Points",
+        "Backend_Model_Lean_Side","Backend_Model_Lean_Points",
+    ):
+        out[col]=None
+    out["Quote_State"]="NO_VERIFIED_BACKEND_QUOTE"
+    out["V55_Bet_Decision"]="RESEARCH_ONLY_NO_AUTHORITY"
+    out["V55_Bet_Authority"]=0
+    now=_timestamp(now if now is not None else datetime.now(timezone.utc))
     if pd.isna(now):
         raise ValueError("invalid now")
     if "Game_Start_UTC" not in out.columns:
-        report["status"] = "V55_MISSING_KICKOFF_FIELD"
-        return out, report
-    kickoff = pd.to_datetime(out["Game_Start_UTC"], errors="coerce", utc=True)
-    upcoming = kickoff.gt(now) & kickoff.le(now + pd.Timedelta(days=14))
-    report["upcoming_forecast_rows"] = int(upcoming.sum())
+        report["status"]="V55_MISSING_KICKOFF_FIELD"
+        return out,report
+    kickoff=pd.to_datetime(out["Game_Start_UTC"],errors="coerce",utc=True)
+    upcoming=kickoff.gt(now) & kickoff.le(now+pd.Timedelta(days=14))
+    report["upcoming_forecast_rows"]=int(upcoming.sum())
     if not upcoming.any():
-        return out, report
-
-    required = {"Game_Start", "Home_Team_Norm", "Away_Team_Norm", "Outcome", "Value",
-                "Odds_Price", "Snapshot_Timestamp"}
-    if not isinstance(quotes, pd.DataFrame) or not required.issubset(quotes.columns):
-        report["status"] = "BACKEND_QUOTE_SCHEMA_MISSING"
-        report["missing_backend_fields"] = sorted(required - set(getattr(quotes, "columns", [])))
-        report["unmatched_forecast_rows"] = report["upcoming_forecast_rows"]
-        return out, report
-    q = quotes.copy()
-    q["_kick"] = pd.to_datetime(q["Game_Start"], errors="coerce", utc=True)
-    q["_snap"] = pd.to_datetime(q["Snapshot_Timestamp"], errors="coerce", utc=True)
-    q["_home"] = q["Home_Team_Norm"].map(_norm_team)
-    q["_away"] = q["Away_Team_Norm"].map(_norm_team)
-    q["_selected"] = q["Outcome"].map(_norm_team)
-    q["_line"] = pd.to_numeric(q["Value"],errors="coerce")
-    q["_american"] = pd.to_numeric(q["Odds_Price"],errors="coerce")
-    if "Bookmaker" not in q.columns:
-        q["Bookmaker"] = q.get("Book", "")
-    q["_book"] = q["Bookmaker"].fillna("").astype(str).str.lower().str.strip()
-    valid = (q["_kick"].gt(now) & q["_kick"].le(now + pd.Timedelta(days=14)) &
-             q["_snap"].le(now) & q["_snap"].lt(q["_kick"]) &
-             q["_snap"].ge(now - pd.Timedelta(minutes=max_age_minutes)) &
-             q["_home"].ne("") & q["_away"].ne("") & q["_home"].ne(q["_away"]) &
-             q["_selected"].isin(pd.concat([q["_home"],q["_away"]]).unique()) &
-             q["_line"].between(-100,100) &
-             q["_american"].map(_valid_american) & q["_book"].ne(""))
-    # Verify each outcome is one of ITS OWN matchup's participants.
-    valid &= (q["_selected"].eq(q["_home"]) | q["_selected"].eq(q["_away"]))
-    report["stale_or_invalid_quote_rows"] = int((~valid).sum())
-    q = q.loc[valid].copy()
+        return out,report
+    required={"Game_Start","Home_Team_Norm","Away_Team_Norm","Outcome",
+              "Value","Odds_Price","Snapshot_Timestamp"}
+    if not isinstance(quotes,pd.DataFrame) or not required.issubset(quotes.columns):
+        report["status"]="BACKEND_QUOTE_SCHEMA_MISSING"
+        report["missing_backend_fields"]=sorted(required-set(getattr(quotes,"columns",[])))
+        report["unmatched_forecast_rows"]=report["upcoming_forecast_rows"]
+        return out,report
+    q=quotes.copy()
+    q["_kick"]=pd.to_datetime(q["Game_Start"],errors="coerce",utc=True)
+    q["_snap"]=pd.to_datetime(q["Snapshot_Timestamp"],errors="coerce",utc=True)
+    q["_home"]=q["Home_Team_Norm"].map(_norm_team)
+    q["_away"]=q["Away_Team_Norm"].map(_norm_team)
+    q["_selected"]=q["Outcome"].map(_norm_team)
+    if "Outcome_Norm" in q.columns:
+        missing=q["_selected"].eq("")
+        q.loc[missing,"_selected"]=q.loc[missing,"Outcome_Norm"].map(_norm_team)
+    q["_line"]=pd.to_numeric(q["Value"],errors="coerce")
+    q["_american"]=pd.to_numeric(q["Odds_Price"],errors="coerce")
+    b1=q["Bookmaker"] if "Bookmaker" in q.columns else pd.Series("",index=q.index)
+    b2=q["Book"] if "Book" in q.columns else pd.Series("",index=q.index)
+    q["_book"]=b1.fillna("").astype(str).str.lower().str.strip()
+    q.loc[q["_book"].isin(["", "nan","none"]),"_book"]=b2.fillna("").astype(str).str.lower().str.strip()
+    valid=(q["_kick"].gt(now)&q["_kick"].le(now+pd.Timedelta(days=14))&
+           q["_snap"].le(now)&q["_snap"].lt(q["_kick"])&
+           q["_snap"].ge(now-pd.Timedelta(minutes=max_age_minutes))&
+           q["_home"].ne("")&q["_away"].ne("")&q["_home"].ne(q["_away"])&
+           (q["_selected"].eq(q["_home"])|q["_selected"].eq(q["_away"]))&
+           q["_line"].between(-100,100)&
+           q["_american"].map(_valid_american)&q["_book"].ne(""))
+    report["stale_or_invalid_quote_rows"]=int((~valid).sum())
+    q=q.loc[valid].copy()
     if q.empty:
-        report["status"] = "NO_VALID_FRESH_BACKEND_QUOTES"
-        report["unmatched_forecast_rows"] = report["upcoming_forecast_rows"]
-        return out, report
-    # Scanner may write historical snapshots in addition to latest lines;
-    # keep latest per book + game + selected outcome, rather than a stale opener.
-    q = (q.sort_values("_snap",ascending=False)
-           .drop_duplicates(["_home", "_away", "_kick", "_book", "_selected"], keep="first"))
-    q["_team_pair"] = q.apply(lambda r: tuple(sorted((r["_home"],r["_away"]))),axis=1)
-    matches = 0
-    unique_games = set()
-    def _note_unmatched(idx, reason):
-        if len(report["unmatched_examples"]) < 8:
+        report["status"]="NO_VALID_FRESH_BACKEND_QUOTES"
+        report["unmatched_forecast_rows"]=report["upcoming_forecast_rows"]
+        return out,report
+    q=(q.sort_values("_snap",ascending=False)
+       .drop_duplicates(["_home","_away","_kick","_book","_selected","_line"],keep="first"))
+    q["_team_pair"]=q.apply(lambda r:tuple(sorted((r["_home"],r["_away"]))),axis=1)
+    counted=set()
+    def note(idx,reason):
+        if len(report["unmatched_examples"])<10:
             report["unmatched_examples"].append({
-                "matchup": str(out.at[idx,"Matchup"])[:100] if "Matchup" in out.columns else "",
-                "selected": str(out.at[idx,"Selected_Team"])[:80] if "Selected_Team" in out.columns else "",
-                "kickoff_utc": str(kickoff.loc[idx]), "reason": reason,
+                "matchup":str(out.at[idx,"Matchup"])[:100] if "Matchup" in out.columns else "",
+                "selected":str(out.at[idx,"Selected_Team"])[:60] if "Selected_Team" in out.columns else "",
+                "kickoff_utc":str(kickoff.loc[idx]),"reason":reason,
             })
     for idx in out.index[upcoming]:
-        row = out.loc[idx]
-        (home,away), oriented = _matchup_teams(row)
-        selected = _norm_team(row.get("Selected_Team"))
-        if not home or not away or home == away or selected not in (home,away):
-            report["unresolved_forecast_identity"] += 1
-            out.at[idx,"Quote_State"] = "UNRESOLVED_GAME_OR_SELECTED_SIDE"
-            _note_unmatched(idx, "UNRESOLVED_GAME_OR_SELECTED_SIDE")
+        row=out.loc[idx]
+        (home,away), oriented=_matchup_teams(row)
+        selected=_norm_team(row.get("Selected_Team"))
+        if not home or not away or home==away:
+            report["unresolved_forecast_identity"]+=1
+            out.at[idx,"Quote_State"]="UNRESOLVED_V55_GAME_IDENTITY"
+            note(idx,"UNRESOLVED_GAME_IDENTITY")
             continue
-        game = q[q["_team_pair"].map(lambda p: p == tuple(sorted((home,away))))]
-        if game.empty:
-            report["no_matching_game"] += 1
-            _note_unmatched(idx, "NO_MATCHING_PARTICIPANTS")
+        cand=q.loc[q["_team_pair"].map(lambda p:p==tuple(sorted((home,away))))]
+        if cand.empty:
+            report["no_matching_game"]+=1
+            note(idx,"NO_MATCHING_PARTICIPANTS")
             continue
-        # Guard against one team-pair playing on multiple different dates.
-        delta = (game["_kick"] - kickoff.loc[idx]).abs()
-        game = game[delta.le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))]
-        if game.empty:
-            report["no_matching_game"] += 1
-            _note_unmatched(idx, "KICKOFF_OUTSIDE_60_MINUTES")
+        cand=cand.loc[(cand["_kick"]-kickoff.loc[idx]).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))]
+        if cand.empty:
+            report["no_matching_game"]+=1
+            note(idx,"KICKOFF_OUTSIDE_TOLERANCE")
             continue
-        # Match actual sportsbook outcome; never infer side from spread sign.
-        sides = game[game["_selected"] == selected]
-        if sides.empty:
-            report["no_selected_side_quote"] += 1
-            _note_unmatched(idx, "NO_SPREAD_QUOTE_FOR_SELECTED_SIDE")
+        if oriented:
+            cand=cand.loc[cand["_home"].eq(home)&cand["_away"].eq(away)]
+            if cand.empty:
+                report["unresolved_forecast_identity"]+=1
+                out.at[idx,"Quote_State"]="HOME_AWAY_ORIENTATION_CONFLICT"
+                note(idx,"HOME_AWAY_ORIENTATION_CONFLICT")
+                continue
+        unique_games=cand[["_home","_away","_kick"]].drop_duplicates()
+        if len(unique_games)!=1:
+            report["ambiguous_quote_rows"]+=1
+            out.at[idx,"Quote_State"]="AMBIGUOUS_BACKEND_GAME"
+            note(idx,"AMBIGUOUS_GAME_OR_KICKOFF")
             continue
-        candidates = sides[["_home","_away","_kick"]].drop_duplicates()
-        if len(candidates) != 1:
-            report["ambiguous_quote_rows"] += 1
-            out.at[idx,"Quote_State"] = "AMBIGUOUS_BACKEND_GAME"
-            _note_unmatched(idx, "AMBIGUOUS_BACKEND_GAME")
-            continue
-        # Different books have different current lines. For display choose the
-        # most recent quote, not a synthetic consensus or a best-price bet.
-        chosen = sides.sort_values(["_snap","_book"],ascending=[False,True]).iloc[0]
-        if oriented and (home != chosen["_home"] or away != chosen["_away"]):
-            report["unresolved_forecast_identity"] += 1
-            out.at[idx,"Quote_State"] = "HOME_AWAY_ORIENTATION_CONFLICT"
-            _note_unmatched(idx, "HOME_AWAY_ORIENTATION_CONFLICT")
-            continue
-        out.at[idx,"Current_Spread"] = float(chosen["_line"])
-        out.at[idx,"Odds_American"] = float(chosen["_american"])
-        out.at[idx,"Backend_Quote_Book"] = chosen["_book"]
-        out.at[idx,"Backend_Quote_Timestamp"] = chosen["_snap"].isoformat()
-        out.at[idx,"Backend_Quote_Game_Key"] = str(chosen.get("Game_Key") or "")
-        out.at[idx,"Quote_State"] = "FRESH_VERIFIED_BACKEND_SPREAD"
-        # Signed margin arithmetic is safe only when home/away is known.
-        home_margin = _price(row.get("CORE_Projected_Home_Margin"))
-        if oriented and home_margin is not None:
-            selected_margin = home_margin if selected==home else -home_margin
-            out.at[idx,"CORE_Project_Cover_Points"] = selected_margin + float(chosen["_line"])
-        matches += 1
-        unique_games.add((tuple(sorted((home,away))), chosen["_kick"].isoformat()))
-    report["matched_quote_rows"] = matches
-    report["priced_games"] = len(unique_games)
-    report["unmatched_forecast_rows"] = report["upcoming_forecast_rows"] - matches
-    report["status"] = "PASS" if matches else "NO_MATCHING_UPCOMING_MODEL_AND_BACKEND_PRICES"
-    return out, report
+        actual_home=str(unique_games.iloc[0]["_home"])
+        actual_away=str(unique_games.iloc[0]["_away"])
+        pair=_paired_spread(cand,actual_home,actual_away)
+        # Unselected CORE forecast: matching paired game prices is possible and
+        # desirable, but a model betting side must NOT be guessed or invented.
+        if not selected:
+            if pair is None:
+                report["no_two_sided_spread"]+=1
+                out.at[idx,"Quote_State"]="MATCHED_GAME_NO_VERIFIED_TWO_SIDED_SPREAD"
+                note(idx,"NO_SAME_BOOK_TWO_SIDED_SPREAD")
+                continue
+            h,a=pair
+            for side,label in ((h,"Home"),(a,"Away")):
+                out.at[idx,"Backend_"+label+"_Spread"]=float(side["_line"])
+                out.at[idx,"Backend_"+label+"_Odds_American"]=float(side["_american"])
+                out.at[idx,"Backend_"+label+"_Book"]=side["_book"]
+                out.at[idx,"Backend_"+label+"_Quote_UTC"]=side["_snap"].isoformat()
+            out.at[idx,"Backend_Quote_Book"]=h["_book"]
+            out.at[idx,"Backend_Quote_Timestamp"]=max(h["_snap"],a["_snap"]).isoformat()
+            out.at[idx,"Backend_Quote_Game_Key"]=str(h.get("Game_Key") or "")
+            out.at[idx,"Quote_State"]="FRESH_TWO_SIDED_BACKEND_PRICE_NO_SELECTED_TEAM"
+            report["paired_two_sided_games"]+=1
+            margin=_price(row.get("CORE_Projected_Home_Margin"))
+            if oriented and margin is not None:
+                he=margin+float(h["_line"])
+                ae=-margin+float(a["_line"])
+                out.at[idx,"Backend_Projected_Home_Cover_Points"]=he
+                out.at[idx,"Backend_Projected_Away_Cover_Points"]=ae
+                out.at[idx,"Backend_Model_Lean_Side"]=home if he>=ae else away
+                out.at[idx,"Backend_Model_Lean_Points"]=abs(he)
+        else:
+            if selected not in (home,away):
+                report["unresolved_forecast_identity"]+=1
+                out.at[idx,"Quote_State"]="SELECTED_SIDE_NOT_PARTICIPANT"
+                note(idx,"SELECTED_SIDE_NOT_PARTICIPANT")
+                continue
+            s=cand.loc[cand["_selected"].eq(selected)].sort_values("_snap",ascending=False)
+            if s.empty:
+                report["no_selected_side_quote"]+=1
+                note(idx,"NO_QUOTE_FOR_SELECTED_SIDE")
+                continue
+            chosen=s.iloc[0]
+            out.at[idx,"Current_Spread"]=float(chosen["_line"])
+            out.at[idx,"Odds_American"]=float(chosen["_american"])
+            out.at[idx,"Backend_Quote_Book"]=chosen["_book"]
+            out.at[idx,"Backend_Quote_Timestamp"]=chosen["_snap"].isoformat()
+            out.at[idx,"Backend_Quote_Game_Key"]=str(chosen.get("Game_Key") or "")
+            out.at[idx,"Quote_State"]="FRESH_VERIFIED_SELECTED_SIDE_BACKEND_SPREAD"
+            margin=_price(row.get("CORE_Projected_Home_Margin"))
+            if oriented and margin is not None:
+                points=(margin if selected==home else -margin)+float(chosen["_line"])
+                out.at[idx,"CORE_Project_Cover_Points"]=points
+            if pair is not None:
+                report["paired_two_sided_games"]+=1
+        report["matched_quote_rows"]+=1
+        counted.add((tuple(sorted((actual_home,actual_away))),str(unique_games.iloc[0]["_kick"])))
+        if len(report["identity_examples"])<6:
+            report["identity_examples"].append({"forecast":str(row.get("Matchup")),
+                "market_home":str(cand.iloc[0]["Home_Team_Norm"]),
+                "market_away":str(cand.iloc[0]["Away_Team_Norm"]),
+                "selected_side_present":bool(selected)})
+    report["priced_games"]=len(counted)
+    report["unmatched_forecast_rows"]=report["upcoming_forecast_rows"]-report["matched_quote_rows"]
+    report["status"]="PASS" if counted else "NO_MATCHING_UPCOMING_MODEL_AND_BACKEND_PRICES"
+    return out,report
 
 
 def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None):
@@ -491,7 +664,11 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None):
         diag["backend_read_error"] = error
         diag["status"] = "BACKEND_QUERY_ERROR_FAIL_CLOSED"
     updated = dict(audit)
-    updated.update(diag)
+    # Preserve the model provenance contract. The join stage has its OWN status;
+    # replacing audit['status'] with PASS would block publication entirely.
+    updated.update({k: v for k, v in diag.items() if k != "status"})
+    updated["market_price_join_status"] = diag["status"]
+    updated["status"] = audit.get("status")
     updated["v55_bet_authority"] = 0
     updated["price_authority"] = "SHARP_SCANNER_BIGQUERY_ONLY"
     updated["price_join_semantics"] = "FRESH_QUOTE_MATCH_ONLY_NO_V55_PROBABILITY_RECOMPUTE"
