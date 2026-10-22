@@ -968,70 +968,74 @@ def _v55_raw_rich(row):
 
 def _v55_read_enriched_pregame_overlays(bq_client, *, horizon_days=14, lookback_minutes=720,
                                           qualified_brain_registry=None):
-    """Fetch bounded CURRENT NCAAF game-side context, avoiding global LIMIT bias.
+    """Recover legacy system overlays from the actual enriched scoring source.
 
-    Live system producers are separate from odds producers. A generic market
-    view with no named Miner columns cannot supply qualified Miner authority.
+    The unscored market view may have prices but not the legacy system columns.
+    Try the saved scored feed as well, and retain source provenance. Each source
+    is schema-inspected and bounded per game/side/book, not a 25k global bias.
     """
     import pandas as pd
-    required = {'Game_Start', 'Home_Team_Norm', 'Away_Team_Norm',
-                'Outcome', 'Snapshot_Timestamp', 'Sport', 'Market'}
-    if not re.fullmatch(r'[A-Za-z_][\w-]*\.[A-Za-z_][\w-]*\.[A-Za-z_][\w-]*',V55_RAW_OVERLAY_TABLE):
-        return pd.DataFrame(), 'INVALID_ENRICHMENT_TABLE_ID'
-    try:
-        schema = {f.name for f in bq_client.get_table(V55_RAW_OVERLAY_TABLE).schema}
-    except Exception as exc:
-        return pd.DataFrame(), 'SOURCE_SCHEMA_UNAVAILABLE:'+type(exc).__name__
-    missing = required - schema
-    if missing:
-        return pd.DataFrame(), 'MISSING_SOURCE_KEYS:'+','.join(sorted(missing))
+    base_fields={'Game_Start','Home_Team_Norm','Away_Team_Norm',
+                 'Outcome','Snapshot_Timestamp','Sport','Market'}
     qualified_fields=set()
     if isinstance(qualified_brain_registry,dict):
         for rule in (qualified_brain_registry.get('rules') or {}).values():
             qualified_fields.add(rule['signal'])
             if rule.get('ready_field'):qualified_fields.add(rule['ready_field'])
-    optional = [x for x in (*V55_RAW_OVERLAY_FIELDS, 'Bookmaker', 'Book',
-                           *sorted(qualified_fields)) if x in schema]
-    if not optional:
-        return pd.DataFrame(), 'NO_RAW_OVERLAY_COLUMNS_IN_SOURCE'
-    fields = list(sorted(required)) + optional
-    # Select the 12 most recent observations PER game/side/book. This avoids
-    # starving smaller games when a few popular matchups produce 20,000 rows.
-    # Preserve multiple observations for strict as-of joins to quoted prices.
-    if 'Bookmaker' in schema and 'Book' in schema:
-        book_expr = "COALESCE(NULLIF(TRIM(CAST(Bookmaker AS STRING)), ''), NULLIF(TRIM(CAST(Book AS STRING)), ''), '')"
-    elif 'Bookmaker' in schema:
-        book_expr = "COALESCE(CAST(Bookmaker AS STRING), '')"
-    elif 'Book' in schema:
-        book_expr = "COALESCE(CAST(Book AS STRING), '')"
-    else:
-        book_expr = "''"
-    sql = f"""SELECT {','.join('`'+x+'`' for x in fields)}
-      FROM `{V55_RAW_OVERLAY_TABLE}`
-      WHERE UPPER(TRIM(CAST(Sport AS STRING)))='NCAAF'
-        AND LOWER(TRIM(CAST(Market AS STRING)))='spreads'
-        AND Game_Start > CURRENT_TIMESTAMP()
-        AND Game_Start <= TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL {int(horizon_days)} DAY)
-        AND Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {int(lookback_minutes)} MINUTE)
-        AND Snapshot_Timestamp <= CURRENT_TIMESTAMP()
-        AND Snapshot_Timestamp < Game_Start
-      QUALIFY ROW_NUMBER() OVER (
-          PARTITION BY Game_Start, Home_Team_Norm, Away_Team_Norm, Outcome, {book_expr}
-          ORDER BY Snapshot_Timestamp DESC) <= 12
-      ORDER BY Game_Start, Snapshot_Timestamp DESC LIMIT 25000"""
-    try:
-        frame = bq_client.query(sql).to_dataframe(create_bqstorage_client=False)
-        issue=[]
-        if 'NCAAF_RV22_Miner_Votes' not in schema:
-            issue.append('NO_STRUCTURED_MINER_VOTES_COLUMN')
-        if not {'NCAAF_RV2_System_Summary','Miner_System_Summary','System_Signals_Text'} & schema:
-            issue.append('NO_NAMED_SYSTEM_TEXT_COLUMNS')
-        status='PASS' if not issue else 'SOURCE_PARTIAL__'+','.join(issue)
-        if len(frame)>=25000:status+='__TRUNCATED_25000_ROWS'
-        return frame,status
-    except Exception as exc:
-        logging.warning('[NCAAF-V55-RAW-OVERLAY-QUERY-ERROR] %s: %s', type(exc).__name__, str(exc)[:350])
-        return pd.DataFrame(), 'SOURCE_QUERY_FAILED:'+type(exc).__name__+':'+str(exc)[:160]
+    sources=[V55_RAW_OVERLAY_TABLE]
+    for candidate in ('sharplogger.sharp_data.sharp_scores_with_features',
+                      'sharplogger.sharp_data.moves_with_features_merged'):
+        if candidate not in sources:sources.append(candidate)
+    pieces=[];statuses=[];failures=[]
+    for source in sources:
+        if not re.fullmatch(r'[A-Za-z_][\w-]*\.[A-Za-z_][\w-]*\.[A-Za-z_][\w-]*',source):
+            failures.append('BAD_TABLE_ID');continue
+        try:
+            schema={f.name for f in bq_client.get_table(source).schema}
+        except Exception as exc:
+            failures.append(source.rsplit('.',1)[-1]+':SCHEMA_'+type(exc).__name__);continue
+        if not base_fields.issubset(schema):
+            failures.append(source.rsplit('.',1)[-1]+':MISSING_IDENTITY');continue
+        optional=list(dict.fromkeys(x for x in (*V55_RAW_OVERLAY_FIELDS,'Bookmaker','Book',
+                         *sorted(qualified_fields)) if x in schema and x not in base_fields))
+        if not optional:
+            failures.append(source.rsplit('.',1)[-1]+':NO_OVERLAY_COLUMNS');continue
+        if 'Bookmaker' in schema and 'Book' in schema:
+            book_expr="COALESCE(NULLIF(TRIM(CAST(Bookmaker AS STRING)), ''), NULLIF(TRIM(CAST(Book AS STRING)), ''), '')"
+        elif 'Bookmaker' in schema:
+            book_expr="COALESCE(CAST(Bookmaker AS STRING), '')"
+        elif 'Book' in schema:
+            book_expr="COALESCE(CAST(Book AS STRING), '')"
+        else:book_expr="''"
+        fields=list(sorted(base_fields))+optional
+        sql=f"""SELECT {','.join('`'+x+'`' for x in fields)}
+          FROM `{source}`
+          WHERE UPPER(TRIM(CAST(Sport AS STRING)))='NCAAF'
+            AND LOWER(TRIM(CAST(Market AS STRING)))='spreads'
+            AND Game_Start > CURRENT_TIMESTAMP()
+            AND Game_Start <= TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL {int(horizon_days)} DAY)
+            AND Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {int(lookback_minutes)} MINUTE)
+            AND Snapshot_Timestamp <= CURRENT_TIMESTAMP()
+            AND Snapshot_Timestamp < Game_Start
+          QUALIFY ROW_NUMBER() OVER (
+             PARTITION BY Game_Start, Home_Team_Norm, Away_Team_Norm, Outcome, {book_expr}
+             ORDER BY Snapshot_Timestamp DESC) <= 12
+          ORDER BY Game_Start, Snapshot_Timestamp DESC LIMIT 25000"""
+        try:
+            frame=bq_client.query(sql).to_dataframe(create_bqstorage_client=False)
+        except Exception as exc:
+            logging.warning('[NCAAF-V55-RAW-OVERLAY-QUERY-ERROR] table=%s %s: %s',
+                            source,type(exc).__name__,str(exc)[:350])
+            failures.append(source.rsplit('.',1)[-1]+':QUERY_'+type(exc).__name__);continue
+        if frame.empty:
+            statuses.append(source.rsplit('.',1)[-1]+':EMPTY');continue
+        frame['V55_Overlay_Actual_Source']=source
+        pieces.append(frame)
+        statuses.append(source.rsplit('.',1)[-1]+':'+str(len(frame))+'rows')
+    if not pieces:
+        return pd.DataFrame(),'NO_LIVE_OVERLAY_ROWS__'+','.join((failures+statuses)[:5])
+    merged=pd.concat(pieces,ignore_index=True,sort=False)
+    return merged,'PASS_MULTI_SOURCE__'+';'.join(statuses)+'__FAILURES:'+','.join(failures[:3])
 
 
 def attach_v55_raw_pregame_overlays(board, enrich, *, source_status='PASS', now=None):
@@ -1233,7 +1237,7 @@ def attach_v55_raw_pregame_overlays(board, enrich, *, source_status='PASS', now=
                     'verified_quote_book':book if priced else None})
         out.at[idx,'V55_Raw_Overlay_Detail_JSON']=json.dumps(raw,ensure_ascii=False,sort_keys=True)
         out.at[idx,'V55_Raw_Overlay_AsOf_UTC']=picked['_snap'].isoformat()
-        out.at[idx,'V55_Raw_Overlay_Source']=V55_RAW_OVERLAY_TABLE
+        out.at[idx,'V55_Raw_Overlay_Source']=str(picked.get('V55_Overlay_Actual_Source') or V55_RAW_OVERLAY_TABLE)
         out.at[idx,'V55_Raw_Overlay_State']=status
         report['matched_raw_overlays']+=1
         for col,key in [('V55_Raw_BigAl','named_big_al_rows'),('V55_Raw_Pathi','named_pathi_rows'),
@@ -1246,10 +1250,10 @@ def attach_v55_raw_pregame_overlays(board, enrich, *, source_status='PASS', now=
 
 
 def _v55_read_headless_miner_system_snapshot(*,storage_client=None,bucket_name=None,now=None):
-    """Read optional ORIGINAL live Miner IDs for display; never vote from them.
+    """Read original live Miner rows; verify book/line/timing before authority.
 
-    This snapshot is not used by derive_v55_miner_qualified_events because
-    it is not the exact selected sportsbook/price as-of quote event source.
+    Legacy snapshots remain display-only. The 2026 original-source format can
+    qualify ONLY after the separate frozen OOS rule+exact-quote checks.
     """
     import pandas as pd
     blob='research/ncaaf/v55/live_miner_system_context/latest.json'
@@ -1259,24 +1263,40 @@ def _v55_read_headless_miner_system_snapshot(*,storage_client=None,bucket_name=N
             storage_client=storage.Client()
         bucket=bucket_name or os.getenv('MODEL_BUCKET','sharp-models')
         raw=storage_client.bucket(bucket).blob(blob).download_as_bytes()
-        if len(raw)>3_000_000:return pd.DataFrame(),'MINER_SNAPSHOT_TOO_LARGE'
+        if len(raw)>6_000_000:return pd.DataFrame(),'MINER_SNAPSHOT_TOO_LARGE'
         doc=json.loads(raw)
-        if not isinstance(doc,dict) or doc.get('source')!='NCAAF_RV22_HEADLESS_MINER_OUTPUT_DISPLAY_ONLY' or doc.get('authority') is not False:
+        if not isinstance(doc,dict) or doc.get('source') not in ('NCAAF_RV22_HEADLESS_MINER_OUTPUT_DISPLAY_ONLY','NCAAF_RV22_ORIGINAL_LIVE_SYSTEMS') or doc.get('authority') is not False:
             return pd.DataFrame(),'MINER_SNAPSHOT_PROVENANCE_REJECTED'
         t=_timestamp(doc.get('generated_at_utc'));now=_timestamp(now or datetime.now(timezone.utc))
         if pd.isna(t) or pd.isna(now) or t>now or (now-t).total_seconds()>12*3600:
             return pd.DataFrame(),'MINER_SNAPSHOT_STALE_OR_FUTURE'
         rows=doc.get('rows')
-        if not isinstance(rows,list) or len(rows)>500:return pd.DataFrame(),'MINER_SNAPSHOT_INVALID_ROWS'
+        if not isinstance(rows,list) or len(rows)>1800:return pd.DataFrame(),'MINER_SNAPSHOT_INVALID_ROWS'
         source=pd.DataFrame(rows)
         required={'Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome',
                   'Snapshot_Timestamp','NCAAF_RV22_Miner_Votes'}
         if not required.issubset(source.columns):return pd.DataFrame(),'MINER_SNAPSHOT_REQUIRED_FIELDS_MISSING'
-        # Strip all quote/trust fields from the research snapshot. It cannot
-        # impersonate an independently verified sportsbook snapshot.
-        source=source.drop(columns=[x for x in ('Bookmaker','Book','Value','Odds_Price') if x in source.columns])
+        # Old snapshots carried only names; newer snapshots preserve the
+        # original quote identity. Require the signed producer schema AND the
+        # original timestamp/book/price before sending to authority verification.
+        trusted=(doc.get('source')=='NCAAF_RV22_ORIGINAL_LIVE_SYSTEMS' and
+                 str(doc.get('source_module') or '').startswith('ncaaf-research-v2.'))
+        if not trusted:
+            source=source.drop(columns=[x for x in ('Bookmaker','Book','Value','Odds_Price') if x in source.columns])
+            source['V55_Original_Quote_Provenance_Verified']=False
+        else:
+            marked=source.get('V55_Original_Quote_Provenance_Verified',pd.Series(False,index=source.index))
+            mask=marked.map(lambda x:x is True or str(x).lower()=='true')
+            for c in ('Value','Snapshot_Timestamp','Outcome'):
+                if c not in source:mask &=False
+            if not {'Book','Bookmaker'}.intersection(source):mask &=False
+            source['V55_Original_Quote_Provenance_Verified']=mask
+            if 'Value' in source:source.loc[~mask,'Value']=None
+            for bookcol in ('Book','Bookmaker'):
+                if bookcol in source:source.loc[~mask,bookcol]=None
         source['V55_Source_Type']='HEADLESS_MINER_SNAPSHOT_DISPLAY_ONLY'
-        return source,'PASS_DISPLAY_ONLY'
+        source['V55_Overlay_Actual_Source']='gs://'+bucket+'/'+blob
+        return source,('PASS_MARKET_PROVENANCE_CHECKED' if trusted else 'PASS_DISPLAY_ONLY')
     except Exception as exc:
         return pd.DataFrame(),'MINER_SNAPSHOT_UNAVAILABLE:'+type(exc).__name__
 
@@ -1344,8 +1364,19 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     explicit_events, evidence_problem = read_v55_qualified_evidence(bq_client)
     registry, registry_problem = read_v55_research_miner_registry(
         storage_client=storage_client,bucket_name=bucket_name)
+    # Original legacy Miner evaluator already produces the correct validated
+    # mechanism IDs. Its GCS handoff is admitted only when ORIGINAL book, line,
+    # observation timestamp, and pregame provenance are intact.
+    miner_authority_rows=overlay_frame
+    if isinstance(miner_display_frame,pd.DataFrame) and not miner_display_frame.empty:
+        checked=miner_display_frame.loc[
+            miner_display_frame.get('V55_Original_Quote_Provenance_Verified',
+                pd.Series(False,index=miner_display_frame.index)).eq(True)]
+        if not checked.empty:
+            miner_authority_rows=pd.concat([overlay_frame,checked],ignore_index=True,sort=False)
     miner_events, miner_audit = derive_v55_miner_qualified_events(
-        out,overlay_frame,registry)
+        out,miner_authority_rows,registry)
+    miner_audit['original_snapshot_provenance_rows']=len(miner_authority_rows)-len(overlay_frame)
     other_events, other_audit = derive_v55_other_qualified_events(
         out,overlay_frame,other_registry)
     # Externally ingested evidence rows are admissible only if backed by a
@@ -1927,7 +1958,10 @@ def derive_v55_other_qualified_events(board, live_rows, registry, *, now=None):
     live['_side']=live['Outcome'].map(_norm_team)
     if 'Bookmaker' not in live.columns:
         live['Bookmaker']=live['Book']
-    live['_book']=live['Bookmaker'].astype(str).str.lower().str.strip()
+    live['_book']=live['Bookmaker'].fillna('').astype(str).str.lower().str.strip()
+    if 'Book' in live:
+        fallback=live['Book'].fillna('').astype(str).str.lower().str.strip()
+        live['_book']=live['_book'].mask(live['_book'].isin(('', 'nan','none')),fallback)
     live['_spread']=pd.to_numeric(live['Value'],errors='coerce')
     at=_timestamp(now or datetime.now(timezone.utc))
     dedup={}

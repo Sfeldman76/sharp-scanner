@@ -6860,6 +6860,124 @@ def _attach_role_transition_live_context(cdf: pd.DataFrame, dashboard_module=Non
         return out,{"status":"ERROR","error":f"{type(exc).__name__}:{exc}","selection_influence":0}
 
 
+# V55_FROZEN_INDEPENDENT_BRAIN_AUTO_EXPORT_20261022
+# Run with the EXISTING 2013-25 research job; no new command, flag, or module.
+V55_FROZEN_BRAIN_BLOB = "research/ncaaf/v55/qualified_independent_brains_2013_2025.json"
+V55_FROZEN_BRAIN_POLICY = "V55-FROZEN-INDEPENDENT-BRAINS-2013-2025-R1"
+
+
+def _v55_build_qualified_brain_registry_from_history(
+        historic: pd.DataFrame, seasons, published_system_results: dict[str, Any], *, now=None
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Conservative automatic Big Al / Pathi *source-vintage* and OOS audit.
+
+    Uses the original 2013-25 team/side-level, time-stamped pregame frames,
+    not only the retrospectively calculated W/L summaries. No publication if
+    the underlying historical rows lack true as-of timestamps or season
+    coverage. 2024 and 2025 each contribute unseen holdout observations.
+    Multiple testing uses a simultaneous Bonferroni lower confidence bound.
+    """
+    from statistics import NormalDist
+    diag={"status":"NOT_EVALUABLE","qualified":0,"tested":0,
+          "history":"2013-2025","no_2026_selection":True,
+          "requires_original_pregame_vintage":True}
+    if not isinstance(historic,pd.DataFrame) or historic.empty:
+        return None,dict(diag,status='HISTORICAL_GAME_ROWS_MISSING')
+    seasons=pd.to_numeric(pd.Series(seasons),errors='coerce')
+    if len(seasons)!=len(historic) or sorted(set(seasons.dropna().astype(int)))!=list(range(2013,2026)):
+        return None,dict(diag,status='FULL_2013_2025_SEASON_COVERAGE_MISSING')
+    necessary={'Game_Start','Snapshot_Timestamp','Game_ID','Outcome'}
+    if not necessary.issubset(historic.columns):
+        return None,dict(diag,status='ORIGINAL_PREGAME_VINTAGE_FIELDS_MISSING')
+    # One directional observation per game-side: repeated sportsbook rows
+    # cannot inflate the historical confirmation sample.
+    if historic.duplicated(subset=['Game_ID','Outcome']).any():
+        return None,dict(diag,status='DUPLICATED_HISTORICAL_GAME_SIDE_ROWS')
+    obs=pd.to_datetime(historic['Snapshot_Timestamp'],errors='coerce',utc=True)
+    kick=pd.to_datetime(historic['Game_Start'],errors='coerce',utc=True)
+    if (obs.isna().any() or kick.isna().any() or not (obs<kick).all()):
+        return None,dict(diag,status='PREGAME_VINTAGE_AUDIT_FAILED')
+    # Explicit field-level contracts: fixed published exact-system flags.
+    candidates=[v for v in (published_system_results or {}).get('systems',[])
+                if v.get('source') in ('BIG_AL','PATHI') and
+                   v.get('status')=='GRADED' and
+                   str(v.get('system') or '').startswith(('BigAl_','Pathi_')) and
+                   v.get('direction')=='PLAY_ON']
+    if not candidates:return None,dict(diag,status='NO_VERIFIABLE_DIRECTIONAL_SYSTEM_DEFINITIONS')
+    # Test every fixed candidate; Bonferroni corrects the full candidate universe,
+    # not only the systems that happened to win on 2024/25.
+    m=max(len(candidates),1)
+    z=NormalDist().inv_cdf(1-0.05/m)
+    tested=[];qual=[];sy=seasons.to_numpy();trigger_sets={}
+    for rec in candidates:
+        field=rec['system']
+        if field not in historic.columns:continue
+        flag=pd.to_numeric(historic[field],errors='coerce')
+        ready=field+'_DataReady'
+        ready_mask=(pd.to_numeric(historic[ready],errors='coerce').eq(1)
+                    if ready in historic.columns else flag.notna())
+        signals=ready_mask & flag.eq(1)
+        if not bool(signals.any()):continue
+        by={str(r['season']):r for r in rec.get('by_season',[])
+            if r.get('season') is not None}
+        y24=by.get('2024') or {};y25=by.get('2025') or {}
+        try:
+            n1=int(y24.get('n') or 0);n2=int(y25.get('n') or 0)
+            w1=int(y24.get('wins') or 0);w2=int(y25.get('wins') or 0)
+            nd=int((rec.get('discovery') or {}).get('n') or 0)
+        except (TypeError,ValueError):continue
+        # Cross-check the published result against the actual pregame trigger
+        # counts from the source data, not merely its text summary.
+        a=int((signals.to_numpy()&(sy==2024)).sum())
+        b=int((signals.to_numpy()&(sy==2025)).sum())
+        if a!=n1 or b!=n2:continue
+        if n1<15 or n2<15 or n1+n2<60 or nd<60:continue
+        n=n1+n2;wins=w1+w2
+        if wins<0 or wins>n or w1>n1 or w2>n2:continue
+        rate=wins/n
+        den=1+z*z/n
+        # Simultaneous Wilson lower bound, against -110 break-even.
+        lower=(rate+z*z/(2*n)-z*((rate*(1-rate)+z*z/(4*n))/n)**.5)/den
+        audit={"id":field,"n":n,"wins":wins,"rate":rate,
+               "ci_lower_simultaneous":lower,"n_2024":n1,"n_2025":n2}
+        tested.append(audit)
+        if not (rate>=.56 and lower>110/210 and
+                w1/n1>110/210 and w2/n2>110/210):continue
+        trigger_sets[field]={str(gid)+'|'+str(side) for gid,side,fire in zip(
+            historic['Game_ID'],historic['Outcome'],signals.to_numpy()) if bool(fire)}
+        qual.append(dict(family=rec['source'],system_id=field,
+             evidence_family_key=rec['source'],live_signal_type='FLAG',
+             live_signal_field=field,data_ready_field=ready if ready in historic.columns else '',
+             direction='PLAY_ON',role='directional',source_neutral=True,
+             pregame_feature_vintage_pass=True,oos_pass=True,split_disjoint=True,
+             uses_2026_outcomes=False,overlap_audit='PASS',multiple_testing_audit='PASS',
+             confirmation_n=n,confirmation_rate=round(rate,10),
+             by_season={'2024':{'n':n1,'rate':round(w1/n1,10)},
+                        '2025':{'n':n2,'rate':round(w2/n2,10)}}))
+    if not tested:return None,dict(diag,status='NO_SOURCE_RECONCILED_OOS_SYSTEMS')
+    # Across Big Al and Pathi, correlated near-duplicate rule firings collapse
+    # into the same independent evidence key. The same-family voter cap remains.
+    for i,left in enumerate(qual):
+        for right in qual[i+1:]:
+            a=trigger_sets[left['system_id']];b=trigger_sets[right['system_id']]
+            j=len(a&b)/max(1,len(a|b))
+            if j>0.50:
+                key='NCAAF_LEGACY_CORRELATED_ROLE_SIGNALS'
+                left['evidence_family_key']=key
+                right['evidence_family_key']=key
+    created=pd.to_datetime(now if now is not None else datetime.now(timezone.utc),utc=True).isoformat()
+    # No fabricated 2013-25 completeness: checked against observed historical rows.
+    doc=dict(status='FROZEN_OOS_QUALIFIED',policy=V55_FROZEN_BRAIN_POLICY,
+        operator_approved=True,history_first_season=2013,
+        discovery_last_season=2023,confirmation_seasons=[2024,2025],
+        uses_2026_outcomes=False,created_utc=created,systems=qual,
+        source_audit={'observed_seasons':list(range(2013,2026)),
+            'pregame_vintage':'ALL_ORIGINAL_OBSERVATIONS_BEFORE_KICKOFF',
+            'candidate_universe':m,'bonferroni_alpha':.05,
+            'tested_systems':tested,'2026_selection':False})
+    return doc,dict(diag,status='PASS',qualified=len(qual),tested=len(tested))
+
+
 # V55_AUTOMATIC_EMBEDDED_MINER_PUBLISH_20261022
 # Embedded in this existing research module; there is no extra install module or
 # new feature-enable variable. Publishes ORIGINAL pregame Miner rows for display.
@@ -6867,72 +6985,74 @@ V55_LIVE_MINER_DISPLAY_BLOB = "research/ncaaf/v55/live_miner_system_context/late
 
 
 def _v55_embedded_live_miner_document(rows: pd.DataFrame, *, now=None, horizon_days=14) -> dict[str, Any]:
-    """Keep named research triggers; never synthesize a betting confirmation."""
+    """Publish ORIGINAL live Miner votes with their ORIGINAL pregame quote identity.
+
+    A system is independently eligible for a V5.5 voting join only when its
+    producer provided the real sportsbook, spread, and observation timestamp.
+    Never fill these fields with the publish timestamp or a model forecast.
+    Display-only rows without those fields are still published for UI visibility.
+    """
     t = pd.to_datetime(now if now is not None else datetime.now(timezone.utc), utc=True)
-    doc = {"source": "NCAAF_RV22_HEADLESS_MINER_OUTPUT_DISPLAY_ONLY",
-           "generated_at_utc": t.isoformat(), "authority": False, "market": "spreads",
-           "source_module": NCAAF_RESEARCH_V2_SOURCE_TAG, "rows": []}
-    if not isinstance(rows, pd.DataFrame) or rows.empty:
-        return doc
-    necessary = {"Game_Start", "Market"}
-    if not necessary.issubset(rows.columns):
+    doc={"source":"NCAAF_RV22_ORIGINAL_LIVE_SYSTEMS", "generated_at_utc":t.isoformat(),
+         "authority":False, "market":"spreads", "source_module":NCAAF_RESEARCH_V2_SOURCE_TAG,
+         "rows":[], "observations_without_verified_market_identity":0}
+    if not isinstance(rows,pd.DataFrame) or rows.empty:return doc
+    if not {"Game_Start","Market"}.issubset(rows.columns):
         raise ValueError("V55_MINER_CONTEXT_REQUIRES_GAME_START_AND_MARKET")
-    frame = rows.loc[rows["Market"].astype(str).str.lower().eq("spreads")].copy()
-    frame["_v55_kickoff"] = pd.to_datetime(frame["Game_Start"], utc=True, errors="coerce")
-    frame = frame.loc[frame["_v55_kickoff"].gt(t) & frame["_v55_kickoff"].le(t + pd.Timedelta(days=horizon_days))]
-    names = ("Home_Team_Norm", "Away_Team_Norm", "Home_Team", "Away_Team",
-             "Game_ID", "Game_Start", "Market", "Outcome", "Outcome_Norm",
-             "NCAAF_RV22_Miner_Votes", "NCAAF_RV22_Miner_Research_Votes",
-             "NCAAF_RV2_System_Summary", "NCAAF_RV2_Research_System_Summary",
-             "NCAAF_RV2_System_Count", "NCAAF_Miner_Research_Trigger_Count",
-             "NCAAF_Miner_Live_Authority_Policy", "NCAAF_PT_Promotion_Status")
+    frame=rows.loc[rows["Market"].astype(str).str.lower().eq("spreads")].copy()
+    frame["_v55_kickoff"]=pd.to_datetime(frame["Game_Start"],utc=True,errors="coerce")
+    frame=frame.loc[frame["_v55_kickoff"].gt(t)&frame["_v55_kickoff"].le(t+pd.Timedelta(days=horizon_days))].copy()
+    if frame.empty:return doc
+    names=("Home_Team_Norm","Away_Team_Norm","Home_Team","Away_Team",
+           "Game_ID","Game_Start","Market","Outcome","Outcome_Norm","Sport",
+           "Snapshot_Timestamp","Bookmaker","Book","Value",
+           "NCAAF_RV22_Miner_Votes","NCAAF_RV22_Miner_Research_Votes",
+           "NCAAF_RV2_System_Summary","NCAAF_RV2_Research_System_Summary",
+           "NCAAF_RV2_System_Count","NCAAF_Miner_Research_Trigger_Count",
+           "NCAAF_Miner_Live_Authority_Policy","NCAAF_PT_Promotion_Status")
     def clean(v):
-        if isinstance(v, (list, dict)):
-            return v
-        if v is None:
-            return None
+        if isinstance(v,(list,dict)):return v
+        if v is None:return None
         try:
-            if bool(pd.isna(v)):
-                return None
-        except (TypeError, ValueError):
-            pass
-        if hasattr(v, "isoformat"):
-            return v.isoformat()
-        return str(v)
-    seen = set()
-    for _, row in frame.iterrows():
-        home = clean(row.get("Home_Team_Norm")) or clean(row.get("Home_Team"))
-        away = clean(row.get("Away_Team_Norm")) or clean(row.get("Away_Team"))
-        if not home or not away or str(home).lower() == str(away).lower():
-            continue
-        key = (str(home).lower(), str(away).lower(), row["_v55_kickoff"].isoformat())
-        if key in seen:
-            continue
-        # The legacy evaluator puts the ORIGINAL game-level votes on every
-        # side; one canonical home-side row is enough for display transport.
-        same = frame.loc[
-            frame["_v55_kickoff"].eq(row["_v55_kickoff"])
-            & frame.get("Home_Team_Norm", frame.get("Home_Team", pd.Series("", index=frame.index))).astype(str).str.lower().str.strip().eq(str(home).lower().strip())
-            & frame.get("Away_Team_Norm", frame.get("Away_Team", pd.Series("", index=frame.index))).astype(str).str.lower().str.strip().eq(str(away).lower().strip())
-        ]
-        home_row = same.loc[same.get("Outcome_Norm", same.get("Outcome", pd.Series("", index=same.index))).astype(str).str.lower().str.strip().eq(str(home).lower().strip())]
-        selected = home_row.iloc[0] if not home_row.empty else row
-        event = {name: clean(selected.get(name)) for name in names if name in selected.index}
-        for field in ("NCAAF_RV22_Miner_Votes", "NCAAF_RV22_Miner_Research_Votes"):
-            votes = event.get(field)
-            if isinstance(votes, str):
-                try:
-                    votes = json.loads(votes)
-                except (TypeError, ValueError):
-                    votes = []
-            event[field] = votes if isinstance(votes, list) else []
-        event.update({"Game_Start": row["_v55_kickoff"].isoformat(),
-                      "Home_Team_Norm": home, "Away_Team_Norm": away,
-                      "Outcome": home, "Snapshot_Timestamp": t.isoformat(),
-                      "Sport": "NCAAF", "Market": "spreads",
-                      "V55_Source_Type": "HEADLESS_MINER_SNAPSHOT_DISPLAY_ONLY"})
-        doc["rows"].append(event)
+            if bool(pd.isna(v)):return None
+        except (TypeError,ValueError):pass
+        return v.isoformat() if hasattr(v,"isoformat") else str(v)
+    # Latest original bookmaker observation PER GAME+BOOK+OUTCOME. Do not
+    # collapse all books into one home-only event: that loses exact-line identity.
+    seen=set()
+    if "Snapshot_Timestamp" in frame:
+        frame=frame.sort_values("Snapshot_Timestamp",ascending=False,kind="stable")
+    for _,row in frame.iterrows():
+        home=clean(row.get("Home_Team_Norm")) or clean(row.get("Home_Team"))
+        away=clean(row.get("Away_Team_Norm")) or clean(row.get("Away_Team"))
+        side=clean(row.get("Outcome_Norm")) or clean(row.get("Outcome"))
+        book=clean(row.get("Bookmaker")) or clean(row.get("Book"))
+        stamp=pd.to_datetime(row.get("Snapshot_Timestamp"),utc=True,errors="coerce")
+        line=pd.to_numeric(row.get("Value"),errors="coerce")
+        if not home or not away or str(home).lower()==str(away).lower():continue
+        key=(str(home).lower(),str(away).lower(),row["_v55_kickoff"].isoformat(),
+             str(book).lower(),str(side).lower())
+        if key in seen:continue
         seen.add(key)
+        valid_quote=bool(book and side and pd.notna(stamp) and stamp<=t and
+                         stamp<row["_v55_kickoff"] and pd.notna(line) and
+                         np.isfinite(float(line)))
+        event={name:clean(row.get(name)) for name in names if name in row.index}
+        for field in ("NCAAF_RV22_Miner_Votes","NCAAF_RV22_Miner_Research_Votes"):
+            votes=event.get(field)
+            if isinstance(votes,str):
+                try:votes=json.loads(votes)
+                except (TypeError,ValueError):votes=[]
+            event[field]=votes if isinstance(votes,list) else []
+        event.update({"Game_Start":row["_v55_kickoff"].isoformat(),
+                      "Home_Team_Norm":home,"Away_Team_Norm":away,
+                      "Outcome":side,"Sport":"NCAAF","Market":"spreads",
+                      "Snapshot_Timestamp":stamp.isoformat() if pd.notna(stamp) else None,
+                      "V55_Original_Quote_Provenance_Verified":valid_quote,
+                      "V55_Source_Type":"HEADLESS_MINER_SNAPSHOT_DISPLAY_ONLY"})
+        if not valid_quote:doc["observations_without_verified_market_identity"]+=1
+        doc["rows"].append(event)
+        if len(doc["rows"])>=1800:break
     return doc
 
 
@@ -6940,10 +7060,10 @@ def _v55_publish_embedded_live_miner(rows: pd.DataFrame, *, storage_client=None,
                                       bucket_name=None, now=None) -> dict[str, Any]:
     """Publish on the existing headless live Miner path, no new enable switch."""
     doc = _v55_embedded_live_miner_document(rows, now=now)
-    if len(doc["rows"]) > 500:
+    if len(doc["rows"]) > 1800:
         raise ValueError("V55_MINER_CONTEXT_TOO_MANY_GAMES")
     raw = json.dumps(doc, ensure_ascii=False, default=str, allow_nan=False).encode("utf-8")
-    if len(raw) > 3_000_000:
+    if len(raw) > 6_000_000:
         raise ValueError("V55_MINER_CONTEXT_TOO_LARGE")
     if storage_client is None:
         from google.cloud import storage
@@ -7179,14 +7299,12 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     # The existing HEADLESS research/weekly process already runs this routine.
     # Automatically send genuine named pregame Miner votes to the existing V5.5
     # display reader; no opt-in flag, separate helper file, or installer required.
-    if os.getenv("HEADLESS", "0") == "1":
-        try:
-            _v55_result = _v55_publish_embedded_live_miner(out)
-            _live_logging.info("[NCAAF-V55-LIVE-MINER-SNAPSHOT] %s", _v55_result)
-        except Exception:
-            # Display transport must never cancel a successful research run or
-            # replace any missing signal with a guessed voting confirmation.
-            _live_logging.exception("[NCAAF-V55-LIVE-MINER-SNAPSHOT] status=PUBLISH_FAILED_DISPLAY_ONLY")
+    try:
+        _v55_result = _v55_publish_embedded_live_miner(out)
+        _live_logging.info("[NCAAF-V55-LIVE-MINER-SNAPSHOT] %s", _v55_result)
+    except Exception:
+        # Live-system publication must not cancel the original scoring job.
+        _live_logging.exception("[NCAAF-V55-LIVE-MINER-SNAPSHOT] status=PUBLISH_FAILED")
     return out
 
 
@@ -7873,6 +7991,20 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         context_family_cap_audit=_apply_v231_context_family_caps(miners,log_func=log_func)
         system_results=_build_system_results(mg,sy,miners,dashboard_module=dashboard_module)
         published_system_results=_grade_published_ncaaf_systems(mg,sy)
+        # Automatically certify only source-vintage-verifiable fixed published
+        # directional systems. The current report's descriptive W/L is NEVER
+        # promoted on its own. No new script, option, or env var is necessary.
+        _v55_brain_doc,_v55_brain_audit=_v55_build_qualified_brain_registry_from_history(
+            mg,sy,published_system_results)
+        if _v55_brain_doc is not None:
+            try:
+                _v55_brain_raw=json.dumps(_v55_brain_doc,sort_keys=True,default=str).encode()
+                b.blob(V55_FROZEN_BRAIN_BLOB).upload_from_string(
+                    _v55_brain_raw,content_type="application/json")
+                _v55_brain_audit['artifact']=f'gs://{bucket_name}/{V55_FROZEN_BRAIN_BLOB}'
+            except Exception as _v55_brain_exc:
+                _v55_brain_audit['status']='WRITE_FAILED:'+type(_v55_brain_exc).__name__
+        log_func('[NCAAF-V55-AUTO-BRAIN-REGISTRY] '+json.dumps(_v55_brain_audit,sort_keys=True))
         miner_threshold_neighborhood=_miner_authority_threshold_neighborhood(miners)
         _log_v24_evidence_audit(miners=miners,system_results=system_results,published_system_results=published_system_results,
                                 threshold_neighborhood=miner_threshold_neighborhood,log_func=log_func)
@@ -7943,11 +8075,15 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "cfbd_context_bridge":cfbd_context_bridge,
                 "situational_context_bridge":situational_context_bridge,
                 "big_al_observation_ledger":big_al_ledger_diag,"big_al_observation_research":big_al_observation_research,
-                "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"pt_promotion_review":pt_promotion_review,"research_health":_research_health,
+                "prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,
+                "v55_automatic_brain_registry_audit":_v55_brain_audit,
+                "miner_threshold_neighborhood":miner_threshold_neighborhood,"market_rich":market_audit,"intelligence_bridge":intelligence_bridge,"expert_side_bridge":expert_side_bridge,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"pt_promotion_review":pt_promotion_review,"research_health":_research_health,
                 "miner_live_authority_policy":{"policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY,"min_confirmation_n":NCAAF_MINER_LIVE_MIN_CONFIRMATION_N,"min_confirmation_rate":NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE,"uses_2026_selection":False,"source_neutral":True,"pt_systems_may_earn_bounded_vote":True,"pt_family_vote_cap":1,"h2h_family_vote_cap":1,"rivalry_family_vote_cap":1,"travel_family_vote_cap":1,"result_quality_family_vote_cap":1,"schedule_resume_family_vote_cap":1,"recent_vs_season_family_vote_cap":1,"matchup_differential_family_vote_cap":1,"cfbd_personnel_family_vote_cap":1,"cfbd_advanced_family_vote_cap":1,"cfbd_altitude_collapses_to_travel":True,"cfbd_weather_authority":"SHADOW_ONLY","cross_market_family_vote_cap":1,"pt_model_weight":0},
                 "next_step":"KEEP PRODUCTION V1 FROZEN; ADD LEAKAGE-SAFE CFBD PERSONNEL/ADVANCED/ALTITUDE AND CROSS-MARKET STRUCTURE TO THE SOURCE-NEUTRAL MINER; WEATHER REMAINS SHADOW-ONLY UNTIL PROSPECTIVE FORECAST VALIDATION; QUALIFY NEW CHALLENGERS ONLY THROUGH SEALED HISTORY; KEEP 2026 OUTCOMES OUT OF SELECTION"}
         # Preserve a lightweight pickle bundle for future prospective trigger/scoring adapters.
-        bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,"miner_threshold_neighborhood":miner_threshold_neighborhood,"incumbent_system_library_audit":incumbent_system_library_audit,"deep_context_bridge":deep_context_bridge,"cfbd_context_bridge":cfbd_context_bridge,"big_al_observation_research":big_al_observation_research,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
+        bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,
+                "v55_automatic_brain_registry_audit":_v55_brain_audit,
+                "miner_threshold_neighborhood":miner_threshold_neighborhood,"incumbent_system_library_audit":incumbent_system_library_audit,"deep_context_bridge":deep_context_bridge,"cfbd_context_bridge":cfbd_context_bridge,"big_al_observation_research":big_al_observation_research,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
         body=json.dumps(_report_without_models(report),sort_keys=True,separators=(",",":"),default=str).encode()
         sha=hashlib.sha256(body).hexdigest(); hist=f"{REPORT_HISTORY_PREFIX}/{sha[:16]}/report.json"
         b.blob(hist).upload_from_string(body,content_type="application/json"); b.blob(REPORT_CURRENT_BLOB).upload_from_string(body,content_type="application/json")
