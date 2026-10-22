@@ -48793,6 +48793,7 @@ def _ncaaf_v55_quote_coverage(frame, audit):
     states = frame.get('Quote_State',pd.Series('',index=frame.index)).fillna('').astype(str)
     verified = states.isin((
         'FRESH_TWO_SIDED_BACKEND_PRICE_NO_SELECTED_TEAM',
+        'FRESH_TWO_SIDED_BACKEND_PRICE_RESEARCH_SIDE',
         'FRESH_VERIFIED_SELECTED_SIDE_BACKEND_SPREAD'))
     eligible = audit.get('upcoming_forecast_rows')
     if eligible is None:
@@ -48857,9 +48858,13 @@ def _render_ncaaf_v551_weekly_board():
     if not _weekly.empty and all(c in _weekly.columns and _weekly[c].fillna('NOT_EVALUABLE').astype(str).eq('NOT_EVALUABLE').all() for c in _brains):
         st.info('Independent brain evidence is NOT_EVALUABLE for all published forecasts. '
                 'Zero confirmations means no evaluated confirmations, not zero potentially relevant signals.')
-    if _coverage['priced'] and 'Selected_Team' in _weekly and _weekly['Selected_Team'].isna().all():
-        st.info('Backend games have matched home/away sportsbook prices, but V5.5 has selected no betting sides. '
-                'The separate side/cover-probability/EV fields remain blank; no bets are authorized.')
+    _research_n = int(_audit.get('selected_research_sides',0) or 0)
+    _calibrated_n = int(_audit.get('oos_calibrated',0) or 0)
+    if _coverage['priced']:
+        st.caption(f"Independent V5.5 research: {_research_n} provisional positive-normal-EV side leans; "
+                   f"{_calibrated_n} with qualified chronological OOS calibration. "
+                   "Raw probabilities and expected value are UNCALIBRATED when no OOS artifact is qualified; "
+                   "none are authorized bets.")
     if _weekly.empty:
         st.info('No upcoming V5.5 projections in the published backend snapshot.')
         return
@@ -48876,7 +48881,8 @@ def _render_ncaaf_v551_weekly_board():
             if _price_col in shown.columns:
                 shown[_price_col]=None
         shown['V55_Bet_Decision']='NO VERIFIED PRICE'
-    for col in ('CORE_Cover_Probability','CORE_Edge','CORE_EV'):
+    for col in ('CORE_Cover_Probability','CORE_Edge','CORE_EV',
+                'V55_Raw_Cover_Prob','V55_Raw_Edge','V55_Raw_EV'):
         if col not in shown.columns: shown[col]=None
         shown[col]=pd.to_numeric(shown[col],errors='coerce').map(lambda x:f'{x:.1%}' if pd.notna(x) else '—')
     for col in ('CORE_Projected_Home_Margin','Current_Spread','CORE_Project_Cover_Points'):
@@ -48895,15 +48901,19 @@ def _render_ncaaf_v551_weekly_board():
     columns=['Game_Start_UTC','Matchup','Selected_Team','CORE_Model','CORE_Projected_Home_Margin',
         'Backend_Home_Spread','Backend_Home_Odds_American','Backend_Away_Spread',
         'Backend_Away_Odds_American','Backend_Quote_Book','Backend_Quote_Timestamp',
-        'Current_Spread','Odds_American','CORE_Cover_Probability','CORE_Edge','CORE_EV',
+        'Current_Spread','Odds_American','V55_Research_Lean_Team',
+        'V55_Raw_Cover_Prob','V55_Raw_Edge','V55_Raw_EV','V55_Probability_State',
+        'CORE_Cover_Probability','CORE_Edge','CORE_EV',
+        'V55_Research_Decision','V55_Trigger_Context_Authority','V55_Trigger_Context',
         'STAT','BIG_AL','PATHI','SYSTEM_MINER','PREDICTION_TRACKER',
         'Confirm_Count','Oppose_Count','Market_Rich_Sharp_Move','Market_Rich_Limit',
         'Market_Rich_Book_Count','V55_Research_Priority','V55_Bet_Decision','Quote_State']
     st.dataframe(shown[[x for x in columns if x in shown]].rename(columns={'V55_Bet_Decision':'Research Decision (Not Authorized)'}),use_container_width=True,hide_index=True)
     st.caption('2026 live projections come from the V4-selected nonlinear CORE recipe refit on CFBD 2013–25. '
-               'Cover probabilities use retrospectively estimated residual variance and are NOT independently '
-               'calibrated. Big Al/Pathi/Miner/STAT are trigger-only unless an actual timestamped, directionally '
-               'verified V5.5 source exists. Quotes are weekly snapshots; retrospective Market Rich feature '
+               'Provisional V5.5 normal-residual probabilities use retrospectively estimated dispersion; '
+               'they are not prospectively validated. OOS-calibrated fields remain blank unless a separate '
+               'chronological validation bundle passes backend checks. Big Al/Pathi/Miner/STAT are trigger-only '
+               'unless an actual timestamped, directionally '               'verified V5.5 source exists. Quotes are backend scanner snapshots updated on the approximately 30-minute cycle; retrospective Market Rich feature '
                'publication timing remains unverified. BET authority remains 0 until prospective approval.')
 
 

@@ -165,6 +165,8 @@ def publish_weekly_latest(*, storage_client=None, bq_client=None, bucket_name=No
     import ncaaf_v552_live as v55
     gcs = storage_client or storage.Client()
     weekly, audit = v55.read_weekly_latest(gcs,bucket_name=bucket_name or os.getenv("MODEL_BUCKET","sharp-models"))
+    # Verify immutable source BEFORE a quote join can update the audit payload.
+    _verify_audit(audit)
     from google.cloud import bigquery
     client = bq_client or bigquery.Client(project="sharplogger")
     # Always reattach the current stored sportsbook quotes on the backend;
@@ -225,10 +227,24 @@ def read_published_latest(*, bq_client=None, max_market_age_minutes=180):
     stale=age>max_market_age_minutes or age< -5
     if stale:
         # Model-only slate may remain visible; current price/EV/action must not.
-        price_fields={"Current_Spread","Odds_American","CORE_Cover_Probability","CORE_Edge","CORE_EV","CORE_Project_Cover_Points","V55_Bet_Decision","Market_Rich_Sharp_Move","Market_Rich_Limit","Quote_State"}
+        price_fields={"Current_Spread","Odds_American","CORE_Cover_Probability","CORE_Edge","CORE_EV","CORE_Project_Cover_Points","V55_Bet_Decision","Market_Rich_Sharp_Move","Market_Rich_Limit","Quote_State",
+             "Selected_Team","Backend_Home_Spread","Backend_Away_Spread",
+             "Backend_Home_Odds_American","Backend_Away_Odds_American",
+             "Backend_Quote_Book","Backend_Quote_Timestamp",
+             "V55_Raw_Cover_Prob","V55_Raw_EV","V55_Raw_Edge",
+             "V55_Research_Selected_Team","V55_Research_Lean_Team",
+             "V55_Research_Decision","V55_Probability_State",
+             "V55_Research_Selected_Side","V55_Home_Raw_Prob",
+             "V55_Away_Raw_Prob","V55_Home_Raw_EV","V55_Away_Raw_EV",
+             "V55_Trigger_Context","V55_Trigger_Context_Authority",
+             "Backend_Model_Lean_Side","Backend_Model_Lean_Points",
+             "Backend_Projected_Home_Cover_Points","Backend_Projected_Away_Cover_Points",
+             "CORE_EV","CORE_Edge","CORE_Cover_Probability","Book"}
         for col in price_fields.intersection(frame.columns):
             frame[col]=None
         frame["Quote_State"]="STALE_BACKEND_SNAPSHOT"
+        frame["V55_Probability_State"]="STALE_BACKEND_SNAPSHOT"
+        frame["V55_Research_Decision"]="NO_CURRENT_QUOTE__STALE"
         frame["V55_Bet_Decision"]="NO CURRENT QUOTE — STALE"
     meta={**audit,"publication_status":"STALE_MARKET" if stale else "PASS",
           "publication_type":str(commit.publication_type),
@@ -413,6 +429,18 @@ def read_scanner_quotes(bq_client, *, minutes=QUOTE_MAX_AGE_MINUTES, horizon_day
       AND SAFE_CAST(Value AS FLOAT64) IS NOT NULL
       AND SAFE_CAST(Odds_Price AS FLOAT64) IS NOT NULL
     """
+    # Lightweight optional as-of trigger context. These are NOT qualified OOS
+    # confirmations and are never used as training inputs or probability shifts.
+    optional=("BigAl_Side_Support_Count","BigAl_Side_Conflict_Count",
+              "Pathi_System_Count","Pathi_Active_Text","NCAAF_Stat_Active",
+              "System_Side_Consensus_Count","System_Side_Conflict_Count")
+    try:
+        present={f.name for f in bq_client.get_table(MARKET_TABLE).schema}
+        extra=[c for c in optional if c in present]
+    except Exception:
+        extra=[]
+    if extra:
+        query=query.replace("SELECT Game_Start,", "SELECT "+",".join(extra)+",Game_Start,",1)
     cfg = bigquery.QueryJobConfig(query_parameters=[
         bigquery.ScalarQueryParameter("minutes", "INT64", minutes),
         bigquery.ScalarQueryParameter("horizon", "INT64", horizon_days),
@@ -485,6 +513,7 @@ def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minut
         "Backend_Home_Quote_UTC","Backend_Away_Quote_UTC",
         "Backend_Projected_Home_Cover_Points","Backend_Projected_Away_Cover_Points",
         "Backend_Model_Lean_Side","Backend_Model_Lean_Points",
+        "V55_Trigger_Context","V55_Trigger_Context_Authority",
     ):
         out[col]=None
     out["Quote_State"]="NO_VERIFIED_BACKEND_QUOTE"
@@ -599,6 +628,16 @@ def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minut
             out.at[idx,"Backend_Quote_Book"]=h["_book"]
             out.at[idx,"Backend_Quote_Timestamp"]=max(h["_snap"],a["_snap"]).isoformat()
             out.at[idx,"Backend_Quote_Game_Key"]=str(h.get("Game_Key") or "")
+            trigger_context={}
+            for t in ("BigAl_Side_Support_Count","BigAl_Side_Conflict_Count",
+                      "Pathi_System_Count","Pathi_Active_Text","NCAAF_Stat_Active",
+                      "System_Side_Consensus_Count","System_Side_Conflict_Count"):
+                val=h.get(t)
+                if val is not None and str(val).lower() not in ("nan","none","null",""):
+                    trigger_context[t]=_json_default(val)
+            if trigger_context:
+                out.at[idx,"V55_Trigger_Context"]=json.dumps(trigger_context,sort_keys=True)
+            out.at[idx,"V55_Trigger_Context_Authority"]="UNQUALIFIED_PRE_GAME_CONTEXT_ONLY"
             out.at[idx,"Quote_State"]="FRESH_TWO_SIDED_BACKEND_PRICE_NO_SELECTED_TEAM"
             # Quotes are available; V5.5 has not selected a betting side or
             # calculated approved probabilities/EV. Never label this NO_QUOTE.
@@ -657,6 +696,9 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None):
     import json
     import pandas as pd
     log = log_func or logging.info
+    # Never rewrite a rejected model's provenance into a seeming clean audit.
+    if audit.get("production_v1_probabilities_used") is True or audit.get("v55_bet_authority",0)!=0:
+        raise RuntimeError("V55_UNTRUSTED_SOURCE_PROVENANCE_OR_BET_AUTHORITY")
     try:
         market = read_scanner_quotes(bq_client)
     except Exception as exc:
@@ -682,6 +724,331 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None):
     updated["status"] = audit.get("status")
     updated["v55_bet_authority"] = 0
     updated["price_authority"] = "SHARP_SCANNER_BIGQUERY_ONLY"
-    updated["price_join_semantics"] = "FRESH_QUOTE_MATCH_ONLY_NO_V55_PROBABILITY_RECOMPUTE"
+    updated["price_join_semantics"] = "FRESH_QUOTE_MATCH_PLUS_INDEPENDENT_RESEARCH_ONLY"
+    # Model is unchanged. Calculate both spread sides entirely on the backend
+    # and attach qualified evidence only when independently sourced and vetted.
+    calibration, cal_problem = read_v55_oos_calibration()
+    out, research = evaluate_v55_spread_research(out,calibration=calibration)
+    if cal_problem:
+        research["calibration_unavailable_reason"] = cal_problem
+    evidence, evidence_problem = read_v55_qualified_evidence(bq_client)
+    out, brain = attach_v55_qualified_evidence(out,evidence)
+    if evidence_problem:
+        brain["evidence_unavailable_reason"] = evidence_problem
+    updated.update({k:v for k,v in research.items() if k!="status"})
+    updated["research_decision_status"]=research["status"]
+    updated.update(brain)
+    # The original model source audit is immutable: price/research statuses
+    # must never replace it with a generic PASS marker.
+    updated["status"]=audit["status"]
+    updated["v55_bet_authority"] = 0
+    updated["price_join_semantics"] = "FRESH_QUOTES_INDEPENDENT_RESEARCH_ONLY"
     log("[NCAAF-V55-BACKEND-PRICE-BRIDGE] " + json.dumps(diag,sort_keys=True))
+    log("[NCAAF-V55-RESEARCH-SIDE-EV] " + json.dumps(research,sort_keys=True))
+    log("[NCAAF-V55-INDEPENDENT-BRAIN-EVIDENCE] " + json.dumps(brain,sort_keys=True))
     return out, updated
+
+
+# ----- V5.5 independent spread research; NEVER betting authority -----
+
+VALID_BRAIN_FAMILIES = ("STAT", "BIG_AL", "PATHI", "SYSTEM_MINER", "PREDICTION_TRACKER")
+
+
+def _normal_cdf(z):
+    """Normal approximation from the V5.5 *own* residual SD, not V1."""
+    return 0.5 * math.erfc(-z / math.sqrt(2.0))
+
+
+def _american_net(decimal_american):
+    v=_price(decimal_american)
+    if v is None or not _valid_american(v):
+        return None
+    return v/100.0 if v>=100 else 100.0/abs(v)
+
+
+def _validate_oos_calibration(bundle):
+    """Fail closed: a residual SD fitted on 2013-25 is NOT OOS calibration.
+
+    Only a separately certified chronological, held-out V5.5 validation bundle
+    may be used in the calibrated fields. No fitting occurs during repricing.
+    """
+    if not isinstance(bundle,dict):
+        return None
+    if bundle.get("status")!="PASS_OOS_LOCKED" or bundle.get("core_model")!="NONLINEAR_HGB":
+        return None
+    if bundle.get("validation_method")!="CHRONOLOGICAL_OUT_OF_FOLD":
+        return None
+    if bundle.get("model_source")!="CFBD_ONLY_V55":
+        return None
+    if bundle.get("production_v1_probabilities_used") is not False:
+        return None
+    n=_price(bundle.get("validated_games"))
+    if n is None or n<500 or n!=int(n):
+        return None
+    if not re.fullmatch(r"[0-9a-f]{64}",str(bundle.get("oof_predictions_sha256") or "")):
+        return None
+    if not re.fullmatch(r"[0-9a-f]{64}",str(bundle.get("artifact_sha256") or "")):
+        return None
+    brier=_price(bundle.get("brier_score"))
+    ece=_price(bundle.get("ece"))
+    if brier is None or not 0<brier<0.25 or ece is None or not 0<=ece<=0.05:
+        return None
+    scale=_price(bundle.get("residual_scale"))
+    bias=_price(bundle.get("margin_bias"))
+    if scale is None or not 5<=scale<=35 or bias is None or abs(bias)>10:
+        return None
+    train_cutoff=_timestamp(bundle.get("calibration_qualified_at_utc"))
+    if str(train_cutoff) == 'NaT' or train_cutoff.year>2025:
+        return None
+    return {"residual_scale":scale,"margin_bias":bias,
+            "calibration_id":str(bundle.get("calibration_id") or "")[:128]}
+
+
+def read_v55_oos_calibration():
+    """Optional immutable GCS calibration *artifact*; never learn from live bets.
+
+    The canonical 2013-25 research artifact is not present in this supplied
+    source tree. No artifact is silently generated or treated as validated.
+    """
+    uri=os.getenv("NCAAF_V55_OOS_CALIBRATION_GCS_URI","").strip()
+    if not uri:
+        return None,"NO_INDEPENDENT_OOS_CALIBRATION_ARTIFACT_CONFIGURED"
+    if not uri.startswith("gs://") or "/" not in uri[5:]:
+        return None,"INVALID_CALIBRATION_GCS_URI"
+    try:
+        from google.cloud import storage
+        bucket,key=uri[5:].split("/",1)
+        raw=storage.Client().bucket(bucket).blob(key).download_as_bytes()
+        if len(raw)>200_000:
+            return None,"OVERSIZED_CALIBRATION_ARTIFACT"
+        b=json.loads(raw)
+        candidate=_validate_oos_calibration(b)
+        return (candidate,None) if candidate else (None,"OOS_CALIBRATION_CONTRACT_REJECTED")
+    except Exception as exc:
+        return None,"CALIBRATION_ACCESS_ERROR:"+type(exc).__name__
+
+
+def evaluate_v55_spread_research(frame, *, calibration=None):
+    """Backend-only paired spread comparison, shadow-only with explicit provenance.
+
+    V55_Raw_* is a NORMAL RESIDUAL APPROXIMATION, NOT a calibrated probability.
+    CORE_Cover_Probability/CORE_EV are published ONLY with vetted OOS calibration.
+    No decision or model field ever changes bet authority or production V1.
+    """
+    import pandas as pd
+    out=frame.copy()
+    fields=("V55_Research_Lean_Team","V55_Research_Selected_Team",
+            "V55_Research_Selected_Side","V55_Research_Decision",
+            "V55_Raw_Cover_Prob","V55_Raw_EV","V55_Raw_Edge",
+            "V55_Home_Raw_Prob","V55_Away_Raw_Prob",
+            "V55_Home_Raw_EV","V55_Away_Raw_EV",
+            "V55_Probability_State","V55_Calibration_Id")
+    for key in fields:
+        out[key]=None
+    # Never carry earlier model's unverified probability or selected wager into
+    # this backend-only market refresh. Every row is recomputed or withheld.
+    for key in ("CORE_Cover_Probability","CORE_Edge","CORE_EV","Selected_Team",
+                "Current_Spread","Odds_American","CORE_Project_Cover_Points"):
+        out[key]=None
+    audited_calibration=_validate_oos_calibration(calibration)
+    stats={"status":"PASS_RESEARCH_SHADOW","paired_quotes":0,
+           "raw_side_estimates":0,"positive_raw_ev_leans":0,
+           "selected_research_sides":0,"oos_calibrated":0,
+           "calibration_state":"LOCKED_OOS" if audited_calibration else "UNAVAILABLE_UNCALIBRATED",
+           "core_refit":False,"v55_bet_authority":0,"production_v1_probabilities_used":False}
+    for i,r in out.iterrows():
+        if not str(r.get("Quote_State") or "").startswith("FRESH_"):
+            out.at[i,"V55_Research_Decision"]="NO_VERIFIED_QUOTE"
+            out.at[i,"V55_Probability_State"]="NOT_EVALUABLE_NO_QUOTE"
+            continue
+        home_line=_price(r.get("Backend_Home_Spread"))
+        away_line=_price(r.get("Backend_Away_Spread"))
+        home_odds=_american_net(r.get("Backend_Home_Odds_American"))
+        away_odds=_american_net(r.get("Backend_Away_Odds_American"))
+        if any(v is None for v in (home_line,away_line,home_odds,away_odds)):
+            out.at[i,"V55_Research_Decision"]="NO_VERIFIED_TWO_SIDED_QUOTE"
+            continue
+        if abs(home_line+away_line)>0.01:
+            out.at[i,"V55_Research_Decision"]="INCONSISTENT_SIDES"
+            continue
+        stats["paired_quotes"]+=1
+        mu=_price(r.get("CORE_Projected_Home_Margin"))
+        sigma=_price(r.get("CORE_Residual_SD"))
+        hname=str(r.get("Home") or "").strip()
+        aname=str(r.get("Away") or "").strip()
+        if not hname or not aname:
+            matchup=str(r.get("Matchup") or "")
+            m=re.match(r"^(.+?)\s+@\s+(.+)$",matchup)
+            if m: aname,hname=m.group(1),m.group(2)
+        if mu is None or sigma is None or not 4<=sigma<=50 or not hname or not aname:
+            out.at[i,"V55_Research_Decision"]="CORE_DISTRIBUTION_OR_IDENTITY_NOT_VERIFIED"
+            out.at[i,"V55_Probability_State"]="NOT_EVALUABLE_MISSING_SD"
+            continue
+        if str(r.get("CORE_Model"))!="NONLINEAR_HGB":
+            out.at[i,"V55_Research_Decision"]="UNVERIFIED_CORE_MODEL"
+            continue
+        # Continuous normal assumption: push probability is not estimated.
+        hp=_normal_cdf((mu+home_line)/sigma)
+        ap=1-hp
+        hev=hp*home_odds-(1-hp)
+        aev=ap*away_odds-(1-ap)
+        out.at[i,"V55_Home_Raw_Prob"]=hp
+        out.at[i,"V55_Away_Raw_Prob"]=ap
+        out.at[i,"V55_Home_Raw_EV"]=hev
+        out.at[i,"V55_Away_Raw_EV"]=aev
+        out.at[i,"V55_Probability_State"]="UNVALIDATED_NORMAL_RESIDUAL_APPROXIMATION"
+        choose_home=(hev>=aev)
+        side=hname if choose_home else aname
+        p=hp if choose_home else ap
+        ev=hev if choose_home else aev
+        spread=home_line if choose_home else away_line
+        odds=_price(r.get("Backend_Home_Odds_American" if choose_home else "Backend_Away_Odds_American"))
+        out.at[i,"V55_Research_Lean_Team"]=side
+        out.at[i,"V55_Raw_Cover_Prob"]=p
+        out.at[i,"V55_Raw_EV"]=ev
+        out.at[i,"V55_Raw_Edge"]=p-(1/(1+(home_odds if choose_home else away_odds)))
+        stats["raw_side_estimates"]+=1
+        if ev>0:
+            stats["positive_raw_ev_leans"]+=1
+        # These side/price fields are research decisions, not actionable bets.
+        if ev<=0:
+            out.at[i,"V55_Research_Decision"]="MODEL_ONLY__NO_POSITIVE_RAW_EV"
+            out.at[i,"V55_Research_Priority"]="MATCHED_QUOTE__MODEL_ONLY"
+            continue
+        out.at[i,"Selected_Team"]=side
+        out.at[i,"V55_Research_Selected_Team"]=side
+        out.at[i,"Quote_State"]="FRESH_TWO_SIDED_BACKEND_PRICE_RESEARCH_SIDE"
+        out.at[i,"V55_Research_Selected_Side"]="HOME" if choose_home else "AWAY"
+        out.at[i,"Current_Spread"]=spread
+        out.at[i,"Odds_American"]=odds
+        out.at[i,"Book"]=r.get("Backend_Quote_Book")
+        out.at[i,"CORE_Project_Cover_Points"]=(mu+home_line if choose_home else -mu+away_line)
+        out.at[i,"V55_Research_Decision"]="UNVALIDATED_NORMAL_MODEL_LEAN_ONLY"
+        out.at[i,"V55_Research_Priority"]="RAW_MODEL_RESEARCH_LEAN__NO_BET_AUTHORITY"
+        stats["selected_research_sides"]+=1
+        # Independent OOS validation is a required separate input. The weekly
+        # run's retrospective residual SD is NOT sufficient to populate CORE_*.
+        if audited_calibration:
+            z=((mu-audited_calibration["margin_bias"])+home_line)/audited_calibration["residual_scale"]
+            cal_p=_normal_cdf(z)
+            if not choose_home: cal_p=1-cal_p
+            net=home_odds if choose_home else away_odds
+            out.at[i,"CORE_Cover_Probability"]=cal_p
+            out.at[i,"CORE_Edge"]=cal_p-1/(1+net)
+            out.at[i,"CORE_EV"]=cal_p*net-(1-cal_p)
+            out.at[i,"V55_Probability_State"]="INDEPENDENT_CHRONOLOGICAL_OOS_RESIDUAL_CALIBRATION"
+            out.at[i,"V55_Calibration_Id"]=audited_calibration["calibration_id"]
+            out.at[i,"V55_Research_Decision"]="CALIBRATED_RESEARCH_ONLY_NO_BET_AUTHORITY"
+            stats["oos_calibrated"]+=1
+    out["V55_Bet_Authority"]=0
+    out["V55_Bet_Decision"]="RESEARCH_ONLY_NO_AUTHORITY"
+    return out,stats
+
+
+def read_v55_qualified_evidence(bq_client):
+    """Optional V5.5-specific, pregame/OOS-vetted events. No V1 vote reuse.
+
+    Explicitly opt in using a preexisting validated evidence table; never
+    auto-create or infer schema for unvetted 2026 triggers.
+    """
+    table=os.getenv("NCAAF_V55_QUALIFIED_EVIDENCE_TABLE", "").strip()
+    if not table:
+        return None,"NO_V55_QUALIFIED_EVIDENCE_TABLE_CONFIGURED"
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+\.[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+",table):
+        return None,"BAD_EVIDENCE_TABLE_ID"
+    try:
+        df=bq_client.query(f"SELECT * FROM `{table}` WHERE Game_Start_UTC > CURRENT_TIMESTAMP() AND Game_Start_UTC < TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 14 DAY)").to_dataframe(create_bqstorage_client=False)
+        return df,None
+    except Exception as exc:
+        return None,"EVIDENCE_READ_ERROR:"+type(exc).__name__
+
+
+def attach_v55_qualified_evidence(frame,events):
+    """Only independently qualified sources may confirm or oppose V5.5 CORE.
+
+    Exact CFBD game ID, kickoff, directional team, historical qualification
+    prior to 2026, independently timestamped observation <= quote time,
+    verified pregame provenance, and unique source family are mandatory.
+    """
+    import pandas as pd
+    out=frame.copy()
+    # Quarantine every unvetted legacy/live source. Votes in saved weekly GCS
+    # payload have no authority unless they pass the exact V5.5 event contract.
+    for key in ("Confirm_Count","Oppose_Count"):
+        out[key]=0
+    for key in ("Confirm_Families","Oppose_Families"):
+        out[key]=None
+    for family in VALID_BRAIN_FAMILIES:
+        out[family]="NOT_EVALUABLE"
+    report={"evidence_state":"NOT_EVALUABLE_NO_VERIFIED_EVENTS",
+            "rows_read":len(events) if isinstance(events,pd.DataFrame) else 0,
+            "qualified_events_used":0,"multi_family":0,"conflict_games":0,
+            "source_family_cap":1,"v55_bet_authority":0}
+    required={"Game_ID","Game_Start_UTC","Source_Family","Signal_Family","Signal_Side",
+              "Observed_At_UTC","Qualified_At_UTC","Qualification_Status",
+              "OOS_Status","Direction_Verified","Provenance_Status"}
+    if not isinstance(events,pd.DataFrame) or not required.issubset(events.columns):
+        return out,report
+    ev=events.copy()
+    ev["_obs"]=pd.to_datetime(ev["Observed_At_UTC"],utc=True,errors="coerce")
+    ev["_qualified"]=pd.to_datetime(ev["Qualified_At_UTC"],utc=True,errors="coerce")
+    ev["_kick"]=pd.to_datetime(ev["Game_Start_UTC"],utc=True,errors="coerce")
+    ev["_family"]=ev["Source_Family"].astype(str).str.upper().str.strip()
+    ev["_game_id"]=ev["Game_ID"].astype(str)
+    def check(v): return v is True or str(v).lower() in ("true","1")
+    valid=(ev["_family"].isin(VALID_BRAIN_FAMILIES)
+           &ev["Qualification_Status"].eq("QUALIFIED_OOS")
+           &ev["OOS_Status"].eq("PASS")
+           &ev["Provenance_Status"].eq("PRE_GAME_VERIFIED")
+           &ev["Direction_Verified"].map(check)
+           &ev["_qualified"].lt(pd.Timestamp("2026-01-01T00:00:00Z"))
+           &ev["_obs"].lt(ev["_kick"])
+           &ev["_obs"].ge(ev["_qualified"]))
+    ev=ev.loc[valid]
+    if ev.empty:
+        report["evidence_state"]="NO_VALID_V55_OOS_EVENTS"
+        return out,report
+    report["evidence_state"]="EVALUATED_V55_OOS_EVENTS"
+    for i,r in out.iterrows():
+        selected=_norm_team(r.get("Selected_Team"))
+        gid=str(r.get("Game_ID") or "")
+        quote_time=_timestamp(r.get("Backend_Quote_Timestamp"))
+        kick=_timestamp(r.get("Game_Start_UTC"))
+        (home,away),_= _matchup_teams(r)
+        if not selected or not gid or pd.isna(quote_time) or pd.isna(kick):
+            continue
+        relevant=ev.loc[(ev["_game_id"]==gid)&ev["_kick"].eq(kick)&ev["_obs"].le(quote_time)]
+        if relevant.empty:
+            continue
+        # Only one vote per independent source. If independent signals from
+        # the same source oppose each other, that source ABSTAINS.
+        support=set(); opposition=set()
+        for family,g in relevant.groupby("_family"):
+            dirs=set(_norm_team(v) for v in g["Signal_Side"].tolist())
+            dirs.discard("")
+            if len(dirs)!=1:
+                continue
+            direction=next(iter(dirs))
+            if direction not in (home,away):
+                continue
+            if direction==selected: support.add(family)
+            else: opposition.add(family)
+        for family in VALID_BRAIN_FAMILIES:
+            if family in support:
+                out.at[i,family]="QUALIFIED_SUPPORT"
+            elif family in opposition:
+                out.at[i,family]="QUALIFIED_OPPOSE"
+        report["qualified_events_used"]+=len(support)+len(opposition)
+        out.at[i,"Confirm_Count"]=len(support)
+        out.at[i,"Oppose_Count"]=len(opposition)
+        out.at[i,"Confirm_Families"]="|".join(sorted(support)) if support else None
+        out.at[i,"Oppose_Families"]="|".join(sorted(opposition)) if opposition else None
+        if opposition:
+            report["conflict_games"]+=1
+            out.at[i,"V55_Research_Decision"]="RESEARCH_CONFLICT__VETO"
+        elif len(support)>=2:
+            report["multi_family"]+=1
+            out.at[i,"V55_Research_Decision"]="MULTI_FAMILY_RESEARCH_SUPPORT__NO_BET_AUTHORITY"
+    out["V55_Bet_Authority"]=0
+    out["V55_Bet_Decision"]="RESEARCH_ONLY_NO_AUTHORITY"
+    return out,report
