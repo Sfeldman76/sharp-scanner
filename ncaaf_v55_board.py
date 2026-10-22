@@ -109,7 +109,20 @@ def publish_dataframe(weekly, audit, *, bq_client=None, publication_type="WEEKLY
     client = bq_client or bigquery.Client(project="sharplogger")
     _ensure_table(client)
     data = {**base, "record_kind":"DATA", "payload_json":payload, "audit_json":None}
-    errors = client.insert_rows_json(TABLE,[data],row_ids=[snapshot_id+":DATA"])
+    try:
+        errors = client.insert_rows_json(TABLE,[data],row_ids=[snapshot_id+":DATA"])
+    except Exception as exc:
+        # No silent fallback to V1, no dashboard cache masquerading as a publish.
+        if "bigquery.tables.updateData" in str(exc) or "Access Denied: Table" in str(exc):
+            raise RuntimeError(
+                "V55_BQ_WRITE_PERMISSION_DENIED: table="+TABLE+
+                "; the Cloud Run execution service account needs BigQuery write "
+                "access (bigquery.tables.updateData), normally via "
+                "roles/bigquery.dataEditor on dataset sharplogger.sharp_data. "
+                "Check that the table exists and its schema is correct. "
+                "The saved V5.5 forecast can be republished without a CORE refit."
+            ) from exc
+        raise
     if errors:
         raise RuntimeError("V55_BQ_DATA_WRITE_FAILED:" + str(errors)[:600])
     # Verify the staged DATA is query-visible before exposing a COMPLETE marker.
@@ -126,7 +139,16 @@ def publish_dataframe(weekly, audit, *, bq_client=None, publication_type="WEEKLY
     if len(matches)!=1 or matches[0].payload_sha256!=digest or int(matches[0].row_count)!=len(weekly):
         raise RuntimeError("V55_BQ_DATA_NOT_QUERY_VISIBLE")
     commit = {**base, "record_kind":"COMPLETE", "payload_json":None,"audit_json":audit_json}
-    errors=client.insert_rows_json(TABLE,[commit],row_ids=[snapshot_id+":COMPLETE"])
+    try:
+        errors=client.insert_rows_json(TABLE,[commit],row_ids=[snapshot_id+":COMPLETE"])
+    except Exception as exc:
+        if "bigquery.tables.updateData" in str(exc) or "Access Denied: Table" in str(exc):
+            raise RuntimeError(
+                "V55_BQ_COMMIT_WRITE_PERMISSION_DENIED: table="+TABLE+
+                "; service account needs bigquery.tables.updateData on dataset sharplogger.sharp_data. "
+                "Only COMPLETE snapshots are displayed; the partial DATA row cannot appear."
+            ) from exc
+        raise
     if errors:
         raise RuntimeError("V55_BQ_COMMIT_FAILED:" + str(errors)[:600])
     result={"status":"PASS","snapshot_id":snapshot_id,"rows":int(len(weekly)),

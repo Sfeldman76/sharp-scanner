@@ -368,7 +368,18 @@ def main():
                 or _result.get("production_v1_probabilities_used") is not False
                 or _result.get("core_refit") is not False):
             raise RuntimeError("[NCAAF-V552] unsafe market-only refresh")
-        pw.emit("done", "V5.5 CORE retained; market-price snapshot refreshed", pct=1.0)
+        # The market-only Cloud Run job must publish the same completed V5.5
+        # snapshot that the dashboard consumes. Previously this route refreshed
+        # GCS only, so a successful job could leave the BigQuery board stale.
+        from google.cloud import bigquery as _v55_bq
+        import ncaaf_v55_board as _v55board
+        _pub=_v55board.publish_weekly_latest(
+            storage_client=gcs, bq_client=_v55_bq.Client(project="sharplogger"),
+            bucket_name=bucket, publication_type="MARKET_REFRESH")
+        log_func("[NCAAF-V55-MARKET-REFRESH-BQ-BOARD] "+json.dumps(_pub,sort_keys=True))
+        if int(_pub.get("priced_games",0) or 0)==0:
+            log_func("[NCAAF-V55-PRICING-HOLD] Zero priced games after market refresh; CORE only, no bets authorized")
+        pw.emit("done", "V5.5 CORE retained; market-price snapshot refreshed and published", pct=1.0)
         return
 
     # NCAAF V5.4: CFBD authoritative historical CORE and system mining.
