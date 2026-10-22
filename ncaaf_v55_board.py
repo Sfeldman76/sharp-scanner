@@ -793,11 +793,12 @@ def attach_verified_backend_quotes(forecasts, quotes, *, now=None, max_age_minut
 # V5.5 raw pregame evidence is DISPLAY CONTEXT, not qualified evidence or betting authority.
 # Its source is the existing scanner-enriched BigQuery market view, never V1
 # probabilities, an independent odds API, or a dashboard computation.
-V55_RAW_OVERLAY_TABLE = 'sharplogger.sharp_data.moves_with_features_merged'
+V55_RAW_OVERLAY_TABLE = os.getenv('NCAAF_V55_RAW_OVERLAY_TABLE', 'sharplogger.sharp_data.moves_with_features_merged')
 V55_RAW_OVERLAY_FIELDS = (
     'BigAl_Active_Text', 'BigAl_Side_Support_Count', 'BigAl_Side_Conflict_Count',
     'Pathi_Active_Text', 'Pathi_System_Count', 'System_Signals_Text',
-    'NCAAF_RV2_System_Summary', 'Miner_System_Summary', 'Miner_System_Count',
+    'NCAAF_RV2_System_Summary', 'NCAAF_RV2_Research_System_Summary',
+    'NCAAF_RV22_Miner_Research_Votes', 'Miner_System_Summary', 'Miner_System_Count',
     'System_Side_Consensus_Count', 'System_Side_Conflict_Count',
     'NCAAF_Stat_Active', 'NCAAF_Stat_Trust',
     'PT_Consensus_Side', 'PT_Consensus', 'Prediction_Tracker_Consensus',
@@ -872,16 +873,18 @@ def _v55_raw_rich(row):
     return ' | '.join(vals[:6]) if vals else 'NOT_PUBLISHED'
 
 
-def _v55_read_enriched_pregame_overlays(bq_client, *, horizon_days=14, lookback_minutes=240,
+def _v55_read_enriched_pregame_overlays(bq_client, *, horizon_days=14, lookback_minutes=720,
                                           qualified_brain_registry=None):
-    """Small, bounded, optional BQ enrichment; NEVER changes V5.5 votes.
+    """Fetch bounded CURRENT NCAAF game-side context, avoiding global LIMIT bias.
 
-    Returns (DataFrame, source_status). Read failures are explicit rather than
-    pretending there are no Big Al/Pathi/Miner triggers.
+    Live system producers are separate from odds producers. A generic market
+    view with no named Miner columns cannot supply qualified Miner authority.
     """
     import pandas as pd
     required = {'Game_Start', 'Home_Team_Norm', 'Away_Team_Norm',
                 'Outcome', 'Snapshot_Timestamp', 'Sport', 'Market'}
+    if not re.fullmatch(r'[A-Za-z_][\w-]*\.[A-Za-z_][\w-]*\.[A-Za-z_][\w-]*',V55_RAW_OVERLAY_TABLE):
+        return pd.DataFrame(), 'INVALID_ENRICHMENT_TABLE_ID'
     try:
         schema = {f.name for f in bq_client.get_table(V55_RAW_OVERLAY_TABLE).schema}
     except Exception as exc:
@@ -899,6 +902,14 @@ def _v55_read_enriched_pregame_overlays(bq_client, *, horizon_days=14, lookback_
     if not optional:
         return pd.DataFrame(), 'NO_RAW_OVERLAY_COLUMNS_IN_SOURCE'
     fields = list(sorted(required)) + optional
+    # Select the 12 most recent observations PER game/side/book. This avoids
+    # starving smaller games when a few popular matchups produce 20,000 rows.
+    # Preserve multiple observations for strict as-of joins to quoted prices.
+    book_expr = ('COALESCE(NULLIF(TRIM(CAST(Bookmaker AS STRING)),''), '
+                 'NULLIF(TRIM(CAST(Book AS STRING)),''), '')'
+                 if 'Bookmaker' in schema and 'Book' in schema else
+                 'COALESCE(CAST(Bookmaker AS STRING),'')' if 'Bookmaker' in schema else
+                 'COALESCE(CAST(Book AS STRING),'')' if 'Book' in schema else "''")
     sql = f"""SELECT {','.join('`'+x+'`' for x in fields)}
       FROM `{V55_RAW_OVERLAY_TABLE}`
       WHERE UPPER(TRIM(CAST(Sport AS STRING)))='NCAAF'
@@ -908,142 +919,261 @@ def _v55_read_enriched_pregame_overlays(bq_client, *, horizon_days=14, lookback_
         AND Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {int(lookback_minutes)} MINUTE)
         AND Snapshot_Timestamp <= CURRENT_TIMESTAMP()
         AND Snapshot_Timestamp < Game_Start
-      ORDER BY Snapshot_Timestamp DESC LIMIT 20000"""
+      QUALIFY ROW_NUMBER() OVER (
+          PARTITION BY Game_Start, Home_Team_Norm, Away_Team_Norm, Outcome, {book_expr}
+          ORDER BY Snapshot_Timestamp DESC) <= 12
+      ORDER BY Game_Start, Snapshot_Timestamp DESC LIMIT 25000"""
     try:
         frame = bq_client.query(sql).to_dataframe(create_bqstorage_client=False)
-        return frame, 'PASS' if len(frame) < 20000 else 'TRUNCATED_20000_ROWS'
+        issue=[]
+        if 'NCAAF_RV22_Miner_Votes' not in schema:
+            issue.append('NO_STRUCTURED_MINER_VOTES_COLUMN')
+        if not {'NCAAF_RV2_System_Summary','Miner_System_Summary','System_Signals_Text'} & schema:
+            issue.append('NO_NAMED_SYSTEM_TEXT_COLUMNS')
+        status='PASS' if not issue else 'SOURCE_PARTIAL__'+','.join(issue)
+        if len(frame)>=25000:status+='__TRUNCATED_25000_ROWS'
+        return frame,status
     except Exception as exc:
         return pd.DataFrame(), 'SOURCE_QUERY_FAILED:'+type(exc).__name__
 
 
-def attach_v55_raw_pregame_overlays(board, enrich, *, source_status='PASS'):
-    """Attach unqualified, timestamped *display-only* raw overlays.
+def attach_v55_raw_pregame_overlays(board, enrich, *, source_status='PASS', now=None):
+    """Display actual named research overlays without granting them bet authority.
 
-    Exact two-team/home-away/side identity and as-of<=quoted time required.
-    These columns must never mutate qualified votes, CORE, policy, or authority.
+    Unlike betting decisions, display can show an explicitly marked cross-book
+    or home-side context record. Market Rich is ALWAYS sportsbook-and-side
+    specific; verified voting continues to use independent exact join functions.
+    Past timestamps are never inferred from the current clock.
     """
     import pandas as pd
-    out = board.copy()
+    out=board.copy()
     for col in V55_RAW_OVERLAY_COLUMNS:
-        out[col] = None
-    out['V55_Raw_Overlay_State'] = 'NO_VERIFIED_QUOTED_SIDE'
-    report = {'status':source_status, 'priced_sides':0, 'matched_raw_overlays':0,
-              'quote_count_context_rows':0, 'named_big_al_rows':0,
-              'named_pathi_rows':0, 'named_miner_rows':0, 'rich_rows':0}
-    if out.empty:
-        return out, report
-    has_source = isinstance(enrich, pd.DataFrame) and not enrich.empty
+        out[col]=None
+    out['V55_Raw_Overlay_State']='NO_LIVE_SYSTEM_CONTEXT'
+    report={'status':source_status,'priced_sides':0,'unpriced_games':0,
+        'matched_raw_overlays':0,'matched_same_book_side':0,
+        'cross_book_display_only':0,'home_side_display_only':0,
+        'unpriced_display_only':0,'source_rows':0,'matched_game_context':0,
+        'source_has_structured_miner_votes':False,
+        'source_has_named_miner_text':False,'structured_miner_vote_rows':0,
+        'quote_count_context_rows':0,'named_big_al_rows':0,
+        'named_pathi_rows':0,'named_miner_rows':0,'rich_rows':0,
+        'no_game_context':0,'no_usable_context_at_quote':0}
+    if out.empty:return out,report
+    now=_timestamp(now or datetime.now(timezone.utc))
+    has_source=isinstance(enrich,pd.DataFrame) and not enrich.empty
     if has_source:
-        required={'Game_Start', 'Home_Team_Norm','Away_Team_Norm','Outcome','Snapshot_Timestamp'}
+        required={'Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome','Snapshot_Timestamp'}
         if not required.issubset(enrich.columns):
-            has_source = False
-            report['status'] = 'SOURCE_REQUIRED_IDENTITY_MISSING'
+            has_source=False;report['status']='SOURCE_REQUIRED_IDENTITY_MISSING'
         else:
             e=enrich.copy()
-            e['_kick'] = pd.to_datetime(e['Game_Start'],utc=True,errors='coerce')
-            e['_snap'] = pd.to_datetime(e['Snapshot_Timestamp'],utc=True,errors='coerce')
-            e['_home'] = e['Home_Team_Norm'].map(_norm_team)
-            e['_away'] = e['Away_Team_Norm'].map(_norm_team)
-            e['_side'] = e['Outcome'].map(_norm_team)
-            e = e.loc[e['_home'].ne('') & e['_away'].ne('') & e['_side'].ne('')
-                      & e['_snap'].notna() & e['_kick'].notna()].copy()
-    for idx, r in out.iterrows():
-        quoted = _timestamp(r.get('Backend_Quote_Timestamp'))
-        kickoff = _timestamp(r.get('Game_Start_UTC'))
-        if pd.isna(quoted) or pd.isna(kickoff):
-            continue
-        report['priced_sides'] += 1
-        # Preserve the existing home-side quote context as *unnamed*, even if
-        # its direction is not the selected V5.5 research side.
-        prior = r.get('V55_Trigger_Context')
-        context = {}
-        if _v55_raw_clean(prior):
-            try: context=json.loads(prior)
-            except (TypeError, ValueError): context={}
+            e['_kick']=pd.to_datetime(e['Game_Start'],utc=True,errors='coerce')
+            e['_snap']=pd.to_datetime(e['Snapshot_Timestamp'],utc=True,errors='coerce')
+            e['_home']=e['Home_Team_Norm'].map(_norm_team)
+            e['_away']=e['Away_Team_Norm'].map(_norm_team)
+            e['_side']=e['Outcome'].map(_norm_team)
+            e=e.loc[e['_home'].ne('') & e['_away'].ne('') & e['_side'].ne('')
+                   & e['_snap'].notna() & e['_kick'].notna()
+                   & e['_snap'].lt(e['_kick']) & e['_snap'].le(now)].copy()
+            report['source_rows']=len(e)
+            report['source_has_structured_miner_votes']='NCAAF_RV22_Miner_Votes' in e.columns
+            report['source_has_named_miner_text']=bool({'NCAAF_RV2_System_Summary','Miner_System_Summary','System_Signals_Text'}&set(e.columns))
+            if 'Bookmaker' in e.columns or 'Book' in e.columns:
+                a=e['Bookmaker'] if 'Bookmaker' in e.columns else pd.Series('',index=e.index)
+                b=e['Book'] if 'Book' in e.columns else pd.Series('',index=e.index)
+                e['_book']=a.fillna('').astype(str).str.lower().str.strip()
+                e['_book']=e['_book'].mask(e['_book'].isin(('', 'nan','none')),
+                                         b.fillna('').astype(str).str.lower().str.strip())
+            else:e['_book']=''
+    for idx,r in out.iterrows():
+        quote=_timestamp(r.get('Backend_Quote_Timestamp'))
+        kick=_timestamp(r.get('Game_Start_UTC'))
+        if pd.isna(kick) or not now<kick:continue
+        priced=not pd.isna(quote) and quote<=now and quote<kick
+        if priced:report['priced_sides']+=1
+        else:report['unpriced_games']+=1
+        prior=_v55_raw_clean(r.get('V55_Trigger_Context'))
+        context={}
+        if priced and prior:
+            try:context=json.loads(prior)
+            except (TypeError,ValueError):pass
         if context:
-            report['quote_count_context_rows'] += 1
-            bigals = [context.get('BigAl_Side_Support_Count'),context.get('BigAl_Side_Conflict_Count')]
-            if any(_price(x) is not None for x in bigals):
-                out.at[idx,'V55_Raw_BigAl'] = ('HOME quote counts: support '+str(bigals[0] or '0')+
-                                             ', opposition '+str(bigals[1] or '0')+' (unnamed)')
-            pathi=context.get('Pathi_System_Count')
-            if _price(pathi) is not None:
-                out.at[idx,'V55_Raw_Pathi'] = 'HOME quote systems: '+str(pathi)+' (unnamed)'
-            sys1=context.get('System_Side_Consensus_Count')
-            sys2=context.get('System_Side_Conflict_Count')
-            if _price(sys1) is not None or _price(sys2) is not None:
-                out.at[idx,'V55_Raw_Miner'] = ('HOME quote system counts: support '+str(sys1 or '0')+
-                                             ', opposition '+str(sys2 or '0')+' (not Miner IDs)')
-            out.at[idx,'V55_Raw_Overlay_State'] = 'QUOTE_HOME_SIDE_COUNTS_ONLY'
-            out.at[idx,'V55_Raw_Overlay_Source'] = MARKET_TABLE
-        if not has_source:
-            continue
-        (home, away), oriented = _matchup_teams(r)
-        selected = _norm_team(r.get('V55_Research_Lean_Team') or r.get('Selected_Team'))
-        if not oriented or selected not in (home, away):
-            continue
-        valid = e.loc[e['_home'].eq(home) & e['_away'].eq(away) & e['_side'].eq(selected)
-                      & (e['_kick']-kickoff).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))
-                      & e['_snap'].le(quoted) & e['_snap'].lt(kickoff)
-                      & (quoted-e['_snap']).le(pd.Timedelta(minutes=240))]
-        # Market Rich is sportsbook-specific; never graft another book's
-        # movement/line onto the verified execution quote. Where a book
-        # identifier is published in the enriched source it MUST agree.
-        book = str(r.get('Backend_Quote_Book') or '').lower().strip()
-        if book and ('Bookmaker' in valid.columns or 'Book' in valid.columns):
-            v1 = valid['Bookmaker'] if 'Bookmaker' in valid.columns else pd.Series('',index=valid.index)
-            v2 = valid['Book'] if 'Book' in valid.columns else pd.Series('',index=valid.index)
-            source_books=v1.fillna('').astype(str).str.lower().str.strip()
-            source_books=source_books.mask(source_books.isin(('', 'nan','none')),
-                                            v2.fillna('').astype(str).str.lower().str.strip())
-            valid=valid.loc[source_books.eq(book)]
-        if valid.empty:
-            continue
-        picked=valid.sort_values('_snap',ascending=False).iloc[0]
-        def present(k):return k in picked.index
-        out.at[idx,'V55_Raw_BigAl'] = _v55_raw_named(picked,'BigAl_Active_Text','BigAl_Side_Support_Count')
-        out.at[idx,'V55_Raw_Pathi'] = _v55_raw_named(picked,'Pathi_Active_Text','Pathi_System_Count')
-        # The existing scanner sometimes publishes named systems as one
-        # combined human-readable field; separate only explicitly labeled
-        # families. Never infer a named rule from a numerical count.
-        combined=_v55_raw_clean(picked.get('System_Signals_Text'))
-        if combined:
-            labels=[v.strip() for v in combined.split('|') if v.strip()]
-            for col, prefix in (('V55_Raw_BigAl','BIG AL'),('V55_Raw_Pathi','PATHI')):
-                current=str(out.at[idx,col] or '')
-                if current in ('NOT_PUBLISHED','NONE_REPORTED') or 'unnamed triggers' in current:
-                    named=[x for x in labels if x.upper().startswith(prefix+' ')]
-                    if named:
-                        out.at[idx,col]=' | '.join(named)[:240]
-        if present('NCAAF_RV2_System_Summary'):
-            out.at[idx,'V55_Raw_Miner'] = _v55_raw_named(picked,'NCAAF_RV2_System_Summary','Miner_System_Count')
+            report['quote_count_context_rows']+=1
+            ba1=context.get('BigAl_Side_Support_Count');ba2=context.get('BigAl_Side_Conflict_Count')
+            if _price(ba1) is not None or _price(ba2) is not None:
+                out.at[idx,'V55_Raw_BigAl']=f'HOME quote counts: support {ba1 or 0}, opposition {ba2 or 0} (unnamed)'
+            pa=context.get('Pathi_System_Count')
+            if _price(pa) is not None:out.at[idx,'V55_Raw_Pathi']=f'HOME quote systems: {pa} (unnamed)'
+            sy1=context.get('System_Side_Consensus_Count');sy2=context.get('System_Side_Conflict_Count')
+            if _price(sy1) is not None or _price(sy2) is not None:
+                out.at[idx,'V55_Raw_Miner']=f'HOME quote system counts: support {sy1 or 0}, opposition {sy2 or 0} (not Miner IDs)'
+            out.at[idx,'V55_Raw_Overlay_State']='QUOTE_HOME_SIDE_COUNTS_ONLY'
+            out.at[idx,'V55_Raw_Overlay_Source']=MARKET_TABLE
+        if not has_source:continue
+        (home,away),oriented=_matchup_teams(r)
+        selected=_norm_team(r.get('V55_Research_Lean_Team') or r.get('Selected_Team'))
+        if not oriented or selected not in (home,away):continue
+        v=e.loc[e['_home'].eq(home)&e['_away'].eq(away)
+             &(e['_kick']-kick).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))]
+        if v.empty:report['no_game_context']+=1;continue
+        report['matched_game_context']+=1
+        # A priced bet can only display information known AT THAT PRICE.
+        anchor=quote if priced else now
+        v=v.loc[v['_snap'].le(anchor)
+            &(anchor-v['_snap']).le(pd.Timedelta(minutes=720 if not priced else 240))]
+        if v.empty:report['no_usable_context_at_quote']+=1;continue
+        book=str(r.get('Backend_Quote_Book') or '').lower().strip()
+        same_side=v.loc[v['_side'].eq(selected)]
+        same_book=same_side.loc[same_side['_book'].eq(book)] if book else same_side.iloc[0:0]
+        # Prefer an exact displayed quote, then cross-book selected side, then
+        # canonically oriented HOME context explicitly labeled as such.
+        if not same_book.empty:chosen=same_book;status='MATCHED_PRE_GAME_ENRICHED_SIDE__UNQUALIFIED';report['matched_same_book_side']+=1
+        elif not same_side.empty:chosen=same_side;status='CROSS_BOOK_GAME_SYSTEM_CONTEXT_DISPLAY_ONLY';report['cross_book_display_only']+=1
         else:
-            out.at[idx,'V55_Raw_Miner'] = _v55_raw_named(picked,'Miner_System_Summary','Miner_System_Count')
-        if present('NCAAF_Stat_Active'):
-            active = _price(picked.get('NCAAF_Stat_Active'))
-            trust = _price(picked.get('NCAAF_Stat_Trust'))
-            out.at[idx,'V55_Raw_STAT'] = ('ACTIVE'+(f' trust={trust:.2f}' if trust is not None else '')
-                                              if active and active > 0 else 'NOT_ACTIVE' if active is not None else 'NOT_PUBLISHED')
-        for pt_col in ('PT_Consensus_Side','PT_Consensus','Prediction_Tracker_Consensus'):
-            if present(pt_col) and _v55_raw_clean(picked.get(pt_col)):
-                out.at[idx,'V55_Raw_PT'] = _v55_raw_clean(picked[pt_col])[:240]
-                break
-        out.at[idx,'V55_Raw_Market_Rich'] = _v55_raw_rich(picked)
-        # The detailed original data accompanies the compact UI indicator;
-        # source timestamp and exact side identity are persisted for audit.
-        raw = {k:_v55_raw_clean(picked.get(k)) for k in V55_RAW_OVERLAY_FIELDS if present(k)}
-        raw = {k:v for k,v in raw.items() if v is not None}
-        out.at[idx,'V55_Raw_Overlay_Detail_JSON'] = json.dumps(raw,ensure_ascii=False,sort_keys=True)
-        out.at[idx,'V55_Raw_Overlay_AsOf_UTC'] = picked['_snap'].isoformat()
-        out.at[idx,'V55_Raw_Overlay_Source'] = V55_RAW_OVERLAY_TABLE
-        out.at[idx,'V55_Raw_Overlay_State'] = 'MATCHED_PRE_GAME_ENRICHED_SIDE__UNQUALIFIED'
-        report['matched_raw_overlays'] += 1
-        for col, key in [('V55_Raw_BigAl','named_big_al_rows'),('V55_Raw_Pathi','named_pathi_rows'),
-                         ('V55_Raw_Miner','named_miner_rows'),('V55_Raw_Market_Rich','rich_rows')]:
+            chosen=v.loc[v['_side'].eq(home)]
+            if chosen.empty:continue
+            status='HOME_SIDE_CONTEXT_NOT_SELECTED_BET_SIDE';report['home_side_display_only']+=1
+        if not priced:
+            status='UNPRICED_GAME_SYSTEM_CONTEXT_DISPLAY_ONLY';report['unpriced_display_only']+=1
+        # Prefer the most recent available named observation, rather than the
+        # most recent EMPTY odds refresh that wiped the research fields.
+        def richness(rec):
+            present=0
+            for field in ('NCAAF_RV2_System_Summary','NCAAF_RV2_Research_System_Summary','Miner_System_Summary',
+                          'BigAl_Active_Text','Pathi_Active_Text','System_Signals_Text',
+                          'NCAAF_RV22_Miner_Votes'):
+                z=_v55_raw_clean(rec.get(field))
+                if z and z not in ('—','[]','{}'):
+                    present+=1
+            return present
+        candidates=chosen.copy()
+        candidates['_richness']=candidates.apply(richness,axis=1)
+        # Named context up to 240m old is preferable to fresh empty rows,
+        # but NEVER preferable to quote-exact qualified event matching.
+        picked=candidates.sort_values(['_richness','_snap'],ascending=False).iloc[0]
+        out.at[idx,'V55_Raw_BigAl']=_v55_raw_named(picked,'BigAl_Active_Text','BigAl_Side_Support_Count')
+        out.at[idx,'V55_Raw_Pathi']=_v55_raw_named(picked,'Pathi_Active_Text','Pathi_System_Count')
+        summary=_v55_raw_clean(picked.get('NCAAF_RV2_System_Summary'))
+        if not summary or summary in ('—','NONE_REPORTED'):
+            summary=_v55_raw_clean(picked.get('Miner_System_Summary'))
+        # Structured original miner events are DISPLAYED as named research
+        # events, but are NOT automatically qualified by this display bridge.
+        votes=_v55_parse_structured_votes(picked.get('NCAAF_RV22_Miner_Votes'))
+        report['structured_miner_vote_rows']+=len(votes)
+        if votes:
+            names=[f"{x.get('family_id')} → {x.get('target')}"
+                   for x in votes if isinstance(x,dict) and x.get('family_id') and x.get('target')]
+            if names:summary=' | '.join(names[:8])
+        if not summary:
+            shadow=_v55_raw_clean(picked.get('NCAAF_RV2_Research_System_Summary'))
+            if shadow and shadow not in ('—','NONE_REPORTED'):
+                summary='[RESEARCH/SHADOW DISPLAY ONLY] '+shadow
+        if not summary:
+            system_text=_v55_raw_clean(picked.get('System_Signals_Text'))
+            if system_text:
+                names=[x.strip() for x in system_text.split('|')
+                       if x.strip().upper().startswith(('MINER ','MINER:','NCAAF_RV2','NCAAF_RV22'))]
+                if names:summary=' | '.join(names[:8])
+        out.at[idx,'V55_Raw_Miner']=summary[:500] if summary else _v55_raw_named(picked,'Miner_System_Summary','Miner_System_Count')
+        # A legacy exact-book odds refresh may contain zero research columns.
+        # Preserve the separate, original Miner research snapshot as a
+        # secondary *display-only* source (never as quote-matched authority).
+        miner_value=str(out.at[idx,'V55_Raw_Miner'] or '')
+        if miner_value in ('NOT_PUBLISHED','NONE_REPORTED','—','0 (no names in feed)') or 'unnamed' in miner_value:
+            if 'V55_Source_Type' in v.columns:
+                source_type=v['V55_Source_Type'].fillna('').astype(str)
+                research_only=v.loc[source_type.eq('HEADLESS_MINER_SNAPSHOT_DISPLAY_ONLY')
+                    &v['_snap'].le(anchor)&v['_snap'].lt(kick)]
+                if not research_only.empty:
+                    rr=research_only.sort_values('_snap',ascending=False).iloc[0]
+                    names=_v55_raw_clean(rr.get('NCAAF_RV2_System_Summary'))
+                    votes=_v55_parse_structured_votes(rr.get('NCAAF_RV22_Miner_Votes'))
+                    if not names or names=='—':
+                        names=_v55_raw_clean(rr.get('NCAAF_RV2_Research_System_Summary'))
+                        if names and names != '—':
+                            names='[SHADOW] '+names
+                    if not names or names=='—':
+                        names=' | '.join(f"{q.get('family_id')} → {q.get('target')}"
+                            for q in votes if isinstance(q,dict) and q.get('family_id') and q.get('target'))
+                    if names:
+                        out.at[idx,'V55_Raw_Miner']='[RESEARCH GAME CONTEXT ONLY] '+names[:450]
+                        report['structured_miner_vote_rows']+=len(votes)
+        system_text=_v55_raw_clean(picked.get('System_Signals_Text'))
+        if system_text:
+            bits=[x.strip() for x in system_text.split('|') if x.strip()]
+            for col,prefix in (('V55_Raw_BigAl','BIG AL'),('V55_Raw_Pathi','PATHI')):
+                val=str(out.at[idx,col] or '')
+                if val in ('NOT_PUBLISHED','NONE_REPORTED') or 'unnamed' in val:
+                    named=[x for x in bits if x.upper().startswith(prefix+' ')]
+                    if named:out.at[idx,col]=' | '.join(named[:8])[:240]
+        active=_price(picked.get('NCAAF_Stat_Active'))
+        trust=_price(picked.get('NCAAF_Stat_Trust'))
+        if active is not None:
+            out.at[idx,'V55_Raw_STAT']=('ACTIVE'+(f' trust={trust:.2f}' if trust is not None else '') if active>0 else 'NOT_ACTIVE')
+        for pc in ('PT_Consensus_Side','PT_Consensus','Prediction_Tracker_Consensus'):
+            z=_v55_raw_clean(picked.get(pc))
+            if z:out.at[idx,'V55_Raw_PT']=z[:240];break
+        # Only match movement to actual bookmaker AND execution side;
+        # nothing from cross-book or home-only rows can look executable.
+        if priced and not same_book.empty:
+            richrow=same_book.sort_values('_snap',ascending=False).iloc[0]
+            out.at[idx,'V55_Raw_Market_Rich']=_v55_raw_rich(richrow)
+        else:out.at[idx,'V55_Raw_Market_Rich']='NOT_VERIFIED_FOR_EXECUTION_BOOK'
+        raw={k:_v55_raw_clean(picked.get(k)) for k in V55_RAW_OVERLAY_FIELDS if k in picked.index}
+        raw={k:v for k,v in raw.items() if v is not None}
+        raw.update({'display_side':str(picked.get('Outcome')),
+                    'display_book':str(picked.get('_book')),
+                    'display_only':True,'selected_team':str(r.get('Selected_Team')),
+                    'verified_quote_book':book if priced else None})
+        out.at[idx,'V55_Raw_Overlay_Detail_JSON']=json.dumps(raw,ensure_ascii=False,sort_keys=True)
+        out.at[idx,'V55_Raw_Overlay_AsOf_UTC']=picked['_snap'].isoformat()
+        out.at[idx,'V55_Raw_Overlay_Source']=V55_RAW_OVERLAY_TABLE
+        out.at[idx,'V55_Raw_Overlay_State']=status
+        report['matched_raw_overlays']+=1
+        for col,key in [('V55_Raw_BigAl','named_big_al_rows'),('V55_Raw_Pathi','named_pathi_rows'),
+                        ('V55_Raw_Miner','named_miner_rows'),('V55_Raw_Market_Rich','rich_rows')]:
             value=str(out.at[idx,col] or '')
-            if value and value not in ('NOT_PUBLISHED','NONE_REPORTED') and 'unnamed' not in value and not value.startswith('0 ('):
-                report[key] += 1
+            if value and value not in ('NOT_PUBLISHED','NONE_REPORTED','NOT_VERIFIED_FOR_EXECUTION_BOOK') and 'unnamed' not in value and not value.startswith('0 ('):
+                report[key]+=1
     return out,report
+
+
+
+def _v55_read_headless_miner_system_snapshot(*,storage_client=None,bucket_name=None,now=None):
+    """Read optional ORIGINAL live Miner IDs for display; never vote from them.
+
+    This snapshot is not used by derive_v55_miner_qualified_events because
+    it is not the exact selected sportsbook/price as-of quote event source.
+    """
+    import pandas as pd
+    blob='research/ncaaf/v55/live_miner_system_context/latest.json'
+    try:
+        if storage_client is None:
+            from google.cloud import storage
+            storage_client=storage.Client()
+        bucket=bucket_name or os.getenv('MODEL_BUCKET','sharp-models')
+        raw=storage_client.bucket(bucket).blob(blob).download_as_bytes()
+        if len(raw)>3_000_000:return pd.DataFrame(),'MINER_SNAPSHOT_TOO_LARGE'
+        doc=json.loads(raw)
+        if not isinstance(doc,dict) or doc.get('source')!='NCAAF_RV22_HEADLESS_MINER_OUTPUT_DISPLAY_ONLY' or doc.get('authority') is not False:
+            return pd.DataFrame(),'MINER_SNAPSHOT_PROVENANCE_REJECTED'
+        t=_timestamp(doc.get('generated_at_utc'));now=_timestamp(now or datetime.now(timezone.utc))
+        if pd.isna(t) or pd.isna(now) or t>now or (now-t).total_seconds()>12*3600:
+            return pd.DataFrame(),'MINER_SNAPSHOT_STALE_OR_FUTURE'
+        rows=doc.get('rows')
+        if not isinstance(rows,list) or len(rows)>500:return pd.DataFrame(),'MINER_SNAPSHOT_INVALID_ROWS'
+        source=pd.DataFrame(rows)
+        required={'Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome',
+                  'Snapshot_Timestamp','NCAAF_RV22_Miner_Votes'}
+        if not required.issubset(source.columns):return pd.DataFrame(),'MINER_SNAPSHOT_REQUIRED_FIELDS_MISSING'
+        # Strip all quote/trust fields from the research snapshot. It cannot
+        # impersonate an independently verified sportsbook snapshot.
+        source=source.drop(columns=[x for x in ('Bookmaker','Book','Value','Odds_Price') if x in source.columns])
+        source['V55_Source_Type']='HEADLESS_MINER_SNAPSHOT_DISPLAY_ONLY'
+        return source,'PASS_DISPLAY_ONLY'
+    except Exception as exc:
+        return pd.DataFrame(),'MINER_SNAPSHOT_UNAVAILABLE:'+type(exc).__name__
 
 
 def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_client=None, bucket_name=None):
@@ -1092,8 +1222,19 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
         storage_client=storage_client,bucket_name=bucket_name)
     overlay_frame, overlay_source_status = _v55_read_enriched_pregame_overlays(
         bq_client,qualified_brain_registry=other_registry)
+    # Independently published live Miner identifiers are merged for RAW display
+    # only. They are never used by the qualified vote extractor, which continues
+    # to require real quote/price/provenance and the frozen research registry.
+    miner_display_frame, miner_display_status = _v55_read_headless_miner_system_snapshot(
+        storage_client=storage_client,bucket_name=bucket_name)
+    display_frames=[x for x in (overlay_frame,miner_display_frame)
+                    if isinstance(x,pd.DataFrame) and not x.empty]
+    raw_display_frame=(pd.concat(display_frames,ignore_index=True,sort=False)
+                       if display_frames else pd.DataFrame())
     out, raw_overlays = attach_v55_raw_pregame_overlays(
-        out,overlay_frame,source_status=overlay_source_status)
+        out,raw_display_frame,source_status=overlay_source_status)
+    raw_overlays['headless_miner_snapshot_status']=miner_display_status
+    raw_overlays['headless_miner_snapshot_rows']=len(miner_display_frame)
     updated["v55_raw_overlay_audit"] = raw_overlays
     explicit_events, evidence_problem = read_v55_qualified_evidence(bq_client)
     registry, registry_problem = read_v55_research_miner_registry(
