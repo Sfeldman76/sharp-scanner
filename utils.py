@@ -3611,7 +3611,7 @@ def _coerce_dataframe_to_existing_bq_schema(df: pd.DataFrame, table: str) -> pd.
 def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     if df is None or df.empty:
         logging.warning("⚠️ No sharp moves to write.")
-        return
+        return False
 
     df = df.copy()
     df = build_game_key(df)
@@ -3628,7 +3628,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         cols = [c for c in ['Game','Game_Start','Market','Outcome'] if c in df.columns]
         if cols:
             logging.debug(df[cols].head().to_string())
-        return
+        return False
     # --- HARDEN: force Event_Date to STRING for BQ ---
     if 'Event_Date' in df.columns:
         # Coerce any date-like (datetime.date / Timestamp / str) to canonical 'YYYY-MM-DD' string
@@ -3767,13 +3767,13 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     missing = [col for col in required_cols if col not in df.columns]
     if missing:
         logging.error(f"❌ Missing required columns before upload: {missing}")
-        return
+        return False
 
     # Check for any ALLOWED_COLS not present (shouldn't happen after ensure_columns)
     missing_cols = [col for col in ALLOWED_COLS if col not in df.columns]
     if missing_cols:
         logging.error(f"❌ Missing required columns for BigQuery upload: {missing_cols}")
-        return
+        return False
 
     # Deduplicate recent Line_Hash
     try:
@@ -3792,7 +3792,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
 
     if df.empty:
         logging.info("🛑 No new rows after Line_Hash deduplication — exiting.")
-        return
+        return False
 
     logging.info(f"📦 Final row count to upload after filtering and dedup: {len(df)}")
 
@@ -3887,6 +3887,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         logging.info(f"📤 Uploading to `{table}`...")
         to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
         logging.info(f"✅ Wrote {len(df)} new rows to `{table}`")
+        return True
     except Exception as e:
         logging.exception(f"❌ Upload to `{table}` failed.")
         # dump dtypes & first rows
@@ -3920,8 +3921,8 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         except Exception as ee:
             logging.warning(f"⚠️ Post-failure schema diff also failed: {ee}")
 
-        # re-raise if you want the caller to know it failed
-        # raise
+        # The V5.5 market refresh MUST NOT run after a failed price write.
+        return False
 
 
 def normalize_label(label):
@@ -19898,13 +19899,12 @@ def detect_sharp_moves(
     history_hours: int = 120,         # 0/None to skip history
 ):
 
-    # Settle previously locked Production V1 picks even on an empty-odds scan.
+    # NCAAF now uses independent V5.5 forecasts and background market repricing.
+    # Historical V1 settlement/scoring is deliberately inactive in live scanning.
     _is_ncaaf=str(sport_label or "").upper().strip()=="NCAAF" or str(sport_key or "").lower().strip() in ("ncaaf","americanfootball_ncaaf")
     _is_nfl=str(sport_label or "").upper().strip()=="NFL" or str(sport_key or "").lower().strip() in ("nfl","americanfootball_nfl")
     if _is_ncaaf:
-        _settled_v1=settle_ncaaf_production_v1()
-        logging.info("[NCAAF-PROD-V1-BACKGROUND-SETTLEMENT] status=%s settled=%d",
-          _settled_v1.get("status"),int(_settled_v1.get("settled",0) or 0))
+        logging.info("[NCAAF-V55-SCANNER] active_model=V5.5 legacy_v1_scoring=DISABLED")
 
     if not current:
         logging.warning("⚠️ No current odds data provided.")
@@ -20393,21 +20393,27 @@ def detect_sharp_moves(
         logging.info("[NCAAF-V55-NORMALIZED-PRE-SCORER-MARKET-AUDIT] %s",
                      json.dumps(_ncaaf_raw_audit,sort_keys=True,default=str))
 
-    # The V13/legacy scorer is separate from the frozen production contract.
-    # Its failure must not prevent a fresh Production V1 or NFL live market pass.
+    # NCAAF V5.5 runs its own independently trained model in the backend.
+    # Here, only normalize/enrich and persist the actual sportsbook quotes.
+    # Do NOT call the historical V13 blended predictor for NCAAF. It is
+    # expensive, not V5.5, and can drop quote rows needed by V5.5 pricing.
     _phase_t0=time.perf_counter()
-    try:
-        df_scored=apply_blended_sharp_score(
-            df,trained_models,snaps,weights,sport=canon_sport
-        )
-        if not isinstance(df_scored,pd.DataFrame):
-            logging.error("[LEGACY-SCANNER-SCORER] status=INVALID_FRAME sport=%s output_type=%s",
-                          _sport_label or _sport_key,type(df_scored).__name__)
+    if _is_ncaaf:
+        df_scored=df.copy()
+        logging.info("[NCAAF-V55-ODDS-HANDOFF] mode=RAW_NORMALIZED_QUOTES rows=%d legacy_model=SKIPPED",len(df_scored))
+    else:
+        try:
+            df_scored=apply_blended_sharp_score(
+                df,trained_models,snaps,weights,sport=canon_sport
+            )
+            if not isinstance(df_scored,pd.DataFrame):
+                logging.error("[LEGACY-SCANNER-SCORER] status=INVALID_FRAME sport=%s output_type=%s",
+                              _sport_label or _sport_key,type(df_scored).__name__)
+                df_scored=pd.DataFrame()
+        except Exception:
+            logging.exception("[LEGACY-SCANNER-SCORER] status=ERROR sport=%s independent_production_refresh=CONTINUE",
+                              _sport_label or _sport_key)
             df_scored=pd.DataFrame()
-    except Exception:
-        logging.exception("[LEGACY-SCANNER-SCORER] status=ERROR sport=%s independent_production_refresh=CONTINUE",
-                          _sport_label or _sport_key)
-        df_scored=pd.DataFrame()
     logging.info("⏱ detect model scoring %s: %.2fs",_sport_label or _sport_key,time.perf_counter()-_phase_t0)
 
     if not df_scored.empty:
@@ -20419,52 +20425,36 @@ def detect_sharp_moves(
         # but never allowed to change a model probability.
         _ledger={"status":"NOT_APPLICABLE","attempted":0,"inserted":0}
         _settle={"status":"NOT_APPLICABLE"}
-        try:
-            if _is_ncaaf:
-                _ledger=record_ncaaf_v13_forward_shadow_predictions(df_scored)
-                _settle=settle_ncaaf_v13_forward_shadow_results()
-        except Exception as _le:
-            _ledger={"status":"ERROR","error":f"{type(_le).__name__}:{_le}","attempted":0,"inserted":0}
-            logging.exception("[V13.3.7-FORWARD-LEDGER] unexpected writer error")
+        # NCAAF V13 forward models are retired from active scanner scoring.
+        # The V5.5 pipeline owns prospective predictions and refreshes.
         df_scored['V13_Ledger_Status']=str(_ledger.get('status','UNKNOWN'))
         df_scored['V13_Ledger_Events_Attempted']=int(_ledger.get('attempted',0) or 0)
         df_scored['V13_Ledger_Events_Inserted']=int(_ledger.get('inserted',0) or 0)
         df_scored['V13_Settlement_Status']=str(_settle.get('status','UNKNOWN'))
-        summary_df = summarize_consensus(df_scored, SHARP_BOOKS, REC_BOOKS)
+        if _is_ncaaf:
+            # V5.5 is the scoring authority; scanner consensus is optional.
+            # Price writes must not fail due to absent legacy score columns.
+            try:
+                summary_df=summarize_consensus(df_scored, SHARP_BOOKS, REC_BOOKS)
+            except Exception as _consensus_exc:
+                summary_df=pd.DataFrame()
+                logging.info("[NCAAF-V55-ODDS-HANDOFF] legacy_consensus=SKIPPED reason=%s",type(_consensus_exc).__name__)
+        else:
+            summary_df=summarize_consensus(df_scored, SHARP_BOOKS, REC_BOOKS)
     else:
         logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
         df_scored = pd.DataFrame()
         summary_df = pd.DataFrame()
 
-    # Production V1 has a separate, contract-bound inference path. It must not
-    # disappear just because the old scanner model produced zero rows. Keep
-    # V5.5 research out of the frozen Production V1 probability / bet selector.
+    # V5.5 scoring is published by the *backend* AFTER this normalized quote
+    # frame is persisted to BigQuery (detect_utils). Do not run any NCAAF V1
+    # model, selection or settlement here. Keep monitoring lost quote coverage.
     if _is_ncaaf:
         _ncaaf_scored_audit=audit_ncaaf_live_market_prices(df_scored)
         logging.info("[NCAAF-V55-NORMALIZED-POST-SCORER-MARKET-AUDIT] %s",
                      json.dumps(_ncaaf_scored_audit,sort_keys=True,default=str))
-        # Prefer the enriched scorer frame, except when legacy scoring removed
-        # mandatory live odds or produced no usable spread quotes. The raw
-        # normalized frame contains the same snapshot + system enrichment.
-        _raw_priced=int((_ncaaf_raw_audit or {}).get('priced_upcoming_spread_games',0) or 0)
-        _scored_priced=int(_ncaaf_scored_audit.get('priced_upcoming_spread_games',0) or 0)
-        _scored_columns_ok=all(c in df_scored.columns for c in
-            ('Game_Start','Market','Value','Odds_Price','Home_Team_Norm','Away_Team_Norm'))
-        _use_raw_ncaaf=bool(df_scored.empty or not _scored_columns_ok or (_raw_priced and not _scored_priced))
-        _ncaaf_live_input=df if _use_raw_ncaaf else df_scored
-        logging.info("[NCAAF-PROD-V1-MARKET-FRAME] source=%s raw_priced_games=%d scored_priced_games=%d",
-                     'NORMALIZED_FALLBACK' if _use_raw_ncaaf else 'LEGACY_ENRICHED',_raw_priced,_scored_priced)
-        _p1=score_and_record_ncaaf_production_v1(_ncaaf_live_input)
-        logging.info("[NCAAF-PROD-V1-BACKGROUND-REFRESH] status=%s scored_rows=%s selected_markets=%s",
-                     _p1.get('status'),_p1.get('scored_rows'),_p1.get('selected_markets'))
-        if not df_scored.empty:
-            df_scored['NCAAF_Prod_V1_Ledger_Status']=str(_p1.get('status','UNKNOWN'))
-            df_scored['NCAAF_Prod_V1_Locks_Attempted']=int(_p1.get('attempted',0) or 0)
-            df_scored['NCAAF_Prod_V1_Locks_Inserted']=int(_p1.get('inserted',0) or 0)
+        logging.info("[NCAAF-V55-PRICE-HANDOFF] stage=NORMALIZED_MARKET backend_refresh=AFTER_BQ_WRITE v1_model_calls=0")
 
-    # NFL V3.1: refresh MODEL -> ACTION on every normal odds scan.  Use the
-    # scored frame when available, otherwise the normalized current market frame;
-    # recommendation freshness must not depend on a legacy scoring model.
     if _is_nfl:
         try:
             _nfl_refresh_input = df_scored if df_scored is not None and not df_scored.empty else df
@@ -22570,3 +22560,15 @@ def predict_ncaaf_v13_production(rows: pd.DataFrame, bundle: dict, core_prob=Non
         'canonical_fallback_used':False,
     }
     return (prob,info) if return_stages else prob
+
+
+def refresh_ncaaf_v55_background(*, storage_client=None, bq_client=None, bucket_name=None, log_func=None):
+    """Reprice published V5.5 forecasts and publish the complete backend board.
+
+    No legacy model inference; no V1 probabilities/ledgers; no training. Called
+    only after normalized latest sportsbook quotes were stored by detect_utils.
+    """
+    from ncaaf_v55_board import market_refresh_and_publish
+    return market_refresh_and_publish(
+        storage_client=storage_client,bq_client=bq_client,
+        bucket_name=bucket_name,log_func=log_func)

@@ -52,7 +52,8 @@ from utils import (
     add_time_context_flags,
     update_power_ratings,
     normalize_sport,
-    enrich_power_from_current_inplace
+    enrich_power_from_current_inplace,
+    refresh_ncaaf_v55_background,
 )
 
 class ScannerLeaseLost(RuntimeError):
@@ -422,6 +423,7 @@ def _detect_and_save_all_sports_locked(lease: ScannerGCSLease):
                 continue
 
             # ---- 5) Persist sharp moves (trust the hash; writer dedups)
+            _ncaaf_market_write_succeeded=False
             try:
                 if df_moves is not None and not df_moves.empty:
                     if 'Line_Hash' not in df_moves.columns:
@@ -432,13 +434,31 @@ def _detect_and_save_all_sports_locked(lease: ScannerGCSLease):
                         if len(df_moves) < before:
                             logging.info(f"🧽 In-batch dedup: removed {before - len(df_moves)} dupe rows for {sport_label}")
                         lease.assert_valid()
-                        write_sharp_moves_to_master(df_moves, table='sharp_data.sharp_moves_master')
+                        _stored=write_sharp_moves_to_master(df_moves, table='sharp_data.sharp_moves_master')
+                        if sport_label == "NCAAF":
+                            _ncaaf_market_write_succeeded=(_stored is True)
                 else:
                     logging.info(f"ℹ️ No sharp moves produced for {sport_label}.")
             except ScannerLeaseLost:
                 raise
             except Exception as e:
                 logging.error(f"❌ Failed writing sharp moves for {sport_label}: {e}", exc_info=True)
+
+            # V5.5-only NCAAF background scoring/price refresh. Publish after
+            # BigQuery odds commit; missing/failed write MUST NOT price old quotes.
+            if sport_label == "NCAAF":
+                if _ncaaf_market_write_succeeded:
+                    lease.assert_valid()
+                    try:
+                        _v55_out=refresh_ncaaf_v55_background(
+                            bucket_name=os.getenv("MODEL_BUCKET","sharp-models"))
+                        logging.info("[NCAAF-V55-BACKGROUND] status=%s priced_games=%s rows=%s",
+                                     _v55_out.get('status'),_v55_out.get('priced_games'),_v55_out.get('rows'))
+                    except Exception as _v55_exc:
+                        logging.exception("[NCAAF-V55-BACKGROUND] status=ERROR type=%s detail=%s",
+                                          type(_v55_exc).__name__,_v55_exc)
+                else:
+                    logging.warning("[NCAAF-V55-BACKGROUND] status=SKIPPED reason=NO_FRESH_BQ_MARKET_WRITE")
 
             # ---- 6) Backtest + write finals
             try:

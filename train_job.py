@@ -293,6 +293,28 @@ def main():
         pw.emit("done", "NCAAF V5.5 combined-brain research completed; see immutable GCS result directory", pct=1.0)
         return
 
+    # V5.5 HEAVY RESEARCH: CFBD historical audit + selected V5.5 combined
+    # brains and Market Rich analysis. Neither route has betting authority.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v55_heavy":
+        import ncaaf_v54_full_research as _v54
+        import ncaaf_v55_combined_brain as _v55
+        from google.cloud import bigquery as _v55_bq
+        pw.emit("archive", "V5.5 Heavy: audit immutable CFBD historical features and outcomes", pct=0.08)
+        _archive=_v54.run_full(storage_client=gcs,bucket_name=bucket,log_func=log_func)
+        if (_archive.get("status")!="COMPLETE_FULL_RESEARCH__SHADOW_AUTHORITY__VINTAGE_HOLD"
+                or _archive.get("bet_authority")!=0):
+            raise RuntimeError("[NCAAF-V55-HEAVY] source/history audit failed: "+str(_archive.get("status")))
+        pw.emit("brains", "V5.5 Heavy: independent CORE / STAT / Big Al / Pathi / Miner / PT / Market Rich attribution", pct=0.55)
+        _research=_v55.run_cloud(storage_client=gcs,bucket_name=bucket,
+            bq_client=_v55_bq.Client(project="sharplogger"),log_func=log_func)
+        if (_research.get("status")!="COMPLETE_COMBINED_BRAIN_RESEARCH__PROVISIONAL_ONLY"
+                or _research.get("bet_authority")!=0
+                or _research.get("production_modified") is not False):
+            raise RuntimeError("[NCAAF-V55-HEAVY] V5.5 combined-brain research failed: "+str(_research.get("status")))
+        log_func("[NCAAF-V55-HEAVY] status=PASS history=VERIFIED combined_brains=COMPLETE publication=RESEARCH_ONLY")
+        pw.emit("done", "NCAAF V5.5 Heavy Research complete", pct=1.0)
+        return
+
     # V5.5.4 targeted 2026 CFBD /games backfill — independent maintenance.
     # Preserves all existing market, features, research, production and model data.
     if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v55_cfbd_2026_games_repair":
@@ -323,7 +345,17 @@ def main():
             or _v552_result.get("production_v1_probabilities_used") is not False
             or _v552_result.get("v55_bet_authority")!=0):
             raise RuntimeError("[NCAAF-V552] independent weekly model did not publish safely")
-        pw.emit("done", "NCAAF V5.5 independent weekly CORE and brains published", pct=1.0)
+        # Publish exact V5.5 artifact to the same BigQuery board read by UI.
+        # Failure is fatal for the workflow; a successful trainer is not enough
+        # if the dashboard cannot consume its current independent forecast.
+        import ncaaf_v55_board as _v55board
+        _pub=_v55board.publish_weekly_latest(storage_client=gcs,
+            bq_client=_v552_bq.Client(project="sharplogger"),bucket_name=bucket,
+            publication_type="WEEKLY")
+        log_func("[NCAAF-V55-WEEKLY-BQ-BOARD] "+json.dumps(_pub,sort_keys=True))
+        if int(_pub.get("priced_games",0) or 0)==0:
+            log_func("[NCAAF-V55-PRICING-HOLD] V5.5 backend model scored, but price join remains EMPTY. No bets authorized.")
+        pw.emit("done", "NCAAF V5.5 independent weekly CORE and backend board published", pct=1.0)
         return
 
     # V5.5 market-only repricing: reuse the LAST VERIFIED V5.5 weekly CFBD

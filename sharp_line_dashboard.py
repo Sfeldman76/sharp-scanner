@@ -48773,53 +48773,73 @@ def _ncaaf_authority_source_detail(row, source_type, raw_col=None):
 
 @st.cache_data(ttl=90,show_spinner=False)
 def _ncaaf_v551_weekly_snapshot_cached():
-    """Only V5.5 independent forecasts; never load the frozen V1 selector."""
-    import ncaaf_v552_live as _v552
-    return _v552.read_weekly_latest(storage.Client(),bucket_name=MODEL_BUCKET)
+    """Read only the complete V5.5 BigQuery publication from background/weekly.
+
+    No model inference, no GCS artifact-scoring, no V1 bridge on dashboard load.
+    """
+    from ncaaf_v55_board import read_published_latest
+    return read_published_latest(bq_client=bq_client)
 
 
 def _render_ncaaf_v551_weekly_board():
-    st.subheader('V5.5 — Primary Betting Board')
+    st.subheader('V5.5 — Backend Published Board')
     st.caption('V5.5 NONLINEAR_HGB independent CFBD CORE + current sportsbook quotes + STAT, Big Al, Pathi, '
                'Miner, Prediction Tracker and Market Rich. Research candidate grades are provisional; '
-               'Production V1 is NOT the V5.5 probability source. Spread market only until separate '
+               'No V1 scoring or UI model inference. Spread market only until separate '
                'V5.5 H2H and totals models are deployed.')
     try:
         _weekly,_audit=_ncaaf_v551_weekly_snapshot_cached()
         if _audit.get('status')!='COMPLETE_V55_INDEPENDENT_WEEKLY_SHADOW' or _audit.get('production_v1_probabilities_used') is not False:
             raise RuntimeError('V5.5 independent CORE not published')
     except Exception as _exc:
-        st.warning('V5.5 independent weekly CORE is not yet available. Run NCAAF V5.5 — Weekly Model Update '
-                   'after the CFBD 2026 features and current bookmaker slate are loaded. '
-                   'A Production V1 forecast will not be substituted.')
+        st.warning('V5.5 backend publication is unavailable or incomplete. Run V5.5 Weekly, then let the background scanner publish a market refresh. No V1 fallback or UI rescoring is permitted.')
         logging.warning('[NCAAF-V552-UI-HOLD] %s:%s',type(_exc).__name__,str(_exc)[:250])
         return
     _age=pd.Timestamp.now(tz='UTC')-pd.to_datetime(_audit.get('snapshot_utc'),utc=True,errors='coerce')
-    st.caption(f"Last V5.5 CORE fit and snapshot: {_audit.get('snapshot_utc','—')} | "
+    st.caption(f"Backend publication: {_audit.get('published_at_utc','—')} | {_audit.get('publication_type','—')} | {_audit.get('publication_status','—')} | "
+               f"V5.5 CORE snapshot: {_audit.get('snapshot_utc','—')} | "
                f"Model: {_audit.get('core_model','NONLINEAR_HGB')} | "
                f"Live scored games: {_audit.get('core_forecast_games',0)} | "
-               'Frozen V1: separate comparison only')
+               'V1: inactive')
     if pd.notna(_age) and _age.total_seconds()>7*24*3600:
-        st.warning('V5.5 weekly forecast is over seven days old. Refresh V5.5 before acting on current games.')
+        st.warning('V5.5 CORE forecast is more than seven days old. Run V5.5 Weekly.')
+    if _audit.get('publication_status')=='STALE_MARKET':
+        st.error('Backend sportsbook quotes are stale. Price/EV/action fields have been withheld until the scanner refreshes.')
+    if int(_audit.get('priced_games',0) or 0)==0:
+        st.warning('V5.5 model projections exist, but the model-to-market join reports zero priced games. No executable betting recommendations are available.')
     a,b,c,d=st.columns(4)
     a.metric('V5.5 CORE games',int(_audit.get('core_forecast_games',0)))
     b.metric('Verified quotes',int(_audit.get('priced_games',0)))
     c.metric('Multiple brain confirmations',int(_audit.get('multi_family',0)))
     d.metric('Unmatched market games',int(_audit.get('no_market_match',0)))
     if _weekly.empty:
-        st.info('No upcoming CFBD 2026 games scored. Refresh warehouse schedule then run V5.5 weekly.')
+        st.info('No upcoming V5.5 projections in the published backend snapshot.')
         return
     shown=_weekly.copy()
+    if 'Game_Start_UTC' in shown.columns:
+        _start=pd.to_datetime(shown['Game_Start_UTC'],errors='coerce',utc=True)
+        shown=shown.loc[_start.gt(pd.Timestamp.now(tz='UTC'))].copy()
+        if shown.empty:
+            st.info('The current backend publication has no remaining upcoming games. Run V5.5 Weekly after the upcoming CFBD slate is loaded.')
+            return
+    if int(_audit.get('priced_games',0) or 0)==0:
+        # Missing valid market prices cannot yield betting authority.
+        for _price_col in ('Current_Spread','Odds_American','CORE_Cover_Probability','CORE_Edge','CORE_EV','CORE_Project_Cover_Points'):
+            if _price_col in shown.columns:
+                shown[_price_col]=None
+        shown['V55_Bet_Decision']='NO VERIFIED PRICE'
     for col in ('CORE_Cover_Probability','CORE_Edge','CORE_EV'):
+        if col not in shown.columns: shown[col]=None
         shown[col]=pd.to_numeric(shown[col],errors='coerce').map(lambda x:f'{x:.1%}' if pd.notna(x) else '—')
     for col in ('CORE_Projected_Home_Margin','Current_Spread','CORE_Project_Cover_Points'):
+        if col not in shown.columns: shown[col]=None
         shown[col]=pd.to_numeric(shown[col],errors='coerce').map(lambda x:f'{x:+.1f}' if pd.notna(x) else '—')
     columns=['Game_Start_UTC','Matchup','Selected_Team','CORE_Model','CORE_Projected_Home_Margin',
         'Current_Spread','Odds_American','CORE_Cover_Probability','CORE_Edge','CORE_EV',
         'STAT','BIG_AL','PATHI','SYSTEM_MINER','PREDICTION_TRACKER',
         'Confirm_Count','Oppose_Count','Market_Rich_Sharp_Move','Market_Rich_Limit',
         'Market_Rich_Book_Count','V55_Research_Priority','V55_Bet_Decision','Quote_State']
-    st.dataframe(shown[[x for x in columns if x in shown]],use_container_width=True,hide_index=True)
+    st.dataframe(shown[[x for x in columns if x in shown]].rename(columns={'V55_Bet_Decision':'Research Decision (Not Authorized)'}),use_container_width=True,hide_index=True)
     st.caption('2026 live projections come from the V4-selected nonlinear CORE recipe refit on CFBD 2013–25. '
                'Cover probabilities use retrospectively estimated residual variance and are NOT independently '
                'calibrated. Big Al/Pathi/Miner/STAT are trigger-only unless an actual timestamped, directionally '
@@ -49453,27 +49473,9 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # performs exactly those essential transforms once for the selected
         # current quotes and retains all frozen evidence/authority gates.
         if _ncaaf_fast_ui:
-            _ncaaf_display_mode=st.radio('NCAAF model board',
-                ['V5.5 — Primary Betting Board','Production V1 comparison'],
-                horizontal=True,key='ncaaf-active-model-view')
-            if _ncaaf_display_mode=='V5.5 — Primary Betting Board':
-                if force_reload:
-                    _ncaaf_v551_weekly_snapshot_cached.clear()
-                _render_ncaaf_v551_weekly_board()
-                return
-            # Explicit fallback/benchmark only. Opening the main 5.5 board
-            # does not load or score the older V1 models at all.
             if force_reload:
-                _ncaaf_betting_board_first_cached.clear()
-                read_ncaaf_current_quote_heads_cached.clear()
-                _ncaaf_research_v2_report_cached.clear()
-            with st.spinner('Loading optional NCAAF Production V1 comparison...'):
-                _selected,_board_meta=_ncaaf_betting_board_first_cached(hours=24)
-            if _board_meta.get('status')=='ERROR':
-                st.error('Production V1 comparison unavailable: '+str(_board_meta.get('error','UNKNOWN')))
-                return
-            st.caption('Production V1 comparison / existing H2H and totals only, not V5.5 probabilities.')
-            _render_ncaaf_fast_prediction_ui(None,label,selected_picks=_selected,cached_live_info=_board_meta)
+                _ncaaf_v551_weekly_snapshot_cached.clear()
+            _render_ncaaf_v551_weekly_board()
             return
 
         # NFL first paint is the already-published, current-line authority snapshot.
@@ -51659,31 +51661,16 @@ if not HEADLESS:
     _train_market_labels = {}
     _workflow_title = "Train which market?"
     if str(sport).upper().strip() == "NCAAF":
-        # Current operator choices only. Older V3/V4/V4.1/V4.2 routes and
-        # artifacts remain preserved for reproducibility but are hidden here.
-        _train_market_options = [
-            "ncaaf_production_weekly",
-            "ncaaf_v54_full_research",
-            "ncaaf_v55_cfbd_2026_games_repair",
-            "ncaaf_v55_weekly",
-            "ncaaf_v55_market_refresh",
-            "ncaaf_v55_combined_brain",
-            "ncaaf_research_heavy",
-        ]
-        _train_market_labels = {
-            "ncaaf_production_weekly": "NCAAF — Weekly Update (existing frozen Production V1)",
-            "ncaaf_v55_cfbd_2026_games_repair": "NCAAF V5.5 — Repair 2026 CFBD Games Archive (one-time)",
-            "ncaaf_v55_weekly": "NCAAF V5.5 — Weekly CORE + Combined Brains + Market Rich",
-            "ncaaf_v55_market_refresh": "NCAAF V5.5 — Market-only Price Refresh (no CORE refit)",
-            "ncaaf_v55_combined_brain": "NCAAF V5.5 — Combined Brains + Market Rich (fast)",
-            "ncaaf_v54_full_research": "NCAAF V5 — Full Research (CFBD History + Brains)",
-            "ncaaf_research_heavy": "NCAAF Legacy — Heavy Challenger Search",
+        # ONLY V5.5 jobs on the active operator menu. No V1/legacy fallback.
+        _train_market_options=["ncaaf_v55_weekly","ncaaf_v55_heavy"]
+        _train_market_labels={
+            "ncaaf_v55_weekly":"V5.5 Weekly — CORE + Current Market",
+            "ncaaf_v55_heavy":"V5.5 Heavy Research — Full CFBD + Brains",
         }
-        # Streamlit may remember a retired option; sanitize before selectbox.
-        _ncaaf_workflow_key = f"train_market_choice_{sport}"
-        if st.session_state.get(_ncaaf_workflow_key) not in (None, *_train_market_options):
-            st.session_state[_ncaaf_workflow_key] = "ncaaf_v54_full_research"
-        _workflow_title = "NCAAF model maintenance"
+        _ncaaf_workflow_key=f"train_market_choice_{sport}"
+        if st.session_state.get(_ncaaf_workflow_key) not in (None,*_train_market_options):
+            st.session_state[_ncaaf_workflow_key]="ncaaf_v55_weekly"
+        _workflow_title="NCAAF V5.5 model jobs"
     elif str(sport).upper().strip() == "NFL":
         # Operator surface only: weekly production + full protected research.
         # Live line/price changes refresh automatically in the background, so
@@ -51700,54 +51687,10 @@ if not HEADLESS:
         format_func=(lambda x: _train_market_labels.get(x, x)),
         key=f"train_market_choice_{sport}",
     )
-    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_production_weekly":
-        st.sidebar.caption(
-            "WHEN: once each week after prior games settle / the new slate is ready. Reuses the frozen Production V1 CORE models, settles immutable prospective locks, refreshes the current slate and live qualified system triggers, and applies the current CORE-first Bet Authority. It does NOT refit CORE, rerun research, republish the production contract, or promote anything. Market moves continue to refresh through the background scanner after this run."
-        )
-    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_cfbd_2026_games_repair":
-        st.sidebar.caption(
-            "Targeted source-data repair: retrieves ONLY the original 2026 CFBD /games API "
-            "responses, writes immutable hashed snapshots into the EXISTING CFBD API archive, "
-            "and verifies coverage against the 2026 two-sided CFBD schedule. Requires "
-            "CFBD_API_KEY on the training job. No feature warehouse rebuild, CORE refit, "
-            "bet promotion, or utils/production changes. After PASS, run V5.5 Weekly CORE."
-        )
-    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_weekly":
-        st.sidebar.caption(
-            "V5.5 WEEKLY: independently fits the selected NONLINEAR_HGB CORE recipe on verified "
-            "2013–2025 CFBD football history; scores actual upcoming 2026 CFBD pregame features, "
-            "then prices BOTH spread sides from current Utils/Move Master quotes. Includes available "
-            "STAT, Big Al, Pathi, Miner and Market Rich evidence. Missing features or identity fail "
-            "closed without Production V1 substitution. Provisional shadow authority until audited. "
-            "Existing frozen Production V1 remains an optional comparison."
-        )
-    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_market_refresh":
-        st.sidebar.caption(
-            "Reprices the most recent V5.5 independently scored 2026 CFBD CORE forecasts "
-            "using the latest sportsbook/Move Master prices. No refitting or Production V1 "
-            "scoring. Requires an already completed V5.5 weekly model update."
-        )
-    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_research_heavy":
-        st.sidebar.caption(
-            "WHEN: after meaningful research/data changes and periodically during the season. Runs the protected NCAAF STAT/System Miner V4 research plus the expert/specialist Spread CORE search in one job: sequential team power, strength of schedule, conference strength, rest/home/maturity context, structured matchup statistics, recent-vs-season trends, nonlinear residuals and regularized program/conference effects. Discovery/confirmation stay historical, 2026 remains sealed prospective evidence, and no challenger can mutate Production V1 or Bet Authority automatically."
-        )
-    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_combined_brain":
-        st.sidebar.caption(
-            "V5.5 FAST RESEARCH: scores the actually selected V4 NONLINEAR_HGB CORE "
-            "against independently identified Big Al, Pathi and Miner mechanisms; "
-            "tracks STAT/PT as unavailable unless independently sourced. "
-            "Audits bookmaker opening/closing line context as Market Rich, with "
-            "missing pregame quote timestamps explicitly held. Publishes confluence "
-            "and per-system comparisons; does not refit Production V1 or issue bets."
-        )
-    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v54_full_research":
-        st.sidebar.caption(
-            "FULL V5 RESEARCH (CFBD historical source of truth): re-fits V4/V4.2 on verified "
-            "CFBD games and football features, mines CFBD-derived historical state, reuses "
-            "Big Al/Pathi rule definitions, evaluates separate Prediction Tracker feeds and "
-            "rich market prices. Detailed logs expose coverage and quarantined legacy sources. "
-            "Missing CFBD history stops the run; there is no automatic bet promotion."
-        )
+    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_weekly":
+        st.sidebar.caption("Runs the independent V5.5 CFBD NONLINEAR_HGB weekly CORE and available brains in Cloud Run; publishes the exact results to BigQuery. Current prices update automatically through the background scanner without another refit. Quotes/EV fail closed if missing. No Production V1 fallback.")
+    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_heavy":
+        st.sidebar.caption("Runs the protected V5.5 historical CFBD research and combined CORE, STAT, Big Al, Pathi, Miner, PT and Market Rich attribution. Research only; missing pregame evidence cannot become verified betting authority.")
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
         st.sidebar.caption(
             "WHEN: once each week after prior games settle / the new slate is ready. Creates or reuses frozen fair values, refreshes live system triggers, settles the prospective ledger, and applies Production Betting V3 CORE-first Bet Authority. After that, line and price changes refresh automatically through the background scanner—do NOT rerun for market moves."
@@ -51758,14 +51701,9 @@ if not HEADLESS:
         )
 
     
-    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_weekly":
-        with st.expander("V5.5 — Weekly model board (click to load)",expanded=False):
-            if st.button("Load V5.5 weekly model board",key="v551_load_weekly_on_demand"):
-                _render_ncaaf_v551_weekly_board()
-
     # V5.5 optional research viewer. NEVER load historical tables on the first
     # NCAAF page render. Research artifacts cannot cast Production V1 votes.
-    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_combined_brain":
+    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_heavy":
         with st.expander("V5.5 Combined Brains — latest research results (click to load)", expanded=False):
             if st.button("Load latest V5.5 research comparison", key="v55_load_research_on_demand"):
                 try:
@@ -51932,6 +51870,8 @@ if not HEADLESS:
         _train_button_label = "Repair NCAAF 2026 CFBD Games Archive"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v55_weekly":
         _train_button_label = "Run NCAAF V5.5 Weekly Model Update"
+    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v55_heavy":
+        _train_button_label = "Run NCAAF V5.5 Heavy Research"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v55_market_refresh":
         _train_button_label = "Refresh V5.5 Market Prices (no CORE refit)"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v55_combined_brain":
