@@ -52146,6 +52146,47 @@ if not HEADLESS:
                                "historical feature, bookmaker-line and brain signal timestamps are not fully certified. "
                                "Do not interpret this as independently verified ATS or a profitable betting strategy.")
                     st.dataframe(_hl_metrics, use_container_width=True, hide_index=True)
+                    # Source-linked historical opening spreads are not authenticated
+                    # as executable as-of prices. Display ATS evidence ONLY as a
+                    # clearly labeled retrospective research preview; never promote.
+                    _hl_retro=_hl_audit.get("retrospective_ats") or {}
+                    if _hl_retro.get("status")=="RETROSPECTIVE_CFBD_LINKED_OPEN_SPREAD__ORIGINAL_QUOTE_TIME_UNVERIFIED":
+                        st.subheader("V5.5 point edges vs historical ATS — exploratory")
+                        st.warning("These are CFBD-matched historical *opening* spreads, but their original "
+                                   "quote timestamps are not independently certified. The current V5.5 recipe "
+                                   "was selected retrospectively. ATS percentages are descriptive only: no "
+                                   "verified sportsbook ROI, brain lift, live confirmation or threshold promotion.")
+                        st.write({"historical_replay_games":_hl_retro.get("predicted_games"),
+                                  "games_with_open_spreads":_hl_retro.get("games_with_cfbd_linked_open_spread"),
+                                  "historical_brain_events_verified":0,
+                                  "eligible_for_bet_threshold_promotion":False})
+                        _hl_retro_names=(
+                            ("retrospective_core_ats_pooled_buckets.csv","CORE point edge buckets — all priced historical games"),
+                            ("retrospective_core_ats_pooled_thresholds.csv","CORE minimum point edge thresholds — all priced historical games"),
+                            ("retrospective_core_ats_seasons.csv","ATS by season"),
+                            ("retrospective_core_ats_buckets.csv","ATS by season and edge size"),
+                            ("retrospective_core_ats_thresholds.csv","Point edge threshold research"),
+                            ("retrospective_market_coverage.csv","Historical spread coverage"),
+                            ("retrospective_core_vs_market.csv","CORE versus sportsbook benchmark (same games)"),
+                        )
+                        _hl_retro_digests=_hl_audit.get("retrospective_csv_sha256") or {}
+                        for _hl_retro_name,_hl_retro_title in _hl_retro_names:
+                            _hl_retro_data=_hl_bucket.blob(_hl_prefix+"/"+_hl_retro_name).download_as_bytes()
+                            if _v55_hl_hash.sha256(_hl_retro_data).hexdigest()!=_hl_retro_digests.get(_hl_retro_name):
+                                raise RuntimeError("V5.5 historical ATS CSV integrity mismatch: "+_hl_retro_name)
+                            st.markdown("**"+_hl_retro_title+"**")
+                            st.dataframe(pd.read_csv(_v55_hl_io(_hl_retro_data.decode("utf-8"))),
+                                         use_container_width=True,hide_index=True)
+                        st.markdown("**Individual historical ATS game records**")
+                        _hl_edge_name="retrospective_core_ats_game_edges.csv"
+                        _hl_edge_bytes=_hl_bucket.blob(_hl_prefix+"/"+_hl_edge_name).download_as_bytes()
+                        if _v55_hl_hash.sha256(_hl_edge_bytes).hexdigest()!=_hl_retro_digests.get(_hl_edge_name):
+                            raise RuntimeError("V5.5 historical ATS game-level digest mismatch")
+                        st.dataframe(pd.read_csv(_v55_hl_io(_hl_edge_bytes.decode("utf-8"))),
+                                     use_container_width=True,hide_index=True)
+                    else:
+                        st.info("Historical model margins are available; exploratory ATS edge tables "
+                                "have not been published by this replay yet.")
                     _hl_season=st.selectbox("Replay season",sorted(_hl_games.season.unique().tolist()),
                                             key="v55_replay_year_20261023")
                     _hl_slice=_hl_games.loc[_hl_games.season.eq(_hl_season)]

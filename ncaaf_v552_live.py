@@ -695,6 +695,171 @@ def _season_metrics(games):
                      'correlation_pred_actual':float(np.corrcoef(d.model_home_margin,d.actual_home_margin)[0,1]) if len(d)>2 else None})
     return pd.DataFrame(rows)
 
+
+# V5.5 retrospective ATS bridge. These historical source-open spreads are
+# independently joined to CFBD identities, but do NOT carry quote timestamps.
+# They are for exploratory edge-vs-ATS study ONLY: no as-of execution, ROI,
+# held-out model-selection, brain confirmations or betting authority claims.
+RETRO_ATS_STATUS = 'RETROSPECTIVE_CFBD_LINKED_OPEN_SPREAD__ORIGINAL_QUOTE_TIME_UNVERIFIED'
+RETRO_BUCKETS = ((0,2,'0-<2'),(2,4,'2-<4'),(4,6,'4-<6'),
+                 (6,8,'6-<8'),(8,float('inf'),'8+'))
+RETRO_THRESHOLDS = (0,1,2,3,4,5,6,7,8,10)
+
+
+def _retro_wilson(wins, decisions, z=1.959963984540054):
+    if decisions <= 0: return float('nan'),float('nan')
+    p=wins/decisions;denom=1+z*z/decisions
+    centre=(p+z*z/(2*decisions))/denom
+    spread=z*math.sqrt(p*(1-p)/decisions+z*z/(4*decisions*decisions))/denom
+    return 100*(centre-spread),100*(centre+spread)
+
+
+def _retro_ats_summary(rows):
+    wins=int((rows.ats_result=='WIN').sum()) if len(rows) else 0
+    losses=int((rows.ats_result=='LOSS').sum()) if len(rows) else 0
+    pushes=int((rows.ats_result=='PUSH').sum()) if len(rows) else 0
+    low,high=_retro_wilson(wins,wins+losses)
+    return dict(games=int(len(rows)), wins=wins, losses=losses, pushes=pushes,
+                ats_win_pct=round(100*wins/(wins+losses),2) if wins+losses else float('nan'),
+                wilson95_low_pct=round(low,2),wilson95_high_pct=round(high,2),
+                roi_pct=float('nan'),
+                provenance=RETRO_ATS_STATUS)
+
+
+def retrospective_core_ats_from_cfbd_join(predictions, historical_home):
+    """Grade genuine V5.5 replay point edges against historical *source* spreads.
+
+    No sportsbook exposure time is present in the canonical price join; keep
+    ATS records clearly exploratory and never infer price or historical votes.
+    Only single canonical HOME rows and finite, game-linked opening lines enter.
+    """
+    required={'game_id','season','kickoff_utc','model_home_margin',
+              'actual_home_margin','prediction_at_utc','model_id'}
+    if not required.issubset(predictions):
+        raise ReplayHold('V55_RETRO_REPLAY_COLUMNS_MISSING '+str(sorted(required-set(predictions))))
+    if not {'Season','Source_Game_ID','Consensus_Open_Spread','Is_Home','Actual_Margin'}.issubset(historical_home):
+        raise ReplayHold('V55_RETRO_HISTORICAL_MARKET_FIELDS_MISSING')
+    p=predictions.copy()
+    if not p.model_id.astype(str).eq(CHAMPION).all():
+        raise ReplayHold('V55_RETRO_OLD_CORE_PREDICTIONS_REJECTED')
+    p['game_id']=p.game_id.astype(str)
+    p['season']=pd.to_numeric(p.season,errors='raise').astype(int)
+    if p[['season','game_id']].duplicated().any():
+        raise ReplayHold('V55_RETRO_DUPLICATE_PREDICTION_GAME')
+    hist=historical_home.copy()
+    hist=hist.loc[pd.to_numeric(hist.Is_Home,errors='coerce').eq(1)].copy()
+    hist['game_id']=hist.Source_Game_ID.astype(str)
+    hist['season']=pd.to_numeric(hist.Season,errors='raise').astype(int)
+    if hist[['season','game_id']].duplicated().any():
+        raise ReplayHold('V55_RETRO_DUPLICATE_HISTORICAL_GAME')
+    m=hist[['season','game_id','Consensus_Open_Spread','Actual_Margin']].rename(
+        columns={'Consensus_Open_Spread':'home_open_spread','Actual_Margin':'source_actual_home_margin'})
+    d=p.merge(m,on=['season','game_id'],how='left',validate='one_to_one',indicator=True)
+    d['home_open_spread']=pd.to_numeric(d.home_open_spread,errors='coerce')
+    d['source_actual_home_margin']=pd.to_numeric(d.source_actual_home_margin,errors='coerce')
+    d['model_home_margin']=pd.to_numeric(d.model_home_margin,errors='coerce')
+    d['actual_home_margin']=pd.to_numeric(d.actual_home_margin,errors='coerce')
+    if (pd.to_datetime(d.prediction_at_utc,utc=True,errors='coerce').isna().any()
+        or (pd.to_datetime(d.prediction_at_utc,utc=True)>=pd.to_datetime(d.kickoff_utc,utc=True)).any()):
+        raise ReplayHold('V55_RETRO_PREDICTION_NOT_BEFORE_KICKOFF')
+    match=d['_merge'].eq('both')
+    score_match=(d.actual_home_margin-d.source_actual_home_margin).abs().le(.001)
+    if bool((match & ~score_match).any()):
+        raise ReplayHold('V55_RETRO_CFBD_SCORE_OR_ORIENTATION_CONFLICT')
+    mask=(match & np.isfinite(d.home_open_spread) & np.isfinite(d.model_home_margin)
+          & np.isfinite(d.actual_home_margin))
+    valid=d.loc[mask].copy()
+    valid['home_point_edge']=valid.model_home_margin+valid.home_open_spread
+    valid['edge_points']=valid.home_point_edge.abs()
+    valid['pick_side']=np.where(valid.home_point_edge>0,'HOME',
+                        np.where(valid.home_point_edge<0,'AWAY','NO_EDGE'))
+    valid['market_projected_home_margin']=-valid.home_open_spread
+    valid['model_margin_error']=valid.model_home_margin-valid.actual_home_margin
+    valid['market_margin_error']=valid.market_projected_home_margin-valid.actual_home_margin
+    valid['ats_home_margin']=valid.actual_home_margin+valid.home_open_spread
+    valid['ats_result']=np.where(valid.home_point_edge.eq(0),'NO_EDGE',
+                        np.where(valid.ats_home_margin.eq(0),'PUSH',
+                        np.where(np.sign(valid.home_point_edge)==np.sign(valid.ats_home_margin),'WIN','LOSS')))
+    valid['edge_bucket']=''
+    for lo,hi,name in RETRO_BUCKETS:
+        valid.loc[valid.edge_points.ge(lo)&valid.edge_points.lt(hi),'edge_bucket']=name
+    valid['price_vintage']='ORIGINAL_QUOTE_TIMESTAMP_UNAVAILABLE'
+    valid['independent_holdout']=False
+    valid['brain_events_verified']=False
+    valid['bet_authority']=0
+    sample=valid.loc[valid.pick_side.ne('NO_EDGE')].copy()
+    buckets=[]
+    for (season,bucket),g in sample.groupby(['season','edge_bucket'],sort=True):
+        buckets.append({'season':int(season),'edge_bucket':bucket,**_retro_ats_summary(g)})
+    threshold=[]
+    for season,g in sample.groupby('season',sort=True):
+        for t in RETRO_THRESHOLDS:
+            threshold.append({'season':int(season),'min_edge_points':t,
+                              **_retro_ats_summary(g.loc[g.edge_points.ge(t)])})
+    seasons=[]
+    for season,g in sample.groupby('season',sort=True):
+        seasons.append({'season':int(season),**_retro_ats_summary(g)})
+    # Model-versus-market comparison MUST use exactly the same priced games.
+    # A strong-looking full-slate RMSE is not evidence of beating the book.
+    market_baseline=[]
+    for season,g in sample.groupby('season',sort=True):
+        model_error=g.model_margin_error.to_numpy(float)
+        market_error=g.market_margin_error.to_numpy(float)
+        market_baseline.append({'season':int(season),'games':int(len(g)),
+            'model_rmse':round(float(np.sqrt(np.mean(model_error**2))),4),
+            'market_rmse':round(float(np.sqrt(np.mean(market_error**2))),4),
+            'model_mae':round(float(np.mean(np.abs(model_error))),4),
+            'market_mae':round(float(np.mean(np.abs(market_error))),4),
+            'model_minus_market_rmse':round(float(np.sqrt(np.mean(model_error**2))-
+                                               np.sqrt(np.mean(market_error**2))),4),
+            'evaluation_state':RETRO_ATS_STATUS})
+    coverage=[]
+    for season,g in d.groupby('season',sort=True):
+        good=mask.loc[g.index]
+        coverage.append({'season':int(season),'replay_games':len(g),
+                         'matched_historical_game_ids':int(g['_merge'].eq('both').sum()),
+                         'source_open_spread_games':int(g.home_open_spread.notna().sum()),
+                         'gradable_ats_games':int(good.sum()),
+                         'missing_open_spread_games':int((~g.home_open_spread.notna()).sum()),
+                         'market_quote_timestamps_certified':0})
+    pooled_buckets=[]
+    for bucket,g in sample.groupby('edge_bucket',sort=True):
+        pooled_buckets.append({'edge_bucket':bucket,**_retro_ats_summary(g)})
+    pooled_thresholds=[]
+    for t in RETRO_THRESHOLDS:
+        pooled_thresholds.append({'min_edge_points':t,
+                                  **_retro_ats_summary(sample.loc[sample.edge_points.ge(t)])})
+    cols=['season','game_id','kickoff_utc','home_team','away_team','model_id',
+          'model_home_margin','actual_home_margin','home_open_spread','home_point_edge',
+          'edge_points','edge_bucket','pick_side','ats_home_margin','ats_result',
+          'market_projected_home_margin','model_margin_error','market_margin_error',
+          'prediction_at_utc','fold_id','price_vintage','independent_holdout',
+          'brain_events_verified','bet_authority']
+    games=sample[[c for c in cols if c in sample]].copy()
+    result={
+       'retrospective_core_ats_game_edges.csv':games,
+       'retrospective_core_ats_buckets.csv':pd.DataFrame(buckets,columns=['season','edge_bucket',*_retro_ats_summary(sample).keys()]),
+       'retrospective_core_ats_thresholds.csv':pd.DataFrame(threshold,columns=['season','min_edge_points',*_retro_ats_summary(sample).keys()]),
+       'retrospective_core_ats_seasons.csv':pd.DataFrame(seasons,columns=['season',*_retro_ats_summary(sample).keys()]),
+       'retrospective_core_ats_pooled_buckets.csv':pd.DataFrame(pooled_buckets,columns=['edge_bucket',*_retro_ats_summary(sample).keys()]),
+       'retrospective_core_ats_pooled_thresholds.csv':pd.DataFrame(pooled_thresholds),
+       'retrospective_market_coverage.csv':pd.DataFrame(coverage),
+       'retrospective_core_vs_market.csv':pd.DataFrame(market_baseline,columns=[
+          'season','games','model_rmse','market_rmse','model_mae','market_mae',
+          'model_minus_market_rmse','evaluation_state'])}
+    audit={'status':RETRO_ATS_STATUS,'predicted_games':len(p),
+           'games_with_cfbd_linked_open_spread':len(games),
+           'open_spread_source':'sharplogger.sharp_data.ncaaf_historical_game_side_raw',
+           'verified_quote_timestamps':0,'verified_historical_brain_events':0,
+           'historical_feature_vintage_certified':False,
+           'historical_market_vintage_certified':False,
+           'independent_recipe_holdouts':False,
+           'sportsbook_returns_calculated':False,
+           'ats_results':'EXPLORATORY_DESCRIPTIVE_ONLY',
+           'bet_authority':0,'threshold_promotion':False}
+    return result,audit
+
+
 def run_historical_oos_replay(*, storage_client,bucket_name='sharp-models',log_func=print,
                               bq_client=None,output_prefix=None,history_frame=None,
                               v4=None,initial_test_season=2017,**ignored):
@@ -726,6 +891,9 @@ def run_historical_oos_replay(*, storage_client,bucket_name='sharp-models',log_f
     game_bytes=output.to_csv(index=False).encode()
     metrics=_season_metrics(output)
     metric_bytes=metrics.to_csv(index=False).encode()
+    retro_tables,retro_audit=retrospective_core_ats_from_cfbd_join(output,history_frame)
+    retro_bytes={name:frame.to_csv(index=False).encode() for name,frame in retro_tables.items()}
+    log_func('[NCAAF-V55-RETRO-ATS] '+json.dumps(retro_audit,sort_keys=True))
     runid=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     prefix=f'{REPLAY_ROOT}/replay_runs/{runid}'
     audit={
@@ -740,7 +908,9 @@ def run_historical_oos_replay(*, storage_client,bucket_name='sharp-models',log_f
         'historical_pregame_cfbd_feature_vintage_certified':False,
         'historical_bookmaker_quote_vintage_certified':False,
         'historical_brain_signal_vintage_certified':False,
-        'ats_results_calculated':False,
+        'ats_results_calculated':'RETROSPECTIVE_UNVERIFIED_QUOTE_ONLY',
+        'retrospective_ats':retro_audit,
+        'retrospective_csv_sha256':{name:_hash(data) for name,data in retro_bytes.items()},
         'independent_holdout_claim':False,'production_modified':False,
         'bet_authority':0,'policy_promotion':False,
         'predictions_sha256':_hash(game_bytes),
@@ -752,12 +922,16 @@ def run_historical_oos_replay(*, storage_client,bucket_name='sharp-models',log_f
                             ('season_metrics.csv',metric_bytes,'text/csv'),
                             ('audit.json',json.dumps(audit,default=str,indent=2,sort_keys=True).encode(),'application/json')]:
         bucket.blob(prefix+'/'+path).upload_from_string(payload,content_type=ct,if_generation_match=0)
+    for name,payload in retro_bytes.items():
+        bucket.blob(prefix+'/'+name).upload_from_string(payload,content_type='text/csv',if_generation_match=0)
     # Latest pointer updated only after validated artifact publication.
     bucket.blob(f'{REPLAY_ROOT}/latest_replay_status.json').upload_from_string(
         json.dumps({'status':audit['status'],'run_prefix':prefix,
-                    'total_games':len(output),'ats_pending':'HISTORICAL_MARKET_AND_BRAIN_VINTAGES',
+                    'total_games':len(output),
+                    'retrospective_ats_games':retro_audit['games_with_cfbd_linked_open_spread'],
+                    'ats_pending':'QUOTE_TIME_AND_HISTORICAL_BRAIN_VINTAGES',
                     'production_modified':False},sort_keys=True),content_type='application/json')
-    log_func(f'[NCAAF-V55-EXACT-ROLLFORWARD] status={audit["status"]} games={len(output)} output=gs://{bucket_name}/{prefix} ATS=HOLD_MARKET_SOURCE_VINTAGE')
+    log_func(f'[NCAAF-V55-EXACT-ROLLFORWARD] status={audit["status"]} games={len(output)} output=gs://{bucket_name}/{prefix} ATS=RETROSPECTIVE_PREVIEW_ONLY_AND_CERTIFIED_HOLD')
     return {'status':audit['status'],'output_prefix':f'gs://{bucket_name}/{prefix}',
             'games':len(output),'folds':len(folds),'production_modified':False,
             'bet_authority':0,'ats_verified':False}

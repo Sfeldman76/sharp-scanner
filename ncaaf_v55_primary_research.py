@@ -636,12 +636,18 @@ def run_cloud(*, storage_client, bucket_name='sharp-models', log_func=print,
             pointer=json.loads(statusblob.download_as_text())
             if pointer.get('status')!='COMPLETE_V55_EXACT_RECIPE_RETROSPECTIVE_MARGINS':
                 raise ProvenanceError('V5.5 rolling margins not published')
+            replay_audit=json.loads(bucket.blob(pointer['run_prefix']+'/audit.json').download_as_text())
+            retro=replay_audit.get('retrospective_ats') or {}
             report.update(status='COMPLETE_V55_RETROSPECTIVE_MARGINS__ATS_SOURCE_VINTAGE_HOLD',
+                          descriptive_ats_status=retro.get('status','UNAVAILABLE'),
+                          descriptive_ats_games=int(retro.get('games_with_cfbd_linked_open_spread',0)),
+                          descriptive_ats_source_vintage_certified=False,
+                          historical_brain_combinations_status='HOLD_UNVERIFIED_PREGAME_SIGNALS',
                           model_evaluation_completed=True,
                           matched_games=0,
                           margin_prediction_games=pointer.get('total_games'),
                           model_replay_artifacts=f'gs://{bucket_name}/'+pointer['run_prefix'],
-                          reason='V5.5 exact NONLINEAR_HGB expanding-history margin replay complete. Verified pregame bookmaker and brain historical snapshots are not yet available; ATS and bet gates withheld.',
+                          reason='V5.5 retrospective model margins and available CFBD-linked opening spread ATS results are published separately. Original quote timestamps and historical brain events are not yet certified; no independent ATS threshold or bet authority.',
                           independent_holdout_claim=False,
                           historical_feature_vintage_certified=False,
                           historical_market_vintage_certified=False)
