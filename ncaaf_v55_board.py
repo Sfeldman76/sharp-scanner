@@ -1611,6 +1611,10 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
                   if isinstance(x,pd.DataFrame) and not x.empty]
     combined_events=pd.concat(event_frames,ignore_index=True) if event_frames else None
     out, brain = attach_v55_qualified_evidence(out,combined_events)
+    # Display labels come from the SAME frozen Miner research registry that
+    # qualified each event. Keep original mechanism IDs in the evidence JSON
+    # and in the system-ID field; never manufacture votes from friendly names.
+    out = _v55_annotate_miner_rule_names(out, registry)
     brain['miner_registry_status']=registry_problem or 'PASS'
     brain['miner_live_bridge']=miner_audit
     brain['other_brain_registry_status']=other_registry_problem or 'PASS'
@@ -1830,6 +1834,17 @@ def evaluate_v55_spread_research(frame, *, calibration=None):
             out.at[i,"V55_Calibration_Id"]=audited_calibration["calibration_id"]
             out.at[i,"V55_Research_Decision"]="CALIBRATED_RESEARCH_ONLY_NO_BET_AUTHORITY"
             stats["oos_calibrated"]+=1
+    # No-pick diagnostics distinguish healthy matched markets from actual
+    # missing CORE distributions or no-positive-EV outcomes. Never synthesize
+    # a side merely to make the main table nonblank.
+    matched=out.get('Quote_State',pd.Series('',index=out.index)).fillna('').astype(str).str.startswith('FRESH_TWO_SIDED_')
+    unselected=matched & out.get('V55_Research_Selected_Side',pd.Series(index=out.index,dtype='object')).isna()
+    stats['priced_games_without_core_selection']=int(unselected.sum())
+    stats['no_pick_reason_counts']=(out.loc[unselected,'V55_Research_Decision'].fillna('NOT_REPORTED')
+                                    .value_counts().to_dict())
+    stats['no_pick_matchups']=[{'matchup':str(r.get('Matchup') or ''),
+                                'reason':str(r.get('V55_Research_Decision') or 'NOT_REPORTED')}
+                               for _,r in out.loc[unselected].head(25).iterrows()]
     out["V55_Bet_Authority"]=0
     out["V55_Bet_Decision"]="RESEARCH_ONLY_NO_AUTHORITY"
     return out,stats
@@ -2487,6 +2502,42 @@ def attach_v55_qualified_evidence(frame,events, *, now=None):
     out["V55_Bet_Authority"]=0
     out["V55_Bet_Decision"]="RESEARCH_ONLY_NO_AUTHORITY"
     return out,report
+
+
+def _v55_annotate_miner_rule_names(board, registry):
+    """Presentation only: turn opaque frozen Miner IDs into readable rules.
+
+    Reads only the already-validated historical registry. The rules never alter
+    qualified-event rows, authority counts, CORE values, or selections.
+    """
+    import pandas as pd
+    if not isinstance(board,pd.DataFrame):return board
+    out=board.copy()
+    if 'V55_Active_System_Names' not in out: return out
+    out['V55_Active_System_Rules']=None
+    rules=(registry or {}).get('mechanisms') if isinstance(registry,dict) else None
+    if not isinstance(rules,dict) or not rules:return out
+    for idx,record in out.iterrows():
+        active=str(record.get('V55_Active_System_Names') or '')
+        mids=[x.strip() for x in active.split('|') if x.strip() and x.strip() not in ('nan','None')]
+        readable=[]
+        for mid in mids:
+            entry=rules.get(mid)
+            if not isinstance(entry,dict):continue
+            rule=str(entry.get('rule') or '').strip()
+            if rule:readable.append(f'{mid}: {rule}')
+        if readable:out.at[idx,'V55_Active_System_Rules']=' | '.join(readable)[:1300]
+        raw=str(record.get('V55_Raw_Miner') or '')
+        # The live research context also benefits from names; preserve the ID,
+        # displayed team and original provenance, and limit large table strings.
+        if raw and raw not in ('None','nan','NOT_PUBLISHED'):
+            for mid in sorted(rules, key=len,reverse=True):
+                if mid in raw and isinstance(rules[mid],dict):
+                    label=str(rules[mid].get('rule') or '').strip()
+                    if label and '[' not in raw.split(mid,1)[-1][:3]:
+                        raw=raw.replace(mid,mid+' ['+label[:105]+']')
+            out.at[idx,'V55_Raw_Miner']=raw[:1300]
+    return out
 
 
 # ----- Explicit V5.5 betting-selection promotion: owner-directed, provisional -----

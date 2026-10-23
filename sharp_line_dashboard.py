@@ -48816,6 +48816,221 @@ def _ncaaf_v55_quote_coverage(frame, audit):
             'outside':outside,'uncertain':False}
 
 
+def _ncaaf_v55_market_display_columns(frame):
+    """Display paired sportsbook lines without inventing a CORE wager.
+
+    Quote_State and Backend_* are the only inputs for market availability.
+    Selected_Team is a model decision, not proof of whether a market exists.
+    This function never changes the underlying quote, projection, or bet.
+    """
+    import pandas as pd
+    out=frame.copy()
+    def _as_str(value):
+        if value is None or pd.isna(value):
+            return ""
+        return str(value).strip()
+    def _line(value):
+        n=pd.to_numeric(value,errors='coerce')
+        return f'{float(n):+.1f}' if pd.notna(n) else ''
+    def _odds(value):
+        n=pd.to_numeric(value,errors='coerce')
+        return f'{float(n):+.0f}' if pd.notna(n) else ''
+    def _row(r):
+        state=_as_str(r.get('Quote_State'))
+        if not state.startswith('FRESH_'):
+            return pd.Series({'Sportsbook Market':'NO VERIFIED CURRENT MARKET',
+                              'CORE Selection Status':'NO CURRENT MARKET'})
+        match=_as_str(r.get('Matchup'))
+        parts=match.split(' @ ',1)
+        away,home=(parts[0],parts[1]) if len(parts)==2 else ('Away','Home')
+        h,a=(_line(r.get('Backend_Home_Spread')),_line(r.get('Backend_Away_Spread')))
+        hp,ap=(_odds(r.get('Backend_Home_Odds_American')),
+               _odds(r.get('Backend_Away_Odds_American')))
+        if h and a:
+            market=f'{away} {a}' + (f' ({ap})' if ap else '') +                    f' | {home} {h}' + (f' ({hp})' if hp else '')
+        else:
+            sel=_as_str(r.get('Selected_Team'))
+            line=_line(r.get('Current_Spread'))
+            market=(f'{sel} {line}' if sel and line else 'PRICE MATCHED; PAIR UNAVAILABLE')
+        side=_as_str(r.get('Selected_Team'))
+        if side and side.upper()!='NO CORE PICK':
+            status='CORE RESEARCH SIDE: '+side
+        else:
+            reason=_as_str(r.get('V55_Research_Decision'))
+            labels={
+                'MODEL_ONLY__NO_POSITIVE_RAW_EV':'no positive estimated EV (uncalibrated)',
+                'CORE_DISTRIBUTION_OR_IDENTITY_NOT_VERIFIED':'missing CORE margin / residual SD / identity',
+                'UNVERIFIED_CORE_MODEL':'CORE model provenance not verified',
+                'NO_VERIFIED_TWO_SIDED_QUOTE':'paired spread or price not verified',
+                'INCONSISTENT_SIDES':'home and away lines inconsistent',
+            }
+            status='NO CORE PICK: '+labels.get(reason,reason or 'research decision not provided')
+        return pd.Series({'Sportsbook Market':market,'CORE Selection Status':status})
+    if out.empty:
+        out['Sportsbook Market']=pd.Series(dtype='object')
+        out['CORE Selection Status']=pd.Series(dtype='object')
+        return out
+    values=out.apply(_row,axis=1)
+    out[['Sportsbook Market','CORE Selection Status']]=values
+    return out
+
+
+# V5.5 SYSTEM-LIBRARY VIEW. UI metadata only; never an authority source.
+def _ncaaf_v55_history_inventory(report):
+    """Flatten the original NCAAF V2 historic Miner and expert records.
+
+    Every historical number is taken from the published source report. No live
+    2026 outcomes, UI model scoring or inferred W/L records are introduced.
+    """
+    entries=[]
+    if not isinstance(report,dict): return entries
+    for market,group in (report.get('system_miner_v3') or {}).items():
+        if not isinstance(group,dict): continue
+        for rule in group.get('mechanism_families') or []:
+            if not isinstance(rule,dict): continue
+            mid=str(rule.get('mechanism_id') or '').strip()
+            if not mid: continue
+            cond=rule.get('representative_conditions') or []
+            if isinstance(cond,str):cond=[cond]
+            attr=rule.get('attribution') or {}
+            entries.append({'Source':'Miner','Market':str(market).upper(),
+                'System ID':mid,'Rule':' AND '.join(str(x) for x in cond) or str(attr.get('rule') or 'Rule not published'),
+                'Status':str(rule.get('authority_state') or rule.get('evidence_level') or 'UNSPECIFIED'),
+                'Qualified':rule.get('live_authority_eligible') is True,
+                'Discovery N':rule.get('discovery_n'),'Discovery W-L':'—',
+                'Discovery Hit':rule.get('discovery_rate'),
+                'Confirm N':rule.get('confirmation_n'),'2024–25 W-L':'—',
+                'Confirm Hit':rule.get('confirmation_rate'),
+                'Confirmation Pass':rule.get('confirmation_pass'),
+                'Family':str(rule.get('evidence_family_key') or ''),
+                '_detail':rule,'_history':attr.get('season_breakdown') or [],
+            })
+    for k,rule in enumerate(((report.get('published_system_results') or {}).get('systems') or [])):
+        if not isinstance(rule,dict): continue
+        source=str(rule.get('source') or 'EXPERT').strip().upper()
+        if 'PATHI' in source:source='Pathi'
+        elif 'BIG' in source:source='Big Al'
+        else:source=source.title()
+        discovery=rule.get('discovery') or {};confirm=rule.get('confirmation') or {}
+        entries.append({'Source':source,'Market':str(rule.get('market') or 'SPREADS').upper(),
+            'System ID':str(rule.get('system_id') or rule.get('system') or rule.get('label') or f'{source}-{k+1}'),
+            'Rule':str(rule.get('label') or rule.get('system') or rule.get('rule') or 'Not published'),
+            'Status':str(rule.get('status') or 'RESEARCH'), 'Qualified':False,
+            'Discovery N':discovery.get('n'),
+            'Discovery W-L':(f"{discovery['wins']}-{discovery['losses']}" if 'wins' in discovery and 'losses' in discovery else '—'),
+            'Discovery Hit':discovery.get('hit_rate'),
+            'Confirm N':confirm.get('n'),
+            '2024–25 W-L':(f"{confirm['wins']}-{confirm['losses']}" if 'wins' in confirm and 'losses' in confirm else '—'),
+            'Confirm Hit':confirm.get('hit_rate'),
+            'Confirmation Pass':rule.get('confirmation_pass'),
+            'Family':str(rule.get('parent') or ''),
+            '_detail':rule,'_history':rule.get('by_season') or [],
+        })
+    return entries
+
+
+@st.cache_data(ttl=300,show_spinner=False)
+def _ncaaf_v55_research_display_report_cached():
+    """Read the PREVIOUS NCAAF research artifact only when the user opens history.
+
+    A report from the older version remains useful for display even when the
+    strict current-version validation rejects it for production qualification.
+    """
+    try:
+        from google.cloud import storage as _v55_storage
+        import ncaaf_research_v2 as _v55_res
+        _client=_v55_storage.Client()
+        _report,_check=_v55_res.load_current_report_diagnostic(
+            bucket_name=GCS_BUCKET,storage_client=_client)
+        if isinstance(_report,dict):return _report,'CURRENT_REPORT'
+        _blob=_client.bucket(GCS_BUCKET).blob(
+            getattr(_v55_res,'REPORT_CURRENT_BLOB','research/ncaaf/v2/current_report.json'))
+        _raw=json.loads(_blob.download_as_text())
+        if (isinstance(_raw,dict)
+            and str(_raw.get('source_tag') or '').startswith('ncaaf-research-v2.')
+            and isinstance(_raw.get('system_miner_v3'),dict)):
+            return _raw,'LEGACY_REPORT_DISPLAY_ONLY'
+        return None,'INVALID_HISTORICAL_REPORT'
+    except Exception as _exc:
+        return None,type(_exc).__name__+':'+str(_exc)[:180]
+
+
+def _ncaaf_v55_historical_systems_view(active_system_ids=None):
+    """Restore old per-system and per-season research drilldown, on click."""
+    report,status=_ncaaf_v55_research_display_report_cached()
+    if not isinstance(report,dict):
+        st.warning('Historical NCAAF system report unavailable: '+str(status))
+        return
+    records=_ncaaf_v55_history_inventory(report)
+    active_ids=set(active_system_ids or [])
+    for rec in records: rec['Active Now']=rec['System ID'] in active_ids
+    records.sort(key=lambda r:(not r['Active Now'],r['Source'],r['System ID']))
+    st.caption('Source: original NCAAF V2 historical report. '+str(status)+
+       '. These are archived research results, NOT additional V5.5 betting votes. '+
+       '2026 results must never be used to qualify historical systems.')
+    if not records:
+        st.info('The saved research report contains no individual Miner / Big Al / Pathi system records.')
+        return
+    sources=sorted({x['Source'] for x in records})
+    markets=sorted({x['Market'] for x in records})
+    c1,c2,c3=st.columns(3)
+    source=c1.selectbox('Historical source',['All']+sources,key='v55-history-source')
+    market=c2.selectbox('Historical market',['All']+markets,key='v55-history-market')
+    status_filter=c3.selectbox('Historical status',['All','Qualified','Other'],key='v55-history-status')
+    needle=st.text_input('Find a system / rule / ID',key='v55-history-search').strip().lower()
+    matches=[]
+    for rec in records:
+        if source!='All' and rec['Source']!=source:continue
+        if market!='All' and rec['Market']!=market:continue
+        if status_filter=='Qualified' and not rec['Qualified']:continue
+        if status_filter=='Other' and rec['Qualified']:continue
+        if needle and needle not in ' '.join(str(rec.get(c) or '') for c in
+            ('Source','System ID','Rule','Family','Status')).lower():continue
+        matches.append(rec)
+    st.caption(f'{len(matches)} systems shown / {len(records)} historical records available')
+    if not matches:
+        st.info('No historical systems match these filters.')
+        return
+    # Only research metadata goes into this table; nested histories are opened
+    # below by selection instead of rendering hundreds of expander widgets.
+    inv=pd.DataFrame([{k:v for k,v in rec.items() if not k.startswith('_')}
+                     for rec in matches])
+    for field in ('Discovery Hit','Confirm Hit'):
+        inv[field]=pd.to_numeric(inv[field],errors='coerce').map(
+            lambda x:f'{x:.1%}' if pd.notna(x) else '—')
+    st.dataframe(inv,use_container_width=True,hide_index=True)
+    options=list(range(len(matches)))
+    choose=st.selectbox('Open a system’s full historical record',options,
+        format_func=lambda idx:(f"{matches[idx]['Source']} | {matches[idx]['System ID']} | "
+            f"{matches[idx]['Rule'][:90]}"),key='v55-history-selected-record')
+    rec=matches[choose]
+    with st.expander(f"History: {rec['System ID']} — {rec['Rule'][:100]}",expanded=True):
+        st.write({k:v for k,v in rec.items() if not k.startswith('_')})
+        raw=rec['_detail'];hist=rec['_history']
+        if isinstance(hist,dict):
+            hist=[dict(season=k,**v) if isinstance(v,dict) else {'season':k,'result':v}
+                  for k,v in hist.items()]
+        if hist:
+            st.markdown('**Season-by-season history**')
+            st.dataframe(pd.DataFrame(hist),use_container_width=True,hide_index=True)
+        if isinstance(raw.get('discovery_seasons'),list) or isinstance(raw.get('confirmation'),list):
+            for label,key in [('Discovery seasons','discovery_seasons'),
+                              ('Internal validation','internal_validation'),
+                              ('Frozen confirmation — 2024 and 2025','confirmation')]:
+                period=raw.get(key)
+                if isinstance(period,list) and period:
+                    st.markdown('**'+label+'**')
+                    st.dataframe(pd.DataFrame(period),use_container_width=True,hide_index=True)
+        if not hist and (isinstance(raw.get('discovery'),dict) or isinstance(raw.get('confirmation'),dict)):
+            st.markdown('**Discovery / 2024–2025 confirmation**')
+            st.json({'discovery':raw.get('discovery') or {},
+                     'confirmation':raw.get('confirmation') or {}})
+        else:
+            st.caption('No per-season breakdown is published for this system.')
+        st.markdown('**Full source research record**')
+        st.json(raw,expanded=False)
+
+
 def _render_ncaaf_v551_weekly_board():
     st.subheader('V5.5 — Backend Published Board')
     st.caption('V5.5 NONLINEAR_HGB independent CFBD CORE + current sportsbook quotes + STAT, Big Al, Pathi, '
@@ -48890,7 +49105,7 @@ def _render_ncaaf_v551_weekly_board():
     if _weekly.empty:
         st.info('No upcoming V5.5 projections in the published backend snapshot.')
         return
-    shown=_weekly.copy()
+    shown=_ncaaf_v55_market_display_columns(_weekly)
     if 'V55_Bet_Authority' in shown.columns:
         # UI sorting only: all authority/EV decisions were already made backend.
         shown=shown.sort_values(by=['V55_Bet_Authority'],ascending=False,kind='stable')
@@ -48966,24 +49181,61 @@ def _render_ncaaf_v551_weekly_board():
             shown[_field]=shown[_field].fillna('NOT_PUBLISHED').replace('', 'NOT_PUBLISHED')
     # Retain the old production's first-load layout: primary decisions and
     # independent systems only. Technical odds/forecast columns are lazy below.
-    summary=['Game_Start_UTC','Matchup','Selected_Team','Current_Spread',
+    summary=['Game_Start_UTC','Matchup','Sportsbook Market','Selected_Team',
+             'CORE Selection Status','Current_Spread',
              'V55_Policy_EV','V55_Bet_Decision','Confirm_Count','Oppose_Count',
              'Confirm_Families','Oppose_Families','V55_Active_System_Names',
-             'V55_Raw_BigAl','V55_Raw_Pathi','V55_Raw_Miner','V55_Raw_STAT',
-             'V55_Raw_PT','V55_Raw_Market_Rich','Quote_State']
-    st.dataframe(shown[[x for x in summary if x in shown]].rename(
-        columns=_overlay_names),use_container_width=True,hide_index=True)
+             'V55_Active_System_Rules',
+             'Backend_Home_Spread','Backend_Away_Spread',
+             'V55_Raw_BigAl','V55_Raw_Pathi','V55_Raw_Miner',
+             'Quote_State']
+    _priced=shown.get('Quote_State',pd.Series('',index=shown.index)).fillna('').astype(str).str.startswith('FRESH_')
+    _priced_board=shown.loc[_priced].copy()
+    _unpriced=len(shown)-len(_priced_board)
+    _no_core=int(_priced_board.get('Selected_Team',pd.Series(index=_priced_board.index,dtype='object')).isna().sum())
+    st.caption(f'Current sportsbook board: {len(_priced_board)} priced games. '
+               f'{_no_core} priced games have no selected CORE side. '
+               f'{_unpriced} other forecasts are available in All upcoming forecasts below. '
+               'Sportsbook Market shows the actual home and away lines even if CORE makes no pick. '
+               'CORE Selection Status explains why a priced game has no model selection.')
+    _display_board=_priced_board[[x for x in summary if x in _priced_board]].copy()
+    if 'Selected_Team' in _display_board:
+        _display_board['Selected_Team']=_display_board['Selected_Team'].fillna('NO CORE PICK').replace('','NO CORE PICK')
+    if 'V55_Active_System_Rules' in _display_board:
+        _display_board['V55_Active_System_Rules']=_display_board['V55_Active_System_Rules'].fillna('—')
+    # Missing research feed is not an observed zero; make that distinction clear.
+    for _c in ('Confirm_Families','Oppose_Families','V55_Active_System_Names'):
+        if _c in _display_board:_display_board[_c]=_display_board[_c].fillna('—')
+    st.dataframe(_display_board.rename(columns={**_overlay_names,
+        'V55_Active_System_Rules':'System Rules (verified history)'}),
+        use_container_width=True,hide_index=True)
     _raw_matched=int(shown.get('V55_Raw_Overlay_State',pd.Series(index=shown.index,dtype='object')).eq(
                      'MATCHED_PRE_GAME_ENRICHED_SIDE__UNQUALIFIED').sum())
     _raw_count_only=int(shown.get('V55_Raw_Overlay_State',pd.Series(index=shown.index,dtype='object')).eq(
                      'QUOTE_HOME_SIDE_COUNTS_ONLY').sum())
-    st.caption(f'Raw system/market overlays: {_raw_matched} side-matched enriched records; '
-               f'{_raw_count_only} additional home-side count-only records. '
-               'Raw signals are observation context, NOT V5.5 qualified support votes. '
-               'NOT_PUBLISHED means the underlying source did not supply the field.')
+    _live_source_audit=_audit.get('v55_live_system_evaluation') or {}
+    st.caption(f'Enriched market overlays: {_raw_matched} side-matched records; '
+               f'{_raw_count_only} home-side count-only records. '
+               f"Separately calculated live systems: {_live_source_audit.get('big_al_exact_firings','—')} exact Big Al, "
+               f"{_live_source_audit.get('pathi_exact_firings','—')} exact Pathi, "
+               f"{_live_source_audit.get('miner_vote_rows','—')} original Miner vote entries. "
+               'Trigger context is not automatically a qualified bet confirmation. '
+               'NOT_PUBLISHED means that source did not supply this field.')
     _extra_v55=st.selectbox('Additional V5.5 tables — load only when selected',
-        ('Main board only','Full technical/model/price table','Evidence source and timestamp audit'),
+        ('Main board only','All upcoming forecasts (including unpriced)',
+         'Historical systems and W/L histories (click to load)',
+         'Full technical/model/price table','Evidence source and timestamp audit'),
         index=0,key='ncaaf-v55-lazy-detail-tables')
+    if _extra_v55=='All upcoming forecasts (including unpriced)':
+        _all=shown[[x for x in summary if x in shown]].copy()
+        if 'Selected_Team' in _all:
+            _all['Selected_Team']=_all['Selected_Team'].fillna('NO CORE PICK').replace('','NO CORE PICK')
+        st.dataframe(_all.rename(columns=_overlay_names),use_container_width=True,hide_index=True)
+    elif _extra_v55=='Historical systems and W/L histories (click to load)':
+        _active_ids=set()
+        for _names in shown.get('V55_Active_System_Names',pd.Series(dtype='object')).dropna().astype(str):
+            _active_ids.update(x.strip() for x in _names.split('|') if x.strip())
+        _ncaaf_v55_historical_systems_view(_active_ids)
     if _extra_v55=='Full technical/model/price table':
         st.dataframe(shown[[x for x in columns if x in shown]].rename(
             columns=_overlay_names),use_container_width=True,hide_index=True)
