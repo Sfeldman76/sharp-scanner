@@ -520,3 +520,244 @@ def refresh_market_only(*,storage_client,bucket_name='sharp-models',now=None,
         'probability_calibration':report.get('probability_calibration'),
         'historical_market_vintage_certified':False},
         storage_client=storage_client,bucket_name=bucket_name,log_func=log_func)
+
+# Consolidated exact-recipe retrospective replay. No extra Python module required.
+REPLAY_ROOT = "research/ncaaf/v55/ats_primary"
+REPLAY_VERSION = "V55_EXACT_RECIPE_EXPANDING_YEAR_WEEKLY_STATE_20261023"
+V4_STATE=('power_diff','off_diff','def_diff','expected_margin','expected_team_points',
+          'expected_opp_points','power_uncertainty','prior_games_min','rest_diff',
+          'prior_margin_recent_diff','prior_margin_season_diff','site_adv')
+
+class ReplayHold(RuntimeError): pass
+
+def _datetime(v):
+    x=pd.to_datetime(v,errors='coerce',utc=True)
+    return x
+
+def _hash(b): return hashlib.sha256(b).hexdigest()
+
+def validate_historical_games(frame, *, last_season=2025):
+    needed={'Season','Game_Date','Team_Norm','Opponent_Norm','Actual_Margin',
+            'Actual_Total','Is_Home','Source_Game_ID','Team','Opponent'}
+    if not isinstance(frame,pd.DataFrame) or frame.empty:
+        raise ReplayHold('missing 2013-2025 canonical CFBD historical games')
+    if needed-set(frame):
+        raise ReplayHold('CFBD historical fields missing '+str(sorted(needed-set(frame))))
+    f=frame.copy()
+    f['Season']=pd.to_numeric(f.Season,errors='coerce')
+    f['Game_Date']=_datetime(f.Game_Date)
+    if (f.Season.isna().any() or f.Season.lt(2013).any() or f.Season.gt(last_season).any()
+        or f.Game_Date.isna().any()):
+        raise ReplayHold('history includes invalid year, date, or sealed 2026 season')
+    if not f.Is_Home.astype(str).isin(('1','1.0','True','true')).all():
+        raise ReplayHold('historical replay requires one canonical HOME row per game')
+    if f.Source_Game_ID.astype(str).duplicated().any():
+        raise ReplayHold('duplicate historical CFBD game IDs')
+    for col in ('Actual_Margin','Actual_Total'):
+        f[col]=pd.to_numeric(f[col],errors='coerce')
+        if not np.isfinite(f[col]).all():raise ReplayHold('missing result '+col)
+    f=f.sort_values(['Game_Date','Source_Game_ID'],kind='stable').reset_index(drop=True)
+    return f
+
+def _week_start(ts):
+    return (ts-pd.Timedelta(days=int(ts.weekday()))).normalize()
+
+def _training_and_future_features(v4,train,test,cutoff):
+    # No label for any current-week or later game may enter the state builder.
+    t=test.copy()
+    # A kickoff is not a final whistle. Keep a 24-hour result-availability
+    # embargo before weekly state updates unless certified final times exist.
+    future=t.Game_Date.ge(cutoff-pd.Timedelta(hours=24))
+    t.loc[future,['Actual_Margin','Actual_Total']]=np.nan
+    base=pd.concat([train,t],ignore_index=True,sort=False)
+    base['Game_Date']=_datetime(base.Game_Date)
+    dyn=v4.dynamic_features(base,gain=.13,retain=.65)
+    if len(dyn)!=len(base):raise ReplayHold('V4 state output row count changed')
+    return pd.concat([base.reset_index(drop=True),dyn.reset_index(drop=True)],axis=1)
+
+def rolling_v55_game_predictions(history, *, v4=None, begin_season=2017,
+                                 end_season=2025,min_train_games=1500,
+                                 selected_recipe_timestamp='2026-10-21T00:00:00Z',
+                                 log_func=print):
+    """Generate each historical home margin using the identical V5.5 fit call.
+
+    v4 is optional for deterministic mock-based tests. In real production it
+    imports the SAME ncaaf_margin_tournament_v4 module as live V5.5.
+    """
+    if v4 is None:
+        import ncaaf_margin_tournament_v4 as v4
+    f=validate_historical_games(history,last_season=end_season)
+    if begin_season>2025 or end_season!=2025 or begin_season<=2013:
+        raise ReplayHold('expected historical expanding folds ending 2025; 2026 sealed')
+    columns=['V4_'+x for x in V4_STATE]
+    records=[];folds=[]
+    for year in range(begin_season,end_season+1):
+        # January bowl games from the preceding season may not be final at
+        # the January 1 training freeze. Exclude them instead of peeking.
+        train_freeze=pd.Timestamp(f'{year}-01-01T00:00:00Z')
+        tr=f.loc[f.Season.lt(year) & f.Game_Date.lt(train_freeze)].copy()
+        ts=f.loc[f.Season.eq(year)].copy()
+        if ts.empty:continue
+        if len(tr)<min_train_games:raise ReplayHold(f'{year}: historical training games only {len(tr)}')
+        # Historical target labels are never provided to any fitting API from
+        # the predicted year, even when prior in-year outcomes update state.
+        fold_parts=[];static_train=None;chosen=None
+        weeks=sorted({_week_start(x) for x in ts.Game_Date})
+        for week_start in weeks:
+            this_week=ts.Game_Date.map(_week_start).eq(week_start)
+            if not this_week.any():continue
+            if (ts.loc[this_week,'Game_Date'] < week_start).any():
+                raise ReplayHold('weekly prediction begins after kickoff')
+            combo=_training_and_future_features(v4,tr,ts,week_start)
+            prev=combo.iloc[:len(tr)].copy()
+            if static_train is None:
+                chosen=list(v4._cfbd_cols(prev,prev)[:65])
+                if len(chosen)<10:raise ReplayHold(f'{year}: V4 CFBD feature selection insufficient')
+                all_fields=columns+chosen
+                missing=set(all_fields)-set(prev)
+                if missing:raise ReplayHold(f'{year}: V5.5 actual features missing {sorted(missing)}')
+                static_train=prev
+            # The output V4 training features cannot change with as-of week.
+            # This test detects a future-season state leaking back into train.
+            else:
+                sample_cols=all_fields
+                a=static_train[sample_cols].apply(pd.to_numeric,errors='coerce').to_numpy(float)
+                b=prev[sample_cols].apply(pd.to_numeric,errors='coerce').to_numpy(float)
+                if not np.allclose(a,b,equal_nan=True,rtol=1e-8,atol=1e-8):
+                    raise ReplayHold(f'{year}: future games changed historical training features')
+            future=combo.iloc[len(tr):].reset_index(drop=True)
+            p=future.loc[this_week.to_numpy()].copy()
+            p['__prediction_at_utc']=week_start
+            p['__training_year']=year-1
+            fold_parts.append(p)
+        if not fold_parts:raise ReplayHold(f'{year}: no current-year predictions')
+        preds=pd.concat(fold_parts,ignore_index=True)
+        if (preds.Source_Game_ID.astype(str).duplicated().any()
+            or set(preds.Source_Game_ID.astype(str))!=set(ts.Source_Game_ID.astype(str))):
+            raise ReplayHold(f'{year}: historical replay dropped/duplicated a game')
+        if not (preds['__prediction_at_utc']<preds.Game_Date).all():
+            raise ReplayHold(f'{year}: prediction after kickoff')
+        # Single fit per season. The live fitting call and feature ordering are
+        # used without a reimplementation, change of estimator or fitting args.
+        y=static_train.Actual_Margin.to_numpy(float)
+        margin=v4._matrix_fit_predict(static_train,preds,all_fields,y,kind='hgb')
+        margin=np.asarray(margin,dtype=float).reshape(-1)
+        if len(margin)!=len(preds) or not np.isfinite(margin).all():
+            raise ReplayHold(f'{year}: invalid V5.5 margin predictions')
+        train_cutoff=f'{year}-01-01T00:00:00Z'
+        # All prior-year results must have been completed before the testing
+        # season started. Exclude cross-calendar postseason games not final.
+        if tr.Game_Date.max()>=pd.Timestamp(train_cutoff):
+            raise ReplayHold(f'{year}: prior season game after training cutoff')
+        for (_,row),pred_margin in zip(preds.iterrows(),margin):
+            actual=float(row.Actual_Margin) if math.isfinite(float(row.Actual_Margin)) else np.nan
+            # The state builder masks the current week, but scores are restored
+            # only in this POST-PREDICTION evaluation artifact.
+            if not np.isfinite(actual):
+                original=ts.loc[ts.Source_Game_ID.eq(row.Source_Game_ID)]
+                actual=float(original.Actual_Margin.iloc[0])
+            records.append({'game_id':str(row.Source_Game_ID),'season':year,
+                'kickoff_utc':row.Game_Date.isoformat(),
+                'home_team':str(row.Team),'away_team':str(row.Opponent),
+                'model_id':CHAMPION,'model_home_margin':float(pred_margin),
+                'actual_home_margin':actual,
+                'margin_error':float(pred_margin)-actual,
+                'prediction_at_utc':row['__prediction_at_utc'].isoformat(),
+                'training_end_utc':tr.Game_Date.max().isoformat(),
+                'fold_id':f'V55_EXPANDING_{year}',
+                'fit_through_season':year-1,
+                'model_recipe_selected_at_utc':selected_recipe_timestamp,
+                'recipe_selection_retrospective':True,
+                'model_fit_excludes_test_season':True,
+                'test_season_prior_scores_for_state_only':True,
+                'historical_cfbd_feature_vintage_certified':False,
+                'bet_authority':0})
+        folds.append({'season':year,'train_games':len(tr),'predicted_games':len(preds),
+                      'fit_through_season':year-1,'features':len(all_fields),
+                      'week_snapshots':len(weeks),
+                      'model_implementation':'ncaaf_margin_tournament_v4._matrix_fit_predict(kind=hgb)',
+                      'test_year_fit_labels':0,'recipe_selection_retrospective':True})
+        log_func(f'[NCAAF-V55-EXACT-ROLLFORWARD] year={year} train={len(tr)} predict={len(preds)} features={len(all_fields)} weeks={len(weeks)}')
+    if not records:raise ReplayHold('no historical replay predictions generated')
+    output=pd.DataFrame(records).sort_values(['season','kickoff_utc','game_id']).reset_index(drop=True)
+    if output.game_id.duplicated().any():raise ReplayHold('duplicate replay outputs')
+    return output,folds
+
+def _season_metrics(games):
+    import numpy as np
+    rows=[]
+    for year,d in games.groupby('season'):
+        r=d.margin_error.to_numpy(float)
+        rows.append({'season':int(year),'games':len(d),
+                     'rmse_margin':float(np.sqrt(np.mean(r*r))),
+                     'mae_margin':float(np.mean(np.abs(r))),
+                     'mean_pred_minus_actual_margin':float(np.mean(r)),
+                     'correlation_pred_actual':float(np.corrcoef(d.model_home_margin,d.actual_home_margin)[0,1]) if len(d)>2 else None})
+    return pd.DataFrame(rows)
+
+def run_historical_oos_replay(*, storage_client,bucket_name='sharp-models',log_func=print,
+                              bq_client=None,output_prefix=None,history_frame=None,
+                              v4=None,initial_test_season=2017,**ignored):
+    """Runs from the SAME heavy-research route. No old CORE/2026 source reads.
+
+    Delivers useful retrospective model diagnostics even if timestamped book
+    lines are unavailable. Verified ATS is a subsequent gated stage.
+    """
+    import ncaaf_v552_live as v55
+    if history_frame is None:
+        import ncaaf_v54_cfbd_truth as truth
+        if bq_client is None:
+            from google.cloud import bigquery
+            bq_client=bigquery.Client(project='sharplogger')
+        # No archive repair/mutation during model evaluation.
+        import os
+        old=os.environ.get('NCAAF_CFBD_ARCHIVE_AUTOREPAIR')
+        os.environ['NCAAF_CFBD_ARCHIVE_AUTOREPAIR']='0'
+        try:
+            history_frame,_,source_audit=truth.load_from_bigquery(bq_client,log_func=log_func)
+        finally:
+            if old is None:os.environ.pop('NCAAF_CFBD_ARCHIVE_AUTOREPAIR',None)
+            else:os.environ['NCAAF_CFBD_ARCHIVE_AUTOREPAIR']=old
+    else:source_audit={'source':'INJECTED_TEST_FRAME'}
+    output,folds=rolling_v55_game_predictions(history_frame,v4=v4,
+          begin_season=initial_test_season,log_func=log_func)
+    source_bytes=__import__('pathlib').Path(v55.__file__).read_bytes()
+    hash_model=_hash(source_bytes)
+    game_bytes=output.to_csv(index=False).encode()
+    metrics=_season_metrics(output)
+    metric_bytes=metrics.to_csv(index=False).encode()
+    runid=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    prefix=f'{REPLAY_ROOT}/replay_runs/{runid}'
+    audit={
+        'status':'COMPLETE_V55_EXACT_RECIPE_RETROSPECTIVE_MARGINS',
+        'model':'NONLINEAR_HGB','model_implementation':'ncaaf_v552_live + ncaaf_margin_tournament_v4',
+        'deployed_trainer_sha256':hash_model,
+        'live_recipe_uses':'v4.dynamic_features gain=.13 retain=.65 + V4 state fields + first65 CFBD + v4._matrix_fit_predict kind=hgb',
+        'source':'sharplogger.sharp_data.ncaaf_cfbd_archive_research_v1',
+        'source_audit':str(source_audit)[:3000],
+        'folds':folds,'training_test_season_labels_held_out':True,
+        'retrospective_recipe_selected_after_historical_predictions':True,
+        'historical_pregame_cfbd_feature_vintage_certified':False,
+        'historical_bookmaker_quote_vintage_certified':False,
+        'historical_brain_signal_vintage_certified':False,
+        'ats_results_calculated':False,
+        'independent_holdout_claim':False,'production_modified':False,
+        'bet_authority':0,'policy_promotion':False,
+        'predictions_sha256':_hash(game_bytes),
+        'season_metrics_sha256':_hash(metric_bytes),'games':len(output),
+        'prefix':prefix,
+    }
+    bucket=storage_client.bucket(bucket_name)
+    for path,payload,ct in [('game_predictions.csv',game_bytes,'text/csv'),
+                            ('season_metrics.csv',metric_bytes,'text/csv'),
+                            ('audit.json',json.dumps(audit,default=str,indent=2,sort_keys=True).encode(),'application/json')]:
+        bucket.blob(prefix+'/'+path).upload_from_string(payload,content_type=ct,if_generation_match=0)
+    # Latest pointer updated only after validated artifact publication.
+    bucket.blob(f'{REPLAY_ROOT}/latest_replay_status.json').upload_from_string(
+        json.dumps({'status':audit['status'],'run_prefix':prefix,
+                    'total_games':len(output),'ats_pending':'HISTORICAL_MARKET_AND_BRAIN_VINTAGES',
+                    'production_modified':False},sort_keys=True),content_type='application/json')
+    log_func(f'[NCAAF-V55-EXACT-ROLLFORWARD] status={audit["status"]} games={len(output)} output=gs://{bucket_name}/{prefix} ATS=HOLD_MARKET_SOURCE_VINTAGE')
+    return {'status':audit['status'],'output_prefix':f'gs://{bucket_name}/{prefix}',
+            'games':len(output),'folds':len(folds),'production_modified':False,
+            'bet_authority':0,'ats_verified':False}

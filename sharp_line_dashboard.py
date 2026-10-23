@@ -268,7 +268,7 @@ np.random.seed(GLOBAL_SEED)
 
 
 # === Constants and Config ===
-API_KEY = "3879659fe861d68dfa2866c211294684"
+API_KEY = os.environ.get("ODDS_API_KEY", "")
 #FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
 REDIRECT_URI = "https://sharp-scanner-723770381669.us-east4.run.app/"  # no longer used for login, just metadata
 
@@ -52110,6 +52110,49 @@ if not HEADLESS:
         )
 
     
+    # Permanent V5.5 Heavy Research: independently verifiable model replay viewer.
+    # Load nothing on normal board render. Historical markets/brain vintage
+    # still gate any ATS or policy claim regardless of the RMSE shown here.
+    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_heavy":
+        with st.expander("V5.5 rolling model replay — historical predictions (click to load)", expanded=False):
+            if st.button("Load latest V5.5 historical model predictions", key="v55_load_rollforward_20261023"):
+                try:
+                    import hashlib as _v55_hl_hash
+                    from io import StringIO as _v55_hl_io
+                    _hl_bucket=storage.Client().bucket(MODEL_BUCKET)
+                    _hl_root="research/ncaaf/v55/ats_primary"
+                    _hl_latest=json.loads(_hl_bucket.blob(_hl_root+"/latest_status.json").download_as_text())
+                    _hl_pointer=json.loads(_hl_bucket.blob(_hl_root+"/latest_replay_status.json").download_as_text())
+                    _hl_prefix=str(_hl_pointer.get("run_prefix") or "")
+                    if not _hl_prefix.startswith(_hl_root+"/replay_runs/"):
+                        raise RuntimeError("No verified V5.5 replay run prefix")
+                    _hl_audit=json.loads(_hl_bucket.blob(_hl_prefix+"/audit.json").download_as_text())
+                    if (_hl_audit.get("status")!="COMPLETE_V55_EXACT_RECIPE_RETROSPECTIVE_MARGINS"
+                            or _hl_audit.get("model")!="NONLINEAR_HGB"
+                            or _hl_audit.get("production_modified") is not False):
+                        raise RuntimeError("Historical replay audit is incomplete or wrong model")
+                    _hl_m=_hl_bucket.blob(_hl_prefix+"/season_metrics.csv").download_as_bytes()
+                    _hl_p=_hl_bucket.blob(_hl_prefix+"/game_predictions.csv").download_as_bytes()
+                    if (_v55_hl_hash.sha256(_hl_m).hexdigest()!=_hl_audit.get("season_metrics_sha256")
+                            or _v55_hl_hash.sha256(_hl_p).hexdigest()!=_hl_audit.get("predictions_sha256")):
+                        raise RuntimeError("Historical replay file checksum mismatch")
+                    _hl_metrics=pd.read_csv(_v55_hl_io(_hl_m.decode("utf-8")))
+                    _hl_games=pd.read_csv(_v55_hl_io(_hl_p.decode("utf-8")))
+                    st.write({"model":"NONLINEAR_HGB", "predicted_games":len(_hl_games),
+                              "seasons":sorted(_hl_games.season.unique().tolist()),
+                              "latest_heavy_status":_hl_latest.get("status"),
+                              "source_vintage_certified":_hl_audit.get("historical_pregame_cfbd_feature_vintage_certified")})
+                    st.warning("Retrospective V5.5-recipe margin diagnostics only. Current model recipe was selected later; "
+                               "historical feature, bookmaker-line and brain signal timestamps are not fully certified. "
+                               "Do not interpret this as independently verified ATS or a profitable betting strategy.")
+                    st.dataframe(_hl_metrics, use_container_width=True, hide_index=True)
+                    _hl_season=st.selectbox("Replay season",sorted(_hl_games.season.unique().tolist()),
+                                            key="v55_replay_year_20261023")
+                    _hl_slice=_hl_games.loc[_hl_games.season.eq(_hl_season)]
+                    st.dataframe(_hl_slice, use_container_width=True, hide_index=True)
+                except Exception as _hl_exc:
+                    st.warning("V5.5 model replay unavailable: "+type(_hl_exc).__name__+": "+str(_hl_exc)[:350])
+
     # V5.5 optional research viewer. NEVER load historical tables on the first
     # NCAAF page render. Research artifacts cannot cast Production V1 votes.
     if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_heavy":

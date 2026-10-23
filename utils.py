@@ -763,7 +763,7 @@ def read_ncaaf_v13_forward_shadow_summary(client=None, days: int = 60) -> pd.Dat
         logging.warning("[V13.3.7-FORWARD-SUMMARY] unavailable=%s:%s",type(e).__name__,e)
         return pd.DataFrame()
 GCS_BUCKET = "sharp-models"
-API_KEY = "3879659fe861d68dfa2866c211294684"
+API_KEY = os.environ.get("ODDS_API_KEY", "")
 bq_client = bigquery.Client(project=GCP_PROJECT_ID)
 gcs_client = storage.Client(project=GCP_PROJECT_ID)
 
