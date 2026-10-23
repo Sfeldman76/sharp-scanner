@@ -1304,6 +1304,25 @@ def main():
             )
             if not isinstance(_research,dict) or _research.get("status")!="NCAAF_RESEARCH_V2_COMPLETE":
                 raise RuntimeError(f"[NCAAF-HEAVY-RUN] research report failed status={getattr(_research,'get',lambda *_:None)('status')}")
+            # NCAAF_FULL_HISTORY_COMBINED_BRAIN_SHADOW_HOOK_V1
+            # Research-only: 2013-2025 all-brain history, never live bet authority.
+            # Missing archival events/eligibility remain HOLD, not inferred non-triggers.
+            try:
+                from ncaaf_heavy_brain_bridge import run_heavy_brain_shadow as _run_full_history_brains
+                _historical_brains = _run_full_history_brains(
+                    storage_client=gcs, bucket_name=bucket, log_func=log_func,
+                    legacy_cache=_cache, legacy_research=_research,
+                    v55_primary_result=_v55_primary,
+                )
+                log_func("[NCAAF-HEAVY-COMBINED-BRAINS] status="
+                         + str(_historical_brains.get("status", "HOLD"))
+                         + " reason=" + str(_historical_brains.get("reason", "UNKNOWN"))
+                         + " bet_authority=0 production_mutation=FALSE")
+            except Exception as _brain_shadow_exc:
+                log_func("[NCAAF-HEAVY-COMBINED-BRAINS] status=HOLD type="
+                         + type(_brain_shadow_exc).__name__
+                         + " reason=" + str(_brain_shadow_exc)[:250]
+                         + " bet_authority=0 production_mutation=FALSE")
             _miners=_research.get("system_miner_v3") or {}
             _confirmed=sum(int((v or {}).get("confirmed_mechanism_count",0) or 0) for v in _miners.values())
             _best=_core.get("best_challenger") or {}

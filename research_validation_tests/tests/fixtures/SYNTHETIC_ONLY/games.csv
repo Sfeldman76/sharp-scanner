@@ -1,0 +1,14 @@
+season,game_id,kickoff_utc,actual_home_margin,home_spread,quote_at_utc,quote_source,quote_snapshot_id,quote_vintage_certified
+2013,302013,2013-10-07T20:00:00Z,8,-3,2013-10-06T09:00:00Z,verified_archive_provider,fixture-quote-2013,True
+2014,302014,2014-10-07T20:00:00Z,8,-3,2014-10-06T09:00:00Z,verified_archive_provider,fixture-quote-2014,True
+2015,302015,2015-10-07T20:00:00Z,8,-3,2015-10-06T09:00:00Z,verified_archive_provider,fixture-quote-2015,True
+2016,302016,2016-10-07T20:00:00Z,8,-3,2016-10-06T09:00:00Z,verified_archive_provider,fixture-quote-2016,True
+2017,302017,2017-10-07T20:00:00Z,8,-3,2017-10-06T09:00:00Z,verified_archive_provider,fixture-quote-2017,True
+2018,302018,2018-10-07T20:00:00Z,8,-3,2018-10-06T09:00:00Z,verified_archive_provider,fixture-quote-2018,True
+2019,302019,2019-10-07T20:00:00Z,8,-3,2019-10-06T09:00:00Z,verified_archive_provider,fixture-quote-2019,True
+2020,302020,2020-10-07T20:00:00Z,8,-3,2020-10-06T09:00:00Z,verified_archive_provider,fixture-quote-2020,True
+2021,302021,2021-10-07T20:00:00Z,8,-3,2021-10-06T09:00:00Z,verified_archive_provider,fixture-quote-2021,True
+2022,302022,2022-10-07T20:00:00Z,8,-3,2022-10-06T09:00:00Z,verified_archive_provider,fixture-quote-2022,True
+2023,302023,2023-10-07T20:00:00Z,8,-3,2023-10-06T09:00:00Z,verified_archive_provider,fixture-quote-2023,True
+2024,302024,2024-10-07T20:00:00Z,8,-3,2024-10-06T09:00:00Z,verified_archive_provider,fixture-quote-2024,True
+2025,302025,2025-10-07T20:00:00Z,8,-3,2025-10-06T09:00:00Z,verified_archive_provider,fixture-quote-2025,True

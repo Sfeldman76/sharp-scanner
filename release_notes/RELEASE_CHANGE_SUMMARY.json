@@ -1,0 +1,39 @@
+{
+  "original_file_count": 125,
+  "current_file_count": 147,
+  "existing_files_modified": {
+    "train_job.py": {
+      "before": "62fb2da8c9f897d334f7e0411eed3074e3f3b8718141cf8cbc47005dc141a197",
+      "after": "b3671c3b901bf5dfaffea4596350e1c6025736f7ace1b3c643e663f8eabc8f98"
+    }
+  },
+  "existing_files_removed": [],
+  "new_files_added": [
+    "README_FULL_V55_MODEL_20261023.md",
+    "audit_bigquery_brain_sources.py",
+    "ncaaf_brain_full_history.py",
+    "ncaaf_heavy_brain_bridge.py",
+    "release_notes/train_job_before_full_history_merge.py.txt",
+    "release_notes/train_job_combined_brain_merge.diff",
+    "research_validation_tests/DATA_SCHEMA.md",
+    "research_validation_tests/apply_to_repository.py",
+    "research_validation_tests/audit_bigquery_brain_sources.py",
+    "research_validation_tests/ncaaf_brain_full_history.py",
+    "research_validation_tests/ncaaf_heavy_brain_bridge.py",
+    "research_validation_tests/preflight_live_integration.py",
+    "research_validation_tests/tests/fixtures/SYNTHETIC_ONLY/core.csv",
+    "research_validation_tests/tests/fixtures/SYNTHETIC_ONLY/coverage.csv",
+    "research_validation_tests/tests/fixtures/SYNTHETIC_ONLY/eligibility.csv",
+    "research_validation_tests/tests/fixtures/SYNTHETIC_ONLY/games.csv",
+    "research_validation_tests/tests/fixtures/SYNTHETIC_ONLY/rule_evaluations.csv",
+    "research_validation_tests/tests/fixtures/SYNTHETIC_ONLY/signals.csv",
+    "research_validation_tests/tests/fixtures/SYNTHETIC_ONLY/universe_manifest.csv",
+    "research_validation_tests/tests/test_brain_full_history.py",
+    "research_validation_tests/tests/test_heavy_brain_integration.py",
+    "research_validation_tests/tests/test_live_preflight.py"
+  ],
+  "unchanged_original_files": 124,
+  "production_v1_original_sha256": "58e234a523001fcceb030ce42ef5af5e3082fbe29679c65031681a79d4086bca",
+  "nfl_engine_original_sha256": "d9215e0c81fd6b92d22c946e36e3f13869f6f2468ecec7156080cd597bc63e31",
+  "status": "LOCAL_REPO_MERGED_NOT_CLOUD_DEPLOYED"
+}
