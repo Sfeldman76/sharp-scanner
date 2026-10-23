@@ -1401,9 +1401,11 @@ def _v55_evaluate_existing_live_systems(board, market, *, bq_client,
     if quote_rows.empty:return quote_rows,audit
     try:
         if utils_module is None:import utils as utils_module
-        # Two prior seasons are enough to derive live form/role/revenge inputs.
-        # The frozen historical qualification still uses the FULL 2013-25 set.
-        updated=utils_module.attach_pathi_bigal_backend_features(quote_rows,'NCAAF',days_back=730)
+        # PARITY: the existing NCAAF backend defaults to all available history.
+        # Do not silently truncate its Big Al/Pathi state to two years when the
+        # original NFL/NCAAF multi-brain workflow uses the frozen full history.
+        # This only recalculates live SYSTEM FEATURES; CORE remains V5.5 frozen.
+        updated=utils_module.attach_pathi_bigal_backend_features(quote_rows,'NCAAF',days_back=None)
         if not isinstance(updated,pd.DataFrame) or len(updated)!=len(quote_rows):
             raise RuntimeError('LEGACY_LIVE_ENRICHMENT_ROW_COUNT_CHANGED')
         quote_rows=updated
@@ -1871,7 +1873,16 @@ def read_v55_research_miner_registry(*, storage_client=None, bucket_name=None):
             cond=[str(c) for c in rec.get('representative_conditions') or []]
             if not mid or not cond or mid in mechanisms:continue
             if any(x.startswith(('CORE_OOF_','SPEC_','CFBD_WEATHER_')) for x in cond):continue
-            if rec.get('incumbent_revalidation_status') in ('HOLD_NOT_EVALUABLE','LEGACY_CONTRACT_HOLD'):continue
+            # Match the original NCAAF _miner_live_authority_eligible contract:
+            # a legacy contract hold is not automatically a demotion if the
+            # exact previously frozen incumbent retained live eligibility.
+            # A genuinely non-evaluable hold stays out, and all of the OOS,
+            # disjointness, threshold, identity, and price checks still apply.
+            _inc_status=str(rec.get('incumbent_revalidation_status') or '')
+            if _inc_status=='HOLD_NOT_EVALUABLE':continue
+            if (_inc_status=='LEGACY_CONTRACT_HOLD' and
+                rec.get('incumbent_prior_live_authority_eligible',
+                        rec.get('live_authority_eligible',False)) is not True):continue
             if rec.get('confirmation_pass') is not True or rec.get('live_authority_eligible') is not True:continue
             if rec.get('split_audit',{}).get('disjoint') is not True:continue
             if int(rec.get('confirmation_n') or 0)<60 or float(rec.get('confirmation_rate') or 0)<0.56:continue
@@ -1923,7 +1934,9 @@ def derive_v55_miner_qualified_events(board, live_rows, registry, *, now=None):
     audit={'status':'NO_MINER_EVENTS','report_mechanisms':0,'live_source_rows':0,
            'structured_vote_rows':0,'matched_game_sides':0,'qualified_events':0,
            'source':'sharplogger.sharp_data.moves_with_features_merged',
-           'distinct_games':0,'distinct_mechanisms':0}
+           'distinct_games':0,'distinct_mechanisms':0,
+           'qualified_support':0,'qualified_conflicts':0,'vote_rejections':{},
+           'candidate_book_spread_pairs':0,'votes_considered':0}
     empty=pd.DataFrame(columns=cols)
     if not isinstance(registry,dict):
         audit['status']='RESEARCH_REGISTRY_UNAVAILABLE_FAIL_CLOSED';return empty,audit
@@ -1955,6 +1968,9 @@ def derive_v55_miner_qualified_events(board, live_rows, registry, *, now=None):
         audit['status']='REGISTRY_TIME_INVALID_OR_FUTURE';return empty,audit
     # One event per (game, mechanism, direction), retaining latest valid sighting.
     dedup={}
+    def reject(reason):
+        reasons=audit['vote_rejections']
+        reasons[reason]=reasons.get(reason,0)+1
     for _,r in board.iterrows():
         selected=_norm_team(r.get('Selected_Team'))
         if not selected:continue
@@ -1966,14 +1982,18 @@ def derive_v55_miner_qualified_events(board, live_rows, registry, *, now=None):
         gid=str(r.get('Game_ID') or '')
         selected_spread=_price(r.get('Current_Spread'))
         if not gid or selected_spread is None:continue
+        # An OOS-qualified mechanism can oppose CORE. Evaluate both sides of
+        # the SAME book's paired event; do not discard the opposing team's rule.
         hits=live.loc[(live['_home']==home)&(live['_away']==away)
-              &(live['_side']==selected)
+              &live['_side'].isin((home,away))
               &(live['_kick']-kick).abs().le(pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))
               &live['_obs'].le(now)&live['_obs'].lt(kick)&live['_obs'].ge(report_time)
               &((live['_obs'].le(quote)&(quote-live['_obs']).le(pd.Timedelta(minutes=90)))
                 |_v55_live_quote_time_eligible(live,quote,now))]
-        # A researched role/line trigger must apply at the *execution* spread.
-        hits=hits.loc[pd.to_numeric(hits['Value'],errors='coerce').sub(selected_spread).abs().le(.001)]
+        # For the opposite side, the verified executable spread is negated.
+        # Require exact book, side, and spread; never transpose a stale price.
+        expected=hits['_side'].eq(selected).map({True:selected_spread,False:-selected_spread})
+        hits=hits.loc[pd.to_numeric(hits['Value'],errors='coerce').sub(expected).abs().le(.001)]
         # The derived Miner rule may depend on market spread or role. Use the
         # EXACT sportsbook attached to the V5.5 selection, not another book.
         book=str(r.get('Backend_Quote_Book') or '').lower().strip()
@@ -1984,31 +2004,33 @@ def derive_v55_miner_qualified_events(board, live_rows, registry, *, now=None):
             hb=hb.mask(hb.isin(('','nan','none')),b2.fillna('').astype(str).str.lower().str.strip())
             hits=hits.loc[hb.eq(book)]
         if hits.empty:continue
+        audit['candidate_book_spread_pairs']+=1
         audit['matched_game_sides']+=1
         for _,x in hits.iterrows():
             votes=_v55_parse_structured_votes(x['NCAAF_RV22_Miner_Votes'])
             audit['structured_vote_rows']+=len(votes)
             for v in votes:
+                audit['votes_considered']+=1
                 mid=str(v.get('family_id') or '')
                 rule=rules.get(mid)
-                if rule is None:continue
-                if str(v.get('source_type') or '').upper()!='MINER':continue
-                if str(v.get('market') or '').lower()!='spreads':continue
-                if v.get('live_authority_eligible') is not True:continue
-                if v.get('live_authority_policy')!=V55_RESEARCH_MINER_POLICY:continue
-                if v.get('evidence_level')!='STRONG_VALIDATED':continue
-                if str(v.get('evidence_family_key') or '')!=rule['evidence_family_key']:continue
-                if str(v.get('rule') or '')!=rule['rule']:continue
+                if rule is None:reject('SYSTEM_ID_NOT_IN_FROZEN_REGISTRY');continue
+                if str(v.get('source_type') or '').upper()!='MINER':reject('SOURCE_TYPE_NOT_MINER');continue
+                if str(v.get('market') or '').lower()!='spreads':reject('NOT_SPREAD_MARKET');continue
+                if v.get('live_authority_eligible') is not True:reject('LIVE_AUTHORITY_FALSE');continue
+                if v.get('live_authority_policy')!=V55_RESEARCH_MINER_POLICY:reject('POLICY_VERSION_MISMATCH');continue
+                if v.get('evidence_level')!='STRONG_VALIDATED':reject('NOT_STRONG_VALIDATED');continue
+                if str(v.get('evidence_family_key') or '')!=rule['evidence_family_key']:reject('FAMILY_KEY_MISMATCH');continue
+                if str(v.get('rule') or '')!=rule['rule']:reject('RULE_CONDITIONS_MISMATCH');continue
                 try:
                     vote_n=int(v.get('confirmation_n') or 0)
                     vote_rate=float(v.get('confirmation_rate') or 0)
-                except (TypeError,ValueError,OverflowError):continue
-                if vote_n!=rule['n']:continue
-                if not math.isfinite(vote_rate) or abs(vote_rate-rule['rate'])>1e-8:continue
+                except (TypeError,ValueError,OverflowError):reject('VOTE_SAMPLE_METRICS_INVALID');continue
+                if vote_n!=rule['n']:reject('HOLDOUT_SAMPLE_COUNT_MISMATCH');continue
+                if not math.isfinite(vote_rate) or abs(vote_rate-rule['rate'])>1e-8:reject('HOLDOUT_RATE_MISMATCH');continue
                 target=_norm_team(v.get('target'))
-                if target not in (home,away):continue
+                if target not in (home,away):reject('VOTE_TARGET_TEAM_MISMATCH');continue
                 expected_target=home if rule['target']=='PLAY_ON' else away if rule['target']=='FADE' else None
-                if expected_target is None or target!=expected_target:continue
+                if expected_target is None or target!=expected_target:reject('FROZEN_DIRECTION_MISMATCH');continue
                 obs=x['_obs'];key=(gid,mid,target)
                 source_family=('PREDICTION_TRACKER' if v.get('uses_external_ratings_family') is True
                                else 'SYSTEM_MINER')
@@ -2022,6 +2044,10 @@ def derive_v55_miner_qualified_events(board, live_rows, registry, *, now=None):
                 if key not in dedup or obs>_timestamp(dedup[key]['Observed_At_UTC']):dedup[key]=payload
     emit=list(dedup.values())
     audit['qualified_events']=len(emit)
+    audit['qualified_support']=sum(_norm_team(x['Signal_Side'])==_norm_team(
+        board.loc[board['Game_ID'].astype(str).eq(x['Game_ID']),'Selected_Team'].iloc[0])
+        for x in emit)
+    audit['qualified_conflicts']=len(emit)-audit['qualified_support']
     audit['distinct_games']=len({x['Game_ID'] for x in emit})
     audit['distinct_mechanisms']=len({x['Signal_Family'] for x in emit})
     audit['status']='PASS' if emit else ('MATCHED_LIVE_ROWS_NO_QUALIFIED_TRIGGER' if audit['matched_game_sides'] else 'NO_VERIFIED_SAME_SIDE_ASOF_LIVE_ROWS')
