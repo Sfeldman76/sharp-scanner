@@ -8017,6 +8017,29 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
             log_func(f"[NCAAF-SYSTEM-LIBRARY-PRIOR] status=UNAVAILABLE error={type(_prev_exc).__name__}:{_prev_exc}")
         miners,incumbent_system_library_audit=_reconcile_incumbent_system_library(mg,sy,miners,_previous_report,dashboard_module=dashboard_module,log_func=log_func)
         context_family_cap_audit=_apply_v231_context_family_caps(miners,log_func=log_func)
+        # Export the exact CURRENT Miner mechanism predicates evaluated against
+        # this same enriched historical frame. This repairs the research handoff
+        # but is NOT a point-in-time certified replay or a substitute for OOS.
+        miner_exact_path_shadow_audit={"status":"HOLD_NOT_RUN","production_mutation":False,"bet_authority":0}
+        try:
+            from ncaaf_miner_exact_path_shadow_v1 import extract_exact_path_shadow, publish_shadow
+            _miner_exact_shadow=extract_exact_path_shadow(
+                mg, sy, miners,
+                lambda _market: _extended_atoms(
+                    mg,dashboard_module,for_live=False,market=_market,
+                    enforce_support_floor=False))
+            miner_exact_path_shadow_audit=publish_shadow(
+                storage_client,bucket_name,_miner_exact_shadow)
+            log_func("[NCAAF-MINER-EXACT-PATH-SHADOW] status="+str(miner_exact_path_shadow_audit.get("status"))+
+                     " mechanisms="+str(miner_exact_path_shadow_audit.get("mechanisms_cataloged"))+
+                     " firing_rows="+str(miner_exact_path_shadow_audit.get("retrospective_positive_firing_rows"))+
+                     " discovery_rep_changes="+str(miner_exact_path_shadow_audit.get("discovery_only_rep_differs_count"))+
+                     " source_vintage_certified=FALSE authority=0")
+        except Exception as _exact_path_exc:
+            miner_exact_path_shadow_audit={"status":"HOLD_ERROR","error_type":type(_exact_path_exc).__name__,
+                                         "error":str(_exact_path_exc),"production_mutation":False,"bet_authority":0}
+            log_func("[NCAAF-MINER-EXACT-PATH-SHADOW] HOLD_ERROR="+type(_exact_path_exc).__name__+
+                     ":"+str(_exact_path_exc)+" authority=0")
         system_results=_build_system_results(mg,sy,miners,dashboard_module=dashboard_module)
         published_system_results=_grade_published_ncaaf_systems(mg,sy)
         # Automatically certify only source-vintage-verifiable fixed published
@@ -8098,6 +8121,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"full_history_score_foundation":score_foundation,"system_miner_v3":miners,
                 "system_library_inventory":system_library_inventory,"system_library_change_audit":system_library_change_audit,"incumbent_system_library_audit":incumbent_system_library_audit,
                 "context_family_cap_audit":context_family_cap_audit,
+                "miner_exact_path_shadow_audit":miner_exact_path_shadow_audit,
                 "historical_state_context_bridge":historical_state_context_bridge,
                 "deep_context_bridge":deep_context_bridge,
                 "cfbd_context_bridge":cfbd_context_bridge,
