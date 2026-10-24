@@ -6771,6 +6771,10 @@ def _miner_live_authority_eligible(mech: dict[str,Any] | None) -> bool:
     the V2.2 report already published before this runtime patch remains usable.
     """
     m=mech or {}
+    # A recycled historical mechanism ID is never sufficient proof of
+    # eligibility. Keep the rule in research but fail closed for live votes.
+    if m.get("live_authority_collision_hold") or m.get("legacy_id_collision"):
+        return False
     # A previously validated incumbent whose exact historical inputs are
     # temporarily unavailable remains in the library, but is fail-closed for
     # live authority until exact-rule revalidation succeeds again.
@@ -7244,31 +7248,9 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     # Prediction Tracker mechanism shares EXTERNAL_RATINGS_FAMILY and can contribute
     # at most one vote. If qualified external mechanisms disagree on the target,
     # that correlated family abstains instead of being double-counted both ways.
-    def _collapse_independent_authority_votes(votes):
-        groups={}
-        for v in votes:
-            _key=(str(v.get("market") or ""),str(v.get("evidence_family_key") or v.get("family_id") or ""))
-            groups.setdefault(_key,[]).append(v)
-        kept=[]
-        for _key,_vv in groups.items():
-            _targets={str(v.get("target") or "") for v in _vv}
-            if len(_targets)!=1:
-                continue
-            def _rank(v):
-                try: _r=float(v.get("confirmation_rate") or 0)
-                except Exception: _r=0.0
-                try: _n=int(v.get("confirmation_n") or 0)
-                except Exception: _n=0
-                return (_r,_n)
-            _best=max(_vv,key=_rank)
-            _best=dict(_best)
-            _best["correlated_family_candidates"]=len(_vv)
-            _best["family_vote_collapsed"]=bool(len(_vv)>1)
-            kept.append(_best)
-        return kept
-
+    from ncaaf_miner_permanent_integrity_v4 import collapse_live_source_votes
     for _gid,_votes in list(authority_votes_by_game.items()):
-        authority_votes_by_game[_gid]=_collapse_independent_authority_votes(_votes)
+        authority_votes_by_game[_gid]=collapse_live_source_votes(_votes)
 
     # The full confirmed set is preserved separately for research display/prospective tracking.
     out["NCAAF_RV22_Miner_Votes"]=[authority_votes_by_game.get(k,[]) for k in out[keycol]]
@@ -8017,6 +7999,17 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
             log_func(f"[NCAAF-SYSTEM-LIBRARY-PRIOR] status=UNAVAILABLE error={type(_prev_exc).__name__}:{_prev_exc}")
         miners,incumbent_system_library_audit=_reconcile_incumbent_system_library(mg,sy,miners,_previous_report,dashboard_module=dashboard_module,log_func=log_func)
         context_family_cap_audit=_apply_v231_context_family_caps(miners,log_func=log_func)
+        # Permanent mechanism-definition identity repair. Recycled legacy IDs
+        # become immutable definition IDs with an explicit legacy alias map;
+        # ambiguous inherited live votes fail closed. Source-dependent
+        # agreement/Pathi/Big Al interactions are evaluated in SHADOW ONLY.
+        from ncaaf_miner_permanent_integrity_v4 import repair_recycled_ids, research_scenarios
+        miner_permanent_integrity_v4=repair_recycled_ids(miners)
+        log_func(f"[NCAAF-MINER-INTEGRITY-V4] status={miner_permanent_integrity_v4['status']} "
+                 f"rules={miner_permanent_integrity_v4['rules']} "
+                 f"collision_groups={miner_permanent_integrity_v4['recycled_legacy_id_groups']} "
+                 f"canonical_splits={miner_permanent_integrity_v4['canonical_ids_created']} "
+                 f"auto_promotion=FALSE production_core_mutation=FALSE")
         # Export the exact CURRENT Miner mechanism predicates evaluated against
         # this same enriched historical frame. This repairs the research handoff
         # but is NOT a point-in-time certified replay or a substitute for OOS.
@@ -8028,6 +8021,48 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 lambda _market: _extended_atoms(
                     mg,dashboard_module,for_live=False,market=_market,
                     enforce_support_floor=False))
+            _v4_outputs=research_scenarios(
+                _miner_exact_shadow["exact_firings"], _miner_exact_shadow["exact_mechanisms"])
+            _miner_exact_shadow.update(_v4_outputs)
+            # Permanent V5: search original enriched atom histories, not only
+            # previously winning Miner mechanism cofires. Each future-season
+            # recipe is selected using STRICTLY prior seasons. The REAL V5.5
+            # roll-forward (if present) supplies conditional CORE comparisons;
+            # legacy CORE OOF is forbidden as a substitute.
+            try:
+                from ncaaf_unified_history_miner_v5 import (
+                    run_full_history as _run_unified_full_history,
+                    load_current_v55_core as _load_verified_v55_history,
+                )
+                _v55_core_games,_v55_core_source=_load_verified_v55_history(storage_client,bucket_name)
+                _unified_results=_run_unified_full_history(
+                    mg,sy,
+                    lambda _market: _extended_atoms(
+                        mg,dashboard_module,for_live=False,market=_market,
+                        enforce_support_floor=False),
+                    core_games=_v55_core_games,existing_catalog=miners,
+                    markets=('spreads','totals','h2h'),
+                    first_test_year=2017,last_test_year=2025,max_depth=4,
+                )
+                _miner_exact_shadow.update(_unified_results)
+                _miner_exact_shadow['audit']['unified_full_history_miner_v5']={
+                    **_unified_results['audit_v5'],'v55_core_source':_v55_core_source}
+                log_func('[NCAAF-UNIFIED-HISTORY-MINER-V5] status='+
+                    str(_unified_results['audit_v5'].get('status'))+
+                    ' fold_recipes='+str(_unified_results['audit_v5'].get('season_forward_recipe_rows'))+
+                    ' exact_core_only=TRUE bet_authority=0')
+            except Exception as _v5_exc:
+                _miner_exact_shadow['audit']['unified_full_history_miner_v5']={
+                    'status':'HOLD_ERROR','error_type':type(_v5_exc).__name__,
+                    'error':str(_v5_exc),'bet_authority':0,
+                    'production_mutation':False}
+                log_func('[NCAAF-UNIFIED-HISTORY-MINER-V5] HOLD_ERROR='+
+                         type(_v5_exc).__name__+':'+str(_v5_exc)+' authority=0')
+            _miner_exact_shadow["mechanism_legacy_id_crosswalk_v4"]=pd.DataFrame(
+                miner_permanent_integrity_v4["legacy_alias_map"])
+            _miner_exact_shadow["audit"]["permanent_integrity_v4"]={
+                k:v for k,v in miner_permanent_integrity_v4.items() if k!="legacy_alias_map"}
+            _miner_exact_shadow["audit"]["source_independence_v4"]=_v4_outputs["integrity_v4_audit"]
             miner_exact_path_shadow_audit=publish_shadow(
                 storage_client,bucket_name,_miner_exact_shadow)
             log_func("[NCAAF-MINER-EXACT-PATH-SHADOW] status="+str(miner_exact_path_shadow_audit.get("status"))+
