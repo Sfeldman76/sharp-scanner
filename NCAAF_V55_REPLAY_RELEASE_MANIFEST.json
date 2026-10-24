@@ -1,0 +1,18 @@
+{
+  "base_release": "Sharp_Scanner_V55_Historical_Source_Recovery_20261024.zip",
+  "release": "NCAAF_V55_RETROSPECTIVE_BRAIN_REPLAY_V1_20261024",
+  "changed_original_files": [
+    "ncaaf_heavy_brain_bridge.py"
+  ],
+  "added_files": [
+    "README_NCAAF_V55_HISTORICAL_REPLAY_20261024.md",
+    "ncaaf_historical_brain_replay_v1.py",
+    "research_validation_tests/tests/test_historical_brain_replay_v1.py"
+  ],
+  "removed_original_files": [],
+  "production_v1_unchanged": true,
+  "nfl_unchanged": true,
+  "tests_passed": 50,
+  "cloud_validation_performed": false,
+  "bet_authority": 0
+}

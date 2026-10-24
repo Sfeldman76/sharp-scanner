@@ -19,6 +19,7 @@ import tempfile
 import pandas as pd
 from ncaaf_brain_full_history import RunConfig, report, write_output
 from ncaaf_brain_source_recovery import recover_existing_sources
+from ncaaf_historical_brain_replay_v1 import run_heavy_retrospective
 
 INPUTS = ("games", "core", "signals", "coverage", "eligibility", "rule_evaluations", "universe_manifest")
 RESEARCH_ROOT = "research/ncaaf/v55/combined_brains_shadow"
@@ -83,13 +84,19 @@ def _read_bigquery_inputs(env):
 
 
 def _write_gcs(storage_client, bucket_name, run_prefix, result_path, status, receipts, log_func,
-               recovery_frames=None):
+               recovery_frames=None, retrospective=None):
     bucket = storage_client.bucket(bucket_name)
     files = [("status.json", _serialized(status)), ("input_receipts.json", _serialized(receipts))]
     if recovery_frames:
         for source_name, source_frame in sorted(recovery_frames.items()):
             files.append(("recovered_uncertified/" + source_name + ".csv",
                           source_frame.to_csv(index=False).encode()))
+    if retrospective:
+        audit = retrospective.get("audit", {})
+        files.append(("retrospective_replay/audit.json", _serialized(audit)))
+        for name, frame in sorted(retrospective.items()):
+            if isinstance(frame, pd.DataFrame):
+                files.append(("retrospective_replay/" + name + ".csv", frame.to_csv(index=False).encode()))
     if result_path:
         for file in sorted(Path(result_path).glob("*.csv")):
             files.append((file.name, file.read_bytes()))
@@ -108,7 +115,7 @@ def _write_gcs(storage_client, bucket_name, run_prefix, result_path, status, rec
 
 def run_heavy_brain_shadow(*, storage_client, bucket_name="sharp-models", log_func=print,
                            legacy_cache=None, legacy_research=None, v55_primary_result=None,
-                           input_prefix=None, env=None, publish=True):
+                           input_prefix=None, env=None, publish=True, replay_source_frames=None):
     """Invoke *only* after heavy legacy system replay; never use caches as proof.
 
     If the seven immutable data sources are not accessible, return and publish
@@ -130,6 +137,7 @@ def run_heavy_brain_shadow(*, storage_client, bucket_name="sharp-models", log_fu
               "2026_selection_influence":0, "v55_primary":evidence}
     frames, receipts = {}, []
     recovery_frames = {}
+    retrospective = None
     result_path = None
     try:
         if prefix:
@@ -150,6 +158,27 @@ def run_heavy_brain_shadow(*, storage_client, bucket_name="sharp-models", log_fu
             log_func("[NCAAF-V55-HISTORICAL-BRAINS-SOURCE-RECOVERY] recovered=" +
                      ",".join(recovery_audit["recovered_inputs"]) +
                      " still_missing=" + ",".join(missing) + " authority=0")
+            # A separate *retrospective* lane now reconstructs explicitly
+            # defined research hypotheses from CFBD + historical context + PT.
+            # It never fills the five missing certified inputs above: no 2026
+            # promotion, no invented Big Al picks, and no 2024-25 OOS claim.
+            if str(env.get("NCAAF_BRAIN_RETROSPECTIVE_REPLAY_ENABLED", "1")).lower() not in ("0","false","no"):
+                retrospective = run_heavy_retrospective(
+                    storage_client=storage_client, bucket_name=bucket_name,
+                    core=recovery_frames.get("core"),
+                    source_frames=replay_source_frames,
+                    project=env.get("GOOGLE_CLOUD_PROJECT", "sharplogger"),
+                    dataset=env.get("NCAAF_HISTORY_DATASET", "sharp_data"),
+                    log_func=log_func)
+                audit = retrospective.get("audit", {})
+                status["retrospective_replay"] = {
+                    "status": audit.get("status", "HOLD"),
+                    "reason": audit.get("reason", "RESEARCH_ONLY_NO_ORIGINAL_VINTAGE_CERTIFICATION"),
+                    "covered_cfbd_games": (audit.get("source_coverage") or {}).get("cfbd", {}).get("games", 0),
+                    "strict_certified_brain_inputs_replaced": 0,
+                    "bet_authority": 0,
+                    "independent_holdout_certified": False,
+                }
         status["missing_inputs"] = missing
         if missing:
             status["reason"] = "HISTORICAL_BRAIN_EVENT_AND_COVERAGE_ARCHIVES_MISSING" if recovery_frames else "HISTORICAL_INPUTS_NOT_AVAILABLE_FOR_ALL_BRAINS"
@@ -184,7 +213,7 @@ def run_heavy_brain_shadow(*, storage_client, bucket_name="sharp-models", log_fu
     if publish:
         try:
             _write_gcs(storage_client,bucket_name,run_prefix,None,status,receipts,log_func,
-                       recovery_frames=recovery_frames)
+                       recovery_frames=recovery_frames, retrospective=retrospective)
         except Exception as exc:
             # Failure to publish shadow metadata cannot affect weekly models.
             log_func("[NCAAF-V55-HISTORICAL-BRAINS] SHADOW_PUBLICATION_FAILED "+type(exc).__name__+" "+str(exc)[:400])
