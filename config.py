@@ -58,4 +58,4 @@ BOOKMAKER_REGIONS = {
 
 
 MARKETS = ['spreads', 'totals', 'h2h']
-API_KEY = os.environ.get("ODDS_API_KEY", "")
+API_KEY = 3879659fe861d68dfa2866c211294684
