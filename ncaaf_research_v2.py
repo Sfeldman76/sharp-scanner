@@ -655,6 +655,22 @@ def _big_al_rating_observation_report(observations: list[dict[str,Any]], *, mine
     }
     from big_al_multilayer_attribution import analyze_observed_ratings
     report['multilayer_observation_attribution']=analyze_observed_ratings(observations,obs_rows)
+    # A newly specified research-only expert conviction rule. Do not replay it
+    # from a single game row or manufacture a certified Big Al release time;
+    # physical-game two-sided CFBD matching happens in the lightweight
+    # run_big_al_conviction_research.py job outside Heavy.
+    from big_al_conviction_differential_v1 import shadow_confirmation
+    report['conviction_differential_research'] = {
+        'status': 'REGISTERED_SHADOW__REQUIRES_TWO_SIDED_CFBD_FINGERPRINT',
+        'rule': 'BIG_AL_HIGH_CONVICTION_CONFIRMATION',
+        'shadow_evaluations': [shadow_confirmation(x, None) for x in ncaaf],
+        'eligible_rating_min': 6,
+        'independent_support_required': ['CORE', 'ONE_OOS_QUALIFIED_STAT_OR_SYSTEM_MINER'],
+        'source_age_and_release_verification_required': True,
+        'selection_2026_outcomes_used': False,
+        'bet_authority': 0,
+        'production_mutation': False,
+    }
     return report
 
 
