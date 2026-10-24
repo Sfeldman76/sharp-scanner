@@ -680,12 +680,24 @@ def _pt_team_key(x: Any) -> str:
     toks=[]
     for t in s.split(): toks.append(repl.get(t,t))
     s=" ".join(toks)
-    # Common tracker spellings.
-    s=s.replace("n c state","north carolina state").replace("nc state","north carolina state")
-    s=s.replace("s c state","south carolina state").replace("sc state","south carolina state")
-    s=s.replace("e michigan","eastern michigan").replace("w michigan","western michigan")
-    s=s.replace("c michigan","central michigan").replace("n illinois","northern illinois")
-    s=s.replace("s mississippi","southern mississippi").replace("southern miss","southern mississippi")
+    # Common tracker spellings. Replace WHOLE tokens/phrases only.
+    # Plain str.replace("n illinois", ...) corrupts "northern illinois" into
+    # "northernorthern illinois"; similarly "southern miss" corrupts
+    # "southern mississippi". Replays must preserve real school identity.
+    substitutions=(
+        (r"n c state", "north carolina state"),
+        (r"nc state", "north carolina state"),
+        (r"s c state", "south carolina state"),
+        (r"sc state", "south carolina state"),
+        (r"e michigan", "eastern michigan"),
+        (r"w michigan", "western michigan"),
+        (r"c michigan", "central michigan"),
+        (r"n illinois", "northern illinois"),
+        (r"s mississippi", "southern mississippi"),
+        (r"southern miss", "southern mississippi"),
+    )
+    for source, dest in substitutions:
+        s=re.sub(r"(?<![a-z0-9])"+source+r"(?![a-z0-9])",dest,s)
     return re.sub(r"\s+"," ",s).strip()
 
 

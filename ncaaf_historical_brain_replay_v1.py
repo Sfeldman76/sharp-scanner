@@ -22,7 +22,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-VERSION = "NCAAF_BRAIN_RETROSPECTIVE_REPLAY_V1_20261024"
+VERSION = "NCAAF_BRAIN_RETROSPECTIVE_REPLAY_V4_PT_NORMALIZATION_AND_ORIENTATION_20261024"
+from ncaaf_replay_identity_v2 import reconcile
 MIN_YEAR, MAX_YEAR = 2013, 2025
 PT_YEARS = range(2022, 2026)
 SPLITS = {**{y:"DISCOVERY" for y in range(2013, 2022)},
@@ -38,6 +39,8 @@ CONTEXT_COLUMNS = ["Season","Source_Game_ID","Game_Date","Game_Start","Team","Op
    "Pathi_FB_On_Key_3","Pathi_FB_On_Key_7","Pathi_FB_On_Key_10","Pathi_FB_On_Key_14",
    "Pathi_FB_Crossed_Key_Toward_Team","Pathi_FB_Crossed_Key_Away_From_Team",
    "Pathi_FB_Moved_Onto_Key","Pathi_FB_Moved_Off_Key","Pathi_FB_Moved_Through_Key"]
+CFBD_OPTIONAL_IDENTITY_COLUMNS = ["Team_Key","Opponent_Key"]
+CONTEXT_OPTIONAL_IDENTITY_COLUMNS = ["Source_Team_Name","Source_Opponent_Name","Team_Norm","Opponent_Norm","Canonical_Team_Norm","Opponent_Canonical_Team_Norm"]
 CFBD_COLUMNS = ["Season","Game_ID","Game_Date","Team","Opponent","Is_Home",
    "CFBD_Games_Prior","CFBD_Season_Net_PPA_Prior","CFBD_Matchup_Net_PPA_Adv",
    "CFBD_Matchup_Net_Success_Adv", "CFBD_Recent3_Off_PPA_Prior", "CFBD_Season_Off_PPA_Prior"]
@@ -108,12 +111,16 @@ def _checked_source(source: pd.DataFrame, key: str, cols: list[str]) -> pd.DataF
 
 
 def _stage_cfbd(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    x = _checked_source(frame, "cfbd", CFBD_COLUMNS)
+    x = _checked_source(frame, "cfbd", CFBD_COLUMNS+[col for col in CFBD_OPTIONAL_IDENTITY_COLUMNS if col in frame.columns])
     x["season"] = _num(x.Season).astype(int)
     x["game_id"] = _str(x.Game_ID)
     x["kickoff_utc"] = _dates(x.Game_Date)
     x["home_team_key"] = _key(x.Team)
     x["away_team_key"] = _key(x.Opponent)
+    x["cfbd_home_team_raw"] = _str(x.Team)
+    x["cfbd_away_team_raw"] = _str(x.Opponent)
+    x["cfbd_home_team_key_raw"] = _str(x.Team_Key) if "Team_Key" in x else ""
+    x["cfbd_away_team_key_raw"] = _str(x.Opponent_Key) if "Opponent_Key" in x else ""
     all_sides = x[x.game_id.ne("")].copy()
     side_counts = all_sides.groupby(["season","game_id"]).size()
     duplicate_or_single_sides = int(side_counts.ne(2).sum())
@@ -124,7 +131,8 @@ def _stage_cfbd(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     x["game_date_key"] = x.kickoff_utc.dt.strftime("%Y-%m-%d")
     # Independent universe: CFBD games cannot be dropped for lack of STAT/CORE.
     x = x.rename(columns={col:"src_"+col for col in CFBD_COLUMNS if col.startswith("CFBD_")})
-    cols = ["season", "game_id", "kickoff_utc", "game_date_key", "home_team_key", "away_team_key"]
+    cols = ["season", "game_id", "kickoff_utc", "game_date_key", "home_team_key", "away_team_key",
+            "cfbd_home_team_raw", "cfbd_away_team_raw", "cfbd_home_team_key_raw", "cfbd_away_team_key_raw"]
     universe = x[cols].copy()
     manifest = universe.groupby("season").agg(expected_games=("game_id", "size")).reset_index()
     manifest["game_ids_sha256"] = manifest.season.map(universe.groupby("season").game_id.apply(
@@ -136,7 +144,7 @@ def _stage_cfbd(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
 
 
 def _stage_context(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    x = _checked_source(frame, "context", CONTEXT_COLUMNS)
+    x = _checked_source(frame, "context", CONTEXT_COLUMNS+[col for col in CONTEXT_OPTIONAL_IDENTITY_COLUMNS if col in frame.columns])
     x["season"] = _num(x.Season).astype(int)
     x["source_game_id"] = _str(x.Source_Game_ID)
     x["ctx_home_key"] = _key(x.Team)
@@ -150,46 +158,29 @@ def _stage_context(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return x, {"home_rows":len(x), "historical_vintage_certified":False}
 
 
-def _attach_context(universe: pd.DataFrame, context: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    c = context.copy()
-    c["ctx_game_date_key"] = c.ctx_kickoff.dt.strftime("%Y-%m-%d")
-    # First exact season/game-id/teams; fallback exactly same date+home+away,
-    # ONLY where both the CFBD and context keys are unique. No fuzzy matching.
-    ids = universe.merge(c, left_on=["season","game_id","home_team_key","away_team_key"],
-                         right_on=["season","source_game_id","ctx_home_key","ctx_away_key"],
-                         how="left", validate="one_to_one",indicator=True)
-    direct = ids._merge.eq("both")
-    missing = ids.loc[~direct,universe.columns]
-    used = set(zip(ids.loc[direct,"season"].astype(int), ids.loc[direct,"source_game_id"].astype(str)))
-    rem = c.loc[~pd.Series(list(zip(c.season.astype(int), c.source_game_id.astype(str))), index=c.index).isin(used)].copy()
-    left_keys = ["season","game_date_key","home_team_key","away_team_key"]
-    right_keys = ["season","ctx_game_date_key","ctx_home_key","ctx_away_key"]
-    # Duplicate alternatives are ambiguous, fail closed (not arbitrary drop_duplicates).
-    left_unique = missing.loc[~missing.duplicated(left_keys,keep=False)]
-    right_unique = rem.loc[~rem.duplicated(right_keys,keep=False)]
-    by_date = left_unique.merge(right_unique,left_on=left_keys,right_on=right_keys,
-                                how="left",validate="one_to_one",indicator=True)
-    by_date = by_date[by_date._merge.eq("both")].drop(columns="_merge")
-    direct_full = ids.loc[direct].drop(columns="_merge")
-    # direct and fallback share right-hand column set; data stays aligned.
-    all_matched = pd.concat([direct_full,by_date],ignore_index=True)
-    if all_matched.duplicated(["season","game_id"]).any():
-        raise ValueError("CONTEXT_DOUBLE_ASSIGNED_CFBD_GAME")
-    # Use a stable physical CFBD key; preserve every universe member.
-    b = all_matched.drop(columns=[col for col in universe.columns if col not in ("season","game_id")])
-    result = universe.merge(b,on=["season","game_id"],how="left",validate="one_to_one")
-    result["has_context"] = result.source_game_id.notna()
-    result["actual_home_margin"] = _num(result.SU_Margin) if "SU_Margin" in result else np.nan
+def _attach_context(universe: pd.DataFrame, context: pd.DataFrame, aliases=None) -> tuple[pd.DataFrame, dict]:
+    # Explicit school aliases, one-day UTC/local calendar drift, strict 1:1.
+    # Never infer a nonfire from an unjoined historical context row.
+    mapping,diag=reconcile(universe,context,aliases=aliases)
+    left=universe.copy()
+    right=context.reset_index(drop=True).copy()
+    right["ctx_row_id"]=range(len(right))
+    right=right.merge(mapping[["ctx_row_id","season","game_id","identity_method"]],
+                      on=["ctx_row_id","season"],how="inner",validate="one_to_one")
+    # Drop only identity/universe duplicates; keep all context feature values.
+    drop=[c for c in left.columns if c in right.columns and c not in ("season","game_id")]
+    right=right.drop(columns=drop)
+    result=left.merge(right,on=["season","game_id"],how="left",validate="one_to_one")
+    result["has_context"]=result.source_game_id.notna()
+    result["actual_home_margin"]=_num(result.SU_Margin) if "SU_Margin" in result else np.nan
     if "Team_Score" in result:
         alt=_num(result.Team_Score)-_num(result.Opponent_Score)
-        result["actual_home_margin"] = result.actual_home_margin.where(result.actual_home_margin.notna(),alt)
-    result["open_home_spread"] = _num(result.Opening_Spread)
-    result["open_line_source_vintage_certified"] = False
-    return result, {"matched_context_games":int(result.has_context.sum()),
-                    "unmatched_cfbd_games":int((~result.has_context).sum()),
-                    "matched_by_strict_id_team":int(direct.sum()),
-                    "matched_by_exact_date_teams":len(by_date),
-                    "game_identity_ambiguous_or_unmatched":int((~result.has_context).sum())}
+        result["actual_home_margin"]=result.actual_home_margin.where(result.actual_home_margin.notna(),alt)
+    result["open_home_spread"]=_num(result.Opening_Spread)
+    result["open_line_source_vintage_certified"]=False
+    diag.update({"matched_context_games":int(result.has_context.sum()),
+                 "game_identity_ambiguous_or_unmatched":int((~result.has_context).sum())})
+    return result,diag
 
 
 def _compare(v: pd.Series, op: str, target: float) -> pd.Series:
@@ -277,49 +268,50 @@ def pt_archive_inputs(storage_client, bucket_name: str, *, parse_func=None) -> t
     return pd.concat(frames,ignore_index=True) if frames else pd.DataFrame(),audit
 
 
-def attach_pt(games: pd.DataFrame, parsed: pd.DataFrame) -> tuple[pd.DataFrame,dict]:
-    """Explicit HOME/AWAY name + local calendar date; unambiguous match only.
+def attach_pt(games: pd.DataFrame, parsed: pd.DataFrame, aliases=None) -> tuple[pd.DataFrame,dict]:
+    """Attach undated PT files only on unambiguous season-unique ordered pairs.
 
-    Historical UTC offsets may put CFBD games on different dates. Without an
-    independently verified local date source, mismatches remain unmatched.
+    Do NOT require original source dates missing from the actual PT CSVs. The
+    no-date path is diagnostic identity, NOT evidence of pregame publication.
     """
     if parsed.empty:
-        return pd.DataFrame(columns=["season","game_id","brain","system_id","direction","evidence_type","market_vintage_certified"]),{"matched_games":0,"unmatched_pt_rows":0}
-    p=parsed.copy()
-    necessary={"season","home_key","away_key","game_date"}
-    if not necessary.issubset(p):raise ValueError("PT_NORMALIZED_SCHEMA_NOT_MATCHABLE")
-    p["date_key"] = p.game_date.astype("string").fillna("").str[:10]
-    p["home_norm"] = _key(p.home_key)
-    p["away_norm"] = _key(p.away_key)
-    p=p.loc[p.date_key.str.fullmatch(r"\d{4}-\d{2}-\d{2}") & p.home_norm.ne("") & p.away_norm.ne("")].copy()
-    keys=["season","date_key","home_norm","away_norm"]
-    p=p.loc[~p.duplicated(keys,keep=False)]
-    u=games[["season","game_id","game_date_key","home_team_key","away_team_key","open_home_spread"]].copy()
-    u.columns=["season","game_id","date_key","home_norm","away_norm","open_home_spread"]
-    u=u.loc[~u.duplicated(keys,keep=False)]
-    x=u.merge(p,on=keys,how="inner",validate="one_to_one")
-    # PT predictor-vs-spread direction is exploratory: orientations of raw
-    # source-native numeric predictions are not certified across years.
-    forecast=_num(x["prediction_avg_home"]) if "prediction_avg_home" in x else pd.Series(np.nan,index=x.index)
-    openline=_num(x.open_home_spread)
-    # sign of forecast + line is a candidate relative-to-market indication,
-    # NOT a certified source-side or dated bet, even where source has numbers.
-    edge=forecast+openline
-    x["brain"]="PT"
-    x["system_id"]="PT_AVERAGE_VS_CONTEXT_OPEN__RETROSPECTIVE"
-    x["direction"]=np.where(edge>0,"HOME",np.where(edge<0,"AWAY","NONE"))
-    x["evaluation_status"]=np.where(edge.notna(),"FIRE","UNKNOWN")
-    x["evidence_type"]="PT_ARCHIVE_UPLOAD_2026__PREGAME_PUBLICATION_UNVERIFIED"
-    x["market_vintage_certified"]=False
-    x["source_vintage_certified"]=False
-    x["rule_frozen_before_game"]=False
-    x["split"]=x.season.map(SPLITS)
-    # PT values are kept as unverified diagnostics; must not enter certified
-    # CORE-support counts and are never represented as original dated picks.
-    x["pt_forecast_numeric"]=forecast
-    x["pt_context_edge_numeric"]=edge
-    keep=["season","game_id","brain","system_id","direction","evaluation_status","evidence_type","market_vintage_certified","source_vintage_certified","rule_frozen_before_game","split","pt_forecast_numeric","pt_context_edge_numeric"]
-    return x[keep].copy(),{"matched_games":len(x),"unmatched_pt_rows":int(len(parsed)-len(x)),"date_and_team_exact":True,"prediction_direction_is_diagnostic_not_certified":True}
+        return pd.DataFrame(columns=["season","game_id","brain","system_id","direction","evaluation_status","evidence_type","market_vintage_certified"]),{"matched_games":0,"unmatched_pt_rows":0}
+    from ncaaf_pt_history_identity_v3 import match_pt_to_cfbd
+    p=parsed.reset_index(drop=True).copy()
+    p['_pt_row_id']=range(len(p))
+    mapping, identity=match_pt_to_cfbd(games,p,aliases=aliases)
+    if mapping.empty:
+        return pd.DataFrame(columns=["season","game_id","brain","system_id","direction","evaluation_status","evidence_type","market_vintage_certified"]), {
+            **identity,"matched_games":0,"unmatched_pt_rows":len(p),"prediction_direction_is_diagnostic_not_certified":True}
+    x=p.merge(mapping,on=['_pt_row_id','season'],how='inner',validate='one_to_one')
+    markets=games[['season','game_id','open_home_spread']].copy()
+    x=x.merge(markets,on=['season','game_id'],how='left',validate='one_to_one')
+    forecast_raw=_num(x['prediction_avg_home']) if 'prediction_avg_home' in x else pd.Series(np.nan,index=x.index)
+    # PT home designation can differ from CFBD on neutral sites. Align the
+    # PT margin to CFBD's home side before comparing with CFBD's home spread.
+    forecast=forecast_raw.where(~x.identity_orientation.eq('REVERSED'),-forecast_raw)
+    edge=forecast+_num(x.open_home_spread)
+    x['brain']='PT'
+    x['system_id']='PT_AVERAGE_VS_CONTEXT_OPEN__RETROSPECTIVE'
+    x['direction']=np.where(edge>0,'HOME',np.where(edge<0,'AWAY','NONE'))
+    x['evaluation_status']=np.where(edge.notna(),'FIRE','UNKNOWN')
+    x['evidence_type']='PT_ARCHIVE_UPLOADED_2026__PREGAME_PUBLICATION_UNVERIFIED'
+    x['market_vintage_certified']=False
+    x['source_vintage_certified']=False
+    x['rule_frozen_before_game']=False
+    x['split']=x.season.map(SPLITS)
+    x['pt_forecast_numeric']=forecast
+    x['pt_forecast_original_home_numeric']=forecast_raw
+    x['pt_context_edge_numeric']=edge
+    keep=['season','game_id','brain','system_id','direction','evaluation_status','evidence_type',
+          'market_vintage_certified','source_vintage_certified','rule_frozen_before_game','split',
+          'pt_forecast_numeric','pt_forecast_original_home_numeric','pt_context_edge_numeric','identity_method','identity_orientation']
+    audit={**identity, 'matched_games':len(x),'unmatched_pt_rows':len(p)-len(x),
+           'matched_pt_with_directional_edge':int(edge.notna().sum()),
+           'matched_pt_without_market_or_forecast':int(edge.isna().sum()),
+           'pt_reversed_orientation_directional_rows':int((x.identity_orientation.eq('REVERSED') & edge.notna()).sum()),
+           'prediction_direction_is_diagnostic_not_certified':True}
+    return x[keep].copy(),audit
 
 
 def compare_to_core(games: pd.DataFrame, signals: pd.DataFrame, core: pd.DataFrame | None) -> tuple[pd.DataFrame,pd.DataFrame,dict]:
@@ -335,10 +327,36 @@ def compare_to_core(games: pd.DataFrame, signals: pd.DataFrame, core: pd.DataFra
     c=core[["season","game_id","model_home_margin"]].copy()
     c["game_id"] = _str(c.game_id);c["season"] = _num(c.season).astype("Int64")
     if c.duplicated(["season","game_id"]).any():raise ValueError("CORE_DUPLICATE_REPLAY_GAME")
-    g=games[["season","game_id","actual_home_margin","open_home_spread"]].merge(c,on=["season","game_id"],how="inner",validate="one_to_one")
+    # CORE may use the legacy Source_Game_ID rather than CFBD Game_ID.
+    # Map only unique, explicit IDs. Never use a score to guess an identity.
+    valid=games[["season","game_id","actual_home_margin","open_home_spread"]].copy()
+    idmap=games[["season","game_id"]].copy()
+    idmap["core_game_id"]=_str(idmap.game_id)
+    idmap["identity_route"]="CFBD_GAME_ID"
+    if "source_game_id" in games:
+        other=games.loc[games.has_context,["season","game_id","source_game_id"]].copy()
+        other["core_game_id"]=_str(other.source_game_id)
+        other["identity_route"]="CONTEXT_SOURCE_GAME_ID"
+        idmap=pd.concat([idmap,other[["season","game_id","core_game_id","identity_route"]]],ignore_index=True)
+    idmap=idmap[idmap.core_game_id.ne("")]
+    conflict=idmap.groupby(["season","core_game_id"]).game_id.nunique()
+    bad=set(conflict[conflict.gt(1)].index)
+    idmap=idmap[~pd.MultiIndex.from_frame(idmap[["season","core_game_id"]]).isin(bad)]
+    idmap=idmap.sort_values("identity_route").drop_duplicates(["season","core_game_id"])
+    c=c.rename(columns={"game_id":"core_game_id"})
+    matched=c.merge(idmap,on=["season","core_game_id"],how="inner",validate="one_to_one")
+    matched=matched[~matched.duplicated(["season","game_id"],keep=False)].copy()
+    g=valid.merge(matched[["season","game_id","model_home_margin","identity_route"]],
+                  on=["season","game_id"],how="inner",validate="one_to_one")
     g["edge_home"] = _num(g.model_home_margin)+_num(g.open_home_spread)
+    stage_counts={"core_source_rows":len(c), "core_identity_matched_games":len(matched),
+                  "core_games_joined_to_cfbd":len(g),
+                  "core_market_spread_present":int(_num(g.open_home_spread).notna().sum()),
+                  "core_final_outcome_present":int(_num(g.actual_home_margin).notna().sum()),
+                  "core_market_and_outcome_present":int((g.edge_home.notna() & g.actual_home_margin.notna()).sum()),
+                  "core_margin_edge_ge_2_with_outcome":int((g.edge_home.abs().ge(2.0) & g.actual_home_margin.notna()).sum())}
     g=g[g.edge_home.abs().ge(2.0) & g.actual_home_margin.notna()].copy()
-    if g.empty:return g,pd.DataFrame(),{"matched_core_games":0,"reason":"NO_TWO_POINT_CORE_EDGES_WITH_OUTCOMES"}
+    if g.empty:return g,pd.DataFrame(),{**stage_counts,"matched_core_games":0,"reason":"NO_TWO_POINT_CORE_EDGES_WITH_OUTCOMES"}
     g["core_side"]=np.where(g.edge_home>0,"HOME","AWAY")
     g["core_ats_delta"]=np.where(g.core_side.eq("HOME"),1,-1)*(_num(g.actual_home_margin)+_num(g.open_home_spread))
     g["core_ats_sign"]=np.sign(g.core_ats_delta)
@@ -346,6 +364,7 @@ def compare_to_core(games: pd.DataFrame, signals: pd.DataFrame, core: pd.DataFra
     # the number of heavily-correlated mechanisms within that same family.
     f=signals.loc[(signals.evaluation_status=="FIRE") & signals.direction.isin(("HOME","AWAY"))].copy()
     f=f[f.brain.isin(("STAT","SYSTEM_MINER","PT"))]
+    f=f.reindex(columns=["season","game_id","brain","direction"])
     joined=g.merge(f[["season","game_id","brain","direction"]],on=["season","game_id"],how="left")
     joined["support"] = joined.direction.eq(joined.core_side)
     joined["oppose"] = joined.direction.notna() & joined.direction.ne(joined.core_side)
@@ -370,7 +389,7 @@ def compare_to_core(games: pd.DataFrame, signals: pd.DataFrame, core: pd.DataFra
         avg_abs_model_edge=("edge_home",lambda v:float(v.abs().mean()))).reset_index()
     summary["nonpush_ats_win_rate"] = summary.wins.div(summary.wins+summary.losses).replace([np.inf,-np.inf],np.nan)
     summary["causal_incremental_edge_certified"] = False
-    return g,summary,{"matched_core_games":len(g),"correlated_rules_counted_as_one_family":True,
+    return g,summary,{**stage_counts,"matched_core_games":len(g),"eligible_core_comparisons":len(g),"core_identity_routes":g.identity_route.value_counts().to_dict(),"correlated_rules_counted_as_one_family":True,
                       "replay_not_independent_holdout":True,"ats_quote_vintage_certified":False}
 
 
@@ -420,13 +439,13 @@ def independent_brain_core_diagnostics(core_games: pd.DataFrame, signals: pd.Dat
     return out[cols]
 
 
-def reconstruct(*, cfbd: pd.DataFrame, context: pd.DataFrame,
+def reconstruct(*, cfbd: pd.DataFrame, context: pd.DataFrame, aliases=None,
                 pt: pd.DataFrame | None=None, core: pd.DataFrame | None=None) -> dict[str,Any]:
     universe, cfbd_home, meta_cfbd=_stage_cfbd(cfbd)
     ctx,meta_ctx=_stage_context(context)
-    games,join_meta=_attach_context(universe,ctx)
+    games,join_meta=_attach_context(universe,ctx,aliases=aliases)
     rule_evals,rule_coverage=replay_rules(games,cfbd_home)
-    pt_evidence,pt_meta=attach_pt(games,pt if isinstance(pt,pd.DataFrame) else pd.DataFrame())
+    pt_evidence,pt_meta=attach_pt(games,pt if isinstance(pt,pd.DataFrame) else pd.DataFrame(),aliases=aliases)
     all_signals = pd.concat([rule_evals,pt_evidence], ignore_index=True,sort=False) if not pt_evidence.empty else rule_evals.copy()
     core_matched,comparison,core_meta=compare_to_core(games,all_signals,core)
     by_brain_core = independent_brain_core_diagnostics(core_matched, all_signals)
@@ -442,7 +461,7 @@ def reconstruct(*, cfbd: pd.DataFrame, context: pd.DataFrame,
             present=pd.MultiIndex.from_frame(pt_evidence[["season","game_id"]])
             match=pd.MultiIndex.from_frame(e[["season","game_id"]]).isin(present)
             e.loc[match,"evaluation_status"]="RETROSPECTIVE_ONLY"
-            e.loc[match,"reason"]="EXACT_PT_ARCHIVE_MATCH__ORIGINAL_PUBLICATION_UNVERIFIED"
+            e.loc[match,"reason"]="RETROSPECTIVE_MATCH__ORIGINAL_PUBLICATION_UNVERIFIED"
         e["point_in_time_certified"]=False
         family_eligibility.append(e)
     family_eligibility=pd.concat(family_eligibility,ignore_index=True)
@@ -496,12 +515,18 @@ def load_bigquery_source_frames(project="sharplogger",dataset="sharp_data") -> t
         actual={c.name for c in client.get_table(full).schema}
         missing=set(cols)-actual
         if missing:raise ValueError("BIGQUERY_SOURCE_COLUMN_MISSING:"+table+":"+",".join(sorted(missing)))
-        fields=",".join("`"+x+"`" for x in cols)
+        optional=(CFBD_OPTIONAL_IDENTITY_COLUMNS if table=="ncaaf_cfbd_archive_research_v1" else CONTEXT_OPTIONAL_IDENTITY_COLUMNS)
+        fields=",".join("`"+x+"`" for x in cols+[field for field in optional if field in actual])
         sql=f"SELECT {fields} FROM `{full}` WHERE Season BETWEEN @start_season AND @end_season"
         cfg=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("start_season","INT64",MIN_YEAR),
               bigquery.ScalarQueryParameter("end_season","INT64",MAX_YEAR)])
         queries.append(client.query(sql,job_config=cfg).to_dataframe(create_bqstorage_client=False))
-    return queries[0], queries[1]
+    # Aliases are optional and must not block historical replay.
+    try:
+        a=client.query(f"SELECT Source_Team_Name, Team_Norm FROM `{project}.{dataset}.ncaaf_source_team_aliases` WHERE Source_Team_Name IS NOT NULL AND Team_Norm IS NOT NULL").to_dataframe(create_bqstorage_client=False)
+    except Exception:
+        a=pd.DataFrame(columns=["Source_Team_Name","Team_Norm"])
+    return queries[0], queries[1], a
 
 
 def run_heavy_retrospective(*,storage_client,bucket_name="sharp-models",core=None,
@@ -511,11 +536,12 @@ def run_heavy_retrospective(*,storage_client,bucket_name="sharp-models",core=Non
              "2026_selection_influence":0,"production_mutation":False,"version":VERSION}
     try:
         if source_frames is None:
-            cfbd,context=load_bigquery_source_frames(project=project,dataset=dataset)
+            cfbd,context,aliases=load_bigquery_source_frames(project=project,dataset=dataset)
         else:
-            cfbd,context=source_frames
+            cfbd,context=source_frames[:2]
+            aliases=source_frames[2] if len(source_frames)>2 else None
         pt,pt_gcs=pt_archive_inputs(storage_client,bucket_name)
-        result=reconstruct(cfbd=cfbd,context=context,pt=pt,core=core)
+        result=reconstruct(cfbd=cfbd,context=context,pt=pt,core=core,aliases=aliases)
         result["audit"]["pt_gcs"] = pt_gcs
         log_func("[NCAAF-HIST-REPLAY] status=RETROSPECTIVE_DIAGNOSTICS_COMPLETE "
                  f"cfbd_games={len(result['game_join_coverage'])} "

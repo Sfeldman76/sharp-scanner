@@ -106,13 +106,15 @@ class HistoricalReplayTests(unittest.TestCase):
   self.assertFalse(signals.source_vintage_certified.any())
   self.assertFalse(signals.rule_frozen_before_game.any())
 
- def test_pt_with_missing_date_is_not_turned_into_signal(self):
+ def test_pt_with_missing_date_is_unverified_unique_pair_only(self):
   cfbd,ctx,_=sample();u,features,_=_stage_cfbd(cfbd)
   games,_=_attach_context(u,_stage_context(ctx)[0])
   pt=pd.DataFrame({'season':[2025],'home_key':['home3'],'away_key':['away3'],
        'game_date':[''], 'prediction_avg_home':[5]})
   signals,meta=attach_pt(games,pt)
-  self.assertTrue(signals.empty)
+  self.assertEqual(len(signals),1)
+  self.assertFalse(signals.source_vintage_certified.any())
+  self.assertEqual(meta['identity_routes']['SEASON_UNIQUE_ORDERED_PAIR_NO_SOURCE_DATE'],1)
 
  def test_no_big_al_context_fabricated(self):
   cfbd,ctx,_=sample();r=reconstruct(cfbd=cfbd,context=ctx)
