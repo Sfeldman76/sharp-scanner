@@ -18,6 +18,7 @@ import tempfile
 
 import pandas as pd
 from ncaaf_brain_full_history import RunConfig, report, write_output
+from ncaaf_brain_source_recovery import recover_existing_sources
 
 INPUTS = ("games", "core", "signals", "coverage", "eligibility", "rule_evaluations", "universe_manifest")
 RESEARCH_ROOT = "research/ncaaf/v55/combined_brains_shadow"
@@ -81,9 +82,14 @@ def _read_bigquery_inputs(env):
     return frames, receipts, []
 
 
-def _write_gcs(storage_client, bucket_name, run_prefix, result_path, status, receipts, log_func):
+def _write_gcs(storage_client, bucket_name, run_prefix, result_path, status, receipts, log_func,
+               recovery_frames=None):
     bucket = storage_client.bucket(bucket_name)
     files = [("status.json", _serialized(status)), ("input_receipts.json", _serialized(receipts))]
+    if recovery_frames:
+        for source_name, source_frame in sorted(recovery_frames.items()):
+            files.append(("recovered_uncertified/" + source_name + ".csv",
+                          source_frame.to_csv(index=False).encode()))
     if result_path:
         for file in sorted(Path(result_path).glob("*.csv")):
             files.append((file.name, file.read_bytes()))
@@ -123,15 +129,30 @@ def run_heavy_brain_shadow(*, storage_client, bucket_name="sharp-models", log_fu
               "production_mutation":False, "historical_universe":"2013-2025",
               "2026_selection_influence":0, "v55_primary":evidence}
     frames, receipts = {}, []
+    recovery_frames = {}
     result_path = None
     try:
         if prefix:
             frames, receipts, missing = _read_gcs_inputs(storage_client,bucket_name,prefix)
         else:
             frames, receipts, missing = _read_bigquery_inputs(env)
+        # If no explicit archive prefix or table mapping was supplied, recover
+        # source-diagnostic CORE and game rows from work Heavy already completed.
+        # These recovered frames never attest historical brain events or book prices.
+        if not prefix and not any(env.get("NCAAF_BRAIN_BQ_" + k.upper() + "_TABLE", "") for k in INPUTS):
+            recovery_frames, recovered_receipts, recovery_audit = recover_existing_sources(
+                storage_client=storage_client, bucket_name=bucket_name,
+                legacy_cache=cache, v55_primary_result=primary)
+            frames.update(recovery_frames)
+            receipts.extend(recovered_receipts)
+            status["source_recovery"] = recovery_audit
+            missing = [key for key in INPUTS if key not in frames]
+            log_func("[NCAAF-V55-HISTORICAL-BRAINS-SOURCE-RECOVERY] recovered=" +
+                     ",".join(recovery_audit["recovered_inputs"]) +
+                     " still_missing=" + ",".join(missing) + " authority=0")
         status["missing_inputs"] = missing
         if missing:
-            status["reason"] = "HISTORICAL_INPUTS_NOT_AVAILABLE_FOR_ALL_BRAINS"
+            status["reason"] = "HISTORICAL_BRAIN_EVENT_AND_COVERAGE_ARCHIVES_MISSING" if recovery_frames else "HISTORICAL_INPUTS_NOT_AVAILABLE_FOR_ALL_BRAINS"
             log_func("[NCAAF-V55-HISTORICAL-BRAINS] HOLD missing_inputs="+",".join(missing)+" authority=0")
         else:
             with tempfile.TemporaryDirectory(prefix="ncaaf_brains_shadow_") as td:
@@ -162,7 +183,8 @@ def run_heavy_brain_shadow(*, storage_client, bucket_name="sharp-models", log_fu
         log_func("[NCAAF-V55-HISTORICAL-BRAINS] HOLD error="+type(exc).__name__+" "+str(exc)[:400]+" authority=0")
     if publish:
         try:
-            _write_gcs(storage_client,bucket_name,run_prefix,None,status,receipts,log_func)
+            _write_gcs(storage_client,bucket_name,run_prefix,None,status,receipts,log_func,
+                       recovery_frames=recovery_frames)
         except Exception as exc:
             # Failure to publish shadow metadata cannot affect weekly models.
             log_func("[NCAAF-V55-HISTORICAL-BRAINS] SHADOW_PUBLICATION_FAILED "+type(exc).__name__+" "+str(exc)[:400])
