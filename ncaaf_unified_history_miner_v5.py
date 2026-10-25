@@ -90,9 +90,41 @@ def _make_atom_bank(resolver,market,n,year_mask,*, cap_per_family=12):
         family=str(raw.get('family') or '').strip()
         if not name or name in seen: continue
         seen.add(name)
-        try: mask=np.asarray(raw['mask'],dtype=bool)
-        except Exception: invalid.append((name,'NON_BOOL_MASK'));continue
-        if len(mask)!=n: raise ValueError('UNIFIED_ATOM_ROW_ALIGNMENT:'+name)
+        # Fail closed on unavailable snapshot values. Casting float NaN directly
+        # to bool evaluates True in NumPy, silently fabricating rule firings.
+        try:
+            values=np.asarray(raw['mask'])
+            if values.ndim!=1 or len(values)!=n:
+                raise ValueError('UNIFIED_ATOM_ROW_ALIGNMENT:'+name)
+            if values.dtype.kind=='b':
+                mask=values.astype(bool,copy=False)
+            elif values.dtype.kind in ('i','u','f'):
+                finite=np.isfinite(values)
+                if np.any(finite & ~np.isin(values,[0,1])):
+                    raise TypeError('NON_BINARY_NUMERIC_MASK')
+                mask=finite & (values==1)
+                if not finite.all():
+                    invalid.append((name,'MISSING_MASK_VALUES:'+str(int((~finite).sum()))))
+            else:
+                missing=np.asarray(pd.isna(values),dtype=bool)
+                present=values[~missing]
+                def _bit(x):
+                    if isinstance(x,(bool,np.bool_)):
+                        return bool(x)
+                    if isinstance(x,(int,float,np.integer,np.floating)) and np.isfinite(x) and x in (0,1):
+                        return bool(x)
+                    raise TypeError('NON_BINARY_MASK_VALUE')
+                mapped=np.asarray([_bit(x) for x in present],dtype=bool)
+                mask=np.zeros(n,dtype=bool)
+                mask[~missing]=mapped
+                if missing.any():
+                    invalid.append((name,'MISSING_MASK_VALUES:'+str(int(missing.sum()))))
+        except ValueError as exc:
+            if str(exc).startswith('UNIFIED_ATOM_ROW_ALIGNMENT:'):
+                raise
+            invalid.append((name,'NON_BOOL_MASK'));continue
+        except (TypeError,OverflowError):
+            invalid.append((name,'NON_BOOL_MASK'));continue
         source=category(family,name)
         # Old CORE_MODEL atoms are not V5.5 independent evidence and must not
         # leak old OOF predictions into this new discovery lane.
