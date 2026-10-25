@@ -8043,6 +8043,8 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                     core_games=_v55_core_games,existing_catalog=miners,
                     markets=('spreads','totals','h2h'),
                     first_test_year=2017,last_test_year=2025,max_depth=4,
+                    progress=lambda _step: log_func('[NCAAF-UNIFIED-MINER-V5-STEP] '
+                        +json.dumps(_step,default=str,sort_keys=True)),
                 )
                 _miner_exact_shadow.update(_unified_results)
                 _miner_exact_shadow['audit']['unified_full_history_miner_v5']={
@@ -8056,8 +8058,12 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                     'status':'HOLD_ERROR','error_type':type(_v5_exc).__name__,
                     'error':str(_v5_exc),'bet_authority':0,
                     'production_mutation':False}
+                import traceback as _v5_traceback
+                _v5_tb=_v5_traceback.format_exc()
+                _miner_exact_shadow['audit']['unified_full_history_miner_v5']['traceback']=_v5_tb[-12000:]
                 log_func('[NCAAF-UNIFIED-HISTORY-MINER-V5] HOLD_ERROR='+
                          type(_v5_exc).__name__+':'+str(_v5_exc)+' authority=0')
+                log_func('[NCAAF-UNIFIED-HISTORY-MINER-V5-TRACEBACK] '+_v5_tb[-12000:])
             _miner_exact_shadow["mechanism_legacy_id_crosswalk_v4"]=pd.DataFrame(
                 miner_permanent_integrity_v4["legacy_alias_map"])
             _miner_exact_shadow["audit"]["permanent_integrity_v4"]={

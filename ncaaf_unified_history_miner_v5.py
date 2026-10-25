@@ -14,11 +14,11 @@ from collections import defaultdict, Counter
 from hashlib import sha256
 from itertools import combinations
 from datetime import datetime, timezone
-import io, json
+import io, json, traceback
 import numpy as np
 import pandas as pd
 
-VERSION = 'NCAAF_UNIFIED_FULL_HISTORY_MINER_V5_20261024'
+VERSION = 'NCAAF_UNIFIED_FULL_HISTORY_MINER_V5_1_20261025'
 RESEARCH_ROOT = 'research/ncaaf/v2/unified_full_history_miner/runs'
 CATEGORY_KEYS = ('MINER_CONTEXT','PATHI_STYLE','BIG_AL_STYLE','CFBD','RICH_MARKET','PT_EXTERNAL','CORE_MODEL')
 
@@ -152,13 +152,55 @@ def _make_atom_bank(resolver,market,n,year_mask,*, cap_per_family=12):
             admitted.append(a)
             if len(admitted)>=cap_per_family:break
         trimmed.extend(admitted)
-    return trimmed,invalid,bank
+    # Exact cross-source duplicates are one scenario, not independent brains.
+    # Global, deterministic source ordering avoids counting the same binary
+    # firing pattern as Miner + Pathi/Big Al/market confirmations.
+    independent=[]
+    for a in trimmed:
+        if any(np.array_equal(a['mask'][year_mask],b['mask'][year_mask]) for b in independent):
+            invalid.append((a['name'],'DUPLICATE_MASK_CROSS_FAMILY'))
+            continue
+        independent.append(a)
+    return independent,invalid,bank
+
+
+def _safe_mask(mask, n, label):
+    """Normalize pandas/nullable/list-backed historical predicates before indexing.
+
+    This is a strict data contract, not a truthiness conversion: NaN is never a
+    system firing and malformed shapes fail explicitly rather than receiving an
+    uninformative NumPy list/array indexing TypeError.
+    """
+    vals=np.asarray(mask)
+    if vals.ndim!=1 or len(vals)!=n:
+        raise ValueError(f'UNIFIED_ROW_MASK_ALIGNMENT:{label}:shape={vals.shape} expected={n}')
+    if vals.dtype.kind=='b': return vals.astype(bool,copy=False)
+    if vals.dtype.kind in 'iuf':
+        good=np.isfinite(vals)
+        if np.any(good & ~np.isin(vals,[0,1])):
+            raise ValueError(f'UNIFIED_NON_BINARY_MASK:{label}')
+        return good & (vals==1)
+    missing=np.asarray(pd.isna(vals),dtype=bool)
+    good=np.zeros(n,dtype=bool)
+    for idx in np.flatnonzero(~missing):
+        v=vals[idx]
+        if v is True or isinstance(v,np.bool_) and v:
+            good[idx]=True
+        elif v is False or isinstance(v,np.bool_) and not v:
+            continue
+        elif isinstance(v,(int,float,np.integer,np.floating)) and np.isfinite(v) and v in (0,1):
+            good[idx]=bool(v)
+        else:
+            raise ValueError(f'UNIFIED_NON_BINARY_MASK:{label}:row={idx}')
+    return good
 
 
 def _event_stats(mask, direction, rowmeta, result, *, index_limit=None):
     """Exactly one physical-game outcome; conflicting source-side fires abstain."""
-    group=rowmeta['group']; side=rowmeta['home']; good=(group>=0)&mask
-    if index_limit is not None: good &=index_limit
+    group=np.asarray(rowmeta['group'],dtype=np.int64)
+    side=np.asarray(rowmeta['home'],dtype=float)
+    good=(group>=0)&_safe_mask(mask,len(group),'event_rule')
+    if index_limit is not None: good &=_safe_mask(index_limit,len(group),'event_window')
     ix=np.flatnonzero(good)
     if not len(ix):return 0,0,0,0, np.array([],int)
     gi=group[ix]; target_side=np.where(side[ix]==1,1,-1)
@@ -168,7 +210,7 @@ def _event_stats(mask, direction, rowmeta, result, *, index_limit=None):
     selected=np.flatnonzero(((home_votes>0)^(away_votes>0))&rowmeta['sound'])
     targets=np.where(home_votes[selected]>0,1,-1)
     # Outcome orientation is home. result is +1 home WIN, -1 home LOSS, 0 push.
-    actual=result[selected]
+    actual=np.asarray(result,dtype=float)[selected]
     evaluable=np.isfinite(actual)&(actual!=0)
     decisions=actual[evaluable]*targets[evaluable]
     return int((decisions>0).sum()),int((decisions<0).sum()),int((~evaluable).sum()),int(len(selected)),selected
@@ -207,7 +249,8 @@ def _evaluate(mask, direction, meta, outcome, year_mask, min_n=35):
 
 
 def _overlap_duplicate(a,b,train_mask):
-    x=a&train_mask; y=b&train_mask
+    x=np.asarray(a,dtype=bool)&np.asarray(train_mask,dtype=bool)
+    y=np.asarray(b,dtype=bool)&np.asarray(train_mask,dtype=bool)
     both=int((x&y).sum()); union=int((x|y).sum())
     return union>0 and both/union>=.97
 
@@ -230,9 +273,16 @@ def _core_group_arrays(meta,coremap):
 
 
 def _conditional_core_train(mask,direction,meta,train,core_arrays,min_n=25):
+    """Use ONLY prior-season matched CORE candidates for support/veto discovery.
+
+    A contradictory rule can add value by filtering CORE's *losing* cohort. This
+    is a shadow research ranking; selecting it does not grant live veto power.
+    """
     side,ats,edge=core_arrays
     if not np.any(side):return None
-    group=meta['group']; good=(group>=0)&mask&train
+    group=np.asarray(meta['group'],dtype=np.int64)
+    train_rows=(group>=0)&_safe_mask(train,len(group),'core_train_window')
+    good=train_rows&_safe_mask(mask,len(group),'core_conditional')
     ix=np.flatnonzero(good)
     if not len(ix):return None
     gi=group[ix]
@@ -242,14 +292,32 @@ def _conditional_core_train(mask,direction,meta,train,core_arrays,min_n=25):
     away_votes=np.bincount(gi,weights=(target==-1).astype(float),minlength=meta['group_count'])
     selected=np.flatnonzero(((home_votes>0)^(away_votes>0))&meta['sound'])
     voted=np.where(home_votes[selected]>0,1,-1)
-    eligible=selected[(voted==side[selected])&np.isfinite(ats[selected])&(ats[selected]!=0)]
-    w=int((ats[eligible]>0).sum());l=int((ats[eligible]<0).sum());n=w+l
-    if n<min_n:return None
-    # 10/10 prior guards tiny conditional subsets. Train seasons ONLY.
-    lift=(w+10)/(n+20)-.5
-    return {'core_train_wins':w,'core_train_losses':l,'core_train_n':n,
-            'core_train_shrunken_lift':lift,
-            'rank_score':lift*np.sqrt(min(n,350)/150.)}
+    valid=(side[selected]!=0)&np.isfinite(ats[selected])&(ats[selected]!=0)
+    supported=selected[valid&(voted==side[selected])]
+    vetoed=selected[valid&(voted==-side[selected])]
+    # Baseline comes from the same strictly prior-season CORE candidate pool.
+    eligible_groups=np.unique(group[train_rows])
+    pool=eligible_groups[(side[eligible_groups]!=0)&np.isfinite(ats[eligible_groups])&
+                         (ats[eligible_groups]!=0)]
+    baseline=(int((ats[pool]>0).sum())+10)/(len(pool)+20) if len(pool) else .5
+    candidates=[]
+    for purpose,eligible in (('SUPPORT',supported),('VETO',vetoed)):
+        core_w=int((ats[eligible]>0).sum())
+        core_l=int((ats[eligible]<0).sum())
+        n=core_w+core_l
+        if n<min_n:continue
+        # Incremental improvement versus the correct prior-period baseline:
+        # support wants a higher win rate, veto wants a higher *loss* rate.
+        desirable=core_w if purpose=='SUPPORT' else core_l
+        rate=(desirable+10)/(n+20)
+        benchmark=baseline if purpose=='SUPPORT' else 1-baseline
+        lift=rate-benchmark
+        candidates.append({'core_train_wins':core_w,'core_train_losses':core_l,
+            'core_train_n':n,'core_train_shrunken_lift':lift,
+            'core_train_baseline_winrate':baseline,
+            'core_train_purpose':purpose,
+            'rank_score':lift*np.sqrt(min(n,350)/150.)})
+    return max(candidates,key=lambda z:z['rank_score']) if candidates else None
 
 
 def _rank_with_core(ev,mask,direction,meta,train,core_arrays):
@@ -260,7 +328,7 @@ def _rank_with_core(ev,mask,direction,meta,train,core_arrays):
             # When a genuine prior-season CORE cohort exists, optimizing
             # conditional CORE win rate supersedes standalone ATS selection.
             ev={**ev,**conditional,'rank_score':conditional['rank_score'],
-                'selection_basis':'PRIOR_SEASON_V55_CORE_SUPPORT'}
+                'selection_basis':'PRIOR_SEASON_V55_CORE_'+conditional['core_train_purpose']}
             return ev
     return {**ev,'selection_basis':'PRIOR_SEASON_STANDALONE_ATS'}
 
@@ -367,7 +435,7 @@ def _fold_rule_core_stats(mask,direction,meta,coremap,year):
     # Group source rows by physical game; leave self-contradicting rules out.
     dummy=np.full(meta['group_count'],np.nan)
     _,_,_,_,which=_event_stats(mask,direction,meta,dummy,index_limit=year_mask)
-    positive=np.flatnonzero(mask & year_mask & (meta['group']>=0))
+    positive=np.flatnonzero(_safe_mask(mask,len(year_mask),'fold_core') & year_mask & (meta['group']>=0))
     groups=defaultdict(set)
     for i in positive:
         target=('HOME' if meta['home'][i]==1 else 'AWAY')
@@ -392,15 +460,22 @@ def _fold_rule_core_stats(mask,direction,meta,coremap,year):
 
 def run_full_history(games, seasons, atom_resolver, *, core_games=None, existing_catalog=None,
                      markets=('spreads','totals','h2h'), first_test_year=2017,
-                     last_test_year=2025, max_depth=4):
+                     last_test_year=2025, max_depth=4, progress=None):
     """All available 2013–2025 historical seasons. Bounded season-forward search.
 
     Features may not be point-in-time certified: this is an honest shadow,
     with source coverage and missing inputs exposed separately from nonfires.
     """
+    def emit(phase, market='', **metrics):
+        if progress is not None:
+            progress({'phase':phase,'market':market,'metrics':metrics,'research_only':True,'bet_authority':0})
+    emit('SOURCE_IDENTITY_START')
     meta=_source_rows(games,seasons)
+    emit('SOURCE_IDENTITY_PASS',sound_games=meta['sound_games'],side_rows=meta['side_rows'])
+    emit('CORE_CROSSWALK_START')
     coremap,coreaudit=_build_core_map(games,seasons,core_games)
     core_arrays=_core_group_arrays(meta,coremap)
+    emit('CORE_CROSSWALK_PASS',core_matches=len(coremap))
     catalog_defs = {}
     for market, registry in (existing_catalog or {}).items():
         for m in (registry or {}).get('mechanism_families', []):
@@ -408,17 +483,31 @@ def run_full_history(games, seasons, atom_resolver, *, core_games=None, existing
             if names:
                 fid=fingerprint(market,str(m.get('direction','')),names)
                 catalog_defs[fid]=str(m.get('mechanism_id') or '')
-    fold_records=[];ranked=[];coverage=[];windows=[];future=[];retested=[]
+    fold_records=[];ranked=[];coverage=[];windows=[];future=[];retested=[];ledger=[]
+    game_home_row=np.full(meta['group_count'],-1,dtype=np.int64)
+    for _j in np.flatnonzero(meta['valid'] & (meta['home']==1)):
+        _group=int(meta['group'][_j])
+        if _group>=0 and meta['sound'][_group]:game_home_row[_group]=int(_j)
     for market in markets:
+        emit('MARKET_START',market)
         try: outcome,contradictions=_group_outcomes(games,meta,market)
         except Exception as e:
             coverage.append({'market':market,'status':'TARGET_HOLD','reason':type(e).__name__+':'+str(e)})
             continue
+        # Preserve the archived price as evidence, NOT as an authenticated
+        # as-of betting quote. Never silently substitute a close/open.
+        market_price=(_num_field(games,('Consensus_Open_Spread','Opening_Spread'))
+                      if market=='spreads' else
+                      _num_field(games,('Consensus_Open_Total','Opening_Total'))
+                      if market=='totals' else np.full(len(games),np.nan))
         historical=meta['valid']&(meta['season']<=last_test_year)
         # Resolve each market atom universe once; fold-level dedup still uses
         # strictly pre-evaluation-year masks/frequencies.
+        emit('ATOM_RESOLUTION_START',market)
         cached_market_atoms=atom_resolver(market)
+        emit('ATOM_RESOLUTION_PASS',market,raw_atoms=len(cached_market_atoms))
         bank,invalid,raw_bank=_make_atom_bank(lambda _m:cached_market_atoms,market,len(games),historical)
+        emit('ATOM_BANK_PASS',market,atoms=len(bank),invalid=len(invalid))
         by_src=Counter(a['source'] for a in bank)
         for c in CATEGORY_KEYS:
             coverage.append({'market':market,'category':c,'available_atoms':by_src[c],
@@ -431,10 +520,10 @@ def run_full_history(games, seasons, atom_resolver, *, core_games=None, existing
         for year in range(max(2013,first_test_year),min(2025,last_test_year)+1):
             baseline=[]
             if market=='spreads':
-                for (cy,sourceid),(side,outcome,edge) in coremap.items():
+                for (cy,sourceid),(side,core_ats_result,edge) in coremap.items():
                     if cy==year and np.isfinite(edge) and edge>=2 and side in ('HOME','AWAY'):
-                        if outcome in ('WIN','LOSS','PUSH'):
-                            baseline.append(outcome)
+                        if core_ats_result in ('WIN','LOSS','PUSH'):
+                            baseline.append(core_ats_result)
             baseline_w=baseline.count('WIN');baseline_l=baseline.count('LOSS')
             baseline_rate=baseline_w/(baseline_w+baseline_l) if baseline_w+baseline_l else None
             # Rebuild availability, duplication and threshold clones using ONLY
@@ -442,12 +531,14 @@ def run_full_history(games, seasons, atom_resolver, *, core_games=None, existing
             # silently choose which atoms survive the candidate cap.
             year_bank,_,_=_make_atom_bank(lambda _m:cached_market_atoms,market,len(games),
                             meta['valid']&(meta['season']<year))
+            emit('FOLD_SEARCH_START',market,year=year,atoms=len(year_bank))
             rules,examined=_select_for_fold(year_bank,meta,outcome,market,year,
                 core_arrays=core_arrays if market=='spreads' else None,max_depth=max_depth)
             windows.append({'market':market,'test_season':year,'train_end_season':year-1,
                             'train_start_season':2013,'evaluated_candidate_conditions':examined,
                             'selected_frozen_rules':len(rules),'selection_uses_test_season_outcomes':False,
                             'independently_certified':False,'bet_authority':0})
+            emit('FOLD_SEARCH_PASS',market,year=year,frozen_rules=len(rules),tested_candidates=examined)
             foldmask=(meta['season']==year)&meta['valid']
             for ix,r in enumerate(rules):
                 w,l,p,n,selected=_event_stats(r['mask'],r['direction'],meta,outcome,index_limit=foldmask)
@@ -462,6 +553,8 @@ def run_full_history(games, seasons, atom_resolver, *, core_games=None, existing
                      'selection_basis':r['score']['selection_basis'],
                      'prior_core_support_n':r['score'].get('core_train_n',0),
                      'prior_core_support_shrunken_lift':r['score'].get('core_train_shrunken_lift'),
+                     'prior_core_discovery_purpose':r['score'].get('core_train_purpose'),
+                     'prior_core_baseline_winrate':r['score'].get('core_train_baseline_winrate'),
                      'test_wins':w,'test_losses':l,'test_pushes_or_ungraded':p,
                      'test_unique_games':n,'test_nonpush_winrate':w/(w+l) if w+l else None,
                      'historical_vintage_certified':False,'holdout_independent_of_present_day_feature_selection':False,
@@ -477,8 +570,51 @@ def run_full_history(games, seasons, atom_resolver, *, core_games=None, existing
                         if support_n and baseline_rate is not None else None)
                     row['incremental_provenance']='RETROSPECTIVE_UNVERIFIED_QUOTES_AND_NONINDEPENDENT_RECIPE'
                 fold_records.append(row)
+                # One physical game per rule: a reconstruction ledger, never an
+                # archived actual betting recommendation. Unknown quote vintage
+                # is explicit; conflicting side fires were already abstained.
+                if selected.size:
+                    gi=np.asarray(meta['group'],dtype=np.int64)
+                    eligible_rows=np.flatnonzero((gi>=0)&r['mask']&foldmask)
+                    by_game=defaultdict(set)
+                    for j in eligible_rows:
+                        side='HOME' if meta['home'][j]==1 else 'AWAY'
+                        if r['direction']=='FADE':side='AWAY' if side=='HOME' else 'HOME'
+                        by_game[int(gi[j])].add(side)
+                    for game_idx in selected:
+                        year_id,source_id=str(meta['keys'][game_idx]).split('|',1)
+                        voted=by_game.get(int(game_idx),set())
+                        if len(voted)!=1:continue
+                        decision_side=next(iter(voted))
+                        c=coremap.get((int(year_id),source_id)) if market=='spreads' else None
+                        core_side,core_result,core_edge=(c if c else ('','',''))
+                        if c and np.isfinite(c[2]) and c[2]>=2 and core_side in ('HOME','AWAY'):
+                            relationship='SUPPORT' if decision_side==core_side else 'VETO_OR_OPPOSITION'
+                        else:
+                            relationship='CORE_UNAVAILABLE_OR_NOT_CANDIDATE'
+                        home_row=int(game_home_row[game_idx])
+                        archived_price=float(market_price[home_row]) if home_row>=0 else float('nan')
+                        kickoff=str(meta['dates'][home_row]) if home_row>=0 else ''
+                        actual=float(outcome[game_idx])
+                        decided=(1 if decision_side=='HOME' else -1)*actual if np.isfinite(actual) else np.nan
+                        ledger.append({'market':market,'test_season':year,'source_game_id':source_id,
+                            'source_identity':str(meta['keys'][game_idx]),'rule_id':rid,
+                            'frozen_rule_rank':ix+1,'direction':r['direction'],
+                            'rule_sources':'|'.join(sorted(r['sources'])),
+                            'rule_decision_side':decision_side,
+                            'kickoff_date_unverified':kickoff,
+                            'archived_market_open_price_unverified':archived_price,
+                            'retrospective_rule_result':('WIN' if decided>0 else 'LOSS' if decided<0 else 'PUSH' if decided==0 else 'UNKNOWN'),
+                            'core_relationship':relationship,'core_side':core_side,
+                            'core_historical_result':core_result,'core_edge_points':core_edge,
+                            'rule_selected_before_test_year':True,
+                            'market_quote_asof_verified':False,
+                            'actual_original_signal_archive_verified':False,
+                            'point_in_time_feature_certified':False,
+                            'bet_authority':0})
         # 2026+ outcomes explicitly not processed. Freeze next-season recipe using
         # all historic data available at completion, not 2026 results.
+        emit('NEXT_YEAR_FREEZE_START',market,atoms=len(bank))
         final,examined=_select_for_fold(bank,meta,outcome,market,2026,
             core_arrays=core_arrays if market=='spreads' else None,max_depth=max_depth)
         for rank,r in enumerate(final):
@@ -495,8 +631,10 @@ def run_full_history(games, seasons, atom_resolver, *, core_games=None, existing
                            'selection_end_season':2025,'train_games':r['score']['games'],
                            'train_shrunken_lift':r['score']['shrunken_lift'],
                            'selection_basis':r['score']['selection_basis'],
+                           'prior_core_discovery_purpose':r['score'].get('core_train_purpose'),
                            'requires_original_quote_asof_for_live_use':True,
                            'current_2026_fires_not_certified':True,'bet_authority':0})
+        emit('MARKET_PASS',market,fold_rows=sum(x['market']==market for x in fold_records),future_rules=len(final))
     folds=pd.DataFrame(fold_records)
     if not folds.empty:
         # Each year selected from past only; do not pooled-rank winners using
@@ -528,13 +666,16 @@ def run_full_history(games, seasons, atom_resolver, *, core_games=None, existing
            'rule_discovery_multiple_testing_promotion_cleared':False,
            'known_existing_catalog_exact_rules_omitted_from_new_paths':len(retested),
            'source_coverage_not_a_no_fire':True,
+           'historical_decision_ledger_is_retrospective_only':True,
+           'historical_decision_ledger_rows':len(ledger),
            'production_mutation':False,'automatic_promotion':False,'bet_authority':0}
     return {'audit_v5':audit, 'feature_source_coverage_v5':pd.DataFrame(coverage),
             'season_forward_windows_v5':pd.DataFrame(windows),
             'season_forward_frozen_rules_v5':folds,
             'season_forward_summary_v5':pd.DataFrame(ranked),
             'new_full_history_paths_v5':pd.DataFrame(future),
-            'existing_catalog_retested_v5':pd.DataFrame(retested)}
+            'existing_catalog_retested_v5':pd.DataFrame(retested),
+            'retrospective_game_decision_ledger_v5':pd.DataFrame(ledger)}
 
 
 def load_current_v55_core(storage_client,bucket_name):
