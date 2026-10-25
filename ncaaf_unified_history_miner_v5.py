@@ -18,7 +18,7 @@ import io, json, traceback
 import numpy as np
 import pandas as pd
 
-VERSION = 'NCAAF_UNIFIED_FULL_HISTORY_MINER_V5_1_20261025'
+VERSION = 'NCAAF_UNIFIED_FULL_HISTORY_MINER_V5_2_20261025'
 RESEARCH_ROOT = 'research/ncaaf/v2/unified_full_history_miner/runs'
 CATEGORY_KEYS = ('MINER_CONTEXT','PATHI_STYLE','BIG_AL_STYLE','CFBD','RICH_MARKET','PT_EXTERNAL','CORE_MODEL')
 
@@ -76,11 +76,21 @@ def _source_rows(games,seasons):
     num_groups=len(unique)
     home_rows=np.bincount(group_index,weights=(home[valid]==1).astype(float),minlength=num_groups)
     away_rows=np.bincount(group_index,weights=(home[valid]==0).astype(float),minlength=num_groups)
-    # Fail closed for incomplete or more than one physical row per side.
-    sound=(home_rows==1)&(away_rows==1)
+    # Native 2013-2025 NCAAF research is one perspective row per physical game;
+    # other source tables have exactly two opposite-side rows. Both are valid
+    # when the archived source game ID is unique and team/opponent identity is
+    # populated. Do not require a fabricated second row to score a game.
+    singleton=(home_rows+away_rows==1)
+    paired=(home_rows==1)&(away_rows==1)
+    sound=singleton|paired
+    if not sound.any():
+        raise ValueError('UNIFIED_NO_UNAMBIGUOUS_SOURCE_GAMES:single_or_paired_rows_required')
     return {'season':sy,'ids':ids,'teams':teams,'opponents':opps,'dates':dates,'home':home,
             'valid':valid,'group':all_group,'keys':unique,'sound':sound,'group_count':num_groups,
-            'side_rows':int(valid.sum()),'sound_games':int(sound.sum())}
+            'single':singleton,'paired':paired,
+            'side_rows':int(valid.sum()),'sound_games':int(sound.sum()),
+            'single_row_games':int(singleton.sum()),'paired_row_games':int(paired.sum()),
+            'rejected_game_ids':int((~sound).sum())}
 
 
 def _make_atom_bank(resolver,market,n,year_mask,*, cap_per_family=12):
@@ -195,15 +205,23 @@ def _safe_mask(mask, n, label):
     return good
 
 
-def _event_stats(mask, direction, rowmeta, result, *, index_limit=None):
-    """Exactly one physical-game outcome; conflicting source-side fires abstain."""
+def _event_stats(mask, direction, rowmeta, result, *, index_limit=None,market='spreads'):
+    """Exactly one physical-game outcome; conflicts abstain for sided markets.
+
+    Totals are game-level OVER/UNDER decisions, never home/away side bets.
+    """
     group=np.asarray(rowmeta['group'],dtype=np.int64)
     side=np.asarray(rowmeta['home'],dtype=float)
     good=(group>=0)&_safe_mask(mask,len(group),'event_rule')
     if index_limit is not None: good &=_safe_mask(index_limit,len(group),'event_window')
     ix=np.flatnonzero(good)
     if not len(ix):return 0,0,0,0, np.array([],int)
-    gi=group[ix]; target_side=np.where(side[ix]==1,1,-1)
+    gi=group[ix]
+    if market=='totals':
+        # Both team perspectives of the same game describe the same total.
+        target_side=np.ones(len(ix),dtype=int)
+    else:
+        target_side=np.where(side[ix]==1,1,-1)
     if direction=='FADE':target_side=-target_side
     home_votes=np.bincount(gi,weights=(target_side==1).astype(float),minlength=rowmeta['group_count'])
     away_votes=np.bincount(gi,weights=(target_side==-1).astype(float),minlength=rowmeta['group_count'])
@@ -230,15 +248,25 @@ def _group_outcomes(games,rowmeta,market):
         hvals[int(keys[i])].append(float(oriented[i]))
     contradictions=0
     for key,values in hvals.items():
-        if len(values)!=2 or not rowmeta['sound'][key] or abs(values[0]-values[1])>0.01:
+        if not rowmeta['sound'][key]:
+            contradictions+=1;continue
+        # One-row archive: one recorded perspective is enough. For mirrored
+        # archives require both sides and matching canonical HOME results.
+        if rowmeta['paired'][key]:
+            if len(values)!=2 or abs(values[0]-values[1])>0.01:
+                contradictions+=1;continue
+        elif rowmeta['single'][key]:
+            if len(values)!=1:
+                contradictions+=1;continue
+        else:
             contradictions+=1;continue
         val=values[0]
         result[key]=(1 if val>0 else -1 if val<0 else 0)
     return result, contradictions
 
 
-def _evaluate(mask, direction, meta, outcome, year_mask, min_n=35):
-    w,l,p,all_games,_=_event_stats(mask,direction,meta,outcome,index_limit=year_mask)
+def _evaluate(mask, direction, meta, outcome, year_mask, min_n=35,market='spreads'):
+    w,l,p,all_games,_=_event_stats(mask,direction,meta,outcome,index_limit=year_mask,market=market)
     n=w+l
     if n<min_n: return None
     rate=(w+10)/(n+20)  # beta shrinkage; ranked within training window only
@@ -341,7 +369,7 @@ def _select_for_fold(atom_bank,meta,outcome,market,eval_year,*,
     singles=[]
     for a in atom_bank:
         for direction in ('PLAY_ON','FADE'):
-            score=_rank_with_core(_evaluate(a['mask'],direction,meta,outcome,train,min_n=min_train_n),
+            score=_rank_with_core(_evaluate(a['mask'],direction,meta,outcome,train,min_n=min_train_n,market=market),
                                    a['mask'],direction,meta,train,core_arrays)
             if score:
                 singles.append({'atoms':(a['name'],),'sources':frozenset((a['source'],)),
@@ -378,7 +406,7 @@ def _select_for_fold(atom_bank,meta,outcome,market,eval_year,*,
                 mask=base['mask']&source_lookup[name]['mask']
                 # require material narrowing beyond parent rather than duplicate.
                 if _overlap_duplicate(mask,base['mask'],train):continue
-                ev=_rank_with_core(_evaluate(mask,base['direction'],meta,outcome,train,min_n=min_train_n),
+                ev=_rank_with_core(_evaluate(mask,base['direction'],meta,outcome,train,min_n=min_train_n,market=market),
                                    mask,base['direction'],meta,train,core_arrays)
                 evaluated+=1
                 if not ev: continue
@@ -471,7 +499,9 @@ def run_full_history(games, seasons, atom_resolver, *, core_games=None, existing
             progress({'phase':phase,'market':market,'metrics':metrics,'research_only':True,'bet_authority':0})
     emit('SOURCE_IDENTITY_START')
     meta=_source_rows(games,seasons)
-    emit('SOURCE_IDENTITY_PASS',sound_games=meta['sound_games'],side_rows=meta['side_rows'])
+    emit('SOURCE_IDENTITY_PASS',sound_games=meta['sound_games'],side_rows=meta['side_rows'],
+         single_row_games=meta['single_row_games'],paired_row_games=meta['paired_row_games'],
+         rejected_game_ids=meta['rejected_game_ids'])
     emit('CORE_CROSSWALK_START')
     coremap,coreaudit=_build_core_map(games,seasons,core_games)
     core_arrays=_core_group_arrays(meta,coremap)
@@ -485,9 +515,12 @@ def run_full_history(games, seasons, atom_resolver, *, core_games=None, existing
                 catalog_defs[fid]=str(m.get('mechanism_id') or '')
     fold_records=[];ranked=[];coverage=[];windows=[];future=[];retested=[];ledger=[]
     game_home_row=np.full(meta['group_count'],-1,dtype=np.int64)
-    for _j in np.flatnonzero(meta['valid'] & (meta['home']==1)):
+    # Always retain a row for single-sided away-perspective archive games;
+    # prefer home when an authentic mirrored pair exists.
+    for _j in np.flatnonzero(meta['valid']):
         _group=int(meta['group'][_j])
-        if _group>=0 and meta['sound'][_group]:game_home_row[_group]=int(_j)
+        if _group>=0 and meta['sound'][_group] and (game_home_row[_group]<0 or meta['home'][_j]==1):
+            game_home_row[_group]=int(_j)
     for market in markets:
         emit('MARKET_START',market)
         try: outcome,contradictions=_group_outcomes(games,meta,market)
@@ -541,7 +574,7 @@ def run_full_history(games, seasons, atom_resolver, *, core_games=None, existing
             emit('FOLD_SEARCH_PASS',market,year=year,frozen_rules=len(rules),tested_candidates=examined)
             foldmask=(meta['season']==year)&meta['valid']
             for ix,r in enumerate(rules):
-                w,l,p,n,selected=_event_stats(r['mask'],r['direction'],meta,outcome,index_limit=foldmask)
+                w,l,p,n,selected=_event_stats(r['mask'],r['direction'],meta,outcome,index_limit=foldmask,market=market)
                 rid=fingerprint(market,r['direction'],r['atoms'])
                 row={'rule_id':rid,'market':market,'test_season':year,'train_end_season':year-1,
                      'direction':r['direction'],'condition_atoms':' AND '.join(r['atoms']),
@@ -578,9 +611,12 @@ def run_full_history(games, seasons, atom_resolver, *, core_games=None, existing
                     eligible_rows=np.flatnonzero((gi>=0)&r['mask']&foldmask)
                     by_game=defaultdict(set)
                     for j in eligible_rows:
-                        side='HOME' if meta['home'][j]==1 else 'AWAY'
-                        if r['direction']=='FADE':side='AWAY' if side=='HOME' else 'HOME'
-                        by_game[int(gi[j])].add(side)
+                        if market=='totals':
+                            choice='OVER' if r['direction']=='PLAY_ON' else 'UNDER'
+                        else:
+                            choice='HOME' if meta['home'][j]==1 else 'AWAY'
+                            if r['direction']=='FADE':choice='AWAY' if choice=='HOME' else 'HOME'
+                        by_game[int(gi[j])].add(choice)
                     for game_idx in selected:
                         year_id,source_id=str(meta['keys'][game_idx]).split('|',1)
                         voted=by_game.get(int(game_idx),set())
@@ -596,7 +632,7 @@ def run_full_history(games, seasons, atom_resolver, *, core_games=None, existing
                         archived_price=float(market_price[home_row]) if home_row>=0 else float('nan')
                         kickoff=str(meta['dates'][home_row]) if home_row>=0 else ''
                         actual=float(outcome[game_idx])
-                        decided=(1 if decision_side=='HOME' else -1)*actual if np.isfinite(actual) else np.nan
+                        decided=(1 if decision_side in ('HOME','OVER') else -1)*actual if np.isfinite(actual) else np.nan
                         ledger.append({'market':market,'test_season':year,'source_game_id':source_id,
                             'source_identity':str(meta['keys'][game_idx]),'rule_id':rid,
                             'frozen_rule_rank':ix+1,'direction':r['direction'],
@@ -635,6 +671,8 @@ def run_full_history(games, seasons, atom_resolver, *, core_games=None, existing
                            'requires_original_quote_asof_for_live_use':True,
                            'current_2026_fires_not_certified':True,'bet_authority':0})
         emit('MARKET_PASS',market,fold_rows=sum(x['market']==market for x in fold_records),future_rules=len(final))
+    if not any(int(w['evaluated_candidate_conditions'])>0 for w in windows):
+        raise ValueError('UNIFIED_NO_CANDIDATES_EVALUATED:check_game_identity_and_target_coverage')
     folds=pd.DataFrame(fold_records)
     if not folds.empty:
         # Each year selected from past only; do not pooled-rank winners using
@@ -651,7 +689,11 @@ def run_full_history(games, seasons, atom_resolver, *, core_games=None, existing
                            'retrospective_unverified_feature_vintage':True,'bet_authority':0})
     audit={'version':VERSION,'status':'COMPLETE_RESEARCH_ONLY_NOT_CERTIFIED',
            'historical_seasons':[int(x) for x in sorted(set(meta['season'][meta['valid']].astype(int)))],
-           'side_rows_with_identity':meta['side_rows'],'two_sided_source_games':meta['sound_games'],
+           'side_rows_with_identity':meta['side_rows'],
+           'unambiguous_source_games':meta['sound_games'],
+           'two_sided_source_games':meta['paired_row_games'],
+           'single_row_source_games':meta['single_row_games'],
+           'rejected_ambiguous_source_ids':meta['rejected_game_ids'],
            'cross_brain_market_atom_lanes':sorted(set((r['category'] for r in coverage if r.get('available_atoms',0)>0))),
            'markets':list(markets),'max_interaction_depth':max_depth,
            'season_forward_recipe_rows':len(fold_records),'distinct_frozen_rule_ids':len(set(x['rule_id'] for x in fold_records)),
