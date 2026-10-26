@@ -8049,6 +8049,38 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 _miner_exact_shadow.update(_unified_results)
                 _miner_exact_shadow['audit']['unified_full_history_miner_v5']={
                     **_unified_results['audit_v5'],'v55_core_source':_v55_core_source}
+                # V6 validates each historical market/game once, audits incompatible
+                # CORE-vs-Miner grades and tests fixed shadow-only arbitration
+                # policies. All historical price/source vintage gaps remain HOLD.
+                # No betting recommendation, current_report, or production write.
+                try:
+                    from ncaaf_decision_validation_v6 import (
+                        build as _v6_validate_decisions,
+                        canonical_from_research_frame as _v6_canonical_frame)
+                    _v6_outputs=_v6_validate_decisions(
+                        _unified_results['retrospective_game_decision_ledger_v5'],
+                        _unified_results['season_forward_frozen_rules_v5'],
+                        _unified_results['new_full_history_paths_v5'],
+                        _unified_results['feature_source_coverage_v5'],
+                        canonical=_v6_canonical_frame(mg,sy))
+                    for _v6_key,_v6_obj in _v6_outputs.items():
+                        if isinstance(_v6_obj,pd.DataFrame):
+                            _miner_exact_shadow[_v6_key]=_v6_obj
+                    _miner_exact_shadow['audit']['decision_validation_v6']=_v6_outputs['validation_audit_v6']
+                    log_func('[NCAAF-DECISION-VALIDATION-V6] status='+
+                             str(_v6_outputs['validation_audit_v6']['status'])+
+                             ' unique_market_games='+str(_v6_outputs['validation_audit_v6']['unique_market_games'])+
+                             ' bet_authority=0')
+                except Exception as _v6_exc:
+                    import traceback as _v6_traceback
+                    _v6_tb=_v6_traceback.format_exc()
+                    _miner_exact_shadow['audit']['decision_validation_v6']={
+                        'status':'HOLD_ERROR','exception':type(_v6_exc).__name__,
+                        'error':str(_v6_exc),'traceback':_v6_tb[-12000:],
+                        'bet_authority':0,'automatic_promotion':False}
+                    log_func('[NCAAF-DECISION-VALIDATION-V6] HOLD_ERROR '+
+                             type(_v6_exc).__name__+':'+str(_v6_exc))
+                    log_func('[NCAAF-DECISION-VALIDATION-V6-TRACEBACK] '+_v6_tb[-12000:])
                 log_func('[NCAAF-UNIFIED-HISTORY-MINER-V5] status='+
                     str(_unified_results['audit_v5'].get('status'))+
                     ' fold_recipes='+str(_unified_results['audit_v5'].get('season_forward_recipe_rows'))+
