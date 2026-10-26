@@ -341,6 +341,22 @@ def read_published_latest(*, bq_client=None, max_market_age_minutes=180):
                 if col in frame.columns:frame.loc[expired,col]=None
             for col in VALID_BRAIN_FAMILIES:
                 if col in frame.columns:frame.loc[expired,col]='QUOTE_EXPIRED_REEVALUATE'
+    # Prospective V7 labels have an independent 15-minute quote TTL. Even if
+    # V55 authority and the board snapshot remain fresh, shadow BETs may not.
+    if 'V7_Shadow_Decision' in frame.columns:
+        v7_q=pd.to_datetime(frame.get('Backend_Quote_Timestamp',
+                pd.Series(index=frame.index,dtype='object')),utc=True,errors='coerce')
+        v7_k=pd.to_datetime(frame.get('Game_Start_UTC',
+                pd.Series(index=frame.index,dtype='object')),utc=True,errors='coerce')
+        v7_t=pd.Timestamp(_utcnow())
+        v7_expired=(frame['V7_Shadow_Decision'].isin(('BET','STRONG BET')) &
+            (v7_q.isna() | v7_k.isna() | (v7_q>v7_t) |
+             (v7_t-v7_q>pd.Timedelta(minutes=15)) | (v7_k<=v7_t) | stale))
+        if v7_expired.any():
+            frame.loc[v7_expired,'V7_Shadow_Decision']='EXPIRED_SHADOW_PRICE'
+            frame.loc[v7_expired,'V7_Shadow_Reason']='EXPIRED_QUOTE_REEVALUATE_IN_BACKEND'
+            frame.loc[v7_expired,'V7_Shadow_Strength']=None
+            frame.loc[v7_expired,'V7_Shadow_Evidence_JSON']='[]'
     active_count=int(frame["V55_Bet_Authority"].eq(1).sum()) if "V55_Bet_Authority" in frame else 0
     strong_count=int((frame.get("V55_Bet_Decision",pd.Series(dtype="object"))=="STRONG BET").sum()) if active_count else 0
     meta={**audit,"publication_status":"STALE_MARKET" if stale else "PASS",
@@ -1610,6 +1626,27 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     event_frames=[x for x in (vetted_explicit,miner_events,other_events)
                   if isinstance(x,pd.DataFrame) and not x.empty]
     combined_events=pd.concat(event_frames,ignore_index=True) if event_frames else None
+    # V7: attach actual frozen OOS sample/rate from the ALREADY verified registry.
+    # Never trust n/rate claimed by a live vote or a descriptive overlay.
+    if isinstance(combined_events,pd.DataFrame) and not combined_events.empty:
+        independent_rules=(other_registry or {}).get('rules',{}) if isinstance(other_registry,dict) else {}
+        miner_rules=(registry or {}).get('mechanisms',{}) if isinstance(registry,dict) else {}
+        def _v7_registry_metric(event):
+            fam=str(event.get('Source_Family') or '').upper()
+            sid=str(event.get('Signal_Family') or '')
+            found=independent_rules.get((fam,sid))
+            if found is None and fam in ('SYSTEM_MINER','PREDICTION_TRACKER'):
+                found=miner_rules.get(sid)
+            if found is None:return (None,None,False)
+            n=_price(found.get('n'));rate=_price(found.get('rate'))
+            if n is None or rate is None or n<60 or not 0.50<=rate<=1.0:
+                return (None,None,False)
+            return (int(n),float(rate),True)
+        _v7_metrics=combined_events.apply(_v7_registry_metric,axis=1)
+        combined_events=combined_events.copy()
+        combined_events['V7_Historical_N']=[x[0] for x in _v7_metrics]
+        combined_events['V7_Historical_Rate']=[x[1] for x in _v7_metrics]
+        combined_events['V7_Historical_Verified']=[x[2] for x in _v7_metrics]
     out, brain = attach_v55_qualified_evidence(out,combined_events)
     # Display labels come from the SAME frozen Miner research registry that
     # qualified each event. Keep original mechanism IDs in the evidence JSON
@@ -1632,6 +1669,18 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     # training audit. Only the published V5.5 decision policy can grant bets.
     out, policy = apply_v55_owner_betting_policy(out)
     updated.update(policy)
+    # V7 cannot block established V55 quote publication or mutate V55 stake
+    # authority if the new PROSPECTIVE SHADOW selector encounters bad inputs.
+    try:
+        out, v7_shadow = apply_v7_prospective_shadow_policy(out)
+    except Exception as exc:
+        v7_shadow={'policy':V7_SHADOW_POLICY_ID,'status':'FAIL_CLOSED_V7_SHADOW_EXCEPTION',
+                   'error':type(exc).__name__,'bet_authority':0}
+        out['V7_Shadow_Decision']='SHADOW_UNAVAILABLE'
+        out['V7_Bet_Authority']=0
+        log('[NCAAF-V7-PROSPECTIVE-SHADOW-ERROR] ' + type(exc).__name__)
+    updated['v7_prospective_shadow'] = v7_shadow
+    log('[NCAAF-V7-PROSPECTIVE-SHADOW] ' + json.dumps(v7_shadow,sort_keys=True))
     updated["status"]=audit["status"]
     updated["price_join_semantics"] = "FRESH_QUOTES_V55_OWNER_DIRECTED_DECISION"
     log("[NCAAF-V55-LIVE-SYSTEM-EVALUATION] " + json.dumps(live_system_audit,sort_keys=True))
@@ -2352,6 +2401,7 @@ def attach_v55_qualified_evidence(frame,events, *, now=None):
     for family in VALID_BRAIN_FAMILIES:
         out[family]="NOT_EVALUABLE"
     out['V55_Independent_Support_Keys']=None
+    out['V7_Trusted_Evidence_Events']=0
     out['V55_Independent_Conflict_Keys']=None
     out['V55_Active_System_Names']=None
     report={"evidence_state":"NOT_EVALUABLE_NO_VERIFIED_EVENTS",
@@ -2477,7 +2527,11 @@ def attach_v55_qualified_evidence(frame,events, *, now=None):
                 "direction":str(ee.get("Signal_Side")),
                 "observed_utc":str(ee.get("Observed_At_UTC")),
                 "qualified_utc":str(ee.get("Qualified_At_UTC")),
-                "evidence_family_key":str(ee.get("Evidence_Family_Key") or "") if pd.notna(ee.get("Evidence_Family_Key")) else ""})
+                "evidence_family_key":str(ee.get("Evidence_Family_Key") or "") if pd.notna(ee.get("Evidence_Family_Key")) else "",
+                "historical_n":int(ee.get("V7_Historical_N")) if _price(ee.get("V7_Historical_N")) is not None and 0 <= _price(ee.get("V7_Historical_N")) <= 100000 else None,
+                "historical_ats_rate":float(ee.get("V7_Historical_Rate")) if _price(ee.get("V7_Historical_Rate")) is not None and 0 <= _price(ee.get("V7_Historical_Rate")) <= 1 else None,
+                "historical_source":"FROZEN_V55_REGISTRY_MATCH" if str(_v55_raw_clean(ee.get("V7_Historical_Verified")) or "").lower() in ("true","1") else "UNATTESTED"})
+        out.at[i,"V7_Trusted_Evidence_Events"]=sum(e.get("historical_source")=="FROZEN_V55_REGISTRY_MATCH" for e in evidence_details)
         out.at[i,"V55_Qualified_Evidence_Detail_JSON"]=json.dumps(evidence_details[:20],sort_keys=True)
         for family in VALID_BRAIN_FAMILIES:
             if family in support:
@@ -2576,6 +2630,197 @@ def _v55_bet_key(row):
         str(row.get("Game_Start_UTC") or "").strip(),
         _norm_team(row.get("Selected_Team"))))
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:28]
+
+
+# V7 is an operational, PRICE-CHECKED PROSPECTIVE SHADOW POLICY running on
+# the existing V5.5 board. It must never alter V55 bet authority or stake units.
+V7_SHADOW_POLICY_ID = 'NCAAF_V7_BRAIN_LED_AND_CORE_LED_PROSPECTIVE_R1_20261026'
+V7_SHADOW_MAX_PER_SNAPSHOT = 3
+
+
+def _v7_empirical_price_score(n, observed_rate, american):
+    """Shrink pre-2026 verified ATS results toward 50%, then compare with price.
+
+    Not a certified EV estimate: archived historical quote timing remains a hold.
+    Return None when evidence or current executable quote is not usable.
+    """
+    net=_american_net(american)
+    if net is None or n is None or observed_rate is None:return None
+    try:n=float(n);p=float(observed_rate)
+    except (ValueError,TypeError,OverflowError):return None
+    if not 60<=n<=100000 or not .50<=p<=1.0 or not math.isfinite(n+p):return None
+    shrink=(p*n+20.)/(n+40.)
+    return {'sample':int(n),'observed_rate':p,'shrunk_rate':shrink,
+            'break_even':1./(1.+net),'conservative_surplus':shrink-1./(1.+net)}
+
+
+def apply_v7_prospective_shadow_policy(frame, *, now=None):
+    """Evaluate every NCAAF backend board using verified LIVE signals only.
+
+    Real-time game identity, quote freshness, source-family independence, and
+    historical registry matching are mandatory. Distinct historical systems
+    sharing a source/family are never treated as independent confirmations.
+    The V7 labels are prospective research recommendations ONLY. The existing
+    V55 owner authority routine remains entirely unchanged.
+    """
+    import pandas as pd
+    if not isinstance(frame,pd.DataFrame):raise TypeError('V7_BOARD_NOT_FRAME')
+    out=frame.copy()
+    now=_timestamp(now or datetime.now(timezone.utc))
+    if pd.isna(now):raise ValueError('V7_INVALID_TIME')
+    initial={
+      'V7_Shadow_Decision':'PASS','V7_Shadow_Path':'NONE',
+      'V7_Shadow_Reason':'NO_EVALUATION','V7_Shadow_Evidence_JSON':'[]',
+      'V7_Shadow_Strength':None,'V7_Shadow_Break_Even':None,
+      'V7_Shadow_Eligible_Families':0,'V7_Shadow_Quote_Age_Min':None,
+      'V7_Shadow_Stake_Units':0.0,'V7_Bet_Authority':0,
+      'V7_Shadow_Policy_Id':V7_SHADOW_POLICY_ID,'V7_Shadow_Bet_Key':None,
+      'V7_Shadow_Evaluated_At_UTC':now.isoformat()}
+    for field,value in initial.items():out[field]=value
+    audit={'policy':V7_SHADOW_POLICY_ID,'status':'PROSPECTIVE_SHADOW_ONLY',
+           'input_rows':len(out),'bet_authority':0,'stake_units':0,
+           'pricing_passed':0,'historically_qualified_rows':0,
+           'proposed_bets':0,'strong_bets':0,'brain_led':0,'core_led':0,
+           'fade_requires_opposite_quote':0,'conflict_passes':0,
+           'price_integrity_holds':0,'duplicate_games_passed':0,
+           'labeled_bets_are_not_formally_authorized':True,
+           'uses_only_registry_attested_verified_pregame_events':True}
+    candidates=[]
+    for idx,row in out.iterrows():
+        gid=str(row.get('Game_ID') or '').strip()
+        kick=_timestamp(row.get('Game_Start_UTC'))
+        quote=_timestamp(row.get('Backend_Quote_Timestamp'))
+        quote_state=str(row.get('Quote_State') or '')
+        age=(now-quote).total_seconds()/60. if pd.notna(quote) else None
+        out.at[idx,'V7_Shadow_Quote_Age_Min']=age
+        if (not gid or not quote_state.startswith('FRESH_TWO_SIDED_')
+            or pd.isna(kick) or pd.isna(quote) or not quote<=now<kick
+            or not kick<=now+pd.Timedelta(days=7) or age is None or age>15):
+            out.at[idx,'V7_Shadow_Reason']='HOLD_MISSING_OR_STALE_PAIRED_PRICE'
+            audit['price_integrity_holds']+=1;continue
+        spread=_price(row.get('Current_Spread'))
+        odds=_price(row.get('Odds_American'))
+        if (spread is None or odds is None or not _valid_american(odds)
+            or not -135<=odds<=145 or not str(row.get('Backend_Quote_Book') or '').strip()
+            or not str(row.get('Selected_Team') or '').strip()
+            or str(row.get('V55_Research_Selected_Side') or '') not in ('HOME','AWAY')):
+            out.at[idx,'V7_Shadow_Reason']='HOLD_SIDE_BOOK_OR_PRICE_UNVERIFIED'
+            audit['price_integrity_holds']+=1;continue
+        (home,away),oriented=_matchup_teams(row)
+        expected_team=home if str(row.get('V55_Research_Selected_Side'))=='HOME' else away
+        if not oriented or _norm_team(row.get('Selected_Team'))!=expected_team:
+            out.at[idx,'V7_Shadow_Reason']='HOLD_PHYSICAL_GAME_SIDE_IDENTITY'
+            audit['price_integrity_holds']+=1;continue
+        audit['pricing_passed']+=1
+        if str(row.get('CORE_Model') or '')!='NONLINEAR_HGB':
+            out.at[idx,'V7_Shadow_Reason']='HOLD_CORE_MODEL_PROVENANCE';continue
+        try:details=json.loads(row.get('V55_Qualified_Evidence_Detail_JSON') or '[]')
+        except (ValueError,TypeError):details=[]
+        if not isinstance(details,list):details=[]
+        team=_norm_team(row.get('Selected_Team'))
+        vetted=[];unmatched=[]
+        for evidence in details:
+            if not isinstance(evidence,dict):continue
+            if (evidence.get('historical_source')!='FROZEN_V55_REGISTRY_MATCH'
+                or _norm_team(evidence.get('direction'))!=team):
+                unmatched.append(evidence);continue
+            metric=_v7_empirical_price_score(evidence.get('historical_n'),
+                      evidence.get('historical_ats_rate'),odds)
+            if metric is None:continue
+            # Dependency keys preserve source-family independence, not vote totals.
+            family=str(evidence.get('source') or '').upper().strip()
+            dep=str(evidence.get('evidence_family_key') or family).upper().strip()
+            if not family or not dep:continue
+            vetted.append({**metric,'source':family,'dependency':dep,
+                           'system_id':str(evidence.get('system_id') or '')})
+        # No raw overlays, text mentions, or unverified counts can create V7 bets.
+        if vetted:audit['historically_qualified_rows']+=1
+        # One strongest rule per source, then collapse additional shared
+        # evidence-family keys. Do not add correlated rule rates together.
+        vetted.sort(key=lambda e:(-e['conservative_surplus'],-e['sample'],e['system_id']))
+        used_src=set();used_dep=set();independent=[]
+        for e in vetted:
+            if e['source'] not in used_src and e['dependency'] not in used_dep:
+                independent.append(e)
+                used_src.add(e['source']);used_dep.add(e['dependency'])
+        # Respect the stronger transitive-dependency graph already computed
+        # by the authenticated V55 evidence bridge. A chain of overlapping
+        # source keys must not count as two independent confirmations.
+        verified_family_cap=int(_price(row.get('Confirm_Count')) or 0)
+        if verified_family_cap < len(independent):
+            independent=independent[:verified_family_cap]
+        out.at[idx,'V7_Shadow_Evidence_JSON']=json.dumps(independent,sort_keys=True)
+        out.at[idx,'V7_Shadow_Eligible_Families']=len(independent)
+        opposing=int(_price(row.get('Oppose_Count')) or 0)
+        if opposing:
+            audit['conflict_passes']+=1
+            out.at[idx,'V7_Shadow_Reason']='PASS_VERIFIED_OPPOSITION_NO_AUTOMATIC_FADE'
+            # The available odds apply to the CORE-selected side, never to the
+            # opposite side. An independent opposite-side quote is necessary.
+            if len(unmatched):
+                out.at[idx,'V7_Shadow_Path']='POTENTIAL_FADE_REPRICE_REQUIRED'
+                audit['fade_requires_opposite_quote']+=1
+            continue
+        if not independent:
+            out.at[idx,'V7_Shadow_Reason']='PASS_NO_PRICE_QUALIFIED_INDEPENDENT_EVIDENCE'
+            continue
+        best=independent[0]
+        out.at[idx,'V7_Shadow_Strength']=best['conservative_surplus']
+        out.at[idx,'V7_Shadow_Break_Even']=best['break_even']
+        projected=_price(row.get('CORE_Projected_Home_Margin'))
+        core_side=str(row.get('V55_Research_Selected_Side'))
+        model_pts=(projected if core_side=='HOME' else -projected)+spread if projected is not None else None
+        # Crucial: low CORE edge cannot veto historically qualified brains.
+        has_core_edge=bool(model_pts is not None and model_pts>=2.0)
+        core_prob_est=None
+        sigma=_price(row.get('CORE_Residual_SD'))
+        if model_pts is not None and sigma is not None and 8<=sigma<=30:
+            try:
+                win,push,loss=_v55_integer_margin_win_push_loss(
+                    projected if core_side=='HOME' else -projected,sigma,spread)
+                core_prob_est=win*_american_net(odds)-loss
+            except (ValueError,OverflowError,TypeError):pass
+        path='CORE_LED' if has_core_edge else 'BRAIN_LED_WEAK_CORE'
+        # No CORE result can be graded in V6.5; here we distinguish genuinely
+        # absent forecasts from forecasts with a small model-market difference.
+        if projected is None:path='BRAIN_LED_NO_CORE_PROJECTION'
+        out.at[idx,'V7_Shadow_Path']=path
+        # Bet rule: evidence must clear actual book breakeven AFTER shrinkage;
+        # CORE-led path additionally requires an uncalibrated model EV floor.
+        # This is a shadow selection threshold, not a guaranteed positive EV.
+        confirmed=[e for e in independent if e['conservative_surplus']>=0.008]
+        if not confirmed:
+            out.at[idx,'V7_Shadow_Reason']='WATCH_EVIDENCE_BELOW_PRICE_THRESHOLD'
+            continue
+        if has_core_edge and (core_prob_est is None or core_prob_est<0.025):
+            out.at[idx,'V7_Shadow_Reason']='WATCH_CORE_PRICE_MODEL_NOT_POSITIVE'
+            continue
+        if len(confirmed)>=2 and confirmed[1]['conservative_surplus']>=0.015:
+            decision='STRONG BET'
+        else:
+            decision='BET'
+        # Conservative optional ceiling on shadow candidates per snapshot.
+        # Stakes remain zero even for STRONG BET.
+        candidates.append((len(confirmed),best['conservative_surplus'],
+                           core_prob_est if core_prob_est is not None else float('-inf'),
+                           gid,idx,decision,path))
+    candidates.sort(key=lambda x:(-x[0],-x[1],-x[2],x[3]))
+    chosen_games=set()
+    for rank,(_,_,_,gid,idx,decision,path) in enumerate(candidates):
+        if gid in chosen_games:
+            out.at[idx,'V7_Shadow_Reason']='PASS_DUPLICATE_PHYSICAL_GAME'
+            audit['duplicate_games_passed']+=1;continue
+        chosen_games.add(gid)
+        if len(chosen_games)>V7_SHADOW_MAX_PER_SNAPSHOT:
+            out.at[idx,'V7_Shadow_Reason']='PASS_SHADOW_SNAPSHOT_CAP';continue
+        out.at[idx,'V7_Shadow_Decision']=decision
+        out.at[idx,'V7_Shadow_Reason']='RESEARCH_PRICE_CHECKED_REGISTRY_EVIDENCE'
+        out.at[idx,'V7_Shadow_Bet_Key']=_v55_bet_key(out.loc[idx])
+        audit['proposed_bets']+=1
+        audit['strong_bets']+=int(decision=='STRONG BET')
+        audit['brain_led']+=int(path.startswith('BRAIN_LED'))
+        audit['core_led']+=int(path=='CORE_LED')
+    return out,audit
 
 
 def apply_v55_owner_betting_policy(frame, *, now=None, enabled=None):
