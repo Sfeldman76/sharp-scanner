@@ -16,7 +16,7 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 
-VERSION = 'NCAAF_DECISION_VALIDATION_V6_20261025'
+VERSION = 'NCAAF_DECISION_VALIDATION_V6_4_20261026'
 REQUIRED = ('market','test_season','source_identity','source_game_id','rule_id',
             'frozen_rule_rank','rule_decision_side','rule_sources',
             'retrospective_rule_result','core_side','core_historical_result',
@@ -155,6 +155,614 @@ def _normalise(d,f):
     return chk.drop(columns='_rule_preselected')
 
 
+# V6.2: situational-edge discovery on the EXISTING validated V5.2 ledger.
+# No new model, no majority voting, no live decisions. Historical season-forward
+# grades are only retrospective until source and book-price vintage is certified.
+def _wilson_lower(w, l, z=1.96):
+    n = w + l
+    if n <= 0:
+        return np.nan
+    p = w / n
+    return (p + z*z/(2*n) - z*math.sqrt(p*(1-p)/n + z*z/(4*n*n))) / (1+z*z/n)
+
+
+def _edge_summary(rows, group, *, kind):
+    """One result per distinct (condition, physical game), not rule firings/votes."""
+    out = []
+    keys = list(group) if isinstance(group, (tuple, list)) else [group]
+    for key, g in rows.groupby(keys, sort=True, dropna=False):
+        if not isinstance(key, tuple):
+            key = (key,)
+        ident = dict(zip(keys, key))
+        w = int((g.result == 'WIN').sum())
+        l = int((g.result == 'LOSS').sum())
+        push = int((g.result == 'PUSH').sum())
+        seasons = g.groupby('test_season').result.agg(
+            n=lambda x: int(x.isin(('WIN', 'LOSS')).sum()),
+            wins=lambda x: int(x.eq('WIN').sum()))
+        meaningful = seasons.loc[seasons.n >= 8]
+        positives = int((meaningful.wins / meaningful.n > 0.5238095238).sum())
+        out.append({**ident, 'condition_type':kind,
+            'graded_games': w+l, 'wins': w, 'losses': l, 'pushes':push,
+            'winrate_descriptive':w/(w+l) if w+l else np.nan,
+            'rate_shrunk_to_half_n40':(w+20)/(w+l+40),
+            'wilson95_lower':_wilson_lower(w,l),
+            'tested_seasons':int(len(seasons)),
+            'seasons_with_8plus_grades':int(len(meaningful)),
+            'seasons_above_110_breakeven':positives,
+            'min_meaningful_season_winrate':float((meaningful.wins/meaningful.n).min()) if len(meaningful) else np.nan,
+            'price_vintage_certified':False,
+            'qualified_roi':False,
+            'selection_status':'RETROSPECTIVE_HYPOTHESIS_NOT_CERTIFIED',
+            'bet_authority':0})
+    return pd.DataFrame(out)
+
+
+def _prior_year_rollforward(years, groupcols, *, pair=False):
+    """Prior HELD-OUT season grades only; NEVER use this year's outcome to score its signal."""
+    rows = []
+    for key, frame in years.groupby(groupcols, sort=True, dropna=False):
+        if not isinstance(key, tuple):
+            key = (key,)
+        identity = dict(zip(groupcols,key))
+        history = []
+        for _, obs in frame.sort_values('test_season').iterrows():
+            yw, yl = int(obs.wins), int(obs.losses)
+            pw = sum(x[1] for x in history)
+            pl = sum(x[2] for x in history)
+            prior_seasons = sum(x[1]+x[2]>=8 for x in history)
+            prev_rates = [x[1]/(x[1]+x[2]) for x in history if x[1]+x[2]>=8]
+            # Pooled evidence matters more than a binary season-by-season vote.
+            # A single down year reduces total results and increases uncertainty,
+            # but NEVER disqualifies a condition merely because that year lost.
+            p_shrunk = (pw+20)/(pw+pl+40)
+            strength = p_shrunk-0.5
+            meaningful = [(y,w,l) for y,w,l in history if w+l>=8]
+            bad = [(y,w,l) for y,w,l in meaningful if w/(w+l)<(110/210)]
+            n_good = len(meaningful)-len(bad)
+            # Separate ordinary binomial season noise from observed between-year
+            # variation; only EXCESS heterogeneity reduces research ranking.
+            # This is a descriptive risk adjustment, NOT validated predictive EV.
+            meaningful_n = sum(w+l for _,w,l in meaningful)
+            if len(meaningful)>=2 and meaningful_n:
+                mean_p = sum(w for _,w,_ in meaningful)/meaningful_n
+                season_mse = sum((w+l)*((w/(w+l))-mean_p)**2 for _,w,l in meaningful)/meaningful_n
+                sampling_mse = len(meaningful)*mean_p*(1-mean_p)/meaningful_n
+                excess_season_sd = math.sqrt(max(0.,season_mse-sampling_mse))
+            else:
+                excess_season_sd = 0.
+            variance_penalty = min(0.05, 0.5*excess_season_sd)
+            # Whether a single season dominates the historical edge is visible,
+            # not an implicit veto. Evaluate excluding EACH meaningful season.
+            leave_one_season_out_min = min(
+                ((pw-w+20)/(pw+pl-w-l+40)-0.5)
+                for _,w,l in meaningful) if meaningful else np.nan
+            last_bad_streak = 0
+            for y,w,l in reversed(meaningful):
+                if w/(w+l) >= 110/210:
+                    break
+                last_bad_streak+=1
+            repeated_bad_penalty = min(0.03,0.01*max(0,last_bad_streak-1))
+            robust_score = strength-variance_penalty-repeated_bad_penalty
+            # This probabilistic proxy is deliberately independent of observed
+            # TEST-year results and is NOT certified ROI or executable pricing.
+            post_sd = math.sqrt(p_shrunk*(1-p_shrunk)/(pw+pl+41))
+            prob_above_110 = 0.5*math.erfc(((110/210)-p_shrunk)/(math.sqrt(2)*post_sd)) if post_sd else np.nan
+            # Keep the historical prior-only selection gate unchanged. No
+            # per-season positive-result requirement was ever intended.
+            evidence_ok = (pw+pl >= 40 and prior_seasons>=2 and
+                           n_good>=1 and strength>=0.035 and identity['market'] != 'h2h')
+            if not meaningful:
+                regime='INSUFFICIENT_YEARLY_OBSERVATIONS'
+            elif len(bad)==0:
+                regime='NO_MEANINGFUL_DOWN_YEAR'
+            elif last_bad_streak>=2:
+                regime='REPEATED_RECENT_DOWN_YEARS_REVIEW'
+            elif last_bad_streak==1:
+                regime='ONE_RECENT_DOWN_YEAR_NOT_A_VETO'
+            else:
+                regime='RECOVERED_AFTER_DOWN_YEAR'
+            rows.append({**identity,'test_season':int(obs.test_season),
+                'prior_tested_seasons':len(history),
+                'prior_8plus_grade_seasons':prior_seasons,
+                'prior_wins':pw,'prior_losses':pl,
+                'prior_shrunk_excess_over_half':strength,
+                'prior_robust_support_score':robust_score,
+                'prior_excess_between_season_sd':excess_season_sd,
+                'prior_variance_risk_penalty':variance_penalty,
+                'prior_repeated_down_year_penalty':repeated_bad_penalty,
+                'prior_meaningful_down_seasons':len(bad),
+                'prior_meaningful_up_seasons':n_good,
+                'prior_last_down_year_streak':last_bad_streak,
+                'prior_leave_one_season_out_min_excess':leave_one_season_out_min,
+                'prior_probability_above_minus110_proxy':prob_above_110,
+                'prior_evidence_regime':regime,
+                'prior_wilson95_lower':_wilson_lower(pw,pl),
+                'prior_min_meaningful_season_winrate':min(prev_rates) if prev_rates else np.nan,
+                'prior_only_stability_screen':bool(evidence_ok),
+                'test_wins':yw,'test_losses':yl,'test_pushes':int(obs.pushes),
+                'test_nonpush_winrate':yw/(yw+yl) if yw+yl else np.nan,
+                'test_outcome_used_in_prior_score':False,
+                'market_price_certified':False,'bet_authority':0})
+            history.append((int(obs.test_season),yw,yl))
+    return pd.DataFrame(rows)
+
+
+def _complete_exact_pair_research(simple, rule_years):
+    """Full rule-pair intersections with game identity, not per-game rank trim.
+
+    The rule definition and pair key are frozen and source categories sorted.
+    A category is not proof of independent signal provenance. Rule pair selection
+    uses only prior evaluated seasons in _prior_year_rollforward.
+    """
+    from itertools import combinations
+    pair_keys=['market','test_season','source_identity','rule_decision_side']
+    gkeys=['market','test_season','source_identity','rule_pair']
+    simple=simple.copy()
+    simple['category_rank']=(simple.sort_values(['frozen_rule_rank','rule_id'])
+       .groupby(pair_keys+['rule_sources'],sort=False).cumcount().add(1)
+       .reindex(simple.index))
+    # Category-specific joins bound the peak memory. Never form all 2.3m
+    # same-game permutations or drop true pair members by ranking.
+    parts=[];raw_events=0;invalid_grades=0
+    categories=sorted(simple.rule_sources.unique())
+    for source_a,source_b in combinations(categories,2):
+        a=simple.loc[simple.rule_sources.eq(source_a),
+          pair_keys+['rule_id','result','category_rank']]
+        b=simple.loc[simple.rule_sources.eq(source_b),
+          pair_keys+['rule_id','result','category_rank']]
+        if a.empty or b.empty:continue
+        x=a.merge(b,on=pair_keys,how='inner',suffixes=('_a','_b'))
+        if x.empty:continue
+        raw_events+=len(x)
+        bad=x.result_a.ne(x.result_b)
+        invalid_grades+=int(bad.sum())
+        x=x.loc[~bad].copy()
+        if x.empty:continue
+        x['rule_pair']=x.rule_id_a+'|'+x.rule_id_b
+        x['rank_restricted_v62']=(x.category_rank_a.le(2)&x.category_rank_b.le(2))
+        x['category_a']=source_a;x['category_b']=source_b
+        x=x.rename(columns={'rule_decision_side':'side','result_a':'result'})
+        parts.append(x[['market','test_season','source_identity','side','rule_pair',
+            'rule_id_a','rule_id_b','category_a','category_b','result','rank_restricted_v62']])
+    cols=['market','test_season','source_identity','side','rule_pair',
+          'rule_id_a','rule_id_b','category_a','category_b','result','rank_restricted_v62']
+    events=pd.concat(parts,ignore_index=True) if parts else pd.DataFrame(columns=cols)
+    if events.empty:
+        empty_scores=pd.DataFrame(columns=['market','rule_pair','graded_games','wins','losses','pushes','bet_authority'])
+        empty_fold=pd.DataFrame(columns=['market','rule_pair','test_season','prior_only_stability_screen','bet_authority'])
+        empty_components=pd.DataFrame(columns=['market','rule_pair','test_season','wins','losses','pushes','bet_authority'])
+        return (events,empty_fold,empty_scores,empty_scores.copy(),empty_components,
+                {'raw_join_rows':raw_events,'invalid_pair_grade_rows':invalid_grades,
+                 'pair_game_conflict_rows_removed':0,'full_pair_events':0,
+                 'ranked_subset_events':0,'all_pair_definitions':0,'retained_pairs':0})
+    # One pair/physical game; exclude a pair when it simultaneously signals
+    # both sides, rather than cherry-pick the more successful side.
+    conflicts=events.groupby(gkeys,sort=False).side.transform('nunique').gt(1)
+    removed=int(conflicts.sum())
+    events=events.loc[~conflicts].drop_duplicates(gkeys).copy()
+    all_event_count=len(events)
+    w=events.result.eq('WIN').astype('int8');l=events.result.eq('LOSS').astype('int8');p=events.result.eq('PUSH').astype('int8')
+    events['n_w']=w;events['n_l']=l;events['n_p']=p
+    group=['market','rule_pair'];group_year=group+['test_season']
+    years=events.groupby(group_year,as_index=False,sort=False).agg(
+        wins=('n_w','sum'),losses=('n_l','sum'),pushes=('n_p','sum'),
+        rank_subset_firings=('rank_restricted_v62','sum'))
+    total=years.assign(nonpush=years.wins+years.losses).groupby(group,as_index=False).agg(
+        total_graded=('nonpush','sum'),eval_seasons=('test_season','nunique'))
+    # A 40-grade/2-season prior screen implies at least 25 grades/2 years
+    # across the observed history; prune weak definitions before expensive
+    # scorecards without hiding possible prior-screen selections.
+    keep=total.loc[total.total_graded.ge(25)&total.eval_seasons.ge(2),group]
+    if keep.empty:
+        empty_scores=pd.DataFrame(columns=group+['graded_games','wins','losses','pushes','bet_authority'])
+        empty_folds=pd.DataFrame(columns=group+['test_season','prior_only_stability_screen','bet_authority'])
+        audit={'raw_join_rows':raw_events,'invalid_pair_grade_rows':invalid_grades,
+               'pair_game_conflict_rows_removed':removed,'full_pair_events':all_event_count,
+               'ranked_subset_events':int(events.rank_restricted_v62.sum()),
+               'all_pair_definitions':int(len(total)),'retained_pairs':0,
+               'retained_event_rows':0,'rank_restricted_population_changed_pairs':0}
+        empty_components=pd.DataFrame(columns=['market','rule_pair','test_season','wins','losses','pushes','bet_authority'])
+        return (events.iloc[0:0].copy(),empty_folds,empty_scores,
+                empty_scores.copy(),empty_components,audit)
+    yrs=years.merge(keep,on=group,how='inner',validate='many_to_one')
+    selected_events=events.merge(keep,on=group,how='inner',validate='many_to_one')
+    folds=_prior_year_rollforward(yrs[['market','rule_pair','test_season','wins','losses','pushes']],group)
+    scores=_edge_summary(selected_events,group,kind='EXACT_FULL_INTERSECTION_DISJOINT_CATEGORY_PAIR')
+    info=(selected_events.groupby(group,as_index=False,sort=False)
+          .agg(rule_id_a=('rule_id_a','first'),rule_id_b=('rule_id_b','first'),
+               category_a=('category_a','first'),category_b=('category_b','first')))
+    scores=scores.merge(info,on=group,validate='one_to_one')
+    scores['intersection_policy']='ALL_SAME_SIDE_FIRINGS__NO_PRE_RANK_CUTOFF'
+    scores['source_independence_certified']=False
+    # Sensitivity to *previous* algorithm's top-two restriction on identical
+    # fixed rule definitions. This never determines rule eligibility.
+    restricted=selected_events.loc[selected_events.rank_restricted_v62]
+    rank_counts=(restricted.groupby(group,as_index=False).agg(
+        rank2_wins=('n_w','sum'),rank2_losses=('n_l','sum'),rank2_pushes=('n_p','sum')))
+    sens=scores[group+['graded_games','wins','losses','pushes']].merge(rank_counts,on=group,how='left')
+    for col in ('rank2_wins','rank2_losses','rank2_pushes'):
+        sens[col]=sens[col].fillna(0).astype(int)
+    sens['full_rate']=sens.wins.div(sens.wins+sens.losses).where(sens.wins+sens.losses>0)
+    sens['rank2_rate']=sens.rank2_wins.div(sens.rank2_wins+sens.rank2_losses).where(
+        sens.rank2_wins+sens.rank2_losses>0)
+    sens['rank_cutoff_changes_population']=(sens.graded_games.ne(sens.rank2_wins+sens.rank2_losses))
+    sens['rank2_is_diagnostic_only']=True;sens['bet_authority']=0
+    # Compare pair performance to both constituent rules across exactly the
+    # same evaluation YEARS. On actual pair games, all three sides and grades
+    # necessarily coincide. Incremental *selection* effect compares the pair
+    # intersection against each rule's non-intersection games.
+    component_years=rule_years[['market','test_season','rule_id','wins','losses','pushes']]
+    components=yrs.merge(info,on=group,validate='many_to_one')
+    for side in ('a','b'):
+        src=component_years.rename(columns={
+           'rule_id':'rule_id_'+side,'wins':'component_'+side+'_all_wins',
+           'losses':'component_'+side+'_all_losses','pushes':'component_'+side+'_all_pushes'})
+        components=components.merge(src,on=['market','test_season','rule_id_'+side],how='left',validate='many_to_one')
+        for kind in ('wins','losses','pushes'):
+            orig='component_'+side+'_all_'+kind
+            if components[orig].isna().any():raise ValueError('EXACT_PAIR_COMPONENT_MISSING')
+            components['component_'+side+'_only_'+kind]=(components[orig]-components[kind]).astype(int)
+            if (components['component_'+side+'_only_'+kind]<0).any():
+                raise ValueError('EXACT_PAIR_COMPONENT_SUBTRACTION_NEGATIVE')
+    components['pair_nonpush']=components.wins+components.losses
+    components['pair_rate']=components.wins.div(components.pair_nonpush).where(components.pair_nonpush>0)
+    for side in ('a','b'):
+        denom=components['component_'+side+'_only_wins']+components['component_'+side+'_only_losses']
+        components['component_'+side+'_only_rate']=components['component_'+side+'_only_wins'].div(denom).where(denom>0)
+        components['pair_minus_'+side+'_only_rate_pp']=100*(components.pair_rate-components['component_'+side+'_only_rate'])
+    components['same_season_not_matched_control']=True
+    components['source_vintage_certified']=False;components['bet_authority']=0
+    audit={'raw_join_rows':raw_events,'invalid_pair_grade_rows':invalid_grades,
+           'pair_game_conflict_rows_removed':removed,'full_pair_events':all_event_count,
+           'ranked_subset_events':int(events.rank_restricted_v62.sum()),
+           'all_pair_definitions':int(len(total)),'retained_pairs':int(len(scores)),
+           'retained_event_rows':int(len(selected_events)),
+           'rank_restricted_population_changed_pairs':int(sens.rank_cutoff_changes_population.sum())}
+    return selected_events,folds,scores,sens,components,audit
+
+
+def _exact_pair_core_milestone(specific, folds, core_pool):
+    """Paired conditional evidence at original CORE opportunities, with hold gates.
+
+    A same-side confirmation returns the SAME win/loss as CORE on that game;
+    sample enrichment is a *selection* claim, not same-game prediction lift.
+    Opposition is a potential fade, not a signed profitable bet without prices.
+    """
+    cols=['market','test_season','source_identity','rule_pair','side','result']
+    empty_ev=pd.DataFrame(columns=cols+['core_side','role','prior_only_stability_screen','bet_authority'])
+    empty_cmp=pd.DataFrame(columns=['market','rule_pair','test_season','role','core_bucket','core_wins','core_losses','pair_wins','pair_losses','matched_games','baseline_winrate','selection_lift_vs_bucket_pp','bet_authority'])
+    empty_pol=pd.DataFrame(columns=['test_season','policy','selected_games','core_wins','core_losses','pair_wins','pair_losses','status','bet_authority'])
+    audit={'prior_screened_pair_game_events':0,'pair_matched_core_events':0,'distinct_core_games':0,
+           'core_pairs_grade_mismatch_excluded':0,'unique_game_pair_policy_rows':0,
+           'status':'NO_PRESEASON_SCREENED_MATCHED_CORE_PAIRS',
+           'certified_incremental_roi':False,'bet_authority':0}
+    if specific.empty or folds.empty or core_pool.empty:
+        return empty_ev,empty_cmp,empty_pol,audit
+    eligible=folds.loc[folds.prior_only_stability_screen.fillna(False),
+        ['market','rule_pair','test_season','prior_wins','prior_losses','prior_shrunk_excess_over_half','prior_robust_support_score','prior_evidence_regime','prior_8plus_grade_seasons']]
+    if eligible.empty:return empty_ev,empty_cmp,empty_pol,audit
+    x=(specific.loc[specific.market.eq('spreads')].merge(
+        eligible,on=['market','rule_pair','test_season'],how='inner',validate='many_to_one'))
+    audit['prior_screened_pair_game_events']=int(len(x))
+    if x.empty:return empty_ev,empty_cmp,empty_pol,audit
+    core=core_pool.loc[core_pool.market.eq('spreads')].copy()
+    core['core_edge_points_unverified']=pd.to_numeric(core.core_edge_points_unverified,errors='coerce')
+    x=x.merge(core[['market','test_season','source_identity','core_side','core_result_unverified','core_bucket',
+           'core_edge_points_unverified']],on=['market','test_season','source_identity'],how='inner',validate='many_to_one')
+    audit['pair_matched_core_events']=int(len(x))
+    if x.empty:return empty_ev,empty_cmp,empty_pol,audit
+    x['role']=np.where(x.side.eq(x.core_side),'CONFIRM_CORE','OPPOSE_CORE')
+    x['core_grade_sign']=x.core_result_unverified.map(RESULTS)
+    x['pair_grade_sign']=x.result.map(RESULTS)
+    consistent=x.pair_grade_sign.eq(np.where(x.role.eq('CONFIRM_CORE'),x.core_grade_sign,-x.core_grade_sign))
+    audit['core_pairs_grade_mismatch_excluded']=int((~consistent).sum())
+    x=x.loc[consistent].copy()
+    if x.empty:return empty_ev,empty_cmp,empty_pol,audit
+    x['core_win']=x.core_result_unverified.eq('WIN').astype('int8')
+    x['core_loss']=x.core_result_unverified.eq('LOSS').astype('int8')
+    x['pair_win']=x.result.eq('WIN').astype('int8')
+    x['pair_loss']=x.result.eq('LOSS').astype('int8')
+    x['historical_bookmaker_quote_time_certified']=False
+    x['source_signal_vintage_certified']=False;x['bet_authority']=0
+    # Baseline exactly matched on market/season/CORE edge bucket AND CORE side.
+    baseline=core.groupby(['market','test_season','core_bucket','core_side'],as_index=False).agg(
+        baseline_wins=('core_result_unverified',lambda z:int(z.eq('WIN').sum())),
+        baseline_losses=('core_result_unverified',lambda z:int(z.eq('LOSS').sum())))
+    baseline['baseline_winrate']=(baseline.baseline_wins/
+        (baseline.baseline_wins+baseline.baseline_losses))
+    comparison=(x.groupby(['market','rule_pair','test_season','role','core_bucket','core_side'],as_index=False)
+        .agg(core_wins=('core_win','sum'),core_losses=('core_loss','sum'),
+             pair_wins=('pair_win','sum'),pair_losses=('pair_loss','sum'),
+             matched_games=('source_identity','nunique'),
+             prior_wins=('prior_wins','first'),prior_losses=('prior_losses','first'),
+             prior_excess=('prior_shrunk_excess_over_half','first')))
+    comparison=comparison.merge(baseline,on=['market','test_season','core_bucket','core_side'],
+        how='left',validate='many_to_one')
+    comparison['core_matched_winrate']=comparison.core_wins/(comparison.core_wins+comparison.core_losses)
+    comparison['pair_matched_winrate']=comparison.pair_wins/(comparison.pair_wins+comparison.pair_losses)
+    comparison['selection_lift_vs_bucket_pp']=100*(comparison.core_matched_winrate-comparison.baseline_winrate)
+    comparison['pair_minus_core_same_game_pp']=100*(comparison.pair_matched_winrate-comparison.core_matched_winrate)
+    comparison['same_game_profit_comparison_certified']=False
+    comparison['independent_holdout_certified']=False
+    comparison['support_is_selection_enrichment_not_new_prediction']=True
+    comparison['bet_authority']=0
+    # A bounded one-CORE-opportunity-per-game shadow policy. Competing exact
+    # pairs are ranked by PRE-TEST-YEAR evidence alone. If strongest eligible
+    # supports CORE we flag confirmation; if it opposes CORE flag research fade;
+    # neither is authorized at historical unverified prices.
+    x=x.sort_values(['market','test_season','source_identity','prior_robust_support_score',
+                      'prior_shrunk_excess_over_half','prior_wins','rule_pair'],ascending=[True,True,True,False,False,False,True])
+    distinct=x.drop_duplicates(['market','test_season','source_identity']).copy()
+    distinct['policy']=np.where(distinct.role.eq('CONFIRM_CORE'),'PRIOR_QUALIFIED_CONFIRM_CORE',
+                               'PRIOR_QUALIFIED_POTENTIAL_FADE')
+    policy=distinct.groupby(['test_season','policy'],as_index=False).agg(
+        selected_games=('source_identity','nunique'),core_wins=('core_win','sum'),
+        core_losses=('core_loss','sum'),pair_wins=('pair_win','sum'),pair_losses=('pair_loss','sum'))
+    policy['status']='RESEARCH_ONLY_EXACT_PAIR_PRIOR_SCREEN__PRICE_VINTAGE_HOLD'
+    policy['bet_authority']=0
+    audit['distinct_core_games']=int(len(distinct))
+    audit['unique_game_pair_policy_rows']=int(len(policy))
+    audit['status']='RESEARCH_ONLY_PRIOR_SCREENED_PAIRS_WITH_CORE__PRICE_VINTAGE_HOLD'
+    return x,comparison,policy,audit
+
+
+def _pair_forward_one_opportunity(specific, folds):
+    """Retrospective season-forward screening, ONE opportunity per physical game.
+
+    Do not sum overlapping frozen-rule portfolios, and do not resolve opposing
+    directions by observed results. H2H returns remain unqualified without odds.
+    """
+    empty=pd.DataFrame(columns=['market','test_season','source_identity','side','result',
+         'rule_pair','prior_wins','prior_losses','decision_state','bet_authority'])
+    empty_summary=pd.DataFrame(columns=['market','test_season','graded_games','wins','losses','pushes',
+        'conflict_games_passed','winrate_descriptive','status','bet_authority'])
+    if specific.empty or folds.empty:return empty,empty_summary,{'qualified_pair_years':0,'eligible_firings':0,'conflict_games':0,'decisions':0}
+    ok=folds.loc[folds.prior_only_stability_screen.fillna(False),
+        ['market','rule_pair','test_season','prior_wins','prior_losses','prior_shrunk_excess_over_half','prior_robust_support_score','prior_evidence_regime']]
+    ok=ok.loc[ok.market.isin(('spreads','totals'))]
+    if ok.empty:return empty,empty_summary,{'qualified_pair_years':0,'eligible_firings':0,'conflict_games':0,'decisions':0}
+    events=specific.merge(ok,on=['market','rule_pair','test_season'],how='inner',validate='many_to_one')
+    if events.empty:return empty,empty_summary,{'qualified_pair_years':int(len(ok)),'eligible_firings':0,'conflict_games':0,'decisions':0}
+    groups=['market','test_season','source_identity']
+    conflicts=events.groupby(groups).side.nunique().gt(1)
+    conflicts=conflicts.rename('opposing_prequalified_pairs').reset_index()
+    events=events.merge(conflicts,on=groups,how='left',validate='many_to_one')
+    events=events.sort_values(groups+['prior_robust_support_score','prior_shrunk_excess_over_half','prior_wins','rule_pair'],
+                ascending=[True,True,True,False,False,False,True],kind='mergesort')
+    representative=events.drop_duplicates(groups).copy()
+    representative['qualified_pairs_on_game']=events.groupby(groups).rule_pair.transform('size').loc[representative.index].astype(int)
+    representative['decision_state']=np.where(representative.opposing_prequalified_pairs,
+                  'PASS_OPPOSING_PREQUALIFIED_PAIRS','EXPLORATORY_PRIOR_SCREEN_PAIR')
+    representative['eligible_result']=representative.result.where(~representative.opposing_prequalified_pairs)
+    representative['historical_price_certified']=False
+    representative['independent_source_and_holdout_certified']=False
+    representative['bet_authority']=0
+    agg=[]
+    for (market,year),g in representative.groupby(['market','test_season'],sort=True):
+        take=g.loc[g.decision_state.eq('EXPLORATORY_PRIOR_SCREEN_PAIR')]
+        w=int(take.eligible_result.eq('WIN').sum());l=int(take.eligible_result.eq('LOSS').sum())
+        agg.append({'market':market,'test_season':int(year),'unique_opportunities':int(len(g)),
+                    'graded_games':w+l,'wins':w,'losses':l,'pushes':int(take.eligible_result.eq('PUSH').sum()),
+                    'conflict_games_passed':int(g.opposing_prequalified_pairs.sum()),
+                    'winrate_descriptive':w/(w+l) if w+l else float('nan'),
+                    'status':'EXPLORATORY_UNVERIFIED_HISTORICAL_PRICE_AND_MULTIPLE_TESTING',
+                    'bet_authority':0})
+    return representative,pd.DataFrame(agg),{'qualified_pair_years':int(len(ok)),
+        'eligible_firings':int(len(events)),'conflict_games':int(representative.opposing_prequalified_pairs.sum()),
+        'decisions':int(representative.decision_state.eq('EXPLORATORY_PRIOR_SCREEN_PAIR').sum())}
+
+
+def build_situational_edge_research(d, games):
+    """Identify stable conditions and combinations, with CORE only as base.
+
+    This is a diagnostic *selection* engine; no probability adjustments or
+    bet authorities are invented. Condition strength is estimated only from
+    earlier season-forward grades. Cross-family independence remains unverified.
+    """
+    slim = d[['market','test_season','source_identity','rule_id','rule_decision_side',
+              'rule_sources','retrospective_rule_result','frozen_rule_rank',
+              'core_side','core_historical_result','core_edge_points']].copy()
+    slim.rename(columns={'retrospective_rule_result':'result'},inplace=True)
+    slim = slim.loc[slim.result.isin(('WIN','LOSS','PUSH'))].copy()
+    slim['rule_sources'] = slim.rule_sources.fillna('')
+    slim['n_w'] = slim.result.eq('WIN').astype(int)
+    slim['n_l'] = slim.result.eq('LOSS').astype(int)
+    slim['n_p'] = slim.result.eq('PUSH').astype(int)
+    # V5.2 rule_id identifies a frozen definition; deduplicate any accidental
+    # repeat of the same condition in a single physical game.
+    slim = slim.sort_values(['market','test_season','source_identity','rule_id','frozen_rule_rank']).drop_duplicates(
+        ['market','test_season','source_identity','rule_id'])
+    rule_groups = ['market','rule_id']
+    rule_years = slim.groupby(rule_groups+['test_season'],as_index=False).agg(
+        wins=('n_w','sum'),losses=('n_l','sum'),pushes=('n_p','sum'),
+        rule_sources=('rule_sources','first'), rule_firings=('result','size'))
+    rule_summary=_edge_summary(slim,rule_groups,kind='FROZEN_SINGLE_OR_EXISTING_CROSS_SOURCE_RULE')
+    desc = slim.groupby(rule_groups,as_index=False).agg(
+        rule_sources=('rule_sources','first'),
+        example_side=('rule_decision_side','first'))
+    rule_summary=rule_summary.merge(desc,on=rule_groups,how='left',validate='one_to_one')
+    rule_summary['cross_source_rule']=rule_summary.rule_sources.map(lambda x:len([c for c in str(x).split('|') if c])>1)
+    rule_summary['h2h_price_required']=rule_summary.market.eq('h2h')
+    rule_folds=_prior_year_rollforward(rule_years,rule_groups)
+    rule_folds=rule_folds.merge(rule_years[rule_groups+['test_season','rule_sources']],
+                               on=rule_groups+['test_season'],how='left',validate='one_to_one')
+
+    # Pair two SINGLE-SOURCE categories firing ON THE SAME SIDE. The pair is
+    # an exploratory new condition; never count several rules in one category as
+    # several independent votes. Do not combine rules that internally already
+    # depend on multiple source categories.
+    simple=slim.loc[slim.rule_sources.str.count('\\|').eq(0)&slim.rule_sources.ne('')]
+    per_category=(simple.sort_values(['frozen_rule_rank','rule_id'])
+                  .drop_duplicates(['market','test_season','source_identity',
+                                    'rule_decision_side','rule_sources']))
+    # Vectorized category pairing. All 235k rule firings must not be expanded
+    # into nested Python rule-pair loops; only six distinct source categories
+    # can participate per physical game/side.
+    pair_keys=['market','test_season','source_identity','rule_decision_side']
+    left=per_category[pair_keys+['rule_sources','result']].copy()
+    merged=left.merge(left,on=pair_keys,how='inner',suffixes=('_a','_b'))
+    merged=merged.loc[(merged.rule_sources_a < merged.rule_sources_b) &
+                      (merged.result_a == merged.result_b)].copy()
+    combo_data=merged[pair_keys+['rule_sources_a','rule_sources_b','result_a']].copy()
+    combo_data['source_pair']=combo_data.rule_sources_a+'|'+combo_data.rule_sources_b
+    combo_data.rename(columns={'rule_decision_side':'side','result_a':'result'},inplace=True)
+    combo_data=combo_data[['market','test_season','source_identity','side','source_pair','result']]
+    if not combo_data.empty:
+        # Do not quietly count BOTH opposite positions as two profitable bets.
+        contradiction=(combo_data.groupby(['market','test_season','source_identity','source_pair'])
+                       .side.transform('nunique').gt(1))
+        combo_conflicts=int(contradiction.sum())
+        combo_data=combo_data.loc[~contradiction].drop_duplicates(
+            ['market','test_season','source_identity','source_pair'])
+        combo_data['n_w']=combo_data.result.eq('WIN').astype(int)
+        combo_data['n_l']=combo_data.result.eq('LOSS').astype(int)
+        combo_data['n_p']=combo_data.result.eq('PUSH').astype(int)
+        combo_groups=['market','source_pair']
+        combo_years=combo_data.groupby(combo_groups+['test_season'],as_index=False).agg(
+            wins=('n_w','sum'),losses=('n_l','sum'),pushes=('n_p','sum'))
+        combo_score=_edge_summary(combo_data,combo_groups,kind='CROSS_SOURCE_PAIR_SAME_SIDE')
+        combo_folds=_prior_year_rollforward(combo_years,combo_groups,pair=True)
+        combo_score['independent_source_provenance_certified']=False
+    else:
+        combo_conflicts=0
+        combo_score=pd.DataFrame(columns=['market','source_pair','wins','losses','graded_games','bet_authority'])
+        combo_folds=pd.DataFrame(columns=['market','source_pair','test_season','prior_only_stability_screen','bet_authority'])
+
+    # V6.3: use the COMPLETE intersection of each fixed pair of single-source
+    # definitions. V6.2 mistakenly restricted the population to the two
+    # highest-ranked rules per category/game BEFORE grading. Keep that subset
+    # only as an explicit sensitivity analysis, never as the full backtest.
+    specific, specific_folds, specific_scores, specific_rank_sensitivity, specific_components, specific_audit = (
+        _complete_exact_pair_research(simple, rule_years))
+
+    pair_forward_games, pair_forward_summary, pair_forward_audit = (
+        _pair_forward_one_opportunity(specific, specific_folds))
+
+    # CORE is the baseline. Attach ONLY before-test-year scores to each fired
+    # condition. Never treat every explorer as a veto; evaluate strong prior
+    # support or opposition separately and disclose the comparator cohort.
+    relevant=games.loc[games.core_candidate_in_ledger,
+        ['market','test_season','source_identity','core_side','core_result_unverified',
+         'core_edge_points_unverified','core_rule_grading_disagreement',
+         'rule_internal_grade_consistent']].copy()
+    relevant=relevant.loc[(~relevant.core_rule_grading_disagreement)&
+                          relevant.rule_internal_grade_consistent].copy()
+    relevant['core_bucket']=pd.cut(pd.to_numeric(relevant.core_edge_points_unverified,errors='coerce'),
+        bins=[1.999,4,7,np.inf],labels=['2_TO_4','4_TO_7','7_PLUS'],include_lowest=True)
+    relevant['core_bucket']=relevant['core_bucket'].astype(str)
+    core_pool=relevant.loc[relevant.core_result_unverified.isin(('WIN','LOSS'))].copy()
+    baseline=(core_pool.groupby(['market','test_season','core_bucket'],as_index=False)
+              .core_result_unverified.agg(
+                   baseline_games='size',baseline_wins=lambda x:int(x.eq('WIN').sum())))
+    baseline['baseline_winrate']=baseline.baseline_wins/baseline.baseline_games
+    # One physical CORE bet is an observation for each *distinct tested rule*,
+    # but counts MUST NOT be summed across conditions.
+    with_core=slim.merge(core_pool[['market','test_season','source_identity','core_bucket',
+                       'core_side','core_result_unverified']].rename(
+                            columns={'core_side':'verified_core_side',
+                                     'core_result_unverified':'verified_core_grade'}),
+                       on=['market','test_season','source_identity'],how='inner',validate='many_to_one')
+    with_core=with_core.loc[with_core.market.eq('spreads')]
+    with_core['role']=np.where(with_core.rule_decision_side.eq(with_core.verified_core_side),
+                               'CONFIRM_CORE','OPPOSE_CORE')
+    with_core['core_win']=with_core.verified_core_grade.eq('WIN').astype(int)
+    conditional=(with_core.groupby(['market','rule_id','test_season','core_bucket','role'],as_index=False)
+                 .agg(core_wins=('core_win','sum'),core_games=('core_win','size')))
+    conditional=conditional.merge(baseline,on=['market','test_season','core_bucket'],how='left',validate='many_to_one')
+    conditional['core_winrate']=conditional.core_wins/conditional.core_games
+    conditional['core_vs_bucket_baseline_pp']=100*(conditional.core_winrate-conditional.baseline_winrate)
+    conditional['descriptive_not_causal_or_certified']=True
+    conditional['bet_authority']=0
+
+    # One CORE candidate per game. A rule only earns consideration once it has
+    # previous season-forward observations. Its score is an evidence descriptor,
+    # NOT a calibrated probability and NOT an additive model adjustment.
+    triggered=with_core.merge(rule_folds[['market','rule_id','test_season',
+                'prior_only_stability_screen','prior_shrunk_excess_over_half',
+                'prior_robust_support_score','prior_evidence_regime',
+                'prior_wins','prior_losses','prior_8plus_grade_seasons']],
+                on=['market','rule_id','test_season'],how='left',validate='many_to_one')
+    triggered=triggered.loc[triggered.prior_only_stability_screen.fillna(False)].copy()
+    # Strongest previous-season evidence for each condition direction; sources
+    # exposed so the same underlying family isn't mistaken for many voters.
+    candidate_rows=[]
+    idx=['market','test_season','source_identity']
+    for key,g in triggered.groupby(idx,sort=True):
+        sides={}
+        for role,z in g.groupby('role'):
+            top=z.sort_values(['prior_robust_support_score','prior_shrunk_excess_over_half','prior_wins','rule_id'],
+                              ascending=[False,False,False,True]).iloc[0]
+            sides[role]=(str(top.rule_id),str(top.rule_sources),
+                         float(top.prior_shrunk_excess_over_half),int(top.prior_wins+top.prior_losses))
+        same=sides.get('CONFIRM_CORE');opp=sides.get('OPPOSE_CORE')
+        candidate_rows.append({'market':key[0],'test_season':key[1],'source_identity':key[2],
+          'support_rule_id':same[0] if same else '',
+          'support_source_categories':same[1] if same else '',
+          'support_prior_shrunk_excess':same[2] if same else np.nan,
+          'support_prior_graded':same[3] if same else 0,
+          'opposition_rule_id':opp[0] if opp else '',
+          'opposition_source_categories':opp[1] if opp else '',
+          'opposition_prior_shrunk_excess':opp[2] if opp else np.nan,
+          'opposition_prior_graded':opp[3] if opp else 0,
+          'evidence_state':('BOTH_STABLE_CONDITIONS_CONFLICT' if same and opp else
+                            'PRIOR_STABLE_CONFIRMATION' if same else 'PRIOR_STABLE_OPPOSITION'),
+          'selection_is_preseason_evidence_only':True,'price_asof_certified':False,
+          'bet_authority':0})
+    candidate=pd.DataFrame(candidate_rows)
+    if candidate.empty:
+        candidate=pd.DataFrame(columns=idx+['evidence_state','bet_authority'])
+    candidate=relevant.merge(candidate,on=idx,how='left',validate='one_to_one')
+    candidate['evidence_state']=candidate.evidence_state.fillna('NO_STABLE_PRIOR_CONDITION')
+    candidate['bet_authority']=0
+    # Prior-season-selected *exact* pair events evaluated against precisely the
+    # same CORE physical games. Pair profitability remains uncertified until
+    # the original executable price, grade and signal vintages are validated.
+    pair_core_events, pair_core_comparison, pair_core_policy, pair_core_audit = (
+        _exact_pair_core_milestone(specific, specific_folds, core_pool))
+    audit={'version':'NCAAF_EXISTING_V6_SITUATIONAL_EDGE_V6_4_20261026',
+           'one_bad_season_is_automatic_disqualification':False,
+           'prior_only_robust_season_variance_ranking':True,
+           'specific_pair_preseason_qualified_one_recent_down_year':int((specific_folds.prior_only_stability_screen.fillna(False) & specific_folds.prior_evidence_regime.eq('ONE_RECENT_DOWN_YEAR_NOT_A_VETO')).sum()) if not specific_folds.empty else 0,
+           'status':'SEASON_FORWARD_DESCRIPTIVE_ONLY_NOT_CERTIFIED',
+           'new_python_modules':0,'rule_scorecards':int(len(rule_summary)),
+           'rule_prior_only_folds':int(len(rule_folds)),
+           'category_pair_scorecards':int(len(combo_score)),
+           'specific_cross_source_rule_pairs_retained':int(len(specific_scores)),
+           'specific_pair_prior_only_folds_retained':int(len(specific_folds)),
+           'specific_pair_opposite_side_conflicts_excluded':specific_audit['pair_game_conflict_rows_removed'],
+           'full_pair_events':specific_audit['full_pair_events'],
+           'ranked_subset_events':specific_audit['ranked_subset_events'],
+           'exact_pair_core_milestone':pair_core_audit,
+           'exact_pair_one_opportunity_forward':pair_forward_audit,
+           'category_pair_prior_only_folds':int(len(combo_folds)),
+           'pair_opposite_side_conflicts_excluded':combo_conflicts,
+           'core_conditional_comparisons':int(len(conditional)),
+           'matched_core_games':int(len(candidate)),
+           'core_games_with_prior_stable_evidence':int(candidate.evidence_state.ne('NO_STABLE_PRIOR_CONDITION').sum()),
+           'calibrated_betting_probabilities':False,
+           'certified_market_roi':False,
+           'independent_vintage_or_holdout_certified':False,
+           'historical_core_quote_grade_discrepancies_excluded':True,
+           'production_mutation':False,'bet_authority':0}
+    return {'situational_edge_rules_v6':rule_summary,
+            'situational_edge_rollforward_v6':rule_folds,
+            'situational_combo_rules_v6':combo_score,
+            'situational_combo_rollforward_v6':combo_folds,
+            'situational_specific_combos_v6':specific_scores,
+            'situational_specific_combo_rollforward_v6':specific_folds,
+            'situational_specific_combo_rank_sensitivity_v6':specific_rank_sensitivity,
+            'situational_specific_combo_components_v6':specific_components,
+            'situational_specific_combo_forward_games_v6':pair_forward_games,
+            'situational_specific_combo_forward_summary_v6':pair_forward_summary,
+            'situational_specific_combo_core_events_v6':pair_core_events,
+            'situational_specific_combo_core_comparison_v6':pair_core_comparison,
+            'situational_specific_combo_core_policy_v6':pair_core_policy,
+            'situational_core_conditionals_v6':conditional,
+            'situational_core_candidate_ledger_v6':candidate,
+            'situational_edge_audit_v6':audit}
+
+
 def _policy_decision(policy,core,positive,negative):
     if core not in ('HOME','AWAY'):return 'NO_CORE'
     p=len(positive);n=len(negative)
@@ -182,6 +790,9 @@ def build(d,f,n,s,*,canonical=None):
     d['core_edge_points']=pd.to_numeric(d.core_edge_points,errors='coerce')
     d['historical_price']=pd.to_numeric(d.get('archived_market_open_price_unverified',np.nan),errors='coerce')
     d['price_recorded']=d.historical_price.notna()
+    # Sort once globally instead of sorting inside each of ~14,448 game groups.
+    d=d.sort_values(['market','test_season','source_identity',
+                      'frozen_rule_rank','rule_id'],kind='mergesort')
     # Canonical source is optional. Without scores and both price definitions,
     # NEVER quietly mark grade reconciliation as passed.
     lookup={}
@@ -274,7 +885,7 @@ def build(d,f,n,s,*,canonical=None):
         # Internal grading disagreement by source_game occurs even if we lack
         # an externally attested canonical CFBD margin; never call it certified.
         conflict=len([v for v in sides.values() if v>0])>1
-        best=g.sort_values(['frozen_rule_rank','rule_id']).iloc[0]
+        best=g.iloc[0]  # rank pre-sorted once above
         decisions={p:_policy_decision(p,core_side if core_candidate else '',supporting,opposing) for p in POLICIES}
         game_rows.append({'market':market,'test_season':int(year),'source_identity':str(identity),
             'source_game_id':str(g.source_game_id.iloc[0]),
@@ -341,6 +952,8 @@ def build(d,f,n,s,*,canonical=None):
                 'certified_incremental_lift':'HOLD_NONINDEPENDENT_RETROSPECTIVE_VINTAGE',
                 'production_authority':0})
     paired=pd.DataFrame(summaries)
+    # V6.2 situational-edge research: same existing module, no new Python scripts.
+    situational=build_situational_edge_research(d,games)
     # Run-level quality gates fail closed, not implicit PASS through empty inputs.
     incomplete={
         'canonical_scores_missing':canonical is None,
@@ -361,7 +974,7 @@ def build(d,f,n,s,*,canonical=None):
                     'core_candidates_in_ledger':int(g.core_candidate_in_ledger.sum()),
                     'core_grade_disagreement_games':int(g.core_rule_grading_disagreement.sum())}
             for m,g in games.groupby('market')}
-    return {'game_level_evidence_v6':games,'paired_core_shadow_policies_v6':paired,
+    return {**situational,'game_level_evidence_v6':games,'paired_core_shadow_policies_v6':paired,
         'settlement_reconciliation_v6':reconciliation,
         'validation_audit_v6':{'version':VERSION,'status':'RESEARCH_DIAGNOSTIC_ONLY_CERTIFICATION_HOLD',
             'input_ledger_rows':int(len(d)), 'unique_market_games':int(len(games)),
@@ -370,7 +983,8 @@ def build(d,f,n,s,*,canonical=None):
             'canonical_regraded_rule_games':int(games.canonical_reconciliation.eq('GRADED_MATCH').sum()),
         'core_exact_price_reconciled_games':int(games.canonical_core_reconciliation.eq('CORE_REPLAY_GRADE_MATCH').sum()),
         'moneyline_roi_qualified':False,'features_asof_certified':False,
-            'sources_independent_certified':False,'production_mutation':False,
+            'sources_independent_certified':False,'situational_edge_v6_2':situational['situational_edge_audit_v6'],
+            'production_mutation':False,
             'automatic_promotion':False,'bet_authority':0}}
 
 
