@@ -1669,6 +1669,45 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     # training audit. Only the published V5.5 decision policy can grant bets.
     out, policy = apply_v55_owner_betting_policy(out)
     updated.update(policy)
+    # V7 independently shops existing backend bookmaker quotes. The V5.5
+    # authorized price and policy are IMMUTABLE at this stage.
+    try:
+        out, rec_audit = attach_v7_recreational_same_line_quotes(out,market)
+    except Exception as exc:
+        rec_audit={'status':'FAIL_CLOSED_RECREATIONAL_PRICE_SHOP',
+                   'error':type(exc).__name__}
+        log('[NCAAF-V7-REC-SHOP-ERROR] '+type(exc).__name__)
+    updated['v7_recreational_pricing']=rec_audit
+    # Distinguish actual attested live mechanisms from raw descriptive data.
+    # 2,546 historical V6.5 hypotheses are NOT implicitly executable triggers.
+    sources={}
+    system_ids=set()
+    for raw in out.get('V55_Qualified_Evidence_Detail_JSON',pd.Series(dtype=object)).dropna():
+        try:items=json.loads(raw)
+        except (ValueError,TypeError):continue
+        if not isinstance(items,list):continue
+        for e in items:
+            if not isinstance(e,dict) or e.get('historical_source')!='FROZEN_V55_REGISTRY_MATCH':continue
+            fam=str(e.get('source') or '').upper()
+            sid=str(e.get('system_id') or '')
+            if not fam or not sid:continue
+            system_ids.add((fam,sid));sources[fam]=sources.get(fam,0)+1
+    coverage={'verified_live_system_ids':len(system_ids),
+         'verified_ids_by_family':{k:sum(1 for f,_ in system_ids if f==k)
+                                   for k in sorted(sources)},
+         'verified_firings_by_family':sources,
+         'miner_registry_mechanisms':len((registry or {}).get('mechanisms',{})),
+         'other_brain_registry_rules':len((other_registry or {}).get('rules',{})),
+         'other_registry_status':other_registry_problem or 'PASS',
+         'other_live_match_status':other_audit.get('status'),
+         'raw_bigal_rows':int(out.get('V55_Raw_BigAl',pd.Series(dtype=object)).fillna('').astype(str).str.contains('SPREAD ENHANCER',case=False,regex=False).sum()),
+         'raw_pathi_rows':int(out.get('V55_Raw_Pathi',pd.Series(dtype=object)).fillna('').astype(str).str.contains('FOOTBALL RESEARCH CONTEXT',case=False,regex=False).sum()),
+         'research_v65_candidates_are_not_live_verified':True,
+         'v7_side_scope':'CORE_SELECTED_SIDE_ONLY__OPPOSITE_BRAIN_SIDES_NOT_YET_PRICED'}
+    coverage['status']=('MULTI_SOURCE_ACTIVE' if len(sources)>1
+          else 'SINGLE_SOURCE_LIVE_REGISTRY_COVERAGE' if sources
+          else 'ZERO_ATTESTED_LIVE_EVIDENCE')
+    updated['v7_live_brain_coverage']=coverage
     # V7 cannot block established V55 quote publication or mutate V55 stake
     # authority if the new PROSPECTIVE SHADOW selector encounters bad inputs.
     try:
@@ -2635,7 +2674,136 @@ def _v55_bet_key(row):
 # V7 is an operational, PRICE-CHECKED PROSPECTIVE SHADOW POLICY running on
 # the existing V5.5 board. It must never alter V55 bet authority or stake units.
 V7_SHADOW_POLICY_ID = 'NCAAF_V7_BRAIN_LED_AND_CORE_LED_PROSPECTIVE_R1_20261026'
-V7_SHADOW_MAX_PER_SNAPSHOT = 3
+V7_SHADOW_MAX_PER_SNAPSHOT = 100  # observational cap only; V5.5 wager cap remains 3
+
+
+# Sharp books remain valuable PRICE DISCOVERY sources; user-facing execution
+# research should separately identify fresh, legally accessible recreational
+# books. This allowlist is deliberately only an identity classification, never
+# a claim that the user can wager at any particular book or jurisdiction.
+V7_RECREATIONAL_BOOK_ALIASES = frozenset((
+    'draftkings', 'fanduel', 'betmgm', 'caesars', 'caesars_sportsbook',
+    'bet365', 'betrivers', 'fanatics', 'fanatics_sportsbook', 'espnbet',
+    'espn_bet', 'the_score_bet', 'hardrockbet', 'hard_rock_bet',
+    'betfred_us', 'betparx', 'ballybet', 'pointsbetus', 'pointsbet_us',
+    'sportsbook_draftkings', 'sportsbook_fanduel',
+))
+
+
+def _v7_book_id(value):
+    return re.sub(r'[^a-z0-9_]+', '', str(value or '').lower().replace(' ', '_').replace('-', '_'))
+
+
+def attach_v7_recreational_same_line_quotes(board, market, *, now=None):
+    """Independent V7 price shopping; NO changes to V5.5's selected prices.
+
+    Only fresh, paired, same-book, same-spread quotes enter the recreational
+    comparison. We do not rank different point spreads by their moneyline odds
+    or use one sportsbook for one side and another for the opposite side.
+    Missing rec-book coverage is visible, not silently replaced by Pinnacle.
+    """
+    import pandas as pd
+    if not isinstance(board, pd.DataFrame):raise TypeError('V7_PRICE_BOARD_NOT_FRAME')
+    out=board.copy()
+    defaults={
+        'V7_Rec_Price_Status':'NO_FRESH_RECREATIONAL_MATCH',
+        'V7_Rec_Book':None,'V7_Rec_Spread':None,
+        'V7_Rec_Odds_American':None,'V7_Rec_Quote_Timestamp':None,
+        'V7_Rec_Price_Improvement':None,
+        'V7_Rec_Paired_Quote':False,
+    }
+    for field,default in defaults.items():out[field]=default
+    report={'status':'NO_RECREATIONAL_BOOK_QUOTES','input_board_rows':len(out),
+            'rec_books_present':[],'rec_same_line_paired_games':0,
+            'rec_better_than_reference_games':0,'rec_reference_or_worse_games':0,
+            'unmatched_same_line_games':0,'reference_sharp_books':{},
+            'quote_age_limit_minutes':15,
+            'does_not_modify_v55_executable_or_authority_fields':True}
+    if not isinstance(market,pd.DataFrame) or market.empty:return out,report
+    needed={'Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome',
+            'Value','Odds_Price','Snapshot_Timestamp'}
+    if not needed.issubset(market.columns):
+        report['status']='MISSING_MARKET_QUOTE_FIELDS';return out,report
+    now=_timestamp(now or _utcnow())
+    if pd.isna(now):report['status']='INVALID_EVALUATION_TIME';return out,report
+    q=market.copy()
+    q['_kick']=pd.to_datetime(q['Game_Start'],errors='coerce',utc=True)
+    q['_snap']=pd.to_datetime(q['Snapshot_Timestamp'],errors='coerce',utc=True)
+    q['_home']=q['Home_Team_Norm'].map(_norm_team)
+    q['_away']=q['Away_Team_Norm'].map(_norm_team)
+    q['_selected']=q['Outcome'].map(_norm_team)
+    b1=q['Bookmaker'] if 'Bookmaker' in q else pd.Series('',index=q.index)
+    b2=q['Book'] if 'Book' in q else pd.Series('',index=q.index)
+    q['_book']=b1.fillna('').astype(str).str.lower().str.strip()
+    q.loc[q['_book'].isin(('', 'nan','none')),'_book']=b2.fillna('').astype(str).str.lower().str.strip()
+    q['_book_id']=q['_book'].map(_v7_book_id)
+    q['_spread']=pd.to_numeric(q['Value'],errors='coerce')
+    q['_odds']=pd.to_numeric(q['Odds_Price'],errors='coerce')
+    q=q.loc[(q['_book_id'].isin(V7_RECREATIONAL_BOOK_ALIASES))
+      &q['_snap'].between(now-pd.Timedelta(minutes=15),now)
+      &q['_snap'].lt(q['_kick'])
+      &q['_kick'].gt(now)
+      &q['_selected'].ne('')
+      &q['_odds'].map(_valid_american)
+      &q['_spread'].between(-100,100)].copy()
+    report['rec_books_present']=sorted(q['_book_id'].unique().tolist())
+    if q.empty:return out,report
+    report['status']='RECREATIONAL_QUOTES_PRESENT'
+    # Search bounded to actual 2026 forecast matchups. No requirement to have
+    # every book represented: only paired quotes can support an execution price.
+    q['_match']=list(zip(q['_home'],q['_away']))
+    game_groups={k:g for k,g in q.groupby('_match',sort=False)}
+    for idx,r in out.iterrows():
+        selected=_norm_team(r.get('Selected_Team'))
+        (home,away),oriented=_matchup_teams(r)
+        kick=_timestamp(r.get('Game_Start_UTC'))
+        refspread=_price(r.get('Current_Spread'))
+        refodds=_price(r.get('Odds_American'))
+        refbook=_v7_book_id(r.get('Backend_Quote_Book'))
+        if refbook:report['reference_sharp_books'][refbook]=report['reference_sharp_books'].get(refbook,0)+1
+        if (not oriented or selected not in (home,away) or pd.isna(kick)
+            or refspread is None or refodds is None):continue
+        group=game_groups.get((home,away))
+        if group is None:continue
+        group=group.loc[(group['_kick']-kick).abs().le(
+            pd.Timedelta(minutes=KICKOFF_TOLERANCE_MINUTES))]
+        if group.empty:continue
+        paired=[]
+        for book,bookrows in group.groupby('_book_id',sort=False):
+            sides=bookrows.loc[bookrows['_selected'].eq(selected)
+                &bookrows['_spread'].sub(refspread).abs().le(.001)]
+            if sides.empty:continue
+            other=(away if selected==home else home)
+            opposite=bookrows.loc[bookrows['_selected'].eq(other)
+                &bookrows['_spread'].add(refspread).abs().le(.001)]
+            if opposite.empty:continue
+            for _,sr in sides.sort_values('_snap',ascending=False).head(8).iterrows():
+                compatible=opposite.loc[(opposite['_snap']-sr['_snap']).abs().le(
+                    pd.Timedelta(minutes=15))]
+                if compatible.empty:continue
+                other_row=compatible.sort_values('_snap',ascending=False).iloc[0]
+                # Quoted prices must be from the same live pregame market.
+                paired.append((float(sr['_odds']),min(sr['_snap'],other_row['_snap']),
+                               str(book),sr))
+                break
+        if not paired:
+            report['unmatched_same_line_games']+=1
+            out.at[idx,'V7_Rec_Price_Status']='REC_PRICE_EXISTS_DIFFERENT_LINE_OR_UNPAIRED'
+            continue
+        # At the SAME spread, higher American odds always pay more.
+        paired.sort(key=lambda x:(x[0],x[1],x[2]),reverse=True)
+        rec_american,_,book,quote=paired[0]
+        out.at[idx,'V7_Rec_Price_Status']='FRESH_PAIRED_IDENTICAL_SPREAD'
+        out.at[idx,'V7_Rec_Book']=book
+        out.at[idx,'V7_Rec_Spread']=float(quote['_spread'])
+        out.at[idx,'V7_Rec_Odds_American']=rec_american
+        out.at[idx,'V7_Rec_Quote_Timestamp']=quote['_snap'].isoformat()
+        out.at[idx,'V7_Rec_Price_Improvement']=rec_american-refodds
+        out.at[idx,'V7_Rec_Paired_Quote']=True
+        report['rec_same_line_paired_games']+=1
+        if rec_american>refodds:report['rec_better_than_reference_games']+=1
+        else:report['rec_reference_or_worse_games']+=1
+    return out,report
 
 
 def _v7_empirical_price_score(n, observed_rate, american):
@@ -2675,7 +2843,9 @@ def apply_v7_prospective_shadow_policy(frame, *, now=None):
       'V7_Shadow_Eligible_Families':0,'V7_Shadow_Quote_Age_Min':None,
       'V7_Shadow_Stake_Units':0.0,'V7_Bet_Authority':0,
       'V7_Shadow_Policy_Id':V7_SHADOW_POLICY_ID,'V7_Shadow_Bet_Key':None,
-      'V7_Shadow_Evaluated_At_UTC':now.isoformat()}
+      'V7_Shadow_Evaluated_At_UTC':now.isoformat(),
+      'V7_Shadow_Execution_Book':None,'V7_Shadow_Execution_Odds':None,
+      'V7_Shadow_Price_Classification':'NO_VERIFIED_EXECUTION_PRICE'}
     for field,value in initial.items():out[field]=value
     audit={'policy':V7_SHADOW_POLICY_ID,'status':'PROSPECTIVE_SHADOW_ONLY',
            'input_rows':len(out),'bet_authority':0,'stake_units':0,
@@ -2684,7 +2854,10 @@ def apply_v7_prospective_shadow_policy(frame, *, now=None):
            'fade_requires_opposite_quote':0,'conflict_passes':0,
            'price_integrity_holds':0,'duplicate_games_passed':0,
            'labeled_bets_are_not_formally_authorized':True,
-           'uses_only_registry_attested_verified_pregame_events':True}
+           'uses_only_registry_attested_verified_pregame_events':True,
+           'reference_only_shadow_bets':0,'recreational_same_line_shadow_bets':0,
+           'qualified_system_ids_selected':[],
+           'v55_owner_authority_unchanged':True}
     candidates=[]
     for idx,row in out.iterrows():
         gid=str(row.get('Game_ID') or '').strip()
@@ -2699,9 +2872,29 @@ def apply_v7_prospective_shadow_policy(frame, *, now=None):
             out.at[idx,'V7_Shadow_Reason']='HOLD_MISSING_OR_STALE_PAIRED_PRICE'
             audit['price_integrity_holds']+=1;continue
         spread=_price(row.get('Current_Spread'))
-        odds=_price(row.get('Odds_American'))
+        reference_odds=_price(row.get('Odds_American'))
+        # Research evaluates a recreational paired quote at the IDENTICAL
+        # spread where available. Otherwise Pinnacle/sharp remains a reference,
+        # not an assertion of a user-executable recreational price.
+        rec_ok=(str(row.get('V7_Rec_Price_Status') or '')==
+                'FRESH_PAIRED_IDENTICAL_SPREAD'
+                and bool(row.get('V7_Rec_Paired_Quote'))
+                and _price(row.get('V7_Rec_Spread')) is not None
+                and spread is not None
+                and abs(_price(row.get('V7_Rec_Spread'))-spread)<.001
+                and pd.notna(_timestamp(row.get('V7_Rec_Quote_Timestamp')))
+                and 0<=(now-_timestamp(row.get('V7_Rec_Quote_Timestamp'))).total_seconds()/60<=15)
+        odds=(_price(row.get('V7_Rec_Odds_American')) if rec_ok
+              else reference_odds)
+        book=(str(row.get('V7_Rec_Book') or '') if rec_ok
+              else str(row.get('Backend_Quote_Book') or ''))
+        out.at[idx,'V7_Shadow_Execution_Book']=book
+        out.at[idx,'V7_Shadow_Execution_Odds']=odds
+        out.at[idx,'V7_Shadow_Price_Classification']=(
+            'RECREATIONAL_PAIRED_SAME_SPREAD' if rec_ok else
+            'REFERENCE_BOOK_ONLY__RECREATIONAL_NOT_CONFIRMED')
         if (spread is None or odds is None or not _valid_american(odds)
-            or not -135<=odds<=145 or not str(row.get('Backend_Quote_Book') or '').strip()
+            or not -135<=odds<=145 or not book.strip()
             or not str(row.get('Selected_Team') or '').strip()
             or str(row.get('V55_Research_Selected_Side') or '') not in ('HOME','AWAY')):
             out.at[idx,'V7_Shadow_Reason']='HOLD_SIDE_BOOK_OR_PRICE_UNVERIFIED'
@@ -2814,12 +3007,29 @@ def apply_v7_prospective_shadow_policy(frame, *, now=None):
         if len(chosen_games)>V7_SHADOW_MAX_PER_SNAPSHOT:
             out.at[idx,'V7_Shadow_Reason']='PASS_SHADOW_SNAPSHOT_CAP';continue
         out.at[idx,'V7_Shadow_Decision']=decision
-        out.at[idx,'V7_Shadow_Reason']='RESEARCH_PRICE_CHECKED_REGISTRY_EVIDENCE'
+        out.at[idx,'V7_Shadow_Reason']=(
+          'RESEARCH_REC_PRICE_CHECKED_REGISTRY_EVIDENCE' if
+          out.at[idx,'V7_Shadow_Price_Classification']=='RECREATIONAL_PAIRED_SAME_SPREAD'
+          else 'SHADOW_REFERENCE_BOOK_PRICE__NOT_VERIFIED_REC_EXECUTION')
+        if out.at[idx,'V7_Shadow_Price_Classification']=='RECREATIONAL_PAIRED_SAME_SPREAD':
+            audit['recreational_same_line_shadow_bets']+=1
+        else:audit['reference_only_shadow_bets']+=1
+        try:
+            evid=json.loads(out.at[idx,'V7_Shadow_Evidence_JSON'] or '[]')
+            audit['qualified_system_ids_selected'].extend(str(e.get('system_id')) for e in evid)
+        except (ValueError,TypeError,AttributeError):pass
         out.at[idx,'V7_Shadow_Bet_Key']=_v55_bet_key(out.loc[idx])
         audit['proposed_bets']+=1
         audit['strong_bets']+=int(decision=='STRONG BET')
         audit['brain_led']+=int(path.startswith('BRAIN_LED'))
         audit['core_led']+=int(path=='CORE_LED')
+    audit['qualified_system_ids_selected']=sorted(set(
+        x for x in audit['qualified_system_ids_selected'] if x))[:50]
+    audit['unique_selected_historical_systems']=len(audit['qualified_system_ids_selected'])
+    audit['evidence_concentration_status']=(
+        'SINGLE_VERIFIED_SYSTEM_ACROSS_SELECTIONS' if
+        audit['proposed_bets']>1 and audit['unique_selected_historical_systems']==1
+        else 'MULTIPLE_SYSTEMS_OR_FEW_SELECTIONS')
     return out,audit
 
 
