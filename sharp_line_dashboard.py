@@ -49371,6 +49371,14 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None
             rec.update({f'{prefix} Action':action,f'{prefix} Pick':label,f'{prefix} Prob':x.get('_pred',np.nan),f'{prefix} Edge':x.get('_edge',np.nan),f'{prefix} EV':x.get('_ev',np.nan),f'{prefix} Fair':fair,f'{prefix} Status':status,f'{prefix} Source':source,
                         f'{prefix} CORE Qualifies':bool(x.get('_core_qualifies',False)),f'{prefix} Support Count':_sup_n,f'{prefix} Conflict Count':_con_n,
                         f'{prefix} Support':(_sup_s+' · '+_sup_f if _sup_f!='—' else '—'),f'{prefix} Conflict':(_con_s+' · '+_con_f if _con_f!='—' else '—'),f'{prefix} Confidence':_conf,f'{prefix} Reason':_reason})
+            # Display-only fair-versus-selected-quote edge in points.
+            # No influence on backend candidate/bet/strong-bet logic.
+            if m == 'spreads':
+                rec['Spr Point Edge'] = (float(line) - float(fair)) if (np.isfinite(line) and np.isfinite(fair)) else np.nan
+            elif m == 'totals':
+                _is_over = str(pick).strip().lower() == 'over'
+                _is_under = str(pick).strip().lower() == 'under'
+                rec['Tot Point Edge'] = ((float(fair) - float(line)) if _is_over else (float(line) - float(fair)) if _is_under else np.nan) if (np.isfinite(line) and np.isfinite(fair)) else np.nan
             if action in ('BET','STRONG BET'):
                 production_plays.append(f"{prefix}: {label}")
             if m=='spreads':
@@ -49397,7 +49405,18 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None
         rec['Systems']=' | '.join(_unique_system_parts) if _unique_system_parts else '—'
         rec['System Count']=len(_unique_system_parts)
         rec['System Trigger']=' | '.join(_unique_system_parts) if _unique_system_parts else '—'
-        rec['Pathi State']=spread_pathi; rec['Miner State']=spread_miner
+        # Mirror the NFL main-table distinctions: qualification state is not
+        # the raw Pathi rule text. A raw-only firing is TRACK, not SUPPORT.
+        _n_pathi_support = 'PATHI' in str(rec.get('Spr Support', '')).upper()
+        _n_pathi_conflict = 'PATHI' in str(rec.get('Spr Conflict', '')).upper()
+        rec['Pathi State'] = (
+            'MIXED' if _n_pathi_support and _n_pathi_conflict else
+            'SUPPORT' if _n_pathi_support else
+            'CONFLICT' if _n_pathi_conflict else
+            'TRACK' if spread_pathi not in ('', '—', 'nan', 'None') else '—'
+        )
+        rec['Pathi Overlay'] = spread_pathi if spread_pathi not in ('', 'nan', 'None') else '—'
+        rec['Miner State'] = spread_miner
         rec['Spread Support']=spread_support; rec['Spread Conflict']=spread_conflict
         records.append(rec)
     view=pd.DataFrame(records)
@@ -49452,11 +49471,31 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None
     if _schedule_conflict_games:
         st.caption(f'Schedule normalization merged {_schedule_conflict_games} matchup(s) that arrived with conflicting kickoff-time variants. The freshest/highest-coverage kickoff is used for the production board and ledger identity.')
 
+    # NCAAF_NFL_PARITY_MAIN_BOARD_20261026
     view=view.sort_values('_game_start')
-    main=view[['Game Time','Matchup','Spr Action','Spr Pick','Spr Prob','Spr Edge','Spr Support','Spr Conflict','H2H Action','H2H Pick','H2H Prob','H2H Edge','Tot Action','Tot Pick','Tot Prob','Tot Edge','Tot Support','Tot Conflict','Production Plays','Pathi State','Miner State','System Trigger']].copy()
-    main=main.rename(columns={'Spr Edge':'Spr Model Edge','H2H Edge':'H2H Model Edge','Tot Edge':'Tot Model Edge'})
-    for c in ['Spr Prob','Spr Model Edge','H2H Prob','H2H Model Edge','Tot Prob','Tot Model Edge']:
-        main[c]=pd.to_numeric(main[c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
+    # Main NCAAF board uses the same 19 visible columns and ordering as NFL.
+    # All fields originate from existing backend results; this is presentation only.
+    _ncaaf_nfl_columns = [
+        'Game Time','Matchup',
+        'Spr Action','Spr Pick','Spr Prob','Spr Model Edge',
+        'H2H Action','H2H Pick','H2H Prob','H2H Model Edge',
+        'Tot Action','Tot Pick','Tot Prob','Tot Model Edge',
+        'Production Plays','Pathi State','Pathi Overlay','Edge Sources','System Trigger',
+    ]
+    main=view.copy()
+    main['Spr Model Edge']=pd.to_numeric(main.get('Spr Point Edge',pd.Series(np.nan,index=main.index)),errors='coerce')
+    main['H2H Model Edge']=pd.to_numeric(main.get('H2H Edge',pd.Series(np.nan,index=main.index)),errors='coerce')
+    main['Tot Model Edge']=pd.to_numeric(main.get('Tot Point Edge',pd.Series(np.nan,index=main.index)),errors='coerce')
+    for _nm in _ncaaf_nfl_columns:
+        if _nm not in main.columns:
+            main[_nm]='—'
+    main=main[_ncaaf_nfl_columns].copy()
+    for _nm in ('Spr Prob','H2H Prob','Tot Prob','H2H Model Edge'):
+        main[_nm]=pd.to_numeric(main[_nm],errors='coerce').map(
+            lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
+    for _nm in ('Spr Model Edge','Tot Model Edge'):
+        main[_nm]=pd.to_numeric(main[_nm],errors='coerce').map(
+            lambda x:f'{x:.2f} pts' if pd.notna(x) else '—')
     st.dataframe(main,use_container_width=True,hide_index=True)
 
     # TRUE ON-DEMAND NCAAF DETAILS (2026-10-14): Streamlit executes closed
