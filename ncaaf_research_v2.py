@@ -6666,26 +6666,86 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
         if sc is None:
             from google.cloud import storage
             sc=storage.Client()
-        _pt_live_blob=sc.bucket(bucket_name).blob(PT_CURRENT_BLOB)
-        _pt_live_blob_updated=None
-        try:
-            _pt_live_blob.reload()
-            _pt_live_blob_updated=getattr(_pt_live_blob,'updated',None)
-        except Exception:
-            pass  # Without source time index atoms fail closed.
-        raw=_pt_live_blob.download_as_bytes()
-        ex=pd.read_csv(io.BytesIO(raw))
-        if ex.empty: return out,{"status":"EMPTY","matched":0}
-        # Exact canonical school IDs (same normalizer as sportsbook pricing).
-        # Do not use _pt_candidate_map fuzzy inference in a live authority path.
+        # V5.5 PRODUCTION PT: prefer the source explicitly labeled current-week.
+        # The merged season file contains earlier fixtures/rematches; collapsing
+        # duplicate school pairs across that archive can silently discard *all*
+        # current-week matches and cannot prove when an old prediction existed.
         from ncaaf_miner_live_unblock_v1 import school_key as _live_school_key
-        homes=out.get("Home_Team_Norm",out.get("Home_Team",pd.Series("",index=out.index))).map(_live_school_key)
-        aways=out.get("Away_Team_Norm",out.get("Away_Team",pd.Series("",index=out.index))).map(_live_school_key)
-        ex=ex.copy(); ex["home_i"]=ex.get("home_key",pd.Series("",index=ex.index)).map(_live_school_key)
-        ex["away_i"]=ex.get("away_key",pd.Series("",index=ex.index)).map(_live_school_key)
-        ex=ex.loc[ex["home_i"].ne("")&ex["away_i"].ne("")&ex["home_i"].ne(ex["away_i"])].copy()
-        ex["pair_key"]=ex["home_i"].astype(str)+"|"+ex["away_i"].astype(str)
-        vc=ex["pair_key"].value_counts(); ex=ex.loc[ex["pair_key"].map(vc).eq(1)].set_index("pair_key",drop=False)
+        _pt_now=pd.Timestamp.now(tz="UTC")
+        _pt_sources=[]
+        _pt_read_audit=[]
+        for _path,_priority in ((PT_CURRENT_LIVE_BLOB,2),(PT_CURRENT_BLOB,1)):
+            try:
+                _blob=sc.bucket(bucket_name).blob(_path)
+                _blob.reload()
+                _updated=pd.to_datetime(getattr(_blob,'updated',None),utc=True,errors='coerce')
+                if pd.isna(_updated) or _updated>_pt_now+pd.Timedelta(minutes=5) or _updated<_pt_now-pd.Timedelta(days=14):
+                    _pt_read_audit.append({'source':_path,'status':'UNVERIFIED_OR_STALE_SOURCE_TIMESTAMP'})
+                    continue
+                _source=pd.read_csv(io.BytesIO(_blob.download_as_bytes()))
+                if _source.empty:
+                    _pt_read_audit.append({'source':_path,'status':'EMPTY'})
+                    continue
+                if 'season' not in _source.columns or not {'home_key','away_key'}.issubset(_source.columns):
+                    _pt_read_audit.append({'source':_path,'status':'MISSING_SEASON_OR_TEAM_KEYS'})
+                    continue
+                _source=_source.loc[pd.to_numeric(_source['season'],errors='coerce').eq(PT_CURRENT_SEASON)].copy()
+                if _priority==1:
+                    # Merged current.csv contains completed 2026 games. Only
+                    # genuine LIVE_CURRENT rows may stand in for the live feed.
+                    if 'source_kind' not in _source.columns:
+                        _pt_read_audit.append({'source':_path,'status':'NO_LIVE_ORIGIN_ATTESTATION'})
+                        continue
+                    _source=_source.loc[_source['source_kind'].astype(str).eq('LIVE_CURRENT')]
+                _source['home_i']=_source['home_key'].map(_live_school_key)
+                _source['away_i']=_source['away_key'].map(_live_school_key)
+                _source=_source.loc[_source.home_i.ne('')&_source.away_i.ne('')&_source.home_i.ne(_source.away_i)].copy()
+                _source['pair_key']=_source.home_i.astype(str)+'|'+_source.away_i.astype(str)
+                _counts=_source.pair_key.value_counts()
+                _dup=int(_source.pair_key.map(_counts).gt(1).sum())
+                _source=_source.loc[_source.pair_key.map(_counts).eq(1)].copy()
+                # A newer *raw* snapshot is preferred, but never backdate a
+                # later ingestion timestamp or fabricate an event game date.
+                _source['_pt_source_updated_utc']=_updated
+                _source['_pt_source_priority']=_priority
+                _pt_sources.append(_source)
+                _pt_read_audit.append({'source':_path,'status':'PASS','eligible_rows':len(_source),
+                                      'duplicate_rows_held':_dup,'updated_utc':_updated.isoformat()})
+            except Exception as _source_exc:
+                _pt_read_audit.append({'source':_path,'status':'UNAVAILABLE:'+type(_source_exc).__name__})
+        if not _pt_sources:
+            import logging as _pt_prod_log
+            _pt_prod_log.warning('[NCAAF-PT-LIVE-SOURCE-MATCH] %s',{
+                'status':'NO_VERIFIED_CURRENT_WEEK_SOURCE','sources':_pt_read_audit})
+            return out,{'status':'UNAVAILABLE_NO_VALID_PREGAME_PT_SOURCE','matched':0,'source_audit':_pt_read_audit}
+        ex=pd.concat(_pt_sources,ignore_index=True,sort=False)
+        ex=ex.sort_values(['_pt_source_priority','_pt_source_updated_utc'],ascending=False)
+        ex=ex.drop_duplicates(subset=['pair_key'],keep='first').set_index('pair_key',drop=False)
+        homes=out.get('Home_Team_Norm',out.get('Home_Team',pd.Series('',index=out.index))).map(_live_school_key)
+        aways=out.get('Away_Team_Norm',out.get('Away_Team',pd.Series('',index=out.index))).map(_live_school_key)
+        # Source-level pregame selection: use the source's own observation
+        # time and verified market kickoff, not the date of an old archive game.
+        _kicks=pd.to_datetime(out.get('Game_Start',out.get('Game_Date',pd.Series(pd.NaT,index=out.index))),utc=True,errors='coerce')
+        _eligible_pairs={}
+        for _i,(_h,_a) in enumerate(zip(homes,aways)):
+            _key=f'{_h}|{_a}'
+            if _key not in ex.index:continue
+            _src=ex.loc[_key]
+            _source_time=_src['_pt_source_updated_utc']
+            _kick=_kicks.iloc[_i]
+            if pd.isna(_kick) or not _source_time<_kick or not _pt_now<_kick:continue
+            _date=pd.to_datetime(_src.get('game_date'),utc=True,errors='coerce')
+            if pd.notna(_date) and _date.date() not in {_kick.date(),_kick.tz_convert('America/New_York').date()}:
+                continue
+            _eligible_pairs[_key]=_src
+        ex=pd.DataFrame.from_dict(_eligible_pairs,orient='index') if _eligible_pairs else ex.iloc[0:0]
+        _pt_live_blob_updated=max((_src['_pt_source_updated_utc'] for _src in _eligible_pairs.values()),default=None)
+        import logging as _pt_prod_log
+        _pt_prod_log.info('[NCAAF-PT-LIVE-SOURCE-MATCH] %s',{
+            'status':'PASS' if _eligible_pairs else 'NO_MATCHED_CURRENT_WEEK_FIXTURES',
+            'market_game_rows':len(out),'source_pair_rows':sum(len(p) for p in _pt_sources),
+            'eligible_current_pairs':len(_eligible_pairs),'sources':_pt_read_audit,
+            'latest_source_utc':str(_pt_live_blob_updated), 'authority':'FROZEN_MINER_OOS_GATES_ONLY'})
         meta=np.full(len(out),np.nan); cnt=np.full(len(out),np.nan); pavg=np.full(len(out),np.nan)
         _promo_fair=np.full(len(out),np.nan); _promo_n=np.zeros(len(out),dtype=int)
         ext_consensus=np.full(len(out),np.nan); ext_clusters=np.full(len(out),np.nan); ext_indices=np.full(len(out),np.nan)

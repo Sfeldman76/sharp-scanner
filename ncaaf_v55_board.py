@@ -1693,6 +1693,35 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     # training audit. Only the published V5.5 decision policy can grant bets.
     out, policy = apply_v55_owner_betting_policy(out)
     updated.update(policy)
+    # Make every published BET's exact supporting frozen mechanisms inspectable.
+    # This is audit-only and cannot create, remove, or promote an authority vote.
+    _bet_evidence_report=[]
+    for _,_bet in out.loc[out.get('V55_Bet_Authority',pd.Series(0,index=out.index)).eq(1)].iterrows():
+        try:
+            _events=json.loads(_bet.get('V55_Qualified_Evidence_Detail_JSON') or '[]')
+            if not isinstance(_events,list):_events=[]
+        except (ValueError,TypeError):_events=[]
+        _bet_evidence_report.append({
+            'game_id':str(_bet.get('Game_ID') or ''),
+            'matchup':str(_bet.get('Matchup') or ''),
+            'selected':str(_bet.get('Selected_Team') or ''),
+            'decision':str(_bet.get('V55_Bet_Decision') or ''),
+            'book':str(_bet.get('Backend_Quote_Book') or ''),
+            'spread':_price(_bet.get('Current_Spread')),
+            'qualified_support_count':int(_price(_bet.get('Confirm_Count')) or 0),
+            'qualified_oppose_count':int(_price(_bet.get('Oppose_Count')) or 0),
+            'independent_support_keys':str(_bet.get('V55_Independent_Support_Keys') or ''),
+            'support_families':str(_bet.get('Confirm_Families') or ''),
+            'historical_systems':[{
+                'brain':str(_ev.get('source') or ''),
+                'system_id':str(_ev.get('system_id') or ''),
+                'direction':str(_ev.get('direction') or ''),
+                'evidence_family_key':str(_ev.get('evidence_family_key') or ''),
+                'frozen_registry':str(_ev.get('historical_source') or '')}
+                for _ev in _events if isinstance(_ev,dict)],
+        })
+    updated['v55_per_bet_frozen_evidence_audit']=_bet_evidence_report
+    log('[NCAAF-V55-PRODUCTION-BET-EVIDENCE] '+json.dumps(_bet_evidence_report,sort_keys=True))
     # V7 independently shops existing backend bookmaker quotes. The V5.5
     # authorized price and policy are IMMUTABLE at this stage.
     try:
