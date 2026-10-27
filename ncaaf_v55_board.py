@@ -2443,10 +2443,14 @@ def attach_v55_qualified_evidence(frame,events, *, now=None):
     out['V7_Trusted_Evidence_Events']=0
     out['V55_Independent_Conflict_Keys']=None
     out['V55_Active_System_Names']=None
+    out['V55_Miner_Qualified_System_Count']=0
+    out['V55_Miner_Independent_Family_Count']=0
+    out['V55_Miner_Independent_Family_Keys']=None
     report={"evidence_state":"NOT_EVALUABLE_NO_VERIFIED_EVENTS",
             "rows_read":len(events) if isinstance(events,pd.DataFrame) else 0,
             "qualified_events_used":0,"multi_family":0,"conflict_games":0,
-            "source_family_cap":1,"v55_bet_authority":0}
+            "source_family_cap":1,"v55_bet_authority":0,
+            "miner_independent_family_policy":"ONE_VERIFIED_UNDERLYING_FAMILY_ONE_VOTE"}
     required={"Game_ID","Game_Start_UTC","Source_Family","Signal_Family","Signal_Side",
               "Observed_At_UTC","Qualified_At_UTC","Qualification_Status",
               "OOS_Status","Direction_Verified","Provenance_Status"}
@@ -2519,6 +2523,19 @@ def attach_v55_qualified_evidence(frame,events, *, now=None):
             relevant=relevant.loc[keep]
         if relevant.empty:
             continue
+        # Show distinct frozen mechanism IDs separately from distinct qualified
+        # underlying families. A pile of overlapping rules cannot inflate the
+        # independent-confirmation count.
+        _minervotes=relevant.loc[relevant['_family'].eq('SYSTEM_MINER')]
+        if not _minervotes.empty:
+            _minerids={str(x).strip() for x in _minervotes['Signal_Family'].tolist()
+                       if str(x).strip() and str(x).lower()!='nan'}
+            _minerfamilykeys={str(x).strip().upper() for x in
+                              _minervotes.get('Evidence_Family_Key',pd.Series('',index=_minervotes.index)).tolist()
+                              if pd.notna(x) and str(x).strip()}
+            out.at[i,'V55_Miner_Qualified_System_Count']=len(_minerids)
+            out.at[i,'V55_Miner_Independent_Family_Count']=len(_minerfamilykeys)
+            out.at[i,'V55_Miner_Independent_Family_Keys']='|'.join(sorted(_minerfamilykeys))
         # Independent-voter components: connect events that share a source brain
         # OR an underlying evidence family. This prevents duplicate Miner votes,
         # PT/Miner external ratings double counting, and mixed-direction signals
@@ -2537,9 +2554,18 @@ def attach_v55_qualified_evidence(frame,events, *, now=None):
         seen_source={};seen_dep={}
         for ix,evr in enumerate(records):
             f=evr['_family'];d=evr['_dependency']
-            if f in seen_source:union(ix,seen_source[f])
+            # Preserve the one-vote cap per *underlying* independent Miner
+            # evidence family, not per producer. Two OOS-qualified Miner
+            # mechanisms with distinct frozen family keys may be distinct
+            # confirmations. Correlated Miner variants with the same key
+            # remain a single vote. PT/Miner sharing an evidence key still
+            # collapses to one component via seen_dep.
+            # Legacy/missing keys must fail closed, never create many votes.
+            source_key=(f+'::'+d if f=='SYSTEM_MINER' and d and
+                        d not in ('NAN','NONE','NULL','') else f)
+            if source_key in seen_source:union(ix,seen_source[source_key])
             if d in seen_dep:union(ix,seen_dep[d])
-            seen_source[f]=ix;seen_dep[d]=ix
+            seen_source[source_key]=ix;seen_dep[d]=ix
         components={}
         for ix,evr in enumerate(records):components.setdefault(root(ix),[]).append(evr)
         support=set();opposition=set();conflicts=set()

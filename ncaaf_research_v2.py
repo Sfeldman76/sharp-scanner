@@ -7666,6 +7666,7 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     registry=report.get("system_miner_v3") or {}
     authority_votes_by_game={k:[] for k in keys}; research_votes_by_game={k:[] for k in keys}
     confirmed_research=0; authority_qualified=0; authority_evaluable=0; research_evaluable=0
+    _miner_coverage_diagnostics=[]  # NCAAF_MULTI_MINER_LIVE_COVERAGE_DIAGNOSTICS_20261027
     for market,mr in registry.items():
         atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(cdf,dashboard_module,for_live=True,market=market)}
         for mech in (mr or {}).get("mechanism_families",[]):
@@ -7674,12 +7675,34 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
             live_eligible=_miner_live_authority_eligible(mech)
             if live_eligible: authority_qualified+=1
             cond=list(mech.get("representative_conditions") or [])
-            if not cond or any(c not in atoms for c in cond): continue
+            # Observe why a frozen eligible rule does not reach live voting.
+            # Do NOT change rule eligibility, atom masks, target selection, or vote counts.
+            _coverage_missing=[str(c) for c in cond if c not in atoms]
+            if not cond or _coverage_missing:
+                if live_eligible and str(market).lower()=='spreads':
+                    _miner_coverage_diagnostics.append({
+                        'system_id':str(mech.get('mechanism_id') or ''),
+                        'family':str(mech.get('evidence_family_key') or mech.get('mechanism_id') or ''),
+                        'status':'MISSING_LIVE_ATOMS' if _coverage_missing else 'EMPTY_FROZEN_RULE',
+                        'missing_atoms':_coverage_missing,
+                        'matched_games':0,
+                        'condition_count':len(cond),
+                    })
+                continue
             research_evaluable+=1
             if live_eligible: authority_evaluable+=1
             mask=np.ones(len(cdf),dtype=bool)
             for c in cond: mask &= atoms[c]
             direction=str(mech.get("direction") or "PLAY_ON").upper()
+            if live_eligible and str(market).lower()=='spreads':
+                _miner_coverage_diagnostics.append({
+                    'system_id':str(mech.get('mechanism_id') or ''),
+                    'family':str(mech.get('evidence_family_key') or mech.get('mechanism_id') or ''),
+                    'status':'TRIGGERED' if bool(np.any(mask)) else 'EVALUABLE_NO_GAME_TRIGGER',
+                    'missing_atoms':[],
+                    'matched_games':int(np.count_nonzero(mask)),
+                    'condition_count':len(cond),
+                })
             for j in np.flatnonzero(mask):
                 r=cdf.iloc[j]; home=_norm_team_live(r.get("Home_Team_Norm",r.get("Home_Team",""))); away=_norm_team_live(r.get("Away_Team_Norm",r.get("Away_Team","")))
                 if str(market).lower()=="totals": target="over" if direction=="PLAY_ON" else "under"
@@ -7707,6 +7730,34 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
                       "live_authority_eligible":live_eligible,"live_authority_policy":NCAAF_MINER_LIVE_AUTHORITY_POLICY}
                 research_votes_by_game[keys[j]].append(vote)
                 if live_eligible: authority_votes_by_game[keys[j]].append(vote)
+    # Diagnostic only; no authority, research, or side-selection behavior changes.
+    try:
+        from collections import Counter as _MinerCoverageCounter
+        _status_counts=dict(_MinerCoverageCounter(r['status'] for r in _miner_coverage_diagnostics))
+        _families={}
+        for _rec in _miner_coverage_diagnostics:
+            _f=_rec['family']
+            _group=_families.setdefault(_f,dict(eligible_mechanisms=0,evaluable=0,triggered_mechanisms=0,matched_game_instances=0,missing_atoms=[]))
+            _group['eligible_mechanisms']+=1
+            if _rec['status']!='MISSING_LIVE_ATOMS' and _rec['status']!='EMPTY_FROZEN_RULE':_group['evaluable']+=1
+            if _rec['status']=='TRIGGERED':_group['triggered_mechanisms']+=1
+            _group['matched_game_instances']+=_rec['matched_games']
+            _group['missing_atoms'].extend(_rec.get('missing_atoms') or [])
+        for _group in _families.values():
+            _group['missing_atoms']=sorted(set(_group['missing_atoms']))[:60]
+        _live_logging.info('[NCAAF-MINER-LIVE-COVERAGE] %s',json.dumps({
+            'policy':'DIAGNOSTIC_ONLY_NO_AUTHORITY_CHANGE',
+            'live_games_evaluated':int(len(cdf)),
+            'spread_eligible_mechanisms':int(len(_miner_coverage_diagnostics)),
+            'status_counts':_status_counts,
+            'families':_families,
+            'mechanisms':_miner_coverage_diagnostics,
+            'authority_qualified_all_markets':int(authority_qualified),
+            'authority_evaluable_all_markets':int(authority_evaluable),
+            'research_evaluable_all_markets':int(research_evaluable),
+        },sort_keys=True,default=str))
+    except Exception as _coverage_exc:
+        _live_logging.warning('[NCAAF-MINER-LIVE-COVERAGE] DIAGNOSTIC_LOG_ONLY_ERROR:%s',type(_coverage_exc).__name__)
     # PT source preference is qualified by independently held-out historical
     # forecasts, not by waiting for future games. Preserve one PT family vote.
     _pt_promo_state={"status":"INCUMBENT"};_pt_promo_status="NO_STATE"
