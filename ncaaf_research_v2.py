@@ -7508,14 +7508,25 @@ def _v55_settle_prospective_brain_evidence(*, dashboard_module=None,
         client=bigquery.Client()
     from google.cloud import bigquery as _bq
     ids=sorted({game['physical_game_id'] for game,_ in targets})
-    sql='''SELECT CAST(physical_game_id AS STRING) AS physical_game_id,
-           ANY_VALUE(home_score) AS home_score,ANY_VALUE(away_score) AS away_score
-           FROM `sharplogger.sharp_data.ncaaf_production_v1_results`
-           WHERE CAST(physical_game_id AS STRING) IN UNNEST(@ids)
-             AND home_score IS NOT NULL AND away_score IS NOT NULL
-             AND LOWER(market)='spreads'
-           GROUP BY physical_game_id
-           HAVING COUNT(DISTINCT CONCAT(CAST(home_score AS STRING),'|',CAST(away_score AS STRING)))=1'''
+    # Rename raw score columns before grouping. In BigQuery, a HAVING
+    # reference to a SELECT alias such as home_score can resolve to its
+    # ANY_VALUE aggregate and cause "Aggregations of aggregations" (400).
+    # This CTE keeps the consistency test on unaggregated source scores.
+    sql='''WITH settled_input AS (
+               SELECT CAST(physical_game_id AS STRING) AS game_id,
+                      CAST(home_score AS STRING) AS raw_home_score,
+                      CAST(away_score AS STRING) AS raw_away_score
+               FROM `sharplogger.sharp_data.ncaaf_production_v1_results`
+               WHERE CAST(physical_game_id AS STRING) IN UNNEST(@ids)
+                 AND home_score IS NOT NULL AND away_score IS NOT NULL
+                 AND LOWER(market)='spreads'
+           )
+           SELECT game_id AS physical_game_id,
+                  ANY_VALUE(raw_home_score) AS home_score,
+                  ANY_VALUE(raw_away_score) AS away_score
+           FROM settled_input
+           GROUP BY game_id
+           HAVING COUNT(DISTINCT CONCAT(raw_home_score,'|',raw_away_score)) = 1'''
     config=_bq.QueryJobConfig(query_parameters=[_bq.ArrayQueryParameter('ids','STRING',ids)])
     completed=client.query(sql,job_config=config).to_dataframe(create_bqstorage_client=False)
     scores={str(rec['physical_game_id']):(rec['home_score'],rec['away_score'])
