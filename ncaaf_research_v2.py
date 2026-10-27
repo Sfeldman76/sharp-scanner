@@ -7205,6 +7205,26 @@ def _v55_numeric(v):
     except (ValueError,TypeError):return None
 
 
+def _v55_production_ledger_identity(row, home, away, kickoff):
+    """Match ncaaf_production_ledger_v1._physical without granting false ID certification.
+
+    Explicit physical fields precede the canonical team+kickoff derived ID.
+    Never substitute the potentially unrelated CFBD Game_ID/Source_Game_ID.
+    """
+    for col in ('_prod_game_id', 'Merge_Key_Short', 'Physical_Game_ID', 'physical_game_id'):
+        raw=_v55_first_present(row,col)
+        if raw is not None and str(raw).strip().lower() not in ('nan','nat','none','<na>'):
+            return str(raw).strip().lower(), 'PHYSICAL_ID', True
+    clean=lambda name: re.sub(r'[^a-z0-9]+','_',str(name).lower()).strip('_')
+    home_key=clean(home)
+    away_key=clean(away)
+    if not home_key or not away_key or pd.isna(kickoff):
+        return None,'MISSING',False
+    joined=f'{home_key}|{away_key}|{kickoff.isoformat()}'
+    derived='derived_'+hashlib.sha256(joined.encode('utf-8')).hexdigest()[:24]
+    return derived,'TEAM_KICKOFF',False
+
+
 def _v55_vote_list(v):
     if isinstance(v,str):
         try:v=json.loads(v)
@@ -7219,7 +7239,8 @@ def _v55_collect_prospective_brain_evidence(rows: pd.DataFrame, *, now=None) -> 
     source/market snapshot time). A quote is usable for priced evaluation only
     when its original timestamp, sportsbook, side, line AND odds are available.
     Repeated refreshes are distinct observations; subsequent scores can be
-    joined via original physical_game_id, without mutating a pregame record.
+    joined through the same canonical game key used by Production V1, without
+    mutating a pregame record. TEAM_KICKOFF keys are not externally verified.
     """
     t=pd.to_datetime(now if now is not None else datetime.now(timezone.utc),utc=True)
     doc={'status':'PASS','policy':V55_PROSPECTIVE_EVIDENCE_POLICY,
@@ -7249,16 +7270,12 @@ def _v55_collect_prospective_brain_evidence(rows: pd.DataFrame, *, now=None) -> 
         away=str(_v55_first_present(row,'Away_Team_Norm','Away_Team') or '').strip()
         if not home or not away or home.lower()==away.lower():continue
         side=str(_v55_first_present(row,'Outcome_Norm','Outcome') or '').strip()
-        gameid=_v55_first_present(row,'_prod_game_id','Game_ID','Source_Game_ID')
-        if gameid is None or str(gameid).strip().lower() in ('nan','none','<na>'):
-            physical_id=None
-            game_key=hashlib.sha256(f'{home.lower()}|{away.lower()}|{kickoff.isoformat()}'.encode()).hexdigest()[:24]
-        else:
-            physical_id=str(gameid).strip();game_key=physical_id
-        if physical_id:
-            gkey=hashlib.sha256(physical_id.encode('utf-8')).hexdigest()[:32]
-            games[gkey]={'physical_game_id':physical_id,'home':home,'away':away,
-                         'kickoff_utc':kickoff.isoformat(),'game_key_sha256':gkey}
+        physical_id, game_match_type, game_id_verified = _v55_production_ledger_identity(
+            row, home, away, kickoff)
+        if not physical_id:
+            doc['skipped']['GAME_IDENTITY_MISSING']=doc['skipped'].get('GAME_IDENTITY_MISSING',0)+1
+            continue
+        game_key=physical_id
         book=_v55_first_present(row,'Bookmaker','Book','Sportsbook')
         source_stamp=pd.to_datetime(_v55_first_present(row,'Snapshot_Timestamp'),utc=True,errors='coerce')
         source_stamp_valid=bool(pd.notna(source_stamp) and source_stamp<=t and source_stamp<kickoff)
@@ -7335,6 +7352,13 @@ def _v55_collect_prospective_brain_evidence(rows: pd.DataFrame, *, now=None) -> 
                             'selection_sha256':str(pt_sha),
                             'observation_type':'NON_DIRECTIONAL_FORECAST_CONTEXT'})
         if not signals:continue
+        # Index only fixtures with recorded brain observations. A derived ID
+        # matches the frozen Production V1 ledger fallback but is NOT an
+        # externally verified physical identifier.
+        gkey=hashlib.sha256(physical_id.encode('utf-8')).hexdigest()[:32]
+        games[gkey]={'physical_game_id':physical_id,'game_match_type':game_match_type,
+                     'game_id_verified':game_id_verified,'home':home,'away':away,
+                     'kickoff_utc':kickoff.isoformat(),'game_key_sha256':gkey}
         for sig in signals:
             # This is the receipt timestamp; it does not attest to the source
             # timestamp of inputs used by the model or expert to form the signal.
@@ -7343,7 +7367,9 @@ def _v55_collect_prospective_brain_evidence(rows: pd.DataFrame, *, now=None) -> 
             if uniqueness in seen:continue
             seen.add(uniqueness); sources.add(sig['family'])
             event={'physical_game_id':physical_id,'game_key':game_key,
-                   'game_id_verified':bool(physical_id),'home_team':home,'away_team':away,
+                   'game_id_verified':game_id_verified,
+                   'game_match_type':game_match_type,
+                   'home_team':home,'away_team':away,
                    'kickoff_utc':kickoff.isoformat(),'market':market,
                    'selection_side':side,'sportsbook':str(book) if book is not None else None,
                    'line':line if market!='h2h' else None,
@@ -7410,7 +7436,9 @@ def _v55_capture_prospective_brain_evidence(rows: pd.DataFrame, *, storage_clien
             'priced':doc['priced_observations'],
             'unverified_quote':doc['unverified_quote_observations'],
             'no_source_signal_families':doc['no_source_signal_families'],
-            'source_signal_fields_present':doc.get('source_signal_fields_present',{})}
+            'source_signal_fields_present':doc.get('source_signal_fields_present',{}),
+            'indexed_games_expected':len(doc['games']),
+            'derived_ledger_game_ids':sum(g.get('game_match_type')=='TEAM_KICKOFF' for g in doc['games'])}
     if not doc['observations']:return report
     stamp=pd.to_datetime(doc['captured_at_utc'],utc=True)
     payload=json.dumps(doc,sort_keys=True,default=str,allow_nan=False).encode()
@@ -7428,7 +7456,7 @@ def _v55_capture_prospective_brain_evidence(rows: pd.DataFrame, *, storage_clien
         if not bucket.blob(path).exists():raise
         report['duplicate_snapshot']='ALREADY_EXISTS_IMMUTABLE'
     # One small per-game index: settlement scans games, not 48 daily snapshots.
-    game_index_ok=0;game_index_errors=0
+    game_index_ok=0;game_index_errors=0;game_index_existing=0
     for game in doc['games']:
         # Game index has no price, prediction, or betting recommendation.
         game_day=game['kickoff_utc'][:10]
@@ -7439,20 +7467,23 @@ def _v55_capture_prospective_brain_evidence(rows: pd.DataFrame, *, storage_clien
                 content_type='application/json',if_generation_match=0)
             game_index_ok+=1
         except Exception:
-            if not obj.exists():game_index_errors+=1
-    report.update(game_indexes_written=game_index_ok,game_index_write_errors=game_index_errors)
+            if obj.exists():game_index_existing+=1
+            else:game_index_errors+=1
+    report.update(game_indexes_written=game_index_ok,
+                  game_indexes_existing=game_index_existing,
+                  game_index_write_errors=game_index_errors)
     return report
 
 
 def _v55_settle_prospective_brain_evidence(*, dashboard_module=None,
                                             storage_client=None,bucket_name='sharp-models',
                                             now=None,days_back=15) -> dict[str,Any]:
-    """Settle exact physical IDs into SEPARATE immutable score records.
+    """Settle each indexed game from the Production V1 authoritative final-score feed.
 
-    Records no outcomes in first-seen signal blobs. Match the actual home/away
-    scores only from the settled V1 results table, not the research frame.
-    Uses the game index for bounded lookups; no 2026 outcome influences fit.
-    Interactive Streamlit sessions must not write research artifacts.
+    The immutable original signal snapshots remain untouched. Use either an exact
+    Merge_Key_Short or the exact ledger-compatible TEAM_KICKOFF hash; never fuzzy
+    team matching or reconstructed pregame odds. Duplicate inconsistent finals,
+    unresolvable identifiers and not-yet-final fixtures are held, not graded.
     """
     if _v55_inside_streamlit_script_context():
         return {'status':'SKIPPED_INTERACTIVE_UI_READ_ONLY','pending':0,
@@ -7464,49 +7495,88 @@ def _v55_settle_prospective_brain_evidence(*, dashboard_module=None,
     if not hasattr(storage_client,'list_blobs'):
         return {'status':'LIST_BLOBS_UNAVAILABLE'}
     t=pd.to_datetime(now if now is not None else datetime.now(timezone.utc),utc=True)
-    targets=[];days=int(min(max(days_back,1),30))
+    targets=[];indexed=0;before_kickoff=0;index_read_errors=0
+    days=int(min(max(days_back,1),30))
     for delta in range(days+1):
         date=(t-pd.Timedelta(days=delta)).strftime('%Y-%m-%d')
         prefix=f'{V55_PROSPECTIVE_EVIDENCE_PREFIX}/games/{date}/'
         for ref in storage_client.list_blobs(bucket_name,prefix=prefix,max_results=300):
             try:
                 game=json.loads(ref.download_as_text())
-                gid=str(game.get('physical_game_id') or '')
-                if not gid:continue
+                gid=str(game.get('physical_game_id') or '').strip().lower()
+                kickoff=pd.to_datetime(game.get('kickoff_utc'),utc=True,errors='coerce')
+                if not gid or pd.isna(kickoff):continue
+                indexed+=1
+                if kickoff>t:
+                    before_kickoff+=1
+                    continue
                 outpath=(f'{V55_PROSPECTIVE_EVIDENCE_PREFIX}/outcomes/'
                          f'{game["game_key_sha256"]}.json')
-                if not bucket.blob(outpath).exists():targets.append((game,outpath))
-            except Exception:continue
-    if not targets:return {'status':'NO_PENDING_GAMES','pending':0,'settled':0}
+                if not bucket.blob(outpath).exists():targets.append((game,outpath,kickoff))
+            except Exception:
+                index_read_errors+=1
+    if not targets:
+        return {'status':'NO_PENDING_GAMES','pending':0,'settled':0,
+                'indexed_games':indexed,'before_kickoff':before_kickoff,
+                'index_read_errors':index_read_errors}
     client=getattr(dashboard_module,'bq_client',None)
     if client is None:
         from google.cloud import bigquery
         client=bigquery.Client()
     from google.cloud import bigquery as _bq
-    ids=sorted({game['physical_game_id'] for game,_ in targets})
-    sql='''SELECT CAST(physical_game_id AS STRING) AS physical_game_id,
-           ANY_VALUE(home_score) AS home_score,ANY_VALUE(away_score) AS away_score
-           FROM `sharplogger.sharp_data.ncaaf_production_v1_results`
-           WHERE CAST(physical_game_id AS STRING) IN UNNEST(@ids)
-             AND home_score IS NOT NULL AND away_score IS NOT NULL
-             AND LOWER(market)='spreads'
-           GROUP BY physical_game_id
-           HAVING COUNT(DISTINCT CONCAT(CAST(home_score AS STRING),'|',CAST(away_score AS STRING)))=1'''
-    config=_bq.QueryJobConfig(query_parameters=[_bq.ArrayQueryParameter('ids','STRING',ids)])
-    completed=client.query(sql,job_config=config).to_dataframe(create_bqstorage_client=False)
-    scores={str(rec['physical_game_id']):(rec['home_score'],rec['away_score'])
-            for _,rec in completed.iterrows()}
-    count=0; errors=0
-    for game,path in targets:
-        if game['physical_game_id'] not in scores:continue
-        hs,aws=scores[game['physical_game_id']]
-        hs=_v55_numeric(hs);aws=_v55_numeric(aws)
-        if hs is None or aws is None:continue
-        outcome={'physical_game_id':game['physical_game_id'],
+    scan_start=min(k for _,_,k in targets)-pd.Timedelta(days=1)
+    scan_end=min(t,max(k for _,_,k in targets)+pd.Timedelta(days=1))
+    # This is the same final-score source used by the frozen Production V1
+    # results ledger, but it covers ALL completed fixtures rather than just
+    # fixtures for which Production V1 recorded a pregame model prediction.
+    sql="""SELECT CAST(Merge_Key_Short AS STRING) AS merge_key_short,
+           Home_Team, Away_Team, Game_Start,
+           SAFE_CAST(Score_Home_Score AS FLOAT64) AS home_score,
+           SAFE_CAST(Score_Away_Score AS FLOAT64) AS away_score
+           FROM `sharplogger.sharp_data.game_scores_final`
+           WHERE SAFE_CAST(Game_Start AS TIMESTAMP) BETWEEN @start AND @end
+             AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL"""
+    config=_bq.QueryJobConfig(query_parameters=[
+        _bq.ScalarQueryParameter('start','TIMESTAMP',scan_start.to_pydatetime()),
+        _bq.ScalarQueryParameter('end','TIMESTAMP',scan_end.to_pydatetime())])
+    finals=client.query(sql,job_config=config).to_dataframe(create_bqstorage_client=False)
+    # Build two independent exact identity indexes. A slug/kickoff match is
+    # explicitly recorded as a derived ledger key, not a verified source ID.
+    scores={};ambiguous=set()
+    for _,r in finals.iterrows():
+        hs=_v55_numeric(r.get('home_score'));aws=_v55_numeric(r.get('away_score'))
+        kick=pd.to_datetime(r.get('Game_Start'),utc=True,errors='coerce')
+        if hs is None or aws is None or pd.isna(kick):continue
+        direct=_v55_first_present(r,'merge_key_short')
+        direct=str(direct).strip().lower() if direct is not None else None
+        derived,_,_= _v55_production_ledger_identity(
+            {},str(r.get('Home_Team') or ''),str(r.get('Away_Team') or ''),kick)
+        for key in (direct,derived):
+            if not key:continue
+            prior=scores.get(key)
+            current=(hs,aws,kick)
+            if prior is not None and (prior[0]!=hs or prior[1]!=aws or
+                                      prior[2]!=kick):
+                ambiguous.add(key)
+            else:
+                scores[key]=current
+    count=0;errors=0;matched=0
+    for game,path,kickoff in targets:
+        gid=str(game['physical_game_id']).strip().lower()
+        if gid in ambiguous or gid not in scores:continue
+        hs,aws,final_kick=scores[gid]
+        # A physical game ID must also resolve to a compatible game start.
+        # Exact kickoff equality is required for derived team+kicks IDs.
+        if game.get('game_match_type')=='TEAM_KICKOFF':
+            if final_kick!=kickoff:continue
+        elif abs((final_kick-kickoff).total_seconds())>12*3600:continue
+        matched+=1
+        outcome={'physical_game_id':gid,'game_match_type':game.get('game_match_type'),
+                 'game_id_verified':bool(game.get('game_id_verified')),
                  'home_team_at_capture':game['home'],'away_team_at_capture':game['away'],
                  'home_score':hs,'away_score':aws,'home_margin':hs-aws,
                  'total_score':hs+aws,'settled_at_utc':t.isoformat(),
-                 'score_source':'ncaaf_production_v1_results',
+                 'score_source':'game_scores_final',
                  'does_not_modify_original_observations':True}
         try:
             bucket.blob(path).upload_from_string(json.dumps(outcome,sort_keys=True),
@@ -7515,8 +7585,12 @@ def _v55_settle_prospective_brain_evidence(*, dashboard_module=None,
         except Exception:
             if not bucket.blob(path).exists():errors+=1
     return {'status':'PASS' if not errors else 'PARTIAL_WRITE_FAILURE',
-            'pending':len(targets),'completed_found':len(scores),
+            'pending':len(targets),'matched_final_scores':matched,
             'settled':count,'write_errors':errors,
+            'ambiguous_final_game_keys':len(ambiguous),
+            'indexed_games':indexed,'before_kickoff':before_kickoff,
+            'index_read_errors':index_read_errors,
+            'score_source':'game_scores_final',
             'research_selection_influence':0,'automatic_bet_authority':False}
 
 def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard_module=None) -> pd.DataFrame:
