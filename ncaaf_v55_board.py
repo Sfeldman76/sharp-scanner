@@ -599,7 +599,8 @@ def read_scanner_quotes(bq_client, *, minutes=QUOTE_MAX_AGE_MINUTES, horizon_day
     """
     # Lightweight optional as-of trigger context. These are NOT qualified OOS
     # confirmations and are never used as training inputs or probability shifts.
-    optional=("BigAl_Side_Support_Count","BigAl_Side_Conflict_Count",
+    optional=("Open_Value","Opening_Spread",  # original side-specific opening line
+              "BigAl_Side_Support_Count","BigAl_Side_Conflict_Count",
               "Pathi_System_Count","Pathi_Active_Text","NCAAF_Stat_Active",
               "System_Side_Consensus_Count","System_Side_Conflict_Count")
     try:
@@ -1390,11 +1391,34 @@ def _v55_direct_current_quote_rows(board, market, *, now=None):
     # against completed-game history and cannot infer any current-game result.
     rows['Sport']='NCAAF';rows['Market']='spreads'
     rows['Game']=rows['Away_Team_Norm'].astype(str)+' @ '+rows['Home_Team_Norm'].astype(str)
+    # Opening-line-dependent Miner atoms must receive the REAL stored opening
+    # spread, not the current quote or an opposite-book proxy. Source values
+    # must be anti-symmetric across the exact same-book two-sided market.
+    verified_open=0
+    rows['Consensus_Open_Spread']=float('nan')
+    for (h,a,kick,book),ixs in rows.groupby(['_home','_away','_kick','_book'],dropna=False).groups.items():
+        group=rows.loc[list(ixs)]
+        home_rows=group[group['_side'].eq(h)]
+        away_rows=group[group['_side'].eq(a)]
+        if len(home_rows)!=1 or len(away_rows)!=1:
+            continue
+        hr=home_rows.iloc[0];ar=away_rows.iloc[0]
+        for field in ('Open_Value','Opening_Spread'):
+            if field not in rows:
+                continue
+            ho=_price(hr.get(field));ao=_price(ar.get(field))
+            if ho is None or ao is None or not -100<=ho<=100 or abs(ho+ao)>0.01:
+                continue
+            rows.loc[group.index,'Consensus_Open_Spread']=float(ho)
+            verified_open += 1
+            break
+    # Collected in the return audit below.
+    verified_open_count=verified_open
     rows['V55_Original_Quote_Timestamp']=rows['Snapshot_Timestamp']
     rows['V55_Original_Quote_Provenance_Verified']=True
     rows['V55_Source_Type']='LIVE_ENGINE_RECALCULATED'
     return rows.drop(columns=[c for c in rows.columns if c.startswith('_')],errors='ignore'),{
-        'status':'PASS','games':games,'rows':len(rows),'source':'ORIGINAL_VERIFIED_SCANNER_BOOK_QUOTES'}
+        'status':'PASS','games':games,'rows':len(rows), 'verified_opening_spread_games':verified_open_count, 'source':'ORIGINAL_VERIFIED_SCANNER_BOOK_QUOTES'}
 
 
 def _v55_evaluate_existing_live_systems(board, market, *, bq_client,

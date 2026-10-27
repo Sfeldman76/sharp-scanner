@@ -6676,12 +6676,15 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
         raw=_pt_live_blob.download_as_bytes()
         ex=pd.read_csv(io.BytesIO(raw))
         if ex.empty: return out,{"status":"EMPTY","matched":0}
-        homes=out.get("Home_Team_Norm",out.get("Home_Team",pd.Series("",index=out.index))).astype(str).map(_pt_team_key)
-        aways=out.get("Away_Team_Norm",out.get("Away_Team",pd.Series("",index=out.index))).astype(str).map(_pt_team_key)
-        internal=pd.concat([homes,aways],ignore_index=True).tolist()
-        emap,_un=_pt_candidate_map(pd.concat([ex.get("home_key",pd.Series(dtype=str)),ex.get("away_key",pd.Series(dtype=str))],ignore_index=True),internal)
-        ex=ex.copy(); ex["home_i"]=ex.get("home_key",pd.Series("",index=ex.index)).map(emap); ex["away_i"]=ex.get("away_key",pd.Series("",index=ex.index)).map(emap)
-        ex=ex.loc[ex["home_i"].notna()&ex["away_i"].notna()].copy(); ex["pair_key"]=ex["home_i"].astype(str)+"|"+ex["away_i"].astype(str)
+        # Exact canonical school IDs (same normalizer as sportsbook pricing).
+        # Do not use _pt_candidate_map fuzzy inference in a live authority path.
+        from ncaaf_miner_live_unblock_v1 import school_key as _live_school_key
+        homes=out.get("Home_Team_Norm",out.get("Home_Team",pd.Series("",index=out.index))).map(_live_school_key)
+        aways=out.get("Away_Team_Norm",out.get("Away_Team",pd.Series("",index=out.index))).map(_live_school_key)
+        ex=ex.copy(); ex["home_i"]=ex.get("home_key",pd.Series("",index=ex.index)).map(_live_school_key)
+        ex["away_i"]=ex.get("away_key",pd.Series("",index=ex.index)).map(_live_school_key)
+        ex=ex.loc[ex["home_i"].ne("")&ex["away_i"].ne("")&ex["home_i"].ne(ex["away_i"])].copy()
+        ex["pair_key"]=ex["home_i"].astype(str)+"|"+ex["away_i"].astype(str)
         vc=ex["pair_key"].value_counts(); ex=ex.loc[ex["pair_key"].map(vc).eq(1)].set_index("pair_key",drop=False)
         meta=np.full(len(out),np.nan); cnt=np.full(len(out),np.nan); pavg=np.full(len(out),np.nan)
         _promo_fair=np.full(len(out),np.nan); _promo_n=np.zeros(len(out),dtype=int)
