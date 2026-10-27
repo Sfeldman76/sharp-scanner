@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request, HTTPException
 from google.cloud import tasks_v2
+from google.protobuf.duration_pb2 import Duration
 from google.api_core.exceptions import AlreadyExists
 # ✅ Configure logging once, right after imports
 
@@ -26,6 +27,7 @@ def enqueue_detection_task(client: tasks_v2.CloudTasksClient, parent: str, base_
     task_id = f"sharp-detection-{window}"
     base_task["name"] = client.task_path(PROJECT_ID, LOCATION, QUEUE_ID, task_id)
     try:
+        base_task["dispatch_deadline"] = Duration(seconds=1200)
         created = client.create_task(request={"parent": parent, "task": base_task})
         print(f"[ENQUEUE] Task created: {created.name}")
         return created.name
