@@ -49031,6 +49031,160 @@ def _ncaaf_v55_historical_systems_view(active_system_ids=None):
         st.json(raw,expanded=False)
 
 
+# V55_NFL_PARITY_REAL_WEEKLY_BOARD_20261027
+# The separate Production V1 board already has NFL parity; this function is
+# deliberately attached to the V5.5 published-board renderer instead.
+_NCAAF_V55_NFL_BOARD_COLUMNS = [
+    'Game Time','Matchup',
+    'Spr Action','Spr Pick','Spr Prob','Spr Model Edge',
+    'H2H Action','H2H Pick','H2H Prob','H2H Model Edge',
+    'Tot Action','Tot Pick','Tot Prob','Tot Model Edge',
+    'Production Plays','Pathi State','Pathi Overlay','Edge Sources','System Trigger',
+]
+
+
+def _ncaaf_v55_nfl_parity_display(weekly_rows):
+    """Format V5.5 BACKEND PUBLISHED spread signals in the NFL's 19 columns.
+
+    Current V5.5 publishes only spreads. H2H and totals remain unavailable,
+    rather than showing V1 scores or inventing V5.5 market predictions.
+    Authority, quote, CORE model probability and named-system certification
+    are read from the published backend fields; none are decided in the UI.
+    """
+    import pandas as pd
+    import numpy as np
+    out=[]
+    blank='—'
+
+    def _text(x):
+        if x is None:
+            return ''
+        try:
+            if pd.isna(x):return ''
+        except (ValueError,TypeError):
+            pass
+        v=str(x).strip()
+        return '' if v.lower() in ('nan','none','null','nat') else v
+
+    def _number(x):
+        # Published rows may already be %- and spread-formatted for display.
+        try:
+            raw=_text(x).replace(',','').replace('%','').replace('pts','').strip()
+            return float(raw) if raw and raw not in ('—','-') else np.nan
+        except (ValueError,TypeError):
+            return np.nan
+
+    def _prob(x):
+        raw=_text(x)
+        v=_number(x)
+        if not np.isfinite(v) or v<0:
+            return blank
+        p=v if '%' in raw or v>1 else 100*v
+        return f'{p:.1f}%' if 0<=p<=100 else blank
+
+    def _is_real(x):
+        return bool(x) and x.upper() not in (
+            '—','NONE_REPORTED','NOT_PUBLISHED','NOT_EVALUABLE','N/A','UNAVAILABLE')
+
+    def _families(x):
+        v=_text(x).upper()
+        # Exact family tokens; no substring match on unrelated names.
+        return set(q.strip() for q in __import__('re').split(r'[|,;]+',v)
+                   if q.strip() and q.strip() not in ('—','NONE','NOT_PUBLISHED'))
+
+    for _,r in weekly_rows.iterrows():
+        kickoff=pd.to_datetime(r.get('Game_Start_UTC'),utc=True,errors='coerce')
+        game_time=(kickoff.tz_convert('America/New_York').strftime('%a %I:%M %p')
+                   if pd.notna(kickoff) else blank)
+        matchup=_text(r.get('Matchup')) or blank
+        teams=matchup.split(' @ ',1)
+        away,home=(teams[0].strip(),teams[1].strip()) if len(teams)==2 else ('','')
+        side=_text(r.get('Selected_Team'))
+        has_side=bool(side and side.upper() not in ('NO CORE PICK','—'))
+        quote_state=_text(r.get('Quote_State'))
+        has_quote=quote_state.startswith('FRESH_')
+        selected_valid=has_side and has_quote
+        action=_text(r.get('V55_Bet_Decision')) or '—'
+        if not has_quote:
+            action='NO VERIFIED PRICE'
+        if not has_side and has_quote and action in ('BET','STRONG BET','CANDIDATE'):
+            # Do not present an incoherent wager when no side was published.
+            action='NO CORE PICK'
+
+        # Only cite the published selected side's odds and line. Fallback to the
+        # matching paired BACKEND quote if the selected-side price is absent.
+        spread=_number(r.get('Current_Spread'))
+        odds=_number(r.get('Odds_American'))
+        if selected_valid and (not np.isfinite(spread) or not np.isfinite(odds)):
+            side_key=side.casefold()
+            if home and side_key==home.casefold():
+                if not np.isfinite(spread):spread=_number(r.get('Backend_Home_Spread'))
+                if not np.isfinite(odds):odds=_number(r.get('Backend_Home_Odds_American'))
+            elif away and side_key==away.casefold():
+                if not np.isfinite(spread):spread=_number(r.get('Backend_Away_Spread'))
+                if not np.isfinite(odds):odds=_number(r.get('Backend_Away_Odds_American'))
+        spr_pick=blank
+        if selected_valid:
+            spr_pick=side
+            if np.isfinite(spread):spr_pick+=f' {spread:+.1f}'
+            if np.isfinite(odds):spr_pick+=f' ({odds:+.0f})'
+
+        spr_prob=blank
+        if selected_valid:
+            for field in ('V55_Policy_Win_Prob','CORE_Cover_Probability','V55_Raw_Cover_Prob'):
+                spr_prob=_prob(r.get(field))
+                if spr_prob!=blank:break
+
+        # The published side-aligned projected cover-points are authoritative
+        # for display. If absent, translating the published CORE home margin
+        # into the SAME quoted side's points is a presentation-only identity;
+        # no new betting edge, probability or model prediction is produced.
+        point_edge=np.nan
+        if selected_valid and np.isfinite(spread):
+            point_edge=_number(r.get('CORE_Project_Cover_Points'))
+            if not np.isfinite(point_edge):
+                home_margin=_number(r.get('CORE_Projected_Home_Margin'))
+                if np.isfinite(home_margin):
+                    if side.casefold()==home.casefold() and home:
+                        point_edge=home_margin+spread
+                    elif side.casefold()==away.casefold() and away:
+                        point_edge=-home_margin+spread
+        edge_display=f'{point_edge:+.2f} pts' if np.isfinite(point_edge) else blank
+
+        support=_families(r.get('Confirm_Families'))
+        oppose=_families(r.get('Oppose_Families'))
+        raw_pathi=_text(r.get('V55_Raw_Pathi'))
+        pathi_support='PATHI' in support
+        pathi_oppose='PATHI' in oppose
+        pathi_state=('MIXED' if pathi_support and pathi_oppose else
+                     'SUPPORT' if pathi_support else 'CONFLICT' if pathi_oppose else
+                     'TRACK' if _is_real(raw_pathi) else blank)
+        qualified_rules=_text(r.get('V55_Active_System_Rules'))
+        active_systems=_text(r.get('V55_Active_System_Names'))
+        system_trigger=(qualified_rules if _is_real(qualified_rules) else
+                        active_systems if _is_real(active_systems) else blank)
+        support_txt=', '.join(sorted(support))
+        oppose_txt=', '.join(sorted(oppose))
+        edge_sources=' | '.join([label for label in (
+            f'SUPPORT: {support_txt}' if support_txt else '',
+            f'OPPOSE: {oppose_txt}' if oppose_txt else '') if label]) or blank
+        active_bet=selected_valid and action in ('BET','STRONG BET')
+        plays=(f'Spr: {spr_pick}' if active_bet else blank)
+
+        out.append({
+            'Game Time':game_time,'Matchup':matchup,
+            'Spr Action':action,'Spr Pick':spr_pick,'Spr Prob':spr_prob,
+            'Spr Model Edge':edge_display,
+            'H2H Action':blank,'H2H Pick':blank,'H2H Prob':blank,'H2H Model Edge':blank,
+            'Tot Action':blank,'Tot Pick':blank,'Tot Prob':blank,'Tot Model Edge':blank,
+            'Production Plays':plays,
+            'Pathi State':pathi_state,
+            'Pathi Overlay':raw_pathi if _is_real(raw_pathi) else blank,
+            'Edge Sources':edge_sources,'System Trigger':system_trigger,
+        })
+    return pd.DataFrame.from_records(out,columns=_NCAAF_V55_NFL_BOARD_COLUMNS)
+
+
 def _render_ncaaf_v551_weekly_board():
     st.subheader('V5.5 — Backend Published Board')
     st.caption('V5.5 NONLINEAR_HGB independent CFBD CORE + current sportsbook quotes + STAT, Big Al, Pathi, '
@@ -49179,8 +49333,9 @@ def _render_ncaaf_v551_weekly_board():
     for _field in _overlay_fields:
         if _field in shown.columns:
             shown[_field]=shown[_field].fillna('NOT_PUBLISHED').replace('', 'NOT_PUBLISHED')
-    # Retain the old production's first-load layout: primary decisions and
-    # independent systems only. Technical odds/forecast columns are lazy below.
+    # IMPORTANT: The V5.5 weekly board is a DIFFERENT renderer from the
+    # Production V1 fast board. The user-visible export came from this table.
+    # Apply NFL parity here without mixing V1 H2H/totals model outputs into V5.5.
     summary=['Game_Start_UTC','Matchup','Sportsbook Market','Selected_Team',
              'CORE Selection Status','Current_Spread',
              'V55_Policy_EV','V55_Bet_Decision','Confirm_Count','Oppose_Count',
@@ -49192,23 +49347,17 @@ def _render_ncaaf_v551_weekly_board():
     _priced=shown.get('Quote_State',pd.Series('',index=shown.index)).fillna('').astype(str).str.startswith('FRESH_')
     _priced_board=shown.loc[_priced].copy()
     _unpriced=len(shown)-len(_priced_board)
-    _no_core=int(_priced_board.get('Selected_Team',pd.Series(index=_priced_board.index,dtype='object')).isna().sum())
-    st.caption(f'Current sportsbook board: {len(_priced_board)} priced games. '
-               f'{_no_core} priced games have no selected CORE side. '
-               f'{_unpriced} other forecasts are available in All upcoming forecasts below. '
-               'Sportsbook Market shows the actual home and away lines even if CORE makes no pick. '
-               'CORE Selection Status explains why a priced game has no model selection.')
-    _display_board=_priced_board[[x for x in summary if x in _priced_board]].copy()
-    if 'Selected_Team' in _display_board:
-        _display_board['Selected_Team']=_display_board['Selected_Team'].fillna('NO CORE PICK').replace('','NO CORE PICK')
-    if 'V55_Active_System_Rules' in _display_board:
-        _display_board['V55_Active_System_Rules']=_display_board['V55_Active_System_Rules'].fillna('—')
-    # Missing research feed is not an observed zero; make that distinction clear.
-    for _c in ('Confirm_Families','Oppose_Families','V55_Active_System_Names'):
-        if _c in _display_board:_display_board[_c]=_display_board[_c].fillna('—')
-    st.dataframe(_display_board.rename(columns={**_overlay_names,
-        'V55_Active_System_Rules':'System Rules (verified history)'}),
-        use_container_width=True,hide_index=True)
+    _no_core=int(_priced_board.get('Selected_Team',pd.Series(index=_priced_board.index,dtype='object')).fillna('').astype(str).str.upper().isin(('', 'NO CORE PICK')).sum())
+    st.caption(f'Current sportsbook board: {len(_priced_board)} priced games; '
+               f'{_no_core} without a selected CORE side; '
+               f'{_unpriced} forecasts without a fresh sportsbook quote. '
+               'The main table now matches NFL column order. '
+               'V5.5 only publishes spreads: unavailable H2H and totals fields are shown as —, '
+               'not populated with frozen V1 predictions. '
+               'BET/STRONG BET/CANDIDATE/VETO are the exact backend actions; '
+               'raw Pathi context is TRACK, not a qualified vote.')
+    _display_board=_ncaaf_v55_nfl_parity_display(_priced_board)
+    st.dataframe(_display_board,use_container_width=True,hide_index=True)
     _raw_matched=int(shown.get('V55_Raw_Overlay_State',pd.Series(index=shown.index,dtype='object')).eq(
                      'MATCHED_PRE_GAME_ENRICHED_SIDE__UNQUALIFIED').sum())
     _raw_count_only=int(shown.get('V55_Raw_Overlay_State',pd.Series(index=shown.index,dtype='object')).eq(
