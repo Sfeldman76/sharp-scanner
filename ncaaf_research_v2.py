@@ -57,7 +57,7 @@ NCAAF_MINER_INTERNAL_VALIDATION_MIN_RATE = 0.50
 NCAAF_MINER_HISTORY_CONTRACT = "FEATURE_AWARE_MAX_HISTORY__CHRONO_INTERNAL_VALIDATION__2024_2025_FINAL__2026_PROSPECTIVE"
 # V2.32 optional CFBD research feature bridge. The table is produced by
 # ncaaf_cfbd_miner_loader_v1.py. Missing/unavailable data always fail closed.
-NCAAF_CFBD_MINER_FEATURE_TABLE = os.getenv("NCAAF_CFBD_MINER_FEATURE_TABLE", "sharplogger.sharp_data.ncaaf_cfbd_miner_features_v1")
+NCAAF_CFBD_MINER_FEATURE_TABLE = os.getenv("NCAAF_CFBD_MINER_FEATURE_TABLE", "sharplogger.sharp_data.ncaaf_cfbd_miner_features_postgame_v1")
 NCAAF_CFBD_MINER_PATCH = "CFBD_GAME_SHIFT1_STATIC_PRESEASON_ALTITUDE_WEATHER_SHADOW_20261015"
 _CFBD_MINER_CONTEXT_CACHE: dict[str,Any] = {}
 REPORT_CURRENT_BLOB = "research/ncaaf/v2/current_report.json"
@@ -3796,6 +3796,13 @@ def _attach_cfbd_context_to_miner(dashboard_module, miner_games: pd.DataFrame, *
     if finite.empty:
         return out,{"status":"NO_SEASON","table":NCAAF_CFBD_MINER_FEATURE_TABLE,"selection_influence":0}
     lo=int(finite.min()); hi=int(finite.max()); ck=f"{lo}:{hi}"
+    # Force 2026+ context to refresh in long-running Cloud Run/Streamlit workers.
+    # Completed-game source changes must not be cached indefinitely.
+    _now_cfbd_cache=_cfbd_time.monotonic()
+    _timestamps=_CFBD_MINER_CONTEXT_CACHE.setdefault("__postgame_loaded_at",{})
+    if hi>=2026 and ck in _CFBD_MINER_CONTEXT_CACHE:
+        if _now_cfbd_cache-float(_timestamps.get(ck,0))>900:
+            _CFBD_MINER_CONTEXT_CACHE.pop(ck,None)
     cf=_CFBD_MINER_CONTEXT_CACHE.get(ck)
     _cfbd_source_cache_hit=isinstance(cf,pd.DataFrame)
     if not isinstance(cf,pd.DataFrame):
@@ -3805,6 +3812,7 @@ def _attach_cfbd_context_to_miner(dashboard_module, miner_games: pd.DataFrame, *
             except TypeError: cf=q.to_dataframe()
             if cf is None: cf=pd.DataFrame()
             _CFBD_MINER_CONTEXT_CACHE[ck]=cf.copy()
+            _CFBD_MINER_CONTEXT_CACHE.setdefault("__postgame_loaded_at",{})[ck]=_cfbd_time.monotonic()
         except Exception as exc:
             log_func(f"[NCAAF-CFBD-BRIDGE] status=UNAVAILABLE table={NCAAF_CFBD_MINER_FEATURE_TABLE} error={type(exc).__name__}:{exc} fail_closed=TRUE authority=0")
             return out,{"status":"UNAVAILABLE","table":NCAAF_CFBD_MINER_FEATURE_TABLE,"error":f"{type(exc).__name__}:{exc}","selection_influence":0}
