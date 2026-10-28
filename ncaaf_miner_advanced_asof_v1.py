@@ -130,24 +130,71 @@ def restore_advanced_asof(live, cfbd_history, *, team_key, asof=None, min_reconc
     home=_team(out,('Team_Norm','Home_Team_Norm','Home_Team'),team_key)
     away=_team(out,('Opponent_Norm','Away_Team_Norm','Away_Team'),team_key)
     audit['historical_complete_sides']=len(hist)
+    # Observational diagnostics only. Never alter masks, keys, values or authority.
+    hist_keys=set((int(sy),team) for sy,team in zip(hist['_sy'],hist['_team']) if team and pd.notna(sy))
+    _live_keys=[(int(live_sy.iloc[j]),home.iloc[j]) for j in range(len(out))
+                if pd.notna(live_sy.iloc[j]) and home.iloc[j]]
+    _opp_keys=[(int(live_sy.iloc[j]),away.iloc[j]) for j in range(len(out))
+                if pd.notna(live_sy.iloc[j]) and away.iloc[j]]
+    audit['input_join_diagnostics']={
+        'game_start_column_present':'Game_Start' in out.columns,
+        'game_date_column_present':'Game_Date' in out.columns,
+        'season_present':int(live_sy.notna().sum()),
+        'date_parsed':int(live_date.notna().sum()),
+        'date_in_future':int(live_date.gt(now).sum()),
+        'home_key_present':int(home.ne('').sum()),
+        'away_key_present':int(away.ne('').sum()),
+        'home_team_season_key_in_source':int(sum(k in hist_keys for k in _live_keys)),
+        'away_team_season_key_in_source':int(sum(k in hist_keys for k in _opp_keys)),
+        'source_team_season_keys':len(hist_keys),
+        'source_most_recent_game_date':hist['_dt'].max().isoformat(),
+        'source_seasons':sorted({int(k[0]) for k in hist_keys}),
+    }
+    audit['field_join_diagnostics']={}
     # Prevent future-date or wrong-season injection for current games.
     eligible=(live_date.gt(now) & live_sy.notna() & home.ne('') & away.ne(''))
+    audit['input_join_diagnostics']['eligible_live_rows']=int(eligible.sum())
+    audit['input_join_diagnostics']['eligible_home_key_in_source']=int(sum(
+        bool(eligible.iloc[j]) and ((int(live_sy.iloc[j]),home.iloc[j]) in hist_keys)
+        for j in range(len(out))))
+    audit['input_join_diagnostics']['eligible_away_key_in_source']=int(sum(
+        bool(eligible.iloc[j]) and ((int(live_sy.iloc[j]),away.iloc[j]) in hist_keys)
+        for j in range(len(out))))
     patched={}
     candidates={}
     for prior,raw_names,minimum in RAW_SPECS:
+        detail={
+            'prior_in_source':prior in hist.columns,
+            'source_prior_numeric':int(_numeric(hist,prior).notna().sum()),
+            'source_raw_numeric':{name:int(_numeric(hist,name).notna().sum()) for name in raw_names},
+            'minimum_prior_games':minimum,
+            'destinations':{},
+        }
+        audit['field_join_diagnostics'][prior]=detail
         raw=next((c for c in raw_names if c in hist.columns and _numeric(hist,c).notna().any()),None)
         if raw is None or prior not in hist.columns:
+            detail['replay_status']='RAW_AND_PRIOR_PAIR_NOT_AVAILABLE'
             audit['held_fields'][prior]='RAW_AND_PRIOR_PAIR_NOT_AVAILABLE';continue
         hist[raw]=_numeric(hist,raw)
         hist[prior]=_numeric(hist,prior)
         verified,proof=_replay_metric(hist,raw,prior,min_reconciliation=min_reconciliation)
         audit['replay'][prior]=proof
         if verified is None:
+            detail['replay_status']=proof['status']
             audit['held_fields'][prior]=proof['status'];continue
         candidates[prior]=verified
+        detail['replay_status']=proof['status']
         for prefix,names in (('',home),('CFBD_Opp_',away)):
             dest=prior if not prefix else 'CFBD_Opp_'+prior[len('CFBD_'):]
             existing=_numeric(out,dest)
+            eligible_keys=[(int(live_sy.iloc[j]),names.iloc[j]) for j in range(len(out))
+                           if eligible.iloc[j] and names.iloc[j]]
+            detail['destinations'][dest]={
+                'already_numeric':int(existing.notna().sum()),
+                'null_eligible':int((eligible & existing.isna()).sum()),
+                'eligible_team_season_replay_key':int(sum(k in verified for k in eligible_keys)),
+                'eligible_key_min_games':int(sum((verified.get(k) or {}).get('n',0)>=minimum for k in eligible_keys)),
+            }
             new=existing.copy()
             filled=0
             for j in range(len(out)):
@@ -157,6 +204,7 @@ def restore_advanced_asof(live, cfbd_history, *, team_key, asof=None, min_reconc
                     new.iloc[j]=state['value'];filled+=1
             if filled:patched[dest]=new
             audit['filled_by_field'][dest]=filled
+            detail['destinations'][dest]['filled']=filled
             audit['filled_cells']+=filled
     # Derived matchup only if its exact definition is proven historically.
     matchup_ok,form=_verify_matchup_formula(hist,min_pairs=min_reconciliation)
@@ -178,4 +226,6 @@ def restore_advanced_asof(live, cfbd_history, *, team_key, asof=None, min_reconc
         out=pd.concat([out.drop(columns=list(patched),errors='ignore'),
                        pd.DataFrame(patched,index=out.index)],axis=1)
     audit['status']='PASS_VERIFIED_RECONSTRUCTION' if audit['filled_cells'] else 'HOLD_NO_REPLAY_VERIFIED_FIELDS'
+    audit['historical_replayed_fields']=sorted(k for k,v in audit.get('replay',{}).items() if v.get('status')=='REPLAY_VERIFIED')
+    audit['live_restore_explanation']='SOURCE_REPLAY_VERIFIED_BUT_NO_LIVE_CELLS_FILLED' if audit['historical_replayed_fields'] and not audit['filled_cells'] else audit['status']
     return out,audit
