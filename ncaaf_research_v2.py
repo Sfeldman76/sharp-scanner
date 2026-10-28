@@ -7694,6 +7694,31 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     except Exception:
         import logging as _mine_input_logging
         _mine_input_logging.exception('[NCAAF-MINER-CFBD-STATIC-RESTORE] status=ERROR_FAIL_CLOSED')
+    # NCAAF-MINER-ASOF-CONFERENCE-V1: verified prior-team conference records.
+    # Do not interpolate missing advanced stats, STAT forecasts, or PT providers.
+    try:
+        from ncaaf_miner_prior_context_v1 import (restore_verified_conference_context,
+                                                    load_verified_conference_history)
+        _csy=pd.to_numeric(cdf.get('Season'),errors='coerce').dropna()
+        _prior_cfbd=_CFBD_MINER_CONTEXT_CACHE.get(_ck) if '_ck' in locals() else None
+        _conf_candidate=_prior_cfbd
+        _conference_table_diag={'status':'CFBD_SOURCE_ONLY'}
+        _conf_fields=('Conference','Team_Conference','Opponent_Conference','CFBD_Team_Conference',
+                      'Team_Conference_Norm','Conference_Norm','Context_Conference','Context_Opp_Conference')
+        _has_real_conf=isinstance(_conf_candidate,pd.DataFrame) and any(
+            c in _conf_candidate.columns and _conf_candidate[c].astype('string').str.strip()
+                    .replace({'':pd.NA,'nan':pd.NA,'None':pd.NA}).notna().any()
+            for c in _conf_fields)
+        if not _has_real_conf:
+            _conf_candidate,_conference_table_diag=load_verified_conference_history(
+                getattr(dashboard_module,'bq_client',None),
+                season=int(_csy.max()) if not _csy.empty else 2026)
+        cdf,_verified_conference_diag=restore_verified_conference_context(
+            cdf,_conf_candidate,team_key=_pt_team_key)
+        _live_logging.info('[NCAAF-MINER-VERIFIED-CONFERENCE-RESTORE] %s',
+                           {'lookup':_conference_table_diag,**_verified_conference_diag})
+    except Exception:
+        _live_logging.exception('[NCAAF-MINER-VERIFIED-CONFERENCE-RESTORE] status=ERROR_FAIL_CLOSED')
     cdf,_situational_live_diag=_attach_h2h_rivalry_travel_context(dashboard_module,cdf,log_func=lambda *a,**k:None,for_live=True)
     cdf,_pt_live_diag=_pt_attach_current_live_frame(cdf,dashboard_module=dashboard_module)
     registry=report.get("system_miner_v3") or {}

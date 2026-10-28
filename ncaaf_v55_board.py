@@ -1711,6 +1711,9 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
             'qualified_support_count':int(_price(_bet.get('Confirm_Count')) or 0),
             'qualified_oppose_count':int(_price(_bet.get('Oppose_Count')) or 0),
             'independent_support_keys':str(_bet.get('V55_Independent_Support_Keys') or ''),
+            'miner_qualified_systems':int(_price(_bet.get('V55_Miner_Qualified_System_Count')) or 0),
+            'miner_independent_families':int(_price(_bet.get('V55_Miner_Independent_Family_Count')) or 0),
+            'miner_evidence_family_keys':str(_bet.get('V55_Miner_Independent_Family_Keys') or ''),
             'support_families':str(_bet.get('Confirm_Families') or ''),
             'historical_systems':[{
                 'brain':str(_ev.get('source') or ''),
@@ -2523,7 +2526,8 @@ def attach_v55_qualified_evidence(frame,events, *, now=None):
     report={"evidence_state":"NOT_EVALUABLE_NO_VERIFIED_EVENTS",
             "rows_read":len(events) if isinstance(events,pd.DataFrame) else 0,
             "qualified_events_used":0,"multi_family":0,"conflict_games":0,
-            "source_family_cap":1,"v55_bet_authority":0,
+            "source_family_cap":1,"source_family_cap_basis":"PER_VERIFIED_UNDERLYING_FAMILY", 
+            "v55_bet_authority":0,
             "miner_independent_family_policy":"ONE_VERIFIED_UNDERLYING_FAMILY_ONE_VOTE"}
     required={"Game_ID","Game_Start_UTC","Source_Family","Signal_Family","Signal_Side",
               "Observed_At_UTC","Qualified_At_UTC","Qualification_Status",
@@ -2649,7 +2653,20 @@ def attach_v55_qualified_evidence(frame,events, *, now=None):
             dirs.discard('')
             if not dirs or not dirs.issubset({home,away}):continue
             brains={v['_family'] for v in component}
-            label='+'.join(sorted(brains))
+            # Component identities must include the independently certified
+            # underlying evidence-family key. Labeling every Miner component
+            # only SYSTEM_MINER silently folds genuinely different families
+            # into a single set entry and suppresses STRONG BET eligibility.
+            # The union-find above already collapses shared source/dependency
+            # chains, so each remaining component is one possible vote.
+            # Missing keys fail closed to the single source identity.
+            identities={
+                f"{v['_family']}::{v['_dependency']}"
+                if v['_dependency'] not in ('', 'NAN', 'NONE', 'NULL')
+                else v['_family']
+                for v in component
+            }
+            label='+'.join(sorted(identities))
             if len(dirs)>1:
                 independent_oppose.add(label)
                 opposition.update(brains);conflicts.update(brains)

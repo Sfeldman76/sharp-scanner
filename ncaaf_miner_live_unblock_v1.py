@@ -27,6 +27,9 @@ STATIC_CFBD = (
     'CFBD_Portal_In_4StarPlus', 'CFBD_Portal_Out_4StarPlus',
     'CFBD_Portal_In_QB_Prior_TotalPPA', 'CFBD_Roster_ALL_Retention',
     'CFBD_Returning_Pct_PPA', 'CFBD_Talent_Rank',
+    # Prior-season high-usage departures are season-static; strict prior-game
+    # agreement is required before allowing this feature into live Miner.
+    'CFBD_Prior_HighUsage_Lost_Count',
 )
 
 
