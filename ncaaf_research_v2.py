@@ -39,9 +39,9 @@ NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.33.0-feature-aware-max-history
 NCAAF_RESEARCH_V2_VERSION = "2.33.0"
 NCAAF_RESEARCH_REPAIR_PATCH = "ptiv-2023fit-2024select-2025holdout-live-availability-20261014"
 NCAAF_LIVE_CALENDAR_PATCH = "miner-season-game-date-safe-fallback-20261014"
-NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
+NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_21_HISTORICAL_DEEP_QUALIFICATION_20261028"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
-NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
+NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.53
 DISCOVERY_MAX_SEASON = 2023  # retained for non-Miner research lanes / backward compatibility
 CONFIRMATION_SEASONS = (2024, 2025)
 PROSPECTIVE_MIN_SEASON = 2026
@@ -6010,12 +6010,11 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         for _pb in (behavior.get("top_confirmed") or [])[:8]:
             log_func(f"[NCAAF-RV2182-PREDICTOR-TOP] predictor={_pb.get('predictor')} behavior={_pb.get('behavior')} state={_pb.get('state')} discovery={_pb.get('discovery_rate')}/{_pb.get('discovery_n')} confirmation={_pb.get('confirmation_rate')}/{_pb.get('confirmation_n')} meta_constituent={str(bool(_pb.get('meta_constituent',False))).upper()} source_cluster={_pb.get('source_cluster')} authority=0")
     if valid.sum()<500: out["status"]="INSUFFICIENT_HISTORY"; return out
-    # Deep CFBD discovery challenger. Heavy Research inventories ALL CFBD fields,
-    # screens historical/PIT eligibility, and tests up to six independent
-    # conditions combining pregame CFBD + ATS/opponent/rivalry/conference context.
-    # ISOLATION CONTRACT: shadow-only report, never inserted into `atoms`,
-    # `finalists`, `mechanism_families`, or published live authority library.
-    # Existing production Miner discovery and live voting remain unchanged.
+    # Deep CFBD discovery + historical validation. The frozen 2024/25 holdout
+    # can automatically qualify exact combinations for existing Miner live
+    # authority, but ONLY with independently certified pregame source vintages,
+    # multiple-testing control and reproducible live atom evaluation.
+    # CFBD_PG_ fields are retrospective and remain ineligible for promotion.
     if market == "spreads" and os.getenv("NCAAF_MINER_DEEP_CFBD", "1").strip().lower() not in {"0", "off", "false", "no"}:
         try:
             from ncaaf_miner_deep_cfbd_v1 import run_deep_cfbd_challenger
@@ -6024,7 +6023,7 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
                 max_depth=min(6,max(5,int(os.getenv("NCAAF_MINER_DEEP_MAX_DEPTH","6"))))
             )
         except Exception as _deep_exc:
-            out["deep_cfbd_shadow"] = {"status":"ERROR_RESEARCH_ONLY",
+            out["deep_cfbd_shadow"] = {"status":"ERROR_DEEP_DISCOVERY",
                                        "exception":f"{type(_deep_exc).__name__}:{_deep_exc}",
                                        "production_authority":0}
             log_func(f"[NCAAF-DEEP-CFBD] status=ERROR_RESEARCH_ONLY error={type(_deep_exc).__name__}:{_deep_exc} authority=0")
@@ -6058,10 +6057,10 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
             )
             r["quality"]=4*max(0,r["market_residual_discovery"])+2*max(0,hp.get("roi",0))+0.05*float(hp.get("positive_price_band_fraction",0) or 0)
         else:
-            discovery_pass=bool(bool(r.get("internal_validation_pass",False)) and r["discovery_rate"]>=.54 and r["stable_discovery_fraction"]>=float(r.get("required_stable_discovery_fraction",1.0)) and np.isfinite(r["remove_best_discovery_rate"]) and r["remove_best_discovery_rate"]>=.515)
+            discovery_pass=bool(bool(r.get("internal_validation_pass",False)) and r["discovery_rate"]>=.53 and r["stable_discovery_fraction"]>=float(r.get("required_stable_discovery_fraction",1.0)) and np.isfinite(r["remove_best_discovery_rate"]) and r["remove_best_discovery_rate"]>=.515)
             _iv_bonus=max(0.0,float(r.get("internal_validation_rate",.5) or .5)-.5) if np.isfinite(r.get("internal_validation_rate",np.nan)) else 0.0
             r["quality"]=(r["discovery_rate"]-.5)*3 + max(0,r["remove_best_discovery_rate"]-.5) + .03*r["stable_discovery_fraction"] + .20*_iv_bonus
-        r["discovery_pass"]=discovery_pass; r["idx"]=tuple(idx)
+        r["discovery_pass"]=discovery_pass; r["idx"]=tuple(idx); r["market"]=market
         return r
 
     def legacy_search(lane_atoms):
@@ -6391,6 +6390,22 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         if fam.get("meta_constituent_overlap_guard")!="PASS":
             continue
         families.append(fam)
+    # Add automatically validated deep rules to the SAME Miner mechanism library.
+    # Failed PIT, independent holdout, or live-condition checks remain diagnostics
+    # and cannot cast a bet vote. This does not create an additional vote family
+    # for correlated CFBD mechanisms.
+    if market == "spreads":
+        _deep_result=out.get("deep_cfbd_shadow") or {}
+        for _deep_mech in (_deep_result.get("auto_qualified_mechanisms") or []):
+            if _miner_live_authority_eligible(_deep_mech):
+                families.append(_deep_mech)
+        _deep_result["published_authority_mechanisms"]=sum(1 for m in families if m.get("miner_lane")=="DEEP_CFBD_AUTO")
+        log_func(f"[NCAAF-DEEP-CFBD-AUTHORITY] status={_deep_result.get('status')} "
+                 f"tested={_deep_result.get('tested_hypotheses',0)} "
+                 f"holdout_pass={_deep_result.get('holdout_screen_pass',0)} "
+                 f"ready={_deep_result.get('authority_ready_count',0)} "
+                 f"published={_deep_result['published_authority_mechanisms']} "
+                 f"blocked_pit={_deep_result.get('blocked_pit_count',0)}")
     clean=[]
     for z in finalists:
         z=dict(z); z.pop("_mask_internal",None); clean.append(z)
@@ -6500,6 +6515,11 @@ def _prospective_shadow(full_games: pd.DataFrame, full_seasons: np.ndarray, mine
     out={"status":"PASS","season_min":PROSPECTIVE_MIN_SEASON,"mechanisms":[],"production_authority":0,"selection_influence":0}
     for market,mr in (miners or {}).items():
         atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(full_games,dashboard_module,for_live=False,market=market)}
+        try:
+            from ncaaf_miner_deep_cfbd_v1 import frozen_live_auto_atoms
+            atoms.update(frozen_live_auto_atoms(full_games,(mr or {}).get('mechanism_families') or []))
+        except (ImportError,ValueError,TypeError,KeyError):
+            pass
         y,valid,baseline=_market_target(full_games,market)
         for mech in (mr or {}).get("mechanism_families",[]):
             if not mech.get("confirmation_pass"): continue
@@ -6546,14 +6566,14 @@ def _beta_shrunk_rate(wins: int, n: int, prior_wins: float=15.0, prior_losses: f
 
 
 def _miner_authority_threshold_neighborhood(miners: dict[str,Any]) -> dict[str,Any]:
-    """Show sensitivity near the frozen 60 / 56% live-authority gate.
+    """Show sensitivity near the 60 game / 53% minimum live-authority screen.
 
     This does not choose a threshold and has zero selection influence. It answers
     whether the qualified family count is brittle to small neighboring cutoffs.
     """
     rows=[]
     for min_n in (50,60,70):
-        for min_rate in (.55,.56,.57):
+        for min_rate in (.52,.53,.54,.55,.56):
             by_market={}; total=0
             for market,mr in (miners or {}).items():
                 n=sum(bool(x.get("confirmation_pass")) and int(x.get("confirmation_n",0) or 0)>=min_n and
@@ -6891,6 +6911,7 @@ def _miner_live_authority_eligible(mech: dict[str,Any] | None) -> bool:
     _inc_status=str(m.get("incumbent_revalidation_status") or "")
     if _inc_status=="HOLD_NOT_EVALUABLE": return False
     if _inc_status=="LEGACY_CONTRACT_HOLD":
+        if m.get('miner_lane')=='DEEP_CFBD_AUTO': return False
         return bool(m.get("incumbent_prior_live_authority_eligible",m.get("live_authority_eligible",False)))
     _conds=[str(x) for x in (m.get("representative_conditions") or m.get("conditions") or [])]
     # CORE OOF / specialist research bridges are not live-authority inputs.
@@ -6906,7 +6927,19 @@ def _miner_live_authority_eligible(mech: dict[str,Any] | None) -> bool:
     except Exception: n=0
     try: rate=float(m.get("confirmation_rate",0) or 0)
     except Exception: rate=0.0
-    return bool(n>=NCAAF_MINER_LIVE_MIN_CONFIRMATION_N and np.isfinite(rate) and rate>=NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE)
+    # Deep, automatically discovered CFBD systems must pass the *additional*
+    # out-of-sample FDR, exact-atom, and verified source-vintage requirements.
+    # Legacy mechanisms retain their existing chronological + FDR selection.
+    if m.get("miner_lane") == "DEEP_CFBD_AUTO":
+        if not (m.get("deep_cfbd_pit_certified") and m.get("deep_cfbd_holdout_fdr_pass")
+                and m.get("deep_cfbd_exact_live_atoms_available", False)
+                and m.get("deep_cfbd_unique_games_confirmed", False)):
+            return False
+        if any(str(k).startswith("CFBD_PG_") for k in (m.get("auto_atom_fields") or [])):
+            return False
+    _market=str(m.get('market') or 'spreads').lower()
+    _floor=(NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE if _market=='spreads' else 0.56)
+    return bool(n>=NCAAF_MINER_LIVE_MIN_CONFIRMATION_N and np.isfinite(rate) and rate>=_floor)
 
 
 def _attach_role_transition_live_context(cdf: pd.DataFrame, dashboard_module=None, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
@@ -7766,12 +7799,23 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     _miner_coverage_diagnostics=[]  # NCAAF_MULTI_MINER_LIVE_COVERAGE_DIAGNOSTICS_20261027
     for market,mr in registry.items():
         atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(cdf,dashboard_module,for_live=True,market=market)}
+        # Frozen deep atoms are evaluated from their stored discovery-only
+        # thresholds; no threshold is re-fit using upcoming games.
+        try:
+            from ncaaf_miner_deep_cfbd_v1 import frozen_live_auto_atoms
+            atoms.update(frozen_live_auto_atoms(cdf, (mr or {}).get("mechanism_families") or []))
+        except ImportError:
+            pass  # deep modules absent => deep conditions fail closed
+        except Exception as _auto_live_exc:
+            _live_logging.warning('[NCAAF-DEEP-CFBD-ATOM-ERROR] %s',type(_auto_live_exc).__name__)
         for mech in (mr or {}).get("mechanism_families",[]):
             if not mech.get("confirmation_pass"): continue
             confirmed_research+=1
-            live_eligible=_miner_live_authority_eligible(mech)
-            if live_eligible: authority_qualified+=1
             cond=list(mech.get("representative_conditions") or [])
+            live_eligible=_miner_live_authority_eligible(mech)
+            if live_eligible and mech.get("miner_lane")=="DEEP_CFBD_AUTO":
+                live_eligible=bool(cond and all(c in atoms for c in cond))
+            if live_eligible: authority_qualified+=1
             # Observe why a frozen eligible rule does not reach live voting.
             # Do NOT change rule eligibility, atom masks, target selection, or vote counts.
             _coverage_missing=[str(c) for c in cond if c not in atoms]
@@ -8019,7 +8063,8 @@ def _discovery_pass_from_exact_rule(rep: dict[str,Any], market: str) -> bool:
     if str(market).lower()=="h2h":
         hp=rep.get("h2h_discovery_price") or {}
         return bool(bool(rep.get("internal_validation_pass",False)) and float(rep.get("stable_discovery_fraction",0) or 0)>=float(rep.get("required_stable_discovery_fraction",1.0) or 1.0) and np.isfinite(rep.get("market_residual_discovery",np.nan)) and float(rep.get("market_residual_discovery"))>=.01 and int(hp.get("priced_n",0) or 0)>=80 and np.isfinite(hp.get("roi",np.nan)) and float(hp.get("roi"))>.01 and bool(hp.get("price_band_robust",False)) and np.isfinite(rep.get("remove_best_discovery_roi",np.nan)) and float(rep.get("remove_best_discovery_roi"))>=0 and np.isfinite(rep.get("remove_best_market_residual",np.nan)) and float(rep.get("remove_best_market_residual"))>=0)
-    return bool(bool(rep.get("internal_validation_pass",False)) and np.isfinite(rep.get("discovery_rate",np.nan)) and float(rep.get("discovery_rate"))>=.54 and float(rep.get("stable_discovery_fraction",0) or 0)>=float(rep.get("required_stable_discovery_fraction",1.0) or 1.0) and np.isfinite(rep.get("remove_best_discovery_rate",np.nan)) and float(rep.get("remove_best_discovery_rate"))>=.515)
+    _rate_floor = .53 if str(market).lower()=='spreads' else .54
+    return bool(bool(rep.get("internal_validation_pass",False)) and np.isfinite(rep.get("discovery_rate",np.nan)) and float(rep.get("discovery_rate"))>=_rate_floor and float(rep.get("stable_discovery_fraction",0) or 0)>=float(rep.get("required_stable_discovery_fraction",1.0) or 1.0) and np.isfinite(rep.get("remove_best_discovery_rate",np.nan)) and float(rep.get("remove_best_discovery_rate"))>=.515)
 
 
 def _legacy_contract_evidence_diagnostic(games: pd.DataFrame, seasons: np.ndarray, mask: np.ndarray,
@@ -8263,7 +8308,22 @@ def _reconcile_incumbent_system_library(games: pd.DataFrame, seasons: np.ndarray
         atoms=_extended_atoms(games,dashboard_module,for_live=False,market=market,enforce_support_floor=False)
         atom_map={str(a.get("name")):a for a in atoms}
         y,valid,baseline=_market_target(games,market)
+        # Frozen Deep Miner thresholds are not part of legacy extended atoms.
+        # A deep system must pass the entire current discovery/holdout/PIT
+        # certification process again; never grandfather an old live vote.
         for old in incumbents:
+            if old.get('miner_lane')=='DEEP_CFBD_AUTO':
+                sig=_ncaaf_system_signature(old)
+                existing=cur_by_sig.get(sig)
+                if existing is not None and _miner_live_authority_eligible(existing):
+                    audit['rediscovered']+=1
+                    audit['details'].append({'signature':sig,'market':market,
+                        'state':'DEEP_FRESHLY_REQUALIFIED','mechanism_id':existing.get('mechanism_id')})
+                else:
+                    audit['demoted']+=1
+                    audit['details'].append({'signature':sig,'market':market,
+                        'state':'DEEP_NOT_REQUALIFIED_HOLD','reason':'NO_CURRENT_PIT_AND_HOLDOUT_EVIDENCE'})
+                continue
             sig=_ncaaf_system_signature(old); cond=list(old.get("representative_conditions") or [])
             existing=cur_by_sig.get(sig); missing=[c for c in cond if c not in atom_map]
             if missing:
@@ -8380,6 +8440,12 @@ def _apply_v231_context_family_caps(miners: dict[str,Any], *, log_func=print) ->
     for _market,_mr in (miners or {}).items():
         for m in ((_mr or {}).get("mechanism_families") or []):
             fams=set(str(x) for x in (m.get("families") or []))
+            # Deep CFBD mechanisms share one correlated research family.
+            # Do not relabel a deep interaction as an additional rivalry or
+            # H2H vote simply because it contains those context conditions.
+            if m.get('miner_lane')=='DEEP_CFBD_AUTO':
+                m['evidence_family_key']='NCAAF_CFBD_DEEP_DISCOVERY_FAMILY'
+                continue
             if "EXTERNAL_RATINGS_FAMILY" in fams or bool(m.get("uses_external_ratings_family")):
                 continue
             if "SEASON_RECORD_STATE" in fams or bool(m.get("uses_season_record_state_family")):
@@ -9540,7 +9606,7 @@ def self_test() -> dict[str,Any]:
         "weak_confirmed_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":109,"confirmation_rate":0.5229}),
         "strong_confirmed_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.6222}),
         "pt_strong_validated_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["META_PT_EDGE_TEAM_3PLUS"]}),
-        "pt_weak_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.54,"representative_conditions":["META_PT_EDGE_TEAM_3PLUS"]}),
+        "pt_weak_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.529,"representative_conditions":["META_PT_EDGE_TEAM_3PLUS"]}),
         "core_oof_bridge_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["CORE_OOF_EDGE_TEAM_2PLUS"]}),
         "pt_family_vote_cap":1,
         "season_record_state_family_vote_cap":1,

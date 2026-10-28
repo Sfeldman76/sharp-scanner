@@ -1,25 +1,24 @@
-"""Broad, bounded, pregame-safe CFBD x situational depth-6 challenger.
+"""Bounded deep CFBD x situational Miner with gated historical promotion.
 
-Runs only in Heavy Research, produces *shadow diagnostics*, never systems or bet
-votes. All thresholds, directions, beam choices and FDR are discovery-only
-(<=2023); 2024/25 holdout metrics are produced only after freezing finalists.
-2026 outcomes are excluded entirely. Retrospective 2026-only CFBD_PG fields
-are inventoried but prohibited from historical discovery and promotion.
-
-Historical odds must originate from archived pregame quotes in the host frame.
-The helper reports ATS hit-rates, NOT verified ROI if betting odds are missing.
+Search <=2023; freeze rules; evaluate 2024 and 2025 with unique-game
+holdout inference and multiplicity adjustment. Only eligible if independently
+certified as-of pregame features, fixed exact thresholds and live atom evaluation.
+Retrospective CFBD_PG_ values can never earn historical authority by name.
 """
 from __future__ import annotations
 import hashlib
+import json
 import math
+import os
 import re
+from pathlib import Path
 from collections import Counter, defaultdict
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-VERSION = 'NCAAF-DEEP-CFBD-SHADOW-V1-20261028'
+VERSION = 'NCAAF-DEEP-CFBD-AUTHORITY-V2-20261028'
 CONFIRM_YEARS = (2024, 2025)
 DISC_MAX = 2023
 
@@ -109,6 +108,72 @@ def _get_sides(g: pd.DataFrame, seasons: np.ndarray):
     return sy, game_id
 
 
+# 53% is a minimum screen, NOT a complete statistical qualification.
+MIN_CONFIRM_N = 60
+MIN_CONFIRM_RATE = 0.53
+REFERENCE_MINUS110_BREAKEVEN = 110.0 / 210.0
+HOLDOUT_FDR_Q = 0.10
+
+
+def _exact_binomial_upper_tail(wins: int, n: int, p0: float) -> float:
+    """P[X >= wins], exact binomial using log probabilities (no SciPy needed)."""
+    if not 0 <= wins <= n or not 0 < p0 < 1:
+        return 1.0
+    if wins == 0:
+        return 1.0
+    logs = [math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1)
+            + k*math.log(p0) + (n-k)*math.log1p(-p0) for k in range(wins,n + 1)]
+    mx=max(logs)
+    return min(1.0,math.exp(mx)*sum(math.exp(t-mx) for t in logs))
+
+
+def _certified_fields():
+    """Load separately audited feature lineages, not a name-based assertion.
+
+    JSON format: {"CFBD_Season_Off_PPA_Prior":
+      {"pregame_asof_verified": true, "verified_2024_2025": true,
+       "source": "...", "audit_id": "..."}}
+    Source/audit_id must identify independent reproducible lineage evidence.
+    """
+    path=os.getenv('NCAAF_MINER_PIT_CERTIFICATION_FILE','').strip()
+    if not path:
+        path=str(Path(__file__).with_name('ncaaf_deep_pit_certified_fields.json'))
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path,encoding='utf-8') as f:
+            data=json.load(f)
+        return {str(k):v for k,v in data.items() if isinstance(v,dict)
+                and v.get('pregame_asof_verified') is True
+                and v.get('verified_2024_2025') is True
+                and str(v.get('source') or '').strip()
+                and str(v.get('audit_id') or '').strip()}
+    except (OSError,ValueError,TypeError):
+        return {}
+
+
+def frozen_live_auto_atoms(g: pd.DataFrame, mechanisms: list[dict]) -> dict[str,np.ndarray]:
+    """Evaluate ONLY exact frozen CFBD atom definitions; no new quantiles."""
+    masks={}
+    for mech in mechanisms:
+        if mech.get('miner_lane')!='DEEP_CFBD_AUTO':
+            continue
+        for atom in mech.get('auto_atom_specs') or []:
+            col=str(atom.get('source_field') or '')
+            name=str(atom.get('name') or '')
+            if _cfbd_status(col)!='NAME_SCREENED_PRIOR_OR_PRESEASON' or not col in g:
+                continue
+            try:
+                op=str(atom['operator']); t=float(atom['threshold'])
+                if not math.isfinite(t) or op not in ('EQ','LE','GE') or name != _identity(col,op,t):
+                    continue
+                vec=pd.to_numeric(g[col],errors='coerce').to_numpy(dtype=float)
+                masks[name]=np.asarray(np.isfinite(vec)&((vec==t) if op=='EQ' else ((vec<=t) if op=='LE' else (vec>=t))),dtype=bool)
+            except (KeyError,TypeError,ValueError):
+                continue
+    return masks
+
+
 def _rate(mask: np.ndarray, y: np.ndarray, valid: np.ndarray, gid: np.ndarray, scope: np.ndarray):
     ix = np.flatnonzero(mask & valid & scope)
     if not len(ix):
@@ -116,8 +181,15 @@ def _rate(mask: np.ndarray, y: np.ndarray, valid: np.ndarray, gid: np.ndarray, s
     # A physical game contributes one effective observation. Two team sides
     # qualifying in opposite directions are averaged within the game.
     _, inv = np.unique(gid[ix], return_inverse=True)
-    vals = np.bincount(inv, weights=y[ix]) / np.bincount(inv)
-    return {'rows': int(len(ix)), 'games': int(len(vals)), 'rate': float(vals.mean())}
+    cnt=np.bincount(inv)
+    vals = np.bincount(inv, weights=y[ix]) / cnt
+    # Mirrored qualifying team-sides are deliberately NOT counted as
+    # independent betting opportunities in inferential promotion tests.
+    unambiguous=(cnt==1)
+    return {'rows': int(len(ix)), 'games': int(len(vals)), 'rate': float(vals.mean()),
+            'unambiguous_games':int(unambiguous.sum()),
+            'unambiguous_wins':int(np.rint(vals[unambiguous].sum())),
+            'ambiguous_games':int((~unambiguous).sum())}
 
 
 def _support(metric: dict, years: np.ndarray, mask: np.ndarray, valid: np.ndarray,
@@ -318,7 +390,7 @@ def _leaderboard(g: pd.DataFrame, sy: np.ndarray, y: np.ndarray,
     for z, val in zip(all_tests, q):
         z['q'] = float(val)
     shortlist = [z for z in all_tests if z['depth'] >= 2 and z['q'] <= .10 and
-                 z['rate'] >= .54 and z['stable_years'] >= 2]
+                 z['rate'] >= .53 and z['stable_years'] >= 2]
     shortlist = sorted(shortlist, key=lambda v:(v['score'],v['n']), reverse=True)[:75]
     return shortlist, inventory, {'tested_hypotheses':len(all_tests),
                                   'depth_evaluated':depth_count,
@@ -388,7 +460,12 @@ def run_deep_cfbd_challenger(games: pd.DataFrame, seasons: np.ndarray,
         all_core = _rate(core_candidate, y, valid, gids, np.isin(sy, CONFIRM_YEARS))
         core_delta = (matched_core['rate'] - all_core['rate']) if (
             matched_core['rate'] is not None and all_core['rate'] is not None) else None
+        _atom_specs=[{'name':a['name'],'source_field':a['source_field'],
+                      'operator':a['operator'],'threshold':float(a['threshold'])}
+                     for a in st['atoms'] if a.get('kind')=='CFBD']
+        _pid='NCAAF-DEEP-'+hashlib.sha256((direction+'|'+','.join(st['name_key'])).encode()).hexdigest()[:16].upper()
         report.append({'conditions':list(st['name_key']), 'families':list(st['families']),
+                       'mechanism_id':_pid,'auto_atom_specs':_atom_specs,
                        'depth':st['depth'], 'direction':direction,
                        'discovery_games':st['n'], 'discovery_rate':round(st['rate'],5),
                        'discovery_p':round(st['p'],9), 'discovery_fdr_q':round(st['q'],7),
@@ -400,6 +477,69 @@ def run_deep_cfbd_challenger(games: pd.DataFrame, seasons: np.ndarray,
                        'core_oof_unfiltered_candidates':all_core,
                        'core_oof_conditional_ats_lift':core_delta,
                        'state':'RESEARCH_SHADOW_NO_BET_AUTHORITY'})
+    # Holdout is examined ONLY after discovery thresholds, atom directions,
+    # full tested-hypothesis FDR and finalist list have been frozen. Use one
+    # independent physical game per exact rule, and Holm/BH correction across
+    # every held-out finalist (including those that fail the first screen).
+    cert=_certified_fields()
+    for h in report:
+        ho=h['confirmation_all']
+        n=int(ho.get('unambiguous_games',0)); wins=int(ho.get('unambiguous_wins',0))
+        h['confirmation_unambiguous_n']=n
+        h['confirmation_unambiguous_wins']=wins
+        h['confirmation_p_above_minus110']=_exact_binomial_upper_tail(wins,n,REFERENCE_MINUS110_BREAKEVEN)
+    qvals=_bh([h['confirmation_p_above_minus110'] for h in report])
+    promotions=[]; blocked_pit=0; evidence_pass=0
+    for h,q in zip(report,qvals):
+        h['confirmation_fdr_q']=float(q)
+        h['pit_field_attestations']={str(x['source_field']):cert.get(str(x['source_field']))
+                                     for x in h['auto_atom_specs']}
+        h['pit_certified']=bool(h['auto_atom_specs']) and all(
+            x['source_field'] in cert for x in h['auto_atom_specs'])
+        h['confirmation_unique_games']=bool(
+            h['confirmation_all'].get('ambiguous_games',0)==0)
+        h['holdout_fdr_pass']=bool(float(q)<=HOLDOUT_FDR_Q)
+        h['statistical_pass']=bool(
+            h['confirmation_screen_pass'] and h['confirmation_unique_games']
+            and h['confirmation_unambiguous_n']>=MIN_CONFIRM_N
+            and h['confirmation_all'].get('rate') is not None
+            and h['confirmation_all']['rate']>=MIN_CONFIRM_RATE
+            and h['holdout_fdr_pass'])
+        if h['statistical_pass']:
+            evidence_pass+=1
+            if not h['pit_certified']:
+                blocked_pit+=1
+        h['authority_ready']=bool(h['statistical_pass'] and h['pit_certified'])
+        h['authority_block_reason']=(
+            'STATISTICAL_OR_HOLDOUT_EVIDENCE_INSUFFICIENT' if not h['statistical_pass'] else
+            'PIT_LINEAGE_NOT_CERTIFIED' if not h['pit_certified'] else 'READY_FOR_EXACT_LIVE_EVALUATION')
+        if h['authority_ready']:
+            promotions.append({
+                'mechanism_id':h['mechanism_id'], 'market':'spreads',
+                'representative_system_id':h['mechanism_id'],
+                'member_system_ids':[h['mechanism_id']], 'member_count':1,
+                'miner_lane':'DEEP_CFBD_AUTO','representative_conditions':h['conditions'],
+                'direction':h['direction'], 'families':h['families'],
+                # All deep CFBD patterns count as at most one independent family
+                # when supporting a CORE candidate, avoiding false multiple votes.
+                'evidence_family_key':'NCAAF_CFBD_DEEP_DISCOVERY_FAMILY',
+                'auto_atom_specs':h['auto_atom_specs'],
+                'auto_atom_fields':[a['source_field'] for a in h['auto_atom_specs']],
+                'confirmation_n':h['confirmation_unambiguous_n'],
+                'confirmation_rate':h['confirmation_all']['rate'],
+                'confirmation_pass':True,
+                'deep_cfbd_validation_pass':True,
+                'deep_cfbd_pit_certified':True,
+                'deep_cfbd_holdout_fdr_pass':True,
+                'deep_cfbd_exact_live_atoms_available':True, # checked again in live eval
+                'deep_cfbd_unique_games_confirmed':True,
+                'discovery_n':h['discovery_games'], 'discovery_rate':h['discovery_rate'],
+                'deep_cfbd_holdout_q':float(q),
+                'authority_state':'STRONG_VALIDATED',
+                'live_authority_eligible':True,
+                'current_qualified':True,
+                'production_authority':0,
+            })
     count_by_reject = Counter(z['admission'] for z in inventory)
     output = {'status':'PASS', 'version':VERSION, 'market':'spreads',
               'source':'ALL_NAME_SCREENED_PRE2024_CFBD_FIELDS__SHADOW',
@@ -411,14 +551,20 @@ def run_deep_cfbd_challenger(games: pd.DataFrame, seasons: np.ndarray,
               'feature_inventory':inventory, **counts, **audit_stats,
               'shortlisted_systems':len(shortlist),
               'holdout_screen_pass':sum(x['confirmation_screen_pass'] for x in report),
+              'statistical_authority_pass':evidence_pass,
+              'blocked_pit_count':blocked_pit,
+              'authority_ready_count':len(promotions),
+              'auto_qualified_mechanisms':promotions,
               'top_hypotheses':report,
               'search_depth_cap':max_depth,
               'pvalue_policy':'TWO_SIDED_DISCOVERY_BH_FDR_ALL_EVALUATED__UNIQUE_PHYSICAL_GAMES',
-              'validation_policy':'2024_2025_SEALED__NOT_LIVE_PIT_CERTIFIED__PROSPECTIVE_REQUIRED',
+              'validation_policy':'2024_2025_SEALED__HOLDOUT_FDR__PIT_CERTIFICATION_REQUIRED',
               'core_policy':'OOF_CORE_EDGE_IF_PRESENT__DESCRIPTIVE_CONDITIONAL_LIFT_NOT_CAUSAL',
-              'production_authority':0,'automatic_promotion':False,
+              'production_authority':0,'automatic_promotion':True,
+              'promotion_policy':'60_UNAMBIGUOUS_GAMES__53PCT_MIN__HOLDOUT_BH_FDR_Q10__PIT_CERTIFICATE__EXACT_LIVE_ATOMS',
               'selection_influence':0}
-    log_func('[NCAAF-DEEP-CFBD] status=PASS columns=%d admit=%d tested=%d max_depth=%d shortlisted=%d holdout_screen=%d authority=0' %
+    log_func('[NCAAF-DEEP-CFBD] status=PASS columns=%d admit=%d tested=%d max_depth=%d shortlisted=%d holdout_screen=%d evidence_pass=%d blocked_pit=%d auto_ready=%d' %
              (len(inventory), len(output['features_admitted']), counts['tested_hypotheses'],
-              max_depth, len(shortlist), output['holdout_screen_pass']))
+              max_depth, len(shortlist), output['holdout_screen_pass'], evidence_pass,
+              blocked_pit,len(promotions)))
     return output
