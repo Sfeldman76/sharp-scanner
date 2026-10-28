@@ -6010,6 +6010,24 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         for _pb in (behavior.get("top_confirmed") or [])[:8]:
             log_func(f"[NCAAF-RV2182-PREDICTOR-TOP] predictor={_pb.get('predictor')} behavior={_pb.get('behavior')} state={_pb.get('state')} discovery={_pb.get('discovery_rate')}/{_pb.get('discovery_n')} confirmation={_pb.get('confirmation_rate')}/{_pb.get('confirmation_n')} meta_constituent={str(bool(_pb.get('meta_constituent',False))).upper()} source_cluster={_pb.get('source_cluster')} authority=0")
     if valid.sum()<500: out["status"]="INSUFFICIENT_HISTORY"; return out
+    # Deep CFBD discovery challenger. Heavy Research inventories ALL CFBD fields,
+    # screens historical/PIT eligibility, and tests up to six independent
+    # conditions combining pregame CFBD + ATS/opponent/rivalry/conference context.
+    # ISOLATION CONTRACT: shadow-only report, never inserted into `atoms`,
+    # `finalists`, `mechanism_families`, or published live authority library.
+    # Existing production Miner discovery and live voting remain unchanged.
+    if market == "spreads" and os.getenv("NCAAF_MINER_DEEP_CFBD", "1").strip().lower() not in {"0", "off", "false", "no"}:
+        try:
+            from ncaaf_miner_deep_cfbd_v1 import run_deep_cfbd_challenger
+            out["deep_cfbd_shadow"] = run_deep_cfbd_challenger(
+                games, seasons, atoms, log_func=log_func,
+                max_depth=min(6,max(5,int(os.getenv("NCAAF_MINER_DEEP_MAX_DEPTH","6"))))
+            )
+        except Exception as _deep_exc:
+            out["deep_cfbd_shadow"] = {"status":"ERROR_RESEARCH_ONLY",
+                                       "exception":f"{type(_deep_exc).__name__}:{_deep_exc}",
+                                       "production_authority":0}
+            log_func(f"[NCAAF-DEEP-CFBD] status=ERROR_RESEARCH_ONLY error={type(_deep_exc).__name__}:{_deep_exc} authority=0")
 
     # Entire candidate universe shares these prices. Only H2H needs the cache;
     # keep it scoped to this invocation so 2026 or live frame changes cannot
