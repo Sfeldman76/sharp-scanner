@@ -7719,6 +7719,19 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
                            {'lookup':_conference_table_diag,**_verified_conference_diag})
     except Exception:
         _live_logging.exception('[NCAAF-MINER-VERIFIED-CONFERENCE-RESTORE] status=ERROR_FAIL_CLOSED')
+    # Miner advanced-as-of recovery: never use an earlier game's shift(1)
+    # metric as this week's current prior. Replay source game observations
+    # against frozen historical pregame columns and only publish definitions
+    # that match exactly. Other rules remain blocked with explicit reasons.
+    try:
+        from ncaaf_miner_advanced_asof_v1 import restore_advanced_asof
+        _advanced_prior=_CFBD_MINER_CONTEXT_CACHE.get(_ck) if '_ck' in locals() else None
+        cdf,_advanced_diag=restore_advanced_asof(
+            cdf,_advanced_prior,team_key=_pt_team_key)
+        _live_logging.info('[NCAAF-MINER-ADVANCED-ASOF-RESTORE] %s',
+                           json.dumps(_advanced_diag,sort_keys=True,default=str))
+    except Exception:
+        _live_logging.exception('[NCAAF-MINER-ADVANCED-ASOF-RESTORE] status=ERROR_FAIL_CLOSED')
     cdf,_situational_live_diag=_attach_h2h_rivalry_travel_context(dashboard_module,cdf,log_func=lambda *a,**k:None,for_live=True)
     cdf,_pt_live_diag=_pt_attach_current_live_frame(cdf,dashboard_module=dashboard_module)
     registry=report.get("system_miner_v3") or {}
