@@ -8621,6 +8621,24 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         if historic.sum()<500: raise RuntimeError(f"insufficient <=2025 history n={int(historic.sum())}")
         g=games.loc[historic].reset_index(drop=True); mg=miner_games.loc[historic].reset_index(drop=True); sy=seasons[historic]; om=oof_margin[historic]; ot=oof_total[historic]
         log_func(f"[NCAAF-RV232-PREFLIGHT] source={NCAAF_RESEARCH_V2_SOURCE_TAG} rows={len(g)} seasons={sorted(set(sy.astype(int)))} discovery<=2023 confirmation=2024,2025 prospective>=2026 production_authority=0")
+        # Research-field audit: compare the actual STAT/CORE feature registry
+        # with the richer, independently joined Miner feature matrix.
+        # Diagnostics never mutate data or promote a feature/candidate.
+        try:
+            from ncaaf_research_feature_audit_v1 import audit_research_feature_lineage
+            research_feature_lineage_audit = audit_research_feature_lineage(
+                g, mg, sy, cols, log_func=log_func)
+            from ncaaf_research_feature_audit_v1 import audit_stat_family_caps
+            research_feature_lineage_audit['stat_family_caps'] = audit_stat_family_caps(
+                cols, STAT_FAMILY_TOKENS, sparse_candidates=SPARSE_STAT_CANDIDATES,
+                core_frame=g, log_func=log_func)
+        except Exception as _feature_audit_exc:
+            research_feature_lineage_audit = {
+                "summary": {"status":"AUDIT_ERROR",
+                    "error":f"{type(_feature_audit_exc).__name__}:{_feature_audit_exc}",
+                    "policy":"DIAGNOSTIC_ONLY_NO_AUTHORITY"},"fields":[]}
+            log_func("[NCAAF-RESEARCH-FEATURE-LINEAGE] "+json.dumps(
+                research_feature_lineage_audit["summary"],sort_keys=True))
         # Complement the existing market-error STAT research with a separate,
         # chronological all-season score foundation. The original market-only
         # lane intentionally still needs authentic opening prices.
@@ -8898,6 +8916,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "system_library_inventory":system_library_inventory,"system_library_change_audit":system_library_change_audit,"incumbent_system_library_audit":incumbent_system_library_audit,
                 "context_family_cap_audit":context_family_cap_audit,
                 "miner_exact_path_shadow_audit":miner_exact_path_shadow_audit,
+                "research_feature_lineage_audit":research_feature_lineage_audit,
                 "historical_state_context_bridge":historical_state_context_bridge,
                 "deep_context_bridge":deep_context_bridge,
                 "cfbd_context_bridge":cfbd_context_bridge,
@@ -8912,6 +8931,17 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,
                 "v55_automatic_brain_registry_audit":_v55_brain_audit,
                 "miner_threshold_neighborhood":miner_threshold_neighborhood,"incumbent_system_library_audit":incumbent_system_library_audit,"deep_context_bridge":deep_context_bridge,"cfbd_context_bridge":cfbd_context_bridge,"big_al_observation_research":big_al_observation_research,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
+        # Separate read-only lineage artifact for per-season feature coverage.
+        # Failure to publish diagnostics cannot mutate research selection or CORE.
+        try:
+            _feature_path="research/ncaaf/v2/feature_lineage_latest.json"
+            b.blob(_feature_path).upload_from_string(
+                json.dumps(research_feature_lineage_audit,sort_keys=True,default=str),
+                content_type="application/json")
+            log_func("[NCAAF-RESEARCH-FEATURE-AUDIT-ARTIFACT] gs://"+str(bucket_name)+"/"+_feature_path)
+        except Exception as _audit_pub_exc:
+            log_func("[NCAAF-RESEARCH-FEATURE-AUDIT-ARTIFACT] FAILED "+
+                f"{type(_audit_pub_exc).__name__}:{_audit_pub_exc}")
         body=json.dumps(_report_without_models(report),sort_keys=True,separators=(",",":"),default=str).encode()
         sha=hashlib.sha256(body).hexdigest(); hist=f"{REPORT_HISTORY_PREFIX}/{sha[:16]}/report.json"
         b.blob(hist).upload_from_string(body,content_type="application/json"); b.blob(REPORT_CURRENT_BLOB).upload_from_string(body,content_type="application/json")
