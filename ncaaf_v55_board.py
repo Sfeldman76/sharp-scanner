@@ -1722,6 +1722,27 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
         })
     updated['v55_per_bet_frozen_evidence_audit']=_bet_evidence_report
     log('[NCAAF-V55-PRODUCTION-BET-EVIDENCE] '+json.dumps(_bet_evidence_report,sort_keys=True))
+    # Evidence health is a READ-ONLY production ledger. It never converts
+    # raw Big Al, Pathi, PT or STAT triggers into qualified betting votes.
+    # Preserve the existing CORE/policy output and report exact source gaps.
+    try:
+        from ncaaf_v55_evidence_health_v1 import audit_v55_production_evidence
+        evidence_health = audit_v55_production_evidence(
+            out,live_system_rows,miner_registry=registry,other_registry=other_registry,
+            other_registry_problem=other_registry_problem,
+            miner_bridge=miner_audit,other_bridge=other_audit)
+        updated['v55_evidence_layer_health']=evidence_health
+        compact={k:v for k,v in evidence_health.items() if k!='trace'}
+        log('[NCAAF-V55-EVIDENCE-LAYER-HEALTH] '+json.dumps(compact,sort_keys=True))
+        log('[NCAAF-V55-EVIDENCE-CANDIDATE-TRACE] '+json.dumps(evidence_health['trace'],sort_keys=True))
+        if evidence_health['violations']:
+            raise RuntimeError('V55_EVIDENCE_INTEGRITY_VIOLATION:'+str(evidence_health['violations'][:2]))
+    except ImportError:
+        # When a partial GitHub deployment omits the helper, legacy V5.5
+        # continues without any new votes, but missing audit is visible.
+        updated['v55_evidence_layer_health']={'status':'HELPER_NOT_DEPLOYED','changes_betting_authority':False}
+        log('[NCAAF-V55-EVIDENCE-LAYER-HEALTH] status=HELPER_NOT_DEPLOYED')
+
     # V7 independently shops existing backend bookmaker quotes. The V5.5
     # authorized price and policy are IMMUTABLE at this stage.
     try:
