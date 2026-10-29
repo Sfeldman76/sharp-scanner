@@ -268,7 +268,7 @@ np.random.seed(GLOBAL_SEED)
 
 
 # === Constants and Config ===
-API_KEY = os.environ.get("ODDS_API_KEY", "")
+API_KEY = "3879659fe861d68dfa2866c211294684"
 #FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
 REDIRECT_URI = "https://sharp-scanner-723770381669.us-east4.run.app/"  # no longer used for login, just metadata
 
@@ -48771,640 +48771,6 @@ def _ncaaf_authority_source_detail(row, source_type, raw_col=None):
     return " | ".join(dict.fromkeys(parts)) if parts else "—"
 
 
-@st.cache_data(ttl=90,show_spinner=False)
-def _ncaaf_v551_weekly_snapshot_cached():
-    """Read only the complete V5.5 BigQuery publication from background/weekly.
-
-    No model inference, no GCS artifact-scoring, no V1 bridge on dashboard load.
-    """
-    from ncaaf_v55_board import read_published_latest
-    return read_published_latest(bq_client=bq_client)
-
-
-def _ncaaf_v55_quote_coverage(frame, audit):
-    """Presentation-only reconciliation of published V5.5 quote coverage.
-
-    Does not score, select sides, calculate odds/edges, or change bet authority.
-    The backend audit counts are publication-scoped, not all-season forecasts.
-    Derive from immutable published Quote_State to defend against older audit
-    fields where no_market_match was incorrectly the entire forecast count.
-    """
-    import pandas as pd
-    states = frame.get('Quote_State',pd.Series('',index=frame.index)).fillna('').astype(str)
-    verified = states.isin((
-        'FRESH_TWO_SIDED_BACKEND_PRICE_NO_SELECTED_TEAM',
-        'FRESH_TWO_SIDED_BACKEND_PRICE_RESEARCH_SIDE',
-        'FRESH_VERIFIED_SELECTED_SIDE_BACKEND_SPREAD'))
-    eligible = audit.get('upcoming_forecast_rows')
-    if eligible is None:
-        # Older market bridge audit: scope window to the publication timestamp.
-        published = pd.to_datetime(audit.get('published_at_utc'),utc=True,errors='coerce')
-        if pd.isna(published):
-            return {'eligible':None,'priced':int(verified.sum()),'unmatched':None,
-                    'outside':None,'uncertain':True}
-        kick = pd.to_datetime(frame.get('Game_Start_UTC',pd.Series(index=frame.index,dtype='object')),
-                              utc=True,errors='coerce')
-        eligible = int((kick.gt(published) & kick.le(published+pd.Timedelta(days=14))).sum())
-    eligible = max(0,int(eligible))
-    # Backend snapshot records may include other quote states in later versions.
-    priced = int(audit.get('priced_games',int(verified.sum())) or 0)
-    if int(verified.sum()) != priced:
-        priced = int(verified.sum())
-    unmatched = max(0,eligible-priced)
-    outside = max(0,len(frame)-eligible)
-    return {'eligible':eligible,'priced':priced,'unmatched':unmatched,
-            'outside':outside,'uncertain':False}
-
-
-def _ncaaf_v55_market_display_columns(frame):
-    """Display paired sportsbook lines without inventing a CORE wager.
-
-    Quote_State and Backend_* are the only inputs for market availability.
-    Selected_Team is a model decision, not proof of whether a market exists.
-    This function never changes the underlying quote, projection, or bet.
-    """
-    import pandas as pd
-    out=frame.copy()
-    def _as_str(value):
-        if value is None or pd.isna(value):
-            return ""
-        return str(value).strip()
-    def _line(value):
-        n=pd.to_numeric(value,errors='coerce')
-        return f'{float(n):+.1f}' if pd.notna(n) else ''
-    def _odds(value):
-        n=pd.to_numeric(value,errors='coerce')
-        return f'{float(n):+.0f}' if pd.notna(n) else ''
-    def _row(r):
-        state=_as_str(r.get('Quote_State'))
-        if not state.startswith('FRESH_'):
-            return pd.Series({'Sportsbook Market':'NO VERIFIED CURRENT MARKET',
-                              'CORE Selection Status':'NO CURRENT MARKET'})
-        match=_as_str(r.get('Matchup'))
-        parts=match.split(' @ ',1)
-        away,home=(parts[0],parts[1]) if len(parts)==2 else ('Away','Home')
-        h,a=(_line(r.get('Backend_Home_Spread')),_line(r.get('Backend_Away_Spread')))
-        hp,ap=(_odds(r.get('Backend_Home_Odds_American')),
-               _odds(r.get('Backend_Away_Odds_American')))
-        if h and a:
-            market=f'{away} {a}' + (f' ({ap})' if ap else '') +                    f' | {home} {h}' + (f' ({hp})' if hp else '')
-        else:
-            sel=_as_str(r.get('Selected_Team'))
-            line=_line(r.get('Current_Spread'))
-            market=(f'{sel} {line}' if sel and line else 'PRICE MATCHED; PAIR UNAVAILABLE')
-        side=_as_str(r.get('Selected_Team'))
-        if side and side.upper()!='NO CORE PICK':
-            status='CORE RESEARCH SIDE: '+side
-        else:
-            reason=_as_str(r.get('V55_Research_Decision'))
-            labels={
-                'MODEL_ONLY__NO_POSITIVE_RAW_EV':'no positive estimated EV (uncalibrated)',
-                'CORE_DISTRIBUTION_OR_IDENTITY_NOT_VERIFIED':'missing CORE margin / residual SD / identity',
-                'UNVERIFIED_CORE_MODEL':'CORE model provenance not verified',
-                'NO_VERIFIED_TWO_SIDED_QUOTE':'paired spread or price not verified',
-                'INCONSISTENT_SIDES':'home and away lines inconsistent',
-            }
-            status='NO CORE PICK: '+labels.get(reason,reason or 'research decision not provided')
-        return pd.Series({'Sportsbook Market':market,'CORE Selection Status':status})
-    if out.empty:
-        out['Sportsbook Market']=pd.Series(dtype='object')
-        out['CORE Selection Status']=pd.Series(dtype='object')
-        return out
-    values=out.apply(_row,axis=1)
-    out[['Sportsbook Market','CORE Selection Status']]=values
-    return out
-
-
-# V5.5 SYSTEM-LIBRARY VIEW. UI metadata only; never an authority source.
-def _ncaaf_v55_history_inventory(report):
-    """Flatten the original NCAAF V2 historic Miner and expert records.
-
-    Every historical number is taken from the published source report. No live
-    2026 outcomes, UI model scoring or inferred W/L records are introduced.
-    """
-    entries=[]
-    if not isinstance(report,dict): return entries
-    for market,group in (report.get('system_miner_v3') or {}).items():
-        if not isinstance(group,dict): continue
-        for rule in group.get('mechanism_families') or []:
-            if not isinstance(rule,dict): continue
-            mid=str(rule.get('mechanism_id') or '').strip()
-            if not mid: continue
-            cond=rule.get('representative_conditions') or []
-            if isinstance(cond,str):cond=[cond]
-            attr=rule.get('attribution') or {}
-            entries.append({'Source':'Miner','Market':str(market).upper(),
-                'System ID':mid,'Rule':' AND '.join(str(x) for x in cond) or str(attr.get('rule') or 'Rule not published'),
-                'Status':str(rule.get('authority_state') or rule.get('evidence_level') or 'UNSPECIFIED'),
-                'Qualified':rule.get('live_authority_eligible') is True,
-                'Discovery N':rule.get('discovery_n'),'Discovery W-L':'—',
-                'Discovery Hit':rule.get('discovery_rate'),
-                'Confirm N':rule.get('confirmation_n'),'2024–25 W-L':'—',
-                'Confirm Hit':rule.get('confirmation_rate'),
-                'Confirmation Pass':rule.get('confirmation_pass'),
-                'Family':str(rule.get('evidence_family_key') or ''),
-                '_detail':rule,'_history':attr.get('season_breakdown') or [],
-            })
-    for k,rule in enumerate(((report.get('published_system_results') or {}).get('systems') or [])):
-        if not isinstance(rule,dict): continue
-        source=str(rule.get('source') or 'EXPERT').strip().upper()
-        if 'PATHI' in source:source='Pathi'
-        elif 'BIG' in source:source='Big Al'
-        else:source=source.title()
-        discovery=rule.get('discovery') or {};confirm=rule.get('confirmation') or {}
-        entries.append({'Source':source,'Market':str(rule.get('market') or 'SPREADS').upper(),
-            'System ID':str(rule.get('system_id') or rule.get('system') or rule.get('label') or f'{source}-{k+1}'),
-            'Rule':str(rule.get('label') or rule.get('system') or rule.get('rule') or 'Not published'),
-            'Status':str(rule.get('status') or 'RESEARCH'), 'Qualified':False,
-            'Discovery N':discovery.get('n'),
-            'Discovery W-L':(f"{discovery['wins']}-{discovery['losses']}" if 'wins' in discovery and 'losses' in discovery else '—'),
-            'Discovery Hit':discovery.get('hit_rate'),
-            'Confirm N':confirm.get('n'),
-            '2024–25 W-L':(f"{confirm['wins']}-{confirm['losses']}" if 'wins' in confirm and 'losses' in confirm else '—'),
-            'Confirm Hit':confirm.get('hit_rate'),
-            'Confirmation Pass':rule.get('confirmation_pass'),
-            'Family':str(rule.get('parent') or ''),
-            '_detail':rule,'_history':rule.get('by_season') or [],
-        })
-    return entries
-
-
-@st.cache_data(ttl=300,show_spinner=False)
-def _ncaaf_v55_research_display_report_cached():
-    """Read the PREVIOUS NCAAF research artifact only when the user opens history.
-
-    A report from the older version remains useful for display even when the
-    strict current-version validation rejects it for production qualification.
-    """
-    try:
-        from google.cloud import storage as _v55_storage
-        import ncaaf_research_v2 as _v55_res
-        _client=_v55_storage.Client()
-        _report,_check=_v55_res.load_current_report_diagnostic(
-            bucket_name=GCS_BUCKET,storage_client=_client)
-        if isinstance(_report,dict):return _report,'CURRENT_REPORT'
-        _blob=_client.bucket(GCS_BUCKET).blob(
-            getattr(_v55_res,'REPORT_CURRENT_BLOB','research/ncaaf/v2/current_report.json'))
-        _raw=json.loads(_blob.download_as_text())
-        if (isinstance(_raw,dict)
-            and str(_raw.get('source_tag') or '').startswith('ncaaf-research-v2.')
-            and isinstance(_raw.get('system_miner_v3'),dict)):
-            return _raw,'LEGACY_REPORT_DISPLAY_ONLY'
-        return None,'INVALID_HISTORICAL_REPORT'
-    except Exception as _exc:
-        return None,type(_exc).__name__+':'+str(_exc)[:180]
-
-
-def _ncaaf_v55_historical_systems_view(active_system_ids=None):
-    """Restore old per-system and per-season research drilldown, on click."""
-    report,status=_ncaaf_v55_research_display_report_cached()
-    if not isinstance(report,dict):
-        st.warning('Historical NCAAF system report unavailable: '+str(status))
-        return
-    records=_ncaaf_v55_history_inventory(report)
-    active_ids=set(active_system_ids or [])
-    for rec in records: rec['Active Now']=rec['System ID'] in active_ids
-    records.sort(key=lambda r:(not r['Active Now'],r['Source'],r['System ID']))
-    st.caption('Source: original NCAAF V2 historical report. '+str(status)+
-       '. These are archived research results, NOT additional V5.5 betting votes. '+
-       '2026 results must never be used to qualify historical systems.')
-    if not records:
-        st.info('The saved research report contains no individual Miner / Big Al / Pathi system records.')
-        return
-    sources=sorted({x['Source'] for x in records})
-    markets=sorted({x['Market'] for x in records})
-    c1,c2,c3=st.columns(3)
-    source=c1.selectbox('Historical source',['All']+sources,key='v55-history-source')
-    market=c2.selectbox('Historical market',['All']+markets,key='v55-history-market')
-    status_filter=c3.selectbox('Historical status',['All','Qualified','Other'],key='v55-history-status')
-    needle=st.text_input('Find a system / rule / ID',key='v55-history-search').strip().lower()
-    matches=[]
-    for rec in records:
-        if source!='All' and rec['Source']!=source:continue
-        if market!='All' and rec['Market']!=market:continue
-        if status_filter=='Qualified' and not rec['Qualified']:continue
-        if status_filter=='Other' and rec['Qualified']:continue
-        if needle and needle not in ' '.join(str(rec.get(c) or '') for c in
-            ('Source','System ID','Rule','Family','Status')).lower():continue
-        matches.append(rec)
-    st.caption(f'{len(matches)} systems shown / {len(records)} historical records available')
-    if not matches:
-        st.info('No historical systems match these filters.')
-        return
-    # Only research metadata goes into this table; nested histories are opened
-    # below by selection instead of rendering hundreds of expander widgets.
-    inv=pd.DataFrame([{k:v for k,v in rec.items() if not k.startswith('_')}
-                     for rec in matches])
-    for field in ('Discovery Hit','Confirm Hit'):
-        inv[field]=pd.to_numeric(inv[field],errors='coerce').map(
-            lambda x:f'{x:.1%}' if pd.notna(x) else '—')
-    st.dataframe(inv,use_container_width=True,hide_index=True)
-    options=list(range(len(matches)))
-    choose=st.selectbox('Open a system’s full historical record',options,
-        format_func=lambda idx:(f"{matches[idx]['Source']} | {matches[idx]['System ID']} | "
-            f"{matches[idx]['Rule'][:90]}"),key='v55-history-selected-record')
-    rec=matches[choose]
-    with st.expander(f"History: {rec['System ID']} — {rec['Rule'][:100]}",expanded=True):
-        st.write({k:v for k,v in rec.items() if not k.startswith('_')})
-        raw=rec['_detail'];hist=rec['_history']
-        if isinstance(hist,dict):
-            hist=[dict(season=k,**v) if isinstance(v,dict) else {'season':k,'result':v}
-                  for k,v in hist.items()]
-        if hist:
-            st.markdown('**Season-by-season history**')
-            st.dataframe(pd.DataFrame(hist),use_container_width=True,hide_index=True)
-        if isinstance(raw.get('discovery_seasons'),list) or isinstance(raw.get('confirmation'),list):
-            for label,key in [('Discovery seasons','discovery_seasons'),
-                              ('Internal validation','internal_validation'),
-                              ('Frozen confirmation — 2024 and 2025','confirmation')]:
-                period=raw.get(key)
-                if isinstance(period,list) and period:
-                    st.markdown('**'+label+'**')
-                    st.dataframe(pd.DataFrame(period),use_container_width=True,hide_index=True)
-        if not hist and (isinstance(raw.get('discovery'),dict) or isinstance(raw.get('confirmation'),dict)):
-            st.markdown('**Discovery / 2024–2025 confirmation**')
-            st.json({'discovery':raw.get('discovery') or {},
-                     'confirmation':raw.get('confirmation') or {}})
-        else:
-            st.caption('No per-season breakdown is published for this system.')
-        st.markdown('**Full source research record**')
-        st.json(raw,expanded=False)
-
-
-# V55_NFL_PARITY_REAL_WEEKLY_BOARD_20261027
-# The separate Production V1 board already has NFL parity; this function is
-# deliberately attached to the V5.5 published-board renderer instead.
-_NCAAF_V55_NFL_BOARD_COLUMNS = [
-    'Game Time','Matchup',
-    'Spr Action','Spr Pick','Spr Prob','Spr Model Edge',
-    'H2H Action','H2H Pick','H2H Prob','H2H Model Edge',
-    'Tot Action','Tot Pick','Tot Prob','Tot Model Edge',
-    'Production Plays','Pathi State','Pathi Overlay','Edge Sources','System Trigger',
-]
-
-
-def _ncaaf_v55_nfl_parity_display(weekly_rows):
-    """Format V5.5 BACKEND PUBLISHED spread signals in the NFL's 19 columns.
-
-    Current V5.5 publishes only spreads. H2H and totals remain unavailable,
-    rather than showing V1 scores or inventing V5.5 market predictions.
-    Authority, quote, CORE model probability and named-system certification
-    are read from the published backend fields; none are decided in the UI.
-    """
-    import pandas as pd
-    import numpy as np
-    out=[]
-    blank='—'
-
-    def _text(x):
-        if x is None:
-            return ''
-        try:
-            if pd.isna(x):return ''
-        except (ValueError,TypeError):
-            pass
-        v=str(x).strip()
-        return '' if v.lower() in ('nan','none','null','nat') else v
-
-    def _number(x):
-        # Published rows may already be %- and spread-formatted for display.
-        try:
-            raw=_text(x).replace(',','').replace('%','').replace('pts','').strip()
-            return float(raw) if raw and raw not in ('—','-') else np.nan
-        except (ValueError,TypeError):
-            return np.nan
-
-    def _prob(x):
-        raw=_text(x)
-        v=_number(x)
-        if not np.isfinite(v) or v<0:
-            return blank
-        p=v if '%' in raw or v>1 else 100*v
-        return f'{p:.1f}%' if 0<=p<=100 else blank
-
-    def _is_real(x):
-        return bool(x) and x.upper() not in (
-            '—','NONE_REPORTED','NOT_PUBLISHED','NOT_EVALUABLE','N/A','UNAVAILABLE')
-
-    def _families(x):
-        v=_text(x).upper()
-        # Exact family tokens; no substring match on unrelated names.
-        return set(q.strip() for q in __import__('re').split(r'[|,;]+',v)
-                   if q.strip() and q.strip() not in ('—','NONE','NOT_PUBLISHED'))
-
-    for _,r in weekly_rows.iterrows():
-        kickoff=pd.to_datetime(r.get('Game_Start_UTC'),utc=True,errors='coerce')
-        game_time=(kickoff.tz_convert('America/New_York').strftime('%a %I:%M %p')
-                   if pd.notna(kickoff) else blank)
-        matchup=_text(r.get('Matchup')) or blank
-        teams=matchup.split(' @ ',1)
-        away,home=(teams[0].strip(),teams[1].strip()) if len(teams)==2 else ('','')
-        side=_text(r.get('Selected_Team'))
-        has_side=bool(side and side.upper() not in ('NO CORE PICK','—'))
-        quote_state=_text(r.get('Quote_State'))
-        has_quote=quote_state.startswith('FRESH_')
-        selected_valid=has_side and has_quote
-        action=_text(r.get('V55_Bet_Decision')) or '—'
-        if not has_quote:
-            action='NO VERIFIED PRICE'
-        if not has_side and has_quote and action in ('BET','STRONG BET','CANDIDATE'):
-            # Do not present an incoherent wager when no side was published.
-            action='NO CORE PICK'
-
-        # Only cite the published selected side's odds and line. Fallback to the
-        # matching paired BACKEND quote if the selected-side price is absent.
-        spread=_number(r.get('Current_Spread'))
-        odds=_number(r.get('Odds_American'))
-        if selected_valid and (not np.isfinite(spread) or not np.isfinite(odds)):
-            side_key=side.casefold()
-            if home and side_key==home.casefold():
-                if not np.isfinite(spread):spread=_number(r.get('Backend_Home_Spread'))
-                if not np.isfinite(odds):odds=_number(r.get('Backend_Home_Odds_American'))
-            elif away and side_key==away.casefold():
-                if not np.isfinite(spread):spread=_number(r.get('Backend_Away_Spread'))
-                if not np.isfinite(odds):odds=_number(r.get('Backend_Away_Odds_American'))
-        spr_pick=blank
-        if selected_valid:
-            spr_pick=side
-            if np.isfinite(spread):spr_pick+=f' {spread:+.1f}'
-            if np.isfinite(odds):spr_pick+=f' ({odds:+.0f})'
-
-        spr_prob=blank
-        if selected_valid:
-            for field in ('V55_Policy_Win_Prob','CORE_Cover_Probability','V55_Raw_Cover_Prob'):
-                spr_prob=_prob(r.get(field))
-                if spr_prob!=blank:break
-
-        # The published side-aligned projected cover-points are authoritative
-        # for display. If absent, translating the published CORE home margin
-        # into the SAME quoted side's points is a presentation-only identity;
-        # no new betting edge, probability or model prediction is produced.
-        point_edge=np.nan
-        if selected_valid and np.isfinite(spread):
-            point_edge=_number(r.get('CORE_Project_Cover_Points'))
-            if not np.isfinite(point_edge):
-                home_margin=_number(r.get('CORE_Projected_Home_Margin'))
-                if np.isfinite(home_margin):
-                    if side.casefold()==home.casefold() and home:
-                        point_edge=home_margin+spread
-                    elif side.casefold()==away.casefold() and away:
-                        point_edge=-home_margin+spread
-        edge_display=f'{point_edge:+.2f} pts' if np.isfinite(point_edge) else blank
-
-        support=_families(r.get('Confirm_Families'))
-        oppose=_families(r.get('Oppose_Families'))
-        raw_pathi=_text(r.get('V55_Raw_Pathi'))
-        pathi_support='PATHI' in support
-        pathi_oppose='PATHI' in oppose
-        pathi_state=('MIXED' if pathi_support and pathi_oppose else
-                     'SUPPORT' if pathi_support else 'CONFLICT' if pathi_oppose else
-                     'TRACK' if _is_real(raw_pathi) else blank)
-        qualified_rules=_text(r.get('V55_Active_System_Rules'))
-        active_systems=_text(r.get('V55_Active_System_Names'))
-        system_trigger=(qualified_rules if _is_real(qualified_rules) else
-                        active_systems if _is_real(active_systems) else blank)
-        support_txt=', '.join(sorted(support))
-        oppose_txt=', '.join(sorted(oppose))
-        edge_sources=' | '.join([label for label in (
-            f'SUPPORT: {support_txt}' if support_txt else '',
-            f'OPPOSE: {oppose_txt}' if oppose_txt else '') if label]) or blank
-        active_bet=selected_valid and action in ('BET','STRONG BET')
-        plays=(f'Spr: {spr_pick}' if active_bet else blank)
-
-        out.append({
-            'Game Time':game_time,'Matchup':matchup,
-            'Spr Action':action,'Spr Pick':spr_pick,'Spr Prob':spr_prob,
-            'Spr Model Edge':edge_display,
-            'H2H Action':blank,'H2H Pick':blank,'H2H Prob':blank,'H2H Model Edge':blank,
-            'Tot Action':blank,'Tot Pick':blank,'Tot Prob':blank,'Tot Model Edge':blank,
-            'Production Plays':plays,
-            'Pathi State':pathi_state,
-            'Pathi Overlay':raw_pathi if _is_real(raw_pathi) else blank,
-            'Edge Sources':edge_sources,'System Trigger':system_trigger,
-        })
-    return pd.DataFrame.from_records(out,columns=_NCAAF_V55_NFL_BOARD_COLUMNS)
-
-
-def _render_ncaaf_v551_weekly_board():
-    st.subheader('V5.5 — Backend Published Board')
-    st.caption('V5.5 NONLINEAR_HGB independent CFBD CORE + current sportsbook quotes + STAT, Big Al, Pathi, '
-               'Miner, Prediction Tracker and Market Rich. Owner-directed V5.5 spread betting authority is provisional and risk-capped; '
-               'No V1 scoring or UI model inference. Spread market only until separate '
-               'V5.5 H2H and totals models are deployed.')
-    try:
-        _weekly,_audit=_ncaaf_v551_weekly_snapshot_cached()
-        if _audit.get('status')!='COMPLETE_V55_INDEPENDENT_WEEKLY_SHADOW' or _audit.get('production_v1_probabilities_used') is not False:
-            raise RuntimeError('V5.5 independent CORE not published')
-    except Exception as _exc:
-        st.warning('V5.5 backend publication is unavailable or incomplete. Run V5.5 Weekly, then let the background scanner publish a market refresh. No V1 fallback or UI rescoring is permitted.')
-        logging.warning('[NCAAF-V552-UI-HOLD] %s:%s',type(_exc).__name__,str(_exc)[:250])
-        return
-    _age=pd.Timestamp.now(tz='UTC')-pd.to_datetime(_audit.get('snapshot_utc'),utc=True,errors='coerce')
-    st.caption(f"Backend publication: {_audit.get('published_at_utc','—')} | {_audit.get('publication_type','—')} | {_audit.get('publication_status','—')} | "
-               f"V5.5 CORE snapshot: {_audit.get('snapshot_utc','—')} | "
-               f"Model: {_audit.get('core_model','NONLINEAR_HGB')} | "
-               f"Live scored games: {_audit.get('core_forecast_games',0)} | "
-               'V1: inactive')
-    if pd.notna(_age) and _age.total_seconds()>7*24*3600:
-        st.warning('V5.5 CORE forecast is more than seven days old. Run V5.5 Weekly.')
-    if _audit.get('publication_status')=='STALE_MARKET':
-        st.error('Backend sportsbook quotes are stale. Price/EV/action fields have been withheld until the scanner refreshes.')
-    if int(_audit.get('priced_games',0) or 0)==0:
-        st.warning('V5.5 model projections exist, but the model-to-market join reports zero priced games. No executable betting recommendations are available.')
-    _coverage=_ncaaf_v55_quote_coverage(_weekly,_audit)
-    a,b,c,d=st.columns(4)
-    a.metric('V5.5 CORE games',int(_audit.get('core_forecast_games',len(_weekly))))
-    b.metric('Verified priced games',_coverage['priced'])
-    c.metric('Multiple brain confirmations',int(_audit.get('multi_family',0)))
-    d.metric('Unmatched eligible games',_coverage['unmatched'] if _coverage['unmatched'] is not None else '—')
-    _authorized=int(_audit.get('v55_authorized_bet_rows',0) or 0)
-    _strong=int(_audit.get('v55_strong_bet_rows',0) or 0)
-    _candidates=int(_audit.get('v55_candidate_rows',0) or 0)
-    aa,bb,cc=st.columns(3)
-    aa.metric('V5.5 Authorized Bets',_authorized)
-    bb.metric('Strong Bets',_strong)
-    cc.metric('V5.5 Candidates',_candidates)
-    if _authorized:
-        st.warning('V5.5 historically qualified confirmation policy is ACTIVE. Raw model probabilities '
-                   'have NOT passed independent chronological OOS calibration; bookmaker prices and lines '
-                   'must be rechecked before a wager. The board does not place wagers.')
-    elif _audit.get('v55_authority_policy_status')=='DISABLED_BY_OPERATOR':
-        st.info('V5.5 betting authority is disabled by the backend operator.')
-    if _coverage['eligible'] is not None:
-        st.caption(f"At backend publication: {_coverage['eligible']} games within the 14-day pricing window; "
-                   f"{_coverage['outside']} outside the window. Unmatched counts exclude future games "
-                   "without a current sportsbook market.")
-    else:
-        st.caption('Quote coverage is partially unavailable in this publication; unavailable counts are not assumed to be zero.')
-    _brains=('STAT','BIG_AL','PATHI','SYSTEM_MINER','PREDICTION_TRACKER')
-    _other_brain_diag=_audit.get('long_history_other_brain_bridge') or {}
-    _miner_diag=_audit.get('miner_live_bridge') or {}
-    st.caption('2013–2025 independent research; 2024/2025 frozen confirmation; 2026 results sealed. '
-               'Decision ladder: qualified CORE edge → CANDIDATE; one distinct qualified brain → BET; '
-               'two independent evidence families → STRONG BET; qualified conflict → VETO. '
-               'Names/counts alone cannot grant votes.')
-    st.caption('Verified evidence: Miner '+str(_miner_diag.get('status','NOT_RUN'))+
-               ' · Big Al/Pathi/STAT/PT '+str(_other_brain_diag.get('status','NOT_RUN'))+
-               ' · historical registry '+str(_audit.get('other_brain_registry_status','NOT_RUN')))
-    if not _weekly.empty and all(c in _weekly.columns and _weekly[c].fillna('NOT_EVALUABLE').astype(str).eq('NOT_EVALUABLE').all() for c in _brains):
-        st.info('Independent brain evidence is NOT_EVALUABLE for all published forecasts. '
-                'Zero confirmations means no evaluated confirmations, not zero potentially relevant signals.')
-    _research_n = int(_audit.get('selected_research_sides',0) or 0)
-    _calibrated_n = int(_audit.get('oos_calibrated',0) or 0)
-    if _coverage['priced']:
-        st.caption(f"Independent V5.5 research: {_research_n} provisional positive-normal-EV side leans; "
-                   f"{_calibrated_n} with qualified chronological OOS calibration. "
-                   "Raw probabilities and expected value are UNCALIBRATED when no OOS artifact is qualified; "
-                   f"{_authorized} provisional bets authorized under owner-directed policy.")
-    if _weekly.empty:
-        st.info('No upcoming V5.5 projections in the published backend snapshot.')
-        return
-    shown=_ncaaf_v55_market_display_columns(_weekly)
-    if 'V55_Bet_Authority' in shown.columns:
-        # UI sorting only: all authority/EV decisions were already made backend.
-        shown=shown.sort_values(by=['V55_Bet_Authority'],ascending=False,kind='stable')
-    if 'Game_Start_UTC' in shown.columns:
-        _start=pd.to_datetime(shown['Game_Start_UTC'],errors='coerce',utc=True)
-        shown=shown.loc[_start.gt(pd.Timestamp.now(tz='UTC'))].copy()
-        if shown.empty:
-            st.info('The current backend publication has no remaining upcoming games. Run V5.5 Weekly after the upcoming CFBD slate is loaded.')
-            return
-    if int(_audit.get('priced_games',0) or 0)==0:
-        # Missing valid market prices cannot yield betting authority.
-        for _price_col in ('Current_Spread','Odds_American','CORE_Cover_Probability','CORE_Edge','CORE_EV','CORE_Project_Cover_Points'):
-            if _price_col in shown.columns:
-                shown[_price_col]=None
-        shown['V55_Bet_Decision']='NO VERIFIED PRICE'
-    for col in ('CORE_Cover_Probability','CORE_Edge','CORE_EV',
-                'V55_Raw_Cover_Prob','V55_Raw_Edge','V55_Raw_EV',
-                'V55_Policy_Win_Prob','V55_Policy_Push_Prob','V55_Policy_EV','V55_Policy_Edge'):
-        if col not in shown.columns: shown[col]=None
-        shown[col]=pd.to_numeric(shown[col],errors='coerce').map(lambda x:f'{x:.1%}' if pd.notna(x) else '—')
-    for col in ('CORE_Projected_Home_Margin','Current_Spread','CORE_Project_Cover_Points'):
-        if col not in shown.columns: shown[col]=None
-        shown[col]=pd.to_numeric(shown[col],errors='coerce').map(lambda x:f'{x:+.1f}' if pd.notna(x) else '—')
-    # Prices are two-sided when no V5.5 selection exists. They are context,
-    # never a substitute for selected-side odds or an authorized betting edge.
-    for col in ('Backend_Home_Spread','Backend_Away_Spread'):
-        if col in shown.columns:
-            shown[col]=pd.to_numeric(shown[col],errors='coerce').map(
-                lambda x:f'{x:+.1f}' if pd.notna(x) else '—')
-    for col in ('Backend_Home_Odds_American','Backend_Away_Odds_American'):
-        if col in shown.columns:
-            shown[col]=pd.to_numeric(shown[col],errors='coerce').map(
-                lambda x:f'{x:+.0f}' if pd.notna(x) else '—')
-    columns=['Game_Start_UTC','Matchup','Selected_Team','CORE_Model','CORE_Projected_Home_Margin',
-        'Backend_Home_Spread','Backend_Home_Odds_American','Backend_Away_Spread',
-        'Backend_Away_Odds_American','Backend_Quote_Book','Backend_Quote_Timestamp',
-        'Current_Spread','Odds_American','V55_Research_Lean_Team',
-        'V55_Raw_Cover_Prob','V55_Raw_Edge','V55_Raw_EV','V55_Probability_State',
-        'V55_Policy_Win_Prob','V55_Policy_Push_Prob','V55_Policy_EV','V55_Policy_Edge',
-        'V55_Authority_State','V55_Authority_Hold_Reason','V55_Bet_Key','V55_Policy_Stake_Units',
-        'CORE_Cover_Probability','CORE_Edge','CORE_EV',
-        'V55_Research_Decision',
-        # RAW source-preserving pregame overlays; qualified votes remain separate.
-        'V55_Raw_BigAl','V55_Raw_Pathi','V55_Raw_Miner','V55_Raw_STAT',
-        'V55_Raw_PT','V55_Raw_Market_Rich','V55_Raw_Overlay_State',
-        'V55_Active_System_Names','V55_Independent_Support_Keys',
-        'V55_Independent_Conflict_Keys',
-        'V55_Trigger_Context_Authority','V55_Trigger_Context',
-        'STAT','BIG_AL','PATHI','SYSTEM_MINER','PREDICTION_TRACKER',
-        'Confirm_Count','Oppose_Count','Confirm_Families','Oppose_Families','Market_Rich_Sharp_Move','Market_Rich_Limit',
-        'Market_Rich_Book_Count','V55_Research_Priority','V55_Bet_Authority','V55_Bet_Decision','Quote_State']
-    _overlay_names={
-        'V55_Bet_Decision':'V5.5 Backend Decision',
-        'V55_Active_System_Names':'Qualified Active Systems',
-        'V55_Independent_Support_Keys':'Independent Support Sources',
-        'V55_Independent_Conflict_Keys':'Qualified Conflicting Sources',
-        'Confirm_Count':'Support','Oppose_Count':'Conflicts',
-        'V55_Raw_BigAl':'Big Al (raw)',
-        'V55_Raw_Pathi':'Pathi (raw)',
-        'V55_Raw_Miner':'Miner (raw)',
-        'V55_Raw_STAT':'STAT (raw)',
-        'V55_Raw_PT':'PT (raw)',
-        'V55_Raw_Market_Rich':'Market Rich (raw)',
-        'V55_Raw_Overlay_State':'Raw Overlay Source Status',
-        'STAT':'Qualified STAT','BIG_AL':'Qualified Big Al',
-        'PATHI':'Qualified Pathi','SYSTEM_MINER':'Qualified Miner',
-        'PREDICTION_TRACKER':'Qualified PT',
-    }
-    _overlay_fields=('V55_Raw_BigAl','V55_Raw_Pathi','V55_Raw_Miner',
-                     'V55_Raw_STAT','V55_Raw_PT','V55_Raw_Market_Rich')
-    for _field in _overlay_fields:
-        if _field in shown.columns:
-            shown[_field]=shown[_field].fillna('NOT_PUBLISHED').replace('', 'NOT_PUBLISHED')
-    # IMPORTANT: The V5.5 weekly board is a DIFFERENT renderer from the
-    # Production V1 fast board. The user-visible export came from this table.
-    # Apply NFL parity here without mixing V1 H2H/totals model outputs into V5.5.
-    summary=['Game_Start_UTC','Matchup','Sportsbook Market','Selected_Team',
-             'CORE Selection Status','Current_Spread',
-             'V55_Policy_EV','V55_Bet_Decision','Confirm_Count','Oppose_Count',
-             'Confirm_Families','Oppose_Families','V55_Active_System_Names',
-             'V55_Active_System_Rules',
-             'Backend_Home_Spread','Backend_Away_Spread',
-             'V55_Raw_BigAl','V55_Raw_Pathi','V55_Raw_Miner',
-             'Quote_State']
-    _priced=shown.get('Quote_State',pd.Series('',index=shown.index)).fillna('').astype(str).str.startswith('FRESH_')
-    _priced_board=shown.loc[_priced].copy()
-    _unpriced=len(shown)-len(_priced_board)
-    _no_core=int(_priced_board.get('Selected_Team',pd.Series(index=_priced_board.index,dtype='object')).fillna('').astype(str).str.upper().isin(('', 'NO CORE PICK')).sum())
-    st.caption(f'Current sportsbook board: {len(_priced_board)} priced games; '
-               f'{_no_core} without a selected CORE side; '
-               f'{_unpriced} forecasts without a fresh sportsbook quote. '
-               'The main table now matches NFL column order. '
-               'V5.5 only publishes spreads: unavailable H2H and totals fields are shown as —, '
-               'not populated with frozen V1 predictions. '
-               'BET/STRONG BET/CANDIDATE/VETO are the exact backend actions; '
-               'raw Pathi context is TRACK, not a qualified vote.')
-    _display_board=_ncaaf_v55_nfl_parity_display(_priced_board)
-    st.dataframe(_display_board,use_container_width=True,hide_index=True)
-    _raw_matched=int(shown.get('V55_Raw_Overlay_State',pd.Series(index=shown.index,dtype='object')).eq(
-                     'MATCHED_PRE_GAME_ENRICHED_SIDE__UNQUALIFIED').sum())
-    _raw_count_only=int(shown.get('V55_Raw_Overlay_State',pd.Series(index=shown.index,dtype='object')).eq(
-                     'QUOTE_HOME_SIDE_COUNTS_ONLY').sum())
-    _live_source_audit=_audit.get('v55_live_system_evaluation') or {}
-    st.caption(f'Enriched market overlays: {_raw_matched} side-matched records; '
-               f'{_raw_count_only} home-side count-only records. '
-               f"Separately calculated live systems: {_live_source_audit.get('big_al_exact_firings','—')} exact Big Al, "
-               f"{_live_source_audit.get('pathi_exact_firings','—')} exact Pathi, "
-               f"{_live_source_audit.get('miner_vote_rows','—')} original Miner vote entries. "
-               'Trigger context is not automatically a qualified bet confirmation. '
-               'NOT_PUBLISHED means that source did not supply this field.')
-    _extra_v55=st.selectbox('Additional V5.5 tables — load only when selected',
-        ('Main board only','All upcoming forecasts (including unpriced)',
-         'Historical systems and W/L histories (click to load)',
-         'Full technical/model/price table','Evidence source and timestamp audit'),
-        index=0,key='ncaaf-v55-lazy-detail-tables')
-    if _extra_v55=='All upcoming forecasts (including unpriced)':
-        _all=shown[[x for x in summary if x in shown]].copy()
-        if 'Selected_Team' in _all:
-            _all['Selected_Team']=_all['Selected_Team'].fillna('NO CORE PICK').replace('','NO CORE PICK')
-        st.dataframe(_all.rename(columns=_overlay_names),use_container_width=True,hide_index=True)
-    elif _extra_v55=='Historical systems and W/L histories (click to load)':
-        _active_ids=set()
-        for _names in shown.get('V55_Active_System_Names',pd.Series(dtype='object')).dropna().astype(str):
-            _active_ids.update(x.strip() for x in _names.split('|') if x.strip())
-        _ncaaf_v55_historical_systems_view(_active_ids)
-    if _extra_v55=='Full technical/model/price table':
-        st.dataframe(shown[[x for x in columns if x in shown]].rename(
-            columns=_overlay_names),use_container_width=True,hide_index=True)
-    elif _extra_v55=='Evidence source and timestamp audit':
-        _details=['Game_Start_UTC','Matchup','V55_Research_Lean_Team',
-                  'V55_Raw_Overlay_State','V55_Raw_Overlay_Source',
-                  'V55_Raw_Overlay_AsOf_UTC','V55_Raw_Overlay_Detail_JSON',
-                  'V55_Trigger_Context','V55_Qualified_Evidence_Detail_JSON',
-                  'Confirm_Families','Oppose_Families',
-                  'V55_Independent_Support_Keys','V55_Independent_Conflict_Keys',
-                  'V55_Active_System_Names']
-        st.dataframe(shown[[x for x in _details if x in shown]],use_container_width=True,hide_index=True)
-    st.caption('2026 live projections come from the V4-selected nonlinear CORE recipe refit on CFBD 2013–25. '
-               'Provisional V5.5 normal-residual probabilities use retrospectively estimated dispersion; '
-               'they are not prospectively validated. OOS-calibrated fields remain blank unless a separate '
-               'chronological validation bundle passes backend checks. Big Al/Pathi/Miner/STAT are trigger-only '
-               'unless an actual timestamped, directionally '               'verified V5.5 source exists. Quotes are backend scanner snapshots updated on the approximately 30-minute cycle; retrospective Market Rich feature '
-               'publication timing remains unverified. CORE-only selections are CANDIDATE; BET and STRONG BET require qualified independent historical confirmations and current pregame signals. Stake sizing is provisional; model-probability OOS validation remains outstanding.')
-
-
 def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None, cached_live_info=None):
     """Lean NCAAF board; selected picks are computed once per minute outside UI."""
     now=pd.Timestamp.now(tz='UTC')
@@ -49520,14 +48886,6 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None
             rec.update({f'{prefix} Action':action,f'{prefix} Pick':label,f'{prefix} Prob':x.get('_pred',np.nan),f'{prefix} Edge':x.get('_edge',np.nan),f'{prefix} EV':x.get('_ev',np.nan),f'{prefix} Fair':fair,f'{prefix} Status':status,f'{prefix} Source':source,
                         f'{prefix} CORE Qualifies':bool(x.get('_core_qualifies',False)),f'{prefix} Support Count':_sup_n,f'{prefix} Conflict Count':_con_n,
                         f'{prefix} Support':(_sup_s+' · '+_sup_f if _sup_f!='—' else '—'),f'{prefix} Conflict':(_con_s+' · '+_con_f if _con_f!='—' else '—'),f'{prefix} Confidence':_conf,f'{prefix} Reason':_reason})
-            # Display-only fair-versus-selected-quote edge in points.
-            # No influence on backend candidate/bet/strong-bet logic.
-            if m == 'spreads':
-                rec['Spr Point Edge'] = (float(line) - float(fair)) if (np.isfinite(line) and np.isfinite(fair)) else np.nan
-            elif m == 'totals':
-                _is_over = str(pick).strip().lower() == 'over'
-                _is_under = str(pick).strip().lower() == 'under'
-                rec['Tot Point Edge'] = ((float(fair) - float(line)) if _is_over else (float(line) - float(fair)) if _is_under else np.nan) if (np.isfinite(line) and np.isfinite(fair)) else np.nan
             if action in ('BET','STRONG BET'):
                 production_plays.append(f"{prefix}: {label}")
             if m=='spreads':
@@ -49554,18 +48912,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None
         rec['Systems']=' | '.join(_unique_system_parts) if _unique_system_parts else '—'
         rec['System Count']=len(_unique_system_parts)
         rec['System Trigger']=' | '.join(_unique_system_parts) if _unique_system_parts else '—'
-        # Mirror the NFL main-table distinctions: qualification state is not
-        # the raw Pathi rule text. A raw-only firing is TRACK, not SUPPORT.
-        _n_pathi_support = 'PATHI' in str(rec.get('Spr Support', '')).upper()
-        _n_pathi_conflict = 'PATHI' in str(rec.get('Spr Conflict', '')).upper()
-        rec['Pathi State'] = (
-            'MIXED' if _n_pathi_support and _n_pathi_conflict else
-            'SUPPORT' if _n_pathi_support else
-            'CONFLICT' if _n_pathi_conflict else
-            'TRACK' if spread_pathi not in ('', '—', 'nan', 'None') else '—'
-        )
-        rec['Pathi Overlay'] = spread_pathi if spread_pathi not in ('', 'nan', 'None') else '—'
-        rec['Miner State'] = spread_miner
+        rec['Pathi State']=spread_pathi; rec['Miner State']=spread_miner
         rec['Spread Support']=spread_support; rec['Spread Conflict']=spread_conflict
         records.append(rec)
     view=pd.DataFrame(records)
@@ -49620,31 +48967,11 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None
     if _schedule_conflict_games:
         st.caption(f'Schedule normalization merged {_schedule_conflict_games} matchup(s) that arrived with conflicting kickoff-time variants. The freshest/highest-coverage kickoff is used for the production board and ledger identity.')
 
-    # NCAAF_NFL_PARITY_MAIN_BOARD_20261026
     view=view.sort_values('_game_start')
-    # Main NCAAF board uses the same 19 visible columns and ordering as NFL.
-    # All fields originate from existing backend results; this is presentation only.
-    _ncaaf_nfl_columns = [
-        'Game Time','Matchup',
-        'Spr Action','Spr Pick','Spr Prob','Spr Model Edge',
-        'H2H Action','H2H Pick','H2H Prob','H2H Model Edge',
-        'Tot Action','Tot Pick','Tot Prob','Tot Model Edge',
-        'Production Plays','Pathi State','Pathi Overlay','Edge Sources','System Trigger',
-    ]
-    main=view.copy()
-    main['Spr Model Edge']=pd.to_numeric(main.get('Spr Point Edge',pd.Series(np.nan,index=main.index)),errors='coerce')
-    main['H2H Model Edge']=pd.to_numeric(main.get('H2H Edge',pd.Series(np.nan,index=main.index)),errors='coerce')
-    main['Tot Model Edge']=pd.to_numeric(main.get('Tot Point Edge',pd.Series(np.nan,index=main.index)),errors='coerce')
-    for _nm in _ncaaf_nfl_columns:
-        if _nm not in main.columns:
-            main[_nm]='—'
-    main=main[_ncaaf_nfl_columns].copy()
-    for _nm in ('Spr Prob','H2H Prob','Tot Prob','H2H Model Edge'):
-        main[_nm]=pd.to_numeric(main[_nm],errors='coerce').map(
-            lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
-    for _nm in ('Spr Model Edge','Tot Model Edge'):
-        main[_nm]=pd.to_numeric(main[_nm],errors='coerce').map(
-            lambda x:f'{x:.2f} pts' if pd.notna(x) else '—')
+    main=view[['Game Time','Matchup','Spr Action','Spr Pick','Spr Prob','Spr Edge','Spr Support','Spr Conflict','H2H Action','H2H Pick','H2H Prob','H2H Edge','Tot Action','Tot Pick','Tot Prob','Tot Edge','Tot Support','Tot Conflict','Production Plays','Pathi State','Miner State','System Trigger']].copy()
+    main=main.rename(columns={'Spr Edge':'Spr Model Edge','H2H Edge':'H2H Model Edge','Tot Edge':'Tot Model Edge'})
+    for c in ['Spr Prob','Spr Model Edge','H2H Prob','H2H Model Edge','Tot Prob','Tot Model Edge']:
+        main[c]=pd.to_numeric(main[c],errors='coerce').map(lambda x:f'{x*100:.1f}%' if pd.notna(x) else '—')
     st.dataframe(main,use_container_width=True,hide_index=True)
 
     # TRUE ON-DEMAND NCAAF DETAILS (2026-10-14): Streamlit executes closed
@@ -49656,8 +48983,7 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None
     _ncaaf_extra_section=st.selectbox(
         'Additional NCAAF tables — load only when selected',
         ['Betting Board only', 'System Details', 'Model / Bet Authority Details',
-         'Production Results', 'CORE Challenger Research', 'Production Edge Evidence',
-         'V5.5 Weekly Model Board'],
+         'Production Results', 'CORE Challenger Research', 'Production Edge Evidence'],
         index=0, key='ncaaf-extra-section-on-demand',
     )
     _show_ncaaf_systems=(_ncaaf_extra_section=='System Details')
@@ -49665,12 +48991,8 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None
     _show_ncaaf_results=(_ncaaf_extra_section=='Production Results')
     _show_ncaaf_challenger=(_ncaaf_extra_section=='CORE Challenger Research')
     _show_ncaaf_edge=(_ncaaf_extra_section=='Production Edge Evidence')
-    _show_ncaaf_v551=(_ncaaf_extra_section=='V5.5 Weekly Model Board')
     if _ncaaf_extra_section!='Betting Board only':
         st.caption('Only the selected additional section is loaded; the main betting board stays visible.')
-
-    if _show_ncaaf_v551:
-        _render_ncaaf_v551_weekly_board()
 
     if _show_ncaaf_model:
         with st.expander('Why Bet Authority made each decision',expanded=True):
@@ -50071,8 +49393,18 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # current quotes and retains all frozen evidence/authority gates.
         if _ncaaf_fast_ui:
             if force_reload:
-                _ncaaf_v551_weekly_snapshot_cached.clear()
-            _render_ncaaf_v551_weekly_board()
+                _ncaaf_betting_board_first_cached.clear()
+                read_ncaaf_current_quote_heads_cached.clear()
+                _ncaaf_research_v2_report_cached.clear()
+            with st.spinner('Loading NCAAF betting board (60-second cached snapshot)...'):
+                _selected,_board_meta=_ncaaf_betting_board_first_cached(hours=24)
+            if _board_meta.get('status')=='ERROR':
+                st.error('NCAAF board refresh failed: '+str(_board_meta.get('error','UNKNOWN')))
+                return
+            st.caption('NCAAF betting board: latest per-book quotes; frozen CORE and qualified system votes; 60-second shared cache.')
+            _render_ncaaf_fast_prediction_ui(None,label,selected_picks=_selected,cached_live_info=_board_meta)
+            from v55_any_brain_main_panel import render_any_brain_panel
+            render_any_brain_panel()
             return
 
         # NFL first paint is the already-published, current-line authority snapshot.
@@ -50214,6 +49546,8 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # trend/spark history, small-book liquidity panel, or secondary live-odds matrix.
         if _ncaaf_fast_ui:
             _render_ncaaf_fast_prediction_ui(df_moves_raw, label)
+            from v55_any_brain_main_panel import render_any_brain_panel
+            render_any_brain_panel()
             return
 
         # === 3) Load per-market models (BEFORE any sharp-scoring)
@@ -52258,16 +51592,15 @@ if not HEADLESS:
     _train_market_labels = {}
     _workflow_title = "Train which market?"
     if str(sport).upper().strip() == "NCAAF":
-        # ONLY V5.5 jobs on the active operator menu. No V1/legacy fallback.
-        _train_market_options=["ncaaf_v55_weekly","ncaaf_v55_heavy"]
-        _train_market_labels={
-            "ncaaf_v55_weekly":"V5.5 Weekly — CORE + Current Market",
-            "ncaaf_v55_heavy":"V5.5 Heavy Research — Full CFBD + Brains",
+        # Mirror the NFL operator surface: one normal weekly production refresh
+        # and one protected heavy research workflow.  Explicit contract promotion
+        # remains backend-only and is never a routine operator action.
+        _train_market_options = ["ncaaf_production_weekly", "ncaaf_research_heavy"]
+        _train_market_labels = {
+            "ncaaf_production_weekly": "NCAAF Production — Weekly Update",
+            "ncaaf_research_heavy": "NCAAF Research — Heavy Challenger Search",
         }
-        _ncaaf_workflow_key=f"train_market_choice_{sport}"
-        if st.session_state.get(_ncaaf_workflow_key) not in (None,*_train_market_options):
-            st.session_state[_ncaaf_workflow_key]="ncaaf_v55_weekly"
-        _workflow_title="NCAAF V5.5 model jobs"
+        _workflow_title = "NCAAF model maintenance"
     elif str(sport).upper().strip() == "NFL":
         # Operator surface only: weekly production + full protected research.
         # Live line/price changes refresh automatically in the background, so
@@ -52284,10 +51617,14 @@ if not HEADLESS:
         format_func=(lambda x: _train_market_labels.get(x, x)),
         key=f"train_market_choice_{sport}",
     )
-    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_weekly":
-        st.sidebar.caption("Runs the independent V5.5 CFBD NONLINEAR_HGB weekly CORE and available brains in Cloud Run; publishes the exact results to BigQuery. Current prices update automatically through the background scanner without another refit. Quotes/EV fail closed if missing. No Production V1 fallback.")
-    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_heavy":
-        st.sidebar.caption("Runs the protected V5.5 historical CFBD research and combined CORE, STAT, Big Al, Pathi, Miner, PT and Market Rich attribution. Research only; missing pregame evidence cannot become verified betting authority.")
+    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_production_weekly":
+        st.sidebar.caption(
+            "WHEN: once each week after prior games settle / the new slate is ready. Reuses the frozen Production V1 CORE models, settles immutable prospective locks, refreshes the current slate and live qualified system triggers, and applies the current CORE-first Bet Authority. It does NOT refit CORE, rerun research, republish the production contract, or promote anything. Market moves continue to refresh through the background scanner after this run."
+        )
+    elif str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_research_heavy":
+        st.sidebar.caption(
+            "WHEN: after meaningful research/data changes and periodically during the season. Runs the protected NCAAF STAT/System Miner V4 research plus the expert/specialist Spread CORE search in one job: sequential team power, strength of schedule, conference strength, rest/home/maturity context, structured matchup statistics, recent-vs-season trends, nonlinear residuals and regularized program/conference effects. Discovery/confirmation stay historical, 2026 remains sealed prospective evidence, and no challenger can mutate Production V1 or Bet Authority automatically."
+        )
     elif str(sport).upper().strip() == "NFL" and market_choice == "nfl_production_weekly":
         st.sidebar.caption(
             "WHEN: once each week after prior games settle / the new slate is ready. Creates or reuses frozen fair values, refreshes live system triggers, settles the prospective ledger, and applies Production Betting V3 CORE-first Bet Authority. After that, line and price changes refresh automatically through the background scanner—do NOT rerun for market moves."
@@ -52298,123 +51635,6 @@ if not HEADLESS:
         )
 
     
-    # Permanent V5.5 Heavy Research: independently verifiable model replay viewer.
-    # Load nothing on normal board render. Historical markets/brain vintage
-    # still gate any ATS or policy claim regardless of the RMSE shown here.
-    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_heavy":
-        with st.expander("V5.5 rolling model replay — historical predictions (click to load)", expanded=False):
-            if st.button("Load latest V5.5 historical model predictions", key="v55_load_rollforward_20261023"):
-                try:
-                    import hashlib as _v55_hl_hash
-                    from io import StringIO as _v55_hl_io
-                    _hl_bucket=storage.Client().bucket(MODEL_BUCKET)
-                    _hl_root="research/ncaaf/v55/ats_primary"
-                    _hl_latest=json.loads(_hl_bucket.blob(_hl_root+"/latest_status.json").download_as_text())
-                    _hl_pointer=json.loads(_hl_bucket.blob(_hl_root+"/latest_replay_status.json").download_as_text())
-                    _hl_prefix=str(_hl_pointer.get("run_prefix") or "")
-                    if not _hl_prefix.startswith(_hl_root+"/replay_runs/"):
-                        raise RuntimeError("No verified V5.5 replay run prefix")
-                    _hl_audit=json.loads(_hl_bucket.blob(_hl_prefix+"/audit.json").download_as_text())
-                    if (_hl_audit.get("status")!="COMPLETE_V55_EXACT_RECIPE_RETROSPECTIVE_MARGINS"
-                            or _hl_audit.get("model")!="NONLINEAR_HGB"
-                            or _hl_audit.get("production_modified") is not False):
-                        raise RuntimeError("Historical replay audit is incomplete or wrong model")
-                    _hl_m=_hl_bucket.blob(_hl_prefix+"/season_metrics.csv").download_as_bytes()
-                    _hl_p=_hl_bucket.blob(_hl_prefix+"/game_predictions.csv").download_as_bytes()
-                    if (_v55_hl_hash.sha256(_hl_m).hexdigest()!=_hl_audit.get("season_metrics_sha256")
-                            or _v55_hl_hash.sha256(_hl_p).hexdigest()!=_hl_audit.get("predictions_sha256")):
-                        raise RuntimeError("Historical replay file checksum mismatch")
-                    _hl_metrics=pd.read_csv(_v55_hl_io(_hl_m.decode("utf-8")))
-                    _hl_games=pd.read_csv(_v55_hl_io(_hl_p.decode("utf-8")))
-                    st.write({"model":"NONLINEAR_HGB", "predicted_games":len(_hl_games),
-                              "seasons":sorted(_hl_games.season.unique().tolist()),
-                              "latest_heavy_status":_hl_latest.get("status"),
-                              "source_vintage_certified":_hl_audit.get("historical_pregame_cfbd_feature_vintage_certified")})
-                    st.warning("Retrospective V5.5-recipe margin diagnostics only. Current model recipe was selected later; "
-                               "historical feature, bookmaker-line and brain signal timestamps are not fully certified. "
-                               "Do not interpret this as independently verified ATS or a profitable betting strategy.")
-                    st.dataframe(_hl_metrics, use_container_width=True, hide_index=True)
-                    # Source-linked historical opening spreads are not authenticated
-                    # as executable as-of prices. Display ATS evidence ONLY as a
-                    # clearly labeled retrospective research preview; never promote.
-                    _hl_retro=_hl_audit.get("retrospective_ats") or {}
-                    if _hl_retro.get("status")=="RETROSPECTIVE_CFBD_LINKED_OPEN_SPREAD__ORIGINAL_QUOTE_TIME_UNVERIFIED":
-                        st.subheader("V5.5 point edges vs historical ATS — exploratory")
-                        st.warning("These are CFBD-matched historical *opening* spreads, but their original "
-                                   "quote timestamps are not independently certified. The current V5.5 recipe "
-                                   "was selected retrospectively. ATS percentages are descriptive only: no "
-                                   "verified sportsbook ROI, brain lift, live confirmation or threshold promotion.")
-                        st.write({"historical_replay_games":_hl_retro.get("predicted_games"),
-                                  "games_with_open_spreads":_hl_retro.get("games_with_cfbd_linked_open_spread"),
-                                  "historical_brain_events_verified":0,
-                                  "eligible_for_bet_threshold_promotion":False})
-                        _hl_retro_names=(
-                            ("retrospective_core_ats_pooled_buckets.csv","CORE point edge buckets — all priced historical games"),
-                            ("retrospective_core_ats_pooled_thresholds.csv","CORE minimum point edge thresholds — all priced historical games"),
-                            ("retrospective_core_ats_seasons.csv","ATS by season"),
-                            ("retrospective_core_ats_buckets.csv","ATS by season and edge size"),
-                            ("retrospective_core_ats_thresholds.csv","Point edge threshold research"),
-                            ("retrospective_market_coverage.csv","Historical spread coverage"),
-                            ("retrospective_core_vs_market.csv","CORE versus sportsbook benchmark (same games)"),
-                        )
-                        _hl_retro_digests=_hl_audit.get("retrospective_csv_sha256") or {}
-                        for _hl_retro_name,_hl_retro_title in _hl_retro_names:
-                            _hl_retro_data=_hl_bucket.blob(_hl_prefix+"/"+_hl_retro_name).download_as_bytes()
-                            if _v55_hl_hash.sha256(_hl_retro_data).hexdigest()!=_hl_retro_digests.get(_hl_retro_name):
-                                raise RuntimeError("V5.5 historical ATS CSV integrity mismatch: "+_hl_retro_name)
-                            st.markdown("**"+_hl_retro_title+"**")
-                            st.dataframe(pd.read_csv(_v55_hl_io(_hl_retro_data.decode("utf-8"))),
-                                         use_container_width=True,hide_index=True)
-                        st.markdown("**Individual historical ATS game records**")
-                        _hl_edge_name="retrospective_core_ats_game_edges.csv"
-                        _hl_edge_bytes=_hl_bucket.blob(_hl_prefix+"/"+_hl_edge_name).download_as_bytes()
-                        if _v55_hl_hash.sha256(_hl_edge_bytes).hexdigest()!=_hl_retro_digests.get(_hl_edge_name):
-                            raise RuntimeError("V5.5 historical ATS game-level digest mismatch")
-                        st.dataframe(pd.read_csv(_v55_hl_io(_hl_edge_bytes.decode("utf-8"))),
-                                     use_container_width=True,hide_index=True)
-                    else:
-                        st.info("Historical model margins are available; exploratory ATS edge tables "
-                                "have not been published by this replay yet.")
-                    _hl_season=st.selectbox("Replay season",sorted(_hl_games.season.unique().tolist()),
-                                            key="v55_replay_year_20261023")
-                    _hl_slice=_hl_games.loc[_hl_games.season.eq(_hl_season)]
-                    st.dataframe(_hl_slice, use_container_width=True, hide_index=True)
-                except Exception as _hl_exc:
-                    st.warning("V5.5 model replay unavailable: "+type(_hl_exc).__name__+": "+str(_hl_exc)[:350])
-
-    # V5.5 optional research viewer. NEVER load historical tables on the first
-    # NCAAF page render. Research artifacts cannot cast Production V1 votes.
-    if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v55_heavy":
-        with st.expander("V5.5 Combined Brains — latest research results (click to load)", expanded=False):
-            if st.button("Load latest V5.5 research comparison", key="v55_load_research_on_demand"):
-                try:
-                    from io import StringIO as _v55_StringIO
-                    _v55_bucket = storage.Client().bucket(MODEL_BUCKET)
-                    _v55_latest = json.loads(_v55_bucket.blob(
-                        "research/ncaaf/v55_combined_brain/latest_report.json").download_as_text())
-                    _v55_prefix = _v55_latest["run_prefix"]
-                    if not _v55_prefix.startswith("research/ncaaf/v55_combined_brain/runs/"):
-                        raise RuntimeError("V5.5 unrecognized research result location")
-                    _v55_report = json.loads(_v55_bucket.blob(_v55_prefix + "/report.json").download_as_text())
-                    if _v55_report.get("bet_authority") != 0:
-                        raise RuntimeError("Research report authority mismatch")
-                    st.caption("Research only — cannot modify Production V1 bets. "
-                               "Historical 2024–25 has already been inspected; market quote vintage not certified.")
-                    st.write({"Selected CORE":_v55_report.get("core_model"),
-                              "Historical priced games":_v55_report.get("priced_champion_games"),
-                              "Systems available":_v55_report.get("fired_families"),
-                              "Market Rich status":_v55_report.get("market_query",{}).get("status")})
-                    for _v55_name,_v55_label in (
-                        ("v55_confluence_performance.csv","CORE + brain confluence"),
-                        ("v55_mechanism_rankings.csv","Per-system research rankings"),
-                        ("v55_market_rich_conditionals.csv","Market Rich price-context splits")):
-                        _v55_df=pd.read_csv(_v55_StringIO(_v55_bucket.blob(
-                            _v55_prefix + "/" + _v55_name).download_as_text()),low_memory=False)
-                        st.markdown("**"+_v55_label+"**")
-                        st.dataframe(_v55_df,hide_index=True,use_container_width=True)
-                except Exception as _v55_exc:
-                    st.warning("V5.5 research results unavailable: "+str(_v55_exc)[:300])
-
     # -----------------------------
     # --- If training, pause scanner + stop page from doing anything expensive ---
     # -----------------------------
@@ -52544,21 +51764,9 @@ if not HEADLESS:
     elif str(sport).upper().strip() == "NFL" and str(market_choice).lower().strip() == "nfl_research_heavy":
         _train_button_label = "Run NFL Heavy Research"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_production_weekly":
-        _train_button_label = "Run NCAAF Weekly Update (frozen V1)"
+        _train_button_label = "Run NCAAF Weekly Production Update"
     elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_research_heavy":
         _train_button_label = "Run NCAAF Heavy Research"
-    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v55_cfbd_2026_games_repair":
-        _train_button_label = "Repair NCAAF 2026 CFBD Games Archive"
-    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v55_weekly":
-        _train_button_label = "Run NCAAF V5.5 Weekly Model Update"
-    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v55_heavy":
-        _train_button_label = "Run NCAAF V5.5 Heavy Research"
-    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v55_market_refresh":
-        _train_button_label = "Refresh V5.5 Market Prices (no CORE refit)"
-    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v55_combined_brain":
-        _train_button_label = "Run NCAAF V5.5 Combined Brains + Market Rich"
-    elif str(sport).upper().strip() == "NCAAF" and str(market_choice).lower().strip() == "ncaaf_v54_full_research":
-        _train_button_label = "Run NCAAF V5 FULL Research + Audited Brains"
     elif str(market_choice).lower().strip() == "edge_research":
         _train_button_label = f"🧪 Run {sport} Edge Research"
     else:
@@ -52628,15 +51836,7 @@ if not HEADLESS:
                 "MODEL_BUCKET": MODEL_BUCKET,
                 "HEADLESS": "1",
             }
-            if str(sport).upper().strip() == "NCAAF" and market_choice in {"ncaaf_full_history_v3", "ncaaf_margin_tournament_v4", "ncaaf_conditional_features_v42", "ncaaf_v53_full_research", "ncaaf_v54_full_research"}:
-                # Scoped to this execution override only. Never enable the
-                # archive-research feature flag for weekly or heavy workflows.
-                env["NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED"] = "1"
-            if str(sport).upper().strip() == "NCAAF" and market_choice == "ncaaf_v54_full_research":
-                # Scoped archival data repair: only original CFBD /games for
-                # missing 2022 game IDs. No model/prod/market edits.
-                env["NCAAF_CFBD_ARCHIVE_AUTOREPAIR"] = "1"
-
+    
             run_resp = start_job_with_rest(
                 job_name=JOB_NAME,
                 region=REGION,

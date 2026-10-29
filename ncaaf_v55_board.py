@@ -599,8 +599,7 @@ def read_scanner_quotes(bq_client, *, minutes=QUOTE_MAX_AGE_MINUTES, horizon_day
     """
     # Lightweight optional as-of trigger context. These are NOT qualified OOS
     # confirmations and are never used as training inputs or probability shifts.
-    optional=("Open_Value","Opening_Spread",  # original side-specific opening line
-              "BigAl_Side_Support_Count","BigAl_Side_Conflict_Count",
+    optional=("BigAl_Side_Support_Count","BigAl_Side_Conflict_Count",
               "Pathi_System_Count","Pathi_Active_Text","NCAAF_Stat_Active",
               "System_Side_Consensus_Count","System_Side_Conflict_Count")
     try:
@@ -1391,34 +1390,11 @@ def _v55_direct_current_quote_rows(board, market, *, now=None):
     # against completed-game history and cannot infer any current-game result.
     rows['Sport']='NCAAF';rows['Market']='spreads'
     rows['Game']=rows['Away_Team_Norm'].astype(str)+' @ '+rows['Home_Team_Norm'].astype(str)
-    # Opening-line-dependent Miner atoms must receive the REAL stored opening
-    # spread, not the current quote or an opposite-book proxy. Source values
-    # must be anti-symmetric across the exact same-book two-sided market.
-    verified_open=0
-    rows['Consensus_Open_Spread']=float('nan')
-    for (h,a,kick,book),ixs in rows.groupby(['_home','_away','_kick','_book'],dropna=False).groups.items():
-        group=rows.loc[list(ixs)]
-        home_rows=group[group['_side'].eq(h)]
-        away_rows=group[group['_side'].eq(a)]
-        if len(home_rows)!=1 or len(away_rows)!=1:
-            continue
-        hr=home_rows.iloc[0];ar=away_rows.iloc[0]
-        for field in ('Open_Value','Opening_Spread'):
-            if field not in rows:
-                continue
-            ho=_price(hr.get(field));ao=_price(ar.get(field))
-            if ho is None or ao is None or not -100<=ho<=100 or abs(ho+ao)>0.01:
-                continue
-            rows.loc[group.index,'Consensus_Open_Spread']=float(ho)
-            verified_open += 1
-            break
-    # Collected in the return audit below.
-    verified_open_count=verified_open
     rows['V55_Original_Quote_Timestamp']=rows['Snapshot_Timestamp']
     rows['V55_Original_Quote_Provenance_Verified']=True
     rows['V55_Source_Type']='LIVE_ENGINE_RECALCULATED'
     return rows.drop(columns=[c for c in rows.columns if c.startswith('_')],errors='ignore'),{
-        'status':'PASS','games':games,'rows':len(rows), 'verified_opening_spread_games':verified_open_count, 'source':'ORIGINAL_VERIFIED_SCANNER_BOOK_QUOTES'}
+        'status':'PASS','games':games,'rows':len(rows),'source':'ORIGINAL_VERIFIED_SCANNER_BOOK_QUOTES'}
 
 
 def _v55_evaluate_existing_live_systems(board, market, *, bq_client,
@@ -1635,14 +1611,28 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
                 pd.Series(False,index=miner_display_frame.index)).eq(True)]
         if not checked.empty:
             miner_authority_rows=pd.concat([miner_authority_rows,checked],ignore_index=True,sort=False)
+    # Two-sided candidate discovery uses the original, verified matched-home/
+    # away backend quotes; the legacy single-side authority routine is intact.
+    # A verified opposite-side brain signal is no longer discarded merely
+    # because CORE leaned to the other team.
+    from ncaaf_v55_any_brain_candidates import build_two_sided_scan
+    try:
+        brain_scan_sides = build_two_sided_scan(out)
+        brain_scan_input = pd.concat([out,brain_scan_sides],ignore_index=True,sort=False)
+        brain_scan_build_status = 'PASS'
+    except Exception as exc:
+        brain_scan_sides = pd.DataFrame()
+        brain_scan_input = out
+        brain_scan_build_status = 'FAIL_CLOSED_'+type(exc).__name__
+        log('[NCAAF-V55-ANY-BRAIN-SCAN-BUILD-ERROR] '+type(exc).__name__)
     miner_events, miner_audit = derive_v55_miner_qualified_events(
-        out,miner_authority_rows,registry)
+        brain_scan_input,miner_authority_rows,registry)
     miner_audit['direct_runtime_rows']=len(live_system_rows)
     miner_audit['original_snapshot_provenance_rows']=max(0,len(miner_authority_rows)-len(overlay_frame)-len(live_system_rows))
     other_authority_rows=(pd.concat([overlay_frame,live_system_rows],ignore_index=True,sort=False)
         if not live_system_rows.empty else overlay_frame)
     other_events, other_audit = derive_v55_other_qualified_events(
-        out,other_authority_rows,other_registry)
+        brain_scan_input,other_authority_rows,other_registry)
     # Externally ingested evidence rows are admissible only if backed by a
     # matching frozen rule. String statuses in a live table are not a certificate.
     vetted_explicit, explicit_gate = validate_v55_external_qualified_events(
@@ -1693,59 +1683,77 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     # training audit. Only the published V5.5 decision policy can grant bets.
     out, policy = apply_v55_owner_betting_policy(out)
     updated.update(policy)
-    # Make every published BET's exact supporting frozen mechanisms inspectable.
-    # This is audit-only and cannot create, remove, or promote an authority vote.
-    _bet_evidence_report=[]
-    for _,_bet in out.loc[out.get('V55_Bet_Authority',pd.Series(0,index=out.index)).eq(1)].iterrows():
-        try:
-            _events=json.loads(_bet.get('V55_Qualified_Evidence_Detail_JSON') or '[]')
-            if not isinstance(_events,list):_events=[]
-        except (ValueError,TypeError):_events=[]
-        _bet_evidence_report.append({
-            'game_id':str(_bet.get('Game_ID') or ''),
-            'matchup':str(_bet.get('Matchup') or ''),
-            'selected':str(_bet.get('Selected_Team') or ''),
-            'decision':str(_bet.get('V55_Bet_Decision') or ''),
-            'book':str(_bet.get('Backend_Quote_Book') or ''),
-            'spread':_price(_bet.get('Current_Spread')),
-            'qualified_support_count':int(_price(_bet.get('Confirm_Count')) or 0),
-            'qualified_oppose_count':int(_price(_bet.get('Oppose_Count')) or 0),
-            'independent_support_keys':str(_bet.get('V55_Independent_Support_Keys') or ''),
-            'miner_qualified_systems':int(_price(_bet.get('V55_Miner_Qualified_System_Count')) or 0),
-            'miner_independent_families':int(_price(_bet.get('V55_Miner_Independent_Family_Count')) or 0),
-            'miner_evidence_family_keys':str(_bet.get('V55_Miner_Independent_Family_Keys') or ''),
-            'support_families':str(_bet.get('Confirm_Families') or ''),
-            'historical_systems':[{
-                'brain':str(_ev.get('source') or ''),
-                'system_id':str(_ev.get('system_id') or ''),
-                'direction':str(_ev.get('direction') or ''),
-                'evidence_family_key':str(_ev.get('evidence_family_key') or ''),
-                'frozen_registry':str(_ev.get('historical_source') or '')}
-                for _ev in _events if isinstance(_ev,dict)],
-        })
-    updated['v55_per_bet_frozen_evidence_audit']=_bet_evidence_report
-    log('[NCAAF-V55-PRODUCTION-BET-EVIDENCE] '+json.dumps(_bet_evidence_report,sort_keys=True))
-    # Evidence health is a READ-ONLY production ledger. It never converts
-    # raw Big Al, Pathi, PT or STAT triggers into qualified betting votes.
-    # Preserve the existing CORE/policy output and report exact source gaps.
+    # Candidate origination is game-side evidence discovery only. It cannot
+    # mutate owner betting authority, model probabilities, or staking amounts.
+    # Live Miner vote rows are research observations, NOT frozen OOS authority.
+    from ncaaf_v55_shadow_signal_bridge import build_shadow_events
     try:
-        from ncaaf_v55_evidence_health_v1 import audit_v55_production_evidence
-        evidence_health = audit_v55_production_evidence(
-            out,live_system_rows,miner_registry=registry,other_registry=other_registry,
-            other_registry_problem=other_registry_problem,
-            miner_bridge=miner_audit,other_bridge=other_audit)
-        updated['v55_evidence_layer_health']=evidence_health
-        compact={k:v for k,v in evidence_health.items() if k!='trace'}
-        log('[NCAAF-V55-EVIDENCE-LAYER-HEALTH] '+json.dumps(compact,sort_keys=True))
-        log('[NCAAF-V55-EVIDENCE-CANDIDATE-TRACE] '+json.dumps(evidence_health['trace'],sort_keys=True))
-        if evidence_health['violations']:
-            raise RuntimeError('V55_EVIDENCE_INTEGRITY_VIOLATION:'+str(evidence_health['violations'][:2]))
-    except ImportError:
-        # When a partial GitHub deployment omits the helper, legacy V5.5
-        # continues without any new votes, but missing audit is visible.
-        updated['v55_evidence_layer_health']={'status':'HELPER_NOT_DEPLOYED','changes_betting_authority':False}
-        log('[NCAAF-V55-EVIDENCE-LAYER-HEALTH] status=HELPER_NOT_DEPLOYED')
+        shadow_events, shadow_bridge_audit = build_shadow_events(
+            live_system_rows, brain_scan_sides)
+    except Exception as exc:
+        shadow_events = pd.DataFrame()
+        shadow_bridge_audit = {'status':'FAIL_CLOSED_SHADOW_SOURCE',
+                               'error':type(exc).__name__,'authority':0}
+        log('[NCAAF-V55-SHADOW-SIGNAL-ERROR] '+type(exc).__name__)
+    from ncaaf_v55_any_brain_candidates import attach_any_brain_candidates
+    try:
+        qualified_two_sides, _ = attach_v55_qualified_evidence(
+            brain_scan_sides, combined_events)
+        out, any_brain_audit = attach_any_brain_candidates(
+            out,qualified_two_sides,raw_events=explicit_events,
+            live_research_events=shadow_events)
+        any_brain_audit['two_sided_scan_build']=brain_scan_build_status
+    except Exception as exc:
+        any_brain_audit={'status':'FAIL_CLOSED_ANY_BRAIN_DISCOVERY',
+                        'error':type(exc).__name__,'bet_authority_changed':False,
+                        'two_sided_scan_build':brain_scan_build_status}
+        out['V55_Any_Brain_Research_Status']='DISCOVERY_UNAVAILABLE'
+        out['V55_Any_Brain_Candidates_JSON']='[]'
+        out['V55_Any_Brain_Candidate_Count']=0
+        log('[NCAAF-V55-ANY-BRAIN-DISCOVERY-ERROR] '+type(exc).__name__)
 
+    # Any-Brain handoff observability. Research-only; never changes authority.
+    def _ab_event_count(frame):
+        return int(len(frame)) if isinstance(frame, pd.DataFrame) else 0
+
+    handoff = {
+        'two_sided_scan_rows': _ab_event_count(brain_scan_sides),
+        'miner_qualified_event_rows': _ab_event_count(miner_events),
+        'other_qualified_event_rows': _ab_event_count(other_events),
+        'external_event_rows': _ab_event_count(explicit_events),
+        'vetted_external_event_rows': _ab_event_count(vetted_explicit),
+        'combined_qualified_event_rows': _ab_event_count(combined_events),
+        'vetted_two_sided_rows': (
+            _ab_event_count(qualified_two_sides)
+            if 'qualified_two_sides' in locals() else 0
+        ),
+        'vetted_two_sided_confirmations': (
+            int(pd.to_numeric(
+                qualified_two_sides.get('Confirm_Count',
+                    pd.Series(dtype=float)),
+                errors='coerce'
+            ).fillna(0).gt(0).sum())
+            if 'qualified_two_sides' in locals()
+            else 0
+        ),
+        'miner_bridge_status': miner_audit.get('status'),
+        'miner_vote_rejections': miner_audit.get('vote_rejections', {}),
+        'other_bridge_status': other_audit.get('status'),
+        'external_gate_status': explicit_gate.get('status')
+            if isinstance(explicit_gate, dict) else str(explicit_gate),
+        'live_evaluator_status': live_system_audit.get('status'),
+        'live_big_al_pathi_status': live_system_audit.get('big_al_pathi'),
+        'research_only_live_signal_bridge': 'NOT_YET_CONNECTED',
+        'bet_authority_changed': False,
+    }
+
+    updated['v55_any_brain_handoff_diagnostics'] = handoff
+    log('[NCAAF-V55-ANY-BRAIN-HANDOFF] ' +
+        json.dumps(handoff, sort_keys=True, default=str))
+
+    updated['v55_any_brain_shadow_bridge'] = shadow_bridge_audit
+    updated['v55_any_brain_candidate_discovery']=any_brain_audit
+    log('[NCAAF-V55-ANY-BRAIN-DISCOVERY] '+json.dumps(any_brain_audit,sort_keys=True))
     # V7 independently shops existing backend bookmaker quotes. The V5.5
     # authorized price and policy are IMMUTABLE at this stage.
     try:
@@ -1780,7 +1788,7 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
          'raw_bigal_rows':int(out.get('V55_Raw_BigAl',pd.Series(dtype=object)).fillna('').astype(str).str.contains('SPREAD ENHANCER',case=False,regex=False).sum()),
          'raw_pathi_rows':int(out.get('V55_Raw_Pathi',pd.Series(dtype=object)).fillna('').astype(str).str.contains('FOOTBALL RESEARCH CONTEXT',case=False,regex=False).sum()),
          'research_v65_candidates_are_not_live_verified':True,
-         'v7_side_scope':'CORE_SELECTED_SIDE_ONLY__OPPOSITE_BRAIN_SIDES_NOT_YET_PRICED'}
+         'v7_side_scope':'V7_LEGACY_SELECTED_SIDE__V55_ANY_BRAIN_TWO_SIDED_CANDIDATES_SEPARATE'}
     coverage['status']=('MULTI_SOURCE_ACTIVE' if len(sources)>1
           else 'SINGLE_SOURCE_LIVE_REGISTRY_COVERAGE' if sources
           else 'ZERO_ATTESTED_LIVE_EVIDENCE')
@@ -2526,8 +2534,7 @@ def attach_v55_qualified_evidence(frame,events, *, now=None):
     report={"evidence_state":"NOT_EVALUABLE_NO_VERIFIED_EVENTS",
             "rows_read":len(events) if isinstance(events,pd.DataFrame) else 0,
             "qualified_events_used":0,"multi_family":0,"conflict_games":0,
-            "source_family_cap":1,"source_family_cap_basis":"PER_VERIFIED_UNDERLYING_FAMILY", 
-            "v55_bet_authority":0,
+            "source_family_cap":1,"v55_bet_authority":0,
             "miner_independent_family_policy":"ONE_VERIFIED_UNDERLYING_FAMILY_ONE_VOTE"}
     required={"Game_ID","Game_Start_UTC","Source_Family","Signal_Family","Signal_Side",
               "Observed_At_UTC","Qualified_At_UTC","Qualification_Status",
@@ -2653,20 +2660,7 @@ def attach_v55_qualified_evidence(frame,events, *, now=None):
             dirs.discard('')
             if not dirs or not dirs.issubset({home,away}):continue
             brains={v['_family'] for v in component}
-            # Component identities must include the independently certified
-            # underlying evidence-family key. Labeling every Miner component
-            # only SYSTEM_MINER silently folds genuinely different families
-            # into a single set entry and suppresses STRONG BET eligibility.
-            # The union-find above already collapses shared source/dependency
-            # chains, so each remaining component is one possible vote.
-            # Missing keys fail closed to the single source identity.
-            identities={
-                f"{v['_family']}::{v['_dependency']}"
-                if v['_dependency'] not in ('', 'NAN', 'NONE', 'NULL')
-                else v['_family']
-                for v in component
-            }
-            label='+'.join(sorted(identities))
+            label='+'.join(sorted(brains))
             if len(dirs)>1:
                 independent_oppose.add(label)
                 opposition.update(brains);conflicts.update(brains)
