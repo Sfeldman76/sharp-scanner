@@ -80,7 +80,7 @@ def build_two_sided_scan(board, *, now=None):
         'V55_Brain_Scan_Side','V55_Brain_Scan_Research_Only'])
 
 
-def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, now=None):
+def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_research_events=None, now=None):
     """Summarize two-sided discovery into the existing game-level board.
 
     Qualified events come ONLY from the current, already-vetted V55
@@ -111,6 +111,18 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, now=Non
         vetted_sides=pd.DataFrame()
     if not isinstance(raw_events,pd.DataFrame):
         raw_events=pd.DataFrame()
+    # Live research signals are independent discoveries, never qualified votes.
+    # Use the exact same original-quote and pregame matching gate as raw events.
+    if not isinstance(live_research_events,pd.DataFrame):
+        live_research_events=pd.DataFrame()
+    audit['live_research_input_rows']=int(len(live_research_events))
+    audit['raw_event_input_rows']=int(len(raw_events))
+    candidate_event_frames = [frame for frame in (raw_events,live_research_events)
+                              if not frame.empty]
+    discovery_events = (pd.concat(candidate_event_frames,ignore_index=True,sort=False)
+                        if candidate_event_frames else pd.DataFrame())
+    audit['discovery_event_rows']=int(len(discovery_events))
+    audit['research_only_events'] = True
     for idx,row in out.iterrows():
         gid=str(row.get('Game_ID') or '').strip()
         kick=stamp(row.get('Game_Start_UTC'))
@@ -155,8 +167,8 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, now=Non
         # The explicit external event feed may include unqualified named,
         # directional pregame signals. Allow discovery only when its ORIGINAL
         # book, side, line, and clock match the frozen two-sided quote.
-        if not sides.empty and not raw_events.empty:
-            for _,e in raw_events.iterrows():
+        if not sides.empty and not discovery_events.empty:
+            for _,e in discovery_events.iterrows():
                 if str(e.get('Game_ID') or '').strip()!=gid:continue
                 family=str(e.get('Source_Family') or '').upper().strip()
                 if family not in BRAINS or family=='CORE':continue
