@@ -1695,13 +1695,32 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
         shadow_bridge_audit = {'status':'FAIL_CLOSED_SHADOW_SOURCE',
                                'error':type(exc).__name__,'authority':0}
         log('[NCAAF-V55-SHADOW-SIGNAL-ERROR] '+type(exc).__name__)
+    # Independent-source structured signals are research-only, never votes.
+    from ncaaf_v55_other_shadow_signals import build_other_shadow_events
+    try:
+        # V55_PRODUCER_HANDOFF_V1: structure explicit per-family JSON payloads.
+        # This stage is discovery only; original-quote verification happens below.
+        from ncaaf_v55_producer_handoff import normalize_producer_signals
+        other_live_rows, producer_handoff_audit = normalize_producer_signals(live_system_rows)
+        other_shadow_events, other_shadow_audit = build_other_shadow_events(
+            other_live_rows, brain_scan_sides)
+        other_shadow_audit['producer_handoff'] = producer_handoff_audit
+    except Exception as exc:
+        other_shadow_events = pd.DataFrame()
+        other_shadow_audit = {'status':'FAIL_CLOSED_OTHER_BRAIN_SHADOW',
+                              'error':type(exc).__name__, 'authority':0}
+        log('[NCAAF-V55-OTHER-SHADOW-ERROR] '+type(exc).__name__)
+    shadow_all_frames=[x for x in (shadow_events,other_shadow_events)
+                       if isinstance(x,pd.DataFrame) and not x.empty]
+    combined_shadow_events=(pd.concat(shadow_all_frames,ignore_index=True,sort=False)
+                            if shadow_all_frames else pd.DataFrame())
     from ncaaf_v55_any_brain_candidates import attach_any_brain_candidates
     try:
         qualified_two_sides, _ = attach_v55_qualified_evidence(
             brain_scan_sides, combined_events)
         out, any_brain_audit = attach_any_brain_candidates(
             out,qualified_two_sides,raw_events=explicit_events,
-            live_research_events=shadow_events)
+            live_research_events=combined_shadow_events)
         any_brain_audit['two_sided_scan_build']=brain_scan_build_status
     except Exception as exc:
         any_brain_audit={'status':'FAIL_CLOSED_ANY_BRAIN_DISCOVERY',
@@ -1710,7 +1729,9 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
         out['V55_Any_Brain_Research_Status']='DISCOVERY_UNAVAILABLE'
         out['V55_Any_Brain_Candidates_JSON']='[]'
         out['V55_Any_Brain_Candidate_Count']=0
-        log('[NCAAF-V55-ANY-BRAIN-DISCOVERY-ERROR] '+type(exc).__name__)
+        log('[NCAAF-V55-ANY-BRAIN-DISCOVERY-ERROR] '+type(exc).__name__+': '+str(exc))
+        import traceback
+        log('[NCAAF-V55-ANY-BRAIN-DISCOVERY-TRACEBACK] '+traceback.format_exc())
 
     # Any-Brain handoff observability. Research-only; never changes authority.
     def _ab_event_count(frame):
@@ -1752,6 +1773,8 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
         json.dumps(handoff, sort_keys=True, default=str))
 
     updated['v55_any_brain_shadow_bridge'] = shadow_bridge_audit
+    updated['v55_other_brain_shadow_bridge'] = other_shadow_audit
+    log('[NCAAF-V55-OTHER-SHADOW-HANDOFF] '+json.dumps(other_shadow_audit,sort_keys=True,default=str))
     updated['v55_any_brain_candidate_discovery']=any_brain_audit
     log('[NCAAF-V55-ANY-BRAIN-DISCOVERY] '+json.dumps(any_brain_audit,sort_keys=True))
     # V7 independently shops existing backend bookmaker quotes. The V5.5
