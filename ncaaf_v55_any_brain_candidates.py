@@ -11,6 +11,7 @@ selector are not changed by this module.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from datetime import datetime, timezone
 
 BRAINS = frozenset((
@@ -117,12 +118,26 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_re
         live_research_events=pd.DataFrame()
     audit['live_research_input_rows']=int(len(live_research_events))
     audit['raw_event_input_rows']=int(len(raw_events))
-    candidate_event_frames = [frame for frame in (raw_events,live_research_events)
-                              if not frame.empty]
-    discovery_events = (pd.concat(candidate_event_frames,ignore_index=True,sort=False)
+    candidate_event_frames = []
+    for frame, is_live in ((raw_events, False), (live_research_events, True)):
+        if not frame.empty:
+            tagged = frame.copy()
+            tagged['_V55_Live_Research_Event'] = is_live
+            candidate_event_frames.append(tagged)
+    discovery_events = (pd.concat(candidate_event_frames, ignore_index=True, sort=False)
                         if candidate_event_frames else pd.DataFrame())
     audit['discovery_event_rows']=int(len(discovery_events))
     audit['research_only_events'] = True
+    # A live signal is a research observation, not a qualified production vote.
+    # Count INPUT and REJECTED events separately; otherwise valid live signals
+    # can silently disappear at this final origination gate.
+    rejected_events = Counter()
+    accepted_events = Counter()
+    if not discovery_events.empty:
+        known_game_ids = set(out['Game_ID'].astype(str)) if 'Game_ID' in out else set()
+        for _, event in discovery_events.iterrows():
+            if str(event.get('Game_ID') or '').strip() not in known_game_ids:
+                rejected_events['GAME_ID_NOT_ON_BOARD'] += 1
     for idx,row in out.iterrows():
         gid=str(row.get('Game_ID') or '').strip()
         kick=stamp(row.get('Game_Start_UTC'))
@@ -167,43 +182,101 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_re
         # The explicit external event feed may include unqualified named,
         # directional pregame signals. Allow discovery only when its ORIGINAL
         # book, side, line, and clock match the frozen two-sided quote.
-        if not sides.empty and not discovery_events.empty:
-            for _,e in discovery_events.iterrows():
-                if str(e.get('Game_ID') or '').strip()!=gid:continue
-                family=str(e.get('Source_Family') or '').upper().strip()
-                if family not in BRAINS or family=='CORE':continue
-                team=norm(e.get('Signal_Side'))
-                if team not in (home,away):continue
-                side_row=sides.loc[sides['Selected_Team'].map(norm).eq(team)]
-                if side_row.empty:continue
-                v=side_row.iloc[0]
-                obs=stamp(e.get('Observed_At_UTC'))
-                event_kick=stamp(e.get('Game_Start_UTC'))
-                qt=stamp(v.get('Backend_Quote_Timestamp'))
-                book=str(e.get('Observed_Book') or '').lower().strip()
-                spread=price(e.get('Observed_Spread'))
-                chosen_spread=price(v.get('Current_Spread'))
-                if (pd.isna(obs) or pd.isna(event_kick) or pd.isna(qt)
-                    or event_kick!=kick or not obs<=at<kick or obs>qt
-                    or (qt-obs).total_seconds()/60>15
-                    or not book or book!=str(v.get('Backend_Quote_Book') or '').lower().strip()
-                    or spread is None or chosen_spread is None
-                    or abs(spread-chosen_spread)>.001):continue
+        if not discovery_events.empty:
+            # We only inspect source events tied to THIS game. Every rejected
+            # observation receives a specific reason in the discovery audit.
+            for _, e in discovery_events.iterrows():
+                if str(e.get('Game_ID') or '').strip() != gid:
+                    continue
+                family = str(e.get('Source_Family') or '').upper().strip()
+                if family not in BRAINS or family == 'CORE':
+                    rejected_events['INVALID_INDEPENDENT_FAMILY'] += 1
+                    continue
+                team = norm(e.get('Signal_Side'))
+                if team not in (home, away):
+                    rejected_events['DIRECTION_NOT_IN_GAME'] += 1
+                    continue
+                if sides.empty or 'Selected_Team' not in sides:
+                    rejected_events['NO_VETTED_PAIRED_SIDES'] += 1
+                    continue
+                side_row = sides.loc[sides['Selected_Team'].map(norm).eq(team)]
+                if side_row.empty:
+                    rejected_events['SIDE_MISSING_FROM_VETTED_PAIR'] += 1
+                    continue
+                v = side_row.iloc[0]
+                observed_at = stamp(e.get('Observed_At_UTC'))
+                original_quote = stamp(e.get('Observed_Quote_UTC'))
+                event_kick = stamp(e.get('Game_Start_UTC'))
+                current_quote = stamp(v.get('Backend_Quote_Timestamp'))
+                if any(pd.isna(t) for t in (observed_at, event_kick, current_quote, at)):
+                    rejected_events['MISSING_EVENT_OR_QUOTE_TIMESTAMP'] += 1
+                    continue
+                if event_kick != kick:
+                    rejected_events['KICKOFF_MISMATCH'] += 1
+                    continue
+                if bool(e.get('_V55_Live_Research_Event')):
+                    # A LIVE signal is computed after its original quote.
+                    # The old gate required observed_at <= current_quote and
+                    # inadvertently blocked genuine contemporaneous evidence.
+                    # Do not infer a missing original-quote timestamp.
+                    if pd.isna(original_quote):
+                        rejected_events['MISSING_EVENT_OR_QUOTE_TIMESTAMP'] += 1
+                        continue
+                    if not original_quote <= observed_at <= at < kick:
+                        rejected_events['NON_PREGAME_OR_BAD_EVENT_CLOCK'] += 1
+                        continue
+                    if not original_quote <= current_quote <= at:
+                        rejected_events['INVALID_ORIGINAL_QUOTE_VINTAGE'] += 1
+                        continue
+                    if (observed_at - original_quote).total_seconds() > 15 * 60:
+                        rejected_events['EVALUATION_TOO_FAR_FROM_ORIGINAL_QUOTE'] += 1
+                        continue
+                    if (current_quote - original_quote).total_seconds() > 15 * 60:
+                        rejected_events['BOARD_QUOTE_NOT_SAME_VINTAGE'] += 1
+                        continue
+                    if (at - observed_at).total_seconds() > 15 * 60:
+                        rejected_events['STALE_RESEARCH_EVENT'] += 1
+                        continue
+                else:
+                    # Backward-compatible LEGACY raw-event contract. It is a
+                    # quote-timestamped observation that must PRECEDE the
+                    # vetted quote, not a newly computed live signal.
+                    if not observed_at <= current_quote <= at < kick:
+                        rejected_events['LEGACY_QUOTE_CLOCK_MISMATCH'] += 1
+                        continue
+                    if (current_quote - observed_at).total_seconds() > 15 * 60:
+                        rejected_events['LEGACY_QUOTE_TOO_OLD'] += 1
+                        continue
+                book = str(e.get('Observed_Book') or '').lower().strip()
+                vetted_book = str(v.get('Backend_Quote_Book') or '').lower().strip()
+                if not book or book != vetted_book:
+                    rejected_events['BOOK_MISMATCH'] += 1
+                    continue
+                spread = price(e.get('Observed_Spread'))
+                chosen_spread = price(v.get('Current_Spread'))
+                if spread is None or chosen_spread is None or abs(spread - chosen_spread) > .001:
+                    rejected_events['SPREAD_MISMATCH'] += 1
+                    continue
+                # The two-sided scan already certified same-book opposing
+                # spreads. These events remain shadow-only, even if accepted.
+                accepted_events[family] += 1
                 if team not in opportunities:
-                    opportunities[team]={
-                        'game_id':gid,'team':team,'side':('HOME' if team==home else 'AWAY'),
-                        'origins':[],'qualified_independent_families':0,
-                        'opposing_independent_families':0,
-                        'status':'UNQUALIFIED_SHADOW',
-                        'price_book':str(v.get('Backend_Quote_Book') or ''),
-                        'price_spread':chosen_spread,
-                        'price_odds':price(v.get('Odds_American')),
-                        'price_observed_utc':str(v.get('Backend_Quote_Timestamp') or ''),
-                        'system_ids':[],'bet_authority':0}
-                target=opportunities[team]
-                target['origins']=sorted(set(target['origins']) | {family})
+                    opportunities[team] = {
+                        'game_id': gid, 'team': team,
+                        'side': ('HOME' if team == home else 'AWAY'),
+                        'origins': [], 'qualified_independent_families': 0,
+                        'opposing_independent_families': 0,
+                        'status': 'UNQUALIFIED_SHADOW',
+                        'price_book': vetted_book,
+                        'price_spread': chosen_spread,
+                        'price_odds': price(v.get('Odds_American')),
+                        'price_observed_utc': str(v.get('Backend_Quote_Timestamp') or ''),
+                        'system_ids': [], 'bet_authority': 0,
+                    }
+                target = opportunities[team]
+                target['origins'] = sorted(set(target['origins']) | {family})
                 if str(e.get('Signal_Family') or '').strip():
-                    target['system_ids']=sorted(set(target['system_ids']) | {str(e['Signal_Family'])})[:15]
+                    target['system_ids'] = sorted(set(target['system_ids']) | {str(e['Signal_Family'])})[:15]
         # Preserve an already-established CORE candidate as a discovery origin;
         # do not independently certify a new probability from raw CORE margin.
         core_dec=str(row.get('V55_Bet_Decision') or '')
@@ -236,6 +309,14 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_re
         if core_team in (home,away):
             audit['opposing_core_side_candidates']+=sum(x['team']!=core_team for x in items)
         for f in origin_set:audit['by_origin'][f]=audit['by_origin'].get(f,0)+1
+    audit['live_event_accepted_rows'] = int(sum(accepted_events.values()))
+    audit['live_event_accepted_by_family'] = dict(accepted_events)
+    audit['live_event_rejections'] = dict(rejected_events)
+    audit['live_event_rejected_rows'] = int(sum(rejected_events.values()))
+    audit['live_event_accounted_for'] = (
+        audit['live_event_accepted_rows'] + audit['live_event_rejected_rows']
+        == audit['discovery_event_rows']
+    )
     # Strict boundary: this module cannot manufacture or update bet authority.
     for col in ('V55_Bet_Authority','V55_Bet_Decision','V55_Policy_EV',
                 'V55_Policy_Stake_Units','V55_Authority_Policy_Id'):
