@@ -1701,10 +1701,15 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
         # V55_PRODUCER_HANDOFF_V1: structure explicit per-family JSON payloads.
         # This stage is discovery only; original-quote verification happens below.
         from ncaaf_v55_producer_handoff import normalize_producer_signals
-        other_live_rows, producer_handoff_audit = normalize_producer_signals(live_system_rows)
+        # V55_LIVE_SOURCE_CONNECTORS_V1: real play-on-side producer signals.
+        # No contextual feature or independent vote is granted betting authority.
+        from ncaaf_v55_live_source_connectors import attach_live_source_signals
+        source_live_rows, live_source_audit = attach_live_source_signals(live_system_rows)
+        other_live_rows, producer_handoff_audit = normalize_producer_signals(source_live_rows)
         other_shadow_events, other_shadow_audit = build_other_shadow_events(
             other_live_rows, brain_scan_sides)
         other_shadow_audit['producer_handoff'] = producer_handoff_audit
+        other_shadow_audit['live_source_connectors'] = live_source_audit
     except Exception as exc:
         other_shadow_events = pd.DataFrame()
         other_shadow_audit = {'status':'FAIL_CLOSED_OTHER_BRAIN_SHADOW',
