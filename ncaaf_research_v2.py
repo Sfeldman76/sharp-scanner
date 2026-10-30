@@ -7731,7 +7731,7 @@ def _v55_capture_prospective_brain_evidence(rows: pd.DataFrame, *, storage_clien
     return report
 
 
-def _v55_settle_prospective_brain_evidence(*, dashboard_module=None,
+def _v55_settle_prospective_brain_evidence_exact_id_legacy(*, dashboard_module=None,
                                             storage_client=None,bucket_name='sharp-models',
                                             now=None,days_back=15) -> dict[str,Any]:
     """Settle exact physical IDs into SEPARATE immutable score records.
@@ -7816,6 +7816,20 @@ def _v55_settle_prospective_brain_evidence(*, dashboard_module=None,
             'pending':len(targets),'completed_found':len(scores),
             'settled':count,'write_errors':errors,
             'research_selection_influence':0,'automatic_bet_authority':False}
+
+def _v55_settle_prospective_brain_evidence(*, dashboard_module=None,
+                                            storage_client=None,bucket_name='sharp-models',
+                                            now=None,days_back=15) -> dict[str,Any]:
+    """Preserve exact-ID settlement; add non-authority dual-score research reviews."""
+    legacy=_v55_settle_prospective_brain_evidence_exact_id_legacy(
+        dashboard_module=dashboard_module, storage_client=storage_client,
+        bucket_name=bucket_name, now=now, days_back=days_back)
+    from ncaaf_v55_settlement_bridge import reconcile_prospective_score_reviews
+    review=reconcile_prospective_score_reviews(
+        dashboard_module=dashboard_module, storage_client=storage_client,
+        bucket_name=bucket_name, now=now, days_back=days_back,
+        in_streamlit=_v55_inside_streamlit_script_context())
+    return {**legacy, 'dual_source_score_review':review}
 
 def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard_module=None) -> pd.DataFrame:
     """Evaluate frozen confirmed Miner mechanisms against current pregame context.
