@@ -14,6 +14,7 @@ import json
 from collections import Counter
 from datetime import datetime, timezone
 from ncaaf_v55_live_source_connectors import MAX_QUOTE_TO_EVALUATION_S as RESEARCH_QUOTE_WINDOW_S
+from ncaaf_v55_game_identity import stable_game_key
 
 BRAINS = frozenset((
     'CORE', 'SYSTEM_MINER', 'PATHI', 'BIG_AL', 'STAT',
@@ -44,6 +45,7 @@ def build_two_sided_scan(board, *, now=None):
         (home, away), oriented = match(row)
         gid = str(row.get('Game_ID') or '').strip()
         kick = stamp(row.get('Game_Start_UTC'))
+        stable_id = stable_game_key(home,away,row.get('Game_Start_UTC'),normalizer=norm)
         if not (gid and oriented and home and away and pd.notna(kick) and at < kick):
             continue
         records = []
@@ -73,13 +75,14 @@ def build_two_sided_scan(board, *, now=None):
             rec['Backend_Quote_Book']=book
             rec['Backend_Quote_Timestamp']=observed.isoformat()
             rec['Quote_State']='FRESH_TWO_SIDED_BACKEND_PRICE_BRAIN_SCAN'
+            rec['V55_Stable_Game_Key']=stable_id
             rec['V55_Brain_Scan_Side']=side
             rec['V55_Brain_Scan_Research_Only']=True
             rec['V55_Bet_Authority']=0
             rec['V55_Bet_Decision']='RESEARCH_ONLY_NO_AUTHORITY'
             out.append(rec)
     return pd.DataFrame(out, columns=list(board.columns)+[
-        'V55_Brain_Scan_Side','V55_Brain_Scan_Research_Only'])
+        'V55_Stable_Game_Key','V55_Brain_Scan_Side','V55_Brain_Scan_Research_Only'])
 
 
 def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_research_events=None, now=None):
@@ -96,6 +99,11 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_re
     match, norm, price, stamp, _ = _helpers()
     at=stamp(now if now is not None else datetime.now(timezone.utc))
     out=board.copy()
+    out['V55_Stable_Game_Key'] = [
+        stable_game_key(*match(r)[0],r.get('Game_Start_UTC'),normalizer=norm)
+        if match(r)[1] else None for _,r in out.iterrows()
+    ]
+    key_counts=Counter(k for k in out['V55_Stable_Game_Key'] if k)
     for col,value in (
         ('V55_Any_Brain_Candidate_Count', 0),
         ('V55_Any_Brain_Qualified_Candidate_Count', 0),
@@ -137,11 +145,16 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_re
     if not discovery_events.empty:
         known_game_ids = set(out['Game_ID'].astype(str)) if 'Game_ID' in out else set()
         for _, event in discovery_events.iterrows():
-            if str(event.get('Game_ID') or '').strip() not in known_game_ids:
-                rejected_events['GAME_ID_NOT_ON_BOARD'] += 1
+            source_gid=str(event.get('Game_ID') or '').strip()
+            if source_gid not in known_game_ids:
+                ek=stable_game_key(event.get('Home_Team_Norm'),event.get('Away_Team_Norm'),
+                                   event.get('Game_Start_UTC'),normalizer=norm)
+                if not ek or key_counts.get(ek)!=1:
+                    rejected_events['GAME_ID_NOT_ON_BOARD'] += 1
     for idx,row in out.iterrows():
         gid=str(row.get('Game_ID') or '').strip()
         kick=stamp(row.get('Game_Start_UTC'))
+        stable_id=row.get('V55_Stable_Game_Key')
         (home,away),oriented=match(row)
         if not gid or not oriented or pd.isna(kick):
             continue
@@ -168,7 +181,7 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_re
             if not sources:
                 continue
             opportunities[team]={
-                'game_id':gid,'team':team,'side':side,
+                'game_id':gid,'stable_game_key':stable_id,'team':team,'side':side,
                 'origins':sources,'qualified_independent_families':n,
                 'opposing_independent_families':opposing,
                 'status':('QUALIFIED_CONFLICTED_SHADOW' if opposing else 'QUALIFIED_SHADOW'),
@@ -187,8 +200,16 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_re
             # We only inspect source events tied to THIS game. Every rejected
             # observation receives a specific reason in the discovery audit.
             for _, e in discovery_events.iterrows():
-                if str(e.get('Game_ID') or '').strip() != gid:
-                    continue
+                event_gid=str(e.get('Game_ID') or '').strip()
+                if event_gid != gid:
+                    # Research-only crosswalk, requiring oriented source teams,
+                    # calendar date, and one unique board Game_ID. Qualified
+                    # production events still use the unchanged exact ID gate.
+                    event_key=stable_game_key(e.get('Home_Team_Norm'),
+                                             e.get('Away_Team_Norm'),
+                                             e.get('Game_Start_UTC'),normalizer=norm)
+                    if not event_key or not stable_id or event_key!=stable_id or key_counts[stable_id]!=1:
+                        continue
                 family = str(e.get('Source_Family') or '').upper().strip()
                 if family not in BRAINS or family == 'CORE':
                     rejected_events['INVALID_INDEPENDENT_FAMILY'] += 1
@@ -213,8 +234,13 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_re
                     rejected_events['MISSING_EVENT_OR_QUOTE_TIMESTAMP'] += 1
                     continue
                 if event_kick != kick:
-                    rejected_events['KICKOFF_MISMATCH'] += 1
-                    continue
+                    event_key=stable_game_key(e.get('Home_Team_Norm'),
+                                             e.get('Away_Team_Norm'),
+                                             e.get('Game_Start_UTC'),normalizer=norm)
+                    if (not event_key or not stable_id or event_key != stable_id
+                        or key_counts[stable_id]!=1):
+                        rejected_events['DATE_TEAMS_MISMATCH_OR_AMBIGUOUS'] += 1
+                        continue
                 if bool(e.get('_V55_Live_Research_Event')):
                     # A LIVE signal is computed after its original quote.
                     # The old gate required observed_at <= current_quote and
@@ -223,7 +249,7 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_re
                     if pd.isna(original_quote):
                         rejected_events['MISSING_EVENT_OR_QUOTE_TIMESTAMP'] += 1
                         continue
-                    if not original_quote <= observed_at <= at < kick:
+                    if not original_quote <= observed_at <= at < min(kick,event_kick):
                         rejected_events['NON_PREGAME_OR_BAD_EVENT_CLOCK'] += 1
                         continue
                     if not original_quote <= current_quote <= at:
@@ -263,7 +289,7 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_re
                 accepted_events[family] += 1
                 if team not in opportunities:
                     opportunities[team] = {
-                        'game_id': gid, 'team': team,
+                        'game_id': gid, 'stable_game_key': stable_id, 'team': team,
                         'side': ('HOME' if team == home else 'AWAY'),
                         'origins': [], 'qualified_independent_families': 0,
                         'opposing_independent_families': 0,
@@ -285,7 +311,7 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_re
         if core_team in (home,away) and core_dec in ('CANDIDATE','BET','STRONG BET'):
             if core_team not in opportunities:
                 opportunities[core_team]={
-                    'game_id':gid,'team':core_team,
+                    'game_id':gid,'stable_game_key':stable_id,'team':core_team,
                     'side':('HOME' if core_team==home else 'AWAY'),
                     'origins':['CORE'],'qualified_independent_families':0,
                     'opposing_independent_families':0,'status':'CORE_CANDIDATE',
@@ -310,6 +336,8 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_re
         if core_team in (home,away):
             audit['opposing_core_side_candidates']+=sum(x['team']!=core_team for x in items)
         for f in origin_set:audit['by_origin'][f]=audit['by_origin'].get(f,0)+1
+    audit['stable_game_keys_available'] = int(sum(bool(x) for x in out['V55_Stable_Game_Key']))
+    audit['stable_game_key_collisions'] = int(sum(v>1 for v in key_counts.values()))
     audit['live_event_accepted_rows'] = int(sum(accepted_events.values()))
     audit['live_event_accepted_by_family'] = dict(accepted_events)
     audit['live_event_rejections'] = dict(rejected_events)

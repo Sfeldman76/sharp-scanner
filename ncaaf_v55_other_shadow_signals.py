@@ -13,6 +13,7 @@ import json
 from collections import Counter
 from datetime import datetime, timezone
 from ncaaf_v55_live_source_connectors import MAX_QUOTE_TO_EVALUATION_S as RESEARCH_QUOTE_WINDOW_S
+from ncaaf_v55_game_identity import stable_game_key
 
 FAMILIES = frozenset({'BIG_AL','PATHI','PREDICTION_TRACKER','STAT','MARKET_RICH'})
 FIELD = 'V55_Independent_Shadow_Signals_JSON'
@@ -37,7 +38,9 @@ def build_other_shadow_events(live_rows, two_sided, *, now=None):
         team=_norm_team(s.get('Selected_Team'))
         (home,away),oriented=_matchup_teams(s)
         if not gid or not oriented or team not in (home,away):continue
-        sides.setdefault((home,away),[]).append((s,gid,team))
+        identity=stable_game_key(home,away,s.get('Game_Start_UTC'),normalizer=_norm_team)
+        if not identity:continue
+        sides.setdefault(identity,[]).append((s,gid,team))
     for _,r in live_rows.iterrows():
         raw=r.get(FIELD)
         if raw is None or (isinstance(raw,float) and pd.isna(raw)) or raw=='':continue
@@ -67,14 +70,25 @@ def build_other_shadow_events(live_rows, two_sided, *, now=None):
             book=str(r.get('Bookmaker') or r.get('Book') or '').lower().strip()
             spread=_price(r.get('Value'))
             if not book or spread is None:rejected['SOURCE_BOOK_OR_SPREAD']+=1;continue
+            identity=stable_game_key(home,away,kick,normalizer=_norm_team)
+            if not identity:
+                rejected['INVALID_DATE_TEAM_IDENTITY']+=1;continue
+            same_day_sides=sides.get(identity,[])
+            # Both side quotes must belong to ONE distinct game in this
+            # calendar date + oriented team pair. Do not guess doubleheaders,
+            # reschedules, or duplicate backend Game_IDs.
+            possible_ids={g for _,g,_ in same_day_sides}
+            if len(possible_ids)!=1:
+                rejected['AMBIGUOUS_OR_MISSING_DATE_TEAM_GAME']+=1;continue
             found=False
-            for s,gid,team in sides.get((home,away),[]):
+            for s,gid,team in same_day_sides:
                 if target!=team:continue
                 sk=_timestamp(s.get('Game_Start_UTC'))
                 qt=_timestamp(s.get('Backend_Quote_Timestamp'))
                 ss=_price(s.get('Current_Spread'))
                 sb=str(s.get('Backend_Quote_Book') or '').lower().strip()
-                if (pd.isna(sk) or pd.isna(qt) or abs((sk-kick).total_seconds())>900
+                if (pd.isna(sk) or pd.isna(qt)
+                    or not original<=seen<=clock<min(kick,sk)
                     or not source_quote<=qt<=clock<sk
                     or (clock-qt).total_seconds()>RESEARCH_QUOTE_WINDOW_S
                     or (qt-source_quote).total_seconds()>RESEARCH_QUOTE_WINDOW_S
@@ -86,6 +100,9 @@ def build_other_shadow_events(live_rows, two_sided, *, now=None):
                      'Observed_Quote_UTC':source_quote.isoformat(),
                      'Observed_Book':book,'Observed_Spread':ss,
                      'Game_Start_UTC':sk.isoformat(),
+                     'V55_Original_Source_Kickoff_UTC':kick.isoformat(),
+                     'Home_Team_Norm':home,'Away_Team_Norm':away,
+                     'V55_Stable_Game_Key':identity,
                      'Research_Evidence_State':'UNQUALIFIED_PROSPECTIVE_SHADOW',
                      'V55_Evidence_Qualified':False}
                 if key not in accepted or val['Observed_At_UTC']>accepted[key]['Observed_At_UTC']:
