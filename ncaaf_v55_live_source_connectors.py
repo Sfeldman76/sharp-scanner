@@ -46,7 +46,7 @@ PT_SOURCE_CLOCKS = (
 # live quote. The generic live evaluator boolean does NOT do that for PT.
 PT_RECOMPUTED = 'V55_PT_Five_Source_Recomputed_On_Current_Quote'
 FIELD = 'V55_Independent_Shadow_Signals_JSON'
-MAX_QUOTE_TO_EVALUATION_S = 900
+MAX_QUOTE_TO_EVALUATION_S = 2400  # Research snapshot vintage; NOT an executable price
 MAX_OBSERVATION_AGE_S = 300
 # No age cutoff for the latest verified weekly PT source.
 

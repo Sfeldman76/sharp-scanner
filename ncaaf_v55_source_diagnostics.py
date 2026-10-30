@@ -69,7 +69,7 @@ def audit_live_source_inputs(live_rows, *, now=None):
         if clock >= kick:
             errors.append('GAME_STARTED')
         if quote_to_eval > MAX_QUOTE_TO_EVALUATION_S:
-            errors.append('QUOTE_TO_EVALUATION_OVER_15M')
+            errors.append('QUOTE_TO_EVALUATION_OVER_40M')
         if age > MAX_OBSERVATION_AGE_S:
             errors.append('EVALUATION_OLDER_THAN_5M')
         ready = any(_num(row.get(flag)) == 1 and _num(row.get(flag+'_DataReady')) == 1

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from datetime import datetime, timezone
+from ncaaf_v55_live_source_connectors import MAX_QUOTE_TO_EVALUATION_S as RESEARCH_QUOTE_WINDOW_S
 
 BRAINS = frozenset((
     'CORE', 'SYSTEM_MINER', 'PATHI', 'BIG_AL', 'STAT',
@@ -228,10 +229,10 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_re
                     if not original_quote <= current_quote <= at:
                         rejected_events['INVALID_ORIGINAL_QUOTE_VINTAGE'] += 1
                         continue
-                    if (observed_at - original_quote).total_seconds() > 15 * 60:
+                    if (observed_at - original_quote).total_seconds() > RESEARCH_QUOTE_WINDOW_S:
                         rejected_events['EVALUATION_TOO_FAR_FROM_ORIGINAL_QUOTE'] += 1
                         continue
-                    if (current_quote - original_quote).total_seconds() > 15 * 60:
+                    if (current_quote - original_quote).total_seconds() > RESEARCH_QUOTE_WINDOW_S:
                         rejected_events['BOARD_QUOTE_NOT_SAME_VINTAGE'] += 1
                         continue
                     if (at - observed_at).total_seconds() > 15 * 60:

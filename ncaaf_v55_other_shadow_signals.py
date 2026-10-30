@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from datetime import datetime, timezone
+from ncaaf_v55_live_source_connectors import MAX_QUOTE_TO_EVALUATION_S as RESEARCH_QUOTE_WINDOW_S
 
 FAMILIES = frozenset({'BIG_AL','PATHI','PREDICTION_TRACKER','STAT','MARKET_RICH'})
 FIELD = 'V55_Independent_Shadow_Signals_JSON'
@@ -61,7 +62,7 @@ def build_other_shadow_events(live_rows, two_sided, *, now=None):
             if any(pd.isna(x) for x in (seen,row_seen,original,source_quote,kick,clock)):
                 rejected['MISSING_TIMESTAMP']+=1;continue
             if not (original==source_quote and original<=row_seen<=seen<=clock<kick
-                    and (clock-seen).total_seconds()<=300 and (seen-original).total_seconds()<=900):
+                    and (clock-seen).total_seconds()<=300 and (seen-original).total_seconds()<=RESEARCH_QUOTE_WINDOW_S):
                 rejected['VINTAGE_OR_AGE']+=1;continue
             book=str(r.get('Bookmaker') or r.get('Book') or '').lower().strip()
             spread=_price(r.get('Value'))
@@ -75,8 +76,8 @@ def build_other_shadow_events(live_rows, two_sided, *, now=None):
                 sb=str(s.get('Backend_Quote_Book') or '').lower().strip()
                 if (pd.isna(sk) or pd.isna(qt) or abs((sk-kick).total_seconds())>900
                     or not source_quote<=qt<=clock<sk
-                    or (clock-qt).total_seconds()>900
-                    or (qt-source_quote).total_seconds()>900
+                    or (clock-qt).total_seconds()>RESEARCH_QUOTE_WINDOW_S
+                    or (qt-source_quote).total_seconds()>RESEARCH_QUOTE_WINDOW_S
                     or sb!=book or ss is None
                     or abs(spread-(ss if source_side==team else -ss))>.001):continue
                 key=(gid,team,family,mid)
