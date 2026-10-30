@@ -1393,6 +1393,86 @@ def _pt_load_feeder_manifest(storage_client,bucket_name: str) -> dict[str,Any]:
         return {}
 
 
+def _pt_attest_manual_live_upload(sc, bucket_name, raw):
+    import hashlib
+    from datetime import datetime, timezone
+
+    if not isinstance(raw, bytes):
+        return None, None, None
+
+    path = f"{PT_RAW_PREFIX}/ncaapredictions.csv"
+
+    try:
+        bucket = sc.bucket(bucket_name)
+        blob = bucket.blob(path)
+        blob.reload()
+
+        sha = hashlib.sha256(raw).hexdigest()
+
+        if hashlib.sha256(blob.download_as_bytes()).hexdigest() != sha:
+            return None, None, None
+
+        md = blob.metadata or {}
+
+        if (
+            md.get("source") != "manual-ui"
+            or md.get("sha256") != sha
+            or md.get("validated") != "true"
+        ):
+            return None, None, None
+
+        manifest = _pt_load_feeder_manifest(sc, bucket_name)
+        rec = (manifest.get("sources") or {}).get("ncaapredictions") or {}
+
+        if rec.get("status") not in {"PASS", "SKIPPED_IDENTICAL"}:
+            return None, None, None
+
+        if rec.get("sha256") != sha:
+            return None, None, None
+
+        if rec.get("raw_blob") != f"gs://{bucket_name}/{path}":
+            return None, None, None
+
+        observed = blob.updated
+
+        if observed is None:
+            return None, None, None
+
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=timezone.utc)
+
+        if observed > datetime.now(timezone.utc):
+            return None, None, None
+
+        if rec.get("status") == "PASS":
+            fetched = datetime.fromisoformat(
+                str(rec["fetched_utc"]).replace("Z", "+00:00")
+            )
+
+            if fetched.tzinfo is None:
+                return None, None, None
+
+            if not 0 <= (observed - fetched).total_seconds() <= 600:
+                return None, None, None
+
+            stamp = fetched.astimezone(timezone.utc).strftime(
+                "%Y%m%dT%H%M%SZ"
+            )
+
+            snapshot = bucket.blob(
+                f"{PT_FEEDER_SNAPSHOT_PREFIX}/{stamp}/ncaapredictions.csv"
+            )
+
+            if hashlib.sha256(snapshot.download_as_bytes()).hexdigest() != sha:
+                return None, None, None
+
+        return observed.isoformat(), sha, str(blob.generation)
+
+    except Exception:
+        return None, None, None
+
+
+
 def _pt_load_season(season: int, *, storage_client, bucket_name: str, force_web: bool=False, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
     season=int(season); raw_path=f"{PT_RAW_PREFIX}/ncaa{season}.csv"; norm_path=f"{PT_NORMALIZED_PREFIX}/ncaa{season}.csv"
     current=season>=PT_CURRENT_SEASON
@@ -1401,7 +1481,8 @@ def _pt_load_season(season: int, *, storage_client, bucket_name: str, force_web:
     # V2.17: GCS is the primary model-side interface for every season. Completed
     # historical seasons are immutable. The current-season YTD archive can remain
     # valid for a week; the separate live/current feed has the tighter freshness gate.
-    max_age=PT_CURRENT_ARCHIVE_MAX_AGE_HOURS if current else None
+    # Manual weekly archive: retain latest validated snapshot until superseded.
+    max_age=None
     raw,gdiag=_pt_gcs_raw(storage_client,bucket_name,raw_path,max_age_hours=max_age)
     if raw is not None:
         source="GCS_FEEDER_RAW"
@@ -1444,7 +1525,8 @@ def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -
     authoritative NCAA schedule.
     """
     raw_path=f"{PT_RAW_PREFIX}/ncaapredictions.csv"
-    raw,gcsv=_pt_gcs_raw(storage_client,bucket_name,raw_path,max_age_hours=PT_FEEDER_CURRENT_MAX_AGE_HOURS)
+    # Weekly uploader schedule: no arbitrary 24h/72h source expiration.
+    raw,gcsv=_pt_gcs_raw(storage_client,bucket_name,raw_path,max_age_hours=None)
     hraw=None
     ghtml={"status":"NOT_REQUIRED_CSV_ONLY","age_hours":None}
     source=""; csv_exc=None; html_exc=None; infer_diag={"status":"NOT_REQUIRED_CSV_ONLY"}; verified_map={}
@@ -1490,6 +1572,15 @@ def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -
         return pd.DataFrame(),{"status":"UNAVAILABLE","season":PT_CURRENT_SEASON,"error":f"CSV={err_csv}; HTML={err_html}","gcs_csv":gcsv,"gcs_html":ghtml,"url":PT_LIVE_CSV_URL,"page_url":PT_LIVE_PAGE_URL,"authority":0}
 
     frame=frame.copy(); frame["source_kind"]="LIVE_CURRENT"; frame["source_priority"]=2
+    # Only a SHA+generation+manifest+snapshot verified original upload provides
+    # a producer clock. Normalized CSV object updates do not establish one.
+    _pt_clock,_pt_sha,_pt_generation=_pt_attest_manual_live_upload(
+        storage_client,bucket_name,raw if source=="GCS_FEEDER_LIVE" else None
+    )
+    frame["pt_source_observed_at_utc"]=_pt_clock
+    frame["pt_source_sha256"]=_pt_sha
+    frame["pt_source_generation"]=_pt_generation
+    log_func(f"[NCAAF-PT-UPLOADER-PROVENANCE] status={'ATTESTED' if _pt_clock else 'BLOCKED'} observed={_pt_clock} authority=0")
     try: storage_client.bucket(bucket_name).blob(PT_CURRENT_LIVE_BLOB).upload_from_string(frame.to_csv(index=False).encode(),content_type="text/csv")
     except Exception: pass
     diag.update({"source":source,"source_kind":"LIVE_CURRENT","url":PT_LIVE_CSV_URL,"page_url":PT_LIVE_PAGE_URL,"header_verification":infer_diag,"verified_header_map":verified_map,"gcs_csv":gcsv,"gcs_html":ghtml,"authority":0})
@@ -1798,10 +1889,17 @@ def _pt_candidate_map(external_names: Iterable[str], internal_names: Iterable[st
     for raw in sorted({_pt_team_key(x) for x in external_names if _pt_team_key(x)}):
         if raw in ints: mapping[raw]=raw; continue
         hinted=hints.get(raw)
-        if hinted in ints:
+        # University of Tennessee and Middle Tennessee State must never
+        # resolve to one another, including through a provided alias hint.
+        def _pt_confuses_tennessee(a,b):
+            is_mid=lambda x: x=="middle tennessee" or x.startswith("middle tennessee ")
+            return (a=="tennessee" and is_mid(b)) or (is_mid(a) and b=="tennessee")
+        if hinted in ints and not _pt_confuses_tennessee(raw,hinted):
             mapping[raw]=hinted; continue
         rt=set(raw.split()); scored=[]
         for cand in ints:
+            if _pt_confuses_tennessee(raw,cand):
+                continue
             ct=set(cand.split())
             subset=rt.issubset(ct) and len(rt)>=1
             tok=(len(rt&ct)/max(len(rt),1)) if rt else 0.0
@@ -6712,69 +6810,112 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
         if sc is None:
             from google.cloud import storage
             sc=storage.Client()
-        # V5.5 PRODUCTION PT: prefer the source explicitly labeled current-week.
-        # The merged season file contains earlier fixtures/rematches; collapsing
-        # duplicate school pairs across that archive can silently discard *all*
-        # current-week matches and cannot prove when an old prediction existed.
+        # V5.5 PRODUCTION PT: preserve the GitHub current-live preference,
+        # strict per-game pregame validation, and the Miner index restore below.
+        # Read RAW evidence first. Normalized GCS writes are NEVER a substitute
+        # for the original weekly Prediction Tracker source observation clock.
         from ncaaf_miner_live_unblock_v1 import school_key as _live_school_key
         _pt_now=pd.Timestamp.now(tz="UTC")
+        _pt_source_raw=_pt_blob_bytes(sc,bucket_name,f"{PT_RAW_PREFIX}/ncaapredictions.csv")
+        _verified_clock,_verified_sha,_verified_generation=(
+            _pt_attest_manual_live_upload(sc,bucket_name,_pt_source_raw)
+        )
+        if not _verified_clock:
+            return out,{'status':'UNATTESTED_LIVE_PT_UPLOAD','matched':0,
+                        'reason':'RAW_METADATA_MANIFEST_SNAPSHOT_NOT_VERIFIED','authority':0}
+        _verified_stamp=pd.to_datetime(_verified_clock,utc=True,errors='coerce')
+        if pd.isna(_verified_stamp) or _verified_stamp>_pt_now:
+            return out,{'status':'INVALID_RAW_PT_CLOCK','matched':0,'authority':0}
+
+        def _pt_tennessee_conflict(raw,canonical):
+            a=_pt_team_key(raw);b=_pt_team_key(canonical)
+            is_mid=lambda v:v=='middle tennessee' or v.startswith('middle tennessee ')
+            return (a=='tennessee' and is_mid(b)) or (is_mid(a) and b=='tennessee')
+
         _pt_sources=[]
+        _pt_duplicate_pairs=set()
         _pt_read_audit=[]
         for _path,_priority in ((PT_CURRENT_LIVE_BLOB,2),(PT_CURRENT_BLOB,1)):
             try:
                 _blob=sc.bucket(bucket_name).blob(_path)
                 _blob.reload()
                 _updated=pd.to_datetime(getattr(_blob,'updated',None),utc=True,errors='coerce')
-                if pd.isna(_updated) or _updated>_pt_now+pd.Timedelta(minutes=5) or _updated<_pt_now-pd.Timedelta(days=14):
-                    _pt_read_audit.append({'source':_path,'status':'UNVERIFIED_OR_STALE_SOURCE_TIMESTAMP'})
+                # No artificial 14-day cache cutoff: PT is uploaded weekly.
+                # Still reject missing/future cache writes.
+                if pd.isna(_updated) or _updated>_pt_now+pd.Timedelta(minutes=5):
+                    _pt_read_audit.append({'source':_path,'status':'INVALID_CACHE_TIMESTAMP'})
                     continue
                 _source=pd.read_csv(io.BytesIO(_blob.download_as_bytes()))
                 if _source.empty:
                     _pt_read_audit.append({'source':_path,'status':'EMPTY'})
                     continue
-                if 'season' not in _source.columns or not {'home_key','away_key'}.issubset(_source.columns):
-                    _pt_read_audit.append({'source':_path,'status':'MISSING_SEASON_OR_TEAM_KEYS'})
+                _required={'season','home_key','away_key','source_kind',
+                           'pt_source_sha256','pt_source_generation','pt_source_observed_at_utc'}
+                if not _required.issubset(_source.columns):
+                    _pt_read_audit.append({'source':_path,'status':'MISSING_ATTESTATION_COLUMNS'})
                     continue
-                _source=_source.loc[pd.to_numeric(_source['season'],errors='coerce').eq(PT_CURRENT_SEASON)].copy()
-                if _priority==1:
-                    # Merged current.csv contains completed 2026 games. Only
-                    # genuine LIVE_CURRENT rows may stand in for the live feed.
-                    if 'source_kind' not in _source.columns:
-                        _pt_read_audit.append({'source':_path,'status':'NO_LIVE_ORIGIN_ATTESTATION'})
-                        continue
-                    _source=_source.loc[_source['source_kind'].astype(str).eq('LIVE_CURRENT')]
+                _source=_source.loc[
+                    pd.to_numeric(_source['season'],errors='coerce').eq(PT_CURRENT_SEASON)
+                    & _source['source_kind'].astype(str).eq('LIVE_CURRENT')
+                ].copy()
+                _row_stamps=pd.to_datetime(_source['pt_source_observed_at_utc'],utc=True,errors='coerce')
+                _source=_source.loc[
+                    _source['pt_source_sha256'].astype(str).eq(str(_verified_sha))
+                    & pd.to_numeric(_source['pt_source_generation'],errors='coerce').eq(int(_verified_generation))
+                    & _row_stamps.eq(_verified_stamp)
+                ].copy()
+                if _source.empty:
+                    _pt_read_audit.append({'source':_path,'status':'NO_ROWS_MATCH_RAW_ATTESTATION'})
+                    continue
                 _source['home_i']=_source['home_key'].map(_live_school_key)
                 _source['away_i']=_source['away_key'].map(_live_school_key)
-                _source=_source.loc[_source.home_i.ne('')&_source.away_i.ne('')&_source.home_i.ne(_source.away_i)].copy()
+                _source=_source.loc[
+                    _source.home_i.ne('')&_source.away_i.ne('')
+                    &_source.home_i.ne(_source.away_i)
+                    &~_source.apply(lambda r:_pt_tennessee_conflict(r['home_key'],r['home_i'])
+                                             or _pt_tennessee_conflict(r['away_key'],r['away_i']),axis=1)
+                ].copy()
                 _source['pair_key']=_source.home_i.astype(str)+'|'+_source.away_i.astype(str)
                 _counts=_source.pair_key.value_counts()
                 _dup=int(_source.pair_key.map(_counts).gt(1).sum())
+                _pt_duplicate_pairs.update(_counts.index[_counts.gt(1)].tolist())
                 _source=_source.loc[_source.pair_key.map(_counts).eq(1)].copy()
-                # A newer *raw* snapshot is preferred, but never backdate a
-                # later ingestion timestamp or fabricate an event game date.
-                _source['_pt_source_updated_utc']=_updated
+                _source['_pt_source_updated_utc']=_verified_stamp
                 _source['_pt_source_priority']=_priority
                 _pt_sources.append(_source)
                 _pt_read_audit.append({'source':_path,'status':'PASS','eligible_rows':len(_source),
-                                      'duplicate_rows_held':_dup,'updated_utc':_updated.isoformat()})
+                                      'duplicate_rows_held':_dup,
+                                      'original_upload_utc':_verified_clock})
             except Exception as _source_exc:
                 _pt_read_audit.append({'source':_path,'status':'UNAVAILABLE:'+type(_source_exc).__name__})
         if not _pt_sources:
             import logging as _pt_prod_log
             _pt_prod_log.warning('[NCAAF-PT-LIVE-SOURCE-MATCH] %s',{
-                'status':'NO_VERIFIED_CURRENT_WEEK_SOURCE','sources':_pt_read_audit})
-            return out,{'status':'UNAVAILABLE_NO_VALID_PREGAME_PT_SOURCE','matched':0,'source_audit':_pt_read_audit}
+                'status':'NO_ATTESTED_CURRENT_WEEK_SOURCE','sources':_pt_read_audit})
+            return out,{'status':'UNAVAILABLE_NO_VALID_PREGAME_PT_SOURCE','matched':0,
+                        'source_audit':_pt_read_audit,'authority':0}
         ex=pd.concat(_pt_sources,ignore_index=True,sort=False)
         ex=ex.sort_values(['_pt_source_priority','_pt_source_updated_utc'],ascending=False)
+        # A duplicated LIVE_CURRENT matchup cannot be rescued by an archive
+        # fallback. Preserve the source ambiguity hold across both caches.
+        ex=ex.loc[~ex.pair_key.isin(_pt_duplicate_pairs)].copy()
         ex=ex.drop_duplicates(subset=['pair_key'],keep='first').set_index('pair_key',drop=False)
-        homes=out.get('Home_Team_Norm',out.get('Home_Team',pd.Series('',index=out.index))).map(_live_school_key)
-        aways=out.get('Away_Team_Norm',out.get('Away_Team',pd.Series('',index=out.index))).map(_live_school_key)
-        # Source-level pregame selection: use the source's own observation
-        # time and verified market kickoff, not the date of an old archive game.
+        _home_raw=out.get('Home_Team_Norm',out.get('Home_Team',pd.Series('',index=out.index)))
+        _away_raw=out.get('Away_Team_Norm',out.get('Away_Team',pd.Series('',index=out.index)))
+        homes=_home_raw.map(_live_school_key)
+        aways=_away_raw.map(_live_school_key)
+        _bad_pairs=[_pt_tennessee_conflict(raw,canonical)
+                    for raw,canonical in zip(_home_raw,homes)]
+        _bad_pairs=[a or _pt_tennessee_conflict(raw,canonical)
+                    for a,raw,canonical in zip(_bad_pairs,_away_raw,aways)]
         _kicks=pd.to_datetime(out.get('Game_Start',out.get('Game_Date',pd.Series(pd.NaT,index=out.index))),utc=True,errors='coerce')
+        _market_pairs=pd.Series([f'{h}|{a}' for h,a in zip(homes,aways)])
+        _market_pair_counts=_market_pairs.value_counts()
         _eligible_pairs={}
         for _i,(_h,_a) in enumerate(zip(homes,aways)):
+            if _bad_pairs[_i]:continue
             _key=f'{_h}|{_a}'
+            if _market_pair_counts.get(_key,0)!=1:continue
             if _key not in ex.index:continue
             _src=ex.loc[_key]
             _source_time=_src['_pt_source_updated_utc']
@@ -6797,6 +6938,7 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
         ext_consensus=np.full(len(out),np.nan); ext_clusters=np.full(len(out),np.nan); ext_indices=np.full(len(out),np.nan)
         ext_std=np.full(len(out),np.nan); ext_iqr=np.full(len(out),np.nan)
         listed=np.zeros(len(out),dtype=float); full_five=np.zeros(len(out),dtype=float)
+        _pt_obs=[None]*len(out)
         comp={k:np.full(len(out),np.nan) for k in PT_PUBLISHED_WEIGHTS}
         _pt_live_selection=None
         try:
@@ -6812,6 +6954,7 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
             r=ex.loc[k]
             if isinstance(r,pd.DataFrame): continue
             listed[i]=1.0
+            _pt_obs[i]=_verified_clock  # original RAW verified upload timestamp
             # Research-only five-source champion challenger, chosen and locked
             # in development. Never substitute the hardcoded earlier five.
             _available=[]
@@ -6849,6 +6992,7 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
         out["_PT_PROMO_FIVE_MARGIN_HOME"]=_promo_fair
         out["_PT_PROMO_FIVE_COUNT"]=_promo_n
         out["_PT_PROMO_SELECTION_SHA"]=_pt_live_sha
+        out["NCAAF_PT_Five_Source_Observed_At_UTC"]=_pt_obs
         out["_V210_PT_META_MARGIN_TEAM"]=meta
         out["_V210_PT_META_EDGE_POINTS"]=meta-market
         out["_V210_PT_META_SYSTEM_COUNT"]=cnt
@@ -7985,6 +8129,8 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     out["NCAAF_PT_Five_Source_Margin_Home"]=[_pt_five_by.get(k,np.nan) for k in out[keycol]]
     out["NCAAF_PT_Five_Source_Count"]=[_pt_five_count_by.get(k,0) for k in out[keycol]]
     out["NCAAF_PT_Five_Source_Selection_SHA"]=[_pt_five_sha_by.get(k) for k in out[keycol]]
+    _pt_five_obs_by={keys[i]:cdf.iloc[i].get("NCAAF_PT_Five_Source_Observed_At_UTC") for i in range(len(cdf))}
+    out["NCAAF_PT_Five_Source_Observed_At_UTC"]=[_pt_five_obs_by.get(k) for k in out[keycol]]
     out["NCAAF_PT_Meta_Margin_Home"]=[_pt_meta_by.get(k,np.nan) for k in out[keycol]]
     out["NCAAF_PT_Meta_Edge_Home"]=[_pt_edge_by.get(k,np.nan) for k in out[keycol]]
     out["NCAAF_PT_Meta_System_Count"]=[_pt_cnt_by.get(k,np.nan) for k in out[keycol]]
