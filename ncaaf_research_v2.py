@@ -7691,6 +7691,22 @@ def _v55_capture_prospective_brain_evidence(rows: pd.DataFrame, *, storage_clien
         storage_client=storage.Client()
     bucket=storage_client.bucket(bucket_name)
     registry_status=_v55_bootstrap_brain_registry_hold(bucket,now=now)
+    # V55_PRODUCTION_LEDGER_RULE_LOCK: first-seen live rule registration is
+    # prospective-only; previous immutable observations are never modified.
+    try:
+        from ncaaf_v55_production_ledger import stamp_capture_rule_versions
+        _rule_stamp=stamp_capture_rule_versions(doc,bucket,now=doc['captured_at_utc'])
+        import logging as _v55_ledger_logging
+        _v55_ledger_logging.getLogger(__name__).info(
+            '[NCAAF-V55-RULE-REGISTRATION] %s',_rule_stamp)
+    except Exception:
+        import logging as _v55_ledger_logging
+        _v55_ledger_logging.getLogger(__name__).exception(
+            '[NCAAF-V55-RULE-REGISTRATION] HOLD_ERROR_CAPTURE_CONTINUES')
+        for _event in doc.get('observations',[]):
+            if isinstance(_event,dict):
+                _event['rule_registration_before_capture']=False
+                _event['rule_version_hold']='REGISTRY_UNAVAILABLE_FAIL_CLOSED'
     report={'status':doc['status'],'registry_status':registry_status,
             'observations':len(doc['observations']),
             'source_counts':doc['source_counts'],
@@ -7829,7 +7845,21 @@ def _v55_settle_prospective_brain_evidence(*, dashboard_module=None,
         dashboard_module=dashboard_module, storage_client=storage_client,
         bucket_name=bucket_name, now=now, days_back=days_back,
         in_streamlit=_v55_inside_streamlit_script_context())
-    return {**legacy, 'dual_source_score_review':review}
+    # V55_PRODUCTION_LEDGER_REVIEW: headless, research-only, fail-closed.
+    # Reads the immutable original observations and existing score reviews.
+    try:
+        from ncaaf_v55_production_ledger import run_cycle
+        _ledger_result=run_cycle(
+            storage_client=storage_client,bucket_name=bucket_name,now=now,
+            in_streamlit=_v55_inside_streamlit_script_context())
+    except Exception as _ledger_exc:
+        import logging as _v55_ledger_logging
+        _v55_ledger_logging.getLogger(__name__).exception(
+            '[NCAAF-V55-PRODUCTION-LEDGER] HOLD_ERROR_NO_AUTHORITY')
+        _ledger_result={'status':'HOLD_ERROR_NO_AUTHORITY','error':
+                        type(_ledger_exc).__name__,'bet_authority':0}
+    return {**legacy, 'dual_source_score_review':review,
+            'production_intelligence_ledger':_ledger_result}
 
 def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard_module=None) -> pd.DataFrame:
     """Evaluate frozen confirmed Miner mechanisms against current pregame context.
