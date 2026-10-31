@@ -36,7 +36,8 @@ def _float(v):
 
 
 def _str(v):
-    return str(v or '').strip()
+    value=str(v or '').strip()
+    return '' if value.lower() in ('nan','nat','none','null') else value
 
 
 def _iso(t):
@@ -128,8 +129,9 @@ def build_core_records(board, *, now=None):
         bookline = _float(x.get('Current_Spread'))
         odds = _float(x.get('Odds_American'))
         direction = None
-        if selected and primary and norm(selected) == norm(primary):
-            direction = 'HOME' if norm(selected)==norm(home) else 'AWAY' if norm(selected)==norm(away) else None
+        if selected and primary and canonical_team_strict(selected) == canonical_team_strict(primary):
+            direction = ('HOME' if canonical_team_strict(selected)==canonical_team_strict(home) else
+                         'AWAY' if canonical_team_strict(selected)==canonical_team_strict(away) else None)
         quote_good = bool(direction and quote_book and quote_stamp and
                           published - timedelta(minutes=90) <= quote_stamp <= published and
                           quote_stamp < kickoff and bookline is not None and odds is not None and
@@ -141,6 +143,22 @@ def build_core_records(board, *, now=None):
         group = 'PRICED_CORE_RESEARCH_LEAN' if quote_good else 'CORE_MODEL_ONLY_NO_PRICE_OR_SELECTION'
         if not quote_good:
             holds['NO_VERIFIED_CORE_DIRECTION_AND_PRICE'] += 1
+            if not selected: holds['MISSING_V55_RESEARCH_SELECTED_TEAM'] += 1
+            if not primary: holds['MISSING_PRIMARY_SELECTED_TEAM'] += 1
+            if selected and primary and canonical_team_strict(selected)!=canonical_team_strict(primary):
+                holds['RESEARCH_VS_PRIMARY_SELECTION_CONFLICT'] += 1
+            if selected and canonical_team_strict(selected) not in (canonical_team_strict(home),canonical_team_strict(away)):
+                holds['SELECTED_TEAM_NOT_AN_ORIENTED_PARTICIPANT'] += 1
+            if not quote_book: holds['MISSING_BACKEND_BOOK'] += 1
+            if not quote_stamp: holds['MISSING_QUOTE_TIMESTAMP'] += 1
+            if bookline is None: holds['MISSING_BACKEND_SPREAD'] += 1
+            if odds is None: holds['MISSING_BACKEND_ODDS'] += 1
+            if not _str(x.get('Quote_State')).startswith('FRESH_'):
+                holds['NO_FRESH_VERIFIED_QUOTE_STATE'] += 1
+            if _str(x.get('V55_Research_Decision')) not in (
+                'UNVALIDATED_NORMAL_MODEL_LEAN_ONLY',
+                'CALIBRATED_RESEARCH_ONLY_NO_BET_AUTHORITY'):
+                holds['RESEARCH_DECISION_NOT_PRICE_ELIGIBLE'] += 1
         doc = {'family':'CORE','signal_id':'CORE-NONLINEAR_HGB-V55',
                'source':'VERIFIED_V55_BIGQUERY_COMPLETE_PUBLICATION',
                'policy':POLICY,'game_key':game_key,
@@ -244,7 +262,7 @@ def capture_board(*, bq_client, bucket, now=None):
                 previous = _read_existing(bucket.blob(path))
                 # Keep the very first priced decision. A later opposite side is
                 # explicitly reported, never permitted to overwrite the original.
-                if norm(previous.get('selected_team')) != norm(rec['selected_team']):
+                if canonical_team_strict(previous.get('selected_team')) != canonical_team_strict(rec['selected_team']):
                     changes += 1
                     conflict = {'game_key':rec['game_key'], 'first_decision_id':previous.get('decision_id'),
                                 'first_team':previous.get('selected_team'), 'later_team':rec['selected_team'],
@@ -263,70 +281,225 @@ def capture_board(*, bq_client, bucket, now=None):
             'new_core_model_only':first_model,
             'core_research_side_flips_observed':changes,
             'missing_selection_and_price':diagnostics['holds'].get('NO_VERIFIED_CORE_DIRECTION_AND_PRICE',0),
+            'research_hold_reasons_overlapping':diagnostics['holds'],
             'errors_count':len(errors),'errors':errors[:10],
             'core_input_vintage_certified':False,'bet_authority':0}
 
 
-def aggregate_core_miner_relationships(decisions, scores, conflict_ids=None):
-    """One matchup per game, not one bet per Miner firing or bookmaker."""
-    conflicted = set(conflict_ids or ())
-    bygame = collections.defaultdict(list)
-    for d in decisions:
-        if isinstance(d,dict) and d.get('game_key') and d.get('decision_id') not in conflicted:
-            bygame[d['game_key']].append(d)
-    result=[]
-    for game, members in bygame.items():
-        core = [d for d in members if d.get('family')=='CORE'
-                and d.get('side_relative') in ('HOME','AWAY') and d.get('price_verified')]
-        miners = [d for d in members if d.get('family')=='MINER'
-                  and d.get('side_relative') in ('HOME','AWAY') and d.get('price_verified')]
-        if not core or not miners:
+# V55-CANONICAL-CORE-MINER-RESEARCH-JOIN-20261031
+# Exact, reviewed school / mascot equivalence classes only. Do not use
+# substring matching (Florida vs Florida Atlantic) or speculative fuzzy joins.
+TEAM_ALIASES = {
+    'appalachian state mountaineers':'appalachian state',
+    'arizona wildcats':'arizona',
+    'boise state broncos':'boise state',
+    'colorado state rams':'colorado state',
+    'florida gators':'florida',
+    'fresno state bulldogs':'fresno state',
+    'georgia bulldogs':'georgia',
+    'georgia southern eagles':'georgia southern',
+    'georgia tech yellow jackets':'georgia tech',
+    'indiana hoosiers':'indiana',
+    'iowa state cyclones':'iowa state',
+    'kansas jayhawks':'kansas',
+    'michigan wolverines':'michigan',
+    'minnesota golden gophers':'minnesota',
+    'northwestern wildcats':'northwestern',
+    'oklahoma state cowboys':'oklahoma state',
+    'oregon ducks':'oregon',
+    'oregon state beavers':'oregon state',
+    'pittsburgh panthers':'pittsburgh',
+    'rutgers scarlet knights':'rutgers',
+    'smu mustangs':'smu',
+    'south florida bulls':'south florida',
+    'syracuse orange':'syracuse',
+    'tcu horned frogs':'tcu',
+    'texas state bobcats':'texas state',
+    'texas tech red raiders':'texas tech',
+    'uab blazers':'uab',
+    'utah state aggies':'utah state',
+    'florida atlantic owls':'florida atlantic',
+    'north texas mean green':'north texas',
+    'james madison dukes':'james madison',
+    'troy trojans':'troy',
+    'middle tennessee blue raiders':'middle tennessee',
+    'kennesaw state owls':'kennesaw state',
+    'new mexico state aggies':'new mexico state',
+    'jacksonville state gamecocks':'jacksonville state',
+    'western kentucky hilltoppers':'western kentucky',
+    'delaware blue hens':'delaware',
+    'utep miners':'utep',
+    'southern miss golden eagles':'southern miss',
+    'liberty flames':'liberty',
+    'north dakota state bison':'north dakota state',
+    'florida international panthers':'florida international',
+    'washington state cougars':'washington state',
+    'san diego state aztecs':'san diego state',
+}
+
+
+def canonical_team_strict(team):
+    normalized = norm(team)
+    return TEAM_ALIASES.get(normalized,normalized)
+
+
+def _research_identity(doc):
+    """Derived key, never written into the original immutable observation."""
+    kickoff = parse_dt(doc.get('kickoff_utc'))
+    h = canonical_team_strict(doc.get('home_team'))
+    a = canonical_team_strict(doc.get('away_team'))
+    if not kickoff or not h or not a or h == a:
+        return None
+    from zoneinfo import ZoneInfo
+    day = kickoff.astimezone(ZoneInfo('America/New_York')).date().isoformat()
+    return ('NCAAF',day,h,a)
+
+
+def _safe_same_fixture(core,miner,max_minutes=120):
+    a,b=parse_dt(core.get('kickoff_utc')),parse_dt(miner.get('kickoff_utc'))
+    if not a or not b:
+        return False, 'MISSING_KICKOFF'
+    cid = _str(core.get('original_physical_game_id'))
+    mid = _str(miner.get('original_physical_game_id'))
+    if cid and mid and cid == mid:
+        return True, 'IDENTICAL_ORIGINAL_ID'
+    if abs((a-b).total_seconds()) <= max_minutes*60:
+        return True, 'EXPLICIT_ALIASES_AND_KICKOFF_WITHIN_2H'
+    return False, 'KICKOFF_DIFFERENCE_HOLD'
+
+
+def _score_for_identity(identity,core,miner,scores):
+    """Require an unambiguous identical score for the captured participant pair."""
+    choices=[]
+    for d in [core]+list(miner):
+        score=scores.get(d.get('game_key'))
+        if score is not None:
+            choices.append(score)
+    if not choices:
+        return None
+    # Score IDs can differ by redundant review record, but score must agree.
+    pairs={(s[0],s[1]) for s in choices}
+    if len(pairs)!=1:
+        return None
+    return choices[0]
+
+
+def _ats_at_original_price(d,score):
+    if not score or not d.get('price_verified') or d.get('side_relative') not in ('HOME','AWAY'):
+        return None
+    ln = _float(d.get('quote_line'))
+    if ln is None:
+        return None
+    margin = (score[0]-score[1] if d['side_relative']=='HOME' else score[1]-score[0]) + ln
+    return 'WIN' if margin > .00001 else 'LOSS' if margin < -.00001 else 'PUSH'
+
+
+def audit_core_miner_linkage(decisions,scores,*,model_context=(),conflict_ids=(),flipped_games=()):
+    """Read-only deterministic identity join and status diagnostics.
+
+    Priced comparisons are separate from model-only context. Broad alias
+    agreement is *not* independently verified fixture identity: kickoff or
+    identical source game id is required. Missing/no-overlap cases are recorded
+    rather than fixing unknown pairs by fuzzy matching.
+    """
+    conflicts=set(conflict_ids or ())
+    flipped=set(flipped_games or ())
+    base=collections.defaultdict(lambda:{'core':[],'miner':[],'model':[]})
+    ignored=collections.Counter()
+    for d in list(decisions)+list(model_context):
+        if not isinstance(d,dict): continue
+        if d.get('decision_id') in conflicts: ignored['CONFLICTED_IMMUTABLE_SYSTEM_DECISION']+=1;continue
+        if d.get('game_key') in flipped: ignored['CORE_SIDE_FLIP_HOLD']+=1;continue
+        key=_research_identity(d)
+        if key is None:
+            ignored['INCOMPLETE_IDENTITY']+=1;continue
+        typ=('core' if d.get('family')=='CORE' and d.get('price_verified') and
+             d.get('side_relative') in ('HOME','AWAY') else
+             'model' if d.get('family')=='CORE' and d.get('record_kind')=='CORE_MODEL_ONLY_NO_PRICE_OR_SELECTION' else
+             'miner' if d.get('family')=='MINER' and d.get('price_verified') and
+             d.get('side_relative') in ('HOME','AWAY') else None)
+        if typ:base[key][typ].append(d)
+    counters=collections.Counter()
+    joined=[]
+    examples=[]
+    for key,group in sorted(base.items()):
+        c=group['core'];m=group['miner'];mo=group['model']
+        if c:counters['priced_core_games']+=1
+        if m:counters['priced_miner_games']+=1
+        if mo:counters['core_model_only_games']+=1
+        if not m:
+            if c:counters['priced_core_without_miner_same_game']+=1
             continue
-        if len(core)!=1:
+        if not c:
+            if mo:
+                counters['miner_overlaps_core_model_only']+=1
+                if len(mo)!=1:
+                    counters['ambiguous_core_model_rows']+=1
+                elif any(_safe_same_fixture(mo[0],mm)[0] for mm in m):
+                    counters['miner_model_only_fixture_verified']+=1
+            else:counters['miner_without_core_price_or_model']+=1
             continue
-        c=core[0]
-        sides={d['side_relative'] for d in miners}
-        relation=('MIXED_MINER_DIRECTIONS' if len(sides)>1 else
-                  'MINER_CONFIRMS_CORE' if c['side_relative'] in sides else
-                  'MINER_OPPOSES_CORE')
-        score=scores.get(game)
-        matched=[]
-        # Same normalized side and exactly opposite line, no market proxy.
-        for m in miners:
-            mline, cline = _float(m.get('quote_line')), _float(c.get('quote_line'))
-            if mline is None or cline is None:
-                continue
-            if m['side_relative'] == c['side_relative']:
-                same_line = abs(mline - cline) <= .01
-            else:
-                same_line = abs(mline + cline) <= .01
-            if same_line:
-                matched.append(m)
-        # Score an ATS comparison ONCE per game, only for a single Miner
-        # direction and an exactly matched spread. Multiple mechanisms do not
-        # contribute multiple independent outcomes. Scores remain provisional.
-        core_ats = miner_ats = None
-        if score is not None and len(sides)==1 and matched:
-            home_score, away_score, _cfbd = score
-            core_margin = ((home_score-away_score) if c['side_relative']=='HOME'
-                           else (away_score-home_score)) + float(c['quote_line'])
-            m0 = sorted(matched,key=lambda r:(_str(r.get('capture_utc')),
-                                                 _str(r.get('signal_id'))))[0]
-            miner_margin = ((home_score-away_score) if m0['side_relative']=='HOME'
-                            else (away_score-home_score)) + float(m0['quote_line'])
-            core_ats = 'WIN' if core_margin>0 else 'LOSS' if core_margin<0 else 'PUSH'
-            miner_ats = 'WIN' if miner_margin>0 else 'LOSS' if miner_margin<0 else 'PUSH'
-        result.append({'game_key':game,'relation':relation,
-                       'core_selected_team':c.get('selected_team'),
-                       'same_line_core_ats_provisional':core_ats,
-                       'same_line_miner_ats_provisional':miner_ats,
+        counters['priced_core_miner_same_alias_date']+=1
+        if len(c)!=1:
+            counters['ambiguous_multiple_priced_core_rows']+=1;continue
+        core=c[0]
+        verified=[x for x in m if _safe_same_fixture(core,x)[0]]
+        if not verified:
+            counters['priced_overlap_kickoff_mismatch_hold']+=1
+            if len(examples)<12:examples.append({'reason':'KICKOFF_MISMATCH_HOLD','key':'|'.join(key)})
+            continue
+        sides={x['side_relative'] for x in verified}
+        if len(sides)!=1:
+            counters['mixed_miner_sides_vetoed']+=1
+            continue
+        counters['priced_core_miner_fixture_verified']+=1
+        selected_side=next(iter(sides))
+        relation='MINER_CONFIRMS_CORE' if selected_side==core['side_relative'] else 'MINER_OPPOSES_CORE'
+        ml=[]
+        for mm in verified:
+            cl, mline=_float(core.get('quote_line')),_float(mm.get('quote_line'))
+            if cl is None or mline is None:continue
+            if (abs(cl-mline) <= .01 if core['side_relative']==mm['side_relative']
+                else abs(cl+mline) <= .01):ml.append(mm)
+        score=_score_for_identity(key,core,verified,scores)
+        first=sorted(verified,key=lambda d:(str(d.get('capture_utc')),
+                                              str(d.get('signal_id'))))[0]
+        gradeable=score is not None
+        if ml:
+            counters['priced_core_miner_same_original_line']+=1
+        else:counters['priced_overlap_different_original_line']+=1
+        if gradeable:counters['priced_overlap_provisional_score_review']+=1
+        joined.append({'game_key':core['game_key'], 'canonical_game_identity':'|'.join(key),
+                       'core_source_game_key':core['game_key'],
+                       'miner_source_game_keys':sorted({x.get('game_key') for x in verified}),
+                       'link_policy':'EXPLICIT_SCHOOL_ALIASES_AND_KICKOFF_2H_OR_IDENTICAL_ORIGINAL_ID',
+                       'fixture_identity_original_attestation':False,
+                       'relation':relation,
+                       'core_selected_team':core.get('selected_team'),
+                       'core_selected_side':core['side_relative'],
+                       'core_quote_line':core.get('quote_line'),
+                       'miner_original_quote_line':first.get('quote_line'),
+                       'different_original_price_can_change_ATS':True,
+                       'miner_mechanisms_on_game':len(verified),
+                       'distinct_miner_named_family_keys_not_certified_independent':len({
+                           x.get('evidence_family_key') or x.get('signal_id') for x in verified}),
+                       'same_line_comparisons':len(ml),
                        'same_line_one_result_per_game':True,
-                       'core_selected_side':c['side_relative'],
-                       'miner_mechanisms_on_game':len(miners),
-                       'distinct_miner_named_family_keys_not_certified_independent':len(set(
-                           d.get('evidence_family_key') or d.get('signal_id') for d in miners)),
-                       'same_line_comparisons':len(matched),
-                       'score_review_available':score is not None,
+                       'same_line_core_ats_provisional':_ats_at_original_price(core,score) if ml else None,
+                       'same_line_miner_ats_provisional':_ats_at_original_price(ml[0],score) if ml else None,
+                       'original_line_core_ats_provisional':_ats_at_original_price(core,score),
+                       'original_line_miner_ats_provisional':_ats_at_original_price(first,score),
+                       'score_review_available':gradeable,
                        'finality_certified':False,'bet_authority':0,
                        'research_only':True})
-    return result
+    summary={'status':'PASS_IDENTITY_AUDIT_ONLY','alias_policy':'EXPLICIT_KNOWN_SCHOOL_MASCOT_PAIRS',
+             'counts':dict(sorted(counters.items())), 'ignored':dict(ignored),
+             'held_examples':examples,'results_are_not_approved_bets':True,
+             'model_only_does_not_mean_core_pick':True,'bet_authority':0}
+    return joined,summary
+
+
+def aggregate_core_miner_relationships(decisions,scores,conflict_ids=None):
+    """Backward-compatible priced-only interface."""
+    items,_=audit_core_miner_linkage(decisions,scores,conflict_ids=conflict_ids)
+    return items

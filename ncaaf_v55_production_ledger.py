@@ -408,6 +408,8 @@ def run_cycle(*, storage_client=None, bucket_name='sharp-models', now=None,
                               limit=MAX_DECISIONS,errors=errors)
     decisions.extend(d for d in core_decisions if d.get('family')=='CORE'
                      and d.get('price_verified') and d.get('decision_id'))
+    core_models=_find_json(storage_client,bucket_name,f'{ROOT}/core_model_first_seen_v1/',
+                           limit=MAX_DECISIONS,errors=errors)
     reviews=_find_json(storage_client,bucket_name,f'{PREFIX}/score_reviews_v1/',
                        limit=MAX_REVIEWS,errors=errors)
     scores=_review_index(reviews)
@@ -453,21 +455,26 @@ def run_cycle(*, storage_client=None, bucket_name='sharp-models', now=None,
     # CORE vs Miner comparisons are per GAME, not per mechanism firing;
     # historical/review-only scores cannot generate authorized betting proof.
     comparison=[]
+    crosswalk_audit={'status':'HOLD_NOT_EVALUATED','counts':{}}
     try:
-        from ncaaf_v55_core_shadow import aggregate_core_miner_relationships
-        comparison=aggregate_core_miner_relationships(
-            [d for d in decisions if d.get('game_key') not in flipped_games],
-            scores,conflict_ids=conflict_ids)
+        from ncaaf_v55_core_shadow import audit_core_miner_linkage
+        comparison,crosswalk_audit=audit_core_miner_linkage(
+            decisions,scores,model_context=core_models,
+            conflict_ids=conflict_ids,flipped_games=flipped_games)
+        LOG.info('[NCAAF-V55-CORE-MINER-LINK-AUDIT] %s',
+                 json.dumps(crosswalk_audit,sort_keys=True))
         for item in comparison:
             if not item['score_review_available']:
                 continue
-            identity=hashlib.sha256(item['game_key'].encode()).hexdigest()[:32]
+            identity=hashlib.sha256(item['canonical_game_identity'].encode()).hexdigest()[:32]
             try:
-                _put_once(bucket,f'{ROOT}/core_miner_provisional_v1/{identity}.json',item)
+                # Versioned output; never re-write old V1 comparison semantics.
+                _put_once(bucket,f'{ROOT}/core_miner_provisional_v2/{identity}.json',item)
             except Exception as exc:
-                errors.append('CORE_MINER_COMPARISON_WRITE:'+type(exc).__name__)
+                errors.append('CORE_MINER_COMPARISON_V2_WRITE:'+type(exc).__name__)
     except Exception as exc:
         errors.append('CORE_MINER_COMPARISON_HOLD:'+type(exc).__name__)
+        LOG.exception('[NCAAF-V55-CORE-MINER-LINK-AUDIT] ERROR')
     ledger=collections.defaultdict(lambda:{'unique_system_game_decisions':0,'provisional_wins':0,
                                            'provisional_losses':0,'provisional_pushes':0,
                                            'provisional_units':0.0})
@@ -513,6 +520,8 @@ def run_cycle(*, storage_client=None, bucket_name='sharp-models', now=None,
             'core_pregame_decision_ledger_integrated':core_capture.get('status')=='PASS',
             'core_source_capture':core_capture,
             'immutable_core_decisions':len(core_decisions),
+            'core_model_only_first_seen':len(core_models),
+            'core_miner_identity_audit':crosswalk_audit,
             'core_miner_game_level_research_comparisons':len(comparison),
             'core_miner_games_with_score_reviews':sum(bool(i['score_review_available']) for i in comparison),
             'miner_home_only_diagnostics':[key for key,v in mechanisms.items()
