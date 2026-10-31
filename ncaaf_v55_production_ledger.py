@@ -347,6 +347,22 @@ def run_cycle(*, storage_client=None, bucket_name='sharp-models', now=None,
         storage_client=storage.Client()
     bucket=storage_client.bucket(bucket_name)
     errors=[]; observed=[]; invalid_objects=0
+    # CORE-V55-PUBLISHED-JOURNAL: read the COMPLETE+SHA-verified backend board,
+    # never infer a CORE pick from other brains or reconstruct after a result.
+    # In this deployment the board is published after the research pass, so
+    # the latest complete publication is ordinarily the PREVIOUS refresh.
+    core_capture={'status':'HOLD_UNAVAILABLE','bet_authority':0}
+    try:
+        from google.cloud import bigquery as _bigquery
+        from ncaaf_v55_core_shadow import capture_board
+        core_capture=capture_board(bq_client=_bigquery.Client(project='sharplogger'),
+                                   bucket=bucket,now=t)
+        if core_capture.get('status') != 'PASS':
+            errors.append('CORE_BOARD_CAPTURE_PARTIAL_HOLD')
+        LOG.info('[NCAAF-V55-CORE-SOURCE] %s',json.dumps(core_capture,sort_keys=True))
+    except Exception as exc:
+        errors.append('CORE_BOARD_CAPTURE_HOLD:'+type(exc).__name__)
+        LOG.warning('[NCAAF-V55-CORE-SOURCE] HOLD %s',type(exc).__name__)
     days = min(3, max(1,int(days_back)))
     for d in range(days+1):
         day=(t-timedelta(days=d)).strftime('%Y-%m-%d')
@@ -386,6 +402,12 @@ def run_cycle(*, storage_client=None, bucket_name='sharp-models', now=None,
             errors.append(f'DECISION_WRITE_ERROR:{d["decision_id"]}:{type(exc).__name__}')
     decisions=_find_json(storage_client,bucket_name,f'{ROOT}/shadow_decisions_v1/',
                          limit=MAX_DECISIONS,errors=errors)
+    # Immutable originally published CORE research leans, locked separately
+    # from captured external brain events to avoid any retrospective merging.
+    core_decisions=_find_json(storage_client,bucket_name,f'{ROOT}/core_first_priced_v1/',
+                              limit=MAX_DECISIONS,errors=errors)
+    decisions.extend(d for d in core_decisions if d.get('family')=='CORE'
+                     and d.get('price_verified') and d.get('decision_id'))
     reviews=_find_json(storage_client,bucket_name,f'{PREFIX}/score_reviews_v1/',
                        limit=MAX_REVIEWS,errors=errors)
     scores=_review_index(reviews)
@@ -405,6 +427,11 @@ def run_cycle(*, storage_client=None, bucket_name='sharp-models', now=None,
     conflicts=_find_json(storage_client,bucket_name,f'{ROOT}/conflicts_v1/',
                          limit=MAX_DECISIONS,errors=errors)
     conflict_ids={c.get('decision_id') for c in conflicts}
+    # A published CORE side flip is tracked but must not masquerade as an
+    # independent, stable comparison against Miner on that game.
+    core_flips=_find_json(storage_client,bucket_name,f'{ROOT}/core_side_flips_v1/',
+                         limit=MAX_DECISIONS,errors=errors)
+    flipped_games={x.get('game_key') for x in core_flips if x.get('game_key')}
     outcome_created=outcome_existing=0
     provisional=[]
     for d in decisions:
@@ -423,6 +450,24 @@ def run_cycle(*, storage_client=None, bucket_name='sharp-models', now=None,
             outcome_existing+=int(state=='ALREADY_EXISTS')
         except Exception as exc:
             errors.append(f'PROVISIONAL_WRITE_ERROR:{d["decision_id"]}:{type(exc).__name__}')
+    # CORE vs Miner comparisons are per GAME, not per mechanism firing;
+    # historical/review-only scores cannot generate authorized betting proof.
+    comparison=[]
+    try:
+        from ncaaf_v55_core_shadow import aggregate_core_miner_relationships
+        comparison=aggregate_core_miner_relationships(
+            [d for d in decisions if d.get('game_key') not in flipped_games],
+            scores,conflict_ids=conflict_ids)
+        for item in comparison:
+            if not item['score_review_available']:
+                continue
+            identity=hashlib.sha256(item['game_key'].encode()).hexdigest()[:32]
+            try:
+                _put_once(bucket,f'{ROOT}/core_miner_provisional_v1/{identity}.json',item)
+            except Exception as exc:
+                errors.append('CORE_MINER_COMPARISON_WRITE:'+type(exc).__name__)
+    except Exception as exc:
+        errors.append('CORE_MINER_COMPARISON_HOLD:'+type(exc).__name__)
     ledger=collections.defaultdict(lambda:{'unique_system_game_decisions':0,'provisional_wins':0,
                                            'provisional_losses':0,'provisional_pushes':0,
                                            'provisional_units':0.0})
@@ -465,7 +510,11 @@ def run_cycle(*, storage_client=None, bucket_name='sharp-models', now=None,
             'provisional_outcomes_count':len(provisional),
             'performance_by_family_provisional_only':dict(ledger),
             'performance_by_mechanism_provisional_only':dict(mechanisms),
-            'core_pregame_decision_ledger_integrated':False,
+            'core_pregame_decision_ledger_integrated':core_capture.get('status')=='PASS',
+            'core_source_capture':core_capture,
+            'immutable_core_decisions':len(core_decisions),
+            'core_miner_game_level_research_comparisons':len(comparison),
+            'core_miner_games_with_score_reviews':sum(bool(i['score_review_available']) for i in comparison),
             'miner_home_only_diagnostics':[key for key,v in mechanisms.items()
               if key.startswith('MINER:') and v['home_decisions'] and not v['away_decisions']],
             'source_finality_certified':False,
