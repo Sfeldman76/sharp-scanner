@@ -9022,6 +9022,29 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                     "policy":"DIAGNOSTIC_ONLY_NO_AUTHORITY"},"fields":[]}
             log_func("[NCAAF-RESEARCH-FEATURE-LINEAGE] "+json.dumps(
                 research_feature_lineage_audit["summary"],sort_keys=True))
+        # Independent typed/source-to-matrix lineage reconciliation. A numeric-only
+        # audit can label valid CFBD string metadata as "unpopulated". The source
+        # reconciliation uses the original research frames, a read-only BQ source
+        # inventory, and explicitly distinguishes absent fields from join losses.
+        # Never fill missing features or allow this diagnostic to affect selection.
+        try:
+            from ncaaf_v55_source_lineage import reconcile_source_lineage
+            _source_lineage_reconciliation = reconcile_source_lineage(
+                games=g, miner_games=mg,
+                lineage_report=research_feature_lineage_audit,
+                market_report=_market_rich_audit(g, utils_module),
+                bq_client=getattr(dashboard_module, "bq_client", None),
+                cfbd_table=NCAAF_CFBD_MINER_FEATURE_TABLE,
+                storage_client=storage_client, bucket_name=bucket_name,
+                persist=True, log_func=log_func)
+        except Exception as _src_lineage_exc:
+            _source_lineage_reconciliation = {
+                "status": "UNKNOWN", "production_authority": 0,
+                "production_mutation": False, "feature_mutation": False,
+                "error": f"{type(_src_lineage_exc).__name__}:{_src_lineage_exc}"}
+            log_func("[NCAAF-V55-SOURCE-LINEAGE] ERROR "
+                     + _source_lineage_reconciliation["error"])
+
         # Complement the existing market-error STAT research with a separate,
         # chronological all-season score foundation. The original market-only
         # lane intentionally still needs authentic opening prices.
@@ -9300,6 +9323,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "context_family_cap_audit":context_family_cap_audit,
                 "miner_exact_path_shadow_audit":miner_exact_path_shadow_audit,
                 "research_feature_lineage_audit":research_feature_lineage_audit,
+                "source_lineage_reconciliation":_source_lineage_reconciliation,
                 "historical_state_context_bridge":historical_state_context_bridge,
                 "deep_context_bridge":deep_context_bridge,
                 "cfbd_context_bridge":cfbd_context_bridge,

@@ -440,6 +440,20 @@ def audit_research_publications(report, storage_client, bucket_name, now):
                   'PASS' if fl.get('status')=='PASS' else 'WARNING',
                   'Feature-lineage artifact status as reported by Heavy Research; independently checking per-feature vintages requires source timestamps',
                   metrics={'feature_lineage_status':fl.get('status')}, domain='research')
+        # The typed/source-level reconciliation has independent semantics from
+        # the original numeric-only feature audit. Missing/unreadable source
+        # evidence remains UNKNOWN; genuine source-to-matrix loss is FAIL.
+        src_lineage = r.get('source_lineage_reconciliation') or {}
+        sl_status = src_lineage.get('status')
+        sl_severity = ('FAIL' if sl_status == 'FAIL' else
+                       'WARNING' if sl_status == 'WARNING' else
+                       'PASS' if sl_status == 'PASS' else 'UNKNOWN')
+        add_check(report, 'RESEARCH_SOURCE_TO_MODEL_LINEAGE', sl_severity,
+                  'Typed CFBD and Market Rich source reconciliation; original pregame vintage remains separately uncertified',
+                  metrics={'reconciliation_status': sl_status,
+                           'summary': src_lineage.get('summary') or {},
+                           'artifact_uri': src_lineage.get('artifact_uri'),
+                           'error': src_lineage.get('error')}, domain='research')
     except Exception as exc:
         add_check(report,'RESEARCH_REPORT_PUBLICATION','FAIL',
                   'Current research report could not be verified',
