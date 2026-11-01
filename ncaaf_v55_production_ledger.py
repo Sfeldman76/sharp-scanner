@@ -629,6 +629,32 @@ def run_cycle(*, storage_client=None, bucket_name='sharp-models', now=None,
                                    'PROSPECTIVE_INDEPENDENT_OOS_NOT_YET_ESTABLISHED',
                                    'NO_VERIFIED_EXECUTED_WAGER_PRICE_OR_SLIPPAGE',
                                    'MANUAL_APPROVAL_REQUIRED_FOR_ANY_AUTHORITY_CHANGE']}
+    # Read-only V5.5 data-flow audit: detects missing/duplicate/misrouted data.
+    # Never changes CORE, brains, scores, qualifications or wager authority.
+    try:
+        from ncaaf_v55_pipeline_health import run_cycle as _audit_pipeline_health
+        try:
+            from google.cloud import bigquery as _audit_bq
+            _audit_client=_audit_bq.Client(project='sharplogger')
+        except Exception:
+            _audit_client=None
+        _health=_audit_pipeline_health(storage_client=storage_client,
+            bucket_name=bucket_name,ledger_report=report,bq_client=_audit_client,
+            now=t,persist=True)
+        report['pipeline_health_audit']={
+            'status':_health.get('status'),
+            'check_counts':_health.get('check_counts',{}),
+            'failure_codes':_health.get('failure_codes',[]),
+            'warning_codes':_health.get('warning_codes',[]),
+            'unknown_codes':_health.get('unknown_codes',[]),
+            'report_uri':_health.get('report_uri')}
+    except Exception as exc:
+        # The audit is strictly an observer, never a reason to rewrite a ledger
+        # or to convert an unavailable audit into a successful verification.
+        report['pipeline_health_audit']={
+            'status':'FAIL','error_type':type(exc).__name__,
+            'failure_codes':['PIPELINE_AUDIT_EXECUTION_FAILED']}
+        LOG.exception('[NCAAF-V55-PIPELINE-HEALTH] audit execution failed')
     run_key=t.strftime('%Y%m%dT%H%M%S%fZ')
     # All writes are research namespace only; latest is an observability pointer.
     try:
