@@ -14,7 +14,8 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 PREFIX = 'research/ncaaf/v55/prospective_brain_evidence_v1'
-SCORE_POLICY = 'V55-DUAL-SCORE-REVIEW-NO-FINALITY-CERTIFICATE-20261030'
+SCORE_POLICY = 'V55-DUAL-SCORE-REVIEW-NO-FINALITY-CERTIFICATE-20261101'
+REVIEW_VERSION = 2
 ALIASES = {
     'james madison dukes':'james madison', 'troy trojans':'troy',
     'middle tennessee blue raiders':'middle tennessee',
@@ -58,25 +59,72 @@ def score_pair(row):
     except (TypeError,KeyError,ValueError,OverflowError):return None
 
 
+# Score-only identity. Never substitute this for the immutable capture/game_key
+# identity: doing so would change previously issued decision IDs and hashes.
+def score_canonical_key(row):
+    t=parse_dt(row.get('kickoff_utc'))
+    if t is None:return None
+    # Lazy import because the CORE module itself imports the original
+    # settlement bridge. This is the SAME explicit alias policy already
+    # used for the deployed CORE–Miner linkage; no fuzzy matching.
+    from ncaaf_v55_core_shadow import canonical_team_strict
+    h=canonical_team_strict(row.get('home'))
+    a=canonical_team_strict(row.get('away'))
+    if not h or not a or h==a:return None
+    return ('NCAAF',t.astimezone(ZoneInfo('America/New_York')).date().isoformat(),h,a)
+
+
+def source_coverage(rows):
+    from collections import Counter
+    counts=Counter()
+    for row in rows:
+        k=score_canonical_key(row)
+        if k:counts[k[1]]+=1
+    return dict(sorted(counts.items()))
+
+
+def missing_score_diagnosis(game, cfbd_rows, final_rows):
+    """Discriminate source lag from alias/date failures without guessing."""
+    key=score_canonical_key(game)
+    if not key:return 'CAPTURED_GAME_IDENTITY_INVALID'
+    day=key[1]
+    cfkeys=[score_canonical_key(r) for r in cfbd_rows]
+    fikeys=[score_canonical_key(r) for r in final_rows]
+    if key not in cfkeys:
+        same_teams_elsewhere=any(x and x[2:]==key[2:] and x[1]!=day for x in cfkeys)
+        if same_teams_elsewhere:return 'CFBD_FIXTURE_DIFFERENT_DATE_HOLD'
+        reverse=('NCAAF',day,key[3],key[2])
+        if reverse in cfkeys:return 'CFBD_REVERSED_ORIENTATION_HOLD'
+        if not any(x and x[1]==day for x in cfkeys):return 'CFBD_DATE_NOT_PRESENT_IN_EXTRACT'
+        return 'CFBD_FIXTURE_MISSING_ON_PRESENT_DATE'
+    if key not in fikeys:
+        if not any(x and x[1]==day for x in fikeys):return 'SECOND_SOURCE_DATE_NOT_PRESENT_IN_EXTRACT'
+        return 'SECOND_SOURCE_FIXTURE_MISSING_ON_PRESENT_DATE'
+    return 'SCORES_PRESENT_BUT_UNVERIFIED_OR_CONFLICTED'
+
+
 def score_review(game, cfbd_rows, final_rows, now, *, min_maturity_hours=12):
-    """Return a review object, never a finality/authority certificate."""
-    target=key_from_row(game)
-    if target is None:return {'state':'INVALID_CAPTURED_IDENTITY'}
+    """Strict dual-table score *review*, NEVER official-final certification."""
+    original=key_from_row(game)
+    target=score_canonical_key(game)
+    if target is None or original is None:return {'state':'INVALID_CAPTURED_IDENTITY'}
     t=parse_dt(game.get('kickoff_utc'))
     if now-t<timedelta(hours=min_maturity_hours):return {'state':'WAIT_FOR_SCORE_MATURITY'}
-    cf=[r for r in cfbd_rows if key_from_row(r)==target]
-    fi=[r for r in final_rows if key_from_row(r)==target]
-    if not cf:return {'state':'CFBD_SCORE_NOT_FOUND'}
-    if not fi:return {'state':'SECOND_SCORE_SOURCE_NOT_FOUND'}
+    cf=[r for r in cfbd_rows if score_canonical_key(r)==target]
+    fi=[r for r in final_rows if score_canonical_key(r)==target]
+    if not cf:return {'state':'CFBD_SCORE_NOT_FOUND', 'diagnostic':missing_score_diagnosis(game,cfbd_rows,final_rows)}
+    if not fi:return {'state':'SECOND_SCORE_SOURCE_NOT_FOUND', 'diagnostic':missing_score_diagnosis(game,cfbd_rows,final_rows)}
     ids={str(r.get('cfbd_game_id') or '').strip() for r in cf}
     if '' in ids or len(ids)!=1:return {'state':'AMBIGUOUS_CFBD_ID'}
     scores={score_pair(r) for r in cf+fi}
     if None in scores or len(scores)!=1:return {'state':'MISSING_OR_CONFLICTING_SCORES'}
     return {'state':'DUAL_SOURCE_SCORE_AGREEMENT_REVIEW_ONLY',
             'cfbd_game_id':next(iter(ids)), 'home_score':next(iter(scores))[0],
-            'away_score':next(iter(scores))[1], 'stable_game_key':'|'.join(target),
+            'away_score':next(iter(scores))[1], 'stable_game_key':'|'.join(original),
+            'canonical_score_fixture_identity':'|'.join(target),
             'cfbd_rows':len(cf), 'final_rows':len(fi),
             'score_source':'ncaaf_cfbd_postgame_finals_v1+game_scores_final',
+            'sources_are_independent_certified':False,
             'finality_certified':False,'settlement_certified':False,
             'bet_authority':0,'source_proof_policy':SCORE_POLICY}
 
@@ -164,15 +212,46 @@ def reconcile_prospective_score_reviews(*, dashboard_module=None, storage_client
         return {'status':'SCORE_QUERY_FAILED_FAIL_CLOSED',
                 'error':f'{type(exc).__name__}:{exc}'[:250],
                 'review_created':0,'bet_authority':0}
-    counts=Counter();created=0;write_errors=0
+    counts=Counter();diagnostics=Counter();examples=[];created=0;write_errors=0;score_drift=0;disputes_written=0
     for sha,g in sorted(mature.items()):
-        outpath=f'{PREFIX}/score_reviews_v1/{sha}.json'
+        outpath=f'{PREFIX}/score_reviews_v2/{sha}.json'
         blob=bucket.blob(outpath)
         if blob.exists():
             counts['ALREADY_PRESENT']+=1
+            # Existing immutable reviews must NOT silently override a later
+            # contradictory pair of source scores. An append-only dispute
+            # quarantines this fixture in the consuming ledger.
+            try:
+                old=json.loads(blob.download_as_text())
+                current=score_review(g,cf,fi,t)
+                if current.get('state')=='DUAL_SOURCE_SCORE_AGREEMENT_REVIEW_ONLY' and (
+                    (current.get('home_score'),current.get('away_score'),str(current.get('cfbd_game_id')))
+                    != (old.get('home_score'),old.get('away_score'),str(old.get('cfbd_game_id')))):
+                    score_drift+=1
+                    dispute={'original_game_index_sha256':sha,'original_physical_game_id':g['physical_game_id'],
+                             'original_review_scores':[old.get('home_score'),old.get('away_score')],
+                             'new_source_scores':[current['home_score'],current['away_score']],
+                             'original_cfbd_id':old.get('cfbd_game_id'),
+                             'new_cfbd_id':current.get('cfbd_game_id'),
+                             'observed_at_utc':t.isoformat(), 'state':'DISPUTED_REVIEW_SCORE_HOLD',
+                             'bet_authority':0,'settlement_certified':False}
+                    db=bucket.blob(f'{PREFIX}/score_review_disputes_v1/{sha}.json')
+                    if not db.exists():
+                        db.upload_from_string(json.dumps(dispute,sort_keys=True),
+                            content_type='application/json',if_generation_match=0)
+                        disputes_written+=1
+                elif current.get('state')!='DUAL_SOURCE_SCORE_AGREEMENT_REVIEW_ONLY':
+                    diagnostics['EXISTING_REVIEW_RECHECK_SOURCE_NOT_CURRENTLY_AGREEING']+=1
+            except Exception:
+                # A read error is not evidence that an old review is correct.
+                diagnostics['EXISTING_REVIEW_RECHECK_ERROR_HOLD']+=1
+                write_errors+=1
             continue
         review=score_review(g,cf,fi,t)
         counts[review['state']]+=1
+        if review.get('diagnostic'):
+            diagnostics[review['diagnostic']]+=1
+            if len(examples)<12:examples.append({'fixture':review.get('diagnostic'), 'home':g.get('home'), 'away':g.get('away'),'kickoff_utc':g.get('kickoff_utc')})
         if review['state']!='DUAL_SOURCE_SCORE_AGREEMENT_REVIEW_ONLY':continue
         artifact={'original_physical_game_id':g['physical_game_id'],
                   'original_game_index_sha256':sha,
@@ -180,6 +259,7 @@ def reconcile_prospective_score_reviews(*, dashboard_module=None, storage_client
                   'captured_away_team':g['away'],
                   'captured_kickoff_utc':g['kickoff_utc'],
                   'review_created_at_utc':t.isoformat(),
+                  'review_version':2,
                   'immutable_source_capture_preserved':True,
                   **review}
         try:
@@ -193,5 +273,9 @@ def reconcile_prospective_score_reviews(*, dashboard_module=None, storage_client
             'mature_game_indexes':len(mature),
             'score_sources':{'cfbd':len(cf),'game_scores_final':len(fi)},
             'review_created':created,'review_states':dict(counts),
+            'source_score_drift_detected':score_drift,'review_disputes_written':disputes_written,
+            'missing_score_diagnostics':dict(diagnostics),
+            'missing_examples':examples,
+            'source_coverage_by_et_day':{'cfbd':source_coverage(cf), 'game_scores_final':source_coverage(fi)},
             'write_errors':write_errors,'outcome_objects_modified':0,
             'bet_authority':0,'automatic_wager_execution':False}

@@ -17,7 +17,7 @@ import logging
 import math
 from datetime import datetime, timedelta, timezone
 
-from ncaaf_v55_settlement_bridge import key_from_row, parse_dt, norm, PREFIX
+from ncaaf_v55_settlement_bridge import key_from_row, score_canonical_key, parse_dt, norm, PREFIX
 
 LOG = logging.getLogger('ncaaf_v55_production_ledger')
 ROOT = 'research/ncaaf/v55/production_intelligence_v1'
@@ -286,6 +286,90 @@ def _review_index(refs):
     return {k: v[0] for k, v in bykey.items() if len(set(v)) == 1}
 
 
+def reconcile_review_scores(reviews, decisions, *, max_kickoff_delta_minutes=120):
+    """Read-only alias-aware lookup with independent fixture-clock check.
+
+    Do not change original CORE or Miner decision IDs. A single old/v2 review
+    can grade both keys only if its original captured fixture is unambiguous,
+    the dual-score review agrees, and the independently captured kickoff is
+    within the configured tolerance. This never attests official finality.
+    """
+    fixture_scores=collections.defaultdict(list)
+    rejected=collections.Counter()
+    for r in reviews:
+        if not isinstance(r,dict) or r.get('state')!='DUAL_SOURCE_SCORE_AGREEMENT_REVIEW_ONLY':
+            continue
+        if r.get('finality_certified') is True or r.get('settlement_certified') is True:
+            # This reader never upgrades certificate status from a shadow review.
+            rejected['MISLABELED_OFFICIAL_REVIEW_HOLD']+=1;continue
+        if r.get('score_source') != 'ncaaf_cfbd_postgame_finals_v1+game_scores_final':
+            rejected['SOURCE_PROVENANCE_HOLD']+=1;continue
+        key=score_canonical_key({'home':r.get('captured_home_team'),
+             'away':r.get('captured_away_team'),
+             'kickoff_utc':r.get('captured_kickoff_utc')})
+        original=key_from_row({'home':r.get('captured_home_team'),
+             'away':r.get('captured_away_team'),
+             'kickoff_utc':r.get('captured_kickoff_utc')})
+        if not key or not original or '|'.join(original)!=r.get('stable_game_key'):
+            rejected['REVIEW_CAPTURED_IDENTITY_HOLD']+=1;continue
+        h=_float(r.get('home_score'));a=_float(r.get('away_score'))
+        cf=_str(r.get('cfbd_game_id'))
+        if not cf or h is None or a is None or h<0 or a<0 or not h.is_integer() or not a.is_integer():
+            rejected['REVIEW_INVALID_SCORE_OR_GAME_ID_HOLD']+=1;continue
+        date=parse_dt(r['captured_kickoff_utc'])
+        fixture_scores[key].append(((h,a,cf),date,r['stable_game_key']))
+    verified={}; held_fixture=set()
+    for fixture,items in fixture_scores.items():
+        # Agreement of old+new reviews cannot count as two score sources;
+        # both reviews already contain their own source attestations.
+        vals={row[0] for row in items}
+        if len(vals)!=1:
+            held_fixture.add(fixture)
+            rejected['CONFLICTING_REVIEW_SCORES_OR_GAME_IDS_HOLD']+=1
+            continue
+        verified[fixture]=(next(iter(vals)),items)
+    mapped={}; blocked_keys=set();linked=0;alias_linked=0
+    for d in decisions:
+        if not isinstance(d,dict) or not d.get('game_key') or not d.get('decision_id'):
+            continue
+        if d.get('game_key') in blocked_keys or d.get('conflicting_directions'):
+            rejected['CONFLICTED_DECISION_HOLD']+=1;continue
+        if not d.get('price_verified') or not d.get('capture_clock_verified') or not d.get('direction_verified'):
+            rejected['DECISION_NOT_ELIGIBLE_FOR_SHADOW_GRADING']+=1;continue
+        fixture=score_canonical_key({'home':d.get('home_team'),
+                'away':d.get('away_team'),'kickoff_utc':d.get('kickoff_utc')})
+        decision_clock=parse_dt(d.get('kickoff_utc'))
+        if not fixture or not decision_clock:
+            rejected['DECISION_GAME_IDENTITY_HOLD']+=1;continue
+        if fixture in held_fixture:
+            rejected['REVIEW_CONFLICT_HOLD']+=1;continue
+        if fixture not in verified:
+            rejected['NO_DUAL_SOURCE_REVIEW_FOR_FIXTURE']+=1;continue
+        score,records=verified[fixture]
+        # A date-only or alias-only match is not enough for a wager outcome.
+        if not any(abs((decision_clock-r[1]).total_seconds())<=max_kickoff_delta_minutes*60
+                   for r in records):
+            rejected['KICKOFF_TIME_MISMATCH_HOLD']+=1;continue
+        old=mapped.get(d['game_key'])
+        if old is not None and old!=score:
+            mapped.pop(d['game_key'],None)
+            blocked_keys.add(d['game_key'])
+            rejected['DECISIONS_SAME_GAME_KEY_DISAGREE_ON_SCORE_HOLD']+=1
+            continue
+        mapped[d['game_key']]=score
+        linked+=1
+        if all(x[2]!=d['game_key'] for x in records):alias_linked+=1
+    summary={'review_objects_seen':len(reviews), 'unique_verified_score_fixtures':len(verified),
+             'review_fixture_conflicts':len(held_fixture),
+             'decisions_linked_to_reviews':linked,
+             'decisions_linked_by_explicit_alias':alias_linked,
+             'scored_original_game_keys':len(mapped),
+             'holds':dict(sorted(rejected.items())),
+             'source_lineage_independence_certified':False,
+             'official_finality_certified':False,'bet_authority':0}
+    return mapped,summary
+
+
 def _net_win(odds, fmt):
     if fmt == 'AMERICAN':
         return odds/100 if odds >= 100 else 100/abs(odds)
@@ -412,7 +496,15 @@ def run_cycle(*, storage_client=None, bucket_name='sharp-models', now=None,
                            limit=MAX_DECISIONS,errors=errors)
     reviews=_find_json(storage_client,bucket_name,f'{PREFIX}/score_reviews_v1/',
                        limit=MAX_REVIEWS,errors=errors)
-    scores=_review_index(reviews)
+    reviews.extend(_find_json(storage_client,bucket_name,f'{PREFIX}/score_reviews_v2/',
+                       limit=MAX_REVIEWS,errors=errors))
+    disputes=_find_json(storage_client,bucket_name,f'{PREFIX}/score_review_disputes_v1/',
+                       limit=MAX_REVIEWS,errors=errors)
+    disputed_sha={x.get('original_game_index_sha256') for x in disputes
+                  if x.get('state')=='DISPUTED_REVIEW_SCORE_HOLD' and x.get('original_game_index_sha256')}
+    reviews=[x for x in reviews if x.get('original_game_index_sha256') not in disputed_sha]
+    scores,score_link_diagnostics=reconcile_review_scores(reviews,decisions)
+    score_link_diagnostics['disputed_original_game_indexes_quarantined']=len(disputed_sha)
     # A previously captured direction cannot be silently replaced if a later
     # refresh produces its opposite. Persist a separate immutable veto record.
     for d in proposed:
@@ -447,7 +539,7 @@ def run_cycle(*, storage_client=None, bucket_name='sharp-models', now=None,
         if not result:continue
         provisional.append(result)
         try:
-            state=_put_once(bucket,f'{ROOT}/provisional_outcomes_v1/{d["decision_id"]}.json',result)
+            state=_put_once(bucket,f'{ROOT}/provisional_outcomes_v2/{d["decision_id"]}.json',result)
             outcome_created+=int(state=='CREATED')
             outcome_existing+=int(state=='ALREADY_EXISTS')
         except Exception as exc:
@@ -469,7 +561,7 @@ def run_cycle(*, storage_client=None, bucket_name='sharp-models', now=None,
             identity=hashlib.sha256(item['canonical_game_identity'].encode()).hexdigest()[:32]
             try:
                 # Versioned output; never re-write old V1 comparison semantics.
-                _put_once(bucket,f'{ROOT}/core_miner_provisional_v2/{identity}.json',item)
+                _put_once(bucket,f'{ROOT}/core_miner_provisional_v3/{identity}.json',item)
             except Exception as exc:
                 errors.append('CORE_MINER_COMPARISON_V2_WRITE:'+type(exc).__name__)
     except Exception as exc:
@@ -512,6 +604,7 @@ def run_cycle(*, storage_client=None, bucket_name='sharp-models', now=None,
             'durable_shadow_decisions':len(decisions),
             'conflicted_system_games_vetoed':len(conflict_ids),
             'dual_source_review_game_keys':len(scores),
+            'score_review_link_diagnostics':score_link_diagnostics,
             'provisional_outcomes_new':outcome_created,
             'provisional_outcomes_preexisting':outcome_existing,
             'provisional_outcomes_count':len(provisional),
