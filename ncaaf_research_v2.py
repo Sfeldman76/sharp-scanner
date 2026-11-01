@@ -35,6 +35,43 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+def _v55_is_nullable_float_conversion_error(error):
+    """Do not retry unrelated feature-audit failures or mask real data errors."""
+    message = str(error).lower()
+    return ('missing values' in message and
+            ('float64' in message or 'na_value' in message))
+
+
+def _v55_nullable_audit_copy(frame):
+    """Return audit-only pandas-compatible columns, preserving original missingness.
+
+    The source DataFrame is never modified. Nullable ints are converted to object
+    arrays rather than float to avoid loss of precision in game identifiers.
+    """
+    output = frame.copy(deep=False)
+    converted = []
+    for column in frame.columns:
+        values = frame[column]
+        dtype = values.dtype
+        if isinstance(dtype, pd.api.extensions.ExtensionDtype):
+            if pd.api.types.is_float_dtype(dtype):
+                output[column] = pd.Series(
+                    values.to_numpy(dtype=np.float64, na_value=np.nan),
+                    index=values.index)
+            elif pd.api.types.is_integer_dtype(dtype) or pd.api.types.is_bool_dtype(dtype):
+                output[column] = pd.Series(
+                    values.to_numpy(dtype=object, na_value=np.nan),
+                    index=values.index)
+            elif isinstance(dtype, pd.StringDtype):
+                output[column] = pd.Series(
+                    values.to_numpy(dtype=object, na_value=np.nan),
+                    index=values.index)
+            else:
+                continue  # Categories and timezone-aware dates retain their types.
+            converted.append(str(column))
+    return output, converted
+
+
 NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.33.0-feature-aware-max-history-miner-20261015"
 NCAAF_RESEARCH_V2_VERSION = "2.33.0"
 NCAAF_RESEARCH_REPAIR_PATCH = "ptiv-2023fit-2024select-2025holdout-live-availability-20261014"
@@ -8923,20 +8960,64 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
             log_func("[NCAAF-V55-RESEARCH-PIPELINE-HEALTH] ERROR "+
                 f"{type(_v55_research_audit_exc).__name__}:{_v55_research_audit_exc}")
 
-        # Research-field audit: compare the actual STAT/CORE feature registry
-        # with the richer, independently joined Miner feature matrix.
-        # Diagnostics never mutate data or promote a feature/candidate.
+        # Read-only historical field-lineage audit. Pandas extension dtypes
+        # (Float64/Int64/boolean) can carry pd.NA, which older audit conversion
+        # code cannot pass to a NumPy float64 array. Retry *diagnostics only*
+        # against shallow audit copies with explicit np.nan missing markers.
+        # The original g/mg frames and all training/model inputs remain intact.
+        _feature_audit_stage = "LINEAGE"
         try:
-            from ncaaf_research_feature_audit_v1 import audit_research_feature_lineage
-            research_feature_lineage_audit = audit_research_feature_lineage(
-                g, mg, sy, cols, log_func=log_func)
-            from ncaaf_research_feature_audit_v1 import audit_stat_family_caps
-            research_feature_lineage_audit['stat_family_caps'] = audit_stat_family_caps(
-                cols, STAT_FAMILY_TOKENS, sparse_candidates=SPARSE_STAT_CANDIDATES,
-                core_frame=g, log_func=log_func)
+            from ncaaf_research_feature_audit_v1 import (
+                audit_research_feature_lineage, audit_stat_family_caps)
+            _audit_input_g, _audit_input_mg = g, mg
+            _audit_nullable_retry = None
+            try:
+                research_feature_lineage_audit = audit_research_feature_lineage(
+                    g, mg, sy, cols, log_func=log_func)
+            except ValueError as _nullable_error:
+                if not _v55_is_nullable_float_conversion_error(_nullable_error):
+                    raise
+                _audit_input_g, _g_converted = _v55_nullable_audit_copy(g)
+                _audit_input_mg, _mg_converted = _v55_nullable_audit_copy(mg)
+                _audit_nullable_retry = {
+                    "lineage": True,
+                    "core_columns_converted": _g_converted,
+                    "miner_columns_converted": _mg_converted,
+                }
+                research_feature_lineage_audit = audit_research_feature_lineage(
+                    _audit_input_g, _audit_input_mg, sy, cols, log_func=log_func)
+            _feature_audit_stage = "STAT_FAMILY_CAPS"
+            try:
+                _stat_caps = audit_stat_family_caps(
+                    cols, STAT_FAMILY_TOKENS,
+                    sparse_candidates=SPARSE_STAT_CANDIDATES,
+                    core_frame=_audit_input_g, log_func=log_func)
+            except ValueError as _nullable_error:
+                if not _v55_is_nullable_float_conversion_error(_nullable_error):
+                    raise
+                if _audit_input_g is g:
+                    _audit_input_g, _g_converted = _v55_nullable_audit_copy(g)
+                else:
+                    _g_converted = list(_audit_nullable_retry.get('core_columns_converted', []))
+                _audit_nullable_retry = _audit_nullable_retry or {}
+                _audit_nullable_retry.update({
+                    "stat_family_caps": True,
+                    "core_columns_converted": _g_converted,
+                })
+                _stat_caps = audit_stat_family_caps(
+                    cols, STAT_FAMILY_TOKENS,
+                    sparse_candidates=SPARSE_STAT_CANDIDATES,
+                    core_frame=_audit_input_g, log_func=log_func)
+            research_feature_lineage_audit['stat_family_caps'] = _stat_caps
+            if _audit_nullable_retry is not None:
+                research_feature_lineage_audit.setdefault('summary', {})[
+                    'nullable_diagnostic_compatibility'] = _audit_nullable_retry
+                log_func('[NCAAF-RESEARCH-FEATURE-LINEAGE-COMPAT] '+json.dumps(
+                    _audit_nullable_retry, sort_keys=True))
         except Exception as _feature_audit_exc:
             research_feature_lineage_audit = {
                 "summary": {"status":"AUDIT_ERROR",
+                    "stage": _feature_audit_stage,
                     "error":f"{type(_feature_audit_exc).__name__}:{_feature_audit_exc}",
                     "policy":"DIAGNOSTIC_ONLY_NO_AUTHORITY"},"fields":[]}
             log_func("[NCAAF-RESEARCH-FEATURE-LINEAGE] "+json.dumps(
