@@ -8903,6 +8903,26 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         if historic.sum()<500: raise RuntimeError(f"insufficient <=2025 history n={int(historic.sum())}")
         g=games.loc[historic].reset_index(drop=True); mg=miner_games.loc[historic].reset_index(drop=True); sy=seasons[historic]; om=oof_margin[historic]; ot=oof_total[historic]
         log_func(f"[NCAAF-RV232-PREFLIGHT] source={NCAAF_RESEARCH_V2_SOURCE_TAG} rows={len(g)} seasons={sorted(set(sy.astype(int)))} discovery<=2023 confirmation=2024,2025 prospective>=2026 production_authority=0")
+        # V5.5 dual-mode pipeline health: read-only checks at the actual research
+        # input boundary. This does not modify g, mg, sy, OOF, candidate features,
+        # model fitting, scoring, rule selection or authority.
+        try:
+            from ncaaf_v55_research_health import audit_research_frames as _v55_audit_frames
+            _v55_research_input_health = _v55_audit_frames(
+                games=g, miner_games=mg, seasons=sy, oof_margin=om,
+                oof_total=ot, candidate_feature_cols=cols,
+                source_tag=NCAAF_RESEARCH_V2_SOURCE_TAG,
+                storage_client=storage_client, bucket_name=bucket_name,
+                persist=True)
+            log_func("[NCAAF-V55-RESEARCH-PIPELINE-HEALTH] "+json.dumps({
+                "status":_v55_research_input_health.get("status"),
+                "check_counts":_v55_research_input_health.get("check_counts"),
+                "failure_codes":_v55_research_input_health.get("failure_codes"),
+                "report_uri":_v55_research_input_health.get("report_uri")},sort_keys=True))
+        except Exception as _v55_research_audit_exc:
+            log_func("[NCAAF-V55-RESEARCH-PIPELINE-HEALTH] ERROR "+
+                f"{type(_v55_research_audit_exc).__name__}:{_v55_research_audit_exc}")
+
         # Research-field audit: compare the actual STAT/CORE feature registry
         # with the richer, independently joined Miner feature matrix.
         # Diagnostics never mutate data or promote a feature/candidate.

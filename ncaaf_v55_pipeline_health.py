@@ -62,9 +62,9 @@ def _json(doc):
     return json.dumps(doc,sort_keys=True,separators=(',',':'),allow_nan=False,default=str)
 
 
-def add_check(report, code, severity, reason, *, metrics=None, evidence=None):
+def add_check(report, code, severity, reason, *, metrics=None, evidence=None, domain="production"):
     assert severity in ('PASS','WARNING','FAIL','UNKNOWN')
-    entry={'code':code,'status':severity,'reason':reason,
+    entry={'code':code,'status':severity,'domain':domain,'reason':reason,
            'metrics':metrics or {}}
     if evidence is not None: entry['evidence']=evidence
     report['checks'].append(entry)
@@ -79,6 +79,13 @@ def summarize(report):
     report['failure_codes']=[x['code'] for x in report['checks'] if x['status']=='FAIL']
     report['warning_codes']=[x['code'] for x in report['checks'] if x['status']=='WARNING']
     report['unknown_codes']=[x['code'] for x in report['checks'] if x['status']=='UNKNOWN']
+    for domain in ('production','research'):
+        subset=[x for x in report['checks'] if x.get('domain','production')==domain]
+        cc=Counter(x['status'] for x in subset)
+        report[f'{domain}_check_counts']={k:cc.get(k,0) for k in ('PASS','WARNING','FAIL','UNKNOWN')}
+        report[f'{domain}_status']=('FAIL' if cc['FAIL'] else 'WARNING' if cc['WARNING'] else
+                                   'UNKNOWN' if cc['UNKNOWN'] or not subset else 'PASS')
+        report[f'{domain}_failure_codes']=[x['code'] for x in subset if x['status']=='FAIL']
     return report
 
 
@@ -328,11 +335,115 @@ def audit_warehouse_metadata(report, bq_client):
     add_check(report,'WAREHOUSE_INVENTORY',status,
               'Metadata-only availability check; does not prove historical coverage, deduplication, or feature use',
               metrics={'source_tables_checked':len(REQUIRED_WAREHOUSE),
-                       'unavailable_or_empty':missing,'tables':info})
+                       'unavailable_or_empty':missing,'tables':info}, domain='research')
     # Never present metadata-only row counts as a full-model feature integrity PASS.
     add_check(report,'HISTORICAL_ROW_LEVEL_JOIN_AND_LEAKAGE','UNKNOWN',
-              'Not verified by metadata; requires distinct-game, feature-null, and pregame-vintage checks at model-input boundary')
+              'Metadata cannot certify research input completeness; read research-input health separately',domain='research')
 
+
+
+def audit_research_publications(report, storage_client, bucket_name, now):
+    """Independent read of the heavy-research *actual frame* health publication.
+
+    Research is run on a different cadence from market refresh. Stale and missing
+    artifacts are NOT mistaken for a failed live production cycle.
+    """
+    bucket=storage_client.bucket(bucket_name)
+    path=f'{OUT}/latest_research.json'
+    obj=bucket.blob(path)
+    try:
+        if not obj.exists():
+            add_check(report,'RESEARCH_INPUT_AUDIT','UNKNOWN',
+                      'Heavy Research has not published its input-frame audit yet; execute Heavy Research',
+                      metrics={'expected_artifact':f'gs://{bucket_name}/{path}'},domain='research')
+            return
+        size=getattr(obj,'size',None)
+        if size and size>MAX_CAPTURE_BYTES:
+            add_check(report,'RESEARCH_INPUT_AUDIT','FAIL','Research audit exceeds size cap',domain='research')
+            return
+        raw=obj.download_as_bytes()
+        if len(raw)>MAX_CAPTURE_BYTES:raise ValueError('AUDIT_FILE_TOO_LARGE')
+        doc=json.loads(raw)
+        if doc.get('schema_version')!='V55_RESEARCH_INPUT_HEALTH_V1_20261101':
+            raise ValueError('RESEARCH_INPUT_AUDIT_SCHEMA_MISMATCH')
+        generated=_dt(doc.get('created_at_utc'))
+        age=(now-generated).total_seconds()/3600 if generated else None
+        if age is None or age < -0.0833:
+            add_check(report,'RESEARCH_INPUT_AUDIT','FAIL','Invalid or future dated research-input audit',domain='research')
+            return
+        issues=doc.get('failure_codes') or []
+        status=('FAIL' if issues or doc.get('status')=='FAIL' else
+                'WARNING' if age>14*24 or doc.get('status')=='WARNING' else
+                'UNKNOWN' if doc.get('status')=='UNKNOWN' else 'PASS')
+        add_check(report,'RESEARCH_INPUT_AUDIT',status,
+                  'Heavy Research actual-frame audit is available; observations are separate from live production',
+                  metrics={'input_audit_status':doc.get('status'),
+                           'audit_age_hours':round(age,2),
+                           'row_summary':doc.get('row_summary',{}),
+                           'failure_codes':issues,
+                           'warning_codes':doc.get('warning_codes') or [],
+                           'source_tag':doc.get('source_tag')},domain='research')
+        report['research_input_audit']={'status':doc.get('status'),'age_hours':round(age,2),
+                                        'artifact':f'gs://{bucket_name}/{path}',
+                                        'row_summary':doc.get('row_summary',{})}
+    except Exception as exc:
+        add_check(report,'RESEARCH_INPUT_AUDIT','FAIL',
+                  'Research audit publication unreadable; do not infer successful research validation',
+                  metrics={'error_type':type(exc).__name__},domain='research')
+        return
+
+    # Published research report is evidence of pipeline completion; it is not
+    # equivalent to verified per-row feature provenance.
+    path='research/ncaaf/v2/current_report.json'
+    try:
+        obj=bucket.blob(path)
+        if not obj.exists():
+            add_check(report,'RESEARCH_REPORT_PUBLICATION','WARNING',
+                      'No current Heavy Research report',domain='research')
+            return
+        sz=getattr(obj,'size',None)
+        if sz and sz>MAX_CAPTURE_BYTES:
+            add_check(report,'RESEARCH_REPORT_PUBLICATION','UNKNOWN',
+                      'Research report exists but exceeds safe audit read cap; provenance not checked',
+                      metrics={'size_bytes':sz},domain='research')
+            return
+        raw=obj.download_as_bytes()
+        if len(raw)>MAX_CAPTURE_BYTES:raise ValueError('RESEARCH_REPORT_TOO_LARGE')
+        r=json.loads(raw)
+        seasons=r.get('seasons') or []
+        prospective=[x for x in seasons if isinstance(x,(float,int)) and x>=2026]
+        health=r.get('research_feature_lineage_audit') or {}
+        fl=health.get('summary') or {}
+        bad=bool(prospective or r.get('production_authority') not in (0,None) or
+                 fl.get('status')=='AUDIT_ERROR')
+        report_age=(now-_dt(r.get('created_utc'))).total_seconds()/3600 if _dt(r.get('created_utc')) else None
+        prior=report.get('research_input_audit') or {}
+        mismatch=bool(prior.get('age_hours') is not None and
+                      prior.get('row_summary',{}).get('rows') is not None and
+                      r.get('rows') is not None and
+                      r.get('created_utc') and _dt(r.get('created_utc')) and
+                      _dt(r.get('created_utc')) <= now and
+                      abs((_dt(r.get('created_utc'))-
+                           (now-timedelta(hours=prior['age_hours']))).total_seconds())<3*3600 and
+                      r['rows']!=prior['row_summary']['rows'])
+        add_check(report,'RESEARCH_REPORT_PUBLICATION',
+                  'FAIL' if bad or mismatch else 'WARNING' if report_age is None or report_age>14*24 or r.get('status') not in ('NCAAF_RESEARCH_V2_COMPLETE','PASS') else 'PASS',
+                  'Heavy Research report was read without changing systems, model or qualification',
+                  metrics={'status':r.get('status'),'source_tag':r.get('source_tag'),
+                           'rows':r.get('rows'),'seasons':seasons,
+                           'report_age_hours':round(report_age,2) if report_age is not None else None,
+                           'feature_lineage_status':fl.get('status'),
+                           'research_input_row_count_mismatch':mismatch},domain='research')
+        add_check(report,'RESEARCH_FEATURE_LINEAGE_PUBLICATION',
+                  'UNKNOWN' if not fl.get('status') else
+                  'FAIL' if fl.get('status')=='AUDIT_ERROR' else
+                  'PASS' if fl.get('status')=='PASS' else 'WARNING',
+                  'Feature-lineage artifact status as reported by Heavy Research; independently checking per-feature vintages requires source timestamps',
+                  metrics={'feature_lineage_status':fl.get('status')}, domain='research')
+    except Exception as exc:
+        add_check(report,'RESEARCH_REPORT_PUBLICATION','FAIL',
+                  'Current research report could not be verified',
+                  metrics={'exception':type(exc).__name__},domain='research')
 
 def run_cycle(*, storage_client, bucket_name='sharp-models', ledger_report,
               bq_client=None, now=None, persist=True):
@@ -373,6 +484,7 @@ def run_cycle(*, storage_client, bucket_name='sharp-models', ledger_report,
                   metrics={'exception':type(exc).__name__})
     audit_verified_board(r,bq_client,now)
     audit_warehouse_metadata(r,bq_client)
+    audit_research_publications(r,storage_client,bucket_name,now)
     summarize(r)
     if persist:
         bucket=storage_client.bucket(bucket_name)
@@ -388,6 +500,8 @@ def run_cycle(*, storage_client, bucket_name='sharp-models', ledger_report,
             summarize(r)
     LOG.info('[NCAAF-V55-PIPELINE-HEALTH] %s',_json({
         'status':r['status'],'check_counts':r['check_counts'],
+        'production_status':r['production_status'],
+        'research_status':r['research_status'],
         'failure_codes':r['failure_codes'],'warning_codes':r['warning_codes'],
         'unknown_codes':r['unknown_codes'],'report_uri':r.get('report_uri'),
         'bet_authority':0}))

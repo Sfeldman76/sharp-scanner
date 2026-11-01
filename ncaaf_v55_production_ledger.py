@@ -643,6 +643,10 @@ def run_cycle(*, storage_client=None, bucket_name='sharp-models', now=None,
             now=t,persist=True)
         report['pipeline_health_audit']={
             'status':_health.get('status'),
+            'production_status':_health.get('production_status'),
+            'research_status':_health.get('research_status'),
+            'production_check_counts':_health.get('production_check_counts',{}),
+            'research_check_counts':_health.get('research_check_counts',{}),
             'check_counts':_health.get('check_counts',{}),
             'failure_codes':_health.get('failure_codes',[]),
             'warning_codes':_health.get('warning_codes',[]),
