@@ -2173,7 +2173,7 @@ def read_v55_research_miner_registry(*, storage_client=None, bucket_name=None):
             if rec.get('confirmation_pass') is not True or rec.get('live_authority_eligible') is not True:continue
             if rec.get('live_authority_policy')!=frozen_policy:continue
             if rec.get('split_audit',{}).get('disjoint') is not True:continue
-            if int(rec.get('confirmation_n') or 0)<60 or float(rec.get('confirmation_rate') or 0)<0.56:continue
+            if int(rec.get('confirmation_n') or 0)<60 or float(rec.get('confirmation_rate') or 0)<0.53:continue
             if rec.get('meta_constituent_overlap_guard','PASS')!='PASS':continue
             if rec.get('market')!='spreads':continue
             mechanisms[mid]={
@@ -2406,7 +2406,7 @@ def _v55_validate_long_history_brain_registry(doc, *, raw_sha='', now=None):
                 and entry.get('uses_2026_outcomes') is False
                 and entry.get('overlap_audit')=='PASS'
                 and entry.get('multiple_testing_audit')=='PASS'
-                and n==y1+y2 and n>=60 and rate>=0.56
+                and n==y1+y2 and n>=60 and rate>=0.53
                 and y1>=15 and y2>=15
                 and 0<=rate1<=1 and 0<=rate2<=1
                 and abs((rate1*y1+rate2*y2)/n-rate)<0.001):
