@@ -5,7 +5,7 @@ WITH latest AS (
   WHERE record_kind='COMPLETE'
   ORDER BY published_at DESC
   LIMIT 1
-), rows AS (
+), board_records AS (
   SELECT l.published_at,l.audit_json,r
   FROM latest l
   JOIN `sharplogger.sharp_data.ncaaf_v55_live_board` d
@@ -29,4 +29,4 @@ SELECT
   COUNTIF(SAFE_CAST(JSON_VALUE(r,'$.V55_Any_Brain_Candidate_Count') AS INT64)>0) AS candidate_games,
   COUNTIF(SAFE_CAST(JSON_VALUE(r,'$.V55_Any_Brain_Qualified_Candidate_Count') AS INT64)>0) AS qualified_candidate_games,
   COUNTIF(SAFE_CAST(JSON_VALUE(r,'$.V55_Bet_Authority') AS INT64)>0) AS authorized_rows
-FROM rows;
+FROM board_records;
