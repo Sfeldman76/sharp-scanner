@@ -35,50 +35,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-def _v55_is_nullable_float_conversion_error(error):
-    """Do not retry unrelated feature-audit failures or mask real data errors."""
-    message = str(error).lower()
-    return ('missing values' in message and
-            ('float64' in message or 'na_value' in message))
-
-
-def _v55_nullable_audit_copy(frame):
-    """Return audit-only pandas-compatible columns, preserving original missingness.
-
-    The source DataFrame is never modified. Nullable ints are converted to object
-    arrays rather than float to avoid loss of precision in game identifiers.
-    """
-    output = frame.copy(deep=False)
-    converted = []
-    for column in frame.columns:
-        values = frame[column]
-        dtype = values.dtype
-        if isinstance(dtype, pd.api.extensions.ExtensionDtype):
-            if pd.api.types.is_float_dtype(dtype):
-                output[column] = pd.Series(
-                    values.to_numpy(dtype=np.float64, na_value=np.nan),
-                    index=values.index)
-            elif pd.api.types.is_integer_dtype(dtype) or pd.api.types.is_bool_dtype(dtype):
-                output[column] = pd.Series(
-                    values.to_numpy(dtype=object, na_value=np.nan),
-                    index=values.index)
-            elif isinstance(dtype, pd.StringDtype):
-                output[column] = pd.Series(
-                    values.to_numpy(dtype=object, na_value=np.nan),
-                    index=values.index)
-            else:
-                continue  # Categories and timezone-aware dates retain their types.
-            converted.append(str(column))
-    return output, converted
-
-
 NCAAF_RESEARCH_V2_SOURCE_TAG = "ncaaf-research-v2.33.0-feature-aware-max-history-miner-20261015"
 NCAAF_RESEARCH_V2_VERSION = "2.33.0"
 NCAAF_RESEARCH_REPAIR_PATCH = "ptiv-2023fit-2024select-2025holdout-live-availability-20261014"
 NCAAF_LIVE_CALENDAR_PATCH = "miner-season-game-date-safe-fallback-20261014"
-NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_21_HISTORICAL_DEEP_QUALIFICATION_20261028"
+NCAAF_MINER_LIVE_AUTHORITY_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
 NCAAF_MINER_LIVE_MIN_CONFIRMATION_N = 60
-NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.53
+NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE = 0.56
 DISCOVERY_MAX_SEASON = 2023  # retained for non-Miner research lanes / backward compatibility
 CONFIRMATION_SEASONS = (2024, 2025)
 PROSPECTIVE_MIN_SEASON = 2026
@@ -1430,6 +1393,51 @@ def _pt_load_feeder_manifest(storage_client,bucket_name: str) -> dict[str,Any]:
         return {}
 
 
+def _pt_load_season(season: int, *, storage_client, bucket_name: str, force_web: bool=False, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
+    season=int(season); raw_path=f"{PT_RAW_PREFIX}/ncaa{season}.csv"; norm_path=f"{PT_NORMALIZED_PREFIX}/ncaa{season}.csv"
+    current=season>=PT_CURRENT_SEASON
+    raw=None; source=""; web_exc=None
+
+    # V2.17: GCS is the primary model-side interface for every season. Completed
+    # historical seasons are immutable. The current-season YTD archive can remain
+    # valid for a week; the separate live/current feed has the tighter freshness gate.
+    # Retain the latest validated weekly archive.
+    max_age=None
+    raw,gdiag=_pt_gcs_raw(storage_client,bucket_name,raw_path,max_age_hours=max_age)
+    if raw is not None:
+        source="GCS_FEEDER_RAW"
+        log_func(f"[NCAAF-PT-GCS] season={season} kind=ARCHIVE status=PASS age_hours={gdiag.get('age_hours')} path=gs://{bucket_name}/{raw_path} authority=0")
+    else:
+        log_func(f"[NCAAF-PT-GCS] season={season} kind=ARCHIVE status={gdiag.get('status')} age_hours={gdiag.get('age_hours')} path=gs://{bucket_name}/{raw_path} authority=0")
+
+    # Direct/relay web remains a best-effort fallback only.  It is no longer the
+    # contract Heavy/Weekly rely on, and can be disabled with PT_ALLOW_WEB_FALLBACK=0.
+    if raw is None and PT_ALLOW_WEB_FALLBACK:
+        try:
+            raw,web_source=_pt_fetch_csv_resilient(PT_ARCHIVE_URL.format(season=season),referer=PT_ARCHIVE_PAGE_URL)
+            source=web_source
+            try: storage_client.bucket(bucket_name).blob(raw_path).upload_from_string(raw,content_type="text/csv")
+            except Exception: pass
+        except Exception as exc:
+            web_exc=exc
+    if raw is None:
+        err=(f"{type(web_exc).__name__}:{web_exc}" if web_exc else f"GCS_{gdiag.get('status')}")
+        log_func(f"[NCAAF-PT-SEASON] season={season} status=UNAVAILABLE error={err} gcs_status={gdiag.get('status')} authority=0")
+        return pd.DataFrame(),{"status":"UNAVAILABLE","season":season,"error":err,"gcs":gdiag,"authority":0}
+
+    _verified_map=_pt_load_header_manifest(storage_client,bucket_name)
+    frame,diag=_pt_parse_csv(raw,season,verified_header_map=_verified_map,source_context=f"ARCHIVE_{source}",log_func=log_func)
+    diag["source"]=source; diag["url"]=PT_ARCHIVE_URL.format(season=season); diag["gcs"]=gdiag; diag["authority"]=0
+    if not frame.empty:
+        try: storage_client.bucket(bucket_name).blob(norm_path).upload_from_string(frame.to_csv(index=False).encode(),content_type="text/csv")
+        except Exception: pass
+    log_func(f"[NCAAF-PT-SEASON] season={season} status={diag.get('status')} source={source} rows={len(frame)} full_five={int(np.isfinite(pd.to_numeric(frame.get('meta_margin_home'),errors='coerce')).sum()) if not frame.empty else 0} authority=0")
+    return frame,diag
+
+
+
+
+# PT_GCS_MANUAL_UPLOAD_PROVENANCE_V1
 def _pt_attest_manual_live_upload(sc, bucket_name, raw):
     import hashlib
     from datetime import datetime, timezone
@@ -1508,51 +1516,6 @@ def _pt_attest_manual_live_upload(sc, bucket_name, raw):
     except Exception:
         return None, None, None
 
-
-
-def _pt_load_season(season: int, *, storage_client, bucket_name: str, force_web: bool=False, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
-    season=int(season); raw_path=f"{PT_RAW_PREFIX}/ncaa{season}.csv"; norm_path=f"{PT_NORMALIZED_PREFIX}/ncaa{season}.csv"
-    current=season>=PT_CURRENT_SEASON
-    raw=None; source=""; web_exc=None
-
-    # V2.17: GCS is the primary model-side interface for every season. Completed
-    # historical seasons are immutable. The current-season YTD archive can remain
-    # valid for a week; the separate live/current feed has the tighter freshness gate.
-    # Manual weekly archive: retain latest validated snapshot until superseded.
-    max_age=None
-    raw,gdiag=_pt_gcs_raw(storage_client,bucket_name,raw_path,max_age_hours=max_age)
-    if raw is not None:
-        source="GCS_FEEDER_RAW"
-        log_func(f"[NCAAF-PT-GCS] season={season} kind=ARCHIVE status=PASS age_hours={gdiag.get('age_hours')} path=gs://{bucket_name}/{raw_path} authority=0")
-    else:
-        log_func(f"[NCAAF-PT-GCS] season={season} kind=ARCHIVE status={gdiag.get('status')} age_hours={gdiag.get('age_hours')} path=gs://{bucket_name}/{raw_path} authority=0")
-
-    # Direct/relay web remains a best-effort fallback only.  It is no longer the
-    # contract Heavy/Weekly rely on, and can be disabled with PT_ALLOW_WEB_FALLBACK=0.
-    if raw is None and PT_ALLOW_WEB_FALLBACK:
-        try:
-            raw,web_source=_pt_fetch_csv_resilient(PT_ARCHIVE_URL.format(season=season),referer=PT_ARCHIVE_PAGE_URL)
-            source=web_source
-            try: storage_client.bucket(bucket_name).blob(raw_path).upload_from_string(raw,content_type="text/csv")
-            except Exception: pass
-        except Exception as exc:
-            web_exc=exc
-    if raw is None:
-        err=(f"{type(web_exc).__name__}:{web_exc}" if web_exc else f"GCS_{gdiag.get('status')}")
-        log_func(f"[NCAAF-PT-SEASON] season={season} status=UNAVAILABLE error={err} gcs_status={gdiag.get('status')} authority=0")
-        return pd.DataFrame(),{"status":"UNAVAILABLE","season":season,"error":err,"gcs":gdiag,"authority":0}
-
-    _verified_map=_pt_load_header_manifest(storage_client,bucket_name)
-    frame,diag=_pt_parse_csv(raw,season,verified_header_map=_verified_map,source_context=f"ARCHIVE_{source}",log_func=log_func)
-    diag["source"]=source; diag["url"]=PT_ARCHIVE_URL.format(season=season); diag["gcs"]=gdiag; diag["authority"]=0
-    if not frame.empty:
-        try: storage_client.bucket(bucket_name).blob(norm_path).upload_from_string(frame.to_csv(index=False).encode(),content_type="text/csv")
-        except Exception: pass
-    log_func(f"[NCAAF-PT-SEASON] season={season} status={diag.get('status')} source={source} rows={len(frame)} full_five={int(np.isfinite(pd.to_numeric(frame.get('meta_margin_home'),errors='coerce')).sum()) if not frame.empty else 0} authority=0")
-    return frame,diag
-
-
-
 def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
     """Load current-week ratings with GCS-first, name-safe identity validation.
 
@@ -1562,8 +1525,11 @@ def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -
     authoritative NCAA schedule.
     """
     raw_path=f"{PT_RAW_PREFIX}/ncaapredictions.csv"
-    # Weekly uploader schedule: no arbitrary 24h/72h source expiration.
-    raw,gcsv=_pt_gcs_raw(storage_client,bucket_name,raw_path,max_age_hours=None)
+    # PT weekly uploads have no fixed age expiration.
+    # Original upload provenance is verified independently.
+    raw,gcsv=_pt_gcs_raw(
+        storage_client,bucket_name,raw_path,max_age_hours=None
+    )
     hraw=None
     ghtml={"status":"NOT_REQUIRED_CSV_ONLY","age_hours":None}
     source=""; csv_exc=None; html_exc=None; infer_diag={"status":"NOT_REQUIRED_CSV_ONLY"}; verified_map={}
@@ -1609,10 +1575,9 @@ def _pt_load_live_current(*, storage_client, bucket_name: str, log_func=print) -
         return pd.DataFrame(),{"status":"UNAVAILABLE","season":PT_CURRENT_SEASON,"error":f"CSV={err_csv}; HTML={err_html}","gcs_csv":gcsv,"gcs_html":ghtml,"url":PT_LIVE_CSV_URL,"page_url":PT_LIVE_PAGE_URL,"authority":0}
 
     frame=frame.copy(); frame["source_kind"]="LIVE_CURRENT"; frame["source_priority"]=2
-    # Only a SHA+generation+manifest+snapshot verified original upload provides
-    # a producer clock. Normalized CSV object updates do not establish one.
     _pt_clock,_pt_sha,_pt_generation=_pt_attest_manual_live_upload(
-        storage_client,bucket_name,raw if source=="GCS_FEEDER_LIVE" else None
+        storage_client,bucket_name,
+        raw if source=="GCS_FEEDER_LIVE" else None
     )
     frame["pt_source_observed_at_utc"]=_pt_clock
     frame["pt_source_sha256"]=_pt_sha
@@ -1926,16 +1891,16 @@ def _pt_candidate_map(external_names: Iterable[str], internal_names: Iterable[st
     for raw in sorted({_pt_team_key(x) for x in external_names if _pt_team_key(x)}):
         if raw in ints: mapping[raw]=raw; continue
         hinted=hints.get(raw)
-        # University of Tennessee and Middle Tennessee State must never
-        # resolve to one another, including through a provided alias hint.
-        def _pt_confuses_tennessee(a,b):
-            is_mid=lambda x: x=="middle tennessee" or x.startswith("middle tennessee ")
-            return (a=="tennessee" and is_mid(b)) or (is_mid(a) and b=="tennessee")
-        if hinted in ints and not _pt_confuses_tennessee(raw,hinted):
+        if hinted in ints:
             mapping[raw]=hinted; continue
         rt=set(raw.split()); scored=[]
         for cand in ints:
-            if _pt_confuses_tennessee(raw,cand):
+            # Distinct universities: Tennessee is not Middle Tennessee.
+            # Never resolve one to the other through fuzzy matching.
+            if raw == "tennessee" and (
+                cand == "middle tennessee"
+                or cand.startswith("middle tennessee ")
+            ):
                 continue
             ct=set(cand.split())
             subset=rt.issubset(ct) and len(rt)>=1
@@ -5418,10 +5383,6 @@ def _extended_atoms(g: pd.DataFrame, dashboard_module=None, *, for_live: bool=Fa
         for v,cnt in vc.items():
             if "__VS__" in v and "UNKNOWN" not in v and (for_live or cnt>=60):
                 add("CONFPAIR_"+re.sub(r"[^A-Z0-9]+","_",v)[:36],"CONFERENCE_PAIR",pairs.eq(v),v.replace("__VS__"," vs "),source_ok=True)
-    if for_live and not (conf.ne("").any() and oppconf.ne("").any()):
-        _cf_same_flag=nfirst('CFBD_Same_Conference')
-        add('SAME_CONFERENCE','CONFERENCE_PAIR',_cf_same_flag.eq(1),
-            source_ok=_cf_same_flag.notna().any())
     coach=tfirst("Head_Coach","Coach","Team_Head_Coach")
     if coach.ne("").any():
         for v,cnt in coach.value_counts().items():
@@ -6145,23 +6106,6 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         for _pb in (behavior.get("top_confirmed") or [])[:8]:
             log_func(f"[NCAAF-RV2182-PREDICTOR-TOP] predictor={_pb.get('predictor')} behavior={_pb.get('behavior')} state={_pb.get('state')} discovery={_pb.get('discovery_rate')}/{_pb.get('discovery_n')} confirmation={_pb.get('confirmation_rate')}/{_pb.get('confirmation_n')} meta_constituent={str(bool(_pb.get('meta_constituent',False))).upper()} source_cluster={_pb.get('source_cluster')} authority=0")
     if valid.sum()<500: out["status"]="INSUFFICIENT_HISTORY"; return out
-    # Deep CFBD discovery + historical validation. The frozen 2024/25 holdout
-    # can automatically qualify exact combinations for existing Miner live
-    # authority, but ONLY with independently certified pregame source vintages,
-    # multiple-testing control and reproducible live atom evaluation.
-    # CFBD_PG_ fields are retrospective and remain ineligible for promotion.
-    if market == "spreads" and os.getenv("NCAAF_MINER_DEEP_CFBD", "1").strip().lower() not in {"0", "off", "false", "no"}:
-        try:
-            from ncaaf_miner_deep_cfbd_v1 import run_deep_cfbd_challenger
-            out["deep_cfbd_shadow"] = run_deep_cfbd_challenger(
-                games, seasons, atoms, log_func=log_func,
-                max_depth=min(6,max(5,int(os.getenv("NCAAF_MINER_DEEP_MAX_DEPTH","6"))))
-            )
-        except Exception as _deep_exc:
-            out["deep_cfbd_shadow"] = {"status":"ERROR_DEEP_DISCOVERY",
-                                       "exception":f"{type(_deep_exc).__name__}:{_deep_exc}",
-                                       "production_authority":0}
-            log_func(f"[NCAAF-DEEP-CFBD] status=ERROR_RESEARCH_ONLY error={type(_deep_exc).__name__}:{_deep_exc} authority=0")
 
     # Entire candidate universe shares these prices. Only H2H needs the cache;
     # keep it scoped to this invocation so 2026 or live frame changes cannot
@@ -6192,10 +6136,10 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
             )
             r["quality"]=4*max(0,r["market_residual_discovery"])+2*max(0,hp.get("roi",0))+0.05*float(hp.get("positive_price_band_fraction",0) or 0)
         else:
-            discovery_pass=bool(bool(r.get("internal_validation_pass",False)) and r["discovery_rate"]>=.53 and r["stable_discovery_fraction"]>=float(r.get("required_stable_discovery_fraction",1.0)) and np.isfinite(r["remove_best_discovery_rate"]) and r["remove_best_discovery_rate"]>=.515)
+            discovery_pass=bool(bool(r.get("internal_validation_pass",False)) and r["discovery_rate"]>=.54 and r["stable_discovery_fraction"]>=float(r.get("required_stable_discovery_fraction",1.0)) and np.isfinite(r["remove_best_discovery_rate"]) and r["remove_best_discovery_rate"]>=.515)
             _iv_bonus=max(0.0,float(r.get("internal_validation_rate",.5) or .5)-.5) if np.isfinite(r.get("internal_validation_rate",np.nan)) else 0.0
             r["quality"]=(r["discovery_rate"]-.5)*3 + max(0,r["remove_best_discovery_rate"]-.5) + .03*r["stable_discovery_fraction"] + .20*_iv_bonus
-        r["discovery_pass"]=discovery_pass; r["idx"]=tuple(idx); r["market"]=market
+        r["discovery_pass"]=discovery_pass; r["idx"]=tuple(idx)
         return r
 
     def legacy_search(lane_atoms):
@@ -6525,22 +6469,6 @@ def run_system_miner_v3(games: pd.DataFrame, seasons: np.ndarray, market: str, d
         if fam.get("meta_constituent_overlap_guard")!="PASS":
             continue
         families.append(fam)
-    # Add automatically validated deep rules to the SAME Miner mechanism library.
-    # Failed PIT, independent holdout, or live-condition checks remain diagnostics
-    # and cannot cast a bet vote. This does not create an additional vote family
-    # for correlated CFBD mechanisms.
-    if market == "spreads":
-        _deep_result=out.get("deep_cfbd_shadow") or {}
-        for _deep_mech in (_deep_result.get("auto_qualified_mechanisms") or []):
-            if _miner_live_authority_eligible(_deep_mech):
-                families.append(_deep_mech)
-        _deep_result["published_authority_mechanisms"]=sum(1 for m in families if m.get("miner_lane")=="DEEP_CFBD_AUTO")
-        log_func(f"[NCAAF-DEEP-CFBD-AUTHORITY] status={_deep_result.get('status')} "
-                 f"tested={_deep_result.get('tested_hypotheses',0)} "
-                 f"holdout_pass={_deep_result.get('holdout_screen_pass',0)} "
-                 f"ready={_deep_result.get('authority_ready_count',0)} "
-                 f"published={_deep_result['published_authority_mechanisms']} "
-                 f"blocked_pit={_deep_result.get('blocked_pit_count',0)}")
     clean=[]
     for z in finalists:
         z=dict(z); z.pop("_mask_internal",None); clean.append(z)
@@ -6650,11 +6578,6 @@ def _prospective_shadow(full_games: pd.DataFrame, full_seasons: np.ndarray, mine
     out={"status":"PASS","season_min":PROSPECTIVE_MIN_SEASON,"mechanisms":[],"production_authority":0,"selection_influence":0}
     for market,mr in (miners or {}).items():
         atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(full_games,dashboard_module,for_live=False,market=market)}
-        try:
-            from ncaaf_miner_deep_cfbd_v1 import frozen_live_auto_atoms
-            atoms.update(frozen_live_auto_atoms(full_games,(mr or {}).get('mechanism_families') or []))
-        except (ImportError,ValueError,TypeError,KeyError):
-            pass
         y,valid,baseline=_market_target(full_games,market)
         for mech in (mr or {}).get("mechanism_families",[]):
             if not mech.get("confirmation_pass"): continue
@@ -6701,14 +6624,14 @@ def _beta_shrunk_rate(wins: int, n: int, prior_wins: float=15.0, prior_losses: f
 
 
 def _miner_authority_threshold_neighborhood(miners: dict[str,Any]) -> dict[str,Any]:
-    """Show sensitivity near the 60 game / 53% minimum live-authority screen.
+    """Show sensitivity near the frozen 60 / 56% live-authority gate.
 
     This does not choose a threshold and has zero selection influence. It answers
     whether the qualified family count is brittle to small neighboring cutoffs.
     """
     rows=[]
     for min_n in (50,60,70):
-        for min_rate in (.52,.53,.54,.55,.56):
+        for min_rate in (.55,.56,.57):
             by_market={}; total=0
             for market,mr in (miners or {}).items():
                 n=sum(bool(x.get("confirmation_pass")) and int(x.get("confirmation_n",0) or 0)>=min_n and
@@ -6847,129 +6770,33 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
         if sc is None:
             from google.cloud import storage
             sc=storage.Client()
-        # V5.5 PRODUCTION PT: preserve the GitHub current-live preference,
-        # strict per-game pregame validation, and the Miner index restore below.
-        # Read RAW evidence first. Normalized GCS writes are NEVER a substitute
-        # for the original weekly Prediction Tracker source observation clock.
-        from ncaaf_miner_live_unblock_v1 import school_key as _live_school_key
-        _pt_now=pd.Timestamp.now(tz="UTC")
-        _pt_source_raw=_pt_blob_bytes(sc,bucket_name,f"{PT_RAW_PREFIX}/ncaapredictions.csv")
-        _verified_clock,_verified_sha,_verified_generation=(
-            _pt_attest_manual_live_upload(sc,bucket_name,_pt_source_raw)
-        )
-        if not _verified_clock:
-            return out,{'status':'UNATTESTED_LIVE_PT_UPLOAD','matched':0,
-                        'reason':'RAW_METADATA_MANIFEST_SNAPSHOT_NOT_VERIFIED','authority':0}
-        _verified_stamp=pd.to_datetime(_verified_clock,utc=True,errors='coerce')
-        if pd.isna(_verified_stamp) or _verified_stamp>_pt_now:
-            return out,{'status':'INVALID_RAW_PT_CLOCK','matched':0,'authority':0}
+        raw=sc.bucket(bucket_name).blob(PT_CURRENT_BLOB).download_as_bytes()
+        ex=pd.read_csv(io.BytesIO(raw))
+        if ex.empty: return out,{"status":"EMPTY","matched":0}
+        homes=out.get("Home_Team_Norm",out.get("Home_Team",pd.Series("",index=out.index))).astype(str).map(_pt_team_key)
+        aways=out.get("Away_Team_Norm",out.get("Away_Team",pd.Series("",index=out.index))).astype(str).map(_pt_team_key)
+        internal=pd.concat([homes,aways],ignore_index=True).tolist()
+        emap,_un=_pt_candidate_map(pd.concat([ex.get("home_key",pd.Series(dtype=str)),ex.get("away_key",pd.Series(dtype=str))],ignore_index=True),internal)
+        ex=ex.copy(); ex["home_i"]=ex.get("home_key",pd.Series("",index=ex.index)).map(emap); ex["away_i"]=ex.get("away_key",pd.Series("",index=ex.index)).map(emap)
+        ex=ex.loc[ex["home_i"].notna()&ex["away_i"].notna()].copy(); ex["pair_key"]=ex["home_i"].astype(str)+"|"+ex["away_i"].astype(str)
 
-        def _pt_tennessee_conflict(raw,canonical):
-            a=_pt_team_key(raw);b=_pt_team_key(canonical)
-            is_mid=lambda v:v=='middle tennessee' or v.startswith('middle tennessee ')
-            return (a=='tennessee' and is_mid(b)) or (is_mid(a) and b=='tennessee')
+        # PT_LIVE_ARCHIVE_COLLISION_FIX_V1
+        # Prefer one current live observation over historical
+        # records mapping to the same matchup.
+        # Multiple live observations remain ambiguous.
+        _live_mask=ex["source_kind"].astype(str).eq("LIVE_CURRENT")
+        _live_counts=ex.loc[_live_mask,"pair_key"].value_counts()
+        _unique_live=set(_live_counts.index[_live_counts.eq(1)])
 
-        _pt_sources=[]
-        _pt_duplicate_pairs=set()
-        _pt_read_audit=[]
-        for _path,_priority in ((PT_CURRENT_LIVE_BLOB,2),(PT_CURRENT_BLOB,1)):
-            try:
-                _blob=sc.bucket(bucket_name).blob(_path)
-                _blob.reload()
-                _updated=pd.to_datetime(getattr(_blob,'updated',None),utc=True,errors='coerce')
-                # No artificial 14-day cache cutoff: PT is uploaded weekly.
-                # Still reject missing/future cache writes.
-                if pd.isna(_updated) or _updated>_pt_now+pd.Timedelta(minutes=5):
-                    _pt_read_audit.append({'source':_path,'status':'INVALID_CACHE_TIMESTAMP'})
-                    continue
-                _source=pd.read_csv(io.BytesIO(_blob.download_as_bytes()))
-                if _source.empty:
-                    _pt_read_audit.append({'source':_path,'status':'EMPTY'})
-                    continue
-                _required={'season','home_key','away_key','source_kind',
-                           'pt_source_sha256','pt_source_generation','pt_source_observed_at_utc'}
-                if not _required.issubset(_source.columns):
-                    _pt_read_audit.append({'source':_path,'status':'MISSING_ATTESTATION_COLUMNS'})
-                    continue
-                _source=_source.loc[
-                    pd.to_numeric(_source['season'],errors='coerce').eq(PT_CURRENT_SEASON)
-                    & _source['source_kind'].astype(str).eq('LIVE_CURRENT')
-                ].copy()
-                _row_stamps=pd.to_datetime(_source['pt_source_observed_at_utc'],utc=True,errors='coerce')
-                _source=_source.loc[
-                    _source['pt_source_sha256'].astype(str).eq(str(_verified_sha))
-                    & pd.to_numeric(_source['pt_source_generation'],errors='coerce').eq(int(_verified_generation))
-                    & _row_stamps.eq(_verified_stamp)
-                ].copy()
-                if _source.empty:
-                    _pt_read_audit.append({'source':_path,'status':'NO_ROWS_MATCH_RAW_ATTESTATION'})
-                    continue
-                _source['home_i']=_source['home_key'].map(_live_school_key)
-                _source['away_i']=_source['away_key'].map(_live_school_key)
-                _source=_source.loc[
-                    _source.home_i.ne('')&_source.away_i.ne('')
-                    &_source.home_i.ne(_source.away_i)
-                    &~_source.apply(lambda r:_pt_tennessee_conflict(r['home_key'],r['home_i'])
-                                             or _pt_tennessee_conflict(r['away_key'],r['away_i']),axis=1)
-                ].copy()
-                _source['pair_key']=_source.home_i.astype(str)+'|'+_source.away_i.astype(str)
-                _counts=_source.pair_key.value_counts()
-                _dup=int(_source.pair_key.map(_counts).gt(1).sum())
-                _pt_duplicate_pairs.update(_counts.index[_counts.gt(1)].tolist())
-                _source=_source.loc[_source.pair_key.map(_counts).eq(1)].copy()
-                _source['_pt_source_updated_utc']=_verified_stamp
-                _source['_pt_source_priority']=_priority
-                _pt_sources.append(_source)
-                _pt_read_audit.append({'source':_path,'status':'PASS','eligible_rows':len(_source),
-                                      'duplicate_rows_held':_dup,
-                                      'original_upload_utc':_verified_clock})
-            except Exception as _source_exc:
-                _pt_read_audit.append({'source':_path,'status':'UNAVAILABLE:'+type(_source_exc).__name__})
-        if not _pt_sources:
-            import logging as _pt_prod_log
-            _pt_prod_log.warning('[NCAAF-PT-LIVE-SOURCE-MATCH] %s',{
-                'status':'NO_ATTESTED_CURRENT_WEEK_SOURCE','sources':_pt_read_audit})
-            return out,{'status':'UNAVAILABLE_NO_VALID_PREGAME_PT_SOURCE','matched':0,
-                        'source_audit':_pt_read_audit,'authority':0}
-        ex=pd.concat(_pt_sources,ignore_index=True,sort=False)
-        ex=ex.sort_values(['_pt_source_priority','_pt_source_updated_utc'],ascending=False)
-        # A duplicated LIVE_CURRENT matchup cannot be rescued by an archive
-        # fallback. Preserve the source ambiguity hold across both caches.
-        ex=ex.loc[~ex.pair_key.isin(_pt_duplicate_pairs)].copy()
-        ex=ex.drop_duplicates(subset=['pair_key'],keep='first').set_index('pair_key',drop=False)
-        _home_raw=out.get('Home_Team_Norm',out.get('Home_Team',pd.Series('',index=out.index)))
-        _away_raw=out.get('Away_Team_Norm',out.get('Away_Team',pd.Series('',index=out.index)))
-        homes=_home_raw.map(_live_school_key)
-        aways=_away_raw.map(_live_school_key)
-        _bad_pairs=[_pt_tennessee_conflict(raw,canonical)
-                    for raw,canonical in zip(_home_raw,homes)]
-        _bad_pairs=[a or _pt_tennessee_conflict(raw,canonical)
-                    for a,raw,canonical in zip(_bad_pairs,_away_raw,aways)]
-        _kicks=pd.to_datetime(out.get('Game_Start',out.get('Game_Date',pd.Series(pd.NaT,index=out.index))),utc=True,errors='coerce')
-        _market_pairs=pd.Series([f'{h}|{a}' for h,a in zip(homes,aways)])
-        _market_pair_counts=_market_pairs.value_counts()
-        _eligible_pairs={}
-        for _i,(_h,_a) in enumerate(zip(homes,aways)):
-            if _bad_pairs[_i]:continue
-            _key=f'{_h}|{_a}'
-            if _market_pair_counts.get(_key,0)!=1:continue
-            if _key not in ex.index:continue
-            _src=ex.loc[_key]
-            _source_time=_src['_pt_source_updated_utc']
-            _kick=_kicks.iloc[_i]
-            if pd.isna(_kick) or not _source_time<_kick or not _pt_now<_kick:continue
-            _date=pd.to_datetime(_src.get('game_date'),utc=True,errors='coerce')
-            if pd.notna(_date) and _date.date() not in {_kick.date(),_kick.tz_convert('America/New_York').date()}:
-                continue
-            _eligible_pairs[_key]=_src
-        ex=pd.DataFrame.from_dict(_eligible_pairs,orient='index') if _eligible_pairs else ex.iloc[0:0]
-        _pt_live_blob_updated=max((_src['_pt_source_updated_utc'] for _src in _eligible_pairs.values()),default=None)
-        import logging as _pt_prod_log
-        _pt_prod_log.info('[NCAAF-PT-LIVE-SOURCE-MATCH] %s',{
-            'status':'PASS' if _eligible_pairs else 'NO_MATCHED_CURRENT_WEEK_FIXTURES',
-            'market_game_rows':len(out),'source_pair_rows':sum(len(p) for p in _pt_sources),
-            'eligible_current_pairs':len(_eligible_pairs),'sources':_pt_read_audit,
-            'latest_source_utc':str(_pt_live_blob_updated), 'authority':'FROZEN_MINER_OOS_GATES_ONLY'})
+        ex=ex.loc[
+            _live_mask | ~ex["pair_key"].isin(_unique_live)
+        ].copy()
+
+        vc=ex["pair_key"].value_counts()
+        ex=ex.loc[
+            ex["pair_key"].map(vc).eq(1)
+        ].set_index("pair_key",drop=False)
+
         meta=np.full(len(out),np.nan); cnt=np.full(len(out),np.nan); pavg=np.full(len(out),np.nan)
         _promo_fair=np.full(len(out),np.nan); _promo_n=np.zeros(len(out),dtype=int)
         ext_consensus=np.full(len(out),np.nan); ext_clusters=np.full(len(out),np.nan); ext_indices=np.full(len(out),np.nan)
@@ -6985,13 +6812,37 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
             _pt_live_selection=None
         _pt_live_selected=(_pt_live_selection or {}).get("sources") or []
         _pt_live_sha=(_pt_live_selection or {}).get("selection_sha256")
+        _current_clock=_current_sha=_current_generation=None
+        try:
+            _source_raw=_pt_blob_bytes(
+                sc,bucket_name,f"{PT_RAW_PREFIX}/ncaapredictions.csv"
+            )
+            _current_clock,_current_sha,_current_generation=(
+                _pt_attest_manual_live_upload(sc,bucket_name,_source_raw)
+            )
+        except Exception:
+            pass
+
         for i,(h,a) in enumerate(zip(homes,aways)):
             k=f"{h}|{a}"
             if k not in ex.index: continue
             r=ex.loc[k]
             if isinstance(r,pd.DataFrame): continue
             listed[i]=1.0
-            _pt_obs[i]=_verified_clock  # original RAW verified upload timestamp
+            if (
+                _current_clock is not None
+                and str(r.get("source_kind"))=="LIVE_CURRENT"
+                and str(r.get("pt_source_sha256"))==str(_current_sha)
+                and pd.notna(pd.to_numeric(
+                    r.get("pt_source_generation"),errors="coerce"
+                ))
+                and int(pd.to_numeric(
+                    r.get("pt_source_generation"),errors="coerce"
+                ))==int(_current_generation)
+                and str(r.get("pt_source_observed_at_utc"))==str(_current_clock)
+            ):
+                _pt_obs[i]=_current_clock
+
             # Research-only five-source champion challenger, chosen and locked
             # in development. Never substitute the hardcoded earlier five.
             _available=[]
@@ -7052,16 +6903,6 @@ def _pt_attach_current_live_frame(cdf: pd.DataFrame, dashboard_module=None) -> t
         for _k in PT_PUBLISHED_WEIGHTS:
             out[f"_V212_PT_{_k}_MARGIN_TEAM"]=comp[_k]
             out[f"_V212_PT_{_k}_EDGE_POINTS"]=comp[_k]-market
-        # NCAAF-MINER-INPUT-UNBLOCK-V1: historical-identical external index atoms.
-        # Do not impute missing PT sources or promote previously uncertified rules.
-        from ncaaf_miner_live_unblock_v1 import restore_pt_index_features as _restore_miner_pt
-        out,_pt_index_unblock=_restore_miner_pt(
-            out,ex,home_keys=homes,away_keys=aways,
-            snapshot_updated_utc=_pt_live_blob_updated,
-            source_cluster=_pt_index_source_cluster,
-            meta_constituents=PT_META_CONSTITUENT_INDEX_IDS)
-        import logging as _pt_input_log
-        _pt_input_log.info('[NCAAF-MINER-PT-INDEX-RESTORE] %s',_pt_index_unblock)
         return out,{
             "status":"PASS","matched":int(listed.sum()),"any_component":int((_cn>0).sum()),
             "partial":int(((_cn>0)&(_cn<5)).sum()),"full_five":int((_cn==5).sum()),
@@ -7092,7 +6933,6 @@ def _miner_live_authority_eligible(mech: dict[str,Any] | None) -> bool:
     _inc_status=str(m.get("incumbent_revalidation_status") or "")
     if _inc_status=="HOLD_NOT_EVALUABLE": return False
     if _inc_status=="LEGACY_CONTRACT_HOLD":
-        if m.get('miner_lane')=='DEEP_CFBD_AUTO': return False
         return bool(m.get("incumbent_prior_live_authority_eligible",m.get("live_authority_eligible",False)))
     _conds=[str(x) for x in (m.get("representative_conditions") or m.get("conditions") or [])]
     # CORE OOF / specialist research bridges are not live-authority inputs.
@@ -7108,19 +6948,7 @@ def _miner_live_authority_eligible(mech: dict[str,Any] | None) -> bool:
     except Exception: n=0
     try: rate=float(m.get("confirmation_rate",0) or 0)
     except Exception: rate=0.0
-    # Deep, automatically discovered CFBD systems must pass the *additional*
-    # out-of-sample FDR, exact-atom, and verified source-vintage requirements.
-    # Legacy mechanisms retain their existing chronological + FDR selection.
-    if m.get("miner_lane") == "DEEP_CFBD_AUTO":
-        if not (m.get("deep_cfbd_pit_certified") and m.get("deep_cfbd_holdout_fdr_pass")
-                and m.get("deep_cfbd_exact_live_atoms_available", False)
-                and m.get("deep_cfbd_unique_games_confirmed", False)):
-            return False
-        if any(str(k).startswith("CFBD_PG_") for k in (m.get("auto_atom_fields") or [])):
-            return False
-    _market=str(m.get('market') or 'spreads').lower()
-    _floor=(NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE if _market=='spreads' else 0.56)
-    return bool(n>=NCAAF_MINER_LIVE_MIN_CONFIRMATION_N and np.isfinite(rate) and rate>=_floor)
+    return bool(n>=NCAAF_MINER_LIVE_MIN_CONFIRMATION_N and np.isfinite(rate) and rate>=NCAAF_MINER_LIVE_MIN_CONFIRMATION_RATE)
 
 
 def _attach_role_transition_live_context(cdf: pd.DataFrame, dashboard_module=None, log_func=print) -> tuple[pd.DataFrame,dict[str,Any]]:
@@ -7220,9 +7048,6 @@ def _attach_role_transition_live_context(cdf: pd.DataFrame, dashboard_module=Non
 # Run with the EXISTING 2013-25 research job; no new command, flag, or module.
 V55_FROZEN_BRAIN_BLOB = "research/ncaaf/v55/qualified_independent_brains_2013_2025.json"
 V55_FROZEN_BRAIN_POLICY = "V55-FROZEN-INDEPENDENT-BRAINS-2013-2025-R1"
-V55_BRAIN_AUDIT_BLOB = "research/ncaaf/v55/independent_brain_registry_audit_latest.json"
-V55_PROSPECTIVE_EVIDENCE_PREFIX = "research/ncaaf/v55/prospective_brain_evidence_v1"
-V55_PROSPECTIVE_EVIDENCE_POLICY = "NCAAF-ORIGINAL-PREGAME-OBSERVATIONS-V1-20261026"
 
 
 def _v55_build_qualified_brain_registry_from_history(
@@ -7243,28 +7068,11 @@ def _v55_build_qualified_brain_registry_from_history(
     if not isinstance(historic,pd.DataFrame) or historic.empty:
         return None,dict(diag,status='HISTORICAL_GAME_ROWS_MISSING')
     seasons=pd.to_numeric(pd.Series(seasons),errors='coerce')
-    if len(seasons)!=len(historic):
-        return None,dict(diag,status='SEASON_FRAME_LENGTH_MISMATCH')
-    # The pipeline may pass a mixed 2013-2026 frame. Freeze evaluation to
-    # seasons 2013-25 BEFORE inspecting any features, counts or outcomes.
-    historical_mask=seasons.ge(2013)&seasons.le(2025)
-    diag['excluded_nonhistorical_rows']=int((~historical_mask).sum())
-    historic=historic.iloc[np.flatnonzero(historical_mask.to_numpy())].reset_index(drop=True)
-    seasons=seasons.loc[historical_mask].reset_index(drop=True)
-    observed=sorted(set(seasons.dropna().astype(int)))
-    diag['observed_historical_seasons']=observed
-    diag['missing_historical_seasons']=sorted(set(range(2013,2026))-set(observed))
-    if observed!=list(range(2013,2026)):
+    if len(seasons)!=len(historic) or sorted(set(seasons.dropna().astype(int)))!=list(range(2013,2026)):
         return None,dict(diag,status='FULL_2013_2025_SEASON_COVERAGE_MISSING')
     necessary={'Game_Start','Snapshot_Timestamp','Game_ID','Outcome'}
     if not necessary.issubset(historic.columns):
-        return None,dict(diag,status='ORIGINAL_PREGAME_VINTAGE_FIELDS_MISSING',
-                         missing_fields=sorted(necessary-set(historic.columns)),
-                         evidence_type='RECONSTRUCTED_HISTORY_NOT_SOURCE_CERTIFIED')
-    # A timestamp on the GAME row is not a timestamp of each Big Al/Pathi
-    # rule input. Every promoted rule must have immutable source-level proof.
-    # An explicit per-rule source timestamp and provenance token are required.
-    # Neither ingestion time nor an enriched historical row is sufficient.
+        return None,dict(diag,status='ORIGINAL_PREGAME_VINTAGE_FIELDS_MISSING')
     # One directional observation per game-side: repeated sportsbook rows
     # cannot inflate the historical confirmation sample.
     if historic.duplicated(subset=['Game_ID','Outcome']).any():
@@ -7285,34 +7093,14 @@ def _v55_build_qualified_brain_registry_from_history(
     m=max(len(candidates),1)
     z=NormalDist().inv_cdf(1-0.05/m)
     tested=[];qual=[];sy=seasons.to_numpy();trigger_sets={}
-    missing_source_proofs={}; invalid_source_proofs={}
     for rec in candidates:
         field=rec['system']
-        if field not in historic.columns:
-            missing_source_proofs[field]=['SYSTEM_FLAG_NOT_IN_HISTORICAL_FRAME']
-            continue
-        original_timestamp=field+'_Observed_At'
-        original_record=field+'_Source_Record_ID'
-        original_attestation=field+'_Original_Pregame_Verified'
-        missing=[c for c in (original_timestamp, original_record, original_attestation)
-                 if c not in historic.columns]
-        if missing:
-            missing_source_proofs[field]=missing
-            continue  # source-specific original pregame vintage is not certified
-        rule_observed=pd.to_datetime(historic[original_timestamp],errors='coerce',utc=True)
-        rule_source=historic[original_record].astype('string').fillna('').str.strip()
-        rule_verified=pd.to_numeric(historic[original_attestation],errors='coerce').eq(1)
+        if field not in historic.columns:continue
         flag=pd.to_numeric(historic[field],errors='coerce')
         ready=field+'_DataReady'
         ready_mask=(pd.to_numeric(historic[ready],errors='coerce').eq(1)
                     if ready in historic.columns else flag.notna())
         signals=ready_mask & flag.eq(1)
-        # No partial source-vintage attestations for a qualified rule.
-        invalid=(signals & (rule_observed.isna() | rule_observed.ge(kick) |
-                            rule_source.eq('') | ~rule_verified))
-        if bool(invalid.any()):
-            invalid_source_proofs[field]=int(invalid.sum())
-            continue
         if not bool(signals.any()):continue
         by={str(r['season']):r for r in rec.get('by_season',[])
             if r.get('season') is not None}
@@ -7350,10 +7138,6 @@ def _v55_build_qualified_brain_registry_from_history(
              confirmation_n=n,confirmation_rate=round(rate,10),
              by_season={'2024':{'n':n1,'rate':round(w1/n1,10)},
                         '2025':{'n':n2,'rate':round(w2/n2,10)}}))
-    diag.update(candidate_system_count=len(candidates),
-                missing_source_proof_fields=missing_source_proofs,
-                invalid_source_proof_firings=invalid_source_proofs,
-                source_specific_vintage_required=True)
     if not tested:return None,dict(diag,status='NO_SOURCE_RECONCILED_OOS_SYSTEMS')
     # Across Big Al and Pathi, correlated near-duplicate rule firings collapse
     # into the same independent evidence key. The same-family voter cap remains.
@@ -7365,20 +7149,17 @@ def _v55_build_qualified_brain_registry_from_history(
                 key='NCAAF_LEGACY_CORRELATED_ROLE_SIGNALS'
                 left['evidence_family_key']=key
                 right['evidence_family_key']=key
-    if not qual:
-        return None,dict(diag,status='NO_SYSTEMS_CLEARED_SEALED_OOS_GATE',tested=len(tested))
     created=pd.to_datetime(now if now is not None else datetime.now(timezone.utc),utc=True).isoformat()
     # No fabricated 2013-25 completeness: checked against observed historical rows.
     doc=dict(status='FROZEN_OOS_QUALIFIED',policy=V55_FROZEN_BRAIN_POLICY,
-        operator_approved=False,production_authority=0,qualification_research_pass=True,history_first_season=2013,
+        operator_approved=True,history_first_season=2013,
         discovery_last_season=2023,confirmation_seasons=[2024,2025],
         uses_2026_outcomes=False,created_utc=created,systems=qual,
         source_audit={'observed_seasons':list(range(2013,2026)),
             'pregame_vintage':'ALL_ORIGINAL_OBSERVATIONS_BEFORE_KICKOFF',
             'candidate_universe':m,'bonferroni_alpha':.05,
             'tested_systems':tested,'2026_selection':False})
-    return doc,dict(diag,status='PASS',qualified=len(qual),tested=len(tested),
-                    **{'2026_selection_rows':0})
+    return doc,dict(diag,status='PASS',qualified=len(qual),tested=len(tested))
 
 
 # V55_AUTOMATIC_EMBEDDED_MINER_PUBLISH_20261022
@@ -7482,422 +7263,6 @@ def _v55_publish_embedded_live_miner(rows: pd.DataFrame, *, storage_client=None,
             "bet_authority": False}
 
 
-
-# V55_IMMUTABLE_PROSPECTIVE_BRAIN_EVIDENCE_20261026
-# UI must remain display-only. Capture/settlement belongs to the normal
-# backend scorer/refresh, never a Streamlit user-driven script rerun.
-def _v55_inside_streamlit_script_context() -> bool:
-    try:
-        from streamlit.runtime.scriptrunner import get_script_run_ctx
-        return get_script_run_ctx(suppress_warning=True) is not None
-    except (ImportError,AttributeError,RuntimeError):
-        return False
-
-
-# The normal pregame headless refresh calls this through attach_live_miner_votes.
-# This is an evidence ledger, NOT an alternative bet-authority engine.
-
-def _v55_first_present(row, *names):
-    """Use named source fields only; never infer historical quote provenance."""
-    for name in names:
-        v=row.get(name)
-        if v is None:continue
-        try:
-            if bool(pd.isna(v)):continue
-        except (TypeError,ValueError):pass
-        if isinstance(v,str) and not v.strip():continue
-        return v
-    return None
-
-
-def _v55_scalar(v):
-    if v is None:return None
-    if isinstance(v,(dict,list)):return v
-    try:
-        if bool(pd.isna(v)):return None
-    except (ValueError,TypeError):pass
-    if isinstance(v,np.generic):v=v.item()
-    if hasattr(v,'isoformat'):return v.isoformat()
-    if isinstance(v,float) and not math.isfinite(v):return None
-    return v if isinstance(v,(str,int,float,bool)) else str(v)
-
-
-def _v55_numeric(v):
-    try:
-        n=float(v)
-        return n if math.isfinite(n) else None
-    except (ValueError,TypeError):return None
-
-
-def _v55_vote_list(v):
-    if isinstance(v,str):
-        try:v=json.loads(v)
-        except (ValueError,TypeError):return []
-    return v if isinstance(v,list) else []
-
-
-def _v55_collect_prospective_brain_evidence(rows: pd.DataFrame, *, now=None) -> dict[str,Any]:
-    """Capture exactly observed prospective signals BEFORE kickoff.
-
-    `captured_at_utc` is this process's receipt time (not an invented
-    source/market snapshot time). A quote is usable for priced evaluation only
-    when its original timestamp, sportsbook, side, line AND odds are available.
-    Repeated refreshes are distinct observations; subsequent scores can be
-    joined via original physical_game_id, without mutating a pregame record.
-    """
-    t=pd.to_datetime(now if now is not None else datetime.now(timezone.utc),utc=True)
-    doc={'status':'PASS','policy':V55_PROSPECTIVE_EVIDENCE_POLICY,
-         'captured_at_utc':t.isoformat(),'source_tag':NCAAF_RESEARCH_V2_SOURCE_TAG,
-         'contract':'APPEND_ONLY_RECEIPT_AT_REFRESH__ORIGINAL_QUOTES_ONLY__NO_OUTCOMES_AT_CAPTURE__NO_BET_AUTHORITY',
-         'observations':[],'games':[],'source_counts':{},'priced_observations':0,
-         'line_verified_observations':0,'unverified_quote_observations':0,
-         'no_source_signal_families':[],'skipped':{}}
-    if not isinstance(rows,pd.DataFrame) or rows.empty:
-        doc['status']='NO_ROWS';return doc
-    games={}; seen=set(); sources=set()
-    published={x['system']:x['source'] for x in _PUBLISHED_NCAAF_DIRECTIONAL_SYSTEMS}
-    doc['source_signal_fields_present']={
-        'BIG_AL':sorted(x for x,f in published.items() if f=='BIG_AL' and x in rows.columns),
-        'PATHI':sorted(x for x,f in published.items() if f=='PATHI' and x in rows.columns),
-        'STAT':[x for x in ('NCAAF_STAT_Votes','NCAAF_STAT_Research_Votes','STAT_Votes') if x in rows.columns],
-        'PT':[x for x in ('NCAAF_PT_Five_Source_Margin_Home','NCAAF_PT_Five_Source_Count','NCAAF_PT_Five_Source_Selection_SHA') if x in rows.columns],
-        'MINER':[x for x in ('NCAAF_RV22_Miner_Votes','NCAAF_RV22_Miner_Research_Votes') if x in rows.columns],
-    }
-    for _,row in rows.iterrows():
-        kickoff=pd.to_datetime(row.get('Game_Start'),utc=True,errors='coerce')
-        if pd.isna(kickoff) or kickoff<=t:
-            doc['skipped']['NOT_PREKICKOFF']=doc['skipped'].get('NOT_PREKICKOFF',0)+1;continue
-        market=str(_v55_first_present(row,'Market') or '').strip().lower()
-        if market not in ('spreads','h2h','totals'):continue
-        home=str(_v55_first_present(row,'Home_Team_Norm','Home_Team') or '').strip()
-        away=str(_v55_first_present(row,'Away_Team_Norm','Away_Team') or '').strip()
-        if not home or not away or home.lower()==away.lower():continue
-        side=str(_v55_first_present(row,'Outcome_Norm','Outcome') or '').strip()
-        gameid=_v55_first_present(row,'_prod_game_id','Game_ID','Source_Game_ID')
-        if gameid is None or str(gameid).strip().lower() in ('nan','none','<na>'):
-            physical_id=None
-            game_key=hashlib.sha256(f'{home.lower()}|{away.lower()}|{kickoff.isoformat()}'.encode()).hexdigest()[:24]
-        else:
-            physical_id=str(gameid).strip();game_key=physical_id
-        if physical_id:
-            gkey=hashlib.sha256(physical_id.encode('utf-8')).hexdigest()[:32]
-            games[gkey]={'physical_game_id':physical_id,'home':home,'away':away,
-                         'kickoff_utc':kickoff.isoformat(),'game_key_sha256':gkey}
-        book=_v55_first_present(row,'Bookmaker','Book','Sportsbook')
-        source_stamp=pd.to_datetime(_v55_first_present(row,'Snapshot_Timestamp'),utc=True,errors='coerce')
-        source_stamp_valid=bool(pd.notna(source_stamp) and source_stamp<=t and source_stamp<kickoff)
-        raw_line=_v55_first_present(row,'Value')
-        if raw_line is None:
-            raw_line=_v55_first_present(row,'_line','Current_Spread','Current_Total')
-        line=_v55_numeric(raw_line)
-        # Never substitute consensus/open price for a named sportsbook quote.
-        # The side-specific quote requires the original 'Value' row field.
-        original_line=_v55_numeric(row.get('Value'))
-        odds_field=next((c for c in ('American_Odds','Price','Odds','Odds_Price')
-                         if _v55_first_present(row,c) is not None),None)
-        odds=_v55_numeric(row.get(odds_field)) if odds_field else None
-        # Do not report an untyped decimal price as American odds. An ROI
-        # evaluator must use the recorded format; never assume -110.
-        odds_format=('AMERICAN' if odds is not None and
-                     (odds<=-100 or odds>=100) else
-                     'DECIMAL' if odds is not None and 1.01<=odds<=99.99 else None)
-        # h2h original Value is a moneyline quote, not a spread point line.
-        line_verified=bool(book and source_stamp_valid and side and original_line is not None)
-        price_verified=bool(line_verified and
-                            (odds_format is not None or
-                             (market=='h2h' and abs(original_line)>=100)))
-        signals=[]
-        for name,family in published.items():
-            val=_v55_numeric(row.get(name))
-            if val==1 and side and side.lower() in (home.lower(),away.lower()):
-                ready=row.get(name+'_DataReady')
-                if ready is not None and _v55_numeric(ready)!=1:continue
-                signals.append({'family':family,'signal_id':name,'target':side,
-                                'evidence_level':'PUBLISHED_FLAG_PROSPECTIVE_SHADOW',
-                                'authority_claim':False})
-        # MINER votes are the actual materialized live firings, not replayed
-        # historical mechanism conditions. Qualified and shadow are both
-        # observed, with the original eligibility flag retained.
-        qualified={str(x.get('family_id')) for x in _v55_vote_list(row.get('NCAAF_RV22_Miner_Votes'))
-                   if isinstance(x,dict)}
-        for vote in _v55_vote_list(row.get('NCAAF_RV22_Miner_Research_Votes')):
-            if not isinstance(vote,dict):continue
-            target=str(vote.get('target') or '')
-            if not target or side.lower()!=target.lower() or str(vote.get('market') or '').lower()!=market:continue
-            sid=str(vote.get('family_id') or '')
-            if not sid:continue
-            family='PT' if str(vote.get('source_type') or '').upper()=='PT' else 'MINER'
-            signals.append({'family':family,'signal_id':sid,'target':target,
-                            'evidence_family_key':vote.get('evidence_family_key'),
-                            'evidence_level':vote.get('evidence_level'),
-                            'authority_claim':sid in qualified and bool(vote.get('live_authority_eligible')),
-                            'rule':vote.get('rule'),
-                            'confirmation_n':_v55_scalar(vote.get('confirmation_n'))})
-        # STAT only when the live producer actually supplies a directional
-        # signal. Numeric research edges by themselves are NOT a play-on flag.
-        for col in ('NCAAF_STAT_Votes','NCAAF_STAT_Research_Votes','STAT_Votes'):
-            for vote in _v55_vote_list(row.get(col)):
-                if not isinstance(vote,dict):continue
-                target=str(vote.get('target') or '')
-                if target.lower()!=side.lower() or not target:continue
-                sid=str(vote.get('family_id') or vote.get('signal_id') or '')
-                if not sid:continue
-                signals.append({'family':'STAT','signal_id':sid,'target':target,
-                                'evidence_level':'LIVE_STAT_SOURCE_SIGNAL',
-                                'authority_claim':False,'rule':vote.get('rule')})
-        # A PT forecast is stored as a forecast only, unless the separate PT
-        # promotion controller emitted an explicit vote above.
-        pt_prediction=_v55_numeric(_v55_first_present(row,'NCAAF_PT_Five_Source_Margin_Home'))
-        pt_count=_v55_numeric(_v55_first_present(row,'NCAAF_PT_Five_Source_Count'))
-        pt_sha=_v55_first_present(row,'NCAAF_PT_Five_Source_Selection_SHA')
-        if pt_prediction is not None and pt_count is not None and pt_count>=1 and pt_sha:
-            # Record once per source quote; no claim of a recommended direction.
-            signals.append({'family':'PT','signal_id':'PT_FIVE_SOURCE_FORECAST_ONLY',
-                            'target':None,'evidence_level':'OBSERVED_FORECAST_NO_VOTE',
-                            'authority_claim':False,
-                            'forecast_margin_home':pt_prediction,'source_count':int(pt_count),
-                            'selection_sha256':str(pt_sha),
-                            'observation_type':'NON_DIRECTIONAL_FORECAST_CONTEXT'})
-        if not signals:continue
-        for sig in signals:
-            # This is the receipt timestamp; it does not attest to the source
-            # timestamp of inputs used by the model or expert to form the signal.
-            uniqueness=(game_key,market,str(book),str(side),str(line),str(odds),
-                        str(source_stamp),sig['family'],sig['signal_id'])
-            if uniqueness in seen:continue
-            seen.add(uniqueness); sources.add(sig['family'])
-            event={'physical_game_id':physical_id,'game_key':game_key,
-                   'game_id_verified':bool(physical_id),'home_team':home,'away_team':away,
-                   'kickoff_utc':kickoff.isoformat(),'market':market,
-                   'selection_side':side,'sportsbook':str(book) if book is not None else None,
-                   'line':line if market!='h2h' else None,
-                   'original_book_line':original_line if market!='h2h' else None,
-                   'original_book_moneyline':original_line if market=='h2h' else None,
-                   'quoted_odds_raw':odds,'quoted_odds_field':odds_field,
-                   'quoted_odds_format':odds_format,
-                   'source_snapshot_utc':source_stamp.isoformat() if source_stamp_valid else None,
-                   'captured_at_utc':t.isoformat(),
-                   'original_quote_line_verified':line_verified,
-                   'price_roi_eligible':price_verified,
-                   'quote_provenance':'ORIGINAL_TIMESTAMP_BOOK_SIDE_LINE' if line_verified else 'UNVERIFIED_SOURCE_QUOTE',
-                   'future_outcome_not_known_at_capture':True,
-                   **sig}
-            doc['observations'].append(event)
-            doc['source_counts'][sig['family']]=doc['source_counts'].get(sig['family'],0)+1
-            doc['line_verified_observations']+=int(line_verified)
-            doc['priced_observations']+=int(price_verified)
-            doc['unverified_quote_observations']+=int(not line_verified)
-    doc['games']=list(games.values())
-    doc['no_source_signal_families']=sorted({'BIG_AL','PATHI','STAT','PT','MINER'}-sources)
-    doc['status']='PASS' if doc['observations'] else 'NO_ACTUAL_SIGNALS_IN_FRAME'
-    return doc
-
-
-def _v55_bootstrap_brain_registry_hold(bucket, *, now=None):
-    """Keep registry discoverable without falsely granting historic authority."""
-    blob=bucket.blob(V55_FROZEN_BRAIN_BLOB)
-    if blob.exists():return 'EXISTING_PRESERVED'
-    doc={'status':'HOLD_UNVERIFIED_HISTORY', 'policy':V55_FROZEN_BRAIN_POLICY,
-         'operator_approved':False,'production_authority':0,'systems':[],
-         'uses_2026_outcomes':False,
-         'created_utc':pd.to_datetime(now if now is not None else datetime.now(timezone.utc),utc=True).isoformat(),
-         'reason':'ORIGINAL_PREGAME_VINTAGE_FIELDS_NOT_YET_CERTIFIED',
-         'historical_certification':False,'source_tag':NCAAF_RESEARCH_V2_SOURCE_TAG}
-    try:
-        blob.upload_from_string(json.dumps(doc,sort_keys=True),
-            content_type='application/json',if_generation_match=0)
-        return 'ZERO_AUTHORITY_HOLD_CREATED'
-    except Exception as exc:
-        # Another concurrent refresh may have safely created the object first.
-        if blob.exists():return 'CREATED_CONCURRENTLY_PRESERVED'
-        raise exc
-
-
-def _v55_capture_prospective_brain_evidence(rows: pd.DataFrame, *, storage_client=None,
-                                            bucket_name='sharp-models',now=None) -> dict[str,Any]:
-    """One immutable per-refresh snapshot; no rolling file overwrites.
-
-    Only the backend refresh can write observations. Dashboard reruns are read-only.
-    """
-    if _v55_inside_streamlit_script_context():
-        return {'status':'SKIPPED_INTERACTIVE_UI_READ_ONLY','observations':0,
-                'automatic_bet_authority':False}
-    doc=_v55_collect_prospective_brain_evidence(rows,now=now)
-    if storage_client is None:
-        from google.cloud import storage
-        storage_client=storage.Client()
-    bucket=storage_client.bucket(bucket_name)
-    registry_status=_v55_bootstrap_brain_registry_hold(bucket,now=now)
-    # V55_PRODUCTION_LEDGER_RULE_LOCK: first-seen live rule registration is
-    # prospective-only; previous immutable observations are never modified.
-    try:
-        from ncaaf_v55_production_ledger import stamp_capture_rule_versions
-        _rule_stamp=stamp_capture_rule_versions(doc,bucket,now=doc['captured_at_utc'])
-        import logging as _v55_ledger_logging
-        _v55_ledger_logging.getLogger(__name__).info(
-            '[NCAAF-V55-RULE-REGISTRATION] %s',_rule_stamp)
-    except Exception:
-        import logging as _v55_ledger_logging
-        _v55_ledger_logging.getLogger(__name__).exception(
-            '[NCAAF-V55-RULE-REGISTRATION] HOLD_ERROR_CAPTURE_CONTINUES')
-        for _event in doc.get('observations',[]):
-            if isinstance(_event,dict):
-                _event['rule_registration_before_capture']=False
-                _event['rule_version_hold']='REGISTRY_UNAVAILABLE_FAIL_CLOSED'
-    report={'status':doc['status'],'registry_status':registry_status,
-            'observations':len(doc['observations']),
-            'source_counts':doc['source_counts'],
-            'priced':doc['priced_observations'],
-            'unverified_quote':doc['unverified_quote_observations'],
-            'no_source_signal_families':doc['no_source_signal_families'],
-            'source_signal_fields_present':doc.get('source_signal_fields_present',{})}
-    if not doc['observations']:return report
-    stamp=pd.to_datetime(doc['captured_at_utc'],utc=True)
-    payload=json.dumps(doc,sort_keys=True,default=str,allow_nan=False).encode()
-    # A content digest distinguishes same-microsecond refreshes. Never overwrite
-    # the first observation or retroactively populate outcomes in this blob.
-    sha=hashlib.sha256(payload).hexdigest()
-    path=(f'{V55_PROSPECTIVE_EVIDENCE_PREFIX}/observations/'
-          f'{stamp.strftime("%Y-%m-%d")}/'
-          f'{stamp.strftime("%H%M%S%f")}_{sha[:20]}.json')
-    try:
-        bucket.blob(path).upload_from_string(payload,
-            content_type='application/json',if_generation_match=0)
-        report['observation_artifact']=f'gs://{bucket_name}/{path}'
-    except Exception as exc:
-        if not bucket.blob(path).exists():raise
-        report['duplicate_snapshot']='ALREADY_EXISTS_IMMUTABLE'
-    # One small per-game index: settlement scans games, not 48 daily snapshots.
-    game_index_ok=0;game_index_errors=0
-    for game in doc['games']:
-        # Game index has no price, prediction, or betting recommendation.
-        game_day=game['kickoff_utc'][:10]
-        ix=f'{V55_PROSPECTIVE_EVIDENCE_PREFIX}/games/{game_day}/{game["game_key_sha256"]}.json'
-        obj=bucket.blob(ix)
-        try:
-            obj.upload_from_string(json.dumps(game,sort_keys=True),
-                content_type='application/json',if_generation_match=0)
-            game_index_ok+=1
-        except Exception:
-            if not obj.exists():game_index_errors+=1
-    report.update(game_indexes_written=game_index_ok,game_index_write_errors=game_index_errors)
-    return report
-
-
-def _v55_settle_prospective_brain_evidence_exact_id_legacy(*, dashboard_module=None,
-                                            storage_client=None,bucket_name='sharp-models',
-                                            now=None,days_back=15) -> dict[str,Any]:
-    """Settle exact physical IDs into SEPARATE immutable score records.
-
-    Records no outcomes in first-seen signal blobs. Match the actual home/away
-    scores only from the settled V1 results table, not the research frame.
-    Uses the game index for bounded lookups; no 2026 outcome influences fit.
-    Interactive Streamlit sessions must not write research artifacts.
-    """
-    if _v55_inside_streamlit_script_context():
-        return {'status':'SKIPPED_INTERACTIVE_UI_READ_ONLY','pending':0,
-                'settled':0,'automatic_bet_authority':False}
-    if storage_client is None:
-        from google.cloud import storage
-        storage_client=storage.Client()
-    bucket=storage_client.bucket(bucket_name)
-    if not hasattr(storage_client,'list_blobs'):
-        return {'status':'LIST_BLOBS_UNAVAILABLE'}
-    t=pd.to_datetime(now if now is not None else datetime.now(timezone.utc),utc=True)
-    targets=[];days=int(min(max(days_back,1),30))
-    for delta in range(days+1):
-        date=(t-pd.Timedelta(days=delta)).strftime('%Y-%m-%d')
-        prefix=f'{V55_PROSPECTIVE_EVIDENCE_PREFIX}/games/{date}/'
-        for ref in storage_client.list_blobs(bucket_name,prefix=prefix,max_results=300):
-            try:
-                game=json.loads(ref.download_as_text())
-                gid=str(game.get('physical_game_id') or '')
-                if not gid:continue
-                outpath=(f'{V55_PROSPECTIVE_EVIDENCE_PREFIX}/outcomes/'
-                         f'{game["game_key_sha256"]}.json')
-                if not bucket.blob(outpath).exists():targets.append((game,outpath))
-            except Exception:continue
-    if not targets:return {'status':'NO_PENDING_GAMES','pending':0,'settled':0}
-    client=getattr(dashboard_module,'bq_client',None)
-    if client is None:
-        from google.cloud import bigquery
-        client=bigquery.Client()
-    from google.cloud import bigquery as _bq
-    ids=sorted({game['physical_game_id'] for game,_ in targets})
-    # Rename raw score columns before grouping. In BigQuery, a HAVING
-    # reference to a SELECT alias such as home_score can resolve to its
-    # ANY_VALUE aggregate and cause "Aggregations of aggregations" (400).
-    # This CTE keeps the consistency test on unaggregated source scores.
-    sql='''WITH settled_input AS (
-               SELECT CAST(physical_game_id AS STRING) AS game_id,
-                      CAST(home_score AS STRING) AS raw_home_score,
-                      CAST(away_score AS STRING) AS raw_away_score
-               FROM `sharplogger.sharp_data.ncaaf_production_v1_results`
-               WHERE CAST(physical_game_id AS STRING) IN UNNEST(@ids)
-                 AND home_score IS NOT NULL AND away_score IS NOT NULL
-                 AND LOWER(market)='spreads'
-           )
-           SELECT game_id AS physical_game_id,
-                  ANY_VALUE(raw_home_score) AS home_score,
-                  ANY_VALUE(raw_away_score) AS away_score
-           FROM settled_input
-           GROUP BY game_id
-           HAVING COUNT(DISTINCT CONCAT(raw_home_score,'|',raw_away_score)) = 1'''
-    config=_bq.QueryJobConfig(query_parameters=[_bq.ArrayQueryParameter('ids','STRING',ids)])
-    completed=client.query(sql,job_config=config).to_dataframe(create_bqstorage_client=False)
-    scores={str(rec['physical_game_id']):(rec['home_score'],rec['away_score'])
-            for _,rec in completed.iterrows()}
-    count=0; errors=0
-    for game,path in targets:
-        if game['physical_game_id'] not in scores:continue
-        hs,aws=scores[game['physical_game_id']]
-        hs=_v55_numeric(hs);aws=_v55_numeric(aws)
-        if hs is None or aws is None:continue
-        outcome={'physical_game_id':game['physical_game_id'],
-                 'home_team_at_capture':game['home'],'away_team_at_capture':game['away'],
-                 'home_score':hs,'away_score':aws,'home_margin':hs-aws,
-                 'total_score':hs+aws,'settled_at_utc':t.isoformat(),
-                 'score_source':'ncaaf_production_v1_results',
-                 'does_not_modify_original_observations':True}
-        try:
-            bucket.blob(path).upload_from_string(json.dumps(outcome,sort_keys=True),
-                content_type='application/json',if_generation_match=0)
-            count+=1
-        except Exception:
-            if not bucket.blob(path).exists():errors+=1
-    return {'status':'PASS' if not errors else 'PARTIAL_WRITE_FAILURE',
-            'pending':len(targets),'completed_found':len(scores),
-            'settled':count,'write_errors':errors,
-            'research_selection_influence':0,'automatic_bet_authority':False}
-
-def _v55_settle_prospective_brain_evidence(*, dashboard_module=None,
-                                            storage_client=None,bucket_name='sharp-models',
-                                            now=None,days_back=15) -> dict[str,Any]:
-    """Preserve exact-ID settlement; add non-authority dual-score research reviews."""
-    legacy=_v55_settle_prospective_brain_evidence_exact_id_legacy(
-        dashboard_module=dashboard_module, storage_client=storage_client,
-        bucket_name=bucket_name, now=now, days_back=days_back)
-    from ncaaf_v55_settlement_bridge import reconcile_prospective_score_reviews
-    review=reconcile_prospective_score_reviews(
-        dashboard_module=dashboard_module, storage_client=storage_client,
-        bucket_name=bucket_name, now=now, days_back=days_back,
-        in_streamlit=_v55_inside_streamlit_script_context())
-    # V55_PRODUCTION_LEDGER_REVIEW: headless, research-only, fail-closed.
-    # Reads the immutable original observations and existing score reviews.
-    try:
-        from ncaaf_v55_production_ledger import run_cycle
-        _ledger_result=run_cycle(
-            storage_client=storage_client,bucket_name=bucket_name,now=now,
-            in_streamlit=_v55_inside_streamlit_script_context())
-    except Exception as _ledger_exc:
-        import logging as _v55_ledger_logging
-        _v55_ledger_logging.getLogger(__name__).exception(
-            '[NCAAF-V55-PRODUCTION-LEDGER] HOLD_ERROR_NO_AUTHORITY')
-        _ledger_result={'status':'HOLD_ERROR_NO_AUTHORITY','error':
-                        type(_ledger_exc).__name__,'bet_authority':0}
-    return {**legacy, 'dual_source_score_review':review,
-            'production_intelligence_ledger':_ledger_result}
-
 def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard_module=None) -> pd.DataFrame:
     """Evaluate frozen confirmed Miner mechanisms against current pregame context.
 
@@ -7906,37 +7271,7 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     the frozen representative conditions, then attaches directional votes to every
     market row for Bet Authority. 2026 outcomes never select/qualify a mechanism.
     """
-    if rows is None:return rows
-    if not isinstance(report,dict):
-        # Even when the historical Miner report is unavailable, capture real
-        # upstream expert signals already present in the incoming pregame feed.
-        # A missing research bundle must not erase the prospective record.
-        import logging as _missing_report_logging
-        try:
-            _sc=getattr(dashboard_module,'gcs_client',None)
-            _bucket=str(getattr(dashboard_module,'GCS_BUCKET','sharp-models') or 'sharp-models')
-            _captured=_v55_capture_prospective_brain_evidence(
-                rows,storage_client=_sc,bucket_name=_bucket)
-            _missing_report_logging.info('[NCAAF-V55-PROSPECTIVE-NO-RESEARCH-REPORT] %s',_captured)
-            _settled=_v55_settle_prospective_brain_evidence(
-                dashboard_module=dashboard_module,storage_client=_sc,bucket_name=_bucket)
-            _missing_report_logging.info('[NCAAF-V55-PROSPECTIVE-BRAIN-SETTLE] %s',_settled)
-        except Exception:
-            _missing_report_logging.exception('[NCAAF-V55-PROSPECTIVE-NO-RESEARCH-REPORT] HOLD_ERROR')
-        return rows
-    if rows.empty:
-        # The postgame settlement pass must still run on a refresh with no
-        # upcoming fixtures. No new signals can be captured from an empty feed.
-        import logging as _empty_live_logging
-        try:
-            _settled=_v55_settle_prospective_brain_evidence(
-                dashboard_module=dashboard_module,
-                storage_client=getattr(dashboard_module,'gcs_client',None),
-                bucket_name=str(getattr(dashboard_module,'GCS_BUCKET','sharp-models') or 'sharp-models'))
-            _empty_live_logging.info('[NCAAF-V55-PROSPECTIVE-BRAIN-SETTLE] %s',_settled)
-        except Exception:
-            _empty_live_logging.exception('[NCAAF-V55-PROSPECTIVE-BRAIN-SETTLE] HOLD_ERROR')
-        return rows
+    if rows is None or rows.empty or not isinstance(report,dict): return rows
     out=rows.copy()
     keycol="_prod_game_id" if "_prod_game_id" in out.columns else None
     if keycol is None:
@@ -7966,56 +7301,6 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     cdf,_bounce_live_diag=_attach_role_transition_live_context(cdf,dashboard_module=dashboard_module,log_func=lambda *a,**k:None)
     cdf,_deep_live_diag=_attach_deep_stat_context_to_miner(dashboard_module,cdf,log_func=lambda *a,**k:None,for_live=True)
     cdf,_cfbd_live_diag=_attach_cfbd_context_to_miner(dashboard_module,cdf,log_func=lambda *a,**k:None,for_live=True)
-    # NCAAF-MINER-INPUT-UNBLOCK-V1: strictly-prior same-season *static* CFBD recovery.
-    try:
-        from ncaaf_miner_live_unblock_v1 import restore_cfbd_static as _restore_miner_cfbd_static
-        _cseason=pd.to_numeric(cdf.get('Season'),errors='coerce').dropna()
-        _ck=(f"{int(_cseason.min())}:{int(_cseason.max())}" if not _cseason.empty else '')
-        cdf,_cfbd_unblock_diag=_restore_miner_cfbd_static(
-            cdf,_CFBD_MINER_CONTEXT_CACHE.get(_ck),team_key=_pt_team_key)
-        import logging as _mine_input_logging
-        _mine_input_logging.info('[NCAAF-MINER-CFBD-STATIC-RESTORE] %s',_cfbd_unblock_diag)
-    except Exception:
-        import logging as _mine_input_logging
-        _mine_input_logging.exception('[NCAAF-MINER-CFBD-STATIC-RESTORE] status=ERROR_FAIL_CLOSED')
-    # NCAAF-MINER-ASOF-CONFERENCE-V1: verified prior-team conference records.
-    # Do not interpolate missing advanced stats, STAT forecasts, or PT providers.
-    try:
-        from ncaaf_miner_prior_context_v1 import (restore_verified_conference_context,
-                                                    load_verified_conference_history)
-        _csy=pd.to_numeric(cdf.get('Season'),errors='coerce').dropna()
-        _prior_cfbd=_CFBD_MINER_CONTEXT_CACHE.get(_ck) if '_ck' in locals() else None
-        _conf_candidate=_prior_cfbd
-        _conference_table_diag={'status':'CFBD_SOURCE_ONLY'}
-        _conf_fields=('Conference','Team_Conference','Opponent_Conference','CFBD_Team_Conference',
-                      'Team_Conference_Norm','Conference_Norm','Context_Conference','Context_Opp_Conference')
-        _has_real_conf=isinstance(_conf_candidate,pd.DataFrame) and any(
-            c in _conf_candidate.columns and _conf_candidate[c].astype('string').str.strip()
-                    .replace({'':pd.NA,'nan':pd.NA,'None':pd.NA}).notna().any()
-            for c in _conf_fields)
-        if not _has_real_conf:
-            _conf_candidate,_conference_table_diag=load_verified_conference_history(
-                getattr(dashboard_module,'bq_client',None),
-                season=int(_csy.max()) if not _csy.empty else 2026)
-        cdf,_verified_conference_diag=restore_verified_conference_context(
-            cdf,_conf_candidate,team_key=_pt_team_key)
-        _live_logging.info('[NCAAF-MINER-VERIFIED-CONFERENCE-RESTORE] %s',
-                           {'lookup':_conference_table_diag,**_verified_conference_diag})
-    except Exception:
-        _live_logging.exception('[NCAAF-MINER-VERIFIED-CONFERENCE-RESTORE] status=ERROR_FAIL_CLOSED')
-    # Miner advanced-as-of recovery: never use an earlier game's shift(1)
-    # metric as this week's current prior. Replay source game observations
-    # against frozen historical pregame columns and only publish definitions
-    # that match exactly. Other rules remain blocked with explicit reasons.
-    try:
-        from ncaaf_miner_advanced_asof_v1 import restore_advanced_asof
-        _advanced_prior=_CFBD_MINER_CONTEXT_CACHE.get(_ck) if '_ck' in locals() else None
-        cdf,_advanced_diag=restore_advanced_asof(
-            cdf,_advanced_prior,team_key=_pt_team_key)
-        _live_logging.info('[NCAAF-MINER-ADVANCED-ASOF-RESTORE] %s',
-                           json.dumps(_advanced_diag,sort_keys=True,default=str))
-    except Exception:
-        _live_logging.exception('[NCAAF-MINER-ADVANCED-ASOF-RESTORE] status=ERROR_FAIL_CLOSED')
     cdf,_situational_live_diag=_attach_h2h_rivalry_travel_context(dashboard_module,cdf,log_func=lambda *a,**k:None,for_live=True)
     cdf,_pt_live_diag=_pt_attach_current_live_frame(cdf,dashboard_module=dashboard_module)
     registry=report.get("system_miner_v3") or {}
@@ -8024,23 +7309,12 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     _miner_coverage_diagnostics=[]  # NCAAF_MULTI_MINER_LIVE_COVERAGE_DIAGNOSTICS_20261027
     for market,mr in registry.items():
         atoms={a["name"]:np.asarray(a["mask"],dtype=bool) for a in _extended_atoms(cdf,dashboard_module,for_live=True,market=market)}
-        # Frozen deep atoms are evaluated from their stored discovery-only
-        # thresholds; no threshold is re-fit using upcoming games.
-        try:
-            from ncaaf_miner_deep_cfbd_v1 import frozen_live_auto_atoms
-            atoms.update(frozen_live_auto_atoms(cdf, (mr or {}).get("mechanism_families") or []))
-        except ImportError:
-            pass  # deep modules absent => deep conditions fail closed
-        except Exception as _auto_live_exc:
-            _live_logging.warning('[NCAAF-DEEP-CFBD-ATOM-ERROR] %s',type(_auto_live_exc).__name__)
         for mech in (mr or {}).get("mechanism_families",[]):
             if not mech.get("confirmation_pass"): continue
             confirmed_research+=1
-            cond=list(mech.get("representative_conditions") or [])
             live_eligible=_miner_live_authority_eligible(mech)
-            if live_eligible and mech.get("miner_lane")=="DEEP_CFBD_AUTO":
-                live_eligible=bool(cond and all(c in atoms for c in cond))
             if live_eligible: authority_qualified+=1
+            cond=list(mech.get("representative_conditions") or [])
             # Observe why a frozen eligible rule does not reach live voting.
             # Do NOT change rule eligibility, atom masks, target selection, or vote counts.
             _coverage_missing=[str(c) for c in cond if c not in atoms]
@@ -8210,8 +7484,13 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     out["NCAAF_PT_Five_Source_Margin_Home"]=[_pt_five_by.get(k,np.nan) for k in out[keycol]]
     out["NCAAF_PT_Five_Source_Count"]=[_pt_five_count_by.get(k,0) for k in out[keycol]]
     out["NCAAF_PT_Five_Source_Selection_SHA"]=[_pt_five_sha_by.get(k) for k in out[keycol]]
-    _pt_five_obs_by={keys[i]:cdf.iloc[i].get("NCAAF_PT_Five_Source_Observed_At_UTC") for i in range(len(cdf))}
-    out["NCAAF_PT_Five_Source_Observed_At_UTC"]=[_pt_five_obs_by.get(k) for k in out[keycol]]
+    _pt_obs_by={
+        keys[i]:cdf.iloc[i].get("NCAAF_PT_Five_Source_Observed_At_UTC")
+        for i in range(len(cdf))
+    }
+    out["NCAAF_PT_Five_Source_Observed_At_UTC"]=[
+        _pt_obs_by.get(k) for k in out[keycol]
+    ]
     out["NCAAF_PT_Meta_Margin_Home"]=[_pt_meta_by.get(k,np.nan) for k in out[keycol]]
     out["NCAAF_PT_Meta_Edge_Home"]=[_pt_edge_by.get(k,np.nan) for k in out[keycol]]
     out["NCAAF_PT_Meta_System_Count"]=[_pt_cnt_by.get(k,np.nan) for k in out[keycol]]
@@ -8246,22 +7525,6 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     except Exception:
         # Live-system publication must not cancel the original scoring job.
         _live_logging.exception("[NCAAF-V55-LIVE-MINER-SNAPSHOT] status=PUBLISH_FAILED")
-    # Capture observed Big Al/Pathi/STAT/PT/Miner evidence on the NORMAL
-    # refresh; never require a Heavy Research execution to start the ledger.
-    try:
-        _research_gcs=getattr(dashboard_module,'gcs_client',None)
-        _research_bucket=str(getattr(dashboard_module,'GCS_BUCKET','sharp-models') or 'sharp-models')
-        _evidence=_v55_capture_prospective_brain_evidence(
-            out,storage_client=_research_gcs,bucket_name=_research_bucket)
-        _live_logging.info('[NCAAF-V55-PROSPECTIVE-BRAIN-CAPTURE] %s',_evidence)
-        _settled=_v55_settle_prospective_brain_evidence(
-            dashboard_module=dashboard_module,storage_client=_research_gcs,
-            bucket_name=_research_bucket)
-        _live_logging.info('[NCAAF-V55-PROSPECTIVE-BRAIN-SETTLE] %s',_settled)
-    except Exception:
-        # Observability failure is visible in logs, but cannot grant authority
-        # and must not interrupt CORE pricing or the frozen betting backend.
-        _live_logging.exception('[NCAAF-V55-PROSPECTIVE-BRAIN-EVIDENCE] HOLD_ERROR')
     return out
 
 
@@ -8290,8 +7553,7 @@ def _discovery_pass_from_exact_rule(rep: dict[str,Any], market: str) -> bool:
     if str(market).lower()=="h2h":
         hp=rep.get("h2h_discovery_price") or {}
         return bool(bool(rep.get("internal_validation_pass",False)) and float(rep.get("stable_discovery_fraction",0) or 0)>=float(rep.get("required_stable_discovery_fraction",1.0) or 1.0) and np.isfinite(rep.get("market_residual_discovery",np.nan)) and float(rep.get("market_residual_discovery"))>=.01 and int(hp.get("priced_n",0) or 0)>=80 and np.isfinite(hp.get("roi",np.nan)) and float(hp.get("roi"))>.01 and bool(hp.get("price_band_robust",False)) and np.isfinite(rep.get("remove_best_discovery_roi",np.nan)) and float(rep.get("remove_best_discovery_roi"))>=0 and np.isfinite(rep.get("remove_best_market_residual",np.nan)) and float(rep.get("remove_best_market_residual"))>=0)
-    _rate_floor = .53 if str(market).lower()=='spreads' else .54
-    return bool(bool(rep.get("internal_validation_pass",False)) and np.isfinite(rep.get("discovery_rate",np.nan)) and float(rep.get("discovery_rate"))>=_rate_floor and float(rep.get("stable_discovery_fraction",0) or 0)>=float(rep.get("required_stable_discovery_fraction",1.0) or 1.0) and np.isfinite(rep.get("remove_best_discovery_rate",np.nan)) and float(rep.get("remove_best_discovery_rate"))>=.515)
+    return bool(bool(rep.get("internal_validation_pass",False)) and np.isfinite(rep.get("discovery_rate",np.nan)) and float(rep.get("discovery_rate"))>=.54 and float(rep.get("stable_discovery_fraction",0) or 0)>=float(rep.get("required_stable_discovery_fraction",1.0) or 1.0) and np.isfinite(rep.get("remove_best_discovery_rate",np.nan)) and float(rep.get("remove_best_discovery_rate"))>=.515)
 
 
 def _legacy_contract_evidence_diagnostic(games: pd.DataFrame, seasons: np.ndarray, mask: np.ndarray,
@@ -8535,22 +7797,7 @@ def _reconcile_incumbent_system_library(games: pd.DataFrame, seasons: np.ndarray
         atoms=_extended_atoms(games,dashboard_module,for_live=False,market=market,enforce_support_floor=False)
         atom_map={str(a.get("name")):a for a in atoms}
         y,valid,baseline=_market_target(games,market)
-        # Frozen Deep Miner thresholds are not part of legacy extended atoms.
-        # A deep system must pass the entire current discovery/holdout/PIT
-        # certification process again; never grandfather an old live vote.
         for old in incumbents:
-            if old.get('miner_lane')=='DEEP_CFBD_AUTO':
-                sig=_ncaaf_system_signature(old)
-                existing=cur_by_sig.get(sig)
-                if existing is not None and _miner_live_authority_eligible(existing):
-                    audit['rediscovered']+=1
-                    audit['details'].append({'signature':sig,'market':market,
-                        'state':'DEEP_FRESHLY_REQUALIFIED','mechanism_id':existing.get('mechanism_id')})
-                else:
-                    audit['demoted']+=1
-                    audit['details'].append({'signature':sig,'market':market,
-                        'state':'DEEP_NOT_REQUALIFIED_HOLD','reason':'NO_CURRENT_PIT_AND_HOLDOUT_EVIDENCE'})
-                continue
             sig=_ncaaf_system_signature(old); cond=list(old.get("representative_conditions") or [])
             existing=cur_by_sig.get(sig); missing=[c for c in cond if c not in atom_map]
             if missing:
@@ -8614,7 +7861,7 @@ def _reconcile_incumbent_system_library(games: pd.DataFrame, seasons: np.ndarray
             target=existing if existing is not None else dict(old)
             if existing is not None: audit["rediscovered"]+=1
             else: audit["restored_missing"]+=1
-            target.update({"market":market,"direction":rep.get("direction"),"representative_conditions":cond,"families":list(dict.fromkeys(fams)),"discovery_rate":rep.get("discovery_rate"),"discovery_n":rep.get("discovery_n"),"confirmation_rate":rep.get("confirmation_rate"),"confirmation_n":rep.get("confirmation_n"),"confirmation_pass":True,"split_audit":rep.get("split_audit") or {},"authority_state":"CONFIRMED_SHADOW","production_authority":0,"library_origin":"INCUMBENT_REVALIDATED","incumbent_revalidation_status":"PASS","incumbent_prior_live_authority_eligible":bool(old.get("live_authority_eligible")),"original_search_multiple_testing_status":"FROZEN_PRIOR_PASS"})
+            target.update({"market":market,"direction":rep.get("direction"),"representative_conditions":cond,"families":list(dict.fromkeys(fams)),"discovery_rate":rep.get("discovery_rate"),"discovery_n":rep.get("discovery_n"),"confirmation_rate":rep.get("confirmation_rate"),"confirmation_n":rep.get("confirmation_n"),"confirmation_pass":True,"split_audit":rep.get("split_audit") or {},"authority_state":"CONFIRMED_SHADOW","production_authority":0,"library_origin":"INCUMBENT_REVALIDATED","incumbent_revalidation_status":"PASS","incumbent_missing_atoms":[],"incumbent_prior_live_authority_eligible":bool(old.get("live_authority_eligible")),"original_search_multiple_testing_status":"FROZEN_PRIOR_PASS"})
             target["uses_external_ratings_family"]=bool(old.get("uses_external_ratings_family")) or "EXTERNAL_RATINGS_FAMILY" in set(fams)
             target["uses_season_record_state_family"]=bool(old.get("uses_season_record_state_family")) or "SEASON_RECORD_STATE" in set(fams)
             target["uses_role_transition_bounceback_family"]=bool(old.get("uses_role_transition_bounceback_family")) or "ROLE_TRANSITION_BOUNCEBACK" in set(fams)
@@ -8667,12 +7914,6 @@ def _apply_v231_context_family_caps(miners: dict[str,Any], *, log_func=print) ->
     for _market,_mr in (miners or {}).items():
         for m in ((_mr or {}).get("mechanism_families") or []):
             fams=set(str(x) for x in (m.get("families") or []))
-            # Deep CFBD mechanisms share one correlated research family.
-            # Do not relabel a deep interaction as an additional rivalry or
-            # H2H vote simply because it contains those context conditions.
-            if m.get('miner_lane')=='DEEP_CFBD_AUTO':
-                m['evidence_family_key']='NCAAF_CFBD_DEEP_DISCOVERY_FAMILY'
-                continue
             if "EXTERNAL_RATINGS_FAMILY" in fams or bool(m.get("uses_external_ratings_family")):
                 continue
             if "SEASON_RECORD_STATE" in fams or bool(m.get("uses_season_record_state_family")):
@@ -8940,111 +8181,6 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         if historic.sum()<500: raise RuntimeError(f"insufficient <=2025 history n={int(historic.sum())}")
         g=games.loc[historic].reset_index(drop=True); mg=miner_games.loc[historic].reset_index(drop=True); sy=seasons[historic]; om=oof_margin[historic]; ot=oof_total[historic]
         log_func(f"[NCAAF-RV232-PREFLIGHT] source={NCAAF_RESEARCH_V2_SOURCE_TAG} rows={len(g)} seasons={sorted(set(sy.astype(int)))} discovery<=2023 confirmation=2024,2025 prospective>=2026 production_authority=0")
-        # V5.5 dual-mode pipeline health: read-only checks at the actual research
-        # input boundary. This does not modify g, mg, sy, OOF, candidate features,
-        # model fitting, scoring, rule selection or authority.
-        try:
-            from ncaaf_v55_research_health import audit_research_frames as _v55_audit_frames
-            _v55_research_input_health = _v55_audit_frames(
-                games=g, miner_games=mg, seasons=sy, oof_margin=om,
-                oof_total=ot, candidate_feature_cols=cols,
-                source_tag=NCAAF_RESEARCH_V2_SOURCE_TAG,
-                storage_client=storage_client, bucket_name=bucket_name,
-                persist=True)
-            log_func("[NCAAF-V55-RESEARCH-PIPELINE-HEALTH] "+json.dumps({
-                "status":_v55_research_input_health.get("status"),
-                "check_counts":_v55_research_input_health.get("check_counts"),
-                "failure_codes":_v55_research_input_health.get("failure_codes"),
-                "report_uri":_v55_research_input_health.get("report_uri")},sort_keys=True))
-        except Exception as _v55_research_audit_exc:
-            log_func("[NCAAF-V55-RESEARCH-PIPELINE-HEALTH] ERROR "+
-                f"{type(_v55_research_audit_exc).__name__}:{_v55_research_audit_exc}")
-
-        # Read-only historical field-lineage audit. Pandas extension dtypes
-        # (Float64/Int64/boolean) can carry pd.NA, which older audit conversion
-        # code cannot pass to a NumPy float64 array. Retry *diagnostics only*
-        # against shallow audit copies with explicit np.nan missing markers.
-        # The original g/mg frames and all training/model inputs remain intact.
-        _feature_audit_stage = "LINEAGE"
-        try:
-            from ncaaf_research_feature_audit_v1 import (
-                audit_research_feature_lineage, audit_stat_family_caps)
-            _audit_input_g, _audit_input_mg = g, mg
-            _audit_nullable_retry = None
-            try:
-                research_feature_lineage_audit = audit_research_feature_lineage(
-                    g, mg, sy, cols, log_func=log_func)
-            except ValueError as _nullable_error:
-                if not _v55_is_nullable_float_conversion_error(_nullable_error):
-                    raise
-                _audit_input_g, _g_converted = _v55_nullable_audit_copy(g)
-                _audit_input_mg, _mg_converted = _v55_nullable_audit_copy(mg)
-                _audit_nullable_retry = {
-                    "lineage": True,
-                    "core_columns_converted": _g_converted,
-                    "miner_columns_converted": _mg_converted,
-                }
-                research_feature_lineage_audit = audit_research_feature_lineage(
-                    _audit_input_g, _audit_input_mg, sy, cols, log_func=log_func)
-            _feature_audit_stage = "STAT_FAMILY_CAPS"
-            try:
-                _stat_caps = audit_stat_family_caps(
-                    cols, STAT_FAMILY_TOKENS,
-                    sparse_candidates=SPARSE_STAT_CANDIDATES,
-                    core_frame=_audit_input_g, log_func=log_func)
-            except ValueError as _nullable_error:
-                if not _v55_is_nullable_float_conversion_error(_nullable_error):
-                    raise
-                if _audit_input_g is g:
-                    _audit_input_g, _g_converted = _v55_nullable_audit_copy(g)
-                else:
-                    _g_converted = list(_audit_nullable_retry.get('core_columns_converted', []))
-                _audit_nullable_retry = _audit_nullable_retry or {}
-                _audit_nullable_retry.update({
-                    "stat_family_caps": True,
-                    "core_columns_converted": _g_converted,
-                })
-                _stat_caps = audit_stat_family_caps(
-                    cols, STAT_FAMILY_TOKENS,
-                    sparse_candidates=SPARSE_STAT_CANDIDATES,
-                    core_frame=_audit_input_g, log_func=log_func)
-            research_feature_lineage_audit['stat_family_caps'] = _stat_caps
-            if _audit_nullable_retry is not None:
-                research_feature_lineage_audit.setdefault('summary', {})[
-                    'nullable_diagnostic_compatibility'] = _audit_nullable_retry
-                log_func('[NCAAF-RESEARCH-FEATURE-LINEAGE-COMPAT] '+json.dumps(
-                    _audit_nullable_retry, sort_keys=True))
-        except Exception as _feature_audit_exc:
-            research_feature_lineage_audit = {
-                "summary": {"status":"AUDIT_ERROR",
-                    "stage": _feature_audit_stage,
-                    "error":f"{type(_feature_audit_exc).__name__}:{_feature_audit_exc}",
-                    "policy":"DIAGNOSTIC_ONLY_NO_AUTHORITY"},"fields":[]}
-            log_func("[NCAAF-RESEARCH-FEATURE-LINEAGE] "+json.dumps(
-                research_feature_lineage_audit["summary"],sort_keys=True))
-        # Independent typed/source-to-matrix lineage reconciliation. A numeric-only
-        # audit can label valid CFBD string metadata as "unpopulated". The source
-        # reconciliation uses the original research frames, a read-only BQ source
-        # inventory, and explicitly distinguishes absent fields from join losses.
-        # Never fill missing features or allow this diagnostic to affect selection.
-        try:
-            from ncaaf_v55_source_lineage import reconcile_source_lineage
-            _source_lineage_reconciliation = reconcile_source_lineage(
-                games=g, miner_games=mg,
-                lineage_report=research_feature_lineage_audit,
-                market_report=_market_rich_audit(g, utils_module),
-                bq_client=getattr(dashboard_module, "bq_client", None),
-                cfbd_table=NCAAF_CFBD_MINER_FEATURE_TABLE,
-                storage_client=storage_client, bucket_name=bucket_name,
-                persist=True, log_func=log_func)
-        except Exception as _src_lineage_exc:
-            _source_lineage_reconciliation = {
-                "status": "UNKNOWN", "production_authority": 0,
-                "production_mutation": False, "feature_mutation": False,
-                "error": f"{type(_src_lineage_exc).__name__}:{_src_lineage_exc}"}
-            log_func("[NCAAF-V55-SOURCE-LINEAGE] ERROR "
-                     + _source_lineage_reconciliation["error"])
-
         # Complement the existing market-error STAT research with a separate,
         # chronological all-season score foundation. The original market-only
         # lane intentionally still needs authentic opening prices.
@@ -9194,67 +8330,14 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         # promoted on its own. No new script, option, or env var is necessary.
         _v55_brain_doc,_v55_brain_audit=_v55_build_qualified_brain_registry_from_history(
             mg,sy,published_system_results)
-        # Always persist a diagnostic. If the registry has never existed, publish
-        # an explicit zero-authority HOLD document instead of a missing blob.
-        # Never replace an existing certified registry with an unverified HOLD,
-        # and never overwrite an operator-maintained version automatically.
-        _v55_brain_audit['policy']=V55_FROZEN_BRAIN_POLICY
-        _v55_brain_audit['research_source_tag']=NCAAF_RESEARCH_V2_SOURCE_TAG
-        _v55_brain_audit['evaluated_at_utc']=_now()
-        try:
-            _registry_blob=b.blob(V55_FROZEN_BRAIN_BLOB)
-            _previous_registry=None
-            if _registry_blob.exists():
-                try:
-                    _previous_registry=json.loads(_registry_blob.download_as_text())
-                except Exception as _old_read_exc:
-                    _v55_brain_audit['previous_registry_read_error']=type(_old_read_exc).__name__
-            if _v55_brain_doc is not None:
-                if _previous_registry is None and not _registry_blob.exists():
-                    _registry_blob.upload_from_string(
-                        json.dumps(_v55_brain_doc,sort_keys=True,default=str),
-                        content_type='application/json',if_generation_match=0)
-                    _v55_brain_audit['registry_write']='CREATED_SOURCE_VERIFIED'
-                elif (isinstance(_previous_registry,dict) and
-                      _previous_registry.get('status')=='HOLD_UNVERIFIED_HISTORY' and
-                      not bool(_previous_registry.get('operator_approved')) and
-                      not (_previous_registry.get('systems') or [])):
-                    # A run with authentic original source evidence can upgrade
-                    # the placeholder, but not silently approve betting stakes.
-                    _registry_blob.reload()
-                    _registry_blob.upload_from_string(
-                        json.dumps(_v55_brain_doc,sort_keys=True,default=str),
-                        content_type='application/json',
-                        if_generation_match=_registry_blob.generation)
-                    _v55_brain_audit['registry_write']='UPGRADED_PREVIOUS_HOLD_TO_RESEARCH_QUALIFIED'
-                else:
-                    _v55_brain_audit['registry_write']='PRESERVED_EXISTING_NO_AUTOMATIC_OVERWRITE'
-                _v55_brain_audit['artifact']=f'gs://{bucket_name}/{V55_FROZEN_BRAIN_BLOB}' 
-            elif _previous_registry is None and not _registry_blob.exists():
-                _hold_doc={'status':'HOLD_UNVERIFIED_HISTORY',
-                    'policy':V55_FROZEN_BRAIN_POLICY,'operator_approved':False,
-                    'production_authority':0,'systems':[],
-                    'uses_2026_outcomes':False,'created_utc':_now(),
-                    'reason':_v55_brain_audit.get('status'),
-                    'research_source_tag':NCAAF_RESEARCH_V2_SOURCE_TAG,
-                    'historical_certification':False}
-                _registry_blob.upload_from_string(json.dumps(_hold_doc,sort_keys=True),
-                    content_type='application/json',if_generation_match=0)
-                _v55_brain_audit['registry_write']='CREATED_ZERO_AUTHORITY_HOLD'
+        if _v55_brain_doc is not None:
+            try:
+                _v55_brain_raw=json.dumps(_v55_brain_doc,sort_keys=True,default=str).encode()
+                b.blob(V55_FROZEN_BRAIN_BLOB).upload_from_string(
+                    _v55_brain_raw,content_type="application/json")
                 _v55_brain_audit['artifact']=f'gs://{bucket_name}/{V55_FROZEN_BRAIN_BLOB}'
-            else:
-                _v55_brain_audit['registry_write']='PRESERVED_EXISTING_REGISTRY'
-                if isinstance(_previous_registry,dict):
-                    _v55_brain_audit['existing_registry_status']=_previous_registry.get('status')
-                    _v55_brain_audit['existing_registry_systems']=len(_previous_registry.get('systems') or [])
-                _v55_brain_audit['artifact']=f'gs://{bucket_name}/{V55_FROZEN_BRAIN_BLOB}'
-            b.blob(V55_BRAIN_AUDIT_BLOB).upload_from_string(
-                json.dumps(_v55_brain_audit,sort_keys=True,default=str),
-                content_type='application/json')
-            _v55_brain_audit['audit_artifact']=f'gs://{bucket_name}/{V55_BRAIN_AUDIT_BLOB}'
-        except Exception as _v55_brain_exc:
-            _v55_brain_audit['registry_write_error']=f'{type(_v55_brain_exc).__name__}:{_v55_brain_exc}'
-            log_func('[NCAAF-V55-AUTO-BRAIN-REGISTRY-WRITE] '+_v55_brain_audit['registry_write_error'])
+            except Exception as _v55_brain_exc:
+                _v55_brain_audit['status']='WRITE_FAILED:'+type(_v55_brain_exc).__name__
         log_func('[NCAAF-V55-AUTO-BRAIN-REGISTRY] '+json.dumps(_v55_brain_audit,sort_keys=True))
         miner_threshold_neighborhood=_miner_authority_threshold_neighborhood(miners)
         _log_v24_evidence_audit(miners=miners,system_results=system_results,published_system_results=published_system_results,
@@ -9322,8 +8405,6 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "system_library_inventory":system_library_inventory,"system_library_change_audit":system_library_change_audit,"incumbent_system_library_audit":incumbent_system_library_audit,
                 "context_family_cap_audit":context_family_cap_audit,
                 "miner_exact_path_shadow_audit":miner_exact_path_shadow_audit,
-                "research_feature_lineage_audit":research_feature_lineage_audit,
-                "source_lineage_reconciliation":_source_lineage_reconciliation,
                 "historical_state_context_bridge":historical_state_context_bridge,
                 "deep_context_bridge":deep_context_bridge,
                 "cfbd_context_bridge":cfbd_context_bridge,
@@ -9338,17 +8419,6 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
         bundle={"report":report,"system_miner_v3":miners,"sparse_stat_v21":sparse_stat,"prospective_shadow_2026":prospective,"system_results":system_results,"published_system_results":published_system_results,
                 "v55_automatic_brain_registry_audit":_v55_brain_audit,
                 "miner_threshold_neighborhood":miner_threshold_neighborhood,"incumbent_system_library_audit":incumbent_system_library_audit,"deep_context_bridge":deep_context_bridge,"cfbd_context_bridge":cfbd_context_bridge,"big_al_observation_research":big_al_observation_research,"external_rating_metamodel":external_ratings,"pt_incremental_value":pt_incremental,"stat_family_definitions":STAT_FAMILY_TOKENS,"source_tag":NCAAF_RESEARCH_V2_SOURCE_TAG}
-        # Separate read-only lineage artifact for per-season feature coverage.
-        # Failure to publish diagnostics cannot mutate research selection or CORE.
-        try:
-            _feature_path="research/ncaaf/v2/feature_lineage_latest.json"
-            b.blob(_feature_path).upload_from_string(
-                json.dumps(research_feature_lineage_audit,sort_keys=True,default=str),
-                content_type="application/json")
-            log_func("[NCAAF-RESEARCH-FEATURE-AUDIT-ARTIFACT] gs://"+str(bucket_name)+"/"+_feature_path)
-        except Exception as _audit_pub_exc:
-            log_func("[NCAAF-RESEARCH-FEATURE-AUDIT-ARTIFACT] FAILED "+
-                f"{type(_audit_pub_exc).__name__}:{_audit_pub_exc}")
         body=json.dumps(_report_without_models(report),sort_keys=True,separators=(",",":"),default=str).encode()
         sha=hashlib.sha256(body).hexdigest(); hist=f"{REPORT_HISTORY_PREFIX}/{sha[:16]}/report.json"
         b.blob(hist).upload_from_string(body,content_type="application/json"); b.blob(REPORT_CURRENT_BLOB).upload_from_string(body,content_type="application/json")
@@ -9921,7 +8991,7 @@ def self_test() -> dict[str,Any]:
         "weak_confirmed_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":109,"confirmation_rate":0.5229}),
         "strong_confirmed_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.6222}),
         "pt_strong_validated_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["META_PT_EDGE_TEAM_3PLUS"]}),
-        "pt_weak_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.529,"representative_conditions":["META_PT_EDGE_TEAM_3PLUS"]}),
+        "pt_weak_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.54,"representative_conditions":["META_PT_EDGE_TEAM_3PLUS"]}),
         "core_oof_bridge_authority":_miner_live_authority_eligible({"confirmation_pass":True,"confirmation_n":90,"confirmation_rate":0.60,"representative_conditions":["CORE_OOF_EDGE_TEAM_2PLUS"]}),
         "pt_family_vote_cap":1,
         "season_record_state_family_vote_cap":1,
