@@ -1,3 +1,4 @@
+# NCAAF_V55_REGISTRY_MARKET_GUARDED_FIX_20261102: safe source-checked registry version + snapshot display only
 """NCAAF V5.5 backend-only model publication and scanner-quote handoff.
 
 The installed ncaaf_v552_live.py supplies frozen CORE forecasts. The backend
@@ -982,6 +983,67 @@ def _v55_raw_rich(row):
     return ' | '.join(vals[:6]) if vals else 'NOT_PUBLISHED'
 
 
+
+def _v55_rich_from_market_snapshots(same_book, anchor, expected_spread):
+    """Observed market movement; DISPLAY ONLY, never a qualification/vote.
+
+    Uses only the existing scanner source, same kickoff/side/book market rows
+    already matched by the caller. Does not use later quotes, synthetic openers,
+    or the recalculated runtime snapshots. A reported 30/60/120m movement
+    requires a stored quote within 15 minutes BEFORE the requested lookback.
+    """
+    import pandas as pd
+    if not isinstance(same_book, pd.DataFrame) or same_book.empty:
+        return 'NOT_PUBLISHED'
+    at = _timestamp(anchor)
+    line = _price(expected_spread)
+    if pd.isna(at) or line is None:
+        return 'NOT_PUBLISHED'
+    need = {'Value', '_snap', 'V55_Overlay_Actual_Source'}
+    if not need.issubset(same_book.columns):
+        return 'NOT_PUBLISHED'
+    h = same_book.loc[
+        same_book['V55_Overlay_Actual_Source'].astype(str).eq(V55_RAW_OVERLAY_TABLE)
+        & same_book['_snap'].notna()
+        & same_book['_snap'].le(at)
+        & same_book['_snap'].lt(same_book['_kick'])
+    ].copy()
+    if h.empty:
+        return 'NOT_PUBLISHED'
+    h['_price'] = pd.to_numeric(h['Value'], errors='coerce')
+    h = h.loc[h['_price'].notna()].copy()
+    if h.empty:
+        return 'NOT_PUBLISHED'
+    # An alternate spread at the same time is not the same price path.
+    # Discard ambiguous timestamp groups rather than comparing alternate lines.
+    n = h.groupby('_snap')['_price'].transform('nunique')
+    h = h.loc[n.eq(1)].sort_values('_snap').drop_duplicates('_snap', keep='last')
+    if h.empty:
+        return 'NOT_PUBLISHED'
+    current = h.loc[
+        h['_price'].sub(line).abs().le(.001)
+        & (at - h['_snap']).le(pd.Timedelta(minutes=15))
+    ]
+    if current.empty:
+        return 'NOT_PUBLISHED'
+    selected = current.sort_values('_snap').iloc[-1]
+    current_at = selected['_snap']
+    vals = []
+    opener = _price(selected.get('Open_Value'))
+    if opener is not None:
+        vals.append(f'Open→Now {line-opener:+.1f}')
+    for minutes, label in ((30,'30m'),(60,'60m'),(120,'120m')):
+        cutoff = current_at - pd.Timedelta(minutes=minutes)
+        old = h.loc[
+            h['_snap'].le(cutoff)
+            & h['_snap'].ge(cutoff - pd.Timedelta(minutes=15))
+        ]
+        if old.empty:
+            continue
+        earlier = old.iloc[-1]
+        vals.append(f'{label} {line-float(earlier["_price"]):+.1f}')
+    return ' | '.join(vals[:6]) if vals else 'NOT_PUBLISHED'
+
 def _v55_read_enriched_pregame_overlays(bq_client, *, horizon_days=14, lookback_minutes=720,
                                           qualified_brain_registry=None):
     """Recover legacy system overlays from the actual enriched scoring source.
@@ -1012,7 +1074,7 @@ def _v55_read_enriched_pregame_overlays(bq_client, *, horizon_days=14, lookback_
             failures.append(source.rsplit('.',1)[-1]+':SCHEMA_'+type(exc).__name__);continue
         if not base_fields.issubset(schema):
             failures.append(source.rsplit('.',1)[-1]+':MISSING_IDENTITY');continue
-        optional=list(dict.fromkeys(x for x in (*V55_RAW_OVERLAY_FIELDS,'Bookmaker','Book',
+        optional=list(dict.fromkeys(x for x in (*V55_RAW_OVERLAY_FIELDS,'Bookmaker','Book','Open_Value',
                          *sorted(qualified_fields)) if x in schema and x not in base_fields))
         if not optional:
             failures.append(source.rsplit('.',1)[-1]+':NO_OVERLAY_COLUMNS');continue
@@ -1256,7 +1318,11 @@ def attach_v55_raw_pregame_overlays(board, enrich, *, source_status='PASS', now=
         # nothing from cross-book or home-only rows can look executable.
         if priced and not same_book.empty:
             richrow=same_book.sort_values('_snap',ascending=False).iloc[0]
-            out.at[idx,'V55_Raw_Market_Rich']=_v55_raw_rich(richrow)
+            rich_value=_v55_raw_rich(richrow)
+            if rich_value=='NOT_PUBLISHED':
+                rich_value=_v55_rich_from_market_snapshots(
+                    same_book,anchor,r.get('Current_Spread'))
+            out.at[idx,'V55_Raw_Market_Rich']=rich_value
         else:out.at[idx,'V55_Raw_Market_Rich']='NOT_VERIFIED_FOR_EXECUTION_BOOK'
         raw={k:_v55_raw_clean(picked.get(k)) for k in V55_RAW_OVERLAY_FIELDS if k in picked.index}
         raw={k:v for k,v in raw.items() if v is not None}
@@ -2055,6 +2121,10 @@ def evaluate_v55_spread_research(frame, *, calibration=None):
 # ----- Historical frozen-system -> timestamped V5.5 game-side evidence bridge -----
 V55_RESEARCH_MINER_REPORT_BLOB = "research/ncaaf/v2/current_report.json"
 V55_RESEARCH_MINER_POLICY = "NCAAF_MINER_LIVE_AUTHORITY_V2_20_SOURCE_NEUTRAL_STRONG_VALIDATED_20261007"
+V55_RESEARCH_MINER_SUPPORTED_POLICIES = frozenset((
+    V55_RESEARCH_MINER_POLICY,
+    'NCAAF_MINER_LIVE_AUTHORITY_V2_21_HISTORICAL_DEEP_QUALIFICATION_20261028',
+))
 
 
 def read_v55_research_miner_registry(*, storage_client=None, bucket_name=None):
@@ -2079,7 +2149,8 @@ def read_v55_research_miner_registry(*, storage_client=None, bucket_name=None):
             return None,'RESEARCH_REPORT_PROVENANCE_UNVERIFIED'
         if int(report.get('discovery_max_season',9999))>2023:return None,'DISCOVERY_NOT_FROZEN'
         if sorted(int(x) for x in report.get('confirmation_seasons',[]))!=[2024,2025]:return None,'CONFIRMATION_YEARS_NOT_FROZEN'
-        if (report.get('miner_live_authority_policy') or {}).get('policy')!=V55_RESEARCH_MINER_POLICY:return None,'RESEARCH_POLICY_MISMATCH'
+        frozen_policy=(report.get('miner_live_authority_policy') or {}).get('policy')
+        if frozen_policy not in V55_RESEARCH_MINER_SUPPORTED_POLICIES:return None,'RESEARCH_POLICY_MISMATCH'
         if (report.get('miner_live_authority_policy') or {}).get('uses_2026_selection') is not False:return None,'2026_SELECTION_UNVERIFIED'
         created=_timestamp(report.get('created_utc'))
         if created is None or str(created)=='NaT':return None,'RESEARCH_REPORT_TIMESTAMP_MISSING'
@@ -2100,6 +2171,7 @@ def read_v55_research_miner_registry(*, storage_client=None, bucket_name=None):
                 rec.get('incumbent_prior_live_authority_eligible',
                         rec.get('live_authority_eligible',False)) is not True):continue
             if rec.get('confirmation_pass') is not True or rec.get('live_authority_eligible') is not True:continue
+            if rec.get('live_authority_policy')!=frozen_policy:continue
             if rec.get('split_audit',{}).get('disjoint') is not True:continue
             if int(rec.get('confirmation_n') or 0)<60 or float(rec.get('confirmation_rate') or 0)<0.56:continue
             if rec.get('meta_constituent_overlap_guard','PASS')!='PASS':continue
@@ -2111,7 +2183,7 @@ def read_v55_research_miner_registry(*, storage_client=None, bucket_name=None):
                 'n':int(rec.get('confirmation_n')),
                 'rate':float(rec.get('confirmation_rate')),
             }
-        return {'mechanisms':mechanisms,'created_utc':created,
+        return {'mechanisms':mechanisms,'policy':frozen_policy,'created_utc':created,
                 'report_sha256':hashlib.sha256(raw).hexdigest(),
                 'uri':f'gs://{bucket}/{V55_RESEARCH_MINER_REPORT_BLOB}'},None
     except Exception as exc:
@@ -2233,7 +2305,7 @@ def derive_v55_miner_qualified_events(board, live_rows, registry, *, now=None):
                 if str(v.get('source_type') or '').upper()!='MINER':reject('SOURCE_TYPE_NOT_MINER');continue
                 if str(v.get('market') or '').lower()!='spreads':reject('NOT_SPREAD_MARKET');continue
                 if v.get('live_authority_eligible') is not True:reject('LIVE_AUTHORITY_FALSE');continue
-                if v.get('live_authority_policy')!=V55_RESEARCH_MINER_POLICY:reject('POLICY_VERSION_MISMATCH');continue
+                if v.get('live_authority_policy')!=registry.get('policy'):reject('POLICY_VERSION_MISMATCH');continue
                 if v.get('evidence_level')!='STRONG_VALIDATED':reject('NOT_STRONG_VALIDATED');continue
                 if str(v.get('evidence_family_key') or '')!=rule['evidence_family_key']:reject('FAMILY_KEY_MISMATCH');continue
                 if str(v.get('rule') or '')!=rule['rule']:reject('RULE_CONDITIONS_MISMATCH');continue
