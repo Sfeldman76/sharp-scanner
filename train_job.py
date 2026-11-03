@@ -199,208 +199,6 @@ def main():
         pw.emit("done", "NCAAF Full-History V3 complete (research only)", pct=1.0)
         return
 
-    # NCAAF_V4_FOOTBALL_TOURNAMENT_20261020 — research-only, no production route.
-    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_margin_tournament_v4":
-        if str(os.getenv("NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED", "0")).strip().lower() not in {"1","true","yes","on"}:
-            raise RuntimeError("[NCAAF-V4] explicit archive research opt-in required")
-        import sharp_line_dashboard as _v4_dashboard
-        import ncaaf_margin_tournament_v4 as _v4
-        log_func("[NCAAF-V4] phase=CACHE_PREP legacy_dashboard_cache_only=TRUE authority=0")
-        pw.emit("cache", "NCAAF V4: preparing historical game + CFBD archive context", pct=0.12)
-        _v4_dashboard.fit_historical_ncaaf_core_expert("spreads", log_func=log_func)
-        _v4_dashboard.fit_ncaaf_statistical_brain(log_func=log_func)
-        pw.emit("research", "NCAAF V4: chronological football-model tournament", pct=0.50)
-        _v4_result = _v4.run_cloud_research(
-            dashboard_module=_v4_dashboard, storage_client=gcs,
-            bucket_name=bucket, log_func=log_func)
-        if _v4_result.get("status") != "RESEARCH_COMPLETE_NO_PROMOTION":
-            raise RuntimeError("[NCAAF-V4] incomplete: " + str(_v4_result.get("status")))
-        pw.emit("done", "NCAAF V4 football tournament complete (research-only)", pct=1.0)
-        return
-
-    # NCAAF V4.2 conditional football feature research; ALL FIVE families in one
-    # isolated, no-market, no-promotion historical tournament.
-    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_conditional_features_v42":
-        if str(os.getenv("NCAAF_CFBD_ARCHIVE_RESEARCH_ENABLED", "0")).strip().lower() not in {"1","true","yes","on"}:
-            raise RuntimeError("[NCAAF-V42] explicit archive research opt-in required")
-        import sharp_line_dashboard as _v42_dashboard
-        import ncaaf_v42_conditional_features as _v42
-        log_func("[NCAAF-V42] phase=HISTORICAL_CACHE_PREP source=2013_2025 legacy_cache_only=TRUE production_authority=0")
-        pw.emit("cache", "V4.2: preparing verified historical game and CFBD archive join", pct=0.10)
-        _v42_dashboard.fit_historical_ncaaf_core_expert("spreads", log_func=log_func)
-        _v42_dashboard.fit_ncaaf_statistical_brain(log_func=log_func)
-        pw.emit("research", "V4.2: five conditional feature families plus predeclared combinations", pct=0.50)
-        result = _v42.run_cloud_research(
-            dashboard_module=_v42_dashboard,storage_client=gcs,
-            bucket_name=bucket,log_func=log_func)
-        if result.get("status") != "EXPLORATORY_RESEARCH__SOURCE_VINTAGE_HOLD":
-            raise RuntimeError("[NCAAF-V42] unexpected status: " + str(result.get("status")))
-        pw.emit("done", "V4.2 football feature tournament complete: research only", pct=1.0)
-        return
-
-    # NCAAF V4.1 retrospective artifact audit, zero historical cache or model refit.
-    # Input is the existing V4 published report + game predictions in research GCS.
-    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v41_integrity":
-        import ncaaf_v41_integrity as _v41
-        log_func("[NCAAF-V41] phase=READ_PRIOR_V4_ARTIFACTS legacy_cache=SKIPPED bq_queries=NONE authority=0")
-        pw.emit("audit", "V4.1: checking published V4 per-game forecasts and pregame integrity", pct=0.15)
-        _v41_result = _v41.run_cloud_audit(
-            storage_client=gcs, bucket_name=bucket, log_func=log_func)
-        if _v41_result.get("status") != "RETROSPECTIVE_AUDITED__SOURCE_VINTAGE_HOLD":
-            raise RuntimeError("[NCAAF-V41] unexpected audit status " + str(_v41_result.get("status")))
-        pw.emit("done", "V4.1 audit complete; source-vintage certification remains gated", pct=1.0)
-        return
-
-    # NCAAF Production V1 historical fixed-backbone replay (RESEARCH ONLY).
-    # This is not a re-scoring of the fitted 2026 artifact, which was trained
-    # through 2025. Each validation year fits the original fixed head recipes
-    # using strictly earlier seasons. There are no historical bet-ROI claims.
-    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_prod_v1_historical_replay":
-        import sharp_line_dashboard as _v1hist_dashboard
-        import ncaaf_prod_v1_historical_replay as _v1hist
-        pw.emit("audit", "NCAAF Production V1: expanding-season replay of frozen head recipes (research only)", pct=0.10)
-        result = _v1hist.run_cloud_research(
-            dashboard_module=_v1hist_dashboard, storage_client=gcs,
-            bucket_name=bucket, log_func=log_func)
-        if result.get("status") != "RESEARCH_FIXED_BACKBONE_REPLAY__HISTORICAL_SELECTION_AND_SOURCE_VINTAGE_HOLD":
-            raise RuntimeError("[NCAAF-PROD-V1-BACKTEST] unexpected status="+str(result.get("status")))
-        pw.emit("done", "NCAAF Production V1 historical model replay complete; original bet ROI unverified", pct=1.0)
-        return
-
-    # NCAAF V5.3 — one comprehensive football + legacy-brain research run.
-    # Logs every source, stage, integrity gate and partial failure. No V1 refit,
-    # no silent fallbacks or promotion of previously inspected historical results.
-    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v53_full_research":
-        import ncaaf_v53_full_research as _v53
-        pw.emit("research", "V5 full research: V4 football, V4.2, legacy Big Al/Pathi/PT/Miner, V5 point edges and shadow authority", pct=0.05)
-        _result=_v53.run_full(storage_client=gcs,bucket_name=bucket,log_func=log_func)
-        if _result.get("status")!="COMPLETE_FULL_RESEARCH__SHADOW_AUTHORITY__VINTAGE_HOLD" or _result.get("bet_authority")!=0:
-            raise RuntimeError("[NCAAF-V53] incomplete or unsafe authority contract: "+str(_result.get("status")))
-        pw.emit("done", "NCAAF V5 full research finished; see detailed audited phases and candidate policy", pct=1.0)
-        return
-
-    # NCAAF V5.5: fast COMBINED brain/market-rich research from a completed
-    # immutable CFBD V5.4.9 archive. No CORE re-fit or production file writes.
-    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v55_combined_brain":
-        import ncaaf_v55_combined_brain as _v55
-        from google.cloud import bigquery as _v55_bq
-        pw.emit("research", "V5.5: selected V4 CORE + STAT availability + Big Al/Pathi/Miner + price-only historical Market Rich", pct=0.10)
-        _result=_v55.run_cloud(storage_client=gcs,bucket_name=bucket,
-            bq_client=_v55_bq.Client(project="sharplogger"), log_func=log_func)
-        if (_result.get("status")!="COMPLETE_COMBINED_BRAIN_RESEARCH__PROVISIONAL_ONLY"
-                or _result.get("bet_authority")!=0 or _result.get("production_modified") is not False):
-            raise RuntimeError("[NCAAF-V55] incomplete or unsafe production authority contract")
-        pw.emit("done", "NCAAF V5.5 combined-brain research completed; see immutable GCS result directory", pct=1.0)
-        return
-
-    # V5.5.4 targeted 2026 CFBD /games backfill — independent maintenance.
-    # Preserves all existing market, features, research, production and model data.
-    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v55_cfbd_2026_games_repair":
-        import ncaaf_v554_cfbd_games_backfill as _v554
-        from google.cloud import bigquery as _v554_bq
-        pw.emit("audit", "V5.5: audit 2026 CFBD game archive and backfill /games ONLY", pct=0.10)
-        _v554_result=_v554.run_backfill(
-            bq_client=_v554_bq.Client(project="sharplogger"),
-            storage_client=gcs,bucket_name=bucket,log_func=log_func)
-        if (_v554_result.get("status") not in ("PASS", "PASS_ALREADY_COMPLETE")
-            or _v554_result.get("production_modified") is not False
-            or _v554_result.get("bet_authority") != 0):
-            raise RuntimeError("[NCAAF-V554] CFBD 2026 games archive repair is not verified")
-        pw.emit("done", "2026 CFBD /games archive verified; next run V5.5 Weekly CORE", pct=1.0)
-        return
-
-    # V5.5 WEEKLY: own CFBD NONLINEAR_HGB forecast, independently priced
-    # current-game slate and research brains. The frozen Production V1 scorer,
-    # pick selector, contract, and bet ledgers are NOT used or modified.
-    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v55_weekly":
-        import ncaaf_v552_live as _v552
-        from google.cloud import bigquery as _v552_bq
-        pw.emit("model", "V5.5: CFBD-only 2013-25 champion training + 2026 pregame scoring; independent selection", pct=0.10)
-        _v552_result=_v552.run_weekly(storage_client=gcs,bucket_name=bucket,
-            bq_client=_v552_bq.Client(project="sharplogger"),log_func=log_func)
-        if (_v552_result.get("status")!="COMPLETE_V55_INDEPENDENT_WEEKLY_SHADOW"
-            or _v552_result.get("production_mutation") is not False
-            or _v552_result.get("production_v1_probabilities_used") is not False
-            or _v552_result.get("v55_bet_authority")!=0):
-            raise RuntimeError("[NCAAF-V552] independent weekly model did not publish safely")
-        pw.emit("done", "NCAAF V5.5 independent weekly CORE and brains published", pct=1.0)
-        return
-
-    # V5.5 market-only repricing: reuse the LAST VERIFIED V5.5 weekly CFBD
-    # forecast; no model fit or Production V1 probabilities may be substituted.
-    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v55_market_refresh":
-        import ncaaf_v552_live as _v552
-        pw.emit("market", "V5.5 market-only quote update against the latest V5.5 CORE projections", pct=0.30)
-        _result=_v552.refresh_market_only(storage_client=gcs,bucket_name=bucket,log_func=log_func)
-        if (_result.get("status")!="COMPLETE_V55_INDEPENDENT_WEEKLY_SHADOW"
-                or _result.get("production_v1_probabilities_used") is not False
-                or _result.get("core_refit") is not False):
-            raise RuntimeError("[NCAAF-V552] unsafe market-only refresh")
-        pw.emit("done", "V5.5 CORE retained; market-price snapshot refreshed", pct=1.0)
-        return
-
-    # NCAAF V5.4: CFBD authoritative historical CORE and system mining.
-    # Original weekly Production V1 and legacy research remain untouched.
-    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v54_full_research":
-        import ncaaf_v54_full_research as _v54
-        pw.emit("research", "V5 full research with CFBD-only historical football facts, separate rich market and original expert rules", pct=0.05)
-        _result=_v54.run_full(storage_client=gcs,bucket_name=bucket,log_func=log_func)
-        if _result.get("status")!="COMPLETE_FULL_RESEARCH__SHADOW_AUTHORITY__VINTAGE_HOLD" or _result.get("bet_authority")!=0:
-            raise RuntimeError("[NCAAF-V54] incomplete or unsafe authority contract: "+str(_result.get("status")))
-        pw.emit("done", "NCAAF V5.4 CFBD-authoritative research finished; inspect source and full-stage audits", pct=1.0)
-        return
-
-    # NCAAF V5.2: source discovery and independently verified brain attribution.
-    # No V4 refit, production changes, inferred odds or unverified historical votes.
-    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v52_brain_attribution":
-        import ncaaf_v52_brain_research as _v52
-        pw.emit("research", "V5.2: inventory historical Big Al/Pathi/PT/Miner sources and gate original pregame brain evidence", pct=0.20)
-        _result = _v52.cloud_run(storage_client=gcs, bucket_name=bucket, log_func=log_func)
-        if _result.get("bet_authority") != 0 or _result.get("production_modified") is not False:
-            raise RuntimeError("[NCAAF-V52] unexpected authority contract")
-        pw.emit("done", f"V5.2 completed with status={_result['status']}; source inventory and evidence gates published", pct=1.0)
-        return
-
-    # NCAAF V5.1 — Read-only point-edge research: NO refit, no live bet votes.
-    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v51_edge_research":
-        import ncaaf_v51_edge_research as _v51
-        pw.emit("research", "V5.1: deduplicate V5 signals, verify frozen V4 outcome/orientation, score conditional point edges and source-vintage gated brains", pct=0.20)
-        _result = _v51.cloud_run(storage_client=gcs, bucket_name=bucket, log_func=log_func)
-        if _result.get("status") != "HISTORICAL_EDGE_ATTRIBUTION__SOURCE_VINTAGE_HOLD":
-            raise RuntimeError("[NCAAF-V51] unexpected status: " + str(_result.get("status")))
-        pw.emit("done", "V5.1 point-edge attribution published; no bet authority, no historical ROI", pct=1.0)
-        return
-
-    # NCAAF V5 — Independent football margins -> market-value research.
-    # Consumes immutable historical OOF research artifacts only. The optional
-    # BIG_AL/PATHI/PT/MINER/STATE snapshot bridge is timestamp-vintage gated.
-    # No Production V1 files, weekly retraining, dashboards or bet votes run.
-    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v5_market_value":
-        import ncaaf_v5_betting_research as _v5
-        pw.emit("research", "V5: verify V4/A forecasts, calibrate ATS margin probabilities and audit independent brains", pct=0.18)
-        _result = _v5.cloud_run(storage_client=gcs, bucket_name=bucket, log_func=log_func)
-        if _result.get("status") not in {
-                "HISTORICAL_DIRECTIONAL_RESEARCH__SOURCE_VINTAGE_HOLD",
-                "NO_VERIFIED_HISTORICAL_OPEN_MARKET_GAMES__RESEARCH_BLOCKED"}:
-            raise RuntimeError("[NCAAF-V5] unexpected status: " + str(_result.get("status")))
-        pw.emit("done", "V5 research report published; betting authority remains zero", pct=1.0)
-        return
-
-    # NCAAF V4.3: read-only focused research validation and production robustness.
-    # This route does NOT import dashboard history trainers, refit challengers,
-    # touch the frozen production model, or give any betting authority.
-    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_v43_focused_validation":
-        import ncaaf_v43_validation as _v43
-        import ncaaf_prod_v1_robustness as _prod_audit
-        pw.emit("validation", "V4.3: comparing frozen V4 with A, AB, AC on immutable V4.2 predictions", pct=0.20)
-        result = _v43.run_cloud_audit(storage_client=gcs,bucket_name=bucket,log_func=log_func)
-        if result.get("status") != "EXPLORATORY_FOCUSED_VALIDATION__SOURCE_VINTAGE_HOLD":
-            raise RuntimeError("[NCAAF-V43] unexpected status: " + str(result.get("status")))
-        pw.emit("robustness", "V4.3: auditing prospective Production V1 ledger read-only", pct=0.70)
-        _prod_audit.run_cloud_audit(storage_client=gcs,bucket_name=bucket,log_func=log_func)
-        pw.emit("done", "V4.3 validation + Production V1 robustness audit complete, research only", pct=1.0)
-        return
-
     # NFL Heavy Research / Engine V3.17 — persistent Miner library + Big Al current-card fingerprint + protected PT lanes.
     # Research-only: frozen CORE remains the fair-value anchor. STAT/PBP/context learn
     # residual corrections; SYSTEM/STAT/PBP become selective trust lanes; a partially pooled
@@ -860,7 +658,7 @@ def main():
         str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_production_weekly"
     )
     _ncaaf_research_heavy_run = bool(
-        str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() in {"ncaaf_research_heavy", "ncaaf_v55_heavy"}
+        str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_research_heavy"
     )
     _ncaaf_rv22_run = bool(
         str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_research_v2"
@@ -1194,11 +992,6 @@ def main():
                 f"contract_source={_refresh.get('contract_source','NA')} artifact={_refresh.get('artifact',str(_contract.get('_artifact_sha256'))[:16])} "
                 "probability_refit=FALSE research_run=FALSE production_publish=FALSE automatic_promotion=FALSE"
             )
-            # Never mirror V1's already-selected picks into the V5.5 main
-            # weekly artifact. That would overwrite V5.5's own CORE forecast.
-            log_func('[NCAAF-V552-PRODUCTION-ISOLATION] frozen_v1_weekly=UNCHANGED '
-                     'v55_board_not_overwritten=TRUE separate_models=TRUE')
-
             # The canonical selector already captured PT observations from the
             # exact selected spread rows. Here we verify coverage and settle, but
             # DO NOT run a second score_live_rows() or quote selection.
@@ -1239,30 +1032,6 @@ def main():
             return
 
         if _ncaaf_research_heavy_run:
-            # V5.5 ATS-FIRST HEAVY RESEARCH — PERMANENT PRIMARY CONTRACT.
-            # A genuine chronological NONLINEAR_HGB replay and pregame book
-            # quotes MUST validate before the legacy challenger / system lab
-            # may run as an ancillary comparison.  The legacy CORE cache and
-            # its old OOF margins are NEVER acceptable V5.5 stand-ins.
-            import ncaaf_v55_primary_research as _v55_ats_primary
-            pw.emit("v55_ats", "NCAAF Heavy: V5.5 chronological OOS point-edge / ATS / independent-brain study (primary)", pct=0.04)
-            _v55_primary = _v55_ats_primary.run_cloud(
-                storage_client=gcs, bucket_name=bucket, log_func=log_func,
-            )
-            _v55_primary_pass = bool(
-                _v55_primary.get("status") == "COMPLETE_V55_ATS_PRIMARY_RESEARCH"
-                and _v55_primary.get("production_modified") is False
-                and _v55_primary.get("bet_authority") == 0
-            )
-            if not _v55_primary_pass:
-                log_func("[NCAAF-HEAVY-V55-PRIMARY-HOLD] V5.5 ATS research is NOT "
-                         "complete; legacy research will continue as a secondary lane "
-                         "without using its OOF predictions as V5.5 evidence: "
-                         + str(_v55_primary.get("status")) + " "
-                         + str(_v55_primary.get("reason", "")))
-            else:
-                log_func("[NCAAF-HEAVY-V55-PRIMARY] status=PASS legacy_pipeline=SECONDARY "
-                         "policy_promotion=FALSE production_mutation=FALSE")
             # One protected research workflow, analogous to NFL Heavy Research.
             # Build the leakage-safe historical cache once, then run both the
             # current STAT/System Miner research and the compact CORE challenger.
@@ -1270,7 +1039,7 @@ def main():
             # artifact or Bet Authority policy is mutated automatically.
             log_func("[NCAAF-HEAVY-RUN] phase=HISTORICAL_CACHE start=TRUE production_mutation=FALSE year_2026_selection=FALSE")
             _t0=__import__('time').perf_counter()
-            pw.emit("cache","NCAAF Heavy secondary legacy diagnostics: historical/OOF cache",pct=0.45)
+            pw.emit("cache","NCAAF Heavy Research: build protected historical/OOF cache",pct=0.10)
             _sld.fit_historical_ncaaf_core_expert("spreads",log_func=log_func)
             _sld.fit_ncaaf_statistical_brain(log_func=log_func)
             _cache=getattr(_sld,"_V1357_SPREAD_RESEARCH_CACHE",{}) or {}
@@ -1286,14 +1055,14 @@ def main():
             # V2.11 ordering is intentional: CORE challenger first publishes leakage-safe
             # season-forward incumbent/specialist state into the research-only Miner frame.
             # The same existing Miner then tests those states together with Pathi/Big Al.
-            pw.emit("core","NCAAF Heavy secondary legacy CORE challenger (not V5.5)",pct=0.64)
+            pw.emit("core","NCAAF Heavy Research: build existing-feed coverage + OOF CORE/specialist Miner bridge",pct=0.40)
             _core=_nccv2.run_ncaaf_core_challenger_v2(
                 dashboard_module=_sld,bucket_name=bucket,storage_client=gcs,log_func=log_func,hard_fail=True
             )
             if not isinstance(_core,dict) or _core.get("status")!="NCAAF_CORE_CHALLENGER_V2_COMPLETE":
                 raise RuntimeError(f"[NCAAF-HEAVY-RUN] core challenger failed status={getattr(_core,'get',lambda *_:None)('status')}")
 
-            pw.emit("systems","NCAAF Heavy ancillary persistent Miner, Big Al, Pathi and PT research",pct=0.80)
+            pw.emit("systems","NCAAF Heavy Research: run persistent incumbent library + challenger Miner + Big Al observation hypotheses + Pathi + OOF CORE/specialist atoms",pct=0.72)
             # Prediction Tracker is read only from validated GCS uploads. It is intentionally
             # sparse: absence from PT never removes a game and partial named-system coverage
             # remains usable as component research while META still requires exact 5-of-5.
@@ -1304,25 +1073,6 @@ def main():
             )
             if not isinstance(_research,dict) or _research.get("status")!="NCAAF_RESEARCH_V2_COMPLETE":
                 raise RuntimeError(f"[NCAAF-HEAVY-RUN] research report failed status={getattr(_research,'get',lambda *_:None)('status')}")
-            # NCAAF_FULL_HISTORY_COMBINED_BRAIN_SHADOW_HOOK_V1
-            # Research-only: 2013-2025 all-brain history, never live bet authority.
-            # Missing archival events/eligibility remain HOLD, not inferred non-triggers.
-            try:
-                from ncaaf_heavy_brain_bridge import run_heavy_brain_shadow as _run_full_history_brains
-                _historical_brains = _run_full_history_brains(
-                    storage_client=gcs, bucket_name=bucket, log_func=log_func,
-                    legacy_cache=_cache, legacy_research=_research,
-                    v55_primary_result=_v55_primary,
-                )
-                log_func("[NCAAF-HEAVY-COMBINED-BRAINS] status="
-                         + str(_historical_brains.get("status", "HOLD"))
-                         + " reason=" + str(_historical_brains.get("reason", "UNKNOWN"))
-                         + " bet_authority=0 production_mutation=FALSE")
-            except Exception as _brain_shadow_exc:
-                log_func("[NCAAF-HEAVY-COMBINED-BRAINS] status=HOLD type="
-                         + type(_brain_shadow_exc).__name__
-                         + " reason=" + str(_brain_shadow_exc)[:250]
-                         + " bet_authority=0 production_mutation=FALSE")
             _miners=_research.get("system_miner_v3") or {}
             _confirmed=sum(int((v or {}).get("confirmed_mechanism_count",0) or 0) for v in _miners.values())
             _best=_core.get("best_challenger") or {}
@@ -1338,13 +1088,7 @@ def main():
                 f"pt_strict_incremental_signal={_ptinc_ncaaf.get('strict_incremental_signal')} "
                 "2026_selection_influence=0 production_mutation=FALSE automatic_promotion=FALSE"
             )
-            if _v55_primary_pass:
-                pw.emit("done", "NCAAF V5.5 ATS Primary + Legacy Systems Research complete", pct=1.0)
-            else:
-                log_func("[NCAAF-HEAVY-OVERALL] status=V55_PRIMARY_HOLD "
-                         "legacy_systems=COMPLETE secondary_only=TRUE "
-                         "v55_ats_results=UNAVAILABLE betting_policy_promotion=FALSE")
-                pw.emit("done", "NCAAF Heavy: legacy research complete, V5.5 ATS PRIMARY HELD pending genuine replay", pct=1.0)
+            pw.emit("done","NCAAF Heavy Challenger Research complete ✅",pct=1.0)
             return
 
         if _ncaaf_core_challenger_run:

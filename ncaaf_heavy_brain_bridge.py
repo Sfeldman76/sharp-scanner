@@ -218,3 +218,9 @@ def run_heavy_brain_shadow(*, storage_client, bucket_name="sharp-models", log_fu
             # Failure to publish shadow metadata cannot affect weekly models.
             log_func("[NCAAF-V55-HISTORICAL-BRAINS] SHADOW_PUBLICATION_FAILED "+type(exc).__name__+" "+str(exc)[:400])
     return status
+
+# NCAAF-V55-RESEARCH-STATUS-HOOK-BEGIN
+# Keep the original bridge's return value and certification HOLD unchanged.
+from ncaaf_v55_heavy_research_hook import wrap_heavy_brain_shadow as _v55_wrap_research
+run_heavy_brain_shadow = _v55_wrap_research(run_heavy_brain_shadow)
+# NCAAF-V55-RESEARCH-STATUS-HOOK-END

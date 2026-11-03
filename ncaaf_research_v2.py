@@ -7312,11 +7312,7 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
         for mech in (mr or {}).get("mechanism_families",[]):
             if not mech.get("confirmation_pass"): continue
             confirmed_research+=1
-            live_eligible=bool(
-                _miner_live_authority_eligible(mech)
-                and mech.get('full_history_miner_certified') is True
-                and mech.get('full_history_miner_origin') == 'FRESH_2013_2025_DISCOVERY'
-            )
+            live_eligible=_miner_live_authority_eligible(mech)
             if live_eligible: authority_qualified+=1
             cond=list(mech.get("representative_conditions") or [])
             # Observe why a frozen eligible rule does not reach live voting.
@@ -8211,9 +8207,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 _previous_report=json.loads(_prev_blob.download_as_text())
         except Exception as _prev_exc:
             log_func(f"[NCAAF-SYSTEM-LIBRARY-PRIOR] status=UNAVAILABLE error={type(_prev_exc).__name__}:{_prev_exc}")
-        from ncaaf_miner_full_history_clean_v1 import finalize_clean_miner_library
-        miners,incumbent_system_library_audit=finalize_clean_miner_library(
-            mg,sy,miners,previous_report=_previous_report,dashboard_module=dashboard_module,log_func=log_func)
+        miners,incumbent_system_library_audit=_reconcile_incumbent_system_library(mg,sy,miners,_previous_report,dashboard_module=dashboard_module,log_func=log_func)
         context_family_cap_audit=_apply_v231_context_family_caps(miners,log_func=log_func)
         # Permanent mechanism-definition identity repair. Recycled legacy IDs
         # become immutable definition IDs with an explicit legacy alias map;
@@ -8408,7 +8402,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 "production_authority":0,"production_contract_mutated":False,
                 "benchmark":"FROZEN_NCAAF_PRODUCTION_V1","discovery_max_season":NCAAF_MINER_PRECONF_MAX_SEASON,"miner_history_contract":NCAAF_MINER_HISTORY_CONTRACT,"confirmation_seasons":list(CONFIRMATION_SEASONS),"prospective_min_season":PROSPECTIVE_MIN_SEASON,
                 "rows":len(g),"seasons":sorted(set(sy.astype(int))),"orthogonal_stat":stat,"sparse_stat_v21":sparse_stat,"full_history_score_foundation":score_foundation,"system_miner_v3":miners,
-                "system_library_inventory":system_library_inventory,"system_library_change_audit":system_library_change_audit,"incumbent_system_library_audit":incumbent_system_library_audit,"full_history_miner_contract":incumbent_system_library_audit,
+                "system_library_inventory":system_library_inventory,"system_library_change_audit":system_library_change_audit,"incumbent_system_library_audit":incumbent_system_library_audit,
                 "context_family_cap_audit":context_family_cap_audit,
                 "miner_exact_path_shadow_audit":miner_exact_path_shadow_audit,
                 "historical_state_context_bridge":historical_state_context_bridge,
