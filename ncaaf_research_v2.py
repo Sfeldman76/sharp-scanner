@@ -6933,7 +6933,7 @@ def _miner_live_authority_eligible(mech: dict[str,Any] | None) -> bool:
     _inc_status=str(m.get("incumbent_revalidation_status") or "")
     if _inc_status=="HOLD_NOT_EVALUABLE": return False
     if _inc_status=="LEGACY_CONTRACT_HOLD":
-        return bool(m.get("incumbent_prior_live_authority_eligible",m.get("live_authority_eligible",False)))
+        return False
     _conds=[str(x) for x in (m.get("representative_conditions") or m.get("conditions") or [])]
     # CORE OOF / specialist research bridges are not live-authority inputs.
     # Prediction Tracker is intentionally NOT blocked by source: PT-derived
@@ -8207,7 +8207,7 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                 _previous_report=json.loads(_prev_blob.download_as_text())
         except Exception as _prev_exc:
             log_func(f"[NCAAF-SYSTEM-LIBRARY-PRIOR] status=UNAVAILABLE error={type(_prev_exc).__name__}:{_prev_exc}")
-        miners,incumbent_system_library_audit=_reconcile_incumbent_system_library(mg,sy,miners,_previous_report,dashboard_module=dashboard_module,log_func=log_func)
+        miners,incumbent_system_library_audit=_reconcile_incumbent_system_library(mg,sy,miners,None,dashboard_module=dashboard_module,log_func=log_func)
         context_family_cap_audit=_apply_v231_context_family_caps(miners,log_func=log_func)
         # Permanent mechanism-definition identity repair. Recycled legacy IDs
         # become immutable definition IDs with an explicit legacy alias map;

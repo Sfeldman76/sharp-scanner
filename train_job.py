@@ -1032,6 +1032,18 @@ def main():
             return
 
         if _ncaaf_research_heavy_run:
+# NCAAF-V55-MANUAL-HEAVY-SEVEN-INPUT-EARLY-GATE-20261103
+            # This preflight is strictly inside the MANUAL NCAAF Heavy Research
+            # branch, before historic fit / CORE / Miner.  Failure aborts within
+            # the bridge check instead of after a long research execution.
+            from ncaaf_v55_bridge_startup_gate import check_manual_heavy_bridge
+            _bridge_audit = check_manual_heavy_bridge(
+                storage_client=gcs, bucket_name=bucket, log_func=log_func,
+                env=os.environ,
+            )
+            if (_bridge_audit.get("research_execution_status") != "PASS_RESEARCH_ONLY"
+                    or _bridge_audit.get("historical_certification_status") != "HOLD_UNCERTIFIED"):
+                raise RuntimeError("[NCAAF-V55-EARLY-GATE] BLOCKED_INVALID_RESEARCH_STATUS")
             # One protected research workflow, analogous to NFL Heavy Research.
             # Build the leakage-safe historical cache once, then run both the
             # current STAT/System Miner research and the compact CORE challenger.
