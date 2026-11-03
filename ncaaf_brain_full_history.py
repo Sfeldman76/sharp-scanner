@@ -501,10 +501,21 @@ def per_system_reports(signals: pd.DataFrame, cfg: RunConfig) -> tuple[pd.DataFr
     # No authority auto-granted. Eligibility is descriptive even if qualified.
     confirm=reports.loc[reports.phase.eq("confirmation")].copy()
     if not confirm.empty:
-        complete_years=(signals.loc[signals.season.isin(CONFIRM_YEARS)]
-                        .groupby(["brain", "system_id", "evidence_family"])
-                        .apply(lambda d: int(d.loc[d.ats_qualifies,"season"].nunique()),include_groups=False)
-                        .rename("qualified_seasons").reset_index())
+        # Use a vectorized distinct-year count, compatible with pandas < 2.2.
+        # Preserve systems with zero qualifying years (count=0, not missing),
+        # and do not change the sealed confirmation-year evidence floor.
+        _confirm_events = signals.loc[signals.season.isin(CONFIRM_YEARS)]
+        complete_years = (
+            _confirm_events.assign(
+                _qualified_season=_confirm_events["season"].where(
+                    _confirm_events["ats_qualifies"].fillna(False)
+                )
+            )
+            .groupby(["brain", "system_id", "evidence_family"])["_qualified_season"]
+            .nunique()
+            .rename("qualified_seasons")
+            .reset_index()
+        )
         confirm=confirm.merge(complete_years,on=["brain","system_id","evidence_family"],how="left")
         confirm["meets_evidence_floor"] = (confirm.graded.ge(cfg.min_system_confirmation_bets)
                                             & confirm.qualified_seasons.ge(cfg.min_confirmation_seasons))
