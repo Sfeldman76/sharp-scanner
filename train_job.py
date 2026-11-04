@@ -1085,6 +1085,25 @@ def main():
             )
             if not isinstance(_research,dict) or _research.get("status")!="NCAAF_RESEARCH_V2_COMPLETE":
                 raise RuntimeError(f"[NCAAF-HEAVY-RUN] research report failed status={getattr(_research,'get',lambda *_:None)('status')}")
+            # NCAAF_V55_EXPERT_CACHE_SNAPSHOT_AFTER_RECONCILIATION_V1
+            # The full-history dashboard cache has ALREADY been built and
+            # independently reconciled by run_ncaaf_research_v2 above.
+            # Do not add independent training or dashboard imports here.
+            try:
+                from ncaaf_v55_publish_existing_expert_cache import publish_existing_expert_cache
+                publish_existing_expert_cache(
+                    dashboard_module=_sld,
+                    storage_client=gcs,
+                    bucket_name=bucket,
+                    log_func=log_func,
+                )
+            except Exception as _expert_cache_exc:
+                log_func(
+                    "[NCAAF-V55-EXPERT-CACHE-SNAPSHOT] "
+                    "status=HOLD_SNAPSHOT_NOT_PUBLISHED "
+                    f"reason={type(_expert_cache_exc).__name__}:{_expert_cache_exc} "
+                    "bet_authority=0 production_mutation=FALSE"
+                )
             _miners=_research.get("system_miner_v3") or {}
             _confirmed=sum(int((v or {}).get("confirmed_mechanism_count",0) or 0) for v in _miners.values())
             _best=_core.get("best_challenger") or {}
