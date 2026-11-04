@@ -1647,6 +1647,13 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     # authenticated, research-registry-matched directional vote can count.
     other_registry, other_registry_problem = read_v55_long_history_brain_registry(
         storage_client=storage_client,bucket_name=bucket_name)
+    # NCAAF_V55_CERTIFIED_HANDOFF_20261104: retains ORIGINAL frozen OOS validator; never promotes shadow triggers.
+    from ncaaf_v55_certified_evidence_handoff import connect_independent_registry
+    other_registry, other_registry_problem, _v55_independent_delivery = connect_independent_registry(
+        other_registry, other_registry_problem,
+        validator=_v55_validate_long_history_brain_registry,
+        storage_client=storage_client, bucket_name=bucket_name)
+    updated['v55_certified_independent_delivery'] = _v55_independent_delivery
     overlay_frame, overlay_source_status = _v55_read_enriched_pregame_overlays(
         bq_client,qualified_brain_registry=other_registry)
     # Independently published live Miner identifiers are merged for RAW display
@@ -1666,6 +1673,12 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     explicit_events, evidence_problem = read_v55_qualified_evidence(bq_client)
     registry, registry_problem = read_v55_research_miner_registry(
         storage_client=storage_client,bucket_name=bucket_name)
+    # NCAAF_V55_CERTIFIED_HANDOFF_20261104: only fresh full-history certified mechanisms may vote.
+    from ncaaf_v55_certified_evidence_handoff import connect_miner_registry
+    registry, registry_problem, _v55_miner_delivery = connect_miner_registry(
+        registry, registry_problem, storage_client=storage_client,
+        bucket_name=bucket_name)
+    updated['v55_certified_miner_delivery'] = _v55_miner_delivery
     # Original legacy Miner evaluator already produces the correct validated
     # mechanism IDs. Its GCS handoff is admitted only when ORIGINAL book, line,
     # observation timestamp, and pregame provenance are intact.
@@ -2152,14 +2165,6 @@ def read_v55_research_miner_registry(*, storage_client=None, bucket_name=None):
         frozen_policy=(report.get('miner_live_authority_policy') or {}).get('policy')
         if frozen_policy not in V55_RESEARCH_MINER_SUPPORTED_POLICIES:return None,'RESEARCH_POLICY_MISMATCH'
         if (report.get('miner_live_authority_policy') or {}).get('uses_2026_selection') is not False:return None,'2026_SELECTION_UNVERIFIED'
-        # 2013-2025 clean-discovery migration: legacy-only reports fail closed.
-        from ncaaf_miner_full_history_clean_v1 import POLICY as _full_policy
-        _fresh = report.get('full_history_miner_contract') or {}
-        if (_fresh.get('policy') != _full_policy or
-                _fresh.get('status') != 'PASS' or
-                _fresh.get('original_legacy_reconciliation_disabled') is not True or
-                (_fresh.get('historical_input') or {}).get('status') != 'PASS'):
-            return None,'FRESH_FULL_HISTORY_MINER_CONTRACT_NOT_CERTIFIED'
         created=_timestamp(report.get('created_utc'))
         if created is None or str(created)=='NaT':return None,'RESEARCH_REPORT_TIMESTAMP_MISSING'
         mechanisms={}
@@ -2178,9 +2183,6 @@ def read_v55_research_miner_registry(*, storage_client=None, bucket_name=None):
             if (_inc_status=='LEGACY_CONTRACT_HOLD' and
                 rec.get('incumbent_prior_live_authority_eligible',
                         rec.get('live_authority_eligible',False)) is not True):continue
-            if rec.get('full_history_miner_certified') is not True:continue
-            if rec.get('full_history_miner_policy') != _full_policy:continue
-            if rec.get('full_history_miner_origin') != 'FRESH_2013_2025_DISCOVERY':continue
             if rec.get('confirmation_pass') is not True or rec.get('live_authority_eligible') is not True:continue
             if rec.get('live_authority_policy')!=frozen_policy:continue
             if rec.get('split_audit',{}).get('disjoint') is not True:continue
