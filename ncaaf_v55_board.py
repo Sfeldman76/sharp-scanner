@@ -1647,13 +1647,6 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     # authenticated, research-registry-matched directional vote can count.
     other_registry, other_registry_problem = read_v55_long_history_brain_registry(
         storage_client=storage_client,bucket_name=bucket_name)
-    # NCAAF_V55_CERTIFIED_HANDOFF_20261104: retains ORIGINAL frozen OOS validator; never promotes shadow triggers.
-    from ncaaf_v55_certified_evidence_handoff import connect_independent_registry
-    other_registry, other_registry_problem, _v55_independent_delivery = connect_independent_registry(
-        other_registry, other_registry_problem,
-        validator=_v55_validate_long_history_brain_registry,
-        storage_client=storage_client, bucket_name=bucket_name)
-    updated['v55_certified_independent_delivery'] = _v55_independent_delivery
     overlay_frame, overlay_source_status = _v55_read_enriched_pregame_overlays(
         bq_client,qualified_brain_registry=other_registry)
     # Independently published live Miner identifiers are merged for RAW display
@@ -1673,12 +1666,6 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     explicit_events, evidence_problem = read_v55_qualified_evidence(bq_client)
     registry, registry_problem = read_v55_research_miner_registry(
         storage_client=storage_client,bucket_name=bucket_name)
-    # NCAAF_V55_CERTIFIED_HANDOFF_20261104: only fresh full-history certified mechanisms may vote.
-    from ncaaf_v55_certified_evidence_handoff import connect_miner_registry
-    registry, registry_problem, _v55_miner_delivery = connect_miner_registry(
-        registry, registry_problem, storage_client=storage_client,
-        bucket_name=bucket_name)
-    updated['v55_certified_miner_delivery'] = _v55_miner_delivery
     # Original legacy Miner evaluator already produces the correct validated
     # mechanism IDs. Its GCS handoff is admitted only when ORIGINAL book, line,
     # observation timestamp, and pregame provenance are intact.
@@ -2186,7 +2173,7 @@ def read_v55_research_miner_registry(*, storage_client=None, bucket_name=None):
             if rec.get('confirmation_pass') is not True or rec.get('live_authority_eligible') is not True:continue
             if rec.get('live_authority_policy')!=frozen_policy:continue
             if rec.get('split_audit',{}).get('disjoint') is not True:continue
-            if int(rec.get('confirmation_n') or 0)<60 or float(rec.get('confirmation_rate') or 0)<0.53:continue
+            if int(rec.get('confirmation_n') or 0)<60 or float(rec.get('confirmation_rate') or 0)<0.56:continue
             if rec.get('meta_constituent_overlap_guard','PASS')!='PASS':continue
             if rec.get('market')!='spreads':continue
             mechanisms[mid]={
@@ -2419,7 +2406,7 @@ def _v55_validate_long_history_brain_registry(doc, *, raw_sha='', now=None):
                 and entry.get('uses_2026_outcomes') is False
                 and entry.get('overlap_audit')=='PASS'
                 and entry.get('multiple_testing_audit')=='PASS'
-                and n==y1+y2 and n>=60 and rate>=0.53
+                and n==y1+y2 and n>=60 and rate>=0.56
                 and y1>=15 and y2>=15
                 and 0<=rate1<=1 and 0<=rate2<=1
                 and abs((rate1*y1+rate2*y2)/n-rate)<0.001):

@@ -7525,6 +7525,21 @@ def attach_live_miner_votes(rows: pd.DataFrame, report: dict[str,Any], dashboard
     except Exception:
         # Live-system publication must not cancel the original scoring job.
         _live_logging.exception("[NCAAF-V55-LIVE-MINER-SNAPSHOT] status=PUBLISH_FAILED")
+    # V55_UNIFIED_EXECUTABLE_MINER_LIBRARY_20261104: research-only live evaluation
+    # Certified Miner events and all betting authority fields are unchanged.
+    try:
+        from ncaaf_v55_miner_live_hook import attach_shadow_live_library as _v55_attach_unified
+        out, _v55_unified_live_report = _v55_attach_unified(
+            out, cdf, keycol, dashboard_module=dashboard_module,
+            storage_client=getattr(dashboard_module, 'gcs_client', None),
+            bucket_name=getattr(dashboard_module, 'GCS_BUCKET', None))
+    except Exception as _v55_unified_exc:
+        import logging as _v55_unified_logging
+        _v55_unified_logging.warning('[NCAAF-V55-UNIFIED-MINER-LIVE] HOLD_ERROR:%s',
+                                     type(_v55_unified_exc).__name__)
+        out['NCAAF_V55_Unified_Miner_Live_Status']='HOLD_ERROR:'+type(_v55_unified_exc).__name__
+        out['NCAAF_V55_Unified_Miner_Signals_JSON']='[]'
+        out['NCAAF_V55_Unified_Miner_Executable_Rules']=0
     return out
 
 
@@ -8257,6 +8272,26 @@ def run_ncaaf_research_v2(*, dashboard_module, utils_module=None, production_mod
                         +json.dumps(_step,default=str,sort_keys=True)),
                 )
                 _miner_exact_shadow.update(_unified_results)
+                # Independent research-only repaired chronological history lane.
+                # Never changes original pregame evidence or live betting authority.
+                try:
+                    from ncaaf_v55_walkforward_hook import materialize_walkforward_research as _v55_walkforward_repair
+                    _v55_recovered=_v55_walkforward_repair(_unified_results,storage_client,bucket_name)
+                    _miner_exact_shadow.update(_v55_recovered)
+                    log_func('[NCAAF-V55-RECONSTRUCTED-WALKFORWARD] status='+
+                             str(_v55_recovered['reconstructed_walkforward_audit_v1']['status'])+
+                             ' unique_market_games='+
+                             str(_v55_recovered['reconstructed_walkforward_audit_v1']['unique_market_game_rows'])+
+                             ' bet_authority=0')
+                except Exception as _v55_recovery_error:
+                    _miner_exact_shadow['reconstructed_walkforward_audit_v1']={
+                        'status':'HOLD_RECONSTRUCTION',
+                        'error_type':type(_v55_recovery_error).__name__,
+                        'error':str(_v55_recovery_error)[:1000],
+                        'bet_authority':0,'production_mutation':False}
+                    log_func('[NCAAF-V55-RECONSTRUCTED-WALKFORWARD] HOLD_RECONSTRUCTION '+
+                             type(_v55_recovery_error).__name__+':'+str(_v55_recovery_error))
+
                 _miner_exact_shadow['audit']['unified_full_history_miner_v5']={
                     **_unified_results['audit_v5'],'v55_core_source':_v55_core_source}
                 # V6 validates each historical market/game once, audits incompatible
