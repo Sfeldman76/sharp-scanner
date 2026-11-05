@@ -276,6 +276,10 @@ def combine(events,lookup,byside,pergame):
         grouped_events[group].append(e)
     candidates=[]; summaries=Counter()
     for (y,gid,market),bybrain in sorted(games.items()):
+        # Cohort is a property of the game, NOT of an individual candidate.
+        # A game with only intra-family contradictions has no stable target,
+        # so the candidate loop below may run zero times.
+        cohort=lookup[(y,gid)]['split']
         stable={b:next(iter(ts)) for b,ts in bybrain.items() if len(ts)==1}
         conflicting_within={b for b,ts in bybrain.items() if len(ts)>1}
         targets=set(stable.values())
@@ -285,7 +289,7 @@ def combine(events,lookup,byside,pergame):
             signals=[e for e in grouped_events[(y,gid,market)] if e['target']==target and e['brain'] in supporters]
             # A brain can fire multiple systems in one family, but counts once.
             grade=retrospective_grade({'season':y,'cfbd_game_id':gid,'market':market,'target':target},byside)
-            cohort=lookup[(y,gid)]['split'];price_count=pergame[(y,gid)]
+            price_count=pergame[(y,gid)]
             candidates.append({'season':y,'cfbd_game_id':gid,'market':market,'candidate_target':target,
                 'split':cohort,'site_status':lookup[(y,gid)]['role_verification_status'],
                 'supporting_brains':';'.join(supporters),'supporting_family_count':len(supporters),
@@ -298,7 +302,9 @@ def combine(events,lookup,byside,pergame):
                 'original_signal_capture_certified':'false','original_price_capture_certified':'false',
                 'certified_ev':'','authorized_bet':'false','bet_authority':0})
             summaries[(cohort,market,'candidates')]+=1
-        if conflicting_within:summaries[(cohort,market,'games_intrafamily_conflicted')]+=1
+        if conflicting_within:
+            summaries[(cohort,market,'games_intrafamily_conflicted')]+=1
+            if not targets:summaries[(cohort,market,'games_intrafamily_conflicted_no_stable_side')]+=1
     return clean,candidates,summaries,suppressed
 
 
@@ -383,6 +389,7 @@ def run(ledger_dir,v6_dir,source_dir,out_dir,extra_sources=()):
         'market_quote_counts':dict(quote_counts),'market_rows_attached_to_games':len(prices),
         'candidate_count_by_family_count':{str(k):v for k,v in groups.items()},
         'candidate_rows':len(candidates),'descriptive_coalition_rows':len(coals),
+        'game_market_diagnostics':{'|'.join(map(str,k)):v for k,v in sorted(group_count.items())},
         'brain_season_coverage_rows':len(coverage),
         'conflict_veto_candidate_rows':sum(yn(r['conflict_veto_research']) for r in candidates),
         'all_brains_frozen_unchanged':True,'miner_345_rules_rebuilt':False,
