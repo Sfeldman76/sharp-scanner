@@ -49341,6 +49341,15 @@ def _render_ncaaf_fast_prediction_ui(df_moves_raw, label, *, selected_picks=None
 
     print(f"[NCAAF-PROD-V2-FAST-UI] games={len(view)} spread_predictions={int(view['Spr Prob'].notna().sum())} h2h_predictions={int(view['H2H Prob'].notna().sum())} total_predictions={int(view['Tot Prob'].notna().sum())} candidates={candidate_n} bets={bet_n} strong_bets={strong_n} h2h_model_only={h2h_n} production_games={prod_n} miner_qualified={_miner_qualified} miner_evaluable={_miner_evaluable} miner_triggers={_miner_triggers} production_contract={live_info.get('production_contract','MISSING')} policy=NCAAF_PRODUCTION_BETTING_V2_1_STRONG_VALIDATED_MINER_ONLY generic_autofs=RETIRED multi_head_runtime=RETIRED rich_market_render=FALSE probability_blend=NONE spread_model=FROZEN_SEPARATE h2h_model=FROZEN_SEPARATE totals_model=FROZEN_SEPARATE")
 
+
+# V55_BACKEND_AT_ACTUAL_NCAAF_ENTRY_V3 — UI only; backend authority unchanged.
+_ncaaf_legacy_fast_render_before_v55_v3 = _render_ncaaf_fast_prediction_ui
+def _render_ncaaf_fast_prediction_ui(*_v55_args, **_v55_kwargs):
+    """Actual existing NCAAF route now reads the verified V5.5 publication."""
+    from ncaaf_v55_dashboard_route_v3 import render_published_v55_board
+    return render_published_v55_board(st)
+# END V55_BACKEND_AT_ACTUAL_NCAAF_ENTRY_V3
+
 def render_scanner_tab(label, sport_key, container, force_reload=False):
 
     if st.session_state.get("pause_refresh_user", False) or st.session_state.get("pause_refresh_lock", False):
