@@ -16,7 +16,7 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 
-VERSION = 'NCAAF_DECISION_VALIDATION_V6_4_20261026'
+VERSION = 'NCAAF_DECISION_VALIDATION_V6_5_20261026'
 REQUIRED = ('market','test_season','source_identity','source_game_id','rule_id',
             'frozen_rule_rank','rule_decision_side','rule_sources',
             'retrospective_rule_result','core_side','core_historical_result',
@@ -553,7 +553,7 @@ def _pair_forward_one_opportunity(specific, folds):
         'decisions':int(representative.decision_state.eq('EXPLORATORY_PRIOR_SCREEN_PAIR').sum())}
 
 
-def build_situational_edge_research(d, games):
+def build_situational_edge_research(d, games, recipes=None):
     """Identify stable conditions and combinations, with CORE only as base.
 
     This is a diagnostic *selection* engine; no probability adjustments or
@@ -720,7 +720,8 @@ def build_situational_edge_research(d, games):
     # the original executable price, grade and signal vintages are validated.
     pair_core_events, pair_core_comparison, pair_core_policy, pair_core_audit = (
         _exact_pair_core_milestone(specific, specific_folds, core_pool))
-    audit={'version':'NCAAF_EXISTING_V6_SITUATIONAL_EDGE_V6_4_20261026',
+    v65=_v65_outputs(slim,recipes,rule_summary,rule_folds,specific,specific_scores,specific_folds,core_pool,games)
+    audit={'version':'NCAAF_EXISTING_V6_SITUATIONAL_EDGE_V6_5_20261026',
            'one_bad_season_is_automatic_disqualification':False,
            'prior_only_robust_season_variance_ranking':True,
            'specific_pair_preseason_qualified_one_recent_down_year':int((specific_folds.prior_only_stability_screen.fillna(False) & specific_folds.prior_evidence_regime.eq('ONE_RECENT_DOWN_YEAR_NOT_A_VETO')).sum()) if not specific_folds.empty else 0,
@@ -745,7 +746,7 @@ def build_situational_edge_research(d, games):
            'independent_vintage_or_holdout_certified':False,
            'historical_core_quote_grade_discrepancies_excluded':True,
            'production_mutation':False,'bet_authority':0}
-    return {'situational_edge_rules_v6':rule_summary,
+    return {**v65,'situational_edge_rules_v6':rule_summary,
             'situational_edge_rollforward_v6':rule_folds,
             'situational_combo_rules_v6':combo_score,
             'situational_combo_rollforward_v6':combo_folds,
@@ -761,6 +762,473 @@ def build_situational_edge_research(d, games):
             'situational_core_conditionals_v6':conditional,
             'situational_core_candidate_ledger_v6':candidate,
             'situational_edge_audit_v6':audit}
+
+
+# V6.5: comprehensive conditional-edge research on EXISTING, immutable V5.2
+# history. Outputs are descriptions of RETROSPECTIVE cohorts. There is no live
+# model adjustment, bet/strong-bet authority, or verified executable-price ROI.
+def _v65_market_line_regime(market, price):
+    """Absolute opening-line magnitude only: no inferred favorite or movement."""
+    if not np.isfinite(price):
+        return 'PRICE_MISSING'
+    p=abs(float(price))
+    if market=='spreads':
+        return 'SPREAD_ABS_0_TO_3' if p<=3 else ('SPREAD_ABS_3_TO_7' if p<=7 else
+            'SPREAD_ABS_7_TO_14' if p<=14 else 'SPREAD_ABS_OVER_14')
+    if market=='totals':
+        return 'TOTAL_UNDER_45' if p<45 else ('TOTAL_45_TO_UNDER_55' if p<55 else
+            'TOTAL_55_TO_UNDER_60' if p<60 else 'TOTAL_60_PLUS')
+    return 'MONEYLINE_PRICE_NOT_VERIFIED'
+
+
+def _v65_brain_rescue(qualified_firings, slim, specific, games):
+    """Study prior-qualified brains when CORE is weak or missing, not just CORE bets.
+
+    A CORE edge below two points is a *low-edge/no-bet* cohort, not proof
+    that its predicted side is wrong. A signal that opposes CORE is not
+    automatically a profitable fade. The recorded quote vintages, feature
+    vintages, and original prices are still unverified, so none of these
+    reports can grant betting authority or state executable ROI.
+    """
+    key=['market','test_season','source_identity']
+    eventcols=key+['condition_class','condition_id','signal_side','result',
+         'prior_robust_support_score','prior_wins','prior_losses','core_state',
+         'research_role','core_side','core_result_unverified',
+         'core_edge_points_unverified','same_game_grade_compatible',
+         'review_status','bet_authority']
+    summcols=['market','condition_class','condition_id','test_season',
+         'core_state','research_role','graded_games','wins','losses','pushes',
+         'descriptive_winrate','core_grade_compatible_games','bet_authority']
+    gamecols=key+['core_state','research_role','signal_side','result',
+         'condition_class','condition_id','eligible_conditions_on_game',
+         'opposing_qualified_signals','same_game_grade_compatible',
+         'shadow_state','bet_authority']
+    if qualified_firings.empty:
+        return (pd.DataFrame(columns=eventcols),pd.DataFrame(columns=summcols),
+                pd.DataFrame(columns=gamecols),{'qualified_brain_firings':0,
+                'weak_core_brain_games':0,'no_core_brain_games':0,
+                'research_only':True,'bet_authority':0})
+    s1=slim[key+['rule_id','rule_decision_side']].rename(columns={
+         'rule_id':'condition_id','rule_decision_side':'signal_side'}).copy()
+    s1['condition_class']='SINGLE_OR_EXISTING_RULE'
+    s2=specific[key+['rule_pair','side']].rename(columns={
+         'rule_pair':'condition_id','side':'signal_side'}).copy()
+    s2['condition_class']='EXACT_CROSS_SOURCE_PAIR'
+    sides=pd.concat([s1,s2],ignore_index=True).drop_duplicates(
+        key+['condition_class','condition_id'])
+    if sides.duplicated(key+['condition_class','condition_id']).any():
+        raise ValueError('V65_DUPLICATED_BRAIN_SIDE')
+    selected=qualified_firings.merge(sides,on=key+['condition_class','condition_id'],
+        how='inner',validate='one_to_one')
+    metadata=games[key+['core_side','core_result_unverified',
+        'core_edge_points_unverified','rule_internal_grade_consistent',
+        'price_consistent_within_ledger','market_quote_asof_verified',
+        'point_in_time_features_verified']].copy()
+    selected=selected.drop(columns=[c for c in metadata.columns if c not in key and c in selected.columns])
+    selected=selected.merge(metadata,on=key,how='left',validate='many_to_one')
+    edge=pd.to_numeric(selected.core_edge_points_unverified,errors='coerce')
+    core_present=(selected.market.eq('spreads')&
+        selected.core_side.isin(('HOME','AWAY'))&
+        selected.core_result_unverified.isin(('WIN','LOSS','PUSH'))&
+        edge.ge(0)&edge.notna())
+    selected['core_state']=np.select(
+        [core_present&edge.lt(2),core_present&edge.ge(2)],
+        ['CORE_LOW_EDGE_BELOW_2','CORE_EDGE_2_PLUS'],default='CORE_NOT_GRADED')
+    selected['research_role']=np.select([
+        core_present&selected.signal_side.eq(selected.core_side),
+        core_present&selected.signal_side.ne(selected.core_side)],
+        ['AGREES_WITH_CORE','OPPOSES_CORE'],default='STANDALONE_NO_GRADED_CORE')
+    # If two historical grades use different quotes, opposing CORE does not
+    # identify a same-price advantage. Mark the disagreement, do not erase it.
+    expected=np.where(selected.research_role.eq('AGREES_WITH_CORE'),
+        selected.core_result_unverified.map(RESULTS),
+        -selected.core_result_unverified.map(RESULTS))
+    compatible=selected.result.map(RESULTS).eq(expected)
+    # For no-CORE markets/games a same-game comparison does not exist.
+    selected['same_game_grade_compatible']=np.where(core_present,compatible,np.nan)
+    clean=(selected.rule_internal_grade_consistent.fillna(False).astype(bool)&
+           selected.price_consistent_within_ledger.fillna(False).astype(bool))
+    selected['review_status']=np.select([
+        ~clean,
+        core_present&~compatible,
+        selected.market.eq('h2h'),
+        selected.market.eq('totals')],
+        ['HOLD_LEDGER_CONTRADICTION','HOLD_CORE_RULE_QUOTE_GRADE_BRIDGE',
+         'HOLD_H2H_MONEYLINE_PRICE','TOTALS_STANDALONE_PRICE_UNVERIFIED'],
+         default='SPREAD_SHADOW_ONLY_PRICE_UNVERIFIED')
+    selected['bet_authority']=0
+    # No statistical comparison includes invalid prices/settlements as an
+    # equivalent same-game outcome. Keep the rows visible for reconciliation.
+    grp=['market','condition_class','condition_id','test_season',
+         'core_state','research_role']
+    good=selected.loc[selected.review_status.isin((
+       'SPREAD_SHADOW_ONLY_PRICE_UNVERIFIED',
+       'TOTALS_STANDALONE_PRICE_UNVERIFIED',
+       'HOLD_H2H_MONEYLINE_PRICE'))].copy()
+    if good.empty:
+        summary=pd.DataFrame(columns=summcols)
+    else:
+        good['nwin']=good.result.eq('WIN').astype(int)
+        good['nloss']=good.result.eq('LOSS').astype(int)
+        good['npush']=good.result.eq('PUSH').astype(int)
+        summary=good.groupby(grp,as_index=False).agg(
+             wins=('nwin','sum'),losses=('nloss','sum'),pushes=('npush','sum'),
+             core_grade_compatible_games=('same_game_grade_compatible','sum'))
+        summary['graded_games']=summary.wins+summary.losses
+        summary['descriptive_winrate']=summary.wins.div(summary.graded_games).where(
+            summary.graded_games.gt(0))
+        summary['bet_authority']=0
+    # One game = at most one shadow opportunity. Opposite-side qualified
+    # brains => PASS, not a retrospectively selected winning side.
+    selected=selected.sort_values(key+['prior_robust_support_score','condition_class','condition_id'],
+         ascending=[True,True,True,False,True,True],kind='mergesort')
+    meta=selected.groupby(key,as_index=False).agg(
+        eligible_conditions_on_game=('condition_id','size'),
+        opposing_qualified_signals=('signal_side',lambda x:x.nunique()>1),
+        any_integrity_hold=('review_status',lambda x:bool(x.str.startswith('HOLD_LEDGER').any() or
+              x.str.startswith('HOLD_CORE_RULE').any())))
+    one=selected.drop_duplicates(key).merge(meta,on=key,validate='one_to_one')
+    one['shadow_state']=np.select([
+        one.opposing_qualified_signals,one.any_integrity_hold,
+        one.market.eq('h2h'),one.core_state.eq('CORE_LOW_EDGE_BELOW_2'),
+        one.core_state.eq('CORE_NOT_GRADED')],
+        ['PASS_OPPOSING_QUALIFIED_BRAINS','HOLD_LEDGER_OR_QUOTE_GRADE_BRIDGE',
+         'HOLD_MONEYLINE_PRICE','RESEARCH_LOW_CORE_EDGE_RESCUE',
+         'RESEARCH_STANDALONE_NO_CORE'],
+         default='RESEARCH_WITH_CORE')
+    one['bet_authority']=0
+    audit={'qualified_brain_firings':int(len(selected)),
+        'weak_core_brain_games':int(one.core_state.eq('CORE_LOW_EDGE_BELOW_2').sum()),
+        'no_core_brain_games':int(one.core_state.eq('CORE_NOT_GRADED').sum()),
+        'distinct_brain_games':int(len(one)),
+        'opposite_direction_conflicts':int(one.opposing_qualified_signals.sum()),
+        'held_grade_or_integrity_games':int(one.any_integrity_hold.sum()),
+        'one_game_one_opportunity':True,
+        'no_core_is_not_model_failure':True,
+        'weak_core_is_edge_below_2_not_negative_accuracy':True,
+        'historical_execution_prices_certified':False,
+        'research_only':True,'bet_authority':0}
+    return selected,summary,one,audit
+
+
+def _v65_outputs(slim, recipes, rule_scores, rule_folds,
+                 specific, pair_scores, pair_folds, core_pool, games):
+    """Research leaderboard, transparent regimes and CORE-selected versus unselected.
+
+    Selection on TEST year is strictly based on earlier evaluated season folds;
+    price data remains uncertified and is never treated as executable -110 ROI.
+    All full-history leaderboard rates are descriptive, not a trained decision policy.
+    """
+    key=['market','test_season','source_identity']
+    # Full universe: zero-qualification systems are retained, never quietly hidden.
+    rs=rule_scores.copy().rename(columns={'rule_id':'condition_id'})
+    ps=pair_scores.copy().rename(columns={'rule_pair':'condition_id'})
+    rs['condition_class']='SINGLE_OR_EXISTING_RULE'
+    ps['condition_class']='EXACT_CROSS_SOURCE_PAIR'
+    if 'rule_sources' not in ps.columns:
+        ps['rule_sources']=ps.get('category_a',pd.Series(index=ps.index,dtype='object')).fillna('')+'|'+ps.get('category_b',pd.Series(index=ps.index,dtype='object')).fillna('')
+    universe=pd.concat([rs,ps],ignore_index=True,sort=False)
+    if universe.empty:
+        universe=pd.DataFrame(columns=['market','condition_id','condition_class','graded_games','bet_authority'])
+    # Human-readable frozen atoms from the research export, never reconstructed
+    # from a retrospective outcome. The same rule may appear in multiple folds.
+    info=pd.DataFrame(columns=['market','rule_id','atoms','definition_variants'])
+    if recipes is not None and {'market','rule_id','condition_atoms'}.issubset(recipes):
+        rec=recipes[['market','rule_id','condition_atoms']].copy().dropna(subset=['rule_id'])
+        rec['condition_atoms']=rec.condition_atoms.fillna('').astype(str)
+        info=(rec.groupby(['market','rule_id'],as_index=False)
+             .agg(atoms=('condition_atoms','first'),definition_variants=('condition_atoms','nunique')))
+    if not info.empty:
+        a=info.rename(columns={'rule_id':'condition_id','atoms':'atoms_a'})
+        universe=universe.merge(a,on=['market','condition_id'],how='left',validate='many_to_one')
+        label_a=info.rename(columns={'rule_id':'rule_id_a','atoms':'pair_component_a',
+                                     'definition_variants':'pair_definition_variants_a'})
+        label_b=info.rename(columns={'rule_id':'rule_id_b','atoms':'pair_component_b',
+                                     'definition_variants':'pair_definition_variants_b'})
+        universe=universe.merge(label_a,on=['market','rule_id_a'],how='left',validate='many_to_one')
+        universe=universe.merge(label_b,on=['market','rule_id_b'],how='left',validate='many_to_one')
+    else:
+        universe['atoms_a']='';universe['pair_component_a']='';universe['pair_component_b']=''
+    universe['readable_condition']=np.where(universe.condition_class.eq('EXACT_CROSS_SOURCE_PAIR'),
+           universe.pair_component_a.fillna('')+' AND '+universe.pair_component_b.fillna(''),
+           universe.atoms_a.fillna(''))
+    universe['readable_condition']=universe.readable_condition.replace('', 'DEFINITION_NOT_AVAILABLE')
+    rf=rule_folds.copy().rename(columns={'rule_id':'condition_id'})
+    pf=pair_folds.copy().rename(columns={'rule_pair':'condition_id'})
+    rf['condition_class']='SINGLE_OR_EXISTING_RULE';pf['condition_class']='EXACT_CROSS_SOURCE_PAIR'
+    folds=pd.concat([rf,pf],ignore_index=True,sort=False)
+    if not folds.empty:
+        qualified=folds.loc[folds.prior_only_stability_screen.fillna(False)].copy()
+        qualified['qualified_grade_count']=qualified.test_wins+qualified.test_losses
+        q=qualified.groupby(['market','condition_class','condition_id'],as_index=False).agg(
+            forward_qualified_seasons=('test_season','nunique'),
+            forward_qualified_wins=('test_wins','sum'),
+            forward_qualified_losses=('test_losses','sum'),
+            forward_qualified_pushes=('test_pushes','sum'),
+            first_qualified_season=('test_season','min'),
+            latest_qualified_season=('test_season','max'))
+        latest=(folds.sort_values('test_season').drop_duplicates(
+                ['market','condition_class','condition_id'],keep='last')
+                [['market','condition_class','condition_id','test_season',
+                  'prior_robust_support_score','prior_wins','prior_losses',
+                  'prior_evidence_regime','prior_leave_one_season_out_min_excess',
+                  'prior_only_stability_screen']].rename(columns={
+                  'test_season':'latest_evaluation_season',
+                  'prior_robust_support_score':'latest_preseason_robust_score',
+                  'prior_wins':'latest_preseason_wins',
+                  'prior_losses':'latest_preseason_losses',
+                  'prior_evidence_regime':'latest_preseason_resilience',
+                  'prior_only_stability_screen':'qualified_entering_latest_season'}))
+        universe=universe.merge(q,on=['market','condition_class','condition_id'],how='left',validate='one_to_one')
+        universe=universe.merge(latest,on=['market','condition_class','condition_id'],how='left',validate='one_to_one')
+    else:
+        qualified=pd.DataFrame(columns=folds.columns)
+    for c in ('forward_qualified_seasons','forward_qualified_wins','forward_qualified_losses','forward_qualified_pushes'):
+        if c not in universe:universe[c]=0
+        universe[c]=universe[c].fillna(0).astype(int)
+    universe['forward_qualified_rate']=universe.forward_qualified_wins.div(
+        universe.forward_qualified_wins+universe.forward_qualified_losses).where(
+        universe.forward_qualified_wins+universe.forward_qualified_losses>0)
+    universe['research_sort_score']=pd.to_numeric(universe.get('latest_preseason_robust_score',np.nan),errors='coerce')
+    universe['research_rank_is_not_2026_precommitted']=True
+    universe['source_independence_certified']=False
+    universe['historical_quotes_asof_certified']=False
+    universe['test_season_signal_vintage_certified']=False
+    universe['moneyline_ev_qualified']=False
+    universe['bet_authority']=0
+    universe=universe.sort_values(['market','forward_qualified_seasons','research_sort_score','graded_games','condition_id'],
+         ascending=[True,False,False,False,True],kind='mergesort').reset_index(drop=True)
+    universe['research_rank_within_market']=universe.groupby('market').cumcount().add(1)
+    # Market magnitude analysis. The archived line is not an independently
+    # attested game-time quote; only robust, literal magnitude bins are exposed.
+    lines=(games[key+['market_price_in_ledger_unverified','price_consistent_within_ledger']]
+       .rename(columns={'market_price_in_ledger_unverified':'historical_open_line_unverified'}))
+    lines['historical_open_line_unverified']=pd.to_numeric(lines.historical_open_line_unverified,errors='coerce')
+    lines['line_regime']= [_v65_market_line_regime(m,p) for m,p in zip(lines.market,lines.historical_open_line_unverified)]
+    # Game-level rule and pair evaluations; this is a *descriptive* regime slice.
+    one=slim[key+['rule_id','result']].rename(columns={'rule_id':'condition_id'}).copy()
+    one['condition_class']='SINGLE_OR_EXISTING_RULE'
+    two=specific[key+['rule_pair','result']].rename(columns={'rule_pair':'condition_id'}).copy()
+    two['condition_class']='EXACT_CROSS_SOURCE_PAIR'
+    fired=pd.concat([one,two],ignore_index=True)
+    fired=fired.drop_duplicates(key+['condition_class','condition_id'])
+    fired=fired.merge(lines,on=key,how='left',validate='many_to_one')
+    fired['n_w']=fired.result.eq('WIN').astype('int8')
+    fired['n_l']=fired.result.eq('LOSS').astype('int8')
+    fired['n_p']=fired.result.eq('PUSH').astype('int8')
+    rcols=['market','condition_class','condition_id','test_season','line_regime']
+    regimes=fired.groupby(rcols,as_index=False,sort=False).agg(
+        wins=('n_w','sum'),losses=('n_l','sum'),pushes=('n_p','sum'))
+    regimes['graded_games']=regimes.wins+regimes.losses
+    # Every game's absolute line belongs to one mutually exclusive bin.
+    # Show the OTHER fired games for this same condition/season as context;
+    # no post-hoc regime is retrospectively promoted to a frozen betting rule.
+    reg_totals=regimes.groupby(['market','condition_class','condition_id','test_season'],as_index=False).agg(
+        condition_season_wins=('wins','sum'),condition_season_losses=('losses','sum'))
+    regimes=regimes.merge(reg_totals,on=['market','condition_class','condition_id','test_season'],validate='many_to_one')
+    regimes['other_regimes_wins']=regimes.condition_season_wins-regimes.wins
+    regimes['other_regimes_losses']=regimes.condition_season_losses-regimes.losses
+    regimes['other_regimes_rate']=regimes.other_regimes_wins.div(regimes.other_regimes_wins+regimes.other_regimes_losses).where(
+        (regimes.other_regimes_wins+regimes.other_regimes_losses)>0)
+    regimes['observed_rate']=regimes.wins.div(regimes.graded_games).where(regimes.graded_games.gt(0))
+    regimes['regime_vs_other_firings_pp']=100*(regimes.observed_rate-regimes.other_regimes_rate)
+    regimes['inference_status']=np.where(regimes.graded_games.ge(25),
+           'DESCRIPTIVE_REGIME_NEEDS_CHRONOLOGICAL_CONFIRMATION','SMALL_REGIME_SAMPLE')
+    regimes['line_quote_timestamp_certified']=False;regimes['bet_authority']=0
+    regimes=regimes.merge(folds[['market','condition_class','condition_id','test_season',
+         'prior_only_stability_screen','prior_robust_support_score']],on=['market','condition_class','condition_id','test_season'],how='left',validate='many_to_one')
+    # No claim of margin-residual error is possible from win/loss-only CORE data.
+    # Measure *selection enrichment* against CORE candidates NOT selected by this
+    # exact condition, within same year/edge bucket/CORE side. Critically, the
+    # comparator EXCLUDES every game firing the tested condition.
+    eligible=folds.loc[folds.prior_only_stability_screen.fillna(False),
+        ['market','test_season','condition_class','condition_id',
+         'prior_wins','prior_losses','prior_robust_support_score','prior_evidence_regime']].copy() if not folds.empty else pd.DataFrame(columns=[
+         'market','test_season','condition_class','condition_id',
+         'prior_wins','prior_losses','prior_robust_support_score','prior_evidence_regime'])
+    ev=fired.merge(eligible,on=['market','test_season','condition_class','condition_id'],how='inner',validate='many_to_one')
+    all_qualified_firings=ev.copy()
+    ev=ev.loc[ev.market.eq('spreads')].copy()
+    pool=core_pool.loc[core_pool.market.eq('spreads')].copy()
+    pool=pool.merge(lines[key+['line_regime']],on=key,how='left',validate='one_to_one')
+    subset=ev.rename(columns={'result':'rule_result'}).merge(pool[key+[
+        'core_side','core_result_unverified','core_bucket','core_edge_points_unverified','line_regime']],
+        on=key,how='inner',validate='many_to_one',suffixes=('','_core'))
+    mismatches=0
+    if not subset.empty:
+        # A rule and CORE can settle differently if original lines differ;
+        # do not silently grade such observations as exact price-matched.
+        sides=slim[key+['rule_id','rule_decision_side']].rename(columns={'rule_id':'condition_id','rule_decision_side':'signal_side'})
+        sides['condition_class']='SINGLE_OR_EXISTING_RULE'
+        paired_sides=specific[key+['rule_pair','side']].rename(columns={'rule_pair':'condition_id','side':'signal_side'})
+        paired_sides['condition_class']='EXACT_CROSS_SOURCE_PAIR'
+        all_sides=pd.concat([sides,paired_sides],ignore_index=True).drop_duplicates(key+['condition_class','condition_id'])
+        subset=subset.merge(all_sides,on=key+['condition_class','condition_id'],validate='one_to_one')
+        subset['role']=np.where(subset.signal_side.eq(subset.core_side),'CONFIRM_CORE','OPPOSE_CORE')
+        expected=np.where(subset.role.eq('CONFIRM_CORE'),subset.core_result_unverified.map(RESULTS),-subset.core_result_unverified.map(RESULTS))
+        grade_ok=subset.rule_result.map(RESULTS).eq(expected)
+        mismatches=int((~grade_ok).sum())
+        subset=subset.loc[grade_ok].copy()
+    # Match also on archived absolute line magnitude. Using coarser cohorts
+    # would compare heavy-underdog conditions with unrelated favorite sizes.
+    if not subset.empty:
+        if not subset.line_regime.eq(subset.line_regime_core).all():
+            raise ValueError('V65_HISTORICAL_LINE_REGIME_CONTRADICTION')
+    cohort_cols=['market','test_season','core_bucket','core_side','line_regime']
+    group=['market','condition_class','condition_id','test_season','role','core_bucket','core_side','line_regime']
+    outcols=['market','condition_class','condition_id','test_season','role',
+        'core_bucket','core_side','line_regime','selected_games','selected_wins','selected_losses',
+        'comparator_games','comparator_wins','comparator_losses','selected_core_rate',
+        'comparator_core_rate','selection_lift_pp','comparison_status','bet_authority']
+    if subset.empty:
+        strata=pd.DataFrame(columns=outcols)
+    else:
+        subset['is_win']=subset.core_result_unverified.eq('WIN').astype('int8')
+        # full baseline is the identical CORE opportunity universe.
+        totals=pool.assign(is_win=pool.core_result_unverified.eq('WIN').astype('int8')).groupby(cohort_cols,as_index=False).agg(
+            cohort_total_games=('is_win','size'),cohort_total_wins=('is_win','sum'))
+        # Exclude ALL qualifying firings of this condition from its control set,
+        # regardless of whether they agree or oppose CORE on other games.
+        exclcols=['market','condition_class','condition_id','test_season','core_bucket','core_side','line_regime']
+        excluded=subset.groupby(exclcols,as_index=False).agg(
+            excluded_games=('is_win','size'),excluded_wins=('is_win','sum'))
+        strata=subset.groupby(group,as_index=False).agg(
+            selected_games=('is_win','size'),selected_wins=('is_win','sum'),
+            prior_strength=('prior_robust_support_score','first'),
+            prior_wins=('prior_wins','first'),prior_losses=('prior_losses','first'))
+        strata=strata.merge(excluded,on=exclcols,how='left',validate='many_to_one').merge(
+            totals,on=cohort_cols,how='left',validate='many_to_one')
+        strata['selected_losses']=strata.selected_games-strata.selected_wins
+        strata['comparator_games']=strata.cohort_total_games-strata.excluded_games
+        strata['comparator_wins']=strata.cohort_total_wins-strata.excluded_wins
+        strata['comparator_losses']=strata.comparator_games-strata.comparator_wins
+        if (strata[['comparator_games','comparator_wins','comparator_losses']]<0).any().any():
+            raise ValueError('V65_EXCLUDED_COMPARATOR_NEGATIVE')
+        strata['selected_core_rate']=strata.selected_wins.div(strata.selected_games)
+        strata['comparator_core_rate']=strata.comparator_wins.div(strata.comparator_games).where(strata.comparator_games>0)
+        strata['selection_lift_pp']=100*(strata.selected_core_rate-strata.comparator_core_rate)
+        strata['comparison_status']=np.where((strata.selected_games>=8)&(strata.comparator_games>=20),
+            'DESCRIPTIVE_MATCHED_STRATUM_NOT_CAUSAL','SMALL_OR_MISSING_COMPARATOR')
+        strata['certified_executable_price']=False
+        strata['independent_holdout']=False
+        strata['bet_authority']=0
+    # Aggregate only WITHIN one condition/year/role across disjoint strata. The
+    # same physical CORE game may appear under DIFFERENT conditions; never
+    # aggregate condition rows as though they were unique portfolio bets.
+    aggkeys=['market','condition_class','condition_id','test_season','role']
+    if strata.empty:
+        core_lift=pd.DataFrame(columns=aggkeys+['selected_games','comparator_games','selection_lift_pp','bet_authority'])
+    else:
+        core_lift=strata.groupby(aggkeys,as_index=False).agg(
+            selected_games=('selected_games','sum'),selected_wins=('selected_wins','sum'),
+            selected_losses=('selected_losses','sum'),comparator_games=('comparator_games','sum'),
+            comparator_wins=('comparator_wins','sum'),comparator_losses=('comparator_losses','sum'),
+            strata_included=('line_regime','size'),prior_strength=('prior_strength','first'),
+            prior_wins=('prior_wins','first'),prior_losses=('prior_losses','first'))
+        core_lift['selected_core_rate']=core_lift.selected_wins.div(core_lift.selected_games)
+        core_lift['comparator_core_rate']=core_lift.comparator_wins.div(core_lift.comparator_games).where(core_lift.comparator_games.gt(0))
+        core_lift['selection_lift_pp']=100*(core_lift.selected_core_rate-core_lift.comparator_core_rate)
+        p1=core_lift.selected_core_rate;p0=core_lift.comparator_core_rate
+        se=np.sqrt(p1*(1-p1)/core_lift.selected_games+p0*(1-p0)/core_lift.comparator_games.clip(lower=1))
+        core_lift['naive_diff_ci95_low_pp']=core_lift.selection_lift_pp-196*se
+        core_lift['naive_diff_ci95_high_pp']=core_lift.selection_lift_pp+196*se
+        core_lift['comparison_status']=np.where((core_lift.selected_games>=12)&(core_lift.comparator_games>=30),
+            'EXPLORATORY_MATCHED_COMPARISON_NOT_PROVEN','INSUFFICIENT_COMPARABLE_GAMES')
+        core_lift['same_game_core_vs_signal_lift_is_not_identifiable']=True
+        core_lift['bet_authority']=0
+    rescue_events,rescue_summary,rescue_games,rescue_audit=_v65_brain_rescue(
+        all_qualified_firings,slim,specific,games)
+    if not rescue_events.empty:
+        coverage=rescue_events.groupby(['market','condition_class','condition_id'],as_index=False).agg(
+             total_prior_qualified_firings=('source_identity','size'),
+             weak_core_firings=('core_state',lambda s:int(s.eq('CORE_LOW_EDGE_BELOW_2').sum())),
+             no_core_firings=('core_state',lambda s:int(s.eq('CORE_NOT_GRADED').sum())))
+        universe=universe.merge(coverage,on=['market','condition_class','condition_id'],
+             how='left',validate='one_to_one')
+    for col in ('total_prior_qualified_firings','weak_core_firings','no_core_firings'):
+        if col not in universe:universe[col]=0
+        universe[col]=universe[col].fillna(0).astype(int)
+    # Condition overlap: diagnose duplicate mechanisms instead of voting twice.
+    ovsrc=ev[key+['condition_class','condition_id']].drop_duplicates().copy()
+    if not ev.empty:
+        distinct_counts=(ev.groupby(['market','condition_class','condition_id'],as_index=False)
+                         .source_identity.size().rename(columns={'size':'firings'}))
+        # Prior evidence alone determines the representative candidate subset.
+        ov_top=(ev.groupby(['market','condition_class','condition_id'],as_index=False)
+                 .agg(best_prior=('prior_robust_support_score','max'),
+                      qualified_years=('test_season','nunique'))
+                 .merge(distinct_counts,on=['market','condition_class','condition_id'],validate='one_to_one')
+                 .sort_values(['market','qualified_years','best_prior','firings','condition_id'],ascending=[True,False,False,False,True]))
+        ov_top=ov_top.groupby('market').head(30)
+        ovsrc=ovsrc.merge(ov_top[['market','condition_class','condition_id']],on=['market','condition_class','condition_id'],how='inner')
+        o=[]
+        for market,grp in ovsrc.groupby('market'):
+            sets={cl+'::'+str(cid):set(zip(q.test_season,q.source_identity))
+                  for (cl,cid),q in grp.groupby(['condition_class','condition_id'])}
+            ids=sorted(sets)
+            for i,a in enumerate(ids):
+                for b in ids[i+1:]:
+                    shared=len(sets[a]&sets[b]);total=len(sets[a]|sets[b])
+                    if shared:
+                        o.append({'market':market,'condition_a':a,'condition_b':b,
+                           'cofired_physical_games':shared,'union_physical_games':total,
+                           'jaccard':shared/total,'not_independent_confirmation':True,'bet_authority':0})
+        overlap=pd.DataFrame(o,columns=['market','condition_a','condition_b','cofired_physical_games',
+                'union_physical_games','jaccard','not_independent_confirmation','bet_authority'])
+    else:
+        overlap=pd.DataFrame(columns=['market','condition_a','condition_b','cofired_physical_games','union_physical_games','jaccard','not_independent_confirmation','bet_authority'])
+    # One physical-game shadow evidence summary. No post hoc pick classification
+    # or inferred profit; disagreements are flagged for investigation.
+    if subset.empty:
+        decisions=pd.DataFrame(columns=key+['signal_count','research_evidence_state','bet_authority'])
+    else:
+        grouped=subset.groupby(key,as_index=False).agg(
+           qualifying_systems=('condition_id','nunique'),
+           confirmation_systems=('role',lambda s:int(s.eq('CONFIRM_CORE').sum())),
+           opposition_systems=('role',lambda s:int(s.eq('OPPOSE_CORE').sum())),
+           best_prior_strength=('prior_robust_support_score','max'),
+           core_side=('core_side','first'),core_result_unverified=('core_result_unverified','first'),
+           core_edge_points_unverified=('core_edge_points_unverified','first'))
+        grouped['research_evidence_state']=np.select([
+            grouped.confirmation_systems.gt(0)&grouped.opposition_systems.gt(0),
+            grouped.confirmation_systems.gt(0),grouped.opposition_systems.gt(0)],
+            ['MIXED_PRIOR_QUALIFIED_EVIDENCE','CONFIRMATIONS_ONLY','OPPOSITION_ONLY'],default='NO_QUALIFIED_EVIDENCE')
+        grouped['independent_family_count_verified']=0
+        grouped['price_asof_certified']=False
+        grouped['bet_authority']=0
+        decisions=grouped
+    audit={'version':'NCAAF_CONDITIONAL_EDGE_V6_5_20261026',
+        'systems_in_full_leaderboard':int(len(universe)),
+        'single_rule_entries':int(universe.condition_class.eq('SINGLE_OR_EXISTING_RULE').sum()),
+        'exact_pair_entries':int(universe.condition_class.eq('EXACT_CROSS_SOURCE_PAIR').sum()),
+        'prior_qualified_rule_or_pair_years':int(len(qualified)),
+        'descriptive_price_regime_slices':int(len(regimes)),
+        'core_exact_grade_mismatches_excluded':mismatches,
+        'matched_core_condition_firings':int(len(subset)),
+        'matched_core_condition_year_roles':int(len(core_lift)),
+        'unique_matched_core_games':int(len(decisions)),
+        'brain_rescue':rescue_audit,
+        'overlap_pair_rows':int(len(overlap)),
+        'eligibility_uses_test_season_outcome':False,
+        'selection_controls_exclude_condition_firings':True,
+        'controls_match_year_core_edge_core_side_and_line_magnitude':True,
+        'core_margin_residuals_available':False,
+        'cross_source_independence_certified':False,
+        'original_bookmaker_quote_timestamps_verified':False,
+        'original_bigal_signal_archive_verified':False,
+        'moneyline_executable_roi_certified':False,
+        'live_automatic_betting_authority':0,
+        'status':'RETROSPECTIVE_RESEARCH_ONLY_PRICE_AND_FEATURE_VINTAGE_HOLD'}
+    return {'v65_system_universe_leaderboard':universe,
+            'v65_market_line_regimes':regimes,
+            'v65_core_matched_condition_strata':strata,
+            'v65_core_matched_condition_lift':core_lift,
+            'v65_brain_rescue_condition_events':rescue_events,
+            'v65_brain_rescue_condition_summary':rescue_summary,
+            'v65_brain_rescue_one_game':rescue_games,
+            'v65_condition_overlap':overlap,
+            'v65_core_evidence_games':decisions,
+            'v65_conditional_edge_audit':audit}
 
 
 def _policy_decision(policy,core,positive,negative):
@@ -953,7 +1421,7 @@ def build(d,f,n,s,*,canonical=None):
                 'production_authority':0})
     paired=pd.DataFrame(summaries)
     # V6.2 situational-edge research: same existing module, no new Python scripts.
-    situational=build_situational_edge_research(d,games)
+    situational=build_situational_edge_research(d,games,f)
     # Run-level quality gates fail closed, not implicit PASS through empty inputs.
     incomplete={
         'canonical_scores_missing':canonical is None,
@@ -984,6 +1452,7 @@ def build(d,f,n,s,*,canonical=None):
         'core_exact_price_reconciled_games':int(games.canonical_core_reconciliation.eq('CORE_REPLAY_GRADE_MATCH').sum()),
         'moneyline_roi_qualified':False,'features_asof_certified':False,
             'sources_independent_certified':False,'situational_edge_v6_2':situational['situational_edge_audit_v6'],
+            'conditional_edge_v65':situational['v65_conditional_edge_audit'],
             'production_mutation':False,
             'automatic_promotion':False,'bet_authority':0}}
 

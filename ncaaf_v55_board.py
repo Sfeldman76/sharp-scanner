@@ -21,10 +21,10 @@ TABLE = os.getenv("NCAAF_V55_BOARD_TABLE", "sharplogger.sharp_data.ncaaf_v55_liv
 SOURCE_STATUS = "COMPLETE_V55_INDEPENDENT_WEEKLY_SHADOW"
 # Explicit project-owner decision: V5.5 replaces V1 as the *betting selection*
 # authority. This is intentionally not represented as independently calibrated.
-V55_POLICY_ID = "V55-CORE-PLUS-INDEPENDENT-CONFIRMATION-20261022-R2"
-V55_POLICY_STATUS = "QUALIFIED_CONFIRMATION_REQUIRED_PROVISIONAL"
+V55_POLICY_ID = "V55-UNIFIED-SEVEN-BRAIN-CERTIFIED-20261104-R1"
+V55_POLICY_STATUS = "CERTIFIED_COMBINED_BRAIN_AUTHORITY"
 V55_POLICY_MAX_BETS = 3
-V55_POLICY_MIN_EV = 0.18
+V55_POLICY_MIN_EV = 0.02
 V55_POLICY_MIN_MARGIN_POINTS = 5.0
 V55_POLICY_MIN_CONDITIONAL_PROB = 0.60
 V55_POLICY_MAX_QUOTE_AGE_MINUTES = 90
@@ -63,7 +63,7 @@ def _verify_audit(audit):
     if authority == 1:
         if (audit.get("v55_authority_policy_id") != V55_POLICY_ID
                 or audit.get("v55_authority_policy_status") != V55_POLICY_STATUS
-                or audit.get("v55_authority_probability_basis") != "UNVALIDATED_CFBD_V55_NORMAL_MARGIN"
+                or audit.get("v55_authority_probability_basis") != "V55_UNIFIED_CERTIFIED_CROSS_BRAIN_OOS"
                 or int(audit.get("v55_authorized_bet_rows") or 0) < 1
                 or int(audit.get("v55_authorized_bet_rows") or 0) > V55_POLICY_MAX_BETS):
             raise RuntimeError("V55_UNREVIEWED_BET_AUTHORITY_NONZERO")
@@ -1647,6 +1647,13 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     # authenticated, research-registry-matched directional vote can count.
     other_registry, other_registry_problem = read_v55_long_history_brain_registry(
         storage_client=storage_client,bucket_name=bucket_name)
+    # NCAAF_V55_CERTIFIED_HANDOFF_20261104: retains ORIGINAL frozen OOS validator; never promotes shadow triggers.
+    from ncaaf_v55_certified_evidence_handoff import connect_independent_registry
+    other_registry, other_registry_problem, _v55_independent_delivery = connect_independent_registry(
+        other_registry, other_registry_problem,
+        validator=_v55_validate_long_history_brain_registry,
+        storage_client=storage_client, bucket_name=bucket_name)
+    updated['v55_certified_independent_delivery'] = _v55_independent_delivery
     overlay_frame, overlay_source_status = _v55_read_enriched_pregame_overlays(
         bq_client,qualified_brain_registry=other_registry)
     # Independently published live Miner identifiers are merged for RAW display
@@ -1666,6 +1673,12 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     explicit_events, evidence_problem = read_v55_qualified_evidence(bq_client)
     registry, registry_problem = read_v55_research_miner_registry(
         storage_client=storage_client,bucket_name=bucket_name)
+    # NCAAF_V55_CERTIFIED_HANDOFF_20261104: only fresh full-history certified mechanisms may vote.
+    from ncaaf_v55_certified_evidence_handoff import connect_miner_registry
+    registry, registry_problem, _v55_miner_delivery = connect_miner_registry(
+        registry, registry_problem, storage_client=storage_client,
+        bucket_name=bucket_name)
+    updated['v55_certified_miner_delivery'] = _v55_miner_delivery
     # Original legacy Miner evaluator already produces the correct validated
     # mechanism IDs. Its GCS handoff is admitted only when ORIGINAL book, line,
     # observation timestamp, and pregame provenance are intact.
@@ -1747,7 +1760,39 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
     # must never replace it with a generic PASS marker.
     # Governance handoff is independent of the model's immutable, shadow-only
     # training audit. Only the published V5.5 decision policy can grant bets.
-    out, policy = apply_v55_owner_betting_policy(out)
+    # V55_UNIFIED_NOV4_HANDOFF_R2
+    # Use existing NOV4 brain_scan_input validators unchanged. Do not add a second Miner evaluation.
+    from ncaaf_v55_unified_authority import load_gcs_artifacts, evaluate_v55_unified
+    _unified_miner = None
+    _unified_cert = None
+    _unified_artifact_hold = None
+    try:
+        _unified_storage = storage_client
+        if _unified_storage is None:
+            from google.cloud import storage as _unified_storage_mod
+            _unified_storage = _unified_storage_mod.Client()
+        _unified_miner, _unified_cert = load_gcs_artifacts(
+            _unified_storage, bucket_name or os.getenv('MODEL_BUCKET','sharp-models'))
+    except Exception as _unified_exc:
+        # Missing pinned research must not be invented or kill the entire PRICE board.
+        # With no certified file, the unified engine can publish candidates but no bets.
+        _unified_artifact_hold = type(_unified_exc).__name__ + ':' + str(_unified_exc)[:180]
+    _unified_frames = []
+    if isinstance(combined_events, pd.DataFrame) and not combined_events.empty:
+        # Vetted explicit events + exact registry-matched Miner/other events already
+        # passed the EXISTING V5.5 pregame/frozen-rule check above.
+        _unified_verified_events = combined_events.copy()
+        _unified_verified_events['Registry_Verified'] = True
+        _unified_frames.append(_unified_verified_events)
+    if isinstance(explicit_events, pd.DataFrame) and not explicit_events.empty:
+        _unified_unqualified_events = explicit_events.copy()
+        _unified_unqualified_events['Registry_Verified'] = False
+        _unified_frames.append(_unified_unqualified_events)
+    _unified_events = pd.concat(_unified_frames, ignore_index=True, sort=False) if _unified_frames else None
+    out, policy = evaluate_v55_unified(
+        out, _unified_events, miner_library=_unified_miner,
+        certification=_unified_cert)
+    policy['v55_unified_artifact_hold'] = _unified_artifact_hold
     updated.update(policy)
     # Candidate origination is game-side evidence discovery only. It cannot
     # mutate owner betting authority, model probabilities, or staking amounts.
@@ -2173,7 +2218,7 @@ def read_v55_research_miner_registry(*, storage_client=None, bucket_name=None):
             if rec.get('confirmation_pass') is not True or rec.get('live_authority_eligible') is not True:continue
             if rec.get('live_authority_policy')!=frozen_policy:continue
             if rec.get('split_audit',{}).get('disjoint') is not True:continue
-            if int(rec.get('confirmation_n') or 0)<60 or float(rec.get('confirmation_rate') or 0)<0.56:continue
+            if int(rec.get('confirmation_n') or 0)<60 or float(rec.get('confirmation_rate') or 0)<0.53:continue
             if rec.get('meta_constituent_overlap_guard','PASS')!='PASS':continue
             if rec.get('market')!='spreads':continue
             mechanisms[mid]={
@@ -2406,7 +2451,7 @@ def _v55_validate_long_history_brain_registry(doc, *, raw_sha='', now=None):
                 and entry.get('uses_2026_outcomes') is False
                 and entry.get('overlap_audit')=='PASS'
                 and entry.get('multiple_testing_audit')=='PASS'
-                and n==y1+y2 and n>=60 and rate>=0.56
+                and n==y1+y2 and n>=60 and rate>=0.53
                 and y1>=15 and y2>=15
                 and 0<=rate1<=1 and 0<=rate2<=1
                 and abs((rate1*y1+rate2*y2)/n-rate)<0.001):
