@@ -110,8 +110,23 @@ def _event_valid(raw, row, team, now, miner_rules):
     quote_book = _str(row.get("Backend_Quote_Book")).lower()
     spread = _num(raw.get("Observed_Spread"))
     chosen = _num(row.get("Current_Spread"))
-    # Same game, sportsbook, absolute line. FADE origins can point to
-    # the opposite original sign; no manufactured replacement quotes.
+    # Upstream frozen-rule validators in ncaaf_v55_board.py return a normalized
+    # event WITHOUT Observed_Book / Observed_Spread.  The previous engine
+    # rejected every such event here. Its builder has already checked exact
+    # original game, book, side, spread and pregame timestamp. Admit that
+    # upstream-vetted form only when all its certification markers agree;
+    # unvetted external/research evidence cannot use this fallback.
+    upstream_verified = (
+        _truth(raw.get('Registry_Verified')) and
+        _str(raw.get('Qualification_Status')) == 'QUALIFIED_OOS' and
+        _str(raw.get('OOS_Status')) == 'PASS' and
+        _truth(raw.get('Direction_Verified')) and
+        _str(raw.get('Provenance_Status')) in
+            ('PRE_GAME_VERIFIED','PRE_GAME_VERIFIED_LIVE_RECALCULATED')
+    )
+    if not book and spread is None and upstream_verified:
+        book, spread = quote_book, chosen
+    # Same game, bookmaker and absolute line; no mismatched quote promotion.
     if not book or book != quote_book or spread is None or chosen is None or abs(abs(spread)-abs(chosen)) > .001:
         return None
     q = _dt(row.get("Backend_Quote_Timestamp"))
@@ -221,6 +236,14 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
     # Clones BOTH sides from the exact paired executable quote, not from a
     # CORE-selected-team lookup.
     sides = build_two_sided_scan(board, now=now)
+    # Execute only those new frozen Miner predicates that can be evaluated
+    # honestly from current original same-book prices. CFBD/PT/Pathi atoms
+    # require a separate observed-at pregame feature provider and remain held;
+    # no rule receives a fabricated certificate or authority permission.
+    from ncaaf_v55_live_frozen_miner_bridge import evaluate_quote_atoms
+    new_miner_events, new_miner_audit = evaluate_quote_atoms(sides, miner_rules, now=now)
+    if not new_miner_events.empty:
+        signals.extend(new_miner_events.to_dict('records'))
     out = board.copy()
     for key, val in {
         "V55_Bet_Authority": 0, "V55_Bet_Decision": "PASS",
@@ -261,6 +284,9 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
         "v55_unified_live_qualified_by_brain": {},
         "v55_unified_live_research_by_brain": {},
         "v55_unified_new_miner_v2_rule_ids_fired": 0,
+        "v55_unified_miner_v2_live_executor": new_miner_audit,
+        "v55_unified_upstream_event_rows": len(signals)-len(new_miner_events),
+        "v55_unified_quote_atom_research_events": len(new_miner_events),
     }
     qualified_by_brain = defaultdict(set)
     research_by_brain = defaultdict(set)
@@ -301,6 +327,8 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
         opp_keys = _independent_keys(oppose)
         snapshot = {"game_id":gid,"team":selected,"side":side,"origins":all_origin,
             "qualified_family_keys":list(keys),"opposing_family_keys":list(opp_keys),
+            "research_system_ids":sorted({e['system_id'] for e in evs if not e['certified'] and e['team']==selected})[:30],
+            "certified_system_ids":sorted({e['system_id'] for e in support})[:30],
             "raw_signal_count":len(evs),"certified_signal_count":len(support),
             "price_book":_str(row.get("Backend_Quote_Book")),
             "price_spread":spread,"price_odds":odds,
@@ -309,6 +337,7 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
         if all_origin: audit["v55_unified_candidate_sides"] += 1
         if not all_origin: continue
         if not support:
+            snapshot['hold'] = 'NO_CERTIFIED_DIRECTIONAL_BRAIN'
             audit["v55_unified_hold_reasons"]["NO_CERTIFIED_DIRECTIONAL_BRAIN"] += 1; continue
         if oppose:
             snapshot["hold"] = "CERTIFIED_OPPOSITION_VETO"
@@ -389,7 +418,13 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
         audit["v55_unified_brain_origin_games"] += bool(origins)
         if r.get("V55_Bet_Authority") != 1 and origins:
             out.at[idx,"V55_Bet_Decision"] = "CANDIDATE"
-            out.at[idx,"V55_Authority_Hold_Reason"] = "UNCERTIFIED_OR_NO_POSITIVE_CROSS_BRAIN_EV"
+            # Preserve the actual blocking reason from the evaluated game side.
+            # A valid research signal is not a certified wager.
+            holds = {x.get('hold') for x in opportunities if x.get('origins') and x.get('hold')}
+            priority = ('CERTIFIED_OPPOSITION_VETO','MISSING_MATCHED_COMBINATION_OOS_CERTIFICATE',
+                        'NO_POSITIVE_CERTIFIED_NET_VALUE','NO_CERTIFIED_DIRECTIONAL_BRAIN')
+            out.at[idx,"V55_Authority_Hold_Reason"] = ('|'.join(h for h in priority if h in holds)
+                if holds else 'UNCERTIFIED_OR_NO_POSITIVE_CROSS_BRAIN_EV')
             audit["v55_candidate_rows"] += 1
     audit["v55_bet_authority"] = int(audit["v55_authorized_bet_rows"] > 0)
     audit["v55_policy_status"] = ("DISABLED_BY_OPERATOR" if not authority_enabled
