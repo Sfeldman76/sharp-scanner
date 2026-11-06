@@ -21,8 +21,8 @@ TABLE = os.getenv("NCAAF_V55_BOARD_TABLE", "sharplogger.sharp_data.ncaaf_v55_liv
 SOURCE_STATUS = "COMPLETE_V55_INDEPENDENT_WEEKLY_SHADOW"
 # Explicit project-owner decision: V5.5 replaces V1 as the *betting selection*
 # authority. This is intentionally not represented as independently calibrated.
-V55_POLICY_ID = "V55-UNIFIED-SEVEN-BRAIN-CERTIFIED-20261104-R1"
-V55_POLICY_STATUS = "CERTIFIED_COMBINED_BRAIN_AUTHORITY"
+V55_POLICY_ID = "V55-UNIFIED-SEVEN-BRAIN-VALIDATED-BETTING-EDGE-20261106-R1"
+V55_POLICY_STATUS = "OOS_VALIDATED_BETTING_EDGE_AUTHORITY"
 V55_POLICY_MAX_BETS = 3
 V55_POLICY_MIN_EV = 0.02
 V55_POLICY_MIN_MARGIN_POINTS = 5.0
@@ -63,7 +63,7 @@ def _verify_audit(audit):
     if authority == 1:
         if (audit.get("v55_authority_policy_id") != V55_POLICY_ID
                 or audit.get("v55_authority_policy_status") != V55_POLICY_STATUS
-                or audit.get("v55_authority_probability_basis") != "V55_UNIFIED_CERTIFIED_CROSS_BRAIN_OOS"
+                or audit.get("v55_authority_probability_basis") != "NOT_USED__VALIDATED_OUT_OF_SAMPLE_BETTING_RETURNS"
                 or int(audit.get("v55_authorized_bet_rows") or 0) < 1
                 or int(audit.get("v55_authorized_bet_rows") or 0) > V55_POLICY_MAX_BETS):
             raise RuntimeError("V55_UNREVIEWED_BET_AUTHORITY_NONZERO")
@@ -1906,7 +1906,7 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
         except (ValueError,TypeError):continue
         if not isinstance(items,list):continue
         for e in items:
-            if not isinstance(e,dict) or e.get('historical_source')!='FROZEN_V55_REGISTRY_MATCH':continue
+            if not isinstance(e,dict) or e.get('historical_source') not in ('FROZEN_V55_REGISTRY_MATCH','VALIDATED_PREGAME_BETTING_EDGE'):continue
             fam=str(e.get('source') or '').upper()
             sid=str(e.get('system_id') or '')
             if not fam or not sid:continue
@@ -3165,7 +3165,7 @@ def apply_v7_prospective_shadow_policy(frame, *, now=None):
         vetted=[];unmatched=[]
         for evidence in details:
             if not isinstance(evidence,dict):continue
-            if (evidence.get('historical_source')!='FROZEN_V55_REGISTRY_MATCH'
+            if (evidence.get('historical_source') not in ('FROZEN_V55_REGISTRY_MATCH','VALIDATED_PREGAME_BETTING_EDGE')
                 or _norm_team(evidence.get('direction'))!=team):
                 unmatched.append(evidence);continue
             metric=_v7_empirical_price_score(evidence.get('historical_n'),

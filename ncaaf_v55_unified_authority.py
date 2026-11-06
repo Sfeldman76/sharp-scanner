@@ -14,11 +14,12 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 BRAINS = ("CORE", "STAT", "SYSTEM_MINER", "PATHI", "BIG_AL", "PREDICTION_TRACKER", "MARKET_RICH")
-POLICY_ID = "V55-UNIFIED-SEVEN-BRAIN-CERTIFIED-20261104-R1"
-POLICY_STATUS = "CERTIFIED_COMBINED_BRAIN_AUTHORITY"
+POLICY_ID = "V55-UNIFIED-SEVEN-BRAIN-VALIDATED-BETTING-EDGE-20261106-R1"
+POLICY_STATUS = "OOS_VALIDATED_BETTING_EDGE_AUTHORITY"
 MIN_EV = .02
 MAX_BETS = 3
 MAX_QUOTE_MIN = 90
+BET_MAX_QUOTE_MIN = 15
 
 
 def _dt(v):
@@ -131,6 +132,7 @@ def _event_valid(raw, row, team, now, miner_rules):
         _str(raw.get('Provenance_Status')) in
             ('PRE_GAME_VERIFIED','PRE_GAME_VERIFIED_LIVE_RECALCULATED')
     )
+    edge_price_attested = bool(book and spread is not None)
     if not book and spread is None and upstream_verified:
         book, spread = quote_book, chosen
     # Same game, bookmaker and absolute line; no mismatched quote promotion.
@@ -164,6 +166,7 @@ def _event_valid(raw, row, team, now, miner_rules):
         valid_cert = valid_cert and _truth(raw.get("Original_Pregame_Quote_Verified"))
     return {"family": f, "system_id": sid, "dependency": dep,
             "team": sig_team, "certified": bool(valid_cert),
+            "edge_price_attested": edge_price_attested,
             "observed_at": obs.isoformat()}
 
 
@@ -224,29 +227,26 @@ def _independent_keys(evidence):
     return tuple(sorted(min(keys) for keys in components.values()))
 
 
-def _certs(doc):
-    """Only accept independently sealed 2024-25 OOS combination certificates."""
-    if not isinstance(doc, dict) or doc.get("schema") != "V55-COMBINED-OOS-CERTIFICATE-R1": return {}
-    if doc.get("status") != "PASS_CERTIFIED_ORIGINAL_PREGAME_VINTAGE": return {}
-    if not _truth(doc.get("original_pregame_vintage_certified")) or not _truth(doc.get("2026_excluded_from_selection")):
-        return {}
-    found = {}
-    for c in doc.get("combinations") or []:
-        if c.get("market") != "spreads" or not _truth(c.get("frozen_before_oos")):
-            continue
-        if not _truth(c.get("out_of_sample_pass")) or not _truth(c.get("original_quote_provenance_verified")):
-            continue
-        n = _num(c.get("oos_unique_games")); prob = _num(c.get("prob_win"))
-        low = _num(c.get("prob_win_lower_95")); push = _num(c.get("prob_push"))
-        if push is None: push = 0.0
-        if n is None or n < 100 or prob is None or low is None or not 0 <= low <= prob <= 1-push:
-            continue
-        keys = tuple(sorted(set(_str(x) for x in (c.get("component_keys") or []) if _str(x))))
-        if not keys or keys in found: continue
-        found[keys] = {"n": int(n), "p": prob, "lower": low, "push": push,
-                       "certificate_id": _str(c.get("certificate_id")),
-                       "source_sha": _str(c.get("source_sha256"))}
-    return found
+def _certs(doc, *, now=None):
+    """Only sealed *betting return* certificates, not predictive probabilities."""
+    from ncaaf_v55_validated_edge import load_edge_certificates
+    return load_edge_certificates(doc, now=now)
+
+
+def _edge_matches(cert, evs, now):
+    """An OOS certificate binds exact brain/system/dependency and predates live signal."""
+    from ncaaf_v55_validated_edge import component
+    selected = {}
+    frozen = _dt(cert.get('frozen_at_utc'))
+    if not frozen or frozen > now: return None
+    expected = cert.get('component_dependencies') or {}
+    for e in evs:
+        k = component(e['family'], e['system_id'])
+        obs = _dt(e.get('observed_at'))
+        if k in expected and e['dependency'] == expected[k] and obs and frozen <= obs and (
+                e['family']=='CORE' or e.get('edge_price_attested') is True):
+            selected[k] = e
+    return [selected[k] for k in cert['component_ids']] if len(selected)==len(cert['component_ids']) else None
 
 
 def evaluate_v55_unified(board, events, *, miner_library=None, certification=None, now=None, live_feature_rows=None):
@@ -265,7 +265,7 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
     now = _dt(now) if now is not None else datetime.now(timezone.utc)
     if not now: raise ValueError("BAD_EVALUATION_CLOCK")
     miner_rules = verify_miner_library(miner_library) if miner_library is not None else {}
-    certs = _certs(certification)
+    certs = _certs(certification, now=now)
     signals = events.to_dict("records") if isinstance(events, pd.DataFrame) else []
     # Clones BOTH sides from the exact paired executable quote, not from a
     # CORE-selected-team lookup.
@@ -302,7 +302,7 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
     for key, val in {
         "V55_Bet_Authority": 0, "V55_Bet_Decision": "PASS",
         "V55_Authority_State": None, "V55_Authority_Policy_Id": None,
-        "V55_Authority_Hold_Reason": "NO_CERTIFIED_COMBINED_EDGE",
+        "V55_Authority_Hold_Reason": "NO_VALIDATED_BETTING_EDGE",
         "V55_Bet_Key": None, "V55_Policy_EV": None, "V55_Policy_Win_Prob": None,
         "V55_Policy_Push_Prob": None, "V55_Policy_Lose_Prob": None,
         "V55_Policy_Edge": None, "V55_Policy_Model_Edge_Points": None,
@@ -311,17 +311,25 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
         "Oppose_Count": 0, "V55_Independent_Support_Keys": None,
         "V55_Independent_Conflict_Keys": None, "V55_Active_System_Names": None,
         "V55_Unified_Candidates_JSON": "[]",
+        "V55_Validated_Edge_ROI": None,
+        "V55_Validated_Edge_Lower_ROI": None,
+        "V55_Validated_Edge_Historical_ROI": None,
+        "V55_Validated_Edge_Sample": None,
+        "V55_Validated_Edge_Certificate_ID": None,
         "V55_Unified_Brains_Seen": None, "V55_Unified_Research_State": "NO_PAIRED_PRICE",
     }.items(): out[key] = val
     audit = {
         "v55_authority_policy_id": POLICY_ID,
         "v55_authority_policy_status": POLICY_STATUS,
-        "v55_authority_probability_basis": "V55_UNIFIED_CERTIFIED_CROSS_BRAIN_OOS",
+        "v55_authority_probability_basis": "NOT_USED__VALIDATED_OUT_OF_SAMPLE_BETTING_RETURNS",
+        "v55_edge_certification_schema": "V55-VALIDATED-BETTING-EDGE-R1",
+        "v55_edge_certification_method": "ATTESTED_REALIZED_OOS_ROI_REPRICED_AT_LIVE_BOOKMAKER_ODDS",
+        "v55_edge_certification_rejected": len((certification or {}).get('rejected_selections',{})) if isinstance(certification,dict) else 0,
         "v55_authorized_bet_rows": 0, "v55_strong_bet_rows": 0,
         "v55_candidate_rows": 0, "v55_authority_evaluable": 0,
         "v55_bet_authority": 0,
-        "v55_policy_status": "NO_CERTIFIED_COMBINED_BETS",
-        "v55_decision_ladder": "ANY_QUALIFIED_BRAIN_ORIGIN__INDEPENDENCE_CONFLICT_VETO__CERTIFIED_PRICE_EV",
+        "v55_policy_status": "NO_VALIDATED_BETTING_EDGE_BETS",
+        "v55_decision_ladder": "ANY_BRAIN_ORIGIN__ATTESTED_OOS_RETURN_CERTIFICATE__CONFLICT_VETO__LIVE_REPRICED_ROI",
         "v55_automatic_wager_execution": False,
         "v55_v1_selector_used": False,
         "v55_research_historical_seasons": "2013-2025_PRE_2026_ONLY",
@@ -339,7 +347,10 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
             totals=sum(r.get("market")=="totals" for r in miner_rules.values())),
         "v55_unified_miner_v2_market_counts": {"spreads":116, "h2h":120, "totals":109} if miner_rules else {},
         "v55_unified_miner_legacy_admitted": False,
-        "v55_unified_certified_combinations": len(certs),
+        "v55_unified_certified_combinations": len(certs),  # compatibility: includes single-brain edge certificates
+        "v55_validated_edge_certificates": len(certs),
+        "v55_validated_edge_single_brain_certificates": sum(len(c)==1 for c in certs),
+        "v55_validated_edge_multi_brain_certificates": sum(len(c)>=2 for c in certs),
         "v55_unified_input_qualified_event_rows": len(signals),
         "v55_unified_side_rows": len(sides),
         "v55_unified_h2h_totals_authority": 0,
@@ -355,7 +366,7 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
         "v55_unified_full_atom_research_events": len(feature_events),
         "v55_unified_certification_state": (
             "ACCEPTED_COMBINATION_CERTIFICATES" if certs
-            else "MISSING_INDEPENDENT_ORIGINAL_VINTAGE_OOS_COMBINATION_CERTIFICATES"),
+            else "MISSING_INDEPENDENT_ORIGINAL_PREGAME_VALIDATED_BETTING_EDGE_CERTIFICATES"),
         "v55_unified_upstream_event_rows": max(0, len(signals)-len(new_miner_events)-len(feature_events)),
         "v55_unified_quote_atom_research_events": len(new_miner_events),
         "v55_unified_miner_v2_evidence_state": (
@@ -385,55 +396,89 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
         for raw in by_gid.get(gid, []):
             r = _event_valid(raw, row, selected, now, miner_rules)
             if r is not None:
-                evs.append(r)
-                fingerprint = (gid, r["system_id"],r["team"],r["observed_at"])
-                (qualified_by_brain if r["certified"] else research_by_brain)[r["family"]].add(fingerprint)
-                if r["family"] == "SYSTEM_MINER": fired_new_miner_ids.add(r["system_id"])
-        # CORE may originate on EITHER side, but its raw uncalibrated margin
-        # is a candidate only; it can never create a certified combo itself.
-        side = _str(row.get("V55_Brain_Scan_Side"))
-        raw_core_ev = _num(row.get("V55_Home_Raw_EV" if side == "HOME" else "V55_Away_Raw_EV"))
-        core_origin = raw_core_ev is not None and raw_core_ev > 0
-        (home, away), ok = legacy._matchup_teams(row)
-        support = [e for e in evs if e["team"] == selected and e["certified"]]
-        oppose = [e for e in evs if e["team"] != selected and e["certified"]]
-        all_origin = sorted({e["family"] for e in evs if e["team"] == selected} | ({"CORE"} if core_origin else set()))
-        # Collapses duplicate mechanisms by source-family + dependency key.
-        # Different systems sharing one dependency are one support vote.
-        keys = _independent_keys(support)
-        opp_keys = _independent_keys(oppose)
-        snapshot = {"game_id":gid,"team":selected,"side":side,"origins":all_origin,
-            "qualified_family_keys":list(keys),"opposing_family_keys":list(opp_keys),
-            "research_system_ids":sorted({e['system_id'] for e in evs if not e['certified'] and e['team']==selected})[:30],
-            "certified_system_ids":sorted({e['system_id'] for e in support})[:30],
-            "raw_signal_count":len(evs),"certified_signal_count":len(support),
-            "price_book":_str(row.get("Backend_Quote_Book")),
-            "price_spread":spread,"price_odds":odds,
-            "quote_utc":q.isoformat(),"bet_authority":0}
+                # Old registry fields are not decision authority; only the
+                # new validated-ROI manifest may certify a live signal.
+                evs.append({**r, 'certified': False})
+                fingerprint = (gid, r['system_id'], r['team'], r['observed_at'])
+                research_by_brain[r['family']].add(fingerprint)
+                if r['family'] == 'SYSTEM_MINER': fired_new_miner_ids.add(r['system_id'])
+        side = _str(row.get('V55_Brain_Scan_Side'))
+        home_away, oriented = legacy._matchup_teams(row)
+        if oriented:
+            # Preserve independent CORE opposition even when another brain
+            # originated the candidate on the opposite side.
+            for role, team in zip(('HOME','AWAY'),home_away):
+                raw_core_ev = _num(row.get('V55_Home_Raw_EV' if role=='HOME' else 'V55_Away_Raw_EV'))
+                if raw_core_ev is not None and raw_core_ev>0:
+                    evs.append({'family':'CORE','system_id':'CORE_V55',
+                                'dependency':'CORE_V55','team':team,'certified':False,
+                                'edge_price_attested':True,
+                        'observed_at':q.isoformat()})
+        all_origin = sorted({e['family'] for e in evs if e['team']==selected})
+        same = [e for e in evs if e['team']==selected]
+        opposite = [e for e in evs if e['team']!=selected]
+        # Iterate over predeclared single or combined betting edges. We do
+        # NOT fit/estimate a new predictive win probability from live evidence.
+        matching = []
+        opposed = []
+        from ncaaf_v55_validated_edge import current_edge
+        for cert in certs.values():
+            other = _edge_matches(cert, opposite, now)
+            if other:
+                opposed.append((cert,other))
+            chosen = _edge_matches(cert, same, now)
+            if chosen:
+                returns = current_edge(cert, odds, spread, row.get('Backend_Quote_Book'))
+                if returns:
+                    matching.append((cert,chosen,returns))
+        # A live research observation is *not* counted as an independent
+        # qualified vote without the original-vintage certificate.
+        supported = {(e['family'],e['system_id']) for _, ss, _ in matching for e in ss}
+        keys = sorted({e['dependency'] for e in same if (e['family'],e['system_id']) in supported})
+        opp_keys = sorted({e['dependency'] for _, ss in opposed for e in ss})
+        for e in same:
+            if (e['family'],e['system_id']) in supported:
+                qualified_by_brain[e['family']].add((gid,e['system_id'],e['team'],e['observed_at']))
+        snapshot = {'game_id':gid,'team':selected,'side':side,'origins':all_origin,
+            'qualified_family_keys':keys,'opposing_family_keys':opp_keys,
+            'research_system_ids':sorted({e['system_id'] for e in same if (e['family'],e['system_id']) not in supported})[:30],
+            'certified_system_ids':sorted({e['system_id'] for e in same if (e['family'],e['system_id']) in supported})[:30],
+            'raw_signal_count':len(evs),'certified_signal_count':len(supported),
+            'price_book':_str(row.get('Backend_Quote_Book')),
+            'price_spread':spread,'price_odds':odds,'quote_utc':q.isoformat(),
+            'bet_authority':0}
         side_results[gid].append(snapshot)
-        if all_origin: audit["v55_unified_candidate_sides"] += 1
-        if not all_origin: continue
-        if not support:
-            snapshot['hold'] = 'NO_CERTIFIED_DIRECTIONAL_BRAIN'
-            audit["v55_unified_hold_reasons"]["NO_CERTIFIED_DIRECTIONAL_BRAIN"] += 1; continue
-        if oppose:
-            snapshot["hold"] = "CERTIFIED_OPPOSITION_VETO"
-            audit["v55_unified_hold_reasons"]["CERTIFIED_OPPOSITION_VETO"] += 1; continue
-        certificate = certs.get(keys)
-        if certificate is None:
-            snapshot["hold"] = "MISSING_MATCHED_COMBINATION_OOS_CERTIFICATE"
-            audit["v55_unified_hold_reasons"]["MISSING_MATCHED_COMBINATION_OOS_CERTIFICATE"] += 1; continue
-        audit["v55_authority_evaluable"] += 1
-        p, low, push = certificate["p"], certificate["lower"], certificate["push"]
-        ev = p*net-(1-p-push)
-        min_ev = low*net-(1-low-push)
-        snapshot.update({"estimated_ev":ev,"conservative_ev":min_ev,
-            "certificate_id":certificate["certificate_id"],"oos_games":certificate["n"]})
-        if ev < MIN_EV or min_ev <= 0:
-            snapshot["hold"] = "NO_POSITIVE_CERTIFIED_NET_VALUE"
-            audit["v55_unified_hold_reasons"]["NO_POSITIVE_CERTIFIED_NET_VALUE"] += 1; continue
-        candidates.append((min_ev,ev,len(keys),gid,selected,side,spread,odds,quote_age,certificate,
-            support,keys,opp_keys))
+        if all_origin:audit['v55_unified_candidate_sides']+=1
+        if not all_origin:continue
+        if opposed:
+            snapshot['hold']='CERTIFIED_OPPOSITION_VETO'
+            audit['v55_unified_hold_reasons']['CERTIFIED_OPPOSITION_VETO']+=1
+            continue
+        if not matching:
+            snapshot['hold']='NO_MATCHED_VALIDATED_BETTING_EDGE_FOR_LIVE_SYSTEMS_AND_PRICE'
+            audit['v55_unified_hold_reasons']['NO_MATCHED_VALIDATED_BETTING_EDGE_FOR_LIVE_SYSTEMS_AND_PRICE']+=1
+            continue
+        if quote_age > BET_MAX_QUOTE_MIN:
+            snapshot['hold']='PRICE_TOO_OLD_FOR_BET_AUTHORITY'
+            audit['v55_unified_hold_reasons']['PRICE_TOO_OLD_FOR_BET_AUTHORITY']+=1
+            continue
+        audit['v55_authority_evaluable']+=1
+        # Selection is by conservative ROI lower bound, not by forecast p(win).
+        matching.sort(key=lambda x:(-x[2]['roi_lower'],-x[2]['roi'],-len(x[1]),x[0]['certificate_id']))
+        certificate, support, returns = matching[0]
+        ev, min_ev = returns['roi'], returns['roi_lower']
+        cert_keys = tuple(e['dependency'] for e in support)
+        snapshot.update({'estimated_ev':ev,'conservative_ev':min_ev,
+            'validated_historical_roi':returns['historical_realized_roi'],
+            'certificate_id':certificate['certificate_id'],
+            'oos_games':certificate['oos_unique_games'],
+            'validated_roi_not_probability':True})
+        if ev < MIN_EV or min_ev<=0:
+            snapshot['hold']='LIVE_PRICE_REPRICED_EDGE_NOT_POSITIVE'
+            audit['v55_unified_hold_reasons']['LIVE_PRICE_REPRICED_EDGE_NOT_POSITIVE']+=1
+            continue
+        candidates.append((min_ev,ev,len(set(cert_keys)),gid,selected,side,spread,odds,quote_age,
+            certificate,support,tuple(sorted(set(cert_keys))),tuple(opp_keys)))
     # Only one side of each physical game; cap to the existing V55 top 3.
     candidates.sort(key=lambda x:(-x[0],-x[1],-x[2],x[3],x[4]))
     # Retain the established operator emergency stop even after replacing the
@@ -459,10 +504,15 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
         out.at[idx,"Odds_American"] = odds
         out.at[idx,"Book"] = out.at[idx,"Backend_Quote_Book"]
         out.at[idx,"V55_Policy_EV"] = ev
-        out.at[idx,"V55_Policy_Edge"] = ev/(1+_prob_net(odds))
-        out.at[idx,"V55_Policy_Win_Prob"] = certificate["p"]
-        out.at[idx,"V55_Policy_Push_Prob"] = certificate["push"]
-        out.at[idx,"V55_Policy_Lose_Prob"] = 1-certificate["p"]-certificate["push"]
+        out.at[idx,"V55_Policy_Edge"] = min_ev # conservative out-of-sample ROI, not a probability difference
+        out.at[idx,"V55_Policy_Win_Prob"] = None
+        out.at[idx,"V55_Policy_Push_Prob"] = None
+        out.at[idx,"V55_Policy_Lose_Prob"] = None
+        out.at[idx,"V55_Validated_Edge_ROI"] = ev
+        out.at[idx,"V55_Validated_Edge_Lower_ROI"] = min_ev
+        out.at[idx,"V55_Validated_Edge_Historical_ROI"] = certificate['oos_realized_roi']
+        out.at[idx,"V55_Validated_Edge_Sample"] = certificate['oos_unique_games']
+        out.at[idx,"V55_Validated_Edge_Certificate_ID"] = certificate['certificate_id']
         out.at[idx,"V55_Policy_Model_Edge_Points"] = None  # not fabricated from CORE
         out.at[idx,"V55_Policy_Quote_Age_Min"] = age
         out.at[idx,"V55_Policy_Stake_Units"] = .5 if nkeys >= 2 else .25
@@ -479,7 +529,7 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
         out.at[idx,"V55_Qualified_Evidence_Detail_JSON"] = json.dumps([{
             "source":e["family"], "system_id":e["system_id"], "direction":e["team"],
             "evidence_family_key":e["dependency"], "observed_utc":e["observed_at"],
-            "historical_source":"FROZEN_V55_REGISTRY_MATCH", "certificate_id":certificate["certificate_id"]}
+            "historical_source":"VALIDATED_PREGAME_BETTING_EDGE", "certificate_id":certificate["certificate_id"]}
             for e in support[:20]],sort_keys=True)
         key = "|".join(("NCAAF","V55","SPREADS",gid,_str(out.at[idx,"Game_Start_UTC"]), selected))
         out.at[idx,"V55_Bet_Key"] = hashlib.sha256(key.encode("utf-8")).hexdigest()[:28]
@@ -498,15 +548,16 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
             # Preserve the actual blocking reason from the evaluated game side.
             # A valid research signal is not a certified wager.
             holds = {x.get('hold') for x in opportunities if x.get('origins') and x.get('hold')}
-            priority = ('CERTIFIED_OPPOSITION_VETO','MISSING_MATCHED_COMBINATION_OOS_CERTIFICATE',
-                        'NO_POSITIVE_CERTIFIED_NET_VALUE','NO_CERTIFIED_DIRECTIONAL_BRAIN')
+            priority = ('CERTIFIED_OPPOSITION_VETO','LIVE_PRICE_REPRICED_EDGE_NOT_POSITIVE',
+                        'NO_MATCHED_VALIDATED_BETTING_EDGE_FOR_LIVE_SYSTEMS_AND_PRICE',
+                        'PRICE_TOO_OLD_FOR_BET_AUTHORITY')
             out.at[idx,"V55_Authority_Hold_Reason"] = ('|'.join(h for h in priority if h in holds)
                 if holds else 'UNCERTIFIED_OR_NO_POSITIVE_CROSS_BRAIN_EV')
             audit["v55_candidate_rows"] += 1
     audit["v55_bet_authority"] = int(audit["v55_authorized_bet_rows"] > 0)
     audit["v55_policy_status"] = ("DISABLED_BY_OPERATOR" if not authority_enabled
-                                 else "CERTIFIED_UNIFIED_BETS_PUBLISHED" if audit["v55_bet_authority"]
-                                 else "NO_CERTIFIED_COMBINED_BETS")
+                                 else "VALIDATED_EDGE_BETS_PUBLISHED" if audit["v55_bet_authority"]
+                                 else "NO_VALIDATED_BETTING_EDGE_BETS")
     audit["v55_unified_hold_reasons"] = dict(audit["v55_unified_hold_reasons"])
     audit["v55_unified_live_qualified_by_brain"] = {x:len(v) for x,v in sorted(qualified_by_brain.items())}
     audit["v55_unified_live_research_by_brain"] = {x:len(v) for x,v in sorted(research_by_brain.items())}
@@ -515,21 +566,37 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
 
 
 def load_gcs_artifacts(storage_client, bucket_name):
-    """Load pinned Miner rules and optional separately certified combo file."""
+    """Independently load pinned Miner library and validated ROI certificates.
+
+    Missing/unavailable Miner must not prevent a certified PT, PATHI, BIG_AL,
+    STAT, MARKET_RICH or CORE edge from receiving its own authority check.
+    Missing edge certificates never turn legacy probabilistic evidence into
+    betting authority.
+    """
+    import logging
     bucket = storage_client.bucket(bucket_name)
-    pointer = json.loads(bucket.blob(
-        "research/ncaaf/v55/unified_executable_miner_library_v2/current_library.json").download_as_text())
-    if pointer.get("rule_count") != 345 or pointer.get("bet_authority") != 0:
-        raise RuntimeError("MINER_V2_POINTER_INTEGRITY_FAILURE")
-    uri = _str(pointer.get("latest_uri"))
-    root = "gs://"+bucket_name+"/research/ncaaf/v55/unified_executable_miner_library_v2/"
-    if not uri.startswith(root) or not uri.endswith("/library.json"):
-        raise RuntimeError("MINER_V2_URI_NOT_IN_AUTHORIZED_PREFIX")
-    payload = bucket.blob(uri[len("gs://"+bucket_name+"/"):]).download_as_bytes()
-    if hashlib.sha256(payload).hexdigest() != _str(pointer.get("sha256")):
-        raise RuntimeError("MINER_V2_LIBRARY_SHA256_MISMATCH")
-    lib = json.loads(payload)
-    verify_miner_library(lib)
-    cert_blob = bucket.blob("research/ncaaf/v55/unified_combined_authority/certified_combinations_latest.json")
-    cert = json.loads(cert_blob.download_as_text()) if cert_blob.exists() else None
+    cert = None
+    try:
+        cert_blob = bucket.blob("research/ncaaf/v55/unified_combined_authority/validated_edge_certificates_latest.json")
+        cert = json.loads(cert_blob.download_as_text()) if cert_blob.exists() else None
+    except Exception as exc:
+        logging.warning('[NCAAF-V55-EDGE-LOAD] certificate_unavailable=%s:%s',type(exc).__name__,str(exc)[:160])
+    lib = None
+    try:
+        pointer = json.loads(bucket.blob(
+            "research/ncaaf/v55/unified_executable_miner_library_v2/current_library.json").download_as_text())
+        if pointer.get("rule_count") != 345 or pointer.get("bet_authority") != 0:
+            raise RuntimeError("MINER_V2_POINTER_INTEGRITY_FAILURE")
+        uri = _str(pointer.get("latest_uri"))
+        root = "gs://"+bucket_name+"/research/ncaaf/v55/unified_executable_miner_library_v2/"
+        if not uri.startswith(root) or not uri.endswith("/library.json"):
+            raise RuntimeError("MINER_V2_URI_NOT_IN_AUTHORIZED_PREFIX")
+        payload = bucket.blob(uri[len("gs://"+bucket_name+"/"):]).download_as_bytes()
+        if hashlib.sha256(payload).hexdigest() != _str(pointer.get("sha256")):
+            raise RuntimeError("MINER_V2_LIBRARY_SHA256_MISMATCH")
+        lib = json.loads(payload)
+        verify_miner_library(lib)
+    except Exception as exc:
+        logging.warning('[NCAAF-V55-EDGE-LOAD] miner_unavailable=%s:%s; non-Miner edge authority remains independent',
+                        type(exc).__name__,str(exc)[:160])
     return lib, cert

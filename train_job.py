@@ -1119,6 +1119,21 @@ def main():
                 f"pt_strict_incremental_signal={_ptinc_ncaaf.get('strict_incremental_signal')} "
                 "2026_selection_influence=0 production_mutation=FALSE automatic_promotion=FALSE"
             )
+            # V55 validated betting-return certificates: original timestamped
+            # signal+quote capture and predeclared holdout manifest required.
+            # Missing inputs must not turn retrospective Stage2 outcomes into
+            # bet authority, and must not prevent successful CORE/Miner research.
+            try:
+                from ncaaf_v55_edge_research_hook import run_attested_edge_validation
+                _edge_validation=run_attested_edge_validation(
+                    gcs,bucket_name=bucket,log_func=log_func)
+                log_func("[NCAAF-V55-EDGE-RESEARCH-HANDOFF] "
+                         +json.dumps(_edge_validation,sort_keys=True,default=str))
+            except Exception as _edge_validation_exc:
+                log_func("[NCAAF-V55-EDGE-RESEARCH-HANDOFF] "
+                         "status=HOLD_NO_CERTIFICATION error="
+                         +type(_edge_validation_exc).__name__+":"
+                         +str(_edge_validation_exc)[:180])
             pw.emit("done","NCAAF Heavy Challenger Research complete ✅",pct=1.0)
             return
 

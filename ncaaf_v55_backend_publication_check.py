@@ -33,6 +33,10 @@ def inspect(audit):
         'unified_candidate_sides':audit.get('v55_unified_candidate_sides'),
         'live_shadow_handoff_status':handoff.get('research_only_live_signal_bridge'),
         'certification_state':audit.get('v55_unified_certification_state'),
+        'validation_basis':audit.get('v55_authority_probability_basis'),
+        'edge_certification_schema':audit.get('v55_edge_certification_schema'),
+        'edge_certification_method':audit.get('v55_edge_certification_method'),
+        'edge_certificates_rejected':audit.get('v55_edge_certification_rejected'),
         'legacy_live_miner_status':live.get('miner'),
         'legacy_live_miner_vote_rows':live.get('miner_vote_rows'),
         'legacy_live_miner_report_status':live.get('miner_report_status'),
@@ -40,6 +44,9 @@ def inspect(audit):
         'research_brains':audit.get('v55_unified_live_research_by_brain'),
         'qualified_brains':audit.get('v55_unified_live_qualified_by_brain'),
         'certified_combinations':audit.get('v55_unified_certified_combinations'),
+        'validated_edge_certificates':audit.get('v55_validated_edge_certificates'),
+        'validated_edge_single_brain_certificates':audit.get('v55_validated_edge_single_brain_certificates'),
+        'validated_edge_multi_brain_certificates':audit.get('v55_validated_edge_multi_brain_certificates'),
         'authority_evaluable':audit.get('v55_authority_evaluable'),
         'authorized_bets':audit.get('v55_authorized_bet_rows'),
         'hold_reasons':audit.get('v55_unified_hold_reasons'),
@@ -61,6 +68,6 @@ def main():
     if not result['unified_backend_bridge_deployed']:
         print('\nHOLD: New engine was not executed in the backend publisher image. Uploading GitHub source alone does not redeploy Cloud Run.')
     elif not result['certified_combinations']:
-        print('\nHOLD: No accepted independent original-vintage combination certificates; no authorized bets can be issued.')
+        print('\nHOLD: No accepted original-pregame out-of-sample betting-return certificate. Historical research-only outcomes cannot authorize bets.')
 
 if __name__=='__main__':main()
