@@ -53,7 +53,10 @@ def evaluate_quote_atoms(sides, miner_rules, *, now=None, max_quote_age_minutes=
     at=_dt(now) if now is not None else datetime.now(timezone.utc)
     if at is None:raise ValueError('UNIFIED_MINER_INVALID_CLOCK')
     diag={
-        'status':'RESEARCH_ONLY_NO_CERTIFIED_FIRE',
+        'status':'LIVE_MONITORING_STARTED_NO_CERTIFIED_FIRE',
+        'execution_mode':'LIVE_MONITORING',
+        'live_tracking_enabled_rules':sum(r.get('live_tracking_enabled') is True for r in miner_rules.values()),
+        'bet_authority_eligible_rules':sum(r.get('historical_oos_certified') is True and r.get('live_authority_eligible') is True for r in miner_rules.values()),
         'frozen_rule_count':len(miner_rules),
         'spread_rules':sum(r.get('market')=='spreads' for r in miner_rules.values()),
         'quote_atom_rules_evaluable':0,
@@ -156,9 +159,11 @@ def evaluate_quote_atoms(sides, miner_rules, *, now=None, max_quote_age_minutes=
                 'Registry_Verified':False,
                 'Market':'spreads',
                 'Rule_Atoms':'|'.join(atoms),
+                'Live_Evaluation_Status':'LIVE_OBSERVED_RULE_TRIGGER',
+                'Bet_Certification_Status':'UNCERTIFIED_FROZEN_RULE',
             })
     diag['fired_rule_ids']=len({x['Signal_Family'] for x in rows})
     diag['fired_game_sides']=len(game_sides)
     diag['research_event_rows']=len(rows)
-    diag['status']='PASS_RESEARCH_ONLY_QUOTE_ATOMS' if rows else 'NO_OBSERVABLE_QUOTE_ATOM_FIRE'
+    diag['status']='LIVE_FIRINGS_OBSERVED_OOS_UNCERTIFIED' if rows else 'LIVE_SCANNED_NO_SUPPORTED_RULE_FIRINGS'
     return pd.DataFrame.from_records(rows,columns=cols),diag

@@ -78,7 +78,14 @@ def verify_miner_library(doc):
         raise RuntimeError("MINER_V2_DUPLICATE_OR_LEGACY_RULE")
     if any(not _truth(x.get("rule_definition_executable")) for x in rules):
         raise RuntimeError("MINER_V2_NON_EXECUTABLE_RULE")
-    return {x["rule_id"]: x for x in rules}
+    # Arm all 345 frozen definitions for LIVE observation, not automatic bets.
+    # Historical certification fields remain authoritative and unchanged.
+    # Use runtime copies: never rewrite the pinned, hash-checked GCS library.
+    return {
+        x["rule_id"]: {**x, "live_tracking_enabled": True,
+                        "live_tracking_state": "LIVE_MONITORED"}
+        for x in rules
+    }
 
 
 def _event_identity(raw):
@@ -272,6 +279,17 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
         "v55_v1_selector_used": False,
         "v55_research_historical_seasons": "2013-2025_PRE_2026_ONLY",
         "v55_unified_miner_v2_rule_count": len(miner_rules),
+        # LIVE is an observation/execution state, not an OOS certification.
+        "v55_unified_miner_v2_execution_mode": "LIVE_MONITORING" if miner_rules else "NO_FROZEN_LIBRARY",
+        "v55_unified_miner_v2_live_tracking_rules": sum(
+            r.get("live_tracking_enabled") is True for r in miner_rules.values()),
+        "v55_unified_miner_v2_live_bet_eligible_rules": sum(
+            _truth(r.get("historical_oos_certified")) and
+            _truth(r.get("live_authority_eligible")) for r in miner_rules.values()),
+        "v55_unified_miner_v2_live_markets": dict(
+            spreads=sum(r.get("market")=="spreads" for r in miner_rules.values()),
+            h2h=sum(r.get("market")=="h2h" for r in miner_rules.values()),
+            totals=sum(r.get("market")=="totals" for r in miner_rules.values())),
         "v55_unified_miner_v2_market_counts": {"spreads":116, "h2h":120, "totals":109} if miner_rules else {},
         "v55_unified_miner_legacy_admitted": False,
         "v55_unified_certified_combinations": len(certs),
@@ -287,6 +305,12 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
         "v55_unified_miner_v2_live_executor": new_miner_audit,
         "v55_unified_upstream_event_rows": len(signals)-len(new_miner_events),
         "v55_unified_quote_atom_research_events": len(new_miner_events),
+        "v55_unified_miner_v2_evidence_state": (
+            "LIVE_ACTIVE_OOS_CERTIFIED_SOME_RULES" if any(
+                _truth(r.get("historical_oos_certified")) and
+                _truth(r.get("live_authority_eligible")) for r in miner_rules.values())
+            else "LIVE_ACTIVE_RESEARCH_SIGNALS_NO_OOS_CERTIFICATION"
+            if miner_rules else "FROZEN_LIBRARY_UNAVAILABLE"),
     }
     qualified_by_brain = defaultdict(set)
     research_by_brain = defaultdict(set)
