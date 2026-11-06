@@ -1,364 +1,350 @@
-"""NCAAF V5.5: NFL-identical 19-column betting BOARD, NCAAF backend evidence.
+"""Display-only, NFL-shaped, market-aware NCAAF V5.5 ROI betting board.
 
-Drop-in replacement for the module already imported by the installed V3 route.
-The UI only READS ncaaf_v55_board.read_published_latest(). No V1 inference,
-no book lookups, no rule scoring, no user-side promotion of bets.
+Exactly one research authority module and one live authority module exist elsewhere.
+This UI imports NEITHER, never scores bets, and does not use legacy V1/CORE
+probabilities. It reads the complete SHA-verified BigQuery publication as-is.
 """
 from __future__ import annotations
-
+import hashlib
 import json
 import math
+from datetime import datetime, timezone
 from collections import Counter
 
+BOARD_TABLE = 'sharplogger.sharp_data.ncaaf_v55_live_board'
+REGISTRY_URI = 'gs://sharp-models/research/ncaaf/v55/two_engine_roi/current_registry.json'
+POLICY = 'V55-UNIFIED-SEVEN-BRAIN-VALIDATED-BETTING-EDGE-20261106-R1'
+REGISTRY_SCHEMA = 'NCAAF-V55-TWO-ENGINE-ROI-REGISTRY-V1'
+ACTIONS = frozenset({'BET','STRONG BET'})
+MARKETS = ('spreads', 'h2h', 'totals')
+BR = {'spreads':'Spr','h2h':'H2H','totals':'Tot'}
+# Retains the NFL-style 19-column board, replacing unrelated predicted
+# probabilities / model point edges with the requested OOS ROI evidence.
 NFL_COLUMNS = [
-    'Game Time', 'Matchup',
-    'Spr Action', 'Spr Pick', 'Spr Prob', 'Spr Model Edge',
-    'H2H Action', 'H2H Pick', 'H2H Prob', 'H2H Model Edge',
-    'Tot Action', 'Tot Pick', 'Tot Prob', 'Tot Model Edge',
-    'Production Plays', 'Pathi State', 'Pathi Overlay', 'Edge Sources', 'System Trigger',
+    'Game Time','Matchup',
+    'Spr Action','Spr Pick','Spr OOS ROI','Spr ROI Floor',
+    'H2H Action','H2H Pick','H2H OOS ROI','H2H ROI Floor',
+    'Tot Action','Tot Pick','Tot OOS ROI','Tot ROI Floor',
+    'Production Plays','Pathi State','Pathi Overlay','Edge Sources','System Trigger',
 ]
-BET_ACTIONS = {'BET', 'STRONG BET'}
-MISSING = {'', '—', 'NONE', 'NAN', 'NULL', 'NAT', '<NA>', 'NOT_PUBLISHED', 'NOT_EVALUABLE', 'NO CORE PICK'}
 
+def _txt(v):
+    if v is None:return ''
+    a=str(v).strip()
+    return '' if a.lower() in ('','nan','none','nat','null','<na>','—') else a
 
-def text(value):
-    if value is None:
-        return ''
+def _num(v):
     try:
-        import pandas as pd
-        missing = pd.isna(value)
-        if isinstance(missing, (bool, type(pd.NA))) and missing is True:
-            return ''
-    except (TypeError, ValueError):
-        pass
-    s = str(value).strip()
-    return '' if s.upper() in MISSING else s
+        n=float(v)
+        return n if math.isfinite(n) else None
+    except (ValueError,TypeError):return None
 
-
-def num(value):
+def _dt(x):
+    if isinstance(x,datetime):return x.astimezone(timezone.utc) if x.tzinfo else None
     try:
-        v = float(text(value).replace('%', '').replace(',', '').replace('pts', '').strip())
-        return v if math.isfinite(v) else None
-    except (ValueError, TypeError):
-        return None
+        d=datetime.fromisoformat(_txt(x).replace('Z','+00:00'))
+        return d.astimezone(timezone.utc) if d.tzinfo else None
+    except (ValueError,TypeError,OverflowError):return None
 
+def _auth(v):return v is True or _txt(v).lower() in ('1','1.0','true')
 
-def is_auth(value):
-    return text(value).lower() in {'1', '1.0', 'true'}
+def _norm_market(v):
+    t=_txt(v).lower()
+    return {'spread':'spreads','ats':'spreads','moneyline':'h2h','ml':'h2h','total':'totals'}.get(t,t)
 
+def _json_candidates(v):
+    if isinstance(v,list):d=v
+    elif isinstance(v,str) and v.strip():
+        try:d=json.loads(v)
+        except (ValueError,TypeError):return [],'INVALID_CANDIDATE_JSON'
+    else:return [],None
+    if not isinstance(d,list):return [],'CANDIDATES_NOT_LIST'
+    return [x for x in d if isinstance(x,dict)],None
 
-def pct(value):
-    n = num(value)
-    if n is None or n < 0:
-        return '—'
-    if n <= 1:
-        n *= 100
-    return f'{n:.1f}%' if n <= 100 else '—'
+def _pct(v):
+    n=_num(v)
+    return f'{100*n:+.1f}%' if n is not None else '—'
 
-
-def families(value):
-    import re
-    if isinstance(value, list):
-        seq = value
+def _team_label(row,c):
+    side=_txt(c.get('side')).upper();m=_norm_market(c.get('market'))
+    if m=='totals':name=side.title()
     else:
-        seq = re.split(r'[|,;]+', text(value))
-    return sorted(set(x.strip().upper() for x in map(str, seq) if text(x)))
+        name=_txt(c.get('team'))
+        if not name:
+            match=_txt(row.get('Matchup')).split(' @ ',1)
+            if len(match)==2:name=match[1] if side=='HOME' else match[0]
+    line=_num(c.get('price_spread'));odds=_num(c.get('price_odds'))
+    if m=='h2h':return f'{name} ({odds:+g})' if odds is not None else name or '—'
+    if line is not None and odds is not None:
+        return f'{name} {line:g} ({odds:+g})' if m=='totals' else f'{name} {line:+g} ({odds:+g})'
+    return name or '—'
 
+def _quote_fresh(c,now,kickoff,limit_minutes=15):
+    q=_dt(c.get('quote_utc') or c.get('price_observed_utc'))
+    return bool(q and kickoff and q<=now<kickoff and (now-q).total_seconds()<=limit_minutes*60)
 
-def candidate_info(value):
-    if isinstance(value, list):
-        candidates = value
-    elif isinstance(value, str) and value.strip():
-        try:
-            candidates = json.loads(value)
-        except (ValueError, TypeError):
-            return [], 'CANDIDATE_JSON_INVALID'
-    else:
-        return [], None
-    if not isinstance(candidates, list):
-        return [], 'CANDIDATE_JSON_NOT_LIST'
-    return [x for x in candidates if isinstance(x, dict)], None
+def _valid_action(row,c,audit,now,kick):
+    """Fail-closed UI depiction of a backend-authorized wager, not promotion.
 
-
-def _quote_current(row):
-    return text(row.get('Quote_State')).startswith('FRESH_')
-
-
-def _validated_bet(row):
-    """Authority must be granted on this very published game and selected side."""
-    if not (is_auth(row.get('V55_Bet_Authority')) and
-            text(row.get('V55_Bet_Decision')).upper() in BET_ACTIONS and
-            _quote_current(row) and text(row.get('Selected_Team')) and
-            text(row.get('Backend_Quote_Book'))):
+    Require exact match of published market, side, sportsbook, current line,
+    current odds, certificate and backend ROI policy; quoted price is recent.
+    """
+    if not (_auth(row.get('V55_Bet_Authority')) and _auth(c.get('bet_authority')) and
+            _txt(row.get('V55_Bet_Decision')).upper() in ACTIONS and
+            _txt(c.get('status')).upper()==_txt(row.get('V55_Bet_Decision')).upper() and
+            _norm_market(row.get('V55_Selected_Market'))==_norm_market(c.get('market')) and
+            _txt(row.get('V55_Authority_Policy_Id'))==POLICY and
+            _txt(audit.get('v55_authority_policy_id'))==POLICY and
+            audit.get('production_v1_probabilities_used') is False and
+            _txt(row.get('V55_Validated_Edge_Certificate_ID'))==_txt(c.get('certificate_id')) and
+            _txt(c.get('certificate_id')) and
+            _txt(row.get('V55_Research_Selected_Side')).upper()==_txt(c.get('side')).upper() and
+            _txt(row.get('Backend_Quote_Book')).lower()==_txt(c.get('price_book')).lower() and
+            _txt(row.get('Backend_Quote_Book')) and
+            _quote_fresh(c,now,kick)):
         return False
-    spread, odds = num(row.get('Current_Spread')), num(row.get('Odds_American'))
-    return spread is not None and odds is not None and (odds <= -100 or odds >= 100)
+    a,b=_num(row.get('Odds_American')),_num(c.get('price_odds'))
+    if a is None or b is None or abs(a-b)>1e-7 or (-100<a<100):return False
+    if _norm_market(c.get('market'))!='h2h':
+        a,b=_num(row.get('Current_Spread')),_num(c.get('price_spread'))
+        if a is None or b is None or abs(a-b)>1e-7:return False
+    return _num(c.get('validated_roi')) is not None and _num(c.get('validated_roi_lower')) is not None
 
+def read_published_latest(*,client=None,now=None,max_age_minutes=180):
+    """Read the latest COMPLETE publication without importing legacy authority.
 
-def _side_label(row):
-    selected = text(row.get('Selected_Team'))
-    if not selected or not _quote_current(row):
-        return '—'
-    spread, price = num(row.get('Current_Spread')), num(row.get('Odds_American'))
-    # The chosen SIDE must have its own published price, not the opponent's quote.
-    if spread is None or price is None:
-        return selected + ' (price unavailable)'
-    return f'{selected} {spread:+g} ({price:+.0f})'
+    Do not infer missing source fields, repair incomplete books, or re-authorize
+    expired bets. A partial/modified snapshot is rejected entirely.
+    """
+    from google.cloud import bigquery
+    import pandas as pd
+    bq=client or bigquery.Client(project='sharplogger')
+    sql=f'''SELECT snapshot_id,published_at,record_kind,payload_json,audit_json,
+                   row_count,payload_sha256,publication_type
+             FROM `{BOARD_TABLE}`
+             WHERE snapshot_id=(SELECT snapshot_id FROM `{BOARD_TABLE}`
+                                 WHERE record_kind='COMPLETE'
+                                 ORDER BY published_at DESC LIMIT 1)'''
+    records=list(bq.query(sql).result())
+    if len(records)!=2 or {str(r.record_kind) for r in records}!={'DATA','COMPLETE'}:
+        raise RuntimeError('INCOMPLETE_NCAAF_SNAPSHOT')
+    data=next(r for r in records if r.record_kind=='DATA')
+    done=next(r for r in records if r.record_kind=='COMPLETE')
+    if (data.snapshot_id!=done.snapshot_id or data.payload_sha256!=done.payload_sha256 or
+            data.row_count!=done.row_count or not data.payload_json or not done.audit_json or
+            hashlib.sha256(data.payload_json.encode('utf-8')).hexdigest()!=done.payload_sha256):
+        raise RuntimeError('CORRUPTED_OR_PARTIAL_NCAAF_SNAPSHOT')
+    audit=json.loads(done.audit_json)
+    values=json.loads(data.payload_json)
+    if not isinstance(values,list) or len(values)!=int(done.row_count):
+        raise RuntimeError('BAD_NCAAF_ROW_COUNT')
+    if audit.get('status')!='COMPLETE_V55_INDEPENDENT_WEEKLY_SHADOW':
+        raise RuntimeError('UNVERIFIED_NCAAF_PUBLICATION_STATUS')
+    at=_dt(now) if now else datetime.now(timezone.utc)
+    published=_dt(done.published_at)
+    if not at or not published:raise RuntimeError('INVALID_NCAAF_SNAPSHOT_TIME')
+    age=(at-published).total_seconds()/60
+    audit={**audit,'snapshot_id':str(done.snapshot_id),'published_at_utc':published.isoformat(),
+           'published_age_minutes':round(age,1),
+           'publication_status':'PASS' if -5<=age<=max_age_minutes else 'STALE_MARKET'}
+    frame=pd.DataFrame(values)
+    if 'v55_authorized_bet_rows' in audit:
+        claimed=int(audit.get('v55_authorized_bet_rows') or 0)
+        observed=sum(_auth(r.get('V55_Bet_Authority')) for r in values)
+        if claimed!=observed:raise RuntimeError('AUTHORIZED_BET_COUNT_DISAGREES_WITH_PUBLICATION_AUDIT')
+        if bool(claimed)!=bool(audit.get('v55_bet_authority')):
+            raise RuntimeError('AUTHORIZED_BET_FLAG_DISAGREES_WITH_PUBLICATION_AUDIT')
+    return frame,audit
 
+def nfl_shaped_game_board(weekly, audit=None, *, now=None):
+    """One NFL-style row PER GAME + source-direct candidate/system history ledger.
 
-def nfl_shaped_game_board(weekly, *, now=None):
-    """Return exactly NFL_COLUMNS, one game per row, plus diagnostic detail.
-
-    Only the backend may decide BET, STRONG BET, candidate, or conflict.
-    Research candidates without published selections remain visible in details,
-    never converted by this renderer into actual bets.
+    No synthesized candidate, probability, inferred CORE pick, or implied bet.
     """
     import pandas as pd
-    if not isinstance(weekly, pd.DataFrame):
-        raise TypeError('PUBLISHED_WEEKLY_NOT_DATAFRAME')
-    now = pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
-    now = now.tz_localize('UTC') if now.tzinfo is None else now.tz_convert('UTC')
-    board, detail, candidates_detail, identity = [], [], [], set()
-    diagnostics = Counter()
-    for _, row in weekly.iterrows():
-        kick = pd.to_datetime(row.get('Game_Start_UTC'), utc=True, errors='coerce')
-        if pd.notna(kick) and kick <= now:
+    if not isinstance(weekly,pd.DataFrame):raise TypeError('WEEKLY_MUST_BE_DATAFRAME')
+    audit=audit or {}
+    at=_dt(now) if now else datetime.now(timezone.utc)
+    if not at:raise ValueError('INVALID_NOW')
+    stale=audit.get('publication_status')=='STALE_MARKET'
+    main=[];detail=[];errors=[];seen_games=set();metrics=Counter()
+    for _,srow in weekly.iterrows():
+        row=srow.to_dict();gid=_txt(row.get('Game_ID') or row.get('game_id'))
+        kick=_dt(row.get('Game_Start_UTC') or row.get('kickoff_utc'))
+        if kick and kick<=at:continue
+        if gid in seen_games and gid:
+            errors.append({'game_id':gid,'reason':'DUPLICATE_GAME_IN_PUBLISHED_DATA'})
             continue
-        match = text(row.get('Matchup')) or '—'
-        gid = text(row.get('Game_ID'))
-        key = gid or (match, str(kick))
-        if key in identity:
-            diagnostics['duplicate_game_rows_suppressed'] += 1
-            # Duplicated physical-game publications are not another bet.
-            # The caller must inspect backend identity collisions.
-            continue
-        identity.add(key)
-        fresh = _quote_current(row)
-        bet = _validated_bet(row)
-        published_action = text(row.get('V55_Bet_Decision')).upper()
-        if published_action in BET_ACTIONS and not bet:
-            action = 'BLOCKED — VERIFY BET'
-        else:
-            action = published_action or 'PASS'
-        sel = text(row.get('Selected_Team'))
-        if not fresh and not bet and action not in {'BLOCKED — VERIFY BET'}:
-            # Retain the publisher's PASS/CANDIDATE decision; price status is
-            # shown in detail and the main spread selection is unavailable.
-            diagnostics['unpriced_or_stale_games'] += 1
-        if bet:
-            diagnostics['displayed_authorized_bets'] += 1
-        if action == 'CANDIDATE':
-            diagnostics['published_candidate_games'] += 1
-        if fresh:
-            diagnostics['fresh_priced_games'] += 1
-        raw_miner = text(row.get('V55_Raw_Miner')) or text(row.get('SYSTEM_MINER'))
-        if not raw_miner:
-            diagnostics['miner_unavailable_games'] += 1
-        support = families(row.get('Confirm_Families'))
-        opposition = families(row.get('Oppose_Families'))
-        pathi = text(row.get('V55_Raw_Pathi'))
-        pathi_state = ('MIXED' if 'PATHI' in support and 'PATHI' in opposition
-                       else 'SUPPORT' if 'PATHI' in support
-                       else 'CONFLICT' if 'PATHI' in opposition
-                       else 'TRACK' if pathi else '—')
-        origin = text(row.get('V55_Unified_Brains_Seen'))
-        edge_sources = []
-        if origin:
-            edge_sources.append('ORIGIN: ' + origin)
-        if support:
-            edge_sources.append('SUPPORT: ' + ', '.join(support))
-        if opposition:
-            edge_sources.append('OPPOSE: ' + ', '.join(opposition))
-        system = (text(row.get('V55_Active_System_Rules')) or
-                  text(row.get('V55_Active_System_Names')) or '—')
-        prob = (pct(row.get('V55_Policy_Win_Prob')) if fresh and sel
-                else '—')
-        # Policy prob may be missing or intentionally withheld; show a published
-        # CORE probability only if it belongs to the selected published side.
-        if prob == '—' and fresh and sel:
-            prob = pct(row.get('CORE_Cover_Probability'))
-        points = (num(row.get('CORE_Project_Cover_Points')) if fresh and sel
-                  else None)
-        point_label = f'{points:+.2f} pts' if points is not None else '—'
-        pick = _side_label(row)
-        game_time = (kick.tz_convert('America/New_York').strftime('%a %I:%M %p')
-                     if pd.notna(kick) else '—')
-        record = {
-            'Game Time': game_time, 'Matchup': match,
-            'Spr Action': action, 'Spr Pick': pick, 'Spr Prob': prob,
-            'Spr Model Edge': point_label,
-            'H2H Action': '—', 'H2H Pick': '—', 'H2H Prob': '—', 'H2H Model Edge': '—',
-            'Tot Action': '—', 'Tot Pick': '—', 'Tot Prob': '—', 'Tot Model Edge': '—',
-            'Production Plays': ('Spr: ' + pick) if bet else '—',
-            'Pathi State': pathi_state, 'Pathi Overlay': pathi or '—',
-            'Edge Sources': ' | '.join(edge_sources) or '—',
-            'System Trigger': system,
-            '_kick': kick, '_gid': gid,
-        }
-        board.append(record)
-        cands, candidate_error = candidate_info(row.get('V55_Unified_Candidates_JSON'))
-        if candidate_error:
-            diagnostics[candidate_error] += 1
-        for c in cands:
-            origins = c.get('origins') or []
-            if not isinstance(origins, list): origins = [origins]
-            candidate_team = text(c.get('team'))
-            candidate_origins = ', '.join(str(x) for x in origins if text(x)) or '—'
-            candidate_spread = num(c.get('price_spread'))
-            candidate_odds = num(c.get('price_odds'))
-            candidates_detail.append({
-                'Game Time': game_time, 'Matchup': match,
-                'Candidate Team': candidate_team or '—',
-                'Side': text(c.get('side')) or '—',
-                'Originating Brains': candidate_origins,
-                'Published Spread': candidate_spread if fresh else None,
-                'Published Odds': candidate_odds if fresh else None,
-                'Book': text(c.get('price_book')) if fresh else '—',
-                'Qualified Support': ' | '.join(map(str, c.get('qualified_family_keys') or [])) or '—',
-                'Conflicts': ' | '.join(map(str, c.get('opposing_family_keys') or [])) or '—',
-                'Research EV': num(c.get('estimated_ev')),
-                'Research Hold': text(c.get('hold')) or '—',
-                'Published Bet Action': action if bet and candidate_team.casefold() == sel.casefold() else 'RESEARCH ONLY',
-                'Game ID': gid,
-            })
-            if not origins:
-                diagnostics['candidates_without_named_origin'] += 1
-            if any(str(x).upper().find('MINER') >= 0 for x in origins):
-                diagnostics['miner_originating_candidate_sides'] += 1
-        detail.append({
-            'Game Time': game_time, 'Matchup': match, 'Game ID': gid,
-            'Backend Decision': published_action or '—',
-            'Bet Authority': int(bet), 'Published Authority Flag': text(row.get('V55_Bet_Authority')) or '0',
-            'Published Selected Team': sel or '—',
-            'Selected Spread': num(row.get('Current_Spread')) if fresh else None,
-            'Selected Odds': num(row.get('Odds_American')) if fresh else None,
-            'Home Spread': num(row.get('Backend_Home_Spread')) if fresh else None,
-            'Home Odds': num(row.get('Backend_Home_Odds_American')) if fresh else None,
-            'Away Spread': num(row.get('Backend_Away_Spread')) if fresh else None,
-            'Away Odds': num(row.get('Backend_Away_Odds_American')) if fresh else None,
-            'Sportsbook': text(row.get('Backend_Quote_Book')) or '—',
-            'Quote State': text(row.get('Quote_State')) or '—',
-            'Quote Time': text(row.get('Backend_Quote_Timestamp')) or '—',
-            'Policy EV': num(row.get('V55_Policy_EV')),
-            'Probability State': text(row.get('V55_Probability_State')) or '—',
-            'Originating Brain Families': origin or '—',
-            'Miner State': raw_miner or '—',
-            'Support Families': ' | '.join(support) or '—',
-            'Opposition Families': ' | '.join(opposition) or '—',
-            'Active Systems': system,
-            'Authority Hold Reason': text(row.get('V55_Authority_Hold_Reason')) or '—',
-            'Unified Research State': text(row.get('V55_Unified_Research_State')) or '—',
-            'Unified Candidates': len(cands),
-        })
-    main = pd.DataFrame(board)
-    if len(main):
-        main = main.sort_values(['_kick', 'Matchup'], na_position='last', kind='stable')
-        main = main[NFL_COLUMNS].reset_index(drop=True)
-    else:
-        main = pd.DataFrame(columns=NFL_COLUMNS)
-    details = pd.DataFrame(detail)
-    all_candidates = pd.DataFrame(candidates_detail)
-    diagnostics['unique_upcoming_games'] = len(main)
-    diagnostics['candidate_side_records'] = len(all_candidates)
-    diagnostics['qualified_support_candidate_sides'] = int(sum(
-        r.get('Qualified Support') not in (None, '', '—') for r in candidates_detail))
-    diagnostics['published_miners_with_named_origin'] = diagnostics['miner_originating_candidate_sides']
-    return main, details, all_candidates, dict(diagnostics)
+        if gid:seen_games.add(gid)
+        match=_txt(row.get('Matchup')) or '—'
+        candidates,err=_json_candidates(row.get('V55_Unified_Candidates_JSON'))
+        if err:errors.append({'game_id':gid,'reason':err})
+        cand_by_market={m:[] for m in MARKETS};identity=set()
+        for c in candidates:
+            m=_norm_market(c.get('market'));side=_txt(c.get('side')).upper()
+            book=_txt(c.get('price_book')).lower();line=_num(c.get('price_spread'))
+            if m not in MARKETS or side not in (('OVER','UNDER') if m=='totals' else ('HOME','AWAY')):
+                errors.append({'game_id':gid,'reason':'BAD_CANDIDATE_MARKET_SIDE'});continue
+            ident=(gid,m,side,book,line)
+            if ident in identity:
+                errors.append({'game_id':gid,'reason':'DUPLICATE_CANDIDATE_IDENTITY'});continue
+            identity.add(ident)
+            c=dict(c)
+            c['origins'] = c.get('origins') if isinstance(c.get('origins'),list) else []
+            cand_by_market[m].append(c)
+            authorized=bool(not stale and _valid_action(row,c,audit,at,kick))
+            if _auth(c.get('bet_authority')) and not authorized:
+                errors.append({'game_id':gid,'reason':'BACKEND_AUTHORITY_UNVERIFIED_IN_DISPLAY','market':m,'side':side})
+            # Preserve backend history/certificate keys but do not infer them.
+            detail.append({'Game ID':gid,'Game Time':kick.astimezone(__import__('zoneinfo').ZoneInfo('America/New_York')).strftime('%a %b %d %I:%M %p') if kick else '—',
+                'Matchup':match,'Market':m.upper(),'Side':side,'Team/Selection':_txt(c.get('team')) or side,
+                'Book':book,'Line':line,'Odds':_num(c.get('price_odds')),
+                'Backend Status':_txt(c.get('status')) or '—',
+                'Published Action':_txt(c.get('status')) if authorized else 'RESEARCH — NOT A BET',
+                'Bet Authority':int(authorized),'Originating Brains':' | '.join(c['origins']) or '—',
+                'System IDs':' | '.join(c.get('system_ids') or [] ) or '—',
+                'Qualified Components':' | '.join(c.get('qualified_family_keys') or []) or '—',
+                'OOS ROI':_num(c.get('validated_roi')) if authorized else None,
+                'OOS ROI Floor':_num(c.get('validated_roi_lower')) if authorized else None,
+                'OOS Certificate':_txt(c.get('certificate_id')),
+                'Hold': '—' if authorized else _txt(c.get('hold') or c.get('status') or row.get('V55_Authority_Hold_Reason')),
+                'Quote UTC':_txt(c.get('quote_utc')),'Core Reference':_txt(c.get('core_reference_team')),
+                'Opposes CORE':bool(c.get('opposes_core',False))})
+            metrics['candidate_sides']+=1
+            if authorized:metrics['authorized_candidates']+=1
+            for f in c['origins']:metrics['brain_'+_txt(f).upper()]+=1
+            if 'CORE' in c['origins'] and c.get('opposes_core'):
+                errors.append({'game_id':gid,'reason':'CORE_ORIGIN_OPPOSES_CORE_CONTRADICTION'})
+        approved=next((c for group in cand_by_market.values() for c in group
+                       if not stale and _valid_action(row,c,audit,at,kick)),None)
+        if _auth(row.get('V55_Bet_Authority')) and not approved:
+            errors.append({'game_id':gid,'reason':'AUTHORIZED_GAME_HAS_NO_EXACT_CANDIDATE_MATCH'})
+        market_cells={}
+        for m in MARKETS:
+            prefix=BR[m]
+            cand=cand_by_market[m]
+            valid=next((x for x in cand if not stale and _valid_action(row,x,audit,at,kick)),None)
+            if valid:
+                action=_txt(valid['status']).upper();picked=_team_label(row,valid)
+                roi=_pct(valid.get('validated_roi'));floor=_pct(valid.get('validated_roi_lower'))
+            elif cand:
+                # Show backend research signals without promoting them to bets.
+                action='RESEARCH';picked='—';roi='—';floor='—'
+            else:
+                action=('PASS' if m=='spreads' and _txt(row.get('V55_Bet_Decision')).upper()=='PASS' else '—')
+                picked='—';roi='—';floor='—'
+            market_cells.update({f'{prefix} Action':action,f'{prefix} Pick':picked,
+                                 f'{prefix} OOS ROI':roi,f'{prefix} ROI Floor':floor})
+        origins=sorted({f for group in cand_by_market.values() for c in group for f in c.get('origins',[])})
+        systems=sorted({t for group in cand_by_market.values() for c in group for t in (c.get('system_ids') or [])})
+        pathi=_txt(row.get('V55_Raw_Pathi'))
+        date=kick.astimezone(__import__('zoneinfo').ZoneInfo('America/New_York')).strftime('%a %b %d %I:%M %p') if kick else '—'
+        act=(BR[_norm_market(approved['market'])]+': '+_team_label(row,approved)) if approved else '—'
+        main.append({'Game Time':date,'Matchup':match,**market_cells,
+             'Production Plays':act,'Pathi State':'TRACK' if pathi else '—',
+             'Pathi Overlay':pathi or '—','Edge Sources':' | '.join(origins) or '—',
+             'System Trigger':' | '.join(systems) or '—','_kick':kick,'_gid':gid})
+        metrics['upcoming_games']+=1
+        metrics['authorized_games']+=bool(approved)
+        metrics['strong_bets']+=bool(approved and approved.get('status')=='STRONG BET')
+        metrics['games_with_candidates']+=bool(candidates)
+    mainframe=pd.DataFrame(main)
+    if not mainframe.empty:
+        mainframe['_sortable']=mainframe['_kick'].map(lambda d:d or datetime.max.replace(tzinfo=timezone.utc))
+        mainframe=mainframe.sort_values(['_sortable','Matchup'],kind='stable').drop(columns=['_sortable','_kick','_gid'])
+        mainframe=mainframe[NFL_COLUMNS].reset_index(drop=True)
+    else:mainframe=pd.DataFrame(columns=NFL_COLUMNS)
+    return mainframe,pd.DataFrame(detail),dict(metrics),errors
 
+def _read_history_registry(uri=REGISTRY_URI):
+    """Read-only certificate summaries; no automatic recovery or source fabrication."""
+    from google.cloud import storage
+    import hashlib
+    b,p=uri[5:].split('/',1)
+    doc=json.loads(storage.Client().bucket(b).blob(p).download_as_text())
+    if doc.get('schema')!=REGISTRY_SCHEMA or doc.get('status')!='PASS_CERTIFIED_ROI_REGISTRY':
+        raise ValueError('NO_PUBLISHED_VALIDATED_ROI_CERTIFICATES')
+    cert=doc.get('certificates',[])
+    calculated=hashlib.sha256(json.dumps(cert,sort_keys=True,separators=(',',':'),allow_nan=False,default=str).encode()).hexdigest()
+    if doc.get('certificates_sha256')!=calculated:raise ValueError('CORRUPT_ROI_CERTIFICATE_REGISTRY')
+    return doc
 
 def render_published_v55_board(st):
-    """Replace previous double research table with exact NFL board format."""
+    """Existing sharp_line_dashboard.py calls this exact function unchanged."""
     import pandas as pd
-    try:
-        from ncaaf_v55_board import read_published_latest
-        weekly, audit = read_published_latest()
+    st.subheader('NCAAF V5.5 — Validated Betting Edges')
+    try:weekly,audit=read_published_latest()
     except Exception as exc:
-        st.error('Verified NCAAF V5.5 publication unavailable; no V1 fallback.')
-        st.code(f'{type(exc).__name__}: {str(exc)[:450]}')
+        st.error('NCAAF verified publication unavailable. No V1 fallback.')
+        st.code(f'{type(exc).__name__}: {str(exc)[:350]}')
         return
-    if (audit.get('status') != 'COMPLETE_V55_INDEPENDENT_WEEKLY_SHADOW' or
-            audit.get('production_v1_probabilities_used') is not False):
-        st.error('Backend publication provenance failed; board withheld.')
-        st.json({'status':audit.get('status'),'v1_probabilities_used':audit.get('production_v1_probabilities_used')})
-        return
-    if not isinstance(weekly, pd.DataFrame):
-        st.error('Invalid backend published table.')
-        return
-    try:
-        main, details, candidate_ledger, diag = nfl_shaped_game_board(weekly)
+    if audit.get('v55_authority_policy_id')!=POLICY:
+        st.warning('This board was published by a different/legacy authority policy. It cannot show ROI-authorized bets.')
+    if audit.get('publication_status')=='STALE_MARKET':
+        st.error('Published snapshot is stale. All betting actions are hidden until the backend refreshes.')
+    try:main,details,stats,issues=nfl_shaped_game_board(weekly,audit)
     except Exception as exc:
-        st.error('Cannot construct verified NCAAF board from backend publication.')
-        st.code(f'{type(exc).__name__}: {str(exc)[:500]}')
+        st.error('Unable to format backend publication. No bet calculation attempted.')
+        st.code(f'{type(exc).__name__}: {str(exc)[:350]}')
         return
-    # NFL UI: date filter, subtitle, five metrics, one 19-col betting board,
-    # then a single on-demand additional-detail selector.
-    # Use backend start times in the detail table to reconstruct the ET date.
-    d = details.copy()
-    date_options = ['All']
-    if len(d):
-        dates = sorted({x[:11] for x in d['Game Time'].astype(str) if x != '—'})
-        # The source uses short weekday/time. Group instead using actual kickoff.
-        if 'Game_Start_UTC' in weekly:
-            wk = weekly.copy()
-            wk['_et_date'] = pd.to_datetime(wk['Game_Start_UTC'], utc=True, errors='coerce').dt.tz_convert('America/New_York').dt.strftime('%Y-%m-%d')
-            mapping = {text(r.get('Game_ID')) or text(r.get('Matchup')): r['_et_date'] for _, r in wk.iterrows()}
-            d['_date'] = d.apply(lambda x: mapping.get(text(x['Game ID']) or text(x['Matchup']), ''), axis=1)
-            date_options = ['All'] + sorted(x for x in d['_date'].dropna().unique().tolist() if x)
-    date_choice = st.selectbox('Game date', date_options, index=0, key='ncaaf-v55-nfl-parity-date')
-    if date_choice != 'All' and '_date' in d:
-        game_ids = set(d.loc[d['_date'].eq(date_choice),'Game ID'])
-        matchups = set(d.loc[d['_date'].eq(date_choice),'Matchup'])
-        d = d.loc[d['_date'].eq(date_choice)].copy()
-        main = main.loc[main['Matchup'].isin(matchups)].copy()
-        if len(candidate_ledger):
-            candidate_ledger = candidate_ledger.loc[candidate_ledger['Matchup'].isin(matchups)].copy()
-    st.subheader('NCAAF V5.5 Production — Spread, H2H & Totals')
-    st.caption('Same 19-column layout as NFL. V5.5 publishes SPREADS only at present; H2H/Totals are not substituted from V1. All actions, prices, and supporting evidence come from the verified NCAAF backend.')
-    st.caption(f"Background publication: {audit.get('published_at_utc','—')} · snapshot {audit.get('snapshot_id','—')} · status {audit.get('publication_status','—')}")
-    if audit.get('publication_status') == 'STALE_MARKET':
-        st.error('Backend quotes are stale. No current bets can be shown.')
-    spr_bets = int(main['Spr Action'].isin(BET_ACTIONS).sum())
-    strong_bets = int(main['Spr Action'].eq('STRONG BET').sum())
-    candidates = int(main['Spr Action'].eq('CANDIDATE').sum())
-    fresh = int(d.get('Quote State',pd.Series(dtype=str)).fillna('').astype(str).str.startswith('FRESH_').sum())
-    a,b,c,e,f = st.columns(5)
-    a.metric('Upcoming games',len(main))
-    b.metric('Spread candidates',candidates)
-    c.metric('Confirmed spread bets',spr_bets)
-    e.metric('Strong bets',strong_bets)
-    f.metric('Fresh priced',fresh)
-    if main.empty:
-        st.info('No upcoming published games.')
-    else:
-        st.dataframe(main, use_container_width=True, hide_index=True)
-    extra = st.selectbox('Additional NCAAF tables — load only when selected',[
-        'Betting Board only', 'System Details', 'Model / Bet Authority Details',
-        'Research Candidate Sides', 'Publication / Price Diagnostics',
-    ], index=0, key='ncaaf-v55-nfl-parity-detail')
-    if extra == 'System Details':
-        cols = ['Game Time','Matchup','Originating Brain Families','Miner State','Support Families',
-                'Opposition Families','Active Systems','Unified Research State']
-        st.dataframe(d[[x for x in cols if x in d]], use_container_width=True, hide_index=True)
-        # The live failure is visible here. Do not silently swap in history.
-        miner_available = int(d['Miner State'].astype(str).isin(['—','NOT_EVALUABLE','NOT_PUBLISHED']).sum()) if len(d) else 0
-        if miner_available:
-            st.warning(f'{miner_available} game rows have no evaluable/published live Miner signal. Historical Miner performance does not automatically become a live vote; fix the backend evidence publication.')
-    elif extra == 'Model / Bet Authority Details':
-        st.dataframe(d.drop(columns=['_date'], errors='ignore'),use_container_width=True,hide_index=True)
-    elif extra == 'Research Candidate Sides':
-        if len(candidate_ledger):
-            st.dataframe(candidate_ledger,hide_index=True,use_container_width=True)
-            st.caption('Retrospective or live research candidates are NOT bets unless published authority and prices match the selected game side. These rows do not grant bet authority.')
+    # All date filters operate on backend kickoff, never displayed text.
+    dates=['All']
+    if not weekly.empty and 'Game_Start_UTC' in weekly:
+        kick=pd.to_datetime(weekly['Game_Start_UTC'],utc=True,errors='coerce')
+        dates += sorted({str(x) for x in kick.dt.tz_convert('America/New_York').dt.strftime('%Y-%m-%d').dropna().unique()})
+    select=st.selectbox('Game date',dates,key='ncaaf-v55-roi-date')
+    if select!='All' and 'Game_Start_UTC' in weekly:
+        target=weekly.copy()
+        target['_et']=pd.to_datetime(target['Game_Start_UTC'],utc=True,errors='coerce').dt.tz_convert('America/New_York').dt.strftime('%Y-%m-%d')
+        main,details,stats,issues=nfl_shaped_game_board(target[target['_et']==select].drop(columns=['_et']),audit)
+    st.caption(f"Published: {audit.get('published_at_utc','—')} · snapshot: {audit.get('snapshot_id','—')} · ROI certificate count: {audit.get('v55_validated_edge_certificates',0)}")
+    st.caption('Spread / H2H / Totals; backend ROI and conservative ROI floor only. Research signals are not bets. No predicted probabilities.')
+    cs=st.columns(5)
+    for col,label,value in zip(cs,('Upcoming games','Games with signals','Authorized bets','Strong bets','ROI certificates'),
+                               (stats.get('upcoming_games',0),stats.get('games_with_candidates',0),stats.get('authorized_games',0),stats.get('strong_bets',0),audit.get('v55_validated_edge_certificates',0))):
+        col.metric(label,int(value or 0))
+    st.dataframe(main,hide_index=True,use_container_width=True)
+    extra=st.selectbox('Additional NCAAF tables — load only when selected',
+      ['Betting Board only','Research Candidate Sides','System Details & History','Publication / Price Diagnostics'],
+      key='ncaaf-v55-roi-extra')
+    if extra=='Research Candidate Sides':
+        if details.empty:st.info('No backend-originated candidates in this publication.')
+        else:st.dataframe(details,hide_index=True,use_container_width=True)
+    if extra=='System Details & History':
+        if details.empty:st.info('No published system events.')
         else:
-            st.info('No independent side-level candidates published for the selected date.')
-    elif extra == 'Publication / Price Diagnostics':
-        st.json({**diag, 'snapshot_id':audit.get('snapshot_id'),
-                 'backend_authorized_bets':audit.get('v55_authorized_bet_rows'),
-                 'miner_live_bridge':audit.get('miner_live_bridge'),
-                 'v55_live_system_evaluation':audit.get('v55_live_system_evaluation'),
-                 'v55_unified_artifact_hold':audit.get('v55_unified_artifact_hold'),
-                 'v55_authority_policy_status':audit.get('v55_authority_policy_status')})
-        if diag.get('duplicate_game_rows_suppressed'):
-            st.error('Backend duplicated game identities. Duplicated records were withheld; publication needs repair.')
-    if spr_bets == 0:
-        st.caption('No NCAAF wager has current backend authorization in this publication. Research candidates remain available in the detail selector; the UI does not authorize wagers.')
+            options=details.index.tolist()
+            # Click any row to inspect the named historical edge; fall back to
+            # a selectbox on Streamlit versions without dataframe selection.
+            idx=None
+            if hasattr(st,'dataframe'):
+                try:
+                    event=st.dataframe(details[['Matchup','Market','Side','Book','System IDs','OOS Certificate','Published Action']],
+                        use_container_width=True,hide_index=True,on_select='rerun',
+                        selection_mode='single-row',key='ncaaf-v55-roi-system-select')
+                    chosen=event.selection.rows if event is not None else []
+                    if chosen:idx=options[chosen[0]]
+                except (TypeError,AttributeError):pass
+            if idx is None:
+                def label(idx):
+                    r=details.loc[idx]
+                    return f"{r['Matchup']} — {r['Market']} {r['Side']} / {r['Book']} / {r['System IDs'][:70]}"
+                idx=st.selectbox('Select a system firing to inspect',options,format_func=label,key='ncaaf-v55-roi-history')
+            selected=details.loc[idx]
+            st.json({k:selected[k] for k in ['Game ID','Market','Side','Originating Brains','System IDs','Qualified Components','Backend Status','Published Action','Hold','OOS Certificate']})
+            certificate=_txt(selected['OOS Certificate'])
+            if not certificate:
+                st.info('No validated OOS betting record for this live research signal.')
+            else:
+                try:
+                    registry=_read_history_registry()
+                    found=next((r for r in registry.get('certificates',[]) if r.get('id')==certificate),None)
+                    if not found:st.error('Published live certificate is absent from the research registry.')
+                    else:
+                        st.dataframe(pd.DataFrame([{'Season':season,**result} for season,result in sorted(found.get('by_season',{}).items())]),hide_index=True,use_container_width=True)
+                        st.json({k:found.get(k) for k in ('components','market','side','book','line','wins','losses','pushes','oos_unique_games','realized_roi','oos_roi_lower_adjusted','confidence_method','source_sha256')})
+                except Exception as exc:st.warning(f'Certificate history unavailable: {type(exc).__name__}: {str(exc)[:140]}')
+    if extra=='Publication / Price Diagnostics':
+        st.json({k:audit.get(k) for k in ('status','publication_status','v55_authority_policy_id','v55_authority_probability_basis','v55_authorized_bet_rows','v55_validated_edge_certificates','v55_live_signal_rejections','v55_rejected_quote_pairs','v55_conflict_veto_rows')})
+        if issues:st.dataframe(pd.DataFrame(issues),hide_index=True,use_container_width=True)
+        elif not stats.get('authorized_games'):st.info('No published ROI-authorized bet; inspect backend research certificate status.')
