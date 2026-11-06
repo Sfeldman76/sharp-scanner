@@ -274,3 +274,81 @@ def attach_any_brain_candidates(board, vetted_sides, *, raw_events=None, live_re
         if col in board.columns and not out[col].equals(board[col]):
             raise RuntimeError('BRAIN_CANDIDATE_ILLEGAL_AUTHORITY_MUTATION:'+col)
     return out,audit
+
+
+def project_unified_candidates(board):
+    """Compatibility projection from the ONE unified side-candidate ledger.
+
+    Does not re-evaluate CORE, PT, Miner, pricing, independent evidence or bets.
+    No alternate source may promote a candidate or revise the betting decision.
+    """
+    import pandas as pd
+    if not isinstance(board, pd.DataFrame):
+        raise TypeError("UNIFIED_CANDIDATE_BOARD_NOT_DATAFRAME")
+    out = board.copy()
+    audit = {"status": "CANONICAL_UNIFIED_RESEARCH_ONLY", "games":len(out),
+             "candidate_games":0,"candidate_game_sides":0,"qualified_candidate_game_sides":0,
+             "opposing_core_side_candidates":0,"by_origin":{},"by_origin_sides":{},
+             "bet_authority_changed":False, "source":"V55_Unified_Candidates_JSON"}
+    counts=[]; qcounts=[]; origin_cols=[]; research_status=[]; details=[]
+    for _, row in out.iterrows():
+        raw = row.get("V55_Unified_Candidates_JSON")
+        if isinstance(raw, str):
+            try: items = json.loads(raw)
+            except (ValueError, TypeError):
+                raise RuntimeError("UNIFIED_CANDIDATES_INVALID_JSON")
+        elif isinstance(raw, list):items = raw
+        else:items = []
+        if not isinstance(items,list) or any(not isinstance(x,dict) for x in items):
+            raise RuntimeError("UNIFIED_CANDIDATES_NOT_ARRAY")
+        # The unified engine also records inspected sides with zero origins.
+        candidates=[x for x in items if x.get('origins')]
+        if len({(x.get('game_id'),x.get('side')) for x in candidates}) != len(candidates):
+            raise RuntimeError("UNIFIED_DUPLICATE_GAME_SIDE")
+        for x in candidates:
+            if str(x.get('game_id') or '')!=str(row.get('Game_ID') or ''):
+                raise RuntimeError("UNIFIED_CANDIDATE_GAME_ID_MISMATCH")
+        # Keep the established detail field names as aliases, while their
+        # values come ONLY from unified authority's own persisted snapshots.
+        candidates=[dict(x) for x in candidates]
+        for x in candidates:
+            x['system_ids']=sorted(set(
+                (x.get('research_system_ids') or [])+
+                (x.get('certified_system_ids') or [])))
+            x['qualified_independent_families']=len(x.get('qualified_family_keys') or [])
+            x['opposing_independent_families']=len(x.get('opposing_family_keys') or [])
+            x['price_observed_utc']=x.get('quote_utc')
+            published_action=str(row.get('V55_Bet_Decision') or '').upper()
+            published_auth=str(row.get('V55_Bet_Authority') or '').lower() in ('true','1','1.0')
+            published_team=str(row.get('Selected_Team') or '').strip().lower()
+            same_team=str(x.get('team') or '').strip().lower()==published_team
+            x['bet_authority']=int(published_auth and same_team and
+                published_action in ('BET','STRONG BET'))
+            x['status']=published_action if x['bet_authority'] else (
+                x.get('hold') or 'UNIFIED_RESEARCH_ONLY')
+        families=sorted({str(x).upper() for cand in candidates for x in cand['origins']})
+        qcount=sum(bool(x.get('qualified_family_keys')) for x in candidates)
+        counts.append(len(candidates));qcounts.append(qcount)
+        origin_cols.append('|'.join(families) if families else None)
+        research_status.append('CANONICAL_UNIFIED_CANDIDATES' if candidates else 'NO_UNIFIED_CANDIDATES')
+        details.append(json.dumps(candidates,sort_keys=True))
+        if candidates:audit['candidate_games']+=1
+        audit['candidate_game_sides']+=len(candidates)
+        audit['qualified_candidate_game_sides']+=qcount
+        core=str(row.get('Selected_Team') or '').lower().strip()
+        if core:audit['opposing_core_side_candidates']+=sum(
+            str(x.get('team') or '').lower().strip()!=core for x in candidates)
+        for f in families:audit['by_origin'][f]=audit['by_origin'].get(f,0)+1
+        for cand in candidates:
+            for f in set(str(v).upper() for v in cand['origins']):
+                audit['by_origin_sides'][f]=audit['by_origin_sides'].get(f,0)+1
+    out['V55_Any_Brain_Candidate_Count']=counts
+    out['V55_Any_Brain_Qualified_Candidate_Count']=qcounts
+    out['V55_Any_Brain_Origin_Families']=origin_cols
+    out['V55_Any_Brain_Candidates_JSON']=details
+    out['V55_Any_Brain_Research_Status']=research_status
+    for col in ('V55_Bet_Authority','V55_Bet_Decision','V55_Policy_EV',
+                'V55_Policy_Stake_Units','V55_Authority_Policy_Id'):
+        if col in board and not out[col].equals(board[col]):
+            raise RuntimeError('CANONICAL_PROJECTION_ILLEGAL_AUTHORITY_MUTATION:'+col)
+    return out,audit

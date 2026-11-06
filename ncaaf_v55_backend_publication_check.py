@@ -8,6 +8,9 @@ TABLE = 'sharplogger.sharp_data.ncaaf_v55_live_board'
 def inspect(audit):
     miner=audit.get('v55_unified_miner_v2_live_executor') or {}
     live=audit.get('v55_live_system_evaluation') or {}
+    feature=audit.get('v55_unified_full_atom_executor') or {}
+    canonical=audit.get('v55_any_brain_candidate_discovery') or {}
+    handoff=audit.get('v55_any_brain_handoff_diagnostics') or {}
     return {
         'published_at':audit.get('published_at_utc'),
         'unified_backend_bridge_deployed':bool(miner),
@@ -17,6 +20,19 @@ def inspect(audit):
         'source_atoms_unavailable':miner.get('unavailable_atoms'),
         'quote_atom_live_firings':miner.get('fired_rule_ids'),
         'quote_atom_research_events':audit.get('v55_unified_quote_atom_research_events'),
+        'full_atom_provider_status':feature.get('status'),
+        'full_atom_verified_rows':feature.get('eligible_rows'),
+        'full_atom_fired_rules':feature.get('fired_rule_ids'),
+        'full_atom_research_events':feature.get('research_event_rows'),
+        'full_atom_provider_error':feature.get('provider_error'),
+        'canonical_candidate_source':canonical.get('source'),
+        'canonical_candidate_status':canonical.get('status'),
+        'canonical_candidate_sides':canonical.get('candidate_game_sides'),
+        'canonical_origin_sides':canonical.get('by_origin_sides'),
+        'canonical_origin_games':canonical.get('by_origin'),
+        'unified_candidate_sides':audit.get('v55_unified_candidate_sides'),
+        'live_shadow_handoff_status':handoff.get('research_only_live_signal_bridge'),
+        'certification_state':audit.get('v55_unified_certification_state'),
         'legacy_live_miner_status':live.get('miner'),
         'legacy_live_miner_vote_rows':live.get('miner_vote_rows'),
         'legacy_live_miner_report_status':live.get('miner_report_status'),

@@ -1777,23 +1777,6 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
         # Missing pinned research must not be invented or kill the entire PRICE board.
         # With no certified file, the unified engine can publish candidates but no bets.
         _unified_artifact_hold = type(_unified_exc).__name__ + ':' + str(_unified_exc)[:180]
-    _unified_frames = []
-    if isinstance(combined_events, pd.DataFrame) and not combined_events.empty:
-        # Vetted explicit events + exact registry-matched Miner/other events already
-        # passed the EXISTING V5.5 pregame/frozen-rule check above.
-        _unified_verified_events = combined_events.copy()
-        _unified_verified_events['Registry_Verified'] = True
-        _unified_frames.append(_unified_verified_events)
-    if isinstance(explicit_events, pd.DataFrame) and not explicit_events.empty:
-        _unified_unqualified_events = explicit_events.copy()
-        _unified_unqualified_events['Registry_Verified'] = False
-        _unified_frames.append(_unified_unqualified_events)
-    _unified_events = pd.concat(_unified_frames, ignore_index=True, sort=False) if _unified_frames else None
-    out, policy = evaluate_v55_unified(
-        out, _unified_events, miner_library=_unified_miner,
-        certification=_unified_cert)
-    policy['v55_unified_artifact_hold'] = _unified_artifact_hold
-    updated.update(policy)
     # Candidate origination is game-side evidence discovery only. It cannot
     # mutate owner betting authority, model probabilities, or staking amounts.
     # Live Miner vote rows are research observations, NOT frozen OOS authority.
@@ -1830,24 +1813,36 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
                        if isinstance(x,pd.DataFrame) and not x.empty]
     combined_shadow_events=(pd.concat(shadow_all_frames,ignore_index=True,sort=False)
                             if shadow_all_frames else pd.DataFrame())
-    from ncaaf_v55_any_brain_candidates import attach_any_brain_candidates
-    try:
-        qualified_two_sides, _ = attach_v55_qualified_evidence(
-            brain_scan_sides, combined_events)
-        out, any_brain_audit = attach_any_brain_candidates(
-            out,qualified_two_sides,raw_events=explicit_events,
-            live_research_events=combined_shadow_events)
-        any_brain_audit['two_sided_scan_build']=brain_scan_build_status
-    except Exception as exc:
-        any_brain_audit={'status':'FAIL_CLOSED_ANY_BRAIN_DISCOVERY',
-                        'error':type(exc).__name__,'bet_authority_changed':False,
-                        'two_sided_scan_build':brain_scan_build_status}
-        out['V55_Any_Brain_Research_Status']='DISCOVERY_UNAVAILABLE'
-        out['V55_Any_Brain_Candidates_JSON']='[]'
-        out['V55_Any_Brain_Candidate_Count']=0
-        log('[NCAAF-V55-ANY-BRAIN-DISCOVERY-ERROR] '+type(exc).__name__+': '+str(exc))
-        import traceback
-        log('[NCAAF-V55-ANY-BRAIN-DISCOVERY-TRACEBACK] '+traceback.format_exc())
+    # The other-source producers have ALREADY verified their original quote,
+    # game and signal clock. Normalize as research-only input; the common
+    # decision engine rechecks current book, price, side, and observation time.
+    from ncaaf_v55_unified_authority import normalize_prospective_shadow_events
+    _unified_shadow_events = normalize_prospective_shadow_events(combined_shadow_events)
+    _unified_frames = []
+    if isinstance(combined_events, pd.DataFrame) and not combined_events.empty:
+        # Vetted explicit events + exact registry-matched Miner/other events already
+        # passed the EXISTING V5.5 pregame/frozen-rule check above.
+        _unified_verified_events = combined_events.copy()
+        _unified_verified_events['Registry_Verified'] = True
+        _unified_frames.append(_unified_verified_events)
+    if isinstance(explicit_events, pd.DataFrame) and not explicit_events.empty:
+        _unified_unqualified_events = explicit_events.copy()
+        _unified_unqualified_events['Registry_Verified'] = False
+        _unified_frames.append(_unified_unqualified_events)
+    if not _unified_shadow_events.empty:
+        _unified_frames.append(_unified_shadow_events)
+    _unified_events = pd.concat(_unified_frames, ignore_index=True, sort=False) if _unified_frames else None
+    out, policy = evaluate_v55_unified(
+        out, _unified_events, miner_library=_unified_miner,
+        certification=_unified_cert, live_feature_rows=live_system_rows)
+    policy['v55_unified_artifact_hold'] = _unified_artifact_hold
+    updated.update(policy)
+    # Compatibility fields and the detail audit are a lossless PROJECTION of
+    # the one already-published unified decision/evidence record. Never run a
+    # second candidate selector with a different evidence feed.
+    from ncaaf_v55_any_brain_candidates import project_unified_candidates
+    out, any_brain_audit = project_unified_candidates(out)
+    any_brain_audit['two_sided_scan_build'] = brain_scan_build_status
 
     # Any-Brain handoff observability. Research-only; never changes authority.
     def _ab_event_count(frame):
@@ -1880,7 +1875,7 @@ def bridge_weekly_prices(weekly, audit, *, bq_client, log_func=None, storage_cli
             if isinstance(explicit_gate, dict) else str(explicit_gate),
         'live_evaluator_status': live_system_audit.get('status'),
         'live_big_al_pathi_status': live_system_audit.get('big_al_pathi'),
-        'research_only_live_signal_bridge': 'NOT_YET_CONNECTED',
+        'research_only_live_signal_bridge': 'CONNECTED_TO_UNIFIED_ENGINE',
         'bet_authority_changed': False,
     }
 

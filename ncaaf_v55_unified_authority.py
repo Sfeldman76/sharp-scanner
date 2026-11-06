@@ -167,6 +167,33 @@ def _event_valid(raw, row, team, now, miner_rules):
             "observed_at": obs.isoformat()}
 
 
+def normalize_prospective_shadow_events(events):
+    """Translate only independently quote-attested discovery events to unified input.
+
+    Historical qualification is deliberately NOT asserted. Validation is repeated
+    by _event_valid against the current publisher's exact game, side and quote.
+    """
+    import pandas as pd
+    if not isinstance(events, pd.DataFrame) or events.empty:
+        return pd.DataFrame()
+    required = {"Game_ID", "Game_Start_UTC", "Source_Family", "Signal_Family",
+                "Signal_Side", "Observed_At_UTC", "Observed_Quote_UTC",
+                "Observed_Book", "Observed_Spread"}
+    if not required.issubset(events.columns):
+        return pd.DataFrame()
+    out = events.copy()
+    out["Direction_Verified"] = True
+    out["Provenance_Status"] = "PRE_GAME_VERIFIED_LIVE_RECALCULATED"
+    out["Registry_Verified"] = False
+    out["Qualification_Status"] = "RESEARCH_ONLY"
+    out["OOS_Status"] = "NOT_CERTIFIED"
+    out["Qualified_At_UTC"] = None
+    out["Evidence_Family_Key"] = out.apply(
+        lambda x: _str(x.get('Evidence_Family_Key')) or
+        ('RESEARCH_SOURCE::' + _str(x.get('Source_Family')).upper()), axis=1)
+    return out
+
+
 def _independent_keys(evidence):
     """Count independent evidence components, not mechanisms or raw families.
 
@@ -222,7 +249,7 @@ def _certs(doc):
     return found
 
 
-def evaluate_v55_unified(board, events, *, miner_library=None, certification=None, now=None):
+def evaluate_v55_unified(board, events, *, miner_library=None, certification=None, now=None, live_feature_rows=None):
     """Return one V5.5 board row/game and its single unified authority audit.
 
     The existing V5.5 publisher remains the ONLY authority publisher.
@@ -251,6 +278,26 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
     new_miner_events, new_miner_audit = evaluate_quote_atoms(sides, miner_rules, now=now)
     if not new_miner_events.empty:
         signals.extend(new_miner_events.to_dict('records'))
+    # Full atom-catalog execution uses the EXACT frozen 2013-25 atom producer.
+    # It is research only until original-vintage OOS certificates exist.
+    from ncaaf_v55_live_feature_handoff import evaluate_verified_live_features
+    feature_events, feature_audit = evaluate_verified_live_features(
+        sides, live_feature_rows, miner_library, now=now)
+    if not feature_events.empty:
+        signals.extend(feature_events.to_dict('records'))
+    # A rule can fire through both quote atoms and full-feature provider.
+    # Count it once per game/side/price so duplicate evaluators never increase
+    # evidence strength or change certification outcomes.
+    unique = {}
+    for ev in signals:
+        key = (_str(ev.get('Game_ID')), _str(ev.get('Source_Family')).upper(),
+               _str(ev.get('Signal_Family')), _team(ev.get('Signal_Side')),
+               _str(ev.get('Observed_Book')).lower(), _num(ev.get('Observed_Spread')))
+        current = unique.get(key)
+        if current is None or (_truth(ev.get('Registry_Verified')) and
+                               not _truth(current.get('Registry_Verified'))):
+            unique[key] = ev
+    signals = list(unique.values())
     out = board.copy()
     for key, val in {
         "V55_Bet_Authority": 0, "V55_Bet_Decision": "PASS",
@@ -303,7 +350,13 @@ def evaluate_v55_unified(board, events, *, miner_library=None, certification=Non
         "v55_unified_live_research_by_brain": {},
         "v55_unified_new_miner_v2_rule_ids_fired": 0,
         "v55_unified_miner_v2_live_executor": new_miner_audit,
-        "v55_unified_upstream_event_rows": len(signals)-len(new_miner_events),
+        "v55_unified_full_atom_executor": feature_audit,
+        "v55_unified_combined_signal_rows_deduplicated": len(signals),
+        "v55_unified_full_atom_research_events": len(feature_events),
+        "v55_unified_certification_state": (
+            "ACCEPTED_COMBINATION_CERTIFICATES" if certs
+            else "MISSING_INDEPENDENT_ORIGINAL_VINTAGE_OOS_COMBINATION_CERTIFICATES"),
+        "v55_unified_upstream_event_rows": max(0, len(signals)-len(new_miner_events)-len(feature_events)),
         "v55_unified_quote_atom_research_events": len(new_miner_events),
         "v55_unified_miner_v2_evidence_state": (
             "LIVE_ACTIVE_OOS_CERTIFIED_SOME_RULES" if any(
