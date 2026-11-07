@@ -103,8 +103,87 @@ def row_normal(raw):
         home=int(float(raw['home_score'])),away=int(float(raw['away_score'])),result=res,
         profit=(gain if res=='WIN' else -1.0 if res=='LOSS' else 0.0))
 
+def line_movement_research(groups, *, movement_points=(0.5, 1.0, 2.0, 3.0, 4.0, 6.0)):
+    """Measure how existing betting results change at *hypothetical* tougher lines.
+
+    Each recorded final score allows exact ATS/push settlement at another line,
+    independent of whether a book ever quoted it. These are line-sensitivity
+    outcomes, NEVER a claim that the alternative was a priced/executable bet.
+
+    Independently, inspect *actual captured quote sequences* to describe
+    opening-to-later line movement. A movement is observed only if two original
+    pregame quote snapshots exist for the same game/market/side/book; a final
+    outcome by itself is never labeled an 'overmove'.
+    """
+    unique={}
+    for g in groups:
+        r=g['record']
+        key=(r['game_id'],r['market'],r['side'],r['book'],r['line'],r['quote'],r['odds'])
+        unique[key]=r
+    graded=list(unique.values())
+    simulations={}
+    for points in movement_points:
+        if points<=0 or int(points*2)!=points*2:raise ValueError('INVALID_MOVEMENT_STEP')
+        counters=Counter()
+        games=set()
+        for r in graded:
+            if r['market'] not in ('spreads','totals'):continue
+            # Moving the offer against the selected position always makes
+            # the bet harder to win. For spreads, fewer awarded points is
+            # harder for HOME or AWAY; for totals, OVER needs a higher total
+            # and UNDER needs a lower total.
+            alternate=(r['line']-points if r['market']=='spreads' or r['side']=='UNDER'
+                       else r['line']+points)
+            result=grade(r['market'],r['side'],alternate,r['home'],r['away'])
+            counters[r['result']+'->'+result]+=1
+            games.add(r['game_id'])
+        if counters:
+            simulations[str(points)]={
+                'original_quote_rows':sum(counters.values()),
+                'unique_games':len(games),
+                'wins_turning_into_push_or_loss':sum(v for k,v in counters.items()
+                                                    if k.startswith('WIN->') and k!='WIN->WIN'),
+                'graded_outcome_transitions':dict(sorted(counters.items())),
+                'alternative_line_executable_quote_claimed':False,
+                'alternative_line_roi_certified':False}
+    chains=defaultdict(list)
+    for r in graded:
+        if r['market'] in ('spreads','totals'):
+            chains[(r['game_id'],r['market'],r['side'],r['book'])].append(r)
+    observed=Counter()
+    movement_examples=[]
+    for key,chain in chains.items():
+        chain.sort(key=lambda x:(x['quote'],x['price_ref']))
+        first,last=chain[0],chain[-1]
+        if first['quote']==last['quote'] or first['line']==last['line']:continue
+        # Opening/last in this chain mean earliest/latest *captured*, not
+        # necessarily the market's official opening/closing line.
+        adverse=(first['line']-last['line'] if first['market']=='spreads' or first['side']=='UNDER'
+                 else last['line']-first['line'])
+        direction='ADVERSE' if adverse>0 else 'FAVORABLE'
+        band='3_PLUS' if abs(adverse)>=3 else '1_TO_UNDER_3' if abs(adverse)>=1 else 'UNDER_1'
+        observed[direction+'_'+band]+=1
+        before=grade(first['market'],first['side'],first['line'],first['home'],first['away'])
+        after=grade(last['market'],last['side'],last['line'],last['home'],last['away'])
+        observed['ACTUAL_OBSERVED_QUOTES_'+before+'_TO_'+after]+=1
+        if len(movement_examples)<20:
+            movement_examples.append({'game_id':key[0], 'market':key[1], 'side':key[2],
+                'book':key[3], 'earliest_captured_line':first['line'],
+                'latest_captured_line':last['line'], 'adverse_points':adverse,
+                'earliest_capture_utc':first['quote'].isoformat(),
+                'latest_capture_utc':last['quote'].isoformat(),
+                'earliest_grade':before,'latest_grade':after})
+    return {'method':'REGRADING_AT_ALTERNATIVE_LINES_AND_CAPTURED_MARKET_MOVES',
+            'alternative_spread_totals_scenarios':simulations,
+            'observed_original_quote_movement_counts':dict(sorted(observed.items())),
+            'observed_move_examples':movement_examples,
+            'status':'DESCRIPTIVE_ONLY_REQUIRES_FROZEN_DISCOVERY_AND_OOS_VALIDATION',
+            'not_a_certified_betting_edge':True}
+
 def _stratum(r):
-    # Exact sportsbook and exact spread/total. No -3 record is used for -6.
+    # Executed-wager ROI uses its original sportsbook line and odds. A -3
+    # historical result ALSO contributes to hypothetical -6 line sensitivity
+    # in line_movement_research(), but not as a fabricated -6 priced wager.
     return (r['market'],r['side'],r['book'],r['line'])
 
 def _group(rows):
@@ -198,6 +277,27 @@ def research(records,*, capture_audit=None, source_sha256=None, holdout_start=20
         groups=_group(clean)
     except ValueError as e:
         root['status']='HOLD_CONFLICTING_SOURCE';root['error']=str(e);return _seal(root)
+    # Actual unit-stake ROI from independently provided original game/price
+    # observations. This descriptive result is NOT an OOS certificate. It lets
+    # research expose prices, graded outcomes, and available betting ROI even
+    # when an external source-capture attestation is still missing.
+    descriptive={}
+    sample_quotes={}
+    for g in groups:
+        r=g['record']
+        key=(r['game_id'],r['market'],r['side'],r['book'],r['line'],r['quote'],r['odds'])
+        sample_quotes[key]=r
+    for m in sorted(MARKETS):
+        ms=[r for r in sample_quotes.values() if r['market']==m]
+        if ms:
+            descriptive[m]={'unique_graded_bet_quotes':len(ms),
+                            'wins':sum(r['result']=='WIN' for r in ms),
+                            'losses':sum(r['result']=='LOSS' for r in ms),
+                            'pushes':sum(r['result']=='PUSH' for r in ms),
+                            'descriptive_realized_roi':sum(r['profit'] for r in ms)/len(ms),
+                            'independent_out_of_sample':False}
+    root['historical_roi_diagnostics']=descriptive
+    root['line_movement_research']=line_movement_research(groups)
     if not _audit_ok(capture_audit,source_sha256):
         root['status']='HOLD_INDEPENDENT_ORIGINAL_CAPTURE_AUDIT_REQUIRED';return _seal(root)
     # Train-only selection from components that were demonstrably frozen before
@@ -287,6 +387,68 @@ def research(records,*, capture_audit=None, source_sha256=None, holdout_start=20
 def _seal(doc):
     doc['certificates_sha256']=digest(doc['certificates'])
     return doc
+
+def warehouse_historical_inputs(*,client=None,project='sharplogger',dataset='sharp_data',
+                                table_override=None):
+    """Discover a real original-pregame signal+quote ledger IN the existing BQ warehouse.
+
+    This is a schema-inspected ingest path, NOT a synthetic construction of
+    historical signal timestamps from modern feature tables. An eligible table
+    must already contain all the original captured evidence fields. Report
+    precise per-table gaps so research can expose what ingestion is still needed.
+    Historical ROI is computed by research() after the source passes this audit.
+    """
+    import re
+    from google.cloud import bigquery
+    if not (re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]*',project) and
+            re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*',dataset)):
+        raise ValueError('INVALID_WAREHOUSE_PROJECT_OR_DATASET')
+    bq=client or bigquery.Client(project=project)
+    schema_sql='SELECT table_name,column_name FROM `'+project+'.'+dataset+'.INFORMATION_SCHEMA.COLUMNS` ORDER BY table_name,column_name'
+    schema=defaultdict(set)
+    for row in bq.query(schema_sql).result():
+        fields=dict(row.items()) if hasattr(row,'items') else {'table_name':row.table_name,'column_name':row.column_name}
+        schema[str(fields['table_name'])].add(str(fields['column_name']))
+    essential=set(REQUIRED)|{'original_pregame_signal_verified','original_pregame_quote_verified','feature_vintage_verified'}
+    # `line` is optional only for h2h rows, but spread/total events must carry it.
+    expected=('ncaaf_v55_original_pregame_bet_events_v1',
+              'ncaaf_v55_original_signal_quote_ledger_v1',
+              'ncaaf_v55_bet_event_ledger_v1',
+              'ncaaf_v55_canonical_bet_events_v1')
+    candidates=sorted((t for t in schema if ('ncaaf' in t.lower() or t in ('moves_with_features_merged','bigal_game_context'))),
+                      key=lambda t:(0 if t in expected else 1,t))
+    gaps={t:sorted(essential-schema[t]) for t in candidates}
+    diagnostics={'status':'HOLD_WAREHOUSE_ORIGINAL_PREGAME_EVENT_LEDGER_NOT_FOUND',
+                 'warehouse':project+'.'+dataset,
+                 'sources_inspected':len(candidates),
+                 'eligible_source_tables':[t for t in candidates if not gaps[t]],
+                 'missing_columns_by_table':gaps,
+                 'no_retroactive_signal_reconstruction':True,
+                 'pricing_from_actual_historical_quotes_only':True}
+    override=(table_override or '').strip()
+    if override:
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*',override):
+            raise ValueError('INVALID_ORIGINAL_EVENTS_TABLE_OVERRIDE')
+        if override not in schema or essential-schema[override]:
+            diagnostics['status']='HOLD_EXPLICIT_EVENT_SOURCE_COLUMNS_INCOMPLETE'
+            diagnostics['explicit_source_table']=override
+            return [],None,diagnostics
+        chosen=override
+    else:
+        eligible=[t for t in candidates if not gaps[t]]
+        if not eligible:return [],None,diagnostics
+        if len(eligible)!=1:
+            diagnostics['status']='HOLD_MULTIPLE_ORIGINAL_EVENT_SOURCE_TABLES__SELECT_EXPLICIT'
+            return [],None,diagnostics
+        chosen=eligible[0]
+    sql=('SELECT * FROM `'+project+'.'+dataset+'.'+chosen+'` '
+         'WHERE SAFE_CAST(season AS INT64) BETWEEN 2013 AND 2026 '
+         'ORDER BY game_id,market,side,book,quote_observed_at_utc,source_family,system_id')
+    rows=[dict(row.items()) for row in bq.query(sql).result(page_size=10000)]
+    diagnostics.update({'status':'WAREHOUSE_ORIGINAL_SOURCE_SCHEMA_FOUND__ROW_VINTAGE_AUDIT_PENDING',
+                        'selected_event_table':project+'.'+dataset+'.'+chosen,
+                        'source_rows':len(rows)})
+    return rows,digest(rows),diagnostics
 
 def load_rows(path):
     if path.startswith('bq://'):

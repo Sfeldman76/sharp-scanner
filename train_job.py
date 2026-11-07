@@ -179,6 +179,71 @@ def main():
     if HEADLESS:
         install_streamlit_shim(log_func)
 
+    # NCAAF_V55_TWO_AUTHORITY_CUTOVER_20261106:
+    # One research engine for all manual NCAAF heavy/research menu entry points.
+    # Do not run historical V2 / Stage2 validation as a parallel betting authority.
+    # The source feed must contain independently captured pregame signal AND quote
+    # events. Missing original data publishes a precise HOLD, never certificates.
+    if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() in {
+        "ncaaf_research_heavy", "ncaaf_research_v2", "ncaaf_full_history_v3",
+        "ncaaf_roi_research", "ncaaf_research", "research", "heavy_research",
+    }:
+        import ncaaf_v55_research as _roi
+        from google.cloud import bigquery
+        from google.api_core.exceptions import NotFound as _GcsNotFound
+        events_uri = os.getenv("NCAAF_V55_ORIGINAL_EVENTS_URI", "").strip()
+        audit_uri = os.getenv("NCAAF_V55_CAPTURE_AUDIT_URI", "").strip()
+        registry_uri = os.getenv("NCAAF_V55_ROI_REGISTRY_URI",
+            f"gs://{bucket}/research/ncaaf/v55/two_engine_roi/current_registry.json")
+        holdout = int(os.getenv("NCAAF_V55_HOLDOUT_START", "2024"))
+        pw.emit("research", "NCAAF V5.5 consolidated ROI research: original-capture input validation", pct=0.10)
+        if not events_uri:
+            # No manually uploaded event manifest required. Inspect the
+            # existing BigQuery warehouse for ORIGINAL pregame signal+quote
+            # records, with explicit schema and vintage holds where missing.
+            try:
+                rows,source_sha,source_diag = _roi.warehouse_historical_inputs(
+                    client=bigquery.Client(project='sharplogger'),
+                    project=os.getenv('GCP_PROJECT','sharplogger'),
+                    dataset=os.getenv('NCAAF_V55_SOURCE_DATASET','sharp_data'),
+                    table_override=os.getenv('NCAAF_V55_ORIGINAL_EVENTS_TABLE',''))
+                source_audit = _roi.read_json(audit_uri) if audit_uri else None
+                result = _roi.research(rows,capture_audit=source_audit,
+                                       source_sha256=source_sha,holdout_start=holdout)
+                result['warehouse_input_diagnostics'] = source_diag
+                if not rows:
+                    result['status'] = source_diag['status']
+                result['source_handoff_status'] = source_diag['status']
+            except Exception as exc:
+                result = _roi.research([],capture_audit=None,holdout_start=holdout)
+                result['status'] = 'HOLD_WAREHOUSE_SOURCE_INSPECTION_FAILED'
+                result['source_handoff_status'] = type(exc).__name__+':'+str(exc)
+        else:
+            try:
+                rows, source_sha = _roi.load_rows(events_uri)
+                source_audit = _roi.read_json(audit_uri) if audit_uri else None
+                result = _roi.research(rows,capture_audit=source_audit,
+                                      source_sha256=source_sha,holdout_start=holdout)
+                result['original_events_uri'] = events_uri
+                result['capture_audit_uri'] = audit_uri or None
+            except (_GcsNotFound, FileNotFoundError) as exc:
+                result = _roi.research([],capture_audit=None,holdout_start=holdout)
+                result['status'] = 'HOLD_ORIGINAL_PREGAME_SOURCE_NOT_FOUND'
+                result['source_handoff_status'] = type(exc).__name__
+        _roi.put_json(registry_uri,result)
+        log_func('[NCAAF-V55-TWO-ENGINE-ROI-RESEARCH] '+json.dumps({
+            'status':result['status'], 'observations':result.get('raw_rows',0),
+            'hypotheses':result.get('tested_hypotheses',0),
+            'certified_edges':len(result.get('certificates',[])),
+            'registry_uri':registry_uri,
+        },sort_keys=True))
+        pw.emit("done" if result['status']=='PASS_CERTIFIED_ROI_REGISTRY' else "error",
+                "NCAAF ROI research: "+result['status'],pct=1.0)
+        if result['status']!='PASS_CERTIFIED_ROI_REGISTRY':
+            raise RuntimeError('[NCAAF-V55-TWO-ENGINE-RESEARCH-HOLD] '+result['status']+
+                ' — inspect the published ROI registry and original signal/price capture evidence')
+        return
+
     # NCAAF_FULL_HISTORY_V3_ISOLATED_ROUTE_20261019 — separate research job mode.
     # No Production V1 or shared heavy-research path is executed by this branch.
     if str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() == "ncaaf_full_history_v3":

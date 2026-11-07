@@ -22646,7 +22646,10 @@ def refresh_ncaaf_v55_background(*, storage_client=None, bq_client=None, bucket_
     No legacy model inference; no V1 probabilities/ledgers; no training. Called
     only after normalized latest sportsbook quotes were stored by detect_utils.
     """
-    from ncaaf_v55_board import market_refresh_and_publish
-    return market_refresh_and_publish(
+    # NCAAF_V55_TWO_AUTHORITY_CUTOVER_20261106:
+    # Scanner odds ingestion is unchanged; only this NCAAF publish call is
+    # replaced.  NEVER execute the old ncaaf_v55_board authority/publisher.
+    from ncaaf_v55_backend import run_backend_refresh
+    return run_backend_refresh(
         storage_client=storage_client,bq_client=bq_client,
         bucket_name=bucket_name,log_func=log_func)

@@ -350,6 +350,15 @@ def evaluate(board,signals,registry,*,now=None,extra_quotes=None,max_bets=3):
     return out,audit
 
 def read_rows(path):
+    if not path:raise ValueError('EMPTY_SOURCE_RECORDS_URI')
+    if path.startswith('bq://'):
+        import re
+        name=path[5:]
+        if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]*\.[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*',name):
+            raise ValueError('INVALID_BQ_SOURCE_TABLE_ID')
+        from google.cloud import bigquery
+        return [dict(row.items()) for row in bigquery.Client(project='sharplogger').query(
+            'SELECT * FROM `'+name+'` LIMIT 100000').result()]
     if path.startswith('gs://'):
         from google.cloud import storage
         b,p=path[5:].split('/',1);content=storage.Client().bucket(b).blob(p).download_as_bytes()
@@ -388,6 +397,11 @@ def publish_snapshot(rows,audit,*,client=None,table='sharplogger.sharp_data.ncaa
               'row_count':len(rows),'payload_sha256':digest,'publication_type':'MARKET_REFRESH'}]
     if audit.get('v55_bet_authority') and audit.get('v55_authority_policy_id')!=POLICY:
         raise RuntimeError('INVALID_LIVE_AUTHORITY_POLICY')
+    # Operational bet kill switch: fail-closed even in LIVE publication mode.
+    # A true certification is not equivalent to authorization to place bets.
+    authorized_switch=os.environ.get('NCAAF_V55_BET_AUTHORITY_MODE','OFF').upper()=='ON'
+    if not authorized_switch and any(r.get('V55_Bet_Authority') for r in rows):
+        raise RuntimeError('BET_AUTHORITY_KILL_SWITCH_OFF__WOULD_PUBLISH_BET')
     # Prevent an H2H/totals action from reaching an old spread-only UI.
     # Enable only AFTER ncaaf_v55_dashboard_route_v3.py (market-aware ROI
     # renderer) has been deployed and tested in the actual Streamlit app.
@@ -405,8 +419,8 @@ def publish_snapshot(rows,audit,*,client=None,table='sharplogger.sharp_data.ncaa
             s(row.get('V55_Bet_Decision')) not in ('BET','STRONG BET') or
             not s(row.get('V55_Validated_Edge_Certificate_ID'))):
             raise RuntimeError('AUTHORIZED_MARKET_SIDE_POLICY_MISMATCH')
-        records=json.loads(row.get('V55_Unified_Candidates_JSON') or '[]')
-        matches=[c for c in records if c.get('bet_authority') and
+        candidate_records=json.loads(row.get('V55_Unified_Candidates_JSON') or '[]')
+        matches=[c for c in candidate_records if c.get('bet_authority') and
                  market(c.get('market'))==chosen_market and
                  s(c.get('side')).upper()==selected_side and
                  s(c.get('certificate_id'))==s(row.get('V55_Validated_Edge_Certificate_ID')) and
@@ -427,6 +441,146 @@ def publish_snapshot(rows,audit,*,client=None,table='sharplogger.sharp_data.ncaa
     errors=bq.insert_rows_json(table,[records[1]],row_ids=[snapshot+':COMPLETE'])
     if errors:raise RuntimeError('BQ_COMPLETE_WRITE_ERROR:'+str(errors)[:300])
     return {'snapshot_id':snapshot,'status':'PASS','rows':len(rows),'authorized':int(audit.get('v55_authorized_bet_rows',0))}
+
+def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,log_func=None):
+    """Production scanner dispatch. ONE NCAAF authority/publisher.
+
+    Existing frozen weekly forecasts and BigQuery paired quotes are data
+    readers only. NO legacy V55 board decisions, candidate selector, or writer
+    executes. Requires separately captured live directional signals; missing
+    feed is clearly held and cannot become certified betting evidence.
+    """
+    import logging
+    from google.cloud import storage,bigquery
+    from google.api_core.exceptions import NotFound
+    import ncaaf_v552_live as frozen_source
+    # Source-only import: does NOT execute the historical authority, board
+    # publisher, V7 shadow selector, or any other decision-making routine.
+    from ncaaf_v55_board import read_scanner_quotes,attach_verified_backend_quotes
+    log=log_func or logging.info
+    bucket=bucket_name or os.environ.get('MODEL_BUCKET','sharp-models')
+    gcs=storage_client or storage.Client()
+    bq=bq_client or bigquery.Client(project='sharplogger')
+    mode=s(os.environ.get('NCAAF_V55_CUTOVER_MODE','SHADOW')).upper()
+    if mode not in ('SHADOW','LIVE'):
+        raise RuntimeError('INVALID_NCAAF_TWO_ENGINE_CUTOVER_MODE')
+
+    # SHA-verifies the GCS frozen weekly snapshot; never call refresh_market_only
+    # or the old market_refresh_and_publish because they invoke old decisions.
+    weekly,source_audit=frozen_source.read_weekly_latest(gcs,bucket_name=bucket)
+    if source_audit.get('production_v1_probabilities_used') is not False:
+        raise RuntimeError('INVALID_FROZEN_FORECAST_PROVENANCE')
+    # Clear older authority and candidate fields from input before the new
+    # engine writes a fresh canonical record. Preserve CORE's original pick.
+    base=weekly.copy()
+    # Weekly Selected_Team is chosen using a former CORE probability/EV
+    # market scan and is NOT a certified ROI system's original selection.
+    # Never attribute it to CORE. Allow the verified quote matcher to return
+    # both sides with no selected-side shortcut.
+    base['Selected_Team']=None
+    legacy=[c for c in base.columns if c.startswith(('V55_','V7_','Confirm_','Oppose_'))]
+    for c in legacy:base.drop(columns=[c],inplace=True)
+    # Market source and current prices are always the scanner's BigQuery feed.
+    book_quotes=read_scanner_quotes(bq,minutes=15,horizon_days=14)
+    board,pricing=attach_verified_backend_quotes(base,book_quotes,max_age_minutes=15)
+    # Source-specific signal timestamps and frozen hashes are mandatory.
+    # Never infer a "directional signal" from CORE probabilities, names, or
+    # a descriptive Pathi/Big Al context-only display overlay.
+    signals_uri=s(os.environ.get('NCAAF_V55_LIVE_SIGNALS_URI'))
+    source_hold=None
+    try:
+        signals=read_rows(signals_uri) if signals_uri else []
+        if not signals_uri:source_hold='LIVE_ORIGINAL_DIRECTIONAL_SIGNAL_FEED_NOT_CONFIGURED'
+    except (NotFound,FileNotFoundError) as exc:
+        signals=[];source_hold='LIVE_DIRECTIONAL_SIGNAL_FEED_MISSING:'+type(exc).__name__
+    if not isinstance(signals,list):
+        raise RuntimeError('INVALID_LIVE_SIGNAL_FEED_SCHEMA')
+    registry_uri=s(os.environ.get('NCAAF_V55_ROI_REGISTRY_URI')) or (
+        'gs://'+bucket+'/research/ncaaf/v55/two_engine_roi/current_registry.json')
+    try:
+        registry=read_registry(registry_uri)
+    except (NotFound,FileNotFoundError) as exc:
+        registry=None
+        source_hold=(source_hold+';' if source_hold else '')+'ROI_REGISTRY_MISSING:'+type(exc).__name__
+
+    extras_uri=s(os.environ.get('NCAAF_V55_OTHER_MARKET_QUOTES_URI'))
+    extra_quotes=read_rows(extras_uri) if extras_uri else None
+    output,audit=evaluate(board.to_dict('records'),signals,registry,extra_quotes=extra_quotes)
+    # Deployment kill switch also controls PUBLICATION of authority. Keep
+    # research candidates but never place BET / STRONG BET on the board in OFF.
+    auth_on=os.getenv('NCAAF_V55_BET_AUTHORITY_MODE','OFF').upper()=='ON'
+    if not auth_on:
+        would_bet=int(audit.get('v55_authorized_bet_rows',0))
+        for row in output:
+            cand=json.loads(row.get('V55_Unified_Candidates_JSON') or '[]')
+            for c in cand:
+                if c.get('bet_authority'):
+                    c['bet_authority']=0
+                    c['hold']='BET_AUTHORITY_OPERATOR_OFF'
+                    c['status']='RESEARCH_ONLY__BET_AUTHORITY_OFF'
+            row['V55_Unified_Candidates_JSON']=json.dumps(cand,sort_keys=True)
+            row['V55_Bet_Authority']=0
+            row['V55_Bet_Decision']='CANDIDATE' if cand else 'PASS'
+            row['V55_Authority_State']=None
+            row['V55_Authority_Hold_Reason']='BET_AUTHORITY_OPERATOR_OFF' if cand else row.get('V55_Authority_Hold_Reason')
+            for field in ('V55_Validated_Edge_Certificate_ID','V55_Validated_Edge_ROI','V55_Validated_Edge_Lower_ROI',
+                          'V55_Bet_Key','V55_Qualified_Evidence_Detail_JSON','V55_Independent_Support_Keys'):
+                row[field]=None
+        audit['two_engine_operator_disabled_authority_candidates']=would_bet
+        audit['v55_bet_authority']=0
+        audit['v55_authorized_bet_rows']=0
+        audit['v55_strong_bet_rows']=0
+    # Sanitization is SERIALIZATION only: never turn a missing numeric
+    # feature into an authorized decision or a synthetic price.
+    def clean_for_json(value):
+        if isinstance(value,dict):return {str(k):clean_for_json(v) for k,v in value.items()}
+        if isinstance(value,(tuple,list)):return [clean_for_json(v) for v in value]
+        if value is None:return None
+        if hasattr(value,'item'):
+            try:return clean_for_json(value.item())
+            except (ValueError,TypeError):pass
+        if isinstance(value,float) and not math.isfinite(value):return None
+        if not isinstance(value,(str,int,float,bool)):
+            try:
+                import pandas as pd
+                if pd.isna(value):return None
+            except (ValueError,TypeError):pass
+            if isinstance(value,(datetime,)) and value.tzinfo:
+                return value.isoformat()
+            return str(value)
+        return value
+    output=clean_for_json(output)
+    audit.update({'two_engine_source_status':'PASS' if not source_hold else 'HOLD',
+                  'two_engine_source_hold':source_hold,
+                  'two_engine_original_signal_rows':len(signals),
+                  'two_engine_live_signal_families':dict(Counter(family(x.get('source_family') or x.get('Source_Family')) for x in signals)),
+                  'two_engine_registry_uri':registry_uri,
+                  'two_engine_source_forecast_run':source_audit.get('run_prefix'),
+                  'two_engine_quote_ingestion':pricing,
+                  'two_engine_cutover_mode':mode})
+    # No public BET authority in SHADOW regardless of certificates.
+    if mode=='SHADOW':
+        audit['two_engine_shadow_authority_would_qualify']=audit.get('v55_authorized_bet_rows',0)
+        audit['two_engine_shadow_status']='PUBLISH_BLOCKED_UNTIL_EXPLICIT_LIVE_CUTOVER'
+        log('[NCAAF-V55-TWO-ENGINE-SHADOW] '+json.dumps({
+            'games':len(output),'prices':pricing.get('priced_games'),
+            'live_signal_rows':len(signals),'certificates':audit.get('v55_validated_edge_certificates'),
+            'would_authorize':audit.get('v55_authorized_bet_rows'),
+            'hold':source_hold,'old_authority_executed':False},sort_keys=True))
+        return {'status':'SHADOW_NO_PUBLICATION','rows':len(output),
+                'signals':len(signals),'authority':0,'hold':source_hold}
+
+    # LIVE is an explicit cutover, never a fallback to the old NCAAF publisher.
+    # Missing original signal capture cannot be published as a deceptively
+    # complete candidate board. It is safe to show a source HOLD via logs.
+    if source_hold:
+        log('[NCAAF-V55-TWO-ENGINE-LIVE-HOLD] '+str(source_hold))
+        return {'status':'HOLD_NO_PUBLICATION','hold':source_hold,'authority':0}
+    result=publish_snapshot(output,audit,client=bq)
+    log('[NCAAF-V55-TWO-ENGINE-BACKEND-PUBLISH] '+json.dumps({
+        **result,'signals':len(signals),'certificates':audit.get('v55_validated_edge_certificates'),
+        'source_holds':source_hold,'old_authority_executed':False},sort_keys=True))
+    return result
 
 def main(argv=None):
     p=argparse.ArgumentParser(description='Single NCAAF seven-brain ROI-only live betting backend')
