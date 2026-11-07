@@ -442,6 +442,63 @@ def publish_snapshot(rows,audit,*,client=None,table='sharplogger.sharp_data.ncaa
     if errors:raise RuntimeError('BQ_COMPLETE_WRITE_ERROR:'+str(errors)[:300])
     return {'snapshot_id':snapshot,'status':'PASS','rows':len(rows),'authorized':int(audit.get('v55_authorized_bet_rows',0))}
 
+def canonicalize_live_signal_game_ids(events,board):
+    """Use existing exact stable game IDs, never fuzzy names or final scores.
+
+    The previous Stage1 crosswalk is historical and cannot make an unverified
+    current producer game ID a CFBD ID. For live observations accept only an
+    exact canonical Game_ID or an explicit matching named ID in both records.
+    """
+    aliases=('CFBD_Game_ID','cfbd_game_id','ESPN_Game_ID','espn_game_id',
+             'Canonical_Game_ID','canonical_game_id','Source_Game_ID','source_game_id')
+    b=list(board.to_dict('records') if hasattr(board,'to_dict') else board)
+    index={};ambiguous=set();canonical=set();by_canonical={}
+    for row in b:
+        gid=s(row.get('Game_ID') or row.get('game_id'))
+        if not gid:continue
+        canonical.add(gid);by_canonical[gid]=row
+        for field in aliases:
+            v=s(row.get(field))
+            if not v:continue
+            key=(field,v)
+            if key in index and index[key]!=gid:ambiguous.add(key)
+            index[key]=gid
+    result=[];holds=Counter();per_family=Counter();matched=Counter();games=defaultdict(set)
+    for item in events:
+        if not isinstance(item,dict):holds['BAD_SIGNAL_ROW']+=1;continue
+        fam=family(item.get('source_family') or item.get('Source_Family'))
+        per_family[fam]+=1
+        gid=s(item.get('game_id') or item.get('Game_ID'))
+        if gid not in canonical:
+            available=set()
+            for field in aliases:
+                v=s(item.get(field))
+                if not v:continue
+                k=(field,v)
+                if k in ambiguous:
+                    holds['AMBIGUOUS_EXACT_ID_ALIAS']+=1;continue
+                if k in index:available.add(index[k])
+            if len(available)!=1:
+                holds['NO_UNIQUE_EXACT_LIVE_GAME_ID']+=1
+                continue
+            gid=next(iter(available))
+        src_kick=clock(item.get('kickoff_utc') or item.get('Game_Start_UTC'))
+        board_kick=clock(by_canonical[gid].get('Game_Start_UTC') or by_canonical[gid].get('kickoff_utc'))
+        if src_kick and board_kick and abs((src_kick-board_kick).total_seconds())>15*60:
+            holds['CANONICAL_ID_KICKOFF_CONFLICT']+=1;continue
+        copy=dict(item);copy['game_id']=gid;copy['Game_ID']=gid
+        result.append(copy);matched[fam]+=1;games[fam].add(gid)
+    audit={'all_seven_expected':sorted(BRAINS),
+           'by_family_input':dict(per_family),
+           'by_family_matched':{fam:matched[fam] for fam in sorted(BRAINS)},
+           'by_family_distinct_games':{fam:len(games[fam]) for fam in sorted(BRAINS)},
+           'unmatched_reasons':dict(holds),
+           'missing_live_families':sorted(BRAINS-set(matched)),
+           'canonical_board_games':len(canonical),
+           'matched_signal_rows':len(result)}
+    return result,audit
+
+
 def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,log_func=None):
     """Production scanner dispatch. ONE NCAAF authority/publisher.
 
@@ -505,7 +562,9 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
 
     extras_uri=s(os.environ.get('NCAAF_V55_OTHER_MARKET_QUOTES_URI'))
     extra_quotes=read_rows(extras_uri) if extras_uri else None
+    signals,live_identity_audit=canonicalize_live_signal_game_ids(signals,board)
     output,audit=evaluate(board.to_dict('records'),signals,registry,extra_quotes=extra_quotes)
+    audit['two_engine_live_identity_matching']=live_identity_audit
     # Deployment kill switch also controls PUBLICATION of authority. Keep
     # research candidates but never place BET / STRONG BET on the board in OFF.
     auth_on=os.getenv('NCAAF_V55_BET_AUTHORITY_MODE','OFF').upper()=='ON'

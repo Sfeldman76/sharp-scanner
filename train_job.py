@@ -230,18 +230,65 @@ def main():
                 result = _roi.research([],capture_audit=None,holdout_start=holdout)
                 result['status'] = 'HOLD_ORIGINAL_PREGAME_SOURCE_NOT_FOUND'
                 result['source_handoff_status'] = type(exc).__name__
+        # Reuse the actual CFBD/game-side warehouse and the existing historical
+        # provider/snapshot quotes without requiring a NEW manually made ledger.
+        # This replay creates full-history ATS, counterfactual line sensitivity,
+        # and observed-price ROI diagnostics where both scores and odds match.
+        # It does not mislabel reconstructed brain observations as historical bets.
+        try:
+            replay = _roi.warehouse_replay_existing_sources(
+                client=bigquery.Client(project=os.getenv('GCP_PROJECT','sharplogger')),
+                project=os.getenv('GCP_PROJECT','sharplogger'),
+                dataset=os.getenv('NCAAF_V55_SOURCE_DATASET','sharp_data'))
+            result['historical_warehouse_replay'] = replay
+        except Exception as exc:
+            result['historical_warehouse_replay'] = {
+                'status':'HOLD_HISTORICAL_WAREHOUSE_REPLAY_FAILED',
+                'exception':type(exc).__name__+':'+str(exc),
+                'bet_authority':0}
+        # Read the audited November 5 Stage1 V5.2 canonical IDs and pinned
+        # original research snapshots. No identity rediscovery or legacy Miner
+        # authority. This is the seven-brain historical identity replay.
+        try:
+            brain_replay = _roi.replay_prior_brain_sources(
+                storage_client=gcs, bucket=bucket,
+                canonical_prefix=os.getenv('NCAAF_V55_CANONICAL_LEDGER_URI','').strip() or None)
+            result['historical_seven_brain_replay'] = brain_replay
+        except Exception as exc:
+            result['historical_seven_brain_replay'] = {
+                'status':'HOLD_PRIOR_CANONICAL_BRAIN_REPLAY_FAILED',
+                'exception':type(exc).__name__+':'+str(exc),'bet_authority':0}
+        log_func('[NCAAF-V55-CANONICAL-SEVEN-BRAIN-REPLAY] '+json.dumps({
+            'status':result['historical_seven_brain_replay'].get('status'),
+            'canonical_games':result['historical_seven_brain_replay'].get('canonical_games',0),
+            'by_brain':result['historical_seven_brain_replay'].get('by_brain',{}),
+            'holds':result['historical_seven_brain_replay'].get('holds',{}),
+            'missing_object':result['historical_seven_brain_replay'].get('missing_object'),
+            'family_feed_holds':result['historical_seven_brain_replay'].get('source_feed_holds',{})},sort_keys=True))
+        # Completed research and accepted BET certification are separate
+        # statuses. The Cloud Run execution should not be marked FAILED when
+        # legitimate historical ATS/quote ROI diagnostics finished and zero
+        # strategies passed the OOS certification contract.
+        if (result.get('status')!='PASS_CERTIFIED_ROI_REGISTRY' and
+            result.get('historical_warehouse_replay',{}).get('status')==
+                'RESEARCH_WAREHOUSE_REPLAY_READY_FOR_BRAIN_RETROSPECTIVE_JOIN'):
+            result['edge_certification_status']=result['status']
+            result['status']='RESEARCH_WAREHOUSE_REPLAY_COMPLETE_NO_CERTIFIED_EDGES'
         _roi.put_json(registry_uri,result)
         log_func('[NCAAF-V55-TWO-ENGINE-ROI-RESEARCH] '+json.dumps({
             'status':result['status'], 'observations':result.get('raw_rows',0),
             'hypotheses':result.get('tested_hypotheses',0),
             'certified_edges':len(result.get('certificates',[])),
+            'graded_history_games':result.get('historical_warehouse_replay',{}).get('graded_games',0),
+            'recorded_price_wagers':result.get('historical_warehouse_replay',{}).get('priced_game_wagers',0),
+            'archived_provider_quote_rows':result.get('historical_warehouse_replay',{}).get('archived_provider_quote_rows',0),
             'registry_uri':registry_uri,
         },sort_keys=True))
-        pw.emit("done" if result['status']=='PASS_CERTIFIED_ROI_REGISTRY' else "error",
+        pw.emit("done" if result['status'] in ('PASS_CERTIFIED_ROI_REGISTRY','RESEARCH_WAREHOUSE_REPLAY_COMPLETE_NO_CERTIFIED_EDGES') else "error",
                 "NCAAF ROI research: "+result['status'],pct=1.0)
         if result['status']!='PASS_CERTIFIED_ROI_REGISTRY':
-            raise RuntimeError('[NCAAF-V55-TWO-ENGINE-RESEARCH-HOLD] '+result['status']+
-                ' — inspect the published ROI registry and original signal/price capture evidence')
+            log_func('[NCAAF-V55-TWO-ENGINE-RESEARCH-HOLD] '+result['status']+
+                ' — ROI replay saved; certified live bet authority remains closed')
         return
 
     # NCAAF_FULL_HISTORY_V3_ISOLATED_ROUTE_20261019 — separate research job mode.
