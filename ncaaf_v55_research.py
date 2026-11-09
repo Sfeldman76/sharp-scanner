@@ -914,8 +914,118 @@ def replay_existing_frozen_brains(manifest_bytes,sides_bytes,audit_bytes, *,
     return summary,rows,groups
 
 
+
+def canonical_replay_edge_diagnostics(events, games, team_map, groups, *, top_n=100):
+    """Analyze ALL attached canonical firings without pretending original prices.
+
+    Discovery (2013-23) and retrospective confirmation (2024-25) are reported
+    separately. Neither is called OOS/certified absent original pregame freeze,
+    quote capture and an untouched post-selection test window. No win-prob model.
+    """
+    if top_n<1 or top_n>1000:raise ValueError('INVALID_REPORT_LIMIT')
+    singles=defaultdict(Counter); families=defaultdict(Counter)
+    combos=defaultdict(Counter); line_sensitivity=defaultdict(Counter)
+    invalid=Counter(); graded=0; observed=Counter(); excluded_conflict_groups=0
+    for r in events:
+        season=r['season']; market=r['market']; team=r['target']
+        observed[r['brain']]+=1
+        if market=='totals':
+            invalid['TOTAL_NO_VERIFIED_REFERENCE_TOTAL']+=1
+            continue
+        rec=team_map.get((season,r['cfbd_game_id']),{}).get(team)
+        if rec is None:invalid['UNKNOWN_CANONICAL_SIDE']+=1;continue
+        team_score=num(rec.get('team_score')); opponent=num(rec.get('opponent_score'))
+        line=num(rec.get('retrospective_open_spread')) if market=='spreads' else None
+        if team_score is None or opponent is None or (market=='spreads' and line is None):
+            invalid['NO_GRADABLE_REFERENCE_LINE_OR_FINAL']+=1;continue
+        # Re-grade named team as a virtual HOME orientation; the actual venue
+        # role is deliberately not inferred (neutral-site safe).
+        result=grade(market,'HOME',line,team_score,opponent)
+        if result is None:invalid['NO_GRADABLE_OUTCOME']+=1;continue
+        partition='DISCOVERY_2013_2023' if season<=2023 else 'RETROSPECTIVE_2024_2025'
+        singles[(r['brain'],r['system_id'],market,partition)][result]+=1
+        singles[(r['brain'],r['system_id'],market,partition)]['games']+=1
+        families[(r['brain'],market,partition)][result]+=1
+        families[(r['brain'],market,partition)]['occurrences']+=1
+        graded+=1
+        if market=='spreads':
+            for shift in (0.5,1,3,6):
+                alt=grade(market,'HOME',line-shift,team_score,opponent)
+                line_sensitivity[(r['brain'],market,str(shift))][result+'->'+alt]+=1
+    for g in groups:
+        yr=g['season'];m=g['market'];ts=g['target']
+        if m=='totals':continue
+        if g['conflict']:
+            excluded_conflict_groups+=1
+            continue
+        sides=team_map.get((yr,g['cfbd_game_id']),{})
+        rec=sides.get(ts)
+        if rec is None:continue
+        tsco=num(rec.get('team_score'));osco=num(rec.get('opponent_score'))
+        ln=num(rec.get('retrospective_open_spread')) if m=='spreads' else None
+        if tsco is None or osco is None or (m=='spreads' and ln is None):continue
+        outcome=grade(m,'HOME',ln,tsco,osco)
+        if outcome is None:continue
+        partition='DISCOVERY_2013_2023' if yr<=2023 else 'RETROSPECTIVE_2024_2025'
+        fs=g['families']
+        for a,b in itertools.combinations(fs,2):
+            k=(a,b,m,partition)
+            combos[k][outcome]+=1
+            combos[k]['unique_game_sides']+=1
+            if g['conflict']:combos[k]['has_opposing_source_families']+=1
+    def summarize(k,c):
+        n=c['WIN']+c['LOSS']+c['PUSH']
+        return {'key':list(k),'n':n,'wins':c['WIN'],'losses':c['LOSS'],
+                'pushes':c['PUSH'],'ats_cover_rate_excluding_pushes':
+                    round(c['WIN']/(c['WIN']+c['LOSS']),6) if c['WIN']+c['LOSS'] else None}
+    systems=[summarize(k,c) for k,c in singles.items()]
+    systems.sort(key=lambda r:(-r['n'],r['key']))
+    pairs=[dict(summarize(k,c),opposing_family_present=c['has_opposing_source_families']>0)
+           for k,c in combos.items()]
+    pairs.sort(key=lambda r:(-r['n'],r['key']))
+    return {'status':'DESCRIPTIVE_CANONICAL_ATS__NOT_CERTIFIED_BETTING_ROI',
+            'canonical_observations_input':len(events),
+            'canonical_observations_by_family':dict(observed),
+            'reference_line_graded_occurrences':graded,
+            'system_market_partition_count':len(systems),
+            'combination_market_partition_count':len(pairs),
+            'excluded_opposing_signal_groups_from_combination_research':excluded_conflict_groups,
+            'individual_systems_top':systems[:top_n],
+            'family_market_partitions':[summarize(k,v) for k,v in sorted(families.items())],
+            'same_side_family_pairs_top':pairs[:top_n],
+            'reference_line_adverse_movement':[
+                {'brain':k[0],'market':k[1],'points':k[2],'grade_transitions':dict(c)}
+                for k,c in sorted(line_sensitivity.items())],
+            'grading_holds':dict(invalid),
+            'historical_book_odds_available_in_this_ledger':False,
+            'original_pregame_source_capture_verified':False,
+            'independent_out_of_sample':False,'certified_edges':0,'bet_authority':0}
+
+
+def source_capture_field_diagnostics(raw):
+    """Show exactly why a frozen raw family feed failed to attach signals."""
+    data={}
+    for fam,rows in raw.items():
+        if fam=='FROZEN_MINER':continue
+        allkeys=set();fires=Counter();markets=Counter();directions=Counter();ids=Counter()
+        for r in rows:
+            allkeys.update(r)
+            fires[str(r.get('evaluation_status') or '<MISSING>').strip().upper()]+=1
+            markets[str(r.get('market') or '<MISSING>').strip().lower()]+=1
+            directions[str(r.get('direction') or r.get('rule_decision_side') or r.get('pick_side') or '<MISSING>').strip().upper()]+=1
+            if r.get('cfbd_game_id'):ids['cfbd_game_id']+=1
+            if r.get('source_game_id'):ids['source_game_id']+=1
+            if r.get('game_id'):ids['game_id']+=1
+        data[fam]={'source_rows':len(rows),'fields':sorted(allkeys),
+                   'evaluation_status_counts':dict(fires.most_common(12)),
+                   'market_value_counts':dict(markets.most_common(12)),
+                   'direction_value_counts':dict(directions.most_common(12)),
+                   'identity_field_counts':dict(ids)}
+    return data
+
 def replay_prior_brain_sources(*, storage_client=None,bucket='sharp-models',canonical_prefix=None,
-                               publish_events=True):
+                               publish_events=True,archive_client=None,
+                               archive_project='sharplogger',archive_dataset='sharp_data'):
     """Use previously frozen artifact locations directly. Never request a NEW
     identity matcher or fabricated historical event manifest.
 
@@ -965,6 +1075,30 @@ def replay_prior_brain_sources(*, storage_client=None,bucket='sharp-models',cano
         data['historical_cfbd_game_manifest_v5.csv'],data['historical_cfbd_game_sides_v5.csv'],
         data['stage1_canonical_ledger_v5_audit.json'],stage2_events=stage2,
         raw_sources=raw,expert_cache=expert,source_receipts=receipts)
+    # Required integration: canonical firings MUST be evaluated as historical
+    # research candidates, not simply printed and dropped after ROI() ran on an
+    # empty original-capture table. ATS research is available even if original
+    # executable quote ROI/certification is not.
+    audit,bygame,_,team_map,_=_checked_canonical(
+        data['historical_cfbd_game_manifest_v5.csv'],
+        data['historical_cfbd_game_sides_v5.csv'],
+        data['stage1_canonical_ledger_v5_audit.json'])
+    summary['canonical_edge_research']=canonical_replay_edge_diagnostics(rows,bygame,team_map,groups)
+    summary['raw_source_field_diagnostics']=source_capture_field_diagnostics(raw)
+    if archive_client is not None:
+        try:
+            summary['canonical_provider_market_research']=canonical_provider_brain_research(
+                rows,bygame, _checked_canonical(
+                    data['historical_cfbd_game_manifest_v5.csv'],
+                    data['historical_cfbd_game_sides_v5.csv'],
+                    data['stage1_canonical_ledger_v5_audit.json'])[2],
+                team_map,client=archive_client,project=archive_project,
+                dataset=archive_dataset)
+        except Exception as exc:
+            summary['canonical_provider_market_research']={
+                'status':'HOLD_ARCHIVED_PROVIDER_JOIN_EXCEPTION',
+                'exception':type(exc).__name__+':'+str(exc),
+                'bet_authority':0}
     # Persist one canonical historical occurrence ledger for repeatable ROI
     # research and clickable system-history lookup. Never pretend these events
     # have original pregame timing/price certification.
@@ -1024,6 +1158,226 @@ def publish_existing_canonical_ledger(local_dir, *, storage_client=None,
             'source_path':str(root),'destination':destination,
             'sha256':{k:hashlib.sha256(v).hexdigest() for k,v in raw.items()},
             'rematched_or_rediscovered_games':0,'bet_authority':0}
+
+
+
+# -------------------- Canonical archive × frozen-brain integration --------------------
+def canonical_provider_brain_research(events, games, native_ids, team_map, *, client,
+                                      project='sharplogger', dataset='sharp_data',
+                                      max_quote_rows=200000, top_n=200):
+    """Join frozen historical firings to EXISTING archived bookmaker lines.
+
+    This is a retrospective MARKET-RESEARCH lane. Archive records do not carry
+    original quote timestamps or spread/totals vig. Consequently its ATS and
+    ML quoted-return measurements are NOT original-capture bet certificates.
+
+    Exact (season, CFBD-id or preverified source-id) is mandatory; unmatched
+    neutral games cannot silently acquire bookmaker HOME/AWAY conventions.
+    Any line or odds convention requiring unverified inference is labeled and
+    excluded from live betting authority. No ML bet is inferred from a spread
+    fire or vice versa.
+    """
+    import re
+    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]*',project) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*',dataset):
+        raise ValueError('INVALID_WAREHOUSE_NAME')
+    if not 0 < max_quote_rows <= 1000000:raise ValueError('INVALID_ARCHIVE_MAX_ROWS')
+    if not 0 < top_n <= 10000:raise ValueError('INVALID_ARCHIVE_REPORT_LIMIT')
+    fq=f'`{project}.{dataset}.ncaaf_archive_market_provider_quotes_v1`'
+    sql=(f'SELECT season,game_id,provider,spread_quoted,total_quoted,home_ml_quoted,away_ml_quoted '
+         f'FROM {fq} WHERE SAFE_CAST(season AS INT64) BETWEEN 2013 AND 2025 '
+         f'ORDER BY season,game_id,provider LIMIT {max_quote_rows+1}')
+    by_game=defaultdict(list)
+    for e in events:
+        by_game[(int(e['season']),str(e['cfbd_game_id']))].append(e)
+    counters=Counter(); by_family=defaultdict(Counter); by_system=defaultdict(Counter)
+    by_pair=defaultdict(Counter); cover_by_year=defaultdict(Counter); provider_counts=Counter()
+    # A game contributes once per provider/market/system, regardless of how
+    # many raw firings or repeat quotes exist in the feed.
+    seen=set(); seen_family=set(); matched_games=set(); evaluated_sides=set()
+    # Untimed quote rows sometimes contain several values for the SAME
+    # provider/game. Without a quote timestamp there is no defensible way to
+    # choose the winning one. Reject that market's conflicting offers rather
+    # than treating whichever row appears first as an executable price.
+    quote_rows=list(_source_research_rows(sql,client))
+    disagreement=defaultdict(lambda:defaultdict(set))
+    for q in quote_rows[:max_quote_rows]:
+        grp=(str(q.get('season')),str(q.get('game_id')),str(q.get('provider') or '').lower())
+        for field in ('spread_quoted','total_quoted','home_ml_quoted','away_ml_quoted'):
+            val=num(q.get(field))
+            if val is not None:disagreement[grp][field].add(val)
+    conflicts={k:{name for name,values in group.items() if len(values)>1}
+               for k,group in disagreement.items()}
+    for _,badfields in conflicts.items():
+        for field in badfields:counters['UNTIMED_CONFLICT_'+field.upper()]+=1
+    rows_read=0
+    for r in quote_rows:
+        rows_read+=1
+        if rows_read>max_quote_rows:break
+        counters['archived_rows_read']+=1
+        year=int(r['season']); ident=str(r.get('game_id') or '').strip()
+        g1=ident if (year,ident) in games else ''
+        g2=native_ids.get((year,ident),'')
+        if g1 and g2 and g1!=g2:
+            counters['IDENTITY_COLLISION']+=1;continue
+        gid=g1 or g2
+        if not gid:
+            counters['NO_VERIFIED_CANONICAL_GAME_ID']+=1;continue
+        key=(year,gid);game=games[key];members=team_map[key]
+        if game.get('role_verification_status')!='HOME_AWAY_VERIFIED':
+            counters['NO_VERIFIED_ARCHIVE_HOME_AWAY_CONVENTION']+=1;continue
+        home=[(t,v) for t,v in members.items() if str(v.get('is_home_verified')).strip()=='1']
+        away=[(t,v) for t,v in members.items() if str(v.get('is_home_verified')).strip()=='0']
+        if len(home)!=1 or len(away)!=1 or home[0][0]==away[0][0]:
+            counters['HOME_AWAY_SIDES_NOT_UNIQUE']+=1;continue
+        ht,hrow=home[0];at,arow=away[0]
+        hs,as_=num(hrow.get('team_score')),num(arow.get('team_score'))
+        if hs is None or as_ is None or (num(hrow.get('opponent_score'))!=as_) or (num(arow.get('opponent_score'))!=hs):
+            counters['MISSING_OR_CONFLICTING_FINAL']+=1;continue
+        fam_events=by_game.get(key,[])
+        if not fam_events:
+            counters['CANONICAL_GAME_WITH_NO_BRAIN_FIRE']+=1;continue
+        provider=str(r.get('provider') or '').strip().lower()
+        if not provider:
+            counters['MISSING_BOOK']+=1;continue
+        provider_counts[provider]+=1
+        counters['PROVIDER_IDENTITY_MATCHED_ROWS']+=1
+        matched_games.add(key)
+        # The raw archive spread convention was not established by the source
+        # audit. Treat 'spread_quoted' as a home-oriented REFERENCE hypothesis,
+        # never as a verified executable wager. All this lane's cover grades
+        # remain explicitly provisional until convention is verified.
+        badfields=conflicts[(str(r.get('season')),str(r.get('game_id')),provider)]
+        spread=None if 'spread_quoted' in badfields else num(r.get('spread_quoted'))
+        total=None if 'total_quoted' in badfields else num(r.get('total_quoted'))
+        ml={'HOME':None if 'home_ml_quoted' in badfields else num(r.get('home_ml_quoted')),
+            'AWAY':None if 'away_ml_quoted' in badfields else num(r.get('away_ml_quoted'))}
+        if spread is None:counters['SPREAD_REFERENCE_NOT_NUMERIC']+=1
+        if total is None:counters['TOTAL_REFERENCE_NOT_NUMERIC']+=1
+        fs=defaultdict(set)
+        for ev in fam_events:
+            market=normal_market(ev.get('market'))
+            target=str(ev.get('target') or '')
+            if market=='spreads':
+                if target not in (ht,at):
+                    counters['SPREAD_FIRE_NOT_NAMED_ON_THIS_GAME']+=1;continue
+                if spread is None:continue
+                side='HOME' if target==ht else 'AWAY'
+                # Game must be graded from the SELECTED TEAM perspective;
+                # HOME quote sign reverses for the away-team bet.
+                line=spread if side=='HOME' else -spread
+                score_for=hs if side=='HOME' else as_
+                score_against=as_ if side=='HOME' else hs
+                outcome=grade('spreads','HOME',line,score_for,score_against)
+                unit_profit=None   # archive contains no verified spread vig
+            elif market=='h2h':
+                if target not in (ht,at):
+                    counters['H2H_FIRE_NOT_NAMED_ON_THIS_GAME']+=1;continue
+                side='HOME' if target==ht else 'AWAY'
+                quote=ml[side]
+                if odds_profit(quote) is None:
+                    counters['MISSING_OR_INVALID_ML_ODDS']+=1;continue
+                outcome=grade('h2h',side,None,hs,as_)
+                unit_profit=odds_profit(quote) if outcome=='WIN' else -1.0 if outcome=='LOSS' else 0.0
+            elif market=='totals':
+                if total is None or target not in ('OVER','UNDER'):continue
+                outcome=grade('totals',target,total,hs,as_)
+                side=target;unit_profit=None
+            else:continue
+            if outcome not in ('WIN','LOSS','PUSH'):continue
+            sk=(year,gid,provider,market,side,str(ev.get('system_id') or ''))
+            if sk in seen:
+                counters['DUPLICATE_PROVIDER_SYSTEM_GRADE_SUPPRESSED']+=1;continue
+            seen.add(sk)
+            fam=str(ev['brain']);system=str(ev['system_id'])
+            family_key=(year,gid,provider,market,side,fam)
+            if family_key not in seen_family:
+                seen_family.add(family_key)
+                for ctr in (by_family[(fam,market)],cover_by_year[(year,fam,market)]):
+                    ctr[outcome]+=1
+                    if unit_profit is not None:
+                        ctr['ML_RETURN_UNITS']+=unit_profit;ctr['ML_RETURN_N']+=1
+            else:
+                counters['DUPLICATE_SAME_BRAIN_FAMILY_SUPPORT_NOT_INDEPENDENT']+=1
+            ctr=by_system[(fam,system,market)]
+            ctr[outcome]+=1
+            if unit_profit is not None:
+                ctr['ML_RETURN_UNITS']+=unit_profit;ctr['ML_RETURN_N']+=1
+            fs[(market,side)].add(fam)
+            evaluated_sides.add((year,gid,market,side))
+            counters['BRAIN_PROVIDER_MARKET_GRADES']+=1
+        # A pair of independent brain families supporting the SAME market and
+        # side, on the SAME provider quote, is one combined observation.
+        for (market,side),families in fs.items():
+            opposing=('AWAY' if side=='HOME' else 'HOME' if side=='AWAY'
+                      else 'UNDER' if side=='OVER' else 'OVER')
+            if fs.get((market,opposing)):
+                counters['CONFLICTED_PROVIDER_SIDE_EXCLUDED']+=1;continue
+            for a,b in itertools.combinations(sorted(families),2):
+                if market=='h2h':
+                    quote=ml[side];profit=(odds_profit(quote) if side=='HOME' and hs>as_ or side=='AWAY' and as_>hs
+                          else -1.0 if hs!=as_ else 0.0)
+                else:profit=None
+                k=(a,b,market)
+                grade_outcome=grade('h2h',side,None,hs,as_) if market=='h2h' else (
+                    grade('totals',side,total,hs,as_) if market=='totals' else
+                    grade('spreads','HOME',spread if side=='HOME' else -spread,
+                          hs if side=='HOME' else as_,as_ if side=='HOME' else hs))
+                by_pair[k][grade_outcome]+=1
+                if profit is not None:
+                    by_pair[k]['ML_RETURN_UNITS']+=profit;by_pair[k]['ML_RETURN_N']+=1
+                counters['INDEPENDENT_FAMILY_PAIR_GRADES']+=1
+    if rows_read>max_quote_rows:counters['ARCHIVE_TRUNCATED__NOT_COMPLETE_HISTORY']=1
+    def record(label,k,v):
+        n=v['WIN']+v['LOSS']+v['PUSH'];m=v['ML_RETURN_N']
+        return {'key':list(k),'n':n,'wins':v['WIN'],'losses':v['LOSS'],'pushes':v['PUSH'],
+                'ats_or_ml_win_rate':round(v['WIN']/(v['WIN']+v['LOSS']),6) if v['WIN']+v['LOSS'] else None,
+                'retrospective_untimed_ml_quote_roi':round(v['ML_RETURN_UNITS']/m,6) if m else None,
+                'ml_price_observations':m,'source':'UNTIMED_ARCHIVE__NOT_CERTIFIED',
+                'price_executable_verified':False}
+    def limited(table):
+        arr=[record('x',key,value) for key,value in table.items()]
+        return sorted(arr,key=lambda x:(-x['n'],x['key']))[:top_n],len(arr)
+    families,n_families=limited(by_family)
+    systems,n_systems=limited(by_system)
+    pairs,n_pairs=limited(by_pair)
+    status=('ARCHIVE_MARKET_AND_BRAINS_JOINED_RESEARCH_ONLY' if counters['BRAIN_PROVIDER_MARKET_GRADES']
+            else 'HOLD_ARCHIVE_HAS_NO_VERIFIABLE_BRAIN_MARKET_JOIN')
+    return {'status':status,'source_table':f'{project}.{dataset}.ncaaf_archive_market_provider_quotes_v1',
+            'source_rows_inspected':min(rows_read,max_quote_rows),'archive_truncated':rows_read>max_quote_rows,
+            'distinct_games_joined':len(matched_games),'distinct_market_sides_graded':len(evaluated_sides),
+            'provider_counts':dict(provider_counts),'join_and_grading_counts':dict(counters),
+            'brain_market_research':families,'individual_systems_top':systems,
+            'individual_systems_total':n_systems,'independent_family_pairs_top':pairs,
+            'independent_family_pairs_total':n_pairs,
+            'by_season_brain_market':[record('year',k,v) for k,v in sorted(cover_by_year.items())],
+            'spread_quote_sign_convention_verified':False,
+            'spread_roi_calculated':False,'moneyline_quote_captured_at_pregame_verified':False,
+            'totals_roi_calculated':False,'original_quote_timestamps_available':False,
+            'original_brain_signal_vintage_verified':False,
+            'conservative_roi_certificate_count':0,'bet_authority':0}
+
+
+def integration_acceptance_report(canonical, warehouse, provider):
+    """No false green on an empty joined source. This is DATA readiness only."""
+    bybrain=canonical.get('by_brain') or {}
+    expected=sorted(BRAINS)
+    missing=[f for f in expected if not bybrain.get(f)]
+    price_count=int((warehouse or {}).get('priced_game_wagers') or 0)
+    joined=int((provider or {}).get('join_and_grading_counts',{}).get('BRAIN_PROVIDER_MARKET_GRADES') or 0)
+    unresolved={}
+    if not canonical.get('canonical_games'):unresolved['canonical']='NO_CANONICAL_GAME_LEDGER'
+    if not canonical.get('canonical_edge_research',{}).get('reference_line_graded_occurrences'):
+        unresolved['brain_grading']='CANONICAL_BRAINS_NOT_GRADED'
+    if missing:unresolved['missing_directional_families']=missing
+    if joined==0:unresolved['archive_brain_join']='ZERO_BRAIN_PROVIDER_MARKET_GRADES'
+    if price_count==0:unresolved['timestamped_price_join']='ZERO_MATCHED_ORIGINALLY_CAPTURED_SNAPSHOT_PRICES'
+    if not canonical.get('source_receipts'):
+        unresolved['lineage']='SOURCE_RECEIPTS_MISSING'
+    return {'status':'PASS_DATA_INTEGRATION' if not unresolved else 'FAIL_DATA_INTEGRATION',
+            'missing_brain_families':missing,'canonical_games':canonical.get('canonical_games',0),
+            'brain_occurrences':sum(int(bybrain.get(f) or 0) for f in expected),
+            'archive_brain_market_grades':joined,'originally_priced_market_wagers':price_count,
+            'blocking_reasons':unresolved,'does_not_grant_bet_authority':True}
 
 
 def warehouse_historical_inputs(*,client=None,project='sharplogger',dataset='sharp_data',

@@ -252,7 +252,10 @@ def main():
         try:
             brain_replay = _roi.replay_prior_brain_sources(
                 storage_client=gcs, bucket=bucket,
-                canonical_prefix=os.getenv('NCAAF_V55_CANONICAL_LEDGER_URI','').strip() or None)
+                canonical_prefix=os.getenv('NCAAF_V55_CANONICAL_LEDGER_URI','').strip() or None,
+                archive_client=bigquery.Client(project=os.getenv('GCP_PROJECT','sharplogger')),
+                archive_project=os.getenv('GCP_PROJECT','sharplogger'),
+                archive_dataset=os.getenv('NCAAF_V55_SOURCE_DATASET','sharp_data'))
             result['historical_seven_brain_replay'] = brain_replay
         except Exception as exc:
             result['historical_seven_brain_replay'] = {
@@ -265,30 +268,82 @@ def main():
             'holds':result['historical_seven_brain_replay'].get('holds',{}),
             'missing_object':result['historical_seven_brain_replay'].get('missing_object'),
             'family_feed_holds':result['historical_seven_brain_replay'].get('source_feed_holds',{})},sort_keys=True))
+        canonical = result['historical_seven_brain_replay'].get('canonical_edge_research',{})
+        capture_diag = result['historical_seven_brain_replay'].get('raw_source_field_diagnostics',{})
+        log_func('[NCAAF-V55-CANONICAL-EDGE-RESEARCH] '+json.dumps({
+            'status':canonical.get('status','NOT_AVAILABLE'),
+            'canonical_observations':canonical.get('canonical_observations_input',0),
+            'graded_reference_occurrences':canonical.get('reference_line_graded_occurrences',0),
+            'system_partitions':canonical.get('system_market_partition_count',0),
+            'family_pair_partitions':canonical.get('combination_market_partition_count',0),
+            'family_feed_fields':{f:{'rows':v['source_rows'],
+                'evaluation_status':v['evaluation_status_counts'],
+                'market_values':v['market_value_counts'],
+                'direction_values':v['direction_value_counts']}
+                for f,v in capture_diag.items()},
+            'quoted_roi_certified':False,
+        },sort_keys=True))
+        warehouse_quote = result.get('historical_warehouse_replay',{})
+        log_func('[NCAAF-V55-QUOTE-MATCH-AUDIT] '+json.dumps({
+            'quoted_price_wagers':warehouse_quote.get('priced_game_wagers',0),
+            'archived_provider_quote_rows':warehouse_quote.get('archived_provider_quote_rows',0),
+            'snapshot_source':warehouse_quote.get('source_tables',{}).get('sharp_scores_full',{}),
+            'snapshot_match_rejections':warehouse_quote.get('rejected_snapshot_rows',{}),
+            'historical_quote_identity_unmatched':warehouse_quote.get('unmatched_snapshot_game_keys',0),
+            'certified_executable_roi':False,
+        },sort_keys=True))
+        provider = result.get('historical_seven_brain_replay',{}).get('canonical_provider_market_research',{})
+        log_func('[NCAAF-V55-CANONICAL-ARCHIVE-BRAIN-JOIN] '+json.dumps({
+            'status':provider.get('status'),'distinct_games':provider.get('distinct_games_joined',0),
+            'matched_market_sides':provider.get('distinct_market_sides_graded',0),
+            'joined_brain_grades':provider.get('join_and_grading_counts',{}).get('BRAIN_PROVIDER_MARKET_GRADES',0),
+            'join_holds':provider.get('join_and_grading_counts',{}),
+            'system_partitions':provider.get('individual_systems_total',0),
+            'independent_family_pairs':provider.get('independent_family_pairs_total',0),
+            'untimed_archive_not_certified':True},sort_keys=True))
+        result['data_integration_acceptance']=_roi.integration_acceptance_report(
+            result.get('historical_seven_brain_replay',{}),
+            result.get('historical_warehouse_replay',{}), provider)
+        log_func('[NCAAF-V55-DATA-INTEGRATION-ACCEPTANCE] '+json.dumps(
+            result['data_integration_acceptance'],sort_keys=True))
+        # A cloud task returning exit(0) with missing families AND zero priced
+        # joins was previously mistaken for a successful research run. Publish
+        # the evidence diagnostics, then fail strictly by default instead.
+        if result['data_integration_acceptance']['status']!='PASS_DATA_INTEGRATION':
+            result['edge_certification_status']=result.get('status')
+            result['status']='FAIL_DATA_INTEGRATION__SEE_SOURCE_RECONCILIATION'
         # Completed research and accepted BET certification are separate
         # statuses. The Cloud Run execution should not be marked FAILED when
         # legitimate historical ATS/quote ROI diagnostics finished and zero
         # strategies passed the OOS certification contract.
         if (result.get('status')!='PASS_CERTIFIED_ROI_REGISTRY' and
             result.get('historical_warehouse_replay',{}).get('status')==
-                'RESEARCH_WAREHOUSE_REPLAY_READY_FOR_BRAIN_RETROSPECTIVE_JOIN'):
+                'RESEARCH_WAREHOUSE_REPLAY_READY_FOR_BRAIN_RETROSPECTIVE_JOIN' and
+            canonical.get('status')=='DESCRIPTIVE_CANONICAL_ATS__NOT_CERTIFIED_BETTING_ROI' and
+            canonical.get('canonical_observations_input',0)>0):
             result['edge_certification_status']=result['status']
-            result['status']='RESEARCH_WAREHOUSE_REPLAY_COMPLETE_NO_CERTIFIED_EDGES'
+            result['status']='RESEARCH_CANONICAL_ATS_COMPLETE__ORIGINAL_BET_PRICE_CERTIFICATION_HOLD'
         _roi.put_json(registry_uri,result)
         log_func('[NCAAF-V55-TWO-ENGINE-ROI-RESEARCH] '+json.dumps({
-            'status':result['status'], 'observations':result.get('raw_rows',0),
-            'hypotheses':result.get('tested_hypotheses',0),
+            'status':result['status'], 'original_captured_price_signal_observations':result.get('raw_rows',0),
+            'historical_canonical_brain_observations':canonical.get('canonical_observations_input',0),
+            'descriptive_system_partitions':canonical.get('system_market_partition_count',0),
+            'descriptive_family_pair_partitions':canonical.get('combination_market_partition_count',0),
+            'certification_tested_hypotheses':result.get('tested_hypotheses',0),
             'certified_edges':len(result.get('certificates',[])),
             'graded_history_games':result.get('historical_warehouse_replay',{}).get('graded_games',0),
             'recorded_price_wagers':result.get('historical_warehouse_replay',{}).get('priced_game_wagers',0),
             'archived_provider_quote_rows':result.get('historical_warehouse_replay',{}).get('archived_provider_quote_rows',0),
             'registry_uri':registry_uri,
         },sort_keys=True))
-        pw.emit("done" if result['status'] in ('PASS_CERTIFIED_ROI_REGISTRY','RESEARCH_WAREHOUSE_REPLAY_COMPLETE_NO_CERTIFIED_EDGES') else "error",
+        pw.emit("done" if result['status'] in ('PASS_CERTIFIED_ROI_REGISTRY','RESEARCH_CANONICAL_ATS_COMPLETE__ORIGINAL_BET_PRICE_CERTIFICATION_HOLD') else "error",
                 "NCAAF ROI research: "+result['status'],pct=1.0)
         if result['status']!='PASS_CERTIFIED_ROI_REGISTRY':
             log_func('[NCAAF-V55-TWO-ENGINE-RESEARCH-HOLD] '+result['status']+
                 ' — ROI replay saved; certified live bet authority remains closed')
+        if (result['data_integration_acceptance']['status']!='PASS_DATA_INTEGRATION' and
+            os.getenv('NCAAF_V55_STRICT_DATA_ACCEPTANCE','1').strip().lower() not in ('0','false','no')):
+            raise RuntimeError('NCAAF_V55_DATA_INTEGRATION_FAILED__READ_CURRENT_REGISTRY_AND_LOGS')
         return
 
     # NCAAF_FULL_HISTORY_V3_ISOLATED_ROUTE_20261019 — separate research job mode.
