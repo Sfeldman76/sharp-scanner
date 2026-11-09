@@ -550,13 +550,65 @@ def warehouse_replay_existing_sources(*, client=None, project='sharplogger',
         # Enforce a strict practical export budget; report truncation instead
         # of certifying partial tests. Research may still use partial diagnostics.
         rejected=Counter();wagers={};all_quotes=[];expert_events={};count=0
+        # A source's Game_Key need not equal its canonical CFBD identifier.
+        # Only accept an explicit canonical ID or an exact prior verified
+        # native source ID; do not rematch by team/score/date heuristics.
+        aliases=defaultdict(set)
+        for canonical_id,canonical_game in games.items():
+            season=canonical_game.get('season')
+            source_id=str(canonical_game.get('source_game_id') or '').strip()
+            if source_id and season is not None:
+                aliases[(str(season),source_id)].add(canonical_id)
+        # Reuse Stage 1 V5.2 identities. Do not create a second fuzzy matcher.
+        identity_index={}
+        try:
+            existing=_source_inventory('sharp-models',None)
+            original=[_obj_bytes(existing[n]) for n in (
+                'historical_cfbd_game_manifest_v5.csv',
+                'historical_cfbd_game_sides_v5.csv',
+                'stage1_canonical_ledger_v5_audit.json')]
+            identity_index=_verified_snapshot_identity_index(*original)
+            report['stage1_identity_reuse']='VERIFIED_HASHED_V5_2'
+        except Exception as exc:
+            report['stage1_identity_reuse']='HOLD_STAGE1_IDENTITY_UNAVAILABLE:'+type(exc).__name__
+        # Canonical-side lookup must corroborate warehouse historical results.
+        # Match only unique season, same teams and roles: no score matching.
+        game_pair_index=defaultdict(set)
+        for hist_key, hist_game in games.items():
+            game_pair_index[(hist_game['season'],hist_game['home_team'],hist_game['away_team'])].add(hist_key)
+        report['snapshot_key_mapping_policy']='EXACT_NATIVE_OR_VERIFIED_V5_2_DATE_TEAM_ROLE_CROSSWALK'
+        report['snapshot_unmatched_key_examples']=[]
         for q in _source_research_rows(sql,bq,limit=max_quote_rows+1):
             count+=1
             if count>max_quote_rows:break
             key=str(q.get('Game_Key') or '').strip()
             g=games.get(key)
             if not g:
-                rejected['NO_EXACT_CANONICAL_GAME_KEY']+=1;continue
+                kick=clock(q.get('Commence_Hour'))
+                possible=aliases.get((str(kick.year),key),set()) if kick else set()
+                if len(possible)==1:
+                    g=games[next(iter(possible))]
+                    rejected['VERIFIED_NATIVE_GAME_KEY_RECOVERED']+=1
+                else:
+                    stage1_id,reason=_resolve_exact_snapshot_identity(q,identity_index)
+                    # A valid canonical key by itself is not a scored warehouse
+                    # game. Confirm exactly one historical result with same year,
+                    # teams and roles before allowing grading.
+                    hk=game_pair_index.get((kick.year,_entity_key(q.get('Home_Team_Norm')),
+                                               _entity_key(q.get('Away_Team_Norm'))),set()) if kick else set()
+                    if stage1_id and len(hk)==1:
+                        g=games[next(iter(hk))]
+                        rejected['VERIFIED_V5_2_ROLE_DATE_CROSSWALK_RECOVERED']+=1
+                    else:
+                        if stage1_id and len(hk)>1:reason='AMBIGUOUS_HISTORICAL_RESULT_FOR_CANONICAL_GAME'
+                        if stage1_id and not hk:reason='NO_MATCHED_HISTORICAL_RESULT_FOR_CANONICAL_GAME'
+                        rejected[reason if identity_index else 'NO_EXACT_CANONICAL_GAME_KEY']+=1
+                        if len(report['snapshot_unmatched_key_examples'])<12:
+                            report['snapshot_unmatched_key_examples'].append({
+                                'key':key,'home':str(q.get('Home_Team_Norm') or ''),
+                                'away':str(q.get('Away_Team_Norm') or ''),
+                                'kickoff':str(q.get('Commence_Hour') or '')})
+                        continue
             if (_entity_key(q.get('Home_Team_Norm'))!=g['home_team'] or
                 _entity_key(q.get('Away_Team_Norm'))!=g['away_team']):
                 rejected['HOME_AWAY_NAMES_OR_ROLE_MISMATCH']+=1;continue
@@ -581,7 +633,7 @@ def warehouse_replay_existing_sources(*, client=None, project='sharplogger',
             if res is None:
                 rejected['UNGRADABLE_QUOTE']+=1;continue
             profit=odds_profit(odds) if res=='WIN' else -1.0 if res=='LOSS' else 0.0
-            entry={'game_id':key,'market':market,'side':side,'line':line if market!='h2h' else None,
+            entry={'game_id':str(g.get('cfbd_game_id') or key),'market':market,'side':side,'line':line if market!='h2h' else None,
                    'book':book,'odds':odds,'quote':observed,'result':res,'profit':profit,
                    'home':g['home'],'away':g['away'],'season':g['season'],
                    'price_ref':key+'|'+book+'|'+observed.isoformat()}
@@ -655,6 +707,59 @@ def _obj_bytes(uri, storage_client=None):
     return Path(uri).read_bytes()
 
 
+def _discover_verified_stage2_uri(bucket, storage_client=None):
+    """Locate the one already-built Stage 2 event ledger; never regenerate it.
+
+    An explicit URI is authoritative. Automatic lookup accepts only the exact
+    published artifact filename, never a similarly named raw research file.
+    """
+    explicit=(os.getenv('NCAAF_V55_STAGE2_V3_FROZEN_EVENTS_URI','').strip()
+              or os.getenv('NCAAF_V55_FROZEN_EVENTS_URI','').strip())
+    if explicit:
+        return explicit, 'EXPLICIT_PREVIOUS_STAGE2_URI'
+    expected='research/ncaaf/v55/previously_verified_stage2_v3/stage2_frozen_brain_events.csv'
+    if storage_client is None:
+        from google.cloud import storage
+        storage_client=storage.Client()
+    if storage_client.bucket(bucket).blob(expected).exists():
+        return 'gs://'+bucket+'/'+expected, 'AUTO_DISCOVERED_VERIFIED_STAGE2_URI'
+    return '', 'HOLD_STAGE2_EVENT_LEDGER_NOT_PUBLISHED'
+
+
+def _verified_snapshot_identity_index(manifest_bytes, sides_bytes, audit_bytes):
+    """Exact date and two named team roles from already hash-verified V5.2.
+
+    No score fitting, fuzzy aliases, or inference from sportsbook lines.
+    Returns a unique canonical game only; ambiguous identities remain held.
+    """
+    _, bygame, _, sides, _ = _checked_canonical(manifest_bytes,sides_bytes,audit_bytes)
+    candidates=defaultdict(set)
+    for (season,gid), game in bygame.items():
+        date=str(game.get('game_date') or '')[:10]
+        if not date or len(date)!=10:continue
+        members=sides.get((season,gid),{})
+        home=[x for x in members.values() if str(x.get('is_home_verified') or '').lower() in ('true','1','yes')]
+        away=[x for x in members.values() if str(x.get('is_home_verified') or '').lower() in ('false','0','no')]
+        if len(home)!=1 or len(away)!=1:continue
+        for hn in (home[0].get('cfbd_team_key'),home[0].get('source_team_label')):
+            for an in (away[0].get('cfbd_team_key'),away[0].get('source_team_label')):
+                if _entity_key(hn) and _entity_key(an):
+                    candidates[(season,date,_entity_key(hn),_entity_key(an))].add(gid)
+    return candidates
+
+
+def _resolve_exact_snapshot_identity(row, index):
+    kickoff=clock(row.get('Commence_Hour'))
+    if not kickoff:return None, 'NO_KICKOFF_FOR_CANONICAL_IDENTITY'
+    h=_entity_key(row.get('Home_Team_Norm'))
+    a=_entity_key(row.get('Away_Team_Norm'))
+    # No calendar-day shifting: only exact previously verified game date.
+    keys=(kickoff.year,kickoff.date().isoformat(),h,a)
+    options=index.get(keys,set())
+    if len(options)==1:return next(iter(options)), 'VERIFIED_STAGE1_DATE_AND_TEAM_ROLES'
+    return None, 'AMBIGUOUS_STAGE1_DATE_AND_ROLES' if len(options)>1 else 'NO_VERIFIED_STAGE1_DATE_AND_ROLES'
+
+
 def _source_inventory(bucket, storage_client, *, canonical_prefix=None):
     """No directory-wide alias rediscovery. Find existing V5.2 artifact bundle.
 
@@ -705,9 +810,35 @@ def _checked_canonical(manifest_bytes,sides_bytes,audit_bytes):
     return audit,bygame,bynative,teams,names
 
 
+def verified_frozen_market(family, record, *, research_assumption=''):
+    """Recover only a market explicitly evidenced by a frozen source row.
+
+    A forecast and a HOME/AWAY direction do not establish spreads vs H2H.
+    """
+    existing=normal_market(record.get('market'))
+    if existing in MARKETS:
+        return existing
+    # STAT's recorded spread and ATS result are explicit spread evidence.
+    if family=='STAT' and num(record.get('open_home_spread')) is not None and \
+            str(record.get('descriptive_ats_result') or '').strip().upper() in \
+            ('WIN','LOSS','PUSH','W','L'):
+        return 'spreads'
+    # Stage 2 V3 supported an EXPLICIT research-only combined-market assumption.
+    # Never promote this assumption to source truth or original betting authority.
+    if family in ('STAT','PREDICTION_TRACKER') and research_assumption in MARKETS:
+        return research_assumption
+    # External PT evidence can only declare its own market, not inherit STAT.
+    explicit=str(record.get('evidence_type') or '').strip().upper()
+    declared={'ATS':'spreads','SPREAD':'spreads','SPREADS':'spreads',
+              'H2H':'h2h','MONEYLINE':'h2h','ML':'h2h',
+              'TOTAL':'totals','TOTALS':'totals','OVER_UNDER':'totals'}
+    return declared.get(explicit)
+
+
 def replay_existing_frozen_brains(manifest_bytes,sides_bytes,audit_bytes, *,
                                   stage2_events=None, raw_sources=None,
-                                  expert_cache=None, source_receipts=None):
+                                  expert_cache=None, source_receipts=None,
+                                  combined_research_assumption=''):
     """Attach ALL available frozen brains to previously matched game identities.
 
     Frozen outputs and original raw source artifacts share the exact CFBD IDs.
@@ -826,13 +957,13 @@ def replay_existing_frozen_brains(manifest_bytes,sides_bytes,audit_bytes, *,
             if str(r.get('evaluation_status') or '').upper() not in ('FIRE','FIRED'):
                 holds['NOT_EXPLICIT_SOURCE_FIRE']+=1;continue
             y=yyear(r);gid=resolve(y,r);d=str(r.get('direction') or '').upper()
-            m=normal_market(r.get('market'))
+            m=verified_frozen_market(fam,r,research_assumption=combined_research_assumption)
             if not verify_named_pair(y,gid,r.get('home_team') or r.get('home_team_key'),
                                      r.get('away_team') or r.get('away_team_key')):
                 continue
             # Never invent the market from an unqualified combined replay.
             if m not in MARKETS:
-                holds['UNKNOWN_SOURCE_MARKET']+=1;continue
+                holds['UNVERIFIABLE_MARKET_'+fam]+=1;continue
             name=r.get('team') or r.get('team_key') or r.get('pick_team') or ''
             if d in ('HOME','AWAY','ROAD') and r.get('home_team') and r.get('away_team'):
                 name=r['home_team'] if d=='HOME' else r['away_team']
@@ -1064,17 +1195,22 @@ def replay_prior_brain_sources(*, storage_client=None,bucket='sharp-models',cano
         expert=None;holds['PATHI_BIG_AL']=type(exc).__name__+':'+str(exc)
     # Optional already attached Stage2 CSV can fill in family slots that raw
     # streams could not attach; no separate stage2 authority is executed.
-    stage2_uri=os.getenv('NCAAF_V55_FROZEN_EVENTS_URI','').strip()
+    stage2_uri,stage2_discovery=_discover_verified_stage2_uri(bucket,storage_client)
     stage2=[]
+    if not stage2_uri:holds['STAGE2_FROZEN']=stage2_discovery
     if stage2_uri:
         try:
             content=_obj_bytes(stage2_uri,storage_client);stage2=_csv_bytes(content)
             receipts['STAGE2_FROZEN']={'uri':stage2_uri,'sha256':hashlib.sha256(content).hexdigest(),'rows':len(stage2)}
         except Exception as exc:holds['STAGE2_FROZEN']=type(exc).__name__+':'+str(exc)
+    assumption=os.getenv('NCAAF_V55_COMBINED_MARKET_RESEARCH_ASSUMPTION','').strip().lower()
+    if assumption and assumption not in MARKETS:
+        raise ValueError('INVALID_RESEARCH_ONLY_COMBINED_MARKET_ASSUMPTION')
     summary,rows,groups=replay_existing_frozen_brains(
         data['historical_cfbd_game_manifest_v5.csv'],data['historical_cfbd_game_sides_v5.csv'],
         data['stage1_canonical_ledger_v5_audit.json'],stage2_events=stage2,
-        raw_sources=raw,expert_cache=expert,source_receipts=receipts)
+        raw_sources=raw,expert_cache=expert,source_receipts=receipts,
+        combined_research_assumption=assumption)
     # Required integration: canonical firings MUST be evaluated as historical
     # research candidates, not simply printed and dropped after ROI() ran on an
     # empty original-capture table. ATS research is available even if original
@@ -1085,6 +1221,10 @@ def replay_prior_brain_sources(*, storage_client=None,bucket='sharp-models',cano
         data['stage1_canonical_ledger_v5_audit.json'])
     summary['canonical_edge_research']=canonical_replay_edge_diagnostics(rows,bygame,team_map,groups)
     summary['raw_source_field_diagnostics']=source_capture_field_diagnostics(raw)
+    summary['stage2_v3_reuse']={'frozen_events_uri':stage2_uri or None,
+        'discovery_status':stage2_discovery,
+        'events_loaded':len(stage2),'research_only_combined_market_assumption':assumption or None,
+        'original_market_verified_by_assumption':False,'bet_authority':0}
     if archive_client is not None:
         try:
             summary['canonical_provider_market_research']=canonical_provider_brain_research(
