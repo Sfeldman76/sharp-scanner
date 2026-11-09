@@ -1763,6 +1763,103 @@ def _ml_table_rows(client,table,required,optional,where):
     return rows,{'status':'LOADED','source_rows':len(rows),'feature_columns':included,
                  'missing_optional':sorted(set(optional)-set(included))}
 
+def ml_cfbd_prior_training_rows(*,client,canonical_manifest,canonical_sides,
+                                canonical_audit,project='sharplogger',dataset='sharp_data'):
+    """Build a game-level ML matrix from the existing CFBD pre-game *_Prior fields.
+
+    CFBD Game_ID + Team_Key must match BOTH original V5.2 sides. Never use
+    final score, contemporaneous game stats or retrospective system outcomes
+    as input features. Historical spread and total labels are intentionally
+    absent until the exact original line/total is independently established.
+    """
+    _,games,_,teams,_=_checked_canonical(canonical_manifest,canonical_sides,canonical_audit)
+    table=f'{project}.{dataset}.ncaaf_cfbd_archive_research_v1'
+    try:
+        fields={f.name:getattr(getattr(f,'field_type',None),'upper',lambda: str(getattr(f,'field_type','')).upper())()
+                for f in client.get_table(table).schema}
+    except Exception as exc:
+        return [],{'status':'HOLD_CFBD_SOURCE_UNAVAILABLE','source':table,
+                   'error':type(exc).__name__+':'+str(exc)}
+    required={'Game_ID','Game_Date','Team_Key'}
+    if not required.issubset(fields):
+        return [],{'status':'HOLD_CFBD_REQUIRED_FIELDS','source':table,
+                   'missing':sorted(required-set(fields))}
+    feature_cols=sorted(c for c,t in fields.items() if
+        (c=='CFBD_Games_Prior' or (c.startswith('CFBD_') and c.endswith('_Prior')))
+        and t in ('FLOAT','FLOAT64','INTEGER','INT64','NUMERIC','BIGNUMERIC'))
+    if not feature_cols:
+        return [],{'status':'HOLD_NO_CFBD_PREGAME_PRIORS','source':table}
+    has_season='Season' in fields
+    cols=['Game_ID','Game_Date','Team_Key']+(['Season'] if has_season else [])+feature_cols
+    predicate=('SAFE_CAST(`Season` AS INT64) BETWEEN 2013 AND 2025' if has_season else
+               'EXTRACT(YEAR FROM Game_Date) BETWEEN 2013 AND 2025')
+    sql=('SELECT '+','.join('`'+c+'`' for c in cols)+f' FROM `{table}` WHERE '+predicate)
+    try:
+        source_rows=client.query(sql).result(page_size=10000)
+    except Exception as exc:
+        return [],{'status':'HOLD_CFBD_PRIOR_QUERY_FAILED','source':table,
+                   'error':type(exc).__name__+':'+str(exc)}
+    # Exactly two separately identified sides per canonical CFBD game.
+    observed=defaultdict(dict);holds=Counter();raw_count=0
+    for rr in source_rows:
+        raw_count+=1;r=dict(rr.items())
+        gd=r.get('Game_Date')
+        try:year=int(r['Season']) if has_season else int(str(gd)[:4]);gid=str(int(r['Game_ID']))
+        except (ValueError,TypeError,OverflowError):
+            holds['INVALID_GAME_ID_OR_DATE']+=1;continue
+        if (year,gid) not in games:
+            holds['NOT_IN_VERIFIED_STAGE1']+=1;continue
+        if str(gd)[:10] != str(games[(year,gid)].get('game_date') or '')[:10]:
+            holds['CFBD_GAME_DATE_DISAGREES_WITH_STAGE1']+=1;continue
+        side_map=teams[(year,gid)]
+        matches=[k for k,v in side_map.items() if _canonical_name(k)==_canonical_name(r['Team_Key'])]
+        if len(matches)!=1:
+            holds['CFBD_TEAM_KEY_NOT_EXACT_STAGE1_SIDE']+=1;continue
+        k=matches[0]
+        if k in observed[(year,gid)]:
+            # Once ambiguous, always ambiguous; never let subsequent duplicates restore it.
+            observed[(year,gid)][k]=None
+            holds['DUPLICATE_CFBD_SIDE']+=1
+        else:observed[(year,gid)][k]=r
+    matrix=[]
+    for (year,gid),side_rows in sorted(observed.items()):
+        g=games[(year,gid)];side_map=teams[(year,gid)]
+        if g.get('role_verification_status')!='HOME_AWAY_VERIFIED':
+            holds['UNVERIFIED_GAME_ROLES']+=1;continue
+        home=[k for k,v in side_map.items() if str(v.get('is_home_verified')).lower() in ('1','true','yes')]
+        if len(home)!=1 or len(side_rows)!=2 or set(side_rows)!=set(side_map) or any(v is None for v in side_rows.values()):
+            holds['INCOMPLETE_OR_DUPLICATE_CFBD_TWO_SIDES']+=1;continue
+        hkey=home[0];akey=next(k for k in side_map if k!=hkey)
+        hs=_ml_number(side_map[hkey].get('team_score'))
+        av=_ml_number(side_map[akey].get('team_score'))
+        h_opp=_ml_number(side_map[hkey].get('opponent_score'))
+        a_opp=_ml_number(side_map[akey].get('opponent_score'))
+        if not (all(math.isfinite(v) and v>=0 for v in (hs,av,h_opp,a_opp)) and hs==a_opp and av==h_opp):
+            holds['UNVERIFIED_FINAL_SCORE_ORIENTATION']+=1;continue
+        if hs==av:
+            holds['TIED_FINAL_SCORE']+=1;continue
+        hx=side_rows[hkey];ax=side_rows[akey]
+        # Numeric prior-only feature differences preserve home/away orientation.
+        features={}
+        for c in feature_cols:
+            hv=_ml_number(hx.get(c));vv=_ml_number(ax.get(c))
+            features['CFBD_DIFF_'+c]=(hv-vv if math.isfinite(hv) and math.isfinite(vv) else float('nan'))
+        if not any(math.isfinite(v) for v in features.values()):
+            holds['ALL_PRIOR_FEATURES_NULL']+=1;continue
+        matrix.append({'season':year,'game_id':gid,'date':g.get('game_date'),
+                       'core_features':features,'label_h2h':int(hs>av),
+                       'label_spread':None,'label_totals':None})
+    audit={'status':'CFBD_PRIOR_MATRIX_BUILT' if matrix else 'HOLD_NO_MATCHED_CFBD_TRAINING_GAMES',
+           'source':table,'source_rows':raw_count,'matched_games':len(matrix),
+           'available_prior_columns':len(feature_cols),
+           'feature_policy':'ONLY_CFBD_PRIOR_FIELDS__HOME_MINUS_AWAY__CANONICAL_LABELS',
+           'labels':{'h2h':len(matrix),'spreads':0,'totals':0},
+           'holds':dict(holds),'feature_vintage_certified':False,
+           'spread_total_policy':'REQUIRES_ORIGINAL_VERIFIED_HISTORICAL_LINES',
+           'bet_authority':0}
+    return matrix,audit
+
+
 def ml_historical_training_rows(*,client=None,project='sharplogger',dataset='sharp_data',
                                canonical_manifest=None,canonical_sides=None,canonical_audit=None):
     """V5.2 identity-verified historical rows, not a blind Game_Key join.
@@ -1783,9 +1880,14 @@ def ml_historical_training_rows(*,client=None,project='sharplogger',dataset='sha
         records,source=_ml_table_rows(client,table,needed,tuple(f for f in ML_CORE_FIELDS if f not in needed),
                     'WHERE Season BETWEEN 2013 AND 2025')
     except Exception as exc:
-        return [],{'status':'HOLD_HISTORICAL_SOURCE_QUERY_FAILED',
-                   'error':type(exc).__name__+':'+str(exc)}
-    if source['status']!='LOADED':return [],source
+        records=[];source={'status':'HOLD_LEGACY_CORE_VIEW_UNAVAILABLE',
+                           'error':type(exc).__name__+':'+str(exc)}
+    if source['status']!='LOADED':
+        rows,cfbd_audit=ml_cfbd_prior_training_rows(client=client,
+            canonical_manifest=canonical_manifest,canonical_sides=canonical_sides,
+            canonical_audit=canonical_audit,project=project,dataset=dataset)
+        cfbd_audit['legacy_view_audit']=source
+        return rows,cfbd_audit
     joined={};ambiguous=set();holds=Counter()
     for r in records:
         yr=num(r.get('Season'))
@@ -1888,15 +1990,28 @@ def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
                         'FEATURE_VINTAGE_REQUIRES_SOURCE_VALIDATION',
                         'NO_AUTOMATIC_BET_AUTHORITY']}
     models={};oof={};valid_fields=set()
+    report['label_coverage']={k:sum(r.get(k) in (0,1) for r in historical_rows)
+        for k in ('label_spread','label_h2h','label_totals')}
     for r in historical_rows:
         valid_fields.update(k for k,v in r.get('core_features',{}).items() if math.isfinite(_ml_number(v)))
-    # CORE and STAT are distinct feature views, not the same fitted model.
-    for brain,fields in (('CORE',ML_CORE_FIELDS),('STAT',ML_STAT_FIELDS)):
+    # CORE and STAT are distinct views of historical pregame inputs. On
+    # the verified CFBD fallback CORE uses every available prior difference;
+    # STAT uses season-form and recent-form offensive/defensive statistical
+    # subsets, never outcomes or the same game's measured performance.
+    cfbd=sorted(f for f in valid_fields if f.startswith('CFBD_DIFF_CFBD_') and f.endswith('_Prior'))
+    stat_cfbd=[f for f in cfbd if any(x in f for x in
+        ('_Season_', '_Recent3_', '_Recent5_')) and any(x in f for x in
+        ('_Off_', '_Def_'))]
+    brain_fields=(('CORE',tuple(cfbd) if cfbd else ML_CORE_FIELDS),
+                  ('STAT',tuple(stat_cfbd) if stat_cfbd else ML_STAT_FIELDS))
+    for brain,fields in brain_fields:
         cols=[f for f in fields if f in valid_fields]
         if brain=='STAT' and len(cols)<2:
             report[brain]={'status':'HOLD_STAT_INDEPENDENT_FEATURES_UNAVAILABLE','features':cols};continue
         if not cols:
             report[brain]={'status':'HOLD_NO_PREGAME_TRAINING_FEATURES'};continue
+        report[brain+'_feature_selection']={'features':cols,'feature_count':len(cols),
+            'source':'CFBD_PRIOR_DIFFERENCES' if cfbd else 'LEGACY_CORE_VIEW'}
         for market,label in (('spreads','label_spread'),('h2h','label_h2h'),('totals','label_totals')):
             prediction,audit,fitted=_ml_fitting_series(historical_rows,cols,label,min_train=min_train)
             report[brain+'_'+market]=audit
@@ -2021,6 +2136,12 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
                         dataset='sharp_data',bucket='sharp-models',
                         manifest_uri=None,canonical_uri=None,events_uri=None,market_feed_uri=None):
     """Heavy Research entry point; reuse ONLY existing Stage1/Stage2 artifacts."""
+    # A single initialized BigQuery client must be passed to BOTH historical
+    # loaders. Previously the Market Rich loader received None on Cloud Run,
+    # deterministically causing a HOLD regardless of warehouse contents.
+    if client is None:
+        from google.cloud import bigquery
+        client=bigquery.Client(project=project)
     prefix=(canonical_uri or ('gs://'+bucket+'/research/ncaaf/v55/canonical_stage1/v5_2/')).rstrip('/')+'/'
     try:
         raw={name:_obj_bytes(prefix+name,storage_client) for name in
