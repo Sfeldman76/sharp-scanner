@@ -1601,7 +1601,7 @@ ML_STAT_FIELDS = ('Opening_Spread','Opening_Total','Team_Prior_ATS_Rate','Oppone
 ML_MARKET_FIELDS = ('SharpBetScore','Sharp_Move_Signal','Delta_vs_Sharp',
                     'Sharp_Limit_Jump','Sharp_Time_Score','Limit_Jump',
                     'Market_Leader','Is_Pinnacle','Sharp_Limit_Total')
-ML_SCHEMA = 'NCAAF_V55_ML_RESEARCH_V2_HISTORICAL_MARKET'
+ML_SCHEMA = 'NCAAF_V55_ML_RESEARCH_V3_SPREAD_TOTAL_PREGAME_REFERENCES'
 # These features are derived from historical scores_with_features snapshots.
 # The current/live moves table is NEVER used for model fitting.
 ML_HIST_MARKET_FIELDS = ('MARKET_SPREAD_OPEN','MARKET_SPREAD_LATEST',
@@ -1732,7 +1732,14 @@ def ml_historical_market_rows(*,client,canonical_manifest,canonical_sides,
         if ml:features['MARKET_H2H_HOME_PRICE']=ml[-1][3]
         if not any(math.isfinite(features[f]) for f in ML_HIST_MARKET_FIELDS if f!='MARKET_SNAPSHOT_COUNT'):
             holds['NO_DIRECTIONALLY_VERIFIED_MARKET_FEATURE']+=1;continue
-        result.append({'season':season,'game_id':gid,'core_features':features})
+        # The label reference is a verified prekick market quote, not a
+        # retrospective closing number. Preserve direction (HOME/OVER).
+        # No synthetic market lines are created from game scores.
+        result.append({'season':season,'game_id':gid,'core_features':features,
+                       'spread_home_line':features['MARKET_SPREAD_LATEST'],
+                       'total_over_line':features['MARKET_TOTAL_LATEST'],
+                       'spread_label_source':'SCORES_WITH_FEATURES_PREKICK_HOME',
+                       'total_label_source':'SCORES_WITH_FEATURES_PREKICK_OVER'})
     return sorted(result,key=lambda x:(x['season'],x['game_id'])),{
         'status':'HISTORICAL_MARKET_SNAPSHOTS_JOINED' if result else 'HOLD_NO_HISTORICAL_MARKET_SNAPSHOTS_MATCHED',
         'source':fq,'snapshot_time_field':snapshot,'kickoff_field':kickoff,
@@ -1847,7 +1854,8 @@ def ml_cfbd_prior_training_rows(*,client,canonical_manifest,canonical_sides,
         if not any(math.isfinite(v) for v in features.values()):
             holds['ALL_PRIOR_FEATURES_NULL']+=1;continue
         matrix.append({'season':year,'game_id':gid,'date':g.get('game_date'),
-                       'core_features':features,'label_h2h':int(hs>av),
+                       'core_features':features,'home_score':hs,'away_score':av,
+                       'label_h2h':int(hs>av),
                        'label_spread':None,'label_totals':None})
     audit={'status':'CFBD_PRIOR_MATRIX_BUILT' if matrix else 'HOLD_NO_MATCHED_CFBD_TRAINING_GAMES',
            'source':table,'source_rows':raw_count,'matched_games':len(matrix),
@@ -1917,6 +1925,7 @@ def ml_historical_training_rows(*,client=None,project='sharplogger',dataset='sha
         opentotal=_ml_number(r.get('Opening_Total'))
         item={'season':yr,'game_id':gid,'source_game_id':src,
               'date':g.get('game_date'),'core_features':x,
+              'home_score':hs,'away_score':aws,
               'label_spread':int(hs+line>aws) if hs+line!=aws else None,
               'label_h2h':int(hs>aws) if hs!=aws else None,
               'label_totals':(int(hs+aws>opentotal) if math.isfinite(opentotal) and hs+aws!=opentotal else None)}
@@ -1984,6 +1993,136 @@ def _ml_brain_counts(events):
         counts[key][family]+=1
     return counts
 
+def _ml_family_coverage(meta_rows, families=('SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER')):
+    """Research feature-presence audit, not historical capture certification."""
+    from collections import Counter
+    by_family={}
+    for family in families:
+        field=family+'_NET'
+        vals=[_ml_number(r.get('core_features',{}).get(field)) for r in meta_rows]
+        active=[r for r,v in zip(meta_rows,vals) if math.isfinite(v) and v!=0]
+        by_year=Counter(str(r['season']) for r in active)
+        by_family[family]={'nonzero_net_games':len(active),'nonzero_net_games_by_season':dict(sorted(by_year.items())),
+                           'feature_present_games':sum(math.isfinite(v) for v in vals),
+                           'absent_or_balanced_net_games':len(meta_rows)-len(active),
+                           'definition':'CAPPED_HOME_MINUS_AWAY_EVENT_COUNT__RETROSPECTIVE_UNCERTIFIED'}
+    return {'meta_candidate_games':len(meta_rows),'families':by_family,
+            'warning':'NONZERO_NET_IS_NOT_PROOF_OF_ORIGINALLY_AVAILABLE_PREGAME_EVIDENCE'}
+
+
+def _ml_market_coverage(mrows):
+    """Assess Market Rich fold viability without altering train/validation policy."""
+    from collections import Counter
+    by_year=Counter(str(r['season']) for r in mrows)
+    by_label={k:dict(sorted(Counter(str(r['season']) for r in mrows if r.get(k) in (0,1)).items()))
+              for k in ('label_h2h','label_spread','label_totals')}
+    fields={f:sum(math.isfinite(_ml_number(r.get('core_features',{}).get(f))) for r in mrows)
+            for f in ML_HIST_MARKET_FIELDS}
+    return {'labeled_joined_games':len(mrows),'games_by_season':dict(sorted(by_year.items())),
+            'label_games_by_season':by_label,'non_null_features':fields,
+            'note':'Season folds require 240 earlier-year labeled games and 30 same-year labeled games by default.'}
+
+
+def _ml_matched_probability_metrics(rows, predictions, label, min_games=1):
+    """Strict paired-game scoring on exactly the same games for all named models."""
+    from sklearn.metrics import brier_score_loss,log_loss
+    from collections import Counter
+    import numpy as np
+    models=tuple(predictions)
+    common=sorted(set.intersection(*(set(m) for m in predictions.values()))) if models else []
+    by_key={(int(r['season']),str(r['game_id'])):r for r in rows}
+    common=[key for key in common if key in by_key and by_key[key].get(label) in (0,1)
+            and all(math.isfinite(float(predictions[name][key])) for name in models)]
+    result={'status':'MATCHED_GAME_COMPARISON' if len(common)>=min_games else 'HOLD_NO_COMMON_OOF_GAMES',
+            'same_games':len(common),'models':{},'by_season':dict(sorted(Counter(str(k[0]) for k in common).items())),
+            'interpretation':'Paired metrics only, not a confidence interval or evidence of betting ROI.'}
+    if not common:return result
+    y=np.array([int(by_key[k][label]) for k in common])
+    for name in models:
+        p=np.array([float(predictions[name][k]) for k in common])
+        result['models'][name]={'brier':round(float(brier_score_loss(y,p)),6),
+                                'logloss':round(float(log_loss(y,p,labels=[0,1])),6)}
+    return result
+
+
+def _ml_attach_verified_market_labels(historical_rows, market_rows):
+    """Attach market-conditional ATS/total targets to canonical *score* rows.
+
+    Requires a prekick HOME spread or OVER total observation on a verified
+    canonical game. Opening/movement values alone are not sufficient if the
+    reference line is missing. Scores are labels ONLY, never model features.
+    """
+    index={(int(r['season']),str(r['game_id'])):r for r in historical_rows}
+    audit=Counter(); examples=Counter()
+    for market_row in market_rows or []:
+        key=(int(market_row['season']),str(market_row['game_id']))
+        r=index.get(key)
+        if r is None:
+            audit['NO_CANONICAL_TRAINING_ROW']+=1;continue
+        hs=_ml_number(r.get('home_score'));aw=_ml_number(r.get('away_score'))
+        if not all(math.isfinite(x) and x>=0 for x in (hs,aw)):
+            audit['NO_CANONICAL_VERIFIED_SCORES']+=1;continue
+        for kind,field,feature in (
+            ('spread','spread_home_line','MARKET_SPREAD_LINE'),
+            ('totals','total_over_line','MARKET_TOTAL_LINE')):
+            line=_ml_number(market_row.get(field))
+            if not math.isfinite(line):
+                audit[kind+'_NO_VERIFIED_PREKICK_LINE']+=1;continue
+            # Sanity bounds flag potentially mislabeled odds instead of
+            # silently interpreting prices as points.
+            if (kind=='spread' and not -70<=line<=70) or (kind=='totals' and not 1<=line<=150):
+                audit[kind+'_OUT_OF_RANGE_LINE']+=1;continue
+            if kind=='spread':
+                margin=hs+line-aw;label='label_spread'
+            else:
+                margin=hs+aw-line;label='label_totals'
+            if abs(margin)<1e-8:
+                audit[kind+'_PUSH_EXCLUDED']+=1;continue
+            target=int(margin>0)
+            old=r.get(label)
+            if old in (0,1) and old!=target:
+                audit[kind+'_CONFLICTING_REFERENCE']+=1;continue
+            r[label]=target
+            r['core_features'][feature]=line
+            r[kind+'_source']='VERIFIED_PREKICK_SCORES_WITH_FEATURES'
+            audit[kind+'_LABELED']+=1
+            examples[str(r['season'])+'_'+kind]+=1
+    return {'status':'VERIFIED_PREGAME_MARKET_REFERENCE_LABEL_AUDIT',
+            'counts':dict(audit),'labeled_by_season':dict(sorted(examples.items())),
+            'market_reference':'LAST_PREKICK_OBSERVED_PER_BOOK__MEAN_ACROSS_BOOKS',
+            'no_untimed_archive_fallback':True,
+            'limitations':'Snapshot capture is prekick; independent market feature vintage certification remains required.'}
+
+
+def _ml_ablation_report(meta_rows,fields,label,baseline_pred,*,min_train=240):
+    """Same-game chronological leave-one-family-out comparison, research-only."""
+    import numpy as np
+    from sklearn.metrics import brier_score_loss,log_loss
+    families=('SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER','MARKET_RICH')
+    base=np.asarray(baseline_pred,dtype=float)
+    y=np.asarray([r.get(label) if r.get(label) in (0,1) else -1 for r in meta_rows],dtype=int)
+    results={}
+    for fam in families:
+        excluded='MARKET_RICH_OOF' if fam=='MARKET_RICH' else fam+'_NET'
+        if excluded not in fields:continue
+        reduced=[f for f in fields if f!=excluded]
+        candidate,diagnostics,_=_ml_fitting_series(meta_rows,reduced,label,min_train=min_train)
+        m=np.isfinite(base)&np.isfinite(candidate)&(y>=0)
+        n=int(m.sum())
+        if not n:
+            results[fam]={'status':'HOLD_NO_IDENTICAL_OOF_GAMES','oof_games':0};continue
+        bf=float(brier_score_loss(y[m],base[m]));af=float(brier_score_loss(y[m],candidate[m]))
+        bl=float(log_loss(y[m],base[m],labels=[0,1]));al=float(log_loss(y[m],candidate[m],labels=[0,1]))
+        results[fam]={'status':'EXPLORATORY_PAIRED_ABLATION','same_games':n,
+                      'full_brier':round(bf,6),'without_brier':round(af,6),
+                      'full_logloss':round(bl,6),'without_logloss':round(al,6),
+                      'brier_gain_from_family':round(af-bf,6),
+                      'logloss_gain_from_family':round(al-bl,6),
+                      'warning':'RETROSPECTIVE_SOURCE_VINTAGE_UNCERTIFIED_NOT_PROOF_OF_BETTING_EDGE'}
+    return {'status':'EXPLORATORY_SAME_GAME_CHRONOLOGICAL_ABLATION',
+            'families':results,'capture_certified':False}
+
+
 def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
                         market_rows=None,min_train=240):
     """Three separate research ML learners and one combined stack, when feasible.
@@ -2015,14 +2154,16 @@ def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
     brain_fields=(('CORE',tuple(cfbd) if cfbd else ML_CORE_FIELDS),
                   ('STAT',tuple(stat_cfbd) if stat_cfbd else ML_STAT_FIELDS))
     for brain,fields in brain_fields:
-        cols=[f for f in fields if f in valid_fields]
-        if brain=='STAT' and len(cols)<2:
-            report[brain]={'status':'HOLD_STAT_INDEPENDENT_FEATURES_UNAVAILABLE','features':cols};continue
-        if not cols:
+        base_cols=[f for f in fields if f in valid_fields]
+        if brain=='STAT' and len(base_cols)<2:
+            report[brain]={'status':'HOLD_STAT_INDEPENDENT_FEATURES_UNAVAILABLE','features':base_cols};continue
+        if not base_cols:
             report[brain]={'status':'HOLD_NO_PREGAME_TRAINING_FEATURES'};continue
-        report[brain+'_feature_selection']={'features':cols,'feature_count':len(cols),
+        report[brain+'_feature_selection']={'features':base_cols,'feature_count':len(base_cols),
             'source':'CFBD_PRIOR_DIFFERENCES' if cfbd else 'LEGACY_CORE_VIEW'}
         for market,label in (('spreads','label_spread'),('h2h','label_h2h'),('totals','label_totals')):
+            reference={'spreads':'MARKET_SPREAD_LINE','totals':'MARKET_TOTAL_LINE'}.get(market)
+            cols=base_cols+([reference] if reference and reference in valid_fields else [])
             prediction,audit,fitted=_ml_fitting_series(historical_rows,cols,label,min_train=min_train)
             report[brain+'_'+market]=audit
             if fitted is not None:
@@ -2034,6 +2175,7 @@ def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
     # Historical Market Rich fits on canonical, verified pre-kick warehouse
     # snapshots. Forward/live moves are not a research-training source.
     market_predictions={};market_source='scores_with_features'
+    report['market_rich_chronology_audit']={'status':'HOLD_NO_HISTORICAL_MARKET_ROWS'}
     if market_rows:
         hist_index={(int(r['season']),str(r['game_id'])):r for r in historical_rows}
         mrows=[]
@@ -2044,6 +2186,7 @@ def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
         # Preserve missingness when a canonical historical game had no market
         # record. Fold predictions are keyed to game, never row index.
         report['market_historical_labeled_games']=len(mrows)
+        report['market_rich_chronology_audit']=_ml_market_coverage(mrows)
         cols=[f for f in ML_HIST_MARKET_FIELDS if any(math.isfinite(_ml_number(r.get('core_features',{}).get(f))) for r in mrows)]
         if cols and mrows:
             for market,label in (('spreads','label_spread'),('h2h','label_h2h'),('totals','label_totals')):
@@ -2067,6 +2210,9 @@ def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
     # Meta learners: market-specific, using only same-year OOF base predictions.
     # Historical frozen signals are research-only until original prekick capture.
     counts=_ml_brain_counts(canonical_events)
+    report['combined_brain_input_coverage']={}
+    report['matched_game_model_comparison']={}
+    report['combined_brain_ablation']={}
     for market,label in (('spreads','label_spread'),('h2h','label_h2h'),('totals','label_totals')):
         core_key='CORE_'+market;stat_key='STAT_'+market;outkey='COMBINED_'+market
         if core_key not in oof or stat_key not in oof:
@@ -2095,12 +2241,30 @@ def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
             extras['MARKET_RICH_OOF']=market_predictions.get(market,{}).get((y,gid),float('nan'))
             meta_rows.append({'season':y,'game_id':gid,'core_features':extras,label:r[label]})
         fields=('CORE_OOF','STAT_OOF','MARKET_RICH_OOF','SYSTEM_MINER_NET','BIG_AL_NET','PATHI_NET','PREDICTION_TRACKER_NET')
-        _,meta_audit,model=_ml_fitting_series(meta_rows,fields,label,min_train=min_train)
+        report['combined_brain_input_coverage'][market]=_ml_family_coverage(meta_rows)
+        meta_pred,meta_audit,model=_ml_fitting_series(meta_rows,fields,label,min_train=min_train)
         meta_audit.update({'status':('EXPLORATORY_RETROSPECTIVE_META_OOF' if model is not None else
                                   'HOLD_META_INSUFFICIENT_CHRONOLOGY'),
                           'market_rich_historical_oof_games':len(market_predictions.get(market,{})),
                           'source_event_capture_verified':False})
         report[outkey]=meta_audit
+        if model is not None:
+            report['combined_brain_ablation'][market]=_ml_ablation_report(
+                meta_rows,fields,label,meta_pred,min_train=min_train)
+        else:
+            report['combined_brain_ablation'][market]={'status':'HOLD_META_MODEL_UNAVAILABLE'}
+        # Retain only the same out-of-fold game keys for a fair paired metric.
+        base_rows={(int(r['season']),str(r['game_id'])):i for i,r in enumerate(historical_rows)}
+        predictions={}
+        for brain in ('CORE','STAT'):
+            x=oof.get(brain+'_'+market)
+            if x is not None:
+                predictions[brain]={(y,g):float(x[i]) for (y,g),i in base_rows.items()
+                                    if math.isfinite(float(x[i]))}
+        predictions['COMBINED']={(int(r['season']),str(r['game_id'])):float(meta_pred[i])
+                                 for i,r in enumerate(meta_rows) if math.isfinite(float(meta_pred[i]))}
+        report['matched_game_model_comparison'][market]=_ml_matched_probability_metrics(
+            historical_rows,predictions,label) if len(predictions)==3 else {'status':'HOLD_BASE_OOF_MISSING'}
         if model is not None:
             models[outkey]={'model':model,'features':list(fields),
                 'source':'RETROSPECTIVE_STAGE2_RESEARCH_ONLY',
@@ -2185,7 +2349,9 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
           canonical_sides=raw['historical_cfbd_game_sides_v5.csv'],
           canonical_audit=raw['stage1_canonical_ledger_v5_audit.json'],
           project=project,dataset=dataset)
+    reference_audit=_ml_attach_verified_market_labels(rows,market_data)
     report,models=fit_v55_ml_research(rows,events,team_map,market_rows=market_data)
+    report['market_line_label_audit']=reference_audit
     report['market_rich_historical_source_audit']=market_audit
     report['historical_source_audit']=source
     report['canonical_stage1_games']=len(games)

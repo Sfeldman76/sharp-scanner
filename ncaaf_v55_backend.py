@@ -99,7 +99,7 @@ def audit_ml_research_manifest(doc):
     pregame feature capture and independently evaluated executable prices.
     Merely loading a model manifest does not grant any of those properties.
     """
-    if not isinstance(doc,dict) or doc.get('schema') not in ('NCAAF_V55_ML_RESEARCH_V1','NCAAF_V55_ML_RESEARCH_V2_HISTORICAL_MARKET'):
+    if not isinstance(doc,dict) or doc.get('schema') not in ('NCAAF_V55_ML_RESEARCH_V1','NCAAF_V55_ML_RESEARCH_V2_HISTORICAL_MARKET','NCAAF_V55_ML_RESEARCH_V3_SPREAD_TOTAL_PREGAME_REFERENCES'):
         return {'status':'HOLD_ML_MANIFEST_SCHEMA','bet_authority':0}
     models=doc.get('artifacts') or {}
     invalid=[k for k,v in models.items() if not isinstance(v,dict) or
