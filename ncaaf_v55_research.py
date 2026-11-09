@@ -1739,7 +1739,10 @@ def ml_historical_market_rows(*,client,canonical_manifest,canonical_sides,
                        'spread_home_line':features['MARKET_SPREAD_LATEST'],
                        'total_over_line':features['MARKET_TOTAL_LATEST'],
                        'spread_label_source':'SCORES_WITH_FEATURES_PREKICK_HOME',
-                       'total_label_source':'SCORES_WITH_FEATURES_PREKICK_OVER'})
+                       'total_label_source':'SCORES_WITH_FEATURES_PREKICK_OVER',
+                       'home_ml_quote':ml[-1][3] if ml else None,
+                       'home_ml_quote_book':ml[-1][5] if ml else None,
+                       'original_quote_capture_certified':False})
     return sorted(result,key=lambda x:(x['season'],x['game_id'])),{
         'status':'HISTORICAL_MARKET_SNAPSHOTS_JOINED' if result else 'HOLD_NO_HISTORICAL_MARKET_SNAPSHOTS_MATCHED',
         'source':fq,'snapshot_time_field':snapshot,'kickoff_field':kickoff,
@@ -1863,7 +1866,7 @@ def ml_cfbd_prior_training_rows(*,client,canonical_manifest,canonical_sides,
            'feature_policy':'ONLY_CFBD_PRIOR_FIELDS__HOME_MINUS_AWAY__CANONICAL_LABELS',
            'labels':{'h2h':len(matrix),'spreads':0,'totals':0},
            'holds':dict(holds),'feature_vintage_certified':False,
-           'spread_total_policy':'REQUIRES_ORIGINAL_VERIFIED_HISTORICAL_LINES',
+           'spread_total_policy':'TIMED_REFERENCES_FOR_PREGAME_LANE; UNTIMED_ARCHIVE_ONLY_FOR_SEPARATE_RETROSPECTIVE_LANE',
            'bet_authority':0}
     return matrix,audit
 
@@ -1981,6 +1984,99 @@ def _ml_fitting_series(data,features,label,min_train=240,min_validation=30,perio
     if oof.any() and len(set(yy[valid]))==2:
         fitted=_ml_model();fitted.fit(X[valid],yy[valid])
     return pred,report,fitted
+
+
+def _ml_fitting_within_season(data, features, label, *, min_train=240, min_validation=10):
+    """Research-only weekly walk-forward when historical line labels cover one season.
+
+    Same-week games never enter the earlier-week training sample. The model
+    remains uncertified until availability of all features is independently
+    established, even though market snapshots were observed before kickoff.
+    """
+    import numpy as np
+    from sklearn.metrics import log_loss,brier_score_loss
+    X=np.array([[_ml_number(r.get('core_features',{}).get(k)) for k in features] for r in data],dtype=float)
+    yy=np.array([r.get(label) if r.get(label) in (0,1) else -1 for r in data],dtype=int)
+    datekeys=[]
+    for r in data:
+        try:
+            dt=datetime.fromisoformat(str(r.get('date') or '')[:10])
+            yw=dt.isocalendar()
+            datekeys.append(yw.year*100+yw.week)
+        except (ValueError,AttributeError):datekeys.append(-1)
+    dates=np.array(datekeys,dtype=int)
+    valid=(yy>=0)&(dates>=0)
+    p=np.full(len(data),np.nan);folds=[]
+    for week in sorted(set(dates[valid])):
+        train=np.where(valid & (dates<week))[0]
+        test=np.where(valid & (dates==week))[0]
+        if len(train)<min_train or len(test)<min_validation or len(set(yy[train]))<2:continue
+        m=_ml_model();m.fit(X[train],yy[train]);p[test]=m.predict_proba(X[test])[:,1]
+        folds.append({'iso_week':int(week),'train_games':len(train),'test_games':len(test)})
+    tested=np.isfinite(p)
+    audit={'status':'EXPLORATORY_WITHIN_SEASON_WEEKLY_OOF' if tested.any() else 'HOLD_INSUFFICIENT_WEEKLY_FOLDS',
+           'period_type':'iso_week','training_games':int(valid.sum()),'oof_games':int(tested.sum()),
+           'folds':folds,'features':list(features),'pre_game_feature_vintage_certified':False}
+    if tested.any():
+        audit.update(oof_brier=round(float(brier_score_loss(yy[tested],p[tested])),6),
+                     oof_logloss=round(float(log_loss(yy[tested],p[tested],labels=[0,1])),6))
+    fitted=None
+    if tested.any() and len(set(yy[valid]))==2:
+        fitted=_ml_model();fitted.fit(X[valid],yy[valid])
+    return p,audit,fitted
+
+
+def _ml_train_with_chronological_fallback(data,features,label,*,min_train=240):
+    # Prefer season-isolated validation. Weekly fallback is explicitly
+    # exploratory, and is only attempted when labeled data spans one season.
+    pred,audit,model=_ml_fitting_series(data,features,label,min_train=min_train)
+    if model is not None:return pred,audit,model
+    seasons={int(r['season']) for r in data if r.get(label) in (0,1)}
+    if len(seasons)!=1:return pred,audit,model
+    wp,wa,wm=_ml_fitting_within_season(data,features,label,min_train=min_train)
+    if wm is not None:
+        wa['original_season_hold']=audit['status']
+        return wp,wa,wm
+    audit['weekly_fallback_hold']=wa['status']
+    return pred,audit,model
+
+
+def _ml_chronological_calibration(rows, oof_pred, label, *, min_train=240, min_validation=30):
+    """Fit sigmoid calibrators only on earlier-season OOF base predictions.
+
+    No current-season labels are available to the calibrator until a later
+    season. A shadow forward calibrator is fit only after the audit succeeds.
+    """
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import log_loss,brier_score_loss
+    p=np.asarray(oof_pred,dtype=float)
+    y=np.asarray([r.get(label) if r.get(label) in (0,1) else -1 for r in rows],dtype=int)
+    years=np.asarray([int(r['season']) for r in rows],dtype=int)
+    valid=np.isfinite(p)&(p>0)&(p<1)&(y>=0)
+    logit=np.log(np.clip(p,1e-5,1-1e-5)/(1-np.clip(p,1e-5,1-1e-5)))
+    cal=np.full(len(rows),np.nan); folds=[]
+    for yr in sorted(set(years)):
+        tr=np.where(valid & (years<yr))[0]
+        te=np.where(valid & (years==yr))[0]
+        if len(tr)<min_train or len(te)<min_validation or len(set(y[tr]))!=2:continue
+        model=LogisticRegression(C=0.5,max_iter=300)
+        model.fit(logit[tr].reshape(-1,1),y[tr])
+        cal[te]=model.predict_proba(logit[te].reshape(-1,1))[:,1]
+        folds.append({'season':int(yr),'earlier_oof_games':len(tr),'test_games':len(te)})
+    tested=np.isfinite(cal)
+    report={'status':'CALIBRATION_CHRONOLOGICAL_OOF' if tested.any() else 'HOLD_CALIBRATION_NO_VALID_FOLDS',
+            'oof_games':int(tested.sum()),'folds':folds,'source_capture_certified':False}
+    fitted=None
+    if tested.any():
+        report['same_game_raw_brier']=round(float(brier_score_loss(y[tested],p[tested])),6)
+        report['same_game_raw_logloss']=round(float(log_loss(y[tested],p[tested],labels=[0,1])),6)
+        report['calibrated_brier']=round(float(brier_score_loss(y[tested],cal[tested])),6)
+        report['calibrated_logloss']=round(float(log_loss(y[tested],cal[tested],labels=[0,1])),6)
+        report['calibration_improves_brier']=report['calibrated_brier']<report['same_game_raw_brier']
+        fitted=LogisticRegression(C=0.5,max_iter=300)
+        fitted.fit(logit[valid].reshape(-1,1),y[valid])
+    return report,cal,fitted
 
 def _ml_brain_counts(events):
     """No outcome-derived priors and no retroactive performance encoding."""
@@ -2103,9 +2199,9 @@ def _ml_ablation_report(meta_rows,fields,label,baseline_pred,*,min_train=240):
     y=np.asarray([r.get(label) if r.get(label) in (0,1) else -1 for r in meta_rows],dtype=int)
     results={}
     for fam in families:
-        excluded='MARKET_RICH_OOF' if fam=='MARKET_RICH' else fam+'_NET'
-        if excluded not in fields:continue
-        reduced=[f for f in fields if f!=excluded]
+        excluded={'MARKET_RICH_OOF'} if fam=='MARKET_RICH' else {fam+'_NET',fam+'_ORIGIN_OOF'}
+        if not excluded.intersection(fields):continue
+        reduced=[f for f in fields if f not in excluded]
         candidate,diagnostics,_=_ml_fitting_series(meta_rows,reduced,label,min_train=min_train)
         m=np.isfinite(base)&np.isfinite(candidate)&(y>=0)
         n=int(m.sum())
@@ -2121,6 +2217,606 @@ def _ml_ablation_report(meta_rows,fields,label,baseline_pred,*,min_train=240):
                       'warning':'RETROSPECTIVE_SOURCE_VINTAGE_UNCERTIFIED_NOT_PROOF_OF_BETTING_EDGE'}
     return {'status':'EXPLORATORY_SAME_GAME_CHRONOLOGICAL_ABLATION',
             'families':results,'capture_certified':False}
+
+
+
+def ml_independent_candidate_audit(events, historical_rows, canonical_team_map, *, min_prior=20):
+    """Audit EVERY family as a potential originator, without a CORE dependency.
+
+    Each candidate is keyed to its own market/side/system. Prior historical W/L
+    estimates use strictly earlier seasons, never the season being evaluated.
+    Retrospective events lack original publication time and cannot authorize a bet.
+    """
+    families=('CORE','STAT','MARKET_RICH','SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER')
+    by_game={(int(r['season']),str(r['game_id'])):r for r in historical_rows}
+    seen=set(); accepted=[];holds=Counter(); coverage=defaultdict(Counter)
+    for e in events:
+        fam=str(e.get('brain') or '').upper(); mk=str(e.get('market') or '').lower()
+        if fam not in families or mk not in ('h2h','spreads','totals'):
+            holds['UNSUPPORTED_FAMILY_OR_MARKET']+=1;continue
+        try:key=(int(e['season']),str(e['cfbd_game_id']))
+        except (KeyError,ValueError,TypeError):
+            holds['INVALID_GAME_KEY']+=1;continue
+        target=str(e.get('target') or '').strip()
+        system=str(e.get('system_id') or fam)
+        unique=(key,mk,target,fam,system)
+        if unique in seen:
+            holds['DUPLICATE_SAME_SYSTEM']+=1;continue
+        seen.add(unique)
+        game=by_game.get(key)
+        sides=canonical_team_map.get(key,{})
+        if mk=='totals':
+            if target not in ('OVER','UNDER'):
+                holds['TOTAL_TARGET_NOT_EXPLICIT']+=1;continue
+        else:
+            if target not in sides:
+                holds['TARGET_NOT_EXACT_CANONICAL_SIDE']+=1;continue
+        coverage[(fam,mk)]['originations']+=1
+        label={'h2h':'label_h2h','spreads':'label_spread','totals':'label_totals'}[mk]
+        if not game or game.get(label) not in (0,1):
+            holds['NO_MARKET_SPECIFIC_VERIFIED_LABEL']+=1;continue
+        if mk=='totals':result=int(game[label] == int(target=='OVER'))
+        else:
+            side=sides[target]
+            is_home=str(side.get('is_home_verified')).lower() in ('1','true','yes')
+            if str(side.get('is_home_verified')).lower() not in ('0','1','true','false','yes','no'):
+                holds['UNVERIFIED_HOME_AWAY_ROLE']+=1;continue
+            result=int(game[label]==int(is_home))
+        coverage[(fam,mk)]['graded']+=1
+        coverage[(fam,mk)]['wins']+=result
+        accepted.append((key[0],key[1],mk,target,fam,system,result))
+    # Historical grade aggregation is based on unique GAME+FAMILY+SYSTEM+MARKET
+    # origins; distinct source/market opportunities are not treated as independent
+    # family support just because many rule observations fire for one game.
+    years=sorted({row[0] for row in accepted})
+    out_by_family=defaultdict(Counter)
+    for yr in years:
+        prior=defaultdict(lambda:[0,0])
+        for y,g,m,t,f,system,result in accepted:
+            if y>=yr:continue
+            prior[(f,m,system)][0]+=1
+            prior[(f,m,system)][1]+=result
+        for y,g,m,t,f,system,result in accepted:
+            if y!=yr:continue
+            n,w=prior[(f,m,system)]
+            if n>=min_prior:
+                out_by_family[(f,m)]['prior_qualified']+=1
+                # Beta(1,1) historical-only shrinkage, not a bet threshold.
+    return {
+        'status':'RETROSPECTIVE_INDEPENDENT_ORIGINATION_AUDIT_UNCERTIFIED',
+        'core_required':False,'bet_authority':0,'source_capture_certified':False,
+        'families':{f:{m:dict(coverage.get((f,m),{}),
+                prior_qualified=out_by_family[(f,m)]['prior_qualified'])
+                for m in ('h2h','spreads','totals')} for f in families},
+        'unique_originations':sum(c['originations'] for c in coverage.values()),
+        'graded_system_occurrences':len(accepted),
+        'season_prior_qualified_candidates':sum(c['prior_qualified'] for c in out_by_family.values()),
+        'holds':dict(holds),
+        'warning':'FROZEN_RETROSPECTIVE_EVIDENCE_CAN_HAVE_SELECTION_BIAS; NO_AUTO_BET_AUTHORITY',
+    }
+
+
+def ml_archived_quote_vintage_audit(*,client,project='sharplogger',dataset='sharp_data'):
+    """Discover earlier historical line coverage WITHOUT declaring untimed bets pregame.
+
+    This query intentionally does not return archived lines to training. The
+    archive lacks a certified capture timestamp and original source vintage.
+    """
+    fq=f'{project}.{dataset}.ncaaf_archive_market_provider_quotes_v1'
+    try:
+        table=client.get_table(fq)
+        cols={c.name for c in table.schema}
+        required={'season','game_id','provider','spread_quoted','total_quoted'}
+        if not required.issubset(cols):
+            return {'status':'HOLD_ARCHIVED_QUOTE_SCHEMA','missing_columns':sorted(required-cols)}
+        # Reconstructing capture time from a file date or kickoff is forbidden.
+        capture=next((c for c in ('quote_captured_at','captured_at','snapshot_timestamp','observed_at') if c in cols),None)
+        sql=f"""SELECT SAFE_CAST(season AS INT64) AS season,
+          COUNT(*) AS quote_rows, COUNT(DISTINCT CAST(game_id AS STRING)) AS distinct_source_games,
+          COUNTIF(SAFE_CAST(spread_quoted AS FLOAT64) IS NOT NULL) AS spread_rows,
+          COUNTIF(SAFE_CAST(total_quoted AS FLOAT64) IS NOT NULL) AS totals_rows
+          FROM `{fq}` WHERE SAFE_CAST(season AS INT64) BETWEEN 2013 AND 2025
+          GROUP BY season ORDER BY season"""
+        years=[dict(r.items()) for r in client.query(sql).result()]
+        return {'status':'ARCHIVED_MULTISEASON_QUOTES_UNTIMED_RESEARCH_ONLY',
+                'source':fq,'by_season':years,'capture_column_present':bool(capture),
+                'eligible_for_certified_training':False,
+                'eligible_for_retrospective_reference_research':True,
+                'hold':'ORIGINAL_CAPTURE_TIME_AND_LINE_CONVENTIONS_NOT_CERTIFIED',
+                'policy':'ALLOW_SEPARATE_UNTIMED_REFERENCE_RESEARCH_ONLY; NEVER_LIVE_AUTHORITY_OR_CERTIFIED_OOF'}
+    except Exception as exc:
+        return {'status':'HOLD_ARCHIVED_QUOTE_AUDIT_FAILED','source':fq,
+                'error':type(exc).__name__+':'+str(exc)}
+
+
+
+# ------------------ Context-dependent timestamp policy ------------------
+# A timestamp is essential to establish original/executable quote availability,
+# intra-book movement, or the existence of a historical PT publication.
+# It is NOT needed to grade a game against an *explicitly retrospective*
+# reference spread/total. Such grades remain a separate, non-authoritative lane.
+
+def ml_archived_reference_line_rows(*, client, canonical_manifest,
+                                    canonical_sides, canonical_audit,
+                                    project='sharplogger', dataset='sharp_data',
+                                    max_rows=200000):
+    """Load untimed historical references for exploratory, NOT executable, ML.
+
+    Exact Stage1 V5.2 game identity and verified home/away orientation are
+    required. A provider/game with inconsistent untimed values is excluded
+    per market; valid providers aggregate by deterministic median. The archive
+    spread's sign convention is UNVERIFIED: HOME is an explicit hypothesis and
+    reverse-sign sensitivity is audited. No time is forged or inferred.
+    """
+    import re, statistics
+    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]*',project) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*',dataset):
+        raise ValueError('INVALID_WAREHOUSE_NAME')
+    if not 0 < max_rows <= 1000000:raise ValueError('INVALID_ARCHIVE_MAX_ROWS')
+    _, games, native, teams, _=_checked_canonical(canonical_manifest,canonical_sides,canonical_audit)
+    fq=f'{project}.{dataset}.ncaaf_archive_market_provider_quotes_v1'
+    try:
+        fields={f.name for f in client.get_table(fq).schema}
+        required={'season','game_id','provider','spread_quoted','total_quoted'}
+        if not required.issubset(fields):
+            return [],{'status':'HOLD_ARCHIVE_REFERENCE_SCHEMA','missing':sorted(required-fields),
+                       'source':fq,'bet_authority':0}
+        sql=(f'SELECT season,game_id,provider,spread_quoted,total_quoted '
+             f'FROM `{fq}` WHERE SAFE_CAST(season AS INT64) BETWEEN 2013 AND 2025 '
+             f'ORDER BY season,game_id,provider LIMIT {max_rows+1}')
+        rows=client.query(sql).result(page_size=10000)
+    except Exception as exc:
+        return [],{'status':'HOLD_ARCHIVE_REFERENCE_QUERY','source':fq,
+                   'error':type(exc).__name__+':'+str(exc),'bet_authority':0}
+    holds=Counter();providers=defaultdict(lambda:defaultdict(set));scanned=0
+    for rr in rows:
+        scanned+=1
+        if scanned>max_rows:
+            holds['ROW_LIMIT_REACHED']+=1;break
+        r=dict(rr.items())
+        try:yr=int(r.get('season'))
+        except (ValueError,TypeError):holds['INVALID_SEASON']+=1;continue
+        original=str(r.get('game_id') or '').strip()
+        direct=original if (yr,original) in games else None
+        cross=native.get((yr,original))
+        if direct and cross and direct!=cross:
+            holds['CANONICAL_ID_COLLISION']+=1;continue
+        gid=direct or cross
+        if not gid:
+            holds['NO_VERIFIED_CANONICAL_GAME_ID']+=1;continue
+        key=(yr,gid)
+        if games[key].get('role_verification_status')!='HOME_AWAY_VERIFIED':
+            holds['NO_VERIFIED_HOME_AWAY_ROLE']+=1;continue
+        sides=teams[key]
+        home=[a for a,v in sides.items() if str(v.get('is_home_verified')).strip()=='1']
+        away=[a for a,v in sides.items() if str(v.get('is_home_verified')).strip()=='0']
+        if len(home)!=1 or len(away)!=1 or home[0]==away[0]:
+            holds['HOME_AWAY_NOT_UNIQUE']+=1;continue
+        ht,at=sides[home[0]],sides[away[0]]
+        h, a=num(ht.get('team_score')),num(at.get('team_score'))
+        if (h is None or a is None or h<0 or a<0 or
+            num(ht.get('opponent_score'))!=a or num(at.get('opponent_score'))!=h):
+            holds['CANONICAL_SCORE_ORIENTATION_UNVERIFIED']+=1;continue
+        book=str(r.get('provider') or '').strip().lower()
+        if not book:holds['MISSING_PROVIDER']+=1;continue
+        for market,field,low,high in (('spreads','spread_quoted',-70,70),
+                                      ('totals','total_quoted',1,150)):
+            v=num(r.get(field))
+            if v is None or not low<=v<=high:
+                holds[market+'_MISSING_OR_OUT_OF_RANGE']+=1;continue
+            providers[(yr,gid,market)][book].add(float(v))
+    if scanned>max_rows:
+        return [],{'status':'HOLD_ARCHIVE_TRUNCATED','source':fq,
+                   'rows_scanned':scanned,'holds':dict(holds),'bet_authority':0}
+    game_refs=defaultdict(dict);by_year=Counter()
+    for (yr,gid,market),by_book in sorted(providers.items()):
+        good=[]
+        for book,values in by_book.items():
+            if len(values)!=1:
+                holds['CONFLICTING_UNTIMED_PROVIDER_'+market.upper()]+=1;continue
+            good.append(next(iter(values)))
+        if not good:
+            holds['ALL_PROVIDER_QUOTES_CONFLICT_'+market.upper()]+=1;continue
+        # A wide spread across untimed providers may represent different
+        # measurement periods or a bad line mapping. Do not synthesize a
+        # representative reference from irreconcilable quotes.
+        if len(good)>1 and max(good)-min(good)>(7.0 if market=='spreads' else 10.0):
+            holds['CROSS_PROVIDER_DISPERSION_HOLD_'+market.upper()]+=1;continue
+        line=float(statistics.median_low(good))
+        game_refs[(yr,gid)][market]=(line,len(good))
+        by_year[(yr,market)]+=1
+    references=[]
+    for (yr,gid),pairs in sorted(game_refs.items()):
+        references.append({'season':yr,'game_id':gid,
+            'spread_home_line_research':pairs.get('spreads',(None,0))[0],
+            'total_over_line_research':pairs.get('totals',(None,0))[0],
+            'spread_reference_books':pairs.get('spreads',(None,0))[1],
+            'total_reference_books':pairs.get('totals',(None,0))[1],
+            'reference_type':'UNTIMED_HISTORICAL_PROVIDER_MEDIAN',
+            'spread_orientation':'ASSUMED_HOME_QUOTE_UNVERIFIED',
+            'pregame_capture_verified':False,
+            'executable_price_verified':False})
+    return references,{
+        'status':'ARCHIVED_REFERENCE_LINES_READY_RESEARCH_ONLY' if references else 'HOLD_NO_ARCHIVED_REFERENCE_LINES',
+        'source':fq,'scanned_rows':scanned,'distinct_canonical_games':len(references),
+        'reference_games_by_season_market':{f'{yr}_{market}':n for (yr,market),n in sorted(by_year.items())},
+        'holds':dict(holds),'requires_original_capture_time':False,
+        'does_not_verify_original_pregame_availability':True,
+        'spread_sign_assumption':'HOME_QUOTED_UNVERIFIED_BY_HISTORICAL_SOURCE',
+        'aggregation':'ACTUAL_QUOTED_MEDIAN_LOW_NONCONFLICTING_PROVIDERS_NOT_EXECUTABLE',
+        'source_scope':'HISTORICAL_RESEARCH_ONLY_NO_LINE_MOVEMENT_ORIGINAL_BET_ROI',
+        'bet_authority':0}
+
+
+def ml_attach_research_reference_labels(historical_rows, archive_rows):
+    """Preserve timed labels; attach separate retrospective ML targets only.
+
+    Timed labels remain `label_spread`/`label_totals`; untimed backfills use
+    distinct `*_reference` labels and features. Never overwrite certified
+    inputs or give archived prices a fabricated opening/current timestamp.
+    """
+    indexed={(int(r['season']),str(r['game_id'])):r for r in historical_rows}
+    audit=Counter();by_season=Counter();source_summary=Counter()
+    # A valid observed-pregame reference is also valid for the research lane.
+    for r in historical_rows:
+        for mk,old,ref,field,newfield in (
+            ('spreads','label_spread','label_spread_reference','MARKET_SPREAD_LINE','MARKET_SPREAD_LINE_REFERENCE'),
+            ('totals','label_totals','label_totals_reference','MARKET_TOTAL_LINE','MARKET_TOTAL_LINE_REFERENCE')):
+            if r.get(old) in (0,1):
+                feature_values=r.get('core_features',{})
+                timestamp_verified=r.get(mk+'_source')=='VERIFIED_PREKICK_SCORES_WITH_FEATURES'
+                line=_ml_number(feature_values.get(field))
+                if not timestamp_verified and not math.isfinite(line):
+                    # The optional legacy training view names its columns
+                    # Opening_Spread/Opening_Total, but cannot establish when
+                    # they were observed. Preserve them only as hypotheses.
+                    oldname='Opening_Spread' if mk=='spreads' else 'Opening_Total'
+                    line=_ml_number(feature_values.get(oldname))
+                if not math.isfinite(line):
+                    audit[mk+'_EXISTING_LABEL_MISSING_REFERENCE_LINE']+=1
+                    continue
+                r[ref]=int(r[old]);r['core_features'][newfield]=line
+                if timestamp_verified:
+                    r[mk+'_reference_source']='VERIFIED_PREKICK_SNAPSHOT'
+                    source_summary[mk+'_TIMED']+=1
+                else:
+                    r[mk+'_reference_source']='LEGACY_NAMED_REFERENCE_UNTIMED'
+                    source_summary[mk+'_EXISTING_UNTIMED']+=1
+    for entry in archive_rows:
+        key=(int(entry['season']),str(entry['game_id']))
+        r=indexed.get(key)
+        if r is None:
+            audit['NO_CANONICAL_TRAINING_ROW']+=1;continue
+        hs=_ml_number(r.get('home_score'));away=_ml_number(r.get('away_score'))
+        if not all(math.isfinite(v) and v>=0 for v in (hs,away)):
+            audit['NO_CANONICAL_SCORES']+=1;continue
+        for mk,linefield,label,feature in (
+            ('spreads','spread_home_line_research','label_spread_reference','MARKET_SPREAD_LINE_REFERENCE'),
+            ('totals','total_over_line_research','label_totals_reference','MARKET_TOTAL_LINE_REFERENCE')):
+            line=_ml_number(entry.get(linefield))
+            if not math.isfinite(line):continue
+            if (mk=='spreads' and not -70<=line<=70) or (mk=='totals' and not 1<=line<=150):
+                audit[mk+'_INVALID_REFERENCE_RANGE']+=1;continue
+            margin=hs+line-away if mk=='spreads' else hs+away-line
+            if abs(margin)<1e-8:
+                audit[mk+'_PUSH_EXCLUDED']+=1;continue
+            label_value=int(margin>0)
+            old=r.get(label)
+            if old in (0,1):
+                audit[mk+'_EXISTING_REFERENCE_PRESERVED']+=1
+                if old!=label_value:audit[mk+'_ARCHIVE_DIFFERS_FROM_EXISTING_LABEL']+=1
+                # Compare sign hypotheses against a timed quote when one
+                # exists, but never infer proof of original archive timing.
+                if mk=='spreads' and r.get('spreads_source')=='VERIFIED_PREKICK_SCORES_WITH_FEATURES':
+                    observed=_ml_number(r.get('core_features',{}).get('MARKET_SPREAD_LINE'))
+                    if math.isfinite(observed) and abs(line)>.01:
+                        same=abs(observed-line);flip=abs(observed+line)
+                        if abs(same-flip)<1e-9:
+                            audit['SPREAD_SIGN_SNAPSHOT_COMPARISON_TIED']+=1
+                        elif same<flip:
+                            audit['SPREAD_SIGN_SNAPSHOT_FAVORS_HOME_CONVENTION']+=1
+                        else:
+                            audit['SPREAD_SIGN_SNAPSHOT_FAVORS_REVERSED_CONVENTION']+=1
+                continue
+            r[label]=label_value
+            r['core_features'][feature]=line
+            r[mk+'_reference_source']='UNTIMED_ARCHIVE_HYPOTHESIS'
+            source_summary[mk+'_UNTIMED_ARCHIVE']+=1
+            by_season[(int(r['season']),mk)]+=1
+            if mk=='spreads':
+                # We deliberately do NOT use this opposite assumption to pick
+                # the better-looking model after seeing results.
+                opposite=hs-line-away
+                if opposite*margin<0:
+                    audit['SPREAD_SIGN_REVERSAL_CHANGES_LABEL']+=1
+    counts={key:sum(r.get(key) in (0,1) for r in historical_rows)
+            for key in ('label_spread','label_totals','label_spread_reference','label_totals_reference')}
+    return {'status':'DUAL_LANE_RETROSPECTIVE_LABELS_BUILT',
+        'labels':counts,'backfilled_by_season_market':{f'{yr}_{mk}':n for (yr,mk),n in sorted(by_season.items())},
+        'by_source':dict(source_summary),'holds':dict(audit),
+        'timestamp_requirement':'ORIGINAL_TIME_REQUIRED_ONLY_FOR_TIME_DEPENDENT_CLAIMS',
+        'spread_orientation':'HOME_QUOTE_HYPOTHESIS_UNVERIFIED; SIGN_SENSITIVITY_REPORTED',
+        'timed_training_labels_preserved':True,'untimed_reference_is_not_executable':True,
+        'bet_authority':0}
+
+
+def ml_american_odds_to_decimal(price, *, verified_format=None):
+    """Fail closed on ambiguous odds encoding. No guessing based on magnitude."""
+    x=_ml_number(price)
+    if not math.isfinite(x):return None
+    if verified_format=='american':
+        if x>=100:return 1+x/100
+        if x<=-100:return 1+100/abs(x)
+    if verified_format=='decimal' and 1.0<x<=100:return x
+    return None
+
+
+def ml_priced_ev_audit(predictions, market_rows, *, price_format=None):
+    """Research-only EV audit at an originally timestamped bookmaker quote.
+
+    Even a computed EV is not an actionable bet without verified quote/capture,
+    bookmaker, canonical identity, side and market-time parity.
+    """
+    matched=0;verified=0;rows=[];holds=Counter()
+    by_game={(int(r['season']),str(r['game_id'])):r for r in market_rows}
+    for key,p in predictions.items():
+        quote=by_game.get(key)
+        if not quote:continue
+        matched+=1
+        if not quote.get('original_quote_capture_certified'):
+            holds['ORIGINAL_QUOTE_CAPTURE_UNCERTIFIED']+=1;continue
+        decimal=ml_american_odds_to_decimal(quote.get('home_ml_quote'),verified_format=price_format)
+        if decimal is None:
+            holds['MISSING_VERIFIED_ODDS_FORMAT_OR_PRICE']+=1;continue
+        if not math.isfinite(float(p)) or not 0<=float(p)<=1:continue
+        verified+=1
+        rows.append({'season':key[0],'game_id':key[1],'prob_home':float(p),
+                     'decimal_odds':decimal,'expected_value_per_unit':round(float(p)*decimal-1,6)})
+    return {'status':'RESEARCH_PRICED_EV_VERIFIED' if verified else 'HOLD_NO_CERTIFIED_ORIGINALLY_CAPTURED_PRICE',
+            'prediction_market_matches':matched,'certified_price_matches':verified,
+            'positive_ev_quotes':sum(r['expected_value_per_unit']>0 for r in rows),
+            'sample':rows[:20], 'holds':dict(holds),'bet_authority':0}
+
+
+def fit_v55_independent_brain_models(events, historical_rows, canonical_team_map, *, min_train=240, return_predictions=False):
+    """Separate per-family/market research learner; CORE never gates admission.
+
+    Signal and system credibility are season-prior only. Historical grades are
+    computed from original-candidate side and the verified market-specific label,
+    never used as features for that same/earlier season. Frozen retrospective
+    source vintage is NOT certified, so all resulting models are research-only.
+    """
+    families=('SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER')
+    labels={'h2h':'label_h2h','spreads':'label_spread','totals':'label_totals'}
+    history={(int(r['season']),str(r['game_id'])):r for r in historical_rows}
+    grouped=defaultdict(list); seen=set();holds=Counter()
+    for e in events:
+        fam=str(e.get('brain') or '').upper()
+        mk=str(e.get('market') or '').lower()
+        if fam not in families or mk not in labels:continue
+        try:key=(int(e['season']),str(e['cfbd_game_id']))
+        except (TypeError,ValueError,KeyError):continue
+        target=str(e.get('target') or '').strip()
+        side_map=canonical_team_map.get(key,{})
+        if mk=='totals':
+            if target not in ('OVER','UNDER'):
+                holds['TOTAL_TARGET_NOT_VERIFIED']+=1;continue
+            sign=1 if target=='OVER' else -1
+        elif target in side_map:
+            v=str(side_map[target].get('is_home_verified')).lower()
+            if v not in ('1','0','true','false','yes','no'):
+                holds['SIDE_ROLE_UNVERIFIED']+=1;continue
+            sign=1 if v in ('1','true','yes') else -1
+        else:
+            holds['CANONICAL_SIDE_NOT_MATCHED']+=1;continue
+        system=str(e.get('system_id') or fam)
+        uniq=(key,fam,mk,target,system)
+        if uniq in seen:continue
+        seen.add(uniq)
+        grouped[(fam,mk,key)].append((sign,system))
+    audits={};models={};origin_oof={}
+    for fam in families:
+      for mk,label in labels.items():
+        candidates=sorted((key,signals) for (f,m,key),signals in grouped.items() if f==fam and m==mk)
+        prior=defaultdict(lambda:[0,0]);training=[];prior_year=None
+        graded=0;missing=0
+        for (yr,gid),signals in candidates:
+            r=history.get((yr,gid)); actual=None if r is None else r.get(label)
+            if actual not in (0,1):
+                missing+=1;continue
+            # Build predictive features BEFORE any results from this season are
+            # added. Year-wide pending results become priors only next season.
+            if yr!=prior_year:
+                if prior_year is not None:
+                    for k,(n,w) in season_pending.items():
+                        prior[k][0]+=n;prior[k][1]+=w
+                season_pending=defaultdict(lambda:[0,0]);prior_year=yr
+            signed=sum(sign for sign,system in signals)
+            evidence=[]
+            for sign,system in signals:
+                n,w=prior[system]
+                evidence.append(sign*((w+1)/(n+2)-.5))
+                # The evaluation label is used only to update a *future* year.
+                won=int(actual==(1 if sign==1 else 0))
+                season_pending[system][0]+=1
+                season_pending[system][1]+=won
+            # Capped counts prevent multiple correlated rules from generating
+            # arbitrarily large pseudo-confidence.
+            features={'ORIGIN_NET':float(max(-5,min(5,signed))),
+                      'ORIGIN_SYSTEM_COUNT':float(min(12,len({sys for _,sys in signals}))),
+                      'ORIGIN_SEASON_PRIOR':sum(evidence)/len(evidence) if evidence else 0.,
+                      'ORIGIN_FAMILY_PRESENT':1.}
+            training.append({'season':yr,'game_id':gid,'core_features':features,label:int(actual)})
+            graded+=1
+        key=f'ORIGIN_{fam}_{mk}'
+        cols=['ORIGIN_NET','ORIGIN_SYSTEM_COUNT','ORIGIN_SEASON_PRIOR','ORIGIN_FAMILY_PRESENT']
+        if training:
+            preds,audit,model=_ml_train_with_chronological_fallback(training,cols,label,min_train=min_train)
+            audit={k:v for k,v in audit.items() if k!='features'}
+            if model is not None:
+                origin_oof[(fam,mk)]={(int(r['season']),str(r['game_id'])):float(pred[i])
+                    for i,r in enumerate(training) if math.isfinite(float(pred[i]))}
+            if model is not None:
+                models[key]={'model':model,'features':cols,
+                             'source':'RETROSPECTIVE_FROZEN_FAMILY_SEASON_PRIOR_RESEARCH_ONLY',
+                             'prediction_target':{'h2h':'HOME_WIN','spreads':'HOME_COVER','totals':'OVER'}[mk]}
+        else:
+            audit={'status':'HOLD_NO_MARKET_SPECIFIC_VERIFIED_LABELS',
+                   'training_games':0,'oof_games':0}
+        audits[key]={**audit,'candidate_games':len(candidates),
+                     'labeled_candidate_games':graded,'unlabeled_candidate_games':missing,
+                     'core_required':False,'original_signal_capture_certified':False,
+                     'bet_authority':0}
+    result={'status':'INDEPENDENT_FAMILY_ML_EVALUATED_RESEARCH_ONLY',
+            'models_trained':sorted(models),'families':audits,'holds':dict(holds),
+            'bet_authority':0}
+    return (result,models,origin_oof) if return_predictions else (result,models)
+
+
+def fit_v55_retrospective_reference_lane(historical_rows, events, team_map, *, min_train=240):
+    """Chronologically train multiseason spread/total models on untimed REFERENCES.
+
+    A game outcome and untimed market reference can define an ATS/OVER label
+    without original quote capture. The distinction from an originally
+    available, executable betting opportunity is permanent and machine-readable.
+    Models here are NEVER forward-authority models.
+    """
+    import numpy as np
+    report={'status':'HOLD_NO_RETROSPECTIVE_REFERENCE_LABELS',
+            'reference_timing_policy':'TIMESTAMPS_NOT_REQUIRED_FOR_RETROSPECTIVE_REFERENCE_GRADES',
+            'requires_verified_capture_for_forward_price_ev':True,
+            'home_spread_sign_certified':False,
+            'model_scope':'EXPLORATORY_RECONSTRUCTED_OUTCOMES_NOT_ORIGINAL_BETS',
+            'bet_authority':0,'trained_models':[],'model_audits':{},
+            'combined_brain_input_coverage':{},'combined_brain_ablation':{},
+            'matched_game_model_comparison':{}}
+    models={};oo={};features={};metrics={}
+    core_fields=sorted({k for r in historical_rows for k in r.get('core_features',{})
+                        if k.startswith('CFBD_DIFF_CFBD_') and k.endswith('_Prior')})
+    if not core_fields:
+        # Compatible with the original prior-only legacy training view.
+        core_fields=sorted({k for r in historical_rows for k in r.get('core_features',{})
+                            if k in ML_CORE_FIELDS})
+    stat_fields=[k for k in core_fields if ('_Season_' in k or '_Recent3_' in k or '_Recent5_' in k)
+                 and ('_Off_' in k or '_Def_' in k)]
+    if len(stat_fields)<2:stat_fields=[f for f in ML_STAT_FIELDS if any(f in r.get('core_features',{}) for r in historical_rows)]
+    if not core_fields or len(stat_fields)<2:
+        report['status']='HOLD_NO_INDEPENDENT_CORE_STAT_PRIOR_FEATURES'
+        return report,models
+    # Shallow row copies are sufficient: labels change only in this research
+    # view; original (verified-pregame) labels are never altered.
+    research_rows=[]
+    for r in historical_rows:
+        research_rows.append({**r,
+            'label_spread':r.get('label_spread_reference'),
+            'label_totals':r.get('label_totals_reference')})
+    # Original capture vintage is intentionally NOT used to gate retrospective
+    # system reconstructions. Their prior-season reliability remains leakage-safe
+    # for inference *conditional on the frozen system selection*.
+    report['independent_candidate_reference_audit']=ml_independent_candidate_audit(
+        events,research_rows,team_map)
+    family_report,family_models,family_oof=fit_v55_independent_brain_models(
+        events,research_rows,team_map,min_train=min_train,return_predictions=True)
+    report['independent_brain_reference_ml']=family_report
+    for key,spec in family_models.items():
+        new=key+'_reference'
+        models[new]={**spec,'source':'RETROSPECTIVE_REFERENCE_ONLY',
+                     'bet_authority':0,'forward_eligible':False}
+        report['trained_models'].append(new)
+    counts=_ml_brain_counts(events)
+    for market,label,linefeature in (
+        ('spreads','label_spread','MARKET_SPREAD_LINE_REFERENCE'),
+        ('totals','label_totals','MARKET_TOTAL_LINE_REFERENCE')):
+        ref_count=sum(r.get(label) in (0,1) for r in research_rows)
+        report['model_audits'][market]={'labeled_games':ref_count,
+            'line_source':'TIMED_SNAPSHOT_OR_UNTIMED_ARCHIVE_RESEARCH',
+            'line_sign_certified':market!='spreads',
+            'original_price_capture_certified':False}
+        if ref_count<min_train:
+            report['model_audits'][market]['status']='HOLD_INSUFFICIENT_REFERENCE_GAMES'
+            continue
+        for fam,base in (('CORE',core_fields),('STAT',stat_fields)):
+            cols=list(base)+[linefeature]
+            pred,audit,fit=_ml_train_with_chronological_fallback(research_rows,cols,label,min_train=min_train)
+            name=f'{fam}_{market}_reference'
+            report['model_audits'][name]={k:v for k,v in audit.items() if k!='features'}
+            if fit is None:continue
+            oo[name]=pred
+            models[name]={'model':fit,'features':cols,
+                'source':'UNTIMED_REFERENCE_OR_CAPTURED_REFERENCE_RESEARCH_ONLY',
+                'prediction_target':'HOME_COVER' if market=='spreads' else 'OVER',
+                'bet_authority':0,'forward_eligible':False,
+                'spread_sign_assumed':market=='spreads'}
+            report['trained_models'].append(name)
+        ck=f'CORE_{market}_reference';sk=f'STAT_{market}_reference'
+        if ck not in oo or sk not in oo:
+            report['model_audits'][f'COMBINED_{market}_reference']={'status':'HOLD_BASE_OOF_MISSING'}
+            continue
+        meta=[]
+        for i,r in enumerate(research_rows):
+            if r.get(label) not in (0,1):continue
+            a=oo[ck][i];b=oo[sk][i]
+            if not math.isfinite(float(a)) or not math.isfinite(float(b)):continue
+            y=int(r['season']);gid=str(r['game_id']);sides=team_map.get((y,gid),{})
+            if market=='totals':
+                hc=counts.get((y,gid,'OVER',market),Counter())
+                ac=counts.get((y,gid,'UNDER',market),Counter())
+            else:
+                home=[t for t,v in sides.items() if str(v.get('is_home_verified'))=='1']
+                away=[t for t,v in sides.items() if str(v.get('is_home_verified'))=='0']
+                if len(home)!=1 or len(away)!=1:continue
+                hc=counts.get((y,gid,home[0],market),Counter())
+                ac=counts.get((y,gid,away[0],market),Counter())
+            x={'CORE_OOF':float(a),'STAT_OOF':float(b),
+               # A STATIC line is context, not a synthetic Market Rich OOF or
+               # sharp movement signal. Preserve its provenance in the report.
+               'MARKET_REFERENCE_LINE':_ml_number(r.get('core_features',{}).get(linefeature))}
+            for family in ('SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER'):
+                x[family+'_NET']=float(min(3,hc.get(family,0))-min(3,ac.get(family,0)))
+                x[family+'_ORIGIN_OOF']=family_oof.get((family,market),{}).get((y,gid),float('nan'))
+            meta.append({'season':y,'game_id':gid,'core_features':x,label:int(r[label])})
+        if not meta:continue
+        fields=tuple(meta[0]['core_features'])
+        report['combined_brain_input_coverage'][market]=_ml_family_coverage(meta)
+        pred,audit,fit=_ml_fitting_series(meta,fields,label,min_train=min_train)
+        name=f'COMBINED_{market}_reference'
+        report['model_audits'][name]={**{k:v for k,v in audit.items() if k!='features'},
+            'status':'EXPLORATORY_RETROSPECTIVE_META_OOF' if fit is not None else audit['status'],
+            'original_expert_capture_certified':False,
+            'reference_line_original_capture_certified':False}
+        if fit is not None:
+            models[name]={'model':fit,'features':list(fields),
+                'source':'RETROSPECTIVE_UNTIMED_OR_TIMED_REFERENCE_STACK',
+                'prediction_target':'HOME_COVER' if market=='spreads' else 'OVER',
+                'bet_authority':0,'forward_eligible':False}
+            report['trained_models'].append(name)
+            report['combined_brain_ablation'][market]=_ml_ablation_report(
+                meta,fields,label,pred,min_train=min_train)
+            # An archived reference line is not Market Rich ML. Test its
+            # incremental context explicitly without relabeling as a full
+            # price-movement brain. Same OOF game sample only.
+            from sklearn.metrics import brier_score_loss, log_loss
+            reduced=[f for f in fields if f!='MARKET_REFERENCE_LINE']
+            without,_,_=_ml_fitting_series(meta,reduced,label,min_train=min_train)
+            common=np.isfinite(pred)&np.isfinite(without)
+            if common.any():
+                yt=np.asarray([r[label] for r in meta],dtype=int)
+                report['reference_line_context_ablation_'+market]={
+                    'status':'EXPLORATORY_SAME_GAME_STATIC_LINE_CONTEXT',
+                    'same_games':int(common.sum()),
+                    'with_line_brier':round(float(brier_score_loss(yt[common],pred[common])),6),
+                    'without_line_brier':round(float(brier_score_loss(yt[common],without[common])),6),
+                    'with_line_logloss':round(float(log_loss(yt[common],pred[common],labels=[0,1])),6),
+                    'without_line_logloss':round(float(log_loss(yt[common],without[common],labels=[0,1])),6),
+                    'not_a_market_rich_ml_model':True,'bet_authority':0}
+            mapped={(int(r['season']),str(r['game_id'])):i for i,r in enumerate(research_rows)}
+            pred_map={name0:{k:float(p[mapped[k]]) for k in mapped if math.isfinite(float(p[mapped[k]]))}
+                for name0,p in (('CORE',oo[ck]),('STAT',oo[sk]))}
+            pred_map['COMBINED']={(int(r['season']),str(r['game_id'])):float(pred[i])
+                for i,r in enumerate(meta) if math.isfinite(float(pred[i]))}
+            report['matched_game_model_comparison'][market]=_ml_matched_probability_metrics(
+                research_rows,pred_map,label)
+    report['status']='EXPLORATORY_RETROSPECTIVE_MODELS_TRAINED' if report['trained_models'] else 'HOLD_REFERENCE_MODEL_FOLDS'
+    return report,models
 
 
 def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
@@ -2164,14 +2860,26 @@ def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
         for market,label in (('spreads','label_spread'),('h2h','label_h2h'),('totals','label_totals')):
             reference={'spreads':'MARKET_SPREAD_LINE','totals':'MARKET_TOTAL_LINE'}.get(market)
             cols=base_cols+([reference] if reference and reference in valid_fields else [])
-            prediction,audit,fitted=_ml_fitting_series(historical_rows,cols,label,min_train=min_train)
+            prediction,audit,fitted=_ml_train_with_chronological_fallback(historical_rows,cols,label,min_train=min_train)
             report[brain+'_'+market]=audit
             if fitted is not None:
                 key=brain+'_'+market
                 models[key]={'model':fitted,'features':cols,'source':'STAGE1_V5_2_HISTORICAL',
-                             'prediction_target':'HOME_COVER' if market=='spreads' else 'HOME_WIN'}
+                             'prediction_target':{'spreads':'HOME_COVER','h2h':'HOME_WIN','totals':'OVER'}[market]}
                 oof[key]=prediction
                 report['trained_models'].append(key)
+    report['chronological_probability_calibration']={}
+    for name,pred in oof.items():
+        market=name.split('_',1)[-1]
+        label={'h2h':'label_h2h','spreads':'label_spread','totals':'label_totals'}.get(market)
+        if not label:continue
+        ca,cp,cm=_ml_chronological_calibration(historical_rows,pred,label)
+        report['chronological_probability_calibration'][name]=ca
+        if cm is not None:
+            models['CAL_'+name]={'model':cm,'features':['UNCALIBRATED_MODEL_PROBABILITY'],
+                'input_transform':'LOGIT_CLIPPED_1E-5','source':'SHADOW_EARLIER_SEASON_OOF_CALIBRATION',
+                'prediction_target':models[name]['prediction_target'],
+                'bet_authority':0}
     # Historical Market Rich fits on canonical, verified pre-kick warehouse
     # snapshots. Forward/live moves are not a research-training source.
     market_predictions={};market_source='scores_with_features'
@@ -2182,7 +2890,7 @@ def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
         for source in market_rows:
             base=hist_index.get((int(source['season']),str(source['game_id'])))
             if not base:continue
-            mrows.append({**source,**{k:base.get(k) for k in ('label_spread','label_h2h','label_totals')}})
+            mrows.append({**source,'date':base.get('date'),**{k:base.get(k) for k in ('label_spread','label_h2h','label_totals')}})
         # Preserve missingness when a canonical historical game had no market
         # record. Fold predictions are keyed to game, never row index.
         report['market_historical_labeled_games']=len(mrows)
@@ -2190,7 +2898,7 @@ def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
         cols=[f for f in ML_HIST_MARKET_FIELDS if any(math.isfinite(_ml_number(r.get('core_features',{}).get(f))) for r in mrows)]
         if cols and mrows:
             for market,label in (('spreads','label_spread'),('h2h','label_h2h'),('totals','label_totals')):
-                pred,audit,fitted=_ml_fitting_series(mrows,cols,label,min_train=min_train)
+                pred,audit,fitted=_ml_train_with_chronological_fallback(mrows,cols,label,min_train=min_train)
                 report['MARKET_RICH_'+market]=audit
                 if fitted is not None:
                     tag='MARKET_RICH_'+market
@@ -2207,6 +2915,14 @@ def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
                                    'matched_games':len(mrows)}
     else:
         report['MARKET_RICH']={'status':'HOLD_HISTORICAL_MARKET_SNAPSHOT_SOURCE_MISSING'}
+    report['independent_brain_origination']=ml_independent_candidate_audit(
+        canonical_events,historical_rows,canonical_team_map)
+    origin_audit,origin_models,origin_predictions=fit_v55_independent_brain_models(
+        canonical_events,historical_rows,canonical_team_map,min_train=min_train,
+        return_predictions=True)
+    report['independent_brain_ml']=origin_audit
+    models.update(origin_models)
+    report['trained_models'].extend(sorted(origin_models))
     # Meta learners: market-specific, using only same-year OOF base predictions.
     # Historical frozen signals are research-only until original prekick capture.
     counts=_ml_brain_counts(canonical_events)
@@ -2239,8 +2955,13 @@ def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
                    for fam in ('SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER')}
             extras['CORE_OOF']=float(cp);extras['STAT_OOF']=float(sp)
             extras['MARKET_RICH_OOF']=market_predictions.get(market,{}).get((y,gid),float('nan'))
+            for fam in ('SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER'):
+                extras[fam+'_ORIGIN_OOF']=origin_predictions.get((fam,market),{}).get((y,gid),float('nan'))
             meta_rows.append({'season':y,'game_id':gid,'core_features':extras,label:r[label]})
-        fields=('CORE_OOF','STAT_OOF','MARKET_RICH_OOF','SYSTEM_MINER_NET','BIG_AL_NET','PATHI_NET','PREDICTION_TRACKER_NET')
+        fields=('CORE_OOF','STAT_OOF','MARKET_RICH_OOF',
+                'SYSTEM_MINER_NET','BIG_AL_NET','PATHI_NET','PREDICTION_TRACKER_NET',
+                'SYSTEM_MINER_ORIGIN_OOF','BIG_AL_ORIGIN_OOF','PATHI_ORIGIN_OOF',
+                'PREDICTION_TRACKER_ORIGIN_OOF')
         report['combined_brain_input_coverage'][market]=_ml_family_coverage(meta_rows)
         meta_pred,meta_audit,model=_ml_fitting_series(meta_rows,fields,label,min_train=min_train)
         meta_audit.update({'status':('EXPLORATORY_RETROSPECTIVE_META_OOF' if model is not None else
@@ -2263,6 +2984,9 @@ def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
                                     if math.isfinite(float(x[i]))}
         predictions['COMBINED']={(int(r['season']),str(r['game_id'])):float(meta_pred[i])
                                  for i,r in enumerate(meta_rows) if math.isfinite(float(meta_pred[i]))}
+        if market=='h2h':
+            report['priced_ev_research_audit']=ml_priced_ev_audit(
+                predictions.get('COMBINED',{}),market_rows or [])
         report['matched_game_model_comparison'][market]=_ml_matched_probability_metrics(
             historical_rows,predictions,label) if len(predictions)==3 else {'status':'HOLD_BASE_OOF_MISSING'}
         if model is not None:
@@ -2297,7 +3021,9 @@ def publish_v55_ml_artifacts(report,models,*,publish_uri,storage_client=None):
             key=f'{root}/models/{name}-{h}.joblib'
             bucket.blob(key).upload_from_filename(str(path),content_type='application/octet-stream')
             names[name]={'uri':'gs://'+loc.netloc+'/'+key,'sha256':h,
-                         'features':model_spec['features']}
+                         'features':model_spec['features'],
+                         'forward_eligible':bool(model_spec.get('forward_eligible',False)),
+                         'research_reference_only':name.endswith('_reference')}
     manifest=dict(report,artifacts=names,
                   trained_utc=datetime.now(timezone.utc).isoformat(),
                   registry_policy='ML_SHADOW_ONLY_NO_BET_AUTHORITY')
@@ -2350,8 +3076,37 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
           canonical_audit=raw['stage1_canonical_ledger_v5_audit.json'],
           project=project,dataset=dataset)
     reference_audit=_ml_attach_verified_market_labels(rows,market_data)
+    archived_references, archived_reference_source_audit=ml_archived_reference_line_rows(
+        client=client,canonical_manifest=raw['historical_cfbd_game_manifest_v5.csv'],
+        canonical_sides=raw['historical_cfbd_game_sides_v5.csv'],
+        canonical_audit=raw['stage1_canonical_ledger_v5_audit.json'],
+        project=project,dataset=dataset)
+    reference_label_audit=ml_attach_research_reference_labels(rows,archived_references)
     report,models=fit_v55_ml_research(rows,events,team_map,market_rows=market_data)
+    retrospective_report,retrospective_models=fit_v55_retrospective_reference_lane(
+        rows,events,team_map)
+    # Reference model artifacts have a distinct name and forward_eligible=False.
+    # No older untimed quote can change the certified-input label columns.
+    models.update(retrospective_models)
+    report['reference_research_schema']='RETROSPECTIVE_REFERENCE_V1_CONTEXTUAL_TIME_POLICY'
+    report['retrospective_reference_research']=retrospective_report
+    report['trained_models'].extend(retrospective_report.get('trained_models',[]))
+    report.setdefault('model_features',{}).update({name:spec['features']
+        for name,spec in retrospective_models.items()})
+    report['contextual_timestamp_policy']={
+        'retrospective_scores_reference':'ORIGINAL_CAPTURE_TIME_NOT_REQUIRED',
+        'observed_market_movement':'PREKICK_ORDERED_TIMESTAMPS_REQUIRED',
+        'historical_executable_betting_roi':'ORIGINAL_PRICE_AND_SIGNAL_AVAILABILITY_REQUIRED',
+        'current_forward_bets':'CURRENT_VERIFIED_PREKICK_PRICES_REQUIRED',
+        'missing_historical_time':'NOT_A_GENERAL_RESEARCH_VETO',
+        'untimed_reference_models_forward_eligible':False}
+    if report['status']=='HOLD_ML_TRAINING_DATA_OR_FEATURES' and retrospective_models:
+        report['status']='EXPLORATORY_REFERENCE_MODELS_TRAINED_UNCERTIFIED' 
+    report['archived_reference_line_source_audit']=archived_reference_source_audit
+    report['retrospective_reference_label_audit']=reference_label_audit
     report['market_line_label_audit']=reference_audit
+    report['archived_multiseason_quote_audit']=ml_archived_quote_vintage_audit(
+        client=client,project=project,dataset=dataset)
     report['market_rich_historical_source_audit']=market_audit
     report['historical_source_audit']=source
     report['canonical_stage1_games']=len(games)
