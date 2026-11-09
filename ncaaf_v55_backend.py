@@ -3,7 +3,8 @@
 
 Consumes one original live signal stream, one same-book two-sided price stream,
 and the sealed ROI research registry. One authoritative output ledger. All 7
-brains may originate. No probabilities, no fitted model, no synthetic evidence.
+brains may originate. Research ML manifests are audited in shadow only; no
+model receives betting authority without independently validated evidence.
 This module does NOT fetch sports odds, produce CFBD features or place wagers.
 Those upstream data services must feed canonical source records.
 """
@@ -90,6 +91,25 @@ def checked_registry(doc,at):
             seen.add(c['id']);found.append(c)
         except (KeyError,ValueError,TypeError,OverflowError):continue
     return found
+
+def audit_ml_research_manifest(doc):
+    """Shadow-only handoff audit; never reinterpret an ML model as bet authority.
+
+    Production predictions need the exact training feature schema, original
+    pregame feature capture and independently evaluated executable prices.
+    Merely loading a model manifest does not grant any of those properties.
+    """
+    if not isinstance(doc,dict) or doc.get('schema')!='NCAAF_V55_ML_RESEARCH_V1':
+        return {'status':'HOLD_ML_MANIFEST_SCHEMA','bet_authority':0}
+    models=doc.get('artifacts') or {}
+    invalid=[k for k,v in models.items() if not isinstance(v,dict) or
+             not s(v.get('uri')).startswith('gs://') or len(s(v.get('sha256')))!=64 or
+             not isinstance(v.get('features'),list)]
+    return {'status':('ML_SHADOW_MANIFEST_PRESENT' if models and not invalid else
+                      'HOLD_ML_ARTIFACTS_MISSING_OR_INVALID'),
+            'models':sorted(models),'invalid_models':invalid,
+            'manifest_policy':doc.get('registry_policy'),
+            'live_feature_parity_verified':False,'bet_authority':0}
 
 def row_quotes(board):
     """Translate existing V5.5 paired HOME/AWAY backend prices, not inferred odds.
@@ -560,11 +580,20 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
         registry=None
         source_hold=(source_hold+';' if source_hold else '')+'ROI_REGISTRY_MISSING:'+type(exc).__name__
 
+    ml_uri=s(os.environ.get('NCAAF_V55_ML_MANIFEST_URI')) or (
+        'gs://'+bucket+'/research/ncaaf/v55/ml/current_manifest.json')
+    try:
+        ml_audit=audit_ml_research_manifest(read_registry(ml_uri))
+    except Exception as exc:
+        ml_audit={'status':'HOLD_ML_MANIFEST_UNAVAILABLE',
+                  'error':type(exc).__name__+':'+str(exc),'bet_authority':0}
+    log('[NCAAF-V55-ML-SHADOW-MANIFEST] '+json.dumps(ml_audit,sort_keys=True))
     extras_uri=s(os.environ.get('NCAAF_V55_OTHER_MARKET_QUOTES_URI'))
     extra_quotes=read_rows(extras_uri) if extras_uri else None
     signals,live_identity_audit=canonicalize_live_signal_game_ids(signals,board)
     output,audit=evaluate(board.to_dict('records'),signals,registry,extra_quotes=extra_quotes)
     audit['two_engine_live_identity_matching']=live_identity_audit
+    audit['ml_shadow_manifest']=ml_audit
     # Deployment kill switch also controls PUBLICATION of authority. Keep
     # research candidates but never place BET / STRONG BET on the board in OFF.
     auth_on=os.getenv('NCAAF_V55_BET_AUTHORITY_MODE','OFF').upper()=='ON'

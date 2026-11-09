@@ -310,6 +310,31 @@ def main():
         result['market_rich_feature_coverage'] = market_rich
         log_func('[NCAAF-V55-MARKET-RICH-FEATURE-COVERAGE] '+json.dumps(
             market_rich,sort_keys=True,default=str))
+        # Active V5.5 ML training is part of Heavy Research, not a second job.
+        # ML artifacts are research-only until pregame provenance and held-out
+        # price-validation establish any independent betting authority.
+        try:
+            _ml_report = _roi.run_v55_ml_training(
+                client=bigquery.Client(project=os.getenv('GCP_PROJECT','sharplogger')),
+                storage_client=gcs,
+                project=os.getenv('GCP_PROJECT','sharplogger'),
+                dataset=os.getenv('NCAAF_V55_SOURCE_DATASET','sharp_data'),
+                bucket=bucket,
+                market_feed_uri=os.getenv('NCAAF_V55_MARKET_RICH_FEED_URI') or None)
+            result['ml_training'] = _ml_report
+            log_func('[NCAAF-V55-ML-TRAINING] '+json.dumps({
+                'status':_ml_report.get('status'),
+                'trained_models':_ml_report.get('trained_models',[]),
+                'core_spread':_ml_report.get('CORE_spreads',{}),
+                'stat_spread':_ml_report.get('STAT_spreads',{}),
+                'combined_spread':_ml_report.get('COMBINED_spreads',{}),
+                'market_rich':_ml_report.get('MARKET_RICH',{}),
+                'publication':_ml_report.get('publication'),
+                'bet_authority':0},sort_keys=True,default=str))
+        except Exception as exc:
+            result['ml_training'] = {'status':'HOLD_ML_TRAINING_EXCEPTION',
+                 'error':type(exc).__name__+':'+str(exc),'bet_authority':0}
+            log_func('[NCAAF-V55-ML-TRAINING] '+json.dumps(result['ml_training']))
         result['data_integration_acceptance']=_roi.integration_acceptance_report(
             result.get('historical_seven_brain_replay',{}),
             result.get('historical_warehouse_replay',{}), provider,market_rich)

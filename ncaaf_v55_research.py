@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""NCAAF V5.5 authoritative ROI-edge RESEARCH engine (no NCAAF module imports).
+"""NCAAF V5.5 canonical research: evidence/ROI and expanding-origin ML training.
 
 Input is the ORIGINAL, PRE-GAME captured seven-brain bet-event ledger. This file
 never infers original signals/quotes from retrospective context. It discovers
 hypotheses ONLY from discovery-period events, verifies rule freeze provenance,
 tests 2024-25 or 2026+ OOS, calculates realized per-unit betting ROI, and
 publishes a hash-checked registry only when the capture audit is independently
-attested. No predictive win-probability model and no live betting.
+attested. ML training is research-only, produces separately versioned artifacts,
+and cannot bypass the original ROI certification or live betting safeguards.
 """
 from __future__ import annotations
 import argparse, csv, hashlib, io, itertools, json, math, os, sys
@@ -1584,6 +1585,445 @@ def market_rich_feature_coverage(*, client=None, project='sharplogger', dataset=
         result.update(status='HOLD_MARKET_RICH_PUBLISH_FAILED',exported_rows=count,
                       exception=type(exc).__name__+':'+str(exc))
     return result
+
+
+# ---------------- V5.5 integrated ML research (not betting authority) ----------------
+# This implementation deliberately shares the verified canonical Stage1/Stage2
+# observation ledgers. No second candidate selector or independent job.
+ML_CORE_FIELDS = ('Opening_Spread','Opening_Total','Away_Travel_Miles','Away_Time_Zones_Crossed',
+                  'Neutral_Site','Venue_Elevation','Altitude_Gain',
+                  'Team_Prior_ATS_Rate','Opponent_Prior_ATS_Rate',
+                  'Team_Prior_Win_Rate','Opponent_Prior_Win_Rate',
+                  'Team_Prior_Scoring_Avg','Opponent_Prior_Scoring_Avg')
+ML_STAT_FIELDS = ('Opening_Spread','Opening_Total','Team_Prior_ATS_Rate','Opponent_Prior_ATS_Rate',
+                  'Team_Prior_Win_Rate','Opponent_Prior_Win_Rate',
+                  'Team_Prior_Scoring_Avg','Opponent_Prior_Scoring_Avg')
+ML_MARKET_FIELDS = ('SharpBetScore','Sharp_Move_Signal','Delta_vs_Sharp',
+                    'Sharp_Limit_Jump','Sharp_Time_Score','Limit_Jump',
+                    'Market_Leader','Is_Pinnacle','Sharp_Limit_Total')
+ML_SCHEMA = 'NCAAF_V55_ML_RESEARCH_V1'
+
+def ml_market_rich_labeled_rows(*,client,market_uri,storage_client=None,
+                                project='sharplogger',dataset='sharp_data'):
+    """Exact 2026 recorded prekick feature snapshot + completed game scores.
+
+    Never fill a missing 2026 result using the 2013-25 Stage1 game ledger;
+    never infer HOME/AWAY from the final winner. Source game and team names
+    must agree uniquely before a labeled market example is accepted.
+    """
+    import gzip
+    try:
+        content=_obj_bytes(market_uri,storage_client)
+        raw=[json.loads(line) for line in gzip.decompress(content).decode().splitlines() if line.strip()]
+    except Exception as exc:
+        return [],{'status':'HOLD_MARKET_RICH_FEED_READ_FAILED','error':str(exc)}
+    # Aggregate recorded market facts by Game_Key, never select a single
+    # bookmaker or signal based on outcomes.
+    grouped=defaultdict(list);holds=Counter()
+    for r in raw:
+        gid=str(r.get('Game_Key') or '').strip()
+        if not gid:holds['MISSING_GAME_KEY']+=1;continue
+        if (str(r.get('Sport') or '').upper() not in
+            ('NCAAF','NCAA FOOTBALL','COLLEGE FOOTBALL')):continue
+        ts=clock(r.get('Time'));kick=clock(r.get('Game_Start'))
+        if ts is None or kick is None or ts>=kick:
+            holds['NOT_VERIFIED_PREGAME']+=1;continue
+        grouped[gid].append(r)
+    # Candidate result sources must have original game identity and separately
+    # named HOME/AWAY scores; do not accept an anonymous score pair.
+    candidate_tables=('game_scores_final','sharp_scores_full')
+    result_source=None;results={};result_fields={}
+    for table in candidate_tables:
+        fq=f'{project}.{dataset}.{table}'
+        try:cols={f.name for f in client.get_table(fq).schema}
+        except Exception:continue
+        names=next(((h,a) for h,a in (
+            ('Home_Team_Norm','Away_Team_Norm'),('home_team','away_team'),
+            ('Home_Team','Away_Team')) if h in cols and a in cols),None)
+        scores=next(((h,a) for h,a in (
+            ('Home_Score','Away_Score'),('home_score','away_score'),
+            ('Home_Points','Away_Points')) if h in cols and a in cols),None)
+        key=next((k for k in ('Game_Key','game_key') if k in cols),None)
+        start=next((k for k in ('Game_Start','game_start','Commence_Time') if k in cols),None)
+        if not names or not scores or not key:
+            holds['RESULT_TABLE_SCHEMA_MISSING_'+table.upper()]+=1;continue
+        status_col=next((k for k in ('Status','status','Game_Status','game_status','Completed') if k in cols),None)
+        # 'sharp_scores_full' may contain live/in-progress scores: require a
+        # recorded FINAL status there. 'game_scores_final' is the final ledger.
+        if table!='game_scores_final' and status_col is None:
+            holds['RESULT_COMPLETION_STATUS_UNVERIFIED_'+table.upper()]+=1
+            continue
+        selected=[key,*names,*scores]+([start] if start else [])+([status_col] if status_col else [])
+        sql='SELECT '+','.join('`'+k+'`' for k in selected)+f' FROM `{fq}` WHERE `{key}` IS NOT NULL'
+        try:rawres=[dict(row.items()) for row in client.query(sql).result(page_size=10000)]
+        except Exception as exc:
+            holds['RESULT_TABLE_QUERY_FAILED_'+table.upper()]+=1;continue
+        for item in rawres:
+            rid=str(item.get(key) or '').strip()
+            if rid not in grouped:continue
+            if status_col:
+                status=str(item.get(status_col) or '').strip().lower()
+                if status not in ('final','completed','complete','closed','true','1'):
+                    holds['RESULT_NOT_FINAL']+=1;continue
+            hs=_ml_number(item.get(scores[0]));aws=_ml_number(item.get(scores[1]))
+            if not math.isfinite(hs) or not math.isfinite(aws):continue
+            doc={'home':_canonical_name(item.get(names[0])),
+                 'away':_canonical_name(item.get(names[1])),
+                 'hs':hs,'aws':aws,'start':str(item.get(start) or '')}
+            if rid in results and results[rid]!=doc:
+                results[rid]=None
+            elif rid not in results:results[rid]=doc
+        result_source=fq;result_fields={'id':key,'teams':list(names),'scores':list(scores),'kickoff':start}
+        if results:break
+    entries=[]
+    for gid,records in grouped.items():
+        game=results.get(gid)
+        if game is None:
+            holds['NO_UNIQUE_COMPLETED_GAME_RESULT']+=1;continue
+        source_home={_canonical_name(r.get('Home_Team_Norm')) for r in records}
+        source_away={_canonical_name(r.get('Away_Team_Norm')) for r in records}
+        if source_home!={game['home']} or source_away!={game['away']} or not game['home'] or not game['away']:
+            holds['NAMED_HOME_AWAY_MISMATCH']+=1;continue
+        kickoff={clock(r.get('Game_Start')) for r in records}
+        if len(kickoff)!=1 or None in kickoff:
+            holds['INCONSISTENT_GAME_START']+=1;continue
+        source_kick=next(iter(kickoff))
+        if game.get('start'):
+            final_kick=clock(game['start'])
+            if final_kick is None or abs((final_kick-source_kick).total_seconds())>6*3600:
+                holds['RESULT_KICKOFF_MISMATCH']+=1;continue
+        if game['hs']==game['aws']:
+            holds['H2H_DRAW_EXCLUDED']+=1;continue
+        ks=next(iter(kickoff))
+        features={}
+        for f in ML_MARKET_FIELDS:
+            values=[_ml_number(r.get(f)) for r in records]
+            present=[v for v in values if math.isfinite(v)]
+            features[f]=sum(present)/len(present) if present else float('nan')
+        features['MARKET_RECORD_COUNT']=float(len(records))
+        week=ks.isocalendar().week
+        entries.append({'season':ks.year,'period':ks.year*100+week,'game_id':gid,
+                        'core_features':features,'label_h2h':int(game['hs']>game['aws'])})
+    return sorted(entries,key=lambda x:(x['period'],x['game_id'])),{
+        'status':'MARKET_RICH_LABELED_EXACT_JOIN' if entries else 'HOLD_NO_MARKET_RICH_EXACT_LABELED_GAMES',
+        'source_rows':len(raw),'source_games':len(grouped),'labeled_games':len(entries),
+        'result_source':result_source,'result_fields':result_fields,'holds':dict(holds),
+        'original_game_identity_required':True,'original_pregame_feature_provenance_certified':False}
+
+
+def _ml_number(value):
+    if value in (None,'','NULL'):return float('nan')
+    if isinstance(value,bool):return float(value)
+    try:
+        x=float(value)
+        return x if math.isfinite(x) else float('nan')
+    except (ValueError,TypeError):return float('nan')
+
+def _ml_table_rows(client,table,required,optional,where):
+    """Use ONLY explicit pregame allowlists; no outcomes can enter feature X."""
+    if not all(x.replace('_','').isalnum() for x in required+optional):
+        raise ValueError('INVALID_ML_FEATURE_IDENTIFIER')
+    schema={f.name for f in client.get_table(table).schema}
+    missing=sorted(set(required)-schema)
+    if missing:return [],{'status':'HOLD_REQUIRED_SOURCE_COLUMNS_MISSING','missing':missing}
+    included=[f for f in optional if f in schema]
+    columns=list(required)+included
+    sql='SELECT '+','.join('`'+c+'`' for c in columns)+' FROM `'+table+'` '+where
+    rows=[dict(r.items()) for r in client.query(sql).result(page_size=10000)]
+    return rows,{'status':'LOADED','source_rows':len(rows),'feature_columns':included,
+                 'missing_optional':sorted(set(optional)-set(included))}
+
+def ml_historical_training_rows(*,client=None,project='sharplogger',dataset='sharp_data',
+                               canonical_manifest=None,canonical_sides=None,canonical_audit=None):
+    """V5.2 identity-verified historical rows, not a blind Game_Key join.
+
+    Historical warehouse attributes are restricted to an explicit, small
+    pregame-name allowlist. User must review vintage: by themselves names do
+    not prove each feature existed before kickoff.
+    """
+    if canonical_manifest is None or canonical_sides is None or canonical_audit is None:
+        return [],{'status':'HOLD_CANONICAL_V52_LEDGER_REQUIRED'}
+    _,games,native,teams,_=_checked_canonical(canonical_manifest,canonical_sides,canonical_audit)
+    if client is None:
+        from google.cloud import bigquery
+        client=bigquery.Client(project=project)
+    table=f'{project}.{dataset}.ncaaf_historical_core_training_vw'
+    needed=('Season','Game_Key','Is_Home','Team_Score','Opponent_Score','Opening_Spread')
+    try:
+        records,source=_ml_table_rows(client,table,needed,tuple(f for f in ML_CORE_FIELDS if f not in needed),
+                    'WHERE Season BETWEEN 2013 AND 2025')
+    except Exception as exc:
+        return [],{'status':'HOLD_HISTORICAL_SOURCE_QUERY_FAILED',
+                   'error':type(exc).__name__+':'+str(exc)}
+    if source['status']!='LOADED':return [],source
+    joined={};ambiguous=set();holds=Counter()
+    for r in records:
+        yr=num(r.get('Season'))
+        if yr is None:holds['YEAR_MISSING']+=1;continue
+        yr=int(yr);src=str(r.get('Game_Key') or '').strip()
+        gid=native.get((yr,src))
+        if not gid and (yr,src) in games:gid=src
+        if not gid:holds['UNMATCHED_VERIFIED_STAGE1_ID']+=1;continue
+        if str(r.get('Is_Home')).strip().lower() not in ('1','true'):
+            continue
+        g=games[(yr,gid)]
+        if g.get('role_verification_status')!='HOME_AWAY_VERIFIED':
+            holds['NO_VERIFIED_HOME_AWAY_ROLE']+=1;continue
+        home=[k for k,s in teams[(yr,gid)].items() if str(s.get('is_home_verified'))=='1']
+        if len(home)!=1:holds['HOME_ROLE_NOT_UNIQUE']+=1;continue
+        hs=_ml_number(r['Team_Score']);aws=_ml_number(r['Opponent_Score']);line=_ml_number(r['Opening_Spread'])
+        if not all(math.isfinite(x) for x in (hs,aws,line)):
+            holds['SCORE_OR_OPEN_LINE_MISSING']+=1;continue
+        # Require independently matched score orientation; fail closed on mismatches.
+        home_side=teams[(yr,gid)][home[0]]
+        if (_ml_number(home_side.get('team_score'))!=hs or
+            _ml_number(home_side.get('opponent_score'))!=aws):
+            holds['CANONICAL_SCORE_ORIENTATION_DISAGREEMENT']+=1;continue
+        key=(yr,gid)
+        x={f:_ml_number(r.get(f)) for f in ML_CORE_FIELDS}
+        x['Opening_Spread']=line
+        opentotal=_ml_number(r.get('Opening_Total'))
+        item={'season':yr,'game_id':gid,'source_game_id':src,
+              'date':g.get('game_date'),'core_features':x,
+              'label_spread':int(hs+line>aws) if hs+line!=aws else None,
+              'label_h2h':int(hs>aws) if hs!=aws else None,
+              'label_totals':(int(hs+aws>opentotal) if math.isfinite(opentotal) and hs+aws!=opentotal else None)}
+        if key in joined and joined[key]!=item:
+            ambiguous.add(key)
+        else:joined[key]=item
+    for key in ambiguous:joined.pop(key,None)
+    holds['AMBIGUOUS_CONFLICTING_HISTORY']=len(ambiguous)
+    return sorted(joined.values(),key=lambda x:(x['season'],x['date'] or '',x['game_id'])),{
+        **source,'status':'HISTORICAL_STAGE1_ML_ROWS_MATCHED',
+        'matched_games':len(joined),'holds':dict(holds),
+        'feature_vintage_certified':False,
+        'original_source':table,
+        'feature_policy':'EXPLICIT_PREGAME_NAMED_ALLOWLIST__VINTAGE_REVIEW_REQUIRED'}
+
+def _ml_model():
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    return HistGradientBoostingClassifier(max_iter=90,learning_rate=.05,max_leaf_nodes=9,
+             min_samples_leaf=55,l2_regularization=8.0,random_state=20261109)
+
+def _ml_fitting_series(data,features,label,min_train=240,min_validation=30,period_field="season"):
+    """Expanding-season OOF: only earlier years train each season."""
+    import numpy as np
+    X=np.array([[_ml_number(r.get('core_features',{}).get(k)) for k in features] for r in data],dtype=float)
+    yy=np.array([r.get(label) if r.get(label) in (0,1) else -1 for r in data],dtype=int)
+    years=np.array([int(r[period_field]) for r in data],dtype=int)
+    # fixed fills based on each training window only; hist HGB handles NaNs directly.
+    valid=yy>=0;pred=np.full(len(data),np.nan);folds=[]
+    for yr in sorted(set(years)):
+        train=np.where(valid & (years<yr))[0]
+        test=np.where(valid & (years==yr))[0]
+        if len(train)<min_train or len(test)<min_validation or len(set(yy[train]))<2:continue
+        m=_ml_model();m.fit(X[train],yy[train]);pred[test]=m.predict_proba(X[test])[:,1]
+        folds.append({'season':int(yr),'train_games':len(train),'test_games':len(test)})
+    oof=np.isfinite(pred)
+    report={'folds':folds,'oof_games':int(oof.sum()),'training_games':int(valid.sum()),
+            'features':list(features),'period_type':period_field,'status':'EXPANDING_SEASON_OOF' if folds else 'HOLD_INSUFFICIENT_CHRONOLOGICAL_FOLDS'}
+    if oof.any():
+        from sklearn.metrics import log_loss, brier_score_loss
+        report.update(oof_logloss=round(float(log_loss(yy[oof],pred[oof],labels=[0,1])),6),
+                      oof_brier=round(float(brier_score_loss(yy[oof],pred[oof])),6))
+    fitted=None
+    if oof.any() and len(set(yy[valid]))==2:
+        fitted=_ml_model();fitted.fit(X[valid],yy[valid])
+    return pred,report,fitted
+
+def _ml_brain_counts(events):
+    """No outcome-derived priors and no retroactive performance encoding."""
+    counts=defaultdict(Counter)
+    for e in events:
+        if e.get('market') not in MARKETS:continue
+        family=str(e.get('brain') or '')
+        if family not in ('SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER'):continue
+        key=(int(e['season']),str(e['cfbd_game_id']),str(e['target']),str(e['market']))
+        counts[key][family]+=1
+    return counts
+
+def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
+                        market_rows=None,min_train=240):
+    """Three separate research ML learners and one combined stack, when feasible.
+
+    Never authorizes bets. Stage2 frozen observations are retrospective; combined
+    model's OOF numbers are exploratory until per-event pregame capture is proved.
+    """
+    import numpy as np
+    report={'schema':ML_SCHEMA,'status':'ML_RESEARCH_HOLD','bet_authority':0,
+            'pre_game_evidence_certified':False,'trained_models':[],
+            'coverage':{'historical_game_rows':len(historical_rows),'frozen_events':len(canonical_events),
+                        'market_feature_rows':len(market_rows or [])},
+            'warnings':['FROZEN_STAGE2_EVENTS_NOT_CERTIFIED_ORIGINAL_PREGAME_CAPTURE',
+                        'FEATURE_VINTAGE_REQUIRES_SOURCE_VALIDATION',
+                        'NO_AUTOMATIC_BET_AUTHORITY']}
+    models={};oof={};valid_fields=set()
+    for r in historical_rows:
+        valid_fields.update(k for k,v in r.get('core_features',{}).items() if math.isfinite(_ml_number(v)))
+    # CORE and STAT are distinct feature views, not the same fitted model.
+    for brain,fields in (('CORE',ML_CORE_FIELDS),('STAT',ML_STAT_FIELDS)):
+        cols=[f for f in fields if f in valid_fields]
+        if brain=='STAT' and len(cols)<2:
+            report[brain]={'status':'HOLD_STAT_INDEPENDENT_FEATURES_UNAVAILABLE','features':cols};continue
+        if not cols:
+            report[brain]={'status':'HOLD_NO_PREGAME_TRAINING_FEATURES'};continue
+        for market,label in (('spreads','label_spread'),('h2h','label_h2h'),('totals','label_totals')):
+            prediction,audit,fitted=_ml_fitting_series(historical_rows,cols,label,min_train=min_train)
+            report[brain+'_'+market]=audit
+            if fitted is not None:
+                key=brain+'_'+market
+                models[key]={'model':fitted,'features':cols,'source':'STAGE1_V5_2_HISTORICAL',
+                             'prediction_target':'HOME_COVER' if market=='spreads' else 'HOME_WIN'}
+                oof[key]=prediction
+                report['trained_models'].append(key)
+    # Market Rich is 2026-only; requires verified same-game FINAL outcomes
+    # to train. The raw market events alone cannot provide labels.
+    if market_rows:
+        marketcols=[f for f in ML_MARKET_FIELDS if any(math.isfinite(_ml_number(r.get('core_features',{}).get(f))) for r in market_rows)]
+        if marketcols:
+            market_pred,market_audit,market_model=_ml_fitting_series(market_rows,marketcols,
+                 'label_h2h',min_train=min_train,min_validation=15,period_field='period')
+            report['MARKET_RICH']=market_audit
+            if market_model is not None:
+                models['MARKET_RICH_h2h']={'model':market_model,'features':marketcols,
+                    'source':'2026_RECORDED_PREGAME_MOVES_EXACT_FINAL_JOIN',
+                    'prediction_target':'HOME_WIN'}
+                report['trained_models'].append('MARKET_RICH_h2h')
+        else:
+            report['MARKET_RICH']={'status':'HOLD_MARKET_RICH_FEATURES_EMPTY'}
+    else:
+        report['MARKET_RICH']={'status':'HOLD_MARKET_RICH_2026_NO_VERIFIED_LABELED_GAME_JOIN',
+            'available_pregame_rows':0,'training_feature_fields':list(ML_MARKET_FIELDS)}
+    # Meta learners: market-specific, using only same-year OOF base predictions.
+    # Historical frozen signals are research-only until original prekick capture.
+    counts=_ml_brain_counts(canonical_events)
+    for market,label in (('spreads','label_spread'),('h2h','label_h2h'),('totals','label_totals')):
+        core_key='CORE_'+market;stat_key='STAT_'+market;outkey='COMBINED_'+market
+        if core_key not in oof or stat_key not in oof:
+            report[outkey]={'status':'HOLD_MISSING_CORE_OR_STAT_OOF'};continue
+        meta_rows=[]
+        for i,r in enumerate(historical_rows):
+            if r.get(label) not in (0,1):continue
+            cp=oof[core_key][i];sp=oof[stat_key][i]
+            if not math.isfinite(cp) or not math.isfinite(sp):continue
+            y=int(r['season']);gid=str(r['game_id'])
+            sides=canonical_team_map.get((y,gid),{})
+            if market=='totals':
+                # Over and Under are not independent family votes. Count only
+                # recorded OVER minus UNDER and retain zero when no signal.
+                hc=counts.get((y,gid,'OVER',market),Counter())
+                ac=counts.get((y,gid,'UNDER',market),Counter())
+            else:
+                home=[name for name,side in sides.items() if str(side.get('is_home_verified'))=='1']
+                away=[name for name in sides if name not in home]
+                if len(home)!=1 or len(away)!=1:continue
+                hc=counts.get((y,gid,home[0],market),Counter())
+                ac=counts.get((y,gid,away[0],market),Counter())
+            extras={f'{fam}_NET':float(min(3,hc.get(fam,0))-min(3,ac.get(fam,0)))
+                   for fam in ('SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER')}
+            extras['CORE_OOF']=float(cp);extras['STAT_OOF']=float(sp)
+            meta_rows.append({'season':y,'game_id':gid,'core_features':extras,label:r[label]})
+        fields=('CORE_OOF','STAT_OOF','SYSTEM_MINER_NET','BIG_AL_NET','PATHI_NET','PREDICTION_TRACKER_NET')
+        _,meta_audit,model=_ml_fitting_series(meta_rows,fields,label,min_train=min_train)
+        meta_audit.update({'status':('EXPLORATORY_RETROSPECTIVE_META_OOF' if model is not None else
+                                  'HOLD_META_INSUFFICIENT_CHRONOLOGY'),
+                          'no_market_rich_historical_overlap':True,
+                          'source_event_capture_verified':False})
+        report[outkey]=meta_audit
+        if model is not None:
+            models[outkey]={'model':model,'features':list(fields),
+                'source':'RETROSPECTIVE_STAGE2_RESEARCH_ONLY',
+                'prediction_target':{'spreads':'HOME_COVER','h2h':'HOME_WIN','totals':'OVER'}[market]}
+            report['trained_models'].append(outkey)
+    report['status']='ML_RESEARCH_TRAINED_UNCERTIFIED' if models else 'HOLD_ML_TRAINING_DATA_OR_FEATURES'
+    report['model_features']={k:v['features'] for k,v in models.items()}
+    return report,models
+
+def publish_v55_ml_artifacts(report,models,*,publish_uri,storage_client=None):
+    """Version ML package atomically by hash; publish pointer last.
+
+    This manifest is NOT compatible with old ROI-certificate authority.
+    """
+    import joblib,tempfile
+    from urllib.parse import urlsplit
+    if not publish_uri.startswith('gs://') or not publish_uri.endswith('.json'):
+        raise ValueError('INVALID_ML_MANIFEST_URI')
+    if storage_client is None:
+        from google.cloud import storage
+        storage_client=storage.Client()
+    loc=urlsplit(publish_uri);bucket=storage_client.bucket(loc.netloc)
+    root=loc.path.lstrip('/').rsplit('/',1)[0]
+    names={}
+    with tempfile.TemporaryDirectory(prefix='v55_ml_') as d:
+        for name,model_spec in sorted(models.items()):
+            path=Path(d)/(name+'.joblib')
+            joblib.dump(model_spec,path)
+            h=hashlib.sha256(path.read_bytes()).hexdigest()
+            key=f'{root}/models/{name}-{h}.joblib'
+            bucket.blob(key).upload_from_filename(str(path),content_type='application/octet-stream')
+            names[name]={'uri':'gs://'+loc.netloc+'/'+key,'sha256':h,
+                         'features':model_spec['features']}
+    manifest=dict(report,artifacts=names,
+                  trained_utc=datetime.now(timezone.utc).isoformat(),
+                  registry_policy='ML_SHADOW_ONLY_NO_BET_AUTHORITY')
+    bucket.blob(loc.path.lstrip('/')).upload_from_string(json.dumps(manifest,sort_keys=True,
+         default=str,allow_nan=False),content_type='application/json')
+    return {'status':report['status'],'manifest_uri':publish_uri,'models':sorted(names),
+            'bet_authority':0}
+
+def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
+                        dataset='sharp_data',bucket='sharp-models',
+                        manifest_uri=None,canonical_uri=None,events_uri=None,market_feed_uri=None):
+    """Heavy Research entry point; reuse ONLY existing Stage1/Stage2 artifacts."""
+    prefix=(canonical_uri or ('gs://'+bucket+'/research/ncaaf/v55/canonical_stage1/v5_2/')).rstrip('/')+'/'
+    try:
+        raw={name:_obj_bytes(prefix+name,storage_client) for name in
+             ('historical_cfbd_game_manifest_v5.csv','historical_cfbd_game_sides_v5.csv',
+              'stage1_canonical_ledger_v5_audit.json')}
+        audit,games,native,team_map,names=_checked_canonical(
+             raw['historical_cfbd_game_manifest_v5.csv'],
+             raw['historical_cfbd_game_sides_v5.csv'],raw['stage1_canonical_ledger_v5_audit.json'])
+    except Exception as exc:
+        return {'status':'HOLD_ML_CANONICAL_SOURCE','error':type(exc).__name__+':'+str(exc),
+                'bet_authority':0}
+    rows,source=ml_historical_training_rows(client=client,project=project,dataset=dataset,
+             canonical_manifest=raw['historical_cfbd_game_manifest_v5.csv'],
+             canonical_sides=raw['historical_cfbd_game_sides_v5.csv'],
+             canonical_audit=raw['stage1_canonical_ledger_v5_audit.json'])
+    event_uri=events_uri or ('gs://'+bucket+'/research/ncaaf/v55/two_engine_roi/frozen_brain_canonical_events_latest.jsonl')
+    try:
+        event_bytes=_obj_bytes(event_uri,storage_client)
+        events=[json.loads(line) for line in event_bytes.decode().splitlines() if line.strip()]
+        # Strictly inspect membership; no new matching algorithm.
+        if any((int(x['season']),str(x['cfbd_game_id'])) not in games for x in events):
+            raise ValueError('FROZEN_EVENT_HAS_UNKNOWN_STAGE1_GAME')
+        event_status={'status':'EVENTS_LOADED','rows':len(events),'uri':event_uri}
+    except Exception as exc:
+        events=[];event_status={'status':'HOLD_EVENTS_UNAVAILABLE',
+                               'error':type(exc).__name__+':'+str(exc)}
+    market_uri=market_feed_uri or ('gs://'+bucket+'/research/ncaaf/v55/market_rich/pregame_events_latest.jsonl.gz')
+    if client is None:
+        from google.cloud import bigquery
+        client=bigquery.Client(project=project)
+    market_data,market_audit=ml_market_rich_labeled_rows(client=client,
+         market_uri=market_uri,storage_client=storage_client,project=project,dataset=dataset)
+    report,models=fit_v55_ml_research(rows,events,team_map,market_rows=market_data)
+    report['market_rich_label_join_audit']=market_audit
+    report['historical_source_audit']=source
+    report['canonical_stage1_games']=len(games)
+    report['canonical_event_audit']=event_status
+    report['market_rich_2026_source']='moves_with_features_merged'
+    report['market_rich_2026_ingested_in_research']=True
+    report['market_rich_trained']='MARKET_RICH_h2h' in models
+    try:
+        published=publish_v55_ml_artifacts(report,models,publish_uri=(manifest_uri or
+             'gs://'+bucket+'/research/ncaaf/v55/ml/current_manifest.json'),
+             storage_client=storage_client)
+        return dict(report,publication=published)
+    except Exception as exc:
+        report['publication']={'status':'HOLD_ML_ARTIFACT_PUBLICATION_FAILED',
+                               'error':type(exc).__name__+':'+str(exc)}
+        return report
 
 
 def integration_acceptance_report(canonical, warehouse, provider, market_rich=None):
