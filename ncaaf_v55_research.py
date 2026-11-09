@@ -1925,12 +1925,22 @@ def ml_historical_training_rows(*,client=None,project='sharplogger',dataset='sha
         else:joined[key]=item
     for key in ambiguous:joined.pop(key,None)
     holds['AMBIGUOUS_CONFLICTING_HISTORY']=len(ambiguous)
-    return sorted(joined.values(),key=lambda x:(x['season'],x['date'] or '',x['game_id'])),{
-        **source,'status':'HISTORICAL_STAGE1_ML_ROWS_MATCHED',
+    legacy_audit={**source,'status':('HISTORICAL_STAGE1_ML_ROWS_MATCHED' if joined
+                                      else 'HOLD_LEGACY_VIEW_ZERO_VERIFIED_GAME_MATCHES'),
         'matched_games':len(joined),'holds':dict(holds),
-        'feature_vintage_certified':False,
-        'original_source':table,
+        'feature_vintage_certified':False,'original_source':table,
         'feature_policy':'EXPLICIT_PREGAME_NAMED_ALLOWLIST__VINTAGE_REVIEW_REQUIRED'}
+    if not joined:
+        # The legacy view can load successfully yet use another game-key space.
+        # Zero verified canonical matches MUST trigger the existing CFBD-prior
+        # matrix, rather than silently publishing an empty training manifest.
+        rows,cfbd_audit=ml_cfbd_prior_training_rows(client=client,
+            canonical_manifest=canonical_manifest,canonical_sides=canonical_sides,
+            canonical_audit=canonical_audit,project=project,dataset=dataset)
+        cfbd_audit['legacy_view_audit']=legacy_audit
+        cfbd_audit['source_selection']='CFBD_PRIORS_AFTER_ZERO_LEGACY_CANONICAL_MATCHES'
+        return rows,cfbd_audit
+    return sorted(joined.values(),key=lambda x:(x['season'],x['date'] or '',x['game_id'])),legacy_audit
 
 def _ml_model():
     from sklearn.ensemble import HistGradientBoostingClassifier
