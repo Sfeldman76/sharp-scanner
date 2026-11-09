@@ -1497,11 +1497,100 @@ def canonical_provider_brain_research(events, games, native_ids, team_map, *, cl
             'conservative_roi_certificate_count':0,'bet_authority':0}
 
 
-def integration_acceptance_report(canonical, warehouse, provider):
-    """No false green on an empty joined source. This is DATA readiness only."""
+def market_rich_feature_coverage(*, client=None, project='sharplogger', dataset='sharp_data',
+                                 publish_uri=None, storage_client=None):
+    """Ingest ALL recorded pregame Market Rich rows, including sparse/zero features.
+
+    Market Rich is an observational feature family, NOT a directional BET family.
+    Store the full source rows as a GCS gzip JSONL feed; null score, zero moves,
+    missing directional legacy flag, and repeated movements are NOT exclusions.
+    Historical 2013-2025 absence is reported as coverage, never backfilled.
+    """
+    import re, gzip, tempfile
+    if not (re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]*',project) and
+            re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*',dataset)):
+        raise ValueError('INVALID_MARKET_RICH_DATASET')
+    if client is None:
+        from google.cloud import bigquery
+        client=bigquery.Client(project=project)
+    table=f'{project}.{dataset}.moves_with_features_merged'
+    base=(f"FROM `{table}` WHERE UPPER(Sport) IN "
+          "('NCAAF','NCAA FOOTBALL','COLLEGE FOOTBALL') "
+          'AND Game_Start IS NOT NULL AND Time IS NOT NULL AND Time < Game_Start')
+    sql=f"""SELECT EXTRACT(YEAR FROM Game_Start) AS season,
+      COUNT(*) AS pregame_rows,
+      COUNT(DISTINCT Game_Key) AS pregame_games,
+      COUNTIF(SharpBetScore IS NOT NULL) AS pregame_scored_rows,
+      COUNTIF(Sharp_Move_Signal = 1) AS pregame_sharp_move_rows,
+      COUNTIF(Delta_vs_Sharp IS NOT NULL OR Sharp_Limit_Jump IS NOT NULL OR
+          Sharp_Time_Score IS NOT NULL) AS pregame_feature_rows
+    {base} GROUP BY season ORDER BY season"""
+    try:
+        rows=[dict(row.items()) for row in client.query(sql).result()]
+    except Exception as exc:
+        return {'status':'HOLD_MARKET_RICH_SOURCE_QUERY_FAILED',
+                'source':table,'exception':type(exc).__name__+':'+str(exc),
+                'legacy_SHARP_SIDE_TO_BET_required':False,'bet_authority':0}
+    totals={k:sum(int(r.get(k) or 0) for r in rows) for k in
+            ('pregame_rows','pregame_games','pregame_scored_rows',
+             'pregame_sharp_move_rows','pregame_feature_rows')}
+    # Counts are descriptive; NO feature completeness requirement for an event.
+    result={'source':table,'by_season':rows,'totals':totals,
+            'historical_2013_2025_rows':sum(int(r.get('pregame_rows') or 0)
+                for r in rows if 2013<=int(r.get('season') or 0)<=2025),
+            'legacy_SHARP_SIDE_TO_BET_required':False,
+            'directional_signal_required':False,'original_signal_capture_certified':False,
+            'ingestion_policy':'ALL_PREKICK_ROWS_NO_SCORE_OR_SIGNAL_FILTER',
+            'bet_authority':0}
+    if not totals['pregame_rows']:
+        result['status']='HOLD_NO_MARKET_RICH_PREGAME_ROWS'
+        return result
+    if publish_uri is None:
+        result['status']='MARKET_RICH_PREGAME_ROWS_AVAILABLE_NOT_PUBLISHED'
+        return result
+    if not (publish_uri.startswith('gs://') and publish_uri.endswith('.jsonl.gz')):
+        raise ValueError('INVALID_MARKET_RICH_PUBLISH_URI')
+    from urllib.parse import urlsplit
+    location=urlsplit(publish_uri)
+    from collections import Counter as _Counter
+    observed=_Counter(); count=0; sha=hashlib.sha256()
+    try:
+        with tempfile.TemporaryDirectory(prefix='v55_market_rich_') as temp:
+            path=Path(temp)/'market_rich_pregame.jsonl.gz'
+            with gzip.open(path,'wt',encoding='utf8') as out:
+                # No LIMIT, no SharpBetScore requirement, no Sharp_Move_Signal filter.
+                for raw in client.query(f'SELECT * {base} ORDER BY Game_Start, Time, Game_Key, Bookmaker').result():
+                    obj=dict(raw.items()); out.write(json.dumps(obj,sort_keys=True,default=str,allow_nan=False)+'\n')
+                    count+=1
+                    stamp=obj.get('Game_Start')
+                    if stamp is not None:observed[int(str(stamp)[:4])]+=1
+            expected={int(r['season']):int(r['pregame_rows']) for r in rows}
+            if count!=totals['pregame_rows'] or dict(observed)!=expected:
+                result.update(status='HOLD_MARKET_RICH_ROW_RECONCILIATION_FAILED',
+                              exported_rows=count,observed_by_season=dict(observed))
+                return result
+            if storage_client is None:
+                from google.cloud import storage
+                storage_client=storage.Client(project=project)
+            bucket=storage_client.bucket(location.netloc)
+            blob=bucket.blob(location.path.lstrip('/'))
+            blob.upload_from_filename(str(path),content_type='application/gzip')
+            with path.open('rb') as inp:
+                for block in iter(lambda:inp.read(1024*1024),b''):sha.update(block)
+        result.update(status='MARKET_RICH_PREGAME_FEATURE_FEED_AVAILABLE',
+                      published_rows=count,publication_uri=publish_uri,
+                      publication_sha256=sha.hexdigest(),by_season_published=dict(observed))
+    except Exception as exc:
+        result.update(status='HOLD_MARKET_RICH_PUBLISH_FAILED',exported_rows=count,
+                      exception=type(exc).__name__+':'+str(exc))
+    return result
+
+
+def integration_acceptance_report(canonical, warehouse, provider, market_rich=None):
+    """Validate directional brains and Market Rich feature coverage separately."""
     bybrain=canonical.get('by_brain') or {}
-    expected=sorted(BRAINS)
-    missing=[f for f in expected if not bybrain.get(f)]
+    directional=sorted(BRAINS-{'MARKET_RICH'})
+    missing=[f for f in directional if not bybrain.get(f)]
     price_count=int((warehouse or {}).get('priced_game_wagers') or 0)
     joined=int((provider or {}).get('join_and_grading_counts',{}).get('BRAIN_PROVIDER_MARKET_GRADES') or 0)
     unresolved={}
@@ -1511,12 +1600,15 @@ def integration_acceptance_report(canonical, warehouse, provider):
     if missing:unresolved['missing_directional_families']=missing
     if joined==0:unresolved['archive_brain_join']='ZERO_BRAIN_PROVIDER_MARKET_GRADES'
     if price_count==0:unresolved['timestamped_price_join']='ZERO_MATCHED_ORIGINALLY_CAPTURED_SNAPSHOT_PRICES'
-    if not canonical.get('source_receipts'):
-        unresolved['lineage']='SOURCE_RECEIPTS_MISSING'
+    if not canonical.get('source_receipts'):unresolved['lineage']='SOURCE_RECEIPTS_MISSING'
+    market=market_rich or {}
+    if market.get('status')!='MARKET_RICH_PREGAME_FEATURE_FEED_AVAILABLE':
+        unresolved['market_rich_features']=market.get('status') or 'MARKET_RICH_FEATURE_AUDIT_NOT_RUN'
     return {'status':'PASS_DATA_INTEGRATION' if not unresolved else 'FAIL_DATA_INTEGRATION',
             'missing_brain_families':missing,'canonical_games':canonical.get('canonical_games',0),
-            'brain_occurrences':sum(int(bybrain.get(f) or 0) for f in expected),
+            'brain_occurrences':sum(int(bybrain.get(f) or 0) for f in directional),
             'archive_brain_market_grades':joined,'originally_priced_market_wagers':price_count,
+            'market_rich_features':market,
             'blocking_reasons':unresolved,'does_not_grant_bet_authority':True}
 
 

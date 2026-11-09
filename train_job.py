@@ -301,9 +301,18 @@ def main():
             'system_partitions':provider.get('individual_systems_total',0),
             'independent_family_pairs':provider.get('independent_family_pairs_total',0),
             'untimed_archive_not_certified':True},sort_keys=True))
+        market_rich = _roi.market_rich_feature_coverage(
+            client=bigquery.Client(project=os.getenv('GCP_PROJECT','sharplogger')),
+            project=os.getenv('GCP_PROJECT','sharplogger'),
+            dataset=os.getenv('NCAAF_V55_SOURCE_DATASET','sharp_data'),
+            publish_uri=os.getenv('NCAAF_V55_MARKET_RICH_FEED_URI',
+               'gs://sharp-models/research/ncaaf/v55/market_rich/pregame_events_latest.jsonl.gz'))
+        result['market_rich_feature_coverage'] = market_rich
+        log_func('[NCAAF-V55-MARKET-RICH-FEATURE-COVERAGE] '+json.dumps(
+            market_rich,sort_keys=True,default=str))
         result['data_integration_acceptance']=_roi.integration_acceptance_report(
             result.get('historical_seven_brain_replay',{}),
-            result.get('historical_warehouse_replay',{}), provider)
+            result.get('historical_warehouse_replay',{}), provider,market_rich)
         log_func('[NCAAF-V55-DATA-INTEGRATION-ACCEPTANCE] '+json.dumps(
             result['data_integration_acceptance'],sort_keys=True))
         # A cloud task returning exit(0) with missing families AND zero priced
