@@ -519,104 +519,168 @@ def canonicalize_live_signal_game_ids(events,board):
     return result,audit
 
 
-def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, *, now=None):
-    """Build exact pregame HOME-AWAY CFBD differences, never postgame proxies.
+def _v55_live_id(value):
+    """Normalize BQ INT64 IDs and blank pandas values without fuzzy aliases."""
+    if value is None:return ''
+    if isinstance(value,float) and not math.isfinite(value):return ''
+    raw=s(value)
+    if raw.lower() in ('nan','none','null','nat','<na>'):return ''
+    if raw.endswith('.0') and raw[:-2].isdigit():return raw[:-2]
+    return raw
 
-    The warehouse must provide TWO game-specific, timestamped team rows, with
-    prior-only columns that match the trained model schema. No fuzzy matching,
-    no previous-game substitutions, and no default zero for missing features.
+
+def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, *, now=None):
+    """Build live HOME-AWAY model inputs from 2026 CFBD prior-team rows.
+
+    The existing CFBD miner table has Game_ID, Team_Key, Is_Home,
+    Game_Date, Season, Week and *_Prior features, but NO capture timestamp.
+    An observed prekick read produces a NEW shadow snapshot; this does NOT
+    certify a vintage of a historical observation or permit bet authority.
+
+    Identity: first exact CFBD game ID (if available), otherwise UNIQUE
+    ordered home/away team keys + kickoff within 15 minutes. Never use
+    approximate names or ambiguous fixture matches.
     """
-    now=now or datetime.now(timezone.utc)
-    holds=Counter();out=[];seen_board={};source_by_game=defaultdict(list)
+    now=clock(now or datetime.now(timezone.utc))
+    if now is None:raise ValueError('NOW_MUST_BE_TIMEZONE_AWARE')
+    holds=Counter();out=[];seen_board={};groups=defaultdict(list)
     priors=sorted({name[len('CFBD_DIFF_'):] for name in required_features
                    if name.startswith('CFBD_DIFF_') and name.endswith('_Prior')})
     for r in board_rows:
-        gid=s(r.get('Game_ID') or r.get('game_id'))
-        if not gid:continue
-        home=s(r.get('Home_Team') or r.get('Home_Team_Norm'))
-        away=s(r.get('Away_Team') or r.get('Away_Team_Norm'))
-        kickoff=clock(r.get('Game_Start_UTC') or r.get('kickoff_utc'))
-        if not home or not away or not kickoff or kickoff<=now:
+        if not isinstance(r,dict):holds['INVALID_BOARD_ROW']+=1;continue
+        board_id=_v55_live_id(r.get('Game_ID') or r.get('game_id'))
+        home=slug(r.get('Home_Team') or r.get('Home_Team_Norm'))
+        away=slug(r.get('Away_Team') or r.get('Away_Team_Norm'))
+        kick=clock(r.get('Game_Start_UTC') or r.get('kickoff_utc'))
+        if not board_id or not home or not away or home==away or not kick or kick<=now:
             holds['INVALID_BOARD_IDENTITY_OR_KICKOFF']+=1;continue
-        if gid in seen_board and seen_board[gid]!=(slug(home),slug(away),kickoff):
-            holds['CONFLICTING_BOARD_GAME_ID']+=1
-            seen_board[gid]=None
-        elif gid not in seen_board:
-            seen_board[gid]=(slug(home),slug(away),kickoff)
+        cfbd_id=_v55_live_id(r.get('CFBD_Game_ID') or r.get('cfbd_game_id'))
+        identity=(home,away,kick,cfbd_id)
+        if board_id in seen_board and seen_board[board_id]!=identity:
+            holds['CONFLICTING_BOARD_GAME_ID']+=1;seen_board[board_id]=None
+        elif board_id not in seen_board:seen_board[board_id]=identity
     for r in cfbd_rows:
         if not isinstance(r,dict):holds['INVALID_CFBD_SOURCE_ROW']+=1;continue
-        gid=s(r.get('Game_ID') or r.get('game_id'))
-        if gid in seen_board and seen_board[gid] is not None:
-            source_by_game[gid].append(r)
-    for gid,identity in seen_board.items():
+        gid=_v55_live_id(r.get('Game_ID') or r.get('game_id'))
+        kick=clock(r.get('Game_Date') or r.get('game_date') or r.get('Game_Start_UTC'))
+        season=num(r.get('Season') if 'Season' in r else r.get('season'))
+        side=num(r.get('Is_Home') if 'Is_Home' in r else r.get('is_home'))
+        name=slug(r.get('Team_Key') or r.get('team_key'))
+        if not gid or not kick or kick<=now or season!=now.year or side not in (0.0,1.0) or not name:
+            holds['SOURCE_NOT_CURRENT_FUTURE_TWO_SIDE_RECORD']+=1;continue
+        groups[gid].append(r)
+    # Only complete, non-duplicated, correctly oriented CFBD fixtures can be
+    # candidates. This also prevents one-side rows creating phantom opponents.
+    fixtures={};by_teams=defaultdict(list)
+    for gid,records in groups.items():
+        if len(records)!=2:
+            holds['CFBD_GAME_NOT_EXACTLY_TWO_ROWS']+=1;continue
+        home_rows=[r for r in records if num(r.get('Is_Home') if 'Is_Home' in r else r.get('is_home'))==1.0]
+        away_rows=[r for r in records if num(r.get('Is_Home') if 'Is_Home' in r else r.get('is_home'))==0.0]
+        if len(home_rows)!=1 or len(away_rows)!=1:
+            holds['CFBD_GAME_HAS_DUPLICATE_OR_MISSING_ORIENTATION']+=1;continue
+        hr,ar=home_rows[0],away_rows[0]
+        h=slug(hr.get('Team_Key') or hr.get('team_key'))
+        a=slug(ar.get('Team_Key') or ar.get('team_key'))
+        ht=clock(hr.get('Game_Date') or hr.get('game_date') or hr.get('Game_Start_UTC'))
+        at=clock(ar.get('Game_Date') or ar.get('game_date') or ar.get('Game_Start_UTC'))
+        if not ht or not at or abs((ht-at).total_seconds())>900 or h==a:
+            holds['CFBD_GAME_ROLE_OR_DATE_CONFLICT']+=1;continue
+        fixtures[gid]=(h,a,ht,hr,ar)
+        by_teams[(h,a)].append(gid)
+    for board_id,identity in seen_board.items():
         if identity is None:continue
-        home,away,kickoff=identity
-        source=source_by_game.get(gid,[])
-        if not source:holds['NO_EXACT_CURRENT_CFBD_GAME_ID']+=1;continue
-        sides=defaultdict(list);asofs=[]
-        for row in source:
-            name=slug(row.get('Team_Key') or row.get('team_key') or row.get('Team'))
-            if name in (home,away):sides[name].append(row)
-            else:holds['CFBD_TEAM_NAME_NOT_EXACT_BOARD_SIDE']+=1
-        if home==away or len(sides[home])!=1 or len(sides[away])!=1:
-            holds['NOT_EXACTLY_TWO_UNIQUE_CFBD_SIDES']+=1;continue
-        hr,ar=sides[home][0],sides[away][0]
-        for row in (hr,ar):
-            at=clock(row.get('feature_asof_utc') or row.get('Feature_AsOf_UTC'))
-            sourcekick=clock(row.get('Game_Start_UTC') or row.get('kickoff_utc'))
-            if not at or at>now or not at<kickoff or (sourcekick and abs((sourcekick-kickoff).total_seconds())>900):
-                asofs=[];break
-            asofs.append(at)
-        if len(asofs)!=2:
-            holds['SOURCE_NOT_PROVEN_PREGAME_OR_KICKOFF_CONFLICT']+=1;continue
-        # Require exact original prior feature names in both sides, not a row
-        # generated using the completed game's box score.
+        home,away,kick,cfbd_id=identity
+        # The sportsbook board Game_ID and CFBD's numeric Game_ID need not
+        # share a namespace. Prefer a true explicitly mapped CFBD_Game_ID;
+        # otherwise fall back to exact two-team and kickoff identity.
+        ids=[cfbd_id] if cfbd_id else ([board_id] if board_id in fixtures else [])
+        if ids:
+            candidates=ids;method='EXACT_CFBD_GAME_ID'
+        else:
+            candidates=[gid for gid in by_teams.get((home,away),[])
+                        if abs((fixtures[gid][2]-kick).total_seconds())<=900]
+            method='EXACT_TEAM_PAIR_AND_KICKOFF'
+        if len(candidates)!=1:
+            holds['NO_UNIQUE_FUTURE_CFBD_FIXTURE' if not candidates else 'AMBIGUOUS_FUTURE_CFBD_FIXTURE']+=1
+            continue
+        source_id=candidates[0]
+        fixture=fixtures.get(source_id)
+        if not fixture:
+            holds['MAPPED_CFBD_ID_NOT_IN_FORWARD_FEATURE_TABLE']+=1;continue
+        h,a,cfbd_kick,hr,ar=fixture
+        if h!=home or a!=away or abs((cfbd_kick-kick).total_seconds())>900:
+            holds['CFBD_FIXTURE_TEAM_OR_KICKOFF_CONFLICT']+=1;continue
         missing=[c for c in priors if c not in hr or c not in ar]
         if missing:
             holds['MISSING_REQUIRED_CFBD_PRIOR_COLUMNS']+=1;continue
+        # A row with a true feature timestamp must still be pregame. A table
+        # without capture timestamps is usable for NEW forward shadow reads
+        # only; never backdate it or claim historic/vintage certification.
+        supplied_times=[clock(r.get('feature_asof_utc') or r.get('Feature_AsOf_UTC')) for r in (hr,ar)]
+        if any((r.get('feature_asof_utc') or r.get('Feature_AsOf_UTC')) for r in (hr,ar)):
+            if not all(t is not None and t<=now and t<kick for t in supplied_times):
+                holds['INVALID_EXPLICIT_FEATURE_CAPTURE_TIMESTAMP']+=1;continue
+            snapshot_time=max(supplied_times)
+            vintage_verified=True
+        else:
+            snapshot_time=now
+            vintage_verified=False
         features={}
         for c in priors:
-            h=num(hr[c]);a=num(ar[c]);features['CFBD_DIFF_'+c]=h-a if h is not None and a is not None else float('nan')
+            hv=num(hr[c]);av=num(ar[c]);features['CFBD_DIFF_'+c]=(hv-av if hv is not None and av is not None else float('nan'))
         if not any(math.isfinite(v) for v in features.values()):
             holds['NO_NUMERIC_PRIOR_DIFFERENCES']+=1;continue
-        out.append({'game_id':gid,'feature_asof_utc':max(asofs).isoformat(),
-                    'core_features':features,'source':'EXACT_CURRENT_CFBD_TWO_SIDE_PREGAME_PRIORS',
-                    'feature_vintage_verified':True})
-    return out,{'status':'PREGAME_CFBD_FEATURES_BUILT' if out else 'HOLD_NO_VERIFIED_FORWARD_FEATURES',
+        out.append({'game_id':board_id,'cfbd_game_id':source_id,
+                    'feature_asof_utc':snapshot_time.isoformat(),
+                    'feature_read_at_utc':now.isoformat(),
+                    'core_features':features,
+                    'source':'EXISTING_CFBD_MINER_PREKICK_PRIORS_READ_TIME_SHADOW',
+                    'identity_match_method':method,
+                    'feature_vintage_verified':vintage_verified,
+                    'bet_authority':0})
+    return out,{'status':'PREGAME_CFBD_FEATURES_BUILT_SHADOW' if out else 'HOLD_NO_VERIFIED_FORWARD_FEATURES',
                 'board_games':len(seen_board),'source_rows':len(cfbd_rows),
+                'future_source_fixture_groups':len(fixtures),
                 'feature_games':len(out),'prior_columns_required':len(priors),
+                'capture_timestamp_available':any(r.get('feature_vintage_verified') for r in out),
+                'read_time_only_snapshots':sum(not r['feature_vintage_verified'] for r in out),
+                'identity_methods':dict(Counter(r['identity_match_method'] for r in out)),
                 'holds':dict(holds),'bet_authority':0}
 
 
 def read_live_cfbd_rows_from_bq(bq_client, table_id, required_features, *,now=None):
-    """Read only timestamped, matching-schema forward CFBD side snapshots.
+    """Read existing miner prior features only for future 2026 fixtures.
 
-    A postgame warehouse table is never accepted as an implicit source.
+    Game_Date is a KICKOFF, not a feature capture. An un-timestamped source
+    may generate a current shadow snapshot only while kickoff is in the
+    future. Never use archive/postgame/research tables as a live source.
     """
     import re
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]*\.[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*',table_id or ''):
         raise ValueError('INVALID_LIVE_CFBD_TABLE_ID')
-    if 'postgame' in table_id.lower() or 'archive' in table_id.lower():
-        raise ValueError('POSTGAME_OR_ARCHIVE_TABLE_FORBIDDEN_AS_FORWARD_SOURCE')
+    if table_id.lower()!='sharplogger.sharp_data.ncaaf_cfbd_miner_features_v1':
+        raise ValueError('LIVE_CFBD_TABLE_NOT_APPROVED_AS_FORWARD_PRIOR_SOURCE')
     table=bq_client.get_table(table_id)
     fields={field.name for field in table.schema}
-    source_id='Game_ID' if 'Game_ID' in fields else 'game_id' if 'game_id' in fields else None
-    side='Team_Key' if 'Team_Key' in fields else 'team_key' if 'team_key' in fields else None
-    asof='feature_asof_utc' if 'feature_asof_utc' in fields else 'Feature_AsOf_UTC' if 'Feature_AsOf_UTC' in fields else None
-    if not all((source_id,side,asof)):
-        raise ValueError('LIVE_CFBD_SOURCE_REQUIRES_GAME_TEAM_FEATURE_ASOF_FIELDS')
+    required={'Game_ID','Team_Key','Is_Home','Game_Date','Season','Week'}
+    if not required.issubset(fields):
+        raise ValueError('EXISTING_CFBD_SOURCE_MISSING_GAME_ROLE_OR_KICKOFF_FIELDS:'+str(sorted(required-fields)))
     priors={name[len('CFBD_DIFF_'):] for name in required_features
             if name.startswith('CFBD_DIFF_') and name.endswith('_Prior')}
     if not priors.issubset(fields):
-        raise ValueError('LIVE_CFBD_SOURCE_MISSING_MODEL_PRIOR_FIELDS:'+str(len(priors-fields)))
-    wanted=[source_id,side,asof]+(['Game_Start_UTC'] if 'Game_Start_UTC' in fields else [])+sorted(priors)
-    now=now or datetime.now(timezone.utc)
-    # Avoid huge scans and accidentally accepting last year's historical rows.
+        raise ValueError('LIVE_CFBD_SOURCE_MISSING_MODEL_PRIOR_FIELDS:'+str(sorted(priors-fields)[:12]))
+    now=clock(now or datetime.now(timezone.utc))
+    if not now:raise ValueError('NOW_MUST_BE_TIMEZONE_AWARE')
+    optional=[c for c in ('feature_asof_utc','Feature_AsOf_UTC') if c in fields]
+    wanted=['Game_ID','Team_Key','Is_Home','Game_Date','Season','Week']+optional+sorted(priors)
     sql=('SELECT '+','.join('`'+c+'`' for c in wanted)+f' FROM `{table_id}` '
-         f'WHERE `{asof}` >= TIMESTAMP_SUB(@now, INTERVAL 45 DAY) '
-         f'AND `{asof}` <= @now LIMIT 10000')
+         'WHERE `Season` = @season AND `Game_Date` > @now '
+         'AND `Game_Date` <= TIMESTAMP_ADD(@now, INTERVAL 45 DAY) LIMIT 10000')
     from google.cloud import bigquery
-    config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter('now','TIMESTAMP',now)])
+    config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter('season','INT64',now.year),
+        bigquery.ScalarQueryParameter('now','TIMESTAMP',now)])
     return [dict(row.items()) for row in bq_client.query(sql,job_config=config).result()]
 
 
@@ -721,7 +785,7 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
     # current pregame CFBD feature records are supplied with exact provenance.
     # No hidden feature inference from the weekly board or postgame warehouse.
     feature_uri=s(os.environ.get('NCAAF_V55_ML_LIVE_FEATURES_URI'))
-    feature_table=s(os.environ.get('NCAAF_V55_ML_LIVE_FEATURES_BQ_TABLE'))
+    feature_table=s(os.environ.get('NCAAF_V55_ML_LIVE_FEATURES_BQ_TABLE')) or 'sharplogger.sharp_data.ncaaf_cfbd_miner_features_v1'
     ml_feature_rows=[]
     feature_audit={'status':'HOLD_NO_FORWARD_FEATURE_SOURCE','bet_authority':0}
     try:
@@ -738,6 +802,8 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
             ml_feature_rows,feature_audit=build_live_cfbd_feature_snapshots(
                 board.to_dict('records'),source,wanted)
             feature_audit['source']=feature_table
+            feature_audit['feature_contract']='READ_TIME_SHADOW_ONLY_NO_ORIGINAL_CAPTURE_CLAIM'
+            feature_audit['source_adapter_version']='20261110_CFBD_MINER_FORWARD_V1'
         else:
             feature_audit['status']='LIVE_FEATURES_URI_OR_BQ_TABLE_NOT_CONFIGURED'
     except Exception as exc:
