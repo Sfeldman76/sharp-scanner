@@ -781,8 +781,11 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
     legacy=[c for c in base.columns if c.startswith(('V55_','V7_','Confirm_','Oppose_'))]
     for c in legacy:base.drop(columns=[c],inplace=True)
     # Market source and current prices are always the scanner's BigQuery feed.
-    book_quotes=read_scanner_quotes(bq,minutes=15,horizon_days=14)
-    board,pricing=attach_verified_backend_quotes(base,book_quotes,max_age_minutes=15)
+    book_quotes=read_scanner_quotes(bq,minutes=180,horizon_days=14)
+    board,pricing=attach_verified_backend_quotes(base,book_quotes,max_age_minutes=180)
+    pricing["reference_quote_max_age_minutes"]=180
+    pricing["execution_quote_max_age_minutes"]=15
+    pricing["reference_quote_never_grants_bet_authority"]=True
     # Source-specific signal timestamps and frozen hashes are mandatory.
     # Never infer a "directional signal" from CORE probabilities, names, or
     # a descriptive Pathi/Big Al context-only display overlay.
@@ -878,7 +881,8 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
                     raise ValueError('ML_SHADOW_ONLY_ARTIFACT_REQUIRED:'+name)
                 specs[name]=spec
             current_quotes=row_quotes(board.to_dict('records'))+(extra_quotes or [])
-            valid_quotes=[q for raw in current_quotes if (q:=quote_normal(raw,datetime.now(timezone.utc)))]
+            shadow_quote_clock=datetime.now(timezone.utc)
+            valid_quotes=[q for raw in current_quotes if (q:=quote_normal(raw,shadow_quote_clock,age_limit=180))]
             # quote_normal dates are objects; score_snapshot receives text.
             qrows=[{**q,'kickoff_utc':q['kickoff'].isoformat(),
                      'quote_observed_at_utc':q['quote'].isoformat()} for q in valid_quotes]
@@ -1092,6 +1096,10 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
         if per:
             records.append({'game_id':gid,'market':target,'side':q.get('side'), 'book':q.get('book'),
                             'quoted_line':q.get('line'),'quoted_odds':q.get('odds'),
+                            'quote_age_minutes':round((now-quoted).total_seconds()/60.0,2),
+                            'shadow_price_status':('REFERENCE_QUOTE_NOT_EXECUTABLE__OVER_15_MIN'
+                                                   if (now-quoted).total_seconds()>900
+                                                   else 'REFERENCE_QUOTE_WITHIN_15_MIN__NO_AUTHORITY'),
                             'models':per,'brain_signal_families':sorted(signal_counts.get(gid,set())),
                             'status':'SHADOW_NOT_AUTHORIZED','bet_authority':0})
     return {'status':'SHADOW_SCORED' if records else 'HOLD_LIVE_SCORING_INPUTS',

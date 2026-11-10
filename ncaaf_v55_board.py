@@ -386,6 +386,7 @@ KICKOFF_TOLERANCE_MINUTES = 60
 # No fuzzy matching: a verified matchup needs BOTH teams, home/away orientation,
 # an unambiguous sportsbook identity and compatible kickoff time.
 SCHOOL_EQUIVALENTS = {
+    "sam houston state": "sam houston",
     "app state": "appalachian state",
     "appalachian st": "appalachian state",
     "uconn": "connecticut",
@@ -463,6 +464,7 @@ SCHOOL_EQUIVALENTS = {
 # Mascots are suffixes, never entire-school substrings. Longer first protects
 # "golden eagles" from the shorter "eagles" suffix, etc.
 NCAAF_MASCOTS = tuple(sorted({m.strip() for m in """
+    jaguars, bearkats,
     black knights, blue devils, golden hurricane, fighting irish, fighting illini,
     fighting hawks, rainbow warriors, golden eagles, golden flashes, golden gophers,
     green wave, red wolves, red raiders, redhawks, mean green, blue raiders,
