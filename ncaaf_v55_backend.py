@@ -156,6 +156,26 @@ def quote_normal(raw,at,age_limit=15):
     return dict(game_id=gid,market=m,side=side,book=book,line=(line if m!='h2h' else None),
                 odds=odds,quote=quoted,kickoff=kick)
 
+def _v55_signal_quote_sequence(event, observed, quoted, book_quote, at):
+    """Two legitimate prospective sequences; NEVER backdate model decisions.
+
+    Original signals may precede the recorded sportsbook snapshot. A frozen
+    rule evaluated *on* an already recorded current quote naturally fires
+    after that snapshot. The latter must have its own immutable first-seen
+    capture and an exact quote-source reference, all within 15 minutes.
+    """
+    qclock=book_quote['quote']
+    kickoff=book_quote['kickoff']
+    if not (observed and quoted and observed<=at<kickoff and quoted<=qclock<kickoff):
+        return False
+    if observed<=quoted:
+        return True
+    return (truth(event.get('prospective_evaluation_after_quote'))
+        and bool(s(event.get('signal_capture_ref')))
+        and bool(s(event.get('quote_capture_ref')))
+        and quoted<=observed and (observed-quoted).total_seconds()<=900)
+
+
 def signals_by_side(events,boards,quotes,at):
     """Only original pregame, direction-verified events from seven brains.
 
@@ -184,6 +204,7 @@ def signals_by_side(events,boards,quotes,at):
         quoted=clock(e.get('quote_observed_at_utc') or e.get('Observed_Quote_UTC'))
         line=num(e.get('line') if 'line' in e else e.get('Observed_Spread'))
         if (not gid or f not in BRAINS or not sid or not dep or not observed or not book or not quoted or
+            not s(e.get('signal_capture_ref') or e.get('source_capture_ref') or e.get('original_capture_id')) or
             observed>at or not truth(e.get('direction_verified',e.get('Direction_Verified'))) or
             side not in (('OVER','UNDER') if m=='totals' else ('HOME','AWAY'))):
             rejected['INVALID_LIVE_EVENT']+=1;continue
@@ -192,7 +213,7 @@ def signals_by_side(events,boards,quotes,at):
         component=f+'|'+sid
         for q in quotes:
             if (q['game_id']!=gid or q['market']!=m or q['side']!=side or
-                book!=q['book'] or not (observed<=quoted<=q['quote']<q['kickoff']) or
+                book!=q['book'] or not _v55_signal_quote_sequence(e,observed,quoted,q,at) or
                 (q['quote']-quoted).total_seconds()>900 or
                 (m!='h2h' and (line is None or abs(line-q['line'])>1e-7))):
                 continue
@@ -879,7 +900,10 @@ def read_seven_brain_signal_sources(manifest_uri, bq_client, *, now=None):
                 capture=s(e.get('signal_capture_ref') or e.get('source_capture_ref') or e.get('original_capture_id'))
                 if not gid or not sid or not capture or not evtime or not kickoff or not quote_time:
                     rejected['MISSING_ORIGINAL_EVENT_PROVENANCE']+=1;continue
-                if not evtime<=quote_time<kickoff or quote_time>at or evtime>at:
+                producer_after_quote=(truth(e.get('prospective_evaluation_after_quote')) and
+                    quote_time<=evtime<kickoff and (evtime-quote_time).total_seconds()<=900 and
+                    bool(s(e.get('quote_capture_ref'))) and bool(s(e.get('signal_capture_ref'))))
+                if not ((evtime<=quote_time<kickoff) or producer_after_quote) or quote_time>at or evtime>at:
                     rejected['NOT_VERIFIED_PREGAME_CHRONOLOGY']+=1;continue
                 if not truth(e.get('direction_verified',e.get('Direction_Verified'))):
                     rejected['DIRECTION_UNVERIFIED']+=1;continue
@@ -912,6 +936,225 @@ def read_seven_brain_signal_sources(manifest_uri, bq_client, *, now=None):
                     'all_seven_brains_supported':True,
                     'original_capture_required_for_execution':True,
                     'retrospective_observations_not_reclassified_as_live':True}
+
+# NCAAF V5.5: prospective producer -> unified authority handoff.
+# Only the EXISTING board's frozen/qualified expert evaluator is reused.
+# The retired NCAAF Research V2 Miner evaluator and the old V55 publisher are
+# NEVER invoked from this bridge. Current V5 full-history Miner needs its
+# separately published prospective rule firings (not the old RV22 votes).
+V55_PROSPECTIVE_PRODUCER_TAG='V55_FROZEN_EXPERT_ORIGIN_CAPTURE_20261110_V1'
+
+
+def _v55_producer_definition_hash(rule, family_name, system_id, registry_sha):
+    """Exact deterministic frozen rule identity for prospective captures."""
+    recipe={'registry_sha256':registry_sha,'family':family_name,'system_id':system_id,
+        'source_signal_field':rule['signal'],'signal_type':rule['signal_type'],
+        'ready_field':rule['ready_field'],'direction':rule['direction'],
+        'dependency':rule['key'],'qualified_at':rule['qualified_at'].isoformat()}
+    return sha(recipe)
+
+
+def normalize_v55_producer_events(raw_events, board_rows, qualified_registry, *, now=None):
+    """Adapt current frozen-rule firings to the existing 7-brain contract.
+
+    Only actual pregame evaluation rows produced NOW are accepted. Match an
+    exact paired sportsbook, canonical game ID, HOME/AWAY direction, current
+    line and price. Do not transform archived Big Al/Pathi context into votes.
+    """
+    at=clock(now) if now is not None else datetime.now(timezone.utc)
+    if at is None:raise ValueError('PRODUCER_NOW_NOT_UTC_AWARE')
+    if hasattr(raw_events,'to_dict'):raw_events=raw_events.to_dict('records')
+    if hasattr(board_rows,'to_dict'):board_rows=board_rows.to_dict('records')
+    rules=(qualified_registry or {}).get('rules') or {}
+    registry_sha=s((qualified_registry or {}).get('report_sha256'))
+    out=[];holds=Counter();seen=set()
+    for e in raw_events:
+        fam=family(e.get('Source_Family'));sid=s(e.get('Signal_Family'))
+        rule=rules.get((fam,sid))
+        if fam not in ('STAT','PATHI','BIG_AL','PREDICTION_TRACKER') or not rule:
+            holds['FROZEN_RULE_ID_NOT_VERIFIED']+=1;continue
+        if s(e.get('Qualification_Status'))!='QUALIFIED_OOS' or s(e.get('OOS_Status'))!='PASS' or not truth(e.get('Direction_Verified')):
+            holds['LIVE_QUALIFICATION_NOT_VERIFIED']+=1;continue
+        if (s(e.get('Registry_SHA256'))!=registry_sha or
+            s(e.get('Evidence_Family_Key'))!=s(rule['key']) or
+            not registry_sha):
+            holds['REGISTRY_OR_DEPENDENCY_MISMATCH']+=1;continue
+        if s(e.get('Provenance_Status'))!='PRE_GAME_VERIFIED_LIVE_RECALCULATED':
+            holds['NOT_DIRECT_FROZEN_RULE_EVALUATION']+=1;continue
+        observed=clock(e.get('Observed_At_UTC'))
+        source_quote=clock(e.get('Observed_Quote_UTC'))
+        if not (observed and source_quote and
+                rule['qualified_at']<=source_quote<=observed<=at and
+                (observed-source_quote).total_seconds()<=900):
+            holds['NO_CURRENT_ORIGINAL_QUOTE_PROVENANCE']+=1;continue
+        gid=s(e.get('Game_ID'));direction=s(e.get('Signal_Side'))
+        source_book=s(e.get('Observed_Book')).lower()
+        options=[]
+        for r in board_rows:
+            if gid!=s(r.get('Game_ID') or r.get('game_id')):continue
+            kick=clock(r.get('Game_Start_UTC'))
+            quote=clock(r.get('Backend_Quote_Timestamp'))
+            if not (kick and quote and observed<kick and source_quote<=quote<=at and
+                    (at-quote).total_seconds()<=900 and
+                    source_book==s(r.get('Backend_Quote_Book')).lower() and
+                    s(r.get('Quote_State')).startswith('FRESH_')):continue
+            matchup=s(r.get('Matchup'))
+            if ' @ ' not in matchup:continue
+            away,home=matchup.split(' @ ',1)
+            # The old helper returns a named school, not HOME/AWAY. Require
+            # exact normalized name or canonical quoted team identity.
+            try:
+                import ncaaf_v55_board as board_tools
+                norm=board_tools._norm_team
+            except ImportError:
+                norm=slug
+            t=norm(direction)
+            side='HOME' if t==norm(home) else 'AWAY' if t==norm(away) else ''
+            if not side:continue
+            prefix='Home' if side=='HOME' else 'Away'
+            line=num(r.get('Backend_'+prefix+'_Spread'))
+            odds=num(r.get('Backend_'+prefix+'_Odds_American'))
+            if line is None or profit(odds) is None:continue
+            options.append((r,kick,quote,side,line,odds))
+        if len(options)!=1:
+            holds['NO_UNIQUE_FRESH_SAME_BOOK_SIDE_QUOTE']+=1;continue
+        r,kick,quote,side,line,odds=options[0]
+        if s(e.get('Game_Start_UTC')) and clock(e.get('Game_Start_UTC'))!=kick:
+            holds['KICKOFF_CONFLICT']+=1;continue
+        if s(e.get('Observed_Spread')):
+            # The original observed spread belongs to the row that triggered
+            # the rule. For FADE rules the actual *selected* side has the
+            # opposite spread, so it must come from the paired board.
+            orig_line=num(e.get('Observed_Spread'))
+            if orig_line is None or min(abs(line-orig_line),abs(line+orig_line))>1e-6:
+                holds['QUOTE_LINE_NOT_PAIRED']+=1;continue
+        component_hash=_v55_producer_definition_hash(rule,fam,sid,registry_sha)
+        identity=(gid,side,source_book,line,fam,sid,component_hash,source_quote.isoformat())
+        if identity in seen:
+            holds['DUPLICATE_RULE_FIRE']+=1;continue
+        seen.add(identity)
+        # A stable capture ID identifies this run's prospective observation;
+        # the actual GCS object URI is added BEFORE persistence below.
+        capture_id=sha((V55_PROSPECTIVE_PRODUCER_TAG,identity,observed.isoformat()))
+        quote_ref='bq://sharplogger.sharp_data.sharp_moves_master#'+sha(
+            (gid,source_book,side,line,source_quote.isoformat()))
+        out.append({'game_id':gid,'market':'spreads','side':side,
+            'source_family':fam,'system_id':sid,
+            'evidence_family_key':s(rule['key']),
+            'frozen_definition_sha256':component_hash,
+            'book':source_book,'line':line,'odds':odds,
+            'kickoff_utc':kick.isoformat(),
+            'signal_observed_at_utc':observed.isoformat(),
+            'quote_observed_at_utc':source_quote.isoformat(),
+            'direction_verified':True,
+            'prospective_evaluation_after_quote':True,
+            'quote_capture_ref':quote_ref,
+            'signal_capture_ref':None,
+            'capture_id':capture_id,
+            'rule_registry_sha256':registry_sha,
+            'producer':V55_PROSPECTIVE_PRODUCER_TAG,
+            'original_event_created_prospectively':True,
+            'historical_betting_roi_certified':False})
+    return out,{'status':'PROSPECTIVE_RULE_FIRINGS_PREPARED' if out else 'NO_VERIFIED_PROSPECTIVE_RULE_FIRINGS',
+                'prepared':len(out),'by_brain':dict(Counter(e['source_family'] for e in out)),
+                'holds':dict(holds),'legacy_miner_used':False,
+                'research_replays_promoted':False}
+
+
+def persist_v55_prospective_events(events, storage_client, bucket, *, now=None):
+    """Write one immutable append-only capture before authority may read it."""
+    if not events:return [],{'status':'NO_EVENTS_TO_CAPTURE','captured':0}
+    at=clock(now) if now is not None else datetime.now(timezone.utc)
+    if at is None:raise ValueError('CAPTURE_NOW_NOT_AWARE')
+    name='research/ncaaf/v55/live/prospective_events/'+at.strftime('%Y%m%d')+'/'+at.strftime('%Y%m%dT%H%M%S%fZ')+'_'+uuid.uuid4().hex+'.jsonl'
+    uri='gs://'+bucket+'/'+name
+    captured=[]
+    for row in events:
+        item=dict(row)
+        item['signal_capture_ref']=uri+'#'+s(item['capture_id'])
+        captured.append(item)
+    payload=('\n'.join(json.dumps(e,sort_keys=True,allow_nan=False) for e in captured)+'\n').encode()
+    blob=storage_client.bucket(bucket).blob(name)
+    blob.upload_from_string(payload,content_type='application/x-ndjson',if_generation_match=0)
+    return captured,{'status':'IMMUTABLE_PROSPECTIVE_CAPTURED','captured':len(captured),
+                     'uri':uri,'sha256':hashlib.sha256(payload).hexdigest(),
+                     'legacy_miner_used':False,'historical_certification_claimed':False}
+
+
+def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
+                                         bucket, now=None, log_func=None):
+    """Current genuine frozen-rule producer. Never executes old Miner/V1 authority."""
+    from ncaaf_v55_board import (_v55_direct_current_quote_rows,
+        read_v55_long_history_brain_registry,derive_v55_other_qualified_events)
+    import pandas as pd
+    at=clock(now) if now is not None else datetime.now(timezone.utc)
+    log=log_func or (lambda *_:None)
+    audit={'status':'NOT_STARTED','producer':V55_PROSPECTIVE_PRODUCER_TAG,
+        'families_eligible_for_production':['STAT','PATHI','BIG_AL','PREDICTION_TRACKER'],
+        'full_history_miner_status':'REQUIRES_V5_FROZEN_RULE_LIVE_FIRING_PRODUCER_NOT_LEGACY_V2',
+        'core_status':'ML_RESEARCH_SHADOW_NOT_AUTOMATIC_ORIGINAL_SELECTION',
+        'market_rich_status':'DESCRIPTIVE_MARKET_FEATURES_NOT_AUTOMATIC_DIRECTIONAL_RULES',
+        'source_capture_before_authority':True,'bet_authority':0}
+    frozen,problem=read_v55_long_history_brain_registry(storage_client=storage_client,bucket_name=bucket)
+    if problem or not frozen or not frozen.get('rules'):
+        audit.update(status='HOLD_NO_FROZEN_EXPERT_LIVE_RULE_REGISTRY',reason=str(problem or 'NO_FROZEN_RULES'))
+        return [],audit
+    # Every live evaluation uses current executable paired quotes only; long
+    # research-reference quotes cannot be used to declare original predictions.
+    fresh=board.loc[board['Backend_Quote_Timestamp'].map(lambda x:
+        bool((t:=clock(x)) and 0<=(at-t).total_seconds()<=900))].copy()
+    if fresh.empty:
+        audit['status']='NO_EXECUTION_FRESH_PAIRED_QUOTES';return [],audit
+    live_rows,qa=_v55_direct_current_quote_rows(fresh,book_quotes,now=at)
+    audit['paired_quote_audit']=qa
+    if live_rows.empty:
+        audit['status']='NO_ORIGINAL_PAIRED_QUOTE_ROWS';return [],audit
+    try:
+        import utils
+        enriched=utils.attach_pathi_bigal_backend_features(live_rows,'NCAAF',days_back=None)
+        if not isinstance(enriched,pd.DataFrame) or len(enriched)!=len(live_rows):
+            raise RuntimeError('FROZEN_FEATURE_PRODUCER_CHANGED_QUOTE_ROWS')
+        # Evaluation occurs NOW, AFTER the original sportsbook quote. Do not
+        # backdate the newly computed Pathi/Big Al/STAT rule firing.
+        enriched=enriched.copy()
+        evaluated_at=datetime.now(timezone.utc)
+        enriched['V55_Original_Quote_Timestamp']=enriched['Snapshot_Timestamp']
+        # The time is recorded AFTER feature evaluation finished. Recording
+        # the start of a long enrichment job would falsely backdate signals.
+        enriched['Snapshot_Timestamp']=pd.Timestamp(evaluated_at)
+        enriched['V55_Live_Computed_On_Current_Quote']=True
+    except Exception as exc:
+        audit.update(status='HOLD_EXPERT_FEATURE_PRODUCER_FAILED',error=type(exc).__name__+':'+str(exc)[:240])
+        return [],audit
+    both=[]
+    for row in fresh.to_dict('records'):
+        match=s(row.get('Matchup'))
+        if ' @ ' not in match:continue
+        away,home=match.split(' @ ',1)
+        for side,prefix,name in [('HOME','Home',home),('AWAY','Away',away)]:
+            ln=num(row.get('Backend_'+prefix+'_Spread'))
+            if ln is None:continue
+            item=dict(row);item['Selected_Team']=name;item['Current_Spread']=ln
+            both.append(item)
+    if not both:
+        audit['status']='NO_UNAMBIGUOUS_TWO_SIDED_GAME_MATCHUP';return [],audit
+    observed,qa=derive_v55_other_qualified_events(pd.DataFrame(both),enriched,frozen,now=evaluated_at)
+    audit['rule_firing_audit']=qa
+    prepared,validation=normalize_v55_producer_events(observed,board,frozen,now=evaluated_at)
+    audit['normalization_audit']=validation
+    if not prepared:
+        audit['status']='NO_VERIFIED_CURRENT_FROZEN_RULE_FIRINGS';return [],audit
+    try:
+        captured,capture=persist_v55_prospective_events(prepared,storage_client,bucket,now=evaluated_at)
+        audit['capture_audit']=capture
+        audit.update(status='PASS_PROSPECTIVE_CAPTURED',accepted_events=len(captured),
+                     by_brain=dict(Counter(e['source_family'] for e in captured)))
+        return captured,audit
+    except Exception as exc:
+        audit.update(status='HOLD_PROSPECTIVE_IMMUTABLE_CAPTURE_WRITE_FAILED',
+                     error=type(exc).__name__+':'+str(exc)[:240])
+        return [],audit
+
 
 def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,log_func=None):
     """Production scanner dispatch. ONE NCAAF authority/publisher.
@@ -986,6 +1229,30 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
         signals=[];source_hold='LIVE_DIRECTIONAL_SIGNAL_FEED_INVALID:'+type(exc).__name__+':'+str(exc)
     if not isinstance(signals,list):
         raise RuntimeError('INVALID_LIVE_SIGNAL_FEED_SCHEMA')
+    # The existing frozen expert feature evaluators are now a producer of
+    # prospectively captured original decisions. This runs in the SAME backend
+    # scan and enters the SAME seven-brain evaluator; no additional service or
+    # permanent Python file. It may yield zero when a family has no qualified
+    # current rule, and NEVER imports the retired Miner V2 executor.
+    producer_audit={'status':'DISABLED_BY_OPERATOR','accepted_events':0}
+    if s(os.getenv('NCAAF_V55_PRODUCER_BRIDGE_ENABLED','1')).lower() not in ('0','off','false','no'):
+        try:
+            newly_captured,producer_audit=produce_v55_verified_expert_signals(
+                board,book_quotes,storage_client=gcs,bucket=bucket,log_func=log)
+            if newly_captured:
+                signals.extend(newly_captured)
+                if source_hold=='LIVE_ORIGINAL_DIRECTIONAL_SIGNAL_FEED_NOT_CONFIGURED':
+                    source_hold=None
+        except Exception as exc:
+            producer_audit={'status':'HOLD_PRODUCER_BRIDGE_EXCEPTION',
+                 'error':type(exc).__name__+':'+str(exc)[:240], 'accepted_events':0}
+    log('[NCAAF-V55-SEVEN-BRAIN-PRODUCER-AUDIT] '+json.dumps(producer_audit,sort_keys=True,default=str))
+    seven_brain_input_audit['prospective_producer']=producer_audit
+    seven_brain_input_audit['total_original_events_including_new_capture']=len(signals)
+    seven_brain_input_audit['prospectively_captured_new_events']=int(producer_audit.get('accepted_events',0) or 0)
+    if (producer_audit.get('status')=='PASS_PROSPECTIVE_CAPTURED' and
+            seven_brain_input_audit.get('status')=='NOT_CONFIGURED'):
+        seven_brain_input_audit['status']='PASS_PROSPECTIVE_PRODUCER_CAPTURE'
     log('[NCAAF-V55-SEVEN-BRAIN-INPUT-AUDIT] '+json.dumps(seven_brain_input_audit,sort_keys=True))
     registry_uri=s(os.environ.get('NCAAF_V55_ROI_REGISTRY_URI')) or (
         'gs://'+bucket+'/research/ncaaf/v55/two_engine_roi/current_registry.json')
