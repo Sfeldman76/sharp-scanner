@@ -3081,6 +3081,39 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
     report,models=fit_v55_ml_research(rows,events,team_map,market_rows=market_data)
     retrospective_report,retrospective_models=fit_v55_retrospective_reference_lane(
         rows,events,team_map)
+    # Full CFBD 2013-2025 margin/total targets are score-derived, not
+    # restricted to the 2025 market snapshot / historical odds population.
+    # V5.2 game IDs and prior-feature construction are the sole training input.
+    full_report, full_models = fit_full_history(rows, events, team_map)
+    models.update(full_models)
+    report['full_history_score_research'] = full_report
+    report['full_history_coverage_funnel'] = {
+        'verified_v5_2_canonical_games':len(games),
+        'cfbd_prior_training_games':len(rows),
+        'score_target_eligible_games':full_report.get('coverage',{}).get('canonical_cfbd_training_games'),
+        'primary_spread_label_games':sum(r.get('label_spread') in (0,1) for r in rows),
+        'primary_totals_label_games':sum(r.get('label_totals') in (0,1) for r in rows),
+        'historical_spread_reference_games':sum(r.get('label_spread_reference') in (0,1) for r in rows),
+        'historical_totals_reference_games':sum(r.get('label_totals_reference') in (0,1) for r in rows),
+        'market_snapshot_games':len(market_data),
+        'frozen_evidence_rows':len(events),
+        'cfbd_source_holds':source.get('holds',{}) if isinstance(source,dict) else {},
+        'reference_only_is_not_bet_price_certification':True,
+        'bet_authority':0}
+    report['full_history_source_revision'] = {
+        'research_py_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        'inlined_full_history_engine':'ncaaf_v55_research.py',
+        'source_module_count':2}
+
+    report['full_history_live_handoff'] = {
+        'status':'SHADOW_UNTIL_ORIGINAL_LIVE_FEATURE_PARITY',
+        'feature_contract':'EXACT_CFBD_PRIOR_DIFFERENCE_COLUMNS_AND_CANONICAL_ID',
+        'seven_brains':'CORE_STAT_SYSTEM_MINER_PATHI_BIG_AL_PT_PLUS_LIVE_MARKET_RICH',
+        'historical_market_quote_required_for_score_training':False,
+        'market_price_required_for_live_value':True,
+        'authority':0}
+    report['trained_models'].extend(sorted(full_models))
+    report.setdefault('model_features',{}).update({name:spec['features'] for name,spec in full_models.items()})
     # Reference model artifacts have a distinct name and forward_eligible=False.
     # No older untimed quote can change the certified-input label columns.
     models.update(retrospective_models)
@@ -3302,4 +3335,150 @@ def main(argv=None):
     except Exception as exc:
         print('NCAAF_RESEARCH_ERROR:'+type(exc).__name__+':'+str(exc),file=sys.stderr)
         return 3
+
+# BEGIN INLINED NCAAF V5.5 FULL-HISTORY ENGINE (no third-module dependency)
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from statistics import NormalDist
+import hashlib, json, math
+_V55_FH_FAMILIES=('SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER')
+_V55_FH_TARGETS={'margin':'HOME_SCORE_MINUS_AWAY_SCORE','total':'HOME_SCORE_PLUS_AWAY_SCORE'}
+_V55_FH_VERSION='NCAAF_V55_FULL_HISTORY_V1_RESEARCH_SHADOW'
+def _v55_fh_finite(x):
+    try:
+        v=float(x)
+        return v if math.isfinite(v) else float('nan')
+    except (TypeError, ValueError):return float('nan')
+
+def _v55_fh_evidence_features(events, team_map):
+    """Canonical, market-specific unique family evidence; no results in X."""
+    counts=defaultdict(Counter);seen=set();unknown=Counter()
+    for e in events:
+        try:
+            fam=str(e['brain']);mkt=str(e['market']);yr=int(e['season']);gid=str(e['cfbd_game_id']);side=str(e['target'])
+        except (ValueError,TypeError,KeyError):continue
+        if fam not in _V55_FH_FAMILIES or mkt not in ('spreads','h2h','totals'):continue
+        sysid=str(e.get('system_id') or e.get('mechanism_id') or '').strip()
+        token=(yr,gid,mkt,side,fam,sysid if sysid else hashlib.sha256(json.dumps(e,sort_keys=True,default=str).encode()).hexdigest())
+        if token in seen:continue
+        seen.add(token);counts[(yr,gid,mkt,side)][fam]+=1
+    out={}
+    for key,sides in team_map.items():
+        if not isinstance(key,tuple) or len(key)!=2:continue
+        h=[name for name,side in sides.items() if str(side.get('is_home_verified')).lower() in ('1','true','yes')]
+        a=[name for name,side in sides.items() if str(side.get('is_home_verified')).lower() in ('0','false','no')]
+        if len(h)!=1 or len(a)!=1:continue
+        yr,gid=key; features={}
+        for fam in _V55_FH_FAMILIES:
+            for mkt in ('spreads','h2h','totals'):
+                hside,aside=('OVER','UNDER') if mkt=='totals' else (h[0],a[0])
+                hv=counts.get((yr,gid,mkt,hside),Counter()).get(fam,0)
+                av=counts.get((yr,gid,mkt,aside),Counter()).get(fam,0)
+                features[f'EVIDENCE_{mkt}_{fam}_NET']=float(min(3,hv)-min(3,av))
+        out[key]=features
+    return out
+
+def _v55_fh_prepare_rows(historical_rows,events,team_map):
+    ev=_v55_fh_evidence_features(events,team_map)
+    rows=[];holds=Counter();years=Counter()
+    for r in historical_rows:
+        try:
+            year=int(r['season']);key=(year,str(r['game_id']))
+            hs=_v55_fh_finite(r['home_score']);aw=_v55_fh_finite(r['away_score'])
+        except (ValueError,TypeError,KeyError):holds['INVALID_SCORE_OR_ID']+=1;continue
+        if not (math.isfinite(hs) and math.isfinite(aw) and hs>=0 and aw>=0):
+            holds['INVALID_SCORE_OR_ID']+=1;continue
+        prior={k:v for k,v in (r.get('core_features') or {}).items()
+               if k.startswith('CFBD_DIFF_') and k.endswith('_Prior')}
+        if not prior or not any(math.isfinite(_v55_fh_finite(v)) for v in prior.values()):
+            holds['NO_USABLE_PRIOR_FEATURES']+=1;continue
+        item={'season':year,'game_id':key[1], 'features':{**prior,**ev.get(key,{})},
+              'margin':hs-aw,'total':hs+aw, 'reference_spread':_v55_fh_finite((r.get('core_features') or {}).get('MARKET_SPREAD_LINE_REFERENCE')),
+              'reference_total':_v55_fh_finite((r.get('core_features') or {}).get('MARKET_TOTAL_LINE_REFERENCE'))}
+        rows.append(item);years[year]+=1
+    rows.sort(key=lambda r:(r['season'],r['game_id']))
+    audit={'canonical_cfbd_training_games':len(rows),'eligible_games_by_season':dict(sorted(years.items())),
+           'holds':dict(holds),'historical_frozen_evidence_games':sum((int(r['season']),str(r['game_id'])) in ev for r in rows),
+           'source':'V5_2_CANONICAL_CFBD_PRIORS_AND_FINAL_SCORES','brain_history_original_pregame_capture_certified':False,
+           '2026_training_games':sum(r['season']>=2026 for r in rows)}
+    return rows,audit
+
+def fit_full_history(historical_rows,events,team_map,*,min_train=240,min_test=30):
+    """Expanding-season score regression plus earlier-OOF residual calibration.
+
+    OOF residuals for season Y never use outcomes from season Y or later.
+    The published forward residual scale is learned only from historical OOF.
+    """
+    import numpy as np
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    from sklearn.metrics import mean_absolute_error,mean_squared_error
+    rows,coverage=_v55_fh_prepare_rows(historical_rows,events,team_map)
+    from collections import Counter
+    coverage['expert_nonzero_net_by_market_family']={}
+    for mkt in ('spreads','h2h','totals'):
+        for fam in _V55_FH_FAMILIES:
+            col='EVIDENCE_'+mkt+'_'+fam+'_NET'
+            coverage['expert_nonzero_net_by_market_family'][mkt+'_'+fam]=sum(
+                _v55_fh_finite(r['features'].get(col))!=0 for r in rows if col in r['features'])
+    report={'schema':_V55_FH_VERSION,'status':'HOLD_FULL_HISTORY_INSUFFICIENT','coverage':coverage,
+            'models':{},'same_game_comparison':{},'seven_brain_policy':'CORE_STAT_MINER_BIG_AL_PATHI_PT_PLUS_SEPARATE_LIVE_MARKET_RICH',
+            'historical_brain_capture_certified':False,'historical_feature_vintage_certified':False,
+            'bet_authority':0,'live_scoring_authority':0}
+    fitted={}
+    if len(rows)<min_train+min_test:return report,fitted
+    prior=sorted({k for r in rows for k in r['features'] if k.startswith('CFBD_DIFF_')})
+    stat=[k for k in prior if ('_Season_' in k or '_Recent3_' in k or '_Recent5_' in k) and ('_Off_' in k or '_Def_' in k)]
+    if len(stat)<2:stat=prior[:]
+    expert=sorted({k for r in rows for k in r['features'] if k.startswith('EVIDENCE_')})
+    definitions={'CORE':prior,'STAT':stat,'COMBINED':prior+expert}
+    years=np.asarray([r['season'] for r in rows],int);allpred={}
+    for target in _V55_FH_TARGETS:
+        y=np.asarray([r[target] for r in rows],float)
+        for brain,cols in definitions.items():
+            if not cols:continue
+            X=np.asarray([[_v55_fh_finite(r['features'].get(k)) for k in cols] for r in rows],float)
+            pred=np.full(len(rows),np.nan);cal=[];folds=[];earlier_errors=[]
+            for season in sorted(set(years)):
+                train=np.where(years<season)[0];test=np.where(years==season)[0]
+                if len(train)<min_train or len(test)<min_test:continue
+                model=HistGradientBoostingRegressor(max_iter=90,learning_rate=.05,max_leaf_nodes=9,
+                     min_samples_leaf=55,l2_regularization=8.0,random_state=20261109)
+                model.fit(X[train],y[train]);p=model.predict(X[test]);pred[test]=p
+                sigma=float(np.std(earlier_errors,ddof=1)) if len(earlier_errors)>=min_train else None
+                # A calibration fold exists only once prior OOF residuals exist.
+                if sigma is not None and sigma>0:
+                    z=(y[test]-p)/sigma
+                    cal.append({'season':int(season),'test_games':len(test),'earlier_oof_residuals':len(earlier_errors),
+                                'sigma_before_season':round(sigma,6),'empirical_68pct_interval_coverage':round(float(np.mean(abs(z)<=1)),5)})
+                folds.append({'season':int(season),'train_games':len(train),'test_games':len(test)})
+                earlier_errors.extend((y[test]-p).tolist())
+            valid=np.isfinite(pred);name=f'FULL_{brain}_{target}'
+            info={'target':_V55_FH_TARGETS[target],'feature_count':len(cols),'training_games':len(rows),
+                  'oof_games':int(valid.sum()),'folds':folds,'chronological_calibration_folds':cal,
+                  'status':'EXPANDING_SEASON_SCORE_OOF' if valid.any() else 'HOLD_NO_OOF',
+                  'oof_mae':round(float(mean_absolute_error(y[valid],pred[valid])),6) if valid.any() else None,
+                  'oof_rmse':round(float(mean_squared_error(y[valid],pred[valid])**.5),6) if valid.any() else None,
+                  'forward_residual_sigma':round(float(np.std(earlier_errors,ddof=1)),6) if len(earlier_errors)>1 else None,
+                  'calibration_method':'EARLIER_SEASON_OOF_RESIDUAL_SIGMA_NORMAL_APPROX_SHADOW',
+                  'original_feature_vintage_certified':False,'bet_authority':0}
+            report['models'][name]=info;allpred[name]=pred
+            if valid.any() and len(earlier_errors)>1:
+                final=HistGradientBoostingRegressor(max_iter=90,learning_rate=.05,max_leaf_nodes=9,
+                     min_samples_leaf=55,l2_regularization=8.0,random_state=20261109)
+                final.fit(X,y)
+                fitted[name]={'model':final,'features':cols,'source':_V55_FH_VERSION,
+                    'prediction_target':_V55_FH_TARGETS[target], 'residual_sigma':info['forward_residual_sigma'],
+                    'forward_eligible':False,'bet_authority':0,'feature_vintage_certified':False,
+                    'family_evidence_capture_certified':False}
+        names=[f'FULL_{b}_{target}' for b in definitions]
+        if all(n in allpred for n in names):
+            mask=np.logical_and.reduce([np.isfinite(allpred[n]) for n in names]);paired=int(mask.sum())
+            if paired:
+                report['same_game_comparison'][target]={'games':paired,**{b+'_mae':round(float(mean_absolute_error(y[mask],allpred[f'FULL_{b}_{target}'][mask])),6) for b in definitions},
+                    'fully_paired_out_of_season':True}
+    report['status']='FULL_HISTORY_SCORE_MODELS_TRAINED_SHADOW' if fitted else 'HOLD_FULL_HISTORY_NO_FITTED_MODELS'
+    return report,fitted
+
+# END INLINED FULL-HISTORY TRAINING
+
 if __name__=='__main__':raise SystemExit(main())

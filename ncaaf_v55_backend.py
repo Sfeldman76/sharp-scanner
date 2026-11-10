@@ -588,12 +588,70 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
         ml_audit={'status':'HOLD_ML_MANIFEST_UNAVAILABLE',
                   'error':type(exc).__name__+':'+str(exc),'bet_authority':0}
     log('[NCAAF-V55-ML-SHADOW-MANIFEST] '+json.dumps(ml_audit,sort_keys=True))
+    # Full-history score-regression research artifacts are loaded only when
+    # current pregame CFBD feature records are supplied with exact provenance.
+    # No hidden feature inference from the weekly board or postgame warehouse.
+    feature_uri=s(os.environ.get('NCAAF_V55_ML_LIVE_FEATURES_URI'))
+    ml_feature_rows=[]
+    if feature_uri:
+        try:
+            ml_feature_rows=read_rows(feature_uri)
+            if not isinstance(ml_feature_rows,list):raise ValueError('INVALID_ML_FEATURE_ROWS')
+        except Exception as exc:
+            ml_feature_rows=[]
+            log('[NCAAF-V55-FULL-HISTORY-FEATURE-HOLD] '+type(exc).__name__+':'+str(exc))
+    else:
+        log('[NCAAF-V55-FULL-HISTORY-FEATURE-HOLD] LIVE_FEATURES_URI_NOT_CONFIGURED')
     extras_uri=s(os.environ.get('NCAAF_V55_OTHER_MARKET_QUOTES_URI'))
     extra_quotes=read_rows(extras_uri) if extras_uri else None
     signals,live_identity_audit=canonicalize_live_signal_game_ids(signals,board)
     output,audit=evaluate(board.to_dict('records'),signals,registry,extra_quotes=extra_quotes)
     audit['two_engine_live_identity_matching']=live_identity_audit
     audit['ml_shadow_manifest']=ml_audit
+    # Explicit research-to-live scoring interface. Keep authority unchanged:
+    # the original exact-OOS ROI registry remains the sole certifier.
+    shadow={'status':'HOLD_ML_FEATURE_SOURCE_OR_MANIFEST','bet_authority':0}
+    if ml_feature_rows and ml_audit.get('status')=='ML_SHADOW_MANIFEST_PRESENT':
+        try:
+            import joblib
+            import io
+            md=read_registry(ml_uri)
+            specs={}
+            for name,ref in sorted((md.get('artifacts') or {}).items()):
+                if not name.startswith('FULL_'):continue
+                uri=s(ref.get('uri'))
+                if not uri.startswith('gs://'):continue
+                b,k=uri[5:].split('/',1)
+                blob=gcs.bucket(b).blob(k).download_as_bytes()
+                if hashlib.sha256(blob).hexdigest()!=s(ref.get('sha256')):
+                    raise ValueError('ML_ARTIFACT_SHA256_MISMATCH:'+name)
+                spec=joblib.load(io.BytesIO(blob))
+                if list(spec.get('features',[]))!=list(ref.get('features',[])):
+                    raise ValueError('ML_ARTIFACT_FEATURE_SCHEMA_MISMATCH:'+name)
+                if spec.get('bet_authority')!=0 or spec.get('forward_eligible') is not False:
+                    raise ValueError('ML_SHADOW_ONLY_ARTIFACT_REQUIRED:'+name)
+                specs[name]=spec
+            current_quotes=row_quotes(board.to_dict('records'))+(extra_quotes or [])
+            valid_quotes=[q for raw in current_quotes if (q:=quote_normal(raw,datetime.now(timezone.utc)))]
+            # quote_normal dates are objects; score_snapshot receives text.
+            qrows=[{**q,'kickoff_utc':q['kickoff'].isoformat(),
+                     'quote_observed_at_utc':q['quote'].isoformat()} for q in valid_quotes]
+            shadow=score_snapshot(specs,md,ml_feature_rows,qrows,signals)
+            # Store a compact per-game audit without modifying ROI authority.
+            per_game=defaultdict(list)
+            for record in shadow.get('records',[]):per_game[record['game_id']].append(record)
+            for row in output:
+                gid=s(row.get('Game_ID') or row.get('game_id'))
+                row['V55_ML_Full_History_Shadow_JSON']=json.dumps(per_game.get(gid,[]),sort_keys=True,allow_nan=False)
+                row['V55_ML_Full_History_Shadow_Status']=shadow['status'] if gid in per_game else 'NO_MATCHED_ML_SHADOW'
+            log('[NCAAF-V55-FULL-HISTORY-LIVE-SCORING] '+json.dumps(
+                {k:v for k,v in shadow.items() if k!='records'},sort_keys=True))
+        except Exception as exc:
+            shadow={'status':'HOLD_FULL_HISTORY_SCORING_EXCEPTION',
+                    'error':type(exc).__name__+':'+str(exc),'bet_authority':0}
+            log('[NCAAF-V55-FULL-HISTORY-SCORING-HOLD] '+json.dumps(shadow,sort_keys=True))
+    audit['ml_full_history_live_handoff']={k:v for k,v in shadow.items() if k!='records'}
+
     # Deployment kill switch also controls PUBLICATION of authority. Keep
     # research candidates but never place BET / STRONG BET on the board in OFF.
     auth_on=os.getenv('NCAAF_V55_BET_AUTHORITY_MODE','OFF').upper()=='ON'
@@ -692,4 +750,107 @@ def main(argv=None):
     except Exception as exc:
         print('NCAAF_BACKEND_ERROR:'+type(exc).__name__+':'+str(exc),file=sys.stderr)
         return 3
+
+# BEGIN INLINED NCAAF V5.5 FULL-HISTORY ENGINE (no third-module dependency)
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from statistics import NormalDist
+import hashlib, json, math
+_V55_FH_FAMILIES=('SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER')
+_V55_FH_TARGETS={'margin':'HOME_SCORE_MINUS_AWAY_SCORE','total':'HOME_SCORE_PLUS_AWAY_SCORE'}
+_V55_FH_VERSION='NCAAF_V55_FULL_HISTORY_V1_RESEARCH_SHADOW'
+def _v55_fh_finite(x):
+    try:
+        v=float(x)
+        return v if math.isfinite(v) else float('nan')
+    except (TypeError, ValueError):return float('nan')
+
+def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
+    """Score audited forward feature snapshots and actual fresh paired quotes.
+
+    No probability or odds is synthesized if a required feature or current quote
+    is absent. Outputs never change production authority fields.
+    """
+    import numpy as np
+    now=now or datetime.now(timezone.utc)
+    if now.tzinfo is None:raise ValueError('NAIVE_NOW')
+    by_id={str(r.get('game_id') or r.get('Game_ID')):r for r in inputs if isinstance(r,dict)}
+    signal_counts=defaultdict(set)
+    directional_counts=Counter()
+    for s in signals:
+        key=str(s.get('game_id') or s.get('Game_ID') or '')
+        fam=str(s.get('source_family') or s.get('Source_Family') or '').upper()
+        if key and fam in ('CORE','STAT','SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER','MARKET_RICH'):
+            signal_counts[key].add(fam)
+        market=str(s.get('market') or s.get('Market') or '').lower()
+        side=str(s.get('side') or s.get('Side') or '').upper()
+        if key and fam in _V55_FH_FAMILIES and market in ('spreads','h2h','totals') and side in ('HOME','AWAY','OVER','UNDER'):
+            # This is only a shadow evidence count, never a certification.
+            uniq=str(s.get('system_id') or s.get('System_ID') or '')
+            directional_counts[(key,market,side,fam,uniq)]+=1
+    result=[];holds=Counter();records=[]
+    for q in quotes:
+        gid=str(q.get('game_id') or '')
+        r=by_id.get(gid)
+        if not r:holds['NO_EXACT_LIVE_FEATURE_GAME_ID']+=1;continue
+        try:
+            kick=datetime.fromisoformat(str(q['kickoff_utc']).replace('Z','+00:00'))
+            asof=datetime.fromisoformat(str(r['feature_asof_utc']).replace('Z','+00:00'))
+            quoted=datetime.fromisoformat(str(q['quote_observed_at_utc']).replace('Z','+00:00'))
+            if any(t.tzinfo is None for t in (kick,asof,quoted)) or not asof<kick or not quoted<=now<kick:
+                holds['FEATURE_OR_QUOTE_CHRONOLOGY_INVALID']+=1;continue
+        except (ValueError,TypeError,KeyError):holds['MISSING_VERIFIABLE_FEATURE_TIME']+=1;continue
+        raw=r.get('core_features')
+        if not isinstance(raw,dict):holds['NO_EXPLICIT_FEATURE_SCHEMA']+=1;continue
+        raw=dict(raw)
+        # Stage2/V6 expert counts are explicit in training. For live records,
+        # construct the same *capped directional difference* from the captured
+        # seven-brain signal stream; never use historical signals for new games.
+        for mkt in ('spreads','h2h','totals'):
+            left,right=('OVER','UNDER') if mkt=='totals' else ('HOME','AWAY')
+            for fam in _V55_FH_FAMILIES:
+                nleft=len({ident for (game,market,side,family,ident) in directional_counts
+                           if (game,market,side,family)==(gid,mkt,left,fam)})
+                nright=len({ident for (game,market,side,family,ident) in directional_counts
+                            if (game,market,side,family)==(gid,mkt,right,fam)})
+                raw['EVIDENCE_'+mkt+'_'+fam+'_NET']=float(min(3,nleft)-min(3,nright))
+        target=str(q.get('market') or '')
+        if target not in ('spreads','h2h','totals'):continue
+        model_target='total' if target=='totals' else 'margin'
+        per={}
+        for brain in ('CORE','STAT','COMBINED'):
+            name=f'FULL_{brain}_{model_target}';spec=models.get(name)
+            if spec is None:continue
+            cols=spec['features']
+            # Exact parity: missing columns != zero, and all numeric nonfinite
+            # source values are preserved as explicitly present NaN only.
+            if any(k not in raw for k in cols):holds['FEATURE_SCHEMA_PARITY_MISSING_COLUMNS']+=1;continue
+            x=np.asarray([[_v55_fh_finite(raw[k]) for k in cols]],float)
+            if not np.isfinite(x).any():holds['NO_NUMERIC_LIVE_FEATURES']+=1;continue
+            p=float(spec['model'].predict(x)[0]);sigma=_v55_fh_finite(spec.get('residual_sigma'))
+            if not math.isfinite(sigma) or sigma<=0:holds['MISSING_OOF_RESIDUAL_CALIBRATION']+=1;continue
+            line=_v55_fh_finite(q.get('line'))
+            if target=='spreads':threshold=-line if str(q.get('side')).upper()=='HOME' else line
+            elif target=='h2h':threshold=0
+            else:threshold=line
+            if not math.isfinite(threshold):holds['NO_CURRENT_MARKET_LINE']+=1;continue
+            p_over=NormalDist(mu=p,sigma=sigma).cdf(threshold)
+            higher=1-p_over
+            side=str(q.get('side') or '').upper()
+            probability=(higher if side in ('HOME','OVER') else p_over)
+            if target=='spreads' and side=='AWAY':probability=1-higher
+            if target=='h2h' and side=='AWAY':probability=1-higher
+            per[brain]={'predicted_home_margin_or_total':round(p,5), 'shadow_probability':round(probability,6),
+                        'sigma':sigma}
+        if per:
+            records.append({'game_id':gid,'market':target,'side':q.get('side'), 'book':q.get('book'),
+                            'quoted_line':q.get('line'),'quoted_odds':q.get('odds'),
+                            'models':per,'brain_signal_families':sorted(signal_counts.get(gid,set())),
+                            'status':'SHADOW_NOT_AUTHORIZED','bet_authority':0})
+    return {'status':'SHADOW_SCORED' if records else 'HOLD_LIVE_SCORING_INPUTS',
+            'scored_market_sides':len(records),'scored_games':len(set(r['game_id'] for r in records)),
+            'holds':dict(holds),'records':records,'bet_authority':0}
+
+# END INLINED FULL-HISTORY SCORER
+
 if __name__=='__main__':raise SystemExit(main())
