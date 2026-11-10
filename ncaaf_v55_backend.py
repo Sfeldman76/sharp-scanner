@@ -301,7 +301,7 @@ def evaluate(board,signals,registry,*,now=None,extra_quotes=None,max_bets=3):
         selected.append(best)
     selected.sort(key=lambda r:(r['validated_roi_lower'],r['validated_roi']),reverse=True)
     authorized=[];authorized_game_ids=set()
-    authority_on=s(os.getenv('NCAAF_V55_BET_AUTHORITY_MODE','OFF')).upper() in ('ON','USER_DIRECTED_PROVISIONAL')
+    authority_on=s(os.getenv('NCAAF_V55_BET_AUTHORITY_MODE','OFF')).upper()=='ON'
     for rec in selected:
         if not authority_on:
             rec['status']='BETTING_AUTHORITY_EMERGENCY_OFF';continue
@@ -823,6 +823,96 @@ def read_original_live_signals_from_bq(bq_client,table_id,*,now=None):
     return [dict(row.items()) for row in bq_client.query(sql,job_config=config).result()]
 
 
+
+# Unified live signal ingestion: original observations ONLY. This is a source
+# connector, not a seventh competing decision/prediction engine.
+SEVEN_BRAIN_MANIFEST_SCHEMA='NCAAF_V55_SEVEN_BRAIN_LIVE_SOURCES_V1'
+
+def read_seven_brain_signal_sources(manifest_uri, bq_client, *, now=None):
+    """Read every configured brain's original directional observations.
+
+    Individual brains may originate with no CORE selection. Missing families
+    are disclosed but do not veto other legitimate origins. A source failure
+    is a HOLD; historical replay/ML shadow documents are never interpreted as
+    live observations. The source manifest must itself be explicitly supplied.
+    """
+    at=now or datetime.now(timezone.utc)
+    manifest=read_registry(manifest_uri)
+    if not isinstance(manifest,dict) or manifest.get('schema')!=SEVEN_BRAIN_MANIFEST_SCHEMA:
+        raise ValueError('INVALID_SEVEN_BRAIN_SOURCE_MANIFEST_SCHEMA')
+    sources=manifest.get('sources')
+    if not isinstance(sources,list) or not sources or len(sources)>25:
+        raise ValueError('INVALID_SEVEN_BRAIN_SOURCE_LIST')
+    records=[];source_results=[];failures=[];dedup=set()
+    by_family=Counter();seen_source=set()
+    for j,entry in enumerate(sources):
+        if not isinstance(entry,dict):raise ValueError('INVALID_SOURCE_ENTRY_'+str(j))
+        fam=family(entry.get('family'))
+        uri=s(entry.get('uri'))
+        if fam not in BRAINS and fam!='ALL' or not uri.startswith(('gs://','bq://')) or uri in seen_source:
+            raise ValueError('UNSAFE_OR_DUPLICATE_BRAIN_SOURCE_'+str(j))
+        # Never allow a GCS research-only/replay product to masquerade as a
+        # newly observed live prediction; only explicitly named live sources.
+        uri_lower=uri.lower()
+        if (any(t in uri_lower for t in ('historical','retrospective','postgame','archive',
+                'frozen_brain_canonical_events','replay','ml/current_manifest'))
+            or ('research/' in uri_lower and '/live/' not in uri_lower)):
+            raise ValueError('RESEARCH_ONLY_SOURCE_FORBIDDEN_IN_LIVE_MANIFEST:'+fam)
+        seen_source.add(uri)
+        try:
+            if uri.startswith('bq://'):
+                rows=read_original_live_signals_from_bq(bq_client,uri[5:],now=at)
+            else:
+                rows=read_rows(uri)
+            if not isinstance(rows,list):raise ValueError('SIGNALS_NOT_A_LIST')
+            accepted=0;rejected=Counter()
+            for e in rows:
+                if not isinstance(e,dict):rejected['INVALID_ROW']+=1;continue
+                reported=family(e.get('source_family') or e.get('Source_Family'))
+                if reported not in BRAINS or (fam!='ALL' and reported!=fam):
+                    rejected['UNEXPECTED_SOURCE_FAMILY']+=1;continue
+                gid=s(e.get('game_id') or e.get('Game_ID'))
+                sid=s(e.get('system_id') or e.get('Signal_Family') or e.get('Rule_ID'))
+                evtime=clock(e.get('signal_observed_at_utc') or e.get('Observed_At_UTC'))
+                kickoff=clock(e.get('kickoff_utc') or e.get('Game_Start_UTC'))
+                quote_time=clock(e.get('quote_observed_at_utc') or e.get('Observed_Quote_UTC'))
+                capture=s(e.get('signal_capture_ref') or e.get('source_capture_ref') or e.get('original_capture_id'))
+                if not gid or not sid or not capture or not evtime or not kickoff or not quote_time:
+                    rejected['MISSING_ORIGINAL_EVENT_PROVENANCE']+=1;continue
+                if not evtime<=quote_time<kickoff or quote_time>at or evtime>at:
+                    rejected['NOT_VERIFIED_PREGAME_CHRONOLOGY']+=1;continue
+                if not truth(e.get('direction_verified',e.get('Direction_Verified'))):
+                    rejected['DIRECTION_UNVERIFIED']+=1;continue
+                dep=s(e.get('evidence_family_key') or e.get('Evidence_Family_Key'))
+                def_hash=s(e.get('frozen_definition_sha256') or e.get('Rule_Definition_SHA256')).lower()
+                if not dep or len(def_hash)!=64 or any(c not in '0123456789abcdef' for c in def_hash):
+                    rejected['MISSING_FROZEN_COMPONENT_IDENTITY']+=1;continue
+                emarket=market(e.get('market') or e.get('Market') or 'spreads')
+                eside=s(e.get('side') or e.get('Signal_Side')).upper()
+                ebook=s(e.get('book') or e.get('Observed_Book'))
+                eline=num(e.get('line') if 'line' in e else e.get('Observed_Spread'))
+                if emarket not in ('spreads','h2h','totals') or not eside or not ebook or (emarket!='h2h' and eline is None):
+                    rejected['MISSING_LIVE_MARKET_SIDE_BOOK_LINE']+=1;continue
+                identity=(reported,gid,sid,s(e.get('market') or e.get('Market')),
+                          s(e.get('side') or e.get('Signal_Side')),
+                          s(e.get('book') or e.get('Observed_Book')).lower(),
+                          s(e.get('line') if 'line' in e else e.get('Observed_Spread')),
+                          evtime.isoformat(),quote_time.isoformat(),capture)
+                if identity in dedup:rejected['DUPLICATE_OBSERVATION']+=1;continue
+                dedup.add(identity);records.append(dict(e));accepted+=1;by_family[reported]+=1
+            source_results.append({'family':fam,'uri':uri,'source_rows':len(rows),
+                                   'accepted_original_events':accepted,'rejected':dict(rejected)})
+        except Exception as exc:
+            failures.append({'family':fam,'uri':uri,'error':type(exc).__name__+':'+str(exc)[:240]})
+    return records,{'status':'PASS' if not failures else 'HOLD_SOURCE_ERRORS',
+                    'schema':SEVEN_BRAIN_MANIFEST_SCHEMA,'source_results':source_results,
+                    'source_failures':failures,'accepted_events':len(records),
+                    'by_family':dict(by_family),
+                    'families_without_current_live_events':sorted(BRAINS-set(by_family)),
+                    'all_seven_brains_supported':True,
+                    'original_capture_required_for_execution':True,
+                    'retrospective_observations_not_reclassified_as_live':True}
+
 def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,log_func=None):
     """Production scanner dispatch. ONE NCAAF authority/publisher.
 
@@ -872,12 +962,22 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
     # a descriptive Pathi/Big Al context-only display overlay.
     signals_uri=s(os.environ.get('NCAAF_V55_LIVE_SIGNALS_URI'))
     signals_table=s(os.environ.get('NCAAF_V55_LIVE_SIGNALS_BQ_TABLE'))
+    sources_manifest=s(os.environ.get('NCAAF_V55_SEVEN_BRAIN_MANIFEST_URI'))
     source_hold=None
+    seven_brain_input_audit={'status':'NOT_CONFIGURED','accepted_events':0}
     try:
-        if signals_uri:
+        if sources_manifest:
+            signals,seven_brain_input_audit=read_seven_brain_signal_sources(sources_manifest,bq)
+            if seven_brain_input_audit['status']!='PASS':
+                source_hold='LIVE_SEVEN_BRAIN_SOURCE_VALIDATION_HOLD'
+        elif signals_uri:
             signals=read_rows(signals_uri)
+            seven_brain_input_audit={'status':'SINGLE_SOURCE_LEGACY_URI','source':signals_uri,
+                                     'accepted_events':len(signals) if isinstance(signals,list) else 0}
         elif signals_table:
             signals=read_original_live_signals_from_bq(bq,signals_table)
+            seven_brain_input_audit={'status':'SINGLE_SOURCE_LEGACY_BQ','source':signals_table,
+                                     'accepted_events':len(signals)}
         else:
             signals=[];source_hold='LIVE_ORIGINAL_DIRECTIONAL_SIGNAL_FEED_NOT_CONFIGURED'
     except (NotFound,FileNotFoundError) as exc:
@@ -886,6 +986,7 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
         signals=[];source_hold='LIVE_DIRECTIONAL_SIGNAL_FEED_INVALID:'+type(exc).__name__+':'+str(exc)
     if not isinstance(signals,list):
         raise RuntimeError('INVALID_LIVE_SIGNAL_FEED_SCHEMA')
+    log('[NCAAF-V55-SEVEN-BRAIN-INPUT-AUDIT] '+json.dumps(seven_brain_input_audit,sort_keys=True))
     registry_uri=s(os.environ.get('NCAAF_V55_ROI_REGISTRY_URI')) or (
         'gs://'+bucket+'/research/ncaaf/v55/two_engine_roi/current_registry.json')
     try:
@@ -893,6 +994,14 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
     except (NotFound,FileNotFoundError) as exc:
         registry=None
         source_hold=(source_hold+';' if source_hold else '')+'ROI_REGISTRY_MISSING:'+type(exc).__name__
+    # Certified ROI is a separate, existing research contract. A large
+    # retrospective sample with zero certificates is never a betting edge.
+    registry_audit={'registry_uri':registry_uri,
+                    'status':s((registry or {}).get('status')) if isinstance(registry,dict) else 'UNAVAILABLE',
+                    'certification_status':s((registry or {}).get('edge_certification_status')) if isinstance(registry,dict) else '',
+                    'certified_edge_count':len(checked_registry(registry,datetime.now(timezone.utc))),
+                    'research_only':bool((registry or {}).get('research_only',False)) if isinstance(registry,dict) else None}
+    log('[NCAAF-V55-SEVEN-BRAIN-ROI-READINESS] '+json.dumps(registry_audit,sort_keys=True))
 
     ml_uri=s(os.environ.get('NCAAF_V55_ML_MANIFEST_URI')) or (
         'gs://'+bucket+'/research/ncaaf/v55/ml/current_manifest.json')
@@ -937,6 +1046,8 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
     signals,live_identity_audit=canonicalize_live_signal_game_ids(signals,board)
     output,audit=evaluate(board.to_dict('records'),signals,registry,extra_quotes=extra_quotes)
     audit['two_engine_live_identity_matching']=live_identity_audit
+    audit['seven_brain_source_input_audit']=seven_brain_input_audit
+    audit['seven_brain_roi_registry_audit']=registry_audit
     audit['ml_shadow_manifest']=ml_audit
     # Explicit research-to-live scoring interface. Keep authority unchanged:
     # the original exact-OOS ROI registry remains the sole certifier.
@@ -1189,4 +1300,180 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
 
 # END INLINED FULL-HISTORY SCORER
 
-if __name__=='__main__':raise SystemExit(main())
+
+# === V5.5 VERIFIED SOURCE DISCOVERY AND GUARDED ACTIVATION ===
+# Kept in the existing backend: no additional application Python module.
+# Run: python3 ncaaf_v55_backend.py activate --auto-source [--apply-shadow]
+# Default backend CLI and production scanner refresh remain unchanged.
+import re, subprocess, tempfile
+
+_ACTIVATION_PROJECT='sharplogger'
+_ACTIVATION_DEFAULT_REGISTRY='gs://sharp-models/research/ncaaf/v55/two_engine_roi/current_registry.json'
+_ACTIVATION_REQUIRED_FIELDS={'game_id','market','side','source_family','signal_observed_at_utc','kickoff_utc'}
+_ACTIVATION_EVIDENCE_FIELDS={'quote_observed_at_utc','direction_verified','system_id','evidence_family_key','frozen_definition_sha256'}
+_ACTIVATION_CAPTURE_FIELDS={'signal_capture_ref','source_capture_ref','original_capture_id'}
+
+
+def activation_discover(client):
+    sql='SELECT table_name, column_name FROM `sharplogger.sharp_data.INFORMATION_SCHEMA.COLUMNS` ORDER BY table_name,column_name'
+    schemas=defaultdict(set)
+    for row in client.query(sql).result():
+        x=dict(row.items())
+        schemas[x['table_name']].add(x['column_name'])
+    potential=[]
+    for name,fields in schemas.items():
+        if 'ncaaf' not in name.lower() and 'signal' not in name.lower() and 'brain' not in name.lower():
+            continue
+        match=_ACTIVATION_REQUIRED_FIELDS&fields
+        if len(match)<3:continue
+        missing=sorted(_ACTIVATION_EVIDENCE_FIELDS-fields)
+        if not _ACTIVATION_CAPTURE_FIELDS&fields:missing.append('ORIGINAL_CAPTURE_REF_REQUIRED')
+        potential.append({'table':f'{_ACTIVATION_PROJECT}.sharp_data.{name}',
+                          'required_fields_present':len(match),
+                          'required_fields_missing':sorted(_ACTIVATION_REQUIRED_FIELDS-fields),
+                          'provenance_fields_missing':missing,
+                          'original_capture_certified':False})
+    potential.sort(key=lambda x:(len(x['required_fields_missing'])+len(x['provenance_fields_missing']),x['table']))
+    return potential[:50]
+
+
+def activation_inspect(manifest_uri,registry_uri,client):
+    result={'at_utc':datetime.now(timezone.utc).isoformat(),
+            'project':_ACTIVATION_PROJECT,'seven_brains_supported':sorted(BRAINS),
+            'configuration_only':True,'bets_not_placed_by_this_tool':True,
+            'manifest_uri':manifest_uri,'roi_registry_uri':registry_uri}
+    try:
+        registry=read_registry(registry_uri)
+        certs=checked_registry(registry,datetime.now(timezone.utc))
+        result['registry']={'status':registry.get('status'),
+                            'edge_certification_status':registry.get('edge_certification_status'),
+                            'valid_oos_roi_certificates':len(certs),
+                            'historical_brain_observations':(registry.get('historical_seven_brain_replay') or {}).get('attached_observations'),
+                            'no_retroactive_certification':True}
+    except Exception as exc:
+        result['registry']={'status':'UNAVAILABLE','error':type(exc).__name__+':'+str(exc)[:240],
+                            'valid_oos_roi_certificates':0}
+    if manifest_uri:
+        try:
+            events,audit=read_seven_brain_signal_sources(manifest_uri,client)
+            result['signal_sources']=audit
+            result['original_live_signal_rows']=len(events)
+        except Exception as exc:
+            result['signal_sources']={'status':'HOLD','error':type(exc).__name__+':'+str(exc)[:240]}
+            result['original_live_signal_rows']=0
+    else:
+        result['signal_sources']={'status':'MANIFEST_NOT_CONFIGURED'}
+        result['original_live_signal_rows']=0
+        result['discovered_bq_candidates']=activation_discover(client)
+    ready=(result['original_live_signal_rows']>0 and
+           result['signal_sources']['status']=='PASS' and
+           result['registry']['valid_oos_roi_certificates']>0)
+    result['authority_preflight']='READY_TO_ENABLE_CONFIRMED_OOS_ONLY' if ready else 'HOLD_EVIDENCE_OR_SOURCE_NOT_READY'
+    return result
+
+
+def activation_main(argv=None):
+    parser=argparse.ArgumentParser(description='NCAAF V5.5 seven-brain guarded enablement')
+    source_select=parser.add_mutually_exclusive_group()
+    source_select.add_argument('--manifest',help='gs:// source manifest with ORIGINAL live directional signals for available brains')
+    source_select.add_argument('--auto-source',action='store_true',help='Find one existing independently captured BQ live event ledger (no historical replay)')
+    parser.add_argument('--registry',default=_ACTIVATION_DEFAULT_REGISTRY)
+    parser.add_argument('--report',default='ncaaf_v55_unified_readiness.json')
+    group=parser.add_mutually_exclusive_group()
+    group.add_argument('--apply-shadow',action='store_true',help='Connect configured live sources but leave bet authority OFF')
+    group.add_argument('--apply-live',action='store_true',help='Enable unified LIVE publisher only with valid sources + OOS ROI certificates')
+    args=parser.parse_args(argv)
+    from google.cloud import bigquery
+    client=bigquery.Client(project=_ACTIVATION_PROJECT)
+    selected_manifest=None
+    if args.auto_source:
+        candidates=[c for c in activation_discover(client) if not c['required_fields_missing']
+                    and not c['provenance_fields_missing']
+                    and not any(word in c['table'].lower() for word in
+                                ('historical','retrospective','postgame','archive','research','replay'))]
+        qualified=[]
+        for cand in candidates:
+            candidate_manifest={'schema':SEVEN_BRAIN_MANIFEST_SCHEMA,
+                  'sources':[{'family':'ALL','uri':'bq://'+cand['table']}],
+                  'declaration':'Existing original, captured pregame evidence only'}
+            with tempfile.NamedTemporaryFile(mode='w',suffix='.json',delete=True) as tmp:
+                json.dump(candidate_manifest,tmp);tmp.flush()
+                try:
+                    events,audit=read_seven_brain_signal_sources(tmp.name,client)
+                    if audit['status']=='PASS' and events:
+                        qualified.append((cand['table'],candidate_manifest,len(events),set(audit['by_family'])))
+                except Exception:continue
+        # One combined seven-brain original feed OR distinct independent
+        # per-family feeds are accepted. Ambiguous overlapping sources HOLD.
+        selected=qualified
+        if len(qualified)>1:
+            all_brains=set().union(*(r[3] for r in qualified))
+            supersets=[r for r in qualified if r[3]==all_brains]
+            if len(supersets)==1:
+                selected=supersets
+            else:
+                seen_families=set();disjoint=True
+                for r in qualified:
+                    if seen_families & r[3]:disjoint=False;break
+                    seen_families|=r[3]
+                if not disjoint:selected=[]
+        if selected:
+            selected_manifest={'schema':SEVEN_BRAIN_MANIFEST_SCHEMA,
+                'sources':[e for r in selected for e in r[1]['sources']],
+                'declaration':'Verified original live directional signal sources, no historical replay'}
+            with tempfile.NamedTemporaryFile(mode='w',suffix='.json',delete=True) as tmp:
+                json.dump(selected_manifest,tmp);tmp.flush()
+                status=activation_inspect(tmp.name,args.registry,client)
+            status['auto_source_tables']=[r[0] for r in selected]
+            status['auto_source_rows']=sum(r[2] for r in selected)
+            status['manifest_uri_for_deployment']='gs://sharp-models/research/ncaaf/v55/live/seven_brain_sources_verified_auto_v1.json'
+        else:
+            status=activation_inspect(None,args.registry,client)
+            status['auto_source_status']='HOLD_NONE_OR_AMBIGUOUS_VALID_ORIGINAL_LIVE_LEDGER'
+            status['auto_source_candidates_qualified']=[x[0] for x in qualified]
+    else:
+        status=activation_inspect(args.manifest,args.registry,client)
+    Path(args.report).write_text(json.dumps(status,indent=2,sort_keys=True,default=str)+'\n')
+    print(json.dumps({'authority_preflight':status['authority_preflight'],
+                      'original_live_signal_rows':status['original_live_signal_rows'],
+                      'valid_roi_certificates':status['registry']['valid_oos_roi_certificates'],
+                      'discovered_bq_candidates':status.get('discovered_bq_candidates',[])[:15],
+                      'report':args.report},indent=2))
+    if not (args.apply_shadow or args.apply_live):return 0
+    if not (args.manifest or selected_manifest) or status['signal_sources']['status']!='PASS' or not status['original_live_signal_rows']:
+        print('HOLD: no valid original live signal source manifest; Cloud Run unchanged',file=sys.stderr)
+        return 2
+    if args.apply_live and status['authority_preflight']!='READY_TO_ENABLE_CONFIRMED_OOS_ONLY':
+        print('HOLD: no certified OOS ROI edge registry; Cloud Run unchanged',file=sys.stderr)
+        return 2
+    manifest_to_deploy=args.manifest or status['manifest_uri_for_deployment']
+    if not re.fullmatch(r'gs://[a-zA-Z0-9_.-]+/[a-zA-Z0-9_./-]+',manifest_to_deploy):
+        print('HOLD: manifest GCS URI invalid; Cloud Run unchanged',file=sys.stderr)
+        return 2
+    if selected_manifest:
+        # Only upload a source manifest after the BQ schema and real event
+        # rows have been read and verified, and the user chose --apply-*.
+        from google.cloud import storage
+        bucket,key=manifest_to_deploy[5:].split('/',1)
+        storage.Client().bucket(bucket).blob(key).upload_from_string(
+            json.dumps(selected_manifest,sort_keys=True),content_type='application/json')
+    mode='LIVE' if args.apply_live else 'SHADOW'
+    auth='ON' if args.apply_live else 'OFF'
+    # Existing CFBD/price readers are untouched. One publisher only.
+    cmd=['gcloud','run','services','update','sharp-detection-trigger',
+         '--project='+_ACTIVATION_PROJECT,'--region=us-east4',
+         '--update-env-vars='+','.join((
+             'NCAAF_V55_SEVEN_BRAIN_MANIFEST_URI='+manifest_to_deploy,
+             'NCAAF_V55_CUTOVER_MODE='+mode,
+             'NCAAF_V55_BET_AUTHORITY_MODE='+auth))]
+    print('APPLYING_UNIFIED_ENGINE_MODE='+mode+' BET_AUTHORITY_MODE='+auth,flush=True)
+    subprocess.run(cmd,check=True)
+    return 0
+
+
+
+if __name__=='__main__':
+    if len(sys.argv)>1 and sys.argv[1]=='activate':
+        raise SystemExit(activation_main(sys.argv[2:]))
+    raise SystemExit(main())
+
