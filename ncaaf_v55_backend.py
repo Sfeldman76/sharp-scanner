@@ -529,6 +529,32 @@ def _v55_live_id(value):
     return raw
 
 
+def _v55_board_fixture_identity(row):
+    """Read verified board ID/ordered teams/kickoff, or exact 'AWAY @ HOME'.
+
+    The existing published weekly board can contain Matchup without separate
+    Home_Team/Away_Team. Never infer sides from 'vs', a selected team, or odds.
+    """
+    board_id=_v55_live_id(row.get('Game_ID') or row.get('game_id'))
+    home=slug(row.get('Home_Team') or row.get('Home_Team_Norm'))
+    away=slug(row.get('Away_Team') or row.get('Away_Team_Norm'))
+    method='EXPLICIT_HOME_AWAY'
+    if not home or not away:
+        matchup=s(row.get('Matchup') or row.get('matchup'))
+        if matchup.count('@')==1:
+            raw_away,raw_home=(v.strip() for v in matchup.split('@',1))
+            if raw_away and raw_home:
+                parsed_home,parsed_away=slug(raw_home),slug(raw_away)
+                if parsed_home and parsed_away and parsed_home!=parsed_away:
+                    if (not home or home==parsed_home) and (not away or away==parsed_away):
+                        home,away=parsed_home,parsed_away
+                        method='EXACT_MATCHUP_AWAY_AT_HOME'
+    kickoff_field=next((k for k in ('Game_Start_UTC','kickoff_utc','Kickoff_UTC','Commence_Time_UTC','Game_Date')
+                        if row.get(k) is not None and s(row.get(k)) not in ('','nan','NaT','None')),None)
+    kick=clock(row.get(kickoff_field)) if kickoff_field else None
+    return board_id,home,away,kick,method,kickoff_field
+
+
 def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, *, now=None):
     """Build live HOME-AWAY model inputs from 2026 CFBD prior-team rows.
 
@@ -544,16 +570,20 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
     now=clock(now or datetime.now(timezone.utc))
     if now is None:raise ValueError('NOW_MUST_BE_TIMEZONE_AWARE')
     holds=Counter();out=[];seen_board={};groups=defaultdict(list)
+    board_methods=Counter();board_kickoff_fields=Counter()
+    board_input_fields=set()
     priors=sorted({name[len('CFBD_DIFF_'):] for name in required_features
                    if name.startswith('CFBD_DIFF_') and name.endswith('_Prior')})
     for r in board_rows:
         if not isinstance(r,dict):holds['INVALID_BOARD_ROW']+=1;continue
-        board_id=_v55_live_id(r.get('Game_ID') or r.get('game_id'))
-        home=slug(r.get('Home_Team') or r.get('Home_Team_Norm'))
-        away=slug(r.get('Away_Team') or r.get('Away_Team_Norm'))
-        kick=clock(r.get('Game_Start_UTC') or r.get('kickoff_utc'))
-        if not board_id or not home or not away or home==away or not kick or kick<=now:
-            holds['INVALID_BOARD_IDENTITY_OR_KICKOFF']+=1;continue
+        board_input_fields.update(r.keys())
+        board_id,home,away,kick,method,kick_field=_v55_board_fixture_identity(r)
+        if not board_id:holds['BOARD_MISSING_GAME_ID']+=1;continue
+        if not home or not away or home==away:holds['BOARD_MISSING_HOME_AWAY_TEAM_IDENTITY']+=1;continue
+        if not kick:holds['BOARD_MISSING_OR_UNZONED_KICKOFF']+=1;continue
+        if kick<=now:holds['BOARD_KICKOFF_NOT_FUTURE']+=1;continue
+        board_methods[method]+=1
+        board_kickoff_fields[kick_field]+=1
         cfbd_id=_v55_live_id(r.get('CFBD_Game_ID') or r.get('cfbd_game_id'))
         identity=(home,away,kick,cfbd_id)
         if board_id in seen_board and seen_board[board_id]!=identity:
@@ -640,7 +670,14 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
                     'feature_vintage_verified':vintage_verified,
                     'bet_authority':0})
     return out,{'status':'PREGAME_CFBD_FEATURES_BUILT_SHADOW' if out else 'HOLD_NO_VERIFIED_FORWARD_FEATURES',
-                'board_games':len(seen_board),'source_rows':len(cfbd_rows),
+                'board_games':len(seen_board),'board_rows_examined':len(board_rows),
+                'board_identity_methods':dict(board_methods),
+                'board_kickoff_fields':dict(board_kickoff_fields),
+                'board_identity_fields_present':sorted(board_input_fields.intersection({
+                    'Game_ID','game_id','Matchup','matchup','Home_Team','Away_Team',
+                    'Home_Team_Norm','Away_Team_Norm','Game_Start_UTC','kickoff_utc',
+                    'Kickoff_UTC','Commence_Time_UTC','Game_Date','CFBD_Game_ID'})),
+                'source_rows':len(cfbd_rows),
                 'future_source_fixture_groups':len(fixtures),
                 'feature_games':len(out),'prior_columns_required':len(priors),
                 'capture_timestamp_available':any(r.get('feature_vintage_verified') for r in out),
@@ -803,7 +840,7 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
                 board.to_dict('records'),source,wanted)
             feature_audit['source']=feature_table
             feature_audit['feature_contract']='READ_TIME_SHADOW_ONLY_NO_ORIGINAL_CAPTURE_CLAIM'
-            feature_audit['source_adapter_version']='20261110_CFBD_MINER_FORWARD_V1'
+            feature_audit['source_adapter_version']='20261110_CFBD_MINER_FORWARD_V2_BOARD_MATCHUP'
         else:
             feature_audit['status']='LIVE_FEATURES_URI_OR_BQ_TABLE_NOT_CONFIGURED'
     except Exception as exc:
