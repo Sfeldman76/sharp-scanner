@@ -519,6 +519,128 @@ def canonicalize_live_signal_game_ids(events,board):
     return result,audit
 
 
+def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, *, now=None):
+    """Build exact pregame HOME-AWAY CFBD differences, never postgame proxies.
+
+    The warehouse must provide TWO game-specific, timestamped team rows, with
+    prior-only columns that match the trained model schema. No fuzzy matching,
+    no previous-game substitutions, and no default zero for missing features.
+    """
+    now=now or datetime.now(timezone.utc)
+    holds=Counter();out=[];seen_board={};source_by_game=defaultdict(list)
+    priors=sorted({name[len('CFBD_DIFF_'):] for name in required_features
+                   if name.startswith('CFBD_DIFF_') and name.endswith('_Prior')})
+    for r in board_rows:
+        gid=s(r.get('Game_ID') or r.get('game_id'))
+        if not gid:continue
+        home=s(r.get('Home_Team') or r.get('Home_Team_Norm'))
+        away=s(r.get('Away_Team') or r.get('Away_Team_Norm'))
+        kickoff=clock(r.get('Game_Start_UTC') or r.get('kickoff_utc'))
+        if not home or not away or not kickoff or kickoff<=now:
+            holds['INVALID_BOARD_IDENTITY_OR_KICKOFF']+=1;continue
+        if gid in seen_board and seen_board[gid]!=(slug(home),slug(away),kickoff):
+            holds['CONFLICTING_BOARD_GAME_ID']+=1
+            seen_board[gid]=None
+        elif gid not in seen_board:
+            seen_board[gid]=(slug(home),slug(away),kickoff)
+    for r in cfbd_rows:
+        if not isinstance(r,dict):holds['INVALID_CFBD_SOURCE_ROW']+=1;continue
+        gid=s(r.get('Game_ID') or r.get('game_id'))
+        if gid in seen_board and seen_board[gid] is not None:
+            source_by_game[gid].append(r)
+    for gid,identity in seen_board.items():
+        if identity is None:continue
+        home,away,kickoff=identity
+        source=source_by_game.get(gid,[])
+        if not source:holds['NO_EXACT_CURRENT_CFBD_GAME_ID']+=1;continue
+        sides=defaultdict(list);asofs=[]
+        for row in source:
+            name=slug(row.get('Team_Key') or row.get('team_key') or row.get('Team'))
+            if name in (home,away):sides[name].append(row)
+            else:holds['CFBD_TEAM_NAME_NOT_EXACT_BOARD_SIDE']+=1
+        if home==away or len(sides[home])!=1 or len(sides[away])!=1:
+            holds['NOT_EXACTLY_TWO_UNIQUE_CFBD_SIDES']+=1;continue
+        hr,ar=sides[home][0],sides[away][0]
+        for row in (hr,ar):
+            at=clock(row.get('feature_asof_utc') or row.get('Feature_AsOf_UTC'))
+            sourcekick=clock(row.get('Game_Start_UTC') or row.get('kickoff_utc'))
+            if not at or at>now or not at<kickoff or (sourcekick and abs((sourcekick-kickoff).total_seconds())>900):
+                asofs=[];break
+            asofs.append(at)
+        if len(asofs)!=2:
+            holds['SOURCE_NOT_PROVEN_PREGAME_OR_KICKOFF_CONFLICT']+=1;continue
+        # Require exact original prior feature names in both sides, not a row
+        # generated using the completed game's box score.
+        missing=[c for c in priors if c not in hr or c not in ar]
+        if missing:
+            holds['MISSING_REQUIRED_CFBD_PRIOR_COLUMNS']+=1;continue
+        features={}
+        for c in priors:
+            h=num(hr[c]);a=num(ar[c]);features['CFBD_DIFF_'+c]=h-a if h is not None and a is not None else float('nan')
+        if not any(math.isfinite(v) for v in features.values()):
+            holds['NO_NUMERIC_PRIOR_DIFFERENCES']+=1;continue
+        out.append({'game_id':gid,'feature_asof_utc':max(asofs).isoformat(),
+                    'core_features':features,'source':'EXACT_CURRENT_CFBD_TWO_SIDE_PREGAME_PRIORS',
+                    'feature_vintage_verified':True})
+    return out,{'status':'PREGAME_CFBD_FEATURES_BUILT' if out else 'HOLD_NO_VERIFIED_FORWARD_FEATURES',
+                'board_games':len(seen_board),'source_rows':len(cfbd_rows),
+                'feature_games':len(out),'prior_columns_required':len(priors),
+                'holds':dict(holds),'bet_authority':0}
+
+
+def read_live_cfbd_rows_from_bq(bq_client, table_id, required_features, *,now=None):
+    """Read only timestamped, matching-schema forward CFBD side snapshots.
+
+    A postgame warehouse table is never accepted as an implicit source.
+    """
+    import re
+    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]*\.[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*',table_id or ''):
+        raise ValueError('INVALID_LIVE_CFBD_TABLE_ID')
+    if 'postgame' in table_id.lower() or 'archive' in table_id.lower():
+        raise ValueError('POSTGAME_OR_ARCHIVE_TABLE_FORBIDDEN_AS_FORWARD_SOURCE')
+    table=bq_client.get_table(table_id)
+    fields={field.name for field in table.schema}
+    source_id='Game_ID' if 'Game_ID' in fields else 'game_id' if 'game_id' in fields else None
+    side='Team_Key' if 'Team_Key' in fields else 'team_key' if 'team_key' in fields else None
+    asof='feature_asof_utc' if 'feature_asof_utc' in fields else 'Feature_AsOf_UTC' if 'Feature_AsOf_UTC' in fields else None
+    if not all((source_id,side,asof)):
+        raise ValueError('LIVE_CFBD_SOURCE_REQUIRES_GAME_TEAM_FEATURE_ASOF_FIELDS')
+    priors={name[len('CFBD_DIFF_'):] for name in required_features
+            if name.startswith('CFBD_DIFF_') and name.endswith('_Prior')}
+    if not priors.issubset(fields):
+        raise ValueError('LIVE_CFBD_SOURCE_MISSING_MODEL_PRIOR_FIELDS:'+str(len(priors-fields)))
+    wanted=[source_id,side,asof]+(['Game_Start_UTC'] if 'Game_Start_UTC' in fields else [])+sorted(priors)
+    now=now or datetime.now(timezone.utc)
+    # Avoid huge scans and accidentally accepting last year's historical rows.
+    sql=('SELECT '+','.join('`'+c+'`' for c in wanted)+f' FROM `{table_id}` '
+         f'WHERE `{asof}` >= TIMESTAMP_SUB(@now, INTERVAL 45 DAY) '
+         f'AND `{asof}` <= @now LIMIT 10000')
+    from google.cloud import bigquery
+    config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter('now','TIMESTAMP',now)])
+    return [dict(row.items()) for row in bq_client.query(sql,job_config=config).result()]
+
+
+def read_original_live_signals_from_bq(bq_client,table_id,*,now=None):
+    """Read recorded prekick directional events, not reconstructed picks."""
+    import re
+    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]*\.[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*',table_id or ''):
+        raise ValueError('INVALID_LIVE_SIGNAL_TABLE_ID')
+    if any(word in table_id.lower() for word in ('postgame','archive','research')):
+        raise ValueError('HISTORICAL_SIGNAL_TABLE_FORBIDDEN_AS_LIVE_INPUT')
+    fields={field.name for field in bq_client.get_table(table_id).schema}
+    required={'game_id','market','side','source_family','signal_observed_at_utc','kickoff_utc'}
+    if not required.issubset(fields):
+        raise ValueError('LIVE_SIGNAL_TABLE_MISSING_CAPTURE_SCHEMA:'+str(sorted(required-fields)))
+    now=now or datetime.now(timezone.utc)
+    sql=(f'SELECT * FROM `{table_id}` '
+         'WHERE signal_observed_at_utc >= TIMESTAMP_SUB(@now, INTERVAL 14 DAY) '
+         'AND signal_observed_at_utc <= @now '
+         'AND kickoff_utc > @now LIMIT 10000')
+    from google.cloud import bigquery
+    config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter('now','TIMESTAMP',now)])
+    return [dict(row.items()) for row in bq_client.query(sql,job_config=config).result()]
+
+
 def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,log_func=None):
     """Production scanner dispatch. ONE NCAAF authority/publisher.
 
@@ -564,12 +686,19 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
     # Never infer a "directional signal" from CORE probabilities, names, or
     # a descriptive Pathi/Big Al context-only display overlay.
     signals_uri=s(os.environ.get('NCAAF_V55_LIVE_SIGNALS_URI'))
+    signals_table=s(os.environ.get('NCAAF_V55_LIVE_SIGNALS_BQ_TABLE'))
     source_hold=None
     try:
-        signals=read_rows(signals_uri) if signals_uri else []
-        if not signals_uri:source_hold='LIVE_ORIGINAL_DIRECTIONAL_SIGNAL_FEED_NOT_CONFIGURED'
+        if signals_uri:
+            signals=read_rows(signals_uri)
+        elif signals_table:
+            signals=read_original_live_signals_from_bq(bq,signals_table)
+        else:
+            signals=[];source_hold='LIVE_ORIGINAL_DIRECTIONAL_SIGNAL_FEED_NOT_CONFIGURED'
     except (NotFound,FileNotFoundError) as exc:
         signals=[];source_hold='LIVE_DIRECTIONAL_SIGNAL_FEED_MISSING:'+type(exc).__name__
+    except Exception as exc:
+        signals=[];source_hold='LIVE_DIRECTIONAL_SIGNAL_FEED_INVALID:'+type(exc).__name__+':'+str(exc)
     if not isinstance(signals,list):
         raise RuntimeError('INVALID_LIVE_SIGNAL_FEED_SCHEMA')
     registry_uri=s(os.environ.get('NCAAF_V55_ROI_REGISTRY_URI')) or (
@@ -592,16 +721,30 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
     # current pregame CFBD feature records are supplied with exact provenance.
     # No hidden feature inference from the weekly board or postgame warehouse.
     feature_uri=s(os.environ.get('NCAAF_V55_ML_LIVE_FEATURES_URI'))
+    feature_table=s(os.environ.get('NCAAF_V55_ML_LIVE_FEATURES_BQ_TABLE'))
     ml_feature_rows=[]
-    if feature_uri:
-        try:
+    feature_audit={'status':'HOLD_NO_FORWARD_FEATURE_SOURCE','bet_authority':0}
+    try:
+        if feature_uri:
             ml_feature_rows=read_rows(feature_uri)
             if not isinstance(ml_feature_rows,list):raise ValueError('INVALID_ML_FEATURE_ROWS')
-        except Exception as exc:
-            ml_feature_rows=[]
-            log('[NCAAF-V55-FULL-HISTORY-FEATURE-HOLD] '+type(exc).__name__+':'+str(exc))
-    else:
-        log('[NCAAF-V55-FULL-HISTORY-FEATURE-HOLD] LIVE_FEATURES_URI_NOT_CONFIGURED')
+            feature_audit={'status':'LIVE_FEATURE_ROWS_LOADED','source':feature_uri,
+                           'feature_rows':len(ml_feature_rows),'bet_authority':0}
+        elif feature_table:
+            manifest=read_registry(ml_uri)
+            wanted={c for key,spec in (manifest.get('artifacts') or {}).items()
+                    if key.startswith('FULL_') for c in spec.get('features',[])}
+            source=read_live_cfbd_rows_from_bq(bq,feature_table,wanted)
+            ml_feature_rows,feature_audit=build_live_cfbd_feature_snapshots(
+                board.to_dict('records'),source,wanted)
+            feature_audit['source']=feature_table
+        else:
+            feature_audit['status']='LIVE_FEATURES_URI_OR_BQ_TABLE_NOT_CONFIGURED'
+    except Exception as exc:
+        ml_feature_rows=[]
+        feature_audit={'status':'HOLD_LIVE_CFBD_FEATURE_SOURCE',
+                       'error':type(exc).__name__+':'+str(exc),'bet_authority':0}
+    log('[NCAAF-V55-FULL-HISTORY-FEATURE-AUDIT] '+json.dumps(feature_audit,sort_keys=True))
     extras_uri=s(os.environ.get('NCAAF_V55_OTHER_MARKET_QUOTES_URI'))
     extra_quotes=read_rows(extras_uri) if extras_uri else None
     signals,live_identity_audit=canonicalize_live_signal_game_ids(signals,board)
@@ -651,6 +794,7 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
                     'error':type(exc).__name__+':'+str(exc),'bet_authority':0}
             log('[NCAAF-V55-FULL-HISTORY-SCORING-HOLD] '+json.dumps(shadow,sort_keys=True))
     audit['ml_full_history_live_handoff']={k:v for k,v in shadow.items() if k!='records'}
+    audit['ml_full_history_forward_feature_source']=feature_audit
 
     # Deployment kill switch also controls PUBLICATION of authority. Keep
     # research candidates but never place BET / STRONG BET on the board in OFF.
