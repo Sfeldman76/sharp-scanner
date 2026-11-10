@@ -530,6 +530,22 @@ def _v55_live_id(value):
     return raw
 
 
+
+# Scope-limited aliases for 2026 CFBD game-side prior-feature identity.
+# These are verified SAME-SCHOOL representations; NO fuzzy/substring joins.
+# Do not apply this mapping to sportsbook quote provenance or signal authority.
+def _v55_cfbd_school_key(value):
+    import unicodedata
+    raw=unicodedata.normalize('NFKD',s(value).lower())
+    key=''.join(ch for ch in raw if ch.isalnum() and not unicodedata.combining(ch))
+    explicit={
+        'olemississippi':'olemiss',
+        'southernmississippi':'southernmiss',
+        'northcarolinastate':'ncstate',
+        'texasaandm':'texasam',
+    }
+    return explicit.get(key,key)
+
 def _v55_board_fixture_identity(row):
     """Read verified board ID/ordered teams/kickoff, or exact 'AWAY @ HOME'.
 
@@ -537,15 +553,15 @@ def _v55_board_fixture_identity(row):
     Home_Team/Away_Team. Never infer sides from 'vs', a selected team, or odds.
     """
     board_id=_v55_live_id(row.get('Game_ID') or row.get('game_id'))
-    home=slug(row.get('Home_Team') or row.get('Home_Team_Norm'))
-    away=slug(row.get('Away_Team') or row.get('Away_Team_Norm'))
+    home=_v55_cfbd_school_key(row.get('Home_Team') or row.get('Home_Team_Norm'))
+    away=_v55_cfbd_school_key(row.get('Away_Team') or row.get('Away_Team_Norm'))
     method='EXPLICIT_HOME_AWAY'
     if not home or not away:
         matchup=s(row.get('Matchup') or row.get('matchup'))
         if matchup.count('@')==1:
             raw_away,raw_home=(v.strip() for v in matchup.split('@',1))
             if raw_away and raw_home:
-                parsed_home,parsed_away=slug(raw_home),slug(raw_away)
+                parsed_home,parsed_away=_v55_cfbd_school_key(raw_home),_v55_cfbd_school_key(raw_away)
                 if parsed_home and parsed_away and parsed_home!=parsed_away:
                     if (not home or home==parsed_home) and (not away or away==parsed_away):
                         home,away=parsed_home,parsed_away
@@ -611,7 +627,7 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
         kick=clock(r.get('Game_Date') or r.get('game_date') or r.get('Game_Start_UTC'))
         season=num(r.get('Season') if 'Season' in r else r.get('season'))
         side=num(r.get('Is_Home') if 'Is_Home' in r else r.get('is_home'))
-        name=slug(r.get('Team_Key') or r.get('team_key'))
+        name=_v55_cfbd_school_key(r.get('Team_Key') or r.get('team_key'))
         # A CFBD MIDNIGHT SENTINEL may precede the verified sportsbook
         # kickoff on the same date. Admit a bounded source lookback for
         # identity evaluation only; ordinary past games cannot match a
@@ -631,8 +647,8 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
         if len(home_rows)!=1 or len(away_rows)!=1:
             holds['CFBD_GAME_HAS_DUPLICATE_OR_MISSING_ORIENTATION']+=1;continue
         hr,ar=home_rows[0],away_rows[0]
-        h=slug(hr.get('Team_Key') or hr.get('team_key'))
-        a=slug(ar.get('Team_Key') or ar.get('team_key'))
+        h=_v55_cfbd_school_key(hr.get('Team_Key') or hr.get('team_key'))
+        a=_v55_cfbd_school_key(ar.get('Team_Key') or ar.get('team_key'))
         ht=clock(hr.get('Game_Date') or hr.get('game_date') or hr.get('Game_Start_UTC'))
         at=clock(ar.get('Game_Date') or ar.get('game_date') or ar.get('Game_Start_UTC'))
         if not ht or not at or abs((ht-at).total_seconds())>900 or h==a:
@@ -740,6 +756,7 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
                 'feature_games':len(out),'prior_columns_required':len(priors),
                 'verified_market_placeholder_links':verified_placeholder_links,
                 'past_cfbd_placeholder_date_links':past_source_placeholder_links,
+                'cfbd_school_alias_version':'V55_CFBD_EXPLICIT_SCHOOL_ALIAS_20261110',
                 'cfbd_conflict_types':dict(conflict_types),
                 'cfbd_conflict_examples':conflict_examples,
                 'capture_timestamp_available':any(r.get('feature_vintage_verified') for r in out),
