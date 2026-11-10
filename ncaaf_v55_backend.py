@@ -11,7 +11,8 @@ Those upstream data services must feed canonical source records.
 from __future__ import annotations
 import argparse, csv, hashlib, io, json, math, os, sys, uuid
 from collections import Counter,defaultdict
-from datetime import datetime,timezone
+from datetime import datetime,timezone,timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 SCHEMA='NCAAF-V55-TWO-ENGINE-ROI-REGISTRY-V1'
@@ -570,6 +571,9 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
     now=clock(now or datetime.now(timezone.utc))
     if now is None:raise ValueError('NOW_MUST_BE_TIMEZONE_AWARE')
     holds=Counter();out=[];seen_board={};groups=defaultdict(list)
+    verified_placeholder_hints={}
+    verified_placeholder_links=0;past_source_placeholder_links=0
+    conflict_types=Counter();conflict_examples=[]
     board_methods=Counter();board_kickoff_fields=Counter()
     board_input_fields=set()
     priors=sorted({name[len('CFBD_DIFF_'):] for name in required_features
@@ -585,6 +589,18 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
         board_methods[method]+=1
         board_kickoff_fields[kick_field]+=1
         cfbd_id=_v55_live_id(r.get('CFBD_Game_ID') or r.get('cfbd_game_id'))
+        # Board pricing may have replaced CFBD's unknown midnight kickoff
+        # with an independently verified, two-sided sportsbook event time.
+        # Preserve its ORIGINAL timestamp solely to link the same CFBD
+        # game-side prior-feature rows; NEVER use the placeholder as kickoff.
+        original=clock(r.get('V55_Original_CFBD_Kickoff_UTC'))
+        market_verified=(s(r.get('V55_Kickoff_Verification')) ==
+            'VERIFIED_TWO_SIDED_SPORTSBOOK_REPLACED_CFBD_MIDNIGHT_PLACEHOLDER')
+        if (market_verified and original and original!=kick
+                and abs((original-kick).total_seconds())<=26*3600
+                and original.astimezone(ZoneInfo('America/New_York')).hour==0
+                and original.astimezone(ZoneInfo('America/New_York')).minute==0):
+            verified_placeholder_hints[board_id]=original
         identity=(home,away,kick,cfbd_id)
         if board_id in seen_board and seen_board[board_id]!=identity:
             holds['CONFLICTING_BOARD_GAME_ID']+=1;seen_board[board_id]=None
@@ -596,7 +612,12 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
         season=num(r.get('Season') if 'Season' in r else r.get('season'))
         side=num(r.get('Is_Home') if 'Is_Home' in r else r.get('is_home'))
         name=slug(r.get('Team_Key') or r.get('team_key'))
-        if not gid or not kick or kick<=now or season!=now.year or side not in (0.0,1.0) or not name:
+        # A CFBD MIDNIGHT SENTINEL may precede the verified sportsbook
+        # kickoff on the same date. Admit a bounded source lookback for
+        # identity evaluation only; ordinary past games cannot match a
+        # future verified board event without the explicit saved hint.
+        if (not gid or not kick or kick<=now-timedelta(hours=27)
+                or season!=now.year or side not in (0.0,1.0) or not name):
             holds['SOURCE_NOT_CURRENT_FUTURE_TWO_SIDE_RECORD']+=1;continue
         groups[gid].append(r)
     # Only complete, non-duplicated, correctly oriented CFBD fixtures can be
@@ -631,6 +652,13 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
             candidates=[gid for gid in by_teams.get((home,away),[])
                         if abs((fixtures[gid][2]-kick).total_seconds())<=900]
             method='EXACT_TEAM_PAIR_AND_KICKOFF'
+            # When IDs have different namespaces, recover only a UNIQUE
+            # exact team pair with the original verified CFBD placeholder.
+            if not candidates and board_id in verified_placeholder_hints:
+                orig=verified_placeholder_hints[board_id]
+                candidates=[gid for gid in by_teams.get((home,away),[])
+                            if abs((fixtures[gid][2]-orig).total_seconds())<=900]
+                method='EXACT_TEAMS_AND_ORIGINAL_CFBD_MIDNIGHT_PLACEHOLDER'
         if len(candidates)!=1:
             holds['NO_UNIQUE_FUTURE_CFBD_FIXTURE' if not candidates else 'AMBIGUOUS_FUTURE_CFBD_FIXTURE']+=1
             continue
@@ -639,8 +667,36 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
         if not fixture:
             holds['MAPPED_CFBD_ID_NOT_IN_FORWARD_FEATURE_TABLE']+=1;continue
         h,a,cfbd_kick,hr,ar=fixture
-        if h!=home or a!=away or abs((cfbd_kick-kick).total_seconds())>900:
-            holds['CFBD_FIXTURE_TEAM_OR_KICKOFF_CONFLICT']+=1;continue
+        source_kickoff_gap=abs((cfbd_kick-kick).total_seconds())
+        if h!=home or a!=away:
+            holds['CFBD_FIXTURE_TEAM_OR_KICKOFF_CONFLICT']+=1
+            conflict_types['EXACT_CFBD_GAME_ID_HOME_AWAY_NAME_MISMATCH']+=1
+            if len(conflict_examples)<12:conflict_examples.append({
+                'board_game_id':board_id,'cfbd_game_id':source_id,
+                'board_teams':away+' @ '+home,'source_teams':a+' @ '+h,
+                'market_kickoff_utc':kick.isoformat(),
+                'source_game_date_utc':cfbd_kick.isoformat(),
+                'reason':'HOME_AWAY_NAME_MISMATCH'})
+            continue
+        if source_kickoff_gap>900:
+            orig=verified_placeholder_hints.get(board_id)
+            if orig and abs((cfbd_kick-orig).total_seconds())<=900:
+                # Both teams and original CFBD timestamp match exactly;
+                # actual event kickoff remains the VERIFIED market time.
+                verified_placeholder_links+=1
+                if cfbd_kick<=now:past_source_placeholder_links+=1
+                method+='__VERIFIED_MARKET_KICKOFF_CFBD_PLACEHOLDER_LINK'
+            else:
+                holds['CFBD_FIXTURE_TEAM_OR_KICKOFF_CONFLICT']+=1
+                conflict_types['KICKOFF_CONFLICT_NO_VERIFIED_ORIGINAL_MATCH']+=1
+                if len(conflict_examples)<12:conflict_examples.append({
+                    'board_game_id':board_id,'cfbd_game_id':source_id,
+                    'board_teams':away+' @ '+home,
+                    'market_kickoff_utc':kick.isoformat(),
+                    'source_game_date_utc':cfbd_kick.isoformat(),
+                    'original_cfbd_hint_utc':orig.isoformat() if orig else None,
+                    'reason':'KICKOFF_CONFLICT_NO_VERIFIED_ORIGINAL_MATCH'})
+                continue
         missing=[c for c in priors if c not in hr or c not in ar]
         if missing:
             holds['MISSING_REQUIRED_CFBD_PRIOR_COLUMNS']+=1;continue
@@ -664,6 +720,8 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
         out.append({'game_id':board_id,'cfbd_game_id':source_id,
                     'feature_asof_utc':snapshot_time.isoformat(),
                     'feature_read_at_utc':now.isoformat(),
+                    'cfbd_game_date_utc':cfbd_kick.isoformat(),
+                    'verified_sportsbook_kickoff_utc':kick.isoformat(),
                     'core_features':features,
                     'source':'EXISTING_CFBD_MINER_PREKICK_PRIORS_READ_TIME_SHADOW',
                     'identity_match_method':method,
@@ -680,6 +738,10 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
                 'source_rows':len(cfbd_rows),
                 'future_source_fixture_groups':len(fixtures),
                 'feature_games':len(out),'prior_columns_required':len(priors),
+                'verified_market_placeholder_links':verified_placeholder_links,
+                'past_cfbd_placeholder_date_links':past_source_placeholder_links,
+                'cfbd_conflict_types':dict(conflict_types),
+                'cfbd_conflict_examples':conflict_examples,
                 'capture_timestamp_available':any(r.get('feature_vintage_verified') for r in out),
                 'read_time_only_snapshots':sum(not r['feature_vintage_verified'] for r in out),
                 'identity_methods':dict(Counter(r['identity_match_method'] for r in out)),
@@ -712,7 +774,9 @@ def read_live_cfbd_rows_from_bq(bq_client, table_id, required_features, *,now=No
     optional=[c for c in ('feature_asof_utc','Feature_AsOf_UTC') if c in fields]
     wanted=['Game_ID','Team_Key','Is_Home','Game_Date','Season','Week']+optional+sorted(priors)
     sql=('SELECT '+','.join('`'+c+'`' for c in wanted)+f' FROM `{table_id}` '
-         'WHERE `Season` = @season AND `Game_Date` > @now '
+         # Include a bounded earlier CFBD midnight sentinel so an actual
+         # future market kickoff later the same day can be verified.
+         'WHERE `Season` = @season AND `Game_Date` > TIMESTAMP_SUB(@now, INTERVAL 27 HOUR) '
          'AND `Game_Date` <= TIMESTAMP_ADD(@now, INTERVAL 45 DAY) LIMIT 10000')
     from google.cloud import bigquery
     config=bigquery.QueryJobConfig(query_parameters=[
