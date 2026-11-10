@@ -1854,6 +1854,11 @@ def ml_cfbd_prior_training_rows(*,client,canonical_manifest,canonical_sides,
                 holds['CONFLICTING_CFBD_SIDE_DUPLICATE']+=1
         else:observed[(year,gid)][k]=r
     matrix=[];matched_by_season=Counter();excluded_games_by_season=defaultdict(Counter)
+    canonical_by_year=Counter(yr for yr,gid in games)
+    observed_by_year=Counter(yr for yr,gid in observed)
+    for year,gid in games:
+        if (year,gid) not in observed:
+            excluded_games_by_season[year]['NO_MATCHED_CFBD_SOURCE_SIDE_ROWS']+=1
     for (year,gid),side_rows in sorted(observed.items()):
         g=games[(year,gid)];side_map=teams[(year,gid)]
         if g.get('role_verification_status')!='HOME_AWAY_VERIFIED':
@@ -1890,6 +1895,8 @@ def ml_cfbd_prior_training_rows(*,client,canonical_manifest,canonical_sides,
     audit={'status':'CFBD_PRIOR_MATRIX_BUILT' if matrix else 'HOLD_NO_MATCHED_CFBD_TRAINING_GAMES',
            'source':table,'source_rows':raw_count,'matched_games':len(matrix),
            'available_prior_columns':len(feature_cols),
+           'canonical_games_by_season':dict(sorted(canonical_by_year.items())),
+           'cfbd_games_with_at_least_one_matched_side_by_season':dict(sorted(observed_by_year.items())),
            'matched_games_by_season':dict(sorted(matched_by_season.items())),
            'excluded_canonical_games_by_season':{str(y):dict(c) for y,c in sorted(excluded_games_by_season.items())},
            'identity_recovery_policy':'ONLY_UNIQUE_VERIFIED_STAGE1_SIDE_LABEL_ALIASES; EXACT_REPEAT_DEDUP',
@@ -1903,86 +1910,32 @@ def ml_cfbd_prior_training_rows(*,client,canonical_manifest,canonical_sides,
 
 def ml_historical_training_rows(*,client=None,project='sharplogger',dataset='sharp_data',
                                canonical_manifest=None,canonical_sides=None,canonical_audit=None):
-    """V5.2 identity-verified historical rows, not a blind Game_Key join.
+    """Canonical V5.2 + CFBD prior-feature dataset is the ML source of truth.
 
-    Historical warehouse attributes are restricted to an explicit, small
-    pregame-name allowlist. User must review vintage: by themselves names do
-    not prove each feature existed before kickoff.
+    Prior versions queried the legacy historical_core_training_vw first, then
+    fell back to CFBD only when *zero* legacy games joined. This permitted a
+    partially matching legacy view to silently substitute a small, differently
+    populated sample for the 2013-2025 canonical CFBD population. Never do
+    that. Reuse the already verified V5.2 ledger and historical CFBD prior
+    features directly; Stage2/V6 frozen brains attach separately by that ID.
+
+    Market snapshots and untimed reference quotes attach later, independently,
+    preserving their separate executable/research-only evidence rules.
     """
     if canonical_manifest is None or canonical_sides is None or canonical_audit is None:
-        return [],{'status':'HOLD_CANONICAL_V52_LEDGER_REQUIRED'}
-    _,games,native,teams,_=_checked_canonical(canonical_manifest,canonical_sides,canonical_audit)
+        return [],{'status':'HOLD_CANONICAL_V52_LEDGER_REQUIRED','bet_authority':0}
     if client is None:
         from google.cloud import bigquery
         client=bigquery.Client(project=project)
-    table=f'{project}.{dataset}.ncaaf_historical_core_training_vw'
-    needed=('Season','Game_Key','Is_Home','Team_Score','Opponent_Score','Opening_Spread')
-    try:
-        records,source=_ml_table_rows(client,table,needed,tuple(f for f in ML_CORE_FIELDS if f not in needed),
-                    'WHERE Season BETWEEN 2013 AND 2025')
-    except Exception as exc:
-        records=[];source={'status':'HOLD_LEGACY_CORE_VIEW_UNAVAILABLE',
-                           'error':type(exc).__name__+':'+str(exc)}
-    if source['status']!='LOADED':
-        rows,cfbd_audit=ml_cfbd_prior_training_rows(client=client,
-            canonical_manifest=canonical_manifest,canonical_sides=canonical_sides,
-            canonical_audit=canonical_audit,project=project,dataset=dataset)
-        cfbd_audit['legacy_view_audit']=source
-        return rows,cfbd_audit
-    joined={};ambiguous=set();holds=Counter()
-    for r in records:
-        yr=num(r.get('Season'))
-        if yr is None:holds['YEAR_MISSING']+=1;continue
-        yr=int(yr);src=str(r.get('Game_Key') or '').strip()
-        gid=native.get((yr,src))
-        if not gid and (yr,src) in games:gid=src
-        if not gid:holds['UNMATCHED_VERIFIED_STAGE1_ID']+=1;continue
-        if str(r.get('Is_Home')).strip().lower() not in ('1','true'):
-            continue
-        g=games[(yr,gid)]
-        if g.get('role_verification_status')!='HOME_AWAY_VERIFIED':
-            holds['NO_VERIFIED_HOME_AWAY_ROLE']+=1;continue
-        home=[k for k,s in teams[(yr,gid)].items() if str(s.get('is_home_verified'))=='1']
-        if len(home)!=1:holds['HOME_ROLE_NOT_UNIQUE']+=1;continue
-        hs=_ml_number(r['Team_Score']);aws=_ml_number(r['Opponent_Score']);line=_ml_number(r['Opening_Spread'])
-        if not all(math.isfinite(x) for x in (hs,aws,line)):
-            holds['SCORE_OR_OPEN_LINE_MISSING']+=1;continue
-        # Require independently matched score orientation; fail closed on mismatches.
-        home_side=teams[(yr,gid)][home[0]]
-        if (_ml_number(home_side.get('team_score'))!=hs or
-            _ml_number(home_side.get('opponent_score'))!=aws):
-            holds['CANONICAL_SCORE_ORIENTATION_DISAGREEMENT']+=1;continue
-        key=(yr,gid)
-        x={f:_ml_number(r.get(f)) for f in ML_CORE_FIELDS}
-        x['Opening_Spread']=line
-        opentotal=_ml_number(r.get('Opening_Total'))
-        item={'season':yr,'game_id':gid,'source_game_id':src,
-              'date':g.get('game_date'),'core_features':x,
-              'home_score':hs,'away_score':aws,
-              'label_spread':int(hs+line>aws) if hs+line!=aws else None,
-              'label_h2h':int(hs>aws) if hs!=aws else None,
-              'label_totals':(int(hs+aws>opentotal) if math.isfinite(opentotal) and hs+aws!=opentotal else None)}
-        if key in joined and joined[key]!=item:
-            ambiguous.add(key)
-        else:joined[key]=item
-    for key in ambiguous:joined.pop(key,None)
-    holds['AMBIGUOUS_CONFLICTING_HISTORY']=len(ambiguous)
-    legacy_audit={**source,'status':('HISTORICAL_STAGE1_ML_ROWS_MATCHED' if joined
-                                      else 'HOLD_LEGACY_VIEW_ZERO_VERIFIED_GAME_MATCHES'),
-        'matched_games':len(joined),'holds':dict(holds),
-        'feature_vintage_certified':False,'original_source':table,
-        'feature_policy':'EXPLICIT_PREGAME_NAMED_ALLOWLIST__VINTAGE_REVIEW_REQUIRED'}
-    if not joined:
-        # The legacy view can load successfully yet use another game-key space.
-        # Zero verified canonical matches MUST trigger the existing CFBD-prior
-        # matrix, rather than silently publishing an empty training manifest.
-        rows,cfbd_audit=ml_cfbd_prior_training_rows(client=client,
-            canonical_manifest=canonical_manifest,canonical_sides=canonical_sides,
-            canonical_audit=canonical_audit,project=project,dataset=dataset)
-        cfbd_audit['legacy_view_audit']=legacy_audit
-        cfbd_audit['source_selection']='CFBD_PRIORS_AFTER_ZERO_LEGACY_CANONICAL_MATCHES'
-        return rows,cfbd_audit
-    return sorted(joined.values(),key=lambda x:(x['season'],x['date'] or '',x['game_id'])),legacy_audit
+    rows,audit=ml_cfbd_prior_training_rows(client=client,
+        canonical_manifest=canonical_manifest,canonical_sides=canonical_sides,
+        canonical_audit=canonical_audit,project=project,dataset=dataset)
+    audit['source_selection']='VERIFIED_V5_2_LEDGER_PLUS_CFBD_PRIORS_PRIMARY'
+    audit['legacy_view_selection']='NEVER_USED_TO_REPLACE_VERIFIED_CFBD_POPULATION'
+    audit['frozen_brain_inputs']='EXISTING_CANONICAL_V6_EVENTS_JOINED_BY_CFBD_GAME_ID'
+    audit['historic_market_labels']='TIMED_SNAPSHOT_PRIMARY__UNTIMED_ARCHIVE_RETROSPECTIVE_ONLY'
+    audit['bet_authority']=0
+    return rows,audit
 
 def _ml_model():
     from sklearn.ensemble import HistGradientBoostingClassifier
