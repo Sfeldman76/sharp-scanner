@@ -1811,6 +1811,18 @@ def ml_cfbd_prior_training_rows(*,client,canonical_manifest,canonical_sides,
                    'error':type(exc).__name__+':'+str(exc)}
     # Exactly two separately identified sides per canonical CFBD game.
     observed=defaultdict(dict);holds=Counter();raw_count=0
+    # The immutable V5.2 two-sided ledger already supplies two independently
+    # recorded names for each side. Only exact normalized, UNIQUE matches
+    # against those ledger fields are admissible; never guess a team from a
+    # score, opponent, fuzzy distance, or historical model prediction.
+    side_aliases={}
+    for game_key,side_map in teams.items():
+        aliases=defaultdict(set)
+        for side_key,side in side_map.items():
+            for candidate in (side_key,side.get('cfbd_team_key'),side.get('source_team_label')):
+                normalized=_canonical_name(candidate)
+                if normalized:aliases[normalized].add(side_key)
+        side_aliases[game_key]=aliases
     for rr in source_rows:
         raw_count+=1;r=dict(rr.items())
         gd=r.get('Game_Date')
@@ -1822,23 +1834,37 @@ def ml_cfbd_prior_training_rows(*,client,canonical_manifest,canonical_sides,
         if str(gd)[:10] != str(games[(year,gid)].get('game_date') or '')[:10]:
             holds['CFBD_GAME_DATE_DISAGREES_WITH_STAGE1']+=1;continue
         side_map=teams[(year,gid)]
-        matches=[k for k,v in side_map.items() if _canonical_name(k)==_canonical_name(r['Team_Key'])]
+        normalized_key=_canonical_name(r['Team_Key'])
+        matches=side_aliases[(year,gid)].get(normalized_key,set())
         if len(matches)!=1:
-            holds['CFBD_TEAM_KEY_NOT_EXACT_STAGE1_SIDE']+=1;continue
-        k=matches[0]
+            holds['CFBD_TEAM_KEY_NOT_EXACT_STAGE1_SIDE' if not matches else
+                  'CFBD_TEAM_ALIAS_AMBIGUOUS_STAGE1_SIDES']+=1;continue
+        k=next(iter(matches))
+        if _canonical_name(k)!=normalized_key:
+            holds['CFBD_VERIFIED_STAGE1_SOURCE_LABEL_ALIAS_RECOVERED']+=1
+        current=observed[(year,gid)].get(k)
         if k in observed[(year,gid)]:
-            # Once ambiguous, always ambiguous; never let subsequent duplicates restore it.
-            observed[(year,gid)][k]=None
-            holds['DUPLICATE_CFBD_SIDE']+=1
+            # Exact repeat rows are a warehouse artifact, not two conflicting
+            # observations. Compare all selected feature values and game keys;
+            # a prior conflict (None) must NEVER be restored by later repeats.
+            if current is not None and current==r:
+                holds['IDENTICAL_CFBD_SIDE_REPEAT_DEDUPED']+=1
+            else:
+                observed[(year,gid)][k]=None
+                holds['CONFLICTING_CFBD_SIDE_DUPLICATE']+=1
         else:observed[(year,gid)][k]=r
-    matrix=[]
+    matrix=[];matched_by_season=Counter();excluded_games_by_season=defaultdict(Counter)
     for (year,gid),side_rows in sorted(observed.items()):
         g=games[(year,gid)];side_map=teams[(year,gid)]
         if g.get('role_verification_status')!='HOME_AWAY_VERIFIED':
-            holds['UNVERIFIED_GAME_ROLES']+=1;continue
+            holds['UNVERIFIED_GAME_ROLES']+=1
+            excluded_games_by_season[year]['UNVERIFIED_GAME_ROLES']+=1
+            continue
         home=[k for k,v in side_map.items() if str(v.get('is_home_verified')).lower() in ('1','true','yes')]
         if len(home)!=1 or len(side_rows)!=2 or set(side_rows)!=set(side_map) or any(v is None for v in side_rows.values()):
-            holds['INCOMPLETE_OR_DUPLICATE_CFBD_TWO_SIDES']+=1;continue
+            holds['INCOMPLETE_OR_DUPLICATE_CFBD_TWO_SIDES']+=1
+            excluded_games_by_season[year]['INCOMPLETE_OR_DUPLICATE_CFBD_TWO_SIDES']+=1
+            continue
         hkey=home[0];akey=next(k for k in side_map if k!=hkey)
         hs=_ml_number(side_map[hkey].get('team_score'))
         av=_ml_number(side_map[akey].get('team_score'))
@@ -1856,6 +1882,7 @@ def ml_cfbd_prior_training_rows(*,client,canonical_manifest,canonical_sides,
             features['CFBD_DIFF_'+c]=(hv-vv if math.isfinite(hv) and math.isfinite(vv) else float('nan'))
         if not any(math.isfinite(v) for v in features.values()):
             holds['ALL_PRIOR_FEATURES_NULL']+=1;continue
+        matched_by_season[year]+=1
         matrix.append({'season':year,'game_id':gid,'date':g.get('game_date'),
                        'core_features':features,'home_score':hs,'away_score':av,
                        'label_h2h':int(hs>av),
@@ -1863,6 +1890,9 @@ def ml_cfbd_prior_training_rows(*,client,canonical_manifest,canonical_sides,
     audit={'status':'CFBD_PRIOR_MATRIX_BUILT' if matrix else 'HOLD_NO_MATCHED_CFBD_TRAINING_GAMES',
            'source':table,'source_rows':raw_count,'matched_games':len(matrix),
            'available_prior_columns':len(feature_cols),
+           'matched_games_by_season':dict(sorted(matched_by_season.items())),
+           'excluded_canonical_games_by_season':{str(y):dict(c) for y,c in sorted(excluded_games_by_season.items())},
+           'identity_recovery_policy':'ONLY_UNIQUE_VERIFIED_STAGE1_SIDE_LABEL_ALIASES; EXACT_REPEAT_DEDUP',
            'feature_policy':'ONLY_CFBD_PRIOR_FIELDS__HOME_MINUS_AWAY__CANONICAL_LABELS',
            'labels':{'h2h':len(matrix),'spreads':0,'totals':0},
            'holds':dict(holds),'feature_vintage_certified':False,
@@ -2080,12 +2110,25 @@ def _ml_chronological_calibration(rows, oof_pred, label, *, min_train=240, min_v
 
 def _ml_brain_counts(events):
     """No outcome-derived priors and no retroactive performance encoding."""
-    counts=defaultdict(Counter)
+    counts=defaultdict(Counter);seen=set()
     for e in events:
         if e.get('market') not in MARKETS:continue
-        family=str(e.get('brain') or '')
+        family=str(e.get('brain') or '').upper()
         if family not in ('SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER'):continue
-        key=(int(e['season']),str(e['cfbd_game_id']),str(e['target']),str(e['market']))
+        try:
+            key=(int(e['season']),str(e['cfbd_game_id']),str(e['target']),str(e['market']))
+        except (KeyError,ValueError,TypeError):continue
+        # One system cannot become multiple independent votes because the
+        # same source event was ingested more than once. Different systems
+        # remain distinct but the existing per-family cap still applies.
+        system=str(e.get('system_id') or '').strip()
+        # A missing system_id is not proof that two separate source events
+        # came from one system. Deduplicate only byte-equivalent event
+        # content when no explicit system identifier was recorded.
+        identity=('SYSTEM',system) if system else ('EVENT',digest(e))
+        unique=(key,family,identity)
+        if unique in seen:continue
+        seen.add(unique)
         counts[key][family]+=1
     return counts
 
@@ -3109,6 +3152,32 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
         client=client,project=project,dataset=dataset)
     report['market_rich_historical_source_audit']=market_audit
     report['historical_source_audit']=source
+    # Separately explain CFBD matrix availability, verified pre-kick labels,
+    # and untimed retrospective references. Reporting a small primary lane
+    # as missing CFBD would obscure the actual line-source limitation.
+    by_season=defaultdict(Counter)
+    for r in rows:
+        season=str(r['season'])
+        by_season[season]['cfbd_prior_games']+=1
+        for market in ('spread','totals'):
+            if r.get('label_'+market) in (0,1):
+                by_season[season][market+'_timed_label_games']+=1
+            if r.get('label_'+market+'_reference') in (0,1):
+                by_season[season][market+'_reference_label_games']+=1
+    report['training_coverage_waterfall_v2']={
+        'status':'AUDITED_SEPARATE_PRIMARY_AND_RETROSPECTIVE_LABEL_LANES',
+        'by_season':{y:dict(c) for y,c in sorted(by_season.items())},
+        'cfbd_prior_games':len(rows),
+        'verified_prekick_spread_labels':sum(r.get('label_spread') in (0,1) for r in rows),
+        'verified_prekick_totals_labels':sum(r.get('label_totals') in (0,1) for r in rows),
+        'retrospective_spread_reference_labels':sum(r.get('label_spread_reference') in (0,1) for r in rows),
+        'retrospective_totals_reference_labels':sum(r.get('label_totals_reference') in (0,1) for r in rows),
+        'spread_reference_sign_verified':False,
+        'retrospective_reference_forward_eligible':False,
+        'unavailable_optional_brains_do_not_veto_canonical_games':True,
+        'source_identity_recovery':source.get('identity_recovery_policy'),
+        'research_models_available':sorted(retrospective_models),
+        'bet_authority':0}
     report['canonical_stage1_games']=len(games)
     report['canonical_event_audit']=event_status
     report['market_rich_training_source']=f'{project}.{dataset}.scores_with_features'
