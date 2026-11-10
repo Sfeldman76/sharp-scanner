@@ -2653,8 +2653,8 @@ def fit_v55_independent_brain_models(events, historical_rows, canonical_team_map
             preds,audit,model=_ml_train_with_chronological_fallback(training,cols,label,min_train=min_train)
             audit={k:v for k,v in audit.items() if k!='features'}
             if model is not None:
-                origin_oof[(fam,mk)]={(int(r['season']),str(r['game_id'])):float(pred[i])
-                    for i,r in enumerate(training) if math.isfinite(float(pred[i]))}
+                origin_oof[(fam,mk)]={(int(r['season']),str(r['game_id'])):float(preds[i])
+                    for i,r in enumerate(training) if math.isfinite(float(preds[i]))}
             if model is not None:
                 models[key]={'model':model,'features':cols,
                              'source':'RETROSPECTIVE_FROZEN_FAMILY_SEASON_PRIOR_RESEARCH_ONLY',
