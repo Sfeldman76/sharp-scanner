@@ -1134,6 +1134,112 @@ def canonical_replay_edge_diagnostics(events, games, team_map, groups, *, top_n=
             'independent_out_of_sample':False,'certified_edges':0,'bet_authority':0}
 
 
+V55_QUALIFICATION_BLOB = 'research/ncaaf/v55/qualified_independent_brains_v55_current.json'
+V55_QUALIFICATION_POLICY = 'V55-FROZEN-INDEPENDENT-BRAINS-2013-2025-R1'
+
+
+def v55_frozen_qualification_report(events, team_map, source_receipts, *,
+                                    generated_at=None):
+    """Audit pinned V5.5 firings by system WITHOUT certifying retrospective bets.
+
+    Historical game outcomes and reference lines support descriptive system
+    analysis. OOS *authority* additionally needs independent proof of original
+    rule freeze/feature vintage, an unselected holdout and an executable rule
+    recipe. Never promote a system using only retrospective grades.
+    """
+    import re
+    created = generated_at or datetime.now(timezone.utc).isoformat()
+    observations = defaultdict(lambda: defaultdict(dict))
+    seasons_seen = set()
+    invalid = Counter()
+    for event in events:
+        try:
+            y = int(event['season']); fam = normal_family(event['brain'])
+            sid = str(event['system_id']).strip(); market = normal_market(event['market'])
+            gid = str(event['cfbd_game_id']); target = str(event['target'])
+            if not 2013 <= y <= 2025:
+                invalid['OUTSIDE_FROZEN_HISTORICAL_SEASONS'] += 1; continue
+            seasons_seen.add(y)
+            if not sid or fam not in BRAINS or market != 'spreads':
+                invalid['NON_SPREAD_OR_INVALID_SYSTEM'] += 1; continue
+            rec = team_map.get((y, gid), {}).get(target)
+            if not rec:
+                invalid['NO_CANONICAL_GAME_SIDE'] += 1; continue
+            ts, oscore, ln = (num(rec.get(k)) for k in
+                              ('team_score', 'opponent_score', 'retrospective_open_spread'))
+            if None in (ts, oscore, ln):
+                invalid['REFERENCE_RESULT_OR_LINE_MISSING'] += 1; continue
+            result = grade('spreads', 'HOME', ln, ts, oscore)
+            if result not in ('WIN','LOSS','PUSH'):
+                invalid['UNGRADEABLE_REFERENCE'] += 1; continue
+            # Exact canonical game-side membership suppresses duplication.
+            observations[(fam,sid)][y][(gid,target)] = result
+        except (ValueError,TypeError,KeyError):
+            invalid['INVALID_FROZEN_EVENT'] += 1
+    diagnostics=[]; qualify=[]; rejections=Counter()
+    for (fam,sid), by_season in sorted(observations.items()):
+        byyear={}
+        for year, games in sorted(by_season.items()):
+            vals=list(games.values()); w=vals.count('WIN'); l=vals.count('LOSS')
+            byyear[str(year)]={'n':len(vals),'wins':w,'losses':l,
+                 'pushes':vals.count('PUSH'),'rate':round(w/(w+l),6) if w+l else None}
+        test=[r for yy,rr in by_season.items() if yy in (2024,2025) for r in rr.values()]
+        w=test.count('WIN'); l=test.count('LOSS'); n=len(test)
+        holds=[]
+        if str(fam) not in ('STAT','PATHI','BIG_AL','PREDICTION_TRACKER','SYSTEM_MINER'):
+            holds.append('NO_EXECUTABLE_DIRECTIONAL_RULE_CONTRACT')
+        if byyear.get('2024',{}).get('n',0)<15 or byyear.get('2025',{}).get('n',0)<15 or n<60:
+            holds.append('RETROSPECTIVE_CONFIRMATION_SAMPLE_TOO_SMALL')
+        if w+l == 0 or w/(w+l)<0.53:
+            holds.append('RETROSPECTIVE_REFERENCE_ATS_BELOW_THRESHOLD')
+        # Frozen observations show WHEN a rule fired in a historical replay,
+        # NOT when it was selected, approved and locked prospectively.
+        holds.extend(('INDEPENDENT_PRE_HOLDOUT_RULE_FREEZE_NOT_ATTESTED',
+                      'PREGAME_FEATURE_VINTAGE_NOT_ATTESTED',
+                      'LIVE_RULE_FIELD_RECIPE_NOT_ATTESTED',
+                      'MULTIPLE_TESTING_AND_SOURCE_INDEPENDENCE_NOT_ATTESTED'))
+        for hold in holds:rejections[hold]+=1
+        diagnostics.append({'family':fam,'system_id':sid,'market':'spreads',
+            'discovery_reference_games':sum(len(v) for y,v in by_season.items() if y<=2023),
+            'confirmation_n':n,'confirmation_rate':round(w/(w+l),6) if w+l else None,
+            'by_season':byyear,'holds':holds,
+            'descriptive_reference_only':True,'oos_pass':False})
+    # This is deliberately a new V5.5 source publication, not the Oct 27 V2
+    # zero-system placeholder. Genuine attested passes may be added by the
+    # documented independent certification process; never auto-approve.
+    return {'schema':'NCAAF_V55_FROZEN_RULE_QUALIFICATION_AUDIT_V1',
+        'policy':V55_QUALIFICATION_POLICY,'created_utc':created,
+        'status':'HOLD_INDEPENDENT_FREEZE_AND_VINTAGE_ATTESTATION',
+        'operator_approved':False,'uses_2026_outcomes':False,
+        'history_first_season':min(seasons_seen) if seasons_seen else None,
+        'discovery_last_season':2023,'confirmation_seasons':[2024,2025],
+        'source_audit':{'observed_seasons':sorted(seasons_seen),
+            'source_receipts':source_receipts or {},'invalid_firings':dict(invalid)},
+        'systems':qualify,'candidate_system_count':len(diagnostics),
+        'candidate_diagnostics':diagnostics,'hold_counts':dict(rejections),
+        'retrospective_reference_not_executable_roi':True,
+        'independent_original_pregame_capture_certified':False,
+        'bet_authority':0}
+
+
+def publish_v55_frozen_qualification(report, *, storage_client=None,
+                                     bucket='sharp-models'):
+    """Overwrite only the stable V5.5 qualification *audit*, not legacy V2.
+
+    Stores hashed deterministic contents for reproducible source inspection.
+    Does not publish a qualifying registry while freeze attestations are absent.
+    """
+    from google.cloud import storage
+    client = storage_client or storage.Client()
+    uri = 'gs://'+bucket+'/'+V55_QUALIFICATION_BLOB
+    body = (json.dumps(report,sort_keys=True,default=str,allow_nan=False)+'\n').encode()
+    client.bucket(bucket).blob(V55_QUALIFICATION_BLOB).upload_from_string(
+        body,content_type='application/json')
+    return {'status':report['status'],'uri':uri,'sha256':hashlib.sha256(body).hexdigest(),
+            'candidate_systems':report['candidate_system_count'],
+            'qualified_systems':len(report['systems']),'bet_authority':0}
+
+
 def source_capture_field_diagnostics(raw):
     """Show exactly why a frozen raw family feed failed to attach signals."""
     data={}
@@ -1222,6 +1328,16 @@ def replay_prior_brain_sources(*, storage_client=None,bucket='sharp-models',cano
         data['stage1_canonical_ledger_v5_audit.json'])
     summary['canonical_edge_research']=canonical_replay_edge_diagnostics(rows,bygame,team_map,groups)
     summary['raw_source_field_diagnostics']=source_capture_field_diagnostics(raw)
+    # Reuse the SAME pinned canonical frozen fires for source-specific
+    # qualification diagnostics. No parallel Miner discovery or legacy V2 JSON.
+    qualification=v55_frozen_qualification_report(rows,team_map,receipts)
+    try:
+        summary['frozen_rule_qualification']=publish_v55_frozen_qualification(
+            qualification,storage_client=storage_client,bucket=bucket)
+    except Exception as exc:
+        summary['frozen_rule_qualification']={'status':'HOLD_QUALIFICATION_PUBLICATION_FAILED',
+            'error':type(exc).__name__+':'+str(exc)[:240], 'bet_authority':0}
+
     summary['stage2_v3_reuse']={'frozen_events_uri':stage2_uri or None,
         'discovery_status':stage2_discovery,
         'events_loaded':len(stage2),'research_only_combined_market_assumption':assumption or None,

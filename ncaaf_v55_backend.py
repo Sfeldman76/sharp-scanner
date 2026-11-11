@@ -1085,7 +1085,7 @@ def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
                                          bucket, now=None, log_func=None):
     """Current genuine frozen-rule producer. Never executes old Miner/V1 authority."""
     from ncaaf_v55_board import (_v55_direct_current_quote_rows,
-        read_v55_long_history_brain_registry,derive_v55_other_qualified_events)
+        _v55_validate_long_history_brain_registry,derive_v55_other_qualified_events)
     import pandas as pd
     at=clock(now) if now is not None else datetime.now(timezone.utc)
     log=log_func or (lambda *_:None)
@@ -1095,7 +1095,27 @@ def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
         'core_status':'ML_RESEARCH_SHADOW_NOT_AUTOMATIC_ORIGINAL_SELECTION',
         'market_rich_status':'DESCRIPTIVE_MARKET_FEATURES_NOT_AUTOMATIC_DIRECTIONAL_RULES',
         'source_capture_before_authority':True,'bet_authority':0}
-    frozen,problem=read_v55_long_history_brain_registry(storage_client=storage_client,bucket_name=bucket)
+    # Read the CURRENT V5.5 qualification output, not the October 27
+    # ncaaf-research-v2.33.0 placeholder. A HOLD is a legitimate research
+    # outcome and may not be relabeled as FROZEN_OOS_QUALIFIED.
+    qualification_key=os.getenv('NCAAF_V55_QUALIFIED_RULE_REGISTRY_KEY',
+        'research/ncaaf/v55/qualified_independent_brains_v55_current.json')
+    frozen=None;problem=None
+    try:
+        raw=storage_client.bucket(bucket).blob(qualification_key).download_as_bytes()
+        document=json.loads(raw)
+        audit['qualification_registry_uri']='gs://'+bucket+'/'+qualification_key
+        audit['qualification_registry_status']=s(document.get('status'))
+        audit['qualification_candidates']=int(document.get('candidate_system_count') or 0)
+        audit['qualification_systems']=len(document.get('systems') or [])
+        audit['qualification_hold_counts']=document.get('hold_counts') or {}
+        frozen,problem=_v55_validate_long_history_brain_registry(
+            document,raw_sha=hashlib.sha256(raw).hexdigest())
+        if not frozen:
+            problem=s(document.get('status'))+':'+s(problem)
+    except Exception as exc:
+        problem='V55_QUALIFICATION_REGISTRY_UNAVAILABLE:'+type(exc).__name__
+
     if problem or not frozen or not frozen.get('rules'):
         audit.update(status='HOLD_NO_FROZEN_EXPERT_LIVE_RULE_REGISTRY',reason=str(problem or 'NO_FROZEN_RULES'))
         return [],audit
