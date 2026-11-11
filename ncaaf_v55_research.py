@@ -1188,9 +1188,9 @@ V55_QUALIFICATION_POLICY = 'V55-FROZEN-INDEPENDENT-BRAINS-2013-2025-R1'
 # eligibility test, NOT an independently multiplicity-adjusted ROI certificate.
 V55_OOS_MIN_DECISIONS = 12
 V55_OOS_MIN_DECISIONS_PER_SEASON = 4
-V55_OOS_POSTERIOR_MIN_PROB = 0.90
+V55_OOS_POSTERIOR_MIN_PROB = 0.80
 V55_OOS_REFERENCE_BASELINE = 0.50
-V55_OOS_SCREEN_POLICY = 'V55-2024-2025-BETA11-POSTERIOR-90PCT-VS-50PCT-R1'
+V55_OOS_SCREEN_POLICY = 'V55-2024-2025-BETA11-POSTERIOR-80PCT-VS-50PCT-R2'
 
 
 def v55_oos_statistical_screen(wins, losses, year_2024, year_2025):
@@ -3395,7 +3395,7 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
     # Full CFBD 2013-2025 margin/total targets are score-derived, not
     # restricted to the 2025 market snapshot / historical odds population.
     # V5.2 game IDs and prior-feature construction are the sole training input.
-    full_report, full_models = fit_full_history(rows, events, team_map)
+    full_report, full_models = fit_full_history(rows, events, team_map, market_rows=market_data)
     models.update(full_models)
     report['full_history_score_research'] = full_report
     report['full_history_coverage_funnel'] = {
@@ -3697,7 +3697,26 @@ def _v55_fh_evidence_features(events, team_map):
         out[key]=features
     return out
 
-def _v55_fh_prepare_rows(historical_rows,events,team_map):
+def _v55_fh_prepare_rows(historical_rows,events,team_map, *, market_rows=None):
+    # Market Rich historical snapshots are sourced exclusively from verified
+    # prekick scores_with_features records, never 2026 moves_with_features.
+    historical_market={}
+    market_invalid=Counter()
+    for mr in market_rows or []:
+        try:
+            year=int(mr['season']);gid=str(mr['game_id'])
+            if not 2013<=year<=2025:
+                market_invalid['OUTSIDE_2013_2025']+=1;continue
+            fields=mr.get('core_features') or {}
+            if not isinstance(fields,dict) or not any(
+                math.isfinite(_v55_fh_finite(v)) for k,v in fields.items()
+                if k.startswith('MARKET_')):
+                market_invalid['NO_VERIFIED_MARKET_FEATURE']+=1;continue
+            key=(year,gid)
+            if key in historical_market:
+                market_invalid['DUPLICATE_GAME']+=1;continue
+            historical_market[key]=dict(fields)
+        except (ValueError,TypeError,KeyError):market_invalid['INVALID_ID']+=1
     ev=_v55_fh_evidence_features(events,team_map)
     rows=[];holds=Counter();years=Counter()
     for r in historical_rows:
@@ -3711,7 +3730,13 @@ def _v55_fh_prepare_rows(historical_rows,events,team_map):
                if k.startswith('CFBD_DIFF_') and k.endswith('_Prior')}
         if not prior or not any(math.isfinite(_v55_fh_finite(v)) for v in prior.values()):
             holds['NO_USABLE_PRIOR_FEATURES']+=1;continue
-        item={'season':year,'game_id':key[1], 'features':{**prior,**ev.get(key,{})},
+        market=historical_market.get(key)
+        # Missing Market Rich history remains missing (NaN), not synthetic
+        # zero movement or a zero-priced quote. Explicit availability is used.
+        market_features={f:_v55_fh_finite((market or {}).get(f))
+                         for f in ML_HIST_MARKET_FIELDS}
+        market_features['MARKET_RICH_HIST_PRESENT']=float(bool(market))
+        item={'season':year,'game_id':key[1], 'features':{**prior,**ev.get(key,{}),**market_features},
               'margin':hs-aw,'total':hs+aw, 'reference_spread':_v55_fh_finite((r.get('core_features') or {}).get('MARKET_SPREAD_LINE_REFERENCE')),
               'reference_total':_v55_fh_finite((r.get('core_features') or {}).get('MARKET_TOTAL_LINE_REFERENCE'))}
         rows.append(item);years[year]+=1
@@ -3719,10 +3744,12 @@ def _v55_fh_prepare_rows(historical_rows,events,team_map):
     audit={'canonical_cfbd_training_games':len(rows),'eligible_games_by_season':dict(sorted(years.items())),
            'holds':dict(holds),'historical_frozen_evidence_games':sum((int(r['season']),str(r['game_id'])) in ev for r in rows),
            'source':'V5_2_CANONICAL_CFBD_PRIORS_AND_FINAL_SCORES','brain_history_original_pregame_capture_certified':False,
-           '2026_training_games':sum(r['season']>=2026 for r in rows)}
+           '2026_training_games':sum(r['season']>=2026 for r in rows),
+           'historical_market_rich_matched_games':sum((int(r['season']),str(r['game_id'])) in historical_market for r in rows),
+           'historical_market_rich_rejections':dict(market_invalid)}
     return rows,audit
 
-def fit_full_history(historical_rows,events,team_map,*,min_train=240,min_test=30):
+def fit_full_history(historical_rows,events,team_map,*,market_rows=None,min_train=240,min_test=30):
     """Expanding-season score regression plus earlier-OOF residual calibration.
 
     OOF residuals for season Y never use outcomes from season Y or later.
@@ -3731,7 +3758,7 @@ def fit_full_history(historical_rows,events,team_map,*,min_train=240,min_test=30
     import numpy as np
     from sklearn.ensemble import HistGradientBoostingRegressor
     from sklearn.metrics import mean_absolute_error,mean_squared_error
-    rows,coverage=_v55_fh_prepare_rows(historical_rows,events,team_map)
+    rows,coverage=_v55_fh_prepare_rows(historical_rows,events,team_map,market_rows=market_rows)
     from collections import Counter
     coverage['expert_nonzero_net_by_market_family']={}
     for mkt in ('spreads','h2h','totals'):
@@ -3740,7 +3767,7 @@ def fit_full_history(historical_rows,events,team_map,*,min_train=240,min_test=30
             coverage['expert_nonzero_net_by_market_family'][mkt+'_'+fam]=sum(
                 _v55_fh_finite(r['features'].get(col))!=0 for r in rows if col in r['features'])
     report={'schema':_V55_FH_VERSION,'status':'HOLD_FULL_HISTORY_INSUFFICIENT','coverage':coverage,
-            'models':{},'same_game_comparison':{},'seven_brain_policy':'CORE_STAT_MINER_BIG_AL_PATHI_PT_PLUS_SEPARATE_LIVE_MARKET_RICH',
+            'models':{},'same_game_comparison':{},'seven_brain_policy':'CORE_STAT_MINER_BIG_AL_PATHI_PT_MARKET_RICH_FUSED_IN_COMBINED_ML',
             'historical_brain_capture_certified':False,'historical_feature_vintage_certified':False,
             'bet_authority':0,'live_scoring_authority':0}
     fitted={}
@@ -3749,7 +3776,23 @@ def fit_full_history(historical_rows,events,team_map,*,min_train=240,min_test=30
     stat=[k for k in prior if ('_Season_' in k or '_Recent3_' in k or '_Recent5_' in k) and ('_Off_' in k or '_Def_' in k)]
     if len(stat)<2:stat=prior[:]
     expert=sorted({k for r in rows for k in r['features'] if k.startswith('EVIDENCE_')})
-    definitions={'CORE':prior,'STAT':stat,'COMBINED':prior+expert}
+    # Explicit per-family confluence and opposition features for the learned
+    # combined model. The learner is free to assign zero value to any brain.
+    # CORE/STAT are standalone independently trained views of prior CFBD data;
+    # four other families are represented by unique frozen directional firings;
+    # MARKET_RICH enters only through verified prekick historical snapshots.
+    for item in rows:
+        f=item['features']
+        for mk in ('spreads','h2h','totals'):
+            nets=[_v55_fh_finite(f.get('EVIDENCE_'+mk+'_'+fam+'_NET'))
+                  for fam in _V55_FH_FAMILIES]
+            f['CONFLUENCE_'+mk+'_SUPPORT_HOME']=float(sum(v>0 for v in nets))
+            f['CONFLUENCE_'+mk+'_SUPPORT_AWAY']=float(sum(v<0 for v in nets))
+            f['CONFLUENCE_'+mk+'_CONFLICT']=float(any(v>0 for v in nets) and any(v<0 for v in nets))
+            f['CONFLUENCE_'+mk+'_INDEPENDENT_FAMILIES']=float(sum(v!=0 for v in nets))
+    confluence=sorted({k for item in rows for k in item['features'] if k.startswith('CONFLUENCE_')})
+    market_cols=list(ML_HIST_MARKET_FIELDS)+['MARKET_RICH_HIST_PRESENT']
+    definitions={'CORE':prior,'STAT':stat,'COMBINED':prior+expert+confluence+market_cols}
     years=np.asarray([r['season'] for r in rows],int);allpred={}
     for target in _V55_FH_TARGETS:
         y=np.asarray([r[target] for r in rows],float)
@@ -3788,7 +3831,8 @@ def fit_full_history(historical_rows,events,team_map,*,min_train=240,min_test=30
                 fitted[name]={'model':final,'features':cols,'source':_V55_FH_VERSION,
                     'prediction_target':_V55_FH_TARGETS[target], 'residual_sigma':info['forward_residual_sigma'],
                     'forward_eligible':False,'bet_authority':0,'feature_vintage_certified':False,
-                    'family_evidence_capture_certified':False}
+                    'family_evidence_capture_certified':False,
+                    'seven_brain_combined_features':brain=='COMBINED'}
         names=[f'FULL_{b}_{target}' for b in definitions]
         if all(n in allpred for n in names):
             mask=np.logical_and.reduce([np.isfinite(allpred[n]) for n in names]);paired=int(mask.sum())

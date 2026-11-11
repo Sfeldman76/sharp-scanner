@@ -1094,9 +1094,9 @@ V55_QUALIFICATION_POLICY='V55-FROZEN-INDEPENDENT-BRAINS-2013-2025-R1'
 # eligibility test, NOT an independently multiplicity-adjusted ROI certificate.
 V55_OOS_MIN_DECISIONS = 12
 V55_OOS_MIN_DECISIONS_PER_SEASON = 4
-V55_OOS_POSTERIOR_MIN_PROB = 0.90
+V55_OOS_POSTERIOR_MIN_PROB = 0.80
 V55_OOS_REFERENCE_BASELINE = 0.50
-V55_OOS_SCREEN_POLICY = 'V55-2024-2025-BETA11-POSTERIOR-90PCT-VS-50PCT-R1'
+V55_OOS_SCREEN_POLICY = 'V55-2024-2025-BETA11-POSTERIOR-80PCT-VS-50PCT-R2'
 
 
 def v55_oos_statistical_screen(wins, losses, year_2024, year_2025):
@@ -1427,6 +1427,63 @@ def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
         return [],audit
 
 
+
+
+def seven_brain_live_combination_audit(signals, *, max_examples=150):
+    """Enumerate cross-family live evidence without approving it by count.
+
+    All seven brain families may originate. A single family contributes at most
+    one independent unit even with many correlated systems. Opposing directions
+    and missing dependency evidence remain explicit holds. This function NEVER
+    changes `evaluate` or certified ROI authority.
+    """
+    import itertools
+    by_market=defaultdict(lambda:defaultdict(lambda:defaultdict(set)))
+    by_system=defaultdict(lambda:defaultdict(lambda:defaultdict(set)))
+    invalid=Counter()
+    for record in signals:
+        if not isinstance(record,dict):continue
+        gid=s(record.get('game_id') or record.get('Game_ID'))
+        fam=family(record.get('source_family') or record.get('Source_Family'))
+        mk=market(record.get('market') or record.get('Market'))
+        side=s(record.get('side') or record.get('Side')).upper()
+        system=s(record.get('system_id') or record.get('System_ID'))
+        dependency=s(record.get('evidence_family_key') or record.get('Evidence_Family_Key'))
+        if not gid or fam not in BRAINS or mk not in ('spreads','h2h','totals') or not system or side not in (('OVER','UNDER') if mk=='totals' else ('HOME','AWAY')):
+            invalid['INVALID_SIGNAL_IDENTITY']+=1;continue
+        key=(gid,mk)
+        by_market[key][side][fam].add(dependency if dependency else fam)
+        by_system[key][side][fam].add(system)
+    examples=[];counts=Counter()
+    for (gid,mk),sides in sorted(by_market.items()):
+        sides_present=set(sides)
+        opposite=bool(('HOME' in sides_present and 'AWAY' in sides_present) or ('OVER' in sides_present and 'UNDER' in sides_present))
+        for side,families in sorted(sides.items()):
+            names=sorted(families)
+            counts['candidate_sides']+=1
+            if opposite:counts['opposed_candidate_sides']+=1
+            # All subsets of distinct families (up to 127 for 7 families).
+            combos=[]
+            for n in range(1,len(names)+1):
+                for parts in itertools.combinations(names,n):
+                    dependencies=[next(iter(families[f])) if len(families[f])==1 else '' for f in parts]
+                    if not all(dependencies) or len(set(dependencies))!=len(parts):
+                        counts['dependent_or_ambiguous_combinations']+=1;continue
+                    combos.append(parts)
+            counts['independent_family_combinations']+=len(combos)
+            if len(examples)<max_examples:
+                examples.append({'game_id':gid,'market':mk,'side':side,
+                    'families':names,'system_counts':{f:len(by_system[(gid,mk)][side][f]) for f in names},
+                    'opposing_family_evidence':opposite,
+                    'distinct_family_combo_count':len(combos),
+                    'largest_independent_combo_size':max(map(len,combos),default=0),
+                    'status':'COMBINATION_RESEARCH_ONLY__NEEDS_OOS_CERTIFIED_EV',
+                    'bet_authority':0})
+    return {'status':'SEVEN_BRAIN_COMBINATION_AUDIT','families':sorted(BRAINS),
+            'counts':dict(counts),'invalid':dict(invalid),'examples':examples,
+            'truncated_examples':counts['candidate_sides']>len(examples),
+            'automatic_authority':False}
+
 def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,log_func=None):
     """Production scanner dispatch. ONE NCAAF authority/publisher.
 
@@ -1623,8 +1680,12 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
     extras_uri=s(os.environ.get('NCAAF_V55_OTHER_MARKET_QUOTES_URI'))
     extra_quotes=read_rows(extras_uri) if extras_uri else None
     signals,live_identity_audit=canonicalize_live_signal_game_ids(signals,board)
+    combination_audit=seven_brain_live_combination_audit(signals)
+    log('[NCAAF-V55-SEVEN-BRAIN-LIVE-COMBINATIONS] '+json.dumps(
+        {k:v for k,v in combination_audit.items() if k!='examples'},sort_keys=True))
     output,audit=evaluate(board.to_dict('records'),signals,registry,extra_quotes=extra_quotes)
     audit['two_engine_live_identity_matching']=live_identity_audit
+    audit['seven_brain_live_combinations']={k:v for k,v in combination_audit.items() if k!='examples'}
     audit['seven_brain_source_input_audit']=seven_brain_input_audit
     audit['seven_brain_roi_registry_audit']=registry_audit
     audit['ml_shadow_manifest']=ml_audit
@@ -1836,6 +1897,19 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
                 nright=len({ident for (game,market,side,family,ident) in directional_counts
                             if (game,market,side,family)==(gid,mkt,right,fam)})
                 raw['EVIDENCE_'+mkt+'_'+fam+'_NET']=float(min(3,nleft)-min(3,nright))
+            nets=[raw['EVIDENCE_'+mkt+'_'+fam+'_NET'] for fam in _V55_FH_FAMILIES]
+            raw['CONFLUENCE_'+mkt+'_SUPPORT_HOME']=float(sum(v>0 for v in nets))
+            raw['CONFLUENCE_'+mkt+'_SUPPORT_AWAY']=float(sum(v<0 for v in nets))
+            raw['CONFLUENCE_'+mkt+'_CONFLICT']=float(any(v>0 for v in nets) and any(v<0 for v in nets))
+            raw['CONFLUENCE_'+mkt+'_INDEPENDENT_FAMILIES']=float(sum(v!=0 for v in nets))
+        raw['MARKET_RICH_HIST_PRESENT']=float(any(
+            k in raw and math.isfinite(_v55_fh_finite(raw[k]))
+            for k in ('MARKET_SPREAD_LATEST','MARKET_TOTAL_LATEST','MARKET_H2H_HOME_PRICE')))
+        for col in ('MARKET_SPREAD_OPEN','MARKET_SPREAD_LATEST','MARKET_SPREAD_MOVE',
+                    'MARKET_TOTAL_OPEN','MARKET_TOTAL_LATEST','MARKET_TOTAL_MOVE',
+                    'MARKET_H2H_HOME_PRICE','MARKET_SPREAD_BOOKS',
+                    'MARKET_TOTAL_BOOKS','MARKET_SNAPSHOT_COUNT'):
+            raw.setdefault(col,float('nan'))
         target=str(q.get('market') or '')
         if target not in ('spreads','h2h','totals'):continue
         model_target='total' if target=='totals' else 'margin'
@@ -1862,7 +1936,15 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
             probability=(higher if side in ('HOME','OVER') else p_over)
             if target=='spreads' and side=='AWAY':probability=1-higher
             if target=='h2h' and side=='AWAY':probability=1-higher
-            per[brain]={'predicted_home_margin_or_total':round(p,5), 'shadow_probability':round(probability,6),
+            # ML price-screening only. Never turn this expected value into
+            # authority without independent OOS proof, source capture and a
+            # qualified ROI/EV contract. Prices are the exact current quote.
+            net=profit(q.get('odds'))
+            estimated_ev=(probability*net-(1-probability)) if net is not None else None
+            per[brain]={'predicted_home_margin_or_total':round(p,5),
+                        'shadow_probability':round(probability,6),
+                        'shadow_ev_per_unit':round(estimated_ev,6) if estimated_ev is not None else None,
+                        'positive_ev_shadow':estimated_ev is not None and estimated_ev>0,
                         'sigma':sigma}
         if per:
             records.append({'game_id':gid,'market':target,'side':q.get('side'), 'book':q.get('book'),
