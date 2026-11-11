@@ -1134,93 +1134,214 @@ def canonical_replay_edge_diagnostics(events, games, team_map, groups, *, top_n=
             'independent_out_of_sample':False,'certified_edges':0,'bet_authority':0}
 
 
+def v55_historical_family_combinations(groups, team_map, *, max_families=7):
+    """Grade every observed independent-family subset, 2013-25 only.
+
+    One game/market/target counts once for a combination. Opposing family
+    signals veto that specific market-side; no retrospective quote is called
+    an executable bet, and unverified same-source families are not duplicated.
+    Discovery and holdout grades are strictly separated and never promote a
+    post-hoc combination to a pre-registered OOS ROI certificate.
+    """
+    counters=defaultdict(lambda:defaultdict(dict));opposed=Counter();invalid=Counter()
+    for g in groups:
+        try:
+            y=int(g['season']);market=normal_market(g['market'])
+            if not 2013<=y<=2025 or market!='spreads':continue
+            fams=sorted(set(normal_family(f) for f in g.get('families',[])) & BRAINS)
+            if not fams:continue
+            if g.get('conflict') or g.get('opposing_families'):
+                opposed[market]+=1;continue
+            gid=str(g['cfbd_game_id']);target=str(g['target'])
+            rec=team_map.get((y,gid),{}).get(target)
+            if not rec:invalid['MISSING_SIDE']+=1;continue
+            h,a,line=(num(rec.get(k)) for k in
+                      ('team_score','opponent_score','retrospective_open_spread'))
+            if None in (h,a,line):invalid['MISSING_REFERENCE_RESULT']+=1;continue
+            result=grade('spreads','HOME',line,h,a)
+            if result is None:invalid['UNGRADABLE']+=1;continue
+            season_bin='DISCOVERY_2013_2023' if y<=2023 else 'RETROSPECTIVE_2024_2025'
+            for size in range(1,min(max_families,len(fams))+1):
+                for subset in itertools.combinations(fams,size):
+                    counters[subset][season_bin][(y,gid,target)]=result
+        except (KeyError,TypeError,ValueError):invalid['INVALID_GROUP']+=1
+    summary=[]
+    for subset,splits in sorted(counters.items()):
+        bysplit={}
+        for name,observations in sorted(splits.items()):
+            values=list(observations.values());w=values.count('WIN');l=values.count('LOSS')
+            bysplit[name]={'unique_game_sides':len(values),'wins':w,'losses':l,
+                'pushes':values.count('PUSH'),
+                'cover_rate_excluding_pushes':round(w/(w+l),6) if w+l else None}
+        summary.append({'families':list(subset),'family_count':len(subset),
+                        'partitions':bysplit,'bet_authority':0})
+    return {'status':'ALL_1_TO_7_FAMILY_COMBINATIONS_REFERENCE_ATS_RESEARCH_ONLY',
+        'independent_family_subsets_observed':len(summary),
+        'by_combination':summary,'opposed_game_market_sides_vetoed':dict(opposed),
+        'invalid_rows':dict(invalid),'uses_2026_outcomes':False,
+        'independent_original_bet_price_certified':False,'bet_authority':0}
+
 V55_QUALIFICATION_BLOB = 'research/ncaaf/v55/qualified_independent_brains_v55_current.json'
 V55_QUALIFICATION_POLICY = 'V55-FROZEN-INDEPENDENT-BRAINS-2013-2025-R1'
 
 
-def v55_frozen_qualification_report(events, team_map, source_receipts, *,
-                                    generated_at=None):
-    """Audit pinned V5.5 firings by system WITHOUT certifying retrospective bets.
+def _v55_qualification_evidence(family, system_id, source_receipts, attestations):
+    """Attestations are independently captured proof, not retrospective labels.
 
-    Historical game outcomes and reference lines support descriptive system
-    analysis. OOS *authority* additionally needs independent proof of original
-    rule freeze/feature vintage, an unselected holdout and an executable rule
-    recipe. Never promote a system using only retrospective grades.
+    A receipt is verified only when the evidence names and hashes a pinned source
+    and includes independently reviewable references. Absence is a HOLD.
     """
-    import re
-    created = generated_at or datetime.now(timezone.utc).isoformat()
-    observations = defaultdict(lambda: defaultdict(dict))
-    seasons_seen = set()
-    invalid = Counter()
-    for event in events:
+    key=family+'|'+system_id
+    record=(attestations or {}).get(key) if isinstance(attestations,dict) else None
+    if not isinstance(record,dict):return {}, {'MISSING_INDEPENDENT_SYSTEM_ATTESTATION'}
+    holds=set(); receipts=source_receipts or {}
+    source_name=str(record.get('pinned_source_name') or '')
+    source=receipts.get(source_name)
+    if not (isinstance(source,dict) and len(str(source.get('sha256') or ''))==64
+            and source.get('sha256')==record.get('pinned_source_sha256')):
+        holds.add('PINNED_SOURCE_HASH_NOT_VERIFIED')
+    freeze=str(record.get('definition_frozen_at_utc') or '')
+    frozen=clock(freeze)
+    try: selection_end=int(record.get('selection_end_season') or 9999)
+    except (TypeError,ValueError):selection_end=9999
+    if (not frozen or frozen>=datetime(2024,1,1,tzinfo=timezone.utc)
+            or selection_end>2023
+            or not record.get('independent_preholdout_freeze_ref')):
+        holds.add('INDEPENDENT_PRE_HOLDOUT_RULE_FREEZE_NOT_ATTESTED')
+    fv=record.get('pregame_feature_audit') or {}
+    if not (isinstance(fv,dict) and fv.get('status')=='PASS'
+            and fv.get('source_ref') and fv.get('leakage_audit_ref')
+            and fv.get('all_features_available_before_game') is True):
+        holds.add('PREGAME_FEATURE_VINTAGE_NOT_ATTESTED')
+    live=record.get('live_recipe') or {}
+    if not (isinstance(live,dict) and live.get('role')=='directional'
+            and live.get('direction') in ('PLAY_ON','FADE')
+            and live.get('market')=='spreads'
+            and live.get('feature_parity_ref')):
+        holds.add('LIVE_RULE_FIELD_RECIPE_NOT_ATTESTED')
+    else:
+        if family=='SYSTEM_MINER':
+            conditions=live.get('conditions')
+            if not isinstance(conditions,list) or not conditions or any(
+                not isinstance(c,dict) or c.get('op') not in ('==','!=','<=','<','>=','>','in')
+                or not isinstance(c.get('field'),str)
+                or not __import__('re').fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}',c['field'])
+                or 'value' not in c for c in conditions):
+                holds.add('NO_EXACT_EXECUTABLE_V5_MINER_CONDITIONS')
+        else:
+            f=live.get('signal_field')
+            if (not isinstance(f,str) or not __import__('re').fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}',f)
+                or live.get('signal_type') not in ('FLAG','SIDE')):
+                holds.add('LIVE_RULE_FIELD_RECIPE_NOT_ATTESTED')
+    multiple=record.get('multiple_testing_audit') or {}
+    independence=record.get('source_independence_audit') or {}
+    if not isinstance(multiple,dict):multiple={}
+    if not isinstance(independence,dict):independence={}
+    if not (multiple.get('status')=='PASS' and multiple.get('audit_ref')
+            and multiple.get('selection_without_holdout_outcomes') is True
+            and independence.get('status')=='PASS' and independence.get('audit_ref')
+            and record.get('locked_holdout_ref')):
+        holds.add('MULTIPLE_TESTING_AND_SOURCE_INDEPENDENCE_NOT_ATTESTED')
+    if record.get('uses_2026_outcomes') is not False:
+        holds.add('UNVERIFIED_2026_OUTCOME_EXCLUSION')
+    return record,holds
+
+
+def v55_frozen_qualification_report(events, team_map, source_receipts, *,
+                                    generated_at=None, attestations=None):
+    """Evidence-driven full-history rule qualification; no implicit approvals.
+
+    Independently attested frozen rules are evaluated against sealed 2024-25
+    reference-spread outcomes. Missing attestations are held per system, not
+    universally asserted without examining the actual source receipts.
+    This is rule eligibility only, never a certificate of sportsbook ROI.
+    """
+    created=generated_at or datetime.now(timezone.utc).isoformat()
+    observations=defaultdict(lambda:defaultdict(dict))
+    seasons_seen=set();invalid=Counter()
+    for e in events:
         try:
-            y = int(event['season']); fam = normal_family(event['brain'])
-            sid = str(event['system_id']).strip(); market = normal_market(event['market'])
-            gid = str(event['cfbd_game_id']); target = str(event['target'])
-            if not 2013 <= y <= 2025:
-                invalid['OUTSIDE_FROZEN_HISTORICAL_SEASONS'] += 1; continue
+            y=int(e['season']);fam=normal_family(e['brain']);sid=str(e['system_id']).strip()
+            m=normal_market(e['market']);gid=str(e['cfbd_game_id']);target=str(e['target'])
+            if not 2013<=y<=2025:
+                invalid['OUTSIDE_FROZEN_HISTORICAL_SEASONS']+=1;continue
             seasons_seen.add(y)
-            if not sid or fam not in BRAINS or market != 'spreads':
-                invalid['NON_SPREAD_OR_INVALID_SYSTEM'] += 1; continue
-            rec = team_map.get((y, gid), {}).get(target)
+            if not sid or fam not in BRAINS or m!='spreads':
+                invalid['NON_SPREAD_OR_INVALID_SYSTEM']+=1;continue
+            rec=team_map.get((y,gid),{}).get(target)
             if not rec:
-                invalid['NO_CANONICAL_GAME_SIDE'] += 1; continue
-            ts, oscore, ln = (num(rec.get(k)) for k in
-                              ('team_score', 'opponent_score', 'retrospective_open_spread'))
-            if None in (ts, oscore, ln):
-                invalid['REFERENCE_RESULT_OR_LINE_MISSING'] += 1; continue
-            result = grade('spreads', 'HOME', ln, ts, oscore)
+                invalid['NO_CANONICAL_GAME_SIDE']+=1;continue
+            ts,op,ln=(num(rec.get(k)) for k in
+                        ('team_score','opponent_score','retrospective_open_spread'))
+            if None in (ts,op,ln):
+                invalid['REFERENCE_RESULT_OR_LINE_MISSING']+=1;continue
+            result=grade('spreads','HOME',ln,ts,op)
             if result not in ('WIN','LOSS','PUSH'):
-                invalid['UNGRADEABLE_REFERENCE'] += 1; continue
-            # Exact canonical game-side membership suppresses duplication.
-            observations[(fam,sid)][y][(gid,target)] = result
-        except (ValueError,TypeError,KeyError):
-            invalid['INVALID_FROZEN_EVENT'] += 1
-    diagnostics=[]; qualify=[]; rejections=Counter()
-    for (fam,sid), by_season in sorted(observations.items()):
+                invalid['UNGRADEABLE_REFERENCE']+=1;continue
+            observations[(fam,sid)][y][(gid,target)]=result
+        except (ValueError,TypeError,KeyError):invalid['INVALID_FROZEN_EVENT']+=1
+    diagnostics=[];qualified=[];rejections=Counter()
+    for (fam,sid),by_season in sorted(observations.items()):
         byyear={}
-        for year, games in sorted(by_season.items()):
-            vals=list(games.values()); w=vals.count('WIN'); l=vals.count('LOSS')
-            byyear[str(year)]={'n':len(vals),'wins':w,'losses':l,
-                 'pushes':vals.count('PUSH'),'rate':round(w/(w+l),6) if w+l else None}
-        test=[r for yy,rr in by_season.items() if yy in (2024,2025) for r in rr.values()]
-        w=test.count('WIN'); l=test.count('LOSS'); n=len(test)
+        for year,games in sorted(by_season.items()):
+            vals=list(games.values());w=vals.count('WIN');l=vals.count('LOSS')
+            byyear[str(year)]={'n':len(vals),'wins':w,'losses':l,'pushes':vals.count('PUSH'),
+                 'rate':round(w/(w+l),6) if w+l else None}
+        test=[v for yy,rr in by_season.items() if yy in (2024,2025) for v in rr.values()]
+        w=test.count('WIN');l=test.count('LOSS');n=len(test)
         holds=[]
-        if str(fam) not in ('STAT','PATHI','BIG_AL','PREDICTION_TRACKER','SYSTEM_MINER'):
+        if fam not in ('STAT','PATHI','BIG_AL','PREDICTION_TRACKER','SYSTEM_MINER'):
             holds.append('NO_EXECUTABLE_DIRECTIONAL_RULE_CONTRACT')
         if byyear.get('2024',{}).get('n',0)<15 or byyear.get('2025',{}).get('n',0)<15 or n<60:
             holds.append('RETROSPECTIVE_CONFIRMATION_SAMPLE_TOO_SMALL')
-        if w+l == 0 or w/(w+l)<0.53:
+        if not w+l or w/(w+l)<.53:
             holds.append('RETROSPECTIVE_REFERENCE_ATS_BELOW_THRESHOLD')
-        # Frozen observations show WHEN a rule fired in a historical replay,
-        # NOT when it was selected, approved and locked prospectively.
-        holds.extend(('INDEPENDENT_PRE_HOLDOUT_RULE_FREEZE_NOT_ATTESTED',
-                      'PREGAME_FEATURE_VINTAGE_NOT_ATTESTED',
-                      'LIVE_RULE_FIELD_RECIPE_NOT_ATTESTED',
-                      'MULTIPLE_TESTING_AND_SOURCE_INDEPENDENCE_NOT_ATTESTED'))
-        for hold in holds:rejections[hold]+=1
-        diagnostics.append({'family':fam,'system_id':sid,'market':'spreads',
+        proof,proof_holds=_v55_qualification_evidence(fam,sid,source_receipts,attestations)
+        # Report precise attestation gaps even when the proof registry is absent.
+        if 'MISSING_INDEPENDENT_SYSTEM_ATTESTATION' in proof_holds:
+            proof_holds.discard('MISSING_INDEPENDENT_SYSTEM_ATTESTATION')
+            proof_holds.update(('INDEPENDENT_PRE_HOLDOUT_RULE_FREEZE_NOT_ATTESTED',
+                 'PREGAME_FEATURE_VINTAGE_NOT_ATTESTED','LIVE_RULE_FIELD_RECIPE_NOT_ATTESTED',
+                 'MULTIPLE_TESTING_AND_SOURCE_INDEPENDENCE_NOT_ATTESTED'))
+        holds.extend(sorted(proof_holds))
+        for h in holds:rejections[h]+=1
+        item={'family':fam,'system_id':sid,'market':'spreads',
             'discovery_reference_games':sum(len(v) for y,v in by_season.items() if y<=2023),
             'confirmation_n':n,'confirmation_rate':round(w/(w+l),6) if w+l else None,
-            'by_season':byyear,'holds':holds,
-            'descriptive_reference_only':True,'oos_pass':False})
-    # This is deliberately a new V5.5 source publication, not the Oct 27 V2
-    # zero-system placeholder. Genuine attested passes may be added by the
-    # documented independent certification process; never auto-approve.
-    return {'schema':'NCAAF_V55_FROZEN_RULE_QUALIFICATION_AUDIT_V1',
-        'policy':V55_QUALIFICATION_POLICY,'created_utc':created,
-        'status':'HOLD_INDEPENDENT_FREEZE_AND_VINTAGE_ATTESTATION',
-        'operator_approved':False,'uses_2026_outcomes':False,
+            'by_season':byyear,'holds':holds,'descriptive_reference_only':True,
+            'oos_pass':not bool(holds),'evidence_key':fam+'|'+sid}
+        diagnostics.append(item)
+        if not holds:
+            live=proof['live_recipe']
+            rule=dict(item,role='directional',direction=live['direction'],
+                evidence_family_key=str(proof.get('evidence_family_key') or fam),
+                definition_frozen_at_utc=proof['definition_frozen_at_utc'],
+                independent_preholdout_freeze_ref=proof['independent_preholdout_freeze_ref'],
+                source_pinned_sha256=proof['pinned_source_sha256'],
+                pregame_feature_vintage_pass=True,split_disjoint=True,
+                source_neutral=True,overlap_audit='PASS',multiple_testing_audit='PASS',
+                uses_2026_outcomes=False,live_recipe=live,
+                live_signal_field=live.get('signal_field'),
+                live_signal_type=live.get('signal_type'),
+                data_ready_field=live.get('ready_field'),
+                historical_reference_not_executable_roi=True)
+            qualified.append(rule)
+    approved=bool((attestations or {}).get('_operator_approval',{}).get('approved') is True
+        and (attestations or {}).get('_operator_approval',{}).get('audit_ref'))
+    status=('FROZEN_OOS_QUALIFIED' if qualified and approved
+        else 'HOLD_OPERATOR_APPROVAL' if qualified else 'HOLD_INDEPENDENT_FREEZE_AND_VINTAGE_ATTESTATION')
+    return {'schema':'NCAAF_V55_FROZEN_RULE_QUALIFICATION_AUDIT_V2',
+        'policy':V55_QUALIFICATION_POLICY,'created_utc':created,'status':status,
+        'operator_approved':approved,'uses_2026_outcomes':False,
         'history_first_season':min(seasons_seen) if seasons_seen else None,
         'discovery_last_season':2023,'confirmation_seasons':[2024,2025],
         'source_audit':{'observed_seasons':sorted(seasons_seen),
-            'source_receipts':source_receipts or {},'invalid_firings':dict(invalid)},
-        'systems':qualify,'candidate_system_count':len(diagnostics),
+           'source_receipts':source_receipts or {},'invalid_firings':dict(invalid),
+           'attestation_systems_supplied':len([k for k in (attestations or {}) if k!='_operator_approval'])},
+        'systems':qualified,'candidate_system_count':len(diagnostics),
         'candidate_diagnostics':diagnostics,'hold_counts':dict(rejections),
         'retrospective_reference_not_executable_roi':True,
-        'independent_original_pregame_capture_certified':False,
-        'bet_authority':0}
-
+        'independent_original_pregame_capture_certified':False,'bet_authority':0}
 
 def publish_v55_frozen_qualification(report, *, storage_client=None,
                                      bucket='sharp-models'):
@@ -1328,9 +1449,29 @@ def replay_prior_brain_sources(*, storage_client=None,bucket='sharp-models',cano
         data['stage1_canonical_ledger_v5_audit.json'])
     summary['canonical_edge_research']=canonical_replay_edge_diagnostics(rows,bygame,team_map,groups)
     summary['raw_source_field_diagnostics']=source_capture_field_diagnostics(raw)
+    summary['seven_brain_combination_research']=v55_historical_family_combinations(groups,team_map)
     # Reuse the SAME pinned canonical frozen fires for source-specific
     # qualification diagnostics. No parallel Miner discovery or legacy V2 JSON.
-    qualification=v55_frozen_qualification_report(rows,team_map,receipts)
+    # Only independently supplied system-by-system evidence can lift proof holds.
+    # This is optional and read-only; the pinned canonical retrospective replay
+    # is never allowed to self-attest an original rule freeze.
+    qualification_evidence={}
+    evidence_key=os.getenv('NCAAF_V55_QUALIFICATION_EVIDENCE_KEY',
+        'research/ncaaf/v55/qualification_evidence/current.json')
+    try:
+        evidence_blob=storage_client.bucket(bucket).blob(evidence_key)
+        qualification_evidence=json.loads(evidence_blob.download_as_text())
+        if not isinstance(qualification_evidence,dict):
+            raise ValueError('QUALIFICATION_EVIDENCE_NOT_OBJECT')
+        summary['independent_evidence_source']={'uri':'gs://'+bucket+'/'+evidence_key,
+            'status':'SOURCE_PRESENT_NOT_AUTOMATICALLY_CERTIFIED',
+            'systems_supplied':len(qualification_evidence)}
+    except Exception as exc:
+        qualification_evidence={}
+        summary['independent_evidence_source']={'status':'NOT_AVAILABLE_FAIL_CLOSED',
+            'reason':type(exc).__name__,'uri':'gs://'+bucket+'/'+evidence_key}
+    qualification=v55_frozen_qualification_report(rows,team_map,receipts,
+        attestations=qualification_evidence)
     try:
         summary['frozen_rule_qualification']=publish_v55_frozen_qualification(
             qualification,storage_client=storage_client,bucket=bucket)
@@ -1653,6 +1794,12 @@ def market_rich_feature_coverage(*, client=None, project='sharplogger', dataset=
              'pregame_sharp_move_rows','pregame_feature_rows')}
     # Counts are descriptive; NO feature completeness requirement for an event.
     result={'source':table,'by_season':rows,'totals':totals,
+            # This *separate* published feed is for forward production only.
+            # It must never be represented as historical Market Rich training.
+            'data_role':'FORWARD_LIVE_MARKET_RICH_FEED_NOT_HISTORICAL_RESEARCH',
+            'historical_training_source':f'{project}.{dataset}.scores_with_features',
+            'historical_training_seasons':'2013-2025_ONLY',
+            'forward_feed_excluded_from_historical_fitting':True,
             'historical_2013_2025_rows':sum(int(r.get('pregame_rows') or 0)
                 for r in rows if 2013<=int(r.get('season') or 0)<=2025),
             'legacy_SHARP_SIDE_TO_BET_required':False,
@@ -3253,6 +3400,14 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
     report['archived_multiseason_quote_audit']=ml_archived_quote_vintage_audit(
         client=client,project=project,dataset=dataset)
     report['market_rich_historical_source_audit']=market_audit
+    report['market_rich_data_roles']={
+        'historical_training':{'table':f'{project}.{dataset}.scores_with_features',
+                               'season_max':2025,
+                               'coverage_audit':market_audit,
+                               'allows_2026':False},
+        'forward_live':{'table':f'{project}.{dataset}.moves_with_features_merged',
+                        'excluded_from_historical_training':True,
+                        'feed_uri':market_feed_uri or ('gs://'+bucket+'/research/ncaaf/v55/market_rich/pregame_events_latest.jsonl.gz')}}
     report['historical_source_audit']=source
     # Separately explain CFBD matrix availability, verified pre-kick labels,
     # and untimed retrospective references. Reporting a small primary lane

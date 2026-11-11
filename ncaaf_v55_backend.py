@@ -760,6 +760,11 @@ def build_live_cfbd_feature_snapshots(board_rows, cfbd_rows, required_features, 
                     'cfbd_game_date_utc':cfbd_kick.isoformat(),
                     'verified_sportsbook_kickoff_utc':kick.isoformat(),
                     'core_features':features,
+                    # Preserve exact independently oriented team priors for the
+                    # full-history Miner V5 (ML sees only aggregate differences).
+                    'team_side_features':{
+                        'HOME':{c:hr.get(c) for c in priors},
+                        'AWAY':{c:ar.get(c) for c in priors}},
                     'source':'EXISTING_CFBD_MINER_PREKICK_PRIORS_READ_TIME_SHADOW',
                     'identity_match_method':method,
                     'feature_vintage_verified':vintage_verified,
@@ -1081,11 +1086,199 @@ def persist_v55_prospective_events(events, storage_client, bucket, *, now=None):
                      'legacy_miner_used':False,'historical_certification_claimed':False}
 
 
+# V5.5 shared qualification contract (research publisher -> live backend).
+V55_QUALIFICATION_SCHEMA='NCAAF_V55_FROZEN_RULE_QUALIFICATION_AUDIT_V2'
+V55_QUALIFICATION_POLICY='V55-FROZEN-INDEPENDENT-BRAINS-2013-2025-R1'
+
+
+def validate_v55_current_qualification(doc, raw_sha='', *, now=None):
+    """Validate exact V5.5 research schema WITHOUT consulting legacy V2 registry.
+
+    Original evidence proof fields and OOS results must be present in each
+    accepted system. The issuer's status alone NEVER grants an individual rule.
+    """
+    import re
+    at=clock(now) if now is not None else datetime.now(timezone.utc)
+    rejects=Counter();rules={}
+    if not isinstance(doc,dict) or doc.get('schema')!=V55_QUALIFICATION_SCHEMA:
+        return None,'QUALIFICATION_SCHEMA_MISMATCH'
+    if doc.get('policy')!=V55_QUALIFICATION_POLICY or doc.get('uses_2026_outcomes') is not False:
+        return None,'QUALIFICATION_POLICY_OR_LEAKAGE_MISMATCH'
+    if doc.get('status')!='FROZEN_OOS_QUALIFIED' or doc.get('operator_approved') is not True:
+        return None,'NO_INDEPENDENTLY_APPROVED_FROZEN_OOS_RULES:'+s(doc.get('status'))
+    created=clock(doc.get('created_utc'))
+    if not created or not at or created>at:
+        return None,'INVALID_QUALIFICATION_PUBLICATION_TIME'
+    if doc.get('discovery_last_season')!=2023 or doc.get('confirmation_seasons')!=[2024,2025]:
+        return None,'UNSEALED_HOLDOUT_CONTRACT'
+    for entry in doc.get('systems') or []:
+        if not isinstance(entry,dict):rejects['BAD_RULE']+=1;continue
+        fam=family(entry.get('family'));sid=s(entry.get('system_id'))
+        key=(fam,sid);recipe=entry.get('live_recipe') or {}
+        if not sid or fam not in BRAINS or key in rules:
+            rejects['DUPLICATE_OR_INVALID_RULE_ID']+=1;continue
+        if not (entry.get('oos_pass') is True and entry.get('pregame_feature_vintage_pass') is True
+            and entry.get('split_disjoint') is True and entry.get('source_neutral') is True
+            and entry.get('overlap_audit')=='PASS' and entry.get('multiple_testing_audit')=='PASS'
+            and entry.get('uses_2026_outcomes') is False
+            and entry.get('independent_preholdout_freeze_ref')
+            and entry.get('source_pinned_sha256')
+            and not entry.get('holds')):
+            rejects['EVIDENCE_ATTESTATION_INCOMPLETE']+=1;continue
+        frozen=clock(entry.get('definition_frozen_at_utc'))
+        if not frozen or frozen>=datetime(2024,1,1,tzinfo=timezone.utc):
+            rejects['RULE_NOT_FROZEN_BEFORE_HOLDOUT']+=1;continue
+        try:
+            n=int(entry.get('confirmation_n')); rate=float(entry.get('confirmation_rate'))
+            season=entry.get('by_season') or {}
+            a,b=season['2024'],season['2025']
+            if not (n>=60 and int(a['n'])>=15 and int(b['n'])>=15
+                    and n==int(a['n'])+int(b['n']) and rate>=.53):
+                raise ValueError('OOS_COUNTS')
+        except (ValueError,KeyError,TypeError):
+            rejects['OOS_RESULTS_INVALID']+=1;continue
+        if not (recipe.get('role')=='directional' and recipe.get('market')=='spreads'
+            and recipe.get('direction') in ('PLAY_ON','FADE') and recipe.get('feature_parity_ref')):
+            rejects['LIVE_RECIPE_UNVERIFIED']+=1;continue
+        if fam=='SYSTEM_MINER':
+            conditions=recipe.get('conditions')
+            if not isinstance(conditions,list) or not conditions or any(
+               not isinstance(c,dict) or c.get('op') not in ('==','!=','<=','<','>=','>','in')
+               or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}',s(c.get('field')))
+               or 'value' not in c for c in conditions):
+                rejects['MINER_CONDITION_GRAMMAR_UNSUPPORTED']+=1;continue
+        else:
+            f=s(recipe.get('signal_field'));t=s(recipe.get('signal_type'))
+            expected={'STAT':'NCAAF_Stat_','PATHI':'Pathi_','BIG_AL':'BigAl_'}
+            if (not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}',f) or t not in ('FLAG','SIDE')
+                or (fam in expected and not f.startswith(expected[fam]))
+                or (fam=='PREDICTION_TRACKER' and t!='SIDE')):
+                rejects['EXPERT_LIVE_FIELD_UNSUPPORTED']+=1;continue
+        rules[key]={'family':fam,'id':sid,'signal':recipe.get('signal_field'),
+            'signal_type':recipe.get('signal_type'),'direction':recipe['direction'],
+            'ready_field':s(recipe.get('ready_field')),'conditions':recipe.get('conditions'),
+            'key':s(entry.get('evidence_family_key') or fam),'qualified_at':created,
+            'n':n,'rate':rate,'frozen_hash':s(entry.get('source_pinned_sha256')),
+            'feature_parity_ref':recipe['feature_parity_ref']}
+    return {'rules':rules,'created_utc':created,'report_sha256':raw_sha,
+        'source_seasons':'2013-2025','rejected_by_reason':dict(rejects),
+        'miner_rules':sum(k[0]=='SYSTEM_MINER' for k in rules)},None
+
+
+def _v55_exact_condition(features, condition):
+    """Exact, declared predicates only. Missing inputs never match."""
+    field=condition['field'];op=condition['op'];wanted=condition['value']
+    if field not in features or features[field] is None:return False
+    val=features[field]
+    if op=='in':
+        return isinstance(wanted,(list,tuple)) and val in wanted
+    if op in ('==','!='):
+        return (val==wanted) if op=='==' else (val!=wanted)
+    try:
+        x=float(val);y=float(wanted)
+        if not math.isfinite(x) or not math.isfinite(y):return False
+        return {'<':lambda:x<y,'<=':lambda:x<=y,'>':lambda:x>y,'>=':lambda:x>=y}[op]()
+    except (ValueError,TypeError,KeyError):return False
+
+
+def produce_v55_full_history_miner(board, feature_rows, qualified_registry, *,
+                                    storage_client, bucket, now=None):
+    """Execute independently attested V5 frozen Miner conditions on live priors.
+
+    The actual feature record MUST identify the team side and pass feature
+    vintage verification. Game-level ML diff features alone are insufficient.
+    Never invoke retired RV22 votes, infer missing conditions, or flip sides.
+    """
+    at=clock(now) if now is not None else datetime.now(timezone.utc)
+    rules={k:r for k,r in (qualified_registry or {}).get('rules',{}).items()
+           if k[0]=='SYSTEM_MINER'}
+    holds=Counter();prepared=[];seen=set()
+    audit={'status':'NO_QUALIFIED_V5_MINER_RULES','frozen_rules':len(rules),
+        'evaluated_side_features':0,'fired':0,'holds':{},'legacy_v2_used':False,
+        'bet_authority':0}
+    if not rules:return [],audit
+    if hasattr(board,'to_dict'):board=board.to_dict('records')
+    byid={s(r.get('Game_ID') or r.get('game_id')):r for r in board}
+    oriented=[]
+    for item in feature_rows:
+        if not isinstance(item,dict):holds['INVALID_FEATURE_RECORD']+=1;continue
+        sides=item.get('team_side_features')
+        if isinstance(sides,dict):
+            for side in ('HOME','AWAY'):
+                if isinstance(sides.get(side),dict):
+                    oriented.append(dict(item,team_side=side,features=sides[side],
+                                         core_features=sides[side]))
+        else:
+            oriented.append(item)
+    for item in oriented:
+        gid=s(item.get('game_id') or item.get('Game_ID'))
+        side=s(item.get('team_side') or item.get('Team_Side')).upper()
+        if side not in ('HOME','AWAY'):
+            holds['NO_TEAM_SIDE_FEATURE_VIEW']+=1;continue
+        if item.get('feature_vintage_verified') is not True:
+            holds['PREGAME_FEATURE_VINTAGE_NOT_VERIFIED']+=1;continue
+        feats=item.get('core_features') or item.get('features') or {}
+        if not isinstance(feats,dict):holds['FEATURES_NOT_A_DICTIONARY']+=1;continue
+        row=byid.get(gid)
+        if not row:holds['NO_MATCHED_BOARD_GAME']+=1;continue
+        quote=clock(row.get('Backend_Quote_Timestamp'))
+        kickoff=clock(row.get('Game_Start_UTC'))
+        book=s(row.get('Backend_Quote_Book')).lower()
+        if not (quote and kickoff and quote<=at<kickoff and
+                (at-quote).total_seconds()<=900 and book and
+                s(row.get('Quote_State')).startswith('FRESH_')):
+            holds['NO_CURRENT_BOOK_PRICE']+=1;continue
+        prefix='Home' if side=='HOME' else 'Away'
+        line=num(row.get('Backend_'+prefix+'_Spread'))
+        odds=num(row.get('Backend_'+prefix+'_Odds_American'))
+        if line is None or profit(odds) is None:
+            holds['SIDE_HAS_NO_EXECUTABLE_SPREAD_AND_ODDS']+=1;continue
+        audit['evaluated_side_features']+=1
+        for (fam,sid),rule in rules.items():
+            conditions=rule.get('conditions') or []
+            if not conditions or any(c['field'] not in feats for c in conditions):
+                holds['FROZEN_RULE_FEATURES_NOT_AVAILABLE']+=1;continue
+            if not all(_v55_exact_condition(feats,c) for c in conditions):continue
+            target=side if rule['direction']=='PLAY_ON' else ('AWAY' if side=='HOME' else 'HOME')
+            selected='Home' if target=='HOME' else 'Away'
+            selected_line=num(row.get('Backend_'+selected+'_Spread'))
+            selected_odds=num(row.get('Backend_'+selected+'_Odds_American'))
+            if selected_line is None or profit(selected_odds) is None:
+                holds['FADE_SELECTED_SIDE_HAS_NO_PRICE']+=1;continue
+            identity=(gid,target,book,selected_line,fam,sid,quote.isoformat())
+            if identity in seen:holds['DUPLICATE_FIRING']+=1;continue
+            seen.add(identity)
+            definition=sha((rule['frozen_hash'],sid,conditions,rule['direction']))
+            capture_id=sha(('V55_MINER_FROZEN_V5',identity,at.isoformat()))
+            prepared.append({'game_id':gid,'market':'spreads','side':target,
+                'source_family':'SYSTEM_MINER','system_id':sid,
+                'evidence_family_key':rule['key'],'frozen_definition_sha256':definition,
+                'book':book,'line':selected_line,'odds':selected_odds,
+                'kickoff_utc':kickoff.isoformat(),
+                'signal_observed_at_utc':at.isoformat(),
+                'quote_observed_at_utc':quote.isoformat(),
+                'direction_verified':True,'prospective_evaluation_after_quote':True,
+                'quote_capture_ref':'bq://sharplogger.sharp_data.sharp_moves_master#'+sha(identity),
+                'signal_capture_ref':None,'capture_id':capture_id,
+                'original_event_created_prospectively':True,
+                'historical_betting_roi_certified':False,
+                'source_frozen_miner_v5':True})
+    audit['fired']=len(prepared);audit['holds']=dict(holds)
+    if not prepared:
+        audit['status']='NO_VERIFIABLE_V5_MINER_FIRINGS';return [],audit
+    try:
+        captured,cap=persist_v55_prospective_events(prepared,storage_client,bucket,now=at)
+        audit.update(status='PASS_V5_MINER_CAPTURED',capture=cap)
+        return captured,audit
+    except Exception as exc:
+        audit.update(status='HOLD_MINER_CAPTURE_WRITE_FAILED',error=type(exc).__name__+':'+str(exc)[:160])
+        return [],audit
+
 def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
                                          bucket, now=None, log_func=None):
     """Current genuine frozen-rule producer. Never executes old Miner/V1 authority."""
     from ncaaf_v55_board import (_v55_direct_current_quote_rows,
-        _v55_validate_long_history_brain_registry,derive_v55_other_qualified_events)
+        derive_v55_other_qualified_events)
     import pandas as pd
     at=clock(now) if now is not None else datetime.now(timezone.utc)
     log=log_func or (lambda *_:None)
@@ -1109,7 +1302,7 @@ def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
         audit['qualification_candidates']=int(document.get('candidate_system_count') or 0)
         audit['qualification_systems']=len(document.get('systems') or [])
         audit['qualification_hold_counts']=document.get('hold_counts') or {}
-        frozen,problem=_v55_validate_long_history_brain_registry(
+        frozen,problem=validate_v55_current_qualification(
             document,raw_sha=hashlib.sha256(raw).hexdigest())
         if not frozen:
             problem=s(document.get('status'))+':'+s(problem)
@@ -1119,6 +1312,12 @@ def produce_v55_verified_expert_signals(board, book_quotes, *, storage_client,
     if problem or not frozen or not frozen.get('rules'):
         audit.update(status='HOLD_NO_FROZEN_EXPERT_LIVE_RULE_REGISTRY',reason=str(problem or 'NO_FROZEN_RULES'))
         return [],audit
+    expert_rules={k:v for k,v in frozen['rules'].items() if k[0]!='SYSTEM_MINER'}
+    if not expert_rules:
+        audit.update(status='NO_QUALIFIED_EXPERT_RULES_MINER_MAY_STILL_RUN',
+                     accepted_events=0,full_history_miner_registry_rules=frozen.get('miner_rules',0))
+        return [],audit
+    frozen=dict(frozen,rules=expert_rules)
     # Every live evaluation uses current executable paired quotes only; long
     # research-reference quotes cannot be used to declare original predictions.
     fresh=board.loc[board['Backend_Quote_Timestamp'].map(lambda x:
@@ -1315,6 +1514,24 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
             manifest=read_registry(ml_uri)
             wanted={c for key,spec in (manifest.get('artifacts') or {}).items()
                     if key.startswith('FULL_') for c in spec.get('features',[])}
+            # Only explicit qualified Miner prior-field recipes extend the
+            # existing forward CFBD read. No guessing from atom names.
+            try:
+                qkey=os.getenv('NCAAF_V55_QUALIFIED_RULE_REGISTRY_KEY',
+                    'research/ncaaf/v55/qualified_independent_brains_v55_current.json')
+                qraw=gcs.bucket(bucket).blob(qkey).download_as_bytes()
+                qreg,qproblem=validate_v55_current_qualification(
+                    json.loads(qraw),raw_sha=hashlib.sha256(qraw).hexdigest())
+                if qreg:
+                    for (fam,_),rule in qreg['rules'].items():
+                        if fam!='SYSTEM_MINER':continue
+                        for condition in rule.get('conditions') or []:
+                            field=s(condition['field'])
+                            if field.endswith('_Prior'):
+                                wanted.add('CFBD_DIFF_'+field)
+            except Exception:
+                # Still score frozen ML features; Miner audit will show hold.
+                pass
             source=read_live_cfbd_rows_from_bq(bq,feature_table,wanted)
             ml_feature_rows,feature_audit=build_live_cfbd_feature_snapshots(
                 board.to_dict('records'),source,wanted)
@@ -1328,6 +1545,29 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
         feature_audit={'status':'HOLD_LIVE_CFBD_FEATURE_SOURCE',
                        'error':type(exc).__name__+':'+str(exc),'bet_authority':0}
     log('[NCAAF-V55-FULL-HISTORY-FEATURE-AUDIT] '+json.dumps(feature_audit,sort_keys=True))
+    # Full-history Miner V5 evaluates side-specific, audited pregame feature
+    # records; no V2 votes and no retrospective replay promoted to live.
+    miner_registry=None;miner_registry_hold='NOT_CONFIGURED'
+    try:
+        qualification_key=os.getenv('NCAAF_V55_QUALIFIED_RULE_REGISTRY_KEY',
+            'research/ncaaf/v55/qualified_independent_brains_v55_current.json')
+        qraw=gcs.bucket(bucket).blob(qualification_key).download_as_bytes()
+        miner_registry,miner_registry_hold=validate_v55_current_qualification(
+            json.loads(qraw),raw_sha=hashlib.sha256(qraw).hexdigest())
+    except Exception as exc:
+        miner_registry_hold='V55_MINER_REGISTRY_READ_FAILED:'+type(exc).__name__
+    miner_audit={'status':'HOLD_QUALIFICATION_REGISTRY', 'reason':miner_registry_hold,
+                 'captured':0}
+    if miner_registry is not None:
+        new_miner,miner_audit=produce_v55_full_history_miner(
+            board,ml_feature_rows,miner_registry,storage_client=gcs,bucket=bucket)
+        signals.extend(new_miner)
+        if new_miner and source_hold=='LIVE_ORIGINAL_DIRECTIONAL_SIGNAL_FEED_NOT_CONFIGURED':
+            source_hold=None
+    log('[NCAAF-V55-FULL-HISTORY-MINER-PRODUCER-AUDIT] '+json.dumps(
+        miner_audit,sort_keys=True,default=str))
+    seven_brain_input_audit['full_history_miner_producer']=miner_audit
+    seven_brain_input_audit['total_original_events_including_new_capture']=len(signals)
     extras_uri=s(os.environ.get('NCAAF_V55_OTHER_MARKET_QUOTES_URI'))
     extra_quotes=read_rows(extras_uri) if extras_uri else None
     signals,live_identity_audit=canonicalize_live_signal_game_ids(signals,board)
