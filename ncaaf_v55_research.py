@@ -3625,10 +3625,11 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
     # Full CFBD 2013-2025 margin/total targets are score-derived, not
     # restricted to the 2025 market snapshot / historical odds population.
     # V5.2 game IDs and prior-feature construction are the sole training input.
-    game_audit_rows=[]
+    game_audit_rows=[];brain_audit_rows=[]
     full_report, full_models = fit_full_history(
         rows, events, team_map, market_rows=market_data,
-        archived_reference_rows=archived_references, audit_rows=game_audit_rows)
+        archived_reference_rows=archived_references, audit_rows=game_audit_rows,
+        brain_audit_rows=brain_audit_rows)
     # Enrich the ledger with verified canonical home/away names and scores.
     for _row in game_audit_rows:
         _sides=team_map.get((_row['season'],_row['canonical_game_id']),{})
@@ -3674,6 +3675,49 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
         print('[NCAAF-V55-GAME-LEVEL-AUDIT-EXPORT-FAILED] '+
               json.dumps(full_report['game_level_audit'],sort_keys=True),flush=True)
         raise RuntimeError('NCAAF_V55_GAME_LEVEL_AUDIT_EXPORT_FAILED') from _exc
+    # Export one row per game showing exactly which of the seven brains had
+    # an observed input. Preserve missing source coverage instead of claiming
+    # that no recorded fire is a verified no-fire. This is RESEARCH ONLY.
+    brain_uri='gs://'+bucket+'/research/ncaaf/v55/ml/seven_brain_game_input_audit_latest.csv.gz'
+    try:
+        import csv,gzip,io
+        from google.cloud import storage as _storage
+        _client=storage_client or _storage.Client()
+        _brain_fields=['season','canonical_game_id','home_team','away_team',
+            'final_home_margin','core_margin_oof','stat_margin_oof','full_combined_margin_oof',
+            'core_prior_numeric_fields','stat_prior_numeric_fields',
+            'market_rich_historical_present','market_rich_numeric_fields',
+            'retrospective_expert_capture_certified','market_rich_forward_feed_used_for_training',
+            'expert_source_no_fire_certified']
+        for _family in _V55_FH_FAMILIES:
+            _brain_fields.extend([f'{_family}_{_key}' for _key in ('home_fires','away_fires','net','state')])
+        _buf=io.StringIO();_writer=csv.DictWriter(_buf,fieldnames=_brain_fields,extrasaction='ignore')
+        _writer.writeheader()
+        for _row in brain_audit_rows:
+            _sides=team_map.get((_row['season'],_row['canonical_game_id']),{})
+            if isinstance(_sides,dict):
+                for _name,_side in _sides.items():
+                    if not isinstance(_side,dict):continue
+                    _flag=str(_side.get('is_home_verified','')).lower()
+                    if _flag in ('1','true','yes'):_row['home_team']=_name
+                    elif _flag in ('0','false','no'):_row['away_team']=_name
+            _writer.writerow({k:('' if _row.get(k) is None else _row.get(k)) for k in _brain_fields})
+        _blob=_client.bucket(bucket).blob('research/ncaaf/v55/ml/seven_brain_game_input_audit_latest.csv.gz')
+        _blob.content_encoding='gzip'
+        _blob.upload_from_string(gzip.compress(_buf.getvalue().encode('utf-8')),
+                                 content_type='text/csv')
+        full_report['seven_brain_game_audit']={'status':'PUBLISHED','uri':brain_uri,
+            'rows':len(brain_audit_rows),'schema':'V55_SEVEN_BRAIN_GAME_INPUT_AUDIT_V1',
+            'core_stat_oof_are_diagnostics_not_combined_inputs':True,
+            'no_source_fire_certification':True,'bet_authority':0}
+        print('[NCAAF-V55-SEVEN-BRAIN-GAME-AUDIT] '+
+            json.dumps(full_report['seven_brain_game_audit'],sort_keys=True),flush=True)
+    except Exception as _exc:
+        full_report['seven_brain_game_audit']={'status':'EXPORT_FAILED','uri':brain_uri,
+            'error':type(_exc).__name__+':'+str(_exc)}
+        print('[NCAAF-V55-SEVEN-BRAIN-GAME-AUDIT-EXPORT-FAILED] '+
+            json.dumps(full_report['seven_brain_game_audit'],sort_keys=True),flush=True)
+        raise RuntimeError('NCAAF_V55_SEVEN_BRAIN_GAME_AUDIT_EXPORT_FAILED') from _exc
     models.update(full_models)
     report['full_history_score_research'] = full_report
     report['full_history_coverage_funnel'] = {
@@ -3947,33 +3991,48 @@ def _v55_fh_finite(x):
         return v if math.isfinite(v) else float('nan')
     except (TypeError, ValueError):return float('nan')
 
-def _v55_fh_evidence_features(events, team_map):
-    """Canonical, market-specific unique family evidence; no results in X."""
-    counts=defaultdict(Counter);seen=set();unknown=Counter()
+def _v55_fh_evidence_features(events, team_map, *, return_trace=False):
+    """Canonical unique family evidence and an explicit per-game trace.
+
+    A zero NET does not prove a family was observed and fired no signals:
+    it can also mean simultaneous opposing fires or absent source coverage.
+    Frozen retrospective records are not original pregame capture certificates.
+    """
+    counts=defaultdict(Counter);seen=set()
     for e in events:
         try:
-            fam=str(e['brain']);mkt=str(e['market']);yr=int(e['season']);gid=str(e['cfbd_game_id']);side=str(e['target'])
+            fam=str(e['brain']);mkt=str(e['market'])
+            yr=int(e['season']);gid=str(e['cfbd_game_id']);side=str(e['target'])
         except (ValueError,TypeError,KeyError):continue
         if fam not in _V55_FH_FAMILIES or mkt not in ('spreads','h2h','totals'):continue
         sysid=str(e.get('system_id') or e.get('mechanism_id') or '').strip()
         token=(yr,gid,mkt,side,fam,sysid if sysid else hashlib.sha256(json.dumps(e,sort_keys=True,default=str).encode()).hexdigest())
         if token in seen:continue
         seen.add(token);counts[(yr,gid,mkt,side)][fam]+=1
-    out={}
+    out={};trace={}
     for key,sides in team_map.items():
         if not isinstance(key,tuple) or len(key)!=2:continue
         h=[name for name,side in sides.items() if str(side.get('is_home_verified')).lower() in ('1','true','yes')]
         a=[name for name,side in sides.items() if str(side.get('is_home_verified')).lower() in ('0','false','no')]
         if len(h)!=1 or len(a)!=1:continue
-        yr,gid=key; features={}
-        for fam in _V55_FH_FAMILIES:
-            for mkt in ('spreads','h2h','totals'):
-                hside,aside=('OVER','UNDER') if mkt=='totals' else (h[0],a[0])
+        yr,gid=key; features={};game_trace={}
+        for mkt in ('spreads','h2h','totals'):
+            hside,aside=('OVER','UNDER') if mkt=='totals' else (h[0],a[0])
+            game_trace[mkt]={}
+            for fam in _V55_FH_FAMILIES:
                 hv=counts.get((yr,gid,mkt,hside),Counter()).get(fam,0)
                 av=counts.get((yr,gid,mkt,aside),Counter()).get(fam,0)
-                features[f'EVIDENCE_{mkt}_{fam}_NET']=float(min(3,hv)-min(3,av))
-        out[key]=features
-    return out
+                net=float(min(3,hv)-min(3,av))
+                features[f'EVIDENCE_{mkt}_{fam}_NET']=net
+                game_trace[mkt][fam]={'home_fires':hv,'away_fires':av,
+                    'unique_fires':hv+av,'net':net,
+                    'state':('RECORDED_OPPOSING_CAPPED_NET_ZERO' if hv and av and not net else
+                             'RECORDED_OPPOSING_UNBALANCED' if hv and av else
+                             'RECORDED_DIRECTIONAL_FIRE' if hv or av else
+                             'NO_RECORDED_FIRE_SOURCE_COVERAGE_UNKNOWN')}
+        out[key]=features;trace[key]=game_trace
+    return (out,trace) if return_trace else out
+
 
 def _v55_fh_prepare_rows(historical_rows,events,team_map, *, market_rows=None):
     # Market Rich historical snapshots are sourced exclusively from verified
@@ -3995,7 +4054,7 @@ def _v55_fh_prepare_rows(historical_rows,events,team_map, *, market_rows=None):
                 market_invalid['DUPLICATE_GAME']+=1;continue
             historical_market[key]=dict(fields)
         except (ValueError,TypeError,KeyError):market_invalid['INVALID_ID']+=1
-    ev=_v55_fh_evidence_features(events,team_map)
+    ev,evidence_trace=_v55_fh_evidence_features(events,team_map,return_trace=True)
     rows=[];holds=Counter();years=Counter()
     for r in historical_rows:
         try:
@@ -4014,7 +4073,22 @@ def _v55_fh_prepare_rows(historical_rows,events,team_map, *, market_rows=None):
         market_features={f:_v55_fh_finite((market or {}).get(f))
                          for f in ML_HIST_MARKET_FIELDS}
         market_features['MARKET_RICH_HIST_PRESENT']=float(bool(market))
-        item={'season':year,'game_id':key[1], 'features':{**prior,**ev.get(key,{}),**market_features},
+        # Explicit source-fire presence and opposition flags are derived from
+        # the very same uniquely deduplicated events as NET. This lets the
+        # combined model distinguish a balanced pair of recorded fires from
+        # an unobserved/no-recorded-fire game, without assuming missing feeds
+        # mean a verified NO_FIRE. No results or outcome grades enter features.
+        recorded_flags={}
+        per_market_trace=evidence_trace.get(key,{})
+        for mk in ('spreads','h2h','totals'):
+            for family in _V55_FH_FAMILIES:
+                occurrence=per_market_trace.get(mk,{}).get(family,{})
+                home_count=int(occurrence.get('home_fires',0))
+                away_count=int(occurrence.get('away_fires',0))
+                recorded_flags[f'EVIDENCE_{mk}_{family}_RECORDED_FIRE']=float(bool(home_count+away_count))
+                recorded_flags[f'EVIDENCE_{mk}_{family}_OPPOSING_FIRE']=float(bool(home_count and away_count))
+        item={'season':year,'game_id':key[1], 'features':{**prior,**ev.get(key,{}),**recorded_flags,**market_features},
+              'evidence_trace':evidence_trace.get(key,{}),
               'margin':hs-aw,'total':hs+aw, 'reference_spread':_v55_fh_finite((r.get('core_features') or {}).get('MARKET_SPREAD_LINE_REFERENCE')),
               'reference_total':_v55_fh_finite((r.get('core_features') or {}).get('MARKET_TOTAL_LINE_REFERENCE'))}
         rows.append(item);years[year]+=1
@@ -4026,6 +4100,95 @@ def _v55_fh_prepare_rows(historical_rows,events,team_map, *, market_rows=None):
            'historical_market_rich_matched_games':sum((int(r['season']),str(r['game_id'])) in historical_market for r in rows),
            'historical_market_rich_rejections':dict(market_invalid)}
     return rows,audit
+
+def v55_seven_brain_representation_summary(rows, *, market='spreads'):
+    """Exact input coverage: recorded fire != net fire != source verified.
+
+    CORE/STAT independent OOF predictions are audited separately by the
+    caller. Market Rich is missing on non-joined historical snapshot games.
+    """
+    families=('SYSTEM_MINER','PATHI','BIG_AL','PREDICTION_TRACKER')
+    all_brains=('CORE','STAT')+families+('MARKET_RICH',)
+    out={'schema':'V55_SEVEN_BRAIN_REPRESENTATION_V1',
+         'status':'INPUTS_AUDITED__INDEPENDENT_INCREMENTAL_VALUE_NOT_PROVEN',
+         'game_count':len(rows),'market':market,'by_brain':{},
+         'source_vintage_certified':False,'bet_authority':0,
+         'core_stat_note':'CORE and STAT independent OOF outputs are diagnostics; FULL_COMBINED_margin currently uses overlapping CFBD prior features, NOT those OOF outputs as a seven-brain stack.',
+         'no_fire_note':'Zero NET may mean unrecorded source, no fire, or opposing balanced fires; explicit fire counts distinguish the latter.',
+         'market_rich_note':'Only historical verified prekick snapshot features count as historical Market Rich. Forward 2026 moves are excluded.'}
+    seasons=sorted(set(int(r['season']) for r in rows))
+    for fam in all_brains:
+        seasons_out={};total=Counter()
+        for season in seasons:
+            batch=[r for r in rows if int(r['season'])==season]
+            cnt=Counter();cnt['games']=len(batch)
+            for r in batch:
+                feat=r.get('features',{})
+                if fam in ('CORE','STAT'):
+                    prior=[k for k in feat if k.startswith('CFBD_DIFF_') and k.endswith('_Prior')]
+                    if fam=='STAT':
+                        prior=[k for k in prior if ('_Season_' in k or '_Recent3_' in k or '_Recent5_' in k) and ('_Off_' in k or '_Def_' in k)]
+                    n=sum(math.isfinite(_v55_fh_finite(feat.get(k))) for k in prior)
+                    if n:cnt['games_with_prior_features']+=1
+                elif fam=='MARKET_RICH':
+                    if feat.get('MARKET_RICH_HIST_PRESENT')==1.:cnt['historical_snapshot_games']+=1
+                    if sum(math.isfinite(_v55_fh_finite(feat.get(k))) for k in ML_HIST_MARKET_FIELDS):cnt['games_with_numeric_market_features']+=1
+                else:
+                    trace=r.get('evidence_trace',{}).get(market,{}).get(fam,{})
+                    h=int(trace.get('home_fires',0));a=int(trace.get('away_fires',0))
+                    if h+a:cnt['recorded_fire_games']+=1
+                    if h and a:cnt['opposing_fire_games']+=1
+                    if h and a and min(3,h)==min(3,a):cnt['capped_net_zero_games']+=1
+                    if h+a and min(3,h)!=min(3,a):cnt['nonzero_net_games']+=1
+                    cnt['unique_recorded_fires']+=h+a
+            seasons_out[str(season)]=dict(cnt)
+            total.update(cnt)
+        if fam in ('CORE','STAT'): kind='CFBD_PREGAME_PRIOR_FEATURES'
+        elif fam=='MARKET_RICH': kind='HISTORICAL_VERIFIED_PREKICK_FEATURES_MISSING_IF_ABSENT'
+        else: kind='RETROSPECTIVE_FROZEN_FIRES_NO_CAPTURE_CERTIFICATE'
+        out['by_brain'][fam]={'representation':kind,'totals':dict(total),
+                             'by_season':seasons_out}
+    return out
+
+
+def v55_build_seven_brain_game_audit(rows,allpred):
+    """One row per canonical training game. Scores are not model inputs.
+
+    A brain without a recorded historical fire is UNKNOWN, not a confirmed
+    no-fire. Independent CORE/STAT OOF scores are included for diagnostics,
+    not falsely labeled as features consumed by FULL_COMBINED_margin.
+    """
+    records=[]
+    for idx,r in enumerate(rows):
+        features=r.get('features',{});trace=r.get('evidence_trace',{}).get('spreads',{})
+        rec={'season':r['season'],'canonical_game_id':r['game_id'],
+             'final_home_margin':r.get('margin'),
+             'full_combined_margin_oof':None,
+             'core_margin_oof':None,'stat_margin_oof':None,
+             'market_rich_historical_present':features.get('MARKET_RICH_HIST_PRESENT')==1.,
+             'market_rich_numeric_fields':sum(math.isfinite(_v55_fh_finite(features.get(k))) for k in ML_HIST_MARKET_FIELDS),
+             'core_prior_numeric_fields':sum(k.startswith('CFBD_DIFF_') and k.endswith('_Prior') and math.isfinite(_v55_fh_finite(v)) for k,v in features.items()),
+             'stat_prior_numeric_fields':sum(k.startswith('CFBD_DIFF_') and k.endswith('_Prior') and
+                 ('_Season_' in k or '_Recent3_' in k or '_Recent5_' in k) and
+                 ('_Off_' in k or '_Def_' in k) and math.isfinite(_v55_fh_finite(v)) for k,v in features.items()),
+             'retrospective_expert_capture_certified':False,
+             'market_rich_forward_feed_used_for_training':False,
+             'expert_source_no_fire_certified':False}
+        for model_name,field in (('FULL_COMBINED_margin','full_combined_margin_oof'),
+                                 ('FULL_CORE_margin','core_margin_oof'),
+                                 ('FULL_STAT_margin','stat_margin_oof')):
+            arr=allpred.get(model_name)
+            if arr is not None and idx<len(arr) and math.isfinite(_v55_fh_finite(arr[idx])):
+                rec[field]=float(arr[idx])
+        for fam in _V55_FH_FAMILIES:
+            data=trace.get(fam,{})
+            rec[f'{fam}_home_fires']=data.get('home_fires',0)
+            rec[f'{fam}_away_fires']=data.get('away_fires',0)
+            rec[f'{fam}_net']=data.get('net',0)
+            rec[f'{fam}_state']=data.get('state','NO_RECORDED_FIRE_SOURCE_COVERAGE_UNKNOWN')
+        records.append(rec)
+    return records
+
 
 def v55_ats_oof_validation(records, *, hypothesis, source):
     """Out-of-season spread probability diagnostics; never an ROI certificate.
@@ -4368,7 +4531,8 @@ def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
 
 
 def fit_full_history(historical_rows,events,team_map,*,market_rows=None,
-                     archived_reference_rows=None,min_train=240,min_test=30, audit_rows=None):
+                     archived_reference_rows=None,min_train=240,min_test=30,
+                     audit_rows=None,brain_audit_rows=None):
     """Expanding-season score regression plus earlier-OOF residual calibration.
 
     OOF residuals for season Y never use outcomes from season Y or later.
@@ -4385,6 +4549,7 @@ def fit_full_history(historical_rows,events,team_map,*,market_rows=None,
             col='EVIDENCE_'+mkt+'_'+fam+'_NET'
             coverage['expert_nonzero_net_by_market_family'][mkt+'_'+fam]=sum(
                 _v55_fh_finite(r['features'].get(col))!=0 for r in rows if col in r['features'])
+    coverage['seven_brain_spread_representation']=v55_seven_brain_representation_summary(rows)
     report={'schema':_V55_FH_VERSION,'status':'HOLD_FULL_HISTORY_INSUFFICIENT','coverage':coverage,
             'models':{},'same_game_comparison':{},'seven_brain_policy':'CORE_STAT_MINER_BIG_AL_PATHI_PT_MARKET_RICH_FUSED_IN_COMBINED_ML',
             'historical_brain_capture_certified':False,'historical_feature_vintage_certified':False,
@@ -4458,6 +4623,12 @@ def fit_full_history(historical_rows,events,team_map,*,market_rows=None,
             if paired:
                 report['same_game_comparison'][target]={'games':paired,**{b+'_mae':round(float(mean_absolute_error(y[mask],allpred[f'FULL_{b}_{target}'][mask])),6) for b in definitions},
                     'fully_paired_out_of_season':True}
+    # Publish an exact per-game trace of every brain and all three OOF scores.
+    # This does not modify the learner's feature matrix or historical decisions.
+    if brain_audit_rows is not None:
+        brain_audit_rows.extend(v55_build_seven_brain_game_audit(rows,allpred))
+    coverage['seven_brain_oof_margin_coverage']={name:int(np.isfinite(allpred.get(name,np.array([]))).sum())
+        for name in ('FULL_CORE_margin','FULL_STAT_margin','FULL_COMBINED_margin')}
     # The full-history combined score learner, rather than the small 2025
     # spread classifier, is the eligible source for multiseason price research.
     # Preserve uncertainty, book-side and price-format holds explicitly.
