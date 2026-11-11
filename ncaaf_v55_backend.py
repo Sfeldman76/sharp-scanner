@@ -1440,7 +1440,7 @@ def seven_brain_live_combination_audit(signals, *, max_examples=150):
     import itertools
     by_market=defaultdict(lambda:defaultdict(lambda:defaultdict(set)))
     by_system=defaultdict(lambda:defaultdict(lambda:defaultdict(set)))
-    invalid=Counter()
+    invalid=Counter();family_events=Counter();family_games=defaultdict(set)
     for record in signals:
         if not isinstance(record,dict):continue
         gid=s(record.get('game_id') or record.get('Game_ID'))
@@ -1452,6 +1452,7 @@ def seven_brain_live_combination_audit(signals, *, max_examples=150):
         if not gid or fam not in BRAINS or mk not in ('spreads','h2h','totals') or not system or side not in (('OVER','UNDER') if mk=='totals' else ('HOME','AWAY')):
             invalid['INVALID_SIGNAL_IDENTITY']+=1;continue
         key=(gid,mk)
+        family_events[fam]+=1;family_games[fam].add(key)
         by_market[key][side][fam].add(dependency if dependency else fam)
         by_system[key][side][fam].add(system)
     examples=[];counts=Counter()
@@ -1480,6 +1481,10 @@ def seven_brain_live_combination_audit(signals, *, max_examples=150):
                     'status':'COMBINATION_RESEARCH_ONLY__NEEDS_OOS_CERTIFIED_EV',
                     'bet_authority':0})
     return {'status':'SEVEN_BRAIN_COMBINATION_AUDIT','families':sorted(BRAINS),
+            'family_signal_events':dict(sorted(family_events.items())),
+            'family_game_market_coverage':{f:len(family_games[f]) for f in sorted(BRAINS)},
+            'families_with_zero_live_signals':sorted(BRAINS-set(family_events)),
+            'source_family_presence_is_not_authority':True,
             'counts':dict(counts),'invalid':dict(invalid),'examples':examples,
             'truncated_examples':counts['candidate_sides']>len(examples),
             'automatic_authority':False}
@@ -1596,6 +1601,10 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
                     'certification_status':s((registry or {}).get('edge_certification_status')) if isinstance(registry,dict) else '',
                     'certified_edge_count':len(checked_registry(registry,datetime.now(timezone.utc))),
                     'research_only':bool((registry or {}).get('research_only',False)) if isinstance(registry,dict) else None}
+    registry_audit['raw_rows']=int((registry or {}).get('raw_rows') or 0) if isinstance(registry,dict) else 0
+    registry_audit['clean_rows']=int((registry or {}).get('clean_rows') or 0) if isinstance(registry,dict) else 0
+    registry_audit['source_handoff_status']=s((registry or {}).get('source_handoff_status')) if isinstance(registry,dict) else ''
+    registry_audit['needs_original_event_ledger']=bool(registry_audit['clean_rows']==0)
     log('[NCAAF-V55-SEVEN-BRAIN-ROI-READINESS] '+json.dumps(registry_audit,sort_keys=True))
 
     ml_uri=s(os.environ.get('NCAAF_V55_ML_MANIFEST_URI')) or (

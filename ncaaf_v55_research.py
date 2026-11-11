@@ -1391,6 +1391,65 @@ def v55_frozen_qualification_report(events, team_map, source_receipts, *,
         'retrospective_reference_not_executable_roi':True,
         'independent_original_pregame_capture_certified':False,'bet_authority':0}
 
+def v55_recover_qualification_evidence_inventory(report, source_receipts, *,
+                                                   existing_attestations=None):
+    """Expose recoverable proof and missing evidence for every 80% survivor.
+
+    Historical records and current hashes are *not* independent pre-2024
+    freeze attestations. Never invent dates, validated feature vintages or
+    execute a speculative Miner rule. This report is a review queue, not
+    an attestation or a qualifying registry.
+    """
+    source_map = {'SYSTEM_MINER': ('FROZEN_MINER', 'SYSTEM_MINER', 'STAGE2_FROZEN'),
+                  'PATHI': ('PATHI_BIG_AL', 'STAGE2_FROZEN'),
+                  'BIG_AL': ('PATHI_BIG_AL', 'STAGE2_FROZEN'),
+                  'PREDICTION_TRACKER': ('PREDICTION_TRACKER',),
+                  'STAT': ('STAT',), 'CORE': ('CORE',),
+                  'MARKET_RICH': ()}
+    items=[];by_family=Counter()
+    for row in report.get('candidate_diagnostics') or []:
+        screen=row.get('oos_statistical_screen') or {}
+        if screen.get('pass') is not True:continue
+        fam=row['family'];sid=row['system_id'];by_family[fam]+=1
+        sources=[]
+        for name in source_map.get(fam,()):
+            receipt=(source_receipts or {}).get(name)
+            if isinstance(receipt,dict) and receipt.get('uri') and len(str(receipt.get('sha256') or ''))==64:
+                sources.append({'name':name,'uri':receipt['uri'],
+                                'sha256':receipt['sha256'],
+                                'verified_content_receipt_only':True})
+        att=(existing_attestations or {}).get(fam+'|'+sid)
+        items.append({'evidence_key':fam+'|'+sid, 'family':fam,'system_id':sid,
+                      'confirmation_n':row.get('confirmation_n'),
+                      'posterior_prob':screen.get('posterior_prob'),
+                      'pinned_source_candidates':sources,
+                      'existing_attestation_present':isinstance(att,dict),
+                      'unresolved_evidence_holds':[h for h in row.get('holds',[])
+                           if 'RETROSPECTIVE_CONFIRMATION_' not in h],
+                      'needs_exact_rule_lookup':True,
+                      'needs_independent_pre_2024_freeze_receipt':True,
+                      'needs_pregame_feature_leakage_audit':True,
+                      'needs_live_rule_feature_parity_test':True,
+                      'needs_multiplicity_and_dependency_audit':True,
+                      'bet_authority':0})
+    return {'schema':'NCAAF_V55_EVIDENCE_RECOVERY_QUEUE_V1',
+            'status':'SOURCE_RECEIPTS_LOCATED__SYSTEM_ATTESTATIONS_PENDING',
+            'statistical_policy':V55_OOS_SCREEN_POLICY,
+            'system_count':len(items),'by_family':dict(by_family),
+            'systems':items,'retrospective_artifact_is_not_freeze_proof':True,
+            'bet_authority':0}
+
+
+def publish_v55_recovery_queue(queue, *, storage_client, bucket='sharp-models'):
+    key='research/ncaaf/v55/qualification_evidence/recovery_queue_latest.json'
+    body=(json.dumps(queue,sort_keys=True,allow_nan=False)+'\n').encode()
+    storage_client.bucket(bucket).blob(key).upload_from_string(
+        body, content_type='application/json')
+    return {'status':queue['status'],'uri':'gs://'+bucket+'/'+key,
+            'sha256':hashlib.sha256(body).hexdigest(),
+            'system_count':queue['system_count'],'bet_authority':0}
+
+
 def publish_v55_frozen_qualification(report, *, storage_client=None,
                                      bucket='sharp-models'):
     """Overwrite only the stable V5.5 qualification *audit*, not legacy V2.
@@ -1520,6 +1579,18 @@ def replay_prior_brain_sources(*, storage_client=None,bucket='sharp-models',cano
             'reason':type(exc).__name__,'uri':'gs://'+bucket+'/'+evidence_key}
     qualification=v55_frozen_qualification_report(rows,team_map,receipts,
         attestations=qualification_evidence)
+    # Publish a precise evidence-recovery queue for the 80% statistical
+    # survivors. Do not promote source receipt hashes to temporal attestations.
+    recovery=v55_recover_qualification_evidence_inventory(
+        qualification,receipts,existing_attestations=qualification_evidence)
+    try:
+        summary['qualification_evidence_recovery']=publish_v55_recovery_queue(
+            recovery,storage_client=storage_client,bucket=bucket)
+    except Exception as exc:
+        summary['qualification_evidence_recovery']={
+            'status':'HOLD_EVIDENCE_RECOVERY_PUBLICATION_FAILED',
+            'error':type(exc).__name__+':'+str(exc)[:240],
+            'system_count':recovery['system_count'],'bet_authority':0}
     try:
         summary['frozen_rule_qualification']=publish_v55_frozen_qualification(
             qualification,storage_client=storage_client,bucket=bucket)
@@ -1545,6 +1616,8 @@ def replay_prior_brain_sources(*, storage_client=None,bucket='sharp-models',cano
                 'status':'HOLD_ARCHIVED_PROVIDER_JOIN_EXCEPTION',
                 'exception':type(exc).__name__+':'+str(exc),
                 'bet_authority':0}
+    summary['historical_price_to_roi_handoff']=v55_historical_roi_handoff_diagnostic(
+        summary.get('canonical_provider_market_research'))
     # Persist one canonical historical occurrence ledger for repeatable ROI
     # research and clickable system-history lookup. Never pretend these events
     # have original pregame timing/price certification.
@@ -1801,6 +1874,36 @@ def canonical_provider_brain_research(events, games, native_ids, team_map, *, cl
             'totals_roi_calculated':False,'original_quote_timestamps_available':False,
             'original_brain_signal_vintage_verified':False,
             'conservative_roi_certificate_count':0,'bet_authority':0}
+
+
+def v55_historical_roi_handoff_diagnostic(provider_report, *, priced_snapshot_wagers=None):
+    """Separate historical quote research from executable priced ROI evidence.
+
+    An archived spread/total *line* does not contain its vig; calculating
+    wager ROI by assuming -110 would be fabricated. Moneyline returns can be
+    descriptive if actual archived odds exist, but quote/vintage is not
+    retrospectively certified. This assessment never produces a certificate.
+    """
+    report=provider_report or {}
+    grades=(report.get('join_and_grading_counts') or {})
+    prices=int(priced_snapshot_wagers or 0)
+    ml_prices=sum(int(r.get('ml_price_observations') or 0)
+                  for r in (report.get('brain_market_research') or []))
+    return {'schema':'NCAAF_V55_HISTORICAL_PRICE_HANDOFF_DIAGNOSTIC_V1',
+            'status':'RESEARCH_PRICES_AVAILABLE__EXECUTABLE_ROI_NOT_CERTIFIED'
+                if grades.get('BRAIN_PROVIDER_MARKET_GRADES') or prices else
+                'HOLD_NO_HISTORICAL_QUOTE_MATCHES',
+            'archived_quotes_read':int(report.get('source_rows_inspected') or 0),
+            'brain_provider_market_grades':int(grades.get('BRAIN_PROVIDER_MARKET_GRADES') or 0),
+            'matched_snapshot_wagers':prices,
+            'retrospective_moneyline_price_grades':ml_prices,
+            'spread_and_total_roi_hold':'NO_VERIFIED_POINT_SPREAD_TOTAL_ODDS_IN_ARCHIVE',
+            'moneyline_executable_roi_hold':'NO_VERIFIED_PREGAME_QUOTE_VINTAGE',
+            'roi_certificate_ledger_rows':0,
+            'require_original_capture_only_for_executable_price_claims':True,
+            'retrospective_line_ats_research_allowed':True,
+            'uses_inferred_default_vig':False,
+            'bet_authority':0}
 
 
 def market_rich_feature_coverage(*, client=None, project='sharplogger', dataset='sharp_data',
@@ -3264,13 +3367,29 @@ def fit_v55_ml_research(historical_rows,canonical_events,canonical_team_map,*,
             extras['MARKET_RICH_OOF']=market_predictions.get(market,{}).get((y,gid),float('nan'))
             for fam in ('SYSTEM_MINER','BIG_AL','PATHI','PREDICTION_TRACKER'):
                 extras[fam+'_ORIGIN_OOF']=origin_predictions.get((fam,market),{}).get((y,gid),float('nan'))
-            meta_rows.append({'season':y,'game_id':gid,'core_features':extras,label:r[label]})
+            meta_rows.append({'season':y,'game_id':gid,'date':r.get('date'),
+                              'core_features':extras,label:r[label]})
         fields=('CORE_OOF','STAT_OOF','MARKET_RICH_OOF',
                 'SYSTEM_MINER_NET','BIG_AL_NET','PATHI_NET','PREDICTION_TRACKER_NET',
                 'SYSTEM_MINER_ORIGIN_OOF','BIG_AL_ORIGIN_OOF','PATHI_ORIGIN_OOF',
                 'PREDICTION_TRACKER_ORIGIN_OOF')
         report['combined_brain_input_coverage'][market]=_ml_family_coverage(meta_rows)
         meta_pred,meta_audit,model=_ml_fitting_series(meta_rows,fields,label,min_train=min_train)
+        # A one-season primary quote panel must never be described as
+        # season-out-of-sample. Produce a separate, earlier-week-only research
+        # diagnostic with a smaller training minimum where the sample permits.
+        # This is NOT permission to publish betting authority or to treat
+        # retrospective expert fires as pregame observations.
+        if model is None and len({int(r['season']) for r in meta_rows})==1:
+            weekly_pred,weekly_audit,weekly_model=_ml_fitting_within_season(
+                meta_rows,fields,label,min_train=max(40,min(min_train,len(meta_rows)//2)),
+                min_validation=8)
+            weekly_audit['source_event_capture_verified']=False
+            weekly_audit['bet_authority']=0
+            weekly_audit['chronology_type']='EARLIER_ISO_WEEK_ONLY'
+            report[outkey+'_weekly_research']=weekly_audit
+            # Keep the weekly learner as a separate shadow diagnostic only;
+            # never substitute it for validated season holdout ML.
         meta_audit.update({'status':('EXPLORATORY_RETROSPECTIVE_META_OOF' if model is not None else
                                   'HOLD_META_INSUFFICIENT_CHRONOLOGY'),
                           'market_rich_historical_oof_games':len(market_predictions.get(market,{})),
