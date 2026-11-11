@@ -4,7 +4,7 @@
 Input is the ORIGINAL, PRE-GAME captured seven-brain bet-event ledger. This file
 never infers original signals/quotes from retrospective context. It discovers
 hypotheses ONLY from discovery-period events, verifies rule freeze provenance,
-tests 2024-25 or 2026+ OOS, calculates realized per-unit betting ROI, and
+tests audited chronological folds or 2026+ OOS, calculates realized per-unit betting ROI, and
 publishes a hash-checked registry only when the capture audit is independently
 attested. ML training is research-only, produces separately versioned artifacts,
 and cannot bypass the original ROI certification or live betting safeguards.
@@ -1182,7 +1182,7 @@ def v55_historical_family_combinations(groups, team_map, *, max_families=7):
         'independent_original_bet_price_certified':False,'bet_authority':0}
 
 V55_QUALIFICATION_BLOB = 'research/ncaaf/v55/qualified_independent_brains_v55_current.json'
-V55_QUALIFICATION_POLICY = 'V55-FROZEN-INDEPENDENT-BRAINS-2013-2025-R1'
+V55_QUALIFICATION_POLICY = 'V55-FULL-HISTORY-CHRONOLOGICAL-RESEARCH-R3'
 
 # Shared V5.5 small-sample OOS screening contract. This is a research
 # eligibility test, NOT an independently multiplicity-adjusted ROI certificate.
@@ -1226,7 +1226,90 @@ def v55_oos_statistical_screen(wins, losses, year_2024, year_2025):
 
 
 
-def _v55_qualification_evidence(family, system_id, source_receipts, attestations):
+
+
+V55_HISTORY_SCREEN_POLICY = 'V55-2013-2025-POOLED-BETA11-80PCT-RESEARCH-R3'
+V55_HISTORY_MIN_DECISIONS = 12
+V55_HISTORY_MIN_SEASONS = 3
+
+
+def v55_full_history_statistical_screen(by_season):
+    """Descriptive 2013–2025 screen; NOT an independently selected OOS test.
+
+    Use every distinct game/side observation across seasons, not a universal
+    two-season sample. Low season coverage reduces research eligibility;
+    independence and multiplicity are addressed by a separate audited replay.
+    """
+    years={}
+    for sy, rec in (by_season or {}).items():
+        try:
+            y=int(sy)
+            if not 2013<=y<=2025:continue
+            w=int(rec['wins']);l=int(rec['losses']);p=int(rec.get('pushes',0))
+            if min(w,l,p)<0:raise ValueError('negative')
+            years[y]={'wins':w,'losses':l,'pushes':p}
+        except (TypeError,ValueError,KeyError):
+            return {'pass':False,'reason':'INVALID_SEASON_GRADES','policy':V55_HISTORY_SCREEN_POLICY,
+                    'posterior_prob':None}
+    wins=sum(v['wins'] for v in years.values())
+    losses=sum(v['losses'] for v in years.values())
+    n=wins+losses
+    observed=[y for y,v in years.items() if v['wins']+v['losses']>0]
+    result={'policy':V55_HISTORY_SCREEN_POLICY,'decisive_n':n,'wins':wins,'losses':losses,
+        'participating_seasons':len(observed),'observed_seasons':sorted(observed),
+        'min_decisions':V55_HISTORY_MIN_DECISIONS,'min_seasons':V55_HISTORY_MIN_SEASONS,
+        'posterior_threshold':0.80,'baseline_rate':0.50,
+        'independent_out_of_sample':False,'retrospective_research_only':True}
+    if n<V55_HISTORY_MIN_DECISIONS or len(observed)<V55_HISTORY_MIN_SEASONS:
+        return dict(result,**{'pass':False,'posterior_prob':None,
+            'reason':'INSUFFICIENT_FULL_HISTORY_COVERAGE'})
+    # P(Beta(w+1,l+1)>0.5) = P(Binomial(n+1,0.5)<=w).
+    probability=sum(math.comb(n+1,k) for k in range(wins+1))/(1 << (n+1))
+    passed=probability>=0.80
+    return dict(result,**{'pass':passed,'posterior_prob':round(probability,8),
+        'reason':'PASS_FULL_HISTORY_RESEARCH_SCREEN' if passed else 'FULL_HISTORY_POSTERIOR_BELOW_THRESHOLD'})
+
+
+def v55_validate_rolling_folds(folds, by_season, frozen_definition_sha256):
+    """Accept only independently frozen-before-test chronological folds.
+
+    Folds and their proof refs must be externally attested. This function
+    checks consistency, never reconstructs prior freezes from a 2026 export.
+    A rule chosen using a test season cannot qualify on that season.
+    """
+    if not isinstance(folds,list) or not folds:
+        return {'pass':False,'reason':'NO_VERIFIABLE_ROLLING_FOLDS','fold_count':0}
+    used=set();w=l=0;checked=[]
+    for fold in sorted(folds,key=lambda x:str(x.get('test_season','')) if isinstance(x,dict) else ''):
+        if not isinstance(fold,dict):return {'pass':False,'reason':'INVALID_ROLLING_FOLD'}
+        try:
+            test=int(fold['test_season']);end=int(fold['selection_end_season'])
+            fw=int(fold['wins']);fl=int(fold['losses'])
+            year=by_season[str(test)]
+            frozen=clock(fold['definition_frozen_at_utc'])
+            if (test in used or not 2014<=test<=2025 or end>=test or end<2013
+                or not frozen or frozen>=datetime(test,1,1,tzinfo=timezone.utc)
+                or fold.get('rule_definition_sha256')!=frozen_definition_sha256
+                or len(str(frozen_definition_sha256 or ''))!=64
+                or fold.get('independent_audit_pass') is not True
+                or not fold.get('independent_audit_ref')
+                or not fold.get('feature_vintage_audit_ref')
+                or fold.get('selection_uses_test_outcomes') is not False
+                or fw<0 or fl<0 or fw!=int(year['wins']) or fl!=int(year['losses'])):
+                raise ValueError('invalid proof')
+            used.add(test);w+=fw;l+=fl;checked.append(test)
+        except (KeyError,TypeError,ValueError):
+            return {'pass':False,'reason':'FOLD_CHRONOLOGY_OR_COUNTS_NOT_ATTESTED'}
+    decisive=w+l
+    if decisive<12 or len(used)<2:
+        return {'pass':False,'reason':'INSUFFICIENT_INDEPENDENT_ROLLING_TESTS',
+                'fold_count':len(used),'decisive_n':decisive}
+    return {'pass':True,'reason':'INDEPENDENT_ROLLING_FOLDS_VERIFIED',
+            'fold_count':len(used),'test_seasons':checked,'decisive_n':decisive,
+            'wins':w,'losses':l}
+
+
+def _v55_qualification_evidence(family, system_id, source_receipts, attestations, by_season=None):
     """Attestations are independently captured proof, not retrospective labels.
 
     A receipt is verified only when the evidence names and hashes a pinned source
@@ -1245,10 +1328,16 @@ def _v55_qualification_evidence(family, system_id, source_receipts, attestations
     frozen=clock(freeze)
     try: selection_end=int(record.get('selection_end_season') or 9999)
     except (TypeError,ValueError):selection_end=9999
-    if (not frozen or frozen>=datetime(2024,1,1,tzinfo=timezone.utc)
-            or selection_end>2023
-            or not record.get('independent_preholdout_freeze_ref')):
-        holds.add('INDEPENDENT_PRE_HOLDOUT_RULE_FREEZE_NOT_ATTESTED')
+    validation_type=record.get('validation_type')
+    if validation_type=='INDEPENDENT_ROLLING_FOLDS':
+        rolling=v55_validate_rolling_folds(record.get('rolling_folds'),by_season or {},
+            record.get('frozen_definition_sha256'))
+        if not rolling.get('pass'):
+            holds.add('INDEPENDENT_CHRONOLOGICAL_FOLDS_NOT_ATTESTED')
+    elif (not frozen or frozen>=datetime(2024,1,1,tzinfo=timezone.utc)
+          or selection_end>2023
+          or not record.get('independent_preholdout_freeze_ref')):
+        holds.add('INDEPENDENT_RULE_FREEZE_NOT_ATTESTED')
     fv=record.get('pregame_feature_audit') or {}
     if not (isinstance(fv,dict) and fv.get('status')=='PASS'
             and fv.get('source_ref') and fv.get('leakage_audit_ref')
@@ -1281,7 +1370,7 @@ def _v55_qualification_evidence(family, system_id, source_receipts, attestations
     if not (multiple.get('status')=='PASS' and multiple.get('audit_ref')
             and multiple.get('selection_without_holdout_outcomes') is True
             and independence.get('status')=='PASS' and independence.get('audit_ref')
-            and record.get('locked_holdout_ref')):
+            and (record.get('locked_holdout_ref') or validation_type=='INDEPENDENT_ROLLING_FOLDS')):
         holds.add('MULTIPLE_TESTING_AND_SOURCE_INDEPENDENCE_NOT_ATTESTED')
     if record.get('uses_2026_outcomes') is not False:
         holds.add('UNVERIFIED_2026_OUTCOME_EXCLUSION')
@@ -1292,8 +1381,8 @@ def v55_frozen_qualification_report(events, team_map, source_receipts, *,
                                     generated_at=None, attestations=None):
     """Evidence-driven full-history rule qualification; no implicit approvals.
 
-    Independently attested frozen rules are evaluated against sealed 2024-25
-    reference-spread outcomes. Missing attestations are held per system, not
+    Full history is used for a descriptive screen; rolling folds, when
+    independently attested, establish out-of-sample validity separately. Missing attestations are held per system, not
     universally asserted without examining the actual source receipts.
     This is rule eligibility only, never a certificate of sportsbook ROI.
     """
@@ -1328,25 +1417,21 @@ def v55_frozen_qualification_report(events, team_map, source_receipts, *,
             vals=list(games.values());w=vals.count('WIN');l=vals.count('LOSS')
             byyear[str(year)]={'n':len(vals),'wins':w,'losses':l,'pushes':vals.count('PUSH'),
                  'rate':round(w/(w+l),6) if w+l else None}
+        # Full history qualifies a *research* hypothesis; there is no fixed
+        # four-games-per-recent-season test. OOS validity is a separate proof.
+        history_screen=v55_full_history_statistical_screen(byyear)
         test=[v for yy,rr in by_season.items() if yy in (2024,2025) for v in rr.values()]
         w=test.count('WIN');l=test.count('LOSS');n=len(test)
         holds=[]
         if fam not in ('STAT','PATHI','BIG_AL','PREDICTION_TRACKER','SYSTEM_MINER'):
             holds.append('NO_EXECUTABLE_DIRECTIONAL_RULE_CONTRACT')
-        year24=byyear.get('2024',{})
-        year25=byyear.get('2025',{})
-        screen=v55_oos_statistical_screen(w,l,
-            int(year24.get('wins',0))+int(year24.get('losses',0)),
-            int(year25.get('wins',0))+int(year25.get('losses',0)))
-        if screen['reason']=='INSUFFICIENT_STATISTICAL_EVIDENCE':
-            holds.append('RETROSPECTIVE_CONFIRMATION_INSUFFICIENT_STATISTICAL_EVIDENCE')
-        elif not screen['pass']:
-            holds.append('RETROSPECTIVE_CONFIRMATION_POSTERIOR_EDGE_BELOW_THRESHOLD')
-        proof,proof_holds=_v55_qualification_evidence(fam,sid,source_receipts,attestations)
+        if not history_screen['pass']:
+            holds.append('FULL_HISTORY_RESEARCH_SCREEN_'+history_screen['reason'])
+        proof,proof_holds=_v55_qualification_evidence(fam,sid,source_receipts,attestations,byyear)
         # Report precise attestation gaps even when the proof registry is absent.
         if 'MISSING_INDEPENDENT_SYSTEM_ATTESTATION' in proof_holds:
             proof_holds.discard('MISSING_INDEPENDENT_SYSTEM_ATTESTATION')
-            proof_holds.update(('INDEPENDENT_PRE_HOLDOUT_RULE_FREEZE_NOT_ATTESTED',
+            proof_holds.update(('INDEPENDENT_CHRONOLOGICAL_FOLDS_NOT_ATTESTED',
                  'PREGAME_FEATURE_VINTAGE_NOT_ATTESTED','LIVE_RULE_FIELD_RECIPE_NOT_ATTESTED',
                  'MULTIPLE_TESTING_AND_SOURCE_INDEPENDENCE_NOT_ATTESTED'))
         holds.extend(sorted(proof_holds))
@@ -1355,15 +1440,18 @@ def v55_frozen_qualification_report(events, team_map, source_receipts, *,
             'discovery_reference_games':sum(len(v) for y,v in by_season.items() if y<=2023),
             'confirmation_n':n,'confirmation_decisive_n':w+l,'confirmation_wins':w,'confirmation_losses':l,
             'confirmation_rate':round(w/(w+l),6) if w+l else None,
-            'by_season':byyear,'oos_statistical_screen':screen,'holds':holds,'descriptive_reference_only':True,
+            'by_season':byyear,'oos_statistical_screen':history_screen,'full_history_statistical_screen':history_screen,'holds':holds,'descriptive_reference_only':True,
             'oos_pass':not bool(holds),'evidence_key':fam+'|'+sid}
         diagnostics.append(item)
         if not holds:
             live=proof['live_recipe']
             rule=dict(item,role='directional',direction=live['direction'],
                 evidence_family_key=str(proof.get('evidence_family_key') or fam),
-                definition_frozen_at_utc=proof['definition_frozen_at_utc'],
-                independent_preholdout_freeze_ref=proof['independent_preholdout_freeze_ref'],
+                definition_frozen_at_utc=proof.get('definition_frozen_at_utc'),
+                independent_preholdout_freeze_ref=proof.get('independent_preholdout_freeze_ref'),
+                validation_type=proof.get('validation_type','LEGACY_PRE2024_FREEZE'),
+                rolling_folds=proof.get('rolling_folds',[]),
+                frozen_definition_sha256=proof.get('frozen_definition_sha256'),
                 source_pinned_sha256=proof['pinned_source_sha256'],
                 pregame_feature_vintage_pass=True,split_disjoint=True,
                 source_neutral=True,overlap_audit='PASS',multiple_testing_audit='PASS',
@@ -1377,13 +1465,15 @@ def v55_frozen_qualification_report(events, team_map, source_receipts, *,
         and (attestations or {}).get('_operator_approval',{}).get('audit_ref'))
     status=('FROZEN_OOS_QUALIFIED' if qualified and approved
         else 'HOLD_OPERATOR_APPROVAL' if qualified else 'HOLD_INDEPENDENT_FREEZE_AND_VINTAGE_ATTESTATION')
-    return {'schema':'NCAAF_V55_FROZEN_RULE_QUALIFICATION_AUDIT_V2',
+    return {'schema':'NCAAF_V55_FULL_HISTORY_QUALIFICATION_AUDIT_V3',
         'policy':V55_QUALIFICATION_POLICY,'created_utc':created,'status':status,
         'operator_approved':approved,'uses_2026_outcomes':False,
         'history_first_season':min(seasons_seen) if seasons_seen else None,
-        'discovery_last_season':2023,'confirmation_seasons':[2024,2025],
+        'discovery_last_season':None,'confirmation_seasons':[],
+        'full_history_seasons':list(range(2013,2026)),
+        'validation_contract':'INDEPENDENT_CHRONOLOGICAL_ROLLING_FOLDS_OR_LEGACY_PROOF',
         'source_audit':{'observed_seasons':sorted(seasons_seen),
-           'source_receipts':source_receipts or {},'oos_screen_policy':V55_OOS_SCREEN_POLICY,
+           'source_receipts':source_receipts or {},'oos_screen_policy':V55_HISTORY_SCREEN_POLICY,
            'invalid_firings':dict(invalid),
            'attestation_systems_supplied':len([k for k in (attestations or {}) if k!='_operator_approval'])},
         'systems':qualified,'candidate_system_count':len(diagnostics),
@@ -1393,7 +1483,7 @@ def v55_frozen_qualification_report(events, team_map, source_receipts, *,
 
 def v55_recover_qualification_evidence_inventory(report, source_receipts, *,
                                                    existing_attestations=None):
-    """Expose recoverable proof and missing evidence for every 80% survivor.
+    """Expose recoverable proof and missing evidence for every full-history survivor.
 
     Historical records and current hashes are *not* independent pre-2024
     freeze attestations. Never invent dates, validated feature vintages or
@@ -1421,20 +1511,23 @@ def v55_recover_qualification_evidence_inventory(report, source_receipts, *,
         att=(existing_attestations or {}).get(fam+'|'+sid)
         items.append({'evidence_key':fam+'|'+sid, 'family':fam,'system_id':sid,
                       'confirmation_n':row.get('confirmation_n'),
+                      'full_history_n':screen.get('decisive_n'),
+                      'participating_seasons':screen.get('participating_seasons'),
                       'posterior_prob':screen.get('posterior_prob'),
                       'pinned_source_candidates':sources,
                       'existing_attestation_present':isinstance(att,dict),
                       'unresolved_evidence_holds':[h for h in row.get('holds',[])
                            if 'RETROSPECTIVE_CONFIRMATION_' not in h],
                       'needs_exact_rule_lookup':True,
-                      'needs_independent_pre_2024_freeze_receipt':True,
+                      'needs_independent_pre_2024_freeze_receipt':False,
+                      'needs_independent_chronological_validation':True,
                       'needs_pregame_feature_leakage_audit':True,
                       'needs_live_rule_feature_parity_test':True,
                       'needs_multiplicity_and_dependency_audit':True,
                       'bet_authority':0})
     return {'schema':'NCAAF_V55_EVIDENCE_RECOVERY_QUEUE_V1',
             'status':'SOURCE_RECEIPTS_LOCATED__SYSTEM_ATTESTATIONS_PENDING',
-            'statistical_policy':V55_OOS_SCREEN_POLICY,
+            'statistical_policy':V55_HISTORY_SCREEN_POLICY,
             'system_count':len(items),'by_family':dict(by_family),
             'systems':items,'retrospective_artifact_is_not_freeze_proof':True,
             'bet_authority':0}

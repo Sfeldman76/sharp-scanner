@@ -1087,8 +1087,8 @@ def persist_v55_prospective_events(events, storage_client, bucket, *, now=None):
 
 
 # V5.5 shared qualification contract (research publisher -> live backend).
-V55_QUALIFICATION_SCHEMA='NCAAF_V55_FROZEN_RULE_QUALIFICATION_AUDIT_V2'
-V55_QUALIFICATION_POLICY='V55-FROZEN-INDEPENDENT-BRAINS-2013-2025-R1'
+V55_QUALIFICATION_SCHEMA='NCAAF_V55_FULL_HISTORY_QUALIFICATION_AUDIT_V3'
+V55_QUALIFICATION_POLICY='V55-FULL-HISTORY-CHRONOLOGICAL-RESEARCH-R3'
 
 # Shared V5.5 small-sample OOS screening contract. This is a research
 # eligibility test, NOT an independently multiplicity-adjusted ROI certificate.
@@ -1132,6 +1132,89 @@ def v55_oos_statistical_screen(wins, losses, year_2024, year_2025):
 
 
 
+
+
+V55_HISTORY_SCREEN_POLICY = 'V55-2013-2025-POOLED-BETA11-80PCT-RESEARCH-R3'
+V55_HISTORY_MIN_DECISIONS = 12
+V55_HISTORY_MIN_SEASONS = 3
+
+
+def v55_full_history_statistical_screen(by_season):
+    """Descriptive 2013–2025 screen; NOT an independently selected OOS test.
+
+    Use every distinct game/side observation across seasons, not a universal
+    two-season sample. Low season coverage reduces research eligibility;
+    independence and multiplicity are addressed by a separate audited replay.
+    """
+    years={}
+    for sy, rec in (by_season or {}).items():
+        try:
+            y=int(sy)
+            if not 2013<=y<=2025:continue
+            w=int(rec['wins']);l=int(rec['losses']);p=int(rec.get('pushes',0))
+            if min(w,l,p)<0:raise ValueError('negative')
+            years[y]={'wins':w,'losses':l,'pushes':p}
+        except (TypeError,ValueError,KeyError):
+            return {'pass':False,'reason':'INVALID_SEASON_GRADES','policy':V55_HISTORY_SCREEN_POLICY,
+                    'posterior_prob':None}
+    wins=sum(v['wins'] for v in years.values())
+    losses=sum(v['losses'] for v in years.values())
+    n=wins+losses
+    observed=[y for y,v in years.items() if v['wins']+v['losses']>0]
+    result={'policy':V55_HISTORY_SCREEN_POLICY,'decisive_n':n,'wins':wins,'losses':losses,
+        'participating_seasons':len(observed),'observed_seasons':sorted(observed),
+        'min_decisions':V55_HISTORY_MIN_DECISIONS,'min_seasons':V55_HISTORY_MIN_SEASONS,
+        'posterior_threshold':0.80,'baseline_rate':0.50,
+        'independent_out_of_sample':False,'retrospective_research_only':True}
+    if n<V55_HISTORY_MIN_DECISIONS or len(observed)<V55_HISTORY_MIN_SEASONS:
+        return dict(result,**{'pass':False,'posterior_prob':None,
+            'reason':'INSUFFICIENT_FULL_HISTORY_COVERAGE'})
+    # P(Beta(w+1,l+1)>0.5) = P(Binomial(n+1,0.5)<=w).
+    probability=sum(math.comb(n+1,k) for k in range(wins+1))/(1 << (n+1))
+    passed=probability>=0.80
+    return dict(result,**{'pass':passed,'posterior_prob':round(probability,8),
+        'reason':'PASS_FULL_HISTORY_RESEARCH_SCREEN' if passed else 'FULL_HISTORY_POSTERIOR_BELOW_THRESHOLD'})
+
+
+def v55_validate_rolling_folds(folds, by_season, frozen_definition_sha256):
+    """Accept only independently frozen-before-test chronological folds.
+
+    Folds and their proof refs must be externally attested. This function
+    checks consistency, never reconstructs prior freezes from a 2026 export.
+    A rule chosen using a test season cannot qualify on that season.
+    """
+    if not isinstance(folds,list) or not folds:
+        return {'pass':False,'reason':'NO_VERIFIABLE_ROLLING_FOLDS','fold_count':0}
+    used=set();w=l=0;checked=[]
+    for fold in sorted(folds,key=lambda x:str(x.get('test_season','')) if isinstance(x,dict) else ''):
+        if not isinstance(fold,dict):return {'pass':False,'reason':'INVALID_ROLLING_FOLD'}
+        try:
+            test=int(fold['test_season']);end=int(fold['selection_end_season'])
+            fw=int(fold['wins']);fl=int(fold['losses'])
+            year=by_season[str(test)]
+            frozen=clock(fold['definition_frozen_at_utc'])
+            if (test in used or not 2014<=test<=2025 or end>=test or end<2013
+                or not frozen or frozen>=datetime(test,1,1,tzinfo=timezone.utc)
+                or fold.get('rule_definition_sha256')!=frozen_definition_sha256
+                or len(str(frozen_definition_sha256 or ''))!=64
+                or fold.get('independent_audit_pass') is not True
+                or not fold.get('independent_audit_ref')
+                or not fold.get('feature_vintage_audit_ref')
+                or fold.get('selection_uses_test_outcomes') is not False
+                or fw<0 or fl<0 or fw!=int(year['wins']) or fl!=int(year['losses'])):
+                raise ValueError('invalid proof')
+            used.add(test);w+=fw;l+=fl;checked.append(test)
+        except (KeyError,TypeError,ValueError):
+            return {'pass':False,'reason':'FOLD_CHRONOLOGY_OR_COUNTS_NOT_ATTESTED'}
+    decisive=w+l
+    if decisive<12 or len(used)<2:
+        return {'pass':False,'reason':'INSUFFICIENT_INDEPENDENT_ROLLING_TESTS',
+                'fold_count':len(used),'decisive_n':decisive}
+    return {'pass':True,'reason':'INDEPENDENT_ROLLING_FOLDS_VERIFIED',
+            'fold_count':len(used),'test_seasons':checked,'decisive_n':decisive,
+            'wins':w,'losses':l}
+
+
 def validate_v55_current_qualification(doc, raw_sha='', *, now=None):
     """Validate exact V5.5 research schema WITHOUT consulting legacy V2 registry.
 
@@ -1150,8 +1233,8 @@ def validate_v55_current_qualification(doc, raw_sha='', *, now=None):
     created=clock(doc.get('created_utc'))
     if not created or not at or created>at:
         return None,'INVALID_QUALIFICATION_PUBLICATION_TIME'
-    if doc.get('discovery_last_season')!=2023 or doc.get('confirmation_seasons')!=[2024,2025]:
-        return None,'UNSEALED_HOLDOUT_CONTRACT'
+    if doc.get('validation_contract')!='INDEPENDENT_CHRONOLOGICAL_ROLLING_FOLDS_OR_LEGACY_PROOF':
+        return None,'UNRECOGNIZED_CHRONOLOGICAL_VALIDATION_CONTRACT'
     for entry in doc.get('systems') or []:
         if not isinstance(entry,dict):rejects['BAD_RULE']+=1;continue
         fam=family(entry.get('family'));sid=s(entry.get('system_id'))
@@ -1162,33 +1245,31 @@ def validate_v55_current_qualification(doc, raw_sha='', *, now=None):
             and entry.get('split_disjoint') is True and entry.get('source_neutral') is True
             and entry.get('overlap_audit')=='PASS' and entry.get('multiple_testing_audit')=='PASS'
             and entry.get('uses_2026_outcomes') is False
-            and entry.get('independent_preholdout_freeze_ref')
+            and (entry.get('independent_preholdout_freeze_ref') or
+                 entry.get('validation_type')=='INDEPENDENT_ROLLING_FOLDS')
             and entry.get('source_pinned_sha256')
             and not entry.get('holds')):
             rejects['EVIDENCE_ATTESTATION_INCOMPLETE']+=1;continue
         frozen=clock(entry.get('definition_frozen_at_utc'))
-        if not frozen or frozen>=datetime(2024,1,1,tzinfo=timezone.utc):
+        mode=entry.get('validation_type')
+        if mode=='INDEPENDENT_ROLLING_FOLDS':
+            audit=v55_validate_rolling_folds(entry.get('rolling_folds'),
+                entry.get('by_season') or {},entry.get('frozen_definition_sha256'))
+            if not audit['pass']:
+                rejects['ROLLING_VALIDATION_INCOMPLETE']+=1;continue
+        elif not frozen or frozen>=datetime(2024,1,1,tzinfo=timezone.utc):
             rejects['RULE_NOT_FROZEN_BEFORE_HOLDOUT']+=1;continue
         try:
-            n=int(entry.get('confirmation_n')); rate=float(entry.get('confirmation_rate'))
-            season=entry.get('by_season') or {}
-            a,b=season['2024'],season['2025']
-            wins=int(entry.get('confirmation_wins'))
-            losses=int(entry.get('confirmation_losses'))
-            decisive=wins+losses
-            season24=int(a['wins'])+int(a['losses'])
-            season25=int(b['wins'])+int(b['losses'])
-            if (decisive<=0 or n!=int(a['n'])+int(b['n']) or decisive!=season24+season25
-                or abs(rate-wins/decisive)>0.000002 or
-                entry.get('oos_statistical_screen',{}).get('policy')!=V55_OOS_SCREEN_POLICY):
-                raise ValueError('OOS_COUNTS_OR_POLICY')
-            checked=v55_oos_statistical_screen(wins,losses,season24,season25)
-            recorded=entry['oos_statistical_screen']
-            if (not checked['pass'] or recorded.get('pass') is not True or
-                recorded.get('posterior_prob')!=checked.get('posterior_prob')):
-                raise ValueError('OOS_SCREEN_FAILED')
-        except (ValueError,KeyError,TypeError):
-            rejects['OOS_RESULTS_INVALID']+=1;continue
+            seasons=entry.get('by_season') or {}
+            screen=v55_full_history_statistical_screen(seasons)
+            recorded=entry.get('full_history_statistical_screen') or {}
+            if (not screen['pass'] or recorded.get('pass') is not True
+                or recorded.get('policy')!=V55_HISTORY_SCREEN_POLICY
+                or screen['posterior_prob']!=recorded.get('posterior_prob')):
+                raise ValueError('HISTORY_SCREEN_MISMATCH')
+            n=screen['decisive_n'];rate=screen['wins']/n
+        except (ValueError,KeyError,TypeError,ZeroDivisionError):
+            rejects['FULL_HISTORY_RESULTS_INVALID']+=1;continue
         if not (recipe.get('role')=='directional' and recipe.get('market')=='spreads'
             and recipe.get('direction') in ('PLAY_ON','FADE') and recipe.get('feature_parity_ref')):
             rejects['LIVE_RECIPE_UNVERIFIED']+=1;continue
