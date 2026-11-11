@@ -3961,6 +3961,95 @@ def _v55_fh_prepare_rows(historical_rows,events,team_map, *, market_rows=None):
            'historical_market_rich_rejections':dict(market_invalid)}
     return rows,audit
 
+def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
+                                     verified_price_format=None, min_earlier_residuals=100):
+    """Chronological out-of-season combined-model *research* at captured quotes.
+
+    Consume only existing OOF predictions and earlier-year score residuals.
+    Require a stated price format and exact (season, game ID). A single home
+    moneyline price does NOT imply an away price; never synthesize vig or odds.
+    No retrospective result is an original signal-capture certificate.
+    """
+    by_game={(int(r['season']),str(r['game_id'])):r for r in rows}
+    matched={};reject=Counter();by_year=defaultdict(list)
+    for rec in market_rows or []:
+        try:key=(int(rec['season']),str(rec['game_id']))
+        except (KeyError,ValueError,TypeError):reject['INVALID_MARKET_ID']+=1;continue
+        if key in matched:
+            reject['DUPLICATE_SNAPSHOT_GAME_HELD']+=1
+            matched[key]=None  # no arbitrary choice of retrospective price
+        elif key not in matched:matched[key]=rec
+    earlier=[(int(r['season']),float(r['margin'])-float(predictions[(int(r['season']),str(r['game_id']))]))
+             for r in rows if (int(r['season']),str(r['game_id'])) in predictions and
+             math.isfinite(_v55_fh_finite(predictions[(int(r['season']),str(r['game_id']))]))]
+    from statistics import stdev
+    sigma_by_season={}
+    for yr in sorted({int(r['season']) for r in rows}):
+        prior=[err for season,err in earlier if season<yr]
+        sigma_by_season[yr]=(stdev(prior) if len(prior)>=min_earlier_residuals else float('nan'))
+    lines=[];predictions_count=0
+    for item in sorted(rows,key=lambda r:(r['season'],r['game_id'])):
+        year=int(item['season']);key=(year,str(item['game_id']))
+        oof=predictions.get(key)
+        if oof is None or not math.isfinite(_v55_fh_finite(oof)):
+            reject['NO_COMBINED_CHRONOLOGICAL_OOF']+=1;continue
+        predictions_count+=1
+        # Earlier OOF residuals only. Same-season games cannot calibrate one
+        # another, regardless of their order in the source table.
+        sigma=sigma_by_season[year]
+        raw=matched.get(key)
+        if raw is None:
+            reject['NO_UNAMBIGUOUS_HISTORICAL_MARKET_RECORD']+=1;continue
+        line=_v55_fh_finite(raw.get('spread_home_line'))
+        if math.isfinite(line) and math.isfinite(sigma) and sigma>0:
+            p_home=1-NormalDist(mu=float(oof),sigma=sigma).cdf(-line)
+            lines.append({'season':year,'game_id':key[1], 'market':'spreads',
+                'home_cover_probability':round(p_home,6),
+                'source':'EARLIER_SEASON_OOF_NORMAL_APPROX_RESEARCH',
+                'historical_quote_line':line,'priced_roi':None,
+                'hold':'SPREAD_ODDS_NOT_SUPPLIED__NO_SYNTHETIC_MINUS_110'})
+        else:reject['NO_EARLIER_FOLD_SIGMA_OR_SPREAD_LINE']+=1
+        # Historical ML price needs explicit format to avoid confusing decimal
+        # and American representations. Home price alone cannot price away.
+        quote=raw.get('home_ml_quote')
+        if quote is not None:
+            if verified_price_format not in ('AMERICAN',):
+                reject['MONEYLINE_ODDS_FORMAT_NOT_ATTESTED']+=1
+            elif not math.isfinite(sigma) or sigma<=0:
+                reject['NO_EARLIER_FOLD_SIGMA_FOR_MONEYLINE']+=1
+            else:
+                odds=num(quote)
+                net=odds_profit(odds) if odds is not None else None
+                if net is None:reject['INVALID_OR_MISSING_MONEYLINE_ODDS']+=1
+                else:
+                    p_home=1-NormalDist(mu=float(oof),sigma=sigma).cdf(0)
+                    roi_ev=p_home*net-(1-p_home)
+                    realized=net if float(item['margin'])>0 else -1.0 if float(item['margin'])<0 else 0.0
+                    record={'season':year,'game_id':key[1],'book':raw.get('home_ml_quote_book'),
+                        'market':'h2h','side':'HOME','quote':float(odds),
+                        'predicted_win_probability':round(p_home,6),
+                        'shadow_ev_per_unit':round(roi_ev,6),
+                        'historical_return_per_unit':round(realized,6),
+                        'model_selection_is_independent_of_this_game':True,
+                        'original_brain_capture_verified':False,
+                        'original_quote_capture_certified':bool(raw.get('original_quote_capture_certified') is True)}
+                    if roi_ev>0:by_year[year].append(record)
+        # Do not add current-season errors into past calibration.
+    returns=[r['historical_return_per_unit'] for v in by_year.values() for r in v]
+    return {'status':'RETROSPECTIVE_OOF_PRICE_RESEARCH_ONLY',
+            'independent_tested_hypotheses':0,'certified_edges':0,'bet_authority':0,
+            'chronological_oof_predictions':predictions_count,
+            'spread_line_reference_probabilities':len(lines),
+            'historical_price_format':verified_price_format or 'UNVERIFIED',
+            'hypothetical_ml_positive_ev_wagers':len(returns),
+            'hypothetical_ml_realized_roi':round(sum(returns)/len(returns),6) if returns else None,
+            'by_season':[{ 'season':year,'n':len(v),
+                'unit_stake_roi':round(sum(x['historical_return_per_unit'] for x in v)/len(v),6)}
+                for year,v in sorted(by_year.items())],
+            'holds':dict(reject),'no_synthetic_odds':True,
+            'cannot_issue_executable_roi_certificate':True}
+
+
 def fit_full_history(historical_rows,events,team_map,*,market_rows=None,min_train=240,min_test=30):
     """Expanding-season score regression plus earlier-OOF residual calibration.
 
@@ -4051,6 +4140,21 @@ def fit_full_history(historical_rows,events,team_map,*,market_rows=None,min_trai
             if paired:
                 report['same_game_comparison'][target]={'games':paired,**{b+'_mae':round(float(mean_absolute_error(y[mask],allpred[f'FULL_{b}_{target}'][mask])),6) for b in definitions},
                     'fully_paired_out_of_season':True}
+    # The full-history combined score learner, rather than the small 2025
+    # spread classifier, is the eligible source for multiseason price research.
+    # Preserve uncertainty, book-side and price-format holds explicitly.
+    combined_margin=allpred.get('FULL_COMBINED_margin')
+    report['combined_chronological_price_research']=(
+        v55_combined_oof_price_research(rows,
+            {(int(r['season']),str(r['game_id'])):float(combined_margin[i])
+             for i,r in enumerate(rows) if math.isfinite(float(combined_margin[i]))},
+            market_rows=market_rows)
+        if combined_margin is not None else {'status':'HOLD_NO_COMBINED_OOF','bet_authority':0})
+    report['combined_model_authority_handoff']={
+        'status':'SHADOW_PENDING_INDEPENDENT_LIVE_PRICE_VALIDATION',
+        'model':'FULL_COMBINED_margin','oof_games':report['models'].get('FULL_COMBINED_margin',{}).get('oof_games',0),
+        'individual_rule_certificates_required':False,
+        'no_original_capture_inference':True,'bet_authority':0}
     report['status']='FULL_HISTORY_SCORE_MODELS_TRAINED_SHADOW' if fitted else 'HOLD_FULL_HISTORY_NO_FITTED_MODELS'
     return report,fitted
 

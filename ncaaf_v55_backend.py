@@ -236,6 +236,116 @@ def payoff(c,odds):
     lower=t_bound(returns,.05/max(1,c['tested_hypotheses']))
     return {'repriced_roi':roi,'repriced_lower_roi':lower,'n':n} if lower is not None else None
 
+def v55_verify_combined_model_authority_attestation(attestation, secret, *, now=None):
+    """Operator-controlled, independently attested combined-ML OOS contract.
+
+    Historical replay, preselected rules, shadow metrics and manifest presence
+    NEVER create this contract. HMAC requires a separately managed independent
+    verification key, not an automatically generated digest in the job.
+    """
+    import hmac
+    at=clock(now) if now else datetime.now(timezone.utc)
+    if not isinstance(attestation,dict) or not secret or len(secret)<32:
+        return None,'NO_INDEPENDENT_VERIFICATION_SECRET_OR_ATTESTATION'
+    proof=attestation.get('certificate')
+    mac=attestation.get('hmac_sha256')
+    if not isinstance(proof,dict) or not isinstance(mac,str) or len(mac)!=64:
+        return None,'INVALID_COMBINED_ATTESTATION_ENVELOPE'
+    body=json.dumps(proof,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
+    expect=hmac.new(secret.encode(),body,hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(mac,expect):return None,'INDEPENDENT_ATTESTATION_SIGNATURE_INVALID'
+    try:
+        if proof.get('schema')!='NCAAF_V55_COMBINED_MODEL_OOS_CERT_V1':raise ValueError('SCHEMA')
+        if proof.get('status')!='INDEPENDENT_VALIDATED_EXECUTABLE_OOS':raise ValueError('STATUS')
+        if not all(len(s(proof.get(k)))==64 for k in ('model_sha256','feature_schema_sha256',
+                   'game_universe_sha256','original_signal_quote_ledger_sha256','independent_audit_sha256')):
+            raise ValueError('PROOF_HASHES')
+        if not s(proof.get('independent_validator_id')):raise ValueError('VALIDATOR')
+        start=clock(proof.get('test_start_utc'));end=clock(proof.get('test_end_utc'))
+        frozen=clock(proof.get('model_frozen_utc'));expires=clock(proof.get('valid_until_utc'))
+        if not all((start,end,frozen,expires)) or not frozen<start<end<=at<expires:
+            raise ValueError('CHRONOLOGY')
+        if int(proof.get('oos_unique_games',0))<100 or len(set(proof.get('test_seasons',[])))<2:
+            raise ValueError('INSUFFICIENT_HOLDOUT')
+        if int(proof.get('tested_hypotheses',0))<1:raise ValueError('MULTIPLICITY')
+        if num(proof.get('oos_roi_lower_adjusted')) is None or float(proof['oos_roi_lower_adjusted'])<=0:
+            raise ValueError('NO_POSITIVE_MULTIPLICITY_ADJUSTED_RETURN_LOWER_BOUND')
+        if num(proof.get('oos_brier')) is None or num(proof.get('baseline_brier')) is None or not float(proof['oos_brier'])<float(proof['baseline_brier']):
+            raise ValueError('NO_VALIDATED_CALIBRATION_IMPROVEMENT')
+        if proof.get('original_signal_and_price_capture_verified') is not True or proof.get('feature_vintage_verified') is not True:
+            raise ValueError('ORIGINAL_EVENT_EVIDENCE_REQUIRED')
+        if proof.get('market') not in ('spreads','h2h','totals') or not s(proof.get('book')):
+            raise ValueError('MARKET_OR_BOOK')
+        if not 0<float(proof.get('min_live_ev',0.02))<1:raise ValueError('EV_THRESHOLD')
+    except (ValueError,TypeError,KeyError) as exc:
+        return None,'INVALID_COMBINED_PROOF:'+str(exc)
+    return proof,'PASS_VERIFIED_COMBINED_MODEL_ATTESTATION'
+
+
+def v55_apply_combined_model_authority(board_rows, shadow, attestation, *,
+                                       secret='', now=None, max_bets=3):
+    """Optional independently certified combined-model path, not CORE gated.
+
+    Consumes only forward-scored exact same-book quotes already checked by
+    score_snapshot. Never reuses a research probability from an older game.
+    """
+    at=clock(now) if now else datetime.now(timezone.utc)
+    proof,status=v55_verify_combined_model_authority_attestation(attestation,secret,now=at)
+    audit={'status':status,'combined_authorized':0,'candidate_count':0,'bet_authority':0}
+    if proof is None:return board_rows,audit
+    if s(os.getenv('NCAAF_V55_BET_AUTHORITY_MODE','OFF')).upper()!='ON':
+        audit['status']='COMBINED_MODEL_AUTHORITY_OPERATOR_OFF';return board_rows,audit
+    scored=(shadow or {}).get('records',[])
+    if not isinstance(scored,list):return board_rows,{**audit,'status':'INVALID_LIVE_ML_SCORE_RECORDS'}
+    by_game=defaultdict(list)
+    for item in scored:
+        if str(item.get('market'))!=proof['market'] or str(item.get('book')).lower()!=str(proof['book']).lower():continue
+        if item.get('combined_model_sha256')!=proof['model_sha256'] or item.get('combined_feature_schema_sha256')!=proof['feature_schema_sha256']:
+            continue
+        if item.get('feature_original_capture_certified') is not True:
+            continue
+        combined=(item.get('models') or {}).get('COMBINED') or {}
+        ev=num(combined.get('shadow_ev_per_unit'))
+        prob=num(combined.get('shadow_probability'))
+        if ev is None or prob is None or not 0<prob<1 or ev<float(proof['min_live_ev']):continue
+        if item.get('shadow_price_status')!='REFERENCE_QUOTE_WITHIN_15_MIN__NO_AUTHORITY':continue
+        gid=s(item.get('game_id'));side=s(item.get('side')).upper()
+        if side not in (('OVER','UNDER') if proof['market']=='totals' else ('HOME','AWAY')):continue
+        by_game[(gid,proof['market'])].append((item,ev,prob))
+    selected=[];conflicts=0
+    for (gid,mkt),options in by_game.items():
+        if len({x[0]['side'] for x in options})>1:
+            conflicts+=1;continue  # opposite positive-EV predictions veto
+        chosen=max(options,key=lambda x:x[1]);selected.append((gid,*chosen))
+    selected.sort(key=lambda x:x[2],reverse=True)
+    audit.update(candidate_count=sum(map(len,by_game.values())),conflict_games=conflicts)
+    used=set()
+    for gid,item,ev,prob in selected:
+        if gid in used or len(used)>=max_bets:continue
+        row=next((r for r in board_rows if s(r.get('Game_ID') or r.get('game_id'))==gid),None)
+        if row is None or row.get('V55_Bet_Authority')==1:continue
+        used.add(gid)
+        row.update({'V55_Bet_Authority':1,'V55_Bet_Decision':'BET',
+           'V55_Authority_State':'VERIFIED_COMBINED_ML_OOS',
+           'V55_Authority_Policy_Id':'V55_COMBINED_OOS_CERT_V1',
+           'V55_Authority_Hold_Reason':None,
+           'V55_Selected_Market':proof['market'],
+           'V55_Policy_EV':round(ev,6),'V55_Policy_Win_Prob':round(prob,6),
+           'V55_Validated_Edge_ROI':float(proof.get('oos_realized_roi',0)),
+           'V55_Validated_Edge_Lower_ROI':float(proof['oos_roi_lower_adjusted']),
+           'V55_Validated_Edge_Certificate_ID':str(proof['model_sha256'])[:24],
+           'Backend_Quote_Book':item['book'],'Odds_American':item['quoted_odds'],
+           'Current_Spread':item['quoted_line'],
+           'V55_Bet_Key':sha((gid,proof['market'],item['side']))[:28],
+           'V55_Unified_Research_State':'COMBINED_ML_VALIDATED',
+           'V55_Research_Selected_Side':item['side']})
+        if item['side'] in ('HOME','AWAY'):
+            row['Selected_Team']=(row.get('Home_Team') if item['side']=='HOME' else row.get('Away_Team'))
+        else:row['Selected_Team']=item['side']
+    audit.update(status='COMBINED_MODEL_CERTIFIED_PATH_EVALUATED',combined_authorized=len(used),bet_authority=int(bool(used)))
+    return board_rows,audit
+
+
 def evaluate(board,signals,registry,*,now=None,extra_quotes=None,max_bets=3):
     """Return one canonical backend board and audit for all markets/seven brains.
 
@@ -1822,6 +1932,26 @@ def run_backend_refresh(*,storage_client=None,bq_client=None,bucket_name=None,lo
             shadow={'status':'HOLD_FULL_HISTORY_SCORING_EXCEPTION',
                     'error':type(exc).__name__+':'+str(exc),'bet_authority':0}
             log('[NCAAF-V55-FULL-HISTORY-SCORING-HOLD] '+json.dumps(shadow,sort_keys=True))
+    # Optional separately verified combined-model path. A local source change
+    # or an old research manifest cannot auto-generate the signed OOS contract.
+    combined_cert_uri=s(os.getenv('NCAAF_V55_COMBINED_CERT_URI'))
+    combined_audit={'status':'NO_INDEPENDENT_COMBINED_CERT_CONFIGURED','bet_authority':0}
+    if combined_cert_uri:
+        try:
+            combined_attest=read_registry(combined_cert_uri)
+            output,combined_audit=v55_apply_combined_model_authority(
+                output,shadow,combined_attest,
+                secret=s(os.getenv('NCAAF_V55_COMBINED_ATTESTATION_SECRET')),
+                max_bets=3)
+        except Exception as exc:
+            combined_audit={'status':'HOLD_COMBINED_CERT_BRIDGE_ERROR',
+                'error':type(exc).__name__+':'+str(exc)[:240], 'bet_authority':0}
+    audit['combined_model_authority_path']=combined_audit
+    if combined_audit.get('combined_authorized'):
+        audit['v55_authorized_bet_rows']=sum(int(bool(r.get('V55_Bet_Authority'))) for r in output)
+        audit['v55_bet_authority']=1
+        audit['v55_policy_status']='VERIFIED_COMBINED_ML_EDGES_PUBLISHED'
+    log('[NCAAF-V55-COMBINED-MODEL-AUTHORITY] '+json.dumps(combined_audit,sort_keys=True))
     audit['ml_full_history_live_handoff']={k:v for k,v in shadow.items() if k!='records'}
     audit['ml_full_history_forward_feature_source']=feature_audit
 
@@ -2043,7 +2173,11 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
                             'shadow_price_status':('REFERENCE_QUOTE_NOT_EXECUTABLE__OVER_15_MIN'
                                                    if (now-quoted).total_seconds()>900
                                                    else 'REFERENCE_QUOTE_WITHIN_15_MIN__NO_AUTHORITY'),
-                            'models':per,'brain_signal_families':sorted(signal_counts.get(gid,set())),
+                            'models':per,
+                            'combined_model_sha256':(manifest.get('artifacts') or {}).get('FULL_COMBINED_'+model_target,{}).get('sha256'),
+                            'combined_feature_schema_sha256':sha((manifest.get('artifacts') or {}).get('FULL_COMBINED_'+model_target,{}).get('features',[])),
+                            'feature_original_capture_certified':r.get('original_feature_capture_verified') is True,
+                            'brain_signal_families':sorted(signal_counts.get(gid,set())),
                             'status':'SHADOW_NOT_AUTHORIZED','bet_authority':0})
     return {'status':'SHADOW_SCORED' if records else 'HOLD_LIVE_SCORING_INPUTS',
             'scored_market_sides':len(records),'scored_games':len(set(r['game_id'] for r in records)),
