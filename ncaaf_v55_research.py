@@ -1188,7 +1188,7 @@ V55_QUALIFICATION_POLICY = 'V55-FULL-HISTORY-CHRONOLOGICAL-RESEARCH-R3'
 # eligibility test, NOT an independently multiplicity-adjusted ROI certificate.
 V55_OOS_MIN_DECISIONS = 12
 V55_OOS_MIN_DECISIONS_PER_SEASON = 4
-V55_OOS_POSTERIOR_MIN_PROB = 0.70
+V55_OOS_POSTERIOR_MIN_PROB = 0.80
 V55_OOS_REFERENCE_BASELINE = 0.50
 V55_OOS_SCREEN_POLICY = 'V55-2024-2025-BETA11-POSTERIOR-80PCT-VS-50PCT-R2'
 
@@ -1258,14 +1258,14 @@ def v55_full_history_statistical_screen(by_season):
     result={'policy':V55_HISTORY_SCREEN_POLICY,'decisive_n':n,'wins':wins,'losses':losses,
         'participating_seasons':len(observed),'observed_seasons':sorted(observed),
         'min_decisions':V55_HISTORY_MIN_DECISIONS,'min_seasons':V55_HISTORY_MIN_SEASONS,
-        'posterior_threshold':0.70,'baseline_rate':0.50,
+        'posterior_threshold':0.80,'baseline_rate':0.50,
         'independent_out_of_sample':False,'retrospective_research_only':True}
     if n<V55_HISTORY_MIN_DECISIONS or len(observed)<V55_HISTORY_MIN_SEASONS:
         return dict(result,**{'pass':False,'posterior_prob':None,
             'reason':'INSUFFICIENT_FULL_HISTORY_COVERAGE'})
     # P(Beta(w+1,l+1)>0.5) = P(Binomial(n+1,0.5)<=w).
     probability=sum(math.comb(n+1,k) for k in range(wins+1))/(1 << (n+1))
-    passed=probability>=0.70
+    passed=probability>=0.80
     return dict(result,**{'pass':passed,'posterior_prob':round(probability,8),
         'reason':'PASS_FULL_HISTORY_RESEARCH_SCREEN' if passed else 'FULL_HISTORY_POSTERIOR_BELOW_THRESHOLD'})
 
@@ -3607,9 +3607,50 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
     # Full CFBD 2013-2025 margin/total targets are score-derived, not
     # restricted to the 2025 market snapshot / historical odds population.
     # V5.2 game IDs and prior-feature construction are the sole training input.
+    game_audit_rows=[]
     full_report, full_models = fit_full_history(
         rows, events, team_map, market_rows=market_data,
-        archived_reference_rows=archived_references)
+        archived_reference_rows=archived_references, audit_rows=game_audit_rows)
+    # Enrich the ledger with verified canonical home/away names and scores.
+    for _row in game_audit_rows:
+        _sides=team_map.get((_row['season'],_row['canonical_game_id']),{})
+        if not isinstance(_sides,dict):continue
+        for _name,_side in _sides.items():
+            if not isinstance(_side,dict):continue
+            _flag=str(_side.get('is_home_verified','')).strip().lower()
+            if _flag in ('1','true','yes'):
+                _row['home_team']=_name;_row['home_final_score']=_side.get('team_score')
+            elif _flag in ('0','false','no'):
+                _row['away_team']=_name;_row['away_final_score']=_side.get('team_score')
+    # Publish a *game-level*, outcome-blind-selection audit before the manifest.
+    # Untimed archive sensitivity scenarios are NOT bet certifications.
+    game_audit_uri='gs://'+bucket+'/research/ncaaf/v55/ml/combined_edge_game_audit_latest.csv.gz'
+    try:
+        import csv,gzip,io
+        from google.cloud import storage as _storage
+        _client=storage_client or _storage.Client()
+        _fields=['season','canonical_game_id','home_team','away_team',
+          'home_final_score','away_final_score','final_home_margin',
+          'predicted_home_margin_oof','market_source','orientation',
+          'raw_source_spread','home_spread_as_interpreted','sigma_prior_seasons',
+          'home_cover_probability','selected_side','selected_side_probability',
+          'selected_side_ats_result','home_ats_result','research_bet_at_57_5pct',
+          'reference_books','home_american_odds','away_american_odds',
+          'spread_odds_format_verified','original_capture_verified',
+          'retrospective_only','audit_hold']
+        _buf=io.StringIO();_csv=csv.DictWriter(_buf,fieldnames=_fields,extrasaction='ignore');_csv.writeheader()
+        for _row in game_audit_rows:_csv.writerow({k:('' if _row.get(k) is None else _row.get(k)) for k in _fields})
+        _blob_key='research/ncaaf/v55/ml/combined_edge_game_audit_latest.csv.gz'
+        _client.bucket(bucket).blob(_blob_key).upload_from_string(
+            gzip.compress(_buf.getvalue().encode('utf-8')),
+            content_type='text/csv',content_encoding='gzip')
+        full_report['game_level_audit']={'status':'PUBLISHED','uri':game_audit_uri,
+          'rows':len(game_audit_rows),'schema':'V55_COMBINED_EDGE_GAME_AUDIT_V1',
+          'contains_both_archive_orientation_hypotheses':True,
+          'no_certified_bets_from_retrospective_archive':True}
+    except Exception as _exc:
+        full_report['game_level_audit']={'status':'EXPORT_FAILED',
+          'error':type(_exc).__name__+':'+str(_exc),'uri':game_audit_uri}
     models.update(full_models)
     report['full_history_score_research'] = full_report
     report['full_history_coverage_funnel'] = {
@@ -4086,7 +4127,7 @@ def v55_edge_first_ats_research(records, *, source, hypothesis, probability_floo
 
 def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
                                      archived_reference_rows=None,
-                                     verified_price_format=None, min_earlier_residuals=100):
+                                     verified_price_format=None, min_earlier_residuals=100, audit_rows=None):
     """Chronological out-of-season combined-model *research* at captured quotes.
 
     Consume only existing OOF predictions and earlier-year score residuals.
@@ -4143,8 +4184,21 @@ def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
     for item in sorted(rows,key=lambda r:(r['season'],r['game_id'])):
         year=int(item['season']);key=(year,str(item['game_id']))
         oof=predictions.get(key)
+        audit_base={'season':year,'canonical_game_id':key[1],
+          'final_home_margin':float(item['margin']),
+          'predicted_home_margin_oof':float(oof) if oof is not None and math.isfinite(_v55_fh_finite(oof)) else None,
+          'market_source':'','orientation':'','home_spread_as_interpreted':None,
+          'raw_source_spread':None,'home_cover_probability':None,'selected_side':'',
+          'selected_side_probability':None,'selected_side_ats_result':'',
+          'home_ats_result':'','sigma_prior_seasons':None,'reference_books':None,
+          'home_american_odds':None,'away_american_odds':None,
+          'spread_odds_format_verified':False,'retrospective_only':True,
+          'audit_hold':'','research_bet_at_57_5pct':False,
+          'original_capture_verified':False}
+        def audit_hold(reason, **fields):
+            if audit_rows is not None:audit_rows.append(dict(audit_base,audit_hold=reason,**fields))
         if oof is None or not math.isfinite(_v55_fh_finite(oof)):
-            reject['NO_COMBINED_CHRONOLOGICAL_OOF']+=1;continue
+            reject['NO_COMBINED_CHRONOLOGICAL_OOF']+=1; audit_hold('NO_COMBINED_CHRONOLOGICAL_OOF');continue
         predictions_count+=1
         # Earlier OOF residuals only. Same-season games cannot calibrate one
         # another, regardless of their order in the source table.
@@ -4154,7 +4208,7 @@ def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
         if raw is None:
             candidate=archive.get(key)
             if candidate is None:
-                reject['NO_UNAMBIGUOUS_HISTORICAL_MARKET_RECORD']+=1;continue
+                reject['NO_UNAMBIGUOUS_HISTORICAL_MARKET_RECORD']+=1; audit_hold('NO_UNAMBIGUOUS_HISTORICAL_MARKET_RECORD');continue
             raw=candidate
             source='UNTIMED_ARCHIVE_REFERENCE'
         source_counts[source]+=1
@@ -4185,6 +4239,24 @@ def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
             for hypothesis,p,home_line in scenarios:
                 cover=margin+home_line
                 result=1 if cover>1e-8 else 0 if cover< -1e-8 else None
+                side='HOME' if p>=0.5 else 'AWAY'
+                selected_result=('PUSH' if result is None else
+                                 'WIN' if ((result==1)==(side=='HOME')) else 'LOSS')
+                if audit_rows is not None:
+                    audit_rows.append(dict(audit_base,market_source=source,orientation=hypothesis,
+                       home_spread_as_interpreted=home_line,raw_source_spread=line,
+                       sigma_prior_seasons=sigma,home_cover_probability=p,
+                       selected_side=side,selected_side_probability=(p if side=='HOME' else 1-p),
+                       selected_side_ats_result=selected_result,
+                       home_ats_result=('PUSH' if result is None else 'WIN' if result==1 else 'LOSS'),
+                       reference_books=raw.get('spread_reference_books'),
+                       home_american_odds=raw.get('spread_home_odds_american'),
+                       away_american_odds=raw.get('spread_away_odds_american'),
+                       spread_odds_format_verified=(raw.get('spread_odds_format_verified') is True),
+                       original_capture_verified=(raw.get('original_quote_capture_certified') is True),
+                       audit_hold=('UNTIMED_SPREAD_ORIENTATION_UNVERIFIED' if source=='UNTIMED_ARCHIVE_REFERENCE' else
+                                   'NO_VERIFIED_SPREAD_ODDS' if raw.get('spread_odds_format_verified') is not True else ''),
+                       research_bet_at_57_5pct=(max(p,1-p)>=0.575)))
                 ats_records.append({'season':year,'game_id':key[1],
                      'source':source,'hypothesis':hypothesis,
                      'p_home':float(p),'result':result,
@@ -4192,7 +4264,9 @@ def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
                      'american_odds_away':raw.get('spread_away_odds_american') if source=='VERIFIED_PREKICK_SNAPSHOT' else None,
                      'spread_odds_format_verified':raw.get('spread_odds_format_verified') is True if source=='VERIFIED_PREKICK_SNAPSHOT' else False})
             source_counts[source+'_SPREAD_PROBABILITY']+=1
-        else:reject['NO_EARLIER_FOLD_SIGMA_OR_SPREAD_LINE']+=1
+        else:
+            reject['NO_EARLIER_FOLD_SIGMA_OR_SPREAD_LINE']+=1
+            audit_hold('NO_EARLIER_FOLD_SIGMA_OR_SPREAD_LINE',market_source=source,raw_source_spread=line,sigma_prior_seasons=sigma)
         # Archived reference fields are NOT odds: skip the moneyline path.
         if source!='VERIFIED_PREKICK_SNAPSHOT':continue
         # Historical ML price needs explicit format to avoid confusing decimal
@@ -4271,7 +4345,7 @@ def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
 
 
 def fit_full_history(historical_rows,events,team_map,*,market_rows=None,
-                     archived_reference_rows=None,min_train=240,min_test=30):
+                     archived_reference_rows=None,min_train=240,min_test=30, audit_rows=None):
     """Expanding-season score regression plus earlier-OOF residual calibration.
 
     OOF residuals for season Y never use outcomes from season Y or later.
@@ -4369,7 +4443,8 @@ def fit_full_history(historical_rows,events,team_map,*,market_rows=None,
         v55_combined_oof_price_research(rows,
             {(int(r['season']),str(r['game_id'])):float(combined_margin[i])
              for i,r in enumerate(rows) if math.isfinite(float(combined_margin[i]))},
-            market_rows=market_rows,archived_reference_rows=archived_reference_rows)
+            market_rows=market_rows,archived_reference_rows=archived_reference_rows,
+            audit_rows=audit_rows)
         if combined_margin is not None else {'status':'HOLD_NO_COMBINED_OOF','bet_authority':0})
     report['combined_model_authority_handoff']={
         'status':'SHADOW_PENDING_INDEPENDENT_LIVE_PRICE_VALIDATION',
