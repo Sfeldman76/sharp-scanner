@@ -3659,9 +3659,11 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
         _buf=io.StringIO();_csv=csv.DictWriter(_buf,fieldnames=_fields,extrasaction='ignore');_csv.writeheader()
         for _row in game_audit_rows:_csv.writerow({k:('' if _row.get(k) is None else _row.get(k)) for k in _fields})
         _blob_key='research/ncaaf/v55/ml/combined_edge_game_audit_latest.csv.gz'
-        _client.bucket(bucket).blob(_blob_key).upload_from_string(
+        _blob=_client.bucket(bucket).blob(_blob_key)
+        _blob.content_encoding='gzip'
+        _blob.upload_from_string(
             gzip.compress(_buf.getvalue().encode('utf-8')),
-            content_type='text/csv',content_encoding='gzip')
+            content_type='text/csv')
         full_report['game_level_audit']={'status':'PUBLISHED','uri':game_audit_uri,
           'rows':len(game_audit_rows),'schema':'V55_COMBINED_EDGE_GAME_AUDIT_V1',
           'contains_both_archive_orientation_hypotheses':True,
@@ -3669,6 +3671,9 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
     except Exception as _exc:
         full_report['game_level_audit']={'status':'EXPORT_FAILED',
           'error':type(_exc).__name__+':'+str(_exc),'uri':game_audit_uri}
+        print('[NCAAF-V55-GAME-LEVEL-AUDIT-EXPORT-FAILED] '+
+              json.dumps(full_report['game_level_audit'],sort_keys=True),flush=True)
+        raise RuntimeError('NCAAF_V55_GAME_LEVEL_AUDIT_EXPORT_FAILED') from _exc
     models.update(full_models)
     report['full_history_score_research'] = full_report
     report['full_history_coverage_funnel'] = {
