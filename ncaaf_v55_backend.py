@@ -1090,6 +1090,47 @@ def persist_v55_prospective_events(events, storage_client, bucket, *, now=None):
 V55_QUALIFICATION_SCHEMA='NCAAF_V55_FROZEN_RULE_QUALIFICATION_AUDIT_V2'
 V55_QUALIFICATION_POLICY='V55-FROZEN-INDEPENDENT-BRAINS-2013-2025-R1'
 
+# Shared V5.5 small-sample OOS screening contract. This is a research
+# eligibility test, NOT an independently multiplicity-adjusted ROI certificate.
+V55_OOS_MIN_DECISIONS = 12
+V55_OOS_MIN_DECISIONS_PER_SEASON = 4
+V55_OOS_POSTERIOR_MIN_PROB = 0.90
+V55_OOS_REFERENCE_BASELINE = 0.50
+V55_OOS_SCREEN_POLICY = 'V55-2024-2025-BETA11-POSTERIOR-90PCT-VS-50PCT-R1'
+
+
+def v55_oos_statistical_screen(wins, losses, year_2024, year_2025):
+    """Return auditable Beta(1,1) posterior one-sided P(p > 0.5).
+
+    A small data sufficiency floor prevents five-game systems from qualifying.
+    Pushes do not count as Bernoulli trials. Confirming outcomes must arise
+    from 2024 and 2025; neither retrospective selection nor data provenance is
+    certified by this screen. Independence/multiple-testing still gate authority.
+    For integer beta shapes, the probability is an exact binomial CDF.
+    """
+    w, l = int(wins), int(losses)
+    a, b = int(year_2024), int(year_2025)
+    n = w + l
+    if min(w,l,a,b) < 0 or a+b != n:
+        return {'pass': False, 'reason': 'INCONSISTENT_CONFIRMATION_COUNTS',
+                'decisive_n': n, 'posterior_prob': None}
+    if n < V55_OOS_MIN_DECISIONS or min(a,b) < V55_OOS_MIN_DECISIONS_PER_SEASON:
+        return {'pass': False, 'reason': 'INSUFFICIENT_STATISTICAL_EVIDENCE',
+                'decisive_n': n, 'posterior_prob': None}
+    # For P(Beta(w+1,l+1) > .5), the exact tail is
+    # P(Binomial(n+1,.5) <= w); no scipy dependency required.
+    probability = sum(math.comb(n+1,k) for k in range(w+1)) / (1 << (n+1))
+    passed = probability >= V55_OOS_POSTERIOR_MIN_PROB
+    return {'pass': passed,
+            'reason': 'PASS_STATISTICAL_OOS_SCREEN' if passed else 'POSTERIOR_EDGE_EVIDENCE_BELOW_THRESHOLD',
+            'decisive_n': n, 'posterior_prob': round(probability,8),
+            'baseline_rate': V55_OOS_REFERENCE_BASELINE,
+            'posterior_threshold': V55_OOS_POSTERIOR_MIN_PROB,
+            'policy': V55_OOS_SCREEN_POLICY}
+
+
+
+
 
 def validate_v55_current_qualification(doc, raw_sha='', *, now=None):
     """Validate exact V5.5 research schema WITHOUT consulting legacy V2 registry.
@@ -1132,9 +1173,20 @@ def validate_v55_current_qualification(doc, raw_sha='', *, now=None):
             n=int(entry.get('confirmation_n')); rate=float(entry.get('confirmation_rate'))
             season=entry.get('by_season') or {}
             a,b=season['2024'],season['2025']
-            if not (n>=60 and int(a['n'])>=15 and int(b['n'])>=15
-                    and n==int(a['n'])+int(b['n']) and rate>=.53):
-                raise ValueError('OOS_COUNTS')
+            wins=int(entry.get('confirmation_wins'))
+            losses=int(entry.get('confirmation_losses'))
+            decisive=wins+losses
+            season24=int(a['wins'])+int(a['losses'])
+            season25=int(b['wins'])+int(b['losses'])
+            if (decisive<=0 or n!=int(a['n'])+int(b['n']) or decisive!=season24+season25
+                or abs(rate-wins/decisive)>0.000002 or
+                entry.get('oos_statistical_screen',{}).get('policy')!=V55_OOS_SCREEN_POLICY):
+                raise ValueError('OOS_COUNTS_OR_POLICY')
+            checked=v55_oos_statistical_screen(wins,losses,season24,season25)
+            recorded=entry['oos_statistical_screen']
+            if (not checked['pass'] or recorded.get('pass') is not True or
+                recorded.get('posterior_prob')!=checked.get('posterior_prob')):
+                raise ValueError('OOS_SCREEN_FAILED')
         except (ValueError,KeyError,TypeError):
             rejects['OOS_RESULTS_INVALID']+=1;continue
         if not (recipe.get('role')=='directional' and recipe.get('market')=='spreads'

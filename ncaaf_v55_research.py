@@ -1184,6 +1184,47 @@ def v55_historical_family_combinations(groups, team_map, *, max_families=7):
 V55_QUALIFICATION_BLOB = 'research/ncaaf/v55/qualified_independent_brains_v55_current.json'
 V55_QUALIFICATION_POLICY = 'V55-FROZEN-INDEPENDENT-BRAINS-2013-2025-R1'
 
+# Shared V5.5 small-sample OOS screening contract. This is a research
+# eligibility test, NOT an independently multiplicity-adjusted ROI certificate.
+V55_OOS_MIN_DECISIONS = 12
+V55_OOS_MIN_DECISIONS_PER_SEASON = 4
+V55_OOS_POSTERIOR_MIN_PROB = 0.90
+V55_OOS_REFERENCE_BASELINE = 0.50
+V55_OOS_SCREEN_POLICY = 'V55-2024-2025-BETA11-POSTERIOR-90PCT-VS-50PCT-R1'
+
+
+def v55_oos_statistical_screen(wins, losses, year_2024, year_2025):
+    """Return auditable Beta(1,1) posterior one-sided P(p > 0.5).
+
+    A small data sufficiency floor prevents five-game systems from qualifying.
+    Pushes do not count as Bernoulli trials. Confirming outcomes must arise
+    from 2024 and 2025; neither retrospective selection nor data provenance is
+    certified by this screen. Independence/multiple-testing still gate authority.
+    For integer beta shapes, the probability is an exact binomial CDF.
+    """
+    w, l = int(wins), int(losses)
+    a, b = int(year_2024), int(year_2025)
+    n = w + l
+    if min(w,l,a,b) < 0 or a+b != n:
+        return {'pass': False, 'reason': 'INCONSISTENT_CONFIRMATION_COUNTS',
+                'decisive_n': n, 'posterior_prob': None}
+    if n < V55_OOS_MIN_DECISIONS or min(a,b) < V55_OOS_MIN_DECISIONS_PER_SEASON:
+        return {'pass': False, 'reason': 'INSUFFICIENT_STATISTICAL_EVIDENCE',
+                'decisive_n': n, 'posterior_prob': None}
+    # For P(Beta(w+1,l+1) > .5), the exact tail is
+    # P(Binomial(n+1,.5) <= w); no scipy dependency required.
+    probability = sum(math.comb(n+1,k) for k in range(w+1)) / (1 << (n+1))
+    passed = probability >= V55_OOS_POSTERIOR_MIN_PROB
+    return {'pass': passed,
+            'reason': 'PASS_STATISTICAL_OOS_SCREEN' if passed else 'POSTERIOR_EDGE_EVIDENCE_BELOW_THRESHOLD',
+            'decisive_n': n, 'posterior_prob': round(probability,8),
+            'baseline_rate': V55_OOS_REFERENCE_BASELINE,
+            'posterior_threshold': V55_OOS_POSTERIOR_MIN_PROB,
+            'policy': V55_OOS_SCREEN_POLICY}
+
+
+
+
 
 def _v55_qualification_evidence(family, system_id, source_receipts, attestations):
     """Attestations are independently captured proof, not retrospective labels.
@@ -1292,10 +1333,15 @@ def v55_frozen_qualification_report(events, team_map, source_receipts, *,
         holds=[]
         if fam not in ('STAT','PATHI','BIG_AL','PREDICTION_TRACKER','SYSTEM_MINER'):
             holds.append('NO_EXECUTABLE_DIRECTIONAL_RULE_CONTRACT')
-        if byyear.get('2024',{}).get('n',0)<15 or byyear.get('2025',{}).get('n',0)<15 or n<60:
-            holds.append('RETROSPECTIVE_CONFIRMATION_SAMPLE_TOO_SMALL')
-        if not w+l or w/(w+l)<.53:
-            holds.append('RETROSPECTIVE_REFERENCE_ATS_BELOW_THRESHOLD')
+        year24=byyear.get('2024',{})
+        year25=byyear.get('2025',{})
+        screen=v55_oos_statistical_screen(w,l,
+            int(year24.get('wins',0))+int(year24.get('losses',0)),
+            int(year25.get('wins',0))+int(year25.get('losses',0)))
+        if screen['reason']=='INSUFFICIENT_STATISTICAL_EVIDENCE':
+            holds.append('RETROSPECTIVE_CONFIRMATION_INSUFFICIENT_STATISTICAL_EVIDENCE')
+        elif not screen['pass']:
+            holds.append('RETROSPECTIVE_CONFIRMATION_POSTERIOR_EDGE_BELOW_THRESHOLD')
         proof,proof_holds=_v55_qualification_evidence(fam,sid,source_receipts,attestations)
         # Report precise attestation gaps even when the proof registry is absent.
         if 'MISSING_INDEPENDENT_SYSTEM_ATTESTATION' in proof_holds:
@@ -1307,8 +1353,9 @@ def v55_frozen_qualification_report(events, team_map, source_receipts, *,
         for h in holds:rejections[h]+=1
         item={'family':fam,'system_id':sid,'market':'spreads',
             'discovery_reference_games':sum(len(v) for y,v in by_season.items() if y<=2023),
-            'confirmation_n':n,'confirmation_rate':round(w/(w+l),6) if w+l else None,
-            'by_season':byyear,'holds':holds,'descriptive_reference_only':True,
+            'confirmation_n':n,'confirmation_decisive_n':w+l,'confirmation_wins':w,'confirmation_losses':l,
+            'confirmation_rate':round(w/(w+l),6) if w+l else None,
+            'by_season':byyear,'oos_statistical_screen':screen,'holds':holds,'descriptive_reference_only':True,
             'oos_pass':not bool(holds),'evidence_key':fam+'|'+sid}
         diagnostics.append(item)
         if not holds:
@@ -1336,7 +1383,8 @@ def v55_frozen_qualification_report(events, team_map, source_receipts, *,
         'history_first_season':min(seasons_seen) if seasons_seen else None,
         'discovery_last_season':2023,'confirmation_seasons':[2024,2025],
         'source_audit':{'observed_seasons':sorted(seasons_seen),
-           'source_receipts':source_receipts or {},'invalid_firings':dict(invalid),
+           'source_receipts':source_receipts or {},'oos_screen_policy':V55_OOS_SCREEN_POLICY,
+           'invalid_firings':dict(invalid),
            'attestation_systems_supplied':len([k for k in (attestations or {}) if k!='_operator_approval'])},
         'systems':qualified,'candidate_system_count':len(diagnostics),
         'candidate_diagnostics':diagnostics,'hold_counts':dict(rejections),
