@@ -3690,7 +3690,9 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
             'retrospective_expert_capture_certified','market_rich_forward_feed_used_for_training',
             'expert_source_no_fire_certified']
         for _family in _V55_FH_FAMILIES:
-            _brain_fields.extend([f'{_family}_{_key}' for _key in ('home_fires','away_fires','net','state')])
+            _brain_fields.extend([f'{_family}_{_key}' for _key in (
+                'home_fires','away_fires','net','log_fire_imbalance',
+                'log_fire_volume','capped_net_hid_raw_imbalance','state')])
         _buf=io.StringIO();_writer=csv.DictWriter(_buf,fieldnames=_brain_fields,extrasaction='ignore')
         _writer.writeheader()
         for _row in brain_audit_rows:
@@ -3707,7 +3709,7 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
         _blob.upload_from_string(gzip.compress(_buf.getvalue().encode('utf-8')),
                                  content_type='text/csv')
         full_report['seven_brain_game_audit']={'status':'PUBLISHED','uri':brain_uri,
-            'rows':len(brain_audit_rows),'schema':'V55_SEVEN_BRAIN_GAME_INPUT_AUDIT_V1',
+            'rows':len(brain_audit_rows),'schema':'V55_SEVEN_BRAIN_GAME_INPUT_AUDIT_V2',
             'core_stat_oof_are_diagnostics_not_combined_inputs':True,
             'no_source_fire_certification':True,'bet_authority':0}
         print('[NCAAF-V55-SEVEN-BRAIN-GAME-AUDIT] '+
@@ -4024,8 +4026,19 @@ def _v55_fh_evidence_features(events, team_map, *, return_trace=False):
                 av=counts.get((yr,gid,mkt,aside),Counter()).get(fam,0)
                 net=float(min(3,hv)-min(3,av))
                 features[f'EVIDENCE_{mkt}_{fam}_NET']=net
+                # Preserve asymmetry lost when both teams exceed the historical
+                # cap of three firings. These are counts of deduplicated
+                # retrospective mechanisms, NOT independent confirmations.
+                # log1p compresses correlated / highly prolific rule families.
+                raw_log_imbalance=float(math.log1p(hv)-math.log1p(av))
+                raw_log_volume=float(math.log1p(hv+av))
+                features[f'EVIDENCE_{mkt}_{fam}_LOG_FIRE_IMBALANCE']=raw_log_imbalance
+                features[f'EVIDENCE_{mkt}_{fam}_LOG_FIRE_VOLUME']=raw_log_volume
                 game_trace[mkt][fam]={'home_fires':hv,'away_fires':av,
                     'unique_fires':hv+av,'net':net,
+                    'log_fire_imbalance':raw_log_imbalance,
+                    'log_fire_volume':raw_log_volume,
+                    'capped_net_hid_raw_imbalance':bool(hv!=av and net==0),
                     'state':('RECORDED_OPPOSING_CAPPED_NET_ZERO' if hv and av and not net else
                              'RECORDED_OPPOSING_UNBALANCED' if hv and av else
                              'RECORDED_DIRECTIONAL_FIRE' if hv or av else
@@ -4109,12 +4122,12 @@ def v55_seven_brain_representation_summary(rows, *, market='spreads'):
     """
     families=('SYSTEM_MINER','PATHI','BIG_AL','PREDICTION_TRACKER')
     all_brains=('CORE','STAT')+families+('MARKET_RICH',)
-    out={'schema':'V55_SEVEN_BRAIN_REPRESENTATION_V1',
-         'status':'INPUTS_AUDITED__INDEPENDENT_INCREMENTAL_VALUE_NOT_PROVEN',
+    out={'schema':'V55_SEVEN_BRAIN_REPRESENTATION_V2',
+         'status':'INPUTS_AUDITED__RAW_FIRE_IMBALANCE_PRESERVED__INCREMENTAL_VALUE_NOT_PROVEN',
          'game_count':len(rows),'market':market,'by_brain':{},
          'source_vintage_certified':False,'bet_authority':0,
          'core_stat_note':'CORE and STAT independent OOF outputs are diagnostics; FULL_COMBINED_margin currently uses overlapping CFBD prior features, NOT those OOF outputs as a seven-brain stack.',
-         'no_fire_note':'Zero NET may mean unrecorded source, no fire, or opposing balanced fires; explicit fire counts distinguish the latter.',
+         'no_fire_note':'Zero NET may mean unrecorded source, no fire, or opposing capped fires; raw log imbalance is also retained, but source observation remains uncertified.',
          'market_rich_note':'Only historical verified prekick snapshot features count as historical Market Rich. Forward 2026 moves are excluded.'}
     seasons=sorted(set(int(r['season']) for r in rows))
     for fam in all_brains:
@@ -4139,6 +4152,7 @@ def v55_seven_brain_representation_summary(rows, *, market='spreads'):
                     if h+a:cnt['recorded_fire_games']+=1
                     if h and a:cnt['opposing_fire_games']+=1
                     if h and a and min(3,h)==min(3,a):cnt['capped_net_zero_games']+=1
+                    if h!=a and min(3,h)==min(3,a):cnt['capped_net_hid_raw_imbalance_games']+=1
                     if h+a and min(3,h)!=min(3,a):cnt['nonzero_net_games']+=1
                     cnt['unique_recorded_fires']+=h+a
             seasons_out[str(season)]=dict(cnt)
@@ -4185,6 +4199,9 @@ def v55_build_seven_brain_game_audit(rows,allpred):
             rec[f'{fam}_home_fires']=data.get('home_fires',0)
             rec[f'{fam}_away_fires']=data.get('away_fires',0)
             rec[f'{fam}_net']=data.get('net',0)
+            rec[f'{fam}_log_fire_imbalance']=data.get('log_fire_imbalance',0.)
+            rec[f'{fam}_log_fire_volume']=data.get('log_fire_volume',0.)
+            rec[f'{fam}_capped_net_hid_raw_imbalance']=data.get('capped_net_hid_raw_imbalance',False)
             rec[f'{fam}_state']=data.get('state','NO_RECORDED_FIRE_SOURCE_COVERAGE_UNKNOWN')
         records.append(rec)
     return records
