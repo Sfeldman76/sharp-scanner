@@ -3607,7 +3607,9 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
     # Full CFBD 2013-2025 margin/total targets are score-derived, not
     # restricted to the 2025 market snapshot / historical odds population.
     # V5.2 game IDs and prior-feature construction are the sole training input.
-    full_report, full_models = fit_full_history(rows, events, team_map, market_rows=market_data)
+    full_report, full_models = fit_full_history(
+        rows, events, team_map, market_rows=market_data,
+        archived_reference_rows=archived_references)
     models.update(full_models)
     report['full_history_score_research'] = full_report
     report['full_history_coverage_funnel'] = {
@@ -3962,12 +3964,15 @@ def _v55_fh_prepare_rows(historical_rows,events,team_map, *, market_rows=None):
     return rows,audit
 
 def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
+                                     archived_reference_rows=None,
                                      verified_price_format=None, min_earlier_residuals=100):
     """Chronological out-of-season combined-model *research* at captured quotes.
 
     Consume only existing OOF predictions and earlier-year score residuals.
-    Require a stated price format and exact (season, game ID). A single home
-    moneyline price does NOT imply an away price; never synthesize vig or odds.
+    Require exact canonical (season, game ID) identity. Timed snapshots take
+    precedence; existing canonical archive references are an untimed fallback
+    for spread probability *research only*, never executable EV or ROI. A
+    single home ML price cannot imply an away price or synthetic vig.
     No retrospective result is an original signal-capture certificate.
     """
     by_game={(int(r['season']),str(r['game_id'])):r for r in rows}
@@ -3979,6 +3984,32 @@ def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
             reject['DUPLICATE_SNAPSHOT_GAME_HELD']+=1
             matched[key]=None  # no arbitrary choice of retrospective price
         elif key not in matched:matched[key]=rec
+    # Historical provider quotations have already been validated against the
+    # existing Stage1/V5.2 home/away crosswalk by the archive reference loader.
+    # They remain untimed and have UNVERIFIED spread orientation, so only a
+    # separate sign-hypothesis research lane may use them. Do NOT merge them
+    # into the pregame Market Rich feature table or executable ROI registry.
+    archive={};archive_holds=Counter();archive_duplicated=set()
+    for rec in archived_reference_rows or []:
+        try:key=(int(rec['season']),str(rec['game_id']))
+        except (KeyError,ValueError,TypeError):
+            archive_holds['INVALID_ARCHIVE_ID']+=1;continue
+        if key in archive or key in archive_duplicated:
+            archive_holds['DUPLICATE_ARCHIVE_CANONICAL_GAME']+=1
+            archive_duplicated.add(key)
+            archive[key]=None
+            continue
+        if rec.get('reference_type')!='UNTIMED_HISTORICAL_PROVIDER_MEDIAN' or \
+           rec.get('spread_orientation')!='ASSUMED_HOME_QUOTE_UNVERIFIED' or \
+           rec.get('pregame_capture_verified') is not False or \
+           rec.get('executable_price_verified') is not False:
+            archive_holds['UNRECOGNIZED_ARCHIVE_REFERENCE_CONTRACT']+=1;continue
+        line=_v55_fh_finite(rec.get('spread_home_line_research'))
+        if not math.isfinite(line) or not -70<=line<=70:
+            archive_holds['INVALID_ARCHIVE_SPREAD_LINE']+=1;continue
+        archive[key]=rec
+    source_counts=Counter()
+    orientation_sensitivity=[]
     earlier=[(int(r['season']),float(r['margin'])-float(predictions[(int(r['season']),str(r['game_id']))]))
              for r in rows if (int(r['season']),str(r['game_id'])) in predictions and
              math.isfinite(_v55_fh_finite(predictions[(int(r['season']),str(r['game_id']))]))]
@@ -3998,17 +4029,35 @@ def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
         # another, regardless of their order in the source table.
         sigma=sigma_by_season[year]
         raw=matched.get(key)
+        source='VERIFIED_PREKICK_SNAPSHOT' if raw is not None else None
         if raw is None:
-            reject['NO_UNAMBIGUOUS_HISTORICAL_MARKET_RECORD']+=1;continue
-        line=_v55_fh_finite(raw.get('spread_home_line'))
+            candidate=archive.get(key)
+            if candidate is None:
+                reject['NO_UNAMBIGUOUS_HISTORICAL_MARKET_RECORD']+=1;continue
+            raw=candidate
+            source='UNTIMED_ARCHIVE_REFERENCE'
+        source_counts[source]+=1
+        line=_v55_fh_finite(raw.get('spread_home_line') if source=='VERIFIED_PREKICK_SNAPSHOT'
+                            else raw.get('spread_home_line_research'))
         if math.isfinite(line) and math.isfinite(sigma) and sigma>0:
             p_home=1-NormalDist(mu=float(oof),sigma=sigma).cdf(-line)
-            lines.append({'season':year,'game_id':key[1], 'market':'spreads',
+            rec={'season':year,'game_id':key[1], 'market':'spreads',
                 'home_cover_probability':round(p_home,6),
-                'source':'EARLIER_SEASON_OOF_NORMAL_APPROX_RESEARCH',
-                'historical_quote_line':line,'priced_roi':None,
-                'hold':'SPREAD_ODDS_NOT_SUPPLIED__NO_SYNTHETIC_MINUS_110'})
+                'source':source,'historical_quote_line':line,'priced_roi':None,
+                'hold':'SPREAD_ODDS_NOT_SUPPLIED__NO_SYNTHETIC_MINUS_110'}
+            if source=='UNTIMED_ARCHIVE_REFERENCE':
+                # Both sign conventions are displayed as hypotheses: we do not
+                # know whether the archive was HOME-oriented. This is NOT a
+                # pregame calibration or certificate.
+                alt=1-NormalDist(mu=float(oof),sigma=sigma).cdf(line)
+                orientation_sensitivity.append(abs(p_home-alt))
+                rec['reverse_orientation_home_cover_probability']=round(alt,6)
+                rec['hold']='UNTIMED_ARCHIVE_SPREAD_ORIENTATION_AND_VINTAGE_UNVERIFIED'
+            lines.append(rec)
+            source_counts[source+'_SPREAD_PROBABILITY']+=1
         else:reject['NO_EARLIER_FOLD_SIGMA_OR_SPREAD_LINE']+=1
+        # Archived reference fields are NOT odds: skip the moneyline path.
+        if source!='VERIFIED_PREKICK_SNAPSHOT':continue
         # Historical ML price needs explicit format to avoid confusing decimal
         # and American representations. Home price alone cannot price away.
         quote=raw.get('home_ml_quote')
@@ -4041,6 +4090,13 @@ def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
             'chronological_oof_predictions':predictions_count,
             'spread_line_reference_probabilities':len(lines),
             'historical_price_format':verified_price_format or 'UNVERIFIED',
+            'market_record_source_counts':dict(source_counts),
+            'archive_reference_rejections':dict(archive_holds),
+            'archive_orientation_sensitivity_games':len(orientation_sensitivity),
+            'archive_orientation_mean_absolute_probability_difference':(
+                round(sum(orientation_sensitivity)/len(orientation_sensitivity),6)
+                if orientation_sensitivity else None),
+            'untimed_archive_not_original_quote_or_training_feature':True,
             'hypothetical_ml_positive_ev_wagers':len(returns),
             'hypothetical_ml_realized_roi':round(sum(returns)/len(returns),6) if returns else None,
             'by_season':[{ 'season':year,'n':len(v),
@@ -4050,7 +4106,8 @@ def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
             'cannot_issue_executable_roi_certificate':True}
 
 
-def fit_full_history(historical_rows,events,team_map,*,market_rows=None,min_train=240,min_test=30):
+def fit_full_history(historical_rows,events,team_map,*,market_rows=None,
+                     archived_reference_rows=None,min_train=240,min_test=30):
     """Expanding-season score regression plus earlier-OOF residual calibration.
 
     OOF residuals for season Y never use outcomes from season Y or later.
@@ -4148,7 +4205,7 @@ def fit_full_history(historical_rows,events,team_map,*,market_rows=None,min_trai
         v55_combined_oof_price_research(rows,
             {(int(r['season']),str(r['game_id'])):float(combined_margin[i])
              for i,r in enumerate(rows) if math.isfinite(float(combined_margin[i]))},
-            market_rows=market_rows)
+            market_rows=market_rows,archived_reference_rows=archived_reference_rows)
         if combined_margin is not None else {'status':'HOLD_NO_COMBINED_OOF','bet_authority':0})
     report['combined_model_authority_handoff']={
         'status':'SHADOW_PENDING_INDEPENDENT_LIVE_PRICE_VALIDATION',
