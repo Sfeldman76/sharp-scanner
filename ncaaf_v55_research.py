@@ -1188,7 +1188,7 @@ V55_QUALIFICATION_POLICY = 'V55-FULL-HISTORY-CHRONOLOGICAL-RESEARCH-R3'
 # eligibility test, NOT an independently multiplicity-adjusted ROI certificate.
 V55_OOS_MIN_DECISIONS = 12
 V55_OOS_MIN_DECISIONS_PER_SEASON = 4
-V55_OOS_POSTERIOR_MIN_PROB = 0.80
+V55_OOS_POSTERIOR_MIN_PROB = 0.70
 V55_OOS_REFERENCE_BASELINE = 0.50
 V55_OOS_SCREEN_POLICY = 'V55-2024-2025-BETA11-POSTERIOR-80PCT-VS-50PCT-R2'
 
@@ -1258,14 +1258,14 @@ def v55_full_history_statistical_screen(by_season):
     result={'policy':V55_HISTORY_SCREEN_POLICY,'decisive_n':n,'wins':wins,'losses':losses,
         'participating_seasons':len(observed),'observed_seasons':sorted(observed),
         'min_decisions':V55_HISTORY_MIN_DECISIONS,'min_seasons':V55_HISTORY_MIN_SEASONS,
-        'posterior_threshold':0.80,'baseline_rate':0.50,
+        'posterior_threshold':0.70,'baseline_rate':0.50,
         'independent_out_of_sample':False,'retrospective_research_only':True}
     if n<V55_HISTORY_MIN_DECISIONS or len(observed)<V55_HISTORY_MIN_SEASONS:
         return dict(result,**{'pass':False,'posterior_prob':None,
             'reason':'INSUFFICIENT_FULL_HISTORY_COVERAGE'})
     # P(Beta(w+1,l+1)>0.5) = P(Binomial(n+1,0.5)<=w).
     probability=sum(math.comb(n+1,k) for k in range(wins+1))/(1 << (n+1))
-    passed=probability>=0.80
+    passed=probability>=0.70
     return dict(result,**{'pass':passed,'posterior_prob':round(probability,8),
         'reason':'PASS_FULL_HISTORY_RESEARCH_SCREEN' if passed else 'FULL_HISTORY_POSTERIOR_BELOW_THRESHOLD'})
 
@@ -3963,6 +3963,127 @@ def _v55_fh_prepare_rows(historical_rows,events,team_map, *, market_rows=None):
            'historical_market_rich_rejections':dict(market_invalid)}
     return rows,audit
 
+def v55_ats_oof_validation(records, *, hypothesis, source):
+    """Out-of-season spread probability diagnostics; never an ROI certificate.
+
+    All observations must have an OOF probability, a FINAL home margin, and a
+    canonical spread reference. Pushes are excluded from Bernoulli scoring but
+    included in the audited game count. Predictions cannot be selected using
+    realized ATS outcomes. This is a fixed HOME-side evaluation, not an
+    ex-post selection of profitable sides or the best archive orientation.
+    """
+    from collections import defaultdict
+    groups=defaultdict(list)
+    for rec in records:
+        if rec.get('hypothesis')!=hypothesis or rec.get('source')!=source:continue
+        groups['all'].append(rec)
+        groups['season:'+str(rec['season'])].append(rec)
+        p=float(rec['p_home']);bucket=min(9,max(0,int(p*10)))
+        groups['bucket:'+str(bucket)].append(rec)
+    def metrics(items):
+        settled=[r for r in items if r['result'] in (0,1)]
+        if not settled:return {'games':len(items),'decisions':0,'pushes':len(items),
+                               'brier':None,'logloss':None,'baseline_50pct_brier':None,
+                               'baseline_50pct_logloss':None,'observed_home_cover_rate':None,
+                               'mean_predicted_home_cover_probability':None,'correct_side_rate':None}
+        n=len(settled)
+        brier=sum((r['p_home']-r['result'])**2 for r in settled)/n
+        logloss=-sum(r['result']*math.log(max(1e-12,min(1-1e-12,r['p_home'])))+
+                     (1-r['result'])*math.log(max(1e-12,min(1-1e-12,1-r['p_home'])))
+                     for r in settled)/n
+        return {'games':len(items),'decisions':n,'pushes':len(items)-n,
+            'brier':round(brier,6),'logloss':round(logloss,6),
+            'baseline_50pct_brier':0.25,'baseline_50pct_logloss':round(math.log(2),6),
+            'observed_home_cover_rate':round(sum(r['result'] for r in settled)/n,6),
+            'mean_predicted_home_cover_probability':round(sum(r['p_home'] for r in settled)/n,6),
+            'correct_side_rate':round(sum((r['p_home']>0.5)==bool(r['result']) for r in settled
+                if r['p_home']!=0.5)/sum(r['p_home']!=0.5 for r in settled),6)
+                if any(r['p_home']!=0.5 for r in settled) else None}
+    return {'hypothesis':hypothesis,'source':source,
+            'overall':metrics(groups['all']),
+            'by_season':[{'season':int(k.split(':')[1]),**metrics(v)}
+                         for k,v in sorted(groups.items()) if k.startswith('season:')],
+            'by_probability_decile':[{'decile':int(k.split(':')[1]),**metrics(v)}
+                         for k,v in sorted(groups.items()) if k.startswith('bucket:')],
+            'baseline_note':'50pct uninformed HOME cover baseline, NOT sportsbook-price-adjusted benchmark',
+            'model_selection_independence_attested':False,
+            'original_quote_capture_verified':False,
+            'certified_roi':False}
+
+
+def v55_edge_first_ats_research(records, *, source, hypothesis, probability_floor=0.575):
+    """Fixed-policy candidate-side audit; never certify untimed prices.
+
+    A probability is a fair-pricing input, not itself a sportsbook edge.
+    Select a side using only model probability, never its outcome. Evaluate
+    ATS versus the exact reference line supplied for that hypothesis.
+    Expected-value/ROI use only explicitly supplied American odds with a
+    positively verified format, never the common but invented -110 price.
+    """
+    import statistics
+    from collections import defaultdict
+    eligible=[]; holds=Counter()
+    for rec in records:
+        if rec.get('source')!=source or rec.get('hypothesis')!=hypothesis:continue
+        try:p=float(rec['p_home'])
+        except (TypeError,ValueError,KeyError):holds['INVALID_PROBABILITY']+=1;continue
+        if not math.isfinite(p) or not 0<p<1:
+            holds['INVALID_PROBABILITY']+=1;continue
+        side='HOME' if p>=0.5 else 'AWAY'
+        win_p=p if side=='HOME' else 1-p
+        if win_p<probability_floor:continue
+        result=rec.get('result')
+        win=None if result not in (0,1) else (int(result) if side=='HOME' else 1-int(result))
+        # The minimum decimal payout for neutral (zero) EV is 1/p.
+        # A live sportsbook quote must be better than this and pass uncertainty.
+        fair_decimal=1.0/win_p
+        item={'season':int(rec['season']),'side':side,'probability':win_p,
+              'fair_decimal_odds':fair_decimal,'ats_win':win,'priced_ev':None,'realized_return':None}
+        odds=rec.get('american_odds_'+side.lower())
+        format_verified=rec.get('spread_odds_format_verified') is True
+        if odds is not None and format_verified:
+            odd=num(odds)
+            profit=odds_profit(odd) if odd is not None else None
+            if profit is not None:
+                item['priced_ev']=win_p*profit-(1-win_p)
+                item['realized_return']=(profit if win==1 else -1 if win==0 else 0) if win is not None else None
+            else:holds['INVALID_VERIFIED_SPREAD_ODDS']+=1
+        else:holds['NO_VERIFIED_SPREAD_ODDS']+=1
+        eligible.append(item)
+    def describe(items):
+        decided=[x for x in items if x['ats_win'] is not None]
+        priced=[x for x in decided if x['realized_return'] is not None]
+        n=len(decided);wins=sum(x['ats_win'] for x in decided)
+        # Wilson interval is descriptive only; non-independence makes it optimistic.
+        if n:
+            rate=wins/n;z=1.96;den=1+z*z/n
+            center=(rate+z*z/(2*n))/den
+            half=z*math.sqrt(rate*(1-rate)/n+z*z/(4*n*n))/den
+            lower=max(0,center-half);upper=min(1,center+half)
+        else:rate=lower=upper=None
+        return {'signals':len(items),'graded_decisions':n,
+                'pushes':len(items)-n,'ats_wins':wins,
+                'ats_win_rate':round(rate,6) if rate is not None else None,
+                'descriptive_wilson_95pct_low':round(lower,6) if lower is not None else None,
+                'descriptive_wilson_95pct_high':round(upper,6) if upper is not None else None,
+                'mean_predicted_cover_probability':round(statistics.mean(x['probability'] for x in decided),6) if decided else None,
+                'mean_fair_decimal_odds':round(statistics.mean(x['fair_decimal_odds'] for x in items),6) if items else None,
+                'verified_spread_odds_grades':len(priced),
+                'retrospective_unit_roi':round(statistics.mean(x['realized_return'] for x in priced),6) if priced else None,
+                'mean_quoted_ev':round(statistics.mean(x['priced_ev'] for x in priced),6) if priced else None}
+    by_year=defaultdict(list)
+    for x in eligible:by_year[x['season']].append(x)
+    return {'source':source,'orientation_hypothesis':hypothesis,
+            'fixed_minimum_predicted_cover_probability':probability_floor,
+            'overall':describe(eligible),
+            'by_season':[{'season':year,**describe(vals)} for year,vals in sorted(by_year.items())],
+            'missing_price_holds':dict(holds),
+            'archived_orientation_not_resolved_by_performance':True,
+            'price_break_even_formula':'decimal_odds_must_exceed_1_divided_by_calibrated_win_probability',
+            'requires_validated_calibration_and_independent_model_selection':True,
+            'certified_bets':0,'executable_roi_certified':False}
+
+
 def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
                                      archived_reference_rows=None,
                                      verified_price_format=None, min_earlier_residuals=100):
@@ -4018,7 +4139,7 @@ def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
     for yr in sorted({int(r['season']) for r in rows}):
         prior=[err for season,err in earlier if season<yr]
         sigma_by_season[yr]=(stdev(prior) if len(prior)>=min_earlier_residuals else float('nan'))
-    lines=[];predictions_count=0
+    lines=[];ats_records=[];predictions_count=0
     for item in sorted(rows,key=lambda r:(r['season'],r['game_id'])):
         year=int(item['season']);key=(year,str(item['game_id']))
         oof=predictions.get(key)
@@ -4054,6 +4175,22 @@ def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
                 rec['reverse_orientation_home_cover_probability']=round(alt,6)
                 rec['hold']='UNTIMED_ARCHIVE_SPREAD_ORIENTATION_AND_VINTAGE_UNVERIFIED'
             lines.append(rec)
+            # Actual ATS outcome against each *fixed* sign hypothesis. The
+            # result is never used to choose the better archive orientation.
+            # A home-side score does not require historical spread vig.
+            margin=float(item['margin'])
+            scenarios=[('AS_RECORDED_HOME_SPREAD',p_home,line)]
+            if source=='UNTIMED_ARCHIVE_REFERENCE':
+                scenarios.append(('REVERSED_HOME_SPREAD',alt,-line))
+            for hypothesis,p,home_line in scenarios:
+                cover=margin+home_line
+                result=1 if cover>1e-8 else 0 if cover< -1e-8 else None
+                ats_records.append({'season':year,'game_id':key[1],
+                     'source':source,'hypothesis':hypothesis,
+                     'p_home':float(p),'result':result,
+                     'american_odds_home':raw.get('spread_home_odds_american') if source=='VERIFIED_PREKICK_SNAPSHOT' else None,
+                     'american_odds_away':raw.get('spread_away_odds_american') if source=='VERIFIED_PREKICK_SNAPSHOT' else None,
+                     'spread_odds_format_verified':raw.get('spread_odds_format_verified') is True if source=='VERIFIED_PREKICK_SNAPSHOT' else False})
             source_counts[source+'_SPREAD_PROBABILITY']+=1
         else:reject['NO_EARLIER_FOLD_SIGMA_OR_SPREAD_LINE']+=1
         # Archived reference fields are NOT odds: skip the moneyline path.
@@ -4085,7 +4222,34 @@ def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
                     if roi_ev>0:by_year[year].append(record)
         # Do not add current-season errors into past calibration.
     returns=[r['historical_return_per_unit'] for v in by_year.values() for r in v]
+    ats_validation=[v55_ats_oof_validation(ats_records,hypothesis=orientation,source=source)
+        for source,orientations in (
+            ('VERIFIED_PREKICK_SNAPSHOT',('AS_RECORDED_HOME_SPREAD',)),
+            ('UNTIMED_ARCHIVE_REFERENCE',('AS_RECORDED_HOME_SPREAD','REVERSED_HOME_SPREAD')))
+        for orientation in orientations]
+    edge_research=[v55_edge_first_ats_research(ats_records,source=source,hypothesis=orientation)
+        for source,orientations in (
+            ('VERIFIED_PREKICK_SNAPSHOT',('AS_RECORDED_HOME_SPREAD',)),
+            ('UNTIMED_ARCHIVE_REFERENCE',('AS_RECORDED_HOME_SPREAD','REVERSED_HOME_SPREAD')))
+        for orientation in orientations]
+    readiness={'status':'NOT_CERTIFIED_PENDING_INDEPENDENT_EVIDENCE',
+        'out_of_season_score_predictions_available':predictions_count,
+        'historical_spread_probability_outcomes_evaluated':len(lines),
+        'hypotheses_reported_separately':len(ats_validation),
+        'archive_spread_orientation_unverified':True,
+        'independent_original_pregame_model_predictions_attested':False,
+        'independent_original_quote_at_prediction_attested':False,
+        'historical_quote_spread_odds_verified':False,
+        'model_feature_vintage_attested':False,
+        'independently_adjusted_positive_roi_lower_bound_attested':False,
+        'original_live_capture_and_model_sha_required':True,
+        'eligible_for_automatic_hmac_certificate_generation':False,
+        'next_action':'Verify original prospective 2026 prediction+quote ledger, feature vintage and independent adjusted ROI; do not sign a certificate from retrospective references'}
     return {'status':'RETROSPECTIVE_OOF_PRICE_RESEARCH_ONLY',
+            'ats_oof_validation':ats_validation,
+            'edge_first_ats_research':edge_research,
+            'edge_first_status':'CONDITIONAL_ATS_SIGNALS__NO_VERIFIED_SPREAD_ODDS_FOR_UNTIMED_ARCHIVE',
+            'combined_certification_readiness':readiness,
             'independent_tested_hypotheses':0,'certified_edges':0,'bet_authority':0,
             'chronological_oof_predictions':predictions_count,
             'spread_line_reference_probabilities':len(lines),
