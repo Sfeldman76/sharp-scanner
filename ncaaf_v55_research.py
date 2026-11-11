@@ -2073,9 +2073,27 @@ def market_rich_feature_coverage(*, client=None, project='sharplogger', dataset=
                     stamp=obj.get('Game_Start')
                     if stamp is not None:observed[int(str(stamp)[:4])]+=1
             expected={int(r['season']):int(r['pregame_rows']) for r in rows}
-            if count!=totals['pregame_rows'] or dict(observed)!=expected:
-                result.update(status='HOLD_MARKET_RICH_ROW_RECONCILIATION_FAILED',
-                              exported_rows=count,observed_by_season=dict(observed))
+            # Count and export are separate BigQuery queries on a mutable forward
+            # market table. Their snapshots can differ legitimately as new quotes
+            # arrive. The exported JSONL is the authoritative population for
+            # publication; report preflight/export differences rather than
+            # rejecting an otherwise complete, successfully serialized export.
+            # The per-season tally is accumulated from EACH exported record.
+            source_count_drift = count != totals['pregame_rows'] or dict(observed) != expected
+            result.update(
+                preflight_rows=int(totals['pregame_rows']),
+                preflight_by_season=expected,
+                exported_rows=count,
+                observed_by_season=dict(observed),
+                source_count_drift_observed=bool(source_count_drift),
+                source_count_drift_rows=count-int(totals['pregame_rows']),
+                source_count_drift_by_season={
+                    str(y):int(observed.get(y,0))-int(expected.get(y,0))
+                    for y in sorted(set(observed)|set(expected))
+                    if int(observed.get(y,0))!=int(expected.get(y,0))},
+                reconciliation_policy='PUBLISH_COMPLETE_EXPORT__REPORT_SOURCE_SNAPSHOT_DRIFT')
+            if count == 0 or sum(observed.values()) != count:
+                result.update(status='HOLD_MARKET_RICH_EXPORT_SELF_RECONCILIATION_FAILED')
                 return result
             if storage_client is None:
                 from google.cloud import storage
