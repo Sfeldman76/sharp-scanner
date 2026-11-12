@@ -276,6 +276,11 @@ def v55_verify_combined_model_authority_attestation(attestation, secret, *, now=
             raise ValueError('ORIGINAL_EVENT_EVIDENCE_REQUIRED')
         if proof.get('market') not in ('spreads','h2h','totals') or not s(proof.get('book')):
             raise ValueError('MARKET_OR_BOOK')
+        variant=s(proof.get('model_variant') or 'COMBINED').upper()
+        if variant not in ('COMBINED','STACKED'):
+            raise ValueError('UNRECOGNIZED_COMBINED_MODEL_VARIANT')
+        if variant=='STACKED' and proof.get('market')!='spreads':
+            raise ValueError('STACKED_MARGIN_ONLY_CERTIFIED_FOR_SPREADS')
         if not 0<float(proof.get('min_live_ev',0.02))<1:raise ValueError('EV_THRESHOLD')
     except (ValueError,TypeError,KeyError) as exc:
         return None,'INVALID_COMBINED_PROOF:'+str(exc)
@@ -300,11 +305,17 @@ def v55_apply_combined_model_authority(board_rows, shadow, attestation, *,
     by_game=defaultdict(list)
     for item in scored:
         if str(item.get('market'))!=proof['market'] or str(item.get('book')).lower()!=str(proof['book']).lower():continue
-        if item.get('combined_model_sha256')!=proof['model_sha256'] or item.get('combined_feature_schema_sha256')!=proof['feature_schema_sha256']:
-            continue
+        variant=s(proof.get('model_variant') or 'COMBINED').upper()
+        if variant=='STACKED':
+            matched_model=(item.get('stacked_model_sha256')==proof['model_sha256'] and
+                           item.get('stacked_feature_schema_sha256')==proof['feature_schema_sha256'])
+        else:
+            matched_model=(item.get('combined_model_sha256')==proof['model_sha256'] and
+                           item.get('combined_feature_schema_sha256')==proof['feature_schema_sha256'])
+        if not matched_model:continue
         if item.get('feature_original_capture_certified') is not True:
             continue
-        combined=(item.get('models') or {}).get('COMBINED') or {}
+        combined=(item.get('models') or {}).get('STACKED' if variant=='STACKED' else 'COMBINED') or {}
         ev=num(combined.get('shadow_ev_per_unit'))
         prob=num(combined.get('shadow_probability'))
         if ev is None or prob is None or not 0<prob<1 or ev<float(proof['min_live_ev']):continue
@@ -2116,7 +2127,18 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
                            if (game,market,side,family)==(gid,mkt,left,fam)})
                 nright=len({ident for (game,market,side,family,ident) in directional_counts
                             if (game,market,side,family)==(gid,mkt,right,fam)})
-                raw['EVIDENCE_'+mkt+'_'+fam+'_NET']=float(min(3,nleft)-min(3,nright))
+                prefix='EVIDENCE_'+mkt+'_'+fam
+                raw[prefix+'_NET']=float(min(3,nleft)-min(3,nright))
+                # Exact parity with the full-history frozen-brain representation.
+                # Zero recorded events is UNKNOWN source coverage, not a
+                # source-certified NO_FIRE. The stacked research model uses
+                # explicit NaN for direction when nothing was recorded.
+                raw[prefix+'_RECORDED_FIRE']=float(bool(nleft+nright))
+                raw[prefix+'_OPPOSING_FIRE']=float(bool(nleft and nright)) if nleft+nright else float('nan')
+                raw[prefix+'_LOG_FIRE_IMBALANCE']=(float(math.log1p(nleft)-math.log1p(nright))
+                                                    if nleft+nright else float('nan'))
+                raw[prefix+'_LOG_FIRE_VOLUME']=(float(math.log1p(nleft+nright))
+                                                 if nleft+nright else float('nan'))
             nets=[raw['EVIDENCE_'+mkt+'_'+fam+'_NET'] for fam in _V55_FH_FAMILIES]
             raw['CONFLUENCE_'+mkt+'_SUPPORT_HOME']=float(sum(v>0 for v in nets))
             raw['CONFLUENCE_'+mkt+'_SUPPORT_AWAY']=float(sum(v<0 for v in nets))
@@ -2134,6 +2156,7 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
         if target not in ('spreads','h2h','totals'):continue
         model_target='total' if target=='totals' else 'margin'
         per={}
+        independent_base_point={}
         for brain in ('CORE','STAT','COMBINED'):
             name=f'FULL_{brain}_{model_target}';spec=models.get(name)
             if spec is None:continue
@@ -2144,6 +2167,11 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
             x=np.asarray([[_v55_fh_finite(raw[k]) for k in cols]],float)
             if not np.isfinite(x).any():holds['NO_NUMERIC_LIVE_FEATURES']+=1;continue
             p=float(spec['model'].predict(x)[0]);sigma=_v55_fh_finite(spec.get('residual_sigma'))
+            # Independent stack needs point forecasts, not CORE/STAT's own
+            # Gaussian residual calibrators. Missing base sigma should not
+            # veto an otherwise valid stacked research observation.
+            if brain in ('CORE','STAT') and model_target=='margin':
+                independent_base_point[brain]=p
             if not math.isfinite(sigma) or sigma<=0:holds['MISSING_OOF_RESIDUAL_CALIBRATION']+=1;continue
             line=_v55_fh_finite(q.get('line'))
             if target=='spreads':threshold=-line if str(q.get('side')).upper()=='HOME' else line
@@ -2166,6 +2194,58 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
                         'shadow_ev_per_unit':round(estimated_ev,6) if estimated_ev is not None else None,
                         'positive_ev_shadow':estimated_ev is not None and estimated_ev>0,
                         'sigma':sigma}
+        # Independent CORE/STAT OOF-trained stack. This additional model was
+        # fit on earlier-season base OOF predictions, not overlapping raw CORE
+        # features. All specialist data and Market Rich are optional. It is
+        # evaluated ONLY as a live shadow against the exact current quote.
+        # The signed/OOS authority gate above remains completely unchanged.
+        stack=models.get('FULL_STACKED_margin') if target=='spreads' else None
+        if stack is not None:
+            if 'CORE' not in independent_base_point or 'STAT' not in independent_base_point:
+                holds['STACK_BASE_CORE_STAT_SCORE_MISSING']+=1
+            else:
+                c=float(independent_base_point['CORE'])
+                st=float(independent_base_point['STAT'])
+                stack_input=dict(raw)
+                stack_input['STACK_CORE_MARGIN_OOF']=c
+                stack_input['STACK_STAT_MARGIN_OOF']=st
+                stack_input['STACK_CORE_STAT_DIFFERENCE']=c-st
+                for fam in _V55_FH_FAMILIES:
+                    prefix='EVIDENCE_spreads_'+fam
+                    if stack_input.get(prefix+'_RECORDED_FIRE')!=1.:
+                        for suffix in ('_NET','_LOG_FIRE_IMBALANCE','_LOG_FIRE_VOLUME'):
+                            stack_input[prefix+suffix]=float('nan')
+                if raw.get('MARKET_RICH_HIST_PRESENT')!=1.:
+                    for field in ('MARKET_SPREAD_OPEN','MARKET_SPREAD_LATEST','MARKET_SPREAD_MOVE',
+                                  'MARKET_TOTAL_OPEN','MARKET_TOTAL_LATEST','MARKET_TOTAL_MOVE',
+                                  'MARKET_H2H_HOME_PRICE','MARKET_SPREAD_BOOKS',
+                                  'MARKET_TOTAL_BOOKS','MARKET_SNAPSHOT_COUNT'):
+                        stack_input[field]=float('nan')
+                stack_fields=list(stack['features'])
+                if any(f not in stack_input for f in stack_fields):
+                    holds['STACK_FEATURE_SCHEMA_PARITY_MISSING_COLUMNS']+=1
+                else:
+                    arr=np.asarray([[_v55_fh_finite(stack_input[f]) for f in stack_fields]],float)
+                    if np.isfinite(arr).any():
+                        predicted=float(stack['model'].predict(arr)[0])
+                        sigma=_v55_fh_finite(stack.get('residual_sigma'))
+                        qline=_v55_fh_finite(q.get('line'))
+                        if math.isfinite(sigma) and sigma>0 and math.isfinite(qline):
+                            side=str(q.get('side') or '').upper()
+                            home_p=1-NormalDist(mu=predicted,sigma=sigma).cdf(-qline if side=='HOME' else qline)
+                            # For AWAY quote qline is already AWAY-oriented.
+                            # Away cover = P(home margin < away line).
+                            p_side=home_p if side=='HOME' else 1-home_p
+                            gain=profit(q.get('odds'))
+                            edge=p_side*gain-(1-p_side) if gain is not None else None
+                            per['STACKED']={'predicted_home_margin_or_total':round(predicted,5),
+                                'shadow_probability':round(p_side,6),
+                                'shadow_ev_per_unit':round(edge,6) if edge is not None else None,
+                                'positive_ev_shadow':edge is not None and edge>0,
+                                'sigma':sigma,'independent_oof_stack':True,
+                                'bet_authority':0}
+                        else:holds['STACK_MISSING_VERIFIED_LINE_OR_OOF_SIGMA']+=1
+                    else:holds['STACK_NO_NUMERIC_LIVE_FEATURES']+=1
         if per:
             records.append({'game_id':gid,'market':target,'side':q.get('side'), 'book':q.get('book'),
                             'quoted_line':q.get('line'),'quoted_odds':q.get('odds'),
@@ -2175,6 +2255,8 @@ def score_snapshot(models, manifest, inputs, quotes, signals=(), *,now=None):
                                                    else 'REFERENCE_QUOTE_WITHIN_15_MIN__NO_AUTHORITY'),
                             'models':per,
                             'combined_model_sha256':(manifest.get('artifacts') or {}).get('FULL_COMBINED_'+model_target,{}).get('sha256'),
+                            'stacked_model_sha256':(manifest.get('artifacts') or {}).get('FULL_STACKED_margin',{}).get('sha256') if target=='spreads' else None,
+                            'stacked_feature_schema_sha256':sha((manifest.get('artifacts') or {}).get('FULL_STACKED_margin',{}).get('features',[])) if target=='spreads' else None,
                             'combined_feature_schema_sha256':sha((manifest.get('artifacts') or {}).get('FULL_COMBINED_'+model_target,{}).get('features',[])),
                             'feature_original_capture_certified':r.get('original_feature_capture_verified') is True,
                             'brain_signal_families':sorted(signal_counts.get(gid,set())),

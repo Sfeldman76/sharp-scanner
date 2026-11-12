@@ -2997,7 +2997,7 @@ def ml_attach_research_reference_labels(historical_rows, archive_rows):
             ('totals','label_totals','label_totals_reference','MARKET_TOTAL_LINE','MARKET_TOTAL_LINE_REFERENCE')):
             if r.get(old) in (0,1):
                 feature_values=r.get('core_features',{})
-                timestamp_verified=r.get(mk+'_source')=='VERIFIED_PREKICK_SCORES_WITH_FEATURES'
+                timestamp_verified=r.get(('spread_source' if mk=='spreads' else 'totals_source'))=='VERIFIED_PREKICK_SCORES_WITH_FEATURES'
                 line=_ml_number(feature_values.get(field))
                 if not timestamp_verified and not math.isfinite(line):
                     # The optional legacy training view names its columns
@@ -3040,7 +3040,7 @@ def ml_attach_research_reference_labels(historical_rows, archive_rows):
                 if old!=label_value:audit[mk+'_ARCHIVE_DIFFERS_FROM_EXISTING_LABEL']+=1
                 # Compare sign hypotheses against a timed quote when one
                 # exists, but never infer proof of original archive timing.
-                if mk=='spreads' and r.get('spreads_source')=='VERIFIED_PREKICK_SCORES_WITH_FEATURES':
+                if mk=='spreads' and r.get('spread_source')=='VERIFIED_PREKICK_SCORES_WITH_FEATURES':
                     observed=_ml_number(r.get('core_features',{}).get('MARKET_SPREAD_LINE'))
                     if math.isfinite(observed) and abs(line)>.01:
                         same=abs(observed-line);flip=abs(observed+line)
@@ -3068,7 +3068,7 @@ def ml_attach_research_reference_labels(historical_rows, archive_rows):
         'labels':counts,'backfilled_by_season_market':{f'{yr}_{mk}':n for (yr,mk),n in sorted(by_season.items())},
         'by_source':dict(source_summary),'holds':dict(audit),
         'timestamp_requirement':'ORIGINAL_TIME_REQUIRED_ONLY_FOR_TIME_DEPENDENT_CLAIMS',
-        'spread_orientation':'HOME_QUOTE_HYPOTHESIS_UNVERIFIED; SIGN_SENSITIVITY_REPORTED',
+        'spread_orientation':'HOME_QUOTE_HYPOTHESIS_UNVERIFIED; VERIFIED_SNAPSHOT_OVERLAP_AUDITED; NO_OUTCOME_SELECTED_SIGN',
         'timed_training_labels_preserved':True,'untimed_reference_is_not_executable':True,
         'bet_authority':0}
 
@@ -3709,7 +3709,7 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
         from google.cloud import storage as _storage
         _client=storage_client or _storage.Client()
         _brain_fields=['season','canonical_game_id','home_team','away_team',
-            'final_home_margin','core_margin_oof','stat_margin_oof','full_combined_margin_oof',
+            'final_home_margin','core_margin_oof','stat_margin_oof','full_combined_margin_oof','stacked_margin_oof',
             'core_prior_numeric_fields','stat_prior_numeric_fields',
             'market_rich_historical_present','market_rich_numeric_fields',
             'retrospective_expert_capture_certified','market_rich_forward_feed_used_for_training',
@@ -3737,12 +3737,13 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
                     elif _flag in ('0','false','no'):_row['away_team']=_name
             _writer.writerow({k:('' if _row.get(k) is None else _row.get(k)) for k in _brain_fields})
         _blob=_client.bucket(bucket).blob('research/ncaaf/v55/ml/seven_brain_game_input_audit_latest.csv.gz')
-        _blob.content_encoding='gzip'
+        _blob.content_encoding=None
         _blob.upload_from_string(gzip.compress(_buf.getvalue().encode('utf-8')),
-                                 content_type='text/csv')
+                                 content_type='application/gzip')
         full_report['seven_brain_game_audit']={'status':'PUBLISHED','uri':brain_uri,
             'rows':len(brain_audit_rows),'schema':'V55_SEVEN_BRAIN_GAME_INPUT_AUDIT_V2',
-            'core_stat_oof_are_diagnostics_not_combined_inputs':True,
+            'core_stat_oof_stacked_into_full_stacked_margin':True,
+            'legacy_full_combined_is_direct_overlapping_prior_features':True,
             'no_source_fire_certification':True,'bet_authority':0}
         print('[NCAAF-V55-SEVEN-BRAIN-GAME-AUDIT] '+
             json.dumps(full_report['seven_brain_game_audit'],sort_keys=True),flush=True)
@@ -3776,6 +3777,8 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
         'status':'SHADOW_UNTIL_ORIGINAL_LIVE_FEATURE_PARITY',
         'feature_contract':'EXACT_CFBD_PRIOR_DIFFERENCE_COLUMNS_AND_CANONICAL_ID',
         'seven_brains':'CORE_STAT_SYSTEM_MINER_PATHI_BIG_AL_PT_PLUS_LIVE_MARKET_RICH',
+        'independent_oof_stack':'FULL_STACKED_margin',
+        'original_capture_needed_for_live_bet_not_untimed_archive_research':True,
         'historical_market_quote_required_for_score_training':False,
         'market_price_required_for_live_value':True,
         'authority':0}
@@ -4170,7 +4173,7 @@ def v55_seven_brain_representation_summary(rows, *, market='spreads'):
          'status':'INPUTS_AUDITED__RAW_FIRE_IMBALANCE_PRESERVED__INCREMENTAL_VALUE_NOT_PROVEN',
          'game_count':len(rows),'market':market,'by_brain':{},
          'source_vintage_certified':False,'bet_authority':0,
-         'core_stat_note':'CORE and STAT independent OOF outputs are diagnostics; FULL_COMBINED_margin currently uses overlapping CFBD prior features, NOT those OOF outputs as a seven-brain stack.',
+         'core_stat_note':'FULL_STACKED_margin (if published) stacks earlier-season CORE and STAT OOF scores plus optional frozen experts and Market Rich; legacy FULL_COMBINED_margin still uses overlapping CFBD priors.',
          'no_fire_note':'Zero NET may mean unrecorded source, no fire, or opposing capped fires; raw log imbalance is also retained, but source observation remains uncertified.',
          'market_rich_note':'Only historical verified prekick snapshot features count as historical Market Rich. Forward 2026 moves are excluded.'}
     seasons=sorted(set(int(r['season']) for r in rows))
@@ -4221,7 +4224,7 @@ def v55_build_seven_brain_game_audit(rows,allpred):
         features=r.get('features',{});trace=r.get('evidence_trace',{}).get('spreads',{})
         rec={'season':r['season'],'canonical_game_id':r['game_id'],
              'final_home_margin':r.get('margin'),
-             'full_combined_margin_oof':None,
+             'full_combined_margin_oof':None,'stacked_margin_oof':None,
              'core_margin_oof':None,'stat_margin_oof':None,
              'market_rich_historical_present':features.get('MARKET_RICH_HIST_PRESENT')==1.,
              'market_rich_numeric_fields':sum(math.isfinite(_v55_fh_finite(features.get(k))) for k in ML_HIST_MARKET_FIELDS),
@@ -4233,6 +4236,7 @@ def v55_build_seven_brain_game_audit(rows,allpred):
              'market_rich_forward_feed_used_for_training':False,
              'expert_source_no_fire_certified':False}
         for model_name,field in (('FULL_COMBINED_margin','full_combined_margin_oof'),
+                                 ('FULL_STACKED_margin','stacked_margin_oof'),
                                  ('FULL_CORE_margin','core_margin_oof'),
                                  ('FULL_STAT_margin','stat_margin_oof')):
             arr=allpred.get(model_name)
@@ -4591,6 +4595,144 @@ def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
             'cannot_issue_executable_roi_certificate':True}
 
 
+def v55_archived_spread_orientation_overlap_audit(market_rows, archived_reference_rows):
+    """Quote-to-quote sign corroboration, never outcome-optimized selection.
+
+    An untimed median from multiple books may differ from a verified prekick
+    quote, even when the sign convention is correct. Therefore this is a
+    provenance audit, NOT certification of the source's quote convention.
+    """
+    timed={};duplicates=set()
+    for r in market_rows or []:
+        try:key=(int(r['season']),str(r['game_id']))
+        except (KeyError,ValueError,TypeError):continue
+        val=_v55_fh_finite(r.get('spread_home_line'))
+        if not math.isfinite(val):continue
+        if key in timed:duplicates.add(key)
+        timed[key]=val
+    archive={};adup=set()
+    for r in archived_reference_rows or []:
+        try:key=(int(r['season']),str(r['game_id']))
+        except (KeyError,ValueError,TypeError):continue
+        line=_v55_fh_finite(r.get('spread_home_line_research'))
+        if not math.isfinite(line):continue
+        if key in archive:adup.add(key)
+        archive[key]=line
+    counts=Counter();samples=[]
+    for key in sorted(set(timed)&set(archive)-duplicates-adup):
+        a=archive[key];t=timed[key]
+        if abs(a)<1e-7 or abs(t)<1e-7:
+            counts['ZERO_LINE_NONDIAGNOSTIC']+=1;continue
+        d_same=abs(a-t);d_reverse=abs(a+t)
+        if abs(d_same-d_reverse)<1e-7:
+            counts['EQUAL_SIGN_DISTANCE']+=1
+        elif d_same<d_reverse:
+            counts['HOME_SIGN_CLOSER']+=1
+        else:
+            counts['REVERSED_SIGN_CLOSER']+=1
+        if min(d_same,d_reverse)<=1.0:
+            counts['CLOSE_QUOTE_MATCH_WITHIN_ONE_POINT']+=1
+        if len(samples)<12:
+            samples.append({'season':key[0],'game_id':key[1],
+                'historical_untimed_raw':a,'verified_prekick_home_line':t,
+                'home_distance':round(d_same,4),'reversed_distance':round(d_reverse,4)})
+    return {'status':'SIGN_CORROBORATION_ONLY_UNTIMED_ARCHIVE_NOT_CERTIFIED',
+        'overlapping_unambiguous_games':sum(v for k,v in counts.items() if k in
+            ('HOME_SIGN_CLOSER','REVERSED_SIGN_CLOSER','EQUAL_SIGN_DISTANCE','ZERO_LINE_NONDIAGNOSTIC')),
+        'counts':dict(counts),'samples':samples,
+        'source_convention_documentation_verified':False,
+        'archive_home_sign_certified':False,
+        'orientation_chosen_from_outcomes':False,
+        'note':'Use original provider schema/documentation to certify the sign. Quote overlap cannot prove original vintage or execution.'}
+
+
+def v55_fit_independent_score_stack(rows, base_core, base_stat, *, min_train=240, min_test=30):
+    """Season-forward CORE/STAT margin OOF stack with OPTIONAL expert evidence.
+
+    OOF CORE/STAT values are produced by earlier-season base models. For each
+    test season the stack sees only earlier years of those base OOF rows.
+    Retrospectively reconstructed expert occurrences are not pregame capture
+    certificates. Market Rich missingness does not veto a canonical game.
+    """
+    import numpy as np
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    from sklearn.metrics import mean_absolute_error,mean_squared_error
+    core=np.asarray(base_core,dtype=float);stat=np.asarray(base_stat,dtype=float)
+    if len(core)!=len(rows) or len(stat)!=len(rows):
+        raise ValueError('V55_STACK_INPUT_LENGTH_MISMATCH')
+    # Use SPREAD expert evidence only for the spread/margin stack, never totals
+    # or H2H evidence as a disguised independent ATS validation vote.
+    family_fields=[]
+    for fam in _V55_FH_FAMILIES:
+        family_fields += ['EVIDENCE_spreads_'+fam+suffix for suffix in (
+            '_NET','_LOG_FIRE_IMBALANCE','_LOG_FIRE_VOLUME','_RECORDED_FIRE','_OPPOSING_FIRE')]
+    fields=['STACK_CORE_MARGIN_OOF','STACK_STAT_MARGIN_OOF','STACK_CORE_STAT_DIFFERENCE',
+            'MARKET_RICH_HIST_PRESENT']+family_fields+list(ML_HIST_MARKET_FIELDS)
+    X=np.full((len(rows),len(fields)),np.nan,dtype=float)
+    years=np.asarray([int(r['season']) for r in rows],dtype=int)
+    y=np.asarray([_v55_fh_finite(r.get('margin')) for r in rows],dtype=float)
+    by_source=Counter();valid=np.isfinite(core)&np.isfinite(stat)&np.isfinite(y)
+    for i,r in enumerate(rows):
+        if not valid[i]:continue
+        feat=r.get('features',{})
+        payload={'STACK_CORE_MARGIN_OOF':float(core[i]),
+                 'STACK_STAT_MARGIN_OOF':float(stat[i]),
+                 'STACK_CORE_STAT_DIFFERENCE':float(core[i]-stat[i]),
+                 'MARKET_RICH_HIST_PRESENT':float(feat.get('MARKET_RICH_HIST_PRESENT')==1.)}
+        for fam in _V55_FH_FAMILIES:
+            prefix='EVIDENCE_spreads_'+fam
+            present=_v55_fh_finite(feat.get(prefix+'_RECORDED_FIRE'))==1.
+            payload[prefix+'_RECORDED_FIRE']=float(present)
+            payload[prefix+'_OPPOSING_FIRE']=_v55_fh_finite(feat.get(prefix+'_OPPOSING_FIRE')) if present else float('nan')
+            for suffix in ('_NET','_LOG_FIRE_IMBALANCE','_LOG_FIRE_VOLUME'):
+                payload[prefix+suffix]=_v55_fh_finite(feat.get(prefix+suffix)) if present else float('nan')
+            if present:by_source[fam+'_RECORDED_FIRING_GAMES']+=1
+        for f in ML_HIST_MARKET_FIELDS:
+            payload[f]=_v55_fh_finite(feat.get(f)) if payload['MARKET_RICH_HIST_PRESENT']==1. else float('nan')
+        by_source['MARKET_RICH_SNAPSHOT_GAMES']+=int(payload['MARKET_RICH_HIST_PRESENT'])
+        X[i]=[_v55_fh_finite(payload.get(f)) for f in fields]
+    preds=np.full(len(rows),np.nan);folds=[];earlier_residuals=[];cal=[]
+    for yr in sorted(set(years)):
+        train=np.where(valid & (years<yr))[0]
+        test=np.where(valid & (years==yr))[0]
+        if len(train)<min_train or len(test)<min_test:continue
+        # Never use this or later seasons' base OOF scores for training.
+        m=HistGradientBoostingRegressor(max_iter=90,learning_rate=.05,max_leaf_nodes=9,
+            min_samples_leaf=55,l2_regularization=8.,random_state=20261109)
+        m.fit(X[train],y[train]);preds[test]=m.predict(X[test])
+        if len(earlier_residuals)>=min_train:
+            sigma=float(np.std(earlier_residuals,ddof=1))
+            if sigma>0:cal.append({'season':int(yr),'prior_oof_games':len(earlier_residuals),
+                                   'sigma_from_earlier_seasons':round(sigma,6),
+                                   'empirical_68pct_interval_coverage':round(float(np.mean(abs(y[test]-preds[test])<=sigma)),6)})
+        folds.append({'season':int(yr),'train_prior_oof_games':len(train),'test_games':len(test)})
+        earlier_residuals.extend((y[test]-preds[test]).tolist())
+    tested=np.isfinite(preds)
+    report={'status':'EXPANDING_SEASON_INDEPENDENT_CORE_STAT_STACK_SHADOW' if tested.any() else 'HOLD_STACK_NO_CHRONOLOGICAL_OOF',
+        'training_games':int(valid.sum()),'oof_games':int(tested.sum()),'folds':folds,
+        'calibration_folds':cal,'feature_fields':fields,'optional_family_coverage':dict(by_source),
+        'source_missing_policy':'NO_RECOVERY_PRETENDS_ABSENT_EXPERT_FEED_IS_A_VERIFIED_NO_FIRE',
+        'core_stat_prediction_policy':'EXACT_PRIOR_YEAR_OOF_PREDICTIONS_FOR_META_FIT',
+        'current_price_training_required':False,'market_rich_required':False,
+        'original_expert_capture_certified':False,'source_vintage_certified':False,
+        'forward_eligible':False,'bet_authority':0}
+    fitted=None
+    if tested.any():
+        report['oof_mae']=round(float(mean_absolute_error(y[tested],preds[tested])),6)
+        report['oof_rmse']=round(float(mean_squared_error(y[tested],preds[tested])**.5),6)
+        if len(earlier_residuals)>1:
+            sigma=float(np.std(earlier_residuals,ddof=1))
+            m=HistGradientBoostingRegressor(max_iter=90,learning_rate=.05,max_leaf_nodes=9,
+                min_samples_leaf=55,l2_regularization=8.,random_state=20261109)
+            m.fit(X[valid],y[valid])
+            fitted={'model':m,'features':fields,'source':'INDEPENDENT_OOF_STACK_OPTIONAL_BRAINS_V1',
+                'prediction_target':'HOME_SCORE_MINUS_AWAY_SCORE',
+                'residual_sigma':round(sigma,6),
+                'forward_eligible':False,'feature_vintage_certified':False,
+                'family_evidence_capture_certified':False,'bet_authority':0}
+    return preds,report,fitted
+
+
 def fit_full_history(historical_rows,events,team_map,*,market_rows=None,context_by_game=None,
                      archived_reference_rows=None,min_train=240,min_test=30,
                      audit_rows=None,brain_audit_rows=None):
@@ -4684,12 +4826,44 @@ def fit_full_history(historical_rows,events,team_map,*,market_rows=None,context_
             if paired:
                 report['same_game_comparison'][target]={'games':paired,**{b+'_mae':round(float(mean_absolute_error(y[mask],allpred[f'FULL_{b}_{target}'][mask])),6) for b in definitions},
                     'fully_paired_out_of_season':True}
-    # Publish an exact per-game trace of every brain and all three OOF scores.
+    # Independently stacked score research: train meta only on earlier-year
+    # CORE and STAT OOF scores (not their overlapping raw CFBD feature matrix).
+    # Retrospective reconstructed family events and optional historical Market
+    # Rich stay explicit research-only features with unknown/absent coverage.
+    core_margin=allpred.get('FULL_CORE_margin')
+    stat_margin=allpred.get('FULL_STAT_margin')
+    if core_margin is not None and stat_margin is not None:
+        stack_pred,stack_report,stack_fitted=v55_fit_independent_score_stack(
+            rows,core_margin,stat_margin,min_train=min_train,min_test=min_test)
+        report['independent_core_stat_score_stack']=stack_report
+        allpred['FULL_STACKED_margin']=stack_pred
+        report['models']['FULL_STACKED_margin']={
+            'target':'HOME_SCORE_MINUS_AWAY_SCORE','feature_count':len(stack_report['feature_fields']),
+            'training_games':stack_report['training_games'],'oof_games':stack_report['oof_games'],
+            'folds':stack_report['folds'],'oof_mae':stack_report.get('oof_mae'),
+            'oof_rmse':stack_report.get('oof_rmse'),'forward_residual_sigma':
+                stack_fitted.get('residual_sigma') if stack_fitted else None,
+            'status':stack_report['status'],'original_feature_vintage_certified':False,
+            'bet_authority':0}
+        if stack_fitted:fitted['FULL_STACKED_margin']=stack_fitted
+        paired_mask=np.isfinite(stack_pred)&np.isfinite(allpred['FULL_COMBINED_margin'])
+        if paired_mask.any():
+            ymargin=np.asarray([r['margin'] for r in rows],dtype=float)
+            report['same_game_comparison']['stacked_margin']={
+                'games':int(paired_mask.sum()),'fully_paired_out_of_season':True,
+                'stacked_margin_mae':round(float(mean_absolute_error(ymargin[paired_mask],stack_pred[paired_mask])),6),
+                'legacy_combined_margin_mae':round(float(mean_absolute_error(ymargin[paired_mask],allpred['FULL_COMBINED_margin'][paired_mask])),6),
+                'core_margin_mae':round(float(mean_absolute_error(ymargin[paired_mask],core_margin[paired_mask])),6),
+                'stat_margin_mae':round(float(mean_absolute_error(ymargin[paired_mask],stat_margin[paired_mask])),6)}
+    else:
+        report['independent_core_stat_score_stack']={'status':'HOLD_BASE_CORE_STAT_MARGIN_OOF_UNAVAILABLE',
+                                                      'bet_authority':0}
+    # Publish an exact per-game trace of every brain and four OOF scores.
     # This does not modify the learner's feature matrix or historical decisions.
     if brain_audit_rows is not None:
         brain_audit_rows.extend(v55_build_seven_brain_game_audit(rows,allpred))
     coverage['seven_brain_oof_margin_coverage']={name:int(np.isfinite(allpred.get(name,np.array([]))).sum())
-        for name in ('FULL_CORE_margin','FULL_STAT_margin','FULL_COMBINED_margin')}
+        for name in ('FULL_CORE_margin','FULL_STAT_margin','FULL_COMBINED_margin','FULL_STACKED_margin')}
     # The full-history combined score learner, rather than the small 2025
     # spread classifier, is the eligible source for multiseason price research.
     # Preserve uncertainty, book-side and price-format holds explicitly.
@@ -4701,9 +4875,20 @@ def fit_full_history(historical_rows,events,team_map,*,market_rows=None,context_
             market_rows=market_rows,archived_reference_rows=archived_reference_rows,
             audit_rows=audit_rows)
         if combined_margin is not None else {'status':'HOLD_NO_COMBINED_OOF','bet_authority':0})
+    # Separate stacking test at genuine pre-kick reference lines and untimed
+    # archived sign hypotheses. This never treats an assumed price as a bet.
+    if 'FULL_STACKED_margin' in allpred:
+        stacked=allpred['FULL_STACKED_margin']
+        report['stacked_chronological_price_research']=v55_combined_oof_price_research(
+            rows,{(int(r['season']),str(r['game_id'])):float(stacked[i])
+                  for i,r in enumerate(rows) if math.isfinite(float(stacked[i]))},
+            market_rows=market_rows,archived_reference_rows=archived_reference_rows)
+    report['archived_spread_orientation_overlap_audit']=v55_archived_spread_orientation_overlap_audit(
+        market_rows,archived_reference_rows)
     report['combined_model_authority_handoff']={
-        'status':'SHADOW_PENDING_INDEPENDENT_LIVE_PRICE_VALIDATION',
-        'model':'FULL_COMBINED_margin','oof_games':report['models'].get('FULL_COMBINED_margin',{}).get('oof_games',0),
+        'status':'SHADOW_PENDING_INDEPENDENT_LIVE_PRICE_VALIDATION_AND_ORIGINAL_FEATURE_PARITY',
+        'model':'FULL_STACKED_margin' if 'FULL_STACKED_margin' in fitted else 'FULL_COMBINED_margin',
+        'oof_games':report['models'].get('FULL_STACKED_margin' if 'FULL_STACKED_margin' in fitted else 'FULL_COMBINED_margin',{}).get('oof_games',0),
         'individual_rule_certificates_required':False,
         'no_original_capture_inference':True,'bet_authority':0}
     report['status']='FULL_HISTORY_SCORE_MODELS_TRAINED_SHADOW' if fitted else 'HOLD_FULL_HISTORY_NO_FITTED_MODELS'
