@@ -246,6 +246,33 @@ def main():
                 'status':'HOLD_HISTORICAL_WAREHOUSE_REPLAY_FAILED',
                 'exception':type(exc).__name__+':'+str(exc),
                 'bet_authority':0}
+        # NCAAF-V55-HEAVY-AUTO-BRAINS-20261112: ONE execution, no standalone
+        # expert/Miner scripts. Recalculate research brains before V5.5 replay.
+        # A failed refresh MUST NOT silently use pinned 2022-heavy expert data.
+        try:
+            _fresh_brains = _roi.v55_refresh_all_historical_brains(
+                storage_client=gcs,bucket=bucket,
+                bq_client=bigquery.Client(project=os.getenv('GCP_PROJECT','sharplogger')),
+                project=os.getenv('GCP_PROJECT','sharplogger'),
+                dataset=os.getenv('NCAAF_V55_SOURCE_DATASET','sharp_data'),
+                log_func=log_func)
+            result['automatic_brain_refresh'] = {
+                'status':_fresh_brains['status'],
+                'miner_seasons':_fresh_brains['miner_seasons'],
+                'miner_exact_path_status':_fresh_brains.get('miner_exact_path_status'),
+                'bigal_pathi_reconstruction':_fresh_brains['bigal_pathi_reconstruction'],
+                'current_run_sources':_fresh_brains['current_run_sources'],
+                'bet_authority':0}
+            _fresh_sources=_fresh_brains['current_run_sources']
+        except Exception as _brain_refresh_error:
+            result['automatic_brain_refresh']={
+                'status':'HOLD_FRESH_BRAIN_RECALC_FAILED',
+                'error':type(_brain_refresh_error).__name__+':'+str(_brain_refresh_error),
+                'bet_authority':0}
+            _roi.put_json(registry_uri,result)
+            log_func('[NCAAF-V55-BRAIN-REFRESH] '+json.dumps(
+                result['automatic_brain_refresh'],sort_keys=True))
+            raise RuntimeError('NCAAF_V55_RESEARCH_FRESH_BRAINS_REQUIRED') from _brain_refresh_error
         # Read the audited November 5 Stage1 V5.2 canonical IDs and pinned
         # original research snapshots. No identity rediscovery or legacy Miner
         # authority. This is the seven-brain historical identity replay.
@@ -255,12 +282,18 @@ def main():
                 canonical_prefix=os.getenv('NCAAF_V55_CANONICAL_LEDGER_URI','').strip() or None,
                 archive_client=bigquery.Client(project=os.getenv('GCP_PROJECT','sharplogger')),
                 archive_project=os.getenv('GCP_PROJECT','sharplogger'),
-                archive_dataset=os.getenv('NCAAF_V55_SOURCE_DATASET','sharp_data'))
+                archive_dataset=os.getenv('NCAAF_V55_SOURCE_DATASET','sharp_data'),
+                current_run_sources=_fresh_sources)
             result['historical_seven_brain_replay'] = brain_replay
         except Exception as exc:
             result['historical_seven_brain_replay'] = {
-                'status':'HOLD_PRIOR_CANONICAL_BRAIN_REPLAY_FAILED',
+                'status':'HOLD_CURRENT_RUN_CANONICAL_BRAIN_REPLAY_FAILED',
                 'exception':type(exc).__name__+':'+str(exc),'bet_authority':0}
+            _roi.put_json(registry_uri,result)
+            raise RuntimeError('NCAAF_V55_CURRENT_RUN_BRAIN_REPLAY_REQUIRED') from exc
+        if brain_replay.get('canonical_event_publication',{}).get('status')!='PUBLISHED_RESEARCH_ONLY':
+            _roi.put_json(registry_uri,result)
+            raise RuntimeError('NCAAF_V55_FRESH_CANONICAL_EVENTS_NOT_PUBLISHED')
         log_func('[NCAAF-V55-CANONICAL-SEVEN-BRAIN-REPLAY] '+json.dumps({
             'status':result['historical_seven_brain_replay'].get('status'),
             'canonical_games':result['historical_seven_brain_replay'].get('canonical_games',0),
@@ -320,7 +353,8 @@ def main():
                 project=os.getenv('GCP_PROJECT','sharplogger'),
                 dataset=os.getenv('NCAAF_V55_SOURCE_DATASET','sharp_data'),
                 bucket=bucket,
-                market_feed_uri=os.getenv('NCAAF_V55_MARKET_RICH_FEED_URI') or None)
+                market_feed_uri=os.getenv('NCAAF_V55_MARKET_RICH_FEED_URI') or None,
+                current_run_expert_uri=_fresh_sources['PATHI_BIG_AL'])
             result['ml_training'] = _ml_report
             log_func('[NCAAF-V55-ML-TRAINING] '+json.dumps({
                 'status':_ml_report.get('status'),
@@ -337,7 +371,8 @@ def main():
             log_func('[NCAAF-V55-ML-TRAINING] '+json.dumps(result['ml_training']))
         result['data_integration_acceptance']=_roi.integration_acceptance_report(
             result.get('historical_seven_brain_replay',{}),
-            result.get('historical_warehouse_replay',{}), provider,market_rich)
+            result.get('historical_warehouse_replay',{}), provider,market_rich,
+            expert_refresh=_fresh_brains['bigal_pathi_reconstruction'])
         log_func('[NCAAF-V55-DATA-INTEGRATION-ACCEPTANCE] '+json.dumps(
             result['data_integration_acceptance'],sort_keys=True))
         # A cloud task returning exit(0) with missing families AND zero priced

@@ -1584,7 +1584,8 @@ def source_capture_field_diagnostics(raw):
 
 def replay_prior_brain_sources(*, storage_client=None,bucket='sharp-models',canonical_prefix=None,
                                publish_events=True,archive_client=None,
-                               archive_project='sharplogger',archive_dataset='sharp_data'):
+                               archive_project='sharplogger',archive_dataset='sharp_data',
+                               current_run_sources=None):
     """Use previously frozen artifact locations directly. Never request a NEW
     identity matcher or fabricated historical event manifest.
 
@@ -1608,14 +1609,21 @@ def replay_prior_brain_sources(*, storage_client=None,bucket='sharp-models',cano
         'FROZEN_MINER':'research/ncaaf/v2/miner_exact_path_shadow/runs/20261105T011910606679Z/season_forward_frozen_rules_v5.csv',
         'STAT':'research/ncaaf/v55/combined_brains_shadow/runs/20261103T174003954208Z/retrospective_replay/rule_evaluations_retrospective.csv',
         'PREDICTION_TRACKER':'research/ncaaf/v55/combined_brains_shadow/runs/20261103T174003954208Z/retrospective_replay/pt_evidence_retrospective.csv'}
+    # During Heavy Research, only current-run Miner outputs are allowed.
+    # A missing fresh object is a HOLD, never a silent pinned-source fallback.
+    overrides=current_run_sources or {}
+    if current_run_sources is not None:
+        required={'SYSTEM_MINER','FROZEN_MINER','PATHI_BIG_AL'}
+        if not required.issubset(overrides):
+            raise RuntimeError('V55_CURRENT_RUN_REPLAY_MISSING_SOURCES:'+','.join(sorted(required-set(overrides))))
     raw={};holds={}
     for fam,key in prefixes.items():
-        uri='gs://'+bucket+'/'+key
+        uri=overrides.get(fam) or ('gs://'+bucket+'/'+key)
         try:
             content=_obj_bytes(uri,storage_client);raw[fam]=_csv_bytes(content)
             receipts[fam]={'uri':uri,'sha256':hashlib.sha256(content).hexdigest(),'rows':len(raw[fam])}
         except Exception as exc:holds[fam]=type(exc).__name__+':'+str(exc)
-    expert_uri='gs://'+bucket+'/research/ncaaf/v55/expert_occurrence_snapshots_v1/runs/20261105T012018833244Z_9c0eb9ea4c6d/v143_directional_cache.json'
+    expert_uri=overrides.get('PATHI_BIG_AL') or ('gs://'+bucket+'/research/ncaaf/v55/expert_occurrence_snapshots_v1/runs/20261105T012018833244Z_9c0eb9ea4c6d/v143_directional_cache.json')
     try:
         content=_obj_bytes(expert_uri,storage_client);expert=json.loads(content)
         receipts['PATHI_BIG_AL']={'uri':expert_uri,'sha256':hashlib.sha256(content).hexdigest()}
@@ -1629,6 +1637,11 @@ def replay_prior_brain_sources(*, storage_client=None,bucket='sharp-models',cano
     if stage2_uri:
         try:
             content=_obj_bytes(stage2_uri,storage_client);stage2=_csv_bytes(content)
+            if current_run_sources is not None:
+                # Old Stage2 specialist rows cannot reintroduce the very stale
+                # expert/Miner events that this run just recalculated.
+                stage2=[r for r in stage2 if normal_family(r.get('brain')) not in
+                        ('SYSTEM_MINER','BIG_AL','PATHI')]
             receipts['STAGE2_FROZEN']={'uri':stage2_uri,'sha256':hashlib.sha256(content).hexdigest(),'rows':len(stage2)}
         except Exception as exc:holds['STAGE2_FROZEN']=type(exc).__name__+':'+str(exc)
     assumption=os.getenv('NCAAF_V55_COMBINED_MARKET_RESEARCH_ASSUMPTION','').strip().lower()
@@ -3571,7 +3584,8 @@ def publish_v55_ml_artifacts(report,models,*,publish_uri,storage_client=None):
 
 def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
                         dataset='sharp_data',bucket='sharp-models',
-                        manifest_uri=None,canonical_uri=None,events_uri=None,market_feed_uri=None):
+                        manifest_uri=None,canonical_uri=None,events_uri=None,market_feed_uri=None,
+                        current_run_expert_uri=None):
     """Heavy Research entry point; reuse ONLY existing Stage1/Stage2 artifacts."""
     # A single initialized BigQuery client must be passed to BOTH historical
     # loaders. Previously the Market Rich loader received None on Cloud Run,
@@ -3605,6 +3619,16 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
     except Exception as exc:
         events=[];event_status={'status':'HOLD_EVENTS_UNAVAILABLE',
                                'error':type(exc).__name__+':'+str(exc)}
+    # Context from the very same fresh CFBD replay, not a 2022-heavy cache.
+    # Strictly research-only: Pathi key/role context and Big Al enhancers do
+    # not generate independently validated bets or family votes.
+    context_by_game={};context_audit={'status':'NOT_REQUESTED'}
+    if current_run_expert_uri is not None:
+        try:
+            context_cache=json.loads(_obj_bytes(current_run_expert_uri,storage_client))
+            context_by_game,context_audit=v55_cfbd_expert_context_features(context_cache,team_map,games)
+        except Exception as exc:
+            raise RuntimeError('V55_CURRENT_RUN_CONTEXT_ATTACH_FAILED') from exc
     # Historical ML MUST read scores_with_features. The 2026 moves feed is
     # retained by Market Rich coverage for forward scoring, never ML fitting.
     market_data,market_audit=ml_historical_market_rows(client=client,
@@ -3627,9 +3651,10 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
     # V5.2 game IDs and prior-feature construction are the sole training input.
     game_audit_rows=[];brain_audit_rows=[]
     full_report, full_models = fit_full_history(
-        rows, events, team_map, market_rows=market_data,
+        rows, events, team_map, market_rows=market_data,context_by_game=context_by_game,
         archived_reference_rows=archived_references, audit_rows=game_audit_rows,
         brain_audit_rows=brain_audit_rows)
+    full_report['cfbd_expert_context_source_audit']=context_audit
     # Enrich the ledger with verified canonical home/away names and scores.
     for _row in game_audit_rows:
         _sides=team_map.get((_row['season'],_row['canonical_game_id']),{})
@@ -3688,7 +3713,9 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
             'core_prior_numeric_fields','stat_prior_numeric_fields',
             'market_rich_historical_present','market_rich_numeric_fields',
             'retrospective_expert_capture_certified','market_rich_forward_feed_used_for_training',
-            'expert_source_no_fire_certified']
+            'expert_source_no_fire_certified',
+            'PATHI_context_home_count','PATHI_context_away_count',
+            'BIGAL_context_home_count','BIGAL_context_away_count']
         for _family in _V55_FH_FAMILIES:
             _brain_fields.extend([f'{_family}_{_key}' for _key in (
                 'home_fires','away_fires','net','log_fire_imbalance',
@@ -3696,6 +3723,11 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
         _buf=io.StringIO();_writer=csv.DictWriter(_buf,fieldnames=_brain_fields,extrasaction='ignore')
         _writer.writeheader()
         for _row in brain_audit_rows:
+            _ctx=context_by_game.get((_row['season'],_row['canonical_game_id']),{})
+            for _family in ('PATHI','BIGAL'):
+                for _side in ('HOME','AWAY'):
+                    _row[f'{_family}_context_{_side.lower()}_count']=int(
+                        _ctx.get(f'EVIDENCE_CONTEXT_{_family}_{_side}_COUNT',0))
             _sides=team_map.get((_row['season'],_row['canonical_game_id']),{})
             if isinstance(_sides,dict):
                 for _name,_side in _sides.items():
@@ -3824,18 +3856,28 @@ def run_v55_ml_training(*,client=None,storage_client=None,project='sharplogger',
         return report
 
 
-def integration_acceptance_report(canonical, warehouse, provider, market_rich=None):
+def integration_acceptance_report(canonical, warehouse, provider, market_rich=None, expert_refresh=None):
     """Validate directional brains and Market Rich feature coverage separately."""
     bybrain=canonical.get('by_brain') or {}
     directional=sorted(BRAINS-{'MARKET_RICH'})
     missing=[f for f in directional if not bybrain.get(f)]
+    # A brain that was freshly evaluated across canonical games may legitimately
+    # have zero directional fires; this is not the same as a missing source.
+    # Context-only evidence is not retroactively counted as an independent vote.
+    refresh_ready=set()
+    for year,rules in ((expert_refresh or {}).get('rule_coverage_by_season') or {}).items():
+        for name,stat in (rules or {}).items():
+            if int((stat or {}).get('ready',0) or 0)<=0:continue
+            if str(name).startswith('Pathi_'):refresh_ready.add('PATHI')
+            if str(name).startswith('BigAl_'):refresh_ready.add('BIG_AL')
+    unavailable=[f for f in missing if f not in refresh_ready]
     price_count=int((warehouse or {}).get('priced_game_wagers') or 0)
     joined=int((provider or {}).get('join_and_grading_counts',{}).get('BRAIN_PROVIDER_MARKET_GRADES') or 0)
     unresolved={}
     if not canonical.get('canonical_games'):unresolved['canonical']='NO_CANONICAL_GAME_LEDGER'
     if not canonical.get('canonical_edge_research',{}).get('reference_line_graded_occurrences'):
         unresolved['brain_grading']='CANONICAL_BRAINS_NOT_GRADED'
-    if missing:unresolved['missing_directional_families']=missing
+    if unavailable:unresolved['missing_brain_sources']=unavailable
     if joined==0:unresolved['archive_brain_join']='ZERO_BRAIN_PROVIDER_MARKET_GRADES'
     if price_count==0:unresolved['timestamped_price_join']='ZERO_MATCHED_ORIGINALLY_CAPTURED_SNAPSHOT_PRICES'
     if not canonical.get('source_receipts'):unresolved['lineage']='SOURCE_RECEIPTS_MISSING'
@@ -3843,7 +3885,9 @@ def integration_acceptance_report(canonical, warehouse, provider, market_rich=No
     if market.get('status')!='MARKET_RICH_PREGAME_FEATURE_FEED_AVAILABLE':
         unresolved['market_rich_features']=market.get('status') or 'MARKET_RICH_FEATURE_AUDIT_NOT_RUN'
     return {'status':'PASS_DATA_INTEGRATION' if not unresolved else 'FAIL_DATA_INTEGRATION',
-            'missing_brain_families':missing,'canonical_games':canonical.get('canonical_games',0),
+            'missing_brain_families':unavailable,
+            'families_evaluated_but_no_directional_fire':sorted(set(missing)&refresh_ready),
+            'canonical_games':canonical.get('canonical_games',0),
             'brain_occurrences':sum(int(bybrain.get(f) or 0) for f in directional),
             'archive_brain_market_grades':joined,'originally_priced_market_wagers':price_count,
             'market_rich_features':market,
@@ -4047,7 +4091,7 @@ def _v55_fh_evidence_features(events, team_map, *, return_trace=False):
     return (out,trace) if return_trace else out
 
 
-def _v55_fh_prepare_rows(historical_rows,events,team_map, *, market_rows=None):
+def _v55_fh_prepare_rows(historical_rows,events,team_map, *, market_rows=None, context_by_game=None):
     # Market Rich historical snapshots are sourced exclusively from verified
     # prekick scores_with_features records, never 2026 moves_with_features.
     historical_market={}
@@ -4100,7 +4144,7 @@ def _v55_fh_prepare_rows(historical_rows,events,team_map, *, market_rows=None):
                 away_count=int(occurrence.get('away_fires',0))
                 recorded_flags[f'EVIDENCE_{mk}_{family}_RECORDED_FIRE']=float(bool(home_count+away_count))
                 recorded_flags[f'EVIDENCE_{mk}_{family}_OPPOSING_FIRE']=float(bool(home_count and away_count))
-        item={'season':year,'game_id':key[1], 'features':{**prior,**ev.get(key,{}),**recorded_flags,**market_features},
+        item={'season':year,'game_id':key[1], 'features':{**prior,**ev.get(key,{}),**recorded_flags,**market_features,**(context_by_game or {}).get(key,{})},
               'evidence_trace':evidence_trace.get(key,{}),
               'margin':hs-aw,'total':hs+aw, 'reference_spread':_v55_fh_finite((r.get('core_features') or {}).get('MARKET_SPREAD_LINE_REFERENCE')),
               'reference_total':_v55_fh_finite((r.get('core_features') or {}).get('MARKET_TOTAL_LINE_REFERENCE'))}
@@ -4547,7 +4591,7 @@ def v55_combined_oof_price_research(rows, predictions, *, market_rows=None,
             'cannot_issue_executable_roi_certificate':True}
 
 
-def fit_full_history(historical_rows,events,team_map,*,market_rows=None,
+def fit_full_history(historical_rows,events,team_map,*,market_rows=None,context_by_game=None,
                      archived_reference_rows=None,min_train=240,min_test=30,
                      audit_rows=None,brain_audit_rows=None):
     """Expanding-season score regression plus earlier-OOF residual calibration.
@@ -4558,7 +4602,7 @@ def fit_full_history(historical_rows,events,team_map,*,market_rows=None,
     import numpy as np
     from sklearn.ensemble import HistGradientBoostingRegressor
     from sklearn.metrics import mean_absolute_error,mean_squared_error
-    rows,coverage=_v55_fh_prepare_rows(historical_rows,events,team_map,market_rows=market_rows)
+    rows,coverage=_v55_fh_prepare_rows(historical_rows,events,team_map,market_rows=market_rows,context_by_game=context_by_game)
     from collections import Counter
     coverage['expert_nonzero_net_by_market_family']={}
     for mkt in ('spreads','h2h','totals'):
@@ -4666,5 +4710,356 @@ def fit_full_history(historical_rows,events,team_map,*,market_rows=None,
     return report,fitted
 
 # END INLINED FULL-HISTORY TRAINING
+
+
+# NCAAF-V55-UNIFIED-REFRESH-20261112
+# The active V5.5 Heavy Research job calls this BEFORE replaying frozen events
+# and BEFORE fitting the full-history model. No standalone job is used.
+def v55_rebuild_cfbd_expert_cache(*, bq_client, storage_client, bucket,
+                                  project='sharplogger',dataset='sharp_data',
+                                  utils_module=None, log_func=print):
+    """Recompute historical Pathi/Big Al rules from CFBD canonical games.
+
+    Source quotes here are untimed retrospective *reference* spreads. They do not
+    establish opening/closing movement, original Big Al picks, or live authority.
+    Enhancers and nested tighteners are retained as CONTEXT, not votes.
+    """
+    import pandas as pd
+    from collections import defaultdict, Counter
+    if utils_module is None:
+        import utils as utils_module
+    if not callable(getattr(utils_module,'build_pathi_bigal_team_game_state',None)):
+        raise RuntimeError('V55_EXPERT_REFRESH_REQUIRES_UTILS_STATE_BUILDER')
+    prefix='gs://'+bucket+'/research/ncaaf/v55/canonical_stage1/v5_2/'
+    names=('historical_cfbd_game_manifest_v5.csv',
+           'historical_cfbd_game_sides_v5.csv','stage1_canonical_ledger_v5_audit.json')
+    raw={k:_obj_bytes(prefix+k,storage_client) for k in names}
+    _,games,_,side_map,_=_checked_canonical(raw[names[0]],raw[names[1]],raw[names[2]])
+    table=f'{project}.{dataset}.ncaaf_cfbd_archive_research_v1'
+    available={f.name for f in bq_client.get_table(table).schema}
+    need={'Game_ID','Game_Date','Team_Key'}
+    if not need.issubset(available):
+        raise RuntimeError('V55_CFBD_EXPERT_REQUIRED_FIELDS_MISSING:'+','.join(sorted(need-available)))
+    optional={'Season','Is_Conference_Game','Is_Regular_Season','Season_Type',
+              'Is_Postseason','Is_Bowl','Revenge_Flag_Current','Revenge_Flag_CurrentOrPriorSeason'}
+    cols=sorted(need|(optional&available))
+    where=('SAFE_CAST(Season AS INT64) BETWEEN 2013 AND 2025' if 'Season' in available else
+           'EXTRACT(YEAR FROM Game_Date) BETWEEN 2013 AND 2025')
+    records=[dict(x.items()) for x in bq_client.query(
+        'SELECT '+','.join('`'+x+'`' for x in cols)+' FROM `'+table+'` WHERE '+where
+    ).result(page_size=10000)]
+    byside=defaultdict(list)
+    for r in records:
+        try:
+            y=int(r.get('Season') or str(r['Game_Date'])[:4])
+            gid=str(int(r['Game_ID']))
+            k=(y,gid)
+            if k not in games or str(r.get('Game_Date',''))[:10]!=str(games[k].get('game_date',''))[:10]:
+                continue
+            key=_canonical_name(r['Team_Key'])
+            matches=[nm for nm,sd in side_map[k].items() if key and key in {
+                _canonical_name(nm),_canonical_name(sd.get('cfbd_team_key')),
+                _canonical_name(sd.get('source_team_label'))}]
+            if len(matches)==1:byside[(y,gid,matches[0])].append(r)
+        except (ValueError,TypeError,KeyError):continue
+    references,refdiag=ml_archived_reference_line_rows(
+        client=bq_client,canonical_manifest=raw[names[0]],canonical_sides=raw[names[1]],
+        canonical_audit=raw[names[2]],project=project,dataset=dataset)
+    refmap={(int(r['season']),str(r['game_id'])):r for r in references}
+    # Where a single real bookmaker has verified prekick snapshots, preserve
+    # its opening-to-latest path for the Pathi key-movement rules. Never infer
+    # line movement from an untimed archival reference or mixed bookmakers.
+    timed_rows,timed_audit=ml_historical_market_rows(
+        client=bq_client,canonical_manifest=raw[names[0]],canonical_sides=raw[names[1]],
+        canonical_audit=raw[names[2]],project=project,dataset=dataset)
+    timedmap={(int(r['season']),str(r['game_id'])):r for r in timed_rows}
+    source_counts=Counter();frames=[];index={};original_ready={}
+    for (y,gid),game in sorted(games.items()):
+        if not 2013<=y<=2025:continue
+        sm=side_map[(y,gid)]
+        if game.get('role_verification_status')!='HOME_AWAY_VERIFIED':
+            source_counts['UNVERIFIED_HOME_AWAY']+=1;continue
+        home=[nm for nm,sd in sm.items() if str(sd.get('is_home_verified','')).lower() in ('1','true','yes')]
+        away=[nm for nm,sd in sm.items() if str(sd.get('is_home_verified','')).lower() in ('0','false','no')]
+        if len(home)!=1 or len(away)!=1:source_counts['MISSING_UNIQUE_ROLES']+=1;continue
+        h,a=home[0],away[0]
+        hs=num(sm[h].get('team_score'));aa=num(sm[a].get('team_score'))
+        if hs is None or aa is None or num(sm[h].get('opponent_score'))!=aa or num(sm[a].get('opponent_score'))!=hs:
+            source_counts['SCORE_PAIR_HOLD']+=1;continue
+        game_date=str(game.get('game_date') or '')[:10]
+        if len(game_date)!=10:source_counts['DATE_HOLD']+=1;continue
+        ref=refmap.get((y,gid),{})
+        spread=num(ref.get('spread_home_line_research'))
+        timed=timedmap.get((y,gid),{})
+        timed_f=(timed.get('core_features') or {})
+        timed_books=num(timed_f.get('MARKET_SPREAD_BOOKS'))
+        timed_open=num(timed_f.get('MARKET_SPREAD_OPEN'))
+        timed_latest=num(timed_f.get('MARKET_SPREAD_LATEST'))
+        movement_ready=(timed_books==1 and timed_open is not None and timed_latest is not None)
+        if movement_ready:
+            spread=timed_latest
+            source_counts['VERIFIED_PREKICK_SINGLE_BOOK_MOVEMENT_GAMES']+=1
+        elif timed and timed_books and timed_books>1:
+            source_counts['MULTIBOOK_MOVEMENT_NOT_RECONSTRUCTED']+=1
+        if spread is None:source_counts['MISSING_HISTORICAL_SPREAD_REFERENCE']+=1
+        side_records=[]
+        for nm,other,ishome in ((h,a,True),(a,h,False)):
+            possible=byside.get((y,gid,nm),[])
+            if len(possible)>1:source_counts['DUPLICATE_CFBD_SIDE_HOLD']+=1
+            cf=possible[0] if len(possible)==1 else {}
+            if not cf:source_counts['CFBD_SIDE_FEATURES_MISSING']+=1
+            team=_canonical_name(sm[nm].get('cfbd_team_key') or nm)
+            opp=_canonical_name(sm[other].get('cfbd_team_key') or other)
+            if not team or not opp or team==opp:source_counts['TEAM_IDENTITY_HOLD']+=1;break
+            regular=cf.get('Is_Regular_Season')
+            stage=str(cf.get('Season_Type') or '').strip().lower()
+            verified_regular=regular is not None or stage in (
+                'regular','regular season','postseason','post season','bowl','bowls')
+            original_ready[(y,gid,team)]={'regular':verified_regular,
+                'conference':cf.get('Is_Conference_Game') is not None}
+            side_records.append((nm,{
+                'Sport':'NCAAF','Season':y,'Game_Key':f'{y}|{gid}',
+                'Game_Start':game_date+'T12:00:00Z',
+                'Home_Team_Norm':_canonical_name(sm[h].get('cfbd_team_key') or h),
+                'Away_Team_Norm':_canonical_name(sm[a].get('cfbd_team_key') or a),
+                'Market':'spreads','Outcome':team,
+                'Bookmaker':('verified_prekick_single_book' if movement_ready else 'untimed_archive_research_only'),
+                'Score_Home_Score':hs,'Score_Away_Score':aa,
+                'Value':(spread if ishome else -spread) if spread is not None else None,
+                # A true prekick single-book open exists only on the strictly
+                # matched snapshot subset. Untimed archive has no opening.
+                'First_Line_Value':((timed_open if ishome else -timed_open)
+                    if movement_ready else None),
+                'Is_Conference_Game':cf.get('Is_Conference_Game'),
+                'Is_Regular_Season':cf.get('Is_Regular_Season'),
+                'Is_Postseason':cf.get('Is_Postseason'),
+                'Is_Bowl':cf.get('Is_Bowl'),
+                'Season_Type':cf.get('Season_Type'),
+            }))
+        if len(side_records)!=2:continue
+        for nm,fr in side_records:
+            frames.append(fr);index[(y,gid,_canonical_name(nm))]=fr
+    if len(frames)<1000:raise RuntimeError('V55_CFBD_EXPERT_REPLAY_INSUFFICIENT_GAMES')
+    df=pd.DataFrame(frames)
+    team_state=utils_module.build_pathi_bigal_team_game_state(df)
+    if team_state is None or team_state.empty:
+        raise RuntimeError('V55_CFBD_EXPERT_STATE_EMPTY')
+    exact=[x for x in getattr(utils_module,'BIGAL_EXACT_SIGNAL_COLS',()) if x.startswith('BigAl_CF')]
+    tight={x:y for x,y in getattr(utils_module,'BIGAL_TIGHTENER_PARENT',{}).items()
+           if x.startswith('BigAl_CF')}
+    enh=[x for x in getattr(utils_module,'BIGAL_ENHANCER_COLS',()) if x.startswith('BigAl_CF')]
+    pathi_exact=list(getattr(utils_module,'PATHI_KEY_EVENT_COLS',()))
+    pathi_context=list(getattr(utils_module,'PATHI_ROLE_CONTEXT_COLS',()))
+    rule_catalog=( [(x,'BigAl','directional') for x in exact]
+        +[(x,'BigAl','context') for x in tight]
+        +[(x,'BigAl','context') for x in enh]
+        +[(x,'Pathi','directional') for x in pathi_exact]
+        +[(x,'Pathi','context') for x in pathi_context] )
+    cache={x:{'family':fam,'role':role,'fired':0,'graded':0,'occurrences':[]}
+           for x,fam,role in rule_catalog}
+    coverage=defaultdict(lambda:defaultdict(Counter))
+    seen=set();missing_flags=Counter()
+    for _,row in team_state.iterrows():
+        try:
+            season=int(row['Season']);game_key=str(row['Game_Key']);
+            gid=game_key.split('|',1)[1]
+            team=_canonical_name(row['Team']);opp=_canonical_name(row['Opponent'])
+        except (KeyError,ValueError,TypeError):continue
+        if season<2013 or season>2025:continue
+        for name,fam,role in rule_catalog:
+            if name not in team_state.columns:
+                missing_flags[name]+=1;continue
+            # utils.py uses SHARED readiness indicators for Pathi rule families,
+            # not a separate <rule>_DataReady column. Treating missing per-rule
+            # columns as zero silently discarded every legitimate Pathi firing.
+            ready=name+'_DataReady'
+            if fam=='Pathi' and name in pathi_exact:
+                ready_value=num(row.get('Pathi_FB_Key_DataReady'))
+            elif name=='Pathi_FB_Dog_TotalSpread_Gap_LE10':
+                ready_value=num(row.get('Pathi_FB_Dog_TotalSpread_Gap_LE10_DataReady'))
+            elif fam=='Pathi' and name in (
+                'Pathi_FB_Usually_Dog_Now_Favorite',
+                'Pathi_FB_Usually_Favorite_Now_Dog'):
+                ready_value=num(row.get('Pathi_FB_RoleTrend_DataReady'))
+            elif fam=='Pathi':
+                # Static key position, dog bands and hooks require a known
+                # current spread, but NOT a timestamped opening spread.
+                ready_value=1 if num(row.get('Spread_Value')) is not None else 0
+            else:
+                ready_value=num(row.get(ready))
+            flag=num(row.get(name))
+            # The shared utility may infer REGULAR_SEASON from unknown stage
+            # text; that is not evidence. Keep these rules unevaluable unless
+            # an original CFBD stage field was actually present.
+            source_ready=original_ready.get((season,gid,team),{})
+            if name in ('BigAl_CF2_LateSeasonRevengeDog',
+                        'BigAl_CF3_Fade19PlusFavoriteUpsetLoss',
+                        'BigAl_CF_Enhancer_RevengeDog') and not source_ready.get('regular'):
+                ready_value=0
+            if name=='BigAl_CF1_Week2Home42Win' and not source_ready.get('conference'):
+                ready_value=0
+            stats=coverage[str(season)][name]
+            stats['evaluated']+=1
+            if ready_value!=1:
+                stats['missing_inputs']+=1;continue
+            stats['ready']+=1
+            if flag!=1:continue
+            unique=(season,gid,team,name)
+            if unique in seen:continue
+            seen.add(unique)
+            stats['fired']+=1
+            record={'season':season,'date':str(row['Game_Start'])[:10],
+                    'team':team,'opponent':opp,
+                    'source':'CFBD_CANONICAL_RETROSPECTIVE_RECALC',
+                    'historical_replay_only':True,'original_expert_pick_verified':False}
+            cache[name]['occurrences'].append(record)
+            cache[name]['fired']+=1
+            # Graded outcomes are NOT used as model features or to certify
+            # retrospective expert selection. Treat fire and grade separately.
+    summary={'status':'CFBD_EXPERT_RULES_REBUILT_RESEARCH_ONLY',
+      'source_table':table,'cfbd_rows':len(records),
+      'games_with_two_sided_state':len(frames)//2,'historical_game_sides':len(team_state),
+      'source_holds':dict(source_counts),'historical_reference_audit':refdiag,
+      'verified_prekick_market_audit':timed_audit,
+      'rule_coverage_by_season':{yr:{nm:dict(ct) for nm,ct in rr.items()}
+                                   for yr,rr in sorted(coverage.items())},
+      'big_al_exact_systems':[x for x in exact],
+      'big_al_enhancers_are_not_independent_votes':True,
+      'pathi_key_movement_requires_actual_opening_line':True,
+      'historical_capture_verified':False,'bet_authority':0}
+    body=json.dumps(cache,sort_keys=True,default=str).encode()
+    report=json.dumps(summary,sort_keys=True,default=str).encode()
+    prefix='research/ncaaf/v55/brain_refresh/'
+    target_cache=prefix+'cfbd_expert_directional_cache_latest.json'
+    target_report=prefix+'cfbd_expert_coverage_latest.json'
+    storage_client.bucket(bucket).blob(target_cache).upload_from_string(body,content_type='application/json')
+    storage_client.bucket(bucket).blob(target_report).upload_from_string(report,content_type='application/json')
+    summary['cache_uri']='gs://'+bucket+'/'+target_cache
+    summary['report_uri']='gs://'+bucket+'/'+target_report
+    summary['content_sha256']=hashlib.sha256(body).hexdigest()
+    log_func('[NCAAF-V55-CFBD-EXPERT-REBUILD] '+json.dumps({
+        'status':summary['status'],'sides':summary['historical_game_sides'],
+        'rules':len(cache),'by_family':{fam:sum(v['fired'] for v in cache.values() if v['family']==fam and v['role']=='directional') for fam in ('Pathi','BigAl')},
+        'context_only':sum(v['fired'] for v in cache.values() if v['role']=='context'),
+        'uri':summary['cache_uri'],'bet_authority':0},sort_keys=True))
+    return summary
+
+
+def v55_find_fresh_miner_artifacts(*, storage_client, bucket, after_utc):
+    """Use THIS execution's Miner files, never the pinned 2022-era snapshot."""
+    from datetime import timezone
+    prefix='research/ncaaf/v2/miner_exact_path_shadow/runs/'
+    names=('retrospective_game_decision_ledger_v5.csv','season_forward_frozen_rules_v5.csv')
+    runs=defaultdict(dict)
+    for blob in storage_client.list_blobs(bucket,prefix=prefix):
+        if blob.name.rsplit('/',1)[-1] not in names:continue
+        updated=getattr(blob,'updated',None)
+        if updated is None or updated.astimezone(timezone.utc)<after_utc:continue
+        run=blob.name.rsplit('/',1)[0]
+        runs[run][blob.name.rsplit('/',1)[-1]]=blob.name
+    complete=[(name,files) for name,files in runs.items() if all(k in files for k in names)]
+    if not complete:
+        raise RuntimeError('V55_CURRENT_RUN_MINER_FROZEN_YEAR_ARTIFACTS_MISSING')
+    _,matched=max(complete,key=lambda pair:pair[0])
+    return {'SYSTEM_MINER':'gs://'+bucket+'/'+matched[names[0]],
+            'FROZEN_MINER':'gs://'+bucket+'/'+matched[names[1]]}
+
+
+def v55_refresh_all_historical_brains(*, storage_client, bucket='sharp-models',
+                                      bq_client=None, project='sharplogger',
+                                      dataset='sharp_data', log_func=print):
+    """The ONLY automatic V5.5 Heavy Research refresh entry point.
+
+    Calls the existing full-history Miner, then recalculates CFBD-based Pathi
+    and Big Al rules. All outputs are fresh for this execution. Never silently
+    substitutes a previously frozen system cache if refresh fails.
+    """
+    from datetime import datetime,timezone
+    if bq_client is None:
+        from google.cloud import bigquery
+        bq_client=bigquery.Client(project=project)
+    # The existing V2 Miner already owns complete mechanism discovery,
+    # historical feature attachment, multiple-testing and confirmation gates.
+    import sharp_line_dashboard as dashboard
+    import utils as util
+    import ncaaf_research_v2 as miner
+    started=datetime.now(timezone.utc)  # strict: do not accept a preceding run's artifacts
+    log_func('[NCAAF-V55-BRAIN-REFRESH] phase=EXISTING_MINER_FULL_HISTORY_START')
+    dashboard.fit_historical_ncaaf_core_expert('spreads',log_func=log_func)
+    dashboard.fit_ncaaf_statistical_brain(log_func=log_func)
+    research=miner.run_ncaaf_research_v2(
+        dashboard_module=dashboard,utils_module=util,
+        storage_client=storage_client,bucket_name=bucket,
+        log_func=log_func,hard_fail=True)
+    if not isinstance(research,dict) or research.get('status')!='NCAAF_RESEARCH_V2_COMPLETE':
+        raise RuntimeError('V55_FULL_HISTORY_MINER_REFRESH_INCOMPLETE')
+    history=[int(x) for x in research.get('seasons',[]) if str(x).strip()]
+    if not history or min(history)>2013 or max(history)<2025:
+        raise RuntimeError('V55_MINER_DISCOVERY_FRAME_DOES_NOT_COVER_2013_TO_2025')
+    miner_sources=v55_find_fresh_miner_artifacts(
+        storage_client=storage_client,bucket=bucket,after_utc=started)
+    log_func('[NCAAF-V55-BRAIN-REFRESH] phase=CFBD_EXPERT_RULE_RECALC_START')
+    experts=v55_rebuild_cfbd_expert_cache(
+        bq_client=bq_client,storage_client=storage_client,bucket=bucket,
+        project=project,dataset=dataset,utils_module=util,log_func=log_func)
+    sources=dict(miner_sources,PATHI_BIG_AL=experts['cache_uri'])
+    summary={'status':'FRESH_RESEARCH_BRAINS_READY',
+             'miner_seasons':history,'miner_report_status':research.get('status'),
+             'miner_exact_path_status':(research.get('miner_exact_path_shadow_audit') or {}).get('status'),
+             'bigal_pathi_reconstruction':experts,'current_run_sources':sources,
+             'certified_original_capture':False,'bet_authority':0}
+    log_func('[NCAAF-V55-BRAIN-REFRESH] '+json.dumps({
+        'status':summary['status'],'miner_seasons':history,
+        'sources':sources,'bet_authority':0},sort_keys=True))
+    return summary
+
+
+def v55_cfbd_expert_context_features(expert_cache, team_map, games=None):
+    """Construct research-only features from recalculated context flags.
+
+    Enhancers/tighteners/Pathi role descriptions are never converted to
+    independent votes or expert selections. Strict stage1 identity mapping.
+    """
+    from collections import defaultdict,Counter
+    import re
+    index=defaultdict(set)
+    for (yr,gid),sides in team_map.items():
+        for name,side in sides.items():
+            ishome=str(side.get('is_home_verified','')).lower()
+            if ishome not in ('1','true','yes','0','false','no'):continue
+            direction='HOME' if ishome in ('1','true','yes') else 'AWAY'
+            date=str(side.get('game_date') or (games or {}).get((yr,gid),{}).get('game_date') or '')[:10]
+            for a in (name,side.get('cfbd_team_key'),side.get('source_team_label')):
+                for b in (side.get('cfbd_opponent_key'),side.get('source_opponent_label')):
+                    if a and b and date:
+                        index[(int(yr),date,_canonical_name(a),_canonical_name(b))].add((str(gid),direction))
+    ctx=defaultdict(dict);holds=Counter();seen=set()
+    for name,item in (expert_cache or {}).items():
+        if not isinstance(item,dict) or str(item.get('role','')).lower()!='context':continue
+        fam=str(item.get('family') or '').upper()
+        if fam not in ('PATHI','BIGAL'):continue
+        compact=re.sub('[^A-Z0-9_]+','_',str(name).upper())[:95]
+        for e in item.get('occurrences') or []:
+            try:
+                yr=int(e['season']);key=(yr,str(e['date'])[:10],_canonical_name(e['team']),_canonical_name(e['opponent']))
+            except (ValueError,TypeError,KeyError):holds['INVALID_CONTEXT_RECORD']+=1;continue
+            matched=index.get(key,set())
+            if len(matched)!=1:
+                holds['CONTEXT_CANONICAL_MISSING' if not matched else 'CONTEXT_CANONICAL_AMBIGUOUS']+=1
+                continue
+            gid,side=next(iter(matched));distinct=(yr,gid,fam,compact,side)
+            if distinct in seen:continue
+            seen.add(distinct)
+            # A pair of correlated enhancements stays features, not multiple
+            # family votes. The learner can learn zero usefulness.
+            f=ctx[(yr,gid)]
+            col=f'EVIDENCE_CONTEXT_{fam}_{compact}_{side}'
+            f[col]=1.0
+            count=f'EVIDENCE_CONTEXT_{fam}_{side}_COUNT'
+            f[count]=float(f.get(count,0.0)+1.0)
+    return dict(ctx),{'status':'CONTEXT_FEATURES_JOINED_RESEARCH_ONLY',
+                       'context_features_games':len(ctx),
+                       'holds':dict(holds),'original_capture_certified':False,
+                       'independent_families_awarded':0,'bet_authority':0}
 
 if __name__=='__main__':raise SystemExit(main())
