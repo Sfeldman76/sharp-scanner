@@ -139,6 +139,24 @@ def install_streamlit_shim(log_func):
     return st
 
 
+class DisabledProgressWriter:
+    """No-op progress sink; never touches Cloud Storage.
+
+    Used by NCAAF Heavy Research because progress uploads are optional
+    telemetry, not required research artifacts or acceptance evidence.
+    """
+
+    def emit(self, *args, **kwargs):
+        return None
+
+
+def _disable_progress_for_ncaaf_research(sport, market):
+    return str(sport).upper().strip() == "NCAAF" and str(market).lower().strip() in {
+        "ncaaf_research_heavy", "ncaaf_research_v2", "ncaaf_full_history_v3",
+        "ncaaf_roi_research", "ncaaf_research", "research", "heavy_research",
+    }
+
+
 def start_heartbeat(pw, label, every_sec=45):
     stop_evt = threading.Event()
 
@@ -167,7 +185,10 @@ def main():
         os.environ["PROGRESS_URI"] = progress_uri
 
     gcs = storage.Client()
-    pw = ProgressWriter(progress_uri, gcs)
+    # NCAAF Heavy Research intentionally has no remote progress writes.
+    # Only diagnostic stdout and required model/artifact GCS writes remain.
+    pw = (DisabledProgressWriter() if _disable_progress_for_ncaaf_research(sport, market)
+          else ProgressWriter(progress_uri, gcs))
 
     # This is the ONLY log stream you want:
     def log_func(msg: str):
