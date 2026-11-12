@@ -4744,12 +4744,132 @@ def v55_rebuild_cfbd_expert_cache(*, bq_client, storage_client, bucket,
               'Is_Postseason','Is_Bowl','Revenge_Flag_Current','Revenge_Flag_CurrentOrPriorSeason',
               'Home_Conference','Away_Conference','Conference','Team_Conference',
               'Game_Type','Season_Stage'}
+    # Preserve available aliased CFBD metadata rather than assuming the archive
+    # uses only the mixed-case legacy column spellings. Use SQL aliases to
+    # keep downstream names stable and fail closed on absent source fields.
+    alias_specs={
+      'Is_Conference_Game':('Conference_Game','IsConferenceGame'),
+      'Is_Regular_Season':('Regular_Season','IsRegularSeason'),
+      'Is_Postseason':('Postseason','IsPostseason'),
+      'Is_Bowl':('Bowl_Game','IsBowl'),
+      'Season_Type':('SeasonType','Season_Phase'),
+      'Home_Conference':('HomeConference',),
+      'Away_Conference':('AwayConference',),
+      'Team_Conference':('TeamConference',),
+      'Revenge_Flag_Current':('RevengeFlagCurrent',),
+    }
+    archive_lookup={x.lower().replace('_',''):x for x in available}
+    archive_aliased={}
+    for canonical,alternatives in alias_specs.items():
+        if canonical in available:continue
+        for alias in alternatives:
+            actual=archive_lookup.get(alias.lower().replace('_',''))
+            if actual and actual not in need:
+                archive_aliased[canonical]=actual;break
     cols=sorted(need|(optional&available))
     where=('SAFE_CAST(Season AS INT64) BETWEEN 2013 AND 2025' if 'Season' in available else
            'EXTRACT(YEAR FROM Game_Date) BETWEEN 2013 AND 2025')
+    select=['`'+x+'`' for x in cols]+['`'+source+'` AS `'+canonical+'`'
+        for canonical,source in archive_aliased.items()]
     records=[dict(x.items()) for x in bq_client.query(
-        'SELECT '+','.join('`'+x+'`' for x in cols)+' FROM `'+table+'` WHERE '+where
+        'SELECT '+','.join(select)+' FROM `'+table+'` WHERE '+where
     ).result(page_size=10000)]
+    # NCAAF-V55-BIGAL-GAME-METADATA-20261112: enrich historical game-vintage
+    # facts using only observed CFBD fields. The archive feature table often
+    # contains game/side history without conference or season-type fields.
+    # Different source tables have different naming conventions; normalize
+    # schema names rather than assuming one fixed column capitalization.
+    def _meta_col(schema, *aliases):
+        lookup={str(x).lower().replace('_',''):x for x in schema}
+        for alias in aliases:
+            found=lookup.get(alias.lower().replace('_',''))
+            if found:return found
+        return None
+    def _meta_bool(x):
+        if x is None:return None
+        if isinstance(x,bool):return int(x)
+        v=str(x).strip().lower()
+        if v in ('1','true','yes','y','t'):return 1
+        if v in ('0','false','no','n','f'):return 0
+        return None
+    # Field names are selected at runtime from the actual warehouse schema.
+    # No schedule/score/modern-conference inference is substituted for an
+    # original conference membership or regular/postseason classification.
+    meta_fields={
+        'Is_Conference_Game':('Is_Conference_Game','Conference_Game','IsConferenceGame'),
+        'Is_Regular_Season':('Is_Regular_Season','Regular_Season','IsRegularSeason'),
+        'Is_Postseason':('Is_Postseason','Postseason','IsPostseason'),
+        'Is_Bowl':('Is_Bowl','Bowl_Game','IsBowl'),
+        'Season_Type':('Season_Type','SeasonType','Season_Phase'),
+        'Game_Type':('Game_Type','GameType'),
+        'Season_Stage':('Season_Stage','SeasonStage'),
+        'Home_Conference':('Home_Conference','HomeConference'),
+        'Away_Conference':('Away_Conference','AwayConference'),
+        'Team_Conference':('Team_Conference','TeamConference','Conference'),
+        'Revenge_Flag_Current':('Revenge_Flag_Current','RevengeFlagCurrent'),
+        'Revenge_Flag_CurrentOrPriorSeason':('Revenge_Flag_CurrentOrPriorSeason','RevengeFlagCurrentOrPriorSeason'),
+    }
+    metadata_source_counts=Counter()
+    metadata_by_game=defaultdict(list)
+    # Both optional tables are already part of this project. Other optional
+    # CFBD game metadata tables are examined only if they really exist.
+    for extra_table in (
+        f'{project}.{dataset}.ncaaf_cfbd_miner_features_postgame_v1',
+        f'{project}.{dataset}.ncaaf_cfbd_miner_features_v1',
+        f'{project}.{dataset}.ncaaf_cfbd_games',
+    ):
+        try:
+            schema={f.name for f in bq_client.get_table(extra_table).schema}
+        except Exception:
+            metadata_source_counts['table_not_available_'+extra_table.rsplit('.',1)[-1]]+=1
+            continue
+        gid_col=_meta_col(schema,'Game_ID','GameId','CFBD_Game_ID')
+        if not gid_col:
+            metadata_source_counts['table_without_game_id_'+extra_table.rsplit('.',1)[-1]]+=1
+            continue
+        date_col=_meta_col(schema,'Game_Date','GameDate','Start_Date','StartDate')
+        season_col=_meta_col(schema,'Season','Year')
+        team_col=_meta_col(schema,'Team_Key','Team','Team_Name','TeamName')
+        resolved={k:_meta_col(schema,*aliases) for k,aliases in meta_fields.items()}
+        resolved={k:v for k,v in resolved.items() if v}
+        if not resolved:
+            metadata_source_counts['table_without_metadata_'+extra_table.rsplit('.',1)[-1]]+=1
+            continue
+        selection={gid_col,*resolved.values()}
+        if date_col:selection.add(date_col)
+        if season_col:selection.add(season_col)
+        if team_col:selection.add(team_col)
+        # Missing season/date cannot be safely joined when Game_ID might be
+        # reused by non-NCAAF sources. These are NCAAF-specific CFBD tables;
+        # still require season or game date on every joined record.
+        if not (season_col or date_col):
+            metadata_source_counts['table_without_vintage_'+extra_table.rsplit('.',1)[-1]]+=1
+            continue
+        flt=(f'SAFE_CAST(`{season_col}` AS INT64) BETWEEN 2013 AND 2025' if season_col else
+             f'EXTRACT(YEAR FROM SAFE_CAST(`{date_col}` AS DATE)) BETWEEN 2013 AND 2025')
+        try:
+            srcrows=bq_client.query('SELECT '+','.join('`'+c+'`' for c in sorted(selection))+
+                ' FROM `'+extra_table+'` WHERE '+flt).result(page_size=10000)
+            matched=0
+            for obj in srcrows:
+                r=dict(obj.items())
+                try:
+                    y=int(r[season_col]) if season_col and r.get(season_col) is not None else int(str(r[date_col])[:4])
+                    gid=str(int(r[gid_col]))
+                    if (y,gid) not in games:continue
+                    if date_col and r.get(date_col) is not None and str(r[date_col])[:10]!=str(games[(y,gid)].get('game_date',''))[:10]:continue
+                    data={k:r.get(c) for k,c in resolved.items() if r.get(c) is not None}
+                    if data:
+                        metadata_by_game[(y,gid)].append((
+                            _canonical_name(r.get(team_col)) if team_col and r.get(team_col) else None,
+                            data,extra_table))
+                        matched+=1
+                except (TypeError,ValueError,KeyError):continue
+            metadata_source_counts['matched_rows_'+extra_table.rsplit('.',1)[-1]]=matched
+        except Exception as exc:
+            metadata_source_counts['table_query_failed_'+extra_table.rsplit('.',1)[-1]]+=1
+            log_func('[NCAAF-V55-BIGAL-META] optional_source_query_failed table='+extra_table+
+                     ' error='+type(exc).__name__)
     byside=defaultdict(list)
     for r in records:
         try:
@@ -4804,12 +4924,38 @@ def v55_rebuild_cfbd_expert_cache(*, bq_client, storage_client, bucket,
         elif timed and timed_books and timed_books>1:
             source_counts['MULTIBOOK_MOVEMENT_NOT_RECONSTRUCTED']+=1
         if spread is None:source_counts['MISSING_HISTORICAL_SPREAD_REFERENCE']+=1
+        # Enrich each matching original CFBD side with observed metadata from
+        # the same historical game (never substitute modern team memberships).
+        # Conflicting non-null field values across sources are withheld.
+        effective_sides={}
+        for nm in (h,a):
+            candidates=byside.get((y,gid,nm),[])
+            current=dict(candidates[0]) if len(candidates)==1 else {}
+            identity={_canonical_name(nm),_canonical_name(sm[nm].get('cfbd_team_key')),
+                      _canonical_name(sm[nm].get('source_team_label'))}
+            values=defaultdict(set)
+            for side,data,src in metadata_by_game.get((y,gid),[]):
+                if side and side not in identity:continue
+                for key,value in data.items():
+                    val=_meta_bool(value) if key.startswith('Is_') else str(value).strip().lower()
+                    if val is not None and val!='':values[key].add(val)
+            for field,choices in values.items():
+                current_val=current.get(field)
+                valid=(_meta_bool(current_val) if field.startswith('Is_') else
+                       str(current_val).strip().lower() if current_val is not None else None)
+                if valid is not None and valid!='':choices.add(valid)
+                if len(choices)==1:
+                    current[field]=next(iter(choices))
+                    metadata_source_counts['enriched_'+field]+=1
+                elif len(choices)>1:
+                    current[field]=None
+                    metadata_source_counts['conflict_'+field]+=1
+            effective_sides[nm]=current
         # Conference status may come from verified same-game CFBD side metadata.
         # Never infer it from contemporary conference affiliations.
         conference_by_side={}
         for nm in (h,a):
-            candidates=byside.get((y,gid,nm),[])
-            cf0=candidates[0] if len(candidates)==1 else {}
+            cf0=effective_sides[nm]
             conf=str(cf0.get('Team_Conference') or cf0.get('Conference') or '').strip().lower()
             if conf and conf not in ('nan','none','null','<na>'):
                 conference_by_side[nm]=conf
@@ -4818,8 +4964,7 @@ def v55_rebuild_cfbd_expert_cache(*, bq_client, storage_client, bucket,
         if same_conference is None:
             # These are actual game-vintage CFBD labels, not modern leagues.
             for nm in (h,a):
-                candidates=byside.get((y,gid,nm),[])
-                cf0=candidates[0] if len(candidates)==1 else {}
+                cf0=effective_sides[nm]
                 hc=str(cf0.get('Home_Conference') or '').strip().lower()
                 ac=str(cf0.get('Away_Conference') or '').strip().lower()
                 if hc and ac and hc not in ('none','nan','null','<na>') and ac not in ('none','nan','null','<na>'):
@@ -4829,7 +4974,7 @@ def v55_rebuild_cfbd_expert_cache(*, bq_client, storage_client, bucket,
         for nm,other,ishome in ((h,a,True),(a,h,False)):
             possible=byside.get((y,gid,nm),[])
             if len(possible)>1:source_counts['DUPLICATE_CFBD_SIDE_HOLD']+=1
-            cf=possible[0] if len(possible)==1 else {}
+            cf=effective_sides[nm]
             if not cf:source_counts['CFBD_SIDE_FEATURES_MISSING']+=1
             team=_canonical_name(sm[nm].get('cfbd_team_key') or nm)
             opp=_canonical_name(sm[other].get('cfbd_team_key') or other)
@@ -4990,7 +5135,8 @@ def v55_rebuild_cfbd_expert_cache(*, bq_client, storage_client, bucket,
       'extra_total_market_rows':len(frames)-side_count,
       'historical_spread_direction_status':'RESEARCH_ONLY_UNVERIFIED_ARCHIVE_HOME_SIGN',
       'missing_rule_columns':dict(missing_flags),
-      'source_holds':dict(source_counts),'historical_reference_audit':refdiag,
+      'source_holds':dict(source_counts),'metadata_source_coverage':dict(metadata_source_counts),
+      'historical_reference_audit':refdiag,
       'verified_prekick_market_audit':timed_audit,
       'rule_coverage_by_season':{yr:{nm:dict(ct) for nm,ct in rr.items()}
                                    for yr,rr in sorted(coverage.items())},
