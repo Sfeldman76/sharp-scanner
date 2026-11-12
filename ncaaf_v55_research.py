@@ -4741,7 +4741,9 @@ def v55_rebuild_cfbd_expert_cache(*, bq_client, storage_client, bucket,
     if not need.issubset(available):
         raise RuntimeError('V55_CFBD_EXPERT_REQUIRED_FIELDS_MISSING:'+','.join(sorted(need-available)))
     optional={'Season','Is_Conference_Game','Is_Regular_Season','Season_Type',
-              'Is_Postseason','Is_Bowl','Revenge_Flag_Current','Revenge_Flag_CurrentOrPriorSeason'}
+              'Is_Postseason','Is_Bowl','Revenge_Flag_Current','Revenge_Flag_CurrentOrPriorSeason',
+              'Home_Conference','Away_Conference','Conference','Team_Conference',
+              'Game_Type','Season_Stage'}
     cols=sorted(need|(optional&available))
     where=('SAFE_CAST(Season AS INT64) BETWEEN 2013 AND 2025' if 'Season' in available else
            'EXTRACT(YEAR FROM Game_Date) BETWEEN 2013 AND 2025')
@@ -4773,7 +4775,7 @@ def v55_rebuild_cfbd_expert_cache(*, bq_client, storage_client, bucket,
         client=bq_client,canonical_manifest=raw[names[0]],canonical_sides=raw[names[1]],
         canonical_audit=raw[names[2]],project=project,dataset=dataset)
     timedmap={(int(r['season']),str(r['game_id'])):r for r in timed_rows}
-    source_counts=Counter();frames=[];index={};original_ready={}
+    source_counts=Counter();frames=[];index={};original_ready={};side_count=0
     for (y,gid),game in sorted(games.items()):
         if not 2013<=y<=2025:continue
         sm=side_map[(y,gid)]
@@ -4802,6 +4804,27 @@ def v55_rebuild_cfbd_expert_cache(*, bq_client, storage_client, bucket,
         elif timed and timed_books and timed_books>1:
             source_counts['MULTIBOOK_MOVEMENT_NOT_RECONSTRUCTED']+=1
         if spread is None:source_counts['MISSING_HISTORICAL_SPREAD_REFERENCE']+=1
+        # Conference status may come from verified same-game CFBD side metadata.
+        # Never infer it from contemporary conference affiliations.
+        conference_by_side={}
+        for nm in (h,a):
+            candidates=byside.get((y,gid,nm),[])
+            cf0=candidates[0] if len(candidates)==1 else {}
+            conf=str(cf0.get('Team_Conference') or cf0.get('Conference') or '').strip().lower()
+            if conf and conf not in ('nan','none','null','<na>'):
+                conference_by_side[nm]=conf
+        same_conference=(int(conference_by_side[h]==conference_by_side[a])
+            if len(conference_by_side)==2 else None)
+        if same_conference is None:
+            # These are actual game-vintage CFBD labels, not modern leagues.
+            for nm in (h,a):
+                candidates=byside.get((y,gid,nm),[])
+                cf0=candidates[0] if len(candidates)==1 else {}
+                hc=str(cf0.get('Home_Conference') or '').strip().lower()
+                ac=str(cf0.get('Away_Conference') or '').strip().lower()
+                if hc and ac and hc not in ('none','nan','null','<na>') and ac not in ('none','nan','null','<na>'):
+                    same_conference=int(hc==ac)
+                    break
         side_records=[]
         for nm,other,ishome in ((h,a,True),(a,h,False)):
             possible=byside.get((y,gid,nm),[])
@@ -4812,11 +4835,19 @@ def v55_rebuild_cfbd_expert_cache(*, bq_client, storage_client, bucket,
             opp=_canonical_name(sm[other].get('cfbd_team_key') or other)
             if not team or not opp or team==opp:source_counts['TEAM_IDENTITY_HOLD']+=1;break
             regular=cf.get('Is_Regular_Season')
-            stage=str(cf.get('Season_Type') or '').strip().lower()
-            verified_regular=regular is not None or stage in (
-                'regular','regular season','postseason','post season','bowl','bowls')
+            stage=str(cf.get('Season_Type') or cf.get('Game_Type') or cf.get('Season_Stage') or '').strip().lower()
+            stage_verified=stage in ('regular','regular season','postseason',
+                'post season','bowl','bowls','playoff','playoffs')
+            explicit_post=cf.get('Is_Postseason')
+            explicit_bowl=cf.get('Is_Bowl')
+            regular_inferred=(int(stage in ('regular','regular season')) if stage_verified
+                 else (int(not bool(explicit_post or explicit_bowl))
+                       if explicit_post is not None or explicit_bowl is not None else None))
+            verified_regular=(regular is not None or stage_verified or regular_inferred is not None)
+            conference=cf.get('Is_Conference_Game')
+            if conference is None:conference=same_conference
             original_ready[(y,gid,team)]={'regular':verified_regular,
-                'conference':cf.get('Is_Conference_Game') is not None}
+                'conference':conference is not None}
             side_records.append((nm,{
                 'Sport':'NCAAF','Season':y,'Game_Key':f'{y}|{gid}',
                 'Game_Start':game_date+'T12:00:00Z',
@@ -4830,24 +4861,58 @@ def v55_rebuild_cfbd_expert_cache(*, bq_client, storage_client, bucket,
                 # matched snapshot subset. Untimed archive has no opening.
                 'First_Line_Value':((timed_open if ishome else -timed_open)
                     if movement_ready else None),
-                'Is_Conference_Game':cf.get('Is_Conference_Game'),
-                'Is_Regular_Season':cf.get('Is_Regular_Season'),
+                'Is_Conference_Game':conference,
+                'Is_Regular_Season':regular if regular is not None else regular_inferred,
                 'Is_Postseason':cf.get('Is_Postseason'),
                 'Is_Bowl':cf.get('Is_Bowl'),
-                'Season_Type':cf.get('Season_Type'),
+                'Season_Type':stage if stage else None,
+                # Explicit team-grain revenge inputs take precedence when
+                # observed; absent values are inferred chronologically by utils.
+                'Revenge_Flag':cf.get('Revenge_Flag_Current'),
             }))
         if len(side_records)!=2:continue
         for nm,fr in side_records:
             frames.append(fr);index[(y,gid,_canonical_name(nm))]=fr
-    if len(frames)<1000:raise RuntimeError('V55_CFBD_EXPERT_REPLAY_INSUFFICIENT_GAMES')
+            side_count+=1
+        # Preserve the real archived total only for static, retrospective
+        # Pathi total/spread-gap context. This is not an opening total.
+        ref_total=num(ref.get('total_over_line_research'))
+        if ref_total is not None:
+            # Duplicate the GAME-level metadata from a real team-side record.
+            # The shared builder selects one row as its game scaffold; a bare
+            # totals row could otherwise overwrite conference/stage metadata.
+            total_frame=dict(side_records[0][1])
+            total_frame.update({'Market':'totals','Outcome':'over',
+                'Bookmaker':'untimed_archive_research_only',
+                'Value':ref_total,'First_Line_Value':None,
+                'Revenge_Flag':None})
+            frames.append(total_frame)
+    if side_count<1000:raise RuntimeError('V55_CFBD_EXPERT_REPLAY_INSUFFICIENT_GAMES')
     df=pd.DataFrame(frames)
     team_state=utils_module.build_pathi_bigal_team_game_state(df)
     if team_state is None or team_state.empty:
         raise RuntimeError('V55_CFBD_EXPERT_STATE_EMPTY')
-    exact=[x for x in getattr(utils_module,'BIGAL_EXACT_SIGNAL_COLS',()) if x.startswith('BigAl_CF')]
+    # The team-state return is game/team grain and no longer has the market
+    # or raw quote Value fields. Reconstitute those aliases BEFORE generating
+    # the Pathi football key/movement flags. Never synthesize an opening line.
+    pathi_generator=getattr(utils_module,'add_pathi_football_key_features',None)
+    if not callable(pathi_generator):
+        raise RuntimeError('V55_EXPERT_REFRESH_REQUIRES_PATHI_FOOTBALL_FEATURES')
+    team_state=team_state.copy()
+    team_state['Market']='spreads'
+    team_state['Value']=pd.to_numeric(team_state.get('Spread_Value'),errors='coerce')
+    team_state['First_Line_Value']=pd.to_numeric(team_state.get('Opening_Spread'),errors='coerce')
+    team_state=pathi_generator(team_state)
+    if team_state is None or team_state.empty:
+        raise RuntimeError('V55_PATHI_FOOTBALL_FEATURES_EMPTY')
+    # CFL names begin BigAl_CF too, but are a DIFFERENT SPORT.
+    # Only NCAAF CF1/CF2/CF3 and NCAAF CF_ enhancers qualify here.
+    exact=[x for x in getattr(utils_module,'BIGAL_EXACT_SIGNAL_COLS',())
+           if x.startswith(('BigAl_CF1_','BigAl_CF2_','BigAl_CF3_'))]
     tight={x:y for x,y in getattr(utils_module,'BIGAL_TIGHTENER_PARENT',{}).items()
-           if x.startswith('BigAl_CF')}
-    enh=[x for x in getattr(utils_module,'BIGAL_ENHANCER_COLS',()) if x.startswith('BigAl_CF')]
+           if x.startswith(('BigAl_CF1_','BigAl_CF2_','BigAl_CF3_'))}
+    enh=[x for x in getattr(utils_module,'BIGAL_ENHANCER_COLS',())
+         if x.startswith('BigAl_CF_')]
     pathi_exact=list(getattr(utils_module,'PATHI_KEY_EVENT_COLS',()))
     pathi_context=list(getattr(utils_module,'PATHI_ROLE_CONTEXT_COLS',()))
     rule_catalog=( [(x,'BigAl','directional') for x in exact]
@@ -4859,6 +4924,9 @@ def v55_rebuild_cfbd_expert_cache(*, bq_client, storage_client, bucket,
            for x,fam,role in rule_catalog}
     coverage=defaultdict(lambda:defaultdict(Counter))
     seen=set();missing_flags=Counter()
+    if any(name not in team_state.columns for name,_,_ in rule_catalog):
+        absent=[name for name,_,_ in rule_catalog if name not in team_state.columns]
+        raise RuntimeError('V55_EXPERT_RULE_COLUMNS_MISSING:'+','.join(absent))
     for _,row in team_state.iterrows():
         try:
             season=int(row['Season']);game_key=str(row['Game_Key']);
@@ -4918,7 +4986,10 @@ def v55_rebuild_cfbd_expert_cache(*, bq_client, storage_client, bucket,
             # retrospective expert selection. Treat fire and grade separately.
     summary={'status':'CFBD_EXPERT_RULES_REBUILT_RESEARCH_ONLY',
       'source_table':table,'cfbd_rows':len(records),
-      'games_with_two_sided_state':len(frames)//2,'historical_game_sides':len(team_state),
+      'games_with_two_sided_state':side_count//2,'historical_game_sides':len(team_state),
+      'extra_total_market_rows':len(frames)-side_count,
+      'historical_spread_direction_status':'RESEARCH_ONLY_UNVERIFIED_ARCHIVE_HOME_SIGN',
+      'missing_rule_columns':dict(missing_flags),
       'source_holds':dict(source_counts),'historical_reference_audit':refdiag,
       'verified_prekick_market_audit':timed_audit,
       'rule_coverage_by_season':{yr:{nm:dict(ct) for nm,ct in rr.items()}
